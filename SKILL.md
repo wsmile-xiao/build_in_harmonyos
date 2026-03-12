@@ -2,23 +2,24 @@
 # 固定元数据头（必须，AI 优先读取）
 name: openharmony-compile-guide
 description: 鸿蒙系统编译知识库，提供开源软件在鸿蒙系统上编译的完整指南、最佳实践和经验总结
-version: 1.0.0
-author: OpenSSL Community
+version: 1.1.0
+author: OpenHarmony Community
 permissions: 文件读写权限、Shell执行权限、网络访问权限（可选，用于获取参考资料）
 ---
 
 # 鸿蒙系统编译知识库
 
 ## 1. Description
-本技能是一个完整的鸿蒙系统编译知识库，基于 OpenSSL 在鸿蒙系统上的适配经验整理而成。当用户需要在鸿蒙系统上编译任何任何开源软件时，可以使用此技能获取：
+本技能是一个完整的鸿蒙系统编译知识库，基于 OpenSSL 和 libffi 在鸿蒙系统上的适配经验整理而成。当用户需要在鸿蒙系统上编译任何开源软件时，可以使用此技能获取：
 
 1. 鸿蒙系统环境特点和配置
 2. 编译工具链（Clang + LLVM）的使用方法
 3. 预定义宏（__OHOS__）的作用和时机
 4. 配置文件继承关系和最佳实践
-5. 自动检测逻辑的实现方法
+5. 自动平台检测逻辑的实现方法
 6. 常见编译问题的解决方案
 7. 与其他平台（Linux/Android/iOS）的对比
+8. 不同构建系统的适配策略（Autotools/CMake/自定义Perl等）
 
 这个知识库可以帮助用户快速理解鸿蒙系统的编译环境，避免重复踩坑，提高编译效率。
 
@@ -45,8 +46,103 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 - 用户说："如何在鸿蒙系统上配置交叉编译？"
 - 用户说："鸿蒙系统的 Makefile 有什么特点？"
 - 用户说："如何在鸿蒙系统上调试编译错误？"
+- 用户说："如何识别软件使用的构建系统？"
+- 用户说："Autotools 和 CMake 在鸿蒙上有什么区别？"
 
 ## 3. How to use
+
+### 3.0 构建系统识别与适配策略
+
+在开始适配之前，首先需要识别软件使用的构建系统，不同的构建系统需要不同的适配策略。
+
+#### 常见构建系统类型
+
+| 构建系统 | 识别特征 | 配置文件 | 适配方式 | 示例 |
+|---------|---------|---------|---------|------|
+| **Autotools** | 存在 `configure` 脚本 | `configure.ac`, `Makefile.am` | 修改 `config.guess`, `config.sub` | libffi, glib, curl |
+| **CMake** | 存在 `CMakeLists.txt` | `CMakeLists.txt`, `*.cmake` | 添加 `CMakeLists.txt` 平台检测 | SQLite, Boost |
+| **自定义 Perl** | 存在 `Configure` (大写) | `Configurations/*.conf` | 添加配置文件 + 修改脚本 | OpenSSL |
+| **Meson** | 存在 `meson.build` | `meson.build`, `meson_options.txt` | 添加平台检测逻辑 | systemd, gstreamer |
+| **Makefile** | 存在 `Makefile` | `Makefile`, `*.mk` | 直接修改 Makefile | 小型项目 |
+| **QMake** | 存在 `.pro` 文件 | `*.pro` | 修改 .pro 文件 | Qt 项目 |
+
+#### 构建系统识别命令
+
+```bash
+# 检查是否存在 configure (autotools)
+if [ -f "configure" ]; then
+    echo "检测到 Autotools 构建系统"
+fi
+
+# 检查是否存在 CMakeLists.txt
+if [ -f "CMakeLists.txt" ]; then
+    echo "检测到 CMake 构建系统"
+fi
+
+# 检查是否存在 Configure (OpenSSL 风格)
+if [ -f "Configure" ] && [ -x "Configure" ]; then
+    echo "检测到自定义 Perl Configure 构建系统"
+fi
+
+# 检查是否存在 meson.build
+if [ -f "meson.build" ]; then
+    echo "检测到 Meson 构建系统"
+fi
+
+# 检查是否存在 .pro 文件
+if ls *.pro 1> /dev/null 2>&1; then
+    echo "检测到 QMake 构建系统"
+fi
+```
+
+#### 不同构建系统的适配要点
+
+**Autotools (configure)**
+- 修改 `config.guess` 添加系统检测逻辑
+- 修改 `config.sub` 添加操作系统支持
+- 生成三元组：`aarch64-unknown-linux-ohos`
+- 使用 `--host` 参数指定目标
+- **示例**: libffi 3.4.4
+
+**CMake**
+- 在 `CMakeLists.txt` 中添加平台检测
+- 使用 `CMAKE_SYSTEM_NAME` 变量
+- 设置编译器和工具链
+- 使用 `-DCMAKE_TOOLCHAIN_FILE` 指定工具链文件
+
+**自定义 Perl Configure (OpenSSL)**
+- 添加 `Configurations/*.conf` 配置文件
+- 修改 `Configure` 脚本添加自动检测
+- 使用目标名称：`openharmony-aarch64`
+- 继承 Linux 配置，添加 `__OHOS__` 宏
+- **示例**: OpenSSL 1.1.1w
+
+**Meson**
+- 在 `meson.build` 中添加平台检测
+- 使用 `host_machine.system()` 判断系统
+- 设置编译选项和工具链
+
+#### OpenSSL vs libffi 适配对比
+
+| 方面 | OpenSSL (1.1.1w) | libffi (3.4.4) |
+|------|------------------|----------------|
+| **构建系统** | 自定义 Perl Configure | Autotools (configure) |
+| **配置文件** | Configurations/15-openharmony.conf | config.guess, config.sub |
+| **平台检测位置** | Configure 脚本 | config.guess 脚本 |
+| **检测方式** | Perl 代码 | Shell 脚本 |
+| **目标标识** | openharmony-aarch64 | aarch64-unknown-linux-ohos |
+| **预定义宏** | __OHOS__ | 无（通过三元组识别） |
+| **配置方式** | 目标名称 | 三元组 |
+| **继承关系** | linux-generic32.0 | 自动继承 Linux |
+| **修改文件数** | 2 个 | 2 个 |
+| **补丁大小** | ~2KB | ~1.5KB |
+
+**关键差异总结：**
+1. **构建系统不同**：OpenSSL 使用自定义的 Perl Configure 脚本，libffi 使用标准的 autotools
+2. **配置方式不同**：OpenSSL 通过目标名称（openharmony-aarch64），libffi 通过三元组（aarch64-unknown-linux-ohos）
+3. **检测方式不同**：OpenSSL 在 Configure 脚本中用 Perl 检测，libffi 在 config.guess 中用 Shell 检测
+4. **平台标识不同**：OpenSSL 使用 `__OHOS__` 宏，libffi 使用 `linux-ohos` 三元组
+5. **文件位置不同**：OpenSSL 需要新建配置文件，libffi 只需修改现有文件
 
 ### 3.1 鸿蒙系统环境检查
 
@@ -152,7 +248,7 @@ BASE_UNIX
 
 ### 3.4 自动平台检测实现
 
-**检测逻辑：**
+**OpenSSL Perl Configure 检测逻辑：**
 ```perl
 # 当目标不在目标表中时，自动检测
 if (!$table{$target}) {
@@ -189,10 +285,35 @@ if (!$table{$target}) {
 }
 ```
 
+**libffi config.guess 检测逻辑：**
+```bash
+# 在 config.guess 中添加
+*:HarmonyOS:*)
+    case "$UNAME_MACHINE" in
+        aarch64|arm64)
+            MACHINE=aarch64
+            ;;
+        armv7*|armv8*)
+            MACHINE=arm
+            ;;
+        x86_64|amd64)
+            MACHINE=x86_64
+            ;;
+        i?86)
+            MACHINE=i686
+            ;;
+        *)
+            MACHINE="$UNAME_MACHINE"
+            ;;
+    esac
+    GUESS=${MACHINE}-unknown-linux-ohos
+    ;;
+```
+
 **关键点：**
 1. 检测 `uname -s` 和 `uname -r`（系统名称和内核版本）
 2. 使用正则匹配 `harmonyos|openharmony`（不区分大小写）
-3. 根据 `uname -m` 映射到对应的 `openharmony-*` 目标
+3. OpenSSL 使用目标名称映射，libffi 使用三元组生成
 4. 只在目标不在表中时才检测（避免覆盖用户显式指定的目标）
 
 ### 3.5 常见编译问题及解决方案
@@ -314,13 +435,13 @@ if (!$table{$target}) {
 **三元组格式：**
 ```
 <架构>-<厂商>-<操作系统>
-例如：aarch64-unknown-ohos
+例如：aarch64-unknown-linux-ohos
 ```
 
 **配置示例：**
 ```bash
 # 使用三元组配置
-./configure aarch64-unknown-ohos
+./configure aarch64-unknown-linux-ohos
 
 # 或使用环境变量
 CC=clang CXX=clang++ AR=llvm-ar ./configure
@@ -548,10 +669,11 @@ fi
 当用户需要编译相关的帮助时，AI 应该：
 
 1. 首先检查用户是否在鸿蒙系统上（通过 uname 命令）
-2. 根据用户的具体问题，提供相应的解决方案
-3. 如果需要，提供环境检查脚本
-4. 提供与其他平台的对比，帮助用户理解差异
-5. 给出最佳实践建议
+2. 识别软件使用的构建系统（Autotools/CMake/自定义Perl等）
+3. 根据构建系统类型提供相应的适配策略
+4. 如果需要，提供环境检查脚本
+5. 提供与其他平台的对比，帮助用户理解差异
+6. 给出最佳实践建议
 
 ## 6. 最佳实践总结
 
@@ -607,11 +729,13 @@ fi
 ## 7. 参考资料
 
 - OpenSSL 官方文档：https://www.openssl.org/docs/
+- libffi 官方文档：https://github.com/libffi/libffi
 - OpenHarmony 官方网站：https://www.openharmony.cn/
 - HarmonyOS 开发者文档：https://developer.huawei.com/consumer/cn/doc/
 - Clang 文档：https://clang.llvm.org/docs/
 - LLVM 文档：https://llvm.org/docs/
 - Autotools 文档：https://www.gnu.org/software/autoconf/
+- CMake 文档：https://cmake.org/documentation/
 - POSIX 标准：https://pubs.opengroup.org/onlinepubs/9699919699/
 
 ## 8. License
