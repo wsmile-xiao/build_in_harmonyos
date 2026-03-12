@@ -3,15 +3,20 @@
 本修改为 OpenSSL 添加了 OpenHarmony（鸿蒙系统）支持，实现了**自动平台检测**，用户可以直接运行 `./Configure`，无需手动指定目标。
 
 ## 代码准备
-- 下载代码使用官方代码下载，国内推荐镜像站
-```
-git clone -b OpenSSL_1_1_1w git@gitcode.com:GitHub_Trending/ope/openssl.git
-```
+- 下载代码使用官方代码下载
+	```bash
+	git clone -b OpenSSL_1_1_1w https://github.com/openssl/openssl.git
+	```
+
+	网络有问题则推荐使用国内镜像站
+	```bash
+	git clone -b OpenSSL_1_1_1w git@gitcode.com:GitHub_Trending/ope/openssl.git
+	```
 - 应用修改的补丁
-```
-cd openssl
-git apply 0001-support-build-in-harmonyos.patch
-```
+	```
+	cd openssl
+	git apply 0001-support-build-in-harmonyos.patch
+	```
 
 ## 修改内容介绍（0001-support-build-in-harmonyos.patch 补丁内容）
 
