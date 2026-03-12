@@ -271,6 +271,15 @@ if (!$table{$target}) {
   2. 禁用汇编优化：./configure ... no-asm
 ```
 
+**问题9: github代码下载慢
+```
+错误:   wget: connect: Operation timed out 或 
+原因：github国内访问网络不稳定
+解决：
+	1.通过国内镜像站如gitcode、gitee镜像下载，但无法下载release归档包
+    2.在github链接前增加 https//ghfast.top/<github原始链接>，提高国内下载速度，wget、git命令均可以使用
+```
+
 ### 3.6 与其他平台对比
 
 **vs Linux：**
