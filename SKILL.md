@@ -48,6 +48,7 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 - 用户说："如何在鸿蒙系统上调试编译错误？"
 - 用户说："如何识别软件使用的构建系统？"
 - 用户说："Autotools 和 CMake 在鸿蒙上有什么区别？"
+- 用户说："帮我在鸿蒙电脑编译ncurses-6.4"
 
 ## 3. How to use
 
@@ -401,6 +402,43 @@ if (!$table{$target}) {
     2.在github链接前增加 https//ghfast.top/<github原始链接>，提高国内下载速度，wget、git命令均可以使用
 ```
 
+**问题10：toybox sed 与 autotools 不兼容**
+```
+错误：子目录 Makefile 中的 top_srcdir 被错误设置为乱码（如 /|）
+原因：鸿蒙使用 toybox sed，而非 GNU sed。autotools 生成的 config.status 
+      包含复杂的 sed 脚本（多行命令块、分支命令 :t 和 b、条件跳转 t t），
+      toybox sed 对这些高级特性的支持可能不完整
+解决：
+  1. configure 完成后，使用脚本自动修复子目录 Makefile：
+     for dir in ncurses include man progs panel menu form test misc c++; do
+         if [ -f "$dir/Makefile" ]; then
+             perl -pi -e 's/^top_srcdir\s*=.*/top_srcdir\t= ../' "$dir/Makefile"
+         fi
+     done
+  2. 或安装 GNU sed 替代 toybox sed
+```
+
+**问题11：临时目录不可写**
+```
+错误：configure: error: cannot create a temporary directory in /tmp
+原因：鸿蒙系统的 /tmp 目录可能不可写或不存在
+解决：
+  1. 设置 TMPDIR 环境变量指向可写目录：
+     export TMPDIR=$HOME/tmp
+     mkdir -p $TMPDIR
+  2. 在执行 configure 前确保临时目录存在
+```
+
+**问题12：Makefile 文件被识别为二进制**
+```
+错误：grep: Makefile: binary file matches
+原因：config.status 生成的 Makefile 可能包含非 ASCII 字符
+解决：
+  1. 使用 grep -a 强制作为文本处理
+  2. 使用 perl -pi -e 进行文本替换
+  3. 使用 strings 命令提取可读文本
+```
+
 ### 3.6 与其他平台对比
 
 **vs Linux：**
@@ -412,6 +450,24 @@ if (!$table{$target}) {
 | 动态链接 | dlfcn | dlfcn ✅ 相同 |
 | 系统宏 | 无 | `__OHOS__` ✅ 特有 |
 | 编译器 | gcc | clang ⚠️ 不同 |
+| sed | GNU sed | toybox sed ⚠️ 功能受限 |
+| awk | gawk/mawk | toybox awk ⚠️ 功能受限 |
+| shell | bash | mksh/sh ⚠️ 不同 |
+
+**toybox 工具兼容性注意事项：**
+
+| 工具 | GNU 版本 | toybox 版本 | 差异点 |
+|------|----------|-------------|--------|
+| sed | GNU sed | toybox sed | 不完全支持复杂脚本（多行块、分支命令） |
+| awk | gawk/mawk | toybox awk | 功能有限，某些扩展不可用 |
+| grep | GNU grep | toybox grep | 基本功能相同 |
+| sh | bash | mksh | 语法略有差异 |
+
+**toybox sed 已知问题：**
+1. 复杂的多行命令块 `{...}` 处理可能异常
+2. 分支命令 `:label` 和 `b`、`t` 跳转可能不完整
+3. 某些正则表达式特性不支持
+4. 建议对于复杂的 autotools 项目，configure 后检查生成的 Makefile
 
 **vs Android：**
 | 方面 | Android | OpenHarmony |
@@ -565,6 +621,12 @@ fi
      ```bash
     build_in_harmonyos/
     ├── SKILL.md
+    ├── n/                # n开头命令软件
+    │   └── ncurses/      # ncurses 相关
+    │       ├── 6.4/      # 具体软件版本号
+    │       │   ├── README.md
+    │       │   └── 0001-port-for-ohos.patch
+    │
     ├── r/                # r开头命令软件
     │   └── readline/     # readline 相关
     │       ├── 8.2/      # 具体软件版本号
@@ -738,6 +800,8 @@ fi
 6. ✅ 检查 Perl 模块（Text::Template）
 7. ✅ 检查线程支持（pthread）
 8. ✅ 检查动态链接支持（dlfcn）
+9. ✅ **设置临时目录**：`export TMPDIR=$HOME/tmp && mkdir -p $TMPDIR`
+10. ✅ **检查工具兼容性**：`sed --version` 确认是 toybox 还是 GNU sed
 
 ### 6.2 配置文件编写建议
 
@@ -766,6 +830,51 @@ fi
 4. ✅ 汇编错误：检查目标架构是否正确
 5. ✅ 权限错误：检查文件和目录权限
 6. ✅ 磁盘空间不足：清理临时文件
+7. ✅ **Autotools configure 后处理**：对于复杂项目，检查子目录 Makefile 中的 top_srcdir 变量是否正确
+
+### 6.4.1 Autotools 项目 configure 后处理脚本
+
+对于使用 autotools 构建系统的复杂项目，configure 完成后建议执行以下检查：
+
+```bash
+#!/bin/bash
+# Autotools 项目 configure 后处理脚本
+
+# 1. 检查子目录 Makefile 中的 top_srcdir 是否正确
+for makefile in $(find . -name Makefile -not -path "./.git/*"); do
+    dir=$(dirname "$makefile")
+    top_srcdir=$(grep -a "^top_srcdir" "$makefile" 2>/dev/null | head -1)
+    
+    if [ -n "$top_srcdir" ]; then
+        # 检查 top_srcdir 是否包含乱码
+        if echo "$top_srcdir" | grep -q '[^[:print:]]'; then
+            echo "警告: $makefile 中的 top_srcdir 包含乱码"
+            echo "  原值: $(echo "$top_srcdir" | cat -v)"
+            
+            # 计算正确的相对路径
+            depth=$(echo "$dir" | tr -cd '/' | wc -c)
+            correct_top_srcdir=$(printf '%0.s../' $(seq 1 $depth))
+            correct_top_srcdir=${correct_top_srcdir%/}  # 移除末尾斜杠
+            
+            echo "  修复为: top_srcdir = $correct_top_srcdir"
+            perl -pi -e "s/^top_srcdir\s*=.*/top_srcdir\\t= $correct_top_srcdir/" "$makefile"
+        fi
+    fi
+done
+
+# 2. 验证 config.h 是否生成
+if [ -f "config.h" ]; then
+    echo "✓ config.h 已生成"
+else
+    echo "✗ config.h 未生成，请检查 configure 输出"
+fi
+
+# 3. 检查临时目录设置
+echo "临时目录: ${TMPDIR:-/tmp}"
+if [ ! -d "${TMPDIR:-/tmp}" ]; then
+    echo "警告: 临时目录不存在，请设置 TMPDIR"
+fi
+```
 
 ### 6.5 调试技巧
 
@@ -774,6 +883,249 @@ fi
 3. ✅ 使用 --debug 生成调试版本
 4. ✅ 查看编译日志排查问题
 5. ✅ 使用 strace 跟踪系统调用（如果可用）
+
+### 6.6 修改文件技巧
+**修改文件的标准化流程（7 步）**
+#### 6.6.1. 预处理：提取文件的 “可锚定修改区域”  
+  首先需要从目标文件中提取唯一、稳定的代码片段（锚点），而非依赖行号。锚点的选择原则：
+  - 用函数 / 类定义、注释标记、唯一变量名 作为锚点（避免用空行、通用注释）；
+  - 提取锚点前后的上下文（通常 ±3 行），确保定位的是 “唯一区域”。
+  
+  实操命令（AI/agent 执行）：
+  ```bash
+  # 示例：定位Python文件中calculate_total函数的定义（锚点）
+  # 1. 查找锚点行（返回锚点所在行号，仅用于辅助，不用于硬编码修改）
+  ANCHOR_LINE=$(grep -n -A 3 -B 1 "def calculate_total(prices: list\[float\], discount: float) -> float:" target_file.py | head -1 | cut -d: -f1)
+  # 2. 提取锚点上下文（保存为临时文件，便于分析修改）
+  sed -n "$((ANCHOR_LINE-1)),$((ANCHOR_LINE+10))p" target_file.py > ~/tmp/target_snippet.txt
+  ```
+  - 关键：`grep`用精确的代码特征（如完整函数签名）定位，而非行号；
+  - 提取上下文时，范围稍大（如 ±10 行），确保包含整个待修改区域。
+
+#### 6.6.2.基于锚点片段生成 “原子化修改指令”
+  不直接修改原文件，而是基于提取的~/tmp/target_snippet.txt，生成 **“按内容替换” 的指令 **（而非 “在第 X 行插入 / 删除”），核心要求：
+  - 生成的修改指令必须是“旧内容 → 新内容” 的映射（原子化替换）；
+  - 旧内容必须是原文件中唯一存在的片段（避免全局替换出错）。
+  
+  示例修改指令（标准化格式）：
+  ```bash
+  # 【修改类型】：替换代码块
+  # 【旧内容】（必须精确匹配原文件）：
+  OLD_CONTENT='def calculate_total(prices: list[float], discount: float) -> float:
+      """计算总价（未考虑折扣上限）"""
+      total = sum(prices) * (1 - discount)
+      return total'
+
+  # 【新内容】（包含修改后的完整代码）：
+  NEW_CONTENT='def calculate_total(prices: list[float], discount: float) -> float:
+      """计算总价（限制折扣上限为30%）"""
+      if not prices:
+          raise ValueError("价格列表不能为空")
+      max_discount = min(discount, 0.3)
+      total = sum(prices) * (1 - max_discount)
+      return total'
+
+  # 【执行命令】（用sed按内容替换，而非行号）：
+  # 注意：sed的分隔符用|避免/转义，-z将文件作为单行处理（匹配多行内容）
+  sed -z "s|$OLD_CONTENT|$NEW_CONTENT|g" target_file.py > ~/tmp/modified_file.py
+  ```
+#### 6.6.3.执行修改：写入临时文件（避免直接修改原文件）
+  执行上述生成的sed命令，将修改后的内容写入临时文件（如~/tmp/modified_file.py），而非直接覆盖原文件。
+  - 核心原则：所有修改先落地到临时文件，验证通过后再替换原文件；
+  - 兼容处理：如果是 “插入代码”（而非替换），则基于锚点定位插入位置：
+  ```bash
+  # 示例：在锚点行后插入代码（用sed的a命令，基于锚点内容而非行号）
+  sed "/def calculate_total(/a \    # 新增：折扣上限校验" target_file.py > ~/tmp/modified_file.py
+  ```
+#### 6.6.4.校验 1：语法/格式合法性检查
+  先验证临时文件的基础合法性，避免语法错误：
+  ```bash
+  # 按语言选择校验工具（示例为Python）
+  if ! python -m py_compile ~/tmp/modified_file.py; then
+      echo "语法错误：修改后的文件无法编译"
+      exit 1  # 终止流程，反馈错误
+  fi
+
+  # 代码风格检查（可选，确保符合规范）
+  pylint --disable=all --enable=E ~/tmp/modified_file.py  # 只检查错误（E类），忽略警告
+  ```
+
+#### 6.6.5.校验 2：内容精准性验证
+  验证临时文件中是否包含预期的修改内容，且未篡改其他区域：
+  ```bash
+  # 1. 检查新内容是否正确写入
+  if ! grep -q "max_discount = min(discount, 0.3)" ~/tmp/modified_file.py; then
+      echo "修改失败：未找到折扣上限逻辑"
+      exit 1
+  fi
+
+  # 2. 检查原文件的其他核心内容未被篡改（示例：检查其他函数是否存在）
+  if ! grep -q "def calculate_tax(total: float) -> float" ~/tmp/modified_file.py; then
+      echo "修改异常：其他函数被意外删除"
+      exit 1
+  fi
+  ```
+
+#### 6.6.6.校验 3：业务逻辑验证（可选，关键代码必做）
+  如果修改涉及业务逻辑，AI/agent 执行预设的测试用例，验证修改后的代码逻辑正确：
+  ```bash
+  # 示例：运行单元测试验证修改后的函数
+  python -c "
+  from ~/tmp/modified_file import calculate_total
+  try:
+      assert calculate_total([100,200], 0.4) == 210.0
+      assert calculate_total([], 0.2) raises ValueError
+      print('逻辑验证通过')
+  except AssertionError:
+      print('逻辑验证失败：结果不符合预期')
+      exit 1
+  "
+  ```
+#### 6.6.7：替换原文件：原子化覆盖（避免文件损坏）
+  所有校验通过后，用临时文件原子化替换原文件（避免中途中断导致文件损坏）：
+  ```bash
+  # 1. 备份原文件（保留修改记录）
+  cp target_file.py target_file.py.bak.$(date +%Y%m%d%H%M%S)
+
+  # 2. 原子化替换（mv命令是原子操作，避免文件写入中断）
+  mv ~/tmp/modified_file.py target_file.py
+
+  # 3. 清理临时文件
+  rm -f ~/tmp/target_snippet.txt
+  ```
+
+#### 关键避坑技巧（解决行号漂移核心问题）
+  1. 禁用 “行号硬编码”，全程用 “内容锚点”
+      - ❌ 错误做法：sed -i '10s/old/new/' target.py（行号 10 可能因之前的修改变化）；
+      - ✅ 正确做法：sed -z "s|old_content|new_content|g" target.py（基于内容匹配，不受行号影响）。
+
+  2. 多行替换用-z参数（sed）
+
+      `sed`默认按行处理，多行替换需用`-z`将文件视为单行（用NULL分隔），避免换行符导致匹配失败：
+      ```bash
+      # 多行替换示例（关键：用|作为分隔符，避免/转义）
+      sed -z "s|def calculate_total(.*) -> float:
+      \"\"\"计算总价（未考虑折扣上限）\"\"\"
+      total = sum(prices) * (1 - discount)
+      return total|def calculate_total(.*) -> float:
+      \"\"\"计算总价（限制折扣上限为30%）\"\"\"
+      if not prices:
+          raise ValueError(\"价格列表不能为空\")
+      max_discount = min(discount, 0.3)
+      total = sum(prices) * (1 - max_discount)
+      return total|g" target.py > ~/tmp/modified.py
+      ```
+
+  3. 复杂修改用 awk（替代 sed）
+
+      如果修改涉及 “条件判断 + 多行处理”，用`awk`更灵活，同样基于内容锚点：
+      ```bash
+      # 示例：awk定位函数并修改
+      awk '
+      # 匹配锚点，开始处理
+      /def calculate_total\(/ {
+          print $0  # 打印锚点行
+          getline; print $0  # 打印注释行
+          # 插入新的校验逻辑
+          print "    if not prices:"
+          print "        raise ValueError(\"价格列表不能为空\")"
+          print "    max_discount = min(discount, 0.3)"
+          getline; # 跳过原total行
+          print "    total = sum(prices) * (1 - max_discount)"  # 替换原逻辑
+          next  # 跳过后续处理
+      }
+      # 其他行原样输出
+      1
+      ' target_file.py > /tmp/modified_file.py
+      ```
+
+#### 完整流程示例（端到端）
+  假设要修改order.py中的calculate_total函数，完整的执行流程，以脚本的行程呈现如下，可供指令参考：
+  ```bash
+  #!/bin/bash
+  # 步骤1：提取锚点上下文
+  ANCHOR_PATTERN="def calculate_total(prices: list\[float\], discount: float) -> float:"
+  grep -q "$ANCHOR_PATTERN" order.py || { echo "锚点不存在，终止修改"; exit 1; }
+
+  # 步骤2：生成修改指令（AI输出）
+  OLD_CONTENT='def calculate_total(prices: list[float], discount: float) -> float:
+      """计算总价（未考虑折扣上限）"""
+      total = sum(prices) * (1 - discount)
+      return total'
+  NEW_CONTENT='def calculate_total(prices: list[float], discount: float) -> float:
+      """计算总价（限制折扣上限为30%）"""
+      if not prices:
+          raise ValueError("价格列表不能为空")
+      max_discount = min(discount, 0.3)
+      total = sum(prices) * (1 - max_discount)
+      return total'
+
+  # 步骤3：执行修改（写入临时文件）
+  sed -z "s|$OLD_CONTENT|$NEW_CONTENT|g" order.py > ~/tmp/modified_order.py
+
+  # 步骤4：语法校验
+  if ! python -m py_compile /tmp/modified_order.py; then
+      echo "语法错误，修改失败"
+      exit 1
+  fi
+
+  # 步骤5：内容校验
+  if ! grep -q "max_discount = min(discount, 0.3)" ~/tmp/modified_order.py; then
+      echo "修改未生效，内容缺失"
+      exit 1
+  fi
+
+  # 步骤6：逻辑校验
+  python -c "
+  from /tmp/modified_order import calculate_total
+  try:
+      assert calculate_total([100,200], 0.4) == 210.0
+      calculate_total([], 0.2)
+  except ValueError as e:
+      assert str(e) == '价格列表不能为空'
+  except AssertionError:
+      print('逻辑验证失败')
+      exit 1
+  " || exit 1
+
+  # 步骤7：替换原文件
+  cp order.py order.py.bak.$(date +%Y%m%d%H%M%S)
+  mv /tmp/modified_order.py order.py
+  echo "修改成功，原文件已备份"
+  ```
+
+### 6.7 补丁技巧
+  生成补丁的流程
+  1. 复制备份原文件
+  2. 按照规划的方案修改文件
+  3. 验证是否修改成功
+  4. 确保所有需要修改的文件均得到修改
+  5. 通过diff -Naur 进行补丁生成，多个文件可以通过列表方式如下
+  ```bash
+  diff -Naur \
+  project_old/src/main.c project_new/src/main.c \
+  project_old/include/config.h project_new/include/config.h \
+  > my_patch.patch
+  ```
+  6. 应用补丁文件，确保补丁生效后与原目标修改相同
+
+### 6.8 Autotools系列构建系统修改技巧
+  1. 了解config.guess 的核心目的
+    - 生成系统三元组（triplet），格式为：<架构>-<厂商>-<操作系统>│
+    - 例如：aarch64-unknown-linux-ohos
+  2. 了解config.guess 的实现方式
+    不同版本可能有不同的实现方式：
+    - 通过 GUESS 变量赋值：GUESS=${MACHINE}-unknown-linux-ohos
+    - 通过 echo 直接打印：echo "aarch64-unknown-linux-ohos"
+    - 通过 return 退出：echo "aarch64-unknown-linux-ohos"; exit
+  3. 了解config.sub 的核心目的
+    - 验证和规范化三元组
+    - 将三元组分解为：CPU、厂商、操作系统、内核等组件
+  4. 修改原则
+    1. 最小化修改：只修改必要的部分，避免影响其他功能
+    2. 保持兼容性：确保修改不会破坏原有功能
+    3. 遵循规范：遵循 autotools 的规范和惯例
+  5. 根据这些信息，详细分析对应工程中的文件，确定修改方案进行修改
 
 ## 7. 参考资料
 
