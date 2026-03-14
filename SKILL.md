@@ -469,6 +469,37 @@ if (!$table{$target}) {
 3. 某些正则表达式特性不支持
 4. 建议对于复杂的 autotools 项目，configure 后检查生成的 Makefile
 
+**解决方案：编译安装 GNU sed**
+
+建议在鸿蒙系统上编译安装 GNU sed 以替代 toybox sed：
+
+```bash
+# 编译 GNU sed 4.9
+curl -L -o sed-4.9.tar.gz https://ftp.gnu.org/gnu/sed/sed-4.9.tar.gz
+tar -xzf sed-4.9.tar.gz && cd sed-4.9
+# 应用补丁（参考 build_in_harmonyos/s/sed/4.9/）
+./configure --prefix=$HOME/usr/local
+make && make install
+
+# 设置 PATH 优先使用 GNU sed
+export PATH=$HOME/usr/local/bin:$PATH
+```
+
+详细编译指南请参考：`build_in_harmonyos/s/sed/4.9/README.md`
+
+**推荐的 GNU 工具编译列表**
+
+以下 GNU 工具建议在鸿蒙系统上编译安装，以获得更好的兼容性：
+
+| 工具 | 版本 | 用途 | 归档路径 |
+|------|------|------|----------|
+| GNU sed | 4.9 | 流编辑器，解决 toybox sed 兼容性问题 | s/sed/4.9/ |
+| GNU awk | 5.3+ | 文本处理，功能比 toybox awk 更完整 | 待编译 |
+| GNU grep | 3.11+ | 文本搜索，功能基本相同 | 待编译 |
+| GNU coreutils | 9.4+ | 基础工具集（ls, cp, mv 等） | 待编译 |
+| GNU make | 4.4+ | 构建工具，支持更多扩展 | 待编译 |
+| GNU bash | 5.2+ | Shell，语法更丰富 | 待编译 |
+
 **vs Android：**
 | 方面 | Android | OpenHarmony |
 |------|---------|--------------|
@@ -621,29 +652,38 @@ fi
      ```bash
     build_in_harmonyos/
     ├── SKILL.md
-    ├── n/                # n开头命令软件
-    │   └── ncurses/      # ncurses 相关
-    │       ├── 6.4/      # 具体软件版本号
+    ├── l/                # l开头命令软件
+    │   └── libffi/       # libffi 相关
+    │       ├── 3.4.4/
     │       │   ├── README.md
     │       │   └── 0001-port-for-ohos.patch
+    │       └── 3.5.2/
+    │           ├── README.md
+    │           └── 0001-port-for-ohos.patch
+    │
+    ├── n/                # n开头命令软件
+    │   └── ncurses/      # ncurses 相关
+    │       └── 6.4/
+    │           ├── README.md
+    │           └── 0001-port-for-ohos.patch
+    │
+    ├── o/                # o开头命令软件
+    │   └── openssl/      # openssl 相关
+    │       └── 1.1.1w/
+    │           ├── README.md
+    │           └── 0001-support-build-in-harmonyos.patch
     │
     ├── r/                # r开头命令软件
     │   └── readline/     # readline 相关
-    │       ├── 8.2/      # 具体软件版本号
-    │       │   ├── README.md
-    │       │   └── 0001-port-for-ohos.patch
+    │       └── 8.2/
+    │           ├── README.md
+    │           └── 0001-port-for-ohos.patch
     │
-    ├── l/                # l开头命令软件
-    │   └── libffi/       # libffi 相关
-    │       ├── 3.4.4/    # 具体软件版本号
-    │       │   ├── README.md
-    │       │   └── 0001-port-for-11-ohos.patch
-    │
-    └── o/                # o开头命令软件
-        └── openssl/      # openssl 相关
-            └── 1.1.1w/   # 具体软件版本号
+    └── s/                # s开头命令软件
+        └── sed/          # GNU sed 相关
+            └── 4.9/
                 ├── README.md
-                └── 0001-support-build-in-harmonyos.patch
+                └── 0001-port-for-ohos.patch
     ```
 
 #### 补丁命名规范
