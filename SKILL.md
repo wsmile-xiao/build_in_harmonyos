@@ -429,17 +429,168 @@ if (!$table{$target}) {
   2. 在执行 configure 前确保临时目录存在
 ```
 
-**问题12：Makefile 文件被识别为二进制**
+**问题13：toybox expr 复合正则表达式 Bug**
 ```
-错误：grep: Makefile: binary file matches
-原因：config.status 生成的 Makefile 可能包含非 ASCII 字符
+错误：config.status 生成的 Makefile 包含乱码，或 sed 进程卡住
+原因：toybox expr 在处理复合正则表达式（使用 \| 操作符）时存在严重 bug，
+      会输出乱码或导致进程异常
+排查过程：
+  1. 使用 ps 找到卡住的进程
+  2. 查看 /proc/<pid>/cmdline 获取完整命令
+  3. 分析命令中变量的来源
+  4. 使用 bash -x 追踪 config.status 执行
+  5. 定位到 expr 命令输出异常
+  6. 对比 toybox expr 和 GNU expr 的行为
+验证命令：
+  # toybox expr (错误)
+  expr X"ncurses/Makefile" : 'X\(.*[^/]\)//*[^/][^/]*/*$' \| . : '\(.\)'
+  # 输出: 乱码
+  
+  # GNU expr (正确)
+  gexpr X"ncurses/Makefile" : 'X\(.*[^/]\)//*[^/][^/]*/*$' \| . : '\(.\)'
+  # 输出: ncurses
 解决：
-  1. 使用 grep -a 强制作为文本处理
-  2. 使用 perl -pi -e 进行文本替换
-  3. 使用 strings 命令提取可读文本
+  1. 编译安装 GNU coreutils（包含 GNU expr）
+  2. 设置 PATH 优先使用 GNU 工具
+  3. 详细指南参考：build_in_harmonyos/c/coreutils/9.10/README.md
+影响范围：
+  - 所有使用 autotools 的项目
+  - config.status 使用复杂 expr 命令提取路径
 ```
 
-### 3.6 与其他平台对比
+### 3.6 鸿蒙 musl libc 与 Linux glibc 差异
+
+鸿蒙系统使用 **musl libc** 而非 Linux 常用的 **glibc**，这种差异会导致某些软件在编译时出现问题。
+
+#### 3.6.1 核心差异对比
+
+| 特性 | glibc | musl libc (鸿蒙) | 影响 |
+|------|-------|------------------|------|
+| FILE 结构体 | 暴露内部字段（`_IO_read_ptr` 等） | **不透明类型**，内部结构不可访问 | gnulib stdio 扩展模块需要适配 |
+| `__freadahead` 函数 | 有 | 无 | 无法直接获取预读数据量 |
+| `__freadptr` 函数 | 有 | 无 | 无法直接获取缓冲区指针 |
+| stdio_ext.h | 提供完整的扩展函数 | 仅提供 `__fwriting`、`__freading` 等 | 功能受限 |
+| 线程局部存储 | 完整支持 | 支持但有差异 | 某些多线程代码需适配 |
+| 动态链接 | ld-linux.so | ld-musl-*.so | 加载器不同 |
+
+#### 3.6.2 FILE 结构体差异详解
+
+**glibc 的 FILE 结构（可访问内部字段）：**
+```c
+struct _IO_FILE {
+  int _flags;           /* 标志位 */
+  char* _IO_read_ptr;   /* 当前读取位置 ✅ 可访问 */
+  char* _IO_read_end;   /* 读取缓冲区结束 ✅ 可访问 */
+  char* _IO_read_base;  /* 读取缓冲区起始 ✅ 可访问 */
+  char* _IO_write_base; /* 写入缓冲区起始 ✅ 可访问 */
+  char* _IO_write_ptr;  /* 当前写入位置 ✅ 可访问 */
+  char* _IO_write_end;  /* 写入缓冲区结束 ✅ 可访问 */
+  // ... 更多字段
+};
+```
+
+**musl 的 FILE 结构（不透明类型）：**
+```c
+// musl 中 FILE 是不透明指针
+typedef struct _IO_FILE FILE;
+// 内部结构对用户代码不可见 ❌ 无法访问任何内部字段
+```
+
+#### 3.6.3 gnulib stdio 扩展模块适配
+
+gnulib 提供了三个 stdio 扩展模块，用于直接操作 FILE 结构的内部缓冲区：
+
+| 模块 | 功能 | glibc 实现 | musl 适配方案 |
+|------|------|------------|---------------|
+| `freadahead.c` | 获取预读数据量 | 访问 `_IO_read_end - _IO_read_ptr` | 返回 0（安全回退） |
+| `freadptr.c` | 获取读取缓冲区指针 | 返回 `_IO_read_ptr` | 返回 NULL（调用者回退到标准 API） |
+| `freadseek.c` | 移动读取指针 | 修改 `_IO_read_ptr` | abort()（理论上不会执行） |
+
+**适配代码示例（freadahead.c）：**
+```c
+#elif defined __OHOS__ || (defined __linux__ && !defined __GLIBC__)
+  /* HarmonyOS uses musl libc with opaque FILE structure.
+     musl provides __fwriting in <stdio_ext.h> to check write mode.
+     For musl without __freadahead, we use a safe fallback.  */
+# include <stdio_ext.h>
+  if (__fwriting (fp))
+    return 0;
+  /* musl's FILE is opaque; we cannot access internal buffers directly.
+     Return 0 as a safe fallback - this means we don't report pending input.
+     This is correct for most use cases since musl handles buffering internally.  */
+  return 0;
+```
+
+**适配原则：**
+1. 使用 musl 提供的公开 API（如 `__fwriting`）
+2. 无法实现的功能使用安全回退（返回 0 或 NULL）
+3. 回退后调用者会使用标准 API（如 fread、fgetc）
+4. 这是 GNU 代码中的标准兼容模式
+
+#### 3.6.4 检测 musl 的方法
+
+**编译时检测：**
+```c
+#if defined(__linux__) && !defined(__GLIBC__)
+  // musl libc 环境
+#endif
+
+#if defined(__OHOS__)
+  // HarmonyOS（使用 musl）
+#endif
+```
+
+**运行时检测：**
+```bash
+# 检查 C 库类型
+ldd /bin/sh | grep libc
+# glibc: libc.so.6
+# musl:  ld-musl-aarch64.so.1
+
+# 或检查可执行文件
+file /bin/sh
+# glibc: dynamically linked, interpreter /lib64/ld-linux-x86-64.so.2
+# musl:  dynamically linked, interpreter /lib/ld-musl-aarch64.so.1
+```
+
+#### 3.6.5 常见 musl 兼容性问题
+
+**问题1：gnulib 假设 glibc 的 FILE 结构**
+```
+错误：error: incomplete definition of type 'struct _IO_FILE'
+原因：代码尝试访问 FILE 的内部字段，但 musl 的 FILE 是不透明类型
+解决：
+  1. 添加条件编译检测 musl
+  2. 使用公开 API 或安全回退
+  3. 参考 GNU coreutils 9.10 的适配方案
+```
+
+**问题2：缺少 glibc 特有函数**
+```
+错误：undefined reference to '__xmknod' 或 '__fxstat'
+原因：这些是 glibc 的内部函数，musl 不提供
+解决：
+  1. 检查是否有替代 API
+  2. 使用条件编译禁用相关功能
+  3. 提供兼容性封装
+```
+
+**问题3：线程局部存储差异**
+```
+错误：thread-local storage 相关错误
+原因：musl 的 TLS 实现与 glibc 略有差异
+解决：
+  1. 使用标准的 __thread 或 _Thread_local
+  2. 避免使用 glibc 特有的 TLS 扩展
+```
+
+#### 3.6.6 参考项目
+
+已完成 musl 适配的项目：
+- **GNU coreutils 9.10**: `build_in_harmonyos/c/coreutils/9.10/README.md`
+- 包含 freadahead.c、freadptr.c、freadseek.c 的完整适配方案
+
+### 3.7 与其他平台对比
 
 **vs Linux：**
 | 方面 | Linux | OpenHarmony |
@@ -491,14 +642,19 @@ export PATH=$HOME/usr/local/bin:$PATH
 
 以下 GNU 工具建议在鸿蒙系统上编译安装，以获得更好的兼容性：
 
-| 工具 | 版本 | 用途 | 归档路径 |
-|------|------|------|----------|
-| GNU sed | 4.9 | 流编辑器，解决 toybox sed 兼容性问题 | s/sed/4.9/ |
-| GNU awk | 5.3+ | 文本处理，功能比 toybox awk 更完整 | 待编译 |
-| GNU grep | 3.11+ | 文本搜索，功能基本相同 | 待编译 |
-| GNU coreutils | 9.4+ | 基础工具集（ls, cp, mv 等） | 待编译 |
-| GNU make | 4.4+ | 构建工具，支持更多扩展 | 待编译 |
-| GNU bash | 5.2+ | Shell，语法更丰富 | 待编译 |
+| 工具 | 版本 | 用途 | 归档路径 | 优先级 |
+|------|------|------|----------|--------|
+| GNU coreutils | 9.10 | 基础工具集，**修复 toybox expr bug** | c/coreutils/9.10/ | ⭐⭐⭐ 必须 |
+| GNU sed | 4.9 | 流编辑器，解决 toybox sed 兼容性问题 | s/sed/4.9/ | ⭐⭐⭐ 必须 |
+| GNU awk | 5.3+ | 文本处理，功能比 toybox awk 更完整 | 待编译 | ⭐⭐ 推荐 |
+| GNU grep | 3.11+ | 文本搜索，功能基本相同 | 待编译 | ⭐ 可选 |
+| GNU make | 4.4+ | 构建工具，支持更多扩展 | 待编译 | ⭐ 可选 |
+| GNU bash | 5.2+ | Shell，语法更丰富 | 待编译 | ⭐ 可选 |
+
+**编译顺序建议**：
+1. GNU coreutils（提供 expr，最关键）
+2. GNU sed（替代 toybox sed）
+3. 其他工具（按需安装）
 
 **vs Android：**
 | 方面 | Android | OpenHarmony |
@@ -643,7 +799,8 @@ fi
 
 ### 3.9 知识总结
 #### 归档触发时机
-- 针对每一次在鸿蒙系统上**首次成功完成构建并测试通过**后，按照以下步骤创建归档：
+- 针对每一次在鸿蒙系统上**首次成功完成构建并测试通过**后，按照以下规范创建归档：
+#### 归档目录及命名规范
   - 按照 `<软件名称首字母>/<软件全程>/<版本号>` 创建归档目录
     ```bash
     mkdir -p r/readline/8.2/
@@ -1174,20 +1331,155 @@ fi
   echo "修改成功，原文件已备份"
   ```
 
-### 6.8 补丁技巧
-  生成补丁的流程
-  1. 复制备份原文件
-  2. 按照规划的方案修改文件
-  3. 验证是否修改成功
-  4. 确保所有需要修改的文件均得到修改
-  5. 通过diff -Naur 进行补丁生成，多个文件可以通过列表方式如下
-  ```bash
-  diff -Naur \
-  project_old/src/main.c project_new/src/main.c \
-  project_old/include/config.h project_new/include/config.h \
-  > my_patch.patch
-  ```
-  6. 应用补丁文件，确保补丁生效后与原目标修改相同
+### 6.8 补丁生成最佳实践
+
+#### 6.8.1 标准流程（三目录法）
+
+**问题背景**：直接编写补丁文件容易出错，行号、上下文不匹配会导致补丁无法应用。
+
+**推荐方法**：使用三个独立的目录进行补丁生成和验证。
+
+```bash
+# 步骤1：创建原始备份目录（从 tar 包解压，永不修改）
+tar -xzf package-1.0.tar.gz
+mv package-1.0 package-1.0-orig
+
+# 步骤2：创建工作目录（在此修改和验证）
+cp -a package-1.0-orig package-1.0-work
+cd package-1.0-work
+
+# 步骤3：在工作目录中修改文件
+# ... 执行修改操作 ...
+
+# 步骤4：验证修改是否正确（编译测试）
+./configure && make
+
+# 步骤5：生成补丁
+cd ..
+diff -u package-1.0-orig/file1.c package-1.0-work/file1.c > 0001-fix.patch
+diff -u package-1.0-orig/file2.c package-1.0-work/file2.c >> 0001-fix.patch
+# 或使用循环处理多个文件：
+# for f in $(find package-1.0-work -name "*.c" -type f); do
+#     orig="${f/work/orig}"
+#     diff -u "$orig" "$f" >> 0001-fix.patch
+# done
+
+# 步骤6：创建验证目录（验证补丁可正确应用）
+cp -a package-1.0-orig package-1.0-verify
+cd package-1.0-verify
+patch -p1 < ../0001-fix.patch
+
+# 步骤7：验证补丁后能否正常编译
+./configure && make
+
+# 步骤8：确认无误后清理
+rm -rf package-1.0-verify
+```
+
+#### 6.8.2 目录命名规范
+
+| 目录类型 | 命名 | 用途 | 修改权限 |
+|----------|------|------|----------|
+| 原始备份 | `package-1.0-orig` | 保存原始代码，用于 diff | ❌ 禁止修改 |
+| 工作目录 | `package-1.0-work` | 修改和验证代码 | ✅ 可以修改 |
+| 验证目录 | `package-1.0-verify` | 验证补丁正确性 | 仅应用补丁 |
+
+#### 6.8.3 常见错误及避免方法
+
+**错误1：直接修改 tar 包解压的目录**
+```
+❌ 错误做法：
+tar -xzf package.tar.gz
+cd package
+# 直接修改...
+diff -u package.orig package > patch  # package.orig 不存在！
+
+✅ 正确做法：
+tar -xzf package.tar.gz
+mv package package-orig          # 先重命名
+cp -a package-orig package-work  # 再复制工作目录
+```
+
+**错误2：在工作目录中生成补丁后继续修改**
+```
+❌ 错误做法：
+cd package-work
+# 修改文件...
+diff -u ../package-orig/file.c file.c > patch
+# 继续修改...
+diff -u ../package-orig/file.c file.c >> patch  # 补丁包含旧内容！
+
+✅ 正确做法：
+cd package-work
+# 修改文件...
+# 验证编译...
+# 确认所有修改完成后，一次性生成补丁
+diff -u ../package-orig/file.c file.c > patch
+# 不再修改工作目录
+```
+
+**错误3：补丁生成后删除工作目录**
+```
+❌ 错误做法：
+diff -u orig/file.c work/file.c > patch
+rm -rf work  # 工作目录删除，无法重新生成补丁
+
+✅ 正确做法：
+# 保留工作目录，直到补丁验证通过
+diff -u orig/file.c work/file.c > patch
+cp -a orig verify
+cd verify && patch -p1 < ../patch && make  # 验证
+# 验证通过后可清理
+```
+
+**错误4：使用错误的 diff 参数**
+```
+❌ 错误做法：
+diff file1.c file2.c > patch      # 缺少 -u 参数，上下文不足
+diff -u a/file.c b/file.c > patch # 路径不标准
+
+✅ 正确做法：
+diff -u package-orig/src/file.c package-work/src/file.c > patch
+# 路径应以目录名为前缀，方便 patch -p1 应用
+```
+
+#### 6.8.4 补丁验证清单
+
+在生成补丁后，必须验证：
+
+1. ✅ 补丁能正确应用（`patch -p1 --dry-run < patch`）
+2. ✅ 应用后的文件与工作目录一致（`diff -r orig work`）
+3. ✅ 应用后能正常编译
+4. ✅ 补丁文件格式正确（有 `---` 和 `+++` 行）
+
+#### 6.8.5 多文件补丁生成脚本
+
+```bash
+#!/bin/bash
+# generate-patch.sh - 自动生成多文件补丁
+
+ORIG_DIR="package-1.0-orig"
+WORK_DIR="package-1.0-work"
+PATCH_FILE="0001-port-for-ohos.patch"
+
+# 清空补丁文件
+> "$PATCH_FILE"
+
+# 查找所有修改过的文件
+for work_file in $(find "$WORK_DIR" -type f \( -name "*.c" -o -name "*.h" -o -name "*.sh" \)); do
+    orig_file="${work_file/$WORK_DIR/$ORIG_DIR}"
+    
+    if [ -f "$orig_file" ]; then
+        if ! diff -q "$orig_file" "$work_file" > /dev/null 2>&1; then
+            echo "添加修改: $work_file"
+            diff -u "$orig_file" "$work_file" >> "$PATCH_FILE"
+        fi
+    fi
+done
+
+echo "补丁生成完成: $PATCH_FILE"
+echo "补丁行数: $(wc -l < "$PATCH_FILE")"
+```
 
 ### 6.9 Autotools系列构建系统修改技巧
   1. 了解config.guess 的核心目的
@@ -1206,6 +1498,379 @@ fi
     2. 保持兼容性：确保修改不会破坏原有功能
     3. 遵循规范：遵循 autotools 的规范和惯例
   5. 根据这些信息，详细分析对应工程中的文件，确定修改方案进行修改
+
+### 6.10 问题排查方法论
+
+在鸿蒙系统上编译软件时，可能会遇到各种问题。本节总结了系统化的问题排查方法。
+
+#### 6.10.1 进程卡住问题排查
+
+**场景**：configure 或 make 过程中进程卡住，无响应。
+
+**排查步骤**：
+
+```bash
+# 步骤1：找到卡住的进程
+ps aux | grep -E "configure|make|sed|expr"
+
+# 步骤2：查看进程详细信息
+cat /proc/<pid>/cmdline | tr '\0' ' ' | head -c 500
+cat /proc/<pid>/stack  # 查看调用栈
+
+# 步骤3：检查进程状态
+cat /proc/<pid>/status | grep -E "State|Threads"
+
+# 步骤4：如果命令很长，保存到文件
+cat /proc/<pid>/cmdline | tr '\0' ' ' > /tmp/cmd.txt
+
+# 步骤5：分析命令，确定卡住的具体位置
+# 检查命令中的变量值、管道操作等
+
+# 步骤6：手动执行相关命令验证
+# 例如，单独执行 sed 或 expr 命令测试
+```
+
+**常见原因**：
+- toybox 工具与 GNU 工具不兼容
+- 复杂的 shell 脚本语法差异
+- 死循环或无限等待
+
+#### 6.10.2 乱码/二进制数据问题排查
+
+**场景**：生成的文件包含乱码或被识别为二进制文件。
+
+**排查步骤**：
+
+```bash
+# 步骤1：检查文件类型
+file Makefile
+
+# 步骤2：查看文件十六进制内容
+hexdump -C Makefile | head -20
+
+# 步骤3：查找非 ASCII 字符
+hexdump -C Makefile | grep -E "[^[:print:]]" | head -10
+
+# 步骤4：检查 NULL 字节
+grep -c $'\x00' Makefile
+
+# 步骤5：强制作为文本处理
+grep -a "pattern" Makefile
+```
+
+**常见原因**：
+- toybox 工具 bug（如 expr 复合正则表达式）
+- 终端转义序列被错误写入文件
+- 变量展开异常
+
+#### 6.10.3 变量污染排查
+
+**场景**：shell 变量包含意外的值或乱码。
+
+**排查步骤**：
+
+```bash
+# 步骤1：使用 bash -x 追踪脚本执行
+bash -x ./config.status --file=Makefile 2>&1 | tee trace.log
+
+# 步骤2：查找变量赋值
+grep -E "^[+] ac_[a-z_]+=" trace.log | head -20
+
+# 步骤3：检查变量值是否异常
+# 查找包含乱码的行
+grep -E "[^[:print:]]" trace.log
+
+# 步骤4：追踪变量来源
+# 在脚本中添加调试输出
+echo "DEBUG: var=$var" >&2
+```
+
+**常见原因**：
+- 命令替换（反引号）执行异常
+- 管道命令输出错误
+- 工具兼容性问题
+
+#### 6.10.4 工具兼容性验证
+
+**场景**：怀疑某个工具与标准行为不一致。
+
+**验证方法**：
+
+```bash
+# 步骤1：确定工具来源
+which sed
+ls -la $(which sed)
+
+# 步骤2：查看版本
+sed --version  # GNU sed 会显示版本，toybox 通常不显示
+
+# 步骤3：对比行为
+# 先用 toybox 版本测试
+echo "test" | sed 's/test/pass/'
+
+# 再用 GNU 版本测试（如果已安装）
+echo "test" | gsed 's/test/pass/'
+
+# 步骤4：测试具体功能
+# 例如，测试 expr 复合正则表达式
+expr X"path/file" : 'X\(.*[^/]\)//*[^/][^/]*/*$' \| . : '\(.\)'
+```
+
+**已知的 toybox 问题**：
+
+| 工具 | 问题 | 影响 | 解决方案 |
+|------|------|------|----------|
+| expr | 复合正则表达式 `\|` 输出乱码 | autotools 项目 | 安装 GNU coreutils |
+| sed | 复杂脚本可能异常 | autotools 项目 | 安装 GNU sed |
+| awk | 功能有限 | 某些脚本 | 安装 GNU awk |
+
+#### 6.10.5 编译错误排查流程
+
+```
+1. 仔细阅读错误信息
+   ↓
+2. 确定错误类型：
+   - 语法错误 → 检查编译器版本、标准兼容性
+   - 链接错误 → 检查库依赖、库路径
+   - 缺少头文件 → 检查头文件路径、sysroot
+   - 权限错误 → 检查文件权限、目录权限
+   ↓
+3. 查找相关信息：
+   - 搜索错误信息
+   - 查看项目文档
+   - 检查 SKILL.md 中的已知问题
+   ↓
+4. 尝试解决方案
+   ↓
+5. 验证是否解决
+```
+
+#### 6.10.6 调试技巧汇总
+
+| 技巧 | 命令 | 用途 |
+|------|------|------|
+| 进程追踪 | `strace -f -o trace.log command` | 跟踪系统调用 |
+| 脚本调试 | `bash -x script.sh` | 显示执行的每条命令 |
+| 变量打印 | `echo "var=$var" >&2` | 输出变量值到 stderr |
+| 文件检查 | `file filename` | 查看文件类型 |
+| 二进制查看 | `hexdump -C file \| head` | 查看文件二进制内容 |
+| 进程信息 | `cat /proc/<pid>/cmdline` | 查看进程命令行 |
+| 环境检查 | `env \| sort` | 查看所有环境变量 |
+
+### 6.11 归档文档规范
+
+#### 6.11.1 README.md 必须包含的内容
+
+每个软件的 README.md 应包含以下章节：
+
+| 章节 | 内容 | 重要性 |
+|------|------|--------|
+| 概述 | 软件简介 | ⭐⭐ |
+| 软件信息 | 名称、版本、下载地址 | ⭐⭐⭐ |
+| 鸿蒙环境 | 系统版本、编译器、工具链 | ⭐⭐ |
+| 编译步骤 | 解压、打补丁、配置、编译、安装 | ⭐⭐⭐ |
+| 补丁说明 | **修改文件列表 + 技术细节** | ⭐⭐⭐ 关键 |
+| 遇到的问题 | 问题现象、原因分析、解决方案 | ⭐⭐⭐ 关键 |
+| 经验总结 | 注意事项、与其他软件的关联 | ⭐⭐ |
+| 参考资料 | 官方文档、相关项目 | ⭐ |
+
+**补丁说明章节要求**：
+
+必须详细解释每个修改的技术原因，包括：
+
+```markdown
+### 补丁说明
+
+#### 修改文件
+1. **file.c**: 修改原因
+
+#### 关键修改详解
+
+##### file.c - 功能说明
+
+**问题背景**: 为什么需要这个修改
+
+**技术原理**: 相关的技术知识
+
+**解决方案**: 具体的修改方法
+
+**代码示例**:
+```c
+// 修改后的代码
+```
+
+**影响**: 这个修改会带来什么影响
+```
+
+#### 6.11.2 补丁文件规范
+
+**命名规范**：
+- 单个补丁：`0001-port-for-ohos.patch`
+- 多个补丁：`0001-xxx.patch`, `0002-xxx.patch`
+
+**补丁文件格式**：
+```diff
+--- a/original-file.c
++++ b/modified-file.c
+@@ -行号,数量 +行号,数量 @@
+ 上下文行（以空格开头）
+-删除的行（以 - 开头）
++新增的行（以 + 开头）
+ 上下文行
+```
+
+**注意事项**：
+- 路径应以 `a/` 和 `b/` 开头（便于 `patch -p1` 应用）
+- 包含足够的上下文行（通常 3 行）
+- 确保补丁可以干净地应用
+
+### 6.12 编译项目依赖顺序
+
+某些软件存在依赖关系，需要按正确顺序编译安装。
+
+#### 6.12.1 推荐编译顺序
+
+```
+第一阶段：基础工具（解决 toybox 兼容性问题）
+├── GNU coreutils 9.10  → 提供 GNU expr 等核心工具
+└── GNU sed 4.9         → 替代 toybox sed
+
+第二阶段：常用库
+├── ncurses 6.4         → 终端库
+├── readline 8.2        → 命令行编辑（依赖 ncurses）
+└── gettext             → 国际化支持
+
+第三阶段：其他软件
+└── 按需编译
+```
+
+#### 6.12.2 依赖关系图
+
+```
+GNU coreutils ─────────────────────────────┐
+GNU sed ───────────────────────────────────┤
+                                           │
+                                           ▼
+ncurses ◄───────────────────────────── readline
+   │
+   ├──► 多数终端应用
+   │
+   └──► 其他依赖终端库的软件
+```
+
+#### 6.12.3 编译前检查依赖
+
+```bash
+# 检查是否已安装 GNU coreutils
+which expr && expr --version | grep -i gnu
+
+# 检查是否已安装 GNU sed
+which sed && sed --version | grep -i gnu
+
+# 检查是否已安装 ncurses
+pkg-config --exists ncursesw && echo "ncurses 已安装"
+```
+
+### 6.13 问题排查案例：toybox expr bug 发现过程
+
+本节记录了 toybox expr bug 的完整发现过程，作为问题排查的参考案例。
+
+#### 6.13.1 问题现象
+
+编译 ncurses 时，`config.status` 执行过程中 sed 进程卡住，生成的 Makefile 包含乱码。
+
+#### 6.13.2 排查过程
+
+```bash
+# 第一步：找到卡住的进程
+$ ps aux | grep sed
+USER  PID  ... COMMAND
+user  60545 ... sed s,@top_srcdir@,../<乱码>...,;t t
+
+# 第二步：查看进程命令行
+$ cat /proc/60545/cmdline | tr '\0' ' '
+sed s,@top_srcdir@,../...乱码...,;t t
+
+# 第三步：分析乱码来源
+# 乱码在 $ac_top_srcdir 变量中
+
+# 第四步：追踪 config.status
+$ bash -x ./config.status --file=ncurses/Makefile 2>&1 | grep ac_dots
++ ac_dots='../<乱码>...'
+
+# 第五步：分析 ac_dots 的计算
+# ac_dots 来自 expr 命令的输出
+
+# 第六步：对比测试
+$ expr X"ncurses/Makefile" : 'X\(.*[^/]\)//*[^/][^/]*/*$' \| . : '\(.\)'
+mOkk...  # toybox expr 输出乱码！
+
+$ /path/to/gnu/expr X"ncurses/Makefile" : 'X\(.*[^/]\)//*[^/][^/]*/*$' \| . : '\(.\)'
+ncurses  # GNU expr 正确！
+```
+
+#### 6.13.3 根因分析
+
+| 因素 | 说明 |
+|------|------|
+| 触发条件 | config.status 使用复合正则表达式（`\|` 操作符） |
+| 问题工具 | toybox expr |
+| 问题表现 | 复合正则表达式输出乱码 |
+| 影响范围 | 所有使用 autotools 的项目 |
+
+#### 6.13.4 解决方案
+
+1. 编译安装 GNU coreutils（包含 GNU expr）
+2. 设置 PATH 优先使用 GNU 工具
+
+#### 6.13.5 经验总结
+
+1. **工具兼容性问题可能很隐蔽**：简单命令正常，复杂命令出错
+2. **对比测试很重要**：与已知正确的工具对比行为
+3. **追踪变量来源**：使用 `bash -x` 追踪脚本执行
+4. **系统化排查**：从现象 → 进程 → 变量 → 命令 → 工具
+
+### 6.14 工作流程经验总结
+
+#### 6.14.1 编译新软件的推荐流程
+
+```
+1. 环境准备
+   ├── 检查 PATH 是否包含 $HOME/usr/local/bin
+   ├── 检查 TMPDIR 是否设置
+   └── 确认已安装 GNU coreutils 和 GNU sed
+
+2. 源码准备
+   ├── 下载源码包
+   ├── 创建 orig/work/verify 三个目录
+   └── 在 work 目录中进行修改
+
+3. 适配修改
+   ├── 识别构建系统类型
+   ├── 修改 config.guess/config.sub（Autotools）
+   ├── 处理其他兼容性问题
+   └── 验证编译成功
+
+4. 补丁生成
+   ├── 对比 orig 和 work 生成补丁
+   ├── 在 verify 目录验证补丁
+   └── 确认补丁正确
+
+5. 归档文档
+   ├── 编写 README.md（包含详细技术解释）
+   ├── 检查归档目录命名是否正确
+   └── 提交到知识库
+```
+
+#### 6.14.2 常见错误避免
+
+| 错误 | 后果 | 正确做法 |
+|------|------|----------|
+| 跳过验证步骤 | 补丁无法应用 | 每次修改后都验证编译 |
+| 直接写补丁文件 | 补丁格式错误 | 使用三目录法生成 |
+| README 缺少技术细节 | 无法复现和参考 | 详细记录问题分析和解决方案 |
+| 归档目录命名错误 | 难以查找 | 首字母/软件名/版本号 |
+| 忽略工具兼容性 | 隐蔽的 bug | 优先安装 GNU 工具 |
 
 ## 7. 参考资料
 
