@@ -1,0 +1,548 @@
+From: OpenHarmony Developer <developer@openharmony.io>
+Subject: [PATCH] Fix fstat() and lseek() for HarmonyOS
+
+--- coreutils-9.10-orig/src/cat.c	2026-02-01 06:24:38.000000000 +0800
++++ coreutils-9.10-work/src/cat.c	2026-03-15 14:56:04.704312657 +0800
+@@ -647,21 +647,34 @@
+         case_GETOPT_VERSION_CHAR (PROGRAM_NAME, AUTHORS);
+ 
+         default:
+           usage (EXIT_FAILURE);
+         }
+     }
+ 
+   /* Get device, i-node number, and optimal blocksize of output.  */
+ 
+   if (fstat (STDOUT_FILENO, &ostat_buf) < 0)
+-    error (EXIT_FAILURE, errno, _("standard output"));
++    {
++# ifdef __OHOS__
++      /* HarmonyOS returns EACCES for pipes/terminals/sockets.
++         Use sensible defaults and continue. */
++      if (errno == EACCES || errno == EPERM)
++        {
++          memset (&ostat_buf, 0, sizeof ostat_buf);
++          ostat_buf.st_blksize = 4096;
++          ostat_buf.st_mode = S_IFIFO;
++        }
++      else
++# endif
++        error (EXIT_FAILURE, errno, _("standard output"));
++    }
+ 
+   /* Optimal size of i/o operations of output.  */
+   idx_t outsize = io_blksize (&ostat_buf);
+ 
+   /* Device, I-node number and lazily-acquired flags of the output.  */
+   int out_flags = -2;
+ 
+   /* True if the output is a regular file.  */
+   bool out_isreg = S_ISREG (ostat_buf.st_mode) != 0;
+ 
+@@ -698,23 +711,35 @@
+             {
+               error (0, errno, "%s", quotef (infile));
+               ok = false;
+               continue;
+             }
+         }
+ 
+       struct stat istat_buf;
+       if (fstat (input_desc, &istat_buf) < 0)
+         {
+-          error (0, errno, "%s", quotef (infile));
+-          ok = false;
+-          goto contin;
++# ifdef __OHOS__
++          /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++          if (errno == EACCES || errno == EPERM)
++            {
++              memset (&istat_buf, 0, sizeof istat_buf);
++              istat_buf.st_blksize = 4096;
++              istat_buf.st_mode = S_IFIFO;
++            }
++          else
++# endif
++            {
++              error (0, errno, "%s", quotef (infile));
++              ok = false;
++              goto contin;
++            }
+         }
+ 
+       /* Optimal size of i/o operations of input.  */
+       idx_t insize = io_blksize (&istat_buf);
+ 
+       fdadvise (input_desc, 0, 0, FADVISE_SEQUENTIAL);
+ 
+       /* Don't copy a file to itself if that would merely exhaust the
+          output device.  It's better to catch this error earlier
+          rather than later.  */
+--- coreutils-9.10-orig/src/dd.c	2026-01-31 02:22:07.000000000 +0800
++++ coreutils-9.10-work/src/dd.c	2026-03-15 14:58:13.960309844 +0800
+@@ -1303,20 +1303,32 @@
+ {
+   int ret;
+ 
+   do
+     {
+       process_signals ();
+       ret = fstat (fd, st);
+     }
+   while (ret < 0 && errno == EINTR);
+ 
++# ifdef __OHOS__
++  /* HarmonyOS returns EACCES for pipes/terminals/sockets.
++     Use sensible defaults and continue. */
++  if (ret < 0 && (errno == EACCES || errno == EPERM))
++    {
++      memset (st, 0, sizeof *st);
++      st->st_blksize = 4096;
++      st->st_mode = S_IFIFO;
++      ret = 0;
++    }
++# endif
++
+   return ret;
+ }
+ 
+ /* Restart on EINTR from fsync.  */
+ 
+ static int
+ ifsync (int fd)
+ {
+   int ret;
+ 
+--- coreutils-9.10-orig/src/head.c	2026-01-21 21:51:40.000000000 +0800
++++ coreutils-9.10-work/src/head.c	2026-03-15 20:47:55.163933749 +0800
+@@ -242,21 +242,29 @@
+    corresponds to the file FILENAME.  WHENCE must be SEEK_SET or
+    SEEK_CUR.  Return the resulting offset.  Give a diagnostic and
+    return -1 if lseek fails.  */
+ 
+ static off_t
+ elseek (int fd, off_t offset, int whence, char const *filename)
+ {
+   off_t new_offset = lseek (fd, offset, whence);
+ 
+   if (new_offset < 0)
+-    elseek_diagnostic (offset, whence, filename);
++    {
++# ifdef __OHOS__
++      /* HarmonyOS returns EACCES for lseek on pipes/terminals.
++         This is expected behavior, not an error. */
++      if (errno == EACCES || errno == EPERM || errno == ESPIPE)
++        return -1;
++# endif
++      elseek_diagnostic (offset, whence, filename);
++    }
+ 
+   return new_offset;
+ }
+ 
+ /* For an input file with name FILENAME and descriptor FD,
+    output all but the last N_ELIDE bytes.
+    If CURRENT_POS is nonnegative, assume that the input file is
+    positioned at CURRENT_POS and that it should be repositioned to
+    just before the elided bytes before returning.
+    Return true upon success.
+@@ -805,20 +813,27 @@
+       while (bytes_to_write < bytes_read)
+         if (buffer[bytes_to_write++] == line_end && --lines_to_write == 0)
+           {
+             off_t n_bytes_past_EOL = bytes_read - bytes_to_write;
+             /* If we have read more data than that on the specified number
+                of lines, try to seek back to the position we would have
+                gotten to had we been reading one byte at a time.  */
+             if (lseek (fd, -n_bytes_past_EOL, SEEK_CUR) < 0)
+               {
+                 struct stat st;
++# ifdef __OHOS__
++                /* HarmonyOS returns EACCES for lseek/fstat on pipes/terminals.
++                   This is expected behavior, skip the diagnostic. */
++                if (errno == EACCES || errno == EPERM || errno == ESPIPE)
++                  ; /* ignore */
++                else
++# endif
+                 if (fstat (fd, &st) != 0 || S_ISREG (st.st_mode))
+                   elseek_diagnostic (-n_bytes_past_EOL, SEEK_CUR, filename);
+               }
+             break;
+           }
+       xwrite_stdout (buffer, bytes_to_write);
+     }
+   return true;
+ }
+ 
+@@ -832,23 +847,35 @@
+   if (elide_from_end)
+     {
+       /* Optimize for "infinite" elisions.  */
+       if (n_units == UINTMAX_MAX)
+         return true;
+ 
+       off_t current_pos = -1;
+       struct stat st;
+       if (fstat (fd, &st) != 0)
+         {
+-          error (0, errno, _("cannot fstat %s"),
+-                 quoteaf (filename));
+-          return false;
++# ifdef __OHOS__
++          /* HarmonyOS returns EACCES for fstat on pipes/terminals. */
++          if (errno == EACCES || errno == EPERM)
++            {
++              memset (&st, 0, sizeof st);
++              st.st_blksize = 4096;
++              st.st_mode = S_IFIFO;
++            }
++          else
++# endif
++            {
++              error (0, errno, _("cannot fstat %s"),
++                     quoteaf (filename));
++              return false;
++            }
+         }
+       if (! presume_input_pipe && S_ISREG (st.st_mode))
+         {
+           current_pos = elseek (fd, 0, SEEK_CUR, filename);
+           if (current_pos < 0)
+             return false;
+         }
+       if (count_lines)
+         return elide_tail_lines_file (filename, fd, n_units, &st, current_pos);
+       else
+--- coreutils-9.10-orig/src/sort.c	2026-01-21 21:51:40.000000000 +0800
++++ coreutils-9.10-work/src/sort.c	2026-03-15 20:57:53.699936562 +0800
+@@ -1631,21 +1631,33 @@
+   for (size_t i = 0; i < nfiles; i++)
+     {
+       struct stat st;
+       off_t file_size;
+       size_t worst_case;
+ 
+       if ((i < nfps ? fstat (fileno (fps[i]), &st)
+            : streq (files[i], "-") ? fstat (STDIN_FILENO, &st)
+            : stat (files[i], &st))
+           != 0)
+-        sort_die (_("stat failed"), files[i]);
++        {
++# ifdef __OHOS__
++          /* HarmonyOS returns EACCES for fstat on pipes/terminals. */
++          if (errno == EACCES || errno == EPERM)
++            {
++              memset (&st, 0, sizeof st);
++              st.st_blksize = 4096;
++              st.st_mode = S_IFIFO;
++            }
++          else
++# endif
++            sort_die (_("stat failed"), files[i]);
++        }
+ 
+       if (usable_st_size (&st) && 0 < st.st_size)
+         file_size = st.st_size;
+       else
+         {
+           /* The file has unknown size.  If the user specified a sort
+              buffer size, use that; otherwise, guess the size.  */
+           if (sort_size)
+             return sort_size;
+           file_size = INPUT_FILE_SIZE_GUESS;
+--- coreutils-9.10-orig/src/split.c	2026-01-21 21:51:40.000000000 +0800
++++ coreutils-9.10-work/src/split.c	2026-03-15 14:59:01.612309375 +0800
+@@ -1676,21 +1676,33 @@
+ 
+   /* Binary I/O is safer when byte counts are used.  */
+   xset_binary_mode (STDIN_FILENO, O_BINARY);
+ 
+   /* Advise the kernel of our access pattern.  */
+   fdadvise (STDIN_FILENO, 0, 0, FADVISE_SEQUENTIAL);
+ 
+   /* Get the optimal block size of input device and make a buffer.  */
+ 
+   if (fstat (STDIN_FILENO, &in_stat_buf) != 0)
+-    error (EXIT_FAILURE, errno, "%s", quotef (infile));
++    {
++# ifdef __OHOS__
++      /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++      if (errno == EACCES || errno == EPERM)
++        {
++          memset (&in_stat_buf, 0, sizeof in_stat_buf);
++          in_stat_buf.st_blksize = 4096;
++          in_stat_buf.st_mode = S_IFIFO;
++        }
++      else
++# endif
++        error (EXIT_FAILURE, errno, "%s", quotef (infile));
++    }
+ 
+   if (in_blk_size == 0)
+     {
+       in_blk_size = io_blksize (&in_stat_buf);
+       if (SYS_BUFSIZE_MAX < in_blk_size)
+         in_blk_size = SYS_BUFSIZE_MAX;
+     }
+ 
+   char *buf = xalignalloc (page_size, in_blk_size + 1);
+   ssize_t initial_read = -1;
+--- coreutils-9.10-orig/src/tail.c	2026-01-25 04:00:32.000000000 +0800
++++ coreutils-9.10-work/src/tail.c	2026-03-15 15:51:43.996310157 +0800
+@@ -1021,20 +1021,33 @@
+                  be seen to be the same file (dev/ino).  Otherwise, tail prints
+                  the entire contents of the file when it becomes readable.  */
+               error (0, f->errnum, _("%s has become inaccessible"),
+                      quoteaf (f->prettyname));
+             }
+           else
+             {
+               /* say nothing... it's still not tailable */
+             }
+         }
++# ifdef __OHOS__
++      else if (errno == EACCES || errno == EPERM)
++        {
++          /* HarmonyOS returns EACCES for pipes/terminals/sockets.
++             Use sensible defaults and continue. */
++          memset (&new_stats, 0, sizeof new_stats);
++          new_stats.st_blksize = 4096;
++          new_stats.st_mode = S_IFIFO;
++          f->errnum = 0;
++          /* Fall through to the success path below. */
++          goto ohos_tail_success_1;
++        }
++# endif
+       else if (prev_errnum != f->errnum)
+         error (0, f->errnum, "%s", quotef (f->prettyname));
+     }
+   else if (!IS_TAILABLE_FILE_TYPE (new_stats.st_mode))
+     {
+       f->errnum = -1;
+       f->ignore = ! (reopen_inaccessible_files && follow_mode == Follow_name);
+       if (f->tailable || ! (prev_errnum < 0 || prev_errnum == EISDIR))
+         error (0, 0, _("%s has been replaced with an untailable file%s"),
+                quoteaf (f->prettyname),
+@@ -1042,20 +1055,23 @@
+     }
+   else if ((f->remote = fremote (fd, f)) && ! disable_inotify)
+     {
+       f->errnum = -1;
+       error (0, 0, _("%s has been replaced with an untailable remote file"),
+              quoteaf (f->prettyname));
+       f->ignore = true;
+     }
+   else
+     {
++# ifdef __OHOS__
++    ohos_tail_success_1:
++# endif
+       ok = true;
+       f->errnum = 0;
+     }
+ 
+   f->tailable = ok;
+ 
+   new_file = false;
+   if (!ok)
+     {
+       close_fd (fd, f);
+@@ -1231,25 +1247,37 @@
+                 }
+               else
+                 f[i].blocking = blocking;
+             }
+ 
+           bool read_unchanged = false;
+           if (!f[i].blocking)
+             {
+               if (fstat (fd, &stats) < 0)
+                 {
+-                  f[i].fd = -1;
+-                  f[i].errnum = errno;
+-                  error (0, errno, "%s", quotef (prettyname));
+-                  close (fd); /* ignore failure */
+-                  continue;
++# ifdef __OHOS__
++                  /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++                  if (errno == EACCES || errno == EPERM)
++                    {
++                      memset (&stats, 0, sizeof stats);
++                      stats.st_blksize = 4096;
++                      stats.st_mode = S_IFIFO;
++                    }
++                  else
++# endif
++                    {
++                      f[i].fd = -1;
++                      f[i].errnum = errno;
++                      error (0, errno, "%s", quotef (prettyname));
++                      close (fd); /* ignore failure */
++                      continue;
++                    }
+                 }
+ 
+               if (f[i].mode == stats.st_mode
+                   && (! S_ISREG (stats.st_mode)
+                       || f[i].read_pos == stats.st_size)
+                   && timespec_cmp (f[i].mtime, get_stat_mtime (&stats)) == 0)
+                 {
+                   if ((max_n_unchanged_stats_between_opens
+                        <= f[i].n_unchanged_stats++)
+                       && follow_mode == Follow_name)
+@@ -1432,24 +1460,36 @@
+    PREV_FSPEC records the last File_spec for which we output.  */
+ static void
+ check_fspec (struct File_spec *fspec, struct File_spec **prev_fspec)
+ {
+   if (fspec->fd < 0)
+     return;
+ 
+   struct stat stats;
+   if (fstat (fspec->fd, &stats) < 0)
+     {
+-      fspec->errnum = errno;
+-      close_fd (fspec->fd, fspec);
+-      fspec->fd = -1;
+-      return;
++# ifdef __OHOS__
++      /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++      if (errno == EACCES || errno == EPERM)
++        {
++          memset (&stats, 0, sizeof stats);
++          stats.st_blksize = 4096;
++          stats.st_mode = S_IFIFO;
++        }
++      else
++# endif
++        {
++          fspec->errnum = errno;
++          close_fd (fspec->fd, fspec);
++          fspec->fd = -1;
++          return;
++        }
+     }
+ 
+   char const *prettyname = fspec->prettyname;
+ 
+   /* XXX: This is only a heuristic, as the file may have also
+      been truncated and written to if st_size >= size
+      (in which case we ignore new data <= size).
+      Though in the inotify case it's more likely we'll get
+      separate events for truncate() and write().  */
+   if (S_ISREG (fspec->mode) && stats.st_size < fspec->read_pos)
+@@ -2030,24 +2070,37 @@
+   else
+     {
+       if (print_headers)
+         write_header (f->prettyname);
+ 
+       off_t read_pos;
+       struct stat stats;
+       ok = 0 <= fstat (fd, &stats);
+       if (!ok)
+         {
+-          f->errnum = errno;
+-          error (0, f->errnum, _("cannot fstat %s"), quoteaf (f->prettyname));
++# ifdef __OHOS__
++          /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++          if (errno == EACCES || errno == EPERM)
++            {
++              memset (&stats, 0, sizeof stats);
++              stats.st_blksize = 4096;
++              stats.st_mode = S_IFIFO;
++              ok = true;
++            }
++          else
++# endif
++            {
++              f->errnum = errno;
++              error (0, f->errnum, _("cannot fstat %s"), quoteaf (f->prettyname));
++            }
+         }
+-      else
++      if (ok)
+         {
+           read_pos = tail (f->prettyname, fd, &stats, n_units);
+           ok = -1 <= read_pos;
+           f->errnum = ok ? 0 : -1 - read_pos;
+ 
+           if (IS_TAILABLE_FILE_TYPE (stats.st_mode))
+             f->tailable = true;
+           else if (forever)
+             {
+               ok = false;
+@@ -2415,23 +2468,38 @@
+       error (EXIT_FAILURE, 0, _("cannot follow %s by name"), quoteaf ("-"));
+ 
+     /* When following forever, and not using simple blocking, warn if
+        any file is '-' as the stats() used to check for input are ineffective.
+        This is only a warning, since tail's output (before a failing seek,
+        and that from any non-stdin files) might still be useful.  */
+     if (forever && found_hyphen)
+       {
+         struct stat in_stat;
+         bool blocking_stdin;
++# ifdef __OHOS__
++        /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++        int stdin_fstat_ret = fstat (STDIN_FILENO, &in_stat);
++        if (stdin_fstat_ret < 0 && (errno == EACCES || errno == EPERM))
++          {
++            memset (&in_stat, 0, sizeof in_stat);
++            in_stat.st_blksize = 4096;
++            in_stat.st_mode = S_IFIFO;
++            stdin_fstat_ret = 0;
++          }
++        blocking_stdin = (!nbpids && follow_mode == Follow_descriptor
++                          && n_files == 1 && stdin_fstat_ret == 0
++                          && ! S_ISREG (in_stat.st_mode));
++# else
+         blocking_stdin = (!nbpids && follow_mode == Follow_descriptor
+                           && n_files == 1 && ! fstat (STDIN_FILENO, &in_stat)
+                           && ! S_ISREG (in_stat.st_mode));
++# endif
+ 
+         if (! blocking_stdin && isatty (STDIN_FILENO))
+           error (0, 0, _("warning: following standard input"
+                          " indefinitely is ineffective"));
+       }
+   }
+ 
+   /* Don't read anything if we'll never output anything.  */
+   if (! forever && n_units == (from_start ? COUNT_MAX : 0))
+     return EXIT_SUCCESS;
+@@ -2453,21 +2521,33 @@
+ 
+   for (int i = 0; i < n_files; i++)
+     ok &= tail_file (&F[i], n_files, n_units);
+ 
+   if (forever && ignore_fifo_and_pipe (F, n_files))
+     {
+       /* If stdout is a fifo or pipe, then monitor it
+          so that we exit if the reader goes away.  */
+       struct stat out_stat;
+       if (fstat (STDOUT_FILENO, &out_stat) < 0)
+-        error (EXIT_FAILURE, errno, _("standard output"));
++        {
++# ifdef __OHOS__
++          /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++          if (errno == EACCES || errno == EPERM)
++            {
++              memset (&out_stat, 0, sizeof out_stat);
++              out_stat.st_blksize = 4096;
++              out_stat.st_mode = S_IFIFO;
++            }
++          else
++# endif
++            error (EXIT_FAILURE, errno, _("standard output"));
++        }
+       monitor_output = (S_ISFIFO (out_stat.st_mode)
+                         || (HAVE_FIFO_PIPES != 1 && isapipe (STDOUT_FILENO)));
+ 
+ #if HAVE_INOTIFY
+       /* tailable_stdin() checks if the user specifies stdin via  "-",
+          or implicitly by providing no arguments. If so, we won't use inotify.
+          Technically, on systems with a working /dev/stdin, we *could*,
+          but would it be worth it?  Verifying that it's a real device
+          and hooked up to stdin is not trivial, while reverting to
+          non-inotify-based tail_forever is easy and portable.

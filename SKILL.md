@@ -393,7 +393,64 @@ if (!$table{$target}) {
   2. 禁用汇编优化：./configure ... no-asm
 ```
 
-**问题9: github代码下载慢
+**问题14：fstat() 对管道/终端返回 EACCES**
+```
+错误：cat: standard output: Permission denied
+      fstat(STDOUT_FILENO) failed: errno=13, Permission denied
+原因：鸿蒙系统安全机制限制，对管道、终端、套接字的文件描述符调用 fstat() 返回 EACCES
+影响：
+  - GNU cat、head、tail 等调用 fstat(stdin/stdout) 的命令会失败
+  - write() 系统调用正常（数据可以正常写入）
+  - 只有 fstat() 被限制（无法获取文件描述符的元信息）
+排查：
+  # 验证 fstat 对 stdout 的行为
+  $ cat > test_fstat.c << 'EOF'
+  #include <sys/stat.h>
+  #include <stdio.h>
+  #include <errno.h>
+  #include <string.h>
+  int main() {
+      struct stat st;
+      if (fstat(STDOUT_FILENO, &st) < 0) {
+          printf("fstat failed: errno=%d, %s\n", errno, strerror(errno));
+          return 1;
+      }
+      printf("fstat succeeded\n");
+      return 0;
+  }
+  EOF
+  $ clang test_fstat.c -o test_fstat
+  $ ./test_fstat          # 终端输出：fstat failed: errno=13, Permission denied
+  $ ./test_fstat > /tmp/out.txt  # 文件输出：fstat succeeded
+解决：
+  1. 使用 __OHOS__ 宏进行条件编译
+  2. 当 fstat() 返回 EACCES 或 EPERM 时，使用默认值：
+     - st_blksize = 4096 (默认 I/O 块大小)
+     - st_mode = S_IFIFO (视为管道)
+  3. 参考：build_in_harmonyos/c/coreutils/9.10/0002-fix-fstat-for-harmonyos.patch
+代码示例：
+  #ifdef __OHOS__
+  static inline int
+  ohos_fstat_compat (int fd, struct stat *st)
+  {
+    if (fstat (fd, st) == 0)
+      return 0;
+    if (errno == EACCES || errno == EPERM)
+      {
+        memset (st, 0, sizeof (*st));
+        st->st_blksize = 4096;
+        st->st_mode = S_IFIFO;
+        return 0;
+      }
+    return -1;
+  }
+  #define OHOS_FSTAT(fd, st) ohos_fstat_compat ((fd), (st))
+  #else
+  #define OHOS_FSTAT(fd, st) fstat ((fd), (st))
+  #endif
+```
+
+**问题15：github代码下载慢**
 ```
 错误:   wget: connect: Operation timed out 或 
 原因：github国内访问网络不稳定
@@ -590,7 +647,178 @@ file /bin/sh
 - **GNU coreutils 9.10**: `build_in_harmonyos/c/coreutils/9.10/README.md`
 - 包含 freadahead.c、freadptr.c、freadseek.c 的完整适配方案
 
-### 3.7 与其他平台对比
+### 3.7 鸿蒙系统特有的系统调用限制
+
+鸿蒙系统出于安全考虑，对某些 POSIX 系统调用有特殊限制。在移植软件时需要注意这些差异。
+
+#### 3.7.1 fstat() 对管道/终端的限制
+
+**限制描述：**
+
+| 文件描述符类型 | fstat() 结果 | write() 结果 | 说明 |
+|---------------|-------------|--------------|------|
+| 普通文件 | ✅ 成功 | ✅ 成功 | 正常 |
+| 管道 (pipe) | ❌ EACCES | ✅ 成功 | 可以写入，但无法获取元信息 |
+| 终端 (tty) | ❌ EACCES | ✅ 成功 | 可以输出，但无法获取元信息 |
+| 套接字 (socket) | ❌ EACCES | ✅ 成功 | 可以通信，但无法获取元信息 |
+
+**受影响的软件：**
+
+- GNU coreutils: cat, head, tail, dd, split, tee 等
+- 其他调用 `fstat(STDIN_FILENO)` 或 `fstat(STDOUT_FILENO)` 的软件
+
+**解决方案模板：**
+
+```c
+/* harmonyos-fstat-compat.h */
+#ifndef HARMONYOS_FSTAT_COMPAT_H
+#define HARMONYOS_FSTAT_COMPAT_H
+
+#include <errno.h>
+#include <sys/stat.h>
+#include <string.h>
+
+#ifdef __OHOS__
+
+static inline int
+ohos_fstat_compat (int fd, struct stat *st)
+{
+  if (fstat (fd, st) == 0)
+    return 0;
+
+  if (errno == EACCES || errno == EPERM)
+    {
+      /* HarmonyOS returns EACCES for pipes/terminals/sockets */
+      memset (st, 0, sizeof (*st));
+      st->st_blksize = 4096;      /* Default I/O block size */
+      st->st_mode = S_IFIFO;      /* Treat as pipe/FIFO */
+      return 0;
+    }
+
+  return -1;
+}
+
+#define OHOS_FSTAT(fd, st) ohos_fstat_compat ((fd), (st))
+
+#else /* !__OHOS__ */
+
+#define OHOS_FSTAT(fd, st) fstat ((fd), (st))
+
+#endif /* __OHOS__ */
+
+#endif /* HARMONYOS_FSTAT_COMPAT_H */
+```
+
+**使用方法：**
+
+```c
+#include "harmonyos-fstat-compat.h"
+
+/* 替换 fstat 调用 */
+if (OHOS_FSTAT (STDOUT_FILENO, &st) < 0)
+  error (EXIT_FAILURE, errno, "standard output");
+```
+
+**验证 __OHOS__ 宏：**
+
+```bash
+# 检查编译器预定义的宏
+clang -dM -E - < /dev/null | grep OHOS
+# 输出:
+# #define __OHOS__ 1
+# #define __OHOS_FAMILY__ 1
+# #define __OHOS_Major__ 0
+```
+
+#### 3.7.2 fstat() 和 lseek() 对管道/终端的限制
+
+**限制描述：**
+
+HarmonyOS 出于安全考虑，对管道、终端、套接字的文件描述符禁止 `fstat()` 和 `lseek()` 系统调用。
+
+| 系统调用 | 普通文件 | 管道 | 终端 | Socket | 说明 |
+|----------|----------|------|------|--------|------|
+| fstat() | ✅ 成功 | ❌ EACCES | ❌ EACCES | ❌ EACCES | 无法获取元信息 |
+| lseek() | ✅ 成功 | ❌ EACCES | ❌ EACCES | ❌ EACCES | 无法移动位置 |
+| write() | ✅ 成功 | ✅ 成功 | ✅ 成功 | ✅ 成功 | 数据写入正常 |
+| read() | ✅ 成功 | ✅ 成功 | ✅ 成功 | ✅ 成功 | 数据读取正常 |
+
+**受影响的软件：**
+
+- GNU coreutils: cat, dd, head, sort, split, tail 等
+- 其他调用 `fstat(stdin/stdout)` 或 `lseek()` 的软件
+
+**解决方案模板：**
+
+```c
+/* fstat 兼容性处理 */
+if (fstat (STDOUT_FILENO, &st) < 0)
+  {
+# ifdef __OHOS__
+    /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
+    if (errno == EACCES || errno == EPERM)
+      {
+        memset (&st, 0, sizeof st);
+        st.st_blksize = 4096;      /* 默认 I/O 块大小 */
+        st.st_mode = S_IFIFO;      /* 视为管道 */
+      }
+    else
+# endif
+      error (EXIT_FAILURE, errno, "standard output");
+  }
+
+/* lseek 兼容性处理 */
+off_t pos = lseek (fd, offset, SEEK_CUR);
+if (pos < 0)
+  {
+# ifdef __OHOS__
+    /* HarmonyOS returns EACCES for lseek on pipes/terminals.
+       This is expected behavior, not an error. */
+    if (errno == EACCES || errno == EPERM || errno == ESPIPE)
+      return -1;  /* 静默返回失败 */
+# endif
+    error (0, errno, "lseek failed");
+  }
+```
+
+**验证 __OHOS__ 宏：**
+
+```bash
+clang -dM -E - < /dev/null | grep OHOS
+# 输出:
+# #define __OHOS__ 1
+# #define __OHOS_FAMILY__ 1
+```
+
+**参考实现：**
+
+- toybox 不调用 fstat(stdin/stdout)，使用固定缓冲区 4096 字节
+- 完整补丁参考：`build_in_harmonyos/c/coreutils/9.10/0002-fix-fstat-for-harmonyos.patch`
+
+#### 3.7.3 /tmp 目录只读
+
+**限制描述：**
+- `/tmp` 以 erofs（只读文件系统）挂载
+- 无法在此目录创建临时文件
+
+**解决方案：**
+```bash
+# 设置 TMPDIR 环境变量
+export TMPDIR=$HOME/tmp
+mkdir -p $TMPDIR
+```
+
+#### 3.7.3 toybox 工具功能限制
+
+**限制描述：**
+- toybox expr 不支持复合正则表达式（`\|` 操作符）
+- toybox sed 对复杂脚本支持不完整
+- toybox awk 功能有限
+
+**解决方案：**
+编译安装 GNU 工具替代（详见 build_in_harmonyos/c/coreutils/9.10/）
+
+### 3.8 与其他平台对比
 
 **vs Linux：**
 | 方面 | Linux | OpenHarmony |
@@ -999,6 +1227,160 @@ fi
 8. ✅ 检查动态链接支持（dlfcn）
 9. ✅ **设置临时目录**：`export TMPDIR=$HOME/tmp && mkdir -p $TMPDIR`
 10. ✅ **检查工具兼容性**：`sed --version` 确认是 toybox 还是 GNU sed
+11. ✅ **执行代码扫描**：检测已知的兼容性问题模式
+
+### 6.1.1 编译前代码扫描
+
+在编译前扫描源码，提前发现 HarmonyOS 兼容性问题，避免反复编译测试。
+
+#### 扫描目标
+
+**HarmonyOS 已知限制相关的代码模式：**
+
+| 问题类型 | 扫描模式 | 影响范围 |
+|----------|----------|----------|
+| fstat 对管道限制 | `fstat.*STDIN_FILENO\|fstat.*STDOUT_FILENO\|fstat.*STDERR_FILENO` | cat, dd, head, sort, split, tail 等 |
+| lseek 对管道限制 | `lseek.*SEEK_CUR\|lseek.*SEEK_SET` | head 等 |
+| /tmp 只读 | `"/tmp"\|/tmp/` | 需使用 $TMPDIR |
+| musl FILE 结构差异 | `_IO_.*_ptr\|_IO_.*_base\|__fbufsize` | gnulib stdio 扩展 |
+
+#### 扫描脚本
+
+```bash
+#!/bin/bash
+# harmonyos_precompile_scan.sh - 编译前兼容性扫描
+
+PROJECT_DIR="$1"
+ISSUES=0
+
+echo "=== HarmonyOS 兼容性扫描 ==="
+echo "扫描目录: $PROJECT_DIR"
+echo ""
+
+# 1. 扫描 fstat 对 stdin/stdout/stderr 的调用
+echo "1. 检查 fstat(stdin/stdout/stderr) 调用..."
+FOUND=$(grep -rn "fstat.*STDIN_FILENO\|fstat.*STDOUT_FILENO\|fstat.*STDERR_FILENO" "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | wc -l)
+if [ "$FOUND" -gt 0 ]; then
+    echo "   ⚠️  发现 $FOUND 处可能受 fstat 限制影响的代码"
+    grep -rn "fstat.*STDIN_FILENO\|fstat.*STDOUT_FILENO\|fstat.*STDERR_FILENO" "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | head -10
+    ISSUES=$((ISSUES + FOUND))
+else
+    echo "   ✅ 未发现 fstat(stdin/stdout/stderr) 调用"
+fi
+
+# 2. 扫描 lseek 调用
+echo ""
+echo "2. 检查 lseek 调用..."
+FOUND=$(grep -rn "lseek.*SEEK_CUR\|lseek.*SEEK_SET" "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | wc -l)
+if [ "$FOUND" -gt 0 ]; then
+    echo "   ⚠️  发现 $FOUND 处可能受 lseek 限制影响的代码"
+    grep -rn "lseek.*SEEK_CUR\|lseek.*SEEK_SET" "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | head -10
+    ISSUES=$((ISSUES + FOUND))
+else
+    echo "   ✅ 未发现 lseek 调用"
+fi
+
+# 3. 扫描 /tmp 硬编码路径
+echo ""
+echo "3. 检查 /tmp 硬编码路径..."
+FOUND=$(grep -rn '"/tmp"' "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | wc -l)
+if [ "$FOUND" -gt 0 ]; then
+    echo "   ⚠️  发现 $FOUND 处 /tmp 硬编码路径（应使用 $TMPDIR）"
+    grep -rn '"/tmp"' "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | head -10
+    ISSUES=$((ISSUES + FOUND))
+else
+    echo "   ✅ 未发现 /tmp 硬编码路径"
+fi
+
+# 4. 扫描 glibc 特有的 FILE 结构访问
+echo ""
+echo "4. 检查 glibc FILE 结构访问..."
+FOUND=$(grep -rn "_IO_.*_ptr\|_IO_.*_base\|__fbufsize\|fp->_IO" "$PROJECT_DIR/lib" "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | wc -l)
+if [ "$FOUND" -gt 0 ]; then
+    echo "   ⚠️  发现 $FOUND 处 glibc FILE 结构访问（musl 不兼容）"
+    grep -rn "_IO_.*_ptr\|_IO_.*_base\|__fbufsize\|fp->_IO" "$PROJECT_DIR/lib" "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | head -10
+    ISSUES=$((ISSUES + FOUND))
+else
+    echo "   ✅ 未发现 glibc FILE 结构访问"
+fi
+
+# 5. 扫描 stat 对 stdin/stdout 的调用
+echo ""
+echo "5. 检查 stat(\"-\") 调用（stdin/stdout 特殊处理）..."
+FOUND=$(grep -rn 'stat.*"-"\|streq.*"-".*stat' "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | wc -l)
+if [ "$FOUND" -gt 0 ]; then
+    echo "   ⚠️  发现 $FOUND 处可能受 stat 限制影响的代码"
+    grep -rn 'stat.*"-"\|streq.*"-".*stat' "$PROJECT_DIR/src" 2>/dev/null | grep -v "\.o:" | head -10
+    ISSUES=$((ISSUES + FOUND))
+else
+    echo "   ✅ 未发现 stat(\"-\") 调用"
+fi
+
+echo ""
+echo "=== 扫描结果 ==="
+if [ "$ISSUES" -gt 0 ]; then
+    echo "发现 $ISSUES 处潜在问题，建议提前适配后再编译"
+    echo ""
+    echo "适配方法参考："
+    echo "  - fstat/lseek: 参考 SKILL.md 3.7.2 节"
+    echo "  - musl FILE: 参考 SKILL.md 3.6 节"
+    echo "  - /tmp: 使用 getenv(\"TMPDIR\") 替代"
+    exit 1
+else
+    echo "✅ 未发现已知兼容性问题"
+    exit 0
+fi
+```
+
+#### 使用方法
+
+```bash
+# 解压源码后，编译前执行扫描
+tar -xf project-x.y.z.tar.xz
+cd project-x.y.z
+
+# 执行扫描
+/path/to/harmonyos_precompile_scan.sh .
+
+# 如果发现问题，先适配再编译
+# 适配完成后重新扫描确认
+```
+
+#### 扫描结果处理流程
+
+```
+┌─────────────────┐
+│  解压源码        │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│  执行代码扫描    │◄──────────────────┐
+└────────┬────────┘                    │
+         │                             │
+    发现问题?                           │
+    ┌────┴────┐                        │
+    │是       │否                      │
+    ▼         ▼                        │
+┌─────────┐  ┌─────────┐               │
+│ 分析适配 │  │ 执行编译 │               │
+└────┬────┘  └─────────┘               │
+     │                                 │
+     ▼                                 │
+┌─────────┐                            │
+│重新扫描 ├────────────────────────────┘
+└─────────┘
+```
+
+#### 常见扫描结果及适配优先级
+
+| 问题类型 | 优先级 | 适配难度 | 说明 |
+|----------|--------|----------|------|
+| fstat(stdin/stdout) | 高 | 中 | 直接导致命令失败 |
+| lseek 对管道 | 高 | 中 | 直接导致命令失败 |
+| musl FILE 结构 | 高 | 高 | 编译错误或运行时崩溃 |
+| /tmp 硬编码 | 中 | 低 | 影响临时文件功能 |
+| stat("-") | 中 | 中 | 影响 stdin/stdout 处理 |
 
 ### 6.2 环境变量配置建议
 
@@ -1020,6 +1402,29 @@ export LIBRARY_PATH=$HOME/usr/local/lib:$LIBRARY_PATH
 export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH
 ```
 
+**⚠️ 重要：编译环境工具链依赖**
+
+在编译软件前，**必须确保 PATH 中优先使用已修复的 GNU 工具**。这是因为：
+
+1. **构建过程中的工具链调用**：make、configure 等会调用 sed、sort、awk 等工具
+2. **管道操作**：这些工具通过管道通信，需要修复 fstat 问题
+3. **鸡生蛋问题**：需要先有修复的工具，才能编译其他软件
+
+**正确的编译流程：**
+
+```bash
+# 1. 先编译并安装基础工具（sed, coreutils）
+# 2. 设置 PATH 使用修复的工具
+export PATH=$HOME/usr/local/bin:$PATH
+
+# 3. 验证工具可用
+sed --version    # 应该是 GNU sed
+sort --version   # 应该是 GNU coreutils
+
+# 4. 然后再编译其他软件
+./configure && make && make install
+```
+
 **配置说明：**
 
 | 环境变量 | 用途 | 说明 |
@@ -1039,6 +1444,61 @@ source ~/.zshrc
 
 # 或重新打开终端
 ```
+
+**问题16：make install-man 失败 "Can't open perl script"**
+
+**现象：**
+```bash
+make install-man
+# 错误: Can't open perl script "man/help2man": Permission denied
+```
+
+**根因分析：**
+
+这个错误信息是**误导性的**！真正的原因是：
+
+```
+help2man (Perl 脚本)
+    │
+    └─ 内部调用 sed 处理文本
+        │
+        └─ sed 遇到管道 fstat 问题 ❌
+```
+
+**解决方案：**
+
+```bash
+# 使用修复后的 GNU sed
+export PATH=$HOME/usr/local/bin:$PATH
+
+# 然后执行 make
+make install-man
+```
+
+**关于 help2man：**
+
+| 方面 | 说明 |
+|------|------|
+| 是什么 | GNU 独立软件包，Perl 脚本 |
+| 需要编译吗 | 不需要，是纯 Perl 脚本 |
+| 需要修改 shebang 吗 | **不需要**！help2man.PL 是自解压脚本，自动嵌入正确的 perl 路径 |
+| 依赖什么 | Perl + sed（需修复 fstat）|
+
+**重要提示：** help2man.PL 是自解压脚本，会自动检测并嵌入正确的 perl 路径。
+
+**help2man 安装方法：**
+
+```bash
+# 下载解压后直接安装
+cd help2man-1.49.3
+perl help2man.PL --stdout > $HOME/usr/local/bin/help2man
+chmod +x $HOME/usr/local/bin/help2man
+
+# 首次运行需点击确认（鸿蒙安全机制）
+help2man --version
+```
+
+详细文档：`build_in_harmonyos/h/help2man/1.49.3/README.md`
 
 ### 6.3 配置文件编写建议
 
@@ -1068,6 +1528,147 @@ source ~/.zshrc
 5. ✅ 权限错误：检查文件和目录权限
 6. ✅ 磁盘空间不足：清理临时文件
 7. ✅ **Autotools configure 后处理**：对于复杂项目，检查子目录 Makefile 中的 top_srcdir 变量是否正确
+
+### 6.6 补丁开发与验证最佳实践
+
+#### 6.6.1 三目录法
+
+进行补丁开发时，推荐使用"三目录法"来管理代码：
+
+```
+project-x.y.z-orig/     # 原始源码（只读，用于对比和重新打补丁）
+project-x.y.z-work/     # 工作目录（修改代码，开发补丁）
+project-x.y.z-test/     # 测试目录（验证补丁是否正确应用）
+```
+
+**工作流程：**
+
+```bash
+# 1. 解压并创建目录
+tar -xf project-x.y.z.tar.xz
+mv project-x.y.z project-x.y.z-orig
+cp -a project-x.y.z-orig project-x.y.z-work
+
+# 2. 在 work 目录开发修改
+cd project-x.y.z-work
+# ... 进行修改 ...
+
+# 3. 生成补丁（使用 -U 参数扩大上下文）
+diff -U 10 ../project-x.y.z-orig/src/foo.c src/foo.c > ../fix-xxx.patch
+
+# 4. 验证补丁
+cp -a ../project-x.y.z-orig ../project-x.y.z-test
+cd ../project-x.y.z-test
+patch -p1 < ../fix-xxx.patch
+```
+
+#### 6.6.2 补丁生成规范
+
+**使用 `diff -U N` 扩大上下文范围：**
+
+```bash
+# 默认上下文 3 行（可能因相似代码导致错位）
+diff -u orig/file.c work/file.c > patch.diff
+
+# 推荐上下文 10 行（避免相似代码混淆）
+diff -U 10 orig/file.c work/file.c > patch.diff
+```
+
+| 参数 | 上下文行数 | 适用场景 |
+|------|------------|----------|
+| `-u` (默认) | 3 行 | 简单修改，代码唯一性强 |
+| `-U 5` | 5 行 | 中等复杂度修改 |
+| `-U 10` | 10 行 | 复杂修改，或代码有相似片段 |
+| `-U 15` | 15 行 | 非常复杂修改，确保定位准确 |
+
+**补丁文件格式：**
+
+```diff
+From: OpenHarmony Developer <developer@openharmony.io>
+Subject: [PATCH] 简短描述补丁目的
+
+--- project-orig/src/file.c
++++ project-work/src/file.c
+@@ -行号,长度 +行号,长度 @@
+ 上下文代码（10行）
+-删除的行
++新增的行
+ 上下文代码（10行）
+```
+
+#### 6.6.3 补丁验证流程
+
+```bash
+# 1. 创建干净的测试目录
+rm -rf project-x.y.z-test
+cp -a project-x.y.z-orig project-x.y.z-test
+
+# 2. 应用补丁
+cd project-x.y.z-test
+patch -p1 < ../fix-xxx.patch
+
+# 3. 检查应用结果
+# 应该看到: patching src/file.c
+# 不应该看到: Hunk #1 FAILED at xxx
+
+# 4. 验证编译
+./configure --prefix=$HOME/usr/local
+make
+
+# 5. 验证功能
+# 运行相关测试
+```
+
+**常见补丁问题及解决：**
+
+| 问题 | 原因 | 解决方案 |
+|------|------|----------|
+| `Hunk #1 FAILED` | 上下文不匹配 | 使用 `-U 10` 扩大上下文 |
+| `patch unexpectedly ends` | 补丁文件损坏 | 重新生成补丁 |
+| `Reversed (or previously applied)` | 补丁已应用 | 恢复原始文件后重试 |
+| `can't find file to patch` | 路径不正确 | 检查 `-p` 参数或路径 |
+
+#### 6.6.4 HarmonyOS 特有问题快速排查
+
+**排查 fstat/lseek 问题：**
+
+```bash
+# 检查命令是否受 fstat/lseek 限制影响
+echo "test" | cat 2>&1    # 正常应该输出 "test"
+echo "test" | dd 2>&1     # 正常应该输出 "test"
+echo "a\nb\nc" | sort 2>&1  # 正常应该排序输出
+
+# 如果看到 "Permission denied" 或 "stat failed" 错误，
+# 说明该命令需要修复 fstat 调用
+```
+
+**受影响的典型命令：**
+
+| 命令 | 问题类型 | 典型错误信息 |
+|------|----------|-------------|
+| cat | fstat | `standard output: Permission denied` |
+| dd | fstat | `standard input: Permission denied` |
+| head | fstat, lseek | `cannot seek to relative offset` |
+| sort | fstat | `stat failed: -: Permission denied` |
+| split | fstat | `standard input: Permission denied` |
+| tail | fstat | `cannot fstat` |
+
+**快速定位代码位置：**
+
+```bash
+# 在源码中搜索可能受影响的调用
+grep -rn "fstat.*STDIN_FILENO\|fstat.*STDOUT_FILENO" src/
+grep -rn "lseek.*SEEK_CUR\|lseek.*SEEK_SET" src/
+```
+
+**验证 __OHOS__ 宏可用：**
+
+```bash
+clang -dM -E - < /dev/null | grep OHOS
+# 预期输出:
+# #define __OHOS__ 1
+# #define __OHOS_FAMILY__ 1
+```
 
 ### 6.5.1 Autotools 项目 configure 后处理脚本
 
