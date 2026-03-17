@@ -49,6 +49,7 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 - 用户说："如何识别软件使用的构建系统？"
 - 用户说："Autotools 和 CMake 在鸿蒙上有什么区别？"
 - 用户说："帮我在鸿蒙电脑编译ncurses-6.4"
+- 用户说："辛迪，来一下"
 
 ## 3. How to use
 
@@ -795,7 +796,186 @@ clang -dM -E - < /dev/null | grep OHOS
 - toybox 不调用 fstat(stdin/stdout)，使用固定缓冲区 4096 字节
 - 完整补丁参考：`build_in_harmonyos/c/coreutils/9.10/0002-fix-fstat-for-harmonyos.patch`
 
-#### 3.7.3 /tmp 目录只读
+**典型案例：wc 命令输出格式问题**
+
+这是一个隐蔽的逻辑 bug，值得详细分析。
+
+**问题现象：**
+
+`wc` 命令从管道读取时，输出格式不对齐：
+
+```
+# 期望输出（制表符分隔，宽度7）
+$ echo "" | wc
+      0       0       0
+
+# 实际输出（空格分隔，宽度1）
+$ echo "" | wc
+0 0 0
+```
+
+**根因分析：**
+
+问题出在 `compute_number_width()` 函数：
+
+```c
+static int
+compute_number_width (idx_t nfiles, struct fstatus const *fstatus)
+{
+  int width = 1;
+
+  if (0 < nfiles && fstatus[0].failed <= 0)  // 关键条件
+    {
+      int minimum_width = 1;
+      // ...
+      for (idx_t i = 0; i < nfiles; i++)
+        if (! fstatus[i].failed)  // 这里检查 failed == 0
+          {
+            // 设置 minimum_width 的逻辑
+          }
+      // ...
+    }
+  return width;
+}
+```
+
+**逻辑陷阱：**
+
+1. 从管道读取时，`nfiles == 1`（stdin_only 模式）
+2. `fstat(STDIN_FILENO, ...)` 失败，返回 `-1`
+3. `fstatus[0].failed = -1`
+4. 条件 `fstatus[0].failed <= 0` 为 **真**（-1 <= 0），进入第一个分支
+5. 但 `!fstatus[0].failed` 为 **假**（!(-1) = 0），for 循环内不执行
+6. `minimum_width` 保持为 1，导致输出格式错误
+
+**关键点：** `failed <= 0` 和 `!failed` 是两个不同的条件！
+
+- `failed <= 0`：包含 `failed == 0`（成功）和 `failed == -1`（失败）
+- `!failed`：仅 `failed == 0`（成功）
+
+**解决方案：**
+
+在 for 循环中添加对失败情况的处理：
+
+```c
+for (idx_t i = 0; i < nfiles; i++)
+  if (! fstatus[i].failed)
+    {
+      // ... 原有逻辑
+    }
+#ifdef __OHOS__
+  else if (fstatus[i].failed < 0)
+    {
+      /* HarmonyOS: fstat failed on pipe/special file (returns EACCES).
+         Use default width 7 for proper alignment in output. */
+      minimum_width = 7;
+    }
+#endif
+```
+
+**经验总结：**
+
+1. **条件判断要精确**：`<= 0` 和 `== 0` 含义不同，需要仔细区分
+2. **多文件测试用例**：管道输入和文件输入的行为可能不同
+3. **检查所有分支**：不仅要检查成功路径，也要处理失败路径
+4. **参考：** `build_in_harmonyos/c/coreutils/9.10/README.md`
+
+#### 3.7.3 SELinux 策略对软链接的限制（重要）
+
+**根本原因：**
+
+HarmonyOS 的 SELinux 策略限制了用户进程对软链接的访问。这不是内核不支持，而是安全策略限制。
+
+| 系统/工具 | SELinux 上下文 | readlink/lstat |
+|-----------|----------------|----------------|
+| toybox | `u:object_r:toybox_exec:s0` | ✅ 成功 |
+| 用户程序 | `u:object_r:hmdfs:s0` | ❌ EACCES |
+
+**受影响的系统调用：**
+
+| 系统调用 | 普通文件 | 软链接（用户进程） | 说明 |
+|----------|----------|-------------------|------|
+| lstat() | ✅ 成功 | ❌ EACCES | SELinux 策略限制 |
+| stat() | ✅ 成功 | ❌ EACCES | SELinux 策略限制 |
+| readlink() | ✅ 成功 | ❌ EACCES | SELinux 策略限制 |
+| readlinkat() | ✅ 成功 | ❌ EACCES | SELinux 策略限制 |
+
+**受影响的 GNU coreutils 命令：**
+
+| 命令 | toybox | GNU coreutils | 原因 |
+|------|--------|---------------|------|
+| ls | ✅ | ❌ | lstat 获取链接属性 |
+| stat | ✅ | ❌ | lstat 获取链接状态 |
+| rm | ✅ | ❌ | lstat 检查文件类型 |
+| cp | ✅ | ❌ | lstat 检查是否为链接 |
+| mv | ✅ | ❌ | lstat 检查源文件 |
+| chmod | ✅ | ❌ | lstat 获取文件状态 |
+| chown | ✅ | ❌ | lstat 获取文件状态 |
+| readlink | ✅ | ❌ | readlink 系统调用受限 |
+
+**正常工作的命令：**
+
+| 命令 | toybox | GNU coreutils | 说明 |
+|------|--------|---------------|------|
+| touch | ✅ | ✅ | 不需要 lstat |
+| cat | ✅ | ✅ | 通过 O_PATH 打开链接后读取目标 |
+| du | ✅ | ✅ | 跟随链接 |
+| realpath | ✅ | ❌ | 内部使用 readlink |
+| file | ✅ | ✅ | 使用其他方式检测 |
+| find | ✅ | ✅ | 使用 readdir 获取 d_type |
+
+**解决方案：**
+
+对于涉及软链接的操作，使用 toybox 命令作为兜底：
+
+```bash
+# 在 .zshrc 或脚本中添加别名
+alias ls='/bin/ls'
+alias rm='/bin/rm'
+alias cp='/bin/cp'
+alias mv='/bin/mv'
+alias stat='/bin/stat'
+alias chmod='/bin/chmod'
+alias chown='/bin/chown'
+alias readlink='/bin/readlink'
+
+# 或者按需使用完整路径
+/bin/rm -f some_symlink
+/bin/ls -la directory_with_symlinks
+```
+
+**注意事项：**
+
+1. `ln -s` 本身可以创建软链接，但创建的链接文件可能无法被 GNU 工具正常访问
+2. `ln -sf`（强制覆盖）有额外问题：会创建带随机后缀的乱码文件
+3. 清理损坏的软链接必须使用 toybox 的 `rm`
+4. **SELinux 限制无法在用户空间代码中绕过**，必须使用具有正确上下文的系统工具
+
+**toybox ln -sf 的特殊问题：**
+
+```bash
+# 正常创建
+ln -s source.txt link        # 创建: link -> source.txt ✓
+
+# 强制覆盖问题
+ln -sf source.txt link       # 创建: link_GdinNM -> source.txt ✗ (随机后缀)
+```
+
+建议在鸿蒙系统上避免使用 `ln -sf`，改用：
+```bash
+rm -f link && ln -s source.txt link
+```
+
+**为 GNU coreutils 设置 SELinux 上下文（需要 root 权限）：**
+
+```bash
+# 设置 SELinux 上下文（如果需要）
+chcon u:object_r:toybox_exec:s0 $HOME/usr/local/bin/ls
+chcon u:object_r:toybox_exec:s0 $HOME/usr/local/bin/rm
+# ... 对其他命令执行相同操作
+```
+
+#### 3.7.4 /tmp 目录只读
 
 **限制描述：**
 - `/tmp` 以 erofs（只读文件系统）挂载
@@ -808,7 +988,7 @@ export TMPDIR=$HOME/tmp
 mkdir -p $TMPDIR
 ```
 
-#### 3.7.3 toybox 工具功能限制
+#### 3.7.5 toybox 工具功能限制
 
 **限制描述：**
 - toybox expr 不支持复合正则表达式（`\|` 操作符）
@@ -817,6 +997,53 @@ mkdir -p $TMPDIR
 
 **解决方案：**
 编译安装 GNU 工具替代（详见 build_in_harmonyos/c/coreutils/9.10/）
+
+#### 3.7.6 鸿蒙系统改进建议
+
+以下问题建议鸿蒙系统开发者关注和改进：
+
+**1. SELinux 策略优化**
+
+| 问题 | 当前状态 | 建议改进 |
+|------|----------|----------|
+| 用户进程无法访问软链接 | SELinux 返回 EACCES | 放宽 `hmdfs` 域对 symlink 的访问权限 |
+| 缺少策略切换机制 | 无 | 提供开发者模式，允许自定义 SELinux 策略 |
+
+**建议理由**：
+- 软链接是 Unix/Linux 系统的基本功能
+- 用户编译的 GNU 工具无法正常处理软链接，影响开发体验
+- 其他 Unix-like 系统没有此限制
+
+**2. 文件系统改进**
+
+| 问题 | 当前状态 | 建议改进 |
+|------|----------|----------|
+| `/tmp` 只读 | erofs 挂载 | 默认提供可写临时目录 |
+| `fstat()` 对管道返回 EACCES | 特殊行为 | 返回合理的默认值或 ENOTSUP |
+
+**3. 系统调用一致性**
+
+| 系统调用 | 当前行为 | 建议行为 |
+|----------|----------|----------|
+| `fstat(pipe_fd)` | EACCES | 返回管道的 stat 结构（mode=S_IFIFO） |
+| `lseek(pipe_fd)` | EACCES | 返回 ESPIPE（标准行为） |
+| `lstat(symlink)` | EACCES | 返回软链接的 stat 结构 |
+
+**4. 开发者体验改进**
+
+| 方面 | 建议改进 |
+|------|----------|
+| 包管理 | 提供官方 GNU coreutils 包 |
+| 文档 | 记录系统调用差异和限制 |
+| 调试 | 提供更详细的错误信息（如 SELinux 拒绝原因） |
+
+**5. toybox 功能增强**
+
+| 命令 | 问题 | 建议 |
+|------|------|------|
+| expr | 不支持 `\|` 复合正则 | 实现完整 POSIX expr |
+| sed | 复杂脚本支持不完整 | 增强 GNU 兼容性 |
+| ln -sf | 创建带随机后缀的文件 | 修复 `-f` 强制覆盖逻辑 |
 
 ### 3.8 与其他平台对比
 
@@ -901,7 +1128,7 @@ export PATH=$HOME/usr/local/bin:$PATH
 | SDK | iPhoneOS SDK | 系统自带 ⚠️ 不同 |
 | 版本限制 | 需要 | 不需要 ✅ 简单 |
 
-### 3.7 Autotools 配置
+### 3.9 Autotools 配置
 
 **三元组格式：**
 ```
@@ -923,7 +1150,7 @@ CC=clang CXX=clang++ AR=llvm-ar ./configure
 - 某些构建系统可能需要手动映射三元组到具体目标
 - 大多数情况下，直接使用环境变量更简单
 
-### 3.8 验证编译环境
+### 3.10 验证编译环境
 
 **验证脚本示例：**
 ```bash
@@ -1025,7 +1252,7 @@ else
 fi
 ```
 
-### 3.9 知识总结
+### 3.11 知识总结
 #### 归档触发时机
 - 针对每一次在鸿蒙系统上**首次成功完成构建并测试通过**后，按照以下规范创建归档：
 #### 归档目录及命名规范
@@ -1086,8 +1313,135 @@ fi
 #### 参考对比
    与现有归档对比差异点，便于后续优化类似项目，并提取关键点写入当前的SKILL.md文档
 
+### 3.12 测试失败分析经验
 
-### 3.10 知识提交
+在鸿蒙系统上运行测试套时，需要正确区分失败原因，避免将系统限制误判为软件问题。
+
+#### 测试失败分类
+
+| 失败原因 | 特征 | 示例 | 是否需修复 |
+|----------|------|------|-----------|
+| **系统权限限制** | 错误信息含 "Operation not permitted" 或 "Permission denied" | 硬链接创建、符号链接创建、fifo 创建 | ❌ 系统限制 |
+| **系统能力缺失** | 跳过原因明确指出缺失能力 | inotify、/dev/full、SELinux 支持 | ❌ 系统限制 |
+| **代码逻辑问题** | 输出与期望不匹配，非权限原因 | wc 输出格式、错误消息格式 | ✅ 需要修复 |
+| **toybox 命令混用** | 测试使用了系统 PATH 中的 toybox 命令 | expr 正则表达式、sed 复杂脚本 | ⚠️ 检查 PATH |
+
+#### 检查方法
+
+**1. 检查测试使用的命令版本**
+
+```bash
+# 查看测试日志中的 PATH 设置
+grep "PATH=" tests/test-suite.log | head -5
+
+# 确认使用的是编译后的版本
+which expr sed ls rm
+# 应该输出: $HOME/usr/local/bin/expr
+
+# 检查版本
+expr --version  # 应该是 GNU coreutils
+sed --version   # 应该是 GNU sed
+```
+
+**2. 分析错误信息**
+
+```bash
+# 提取所有失败测试的错误信息
+grep -E "Operation not permitted|Permission denied" tests/test-suite.log | sort -u
+
+# 统计各类错误
+grep -c "Operation not permitted" tests/test-suite.log
+grep -c "Permission denied" tests/test-suite.log
+grep -c "hard link\|symlink\|fifo" tests/test-suite.log
+```
+
+**3. 区分权限限制与逻辑问题**
+
+```bash
+# 权限限制示例（无需修复）
+ln: failed to create hard link 'a-ctime' => 'a': Operation not permitted
+ln: failed to create symbolic link 'symlink': Permission denied
+mkfifo: cannot create fifo 'fifo': Operation not permitted
+
+# 逻辑问题示例（需要修复）
+# wc 输出格式问题
+--- exp
++++ out
+@@ -1 +1 @@
+-      0       0       0
++ 0 0 0
+```
+
+#### 测试套执行注意事项
+
+**1. 首次运行确认弹窗**
+
+鸿蒙系统对首次运行的新编译二进制会弹窗确认，这可能导致：
+- 测试超时
+- 时间敏感测试失败
+- help-version 测试失败
+
+**建议做法：**
+
+```bash
+# 在运行 make check 前，先手动执行一次各命令
+cd src
+for cmd in cat dd head sort split tail wc; do
+    ./$cmd --version > /dev/null  # 触发确认弹窗
+done
+cd ..
+
+# 或者在运行测试时注意确认弹窗
+make check
+```
+
+**2. make check 是否重新编译**
+
+`make check` 会重新编译修改过的源文件。如果修改了源码，需要：
+- 确保修改已保存
+- 重新编译后再运行测试
+- 新编译的二进制首次运行仍需确认
+
+**3. 测试环境变量检查**
+
+```bash
+# 确认环境变量正确加载
+source $HOME/.zshrc
+echo $TMPDIR      # 应为 $HOME/tmp
+echo $PATH        # $HOME/usr/local/bin 应在前面
+```
+
+#### 常见测试失败处理
+
+**情况1：硬链接/符号链接创建失败**
+
+```
+ln: failed to create hard link: Operation not permitted
+```
+
+**判断：** 鸿蒙系统安全限制，无需修复。
+
+**情况2：测试使用了 toybox 命令**
+
+**检查方法：**
+
+```bash
+# 查看测试日志中的命令版本
+grep -E "toybox|GNU coreutils" tests/test-suite.log | head -10
+
+# 如果看到 toybox 版本信息，说明 PATH 设置有问题
+```
+
+**解决：** 确保 `$HOME/usr/local/bin` 在 PATH 最前面。
+
+**情况3：输出格式或行为差异**
+
+需要仔细分析是否是代码逻辑问题：
+1. 对比期望输出和实际输出
+2. 分析差异原因
+3. 参考 wc 案例的分析方法
+
+### 3.13 知识提交
 ** 询问用户是否直接提交知识上库，以用户为准**
 
 ## 4. Edge cases
