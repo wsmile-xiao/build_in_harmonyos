@@ -1426,38 +1426,30 @@ fi
      ```bash
     build_in_harmonyos/
     ├── SKILL.md
+    ├── c/                # c开头命令软件
+    │   └── coreutils/    # GNU coreutils 相关
+    │       └── 9.10/
+    │           ├── README.md
+    │           ├── TEST_REPORT.md       # 【必需】主测试报告
+    │           ├── 0001-add-harmonyos-support.patch
+    │           └── test-details/        # 测试详情目录
+    │               ├── official/        # 官方测试结果
+    │               │   ├── summary.txt
+    │               │   ├── failed-tests.md
+    │               │   └── skipped-tests.md
+    │               └── custom/          # 自定义测试
+    │                   ├── test-scripts/    # 测试脚本归档
+    │                   │   ├── test-debug.sh
+    │                   │   └── test-feature.sh
+    │                   └── results/         # 测试结果
+    │
     ├── l/                # l开头命令软件
     │   └── libffi/       # libffi 相关
-    │       ├── 3.4.4/
-    │       │   ├── README.md
-    │       │   └── 0001-port-for-ohos.patch
-    │       └── 3.5.2/
+    │       └── 3.4.4/
     │           ├── README.md
     │           └── 0001-port-for-ohos.patch
     │
-    ├── n/                # n开头命令软件
-    │   └── ncurses/      # ncurses 相关
-    │       └── 6.4/
-    │           ├── README.md
-    │           └── 0001-port-for-ohos.patch
-    │
-    ├── o/                # o开头命令软件
-    │   └── openssl/      # openssl 相关
-    │       └── 1.1.1w/
-    │           ├── README.md
-    │           └── 0001-support-build-in-harmonyos.patch
-    │
-    ├── r/                # r开头命令软件
-    │   └── readline/     # readline 相关
-    │       └── 8.2/
-    │           ├── README.md
-    │           └── 0001-port-for-ohos.patch
-    │
-    └── s/                # s开头命令软件
-        └── sed/          # GNU sed 相关
-            └── 4.9/
-                ├── README.md
-                └── 0001-port-for-ohos.patch
+    └── ...
     ```
 
 #### 补丁命名规范
@@ -1605,6 +1597,488 @@ grep -E "toybox|GNU coreutils" tests/test-suite.log | head -10
 
 ### 3.13 知识提交
 ** 询问用户是否直接提交知识上库，以用户为准**
+
+### 3.14 测试流程规范
+
+编译完成后，必须进行测试并生成测试报告。测试流程分为官方测试和自定义测试两种情况。
+
+#### 3.14.1 测试目录结构规范
+
+```
+{软件首字母}/{软件名}/{版本号}/
+├── README.md                    # 项目说明
+├── TEST_REPORT.md               # 【必需】主测试报告（统一命名）
+├── 0001-xxx.patch               # 补丁文件
+│
+└── test-details/                # 【必需】测试详情目录
+    ├── official/                # 官方测试
+    │   ├── summary.txt          # 测试摘要（数字统计）
+    │   ├── failed-tests.md      # 失败测试分析
+    │   └── skipped-tests.md     # 跳过测试说明
+    │
+    └── custom/                  # 自定义测试（官方测试不足时）
+        ├── test-plan.md         # 测试计划
+        ├── test-scripts/        # 【重要】测试脚本归档
+        │   ├── test-basic.sh
+        │   └── test-feature.sh
+        └── results/             # 测试结果
+            └── test-basic.log
+```
+
+#### 3.14.2 测试流程
+
+**阶段 1: 官方测试（优先）**
+
+适用条件：项目有官方测试套件（如 `make check`, `make test`, pytest 等）
+
+```bash
+# 运行官方测试
+make check
+
+# 或项目指定的测试命令
+make test
+pytest
+```
+
+**阶段 2: 测试结果收集**
+
+```bash
+# 找到测试日志文件
+find . -name "test-suite.log" -o -name "*.log" | grep test
+
+# 提取测试摘要
+grep -E "^# (TOTAL|PASS|SKIP|FAIL|ERROR)" test-suite.log
+```
+
+**阶段 3: 失败测试分析**
+
+区分失败原因：
+
+| 失败类型 | 特征 | 是否需修复 |
+|----------|------|-----------|
+| 系统权限限制 | "Operation not permitted" / "Permission denied" | ❌ 系统限制 |
+| 系统能力缺失 | 跳过原因明确（如 inotify、/dev/full） | ❌ 系统限制 |
+| 代码逻辑问题 | 输出与期望不匹配，非权限原因 | ✅ 需要修复 |
+| toybox 命令混用 | 测试使用了 toybox 命令 | ⚠️ 检查 PATH |
+
+**阶段 4: 补充自定义测试**
+
+适用条件：
+- 官方无测试套件
+- 官方测试不覆盖关键功能
+- 需要验证鸿蒙特有问题
+
+自定义测试脚本必须归档到 `test-details/custom/test-scripts/` 目录。
+
+#### 3.14.3 TEST_REPORT.md 模板
+
+```markdown
+# XXX 项目测试报告
+
+> **项目**: XXX  
+> **测试日期**: YYYY-MM-DD  
+> **测试环境**: HarmonyOS HongMeng Kernel X.X.X aarch64  
+> **测试类型**: 官方测试套件 / 自定义测试
+
+---
+
+## 一、测试摘要
+
+| 指标 | 数值 | 百分比 |
+|:----:|:----:|:------:|
+| 总测试数 | N | 100% |
+| 通过 (PASS) | N | XX% |
+| 跳过 (SKIP) | N | XX% |
+| 失败 (FAIL) | N | XX% |
+| 错误 (ERROR) | N | XX% |
+
+**有效测试通过率**: XX%
+
+---
+
+## 二、测试结论
+
+### 2.1 总体评价
+
+✅ **核心功能可用** - [描述可用功能]
+
+⚠️ **部分功能受限** - [描述受限功能]
+
+### 2.2 主要问题
+
+| 问题类别 | 影响范围 | 严重程度 |
+|----------|----------|----------|
+| [问题1] | [影响] | 🔴 高/🟡 中/🟢 低 |
+
+### 2.3 可用功能清单
+
+```
+[列出可用的功能或命令]
+```
+
+### 2.4 已知限制
+
+1. [限制1]
+2. [限制2]
+
+---
+
+## 三、测试详情
+
+### 3.1 官方测试
+
+- 测试摘要: `test-details/official/summary.txt`
+- 失败分析: `test-details/official/failed-tests.md`
+
+### 3.2 自定义测试
+
+- 测试脚本: `test-details/custom/test-scripts/`
+- 测试结果: `test-details/custom/results/`
+
+---
+
+*报告生成时间: YYYY-MM-DD*
+```
+
+#### 3.14.4 测试代码归档规范
+
+**原则**：所有编写的测试代码都必须归档到 `test-details/custom/test-scripts/` 目录。
+
+**归档内容**：
+1. 测试脚本（.sh 文件）
+2. 测试数据文件（如有）
+3. 测试说明文档（如 test-plan.md）
+
+**命名规范**：
+- `test-{功能/目的}.sh` - 测试脚本
+- `test-{功能/目的}.log` - 测试结果
+- `test-plan.md` - 测试计划
+
+**示例**：
+
+```
+test-details/custom/
+├── test-plan.md
+├── test-scripts/
+│   ├── test-fstat-compat.sh      # fstat 兼容性测试
+│   ├── test-basic-functions.sh   # 基本功能测试
+│   └── test-data/                # 测试数据
+│       └── sample.txt
+└── results/
+    ├── test-fstat-compat.log
+    └── test-basic-functions.log
+```
+
+#### 3.14.5 库类型软件的测试规范
+
+许多软件是库文件（如 libffi, openssl, ncurses, readline, zlib 等），不包含可执行文件。这类软件的测试方法需要特殊处理。
+
+##### 软件类型分类
+
+| 类型 | 特征 | 示例 | 测试方法 |
+|------|------|------|----------|
+| **可执行程序** | 安装后可直接运行 | coreutils, sed, grep | 直接执行测试 |
+| **库文件** | 无可执行文件，提供 API | libffi, zlib, ncurses | 编译测试程序 |
+| **混合型** | 既有库又有可执行文件 | openssl, curl | 两种方法结合 |
+
+##### 库类型软件测试流程
+
+**方法 1: 官方测试套件（优先）**
+
+大多数库项目有内置测试：
+```bash
+# libffi
+make check
+
+# OpenSSL
+make test
+
+# zlib
+make test
+
+# ncurses
+make check
+```
+
+**方法 2: 编写链接测试程序**
+
+如果官方测试不足，需编写测试程序验证库功能：
+
+```
+test-details/custom/test-scripts/
+├── test-link.c          # C 语言测试程序
+├── test-link.sh         # 编译和运行脚本
+└── test-api.c           # API 功能测试
+```
+
+**测试程序模板（test-link.c）**：
+
+```c
+/* test-link.c - 测试库是否能正确链接 */
+#include <stdio.h>
+#include <library.h>  /* 替换为实际头文件 */
+
+int main(void) {
+    printf("Testing library linkage...\n");
+    
+    /* 调用库的初始化函数 */
+    if (library_init() != 0) {
+        fprintf(stderr, "Failed to initialize library\n");
+        return 1;
+    }
+    
+    /* 测试核心功能 */
+    /* ... */
+    
+    printf("All tests passed!\n");
+    return 0;
+}
+```
+
+**编译运行脚本（test-link.sh）**：
+
+```bash
+#!/bin/sh
+# test-link.sh - 编译并运行库链接测试
+
+LIB_NAME="xxx"
+LIB_DIR="$HOME/usr/local"
+TEST_DIR="$(dirname "$0")"
+
+echo "=== Testing $LIB_NAME library ==="
+echo "Library path: $LIB_DIR"
+echo ""
+
+# 1. 检查库文件是否存在
+echo "1. Checking library files..."
+if [ -f "$LIB_DIR/lib/lib$LIB_NAME.so" ]; then
+    echo "   ✓ Shared library found: lib$LIB_NAME.so"
+elif [ -f "$LIB_DIR/lib/lib$LIB_NAME.a" ]; then
+    echo "   ✓ Static library found: lib$LIB_NAME.a"
+else
+    echo "   ✗ Library not found!"
+    exit 1
+fi
+
+# 2. 检查头文件
+echo ""
+echo "2. Checking header files..."
+if [ -f "$LIB_DIR/include/$LIB_NAME.h" ]; then
+    echo "   ✓ Header found: $LIB_NAME.h"
+else
+    echo "   ✗ Header not found!"
+    exit 1
+fi
+
+# 3. 检查 pkg-config
+echo ""
+echo "3. Checking pkg-config..."
+export PKG_CONFIG_PATH="$LIB_DIR/lib/pkgconfig"
+if pkg-config --exists "$LIB_NAME"; then
+    echo "   ✓ pkg-config found: $LIB_NAME"
+    CFLAGS=$(pkg-config --cflags "$LIB_NAME")
+    LIBS=$(pkg-config --libs "$LIB_NAME")
+    echo "   CFLAGS: $CFLAGS"
+    echo "   LIBS: $LIBS"
+else
+    echo "   ⚠ pkg-config not available, using defaults"
+    CFLAGS="-I$LIB_DIR/include"
+    LIBS="-L$LIB_DIR/lib -l$LIB_NAME"
+fi
+
+# 4. 编译测试程序
+echo ""
+echo "4. Compiling test program..."
+cd "$TEST_DIR"
+clang $CFLAGS -o test-link test-link.c $LIBS
+if [ $? -ne 0 ]; then
+    echo "   ✗ Compilation failed!"
+    exit 1
+fi
+echo "   ✓ Compilation successful"
+
+# 5. 运行测试
+echo ""
+echo "5. Running tests..."
+export LD_LIBRARY_PATH="$LIB_DIR/lib:$LD_LIBRARY_PATH"
+./test-link
+RESULT=$?
+
+if [ $RESULT -eq 0 ]; then
+    echo ""
+    echo "=== All tests passed! ==="
+else
+    echo ""
+    echo "=== Tests failed! ==="
+fi
+
+exit $RESULT
+```
+
+**方法 3: API 功能测试**
+
+针对库的核心 API 编写专项测试：
+
+```c
+/* test-api.c - 测试库的核心 API */
+#include <stdio.h>
+#include <assert.h>
+#include <library.h>
+
+int main(void) {
+    printf("Testing API functions...\n");
+    
+    /* 测试 1: 基础功能 */
+    printf("  Test 1: Basic function... ");
+    assert(library_basic_func() == EXPECTED_VALUE);
+    printf("PASS\n");
+    
+    /* 测试 2: 边界情况 */
+    printf("  Test 2: Edge case... ");
+    assert(library_edge_case(NULL) == ERROR_CODE);
+    printf("PASS\n");
+    
+    /* 测试 3: 错误处理 */
+    printf("  Test 3: Error handling... ");
+    /* ... */
+    printf("PASS\n");
+    
+    printf("All API tests passed!\n");
+    return 0;
+}
+```
+
+##### 库测试报告模板
+
+```markdown
+# XXX 库测试报告
+
+> **项目**: XXX (库)
+> **测试日期**: YYYY-MM-DD
+> **测试类型**: 官方测试 + 链接测试
+
+---
+
+## 一、库信息
+
+| 项目 | 值 |
+|------|-----|
+| 库名称 | libxxx |
+| 版本 | X.Y.Z |
+| 安装路径 | $HOME/usr/local |
+| 头文件 | $HOME/usr/local/include/xxx.h |
+| 库文件 | libxxx.so / libxxx.a |
+
+## 二、测试摘要
+
+### 2.1 官方测试
+
+| 指标 | 数值 |
+|------|------|
+| 总测试数 | N |
+| 通过 | N |
+| 失败 | N |
+
+### 2.2 链接测试
+
+| 测试项 | 结果 |
+|--------|------|
+| 库文件存在 | ✅ |
+| 头文件存在 | ✅ |
+| pkg-config | ✅ |
+| 编译测试程序 | ✅ |
+| 运行测试程序 | ✅ |
+
+## 三、API 测试结果
+
+| API 函数 | 测试结果 | 备注 |
+|----------|----------|------|
+| xxx_init() | ✅ PASS | |
+| xxx_func() | ✅ PASS | |
+| xxx_cleanup() | ✅ PASS | |
+
+## 四、测试详情
+
+- 官方测试: `test-details/official/`
+- 链接测试脚本: `test-details/custom/test-scripts/test-link.sh`
+- API 测试程序: `test-details/custom/test-scripts/test-api.c`
+
+---
+
+*报告生成时间: YYYY-MM-DD*
+```
+
+##### 库测试目录结构示例
+
+```
+l/libffi/3.4.4/
+├── README.md
+├── TEST_REPORT.md
+├── 0001-port-for-ohos.patch
+│
+└── test-details/
+    ├── official/
+    │   ├── summary.txt
+    │   └── failed-tests.md
+    │
+    └── custom/
+        ├── test-scripts/
+        │   ├── test-link.c          # 链接测试程序
+        │   ├── test-link.sh         # 编译运行脚本
+        │   └── test-ffi-api.c       # API 功能测试
+        │
+        └── results/
+            ├── test-link.log
+            └── test-ffi-api.log
+```
+
+##### 不同库类型的测试重点
+
+| 库类型 | 测试重点 | 示例测试 |
+|--------|----------|----------|
+| **系统库** | 系统调用封装、错误处理 | libffi, zlib |
+| **终端库** | 终端特性、输出格式 | ncurses |
+| **网络库** | 连接、协议、安全 | openssl, curl |
+| **数据结构库** | 内存管理、并发安全 | glib |
+| **加密库** | 加解密正确性、性能 | openssl |
+
+##### 测试检查清单
+
+**库文件检查**：
+- [ ] `.so` 共享库存在
+- [ ] `.a` 静态库存在（如适用）
+- [ ] 头文件存在且可用
+- [ ] pkg-config 文件正确生成
+
+**链接测试**：
+- [ ] 能使用 pkg-config 获取编译选项
+- [ ] 测试程序能成功编译
+- [ ] 测试程序能成功运行
+- [ ] 运行时能找到共享库
+
+**API 测试**：
+- [ ] 核心初始化/清理函数正常
+- [ ] 主要功能 API 正常工作
+- [ ] 错误处理正确
+- [ ] 内存无泄漏（可选）
+
+#### 3.14.6 测试报告质量检查清单
+
+**通用检查**：
+- [ ] 主报告文件命名为 `TEST_REPORT.md`
+- [ ] 包含测试摘要（数字统计或链接测试结果）
+- [ ] 列出主要问题
+- [ ] 说明可用功能和已知限制
+
+**可执行程序**：
+- [ ] 官方测试结果存放在 `test-details/official/`
+- [ ] 自定义测试脚本归档到 `test-details/custom/test-scripts/`
+
+**库文件**：
+- [ ] 包含库信息（路径、头文件、库文件）
+- [ ] 包含链接测试结果
+- [ ] 测试程序源码归档到 `test-scripts/`
+- [ ] pkg-config 可用性验证
 
 ## 4. Edge cases
 
