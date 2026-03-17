@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/env bash
 # 选择性安装 GNU coreutils - 只安装完全可用的命令
 # 
 # 用法：

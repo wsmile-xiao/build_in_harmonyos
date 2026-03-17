@@ -49,7 +49,6 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 - 用户说："如何识别软件使用的构建系统？"
 - 用户说："Autotools 和 CMake 在鸿蒙上有什么区别？"
 - 用户说："帮我在鸿蒙电脑编译ncurses-6.4"
-- 用户说："辛迪，来一下"
 
 ## 3. How to use
 
@@ -1566,6 +1565,133 @@ grep -E "toybox|GNU coreutils" tests/test-suite.log | head -10
 6. 给出最佳实践建议
 
 ## 6. 最佳实践总结
+
+### 6.0 Shell 脚本 Shebang 写法
+
+在鸿蒙系统上编写 Shell 脚本时，shebang 的写法需要特别注意：
+
+**问题：** `/bin/bash` 不存在
+
+```bash
+#!/bin/bash  # ❌ 错误：鸿蒙系统上 /bin/bash 不存在
+```
+
+**解决方案 1：使用 env 查找 bash（推荐）**
+
+```bash
+#!/bin/env bash  # ✅ 推荐：通过 env 命令查找 bash
+```
+
+这种方式利用 `env` 命令在 PATH 中查找并执行 bash，不需要指定完整路径。
+
+**解决方案 2：使用 sh（兼容性最好）**
+
+```bash
+#!/bin/sh  # ✅ 推荐：使用系统自带的 sh（toybox）
+```
+
+**解决方案 3：指定 bash 的完整路径**
+
+```bash
+#!/data/service/hnp/bin/bash  # ✅ 可用：指定 bash 的实际安装路径
+```
+
+**各方式对比：**
+
+| 写法 | 优点 | 缺点 |
+|------|------|------|
+| `#!/bin/env bash` | 通用、可移植 | 依赖 PATH 环境变量 |
+| `#!/bin/sh` | 最兼容、系统自带 | 功能受限（toybox sh） |
+| `#!/data/service/hnp/bin/bash` | 明确路径 | 路径可能变化 |
+
+**推荐做法：**
+
+- 一般脚本使用 `#!/bin/env bash` 或 `#!/bin/sh`
+- 需要 bash 特性的脚本使用 `#!/bin/env bash`
+- 需要最大兼容性的脚本使用 `#!/bin/sh`
+
+### 6.0.1 ELF 可执行文件签名
+
+在鸿蒙系统上，ELF 可执行文件需要正确的签名才能运行。当使用 `patchelf`、`strip` 等工具修改 ELF 文件后，签名会失效，需要重新签名。
+
+**问题场景：**
+
+```bash
+# 使用 patchelf 修改 RPATH
+patchelf --set-rpath /new/path myprogram
+
+# 使用 strip 移除调试符号
+strip myprogram
+
+# 以上操作后，签名失效，执行时会报错
+./myprogram  # 错误：签名验证失败
+```
+
+**解决方案：使用 binary-sign-tool 重新签名**
+
+```bash
+# 1. 重新签名
+binary-sign-tool sign -inFile myprogram -outFile myprogram -selfSign 1
+
+# 2. 恢复可执行权限（签名后权限会丢失）
+chmod +x myprogram
+
+# 3. 首次执行需要用户确认弹窗
+./myprogram  # 弹窗确认后可正常执行
+```
+
+**完整流程示例：**
+
+```bash
+# 场景：修改 ELF 文件的 RPATH 后重新签名
+
+# 步骤 1: 修改 ELF
+patchelf --set-rpath $HOME/usr/local/lib myprogram
+
+# 步骤 2: 重新签名
+binary-sign-tool sign -inFile myprogram -outFile myprogram -selfSign 1
+
+# 步骤 3: 恢复权限
+chmod +x myprogram
+
+# 步骤 4: 首次执行确认
+./myprogram --version  # 弹窗确认后执行
+```
+
+**注意事项：**
+
+| 操作 | 影响 | 后续处理 |
+|------|------|----------|
+| patchelf | 签名失效 | 需重新签名 |
+| strip | 签名失效 | 需重新签名 |
+| binary-sign-tool sign | 权限丢失 | chmod +x |
+| 首次执行 | 弹窗确认 | 用户手动确认 |
+
+**最佳实践：**
+
+1. 修改 ELF 文件后立即重新签名
+2. 签名后立即恢复可执行权限
+3. 在自动化脚本中，签名和 chmod 应该成对出现
+4. 对于批量处理，可以编写包装脚本：
+
+```bash
+#!/bin/env bash
+# patch-and-sign.sh - 修改 ELF 并重新签名
+
+elf_file="$1"
+shift
+
+# 执行 patchelf 等修改操作
+"$@"
+
+# 重新签名
+binary-sign-tool sign -inFile "$elf_file" -outFile "$elf_file" -selfSign 1
+
+# 恢复权限
+chmod +x "$elf_file"
+
+echo "已重新签名: $elf_file"
+```
 
 ### 6.1 编译前检查清单
 
