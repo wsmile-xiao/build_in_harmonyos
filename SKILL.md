@@ -2,7 +2,7 @@
 # 固定元数据头（必须，AI 优先读取）
 name: openharmony-compile-guide
 description: 鸿蒙系统编译知识库，提供开源软件在鸿蒙系统上编译的完整指南、最佳实践和经验总结
-version: 1.1.0
+version: 1.2.0
 author: OpenHarmony Community
 permissions: 文件读写权限、Shell执行权限、网络访问权限（可选，用于获取参考资料）
 ---
@@ -1127,7 +1127,67 @@ export PATH=$HOME/usr/local/bin:$PATH
 | SDK | iPhoneOS SDK | 系统自带 ⚠️ 不同 |
 | 版本限制 | 需要 | 不需要 ✅ 简单 |
 
-### 3.9 Autotools 配置
+### 3.9 Autotools 本地构建配置
+
+**重要区分：本地构建 vs 交叉编译**
+
+在鸿蒙系统上编译软件时，需要区分两种场景：
+
+| 场景 | 说明 | 配置复杂度 |
+|------|------|-----------|
+| **本地构建** | 在鸿蒙系统上直接编译，运行在同一系统 | 简单 |
+| **交叉编译** | 在其他系统（如 Linux x86_64）上编译，运行在鸿蒙 | 复杂 |
+
+#### 本地构建
+
+当补丁正确应用后，`config.guess` 会自动检测系统为 `aarch64-unknown-linux-ohos`，本地构建只需最简配置：
+
+```bash
+# 本地构建 - 最简配置
+./configure \
+    --prefix=$HOME/usr/local \
+    [软件特定选项]
+```
+
+**原因**：
+- 系统环境已自动设置 `CC=clang`, `AR=llvm-ar`, `RANLIB=llvm-ranlib` 等
+- `config.guess` 自动检测正确的三元组
+- 无需指定 `--host`, `CFLAGS`, `LDFLAGS` 等参数
+
+**示例（Bash 5.3）**：
+```bash
+./configure \
+    --prefix=$HOME/usr/local \
+    --without-bash-malloc
+```
+
+#### 交叉编译
+
+在非鸿蒙系统上编译鸿蒙程序时，需要完整配置：
+
+```bash
+# 交叉编译 - 完整配置
+./configure \
+    --host=aarch64-linux-ohos \
+    --prefix=/path/to/install \
+    CC=aarch64-linux-ohos-clang \
+    CFLAGS="--sysroot=$SYSROOT -D__OHOS__" \
+    LDFLAGS="--sysroot=$SYSROOT" \
+    AR=llvm-ar \
+    RANLIB=llvm-ranlib \
+    [软件特定选项]
+```
+
+#### 经验总结
+
+| 场景 | 必需参数 | 可选参数 |
+|------|----------|----------|
+| 本地构建 | `--prefix` | 软件特定选项 |
+| 交叉编译 | `--host`, `CC`, `CFLAGS`, `LDFLAGS`, `SYSROOT` | `AR`, `RANLIB`, `NM`, `STRIP` |
+
+**推荐做法**：优先在鸿蒙系统上进行本地构建，配置更简单，问题更少。
+
+### 3.10 Autotools 配置三元组
 
 **三元组格式：**
 ```
@@ -1137,7 +1197,7 @@ export PATH=$HOME/usr/local/bin:$PATH
 
 **配置示例：**
 ```bash
-# 使用三元组配置
+# 使用三元组配置（交叉编译场景）
 ./configure aarch64-unknown-linux-ohos
 
 # 或使用环境变量
@@ -1149,7 +1209,110 @@ CC=clang CXX=clang++ AR=llvm-ar ./configure
 - 某些构建系统可能需要手动映射三元组到具体目标
 - 大多数情况下，直接使用环境变量更简单
 
-### 3.10 验证编译环境
+### 3.11 config.guess 标准修改模式
+
+对于 Autotools 项目，修改 `config.guess` 需要在**两个位置**添加代码：
+
+#### 修改位置 1：`__OHOS__` 宏检测（检测 C 库类型）
+
+在 `__ANDROID__` 检测后添加 `__OHOS__` 检测：
+
+```diff
+ #if defined(__ANDROID__)
+ LIBC=android
++#elif defined(__OHOS__)
++LIBC=ohos
+ #else
+```
+
+**目的**：让脚本知道当前使用的是 HarmonyOS 的 C 库（基于 musl）。
+
+#### 修改位置 2：系统识别 case 分支
+
+在主 case 语句开头添加 HarmonyOS 识别：
+
+```diff
+ case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in
++    *:HarmonyOS:*:*)
++	GUESS=$UNAME_MACHINE-unknown-linux-ohos
++	;;
+     *:NetBSD:*:*)
+```
+
+**目的**：当 `uname -s` 返回 `HarmonyOS` 时，生成正确的三元组。
+
+#### 完整修改示例
+
+**config.guess 修改**：
+```bash
+# 位置 1：在 LIBC 检测部分
+#if defined(__ANDROID__)
+LIBC=android
+#elif defined(__OHOS__)
+LIBC=ohos
+#else
+#include <features.h>
+...
+
+# 位置 2：在主 case 语句开头
+case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in
+    *:HarmonyOS:*:*)
+	GUESS=$UNAME_MACHINE-unknown-linux-ohos
+	;;
+    *:NetBSD:*:*)
+```
+
+#### 验证修改
+
+```bash
+# 检查补丁是否正确应用
+grep -n "__OHOS__" support/config.guess
+grep -n "HarmonyOS" support/config.guess
+
+# 测试 config.guess 输出
+./support/config.guess
+# 应输出: aarch64-unknown-linux-ohos
+```
+
+#### 参考项目
+
+- **libffi 3.4.4**: `build_in_harmonyos/l/libffi/3.4.4/0001-port-for-ohos.patch`
+- **GNU Bash 5.3**: `build_in_harmonyos/b/bash/5.3/0001-port-for-ohos.patch`
+
+### 3.12 config.sub 标准修改模式
+
+`config.sub` 需要添加对 `ohos-linux` 目标的支持：
+
+#### 修改位置
+
+在 `android-linux` 处理后添加 `ohos-linux` 支持：
+
+```diff
+ android-linux)
+     basic_machine=$field1-unknown
+     basic_os=linux-android
+     ;;
++ohos-linux)
++    basic_machine=$field1-unknown
++    basic_os=linux-ohos
++    ;;
+ *)
+```
+
+**目的**：将 `ohos-linux` 三元组解析为正确的系统配置。
+
+#### 验证修改
+
+```bash
+# 检查补丁是否正确应用
+grep -n "ohos-linux" support/config.sub
+
+# 测试 config.sub 输出
+./support/config.sub aarch64-linux-ohos
+# 应输出: aarch64-unknown-linux-ohos
+```
+
+### 3.13 验证编译环境
 
 **验证脚本示例：**
 ```bash
@@ -1692,6 +1855,145 @@ chmod +x "$elf_file"
 
 echo "已重新签名: $elf_file"
 ```
+
+### 6.0.2 Python 编译系统 HarmonyOS 适配分析
+
+**问题现象：** Python 扩展模块编译失败，共享库未生成。
+
+**根本原因：** Python 的 `configure.ac` 中没有识别 HarmonyOS 系统，导致关键编译变量未正确设置。
+
+#### 系统检测结果
+
+| 变量 | 预期值 | 实际值 | 影响 |
+|------|--------|--------|------|
+| `ac_sys_system` | HarmonyOS | HarmonyOS | ✅ 正确 |
+| `LDSHARED` | `$(CC) -shared` | `ld` | ❌ 链接失败 |
+| `CCSHARED` | `-fPIC` | 空 | ❌ 无法生成共享库 |
+| `LDLIBRARY` | `libpython3.9.so` | `libpython3.9.a` | ❌ 无共享库 |
+| `LINKFORSHARED` | `-Xlinker -export-dynamic` | 空 | ❌ 链接问题 |
+
+#### configure.ac 系统检测逻辑
+
+Python 使用 `uname -s` 获取系统名称，然后通过 case 语句设置编译变量：
+
+```bash
+# HarmonyOS 返回 "HarmonyOS"，不匹配任何已知模式
+case $ac_sys_system in
+    Linux*|GNU*)  # ← HarmonyOS 不匹配
+        LDSHARED='$(CC) -shared'
+        CCSHARED="-fPIC"
+        ;;
+    *)  # ← 走到这里，使用默认值
+        LDSHARED="ld"  # 错误！HarmonyOS 没有 ld
+        ;;
+esac
+```
+
+#### 补丁方案
+
+在 `configure.ac` 中添加 HarmonyOS 支持：
+
+```diff
+# LDLIBRARY - 共享库名称
+-    Linux*|GNU*|NetBSD*|FreeBSD*|DragonFly*|OpenBSD*)
++    Linux*|GNU*|NetBSD*|FreeBSD*|DragonFly*|OpenBSD*|HarmonyOS*)
+
+# LDSHARED - 共享库链接命令
+-	Linux*|GNU*|QNX*|VxWorks*)
++	Linux*|GNU*|QNX*|VxWorks*|HarmonyOS*)
+ 		LDSHARED='$(CC) -shared'
+
+# CCSHARED - 位置无关代码标志
+ 	Linux*|GNU*) CCSHARED="-fPIC";;
++	HarmonyOS*) CCSHARED="-fPIC";;
+
+# LINKFORSHARED - 可执行文件链接标志
+-	Linux*|GNU*) LINKFORSHARED="-Xlinker -export-dynamic";;
++	Linux*|GNU*|HarmonyOS*) LINKFORSHARED="-Xlinker -export-dynamic";;
+```
+
+#### 补丁文件位置
+
+```
+/storage/Users/currentUser/tmp/opendesk/build_in_harmonyos/python/0001-Add-HarmonyOS-support-to-configure.ac.patch
+```
+
+#### 应用补丁步骤
+
+```bash
+# 1. 应用补丁到 configure.ac
+cd Python-3.9.0
+patch -p1 < path/to/0001-Add-HarmonyOS-support-to-configure.ac.patch
+
+# 2. 重新生成 configure 脚本
+autoconf
+
+# 3. 配置和编译
+./configure --prefix=$HOME/usr/local --enable-shared
+make
+make install
+```
+
+#### 提交到 Python 社区的建议
+
+1. **补丁格式**：使用标准的 unified diff 格式
+2. **提交信息**：清晰说明 HarmonyOS 与 Linux 的相似性
+3. **测试验证**：提供编译和测试结果
+4. **文档更新**：更新 README 和文档说明 HarmonyOS 支持
+
+### 6.0.3 ELF 可执行文件签名
+
+**问题现象：** 所有 Python 扩展模块编译失败，无法加载。
+
+**根本原因分析：**
+
+1. **链接器配置问题**：
+   - `LDSHARED=ld` 但鸿蒙系统没有 GNU `ld`
+   - 需要改为 `LDSHARED=clang -shared`
+
+2. **-fPIC 编译标志缺失**：
+   - `CCSHARED=` 为空
+   - `CFLAGSFORSHARED=` 为空
+   - 需要设置 `CCSHARED=-fPIC` 和 `CFLAGSFORSHARED=$(CCSHARED)`
+
+3. **共享库缺失**：
+   - `libpython3.9.so` 未生成
+   - 扩展模块无法链接 Python 符号
+
+**修复方案：**
+
+修改 `Makefile`：
+```makefile
+# 修改链接器
+LDSHARED=    clang -shared $(PY_LDFLAGS)
+BLDSHARED=   clang -shared $(PY_CORE_LDFLAGS)
+
+# 添加 -fPIC 标志
+CCSHARED=    -fPIC
+CFLAGSFORSHARED=    $(CCSHARED)
+```
+
+**生成共享库：**
+```bash
+# 编译 Python 核心
+make clean
+make
+
+# 生成 libpython3.9.so
+make libpython3.9.so
+```
+
+**验证共享库符号：**
+```bash
+llvm-nm -D libpython3.9.so | grep PyModuleDef_Init
+# 应该输出: 00000000001754b8 T PyModuleDef_Init
+```
+
+**注意事项：**
+
+1. 扩展模块需要链接到 `libpython3.9.so` 才能找到 Python 符号
+2. `python.exe` 是静态链接的，不会自动导出 Python 符号
+3. 部分模块（如 `_ssl`）依赖 OpenSSL，需要单独配置
 
 ### 6.1 编译前检查清单
 
