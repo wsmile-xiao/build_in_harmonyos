@@ -41,7 +41,41 @@ export TMPDIR=$HOME/tmp
 export PATH="$HOME/usr/local/bin:$PATH"  # 确保使用 GNU 工具
 ./configure --prefix=$HOME/usr/local \
     --with-shared \
-    --enable-widec
+    --enable-widec \
+    --enable-overwrite
+```
+
+**⚠️ 重要：`--enable-overwrite` 选项**
+
+默认情况下，ncurses 会将头文件安装到 `include/ncursesw/` 子目录：
+
+```
+$prefix/include/
+├── ncursesw/
+│   ├── curses.h      ← 头文件实际位置
+│   ├── ncurses.h
+│   └── ...
+└── (无 curses.h)
+```
+
+但大多数软件（如 Python、readline）使用 `#include <curses.h>`，期望在 `include/` 目录下找到头文件。
+
+**两种解决方案：**
+
+| 方案 | 命令 | 说明 |
+|------|------|------|
+| `--enable-overwrite` | 编译时添加此选项 | 头文件直接安装到 `include/`（推荐） |
+| 手动软链接 | 编译后执行 | 灵活，适用于已安装的情况 |
+
+**如果不使用 `--enable-overwrite`，需要手动创建软链接：**
+
+```bash
+cd $HOME/usr/local/include
+ln -sf ncursesw/curses.h curses.h
+ln -sf ncursesw/ncurses.h ncurses.h
+ln -sf ncursesw/term.h term.h
+ln -sf ncursesw/termcap.h termcap.h
+ln -sf ncursesw/unctrl.h unctrl.h
 ```
 
 ### 4. 编译

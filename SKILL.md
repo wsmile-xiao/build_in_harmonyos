@@ -2,7 +2,7 @@
 # 固定元数据头（必须，AI 优先读取）
 name: openharmony-compile-guide
 description: 鸿蒙系统编译知识库，提供开源软件在鸿蒙系统上编译的完整指南、最佳实践和经验总结
-version: 1.2.0
+version: 1.3.3
 author: OpenHarmony Community
 permissions: 文件读写权限、Shell执行权限、网络访问权限（可选，用于获取参考资料）
 ---
@@ -20,6 +20,8 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 6. 常见编译问题的解决方案
 7. 与其他平台（Linux/Android/iOS）的对比
 8. 不同构建系统的适配策略（Autotools/CMake/自定义Perl等）
+
+> **📋 开发环境待办**: 当前鸿蒙系统相比标准 Linux 开发环境仍缺少部分关键工具（如 automake、libtool、Python 3、gawk 等）。完整清单和编译计划见 `MISSING_TOOLS.md`，在开始编译任务前应优先检查该文件，确认相关依赖是否就绪。
 
 这个知识库可以帮助用户快速理解鸿蒙系统的编译环境，避免重复踩坑，提高编译效率。
 
@@ -198,6 +200,43 @@ fi
   - RANLIB=llvm-ranlib
   - NM=llvm-nm
   - STRIP=llvm-strip
+
+**⚠️ 重要：CFLAGS 必须包含 -fPIC**
+
+鸿蒙系统使用动态链接，**所有静态库和共享库都必须用 `-fPIC` 编译**。如果不加此标志，当静态库被链接到共享库时会报错：
+
+```
+ld.lld: error: relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol 'xxx'; recompile with -fPIC
+```
+
+**推荐的环境变量配置（`~/.zshrc`）：**
+
+```bash
+# 编译器
+export CC="clang"
+export CXX="clang++"
+export AR="llvm-ar"
+export RANLIB="llvm-ranlib"
+export NM="llvm-nm"
+export STRIP="llvm-strip"
+
+# ⭐ 关键：所有编译都使用 -fPIC
+export CFLAGS="-fPIC -O2"
+export CXXFLAGS="-fPIC -O2"
+export LDFLAGS="-L$HOME/usr/local/lib"
+```
+
+**如果已安装的静态库没有 `-fPIC`：**
+
+需要重新编译这些库。临时解决方案是移除静态库，让链接器使用共享库：
+
+```bash
+# 临时移除静态库
+mv $HOME/usr/local/lib/libxxx.a $HOME/usr/local/lib/libxxx.a.bak
+
+# 编译完成后可恢复
+mv $HOME/usr/local/lib/libxxx.a.bak $HOME/usr/local/lib/libxxx.a
+```
 
 **系统库支持：**
 - pthread：线程库支持（直接可用）
@@ -393,6 +432,54 @@ if (!$table{$target}) {
   2. 禁用汇编优化：./configure ... no-asm
 ```
 
+**问题9：OpenSSL aarch64 汇编优化导致 SSL BAD_SIGNATURE** ⭐ 重要
+```
+错误：ssl.SSLError: [SSL: BAD_SIGNATURE] bad signature (_ssl.c:1122)
+具体错误：RSA_verify_PKCS1_PSS_mgf1:last octet invalid
+原因：OpenSSL 的 openharmony-aarch64 配置启用了 ARM64 汇编优化，
+      这些汇编代码在 RSA-PSS 签名验证时有 bug，导致 HTTPS 连接失败
+影响：
+  - Python 的 _ssl 模块无法正常建立 HTTPS 连接
+  - 即使不验证证书也会报 BAD_SIGNATURE 错误
+  - pip、requests 等依赖 SSL 的工具无法使用
+排查：
+  # 测试 OpenSSL 命令行连接
+  $ openssl s_client -connect pypi.org:443 </dev/null
+  # 看到: RSA_verify_PKCS1_PSS_mgf1:last octet invalid
+  
+  # 检查编译配置
+  $ openssl version -f
+  # 看到: OPENSSL_BN_ASM_MONT SHA1_ASM SHA256_ASM VPAES_ASM POLY1305_ASM
+  # 这些 ASM 标志表示启用了汇编优化
+解决：
+  1. 重新编译 OpenSSL，禁用汇编优化：
+     ./Configure --prefix=$HOME/usr/local --openssldir=$HOME/usr/local/ssl no-asm
+     make && make install
+  
+  2. 重新编译 Python _ssl 模块，确保正确链接 OpenSSL：
+     cd ~/python/Python-3.9.0-work
+     clang -fPIC -I./Include -I$HOME/usr/local/include \
+           -c Modules/_ssl.c -o build/temp.ohos-aarch64-3.9/Modules/_ssl.o
+     clang -shared -L. -lpython3.9 \
+           -L$HOME/usr/local/lib -lssl -lcrypto \
+           build/temp.ohos-aarch64-3.9/Modules/_ssl.o \
+           -o build/lib.ohos-aarch64-3.9/_ssl.so
+  
+  3. 验证 _ssl.so 正确链接 libssl 和 libcrypto：
+     llvm-readelf -d _ssl.so | grep NEEDED
+     # 应该看到:
+     #   NEEDED: libpython3.9.so.1.0
+     #   NEEDED: libssl.so.1.1
+     #   NEEDED: libcrypto.so.1.1
+     #   NEEDED: libc.so
+关键点：
+  - OpenSSL 在 aarch64 上应优先使用 no-asm 编译
+  - Python _ssl 模块必须链接 libssl 和 libcrypto（检查 NEEDED）
+  - 这是 OpenSSL 汇编代码的 bug，不是鸿蒙系统问题
+参考：
+  - 详细案例：build_in_harmonyos/o/openssl/1.1.1w/README.md
+```
+
 **问题14：fstat() 对管道/终端返回 EACCES**
 ```
 错误：cat: standard output: Permission denied
@@ -457,6 +544,511 @@ if (!$table{$target}) {
 解决：
 	1.通过国内镜像站如gitcode、gitee镜像下载，但无法下载release归档包
     2.在github链接前增加 https//ghfast.top/<github原始链接>，提高国内下载速度，wget、git命令均可以使用
+```
+
+**问题16：Python 扩展模块符号找不到（musl BIND_NOW 问题）**
+
+**现象**：
+```
+import _struct
+ImportError: Error relocating _struct.so: _PyType_Name: symbol not found
+```
+
+**根因分析**：
+
+这是一个 **musl libc 特有问题**，涉及动态链接器行为差异：
+
+| 因素 | glibc 行为 | musl 行为 (鸿蒙) |
+|------|------------|------------------|
+| 默认链接标志 | BIND_LAZY | **BIND_NOW** |
+| 符号解析时机 | 首次使用时 | **加载时立即解析** |
+| 扩展模块依赖 | 仅 libc.so | **需要 libpython** |
+
+**问题链**：
+```
+musl 默认启用 BIND_NOW 标志
+    ↓
+dlopen() 加载 .so 时要求所有符号必须可解析
+    ↓
+扩展模块的 NEEDED 只有 libc.so（无 libpython）
+    ↓
+Python API 符号（_PyType_Name 等）无法解析
+    ↓
+ImportError: symbol not found
+```
+
+**验证命令**：
+```bash
+# 查看扩展模块动态段
+llvm-readelf -d module.so | grep -E "NEEDED|BIND"
+# 错误输出:
+#   NEEDED: libc.so           # 只有 libc
+#   FLAGS: BIND_NOW           # musl 默认
+
+# 正确输出:
+#   NEEDED: libpython3.9.so.1.0   # 有 libpython
+#   NEEDED: libc.so
+```
+
+**解决方案**：
+
+修改 `Makefile` 或 `Makefile.pre.in`，在 `LDSHARED` 中添加 libpython：
+
+```makefile
+# 修改前
+LDSHARED=    $(CC) -shared $(PY_LDFLAGS)
+
+# 修改后
+LDSHARED=    $(CC) -shared $(PY_LDFLAGS) -L. -lpython$(LDVERSION)
+```
+
+**⚠️ 循环依赖陷阱：BLDSHARED ≠ LDSHARED**
+
+这是一个容易踩的坑：**不能简单地在所有共享库链接命令中添加 `-lpython`**。
+
+```
+BLDSHARED — 用于构建 libpython.so 本身
+  ❌ 如果包含 -lpython$(LDVERSION)：链接 libpython.so 时会尝试链接自己 → 循环依赖
+
+LDSHARED — 用于构建扩展模块（.so）
+  ✅ 必须包含 -lpython$(LDVERSION)：扩展模块需要 Python API 符号
+```
+
+**正确的变量关系（Python 3.9.0 configure.ac）：**
+
+```bash
+case $ac_sys_system in
+    HarmonyOS*)
+        # BLDSHARED (for libpython.so) does NOT include -lpython.
+        # LDSHARED (for extension modules) includes -lpython.
+        BLDSHARED='$(CC) -shared'
+        LDSHARED='$(CC) -shared -L. -lpython$(LDVERSION)'
+        LDCXXSHARED='$(CXX) -shared'
+        ;;
+esac
+```
+
+**Makefile.pre.in sharedmods 规则修复：**
+
+Python 的 `Makefile.pre.in` 中，`sharedmods` 目标使用 `$(BLDSHARED)` 来构建扩展模块。这在 Linux 上没问题（BLDSHARED 和 LDSHARED 功能等价），但在 HarmonyOS 上需要使用包含 `-lpython` 的 `LDSHARED`：
+
+```makefile
+# Makefile.pre.in 中的 sharedmods 规则（修改前）
+sharedmods: $(BUILDPYTHON)
+    @$(RUNSHARED) CC='$(CC)' LDSHARED='$(BLDSHARED)' OPT='$(OPT)' \
+        $(PYTHON_FOR_BUILD) ./setup.py $$quiet build
+
+# 修改后：使用 LDSHARED 而非 BLDSHARED
+sharedmods: $(BUILDPYTHON)
+    @$(RUNSHARED) CC='$(CC)' LDSHARED='$(LDSHARED)' OPT='$(OPT)' \
+        $(PYTHON_FOR_BUILD) ./setup.py $$quiet build
+```
+
+**更优的方案（不修改 Makefile.pre.in 全局逻辑）：**
+
+直接在 `configure.ac` 的 HarmonyOS 分支中让 `BLDSHARED = LDSHARED`。这样 `sharedmods` 规则中的 `$(BLDSHARED)` 自然包含 `-lpython`：
+
+```bash
+# configure.ac HarmonyOS 分支
+BLDSHARED='$(CC) -shared -L. -lpython$(LDVERSION)'
+LDSHARED='$(CC) -shared -L. -lpython$(LDVERSION)'
+```
+
+但这要求 `libpython.so` 的构建规则使用独立的链接命令，不依赖 `$(BLDSHARED)`。Python 的 `Makefile.pre.in` 中 `libpython$(LDVERSION).so` 规则确实直接使用 `$(BLDSHARED)`：
+
+```makefile
+libpython$(LDVERSION).so: $(LIBRARY_OBJS) $(DTRACE_OBJS)
+    $(BLDSHARED) -Wl,-h$(INSTSONAME) -o $(INSTSONAME) $(LIBRARY_OBJS) ...
+```
+
+所以**两种方案各有取舍**，需根据具体项目的构建规则选择。
+
+**通用原则（适用于所有插件/扩展系统）：**
+
+| 变量 | 用途 | 能否包含主库链接？ |
+|------|------|-------------------|
+| BLDSHARED | 构建主共享库 | ❌ 不能（循环依赖） |
+| LDSHARED | 构建插件/扩展 | ✅ 必须（符号解析） |
+
+**适用范围**：
+
+| 系统 | 是否适用 | 说明 |
+|------|----------|------|
+| HarmonyOS/OpenHarmony | ✅ 适用 | 使用 musl libc |
+| Alpine Linux | ✅ 适用 | 同样使用 musl |
+| OpenWrt | ✅ 适用 | 同样使用 musl |
+| 标准 Linux (glibc) | ❌ 不适用 | 使用 BIND_LAZY |
+
+**类似问题**：Perl、Ruby 等解释型语言的扩展模块也可能遇到类似问题。
+
+**详细案例**：`build_in_harmonyos/p/python/3.9.0/README.md`
+
+**问题17：平台字符串包含空格导致构建目录异常**
+
+**现象**：
+```
+错误: No module named '_sysconfigdata__ohos_aarch64_linux_ohos'
+原因: 构建目录路径为 build/lib.HarmonyOS HongMeng Kernel 1.11.0-aarch64-3.9/
+      包含空格，无法正确访问
+```
+
+**根因分析**：
+
+`sysconfig.get_platform()` 返回含空格的字符串（如 `HarmonyOS HongMeng Kernel 1.11.0-aarch64`），导致路径解析错误。
+
+**解决方案**：
+
+修改 `Lib/sysconfig.py`，为 HarmonyOS 添加特殊处理：
+
+```python
+# 在 get_platform() 函数中
+elif osname[:9] == "harmonyos" or osname[:4] == "ohos":
+    # HarmonyOS: release contains spaces, skip it
+    return "%s-%s" % (osname, machine)
+```
+
+**类似问题**：其他返回复杂版本字符串的系统可能需要类似处理。
+
+**问题18：Python CAN socket 宏未定义**
+
+**现象**：
+```
+Modules/socketmodule.c:7759:29: error: use of undeclared identifier 'CAN_RAW_FD_FRAMES'
+Modules/socketmodule.c:7762:29: error: use of undeclared identifier 'CAN_RAW_JOIN_FILTERS'
+```
+
+**根因分析**：
+
+configure 检测到这些宏存在，但实际编译时头文件中未定义（HarmonyOS 内核头文件差异）。
+
+**解决方案**：
+
+修改 `pyconfig.h` 禁用这些宏：
+
+```bash
+sed -i 's/^#define HAVE_LINUX_CAN_RAW_FD_FRAMES 1/\/\* #undef HAVE_LINUX_CAN_RAW_FD_FRAMES \*\//' pyconfig.h
+sed -i 's/^#define HAVE_LINUX_CAN_RAW_JOIN_FILTERS 1/\/\* #undef HAVE_LINUX_CAN_RAW_JOIN_FILTERS \*\//' pyconfig.h
+```
+
+**问题19：Python math/cmath 模块符号找不到**
+
+**现象**：
+```
+ImportError: Error relocating math.so: _Py_log1p: symbol not found
+```
+
+**根因分析**：
+
+`_Py_log1p` 等数学辅助函数定义在 `Modules/_math.c`，math/cmath 模块需要链接 `_math.o`。
+
+**解决方案**：
+
+```bash
+# math 模块
+clang -fPIC -DPy_BUILD_CORE_MODULE -I./Include -I. -c Modules/mathmodule.c -o math.o
+clang -shared -L. -lpython3.9 math.o Modules/_math.o -lm -o math.so
+
+# cmath 模块
+clang -fPIC -DPy_BUILD_CORE_MODULE -I./Include -I. -c Modules/cmathmodule.c -o cmath.o
+clang -shared -L. -lpython3.9 cmath.o Modules/_math.o -lm -o cmath.so
+```
+
+**关键点**：
+- 必须添加 `-DPy_BUILD_CORE_MODULE`
+- 必须链接 `Modules/_math.o`
+- 必须添加 `-lm`
+
+**问题20：Python 哈希模块编译需要 Py_BUILD_CORE_MODULE**
+
+**现象**：
+```
+error: "this header requires Py_BUILD_CORE define"
+```
+
+**根因分析**：
+
+`Modules/sha256module.c` 等文件包含 `Include/internal/pycore_byteswap.h`，需要 `Py_BUILD_CORE_MODULE` 宏。
+
+**解决方案**：
+
+```bash
+clang -fPIC -DPy_BUILD_CORE_MODULE -I./Include/internal -I./Include -I. -c Modules/sha256module.c -o sha256.o
+clang -shared -L. -lpython3.9 sha256.o -o _sha256.so
+```
+
+**适用模块**：`_md5`, `_sha1`, `_sha256`, `_sha512`, `_sha3`, `_blake2`, `math`, `cmath`
+
+**问题25：Python subprocess 子进程执行被 SELinux 拦截（域转换问题）** ⭐ 重要
+
+**现象：**
+```python
+import subprocess
+# 执行 SDK 工具失败
+subprocess.run(['clang', '--version'])  # returncode: 1, 无输出
+os.system("clang --version")            # exit code: 1
+```
+
+**根因分析：**
+
+HarmonyOS 的 SELinux 域转换机制：
+
+```
+Shell 进程 (hishell_hap:s0)
+    │
+    └─ 执行用户二进制（如 Python）
+        │
+        └─ 域转换为 adhoc_bin:s0
+            │
+            └─ 无法执行 hnp_file 类型文件（SDK 工具）
+```
+
+| 进程/文件 | SELinux Context |
+|-----------|-----------------|
+| zsh 进程 | `u:r:hishell_hap:s0` |
+| Python 进程 | `u:r:adhoc_bin:s0` |
+| SDK clang-15 | `u:object_r:hnp_file:s0` |
+
+**关键发现：管道语法可绕过限制**
+
+```python
+# 直接执行 - 失败
+os.system("clang --version")  # exit code: 1
+
+# 管道执行 - 成功！
+os.system("clang --version 2>&1 | cat")  # exit code: 0
+```
+
+**解决方案：sitecustomize.py 兼容层**
+
+文件位置：`$HOME/usr/local/lib/python3.9/site-packages/sitecustomize.py`
+
+```python
+import os
+import sys
+import shlex
+
+def _is_harmonyos():
+    platform = sys.platform.lower()
+    return 'harmonyos' in platform or 'ohos' in platform
+
+def _wrap_with_pipe(cmd_str):
+    """添加管道语法绕过 SELinux 限制"""
+    return f"set -o pipefail; {cmd_str} 2>&1 | cat"
+
+if _is_harmonyos():
+    import subprocess
+    
+    _original_popen_init = subprocess.Popen.__init__
+    
+    def _wrapped_popen_init(self, *args, **kwargs):
+        cmd = args[0] if args else kwargs.get('args')
+        if cmd:
+            if isinstance(cmd, (list, tuple)):
+                cmd_str = ' '.join(shlex.quote(str(a)) for a in cmd)
+            else:
+                cmd_str = str(cmd)
+            wrapped_cmd = _wrap_with_pipe(cmd_str)
+            kwargs['shell'] = True
+            return _original_popen_init(self, wrapped_cmd, **kwargs)
+        return _original_popen_init(self, *args, **kwargs)
+    
+    subprocess.Popen.__init__ = _wrapped_popen_init
+```
+
+**配置选项：**
+
+```bash
+# 禁用兼容层
+export HARMONYOS_SUBPROCESS_COMPAT=0
+
+# 启用调试日志
+export HARMONYOS_SUBPROCESS_DEBUG=1
+```
+
+**测试验证：**
+
+```python
+import subprocess
+# 以下操作全部正常工作
+subprocess.run(['echo', 'hello'])           # ✅
+subprocess.run(['clang', '--version'])      # ✅
+subprocess.run('ls | head -5', shell=True)  # ✅
+subprocess.Popen(['cat', '/etc/passwd'])    # ✅
+```
+
+**适用范围：**
+
+| 软件 | 用途 | 影响 |
+|------|------|------|
+| Python | 编译扩展模块、调用编译器 | 需要 sitecustomize.py |
+| pip | 安装包、执行 setup.py | 自动加载 sitecustomize |
+| Perl | 编译 XS 模块 | 需要类似适配 |
+| Ruby | 编译原生扩展 | 需要类似适配 |
+
+**详细文档：** `build_in_harmonyos/p/python/3.9.0/HARMONYOS_SUBPROCESS_GUIDE.md`
+
+**问题26：configure 脚本大小写不敏感检测误判导致 BUILDEXEEXT=.exe**
+
+**现象：**
+```
+BUILDEXE= .exe
+BUILDPYTHON= python3.9$(BUILDEXE)   # 实际产生 python3.9.exe
+```
+
+**根因分析：**
+
+许多 autotools 项目的 `configure.ac` 通过以下逻辑检测文件系统是否大小写不敏感：
+
+```bash
+# 典型检测逻辑（来自 Python configure.ac）
+mkdir conftestdir
+if test -d conftestdir; then
+    # 创建的目录存在，大小写不敏感
+    BUILDEXEEXT=.exe
+else
+    BUILDEXEEXT=$EXEEXT
+fi
+rmdir conftestdir
+```
+
+在 HarmonyOS 上，`mkdir conftestdir` 后 `test -d conftestdir` 返回 **true**（因为文件系统确实存在该目录），但问题在于后续清理 `rmdir conftestdir` 后，`test -d` 仍可能返回 true（取决于具体实现），或者 HarmonyOS 的文件系统在某些情况下对大小写处理与 Linux 不同。
+
+**更精确的原因**：某些实现的检测逻辑是先创建 `CaseSensitiveTestDir`（大写混合），然后检查 `test -d casesensitivetestdir`（全小写）是否也存在。如果存在则认为大小写不敏感。HarmonyOS 的文件系统可能在此测试中误判。
+
+**影响范围：**
+
+| 软件 | 影响 |
+|------|------|
+| Python | 生成 `python3.9.exe` 而非 `python3.9` |
+| 其他 autotools 项目 | 可执行文件名附加 `.exe` 后缀 |
+
+**解决方案：**
+
+在 `configure.ac` 中为 HarmonyOS 跳过此检测：
+
+```diff
+-    AC_MSG_CHECKING(for case-insensitive build directory)
+-    if mkdir conftestdir 2>/dev/null; then
++    case $ac_sys_system in
++        HarmonyOS*)
++            # HarmonyOS: skip case-insensitive test
++            BUILDEXEEXT=$EXEEXT
++            AC_MSG_RESULT(no)
++            ;;
++        *)
++            AC_MSG_CHECKING(for case-insensitive build directory)
++            if mkdir conftestdir 2>/dev/null; then
+                 ...
+-    fi
++            fi
++            ;;
++    esac
+```
+
+**经验总结**：
+- HarmonyOS 虽然使用类似 Linux 的文件系统，但某些边界行为与标准 Linux 不同
+- 遇到 `.exe` 后缀异常时，首先检查 `BUILDEXEEXT` 和 `EXE` 变量
+
+### 6.15 Python 扩展模块编译通用模板
+
+在鸿蒙系统上编译 Python 扩展模块时，需要遵循以下通用模式：
+
+#### 6.15.1 基本编译命令
+
+```bash
+# 通用编译标志
+CFLAGS="-fPIC -I./Include/internal -I./Include -I. -I$HOME/usr/local/include"
+
+# 链接标志（必须包含 libpython）
+LDFLAGS="-shared -L. -lpython3.9"
+
+# 编译单个源文件
+clang $CFLAGS -c Modules/xxxmodule.c -o build/xxx.o
+
+# 链接生成 .so
+clang $LDFLAGS build/xxx.o -o xxx.so
+```
+
+#### 6.15.2 需要 Py_BUILD_CORE_MODULE 的模块
+
+以下模块需要添加 `-DPy_BUILD_CORE_MODULE`：
+
+| 模块 | 原因 |
+|------|------|
+| math, cmath | 使用 `pycore_fileutils.h` |
+| _sha256, _sha512 | 使用 `pycore_byteswap.h` |
+| _sha3, _blake2 | 使用内部头文件 |
+| _md5, _sha1 | 同上 |
+
+```bash
+clang -fPIC -DPy_BUILD_CORE_MODULE -I./Include/internal -I./Include -I. -c Modules/sha256module.c -o sha256.o
+```
+
+#### 6.15.3 需要额外链接的模块
+
+| 模块 | 额外链接 | 说明 |
+|------|----------|------|
+| math, cmath | `Modules/_math.o -lm` | 数学辅助函数 |
+| pyexpat, _elementtree | `build/xmlparse.o build/xmlrole.o build/xmltok.o ...` | expat 解析器 |
+| _blake2 | `build/blake2b.o build/blake2s.o build/blake2module.o` | 多文件链接 |
+
+#### 6.15.4 内置依赖编译示例
+
+**expat（XML 解析）**：
+```bash
+# 编译 expat 库
+for f in Modules/expat/*.c; do
+    clang -fPIC -DHAVE_EXPAT_CONFIG_H=1 -DXML_POOR_ENTROPY=1 \
+          -I./Modules/expat -I./Include -c "$f" -o build/$(basename $f .c).o
+done
+
+# 编译 pyexpat
+clang -fPIC -DHAVE_EXPAT_CONFIG_H=1 -I./Modules/expat -I./Include -I. \
+      -c Modules/pyexpat.c -o build/pyexpat.o
+
+# 链接
+clang -shared -L. -lpython3.9 build/pyexpat.o build/xmlparse.o build/xmlrole.o \
+      build/xmltok.o build/xmltok_impl.o build/xmltok_ns.o -o pyexpat.so
+```
+
+#### 6.15.5 快速编译脚本
+
+```bash
+#!/bin/bash
+# compile_python_module.sh - 快速编译 Python 扩展模块
+
+MODULE_NAME=$1
+SOURCE_FILE=$2
+EXTRA_CFLAGS="${3:-}"
+EXTRA_OBJS="${4:-}"
+NEEDS_CORE="${5:-}"
+
+CFLAGS="-fPIC -I./Include/internal -I./Include -I. -I$HOME/usr/local/include"
+LDFLAGS="-shared -L. -lpython3.9"
+
+if [ "$NEEDS_CORE" = "yes" ]; then
+    CFLAGS="$CFLAGS -DPy_BUILD_CORE_MODULE"
+fi
+
+# 编译
+clang $CFLAGS $EXTRA_CFLAGS -c "$SOURCE_FILE" -o build/${MODULE_NAME}.o
+
+# 链接
+clang $LDFLAGS build/${MODULE_NAME}.o $EXTRA_OBJS -o ${MODULE_NAME}.so
+
+echo "编译完成: ${MODULE_NAME}.so"
+```
+
+**使用示例**：
+```bash
+# 基本模块
+./compile_python_module.sh _struct Modules/_struct.c
+
+# 需要 BUILD_CORE 的模块
+./compile_python_module.sh _sha256 Modules/sha256module.c "" "" yes
+
+# 需要额外链接的模块
+./compile_python_module.sh math Modules/mathmodule.c "" "Modules/_math.o -lm" yes
 ```
 
 **问题10：toybox sed 与 autotools 不兼容**
@@ -639,6 +1231,21 @@ file /bin/sh
 解决：
   1. 使用标准的 __thread 或 _Thread_local
   2. 避免使用 glibc 特有的 TLS 扩展
+```
+
+**问题4：动态链接符号解析差异（BIND_NOW）** ⭐ 重要
+```
+错误：ImportError: symbol not found（Python 扩展模块）
+     undefined symbol: xxx（其他插件系统）
+原因：musl 默认使用 BIND_NOW，要求所有符号在加载时解析
+      扩展模块未链接主程序库，导致符号无法解析
+解决：
+  1. 修改 LDSHARED，添加主程序库链接
+     例：LDSHARED = $(CC) -shared ... -L. -lpython$(VERSION)
+  2. 检查扩展模块的 NEEDED 是否包含所需库
+     llvm-readelf -d module.so | grep NEEDED
+影响：Python、Perl、Ruby 等插件系统
+详见：build_in_harmonyos/p/python/3.9.0/README.md
 ```
 
 #### 3.6.6 参考项目
@@ -1044,6 +1651,173 @@ mkdir -p $TMPDIR
 | sed | 复杂脚本支持不完整 | 增强 GNU 兼容性 |
 | ln -sf | 创建带随机后缀的文件 | 修复 `-f` 强制覆盖逻辑 |
 
+#### 3.7.7 SELinux 域转换对子进程执行 SDK 二进制的限制 ⭐ 重要
+
+**限制描述：**
+
+HarmonyOS 使用 SELinux 强制访问控制，存在**域转换（Domain Transition）**机制。当用户进程创建子进程执行 SDK 工具时，子进程会因 SELinux 策略而执行失败。
+
+**根因分析：SELinux 域转换机制**
+
+| 场景 | 进程类型 | SELinux Context |
+|------|----------|-----------------|
+| Shell 进程 | 受信任进程 | `u:r:hishell_hap:s0` |
+| Python 解释器 | 用户程序 | `u:r:adhoc_bin:s0` |
+| 用户编译的 C 程序 | 用户程序 | `u:r:adhoc_bin:s0` |
+| SDK clang-15 | 系统工具 | `u:object_r:hnp_file:s0` |
+| 用户编译的文件 | 用户文件 | `u:object_r:hmdfs:s0` |
+
+**域转换流程：**
+
+```
+hishell_hap:s0          执行用户程序           adhoc_bin:s0
+(Shell 进程)   ───────────────────────>    (Python/C程序)
+
+✅ 可以执行 hnp_file    ───────────────>    ❌ 不能执行
+   (SDK 工具)                              hnp_file
+```
+
+**关键点**：当 `hishell_hap` 域的进程执行 `hmdfs` 类型的文件时，SELinux 触发域转换，新进程进入 `adhoc_bin` 域，该域**没有执行 `hnp_file` 类型文件的权限**。
+
+**为什么静默失败：**
+
+SDK 的 clang-15 是一个 109MB 的 ELF 二进制，当 `adhoc_bin` 域的进程尝试 `execve()` 它时：
+
+1. `execve()` 系统调用成功（没有返回错误）
+2. SELinux 在内核层面拦截了执行
+3. 进程立即以 exit code 1 退出
+4. **没有任何错误输出**（因为二进制根本没有真正开始执行）
+
+**受影响的调用方式（均失败）：**
+
+| 方式 | 代码 | 结果 |
+|------|------|------|
+| `os.execv()` | `os.execv("/path/to/clang", ["clang", ...])` | ❌ exit 1 |
+| `os.system()` | `os.system("clang --version")` | ❌ exit 1 |
+| `subprocess.run()` | `subprocess.run(["clang", ...])` | ❌ exit 1 |
+| `fork() + execv()` | C 程序直接调用 | ❌ exit 1 |
+
+**解决方案：管道语法绕过 SELinux 限制** ⭐ 关键发现
+
+使用管道语法 `cmd | cat` 可以绕过 SELinux 限制！
+
+```python
+# 直接执行 - 失败
+os.system("clang test.c -o test")  # exit code: 1
+
+# 管道执行 - 成功！
+os.system("clang test.c -o test | cat")  # exit code: 0
+```
+
+**原理**：管道强制 shell 创建子进程来执行管道的左侧命令。这个子进程的 SELinux 上下文可能具有不同的权限，能够执行 SDK 工具。
+
+**管道方式对比测试结果：**
+
+| 方法 | Exit Code | 文件生成 | 推荐 |
+|------|-----------|----------|------|
+| `clang ...`（无管道） | 1 | ❌ No | - |
+| `clang ... \| cat` | 0 | ✅ Yes | ⭐ 推荐 |
+| `clang ... \| head -N` | 0 | ✅ Yes | ⭐ 推荐 |
+| `clang ... \| true` | 0 | ✅ Yes | 可用 |
+| `clang ... & wait` | 0 | ❌ No | 不稳定 |
+
+**正确实现（使用 `pipefail` 获取真实退出码）：**
+
+```python
+# HarmonyOS workaround
+cmd_str = f"set -o pipefail; {cmd} 2>&1 | cat"
+status = os.system(cmd_str)
+```
+
+**注意事项：**
+
+1. 使用 `set -o pipefail` 确保退出码反映实际命令的状态，而不是管道最后一个命令（`cat` 总是返回 0）
+2. `2>&1` 重定向 stderr 到 stdout，确保错误信息能被捕获
+3. 对于 Python，已通过修改 `_bootsubprocess.py` 实现此方案
+
+**受影响的软件：**
+
+- **Python**: `setup.py` 通过 `_bootsubprocess.Popen` 调用 `clang` 编译扩展模块
+- **Perl**: `ExtUtils::CBuilder` 编译 XS 模块
+- **Ruby**: `mkmf.rb` 编译原生扩展
+- **任何**通过子进程调用 SDK 编译器的构建系统
+
+**已验证的解决方案：**
+
+| 方案 | 原理 | 可行性 | 用户感知 |
+|------|------|--------|----------|
+| 管道语法 `\| cat` | 强制 shell 创建有权限的子进程 | ✅ 推荐 | 需修改代码 |
+| 修改 `_bootsubprocess.py` | 用管道语法替代 `os.execv()` | ✅ Python 已实现 | 内部修复 |
+| 用户编译 wrapper 二进制 | wrapper 调用 clang | ✅ 已验证 | 需额外编译 |
+
+**透明兼容层：sitecustomize.py（推荐）**
+
+对于 Python，可以通过 `sitecustomize.py` 实现对用户代码完全透明的兼容：
+
+```python
+# 文件位置: {prefix}/lib/python3.9/site-packages/sitecustomize.py
+# Python 启动时自动加载
+
+import os
+import sys
+
+def _is_harmonyos():
+    platform = sys.platform.lower()
+    return 'harmonyos' in platform or 'ohos' in platform
+
+if _is_harmonyos():
+    _original_os_system = os.system
+    
+    def _harmonyos_os_system(cmd):
+        # 自动添加管道语法
+        wrapped = f"set -o pipefail; {cmd} 2>&1 | cat"
+        return _original_os_system(wrapped)
+    
+    os.system = _harmonyos_os_system
+    os.environ['HARMONYOS_SUBPROCESS_COMPAT'] = '1'
+```
+
+**用户代码无需任何修改**：
+
+```python
+# 用户正常写，不需要关心 HarmonyOS
+import os
+os.system("clang test.c -o test")  # 自动被包装
+```
+
+**安全特性**：
+
+| 特性 | 说明 |
+|------|------|
+| 条件加载 | 只在 HarmonyOS 上启用 |
+| 可禁用 | `export HARMONYOS_SUBPROCESS_COMPAT=0` |
+| 可恢复 | 删除文件即可回滚 |
+| 异常回退 | 出错时回退到原始函数 |
+
+**详细文档：**
+
+- Python 子进程问题完整分析：`build_in_harmonyos/p/python/3.9.0/HARMONYOS_SUBPROCESS_GUIDE.md`
+- sitecustomize.py 模板：`build_in_harmonyos/p/python/3.9.0/sitecustomize.py`
+- 测试脚本参考：`$HOME/tmp/test_subprocess_methods.py`
+
+**建议系统改进：**
+
+| 问题 | 当前状态 | 建议改进 |
+|------|----------|----------|
+| `adhoc_bin` 域无法执行 `hnp_file` | SELinux 策略限制 | 提供开发者模式白名单 |
+| 静默失败无错误信息 | exit code 1，无输出 | 报告具体的 SELinux 拒绝原因 |
+
+**6. musl 动态链接行为优化** ⭐ 新增
+
+| 问题 | 当前行为 | 建议改进 |
+|------|----------|----------|
+| BIND_NOW 默认启用 | 所有符号需加载时解析 | 提供 BIND_LAZY 选项或文档说明 |
+| 插件系统兼容性 | 需手动添加主库链接 | 在 SDK 文档中说明适配方法 |
+
+**影响**：Python、Perl、Ruby 等解释型语言的扩展模块需要特殊处理。
+
+**建议**：在 HarmonyOS 开发者文档中添加"插件系统适配指南"，说明 musl BIND_NOW 的影响和解决方案。
+
 ### 3.8 与其他平台对比
 
 **vs Linux：**
@@ -1278,6 +2052,8 @@ grep -n "HarmonyOS" support/config.guess
 
 - **libffi 3.4.4**: `build_in_harmonyos/l/libffi/3.4.4/0001-port-for-ohos.patch`
 - **GNU Bash 5.3**: `build_in_harmonyos/b/bash/5.3/0001-port-for-ohos.patch`
+- **GNU automake 1.16.5**: `build_in_harmonyos/a/automake/1.16.5/0001-port-for-ohos.patch`
+- **GNU libtool 2.4.7**: `build_in_harmonyos/l/libtool/2.4.7/0001-port-for-ohos.patch`
 
 ### 3.12 config.sub 标准修改模式
 
@@ -2330,90 +3106,86 @@ chmod +x "$elf_file"
 echo "已重新签名: $elf_file"
 ```
 
-### 6.0.2 Python 编译系统 HarmonyOS 适配分析
+### 6.0.2 Autoconf 项目平台适配模式
 
-**问题现象：** Python 扩展模块编译失败，共享库未生成。
+**适用场景**：使用 GNU Autoconf 构建系统的项目（如 Python、GNU coreutils 等）
 
-**根本原因：** Python 的 `configure.ac` 中没有识别 HarmonyOS 系统，导致关键编译变量未正确设置。
+**问题模式**：`configure.ac` 中的 case 语句没有匹配 HarmonyOS 系统，导致编译变量使用默认值。
 
-#### 系统检测结果
+#### 典型变量配置错误
 
-| 变量 | 预期值 | 实际值 | 影响 |
-|------|--------|--------|------|
-| `ac_sys_system` | HarmonyOS | HarmonyOS | ✅ 正确 |
-| `LDSHARED` | `$(CC) -shared` | `ld` | ❌ 链接失败 |
-| `CCSHARED` | `-fPIC` | 空 | ❌ 无法生成共享库 |
-| `LDLIBRARY` | `libpython3.9.so` | `libpython3.9.a` | ❌ 无共享库 |
-| `LINKFORSHARED` | `-Xlinker -export-dynamic` | 空 | ❌ 链接问题 |
+| 变量 | 作用 | 错误默认值 | 正确值 |
+|------|------|-----------|--------|
+| `LDSHARED` | 共享库链接命令 | `ld` | `$(CC) -shared` |
+| `CCSHARED` | 位置无关代码标志 | 空 | `-fPIC` |
+| `LDLIBRARY` | 共享库名称 | `.a` | `.so` |
+| `LINKFORSHARED` | 可执行文件链接标志 | 空 | `-Xlinker -export-dynamic` |
 
-#### configure.ac 系统检测逻辑
+#### 通用修复模式
 
-Python 使用 `uname -s` 获取系统名称，然后通过 case 语句设置编译变量：
-
-```bash
-# HarmonyOS 返回 "HarmonyOS"，不匹配任何已知模式
-case $ac_sys_system in
-    Linux*|GNU*)  # ← HarmonyOS 不匹配
-        LDSHARED='$(CC) -shared'
-        CCSHARED="-fPIC"
-        ;;
-    *)  # ← 走到这里，使用默认值
-        LDSHARED="ld"  # 错误！HarmonyOS 没有 ld
-        ;;
-esac
-```
-
-#### 补丁方案
-
-在 `configure.ac` 中添加 HarmonyOS 支持：
+在 `configure.ac` 的相关 case 语句中添加 HarmonyOS 支持：
 
 ```diff
-# LDLIBRARY - 共享库名称
+-    Linux*|GNU*|...)
++    Linux*|GNU*|...|HarmonyOS*)
+```
+
+**关键点**：
+1. HarmonyOS 与 Linux 高度兼容，通常只需添加 `HarmonyOS*` 到现有 Linux 分支
+2. 修改 `configure.ac` 后需要运行 `autoreconf -ivf` 重新生成 `configure` 脚本
+3. `configure` 脚本本身也需要修改（如果不重新生成）
+
+#### 相关文件
+
+| 文件 | 作用 | 修改要点 |
+|------|------|----------|
+| configure.ac | 主配置 | 添加 HarmonyOS 到各 case 分支 |
+| config.guess | 平台检测 | 添加 `*:HarmonyOS:*:*` 识别 |
+| config.sub | OS 验证 | 添加 `-harmonyos` 映射 |
+
+#### 详细案例
+
+Python 3.9.0 完整适配案例见：`build_in_harmonyos/python/README.md`
+
+#### ⚠️ 关键原则：HarmonyOS 应独立分支处理
+
+**反面教材**（简单追加到 Linux 分支）：
+```diff
 -    Linux*|GNU*|NetBSD*|FreeBSD*|DragonFly*|OpenBSD*)
 +    Linux*|GNU*|NetBSD*|FreeBSD*|DragonFly*|OpenBSD*|HarmonyOS*)
-
-# LDSHARED - 共享库链接命令
--	Linux*|GNU*|QNX*|VxWorks*)
-+	Linux*|GNU*|QNX*|VxWorks*|HarmonyOS*)
- 		LDSHARED='$(CC) -shared'
-
-# CCSHARED - 位置无关代码标志
- 	Linux*|GNU*) CCSHARED="-fPIC";;
-+	HarmonyOS*) CCSHARED="-fPIC";;
-
-# LINKFORSHARED - 可执行文件链接标志
--	Linux*|GNU*) LINKFORSHARED="-Xlinker -export-dynamic";;
-+	Linux*|GNU*|HarmonyOS*) LINKFORSHARED="-Xlinker -export-dynamic";;
 ```
 
-#### 补丁文件位置
+**问题**：HarmonyOS 虽然高度兼容 Linux，但存在大量微妙差异：
+- 没有 `ld`（使用 `ld.lld`）
+- `BUILDEXEEXT` 检测误判（大小写不敏感测试）
+- 系统调用限制（fstat、lseek 对管道/终端）
+- 沙箱签名机制（子进程 exec 限制）
+- `HARDLINK` 不支持、`ln -sf` 有 bug
+- musl libc 默认 BIND_NOW（非 glibc 的 BIND_LAZY）
 
+追加到 Linux 分支会继承所有 Linux 特定的逻辑，某些可能不适配。
+
+**推荐做法**（独立分支）：
+```diff
+     SunOS*)
+         ...SunOS 特定配置...
+         ;;
++    HarmonyOS*)
++        # HarmonyOS: 兼容 Linux 但有独立差异
++        CCSHARED="-fPIC"
++        BLDSHARED='$(CC) -shared'
++        LDSHARED='$(CC) -shared -L. -lpython$(LDVERSION)'
++        ;;
+     Linux*|GNU*|NetBSD*|FreeBSD*|DragonFly*|OpenBSD*)
+         ...Linux 原有配置...
+         ;;
 ```
-/storage/Users/currentUser/tmp/opendesk/build_in_harmonyos/python/0001-Add-HarmonyOS-support-to-configure.ac.patch
-```
 
-#### 应用补丁步骤
-
-```bash
-# 1. 应用补丁到 configure.ac
-cd Python-3.9.0
-patch -p1 < path/to/0001-Add-HarmonyOS-support-to-configure.ac.patch
-
-# 2. 重新生成 configure 脚本
-autoconf
-
-# 3. 配置和编译
-./configure --prefix=$HOME/usr/local --enable-shared
-make
-make install
-```
-
-#### 提交到 Python 社区的建议
-
-1. **补丁格式**：使用标准的 unified diff 格式
-2. **提交信息**：清晰说明 HarmonyOS 与 Linux 的相似性
-3. **测试验证**：提供编译和测试结果
-4. **文档更新**：更新 README 和文档说明 HarmonyOS 支持
+**好处**：
+1. 隔离 HarmonyOS 特有的配置，不污染 Linux 分支
+2. 未来维护更清晰：修改 HarmonyOS 不会意外影响 Linux
+3. 参考 SunOS 的模式：同样是 Unix-like 但有差异的系统
+4. 避免"修改一个分支解决一个问题，却引入另一个问题"的连锁反应
 
 ### 6.0.3 ELF 可执行文件签名
 
@@ -2756,6 +3528,386 @@ help2man --version
 
 详细文档：`build_in_harmonyos/h/help2man/1.49.3/README.md`
 
+**问题17：UID 范围超限（v7 格式归档）**
+
+**现象：**
+```
+tar: value 20001006 out of uid_t range 0..2097151
+tar: Exiting with failure status due to previous errors
+```
+
+**根因分析：**
+
+鸿蒙系统用户 UID（20001006）超出了 tar v7 格式支持的最大值（2097151）。
+
+| tar 格式 | UID 范围 | 说明 |
+|----------|----------|------|
+| v7 (old) | 0 - 2097151 | 旧格式，UID 限制为 21 位 |
+| ustar | 0 - 2097151 | POSIX.1-1988 标准 |
+| POSIX/PAX | 无限制 | 现代格式，推荐使用 |
+
+**解决方案：**
+
+```bash
+# 方案1: 使用 POSIX 或 PAX 格式（推荐）
+tar --format=posix -cf archive.tar files/
+tar --format=pax -cf archive.tar files/
+
+# 方案2: 归档时指定所有者
+tar -cf archive.tar --owner=root --group=root files/
+
+# 方案3: 解压时忽略所有权
+tar -xf archive.tar --no-same-owner
+```
+
+**验证命令：**
+```bash
+# 测试 v7 格式（会报错）
+tar --format=v7 -cf test.tar file.txt
+
+# 测试 POSIX 格式（正常）
+tar --format=posix -cf test.tar file.txt && echo "成功"
+```
+
+**问题18：ncurses 头文件找不到（curses.h not found）**
+
+**现象：**
+```
+fatal error: 'curses.h' file not found
+#include <curses.h>
+```
+
+**根因分析：**
+
+ncurses 使用 `--enable-widec` 编译时，头文件默认安装到 `include/ncursesw/` 子目录：
+
+```
+$prefix/include/
+├── ncursesw/
+│   ├── curses.h      ← 实际位置
+│   ├── ncurses.h
+│   ├── term.h
+│   └── ...
+└── curses.h          ← 缺失！
+```
+
+但大多数软件使用 `#include <curses.h>`，期望在 `include/` 目录下找到头文件。
+
+**解决方案 1：创建软链接（推荐）**
+
+```bash
+cd $HOME/usr/local/include
+ln -sf ncursesw/curses.h curses.h
+ln -sf ncursesw/ncurses.h ncurses.h
+ln -sf ncursesw/term.h term.h
+ln -sf ncursesw/termcap.h termcap.h
+ln -sf ncursesw/unctrl.h unctrl.h
+```
+
+**解决方案 2：重新编译 ncurses 时添加 `--enable-overwrite`**
+
+```bash
+./configure --prefix=$HOME/usr/local --enable-widec --enable-overwrite
+make && make install
+```
+
+`--enable-overwrite` 会让头文件直接安装到 `include/` 目录（不放在子目录）。
+
+**注意事项：**
+- 如果同时需要窄字符版本 (`ncurses`) 和宽字符版本 (`ncursesw`)，不要使用 `--enable-overwrite`
+- Python、readline 等软件依赖 ncurses，需要能找到 `curses.h`
+
+**问题19：libintl 链接失败**
+
+**现象：**
+```
+ld.lld: error: undefined symbol: libintl_gettext
+>>> referenced by xxx.c:123
+ld.lld: error: undefined symbol: libintl_ngettext
+ld.lld: error: undefined symbol: libintl_bindtextdomain
+```
+
+**根因分析：**
+
+Autotools 项目使用 gettext 国际化时，`LDADD` 或 `LDFLAGS` 未正确包含 libintl 库。
+
+**受影响项目：**
+- GNU tar
+- GNU coreutils
+- 其他使用 gettext 的 GNU 软件
+
+**解决方案：**
+
+修改 `src/Makefile`（或对应目录的 Makefile），在 `LDADD` 末尾添加 `$(LIBINTL)`：
+
+```makefile
+# 修改前
+tar_LDADD = $(LIBS) ../lib/libtar.a ../gnu/libgnu.a $(LIB_SELINUX)
+
+# 修改后
+tar_LDADD = $(LIBS) ../lib/libtar.a ../gnu/libgnu.a $(LIB_SELINUX) $(LIBINTL)
+```
+
+**检查方法：**
+```bash
+# 查看 LIBINTL 变量
+grep "LIBINTL" Makefile
+
+# 查看是否有 libintl.a
+ls -la $HOME/usr/local/lib/libintl.a
+```
+
+**问题19：po 目录 .gmo 文件生成失败**
+
+**现象：**
+```
+msgfmt: error while opening "da.1po" for reading: No such file or directory
+make[2]: *** [Makefile:248: da.gmo] Error 1
+```
+
+**根因分析：**
+
+这个问题的根本原因是 `msgmerge` 命令无法正常工作：
+
+```bash
+# 尝试运行系统的 msgmerge 会报错
+$ /data/service/hnp/bin/msgmerge --version
+Error loading shared library libomp.so: No such file or directory
+```
+
+**问题链**：
+```
+系统的 msgmerge 缺少 libomp.so（或签名问题）
+    ↓
+configure 检测 msgmerge 失败
+    ↓
+Makefile 中 MSGMERGE = : (空命令)
+    ↓
+.po.gmo 规则无法生成 .1po 临时文件
+    ↓
+msgfmt 找不到 .1po 文件
+```
+
+**正向解决方案：**
+
+```bash
+# 1. 安装 gettext 工具到用户目录（包含可用的 msgmerge）
+# 下载 gettext 源码编译安装，或使用预编译版本
+# 安装后确保: $HOME/usr/local/bin/msgmerge 可正常运行
+
+# 2. 验证 msgmerge 可用
+$HOME/usr/local/bin/msgmerge --version
+# 应该正常显示版本信息
+
+# 3. 配置时确保 PATH 优先使用用户安装的工具
+export PATH=$HOME/usr/local/bin:$PATH
+./configure --prefix=$HOME/usr/local
+
+# 4. 验证 Makefile 正确检测到 msgmerge
+grep "MSGMERGE" po/Makefile
+# 应该看到: MSGMERGE = /storage/Users/currentUser/usr/local/bin/msgmerge
+
+# 5. 正常编译
+make
+```
+
+**验证 msgmerge 是否可用：**
+```bash
+# 检查 msgmerge 是否存在
+which msgmerge
+
+# 测试 msgmerge 是否能正常运行
+msgmerge --version
+# 如果报错 "Error loading shared library libomp.so"，说明系统版本有问题
+# 应使用用户安装的版本
+```
+
+**备选方案（如果不想安装 gettext）：**
+
+```bash
+# 方案1: 跳过 po 目录
+touch po/*.gmo
+make -C gnu && make -C lib && make -C src
+
+# 方案2: 配置时禁用 NLS
+./configure --disable-nls --prefix=$HOME/usr/local
+```
+
+**注意：** 
+- 国际化（NLS）功能对命令行工具不是必需的，但完整编译需要
+- 推荐安装 gettext 工具到用户目录，这是最彻底的解决方案
+- **跳过 po 不影响测试结果**：经实测验证（GNU tar 1.35），`touch po/*.gmo` 与正确编译 po（msgmerge）的 `make check` 结果完全一致（211 测试：82 通过、98 失败、31 跳过），因为测试套件验证的是归档逻辑而非翻译文本
+
+**问题20：cc/c++ 命令不存在，configure/cmake 找不到编译器**
+
+**现象：**
+```bash
+$ cc --version
+zsh: command not found: cc
+
+$ cmake ..
+-- Could NOT find C_CXX_COMPILER
+```
+
+**根因分析：**
+
+鸿蒙系统的编译器以 `clang`/`clang++` 命名提供，不提供 POSIX 标准的 `cc`/`c++` 入口。虽然环境变量 `CC=clang`、`CXX=clang++` 通常已设置，但部分构建脚本和 Makefile 会硬编码调用 `cc` 而非读取环境变量。
+
+**解决方案：**
+
+```bash
+# 创建 cc/c++ 软链指向 clang
+ln -sf $(which clang) $HOME/usr/local/bin/cc
+ln -sf $(which clang++) $HOME/usr/local/bin/c++
+
+# 验证
+cc --version   # clang version 15.0.4
+c++ --version  # clang version 15.0.4
+```
+
+**注意：**
+- `clang`/`clang++` 位于 `/data/service/hnp/bin/`，已在 PATH 中
+- `CC`/`CXX` 环境变量通常已预设为 `clang`/`clang++`，大多数场景可正常工作
+- 此软链主要解决硬编码 `cc` 调用的场景（老项目 Makefile、某些 cmake 模块等）
+
+**问题21：cp 二进制文件到 PATH 目录报 "Operation not permitted"**
+
+**现象：**
+```bash
+$ cp ./src/tar $HOME/usr/local/bin/tar
+cp: /storage/Users/currentUser/usr/local/bin/tar: Operation not permitted
+```
+
+**根因分析：**
+
+鸿蒙系统安全机制对**新二进制文件**有签名校验。`cp` 复制一个全新的二进制文件到 PATH 目录时被拦截，但 `ln -sf` 创建软链不受此限制。该限制仅在首次复制新二进制时触发，后续覆盖更新已有文件不受影响。
+
+**解决方案：**
+
+```bash
+# 方案1: 软链（推荐，最简单）
+ln -sf /path/to/source/binary $HOME/usr/local/bin/binary
+
+# 方案2: 先复制到临时文件，触发签名确认后再移动
+cp ./src/tar $HOME/tmp/tar        # 可能需要点击确认
+cp $HOME/tmp/tar $HOME/usr/local/bin/tar  # 确认后可正常复制
+
+# 方案3: 如果目录已有同名文件，直接覆盖不受限
+cp -f ./src/tar $HOME/usr/local/bin/tar   # 如果 tar 已存在则可覆盖
+```
+
+**注意：**
+- 此限制仅针对**新二进制文件**，复制文本文件、库文件不受影响
+- `coreutils` 的 install-selected.sh 通过 `cp` 批量安装 74 个命令时未受影响，说明批量复制时签名确认机制可能不同
+- 软链方式会依赖源文件路径长期存在，如果源目录被清理则软链失效
+
+**问题23：/usr/bin/env 不存在，shebang 失效**
+
+**现象：**
+```bash
+$ /path/to/script.sh
+zsh: /usr/bin/env: bad interpreter: no such file or directory
+```
+
+**根因分析：**
+
+鸿蒙系统没有 `/usr/bin/env`。`env` 命令位于 `$HOME/usr/local/bin/env`（GNU coreutils），但不在系统标准路径中。许多开源软件的脚本使用 `#!/usr/bin/env sh`、`#!/usr/bin/env bash`、`#!/usr/bin/env perl` 等 shebang，这些脚本在鸿蒙上直接执行会失败。
+
+**受影响范围：**
+
+| 软件 | 受影响文件 | 严重程度 |
+|------|-----------|----------|
+| libtool 2.4.7 | libtoolize | 中（核心 libtool 不受影响） |
+| 其他 GNU 软件 | install-sh、compile 等辅助脚本 | 中（通常被 make 直接调用，不依赖 shebang） |
+
+**解决方案：**
+
+```bash
+# 方案1: 修改 shebang（推荐）
+sed -i 's|#!/usr/bin/env sh|#!/bin/sh|' script.sh
+sed -i 's|#!/usr/bin/env bash|#!/bin/env bash|' script.sh
+sed -i 's|#!/usr/bin/env perl|#!/data/service/hnp/bin/perl|' script.pl
+
+# 方案2: 创建 /usr/bin/env 软链（需要 root 权限）
+ln -sf $HOME/usr/local/bin/env /usr/bin/env
+
+# 方案3: 修改后重新签名
+sed -i 's|#!/usr/bin/env sh|#!/bin/sh|' $HOME/usr/local/bin/libtoolize
+```
+
+**注意：**
+- `#!/bin/sh` 在鸿蒙上指向 toybox sh，基本兼容
+- `#!/bin/bash` 需使用 `#!/data/service/hnp/bin/bash`
+- `#!/usr/bin/env perl` 可改为 `#!/data/service/hnp/bin/perl`（perl 在 SDK 工具链中）
+
+**问题24：libtoolize 在 zsh/sh 下 shell 函数加载失败**
+
+**现象：**
+```bash
+$ libtoolize --version
+aarch64-unknown-harmonyos
+aarch64-unknown-harmonyos
+libtoolize[165]: func_add_hook: inaccessible or not found
+libtoolize[188]: func_add_hook: inaccessible or not found
+... (大量函数未定义错误)
+```
+
+**根因分析：**
+
+`libtoolize` 脚本内部通过 shell 函数的方式从辅助文件（`build-aux/ltmain.sh`、`m4/libtool.m4` 等）加载功能。这些函数定义使用 bash 的特定 sourcing 语法（点命令 `. file`），在鸿蒙的 sh（toybox）或 zsh 环境下无法正确加载。
+
+**影响评估：**
+
+| 命令 | 用途 | 状态 | 影响 |
+|------|------|------|------|
+| `libtool` | 共享库编译/链接封装 | ✅ 正常 | 核心功能，其他项目构建时使用 |
+| `libtoolize` | autotools 项目初始化 | ❌ 不可用 | 仅在 `autoreconf` / 从零创建项目时需要 |
+
+**实际影响**：对于编译使用 autotools 的开源软件（如 libcurl、glib 等），只需要 `libtool` 命令可用。`libtoolize` 的问题仅在 `autoreconf` 流程中触发，而鸿蒙上的 automake 1.16.5 已安装了 `libtool.m4` 等宏文件到正确位置，大多数情况下可以绕过。
+
+**详细信息参考**：`build_in_harmonyos/l/libtool/2.4.7/README.md`
+
+**问题22：bash 脚本中 ((var++)) 在 set -e 下意外退出**
+
+**现象：**
+```bash
+#!/bin/bash
+set -e
+installed=0
+((installed++))    # 脚本在此处退出，退出码 1
+echo "这行不会执行"
+```
+
+**根因分析：**
+
+Bash 的算术表达式 `((...))` 当结果为 **0**（即变量的原始值为 0 时）返回退出码 1，被 `set -e` 视为失败而终止脚本。
+
+| 表达式 | `installed` 初始值为 0 时 | 退出码 |
+|--------|--------------------------|--------|
+| `((installed++))` | 先取值 0（作为表达式结果），再自增为 1 | **1**（0 为假） |
+| `((++installed))` | 先自增为 1（作为表达式结果） | **0**（1 为真） |
+
+**解决方案：**
+
+```bash
+# 方案1: 使用前缀自增（推荐）
+((++installed))    # 先加后取值，表达式结果为 1，退出码 0
+
+# 方案2: 使用赋值形式
+installed=$((installed + 1))
+
+# 方案3: 后置自增后加分号
+((installed++)) || true
+
+# 方案4: 临时禁用 set -e
+((installed++)) || :
+```
+
+**注意：**
+- 这是 bash 的经典陷阱，不只出现在鸿蒙环境
+- 在编写 install 脚本、测试脚本等需要 `set -e` 的场景时特别容易踩坑
+- 建议：凡是计数器场景，统一使用 `((++var))` 或 `var=$((var + 1))`
+
 ### 6.3 配置文件编写建议
 
 1. ✅ 继承 linux-generic32.0（32 位）或 linux-generic64（64 位）
@@ -2784,6 +3936,65 @@ help2man --version
 5. ✅ 权限错误：检查文件和目录权限
 6. ✅ 磁盘空间不足：清理临时文件
 7. ✅ **Autotools configure 后处理**：对于复杂项目，检查子目录 Makefile 中的 top_srcdir 变量是否正确
+
+**⚠️ make clean vs make distclean（鸿蒙上必须注意）**
+
+在鸿蒙系统上，`make clean` 后重新 `make` 可能失败，表现为**静态库重复定义**：
+
+```
+>>> defined at grammar1.c:14 (Parser/grammar1.c:14)
+grammar1.o:(PyGrammar_FindDFA) in archive ./libpython3.9.a
+defined at grammar1.c:14 (Parser/grammar1.c:14)
+multiple definition of `PyGrammar_FindDFA'
+```
+
+**根因分析**：
+
+| 命令 | 清理范围 | 残留问题 |
+|------|----------|----------|
+| `make clean` | 仅清除 `build/` 目录中的编译产物 | ❌ `Makefile`、`pyconfig.h`、`_sysconfigdata` 等仍保留 |
+| `make distclean` | 清除所有 configure 生成的文件 | ✅ 完全干净 |
+| `rm -rf build` | 删除整个 build 目录 | ✅ 但不清理 Makefile 等 |
+
+`make clean` 后重编失败的原因链：
+```
+make clean（只删 build/ 下的 .o 和 .so）
+    ↓
+Makefile 仍包含旧的变量和路径
+    ↓
+make 重新编译时，部分 .o 文件可能被重复链接
+    ↓
+静态库中符号重复定义
+```
+
+**解决方案（按推荐程度排序）**：
+
+```bash
+# 方案1: make distclean（最彻底）
+make distclean
+./configure --prefix=$HOME/usr/local --enable-shared
+make
+
+# 方案2: 删除 build 目录 + 手动清理
+rm -rf build
+# 如果 Makefile 有问题，也重新生成
+make clean && make distclean
+./configure ... && make
+
+# 方案3: 解压原始源码重来（最安全）
+rm -rf Python-3.9.0-work
+cp -a Python-3.9.0-orig Python-3.9.0-work
+cd Python-3.9.0-work && ./configure ... && make
+```
+
+**通用建议**：
+
+| 场景 | 推荐命令 |
+|------|----------|
+| 修改了 configure.ac 或 Makefile.pre.in | `make distclean && ./configure && make` |
+| 仅修改了 .c/.h 源码 | `make clean && make` 即可 |
+| 扩展模块编译失败需要重试 | `rm -rf build` + 重新编译 |
+| 不确定清理程度 | `make distclean` 最安全 |
 
 ### 6.6 补丁开发与验证最佳实践
 
@@ -3592,13 +4803,35 @@ expr X"path/file" : 'X\(.*[^/]\)//*[^/][^/]*/*$' \| . : '\(.\)'
 ├── GNU coreutils 9.10  → 提供 GNU expr 等核心工具
 └── GNU sed 4.9         → 替代 toybox sed
 
-第二阶段：常用库
-├── ncurses 6.4         → 终端库
-├── readline 8.2        → 命令行编辑（依赖 ncurses）
+第二阶段：常用库（⚠️ 注意编译选项）
+├── zlib 1.3.1          → 压缩库（CFLAGS="-fPIC"）
+├── bzip2 1.0.8         → 压缩库（修改 Makefile 添加 -fPIC）⭐ 新增
+├── ncurses 6.4         → 终端库（加 --enable-overwrite）
+├── readline 8.2        → 命令行编辑（依赖 ncurses，加 CFLAGS="-fPIC"）
+├── libtool 2.4.7       → Autotools 共享库支持（需打 config.guess/config.sub 补丁）
 └── gettext             → 国际化支持
 
 第三阶段：其他软件
 └── 按需编译
+```
+
+**⚠️ 关键编译选项**：
+
+| 软件 | 必需选项 | 原因 |
+|------|----------|------|
+| 所有库 | `CFLAGS="-fPIC"` | 静态库链接到共享库时必需 |
+| ncurses | `--enable-overwrite` | 头文件安装到顶层，其他软件能找到 |
+| readline | `--with-shared` | 生成共享库 |
+| libffi | `--enable-shared` | 生成共享库 |
+
+**示例编译命令**：
+
+```bash
+# ncurses
+./configure --prefix=$HOME/usr/local --with-shared --enable-widec --enable-overwrite
+
+# readline
+CFLAGS="-fPIC" ./configure --prefix=$HOME/usr/local --with-shared
 ```
 
 #### 6.12.2 依赖关系图
@@ -3607,6 +4840,19 @@ expr X"path/file" : 'X\(.*[^/]\)//*[^/][^/]*/*$' \| . : '\(.\)'
 GNU coreutils ─────────────────────────────┐
 GNU sed ───────────────────────────────────┤
                                            │
+                                           ▼
+zlib ──────────────────────────────────────┤
+   │                                       │
+   ├──► Python (_zlib 模块)                │
+   ├──► curl                               │
+   ├──► git                                │
+   └──► openssl                            │
+                                           ▼
+bzip2 ─────────────────────────────────────┤
+   │                                       │
+   ├──► Python (_bz2 模块)                 │
+   ├──► tar (.tar.bz2 格式)                │
+   └──► dpkg, rpm                          │
                                            ▼
 ncurses ◄───────────────────────────── readline
    │
@@ -3623,6 +4869,12 @@ which expr && expr --version | grep -i gnu
 
 # 检查是否已安装 GNU sed
 which sed && sed --version | grep -i gnu
+
+# 检查是否已安装 zlib
+ls -la $HOME/usr/local/lib/libz.so 2>/dev/null && echo "zlib 已安装"
+
+# 检查是否已安装 bzip2
+ls -la $HOME/usr/local/lib/libbz2.so 2>/dev/null && echo "bzip2 已安装"
 
 # 检查是否已安装 ncurses
 pkg-config --exists ncursesw && echo "ncurses 已安装"

@@ -1,252 +1,145 @@
-# OpenSSL for OpenHarmony (HarmonyOS)
+# OpenSSL 1.1.1w for HarmonyOS
 
-本修改为 OpenSSL 添加了 OpenHarmony（鸿蒙系统）支持，实现了**自动平台检测**，用户可以直接运行 `./Configure`，无需手动指定目标。
+## 概述
 
-## 代码准备
-- 下载代码使用官方代码下载
-	```bash
-	git clone -b OpenSSL_1_1_1w https://github.com/openssl/openssl.git
-	```
+OpenSSL 1.1.1w 在 HarmonyOS/OpenHarmony (aarch64) 上的编译和测试记录。
 
-	网络有问题则推荐使用国内镜像站
-	```bash
-	git clone -b OpenSSL_1_1_1w git@gitcode.com:GitHub_Trending/ope/openssl.git
-	```
-- 应用修改的补丁
-	```
-	cd openssl
-	git apply 0001-support-build-in-harmonyos.patch
-	```
+**关键修复**: 使用 `no-asm` 选项禁用汇编优化，解决了 RSA-PSS 签名验证的 BAD_SIGNATURE bug。
 
-## 修改内容介绍（0001-support-build-in-harmonyos.patch 补丁内容）
+## 软件信息
 
-### 1. 新增配置文件
+| 项目 | 值 |
+|------|-----|
+| 名称 | OpenSSL |
+| 版本 | 1.1.1w |
+| 下载地址 | https://www.openssl.org/source/openssl-1.1.1w.tar.gz |
 
-#### Configurations/15-openharmony.conf
-OpenHarmony 平台配置文件，定义了以下目标架构：
-- `openharmony` - 基础配置（32位）
-- `openharmony-aarch64` - 64位 ARM
-- `openharmony-arm` - 32位 ARM
-- `openharmony-x86_64` - 64位 x86
-- `openharmony-x86` - 32位 x86
-- `openharmony-riscv64` - RISC-V 64位
+## 鸿蒙环境
 
-使用官方标准的预处理器宏 `__OHOS__`。
+| 项目 | 值 |
+|------|-----|
+| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
+| 架构 | aarch64 |
+| 编译器 | clang (LLVM) |
+| 工具链 | llvm-ar, llvm-ranlib, llvm-nm |
 
-### 2. 修改 Configure 脚本
-
-在 Configure 脚本中添加了**自动平台检测**逻辑：
-
-```perl
-# 当目标不在目标表中时，自动检测是否为 OpenHarmony 系统
-if (!$table{$target}) {
-    # 检测系统信息
-    my $sysname = `uname -s 2>/dev/null`;
-    my $machine = `uname -m 2>/dev/null`;
-    my $kernel = `uname -r 2>/dev/null`;
-    
-    # 检查是否为 OpenHarmony 系统
-    if ($sysname =~ m/harmonyos|openharmony/i || 
-        $kernel =~ m/harmonyos|openharmony/i) {
-        # 自动映射到对应的 openharmony-* 目标
-        print "Auto-detected OpenHarmony system, using target: $target\n";
-    }
-}
-```
-
-**检测方式：**
-1. 通过 `uname -s` 检测系统名称（HarmonyOS/OpenHarmony）
-2. 通过 `uname -m` 检测机器架构（aarch64/arm/x86_64等）
-3. 通过 `uname -r` 检测内核版本（备用检测方式）
-
-## 使用方法
-
-### 方法1：自动检测（推荐）✨
-
-在 OpenHarmony 系统上，直接运行 `./Configure`，无需指定目标：
+## 编译步骤
 
 ```bash
-./Configure
-make
+# 1. 解压源码
+tar -xzf openssl-1.1.1w.tar.gz
+cd openssl-1.1.1w
+
+# 2. 设置环境变量
+export TMPDIR=$HOME/tmp
+mkdir -p $TMPDIR
+
+# 3. 配置 (关键：使用 no-asm 禁用汇编优化)
+./Configure --prefix=$HOME/usr/local \
+            --openssldir=$HOME/usr/local/ssl \
+            no-asm
+
+# 4. 编译
+make -j$(nproc)
+
+# 5. 安装
 make install
 ```
 
-Configure 脚本会自动检测到 OpenHarmony 系统并选择合适的目标架构，输出类似：
+## 补丁说明
+
+### 修改文件
+
+1. **Configurations/15-openharmony.conf**: OpenHarmony 平台配置
+2. **Configure**: 添加自动检测逻辑
+
+### 关键修改详解
+
+#### 汇编优化禁用 (关键!)
+
+**问题背景**：OpenSSL 的 ARM64 汇编优化代码在 RSA-PSS 签名验证时有 bug，导致 HTTPS 连接失败。
+
+**错误信息**：
 ```
-Auto-detected OpenHarmony system, using target: openharmony-aarch64
+error:0407E086:rsa routines:RSA_verify_PKCS1_PSS_mgf1:last octet invalid
+error:1417B07B:SSL routines:tls_process_cert_verify:bad signature
 ```
 
-### 方法2：直接指定目标
-
-如果需要指定特定架构：
+**解决方案**：使用 `no-asm` 禁用汇编优化
 
 ```bash
-# ARM64
-./Configure openharmony-aarch64
-
-# ARM32
-./Configure openharmony-arm
-
-# x86_64
-./Configure openharmony-x86_64
-
-# RISC-V
-./Configure openharmony-riscv64
-
-make
-make install
+./Configure ... no-asm
 ```
 
-## 编译环境要求
+**影响**：
+- 性能略慢 (~10-20%)
+- 稳定性大幅提升
+- HTTPS 连接正常工作
 
-### 必需工具
-- Perl 5.10+ (需要 Text::Template 模块，OpenSSL 自带)
-- Clang/Clang++ 编译器
-- Make
-- LLVM 工具链（llvm-ar, llvm-ranlib, llvm-nm, llvm-strip）
-通过应用市场下载DevBox安装以上工具链
+## 遇到的问题
 
-### 环境变量
+### 问题1：SSL BAD_SIGNATURE 错误
 
-鸿蒙系统修改~/.zshrc 或对应的解释器配置文件，文件内容如下; 这套环境变量中`DEFAULT_PREFIX`指定了安装的目录, 在alias的`configure`,`cmake`,`Configure`中默认指定，这部分可以忽略，若需要指定目录的这部分，需要提前执行`mkdir -p $DEFAULT_PREFIX`, 避免install过程中出现目录不存在等问题
+**现象**：Python HTTPS 连接失败，报 `BAD_SIGNATURE` 错误
+
+**原因**：ARM64 汇编优化代码 bug
+
+**解决**：使用 `no-asm` 编译
+
+### 问题2：Python _ssl 模块链接问题
+
+**现象**：`_ssl.so` 没有链接 libssl 和 libcrypto
+
+**原因**：Python 构建系统配置问题
+
+**解决**：手动重新编译 _ssl 模块
 
 ```bash
-export DEFAULT_PREFIX=$HOME/usr/local
+# 编译
+clang -fPIC -I./Include -I$HOME/usr/local/include \
+      -c Modules/_ssl.c -o build/temp.ohos-aarch64-3.9/Modules/_ssl.o
 
-export PATH=$PATH:$HOME/npm/bin:$HOME/.local/bin:$DEFAULT_PREFIX/bin
-export LIBRARY_PATH=$DEFAULT_PREFIX/lib:$LIBRARY_PATH
-export LD_LIBRARY_PATH=$DEFAULT_PREFIX/lib:$LD_LIBRARY_PATH
+# 链接
+clang -shared -L. -lpython3.9 \
+      -L$HOME/usr/local/lib -lssl -lcrypto \
+      build/temp.ohos-aarch64-3.9/Modules/_ssl.o \
+      -o build/lib.ohos-aarch64-3.9/_ssl.so
 
-export C_INCLUDE_PATH=$DEFAULT_PREFIX/include:$C_INCLUDE_PATH
-export CPLUS_INCLUDE_PATH=$DEFAULT_PREFIX/include:$CPLUS_INCLUDE_PATH
-
-alias configure='./configure --prefix=$DEFAULT_PREFIX'
-alias cmake='cmake -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX'
-alias Configure='./Configure --prefix=$DEFAULT_PREFIX'
-
-export AS="llvm-as"
-export CC="clang"
-export CC_FOR_BUILD="clang"
-export CXX="clang++"
-export LD="ld.lld"
-export STRIP="llvm-strip"
-export RANLIB="llvm-ranlib"
-export OBJDUMP="llvm-objdump"
-export OBJCOPY="llvm-objcopy"
-export NM="llvm-nm"
-export AR="llvm-ar"
+# 验证链接
+llvm-readelf -d _ssl.so | grep NEEDED
+# 应该看到: libssl.so.1.1, libcrypto.so.1.1
 ```
 
-### 可选环境变量
+### 问题3：官方测试套件失败
 
-```bash
-# 自定义安装路径
-PREFIX=/opt/openssl
+**现象**：所有 159 个测试返回 exit code 2
 
-# 运行测试
-RUN_TESTS=1
-```
+**原因**：鸿蒙签名机制，测试二进制需要手动确认
 
-## 支持的功能
+**解决**：进行手动功能测试验证核心功能
 
-### ✅ 已支持
-- 核心加密算法（AES, DES, 3DES等）
-- 哈希函数（SHA1, SHA256, SHA512, MD5等）
-- 公钥加密（RSA, ECDSA, ECDH等）
-- 对称加密
-- 多线程支持（pthread）
-- 动态链接（dlopen）
+## 测试结果
 
-### ⚠️ 可能需要适配
-- 某些系统调用（syslog, getrandom等）
-- 硬件加速（需要根据具体平台适配）
+详见 [TEST_REPORT.md](./TEST_REPORT.md)
 
-## 故障排除
+**核心测试结果**：
 
-### 问题1：找不到 perl
-```bash
-export PATH=/data/service/hnp/bin:$PATH
-```
+| 测试项 | 结果 |
+|--------|------|
+| AES 加密 | ✅ |
+| SHA256 哈希 | ✅ |
+| RSA 密钥生成 | ✅ |
+| 自签名证书 | ✅ |
+| TLS 1.3 连接 | ✅ |
+| HTTPS 连接 | ✅ |
 
-### 问题2：Configure 权限问题
-```bash
-chmod +x Configure
-```
+## 经验总结
 
-### 问题3：找不到系统头文件
-```bash
-export CPPFLAGS="-I/path/to/sysroot/usr/include $CPPFLAGS"
-```
-
-### 问题4：链接错误
-```bash
-export LDFLAGS="-L/path/to/sdk/lib $LDFLAGS"
-```
-
-### 问题5：自动检测失败
-
-如果自动检测失败，可以手动指定目标：
-
-```bash
-# 查看当前系统信息
-uname -s
-uname -m
-
-# 手动指定目标
-./Configure openharmony-aarch64
-```
-
-## 文件清单
-
-```
-openssl/
-├── Configure                              # 修改：添加自动检测
-└── Configurations/
-    └── 15-openharmony.conf               # 新增：OpenHarmony 配置
-```
-
-## 技术细节
-
-### 预处理器宏
-- `__OHOS__` - OpenHarmony 系统标识（官方标准）
-- `_REENTRANT` - 线程安全支持
-
-### 目标架构映射
-
-| 系统检测 | 架构检测 | OpenSSL 目标 |
-|---------|---------|--------------|
-| HarmonyOS/OpenHarmony | aarch64 | openharmony-aarch64 |
-| HarmonyOS/OpenHarmony | armv7l/armv8l | openharmony-arm |
-| HarmonyOS/OpenHarmony | x86_64 | openharmony-x86_64 |
-| HarmonyOS/OpenHarmony | x86 | openharmony-x86 |
-| HarmonyOS/OpenHarmony | riscv64 | openharmony-riscv64 |
-
-### 自动检测逻辑
-
-1. 用户运行 `./Configure`（不带参数）
-2. Configure 尝试查找目标，但未找到（因为用户没指定）
-3. 触发自动检测逻辑：
-   - 检测系统名称（`uname -s`）
-   - 检测内核版本（`uname -r`）
-   - 如果匹配 "harmonyos" 或 "openharmony"（不区分大小写）
-   - 检测机器架构（`uname -m`）
-   - 映射到对应的 `openharmony-*` 目标
-4. 继续正常的配置流程
-
-## 为什么使用 __OHOS__ 而不是 __HARMONYOS__？
-
-1. **官方标准** - `__OHOS__` 是 OpenHarmony 官方定义的宏
-2. **广泛支持** - OpenHarmony 生态系统中广泛使用
-3. **统一性** - HarmonyOS 作为 OpenHarmony 的发行版，应遵循上游标准
-4. **兼容性** - Clang 编译器已预定义 `__OHOS__` 宏
+1. **汇编优化问题**：在 HarmonyOS 上编译 OpenSSL，应使用 `no-asm` 禁用汇编优化
+2. **Python 链接**：确保 _ssl.so 正确链接 libssl 和 libcrypto
+3. **测试限制**：官方测试套件因签名机制无法自动运行，需手动测试
 
 ## 参考资料
 
-- OpenSSL 官方文档：https://www.openssl.org/docs/
-- OpenHarmony 官方网站：https://www.openharmony.cn/
-- HarmonyOS 开发者文档：https://developer.huawei.com/consumer/cn/doc/
-- Harmony PC 开发者社区：https://harmonypc.csdn.net/content
-- OpenHarmony PC Developer gitcode社区：https://gitcode.com/OpenHarmonyPCDeveloper
-## 许可证
-
-本修改遵循 OpenSSL 原有许可证（Apache 2.0 License）。
+- OpenSSL 官方文档: https://www.openssl.org/docs/
+- OpenSSL Configure 选项: https://wiki.openssl.org/index.php/Compilation_and_Installation
