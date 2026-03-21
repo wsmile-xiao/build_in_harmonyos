@@ -778,6 +778,144 @@ clang -shared -L. -lpython3.9 sha256.o -o _sha256.so
 
 **适用模块**：`_md5`, `_sha1`, `_sha256`, `_sha512`, `_sha3`, `_blake2`, `math`, `cmath`
 
+**问题21：Python curses 模块编译失败（宽字符函数未定义）** ⭐ 重要
+
+**现象**：
+```
+error: unknown type name 'cchar_t'; did you mean 'wchar_t'?
+error: call to undeclared function 'setcchar'
+error: call to undeclared function 'mvwadd_wch'
+```
+
+**根因分析**：
+
+ncurses 的宽字符函数是条件编译的：
+
+```c
+#ifndef NCURSES_WIDECHAR
+#if defined(_XOPEN_SOURCE_EXTENDED) || (defined(_XOPEN_SOURCE) && (_XOPEN_SOURCE >= 500))
+#define NCURSES_WIDECHAR 1
+#else
+#define NCURSES_WIDECHAR 0  // 默认关闭
+#endif
+#endif
+```
+
+**各平台差异**：
+
+| 平台 | C库 | `_XOPEN_SOURCE` 状态 | 需要添加宏？ |
+|------|-----|---------------------|--------------|
+| Linux | glibc | 默认定义且 >= 500 | ❌ 不需要 |
+| macOS | - | 默认不定义 | ✅ 需要 |
+| HarmonyOS | musl | 未定义 | ✅ 需要 |
+
+**解决方案**：
+
+**方案 A：修改 Python setup.py（推荐）**
+
+Python 的 `setup.py` 原本只在 macOS 上添加 `_XOPEN_SOURCE_EXTENDED`：
+
+```python
+# 原代码
+if MACOS:
+    curses_defines.append(('_XOPEN_SOURCE_EXTENDED', '1'))
+```
+
+需要修改为：
+
+```python
+# 修改后
+if MACOS or OHOS:
+    curses_defines.append(('_XOPEN_SOURCE_EXTENDED', '1'))
+```
+
+**补丁文件**：`patches/0009-setup.py-curses-XOPEN_SOURCE_EXTENDED.patch`
+
+**方案 B：手动编译时添加宏**
+
+```bash
+# 编译 _curses 模块
+clang -c -fPIC \
+    -DHAVE_NCURSESW=1 \
+    -D_XOPEN_SOURCE_EXTENDED \   # ⭐ 关键
+    -I$HOME/usr/local/include \
+    -I./Include -I. \
+    Modules/_cursesmodule.c \
+    -o _cursesmodule.o
+
+clang -shared -L. -lpython3.9 \
+    _cursesmodule.o \
+    $HOME/usr/local/lib/libncursesw.a \
+    -o _curses.so
+```
+
+**相关文档**：
+- Python 编译指南：`build_in_harmonyos/p/python/3.9.0/README.md` 第六章
+- ncurses 编译指南：`build_in_harmonyos/n/ncurses/6.4/README.md`
+
+**问题22：共享库符号链接导致系统 Shell 崩溃** ⭐⭐⭐ 严重
+
+**现象**：
+```
+Error loading shared library libncursesw.so.6: Permission denied (needed by /bin/zsh)
+```
+
+**所有终端无法启动，系统完全不可用！**
+
+**根因分析**：
+
+| 因素 | 说明 |
+|------|------|
+| zsh 依赖 | 鸿蒙的 `/bin/zsh` 动态链接 `libncursesw.so.6` |
+| 符号链接断裂 | `libncursesw.so` 指向 `libncursesw.so.6`，但后者不存在 |
+| 用户库路径 | 系统在加载库时找到用户目录下的损坏链接 |
+
+**事故链**：
+```
+用户编译 ncurses 共享库
+  → 创建 libncursesw.so.6.4
+  → 创建符号链接 libncursesw.so → libncursesw.so.6
+  → 但 libncursesw.so.6 指向的目标不存在
+  → zsh 启动时加载 libncursesw.so.6 失败
+  → 所有终端无法使用
+```
+
+**解决方案（预防）**：
+
+**强烈建议：编译静态库而非共享库**
+
+```bash
+# ncurses 静态库编译（推荐）
+./configure --prefix=$HOME/usr/local \
+    --without-shared \       # 不生成共享库
+    --enable-widec \
+    --enable-overwrite
+```
+
+**解决方案（恢复）**：
+
+在新终端中执行：
+```bash
+cd /storage/Users/currentUser/usr/local/lib
+ln -sf libncursesw.so.6.4 libncursesw.so.6
+```
+
+或删除共享库，只保留静态库：
+```bash
+rm -f $HOME/usr/local/lib/libncursesw.so*
+rm -f $HOME/usr/local/lib/libpanelw.so*
+```
+
+**经验总结**：
+
+| 经验 | 说明 |
+|------|------|
+| 静态库优先 | 对于系统关键依赖（ncurses、readline），优先编译静态库 |
+| 检查系统依赖 | 编译前检查系统 shell 依赖哪些库 |
+| 隔离安装目录 | 使用独立的 prefix 目录，避免影响系统 |
+
+**详细文档**：`build_in_harmonyos/n/ncurses/6.4/README.md`
+
 **问题25：Python subprocess 子进程执行被 SELinux 拦截（域转换问题）** ⭐ 重要
 
 **现象：**
@@ -1557,6 +1695,64 @@ alias readlink='/bin/readlink'
 3. 清理损坏的软链接必须使用 toybox 的 `rm`
 4. **SELinux 限制无法在用户空间代码中绕过**，必须使用具有正确上下文的系统工具
 
+**创建软链接受限问题：**
+
+除了访问软链接受限外，在某些场景下，用户进程**创建软链接也会失败**：
+
+```bash
+# 在用户安装目录创建软链接可能失败
+ln -s ncursesw/curses.h curses.h
+# 错误: ln: cannot create symbolic link 'curses.h': Permission denied
+```
+
+**受影响的典型场景：**
+
+| 场景 | 问题描述 | 影响 |
+|------|----------|------|
+| ncurses 头文件安装 | `make install` 尝试用 `ln -s` 创建头链接 | 头文件缺失 |
+| 软件安装脚本 | 安装脚本使用 `ln -sf` 创建软链接 | 安装失败 |
+| 库文件版本管理 | `ln -s libxxx.so.1.0 libxxx.so` | 链接失败 |
+
+**通用解决方案：使用 `cp` 复制代替 `ln -s` 软链接**
+
+```bash
+# 不要使用软链接
+ln -s source.txt link        # ❌ 可能失败
+
+# 使用复制代替
+cp source.txt link           # ✅ 成功
+
+# 对于目录中的多个文件
+for f in ncursesw/*.h; do
+    cp "$f" "$(basename $f)"
+done
+```
+
+**软件编译时的规避方法：**
+
+1. **使用 `--enable-overwrite` 等选项**：让 configure 直接复制文件而非创建软链接
+   ```bash
+   # ncurses 示例
+   ./configure --enable-overwrite  # 头文件直接安装到顶层
+   ```
+
+2. **手动复制替代软链接**：安装后手动复制需要的文件
+   ```bash
+   cd $HOME/usr/local/include
+   cp ncursesw/curses.h curses.h
+   cp ncursesw/ncurses.h ncurses.h
+   ```
+
+3. **修改 Makefile/install 脚本**：将 `ln -s` 替换为 `cp`
+
+**验证文件类型：**
+```bash
+# 检查是否是真实文件（而非软链接）
+file $HOME/usr/local/include/curses.h
+# 应输出: ASCII text
+# 而非: symbolic link to ...
+```
+
 **toybox ln -sf 的特殊问题：**
 
 ```bash
@@ -1650,6 +1846,44 @@ mkdir -p $TMPDIR
 | expr | 不支持 `\|` 复合正则 | 实现完整 POSIX expr |
 | sed | 复杂脚本支持不完整 | 增强 GNU 兼容性 |
 | ln -sf | 创建带随机后缀的文件 | 修复 `-f` 强制覆盖逻辑 |
+
+**6. 共享库安装和动态链接优化** ⭐ 新增
+
+| 问题 | 当前状态 | 建议改进 |
+|------|----------|----------|
+| `ln -s` 创建符号链接受限 | SELinux 返回 EACCES 或失败 | 提供 `cp` 替代方案的安装脚本选项 |
+| 共享库符号链接导致加载失败 | 动态链接器找不到 `.so` | 安装时使用实际文件而非符号链接 |
+| `ln -sf` 创建乱码文件 | 创建带随机后缀的文件 | 修复 `-f` 强制覆盖逻辑 |
+
+**建议理由**：
+- gdbm 编译时发现 `ln -s` 创建符号链接后，动态链接器无法找到共享库
+- 使用 `cp` 复制实际文件替代符号链接后，问题解决
+- 这是许多 autotools 项目安装脚本的常见问题
+
+**解决方案示例**：
+```bash
+# 安装后修复符号链接
+cd $PREFIX/lib
+rm -f libgdbm.so libgdbm.so.6
+cp libgdbm.so.6.0.0 libgdbm.so
+cp libgdbm.so.6.0.0 libgdbm.so.6
+```
+
+**7. 官方测试套件环境配置优化** ⭐ 新增
+
+| 问题 | 当前状态 | 建议改进 |
+|------|----------|----------|
+| `make check` 测试程序找不到共享库 | 需手动设置 LD_LIBRARY_PATH | 自动在测试脚本中设置库路径 |
+| libtool 包装脚本在 HarmonyOS 上异常 | 动态链接环境配置问题 | 优化 libtool 对 musl 的兼容性 |
+
+**建议理由**：
+- gdbm 官方测试套件 33 个测试中有 27 个通过，6 个失败
+- 失败测试中 4 个是因为测试程序找不到共享库
+- 当手动设置正确的 LD_LIBRARY_PATH 后，测试可以通过
+
+**解决方案建议**：
+1. 在 `tests/atlocal` 或类似测试配置文件中自动设置 `LD_LIBRARY_PATH`
+2. 改进 libtool 包装脚本对 HarmonyOS 的支持
 
 #### 3.7.7 SELinux 域转换对子进程执行 SDK 二进制的限制 ⭐ 重要
 

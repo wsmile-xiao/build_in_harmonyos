@@ -4,6 +4,53 @@
 
 本文档记录了 ncurses 6.4 在鸿蒙系统上的编译适配过程，包括遇到的问题、解决方案和注意事项。
 
+---
+
+## ⚠️ 重要风险提示
+
+### 共享库风险
+
+**在鸿蒙系统上编译 ncurses 共享库存在严重风险！**
+
+| 风险 | 说明 | 后果 |
+|------|------|------|
+| **系统 Shell 崩溃** | 鸿蒙的 zsh 依赖 `libncursesw.so.6` | 符号链接问题导致所有终端无法使用 |
+| **库冲突** | 用户编译的共享库可能与系统库冲突 | 系统不稳定或崩溃 |
+| **恢复困难** | Shell 崩溃后无法执行命令 | 需要新终端或重启恢复 |
+
+### 推荐方案：编译静态库
+
+**强烈建议在鸿蒙系统上只编译静态库**，避免共享库问题：
+
+```bash
+./configure --prefix=$HOME/usr/local \
+    --without-shared \        # 关键：不生成共享库
+    --enable-widec \
+    --enable-overwrite
+```
+
+### 如果必须使用共享库
+
+1. 确保符号链接正确：
+   ```bash
+   cd $HOME/usr/local/lib
+   ln -sf libncursesw.so.6.4 libncursesw.so.6
+   ```
+
+2. 测试前先验证 shell 正常：
+   ```bash
+   # 在新终端测试
+   echo "Shell 正常"
+   ```
+
+3. 如遇崩溃，立即在新终端恢复：
+   ```bash
+   cd /storage/Users/currentUser/usr/local/lib
+   ln -s libncursesw.so.6.4 libncursesw.so.6
+   ```
+
+---
+
 ## 软件信息
 
 - **软件名称**: ncurses
@@ -36,13 +83,63 @@ patch -p1 < 0001-port-for-ohos.patch
 
 ### 3. 配置
 
+#### 方案 A：编译静态库（推荐）
+
+**这是鸿蒙系统上的推荐方式**，不会影响系统稳定性：
+
 ```bash
 export TMPDIR=$HOME/tmp
 export PATH="$HOME/usr/local/bin:$PATH"  # 确保使用 GNU 工具
+
 ./configure --prefix=$HOME/usr/local \
-    --with-shared \
+    --without-shared \       # ⭐ 关键：不生成共享库
+    --without-cxx \          # 不编译 C++ 绑定（可选）
+    --without-cxx-binding \
+    --enable-widec \         # 启用宽字符支持
+    --enable-overwrite \     # 头文件安装到顶层
+    --without-debug \
+    --without-profile \
+    --without-ada \
+    --without-manpages \
+    --without-progs \
+    --without-tests
+```
+
+**生成的文件**：
+```
+$HOME/usr/local/lib/
+├── libncursesw.a    # 主库（静态）
+├── libpanelw.a      # 面板库（静态）
+├── libmenuw.a       # 菜单库（静态）
+└── libformw.a       # 表单库（静态）
+```
+
+#### 方案 B：编译共享库（有风险）
+
+**⚠️ 警告：此方案可能导致系统 Shell 崩溃！**
+
+```bash
+export TMPDIR=$HOME/tmp
+export PATH="$HOME/usr/local/bin:$PATH"
+
+./configure --prefix=$HOME/usr/local \
+    --with-shared \          # 生成共享库
     --enable-widec \
     --enable-overwrite
+```
+
+**风险说明**：
+- 鸿蒙系统的 `/bin/zsh` 依赖 `libncursesw.so.6`
+- 如果共享库符号链接不完整，会导致 zsh 无法启动
+- **所有终端将无法使用**，需要在新终端中恢复
+
+**如果选择共享库，必须确保符号链接正确**：
+```bash
+cd $HOME/usr/local/lib
+# 检查符号链接
+ls -la libncursesw.so*
+# 如果缺少 libncursesw.so.6，创建它
+ln -sf libncursesw.so.6.4 libncursesw.so.6
 ```
 
 **⚠️ 重要：`--enable-overwrite` 选项**
@@ -308,5 +405,261 @@ mkdir -p $TMPDIR
 
 ## 版本历史
 
+- 2026-03-21: 添加 ln -s 权限问题解决方案，修复头文件安装问题
+- 2026-03-21: 添加静态库编译方案和风险提示，添加 Python curses 模块静态链接说明
 - 2026-03-15: 更新问题分析，明确 toybox expr bug 为根本原因
 - 2026-03-14: 初始版本，完成 ncurses 6.4 鸿蒙适配
+
+---
+
+## 鸿蒙系统特有问题及解决方案
+
+### 问题 3: ln -s 创建软链接权限被拒绝
+
+**现象**:
+```bash
+$ ln -s ncursesw/curses.h curses.h
+ln: cannot create symbolic link 'curses.h' to 'ncursesw/curses.h': Permission denied
+```
+
+**根本原因**:
+- 鸿蒙系统的 SELinux/MAC 安全策略限制了用户进程创建软链接的权限
+- 这是**鸿蒙系统的通用限制**，不是 ncurses 特有的问题
+
+**详细分析**: 参见 `build_in_harmonyos/SKILL.md` 第 3.7.3 节"SELinux 策略对软链接的限制"
+
+**解决方案**: 使用 `cp` 复制代替 `ln -s` 软链接
+
+```bash
+# 不要使用软链接
+# ln -s ncursesw/curses.h curses.h  # ❌ 会失败
+
+# 使用复制代替
+cp ncursesw/curses.h curses.h  # ✅ 正常工作
+cp ncursesw/ncurses.h ncurses.h
+cp ncursesw/term.h term.h
+cp ncursesw/termcap.h termcap.h
+cp ncursesw/unctrl.h unctrl.h
+cp ncursesw/panel.h panel.h
+cp ncursesw/form.h form.h
+cp ncursesw/menu.h menu.h
+cp ncursesw/eti.h eti.h
+cp ncursesw/ncurses_dll.h ncurses_dll.h
+```
+
+**推荐方法**: 使用 `--enable-overwrite` 选项，让 configure 自动处理
+
+```bash
+./configure --prefix=$HOME/usr/local \
+    --without-shared \
+    --enable-widec \
+    --enable-overwrite    # ⭐ 头文件直接安装到 include/
+```
+
+**注意事项**:
+- 复制的文件是独立的，不会随源文件更新
+- 如果重新安装 ncurses，需要重新复制头文件
+- `--enable-overwrite` 选项会自动处理这个问题（推荐）
+
+### 问题 4: 头文件 include 路径不正确
+
+**现象**:
+编译 Python 时报错：
+```
+fatal error: curses.h: No such file or directory
+```
+
+或者：
+```
+error: 'cchar_t' undeclared
+```
+
+**原因分析**:
+
+1. **头文件位置问题**:
+   - 如果不使用 `--enable-overwrite`，头文件安装在 `include/ncursesw/` 子目录
+   - Python 的 `#include <curses.h>` 找不到文件
+
+2. **头文件内容问题**:
+   - `include/ncursesw/curses.h` 中的 include 路径是 `#include <ncursesw/xxx.h>`
+   - 而顶层 `include/curses.h` 应该是 `#include <xxx.h>`
+
+**解决方案**:
+
+**方案 A: 使用 `--enable-overwrite` 选项（推荐）**
+
+```bash
+./configure --prefix=$HOME/usr/local \
+    --without-shared \
+    --enable-widec \
+    --enable-overwrite    # ⭐ 头文件自动安装到顶层
+```
+
+**方案 B: 手动复制头文件**
+
+如果不使用 `--enable-overwrite`，需要手动处理：
+
+```bash
+cd $HOME/usr/local/include
+
+# 方法1: 复制文件（推荐，因为 ln -s 会失败）
+cp ncursesw/curses.h curses.h
+cp ncursesw/ncurses.h ncurses.h
+# ... 其他头文件
+
+# 方法2: 修复 include 路径（需要修改文件内容）
+# 将 curses.h 中的 #include <ncursesw/xxx.h> 改为 #include <xxx.h>
+sed -i 's|#include <ncursesw/|#include <|g' curses.h
+```
+
+**验证头文件正确性**:
+```bash
+# 检查 include 路径
+grep -n "#include" $HOME/usr/local/include/curses.h | head -10
+
+# 应该看到类似：
+# 89:#include <ncurses_dll.h>
+# 而不是：
+# 89:#include <ncursesw/ncurses_dll.h>
+```
+
+### 完整的清理和重新安装流程
+
+如果之前安装有问题，可以按以下步骤清理重装：
+
+```bash
+# 1. 清理旧的库文件
+cd $HOME/usr/local/lib
+rm -f libncurses* libcurses* libpanel* libmenu* libform* libtic* libtinfo*
+rm -f *.so*  # 清理共享库残留
+
+# 2. 清理旧的头文件
+cd $HOME/usr/local/include
+rm -f curses.h ncurses.h ncurses_dll.h term.h termcap.h unctrl.h eti.h form.h menu.h panel.h
+rm -rf ncursesw
+
+# 3. 重新编译安装（使用正确的选项）
+cd /path/to/ncurses-6.4
+make distclean  # 清理编译产物
+
+./configure --prefix=$HOME/usr/local \
+    --without-shared \
+    --enable-widec \
+    --enable-overwrite \
+    --without-debug \
+    --without-profile \
+    --without-ada \
+    --without-manpages \
+    --without-progs \
+    --without-tests \
+    --without-cxx \
+    --without-cxx-binding
+
+make -j$(nproc)
+make install
+
+# 4. 验证安装
+ls -la $HOME/usr/local/lib/libncursesw.a
+ls -la $HOME/usr/local/include/curses.h
+grep -n "#include" $HOME/usr/local/include/curses.h | head -5
+```
+
+---
+
+## 附录：Python curses 模块编译指南
+
+### 问题：宽字符函数未定义
+
+Python 编译 `_curses` 模块时可能报错：
+```
+error: unknown type name 'cchar_t'; did you mean 'wchar_t'?
+error: call to undeclared function 'setcchar'
+error: call to undeclared function 'wadd_wch'
+```
+
+### 原因分析
+
+ncurses 的宽字符函数（`cchar_t`、`setcchar`、`wadd_wch` 等）是**条件编译**的：
+
+```c
+#if defined(_XOPEN_SOURCE_EXTENDED) || (defined(_XOPEN_SOURCE) && (_XOPEN_SOURCE - 0 >= 500))
+#define NCURSES_WIDECHAR 1
+```
+
+| 平台 | C库 | `_XOPEN_SOURCE` 状态 | 需要添加宏？ |
+|------|-----|---------------------|--------------|
+| Linux | glibc | 默认定义且 >= 500 | ❌ 不需要 |
+| macOS | - | 默认不定义 | ✅ 需要 |
+| HarmonyOS | musl | 未定义 | ✅ 需要 |
+
+### 解决方案
+
+**方案 A：修改 Python setup.py（推荐）**
+
+Python 补丁 `0009-setup.py-curses-XOPEN_SOURCE_EXTENDED.patch` 已修改 `setup.py`：
+
+```python
+if MACOS or OHOS:
+    curses_defines.append(('_XOPEN_SOURCE_EXTENDED', '1'))
+```
+
+**方案 B：手动编译时添加宏**
+
+```bash
+clang -c -fPIC \
+    -DHAVE_NCURSESW=1 \
+    -D_XOPEN_SOURCE_EXTENDED \   # ⭐ 关键：启用宽字符函数
+    -D_XOPEN_SOURCE=600 \
+    -I$HOME/usr/local/include \
+    -I./Include -I. \
+    Modules/_cursesmodule.c \
+    -o _cursesmodule.o
+```
+
+### 编译命令
+
+```bash
+# 编译 _curses 模块
+clang -c -fPIC \
+    -DHAVE_NCURSESW=1 \
+    -D_XOPEN_SOURCE_EXTENDED \
+    -D_XOPEN_SOURCE=600 \
+    -I$HOME/usr/local/include \
+    -I./Include -I. \
+    Modules/_cursesmodule.c \
+    -o _cursesmodule.o
+
+# 静态链接
+clang -shared -L. -lpython3.9 \
+    _cursesmodule.o \
+    $HOME/usr/local/lib/libncursesw.a \
+    -o _curses.so
+
+# 编译 _curses_panel 模块
+clang -c -fPIC \
+    -DHAVE_NCURSESW=1 \
+    -D_XOPEN_SOURCE_EXTENDED \
+    -I$HOME/usr/local/include \
+    -I./Include -I. \
+    Modules/_curses_panel.c \
+    -o _curses_panel.o
+
+# 静态链接
+clang -shared -L. -lpython3.9 \
+    _curses_panel.o \
+    $HOME/usr/local/lib/libpanelw.a \
+    $HOME/usr/local/lib/libncursesw.a \
+    -o _curses_panel.so
+```
+
+### 关键点说明
+
+| 要点 | 说明 |
+|------|------|
+| `-D_XOPEN_SOURCE_EXTENDED` | 必须添加，否则 `cchar_t`、`setcchar` 等宽字符类型和函数未定义 |
+| 静态链接顺序 | `libpanelw.a` 必须在 `libncursesw.a` 之前 |
+| 无运行时依赖 | 静态链接后，不依赖系统 ncurses 共享库 |
+
+### 详细文档
+
+Python 编译完整指南：`build_in_harmonyos/p/python/3.9.0/README.md`

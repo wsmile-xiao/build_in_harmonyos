@@ -799,6 +799,187 @@ clang $LDFLAGS build/math.o Modules/_math.o -lm -o build/math.so
 4. **BLDSHARED ≠ LDSHARED**：构建主库和构建插件的链接命令必须分开，否则循环依赖
 5. **sandbox 签名是最隐蔽的问题**：不报明确错误信息，需要深入排查才能定位根因
 6. **补丁顺序很重要**：0001（configure.ac）必须先于 0007（Makefile.pre.in），因为两者同时被 autoconf 处理
+7. **共享库风险**：ncurses 等系统依赖的共享库，编译时应优先选择静态库，避免符号链接问题导致系统 shell 崩溃
+8. **宽字符宏是隐蔽的**：`_XOPEN_SOURCE_EXTENDED` 宏对 ncurses 宽字符函数至关重要，缺少会导致 `cchar_t` 等类型未定义
+
+---
+
+## 六、curses 模块静态链接编译
+
+### 6.1 问题背景
+
+Python 的 `_curses` 和 `_curses_panel` 模块在鸿蒙系统上编译存在以下问题：
+
+| 问题 | 原因 | 影响 |
+|------|------|------|
+| setup.py 路径硬编码 | 硬编码 `/usr/include/ncursesw` | 找不到头文件 |
+| 宽字符函数未定义 | 缺少 `_XOPEN_SOURCE_EXTENDED` | `cchar_t`、`setcchar` 等未定义 |
+| 共享库链接风险 | 鸿蒙 zsh 依赖 `libncursesw.so.6` | 符号链接问题导致系统崩溃 |
+
+### 6.2 `_XOPEN_SOURCE_EXTENDED` 问题详解
+
+**问题现象：**
+
+编译 `_curses` 模块时报错：
+```
+error: unknown type name 'cchar_t'; did you mean 'wchar_t'?
+error: call to undeclared function 'setcchar'
+error: call to undeclared function 'wadd_wch'
+```
+
+**根本原因：**
+
+ncurses 的宽字符函数是条件编译的：
+```c
+#if defined(_XOPEN_SOURCE_EXTENDED) || (defined(_XOPEN_SOURCE) && (_XOPEN_SOURCE - 0 >= 500))
+#define NCURSES_WIDECHAR 1
+```
+
+各平台情况：
+
+| 平台 | C库 | `_XOPEN_SOURCE` 状态 | 需要添加宏？ |
+|------|-----|---------------------|--------------|
+| Linux | glibc | 默认定义且 >= 500 | ❌ 不需要 |
+| macOS | - | 默认不定义 | ✅ 需要 |
+| HarmonyOS | musl | 未定义 | ✅ 需要 |
+
+**解决方案：**
+
+补丁 `0009-setup.py-curses-XOPEN_SOURCE_EXTENDED.patch` 修改了 `setup.py`：
+
+```python
+# 原代码（只在 macOS 上添加宏）
+if MACOS:
+    curses_defines.append(('_XOPEN_SOURCE_EXTENDED', '1'))
+
+# 修改后（macOS 和 HarmonyOS 都添加宏）
+if MACOS or OHOS:
+    curses_defines.append(('_XOPEN_SOURCE_EXTENDED', '1'))
+```
+
+### 6.3 推荐方案：静态链接
+
+**强烈建议使用静态链接**，避免共享库问题影响系统稳定性。
+
+#### 步骤 1：编译 ncurses 静态库
+
+```bash
+cd ncurses-6.4
+./configure --prefix=$HOME/usr/local \
+    --without-shared \       # ⭐ 关键：不生成共享库
+    --without-cxx \
+    --enable-widec \         # 启用宽字符支持
+    --enable-overwrite       # 头文件安装到顶层
+make && make install.libs
+```
+
+生成的静态库：
+- `libncursesw.a` - 主库
+- `libpanelw.a` - 面板库
+
+#### 步骤 2：编译 _curses 模块
+
+```bash
+cd Python-3.9.0-work
+
+# 编译 _cursesmodule.c
+clang -c -fPIC \
+    -DHAVE_NCURSESW=1 \
+    -D_XOPEN_SOURCE_EXTENDED \   # ⭐ 关键：启用宽字符函数
+    -D_XOPEN_SOURCE=600 \
+    -I$HOME/usr/local/include \
+    -I./Include -I. \
+    Modules/_cursesmodule.c \
+    -o build/temp.ohos-aarch64-3.9/_cursesmodule.o
+
+# 静态链接
+clang -shared -L. -lpython3.9 \
+    build/temp.ohos-aarch64-3.9/_cursesmodule.o \
+    $HOME/usr/local/lib/libncursesw.a \   # 静态链接
+    -o build/lib.ohos-aarch64-3.9/_curses.so
+```
+
+#### 步骤 3：编译 _curses_panel 模块
+
+```bash
+# 编译 _curses_panel.c
+clang -c -fPIC \
+    -DHAVE_NCURSESW=1 \
+    -D_XOPEN_SOURCE_EXTENDED \
+    -I$HOME/usr/local/include \
+    -I./Include -I. \
+    Modules/_curses_panel.c \
+    -o build/temp.ohos-aarch64-3.9/_curses_panel.o
+
+# 静态链接（注意顺序：panel 在前，ncurses 在后）
+clang -shared -L. -lpython3.9 \
+    build/temp.ohos-aarch64-3.9/_curses_panel.o \
+    $HOME/usr/local/lib/libpanelw.a \
+    $HOME/usr/local/lib/libncursesw.a \
+    -o build/lib.ohos-aarch64-3.9/_curses_panel.so
+```
+
+### 6.3 验证
+
+```bash
+./python3.9 -c "
+import _curses
+import _curses_panel
+import curses
+print('✓ curses 模块正常')
+print(f'ncurses 版本: {curses.ncurses_version}')
+"
+```
+
+### 6.4 关键编译选项说明
+
+| 选项 | 作用 |
+|------|------|
+| `-DHAVE_NCURSESW=1` | 指定使用 ncurses 宽字符版本 |
+| `-D_XOPEN_SOURCE_EXTENDED` | 启用 X/Open 宽字符扩展函数（`cchar_t`、`setcchar` 等） |
+| `-D_XOPEN_SOURCE=600` | 设置 X/Open 标准版本 |
+| 静态链接 `.a` 文件 | 避免共享库依赖，不影响系统 |
+
+### 6.5 为什么需要 `-D_XOPEN_SOURCE_EXTENDED`
+
+ncurses 的宽字符函数是条件编译的：
+
+```c
+#ifndef NCURSES_WIDECHAR
+#if defined(_XOPEN_SOURCE_EXTENDED) || (defined(_XOPEN_SOURCE) && (_XOPEN_SOURCE >= 500))
+#define NCURSES_WIDECHAR 1
+#else
+#define NCURSES_WIDECHAR 0  // 默认关闭
+#endif
+#endif
+```
+
+如果不定义 `_XOPEN_SOURCE_EXTENDED`，`NCURSES_WIDECHAR` 为 0，导致：
+- `cchar_t` 类型未定义
+- `setcchar()`、`mvwadd_wch()`、`wget_wch()` 等函数未声明
+
+### 6.6 静态链接 vs 动态链接
+
+| 方式 | 优点 | 缺点 |
+|------|------|------|
+| **静态链接**（推荐） | 不影响系统；无运行时依赖；更稳定 | 文件较大；更新需重新编译 |
+| 动态链接 | 文件小；多程序共享；更新方便 | 可能影响系统 shell；需正确配置库路径 |
+
+**事故案例**：
+
+```bash
+# 尝试创建共享库符号链接
+cd $HOME/usr/local/lib
+ln -sf libncursesw.so.6.4 libncursesw.so.6
+
+# 结果：所有终端无法启动！
+# 错误：Error loading shared library libncursesw.so.6: Permission denied (needed by /bin/zsh)
+```
+
+### 6.7 相关文档
+
+- ncurses 编译指南：`build_in_harmonyos/n/ncurses/6.4/README.md`
+- 鸿蒙编译知识库：`build_in_harmonyos/SKILL.md`
 
 ---
 
