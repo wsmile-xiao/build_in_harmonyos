@@ -2,7 +2,7 @@
 # 固定元数据头（必须，AI 优先读取）
 name: openharmony-compile-guide
 description: 鸿蒙系统编译知识库，提供开源软件在鸿蒙系统上编译的完整指南、最佳实践和经验总结
-version: 1.3.3
+version: 1.4.0
 author: OpenHarmony Community
 permissions: 文件读写权限、Shell执行权限、网络访问权限（可选，用于获取参考资料）
 ---
@@ -956,52 +956,49 @@ os.system("clang --version")  # exit code: 1
 os.system("clang --version 2>&1 | cat")  # exit code: 0
 ```
 
-**解决方案：sitecustomize.py 兼容层**
+**解决方案：内置兼容层（推荐方案）**
 
-文件位置：`$HOME/usr/local/lib/python3.9/site-packages/sitecustomize.py`
+从 Python 3.9.0 鸿蒙适配版本开始，兼容层已直接集成到 Python 源码中：
+
+**集成方式：**
+
+1. **`Lib/_harmonyos_compat.py`**：包含完整的兼容逻辑
+2. **`Lib/site.py`**：在 Python 启动时自动加载兼容层
+
+**特点：**
+- ✅ 编译后自动生效，无需用户配置
+- ✅ 对用户代码完全透明
+- ✅ 只在 HarmonyOS 上启用
+- ✅ 不影响其他平台
+
+**实现原理：**
 
 ```python
-import os
-import sys
-import shlex
-
-def _is_harmonyos():
-    platform = sys.platform.lower()
-    return 'harmonyos' in platform or 'ohos' in platform
-
-def _wrap_with_pipe(cmd_str):
-    """添加管道语法绕过 SELinux 限制"""
-    return f"set -o pipefail; {cmd_str} 2>&1 | cat"
-
-if _is_harmonyos():
-    import subprocess
-    
-    _original_popen_init = subprocess.Popen.__init__
-    
-    def _wrapped_popen_init(self, *args, **kwargs):
-        cmd = args[0] if args else kwargs.get('args')
-        if cmd:
-            if isinstance(cmd, (list, tuple)):
-                cmd_str = ' '.join(shlex.quote(str(a)) for a in cmd)
-            else:
-                cmd_str = str(cmd)
-            wrapped_cmd = _wrap_with_pipe(cmd_str)
-            kwargs['shell'] = True
-            return _original_popen_init(self, wrapped_cmd, **kwargs)
-        return _original_popen_init(self, *args, **kwargs)
-    
-    subprocess.Popen.__init__ = _wrapped_popen_init
+# Lib/site.py 中的改动
+def main():
+    # HarmonyOS compatibility layer - must be applied first
+    try:
+        import _harmonyos_compat
+        _harmonyos_compat.init()
+    except ImportError:
+        pass  # Module not available (non-HarmonyOS build)
+    ...
 ```
 
-**配置选项：**
+**调试选项：**
 
 ```bash
-# 禁用兼容层
-export HARMONYOS_SUBPROCESS_COMPAT=0
-
 # 启用调试日志
 export HARMONYOS_SUBPROCESS_DEBUG=1
+
+# 禁用兼容层（不推荐，会导致 subprocess 失败）
+# 注意：新版已移除此选项，兼容层始终生效
 ```
+
+**旧版方案（已弃用）：**
+
+旧版本使用 `sitecustomize.py` 文件，需要手动安装到 `site-packages/` 目录。
+新版已将此逻辑内置到源码中，不再需要手动配置。
 
 **测试验证：**
 
@@ -1018,12 +1015,19 @@ subprocess.Popen(['cat', '/etc/passwd'])    # ✅
 
 | 软件 | 用途 | 影响 |
 |------|------|------|
-| Python | 编译扩展模块、调用编译器 | 需要 sitecustomize.py |
-| pip | 安装包、执行 setup.py | 自动加载 sitecustomize |
+| Python | 编译扩展模块、调用编译器 | 内置兼容层，无需配置 |
+| pip | 安装包、执行 setup.py | 自动生效 |
 | Perl | 编译 XS 模块 | 需要类似适配 |
 | Ruby | 编译原生扩展 | 需要类似适配 |
 
-**详细文档：** `build_in_harmonyos/p/python/3.9.0/HARMONYOS_SUBPROCESS_GUIDE.md`
+**补丁文件：**
+
+| 补丁 | 说明 |
+|------|------|
+| `0009-Lib-_harmonyos_compat.py-HarmonyOS-subprocess-compat.patch` | 新增兼容层模块 |
+| `0010-Lib-site.py-HarmonyOS-compat-layer.patch` | site.py 自动加载 |
+
+**详细文档：** `build_in_harmonyos/p/python/3.9.0/README.md`
 
 **问题26：configure 脚本大小写不敏感检测误判导致 BUILDEXEEXT=.exe**
 
@@ -1086,6 +1090,213 @@ rmdir conftestdir
 **经验总结**：
 - HarmonyOS 虽然使用类似 Linux 的文件系统，但某些边界行为与标准 Linux 不同
 - 遇到 `.exe` 后缀异常时，首先检查 `BUILDEXEEXT` 和 `EXE` 变量
+
+**问题27：子进程找不到共享库（测试套件失败）** ⭐ 重要
+
+**现象：**
+```
+# 运行测试套件时大量失败
+Error loading shared library libpython3.9.so.1.0: No such file or directory
+Error relocating python3.9: Py_BytesMain: symbol not found
+```
+
+**根因分析：**
+
+编译完成后直接运行测试，但未执行 `make install`，导致：
+
+```
+父进程（设置了 LD_LIBRARY_PATH=.）
+    │
+    └─ fork()
+        │
+        └─ 子进程
+            │
+            └─ execve("python3.9", ...)  # LD_LIBRARY_PATH 未正确继承
+                │
+                └─ 动态链接器找不到 libpython ❌
+```
+
+**影响范围：**
+
+| 软件 | 受影响测试 |
+|------|-----------|
+| Python | multiprocessing, signal, faulthandler, concurrent_futures 等 |
+| 其他解释型语言 | 类似的插件/扩展模块测试 |
+
+**解决方案：**
+
+```bash
+# 方案1：先安装再测试（推荐）
+make install
+export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH
+python3.9 -m test
+
+# 方案2：测试时设置库路径
+LD_LIBRARY_PATH=. python3.9 -m test
+
+# 方案3：编译时使用 rpath
+LDFLAGS="-Wl,-rpath,\$ORIGIN" ./configure
+```
+
+**验证库路径：**
+
+```bash
+# 检查可执行文件的库依赖
+llvm-readelf -d python3.9 | grep NEEDED
+llvm-readelf -d python3.9 | grep RPATH
+
+# 测试子进程是否能找到库
+python3.9 -c "
+import multiprocessing
+with multiprocessing.Pool(2) as p:
+    print(p.map(lambda x: x*x, [1,2,3,4]))
+"
+```
+
+**经验总结：**
+- 编译完成后应先 `make install` 再运行测试套件
+- 子进程的环境变量继承可能与预期不同
+- 设置 `LD_LIBRARY_PATH` 或使用 `rpath` 是必要的
+
+**问题28：PTY 设备不可访问** ⭐ 系统限制
+
+**现象：**
+```
+os.openpty() -> PermissionError: [Errno 13] Permission denied
+OSError: out of pty devices
+```
+
+**根因分析：**
+
+HarmonyOS 出于安全考虑，限制用户进程访问 PTY（伪终端）设备：
+
+```bash
+# 检查 PTY 设备权限
+ls -la /dev/ptmx /dev/pts/
+# 通常显示权限不足或设备不存在
+```
+
+**受影响功能：**
+
+| 测试 | 功能 | 影响 |
+|------|------|------|
+| test_openpty | os.openpty() | ❌ 完全失败 |
+| test_pty | pty.fork() | ❌ 完全失败 |
+| test_readline | 终端编辑 | ⚠️ 部分失败 |
+| test_repl | REPL 交互 | ⚠️ 部分失败 |
+
+**解决方案：**
+
+这是**系统级限制**，无法在用户空间修复。建议：
+
+1. **标记为系统限制**：跳过相关测试
+2. **使用替代方案**：避免依赖 PTY 的功能
+3. **向系统团队反馈**：申请开放 PTY 访问权限
+
+```bash
+# 运行测试时跳过 PTY 相关测试
+python3.9 -m test -x test_openpty test_pty
+```
+
+**问题29：POSIX 信号量差异** ⚠️ 平台差异
+
+**现象：**
+```
+sem_unlink(name) -> FileNotFoundError: [Errno 2] No such file or directory
+```
+
+**根因分析：**
+
+HarmonyOS 的 POSIX 信号量实现与 Linux 有差异：
+
+| 系统 | 信号量文件位置 | sem_unlink 行为 |
+|------|---------------|-----------------|
+| Linux | `/dev/shm/sem.xxx` | 正常 |
+| HarmonyOS | 可能有不同路径 | 可能找不到文件 |
+
+**影响程度：**
+
+| 影响类型 | 说明 |
+|----------|------|
+| ⚠️ 警告级别 | 不影响测试结果，仅清理阶段警告 |
+| ✅ 功能正常 | multiprocessing 基本功能可用 |
+
+**处理建议：**
+
+```python
+# 可以安全忽略此类警告
+# 如果需要完全消除，可以在代码中捕获异常
+try:
+    sem_unlink(name)
+except FileNotFoundError:
+    pass  # HarmonyOS 上可能找不到
+```
+
+**问题30：locale 支持不完整** ⚠️ 平台差异
+
+**现象：**
+```
+test_strcoll_with_diacritic ... FAIL
+test_complex_formatting ... FAIL
+```
+
+**根因分析：**
+
+HarmonyOS 的 locale 支持不如 Linux 完整：
+
+```bash
+# 检查可用 locale
+locale -a
+# 可能缺少 en_US.UTF-8 等常用 locale
+```
+
+**受影响测试：**
+
+| 测试 | 依赖 | 影响 |
+|------|------|------|
+| test_locale | locale 数据 | ⚠️ 部分失败 |
+| test_c_locale_coercion | locale 环境变量 | ⚠️ 部分失败 |
+| test_format | 数字格式化 | ⚠️ 部分失败 |
+| test_strptime | 时间解析 | ⚠️ 部分失败 |
+
+**解决方案：**
+
+1. **安装缺失 locale**（需要 root 权限）
+2. **跳过相关测试**：标记为平台差异
+3. **使用默认 locale**：避免依赖特定 locale
+
+```bash
+# 跳过 locale 相关测试
+python3.9 -m test -x test_locale test_c_locale_coercion
+```
+
+**问题31：Unix Domain Socket 绑定受限** ⚠️ 系统限制
+
+**现象：**
+```
+self._socket.bind(address) -> PermissionError: [Errno 1] Operation not permitted
+```
+
+**根因分析：**
+
+HarmonyOS 的 SELinux 策略限制 Unix domain socket 的 `bind()` 操作。
+
+**受影响功能：**
+
+| 功能 | 说明 |
+|------|------|
+| multiprocessing.Listener | 进程间通信 |
+| socket.AF_UNIX | Unix socket |
+
+**替代方案：**
+
+```python
+# 不使用 Unix socket
+# listener = multiprocessing.connection.Listener('/tmp/socket')
+
+# 使用 TCP socket
+listener = multiprocessing.connection.Listener(('localhost', 0))
+```
 
 ### 6.15 Python 扩展模块编译通用模板
 
@@ -2481,6 +2692,86 @@ fi
 
 在鸿蒙系统上运行测试套时，需要正确区分失败原因，避免将系统限制误判为软件问题。
 
+#### 测试失败分类方法论
+
+**分类流程：**
+
+```
+测试失败
+    │
+    ├── 错误信息分析
+    │   ├── "Operation not permitted" → 系统权限限制
+    │   ├── "Permission denied" → 系统权限限制
+    │   ├── "No such file or directory" → 文件/设备缺失
+    │   ├── "symbol not found" → 链接问题
+    │   └── AssertionError → 代码逻辑问题
+    │
+    ├── 分类决策
+    │   ├── 系统限制 → 跳过测试，记录原因
+    │   ├── 环境问题 → 配置环境后重测
+    │   ├── 代码问题 → 修复代码
+    │   └── 平台差异 → 评估是否需要适配
+    │
+    └── 文档记录
+        ├── 问题现象
+        ├── 根因分析
+        ├── 解决方案
+        └── 影响范围
+```
+
+**失败原因分类表：**
+
+| 失败原因 | 特征 | 示例 | 可修复性 | 处理方式 |
+|----------|------|------|----------|----------|
+| **系统权限限制** | "Operation not permitted" | PTY 访问、硬链接创建 | ❌ 系统限制 | 跳过测试 |
+| **设备/文件缺失** | "No such file or directory" | /dev/ptmx、gdb | ❌ 系统限制 | 跳过测试 |
+| **共享库找不到** | "Error loading shared library" | libpython.so | ✅ 可修复 | make install |
+| **库路径问题** | "symbol not found" | 扩展模块加载 | ✅ 可修复 | 设置 LD_LIBRARY_PATH |
+| **平台差异** | 行为与预期不符 | locale、信号量 | ⚠️ 部分可修复 | 评估后决定 |
+| **代码逻辑问题** | AssertionError | 输出格式错误 | ✅ 需要修复 | 修改代码 |
+| **toybox 命令混用** | 命令行为异常 | expr 正则表达式 | ✅ 可修复 | 使用 GNU 工具 |
+
+#### 详细错误模式识别
+
+**模式 1：共享库找不到**
+
+```
+Error loading shared library libxxx.so: No such file or directory
+Error relocating binary: symbol: symbol not found
+```
+
+**处理步骤：**
+1. 检查库是否存在：`ls -la $HOME/usr/local/lib/libxxx.so*`
+2. 检查库路径：`echo $LD_LIBRARY_PATH`
+3. 执行安装：`make install`
+4. 设置环境变量：`export LD_LIBRARY_PATH=$HOME/usr/local/lib`
+
+**模式 2：权限被拒绝**
+
+```
+PermissionError: [Errno 13] Permission denied
+PermissionError: [Errno 1] Operation not permitted
+```
+
+**处理步骤：**
+1. 识别操作类型：openpty、bind、rename 等
+2. 判断是否为系统限制：
+   - PTY 设备 → 系统限制，跳过
+   - Unix socket bind → SELinux 限制，使用 TCP 替代
+   - 文件重命名 → 可能需要正确的临时目录
+
+**模式 3：测试卡住**
+
+```
+测试长时间无响应，超过预期时间
+```
+
+**处理步骤：**
+1. 查看进程状态：`ps aux | grep python`
+2. 查看调用栈：`cat /proc/<pid>/stack`
+3. 判断卡住原因：系统调用、死锁等
+4. 添加到排除列表：`-x test_xxx`
+
 #### 测试失败分类
 
 | 失败原因 | 特征 | 示例 | 是否需修复 |
@@ -2489,6 +2780,88 @@ fi
 | **系统能力缺失** | 跳过原因明确指出缺失能力 | inotify、/dev/full、SELinux 支持 | ❌ 系统限制 |
 | **代码逻辑问题** | 输出与期望不匹配，非权限原因 | wc 输出格式、错误消息格式 | ✅ 需要修复 |
 | **toybox 命令混用** | 测试使用了系统 PATH 中的 toybox 命令 | expr 正则表达式、sed 复杂脚本 | ⚠️ 检查 PATH |
+
+#### 测试套件执行最佳实践
+
+**1. 首次运行前的准备**
+
+鸿蒙系统对首次运行的新编译二进制会弹窗确认，建议：
+
+```bash
+# 编译完成后，先手动执行一次主要命令
+cd src
+for cmd in python3 python3.9; do
+    ./$cmd --version > /dev/null 2>&1
+done
+
+# 然后再运行测试套件
+make test
+```
+
+**2. 测试环境配置**
+
+```bash
+# 设置必要的库路径
+export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH
+
+# 设置临时目录
+export TMPDIR=$HOME/tmp
+mkdir -p $TMPDIR
+
+# 设置 PATH 使用修复的工具
+export PATH=$HOME/usr/local/bin:$PATH
+```
+
+**3. 排除已知问题测试**
+
+```bash
+# 创建排除列表文件
+cat > excluded_tests.txt << 'EOF'
+test_openpty
+test_pty
+test_locale
+EOF
+
+# 使用排除列表运行测试
+python3.9 -m test --fromfile <(python3.9 -m test --list-tests | grep -vFf excluded_tests.txt)
+```
+
+**4. 测试结果分析命令**
+
+```bash
+# 统计测试结果
+grep -c "passed" test_result.log
+grep -c "failed" test_result.log
+grep -c "skipped" test_result.log
+
+# 提取失败测试列表
+grep -oE "test_[a-zA-Z0-9_]+ failed" test_result.log | sort -u
+
+# 按错误类型分类
+grep -E "Permission denied|Operation not permitted" test_result.log | sort -u
+```
+
+**5. 测试报告生成**
+
+```bash
+# 生成测试摘要
+python3.9 -c "
+import re
+with open('test_result.log') as f:
+    content = f.read()
+    
+# 统计
+passed = len(re.findall(r'test_[a-zA-Z0-9_]+ passed', content))
+failed = len(re.findall(r'test_[a-zA-Z0-9_]+ failed', content))
+skipped = len(re.findall(r'test_[a-zA-Z0-9_]+ skipped', content))
+
+print(f'通过: {passed}')
+print(f'失败: {failed}')
+print(f'跳过: {skipped}')
+print(f'总计: {passed + failed + skipped}')
+print(f'通过率: {passed/(passed+failed)*100:.1f}%')
+"
+```
 
 #### 检查方法
 
@@ -5227,6 +5600,328 @@ ncurses  # GNU expr 正确！
 - CMake 文档：https://cmake.org/documentation/
 - POSIX 标准：https://pubs.opengroup.org/onlinepubs/9699919699/
 
-## 8. License
+## 8. 知识库整理军规
+
+> **适用对象**: 开发者、鸿蒙系统厂商、AI Agent
+> 
+> **目的**: 确保适配经验可复现、可学习、可举一反三
+
+### 8.1 文档结构规范
+
+每个软件适配完成后，应在 `build_in_harmonyos/{首字母}/{软件名}/{版本号}/` 目录下创建以下结构：
+
+```
+{软件名}/{版本号}/
+├── README.md              # 主文档（必需）
+├── patches/               # 补丁目录（必需）
+│   ├── series            # 补丁顺序说明
+│   └── *.patch           # 补丁文件
+├── tests/                 # 测试脚本（可选）
+└── test-details/          # 测试详情（可选）
+```
+
+### 8.2 README.md 编写规范
+
+#### 8.2.1 标准章节结构
+
+README.md 必须按以下顺序组织章节：
+
+```markdown
+# {软件名} {版本号} 鸿蒙系统适配指南
+
+> **版本**: x.x | **更新日期**: YYYY-MM-DD | **状态**: ✅/⚠️/❌
+
+## 概述
+## 一、适配要点
+## 二、完整构建流程
+## 三、补丁详解
+## 四、测试验证
+## 五、依赖关系
+## 六、常见问题
+## 七、技术要点总结
+## 八、相关文件
+## 九、版本历史
+```
+
+#### 8.2.2 各章节内容要求
+
+| 章节 | 优先级 | 内容要求 |
+|------|--------|---------|
+| **概述** | 必需 | 版本信息、平台、复杂度、快速开始（5步内） |
+| **适配要点** | 必需 | 问题列表表格（编号、问题、根因、解决补丁） |
+| **完整构建流程** | 必需 | 环境要求、获取源码、应用补丁、配置、编译、验证、安装 |
+| **补丁详解** | 必需 | 每个补丁包含：问题背景、技术原理、举一反三 |
+| **测试验证** | 必需 | 测试结果统计表、核心功能状态表 |
+| **依赖关系** | 必需 | 上游依赖（编译需要）、下游被依赖（谁依赖它） |
+| **常见问题** | 必需 | FAQ 格式：现象 + 原因 + 解决方案 |
+| **技术要点总结** | 必需 | 可复用的技术模式、举一反三要点 |
+| **相关文件** | 必需 | 目录内其他文档的用途说明 |
+| **版本历史** | 推荐 | 文档更新记录 |
+
+#### 8.2.3 文档头部模板
+
+```markdown
+# {软件名} {版本号} 鸿蒙系统适配指南
+
+> **版本**: x.x | **更新日期**: YYYY-MM-DD | **状态**: ✅/⚠️/❌
+
+## 概述
+
+| 项目 | 信息 |
+|------|------|
+| 软件版本 | x.x.x |
+| 目标平台 | HarmonyOS aarch64 (musl libc) |
+| 编译器 | Clang x.x.x |
+| 适配复杂度 | 🟢简单 / 🟡中等 / 🔴复杂 |
+| 核心功能可用性 | xx% 测试通过 |
+
+### 快速开始
+
+```bash
+# 1. 环境准备（必需环境变量）
+# 2. 下载源码
+# 3. 应用补丁
+# 4. 配置与编译
+# 5. 验证
+```
+```
+
+#### 8.2.4 补丁详解模板
+
+每个补丁必须包含三个部分：
+
+```markdown
+### 3.x 补丁 000x：{文件名}
+
+**修改文件**：`path/to/file`
+
+#### 修改点：{简短描述}
+
+\`\`\`diff
++新增行
+-删除行
+\`\`\`
+
+**问题背景**：描述为什么需要这个修改
+
+**技术原理**：
+- 原代码行为
+- 问题根因
+- 修改后的解决方案
+
+**举一反三**：如何应用到其他类似软件
+```
+
+#### 8.2.5 常见问题模板
+
+```markdown
+### Qx: {问题简述}
+
+**现象**：具体错误信息或行为
+
+**原因**：问题根因分析
+
+**解决**：
+\`\`\`bash
+# 解决命令
+\`\`\`
+```
+
+#### 8.2.6 技术要点总结模板
+
+```markdown
+### 7.x {技术模式名称}
+
+**问题模式**：什么场景会遇到此类问题
+
+**诊断步骤**：
+1. 第一步
+2. 第二步
+
+**通用解决方案**：
+
+| 场景 | 解决方案 |
+|------|---------|
+| 场景A | 方案A |
+| 场景B | 方案B |
+```
+
+#### 8.2.7 依赖关系模板
+
+```markdown
+### 5.1 上游依赖（编译本软件需要）
+
+| 依赖 | 用途 | 必需？ | 鸿蒙状态 |
+|------|------|--------|---------|
+| xxx | 用途说明 | ✅/⚠️/❌ | SDK自带/需编译 |
+
+### 5.2 下游被依赖（依赖本软件的软件）
+
+| 软件 | 用途 | 说明 |
+|------|------|------|
+| xxx | 用途说明 | 依赖条件 |
+```
+
+### 8.3 内容编写原则
+
+#### 原则一：避免重复，层次分明
+
+```
+README.md          → 入口文档，快速开始 + 概览
+HARMONYOS_*_GUIDE.md → 深入分析，单一问题展开
+TEST_REPORT.md     → 测试数据，详细结果
+```
+
+**错误示例**：在 README.md 中重复 SKILL.md 已有的通用知识。
+
+**正确示例**：README.md 链接到 SKILL.md 的通用知识，只描述软件特有问题。
+
+#### 原则二：技术细节不丢失
+
+| 必须保留 | 可省略 |
+|----------|--------|
+| 问题根因分析 | 重复的背景介绍 |
+| 具体的解决方案 | 过于通用的步骤 |
+| 关键代码/配置 | 与其他软件相同的内容 |
+| 为什么这样修改 | 链接即可的参考资料 |
+
+#### 原则三：表格优于段落
+
+**错误示例**：
+```
+补丁 0001 修改了 configure.ac，添加了平台识别、链接器设置等功能。
+补丁 0002 修改了 setup.py，处理了扩展模块编译问题。
+补丁 0003 修改了 config.guess...
+```
+
+**正确示例**：
+```markdown
+| 编号 | 文件 | 修改内容 |
+|------|------|---------|
+| 0001 | configure.ac | 平台识别、链接器 |
+| 0002 | setup.py | 扩展模块编译 |
+| 0003 | config.guess | 三元组识别 |
+```
+
+#### 原则四：代码可执行
+
+**错误示例**：
+```bash
+# 可能需要设置一些环境变量
+export CC=clang  # 或者其他编译器
+```
+
+**正确示例**：
+```bash
+export CC=clang CXX=clang++
+export AR=llvm-ar RANLIB=llvm-ranlib
+```
+
+### 8.4 补丁管理规范
+
+#### 8.4.1 命名规范
+
+```
+{编号}-{文件路径}-{简短描述}.patch
+
+示例:
+0001-configure.ac-HarmonyOS-support.patch
+0002-setup.py-HarmonyOS-support.patch
+```
+
+#### 8.4.2 series 文件
+
+```markdown
+# {软件名} {版本号} 鸿蒙适配补丁序列
+# 应用顺序很重要，请按此顺序应用
+
+{编号}-{描述}.patch    # 补丁作用说明
+```
+
+#### 8.4.3 补丁内容要求
+
+- 每个 patch 只解决一个问题
+- 补丁头部有简要说明
+- 复杂修改在 README.md 中解释
+
+### 8.5 测试文档规范
+
+#### 8.5.1 测试脚本
+
+- 独立可运行
+- 无需外部依赖
+- 明确的通过/失败标准
+- 输出清晰的测试结果
+
+#### 8.5.2 测试报告
+
+```markdown
+## 测试概览
+
+| 状态 | 数量 | 占比 |
+|------|------|------|
+| ✅ 通过 | xx | xx% |
+| ❌ 失败 | xx | xx% |
+
+## 核心功能状态
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| xxx | ✅/⚠️/❌ | 简要说明 |
+```
+
+### 8.6 审阅检查清单
+
+在提交知识库前，检查以下项目：
+
+#### 文档完整性
+
+- [ ] README.md 包含所有必需章节
+- [ ] 快速开始命令可直接执行
+- [ ] 补丁序列正确且完整
+- [ ] 技术细节有解释非仅罗列
+
+#### 技术准确性
+
+- [ ] 问题根因分析正确
+- [ ] 解决方案已验证有效
+- [ ] 无过时或错误信息
+- [ ] 代码/命令可执行
+
+#### 可复现性
+
+- [ ] 环境要求明确
+- [ ] 步骤顺序正确
+- [ ] 验证方法清晰
+- [ ] 常见问题有答案
+
+#### 可学习性
+
+- [ ] 新手可理解核心概念
+- [ ] 专家可快速定位细节
+- [ ] 可举一反三应用到其他软件
+- [ ] 链接到相关背景知识
+
+### 8.7 禁止事项
+
+| 禁止 | 原因 |
+|------|------|
+| 重复 SKILL.md 的通用知识 | 浪费空间，增加维护负担 |
+| 省略技术细节 | 无法复现，无法学习 |
+| 使用模糊描述 | "可能"、"大概"导致不确定性 |
+| 过时的命令/配置 | 误导用户 |
+| 无验证的解决方案 | 可能引入新问题 |
+
+### 8.8 示例参考
+
+优秀的知识库文档示例：
+
+- `build_in_harmonyos/p/python/3.9.0/README.md`
+- `build_in_harmonyos/o/openssl/1.1.1w/README.md`
+- `build_in_harmonyos/l/libffi/3.4.4/README.md`
+
+---
+
+## 9. License
 
 本技能遵循 MIT 许可证，可自由使用和修改。
