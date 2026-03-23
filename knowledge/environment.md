@@ -58,16 +58,22 @@ clang -dM -E - < /dev/null | grep OHOS
 
 ## 4. 环境变量配置
 
-推荐在 `~/.zshrc` 中配置：
+> **重要**：以下环境变量对编译成功率有决定性影响，必须在编译前配置！
+
+### 4.1 必须配置的环境变量
 
 ```bash
+# ============================================================
+# 鸿蒙编译环境必备配置 - 添加到 ~/.zshrc
+# ============================================================
+
 # 安装前缀
 export DEFAULT_PREFIX=$HOME/usr/local
 
-# PATH
-export PATH=$PATH:$HOME/npm/bin:$HOME/.local/bin:$DEFAULT_PREFIX/bin
+# PATH（确保用户安装的工具优先）
+export PATH=$DEFAULT_PREFIX/bin:$HOME/npm/bin:$HOME/.local/bin:$PATH
 
-# 库路径
+# 库路径（运行时和编译时都要设置）
 export LIBRARY_PATH=$DEFAULT_PREFIX/lib:$LIBRARY_PATH
 export LD_LIBRARY_PATH=$DEFAULT_PREFIX/lib:$LD_LIBRARY_PATH
 
@@ -75,7 +81,10 @@ export LD_LIBRARY_PATH=$DEFAULT_PREFIX/lib:$LD_LIBRARY_PATH
 export C_INCLUDE_PATH=$DEFAULT_PREFIX/include:$C_INCLUDE_PATH
 export CPLUS_INCLUDE_PATH=$DEFAULT_PREFIX/include:$CPLUS_INCLUDE_PATH
 
-# 编译器设置
+# pkg-config 路径
+export PKG_CONFIG_PATH=$DEFAULT_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH
+
+# 编译器设置（使用 LLVM 工具链）
 export CC="clang"
 export CXX="clang++"
 export AR="llvm-ar"
@@ -83,19 +92,60 @@ export RANLIB="llvm-ranlib"
 export NM="llvm-nm"
 export STRIP="llvm-strip"
 
-# ⭐ 关键：所有编译都使用 -fPIC
+# ⭐ 关键：所有编译都使用 -fPIC（musl BIND_NOW 要求）
 export CFLAGS="-fPIC -O2"
 export CXXFLAGS="-fPIC -O2"
 export LDFLAGS="-L$DEFAULT_PREFIX/lib"
 
-# 临时目录（鸿蒙 /tmp 不可写）
+# 临时目录（鸿蒙 /tmp 只读，必须设置）
 export TMPDIR=$HOME/tmp
-mkdir -p $TMPDIR
 
-# 便捷别名
+# 创建必要目录
+mkdir -p $TMPDIR
+mkdir -p $DEFAULT_PREFIX/{bin,lib,include,share}
+```
+
+### 4.2 环境变量作用说明
+
+| 变量 | 作用 | 不设置的后果 |
+|------|------|--------------|
+| `TMPDIR` | 临时文件目录 | Autotools 崩溃（/tmp 只读） |
+| `CC/CXX` | 指定编译器 | 可能使用错误的编译器 |
+| `CFLAGS="-fPIC"` | 位置无关代码 | musl BIND_NOW 导致符号找不到 |
+| `AR/RANLIB` | 静态库工具 | 使用 GNU ar 导致格式不兼容 |
+| `LD_LIBRARY_PATH` | 运行时库路径 | 找不到用户安装的库 |
+| `PKG_CONFIG_PATH` | pkg-config 搜索路径 | 找不到已安装的库 |
+
+### 4.3 便捷别名
+
+```bash
 alias configure='./configure --prefix=$DEFAULT_PREFIX'
 alias cmake='cmake -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX'
 alias Configure='./Configure --prefix=$DEFAULT_PREFIX'
+```
+
+### 4.4 环境检查脚本
+
+每次编译前运行以下检查：
+
+```bash
+#!/bin/bash
+# check-env.sh - 鸿蒙编译环境检查
+
+echo "=== 必要环境变量 ==="
+test -n "$TMPDIR" && echo "✅ TMPDIR=$TMPDIR" || echo "❌ TMPDIR 未设置"
+test -n "$CC" && echo "✅ CC=$CC" || echo "⚠️ CC 未设置"
+test -n "$CFLAGS" && echo "✅ CFLAGS=$CFLAGS" || echo "⚠️ CFLAGS 未设置"
+
+echo ""
+echo "=== 必要目录 ==="
+test -d "$TMPDIR" && echo "✅ $TMPDIR 存在" || echo "❌ $TMPDIR 不存在"
+test -d "$DEFAULT_PREFIX/bin" && echo "✅ $DEFAULT_PREFIX/bin 存在" || echo "❌ 安装目录不存在"
+
+echo ""
+echo "=== 编译器 ==="
+command -v cc >/dev/null && echo "✅ cc: $(cc --version | head -1)" || echo "❌ cc 不存在"
+command -v clang >/dev/null && echo "✅ clang: $(clang --version | head -1)" || echo "❌ clang 不存在"
 ```
 
 ## 5. 系统限制
@@ -166,3 +216,162 @@ clang -dM -E - < /dev/null | grep -E "OHOS|GLIBC"
 | /tmp | 可写 | 只读 |
 | SELinux | 通常禁用 | 强制启用 |
 | 软链接 | 正常 | 部分受限 |
+
+## 9. 软链接处理规范（强制）
+
+> **重要**：鸿蒙系统的 SELinux 策略限制软链接的创建和访问。在编译、安装、验证的各个阶段都必须正确处理软链接问题。
+
+### 9.1 问题特征
+
+```bash
+# 软链接存在但无法执行
+ls -la cc -> /data/service/hnp/bin/clang
+cc --version
+# /bin/sh: cc: No such file or directory
+
+# ln -sf 创建带随机后缀的文件（关键问题！）
+ln -sf target link
+ls -la link_XXXXXX  # 出现带后缀的文件
+```
+
+### 9.1.1 ln -sf 的问题
+
+> **⚠️ 重要发现**：在鸿蒙系统上，`ln -sf` 覆盖已存在的软链接时会创建带随机后缀的文件，这是 SELinux 策略导致的特殊行为。
+
+```bash
+# 错误做法：ln -sf 覆盖已存在的软链接
+ln -sf /target /path/to/link
+# 结果：创建了 link_XXXXXX 带随机后缀的文件
+
+# 正确做法：先删除再创建
+rm -f /path/to/link
+ln -s /target /path/to/link
+```
+
+### 9.2 软链接可用性检查函数
+
+```bash
+# ⚠️ 强制规范：必须使用此函数检查软链接
+check_symlink() {
+    local link=$1
+    local desc=${2:-"工具"}
+    
+    # 1. 文件不存在
+    if [ ! -e "$link" ]; then
+        echo "❌ $desc 不存在: $link"
+        return 1
+    fi
+    
+    # 2. 检查是否为软链接
+    if [ -L "$link" ]; then
+        local target=$(readlink "$link")
+        
+        # 3. 验证软链接是否可执行（关键！）
+        if "$link" --version >/dev/null 2>&1; then
+            echo "✅ $desc 软链接可用: $link -> $target"
+            return 0
+        else
+            echo "❌ $desc 软链接不可用（SELinux 限制）: $link -> $target"
+            return 2  # 特殊返回码：需要规避
+        fi
+    fi
+    
+    # 4. 普通文件
+    if [ -x "$link" ]; then
+        echo "✅ $desc 可执行: $link"
+        return 0
+    fi
+    
+    echo "❌ $desc 不可执行: $link"
+    return 1
+}
+```
+
+### 9.3 软链接规避方案
+
+**方案1：wrapper 脚本（推荐）**
+
+```bash
+# 优点：简单可靠，不复制大文件
+create_wrapper() {
+    local name=$1
+    local target=$2
+    local bindir=${3:-$HOME/usr/local/bin}
+    
+    cat > "$bindir/$name" << EOF
+#!/bin/sh
+exec $target "\$@"
+EOF
+    chmod +x "$bindir/$name"
+    echo "✅ 创建 wrapper: $bindir/$name -> $target"
+}
+
+# 使用示例
+create_wrapper "cc" "/data/service/hnp/bin/clang"
+create_wrapper "c++" "/data/service/hnp/bin/clang++"
+```
+
+**方案2：复制文件**
+
+```bash
+# 适用于目标文件较小的情况
+cp $(readlink -f /path/to/target) /path/to/link
+```
+
+### 9.4 标准处理流程
+
+```bash
+# ⚠️ 强制规范：在任何涉及软链接的操作中使用此流程
+setup_tool_symlink() {
+    local name=$1      # 工具名称，如 cc
+    local target=$2    # 目标路径，如 /data/service/hnp/bin/clang
+    local bindir=${3:-$HOME/usr/local/bin}
+    
+    # 1. 先删除已存在的文件（关键！不能用 ln -sf）
+    rm -f "$bindir/$name"
+    
+    # 2. 创建软链接（不加 -f）
+    ln -s "$target" "$bindir/$name"
+    
+    # 3. 验证软链接是否可用
+    if [ -L "$bindir/$name" ]; then
+        if "$bindir/$name" --version >/dev/null 2>&1; then
+            echo "✅ $name 软链接可用"
+            return 0
+        else
+            echo "⚠️ $name 软链接不可用，创建 wrapper 脚本"
+            rm -f "$bindir/$name"
+            create_wrapper "$name" "$target" "$bindir"
+        fi
+    fi
+}
+```
+
+> **注意**：鸿蒙系统上 `ln -sf` 覆盖已存在的软链接会创建带随机后缀的文件，必须使用 `rm -f` + `ln -s` 的方式。
+
+### 9.5 应用场景
+
+| 阶段 | 场景 | 处理方式 |
+|------|------|----------|
+| Phase 2 | 检查依赖工具 | `check_symlink` + `create_wrapper` |
+| Phase 3 | make install 后 | 检查所有安装的软链接 |
+| Phase 4 | 验证产物 | 必须验证可执行性，不仅检查存在 |
+| 日常使用 | 手动创建软链接 | 优先使用 wrapper 脚本 |
+
+### 9.6 常见问题
+
+**Q: 为什么 `ls -la` 显示软链接存在，但执行报错？**
+
+A: SELinux 策略限制了用户进程对软链接指向文件的访问。软链接本身存在，但跟随（follow）软链接访问目标文件时被拒绝。
+
+**Q: 为什么有时候软链接能用，有时候不能？**
+
+A: 取决于 SELinux context。不同进程、不同目录可能有不同的权限策略。
+
+**Q: wrapper 脚本有什么优势？**
+
+A:
+1. 不依赖软链接，避免 SELinux 问题
+2. 不需要复制大文件，节省空间
+3. 可以添加额外参数或环境变量
+4. 简单可靠，易于维护

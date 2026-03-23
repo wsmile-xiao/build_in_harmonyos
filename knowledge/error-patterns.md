@@ -591,22 +591,65 @@ export https_proxy=http://proxy:port
 ```
 ln: cannot create symbolic link 'xxx': Permission denied
 ln -sf 创建带随机后缀的乱码文件
+软链接存在但执行时报 "No such file or directory"
 ```
 
 ### 根因
 
-SELinux 策略限制用户进程创建软链接。
+SELinux 策略限制用户进程创建和访问软链接。
+
+### 诊断步骤
+
+```bash
+# 1. 检查软链接是否存在
+ls -la /path/to/link
+
+# 2. 检查软链接目标
+readlink /path/to/link
+
+# 3. 测试软链接是否可执行
+/path/to/link --version
+```
 
 ### 解决方案
 
-```bash
-# 使用 cp 替代 ln -s
-cp source.txt link.txt
+**方案1：创建 wrapper 脚本（推荐）**
 
-# 批量处理
-for f in ncursesw/*.h; do
-    cp "$f" "$(basename $f)"
-done
+```bash
+# 创建 wrapper 脚本
+cat > $HOME/usr/local/bin/cc << 'EOF'
+#!/bin/sh
+exec /data/service/hnp/bin/clang "$@"
+EOF
+chmod +x $HOME/usr/local/bin/cc
+```
+
+**方案2：使用 cp 复制文件**
+
+```bash
+# 复制真实可执行文件
+cp $(readlink -f /path/to/target) /path/to/link
+```
+
+### 软链接处理标准流程
+
+```bash
+# 1. 尝试创建软链接
+ln -sf /source/file /path/to/link
+
+# 2. 验证软链接是否可用
+if [ -L /path/to/link ] && /path/to/link --version >/dev/null 2>&1; then
+    echo "✅ 软链接可用"
+else
+    echo "❌ 软链接不可用，使用规避方式"
+    
+    # 使用 wrapper 脚本
+    cat > /path/to/link << EOF
+#!/bin/sh
+exec /source/file "\$@"
+EOF
+    chmod +x /path/to/link
+fi
 ```
 
 ---

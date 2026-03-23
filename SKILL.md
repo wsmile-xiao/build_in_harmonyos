@@ -24,6 +24,10 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 知识不遗漏 → 档案结构化 → 检索高效化 → 复用精准化
 ```
 
+### ⚠️ 强制规范
+
+> **软链接处理**：鸿蒙系统的 SELinux 策略限制软链接。在编译、安装、验证的各个阶段，**必须验证软链接是否可执行**，不能仅检查是否存在。详细规范见 `knowledge/environment.md` 第 9 节。
+
 ## 2. When to use
 
 - 用户说："帮我在鸿蒙电脑上编译 XXX"
@@ -64,20 +68,138 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
 
 #### Phase 2: 环境准备
 
-1. 检查系统环境（参考 `knowledge/environment.md`）
-2. 检查依赖是否安装（参考 `MISSING_TOOLS.md`）
-3. 准备编译目录结构
+1. **检查环境变量（必须）**
+   ```bash
+   # 必须检查的环境变量
+   echo "TMPDIR: ${TMPDIR:?未设置}"
+   echo "CC: ${CC:?未设置}"
+   echo "CFLAGS: ${CFLAGS:?未设置}"
+   echo "DEFAULT_PREFIX: ${DEFAULT_PREFIX:?未设置}"
+   ```
+   详细配置参考 `knowledge/environment.md` 第 4 节
+
+2. **检查依赖工具（必须验证软链接可用性）**
+   ```bash
+   # ⚠️ 强制规范：必须验证软链接是否真正可用
+   # 鸿蒙系统软链接可能存在但无法执行（SELinux 限制）
+   
+   # 重要：ln -sf 在鸿蒙上会创建带随机后缀的文件！
+   # 必须使用 rm -f + ln -s 的方式
+   
+   check_symlink() {
+       local link=$1
+       local expected=$2
+       
+       # 1. 检查文件是否存在
+       if [ ! -e "$link" ]; then
+           echo "❌ $link 不存在"
+           return 1
+       fi
+       
+       # 2. 检查是否为软链接
+       if [ -L "$link" ]; then
+           # 3. 验证软链接是否可执行
+           if "$link" --version >/dev/null 2>&1; then
+               echo "✅ $link 软链接可用"
+               return 0
+           else
+               echo "❌ $link 软链接存在但无法执行，需要使用规避方式"
+               return 1
+           fi
+       fi
+       
+       # 4. 普通文件，检查是否可执行
+       if [ -x "$link" ]; then
+           echo "✅ $link 可执行"
+           return 0
+       fi
+       
+       return 1
+   }
+   
+   # 创建软链接的正确方式
+   create_symlink() {
+       local target=$1
+       local link=$2
+       
+       # 关键：先删除再创建，不能用 ln -sf
+       rm -f "$link"
+       ln -s "$target" "$link"
+   }
+   
+   # 检查关键工具
+   check_symlink "$HOME/usr/local/bin/cc" "clang" || create_wrapper "cc" "/data/service/hnp/bin/clang"
+   ```
+
+3. **软链接规避方式（强制使用）**
+   ```bash
+   # 当软链接不可用时，使用 wrapper 脚本（推荐）
+   create_wrapper() {
+       local name=$1
+       local target=$2
+       cat > "$HOME/usr/local/bin/$name" << EOF
+   #!/bin/sh
+   exec $target "\$@"
+   EOF
+       chmod +x "$HOME/usr/local/bin/$name"
+   }
+   ```
+
+4. 准备编译目录结构
 
 #### Phase 3: 编译执行
 
 1. 识别构建系统类型（参考 `knowledge/build-systems.md`）
 2. 应用补丁（如有历史档案）
 3. 执行编译命令
-4. 记录编译过程
+4. **执行 make install 时检查软链接（必须）**
+   ```bash
+   # ⚠️ 强制规范：make install 后必须验证安装产物
+   # 很多软件的 make install 会创建软链接，需要验证
+   
+   make install
+   
+   # 检查安装的可执行文件是否可用
+   for bin in $DEFAULT_PREFIX/bin/*; do
+       if [ -L "$bin" ]; then
+           if ! "$bin" --version >/dev/null 2>&1; then
+               echo "⚠️ $bin 软链接不可用，创建 wrapper 脚本"
+               target=$(readlink "$bin")
+               rm -f "$bin"
+               cat > "$bin" << EOF
+   #!/bin/sh
+   exec $target "\$@"
+   EOF
+               chmod +x "$bin"
+           fi
+       fi
+   done
+   ```
+5. 记录编译过程
 
 #### Phase 4: 验证与归档
 
-1. 验证编译产物
+1. **验证编译产物（必须检查软链接可用性）**
+   ```bash
+   # ⚠️ 强制规范：验证阶段必须检查所有产物软链接
+   # 不能仅检查文件是否存在，必须验证可执行性
+   
+   verify_installation() {
+       local bin=$1
+       
+       # 1. 检查文件存在
+       [ -e "$bin" ] || { echo "❌ $bin 不存在"; return 1; }
+       
+       # 2. 验证可执行性
+       "$bin" --version >/dev/null 2>&1 || {
+           echo "❌ $bin 无法执行"
+           return 1
+       }
+       
+       echo "✅ $bin 验证通过"
+       return 0
+   }
+   ```
 2. **执行官方测试套件（必须）**
    - 运行 `make check` 或 `make test`
    - 记录测试结果（通过/失败/跳过）
@@ -273,6 +395,38 @@ patch --dry-run -p1 < archives/o/openssl/1.1.1w/patches/0001-xxx.patch
 | 补丁版本 | 高 | 通常是 bug 修复 |
 | 小版本升级 | 中 | API 兼容，可能需要调整 |
 | 大版本升级 | 低 | 可能需要重新适配 |
+
+### 6.4 软链接处理规范（强制）
+
+> **⚠️ 强制规范**：鸿蒙系统的 SELinux 策略限制软链接的创建和访问。在编译、安装、验证的各个阶段都必须正确处理软链接问题。
+
+**核心原则**：
+1. **不能仅检查软链接是否存在**，必须验证是否可执行
+2. **禁止使用 `ln -sf` 覆盖已存在的软链接**（会创建带随机后缀的文件）
+3. **必须使用 `rm -f` + `ln -s` 的方式创建软链接**
+4. **软链接不可用时必须使用规避方式**：wrapper 脚本（推荐）或 cp 复制
+5. **make install 后必须检查**安装产物中的软链接
+
+**详细规范**：参考 `knowledge/environment.md` 第 9 节
+
+**快速参考**：
+```bash
+# 创建软链接的正确方式（关键！）
+rm -f /path/to/link           # 先删除
+ln -s /target /path/to/link   # 再创建（不加 -f）
+
+# 检查软链接
+check_symlink "/path/to/link" || create_wrapper "name" "/path/to/target"
+
+# 创建 wrapper 脚本（规避方案）
+cat > $HOME/usr/local/bin/cc << 'EOF'
+#!/bin/sh
+exec /data/service/hnp/bin/clang "$@"
+EOF
+chmod +x $HOME/usr/local/bin/cc
+```
+
+> **关于 clang 路径问题**：鸿蒙的 clang 脚本使用 `exec -a` 设置 argv[0]，所以软链接和 wrapper 脚本都能正确找到 sysroot 和资源目录，不存在路径问题。
 
 ## 7. License
 
