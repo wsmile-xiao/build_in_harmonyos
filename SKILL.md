@@ -482,6 +482,9 @@ patch --dry-run -p1 < archives/o/openssl/1.1.1w/patches/0001-xxx.patch
 | 常见问题 | `knowledge/troubleshooting.md` |
 | musl 兼容性 | `knowledge/musl-compat.md` |
 | 问题案例 | `knowledge/error-patterns.md` |
+| musl/glibc 接口对比 (ISO C + POSIX) | `knowledge/musl-glibc-full-comparison-iso-posix.md` |
+| musl/glibc 接口对比 (GNU + Linux) | `knowledge/musl-glibc-full-comparison-gnu-linux.md` |
+| musl/glibc 差异对开发者影响 | `knowledge/musl-glibc-developer-impact.md` |
 
 ### 6.2 档案命名规范
 

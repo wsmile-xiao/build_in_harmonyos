@@ -2,6 +2,11 @@
 
 鸿蒙系统使用 **musl libc** 而非 Linux 常用的 **glibc**，这种差异会导致某些软件在编译时出现问题。
 
+> **📋 完整文档导航**：
+> - **全量接口对比表 (ISO C + POSIX)**: [`musl-glibc-full-comparison-iso-posix.md`](./musl-glibc-full-comparison-iso-posix.md) — 逐接口列出 ISO C89~C23 和 POSIX.1-2008 的支持差异
+> - **全量接口对比表 (GNU 扩展 + Linux syscall)**: [`musl-glibc-full-comparison-gnu-linux.md`](./musl-glibc-full-comparison-gnu-linux.md) — 覆盖所有 GNU 扩展头文件/函数和 Linux 特有 syscall 封装
+> - **开发者影响分析报告**: [`musl-glibc-developer-impact.md`](./musl-glibc-developer-impact.md) — 编译期/运行期/行为语义/安全/各语言运行时的全面影响分析和迁移最佳实践
+
 ## 1. 核心差异对比
 
 | 特性 | glibc | musl libc (鸿蒙) | 影响 |
