@@ -53,6 +53,31 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 - 用户说："鸿蒙系统用什么编译器？"
 - 用户说："如何在鸿蒙系统上配置 autotools？"
 
+### 2.1 跨 SKILL 协作：Python 三方库适配
+
+当用户咨询的是 **Python 三方库（PyPI 包）** 的鸿蒙适配时，应加载 [ohos-python-release](https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release) 项目的 `feat/pypi-compat-skill` 分支进行分析。两个 SKILL 的职责划分：
+
+| SKILL | 职责范围 | 触发条件 |
+|-------|----------|----------|
+| **本 SKILL** (build_in_harmonyos) | C/C++ 开源软件的编译适配、补丁开发、归档管理 | 用户需要编译 C/C++ 库，或三方库适配过程中涉及底层 C 库编译 |
+| **ohos-python-release** (pypi-compat-skill) | Python 三方库的鸿蒙兼容性分析、纯 Python 适配、wheel 打包 | 用户咨询 PyPI 包在鸿蒙上的兼容性 |
+
+**协作流程**：
+```
+用户咨询 Python 三方库
+    │
+    ├─ 纯 Python 包（无 C 扩展）
+    │   → pypi-compat-skill 独立处理
+    │
+    └─ 包含 C/C++ 扩展的三方库
+        │
+        ├─ pypi-compat-skill 分析兼容性
+        │
+        └─ 需要编译/适配 C 依赖库
+            → 转回本 SKILL 处理 C/C++ 编译
+            → 编译完成后将结果返回 pypi-compat-skill
+```
+
 ## 3. How to use
 
 ### 3.1 编译任务执行流程
@@ -259,7 +284,22 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
    - 编写 README.md
    - 记录测试报告
 
-5. **编译复盘与知识库更新（必须，Phase 4 最后一步）**
+5. **更新 SUMMARY.md（必须，归档后立即执行）**
+   > **⚠️ 强制规范**：每次新增或更新编译档案后，**必须运行 `gen_summary.py` 重新生成 SUMMARY.md**。
+   > SUMMARY.md 是面向人类的兼容性总览文档，不能手动编辑，必须由脚本从档案数据自动生成。
+
+   ```bash
+   # 从编译档案自动生成人可读的兼容性总览
+   python3 scripts/gen_summary.py
+   # 输出: SUMMARY.md（797 行，含统计概览、兼容性一览表、各软件详细信息）
+   ```
+
+   **生成内容包含**：
+   - 📊 总体统计（软件数量、成功/部分成功/失败分布、构建系统分布）
+   - 📋 软件兼容性一览表（状态、兼容性等级、补丁数、依赖、详情链接）
+   - 📖 各软件详细信息（兼容性评估、已知问题、补丁列表、报告链接）
+
+6. **编译复盘与知识库更新（必须，Phase 4 最后一步）**
    > **⚠️ 强制规范**：每次编译完成后，必须回顾本次编译过程中遇到的所有问题和解决方案，
    > 识别出尚未被知识库收录的新模式，及时更新知识库文件。
    > 知识库是跨会话积累的核心资产，不能只积累档案而忽视知识沉淀。
