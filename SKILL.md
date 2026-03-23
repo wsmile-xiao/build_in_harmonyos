@@ -78,7 +78,12 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
 #### Phase 4: 验证与归档
 
 1. 验证编译产物
-2. 执行测试（如有）
+2. **执行官方测试套件（必须）**
+   - 运行 `make check` 或 `make test`
+   - 记录测试结果（通过/失败/跳过）
+   - 分析失败原因：编译问题 vs 环境兼容性问题
+   - 创建测试报告 `reports/test-report.md`
+   - 如果测试失败，必须在 manifest.yaml 中说明原因
 3. 创建软件档案：
    - 生成补丁文件
    - 创建 manifest.yaml
