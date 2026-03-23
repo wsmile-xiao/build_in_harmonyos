@@ -296,3 +296,33 @@ test_results:
   note: |
     详细说明测试结果和失败原因
 ```
+
+## 10. 特殊构建场景
+
+### 10.1 automake 鸡生蛋问题
+
+**问题**：编译 automake 自身时，make 过程需要调用尚未构建好的 automake 来重新生成 Makefile.in 文件，形成循环依赖。
+
+**现象**：
+- config.status 执行后 Makefile 中存在未替换的变量（如 `@am_AUTOCONF@`）
+- make check 触发重新生成导致失败
+
+**解决方案**：
+1. 使用 automake 自带的 `gen-all.pl` 脚本手动生成所有模板文件
+2. 手动 sed 修补残留变量（如 `@am_AUTOCONF@` → `autoconf`）
+3. 手动 cp 安装到正确目录
+
+### 10.2 无 32 位兼容层的软件
+
+**问题**：部分软件（如 strace）默认启用 32 位兼容支持（m32 personality），在纯 aarch64 鸿蒙系统上无法编译。
+
+**解决方案**：
+```bash
+# strace
+./configure --disable-mpers
+
+# 其他类似的软件，检查 configure --help 中是否有 32 位相关选项
+./configure --help | grep -i "32\|m32\|multi\|personality"
+```
+
+**适用软件**：strace 6.19

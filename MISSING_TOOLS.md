@@ -52,12 +52,12 @@
 
 | # | 工具 | 现状 | 影响 | 状态 |
 |---|------|------|------|------|
-| 1 | strace | 6.19 | 编译成功但 ptrace 被 SELinux 限制 | ⚠️ 已完成 6.19 |
-| 2 | rsync | 缺失 | 文件同步不支持增量 | ❌ 待编译 |
+| 1 | strace | 6.19 | $HOME/usr/local/bin | ⚠️ **已编译，ptrace 被 SELinux 禁止** |
+| 2 | rsync | 3.3.0 | $HOME/usr/local/bin | ✅ **已完成** |
 | 3 | jq | 已安装 1.7.1 | — | ✅ 已完成 |
 | 4 | GNU patch | 2.7.6 | $HOME/usr/local/bin | ✅ **已完成** |
 | 5 | GNU file | 5.45 | $HOME/usr/local/bin | ✅ **已完成** |
-| 6 | htop | 缺失 | 进程查看简陋 | ❌ 待编译 |
+| 6 | htop | 3.4.1 | $HOME/usr/local/bin | ✅ **已完成** |
 
 ### 🟢 第三层：锦上添花
 
@@ -102,11 +102,11 @@
 ## 📋 建议操作顺序
 
 ```
-【待编译 - 第二层】
-1. ~~strace（30分钟）~~                ← ✅ 已完成 6.19（ptrace 受 SELinux 限制）
-2. ~~rsync（15分钟）~~                 ← ✅ 已完成
-3. ~~GNU patch + file（各15分钟）~~    ← ✅ 已完成
-4. ~~htop~~                            ← ✅ 已完成
+【已完成 - 第二层 ✅】
+1. strace ✅（已编译，ptrace 被 SELinux 禁止，功能受限）
+2. rsync ✅
+3. GNU patch + file ✅
+4. htop ✅
 
 【可选】
 5. GNU coreutils 补充编译              ← 无法覆盖 toybox，仅记录
@@ -121,6 +121,7 @@
 | `/tmp` 不可写 | Autotools 硬编码 /tmp 会崩溃 | `export TMPDIR=$HOME/tmp` |
 | `mkfifo` 不支持 | make -j jobserver 失效 | make -j1 或 touch aclocal.m4 |
 | SELinux 限制 | 符号链接访问受限 | 视具体场景处理 |
+| SELinux 限制 | ptrace 被禁止（adhoc_bin 域），strace/ltrace/valgrind 不可用 | 需修改 SELinux 策略 |
 
 ---
 
@@ -153,6 +154,7 @@
 | patch | 2.7.6 | archives/p/patch/2.7.6/ |
 | python | 3.9.0 | archives/p/python/3.9.0/ |
 | readline | 8.2 | archives/r/readline/8.2/ |
+| rsync | 3.3.0 | archives/r/rsync/3.3.0/ |
 | sed | 4.9 | archives/s/sed/4.9/ |
 | strace | 6.19 | archives/s/strace/6.19/ |
 | tar | 1.35 | archives/t/tar/1.35/ |
@@ -161,4 +163,4 @@
 
 ---
 
-*最后更新：2026-03-23 18:30（strace 6.19 编译完成，第二层 100%，总计 80%）*
+*最后更新：2026-03-23 17:50（strace 6.19 编译完成，第二层 100%，总进度 80%）*

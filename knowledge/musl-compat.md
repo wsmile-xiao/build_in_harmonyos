@@ -241,3 +241,76 @@ error: thread-local storage not supported
 |------|------|-------------------|
 | BLDSHARED | 构建主共享库 | ❌ 不能（循环依赖） |
 | LDSHARED | 构建插件/扩展 | ✅ 必须（符号解析） |
+
+## 8. _GNU_SOURCE 宏需求
+
+### 问题描述
+
+musl libc 需要 `_GNU_SOURCE` 宏来暴露完整的 POSIX 和 BSD API，而许多 GNU/Linux 软件使用 `_BSD_SOURCE` 或 `_DEFAULT_SOURCE`。在 musl 环境中，仅定义 `_BSD_SOURCE` 不足以暴露 `dirent` API（如 `DIR`、`opendir`、`readdir`）。
+
+### glibc vs musl 的差异
+
+| 宏 | glibc 行为 | musl 行为 |
+|----|-----------|-----------|
+| `_BSD_SOURCE` | 暴露大量 BSD 扩展 | 仅等同于 `_DEFAULT_SOURCE` |
+| `_GNU_SOURCE` | 暴露所有扩展 | 必须定义才能获取完整 API |
+| `_DEFAULT_SOURCE` | 默认定义 | 默认定义但 API 子集不同 |
+| `_XOPEN_SOURCE` | 额外暴露 X/Open API | 不需要（已默认提供 POSIX） |
+
+### 受影响的 API
+
+- `dirent.h`: `DIR`、`opendir`、`readdir`、`readdir_r`
+- `netinet/`: 部分网络 API
+- `sys/`: 部分系统调用封装
+
+### 解决方案
+
+```bash
+# 方案1：通过 CFLAGS 全局添加（推荐）
+CFLAGS="-D_GNU_SOURCE $CFLAGS" ./configure ...
+
+# 方案2：修改源码中的宏定义
+sed -i 's/_BSD_SOURCE/_GNU_SOURCE/g' configure.ac
+```
+
+### 涉及软件
+- gawk 5.3.0
+
+## 9. _XOPEN_SOURCE_EXTENDED 宏需求
+
+### 问题描述
+
+ncurses 的宽字符接口（如 `cchar_t`、`setcchar`、`wadd_wch`）在 musl 下需要显式定义 `_XOPEN_SOURCE_EXTENDED` 宏。如果不定义，编译时会出现宽字符类型未定义的错误。
+
+### 根因
+
+- glibc 定义 `_XOPEN_SOURCE >= 600` 时自动启用宽字符接口
+- musl 即使定义了 `_XOPEN_SOURCE` 也不自动启用 `_XOPEN_SOURCE_EXTENDED`
+- ncurses 的宽字符接口依赖 X/Open Curses 规范
+
+### 解决方案
+
+```bash
+# 通过 CFLAGS 添加
+CFLAGS="-D_XOPEN_SOURCE_EXTENDED -D_XOPEN_SOURCE=600 $CFLAGS" ./configure ...
+```
+
+### 涉及软件
+- Python 3.9.0（_curses 模块编译）
+- ncurses 6.4
+
+## 10. bash malloc 与 musl 不兼容
+
+### 问题描述
+
+GNU bash 默认使用内置的 malloc 实现（通过 `--with-bash-malloc` 选项启用），这个实现针对 glibc 的 malloc 行为做了优化。在 musl libc 上，bash 内置 malloc 会导致运行时内存问题。
+
+### 解决方案
+
+```bash
+# 使用系统 malloc（musl 的 malloc）
+./configure --without-bash-malloc
+```
+
+### 涉及软件
+- bash 5.3

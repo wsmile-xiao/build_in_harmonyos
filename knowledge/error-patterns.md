@@ -32,6 +32,17 @@
 | [E024](#e024-unix-domain-socket-受限) | 系统 | socket.bind: Operation not permitted | 🟡 中等 |
 | [E025](#e025-can-socket-宏未定义) | 编译 | CAN_RAW_FD_FRAMES undeclared | 🟡 中等 |
 | [E026](#e026-线程局部存储tls-差异) | 兼容性 | thread-local storage error | 🟡 中等 |
+| [E027](#e027-libintl_gettext-链接失败) | 链接 | libintl_gettext undefined symbol | 🟡 中等 |
+| [E028](#e028-用户编译的共享库与系统库冲突) | 运行时 | 共享库覆盖系统库导致终端崩溃 | 🔴 阻塞 |
+| [E029](#e029-bash-内置-malloc-与-musl-不兼容) | 运行时 | bash-malloc 与 musl 不兼容 | 🟡 中等 |
+| [E030](#e030-鸿蒙无-32-位兼容层导致-strace-编译失败) | 配置 | m32 personality 检测失败 | 🟡 中等 |
+| [E031](#e031-proc-文件系统-selinux-访问限制) | 运行时 | /proc/stat Permission denied | 🔴 阻塞 |
+| [E032](#e032-_gnu_source-未定义导致-dirent-api-不完整) | 编译 | unknown type name DIR | 🟡 中等 |
+| [E033](#e033-ncurses-宽字符函数需要-_xopen_source_extended) | 编译 | unknown type name cchar_t | 🟡 中等 |
+| [E034](#e034-系统缺少-ca-证书包) | 运行时 | unable to load client CA certificates | 🟡 中等 |
+| [E035](#e035-libtoolize-shell-函数加载失败) | 工具链 | func_add_hook inaccessible or not found | 🟢 轻微 |
+| [E036](#e036-平台字符串含空格导致构建路径错误) | 配置 | get_platform 路径含空格 | 🟡 中等 |
+| [E037](#e037-usrbinenv-不存在导致-shebang-失败) | 环境 | /usr/bin/env bad interpreter | 🟡 中等 |
 
 ---
 
@@ -971,6 +982,366 @@ clang -pthread test_tls.c -o test_tls
 ./test_tls
 # 应该看到两个线程各自独立的 tls_var 值
 ```
+
+---
+
+## E027: libintl_gettext 链接失败
+
+### 错误特征
+
+```
+ld.lld: error: undefined symbol: libintl_gettext
+ld.lld: error: undefined symbol: libintl_bindtextdomain
+```
+
+### 根因
+
+GNU 软件默认启用 NLS（Native Language Support）国际化，依赖 libintl（gettext 库），鸿蒙系统未预装该库。
+
+### 验证命令
+
+```bash
+grep -r "LIBINTL\|libintl\|nls" Makefile.am configure.ac
+```
+
+### 解决方案
+
+```bash
+# 推荐方案：禁用国际化
+./configure --disable-nls
+
+# 如确需 gettext 支持，需自行编译安装 libintl
+```
+
+### 涉及软件
+
+gdbm 1.23、tar 1.35
+
+---
+
+## E028: 用户编译的共享库与系统库冲突
+
+### 错误特征
+
+```
+ncurses 共享库安装后，系统 zsh 崩溃，所有终端不可用
+```
+
+### 根因
+
+用户编译的共享库版本（如 libncursesw.so.6.4）覆盖了系统版本但符号链接不完整，导致依赖系统 ncurses 的程序崩溃。
+
+### 验证命令
+
+```bash
+ls -la $HOME/usr/local/lib/libncurses*
+```
+
+### 解决方案
+
+```bash
+# 方案1：只编译静态库（推荐）
+./configure --without-shared --prefix=$HOME/usr/local
+make && make install
+
+# 方案2：如需共享库，确保符号链接完整
+# 检查所有 .so 链接是否正确指向
+```
+
+### 涉及软件
+
+ncurses 6.4
+
+---
+
+## E029: bash 内置 malloc 与 musl 不兼容
+
+### 错误特征
+
+```
+编译成功但运行时内存异常
+```
+
+### 根因
+
+bash 默认使用内置 malloc 实现，与 musl libc 的内存管理不兼容，导致运行时出现内存相关问题。
+
+### 验证命令
+
+```bash
+./configure --help | grep bash-malloc
+```
+
+### 解决方案
+
+```bash
+./configure --without-bash-malloc --prefix=$HOME/usr/local
+make && make install
+```
+
+### 涉及软件
+
+bash 5.3
+
+---
+
+## E030: 鸿蒙无 32 位兼容层导致 strace 编译失败
+
+### 错误特征
+
+```
+configure 阶段 m32 personality 检测失败
+```
+
+### 根因
+
+strace 默认启用 m32 personality 支持以追踪 32 位程序，鸿蒙系统没有 32 位兼容层，仅有 aarch64 架构。
+
+### 验证命令
+
+```bash
+uname -m  # 仅 aarch64
+```
+
+### 解决方案
+
+```bash
+./configure --disable-mpers --prefix=$HOME/usr/local
+make && make install
+```
+
+### 涉及软件
+
+strace 6.19
+
+---
+
+## E031: /proc 文件系统 SELinux 访问限制
+
+### 错误特征
+
+```
+htop: Cannot open /proc/stat: Permission denied
+```
+
+### 根因
+
+鸿蒙 SELinux 策略限制普通用户访问 /proc 文件系统。
+
+### 验证命令
+
+```bash
+cat /proc/stat  # Permission denied
+```
+
+### 解决方案
+
+```bash
+# 使用 sudo 运行
+sudo -E TERM=xterm-256color htop
+```
+
+### 涉及软件
+
+htop 3.4.1
+
+---
+
+## E032: _GNU_SOURCE 未定义导致 dirent API 不完整
+
+### 错误特征
+
+```
+error: unknown type name 'DIR'
+error: call to undeclared function 'opendir'
+```
+
+### 根因
+
+musl 需要 `_GNU_SOURCE` 而非 `_BSD_SOURCE` 来暴露完整 dirent API，部分软件使用 `_BSD_SOURCE` 不足以在 musl 下获得完整接口。
+
+### 验证命令
+
+```bash
+grep -r "_BSD_SOURCE\|_GNU_SOURCE" 源码
+```
+
+### 解决方案
+
+```bash
+# 方案1：通过 CFLAGS 添加
+export CFLAGS="-D_GNU_SOURCE $CFLAGS"
+
+# 方案2：修改源码中的 _BSD_SOURCE 为 _GNU_SOURCE
+sed -i 's/_BSD_SOURCE/_GNU_SOURCE/g' 源文件
+```
+
+### 涉及软件
+
+gawk 5.3.0
+
+---
+
+## E033: ncurses 宽字符函数需要 _XOPEN_SOURCE_EXTENDED
+
+### 错误特征
+
+```
+error: unknown type name 'cchar_t'
+error: call to undeclared function 'setcchar'
+```
+
+### 根因
+
+musl 下 ncurses 宽字符接口需要显式定义 `_XOPEN_SOURCE_EXTENDED` 才能暴露 cchar_t 等类型和 setcchar 等函数。
+
+### 验证命令
+
+```bash
+grep -r "_XOPEN_SOURCE" 源码
+```
+
+### 解决方案
+
+```bash
+export CFLAGS="-D_XOPEN_SOURCE_EXTENDED -D_XOPEN_SOURCE=600 $CFLAGS"
+```
+
+### 涉及软件
+
+Python 3.9.0（curses 模块）
+
+---
+
+## E034: 系统缺少 CA 证书包
+
+### 错误特征
+
+```
+wget: unable to load client CA certificates
+SSL 证书验证失败
+```
+
+### 根因
+
+鸿蒙系统未预装 ca-certificates 包，缺少 `/etc/ssl/certs/ca-certificates.crt`。
+
+### 验证命令
+
+```bash
+ls /etc/ssl/certs/ca-certificates.crt  # 文件不存在
+```
+
+### 解决方案
+
+```bash
+# 临时方案：跳过证书验证
+wget --no-check-certificate https://example.com/file
+
+# 永久方案：安装 CA 证书包
+```
+
+### 涉及软件
+
+wget 1.19.1
+
+---
+
+## E035: libtoolize shell 函数加载失败
+
+### 错误特征
+
+```
+func_add_hook: inaccessible or not found
+func_dirname: command not found
+```
+
+### 根因
+
+libtoolize 使用 bash 特有的内嵌 source 加载机制，即使 bash 下也可能因函数加载方式问题而失败。
+
+### 验证命令
+
+```bash
+libtoolize --version  # 版本正常但功能受限
+```
+
+### 解决方案
+
+```
+核心功能 libtool 正常可用，libtoolize 仅在从零创建 autotools 项目时需要。
+一般不影响使用已有 autotools 配置的项目构建（此类项目通常自带已生成的配置脚本）。
+```
+
+### 涉及软件
+
+libtool 2.4.7
+
+---
+
+## E036: 平台字符串含空格导致构建路径错误
+
+### 错误特征
+
+```
+No module named '_sysconfigdata__ohos_aarch64'
+构建路径含空格
+```
+
+### 根因
+
+`uname -r` 返回 `"HongMeng Kernel 1.11.0"`（含空格），Python 的 `get_platform()` 将其拼入路径，导致模块路径解析失败。
+
+### 验证命令
+
+```bash
+python3 -c "import sysconfig; print(sysconfig.get_platform())"
+```
+
+### 解决方案
+
+```python
+# 修改 sysconfig.py / distutils/util.py
+# 跳过 release 字段，使用 "ohos-aarch64" 作为平台标识
+```
+
+### 涉及软件
+
+Python 3.9.0
+
+---
+
+## E037: /usr/bin/env 不存在导致 shebang 失败
+
+### 错误特征
+
+```
+/usr/bin/env: bad interpreter: No such file or directory
+```
+
+### 根因
+
+鸿蒙系统没有 `/usr/bin/env`，部分脚本使用 `#!/usr/bin/env sh` 的 shebang，导致直接执行失败。
+
+### 验证命令
+
+```bash
+ls /usr/bin/env  # 文件不存在
+```
+
+### 解决方案
+
+```bash
+# 批量修复 shebang
+sed -i 's|#!/usr/bin/env sh|#!/bin/sh|' file
+sed -i 's|#!/usr/bin/env bash|#!/bin/bash|' file
+
+# 安装后检查并修复所有脚本的 shebang
+```
+
+### 涉及软件
+
+libtool 2.4.7 及通用
 
 ---
 

@@ -216,11 +216,99 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
    - 分析失败原因：编译问题 vs 环境兼容性问题
    - 创建测试报告 `reports/test-report.md`
    - 如果测试失败，必须在 manifest.yaml 中说明原因
-3. 创建软件档案：
-   - 生成补丁文件
+3. **补丁完整性校验（必须，在生成补丁之前执行）**
+   ```bash
+   # ⚠️ 强制规范：生成补丁前必须与原始源码做 diff 比对，
+   # 确保所有源码修改都被捕获为补丁文件，防止遗漏。
+   # 不能仅凭对话记录"回忆"做过哪些修改。
+   
+   # 1. 从原始 tarball 解压到临时目录
+   mkdir -p /tmp/patch_verify
+   cd /tmp/patch_verify
+   tar xf /path/to/original.tar.xz <软件名>-<版本>/ 2>/dev/null
+   
+   # 2. 对比修改后的源码与原始源码
+   diff -ruN \
+       <软件名>-<版本>/ \
+       /path/to/modified-source/ \
+       > /tmp/patch_verify/all_changes.diff
+   
+   # 3. 检查 diff 结果
+   # - 如果无差异 → 没有源码修改，跳过
+   # - 如果有差异 → 逐个检查差异，确认每个修改都已（或将被）生成为补丁文件
+   # - 排除 build 目录、.o 文件、Makefile 等构建产物
+   ```
+   **校验要点**：
+   - 对话中讨论的补丁数量必须与 diff 结果一致
+   - diff 中的每个文件修改都必须有对应的补丁文件
+   - 如果发现遗漏的修改，必须补充生成补丁
+   - **典型案例**：编译过程中为修复编译错误临时修改的源文件（如添加 `__attribute__((unused))`），容易在归档时被遗漏
+   
+   > **教训**：strace 6.19 编译时修改了 `src/sigreturn.c` 抑制 clang 的 `-Wunused-function` 警告，但归档时仅生成了 config.guess 和 config.sub 的补丁，遗漏了源码修改。若当时执行此 diff 校验步骤，即可避免。
+
+4. 创建软件档案：
+   - 生成补丁文件（基于上一步的校验结果）
+   - 验证每个补丁可干净应用：`patch --dry-run -p1 < patches/NNNN-xxx.patch`
    - 创建 manifest.yaml
    - 编写 README.md
    - 记录测试报告
+
+5. **编译复盘与知识库更新（必须，Phase 4 最后一步）**
+   > **⚠️ 强制规范**：每次编译完成后，必须回顾本次编译过程中遇到的所有问题和解决方案，
+   > 识别出尚未被知识库收录的新模式，及时更新知识库文件。
+   > 知识库是跨会话积累的核心资产，不能只积累档案而忽视知识沉淀。
+
+   **复盘步骤**：
+
+   1. **提取本次编译的新经验**
+      ```
+      回顾清单：
+      - 编译过程中遇到了哪些 configure/编译/链接/运行时错误？
+      - 解决方案是什么？是否具有通用性（其他软件可能也会遇到）？
+      - manifest.yaml 中的 knowledge_gained 条目是否都是新的？
+      - 是否发现了新的鸿蒙系统限制或兼容性问题？
+      ```
+
+   2. **比对现有知识库，识别遗漏**
+      ```bash
+      # 检查 error-patterns.md 是否已覆盖本次遇到的错误
+      grep "错误关键词" knowledge/error-patterns.md
+
+      # 检查 troubleshooting.md 是否已覆盖
+      grep "问题描述" knowledge/troubleshooting.md
+      ```
+
+   3. **按类型归档到对应知识库文件**
+      ```
+      | 遇到的问题类型 | 应更新的文件 |
+      |---------------|-------------|
+      | 新的编译/链接/运行时错误模式 | knowledge/error-patterns.md（新增 Exxx） |
+      | 排查思路和诊断流程 | knowledge/troubleshooting.md |
+      | musl 与 glibc 的差异 | knowledge/musl-compat.md |
+      | 构建系统特殊处理方式 | knowledge/build-systems.md |
+      | 鸿蒙系统环境特性/限制 | knowledge/environment.md |
+      | 编译依赖关系/顺序 | knowledge/dependencies.md |
+      ```
+
+   4. **更新知识库**
+      - 为新模式分配编号（error-patterns.md 的 E0xx 序号递增）
+      - 补充错误特征、根因分析、验证命令、解决方案
+      - 更新相关索引表
+
+   **判断标准**——以下情况**必须**写入知识库：
+   - ✅ 同类问题可能在未来编译其他软件时复现
+   - ✅ 解决方案具有通用性，不局限于当前软件
+   - ✅ 揭示了鸿蒙系统与 Linux 的差异
+   - ✅ 编译选项是鸿蒙特有的（如 `--disable-mpers`、`--without-shared`）
+
+   **以下情况**可以**不**写入：
+   - ❌ 仅当前软件特有的逻辑 bug
+   - ❌ 上游已知且已修复的问题
+   - ❌ 一次性环境问题（如磁盘空间不足）
+
+   > **教训**：strace 6.19 编译遗漏了 `src/sigreturn.c` 的补丁，原因是没有在归档前做 diff 校验；
+   > 同时 clang 的 `-Wunused-function` 对 static inline 函数的严格行为也没有被记录为通用知识。
+   > 如果每次编译后都执行复盘，这两个问题本可以在第一时间被发现和沉淀。
 
 ### 3.2 知识检索策略
 
@@ -315,6 +403,7 @@ openharmony-compile-agent/
 │
 ├── knowledge/                  # 静态知识库
 │   ├── build-systems.md        # 构建系统知识
+│   ├── dependencies.md         # 编译依赖顺序与推荐顺序
 │   ├── environment.md          # 鸿蒙环境特性
 │   ├── troubleshooting.md      # 问题排查指南
 │   ├── error-patterns.md       # 错误模式库
@@ -385,7 +474,9 @@ patch --dry-run -p1 < archives/o/openssl/1.1.1w/patches/0001-xxx.patch
 | 原位置 | 新位置 |
 |--------|--------|
 | 构建系统知识 | `knowledge/build-systems.md` |
+| 编译依赖顺序 | `knowledge/dependencies.md` |
 | 环境检查 | `knowledge/environment.md` |
+| 文件系统架构分析 | `knowledge/filesystem-analysis.md` |
 | 常见问题 | `knowledge/troubleshooting.md` |
 | musl 兼容性 | `knowledge/musl-compat.md` |
 | 问题案例 | `knowledge/error-patterns.md` |
@@ -440,4 +531,4 @@ chmod +x $HOME/usr/local/bin/cc
 
 ## 7. License
 
-本技能遵循 MIT 许可证。
+本技能遵循 MIT 许可证。�可证。�能遵循 MIT 许可证。

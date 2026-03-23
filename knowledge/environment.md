@@ -152,11 +152,15 @@ command -v clang >/dev/null && echo "✅ clang: $(clang --version | head -1)" ||
 
 ### 5.1 文件系统
 
+> **完整文件系统架构分析**: 详见 `filesystem-analysis.md`，涵盖 HMFS/HMDFS/EROFS/devfs 等全部文件系统类型、根目录布局差异、Hmmac 安全层等。
+
 | 限制 | 说明 | 解决方案 |
 |------|------|----------|
 | `/tmp` 不可写 | erofs 只读挂载 | `export TMPDIR=$HOME/tmp` |
-| 软链接访问受限 | SELinux 策略 | 使用 `cp` 替代 `ln -s` |
+| 软链接访问受限 | SELinux + Hmmac 策略 | 使用 `cp` 或 wrapper 脚本替代 `ln -s`，详见 §9 |
 | `fstat(pipe)` 返回 EACCES | 安全限制 | 使用兼容性封装 |
+| `$HOME` 是 HMDFS 分布式文件系统 | `stat -f` 返回 unknown，flock 语义可能不同 | 编译脚本避免依赖 FS 类型检测 |
+| 无 `/usr`、`/var`、`/run`、`/sbin` | FHS 标准目录缺失 | 自建目录结构或写入 `$HOME` |
 
 ### 5.2 SELinux 域转换
 
@@ -174,6 +178,50 @@ clang --version
 # 管道执行成功
 clang --version | cat
 ```
+
+#### /proc 文件系统访问限制
+
+鸿蒙 SELinux 策略限制普通用户访问 /proc 文件系统：
+
+```bash
+# /proc/stat 普通用户不可读
+cat /proc/stat  # Permission denied
+
+# htop 等工具需要 sudo 运行
+sudo -E TERM=xterm-256color htop
+```
+
+**受影响的工具**：htop、top、任何依赖 /proc 的诊断工具
+**解决方案**：使用 sudo 运行（需要保留环境变量）
+
+#### /usr/bin/env 不存在
+
+鸿蒙系统没有 `/usr/bin/env`，使用 `#!/usr/bin/env` shebang 的脚本会失败：
+
+```bash
+# 修复 shebang
+sed -i 's|#!/usr/bin/env sh|#!/bin/sh|' script.sh
+sed -i 's|#!/usr/bin/env perl|#!/usr/bin/perl|' script.pl
+
+# 安装后批量检查
+grep -rl '#!/usr/bin/env' $HOME/usr/local/bin/ 2>/dev/null
+```
+
+**受影响的软件**：libtool（libtoolize 脚本）、各种使用 env shebang 的工具
+
+#### CA 证书包缺失
+
+鸿蒙系统未预装 CA 证书包，HTTPS 验证会失败：
+
+```bash
+# 临时方案
+wget --no-check-certificate https://example.com
+
+# 检查
+ls /etc/ssl/certs/ca-certificates.crt  # 不存在
+```
+
+**受影响的工具**：wget、curl、任何使用 OpenSSL 进行 HTTPS 验证的工具
 
 ## 6. 三元组格式
 
@@ -216,6 +264,9 @@ clang -dM -E - < /dev/null | grep -E "OHOS|GLIBC"
 | /tmp | 可写 | 只读 |
 | SELinux | 通常禁用 | 强制启用 |
 | 软链接 | 正常 | 部分受限 |
+| `/usr/bin/env` | 存在 | ❌ 不存在 |
+| `/etc/ssl/certs/` | 预装 CA 证书 | ❌ 缺少 ca-certificates |
+| `/proc/` 访问 | 普通用户可读 | ⚠️ SELinux 限制，需 sudo |
 
 ## 9. 软链接处理规范（强制）
 

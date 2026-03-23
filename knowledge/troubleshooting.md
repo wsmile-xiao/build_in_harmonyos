@@ -165,6 +165,23 @@ import os
 os.system("clang --version | cat")  # 成功
 ```
 
+### 3.4 libintl_gettext 链接失败
+
+**现象**：
+```
+ld.lld: error: undefined symbol: libintl_gettext
+ld.lld: error: undefined symbol: libintl_bindtextdomain
+```
+
+**原因**：GNU 软件默认启用 NLS（国际化），依赖 gettext 库（libintl），鸿蒙系统未预装。
+
+**解决方案**：
+```bash
+./configure --disable-nls
+```
+
+**涉及软件**：gdbm、tar 等大多数 GNU 软件
+
 ---
 
 ## 4. 构建系统问题
@@ -262,6 +279,41 @@ ssl.SSLError: [SSL: BAD_SIGNATURE] bad signature
 ```bash
 ./Configure ... no-asm
 ```
+
+### 5.4 用户编译的共享库与系统库冲突
+
+**现象**：安装用户编译的 ncurses 共享库后，系统 zsh 崩溃，所有终端不可用。
+
+**原因**：用户编译的共享库（如 libncursesw.so.6.4）安装到系统路径后，zsh 等系统工具的动态链接被劫持，且符号链接可能不完整。
+
+**解决方案**：
+```bash
+# 推荐：只编译静态库
+./configure --without-shared
+
+# 如必须用共享库：确保符号链接完整
+ls -la $HOME/usr/local/lib/libncursesw*
+# 应该看到：libncursesw.so.6 → libncursesw.so.6.4
+```
+
+**预防**：所有用户编译的库优先使用静态链接。
+
+### 5.5 动态库符号链接无法被用户进程加载
+
+**现象**：软件编译安装成功，但运行时报 `error while loading shared libraries`，即使 .so 文件存在且路径正确。
+
+**原因**：鸿蒙 SELinux 限制了用户进程加载某些上下文的 .so 符号链接（与 E018 "创建失败"不同，这里是"已存在但无法加载"）。
+
+**解决方案**：
+```bash
+# 方案1：使用静态链接（推荐）
+./configure --enable-static --disable-shared LDFLAGS=-static
+
+# 方案2：设置 SELinux 上下文
+chcon u:object_r:toybox_exec:s0 /path/to/libxxx.so
+```
+
+**涉及软件**：file 5.45（libmagic）、htop 3.4.1
 
 ---
 

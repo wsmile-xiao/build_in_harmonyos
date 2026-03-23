@@ -1,123 +1,88 @@
-# strace 6.19 - HarmonyOS 编译档案
+# strace 6.19 - HarmonyOS 编译记录
 
 ## 概述
 
-strace 是 Linux 下用于跟踪进程系统调用的诊断、调试和指导教学工具。版本 6.19 已在 HarmonyOS HongMeng Kernel 1.11.0 aarch64 环境下成功编译。
+strace 是 Linux 系统调用追踪工具，用于监控和诊断进程与内核之间的交互。
 
-**编译状态**: ⚠️ 部分完成（编译成功，运行时受限）
+**编译状态**: ⚠️ 部分成功（编译通过，运行受限）
 
-## 编译信息
+## 编译环境
 
 | 项目 | 值 |
 |------|-----|
-| 软件版本 | 6.19 |
-| 构建系统 | Autotools (configure/make) |
-| 目标三元组 | aarch64-unknown-linux-ohos |
-| 安装路径 | /storage/Users/currentUser/usr/local |
-| 编译日期 | 2026-03-23 |
+| 系统 | HarmonyOS HongMeng Kernel 1.11.0 aarch64 |
+| 编译器 | clang 15.0.4 |
+| C 库 | musl libc |
+| 三元组 | aarch64-unknown-linux-ohos |
 
 ## 编译步骤
 
-### 1. 下载源码
-
 ```bash
-cd ~/tmp/opendesk/strace
-wget https://github.com/strace/strace/releases/download/v6.19/strace-6.19.tar.xz
+# 1. 下载源码
+wget --no-check-certificate https://strace.io/files/6.19/strace-6.19.tar.xz
 tar xf strace-6.19.tar.xz
 cd strace-6.19
-```
 
-### 2. 应用补丁
+# 2. 应用补丁
+patch -p1 < patches/0001-add-harmonyos-support-to-config.sub.patch
+patch -p1 < patches/0002-fix-unused-function-warning-in-sigreturn.patch
 
-需要修改 `build-aux/config.guess` 和 `build-aux/config.sub` 以支持 HarmonyOS：
+# 3. 配置
+mkdir build && cd build
+../configure --prefix=$HOME/usr/local --disable-mpers
 
-```bash
-# 补丁 1: config.guess - 添加 HarmonyOS 系统识别
-patch -p1 < patches/0001-adapt-config.guess-for-harmonyos.patch
+# 4. 编译（鸿蒙不支持 mkfifo，用单线程）
+make -j1
 
-# 补丁 2: config.sub - 添加 linux-ohos 三元组支持
-patch -p1 < patches/0002-adapt-config.sub-for-harmonyos.patch
-
-# 补丁 3: sigreturn.c - 修复 clang 未使用函数警告
-patch -p1 < patches/0003-fix-unused-function-warning-for-ohos-clang.patch
-```
-
-### 3. 配置
-
-```bash
-export TMPDIR=$HOME/tmp
-./configure \
-    --host=aarch64-unknown-linux-ohos \
-    --prefix=/storage/Users/currentUser/usr/local \
-    --disable-mpers
-```
-
-**关键参数说明**:
-- `--host=aarch64-unknown-linux-ohos`: 交叉编译目标三元组，让 configure 识别为 Linux 兼容系统
-- `--disable-mpers`: 禁用 m32 personality 支持，鸿蒙系统没有 32 位程序兼容层，不使用此参数会导致编译错误
-
-### 4. 编译和安装
-
-```bash
-make -j$(nproc)
+# 5. 安装
 make install
 ```
 
-## 鸿蒙适配说明
+## 补丁说明
 
-### config.guess 修改（3 处）
+### 0001 - config.sub HarmonyOS 支持
 
-1. **case 匹配扩展**: 在 `UNAME_SYSTEM` 的 case 语句中添加 `HarmonyOS`，使其进入 Linux 兼容分支
-2. **LIBC 检测**: 添加 `__OHOS__` 宏识别，将 LIBC 设为 `ohos`（最终三元组输出为 `aarch64-unknown-linux-ohos`）
-3. **系统识别逻辑**: 添加 `*:HarmonyOS:*:*` 匹配分支，输出 `aarch64-unknown-linux-$LIBC`
+config.guess 已内置 HarmonyOS 识别（`LIBC=ohos`, `*:HarmonyOS:*:*` 模式），
+但 config.sub 需要两处额外修改：
 
-### config.sub 修改（2 处）
+1. **三元组解析**：添加 `ohos-linux` → `basic_os=linux-ohos`
+2. **内核-OS 组合验证**：在 `linux-gnu* | linux-musl*` 列表中添加 `linux-ohos*`
+3. **OS 识别**：在 OS 列表中添加 `ohos*`
 
-1. **basic machine-OS 组合**: 添加 `ohos-linux` 映射，将 `basic_os` 设为 `linux-ohos`
-2. **kernel-os 验证**: 在 `linux-*` kernel-os case 语句中添加 `linux-ohos*`
+### 0002 - 修复未使用函数警告
 
-## 已知限制
+`sigreturn.c` 中的 `print_sigmask_addr_size` 函数在 **aarch64、arm、x86_64** 等架构上
+未被对应的 `arch_sigreturn.c` 引用（只有 i386/m68k/powerpc/s390/sparc 使用了
+`tprintsigmask_addr` 宏）。gcc 对 `static inline` 未使用函数不会报错，但
+clang 会，加上 `-Werror` 就变成了编译错误。
 
-### 🔴 PTRACE 无法使用
+添加 `__attribute__((unused))` 消除编译错误，这是一个跨架构的 clang 兼容性修复，
+不仅限于 HarmonyOS。
 
-strace 的核心功能依赖 `ptrace` 系统调用，但 HarmonyOS 的 SELinux 策略禁止了用户空间的 ptrace 访问：
+## 已知问题
 
-```
-$ strace ls
-strace: test_ptrace_setoptions_follow: PTRACE_TRACEME: Permission denied
-```
+### ptrace 权限被 SELinux 禁止 ⚠️
 
-这意味着虽然二进制文件编译正确，但无法实际用于追踪系统调用。这是 HarmonyOS 内核安全策略的限制，无法通过用户空间的修改解决。
-
-## 测试结果
-
-| 测试项 | 结果 | 说明 |
-|--------|------|------|
-| strace --version | ✅ 通过 | 正确输出版本信息 strace --version 6.19 |
-| strace ls (ptrace 追踪) | ❌ 失败 | PTRACE_TRACEME: Permission denied |
-
-详细测试报告见 [reports/test-report.md](reports/test-report.md)。
-
-## 文件结构
+strace 的核心功能依赖 `ptrace` 系统调用，但鸿蒙系统的 SELinux 策略
+（`adhoc_bin` 域）完全禁止了 ptrace 操作：
 
 ```
-archives/s/strace/6.19/
-├── README.md                              # 本文件
-├── manifest.yaml                          # 编译元数据
-├── patches/
-│   ├── 0001-adapt-config.guess-for-harmonyos.patch
-│   └── 0002-adapt-config.sub-for-harmonyos.patch
-├── reports/
-│   └── test-report.md                     # 测试报告
-└── logs/
-    └── (编译日志)
+strace echo hello
+strace: ptrace(PTRACE_TRACEME, ...): Permission denied
 ```
 
-## 参考
+**影响**：strace 可以安装但无法执行实际系统调用追踪。
 
-- [strace 官网](https://strace.io/)
-- [strace 6.19 发布说明](https://github.com/strace/strace/releases/tag/v6.19)
-- [strace 源码仓库](https://github.com/strace/strace)
-strace 官网](https://strace.io/)
-- [strace 6.19 发布说明](https://github.com/strace/strace/releases/tag/v6.19)
-- [strace 源码仓库](https://github.com/strace/strace)
+**可能的解决方案**：
+- 修改 SELinux 策略添加 ptrace 权限（需要 root）
+- 使用开发者模式/调试模式（如有）
+- 联系 OpenHarmony 团队获取 ptrace 支持
+
+## 验证结果
+
+| 测试项 | 结果 |
+|--------|------|
+| strace --version | ✅ PASS |
+| 二进制格式检查 | ✅ ELF 64-bit ARM aarch64 |
+| strace echo hello | ❌ Permission denied |
+| strace -p PID | ❌ Permission denied |

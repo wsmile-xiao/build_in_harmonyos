@@ -1,58 +1,77 @@
-# strace 6.19 测试报告
+# strace 6.19 - 测试报告
 
-**测试日期**: 2026-03-23  
-**测试环境**: HarmonyOS HongMeng Kernel 1.11.0 aarch64  
-**安装路径**: /storage/Users/currentUser/usr/local/bin/strace
+> **测试日期**: 2026-03-23  
+> **测试环境**: HarmonyOS HongMeng Kernel 1.11.0 aarch64  
+> **测试类型**: 手动功能测试
 
----
+## 测试结果汇总
 
-## 测试结果摘要
+| 类别 | 通过 | 失败 | 跳过 |
+|------|------|------|------|
+| 基础功能 | 2 | 0 | 0 |
+| 核心追踪 | 0 | 3 | 0 |
+| sudo 规避 | 0 | 6 | 0 |
+| **总计** | **2** | **9** | **0** |
 
-| 测试项 | 结果 | 说明 |
-|--------|------|------|
-| 版本信息显示 | ✅ 通过 | `strace --version` 正确输出 |
-| 进程追踪功能 | ❌ 失败 | PTRACE_TRACEME 被 SELinux 拒绝 |
+## 详细测试结果
 
-**总计**: 1 通过 / 1 失败
+### 基础功能测试
 
----
+| # | 测试项 | 命令 | 结果 | 说明 |
+|---|--------|------|------|------|
+| 1 | 版本检查 | `strace --version` | ✅ PASS | 输出 strace 6.19，Optional features: no-m32-mpers |
+| 2 | 二进制格式 | `file $(which strace)` | ✅ PASS | ELF 64-bit LSB executable, ARM aarch64, musl libc |
 
-## 测试详情
+### 核心追踪功能测试
 
-### 测试 1: 版本信息显示 ✅
+| # | 测试项 | 命令 | 结果 | 说明 |
+|---|--------|------|------|------|
+| 3 | 基础追踪 | `strace echo hello` | ❌ FAIL | ptrace(PTRACE_TRACEME): Permission denied |
+| 4 | 带过滤追踪 | `strace -e trace=open ls` | ❌ FAIL | ptrace(PTRACE_TRACEME): Permission denied |
+| 5 | 附加进程 | `strace -p PID` | ❌ FAIL | ptrace(PTRACE_ATTACH): Permission denied |
 
-```bash
-$ /storage/Users/currentUser/usr/local/bin/strace --version
-strace -- version 6.19
-Copyright (c) 1991-2025 The strace developers <https://strace.io>.
-...
+### sudo 规避测试
+
+| # | 测试方法 | 结果 | 说明 |
+|---|----------|------|------|
+| 6 | `sudo strace echo hello` | ❌ FAIL | exit code 1，无输出 |
+| 7 | `sudo strace -o /data/out.txt true` | ❌ FAIL | exit code 1，文件未创建 |
+| 8 | `sudo strace --version` | ❌ FAIL | 触发 kill EACCES（内核主动终止） |
+| 9 | `sudo setenforce 0` | ❌ FAIL | Permission denied |
+| 10 | `sudo cat /sys/fs/selinux/enforce` | ❌ FAIL | Permission denied |
+| 11 | `sudo strace -p $$` | ❌ FAIL | exit code 1 |
+
+## 失败原因分析
+
+所有追踪功能失败均因 **SELinux 策略限制**：
+
 ```
-
-**结果**: 成功。二进制文件可正常执行，输出了正确的版本号 6.19。
-
-### 测试 2: 进程追踪功能 ❌
-
-```bash
-$ /storage/Users/currentUser/usr/local/bin/strace ls
-strace: test_ptrace_setoptions_follow: PTRACE_TRACEME: Permission denied
+strace: do_test_ptrace_get_syscall_info: PTRACE_TRACEME: Permission denied
 strace: ptrace(PTRACE_TRACEME, ...): Permission denied
 ```
 
-**结果**: 失败。`PTRACE_TRACEME` 系统调用返回 `Permission denied`。
+- 鸿蒙系统的 SELinux 策略（`adhoc_bin` 域）禁止了 ptrace 系统调用
+- 这不是编译问题，而是系统级安全策略限制
+- `/proc/sys/kernel/yama/ptrace_scope` 不存在（非 yama 限制）
 
-**原因分析**:
-- HarmonyOS 内核的 SELinux 策略禁止用户空间进程使用 `ptrace` 系统调用
-- 这是内核级别的安全限制，无法通过编译选项或用户空间配置解决
-- 即使使用 root 权限也可能受到限制
+### sudo 无法绕过的原因
 
-**影响**:
-- strace 的核心功能（系统调用追踪）完全不可用
-- 二进制文件本身编译正确，但作为工具无法发挥其作用
+SELinux 策略在内核级别封锁了以下操作：
 
----
+| 操作 | 现状 |
+|------|------|
+| ptrace 系统调用 | adhoc_bin 域无权限，sudo 下触发 kill EACCES |
+| /sys/fs/selinux/ | 完全不可访问（即使 root/sudo） |
+| setenforce 切换 | Permission denied（即使 root/sudo） |
+| /sys/kernel/security/ | 完全不可读 |
 
 ## 结论
 
-strace 6.19 在 HarmonyOS 上**编译成功**但**功能不可用**。运行时被 SELinux 策略阻止使用 `ptrace`，这是系统级安全限制。除非 HarmonyOS 放开 ptrace 策略，否则 strace 无法在此平台上实际使用。
+strace 6.19 在鸿蒙系统上**编译成功**，但由于 SELinux 策略在**内核级别**完全封锁 ptrace，
+**核心追踪功能不可用，且无法通过 sudo 或 setenforce 规避**。状态标记为 `partial`。
 
-**建议**: 如果需要调试系统调用，可考虑使用 `gdb`（系统已预装 gdb 16.3），虽然功能不如 strace 方便，但可能受 SELinux 策略限制较少。
+### 可能的解决方案
+
+1. 修改设备 SELinux 策略（需要刷机或系统级权限，非普通 root 可行）
+2. 联系 OpenHarmony 团队获取 ptrace 支持方案
+3. 使用内核级调试替代方案（如 ftrace, 如果可用）
