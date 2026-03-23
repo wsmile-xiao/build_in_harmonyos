@@ -73,32 +73,32 @@ cp libpipeline.so.1.5.8 libpipeline.so.1
 
 ### 5.1 HarmonyOS 系统检测补丁 (config.guess/config.sub)
 
-与所有 autotools 项目相同的 HarmonyOS 补丁模板：
+与所有 autotools 项目相同的 HarmonyOS 补丁模板。
 
-#### config.guess
+#### config.guess — 两处修改
 
-在脚本中添加 HarmonyOS 检测：
+**修改 1**: LIBC 检测中添加 `__OHOS__` 判断（位于 `Linux|GNU|GNU/*` case 内）
+
+```c
+#if defined(__OHOS__)
+LIBC=ohos
+#elif defined(__ANDROID__)
+    LIBC=android
+```
+
+**修改 2**: 添加 HarmonyOS 系统 case（位于 `*:Minix:*:*` 之后）
 
 ```bash
 *:HarmonyOS:*:*)
-    # HarmonyOS/OpenHarmony detection
-    case "$UNAME_MACHINE" in
-        aarch64|arm64)
-            echo "aarch64-unknown-linux-ohos"
-            ;;
-        *)
-            echo "$UNAME_MACHINE-unknown-linux-ohos"
-            ;;
-    esac
-    exit ;;
+    GUESS=$UNAME_MACHINE-unknown-linux-ohos
+    ;;
 ```
 
-#### config.sub
+#### config.sub — 三处修改
 
-三处修改：
-1. **maybe_os** 添加 `ohos-linux` 匹配
+1. **maybe_os** 添加 `ohos-linux` 匹配，产生 `linux-ohos` 三元组
 2. **OS 允许列表** 加 `ohos*`
-3. **kernel-os 验证** 加 `linux-ohos*`
+3. **kernel-os 验证** 加 `linux-ohos*`（linux kernel + ohos os 组合）
 
 ## 六、安装结果
 
