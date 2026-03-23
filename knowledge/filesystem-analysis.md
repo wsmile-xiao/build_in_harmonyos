@@ -9,6 +9,7 @@
 - 软链接处理规范 → `environment.md` §9
 - procfs 访问限制 → `harmonyos-specifics.md` §11
 - SELinux 域转换 → `harmonyos-specifics.md` §7
+- **用户 × 场景 × 影响综合研判** → `filesystem-impact-assessment.md`
 
 ---
 
