@@ -696,3 +696,39 @@ wget -c ...
 # 递归下载测试
 wget -r ...
 ```
+## 11. /proc 文件系统访问限制
+
+### 问题描述
+
+鸿蒙系统的 SELinux 策略限制了普通用户对 `/proc` 文件系统的访问。即使文件权限显示所有用户可读（`-r--r--r--`），普通用户仍然无法读取。
+
+### 现象
+
+```bash
+$ cat /proc/stat
+cat: /proc/stat: Permission denied
+
+$ ls -la /proc/stat
+-r--r--r-- 1 root root 0 2026-03-16 22:23 /proc/stat
+
+$ ls -Z /proc/stat
+u:object_r:proc_stat_file:s0 /proc/stat
+```
+
+### 受影响的工具
+
+- **htop** - 需要 sudo 运行
+- **top** - 可能受影响
+- **ps** - 可能受影响
+- 任何需要读取 `/proc` 的进程监控工具
+
+### 解决方案
+
+1. 使用 `sudo` 运行受影响的工具
+2. 或使用鸿蒙提供的替代方案
+
+### 相关信息
+
+- 用户组 `readproc(3009)` 可能与进程读取权限相关
+- SELinux 上下文类型：`proc_stat_file`, `proc_t` 等
+
