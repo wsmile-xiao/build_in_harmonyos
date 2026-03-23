@@ -150,7 +150,7 @@ def generate_manifest(letter, name, version, data):
             "note": "通过实际使用验证功能正常"
         },
         "knowledge_gained": data["knowledge_gained"],
-        "maintainer": "OpenHarmony Community",
+        "maintainer": "OpenHarmony PC Developer社区",
         "tags": data["tags"]
     }
     return yaml.dump(manifest, default_flow_style=False, allow_unicode=True, sort_keys=False)

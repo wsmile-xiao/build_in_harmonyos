@@ -3,7 +3,7 @@
 name: openharmony-compile-agent
 description: 鸿蒙系统编译智能体，提供软件编译的完整流程指导、知识库检索和档案管理
 version: 2.0.0
-author: OpenHarmony Community
+author: OpenHarmony PC Developer社区
 permissions: 文件读写权限、Shell执行权限、网络访问权限（可选，用于下载源码）
 ---
 
