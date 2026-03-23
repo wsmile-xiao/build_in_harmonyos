@@ -45,6 +45,10 @@
 第六阶段：编程语言（依赖前面所有阶段的库）
 ├── Python 3.9.0          # 依赖 zlib, openssl, ncurses, readline, gdbm, libffi
 └── (其他语言)
+
+第七阶段：文档系统
+├── man-db 2.13.1         # 手册页系统 ⚠️ 需要 VPATH 构建 + automake 绕过
+└── libpipeline 1.5.8     # man-db 的核心依赖（管道抽象库）
 ```
 
 ### ⚠️ 编译顺序的重要性
@@ -190,6 +194,13 @@ coreutils ── (无外部依赖)
 | htop | ncurses | - | - |
 | file | - | - | - |
 
+### 文档系统
+
+| 软件 | 必需依赖 | 可选依赖 | 被依赖 | 编译注意 |
+|------|----------|----------|--------|----------|
+| libpipeline | - | libgio (GLib) | man-db | 标准 autotools，无特殊问题 |
+| man-db | libpipeline, gdbm | bzip2, zlib | - | ⚠️ VPATH 构建 + automake 绕过 + 多个 HarmonyOS 补丁 |
+
 ---
 
 ## 关键编译选项速查
@@ -273,6 +284,11 @@ ModuleNotFoundError: No module named '_ssl'
 ```
 
 **解决**：重新编译 Python，确保 OpenSSL 正确链接。
+
+---
+
+*最后更新：2026-03-23（新增 man-db 2.13.1 / libpipeline 1.5.8 依赖链）*
+SSL 正确链接。
 
 ---
 

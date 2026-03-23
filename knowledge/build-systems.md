@@ -326,3 +326,68 @@ test_results:
 ```
 
 **适用软件**：strace 6.19
+
+### 10.3 automake 版本不匹配
+
+**问题**：上游 tarball 要求 automake 版本高于系统安装的版本（如要求 1.17 但系统只有 1.16.5），或 configure 过程中 autotools 检测到时间戳不一致触发重生成。
+
+**现象**：
+```
+configure.ac: error: requires automake >= 1.17, but 1.16.5 is installed
+```
+
+**解决方案**：
+
+```bash
+# 使用 /bin/true 绕过 autotools 工具调用
+ACLOCAL="/bin/true" AUTOHEADER="/bin/true" AUTOMAKE="/bin/true" \
+  ./configure --prefix=$HOME/usr/local
+make -j1
+```
+
+**适用条件**：tarball 中已包含正确生成的 `Makefile.in` 文件。
+
+**适用软件**：man-db 2.13.1
+
+### 10.4 VPATH 构建避免 autotools 重生成
+
+**问题**：某些 autotools 项目在 make 过程中会检测源码时间戳，如果比生成的 Makefile.in 更新，会尝试调用 autotools 重新生成，导致失败或无限循环。
+
+**解决方案**：使用 VPATH（out-of-tree）构建，将源码和构建产物分离：
+
+```bash
+# 源码目录（保持只读，不修改时间戳）
+$HOME/man-db-src/
+
+# 构建目录（所有编译产物在这里）
+$HOME/build-man-db/
+
+cd $HOME/build-man-db
+ACLOCAL="/bin/true" AUTOHEADER="/bin/true" AUTOMAKE="/bin/true" \
+  ../man-db-src/configure --prefix=$HOME/usr/local
+make -j1
+make install
+```
+
+**优势**：
+1. 不触碰源码目录的时间戳，避免触发 autotools 重生成
+2. 源码和构建产物分离，方便多配置构建
+3. 清理构建产物只需删除构建目录
+
+**注意**：部分 autotools 项目的 `make` target 名称在 VPATH 下可能不同（如 `make mandb` vs `make src/mandb`），需要检查实际 Makefile。
+
+**适用软件**：man-db 2.13.1
+
+### 10.5 上游 config.guess 已含 HarmonyOS 但 config.sub 不完整
+
+**问题**：部分较新的上游 tarball 的 `config.guess` 已包含 HarmonyOS 检测（`__OHOS__` 和 `*:HarmonyOS:*:*`），但 `config.sub` 缺少对应的 `ohos` 支持，导致三元组验证失败。
+
+**诊断**：
+```bash
+grep -c "HarmonyOS\|__OHOS__" build-aux/config.guess  # > 0
+grep -c "ohos" build-aux/config.sub                     # = 0 ← 缺失
+```
+
+**解决方案**：只需补丁 config.sub（添加 `ohos-linux` 匹配、OS 允许列表 `ohos*`、kernel-os 验证 `linux-ohos*`），不需要修改 config.guess。
+
+**适用软件**：man-db 2.13.1（上游 config.guess 已有 HarmonyOS 支持）

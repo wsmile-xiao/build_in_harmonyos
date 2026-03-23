@@ -319,3 +319,55 @@ GNU bash 默认使用内置的 malloc 实现（通过 `--with-bash-malloc` 选�
 
 ### 涉及软件
 - bash 5.3
+
+## 11. iconv 不支持 glibc 扩展后缀
+
+### 问题描述
+
+musl libc 的 iconv 实现不支持 glibc 特有的转换后缀（`//IGNORE`、`//TRANSLIT`、`//WCHAR_T`）。这些后缀在 glibc 中用于控制字符转换时的错误处理方式。
+
+| 后缀 | glibc 行为 | musl 行为 |
+|------|-----------|-----------|
+| `//IGNORE` | 忽略不可转换字符，继续转换 | ❌ `iconv_open` 返回 EINVAL |
+| `//TRANSLIT` | 将不可转换字符音译为近似字符 | ❌ `iconv_open` 返回 EINVAL |
+| `//WCHAR_T` | 转换为宽字符 | ❌ `iconv_open` 返回 EINVAL |
+| 无后缀 | 标准转换 | ✅ 正常工作 |
+
+### 典型触发场景
+
+```c
+// glibc 代码中常见的用法
+iconv_t cd = iconv_open("UTF-8//IGNORE", "iso-8859-1");
+// musl 上: iconv_open 返回 (iconv_t)-1, errno=EINVAL
+```
+
+### 影响的软件
+
+man-db 2.13.1 的 `manconv` 工具使用 `UTF-8//IGNORE` 进行字符编码转换，导致 `mandb` 的 whatis 解析失败，`apropos` 和 `whatis` 命令无法使用。
+
+### 解决方案
+
+```c
+// 方案1：运行时去掉后缀（推荐）
+#ifdef __OHOS__
+  char *clean_to = strdup(to_encoding);
+  char *slash = strstr(clean_to, "//");
+  if (slash) *slash = '\0';
+  iconv_t cd = iconv_open(clean_to, from_encoding);
+  free(clean_to);
+#else
+  iconv_t cd = iconv_open(to_encoding, from_encoding);
+#endif
+
+// 方案2：使用标准编码名
+iconv_t cd = iconv_open("UTF-8", from_encoding);
+// 缺点：遇到不可转换字符时 iconv 返回 EILSEQ，需要调用方处理
+```
+
+### 验证命令
+
+```bash
+# 测试 musl iconv 是否支持 //IGNORE
+echo 'test' | iconv -f UTF-8 -t UTF-8//IGNORE 2>&1
+# musl: iconv: (stdin):unknown encoding: UTF-8//IGNORE
+```

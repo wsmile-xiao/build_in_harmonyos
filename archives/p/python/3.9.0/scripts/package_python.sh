@@ -1,16 +1,35 @@
 #!/bin/bash
 # ============================================================
-# Python 3.9.0 预编译版本打包脚本（带 rpath 处理）
+# Python 3.9.0 预编译版本打包脚本（HarmonyOS）
 # ============================================================
 #
 # 功能：
 #   1. 收集 Python 运行时和依赖库
-#   2. 修改 rpath 使库路径可移植
-#   3. 创建自包含的打包目录
+#   2. 修改 rpath 使库路径可移植（使用 patchelf）
+#   3. Strip debug 符号并分离保存（使用 llvm-objcopy）
+#   4. 移除旧签名并重新签名（binary-sign-tool）
+#   5. 创建自包含的打包目录（主包 + debug 包）
+#
+# 依赖工具：
+#   - patchelf         (RPATH 修改)
+#   - llvm-objcopy     (移除 .codesign 段、strip、debug 分离)
+#   - binary-sign-tool (重新签名)
+#   - llvm-readelf     (分析依赖)
 #
 # 使用方法：
 #   chmod +x package_python.sh
 #   ./package_python.sh
+#
+# 产物：
+#   python-3.9.0-harmonyos-aarch64.tar.gz          # 主包（165MB）
+#   python-3.9.0-harmonyos-aarch64-debug.tar.gz     # Debug 符号包（14MB）
+#
+# 注意事项：
+#   - HarmonyOS 的 ELF 签名机制要求修改后的二进制必须重新签名
+#   - binary-sign-tool 无法覆盖已有签名，必须先用 llvm-objcopy 移除
+#   - 签名后权限会丢失，需要重新 chmod +x
+#   - 首次运行需要用户在弹窗中确认
+#   - 不能使用软链接（SELinux 限制），用 wrapper 脚本替代
 #
 # ============================================================
 
@@ -23,6 +42,15 @@ INSTALL_DIR="$HOME/usr/local"
 OUTPUT_DIR="$HOME/packages"
 PACKAGE_DIR="$OUTPUT_DIR/$PACKAGE_NAME"
 
+# 是否 strip（默认是）
+STRIP_DEBUG="${STRIP_DEBUG:-1}"
+
+# 工具路径
+PATCHELF="${PATCHELF:-$(command -v patchelf || echo /data/service/hnp/bin/patchelf)}"
+OBJCOPY="${OBJCOPY:-$(command -v llvm-objcopy || echo /data/service/hnp/bin/llvm-objcopy)}"
+SIGNTOOL="${SIGNTOOL:-$(command -v binary-sign-tool || echo /data/service/hnp/bin/binary-sign-tool)}"
+READELF="${READELF:-$(command -v llvm-readelf || echo /data/service/hnp/bin/llvm-readelf)}"
+
 # 颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -34,7 +62,7 @@ log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 
 echo "============================================================"
-echo "Python ${PYTHON_VERSION} 预编译版本打包工具"
+echo "Python ${PYTHON_VERSION} 预编译版本打包工具 (HarmonyOS)"
 echo "============================================================"
 
 # ============================================================
@@ -43,30 +71,75 @@ echo "============================================================"
 check_tools() {
     local missing=()
     
-    for tool in llvm-readelf llvm-objcopy llvm-strip patchelf; do
-        if ! command -v $tool &> /dev/null; then
-            missing+=($tool)
+    for tool in "$PATCHELF" "$OBJCOPY" "$SIGNTOOL" "$READELF"; do
+        if [ ! -x "$tool" ]; then
+            missing+=("$(basename $tool)")
         fi
     done
     
     if [ ${#missing[@]} -gt 0 ]; then
-        log_warn "缺少以下工具: ${missing[*]}"
-        log_info "将尝试使用替代方案..."
+        log_error "缺少以下工具: ${missing[*]}"
+        exit 1
     fi
+    
+    log_info "工具检查通过: patchelf, llvm-objcopy, binary-sign-tool, llvm-readelf"
 }
 
 # ============================================================
-# 修改 rpath（使库路径可移植）
+# 修改 RPATH + Strip + 重新签名（完整流程）
+#
+# 关键流程：
+#   1. patchelf --set-rpath              修改 RPATH（破坏签名）
+#   2. llvm-objcopy --only-keep-debug   提取 debug info 到单独文件
+#   3. llvm-objcopy --strip-debug       从主文件移除 debug sections
+#   4. llvm-objcopy --add-gnu-debuglink 在主文件中添加指向 debug 文件的链接
+#   5. llvm-objcopy --remove-section .codesign  移除旧签名段
+#   6. binary-sign-tool sign -selfSign 1        重新签名
+#   7. chmod +x                            恢复执行权限
+#
+# 说明：
+#   - 步骤 2-4 仅在 STRIP_DEBUG=1 时执行
+#   - .gnu_debuglink 使 GDB 能自动加载对应的 debug 文件
+#   - debug 文件保存在 debug/ 子目录
+#
 # ============================================================
-set_rpath() {
+patch_strip_sign() {
     local file="$1"
     local rpath="$2"
+    local name=$(basename "$file")
     
-    if command -v patchelf &> /dev/null; then
-        patchelf --set-rpath "$rpath" "$file" 2>/dev/null || true
+    # Step 1: Set RPATH
+    "$PATCHELF" --set-rpath "$rpath" "$file" 2>/dev/null
+    
+    # Steps 2-4: Strip debug and extract (if enabled)
+    if [ "$STRIP_DEBUG" = "1" ]; then
+        local debug_file="$PACKAGE_DIR/debug/${name}.debug"
+        
+        # Step 2: Extract debug info to separate file
+        "$OBJCOPY" --only-keep-debug "$file" "$debug_file"
+        
+        # Step 3: Strip debug sections from main binary
+        "$OBJCOPY" --strip-debug "$file" "$file.tmp"
+        mv "$file.tmp" "$file"
+        
+        # Step 4: Add .gnu_debuglink section (GDB auto-load)
+        "$OBJCOPY" --add-gnu-debuglink="$debug_file" "$file"
+    fi
+    
+    # Step 5: Remove old .codesign section (required before re-signing)
+    "$OBJCOPY" --remove-section .codesign "$file" 2>/dev/null || true
+    
+    # Step 6: Re-sign with adhoc self-sign
+    "$SIGNTOOL" sign -inFile "$file" -outFile "$file" -selfSign 1 2>/dev/null
+    
+    # Step 7: Restore execute permission (signing removes it)
+    chmod a+x "$file"
+    
+    if [ "$STRIP_DEBUG" = "1" ]; then
+        local stripped_size=$(wc -c < "$file")
+        echo "  ✅ $name: $(numfmt --to=iec $stripped_size 2>/dev/null || echo $stripped_size) (stripped)"
     else
-        # 备用方案：使用 llvm-objcopy（需要更复杂的操作）
-        log_warn "patchelf 不可用，跳过 rpath 设置: $file"
+        echo "  ✅ $name"
     fi
 }
 
@@ -75,7 +148,7 @@ set_rpath() {
 # ============================================================
 get_deps() {
     local file="$1"
-    llvm-readelf -d "$file" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/' || true
+    "$READELF" -d "$file" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/' || true
 }
 
 # ============================================================
@@ -83,66 +156,13 @@ get_deps() {
 # ============================================================
 find_lib() {
     local lib="$1"
-    for dir in /usr/lib /usr/lib64 /lib /lib64 $HOME/usr/local/lib; do
+    for dir in "$INSTALL_DIR/lib" /data/service/hnp/lib /usr/lib /usr/lib64 /lib /lib64; do
         if [ -f "$dir/$lib" ]; then
             echo "$dir/$lib"
             return 0
         fi
     done
     return 1
-}
-
-# ============================================================
-# 收集依赖库
-# ============================================================
-collect_all_deps() {
-    local deps=()
-    local processed_libs=""
-    
-    # 处理一个文件的所有依赖
-    process_file() {
-        local file="$1"
-        for lib in $(get_deps "$file"); do
-            # 跳过系统库
-            case "$lib" in
-                libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*|librt.so*|libutil.so*)
-                    continue
-                    ;;
-            esac
-            
-            # 跳过已处理的库
-            if echo "$processed_libs" | grep -q "^$lib$"; then
-                continue
-            fi
-            
-            processed_libs="$processed_libs\n$lib"
-            
-            local lib_path=$(find_lib "$lib")
-            if [ -n "$lib_path" ]; then
-                deps+=("$lib_path")
-                # 递归处理依赖的依赖
-                process_file "$lib_path"
-            fi
-        done
-    }
-    
-    # 处理 Python 可执行文件
-    if [ -f "$PACKAGE_DIR/bin/python3.9" ]; then
-        process_file "$PACKAGE_DIR/bin/python3.9"
-    fi
-    
-    # 处理 libpython
-    if [ -f "$PACKAGE_DIR/lib/libpython3.9.so.1.0" ]; then
-        process_file "$PACKAGE_DIR/lib/libpython3.9.so.1.0"
-    fi
-    
-    # 处理所有扩展模块
-    find "$PACKAGE_DIR/lib/python3.9" -name "*.so" 2>/dev/null | while read so; do
-        process_file "$so"
-    done
-    
-    # 去重输出
-    printf '%s\n' "${deps[@]}" | sort -u
 }
 
 # ============================================================
@@ -167,80 +187,64 @@ mkdir -p "$PACKAGE_DIR"/{bin,lib/external,include}
 # 复制 Python 运行时
 # ============================================================
 log_info "复制 Python 可执行文件..."
-
-# 复制并设置 rpath
 cp "$INSTALL_DIR/bin/python3.9" "$PACKAGE_DIR/bin/"
-chmod +x "$PACKAGE_DIR/bin/python3.9"
+cp "$INSTALL_DIR/bin/python3.9-config" "$PACKAGE_DIR/bin/"
 
-# 设置可执行文件的 rpath 指向相对路径
-set_rpath "$PACKAGE_DIR/bin/python3.9" '$ORIGIN/../lib:$ORIGIN/../lib/external'
-
-log_info "复制 Python 库文件..."
-cp -P "$INSTALL_DIR/lib/libpython3.9.so"* "$PACKAGE_DIR/lib/" 2>/dev/null || true
-cp -P "$INSTALL_DIR/lib/libpython3.so" "$PACKAGE_DIR/lib/" 2>/dev/null || true
-
-# 设置共享库的 rpath
-for lib in "$PACKAGE_DIR/lib"/libpython*.so*; do
-    if [ -f "$lib" ]; then
-        set_rpath "$lib" '$ORIGIN:$ORIGIN/external'
-    fi
+# ⚠️ HarmonyOS: 不使用软链接（SELinux 限制），用 wrapper 脚本替代
+for alias in python python3; do
+    cat > "$PACKAGE_DIR/bin/$alias" << WEOF
+#!/bin/sh
+SELF_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+exec "\$SELF_DIR/python3.9" "\$@"
+WEOF
+    chmod +x "$PACKAGE_DIR/bin/$alias"
 done
+
+for alias in python-config python3-config; do
+    cat > "$PACKAGE_DIR/bin/$alias" << WEOF
+#!/bin/sh
+SELF_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+exec "\$SELF_DIR/python3.9-config" "\$@"
+WEOF
+    chmod +x "$PACKAGE_DIR/bin/$alias"
+done
+
+log_info "复制 Python 共享库..."
+# ⚠️ HarmonyOS: 复制为真实文件，不使用软链接
+cp "$INSTALL_DIR/lib/libpython3.9.so.1.0" "$PACKAGE_DIR/lib/"
+cp "$INSTALL_DIR/lib/libpython3.9.so.1.0" "$PACKAGE_DIR/lib/libpython3.9.so"
 
 log_info "复制 Python 标准库..."
 cp -r "$INSTALL_DIR/lib/python3.9" "$PACKAGE_DIR/lib/"
 
 log_info "复制头文件..."
-cp -r "$INSTALL_DIR/include/python3.9" "$PACKAGE_DIR/include/"
+cp -r "$INSTALL_DIR/include/python3.9" "$PACKAGE_DIR/include/" 2>/dev/null || true
 
 # ============================================================
-# 处理扩展模块的 rpath
+# 收集并复制外部依赖库
 # ============================================================
-log_info "处理扩展模块的 rpath..."
-find "$PACKAGE_DIR/lib/python3.9" -name "*.so" | while read so; do
-    set_rpath "$so" '$ORIGIN:$ORIGIN/..:$ORIGIN/../external'
-done
-
-# ============================================================
-# 收集并复制依赖库
-# ============================================================
-log_info "分析依赖库..."
+log_info "分析外部依赖库..."
 
 copied_libs=""
 copy_lib() {
     local lib_path="$1"
     local lib_name=$(basename "$lib_path")
     
-    if echo "$copied_libs" | grep -q "$lib_name"; then
+    if echo "$copied_libs" | grep -q "^$lib_name$"; then
         return
     fi
     
-    echo "  复制: $lib_name"
+    log_info "  复制外部依赖: $lib_name"
     cp -L "$lib_path" "$PACKAGE_DIR/lib/external/"
     copied_libs="$copied_libs $lib_name"
-    
-    # 设置依赖库的 rpath
-    set_rpath "$PACKAGE_DIR/lib/external/$lib_name" '$ORIGIN'
 }
 
-# 分析 Python 可执行文件的依赖
-for lib in $(get_deps "$PACKAGE_DIR/bin/python3.9"); do
-    case "$lib" in
-        libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*|librt.so*)
-            continue
-            ;;
-    esac
-    
-    lib_path=$(find_lib "$lib")
-    if [ -n "$lib_path" ]; then
-        copy_lib "$lib_path"
-    fi
-done
-
-# 分析 libpython 的依赖
-if [ -f "$PACKAGE_DIR/lib/libpython3.9.so.1.0" ]; then
-    for lib in $(get_deps "$PACKAGE_DIR/lib/libpython3.9.so.1.0"); do
+# 分析所有 ELF 文件的依赖
+for elf_file in "$PACKAGE_DIR/bin/python3.9" "$PACKAGE_DIR/lib/libpython3.9.so.1.0"; do
+    for lib in $(get_deps "$elf_file"); do
+        # 跳过系统库和 libpython
         case "$lib" in
-            libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*|librt.so*)
+            libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*|librt.so*|libutil.so*|libpython*)
                 continue
                 ;;
         esac
@@ -250,11 +254,10 @@ if [ -f "$PACKAGE_DIR/lib/libpython3.9.so.1.0" ]; then
             copy_lib "$lib_path"
         fi
     done
-fi
+done
 
 # 分析扩展模块的依赖
-log_info "分析扩展模块依赖..."
-find "$PACKAGE_DIR/lib/python3.9" -name "*.so" | while read so; do
+find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" 2>/dev/null | while read so; do
     for lib in $(get_deps "$so"); do
         case "$lib" in
             libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*|librt.so*|libpython*)
@@ -264,50 +267,51 @@ find "$PACKAGE_DIR/lib/python3.9" -name "*.so" | while read so; do
         
         lib_path=$(find_lib "$lib")
         if [ -n "$lib_path" ]; then
-            # 检查是否已复制
-            if [ ! -f "$PACKAGE_DIR/lib/external/$lib" ]; then
-                echo "  复制扩展依赖: $lib"
+            lib_name=$(basename "$lib_path")
+            if [ ! -f "$PACKAGE_DIR/lib/external/$lib_name" ]; then
+                log_info "  复制扩展依赖: $lib_name"
                 cp -L "$lib_path" "$PACKAGE_DIR/lib/external/"
-                set_rpath "$PACKAGE_DIR/lib/external/$lib" '$ORIGIN'
             fi
         fi
     done
 done
 
 # ============================================================
-# 创建启动脚本
+# 设置 RPATH 并重新签名所有 ELF 文件
 # ============================================================
-log_info "创建启动脚本..."
+log_info "设置 RPATH 并重新签名 ELF 文件..."
+log_warn "每个文件首次运行需要用户在弹窗中确认"
 
-cat > "$PACKAGE_DIR/bin/python-wrapper.sh" << 'EOF'
-#!/bin/bash
-# Python 启动脚本 - 自动设置库路径
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PACKAGE_DIR="$(dirname "$SCRIPT_DIR")"
-export LD_LIBRARY_PATH="$PACKAGE_DIR/lib:$PACKAGE_DIR/lib/external${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-exec "$SCRIPT_DIR/python3.9" "$@"
-EOF
-chmod +x "$PACKAGE_DIR/bin/python-wrapper.sh"
+echo "  1. bin/python3.9"
+patch_strip_sign "$PACKAGE_DIR/bin/python3.9" '$ORIGIN/../lib:$ORIGIN/../lib/external'
 
-# 创建符号链接
-cd "$PACKAGE_DIR/bin"
-ln -sf python-wrapper.sh python
-ln -sf python-wrapper.sh python3
-ln -sf python3.9 python-config
-cd - > /dev/null
+echo "  2. lib/libpython3.9.so.1.0"
+patch_strip_sign "$PACKAGE_DIR/lib/libpython3.9.so.1.0" '$ORIGIN:$ORIGIN/external'
+
+echo "  3. lib/libpython3.9.so"
+patch_strip_sign "$PACKAGE_DIR/lib/libpython3.9.so" '$ORIGIN:$ORIGIN/external'
+
+# 外部依赖库
+ext_count=3
+for ext_lib in "$PACKAGE_DIR/lib/external/"*.so*; do
+    [ -f "$ext_lib" ] || continue
+    ext_count=$((ext_count + 1))
+    echo "  $ext_count. lib/external/$(basename $ext_lib)"
+    patch_strip_sign "$ext_lib" '$ORIGIN'
+done
 
 # ============================================================
-# 创建环境配置脚本
+# 创建环境激活脚本
 # ============================================================
+log_info "创建环境激活脚本..."
+
 cat > "$PACKAGE_DIR/activate.sh" << 'EOF'
-#!/bin/bash
-# 激活 Python 环境
+#!/bin/sh
+# Python 3.9.0 环境激活脚本（HarmonyOS）
 PYTHON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export PATH="$PYTHON_DIR/bin:$PATH"
 export LD_LIBRARY_PATH="$PYTHON_DIR/lib:$PYTHON_DIR/lib/external${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-alias python='python3.9'
-echo "Python 3.9.0 环境已激活"
-echo "使用 'deactivate' 退出环境（需要手动实现）"
+echo "Python 3.9.0 (HarmonyOS aarch64) 环境已激活"
 EOF
 chmod +x "$PACKAGE_DIR/activate.sh"
 
@@ -315,7 +319,7 @@ chmod +x "$PACKAGE_DIR/activate.sh"
 # 创建使用说明
 # ============================================================
 cat > "$PACKAGE_DIR/README.md" << 'EOF'
-# Python 3.9.0 预编译版本（HarmonyOS）
+# Python 3.9.0 预编译版本（HarmonyOS aarch64）
 
 ## 快速使用
 
@@ -324,42 +328,56 @@ cat > "$PACKAGE_DIR/README.md" << 'EOF'
 tar -xzf python-3.9.0-harmonyos-aarch64.tar.gz
 cd python-3.9.0-harmonyos-aarch64
 
-# 方法1：直接运行
+# 首次运行：需要在弹窗中确认（ELF adhoc 签名机制）
 ./bin/python3.9 --version
 
-# 方法2：激活环境（推荐）
+# 激活环境（推荐）
 source activate.sh
 python --version
-```
-
-## 添加到系统
-
-编辑 `~/.zshrc`：
-
-```bash
-# Python 3.9
-export PATH=/path/to/python-3.9.0-harmonyos-aarch64/bin:$PATH
-export LD_LIBRARY_PATH=/path/to/python-3.9.0-harmonyos-aarch64/lib:$LD_LIBRARY_PATH
 ```
 
 ## 目录结构
 
 ```
 python-3.9.0-harmonyos-aarch64/
-├── bin/           # 可执行文件
-├── lib/           # Python 库
-│   ├── python3.9/ # 标准库
-│   └── external/  # 依赖库
-├── include/       # 头文件
-├── activate.sh    # 环境激活脚本
+├── bin/                    # 可执行文件
+│   ├── python3.9           # Python 解释器（RPATH 已设置）
+│   ├── python / python3    # Wrapper 脚本
+│   └── python3.9-config    # 编译配置脚本
+├── lib/                    # Python 库
+│   ├── libpython3.9.so*    # 共享库（RPATH 已设置）
+│   ├── python3.9/          # 标准库
+│   │   ├── lib-dynload/    # 扩展模块（大部分静态链接）
+│   │   └── _harmonyos_compat.py  # 子进程兼容层
+│   └── external/           # 外部依赖库
+│       ├── libgdbm.so.6
+│       ├── libgdbm_compat.so.4
+│       └── liblzma.so.5
+├── include/                # 头文件
+├── activate.sh             # 环境激活脚本
 └── README.md
 ```
 
 ## 特性
 
-- 内置 HarmonyOS 子进程兼容层
-- 相对路径设计，可移植到任意目录
-- 包含常用依赖库
+- ✅ RPATH 使用 $ORIGIN 相对路径，可移植到任意目录
+- ✅ 所有 ELF 文件已重新签名（adhoc self-sign）
+- ✅ 内置 HarmonyOS 子进程兼容层
+- ✅ 大部分扩展模块静态链接，外部依赖仅 3 个库
+- ✅ 不使用软链接（用 wrapper 脚本替代，避免 SELinux 限制）
+
+## 已知限制
+
+- 首次运行每个二进制需要用户弹窗确认
+- SSL 证书验证需要设置 SSL_CERT_FILE 环境变量
+- ptrace 被 SELinux 禁止（调试受限）
+- subprocess 调用 SDK 工具需使用管道语法（兼容层已自动处理）
+
+## 打包信息
+
+- 依赖库仅 3 个：libgdbm.so.6, libgdbm_compat.so.4, liblzma.so.5
+- 其余扩展模块（ssl, hashlib, ctypes, zlib, readline, curses 等）均为静态链接
+- 签名流程：patchelf → llvm-objcopy --remove-section .codesign → binary-sign-tool
 EOF
 
 # ============================================================
@@ -369,7 +387,18 @@ log_info "打包..."
 mkdir -p "$OUTPUT_DIR"
 cd "$OUTPUT_DIR"
 
-tar -czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
+# 主包（不含 debug）
+tar -czf "${PACKAGE_NAME}.tar.gz" \
+    --exclude="${PACKAGE_NAME}/debug" \
+    "$PACKAGE_NAME"
+
+if [ "$STRIP_DEBUG" = "1" ] && [ -d "$PACKAGE_DIR/debug" ]; then
+    # Debug 符号包（单独分发）
+    tar -czf "${PACKAGE_NAME}-debug.tar.gz" \
+        "${PACKAGE_NAME}/debug"
+    DEBUG_SIZE=$(du -h "${PACKAGE_NAME}-debug.tar.gz" | cut -f1)
+fi
+
 SIZE=$(du -h "${PACKAGE_NAME}.tar.gz" | cut -f1)
 
 echo ""
@@ -377,12 +406,19 @@ echo "============================================================"
 echo "打包完成！"
 echo "============================================================"
 echo ""
-echo "输出文件: $OUTPUT_DIR/${PACKAGE_NAME}.tar.gz"
-echo "文件大小: $SIZE"
+echo "产物:"
+echo "  主包:   $OUTPUT_DIR/${PACKAGE_NAME}.tar.gz ($SIZE)"
+if [ -n "$DEBUG_SIZE" ]; then
+echo "  Debug:  $OUTPUT_DIR/${PACKAGE_NAME}-debug.tar.gz ($DEBUG_SIZE)"
+fi
 echo ""
-echo "验证方法："
-echo "  cd $OUTPUT_DIR"
+echo "使用方法："
 echo "  tar -xzf ${PACKAGE_NAME}.tar.gz"
 echo "  cd ${PACKAGE_NAME}"
-echo "  ./bin/python3.9 --version"
+echo "  ./bin/python3.9 --version    # 首次运行需确认弹窗"
+echo "  source activate.sh           # 激活环境"
+echo ""
+echo "调试："
+echo "  tar -xzf ${PACKAGE_NAME}-debug.tar.gz"
+echo "  # debug/ 目录与主包目录同级，GDB 自动通过 .gnu_debuglink 加载"
 echo ""

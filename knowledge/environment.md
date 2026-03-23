@@ -181,6 +181,35 @@ clang --version
 clang --version | cat
 ```
 
+#### FIFO 创建限制
+
+鸿蒙 SELinux 策略禁止用户进程创建 FIFO（命名管道），这会影响 GNU make 的 jobserver 机制：
+
+```bash
+# make -j2 会失败，因为 jobserver 依赖 FIFO
+make -j2  # 可能卡住或报错
+
+# 解决方案：使用单线程
+make -j1  # 强制单线程，不使用 jobserver
+```
+
+**影响范围**：所有使用 `make -j` 并行构建的场景。鸿蒙上编译必须使用 `make -j1`。
+
+**注意**：部分 `make check` 测试套件内部也依赖 FIFO，可能导致测试失败或挂起。
+
+#### chmod +x 限制
+
+鸿蒙 SELinux 策略可能限制 `chmod +x` 操作，导致编译生成的二进制文件无法直接执行。
+
+```bash
+# chmod +x 可能不生效
+chmod +x script.sh
+./script.sh  # Permission denied
+
+# 解决方案：使用 sh 直接执行
+sh script.sh
+```
+
 #### /proc 文件系统访问限制
 
 鸿蒙 SELinux 策略限制普通用户访问 /proc 文件系统：

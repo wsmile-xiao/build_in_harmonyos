@@ -64,6 +64,17 @@
 
 在鸿蒙系统上，ELF 可执行文件需要正确的签名才能运行。当使用 `patchelf`、`strip` 等工具修改 ELF 文件后，签名会失效，需要重新签名。
 
+**签名文件结构**：
+- `.note.ohos.ident` — HarmonyOS 平台标识段（不可删除）
+- `.codesign` — 签名数据段（4KB 对齐）
+
+```bash
+# 查看签名信息
+llvm-readelf -S binary | grep -E "codesign|note"
+# [35] .note.ohos.ident  NOTE   ...
+# [36] .codesign         PROGBITS ...
+```
+
 ### 2.2 问题场景
 
 ```bash
@@ -74,47 +85,119 @@ patchelf --set-rpath /new/path myprogram
 llvm-strip myprogram
 
 # 以上操作后，签名失效，执行时会报错
-./myprogram  # 错误：签名验证失败
+./myprogram  # zsh: operation not permitted
 ```
 
 ### 2.3 解决方案
 
-使用 `binary-sign-tool` 重新签名：
+**关键发现**：`binary-sign-tool` 无法覆盖已有的 `.codesign` 段（报错 "section already exists"），
+必须先用 `llvm-objcopy --remove-section .codesign` 移除旧签名，再重新签名。
+
+#### 基本重新签名（三步）
 
 ```bash
-# 1. 重新签名
+# 1. 移除旧签名段
+llvm-objcopy --remove-section .codesign myprogram
+
+# 2. 重新签名
 binary-sign-tool sign -inFile myprogram -outFile myprogram -selfSign 1
 
-# 2. 恢复可执行权限（签名后权限会丢失）
+# 3. 恢复可执行权限（签名后权限会丢失）
 chmod +x myprogram
-
-# 3. 首次执行需要用户确认弹窗
-./myprogram  # 弹窗确认后可正常执行
 ```
 
-### 2.4 完整流程示例
+#### Strip + Debug 分离 + 重新签名（五步）
+
+用于发布版本，减小体积同时保留调试能力：
 
 ```bash
-# 场景：修改 ELF 文件的 RPATH 后重新签名
+# 1. 提取 debug info 到单独文件
+llvm-objcopy --only-keep-debug myprogram myprogram.debug
 
-# 步骤 1: 修改 ELF
-patchelf --set-rpath $HOME/usr/local/lib myprogram
+# 2. 从主文件移除 debug sections
+llvm-objcopy --strip-debug myprogram myprogram.tmp && mv myprogram.tmp myprogram
 
-# 步骤 2: 重新签名
+# 3. 在主文件中添加指向 debug 文件的链接（GDB 自动加载）
+llvm-objcopy --add-gnu-debuglink=myprogram.debug myprogram
+
+# 4. 移除旧签名 + 重新签名
+llvm-objcopy --remove-section .codesign myprogram
 binary-sign-tool sign -inFile myprogram -outFile myprogram -selfSign 1
 
-# 步骤 3: 恢复权限
+# 5. 恢复权限
 chmod +x myprogram
-
-# 步骤 4: 首次执行确认
-./myprogram
 ```
+
+**分离打包**：
+```bash
+# 主包（不含 debug）
+tar -czf myapp.tar.gz --exclude=debug/ myapp/
+# Debug 符号包（需要时再安装）
+tar -czf myapp-debug.tar.gz myapp/debug/
+```
+
+**调试使用**：将 `debug/` 目录解压到主程序同级目录，GDB 会通过 `.gnu_debuglink` 自动加载。
+
+#### patchelf + 签名（四步）
+
+```bash
+# 1. 修改 RPATH
+patchelf --set-rpath '$ORIGIN/../lib' myprogram
+
+# 2. 移除旧签名
+llvm-objcopy --remove-section .codesign myprogram
+
+# 3. 重新签名
+binary-sign-tool sign -inFile myprogram -outFile myprogram -selfSign 1
+
+# 4. 恢复权限
+chmod +x myprogram
+```
+
+#### 完整流程（patchelf + strip + 签名，七步）
+
+```bash
+# 1. patchelf 修改 RPATH
+patchelf --set-rpath '$ORIGIN/../lib' myprogram
+
+# 2. 提取 debug info
+llvm-objcopy --only-keep-debug myprogram myprogram.debug
+
+# 3. Strip debug sections
+llvm-objcopy --strip-debug myprogram myprogram.tmp && mv myprogram.tmp myprogram
+
+# 4. 添加 debuglink
+llvm-objcopy --add-gnu-debuglink=myprogram.debug myprogram
+
+# 5. 移除旧签名
+llvm-objcopy --remove-section .codesign myprogram
+
+# 6. 重新签名
+binary-sign-tool sign -inFile myprogram -outFile myprogram -selfSign 1
+
+# 7. 恢复权限
+chmod +x myprogram
+```
+
+### 2.4 实际案例：Python 3.9.0 可移植打包
+
+| 文件 | Strip 前 | Strip 后 | Debug Info |
+|------|----------|----------|------------|
+| python3.9 | 84K | 74K | 6K |
+| libpython3.9.so.1.0 | **9.6M** | **3.4M** | 6.7M |
+| libgdbm.so.6 | 174K | 158K | 9K |
+| liblzma.so.5 | 244K | 230K | 4K |
+
+`libpython3.9.so` 的 debug info 占 64%，strip 后主包从 177MB 降到 165MB。
 
 ### 2.5 注意事项
 
 1. **签名后权限丢失**：每次签名后需要重新 `chmod +x`
 2. **首次执行确认**：首次运行需要用户在弹窗中确认
 3. **修改即失效**：任何对 ELF 文件的修改都会使签名失效
+4. **不能覆盖签名**：`binary-sign-tool` 无法覆盖已有 `.codesign`，必须先 `llvm-objcopy --remove-section`
+5. **debuglink 路径**：`.gnu_debuglink` 中存储的是文件名（不含路径），GDB 在默认搜索路径中查找
+6. **不要删除 `.note.ohos.ident`**：这是平台标识段，删除会导致系统无法识别文件类型
 
 ---
 

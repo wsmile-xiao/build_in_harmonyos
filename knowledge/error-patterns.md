@@ -43,6 +43,10 @@
 | [E035](#e035-libtoolize-shell-函数加载失败) | 工具链 | func_add_hook inaccessible or not found | 🟢 轻微 |
 | [E036](#e036-平台字符串含空格导致构建路径错误) | 配置 | get_platform 路径含空格 | 🟡 中等 |
 | [E037](#e037-usrbinenv-不存在导致-shebang-失败) | 环境 | /usr/bin/env bad interpreter | 🟡 中等 |
+| [E038](#e038-groff-宏文件缺失) | 运行时 | cannot find macro file | 🟡 中等 |
+| [E039](#e039-musl-iconv-不支持-ignore-后缀) | 兼容性 | iconv_open Invalid argument | 🟡 中等 |
+| [E040](#e040-man_owner-空指针解引用段错误) | 运行时 | SIGSEGV in mandb | 🔴 阻塞 |
+| [E041](#e041-automake-版本不匹配触发重生成) | 构建 | requires automake >= x.y | 🟡 中等 |
 
 ---
 
@@ -1345,6 +1349,221 @@ libtool 2.4.7 及通用
 
 ---
 
+## E038: groff 宏文件缺失
+
+### 错误特征
+
+```
+man man
+# <standard input>:1: warning: macro 'g' not defined (diversion on)
+# <standard input>:1: warning: macro 'safe' not defined (diversion on)
+# <standard input>:1: warning: macro 'padj' not defined (diversion on)
+```
+
+### 根因
+
+groff 1.23.0 相较于旧版本移除了 `g.tmac`（getopt 宏）、`safe.tmac`（安全子集宏）和 `padj.tmac`（段落调整宏）。man-db 的 man_db.conf 中 nroff 定义引用了这些已移除的宏。
+
+| 宏 | 旧版 groff | groff 1.23.0 | man_db.conf 参数 |
+|----|-----------|-------------|-----------------|
+| g.tmac | ✅ 有 | ❌ 移除 | `-mg` |
+| safe.tmac | ✅ 有 | ❌ 移除 | `-msafe` |
+| padj.tmac | ✅ 有 | ❌ 移除 | `-mpadj` |
+| s.tmac | ✅ 有 | ✅ 有 | `-ms` |
+| mandoc.tmac | ✅ 有 | ✅ 有 | `-mandoc` |
+
+### 解决方案
+
+修改 man_db.conf 中的 nroff 定义，移除不兼容的宏参数：
+
+```bash
+# man_db.conf 中
+# 修改前
+DEFINE  nroff  groff -Tutf8 -mg -msafe -mpadj -mandoc
+
+# 修改后（groff 1.23.0 兼容）
+DEFINE  nroff  groff -Tutf8 -mandoc
+```
+
+### 涉及软件
+
+man-db 2.13.1（搭配系统预装的 groff 1.23.0）
+
+---
+
+## E039: musl iconv 不支持 //IGNORE 后缀
+
+### 错误特征
+
+```
+mandb: iconv_open ("UTF-8//IGNORE", "utf-8"): Invalid argument
+mandb: iconv_open ("UTF-8//IGNORE", "iso-8859-1"): Invalid argument
+```
+
+### 根因
+
+glibc 的 iconv 支持特殊后缀 `//IGNORE`（忽略不可转换字符）和 `//TRANSLIT`（音译不可转换字符），但 musl libc 的 iconv 实现不支持这些 glibc 扩展后缀。
+
+| 特性 | glibc | musl libc (鸿蒙) |
+|------|-------|------------------|
+| 基本字符集转换 | ✅ | ✅ |
+| `//IGNORE` 后缀 | ✅ | ❌ 不支持 |
+| `//TRANSLIT` 后缀 | ✅ | ❌ 不支持 |
+| `//WCHAR_T` 后缀 | ✅ | ❌ 不支持 |
+
+### 影响范围
+
+man-db 的 `manconv` 工具使用 `iconv_open("UTF-8//IGNORE", ...)` 进行字符编码转换，导致 mandb 的 whatis 解析全部失败。`apropos` 和 `whatis` 命令因此无法搜索手册页描述。**`man` 命令本身的手册页显示不受影响**。
+
+### 解决方案
+
+```c
+// musl 兼容方案：去掉 //IGNORE 后缀
+#ifdef __OHOS__
+  // musl iconv 不支持 //IGNORE，使用标准编码名
+  char *to_code = "UTF-8";
+#else
+  char *to_code = "UTF-8//IGNORE";
+#endif
+  iconv_t cd = iconv_open(to_code, from_code);
+```
+
+### 涉及软件
+
+man-db 2.13.1
+
+---
+
+## E040: MAN_OWNER 空指针解引用段错误
+
+### 错误特征
+
+```
+mandb
+# (无输出，直接退出)
+echo $?  # 139 = SIGSEGV
+```
+
+### 根因
+
+man-db 源码中 `lib/security.c` 的 `get_man_owner()` 函数在 HarmonyOS 上找不到 `man` 系统用户时返回 NULL，但调用方（如 `src/mandb.c`）直接解引用返回值 `man_owner->pw_uid` 而未做 NULL 检查，导致段错误。
+
+**问题链**：
+```
+configure --with-owner=man  (默认行为)
+    ↓
+config.h: #define MAN_OWNER "man"
+    ↓
+src/mandb.c 第 891 行（在 #ifdef MAN_OWNER 内）:
+    struct passwd *man_owner = get_man_owner();
+    // 未检查 NULL
+    chown(catpath, man_owner->pw_uid, man_owner->pw_gid);
+    //                              ^^^^^^^^^^^^^ 段错误!
+```
+
+### 解决方案
+
+**方案 1（推荐）：在 config.h 中取消 MAN_OWNER 定义**
+
+```bash
+# 编译后修改 config.h
+sed -i 's/^#define MAN_OWNER "man"/\/\* #undef MAN_OWNER \*\//' config.h
+make clean && make
+```
+
+这是最彻底的方案，让整个权限管理代码路径不被编译，避免所有相关的 NULL 解引用风险。
+
+**方案 2：补丁 security.c 返回 NULL + 调用方加 NULL 检查**
+
+```c
+// lib/security.c
+struct passwd *man_owner = getpwnam(MAN_OWNER);
+if (!man_owner) {
+    debug("man user '%s' does not exist, skipping man page ownership", MAN_OWNER);
+    return NULL;  // 而非 error(FAIL, ...)
+}
+
+// 调用方
+struct passwd *man_owner = get_man_owner();
+if (man_owner) {
+    chown(catpath, man_owner->pw_uid, man_owner->pw_gid);
+}
+```
+
+方案 2 需要修改多处调用方，不如方案 1 干净。
+
+### 验证命令
+
+```bash
+# 检查 config.h 中的 MAN_OWNER 定义
+grep MAN_OWNER config.h
+# 应看到: /* #undef MAN_OWNER */
+
+# 测试 mandb
+mandb -C man_db.conf -c /path/to/man
+echo $?  # 应为 0，而非 139
+```
+
+### 涉及软件
+
+man-db 2.13.1
+
+---
+
+## E041: automake 版本不匹配触发重生成
+
+### 错误特征
+
+```
+configure.ac: error: requires automake >= 1.17, but automake 1.16.5 is installed
+# 或
+Makefile.am: error: AM_INIT_AUTOMAKE called but too old
+```
+
+或者更隐蔽的情况：configure 成功但 make 过程中 autotools 检测到源码时间戳比生成的 Makefile.in 更新，触发重新生成，导致大量错误。
+
+### 根因
+
+某些上游 tarball 中的 `configure` 脚本是用较新版本的 automake 生成的，但 configure.ac 中声明的 automake 版本要求更高。在 VPATH 构建中，如果源码目录的时间戳被 touch 等操作更新，autotools 会尝试重新生成文件。
+
+### 解决方案
+
+**方案 1：使用 /bin/true 绕过 autotools 工具**
+
+```bash
+# 强制跳过 autotools 重生成
+ACLOCAL="/bin/true" AUTOHEADER="/bin/true" AUTOMAKE="/bin/true" \
+  ./configure --prefix=$HOME/usr/local
+make -j1
+```
+
+这告诉 configure 跳过 aclocal、autoheader 和 automake 的调用。适用于源码中已包含正确生成的 Makefile.in 的情况。
+
+**方案 2：VPATH 构建（推荐，避免时间戳问题）**
+
+```bash
+# 将源码放在一个目录，在另一个目录构建
+mkdir -p $HOME/man-db-src    # 原始源码（只读）
+mkdir -p $HOME/build-man-db  # 构建目录
+
+# 在构建目录中运行 configure
+cd $HOME/build-man-db
+ACLOCAL="/bin/true" AUTOHEADER="/bin/true" AUTOMAKE="/bin/true" \
+  ../man-db-src/configure --prefix=$HOME/usr/local
+make -j1
+```
+
+VPATH 构建的好处：
+1. 不触碰源码目录的时间戳
+2. 构建产物与源码分离，方便清理
+3. 可以同一份源码用于多个配置的构建
+
+### 涉及软件
+
+man-db 2.13.1
+
+---
+
 ## 错误诊断流程
 
 ```
@@ -1398,5 +1617,5 @@ ls -Z /path/to/file
 
 ---
 
-*文档版本: 2.0*  
-*最后更新: 2024-03-22*
+*文档版本: 2.1*  
+*最后更新: 2026-03-23*

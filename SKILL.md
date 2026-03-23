@@ -320,6 +320,8 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
 | 相似版本 | `archives/{letter}/{name}/` | 评估补丁兼容性 |
 | 构建系统知识 | `knowledge/build-systems.md` | 适配策略 |
 | 环境配置 | `knowledge/environment.md` | 系统特性 |
+| 鸿蒙特有机制 | `knowledge/harmonyos-specifics.md` | 签名、SELinux 等 |
+| 可移植打包 | `knowledge/packaging.md` | RPATH、strip、签名流程 |
 | 常见问题 | `knowledge/troubleshooting.md` | 问题排查 |
 | 错误模式 | `knowledge/error-patterns.md` | 解决方案 |
 
@@ -407,6 +409,8 @@ openharmony-compile-agent/
 │   ├── build-systems.md        # 构建系统知识
 │   ├── dependencies.md         # 编译依赖顺序与推荐顺序
 │   ├── environment.md          # 鸿蒙环境特性
+│   ├── harmonyos-specifics.md  # 鸿蒙特有机制（签名、SELinux 等）
+│   ├── packaging.md            # 可移植打包指南
 │   ├── troubleshooting.md      # 问题排查指南
 │   ├── error-patterns.md       # 错误模式库
 │   └── musl-compat.md          # musl 兼容性
@@ -485,6 +489,8 @@ patch --dry-run -p1 < archives/o/openssl/1.1.1w/patches/0001-xxx.patch
 | musl/glibc 接口对比 (ISO C + POSIX) | `knowledge/musl-glibc-full-comparison-iso-posix.md` |
 | musl/glibc 接口对比 (GNU + Linux) | `knowledge/musl-glibc-full-comparison-gnu-linux.md` |
 | musl/glibc 差异对开发者影响 | `knowledge/musl-glibc-developer-impact.md` |
+| 可移植打包指南 | `knowledge/packaging.md` |
+| 鸿蒙特有机制汇总 | `knowledge/harmonyos-specifics.md` |
 
 ### 6.2 档案命名规范
 
