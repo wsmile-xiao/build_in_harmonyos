@@ -370,6 +370,7 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
 | ptrace 替代方案 | `knowledge/ptrace-alternatives.md` | LD_PRELOAD、strace 替代 |
 | 常见问题 | `knowledge/troubleshooting.md` | 问题排查 |
 | 错误模式 | `knowledge/error-patterns.md` | 解决方案 |
+| 兼容性总览（人可读） | `SUMMARY.md` | 所有软件的兼容性一览和详情链接 |
 
 ### 3.3 软件档案结构
 
