@@ -63,150 +63,11 @@ def load_manifest(software, version):
         return docs[0] if docs else None
 
 
-def get_report_link(software, version, report_name):
-    """生成报告的相对链接"""
-    first_char = software[0]
-    return f"archives/{first_char}/{software}/{version}/reports/{report_name}"
-
-
 def count_patches(patches):
     """统计补丁数量"""
     if not patches:
         return 0
     return len(patches)
-
-
-def format_issues(issues):
-    """格式化已知问题列表"""
-    if not issues:
-        return "无"
-    return "\n".join(f"- {issue}" for issue in issues)
-
-
-def format_key_features(features):
-    """格式化关键特性"""
-    if not features:
-        return ""
-    return "、".join(features)
-
-
-def format_test_results(test):
-    """格式化测试结果"""
-    if not test:
-        return "未测试"
-    test_type = test.get("type", "unknown")
-    passed = test.get("passed", 0)
-    failed = test.get("failed", 0)
-    total = test.get("total", passed + failed)
-    skipped = test.get("skipped", 0)
-
-    if total == 0:
-        return f"**{test_type}**：无测试"
-
-    rate = passed / total * 100 if total > 0 else 0
-    parts = [f"**{test_type}**：{passed}/{total} 通过（{rate:.0f}%）"]
-    if failed > 0:
-        parts.append(f"{failed} 失败")
-    if skipped > 0:
-        parts.append(f"{skipped} 跳过")
-    return "，".join(parts)
-
-
-def software_detail_table(software, version, manifest):
-    """生成单个软件的详细信息表"""
-    lines = []
-    first_char = software[0]
-    compat = manifest.get("compatibility", {}) or {}
-    test = manifest.get("test_results", {}) or {}
-    patches = manifest.get("patches_applied", []) or []
-    build_config = manifest.get("build_config", {}) or {}
-    deps = manifest.get("dependencies", {}) or {}
-
-    lines.append(f"### {software} {version}")
-    lines.append("")
-
-    # 基本信息
-    lines.append("| 属性 | 值 |")
-    lines.append("|------|-----|")
-    lines.append(f"| **状态** | {STATUS_BADGE.get(manifest.get('status', ''), manifest.get('status'))} |")
-    lines.append(f"| **兼容性** | {COMPAT_LEVEL.get(compat.get('level', ''), compat.get('level', '未评估'))} |")
-    lines.append(f"| **构建系统** | {BUILD_SYSTEM_NAMES.get(manifest.get('build_system', ''), manifest.get('build_system'))} |")
-    lines.append(f"| **编译日期** | {manifest.get('compile_date', '未知')} |")
-    lines.append(f"| **目标三元组** | `{build_config.get('target', '未指定')}` |")
-
-    # 依赖
-    required = deps.get("required", []) or []
-    optional = deps.get("optional", []) or []
-    if required or optional:
-        dep_str = ""
-        if required:
-            dep_str += "必需：" + "、".join(required)
-        if optional:
-            if dep_str:
-                dep_str += "；"
-            dep_str += "可选：" + "、".join(optional)
-        lines.append(f"| **依赖** | {dep_str} |")
-
-    lines.append(f"| **补丁数量** | {count_patches(patches)} 个 |")
-
-    # 测试结果
-    lines.append(f"| **测试结果** | {format_test_results(test)} |")
-
-    lines.append("")
-
-    # 关键特性
-    key_features = test.get("key_features", []) or []
-    if key_features:
-        lines.append("**已验证的关键功能**：" + format_key_features(key_features))
-        lines.append("")
-
-    # 已知问题
-    issues = compat.get("issues", []) or []
-    notes = compat.get("notes", "") or ""
-    if isinstance(notes, list):
-        notes = "\n".join(str(n) for n in notes)
-    if issues or notes:
-        lines.append("#### ⚠️ 已知问题")
-        lines.append("")
-        lines.append(format_issues(issues))
-        if notes:
-            lines.append("")
-            # notes 可能是多行字符串
-            for note_line in notes.strip().split("\n"):
-                note_line = note_line.strip()
-                if note_line.startswith("- "):
-                    lines.append(note_line)
-                elif note_line:
-                    lines.append(f"- {note_line}")
-        lines.append("")
-
-    # 补丁列表（链接到具体文件）
-    if patches:
-        lines.append("#### 📝 适配补丁")
-        lines.append("")
-        lines.append("| # | 补丁 | 说明 |")
-        lines.append("|---|------|------|")
-        for i, p in enumerate(patches, 1):
-            patch_file = p.get("file", "")
-            patch_name = patch_file.split("/")[-1] if patch_file else f"补丁{i}"
-            patch_link = f"archives/{first_char}/{software}/{version}/{patch_file}"
-            purpose = p.get("purpose", "")
-            lines.append(f"| {i:02d} | [`{patch_name}`]({patch_link}) | {purpose} |")
-        lines.append("")
-
-    # 报告链接
-    lines.append("#### 📄 详细报告")
-    lines.append("")
-    report_base = f"archives/{first_char}/{software}/{version}/reports"
-    lines.append(f"- [编译说明]({os.path.join(os.path.dirname(report_base), 'README.md')})")
-    lines.append(f"- [测试报告]({report_base}/test-report.md)")
-    if os.path.exists(os.path.join(REPO_ROOT, report_base, "compatibility.md")):
-        lines.append(f"- [兼容性评估]({report_base}/compatibility.md)")
-    if os.path.exists(os.path.join(REPO_ROOT, report_base, "build-report.md")):
-        lines.append(f"- [编译报告]({report_base}/build-report.md)")
-    lines.append("")
-
-    return "\n".join(lines)
 
 
 def generate_summary():
@@ -301,22 +162,6 @@ def generate_summary():
         )
 
     lines.append("")
-
-    # 详细信息（每个软件独立章节）
-    lines.append("---")
-    lines.append("")
-    lines.append("## 📖 各软件详细信息")
-    lines.append("")
-    lines.append("以下按字母顺序列出每个软件的完整编译信息，包括兼容性评估、")
-    lines.append("已知问题、适配补丁列表和报告链接。")
-    lines.append("")
-
-    for name, info in sorted_software:
-        versions = info.get("versions", [])
-        for version in versions:
-            manifest = load_manifest(name, version)
-            if manifest:
-                lines.append(software_detail_table(name, version, manifest))
 
     # 页脚
     lines.append("---")
