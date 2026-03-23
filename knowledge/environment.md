@@ -1,5 +1,7 @@
 # 鸿蒙系统环境特性
 
+> **完整 sudo 分析**（权限模型、功能覆盖、编译影响）：→ `sudo-analysis.md`
+
 ## 1. 系统信息
 
 | 项目 | 值 |
@@ -191,6 +193,16 @@ cat /proc/stat  # Permission denied
 sudo -E TERM=xterm-256color htop
 ```
 
+> **注意**：鸿蒙 sudo 是极简自研实现，**不支持 `-E` 选项**，上面的命令实际会失败。详见 `sudo-analysis.md` §8。
+> 
+> 实际可行方案：
+> ```bash
+> # 方案1：合并为单条 sudo 命令
+> sudo sh -c 'export TERM=xterm-256color; htop'
+> # 方案2：如果 htop 的固定 PATH 已包含所需路径，直接运行
+> sudo htop
+> ```
+
 **受影响的工具**：htop、top、任何依赖 /proc 的诊断工具
 **解决方案**：使用 sudo 运行（需要保留环境变量）
 
@@ -267,6 +279,7 @@ clang -dM -E - < /dev/null | grep -E "OHOS|GLIBC"
 | `/usr/bin/env` | 存在 | ❌ 不存在 |
 | `/etc/ssl/certs/` | 预装 CA 证书 | ❌ 缺少 ca-certificates |
 | `/proc/` 访问 | 普通用户可读 | ⚠️ SELinux 限制，需 sudo |
+| **sudo** | 完整权限管理框架 | ⚠️ 极简提权开关，详见 `sudo-analysis.md` |
 
 ## 9. 软链接处理规范（强制）
 
