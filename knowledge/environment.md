@@ -375,3 +375,40 @@ A:
 2. 不需要复制大文件，节省空间
 3. 可以添加额外参数或环境变量
 4. 简单可靠，易于维护
+
+## 10. Perl 本地模块库配置
+
+### 配置本地 Perl 模块路径
+
+```bash
+# 添加到 ~/.zshrc
+export PERL5LIB="$HOME/perl-lib/lib/perl5:$PERL5LIB"
+```
+
+### 已安装的 Perl 模块
+
+| 模块 | 版本 | 用途 |
+|------|------|------|
+| HTTP::Daemon | 6.16 | HTTP 服务器模拟 |
+| HTTP::Message | 6.18 | HTTP 消息处理 |
+| HTTP::Date | 6.06 | HTTP 日期处理 |
+| URI | 5.27 | URL 解析 |
+| Encode::Locale | 1.05 | 编码本地化 |
+| Try::Tiny | 0.31 | 异常处理 |
+| IO::HTML | 1.004 | HTML 文件读取 |
+| LWP::MediaTypes | 6.04 | 媒体类型处理 |
+
+### 安装新 Perl 模块
+
+```bash
+# 方法1：下载 cpanm
+curl -L https://cpanmin.us -o /tmp/cpanm
+perl /tmp/cpanm --notest -l ~/perl-lib Module::Name
+
+# 方法2：手动安装
+curl -LO https://cpan.metacpan.org/authors/id/.../Module-X.XX.tar.gz
+tar xf Module-X.XX.tar.gz
+cd Module-X.XX
+perl Makefile.PL INSTALL_BASE=$HOME/perl-lib
+make && make install
+```

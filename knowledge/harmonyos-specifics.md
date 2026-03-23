@@ -634,3 +634,65 @@ ohos_fstat_compat (int fd, struct stat *st)
 
 *文档版本: 1.1*  
 *最后更新: 2024-03-22*
+
+## 10. Perl 测试框架依赖问题
+
+### 问题描述
+
+许多 GNU 软件的测试套件使用 Perl 编写，需要额外的 CPAN 模块。系统预装的 Perl 5.42.0 缺少这些模块。
+
+### 常见缺失模块
+
+- `HTTP::Daemon` - HTTP 服务器模拟（wget 测试需要）
+- `HTTP::Request` / `HTTP::Response` - HTTP 消息处理
+- `Test::More` - 测试框架
+- `Module::Build::Tiny` - 构建工具
+
+### 解决方案
+
+**推荐：安装 cpanm**
+
+```bash
+# 下载 cpanm
+curl -L https://cpanmin.us -o cpanm
+chmod +x cpanm
+
+# 安装模块
+./cpanm --notest HTTP::Daemon HTTP::Message LWP
+```
+
+**配置本地 Perl 库**
+
+```bash
+# 创建本地库目录
+mkdir -p ~/perl-lib
+
+# 设置环境变量
+export PERL5LIB="$HOME/perl-lib/lib/perl5:$PERL5LIB"
+export PERL_MM_OPT="INSTALL_BASE=$HOME/perl-lib"
+export PERL_MB_OPT="--install_base $HOME/perl-lib"
+```
+
+### 受影响的软件测试
+
+| 软件 | 测试依赖 | 状态 |
+|------|----------|------|
+| wget | HTTP::Daemon, HTTP::Message | 需安装模块 |
+| curl | HTTP::Daemon 等 | 需安装模块 |
+| 其他 Perl 测试软件 | 各种 CPAN 模块 | 视情况而定 |
+
+### 替代验证方式
+
+当测试框架无法运行时，采用手动验证：
+
+```bash
+# 功能测试
+wget --version
+wget --no-check-certificate -q https://example.com/ -O /dev/null && echo "OK"
+
+# 断点续传测试
+wget -c ...
+
+# 递归下载测试
+wget -r ...
+```
