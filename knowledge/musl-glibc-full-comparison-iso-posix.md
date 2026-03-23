@@ -1348,3 +1348,1278 @@
 | `_XOPEN_VERSION` | ✅ | ✅ | ✅ | |
 | `_SC_*` (全部常量) | ✅ | ✅ | ✅ | ⚠️ 个别值不同 |
 
+
+---
+
+## 2.2 POSIX 系统接口
+
+### `<sys/wait.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `wait` | ✅ | ✅ | ✅ | |
+| `waitpid` | ✅ | ✅ | ✅ | |
+| `waitid` | ✅ | ✅ | ✅ | |
+| `wait3` | BSD | ✅ | ✅ | ✅ | |
+| `wait4` | BSD | ✅ | ✅ | ✅ | |
+| `WIFEXITED` | ✅ | ✅ | ✅ | |
+| `WEXITSTATUS` | ✅ | ✅ | ✅ | |
+| `WIFSIGNALED` | ✅ | ✅ | ✅ | |
+| `WTERMSIG` | ✅ | ✅ | ✅ | |
+| `WIFSTOPPED` | ✅ | ✅ | ✅ | |
+| `WSTOPSIG` | ✅ | ✅ | ✅ | |
+| `WIFCONTINUED` | ✅ | ✅ | ✅ | |
+| `WNOHANG` | ✅ | ✅ | ✅ | |
+| `WUNTRACED` | ✅ | ✅ | ✅ | |
+| `WNOWAIT` | ✅ | ✅ | ✅ | |
+| `WEXITED` | ✅ | ✅ | ✅ | |
+| `WSTOPPED` | ✅ | ✅ | ✅ | |
+| `WCONTINUED` | ✅ | ✅ | ✅ | |
+
+### `<sys/resource.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `getrlimit` | ✅ | ✅ | ✅ | |
+| `setrlimit` | ✅ | ✅ | ✅ | |
+| `getrlimit64` | ✅ | ✅ | ✅ | |
+| `setrlimit64` | ✅ | ✅ | ✅ | |
+| `prlimit` | ✅ | ✅ | ✅ | |
+| `prlimit64` | ✅ | ✅ | ✅ | |
+| `getrusage` | ✅ | ✅ | ✅ | |
+| `getpriority` | ✅ | ✅ | ✅ | |
+| `setpriority` | ✅ | ✅ | ✅ | |
+| `struct rlimit` | ✅ | ✅ | ✅ | musl 始终 64-bit |
+| `struct rusage` | ✅ | ✅ | ✅ | |
+| `RLIMIT_AS` | ✅ | ✅ | ✅ | |
+| `RLIMIT_CORE` | ✅ | ✅ | ✅ | |
+| `RLIMIT_CPU` | ✅ | ✅ | ✅ | |
+| `RLIMIT_DATA` | ✅ | ✅ | ✅ | |
+| `RLIMIT_FSIZE` | ✅ | ✅ | ✅ | |
+| `RLIMIT_LOCKS` | ✅ | ✅ | ✅ | |
+| `RLIMIT_MEMLOCK` | ✅ | ✅ | ✅ | |
+| `RLIMIT_MSGQUEUE` | ✅ | ✅ | ✅ | |
+| `RLIMIT_NICE` | ✅ | ✅ | ✅ | |
+| `RLIMIT_NOFILE` | ✅ | ✅ | ✅ | |
+| `RLIMIT_NPROC` | ✅ | ✅ | ✅ | |
+| `RLIMIT_NPTS` | ✅ | ✅ | ✅ | |
+| `RLIMIT_RSS` | ✅ | ✅ | ✅ | |
+| `RLIMIT_RTPRIO` | ✅ | ✅ | ✅ | |
+| `RLIMIT_RTTIME` | ✅ | ✅ | ✅ | |
+| `RLIMIT_SIGPENDING` | ✅ | ✅ | ✅ | |
+| `RLIMIT_STACK` | ✅ | ✅ | ✅ | |
+| `RLIM_INFINITY` | ✅ | ✅ | ✅ | |
+| `PRIO_MIN` | ✅ | ✅ | ✅ | |
+| `PRIO_MAX` | ✅ | ✅ | ✅ | |
+| `PRIO_PROCESS` | ✅ | ✅ | ✅ | |
+| `PRIO_PGRP` | ✅ | ✅ | ✅ | |
+| `PRIO_USER` | ✅ | ✅ | ✅ | |
+| `RUSAGE_SELF` | ✅ | ✅ | ✅ | |
+| `RUSAGE_CHILDREN` | ✅ | ✅ | ✅ | |
+| `RUSAGE_THREAD` | Linux | ✅ | ✅ | ✅ | |
+| `ioprio_get` | Linux | ✅ | ✅ | ✅ | |
+| `ioprio_set` | Linux | ✅ | ✅ | ✅ | |
+
+### `<signal.h>` (POSIX 信号扩展)
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `kill` | ✅ | ✅ | ✅ | |
+| `raise` | ✅ | ✅ | ✅ | |
+| `sigaction` | ✅ | ✅ | ✅ | |
+| `sigaddset` | ✅ | ✅ | ✅ | |
+| `sigaltstack` | ✅ | ✅ | ✅ | |
+| `sigdelset` | ✅ | ✅ | ✅ | |
+| `sigemptyset` | ✅ | ✅ | ✅ | |
+| `sigfillset` | ✅ | ✅ | ✅ | |
+| `sigismember` | ✅ | ✅ | ✅ | |
+| `sigpending` | ✅ | ✅ | ✅ | |
+| `sigprocmask` | ✅ | ✅ | ✅ | |
+| `sigsuspend` | ✅ | ✅ | ✅ | |
+| `sigtimedwait` | ✅ | ✅ | ✅ | |
+| `sigwait` | ✅ | ✅ | ✅ | |
+| `sigwaitinfo` | ✅ | ✅ | ✅ | |
+| `sigqueue` | ✅ | ✅ | ✅ | |
+| `killpg` | ✅ | ✅ | ✅ | |
+| `pthread_kill` | ✅ | ✅ | ✅ | |
+| `pthread_sigmask` | ✅ | ✅ | ✅ | |
+| `sig_atomic_t` | ✅ | ✅ | ✅ | |
+| `sigset_t` | ✅ | ✅ | ✅ | |
+| `siginfo_t` | ✅ | ✅ | ✅ | |
+| `pid_t` | ✅ | ✅ | ✅ | |
+| `uid_t` | ✅ | ✅ | ✅ | |
+| `SA_NOCLDSTOP` | ✅ | ✅ | ✅ | |
+| `SA_NOCLDWAIT` | ✅ | ✅ | ✅ | |
+| `SA_NODEFER` | ✅ | ✅ | ✅ | |
+| `SA_ONSTACK` | ✅ | ✅ | ✅ | |
+| `SA_RESETHAND` | ✅ | ✅ | ✅ | |
+| `SA_RESTART` | ✅ | ✅ | ✅ | |
+| `SA_SIGINFO` | ✅ | ✅ | ✅ | |
+| `SA_INTERRUPT` | ✅ | ❌ | ❌ | musl 不提供 |
+| `SA_RESTORER` | ✅ | ❌ | ❌ | musl 内部处理 |
+| `SIG_BLOCK` | ✅ | ✅ | ✅ | |
+| `SIG_SETMASK` | ✅ | ✅ | ✅ | |
+| `SIG_UNBLOCK` | ✅ | ✅ | ✅ | |
+| `SI_USER` | ✅ | ✅ | ✅ | |
+| `SI_KERNEL` | ✅ | ✅ | ✅ | |
+| `SI_QUEUE` | ✅ | ✅ | ✅ | |
+| `SI_TIMER` | ✅ | ✅ | ✅ | |
+| `SI_MESGQ` | ✅ | ✅ | ✅ | |
+| `SI_ASYNCIO` | ✅ | ✅ | ✅ | |
+| `SI_SIGIO` | ✅ | ✅ | ✅ | |
+| `SI_TKILL` | ✅ | ✅ | ✅ | |
+| `ILL_*` 常量 | ✅ | ✅ | ✅ | |
+| `FPE_*` 常量 | ✅ | ✅ | ✅ | |
+| `SEGV_*` 常量 | ✅ | ✅ | ✅ | |
+| `BUS_*` 常量 | ✅ | ✅ | ✅ | |
+| `TRAP_*` 常量 | ✅ | ✅ | ✅ | |
+| `CLD_*` 常量 | ✅ | ✅ | ✅ | |
+| `POLL_*` 常量 | ✅ | ✅ | ✅ | |
+| `SIGRTMIN` | ✅ | ✅ | ✅ | |
+| `SIGRTMAX` | ✅ | ✅ | ✅ | |
+| `NSIG` | ✅ | ✅ | ✅ | |
+| `_NSIG` | ✅ | ✅ | ✅ | |
+| `signalfd` | Linux | ✅ | ✅ | ✅ | |
+| `sigprocmask` | ✅ | ✅ | ✅ | |
+
+### `<grp.h>` & `<pwd.h>`
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `getgrgid` | ✅ | ✅ | ✅ | |
+| `getgrnam` | ✅ | ✅ | ✅ | |
+| `getgrgid_r` | ✅ | ✅ | ✅ | |
+| `getgrnam_r` | ✅ | ✅ | ✅ | |
+| `setgrent` | ✅ | ✅ | ✅ | |
+| `getgrent` | ✅ | ✅ | ✅ | |
+| `endgrent` | ✅ | ✅ | ✅ | |
+| `getgrgid` | ✅ | ✅ | ✅ | |
+| `struct group` | ✅ | ✅ | ✅ | |
+| `getpwnam` | ✅ | ✅ | ✅ | |
+| `getpwuid` | ✅ | ✅ | ✅ | |
+| `getpwnam_r` | ✅ | ✅ | ✅ | |
+| `getpwuid_r` | ✅ | ✅ | ✅ | |
+| `setpwent` | ✅ | ✅ | ✅ | |
+| `getpwent` | ✅ | ✅ | ✅ | |
+| `endpwent` | ✅ | ✅ | ✅ | |
+| `struct passwd` | ✅ | ✅ | ✅ | |
+| `getpwuid` | ✅ | ✅ | ✅ | |
+
+---
+
+## 2.3 POSIX 网络接口
+
+### `<sys/socket.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `socket` | ✅ | ✅ | ✅ | |
+| `bind` | ✅ | ✅ | ✅ | |
+| `listen` | ✅ | ✅ | ✅ | |
+| `accept` | ✅ | ✅ | ✅ | |
+| `accept4` | Linux | ✅ | ✅ | ✅ | |
+| `connect` | ✅ | ✅ | ✅ | |
+| `send` | ✅ | ✅ | ✅ | |
+| `sendto` | ✅ | ✅ | ✅ | |
+| `sendmsg` | ✅ | ✅ | ✅ | |
+| `sendmmsg` | Linux | ✅ | ✅ | ✅ | |
+| `recv` | ✅ | ✅ | ✅ | |
+| `recvfrom` | ✅ | ✅ | ✅ | |
+| `recvmsg` | ✅ | ✅ | ✅ | |
+| `recvmmsg` | Linux | ✅ | ✅ | ✅ | |
+| `shutdown` | ✅ | ✅ | ✅ | |
+| `getsockname` | ✅ | ✅ | ✅ | |
+| `getpeername` | ✅ | ✅ | ✅ | |
+| `socketpair` | ✅ | ✅ | ✅ | |
+| `getsockopt` | ✅ | ✅ | ✅ | |
+| `setsockopt` | ✅ | ✅ | ✅ | |
+| `socklen_t` | ✅ | ✅ | ✅ | |
+| `sa_family_t` | ✅ | ✅ | ✅ | |
+| `AF_UNIX` | ✅ | ✅ | ✅ | |
+| `AF_INET` | ✅ | ✅ | ✅ | |
+| `AF_INET6` | ✅ | ✅ | ✅ | |
+| `AF_UNSPEC` | ✅ | ✅ | ✅ | |
+| `AF_PACKET` | Linux | ✅ | ✅ | ✅ | |
+| `AF_NETLINK` | Linux | ✅ | ✅ | ✅ | |
+| `AF_VSOCK` | Linux | ✅ | ✅ | ✅ | |
+| `AF_XDP` | Linux | ✅ | ✅ | ✅ | |
+| `SOCK_STREAM` | ✅ | ✅ | ✅ | |
+| `SOCK_DGRAM` | ✅ | ✅ | ✅ | |
+| `SOCK_RAW` | Linux | ✅ | ✅ | ✅ | |
+| `SOCK_SEQPACKET` | ✅ | ✅ | ✅ | |
+| `SOCK_NONBLOCK` | Linux | ✅ | ✅ | ✅ | |
+| `SOCK_CLOEXEC` | Linux | ✅ | ✅ | ✅ | |
+| `SOL_SOCKET` | ✅ | ✅ | ✅ | |
+| `SOL_IP` | Linux | ✅ | ✅ | ✅ | |
+| `SOL_IPV6` | Linux | ✅ | ✅ | ✅ | |
+| `SOL_ICMPV6` | Linux | ✅ | ✅ | ✅ | |
+| `SOL_TCP` | Linux | ✅ | ✅ | ✅ | |
+| `SOL_UDP` | Linux | ✅ | ✅ | ✅ | |
+| `SO_DEBUG` | ✅ | ✅ | ✅ | |
+| `SO_ACCEPTCONN` | ✅ | ✅ | ✅ | |
+| `SO_BROADCAST` | ✅ | ✅ | ✅ | |
+| `SO_REUSEADDR` | ✅ | ✅ | ✅ | |
+| `SO_REUSEPORT` | ✅ | ✅ | ✅ | |
+| `SO_KEEPALIVE` | ✅ | ✅ | ✅ | |
+| `SO_LINGER` | ✅ | ✅ | ✅ | |
+| `SO_OOBINLINE` | ✅ | ✅ | ✅ | |
+| `SO_SNDBUF` | ✅ | ✅ | ✅ | |
+| `SO_RCVBUF` | ✅ | ✅ | ✅ | |
+| `SO_SNDLOWAT` | ✅ | ✅ | ✅ | |
+| `SO_RCVLOWAT` | ✅ | ✅ | ✅ | |
+| `SO_SNDTIMEO` | ✅ | ✅ | ✅ | |
+| `SO_RCVTIMEO` | ✅ | ✅ | ✅ | |
+| `SO_ERROR` | ✅ | ✅ | ✅ | |
+| `SO_TYPE` | ✅ | ✅ | ✅ | |
+| `SO_DONTROUTE` | ✅ | ✅ | ✅ | |
+| `SO_TIMESTAMP` | Linux | ✅ | ✅ | ✅ | |
+| `SO_TIMESTAMPNS` | Linux | ✅ | ✅ | ✅ | |
+| `SO_TIMESTAMPING` | Linux | ✅ | ✅ | ✅ | |
+| `SO_MARK` | Linux | ✅ | ✅ | ✅ | |
+| `SO_PASSCRED` | Linux | ✅ | ✅ | ✅ | |
+| `SO_PEERCRED` | Linux | ✅ | ✅ | ✅ | |
+| `SO_PEEK_OFF` | Linux | ✅ | ✅ | ✅ | |
+| `SO_PRIORITY` | Linux | ✅ | ✅ | ✅ | |
+| `SO_BINDTODEVICE` | Linux | ✅ | ✅ | ✅ | |
+| `SO_ATTACH_FILTER` | Linux | ✅ | ✅ | ✅ | |
+| `SO_DETACH_FILTER` | Linux | ✅ | ✅ | ✅ | |
+| `SO_ATTACH_BPF` | Linux | ✅ | ✅ | ✅ | |
+| `SO_ATTACH_REUSEPORT_CBPF` | Linux | ✅ | ✅ | ✅ | |
+| `SO_ATTACH_REUSEPORT_EBPF` | Linux | ✅ | ✅ | ✅ | |
+| `SO_ZEROCOPY` | Linux | ✅ | ✅ | ✅ | |
+| `SO_BUSY_POLL` | Linux | ✅ | ✅ | ✅ | |
+| `SO_TXTIME` | Linux | ✅ | ✅ | ✅ | |
+| `MSG_OOB` | ✅ | ✅ | ✅ | |
+| `MSG_PEEK` | ✅ | ✅ | ✅ | |
+| `MSG_DONTROUTE` | ✅ | ✅ | ✅ | |
+| `MSG_WAITALL` | ✅ | ✅ | ✅ | |
+| `MSG_DONTWAIT` | Linux | ✅ | ✅ | ✅ | |
+| `MSG_NOSIGNAL` | Linux | ✅ | ✅ | ✅ | |
+| `MSG_CTRUNC` | ✅ | ✅ | ✅ | |
+| `MSG_TRUNC` | ✅ | ✅ | ✅ | |
+| `MSG_EOR` | ✅ | ✅ | ✅ | |
+| `MSG_MORE` | Linux | ✅ | ✅ | ✅ | |
+| `MSG_WAITFORONE` | Linux | ✅ | ✅ | ✅ | |
+| `MSG_ZEROCOPY` | Linux | ✅ | ✅ | ✅ | |
+| `SCM_RIGHTS` | ✅ | ✅ | ✅ | |
+| `SCM_CREDENTIALS` | Linux | ✅ | ✅ | ✅ | |
+| `struct sockaddr` | ✅ | ✅ | ✅ | |
+| `struct sockaddr_storage` | ✅ | ✅ | ✅ | |
+
+### `<netinet/in.h>` & `<arpa/inet.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `htonl` | ✅ | ✅ | ✅ | |
+| `htons` | ✅ | ✅ | ✅ | |
+| `ntohl` | ✅ | ✅ | ✅ | |
+| `ntohs` | ✅ | ✅ | ✅ | |
+| `inet_addr` | ✅ | ✅ | ✅ | |
+| `inet_ntoa` | ✅ | ✅ | ✅ | |
+| `inet_pton` | ✅ | ✅ | ✅ | |
+| `inet_ntop` | ✅ | ✅ | ✅ | |
+| `inet_aton` | BSD | ✅ | ✅ | ✅ | |
+| `inet_ntop_r` | GNU | ✅ | ❌ | ❌ | inet_ntop 已线程安全 |
+| `inet_makeaddr` | ✅ | ✅ | ✅ | |
+| `inet_netof` | ✅ | ✅ | ✅ | |
+| `inet_network` | ✅ | ✅ | ✅ | |
+| `INADDR_ANY` | ✅ | ✅ | ✅ | |
+| `INADDR_BROADCAST` | ✅ | ✅ | ✅ | |
+| `INADDR_LOOPBACK` | ✅ | ✅ | ✅ | |
+| `INADDR_NONE` | ✅ | ✅ | ✅ | |
+| `IN6ADDR_ANY_INIT` | ✅ | ✅ | ✅ | |
+| `IN6ADDR_LOOPBACK_INIT` | ✅ | ✅ | ✅ | |
+| `in_addr_t` | ✅ | ✅ | ✅ | |
+| `in_port_t` | ✅ | ✅ | ✅ | |
+| `struct in_addr` | ✅ | ✅ | ✅ | |
+| `struct in6_addr` | ✅ | ✅ | ✅ | |
+| `struct sockaddr_in` | ✅ | ✅ | ✅ | |
+| `struct sockaddr_in6` | ✅ | ✅ | ✅ | |
+| `IPPROTO_IP` | ✅ | ✅ | ✅ | |
+| `IPPROTO_ICMP` | ✅ | ✅ | ✅ | |
+| `IPPROTO_TCP` | ✅ | ✅ | ✅ | |
+| `IPPROTO_UDP` | ✅ | ✅ | ✅ | |
+| `IPPROTO_RAW` | ✅ | ✅ | ✅ | |
+| `IPPROTO_IPV6` | ✅ | ✅ | ✅ | |
+| `IPV6_V6ONLY` | ✅ | ✅ | ✅ | |
+| `IPV6_UNICAST_HOPS` | ✅ | ✅ | ✅ | |
+| `IPV6_MULTICAST_IF` | ✅ | ✅ | ✅ | |
+| `IPV6_MULTICAST_HOPS` | ✅ | ✅ | ✅ | |
+| `IPV6_MULTICAST_LOOP` | ✅ | ✅ | ✅ | |
+| `IPV6_JOIN_GROUP` | ✅ | ✅ | ✅ | |
+| `IPV6_LEAVE_GROUP` | ✅ | ✅ | ✅ | |
+| `IPV6_RECVPKTINFO` | ✅ | ✅ | ✅ | |
+| `IPV6_PKTINFO` | ✅ | ✅ | ✅ | |
+| `IPV6_RECVHOPLIMIT` | ✅ | ✅ | ✅ | |
+| `IPV6_HOPLIMIT` | ✅ | ✅ | ✅ | |
+| `IPV6_RECVRTHDR` | ✅ | ✅ | ✅ | |
+| `IPV6_RTHDR` | ✅ | ✅ | ✅ | |
+| `IPV6_RECVTCLASS` | ✅ | ✅ | ✅ | |
+| `IPV6_TCLASS` | ✅ | ✅ | ✅ | |
+| `IPV6_RECVHOPOPTS` | ✅ | ✅ | ✅ | |
+| `IPV6_HOPOPTS` | ✅ | ✅ | ✅ | |
+| `IPV6_RECVDSTOPTS` | ✅ | ✅ | ✅ | |
+| `IPV6_DSTOPTS` | ✅ | ✅ | ✅ | |
+| `struct ipv6_mreq` | ✅ | ✅ | ✅ | |
+| `struct in6_pktinfo` | ✅ | ✅ | ✅ | |
+| `IP_TOS` | ✅ | ✅ | ✅ | |
+| `IP_TTL` | ✅ | ✅ | ✅ | |
+| `IP_HDRINCL` | ✅ | ✅ | ✅ | |
+| `IP_OPTIONS` | ✅ | ✅ | ✅ | |
+| `IP_PKTINFO` | ✅ | ✅ | ✅ | |
+| `IP_RECVTOS` | ✅ | ✅ | ✅ | |
+| `IP_MTU_DISCOVER` | ✅ | ✅ | ✅ | |
+| `IP_MULTICAST_IF` | ✅ | ✅ | ✅ | |
+| `IP_MULTICAST_TTL` | ✅ | ✅ | ✅ | |
+| `IP_MULTICAST_LOOP` | ✅ | ✅ | ✅ | |
+| `IP_ADD_MEMBERSHIP` | ✅ | ✅ | ✅ | |
+| `IP_DROP_MEMBERSHIP` | ✅ | ✅ | ✅ | |
+
+### `<netdb.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `getaddrinfo` | ✅ | ✅ | ✅ | ⚠️ AI_ADDRCONFIG 处理差异 |
+| `getnameinfo` | ✅ | ✅ | ✅ | |
+| `freeaddrinfo` | ✅ | ✅ | ✅ | |
+| `gai_strerror` | ✅ | ✅ | ✅ | |
+| `gethostbyname` | ✅ | ✅ | ✅ | |
+| `gethostbyaddr` | ✅ | ✅ | ✅ | |
+| `gethostent` | ✅ | ✅ | ✅ | |
+| `sethostent` | ✅ | ✅ | ✅ | |
+| `endhostent` | ✅ | ✅ | ✅ | |
+| `gethostbyname2` | ✅ | ✅ | ✅ | |
+| `getprotobyname` | ✅ | ✅ | ✅ | |
+| `getprotobynumber` | ✅ | ✅ | ✅ | |
+| `getservbyname` | ✅ | ✅ | ✅ | |
+| `getservbyport` | ✅ | ✅ | ✅ | |
+| `getservent` | ✅ | ✅ | ✅ | |
+| `struct addrinfo` | ✅ | ✅ | ✅ | |
+| `struct hostent` | ✅ | ✅ | ✅ | |
+| `struct protoent` | ✅ | ✅ | ✅ | |
+| `struct servent` | ✅ | ✅ | ✅ | |
+| `AI_PASSIVE` | ✅ | ✅ | ✅ | |
+| `AI_CANONNAME` | ✅ | ✅ | ✅ | |
+| `AI_NUMERICHOST` | ✅ | ✅ | ✅ | |
+| `AI_NUMERICSERV` | ✅ | ✅ | ✅ | |
+| `AI_V4MAPPED` | ✅ | ✅ | ✅ | |
+| `AI_ALL` | ✅ | ✅ | ✅ | |
+| `AI_ADDRCONFIG` | ✅ | ✅ | ✅ | |
+| `AI_IDN` | GNU | ✅ | ❌ | ❌ | |
+| `AI_CANONIDN` | GNU | ✅ | ❌ | ❌ | |
+| `AI_IDN_ALLOW_UNASSIGNED` | GNU | ✅ | ❌ | ❌ | |
+| `AI_IDN_USE_STD3_ASCII_RULES` | GNU | ✅ | ❌ | ❌ | |
+| `NI_NUMERICHOST` | ✅ | ✅ | ✅ | |
+| `NI_NUMERICSERV` | ✅ | ✅ | ✅ | |
+| `NI_NOFQDN` | ✅ | ✅ | ✅ | |
+| `NI_NAMEREQD` | ✅ | ✅ | ✅ | |
+| `NI_DGRAM` | ✅ | ✅ | ✅ | |
+| `NI_IDN` | GNU | ✅ | ❌ | ❌ | |
+| `EAI_*` 常量 | ✅ | ✅ | ✅ | |
+| `h_errno` | ✅ | ✅ | ✅ | |
+| `hstrerror` | ✅ | ✅ | ✅ | |
+
+### `<ifaddrs.h>`
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `getifaddrs` | ✅ | ✅ | ✅ | |
+| `freeifaddrs` | ✅ | ✅ | ✅ | |
+| `struct ifaddrs` | ✅ | ✅ | ✅ | |
+
+
+---
+
+## 2.4 POSIX 线程 (pthread)
+
+### `<pthread.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `pthread_create` | ✅ | ✅ | ✅ | ⚠️ 默认栈大小差异: musl 128KB, glibc 2-8MB |
+| `pthread_join` | ✅ | ✅ | ✅ | |
+| `pthread_detach` | ✅ | ✅ | ✅ | |
+| `pthread_exit` | ✅ | ✅ | ✅ | |
+| `pthread_self` | ✅ | ✅ | ✅ | |
+| `pthread_equal` | ✅ | ✅ | ✅ | |
+| `pthread_once` | ✅ | ✅ | ✅ | |
+| `pthread_atfork` | ✅ | ✅ | ✅ | |
+| `pthread_cancel` | ✅ | ✅ | ✅ | |
+| `pthread_testcancel` | ✅ | ✅ | ✅ | |
+| `pthread_setcancelstate` | ✅ | ✅ | ✅ | |
+| `pthread_setcanceltype` | ✅ | ✅ | ✅ | |
+| `pthread_kill` | ✅ | ✅ | ✅ | |
+| `pthread_sigmask` | ✅ | ✅ | ✅ | |
+| `pthread_setaffinity_np` | ✅ | ✅ | ✅ | |
+| `pthread_getaffinity_np` | ✅ | ✅ | ✅ | |
+| `pthread_getname_np` | ✅ | ✅ | ✅ | |
+| `pthread_setname_np` | ✅ | ✅ | ✅ | ⚠️ 签名可能有差异 |
+| `pthread_getattr_np` | ✅ | ✅ | ✅ | |
+| `pthread_getattr_default_np` | ✅ | ❌ | ❌ | |
+| `pthread_setattr_default_np` | ✅ | ❌ | ❌ | |
+| `pthread_yield` | ✅ | ✅ | ✅ | |
+| `pthread_cleanup_push` | ✅ | ✅ | ✅ | |
+| `pthread_cleanup_pop` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_init` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_lock` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_unlock` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_trylock` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_timedlock` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_consistent` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_init` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_settype` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_gettype` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_setpshared` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_getpshared` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_setprotocol` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_getprotocol` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_setprioceiling` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_getprioceiling` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_setrobust` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_getrobust` | ✅ | ✅ | ✅ | |
+| `pthread_cond_init` | ✅ | ✅ | ✅ | |
+| `pthread_cond_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_cond_wait` | ✅ | ✅ | ✅ | |
+| `pthread_cond_timedwait` | ✅ | ✅ | ✅ | |
+| `pthread_cond_signal` | ✅ | ✅ | ✅ | |
+| `pthread_cond_broadcast` | ✅ | ✅ | ✅ | |
+| `pthread_condattr_init` | ✅ | ✅ | ✅ | |
+| `pthread_condattr_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_condattr_setpshared` | ✅ | ✅ | ✅ | |
+| `pthread_condattr_setclock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_init` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_rdlock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_tryrdlock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_timedrdlock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_wrlock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_trywrlock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_timedwrlock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlockattr_init` | ✅ | ✅ | ✅ | |
+| `pthread_rwlockattr_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_rwlockattr_setpshared` | ✅ | ✅ | ✅ | |
+| `pthread_rwlockattr_setkind_np` | ✅ | ✅ | ✅ | |
+| `pthread_key_create` | ✅ | ✅ | ✅ | |
+| `pthread_key_delete` | ✅ | ✅ | ✅ | |
+| `pthread_getspecific` | ✅ | ✅ | ✅ | |
+| `pthread_setspecific` | ✅ | ✅ | ✅ | |
+| `pthread_attr_init` | ✅ | ✅ | ✅ | |
+| `pthread_attr_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setstacksize` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getstacksize` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setstackaddr` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getstackaddr` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setguardsize` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getguardsize` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setdetachstate` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getdetachstate` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setscope` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getscope` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setinheritsched` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getinheritsched` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setschedpolicy` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getschedpolicy` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setschedparam` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getschedparam` | ✅ | ✅ | ✅ | |
+| `pthread_attr_setschedpriority` | ✅ | ✅ | ✅ | |
+| `pthread_attr_getschedpriority` | ✅ | ✅ | ✅ | |
+| `pthread_spin_init` | ✅ | ✅ | ✅ | |
+| `pthread_spin_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_spin_lock` | ✅ | ✅ | ✅ | |
+| `pthread_spin_trylock` | ✅ | ✅ | ✅ | |
+| `pthread_spin_unlock` | ✅ | ✅ | ✅ | |
+| `pthread_barrier_init` | ✅ | ✅ | ✅ | |
+| `pthread_barrier_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_barrier_wait` | ✅ | ✅ | ✅ | |
+| `pthread_barrierattr_init` | ✅ | ✅ | ✅ | |
+| `pthread_barrierattr_destroy` | ✅ | ✅ | ✅ | |
+| `pthread_barrierattr_setpshared` | ✅ | ✅ | ✅ | |
+| `pthread_barrierattr_getpshared` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_clockrdlock` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_clockwrlock` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_clocklock` | ✅ | ✅ | ✅ | |
+| `pthread_cond_clockwait` | ✅ | ✅ | ✅ | |
+| `pthread_getcpuclockid` | ✅ | ✅ | ✅ | |
+| `pthread_clockjoin_np` | ✅ | ✅ | ✅ | |
+| `pthread_tryjoin_np` | ✅ | ❌ | ❌ | |
+| `pthread_timedjoin_np` | ✅ | ❌ | ❌ | |
+| `pthread_setconcurrency` | XSI | ✅ | ❌ | ❌ | |
+| `pthread_getconcurrency` | XSI | ✅ | ❌ | ❌ | |
+| `pthread_mutex_getprioceiling` | XSI | ✅ | ✅ | ✅ | |
+| `PTHREAD_CREATE_JOINABLE` | ✅ | ✅ | ✅ | |
+| `PTHREAD_CREATE_DETACHED` | ✅ | ✅ | ✅ | |
+| `PTHREAD_MUTEX_NORMAL` | ✅ | ✅ | ✅ | |
+| `PTHREAD_MUTEX_ERRORCHECK` | ✅ | ✅ | ✅ | |
+| `PTHREAD_MUTEX_RECURSIVE` | ✅ | ✅ | ✅ | |
+| `PTHREAD_MUTEX_DEFAULT` | ✅ | ✅ | ✅ | |
+| `PTHREAD_PRIO_NONE` | ✅ | ✅ | ✅ | |
+| `PTHREAD_PRIO_INHERIT` | ✅ | ✅ | ✅ | |
+| `PTHREAD_PRIO_PROTECT` | ✅ | ✅ | ✅ | |
+| `PTHREAD_SCOPE_SYSTEM` | ✅ | ✅ | ✅ | |
+| `PTHREAD_SCOPE_PROCESS` | ✅ | ✅ | ✅ | |
+| `PTHREAD_INHERIT_SCHED` | ✅ | ✅ | ✅ | |
+| `PTHREAD_EXPLICIT_SCHED` | ✅ | ✅ | ✅ | |
+| `PTHREAD_STACK_MIN` | ✅ | ✅ | ✅ | |
+| `PTHREAD_MUTEX_ROBUST` | ✅ | ✅ | ✅ | |
+| `pthread_t` | ✅ | ✅ | ✅ | |
+| `pthread_mutex_t` | ✅ | ✅ | ✅ | |
+| `pthread_cond_t` | ✅ | ✅ | ✅ | |
+| `pthread_rwlock_t` | ✅ | ✅ | ✅ | |
+| `pthread_key_t` | ✅ | ✅ | ✅ | |
+| `pthread_once_t` | ✅ | ✅ | ✅ | |
+| `pthread_attr_t` | ✅ | ✅ | ✅ | |
+| `pthread_mutexattr_t` | ✅ | ✅ | ✅ | |
+
+---
+
+## 2.5 内存映射
+
+### `<sys/mman.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `mmap` | ✅ | ✅ | ✅ | |
+| `munmap` | ✅ | ✅ | ✅ | |
+| `mprotect` | ✅ | ✅ | ✅ | |
+| `msync` | ✅ | ✅ | ✅ | |
+| `mlock` | ✅ | ✅ | ✅ | |
+| `munlock` | ✅ | ✅ | ✅ | |
+| `mlockall` | ✅ | ✅ | ✅ | |
+| `munlockall` | ✅ | ✅ | ✅ | |
+| `mlock2` | Linux | ✅ | ✅ | ✅ | |
+| `mremap` | ✅ | ✅ | ✅ | |
+| `madvise` | ✅ | ✅ | ✅ | |
+| `posix_madvise` | ✅ | ✅ | ✅ | |
+| `mempcpy` | ✅ | ✅ | ✅ | |
+| `shm_open` | ✅ | ✅ | ✅ | |
+| `shm_unlink` | ✅ | ✅ | ✅ | |
+| `memfd_create` | Linux | ✅ | ✅ | ✅ | |
+| `MAP_SHARED` | ✅ | ✅ | ✅ | |
+| `MAP_PRIVATE` | ✅ | ✅ | ✅ | |
+| `MAP_ANONYMOUS` | ✅ | ✅ | ✅ | |
+| `MAP_ANON` | BSD | ✅ | ✅ | ✅ | |
+| `MAP_FIXED` | ✅ | ✅ | ✅ | |
+| `MAP_FIXED_NOREPLACE` | Linux | ✅ | ✅ | ✅ | |
+| `MAP_GROWSDOWN` | ✅ | ✅ | ✅ | |
+| `MAP_DENYWRITE` | ✅ | ✅ | ✅ | |
+| `MAP_EXECUTABLE` | ✅ | ✅ | ✅ | |
+| `MAP_LOCKED` | ✅ | ✅ | ✅ | |
+| `MAP_NORESERVE` | ✅ | ✅ | ✅ | |
+| `MAP_POPULATE` | ✅ | ✅ | ✅ | |
+| `MAP_NONBLOCK` | ✅ | ✅ | ✅ | |
+| `MAP_STACK` | ✅ | ✅ | ✅ | |
+| `MAP_HUGETLB` | ✅ | ✅ | ✅ | |
+| `MAP_HUGE_SHIFT` | ✅ | ✅ | ✅ | |
+| `MAP_HUGE_MASK` | ✅ | ✅ | ✅ | |
+| `MAP_SYNC` | ✅ | ✅ | ✅ | |
+| `MAP_SHARED_VALIDATE` | ✅ | ✅ | ✅ | |
+| `MAP_FILE` | ✅ | ✅ | ✅ | |
+| `MAP_32BIT` | ✅ | ✅ | ✅ | |
+| `PROT_READ` | ✅ | ✅ | ✅ | |
+| `PROT_WRITE` | ✅ | ✅ | ✅ | |
+| `PROT_EXEC` | ✅ | ✅ | ✅ | |
+| `PROT_NONE` | ✅ | ✅ | ✅ | |
+| `PROT_GROWSDOWN` | ✅ | ✅ | ✅ | |
+| `PROT_GROWSUP` | ✅ | ✅ | ✅ | |
+| `MCL_CURRENT` | ✅ | ✅ | ✅ | |
+| `MCL_FUTURE` | ✅ | ✅ | ✅ | |
+| `MCL_ONFAULT` | ✅ | ✅ | ✅ | |
+| `MS_ASYNC` | ✅ | ✅ | ✅ | |
+| `MS_SYNC` | ✅ | ✅ | ✅ | |
+| `MS_INVALIDATE` | ✅ | ✅ | ✅ | |
+| `MADV_NORMAL` | ✅ | ✅ | ✅ | |
+| `MADV_RANDOM` | ✅ | ✅ | ✅ | |
+| `MADV_SEQUENTIAL` | ✅ | ✅ | ✅ | |
+| `MADV_WILLNEED` | ✅ | ✅ | ✅ | |
+| `MADV_DONTNEED` | ✅ | ✅ | ✅ | |
+| `MADV_FREE` | Linux | ✅ | ✅ | ✅ | |
+| `MADV_REMOVE` | ✅ | ✅ | ✅ | |
+| `MADV_DONTFORK` | ✅ | ✅ | ✅ | |
+| `MADV_DOFORK` | ✅ | ✅ | ✅ | |
+| `MADV_HWPOISON` | ✅ | ✅ | ✅ | |
+| `MADV_MERGEABLE` | ✅ | ✅ | ✅ | |
+| `MADV_UNMERGEABLE` | ✅ | ✅ | ✅ | |
+| `MADV_SOFT_OFFLINE` | ✅ | ✅ | ✅ | |
+| `MADV_HUGEPAGE` | ✅ | ✅ | ✅ | |
+| `MADV_NOHUGEPAGE` | ✅ | ✅ | ✅ | |
+| `MADV_DONTDUMP` | ✅ | ✅ | ✅ | |
+| `MADV_DODUMP` | ✅ | ✅ | ✅ | |
+| `MADV_POPULATE_READ` | ✅ | ✅ | ✅ | |
+| `MADV_POPULATE_WRITE` | ✅ | ✅ | ✅ | |
+| `MADV_COLD` | ✅ | ✅ | ✅ | |
+| `MADV_PAGEOUT` | ✅ | ✅ | ✅ | |
+| `MADV_COLLAPSE` | ✅ | ✅ | ✅ | |
+| `POSIX_MADV_NORMAL` | ✅ | ✅ | ✅ | |
+| `POSIX_MADV_SEQUENTIAL` | ✅ | ✅ | ✅ | |
+| `POSIX_MADV_RANDOM` | ✅ | ✅ | ✅ | |
+| `POSIX_MADV_WILLNEED` | ✅ | ✅ | ✅ | |
+| `POSIX_MADV_DONTNEED` | ✅ | ✅ | ✅ | |
+| `MFD_CLOEXEC` | ✅ | ✅ | ✅ | |
+| `MFD_ALLOW_SEALING` | ✅ | ✅ | ✅ | |
+| `MFD_HUGETLB` | ✅ | ✅ | ✅ | |
+| `MFD_NOEXEC_SEAL` | ✅ | ✅ | ✅ | |
+| `MFD_EXEC` | ✅ | ✅ | ✅ | |
+| `MFD_SYNC` | ✅ | ✅ | ✅ | |
+| `membarrier` | Linux | ✅ | ✅ | ✅ | |
+| `userfaultfd` | Linux | ✅ | ✅ | ✅ | |
+
+---
+
+## 2.6 进程间通信 (IPC)
+
+### `<sys/ipc.h>`, `<sys/msg.h>`, `<sys/sem.h>`, `<sys/shm.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `ftok` | ✅ | ✅ | ✅ | |
+| `msgget` | ✅ | ✅ | ✅ | |
+| `msgsnd` | ✅ | ✅ | ✅ | |
+| `msgrcv` | ✅ | ✅ | ✅ | |
+| `msgctl` | ✅ | ✅ | ✅ | |
+| `struct msqid_ds` | ✅ | ✅ | ✅ | |
+| `semget` | ✅ | ✅ | ✅ | |
+| `semop` | ✅ | ✅ | ✅ | |
+| `semtimedop` | ✅ | ✅ | ✅ | |
+| `semctl` | ✅ | ✅ | ✅ | |
+| `struct semid_ds` | ✅ | ✅ | ✅ | |
+| `union semun` | ✅ | ✅ | ✅ | |
+| `shmget` | ✅ | ✅ | ✅ | |
+| `shmat` | ✅ | ✅ | ✅ | |
+| `shmdt` | ✅ | ✅ | ✅ | |
+| `shmctl` | ✅ | ✅ | ✅ | |
+| `struct shmid_ds` | ✅ | ✅ | ✅ | |
+| `IPC_CREAT` | ✅ | ✅ | ✅ | |
+| `IPC_EXCL` | ✅ | ✅ | ✅ | |
+| `IPC_NOWAIT` | ✅ | ✅ | ✅ | |
+| `IPC_RMID` | ✅ | ✅ | ✅ | |
+| `IPC_SET` | ✅ | ✅ | ✅ | |
+| `IPC_STAT` | ✅ | ✅ | ✅ | |
+| `IPC_INFO` | ✅ | ✅ | ✅ | |
+| `IPC_PRIVATE` | ✅ | ✅ | ✅ | |
+| `SHM_RDONLY` | ✅ | ✅ | ✅ | |
+| `SHM_RND` | ✅ | ✅ | ✅ | |
+| `SHM_REMAP` | ✅ | ✅ | ✅ | |
+| `SHM_HUGETLB` | ✅ | ✅ | ✅ | |
+| `SHM_NORESERVE` | ✅ | ✅ | ✅ | |
+| `SHM_LOCK` | ✅ | ✅ | ✅ | |
+| `SHM_UNLOCK` | ✅ | ✅ | ✅ | |
+| `GETPID` | ✅ | ✅ | ✅ | |
+| `GETVAL` | ✅ | ✅ | ✅ | |
+| `GETALL` | ✅ | ✅ | ✅ | |
+| `SETVAL` | ✅ | ✅ | ✅ | |
+| `SETALL` | ✅ | ✅ | ✅ | |
+| `SEM_UNDO` | ✅ | ✅ | ✅ | |
+| `SHMLBA` | ✅ | ✅ | ✅ | |
+
+### `<mqueue.h>`
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `mq_open` | ✅ | ✅ | ✅ | |
+| `mq_close` | ✅ | ✅ | ✅ | |
+| `mq_unlink` | ✅ | ✅ | ✅ | |
+| `mq_send` | ✅ | ✅ | ✅ | |
+| `mq_timedsend` | ✅ | ✅ | ✅ | |
+| `mq_receive` | ✅ | ✅ | ✅ | |
+| `mq_timedreceive` | ✅ | ✅ | ✅ | |
+| `mq_notify` | ✅ | ✅ | ✅ | |
+| `mq_getattr` | ✅ | ✅ | ✅ | |
+| `mq_setattr` | ✅ | ✅ | ✅ | |
+| `mqd_t` | ✅ | ✅ | ✅ | |
+| `struct mq_attr` | ✅ | ✅ | ✅ | |
+
+---
+
+## 2.7 同步与 I/O 多路复用
+
+### `<poll.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `poll` | ✅ | ✅ | ✅ | |
+| `ppoll` | ✅ | ✅ | ✅ | |
+| `struct pollfd` | ✅ | ✅ | ✅ | |
+| `POLLIN` | ✅ | ✅ | ✅ | |
+| `POLLPRI` | ✅ | ✅ | ✅ | |
+| `POLLOUT` | ✅ | ✅ | ✅ | |
+| `POLLERR` | ✅ | ✅ | ✅ | |
+| `POLLHUP` | ✅ | ✅ | ✅ | |
+| `POLLNVAL` | ✅ | ✅ | ✅ | |
+| `POLLRDNORM` | ✅ | ✅ | ✅ | |
+| `POLLRDBAND` | ✅ | ✅ | ✅ | |
+| `POLLWRNORM` | ✅ | ✅ | ✅ | |
+| `POLLWRBAND` | ✅ | ✅ | ✅ | |
+| `POLLFREE` | Linux | ✅ | ✅ | ✅ | |
+| `POLL_BUSY_LOOP` | Linux | ✅ | ✅ | ✅ | |
+
+### `<sys/select.h>` / `<sys/time.h>` / `<sys/epoll.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `select` | ✅ | ✅ | ✅ | |
+| `pselect` | ✅ | ✅ | ✅ | |
+| `FD_CLR` | ✅ | ✅ | ✅ | |
+| `FD_ISSET` | ✅ | ✅ | ✅ | |
+| `FD_SET` | ✅ | ✅ | ✅ | |
+| `FD_ZERO` | ✅ | ✅ | ✅ | |
+| `fd_set` | ✅ | ✅ | ✅ | |
+| `epoll_create` | ✅ | ✅ | ✅ | |
+| `epoll_create1` | ✅ | ✅ | ✅ | |
+| `epoll_ctl` | ✅ | ✅ | ✅ | |
+| `epoll_wait` | ✅ | ✅ | ✅ | |
+| `epoll_pwait` | ✅ | ✅ | ✅ | |
+| `epoll_pwait2` | ✅ | ✅ | ✅ | |
+| `struct epoll_event` | ✅ | ✅ | ✅ | |
+| `EPOLLIN` | ✅ | ✅ | ✅ | |
+| `EPOLLOUT` | ✅ | ✅ | ✅ | |
+| `EPOLLPRI` | ✅ | ✅ | ✅ | |
+| `EPOLLERR` | ✅ | ✅ | ✅ | |
+| `EPOLLHUP` | ✅ | ✅ | ✅ | |
+| `EPOLLRDHUP` | ✅ | ✅ | ✅ | |
+| `EPOLLET` | ✅ | ✅ | ✅ | |
+| `EPOLLONESHOT` | ✅ | ✅ | ✅ | |
+| `EPOLLWAKEUP` | ✅ | ✅ | ✅ | |
+| `EPOLL_CTL_ADD` | ✅ | ✅ | ✅ | |
+| `EPOLL_CTL_MOD` | ✅ | ✅ | ✅ | |
+| `EPOLL_CTL_DEL` | ✅ | ✅ | ✅ | |
+| `eventfd` | ✅ | ✅ | ✅ | |
+| `eventfd_read` | ✅ | ✅ | ✅ | |
+| `eventfd_write` | ✅ | ✅ | ✅ | |
+| `EFD_SEMAPHORE` | ✅ | ✅ | ✅ | |
+| `EFD_CLOEXEC` | ✅ | ✅ | ✅ | |
+| `EFD_NONBLOCK` | ✅ | ✅ | ✅ | |
+| `timerfd_create` | ✅ | ✅ | ✅ | |
+| `timerfd_gettime` | ✅ | ✅ | ✅ | |
+| `timerfd_settime` | ✅ | ✅ | ✅ | |
+| `TFD_CLOEXEC` | ✅ | ✅ | ✅ | |
+| `TFD_NONBLOCK` | ✅ | ✅ | ✅ | |
+| `TFD_TIMER_ABSTIME` | ✅ | ✅ | ✅ | |
+| `TFD_TIMER_CANCEL_ON_SET` | ✅ | ✅ | ✅ | |
+| `inotify_init` | ✅ | ✅ | ✅ | |
+| `inotify_init1` | ✅ | ✅ | ✅ | |
+| `inotify_add_watch` | ✅ | ✅ | ✅ | |
+| `inotify_rm_watch` | ✅ | ✅ | ✅ | |
+| `inotify_event` | ✅ | ✅ | ✅ | |
+| `signalfd` | ✅ | ✅ | ✅ | |
+| `SFD_NONBLOCK` | ✅ | ✅ | ✅ | |
+| `SFD_CLOEXEC` | ✅ | ✅ | ✅ | |
+
+
+---
+
+## 2.8 正则表达式与模式匹配
+
+### `<regex.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `regcomp` | ✅ | ✅ | ✅ | |
+| `regexec` | ✅ | ✅ | ✅ | |
+| `regfree` | ✅ | ✅ | ✅ | |
+| `regerror` | ✅ | ✅ | ✅ | |
+| `regex_t` | ✅ | ✅ | ✅ | |
+| `regmatch_t` | ✅ | ✅ | ✅ | ⚠️ regoff_t 差异 |
+| `regoff_t` | ✅ | ✅ | ✅ | ⚠️ glibc 64位仍为32-bit; musl 使用 ssize_t |
+| `REG_EXTENDED` | ✅ | ✅ | ✅ | |
+| `REG_ICASE` | ✅ | ✅ | ✅ | |
+| `REG_NOSUB` | ✅ | ✅ | ✅ | |
+| `REG_NEWLINE` | ✅ | ✅ | ✅ | |
+| `REG_NOTBOL` | ✅ | ✅ | ✅ | |
+| `REG_NOTEOL` | ✅ | ✅ | ✅ | |
+| `REG_STARTEND` | ✅ | ❌ | ❌ | musl 不支持 |
+| `REG_BACKTRACKING_MAX` | GNU | ✅ | ❌ | ❌ | |
+| `REG_LITERAL` | GNU | ✅ | ❌ | ❌ | |
+| `REG_PEND` | GNU | ✅ | ❌ | ❌ | |
+| `REG_UCP` | GNU | ✅ | ❌ | ❌ | |
+| `REG_UNGREEDY` | GNU | ✅ | ❌ | ❌ | |
+
+### `<fnmatch.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `fnmatch` | ✅ | ✅ | ✅ | |
+| `FNM_PATHNAME` | ✅ | ✅ | ✅ | |
+| `FNM_NOESCAPE` | ✅ | ✅ | ✅ | |
+| `FNM_PERIOD` | ✅ | ✅ | ✅ | |
+| `FNM_FILE_NAME` | ✅ | ✅ | ✅ | |
+| `FNM_LEADING_DIR` | ✅ | ❌ | ❌ | |
+| `FNM_CASEFOLD` | GNU | ✅ | ✅ | ✅ | |
+| `FNM_EXTMATCH` | GNU | ✅ | ❌ | ❌ | |
+
+### `<glob.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `glob` | ✅ | ✅ | ✅ | |
+| `globfree` | ✅ | ✅ | ✅ | |
+| `glob_t` | ✅ | ✅ | ✅ | |
+| `GLOB_ERR` | ✅ | ✅ | ✅ | |
+| `GLOB_MARK` | ✅ | ✅ | ✅ | |
+| `GLOB_NOSORT` | ✅ | ✅ | ✅ | |
+| `GLOB_DOOFFS` | ✅ | ✅ | ✅ | |
+| `GLOB_NOCHECK` | ✅ | ✅ | ✅ | |
+| `GLOB_APPEND` | ✅ | ✅ | ✅ | |
+| `GLOB_NOESCAPE` | ✅ | ✅ | ✅ | |
+| `GLOB_PERIOD` | ✅ | ✅ | ✅ | |
+| `GLOB_TILDE` | GNU | ✅ | ❌ | ❌ | |
+| `GLOB_TILDE_CHECK` | GNU | ✅ | ❌ | ❌ | |
+| `GLOB_ONLYDIR` | GNU | ✅ | ❌ | ❌ | |
+| `GLOB_BRACE` | GNU | ✅ | ❌ | ❌ | |
+| `GLOB_NOMAGIC` | GNU | ✅ | ❌ | ❌ | |
+| `GLOB_ALTDIRFUNC` | GNU | ✅ | ❌ | ❌ | |
+
+---
+
+## 2.9 国际化与字符集
+
+### `<iconv.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `iconv_open` | ✅ | ✅ | ✅ | |
+| `iconv` | ✅ | ✅ | ✅ | ⚠️ 不可转换字符处理不同 |
+| `iconv_close` | ✅ | ✅ | ✅ | |
+| `iconv_t` | ✅ | ✅ | ✅ | |
+
+> **编码覆盖差异**：
+> - glibc: ~200+ 编码（含 EUC-JP, Shift_JIS, GB18030, BIG5, KOI8-R 等）
+> - musl: ~50-80 编码（主要覆盖 UTF-*, ISO-8859-*, ASCII, CP*, EBCDIC）
+> - musl 缺少：GB18030 (有), Shift_JIS, EUC-JP, Big5, KOI8-U, TIS-620 等
+> - musl 不支持 `//TRANSLIT` 后缀
+> - musl 对无效输入替换为 '?' 而非返回 EILSEQ
+
+### `<langinfo.h>`
+
+| 接口/常量 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `nl_langinfo` | ✅ | ✅ | ✅ | |
+| `nl_langinfo_l` | ✅ | ✅ | ✅ | |
+| `CODESET` | ✅ | ✅ | ✅ | |
+| `D_T_FMT` | ✅ | ✅ | ✅ | |
+| `D_FMT` | ✅ | ✅ | ✅ | |
+| `T_FMT` | ✅ | ✅ | ✅ | |
+| `T_FMT_AMPM` | ✅ | ✅ | ✅ | |
+| `AM_STR`/`PM_STR` | ✅ | ✅ | ✅ | |
+| `DAY_1` ~ `DAY_7` | ✅ | ✅ | ✅ | |
+| `ABDAY_1` ~ `ABDAY_7` | ✅ | ✅ | ✅ | |
+| `MON_1` ~ `MON_12` | ✅ | ✅ | ✅ | |
+| `ABMON_1` ~ `ABMON_12` | ✅ | ✅ | ✅ | |
+| `ERA` | ✅ | ✅ | ✅ | |
+| `ERA_D_T_FMT` | ✅ | ✅ | ✅ | |
+| `ERA_D_FMT` | ✅ | ✅ | ✅ | |
+| `ERA_T_FMT` | ✅ | ✅ | ✅ | |
+| `ALT_DIGITS` | ✅ | ✅ | ✅ | |
+| `RADIXCHAR` | ✅ | ✅ | ✅ | |
+| `THOUSEP` | ✅ | ✅ | ✅ | |
+| `YESEXPR` | ✅ | ✅ | ✅ | |
+| `NOEXPR` | ✅ | ✅ | ✅ | |
+| `CRNCYSTR` | ✅ | ✅ | ✅ | |
+| `nl_item` | ✅ | ✅ | ✅ | |
+
+### `<monetary.h>`
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `strfmon` | ✅ | ✅ | ✅ | |
+| `strfmon_l` | ✅ | ✅ | ✅ | |
+
+---
+
+## 2.10 搜索与排序
+
+### `<search.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `hcreate` | ✅ | ✅ | ✅ | |
+| `hdestroy` | ✅ | ✅ | ✅ | |
+| `hsearch` | ✅ | ✅ | ✅ | |
+| `hcreate_r` | GNU | ✅ | ✅ | ✅ | |
+| `hdestroy_r` | GNU | ✅ | ✅ | ✅ | |
+| `hsearch_r` | GNU | ✅ | ✅ | ✅ | |
+| `tsearch` | ✅ | ✅ | ✅ | |
+| `tfind` | ✅ | ✅ | ✅ | |
+| `tdelete` | ✅ | ✅ | ✅ | |
+| `twalk` | ✅ | ✅ | ✅ | |
+| `tdestroy` | GNU | ✅ | ✅ | ✅ | |
+| `lfind` | ✅ | ✅ | ✅ | |
+| `lsearch` | ✅ | ✅ | ✅ | |
+| `insque` | ✅ | ✅ | ✅ | |
+| `remque` | ✅ | ✅ | ✅ | |
+| `ENTRY` | ✅ | ✅ | ✅ | |
+| `ACTION` | ✅ | ✅ | ✅ | |
+| `VISIT` | ✅ | ✅ | ✅ | |
+
+### `<stdlib.h>` 排序扩展
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `qsort` | ✅ | ✅ | ✅ | |
+| `qsort_r` (BSD) | ✅ | ✅ | ✅ | ⚠️ musl 使用 BSD 签名 |
+| `qsort_r` (GNU) | ✅ | ❌ | ❌ | 签名不同，ABI 不兼容 |
+| `qsort_s` (C11.K) | ✅ | ⚠️ | ⚠️ | 签名不同 |
+| `bsearch` | ✅ | ✅ | ✅ | |
+| `bsearch_r` | ✅ | ❌ | ❌ | |
+| `heapsort` | BSD | ✅ | ✅ | ✅ | |
+| `mergesort` | BSD | ✅ | ✅ | ✅ | |
+| `radixsort` | BSD | ✅ | ❌ | ❌ | |
+
+---
+
+## 2.11 词法分析与终端控制
+
+### `<wordexp.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `wordexp` | ✅ | ✅ | ✅ | |
+| `wordfree` | ✅ | ✅ | ✅ | |
+| `wordexp_t` | ✅ | ✅ | ✅ | |
+| `WRDE_APPEND` | ✅ | ✅ | ✅ | |
+| `WRDE_DOOFFS` | ✅ | ✅ | ✅ | |
+| `WRDE_NOCMD` | ✅ | ✅ | ✅ | |
+| `WRDE_REUSE` | ✅ | ✅ | ✅ | |
+| `WRDE_SHOWERR` | ✅ | ✅ | ✅ | |
+| `WRDE_UNDEF` | ✅ | ✅ | ✅ | |
+| `WRDE_CMDSUB` | GNU | ✅ | ❌ | ❌ | |
+| `WRDE_NOSPLIT` | GNU | ✅ | ❌ | ❌ | |
+
+### `<termios.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `tcgetattr` | ✅ | ✅ | ✅ | |
+| `tcsetattr` | ✅ | ✅ | ✅ | |
+| `tcsendbreak` | ✅ | ✅ | ✅ | |
+| `tcdrain` | ✅ | ✅ | ✅ | |
+| `tcflush` | ✅ | ✅ | ✅ | |
+| `tcflow` | ✅ | ✅ | ✅ | |
+| `cfmakeraw` | ✅ | ✅ | ✅ | |
+| `cfgetispeed` | ✅ | ✅ | ✅ | |
+| `cfgetospeed` | ✅ | ✅ | ✅ | |
+| `cfsetispeed` | ✅ | ✅ | ✅ | |
+| `cfsetospeed` | ✅ | ✅ | ✅ | |
+| `cfsetspeed` | ✅ | ✅ | ✅ | |
+| `tcgetsid` | ✅ | ✅ | ✅ | |
+| `struct termios` | ✅ | ✅ | ✅ | |
+| `B0` ~ `B460800` | ✅ | ✅ | ✅ | 波特率常量 |
+| `CLOCAL` | ✅ | ✅ | ✅ | |
+| `CREAD` | ✅ | ✅ | ✅ | |
+| `CSIZE` | ✅ | ✅ | ✅ | |
+| `CS5`/`CS6`/`CS7`/`CS8` | ✅ | ✅ | ✅ | |
+| `CSTOPB` | ✅ | ✅ | ✅ | |
+| `PARENB` | ✅ | ✅ | ✅ | |
+| `PARODD` | ✅ | ✅ | ✅ | |
+| `ECHO` | ✅ | ✅ | ✅ | |
+| `ECHOE` | ✅ | ✅ | ✅ | |
+| `ECHOK` | ✅ | ✅ | ✅ | |
+| `ECHONL` | ✅ | ✅ | ✅ | |
+| `ICANON` | ✅ | ✅ | ✅ | |
+| `IEXTEN` | ✅ | ✅ | ✅ | |
+| `ISIG` | ✅ | ✅ | ✅ | |
+| `NOFLSH` | ✅ | ✅ | ✅ | |
+| `TOSTOP` | ✅ | ✅ | ✅ | |
+| `IGNBRK` | ✅ | ✅ | ✅ | |
+| `BRKINT` | ✅ | ✅ | ✅ | |
+| `IGNCR` | ✅ | ✅ | ✅ | |
+| `ICRNL` | ✅ | ✅ | ✅ | |
+| `INLCR` | ✅ | ✅ | ✅ | |
+| `ISTRIP` | ✅ | ✅ | ✅ | |
+| `IXON` | ✅ | ✅ | ✅ | |
+| `IXOFF` | ✅ | ✅ | ✅ | |
+| `OPOST` | ✅ | ✅ | ✅ | |
+| `ONLCR` | ✅ | ✅ | ✅ | |
+| `OCRNL` | ✅ | ✅ | ✅ | |
+| `ONOCR` | ✅ | ✅ | ✅ | |
+| `ONLRET` | ✅ | ✅ | ✅ | |
+| `VMIN` | ✅ | ✅ | ✅ | |
+| `VTIME` | ✅ | ✅ | ✅ | |
+| `VERASE` | ✅ | ✅ | ✅ | |
+| `VEOF` | ✅ | ✅ | ✅ | |
+| `VINTR` | ✅ | ✅ | ✅ | |
+| `VKILL` | ✅ | ✅ | ✅ | |
+| `VQUIT` | ✅ | ✅ | ✅ | |
+| `VSTART` | ✅ | ✅ | ✅ | |
+| `VSTOP` | ✅ | ✅ | ✅ | |
+| `VSUSP` | ✅ | ✅ | ✅ | |
+| `VLNEXT` | ✅ | ✅ | ✅ | |
+| `VWERASE` | ✅ | ✅ | ✅ | |
+| `VEOL` | ✅ | ✅ | ✅ | |
+| `VEOL2` | ✅ | ✅ | ✅ | |
+| `VDISCARD` | ✅ | ✅ | ✅ | |
+| `VREPRINT` | ✅ | ✅ | ✅ | |
+| `FLUSHO` | ✅ | ✅ | ✅ | |
+| `EXTPROC` | ✅ | ✅ | ✅ | |
+| `TIOCGWINSZ` | ✅ | ✅ | ✅ | |
+| `TIOCSWINSZ` | ✅ | ✅ | ✅ | |
+
+---
+
+## 2.12 异步 I/O 与其他 POSIX 接口
+
+### `<aio.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `aio_read` | ✅ | ✅ | ✅ | musl 使用可取消版本 |
+| `aio_write` | ✅ | ✅ | ✅ | |
+| `aio_fsync` | ✅ | ✅ | ✅ | |
+| `aio_error` | ✅ | ✅ | ✅ | |
+| `aio_return` | ✅ | ✅ | ✅ | |
+| `aio_suspend` | ✅ | ✅ | ✅ | |
+| `aio_cancel` | ✅ | ✅ | ✅ | |
+| `lio_listio` | ✅ | ✅ | ✅ | |
+| `struct aiocb` | ✅ | ✅ | ✅ | |
+| `AIO_ALLDONE` | ✅ | ✅ | ✅ | |
+| `AIO_CANCELED` | ✅ | ✅ | ✅ | |
+| `AIO_NOTCANCELED` | ✅ | ✅ | ✅ | |
+| `LIO_NOP` | ✅ | ✅ | ✅ | |
+| `LIO_NOWAIT` | ✅ | ✅ | ✅ | |
+| `LIO_READ` | ✅ | ✅ | ✅ | |
+| `LIO_WRITE` | ✅ | ✅ | ✅ | |
+
+### `<syslog.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `openlog` | ✅ | ✅ | ✅ | |
+| `closelog` | ✅ | ✅ | ✅ | |
+| `syslog` | ✅ | ✅ | ✅ | |
+| `vsyslog` | ✅ | ✅ | ✅ | |
+| `setlogmask` | ✅ | ✅ | ✅ | |
+| `LOG_EMERG` | ✅ | ✅ | ✅ | |
+| `LOG_ALERT` | ✅ | ✅ | ✅ | |
+| `LOG_CRIT` | ✅ | ✅ | ✅ | |
+| `LOG_ERR` | ✅ | ✅ | ✅ | |
+| `LOG_WARNING` | ✅ | ✅ | ✅ | |
+| `LOG_NOTICE` | ✅ | ✅ | ✅ | |
+| `LOG_INFO` | ✅ | ✅ | ✅ | |
+| `LOG_DEBUG` | ✅ | ✅ | ✅ | |
+| `LOG_KERN` | ✅ | ✅ | ✅ | |
+| `LOG_USER` | ✅ | ✅ | ✅ | |
+| `LOG_MAIL` | ✅ | ✅ | ✅ | |
+| `LOG_DAEMON` | ✅ | ✅ | ✅ | |
+| `LOG_AUTH` | ✅ | ✅ | ✅ | |
+| `LOG_SYSLOG` | ✅ | ✅ | ✅ | |
+| `LOG_LPR` | ✅ | ✅ | ✅ | |
+| `LOG_NEWS` | ✅ | ✅ | ✅ | |
+| `LOG_UUCP` | ✅ | ✅ | ✅ | |
+| `LOG_LOCAL0`~`LOG_LOCAL7` | ✅ | ✅ | ✅ | |
+| `LOG_PID` | ✅ | ✅ | ✅ | |
+| `LOG_CONS` | ✅ | ✅ | ✅ | |
+| `LOG_NDELAY` | ✅ | ✅ | ✅ | |
+| `LOG_ODELAY` | ✅ | ✅ | ✅ | |
+| `LOG_NOWAIT` | ✅ | ✅ | ✅ | |
+
+### `<ftw.h>`
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `ftw` | ✅ | ✅ | ✅ | |
+| `nftw` | ✅ | ✅ | ✅ | |
+| `FTW_F` | ✅ | ✅ | ✅ | |
+| `FTW_D` | ✅ | ✅ | ✅ | |
+| `FTW_DNR` | ✅ | ✅ | ✅ | |
+| `FTW_DP` | ✅ | ✅ | ✅ | |
+| `FTW_NS` | ✅ | ✅ | ✅ | |
+| `FTW_SL` | ✅ | ✅ | ✅ | |
+| `FTW_SLN` | ✅ | ✅ | ✅ | |
+| `FTW_PHYS` | ✅ | ✅ | ✅ | |
+| `FTW_MOUNT` | ✅ | ✅ | ✅ | |
+| `FTW_DEPTH` | ✅ | ✅ | ✅ | |
+| `FTW_CHDIR` | ✅ | ✅ | ✅ | |
+
+### `<sched.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `sched_yield` | ✅ | ✅ | ✅ | |
+| `sched_get_priority_max` | ✅ | ✅ | ✅ | |
+| `sched_get_priority_min` | ✅ | ✅ | ✅ | |
+| `sched_getparam` | ✅ | ✅ | ✅ | |
+| `sched_setparam` | ✅ | ✅ | ✅ | |
+| `sched_getscheduler` | ✅ | ✅ | ✅ | |
+| `sched_setscheduler` | ✅ | ✅ | ✅ | |
+| `sched_rr_get_interval` | ✅ | ✅ | ✅ | |
+| `sched_getaffinity` | ✅ | ✅ | ✅ | |
+| `sched_setaffinity` | ✅ | ✅ | ✅ | |
+| `sched_getcpu` | ✅ | ✅ | ✅ | |
+| `struct sched_param` | ✅ | ✅ | ✅ | |
+| `SCHED_OTHER` | ✅ | ✅ | ✅ | |
+| `SCHED_FIFO` | ✅ | ✅ | ✅ | |
+| `SCHED_RR` | ✅ | ✅ | ✅ | |
+| `SCHED_BATCH` | Linux | ✅ | ✅ | ✅ | |
+| `SCHED_IDLE` | Linux | ✅ | ✅ | ✅ | |
+| `SCHED_DEADLINE` | Linux | ✅ | ✅ | ✅ | |
+| `SCHED_RESET_ON_FORK` | ✅ | ✅ | ✅ | |
+| `CPU_SET` | ✅ | ✅ | ✅ | |
+| `CPU_CLR` | ✅ | ✅ | ✅ | |
+| `CPU_ISSET` | ✅ | ✅ | ✅ | |
+| `CPU_ZERO` | ✅ | ✅ | ✅ | |
+| `CPU_COUNT` | ✅ | ✅ | ✅ | |
+| `CPU_AND` | ✅ | ✅ | ✅ | |
+| `CPU_OR` | ✅ | ✅ | ✅ | |
+| `CPU_XOR` | ✅ | ✅ | ✅ | |
+| `CPU_EQUAL` | ✅ | ✅ | ✅ | |
+| `cpu_set_t` | ✅ | ✅ | ✅ | |
+| `clone` | ✅ | ⚠️ | ⚠️ | musl 有封装但需 _GNU_SOURCE |
+| `unshare` | ✅ | ✅ | ✅ | |
+| `setns` | ✅ | ✅ | ✅ | |
+
+### `<semaphore.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `sem_init` | ✅ | ✅ | ✅ | |
+| `sem_destroy` | ✅ | ✅ | ✅ | |
+| `sem_wait` | ✅ | ✅ | ✅ | |
+| `sem_timedwait` | ✅ | ✅ | ✅ | |
+| `sem_trywait` | ✅ | ✅ | ✅ | |
+| `sem_post` | ✅ | ✅ | ✅ | |
+| `sem_open` | ✅ | ✅ | ✅ | |
+| `sem_close` | ✅ | ✅ | ✅ | |
+| `sem_unlink` | ✅ | ✅ | ✅ | |
+| `sem_getvalue` | ✅ | ✅ | ✅ | |
+| `sem_t` | ✅ | ✅ | ✅ | |
+
+---
+
+## 2.13 缺失/桩实现接口
+
+### `<utmp.h>` / `<utmpx.h>` / `<lastlog.h>`
+
+| 接口/类型 | glibc | musl | OHOS | 说明 |
+|-----------|:-----:|:----:|:----:|------|
+| `struct utmp` | ✅ | ✅ | ✅ | |
+| `struct utmpx` | ✅ | ✅ | ✅ | |
+| `setutent` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `getutent` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `endutent` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `setutxent` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `getutxent` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `endutxent` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `getutxid` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `getutxline` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `pututxline` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `utmpxname` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `updwtmp` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `updwtmpx` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `login` / `logout` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `logwtmp` | ✅ | ⚠️ | ⚠️ | musl 为桩实现 |
+| `struct lastlog` | ✅ | ⚠️ | ⚠️ | |
+
+### `<fts.h>` — ⚠️ musl 完全不提供
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `fts_open` | ✅ | ❌ | ❌ | glibc ABI 有 bug |
+| `fts_read` | ✅ | ❌ | ❌ | |
+| `fts_children` | ✅ | ❌ | ❌ | |
+| `fts_close` | ✅ | ❌ | ❌ | |
+| `fts_set` | ✅ | ❌ | ❌ | |
+| `FTSENT` | ✅ | ❌ | ❌ | |
+| `FTS_*` 常量 | ✅ | ❌ | ❌ | |
+
+> **注意**: fts.h 虽然在 glibc 中存在，但 musl 作者认为其 ABI 设计有 bug 不愿实现。需要 fts 的软件可以使用独立的 fts 便携库或 nftw 替代。
+
+### `<shadow.h>`
+
+| 接口 | glibc | musl | OHOS | 说明 |
+|------|:-----:|:----:|:----:|------|
+| `setspent` | ✅ | ✅ | ✅ | |
+| `endspent` | ✅ | ✅ | ✅ | |
+| `getspent` | ✅ | ✅ | ✅ | |
+| `getspnam` | ✅ | ✅ | ✅ | |
+| `struct spwd` | ✅ | ✅ | ✅ | |
+| `lckpwdf` | ✅ | ❌ | ❌ | |
+| `ulckpwdf` | ✅ | ❌ | ❌ | |
+| `sgetspent` | ✅ | ❌ | ❌ | |
+| `fgetspent` | ✅ | ❌ | ❌ | |
+| `putspent` | ✅ | ❌ | ❌ | |
+
+---
+
+## 2.14 动态加载接口
+
+### `<dlfcn.h>`
+
+| 接口/宏 | glibc | musl | OHOS | 说明 |
+|---------|:-----:|:----:|:----:|------|
+| `dlopen` | ✅ | ✅ | ✅ | |
+| `dlclose` | ✅ | ✅ | ✅ | ⚠️ musl 为空操作 |
+| `dlsym` | ✅ | ✅ | ✅ | |
+| `dlerror` | ✅ | ✅ | ✅ | |
+| `dlvsym` | ✅ | ✅ | ✅ | |
+| `dladdr` | ✅ | ✅ | ✅ | |
+| `dlinfo` | ✅ | ✅ | ✅ | |
+| `dl_iterate_phdr` | ✅ | ✅ | ✅ | |
+| `RTLD_LAZY` | ✅ | ✅ | ✅ | ⚠️ musl BIND_NOW 下效果不同 |
+| `RTLD_NOW` | ✅ | ✅ | ✅ | |
+| `RTLD_GLOBAL` | ✅ | ✅ | ✅ | |
+| `RTLD_LOCAL` | ✅ | ✅ | ✅ | |
+| `RTLD_DEFAULT` | ✅ | ✅ | ✅ | |
+| `RTLD_NEXT` | ✅ | ✅ | ✅ | |
+| `RTLD_NODELETE` | ✅ | ✅ | ✅ | |
+| `RTLD_NOLOAD` | ✅ | ✅ | ✅ | |
+| `RTLD_DEEPBIND` | ✅ | ❌ | ❌ | musl 不支持 |
+| `RTLD_DI_LINKMAP` | ✅ | ✅ | ✅ | |
+| `RTLD_DI_ORIGIN` | ✅ | ✅ | ✅ | |
+| `dlopen_ns_ext` | ❌ | ❌ | ✅ | OHOS 命名空间隔离 |
+
+> **关键差异**: 
+> 1. `dlclose`: musl 是空操作（从不卸载共享库），glibc 有引用计数卸载
+> 2. `RTLD_DEEPBIND`: musl 不支持
+> 3. BIND_NOW: musl 默认 BIND_NOW，影响扩展模块加载
+> 4. 符号版本：musl 不使用 symbol versioning
+
+---
+
+## 2.15 统计汇总
+
+### 按标准的接口覆盖统计
+
+| 标准层级 | glibc | musl | OHOS musl | 说明 |
+|----------|:-----:|:----:|:---------:|------|
+| ISO C89/C90 (~350 接口) | 100% | ~100% | ~100% | 差异可忽略 |
+| ISO C99 (+~200 接口) | 100% | ~100% | ~100% | 几乎无差异 |
+| ISO C11 (+~80 接口) | ~99% | ~99% | ~99% | |
+| ISO C17/C23 (+~40 接口) | ~95% | ~70% | ~70% | musl 未跟进 `_s` 安全函数 |
+| POSIX.1 Base (~500 接口) | ~100% | ~97% | ~97% | fts.h 是主要缺失 |
+| POSIX.1 Options (~200 接口) | ~95% | ~85% | ~90% | OHOS 补强了部分 |
+| **综合估算** | **~100%** | **~92%** | **~93%** | |
+
+### musl 完全不支持的接口清单
+
+| 头文件 | 接口 | 类别 | 影响 |
+|--------|------|------|:----:|
+| `<fts.h>` | fts_open/read/children/close/set | 全部 | 中 |
+| `<error.h>` | error/error_at_line | 全部 | 中 |
+| `<argp.h>` | argp_parse 全部 | 全部 | 中 |
+| `<obstack.h>` | obstack 全部 | 全部 | 低 |
+| `<execinfo.h>` | backtrace 全部 | 全部 | 中 |
+| `<printf.h>` | register_printf_* | 全部 | 低 |
+| `<makecontext.h>` | makecontext/swapcontext | 全部 | 低 |
+| `<encrypt.h>` | encrypt | 全部 | 低 |
+| `<stdlib.h>` | fcloseall | GNU | 低 |
+| `<stdlib.h>` | memfrob | GNU | 低 |
+| `<stdlib.h>` | getloadavg | GNU | 中 |
+| `<stdlib.h>` | basename(GNU版) | GNU | 高 |
+| `<string.h>` | rawmemchr | GNU | 低 |
+| `<string.h>` | strndupa/strdupa | GNU | 低 |
+| `<string.h>` | inet_ntop_r | GNU | 低 |
+| C11 Annex K | 所有 `_s` 后缀函数 | 全部 | 中 |
+| `<dlfcn.h>` | RTLD_DEEPBIND | 选项 | 低 |
+| `<math.h>` | clog10 | GNU | 低 |
+| `<fenv.h>` | FE_NOMASK_ENV/feenableexcept | GNU | 低 |
+| `<netdb.h>` | AI_IDN/NI_IDN 系列 | GNU | 低 |
+| `<glob.h>` | GLOB_TILDE/GLOB_BRACE 等 | GNU | 中 |
+| `<fnmatch.h>` | FNM_EXTMATCH/FNM_LEADING_DIR | GNU | 低 |
+| `<regex.h>` | REG_STARTEND/REG_UCP 等 | GNU | 低 |
+| `<pthread.h>` | set/getconcurrency/tryjoin_np | XSI | 低 |
+
+---
+
+*文档结束。最后更新：2026-03-23*
+
