@@ -11,6 +11,23 @@
 | 架构 | aarch64 (主要), arm, x86_64 |
 | C 库 | musl libc |
 
+## 1.5 开发环境三件套
+
+鸿蒙开发环境由三个核心组件构成，需要从**应用市场**安装：
+
+| 组件 | 获取方式 | 提供的能力 |
+|------|----------|-----------|
+| **DevBox** | 应用市场搜索 "DevBox" | 编译工具链（clang、llvm-ar、patchelf、binary-sign-tool 等），安装在 `/data/service/hnp/bin/` |
+| **GitNext** | 应用市场搜索 "GitNext" | git 版本管理工具 |
+| **HiShell** | 系统内置 | 设备上的终端环境，`/bin/sh` 是 toybox ash |
+
+### 关键认知
+
+- **HiShell ≠ bash**：`/bin/sh` 是 toybox ash，不支持 `${BASH_SOURCE}`、`[[ ]]`、数组等 bash 特性
+- **工具链来自 DevBox**：`/data/service/hnp/bin/` 下的工具由 DevBox 提供，不是系统自带
+- **git 来自 GitNext**：通过应用市场安装 GitNext 获取 git，不在系统预装路径中
+- **所有命令在 HiShell 中执行**：编译、运行、打包等操作均在 HiShell 终端中完成
+
 ## 2. 编译工具链
 
 ### 2.1 编译器

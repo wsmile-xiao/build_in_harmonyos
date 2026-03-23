@@ -300,6 +300,16 @@ for ext_lib in "$PACKAGE_DIR/lib/external/"*.so*; do
     patch_strip_sign "$ext_lib" '$ORIGIN'
 done
 
+# 扩展模块（设置 RPATH 以确保外部依赖库能被正确找到）
+EXT_DYNLOAD_COUNT=0
+EXT_DYNLOAD_TOTAL=$(find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" -type f 2>/dev/null | wc -l)
+for dynload_so in "$PACKAGE_DIR/lib/python3.9/lib-dynload/"*.so; do
+    [ -f "$dynload_so" ] || continue
+    EXT_DYNLOAD_COUNT=$((EXT_DYNLOAD_COUNT + 1))
+    patch_strip_sign "$dynload_so" '$ORIGIN:$ORIGIN/..:$ORIGIN/../external'
+done
+log_info "扩展模块: 已处理 $EXT_DYNLOAD_COUNT / $EXT_DYNLOAD_TOTAL 个"
+
 # ============================================================
 # 创建环境激活脚本
 # ============================================================
@@ -308,10 +318,21 @@ log_info "创建环境激活脚本..."
 cat > "$PACKAGE_DIR/activate.sh" << 'EOF'
 #!/bin/sh
 # Python 3.9.0 环境激活脚本（HarmonyOS）
-PYTHON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH="$PYTHON_DIR/bin:$PATH"
 export LD_LIBRARY_PATH="$PYTHON_DIR/lib:$PYTHON_DIR/lib/external${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# SSL 证书：优先使用系统编译的 OpenSSL 证书，其次系统证书
+if [ -f "$HOME/usr/local/ssl/cert.pem" ]; then
+    export SSL_CERT_FILE="$HOME/usr/local/ssl/cert.pem"
+elif [ -f "/etc/ssl/certs/ca-certificates.crt" ]; then
+    export SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
+fi
+
 echo "Python 3.9.0 (HarmonyOS aarch64) 环境已激活"
+echo "  PATH:        $PATH"
+echo "  PYTHONHOME:  $PYTHONHOME"
+[ -n "$SSL_CERT_FILE" ] && echo "  SSL_CERT:   $SSL_CERT_FILE"
 EOF
 chmod +x "$PACKAGE_DIR/activate.sh"
 

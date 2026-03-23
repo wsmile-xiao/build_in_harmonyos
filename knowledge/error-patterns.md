@@ -47,6 +47,9 @@
 | [E039](#e039-musl-iconv-不支持-ignore-后缀) | 兼容性 | iconv_open Invalid argument | 🟡 中等 |
 | [E040](#e040-man_owner-空指针解引用段错误) | 运行时 | SIGSEGV in mandb | 🔴 阻塞 |
 | [E041](#e041-automake-版本不匹配触发重生成) | 构建 | requires automake >= x.y | 🟡 中等 |
+| [E042](#e042-扩展模块-rpath-遗漏导致运行时库找不到) | 打包 | ImportError: cannot open shared object file | 🔴 阻塞 |
+| [E043](#e043-activatesh-中-bash_source-在-hishell-不可用) | 脚本 | 环境变量未设置（脚本静默失败） | 🟡 中等 |
+| [E044](#e044-可移植包缺少-pythonhome-导致标准库找不到) | 运行时 | ModuleNotFoundError: No module named 'encodings' | 🔴 阻塞 |
 
 ---
 
@@ -1564,6 +1567,162 @@ man-db 2.13.1
 
 ---
 
+## E042: 扩展模块 RPATH 遗漏导致运行时库找不到
+
+### 错误特征
+
+```
+import _gdbm  # ImportError
+# 或：扩展模块在当前环境能用，但复制到其他机器后失败
+```
+
+运行时可能正常也可能失败，取决于 musl 动态链接器是否能通过调用者链的 RPATH 找到依赖库。
+
+### 根因
+
+打包可移植包时，只为主程序和主共享库设置了 RPATH，**遗漏了扩展模块**（`lib-dynload/*.so`）的 RPATH 设置。
+
+扩展模块（如 `_gdbm.so`）如果 NEEDED 外部库（如 `libgdbm.so.6`），musl 动态链接器会沿调用者链搜索 RPATH——这在简单场景下能工作，但不稳健。如果用户系统上恰好有同名库，可能加载错误版本。
+
+### 验证命令
+
+```bash
+# 检查扩展模块是否有 RPATH
+PATCHELF=/data/service/hnp/bin/patchelf
+for so in lib/python3.9/lib-dynload/*.so; do
+    rpath=$($PATCHELF --print-rpath "$so" 2>/dev/null)
+    if [ -z "$rpath" ]; then
+        echo "❌ $(basename $so): RPATH 为空"
+    fi
+done
+
+# 检查哪些扩展模块 NEEDED 外部库
+for so in lib/python3.9/lib-dynload/*.so; do
+    needed=$(llvm-readelf -d "$so" 2>/dev/null | grep NEEDED | \
+        grep -v 'libc.so\|libm.so\|libdl.so\|libpthread.so\|libpython')
+    if [ -n "$needed" ]; then
+        echo "⚠️ $(basename $so): $needed"
+    fi
+done
+```
+
+### 解决方案
+
+为扩展模块显式设置 RPATH：
+
+```bash
+# 扩展模块在 lib/python3.9/lib-dynload/ 下
+# 需要向上找到 lib/ 和 lib/external/
+EXT_RPATH='$ORIGIN:$ORIGIN/..:$ORIGIN/../external'
+
+for so in "$PKGDIR/lib/python3.9/lib-dynload/"*.so; do
+    $PATCHELF --set-rpath "$EXT_RPATH" "$so"
+    # 然后执行签名三步流程
+done
+```
+
+**RPATH 分级参考**（详见 `packaging.md` §3.2）：
+
+| 文件类型 | 推荐 RPATH |
+|----------|-----------|
+| bin/ 可执行文件 | `$ORIGIN/../lib:$ORIGIN/../lib/external` |
+| lib/libxxx.so 主共享库 | `$ORIGIN:$ORIGIN/external` |
+| lib-dynload/*.so 扩展模块 | `$ORIGIN:$ORIGIN/..:$ORIGIN/../external` |
+| lib/external/*.so 外部依赖 | `$ORIGIN` |
+
+### 涉及软件
+
+Python 3.9.0 可移植打包（通用经验，适用于所有含 C 扩展的解释型语言）
+
+---
+
+## E043: activate.sh 中 ${BASH_SOURCE} 在 HiShell 不可用
+
+### 错误特征
+
+```
+source activate.sh
+# 脚本执行但不报错，但环境变量未生效
+# PYTHON_DIR 为空，后续的 PATH/LD_LIBRARY_PATH 设置全部指向错误路径
+```
+
+### 根因
+
+鸿蒙 HiShell 的 `/bin/sh` 是 **toybox ash**，不支持 bash 特有的 `${BASH_SOURCE}` 变量。
+脚本中使用 `$(dirname "${BASH_SOURCE[0]}")` 来获取脚本所在目录，但 `${BASH_SOURCE[0]}` 在 toybox ash 下为空。
+
+### 验证命令
+
+```bash
+# 检查当前 shell
+echo $SHELL  # /bin/sh
+ls -la /bin/sh  # -> toybox
+
+# 测试 BASH_SOURCE
+echo "${BASH_SOURCE[0]}"  # 输出为空
+```
+
+### 解决方案
+
+使用 POSIX 兼容的方式获取脚本目录：
+
+```bash
+# ❌ 不兼容 toybox ash
+PYTHON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ✅ 兼容 toybox ash / bash / dash
+PYTHON_DIR="$(cd "$(dirname "$0")" && pwd)"
+```
+
+**原理**：`$0` 在所有 POSIX shell 中都可用，包含调用脚本时使用的路径。
+
+### 涉及软件
+
+通用（所有为鸿蒙编写 shell 脚本时都需要注意）
+
+---
+
+## E044: 可移植包缺少 PYTHONHOME 导致标准库找不到
+
+### 错误特征
+
+```
+python3.9
+# Fatal Python error: init_sys_streams: can't initialize sys standard streams
+# ModuleNotFoundError: No module named 'encodings'
+```
+
+### 根因
+
+Python 使用 `PYTHONHOME` 环境变量定位标准库目录（`lib/python3.x/`）。如果不设置，Python 使用编译时硬编码的路径（如 `$HOME/usr/local`），当可移植包解压到其他位置时找不到标准库。
+
+### 验证命令
+
+```bash
+# 检查编译时的前缀
+python3.9 -c "import sys; print(sys.prefix, sys.exec_prefix)"
+# 如果输出的是编译路径而非包解压路径，说明需要设置 PYTHONHOME
+```
+
+### 解决方案
+
+在 activate.sh 中必须设置 `PYTHONHOME`：
+
+```bash
+PYTHON_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PYTHONHOME="$PYTHON_DIR"   # 必须设置！
+export PATH="$PYTHON_DIR/bin:$PATH"
+export LD_LIBRARY_PATH="$PYTHON_DIR/lib:$PYTHON_DIR/lib/external${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+```
+
+**注意**：`PYTHONHOME` 同时影响 `sys.prefix` 和 `sys.exec_prefix`，确保标准库和平台相关文件都能被找到。
+
+### 涉及软件
+
+Python 3.9.0 可移植打包（Python 特有，但同类"解释器需要 HOME 变量"的模式可能也适用于 Perl、Ruby 等）
+
+---
+
 ## 错误诊断流程
 
 ```
@@ -1617,5 +1776,6 @@ ls -Z /path/to/file
 
 ---
 
-*文档版本: 2.1*  
+*文档版本: 2.2*  
 *最后更新: 2026-03-23*
+*新增 E042-E044：可移植打包验证阶段发现的三个问题*

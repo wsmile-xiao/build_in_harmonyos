@@ -40,6 +40,10 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 
 > **依赖软件独立归档**：编译目标软件时，如果需要先编译安装依赖库（如 libpipeline 之于 man-db），这些依赖软件**必须作为独立项目单独创建归档**（manifest.yaml + README.md），不能仅作为主软件归档的一个章节。每个依赖库有自己的版本生命周期和补丁记录，独立归档有助于未来复用和跨项目引用。
 
+> **打包验证完整性**：制作可移植包时，**必须对所有 ELF 文件（包括 lib-dynload/ 下的扩展模块）设置 RPATH 并重新签名**。不能仅处理主程序和主共享库而遗漏扩展模块。详见 `knowledge/packaging.md` §5.4 和 `knowledge/error-patterns.md` E042。
+
+> **Shell 脚本 POSIX 兼容**：为鸿蒙编写的所有 shell 脚本**必须使用 POSIX 兼容语法**（`#!/bin/sh` + toybox ash 兼容），不能依赖 `${BASH_SOURCE}`、`[[ ]]`、数组等 bash 特性。详见 `knowledge/harmonyos-specifics.md` §3 和 `knowledge/packaging.md` §5。
+
 ## 2. When to use
 
 - 用户说："帮我在鸿蒙电脑上编译 XXX"
@@ -322,6 +326,8 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
 | 环境配置 | `knowledge/environment.md` | 系统特性 |
 | 鸿蒙特有机制 | `knowledge/harmonyos-specifics.md` | 签名、SELinux 等 |
 | 可移植打包 | `knowledge/packaging.md` | RPATH、strip、签名流程 |
+| Python 扩展编译 | `knowledge/python-extensions.md` | musl BIND_NOW、静态链接、扩展模块 |
+| ptrace 替代方案 | `knowledge/ptrace-alternatives.md` | LD_PRELOAD、strace 替代 |
 | 常见问题 | `knowledge/troubleshooting.md` | 问题排查 |
 | 错误模式 | `knowledge/error-patterns.md` | 解决方案 |
 

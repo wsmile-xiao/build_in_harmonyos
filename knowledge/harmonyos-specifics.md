@@ -222,21 +222,33 @@ chmod +x myprogram
 
 ### 3.3 原因
 
-- 鸿蒙系统的 bash 可能安装在用户目录
-- `/bin/sh` 通常指向系统 shell（mksh）
-- 使用 `#!/usr/bin/env bash` 可以自动查找 PATH 中的 bash
+- 鸿蒙 HiShell 的 `/bin/sh` 是 **toybox ash**，不是 bash
+- **不支持** `${BASH_SOURCE}`、`[[ ]]`、数组等 bash 特性
+- `/usr/bin/env` 不存在（HiShell 没有），`#!/usr/bin/env xxx` 会直接失败
+- DevBox 提供的 bash 安装在用户目录（如 `$HOME/usr/local/bin/bash`）
+- 推荐统一使用 `#!/bin/sh` + POSIX 兼容语法
 
 ### 3.4 检查 Shell
 
 ```bash
-# 检查系统 shell
+# 检查系统 shell（HiShell）
 ls -la /bin/sh
-# 通常输出: /bin/sh -> /system/bin/mksh
+# 输出: /bin/sh -> toybox
 
-# 检查 bash 是否安装
+# 检查 bash 是否可用（DevBox 安装后）
 which bash
-# 可能输出: /data/service/hnp/bin/bash 或 $HOME/usr/local/bin/bash
+# 可能输出: $HOME/usr/local/bin/bash
 ```
+
+### 3.5 常见 bash 特性不可用
+
+| 特性 | bash | HiShell (toybox ash) |
+|------|------|---------------------|
+| `${BASH_SOURCE[0]}` | ✅ | ❌ 为空 |
+| `[[ ... ]]` | ✅ | ❌ 语法错误 |
+| 数组 `arr=()` | ✅ | ❌ 语法错误 |
+| `${var:offset:length}` | ✅ | ❌ |
+| `$(cd "$(dirname "$0")" && pwd)` | ✅ | ✅ 替代方案 |
 
 ---
 

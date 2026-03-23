@@ -1,16 +1,22 @@
-# HarmonyOS 可移植打包指南
+# HarmonyOS 可移植打�
+指南
 
-在鸿蒙系统上制作可移植的软件包，需要处理 RPATH、ELF 签名、软链接限制等鸿蒙特有问题。
+在鸿蒙系统上制作可移植的软件�
+，需要处理 RPATH、ELF 签名、软链接限制等鸿蒙特有问题。
 
 ## 1. 核心问题
 
 | 问题 | 根因 | 影响 | 解决方案 |
 |------|------|------|----------|
-| 修改 ELF 后无法执行 | adhoc 签名失效 | patchelf/strip 后二进制被内核拒绝 | 移除旧签名 → 重新签名 |
-| 签名工具报 "section already exists" | 无法覆盖已有 .codesign 段 | 直接调用 binary-sign-tool 失败 | 先 llvm-objcopy 移除 |
+| 修改 ELF 后无法执行 | adhoc 签名失效 | patchelf/strip 后二进制被�
+核拒绝 | 移除旧签名 → 重新签名 |
+| 签名工�
+�报 "section already exists" | 无法覆盖已有 .codesign 段 | 直接调用 binary-sign-tool 失败 | �
+� llvm-objcopy 移除 |
 | 软链接不可靠 | SELinux 策略限制 | ln -s 创建的链接无法访问 | 用 wrapper 脚本或 cp 替代 |
 | ln -sf 创建随机后缀文件 | toybox bug | ln -sf link → link_GdinNM | rm -f && ln -s 替代 |
-| 运行时找不到共享库 | LD_LIBRARY_PATH 未设置或 RPATH 错误 | ImportError / 动态链接失败 | patchelf --set-rpath '$ORIGIN/...' |
+| 运行时找不到�
+�享库 | LD_LIBRARY_PATH 未设置或 RPATH 错误 | ImportError / 动态链接失败 | patchelf --set-rpath '$ORIGIN/...' |
 
 ## 2. ELF 文件修改 + 签名完整流程
 
@@ -25,7 +31,8 @@ llvm-objcopy --remove-section .codesign binary
 # 2. 重新签名（adhoc self-sign）
 binary-sign-tool sign -inFile binary -outFile binary -selfSign 1
 
-# 3. 恢复权限（签名会清除权限位）
+# 3. 恢复权限（签名会�
+除权限位）
 chmod a+x binary
 ```
 
@@ -58,7 +65,8 @@ binary-sign-tool sign -inFile "$BINARY" -outFile "$BINARY" -selfSign 1
 chmod a+x "$BINARY"
 ```
 
-### 2.3 封装函数
+### 2.3 封�
+函数
 
 ```bash
 PATCHELF="/data/service/hnp/bin/patchelf"
@@ -96,7 +104,8 @@ patch_strip_sign() {
 
 ### 3.1 使用 $ORIGIN 相对路径
 
-RPATH 使用 `$ORIGIN` 相对于文件自身位置查找库，使包可以放在任意目录：
+RPATH 使用 `$ORIGIN` 相对于文件自身位置查找库，使�
+可以放在任意目录：
 
 ```
 python-3.9.0-harmonyos-aarch64/
@@ -117,7 +126,8 @@ python-3.9.0-harmonyos-aarch64/
 | 文件类型 | 推荐 RPATH | 说明 |
 |----------|-----------|------|
 | 可执行文件 (bin/) | `$ORIGIN/../lib:$ORIGIN/../lib/external` | 向上查找 lib/ |
-| 主共享库 (lib/libxxx.so) | `$ORIGIN:$ORIGIN/external` | 同级和 external/ |
+| 主�
+�享库 (lib/libxxx.so) | `$ORIGIN:$ORIGIN/external` | 同级和 external/ |
 | 扩展模块 (lib/python3.x/lib-dynload/) | `$ORIGIN:$ORIGIN/..:$ORIGIN/../external` | 找 libpython 和 external |
 | 外部依赖 (lib/external/) | `$ORIGIN` | 只找同级 |
 
@@ -133,16 +143,24 @@ llvm-readelf -d binary | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/' | grep -v '^li
 
 ### 3.4 可跳过的系统库
 
-以下库由 musl libc 或动态链接器提供，不需要打包：
+以下库由 musl libc 或动态链接器提供，不需要打�
+：
 
 ```
 libc.so      — musl libc（系统自带）
-libm.so      — 数学库（musl 内建）
-libdl.so     — 动态链接（musl 内建）
-libpthread.so — 线程库（musl 内建）
-librt.so     — 实时扩展（musl 内建）
-libutil.so   — 工具库（musl 内建）
-ld-musl-*.so — 动态链接器（绝对不可打包）
+libm.so      — 数学库（musl �
+建）
+libdl.so     — 动态链接（musl �
+建）
+libpthread.so — 线程库（musl �
+建）
+librt.so     — 实时扩展（musl �
+建）
+libutil.so   — 工�
+�库（musl �
+建）
+ld-musl-*.so — 动态链接器（绝对不可打�
+）
 ```
 
 ## 4. 软链接替代方案
@@ -155,7 +173,8 @@ ld-musl-*.so — 动态链接器（绝对不可打包）
 # ❌ 不要用软链接
 ln -s python3.9 python3
 
-# ✅ 用 wrapper 脚本
+# �
+ 用 wrapper 脚本
 cat > python3 << 'EOF'
 #!/bin/sh
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -164,13 +183,15 @@ EOF
 chmod +x python3
 ```
 
-### 4.2 共享库别名：cp 复制
+### 4.2 �
+�享库别名：cp 复制
 
 ```bash
 # ❌ 不要用软链接
 ln -s libpython3.9.so.1.0 libpython3.9.so
 
-# ✅ 直接复制（多占磁盘空间但可靠）
+# �
+ 直接复制（多占磁盘空间但可靠）
 cp libpython3.9.so.1.0 libpython3.9.so
 ```
 
@@ -180,23 +201,30 @@ cp libpython3.9.so.1.0 libpython3.9.so
 # ❌ toybox ln -sf 会创建随机后缀文件
 ln -sf target link   # → link_GdinNM
 
-# ✅ 分步操作
+# �
+ 分步操作
 rm -f link && ln -s target link
 ```
 
-## 5. 分离打包策略
+## 5. 分离打�
+策略
 
-### 5.1 主包 vs Debug 包
+### 5.1 主�
+ vs Debug �
+
 
 ```bash
-# 主包（不含 debug）
+# 主�
+（不含 debug）
 tar -czf package.tar.gz --exclude=debug/ package/
 
-# Debug 包
+# Debug �
+
 tar -czf package-debug.tar.gz package/debug/
 ```
 
-### 5.2 Python 3.9.0 实际数据
+### 5.2 Python 3.9.0 实�
+数据
 
 | 文件 | Strip 前 | Strip 后 | 节省 | Debug Info |
 |------|----------|----------|------|------------|
@@ -210,12 +238,15 @@ tar -czf package-debug.tar.gz package/debug/
 
 ### 5.3 .gnu_debuglink 工作原理
 
-1. `llvm-objcopy --add-gnu-debuglink=file.debug binary` 在 binary 中嵌入 debug 文件的文件名和 CRC
+1. `llvm-objcopy --add-gnu-debuglink=file.debug binary` 在 binary 中嵌�
+� debug 文件的文件名和 CRC
 2. GDB 加载 binary 时，读取 `.gnu_debuglink` 段，在以下路径搜索 debug 文件：
    - 与 binary 同目录
    - binary 目录下的 `debug/` 子目录
-   - `/usr/lib/debug/` 全局目录
-3. 通过 CRC 校验确保 debug 文件与 binary 匹配
+   - `/usr/lib/debug/` �
+�局目录
+3. 通过 CRC 校验确保 debug 文件与 binary 匹�
+�
 
 ## 6. 首次运行确认
 
@@ -223,15 +254,19 @@ tar -czf package-debug.tar.gz package/debug/
 这是系统级行为，无法绕过。每个新签名的二进制都需要一次确认。
 
 **影响**：
-- 从压缩包解压后首次运行需要确认
+- 从压缩�
+解压后首次运行需要确认
 - 更新二进制后需要重新确认
 - wrapper 脚本（非 ELF）不需要确认
 
-## 7. 完整打包检查清单
+## 7. 完整打�
+检查�
+单
 
 ```bash
 #!/bin/bash
-# verify_package.sh - 验证可移植包完整性
+# verify_package.sh - 验证可移植�
+完整性
 
 PKGDIR="$1"
 
@@ -241,7 +276,8 @@ find "$PKGDIR" -type f -executable | while read f; do
         rpath=$(patchelf --print-rpath "$f" 2>/dev/null)
         echo "  $(basename $f): RPATH=$rpath"
         if echo "$rpath" | grep -q '\$ORIGIN'; then
-            echo "    ✅ 使用相对路径"
+            echo "    �
+ 使用相对路径"
         else
             echo "    ❌ 未设置 RPATH 或使用绝对路径"
         fi
@@ -253,7 +289,8 @@ echo "=== 2. 签名检查 ==="
 find "$PKGDIR" -type f -executable | while read f; do
     if file "$f" | grep -q "ELF"; then
         if llvm-readelf -S "$f" 2>/dev/null | grep -q '.codesign'; then
-            echo "  ✅ $(basename $f): 已签名"
+            echo "  �
+ $(basename $f): 已签名"
         else
             echo "  ❌ $(basename $f): 未签名"
         fi
@@ -277,7 +314,8 @@ find "$PKGDIR" -type f -executable | while read f; do
         if [ ${#missing[@]} -gt 0 ]; then
             echo "  ❌ $(basename $f): 缺少 ${missing[*]}"
         else
-            echo "  ✅ $(basename $f): 依赖完整"
+            echo "  �
+ $(basename $f): 依赖完整"
         fi
     fi
 done
@@ -287,7 +325,76 @@ echo "=== 4. debuglink 检查 ==="
 find "$PKGDIR" -type f -executable | while read f; do
     if file "$f" | grep -q "ELF"; then
         if llvm-readelf -S "$f" 2>/dev/null | grep -q '.gnu_debuglink'; then
-            echo "  ✅ $(basename $f): 有 debuglink"
+            echo "  �
+ $(basename $f): 有 debuglink"
+        fi
+    fi
+done
+
+echo ""
+echo "=== 5. 软链接检查 ==="
+find "$PKGDIR" -type l | while read link; do
+    if [ ! -e "$link" ]; then
+        echo "  ⚠️ $link: 悬空软链接"
+    fi
+done
+echo "  (无输出表示无悬空链接)"
+```
+
+## 9. 参考案例
+
+| 软件 | 打�
+文档 | �
+�键特点 |
+|------|----------|----------|
+| Python 3.9.0 | `archives/p/python/3.9.0/scripts/package_python.sh` | 完整脚本，含 strip + debug 分离 |
+
+---
+
+*文档版本: 1.0*  
+*最后更新: 2026-03-23*  
+*基于 Python 3.9.0 打�
+实战经验总结*
+�含 activate.sh 和扩展模块 RPATH 修复）*
+n
+            echo "  �
+ $(basename $f): 已签名"
+        else
+            echo "  ❌ $(basename $f): 未签名"
+        fi
+    fi
+done
+
+echo ""
+echo "=== 3. 依赖检查 ==="
+find "$PKGDIR" -type f -executable | while read f; do
+    if file "$f" | grep -q "ELF"; then
+        missing=()
+        for lib in $(llvm-readelf -d "$f" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/'); do
+            case "$lib" in
+                libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*) continue ;;
+            esac
+            # Check if lib exists in package
+            if ! find "$PKGDIR" -name "$lib" -type f | grep -q .; then
+                missing+=("$lib")
+            fi
+        done
+        if [ ${#missing[@]} -gt 0 ]; then
+            echo "  ❌ $(basename $f): 缺少 ${missing[*]}"
+        else
+            echo "  �
+ $(basename $f): 依赖完整"
+        fi
+    fi
+done
+
+echo ""
+echo "=== 4. debuglink 检查 ==="
+find "$PKGDIR" -type f -executable | while read f; do
+    if file "$f" | grep -q "ELF"; then
+        if llvm-readelf -S "$f" 2>/dev/null | grep -q '.gnu_debuglink'; then
+            echo "  �
+ $(basename $f): 有 debuglink"
         fi
     fi
 done
@@ -304,7 +411,9 @@ echo "  (无输出表示无悬空链接)"
 
 ## 8. 参考案例
 
-| 软件 | 打包文档 | 关键特点 |
+| 软件 | 打�
+文档 | �
+�键特点 |
 |------|----------|----------|
 | Python 3.9.0 | `archives/p/python/3.9.0/scripts/package_python.sh` | 完整脚本，含 strip + debug 分离 |
 
@@ -312,4 +421,5 @@ echo "  (无输出表示无悬空链接)"
 
 *文档版本: 1.0*  
 *最后更新: 2026-03-23*  
-*基于 Python 3.9.0 打包实战经验总结*
+*基于 Python 3.9.0 打�
+实战经验总结*
