@@ -1,6 +1,6 @@
 # Python 3.9.0 鸿蒙系统适配指南
 
-> **版本**: 2.0 | **更新日期**: 2026-03-21 | **状态**: ✅ 已验证
+> **版本**: 3.1 | **更新日期**: 2026-03-25 | **状态**: ✅ 已验证
 
 ## 概述
 
@@ -9,7 +9,7 @@
 | 软件版本 | Python 3.9.0 |
 | 目标平台 | HarmonyOS aarch64 (musl libc) |
 | 编译器 | Clang 15.0.4 |
-| 适配复杂度 | 🔴 高（10 个补丁，涉及构建系统三层） |
+| 适配复杂度 | 🔴 高（11 个补丁，涉及构建系统三层） |
 | 核心功能可用性 | 74.9% 测试通过 |
 
 ### 快速开始
@@ -25,11 +25,9 @@ tar -xzf Python-3.9.0.tgz && cd Python-3.9.0
 
 # 3. 应用补丁
 PATCHDIR=/storage/Users/currentUser/tmp/opendesk/build_in_harmonyos/p/python/3.9.0/patches
-for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010; do
+for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011; do
     patch -p1 < $PATCHDIR/${p}*.patch
 done
-
-# 4. 构建
 autoconf && ./configure --prefix=$HOME/usr/local --enable-shared && make -j$(nproc)
 
 # 5. 验证
@@ -653,6 +651,76 @@ def main():
 
 ---
 
+### 3.10 补丁 0011：venv/__init__.py（symlink fallback）
+
+**修改文件**：`Lib/venv/__init__.py`（Python 虚拟环境创建模块）
+
+#### 问题背景
+
+Python 3.9 的 `venv` 模块在 64 位 POSIX 系统上（非 macOS）会自动创建 `lib64 -> lib` 符号链接（[Issue #21197](https://bugs.python.org/issue21197)），以便某些通过 `lib64` 路径安装的第三方包能被正确找到。
+
+然而 HarmonyOS 的用户主目录使用 HMDFS 文件系统，该文件系统**完全不支持 `os.symlink()`**——调用会 100% 抛出 `PermissionError`，原因是 SELinux Hmmac 策略禁止创建符号链接。
+
+```python
+# 直接复现
+import os
+os.symlink('lib', '/storage/Users/currentUser/tmp/test-link')
+# OSError: [Errno 13] Permission denied
+```
+
+这导致 `python3 -m venv` 和 `venv.EnvBuilder()` 完全无法使用。
+
+#### 修改内容
+
+```diff
+             link_path = os.path.join(env_dir, 'lib64')
+             if not os.path.exists(link_path):   # Issue #21643
+-                os.symlink('lib', link_path)
++                try:
++                    os.symlink('lib', link_path)
++                except OSError:
++                    # HarmonyOS: HMDFS does not support symlinks (SELinux + Hmmac).
++                    # Fall back to creating lib64 as a real directory.
++                    os.makedirs(link_path, exist_ok=True)
+```
+
+#### 为什么创建目录而不是 symlink 就够了？
+
+关键在于 `sysconfig.get_path()` 的实现：
+
+```python
+# sysconfig.get_path('purelib') 的计算逻辑（简化）
+# ❌ 不是基于 _sysconfigdata 中的 LIBDIR（静态值，编译时烘焙）
+# ✅ 而是基于 sys.prefix（动态值，venv 启动时计算）
+purelib = os.path.join(sys.prefix, 'lib', 'python3.9', 'site-packages')
+```
+
+| 接口 | 值来源 | 正确？ |
+|------|--------|--------|
+| `sys.prefix` | 动态（venv 目录） | ✅ |
+| `sysconfig.get_path('purelib')` | 基于 sys.prefix | ✅ |
+| `sysconfig.get_config_var('LIBDIR')` | 静态（编译时烘焙） | ❌ 不一致 |
+
+`pip install`、`ensurepip`、`setuptools` 都使用 `sysconfig.get_path()`，所以 `lib64` 是 symlink 还是真实目录对它们没有影响。
+
+#### 技术原理
+
+```
+问题链：
+  venv 创建 → os.symlink('lib', 'lib64') → HMDFS 不支持 → OSError → 失败
+
+修复逻辑：
+  try: os.symlink('lib', 'lib64')       # 标准系统正常工作
+  except OSError: os.makedirs('lib64')  # HarmonyOS fallback
+```
+
+**举一反三**：
+- 所有调用 `os.symlink()` 的 Python 代码在 HarmonyOS 上都需要类似处理
+- 在 HMDFS 以外的路径（如 `/data/`）symlink 可能可用，但用户目录下一定不行
+- 也可以在运行时检测文件系统是否支持 symlink，而非捕获异常
+
+---
+
 ## 四、测试验证
 
 ### 4.1 测试结果
@@ -923,6 +991,24 @@ Python 的构建系统是三层架构，任何类似复杂度的软件都可能�
 |------|------|
 | `patches/` | 补丁文件 |
 | `tests/test_subprocess_compat.py` | 兼容层测试 |
+| `package_python.sh` | 打包脚本 |
+| `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程问题深入分析 |
+| `TEST_REPORT.md` | 测试详情 |
+
+---
+
+## 九、版本历史
+
+| 日期 | 版本 | 说明 |
+|------|------|------|
+| 2026-03-21 | 1.0 | 初始版本 |
+| 2026-03-21 | 2.0 | 补丁详解完善，添加举一反三 |
+| 2026-03-21 | 3.0 | 添加依赖关系、技术要点总结章节 |
+| 2026-03-25 | 3.1 | 新增补丁 0011（venv symlink fallback）、统一测试数据（425/314/80/25/6） |
+
+---
+
+*维护者: OpenHarmony 社区*��容层测试 |
 | `package_python.sh` | 打包脚本 |
 | `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程问题深入分析 |
 | `TEST_REPORT.md` | 测试详情 |

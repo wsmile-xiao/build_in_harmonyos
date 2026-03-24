@@ -244,6 +244,120 @@ os.system("clang --version | cat")  # 成功
 
 详见 `knowledge/harmonyos-specifics.md` 第7节。
 
+### 3.5 问题：venv 创建失败（symlink 不支持）
+
+**现象**：
+```
+Error: [Errno 13] Permission denied: 'lib' -> '/path/to/venv/lib64'
+```
+
+**原因**：Python 3.9 的 `venv/__init__.py` 在 64 位 POSIX 系统上会强制创建 `lib64 -> lib` 符号链接（Issue #21197），但鸿蒙的 HMDFS 文件系统（用户主目录）**完全不支持 `os.symlink()`**。
+
+**诊断**：
+```bash
+# 确认 symlink 不支持
+python3 -c "import os; os.symlink('a', '$HOME/tmp/.test')"
+# OSError: [Errno 13] Permission denied
+
+# 确认 venv 代码中的问题
+python3 -c "
+import inspect, venv
+src = inspect.getsource(venv.EnvBuilder.ensure_directories)
+# 关键代码（约第 138-140 行）：
+#   if ((sys.maxsize > 2**32) and (os.name == 'posix') and
+#       (sys.platform != 'darwin')):
+#       link_path = os.path.join(env_dir, 'lib64')
+#       if not os.path.exists(link_path):
+#           os.symlink('lib', link_path)
+"
+```
+
+**编译时修复（推荐）**：在 Python 源码中添加补丁 `0011-Lib-venv-HarmonyOS-symlink-fix.patch`：
+
+```diff
+--- a/Lib/venv/__init__.py
++++ b/Lib/venv/__init__.py
+@@ -137,7 +137,12 @@ class EnvBuilder:
+             if ((sys.maxsize > 2**32) and (os.name == 'posix') and
+                 (sys.platform != 'darwin')):
+                 link_path = os.path.join(env_dir, 'lib64')
+                 if not os.path.exists(link_path):   # Issue #21643
+-                    os.symlink('lib', link_path)
++                    try:
++                        os.symlink('lib', link_path)
++                    except OSError:
++                        # HarmonyOS: HMDFS does not support symlinks.
++                        # Create lib64 as a real directory instead.
++                        os.makedirs(link_path, exist_ok=True)
+             context.bin_path = binpath = os.path.join(env_dir, binname)
+```
+
+**运行时 Workaround（不修改 Python 源码）**：使用封装脚本 `mkvenv.py`，原理是在 venv 创建前预创建 `lib64` 目录（此时 `os.path.exists(link_path)` 为 True，venv 跳过 symlink），并对 `os.symlink` 做 monkey-patch 防御：
+
+```python
+import os, venv, shutil
+
+env_dir = '/path/to/venv'
+
+# 1. 预创建 lib64，让 venv 跳过 symlink 逻辑
+os.makedirs(os.path.join(env_dir, 'lib64'), exist_ok=True)
+
+# 2. Monkey-patch os.symlink 防御（以防 lib64 被内部清理后重建）
+_orig = os.symlink
+def _safe_symlink(src, dst, *a, **kw):
+    try:
+        _orig(src, dst, *a, **kw)
+    except OSError:
+        if not os.path.exists(dst):
+            os.makedirs(dst, exist_ok=True)
+os.symlink = _safe_symlink
+
+# 3. 创建 venv
+try:
+    venv.EnvBuilder(with_pip=True, symlinks=False).create(env_dir)
+finally:
+    os.symlink = _orig
+```
+
+**验证**：
+```bash
+python3 -u mkvenv.py /path/to/venv
+/path/to/venv/bin/python3 -c "import pip; print('pip:', pip.__version__)"
+/path/to/venv/bin/python3 -m pip install six
+/path/to/venv/bin/python3 -c "import six; print('six:', six.__version__)"
+```
+
+### 3.6 问题：sysconfig.LIBDIR 与实际安装路径不一致
+
+**现象**：
+```python
+import sysconfig
+sysconfig.get_config_var('LIBDIR')
+# '/storage/Users/currentUser/usr/local/lib'  ← 编译时 --prefix 路径
+
+sysconfig.get_config_var('installed_base')
+# '/storage/Users/currentUser/usr/python-3.9.0-harmonyos-aarch64'  ← 实际安装路径
+```
+
+**原因**：Python 编译时使用 `--prefix=$HOME/usr/local`，`_sysconfigdata` 模块将 `prefix`、`LIBDIR`、`DESTLIB` 等变量烘焙为编译时的绝对路径。但打包脚本 `package_python.sh` 将产物重新安装到 `/storage/Users/currentUser/usr/python-3.9.0-harmonyos-aarch64/`，导致 `prefix` 与实际位置不匹配。
+
+**实际影响评估**：
+
+| 受影响的接口 | 值 | 是否影响功能 |
+|-------------|-----|:----------:|
+| `sysconfig.get_config_var('prefix')` | 编译时路径（错误） | ❌ 不影响 |
+| `sysconfig.get_config_var('LIBDIR')` | 编译时路径（错误） | ❌ 不影响 |
+| `sysconfig.get_config_var('installed_base')` | 实际路径（正确） | — |
+| `sysconfig.get_path('purelib')` | 实际路径（正确） | — |
+| `sysconfig.get_path('stdlib')` | 实际路径（正确） | — |
+| `sys.prefix` | 实际路径（正确） | — |
+| `pip install` | 使用 `get_path()` | ❌ 不影响 |
+| `venv` + `ensurepip` | 使用 `get_path()` | ❌ 不影响 |
+
+**结论**：Python 3.9 的 `sysconfig.get_path()` 基于 `sys.prefix`（动态计算的）而非 `_sysconfigdata` 中的 `prefix`，因此 `pip install`、`venv`、`ensurepip` 等实际功能不受影响。`LIBDIR` 的不一致仅影响直接调用 `sysconfig.get_config_var('LIBDIR')` 的场景（极少）。
+
+**是否需要修复**：🟢 低优先级。如果需要修复，可在 `Lib/sysconfig.py` 的 `get_config_var()` 中添加 HarmonyOS 特殊处理，将 `LIBDIR` 等变量重定向到 `installed_base` 下。但这不是必须的。
+
 ---
 
 ## 4. expat 内置依赖编译示例
@@ -658,5 +772,6 @@ echo "失败: $failed"
 
 ---
 
-*文档版本: 1.1*  
-*最后更新: 2024-03-22*
+*文档版本: 1.2*
+*最后更新: 2026-03-25*
+*更新内容: 新增 §3.5 venv symlink 修复、§3.6 LIBDIR 配置不一致分析*
