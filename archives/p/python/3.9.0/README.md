@@ -686,22 +686,34 @@ os.symlink('lib', '/storage/Users/currentUser/tmp/test-link')
 
 #### 为什么创建目录而不是 symlink 就够了？
 
-关键在于 `sysconfig.get_path()` 的实现：
+根本原因在于当前平台的 `platlibdir` 值：
 
 ```python
-# sysconfig.get_path('purelib') 的计算逻辑（简化）
-# ❌ 不是基于 _sysconfigdata 中的 LIBDIR（静态值，编译时烘焙）
-# ✅ 而是基于 sys.prefix（动态值，venv 启动时计算）
+import sysconfig
+sysconfig.get_config_var('platlibdir')
+# 'lib'  ← 不是 'lib64'
+```
+
+`platlibdir` 在编译时由 `_sysconfigdata` 烘焙，值为 `lib`（不是 `lib64`），所以 Python 的所有路径都基于 `lib/` 而非 `lib64/`：
+
+```python
+# sysconfig.get_path('purelib') 的实际计算：
+#   {venv_dir}/lib/python3.9/site-packages
+# 而不是：
+#   {venv_dir}/lib64/python3.9/site-packages
+
 purelib = os.path.join(sys.prefix, 'lib', 'python3.9', 'site-packages')
 ```
 
-| 接口 | 值来源 | 正确？ |
-|------|--------|--------|
-| `sys.prefix` | 动态（venv 目录） | ✅ |
-| `sysconfig.get_path('purelib')` | 基于 sys.prefix | ✅ |
-| `sysconfig.get_config_var('LIBDIR')` | 静态（编译时烘焙） | ❌ 不一致 |
+| 接口 | 值 | 说明 |
+|------|-----|------|
+| `sysconfig.get_config_var('platlibdir')` | `'lib'` | 编译时确定，决定路径骨架 |
+| `sysconfig.get_path('purelib')` | `.../lib/python3.9/site-packages` | 基于 `sys.prefix` + `platlibdir` |
+| `sysconfig.get_config_var('LIBDIR')` | 编译时路径（不一致） | 静态值，不被 get_path() 使用 |
 
-`pip install`、`ensurepip`、`setuptools` 都使用 `sysconfig.get_path()`，所以 `lib64` 是 symlink 还是真实目录对它们没有影响。
+`pip install`、`ensurepip`、`setuptools` 全部使用 `sysconfig.get_path()`，该函数基于动态的 `sys.prefix` + `platlibdir`，**根本不读取 `LIBDIR`**。因此 `lib64` 是 symlink 还是真实目录对它们没有任何影响——只要它存在，venv 就不会报错。
+
+> **补充**：在某些 Linux 发行版（RHEL/Fedora）上，`platlibdir` 是 `lib64`，`lib64 -> lib` symlink 才有意义——它让硬编码 `lib64` 路径的第三方工具也能找到包。HarmonyOS 上 `platlibdir` 是 `lib`，symlink 纯粹是防御性代码，创建空目录即可。
 
 #### 技术原理
 
@@ -1008,7 +1020,7 @@ Python 的构建系统是三层架构，任何类似复杂度的软件都可能�
 
 ---
 
-*维护者: OpenHarmony 社区*��容层测试 |
+*维护者: OpenHarmony 社区*��容层测试 |
 | `package_python.sh` | 打包脚本 |
 | `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程问题深入分析 |
 | `TEST_REPORT.md` | 测试详情 |

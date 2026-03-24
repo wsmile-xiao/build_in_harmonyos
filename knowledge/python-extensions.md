@@ -287,7 +287,7 @@ src = inspect.getsource(venv.EnvBuilder.ensure_directories)
 +                        os.symlink('lib', link_path)
 +                    except OSError:
 +                        # HarmonyOS: HMDFS does not support symlinks.
-+                        # Create lib64 as a real directory instead.
++                        # platlibdir is 'lib', so lib64/ is never traversed.
 +                        os.makedirs(link_path, exist_ok=True)
              context.bin_path = binpath = os.path.join(env_dir, binname)
 ```
@@ -326,6 +326,8 @@ python3 -u mkvenv.py /path/to/venv
 /path/to/venv/bin/python3 -m pip install six
 /path/to/venv/bin/python3 -c "import six; print('six:', six.__version__)"
 ```
+
+**注意**：早期版本的 `mkvenv.py` 还创建了 `.pth` 文件将 `lib64/` 加入 `sys.path`，但实测证明这是多余的——`sysconfig.get_path('purelib')` 始终返回 `lib/python3.9/site-packages`（基于动态的 `sys.prefix`），`lib64` 目录永远不会被 pip 作为安装目标。只要 symlink 不报错，venv 就能正常工作。
 
 ### 3.6 问题：sysconfig.LIBDIR 与实际安装路径不一致
 
