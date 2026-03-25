@@ -1,6 +1,7 @@
 # Python 3.9.0 鸿蒙适配：进展总结与下一步计划
 
 > **最后更新**: 2026-03-26 | **维护者**: OpenHarmony PC Developer 社区
+> **状态数据来源**: 2026-03-26 实际验证，基于 20 补丁版本（补丁 0001-0020）
 
 ---
 
@@ -23,29 +24,47 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 - 解决 SELinux 子进程限制（`cmd | cat` pipe 绕过）
 - subprocess 全面改造：posix_spawn musl 路径 + 临时文件 pipe workaround + Python 纯 fallback
 
-### 2. 全量构建验证（2026-03-25）
+### 2. 全量构建验证（2026-03-26）
 
 | 类别 | 数量 |
 |------|------|
-| ✅ 编译+导入成功 | **64 个扩展模块** |
-| ⚠️ 编译成功但导入失败 | 2（_gdbm, _lzma，库路径问题） |
-| ❌ 编译失败 | 1（_ctypes，libffi 缺失） |
-| ⏭️ 依赖缺失未编译 | 10（_ssl, _hashlib, _sqlite3 等） |
+| ✅ 编译+导入成功 | **73 个扩展模块**（72 个 .so 文件） |
+| ⚠️ 编译成功但导入失败 | 2（_gdbm 缺 libgdbm.so.6、_lzma 缺 liblzma.so.5，运行时库缺失，编译本身成功） |
+| ⏭️ 非标准测试项（不计入失败） | 2（_math 为内建静态链接模块、xxlimited_35 为测试专用模块） |
+| ❌ 依赖缺失未编译 | 1（_tkinter 缺少 TK/X11 库） |
 
-### 3. 官方测试结果（425 个测试用例）
+**导入测试详情**：73/78 成功，失败 5 个：
+- `_math`：内建模块（静态链接到 python3.9 本身），不应作为 .so 测试，属于误测
+- `xxlimited_35`：测试专用模块（`Py LIMITED API` 测试），非正式扩展
+- `_tkinter`：缺少 TK/X11 库（平台无 GUI 支持）
+- `_lzma`：运行时缺 `liblzma.so.5`（编译成功，仅运行时缺共享库）
+- `_gdbm`：运行时缺 `libgdbm.so.6`（编译成功，仅运行时缺共享库）
 
-| 状态 | 数量 | 占比 |
-|------|------|------|
-| ✅ 通过 | 314 | 74.9% |
-| ❌ 失败 | 80 | 19.1%（主要是 multiprocessing/PTY/locale） |
-| ⏭️ 跳过 | 25 | 6.0%（GUI/Windows/网络资源） |
-| 💥 崩溃排除 | 6 | 1.4%（invalid syscall 卡住） |
+**特别说明**：
+- ✅ `_ctypes`：导入成功（旧版 STATUS 错误记录为编译失败，实际 libffi 可用）
+- ✅ `_posixsubprocess`：编译成功（9.8MB），旧版 STATUS 暗示缺失，已解决
 
-> ⚠️ 注意：此测试结果基于 11 补丁版本（补丁 0001-0011）。应用 0012-0020 后需重新运行测试以更新数据。
+### 3. SSL 支持（2026-03-26 验证）
 
-**核心结论**：数据结构、字符串编码、文件 I/O、数据库、加密哈希、网络协议等核心功能全部正常。
+| 项目 | 状态 |
+|------|------|
+| `_ssl` 编译+导入 | ✅ 成功 |
+| `_hashlib` 编译+导入 | ✅ 成功 |
+| OpenSSL 版本 | 1.1.1w |
+| 编译参数 | `--with-openssl=$HOME/usr/local` |
 
-### 4. 子进程问题根因分析（3/20 调试会话）
+> ⚠️ `pkg-config --cflags openssl` 返回空是 pkg-config 0.29.2 的已知 bug，通过 `--with-openssl` 手动指定路径绕过。
+
+### 4. pip（2026-03-26 验证）
+
+| 项目 | 状态 |
+|------|------|
+| pip 版本 | 20.2.3（随 Python 3.9.0 内置） |
+| 可用性 | ✅ 正常 |
+| 已安装包 | pytest 8.4.2 |
+| 可升级版本 | 26.0.1（尚未执行） |
+
+### 5. 子进程问题根因分析（2026-03-26 验证）
 
 通过 C 级系统调用测试框架（7 个测试程序），逐层定位了子进程失败的完整链路：
 
@@ -53,7 +72,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 根因：SELinux 域转换
   Shell (hishell_hap:s0) → exec Python → adhoc_bin:s0 → 无权 exec SDK 工具 (hnp_file)
 
-完整测试矩阵（T0-T6，2026-03-26 更新）：
+完整测试矩阵（T0-T6，全部通过）：
   T0: os.fork()                 ✅ 正常
   T1: Popen+wait (无 PIPE)      ✅ 正常（0020 修复）
   T2: stderr=PIPE               ✅ 正常（0020 修复）
@@ -61,8 +80,6 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
   T4: subprocess.run() capture  ✅ 正常
   T5: error capture             ✅ 正常（0020 修复）
   T6: stdin pipe (双向)         ✅ 正常（0020 修复）
-  T3b: stdout+stderr 双 PIPE   ✅ 两个 pipe 同时工作
-  T-env: env dict + PIPE       ✅ execve env 类型 bug 已修复
 ```
 
 **重要发现**：
@@ -71,7 +88,36 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 - `_python_fork_exec` 的 `os.execve()` 需要 dict 而非 list of bytes（0020 已修复）
 - `_posixsubprocess.c` C 扩展是硬依赖，缺失时整个 subprocess 模块不可用
 
-### 5. 全量遗漏扫描（24 个遗漏点）
+### 6. 官方测试结果
+
+> ⚠️ **注意**：以下结果基于 11 补丁版本（补丁 0001-0011），应用 0012-0020 后**未重新运行**，数据仅供参考。
+
+| 状态 | 数量 | 占比 |
+|------|------|------|
+| ✅ 通过 | 314 | 74.9% |
+| ❌ 失败 | 80 | 19.1%（主要是 multiprocessing/PTY/locale） |
+| ⏭️ 跳过 | 25 | 6.0%（GUI/Windows/网络资源） |
+| 💥 崩溃排除 | 6 | 1.4%（invalid syscall 卡住） |
+
+**核心结论**：数据结构、字符串编码、文件 I/O、数据库、加密哈希、网络协议等核心功能全部正常。
+
+### 7. quicktest（2026-03-26 验证）
+
+| 项目 | 状态 |
+|------|------|
+| `python3.9 -m test_builtin` | ❌ 不可用（PYTHONPATH 优先加载 `$HOME/usr/local` 的 stdlib，不包含 `test/` 目录） |
+| `python3.9 Lib/test/test_builtin.py` | ✅ 通过（103 tests, 0 failures, 4 skipped） |
+| 其他测试模块 | 未重新验证 |
+
+> 🟡 quicktest 依赖 `python -m test` 方式运行，但由于 PYTHONPATH 问题当前不可复现，待调查解决。
+
+### 8. C 扩展包兼容性
+
+> ⚠️ **注意**：之前在 11 补丁版本上的 9 包测试结果（4 compatible / 2 partial / 3 import 失败）**已失效**。所有测试包已从 site-packages 卸载，需要 `pip install` 重新测试。
+>
+> 重测可能受 libpython3.9.so 符号导出问题影响（见「已知问题」），建议 P0 修复后再执行。
+
+### 9. 全量遗漏扫描（24 个遗漏点）
 
 | 优先级 | 数量 | 关键影响 |
 |--------|------|---------|
@@ -79,7 +125,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 | **P1 建议修复** | 11 | 时区处理、sendfile 性能、共享内存路径 |
 | **P2 低优先级** | 8 | mimetypes、uuid、pty（影响有限） |
 
-### 6. 上游合入方案分析
+### 10. 上游合入方案分析
 
 | 类别 | 占比 | 说明 |
 |------|------|------|
@@ -87,7 +133,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 | 需重构后提 PR | ~15% | setup.py SDK root、Makefile HARDLINK |
 | 只能 downstream 维护 | ~15% | _harmonyos_compat.py（monkey-patch 侵入性太强） |
 
-### 7. 文档资产
+### 11. 文档资产
 
 | 文档 | 内容 |
 |------|------|
@@ -103,6 +149,8 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 
 > 2026-03-26 更新：从 11 个补丁扩充至 20 个（新增 0012-0020），work 目录全部变更已补丁化。
 > 0002 和 0008 已用完整的 ref→work diff 替换（包含后续新增的 srcdir 相对路径修复）。
+>
+> ⚠️ **补丁依赖**：补丁 0020 依赖 0016（必须先应用 0016 才能应用 0020）。在干净源码上单独 check 0020 会失败，必须按 patches/series 中的顺序依次应用。
 
 ### 核心构建系统（0001-0011）
 
@@ -139,6 +187,8 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 > - stdout/stderr PIPE 恢复使用 `os.pipe()`（移除 `_ohos_make_temp_pair`）
 > - `_python_fork_exec()` 的 `os.execve()` 使用原始 `env` dict 而非 `env_list`（list of bytes）
 > - 移除 posix_spawn 路径对 `_OHOS_PIPE_WORKAROUND` 的禁用条件
+>
+> **0020 依赖 0016**：0020 是对 0016 的修正补丁，在干净源码上 `git apply 0020.patch` 会失败，必须先应用 0016。patches/series 中的顺序已正确排列。
 
 > **关于 0016 的说明**：这是最大的补丁（22KB，541 行），包含多项关键修复：
 > - `_posixsubprocess` 导入改为可选（ModuleNotFoundError 兼容）
@@ -156,39 +206,39 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 ### Phase 1 已完成（2026-03-26）
 
 **核心成果**：
-- ✅ 20 个补丁全部可干净应用（origin 基准验证）
-- ✅ Python 3.9.0 编译成功（64 个扩展模块）
-- ✅ pip 可用（pip install pytest 成功）
-- ✅ _ssl / _hashlib 编译成功（--with-openssl 绕过 pkg-config bug）
+- ✅ 20 个补丁全部可干净应用（origin 基准验证，须按 series 顺序）
+- ✅ Python 3.9.0 编译成功（72 个 .so 扩展模块，73/78 导入成功）
+- ✅ pip 20.2.3 可用（已安装 pytest 8.4.2）
+- ✅ _ssl / _hashlib 编译+导入成功（OpenSSL 1.1.1w）
+- ✅ _ctypes 编译+导入成功
+- ✅ _posixsubprocess 编译成功（9.8MB）
 - ✅ subprocess T0-T6 全部通过（补丁 0020 修复）
-- ✅ quicktest 失败从 8 降至 3（剩余为鸿蒙平台限制）
-- ✅ 9 个 C 扩展包测试（4 compatible / 2 partial / 3 import 失败）
+- ✅ test_builtin 通过（103 tests, 0 failures, 4 skipped）
 
-**quicktest 结果**（排除 test_time 崩溃）：
-- ✅ 已修复：test_builtin、test_module、test_repl（subprocess pipe 修复）
-- 剩余 3 个平台限制：test_locale（locale 不可用）、test_posix（chown 权限）、test_import（文件权限）
-- 1 个崩溃：test_time（clock_settime bad syscall）
-
-### 编译命令
+**编译命令**（实际使用，无 --enable-shared）：
 
 ```bash
 autoconf
 ./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos \
   --build=aarch64-unknown-linux-ohos --disable-ipv6 \
   ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
-  --with-openssl=$HOME/usr/local --enable-shared
+  --with-openssl=$HOME/usr/local
 make -j$(nproc)
 ```
 
+> 注意：当前编译**未使用 `--enable-shared`**，这是有意为之。添加 `--enable-shared` 是 P0 待解决的下一步任务。
+
 ### 已知问题
 
-| 问题 | 根因 | 状态 | 修复方式 |
-|------|------|------|---------|
-| pkg-config `--cflags` 返回空 | pkg-config 0.29.2 实现缺陷 | ⚠️ 调查中 | --with-openssl 绕过 |
-| libpython3.9.so 不导出动态符号 | 编译时未开启 --enable-shared | 🔴 P0 | 重新编译 Python |
-| greenlet/ujson/numpy import 失败 | 上述符号导出问题 | 🔴 P0 | 同上 |
-| Python/ 目录被 ELF 覆盖 | 之前编译产物误创建 | ✅ 已修复 | 从 ref 恢复 |
-| Python-3.9.0-ref 被补丁污染 | 之前调试修改了 ref | ✅ 已修复 | 从 origin 重建 |
+| 问题 | 根因 | 状态 | 备注 |
+|------|------|------|------|
+| libpython3.9.so 0 个动态符号 | 当前编译未加 `--enable-shared`，work 目录只有 libpython3.9.a | 🔴 P0 待解决 | install 目录的 .so 是旧编译产物（3月22日），`nm -D` 显示 0 个动态符号，扩展模块全部静态链接 libpython |
+| make install 不完整 | 编译后未执行 `make install` | 🟡 待执行 | install 目录没有 `bin/python3.9`，没有 `lib-dynload/`，只有 site-packages/ 和旧的 .so 文件 |
+| pip 版本过旧（20.2.3） | 随 Python 3.9.0 内置 | 🟡 待升级 | 可升级到 26.0.1 |
+| quicktest 不可复现 | `python -m test` 因 PYTHONPATH 问题无法运行 | 🟡 待调查 | 直接运行 `python3.9 Lib/test/test_builtin.py` 可行 |
+| C 扩展包测试结果已失效 | 测试包已卸载，且可能受 libpython 符号影响 | 🟡 待重测 | 建议 P0 修复后重新测试 |
+| 官方测试未重跑 | 425 用例结果基于 11 补丁版本 | 🟡 待重跑 | 应用 0012-0020 后需重新运行 |
+| pkg-config `--cflags` 返回空 | pkg-config 0.29.2 实现缺陷 | ⚠️ 已绕过 | `--with-openssl` 指定路径 |
 
 ### 已覆盖的遗漏点
 
@@ -211,25 +261,42 @@ make -j$(nproc)
 
 ## 四、下一步工作计划
 
-### 🔴 P0：修复 libpython3.9.so 符号导出
+### 🔴 P0：重新编译加 --enable-shared → 修复 libpython3.9.so 符号导出
 
-重新编译 Python 3.9.0（开启 `--enable-shared`），解决 greenlet、ujson、numpy 的 import 失败问题。
-
-预期效果：C 扩展兼容性从 4/9 提升到 7+/9。
+当前 work 编译未使用 `--enable-shared`，导致 libpython3.9.so 不导出动态符号。需要重新编译以支持 C 扩展包的动态链接。
 
 步骤：
-1. `make clean` + 重新 `configure`（添加 `--enable-shared`）
-2. `make -j$(nproc)` + `make install`
-3. 验证 `nm -D libpython3.9.so | grep PyType_IsSubtype`
-4. 重跑 C 扩展四关卡测试
+1. `make clean`
+2. 重新 `configure`，添加 `--enable-shared`：
+   ```bash
+   ./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos \
+     --build=aarch64-unknown-linux-ohos --disable-ipv6 \
+     ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
+     --with-openssl=$HOME/usr/local --enable-shared
+   ```
+3. `make -j$(nproc)`
+4. 验证 `nm -D libpython3.9.so | grep PyType_IsSubtype`
 5. 补丁无需修改（configure 参数变更不影响源码补丁）
 
-### 🟡 P1：完善验证
+### 🔴 P0：执行 make install → 完善 install 目录
 
-1. 升级 pip 20.2.3 → 26.0.1
-2. 基于 --enable-shared 重编译后重跑 quicktest
-3. 重跑 C 扩展四关卡测试
-4. 验证 `python -m venv` 完整流程
+当前 install 目录不完整（缺少 `bin/python3.9`、`lib-dynload/`），需在 P0 重编译后执行 `make install`。
+
+### 🟡 P1：升级 pip
+
+升级 pip 20.2.3 → 26.0.1。
+
+### 🟡 P1：重跑 quicktest
+
+基于 20 补丁版本，先解决 PYTHONPATH 问题，然后重跑全量 quicktest。
+
+### 🟡 P1：重测 C 扩展包
+
+在 libpython3.9.so 符号导出修复后，重新安装并测试 C 扩展包兼容性（之前 9 包测试结果已失效）。
+
+### 🟡 P2：重跑官方测试
+
+基于 20 补丁版本重新运行官方测试套件（当前数据基于 11 补丁版本，已过时）。
 
 ### 🟢 P2：文档收尾
 
@@ -249,8 +316,8 @@ make -j$(nproc)
 
 | 资产 | 路径 | 用途 |
 |------|------|------|
-| 补丁文件 | 本目录 `patches/` | **20 个 .patch 文件**（含 series 索引） |
-| 编译好的 Python 3.9 | `~/python/Python-3.9.0-work/python3.9` | 可直接运行（含 20 补丁 + SSL） |
+| 补丁文件 | 本目录 `patches/` | **20 个 .patch 文件**（含 series 索引，注意 0020 依赖 0016） |
+| 编译好的 Python 3.9 | `~/python/Python-3.9.0-work/python3.9` | 可直接运行（含 20 补丁 + SSL，静态链接 libpython） |
 | 干净源码基准 | `~/python/Python-3.9.0-ref/` | 干净的 Python 3.9.0 原始源码（已验证与 origin 一致） |
 | 原始未修改源码 | `~/python/Python-3.9.0-origin/` | tar 包解压的原始副本 |
 

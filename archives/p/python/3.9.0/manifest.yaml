@@ -1,10 +1,11 @@
 # Python 3.9.0 编译档案
+# 最后更新: 2026-03-26 (Phase 1 修复完成)
 
 software: python
 version: 3.9.0
 status: partial
 build_system: autotools
-compile_date: 2024-03-20
+compile_date: "2026-03-26"
 
 dependencies:
   required: []
@@ -14,7 +15,12 @@ build_config:
   target: aarch64-unknown-linux-ohos
   configure_options:
     - --prefix=$HOME/usr/local
-    - --enable-optimizations
+    - --host=aarch64-unknown-linux-ohos
+    - --build=aarch64-unknown-linux-ohos
+    - --disable-ipv6
+    - ac_cv_file__dev_ptmx=no
+    - ac_cv_file__dev_ptc=no
+    - --with-openssl=$HOME/usr/local
   cflags: "-fPIC -O2"
   env:
     CC: clang
@@ -22,6 +28,7 @@ build_config:
     RANLIB: llvm-ranlib
 
 patches_applied:
+  # === Phase 0: 基础平台适配 (0001-0011) ===
   - file: patches/0001-configure.ac-HarmonyOS-support.patch
     purpose: 添加 HarmonyOS 平台检测和配置（10处修改）
     lines_changed: 200
@@ -66,76 +73,228 @@ patches_applied:
     purpose: venv symlink fallback（HMDFS 不支持 symlink）
     lines_changed: 15
     upstream_feasibility: "可提 PR（需改进 errno 检测使其更通用）"
+  # === Phase 1: 遗漏扫描修复 (0012-0020) ===
+  - file: patches/0012-Include-pythread.h-OHOS-native-thread-id.patch
+    purpose: "P0-1: threading.get_native_id() 修复 — PY_HAVE_THREAD_NATIVE_ID 条件添加 __OHOS__"
+    lines_changed: 4
+    upstream_feasibility: 可直接提 PR（新平台条件补充）
+  - file: patches/0013-Lib-multiprocessing-context.py-OHOS-spawn-default.patch
+    purpose: "P0-2: multiprocessing 默认 spawn 启动 — hasattr(os, 'fork') 动态检测 + ohos 平台默认 spawn"
+    lines_changed: 17
+    upstream_feasibility: 可提 PR（动态检测更通用）
+  - file: patches/0014-Lib-multiprocessing-util.py-OHOS-abstract-sockets.patch
+    purpose: "P1-4: multiprocessing _platform_supports_abstract_sockets() 添加鸿蒙平台识别"
+    lines_changed: 4
+    upstream_feasibility: 可直接提 PR
+  - file: patches/0015-Lib-posixpath.py-OHOS-default-path.patch
+    purpose: "P1-8: defpath 从 '/bin:/usr/bin' 改为 '/system/bin:/bin:/usr/bin:/usr/local/bin'"
+    lines_changed: 4
+    upstream_feasibility: 可直接提 PR
+  - file: patches/0016-Lib-subprocess.py-OHOS-pipe-workaround.patch
+    purpose: "P0-3/P0-5/P1-11 综合修复: (1) _posixsubprocess 可选导入 (2) 纯 Python _python_fork_exec fallback (3) OHOS pipe workaround（临时文件替代管道） (4) _use_posix_spawn() 对非 glibc 系统返回 True (5) shell 路径鸿蒙适配 /system/bin/sh (6) select/selectors 延迟导入（构建阶段兼容） (7) posix_spawn 路径 fd 重定向到 /dev/null"
+    lines_changed: 431
+    upstream_feasibility: 部分可提 PR（_use_posix_spawn musl 分支、shell 路径检测）；pipe workaround 为 downstream 专用
+  - file: patches/0017-Modules-_posixsubprocess.c-OHOS-fd-dir.patch
+    purpose: "P0-3: _posixsubprocess.c FD_DIR 改为 /dev/fd（__OHOS__ 与 FreeBSD/macOS 同路径）"
+    lines_changed: 4
+    upstream_feasibility: 可直接提 PR
+  - file: patches/0018-Modules-posixmodule.c-OHOS-fallocate.patch
+    purpose: "P1-3: posixmodule.c fallocate/sendfile 条件添加 __OHOS__（Linux NULL offset 支持）"
+    lines_changed: 4
+    upstream_feasibility: 可提 PR（需确认鸿蒙 sendfile NULL offset 行为）
+  - file: patches/0019-Modules-timemodule.c-OHOS-musl-timezone.patch
+    purpose: "P1-1: timemodule.c musl 时区处理条件添加 __OHOS__（3处修改，bpo-34672）"
+    lines_changed: 8
+    upstream_feasibility: 可直接提 PR
+  - file: patches/0020-Lib-subprocess.py-fix-pipe-and-execve.patch
+    purpose: "0016 修正: (1) _python_fork_exec 增加 env 参数，修复 os.execve 传参类型错误 (2) 回退管道方案（确认 posix_spawn 路径稳定后移除临时文件 workaround）"
+    lines_changed: 28
+    upstream_feasibility: downstream 维护（与 0016 配套）
 
 compatibility:
   level: medium
   issues:
-    - 扩展模块需要特殊处理（musl BIND_NOW）
+    - 扩展模块需要特殊处理（musl BIND_NOW，静态链接 libpython）
     - 部分 C 加速模块需要手动编译
     - PTY 功能不可用（系统限制）
-    - fork() 系统调用不可用（内核限制）⚠️ 严重
-    - multiprocessing 默认 fork 模式不可用 ⚠️ 严重
-    - subprocess._use_posix_spawn() 未覆盖鸿蒙（pip 安装阻塞）⚠️ 严重
-    - threading.get_native_id() 不可用
-    - /proc/self/fd 可能未挂载
+    - 多进程部分测试受限（POSIX 信号量 sem_unlink、Unix domain socket bind 权限）
+    - 终端交互受限（readline、openpty 权限）
+    - locale 支持不完整
   notes: |
     - 主程序正常工作
-    - 60 个扩展模块中约 40 个可用
+    - 72 个扩展模块（.so）编译成功，73 个成功导入
     - _ssl 模块需要手动链接 libssl
     - subprocess 需要使用管道语法绕过 SELinux（_harmonyos_compat.py 已内置）
-    - pip install 需要 posix_spawn 支持（P1-11，尚未修复）
+    - fork() 在 HarmonyOS 上可用（T0 测试验证），但默认使用 spawn 模式以提高兼容性
+    - posix_spawn 路径已稳定，pip install 正常工作
   syscalls:
-    available: [pthread, dl, socket, mmap, posix_spawn]
-    missing: [openpty, forkpty, fork]
-    workaround: [subprocess_pipe, posix_spawn_recommended]
+    available: [pthread, dl, socket, mmap, posix_spawn, fork]
+    missing: [openpty, forkpty]
+    workaround: [subprocess_pipe]
   upstream_contribution_plan:
     phase1_can_pr:
       - configure.ac 平台识别（新平台支持）
       - Lib/sysconfig.py 平台字符串
       - Lib/distutils/util.py 平台字符串
       - Lib/venv/__init__.py symlink 回退（需 errno 改进）
+      - Include/pythread.h PY_HAVE_THREAD_NATIVE_ID（0012）
+      - Lib/multiprocessing/context.py spawn 默认值（0013）
+      - Lib/multiprocessing/util.py 抽象 socket（0014）
+      - Lib/posixpath.py defpath（0015）
+      - Modules/_posixsubprocess.c FD_DIR（0017）
+      - Modules/timemodule.c musl 时区（0019）
+      - Lib/subprocess.py _use_posix_spawn musl 分支（0016 部分）
+      - Lib/subprocess.py shell 路径鸿蒙检测（0016 部分）
     phase2_needs_refactor:
       - setup.py SDK root（参考 macosx_sdk_root 模式）
       - Makefile.pre.in HARDLINK 检测（移入 configure）
       - configure CAN_RAW 检测（改为通用 autoconf 检测）
+      - Lib/subprocess.py _python_fork_exec（考虑更优雅的 upstream 方案）
     downstream_only:
       - _harmonyos_compat.py（monkey-patch 侵入性太强）
       - site.py compat 导入（配套 downstream 修改）
       - _bootsubprocess.py pipe workaround（SELinux 特有）
+      - Lib/subprocess.py OHOS pipe workaround（0016 部分，待评估是否可移除）
   missing_adaptations:
+    # Phase 1 已修复项
     p0_critical:
       - id: P0-1
         file: "Include/pythread.h, Python/thread_pthread.h"
         issue: "threading.get_native_id() 不工作（__OHOS__ 未在 PY_HAVE_THREAD_NATIVE_ID 条件中）"
         fix: "添加 || defined(__OHOS__)"
+        status: fixed
+        patch: 0012
       - id: P0-2
         file: "Lib/multiprocessing/context.py"
-        issue: "默认使用 fork 启动方式，鸿蒙不支持 fork()"
-        fix: "改为 hasattr(os, 'fork') 动态检测，无 fork 时使用 spawn"
+        issue: "默认使用 fork 启动方式"
+        fix: "改为 hasattr(os, 'fork') 动态检测，无 fork 时使用 spawn；ohos 平台默认 spawn"
+        status: fixed
+        patch: 0013
       - id: P0-3
-        file: "Modules/_posixsubprocess.c"
+        file: "Modules/_posixsubprocess.c, Lib/subprocess.py"
         issue: "/proc/self/fd 依赖，鸿蒙可能不挂载 /proc"
-        fix: "为 __OHOS__ 定义 FD_DIR 或使用 brute force"
+        fix: "C 层: __OHOS__ 定义 FD_DIR 为 /dev/fd；Python 层: _python_fork_exec fallback + /proc/self/fd 优先、brute-force 后备"
+        status: fixed
+        patch: "0017, 0016"
       - id: P0-4
         file: "Python/pylifecycle.c"
         issue: "fd 验证缺少 __OHOS__"
         fix: "添加 || defined(__OHOS__)"
+        status: fixed
       - id: P0-5
         file: "Lib/subprocess.py"
         issue: "/bin/sh 硬编码路径"
         fix: "添加鸿蒙平台检测，使用 /system/bin/sh"
+        status: fixed
+        patch: 0016
     p1_recommended:
       - id: P1-1
         file: "Modules/timemodule.c"
         issue: "musl 时区处理条件缺少 __OHOS__"
-      - id: P1-11
-        file: "Lib/subprocess.py"
-        issue: "_use_posix_spawn() 未覆盖鸿蒙 musl — pip 安装阻塞根因"
-        fix: "为鸿蒙返回 True，走 posix_spawn 路径"
+        fix: "条件改为 (defined(__linux__) || defined(__OHOS__)) && !defined(__GLIBC__)"
+        status: fixed
+        patch: 0019
+      - id: P1-2
+        file: "Lib/shutil.py"
+        issue: "sendfile 优化未覆盖鸿蒙"
+        fix: "_USE_CP_SENDFILE 平台检测添加鸿蒙"
+        status: fixed
+      - id: P1-3
+        file: "Modules/posixmodule.c"
+        issue: "sendfile Linux 特定处理未覆盖鸿蒙"
+        fix: "条件添加 __OHOS__"
+        status: fixed
+        patch: 0018
+      - id: P1-4
+        file: "Lib/multiprocessing/util.py"
+        issue: "抽象 socket 支持检测未覆盖鸿蒙"
+        fix: "平台检测添加 ohos/harmonyos"
+        status: fixed
+        patch: 0014
+      - id: P1-5
+        file: "Lib/multiprocessing/heap.py"
+        issue: "共享内存路径 /dev/shm 可能不可用"
+        fix: "平台检测添加鸿蒙"
+        status: open
+      - id: P1-6
+        file: "Modules/posixmodule.c, Modules/signalmodule.c"
+        issue: "pidfd_open/pidfd_send_signal 未覆盖鸿蒙"
+        fix: "暂不处理，等鸿蒙内核支持后添加"
+        status: deferred
+      - id: P1-7
+        file: "Modules/socketmodule.c"
+        issue: "Linux 抽象 socket 命名空间"
+        fix: "根据鸿蒙内核实际能力决定"
+        status: open
       - id: P1-8
         file: "Lib/posixpath.py"
         issue: "defpath = '/bin:/usr/bin' 不适用鸿蒙"
-      # ... 完整 P1/P2 列表见 reports/MISSING_ADAPTATION_SCAN.md
+        fix: "改为 '/system/bin:/bin:/usr/bin:/usr/local/bin'"
+        status: fixed
+        patch: 0015
+      - id: P1-9
+        file: "Lib/tempfile.py"
+        issue: "硬编码临时目录路径"
+        fix: "添加鸿蒙候选目录 /data/local/tmp"
+        status: open
+      - id: P1-10
+        file: "configure"
+        issue: "lchmod 检测应排除鸿蒙"
+        fix: "MACHDEP != ohos 时跳过"
+        status: open
+      - id: P1-11
+        file: "Lib/subprocess.py"
+        issue: "_use_posix_spawn() 未覆盖鸿蒙 musl — pip 安装阻塞根因"
+        fix: "非 glibc 系统返回 True（musl posix_spawn 实现质量良好）"
+        status: fixed
+        patch: "0016, 0020"
+    # P2 项暂不展开，详见 reports/MISSING_ADAPTATION_SCAN.md
+    # P2 共 8 项: ossaudiodev, mimetypes, uuid, pty, linux headers, getpass, libmpdec, asyncio unix_events
+
+phase1_fix_status:
+  completed_date: "2026-03-26"
+  summary: "Phase 1 遗漏扫描修复完成，共 10 个修复项（P0-1~P0-5, P1-1~P1-4, P1-11）"
+  items:
+    - id: P0-1
+      description: "threading.get_native_id() — __OHOS__ 添加到 PY_HAVE_THREAD_NATIVE_ID"
+      patch: 0012
+      verification: "threading.get_native_id() 正常返回线程 ID"
+    - id: P0-2
+      description: "multiprocessing 默认 spawn — hasattr(os, 'fork') 动态检测"
+      patch: 0013
+      verification: "multiprocessing.Process 默认使用 spawn，fork 可用但非默认"
+    - id: P0-3
+      description: "_posixsubprocess /proc/self/fd → /dev/fd fallback + 纯 Python fork_exec"
+      patch: "0017, 0016"
+      verification: "subprocess.Popen(close_fds=True) 正常工作，/proc 不可用时 fallback 正常"
+    - id: P0-4
+      description: "pylifecycle.c fd 验证添加 __OHOS__"
+      patch: "inline/manual"
+      verification: "Python 启动时标准 IO fd 验证正常"
+    - id: P0-5
+      description: "subprocess shell 路径 → /system/bin/sh"
+      patch: 0016
+      verification: "subprocess.Popen(shell=True) 使用正确的鸿蒙 shell 路径"
+    - id: P1-1
+      description: "musl 时区处理条件添加 __OHOS__"
+      patch: 0019
+      verification: "time.localtime() 时区显示正常"
+    - id: P1-2
+      description: "shutil sendfile 优化覆盖鸿蒙"
+      patch: "inline/manual"
+      verification: "shutil.copyfile() 大文件复制使用 sendfile"
+    - id: P1-3
+      description: "posixmodule.c fallocate/sendfile 条件添加 __OHOS__"
+      patch: 0018
+      verification: "os.sendfile() NULL offset 支持正常"
+    - id: P1-4
+      description: "multiprocessing 抽象 socket 检测覆盖鸿蒙"
+      patch: 0014
+      verification: "_platform_supports_abstract_sockets() 在鸿蒙返回 True"
+    - id: P1-11
+      description: "_use_posix_spawn() 非glibc返回True + pipe workaround + execve 修正"
+      patch: "0016, 0020"
+      verification: "pip install 正常工作，subprocess 走 posix_spawn 路径"
 
 test_results:
   type: official
@@ -148,14 +307,21 @@ test_results:
     核心功能正常，失败测试主要涉及：
     - PTY 相关（系统限制）
     - locale 相关（平台差异）
-    - 部分 multiprocessing 测试（fork 不可用）
+    - 部分 multiprocessing 测试（POSIX 信号量/Unix socket bind 权限）
     - 6 个测试因卡住或崩溃被排除（详见 reports/TEST_REPORT.md）
+  extension_modules:
+    compiled: 72
+    import_success: 73
+    note: "72 个 .so 文件编译成功，73 个扩展模块成功导入（含内建模块 _io, _abc 等）"
   key_features:
     - 基本语法
     - 文件操作
     - 网络编程
     - 多线程
     - SSL/HTTPS（需要 OpenSSL）
+    - pip install（已修复，posix_spawn 路径正常）
+    - multiprocessing spawn 模式（已修复）
+    - threading.get_native_id()（已修复）
   report: reports/TEST_REPORT.md
 
 knowledge_gained:
@@ -164,9 +330,11 @@ knowledge_gained:
   - "HarmonyOS SELinux 域转换需要管道语法绕过"
   - "平台字符串可能包含空格需要处理"
   - "许多 C 加速模块需要 Py_BUILD_CORE_MODULE 宏"
-  - "HarmonyOS 内核不支持 fork()，subprocess 必须走 posix_spawn 路径"
-  - "_use_posix_spawn() 对非 glibc 系统返回 False，需要为鸿蒙添加 musl 分支"
-  - "pipe workaround (cmd | cat) 只解决 SELinux 域转换问题，不解决 fork 不可用问题"
+  - "fork() 在 HarmonyOS 上可用（T0 测试验证），但默认使用 spawn 模式以提高 seccomp 兼容性"
+  - "musl 的 posix_spawn() 实现质量良好，正确报告 exec 错误，可作为 fork+exec 的替代路径"
+  - "pipe workaround (cmd | cat) 解决 SELinux 域转换问题；后续通过 _use_posix_spawn() + _python_fork_exec 替代"
+  - "鸿蒙 pipe 内核 bug 可通过临时文件替代管道方案绕过，但 posix_spawn 路径更稳定（0020 已回退 pipe workaround）"
+  - "鸿蒙 OpenDesk 运行时 fd 0/1/2 可能指向 socket，需要在子进程中重定向到 /dev/null"
 
 references:
   - title: Python 官方网站
@@ -186,6 +354,5 @@ analysis_reports:
     date: "2026-03-25"
 
 maintainer: OpenHarmony PC Developer社区
-last_updated: "2026-03-25"
+last_updated: "2026-03-26"
 tags: [python, interpreter, scripting]
-
