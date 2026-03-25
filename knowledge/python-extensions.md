@@ -774,6 +774,75 @@ echo "失败: $failed"
 
 ---
 
-*文档版本: 1.2*
+*文档版本: 1.3*
 *最后更新: 2026-03-25*
-*更新内容: 新增 §3.5 venv symlink 修复、§3.6 LIBDIR 配置不一致分析*
+*更新内容: 新增 §8 subprocess 深度调试（Pipe 数据丢失、fork_exec fallback、C 级测试结论）*
+
+---
+
+## 8. Subprocess 鸿蒙深度调试
+
+> 完整报告：`archives/p/python/3.9.0/HARMONYOS_SUBPROCESS_GUIDE.md`
+
+### 8.1 鸿蒙子进程创建原语能力边界
+
+C 级测试确认鸿蒙的进程创建能力：
+
+| 原语 | SDK 工具 (clang) | 系统命令 (/bin/ls) |
+|------|:---:|:---:|
+| `fork() + execve()` | ❌ SELinux 拦截 | ⚠️ 受权限影响 |
+| `posix_spawnp()` | ❌ SELinux 拦截 | ✅ 正常 |
+| `system("cmd \| cat")` | ✅ Pipe 绕过 | ✅ 正常 |
+
+**关键结论**：
+- `fork()` 和 `posix_spawnp()` 在鸿蒙上都**存在**，但执行 SDK 工具时被 SELinux 静默拦截
+- **Pipe 绕过法（`cmd | cat`）是唯一可靠的 SDK 工具执行方式**
+- 测试时**必须用 SDK 工具作为锚点**（如 clang），不能用 echo/ls 等简单命令
+
+### 8.2 Pipe 数据丢失问题
+
+**症状**：`posix_spawnp()` + pipe 重定向 stderr 时，子进程输出完全丢失（0 bytes）。
+
+**原因**：Python 进程的 fd 0/1/2 在鸿蒙上是 socket（非终端/文件），子进程继承后 pipe 重定向行为异常。
+
+**解决方案**：用临时文件替代 pipe：
+
+```python
+import tempfile
+# 当请求 PIPE 时，创建临时文件
+if capture_stderr:
+    tmp = tempfile.NamedTemporaryFile(delete=False)
+    stderr_file = tmp  # 传给 Popen
+    # 子进程结束后从 tmp.name 读取内容
+```
+
+### 8.3 fd 0/1/2 保护
+
+Python 进程在鸿蒙上的 fd 0 是 socket，子进程继承后可能导致 I/O 混乱。需要在 fork 后立即保护：
+
+```python
+devnull = os.open(os.devnull, os.O_RDWR)
+os.dup2(devnull, 0)  # stdin -> /dev/null
+```
+
+### 8.4 纯 Python fork_exec Fallback
+
+Python 3.9 的 `subprocess.py` 对 `_posixsubprocess` C 扩展有硬依赖。当 C 扩展不可用时，整个 subprocess 模块不可用。
+
+**方案**：参考 Python 3.12+ 做法，在 `subprocess.py` 中实现纯 Python 的 `_python_fork_exec()`。
+
+### 8.5 communicate() Bug
+
+`communicate()` 的简单路径用 `elif` 链，只能处理一个 pipe。双 pipe 时只读一个。需检查 `pipe_count` 后决定走简单路径还是复杂路径。
+
+### 8.6 测试资产
+
+位于 `/storage/Users/currentUser/python/subprocess-tests/`：
+
+| 文件 | 用途 |
+|------|------|
+| `test_syscalls.c` | 系统调用全面测试（fork, vfork, posix_spawn, pipe） |
+| `test_fork_clang.c` | fork+exec 用 clang 编译测试 |
+| `test_spawn*.c` | posix_spawn 各种配置测试 |
+| `test_subprocess_demo.py` | Python subprocess 全面测试 |
+| `test_multiprocessing.py` | multiprocessing 验证 |

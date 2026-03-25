@@ -5,6 +5,213 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，
 并且本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [v2.1.0] - 2026-03-23
+
+### 新增功能
+
+#### 软件档案
+
+新增 **9** 个软件的编译档案：
+
+##### F
+
+- **file 5.45**
+  - 状态：success
+  - 构建系统：autotools
+  - 兼容性：high
+  - 补丁：0 个（无）
+  - 说明：文件类型识别工具。使用静态链接（`--enable-static --disable-shared LDFLAGS=-static`）解决鸿蒙 SELinux 软链接限制，72 项测试全部通过。
+
+##### H
+
+- **htop 3.4.1**
+  - 状态：partial
+  - 构建系统：autotools
+  - 兼容性：medium
+  - 补丁：3 个
+    - `0001-config-guess-harmonyos.patch` — config.guess HarmonyOS 平台识别
+    - `0002-config-sub-harmonyos.patch` — config.sub 三元组验证
+    - `0003-fix-include-path.patch` — 修复 `Panel.h` 头文件包含路径
+  - 备注：
+    - 普通用户无法运行，SELinux 策略限制 `/proc` 文件系统访问
+    - 需要 `sudo` 权限运行
+    - 使用静态链接 ncursesw 编译
+
+##### J
+
+- **jq 1.7.1**
+  - 状态：success
+  - 构建系统：autotools
+  - 兼容性：high
+  - 补丁：2 个
+    - `0001-config-guess-harmonyos-support.patch` — config.guess 平台识别
+    - `0002-config-sub-harmonyos-support.patch` — config.sub 三元组支持
+  - 测试：5/6 通过（shtest 因 BusyBox `script -e` 不兼容失败，非 jq 问题）
+
+##### L
+
+- **libpipeline 1.5.8**
+  - 状态：success
+  - 构建系统：autotools
+  - 兼容性：high
+  - 补丁：2 个
+    - `0001-config.guess-add-HarmonyOS-detection.patch` — config.guess 添加 HarmonyOS 检测
+    - `0002-config.sub-add-linux-ohos-support.patch` — config.sub 添加 ohos 支持
+  - 说明：man-db 的核心依赖库
+
+##### M
+
+- **man-db 2.13.1**
+  - 状态：success
+  - 构建系统：autotools
+  - 兼容性：medium
+  - 补丁：5 个
+    - `0001-config.sub-add-linux-ohos-support.patch` — config.sub 添加 ohos 支持
+    - `0002-security.c-handle-missing-man-owner.patch` — 处理缺失 man 用户
+    - `0003-encodings.c-replace-locale-device-with-utf8.patch` — 适配 groff 1.23.0
+    - `0004-man.c-replace-locale-roff-device-with-utf8.patch` — 适配 groff 1.23.0
+    - `(构建时修改)` config.h 中 `#undef MAN_OWNER` — 彻底禁用权限代码
+  - 依赖：gdbm、bzip2、libpipeline、groff（运行时）
+  - 说明：man page 显示功能正常（带 ANSI 颜色）。apropos/whatis 因 musl iconv 不支持 `//IGNORE` 后缀而不可用。VPATH 构建策略避免 autotools 重生成。
+
+##### P
+
+- **patch 2.7.6**
+  - 状态：partial
+  - 构建系统：autotools
+  - 兼容性：medium
+  - 补丁：1 个
+    - `0001-config-guess-harmonyos-support.patch` — config.guess 平台识别
+  - 测试：32/44 通过，失败项为环境兼容性问题（umask、软链接限制），核心补丁功能正常。
+
+##### R
+
+- **rsync 3.3.0**
+  - 状态：partial
+  - 构建系统：autotools
+  - 兼容性：medium
+  - 补丁：2 个
+    - `0001-config-guess-harmonyos.patch` — config.guess 平台识别
+    - `0002-config-sub-harmonyos.patch` — config.sub 三元组支持
+  - 测试：官方测试套件 44 项全部失败（SELinux 软链接限制），但手动验证基本同步、增量传输、`--delete` 均通过。
+  - 说明：核心文件同步功能正常，测试套件因 SELinux 策略无法创建软链接而失败。
+
+##### S
+
+- **strace 6.19**
+  - 状态：partial
+  - 构建系统：autotools
+  - 兼容性：low
+  - 补丁：3 个
+    - `0001-add-harmonyos-support-to-config.sub.patch` — config.sub 添加 ohos 支持
+    - `0002-fix-unused-function-warning-in-sigreturn.patch` — 修复 clang `-Werror` 编译错误
+    - `0003-add-harmonyos-support-to-config.guess.patch` — config.guess 添加 HarmonyOS 识别
+  - 说明：编译产物正确，但 ptrace 系统调用被 SELinux `adhoc_bin` 域完全禁止，核心追踪功能不可用。需 `--disable-mpers` 禁用多架构支持。
+
+##### W
+
+- **wget 1.19.1**
+  - 状态：partial
+  - 构建系统：autotools
+  - 兼容性：medium
+  - 补丁：2 个
+    - `0001-config-guess-harmonyos.patch` — config.guess 平台识别
+    - `0002-config-sub-harmonyos.patch` — config.sub 三元组支持
+  - 测试：34/39 通过（87%），失败项为 HTTPS 证书固定测试。
+  - 依赖：openssl、zlib、pkg-config
+  - 说明：已替换系统 toybox wget，功能更完整。HTTPS 下载需配合 `--no-check-certificate` 使用（缺少系统 CA 证书）。
+
+#### 知识文档
+
+新增 **8** 篇知识文档（总计 19 篇）：
+
+- `knowledge/filesystem-analysis.md` — 鸿蒙文件系统架构与差异分析
+  - 实机探索 `/proc/mounts` 全量分析
+  - tmpfs/proc/sysfs/devpts 挂载差异
+  - SELinux 上下文与标签系统
+
+- `knowledge/filesystem-impact-assessment.md` — 文件系统差异用户场景影响评估
+  - 用户画像 × 差异维度 × 场景走查
+  - 影响评估矩阵
+
+- `knowledge/musl-glibc-developer-impact.md` — musl 与 glibc 差异对开发者的全面影响分析
+  - 从 glibc/Linux 迁移到 OpenHarmony musl 的完整指导
+
+- `knowledge/musl-glibc-full-comparison-gnu-linux.md` — musl vs glibc GNU 扩展 + Linux 特有接口全量对比表
+  - GNU 特有函数、Linux syscalls 差异详表
+
+- `knowledge/musl-glibc-full-comparison-iso-posix.md` — musl vs glibc ISO C + POSIX 全量接口对比表
+  - 标准 C / POSIX 接口兼容性逐项对比
+
+- `knowledge/packaging.md` — HarmonyOS 可移植打包指南
+  - RPATH 处理、ELF 签名、软链接限制应对
+
+- `knowledge/ptrace-alternatives.md` — 鸿蒙系统 ptrace 限制及替代方案
+  - SELinux adhoc_bin 域分析
+  - strace/gdb 替代调试策略
+
+- `knowledge/sudo-analysis.md` — 鸿蒙 sudo 深度分析报告
+  - 目标分析法（角色→场景→功能需求→鸿蒙覆盖）
+  - sudo 能力与限制
+
+### 改进优化
+
+#### 错误模式库扩展
+
+- `knowledge/error-patterns.md` 从 26 个错误模式扩展到 **44** 个（E001–E044）
+  - 新增模式覆盖：扩展模块 RPATH、HiShell 兼容性、可移植包 PYTHONHOME 等场景
+
+#### Python 3.9.0 增强报告
+
+- 新增 **4** 份深度分析报告：
+  - `UPSTREAM_ADAPTATION_ANALYSIS.md` — 上游适配分析报告
+  - `PATCH_DETAIL_ANALYSIS.md` — 移植补丁详细分析报告
+  - `MISSING_ADAPTATION_SCAN.md` — 适配遗漏扫描报告
+  - `HARMONYOS_SUBPROCESS_GUIDE.md` — HarmonyOS 子进程执行完整指南（v2.0）
+- 补丁从 10 个增加到 **11** 个
+  - 新增 `0011-Lib-venv-HarmonyOS-symlink-fix.patch` — venv 软链接修复
+
+#### gen_summary.py 双 Schema 兼容性
+
+- `scripts/gen_summary.py` 增加 manifest.yaml 双 schema 兼容性支持
+  - Schema A：`patches_applied` / `dependencies` / `compatibility` 字段
+  - Schema B：`build.patches` / `build.dependencies` / `issues` 字段
+  - 自动检测并适配两种格式，确保所有软件档案可被正确索引
+
+#### 元数据修复
+
+- 修复多个 manifest.yaml 元数据腐化问题：
+  - `sed` 档案 manifest 内容被 sed 命令损坏（文件内容意外替换）
+  - `rsync` 档案 manifest 中部分字段名不合规
+  - `patch` 档案 manifest 声明 2 个补丁但实际仅有 1 个补丁文件
+
+### 统计信息
+
+- **知识文件**: 19 个（+8）
+- **软件档案**: 26 个软件，27 个版本（+9）
+- **编译状态**:
+  - 成功 (success): 18 个（+3）
+  - 部分成功 (partial): 8 个（+6）
+  - 失败 (failed): 0 个
+- **构建系统分布**:
+  - autotools: 23 个（+8）
+  - cmake: 1 个
+  - makefile: 1 个
+  - custom-perl: 1 个
+  - script: 1 个（+1，help2man 归类调整）
+
+### 升级指南
+
+如果您从 v2.0.0 升级到 v2.1.0：
+
+1. **新增软件档案**: 9 个新软件编译档案可用（file、htop、jq、libpipeline、man-db、patch、rsync、strace、wget）
+2. **知识文档扩展**: 8 篇新知识文档，覆盖文件系统、musl/glibc 对比、ptrace 替代方案、sudo 分析等主题
+3. **错误模式库**: 从 26 个扩展到 44 个，覆盖更多 HarmonyOS 特有问题
+4. **Python 3.9.0**: 新增 1 个补丁（venv 软链接修复）和 4 份分析报告
+5. **gen_summary.py**: 已支持双 schema 兼容，可正确处理所有 manifest 格式
+
+---
+
 ## [v2.0.0] - 2024-03-22
 
 ### 重大变更
@@ -297,25 +504,19 @@
 
 ### 版本对比
 
-| 特性 | v1.x | v2.0.0 |
-|------|------|--------|
-| 知识库结构 | 单文件 | 模块化 |
-| 模板系统 | 无 | 5 个模板 |
-| 辅助脚本 | 无 | 4 个脚本 |
-| 软件档案 | 基础 | 17 个软件 |
-| 文档完善度 | 基础 | 完整 |
-| 贡献指南 | 无 | 完整 |
+| 特性 | v1.x | v2.0.0 | v2.1.0 |
+|------|------|--------|--------|
+| 知识库结构 | 单文件 | 模块化（11 篇） | 模块化（19 篇） |
+| 模板系统 | 无 | 5 个模板 | 5 个模板 |
+| 辅助脚本 | 无 | 4 个脚本 | 4 个脚本 |
+| 软件档案 | 基础 | 17 个软件 | 26 个软件 |
+| 错误模式 | — | 26 个 | 44 个 |
+| 文档完善度 | 基础 | 完整 | 全面 |
+| 贡献指南 | 无 | 完整 | 完整 |
 
 ---
 
 ## 未来规划
-
-### v2.1.0 (计划中)
-
-- [ ] 新增更多软件档案
-- [ ] 完善测试报告模板
-- [ ] 添加自动化测试脚本
-- [ ] 优化补丁生成工具
 
 ### v2.2.0 (计划中)
 

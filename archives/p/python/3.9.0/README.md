@@ -1009,18 +1009,180 @@ Python 的构建系统是三层架构，任何类似复杂度的软件都可能�
 
 ---
 
-## 九、版本历史
+## 九、全量构建验证成果（2026-03-25 第二轮）
+
+### 9.1 扩展模块编译
+
+从源码 tar 包全量构建，**64 个扩展模块编译链接成功**（修复 libintl_gettext 问题后），30/30 模块加载成功。
+
+| 类别 | 数量 | 说明 |
+|------|------|------|
+| ✅ 编译+导入成功 | 30 | 包括 math, json, pickle, xml, unicodedata 等 |
+| ⚠️ 编译成功但导入失败 | 2 | _gdbm, _lzma（运行时库路径问题） |
+| ❌ 编译失败 | 1 | _ctypes（ffi 头文件/库找不到） |
+| ⏭️ 依赖缺失未编译 | 10 | _ssl, _hashlib, _sqlite3, _tkinter 等 |
+| ✅ multiprocessing 模块 | 1 | spawn 方式可用，Pool 测试通过 |
+
+### 9.2 关键新发现
+
+> 完整分析见 [HARMONYOS_SUBPROCESS_GUIDE.md](../HARMONYOS_SUBPROCESS_GUIDE.md)
+
+#### 发现 1：鸿蒙 Pipe 数据丢失
+
+**症状**：`posix_spawnp()` + pipe 重定向 stderr 时，子进程输出完全丢失（0 bytes）。
+
+**原因**：Python 进程的 fd 0/1/2 在鸿蒙上是 socket（非终端/文件），子进程继承后 pipe 重定向行为异常。
+
+**方案**：用临时文件替代 pipe — 在 `Popen._get_handles()` 层面实现，调用方接口不变。
+
+#### 发现 2：fork_exec 纯 Python Fallback
+
+Python 3.9 的 `subprocess.py` 对 `_posixsubprocess` C 扩展有硬依赖，缺失时整个模块不可用。
+
+**方案**：参考 Python 3.12+ 做法，实现纯 Python 的 `_python_fork_exec()`，并在鸿蒙上启用 `_USE_POSIX_SPAWN = True`。
+
+#### 发现 3：C 级系统调用测试结论
+
+| 原语 | SDK 工具 | 系统命令 |
+|------|:---:|:---:|
+| `fork() + execve()` | ❌ SELinux 拦截 | ⚠️ 受权限影响 |
+| `posix_spawnp()` | ❌ SELinux 拦截 | ✅ 正常 |
+| `system("cmd \| cat")` | ✅ **Pipe 绕过** | ✅ 正常 |
+
+**结论**：Pipe 绕过法（`cmd | cat`）**仍然是唯一可靠的 SDK 工具执行方式**。
+
+#### 发现 4：communicate() elif 链 Bug
+
+`communicate()` 的简单路径用 `elif` 链只能处理一个 pipe，双 pipe 时只读一个。需检查 `pipe_count` 后决定走简单路径还是复杂路径。
+
+#### 发现 5：libintl_gettext 修复
+
+修复 libintl/gettext 相关问题后，CJK 编解码模块全部编译成功（_multibytecodec, _codecs_kr/jp/cn/tw/hk/iso2022）。
+
+---
+
+## 十、Python 3.12 适配路线图
+
+### 10.1 有利因素
+
+Python 3.12+ 已做了多项改进，有利于鸿蒙适配：
+
+| 3.12+ 变化 | 对鸿蒙的影响 | 备注 |
+|-----------|:---:|------|
+| `_posixsubprocess.c` 内联到 subprocess.py | ✅ 大利好 | 不再需要编译 C 扩展 |
+| 更完善的 `posix_spawn` 路径 | ✅ | 可直接启用 |
+| 移除 `distutils` | ✅ | 减少维护负担 |
+| `venv` symlink 处理改进 | ⚠️ | 需确认是否覆盖 HMDFS |
+| `__OHOS__` 可能已在 configure.ac 中 | ⚠️ | 需检查上游 |
+
+### 10.2 仍需处理的问题
+
+| 问题 | 3.9 现状 | 3.12 预期 | 处理建议 |
+|------|:---:|:---:|------|
+| SELinux 限制 SDK 工具 | pipe 绕过 | 仍需 | 根本性限制，需 SELinux 策略调整 |
+| Pipe 数据丢失 | 临时文件替代 | 可能已修复 | 需验证 |
+| fd 0/1/2 socket | /dev/null 保护 | 仍需 | 与 Python 版本无关 |
+| multiprocessing fork 默认 | 手动改 spawn | 可能上游已修复 | 检查 3.12 源码 |
+| /proc/self/fd 依赖 | /dev/fd fallback | 可能上游已修复 | 检查 3.12 源码 |
+| threading.get_native_id | 需加 `__OHOS__` | 仍需 | 除非上游已加 |
+
+### 10.3 建议的适配步骤
+
+```
+Step 1: 检查 Python 3.12 上游 configure.ac 对 HarmonyOS 的支持情况
+Step 2: 尝试原生编译 Python 3.12（不应用任何 patch）
+Step 3: 复用 subprocess-tests/ 中的 C 级测试验证系统调用能力
+Step 4: 重点测试 subprocess 和 multiprocessing 模块
+Step 5: 对比 3.9 的 patch 列表，识别哪些在 3.12 中已不需要
+Step 6: 仅应用必要的鸿蒙适配 patch
+Step 7: 运行完整测试套件
+```
+
+### 10.4 可复用的测试资产
+
+| 资产 | 位置 | 用途 |
+|------|------|------|
+| 系统调用测试 | `subprocess-tests/test_syscalls.c` | 验证鸿蒙内核能力 |
+| fork 测试 | `subprocess-tests/test_fork_clang.c` | 用 clang 作为锚点 |
+| posix_spawn 测试 | `subprocess-tests/test_spawn*.c` | 测试 spawn 路径 |
+| pipe 测试 | `subprocess-tests/test_pipe_simple.c` | pipe 基本功能 |
+| Python subprocess 测试 | `subprocess-tests/test_subprocess_demo.py` | Python 层全面测试 |
+| multiprocessing 测试 | `subprocess-tests/test_multiprocessing.py` | multiprocessing 验证 |
+
+> **注意**：测试代码位于 `/storage/Users/currentUser/python/subprocess-tests/`，可直接复用于 Python 3.12。
+
+---
+
+## 十一、关键踩坑总结
+
+### 11.1 构建阶段踩坑
+
+| # | 踩坑 | 症状 | 解决 |
+|---|------|------|------|
+| 1 | echo 不能作为 subprocess 测试锚点 | echo 通过但 clang 失败 | **用 SDK 工具测试** |
+| 2 | /tmp 只读 | configure 失败 | `export TMPDIR=$HOME/tmp` |
+| 3 | libintl_gettext 缺失 | CJK 模块编译失败 | 安装 gettext 或修复 configure |
+| 4 | ncurses 共享库冲突 | zsh 崩溃 | 用 `--without-shared` 编译静态库 |
+| 5 | OpenSSL ARM64 asm bug | BAD_SIGNATURE | `no-asm` 编译 OpenSSL |
+
+### 11.2 运行阶段踩坑
+
+| # | 踩坑 | 症状 | 解决 |
+|---|------|------|------|
+| 6 | pipe 数据丢失 | 子进程输出 0 bytes | 临时文件替代 |
+| 7 | fd 0/1/2 是 socket | 子进程 I/O 混乱 | dup2 到 /dev/null |
+| 8 | communicate() elif 链 | 双 pipe 只读一个 | 检查 pipe_count |
+| 9 | cleanup 关 read_fd | close 时报错 | cleanup 只删文件 |
+| 10 | _posixsubprocess 硬依赖 | 缺失时模块不可用 | 纯 Python fallback |
+| 11 | HMDFS 不支持 symlink | venv 创建失败 | try/except + makedirs 回退 |
+
+### 11.3 通用复用经验
+
+以下经验**不限于 Python**，适用于任何在鸿蒙上需要子进程交互的软件：
+
+1. **Pipe 绕过 SELinux**：`system("cmd | cat")` 是当前唯一可靠的方案
+2. **临时文件替代 pipe**：当 pipe 数据丢失时，用临时文件 + dup2
+3. **fd 0/1/2 保护**：fork 后立即 dup2 到 /dev/null
+4. **硬链接不支持**：用 `cp -p` 替代 `ln`
+5. **symlink 可能不支持**：try/except OSError + makedirs 回退
+6. **/tmp 只读**：用 `$HOME/tmp` 或 `$TMPDIR`
+7. **musl BIND_NOW**：扩展模块/插件必须链接主程序库
+8. **平台字符串含空格**：`uname -r` 返回 "HongMeng Kernel 1.11.0"
+
+---
+
+## 十二、相关文件索引
+
+| 文件 | 用途 | 新增 |
+|------|------|:---:|
+| `README.md` | 本文件 — 主文档 | - |
+| `patches/series` | 补丁序列 | - |
+| `patches/0001~0011` | 11 个鸿蒙适配补丁 | - |
+| `reports/PATCH_DETAIL_ANALYSIS.md` | 补丁逐文件分析 | - |
+| `reports/UPSTREAM_ADAPTATION_ANALYSIS.md` | 上游合入方案 + 遗漏扫描 | - |
+| `reports/MISSING_ADAPTATION_SCAN.md` | 全量遗漏扫描（P0~P2） | - |
+| `reports/TEST_REPORT.md` | 测试报告 | - |
+| `HARMONYOS_SUBPROCESS_GUIDE.md` | **子进程执行完整指南**（含 C 级测试、Pipe 数据丢失、fork_exec fallback） | ✅ v2.0 合并 |
+| `HARMONYOS_SUBPROCESS_GUIDE.md` | SELinux 子进程限制原理 | - |
+| `tests/test_subprocess_compat.py` | 兼容层测试 | - |
+| `scripts/package_python.sh` | 打包脚本 | - |
+
+---
+
+## 十三、版本历史
 
 | 日期 | 版本 | 说明 |
 |------|------|------|
 | 2026-03-21 | 1.0 | 初始版本 |
 | 2026-03-21 | 2.0 | 补丁详解完善，添加举一反三 |
 | 2026-03-21 | 3.0 | 添加依赖关系、技术要点总结章节 |
-| 2026-03-25 | 3.1 | 新增补丁 0011（venv symlink fallback）、统一测试数据（425/314/80/25/6） |
+| 2026-03-25 | 3.1 | 新增补丁 0011（venv symlink fallback）、统一测试数据 |
+| 2026-03-25 | 3.2 | 全量适配分析：上游合入方案、遗漏扫描、pip 阻塞根因 |
+| 2026-03-25 | 4.0 | **全量构建验证**：64 扩展模块编译、C 级 subprocess 调试、Pipe 数据丢失发现、fork_exec fallback、Python 3.12 路线图、踩坑总结 |
 
 ---
 
-*维护者: OpenHarmony 社区*��容层测试 |
+��容层测试 |
 | `package_python.sh` | 打包脚本 |
 | `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程问题深入分析 |
 | `TEST_REPORT.md` | 测试详情 |

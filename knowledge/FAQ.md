@@ -403,7 +403,7 @@ grep -n "HarmonyOS\|__OHOS__" config.guess
 | environment.md | 系统环境特性 |
 | build-systems.md | 构建系统识别 |
 | troubleshooting.md | 问题排查流程 |
-| error-patterns.md | 26种错误模式 |
+| error-patterns.md | 44种错误模式 |
 | musl-compat.md | musl/glibc 差异 |
 | python-extensions.md | Python 扩展编译 |
 | autotools-patterns.md | Autotools 适配 |
@@ -412,5 +412,5 @@ grep -n "HarmonyOS\|__OHOS__" config.guess
 
 ---
 
-*文档版本: 1.0*  
-*最后更新: 2024-03-22*
+*文档版本: 1.1*  
+*最后更新: 2026-03-26*

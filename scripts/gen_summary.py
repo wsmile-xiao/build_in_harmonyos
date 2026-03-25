@@ -70,6 +70,32 @@ def count_patches(patches):
     return len(patches)
 
 
+def count_actual_patches(software, version):
+    """统计实际补丁文件数量（作为 fallback）"""
+    first_char = software[0]
+    patches_dir = os.path.join(
+        ARCHIVES_DIR, first_char, software, version, "patches"
+    )
+    if not os.path.isdir(patches_dir):
+        return 0
+    return len([f for f in os.listdir(patches_dir) if f.endswith(".patch")])
+
+
+def get_patch_count(manifest, software, version):
+    """获取补丁数量：优先 manifest 声明，fallback 到实际文件计数"""
+    # Schema A: patches_applied
+    patches_a = manifest.get("patches_applied", [])
+    if patches_a:
+        return len(patches_a)
+    # Schema B: build.patches
+    build = manifest.get("build", {}) or {}
+    patches_b = build.get("patches", [])
+    if patches_b:
+        return len(patches_b)
+    # Fallback: count actual .patch files
+    return count_actual_patches(software, version)
+
+
 def generate_summary():
     """生成完整的 SUMMARY.md"""
     index = load_index()
@@ -129,22 +155,45 @@ def generate_summary():
         patch_count = "-"
         dep_info = "-"
         if manifest:
+            # Schema A: compatibility / Schema B: issues
             compat = manifest.get("compatibility", {}) or {}
-            compat_level = COMPAT_LEVEL.get(compat.get("level", ""), "")
-            patch_count = count_patches(manifest.get("patches_applied", []))
+            if not compat:
+                issues = manifest.get("issues", []) or []
+                if issues:
+                    compat_level = "🟡 中"
+                else:
+                    compat_level = "未评估"
+            else:
+                compat_level = COMPAT_LEVEL.get(compat.get("level", ""), "")
+            patch_count = get_patch_count(manifest, name, latest_version)
+            # Schema A: dependencies: {required: [], optional: []}
+            # Schema B: build.dependencies: [item1, item2, ...]
             deps = manifest.get("dependencies", {}) or {}
-            required = deps.get("required", []) or []
-            optional = deps.get("optional", []) or []
-            dep_parts = []
-            if required:
-                dep_parts.append(",".join(required))
-            if optional:
-                opt_str = ",".join(optional[:3])
-                if len(optional) > 3:
-                    opt_str += "..."
-                dep_parts.append(opt_str)
-            if dep_parts:
-                dep_info = "；".join(dep_parts)
+            if isinstance(deps, list):
+                dep_info = ",".join(str(d) for d in deps[:5])
+                if len(deps) > 5:
+                    dep_info += "..."
+            elif deps:
+                build_b = manifest.get("build", {}) or {}
+                deps_b = build_b.get("dependencies", []) or []
+                if isinstance(deps_b, list):
+                    dep_info = ",".join(str(d) for d in deps_b[:5])
+                    if len(deps_b) > 5:
+                        dep_info += "..."
+                else:
+                    required = deps.get("required", []) or []
+                    optional = deps.get("optional", []) or []
+                    dep_parts = []
+                    if required:
+                        dep_parts.append(",".join(required))
+                    if optional:
+                        opt_str = ",".join(optional[:3])
+                        if len(optional) > 3:
+                            opt_str += "..."
+                        dep_parts.append(opt_str)
+                    dep_info = "；".join(dep_parts) if dep_parts else "-"
+            else:
+                dep_info = "-"
 
         # 详情链接
         detail_link = f"[📄]({path}/{latest_version}/)"
