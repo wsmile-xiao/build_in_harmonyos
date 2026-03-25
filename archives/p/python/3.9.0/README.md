@@ -1015,8 +1015,6 @@ Python 的构建系统是三层架构，任何类似复杂度的软件都可能�
 |------|------|
 | `patches/` | 补丁文件（0001~0020） |
 | `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程执行完整指南 |
-| `tests/test_subprocess_compat.py` | 兼容层测试 |
-| `scripts/package_python.sh` | 打包脚本 |
 
 ---
 
@@ -1112,16 +1110,16 @@ Python 3.12+ 已做了多项改进，有利于鸿蒙适配：
 | `venv` symlink 处理改进 | ⚠️ | 需确认是否覆盖 HMDFS |
 | `__OHOS__` 可能已在 configure.ac 中 | ⚠️ | 需检查上游 |
 
-### 10.2 仍需处理的问题
+### 10.2 仍需处理的问题（3.12 适配时）
 
 | 问题 | 3.9 现状 | 3.12 预期 | 处理建议 |
 |------|:---:|:---:|------|
-| SELinux 限制 SDK 工具 | pipe 绕过 | 仍需 | 根本性限制，需 SELinux 策略调整 |
-| Pipe 数据丢失 | ~~临时文件替代~~ | ✅ 补丁 0020 已修复（os.pipe + posix_spawn） | 需验证 |
-| fd 0/1/2 socket | /dev/null 保护 | 仍需 | 与 Python 版本无关 |
-| multiprocessing fork 默认 | 手动改 spawn | 可能上游已修复 | 检查 3.12 源码 |
-| /proc/self/fd 依赖 | /dev/fd fallback | 可能上游已修复 | 检查 3.12 源码 |
-| threading.get_native_id | 需加 `__OHOS__` | 仍需 | 除非上游已加 |
+| SELinux 限制 SDK 工具 | ✅ pipe 绕过 | 仍需 | 根本性限制，需 SELinux 策略调整 |
+| Pipe 数据丢失 | ✅ 补丁 0020 已修复 | 已解决 | — |
+| fd 0/1/2 socket | ✅ 补丁 0016 已实现 | 已解决 | — |
+| multiprocessing fork 默认 | ✅ 补丁 0013 已实现 | 可能上游已修复 | 检查 3.12 源码 |
+| /proc/self/fd 依赖 | ✅ 补丁 0017 已实现 | 已解决 | — |
+| threading.get_native_id | ✅ 补丁 0012 已实现 | 可能上游已修复 | 检查 3.12 源码 |
 
 ### 10.3 建议的适配步骤
 
@@ -1195,7 +1193,7 @@ Step 7: 运行完整测试套件
 | `README.md` | 本文件 — 主文档 | - |
 | `patches/series` | 补丁序列 | - |
 | `patches/0001~0020` | 20 个鸿蒙适配补丁 | - |
-| `HARMONYOS_SUBPROCESS_GUIDE.md` | **子进程执行完整指南**（含 C 级测试、Pipe 数据丢失、fork_exec fallback、SELinux 限制原理） | ✅ v2.0 合并 |
+| `HARMONYOS_SUBPROCESS_GUIDE.md` | **子进程执行完整指南**（含 T0-T6 测试矩阵、C 扩展测试、POSIX spawn 分析） | ✅ v3.0 |
 | `reports/UPSTREAM_ADAPTATION_ANALYSIS.md` | 上游合入方案 + 遗漏扫描 | - |
 | `reports/MISSING_ADAPTATION_SCAN.md` | 全量遗漏扫描（P0~P2） | - |
 | `tests/test_subprocess_compat.py` | 兼容层测试 | - |
@@ -1216,5 +1214,8 @@ Step 7: 运行完整测试套件
 | 2026-03-26 | 4.1 | **补丁扩展至 20 个**：补丁 0011-0020（venv/线程/multiprocessing/subprocess/posix/时区全面修复）；configure 完整参数；pipe 问题已修复；临时文件方案废弃；fork() 可用性确认；C 扩展测试结果补充；文档全面审计修正 |
 
 ---
+
+*维护者: OpenHarmony 社区*
+--
 
 *维护者: OpenHarmony 社区*
