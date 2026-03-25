@@ -28,11 +28,11 @@ PATCHDIR=/storage/Users/currentUser/renshang/build_in_harmonyos/archives/p/pytho
 for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020; do
     patch -p1 < $PATCHDIR/${p}*.patch
 done
-autoconf && ./configure --prefix=$HOME/usr/local --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local && make -j$(nproc)
+CPPFLAGS="-I$HOME/usr/local/include" LDFLAGS="-L$HOME/usr/local/lib" autoconf && ./configure --prefix=$HOME/usr/local --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --enable-shared && make -j$(nproc)
 
 # 5. 验证
-export LD_LIBRARY_PATH=.
-./python3.9 -c "import sys; print(sys.platform)"  # 输出: ohos
+export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH
+python3.9 -c "import sys; print(sys.platform)"  # 输出: ohos
 ```
 
 ---
@@ -87,16 +87,17 @@ done
 
 ```bash
 autoconf
-./configure --prefix=$HOME/usr/local --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local --enable-shared
+CPPFLAGS="-I$HOME/usr/local/include" LDFLAGS="-L$HOME/usr/local/lib" ./configure --prefix=$HOME/usr/local --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --enable-shared
 make -j$(nproc)
 ```
 
 ### 2.5 验证
 
 ```bash
-export LD_LIBRARY_PATH=.
-./python3.9 --version
-./python3.9 -c "import sys; print(sys.platform)"  # ohos
+export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH
+python3.9 --version
+python3.9 -c "import sys; print(sys.platform)"  # ohos
+python3.9 -c "import ssl; print(ssl.OPENSSL_VERSION)"  # OpenSSL 1.1.1w
 ```
 
 ### 2.6 安装
@@ -1210,7 +1211,7 @@ Step 7: 运行完整测试套件
 | 2026-03-25 | 3.1 | 新增补丁 0011（venv symlink fallback）、统一测试数据 |
 | 2026-03-25 | 3.2 | 全量适配分析：上游合入方案、遗漏扫描、pip 阻塞根因 |
 | 2026-03-25 | 4.0 | **全量构建验证**：64 扩展模块编译、C 级 subprocess 调试、Pipe 数据丢失发现、fork_exec fallback、Python 3.12 路线图、踩坑总结 |
-| 2026-03-26 | 4.1 | **补丁扩展至 20 个**：补丁 0011-0020（venv/线程/multiprocessing/subprocess/posix/时区全面修复）；configure 完整参数；pipe 问题已修复；临时文件方案废弃；fork() 可用性确认；C 扩展测试结果补充；文档全面审计修正 |
+| 2026-03-26 | 4.2 | **P0 解决**：--enable-shared 重编译成功，libpython3.9.so 导出 1459 个 text 符号，make install 完成（72/72 导入）；移除 --host/--build（不欺骗构建系统）；移除 --with-openssl（pkg-config 已修复）；添加 CPPFLAGS/LDFLAGS（libintl 依赖） |
 
 ---
 

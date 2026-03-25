@@ -28,7 +28,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 
 | 类别 | 数量 |
 |------|------|
-| ✅ 编译+导入成功 | **69 个扩展模块**（72 个 .so 文件中的 69 个） |
+| ✅ 编译+导入成功 | **72/72 扩展模块**（make install 后全部导入成功） |
 | ⚠️ 编译成功但导入失败 | 3（运行时库缺失，编译本身成功） |
 | ⏭️ 未编译（依赖缺失） | 1（_tkinter 缺少 TK/X11 库） |
 
@@ -236,7 +236,9 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 
 **核心成果**：
 - ✅ 20 个补丁全部可干净应用（origin 基准验证，须按 series 顺序）
-- ✅ Python 3.9.0 编译成功（72 个 .so 扩展模块，73/78 导入成功）
+- ✅ Python 3.9.0 编译成功（72 个 .so 扩展模块，make install 后 72/72 导入成功）
+- ✅ libpython3.9.so 正确导出 1459 个 text 符号（PyType_IsSubtype 等 C API 全部可用）
+- ✅ make install 完成，install 目录完整（bin/python3.9、libpython3.9.so、72 个 lib-dynload .so）
 - ✅ pip 20.2.3 可用（已安装 pytest 8.4.2）
 - ✅ _ssl / _hashlib 编译+导入成功（OpenSSL 1.1.1w）
 - ✅ _ctypes 编译+导入成功
@@ -244,17 +246,23 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 - ✅ subprocess T0-T6 全部通过（补丁 0020 修复）
 - ✅ test_builtin 通过（103 tests, 0 failures, 4 skipped）
 
-**编译命令**（实际使用，无 --enable-shared）：
+**编译命令**（2026-03-26 P0 重编译，已启用 --enable-shared）：
 
 ```bash
 autoconf
+CPPFLAGS="-I$HOME/usr/local/include" LDFLAGS="-L$HOME/usr/local/lib" \
 ./configure --prefix=$HOME/usr/local --disable-ipv6 \
   ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
-  --with-openssl=$HOME/usr/local
+  --enable-shared
 make -j$(nproc)
+make install
 ```
 
-> 注意：当前编译**未使用 `--enable-shared`**，这是有意为之。添加 `--enable-shared` 是 P0 待解决的下一步任务。
+> **环境说明**：
+> - `CPPFLAGS`/`LDFLAGS` 指定 libintl 头文件和库路径（gettext 依赖，用于 _locale 模块）
+> - OpenSSL 路径由 pkg-config 自动检测（已修复，无需手动指定）
+> - 不主动指定 `--host`/`--build`，由 config.guess 自动检测
+> - `--disable-ipv6`：HarmonyOS 当前不支持 IPv6
 
 ### 已知问题
 
@@ -289,25 +297,31 @@ make -j$(nproc)
 
 ## 四、下一步工作计划
 
-### 🔴 P0：重新编译加 --enable-shared → 修复 libpython3.9.so 符号导出
+### ✅ ~~P0~~：重新编译加 --enable-shared → ~~修复 libpython3.9.so 符号导出~~ （已完成）
 
-当前 work 编译未使用 `--enable-shared`，导致 libpython3.9.so 不导出动态符号。需要重新编译以支持 C 扩展包的动态链接。
+~~当前 work 编译未使用 `--enable-shared`，导致 libpython3.9.so 不导出动态符号。~~
 
-步骤：
+**已解决**（2026-03-26）：
 1. `make clean`
-2. 重新 `configure`，添加 `--enable-shared`：
+2. 重新 `configure`：
    ```bash
+   CPPFLAGS="-I$HOME/usr/local/include" LDFLAGS="-L$HOME/usr/local/lib" \
    ./configure --prefix=$HOME/usr/local --disable-ipv6 \
      ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
-     --with-openssl=$HOME/usr/local --enable-shared
+     --enable-shared
    ```
-3. `make -j$(nproc)`
-4. 验证 `nm -D libpython3.9.so | grep PyType_IsSubtype`
-5. 补丁无需修改（configure 参数变更不影响源码补丁）
+3. `make -j$(nproc)` → ✅ 成功
+4. `llvm-nm -D libpython3.9.so | grep " T " | wc -l` → **1459** 个导出 text 符号
+5. `make install` → ✅ install 目录完整，72/72 扩展模块导入成功
 
-### 🔴 P0：执行 make install → 完善 install 目录
+**注意**：`CPPFLAGS`/`LDFLAGS` 指向 `$HOME/usr/local` 是因为 libintl（gettext）头文件和库安装在该路径。之前通过 `--with-openssl=$HOME/usr/local` 顺带覆盖了此路径，现在 pkg-config 已修复 OpenSSL 检测，改为显式传递。
 
-当前 install 目录不完整（缺少 `bin/python3.9`、`lib-dynload/`），需在 P0 重编译后执行 `make install`。
+### ✅ ~~P0~~：执行 make install → 完善 install 目录 （已完成）
+
+**已解决**（2026-03-26）：`make install` 执行成功，安装目录完整：
+- `bin/python3.9` + symlinks（python3, idle3, pydoc3, 2to3）
+- `lib/libpython3.9.so` + `libpython3.9.so.1.0`
+- `lib/python3.9/lib-dynload/` — 72 个 .so，全部导入成功
 
 ### 🟡 P1：升级 pip
 
@@ -412,6 +426,10 @@ else:
 rtswith(('ohos', 'harmonyos')):
     unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
 else:
+    unix_shell = '/bin/sh'
+```
+``
+e:
     unix_shell = '/bin/sh'
 ```
 ``
