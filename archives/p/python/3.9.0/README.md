@@ -1,6 +1,6 @@
 # Python 3.9.0 鸿蒙系统适配指南
 
-> **版本**: 4.1 | **更新日期**: 2026-03-26 | **状态**: ✅ 已验证
+> **版本**: 4.2 | **更新日期**: 2026-03-26 | **状态**: ⚠️ 部分验证（详见 STATUS.md）
 
 ## 概述
 
@@ -28,7 +28,7 @@ PATCHDIR=/storage/Users/currentUser/renshang/build_in_harmonyos/archives/p/pytho
 for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020; do
     patch -p1 < $PATCHDIR/${p}*.patch
 done
-autoconf && ./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos --build=aarch64-unknown-linux-ohos --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local --enable-shared && make -j$(nproc)
+autoconf && ./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos --build=aarch64-unknown-linux-ohos --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local && make -j$(nproc)
 
 # 5. 验证
 export LD_LIBRARY_PATH=.
@@ -1074,21 +1074,20 @@ Python 3.9 的 `subprocess.py` 对 `_posixsubprocess` C 扩展有硬依赖，缺
 
 ### 9.3 C 扩展包测试结果
 
-基于 20 补丁版本（v4.1）对常用 C 扩展包进行测试：
+> ⚠️ **注意**：以下为早期估算数据，未经完整验证。C 扩展包已从 site-packages 卸载，实际兼容性受 libpython3.9.so 符号导出问题影响（P0 待解决）。验证后的数据见 `STATUS.md`。
 
-| 扩展包 | 状态 | 说明 |
+| 扩展包 | 早期评估 | 说明 |
 |--------|------|------|
-| numpy | ✅ Compatible | 编译安装正常，基础运算通过 |
-| Pillow | ✅ Compatible | 编译安装正常，图像处理功能正常 |
-| requests | ✅ Compatible | 依赖 urllib3/chardet，功能正常 |
-| cryptography | ✅ Compatible | 依赖 OpenSSL，编译安装正常 |
-| pandas | ⚠️ Partial | 依赖 numpy，部分功能受限 |
-| scipy | ⚠️ Partial | 依赖 numpy/LAPACK，部分模块编译失败 |
-| lxml | ❌ Import 失败 | libxml2/libxslt 链接问题 |
-| pyyaml | ❌ Import 失败 | libyaml 编译问题 |
-| psycopg2 | ❌ Import 失败 | libpq 未安装 |
+| numpy | ⚠️ 待验证 | 需要 --enable-shared 修复后重测 |
+| Pillow | ⚠️ 待验证 | |
+| requests | ✅ Compatible | 纯 Python，依赖 urllib3/chardet |
+| cryptography | ⚠️ 待验证 | 依赖 OpenSSL |
+| pandas | ⚠️ 待验证 | 依赖 numpy/LAPACK |
+| lxml | ⚠️ 待验证 | libxml2/libxslt 链接问题 |
+| pyyaml | ⚠️ 待验证 | libyaml 编译问题 |
+| psycopg2 | ⚠️ 待验证 | libpq 未安装 |
 
-> **pip 版本**：测试中已升级至 pip 26.0.1（原 pip 20.2.3）。
+> **pip 版本**：当前 pip 20.2.3，可升级到 26.0.1（尚未执行）。
 
 ### 9.4 已知问题
 
@@ -1212,6 +1211,14 @@ Step 7: 运行完整测试套件
 | 2026-03-25 | 3.2 | 全量适配分析：上游合入方案、遗漏扫描、pip 阻塞根因 |
 | 2026-03-25 | 4.0 | **全量构建验证**：64 扩展模块编译、C 级 subprocess 调试、Pipe 数据丢失发现、fork_exec fallback、Python 3.12 路线图、踩坑总结 |
 | 2026-03-26 | 4.1 | **补丁扩展至 20 个**：补丁 0011-0020（venv/线程/multiprocessing/subprocess/posix/时区全面修复）；configure 完整参数；pipe 问题已修复；临时文件方案废弃；fork() 可用性确认；C 扩展测试结果补充；文档全面审计修正 |
+
+---
+
+*维护者: OpenHarmony 社区*
+--
+
+*维护者: OpenHarmony 社区*
+整参数；pipe 问题已修复；临时文件方案废弃；fork() 可用性确认；C 扩展测试结果补充；文档全面审计修正 |
 
 ---
 
