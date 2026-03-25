@@ -248,8 +248,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 
 ```bash
 autoconf
-./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos \
-  --build=aarch64-unknown-linux-ohos --disable-ipv6 \
+./configure --prefix=$HOME/usr/local --disable-ipv6 \
   ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
   --with-openssl=$HOME/usr/local
 make -j$(nproc)
@@ -298,8 +297,7 @@ make -j$(nproc)
 1. `make clean`
 2. 重新 `configure`，添加 `--enable-shared`：
    ```bash
-   ./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos \
-     --build=aarch64-unknown-linux-ohos --disable-ipv6 \
+   ./configure --prefix=$HOME/usr/local --disable-ipv6 \
      ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no \
      --with-openssl=$HOME/usr/local --enable-shared
    ```
@@ -416,3 +414,4 @@ rtswith(('ohos', 'harmonyos')):
 else:
     unix_shell = '/bin/sh'
 ```
+``

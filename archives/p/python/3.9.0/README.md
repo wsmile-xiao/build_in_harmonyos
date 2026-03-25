@@ -28,7 +28,7 @@ PATCHDIR=/storage/Users/currentUser/renshang/build_in_harmonyos/archives/p/pytho
 for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020; do
     patch -p1 < $PATCHDIR/${p}*.patch
 done
-autoconf && ./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos --build=aarch64-unknown-linux-ohos --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local && make -j$(nproc)
+autoconf && ./configure --prefix=$HOME/usr/local --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local && make -j$(nproc)
 
 # 5. 验证
 export LD_LIBRARY_PATH=.
@@ -87,7 +87,7 @@ done
 
 ```bash
 autoconf
-./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos --build=aarch64-unknown-linux-ohos --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local --enable-shared
+./configure --prefix=$HOME/usr/local --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local --enable-shared
 make -j$(nproc)
 ```
 
