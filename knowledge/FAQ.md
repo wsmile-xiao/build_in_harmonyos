@@ -135,18 +135,61 @@ ssl.SSLError: [SSL: BAD_SIGNATURE] bad signature
 configure: error: xxx library not found
 ```
 
-**解决**：设置库和头文件路径：
+**解决**：确保 `PKG_CONFIG_PATH` 包含库的 .pc 文件所在目录：
 ```bash
-export LIBRARY_PATH=$HOME/usr/local/lib:$LIBRARY_PATH
-export C_INCLUDE_PATH=$HOME/usr/local/include:$C_INCLUDE_PATH
 export PKG_CONFIG_PATH=$HOME/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+```
+
+> ⚠️ **不要设置 `C_INCLUDE_PATH`**：该变量会与 pkg-config 冲突，导致 `pkg-config --cflags` 返回空。详见 `environment.md` §11。
+
+如果库没有提供 .pc 文件，可通过构建系统变量指定：
+```bash
+# CMake 项目
+cmake .. -DCMAKE_PREFIX_PATH=$HOME/usr/local
+
+# Autotools 项目
+./configure --prefix=$HOME/usr/local CPPFLAGS="-I$HOME/usr/local/include" LDFLAGS="-L$HOME/usr/local/lib"
 ```
 
 ---
 
 ## 四、运行时错误
 
-### Q11: 子进程执行 SDK 工具失败？
+### Q11: pkg-config --cflags 返回空字符串？
+
+```bash
+$ pkg-config --cflags openssl
+（空）
+
+# 但 .pc 文件明确写了 Cflags
+$ cat /path/to/openssl.pc
+  Cflags: -I${includedir}
+```
+
+**原因**：`C_INCLUDE_PATH` 环境变量包含了 .pc 文件中 `includedir` 的路径。pkg-config 会将 `C_INCLUDE_PATH` 中的路径视为"系统目录"并自动过滤掉匹配的 `-I` 标志。
+
+**排查**：
+```bash
+# 检查是否设置了 C_INCLUDE_PATH
+echo $C_INCLUDE_PATH
+
+# 用 --debug 确认
+pkg-config --debug --cflags openssl 2>&1 | grep "Removing"
+```
+
+**解决**：
+```bash
+# 方案 1（推荐）：从 .zshrc 中移除 C_INCLUDE_PATH
+unset C_INCLUDE_PATH
+unset CPLUS_INCLUDE_PATH
+
+# 方案 2：临时允许系统 Cflags
+PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 pkg-config --cflags openssl
+```
+
+详见 `environment.md` §11。
+
+### Q12: 子进程执行 SDK 工具失败？
 
 ```python
 subprocess.run(['clang', '--version'])  # returncode: 1, 无输出
@@ -262,7 +305,7 @@ ls -la $(which sed) | grep toybox
 
 详见 `knowledge/autotools-patterns.md`。
 
-### Q19: CMake 项目如何适配 HarmonyOS？
+### Q20: CMake 项目如何适配 HarmonyOS？
 
 ```bash
 cmake -DCMAKE_C_COMPILER=clang \
@@ -292,7 +335,7 @@ make
 
 ## 七、Python 相关
 
-### Q21: 如何编译 Python 扩展模块？
+### Q22: 如何编译 Python 扩展模块？
 
 详见 `knowledge/python-extensions.md`。
 

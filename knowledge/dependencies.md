@@ -7,7 +7,15 @@
 
 ## 推荐编译顺序
 
+> ⚠️ **pkg-config 优先**：pkg-config 是编译生态的基石，几乎所有 C/C++ 构建系统都依赖它来发现已安装的库。
+> 如果系统预装的 pkg-config 不可用或有问题，应**最先编译安装 pkg-config**，甚至早于 sed/coreutils/gawk。
+> 详见 `environment.md` §11.7。鸿蒙系统预装了 pkg-config 0.29.2，一般情况下可直接使用。
+
 ```
+第零阶段：pkg-config（如系统预装版本不可用时）
+└── pkg-config              # ⭐ 编译生态基石，后续几乎所有软件的 configure 都依赖它
+                            # 编译方式: ./configure --prefix=$DEFAULT_PREFIX --with-internal-glib
+
 第一阶段：基础工具链（无外部依赖）
 ├── GNU sed 4.9           # 替代 toybox sed，很多 configure 脚本依赖
 ├── GNU coreutils 9.10    # 替代 toybox (包含 expr) ⚠️ 部分编译
@@ -259,11 +267,12 @@ Python 3.9.0
 configure: error: zlib library not found
 ```
 
-**解决**：
+**解决**：确保 `PKG_CONFIG_PATH` 包含 zlib 的 .pc 文件所在目录：
 ```bash
-export LIBRARY_PATH=$HOME/usr/local/lib:$LIBRARY_PATH
-export C_INCLUDE_PATH=$HOME/usr/local/include:$C_INCLUDE_PATH
+export PKG_CONFIG_PATH=$HOME/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
 ```
+
+> ⚠️ **不要设置 `C_INCLUDE_PATH`**：该变量会与 pkg-config 冲突，导致 `--cflags` 返回空。详见 `environment.md` §11。
 
 ### 问题2：找不到 ncurses
 

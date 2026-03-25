@@ -92,16 +92,15 @@ export DEFAULT_PREFIX=$HOME/usr/local
 # PATH（确保用户安装的工具优先）
 export PATH=$DEFAULT_PREFIX/bin:$HOME/npm/bin:$HOME/.local/bin:$PATH
 
-# 库路径（运行时和编译时都要设置）
-export LIBRARY_PATH=$DEFAULT_PREFIX/lib:$LIBRARY_PATH
+# 库路径（运行时）
 export LD_LIBRARY_PATH=$DEFAULT_PREFIX/lib:$LD_LIBRARY_PATH
 
-# 头文件路径
-export C_INCLUDE_PATH=$DEFAULT_PREFIX/include:$C_INCLUDE_PATH
-export CPLUS_INCLUDE_PATH=$DEFAULT_PREFIX/include:$CPLUS_INCLUDE_PATH
-
-# pkg-config 路径
+# pkg-config 路径（⭐ 头文件和库路径通过 pkg-config 发现，不要设置 C_INCLUDE_PATH）
+# 详见本文件 §11「头文件搜索路径：PKG_CONFIG_PATH vs C_INCLUDE_PATH」
 export PKG_CONFIG_PATH=$DEFAULT_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH
+
+# CMake 搜索路径（现代 C/C++ 项目常用）
+export CMAKE_PREFIX_PATH=$DEFAULT_PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}
 
 # 编译器设置（使用 LLVM 工具链）
 export CC="clang"
@@ -134,6 +133,11 @@ mkdir -p $DEFAULT_PREFIX/{bin,lib,include,share}
 | `AR/RANLIB` | 静态库工具 | 使用 GNU ar 导致格式不兼容 |
 | `LD_LIBRARY_PATH` | 运行时库路径 | 找不到用户安装的库 |
 | `PKG_CONFIG_PATH` | pkg-config 搜索路径 | 找不到已安装的库 |
+| `CMAKE_PREFIX_PATH` | CMake 搜索路径 | CMake 项目找不到自定义安装的软件 |
+
+> ⚠️ **不要设置 `C_INCLUDE_PATH`**：详见 §11，该变量会与 pkg-config 冲突，导致 `pkg-config --cflags` 返回空。
+>
+> ⚠️ **不要设置 `LIBRARY_PATH`**：GCC 链接器全局搜索路径，会与构建系统冲突。需要指定库路径时应使用 `LDFLAGS="-L..."` 或 `PKG_CONFIG_PATH`。
 
 ### 4.3 便捷别名
 
@@ -521,4 +525,136 @@ tar xf Module-X.XX.tar.gz
 cd Module-X.XX
 perl Makefile.PL INSTALL_BASE=$HOME/perl-lib
 make && make install
+```
+
+## 11. 头文件搜索路径：PKG_CONFIG_PATH vs C_INCLUDE_PATH
+
+> **⚠️ 重要经验**：这是一个在实践中发现的典型误区，务必在编译初期就正确配置。
+
+### 11.1 问题现象
+
+在鸿蒙系统上，当设置了 `C_INCLUDE_PATH` 环境变量后，`pkg-config --cflags` 会返回空字符串：
+
+```bash
+# 已安装的 .pc 文件明确写了 Cflags
+$ cat /storage/Users/currentUser/usr/local/lib/pkgconfig/openssl.pc
+  Cflags: -I${includedir}
+
+# 但 pkg-config --cflags 返回空！
+$ pkg-config --cflags openssl
+  （空）
+
+# --debug 输出揭示了原因
+$ pkg-config --debug --cflags openssl 2>&1
+  Package libssl has -I/storage/Users/currentUser/usr/local/include in Cflags
+  Removing -I/storage/Users/currentUser/usr/local/include from cflags for libssl
+  returning flags string ""
+```
+
+**所有带 `Cflags:` 行的 .pc 包都受影响**（OpenSSL、zlib、libffi、sqlite3 等），不仅限于特定软件。
+
+### 11.2 根因分析
+
+pkg-config 的 `verify_package()` 函数在加载 .pc 文件后会执行"系统目录过滤"：
+
+1. 读取 `PKG_CONFIG_SYSTEM_INCLUDE_PATH` 环境变量（或编译时内置默认值 `/usr/include`）
+2. **额外读取 GCC 的环境变量**：`C_INCLUDE_PATH`、`CPATH`、`CPP_INCLUDE_PATH`
+3. 遍历 Cflags 中的 `-I` 标志，如果路径匹配上述任一"系统目录"，则删除该标志
+4. 如果未设置 `PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1`，则过滤生效
+
+因此，当 `.pc` 文件中的 `includedir` 恰好等于 `C_INCLUDE_PATH` 中的路径时，对应的 `-I` 标志会被 pkg-config 视为"冗余的系统路径"而删除。
+
+### 11.3 为什么不应该设置 C_INCLUDE_PATH
+
+| 问题 | 说明 |
+|------|------|
+| **与 pkg-config 冲突** | pkg-config 会将 `C_INCLUDE_PATH` 中的路径视为系统目录，过滤掉所有匹配的 `-I` 标志 |
+| **路径优先级不可控** | `C_INCLUDE_PATH` 是编译器预处理器级别的全局设置，无法针对不同项目区分 |
+| **与构建系统冲突** | CMake、autotools、meson 各有自己的依赖查找机制，`C_INCLUDE_PATH` 可能干扰它们 |
+| **非 Linux 标准做法** | Linux 上编译自定义安装的软件，标准做法是通过构建系统（pkg-config、CMake）发现依赖，而非设置编译器全局路径 |
+
+### 11.4 正确做法：依赖构建系统发现依赖
+
+**有 .pc 文件的库（绝大多数 C/C++ 库）**：只需设置 `PKG_CONFIG_PATH`
+
+```bash
+export PKG_CONFIG_PATH=$DEFAULT_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH
+```
+
+构建系统会自动调用 `pkg-config --cflags --libs` 获取正确的 `-I` 和 `-L` 参数。
+
+**没有 .pc 文件的库**：
+
+```bash
+# 方式 A：CMake 项目（推荐）
+cmake .. -DCMAKE_PREFIX_PATH=$DEFAULT_PREFIX
+# 或更精确地
+cmake .. -DCMAKE_INCLUDE_PATH=$DEFAULT_PREFIX/include \
+         -DCMAKE_LIBRARY_PATH=$DEFAULT_PREFIX/lib
+
+# 方式 B：Autotools 项目
+./configure --prefix=$DEFAULT_PREFIX CPPFLAGS="-I$DEFAULT_PREFIX/include" LDFLAGS="-L$DEFAULT_PREFIX/lib"
+
+# 方式 C：手动编译
+clang -I$DEFAULT_PREFIX/include -L$DEFAULT_PREFIX/lib ... -o output
+```
+
+**注意**：`CPPFLAGS` 和 `LDFLAGS` 是构建系统级别的变量，不会影响 pkg-config 的系统目录判断逻辑，可以安全使用。
+
+### 11.5 推荐的 .zshrc 配置
+
+```bash
+# ✅ 应该设置的环境变量
+export PKG_CONFIG_PATH=$DEFAULT_PREFIX/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}
+export CMAKE_PREFIX_PATH=$DEFAULT_PREFIX${CMAKE_PREFIX_PATH:+:$CMAKE_PREFIX_PATH}
+export LD_LIBRARY_PATH=$DEFAULT_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
+export PATH=$DEFAULT_PREFIX/bin:$PATH
+
+# ❌ 不要设置（会与 pkg-config 和构建系统冲突）
+# export C_INCLUDE_PATH=$DEFAULT_PREFIX/include   # 会导致 pkg-config --cflags 返回空
+# export CPLUS_INCLUDE_PATH=$DEFAULT_PREFIX/include
+# export LIBRARY_PATH=$DEFAULT_PREFIX/lib
+```
+
+### 11.6 紧急修复
+
+如果已经设置了 `C_INCLUDE_PATH` 且遇到 `pkg-config --cflags` 返回空：
+
+```bash
+# 方式 1：临时允许系统 Cflags（全局生效）
+export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+pkg-config --cflags openssl  # 现在有输出了
+
+# 方式 2：根本解决——从 .zshrc 中移除 C_INCLUDE_PATH
+unset C_INCLUDE_PATH
+unset CPLUS_INCLUDE_PATH
+```
+
+### 11.7 相关：尽早构建或安装 pkg-config
+
+**pkg-config 是编译生态的基石工具**。几乎所有 C/C++ 构建系统（autotools、cmake、meson）都依赖 pkg-config 来发现已安装的库。如果 pkg-config 不可用或有 bug，会导致连锁的编译失败。
+
+**鸿蒙系统预装了 pkg-config 0.29.2**（位于 `/data/service/hnp/bin/pkg-config`），一般情况下可以直接使用。但在以下场景中需要自行编译安装：
+
+| 场景 | 说明 |
+|------|------|
+| 系统预装版本有 bug | 如本文描述的 Cflags 过滤问题（实际是环境变量配置问题，非 pkg-config 本身 bug） |
+| 需要更新版本 | 某些新软件的 .pc 文件使用了 pkg-config 新语法 |
+| 自定义安装的软件不在系统 PKG_CONFIG_PATH 中 | 需要确保 PKG_CONFIG_PATH 正确设置 |
+
+**如果需要自行编译 pkg-config**，它应作为**第一阶段（基础工具链）的最早编译项之一**，甚至在 sed/coreutils/gawk 之前，因为后续几乎所有软件的 configure 脚本都可能调用 pkg-config 检测依赖。
+
+```bash
+# 编译 pkg-config（autotools 项目，依赖很少）
+./configure --prefix=$DEFAULT_PREFIX --with-internal-glib
+make -j1 && make install
+
+# --with-internal-glib：使用内置 GLib，避免依赖系统 GLib
+```
+
+**验证**：
+```bash
+pkg-config --version
+pkg-config --cflags openssl   # 应输出 -I 路径
+pkg-config --libs openssl     # 应输出 -L -l 路径
 ```
