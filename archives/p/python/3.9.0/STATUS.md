@@ -28,21 +28,24 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 
 | 类别 | 数量 |
 |------|------|
-| ✅ 编译+导入成功 | **73 个扩展模块**（72 个 .so 文件） |
-| ⚠️ 编译成功但导入失败 | 2（_gdbm 缺 libgdbm.so.6、_lzma 缺 liblzma.so.5，运行时库缺失，编译本身成功） |
-| ⏭️ 非标准测试项（不计入失败） | 2（_math 为内建静态链接模块、xxlimited_35 为测试专用模块） |
-| ❌ 依赖缺失未编译 | 1（_tkinter 缺少 TK/X11 库） |
+| ✅ 编译+导入成功 | **69 个扩展模块**（72 个 .so 文件中的 69 个） |
+| ⚠️ 编译成功但导入失败 | 3（运行时库缺失，编译本身成功） |
+| ⏭️ 未编译（依赖缺失） | 1（_tkinter 缺少 TK/X11 库） |
 
-**导入测试详情**：73/78 成功，失败 5 个：
-- `_math`：内建模块（静态链接到 python3.9 本身），不应作为 .so 测试，属于误测
-- `xxlimited_35`：测试专用模块（`Py LIMITED API` 测试），非正式扩展
-- `_tkinter`：缺少 TK/X11 库（平台无 GUI 支持）
-- `_lzma`：运行时缺 `liblzma.so.5`（编译成功，仅运行时缺共享库）
-- `_gdbm`：运行时缺 `libgdbm.so.6`（编译成功，仅运行时缺共享库）
+**扩展模块 .so 全量导入测试**（72 个 .so 文件）：
+- ✅ 导入成功：**69/72**
+- ❌ 导入失败（运行时库缺失）：
+  - `_dbm`：缺 `libgdbm_compat.so.4`
+  - `_gdbm`：缺 `libgdbm.so.6`
+  - `_lzma`：缺 `liblzma.so.5`
+- ⏭️ 未编译：`_tkinter`（缺 TK/X11 库，`setup.py` 跳过）
 
 **特别说明**：
 - ✅ `_ctypes`：导入成功（旧版 STATUS 错误记录为编译失败，实际 libffi 可用）
 - ✅ `_posixsubprocess`：编译成功（9.8MB），旧版 STATUS 暗示缺失，已解决
+- ✅ `_ssl` + `_hashlib`：编译+导入成功
+- ✅ `_curses` + `_curses_panel`：编译+导入成功
+- ✅ `_sqlite3`：编译+导入成功
 
 ### 3. SSL 支持（2026-03-26 验证）
 
@@ -119,11 +122,37 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 
 ### 9. 全量遗漏扫描（24 个遗漏点）
 
+> 完整性验证（2026-03-26）：与 work→origin 的实际 diff 交叉比对，确认 24 个遗漏点**完整无遗漏**。无新增遗漏点。详见 `reports/MISSING_ADAPTATION_SCAN.md`。
+>
+> ⚠️ SCAN 报告中有 5 处"fork 不可用"的错误描述（T0 测试已证明 fork 在鸿蒙上可用），待修正但遗漏点清单本身完整。
+
 | 优先级 | 数量 | 关键影响 |
 |--------|------|---------|
-| **P0 必须修复** | 5 | pip 安装阻塞、multiprocessing 不可用、threading API 不完整 |
+| **P0 必须修复** | 5 | threading API、multiprocessing 默认模式、subprocess 全面修复、fd 验证 |
 | **P1 建议修复** | 11 | 时区处理、sendfile 性能、共享内存路径 |
 | **P2 低优先级** | 8 | mimetypes、uuid、pty（影响有限） |
+
+**补丁覆盖情况**（9/24 已覆盖，其中 P0-1 为部分覆盖）：
+
+| 遗漏ID | 描述 | 补丁 | 状态 |
+|--------|------|------|------|
+| P0-1 | threading.get_native_id() | 0012 | ⚠️ **部分**（pythread.h 已修复，thread_pthread.h 实现缺失） |
+| P0-2 | multiprocessing 默认 spawn | 0013 | ✅ |
+| P0-3 | _posixsubprocess.c FD_DIR /dev/fd | 0017 | ✅ |
+| P0-4 | pylifecycle.c fd 验证 | — | ❌ 未修复 |
+| P0-5 | subprocess shell 路径 | 0016 | ✅ |
+| P1-1 | timemodule.c musl 时区 | 0019 | ✅ |
+| P1-2 | shutil.py sendfile 优化 | — | ❌ |
+| P1-3 | posixmodule.c sendfile NULL offset | 0018 | ✅（补丁文件名误标为 fallocate） |
+| P1-4 | multiprocessing/util.py abstract sockets | 0014 | ✅ |
+| P1-5 | multiprocessing/heap.py /dev/shm | — | ❌ |
+| P1-6 | pidfd_open/pidfd_send_signal | — | ❌（低优先级） |
+| P1-7 | socketmodule.c 抽象 socket | — | ❌ |
+| P1-8 | posixpath.py defpath | 0015 | ✅ |
+| P1-9 | tempfile.py 临时目录 | — | ❌ |
+| P1-10 | configure lchmod 检测 | — | ❌（无实际影响） |
+| P1-11 | _use_posix_spawn() musl | 0016 | ✅ |
+| P2-1~P2-8 | 各类低优先级项 | — | ❌（8 项，影响有限） |
 
 ### 10. 上游合入方案分析
 
@@ -170,16 +199,16 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 
 ### Phase 1：解除 pip 阻塞（0012-0020）
 
-| 补丁 | 遗漏点 ID | 文件 | 说明 |
+| 补丁 | 遗漏点 ID（MISSING_ADAPTATION_SCAN.md 编号） | 文件 | 说明 |
 |------|-----------|------|------|
-| 0012 | P0-1 | Include/pythread.h | threading.get_native_id() 支持 |
+| 0012 | P0-1（部分） | Include/pythread.h | threading.get_native_id() 声明 |
 | 0013 | P0-2 | Lib/multiprocessing/context.py | 默认 spawn 模式 + ForkProcess 保护 |
-| 0014 | P0-3 | Lib/multiprocessing/util.py | abstract sockets 支持 |
-| 0015 | P0-4 | Lib/posixpath.py | PATH 添加 /system/bin |
-| 0016 | P1-1/P1-11/P0-5 | Lib/subprocess.py | **子进程全面修复**（pipe workaround + posix_spawn musl + shell 路径 + Python fork_exec fallback） |
-| 0017 | P1-2 | Modules/_posixsubprocess.c | FD_DIR 改为 /dev/fd |
-| 0018 | P1-3 | Modules/posixmodule.c | posix_fallocate 支持 |
-| 0019 | P1-4 | Modules/timemodule.c | musl 时区处理 |
+| 0014 | P1-4 | Lib/multiprocessing/util.py | abstract sockets 支持 |
+| 0015 | P1-8 | Lib/posixpath.py | PATH 添加 /system/bin |
+| 0016 | P0-5 + P1-11 | Lib/subprocess.py | **子进程全面修复**（pipe workaround + posix_spawn musl + shell 路径 + Python fork_exec fallback） |
+| 0017 | P0-3 | Modules/_posixsubprocess.c | FD_DIR 改为 /dev/fd |
+| 0018 | P1-3 | Modules/posixmodule.c | sendfile NULL offset 支持（补丁文件名误标为 fallocate） |
+| 0019 | P1-1 | Modules/timemodule.c | musl 时区处理 |
 | 0020 | 修正 | Lib/subprocess.py | **修复 0016 遗留**：os.pipe() 替代临时文件、execve env dict、启用 posix_spawn |
 
 > **关于 0020 的说明**：补丁 0016 的 `_OHOS_PIPE_WORKAROUND` 临时文件方案导致 `communicate()` 无法正确读取子进程输出。
@@ -378,6 +407,11 @@ elif sys.platform.startswith(('ohos', 'harmonyos')):
 if hasattr(sys, 'getandroidapilevel'):
     unix_shell = '/system/bin/sh'
 elif sys.platform.startswith(('ohos', 'harmonyos')):
+    unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
+else:
+    unix_shell = '/bin/sh'
+```
+rtswith(('ohos', 'harmonyos')):
     unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
 else:
     unix_shell = '/bin/sh'
