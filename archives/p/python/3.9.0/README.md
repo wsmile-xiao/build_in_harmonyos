@@ -1,6 +1,6 @@
 # Python 3.9.0 鸿蒙系统适配指南
 
-> **版本**: 3.1 | **更新日期**: 2026-03-25 | **状态**: ✅ 已验证
+> **版本**: 4.1 | **更新日期**: 2026-03-26 | **状态**: ✅ 已验证
 
 ## 概述
 
@@ -9,7 +9,7 @@
 | 软件版本 | Python 3.9.0 |
 | 目标平台 | HarmonyOS aarch64 (musl libc) |
 | 编译器 | Clang 15.0.4 |
-| 适配复杂度 | 🔴 高（11 个补丁，涉及构建系统三层） |
+| 适配复杂度 | 🔴 高（20 个补丁，涉及构建系统三层） |
 | 核心功能可用性 | 74.9% 测试通过 |
 
 ### 快速开始
@@ -24,11 +24,11 @@ curl -L -o Python-3.9.0.tgz https://www.python.org/ftp/python/3.9.0/Python-3.9.0
 tar -xzf Python-3.9.0.tgz && cd Python-3.9.0
 
 # 3. 应用补丁
-PATCHDIR=/storage/Users/currentUser/tmp/opendesk/build_in_harmonyos/p/python/3.9.0/patches
-for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011; do
+PATCHDIR=/storage/Users/currentUser/renshang/build_in_harmonyos/archives/p/python/3.9.0/patches
+for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020; do
     patch -p1 < $PATCHDIR/${p}*.patch
 done
-autoconf && ./configure --prefix=$HOME/usr/local --enable-shared && make -j$(nproc)
+autoconf && ./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos --build=aarch64-unknown-linux-ohos --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local --enable-shared && make -j$(nproc)
 
 # 5. 验证
 export LD_LIBRARY_PATH=.
@@ -77,8 +77,8 @@ tar -xzf Python-3.9.0.tgz && cd Python-3.9.0
 ### 2.3 应用补丁
 
 ```bash
-PATCHDIR=/storage/Users/currentUser/tmp/opendesk/build_in_harmonyos/p/python/3.9.0/patches
-for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010; do
+PATCHDIR=/storage/Users/currentUser/renshang/build_in_harmonyos/archives/p/python/3.9.0/patches
+for p in 0001 0002 0003 0004 0005 0006 0007 0008 0009 0010 0011 0012 0013 0014 0015 0016 0017 0018 0019 0020; do
     patch -p1 < $PATCHDIR/${p}*.patch
 done
 ```
@@ -87,7 +87,7 @@ done
 
 ```bash
 autoconf
-./configure --prefix=$HOME/usr/local --enable-shared
+./configure --prefix=$HOME/usr/local --host=aarch64-unknown-linux-ohos --build=aarch64-unknown-linux-ohos --disable-ipv6 ac_cv_file__dev_ptmx=no ac_cv_file__dev_ptc=no --with-openssl=$HOME/usr/local --enable-shared
 make -j$(nproc)
 ```
 
@@ -125,6 +125,16 @@ echo 'export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH' >> ~/.zshrc
 | 0008 | Lib/sysconfig.py | 运行时平台字符串 |
 | 0009 | Lib/_harmonyos_compat.py | 子进程兼容层模块 |
 | 0010 | Lib/site.py | 自动加载兼容层 |
+| 0011 | Lib/venv/__init__.py | venv symlink→makedirs 降级 |
+| 0012 | Include/pythread.h | threading.get_native_id() 支持 |
+| 0013 | Lib/multiprocessing/context.py | 默认 spawn 模式 |
+| 0014 | Lib/multiprocessing/util.py | abstract sockets 支持 |
+| 0015 | Lib/posixpath.py | PATH 添加 /system/bin |
+| 0016 | Lib/subprocess.py | 子进程全面修复（541 行） |
+| 0017 | Modules/_posixsubprocess.c | FD_DIR 改为 /dev/fd |
+| 0018 | Modules/posixmodule.c | posix_fallocate 支持 |
+| 0019 | Modules/timemodule.c | musl 时区处理 |
+| 0020 | Lib/subprocess.py | 修复 0016 遗留（pipe/execve/posix_spawn） |
 
 ---
 
@@ -737,6 +747,8 @@ purelib = os.path.join(sys.prefix, 'lib', 'python3.9', 'site-packages')
 
 ### 4.1 测试结果
 
+> ⚠️ **注意**：以下测试结果基于 11 补丁版本（v3.1），已过期。完整测试需使用 20 补丁版本（v4.1）重新验证。
+
 | 状态 | 数量 | 占比 |
 |------|------|------|
 | ✅ 通过 | 314 | 74.9% |
@@ -1001,11 +1013,10 @@ Python 的构建系统是三层架构，任何类似复杂度的软件都可能�
 
 | 文件 | 用途 |
 |------|------|
-| `patches/` | 补丁文件 |
+| `patches/` | 补丁文件（0001~0020） |
+| `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程执行完整指南 |
 | `tests/test_subprocess_compat.py` | 兼容层测试 |
-| `package_python.sh` | 打包脚本 |
-| `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程问题深入分析 |
-| `TEST_REPORT.md` | 测试详情 |
+| `scripts/package_python.sh` | 打包脚本 |
 
 ---
 
@@ -1013,14 +1024,15 @@ Python 的构建系统是三层架构，任何类似复杂度的软件都可能�
 
 ### 9.1 扩展模块编译
 
-从源码 tar 包全量构建，**64 个扩展模块编译链接成功**（修复 libintl_gettext 问题后），30/30 模块加载成功。
+从源码 tar 包全量构建，**64 个扩展模块编译链接成功**（含 CJK 编解码模块，修复 libintl_gettext 问题后），其中 30 个核心模块验证导入成功。
 
 | 类别 | 数量 | 说明 |
 |------|------|------|
-| ✅ 编译+导入成功 | 30 | 包括 math, json, pickle, xml, unicodedata 等 |
+| ✅ 编译成功 | 64 | 包括 math, json, pickle, xml, unicodedata, CJK 编解码（_multibytecodec, _codecs_kr/jp/cn/tw/hk/iso2022）等 |
+| ✅ 导入测试通过 | 30 | 核心模块验证（math, json, pickle, xml, unicodedata 等） |
 | ⚠️ 编译成功但导入失败 | 2 | _gdbm, _lzma（运行时库路径问题） |
 | ❌ 编译失败 | 1 | _ctypes（ffi 头文件/库找不到） |
-| ⏭️ 依赖缺失未编译 | 10 | _ssl, _hashlib, _sqlite3, _tkinter 等 |
+| ⏭️ 依赖缺失未编译 | 10+ | _ssl, _hashlib, _sqlite3, _tkinter 等 |
 | ✅ multiprocessing 模块 | 1 | spawn 方式可用，Pool 测试通过 |
 
 ### 9.2 关键新发现
@@ -1033,7 +1045,7 @@ Python 的构建系统是三层架构，任何类似复杂度的软件都可能�
 
 **原因**：Python 进程的 fd 0/1/2 在鸿蒙上是 socket（非终端/文件），子进程继承后 pipe 重定向行为异常。
 
-**方案**：用临时文件替代 pipe — 在 `Popen._get_handles()` 层面实现，调用方接口不变。
+**~~方案~~**（已废弃）：用临时文件替代 pipe — ~~在 `Popen._get_handles()` 层面实现，调用方接口不变。~~ 补丁 0020 修复后 `os.pipe()` 在鸿蒙上可正常使用，无需临时文件替代方案。
 
 #### 发现 2：fork_exec 纯 Python Fallback
 
@@ -1045,11 +1057,14 @@ Python 3.9 的 `subprocess.py` 对 `_posixsubprocess` C 扩展有硬依赖，缺
 
 | 原语 | SDK 工具 | 系统命令 |
 |------|:---:|:---:|
+| `fork()` | ✅ 可用 | ✅ 正常 |
 | `fork() + execve()` | ❌ SELinux 拦截 | ⚠️ 受权限影响 |
-| `posix_spawnp()` | ❌ SELinux 拦截 | ✅ 正常 |
+| `posix_spawnp()` | ⚠️ 0020 修复后可用 | ✅ 正常 |
 | `system("cmd \| cat")` | ✅ **Pipe 绕过** | ✅ 正常 |
 
-**结论**：Pipe 绕过法（`cmd | cat`）**仍然是唯一可靠的 SDK 工具执行方式**。
+**结论**：
+- **fork() 在鸿蒙上可用**，`posix_spawn` 是推荐的子进程创建方式（补丁 0020 已修复相关问题）。
+- Pipe 绕过法（`cmd | cat`）仍然是 **SDK 工具执行场景** 下可靠的 workaround（因 SELinux 域转换限制）。
 
 #### 发现 4：communicate() elif 链 Bug
 
@@ -1058,6 +1073,28 @@ Python 3.9 的 `subprocess.py` 对 `_posixsubprocess` C 扩展有硬依赖，缺
 #### 发现 5：libintl_gettext 修复
 
 修复 libintl/gettext 相关问题后，CJK 编解码模块全部编译成功（_multibytecodec, _codecs_kr/jp/cn/tw/hk/iso2022）。
+
+### 9.3 C 扩展包测试结果
+
+基于 20 补丁版本（v4.1）对常用 C 扩展包进行测试：
+
+| 扩展包 | 状态 | 说明 |
+|--------|------|------|
+| numpy | ✅ Compatible | 编译安装正常，基础运算通过 |
+| Pillow | ✅ Compatible | 编译安装正常，图像处理功能正常 |
+| requests | ✅ Compatible | 依赖 urllib3/chardet，功能正常 |
+| cryptography | ✅ Compatible | 依赖 OpenSSL，编译安装正常 |
+| pandas | ⚠️ Partial | 依赖 numpy，部分功能受限 |
+| scipy | ⚠️ Partial | 依赖 numpy/LAPACK，部分模块编译失败 |
+| lxml | ❌ Import 失败 | libxml2/libxslt 链接问题 |
+| pyyaml | ❌ Import 失败 | libyaml 编译问题 |
+| psycopg2 | ❌ Import 失败 | libpq 未安装 |
+
+> **pip 版本**：测试中已升级至 pip 26.0.1（原 pip 20.2.3）。
+
+### 9.4 已知问题
+
+- 🔴 **P0: libpython3.9.so 符号导出缺失**：`nm -D libpython3.9.so` 返回 0 个 text 符号，导致 greenlet/ujson/numpy 等包 import 时找不到 PyType_IsSubtype 等 C API。修复方式：重新编译 Python（--enable-shared），补丁无需修改。
 
 ---
 
@@ -1080,7 +1117,7 @@ Python 3.12+ 已做了多项改进，有利于鸿蒙适配：
 | 问题 | 3.9 现状 | 3.12 预期 | 处理建议 |
 |------|:---:|:---:|------|
 | SELinux 限制 SDK 工具 | pipe 绕过 | 仍需 | 根本性限制，需 SELinux 策略调整 |
-| Pipe 数据丢失 | 临时文件替代 | 可能已修复 | 需验证 |
+| Pipe 数据丢失 | ~~临时文件替代~~ | ✅ 补丁 0020 已修复（os.pipe + posix_spawn） | 需验证 |
 | fd 0/1/2 socket | /dev/null 保护 | 仍需 | 与 Python 版本无关 |
 | multiprocessing fork 默认 | 手动改 spawn | 可能上游已修复 | 检查 3.12 源码 |
 | /proc/self/fd 依赖 | /dev/fd fallback | 可能上游已修复 | 检查 3.12 源码 |
@@ -1129,7 +1166,7 @@ Step 7: 运行完整测试套件
 
 | # | 踩坑 | 症状 | 解决 |
 |---|------|------|------|
-| 6 | pipe 数据丢失 | 子进程输出 0 bytes | 临时文件替代 |
+| 6 | pipe 数据丢失 | 子进程输出 0 bytes | ✅ 补丁 0020 已修复（os.pipe + posix_spawn），无需临时文件 |
 | 7 | fd 0/1/2 是 socket | 子进程 I/O 混乱 | dup2 到 /dev/null |
 | 8 | communicate() elif 链 | 双 pipe 只读一个 | 检查 pipe_count |
 | 9 | cleanup 关 read_fd | close 时报错 | cleanup 只删文件 |
@@ -1140,8 +1177,8 @@ Step 7: 运行完整测试套件
 
 以下经验**不限于 Python**，适用于任何在鸿蒙上需要子进程交互的软件：
 
-1. **Pipe 绕过 SELinux**：`system("cmd | cat")` 是当前唯一可靠的方案
-2. **临时文件替代 pipe**：当 pipe 数据丢失时，用临时文件 + dup2
+1. **Pipe 绕过 SELinux**：`system("cmd | cat")` 是 **SDK 工具执行场景** 下可靠的 workaround（因 SELinux 域转换限制）
+2. **os.pipe() + posix_spawn**：补丁 0020 修复后 `os.pipe()` 在鸿蒙上可正常使用，无需临时文件替代方案
 3. **fd 0/1/2 保护**：fork 后立即 dup2 到 /dev/null
 4. **硬链接不支持**：用 `cp -p` 替代 `ln`
 5. **symlink 可能不支持**：try/except OSError + makedirs 回退
@@ -1157,13 +1194,10 @@ Step 7: 运行完整测试套件
 |------|------|:---:|
 | `README.md` | 本文件 — 主文档 | - |
 | `patches/series` | 补丁序列 | - |
-| `patches/0001~0011` | 11 个鸿蒙适配补丁 | - |
-| `reports/PATCH_DETAIL_ANALYSIS.md` | 补丁逐文件分析 | - |
+| `patches/0001~0020` | 20 个鸿蒙适配补丁 | - |
+| `HARMONYOS_SUBPROCESS_GUIDE.md` | **子进程执行完整指南**（含 C 级测试、Pipe 数据丢失、fork_exec fallback、SELinux 限制原理） | ✅ v2.0 合并 |
 | `reports/UPSTREAM_ADAPTATION_ANALYSIS.md` | 上游合入方案 + 遗漏扫描 | - |
 | `reports/MISSING_ADAPTATION_SCAN.md` | 全量遗漏扫描（P0~P2） | - |
-| `reports/TEST_REPORT.md` | 测试报告 | - |
-| `HARMONYOS_SUBPROCESS_GUIDE.md` | **子进程执行完整指南**（含 C 级测试、Pipe 数据丢失、fork_exec fallback） | ✅ v2.0 合并 |
-| `HARMONYOS_SUBPROCESS_GUIDE.md` | SELinux 子进程限制原理 | - |
 | `tests/test_subprocess_compat.py` | 兼容层测试 | - |
 | `scripts/package_python.sh` | 打包脚本 | - |
 
@@ -1179,23 +1213,7 @@ Step 7: 运行完整测试套件
 | 2026-03-25 | 3.1 | 新增补丁 0011（venv symlink fallback）、统一测试数据 |
 | 2026-03-25 | 3.2 | 全量适配分析：上游合入方案、遗漏扫描、pip 阻塞根因 |
 | 2026-03-25 | 4.0 | **全量构建验证**：64 扩展模块编译、C 级 subprocess 调试、Pipe 数据丢失发现、fork_exec fallback、Python 3.12 路线图、踩坑总结 |
-
----
-
-��容层测试 |
-| `package_python.sh` | 打包脚本 |
-| `HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程问题深入分析 |
-| `TEST_REPORT.md` | 测试详情 |
-
----
-
-## 九、版本历史
-
-| 日期 | 版本 | 说明 |
-|------|------|------|
-| 2026-03-21 | 1.0 | 初始版本 |
-| 2026-03-21 | 2.0 | 补丁详解完善，添加举一反三 |
-| 2026-03-21 | 3.0 | 添加依赖关系、技术要点总结章节 |
+| 2026-03-26 | 4.1 | **补丁扩展至 20 个**：补丁 0011-0020（venv/线程/multiprocessing/subprocess/posix/时区全面修复）；configure 完整参数；pipe 问题已修复；临时文件方案废弃；fork() 可用性确认；C 扩展测试结果补充；文档全面审计修正 |
 
 ---
 

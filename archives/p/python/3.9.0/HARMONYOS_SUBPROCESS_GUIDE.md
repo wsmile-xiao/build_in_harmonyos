@@ -1,13 +1,13 @@
 # HarmonyOS 子进程执行完整指南
 
-> **版本**: 2.0 | **更新**: 2026-03-25 | **重要度**: ⭐⭐⭐⭐⭐  
+> **版本**: 3.0 | **更新**: 2026-03-26 | **重要度**: ⭐⭐⭐⭐⭐  
 > 关联: [README.md](./README.md) · [MISSING_ADAPTATION_SCAN.md](./reports/MISSING_ADAPTATION_SCAN.md) · [UPSTREAM_ADAPTATION_ANALYSIS.md](./reports/UPSTREAM_ADAPTATION_ANALYSIS.md)
 
 ---
 
 ## 速查：一句话结论
 
-**鸿蒙上 `fork()`/`posix_spawn()` 无法执行 SDK 工具（SELinux 域转换限制），Pipe 绕过 `cmd | cat` 是唯一可靠方案。** Python 层还需额外处理 Pipe 数据丢失、fd 重定向等问题。
+**鸿蒙上 `posix_spawn()` + `os.pipe()` 完全可用，`fork()` 也可用。** SELinux 域转换仅限制 SDK 工具（如 clang），Python 子进程和系统命令通过 `posix_spawn` 正常执行。补丁 0020 修复了 0016 遗留的临时文件方案导致的 pipe 数据丢失问题。
 
 ---
 
@@ -91,22 +91,31 @@ fd 2: <redirected>       ← stderr 重定向到文件
 
 #### Python 层测试（subprocess 模块）
 
-| 测试 | 描述 | 结果 | 说明 |
-|------|------|:----:|------|
-| T1 | Popen+wait (无 PIPE) | ❌ | clang 执行失败 |
-| T2 | stderr=PIPE | ❌ | Pipe 数据丢失 |
-| T3 | PIPE+communicate | ✅ | 临时文件方案有效 |
-| T4 | subprocess.run() capture | ✅ | run() 可用 |
-| T5 | error capture | ❌ | Pipe 数据丢失 |
-| T6 | stdin pipe | ❌ | 双向 pipe 问题 |
+| 测试 | 描述 | 旧结果(0016) | 新结果(0020) | 说明 |
+|------|------|:------:|:------:|------|
+| T0 | os.fork() 可用性 | - | ✅ | fork() 正常，鸿蒙内核支持 |
+| T1 | Popen+wait (无 PIPE) | ❌ | ✅ | Python 子进程 + env dict 均正常 |
+| T2 | stderr=PIPE | ❌ | ✅ | stderr 正确捕获 |
+| T3 | PIPE+communicate (stdout) | ✅ | ✅ | 改用真正 os.pipe()，不再需要临时文件 |
+| T4 | subprocess.run() capture | ✅ | ✅ | capture_output 正常 |
+| T5 | error capture | ❌ | ✅ | stderr 正确捕获退出错误信息 |
+| T6 | stdin pipe (双向) | ❌ | ✅ | stdin→子进程→stdout 全链路通 |
+| T3b | stdout+stderr 双 PIPE | - | ✅ | 两个 pipe 同时工作 |
+| T-env | env dict + PIPE | ❌ | ✅ | execve env 类型 bug 已修复 |
+
+> **补丁 0020 修复内容**：
+> 1. stdout/stderr PIPE 恢复使用 `os.pipe()`（移除 `_ohos_make_temp_pair` 临时文件方案）
+> 2. `_python_fork_exec()` 的 `os.execve()` 使用原始 `env` dict 而非 `env_list`（list of bytes）
+> 3. 移除 posix_spawn 路径对 `_OHOS_PIPE_WORKAROUND` 的禁用条件
 
 ### 3.3 关键结论
 
-1. **`fork()` 在鸿蒙上存在**，但 `execve()` SDK 工具被 SELinux 静默拦截
-2. **`posix_spawnp()` 对非 SDK 命令可用**，对 SDK 工具同样被拦截
-3. **`cmd | cat` Pipe 绕过是唯一可靠的 SDK 工具执行方式**
-4. **Pipe 数据丢失**是独立于 SELinux 的第二个问题（与 fd 环境有关）
-5. **测试必须用 SDK 工具作锚点**（如 clang），不能用 echo/ls 等（它们是 shell 内置或系统命令，走不同路径）
+1. **`fork()` 在鸿蒙上存在**，`posix_spawn()` 完全可用且是推荐的子进程启动方式
+2. **`os.pipe()` + `posix_spawn` 在鸿蒙上正常工作**，不需要临时文件方案
+3. **Pipe 数据丢失问题已彻底解决**：根因是 0016 补丁的临时文件方案替代了真正的 pipe
+4. **`os.execve()` 的 `env` 参数必须是 dict**，不能传 list of bytes（Python 层限制，非系统调用限制）
+5. **SELinux 域转换限制**仅影响 SDK 工具（如 clang），不影响 Python 子进程和系统命令
+6. **测试必须用 SDK 工具作锚点**（如 clang），不能用 echo/ls 等（它们是 shell 内置或系统命令，走不同路径）
 
 ---
 
@@ -133,29 +142,19 @@ run_with_pipe(["clang", "test.c", "-o", "test"])  # exit code: 0
 
 **注意**：必须用 `set -o pipefail` 获取真实退出码，否则 pipe 返回的是最后一个命令（cat）的退出码。
 
-### 4.2 临时文件替代 Pipe（数据丢失修复）
+### 4.2 ~~临时文件替代 Pipe~~ → 已废弃
 
-**问题**：使用 `posix_spawnp()` + pipe 重定向 stderr 时，子进程输出可能**完全丢失**（0 bytes）。原因是 Python 进程的 fd 0/1/2 是 socket，子进程继承后 pipe 重定向异常。
+> **补丁 0020 后此方案不再需要。** 调试发现鸿蒙的 `posix_spawn` + `os.pipe()` 完全可用，
+> 临时文件方案反而导致了 `communicate()` 读不到数据的问题。已恢复使用标准 `os.pipe()`。
 
-**方案**：在 `Popen._get_handles()` 层面用临时文件替代 pipe：
-
-```python
-import tempfile, os, sys
-
-_is_ohos = sys.platform.startswith(('ohos', 'harmonyos'))
-
-class Popen:
-    def _get_handles(self, stdin, stdout, stderr):
-        if _is_ohos and stderr == subprocess.PIPE:
-            tmp = tempfile.NamedTemporaryFile(delete=False)
-            self._ohos_stderr_tmp = tmp
-            stderr = tmp.fileno()  # 用临时文件 fd 替代 pipe fd
-        ...
-```
-
-**优势**：一劳永逸，覆盖 `_python_fork_exec` 和 `posix_spawn` 两条路径，调用方接口完全不变。
-
-**注意**：cleanup 只删临时文件，不关 fd（让文件对象自己管理）。
+**历史记录**（保留供参考）：
+>
+> **原问题**：使用 `posix_spawnp()` + pipe 重定向 stderr 时，子进程输出可能**完全丢失**（0 bytes）。
+> 原因是 Python 进程的 fd 0/1/2 是 socket，子进程继承后 pipe 重定向异常。
+>
+> **原方案**：在 `Popen._get_handles()` 层面用临时文件替代 pipe。
+> **实际根因**：临时文件本身导致了数据丢失（文件 fd 不支持 select 事件通知），
+> 而真正的 `os.pipe()` 在 posix_spawn 路径下工作正常。
 
 ### 4.3 fd 0/1/2 /dev/null 保护
 
@@ -294,11 +293,27 @@ AC_SUBST(PIPE_WORKAROUND)
 | ✅ 编译+导入成功 | **64** | math, json, pickle, xml, unicodedata, decimal 等 |
 | ⚠️ 编译成功但导入失败 | 2 | _gdbm, _lzma（运行时库路径问题） |
 | ❌ 编译失败 | 1 | _ctypes（ffi 头文件/库找不到） |
-| ⏭️ 依赖缺失未编译 | 10 | _ssl, _hashlib, _sqlite3, _tkinter 等 |
+| ⏭️ 依赖缺失未编译 | 10 | _ssl(已修复), _sqlite3 等 |
 
 关键修复：**libintl_gettext 问题**修复后 CJK 编解码模块全部编译成功。
 
-### 7.2 multiprocessing
+### 7.2 C 扩展包四关卡测试（2026-03-26）
+
+| 包 | 获取 | 编译 | 导入 | 运行 | 判定 |
+|---|---|---|---|---|---|
+| msgpack 1.1.2 | ✅ | ✅ | ✅ | ✅ | compatible |
+| regex 2026.1.15 | ✅ | ✅ | ✅ | ✅ | compatible |
+| cffi 2.0.0 | ✅ | ✅ | ✅ | ✅ | compatible |
+| yarl 1.22.0 | ✅ | ✅ | ✅ | ✅ | compatible |
+| multidict 6.7.1 | ✅ | ✅ | ✅ | ⚠️ setitem异常 | partial |
+| websockets 15.0.1 | ✅ | ✅ | ✅ | ⚠️ C加速不可用 | partial |
+| greenlet 3.2.5 | ✅ | ✅ | ❌ | — | import 失败 |
+| ujson 5.11.0 | ✅ | ✅ | ❌ | — | import 失败 |
+| numpy 1.26.4 | ✅ | ✅ | ❌ | — | import 失败 |
+
+**根因**：`libpython3.9.so` 不导出动态符号（`nm -D` 返回 0 个 text 符号），greenlet/ujson/numpy 的 .so 运行时找不到 `PyType_IsSubtype` 等 C API。修复方式：重新编译 Python（`--enable-shared`）。
+
+### 7.3 multiprocessing
 
 ```
 multiprocessing spawn Pool: OK         ← ✅ spawn 方式可用
@@ -324,12 +339,15 @@ Process(lambda): AttributeError         ← lambda 无法 pickle（非鸿蒙特�
 | # | 踩坑 | 症状 | 正确做法 |
 |---|------|------|---------|
 | 1 | 用 echo 测试 subprocess | echo 通过但 clang 失败 | **用 SDK 工具作锚点** |
-| 2 | pipe 在鸿蒙正常工作 | 子进程输出丢失 | 临时文件替代 |
-| 3 | fd 0/1/2 是 socket | 子进程 I/O 混乱 | fork 后 dup2 到 /dev/null |
-| 4 | communicate() elif 链 | 双 pipe 只读一个 | 检查 pipe_count |
+| 2 | ~~pipe 在鸿蒙正常工作~~ | ~~子进程输出丢失~~ | ~~临时文件替代~~ **已废弃：os.pipe() + posix_spawn 正常工作** |
+| 3 | fd 0/1/2 是 socket | 子进程 I/O 混乱 | fork 后 dup2 到 /dev/null（_python_fork_exec 中已处理） |
+| 4 | communicate() elif 链 | 双 pipe 只读一个 | 0020 修复后双 pipe 正常（用真正的 pipe 而非临时文件） |
 | 5 | cleanup 关 read_fd | close 时报错 | cleanup 只删文件不关 fd |
-| 6 | 移除 _posixsubprocess.so | subprocess 完全不可用 | 纯 Python fallback |
+| 6 | 移除 _posixsubprocess.so | subprocess 完全不可用 | 纯 Python fallback（_python_fork_exec） |
 | 7 | 不用 pipefail | 错误退出码被吞 | `set -o pipefail` |
+| 8 | _ohos_make_temp_pair 替代 pipe | communicate() 读不到数据 | **0020 修复：恢复使用 os.pipe()** |
+| 9 | execve 传 list of bytes | AttributeError: 'list' has no keys | **0020 修复：传原始 env dict** |
+| 10 | _OHOS_PIPE_WORKAROUND 禁用 posix_spawn | 默认走 fork_exec 路径 | **0020 修复：移除禁用条件** |
 
 ---
 
@@ -348,7 +366,7 @@ Process(lambda): AttributeError         ← lambda 无法 pickle（非鸿蒙特�
 | 问题 | 3.12 预期 |
 |------|:---:|
 | SELinux 限制 SDK 工具 | **仍需** pipe 绕过 |
-| Pipe 数据丢失 | **可能**已修复（需验证） |
+| Pipe 数据丢失 | ~~可能已修复~~ **已修复（补丁 0020）** |
 | fd 0/1/2 socket | **仍需** /dev/null 保护 |
 | multiprocessing fork 默认 | **可能**上游已修复 |
 | threading.get_native_id | **仍需** 加 `__OHOS__` |
@@ -373,10 +391,11 @@ Process(lambda): AttributeError         ← lambda 无法 pickle（非鸿蒙特�
 | `patches/0006` | `_bootsubprocess.py` 补丁（构建阶段） |
 | `patches/0009` | `_harmonyos_compat.py` 补丁（运行时 monkey-patch） |
 | `patches/0010` | `site.py` 自动加载兼容层 |
+| `patches/0020` | subprocess pipe/execve/posix_spawn 修复（替代 0016 的临时文件方案） |
 | `reports/MISSING_ADAPTATION_SCAN.md` | P0-2/P0-3/P0-5/P1-11 等源码级遗漏修复方案 |
 | `reports/UPSTREAM_ADAPTATION_ANALYSIS.md` | 上游合入策略 |
 | `/storage/.../subprocess-tests/` | C 级测试代码（可直接复用于 3.12） |
 
 ---
 
-*维护: OpenDesk 项目组 · 最后更新: 2026-03-25*
+*维护: OpenDesk 项目组 · 最后更新: 2026-03-26*

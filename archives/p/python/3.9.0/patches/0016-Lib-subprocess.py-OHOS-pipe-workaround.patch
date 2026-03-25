@@ -1,0 +1,541 @@
+--- Python-3.9.0-ref/Lib/subprocess.py	2020-10-05 23:07:58.000000000 +0800
++++ Python-3.9.0-work/Lib/subprocess.py	2026-03-25 17:44:48.789046718 +0800
+@@ -75,9 +75,12 @@
+     _mswindows = True
+ except ModuleNotFoundError:
+     _mswindows = False
+-    import _posixsubprocess
+-    import select
+-    import selectors
++    try:
++        import _posixsubprocess
++    except ModuleNotFoundError:
++        _posixsubprocess = None
++    # select/selectors are imported lazily in the else block below
++    # (non-Windows path) when _PopenSelector is needed.
+ else:
+     from _winapi import (CREATE_NEW_CONSOLE, CREATE_NEW_PROCESS_GROUP,
+                          STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+@@ -101,6 +104,237 @@
+                     "CREATE_DEFAULT_ERROR_MODE", "CREATE_BREAKAWAY_FROM_JOB"])
+ 
+ 
++def _py_close_open_fds(start_fd, fds_to_keep):
++    """Close all open file descriptors >= start_fd except those in fds_to_keep.
++
++    Pure Python implementation equivalent to _posixsubprocess.c:_close_open_fds().
++    Uses /proc/self/fd on Linux/OHOS; falls back to brute-force otherwise.
++    """
++    keep_set = set(fds_to_keep)
++    try:
++        # Use /proc/self/fd for efficient fd enumeration (works on Linux/OHOS)
++        for fd_name in os.listdir('/proc/self/fd'):
++            try:
++                fd = int(fd_name)
++            except ValueError:
++                continue
++            if fd >= start_fd and fd not in keep_set:
++                try:
++                    os.close(fd)
++                except OSError:
++                    pass
++    except OSError:
++        # Fallback: brute-force close from start_fd to sysconf(_SC_OPEN_MAX)
++        try:
++            max_fd = os.sysconf('SC_OPEN_MAX')
++        except (OSError, AttributeError):
++            max_fd = 256
++        for fd in range(start_fd, max_fd):
++            if fd not in keep_set:
++                try:
++                    os.close(fd)
++                except OSError:
++                    pass
++
++
++def _python_fork_exec(process_args, executable_list, close_fds, fds_to_keep,
++                      cwd, env_list,
++                      p2cread, p2cwrite, c2pread, c2pwrite,
++                      errread, errwrite,
++                      errpipe_read, errpipe_write,
++                      restore_signals, start_new_session,
++                      gid, gids, uid, child_umask,
++                      preexec_fn):
++    """Pure Python fallback for _posixsubprocess.fork_exec().
++
++    Implements the same contract: fork a child, set up fds/signals/credentials
++    in the child, exec the target program, and write errors to errpipe on
++    failure.  Returns the child PID in the parent; raises OSError if fork()
++    itself fails.
++
++    The errpipe error format is identical to the C implementation so that the
++    existing parent-side errpipe reading code in Popen._execute_child() works
++    without modification.
++    """
++    # --- Prepare data in the parent (matches C code: convert before fork) ---
++    # Convert process_args to bytes argv list
++    if process_args is not None:
++        argv = [os.fsencode(a) for a in process_args]
++    else:
++        argv = None
++
++    # executable_list is already a tuple of bytes (from _execute_child)
++    # env_list is already a list of bytes or None
++    # cwd will be encoded below
++
++    if cwd is not None:
++        cwd_bytes = os.fsencode(cwd)
++    else:
++        cwd_bytes = None
++
++    fds_to_keep = tuple(sorted(fds_to_keep))
++
++    # Disable GC before fork when preexec_fn is set (matches C gc.disable())
++    gc_was_enabled = False
++    if preexec_fn is not None:
++        import gc as _gc
++        gc_was_enabled = _gc.isenabled()
++        if gc_was_enabled:
++            _gc.disable()
++
++    try:
++        pid = os.fork()
++    except:
++        if gc_was_enabled:
++            _gc.enable()
++        raise
++
++    if pid == 0:
++        # ==================== Child process ====================
++        try:
++            # -- Make fds_to_keep inheritable --
++            for fd in fds_to_keep:
++                if fd != errpipe_write:
++                    try:
++                        os.set_inheritable(fd, True)
++                    except OSError:
++                        pass
++
++            # -- Close parent's pipe ends --
++            if p2cwrite != -1:
++                os.close(p2cwrite)
++            if c2pread != -1:
++                os.close(c2pread)
++            if errread != -1:
++                os.close(errread)
++            os.close(errpipe_read)
++
++            # -- Avoid dup2 overwriting stdin/stdout/stderr --
++            if c2pwrite == 0:
++                c2pwrite = os.dup(c2pwrite)
++                os.set_inheritable(c2pwrite, False)
++            while errwrite == 0 or errwrite == 1:
++                errwrite = os.dup(errwrite)
++                os.set_inheritable(errwrite, False)
++
++            # -- Dup fds for child: p2cread→0, c2pwrite→1, errwrite→2 --
++            if p2cread == 0:
++                os.set_inheritable(p2cread, True)
++            elif p2cread != -1:
++                os.dup2(p2cread, 0)
++
++            if c2pwrite == 1:
++                os.set_inheritable(c2pwrite, True)
++            elif c2pwrite != -1:
++                os.dup2(c2pwrite, 1)
++
++            if errwrite == 2:
++                os.set_inheritable(errwrite, True)
++            elif errwrite != -1:
++                os.dup2(errwrite, 2)
++
++            # On HarmonyOS, fd 1/2 may point to sockets (from the OpenDesk
++            # runtime) if not explicitly redirected. External programs like
++            # clang fail silently when writing to such fds. Redirect to
++            # /dev/null when the caller did not request redirection.
++            if _OHOS_PIPE_WORKAROUND:
++                devnull_fd = os.open(os.devnull, os.O_WRONLY)
++                devnull_r = os.open(os.devnull, os.O_RDONLY)
++                if p2cread == -1:
++                    os.dup2(devnull_r, 0)
++                os.close(devnull_r)
++                if c2pwrite == -1:
++                    os.dup2(devnull_fd, 1)
++                if errwrite == -1:
++                    os.dup2(devnull_fd, 2)
++                os.close(devnull_fd)
++
++            # -- Change working directory --
++            if cwd_bytes:
++                os.chdir(cwd_bytes)
++
++            # -- Set umask --
++            if child_umask >= 0:
++                os.umask(child_umask)
++
++            # -- Restore signals to SIG_DFL --
++            if restore_signals:
++                import signal as _sig
++                for sig_num in range(1, _sig.NSIG):
++                    try:
++                        _sig.signal(sig_num, _sig.SIG_DFL)
++                    except (OSError, ValueError):
++                        pass
++
++            # -- Start new session --
++            if start_new_session:
++                os.setsid()
++
++            # -- Set credentials --
++            if gids is not None:
++                os.setgroups(gids)
++            if gid is not None:
++                os.setgid(gid)
++            if uid is not None:
++                os.setuid(uid)
++
++            # -- Call preexec_fn --
++            reached_preexec = True
++            if preexec_fn is not None:
++                preexec_fn()
++
++            # -- Close all fds >= 3 except fds_to_keep --
++            if close_fds:
++                _py_close_open_fds(3, fds_to_keep)
++
++            # -- Try exec for each executable in the list --
++            saved_errno = 0
++            for exec_path in executable_list:
++                try:
++                    if env_list is not None:
++                        os.execve(exec_path, argv, env_list)
++                    else:
++                        os.execv(exec_path, argv)
++                except OSError as e:
++                    if e.errno not in (errno.ENOENT, errno.ENOTDIR) and saved_errno == 0:
++                        saved_errno = e.errno
++
++            # If we get here, all exec attempts failed.
++            # Write error info to errpipe_write (format matches C code).
++            if saved_errno:
++                hex_errno = format(saved_errno, 'x')
++                try:
++                    os.write(errpipe_write, b"OSError:" + hex_errno.encode() + b":noexec")
++                except OSError:
++                    pass
++            else:
++                try:
++                    os.write(errpipe_write, b"SubprocessError:0:")
++                except OSError:
++                    pass
++
++            os._exit(255)  # exec failed
++
++        except BaseException:
++            # Catch-all: write a generic error and exit
++            try:
++                os.write(errpipe_write, b"SubprocessError:0:Unexpected error in child")
++            except OSError:
++                pass
++            os._exit(255)
++
++    # ==================== Parent process ====================
++    if gc_was_enabled:
++        _gc.enable()
++
++    if pid == -1:
++        err = OSError('fork() failed')
++        err.errno = errno
++        raise err
++
++    return pid
++
++
+ # Exception classes used by this module.
+ class SubprocessError(Exception): pass
+ 
+@@ -216,15 +450,24 @@
+     # When select or poll has indicated that the file is writable,
+     # we can write up to _PIPE_BUF bytes without risk of blocking.
+     # POSIX defines PIPE_BUF as >= 512.
+-    _PIPE_BUF = getattr(select, 'PIPE_BUF', 512)
++    try:
++        import select as _select
++        _PIPE_BUF = getattr(_select, 'PIPE_BUF', 512)
+ 
+-    # poll/select have the advantage of not requiring any extra file
+-    # descriptor, contrarily to epoll/kqueue (also, they require a single
+-    # syscall).
+-    if hasattr(selectors, 'PollSelector'):
+-        _PopenSelector = selectors.PollSelector
+-    else:
+-        _PopenSelector = selectors.SelectSelector
++        # poll/select have the advantage of not requiring any extra file
++        # descriptor, contrarily to epoll/kqueue (also, they require a single
++        # syscall).
++        import selectors as _selectors
++        if hasattr(_selectors, 'PollSelector'):
++            _PopenSelector = _selectors.PollSelector
++        else:
++            _PopenSelector = _selectors.SelectSelector
++    except ModuleNotFoundError:
++        # During build process, select/selectors may not be compiled yet.
++        # Set defaults; _PIPE_BUF is only used in _communicate() and
++        # _PopenSelector is only used in _communicate() as well.
++        _PIPE_BUF = 512
++        _PopenSelector = None
+ 
+ 
+ if _mswindows:
+@@ -264,6 +507,43 @@
+ STDOUT = -2
+ DEVNULL = -3
+ 
++# HarmonyOS/OHOS platform detection for pipe workaround.
++# On HarmonyOS, pipes have a kernel-level bug where data written by a
++# child process (especially large programs like clang) can be silently
++# lost. Additionally, fd 1/2 may point to sockets (from the OpenDesk
++# runtime) which causes external programs to fail silently.
++# We work around this by using temporary files instead of pipes.
++_OHOS_PIPE_WORKAROUND = sys.platform.startswith(('ohos', 'harmonyos'))
++
++def _ohos_make_temp_pair(suffix=''):
++        """Create a temp file and return (read_fd, write_fd, cleanup_func).
++
++        Returns two fds: one for reading (parent side) and one for writing
++        (child side). They point to the same underlying file. The child
++        writes to write_fd, and after the child exits, the parent reads
++        from read_fd. cleanup_func() removes the temp file.
++
++        NOTE: tempfile module may not be available during Python build,
++        so we use a simple approach with os.open + a PID-based name.
++        """
++        import errno as _errno
++        tmpdir = os.environ.get('TMPDIR', '/tmp') or '/tmp'
++        # Try TMPDIR first, fall back to CWD if TMPDIR is read-only
++        path = os.path.join(tmpdir, 'py_sub_%d%s' % (os.getpid(), suffix))
++        try:
++            write_fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++        except OSError:
++            # TMPDIR may be read-only on HarmonyOS, use CWD
++            path = 'py_sub_%d%s' % (os.getpid(), suffix)
++            write_fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++        read_fd = os.open(path, os.O_RDONLY)
++        def cleanup():
++            try:
++                os.unlink(path)
++            except OSError:
++                pass
++        return read_fd, write_fd, cleanup
++
+ 
+ # XXX This function is only used by multiprocessing and the test suite,
+ # but it's here so that it can be imported when Python is compiled without
+@@ -683,8 +963,12 @@
+         # use vfork (even if glibc 2.26 added a pipe to properly report errors
+         # to the parent process).
+     except (AttributeError, ValueError, OSError):
+-        # os.confstr() or CS_GNU_LIBC_VERSION value not available
+-        pass
++        # os.confstr() or CS_GNU_LIBC_VERSION value not available.
++        # This likely means musl libc (Alpine Linux, HarmonyOS, OpenWrt, etc.).
++        # musl's posix_spawn() implementation properly reports errors
++        # and is safe to use. This is critical for platforms like HarmonyOS
++        # where fork() may have limitations.
++        return True
+ 
+     # By default, assume that posix_spawn() does not properly report errors.
+     return False
+@@ -1107,6 +1391,9 @@
+         # Optimization: If we are not worried about timeouts, we haven't
+         # started communicating, and we have one or zero pipes, using select()
+         # or threads is unnecessary.
++        # On HarmonyOS, _PopenSelector may be None (select module not yet
++        # compiled). In that case, fall through to _communicate() which has
++        # a simple read-based fallback for this scenario.
+         if (timeout is None and not self._communication_started and
+             [self.stdin, self.stdout, self.stderr].count(None) >= 2):
+             stdout = None
+@@ -1148,6 +1435,13 @@
+ 
+             sts = self.wait(timeout=self._remaining_time(endtime))
+ 
++        # Clean up OHOS temp files
++        for cleanup in getattr(self, '_ohos_cleanups', []):
++            try:
++                cleanup()
++            except OSError:
++                pass
++
+         return (stdout, stderr)
+ 
+ 
+@@ -1571,6 +1865,10 @@
+             c2pread, c2pwrite = -1, -1
+             errread, errwrite = -1, -1
+ 
++            # Track temp file cleanups for OHOS pipe workaround
++            if not hasattr(self, '_ohos_cleanups'):
++                self._ohos_cleanups = []
++
+             if stdin is None:
+                 pass
+             elif stdin == PIPE:
+@@ -1586,7 +1884,11 @@
+             if stdout is None:
+                 pass
+             elif stdout == PIPE:
+-                c2pread, c2pwrite = os.pipe()
++                if _OHOS_PIPE_WORKAROUND:
++                    c2pread, c2pwrite, cleanup = _ohos_make_temp_pair('_stdout')
++                    self._ohos_cleanups.append(cleanup)
++                else:
++                    c2pread, c2pwrite = os.pipe()
+             elif stdout == DEVNULL:
+                 c2pwrite = self._get_devnull()
+             elif isinstance(stdout, int):
+@@ -1598,7 +1900,11 @@
+             if stderr is None:
+                 pass
+             elif stderr == PIPE:
+-                errread, errwrite = os.pipe()
++                if _OHOS_PIPE_WORKAROUND:
++                    errread, errwrite, cleanup = _ohos_make_temp_pair('_stderr')
++                    self._ohos_cleanups.append(cleanup)
++                else:
++                    errread, errwrite = os.pipe()
+             elif stderr == STDOUT:
+                 if c2pwrite != -1:
+                     errwrite = c2pwrite
+@@ -1646,6 +1952,18 @@
+             ):
+                 if fd != -1:
+                     file_actions.append((os.POSIX_SPAWN_DUP2, fd, fd2))
++            # On HarmonyOS, redirect unredirected stdin/stdout/stderr to
++            # /dev/null to prevent silent failures when fd 0 points to a
++            # socket (OpenDesk runtime) or fd 1/2 point to sockets.
++            if _OHOS_PIPE_WORKAROUND:
++                devnull_fd = self._get_devnull()
++                if p2cread == -1:
++                    file_actions.append((os.POSIX_SPAWN_DUP2, devnull_fd, 0))
++                if c2pwrite == -1:
++                    file_actions.append((os.POSIX_SPAWN_DUP2, devnull_fd, 1))
++                if errwrite == -1:
++                    file_actions.append((os.POSIX_SPAWN_DUP2, devnull_fd, 2))
++                file_actions.append((os.POSIX_SPAWN_CLOSE, devnull_fd))
+             if file_actions:
+                 kwargs['file_actions'] = file_actions
+ 
+@@ -1679,8 +1997,13 @@
+ 
+             if shell:
+                 # On Android the default shell is at '/system/bin/sh'.
+-                unix_shell = ('/system/bin/sh' if
+-                          hasattr(sys, 'getandroidapilevel') else '/bin/sh')
++                # On HarmonyOS the shell path may also differ.
++                if hasattr(sys, 'getandroidapilevel'):
++                    unix_shell = '/system/bin/sh'
++                elif sys.platform.startswith(('ohos', 'harmonyos')):
++                    unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
++                else:
++                    unix_shell = '/bin/sh'
+                 args = [unix_shell, "-c"] + args
+                 if executable:
+                     args[0] = executable
+@@ -1691,6 +2014,7 @@
+             sys.audit("subprocess.Popen", executable, args, cwd, env)
+ 
+             if (_USE_POSIX_SPAWN
++                    and not _OHOS_PIPE_WORKAROUND
+                     and os.path.dirname(executable)
+                     and preexec_fn is None
+                     and not close_fds
+@@ -1749,16 +2073,41 @@
+                             for dir in os.get_exec_path(env))
+                     fds_to_keep = set(pass_fds)
+                     fds_to_keep.add(errpipe_write)
+-                    self.pid = _posixsubprocess.fork_exec(
+-                            args, executable_list,
+-                            close_fds, tuple(sorted(map(int, fds_to_keep))),
+-                            cwd, env_list,
+-                            p2cread, p2cwrite, c2pread, c2pwrite,
+-                            errread, errwrite,
+-                            errpipe_read, errpipe_write,
+-                            restore_signals, start_new_session,
+-                            gid, gids, uid, umask,
+-                            preexec_fn)
++                    # On HarmonyOS with _python_fork_exec (pure Python),
++                    # close_fds closes all fds >= 3 except fds_to_keep.
++                    # We must keep all pipe fds that the child needs.
++                    # Always use the Python fallback on OHOS because the C
++                    # implementation (_posixsubprocess) lacks the /dev/null
++                    # fd workaround needed when fd 0 points to a socket.
++                    if _posixsubprocess is None or _OHOS_PIPE_WORKAROUND:
++                        for fd in (p2cread, p2cwrite, c2pread, c2pwrite,
++                                   errread, errwrite):
++                            if fd >= 0:
++                                fds_to_keep.add(fd)
++                    if _posixsubprocess is not None and not _OHOS_PIPE_WORKAROUND:
++                        self.pid = _posixsubprocess.fork_exec(
++                                args, executable_list,
++                                close_fds, tuple(sorted(map(int, fds_to_keep))),
++                                cwd, env_list,
++                                p2cread, p2cwrite, c2pread, c2pwrite,
++                                errread, errwrite,
++                                errpipe_read, errpipe_write,
++                                restore_signals, start_new_session,
++                                gid, gids, uid, umask,
++                                preexec_fn)
++                    else:
++                        # Pure Python fallback when _posixsubprocess C extension
++                        # is not yet available (e.g. during build process).
++                        self.pid = _python_fork_exec(
++                                args, executable_list,
++                                close_fds, tuple(sorted(map(int, fds_to_keep))),
++                                cwd, env_list,
++                                p2cread, p2cwrite, c2pread, c2pwrite,
++                                errread, errwrite,
++                                errpipe_read, errpipe_write,
++                                restore_signals, start_new_session,
++                                gid, gids, uid, umask,
++                                preexec_fn)
+                     self._child_created = True
+                 finally:
+                     # be sure the FD is closed no matter what
+@@ -1956,13 +2305,33 @@
+             if self._input:
+                 input_view = memoryview(self._input)
+ 
++            # On HarmonyOS, _PopenSelector may be None (select module not
++            # compiled yet during build).  Use simple sequential reads instead
++            # of selector-based I/O.  With temp files instead of pipes, this
++            # works correctly: we wait for the child to finish, then read all
++            # data from the temp files.
++            if _PopenSelector is None:
++                if self.stdin:
++                    if input:
++                        os.write(self.stdin.fileno(), input)
++                    self.stdin.close()
++                self.wait(timeout=self._remaining_time(endtime)
++                                 if endtime else None)
++                if self.stdout:
++                    stdout = self.stdout.read()
++                    self.stdout.close()
++                if self.stderr:
++                    stderr = self.stderr.read()
++                    self.stderr.close()
++                return (stdout or b'', stderr or b'')
++
+             with _PopenSelector() as selector:
+                 if self.stdin and input:
+-                    selector.register(self.stdin, selectors.EVENT_WRITE)
++                    selector.register(self.stdin, _selectors.EVENT_WRITE)
+                 if self.stdout and not self.stdout.closed:
+-                    selector.register(self.stdout, selectors.EVENT_READ)
++                    selector.register(self.stdout, _selectors.EVENT_READ)
+                 if self.stderr and not self.stderr.closed:
+-                    selector.register(self.stderr, selectors.EVENT_READ)
++                    selector.register(self.stderr, _selectors.EVENT_READ)
+ 
+                 while selector.get_map():
+                     timeout = self._remaining_time(endtime)
