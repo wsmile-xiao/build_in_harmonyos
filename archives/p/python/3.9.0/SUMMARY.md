@@ -224,6 +224,7 @@ HarmonyOS HMDFS 文件系统不允许跟踪符号链接，这是一个隐蔽但�
 | 遗漏扫描 | `archives/p/python/3.9.0/reports/MISSING_ADAPTATION_SCAN.md` |
 | 上游分析 | `archives/p/python/3.9.0/reports/UPSTREAM_ADAPTATION_ANALYSIS.md` |
 | multiprocessing 测试 | `archives/p/python/3.9.0/reports/MULTIPROCESSING_TEST_REPORT.md` |
+| **C 扩展生态验证（numpy 1.24.4）** | `archives/p/python/3.9.0/reports/C_EXTENSION_COMPAT_REPORT.md` |
 | 编译指南 | `archives/p/python/3.9.0/README.md` |
 | 子进程指南 | `archives/p/python/3.9.0/HARMONYOS_SUBPROCESS_GUIDE.md` |
 | 可运行 Python | `~/python/Python-3.9.0-work/python3.9` |
@@ -261,7 +262,7 @@ make install
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
 | 🟡 | 升级 pip | 20.2.3 已可升级到 26.0.1 |
-| 🟡 | ~~重测 C 扩展包~~ | ✅ 已完成（2026-03-26）：greenlet、brotli、netifaces 编译成功（补丁 0024 修复 HMDFS 符号链接问题） |
+| 🟡 | ~~重测 C 扩展包~~ | ✅ 已完成：greenlet/brotli/netifaces 编译成功；numpy 1.24.4 编译+46 项功能测试+wheel 打包全通过（2026-03-27） |
 | 🟡 | multiprocessing 深度测试 | spawn Pool + 大数据量 |
 | 🟢 | 上游 PR | ~70% 补丁可直接提交 CPython |
 | 🟢 | Python 3.12 适配 | 后续版本 |

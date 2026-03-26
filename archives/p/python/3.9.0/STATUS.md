@@ -192,6 +192,8 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 | PATCH_DETAIL_ANALYSIS.md | 补丁逐文件 diff 分析（待更新至 24 个补丁） |
 | MISSING_ADAPTATION_SCAN.md | 24 个遗漏点完整报告（含代码示例） |
 | README.md (v4.0) | 完整编译指南，含补丁详解和举一反三 |
+| MULTIPROCESSING_TEST_REPORT.md | multiprocessing 深度测试报告（60 项自定义全通过） |
+| **C_EXTENSION_COMPAT_REPORT.md** | **C 扩展生态兼容性报告（numpy 1.24.4 编译+46 项功能测试+wheel 打包全通过）** |
 
 ---
 
@@ -433,7 +435,7 @@ make install
 | 任务 | 说明 |
 |------|------|
 | 升级 pip | 20.2.3 → 26.0.1，改善依赖解析 |
-| 重测 C 扩展包 | ✅ 已完成（2026-03-26）：greenlet、brotli、netifaces 编译成功（补丁 0024 修复 HMDFS 符号链接问题） |
+| 重测 C 扩展包 | ✅ 已完成：greenlet/brotli/netifaces 编译成功（补丁 0024）；numpy 1.24.4 编译+46 项功能测试+wheel 打包全通过（2026-03-27） |
 | 上游 PR | ~70% 补丁可直接提交到 CPython |
 | Python 3.12 适配 | 后续版本 |
 
@@ -512,6 +514,11 @@ elif sys.platform.startswith(('ohos', 'harmonyos')):
 if hasattr(sys, 'getandroidapilevel'):
     unix_shell = '/system/bin/sh'
 elif sys.platform.startswith(('ohos', 'harmonyos')):
+    unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
+else:
+    unix_shell = '/bin/sh'
+```
+):
     unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
 else:
     unix_shell = '/bin/sh'
