@@ -1,7 +1,7 @@
 # Python 3.9.0 鸿蒙适配：进展总结与下一步计划
 
 > **最后更新**: 2026-03-26 | **维护者**: OpenHarmony PC Developer 社区
-> **状态**: Phase 1 + Phase 1.5 完成，项目收尾
+> **状态**: Phase 1 + Phase 1.5 + multiprocessing 深度验证 完成
 > **状态数据来源**: 2026-03-26 实际验证，基于 22 补丁版本（补丁 0001-0022）
 
 ---
@@ -361,13 +361,24 @@ make install
 
 **已解决**（2026-03-26）：安装目录完整，`bin/python3.9` + `libpython3.9.so` + `lib-dynload/` 72 个 .so。
 
+### ✅ ~~multiprocessing 深度测试~~ → **已完成**（2026-03-26）
+
+**结果**：
+- 自定义测试 60/60 全通过（基础原语 19 + Pool 18 + 共享内存 7 + 压力测试 16）
+- 官方 test_multiprocessing_spawn: 228/255 通过（1 失败，26 跳过）
+- 官方 test_multiprocessing_forkserver: 231/255 通过（1 失败，23 跳过）
+- 唯一失败: `test_large_fd_transfer`（fd > 256 的 SCM_RIGHTS 跨进程传递，SELinux 限制）
+- 共享内存正常: `/dev/shm` 缺失无影响，Value/Array/Manager 全部可用
+- Pool 真正并行: 4 workers × 0.3s 任务在 0.82s 完成
+
+详见 `reports/MULTIPROCESSING_TEST_REPORT.md`
+
 ### 🟢 后续可选
 
 | 任务 | 说明 |
 |------|------|
 | 升级 pip | 20.2.3 → 26.0.1，改善依赖解析 |
 | 重测 C 扩展包 | libpython 符号已修复，之前 3 个 import 失败的包应能通过 |
-| multiprocessing 深度测试 | spawn Pool + 共享内存路径 |
 | 上游 PR | ~70% 补丁可直接提交到 CPython |
 | Python 3.12 适配 | 后续版本 |
 
