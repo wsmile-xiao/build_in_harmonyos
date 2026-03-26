@@ -149,7 +149,7 @@ AC_SUBST([HARDLINK]); AC_SUBST([LN_FORCE])
 
 #### P0-2: `multiprocessing` 默认使用 fork — 鸿蒙不支持
 - **文件**: `Lib/multiprocessing/context.py` 行260-262, 270-276
-- **问题**: 默认启动方式为 `fork`，但鸿蒙内核不支持 `fork()`
+- **问题**: 默认启动方式为 `fork`，但鸿蒙 SELinux 策略限制了 fork+exec 可靠性，推荐使用 `spawn` 模式
 - **修复**: 改为 `hasattr(os, 'fork')` 动态检测，无 fork 时使用 `spawn`
 
 #### P0-3: `_posixsubprocess.c` 的 `/proc/self/fd` 依赖

@@ -69,7 +69,7 @@ PyAPI_FUNC(unsigned long) PyThread_get_thread_native_id(void);
 
 ---
 
-#### P0-2: `multiprocessing` 默认使用 `fork` 启动方式 — 鸿蒙不支持 fork
+#### P0-2: `multiprocessing` 默认使用 `fork` 启动方式 — 鸿蒙 SELinux 限制 fork+exec
 
 **文件:** `Lib/multiprocessing/context.py` 行260-262, 行270-276
 
@@ -85,7 +85,7 @@ if sys.platform != 'win32':
         _start_method = 'fork'
 ```
 
-鸿蒙内核**不支持 fork()**（仅有 posix_spawn），因此 `multiprocessing.Process`, `multiprocessing.Pool`, `multiprocessing.Queue` 等全部会失败。
+鸿蒙内核支持 `fork()` 系统调用（已通过 C 级 T0 测试验证），但 SELinux 域转换策略限制了 `fork()` 后的 `execve()`（对 SDK 工具的执行权限）。同时 `posix_spawn()` 在鸿蒙上完全可用且更可靠，因此 multiprocessing 应默认使用 `spawn` 模式。如果保持 `fork` 默认，`multiprocessing.Process`, `multiprocessing.Pool`, `multiprocessing.Queue` 等可能在某些场景下失败。
 
 **影响范围:** 所有使用 `multiprocessing` 的代码，包括 `concurrent.futures.ProcessPoolExecutor`、第三方库中依赖多进程的功能。
 
@@ -481,7 +481,7 @@ def _use_posix_spawn():
     return False
 ```
 
-鸿蒙使用 musl libc 且 `sys.platform` 为 `'ohos'`/`'harmonyos'`。此函数返回 False，导致 subprocess 使用 fork+exec 路径。**但鸿蒙不支持 fork()**。
+鸿蒙使用 musl libc 且 `sys.platform` 为 `'ohos'`/`'harmonyos'`。此函数返回 False，导致 subprocess 使用 fork+exec 路径。**但鸿蒙的 fork+exec 受 SELinux 域转换限制，且 posix_spawn() 在 musl 下更可靠**。
 
 musl libc 的 `posix_spawn()` 实现质量良好，应该可以使用。需验证鸿蒙的 posix_spawn 实现是否能正确报告 exec 错误到父进程。
 
@@ -659,22 +659,22 @@ asyncio 的事件循环处理。鸿蒙上行为应与 Linux 类似。
 
 pip 是 Python 最重要的包管理器，它大量使用 `subprocess` 模块。以下是 pip 使用 subprocess 时的关键路径：
 
-#### 问题 1: fork() 不可用 (P0-2)
+#### 问题 1: fork+exec 受 SELinux 限制 (P0-2)
 
 **调用链:**
-1. `pip install` → `subprocess.run()` → `Popen._execute_child()` → `_posixsubprocess.fork_exec()` → `fork()` → **失败**
+1. `pip install` → `subprocess.run()` → `Popen._execute_child()` → `_posixsubprocess.fork_exec()` → `fork()` → `execve()` → **SELinux 拦截**
 
-**根本原因:** 鸿蒙内核不支持 `fork()` 系统调用。
+**根本原因:** 鸿蒙支持 `fork()` 系统调用（C 级 T0 测试已验证），但 SELinux 域转换策略（`adhoc_bin:s0` → `hnp_file`）限制了 fork 后执行 SDK 工具。`posix_spawn()` 不受此限制，应优先使用。
 
 **当前状态:**
 - `_bootsubprocess.py` 通过 SELinux pipe 绕过方案处理了**构建阶段**（setup.py）的子进程调用
 - `_harmonyos_compat.py` 通过 site.py 在启动时注入兼容层
-- 但 **运行时** 的 `subprocess.Popen()` 仍走 fork 路径
+- 但 **运行时** 的 `subprocess.Popen()` 应走 `posix_spawn()` 路径（补丁 0016/0020 已修复）
 
 **修复方案:**
-1. 在 `_use_posix_spawn()` 中为鸿蒙返回 `True`，使 subprocess 走 `os.posix_spawn()` 路径
-2. 验证鸿蒙的 `posix_spawn()` 能正确报告 exec 错误
-3. 确保鸿蒙的 SELinux 策略允许 posix_spawn 创建的子进程执行目标程序
+1. 在 `_use_posix_spawn()` 中为鸿蒙返回 `True`，使 subprocess 走 `os.posix_spawn()` 路径 ✅ 已修复（补丁 0016）
+2. 验证鸿蒙的 `posix_spawn()` 能正确报告 exec 错误 ✅ 已验证
+3. 确保鸿蒙的 SELinux 策略允许 posix_spawn 创建的子进程执行目标程序 ✅ 已验证
 
 #### 问题 2: `/bin/sh` 路径 (P0-5)
 
@@ -803,5 +803,8 @@ pip install numpy
 ### 第三优先级（性能和兼容性优化）
 
 8. **P1-2**: 启用 sendfile 优化
+9. **P1-3**: sendfile NULL offset 支持
+10. **P1-4~P1-5**: multiprocessing 共享内存和抽象 socket
+优化
 9. **P1-3**: sendfile NULL offset 支持
 10. **P1-4~P1-5**: multiprocessing 共享内存和抽象 socket

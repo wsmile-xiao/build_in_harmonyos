@@ -50,6 +50,11 @@
 | [E042](#e042-扩展模块-rpath-遗漏导致运行时库找不到) | 打包 | ImportError: cannot open shared object file | 🔴 阻塞 |
 | [E043](#e043-activatesh-中-bash_source-在-hishell-不可用) | 脚本 | 环境变量未设置（脚本静默失败） | 🟡 中等 |
 | [E044](#e044-可移植包缺少-pythonhome-导致标准库找不到) | 运行时 | ModuleNotFoundError: No module named 'encodings' | 🔴 阻塞 |
+| [E045](#e045-mmap-rwx-被拒w^x-策略) | 系统调用 | mmap: Invalid argument, CFUNCTYPE MemoryError | 🟡 中等 |
+| [E046](#e046-chmod-完全不生效) | SELinux/FS | chmod: Permission denied, st_mode unchanged | 🟡 中等 |
+| [E047](#e047-文件权限-other-read-被额外屏蔽) | FS | st_mode: missing 0o004 bit | 🟢 轻微 |
+| [E048](#e048-udplite-协议不支持) | 内核 | IPPROTO_UDPLITE: Permission denied | 🟢 轻微 |
+| [E049](#e049-find_library-崩溃ldconfig-不存在) | 系统调用 | find_library, SubprocessError, ldconfig | 🟡 中等 |
 
 ---
 
@@ -1723,6 +1728,377 @@ Python 3.9.0 可移植打包（Python 特有，但同类"解释器需要 HOME �
 
 ---
 
+## E045: mmap RWX 被拒（W^X 策略）
+
+### 错误特征
+
+```
+# ctypes 回调包装器创建失败
+@ctypes.CFUNCTYPE(None, ctypes.c_voidp)
+def myfree(ptr):
+    pass
+# MemoryError
+
+# mmap 直接调用失败
+mmap.mmap(-1, size, prot=mmap.PROT_READ|mmap.PROT_WRITE|mmap.PROT_EXEC)
+# OSError: [Errno 22] Invalid argument
+```
+
+### 根因
+
+HarmonyOS 内核强制 **W^X（Write XOR Execute）** 安全策略，禁止同时可写且可执行的内存映射。这在以下场景中会触发：
+
+1. **ctypes CFUNCTYPE 回调包装器**：libffi 在创建回调 closure 时需要分配 RWX 内存页来存放动态生成的跳转代码
+2. **JIT 编译器**（如 PyPy、numba）：需要将运行时生成的机器码写入可执行内存
+3. **动态代码生成**：任何需要 mmap RWX 的场景
+
+| 系统 | mmap RWX | ctypes 回调 |
+|------|----------|------------|
+| Linux | ✅ 允许 | ✅ 正常 |
+| HarmonyOS | ❌ Invalid argument | ❌ MemoryError |
+
+### 影响范围
+
+| 影响程度 | 说明 |
+|----------|------|
+| 🔴 严重 | 所有使用 `@ctypes.CFUNCTYPE` 装饰器的代码都会 MemoryError |
+| 🟡 中等 | `ctypes.CFUNCTYPE` 类型创建本身 OK，但包装器创建（传入函数）会失败 |
+| 🟢 轻微 | 普通的 ctypes 函数调用（无回调）正常工作 |
+
+### 验证命令
+
+```python
+import ctypes, mmap
+
+# 测试 1：CFUNCTYPE 类型创建（应该成功）
+t = ctypes.CFUNCTYPE(None, ctypes.c_voidp)
+print("Type creation:", "OK")
+
+# 测试 2：包装器创建（应该 MemoryError）
+try:
+    @t
+    def f(ptr): pass
+except MemoryError:
+    print("Wrapper creation: MemoryError")
+
+# 测试 3：mmap RWX（应该失败）
+try:
+    buf = mmap.mmap(-1, 4096, prot=mmap.PROT_READ|mmap.PROT_WRITE|mmap.PROT_EXEC)
+except OSError as e:
+    print(f"mmap RWX: {e}")
+```
+
+### 解决方案
+
+**当前无法在 Python 层修复。** 需要在 libffi 层使用 RW→RX 分步映射：
+
+```c
+// 正确做法：先分配 RW，写入代码后改为 RX
+void *buf = mmap(NULL, size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANON, -1, 0);
+memcpy(buf, code, code_size);
+mprotect(buf, size, PROT_READ|PROT_EXEC);  // 去掉 W，加上 X
+```
+
+**临时绕过**：对于需要回调的场景，可以使用 `subprocess` 将数据传给外部进程处理，避免在进程内使用 ctypes 回调。
+
+### 涉及软件
+
+Python 3.9.0（test_code）、任何使用 ctypes 回调的第三方库（cffi、pycurl 等）
+
+---
+
+## E046: chmod() 完全不生效
+
+### 错误特征
+
+```python
+import os, stat
+
+os.chmod('/tmp/testfile', 0o000)
+mode = os.stat('/tmp/testfile').st_mode
+print(oct(stat.S_IMODE(mode)))  # 仍然是 0o660，chmod 未生效
+
+os.access('/tmp/testfile', os.R_OK)  # True，仍然可读
+```
+
+### 根因
+
+HarmonyOS 的 SELinux 或 HMDFS 文件系统忽略了 POSIX `chmod()` 调用。`chmod()` 系统调用返回成功（不报错），但文件权限实际上没有改变。
+
+**影响链**：所有依赖 `chmod()` 创建受限权限文件的测试逻辑都会失效。
+
+| 系统 | chmod 行为 | os.access 结果 |
+|------|-----------|---------------|
+| Linux | ✅ 实际修改权限 | 按 chmod 后的权限检查 |
+| HarmonyOS | ❌ 返回成功但不修改 | 仍按原始权限检查 |
+
+### 典型失败模式
+
+```python
+# test_httpservers 的测试逻辑
+os.chmod(directory, 0o000)       # 期望：目录不可读
+response = request('/path')       # 期望：404 Not Found
+# 鸿蒙实际：目录仍可读 → 返回 200 OK → 断言失败
+
+# test_argparse 的测试逻辑
+os.chmod(file, 0o444)             # 期望：只读
+parser.parse_args(['readonly'])    # 期望：ArgumentParserError
+# 鸿蒙实际：文件仍可写 → 不报错 → 断言失败
+```
+
+### 验证命令
+
+```python
+import os, tempfile, stat
+tmpf = tempfile.NamedTemporaryFile(delete=False)
+tmpf.close()
+
+os.chmod(tmpf.name, 0o000)
+print("Before:", oct(stat.S_IMODE(os.stat(tmpf.name).st_mode)))
+print("Readable:", os.access(tmpf.name, os.R_OK))
+# 鸿蒙输出: Before: 0o660, Readable: True（chmod 无效）
+
+os.unlink(tmpf.name)
+```
+
+### 解决方案
+
+**无法在 Python 层修复。** 这是平台限制。
+
+对于测试代码，可以跳过依赖 chmod 的测试：
+
+```python
+import os, sys
+
+def skip_if_chmod_broken():
+    """HarmonyOS: chmod() 不生效"""
+    import tempfile
+    tmpf = tempfile.NamedTemporaryFile(delete=False)
+    tmpf.close()
+    try:
+        os.chmod(tmpf.name, 0o000)
+        if os.access(tmpf.name, os.R_OK):
+            os.unlink(tmpf.name)
+            return True  # chmod broken
+    except:
+        pass
+    finally:
+        try: os.unlink(tmpf.name)
+        except: pass
+    return False
+
+if skip_if_chmod_broken():
+    raise unittest.SkipTest("chmod() not functional on this platform")
+```
+
+### 涉及软件
+
+Python 3.9.0（test_argparse、test_httpservers 等至少 7 个测试）
+
+---
+
+## E047: 文件权限 other-read bit 被额外屏蔽
+
+### 错误特征
+
+```python
+# test_dbm_dumb
+AssertionError: 440 != 413
+
+# test_uu
+AssertionError: 432 != 292
+```
+
+### 根因
+
+HarmonyOS 文件系统（HMDFS）在文件创建时会额外清除 "other read" 权限位（0o004），与 umask 设置无关。
+
+| umask 设置 | 期望文件权限 | 实际文件权限 | 差异 |
+|-----------|-------------|-------------|------|
+| 0o022 | 0o644 | 0o640 | -0o004 |
+| 0o002 | 0o664 | 0o660 | -0o004 |
+| 0o077 | 0o600 | 0o600 | 无差异 |
+
+**规律**：other-read（0o004）位始终被清除。当 umask 本身就屏蔽了该位时（如 0o077），没有额外影响。
+
+### 验证命令
+
+```python
+import os, tempfile, stat
+
+old = os.umask(0o022)
+tmpf = tempfile.NamedTemporaryFile(delete=False)
+tmpf.write(b'test')
+tmpf.close()
+mode = stat.S_IMODE(os.stat(tmpf.name).st_mode)
+print(f"umask 022: got {oct(mode)}, expected {oct(0o644)}, diff {oct(0o644 - mode)}")
+os.unlink(tmpf.name)
+os.umask(old)
+# 鸿蒙输出: umask 022: got 0o640, expected 0o644, diff 0o004
+```
+
+### 解决方案
+
+**无法修复。** 文件系统行为差异。对于测试代码，建议放宽权限断言的容差：
+
+```python
+# 修改前
+self.assertEqual(actual_mode, expected_mode)
+
+# 修改后：允许 other-read 位差异
+if sys.platform.startswith(('ohos', 'harmonyos')):
+    expected_mode &= ~0o004  # HarmonyOS 额外清除 other-read
+self.assertEqual(actual_mode, expected_mode)
+```
+
+### 涉及软件
+
+Python 3.9.0（test_dbm_dumb、test_uu）
+
+---
+
+## E048: UDPLITE 协议不支持
+
+### 错误特征
+
+```python
+import socket
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDPLITE)
+# PermissionError: [Errno 13] Permission denied
+```
+
+### 根因
+
+HarmonyOS 内核未启用 UDPLITE（UDP-Lite, RFC 3828）协议支持。UDPLITE 允许部分校验和覆盖，主要用于无线网络环境。
+
+| 系统 | UDPLITE | IPPROTO_UDPLITE 值 |
+|------|---------|-------------------|
+| Linux | ✅ 支持 | 136 |
+| HarmonyOS | ❌ 不支持 | 136（定义存在但内核不支持） |
+
+### 影响范围
+
+| 测试 | 影响 |
+|------|------|
+| test_socket | 36 个 UDPLITE 相关测试 error，其余 352 个通过 |
+
+Python 的 `socket` 模块中 `IPPROTO_UDPLITE` 常量已定义（因为在头文件中），但内核不实际支持该协议。
+
+### 验证命令
+
+```python
+import socket
+try:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDPLITE)
+    print("UDPLITE: OK")
+    s.close()
+except PermissionError:
+    print("UDPLITE: not supported (PermissionError)")
+except OSError as e:
+    print(f"UDPLITE: {e}")
+```
+
+### 解决方案
+
+**无法修复。** 内核不支持该协议。对于测试代码，跳过 UDPLITE 相关测试：
+
+```python
+import socket, sys
+
+def skip_if_no_udplite():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDPLITE)
+        s.close()
+        return False
+    except (PermissionError, OSError):
+        return True
+
+if skip_if_no_udplite():
+    raise unittest.SkipTest("UDPLITE not supported on this platform")
+```
+
+### 涉及软件
+
+Python 3.9.0（test_socket）
+
+---
+
+## E049: find_library 崩溃（ldconfig 不存在）
+
+### 错误特征
+
+```python
+from ctypes.util import find_library
+find_library("c")
+# SubprocessError: Command '('/sbin/ldconfig', '-p')' returned non-zero exit status 127.
+```
+
+### 根因
+
+HarmonyOS 没有 `/sbin/ldconfig`（Linux 标准的共享库缓存管理工具）。`ctypes.util.find_library()` 内部调用 `_findSoname_ldconfig()` 时，直接执行 `ldconfig -p` 命令，因命令不存在而触发 `SubprocessError`。
+
+**问题链**：
+```
+ctypes.util.find_library(name)
+    ↓
+_findSoname_ldconfig(name, True)
+    ↓
+subprocess.run(['/sbin/ldconfig', '-p'], ...)
+    ↓
+ldconfig 不存在 → FileNotFoundError → SubprocessError
+```
+
+### 影响范围
+
+| 影响程度 | 说明 |
+|----------|------|
+| 🔴 严重 | 所有调用 `find_library()` 的代码直接崩溃（SubprocessError） |
+| 🟡 中等 | 返回 `None` 本身是合法行为（表示找不到库），崩溃才是问题 |
+
+**受影响的三方库**：
+
+| 三方库 | 影响场景 |
+|--------|---------|
+| cffi | `ffi.dlopen()` 内部调用 find_library 查找共享库 |
+| trio | 调用 find_library 进行 DNS 解析器发现 |
+| Django GIS | Spatialite 库查找依赖 find_library |
+| Sphinx | 文档构建工具的部分扩展依赖 find_library |
+
+### 验证命令
+
+```python
+from ctypes.util import find_library
+
+# 修复前：SubprocessError
+# find_library("c") → SubprocessError: Command '('/sbin/ldconfig', '-p')' returned non-zero exit status 127.
+
+# 修复后（补丁 0022）：安全返回 None
+# find_library("c") → None
+```
+
+### 解决方案
+
+**补丁 0022**（Python 3.9.0）：在 `Lib/ctypes/util.py` 的 `_findSoname_ldconfig()` 函数头部跳过鸿蒙平台：
+
+```python
+# Lib/ctypes/util.py _findSoname_ldconfig() 函数
+import sys
+
+def _findSoname_ldconfig(name, is64):
+    # HarmonyOS has no /sbin/ldconfig, skip to avoid SubprocessError
+    if sys.platform.startswith(('ohos', 'harmonyos')):
+        return None
+    # ... original code ...
+```
+
+修复后 `find_library()` 安全返回 `None`（表示找不到共享库），与无 ldconfig 的 Linux 系统行为一致。
+
+### 涉及软件
+
+Python 3.9.0（补丁 0022）、cffi、trio、Django、Sphinx
+
+---
+
 ## 错误诊断流程
 
 ```
@@ -1776,6 +2152,6 @@ ls -Z /path/to/file
 
 ---
 
-*文档版本: 2.2*  
-*最后更新: 2026-03-23*
-*新增 E042-E044：可移植打包验证阶段发现的三个问题*
+*文档版本: 2.4*  
+*最后更新: 2026-03-26*
+*新增 E049：find_library 崩溃（HarmonyOS 无 /sbin/ldconfig，已通过补丁 0022 修复）*

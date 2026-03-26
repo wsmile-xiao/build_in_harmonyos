@@ -1,6 +1,9 @@
 # Python 3.9.0 OpenHarmony 跳过测试详情
 
-## 跳过测试列表 (25个)
+> **测试日期**: 2026-03-26 | **补丁版本**: 20 补丁（0001-0020）
+> **前次**: 2026-03-21，11 补丁，25 个跳过 → **本次 26 个跳过（+1）**
+
+## 跳过测试列表 (26个)
 
 ### 1. GUI 相关 (8个)
 
@@ -37,8 +40,8 @@
 | test_winreg | No module named 'winreg' |
 | test_winsound | Use of the 'audio' resource not enabled |
 | test_winconsoleio | test only relevant on win32 |
-| test_startfile | No module named 'os.startfile' |
-| test_msilib | No module named '_msilib' |
+| test_startfile | object has no attribute 'startfile' |
+| test_msilib | No module named '_msi' |
 
 **原因**：这些是 Windows 特有的功能
 
@@ -68,20 +71,34 @@
 
 | 测试 | 跳过原因 |
 |------|----------|
-| test_zipfile64 | resource 'largefile' not enabled |
+| test_zipfile64 | test requires loads of disk-space bytes and a long time to run |
 
 **原因**：测试需要处理大文件，默认未启用
+
+### 7. 调试器依赖 (1个) ⚠️ 新增
+
+| 测试 | 跳过原因 |
+|------|----------|
+| test_gdb | https://bugzilla.redhat.com/show_bug.cgi?id=1866884 |
+
+**原因**：gdb 相关测试（Red Hat Bug 1866884），之前版本为失败状态，本次自动跳过
 
 ## 跳过原因统计
 
 | 分类 | 测试数量 | 占比 |
 |------|----------|------|
-| GUI (无 Tcl/Tk) | 8 | 32% |
-| Windows 特有 | 5 | 20% |
-| 网络资源未启用 | 6 | 24% |
+| GUI (无 Tcl/Tk) | 8 | 31% |
+| Windows 特有 | 5 | 19% |
+| 网络资源未启用 | 6 | 23% |
 | Linux 特有 | 3 | 12% |
 | 其他 Unix 特有 | 2 | 8% |
 | 大文件资源未启用 | 1 | 4% |
+| 调试器依赖 | 1 | 4% |
+
+## 与上次对比
+
+- **新增**：test_gdb（之前为失败状态）
+- 其他 25 个跳过测试与上次完全一致
 
 ## 影响评估
 
@@ -91,6 +108,7 @@
 | Windows/Linux 特有 | ✅ 无影响 | 这些功能在 OpenHarmony 上不需要 |
 | 网络资源未启用 | ✅ 可选 | 可通过 `-u network` 启用 |
 | 大文件资源未启用 | ✅ 可选 | 可通过 `-u largefile` 启用 |
+| 调试器依赖 | ✅ 无影响 | gdb 在鸿蒙上可用性有限 |
 
 ## 如何运行被跳过的网络测试
 
