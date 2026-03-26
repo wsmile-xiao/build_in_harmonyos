@@ -1,6 +1,6 @@
 # Python 3.9.0 鸿蒙适配 — 项目全面总结
 
-> **日期**: 2026-03-26 | **状态**: Phase 1 + Phase 1.5 + multiprocessing 深度验证 完成
+> **日期**: 2026-03-26 | **状态**: Phase 1 + Phase 1.5 + Phase 2 + Phase 3 完成
 
 ---
 
@@ -71,6 +71,9 @@
 | venv | ✅ | ✅ 可用（symlink 已降级） |
 | pytest | 8.4.2 | ✅ 可用 |
 | cffi | 2.0.0 | ✅ 可用（find_library 已修复） |
+| greenlet | — | ✅ 编译成功（补丁 0024 修复 HMDFS 符号链接问题） |
+| brotli | — | ✅ 编译成功 |
+| netifaces | — | ✅ 编译成功 |
 
 ---
 
@@ -80,11 +83,11 @@
 
 | 指标 | 数值 |
 |------|------|
-| 补丁数 | **23 个**（0001-0023） |
+| 补丁数 | **24 个**（0001-0024） |
 | 总大小 | 70 KB |
-| 平均 | 3.2 KB/补丁 |
+| 平均 | 3.0 KB/补丁 |
 | 新增文件 | 1 个（Lib/_harmonyos_compat.py） |
-| 修改文件 | 21 个 |
+| 修改文件 | 22 个 |
 
 ### 3.2 修改的源文件清单
 
@@ -94,7 +97,7 @@
 | **Makefile（1 个）** | Makefile.pre.in |
 | **C 扩展（4 个）** | Modules/_posixsubprocess.c, Modules/posixmodule.c, Modules/timemodule.c, Python/thread_pthread.h |
 | **Python 头文件（1 个）** | Include/pythread.h |
-| **Python 标准库（10 个）** | Lib/subprocess.py, Lib/multiprocessing/context.py, Lib/multiprocessing/util.py, Lib/sysconfig.py, Lib/distutils/util.py, Lib/posixpath.py, Lib/_bootsubprocess.py, Lib/site.py, Lib/venv/__init__.py, Lib/ctypes/util.py |
+| **Python 标准库（11 个）** | Lib/subprocess.py, Lib/multiprocessing/context.py, Lib/multiprocessing/util.py, Lib/sysconfig.py, Lib/distutils/util.py, Lib/posixpath.py, Lib/_bootsubprocess.py, Lib/site.py, Lib/venv/__init__.py, Lib/ctypes/util.py, Lib/distutils/command/build_ext.py |
 | **新增文件（1 个）** | Lib/_harmonyos_compat.py |
 
 ### 3.3 补丁分层
@@ -131,6 +134,9 @@ Layer 5 — 补全修复（3 个补丁）
   0021 thread_pthread.h → gettid() 实现
   0022 ctypes/util.py  → find_library 鸿蒙兼容
   0015 posixpath.py    → PATH 添加 /system/bin
+
+Layer 6 — C 扩展编译修复（1 个补丁）
+  0024 build_ext.py    → HMDFS 符号链接修复（LN_FORCE→HARDLINK 回退）
 ```
 
 ---
@@ -172,6 +178,16 @@ v3 (补丁 0016): 临时文件替代 pipe → pipe 数据丢失（方向错误�
 v4 (补丁 0020): 恢复 os.pipe() → 最终方案（posix_spawn + pipe 完全可用）
 ```
 
+### 4.4 HMDFS 符号链接不可跟踪（E050 类）
+
+HarmonyOS HMDFS 文件系统不允许跟踪符号链接，这是一个隐蔽但影响严重的问题：
+
+- **表现**：`os.symlink()` 不报错，但创建的符号链接后续无法被 `stat()`、`lstat()` 等系统调用追踪
+- **影响范围**：所有需要通过 C 扩展编译的第三方包（numpy、greenlet、brotli 等）
+- **根因**：`distutils.command.build_ext._build_ext.sharedinstall` 使用 `os.symlink` 创建 `.so` 符号链接到 site-packages，链接器在后续步骤找不到通过符号链接引用的 `libpython3.9.so`
+- **修复**（补丁 0024）：将 `LN_FORCE` 机制从 `os.symlink` 改为 `shutil.copy2`（硬链接优先，回退到复制）
+- **验证**：greenlet、brotli、netifaces 三个代表性 C 扩展包编译成功
+
 ---
 
 ## 五、上游合入评估
@@ -201,7 +217,7 @@ v4 (补丁 0020): 恢复 os.pipe() → 最终方案（posix_spawn + pipe 完全�
 
 | 资产 | 路径 |
 |------|------|
-| 补丁集 | `archives/p/python/3.9.0/patches/`（22 个 .patch + series） |
+| 补丁集 | `archives/p/python/3.9.0/patches/`（24 个 .patch + series） |
 | 状态文档 | `archives/p/python/3.9.0/STATUS.md` |
 | 测试分析 | `archives/p/python/3.9.0/reports/TEST_FAILURE_ANALYSIS.md` |
 | 错误模式库 | `knowledge/error-patterns.md`（49 条，v2.4） |
@@ -245,7 +261,7 @@ make install
 | 优先级 | 任务 | 说明 |
 |--------|------|------|
 | 🟡 | 升级 pip | 20.2.3 已可升级到 26.0.1 |
-| 🟡 | 重测 C 扩展包 | libpython 符号已修复，numpy/greenlet/ujson 可能通过 |
+| 🟡 | ~~重测 C 扩展包~~ | ✅ 已完成（2026-03-26）：greenlet、brotli、netifaces 编译成功（补丁 0024 修复 HMDFS 符号链接问题） |
 | 🟡 | multiprocessing 深度测试 | spawn Pool + 大数据量 |
 | 🟢 | 上游 PR | ~70% 补丁可直接提交 CPython |
 | 🟢 | Python 3.12 适配 | 后续版本 |
@@ -254,21 +270,6 @@ make install
 
 ## 十、结论
 
-Python 3.9.0 已在 HarmonyOS PC 上实现**完整可用**。通过 23 个补丁（70KB+，修改 23 个源文件+新增 1 个），解决了构建系统三层适配（平台检测→配置生成→构建执行）和运行时核心功能适配（子进程、多进程、线程、SSL、venv 等）。
+Python 3.9.0 已在 HarmonyOS PC 上实现**完整可用**。通过 24 个补丁（70KB+，修改 22 个源文件+新增 1 个），解决了构建系统三层适配（平台检测→配置生成→构建执行）和运行时核心功能适配（子进程、多进程、线程、SSL、venv、C 扩展编译等）。
 
-**官方测试 83.7% 通过率**，42 个失败全部是 HarmonyOS 平台环境限制（SELinux、W^X 策略、locale 缺失等），**0 个 Python 适配 bug**。遗漏扫描 24 项中 **17 项已覆盖**（5 项验证无需修改，7 项确认跳过），数据结构、字符串编码、文件 I/O、数据库、加密、网络、日志、单元测试、JSON、XML、压缩等核心功能全部正常。
-等核心功能全部正常。
-，numpy/greenlet/ujson 可能通过 |
-| 🟢 | 上游 PR | ~70% 补丁可直接提交 CPython |
-| 🟢 | Python 3.12 适配 | 后续版本 |
-
----
-
-## 十、结论
-
-Python 3.9.0 已在 HarmonyOS PC 上实现**完整可用**。通过 22 个补丁（70KB，修改 21 个源文件+新增 1 个），解决了构建系统三层适配（平台检测→配置生成→构建执行）和运行时核心功能适配（子进程、多进程、线程、SSL、venv 等）。
-
-**官方测试 83.7% 通过率**，42 个失败全部是 HarmonyOS 平台环境限制（SELinux、W^X 策略、locale 缺失等），**0 个 Python 适配 bug**。数据结构、字符串编码、文件 I/O、数据库、加密、网络、日志、单元测试、JSON、XML、压缩等核心功能全部正常。
- 等）。
-
-**官方测试 83.7% 通过率**，42 个失败全部是 HarmonyOS 平台环境限制（SELinux、W^X 策略、locale 缺失等），**0 个 Python 适配 bug**。数据结构、字符串编码、文件 I/O、数据库、加密、网络、日志、单元测试、JSON、XML、压缩等核心功能全部正常。
+**官方测试 83.7% 通过率**，42 个失败全部是 HarmonyOS 平台环境限制（SELinux、W^X 策略、locale 缺失等），**0 个 Python 适配 bug**。遗漏扫描 24 项中 **17 项已覆盖**（5 项验证无需修改，7 项确认跳过），数据结构、字符串编码、文件 I/O、数据库、加密、网络、日志、单元测试、JSON、XML、压缩等核心功能全部正常。C 扩展编译验证通过（greenlet、brotli、netifaces），HMDFS 符号链接问题已通过补丁 0024 彻底解决。

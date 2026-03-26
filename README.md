@@ -28,7 +28,7 @@
 
 | 软件 | 版本 | 状态 | 构建系统 | 说明 |
 |------|------|------|----------|------|
-| Python | 3.9.0 | ⚠️ 部分成功 | Autotools | 完整可用，含可移植包和预编译发布 |
+| Python | 3.9.0 | ⚠️ 部分成功 | Autotools | 24 补丁，完整可用，含 C 扩展编译验证（greenlet/brotli/netifaces） |
 | OpenSSL | 1.1.1w | ✅ 成功 | Custom-Perl | 需 `no-asm`，提供 `python-3.9.0` SSL 支持 |
 | ncurses | 6.4 | ✅ 成功 | Autotools | Python curses 模块依赖 |
 | readline | 8.2 | ✅ 成功 | Autotools | Python readline 模块依赖 |
@@ -93,7 +93,7 @@ Python 3.9.0
 |------|------|
 | [musl-compat.md](knowledge/musl-compat.md) | musl 与 glibc 的差异及兼容方案 |
 | [musl-glibc-developer-impact.md](knowledge/musl-glibc-developer-impact.md) | musl 对开发者的实际影响评估 |
-| [python-extensions.md](knowledge/python-extensions.md) | Python C 扩展模块编译方法 |
+| [python-extensions.md](knowledge/python-extensions.md) | Python C 扩展模块编译方法（含 HMDFS 符号链接修复） |
 | [dependencies.md](knowledge/dependencies.md) | 编译依赖关系与推荐编译顺序 |
 | [autotools-patterns.md](knowledge/autotools-patterns.md) | Autotools 项目适配模式 |
 | [best-practices.md](knowledge/best-practices.md) | 编译最佳实践与经验总结 |

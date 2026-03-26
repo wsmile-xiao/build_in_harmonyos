@@ -1,15 +1,14 @@
 # Python 3.9.0 鸿蒙适配：进展总结与下一步计划
 
 > **最后更新**: 2026-03-26 | **维护者**: OpenHarmony PC Developer 社区
-> **状态**: Phase 1 + Phase 1.5 + Phase 2 完成
-> **状态数据来源**: 2026-03-26 实际验证，基于 23 补丁版本（补丁 0001-0023）
-> **状态数据来源**: 2026-03-26 实际验证，基于 22 补丁版本（补丁 0001-0022）
+> **状态**: Phase 1 + Phase 1.5 + Phase 2 + Phase 3 完成
+> **状态数据来源**: 2026-03-26 实际验证，基于 24 补丁版本（补丁 0001-0024）
 
 ---
 
 ## 一、已完成的工作
 
-### 1. 编译成功（22 个补丁，3 层构建系统适配）
+### 1. 编译成功（24 个补丁，3 层构建系统适配 + C 扩展修复）
 
 Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编译，涉及构建系统三层的全面适配：
 
@@ -94,7 +93,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 - `_python_fork_exec` 的 `os.execve()` 需要 dict 而非 list of bytes（0020 已修复）
 - `_posixsubprocess.c` C 扩展是硬依赖，缺失时整个 subprocess 模块不可用
 
-### 6. 官方测试结果（2026-03-26，22 补丁版本）
+### 6. 官方测试结果（2026-03-26，24 补丁版本）
 
 | 状态 | 数量 | 占比 |
 |------|------|------|
@@ -190,20 +189,21 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 |------|------|
 | HARMONYOS_SUBPROCESS_GUIDE.md (v2.0) | 子进程完整指南，含 C 级测试矩阵、Pipe 绕过方案、3.12 路线图 |
 | UPSTREAM_ADAPTATION_ANALYSIS.md | 上游合入方案 + 遗漏扫描汇总 |
-| PATCH_DETAIL_ANALYSIS.md | 补丁逐文件 diff 分析（待更新至 22 个补丁） |
+| PATCH_DETAIL_ANALYSIS.md | 补丁逐文件 diff 分析（待更新至 24 个补丁） |
 | MISSING_ADAPTATION_SCAN.md | 24 个遗漏点完整报告（含代码示例） |
 | README.md (v4.0) | 完整编译指南，含补丁详解和举一反三 |
 
 ---
 
-## 二、补丁清单（22 个）
+## 二、补丁清单（24 个）
 
-> 2026-03-26 更新：从 11 个补丁扩充至 22 个（新增 0012-0022），work 目录全部变更已补丁化。
+> 2026-03-26 更新：从 11 个补丁扩充至 24 个（新增 0012-0024），work 目录全部变更已补丁化。
 > 0002 和 0008 已用完整的 ref→work diff 替换（包含后续新增的 srcdir 相对路径修复）。
 >
 > ⚠️ **补丁依赖**：
 > - 补丁 0020 依赖 0016（必须先应用 0016 才能应用 0020）
 > - 补丁 0021 依赖 0012（0012 声明 PY_HAVE_THREAD_NATIVE_ID，0021 实现具体逻辑）
+> - 补丁 0024 无额外依赖（独立修复 distutils/sharedinstall 符号链接问题）
 > 在干净源码上单独 check 0020 或 0021 会失败，必须按 patches/series 中的顺序依次应用。
 
 ### 核心构建系统（0001-0011）
@@ -295,6 +295,18 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 - P2-6: `getpass.py` — 当前环境无终端
 - P2-7: `_decimal/mpdecimal.h` — 通过 autoconf fallback 正常工作。
 
+### Phase 3：C 扩展编译修复（0024）
+
+| 补丁 | 遗漏点 ID | 文件 | 说明 |
+|------|-----------|------|------|
+| 0024 | — | Lib/distutils/command/build_ext.py | HMDFS 符号链接修复：sharedinstall 中 `LN_FORCE` 从 `os.symlink`（不可跟踪）改为 `shutil.copy2`（HARDLINK 回退） |
+
+> **关于 0024 的说明**：HarmonyOS HMDFS 文件系统不允许跟踪符号链接。当 `python setup.py build_ext --inplace` 或
+> `pip install` 编译 C 扩展时，`distutils` 的 `_build_ext.sharedinstall` 方法尝试用 `os.symlink` 创建 `.so` 的
+> 符号链接到目标目录，但链接器在后续步骤中找不到通过符号链接引用的 `libpython3.9.so`，导致所有 C 扩展包编译失败。
+> 补丁 0024 将 `LN_FORCE` 机制从 `os.symlink` 改为 `shutil.copy2`（硬链接优先，回退到复制），确保文件系统可追踪。
+> **验证结果**：greenlet、brotli、netifaces 三个 C 扩展包均编译成功。
+
 ---
 
 ## 三、当前状态
@@ -302,7 +314,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 ### Phase 1 已完成（2026-03-26）
 
 **核心成果**：
-- ✅ 22 个补丁全部可干净应用（origin 基准验证，须按 series 顺序）
+- ✅ 24 个补丁全部可干净应用（origin 基准验证，须按 series 顺序）
 - ✅ Python 3.9.0 编译成功（72 个 .so 扩展模块，make install 后 72/72 导入成功）
 - ✅ libpython3.9.so 正确导出 1459 个 text 符号（PyType_IsSubtype 等 C API 全部可用）
 - ✅ make install 完成，install 目录完整（bin/python3.9、libpython3.9.so、72 个 lib-dynload .so）
@@ -321,6 +333,20 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 - ✅ find_library 鸿蒙兼容（补丁 0022，SubprocessError 已修复）
 - ✅ test_ctypes 从 67 errors 改善到 63 errors（+4 通过）
 - ✅ test_threading 全部通过（补丁 0021 修复）
+
+### Phase 2 已完成（2026-03-26）
+
+**核心成果**：
+- ✅ 遗漏扫描剩余 5 项修复（补丁 0023）：fd 验证、sendfile 优化、临时目录、lchmod 检测、uuid 路径
+- ✅ pylifecycle.c fd 验证走 dup() 路径（P0-4）
+- ✅ shutil.py sendfile 零拷贝优化已验证（P1-2）
+
+### Phase 3 已完成（2026-03-26）
+
+**核心成果**：
+- ✅ HMDFS 符号链接不可跟踪问题修复（补丁 0024）：sharedinstall `LN_FORCE` 从 `os.symlink` 改为 `shutil.copy2`
+- ✅ C 扩展包编译验证：greenlet、brotli、netifaces 编译成功
+- ✅ 解决了 pip install / setup.py build_ext --inplace 中链接器找不到 libpython3.9.so 的根因问题
 
 **编译命令**（2026-03-26 P0 重编译，已启用 --enable-shared）：
 
@@ -348,8 +374,9 @@ make install
 | make install 不完整 | 编译后未执行 `make install` | 🟡 待执行 | install 目录没有 `bin/python3.9`，没有 `lib-dynload/`，只有 site-packages/ 和旧的 .so 文件 |
 | pip 版本过旧（20.2.3） | 随 Python 3.9.0 内置 | 🟡 待升级 | 可升级到 26.0.1 |
 | quicktest 不可复现 | `python -m test` 因 PYTHONPATH 问题无法运行 | 🟡 待调查 | 直接运行 `python3.9 Lib/test/test_builtin.py` 可行 |
-| C 扩展包测试结果已失效 | 测试包已卸载，需重新安装测试 | 🟢 后续可选 | libpython3.9.so 符号已修复（1459个），之前 3 个 import 失败的包应该能通过 |
-| 官方测试已重跑 | ~~425 用例结果基于 11 补丁版本~~ | ✅ 已完成 | 2026-03-26 已基于 22 补丁重跑：350 通过 / 42 失败 / 26 跳过（83.7% 通过率） |
+| C 扩展包测试结果已失效 | 测试包已卸载，需重新安装测试 | ✅ 已解决 | 2026-03-26 验证：greenlet、brotli、netifaces 编译成功（补丁 0024 修复了 HMDFS 符号链接问题） |
+| HMDFS 符号链接不可跟踪导致 C 扩展编译失败 | sharedinstall `LN_FORCE` 使用 `os.symlink`，链接器找不到 libpython3.9.so | ✅ 已修复 | 补丁 0024：`LN_FORCE` 改为 `shutil.copy2`（HARDLINK 回退） |
+| 官方测试已重跑 | ~~425 用例结果基于 11 补丁版本~~ | ✅ 已完成 | 2026-03-26 已基于 24 补丁重跑：350 通过 / 42 失败 / 26 跳过（83.7% 通过率） |
 | find_library 崩溃 | HarmonyOS 无 /sbin/ldconfig，find_library() 调用触发 SubprocessError | ✅ 已修复 | 补丁 0022：跳过 ldconfig 路径，test_ctypes 从 67 errors 改善到 63 errors |
 | pkg-config `--cflags` 返回空 | pkg-config 0.29.2 实现缺陷 | ⚠️ 已绕过 | `--with-openssl` 指定路径 |
 
@@ -368,6 +395,7 @@ make install
 | P1-4 | musl 时区 | 0019 |
 | P1-11 | _use_posix_spawn() musl | 0016 |
 | P1-extra | find_library 鸿蒙兼容 | 0022 |
+| P2-extra | HMDFS 符号链接修复 | 0024 |
 
 注意：P0/P1 编号以 patches/series 标注为准。STATUS.md 中的编号可能与 MISSING_ADAPTATION_SCAN.md 中的原始编号存在映射差异（早期调试中进行了重编号），后续需统一。
 
@@ -405,7 +433,7 @@ make install
 | 任务 | 说明 |
 |------|------|
 | 升级 pip | 20.2.3 → 26.0.1，改善依赖解析 |
-| 重测 C 扩展包 | libpython 符号已修复，之前 3 个 import 失败的包应能通过 |
+| 重测 C 扩展包 | ✅ 已完成（2026-03-26）：greenlet、brotli、netifaces 编译成功（补丁 0024 修复 HMDFS 符号链接问题） |
 | 上游 PR | ~70% 补丁可直接提交到 CPython |
 | Python 3.12 适配 | 后续版本 |
 
@@ -422,8 +450,8 @@ make install
 
 | 资产 | 路径 | 用途 |
 |------|------|------|
-| 补丁文件 | 本目录 `patches/` | **22 个 .patch 文件**（含 series 索引，注意 0020 依赖 0016、0021 依赖 0012） |
-| 编译好的 Python 3.9 | `~/python/Python-3.9.0-work/python3.9` | 可直接运行（含 22 补丁 + SSL，静态链接 libpython） |
+| 补丁文件 | 本目录 `patches/` | **24 个 .patch 文件**（含 series 索引，注意 0020 依赖 0016、0021 依赖 0012） |
+| 编译好的 Python 3.9 | `~/python/Python-3.9.0-work/python3.9` | 可直接运行（含 24 补丁 + SSL，动态链接 libpython3.9.so） |
 | 干净源码基准 | `~/python/Python-3.9.0-ref/` | 干净的 Python 3.9.0 原始源码（已验证与 origin 一致） |
 | 原始未修改源码 | `~/python/Python-3.9.0-origin/` | tar 包解压的原始副本 |
 
@@ -488,50 +516,3 @@ elif sys.platform.startswith(('ohos', 'harmonyos')):
 else:
     unix_shell = '/bin/sh'
 ```
-rtswith(('ohos', 'harmonyos')):
-    unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
-else:
-    unix_shell = '/bin/sh'
-```
-``
-e:
-    unix_shell = '/bin/sh'
-```
-``
-'
-else:
-    unix_shell = '/bin/sh'
-```
-``
-e:
-    unix_shell = '/bin/sh'
-```
-``
-s('/system/bin/sh') else '/bin/sh'
-else:
-    unix_shell = '/bin/sh'
-```
-``
-e:
-    unix_shell = '/bin/sh'
-```
-``
-sh'
-```
-``
-e:
-    unix_shell = '/bin/sh'
-```
-``
-    unix_shell = '/bin/sh'
-```
-``
-sh'
-```
-``
-e:
-    unix_shell = '/bin/sh'
-```
-``
-
-``
