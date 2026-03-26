@@ -364,7 +364,9 @@ cat archives/o/openssl/1.1.1w/manifest.yaml
 | 相似版本 | `archives/{letter}/{name}/` | 评估补丁兼容性 |
 | 构建系统知识 | `knowledge/build-systems.md` | 适配策略 |
 | 环境配置 | `knowledge/environment.md` | 系统特性 |
-| 鸿蒙特有机制 | `knowledge/harmonyos-specifics.md` | 签名、SELinux 等 |
+| 鸿蒙特有机制 | `knowledge/harmonyos-specifics.md` | 签名、SELinux、三层安全模型 |
+| __OHOS__ 适配模式 | `knowledge/ohos-adaptation-patterns.md` | 内核 API 复用 vs glibc 特有 |
+| 平台适配扫描 | `knowledge/platform-adaptation-scan.md` | 遗漏扫描方法论 |
 | 可移植打包 | `knowledge/packaging.md` | RPATH、strip、签名流程 |
 | Python 扩展编译 | `knowledge/python-extensions.md` | musl BIND_NOW、静态链接、扩展模块 |
 | ptrace 替代方案 | `knowledge/ptrace-alternatives.md` | LD_PRELOAD、strace 替代 |
@@ -456,7 +458,9 @@ openharmony-compile-agent/
 │   ├── build-systems.md        # 构建系统知识
 │   ├── dependencies.md         # 编译依赖顺序与推荐顺序
 │   ├── environment.md          # 鸿蒙环境特性
-│   ├── harmonyos-specifics.md  # 鸿蒙特有机制（签名、SELinux 等）
+│   ├── harmonyos-specifics.md  # 鸿蒙特有机制（签名、SELinux、安全模型）
+│   ├── ohos-adaptation-patterns.md  # __OHOS__ 通用适配模式（内核 API vs glibc）
+│   ├── platform-adaptation-scan.md  # 平台适配遗漏扫描方法论
 │   ├── packaging.md            # 可移植打包指南
 │   ├── troubleshooting.md      # 问题排查指南
 │   ├── error-patterns.md       # 错误模式库

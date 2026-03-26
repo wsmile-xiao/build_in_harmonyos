@@ -774,75 +774,186 @@ echo "失败: $failed"
 
 ---
 
-*文档版本: 1.3*
-*最后更新: 2026-03-25*
-*更新内容: 新增 §8 subprocess 深度调试（Pipe 数据丢失、fork_exec fallback、C 级测试结论）*
+*文档版本: 1.4*
+*最后更新: 2026-03-26*
+*更新内容: v2.0 修订 §8 subprocess — 修正方向性错误（临时文件方案→posix_spawn+pipe），新增 multiprocessing spawn 适配和验证结果*
 
 ---
 
-## 8. Subprocess 鸿蒙深度调试
+## 8. Subprocess 鸿蒙深度调试（v2.0 修订）
 
 > 完整报告：`archives/p/python/3.9.0/HARMONYOS_SUBPROCESS_GUIDE.md`
+> ⚠️ **v2.0 修订说明**：v1 版本中 §8.2 "临时文件替代 pipe"已被证实为**方向性错误**（补丁 0016），
+> 最终方案是 posix_spawn + os.pipe()（补丁 0020）。本节已全面修订。
 
 ### 8.1 鸿蒙子进程创建原语能力边界
 
-C 级测试确认鸿蒙的进程创建能力：
+C 级测试（7 个测试程序 T0-T6）确认鸿蒙的进程创建能力：
 
-| 原语 | SDK 工具 (clang) | 系统命令 (/bin/ls) |
-|------|:---:|:---:|
-| `fork() + execve()` | ❌ SELinux 拦截 | ⚠️ 受权限影响 |
-| `posix_spawnp()` | ❌ SELinux 拦截 | ✅ 正常 |
-| `system("cmd \| cat")` | ✅ Pipe 绕过 | ✅ 正常 |
+| 原语 | SDK 工具 (clang) | 系统命令 (/bin/ls) | 说明 |
+|------|:---:|:---:|------|
+| `fork()` | ⚠️ 可用但受限 | ✅ 正常 | fork 本身可用，但 SELinux 限制 fork 后 exec SDK 工具 |
+| `fork() + execve()` | ❌ SELinux 域转换 | ✅ 正常 | adhoc_bin 域无法执行 hnp_file 类型 |
+| `os.posix_spawn()` | ✅ **正常** | ✅ 正常 | **推荐路径**，musl 实现质量良好 |
+| `system("cmd \| cat")` | ✅ Pipe 绕过 | ✅ 正常 | 仅用于构建时 bootstrapping |
+| `os.pipe()` | ✅ 可用 | ✅ 可用 | 与 posix_spawn 配合使用正常 |
 
-**关键结论**：
-- `fork()` 和 `posix_spawnp()` 在鸿蒙上都**存在**，但执行 SDK 工具时被 SELinux 静默拦截
-- **Pipe 绕过法（`cmd | cat`）是唯一可靠的 SDK 工具执行方式**
-- 测试时**必须用 SDK 工具作为锚点**（如 clang），不能用 echo/ls 等简单命令
+**关键结论（v2.0 修正）**：
+- **posix_spawn() 是鸿蒙上子进程执行的首选路径**，不受 SELinux 域转换限制
+- `fork()` 本身可用，但 fork 后的 `execve()` 受 SELinux 域转换限制
+- `os.pipe()` 在鸿蒙上**完全可用**，不需要临时文件替代
+- Pipe 绕过法（`cmd | cat`）仅用于构建时 bootstrapping（`_bootsubprocess.py`）
 
-### 8.2 Pipe 数据丢失问题
+### 8.2 正确方案：posix_spawn + os.pipe()
 
-**症状**：`posix_spawnp()` + pipe 重定向 stderr 时，子进程输出完全丢失（0 bytes）。
+**⚠️ 历史教训**：补丁 0016 使用临时文件替代 pipe，导致 `communicate()` 丢失数据。
+补丁 0020 修正了这个错误，恢复使用 `os.pipe()`。以下是经过验证的最终方案。
 
-**原因**：Python 进程的 fd 0/1/2 在鸿蒙上是 socket（非终端/文件），子进程继承后 pipe 重定向行为异常。
+#### 8.2.1 Python subprocess 适配
 
-**解决方案**：用临时文件替代 pipe：
+对于 Python 3.9 的 `subprocess.py`，需要以下修改：
 
-```python
-import tempfile
-# 当请求 PIPE 时，创建临时文件
-if capture_stderr:
-    tmp = tempfile.NamedTemporaryFile(delete=False)
-    stderr_file = tmp  # 传给 Popen
-    # 子进程结束后从 tmp.name 读取内容
-```
-
-### 8.3 fd 0/1/2 保护
-
-Python 进程在鸿蒙上的 fd 0 是 socket，子进程继承后可能导致 I/O 混乱。需要在 fork 后立即保护：
+**1. 让 `_use_posix_spawn()` 在 musl 平台返回 True**：
 
 ```python
-devnull = os.open(os.devnull, os.O_RDWR)
-os.dup2(devnull, 0)  # stdin -> /dev/null
+# Lib/subprocess.py _use_posix_spawn() 函数中
+# musl libc 的 posix_spawn() 实现质量良好，应优先使用
+except (AttributeError, ValueError, OSError):
+    # os.confstr() or CS_GNU_LIBC_VERSION value not available.
+    # This likely means musl libc (Alpine Linux, HarmonyOS, OpenWrt, etc.).
+    # musl's posix_spawn() implementation properly reports errors
+    # and is safe to use.
+    return True  # ← 这会让 musl 平台走 posix_spawn 路径
 ```
 
-### 8.4 纯 Python fork_exec Fallback
+**2. shell 路径支持鸿蒙**：
 
-Python 3.9 的 `subprocess.py` 对 `_posixsubprocess` C 扩展有硬依赖。当 C 扩展不可用时，整个 subprocess 模块不可用。
+```python
+# Lib/subprocess.py 中 unix_shell 的确定
+if hasattr(sys, 'getandroidapilevel'):
+    unix_shell = '/system/bin/sh'
+elif sys.platform.startswith(('ohos', 'harmonyos')):
+    unix_shell = '/system/bin/sh' if os.path.exists('/system/bin/sh') else '/bin/sh'
+else:
+    unix_shell = '/bin/sh'
+```
 
-**方案**：参考 Python 3.12+ 做法，在 `subprocess.py` 中实现纯 Python 的 `_python_fork_exec()`。
+**3. _posixsubprocess C 扩展作为可选依赖**：
 
-### 8.5 communicate() Bug
+```python
+# Lib/subprocess.py 中 _posixsubprocess 的导入
+try:
+    import _posixsubprocess
+except ModuleNotFoundError:
+    _posixsubprocess = None  # 鸿蒙可能缺失此扩展
 
-`communicate()` 的简单路径用 `elif` 链，只能处理一个 pipe。双 pipe 时只读一个。需检查 `pipe_count` 后决定走简单路径还是复杂路径。
+# 提供纯 Python fallback
+if _posixsubprocess is not None:
+    def _execute_child(...):
+        ...
+else:
+    def _execute_child(...):
+        # 纯 Python fork/exec fallback（参考 Python 3.12+）
+        ...
+```
+
+#### 8.2.2 C 层面 _posixsubprocess.c 适配
+
+```c
+// Modules/_posixsubprocess.c
+// 鸿蒙可能不挂载 /proc，使用 /dev/fd 替代
+#if defined(__FreeBSD__) || (defined(__APPLE__) && defined(__MACH__)) || defined(__OHOS__)
+# define FD_DIR "/dev/fd"
+#else
+# define FD_DIR "/proc/self/fd"
+#endif
+```
+
+#### 8.2.3 通用 C/C++ 项目建议
+
+对于非 Python 项目，在鸿蒙上创建子进程时的建议：
+
+```c
+// ✅ 推荐：使用 posix_spawn（不受 SELinux 域转换限制）
+#include <spawn.h>
+extern char **environ;
+
+pid_t pid;
+char *argv[] = {"/path/to/cmd", "arg1", NULL};
+posix_spawnp(&pid, argv[0], NULL, NULL, argv, environ);
+
+// ⚠️ 可用但有限制：fork + exec（受 SELinux 域转换限制）
+pid_t pid = fork();
+if (pid == 0) {
+    execvp(argv[0], argv);  // 对 SDK 工具可能被 SELinux 拦截
+}
+
+// ❌ 不推荐：仅用于构建时 bootstrapping
+system("clang ... | cat");  // pipe 绕过法
+```
+
+### 8.3 ~~临时文件方案~~（已废弃，方向性错误）
+
+> **⚠️ 历史教训**：在最初尝试修复 subprocess 时，我们尝试用临时文件替代 pipe 来捕获子进程输出。
+> 这导致了 `communicate()` 无法正确读取子进程输出（数据丢失）。
+> 后续验证发现鸿蒙的 `posix_spawn()` + `os.pipe()` **完全可用**，临时文件方案没有必要。
+>
+> **经验**：在修改核心通信机制前，应先用最小化测试验证基础假设（posix_spawn + pipe 是否可用），
+> 再决定方案方向。不要凭直觉判断"pipe 在鸿蒙上不可用"。
+
+### 8.4 构建时 Bootstrapping：pipe 绕过法
+
+> 本节描述的方法**仅适用于构建时 bootstrapping**（即 Python 自身编译期间 setup.py 调用 clang 的场景），
+> **不适用于运行时** subprocess 使用。
+
+Python 编译时，`setup.py` 通过 `_bootsubprocess.Popen` 调用编译器。此时 Python 还未编译完成，
+posix_spawn 修复还未生效。使用 pipe 语法绕过 SELinux：
+
+```python
+# Lib/_bootsubprocess.py
+# 鸿蒙构建时，通过 pipe 绕过 SELinux 对直接 exec SDK 工具的限制
+if sys.platform.startswith(('ohos', 'harmonyos')):
+    subprocess.Popen(cmd + ['|', 'cat'], shell=True, ...)
+```
+
+### 8.5 multiprocessing 适配
+
+#### 8.5.1 默认使用 spawn 模式
+
+```python
+# Lib/multiprocessing/context.py
+# 鸿蒙上 fork+exec 受 SELinux 限制，默认使用 spawn 模式
+elif sys.platform.startswith(('ohos', 'harmonyos')):
+    _default_context = DefaultContext(_concrete_contexts['spawn'])
+```
+
+#### 8.5.2 spawn 模式注意事项
+
+spawn 模式是 Python 标准行为（macOS 默认也是 spawn），有以下限制（**非鸿蒙特有**）：
+
+| 限制 | 说明 | 解决方案 |
+|------|------|---------|
+| 函数必须可 pickle | 嵌套函数、lambda 不可用 | worker 函数定义为模块顶层 |
+| `-c` 方式运行的函数不可用 | `python -c "..."` 中的函数无法 pickle | 写成 .py 文件运行 |
+| 全局变量隔离 | 子进程重新 import | 使用 initializer/initargs 传递 |
+
+#### 8.5.3 multiprocessing 验证结果
+
+60 个自定义测试全部通过，官方测试 228/255 通过（仅 1 个 fd 传递边缘 case 失败）：
+
+| 测试类别 | 通过 | 总计 |
+|----------|------|------|
+| 基础原语（Process/Queue/Pipe/Lock/Event/Semaphore/Condition/Barrier） | 19/19 | 100% |
+| Pool（map/imap/apply/starmap） | 18/18 | 100% |
+| 共享内存（Value/Array/Manager） | 7/7 | 100% |
+| 压力测试（大对象/高并发/长时间） | 16/16 | 100% |
+| 官方 test_multiprocessing_spawn | 228/255 | 89.4% |
+
+**重要发现**：`/dev/shm` 缺失对 multiprocessing 共享内存**无影响**，Arena 正确回退到 `tempfile.gettempdir()`。
 
 ### 8.6 测试资产
 
-位于 `/storage/Users/currentUser/python/subprocess-tests/`：
-
 | 文件 | 用途 |
 |------|------|
-| `test_syscalls.c` | 系统调用全面测试（fork, vfork, posix_spawn, pipe） |
-| `test_fork_clang.c` | fork+exec 用 clang 编译测试 |
-| `test_spawn*.c` | posix_spawn 各种配置测试 |
-| `test_subprocess_demo.py` | Python subprocess 全面测试 |
-| `test_multiprocessing.py` | multiprocessing 验证 |
+| `archives/p/python/3.9.0/reports/MULTIPROCESSING_TEST_REPORT.md` | multiprocessing 深度测试报告 |
+| `archives/p/python/3.9.0/HARMONYOS_SUBPROCESS_GUIDE.md` | 子进程完整指南 |

@@ -55,6 +55,7 @@
 | [E047](#e047-文件权限-other-read-被额外屏蔽) | FS | st_mode: missing 0o004 bit | 🟢 轻微 |
 | [E048](#e048-udplite-协议不支持) | 内核 | IPPROTO_UDPLITE: Permission denied | 🟢 轻微 |
 | [E049](#e049-find_library-崩溃ldconfig-不存在) | 系统调用 | find_library, SubprocessError, ldconfig | 🟡 中等 |
+| [E050](#e050-hmdfs-符号链接不可跟踪导致链接器找不到库) | FS/链接 | unable to find library, symlink | 🔴 阻塞 |
 
 ---
 
@@ -2099,6 +2100,78 @@ Python 3.9.0（补丁 0022）、cffi、trio、Django、Sphinx
 
 ---
 
+## E050: HMDFS 符号链接不可跟踪导致链接器找不到库
+
+### 错误特征
+
+```
+ld.lld: error: unable to find library -lpython3.9
+pip install xxx  →  "error: command 'clang' failed with exit code 1"
+```
+
+### 根因
+
+HMDFS 文件系统不正常跟踪符号链接。`os.path.exists()` 对符号链接返回 `False`，动态链接器（ld.lld）通过符号链接搜索库文件时也无法找到目标。
+
+```
+make install 创建:
+  libpython3.9.so → libpython3.9.so.1.0  (符号链接)
+
+Python 进程中:
+  os.path.exists("libpython3.9.so")      → False  (符号链接不可见)
+  os.path.exists("libpython3.9.so.1.0")  → True   (真实文件可见)
+
+链接器搜索:
+  -L/usr/local/lib -lpython3.9
+    → 找 libpython3.9.so → 符号链接 → 无法解析 → "unable to find library"
+```
+
+### 影响范围
+
+- `pip install` 编译所有 C 扩展包时链接失败
+- 任何通过 `-l` 链接符号链接 `.so` 的操作都受影响
+
+### 验证命令
+
+```python
+import os
+symlink = '/usr/local/lib/libpython3.9.so'
+real = '/usr/local/lib/libpython3.9.so.1.0'
+print(f'symlink exists: {os.path.exists(symlink)}')  # False
+print(f'real file exists: {os.path.exists(real)}')    # True
+```
+
+### 解决方案
+
+**用文件副本替代符号链接**：
+
+```bash
+# 删除符号链接
+rm /usr/local/lib/libpython3.9.so
+# 复制真实文件
+cp /usr/local/lib/libpython3.9.so.1.0 /usr/local/lib/libpython3.9.so
+```
+
+对于 Python 的 `make install`，补丁 0024 将 `$(LN_FORCE)` 改为 `$(HARDLINK)`（鸿蒙上为 `cp -p`）：
+
+```makefile
+# Makefile.pre.in sharedinstall
+# 修改前：
+(cd $(DESTDIR)$(LIBDIR); rm -f $(LDLIBRARY); $(LN_FORCE) $(INSTSONAME) $(LDLIBRARY))
+# 修改后：
+(cd $(DESTDIR)$(LIBDIR); rm -f $(LDLIBRARY); $(HARDLINK) $(INSTSONAME) $(LDLIBRARY))
+```
+
+### 代价
+
+额外占用约 10MB 磁盘空间（共享库的副本）。
+
+### 涉及软件
+
+Python 3.9.0（补丁 0024）、任何使用 `make install` + 符号链接分发共享库的 C/C++ 项目
+
+---
+
 ## 错误诊断流程
 
 ```
@@ -2152,6 +2225,6 @@ ls -Z /path/to/file
 
 ---
 
-*文档版本: 2.4*  
+*文档版本: 2.5*  
 *最后更新: 2026-03-26*
-*新增 E049：find_library 崩溃（HarmonyOS 无 /sbin/ldconfig，已通过补丁 0022 修复）*
+*新增 E050：HMDFS 符号链接不可跟踪导致链接器找不到库（补丁 0024 修复）*

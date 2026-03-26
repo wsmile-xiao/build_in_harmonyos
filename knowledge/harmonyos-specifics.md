@@ -2,6 +2,115 @@
 
 本文档介绍鸿蒙系统与其他平台的差异，以及鸿蒙特有的一些机制。
 
+---
+
+## 🚨 鸿蒙移植铁律（所有软件适用）
+
+### 铁律 #1：符号链接在 HMDFS 上不可靠，必须用 `cp` 替代 `ln -s`
+
+**严重程度：🔴 阻塞级 — 违反此规则将导致所有 C 扩展编译失败**
+
+#### 问题描述
+
+HMDFS 文件系统**不正常跟踪符号链接**。`os.path.exists(symlink)` 返回 `False`，
+动态链接器（ld.lld）通过 `-l` 搜索时**无法解析符号链接**。这导致：
+
+- `make install` 创建的 `libXXX.so → libXXX.so.1.0` 符号链接无效
+- 链接器报 `unable to find library -lXXX`
+- **pip install / gem install / cpanm 等所有从源码编译扩展的操作全部失败**
+
+#### 执行时机
+
+```
+代码下载完成
+    ↓
+⚡ 立即执行：扫描源码中所有 ln -s 操作（Makefile.am / Makefile.in / CMakeLists.txt / configure.ac）
+    ↓
+标记所有创建 .so / .a 符号链接的位置
+    ↓
+make install 之前
+    ↓
+⚡ 将所有 .so/.a 相关的 ln -s 替换为 cp -p
+    ↓
+make install
+    ↓
+⚡ 安装后验证：对所有 .so 符号链接执行 os.path.exists() 检查
+    ↓
+如有失败 → 确认根因并修复
+```
+
+#### 标准检查命令
+
+```bash
+# 1. 预扫描：代码下载后，标记所有 ln -s 创建 .so 的位置
+grep -rn 'ln -s.*\.so\|LN.*\.so\|HARDLINK\|LN_FORCE' Makefile* configure.ac Makefile.am CMakeLists.txt
+
+# 2. 安装后验证：检查所有 .so 文件是否可被找到
+find $PREFIX/lib -name "*.so" -type l | while read link; do
+    target=$(readlink "$link")
+    if [ ! -e "$link" ]; then
+        echo "❌ BROKEN: $link -> $target"
+    else
+        echo "✅ OK: $link"
+    fi
+done
+
+# 3. Python 进程内验证（最严格）
+python3 -c "
+import os, glob
+for f in glob.glob('/path/to/lib/*.so'):
+    if not os.path.exists(f):
+        print(f'BROKEN: {f} (symlink not tracked by HMDFS)')
+"
+```
+
+#### 标准修复模式
+
+**Makefile 项目**：
+```makefile
+# 修改前（configure 生成）：
+(cd $(DESTDIR)$(LIBDIR); $(LN) -sf $(INSTSONAME) $(LDLIBRARY))
+
+# 修改后（鸿蒙适配）：
+(cd $(DESTDIR)$(LIBDIR); rm -f $(LDLIBRARY); cp -p $(INSTSONAME) $(LDLIBRARY))
+```
+
+**CMake 项目**：
+```cmake
+# 修改前：
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ...)")
+
+# 修改后：
+install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different ...)")
+```
+
+**autotools 项目**（`configure.ac` / `Makefile.am`）：
+```makefile
+# 如果已有鸿蒙适配的 HARDLINK 变量，优先使用：
+# $(HARDLINK) 替代 $(LN) 或 $(LN_FORCE)
+```
+
+#### 代价
+
+每次用 `cp -p` 替代 `ln -s` 约多占用一份文件大小的磁盘空间。
+对于 10MB 的共享库，代价是 10MB。**这与编译失败相比完全可以接受。**
+
+#### 影响范围
+
+| 软件类型 | 受影响？ | 说明 |
+|----------|---------|------|
+| Python + pip install | 🔴 是 | libpython3.9.so 符号链接 |
+| Ruby + gem install | 🔴 是 | libruby.so 符号链接 |
+| Node.js + npm install | 🔴 是 | node-gyp 编译原生模块 |
+| Perl + cpanm | 🔴 是 | libperl.so 符号链接 |
+| 任何 autoconf/automake 项目 | 🔴 是 | libtool 创建的 .la → .so 链接 |
+| 任何 CMake 项目 | 🔴 是 | install(TARGETS) 创建的符号链接 |
+| 纯 Python/Shell 脚本项目 | 🟢 否 | 不涉及 C 编译链接 |
+
+**参考**：[E050](error-patterns.md#e050-hmdfs-符号链接不可跟踪导致链接器找不到库)、[§11](#11-hmdfs-符号链接限制e051)
+
+---
+
 ## 1. 与其他平台对比
 
 ### 1.1 vs Linux
@@ -55,6 +164,87 @@
 2. 分支命令 `:label` 和 `b`、`t` 跳转可能不完整
 3. 某些正则表达式特性不支持
 4. 建议对于复杂的 autotools 项目，configure 后检查生成的 Makefile
+
+---
+
+## 1.5 HarmonyOS 三层安全模型 ⭐ 重要
+
+HarmonyOS 采用三层安全架构，理解这个模型是做好鸿蒙移植的基础：
+
+### 第一层：SELinux (MAC — 强制访问控制)
+
+**实际权限的最终裁决者**。SELinux 通过安全上下文（Security Context）控制进程对文件的访问。
+
+关键上下文类型：
+
+| 上下文 | 说明 | 权限 |
+|--------|------|------|
+| `hishell_hap:s0` | Shell 进程 | 高权限，可执行 hnp_file |
+| `adhoc_bin:s0` | 用户程序（Python、用户编译的 C 程序） | 受限，不能执行 hnp_file |
+| `hnp_file:s0` | SDK 工具（clang、linker 等） | 被执行的对象 |
+| `hmdfs:s0` | 用户文件 | 用户数据 |
+
+**核心限制**：`adhoc_bin` 域的进程通过 **fork + execve** 执行 `hnp_file` 类型的 SDK 工具时被 SELinux 拦截。
+但 **posix_spawn() 不受此限制**——这是 musl 实现的特性或内核策略差异，Python 3.9.0 已验证
+通过 `subprocess.run(["clang", ...])` 可以正常编译 C 程序。
+
+```
+Shell (hishell_hap) → exec 用户程序 → adhoc_bin
+                                        │
+                              fork + execve(hnp_file) ❌ 被拦截
+                              posix_spawn(hnp_file)  ✅ 正常
+```
+
+**对移植的影响**：
+- fork() 本身可用，但 fork 后 execve SDK 工具受限制
+- **posix_spawn() 不受此限制**（推荐路径，已验证 clang 编译可用）
+- pipe 绕过法 `cmd | cat` 可用于 bootstrapping（仅构建时）
+- Python subprocess 在 `_use_posix_spawn()` 对 musl 返回 True 后，所有子进程操作正常
+
+### 第二层：HMDFS (文件系统虚拟化)
+
+**UID 映射层**。HMDFS 是鸿蒙的文件系统，它进行 UID 虚拟映射：
+
+- 进程看到的 UID ≠ 文件实际的 UID
+- chmod()/chown() 返回成功但不实际生效（空操作）
+- symlink 创建和访问受限
+- hardlink 在用户目录不可用
+
+**对移植的影响**：
+- 不能依赖 Unix 权限位做访问控制
+- symlink 需降级处理（makedirs 替代 symlink）
+- 文件权限断言在测试中会失败（chmod 无效）
+
+### 第三层：Unix 权限位 (DAC — 装饰性)
+
+**纯装饰性元数据，不参与实际访问判定**。
+
+- `chmod()` 调用返回成功，但权限不变
+- `chown()` 调用返回成功，但 owner 不变
+- `stat()` 返回的 st_mode 反映的是创建时的权限，不是 chmod 后的
+- 文件创建时 other-read 位会被额外清除（与 umask 无关）
+
+**实际访问判定链**：
+```
+文件访问请求
+    ↓
+SELinux (MAC) → 拒绝/允许 ← 这是最终裁决
+    ↓ (通过)
+HMDFS (UID 映射) → 映射到实际文件
+    ↓
+Unix 权限位 (DAC) → 忽略（装饰性）
+```
+
+### 安全模型对常见操作的影响
+
+| 操作 | Linux | HarmonyOS | 影响 |
+|------|-------|-----------|------|
+| fork() + exec() | ✅ | ⚠️ SELinux 限制 | 用 posix_spawn 替代 |
+| chmod() | ✅ 生效 | ❌ 空操作 | 测试断言失效 |
+| symlink() | ✅ | ❌ 受限 | venv 需降级 |
+| /dev/shm | ✅ | ❌ 不存在 | 共享内存回退 |
+| mmap RWX | ✅ | ❌ W^X 策略 | ctypes 回调不可用 |
+| PTY | ✅ | ❌ 不可用 | 终端调试受限 |
 
 ---
 
@@ -405,7 +595,7 @@ echo "=== 所有测试通过 ==="
 | 机制 | 说明 | 处理方式 |
 |------|------|----------|
 | ELF 签名 | 可执行文件需要签名 | 修改后重新签名 |
-| SELinux | 强制访问控制 | 使用管道语法绕过 |
+| SELinux | 强制访问控制 | fork+exec 受限，用 posix_spawn 替代 |
 | toybox | 工具功能受限 | 编译 GNU 工具替代 |
 | /tmp 只读 | 临时目录限制 | 设置 TMPDIR |
 | musl libc | C 库差异 | 条件编译处理 |
@@ -447,45 +637,78 @@ hishell_hap:s0          执行用户程序           adhoc_bin:s0
    (SDK 工具)                              hnp_file
 ```
 
-### 7.3 问题现象
+### 7.3 问题现象（仅限 fork + execve）
+
+> **⚠️ 重要更新**：通过 `posix_spawn()` 调用 SDK 工具**不受此限制**。
+> 以下失败现象仅在使用 `fork() + execve()` 路径时出现。
 
 ```python
-import subprocess
-# 执行 SDK 工具失败
-subprocess.run(['clang', '--version'])  # returncode: 1, 无输出
-os.system("clang --version")            # exit code: 1
+import subprocess, os
+
+# ✅ 正常工作（Python 3.9 已通过 posix_spawn 适配）
+subprocess.run(['clang', '--version'])  # returncode: 0
+r = subprocess.run(['clang', 'test.c', '-o', 'test'], capture_output=True, text=True)  # 编译成功
+
+# ❌ 以下场景仍然受限（直接 execve 调用）
+os.execvp('clang', ['clang', '--version'])  # 如果 C 层直接 execve
 ```
 
-**关键点**：SDK 的 clang-15 是一个 109MB 的 ELF 二进制，当 `adhoc_bin` 域的进程尝试 `execve()` 它时：
+**关键点**：SDK 的 clang-15 是一个 109MB 的 ELF 二进制，当 `adhoc_bin` 域的进程尝试通过 `fork() + execve()` 执行它时：
 
 1. `execve()` 系统调用成功（没有返回错误）
 2. SELinux 在内核层面拦截了执行
 3. 进程立即以 exit code 1 退出
 4. **没有任何错误输出**（因为二进制根本没有真正开始执行）
 
-### 7.4 解决方案：管道语法绕过 SELinux 限制
+**但 `posix_spawn()` 不受此限制**——Python 3.9.0 已验证通过 `subprocess.run(["clang", ...])` 可以正常编译和执行 C 程序。推测原因是 musl 的 `posix_spawn()` 实现或内核对该系统调用的 SELinux 策略与 `execve()` 不同。
 
-使用管道语法 `cmd | cat` 可以绕过 SELinux 限制！
+### 7.4 解决方案：优先 posix_spawn（管道语法作为备选）
+
+> **推荐方案**：使用 `posix_spawn()` 替代 `fork() + execve()`。Python 3.9 在 musl 平台默认使用
+> `posix_spawn()`，无需额外配置即可正常执行 SDK 工具。
+
+```c
+/* C 代码中使用 posix_spawn 替代 fork+exec */
+#include <spawn.h>
+extern char **environ;
+
+pid_t pid;
+char *argv[] = {"clang", "test.c", "-o", "test", NULL};
+posix_spawn(&pid, "/usr/bin/clang", NULL, NULL, argv, environ);
+```
 
 ```python
-# 直接执行 - 失败
-os.system("clang test.c -o test")  # exit code: 1
+# Python 代码直接可用（默认 posix_spawn）
+import subprocess
+subprocess.run(["clang", "test.c", "-o", "test"])  # ✅ 正常工作
+```
 
-# 管道执行 - 成功！
+#### 备选方案：管道语法绕过（仅限构建时 bootstrapping）
+
+在 Python 还未适配 posix_spawn 的早期阶段，或者无法修改源码的情况下，
+使用管道语法 `cmd | cat` 可以绕过 SELinux 限制：
+
+```python
+# 仅作为 bootstrapping 备选方案
 os.system("clang test.c -o test | cat")  # exit code: 0
 ```
 
 **原理**：管道强制 shell 创建子进程来执行管道的左侧命令。这个子进程的 SELinux 上下文可能具有不同的权限。
 
-### 7.5 管道方式对比测试结果
+### 7.5 方案对比
 
-| 方法 | Exit Code | 文件生成 | 推荐 |
-|------|-----------|----------|------|
-| `clang ...`（无管道） | 1 | ❌ No | - |
-| `clang ... \| cat` | 0 | ✅ Yes | ⭐ 推荐 |
-| `clang ... \| head -N` | 0 | ✅ Yes | ⭐ 推荐 |
-| `clang ... \| true` | 0 | ✅ Yes | 可用 |
-| `clang ... & wait` | 0 | ❌ No | 不稳定 |
+| 方法 | Exit Code | 文件生成 | 适用场景 |
+|------|-----------|----------|---------|
+| `subprocess.run(["clang", ...])` | 0 | ✅ Yes | ⭐ **推荐**（posix_spawn） |
+| `posix_spawn()` (C 层) | 0 | ✅ Yes | ⭐ **推荐**（C/C++ 项目） |
+| `clang ... \| cat` | 0 | ✅ Yes | 备选（bootstrapping） |
+| `clang ... \| head -N` | 0 | ✅ Yes | 备选 |
+| `clang ... \| true` | 0 | ✅ Yes | 备选 |
+| `clang ...`（裸 fork+execve） | 1 | ❌ No | ❌ 受 SELinux 限制 |
+| `clang ... & wait` | 0 | ❌ No | ❌ 不稳定 |
+
+> **历史记录**：Python 3.9.0 适配初期（补丁 0016 前），`subprocess.run(["clang", ...])`
+> 确实因 fork+execve 路径而失败。通过补丁 0020 修改 `_use_posix_spawn()` 对 musl 返回 True 后解决。
 
 ### 7.6 正确实现（使用 `pipefail` 获取真实退出码）
 
@@ -727,8 +950,50 @@ ohos_fstat_compat (int fd, struct stat *st)
 
 ---
 
-*文档版本: 1.1*  
-*最后更新: 2024-03-22*
+*文档版本: 1.4
+最后更新: 2026-03-26
+更新内容: v1.4 新增"铁律 #1：符号链接在 HMDFS 上不可靠"——所有软件 make install 必须用 cp 替代 ln -s*
+
+## 11. HMDFS 符号链接限制（E051）
+
+### 现象
+
+- `os.path.exists(symlink)` 返回 `False`，即使目标文件存在
+- 动态链接器（ld.lld）通过符号链接找不到共享库：`unable to find library -lXXX`
+- Python `import` 能找到 `.so`（通过 dlopen 的 real-path 解析），但**编译链接阶段**失败
+
+### 根因
+
+HMDFS 文件系统不正常跟踪符号链接。`os.stat()` 对符号链接返回的 inode 与目标文件不同，
+导致链接器的库搜索路径遍历时无法解析符号链接。
+
+### 影响
+
+- `make install` 创建的 `libpython3.9.so → libpython3.9.so.1.0` 符号链接无效
+- 导致 `pip install` 编译所有 C 扩展包时链接失败
+- 任何依赖 `-l` 链接符号链接 `.so` 的操作都会受影响
+
+### 解决方案
+
+**用文件副本替代符号链接**。Python 3.9.0 补丁 0024：
+
+```makefile
+# Makefile.pre.in sharedinstall 部分
+# 修改前：
+(cd $(DESTDIR)$(LIBDIR); rm -f $(LDLIBRARY); $(LN_FORCE) $(INSTSONAME) $(LDLIBRARY))
+# 修改后：
+(cd $(DESTDIR)$(LIBDIR); rm -f $(LDLIBRARY); $(HARDLINK) $(INSTSONAME) $(LDLIBRARY))
+```
+
+其中 `$(HARDLINK)` 在鸿蒙上定义为 `cp -p`（补丁 0007 已有）。
+
+### 代价
+
+额外占用约 10MB 磁盘空间（libpython3.9.so.1.0 的副本）。
+
+### 验证
+
+修复后 greenlet、brotli、netifaces 等包编译链接正常。
 
 ## 10. Perl 测试框架依赖问题
 
