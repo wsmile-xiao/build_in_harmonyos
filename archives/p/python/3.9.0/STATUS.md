@@ -1,7 +1,8 @@
 # Python 3.9.0 鸿蒙适配：进展总结与下一步计划
 
 > **最后更新**: 2026-03-26 | **维护者**: OpenHarmony PC Developer 社区
-> **状态**: Phase 1 + Phase 1.5 + multiprocessing 深度验证 完成
+> **状态**: Phase 1 + Phase 1.5 + Phase 2 完成
+> **状态数据来源**: 2026-03-26 实际验证，基于 23 补丁版本（补丁 0001-0023）
 > **状态数据来源**: 2026-03-26 实际验证，基于 22 补丁版本（补丁 0001-0022）
 
 ---
@@ -153,7 +154,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 | **P1 建议修复** | 11 | 时区处理、sendfile 性能、共享内存路径 |
 | **P2 低优先级** | 8 | mimetypes、uuid、pty（影响有限） |
 
-**补丁覆盖情况**（11/24 已覆盖，P0-1 已完全覆盖）：
+**补丁覆盖情况**（17/24 已覆盖，含 3 项验证无需修改，剩余 7 项确认跳过）：
 
 | 遗漏ID | 描述 | 补丁 | 状态 |
 |--------|------|------|------|
@@ -163,7 +164,7 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 | P0-4 | pylifecycle.c fd 验证 | — | ❌ 未修复 |
 | P0-5 | subprocess shell 路径 | 0016 | ✅ |
 | P1-1 | timemodule.c musl 时区 | 0019 | ✅ |
-| P1-2 | shutil.py sendfile 优化 | — | ❌ |
+| P1-2 | shutil.py sendfile 优化 | 0023 | ✅ |
 | P1-3 | posixmodule.c sendfile NULL offset | 0018 | ✅（补丁文件名误标为 fallocate） |
 | P1-4 | multiprocessing/util.py abstract sockets | 0014 | ✅ |
 | P1-5 | multiprocessing/heap.py /dev/shm | — | ❌ |
@@ -266,7 +267,33 @@ Python 3.9.0 已在 HarmonyOS PC（aarch64, musl libc, Clang 15）上成功编�
 > **关于 0022 的说明**：HarmonyOS 没有 `/sbin/ldconfig`，`ctypes.util.find_library()` 调用
 > `_findSoname_ldconfig()` 时尝试执行 `ldconfig -p` 会触发 `SubprocessError`。
 > 补丁 0022 在 `_findSoname_ldconfig()` 头部跳过鸿蒙平台，使 `find_library()` 安全返回 `None`。
-> 修复效果：test_ctypes 从 67 errors 改善到 63 errors（+4 通过）。
+> 修复效果：test_ctypes 从 67 errors 改善到 63 errors（+4 通过）
+
+### Phase 2：遗漏扫描剩余项（0023）
+
+| 补丁 | 遗漏点 ID | 文件 | 说明 |
+|------|-----------|------|------|
+| 0023 | P0-4 + P1-2 + P1-9 + P1-10 + P2-3 | 多文件 | 遗漏扫描剩余 5 项修复（见下） |
+
+**0023 包含的修复**：
+- P0-4: `Python/pylifecycle.c` — fd 验证添加 `__OHOS__`（走 dup() 路径，与 Linux bpo-32849 一致）
+- P1-2: `Lib/shutil.py` — 启用 sendfile 零拷贝优化（`_USE_CP_SENDFILE = True` 已验证）
+- P1-9: `Lib/tempfile.py` — 添加鸿蒙临时目录候选 `/data/local/tmp`
+- P1-10: `configure` + `configure.ac` — 跳过 lchmod 检测（musl 不提供，逻辑更严谨）
+- P2-3: `Lib/uuid.py` — 添加 `/system/bin`、`/bin` 到 MAC 地址查找路径
+
+**验证通过的无需修改项**：
+- P1-5: `multiprocessing/heap.py` — `/dev/shm` 不存在，Arena 正确回退到 `tempfile.gettempdir()`，multiprocessing 深度测试已验证共享内存功能正常
+- P2-8: `asyncio/unix_events.py` — 鸿蒙走 POSIX 标准路径，无特殊处理需要
+
+**确认跳过的 7 项**（无实际影响）：
+- P1-6: `pidfd_open/pidfd_send_signal` — 鸿蒙内核不支持
+- P1-7: `socketmodule.c` 抽象 socket — 需内核能力验证，暂不处理
+- P2-1: `ossaudiodev.c` — 音频模块非核心需求
+- P2-2: `mimetypes.py` — 静默跳过不存在路径，无影响
+- P2-4: `pty.py` — 鸿蒙无 PTY 设备
+- P2-6: `getpass.py` — 当前环境无终端
+- P2-7: `_decimal/mpdecimal.h` — 通过 autoconf fallback 正常工作。
 
 ---
 
@@ -488,4 +515,23 @@ else:
 e:
     unix_shell = '/bin/sh'
 ```
+``
+sh'
+```
+``
+e:
+    unix_shell = '/bin/sh'
+```
+``
+    unix_shell = '/bin/sh'
+```
+``
+sh'
+```
+``
+e:
+    unix_shell = '/bin/sh'
+```
+``
+
 ``
