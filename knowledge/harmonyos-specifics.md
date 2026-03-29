@@ -109,6 +109,92 @@ install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different ...)
 
 **参考**：[E050](error-patterns.md#e050-hmdfs-符号链接不可跟踪导致链接器找不到库)、[§11](#11-hmdfs-符号链接限制e051)
 
+### 铁律 #2：make install 产出的 ELF 不含 RPATH，必须 post-install 处理
+
+**严重程度：🔴 阻塞级（所有 C/C++ 软件）**
+
+#### 问题描述
+
+HarmonyOS 上 `make install` 产出的可执行文件**不会自动嵌入 RPATH/RUNPATH**，即使：
+- Makefile 中正确设置了 `LDFLAGS="-Wl,-rpath,$ORIGIN"`
+- configure 检测结果正确
+- build 目录中的中间产物看起来正确
+
+实测表现：`llvm-readelf -d` 显示无任何 `(RPATH)` 或 `(RUNPATH)` 条目。
+
+**影响范围**：所有通过 autotools/cmake/meson 编译并 `make install` 的 C/C++ 软件。
+如果可执行文件依赖 `libxxx.so`（非系统库），不设 `LD_LIBRARY_PATH` 就无法运行。
+
+#### 根因
+
+推测与 HarmonyOS 工具链（clang 15 + lld + binary-sign-tool）交互有关：
+1. `make install` 可能在 install 阶段重新链接或 strip 了二进制
+2. lld 链接时可能忽略了 `-Wl,-rpath` 参数
+3. binary-sign-tool 可能影响了 ELF 动态段
+
+#### 必须的 post-install 步骤（四步，顺序不可变）
+
+```bash
+# 假设可执行文件为 $PREFIX/bin/foo，依赖库在 $PREFIX/lib/
+
+# Step 1: 移除旧 ELF 签名（必须先做，否则 patchelf 被拒绝）
+/data/service/hnp/bin/llvm-objcopy --remove-section .codesign $PREFIX/bin/foo
+
+# Step 2: 设置 RPATH（使用 $ORIGIN 相对路径，确保可移植）
+/data/service/hnp/bin/patchelf --set-rpath '$ORIGIN/../lib' $PREFIX/bin/foo
+
+# Step 3: 重新 ELF 签名（修改 ELF 后必须重新签名）
+/data/service/hnp/bin/binary-sign-tool sign -inFile $PREFIX/bin/foo -outFile $PREFIX/bin/foo -selfSign 1
+
+# Step 4: 恢复执行权限（签名后权限丢失）
+chmod a+x $PREFIX/bin/foo
+```
+
+#### 顺序不可变的原因
+
+| 顺序错误 | 后果 |
+|---------|------|
+| 不移除 .codesign 就 patchelf | `patchelf: open: Operation not permitted` |
+| 不签名就运行 | `Operation not permitted`（内核拒绝未签名 ELF） |
+| 不 chmod +x | `Permission denied`（签名后权限归零） |
+| 先签名再 patchelf | 需要再次移除签名，浪费签名次数 |
+
+#### 验证命令
+
+```bash
+# 确认 RPATH 已嵌入
+/data/service/hnp/bin/llvm-readelf -d $PREFIX/bin/foo | grep -i "rpath\|runpath"
+# 期望: 0x000000000000001d (RUNPATH) Library runpath: [$ORIGIN/../lib]
+
+# 确认不设 LD_LIBRARY_PATH 也能运行
+unset LD_LIBRARY_PATH
+$PREFIX/bin/foo --version
+```
+
+#### 需要处理的文件范围
+
+安装后需要逐个处理所有依赖非系统共享库的 ELF 文件：
+1. `$PREFIX/bin/*` — 可执行文件
+2. `$PREFIX/lib/lib*.so` — 共享库（如被其他 .so NEEDED）
+3. `$PREFIX/lib/*/lib-dynload/*.so` — 扩展模块（如依赖外部 .so）
+
+可参考 `scripts/package_python.sh` 中的 `patch_strip_sign()` 函数批量处理。
+
+#### 工具路径
+
+| 工具 | 路径 |
+|------|------|
+| patchelf | `/data/service/hnp/bin/patchelf` |
+| binary-sign-tool | `/data/service/hnp/bin/binary-sign-tool` |
+| llvm-objcopy | `/data/service/hnp/bin/llvm-objcopy` |
+| llvm-readelf | `/data/service/hnp/bin/llvm-readelf` |
+
+#### 关联
+
+- 长期记忆：`HarmonyOS ELF 签名与可移植打包流程`
+- 错误模式：`libpython3.9.so: No such file or directory`（启动时报动态链接器错误）
+- 实际案例：Python 3.9.0 `make install` 后 python3.9 不含 RPATH（2026-03-29 确认）
+
 ---
 
 ## 1. 与其他平台对比
@@ -206,9 +292,51 @@ Shell (hishell_hap) → exec 用户程序 → adhoc_bin
 **UID 映射层**。HMDFS 是鸿蒙的文件系统，它进行 UID 虚拟映射：
 
 - 进程看到的 UID ≠ 文件实际的 UID
-- chmod()/chown() 返回成功但不实际生效（空操作）
 - symlink 创建和访问受限
 - hardlink 在用户目录不可用
+
+**⚠️ chmod 行为约束（HMDFS 特有，实测 2026-03-29）**
+
+HMDFS 上 `chmod()` 不是简单的空操作，而是有**三个硬性规律**：
+
+| 规律 | 说明 |
+|------|------|
+| **other 固定为 0** | 无论设置什么值（0-7），other 位始终为 `---`（0o0） |
+| **group 固定为 6** | 无论设置什么值（0-7），group 位始终为 `rw-`（0o6） |
+| **owner 有最低权限下限** | 即使设 0o000，owner 也会变为 `rw-`（0o6） |
+
+实测数据（/storage hmdfs 和 ~/usr/local hmdfs 结果完全一致）：
+
+| chmod 设置 | 实际结果 | 差异 |
+|-----------|---------|------|
+| 0o700 | 0o760 | group: 0→6 |
+| 0o740 | 0o760 | group: 4→6, other: 4→0 |
+| 0o704 | 0o760 | group: 0→6, other: 4→0 |
+| 0o644 | 0o660 | group: 4→6, other: 4→0 |
+| 0o666 | 0o660 | other: 6→0 |
+| 0o777 | 0o770 | other: 7→0 |
+| 0o600 | 0o660 | group: 0→6 |
+| **0o000** | **0o660** | **owner: 0→6, group: 0→6** |
+
+**关键结论**：
+
+1. `chmod()` 在 HMDFS 上会强制覆盖 group=6、other=0，owner 保底 rw-
+2. **不能依赖 chmod 做权限隔离**：`chmod 600`（保护私钥）实际变成 660
+3. **不能依赖 `chmod 000` 阻止访问**：实际变成 660，文件仍可读写
+4. **`umask()` 在文件创建时生效**：`umask(077)` 后新建文件确实是 0o600
+5. **ELF 签名文件 chmod 返回 Permission denied**：编译产出的二进制（有 .codesign 段）无法 chmod
+6. **不同文件系统行为可能不同**：/data/app、/data/local/tmp（hmfs）因权限限制无法测试，
+   /（tmpfs rootfs）返回 Operation not permitted。已确认 hmdfs 上的行为一致。
+
+**对测试的影响**：
+- `test_tarfile`：`test_file_mode` 断言磁盘文件权限为 0o644，实际为 0o660（other 4→0）
+- `test_httpservers`：`test_get` 期望 `chmod(tempdir, 0)` 后服务器返回 404，实际仍可读取
+- 两者都是验证 HMDFS 的权限限制，不是模块本身有 bug
+
+**对移植的影响**：
+- 不能依赖 Unix 权限位做访问控制
+- 文件权限断言在测试中会失败
+- 如需权限隔离，依赖 HarmonyOS MAC 策略（SELinux context）而非 DAC
 
 **对移植的影响**：
 - 不能依赖 Unix 权限位做访问控制
@@ -240,7 +368,7 @@ Unix 权限位 (DAC) → 忽略（装饰性）
 | 操作 | Linux | HarmonyOS | 影响 |
 |------|-------|-----------|------|
 | fork() + exec() | ✅ | ⚠️ SELinux 限制 | 用 posix_spawn 替代 |
-| chmod() | ✅ 生效 | ❌ 空操作 | 测试断言失效 |
+| chmod() | ✅ 生效 | ⚠️ HMDFS: group固定6/other固定0; hmfs: 未测试 | 测试断言失效 |
 | symlink() | ✅ | ❌ 受限 | venv 需降级 |
 | /dev/shm | ✅ | ❌ 不存在 | 共享内存回退 |
 | mmap RWX | ✅ | ❌ W^X 策略 | ctypes 回调不可用 |
@@ -950,9 +1078,82 @@ ohos_fstat_compat (int fd, struct stat *st)
 
 ---
 
-*文档版本: 1.4
-最后更新: 2026-03-26
-更新内容: v1.4 新增"铁律 #1：符号链接在 HMDFS 上不可靠"——所有软件 make install 必须用 cp 替代 ln -s*
+*文档版本: 1.6
+最后更新: 2026-03-29
+更新内容: v1.6 新增 §12 distutils spawn 吞 stderr 问题（pipe + clang 交互 bug）*
+
+## 12. distutils spawn 吞掉编译器 stderr 输出 ⚠️
+
+### 现象
+
+Python 3.9 的 `distutils.spawn.spawn()` 调用 `subprocess.Popen(cmd, env=env)` 启动 clang 时：
+- clang 返回 exit code 1（编译失败）
+- **stderr 和 stdout 均为空**，无法看到编译错误信息
+- 直接在 shell 中运行相同的 clang 命令，stderr 正常输出
+
+### 影响范围
+
+| 方式 | 是否受影响 | 说明 |
+|------|-----------|------|
+| `python setup.py build_ext` (distutils) | ❌ 失败 | spawn 吞 stderr，无法诊断编译错误 |
+| `pip install` (setuptools) | ✅ 正常 | setuptools 使用不同的 spawn 实现 |
+| 直接 shell `clang` 命令 | ✅ 正常 | shell 的 pipe 对 clang 正常 |
+| Python subprocess (其他场景) | ✅ 正常 | 仅 distutils+clang 组合有问题 |
+
+### 受影响的测试
+
+- `test_peg_generator.test_c_parser` — 20 个 ERROR（distutils 编译 C parser 失败）
+- 任何使用 `distutils` 编译 C 扩展的测试
+
+### 不影响的场景
+
+- `pip install` 安装 C 扩展包（使用 setuptools）
+- PEG parser 功能本身（已预编译到 Python 中）
+- Python 语法解析（完全正常）
+
+### 根因分析
+
+与 `poll() + /dev/null` 内核 bug（详见 troubleshooting.md §7）类似，是鸿蒙 pipe 子系统的问题。
+`distutils.spawn.spawn()` 使用 `subprocess.Popen(cmd, env=env)` 时，pipe 对 clang 的 stderr 连接异常。
+可能原因：
+1. 传递 `env=env` 参数时 subprocess 创建的 pipe 与鸿蒙的进程模型不兼容
+2. clang 在鸿蒙上的 stderr 输出使用了某种非标准管道机制
+
+### 解决方案
+
+**方案 1：使用 setuptools 代替 distutils（推荐）**
+```bash
+pip install setuptools  # setuptools 的编译流程不受影响
+```
+
+**方案 2：跳过受影响测试**
+```python
+@unittest.skipIf(sys.platform == "ohos",
+                 "distutils spawn swallows clang stderr on HarmonyOS")
+class TestCParser(unittest.TestCase):
+    ...
+```
+
+**方案 3：修复 distutils spawn（见补丁）**
+在 `Lib/distutils/spawn.py` 的 `spawn()` 函数中，显式捕获并打印 stderr：
+```python
+proc = subprocess.Popen(cmd, env=env,
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+stdout, _ = proc.communicate()
+if proc.returncode and stdout:
+    sys.stderr.write(stdout.decode(errors='replace'))
+```
+
+### 注意
+
+distutils 在 Python 3.10+ 中已移除（PEP 632），被 setuptools 完全替代。
+此问题仅在 Python 3.9 及更早版本存在。
+
+---
+
+*文档版本: 1.6
+最后更新: 2026-03-29
+更新内容: v1.6 新增"铁律 #2：make install 产出的 ELF 不含 RPATH，必须 post-install 处理"*
 
 ## 11. HMDFS 符号链接限制（E051）
 
@@ -995,7 +1196,43 @@ HMDFS 文件系统不正常跟踪符号链接。`os.stat()` 对符号链接返�
 
 修复后 greenlet、brotli、netifaces 等包编译链接正常。
 
-## 10. Perl 测试框架依赖问题
+## 10. SIGSYS 信号行为（与 Linux seccomp 完全不同）⚠️ 重要
+
+### 问题描述
+
+HarmonyOS 内核对未实现的 syscall（如 `setreuid`、`setregid`、`chroot`、`clock_settime`）发送 SIGSYS 信号（signal 31），但其行为与 Linux seccomp SIGSYS **完全不同**。
+
+### 行为对比
+
+| 特性 | Linux seccomp SIGSYS | HarmonyOS 未实现 syscall |
+|------|---------------------|------------------------|
+| 信号编号 | SIGSYS (31) | SIGSYS (31) |
+| `sigaction` 可捕获？ | ✅ 全部可捕获 | ❌ **部分不可捕获** |
+| handler 中 `si_syscall` | ✅ 包含 syscall 号 | ❌ 不可靠 |
+| handler 返回后 | 返回 `-ENOSYS` | 进程被终止（不可捕获时） |
+| errno 设置 | EPERM/ENOSYS | 不确定/垃圾值 |
+
+### 不可捕获的 syscall（最危险）
+
+- **`setreuid()`** — 进程直接终止，任何 signal handler 都不触发
+- **`setregid()`** — 同上
+
+### 可捕获但行为异常的 syscall
+
+- **`chroot()`** — handler 可触发，但 syscall 返回垃圾值（如 ret=158431531, errno=0）
+- **`clock_settime()`** — handler 可触发，但 errno 不可靠
+
+### 正确做法
+
+**在 C 源码中用 `#ifdef __OHOS__` 守卫，避免进入内核**。详见 `ohos-adaptation-patterns.md` 的"未实现 syscall 提前拦截"模式和 `error-patterns.md` E051。
+
+### 影响
+
+所有从 Linux 移植到鸿蒙的 C/C++ 软件都可能遇到此问题。如果程序中调用了上述 syscall 且鸿蒙内核未实现，进程会直接崩溃。
+
+---
+
+## 11. Perl 测试框架依赖问题
 
 ### 问题描述
 

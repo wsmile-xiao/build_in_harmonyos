@@ -139,6 +139,43 @@ glibc 特有   → 不加（musl 不同）
 
 ---
 
+### 2.x 未实现 syscall 提前拦截（__OHOS__ 守卫返回 ENOSYS）
+
+**背景**：鸿蒙内核对部分未实现的 syscall 发送 SIGSYS 信号（signal 31），且**不可被信号处理器捕获**，进程直接终止。因此不能依赖信号处理，必须在 C 源码调用前拦截。
+
+**典型代码**：
+
+```c
+int some_function(...) {
+#ifdef __OHOS__
+    /* HarmonyOS: unimplemented syscall sends uncatchable SIGSYS.
+       Return ENOSYS to avoid process death. */
+    errno = ENOSYS;
+    return -1;
+#endif
+    return actual_syscall(...);
+}
+```
+
+**已知受影响的 syscall**：
+
+| syscall | SIGSYS 可捕获？ | 正确处理 |
+|---------|----------------|---------|
+| `setreuid` | ❌ 不可捕获 | **必须**提前拦截 |
+| `setregid` | ❌ 不可捕获 | **必须**提前拦截 |
+| `clock_settime` | ✅ 可捕获但 errno 不确定 | 建议提前拦截 |
+| `chroot` | ✅ 可捕获但返回垃圾值 | 建议提前拦截 |
+
+**为什么信号处理不可行**：
+- Python `signal.signal(signal.SIGSYS, handler)` → ❌ 进程仍崩溃
+- C `sigaction(SIGSYS, &sa, NULL)` → ❌ setreuid/setregid 不触发 handler
+
+**编译注意**：`__OHOS__` 由鸿蒙 SDK 的 clang 自动定义，无需额外 `-D` 参数。编译器会警告原始 syscall 调用变为不可达代码（`code will never be executed`），这是预期的。
+
+**案例**：Python 3.9.0 补丁 0039（timemodule.c）、0040（posixmodule.c）。详见 `error-patterns.md` E051。
+
+---
+
 ## 3. 不应加 `__OHOS__` 的模式（glibc 特有）
 
 以下场景中，API 依赖 glibc 特有实现，鸿蒙的 musl libc 没有这些功能，**不应**加 `__OHOS__`。

@@ -50,12 +50,14 @@
 | [E042](#e042-扩展模块-rpath-遗漏导致运行时库找不到) | 打包 | ImportError: cannot open shared object file | 🔴 阻塞 |
 | [E043](#e043-activatesh-中-bash_source-在-hishell-不可用) | 脚本 | 环境变量未设置（脚本静默失败） | 🟡 中等 |
 | [E044](#e044-可移植包缺少-pythonhome-导致标准库找不到) | 运行时 | ModuleNotFoundError: No module named 'encodings' | 🔴 阻塞 |
-| [E045](#e045-mmap-rwx-被拒w^x-策略) | 系统调用 | mmap: Invalid argument, CFUNCTYPE MemoryError | 🟡 中等 |
+| [E045](#e045-mmap-rwx-被拒w^x-策略) | 系统调用 | mmap: Invalid argument, CFUNCTYPE MemoryError | ✅ 已解决 |
 | [E046](#e046-chmod-完全不生效) | SELinux/FS | chmod: Permission denied, st_mode unchanged | 🟡 中等 |
 | [E047](#e047-文件权限-other-read-被额外屏蔽) | FS | st_mode: missing 0o004 bit | 🟢 轻微 |
 | [E048](#e048-udplite-协议不支持) | 内核 | IPPROTO_UDPLITE: Permission denied | 🟢 轻微 |
 | [E049](#e049-find_library-崩溃ldconfig-不存在) | 系统调用 | find_library, SubprocessError, ldconfig | 🟡 中等 |
 | [E050](#e050-hmdfs-符号链接不可跟踪导致链接器找不到库) | FS/链接 | unable to find library, symlink | 🔴 阻塞 |
+| [E051](#e051-未实现-syscall-触发-sigsys-导致进程崩溃) | 内核/信号 | SIGSYS, setreuid, setregid, chroot, clock_settime, core dump, exit 159 | 🔴 阻塞 |
+| [E052](#e052-rpath-缺失导致子进程找不到-libpython) | 构建/RPATH | subprocess exit 127, libpython3.9.so not found, LD_LIBRARY_PATH | 🔴 阻塞 |
 
 ---
 
@@ -1804,7 +1806,10 @@ mprotect(buf, size, PROT_READ|PROT_EXEC);  // 去掉 W，加上 X
 
 ### 涉及软件
 
-Python 3.9.0（test_code）、任何使用 ctypes 回调的第三方库（cffi、pycurl 等）
+- Python 3.9.0（ctypes CFUNCTYPE 回调）
+- 任何使用 ctypes 回调的第三方库（cffi、pycurl 等）
+- **libffi**（ffi_closure_alloc/ffi_prep_closure_loc 在鸿蒙上返回 NULL）
+- 任何依赖 libffi closure 的 C/C++ 软件
 
 ---
 
@@ -2225,6 +2230,121 @@ ls -Z /path/to/file
 
 ---
 
-*文档版本: 2.5*  
-*最后更新: 2026-03-26*
-*新增 E050：HMDFS 符号链接不可跟踪导致链接器找不到库（补丁 0024 修复）*
+## E051: 未实现 syscall 触发 SIGSYS 导致进程崩溃
+
+### 错误特征
+
+- 进程意外退出，无错误信息输出
+- Exit code 159（128 + 31 = SIGSYS）
+- 可能产生 core dump
+- Python: `OSError` 或直接 `killed`，无 traceback
+
+### 触发条件
+
+调用鸿蒙内核未实现的 syscall，已确认的包括：
+- `setreuid()` / `setregid()` — **SIGSYS 不可捕获，进程直接终止**
+- `chroot()` — SIGSYS 可捕获但返回垃圾值
+- `clock_settime()` — SIGSYS 可捕获但 errno 不确定
+
+### 根因分析
+
+鸿蒙内核对未实现的 syscall 发送 SIGSYS 信号（signal 31），但其行为与 Linux seccomp SIGSYS **完全不同**：
+
+| 特性 | Linux seccomp SIGSYS | HarmonyOS 未实现 syscall |
+|------|---------------------|------------------------|
+| sigaction 可捕获？ | ✅ 全部可捕获 | ❌ 部分不可捕获（setreuid/setregid） |
+| handler 中 si_syscall | ✅ 包含 syscall 号 | ❌ 不确定 |
+| handler 返回后 | 返回 -ENOSYS | 进程被终止（不可捕获时） |
+
+**关键发现**：`setreuid`/`setregid` 的 SIGSYS 不触发任何 signal handler（包括 C 层 sigaction），进程直接被终止。这意味着**信号处理方案完全不可行**，必须在源码层面拦截。
+
+### 验证命令
+
+```bash
+# Python 层面
+python3 -c "import os; os.setreuid(0,0)"
+# 预期: exit code 159 (killed by SIGSYS)
+
+# C 层面
+cat > test_sigsys.c << 'EOF'
+#include <unistd.h>
+int main() {
+    setreuid(0, 0);
+    return 0;
+}
+EOF
+clang test_sigsys.c -o test_sigsys && ./test_sigsys
+echo "exit=$?"  # 159
+```
+
+### 解决方案
+
+在 C 源码中用 `#ifdef __OHOS__` 守卫，在 syscall 调用前直接返回 ENOSYS：
+
+```c
+int some_function(...) {
+#ifdef __OHOS__
+    /* HarmonyOS: unimplemented syscall sends uncatchable SIGSYS.
+       Return ENOSYS to avoid process death. */
+    errno = ENOSYS;
+    return -1;
+#endif
+    return actual_syscall(...);
+}
+```
+
+**为什么不用信号处理？**
+- Python `signal.signal(signal.SIGSYS, handler)` → ❌ 进程仍 core dump
+- C `sigaction(SIGSYS, &sa, NULL)` → ❌ setreuid/setregid 不触发 handler
+- C handler + longjmp → ❌ setreuid/setregid 不触发 handler
+
+### 编译注意事项
+
+- `__OHOS__` 由鸿蒙 SDK 的 clang 自动定义，无需额外 `-D` 参数
+- 编译器会警告原始 syscall 调用变为不可达代码（`code will never be executed`），这是预期的
+- 修改 C 源码后需要重新编译并链接
+
+### 影响范围
+
+所有调用未实现 syscall 的 C/C++ 程序。不仅限于 Python，任何从 Linux 移植到鸿蒙的软件都可能遇到。
+
+### 相关补丁
+
+- Python 3.9.0: 0039（timemodule.c clock_settime）、0040（posixmodule.c setreuid/setregid/chroot）
+
+### 相关知识
+
+- `ohos-adaptation-patterns.md` — "未实现 syscall 提前拦截"适配模式
+- `harmonyos-specifics.md` — SIGSYS 信号行为章节
+
+---
+
+*文档版本: 2.6*  
+*最后更新: 2026-03-29*
+*新增 E051：未实现 syscall 触发 SIGSYS 导致进程崩溃（补丁 0039/0040 修复）*
+```bash
+# 系统信息
+uname -a
+
+# 编译器
+clang --version
+which clang llvm-ar
+
+# 环境变量
+echo $CC $CFLAGS $LDFLAGS
+
+# 库依赖
+llvm-readelf -d /path/to/binary | grep NEEDED
+
+# 符号表
+llvm-nm /path/to/library
+
+# SELinux 上下文
+ls -Z /path/to/file
+```
+
+---
+
+*文档版本: 2.7*
+*最后更新: 2026-03-29*
+*新增 E052：RPATH 缺失导致子进程找不到 libpython（补丁 0043 修复）*

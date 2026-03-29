@@ -1,6 +1,6 @@
 # 鸿蒙平台开源软件编译兼容性总览
 
-> 最后更新：2026-03-26
+> 最后更新：2026-03-28
 > 已收录软件：26 款 / 27 个版本
 
 ## 📊 总体统计
@@ -43,7 +43,7 @@
 | **ncurses** | 6.4 | ✅ 完全成功 | 🟢 高 | Autotools | 1 |  | [📄](archives/n/ncurses/6.4/) |
 | **openssl** | 1.1.1w | ✅ 完全成功 | 🟢 高 | Custom Perl | 1 |  | [📄](archives/o/openssl/1.1.1w/) |
 | **patch** | 2.7.6 | ⚠️ 部分成功 | 未评估 | Autotools | 1 | - | [📄](archives/p/patch/2.7.6/) |
-| **python** | 3.9.0 | ⚠️ 部分成功 | 🟡 中 | Autotools | 11 |  | [📄](archives/p/python/3.9.0/) |
+| **python** | 3.9.0 | ⚠️ 部分成功 | 🟡 中 | Autotools | 20 |  | [📄](archives/p/python/3.9.0/) |
 | **readline** | 8.2 | ✅ 完全成功 | 🟢 高 | Autotools | 1 |  | [📄](archives/r/readline/8.2/) |
 | **rsync** | 3.3.0 | ⚠️ 部分成功 | 未评估 | Autotools | 2 | - | [📄](archives/r/rsync/3.3.0/) |
 | **sed** | 4.9 | ✅ 完全成功 | 🟢 高 | Autotools | 1 |  | [📄](archives/s/sed/4.9/) |

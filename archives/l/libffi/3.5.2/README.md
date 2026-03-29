@@ -161,11 +161,21 @@ export AR="llvm-ar"
 - 多架构支持（aarch64, arm, x86_64, i686）
 - 动态库和静态库编译
 - C 语言接口
-- 闭包（closures）支持
 - 版本信息 API（FFI_VERSION_STRING, FFI_VERSION_NUMBER）- 3.5.0+ 新增
+
+### 🔧 闭包（closures）支持 — 需要额外补丁
+
+ffi_closure（闭包/回调）功能在鸿蒙上默认不可用，需要额外的移植补丁。
+
+**根因**：鸿蒙内核级 W^X 安全策略禁止所有 PROT_EXEC 的 mmap/mprotect。
+
+**解决方案**：启用 `FFI_EXEC_STATIC_TRAMP`（复用 .so 内已有的 trampoline code table），并修改 `ffi_tramp_get_libffi()` 添加 mount 表路径回退以解决 HMDFS 路径不可访问问题。
+
+📄 **详细方案请参阅 [CLOSURE_PORTING.md](./CLOSURE_PORTING.md)**
 
 ### ⚠️ 注意事项
 - Java Raw API 已弃用（ffi_java_raw_*）
+- ffi_closure 闭包功能需要额外补丁（见 CLOSURE_PORTING.md）
 
 ## 版本特性
 
@@ -232,6 +242,18 @@ libffi-3.5.2/
 ├── config.guess      # 修改：添加 HarmonyOS 检测
 └── config.sub        # 修改：添加 ohos 操作系统支持
 ```
+
+### 闭包移植补丁（待创建）
+
+```
+patches/
+├── 0001-port-for-ohos.patch              # 基础平台支持（已有）
+└── 0002-closure-port-for-ohos.patch      # 闭包功能支持（待创建）
+    ├── src/tramp.c                      # ffi_tramp_get_libffi() 添加 mount 表路径回退
+    └── src/closures.c                   # 清理调试代码（如有）
+```
+
+关于闭包移植的完整技术细节、根因分析、验证计划，请参阅 **[CLOSURE_PORTING.md](./CLOSURE_PORTING.md)**。
 
 ## 技术细节
 

@@ -343,7 +343,75 @@ getfattr -d -m - /path/to/file
 
 ---
 
-## 7. 获取帮助
+## 7. 进程意外退出（exit code 159 = SIGSYS）
+
+### 症状
+
+- 程序运行中突然退出，无错误信息
+- Exit code 159（128 + signal 31 = SIGSYS）
+- 可能产生 core dump
+
+### 排查步骤
+
+1. **确认信号编号**：
+   ```bash
+   echo $((159 - 128))  # → 31 = SIGSYS
+   ```
+
+2. **检查是否调用了未实现 syscall**：常见触发 syscall 包括 `setreuid`、`setregid`、`chroot`、`clock_settime`
+
+3. **Python 快速复现**：
+   ```bash
+   python3 -c "import os; os.setreuid(0,0)"  # exit 159
+   ```
+
+4. **解决方案**：在 C 源码中添加 `#ifdef __OHOS__` 守卫，在 syscall 调用前返回 ENOSYS
+
+### ⚠️ 注意
+
+- `sigaction(SIGSYS, handler)` 对 `setreuid`/`setregid` **无效**——handler 不会触发
+- **必须在源码层面拦截**，不能依赖信号处理
+- 详细技术分析见 `error-patterns.md` E051
+- 适配模式见 `ohos-adaptation-patterns.md` "未实现 syscall 提前拦截"
+
+---
+
+## 8. 子进程 exit code 127（找不到 libpython3.9.so）
+
+### 症状
+
+- `subprocess.Popen([sys.executable, ...])` 启动的子进程返回 exit code 127
+- 不设 `LD_LIBRARY_PATH` 时直接运行 `python3.9` 也报错
+- 错误信息：`Error loading shared library libpython3.9.so.1.0: No such file or directory`
+
+### 排查步骤
+
+1. **确认是 RPATH 问题**：
+   ```bash
+   unset LD_LIBRARY_PATH && python3.9 -c "print(1)"  # 失败?
+   LD_LIBRARY_PATH=/path/to/python python3.9 -c "print(1)"  # 成功?
+   ```
+
+2. **检查是否有 RPATH**：
+   ```bash
+   # musl 环境下用 objdump 检查
+   # 看 python3.9 是否有 RPATH/RUNPATH 段
+   ```
+
+3. **解决方案**：重新编译/链接时加 `-Wl,-rpath,$ORIGIN`
+   - 或修改 `Makefile.pre.in` 的 `LINKFORSHARED`（补丁 0043）
+   - 或临时重新链接：`clang -Wl,-rpath,$ORIGIN -o python3.9 Programs/python.o -L. -lpython3.9 ...`
+
+### ⚠️ 注意
+
+- 鸿蒙使用 musl ld.so，**不会**自动搜索 `$ORIGIN`
+- glibc 发行版通常有默认的 `$ORIGIN` 搜索，鸿蒙没有
+- 这影响所有通过 subprocess 启动 Python 子进程的场景
+- 详细技术分析见 `error-patterns.md` E052
+
+---
+
+## 9. 获取帮助
 
 1. 查看软件档案：`archives/{首字母}/{软件名}/{版本}/README.md`
 2. 查看问题模式：`knowledge/error-patterns.md`

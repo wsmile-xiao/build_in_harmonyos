@@ -1,0 +1,220 @@
+--- Python-3.9.0/setup.py	2020-10-05 23:07:58.000000000 +0800
++++ Python-3.9.0-clean-v5/setup.py	2026-03-28 23:22:53.594285001 +0800
+@@ -64,7 +64,7 @@
+ MACOS = (HOST_PLATFORM == 'darwin')
+ AIX = (HOST_PLATFORM.startswith('aix'))
+ VXWORKS = ('vxworks' in HOST_PLATFORM)
+-
++OHOS = (HOST_PLATFORM.startswith('harmony') or HOST_PLATFORM.startswith('ohos'))
+ 
+ SUMMARY = """
+ Python is an interpreted, interactive, object-oriented programming
+@@ -238,6 +238,72 @@
+                 or path.startswith('/System/')
+                 or path.startswith('/Library/') )
+ 
++HARMONY_SDK_ROOT = None
++
++def ohos_sdk_root():
++    """Return the sysroot path of the HarmonyOS SDK (mirrors macosx_sdk_root logic)."""
++    global HARMONY_SDK_ROOT
++    if HARMONY_SDK_ROOT:
++        return HARMONY_SDK_ROOT
++
++    # Method 1: extract --sysroot from CFLAGS
++    cflags = sysconfig.get_config_var('CFLAGS') or ''
++    m = re.search(r'--sysroot=(\S+)', cflags)
++    if m is not None:
++        HARMONY_SDK_ROOT = m.group(1)
++        return HARMONY_SDK_ROOT
++
++    # Method 2: probe sysroot by invoking the Clang command (fallback)
++    cc = sysconfig.get_config_var('CC') or 'clang'
++    tmpfile = './setup_harmony_sysroot.%d' % os.getpid()
++    try:
++        os.unlink(tmpfile)
++    except OSError:
++        pass
++    # Execute Clang command and capture output
++    cmd = f'{cc} -v -E - </dev/null 2>{tmpfile} 1>/dev/null'
++    ret = run_command(cmd)
++    if ret == 0:
++        with open(tmpfile) as fp:
++            for line in fp.readlines():
++                # Match HarmonyOS sysroot characteristic path
++                if '../../sysroot/usr/include' in line and 'ignoring' not in line:
++                    # Extract the sysroot directory
++                    sysroot_rel = re.search(r'(\S+/llvm/bin/../../sysroot)', line)
++                    if sysroot_rel:
++                        HARMONY_SDK_ROOT = os.path.abspath(sysroot_rel.group(1))
++                        break
++    # Clean up temporary file
++    try:
++        os.unlink(tmpfile)
++    except OSError:
++        pass
++    
++    return HARMONY_SDK_ROOT
++
++def get_ohos_arch():
++    """Determine the HarmonyOS target architecture (pure builtins, no external deps)."""
++    try:
++        # Prefer os.uname (natively supported on HarmonyOS/Unix-like systems)
++        arch = os.uname().machine.lower()
++    except AttributeError:
++        # Fallback for non-Unix systems (should not be reached on HarmonyOS)
++        arch = platform.machine().lower()
++
++    # Architecture mapping (extend as needed for your SDK directories)
++    arch_map = {
++        "aarch64": "aarch64",
++        "arm64": "aarch64",
++        "armv8": "aarch64",
++        "armv8l": "aarch64",
++        "armv7": "arm32",
++        "armv7l": "arm32",
++        "arm": "arm32",
++        "x86_64": "x86_64",
++        "amd64": "x86_64"
++    }
++    return arch_map.get(arch, "aarch64")
++
+ 
+ def find_file(filename, std_dirs, paths):
+     """Searches for the directory where a given file is located,
+@@ -255,6 +321,8 @@
+         # An SDK is a directory with the same structure as a real
+         # system, but with only header files and libraries.
+         sysroot = macosx_sdk_root()
++    elif OHOS:
++        sysroot = ohos_sdk_root()
+ 
+     # Check the standard locations
+     for dir in std_dirs:
+@@ -377,7 +445,18 @@
+         if not self.srcdir:
+             # Maybe running on Windows but not using CYGWIN?
+             raise ValueError("No source directory; cannot proceed.")
+-        self.srcdir = os.path.abspath(self.srcdir)
++        # On HarmonyOS/OHOS, avoid converting srcdir to absolute path.
++        # Absolute paths cause deeply nested build output directories
++        # (build/temp/.../full/src/path/xxx.o) which can exceed path
++        # length limits and cause issues with HMDFS.
++        if not sys.platform.startswith(('ohos', 'harmonyos')):
++            self.srcdir = os.path.abspath(self.srcdir)
++        else:
++            # Use relative path without leading './' prefix to avoid
++            # nested build output (build/temp././Modules/xxx.o) which
++            # causes path resolution issues on HMDFS.
++            if self.srcdir in ('.', os.curdir):
++                self.srcdir = ''
+ 
+     def remove_disabled(self):
+         # Remove modules that are present on the disabled list
+@@ -456,6 +535,15 @@
+             args['compiler_so'] = compiler + ' ' + ccshared + ' ' + cflags
+         self.compiler.set_executables(**args)
+ 
++        # On HarmonyOS, musl uses BIND_NOW by default, requiring all symbols
++        # to be resolved at load time. Extension modules must link against
++        # libpython to resolve Python API symbols (e.g. _PyType_Name).
++        if OHOS:
++            ldversion = sysconfig.get_config_var('LDVERSION')
++            args['compiler_so'] = (args.get('compiler_so', '') +
++                                   ' -L. -lpython' + ldversion)
++
++
+     def build_extensions(self):
+         self.set_srcdir()
+ 
+@@ -641,6 +729,14 @@
+             self.failed.append(ext.name)
+ 
+     def add_multiarch_paths(self):
++        if OHOS:
++            # HarmonyOS multi-architecture path adaptation
++            arch = get_ohos_arch()
++            if arch:
++                add_dir_to_list(self.compiler.library_dirs, f'/usr/lib/{arch}-linux-ohos')
++                add_dir_to_list(self.compiler.include_dirs, f'/usr/include')
++            return
++
+         # Debian/Ubuntu multiarch support.
+         # https://wiki.ubuntu.com/MultiarchSpec
+         cc = sysconfig.get_config_var('CC')
+@@ -771,8 +867,26 @@
+         # if a file is found in one of those directories, it can
+         # be assumed that no additional -I,-L directives are needed.
+         if not CROSS_COMPILING:
++            
+             self.lib_dirs = self.compiler.library_dirs + system_lib_dirs
+             self.inc_dirs = self.compiler.include_dirs + system_include_dirs
++            if OHOS:
++                sysroot = ohos_sdk_root()
++                if sysroot:
++                    ohos_arch = get_ohos_arch()
++
++                    full_lib_dir = os.path.join(sysroot, "usr", "lib", "{}-linux-ohos".format(ohos_arch))
++                    if os.path.isdir(full_lib_dir):
++                        self.lib_dirs.append(full_lib_dir)
++                    
++                    pub_sdk_inc_dir = os.path.join(sysroot, "usr", "include")
++                    if os.path.isdir(pub_sdk_inc_dir):
++                        self.inc_dirs.append(pub_sdk_inc_dir)
++
++                    arch_sdk_inc_dir = os.path.join(sysroot, "usr", "include", "{}-linux-ohos".format(ohos_arch))
++                    if os.path.isdir(arch_sdk_inc_dir):
++                        self.inc_dirs.append(arch_sdk_inc_dir)
++
+         else:
+             # Add the sysroot paths. 'sysroot' is a compiler option used to
+             # set the logical path of the standard system headers and
+@@ -1076,13 +1190,16 @@
+             # Bug 1464056: If _curses.so links with ncursesw,
+             # _curses_panel.so must link with panelw.
+             panel_library = 'panelw'
+-            if MACOS:
++            if MACOS or OHOS:
+                 # On OS X, there is no separate /usr/lib/libncursesw nor
+                 # libpanelw.  If we are here, we found a locally-supplied
+                 # version of libncursesw.  There should also be a
+                 # libpanelw.  _XOPEN_SOURCE defines are usually excluded
+                 # for OS X but we need _XOPEN_SOURCE_EXTENDED here for
+-                # ncurses wide char support
++                # ncurses wide char support.
++                # On HarmonyOS, musl libc does not define _XOPEN_SOURCE by
++                # default, so we also need _XOPEN_SOURCE_EXTENDED for wide
++                # char support (cchar_t, setcchar, wadd_wch, etc.).
+                 curses_defines.append(('_XOPEN_SOURCE_EXTENDED', '1'))
+         elif MACOS and curses_library == 'ncurses':
+             # Building with the system-suppied combined libncurses/libpanel
+@@ -1137,7 +1254,6 @@
+             libs = ['crypt']
+         else:
+             libs = []
+-
+         self.add(Extension('_crypt', ['_cryptmodule.c'],
+                                libraries=libs))
+ 
+@@ -1778,7 +1894,12 @@
+ 
+     def detect_uuid(self):
+         # Build the _uuid module if possible
+-        uuid_incs = find_file("uuid.h", self.inc_dirs, ["/usr/include/uuid"])
++        uuid_include_subdirs = ["/usr/include/uuid"]
++        # Also search in INCLUDEDIR/uuid for user-installed libuuid
++        includedir = sysconfig.get_config_var('INCLUDEDIR')
++        if includedir:
++            uuid_include_subdirs.append(os.path.join(includedir, "uuid"))
++        uuid_incs = find_file("uuid.h", self.inc_dirs, uuid_include_subdirs)
+         if uuid_incs is not None:
+             if self.compiler.find_library_file(self.lib_dirs, 'uuid'):
+                 uuid_libs = ['uuid']
+@@ -2574,7 +2695,6 @@
+ def main():
+     set_compiler_flags('CFLAGS', 'PY_CFLAGS_NODIST')
+     set_compiler_flags('LDFLAGS', 'PY_LDFLAGS_NODIST')
+-
+     class DummyProcess:
+         """Hack for parallel build"""
+         ProcessPoolExecutor = None
