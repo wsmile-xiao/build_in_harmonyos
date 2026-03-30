@@ -90,7 +90,7 @@ patch_strip_sign() {
     
     # Steps 2-4: Strip debug and extract (if enabled)
     if [ "$STRIP_DEBUG" = "1" ]; then
-        local debug_file="$PACKAGE_DIR/debug/${name}.debug"
+        local debug_file="$OUTPUT_DIR/${PACKAGE_NAME}.debug/${name}.debug"
         
         # Step 2: Extract debug info to separate file
         llvm-objcopy --only-keep-debug "$file" "$debug_file"
@@ -160,7 +160,7 @@ fi
 log_info "创建打包目录: $PACKAGE_DIR"
 rm -rf "$PACKAGE_DIR"
 mkdir -p "$PACKAGE_DIR"/{bin,lib/external,include}
-mkdir -p "$OUTPUT_DIR/debug"
+mkdir -p "$OUTPUT_DIR/${PACKAGE_NAME}.debug"
 
 # ============================================================
 # 复制 Python 运行时
@@ -372,8 +372,8 @@ SIZE=$(du -h "${PACKAGE_NAME}.tar.gz" | cut -f1)
 log_info "  主包: ${PACKAGE_NAME}.tar.gz ($SIZE)"
 
 # Debug 符号包（debug 目录在 output 下，独立于主包）
-if [ "$STRIP_DEBUG" = "1" ] && [ -d "$OUTPUT_DIR/debug" ]; then
-    tar -czf "${PACKAGE_NAME}-debug.tar.gz" -C "$OUTPUT_DIR" "debug"
+if [ "$STRIP_DEBUG" = "1" ] && [ -d "$OUTPUT_DIR/${PACKAGE_NAME}.debug" ]; then
+    tar -czf "${PACKAGE_NAME}-debug.tar.gz" -C "$OUTPUT_DIR" "${PACKAGE_NAME}.debug"
     DEBUG_SIZE=$(du -h "${PACKAGE_NAME}-debug.tar.gz" | cut -f1)
     log_info "  Debug: ${PACKAGE_NAME}-debug.tar.gz ($DEBUG_SIZE)"
 fi
@@ -394,7 +394,7 @@ echo "📊 统计:"
 echo ""
 EXT_COUNT=$(find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" -type f 2>/dev/null | wc -l | tr -d " ")
 LIB_COUNT=$(find "$PACKAGE_DIR/lib/external" -name "*.so*" -type f 2>/dev/null | wc -l | tr -d " ")
-DEBUG_COUNT=$(find "$OUTPUT_DIR/debug" -type f 2>/dev/null | wc -l | tr -d " ")
+DEBUG_COUNT=$(find "$OUTPUT_DIR/${PACKAGE_NAME}.debug" -type f 2>/dev/null | wc -l | tr -d " ")
 ELF_TOTAL=$((3 + EXT_COUNT + LIB_COUNT))
 echo "  ELF 文件:   $ELF_TOTAL 个（python3.9 + libpython3.9.so*2 + $EXT_COUNT 扩展模块 + $LIB_COUNT 外部依赖）"
 echo "  Debug 符号: $DEBUG_COUNT 个"
