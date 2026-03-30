@@ -21,8 +21,8 @@
 #   ./package_python.sh
 #
 # 产物：
-#   python-3.9.0-harmonyos-aarch64.tar.gz          # 主包（165MB）
-#   python-3.9.0-harmonyos-aarch64-debug.tar.gz     # Debug 符号包（14MB）
+#   python-3.9.0-harmonyos-aarch64.tar.gz          # 主包（~207MB）
+#   python-3.9.0-harmonyos-aarch64-debug.tar.gz     # Debug 符号包（~22MB）
 #
 # 注意事项：
 #   - HarmonyOS 的 ELF 签名机制要求修改后的二进制必须重新签名
@@ -311,32 +311,6 @@ done
 log_info "扩展模块: 已处理 $EXT_DYNLOAD_COUNT / $EXT_DYNLOAD_TOTAL 个"
 
 # ============================================================
-# 创建环境激活脚本
-# ============================================================
-log_info "创建环境激活脚本..."
-
-cat > "$PACKAGE_DIR/activate.sh" << 'EOF'
-#!/bin/sh
-# Python 3.9.0 环境激活脚本（HarmonyOS）
-PYTHON_DIR="$(cd "$(dirname "$0")" && pwd)"
-export PATH="$PYTHON_DIR/bin:$PATH"
-export LD_LIBRARY_PATH="$PYTHON_DIR/lib:$PYTHON_DIR/lib/external${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-
-# SSL 证书：优先使用系统编译的 OpenSSL 证书，其次系统证书
-if [ -f "$HOME/usr/local/ssl/cert.pem" ]; then
-    export SSL_CERT_FILE="$HOME/usr/local/ssl/cert.pem"
-elif [ -f "/etc/ssl/certs/ca-certificates.crt" ]; then
-    export SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
-fi
-
-echo "Python 3.9.0 (HarmonyOS aarch64) 环境已激活"
-echo "  PATH:        $PATH"
-echo "  PYTHONHOME:  $PYTHONHOME"
-[ -n "$SSL_CERT_FILE" ] && echo "  SSL_CERT:   $SSL_CERT_FILE"
-EOF
-chmod +x "$PACKAGE_DIR/activate.sh"
-
-# ============================================================
 # 创建使用说明
 # ============================================================
 cat > "$PACKAGE_DIR/README.md" << 'EOF'
@@ -345,16 +319,19 @@ cat > "$PACKAGE_DIR/README.md" << 'EOF'
 ## 快速使用
 
 ```bash
-# 解压
-tar -xzf python-3.9.0-harmonyos-aarch64.tar.gz
-cd python-3.9.0-harmonyos-aarch64
+# 方式一：一键安装（推荐）
+/bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"
 
-# 首次运行：需要在弹窗中确认（ELF adhoc 签名机制）
-./bin/python3.9 --version
+# 方式二：手动安装
+tar -xzf python-3.9.0-harmonyos-aarch64.tar.gz -C ~/usr/
 
-# 激活环境（推荐）
-source activate.sh
-python --version
+# 将以下内容添加到 ~/.bashrc 和 ~/.zshrc
+export PATH="$HOME/usr/python-3.9.0-harmonyos-aarch64/bin:$PATH"
+export TMPDIR="${TMPDIR:-$HOME/tmp}"
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+
+source ~/.bashrc
+python3.9 --version
 ```
 
 ## 目录结构
@@ -375,7 +352,6 @@ python-3.9.0-harmonyos-aarch64/
 │       ├── libgdbm_compat.so.4
 │       └── liblzma.so.5
 ├── include/                # 头文件
-├── activate.sh             # 环境激活脚本
 └── README.md
 ```
 
@@ -383,7 +359,7 @@ python-3.9.0-harmonyos-aarch64/
 
 - ✅ RPATH 使用 $ORIGIN 相对路径，可移植到任意目录
 - ✅ 所有 ELF 文件已重新签名（adhoc self-sign）
-- ✅ 内置 HarmonyOS 子进程兼容层
+- ✅ 内置 HarmonyOS 子进程兼容层（subprocess 自动走 posix_spawn）
 - ✅ 大部分扩展模块静态链接，外部依赖仅 3 个库
 - ✅ 不使用软链接（用 wrapper 脚本替代，避免 SELinux 限制）
 
@@ -392,7 +368,7 @@ python-3.9.0-harmonyos-aarch64/
 - 首次运行每个二进制需要用户弹窗确认
 - SSL 证书验证需要设置 SSL_CERT_FILE 环境变量
 - ptrace 被 SELinux 禁止（调试受限）
-- subprocess 调用 SDK 工具需使用管道语法（兼容层已自动处理）
+- multiprocessing spawn 模式可用但不稳定，fork/forkserver 受限
 
 ## 打包信息
 
@@ -435,9 +411,9 @@ fi
 echo ""
 echo "使用方法："
 echo "  tar -xzf ${PACKAGE_NAME}.tar.gz"
-echo "  cd ${PACKAGE_NAME}"
+echo "  # 安装脚本会自动配置 PATH 和环境变量"
 echo "  ./bin/python3.9 --version    # 首次运行需确认弹窗"
-echo "  source activate.sh           # 激活环境"
+echo "  source ~/.bashrc             # 或 source ~/.zshrc"
 echo ""
 echo "调试："
 echo "  tar -xzf ${PACKAGE_NAME}-debug.tar.gz"
