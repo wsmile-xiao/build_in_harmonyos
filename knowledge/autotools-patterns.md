@@ -447,5 +447,93 @@ grep -n "ohos-linux" config.sub
 
 ---
 
-*文档版本: 1.1*  
-*最后更新: 2024-03-22*
+---
+
+## 10. autotools 宏在鸿蒙上需要 patch
+
+### 问题描述
+
+autotools 生成的 configure 脚本和 Makefile 中使用了大量 M4 宏（如 `AC_CHECK_HEADERS`、
+`AC_CHECK_FUNCS`、`AC_COMPILE_IFELSE` 等），这些宏在鸿蒙上可能产生错误的检测结果，
+导致功能被错误地启用或禁用。
+
+**典型表现**：
+- `AC_CHECK_HEADERS` 报告头文件存在，但实际编译时缺少关键定义
+- `AC_CHECK_FUNCS` 报告函数可用，但运行时触发 SIGSYS
+- `AC_COMPILE_IFELSE` 编译测试通过，但链接失败
+- `AC_MSG_RESULT` 显示错误的平台特征
+
+### 根因分析
+
+| 根因 | 说明 | 影响的宏 |
+|------|------|---------|
+| **config.guess 三元组错误** | 未识别鸿蒙 → 使用 Linux-gnu 代码路径 | 所有依赖三元组的宏 |
+| **头文件检测不完整** | 头文件存在但内容被 `#ifdef __OHOS__` 守卫排除 | `AC_CHECK_HEADERS` |
+| **函数链接检测失败** | 函数声明存在但 syscall 未实现 | `AC_CHECK_FUNCS` |
+| **编译标志测试误判** | clang 与 gcc 的标志差异 | `AC_COMPILE_IFELSE` |
+| **运行时检测受限** | SELinux/fstat 限制导致测试程序异常退出 | `AC_RUN_IFELSE` |
+
+**问题链**：
+```
+autotools 宏执行检测
+    ↓
+检测结果基于错误的假设（如头文件存在 = 功能可用）
+    ↓
+config.h 中定义了错误的 HAVE_XXX 宏
+    ↓
+源码编译时引用了不存在的功能 → 编译或运行时失败
+```
+
+### 解决方案
+
+**方案 1：configure 后手动修正 config.h**
+
+```bash
+# 修正错误的检测结果
+sed -i 's/^#define HAVE_SYSLOG 1/\/\* #undef HAVE_SYSLOG \*\//' config.h
+sed -i 's/^#define HAVE_EPOLL 1/\/\* #undef HAVE_EPOLL \*\//' config.h
+```
+
+**方案 2：使用 config.cache 缓存正确结果**
+
+```bash
+# 创建 config.cache 指定正确的检测结果
+cat > config.cache << 'EOF'
+ac_cv_header_sys_syslog_h=no
+ac_cv_func_syslog=no
+ac_cv_func_epoll_create=no
+EOF
+
+./configure --config-cache --prefix=$HOME/usr/local
+```
+
+**方案 3：在 configure.ac 中为鸿蒙添加特殊处理**
+
+```m4
+case "$host_os" in
+    *ohos*)
+        AC_DEFINE([HAVE_OHOS], [1], [Define to 1 if building for HarmonyOS])
+        # 覆盖错误的检测结果
+        ac_cv_func_syslog=no
+        ;;
+esac
+```
+
+### 影响范围
+
+所有使用 autotools 的项目。影响程度取决于项目对 autotools 检测结果的依赖程度。
+
+### 相关知识
+
+- [autotools-patterns.md §2-3](#2-configguess-修改) — config.guess/config.sub 修改
+- [harmonyos-specifics.md §15](harmonyos-specifics.md#15-configure-脚本不识别-ohos-平台变量) — configure 不识别 OHOS
+- [harmonyos-specifics.md §17](harmonyos-specifics.md#17-系统-posix-头文件缺失) — POSIX 头文件缺失
+- [build-systems.md §10.3](build-systems.md#103-automake-版本不匹配) — automake 版本不匹配绕过
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+---
+
+*文档版本: 1.2*  
+*最后更新: 2026-03-30*
+*新增 §10：autotools 宏在鸿蒙上需要 patch（跨软件知识）*

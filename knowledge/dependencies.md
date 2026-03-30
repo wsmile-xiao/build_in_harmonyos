@@ -296,9 +296,45 @@ ModuleNotFoundError: No module named '_ssl'
 
 ---
 
-*最后更新：2026-03-23（新增 man-db 2.13.1 / libpipeline 1.5.8 依赖链）*
-SSL 正确链接。
+### 问题4：测试框架依赖 Perl，需要单独编译（跨软件知识）
+
+**问题描述**：许多 GNU 软件的测试套件使用 Perl 编写，需要额外的 CPAN 模块。
+如果 Perl 环境未正确配置，测试无法运行，导致无法验证编译产物的正确性。
+
+**根因分析**：
+
+| 缺失类型 | 具体表现 | 影响软件 |
+|----------|----------|----------|
+| **CPAN 模块缺失** | `Can't locate HTTP/Daemon.pm` | wget、curl |
+| **Perl 版本不兼容** | 系统预装的 Perl 版本过旧 | 需要新 Perl 特性的软件 |
+| **Perl 未安装** | `perl: command not found` | OpenSSL Configure 等 |
+
+**解决方案**：
+
+```bash
+# 安装 cpanm
+curl -L https://cpanmin.us -o cpanm
+chmod +x cpanm
+
+# 安装常用测试模块
+./cpanm --notest HTTP::Daemon HTTP::Message LWP Test::More
+
+# 配置本地 Perl 库
+mkdir -p ~/perl-lib
+export PERL5LIB="$HOME/perl-lib/lib/perl5:$PERL5LIB"
+export PERL_MM_OPT="INSTALL_BASE=$HOME/perl-lib"
+export PERL_MB_OPT="--install_base $HOME/perl-lib"
+```
+
+**跨软件影响**：
+
+Perl 不仅是测试框架依赖，它也是构建链中的关键依赖（automake、libtool、OpenSSL Configure 都用 Perl 编写）。
+建议将 Perl 放在编译顺序的第二阶段，确保其 CPAN 模块环境配置正确。
+
+**相关文件**：`harmonyos-specifics.md §14`（Perl 测试框架依赖问题详细分析）
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
 
 ---
 
-*最后更新：2026-03-23*
+*最后更新：2026-03-30（新增 §问题4：测试框架依赖 Perl 跨软件知识）*

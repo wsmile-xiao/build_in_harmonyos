@@ -341,73 +341,8 @@ done
 echo "  (无输出表示无悬空链接)"
 ```
 
-## 9. 参考案例
-
-| 软件 | 打�
-文档 | �
-�键特点 |
-|------|----------|----------|
-| Python 3.9.0 | `archives/p/python/3.9.0/scripts/package_python.sh` | 完整脚本，含 strip + debug 分离 |
-
 ---
 
-*文档版本: 1.0*  
-*最后更新: 2026-03-23*  
-*基于 Python 3.9.0 打�
-实战经验总结*
-�含 activate.sh 和扩展模块 RPATH 修复）*
-n
-            echo "  �
- $(basename $f): 已签名"
-        else
-            echo "  ❌ $(basename $f): 未签名"
-        fi
-    fi
-done
-
-echo ""
-echo "=== 3. 依赖检查 ==="
-find "$PKGDIR" -type f -executable | while read f; do
-    if file "$f" | grep -q "ELF"; then
-        missing=()
-        for lib in $(llvm-readelf -d "$f" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/'); do
-            case "$lib" in
-                libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*) continue ;;
-            esac
-            # Check if lib exists in package
-            if ! find "$PKGDIR" -name "$lib" -type f | grep -q .; then
-                missing+=("$lib")
-            fi
-        done
-        if [ ${#missing[@]} -gt 0 ]; then
-            echo "  ❌ $(basename $f): 缺少 ${missing[*]}"
-        else
-            echo "  �
- $(basename $f): 依赖完整"
-        fi
-    fi
-done
-
-echo ""
-echo "=== 4. debuglink 检查 ==="
-find "$PKGDIR" -type f -executable | while read f; do
-    if file "$f" | grep -q "ELF"; then
-        if llvm-readelf -S "$f" 2>/dev/null | grep -q '.gnu_debuglink'; then
-            echo "  �
- $(basename $f): 有 debuglink"
-        fi
-    fi
-done
-
-echo ""
-echo "=== 5. 软链接检查 ==="
-find "$PKGDIR" -type l | while read link; do
-    if [ ! -e "$link" ]; then
-        echo "  ⚠️ $link: 悬空软链接"
-    fi
-done
-echo "  (无输出表示无悬空链接)"
-```
 
 ## 8. 参考案例
 

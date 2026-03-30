@@ -434,5 +434,108 @@ llvm-readelf -d _curses.so | grep NEEDED
 
 ---
 
-*文档版本: 1.1*  
-*最后更新: 2026-03-26*
+---
+
+## 7. 版本升级时补丁偏移与维护策略
+
+### 7.1 问题描述
+
+当软件升级版本（如从 3.9.0 升级到 3.9.18）时，原有补丁可能因为源码目录结构变化、
+代码行数增减、文件重命名等原因导致 `patch` 命令失败（`Hunk #N FAILED`）。
+
+### 7.2 根因分析
+
+补丁偏移的主要原因：
+
+| 原因 | 说明 | 严重程度 |
+|------|------|----------|
+| **目录结构变化** | 新版本增加/删除/重命名目录 | 🔴 高 |
+| **代码行数变化** | 上游修改导致上下文匹配失败 | 🟡 中 |
+| **文件内容重构** | 函数拆分/合并/移动到其他文件 | 🔴 高 |
+| **格式化变化** | 缩进风格、换行符差异 | 🟢 低 |
+| **补丁冲突** | 上游已修复相同问题 | 🟢 低（可跳过） |
+
+### 7.3 补丁维护策略
+
+**策略 1：最小化补丁（推荐）**
+
+```bash
+# 每个补丁只做最小必要的修改
+# 好的补丁：只修改 HarmonyOS 相关的 5 行
+# 差的补丁：重写整个 200 行函数
+
+# 补丁生成时使用较大上下文（-U 10），降低偏移风险
+diff -U 10 -r orig/ work/ > 0001-fix-for-ohos.patch
+```
+
+**策略 2：语义化补丁而非行级补丁**
+
+```bash
+# 不要依赖具体行号，而是依赖代码上下文
+# 使用 -U 10 或更大的上下文让 patch 工具有更多匹配信息
+
+# 检查补丁是否可以应用
+patch --dry-run -p1 < 0001-fix-for-ohos.patch
+```
+
+**策略 3：版本升级工作流程**
+
+```bash
+# 1. 尝试应用旧补丁
+cd new-version-src/
+patch --dry-run -p1 < ../old-patches/*.patch 2>&1 | grep FAILED
+
+# 2. 如果有 FAILED，手动定位修改点
+# 搜索关键字符串（如 __OHOS__、HAVE_XXX）在新版本中的位置
+grep -rn "__OHOS__\|HAVE_LOG_SYSLOG\|/* HarmonyOS" .
+
+# 3. 手动应用修改或使用 patch 的 fuzz factor
+patch -p1 -F 3 < ../old-patches/0001-fix-for-ohos.patch
+
+# 4. 重新生成补丁
+diff -U 10 -r ../new-version-src-orig/ . > 0001-fix-for-ohos.patch
+```
+
+**策略 4：补丁文档化**
+
+每个补丁文件头部必须说明修改的**语义意图**而非具体行号：
+
+```diff
+# 好的补丁头部
+# Description: Disable syslog on HarmonyOS (syscall not implemented)
+# File: src/foo.c
+# Search for: AC_CHECK_FUNCS([syslog])
+# Replace with: #ifdef __OHOS__ guard
+
+# 差的补丁头部
+# Changed line 1234 in src/foo.c
+```
+
+### 7.4 预防措施
+
+```bash
+# 在 Makefile 或构建脚本中添加版本检查
+if [ "$VERSION" != "3.9.0" ]; then
+    echo "⚠️ Warning: patches were developed for version 3.9.0"
+    echo "   Current version: $VERSION"
+    echo "   Some patches may need manual adjustment"
+fi
+```
+
+### 7.5 影响范围
+
+所有需要维护补丁的软件档案。补丁数量越多、修改范围越大，版本升级时的维护成本越高。
+
+### 相关知识
+
+- [best-practices.md §1](#1-三目录法补丁开发) — 三目录法（补丁开发基础）
+- [autotools-patterns.md §9.1](autotools-patterns.md#91-configure-后子目录-makefile-包含乱码) — configure 后 Makefile 乱码
+- [build-systems.md §10.3](build-systems.md#103-automake-版本不匹配) — automake 版本不匹配
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+---
+
+*文档版本: 1.2*  
+*最后更新: 2026-03-30*
+*新增 §7：版本升级时补丁偏移与维护策略（跨软件知识）*

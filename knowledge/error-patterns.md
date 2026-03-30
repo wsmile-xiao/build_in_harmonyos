@@ -58,6 +58,8 @@
 | [E050](#e050-hmdfs-符号链接不可跟踪导致链接器找不到库) | FS/链接 | unable to find library, symlink | 🔴 阻塞 |
 | [E051](#e051-未实现-syscall-触发-sigsys-导致进程崩溃) | 内核/信号 | SIGSYS, setreuid, setregid, chroot, clock_settime, core dump, exit 159 | 🔴 阻塞 |
 | [E052](#e052-rpath-缺失导致子进程找不到-libpython) | 构建/RPATH | subprocess exit 127, libpython3.9.so not found, LD_LIBRARY_PATH | 🔴 阻塞 |
+| [E053](#e053-cc1plus-不可用必须使用-clang) | 工具链 | cc1plus: error, CXX compiler cannot create executables | 🔴 阻塞 |
+| [E054](#e054-外来二进制首次执行被安全确认弹窗阻止) | 安全机制 | Permission denied, 首次执行后消失, make check 误判 | 🟡 中等 |
 
 ---
 
@@ -298,6 +300,7 @@ case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in
 ```
 cat: standard output: Permission denied
 fstat(STDOUT_FILENO) failed: errno=13, Permission denied
+lseek: Permission denied (管道/终端输入时)
 ```
 
 ### 根因
@@ -336,6 +339,22 @@ ohos_fstat_compat (int fd, struct stat *st)
 ```
 
 **参考补丁**：`archives/c/coreutils/9.10/patches/0002-fix-fstat-for-harmonyos.patch`
+
+**lseek() 修复模板**（同样受此限制）：
+```c
+if (lseek(fd, offset, whence) < 0) {
+#ifdef __OHOS__
+    if (errno == EACCES || errno == EPERM)
+        return -1;  /* 不可 seek，静默返回 */
+#endif
+    error(0, errno, "%s", filename);
+    return -1;
+}
+```
+
+**参考补丁**：`archives/c/coreutils/9.10/patches/`
+
+**相关知识**：[harmonyos-specifics.md §9](harmonyos-specifics.md#9-fstat-和-lseek-对非文件-fd-的限制)
 
 ---
 
@@ -661,7 +680,7 @@ cp $(readlink -f /path/to/target) /path/to/link
 
 ```bash
 # 1. 尝试创建软链接
-ln -sf /source/file /path/to/link
+rm -f /path/to/link && ln -s /source/file /path/to/link
 
 # 2. 验证软链接是否可用
 if [ -L /path/to/link ] && /path/to/link --version >/dev/null 2>&1; then
@@ -814,6 +833,16 @@ try:
 except FileNotFoundError:
     pass  # HarmonyOS 上可能找不到
 ```
+
+### 涉及软件
+
+Python 3.9.0（test_socket）
+
+### 跨软件关联
+
+POSIX 信号量差异是鸿蒙 POSIX 兼容性问题的冰山一角。类似的行为差异也存在于
+`pthread_cond_timedwait()`（超时时间解析差异），详见
+[harmonyos-specifics.md §16](harmonyos-specifics.md#16-pthread_cond_timedwait-行为差异)。
 
 ---
 
@@ -2177,6 +2206,125 @@ Python 3.9.0（补丁 0024）、任何使用 `make install` + 符号链接分发
 
 ---
 
+## E053: cc1plus 不可用，必须使用 clang++
+
+### 错误特征
+
+```
+cc1plus: error: unrecognized command-line option '-Wno-deprecated-register'
+CXX compiler cannot create executables
+configure: error: C++ compiler cannot create executables
+```
+
+或在软件内部调用 C++ 编译器时失败，例如 Python 3.9.0 编译 `_ctypes` 模块：
+
+```
+cc1plus: error: unrecognized option '-Wno-unused-result'
+```
+
+### 根因
+
+鸿蒙 SDK 工具链**不提供 `cc1plus`**（GCC 的 C++ 编译器前端）。鸿蒙使用 LLVM/Clang 工具链，
+`clang++` 是 C++ 编译器，但部分 autotools 项目的 configure 脚本或 Makefile 硬编码调用 `cc1plus`，
+或者 configure 的 C++ 编译器检测逻辑在 clang++ 上误判。
+
+**问题链**：
+```
+configure 或 Makefile 调用 C++ 编译器
+    ↓
+默认使用 g++ 或检测到 cc1plus → 不存在 → 失败
+    ↓
+或 clang++ 被检测为 C++ 编译器但编译参数不兼容 → 编译器报错
+```
+
+### 验证命令
+
+```bash
+# 确认 cc1plus 不存在
+which cc1plus  # 不存在
+
+# 确认 clang++ 可用
+which clang++  # /data/service/hnp/bin/clang++
+clang++ --version
+```
+
+### 解决方案
+
+**方案 1：显式指定 C++ 编译器为 clang++**
+
+```bash
+export CXX=clang++
+./configure --prefix=$HOME/usr/local CXX=clang++
+```
+
+**方案 2：确保 CXX 环境变量在 configure 之前设置**
+
+```bash
+export CC=clang
+export CXX=clang++
+# 确保 CXX 被正确检测
+./configure --prefix=$HOME/usr/local
+grep "CXX" config.log | head -5
+```
+
+**方案 3：如果 Makefile 硬编码了 cc1plus 调用**
+
+```bash
+# 搜索硬编码的 cc1plus
+grep -rn 'cc1plus' Makefile* configure.ac
+# 替换为 clang++
+sed -i 's/cc1plus/clang++/g' Makefile*
+```
+
+### 影响范围
+
+所有使用 C++ 代码且 configure 脚本不正确检测 C++ 编译器的 autotools 项目。
+
+### 涉及软件
+
+Python 3.9.0（`_ctypes` 模块编译）、其他包含 C++ 代码的 autotools 项目
+
+### 相关知识
+
+- [error-patterns.md E012](#e012-找不到-llvm-ar) — LLVM 工具链配置
+- [build-systems.md §3](build-systems.md#3-autotools-适配) — Autotools 适配策略
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+---
+
+## E054: 外来二进制首次执行被安全确认弹窗阻止
+
+### 错误特征
+
+- 编译产物在 `make install` 后 Permission denied
+- `make check` 中测试用例全部失败（误判为功能问题）
+- 首次手动执行后问题消失
+
+### 根因
+
+鸿蒙安全机制要求用户确认非系统预装二进制的执行权限。
+
+### 修复方案
+
+1. `make install` 后手动执行一次二进制触发确认
+2. 批量触发：`find $PREFIX/bin -type f -exec {} --version \;`
+3. `make check` 前确保所有产物已完成确认
+
+### 参考档案
+
+`archives/c/coreutils/9.10/`
+
+### 知识层级
+
+L1 平台真理
+
+### 相关章节
+
+[harmonyos-specifics.md §18](harmonyos-specifics.md#18-外来二进制首次执行确认弹窗)
+
+---
+
 ## 错误诊断流程
 
 ```
@@ -2345,6 +2493,7 @@ ls -Z /path/to/file
 
 ---
 
-*文档版本: 2.7*
-*最后更新: 2026-03-29*
-*新增 E052：RPATH 缺失导致子进程找不到 libpython（补丁 0043 修复）*
+*文档版本: 2.9*
+*最后更新: 2026-03-30*
+*加强 E008：新增 lseek() 对非文件 fd 的限制*
+*新增 E054：外来二进制首次执行被安全确认弹窗阻止*

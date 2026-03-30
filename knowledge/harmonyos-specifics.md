@@ -107,7 +107,7 @@ install(CODE "execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different ...)
 | 任何 CMake 项目 | 🔴 是 | install(TARGETS) 创建的符号链接 |
 | 纯 Python/Shell 脚本项目 | 🟢 否 | 不涉及 C 编译链接 |
 
-**参考**：[E050](error-patterns.md#e050-hmdfs-符号链接不可跟踪导致链接器找不到库)、[§11](#11-hmdfs-符号链接限制e051)
+**参考**：[E050](error-patterns.md#e050-hmdfs-符号链接不可跟踪导致链接器找不到库)、[§13](#13-hmdfs-符号链接限制e051)
 
 ### 铁律 #2：make install 产出的 ELF 不含 RPATH，必须 post-install 处理
 
@@ -767,8 +767,7 @@ hishell_hap:s0          执行用户程序           adhoc_bin:s0
 
 ### 7.3 问题现象（仅限 fork + execve）
 
-> **⚠️ 重要更新**：通过 `posix_spawn()` 调用 SDK 工具**不受此限制**。
-> 以下失败现象仅在使用 `fork() + execve()` 路径时出现。
+> **⚠️ 历史方案，已失效**：以下方案在 Python 3.9.0 适配时有效，但在 3.9.25 及更新版本中**同样被 SELinux 策略阻止**。当前 SELinux 策略下，adhoc_bin 域的进程**无法通过任何子进程创建方式**调用 SDK 二进制（包括 fork+exec、posix_spawn、os.system、pipe workaround）。推荐使用 **HARMONYOS_BUILD_SCRIPT** 模式（见 §7.7）。
 
 ```python
 import subprocess, os
@@ -788,15 +787,15 @@ os.execvp('clang', ['clang', '--version'])  # 如果 C 层直接 execve
 3. 进程立即以 exit code 1 退出
 4. **没有任何错误输出**（因为二进制根本没有真正开始执行）
 
-**但 `posix_spawn()` 不受此限制**——Python 3.9.0 已验证通过 `subprocess.run(["clang", ...])` 可以正常编译和执行 C 程序。推测原因是 musl 的 `posix_spawn()` 实现或内核对该系统调用的 SELinux 策略与 `execve()` 不同。
+**注**：早期（Python 3.9.0）`posix_spawn()` 看似不受限制，但 3.9.25 及更新版本中已被 SELinux 策略阻止。所有子进程创建方式均不可用，必须使用 **HARMONYOS_BUILD_SCRIPT** 模式（见 §7.7）。
 
-### 7.4 解决方案：优先 posix_spawn（管道语法作为备选）
+### 7.4 解决方案：HARMONYOS_BUILD_SCRIPT 模式（推荐）/ 管道语法（备选）
 
-> **推荐方案**：使用 `posix_spawn()` 替代 `fork() + execve()`。Python 3.9 在 musl 平台默认使用
-> `posix_spawn()`，无需额外配置即可正常执行 SDK 工具。
+> **⚠️ 历史方案，已失效**：`posix_spawn()` 和管道语法 `cmd | cat` 在 Python 3.9.25 及更新版本中**同样被 SELinux 策略阻止**。推荐使用 **HARMONYOS_BUILD_SCRIPT** 模式（见 §7.7）。
 
 ```c
-/* C 代码中使用 posix_spawn 替代 fork+exec */
+/* C 代码中 posix_spawn 方案已失效（3.9.25+ SELinux 阻止）*/
+/* 请使用 HARMONYOS_BUILD_SCRIPT 模式（见 §7.7）*/
 #include <spawn.h>
 extern char **environ;
 
@@ -806,9 +805,10 @@ posix_spawn(&pid, "/usr/bin/clang", NULL, NULL, argv, environ);
 ```
 
 ```python
-# Python 代码直接可用（默认 posix_spawn）
+# Python 代码直接可用（默认 posix_spawn）— ⚠️ 已失效（3.9.25+）
+# 请使用 HARMONYOS_BUILD_SCRIPT 模式（见 §7.7）
 import subprocess
-subprocess.run(["clang", "test.c", "-o", "test"])  # ✅ 正常工作
+subprocess.run(["clang", "test.c", "-o", "test"])  # ❌ 3.9.25+ 被 SELinux 阻止
 ```
 
 #### 备选方案：管道语法绕过（仅限构建时 bootstrapping）
@@ -827,11 +827,12 @@ os.system("clang test.c -o test | cat")  # exit code: 0
 
 | 方法 | Exit Code | 文件生成 | 适用场景 |
 |------|-----------|----------|---------|
-| `subprocess.run(["clang", ...])` | 0 | ✅ Yes | ⭐ **推荐**（posix_spawn） |
-| `posix_spawn()` (C 层) | 0 | ✅ Yes | ⭐ **推荐**（C/C++ 项目） |
-| `clang ... \| cat` | 0 | ✅ Yes | 备选（bootstrapping） |
-| `clang ... \| head -N` | 0 | ✅ Yes | 备选 |
-| `clang ... \| true` | 0 | ✅ Yes | 备选 |
+| **HARMONYOS_BUILD_SCRIPT** | 0 (模拟) | ✅ Yes | ⭐ **推荐**（见 §7.7） |
+| `subprocess.run(["clang", ...])` | 0 | ✅ Yes | ❌ **已失效**（3.9.25+ 被阻止） |
+| `posix_spawn()` (C 层) | 0 | ✅ Yes | ❌ **已失效**（3.9.25+ 被阻止） |
+| `clang ... \| cat` | 0 | ✅ Yes | ❌ **已失效**（3.9.25+ 被阻止） |
+| `clang ... \| head -N` | 0 | ✅ Yes | ❌ **已失效**（3.9.25+ 被阻止） |
+| `clang ... \| true` | 0 | ✅ Yes | ❌ **已失效**（3.9.25+ 被阻止） |
 | `clang ...`（裸 fork+execve） | 1 | ❌ No | ❌ 受 SELinux 限制 |
 | `clang ... & wait` | 0 | ❌ No | ❌ 不稳定 |
 
@@ -846,12 +847,30 @@ cmd_str = f"set -o pipefail; {cmd} 2>&1 | cat"
 status = os.system(cmd_str)
 ```
 
-### 7.7 受影响的软件
+### 7.8 受影响的软件
 
 - **Python**: `setup.py` 通过 `_bootsubprocess.Popen` 调用 `clang` 编译扩展模块
 - **Perl**: `ExtUtils::CBuilder` 编译 XS 模块
 - **Ruby**: `mkmf.rb` 编译原生扩展
 - **任何**通过子进程调用 SDK 编译器的构建系统
+
+### 7.7 HARMONYOS_BUILD_SCRIPT 模式（当前推荐方案）
+
+**适用场景**：Python 扩展模块编译等需要从进程内调用外部编译器（clang, llvm-ar 等）的场景。
+
+**原理**：
+1. 设置环境变量 `HARMONYOS_BUILD_SCRIPT=/path/to/build.sh`
+2. 进程内的 spawn() 函数**不实际执行命令**，而是将命令追加写入脚本文件
+3. 脚本文件由 shell（hishell_hap 域）执行，hishell_hap 域有权限调用 SDK 二进制
+
+**实际成果**：Python 3.9.25 使用此方案成功编译 72 个 .so 文件，48/48 扩展模块加载成功。
+
+**关键实现**：
+- spawn() 返回码设为 0（模拟成功）
+- find_executable() 也需要 bypass（否则 .so 链接会静默失败）
+- 编译完成后需执行导出的脚本文件
+
+**参考补丁**：`archives/p/python/3.9.25/patches/0027-distutils-spawn-selinux-bypass.patch`
 
 ---
 
@@ -1025,7 +1044,7 @@ rm -f /data/service/el2/user/0/users/currentUser/usr/local/lib/libncursesw.so*
 
 ---
 
-## 9. fstat() 对管道/终端的限制
+## 9. fstat() 和 lseek() 对非文件 fd 的限制
 
 ### 9.1 限制描述
 
@@ -1078,9 +1097,106 @@ ohos_fstat_compat (int fd, struct stat *st)
 
 ---
 
-*文档版本: 1.6
-最后更新: 2026-03-29
-更新内容: v1.6 新增 §12 distutils spawn 吞 stderr 问题（pipe + clang 交互 bug）*
+### 9.4 lseek() 对管道/终端同样返回 EACCES
+
+与 fstat 同源，HarmonyOS 的 lseek() 对管道、终端等非文件 fd 也返回 EACCES/EPERM。影响：
+- `head` 命令的 elseek 函数（管道输入时尝试 seek 失败并输出错误信息）
+- `tail` 命令的类似 seek 操作
+- 任何使用 lseek 判断 fd 类型的软件
+
+**修复模板**（C 语言）：
+```c
+if (lseek(fd, offset, whence) < 0) {
+#ifdef __OHOS__
+    if (errno == EACCES || errno == EPERM)
+        return -1;  /* 不可 seek，静默返回 */
+#endif
+    error(0, errno, "%s", filename);
+    return -1;
+}
+```
+
+**参考补丁**：`archives/c/coreutils/9.10/patches/`
+
+---
+
+## 10. SIGSYS 信号行为（与 Linux seccomp 完全不同）⚠️ 重要
+
+### 问题描述
+
+HarmonyOS 内核对未实现的 syscall（如 `setreuid`、`setregid`、`chroot`、`clock_settime`）发送 SIGSYS 信号（signal 31），但其行为与 Linux seccomp SIGSYS **完全不同**。
+
+### 行为对比
+
+| 特性 | Linux seccomp SIGSYS | HarmonyOS 未实现 syscall |
+|------|---------------------|------------------------|
+| 信号编号 | SIGSYS (31) | SIGSYS (31) |
+| `sigaction` 可捕获？ | ✅ 全部可捕获 | ❌ **部分不可捕获** |
+| handler 中 `si_syscall` | ✅ 包含 syscall 号 | ❌ 不可靠 |
+| handler 返回后 | 返回 `-ENOSYS` | 进程被终止（不可捕获时） |
+| errno 设置 | EPERM/ENOSYS | 不确定/垃圾值 |
+
+### 不可捕获的 syscall（最危险）
+
+- **`setreuid()`** — 进程直接终止，任何 signal handler 都不触发
+- **`setregid()`** — 同上
+
+### 可捕获但行为异常的 syscall
+
+- **`chroot()`** — handler 可触发，但 syscall 返回垃圾值（如 ret=158431531, errno=0）
+- **`clock_settime()`** — handler 可触发，但 errno 不可靠
+
+### 正确做法
+
+**在 C 源码中用 `#ifdef __OHOS__` 守卫，避免进入内核**。详见 `ohos-adaptation-patterns.md` 的"未实现 syscall 提前拦截"模式和 `error-patterns.md` E051。
+
+### 影响
+
+所有从 Linux 移植到鸿蒙的 C/C++ 软件都可能遇到此问题。如果程序中调用了上述 syscall 且鸿蒙内核未实现，进程会直接崩溃。
+
+---
+
+
+## 11. /proc 文件系统访问限制
+
+### 问题描述
+
+鸿蒙系统的 SELinux 策略限制了普通用户对 `/proc` 文件系统的访问。即使文件权限显示所有用户可读（`-r--r--r--`），普通用户仍然无法读取。
+
+### 现象
+
+```bash
+$ cat /proc/stat
+cat: /proc/stat: Permission denied
+
+$ ls -la /proc/stat
+-r--r--r-- 1 root root 0 2026-03-16 22:23 /proc/stat
+
+$ ls -Z /proc/stat
+u:object_r:proc_stat_file:s0 /proc/stat
+```
+
+### 受影响的工具
+
+- **htop** - 需要 sudo 运行
+- **top** - 可能受影响
+- **ps** - 可能受影响
+- 任何需要读取 `/proc` 的进程监控工具
+
+### 解决方案
+
+1. 使用 `sudo` 运行受影响的工具
+2. 或使用鸿蒙提供的替代方案
+
+> **注意**：鸿蒙 sudo 是自研极简实现（仅 31KB），不支持 `-E`、`-u`、`-s`、`-i` 等标准选项，每次执行都需输入锁屏 PIN 且无凭据缓存。
+> 完整的 sudo 功能差异分析、编译场景影响和规避方案详见 `sudo-analysis.md`。
+
+### 相关信息
+
+- 用户组 `readproc(3009)` 可能与进程读取权限相关
+- SELinux 上下文类型：`proc_stat_file`, `proc_t` 等
+
+
 
 ## 12. distutils spawn 吞掉编译器 stderr 输出 ⚠️
 
@@ -1151,11 +1267,7 @@ distutils 在 Python 3.10+ 中已移除（PEP 632），被 setuptools 完全替�
 
 ---
 
-*文档版本: 1.6
-最后更新: 2026-03-29
-更新内容: v1.6 新增"铁律 #2：make install 产出的 ELF 不含 RPATH，必须 post-install 处理"*
-
-## 11. HMDFS 符号链接限制（E051）
+## 13. HMDFS 符号链接限制（E050）
 
 ### 现象
 
@@ -1196,43 +1308,8 @@ HMDFS 文件系统不正常跟踪符号链接。`os.stat()` 对符号链接返�
 
 修复后 greenlet、brotli、netifaces 等包编译链接正常。
 
-## 10. SIGSYS 信号行为（与 Linux seccomp 完全不同）⚠️ 重要
 
-### 问题描述
-
-HarmonyOS 内核对未实现的 syscall（如 `setreuid`、`setregid`、`chroot`、`clock_settime`）发送 SIGSYS 信号（signal 31），但其行为与 Linux seccomp SIGSYS **完全不同**。
-
-### 行为对比
-
-| 特性 | Linux seccomp SIGSYS | HarmonyOS 未实现 syscall |
-|------|---------------------|------------------------|
-| 信号编号 | SIGSYS (31) | SIGSYS (31) |
-| `sigaction` 可捕获？ | ✅ 全部可捕获 | ❌ **部分不可捕获** |
-| handler 中 `si_syscall` | ✅ 包含 syscall 号 | ❌ 不可靠 |
-| handler 返回后 | 返回 `-ENOSYS` | 进程被终止（不可捕获时） |
-| errno 设置 | EPERM/ENOSYS | 不确定/垃圾值 |
-
-### 不可捕获的 syscall（最危险）
-
-- **`setreuid()`** — 进程直接终止，任何 signal handler 都不触发
-- **`setregid()`** — 同上
-
-### 可捕获但行为异常的 syscall
-
-- **`chroot()`** — handler 可触发，但 syscall 返回垃圾值（如 ret=158431531, errno=0）
-- **`clock_settime()`** — handler 可触发，但 errno 不可靠
-
-### 正确做法
-
-**在 C 源码中用 `#ifdef __OHOS__` 守卫，避免进入内核**。详见 `ohos-adaptation-patterns.md` 的"未实现 syscall 提前拦截"模式和 `error-patterns.md` E051。
-
-### 影响
-
-所有从 Linux 移植到鸿蒙的 C/C++ 软件都可能遇到此问题。如果程序中调用了上述 syscall 且鸿蒙内核未实现，进程会直接崩溃。
-
----
-
-## 11. Perl 测试框架依赖问题
+## 14. Perl 测试框架依赖问题
 
 ### 问题描述
 
@@ -1293,42 +1370,245 @@ wget -c ...
 # 递归下载测试
 wget -r ...
 ```
-## 11. /proc 文件系统访问限制
+
+
+---
+
+## 15. configure 脚本不识别 OHOS 平台变量
 
 ### 问题描述
 
-鸿蒙系统的 SELinux 策略限制了普通用户对 `/proc` 文件系统的访问。即使文件权限显示所有用户可读（`-r--r--r--`），普通用户仍然无法读取。
+许多 autotools 项目的 `configure` 脚本无法识别鸿蒙系统的平台变量（如 `OHOS`、`ohos`、`HarmonyOS`），
+导致平台检测失败或使用错误的默认配置。
 
-### 现象
-
-```bash
-$ cat /proc/stat
-cat: /proc/stat: Permission denied
-
-$ ls -la /proc/stat
--r--r--r-- 1 root root 0 2026-03-16 22:23 /proc/stat
-
-$ ls -Z /proc/stat
-u:object_r:proc_stat_file:s0 /proc/stat
+**典型表现**：
+```
+configure: error: cannot guess build type
+configure: WARNING: unrecognized options: --with-ohos
+checking build system type... Invalid configuration `aarch64-unknown-linux-ohos'
 ```
 
-### 受影响的工具
+### 根因分析
 
-- **htop** - 需要 sudo 运行
-- **top** - 可能受影响
-- **ps** - 可能受影响
-- 任何需要读取 `/proc` 的进程监控工具
+1. **config.guess 未更新**：多数上游 tarball 的 `config.guess` 不包含 HarmonyOS 检测逻辑
+2. **config.sub 缺少 ohos**：三元组验证失败（`linux-ohos` 不在允许的操作系统列表中）
+3. **configure.ac 无鸿蒙分支**：源码级别缺少 `__OHOS__` 或 `linux-ohos` 的条件判断
+
+**问题链**：
+```
+config.guess 不识别 HarmonyOS
+    ↓
+生成错误的三元组（如 aarch64-unknown-linux-gnu 而非 aarch64-unknown-linux-ohos）
+    ↓
+configure 使用错误的默认配置
+    ↓
+编译失败或功能异常
+```
 
 ### 解决方案
 
-1. 使用 `sudo` 运行受影响的工具
-2. 或使用鸿蒙提供的替代方案
+1. **修改 config.guess/config.sub**（详见 [autotools-patterns.md](autotools-patterns.md)）
+2. **使用 `--host` 指定三元组**：`./configure --host=aarch64-unknown-linux-ohos`
+3. **设置环境变量**：`export OHOS=yes`（部分项目支持）
 
-> **注意**：鸿蒙 sudo 是自研极简实现（仅 31KB），不支持 `-E`、`-u`、`-s`、`-i` 等标准选项，每次执行都需输入锁屏 PIN 且无凭据缓存。
-> 完整的 sudo 功能差异分析、编译场景影响和规避方案详见 `sudo-analysis.md`。
+### 影响范围
 
-### 相关信息
+所有使用 autotools 且 config.guess/config.sub 未更新的项目。
 
-- 用户组 `readproc(3009)` 可能与进程读取权限相关
-- SELinux 上下文类型：`proc_stat_file`, `proc_t` 等
+### 相关知识
 
+- [autotools-patterns.md §2-3](autotools-patterns.md#2-configguess-修改) — config.guess/config.sub 修改方法
+- [build-systems.md §3](build-systems.md#3-autotools-适配) — Autotools 适配策略
+- [error-patterns.md E007](error-patterns.md#e007-configguess-无法识别系统) — 对应的错误模式
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+---
+
+## 16. pthread_cond_timedwait 行为差异
+
+### 问题描述
+
+鸿蒙的 `pthread_cond_timedwait()` 在超时时间的解释上与 Linux/glibc 存在差异，
+可能导致条件变量等待超时时间不准确或立即返回。
+
+**典型表现**：
+- 条件变量等待立即超时返回（ETIMEDOUT），而预期应等待数秒
+- 基于超时的同步逻辑出现异常行为
+- 多线程测试中时间相关的断言失败
+
+### 根因分析
+
+鸿蒙的 musl pthread 实现与 glibc 在 `pthread_cond_timedwait()` 的时钟行为上存在差异：
+
+| 特性 | Linux/glibc | HarmonyOS |
+|------|------------|-----------|
+| 超时参数类型 | `struct timespec`（绝对时间，CLOCK_REALTIME） | `struct timespec`（可能使用不同时钟源） |
+| 时钟源 | CLOCK_REALTIME | 可能使用 CLOCK_MONOTONIC |
+| `pthread_condattr_setclock()` | ✅ 支持 | ⚠️ 行为可能不同 |
+| 跨软件一致性 | 一致 | 不同软件可能表现不同 |
+
+### 影响范围
+
+- 使用条件变量超时等待的 C/C++ 软件
+- 依赖精确时间同步的多线程程序
+- 测试套件中基于超时的断言
+
+### 解决方案
+
+**方案 1：使用相对时间而非绝对时间**
+
+```c
+#ifdef __OHOS__
+// 鸿蒙上使用 clock_gettime + 相对计算
+struct timespec ts;
+clock_gettime(CLOCK_MONOTONIC, &ts);
+ts.tv_sec += timeout_sec;
+pthread_cond_timedwait(&cond, &mutex, &ts);
+#else
+// Linux 上使用 CLOCK_REALTIME 绝对时间
+struct timespec ts;
+clock_gettime(CLOCK_REALTIME, &ts);
+ts.tv_sec += timeout_sec;
+pthread_cond_timedwait(&cond, &mutex, &ts);
+#endif
+```
+
+**方案 2：在测试中放宽时间容差**
+
+```c
+// 不要使用精确的超时断言
+// 修改前
+assert(elapsed_time >= expected_timeout);
+
+// 修改后：允许一定误差
+assert(elapsed_time >= expected_timeout - tolerance);
+```
+
+### 相关知识
+
+- [error-patterns.md E022](error-patterns.md#e022-posix-信号量差异) — POSIX 信号量差异（同类问题）
+- [harmonyos-specifics.md §10](#10-sigsys-信号行为与-linux-seccomp-完全不同-important) — 其他 POSIX 行为差异
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+---
+
+## 17. 系统 POSIX 头文件缺失
+
+### 问题描述
+
+鸿蒙系统的标准头文件路径中缺少部分 POSIX 标准定义的头文件或宏，
+导致 `configure` 检测通过但实际编译失败。
+
+**典型表现**：
+```
+fatal error: sys/syscall.h: No such file or directory
+fatal error: netpacket/packet.h: No such file or directory
+fatal error: sys/epoll.h: No such file or directory
+```
+
+或在编译阶段发现宏/类型未定义：
+```
+error: unknown type name 'struct sockaddr_ll'
+error: 'AF_PACKET' undeclared
+error: 'SYS_epoll_create' undeclared
+```
+
+### 根因分析
+
+鸿蒙内核基于 Linux 但裁剪了大量 POSIX 接口。头文件存在以下问题：
+
+| 缺失类型 | 具体表现 | 影响软件 |
+|----------|----------|----------|
+| **系统调用号宏** | `SYS_*` 宏不定义 | strace、需要 syscall 的软件 |
+| **网络协议头文件** | `netpacket/packet.h` 等缺失 | 抓包工具、网络诊断工具 |
+| **IPC 头文件** | `sys/msg.h`、`sys/sem.h` 不完整 | 进程间通信相关软件 |
+| **文件系统头文件** | 部分 `linux/fs.h` 宏缺失 | 文件系统工具 |
+
+**关键发现**：鸿蒙 SDK 的 `__OHOS__` 宏由 clang 自动定义，但部分头文件
+即使存在，其内容也可能被 `#ifdef __OHOS__` 守卫排除。
+
+### 影响范围
+
+- configure 阶段检测到头文件存在但内容不完整 → 编译失败
+- 运行时调用对应 syscall 触发 SIGSYS（见 [§10](#10-sigsys-信号行为与-linux-seccomp-完全不同-important)）
+- 需要系统级 IPC、高级网络、文件系统操作的软件
+
+### 解决方案
+
+**方案 1：configure 阶段禁用缺失功能**
+
+```bash
+# 检查 configure --help 中的相关选项
+./configure --help | grep -i 'syslog\|syscall\|packet\|epoll'
+
+# 禁用需要缺失头文件的功能
+./configure --disable-syslog --without-xxx
+```
+
+**方案 2：提供兼容性头文件**
+
+```c
+// ohos_compat.h
+#ifndef __OHOS_COMPAT_H
+#define __OHOS_COMPAT_H
+
+#ifdef __OHOS__
+
+// 补充缺失的系统调用号（值因架构而异，需根据 target arch 确定）
+#ifndef SYS_epoll_create
+#define SYS_epoll_create 250  // x86_64; aarch64 使用 20
+#endif
+
+// 补充缺失的协议常量
+#ifndef AF_PACKET
+#define AF_PACKET 17
+#endif
+
+// 补充缺失的类型定义
+struct sockaddr_ll {
+    unsigned short sll_family;
+    unsigned short sll_protocol;
+    int sll_ifindex;
+    unsigned short sll_hatype;
+    unsigned char sll_pkttype;
+    unsigned char sll_halen;
+    unsigned char sll_addr[8];
+};
+
+#endif /* __OHOS__ */
+#endif /* __OHOS_COMPAT_H */
+```
+
+### 相关知识
+
+- [error-patterns.md E015](error-patterns.md#e015-找不到头文件) — 找不到头文件的通用处理
+- [error-patterns.md E014](error-patterns.md#e014-系统调用不可用) — 系统调用不可用
+- [error-patterns.md E051](error-patterns.md#e051-未实现-syscall-触发-sigsys-导致进程崩溃) — 未实现 syscall 触发 SIGSYS
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+---
+
+## 18. 外来二进制首次执行确认弹窗
+
+**机制**：鸿蒙系统对**非系统预装**的二进制文件，首次执行时弹出安全确认窗口。用户必须在 **30 秒内点击确认**，否则执行失败（Permission denied）。确认后该二进制被标记为可信，后续执行不再弹窗。
+
+**影响范围**：
+- 所有通过编译安装引入的二进制文件
+- 不是文件权限问题（chmod +x 已正确设置）
+- 不是 SELinux/沙箱限制（确认后正常执行）
+- 批量安装时每个二进制首次执行都触发弹窗
+
+**对编译流程的影响**：
+- `make check` 执行测试时会调用编译产物
+- 如果产物未完成首次确认，测试因 Permission denied 失败，**误判为功能问题**
+- **正确流程**：`make install` → 手动逐个执行一次各命令完成确认 → `make check`
+- 自动化脚本中应先触发确认再执行测试
+
+**缓解策略**：
+- `make install` 后运行 `find $PREFIX/bin -type f -executable -exec {} --version \; 2>&1 | head -1` 批量触发确认
+- 或在测试脚本开头添加确认触发逻辑� 未实现 syscall 触发 SIGSYS
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`

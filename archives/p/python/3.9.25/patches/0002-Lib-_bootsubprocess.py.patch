@@ -1,0 +1,84 @@
+diff -ruN a/Lib/_bootsubprocess.py b/Lib/_bootsubprocess.py
+--- a/Lib/_bootsubprocess.py	2025-11-01 02:40:52.000000000 +0800
++++ b/Lib/_bootsubprocess.py	2026-03-30 19:25:25.774430312 +0800
+@@ -2,8 +2,45 @@
+ Basic subprocess implementation for POSIX which only uses os functions. Only
+ implement features required by setup.py to build C extension modules when
+ subprocess is unavailable. setup.py is not used on Windows.
++
++HarmonyOS modification:
++=======================
++On HarmonyOS, SELinux domain transitions prevent child processes from
++executing SDK binaries directly. The solution is to use pipe syntax
++(cmd | cat) which forces the shell to fork a subprocess that retains
++execution permissions.
++
++SELinux context analysis:
++- Shell process: u:r:hishell_hap:s0
++- Python process: u:r:adhoc_bin:s0
++- SDK binaries: u:object_r:hnp_file:s0
++
++When hishell_hap executes a user binary (Python), the domain transitions
++to adhoc_bin which cannot execute hnp_file type files. However, using
++pipe syntax forces shell to fork a subprocess that somehow retains the
++ability to execute SDK tools.
++
++Test results:
++- os.system("clang ...") → FAIL (exit 1)
++- os.system("clang ... | cat") → SUCCESS (exit 0, file generated)
++
++Note: We use 'set -o pipefail' to ensure the exit code reflects the
++actual command's status, not the pipe's last command (cat always returns 0).
+ """
+ import os
++import sys
++
++
++def _is_harmonyos():
++    """Check if running on HarmonyOS/OpenHarmony.
++
++    NOTE: This function is intentionally duplicated from _harmonyos_compat
++    because _bootsubprocess.py is loaded before site.py, so it cannot
++    import _harmonyos_compat at import time. Keep this implementation
++    in sync with _harmonyos_compat._is_harmonyos().
++    """
++    platform = sys.platform.lower()
++    return 'harmonyos' in platform or 'ohos' in platform
+ 
+ 
+ # distutils.spawn used by distutils.command.build_ext
+@@ -15,6 +52,20 @@
+         self.returncode = None
+ 
+     def wait(self):
++        # HarmonyOS: SELinux restricts exec in forked child processes.
++        # Use pipe syntax (cmd | cat) to bypass the restriction.
++        if _is_harmonyos():
++            import shlex
++            cmd_str = ' '.join(shlex.quote(arg) for arg in self._cmd)
++            if self._env is not None:
++                env_parts = [f'{k}={shlex.quote(str(v))}' for k, v in self._env.items()]
++                cmd_str = 'env ' + ' '.join(env_parts) + ' ' + cmd_str
++            cmd_str = f"set -o pipefail; {cmd_str} 2>&1 | cat"
++            status = os.system(cmd_str)
++            self.returncode = os.waitstatus_to_exitcode(status)
++            return self.returncode
++
++        # Original upstream implementation (fork + exec)
+         pid = os.fork()
+         if pid == 0:
+             # Child process
+@@ -73,7 +124,12 @@
+     tmp_filename = "check_output.tmp"
+     if not isinstance(cmd, str):
+         cmd = " ".join(cmd)
+-    cmd = f"{cmd} >{tmp_filename}"
++    
++    # HarmonyOS: add pipe for consistent behavior
++    if _is_harmonyos():
++        cmd = f"set -o pipefail; {cmd} 2>&1 | cat >{tmp_filename}"
++    else:
++        cmd = f"{cmd} >{tmp_filename}"
+ 
+     try:
+         # system() spawns a shell

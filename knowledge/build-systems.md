@@ -99,6 +99,110 @@ make -j$(nproc)
 make install
 ```
 
+### 3.4 交叉编译必须设置 --host/--build/--target
+
+#### 问题描述
+
+在鸿蒙上编译时，如果 configure 脚本不能通过 `config.guess` 正确识别系统，
+或软件需要在鸿蒙上运行但构建系统和目标系统不同，必须显式设置
+`--host`、`--build`、`--target` 参数。
+
+#### 根因分析
+
+autotools 的 configure 脚本使用三个概念来描述编译环境：
+
+| 参数 | 含义 | 鸿蒙上的典型值 |
+|------|------|---------------|
+| `--build` | **构建系统**（正在编译的机器） | `aarch64-unknown-linux-ohos` |
+| `--host` | **宿主系统**（编译产物运行的机器） | `aarch64-unknown-linux-ohos` |
+| `--target` | **目标系统**（编译产物生成的代码运行的机器） | 通常与 `--host` 相同 |
+
+如果 `config.guess` 返回了错误的三元组（或不支持的值），configure 会使用
+错误的代码路径，导致：
+- 选择了错误的系统调用封装
+- 使用了不兼容的库路径
+- 生成了错误的编译器标志
+
+#### 解决方案
+
+```bash
+# 推荐方式：显式指定 build 和 host
+./configure     --build=aarch64-unknown-linux-ohos     --host=aarch64-unknown-linux-ohos     --prefix=$HOME/usr/local
+
+# 如果 config.guess 已正确修改（推荐优先修改 config.guess），
+# 可以只指定 --host：
+./configure --host=aarch64-unknown-linux-ohos --prefix=$HOME/usr/local
+```
+
+#### 影响范围
+
+所有 config.guess/config.sub 未更新的 autotools 项目。
+
+#### 相关知识
+
+- [autotools-patterns.md §2-3](autotools-patterns.md#2-configguess-修改) — config.guess/config.sub 修改
+- [harmonyos-specifics.md §15](harmonyos-specifics.md#15-configure-脚本不识别-ohos-平台变量) — configure 不识别 OHOS
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+### 3.5 交叉编译工具链的 include 路径需要显式指定
+
+#### 问题描述
+
+鸿蒙 SDK 的系统头文件和库文件不在标准路径（`/usr/include`、`/usr/lib`）下，
+编译时如果未显式指定 include 路径，会导致找不到系统头文件或库文件。
+
+#### 根因分析
+
+鸿蒙 SDK 的工具链文件分布在 `/data/service/hnp/` 下：
+
+| 资源类型 | 标准路径 | 鸿蒙 SDK 路径 |
+|----------|----------|--------------|
+| C 头文件 | `/usr/include` | `/data/service/hnp/sysroot/usr/include` |
+| 系统库 | `/usr/lib` | `/data/service/hnp/sysroot/usr/lib` |
+| LLVM 头文件 | `/usr/include/clang` | `/data/service/hnp/lib/clang/15.0.0/include` |
+
+当 `configure` 或 Makefile 中的 `CPPFLAGS`/`CFLAGS` 未包含 SDK 的 include 路径时，
+编译器找不到系统头文件。
+
+#### 解决方案
+
+```bash
+# 方案 1：设置 CPPFLAGS 包含系统头文件路径
+export CPPFLAGS="-I/data/service/hnp/sysroot/usr/include $CPPFLAGS"
+
+# 方案 2：使用 --sysroot 指定系统根目录
+export CFLAGS="--sysroot=/data/service/hnp/sysroot $CFLAGS"
+
+# 方案 3：使用 clang 的内置路径（通常自动包含）
+# clang --print-search-dirs | grep headers
+# 检查 clang 是否自动包含 sysroot
+clang -xc -E -v /dev/null 2>&1 | grep "^ "
+```
+
+#### 验证命令
+
+```bash
+# 确认编译器能找到系统头文件
+echo '#include <stdio.h>' | clang -xc -E - | head -5
+
+# 确认 SDK sysroot 存在
+ls /data/service/hnp/sysroot/usr/include/stdio.h
+```
+
+#### 影响范围
+
+所有需要系统头文件的 C/C++ 项目，尤其是那些 `CPPFLAGS` 未正确设置的项目。
+
+#### 相关知识
+
+- [error-patterns.md E015](error-patterns.md#e015-找不到头文件) — 找不到头文件的通用处理
+- [harmonyos-specifics.md §17](harmonyos-specifics.md#17-系统-posix-头文件缺失) — POSIX 头文件缺失
+
+> 来源：`archives/p/python/3.9.0/manifest.yaml`
+
+---
+
 ## 4. CMake 适配
 
 ### 4.1 平台检测
