@@ -36,7 +36,7 @@
 | **help2man** | 1.49.3 | ✅ 完全成功 | 🟢 高 | Script | 0 | perl,sed | [📄](archives/h/help2man/1.49.3/) |
 | **htop** | 3.4.1 | ⚠️ 部分成功 | 🟡 中 | Autotools | 3 | - | [📄](archives/h/htop/3.4.1/) |
 | **jq** | 1.7.1 | ✅ 完全成功 | 🟢 高 | Autotools | 2 |  | [📄](archives/j/jq/1.7.1/) |
-| **libffi** | 3.4.4、3.5.2 | ✅ 完全成功 | 🟢 高 | Autotools | 2 | clang,make | [📄](archives/l/libffi/3.5.2/) |
+| **libffi** | 3.4.4、3.5.2 | ✅ 完全成功 | 🟢 高 | Autotools | 1 | clang,make | [📄](archives/l/libffi/3.5.2/) |
 | **libpipeline** | 1.5.8 | ✅ 完全成功 | 🟢 高 | Autotools | 2 |  | [📄](archives/l/libpipeline/1.5.8/) |
 | **libtool** | 2.4.7 | ✅ 完全成功 | 🟢 高 | Autotools | 1 |  | [📄](archives/l/libtool/2.4.7/) |
 | **lzma** | 5.6.2 | ✅ 完全成功 | 🟢 高 | Autotools | 1 | clang,make | [📄](archives/l/lzma/5.6.2/) |
@@ -44,7 +44,7 @@
 | **ncurses** | 6.4 | ✅ 完全成功 | 🟢 高 | Autotools | 1 |  | [📄](archives/n/ncurses/6.4/) |
 | **openssl** | 1.1.1w | ✅ 完全成功 | 🟢 高 | Custom Perl | 1 |  | [📄](archives/o/openssl/1.1.1w/) |
 | **patch** | 2.7.6 | ⚠️ 部分成功 | 未评估 | Autotools | 1 | - | [📄](archives/p/patch/2.7.6/) |
-| **python** | 3.9.0 | ⚠️ 部分成功 | 🟡 中 | Autotools | 78 |  | [📄](archives/p/python/3.9.0/) |
+| **python** | 3.9.0 | ⚠️ 部分成功 | 🟡 中 | Autotools | 20 |  | [📄](archives/p/python/3.9.0/) |
 | **readline** | 8.2 | ✅ 完全成功 | 🟢 高 | Autotools | 1 |  | [📄](archives/r/readline/8.2/) |
 | **rsync** | 3.3.0 | ⚠️ 部分成功 | 未评估 | Autotools | 2 | - | [📄](archives/r/rsync/3.3.0/) |
 | **sed** | 4.9 | ✅ 完全成功 | 🟢 高 | Autotools | 1 |  | [📄](archives/s/sed/4.9/) |
