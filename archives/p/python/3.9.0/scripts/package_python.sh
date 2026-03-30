@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/env bash
 # ============================================================
 # Python 3.9.0 预编译版本打包脚本（HarmonyOS）
 # ============================================================
@@ -37,7 +37,7 @@ set -e
 
 PYTHON_VERSION="3.9.0"
 ARCH=$(uname -m)
-PACKAGE_NAME="python-${PYTHON_VERSION}-harmonyos-${ARCH}"
+PACKAGE_NAME="python-${PYTHON_VERSION}-ohos-${ARCH}"
 INSTALL_DIR="$HOME/usr/local"
 OUTPUT_DIR="$HOME/packages"
 PACKAGE_DIR="$OUTPUT_DIR/$PACKAGE_NAME"
@@ -46,10 +46,6 @@ PACKAGE_DIR="$OUTPUT_DIR/$PACKAGE_NAME"
 STRIP_DEBUG="${STRIP_DEBUG:-1}"
 
 # 工具路径
-PATCHELF="${PATCHELF:-$(command -v patchelf || echo /data/service/hnp/bin/patchelf)}"
-OBJCOPY="${OBJCOPY:-$(command -v llvm-objcopy || echo /data/service/hnp/bin/llvm-objcopy)}"
-SIGNTOOL="${SIGNTOOL:-$(command -v binary-sign-tool || echo /data/service/hnp/bin/binary-sign-tool)}"
-READELF="${READELF:-$(command -v llvm-readelf || echo /data/service/hnp/bin/llvm-readelf)}"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -64,26 +60,6 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 echo "============================================================"
 echo "Python ${PYTHON_VERSION} 预编译版本打包工具 (HarmonyOS)"
 echo "============================================================"
-
-# ============================================================
-# 检查依赖工具
-# ============================================================
-check_tools() {
-    local missing=()
-    
-    for tool in "$PATCHELF" "$OBJCOPY" "$SIGNTOOL" "$READELF"; do
-        if [ ! -x "$tool" ]; then
-            missing+=("$(basename $tool)")
-        fi
-    done
-    
-    if [ ${#missing[@]} -gt 0 ]; then
-        log_error "缺少以下工具: ${missing[*]}"
-        exit 1
-    fi
-    
-    log_info "工具检查通过: patchelf, llvm-objcopy, binary-sign-tool, llvm-readelf"
-}
 
 # ============================================================
 # 修改 RPATH + Strip + 重新签名（完整流程）
@@ -109,28 +85,28 @@ patch_strip_sign() {
     local name=$(basename "$file")
     
     # Step 1: Set RPATH
-    "$PATCHELF" --set-rpath "$rpath" "$file" 2>/dev/null
+    patchelf --set-rpath "$rpath" "$file" 2>/dev/null
     
     # Steps 2-4: Strip debug and extract (if enabled)
     if [ "$STRIP_DEBUG" = "1" ]; then
         local debug_file="$PACKAGE_DIR/debug/${name}.debug"
         
         # Step 2: Extract debug info to separate file
-        "$OBJCOPY" --only-keep-debug "$file" "$debug_file"
+        llvm-objcopy --only-keep-debug "$file" "$debug_file"
         
         # Step 3: Strip debug sections from main binary
-        "$OBJCOPY" --strip-debug "$file" "$file.tmp"
+        llvm-objcopy --strip-debug "$file" "$file.tmp"
         mv "$file.tmp" "$file"
         
         # Step 4: Add .gnu_debuglink section (GDB auto-load)
-        "$OBJCOPY" --add-gnu-debuglink="$debug_file" "$file"
+        llvm-objcopy --add-gnu-debuglink="$debug_file" "$file"
     fi
     
     # Step 5: Remove old .codesign section (required before re-signing)
-    "$OBJCOPY" --remove-section .codesign "$file" 2>/dev/null || true
+    llvm-objcopy --remove-section .codesign "$file" 2>/dev/null || true
     
     # Step 6: Re-sign with adhoc self-sign
-    "$SIGNTOOL" sign -inFile "$file" -outFile "$file" -selfSign 1 2>/dev/null
+    binary-sign-tool sign -inFile "$file" -outFile "$file" -selfSign 1 >/dev/null 2>&1
     
     # Step 7: Restore execute permission (signing removes it)
     chmod a+x "$file"
@@ -148,7 +124,7 @@ patch_strip_sign() {
 # ============================================================
 get_deps() {
     local file="$1"
-    "$READELF" -d "$file" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/' || true
+    llvm-readelf -d "$file" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/' || true
 }
 
 # ============================================================
@@ -176,12 +152,11 @@ if [ ! -f "$INSTALL_DIR/bin/python3.9" ]; then
     exit 1
 fi
 
-check_tools
 
 # 创建打包目录
 log_info "创建打包目录: $PACKAGE_DIR"
 rm -rf "$PACKAGE_DIR"
-mkdir -p "$PACKAGE_DIR"/{bin,lib/external,include}
+mkdir -p "$PACKAGE_DIR"/{bin,lib/external,include,debug}
 
 # ============================================================
 # 复制 Python 运行时
@@ -301,15 +276,17 @@ for ext_lib in "$PACKAGE_DIR/lib/external/"*.so*; do
 done
 
 # 扩展模块（设置 RPATH 以确保外部依赖库能被正确找到）
+EXT_DYNLOAD_TOTAL=$(find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" -type f 2>/dev/null | wc -l | tr -d " ")
 EXT_DYNLOAD_COUNT=0
-EXT_DYNLOAD_TOTAL=$(find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" -type f 2>/dev/null | wc -l)
+log_info "扩展模块: 0 / $EXT_DYNLOAD_TOTAL ..."
 for dynload_so in "$PACKAGE_DIR/lib/python3.9/lib-dynload/"*.so; do
     [ -f "$dynload_so" ] || continue
     EXT_DYNLOAD_COUNT=$((EXT_DYNLOAD_COUNT + 1))
+    printf "\r  处理扩展模块: %d / %d (%s)   " "$EXT_DYNLOAD_COUNT" "$EXT_DYNLOAD_TOTAL" "$(basename $dynload_so)"
     patch_strip_sign "$dynload_so" '$ORIGIN:$ORIGIN/..:$ORIGIN/../external'
 done
-log_info "扩展模块: 已处理 $EXT_DYNLOAD_COUNT / $EXT_DYNLOAD_TOTAL 个"
-
+echo ""
+log_info "扩展模块: 完成，共 $EXT_DYNLOAD_COUNT 个"
 # ============================================================
 # 创建使用说明
 # ============================================================
