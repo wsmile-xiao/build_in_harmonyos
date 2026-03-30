@@ -107,7 +107,7 @@ patch_strip_sign() {
     llvm-objcopy --remove-section .codesign "$file" 2>/dev/null || true
     
     # Step 6: Re-sign with adhoc self-sign
-    binary-sign-tool sign -inFile "$file" -outFile "$file" -selfSign 1 >/dev/null 2>&1
+    binary-sign-tool sign -inFile "$file" -outFile "$file" -selfSign 1 >/dev/null 2>&1 || true
     
     # Step 7: Restore execute permission (signing removes it)
     chmod a+x "$file"
@@ -275,7 +275,6 @@ for ext_lib in "$PACKAGE_DIR/lib/external/"*.so*; do
     [ -f "$ext_lib" ] || continue
     ext_count=$((ext_count + 1))
     echo "  $ext_count. lib/external/$(basename $ext_lib)"
-    QUIET=1
     patch_strip_sign "$ext_lib" '$ORIGIN'
 done
 
