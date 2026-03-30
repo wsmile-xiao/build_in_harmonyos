@@ -21,8 +21,8 @@
 #   ./package_python.sh
 #
 # 产物：
-#   python-3.9.0-harmonyos-aarch64.tar.gz          # 主包（~207MB）
-#   python-3.9.0-harmonyos-aarch64-debug.tar.gz     # Debug 符号包（~22MB）
+#   python-3.9.0-ohos-aarch64.tar.gz          # 主包（~207MB）
+#   python-3.9.0-ohos-aarch64-debug.tar.gz     # Debug 符号包（~22MB）
 #
 # 注意事项：
 #   - HarmonyOS 的 ELF 签名机制要求修改后的二进制必须重新签名
@@ -323,10 +323,10 @@ cat > "$PACKAGE_DIR/README.md" << 'EOF'
 /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"
 
 # 方式二：手动安装
-tar -xzf python-3.9.0-harmonyos-aarch64.tar.gz -C ~/usr/
+tar -xzf python-3.9.0-ohos-aarch64.tar.gz -C ~/usr/
 
 # 将以下内容添加到 ~/.bashrc 和 ~/.zshrc
-export PATH="$HOME/usr/python-3.9.0-harmonyos-aarch64/bin:$PATH"
+export PATH="$HOME/usr/python-3.9.0-ohos-aarch64/bin:$PATH"
 export TMPDIR="${TMPDIR:-$HOME/tmp}"
 export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
 
@@ -337,7 +337,7 @@ python3.9 --version
 ## 目录结构
 
 ```
-python-3.9.0-harmonyos-aarch64/
+python-3.9.0-ohos-aarch64/
 ├── bin/                    # 可执行文件
 │   ├── python3.9           # Python 解释器（RPATH 已设置）
 │   ├── python / python3    # Wrapper 脚本
