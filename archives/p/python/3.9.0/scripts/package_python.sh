@@ -80,6 +80,7 @@ echo "============================================================"
 #
 # ============================================================
 patch_strip_sign() {
+    local quiet="${QUIET:-0}"
     local file="$1"
     local rpath="$2"
     local name=$(basename "$file")
@@ -113,9 +114,11 @@ patch_strip_sign() {
     
     if [ "$STRIP_DEBUG" = "1" ]; then
         local stripped_size=$(wc -c < "$file")
-        echo "  ✅ $name: $(numfmt --to=iec $stripped_size 2>/dev/null || echo $stripped_size) (stripped)"
+        if [ "$quiet" = "0" ]; then
+            echo "  ✅ $name: $(numfmt --to=iec $stripped_size 2>/dev/null || echo $stripped_size) (stripped)"
+        fi
     else
-        echo "  ✅ $name"
+        if [ "$quiet" = "0" ]; then echo "  ✅ $name"; fi
     fi
 }
 
@@ -272,6 +275,7 @@ for ext_lib in "$PACKAGE_DIR/lib/external/"*.so*; do
     [ -f "$ext_lib" ] || continue
     ext_count=$((ext_count + 1))
     echo "  $ext_count. lib/external/$(basename $ext_lib)"
+    QUIET=1
     patch_strip_sign "$ext_lib" '$ORIGIN'
 done
 
@@ -283,6 +287,7 @@ for dynload_so in "$PACKAGE_DIR/lib/python3.9/lib-dynload/"*.so; do
     [ -f "$dynload_so" ] || continue
     EXT_DYNLOAD_COUNT=$((EXT_DYNLOAD_COUNT + 1))
     printf "\r  处理扩展模块: %d / %d (%s)   " "$EXT_DYNLOAD_COUNT" "$EXT_DYNLOAD_TOTAL" "$(basename $dynload_so)"
+    QUIET=1
     patch_strip_sign "$dynload_so" '$ORIGIN:$ORIGIN/..:$ORIGIN/../external'
 done
 echo ""
