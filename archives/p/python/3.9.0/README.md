@@ -9,7 +9,7 @@
 | 软件版本 | Python 3.9.0 |
 | 目标平台 | HarmonyOS aarch64 (musl libc, clang 15.0.4) |
 | 补丁数量 | 78 个（27 核心 + 51 测试） |
-| 官方测试 | 425/425 完成，364 通过（85.6%） |
+| 官方测试 | 425/425 完成，383 通过（90.1%） |
 | C 扩展模块 | 204 个 .so 文件 |
 | 核心模块 | 18/18 全部通过 |
 | ctypes | ✅ 0 ERROR（需 libffi ≥ 3.5.2） |
@@ -192,26 +192,41 @@ musl 的 `posix_spawn()` 实现质量良好 → 替代 fork+exec 作为默认子
 
 ---
 
-## 五、测试结果（v52, 2026-03-29）
+## 五、测试结果（V6 Final, 2026-03-30）
 
 | 指标 | 数值 |
 |------|------|
 | 总测试 | 425 |
-| 通过 | **364 (85.6%)** |
-| 失败 | 39 (33 FAIL + 12 ERROR) |
-| 跳过 | 20 |
+| 通过 | **383 (90.1%)** |
+| 失败 | 6 |
+| 跳过 | 34 |
+| 环境变更 | 2 |
 | 完成率 | 100%（全部跑完） |
+| 耗时 | 3 分 55 秒 |
 
-### 失败根因分类
+### 失败测试（6个）
 
-| 根因 | 测试数 | 可修复 |
-|------|:------:|:------:|
-| Hmmac MAC 策略（/dev/ptmx, mmap, fd） | 6 | ❌ 系统限制 |
-| HMDFS chmod/umask 不遵循 POSIX | 8+ | 需鸿蒙内核修复 |
-| 时区/locale 数据缺失 | 5 | 🔶 可配置 tzdata |
-| 第三方包干扰（setuptools） | 3 | 🔶 已有 skip |
-| distutils spawn 吞 stderr | 1 | 🔶 已有 skip |
-| 待分析（socket/signal/posix 等） | 16+ | 需进一步排查 |
+| 测试 | 根因 |
+|------|------|
+| test_generators | 生成器相关行为差异，需进一步分析 |
+| test_pdb | 调试器测试，可能涉及终端交互 |
+| test_regrtest | 测试框架自测（interrupted 子测试） |
+| test_sundry | 杂项测试（distutils 相关） |
+| test_threading | 线程测试，可能涉及 signal/fork 交互 |
+| test_urllib2 | urllib2 测试，可能涉及网络/权限 |
+
+### 跳过测试分类（34个）
+
+| 类别 | 测试数 | 说明 |
+|------|:------:|------|
+| GUI (Tcl/Tk) | 6 | test_tcl, test_tix, test_tk, test_ttk_guionly, test_ttk_textonly, test_turtle |
+| PTY/终端 | 4 | test_ioctl, test_openpty, test_pty, test_getpass |
+| 多进程 (fork) | 3 | test_multiprocessing_fork/forkserver/spawn |
+| 信号 | 1 | test_signal |
+| 网络 | 3 | test_smtpnet, test_urllib2net |
+| Locale/时区 | 3 | test_c_locale_coercion, test_locale, test_format |
+| Windows | 4 | test_winconsoleio, test_winreg, test_winsound, test_msilib |
+| 其他平台限制 | 10 | test_devpoll, test_gdb, test_idle, test_kqueue, test_distutils, test_embed, test_dbm_dumb, test_startfile, test_nis, test_ossaudiodev, test_spwd, test_zipfile64, test_uu |
 
 详见 `reports/REGRTEST_V52_ANALYSIS.md` 和 `reports/COMPATIBILITY_ASSESSMENT.md`。
 
@@ -228,7 +243,6 @@ musl 的 `posix_spawn()` 实现质量良好 → 替代 fork+exec 作为默认子
 | `reports/COMPATIBILITY_ASSESSMENT.md` | 最终兼容性评估报告 |
 | `reports/ROADMAP.md` | 鸿蒙 Python 生态下一步规划 |
 | `reports/REGRTEST_V52_ANALYSIS.md` | v52 测试详细分析 |
-
 ---
 
 *Python 3.9.0 HarmonyOS 适配 — OpenHarmony PC Developer 社区*
