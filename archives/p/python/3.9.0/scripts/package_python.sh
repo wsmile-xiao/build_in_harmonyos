@@ -159,7 +159,8 @@ fi
 # 创建打包目录
 log_info "创建打包目录: $PACKAGE_DIR"
 rm -rf "$PACKAGE_DIR"
-mkdir -p "$PACKAGE_DIR"/{bin,lib/external,include,debug}
+mkdir -p "$PACKAGE_DIR"/{bin,lib/external,include}
+mkdir -p "$OUTPUT_DIR/debug"
 
 # ============================================================
 # 复制 Python 运行时
@@ -361,21 +362,22 @@ EOF
 # ============================================================
 # 打包
 # ============================================================
-log_info "打包..."
+log_info "打包主包..."
 mkdir -p "$OUTPUT_DIR"
 cd "$OUTPUT_DIR"
 
-# 主包（不含 debug）
-tar -czf "${PACKAGE_NAME}.tar.gz" \
-    --exclude="${PACKAGE_NAME}/debug" \
-    "$PACKAGE_NAME"
+# 主包
+tar -czf "${PACKAGE_NAME}.tar.gz" "$PACKAGE_NAME"
+SIZE=$(du -h "${PACKAGE_NAME}.tar.gz" | cut -f1)
+log_info "  主包: ${PACKAGE_NAME}.tar.gz ($SIZE)"
 
-if [ "$STRIP_DEBUG" = "1" ] && [ -d "$PACKAGE_DIR/debug" ]; then
-    # Debug 符号包（单独分发）
-    tar -czf "${PACKAGE_NAME}-debug.tar.gz" \
-        "${PACKAGE_NAME}/debug"
+# Debug 符号包（debug 目录在 output 下，独立于主包）
+if [ "$STRIP_DEBUG" = "1" ] && [ -d "$OUTPUT_DIR/debug" ]; then
+    tar -czf "${PACKAGE_NAME}-debug.tar.gz" -C "$OUTPUT_DIR" "debug"
     DEBUG_SIZE=$(du -h "${PACKAGE_NAME}-debug.tar.gz" | cut -f1)
+    log_info "  Debug: ${PACKAGE_NAME}-debug.tar.gz ($DEBUG_SIZE)"
 fi
+
 echo ""
 echo "============================================================"
 echo "✅ 打包完成！"
@@ -383,32 +385,32 @@ echo "============================================================"
 echo ""
 echo "📦 产物:"
 echo ""
-echo "  主包: $OUTPUT_DIR/${PACKAGE_NAME}.tar.gz ($SIZE)"
+echo "  主包:   $OUTPUT_DIR/${PACKAGE_NAME}.tar.gz ($SIZE)"
 if [ -n "$DEBUG_SIZE" ]; then
-echo "  Debug: $OUTPUT_DIR/${PACKAGE_NAME}-debug.tar.gz ($DEBUG_SIZE)"
+    echo "  Debug:  $OUTPUT_DIR/${PACKAGE_NAME}-debug.tar.gz ($DEBUG_SIZE)"
 fi
 echo ""
 echo "📊 统计:"
 echo ""
 EXT_COUNT=$(find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" -type f 2>/dev/null | wc -l | tr -d " ")
 LIB_COUNT=$(find "$PACKAGE_DIR/lib/external" -name "*.so*" -type f 2>/dev/null | wc -l | tr -d " ")
-DEBUG_COUNT=$(find "$PACKAGE_DIR/debug" -type f 2>/dev/null | wc -l | tr -d " ")
+DEBUG_COUNT=$(find "$OUTPUT_DIR/debug" -type f 2>/dev/null | wc -l | tr -d " ")
 ELF_TOTAL=$((3 + EXT_COUNT + LIB_COUNT))
-echo "  ELF 文件:  $ELF_TOTAL 个（python3.9 + libpython3.9.so*2 + $EXT_COUNT 扩展模块 + $LIB_COUNT 外部依赖）"
+echo "  ELF 文件:   $ELF_TOTAL 个（python3.9 + libpython3.9.so*2 + $EXT_COUNT 扩展模块 + $LIB_COUNT 外部依赖）"
 echo "  Debug 符号: $DEBUG_COUNT 个"
-echo "  扩展模块:  $EXT_COUNT 个（lib-dynload）"
-echo "  外部依赖:  $LIB_COUNT 个（lib/external）"
+echo "  扩展模块:   $EXT_COUNT 个（lib-dynload）"
+echo "  外部依赖:   $LIB_COUNT 个（lib/external）"
 echo ""
 echo "📋 安装路径: ~/usr/${PACKAGE_NAME}/"
 echo ""
 echo "⚡ 快速安装:"
 echo ""
 echo "  tar -xzf ${PACKAGE_NAME}.tar.gz -C ~/usr/"
-echo "  echo 'export PATH="$HOME/usr/${PACKAGE_NAME}/bin:$PATH"' >> ~/.bashrc"
-echo "  echo 'export PATH="$HOME/usr/${PACKAGE_NAME}/bin:$PATH"' >> ~/.zshrc"
+echo "  echo 'export PATH=\"\$HOME/usr/${PACKAGE_NAME}/bin:\$PATH\"' >> ~/.bashrc"
+echo "  echo 'export PATH=\"\$HOME/usr/${PACKAGE_NAME}/bin:\$PATH\"' >> ~/.zshrc"
 echo "  source ~/.bashrc && python3.9 --version"
 echo ""
 echo "🚀 一键安装（推荐）:"
 echo ""
-echo "  /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)""
+echo '  /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"'
 echo ""
