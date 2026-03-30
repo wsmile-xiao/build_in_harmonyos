@@ -124,8 +124,8 @@
 
 | 功能 | 限制说明 | 影响程度 |
 |------|---------|---------|
-| multiprocessing | spawn模式可用；fork/forkserver受Hmmac MAC限制 | 中 |
-| subprocess | posix_spawn路径正常；fork+execve受SELinux限制 | 低（已workaround） |
+| multiprocessing | spawn模式不依赖fork可用但信号量不稳定；fork/forkserver受Hmmac MAC限制 | 高 |
+| subprocess | 已内置posix_spawn兼容层，用户无感知 | 低 |
 | ctypes | 需要libffi 3.5.2+（closure W^X修复） | 低（已解决） |
 | 文件权限 | HMDFS chmod行为与POSIX不同 | 中 |
 | 时区 | strftime('%Z')格式异常，zoneinfo数据缺失 | 低 |
@@ -230,3 +230,5 @@
 - [TEST_REPORT.md](./TEST_REPORT.md) — 测试执行报告
 - [REGRTEST_V51_ANALYSIS.md](./REGRTEST_V51_ANALYSIS.md) — v51测试分析（对比基线）
 - [CPYTHON_RENAME_SYMLINK_CALLCHAIN.md](./CPYTHON_RENAME_SYMLINK_CALLCHAIN.md) — 文件操作调用链分析
+��链分析
+HAIN.md](./CPYTHON_RENAME_SYMLINK_CALLCHAIN.md) — 文件操作调用链分析
