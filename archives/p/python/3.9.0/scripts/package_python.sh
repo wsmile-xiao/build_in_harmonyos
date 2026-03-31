@@ -379,8 +379,7 @@ if [ "$STRIP_DEBUG" = "1" ] && [ -d "$OUTPUT_DIR/${PACKAGE_NAME}.debug" ]; then
 fi
 
 echo ""
-echo "============================================================"
-echo "✅ 打包完成！"
+echo "============================================================"echo "✅ 打包完成！"
 echo "============================================================"
 echo ""
 echo "📦 产物:"
@@ -408,9 +407,9 @@ echo ""
 echo "  tar -xzf ${PACKAGE_NAME}.tar.gz -C ~/usr/"
 echo "  echo 'export PATH=\"\$HOME/usr/${PACKAGE_NAME}/bin:\$PATH\"' >> ~/.bashrc"
 echo "  echo 'export PATH=\"\$HOME/usr/${PACKAGE_NAME}/bin:\$PATH\"' >> ~/.zshrc"
-echo "  source ~/.bashrc && python3.9 --version"
+echo "  source ~/.zshrc && python3.9 --version"
 echo ""
 echo "🚀 一键安装（推荐）:"
 echo ""
-echo '  /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"'
+echo '  /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/3.9.0/install.sh)"'
 echo ""

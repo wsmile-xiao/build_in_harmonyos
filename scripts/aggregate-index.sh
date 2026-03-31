@@ -29,7 +29,7 @@ for meta in "$ARCHIVES_DIR"/?/*/*/_meta.yaml; do
     
     echo "" >> "$INDEX_FILE"
     echo "  - software: $sw" >> "$INDEX_FILE"
-    echo "    version: $ver" >> "$INDEX_FILE"
+    echo "    version: \"$ver\"" >> "$INDEX_FILE"
     echo "    letter: $letter" >> "$INDEX_FILE"
     echo "    status: $status" >> "$INDEX_FILE"
     echo "    build_system: $build_sys" >> "$INDEX_FILE"
