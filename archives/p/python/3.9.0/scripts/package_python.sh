@@ -302,7 +302,7 @@ cat > "$PACKAGE_DIR/README.md" << 'EOF'
 
 ```bash
 # 方式一：一键安装（推荐）
-/bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"
+CURL_CA_BUNDLE=/etc/ssl/certs/cacert.pem /bin/sh -c "$(curl -fsSL --cacert /etc/ssl/certs/cacert.pem https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"
 
 # 方式二：手动安装
 tar -xzf python-3.9.0-ohos-aarch64.tar.gz -C ~/usr/
@@ -310,7 +310,7 @@ tar -xzf python-3.9.0-ohos-aarch64.tar.gz -C ~/usr/
 # 将以下内容添加到 ~/.bashrc 和 ~/.zshrc
 export PATH="$HOME/usr/python-3.9.0-ohos-aarch64/bin:$PATH"
 export TMPDIR="${TMPDIR:-$HOME/tmp}"
-export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/ca-certificates.crt}"
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/etc/ssl/certs/cacert.pem}"
 
 source ~/.bashrc
 python3.9 --version
@@ -411,5 +411,5 @@ echo "  source ~/.zshrc && python3.9 --version"
 echo ""
 echo "🚀 一键安装（推荐）:"
 echo ""
-echo '  /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/3.9.0/install.sh)"'
+echo '  CURL_CA_BUNDLE=/etc/ssl/certs/cacert.pem /bin/sh -c "$(curl -fsSL --cacert /etc/ssl/certs/cacert.pem https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/3.9.0/install.sh)"'
 echo ""
