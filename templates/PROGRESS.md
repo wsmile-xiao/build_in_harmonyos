@@ -20,6 +20,9 @@
 - [ ] **D5 测试前置**：弹窗预确认 + `MAKEFLAGS=-j1` + `timeout 1800`（或运行 `prep-test.sh`）
 - [ ] **D6 临时文件清理**：Phase 4 前清理 DIAGNOSIS_*.md / MISSING_*.md 等临时文件
 - [ ] **D7 四维度完成度**：编译产出 + 补丁完整性 + 知识提取 + 索引同步
+- [ ] **D8 流程自省**：你是流程质检员，发现问题立即写入 `reports/skill-feedback.md`
+- [ ] **D9 不要改源文档**：SKILL.md / KNOW_YOUR_WHY.md / templates/ 只有主编能改，你只写 feedback
+- [ ] **D10 不要改别人的档案**：只修改 `archives/{letter}/{软件名}/{版本}/` 自己负责的目录
 
 ## 🔴 严重约束速查（编译过程中遵守）
 

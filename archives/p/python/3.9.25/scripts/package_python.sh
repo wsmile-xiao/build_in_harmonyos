@@ -302,7 +302,7 @@ cat > "$PACKAGE_DIR/README.md" << 'EOF'
 
 ```bash
 # 方式一：一键安装（推荐）
-/bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"
+/bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/3.9.25/install.sh)"
 
 # 方式二：手动安装
 tar -xzf python-3.9.25-ohos-aarch64.tar.gz -C ~/usr/
@@ -412,5 +412,5 @@ echo "  source ~/.bashrc && python3.9 --version"
 echo ""
 echo "🚀 一键安装（推荐）:"
 echo ""
-echo '  /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/python3.9/install.sh)"'
+echo '  /bin/sh -c "$(curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/3.9.25/install.sh)"'
 echo ""
