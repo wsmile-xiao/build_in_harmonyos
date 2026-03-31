@@ -15,7 +15,7 @@
 
 | 构建系统 | 数量 |
 |----------|------|
-| Autotools | 23 |
+| Autotools | 25 |
 | CMake | 1 |
 | Makefile | 1 |
 | Custom Perl | 1 |
