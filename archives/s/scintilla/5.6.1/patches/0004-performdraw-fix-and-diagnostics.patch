@@ -1,0 +1,204 @@
+From: OpenDesk <opendesk>
+Date: 2026-04-02
+Subject: [PATCH 4/4] Fix PerformDraw timing, font metrics sign, redraw, and diagnostics
+
+Critical fixes:
+1. PerformDraw() checked surf->Initialised() before surf->Init(),
+   causing canvas=nullptr and all painting silently skipped (white screen).
+   Fix: Move Init() before Initialised() check.
+
+2. OH_Drawing (Skia) FontMetrics.ascent returns negative values (Skia Y-axis
+   points down, ascent points up), but Scintilla expects positive values.
+   This caused negative line height, squishing all text to top-left corner.
+   Fix: Negate ascent in GetAscent()/GetHeight()/GetInternalLeading().
+
+3. Window::InvalidateAll/Rectangle were empty stubs, so Scintilla's repaint
+   requests were silently dropped. Add redraw callback mechanism so that
+   InvalidateAll/Rectangle triggers the host app's RenderFrame.
+
+4. HarmonyOS hilog sanitizes all values to <private>. Use %{public} format
+   specifier to make diagnostic values visible.
+
+Files: ohos/PlatOHOS.cxx, ohos/ScintillaOHOS.cxx, ohos/ScintillaOHOS.h
+--- a/ohos/PlatOHOS.cxx	2026-04-02 09:32:07.821283593 +0800
++++ b/ohos/PlatOHOS.cxx	2026-04-02 09:11:35.621273593 +0800
+@@ -22,6 +22,14 @@
+ #include <memory>
+ #include <algorithm>
+ 
++// OHOS logging
++#include <hilog/log.h>
++#define PLAT_TAG "PlatOHOS"
++#define PLAT_LOG(fmt, ...) OH_LOG_Print(LOG_APP, LOG_INFO, LOG_DOMAIN, PLAT_TAG, fmt, ##__VA_ARGS__)
++#define PLAT_ERR(fmt, ...) OH_LOG_Print(LOG_APP, LOG_ERROR, LOG_DOMAIN, PLAT_TAG, fmt, ##__VA_ARGS__)
++// Bypass HarmonyOS log sanitization: snprintf values into string, then use %{public}s to log
++#define PLAT_DBG(fmt, ...) do { char _dbg[512]; snprintf(_dbg, sizeof(_dbg), fmt, ##__VA_ARGS__); PLAT_LOG("%{public}s", _dbg); } while(0)
++
+ #include "ScintillaTypes.h"
+ #include "ScintillaMessages.h"
+ #include "Scintilla.h"
+@@ -114,11 +122,23 @@
+ 				style.width = FONT_WIDTH_NORMAL;
+ 				style.slant = FONT_STYLE_NORMAL;
+ 				ohTypeface = OH_Drawing_FontMgrMatchFamilyStyle(fontMgr, fp.faceName, style);
++				if (ohTypeface) {
++					PLAT_LOG("Font loaded: '%{public}s' size=%{public}.0f weight=%{public}d", fp.faceName, (double)fp.size, (int)fp.weight);
++				} else {
++					PLAT_ERR("FontMgrMatchFamilyStyle FAILED for '%{public}s', falling back to default typeface", fp.faceName);
++				}
+ 				OH_Drawing_FontMgrDestroy(fontMgr);
++			} else {
++				PLAT_ERR("OH_Drawing_FontMgrCreate FAILED, falling back to default typeface");
+ 			}
+ 		}
+ 		if (!ohTypeface) {
+ 			ohTypeface = OH_Drawing_TypefaceCreateDefault();
++			if (ohTypeface) {
++				PLAT_DBG("Using default typeface");
++			} else {
++				PLAT_DBG("TypefaceCreateDefault FAILED - no font!");
++			}
+ 		}
+ 
+ 		// Create font
+@@ -139,6 +159,10 @@
+ 			OH_Drawing_FontSetEdging(ohFont, FONT_EDGING_SUBPIXEL_ANTI_ALIAS);
+ 			OH_Drawing_FontSetBaselineSnap(ohFont, true);
+ 			UpdateMetrics();
++			PLAT_DBG("Font created: fontSizePx=%.1f ascent=%.1f descent=%.1f height=%.1f avgCharW=%.1f leading=%.1f",
++				fontSizePx, GetAscent(), GetDescent(), GetHeight(), GetAvgCharWidth(), GetLeading());
++		} else {
++			PLAT_DBG("Font FAILED: ohFont=%p ohTypeface=%p", (void*)ohFont, (void*)ohTypeface);
+ 		}
+ 	}
+ 
+@@ -154,13 +178,13 @@
+ 		}
+ 	}
+ 
+-	float GetAscent() const noexcept { return metricsValid ? metrics.ascent : fontSizePx * 0.8f; }
++	float GetAscent() const noexcept { return metricsValid ? -metrics.ascent : fontSizePx * 0.8f; }
+ 	float GetDescent() const noexcept { return metricsValid ? metrics.descent : fontSizePx * 0.2f; }
+-	float GetHeight() const noexcept { return metricsValid ? (metrics.ascent + metrics.descent) : fontSizePx; }
++	float GetHeight() const noexcept { return metricsValid ? (-metrics.ascent + metrics.descent) : fontSizePx; }
+ 	float GetLeading() const noexcept { return metricsValid ? metrics.leading : 0.0f; }
+ 	float GetAvgCharWidth() const noexcept { return metricsValid ? metrics.avgCharWidth : fontSizePx * 0.5f; }
+ 	float GetInternalLeading() const noexcept {
+-		return metricsValid ? std::max(0.0f, (metrics.ascent + metrics.descent) - fontSizePx) : 0.0f;
++		return metricsValid ? std::max(0.0f, (-metrics.ascent + metrics.descent) - fontSizePx) : 0.0f;
+ 	}
+ };
+ 
+@@ -449,19 +473,31 @@
+ 
+ 	// --- Text ---
+ 
++	static int s_drawTextCount;
++
+ 	void DrawTextNoClip(PRectangle rc, const Font *font_, XYPOSITION ybase,
+ 		std::string_view text, ColourRGBA fore, ColourRGBA back) override {
+ 		if (!canvas || !font_ || text.empty()) return;
+ 		auto *fh = FontAs(font_);
+-		if (!fh || !fh->ohFont) return;
++		if (!fh || !fh->ohFont) {
++			if (s_drawTextCount < 5) { PLAT_DBG("DrawTextNoClip[%d]: font INVALID fh=%p ohFont=%p", s_drawTextCount++, (void*)fh, fh ? (void*)fh->ohFont : nullptr); }
++			return;
++		}
+ 		auto *blob = OH_Drawing_TextBlobCreateFromText(
+ 			text.data(), text.size(), fh->ohFont, TEXT_ENCODING_UTF8);
+ 		if (blob) {
++			if (s_drawTextCount < 5) {
++				PLAT_DBG("DrawTextNoClip[%d]: rc=(%.0f,%.0f,%.0f,%.0f) ybase=%.1f textLen=%zu rgba=0x%08x",
++					s_drawTextCount++, (double)rc.left, (double)rc.top, (double)rc.right, (double)rc.bottom,
++					(double)ybase, text.size(), ColourToARGB(fore));
++			}
+ 			ApplyBrush(fore);
+ 			OH_Drawing_CanvasDrawTextBlob(canvas, blob,
+ 				static_cast<float>(rc.left), static_cast<float>(ybase));
+ 			DetachBrush();
+ 			OH_Drawing_TextBlobDestroy(blob);
++		} else {
++			PLAT_DBG("DrawTextNoClip[%d]: TextBlob FAILED len=%zu font=%p", s_drawTextCount++, text.size(), (void*)fh->ohFont);
+ 		}
+ 	}
+ 
+@@ -571,6 +607,16 @@
+ };
+ 
+ // ============================================================================
++// Redraw callback (set by host app via PlatOHOS_SetRedrawCallback)
++// Called when Scintilla requests a repaint via Window::InvalidateAll/Rectangle
++// ============================================================================
++static void (*s_redrawRequested)(void) = nullptr;
++
++extern "C" void PlatOHOS_SetRedrawCallback(void (*cb)(void)) {
++    s_redrawRequested = cb;
++}
++
++// ============================================================================
+ // Window non-virtual methods (stub)
+ // ============================================================================
+ 
+@@ -581,8 +627,8 @@
+ void Window::SetPositionRelative(PRectangle, const Window *) {}
+ PRectangle Window::GetClientPosition() const { return GetPosition(); }
+ void Window::Show(bool) {}
+-void Window::InvalidateAll() {}
+-void Window::InvalidateRectangle(PRectangle) {}
++void Window::InvalidateAll() { if (s_redrawRequested) s_redrawRequested(); }
++void Window::InvalidateRectangle(PRectangle) { if (s_redrawRequested) s_redrawRequested(); }
+ void Window::SetCursor(Cursor) {}
+ PRectangle Window::GetMonitorRect(Point) { return PRectangle(0, 0, 1920, 1080); }
+ 
+@@ -690,6 +736,9 @@
+ } // namespace Internal
+ } // namespace Scintilla
+ 
++// Static member definitions
++int SurfaceImplOHOS::s_drawTextCount = 0;
++
+ // ============================================================================
+ // Debug/Assert
+ // ============================================================================
+
+--- a/ohos/ScintillaOHOS.cxx	2026-04-02 09:32:07.885278749 +0800
++++ b/ohos/ScintillaOHOS.cxx	2026-04-02 09:12:21.173275156 +0800
+@@ -354,8 +354,9 @@
+             SetSize(cw, ch);
+         }
+         auto surf = Surface::Allocate(technology);
+-        if (!surf || !surf->Initialised()) return;
++        if (!surf) return;
+         surf->Init(static_cast<SurfaceID>(canvas), wMain.GetID());
++        if (!surf->Initialised()) return;
+         PRectangle rcPaint = GetClientRectangle();
+         CheckAndClearRedraw();
+         Paint(surf.get(), rcPaint);
+@@ -1044,6 +1045,14 @@
+     }
+ }
+ 
++// ---- Redraw callback ----
++// Delegate to PlatOHOS (where the Window::InvalidateAll stub lives)
++extern "C" void PlatOHOS_SetRedrawCallback(void (*cb)(void));
++
++void BN_Sci_SetRedrawCallback(void (*cb)(void)) {
++    PlatOHOS_SetRedrawCallback(cb);
++}
++
+ int BN_Sci_HasFocus(void *editor) {
+     if (editor) {
+         return static_cast<ScintillaOHOS *>(editor)->HasFocus() ? 1 : 0;
+
+--- a/ohos/ScintillaOHOS.h	2026-04-02 09:32:07.853279531 +0800
++++ b/ohos/ScintillaOHOS.h	2026-04-02 09:12:02.701278593 +0800
+@@ -175,6 +175,9 @@
+ void BN_Sci_SetFocus(void *editor, int focused);
+ int BN_Sci_HasFocus(void *editor);
+ 
++// Redraw callback — set by host app to trigger display refresh
++void BN_Sci_SetRedrawCallback(void (*cb)(void));
++
+ // Input events
+ void BN_Sci_OnTouchDown(void *editor, float x, float y, uint32_t timestamp);
+ void BN_Sci_OnTouchMove(void *editor, float x, float y, uint32_t timestamp);

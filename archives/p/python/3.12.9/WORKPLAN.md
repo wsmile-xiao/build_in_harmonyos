@@ -1,7 +1,8 @@
 # Python 3.12.9 鸿蒙适配 — 工作计划与进展
 
-> **创建日期**: 2026-03-27 | **状态**: 🔄 Phase 2 完成
+> **创建日期**: 2026-03-27 | **最后更新**: 2026-04-01 | **状态**: ✅ Phase 3.5 编译成功
 > **基于**: Python 3.9.0 适配经验（24 补丁，83.7% 测试通过率）
+> **补丁总数**: 26 个（0001-0026，含 uuid 检测 0024、sharedmods hardlink 0025、Setup.stdlib 变量修复 0026）
 
 ---
 
@@ -64,23 +65,50 @@
 | 2.4 | Phase 2D: 标准库补丁 | ✅ 完成 | 0011-0018 (sysconfig/posixpath/subprocess/compat/site/multiproc/venv) |
 | 2.5 | Phase 2F: 补充遗漏修复 | ✅ 完成 | 0019-0021 (fallocate/missing-fixups/hmdfs-symlink) |
 | 2.6 | 补丁完整性校验 | ✅ 完成 | 21 个补丁全部 patch --dry-run 通过 |
+| 2.7 | Phase 2G: 3.9 经验补充 | ✅ 完成 | 0022-0023 (compileall hardlink/ctypes ldconfig) |
 
 **Phase 2 关键结论**：
-- 共生成 **21 个补丁**（总计 ~40KB），覆盖 25 个源文件
+- 共生成 **23 个补丁**（总计 ~42KB），覆盖 27 个源文件
 - 基于 3.9 的 24 补丁经验：5 直接复用 / 7 需修改 / 6 不再需要 / 6 需重写 / 4 新增 → 最终 21 个 3.12 补丁
+- 3.9.25 实战经验补充 2 个运行时补丁（0022 compileall hardlink 回退 + 0023 ctypes ldconfig 守卫）
 - 3 个高风险项有对应补丁覆盖：R1(configure 平台检测→0001-0003)、R3(musl BIND_NOW→0003+0004)、R6(HMDFS symlink→0021)
 - subprocess 适配（0013-0015）完全重写，利用 3.12 的 `_use_posix_spawn()` 新架构
 - 新增 `_harmonyos_compat.py` 兼容层，替换 `os.system()`/`os.popen()` 为 subprocess 实现
 
-### Phase 3: 编译验证
+### Phase 3: 编译验证（进行中）
 
 | # | 任务 | 状态 | 产出 |
 |---|------|------|------|
-| 3.1 | configure 阶段 | ⏳ | logs/configure.log |
-| 3.2 | make 编译阶段 | ⏳ | logs/build.log |
-| 3.3 | make install | ⏳ | logs/install.log |
-| 3.4 | 扩展模块导入验证 | ⏳ | reports/EXTENSION_VERIFICATION.md |
-| 3.5 | 官方测试套件 | ⏳ | reports/TEST_REPORT.md |
+| 3.1 | 解压源码 + apply patches + configure | ✅ 完成 | configure 成功，缺失模块符合预期 |
+| 3.2 | 补丁审查 + 编译准备 | ✅ 完成 | `reviews/PATCH_REVIEW_23.md` |
+| 3.3 | patch 0003/0021 重建 | ✅ 完成 | hunk 行数修复，24 补丁全部 dry-run 通过 |
+| 3.4 | patch 0024 uuid 检测修复 | ✅ 完成 | HAVE_UUID_H 条件化检查 |
+| 3.5 | make 编译 | ✅ 完成 | 111 模块（31 built-in + 76 shared），0 失败，仅 3 缺失 |
+| 3.6 | make install | ⏳ | logs/install.log |
+| 3.7 | 扩展模块导入验证 | ⏳ | reports/EXTENSION_VERIFICATION.md |
+| 3.8 | 官方测试套件 | ⏳ | reports/TEST_REPORT.md |
+
+**Phase 3 已解决错误**：
+| # | 问题 | 补丁 | 说明 |
+|---|------|------|------|
+| E025 | HMDFS 大小写不敏感，`python` 链接目标与 `Python/` 源码目录冲突 | 0003 | BUILDEXEEXT=.exe |
+| E033 | musl 下 ncurses 宽字符接口不可见（define_xopen_source=no 导致） | 0003 | 改为注释走默认逻辑 |
+| E026 | `_uuidmodule.c` 编译失败，`uuid.h` not found | 0024 | pkg-config 找到 libuuid 后改为条件检查 uuid.h |
+
+**Phase 3 待解决（社区提交时）**：
+- **PY_SUPPORT_TIER 警告**: configure 输出 `Platform "aarch64-unknown-linux-ohos" is not supported`（tier 0）
+  - 需在 `PY_SUPPORT_TIER` case 中添加 `aarch64-*-linux-ohos/clang` 条目（预计 tier 3）
+  - 参见 [PEP 0011](https://peps.python.org/pep-0011/)
+  - 位置: configure.ac 约第 35KB 处 `AS_CASE([$host], ...)` 段落
+
+**Phase 3 当前状态**：
+- **E028**: HMDFS symlink → 补丁 0025（sharedmods 用 cp -p 替代 symlink）
+- **E029**: HARMONYOS_* 变量误解析 → 补丁 0026（移除 Setup.stdlib.in 变量定义）
+- **E030**: 3 个可选模块缺失（_tkinter/nis/spwd），均为平台限制，不需改补丁
+  - `_tkinter`: libtcl/libtk 未安装
+  - `nis`: musl libc 不提供 NIS/YP
+  - `spwd`: musl libc 不提供 setspent()
+- **环境修复**: 创建 ncurses.pc 兼容别名 + ncurses.h（cp 从 curses.h），解决 readline/curses 检测失败
 
 ### Phase 4: 归档与知识沉淀
 
@@ -138,15 +166,39 @@
 
 | 文档 | 位置 | 状态 |
 |------|------|------|
-| 工作计划（本文档） | `WORKPLAN.md` | ✅ 已创建 |
-| 源码结构分析 | `reports/SOURCE_STRUCTURE_ANALYSIS.md` | ⏳ |
-| 规格差异对比 | `reports/SPEC_DIFF_ANALYSIS.md` | ⏳ |
-| 补丁可复用性 | `reports/PATCH_REUSABILITY.md` | ⏳ |
-| 风险评估 | `reports/RISK_ASSESSMENT.md` | ⏳ |
+| 工作计划（本文档） | `WORKPLAN.md` | ✅ 已更新 |
+| 源码结构分析 | `reports/BUILD_SYSTEM_ANALYSIS.md` | ✅ 完成 |
+| 标准库分析 | `reports/LIB_ANALYSIS.md` | ✅ 完成 |
+| 扩展模块分析 | `reports/MODULES_ANALYSIS.md` | ✅ 完成 |
+| 补丁可复用性 | `reports/PATCH_REUSABILITY.md` | ✅ 完成 |
+| 风险评估 | `reports/RISK_ASSESSMENT.md` | ✅ 完成 |
+| 补丁差距分析 (3.9→3.12) | `reviews/PATCH_GAP_ANALYSIS.md` | ✅ 完成 |
+| 补丁必要性审查报告 | `reviews/PATCH_REVIEW_23.md` | ✅ 完成 |
+| 补丁审查分组 1 (平台+构建) | `reviews/review-group1-platform-build.md` | ✅ 完成 |
+| 补丁审查分组 2 (C扩展) | `reviews/review-group2-c-extensions.md` | ✅ 完成 |
+| 补丁审查分组 3 (标准库) | `reviews/review-group3-stdlib.md` | ✅ 完成 |
+| 补丁审查分组 4 (聚合+新增) | `reviews/review-group4-aggregate.md` | ✅ 完成 |
 | 编译日志 | `logs/` | ⏳ |
 | 测试报告 | `reports/TEST_REPORT.md` | ⏳ |
-| manifest.yaml | `manifest.yaml` | ⏳ |
-| README.md | `README.md` | ⏳ |
+| manifest.yaml | `manifest.yaml` | ✅ 已创建 |
+| README.md | `README.md` | ✅ 已创建 |
+
+---
+
+## 八、社区提交待办
+
+### 8.1 PY_SUPPORT_TIER 注册
+- **问题**: configure 输出 `Platform "aarch64-unknown-linux-ohos" is not supported`（PY_SUPPORT_TIER=0）
+- **原因**: configure.ac 的 `PY_SUPPORT_TIER` case 列表未包含 `aarch64-*-linux-ohos/clang`
+- **方案**: 向社区提交时在 `PY_SUPPORT_TIER` 段落添加 tier 3 条目
+- **参考**: [PEP 0011](https://peps.python.org/pep-0011/)
+- **位置**: configure.ac 约第 35KB 处 `AS_CASE([$host], ...)` 段落
+
+### 8.2 补丁重建记录
+| 补丁 | 原因 | 重建日期 |
+|------|------|---------|
+| 0003 | editFile 多次修改导致 hunk 行数不匹配 | 2026-04-01 |
+| 0021 | Makefile.pre.in 行号偏移 | 2026-04-01 |
 
 ---
 

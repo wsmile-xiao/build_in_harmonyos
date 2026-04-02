@@ -45,7 +45,7 @@
 | **openssl** | 1.1.1w | ✅ 完全成功 | 🟢 高 | Custom Perl | 1 | - | [📄](archives/o/openssl/1.1.1w/) |
 | **patch** | 2.7.6 | ⚠️ 部分成功 | 🟡 中 | Autotools | 1 | - | [📄](archives/p/patch/2.7.6/) |
 | **python** | 3.12.9、3.9.0、3.9.25 | 🧪 已测试 |  | Autotools | 82 | - | [📄](archives/p/python/3.9.25/) |
-| **readline** | 8.2 | ✅ 完全成功 | 🟢 高 | Autotools | 1 | - | [📄](archives/r/readline/8.2/) |
+| **readline** | 8.2 | ✅ 完全成功 | 🟢 高 | Autotools | 2 | - | [📄](archives/r/readline/8.2/) |
 | **rsync** | 3.3.0 | ⚠️ 部分成功 | 🟡 中 | Autotools | 2 | - | [📄](archives/r/rsync/3.3.0/) |
 | **scintilla** | 5.6.1 | ⚠️ 部分成功 | 🟡 中 | Makefile | 0 | - | [📄](archives/s/scintilla/5.6.1/) |
 | **sed** | 4.9 | ✅ 完全成功 | 🟢 高 | Autotools | 1 | - | [📄](archives/s/sed/4.9/) |

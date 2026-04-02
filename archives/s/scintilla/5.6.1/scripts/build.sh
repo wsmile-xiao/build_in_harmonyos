@@ -1,50 +1,54 @@
-#!/bin/sh
-# Build Scintilla core library for HarmonyOS
+#!/bin/bash
+# build_ohos.sh - Build libscintilla_ohos.so for HarmonyOS (aarch64)
 set -e
 
-SRC_DIR="${1:-.}"
-BUILD_DIR="${2:-build_ohos}"
-PREFIX="${3:-$HOME/usr/local}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SCI_ROOT="$SCRIPT_DIR"
+OHOS_DIR="$SCI_ROOT/ohos"
+SRC_DIR="$SCI_ROOT/src"
 
-echo "Building Scintilla 5.6.1 for HarmonyOS..."
-echo "Source: $SRC_DIR"
-echo "Build:  $BUILD_DIR"
-echo "Prefix: $PREFIX"
+# Toolchain
+CLANG="/data/service/hnp/bin/aarch64-unknown-linux-ohos-clang++"
+SYSROOT="/data/service/hnp/ohos-sdk.org/ohos-sdk_6.1.0.27/ohos/native/sysroot"
 
-mkdir -p "$BUILD_DIR"
+# Output
+OUT_DIR="$SCRIPT_DIR/out"
+OUT_SO="$OUT_DIR/libscintilla_ohos.so"
 
-# Compile all core source files
-for f in "$SRC_DIR"/src/*.cxx; do
-    name=$(basename "$f" .cxx)
-    echo "  Compiling $name..."
-    clang++ -std=c++17 -fPIC -O2 -DNDEBUG \
-        -I "$SRC_DIR/include" -I "$SRC_DIR/src" \
-        -c "$f" -o "$BUILD_DIR/${name}.o"
-done
+mkdir -p "$OUT_DIR"
 
-# Compile platform stubs
-echo "  Compiling PlatOHOS..."
-clang++ -std=c++17 -fPIC -O2 -DNDEBUG \
-    -I "$SRC_DIR/include" -I "$SRC_DIR/src" \
-    -c "$SRC_DIR/ohos/PlatOHOS.cxx" -o "$BUILD_DIR/PlatOHOS.o"
+echo "=== Building libscintilla_ohos.so ==="
+echo "  Compiler: $CLANG"
+echo "  Sysroot: $SYSROOT"
 
-# Create static library
-echo "Creating static library..."
-cd "$BUILD_DIR"
-llvm-ar rcs libscintilla_core.a *.o
-llvm-ranlib libscintilla_core.a
+# Collect Scintilla core source files
+CORE_SRC=$(find "$SRC_DIR" -name '*.cxx' | sort)
+echo "  Core sources: $(echo "$CORE_SRC" | wc -l) files"
 
-# Install
-echo "Installing to $PREFIX..."
-mkdir -p "$PREFIX/lib"
-mkdir -p "$PREFIX/include/scintilla"
-mkdir -p "$PREFIX/include/scintilla/internal"
-cp libscintilla_core.a "$PREFIX/lib/"
-cp "$SRC_DIR"/include/*.h "$PREFIX/include/scintilla/"
-cp "$SRC_DIR"/src/*.h "$PREFIX/include/scintilla/internal/"
+# Platform + OHOS source
+OHOS_SRC="$OHOS_DIR/PlatOHOS.cxx $OHOS_DIR/ScintillaOHOS.cxx"
 
-echo ""
-echo "=== Build complete ==="
-echo "Library: $PREFIX/lib/libscintilla_core.a"
-echo "Headers: $PREFIX/include/scintilla/"
-ls -lh "$PREFIX/lib/libscintilla_core.a"
+ALL_SRC="$CORE_SRC $OHOS_SRC"
+
+# Common flags
+CXXFLAGS="-std=c++17 -fPIC -O2 \
+  -DSCI_OHOS \
+  -DNDEBUG \
+  -I$SCI_ROOT/include \
+  -I$SRC_DIR \
+  -I$OHOS_DIR \
+  -I$SYSROOT/usr/include \
+  -I$SYSROOT/usr/include/hilog \
+  --sysroot=$SYSROOT"
+
+LDFLAGS="-shared -Wl,-soname,libscintilla_ohos.so \
+  -L$SYSROOT/usr/lib/aarch64-linux-ohos \
+  -lnative_drawing \
+  -lhilog_ndk.z"
+
+echo "=== Compiling..."
+$CLANG $CXXFLAGS $ALL_SRC $LDFLAGS -o "$OUT_SO"
+
+echo "=== Build successful ==="
+echo "  Output: $OUT_SO"
+ls -lh "$OUT_SO"

@@ -22,6 +22,7 @@
 #include <memory>
 #include <functional>
 #include <algorithm>
+#include <bitset>
 
 // Scintilla core headers - must follow this exact order (same as GTK build)
 #include "ScintillaTypes.h"
@@ -122,6 +123,9 @@ public:
     std::function<void(int, int, int, const char *)> notifyHandler;
     std::function<std::string()> clipboardGetter;
     std::function<void(const std::string &)> clipboardSetter;
+
+    // FineTicker support
+    std::bitset<static_cast<size_t>(TickReason::dwell)> tickerReasons;
 
     // Size state
     int editorWidth = 800;
@@ -297,6 +301,21 @@ public:
         (void)rc;
     }
 
+    // ----------------------------------------------------------------
+    // FineTicker overrides (prevent Editor base class assert(false))
+    // ----------------------------------------------------------------
+
+    bool FineTickerRunning(TickReason reason) override {
+        return tickerReasons.test(static_cast<size_t>(reason));
+    }
+    void FineTickerStart(TickReason reason, int millis, int tolerance) override {
+        tickerReasons.set(static_cast<size_t>(reason));
+        (void)millis; (void)tolerance;
+    }
+    void FineTickerCancel(TickReason reason) override {
+        tickerReasons.reset(static_cast<size_t>(reason));
+    }
+
     // Allow the host to check/clear the redraw flag
     bool CheckAndClearRedraw() {
         if (needsRedraw) {
@@ -335,8 +354,9 @@ public:
             SetSize(cw, ch);
         }
         auto surf = Surface::Allocate(technology);
-        if (!surf || !surf->Initialised()) return;
+        if (!surf) return;
         surf->Init(static_cast<SurfaceID>(canvas), wMain.GetID());
+        if (!surf->Initialised()) return;
         PRectangle rcPaint = GetClientRectangle();
         CheckAndClearRedraw();
         Paint(surf.get(), rcPaint);
@@ -1023,6 +1043,14 @@ void BN_Sci_SetFocus(void *editor, int focused) {
     if (editor) {
         static_cast<ScintillaOHOS *>(editor)->SetFocus(focused != 0);
     }
+}
+
+// ---- Redraw callback ----
+// Delegate to PlatOHOS (where the Window::InvalidateAll stub lives)
+extern "C" void PlatOHOS_SetRedrawCallback(void (*cb)(void));
+
+void BN_Sci_SetRedrawCallback(void (*cb)(void)) {
+    PlatOHOS_SetRedrawCallback(cb);
 }
 
 int BN_Sci_HasFocus(void *editor) {

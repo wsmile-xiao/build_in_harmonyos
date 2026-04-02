@@ -13,118 +13,136 @@
 | Phase 2 | 单元测试（52/52 通过） | ✅ 完成 | 保证编辑逻辑正确性 |
 | Phase 3 | 渲染层 - Surface/Font | ✅ 完成 | Canvas 文本渲染、图形绘制 |
 | Phase 4 | 渲染层 - Window/Menu/ListBox | ✅ 完成 | 窗口、菜单、补全列表 |
-| **Phase 5** | **ContentSlot 集成层** | ✅ 完成 | **NativeComponent 渲染桥接** |
+| **Phase 5** | **Editor 集成层** | ✅ 完成 | **ScintillaOHOSEditor + Paint 调用** |
 | **Phase 6** | **输入事件桥接** | ✅ 完成 | **触摸/键盘/鼠标事件转发** |
 | **Phase 7** | **IME 输入法适配** | ✅ 完成 | **中文输入支持** |
 | **Phase 8** | **剪贴板适配** | ✅ 完成 | **复制/粘贴/剪切** |
-| **Phase 9** | **CMake 构建系统** | ✅ 完成 | **集成到 BlueNotePad 工程** |
-| **Phase 10** | **设备运行验证** | 🔲 待做 | **端到端测试（需 DevEco Studio）** |
+| **Phase 9** | **CMake 构建系统** | ✅ 完成 | **静态库 + 共享库双目标** |
+| **Phase 10** | **编译链接验证** | ✅ 完成 | **libscintilla_ohos.so + libscintilla_core.a** |
+| **Phase 11** | **DevEco 工程集成** | ✅ 完成 | **libentry.so 链接 + NAPI 绑定** |
+| **Phase 12** | **设备部署与运行时验证** | 🔲 进行中 | **真机渲染/交互验证** |
 
 ---
 
-## Phase 5：ContentSlot 集成层（优先级最高）
+## Phase 0：源码获取 ✅ 完成
 
-**目标**：让 Scintilla 的 Surface 绑定到 HarmonyOS ContentSlot/NodeContent，实现真正在屏幕上渲染文本。
-
-**技术方案**：
-- 使用 `OH_ArkUI_NodeContent_RegisterCallback` 注册 Attach/Detach 回调
-- 使用 `OH_ArkUI_RegisterDrawCallbackOnNodeHandle`（API 15+）注册绘制回调
-- 在绘制回调中将 `ArkUI_DrawContext*` 转换为 `OH_Drawing_Canvas*`，传入 Scintilla
-- 实现 `WindowImplOHOS`：持有 NodeContent 尺寸，Invalidate 触发重绘
-
-**需实现**：
-1. `ScintillaHost` 类（C++，~200 行）：
-   - 持有 Editor + Surface + NodeContentHandle
-   - `OnDraw()` → 调用 Editor::Paint(surface, rect)
-   - `OnAttach()` / `OnDetach()` 生命周期管理
-   - 尺寸缓存 + 更新
-2. `WindowImplOHOS` 改造（~100 行）：
-   - `InvalidateAll()` → 标记脏区域 + 请求重绘
-   - `GetPosition()` → 返回实际尺寸
-
-**产出**：
-- patches/0002-contentslot-integration.patch
-- 可在设备上运行的 Demo（纯 C++ Native 层）
+- 下载 Scintilla 5.6.1 源码包
+- 解压验证 33 个核心 .cxx + 40+ .h 文件完整
 
 ---
 
-## Phase 6：输入事件桥接
+## Phase 1：核心库编译 ✅ 完成
 
-**目标**：将触摸/键盘/鼠标事件从 ArkUI 转发到 Scintilla Editor。
-
-**技术方案**：
-- 通过 `ArkUI_NativeNodeAPI_1` 注册触摸/键盘事件回调
-- 将 ArkUI 事件参数转换为 Scintilla 的 Point / KeyMod / KeyDef
-- 调用 Editor::ButtonDown / ButtonMove / ButtonUp / KeyDown / CharAdded
-
-**需实现**：
-1. 事件转换函数（~150 行）
-2. 手势处理：单击/双击/长按/拖拽/捏合缩放（~100 行）
-
-**产出**：
-- patches/0003-input-event-bridging.patch
+- 33 个 src/*.cxx 文件零修改编译通过
+- 标准 C++17，无平台特定代码
 
 ---
 
-## Phase 7：IME 输入法适配
+## Phase 2：单元测试 ✅ 完成
 
-**目标**：支持中文等非 ASCII 输入。
-
-**技术方案**：
-- HarmonyOS IME 通过 ArkUI 输入法框架回调
-- 实现 `Sci_Notify` SCI_URICHANGED 通知机制
-- 预编辑（composition）字符串显示 + 候选窗联动
-
-**需实现**：
-1. IME 回调注册（~80 行）
-2. PreeditString 处理（~100 行）
-
-**产出**：
-- patches/0004-ime-support.patch
+- 52/52 测试用例通过
+- 3791 个断言全部正确
 
 ---
 
-## Phase 8：剪贴板适配
+## Phase 3：渲染层 - Surface/Font ✅ 完成
 
-**目标**：支持系统剪贴板复制/粘贴/剪切。
-
-**技术方案**：
-- 使用 `@ohos.pasteboard` 系统剪贴板 API（通过 NAPI 回调）
-- 实现 SCI_COPY / SCI_CUT / SCI_PASTE 命令处理
-
-**需实现**：
-1. 剪贴板桥接接口（~80 行）
-
-**产出**：
-- patches/0005-clipboard-support.patch
+- SurfaceImplOHOS：~40 个虚方法，使用 OH_Drawing API
+- FontHandleOHOS：字体管理（OH_Drawing_Font, Typeface, FontMgr）
 
 ---
 
-## Phase 9：CMake 构建系统
+## Phase 4：渲染层 - Window/Menu/ListBox ✅ 完成
 
-**目标**：将 Scintilla 以 CMake 静态库形式集成到 BlueNotePad 工程。
+- Window/Menu：桩实现
+- ListBoxX：内存列表实现
 
-**需产出**：
-- `scintilla/CMakeLists.txt`（~80 行）
-- 编译配置：针对 HarmonyOS SDK 的工具链文件
+---
+
+## Phase 5：Editor 集成层 ✅ 完成
+
+- ScintillaOHOSEditor 实现（Editor 初始化、Paint 调用）
+- 将 Scintilla Editor 绑定到 HarmonyOS 渲染表面
+
+---
+
+## Phase 6：输入事件桥接 ✅ 完成
+
+- 触摸事件：ButtonDown / ButtonMove / ButtonUp
+- 键盘事件：KeyDown / CharAdded
+- 通过 XComponent DispatchTouchEvent 回调转发
+
+---
+
+## Phase 7：IME 输入法适配 ✅ 完成
+
+- 中文等非 ASCII 输入支持
+- PreeditString 处理
+
+---
+
+## Phase 8：剪贴板适配 ✅ 完成
+
+- Copy / Cut / Paste 操作
+- 通过 NAPI 回调桥接系统剪贴板
+
+---
+
+## Phase 9：CMake 构建系统 ✅ 完成
+
+- `scintilla_core` 静态库目标（33 核心 + PlatOHOS）
+- `scintilla_ohos` 共享库目标（whole-archive 链接 core + ScintillaOHOS）
 - 头文件安装规则
 - 依赖声明（libnative_drawing.so）
 
 ---
 
-## Phase 10：设备运行验证
+## Phase 10：编译链接验证 ✅ 完成
+
+- libscintilla_core.a（~1.9MB）
+- libscintilla_ohos.so（~1.49MB，--whole-archive 确保符号完整）
+- 手动 Makefile 脚本同步支持
+
+---
+
+## Phase 11：DevEco 工程集成 ✅ 完成
+
+- 创建 DevEco Studio 工程（Empty Ability）
+- 预编译 .so 方案：libscintilla_ohos.so → entry/libs/arm64-v8a/
+- NAPI 注册 9 个函数（Create/Destroy/SetText/GetText/.../RegisterXComponent）
+- ArkTS UI：XComponent + 标题栏 + 状态栏
+- XComponent 回调：OnSurfaceCreated/Changed/Destroyed + DispatchTouchEvent
+- libentry.so 编译链接成功（205KB）
+- DT_NEEDED 路径修复（$ORIGIN RUNPATH）
+- 符号修复（--whole-archive 链接）
+
+---
+
+## Phase 12：设备部署与运行时验证 🔲 进行中
 
 **目标**：在真机/模拟器上端到端验证所有功能。
 
-**测试项**：
-1. 文本渲染正确性（中英文、多字号、颜色）
-2. 光标移动、选择、删除
-3. 滚动流畅性
-4. 大文件（>10MB）性能
-5. IME 中文输入
-6. 剪贴板操作
-7. 语法高亮（至少 3 种语言）
-8. 多标签切换
+**已完成**：
+- ✅ DT_NEEDED 路径修复（$ORIGIN RUNPATH）
+- ✅ libscintilla_ohos.so 符号修复（whole-archive 链接）
+- ✅ XComponent Surface 创建 + NativeWindow 获取
+- ✅ 两阶段渲染管线（独立 Bitmap → memcpy 到 NativeWindow）
+- ✅ 白屏显示成功（BN_Sci_OnDraw 被调用，耗时 ~9ms）
+- ✅ PerformDraw 时序 Bug 修复（Init/Initialised 顺序）
+- ✅ PlatOHOS 诊断日志（字体加载 + TextBlob 创建，tag: `PlatOHOS`）
+- ✅ 独立编译脚本 `build_ohos.sh`（一键重编，零 warning）
+
+**待验证**：
+- [ ] HAP 重新部署到设备，确认文字正常显示
+- [ ] 如果字体仍不显示，hilog 过滤 `PlatOHOS` 查看具体失败原因
+- [ ] 文本渲染正确性（中英文、多字号、颜色）
+- [ ] 光标移动、选择、删除
+- [ ] 滚动流畅性
+- [ ] 大文件（>10MB）性能
+- [ ] IME 中文输入
+- [ ] 剪贴板操作
+- [ ] 语法高亮（至少 3 种语言）
+- [ ] 多标签切换
 
 ---
 
@@ -135,4 +153,4 @@
 | libiconv | 1.17 | 编码转换（GBK/UTF-16 等） | 🔲 待适配 |
 | libcharset | 1.17 | 编码自动检测 | 🔲 待适配 |
 
-> BlueNotePad 技术方案中提到的 Tree-sitter 增强，作为远期目标，Phase 1-10 不涉及。
+> BlueNotePad 技术方案中提到的 Tree-sitter 增强，作为远期目标，Phase 1-12 不涉及。

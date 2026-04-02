@@ -175,6 +175,9 @@ int BN_Sci_GetFirstVisibleLine(void *editor);
 void BN_Sci_SetFocus(void *editor, int focused);
 int BN_Sci_HasFocus(void *editor);
 
+// Redraw callback — set by host app to trigger display refresh
+void BN_Sci_SetRedrawCallback(void (*cb)(void));
+
 // Input events
 void BN_Sci_OnTouchDown(void *editor, float x, float y, uint32_t timestamp);
 void BN_Sci_OnTouchMove(void *editor, float x, float y, uint32_t timestamp);

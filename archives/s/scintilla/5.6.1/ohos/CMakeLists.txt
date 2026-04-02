@@ -1,5 +1,5 @@
 # ScintillaOHOS CMake Build Configuration
-# Builds libscintilla_ohos.a - static library for HarmonyOS integration
+# Builds libscintilla_core.a (static) and libscintilla_ohos.so (shared) for HarmonyOS
 
 cmake_minimum_required(VERSION 3.16)
 project(scintilla_ohos C CXX)
@@ -72,14 +72,15 @@ set(SCI_OHOS_SOURCES
 )
 
 # ============================================
-# Static library: scintilla_ohos
+# Static library: scintilla_core
+# 33 core files + PlatOHOS.cxx (NO ScintillaOHOS.cxx)
 # ============================================
-add_library(scintilla_ohos STATIC
+add_library(scintilla_core STATIC
     ${SCI_CORE_SOURCES}
-    ${SCI_OHOS_SOURCES}
+    ${CMAKE_SOURCE_DIR}/PlatOHOS.cxx
 )
 
-target_include_directories(scintilla_ohos PUBLIC
+target_include_directories(scintilla_core PUBLIC
     # Scintilla headers
     ${SCI_SRC_DIR}
     ${SCI_SRC_DIR}/../include
@@ -89,14 +90,14 @@ target_include_directories(scintilla_ohos PUBLIC
     ${CMAKE_SOURCE_DIR}
 )
 
-target_compile_definitions(scintilla_ohos PRIVATE
+target_compile_definitions(scintilla_core PRIVATE
     SCI_OHOS
     NDEBUG
     SCI_LEXER
 )
 
 # Force-include missing headers (Scintilla internal headers have fragile includes)
-target_compile_options(scintilla_ohos PRIVATE
+target_compile_options(scintilla_core PRIVATE
     -include cstddef
     -include cstdint
     -include cassert
@@ -104,20 +105,60 @@ target_compile_options(scintilla_ohos PRIVATE
 )
 
 # Optimization
-target_compile_options(scintilla_ohos PRIVATE
+target_compile_options(scintilla_core PRIVATE
     -O2
     -fPIC
 )
 
-# Link Native Drawing API
+# ============================================
+# Shared library: libscintilla_ohos.so
+# ScintillaOHOS integration + DevEco pre-built .so approach
+# Links scintilla_core (whole-archive) + ScintillaOHOS.o
+# ============================================
+add_library(scintilla_ohos SHARED
+    ${CMAKE_SOURCE_DIR}/ScintillaOHOS.cxx
+)
+
+target_include_directories(scintilla_ohos PUBLIC
+    ${SCI_SRC_DIR}
+    ${SCI_SRC_DIR}/../include
+    ${OHOS_SDK_INCLUDE}
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_compile_definitions(scintilla_ohos PRIVATE
+    SCI_OHOS
+    NDEBUG
+    SCI_LEXER
+)
+
+target_compile_options(scintilla_ohos PRIVATE
+    -include cstddef
+    -include cstdint
+    -include cassert
+    -include cstring
+    -O2
+    -fPIC
+)
+
+# Link everything together using --whole-archive to ensure no symbols are dropped
 target_link_libraries(scintilla_ohos PUBLIC
+    -Wl,--whole-archive scintilla_core -Wl,--no-whole-archive
     ${OHOS_SDK_LIB}/libnative_drawing.so
+)
+
+set_target_properties(scintilla_ohos PROPERTIES
+    OUTPUT_NAME "scintilla_ohos"
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}"
 )
 
 # ============================================
 # Header installation
 # ============================================
-install(TARGETS scintilla_ohos ARCHIVE DESTINATION lib)
+install(TARGETS scintilla_core scintilla_ohos
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+)
 install(FILES ScintillaOHOS.h DESTINATION include/scintilla_ohos)
 install(DIRECTORY ${SCI_SRC_DIR}/../include/ DESTINATION include/scintilla_ohos/scintilla
     FILES_MATCHING PATTERN "*.h"
@@ -130,7 +171,9 @@ message(STATUS "")
 message(STATUS "=== ScintillaOHOS Build Configuration ===")
 message(STATUS "  Scintilla source: ${SCI_SRC_DIR}")
 message(STATUS "  OHOS SDK: ${OHOS_NDK_NATIVE}")
-message(STATUS "  Core files: ${CMAKE_CURRENT_SOURCE_DIR}/PlatOHOS.cxx")
-message(STATUS "  Integration: ${CMAKE_CURRENT_SOURCE_DIR}/ScintillaOHOS.cxx")
+message(STATUS "  Static library: libscintilla_core.a (33 core + PlatOHOS)")
+message(STATUS "  Shared library: libscintilla_ohos.so (core + ScintillaOHOS)")
 message(STATUS "  Architecture: ${OHOS_ARCH}")
 message(STATUS "==========================================")
+
+
