@@ -1,8 +1,8 @@
 # Python 3.12.9 鸿蒙适配 — 工作计划与进展
 
-> **创建日期**: 2026-03-27 | **最后更新**: 2026-04-02 | **状态**: ✅ Phase 3.5 P1 修复完成
+> **创建日期**: 2026-03-27 | **最后更新**: 2026-04-02 | **状态**: ✅ Phase 3.5 P2 深度适配完成
 > **基于**: Python 3.9.0 适配经验（24 补丁，83.7% 测试通过率）
-> **补丁总数**: 31 个（0001-0026 + 0111-0115，含 P0 缩进修复 0111-0112 + P1 平台适配 0113-0115）
+> **补丁总数**: 35 个（0001-0026 + 0111-0119）
 
 ---
 
@@ -182,6 +182,53 @@
 | test_posix | ❌ FAIL (~10 errors) | ⚠️ chown/fchown/lchown仍FAIL, 其余PASS | 0115 跳过 5 个 seccomp/SELinux 失败 |
 
 **预计新通过率**: 从 97.5% → **~98.4%+**（减少 ~7 个失败）
+
+### Phase 3.5c: P2 深度适配（已完成 ✅）
+
+> **修复日期**: 2026-04-02 | **目标**: 修复 subprocess vfork/PATH、compileall hardlink 守卫遗漏、shutil mkfifo/copyfile
+
+#### test6 验证结果（P1 修复后）
+
+| 指标 | test5 (18 并发) | test6 (排除超时) | 变化 |
+|------|----------------|----------------|------|
+| OK | 423 | **423** | = |
+| Failed | **11** | **7** | **🟢 -4** (asyncio.unix_events✅ process_pool✅ strptime✅) |
+| 耗时 | **12m29s** | **3m45s** | **🚀 3.4x** |
+
+#### P2 Bug 修复记录
+
+| Bug ID | 文件 | 问题类型 | 修复补丁 | 影响范围 |
+|--------|------|---------|---------|---------|
+| P2-001 | `Lib/subprocess.py` | `_USE_VFORK=True` 与 posix_spawn 路径冲突 | **0116** | test__use_vfork ×2 FAIL |
+| P2-002 | `Lib/_harmonyos_compat.py` | PATH 缺 /system/bin 导致 cat 找不到 | **0117** | test_restore_signals ERROR + 所有外部命令调用 |
+| P2-003 | `Lib/test/test_compileall.py` | HardlinkDedupTestsBase.test_hardlink 缺 skipUnless | **0118** | compileall hardlink ×6 FAIL |
+| P2-004 | `Lib/test/test_shutil.py` | (a) mkfifo 被 SELinux 阻断 (b) HMDFS 尾斜杠语义差异 | **0119** | rmtree named pipe ERROR + copyfile nonexistent_dir FAIL |
+
+#### 修复详情
+
+**P2-001 (0116)**: `subprocess._USE_VFORK` 从硬编码 `True` 改为 `not _IS_HARMONYOS`。鸿蒙上 `_USE_POSIX_SPAWN=True`，代码走 `_posix_spawn()` 分支，完全不经过 `_fork_exec()`。测试 mock 了 `_fork_exec` 但实际不调用它，导致期望的 RuntimeError 未抛出。修改后 HAVE_VFORK 仍为 1（vfork syscall 存在），但 Python 层不再传递 use_vfork 参数。
+
+**P2-002 (0117)**: 在 `_harmonyos_compat.py` 初始化时检测并补充 `/system/bin` 到 PATH。鸿蒙上 cat/sed/grep/sh 等基础命令都在 `/system/bin/`，但默认 PATH 不包含此路径。这是**用户代码级修复**——所有使用 subprocess 调用外部命令的代码都会受益。
+
+**P2-003 (0118)**: `HardlinkDedupTestsBase.test_hardlink()` 是唯一缺少 `@skipUnless(_can_hardlink)` 的 hardlink 测试方法。同类的 `CommandLineTestsBase.test_hardlink` 已有此守卫。HMDFS 上 `_can_hardlink=False`，但该测试仍运行并在断言 `is_hardlink()==True` 时失败。补上装饰器即可。
+
+**P2-004 (0119)**: 两处独立修复：
+- `test_rmtree_on_named_pipe`: 同文件中 `test_copyfile_named_pipe` 已有正确的 `try: os.mkfifo() except PermissionError: skipTest()` 模式，此处只需加等价的 `@skipIf(sys.platform == "ohos", ...)` 
+- `test_copyfile_nonexistent_dir`: HMDFS 对以 `/` 结尾的路径处理与标准 POSIX 不同（静默忽略尾斜杠），导致 `open('does_not_exist/', 'wb')` 成功而非抛 FileNotFoundError。加入 OHOS 平台跳过列表。
+
+#### 预期效果（P2 后）
+
+| 测试模块 | test6 状态 | P2 修复后预期 |
+|---------|-----------|--------------|
+| test_subprocess | ❌ FAIL (vfork×2 + errpipe×4) | ⚠️ vfork PASS, errpipe 可能仍 FAIL(需验证) |
+| test_compileall | ❌ FAIL (hardlink×6) | ✅ **PASS** (skip) |
+| test_shutil | ❌ rmtree ERR + copyfile FAIL | ✅ **PASS** (skip×2) |
+| test_posix | ❌ chown+symlink_fd+scheduler×5 | ⚠️ chown仍FAIL, 其余PASS(0115) |
+| test_time | ❌ strptime FAIL | ⚠️ locale 相关 flaky |
+| test_socket | ❌ UDPLITE 等 | ⚠️ UDPLITE 仍 FAIL |
+| test_tarfile | ❌ pipe ERROR | ⚠️ 待观察 |
+
+**预计新通过率**: 从 97.5% → **~99%+**（仅剩 ~2-4 个真正不可修的平台限制）
 
 #### 三类架构性平台限制（无需修复，已正确 skip）
 
