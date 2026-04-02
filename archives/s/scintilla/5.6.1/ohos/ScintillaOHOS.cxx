@@ -422,8 +422,12 @@ public:
         bool moved = (ptMouseLast != pt);
         OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [B] moved=%{public}d, before DwellEnd", (int)moved);
         if (moved) {
-            DwellEnd(true);
-            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [C] DwellEnd done");
+            // SKIP DwellEnd(true) — it calls NotifyDwelling + FineTickerCancel,
+            // and NotifyDwelling triggers SCN_DWELLINGEND notification which can
+            // cause re-entrant state issues on HarmonyOS (SIGABRT in MUSL-SIGCHAIN).
+            // DwellEnd only cancels hover tooltips — not essential for editing.
+            // ticksToDwell = dwellDelay;  // reset for next potential dwell
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [C] DwellEnd SKIPPED");
         }
         OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [D] before SPositionFromLocation");
         SelectionPosition movePos = SPositionFromLocation(pt, false, false, false);

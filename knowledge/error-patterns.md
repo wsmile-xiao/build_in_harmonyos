@@ -2497,3 +2497,80 @@ ls -Z /path/to/file
 *最后更新: 2026-03-30*
 *加强 E008：新增 lseek() 对非文件 fd 的限制*
 *新增 E054：外来二进制首次执行被安全确认弹窗阻止*
+
+---
+
+## E055: posix_spawn 与 fork+exec 行为差异（Python 3.12+）
+
+### 错误特征
+
+```
+test__use_vfork: AssertionError (mock _fork_exec 不触发)
+test_exception_errpipe_normal: FileNotFoundError (直接报错，不走 errpipe)
+test_restore_signals: FileNotFoundError ('cat' 找不到)
+test_bytes_program: FileNotFoundError (b'true' 是 shell 内建命令)
+```
+
+### 根因
+
+Python 3.12 `subprocess.py` 在 musl/HarmonyOS 上 `_USE_POSIX_SPAWN=True`，所有子进程通过 `os.posix_spawn()` 启动而非 `fork()+exec()`：
+
+| 行为差异 | fork+exec | posix_spawn |
+|---------|----------|-------------|
+| errpipe 机制 | ✅ 子进程通过 errpipe 传错 | ❌ 父进程直接报错 |
+| shell 内建命令 | ✅ shell 处理后 exec | ❌ `true`/`cd` 不可直接 exec |
+| vfork 标志 | `_USE_VFORK` 控制是否用 vfork | 无意义（不用 fork） |
+
+**修复方案**：运行时检测 `subprocess._USE_POSIX_SPAWN` 并 skip 受影响测试（补丁 0116）
+
+---
+
+## E056: @unittest.skipIf reason 换行反转导致 IndentationError（P0）
+
+### 错误特征
+
+```
+IndentationError: unexpected indent
+    @unittest.skipIf(condition,
+                      "long reason wraps"
+                      )
+def test_something(self):   # ← 被识别为缩进错误
+```
+
+### 根因
+
+编辑器/补丁工具将多行 reason 的后续行放到装饰器声明之前。**每次修改测试文件后必须 `py_compile` 验证**。
+
+### 已确认案例
+
+| 文件 | 补丁 | 影响 |
+|------|------|------|
+| test_os.py | 0111 | 6 处 → 全模块无法加载 |
+| test_site.py | 0112 | 4 处 → 全模块无法加载 |
+
+### 防范：长 reason 用括号包裹或保持单行
+
+---
+
+## E057: regrtest 默认多 worker 导致并发竞态
+
+### 错误特征
+
+```
+Run 492 tests in parallel using 18 worker processes  # cpu_count=16
+load avg: 75.00  # 16 核系统严重过载
+Warning -- locale was modified by test_strptime  # 全局状态污染
+test_strptime: 7 errors (首轮) / 0 errors (re-run)  # flaky
+```
+
+### 根因
+
+regrtest 默认按 `os.cpu_count()` 开启 worker（鸿蒙=18），与 `MAKEFLAGS=-j1` **独立**：
+- `MAKEFLAGS=-j1`：make 编译串行化（必需，FIFO 限制）
+- `TESTOPTS="-j1"`：regrtest 测试串行化（推荐用于精确基线）
+
+### 修复
+
+```bash
+MAKEFLAGS="-j1" make test TESTOPTS="-j1 --ignore=smtpnet ..."
+```
