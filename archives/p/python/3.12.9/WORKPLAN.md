@@ -1,8 +1,8 @@
 # Python 3.12.9 鸿蒙适配 — 工作计划与进展
 
-> **创建日期**: 2026-03-27 | **最后更新**: 2026-04-02 | **状态**: ✅ Phase 3.5 测试验证通过 (97.5%)
+> **创建日期**: 2026-03-27 | **最后更新**: 2026-04-02 | **状态**: ✅ Phase 3.5 P1 修复完成
 > **基于**: Python 3.9.0 适配经验（24 补丁，83.7% 测试通过率）
-> **补丁总数**: 28 个（0001-0026 + 0111-0112，含 uuid 检测 0024、sharedmods hardlink 0025、Setup.stdlib 变量修复 0026、P0 缩进修复 0111-0112）
+> **补丁总数**: 31 个（0001-0026 + 0111-0115，含 P0 缩进修复 0111-0112 + P1 平台适配 0113-0115）
 
 ---
 
@@ -145,6 +145,43 @@
 **根因分析**: 所有缩进错误模式完全相同 — `@unittest.skipIf` 装饰器的多行 reason 参数中，换行后的续行被错误地放到了装饰器声明之前，导致 Python 解析器将 reason 字符串视为独立语句，引发 `IndentationError: unexpected indent`。
 
 **✅ test5 验证结果**: P0 修复补丁 0111/0112 生效，test_os 和 test_site **不再出现在失败列表中**。通过率从 84.8% 提升至 **97.5%**。
+
+### Phase 3.5b: P1 平台限制适配（已完成 ✅）
+
+> **修复日期**: 2026-04-02 | **目标**: 消除可被 Python 层面修复的剩余失败项
+
+#### P1 Bug 修复记录
+
+| Bug ID | 文件 | 问题类型 | 修复补丁 | 影响范围 |
+|--------|------|---------|---------|---------|
+| P1-001 | `Lib/multiprocessing/connection.py` | AF_UNIX bind EPERM → 自动回退 AF_INET | **0113** | test_socket(UDS) + asyncio.unix_events + concurrent_futures.process_pool + 三方库通信 |
+| P1-002 | `Lib/test/test_time.py` | test_monotonic_settime SIGSYS 崩溃（遗漏 skip） | **0114** | test_time 整个模块 SIGKILL |
+| P1-003 | `Lib/test/test_posix.py` | SELinux/seccomp 阻断的 syscall 缺少 OHOS skip | **0115** | getgroups/getgrouplist/scheduler/unshare/readlink_dir_fd 共 5 处 |
+
+#### 修复详情
+
+**P1-001 (0113)**: `multiprocessing.connection.SocketListener.__init__()` 中，当 `family='AF_UNIX'` 的 `socket.bind()` 抛出 `PermissionError`（errno=EPERM/EACCES/EINVAL）且平台为 OHOS 时，自动回退到 `AF_INET` + `('127.0.0.1', 0)`。这是**运行时补丁**，对用户代码透明，直接解决 pytest-xdist、asyncio UDS 服务、ProcessPoolExecutor 等三方库在鸿蒙上的通信问题。
+
+**P1-002 (0114)**: `test_monotonic_settime()` 内部调用 `clock_settime(CLOCK_REALTIME)` 跳转系统时钟后恢复，触发 SIGSYS 导致整个测试进程被杀。此前 `test_clock_settime` 已有 OHOS skip（早期补丁），此为遗漏项。
+
+**P1-003 (0115)**: 为以下 5 个测试方法添加 `@unittest.skipIf(sys.platform == 'ohos', ...)`:
+- `test_getgroups()` — SELinux 阻断 getgroups(2)
+- `test_getgrouplist()` — 同上
+- `test_get_and_set_scheduler_and_param()` — seccomp 过滤 sched_* syscall
+- `test_readlink_dir_fd()` — HMDFS 不完全支持 dir_fd 操作
+- `test_unshare_setns()` — seccomp 过滤 unshare/setns syscall
+
+#### 预期效果
+
+| 测试模块 | 修复前状态 | 修复后预期 | 说明 |
+|---------|-----------|-----------|------|
+| test_socket (UDS) | ❌ FAIL (6 errors) | ⚠️ UDPLITE仍FAIL, UDS PASS | 0113 解决 UDS 部分 |
+| test_asyncio.test_unix_events | ❌ FAIL (3 errors) | ✅ PASS | 0113 直接修复根因 |
+| test_concurrent_futures.process_pool | ❌ FAIL (2 errors) | ✅ PASS | 0113 直接修复根因 |
+| test_time | ❌ SIGKILL (-31) | ✅ PASS | 0114 补上遗漏 skip |
+| test_posix | ❌ FAIL (~10 errors) | ⚠️ chown/fchown/lchown仍FAIL, 其余PASS | 0115 跳过 5 个 seccomp/SELinux 失败 |
+
+**预计新通过率**: 从 97.5% → **~98.4%+**（减少 ~7 个失败）
 
 #### 三类架构性平台限制（无需修复，已正确 skip）
 

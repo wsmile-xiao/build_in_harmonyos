@@ -415,10 +415,23 @@ public:
     // Public wrappers for protected event methods
     void DoButtonDown(Point pt, unsigned int t, KeyMod m) { ButtonDownWithModifiers(pt, t, m); }
     void DoButtonMove(Point pt, unsigned int t, KeyMod m) {
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove ENTER pt=(%.1f,%.1f) t=%u haveCapture=%d", pt.x, pt.y, t, mouseCaptured);
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove [1] before BMW call");
-        ButtonMoveWithModifiers(pt, t, m);
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove EXIT (returned normally)");
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove ENTER pt=(%.1f,%.1f) t=%u haveCapture=%{public}d", pt.x, pt.y, t, (int)mouseCaptured);
+        
+        // Step-by-step replication of Editor::ButtonMoveWithModifiers to find exact crash point
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [A] before ptMouseLast check");
+        bool moved = (ptMouseLast != pt);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [B] moved=%{public}d, before DwellEnd", (int)moved);
+        if (moved) {
+            DwellEnd(true);
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [C] DwellEnd done");
+        }
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [D] before SPositionFromLocation");
+        SelectionPosition movePos = SPositionFromLocation(pt, false, false, false);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [E] SPFL done pos=%{public}d", (int)movePos.Position());
+        movePos = MovePositionOutsideChar(movePos, sel.MainCaret() - movePos.Position());
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [F] MoveOutsideChar done pos=%{public}d", (int)movePos.Position());
+        
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove EXIT (step-by-step OK)");
     }
     void DoButtonUp(Point pt, unsigned int t, KeyMod m) { ButtonUpWithModifiers(pt, t, m); }
     void DoRightButtonDown(Point pt, unsigned int t, KeyMod m) { RightButtonDownWithModifiers(pt, t, m); }
