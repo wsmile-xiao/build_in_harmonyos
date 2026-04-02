@@ -316,7 +316,6 @@ public:
     }
 
     std::unique_ptr<Surface> CreateMeasurementSurface() const override {
-        // Create a small off-screen surface for measuring text
         auto surf = Surface::Allocate(technology);
         if (surf) {
             surf->Init(wMain.GetID());
@@ -416,7 +415,8 @@ public:
     // Public wrappers for protected event methods
     void DoButtonDown(Point pt, unsigned int t, KeyMod m) { ButtonDownWithModifiers(pt, t, m); }
     void DoButtonMove(Point pt, unsigned int t, KeyMod m) {
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove ENTER pt=(%.1f,%.1f) t=%u", pt.x, pt.y, t);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove ENTER pt=(%.1f,%.1f) t=%u haveCapture=%d", pt.x, pt.y, t, mouseCaptured);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove [1] before BMW call");
         ButtonMoveWithModifiers(pt, t, m);
         OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove EXIT (returned normally)");
     }
