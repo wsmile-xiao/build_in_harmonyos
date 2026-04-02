@@ -116,6 +116,9 @@ public:
                                            const char *text)>;
     void SetNotifyHandler(NotifyFunc handler);
 
+    // ---- Tick / Timer (call periodically from host for caret blink) ----
+    void Tick();  // calls TickFor(caret) + triggers redraw if needed
+
     // ---- Access underlying Scintilla for advanced use ----
     void *GetScintillaPtr() const;  // returns ScintillaBase*
 
@@ -202,6 +205,9 @@ void BN_Sci_SetClipboardHandlers(void *editor, BN_ClipboardGetFunc getter,
 // Notifications
 typedef void (*BN_NotifyFunc)(void *userData, int code, int wParam, int lParam, const char *text);
 void BN_Sci_SetNotifyHandler(void *editor, BN_NotifyFunc handler, void *userData);
+
+// Tick — advance caret blink timer (call from ArkTS setInterval ~500ms)
+void BN_Sci_Tick(void *editor);
 
 #ifdef __cplusplus
 }

@@ -118,7 +118,7 @@
 
 ---
 
-## Phase 12：设备部署与运行时验证 🔲 进行中
+## Phase 12：设备部署与运行时验证 🔄 进行中
 
 **目标**：在真机/模拟器上端到端验证所有功能。
 
@@ -131,18 +131,22 @@
 - ✅ PerformDraw 时序 Bug 修复（Init/Initialised 顺序）
 - ✅ PlatOHOS 诊断日志（字体加载 + TextBlob 创建，tag: `PlatOHOS`）
 - ✅ 独立编译脚本 `build_ohos.sh`（一键重编，零 warning）
+- ✅ Stride Mismatch 修复（逐行拷贝，消除斜纹）
+- ✅ FontMetrics 符号修复（Skia ascent 负值 → 取绝对值）
+- ✅ 持续渲染机制（redraw callback + dirty flag）
+- ✅ inputMode bypass（去掉 libraryname + ArkTS 事件拦截）
+- ✅ 触摸事件恢复（BN_Sci_OnTouch* + RenderFrame 重入保护 g_rendering）
+- ✅ 键盘事件恢复（.onKeyEvent + sciRequestRedraw + focusable 配置）
+- ✅ 光标闪烁机制（BN_Sci_Tick + setInterval 500ms 驱动 caret blink）
 
-**待验证**：
-- [ ] HAP 重新部署到设备，确认文字正常显示
-- [ ] 如果字体仍不显示，hilog 过滤 `PlatOHOS` 查看具体失败原因
-- [ ] 文本渲染正确性（中英文、多字号、颜色）
-- [ ] 光标移动、选择、删除
-- [ ] 滚动流畅性
-- [ ] 大文件（>10MB）性能
-- [ ] IME 中文输入
+**待设备验证**（2026-04-02 当前步骤）：
+- [ ] HAP clean build + 部署到设备
+- [ ] 触摸选择文本、滚动
+- [ ] 键盘输入（英文、中文）
+- [ ] 光标闪烁可见
 - [ ] 剪贴板操作
-- [ ] 语法高亮（至少 3 种语言）
-- [ ] 多标签切换
+- [ ] 大文件性能
+- [ ] 语法高亮
 
 ---
 

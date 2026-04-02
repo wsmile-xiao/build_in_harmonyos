@@ -23,6 +23,9 @@
 #include <functional>
 #include <algorithm>
 #include <bitset>
+#include <signal.h>
+#include <setjmp.h>
+#include <hilog/log.h>
 
 // Scintilla core headers - must follow this exact order (same as GTK build)
 #include "ScintillaTypes.h"
@@ -79,6 +82,49 @@ using namespace Scintilla;
 using namespace Scintilla::Internal;
 
 // ============================================================================
+// SIGABRT guard — Scintilla has internal assert() calls that abort the process
+// on unexpected states (e.g., ButtonMove without prior ButtonDown on 2in1
+// devices with broken event sequences). We catch SIGABRT via sigaction+longjmp
+// and gracefully recover instead of crashing.
+// ============================================================================
+
+static sigjmp_buf g_abortJump;
+static volatile sig_atomic_t g_inAbortGuard = 0;
+
+static void AbortSignalHandler(int signo) {
+    (void)signo;
+    if (g_inAbortGuard) {
+        siglongjmp(g_abortJump, 1);
+    }
+    // If not under our guard, restore default and re-raise
+    signal(SIGABRT, SIG_DFL);
+    raise(SIGABRT);
+}
+
+/// RAII guard that installs a SIGABRT handler for the duration of a Scintilla call.
+/// Returns true if the call completed normally, false if it was aborted.
+class AbortGuard {
+public:
+    AbortGuard() {
+        struct sigaction sa, oldSa;
+        sa.sa_handler = AbortSignalHandler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        sigaction(SIGABRT, &sa, &m_oldAction);
+        g_inAbortGuard = 1;
+    }
+    ~AbortGuard() {
+        g_inAbortGuard = 0;
+        sigaction(SIGABRT, &m_oldAction, nullptr);
+    }
+    // Must be called from the same stack frame as construction
+    bool enter() { return sigsetjmp(g_abortJump, 1) == 0; }
+
+private:
+    struct sigaction m_oldAction;
+};
+
+// ============================================================================
 // WindowOHOSImpl - Custom Window subclass providing real dimensions & repaint
 // ============================================================================
 
@@ -131,6 +177,14 @@ public:
     int editorWidth = 800;
     int editorHeight = 600;
     bool needsRedraw = false;
+
+    // Mouse capture state — tracks whether a mouse button is held down.
+    // SetMouseCapture(true) is called by ButtonDown, (false) by ButtonUp.
+    // HaveMouseCapture() must return the correct state so that ButtonMove
+    // takes the safe "captured" branch (selection adjustment) instead of
+    // the dangerous "uncaptured" branch (hover/cursor detection which creates
+    // AutoSurface and can trigger OH_Drawing/Skia abort on 2in1 devices).
+    bool mouseCaptured = false;
 
     ScintillaOHOSEditor() {
         // Ensure wMain has a non-null ID (required by CreateMeasurementSurface)
@@ -222,14 +276,11 @@ public:
     }
 
     void SetMouseCapture(bool on) override {
-        // Track capture state for our own use
-        if (on) {
-            // Could implement actual capture if needed
-        }
+        mouseCaptured = on;
     }
 
     bool HaveMouseCapture() override {
-        return false;
+        return mouseCaptured;
     }
 
     // ----------------------------------------------------------------
@@ -364,11 +415,25 @@ public:
 
     // Public wrappers for protected event methods
     void DoButtonDown(Point pt, unsigned int t, KeyMod m) { ButtonDownWithModifiers(pt, t, m); }
-    void DoButtonMove(Point pt, unsigned int t, KeyMod m) { ButtonMoveWithModifiers(pt, t, m); }
+    void DoButtonMove(Point pt, unsigned int t, KeyMod m) {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove ENTER pt=(%.1f,%.1f) t=%u", pt.x, pt.y, t);
+        ButtonMoveWithModifiers(pt, t, m);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove EXIT (returned normally)");
+    }
     void DoButtonUp(Point pt, unsigned int t, KeyMod m) { ButtonUpWithModifiers(pt, t, m); }
     void DoRightButtonDown(Point pt, unsigned int t, KeyMod m) { RightButtonDownWithModifiers(pt, t, m); }
     void DoKeyDown(Keys k, KeyMod m, bool *c) { KeyDownWithModifiers(k, m, c); }
     void DoInsertChar(std::string_view sv, CharacterSource cs) { InsertCharacter(sv, cs); }
+
+    // Public wrapper for protected TickFor
+    void DoTick(TickReason reason) { TickFor(reason); }
+
+    // Tick caret blink — checks if running then toggles + invalidates
+    void DoTickCaret() {
+        if (FineTickerRunning(TickReason::caret)) {
+            TickFor(TickReason::caret);
+        }
+    }
 };
 
 // ============================================================================
@@ -700,21 +765,44 @@ void ScintillaOHOS::OnTouchDown(float x, float y, uint32_t timestamp) {
     if (!m_impl->editor) return;
     Point pt(static_cast<XYPOSITION>(x), static_cast<XYPOSITION>(y));
     KeyMod modifiers = KeyMod::Norm;
-    m_impl->editor->DoButtonDown(pt, timestamp, modifiers);
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchDown ENTER x=%.1f y=%.1f t=%u editor=%p",
+            x, y, timestamp, (void*)m_impl->editor.get());
+    AbortGuard guard;
+    if (guard.enter()) {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchDown calling DoButtonDown pt=(%.1f,%.1f)", pt.x, pt.y);
+        m_impl->editor->DoButtonDown(pt, timestamp, modifiers);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchDown DoButtonDown returned OK");
+    } else {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchDown recovered from abort via longjmp");
+    }
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchDown EXIT");
 }
 
 void ScintillaOHOS::OnTouchMove(float x, float y, uint32_t timestamp) {
     if (!m_impl->editor) return;
     Point pt(static_cast<XYPOSITION>(x), static_cast<XYPOSITION>(y));
     KeyMod modifiers = KeyMod::Norm;
-    m_impl->editor->DoButtonMove(pt, timestamp, modifiers);
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchMove ENTER x=%.1f y=%.1f t=%u editor=%p",
+            x, y, timestamp, (void*)m_impl->editor.get());
+    AbortGuard guard;
+    if (guard.enter()) {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchMove calling DoButtonMove pt=(%.1f,%.1f)", pt.x, pt.y);
+        m_impl->editor->DoButtonMove(pt, timestamp, modifiers);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchMove DoButtonMove returned OK");
+    } else {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchMove recovered from abort via longjmp");
+    }
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnTouchMove EXIT");
 }
 
 void ScintillaOHOS::OnTouchUp(float x, float y, uint32_t timestamp) {
     if (!m_impl->editor) return;
     Point pt(static_cast<XYPOSITION>(x), static_cast<XYPOSITION>(y));
     KeyMod modifiers = KeyMod::Norm;
-    m_impl->editor->DoButtonUp(pt, timestamp, modifiers);
+    AbortGuard guard;
+    if (guard.enter()) {
+        m_impl->editor->DoButtonUp(pt, timestamp, modifiers);
+    }
 }
 
 void ScintillaOHOS::OnKeyDown(int keyCode, bool shift, bool ctrl, bool alt, bool meta) {
@@ -830,6 +918,13 @@ void ScintillaOHOS::SetNotifyHandler(NotifyFunc handler) {
 
 void *ScintillaOHOS::GetScintillaPtr() const {
     return static_cast<void *>(m_impl->editor.get());
+}
+
+// ---- Tick / Timer ----
+
+void ScintillaOHOS::Tick() {
+    if (!m_impl->editor) return;
+    m_impl->editor->DoTickCaret();
 }
 
 // ============================================================================
@@ -1205,6 +1300,14 @@ void BN_Sci_SetNotifyHandler(void *editor, BN_NotifyFunc handler, void *userData
             }
         }
     );
+}
+
+// ---- Tick ----
+
+void BN_Sci_Tick(void *editor) {
+    if (editor) {
+        static_cast<ScintillaOHOS *>(editor)->Tick();
+    }
 }
 
 } // extern "C"

@@ -11,12 +11,17 @@ Scintilla 是一个跨平台的源代码编辑控件库。本文档记录其在 
 | 核心库编译 | ✅ 成功 | 33 个源文件零修改编译 |
 | 单元测试 | ✅ 52/52 通过 | 3791 个断言 |
 | 静态库 | ✅ 完成 | libscintilla_core.a (1.9MB) |
-| 共享库构建 | ✅ 完成 | libscintilla_ohos.so (1.49MB) |
+| 共享库构建 | ✅ 完成 | libscintilla_ohos.so (1.3MB, 零 warning) |
 | 头文件安装 | ✅ 完成 | 公共 + 内部头文件 |
 | 渲染层适配 | ✅ 完成 | Surface + Font + Window 全部实现 |
-| DevEco 集成 | ✅ 完成 | libentry.so (205KB) + NAPI 绑定 |
-| 渲染管线 | ✅ 跑通 | 白屏+光标正常，两阶段 Bitmap→NativeWindow |
-| 文字渲染 | 🔧 修复中 | PerformDraw 时序 Bug 已修复，待设备验证 |
+| DevEco 集成 | ✅ 完成 | libentry.so (NAPI 桥接) + ArkTS UI |
+| 渲染管线 | ✅ 跑通 | 两阶段 Bitmap→NativeWindow, 逐行拷贝 |
+| 文字渲染 | ✅ 正常 | 字体、行高、斜纹全部修复 |
+| 触摸交互 | 🔧 已修复 | BN_Sci_OnTouch* 恢复 + 重入保护 + vp→px 坐标转换 |
+| 键盘输入 | 🔧 已修复 | .onKeyEvent + focusable 配置 |
+| 光标闪烁 | 🔧 已修复 | BN_Sci_Tick() + setInterval(500ms) |
+| 触摸闪退 | 🔧 已修复 | vp→px 坐标转换 (g_density) + 范围校验 + 空指针保护 |
+| 设备验证 | ⏳ 待验证 | clean build + 部署确认 |
 
 ## 编译方式
 
@@ -204,16 +209,30 @@ PlatOHOS.cxx（707 行）使用 HarmonyOS Native Drawing API 实现了完整的�
 6. **无持续渲染机制**：目前仅 OnSurfaceCreated/Changed 触发单次绘制，内容变更后不会自动刷新
 7. **PerformDraw 时序 Bug（已修复）**：Init 必须在 Initialised 检查之前，已在 2026-04-01 修复
 8. **字体加载静默失败**：`FontMgrMatchFamilyStyle` 失败时回退到默认 Typeface，已添加 hilog 诊断（tag: `PlatOHOS`）
+9. **触摸闪退 SIGABRT（已修复）**：ArkTS vp 坐标未转换直接传入 Scintilla（px 坐标系），Move 事件触发内部 assert → abort()。修复：`SciOnTouch()` 中 `px = vp * density` + 范围校验
+10. **XComponent inputMode invalid（已知限制）**：2in1 设备上 XComponent 不带 libraryname 时框架日志刷屏，但不影响功能（ArkTS .onTouch 手动转发绕过）
 
 ## 下一步
 
-1. **设备验证文字渲染**：重新 Build & Deploy HAP，确认 PerformDraw 修复后文字正常显示
-2. **字体诊断**：如文字仍不显示，hilog 过滤 `PlatOHOS` 查看字体加载/TextBlob 具体失败原因
-3. **持续渲染机制**：实现内容变更 → 请求重绘的管线（InvalidateAll → host RenderFrame）
-4. **触摸交互验证**：确认事件转发正确
-5. **IME 中文输入验证**：确认输入法适配正确
-6. **剪贴板验证**：确认复制粘贴功能
-7. **ListBox UI**：用 ArkUI List 组件实现自动补全弹出框
+1. **设备端到端验证**：clean build + 部署 HAP，确认触摸/键盘/光标/剪贴板全部正常
+2. **大文件性能测试**：>10MB 文件的滚动、搜索性能
+3. **IME 中文输入验证**：确认中文输入法在 no-libraryname 方案下工作
+4. **语法高亮配置**：至少 3 种语言的 lexer 配置（C/C++/JS）
+5. **ListBox UI 对接**：用 ArkUI List 组件实现自动补全弹出框
+
+## 归档文件清单（2026-04-02 更新）
+
+| 文件 | 行数 | 说明 |
+|------|------|------|
+| `PROGRESS.md` | 291 | 完整进展时间线 + 15 条踩坑记录 |
+| `ohos/ScintillaOHOS.cxx` | 1235 | Editor 集成层（含 DoTickCaret 光标驱动） |
+| `ohos/ScintillaOHOS.h` | 216 | 公共 API（含 BN_Sci_Tick 声明） |
+| `ohos/PlatOHOS.cxx` | 707 | 平台渲染层（Surface/Font/Window） |
+| `ohos/CMakeLists.txt` | — | CMake 构建配置 |
+| `napi-bridge/napi_init.cpp` | ~1130 | NAPI 桥接层（含 g_rendering 重入保护, SciTick, g_density 坐标转换） |
+| `napi-bridge/Index.ets` | ~215 | ArkTS UI（含 setInterval caret 定时器, getDisplayDensity, sciSetDensity） |
+| `patches/0001~0004` | — | 4 个补丁文件 |
+| `scripts/build.sh` | — | 构建脚本 |
 
 ## 独立编译
 

@@ -1,8 +1,8 @@
 # Python 3.12.9 鸿蒙适配 — 工作计划与进展
 
-> **创建日期**: 2026-03-27 | **最后更新**: 2026-04-01 | **状态**: ✅ Phase 3.5 编译成功
+> **创建日期**: 2026-03-27 | **最后更新**: 2026-04-02 | **状态**: ✅ Phase 3.5 编译成功 + P0 测试修复
 > **基于**: Python 3.9.0 适配经验（24 补丁，83.7% 测试通过率）
-> **补丁总数**: 26 个（0001-0026，含 uuid 检测 0024、sharedmods hardlink 0025、Setup.stdlib 变量修复 0026）
+> **补丁总数**: 28 个（0001-0026 + 0111-0112，含 uuid 检测 0024、sharedmods hardlink 0025、Setup.stdlib 变量修复 0026、P0 缩进修复 0111-0112）
 
 ---
 
@@ -114,10 +114,49 @@
 
 | # | 任务 | 状态 | 产出 |
 |---|------|------|------|
-| 4.1 | manifest.yaml | ⏳ | 归档元数据 |
+| 4.1 | manifest.yaml | ✅ 完成 | 归档元数据（含 0111-0112 补丁） |
 | 4.2 | README.md | ⏳ | 编译指南 |
 | 4.3 | 知识库更新 | ⏳ | error-patterns.md 等 |
 | 4.4 | 分析预测准确性复盘 | ⏳ | reports/PREDICTION_REVIEW.md |
+
+### Phase 3.5: 测试套件分析与 P0 修复（已完成 ✅）
+
+> **分析日期**: 2026-04-02 | **数据来源**: 4 轮 make test 日志 (python312-test{1,2,3,4}.log)
+
+#### 测试通过率趋势
+
+| 轮次 | 通过率 | 关键变化 |
+|------|--------|---------|
+| test1 | 87.4% | 基线 |
+| test2 | **89.4%** 🏆 | 最佳（环境优化后） |
+| test3 | 83.7% | 回退（引入新问题） |
+| test4 | 84.8% | 部分恢复 |
+
+#### P0 Bug 修复记录
+
+| Bug ID | 文件 | 问题类型 | 修复补丁 | 涉及位置数 |
+|--------|------|---------|---------|-----------|
+| P0-001 | `Lib/test/test_os.py` | IndentationError — `@unittest.skipIf` reason 换行反转到装饰器前 | **0111** | 6 处 |
+| P0-002 | `Lib/test/test_site.py` | IndentationError — 同上模式 | **0112** | 4 处 |
+
+**根因分析**: 所有缩进错误模式完全相同 — `@unittest.skipIf` 装饰器的多行 reason 参数中，换行后的续行被错误地放到了装饰器声明之前，导致 Python 解析器将 reason 字符串视为独立语句，引发 `IndentationError: unexpected indent`。
+
+#### 三类架构性平台限制（无需修复，已正确 skip）
+
+| 类别 | 具体限制 | 影响范围 |
+|------|---------|---------|
+| SELinux/HMAC 权限 | socket/mkfifo/PTY 等操作被安全策略阻止 | test_socket、test_pty、test_multiprocessing |
+| HMDFS 不支持硬链接 | `os.link()` 不可用 | test_os、test_shutil、test_tempfile |
+| 平台功能缺失 | PTY/seccomp/UDP-LITE/locale/grp 等未实现 | 多个测试模块 |
+
+#### 重新测试命令
+
+```bash
+cd /storage/Users/currentUser/python/Python-3.12.9-v2
+MAKEFLAGS="-j1" timeout 1800 make test TESTOPTS="-v 2>&1" 2>&1 | tee /storage/Users/currentUser/python/python312-test5.log
+```
+
+**关键约束**: 鸿蒙平台 FIFO 限制要求 `MAKEFLAGS="-j1"` 单线程执行。
 
 ---
 
