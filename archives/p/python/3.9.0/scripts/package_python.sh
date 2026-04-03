@@ -90,6 +90,8 @@ patch_strip_sign() {
     
     # Steps 2-4: Strip debug and extract (if enabled)
     if [ "$STRIP_DEBUG" = "1" ]; then
+        # 确保 debug 目录存在（Bug 4 修复：避免写入不存在的目录导致静默失败）
+        mkdir -p "$OUTPUT_DIR/${PACKAGE_NAME}.debug"
         local debug_file="$OUTPUT_DIR/${PACKAGE_NAME}.debug/${name}.debug"
         
         # Step 2: Extract debug info to separate file
@@ -235,25 +237,44 @@ for elf_file in "$PACKAGE_DIR/bin/python3.9" "$PACKAGE_DIR/lib/libpython3.9.so.1
     done
 done
 
-# 分析扩展模块的依赖
-find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" 2>/dev/null | while read so; do
-    for lib in $(get_deps "$so"); do
-        case "$lib" in
-            libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*|librt.so*|libpython*)
-                continue
-                ;;
-        esac
-        
-        lib_path=$(find_lib "$lib")
-        if [ -n "$lib_path" ]; then
-            lib_name=$(basename "$lib_path")
-            if [ ! -f "$PACKAGE_DIR/lib/external/$lib_name" ]; then
-                log_info "  复制扩展依赖: $lib_name"
-                cp -L "$lib_path" "$PACKAGE_DIR/lib/external/"
-            fi
-        fi
-    done
-done
+# 分析扩展模块的依赖（Bug 1+2+3+5 修复：
+#   - 使用 $OUTPUT_DIR/.needed_tmp_$$ 替代 mktemp（/tmp 只读问题）
+#   - 使用 find -exec 替代 find | while read（避免管道子 shell 变量丢失）
+#   - 内联 ELF 魔数检测（避免函数在子 shell 中不可见）
+#   - 使用精确文件存在检查替代 find 搜索（避免误匹配）
+#）
+NEEDED_TMP="$OUTPUT_DIR/.needed_tmp_$$"
+trap 'rm -f "$NEEDED_TMP"' EXIT
+
+find "$PACKAGE_DIR/lib/python3.9/lib-dynload" -name "*.so" -type f -exec sh -c '
+    # 内联 ELF 魔数检测（Bug 3 修复：不依赖 is_elf 函数）
+    magic=$(head -c 4 "$1" 2>/dev/null | od -A n -t x1 | tr -d " ")
+    [ "$magic" = "7f454c46" ] || exit 0
+    llvm-readelf -d "$1" 2>/dev/null | grep NEEDED | sed "s/.*\[\(.*\)\].*/\1/"
+' _ {} \; 2>/dev/null | sort -u > "$NEEDED_TMP"
+
+# 在主 shell 中处理（变量作用域安全，无子 shell 问题）
+while IFS= read -r lib; do
+    [ -z "$lib" ] && continue
+    # 跳过系统库和 libpython
+    case "$lib" in
+        libc.so*|libm.so*|libdl.so*|libpthread.so*|ld-*.so*|librt.so*|libutil.so*|libpython*)
+            continue
+            ;;
+    esac
+    # 跳过已收集的外部依赖
+    [ -f "$PACKAGE_DIR/lib/external/$lib" ] && continue
+    # 跳过包内已有库（Bug 5 修复：使用精确文件存在检查替代 find -maxdepth）
+    [ -f "$PACKAGE_DIR/lib/$lib" ] && continue
+
+    lib_path=$(find_lib "$lib")
+    if [ -n "$lib_path" ]; then
+        log_info "  复制扩展依赖: $lib"
+        cp -L "$lib_path" "$PACKAGE_DIR/lib/external/"
+    fi
+done < "$NEEDED_TMP"
+rm -f "$NEEDED_TMP"
+unset NEEDED_TMP
 
 # ============================================================
 # 设置 RPATH 并重新签名所有 ELF 文件
@@ -292,6 +313,52 @@ for dynload_so in "$PACKAGE_DIR/lib/python3.9/lib-dynload/"*.so; do
 done
 echo ""
 log_info "扩展模块: 完成，共 $EXT_DYNLOAD_COUNT 个"
+
+# ============================================================
+# 统一修复执行权限（Bug 6 修复：Step 8）
+#
+# ⚠️ 关键：binary-sign-tool 签名后会重置权限位为 umask 默认值
+# 即使之前 chmod a+x 也会被覆盖。必须在所有签名完成后统一修复！
+# 使用进程替代 < <() 避免管道子 shell 变量丢失问题
+# ============================================================
+log_info "统一修复 ELF 文件执行权限 ..."
+
+FIXED_COUNT=0
+MISSING_COUNT=0
+
+# 对所有 ELF 文件添加执行权限（使用进程替代避免子 shell）
+while IFS= read -r -d '' elf; do
+    # 内联 ELF 魔数检测（Bug 3 修复：不依赖 is_elf 函数）
+    magic=$(head -c 4 "$elf" 2>/dev/null | od -A n -t x1 | tr -d ' ')
+    if [ "$magic" = "7f454c46" ] && [ ! -x "$elf" ]; then
+        chmod +x "$elf"
+        FIXED_COUNT=$((FIXED_COUNT + 1))
+    fi
+done < <(find "$PACKAGE_DIR" -type f -print0 2>/dev/null)
+
+# bin/ 下的脚本也确保有执行权限
+find "$PACKAGE_DIR/bin" -type f ! -executable -exec chmod +x {} \; 2>/dev/null || true
+
+# 权限验证
+log_info "验证执行权限 ..."
+NO_EXE_COUNT=0
+NO_EXE_LIST=""
+while IFS= read -r -d '' elf; do
+    magic=$(head -c 4 "$elf" 2>/dev/null | od -A n -t x1 | tr -d ' ')
+    if [ "$magic" = "7f454c46" ] && [ ! -x "$elf" ]; then
+        NO_EXE_COUNT=$((NO_EXE_COUNT + 1))
+        NO_EXE_LIST="$NO_EXE_LIST $(basename "$elf")"
+    fi
+done < <(find "$PACKAGE_DIR" -type f -print0 2>/dev/null)
+
+if [ "$NO_EXE_COUNT" -gt 0 ]; then
+    log_error "仍有 $NO_EXE_COUNT 个 ELF 文件缺少执行权限:$NO_EXE_LIST"
+    log_error "这将导致用户解压 tar.gz 后 Permission denied！"
+    exit 1
+else
+    log_info "所有 ELF 文件均有执行权限（已修复 $FIXED_COUNT 个）"
+fi
+
 # ============================================================
 # 创建使用说明
 # ============================================================
