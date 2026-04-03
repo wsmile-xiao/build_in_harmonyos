@@ -45,6 +45,9 @@ PACKAGE_DIR="$OUTPUT_DIR/$PACKAGE_NAME"
 # 是否 strip（默认是）
 STRIP_DEBUG="${STRIP_DEBUG:-1}"
 
+# 是否纯净版（不装 pip，默认是）
+PURE_MODE="${PURE_MODE:-1}"
+
 # 工具路径
 
 # 颜色输出
@@ -60,6 +63,8 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
 echo "============================================================"
 echo "Python ${PYTHON_VERSION} 预编译版本打包工具 (HarmonyOS)"
 echo "============================================================"
+echo "  纯净:  $([ "$PURE_MODE" = "1" ] && echo '是(无pip)' || echo '否(含pip)')"
+echo ""
 
 # ============================================================
 # 修改 RPATH + Strip + 重新签名（完整流程）
@@ -200,6 +205,15 @@ cp -r "$INSTALL_DIR/lib/python3.9" "$PACKAGE_DIR/lib/"
 
 log_info "复制头文件..."
 cp -r "$INSTALL_DIR/include/python3.9" "$PACKAGE_DIR/include/" 2>/dev/null || true
+
+# 纯净模式：删除 pip
+if [ "$PURE_MODE" = "1" ]; then
+    log_info "纯净模式: 删除 pip ..."
+    rm -rf "$PACKAGE_DIR/lib/python"*/site-packages/pip* 2>/dev/null || true
+    rm -f "$PACKAGE_DIR/bin/pip"* "$PACKAGE_DIR/bin/easy_install"* 2>/dev/null || true
+    # ensurepip 的 _bundled wheel 保留（用户可自行安装）
+    log_info "  pip 已删除，ensurepip _bundled wheel 保留"
+fi
 
 # ============================================================
 # 收集并复制外部依赖库
