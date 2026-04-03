@@ -116,6 +116,8 @@ process_elf() {
 
     # 5b-5d. Strip + debug extract (if enabled)
     if [ "$STRIP_DEBUG" = "1" ] && [ -n "$DEBUG_DIR" ]; then
+        # 确保debug目录存在
+        mkdir -p "$DEBUG_DIR"
         local debug_file="$DEBUG_DIR/${name}.debug"
 
         # 提取 debug info 到单独文件
