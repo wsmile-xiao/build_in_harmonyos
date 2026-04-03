@@ -192,23 +192,83 @@ entry/src/main/ets/pages/Index.ets         ← ArkTS UI (XComponent 容器)
 - [x] **libscintilla_ohos.so 重新编译部署**（零 warning，1.3MB）
 - [ ] **待设备验证**：clean build + 部署，确认触摸选中文本、键盘输入、光标闪烁正常
 
+### ✅ 2026-04-03 — 三大问题正向修复（键盘崩溃/光标不可见/拖选刷新）
+
+- [x] **键盘输入 SIGABRT 崩溃 — 正向修复（非 siglongjmp workaround）**：
+  - **根因定位**：`Editor::KeyDownWithModifiers()` 首行调用 `DwellEnd(false)` → `NotifyDwelling(ptMouseLast, false)` → `PositionFromLocation(pt, true, false, false)` → `CreateMeasurementSurface()` → `OH_Drawing/Skia 内部 abort`
+  - 与触摸 Move 崩溃完全相同的根因链（DwellEnd → NotifyDwelling）
+  - **修复**：重写 `DoKeyDown()` 方法，跳过 `DwellEnd(false)` 调用，直接执行 `kmap.Find + WndProc/KeyDefault`
+  - `OnKeyDown` 和 `OnCharInput` 添加 `AbortGuard` 防护（defense-in-depth）
+- [x] **光标不可见 — 双重根因修复**：
+  - **根因 A**：从未调用 `SetFocus(true)` → `hasFocus=false` → `ShowCaretAtCurrentPosition()` 设置 `caret.active=false` → `TickFor(caret)` 跳过 `InvalidateCaret()`
+    - **修复**：在 `OnSurfaceCreatedNative` 和 `OnSurfaceCreated` 中 `BN_Sci_Init` 后立即调用 `BN_Sci_SetFocus(g_editor, 1)`
+  - **根因 B**：`DoTickCaret()` 检查 `FineTickerRunning(TickReason::caret)` 但该函数是空 stub 永远返回 false → `TickFor` 从未被调用
+    - **修复**：移除 `FineTickerRunning` 检查，`DoTickCaret()` 无条件调用 `TickFor(TickReason::caret)`
+- [x] **鼠标拖选动态刷新 — 确认链路正常**：
+  - 日志分析确认：Move → DoButtonMove → RequestRedraw → RenderFrame 完整链路正常执行
+  - nonWhite 像素恒定可能是因为测试文本量小，选区视觉变化不足以影响采样
+- [x] **napi_init.cpp 清理**：移除所有 `sigaction/siglongjmp/sigjmp_buf/SIGABRT` 相关代码及 `<signal.h>/<setjmp.h>` 头文件
+- [x] **libscintilla_ohos.so 重新编译部署**（零 warning，1.4MB）
+
+### 🔧 2026-04-03 — 键盘输入精细化修复（keyCode映射/诊断日志/光标宽度）
+
+- [x] **Backspace keyCode 映射错误修复**（Index.ets）：
+  - `2055`(KEYCODE_DEL) 从 `Delete(46)` 改为 `BackSpace(8)`
+  - 新增 `2055`(KEYCODE_FWD_DEL?) 映射到 `Delete(308)`
+  - 方向键改用 Scintilla SCK 常量（302/303/301/300）
+- [x] **字母键诊断增强**：
+  - keyText 条件从 `===1` 改为 `>=1 && <=2`
+  - 所有分支添加 console.info 日志
+  - 未映射 keyCode（>=2000）打印帮助识别遗漏
+- [x] **ScintillaOHOS.cxx 诊断日志**：
+  - `DoTickCaret()`：前后 caret 状态日志
+  - `PerformDraw()`：Paint 前 caret 状态 + width
+  - `OnCharInput()`：完成/abort 日志
+  - `DoKeyDown()`：kmap.Find 结果 + WndProc/KeyDefault 完成日志
+- [x] **光标宽度显式设置**：Init() 中新增 `SetCaretWidth(2)`
+- [x] **零 warning 编译部署**（1.3MB）
+
+### 🔧 2026-04-03 — 字母键根因修复 + 光标焦点修复
+
+- [x] **字母键不上屏 — 根因：keyText 是 KEYCODE 名称**：
+  - 日志证据：`keyText='KEYCODE_A' len=9`（非 `'a'`）
+  - sciOnChar 从未被调用，字母键走了错误的 sciOnKeyDown(SCK_End) 路径
+  - **修复**：Index.ets 新增 `mapKeyCodeToChar(keyCode)` 方法：
+    - 2001-2010 → '1'-'0', 2017-2042 → 'a'-'z', 2044→空格, 2057-2067→标点, 2108-2123→小数字符
+    - 优先走映射路径，fallback 到 keyText 单字符判断
+- [x] **光标不可见 — 根因：hasFocus 始终=0**：
+  - 日志证据：所有采样点 active=0 hasFocus=0（on 正常翻转）
+  - no-libraryname 路径的 SciRegisterXComponent 缺少 BN_Sci_SetFocus 调用
+  - **修复 A**：SciRegisterXComponent 中 Init 后添加 SetFocus(1)
+  - **修复 B**：SciOnTouch case 0(Down) 中先调用 SetFocus(1)
+- [ ] **待设备验证**：rebuild + 测试 abcd1234 输入、退格键、光标
+
 ### 🔲 当前阻塞问题
 
-1. ~~**无光标显示**~~ → **已修复**：添加 `BN_Sci_Tick()` NAPI 接口 + ArkTS `setInterval(500ms)` 驱动 caret 闪烁
-2. ~~**键盘输入无效**~~ → **待验证**：`.focusable(true)+.defaultFocus(true)+.focusOnTouch(true)` 已配置，需设备确认
+1. ~~**无光标显示**~~ → **已修复**：SetFocus(true) + DoTickCaret 移除 FineTickerRunning 检查
+2. ~~**键盘输入崩溃**~~ → **已修复**：DoKeyDown 跳过 DwellEnd + AbortGuard 防护
 3. ~~**触摸交互禁用**~~ → **已修复**：恢复 `BN_Sci_OnTouch*` 调用 + `RenderFrame()` 重入保护（`g_rendering` atomic flag）
+
+### 🔧 2026-04-03 — SurfaceHolder 根因最终定位：需要 typeNode.createNode 动态节点
+
+- [x] **根因**：`OH_ArkUI_SurfaceHolder_Create()` 需要 `typeNode.createNode()` 动态创建的 XComponent 节点
+  - 声明式 `XComponent{}` 的框架节点 → 返回 null
+  - 动态 `typeNode.createNode('XComponent')` 节点 → 应返回有效 holder
+- [x] **修复**：改造为 NodeController + NodeContainer 模式（参考 CSDN 文章）
+- [ ] **待设备验证**
 
 ### 📋 下一步计划
 
-1. ~~**恢复触摸事件处理**~~ ✅ — 重入保护 + dirty flag 延迟重绘
-2. ~~**解决键盘焦点问题**~~ ✅ — focusable/defaultFocus/focusOnTouch 已配置
-3. ~~**恢复键盘事件转发**** ✅ — sciOnChar/sciOnKeyDown + sciRequestRedraw
-4. ~~**光标渲染**~~ ✅ — BN_Sci_Tick() + setInterval(500ms) 驱动 caret 闪烁
-5. **设备验证（当前步骤）**：
-   - [ ] 触摸选择文本、滚动
-   - [ ] 键盘输入（英文、中文）
-   - [ ] 光标闪烁可见
-   - [ ] 剪贴板操作
+1. ~~**恢复触摸事件处理**~~ ✅
+2. ~~**解决键盘焦点问题**~~ ✅
+3. ~~**恢复键盘事件转发**~~ ✅
+4. ~~**光标渲染**~~ ✅
+5. ~~**黑屏修复：SurfaceHolder 动态节点模式**~~ ✅ — NodeController 改造完成
+6. **设备验证（当前步骤）**：
+   - [ ] SurfaceHolder 是否有效（关键！）
+   - [ ] 显示是否正常
+   - [ ] 触摸/鼠标/键盘/空格
+   - [ ] 光标闪烁
 
 ## 踩坑记录
 

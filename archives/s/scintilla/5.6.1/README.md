@@ -21,7 +21,10 @@ Scintilla 是一个跨平台的源代码编辑控件库。本文档记录其在 
 | 键盘输入 | 🔧 已修复 | .onKeyEvent + focusable 配置 |
 | 光标闪烁 | 🔧 已修复 | BN_Sci_Tick() + setInterval(500ms) |
 | 触摸闪退 | 🔧 已修复 | vp→px 坐标转换 (g_density) + 范围校验 + 空指针保护 |
-| 设备验证 | ⏳ 待验证 | clean build + 部署确认 |
+| 鼠标拖选反色 | 🔧 已修复 | DoButtonMove 恢复 ButtonMoveWithModifiers 调用 (2026-04-03) |
+| libraryname 模式 | ❌ 已放弃 | SIGSEGV（框架层 OnSurfaceCreated 分发崩溃），切换到 SurfaceHolder |
+| SurfaceHolder 模式 | 🔧 v2 待验证 | OH_ArkUI_SurfaceHolder 官方方案，v1: 显示✅ 键盘✅ 鼠标❌ 空格❌ |
+| 设备验证 | ⏳ v2 rebuild | v2 修复：消除双路径冲突 + 空格keyCode + ArkTS .onTouch fallback |
 
 ## 编译方式
 
@@ -210,13 +213,15 @@ PlatOHOS.cxx（707 行）使用 HarmonyOS Native Drawing API 实现了完整的�
 7. **PerformDraw 时序 Bug（已修复）**：Init 必须在 Initialised 检查之前，已在 2026-04-01 修复
 8. **字体加载静默失败**：`FontMgrMatchFamilyStyle` 失败时回退到默认 Typeface，已添加 hilog 诊断（tag: `PlatOHOS`）
 9. **触摸闪退 SIGABRT（已修复）**：ArkTS vp 坐标未转换直接传入 Scintilla（px 坐标系），Move 事件触发内部 assert → abort()。修复：`SciOnTouch()` 中 `px = vp * density` + 范围校验
-10. **XComponent inputMode invalid（已知限制）**：2in1 设备上 XComponent 不带 libraryname 时框架日志刷屏，但不影响功能（ArkTS .onTouch 手动转发绕过）
+10. **XComponent inputMode invalid（已知限制）**：2in1 设备上 XComponent NDK NODE_TOUCH_EVENT 被框架拦截，ArkTS .onTouch() 可绕过
+11. **libraryname SIGSEGV（已确认不可用）**：OH_NativeXComponent_RegisterCallback 导致框架层 OnSurfaceCreated 分发时崩溃
+12. **SurfaceHolder 双路径冲突（v2 已修复代码）**：XComponentController 与 SurfaceHolder 抢占 surface 管理权导致 Holder 为 null
 
 ## 下一步
 
-1. **设备端到端验证**：clean build + 部署 HAP，确认触摸/键盘/光标/剪贴板全部正常
-2. **大文件性能测试**：>10MB 文件的滚动、搜索性能
-3. **IME 中文输入验证**：确认中文输入法在 no-libraryname 方案下工作
+1. **🔴 SurfaceHolder v2 验证**：rebuild 确认 SurfaceHolder 非 null + 鼠标/空格/显示正常
+2. **中文/Emoji 输入**：验证 SurfaceHolder NODE_ON_KEY_EVENT 的 GetUnicode 路径，或继续用 ArkTS keyCode 映射
+3. **大文件性能测试**：>10MB 文件的滚动、搜索性能
 4. **语法高亮配置**：至少 3 种语言的 lexer 配置（C/C++/JS）
 5. **ListBox UI 对接**：用 ArkUI List 组件实现自动补全弹出框
 

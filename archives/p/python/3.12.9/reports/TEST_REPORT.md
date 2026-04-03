@@ -9,7 +9,7 @@
 | 平台 | HarmonyOS-HongMeng_Kernel_1.11.0-aarch64 |
 | 编译器 | Clang 15.0.4 |
 | libc | musl |
-| Python 源码 | Python-3.12.9-v2 (119 补丁) |
+| Python 源码 | Python-3.12.9-v2 (110 补丁, #0071-0079 跳过) |
 | 测试命令 | `MAKEFLAGS="-j1" make test TESTOPTS="-v -w --ignore=smtpnet --ignore=test__xxsubinterpreters --ignore=test_interpreters"` |
 
 ## 最终结果概览
