@@ -337,4 +337,139 @@ Perl 不仅是测试框架依赖，它也是构建链中的关键依赖（automa
 
 ---
 
-*最后更新：2026-03-30（新增 §问题4：测试框架依赖 Perl 跨软件知识）*
+## 静态编译强制要求表
+
+> **🔴 核心安全规则**：某些库如果以共享库形式安装到用户目录，会通过 `LD_LIBRARY_PATH` 覆盖系统版本，
+> 导致系统工具（Shell、终端等）崩溃。这些库**必须静态编译**。
+
+### 危险等级分类
+
+| 等级 | 库名 | 强制选项 | 根因 | 后果 |
+|------|------|---------|------|------|
+| 🔴 **必须静态** | ncurses | `--without-shared` | libncursesw.so 覆盖系统版本 → **Shell 崩溃，终端不可用** | 系统级故障 |
+| 🟠 **强烈建议** | readline | `--disable-shared` | libreadline.so 版本冲突 → bash/zsh 异常 | Shell 功能异常 |
+| 🟠 **建议静态** | zlib | `--static` 或只装 .a | libz.so 被预编译包加载 → 链接错误 | 编译/运行时失败 |
+| 🟢 可选动态 | openssl, bzip2, lzma | 默认即可 | 冲突风险较低 | 通常无问题 |
+
+### 判断标准：一个库是否需要静态编译？
+
+回答以下问题，任一为"是"则应考虑静态编译：
+
+```
+Q1: 系统是否有同名的预装共享库？
+    → 是：存在覆盖风险
+    → 否：安全
+
+Q2: 系统的关键进程（Shell、终端、窗口管理器）是否依赖该库？
+    → 是：🔴 必须静态（如 ncurses）
+    → 否：看 Q3
+
+Q3: 该库是否会被 LD_LIBRARY_PATH 意外加载？
+    → 是：用户设置 LD_LIBRARY_PATH 后所有子进程受影响
+    → 否：相对安全
+
+Q4: 该库的 SONAME 是否与系统版本不同？
+    → 不同：即使被加载也不会实际覆盖（较安全）
+    → 相同：⚠️ 高风险
+```
+
+### LD_LIBRARY_PATH 陷阱详解
+
+#### 问题机制
+
+```
+用户编译 ncurses 为共享库 → 安装到 $HOME/usr/local/lib/libncursesw.so.6.4
+    ↓
+用户或预编译包 activate.sh 设置：
+    export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH
+    ↓
+用户打开新终端（zsh/bash）
+    ↓
+终端进程继承 LD_LIBRARY_PATH
+    ↓
+动态链接器搜索 libncursesw.so.6 时：
+    1. 先找 $HOME/usr/local/lib/libncursesw.so.6.4 ← 找到了！
+    2. 不再搜索系统路径 /usr/lib/libncursesw.so.6
+    ↓
+但用户版本的 libncursesw.so 缺少某些符号或 ABI 不兼容
+    ↓
+终端调用 ncurses 函数 → crash / hang / 显示异常
+    ↓
+结果：所有终端不可用，用户无法操作电脑
+```
+
+#### 为什么不能简单地"不设置 LD_LIBRARY_PATH"？
+
+预编译包的可移植性依赖于 RPATH + LD_LIBRARY_PATH：
+
+```
+方案 A：只用 RPATH（$ORIGIN 相对路径）
+    ✅ 优点：不影响系统库
+    ❌ 缺点：只能找到包内库，无法利用系统已装的库
+
+方案 B：RPATH + LD_LIBRARY_PATH
+    ✅ 优点：灵活，可覆盖/补充系统库
+    ⚠️ 缺点：LD_LIBRARY_PATH 全局生效，可能污染系统
+
+方案 C：RPATH + activate.sh 精确控制（推荐）
+    ✅ 只在需要时 source activate.sh
+    ✅ deactivate 时恢复原环境
+    ⚠️ 但如果用户在激活状态下启动终端，仍会污染
+```
+
+#### 最佳实践
+
+```bash
+# 对于危险库（ncurses 等），坚决静态编译
+./configure --without-shared --prefix=$PREFIX   # ncurses
+./configure --disable-shared --prefix=$PREFIX    # readline
+
+# 预编译包的 activate.sh 中不要包含危险库路径
+# 即使用户的 lib/ 下有 libncursesw.a，也不会通过 LD_LIBRARY_PATH 加载
+```
+
+---
+
+## 内嵌依赖处理策略
+
+> 当软件内嵌了其他项目的源码作为依赖（如 pkg-config 内嵌 glib、Python 内嵌 sqlite/expat），
+> 这些内嵌依赖的处理方式与独立编译的依赖不同。
+
+### 分类与策略
+
+| 类型 | 示例 | 处理方式 | 归档归属 |
+|------|------|---------|---------|
+| **可选内嵌** | pkg-config `--with-internal-glib` | 使用内嵌版本，补丁放在主软件归档下 | 主软件 archives/p/pkg-config/ |
+| **强制内嵌** | Python 内嵌 expat/sqlite3 | 无法禁用，补丁放在主软件归档下 | 主软件 archives/p/python/ |
+| **可解耦** | 某些软件允许 `--with-external-xxx` | 优先使用外部独立编译的版本 | 各自独立归档 |
+
+### 内嵌依赖补丁规范
+
+```bash
+# 补丁文件放在主软件归档下，路径反映内嵌关系
+archives/p/pkg-config/0.29.2/patches/
+├── 0001-ohos-fix-glib-config-guess.patch      # 修改内嵌 glib 的 config.guess
+├── 0002-ohos-fix-glib-stdio-compat.patch       # 修改内嵌 glib 的源码
+└── 0003-ohos-pkg-config-main-fix.patch         # 修改主软件自身代码
+
+# manifest.yaml 中记录内嵌依赖信息
+embedded_dependencies:
+  - name: glib
+    version: "2.38.2"
+    reason: "--with-internal-glib (pkg-config 无法使用系统 glib)"
+    patches_applied:
+      - "0001-ohos-fix-glib-config-guess.patch"
+      - "0002-ohos-fix-glib-stdio-compat.patch"
+```
+
+### 关键注意事项
+
+1. **内嵌依赖的 config.guess/sub 通常非常旧**（2012-2014 年），几乎必定需要打补丁或用 `--build/--host` 覆盖
+2. **内嵌依赖不应有独立的归档目录**——它是主软件的一部分
+3. **如果内嵌依赖可以解耦为外部依赖，优先解耦**（便于复用和单独更新）
+
+---
+
+*最后更新：2026-04-04*
+*新增 §静态编译强制要求表：危险等级分类 + 判断标准 + LD_LIBRARY_PATH 陷阱*
+*新增 §内嵌依赖处理策略：分类/补丁规范/注意事项*

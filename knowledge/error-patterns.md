@@ -60,6 +60,9 @@
 | [E052](#e052-rpath-缺失导致子进程找不到-libpython) | 构建/RPATH | subprocess exit 127, libpython3.9.so not found, LD_LIBRARY_PATH | 🔴 阻塞 |
 | [E053](#e053-cc1plus-不可用必须使用-clang) | 工具链 | cc1plus: error, CXX compiler cannot create executables | 🔴 阻塞 |
 | [E054](#e054-外来二进制首次执行被安全确认弹窗阻止) | 安全机制 | Permission denied, 首次执行后消失, make check 误判 | 🟡 中等 |
+| [E058](#e058-sed-操作生成文件导致补丁不可复现) | 补丁质量 | sed on configure/Makefile, 不可复现 | 🔴 阻塞 |
+| [E059](#e059-源码修改未保存为-patch-文件) | 补丁质量 | 对话中修改了源码但无 .patch 文件 | 🔴 阻塞 |
+| [E060](#e060-补丁缺少-__ohos__-守卫无法上游化) | 补丁质量 | 硬编码修改, 无平台隔离, 上游拒绝 | 🟡 中等 |
 
 ---
 
@@ -2574,3 +2577,199 @@ regrtest 默认按 `os.cpu_count()` 开启 worker（鸿蒙=18），与 `MAKEFLAG
 ```bash
 MAKEFLAGS="-j1" make test TESTOPTS="-j1 --ignore=smtpnet ..."
 ```
+
+---
+
+## E058: sed 操作生成文件导致补丁不可复现
+
+### 错误特征
+
+```
+# 编译过程中使用了 sed 修改 configure 或 Makefile：
+sed -i 's/BUILDEXEEXT=.exe/BUILDEXEEXT=/' Makefile
+sed -i '/^#define MAN_OWNER/s/^/#\/\* /' config.h
+
+# 编译成功了，但：
+# 1. 这些修改没有对应的 .patch 文件
+# 2. 下次从原始 tarball 重新编译时，这些修改丢失
+# 3. 无法向上游提交（上游不接受 sed hack）
+```
+
+### 根因
+
+`configure` 和 `Makefile` 是**生成文件**（由 `autoconf` / `automake` 从 `configure.ac` / `Makefile.am` 生成）。
+对生成文件使用 `sed` 修改：
+
+| 问题 | 说明 |
+|------|------|
+| **不可复现** | 原始 tarball 不包含这些修改 |
+| **易丢失** | `make distclean` + 重新 `./configure` 后修改消失 |
+| **不可验证** | 无法通过 `patch --dry-run` 检查 |
+| **不可上游** | 上游只接受源码级修改 |
+
+### 正确做法
+
+```
+sed 操作的目标文件          →  正确的修改位置
+─────────────────────────────────────────────
+configure                   →  configure.ac（优先级①）或 configure 本身（优先级②）+ 生成 .patch
+Makefile                    →  Makefile.am（①）或 Makefile.in（②）+ 生成 .patch
+config.h                    →  config.h.in（由 autoconf 从 configure.ac 生成）+ .patch
+build-aux/config.guess      →  直接打补丁（非 autoreconf 生成）✅
+build-aux/config.sub        →  直接打补丁 ✅
+```
+
+**例外情况**：如果软件**只有** `configure` 没有 `configure.ac`（即上游发布的是预生成的 tarball），则直接修改 `configure` 并保存为 `.patch` 文件是可接受的（优先级②）。
+
+### 验证命令
+
+```bash
+# Phase 4 补丁校验时必须执行：
+diff -ruN original_src/ modified_src/ > all_changes.diff
+
+# 检查是否有未捕获的 sed 修改：
+grep -c "++++" all_changes.diff  # 对话中讨论的修改数
+ls patches/*.patch | wc -l       # 实际补丁文件数
+# 两者应该一致（排除 build/ 等构建产物）
+```
+
+### 涉及范围
+
+所有 autotools 项目。**这是最常见的补丁质量问题。**
+
+### 相关规范
+
+- SKILL.md §P0 参数最少化原则
+- `knowledge/build-systems.md` §3.6 修改层级决策树
+
+---
+
+## E059: 源码修改未保存为 .patch 文件
+
+### 错误特征
+
+```
+# 编译过程中临时修改了源码解决了问题：
+# 编辑 lib/stdio.c，在第 42 行添加了 #ifdef __OHOS__ 分支
+# 编译通过了！
+
+# 但归档时发现：
+ls patches/
+# 总计 0
+# （没有 .patch 文件）
+
+# 或：对话中讨论了 5 处修改，但 patches/ 下只有 3 个 .patch
+```
+
+### 根因
+
+编译调试过程中专注于解决问题，忘记将修改固化为正式补丁文件。
+Phase 4 归档时如果没有做 **Step 3 补丁完整性校验**，这些修改会永久丢失。
+
+### 解决方案
+
+**实时保存**（推荐，Phase 3 Step 6）：
+
+```bash
+# 每解决一个问题后立即生成补丁
+cd /path/to/source
+# 假设原始源码在 ../original/，修改后在当前目录
+diff -ruN ../original/ . > ../archives/x/xxx/version/patches/NNNN-description.patch
+
+# 验证补丁可干净应用
+cd ../original/
+patch --dry-run -p1 < ../archives/x/xxx/version/patches/NNNN-description.patch
+```
+
+**批量刷新**（Phase 4 Step 3，使用工具脚本）：
+
+```bash
+./scripts/refresh-patch.sh --all orig_dir/ mod_dir/ patches_dir/
+```
+
+### 防范措施
+
+1. **PROGRESS.md 实时记录**：每处源码修改必须立即写入"源码修改清单"表格
+2. **Phase 4 强制校验**：`diff -ruN` 对比原始源码和修改后源码
+3. **close-archive.sh 检查**：归档收脚脚本检查 patches/ 数量与 PROGRESS.md 一致性
+
+### 相关规范
+
+- SKILL.md §P0 补丁质量"三可"原则
+- SKILL.md Phase 4 Step 3 补丁完整性校验
+
+---
+
+## E060: 补丁缺少 __OHOS__ 守卫无法上游化
+
+### 错误特征
+
+```c
+// ❌ 错误：硬编码修改，影响所有平台
+int fd = open(path, O_RDONLY);
+if (fd < 0) {
+    return 0;  // HarmonyOS 上某些路径需要跳过
+}
+
+// ❌ 错误：用 Linux 判断来排除其他平台
+#ifndef __linux__
+int fd = open(path, O_RDONLY);
+if (fd < 0) return 0;
+#endif
+```
+
+### 根因
+
+修改源码时只考虑了"让它在鸿蒙上工作"，没有考虑：
+1. 其他平台（BSD、macOS、其他 Linux 发行版）
+2. 上游维护者的审核标准
+3. 代码的可读性和可维护性
+
+### 正确写法
+
+```c
+// ✅ 正确：标准 OHOS 隔离模板
+#ifdef __OHOS__
+/*
+ * HarmonyOS: open() on certain paths returns unexpected errors
+ * due to SELinux restrictions on non-standard filesystems.
+ * Skip gracefully instead of failing.
+ */
+if (open(path, O_RDONLY) < 0) {
+    return 0;
+}
+#endif
+```
+
+### 守卫宏选择指南
+
+| 场景 | 推荐守卫 | 说明 |
+|------|---------|------|
+| 鸿蒙特有行为 | `#ifdef __OHOS__` | 最精确，clang 自动定义 |
+| musl 特有行为 | `#if defined(__OHOS__) \|\| (!defined(__GLIBC__) && defined(__linux__))` | 覆盖所有 musl 平台 |
+| 缺少某系统调用 | `#ifdef HAVE_XXX` + 在 configure 中检测 | 最通用，平台无关 |
+| 内核差异 | 运行时检测 errno/EACCES | 无需编译期判断 |
+
+### 命名和注释规范
+
+```c
+/* HarmonyOS: <简短原因> */
+/* HarmonyOS: <原因> — <详细说明（可选）> */
+
+// 示例：
+/* HarmonyOS: fstat() returns EACCES for non-file descriptors */
+/* HarmonyOS: musl iconv does not support //IGNORE suffix (glibc extension) */
+```
+
+### 相关规范
+
+- `knowledge/build-systems.md` §3.7 OHOS 平台隔离标准写法
+- SKILL.md §P0 补丁质量"三可"原则（可上游化）
+
+---
+
+*文档版本: 3.0*
+*最后更新: 2026-04-04*
+*新增 E058：sed 操作生成文件导致补丁不可复现*
+*新增 E059：源码修改未保存为 .patch 文件*
+*新增 E060：补丁缺少 __OHOS__ 守卫无法上游化*

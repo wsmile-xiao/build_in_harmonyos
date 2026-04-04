@@ -12,6 +12,75 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 
 ---
 
+## P0. 编译参数最少化原则（最高优先级，贯穿所有阶段）
+
+> **🔴 核心信条：最简单的编译命令才是正确的编译命令。**
+
+### P0-1. 目标状态
+
+```bash
+# 理想编译命令（零额外参数）
+./configure --prefix=$PREFIX && make && make install
+
+# 或 CMake 项目：
+cmake -DCMAKE_INSTALL_PREFIX=$PREFIX .. && make && make install
+```
+
+任何超出 `--prefix` 和软件自身功能选项的参数，都是**技术债务**。
+
+### P0-2. 参数分类表
+
+| 参数类别 | 是否应该存在 | 说明 | 消除方法 |
+|---------|-------------|------|---------|
+| `--prefix=$PREFIX` | ✅ 必须 | 安装路径 | — |
+| 软件自身选项（如 `--with-internal-glib`） | ✅ 正常 | 功能选择 | — |
+| 平台约束选项（如 `--without-shared`） | ⚠️ 记录为债务 | 见 dependencies.md 静态库要求表 | 完善补丁让 configure 自动判断 |
+| `--build/--host/--target` | ❌ 应消除 | 说明 config.guess/sub 未完善 | 完善 config.guess 的 HarmonyOS 检测 |
+| `-Wno-error` 等 CFLAGS hack | ❌ 应消除 | 说明 configure 层面修改不到位 | 在 configure.ac 中加 `*ohos*` 分支 |
+| `sed` 操作生成文件 | ❌ 绝对禁止 | 不可复现 | 改为正式 .patch 补丁 |
+| `ACLOCAL=/bin/true` 等绕过 | ⚠️ 可接受 | autotools 版本不匹配 | 记录在 manifest.yaml |
+
+### P0-3. 每次编译后的"还债"流程
+
+编译成功后，**必须回顾**本次使用了哪些非标准参数：
+
+```
+Q1: 本次用了哪些 --build/--host/--target / CFLAGS hack？
+    → 是：记录到 manifest.yaml build_cleanliness.extra_params
+    → 否：✅ 达标
+
+Q2: 这些参数能否通过补丁消除？
+    → 能：规划下次改进，写入 improvement_plan
+    → 不能（如 ACLOCAL 绕过）：标注"可接受的技术债务"
+```
+
+### P0-4. manifest.yaml 必须包含的字段
+
+```yaml
+build_cleanliness:
+  standard_params_only: true/false   # 是否只用了 --prefix 和软件自身选项
+  extra_params:                      # 如果有，列出来（这是技术债务）
+    - param: "--build=aarch64-unknown-linux-ohos"
+      reason: "glib 内嵌的 config.guess 过旧，尚未单独打补丁"
+      improvement_plan: "下次：为内嵌 glib 的 config.guess 打补丁，去掉此参数"
+  total_debt_count: 1                # extra_params 条数（目标：趋向 0）
+```
+
+### P0-5. 关于 `--build/--host` 的策略澄清
+
+> **常见误区**："强制指定 `--build/--host` 是标准做法"
+>
+> **正确理解**：强制指定是 **workaround 不是目标**。如果 config.guess/sub 补丁做得足够好，
+> configure 会自动识别出 `aarch64-unknown-linux-ohos`，不需要手动指定。
+>
+> **何时可以保留 `--build/--host`**：
+> - 软件有内嵌依赖（如 pkg-config 内嵌 glib），内嵌的 config.guess 无法单独打补丁时
+> - 作为临时 workaround，但必须在 manifest.yaml 中记录并规划消除
+>
+> **详见**：`knowledge/build-systems.md` §3.6 Autotools 修改层级决策树
+
+---
+
 ## 0. 流程自省（最高优先级，贯穿始终）
 
 > **🫀 这是你最重要的任务。编译技术任务可以跳过，但这个不能。**
@@ -135,6 +204,26 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
 > **打包验证完整性**：制作可移植包时，**必须对所有 ELF 文件（包括 lib-dynload/ 下的扩展模块）设置 RPATH 并重新签名**。不能仅处理主程序和主共享库而遗漏扩展模块。详见 `knowledge/packaging.md` §3 和 `knowledge/error-patterns.md` E042。
 
 > **Shell 脚本 POSIX 兼容**：为鸿蒙编写的所有 shell 脚本**必须使用 POSIX 兼容语法**（`#!/bin/sh` + toybox ash 兼容），不能依赖 `${BASH_SOURCE}`、`[[ ]]`、数组等 bash 特性。详见 `knowledge/harmonyos-specifics.md` §3。
+
+> **补丁质量"三可"原则**：所有对源码的修改**必须以 `.patch` 文件形式保存**，且满足：
+> - **可复现**（Reproducible）：从原始 tarball + 补丁集 → 100% 可重现相同编译产物
+> - **可验证**（Verifiable）：`patch --dry-run -p1 < xxx.patch` 可干净应用；`diff -ruN orig mod` 与补丁一致
+> - **可上游**（Upstreamable）：补丁逻辑清晰、有 `#ifdef __OHOS__` 守卫、附带说明注释，理论上可提交给上游
+>
+> **禁止行为**：
+> - ❌ 使用 `sed` 直接修改 `configure` / `Makefile` 等生成文件（不可复现）
+> - ❌ 编译过程中临时修改源码但未生成补丁文件（会丢失）
+> - ❌ 在对话中讨论了补丁内容但没有保存为 .patch 文件
+>
+> **详见**：`knowledge/build-systems.md` §3.6 修改层级优先级 + `knowledge/error-patterns.md` E058-E060
+
+> **参数最少化原则（P0）**：编译命令应尽可能简单。理想状态是 `./configure --prefix=$PREFIX && make && make install` 零额外参数。
+> 任何额外参数（`--build/--host`、CFLAGS hack 等）都是技术债务，必须在 manifest.yaml 的 `build_cleanliness` 字段中记录并规划消除。
+> **详见**：§P0 编译参数最少化原则
+
+> **安全弹窗提醒**：鸿蒙系统首次执行非系统预装二进制时会弹出安全确认框，超时未确认会导致进程被杀。
+> `make install` 后应立即批量触发确认（`find $PREFIX/bin -type f -exec {} --version \;`），`make check` 前确保所有二进制已完成确认。
+> **详见**：`knowledge/error-patterns.md` E054
 
 ## 2. When to use
 
@@ -373,6 +462,32 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限（可�
    # 生成 SUMMARY.md
    python3 scripts/gen_summary.py
    ```
+
+5.5 **制作预编译分发包（可选，按需执行）**
+   > 当需要将编译产物分发给其他鸿蒙设备时，执行此步骤制作 tar.gz 格式的可移植包。
+   > **完整流程见 `knowledge/packaging.md`（10 步标准化流程）**。
+   
+   **触发条件**：
+   - 用户明确要求制作预编译包
+   - 软件被列入 PREBUILD_TODOLIST.md 的待编译清单
+   
+   **核心步骤概要**：
+   ```
+   Step 1: make install 到独立目录（不污染系统）
+   Step 2: 清理缓存和非必要文件
+   Step 3: 符号链接替换（wrapper/cp）
+   Step 4: 收集外部依赖库到 lib/external/
+   Step 5: 设置 RPATH（$ORIGIN 相对路径）
+   Step 6: Strip debug 符号 + 分离保存
+   Step 7: ELF 签名（adhoc self-sign）
+   Step 8: 统一修复执行权限（必做！签名会重置权限）
+   Step 9: 创建 activate.sh + README.md
+   Step 10: 打包 tar.gz（主包 + debug 符号包）
+   ```
+   
+   **输出位置**：`prebuild_packages/{软件名}-{版本}-ohos-aarch64.tar.gz`
+   
+   **参考实现**：`archives/p/python/3.12.9/scripts/package_python.sh`
 
 6. **知识库校验与补充（必须，Phase 4 最后一步）**
    > **⚠️ 强制规范**：既然实时知识提取已在 Phase 3 Step 6 完成，Phase 4 Step 6 的职责变为**校验与补充**，

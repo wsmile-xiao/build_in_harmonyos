@@ -1,5 +1,9 @@
 # HarmonyOS 可移植打包指南
 
+> **定位**：本文档是 SKILL.md Phase 4 Step 5.5（制作预编译分发包）的**详细操作手册**。
+> 编译智能体在执行预编译包制作时，以本文档为 10 步流程的权威参考。
+> 触发条件见 SKILL.md §Phase 4 Step 5.5。
+
 在鸿蒙系统上制作可移植的软件包，需要处理 RPATH、ELF 签名、软链接限制、权限修复等鸿蒙特有问题。
 
 ## 1. 核心问题
@@ -553,11 +557,42 @@ chmod +x package-dir/bin/*
 
 ---
 
-*文档版本: 2.0*
-*最后更新: 2026-04-03*
+*文档版本: 2.1*
+*最后更新: 2026-04-04*
 *v2.0 更新：*
 *  - 综合 3.9.25 + 3.12.9 最佳实践，建立 10 步标准化流程*
 *  - 新增 Step 4: 外部依赖收集（必做）*
 *  - 新增 Step 8: 统一权限修复（必做），含根因分析*
 *  - 新增 §6: 权限问题详解（binary-sign-tool 签名重置权限根因）*
 *  - 新增 Python 缓存清理步骤*
+*v2.1 更新：*
+*  - 头部增加 SKILL.md Phase 4 Step 5.5 交叉引用定位*
+*  - 新增 §8.5 静态库打包注意事项（对应 dependencies.md 静态编译要求表）*
+
+---
+
+## 8.5 静态库打包注意事项
+
+> 当目标软件使用了 `--without-shared` / `--disable-static` 等选项时（见 `dependencies.md` 静态编译强制要求表），
+> 打包流程需要相应调整。
+
+### 静态库（.a）场景
+
+```bash
+# ncurses --without-shared → 只有 libncursesw.a，无 .so
+# 打包时：
+# 1. Step 3（符号链接替换）：跳过，没有 .so 符号链接
+# 2. Step 4（外部依赖收集）：检查 NEEDED 时不会找到 ncurses（已静态链接）
+# 3. Step 5（RPATH设置）：只需处理可执行文件，无需处理 .so
+# 4. Step 6（Strip）：.a 文件已经是 stripped 状态，跳过或仅做验证
+```
+
+### 混合场景（部分静态 + 部分动态）
+
+```bash
+# readline --disable-shared + openssl 动态库
+# 打包时：
+# - readline 的 .a 已编入最终二进制，不需要单独打包
+# - openssl 的 .so 仍需收集到 lib/external/ 并设置 RPATH
+# - 最终可执行文件不依赖 libreadline.so，但依赖 libssl.so
+```

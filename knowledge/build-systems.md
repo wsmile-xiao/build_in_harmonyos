@@ -201,6 +201,144 @@ ls /data/service/hnp/sysroot/usr/include/stdio.h
 
 > 来源：`archives/p/python/3.9.0/manifest.yaml`
 
+### 3.6 Autotools 源码修改层级决策树
+
+> **核心原则**：修改越靠近源头越好。生成文件（configure/Makefile）的修改是最后手段。
+
+#### 层级优先级（从高到低）
+
+```
+优先级 ①（最佳）：configure.ac / CMakeLists.txt / 源码 .c/.h 文件
+    ↓  autoconf/automake/cmake 重新生成
+优先级 ②（可接受）：configure / Makefile.in（autoconf 生成的中间文件）
+    ↓  config.status / make 重新生成
+优先级 ③（ workaround）：Makefile（make 过程生成的文件）
+    ↓ 直接生效，但 make clean 后丢失
+优先级 ④（禁止）：sed 操作二进制/运行时修改已编译产物
+```
+
+#### 决策流程图
+
+```
+需要修改编译行为？
+    │
+    ├─ 软件有 configure.ac？
+    │   └─ ✅ → ① 修改 configure.ac + re-autoconf
+    │            例：添加 case "*ohos*)" 分支禁用某功能
+    │
+    ├─ 只有 configure（无 configure.ac）？
+    │   └─ ✅ → ② 修改 configure 本身
+    │            例：在平台检测 case 中添加 *ohos* 匹配
+    │            ⚠️ 记录：此修改在 autoreconf 后会丢失
+    │
+    ├─ 需要改变编译标志/链接库？
+    │   └─ 检查 Makefile.am 是否存在
+    │       ├─ 有 → ① 修改 Makefile.am + re-automake
+    │       └─ 无 → ② 修改 Makefile.in 或 ③ Makefile
+    │
+    └─ 需要修复源码 bug？
+        └─ ✅ → ① 直接修改 .c/.h 文件（永远是最高优先级）
+           必须带 #ifdef __OHOS__ 守卫
+```
+
+#### 各层级的典型场景和示例
+
+| 层级 | 典型场景 | 示例 |
+|------|---------|------|
+| **①** 源码/配置源码 | 平台特定代码路径、功能开关 | `#ifdef __OHOS__` 守卫的替代实现 |
+| **①** configure.ac | 新增平台检测、条件编译选项 | `case "*ohos*)" ohos=yes ;;` |
+| **②** configure | 平台检测 case 分支、库搜索路径 | config.guess 已识别但 configure 未处理 |
+| **②** Makefile.in | 链接标志、安装路径模板 | `LDFLAGS += -lxxx` for ohos |
+| **③** Makefile | 临时调试、快速验证 | `CC = clang` 替换 |
+| **④** ❌ 禁止 | sed 操作 configure/Makefile | 绝对不允许 |
+
+#### 特殊情况：内嵌依赖的 config.guess
+
+当软件内嵌了其他项目的旧版 config.guess（如 pkg-config 内嵌 glib 2.38.2 的 config.guess），**无法通过修改主包的 config.guess 解决**。
+
+**策略选择**：
+
+| 方案 | 可行性 | 推荐度 |
+|------|--------|--------|
+| A. 为内嵌依赖单独打补丁 | ✅ 最佳但工作量大 | ⭐⭐⭐ 长期目标 |
+| B. 强制指定 --build/--host 覆盖 | ✅ 立即可行 | ⭐⭐ 短期 workaround |
+| C. --with-internal-glib 禁用内嵌依赖 | 视软件而定 | ⭐ 如可用则最干净 |
+
+**方案 B 的正确使用方式**：
+```bash
+# 使用 --build/--host 作为兜底，不是首选方案
+# 必须在 manifest.yaml build_cleanliness 中记录为技术债务
+./configure --prefix=$PREFIX \
+    --build=aarch64-unknown-linux-ohos \
+    --host=aarch64-unknown-linux-ohos
+# 原因：glib 内嵌 config.guess(2014) 无 HarmonyOS 检测
+# 改进计划：为 glib 的 config.guess 打补丁后去掉此参数
+```
+
+### 3.7 OHOS 平台隔离标准写法
+
+> **原则**：所有平台特定的代码修改必须使用标准化的隔离写法，
+> 确保 OHOS 相关代码易于识别、不影响其他平台、便于上游接受。
+
+#### 三种标准模板
+
+**模板 A：C/C++ 源码中的预编译守卫**
+
+```c
+/* HarmonyOS: <具体原因，如 "fstat() 对非文件 fd 返回 EACCES"> */
+#ifdef __OHOS__
+/* 替代实现或安全回退 */
+static inline int ohos_fstat_compat(int fd, struct stat *st) {
+    if (fstat(fd, st) == 0) return 0;
+    if (errno == EACCES || errno == EPERM) {
+        memset(st, 0, sizeof(*st));
+        st->st_blksize = 4096;
+        return 0;
+    }
+    return -1;
+}
+#define compat_fstat(fd, st) ohos_fstat_compat((fd), (st))
+#else
+#define compat_fstat(fd, st) fstat((fd), (st))
+#endif
+```
+
+**模板 B：configure / configure.ac 中的平台分支**
+
+```bash
+# 在 configure.ac 中（优先级 ①）
+case "$host_os" in
+    *ohos*)
+        # HarmonyOS 特定配置
+        ac_cv_func_fstatat0=no      # 禁用不可靠的检测
+        ;;
+esac
+
+# 在 configure 中（优先级 ②，如果无法修改 configure.ac）
+# 找到对应的 case "$host_os" in 分支，添加 *ohos*) 模式
+```
+
+**模板 C：Makefile / Makefile.am 中的条件编译**
+
+```makefile
+# 在 Makefile.am 中（优先级 ①）
+if OHOS
+    CFLAGS += -D__OHOS__ -Wno-error=deprecated-declarations
+endif
+
+# 或在 configure.ac 中定义 AM_CONDITIONAL:
+AM_CONDITIONAL([OHOS], [echo "$host_os" | grep -q "ohos"])
+```
+
+#### 命名规范
+
+| 元素 | 规范 | 示例 |
+|------|------|------|
+| 宏/函数名前缀 | `ohos_` 或 `_ohos` | `ohos_fstat_compat()` |
+| 变量名 | `_ohos` 后缀 | `ac_cv_func_xxx_ohos` |
+| 补丁文件描述 | 以 `ohos-` 开头 | `0001-ohos-fix-fstat-for-non-file-fd.patch` |
+| 条件编译注释 | 以 `HarmonyOS:` 开头 | `/* HarmonyOS: musl 不支持 */` |
+
 ---
 
 ## 4. CMake 适配

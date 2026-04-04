@@ -138,9 +138,12 @@
 - ✅ 触摸事件恢复（BN_Sci_OnTouch* + RenderFrame 重入保护 g_rendering）
 - ✅ 键盘事件恢复（.onKeyEvent + sciRequestRedraw + focusable 配置）
 - ✅ 光标闪烁机制（BN_Sci_Tick + setInterval 500ms 驱动 caret blink）
+- ✅ **Patch-0013: UAF 修复** — CachedMeasurementSurface operator delete no-op
+- ✅ **Patch-0014: bitmap 尺寸修复** — CachedMeasurementSurface 1x1 → 2048x256
+  - 根因：1x1 像素 bitmap 在 ButtonDown 文本测量路径触发 Skia SEGV_ACCERR
 
-**待设备验证**（2026-04-02 当前步骤）：
-- [ ] HAP clean build + 部署到设备
+**待设备验证**（2026-04-04 当前步骤）：
+- [ ] Rebuild HAP + 部署到设备，测试鼠标点击/拖选
 - [ ] 触摸选择文本、滚动
 - [ ] 键盘输入（英文、中文）
 - [ ] 光标闪烁可见

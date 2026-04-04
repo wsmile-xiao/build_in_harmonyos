@@ -1,4 +1,32 @@
-# MyNotePad 项目进展
+# Scintilla 5.6.1 OHOS 适配进展
+
+## 🎉 最新状态（2026-04-03）— SurfaceHolder 路径打通！
+
+**当前项目**: `/storage/Users/currentUser/renshang/BlueNotePad_v2/`
+**日志文件**: `/storage/Users/currentUser/renshang/BlueNotePad_v2/日志.txt`
+
+### v2 项目验证结果
+```
+SurfaceHolder=有效 ✅ | OnSurfaceCreated 触发 ✅ | AccessibilityProvider 有效 ✅
+OnFrameCallback 持续运行 ✅ | 光标闪烁正常 ✅ | 键盘输入正常 ✅ | 显示正常 ✅
+鼠标点击正常 ✅ | 鼠标拖动 SIGABRT → 正向修复中（两阶段尺寸不一致）
+```
+
+### 关键发现
+- **必须基于 demo 项目模板 (`ArkUISurfaceHolder-main`) 构建**，不能从零创建
+- **模块名必须是 `nativerender`**，不能用 `entry` 或其他自定义名
+- **`.bitfun/project.json` 的 name 字段必须与实际目录匹配**
+- `OH_ArkUI_SurfaceHolder_Create()` 在非 demo 项目模板中始终返回 null（7 个实验排除所有代码/配置因素）
+
+### 当前待修复
+- 鼠标拖动 SIGABRT：两阶段尺寸不一致导致 Scintilla 内部几何状态异常
+  - OnSurfaceCreated GET_BUFFER_GEOMETRY 返回 0x0 → fallback Init(800×600)
+  - OnSurfaceChanged 收到正确尺寸(2090×1203) 但未完整重绘
+  - **修复方案**：OnSurfaceCreated 不初始化，统一在 OnSurfaceChanged 中完整 Init+RenderFrame
+
+---
+
+# MyNotePad 项目进展（历史记录）
 
 ## 项目概述
 
