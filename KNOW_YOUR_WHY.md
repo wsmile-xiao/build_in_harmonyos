@@ -1,6 +1,6 @@
 # 🎯 核心目的：你为什么存在
 
-> **每次开始新编译任务时，先读本文件。每次完成 Phase 3 进入 Phase 4 时，再读本文件。**
+> **每次开始新编译任务时，先读本文件。每次完成 Phase 3 进入 Phase 4/5 时，再读本文件。**
 
 ## 一句话回答
 
@@ -60,12 +60,12 @@
 > **"先建骨架再填肉"，而不是"做完再整理"。**
 
 传统方式：编译完成 → 回忆过程 → 提取知识 → 写文件（容易遗漏）
-新方式：Phase 1.5 建骨架 → Phase 3 每步实时记录和提取 → Phase 4 只做校验补充
+新方式：Phase 1.5 建骨架 → Phase 3 每步实时记录和提取 → Phase 4/5 只做校验补充
 
 这意味着：
 - **Phase 3 的 →Xa 和 →Xb 不是可选的**，是流程的有机组成部分
 - **禁止批量补记**：所有记录必须在问题解决的同一会话内完成
-- Phase 4 Step 6 变成"质检+收尾"，即使跳过也不会丢失太多（但不建议跳过）
+- Phase 4 (verify) + Step 5 (预编译包) + Step 5.5 (归档收口) 变成"质检+收尾"，即使跳过也不会丢失太多（但不建议跳过）
 
 ## 档案 vs 知识库职责
 
@@ -164,13 +164,19 @@
 
 > ⚠️ **Phase 1.5 不可跳过**。它是"边做边记"机制的基础。跳过 = 后续所有实时记录无处可写。
 
-## Phase 2 → Phase 3 转换前，自检：
+## Phase 2 → Phase 2.5 转换前（编译完成后，安装验证前），自检：
 
 ```
-□ TMPDIR 设置了？
-□ CC/CFLAGS/LDFLAGS 设置了？
-□ 依赖工具（cc、make、ar）可用？
-□ 已检索 archives/ 和 knowledge/？
+□ make install 成功了？
+□ 准备好独立目录安装验证（Phase 2.5）？
+```
+
+## Phase 2.5 独立目录安装验证（⭐ 必须做）
+
+```
+□ 干净源码 + 补丁应用？
+□ 独立 TEST_PREFIX configure + make install？
+□ 功能回归测试结果？
 ```
 
 ## Phase 3 过程中（每个子步骤 3.1~3.5 完成后），自检：
@@ -182,22 +188,24 @@
 □ 如果是 L1/L2：已在 manifest.yaml 中添加 knowledge_ref 链接？
 ```
 
-## Phase 3 → Phase 4 转换前（编译完成后），自检：
+## Phase 3 → Phase 4 转换前（编译+验证完成后），自检：
 
 ```
 □ 编译成功了？还是部分成功？
-□ make install 产物的软链接都验证了？
+□ Phase 2.5 独立目录验证通过了？
+□ make check / 功能测试结果？
 □ PROGRESS.md 的每个检查点都已填写？
-□ 准备好做"校验+收尾"工作？
+□ 准备好做质量门禁（verify-build.sh）？
 ```
 
 > ⚠️ **这是最危险的转换点**。编译成功的兴奋感会让你想直接结束。
-> 但 Phase 4 才是这个 Skill 存在的理由。没有 Phase 4，知识不会增长，系统不会变强。
-> 不过由于 Phase 3 已完成 90% 的知识提取工作，Phase 4 现在主要是"质检+收尾"。
+> 但 Phase 4 (质量门禁) + Step 5 (预编译包) + Step 5.5 (归档收口) 才是这个 Skill 存在的理由。
+> 不过由于 Phase 3 已完成 90% 的知识提取工作，后续步骤主要是"质检+收尾"。
 
-## Phase 4 完成前，自检：
+## Phase 4 + Step 5 + Step 5.5 完成前，自检：
 
 ```
+□ G1-G4 质量门禁通过？（verify-build.sh）
 □ 每个源码修改都有对应的补丁文件？（diff 校验确认）
 □ 补丁能干净应用？（patch --dry-run 验证）
 □ manifest.yaml 创建了？字段完整？knowledge_gained 和 knowledge_ref 都填了？
@@ -205,9 +213,10 @@
 □ 有遗漏的 →Xb 提取吗？→ 立即补提取
 □ 有应提升为 L1/L2 但被遗漏的 manifest 条目吗？→ 立即提升
 □ knowledge/ 中有重复条目吗？→ 合并而非新增
-□ SUMMARY.md 运行 gen_summary.py 更新了？
-□ _index.yaml status 从 compiling 改为 completed/failed/partial？
-□ PROGRESS.md 末尾追加了"编译结束"时间戳和最终状态？
+□ 预编译包制作完成？（10 步流程，见 packaging.md）
+□ install.sh 已生成并测试？（curl | sh -s -- <ver>）
+□ finalize-archive.sh 执行通过？（归档收口+RELEASENOTE生成）
+□ PREBUILD_TODOLIST.md 已更新？
 ```
 
 ---
@@ -216,14 +225,13 @@
 
 | 指标 | 值 | 健康度 |
 |------|-----|--------|
-| 已编译软件 | 26 款 / 28 个版本 | ✅ |
-| 错误模式 | E001-E053（53 条） | ✅ |
-| 知识文档 | 21 篇 | ✅ |
-| _index.yaml 同步 | ❌ 少 2 个 Python 版本 | 🔴 需修复 |
-| SUMMARY.md 同步 | ❌ 补丁数统计偏差大 | 🔴 需修复 |
-| Python 3.12.9 manifest | ❌ 缺失 | 🔴 需修复 |
-| manifest 格式一致性 | ⚠️ 8/27 使用非标准格式 | 🟡 需统一 |
-| tmp/ 冗余 | ❌ 995KB 临时文件 | 🔴 需清理 |
+| 已编译软件 | **30** 款 / **33** 个版本 | ✅ |
+| 错误模式 | E001-E067+（67+ 条） | ✅ |
+| 知识文档 | **29** 篇 | ✅ |
+| _index.yaml 同步 | ⚠️ 需检查 | 🟡 |
+| SUMMARY.md 同步 | ⚠️ 需检查 | 🟡 |
+| manifest 格式一致性 | 🟡 部分需统一到 v4 schema | 🟡 |
+| tmp/ 冗余 | ✅ 已清理 | ✅ |
 
 ---
 
@@ -476,8 +484,8 @@ objective: |
   KNOW_YOUR_WHY.md  # 约束与理念（永久）
   README.md         # 项目说明（永久）
   SUMMARY.md        # 由 gen_summary.py 生成（自动）
-  CHANGELOG.md      # 变更历史（永久）
   CONTRIBUTING.md   # 贡献指南（永久）
+  PREBUILD_TODOLIST.md  # 预编译进度跟踪（永久）
   ```
 
 ### S10. 协作规范（多人 AI 实例并行编译时必须遵守）
@@ -535,5 +543,5 @@ objective: |
 ---
 
 *本文档是 SKILL.md 的精简伴侣。SKILL.md 回答"怎么做"，本文档回答"为什么"和"绝对不能忘什么"。*
-*版本: 2.2 | 更新: 2026-03-30 | 新增: 工作流改进规则（D4-D7 致命级、S4-S8 严重级）*
+*版本: 2.3 | 更新: 2026-04-08 | 变更: 数据刷新(30款/67+错误/29篇知识) + 去CHANGELOG引用 + 对齐v4.0*
 

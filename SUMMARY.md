@@ -1,7 +1,7 @@
 # 鸿蒙平台开源软件编译兼容性总览
 
-> 最后更新：2026-04-06
-> 已收录软件：30 款 / 33 个版本
+> 最后更新：2026-04-08
+> 已收录软件：**30** 款 / **33** 个版本
 
 ## 📊 总体统计
 
@@ -45,11 +45,12 @@
 | **ncurses** | 6.4 | ✅ 完全成功 | 🟢 高 | Autotools | 1 | - | [📄](archives/n/ncurses/6.4/) |
 | **openssl** | 1.1.1w | ✅ 完全成功 | 🟢 高 | Custom Perl | 1 | - | [📄](archives/o/openssl/1.1.1w/) |
 | **patch** | 2.7.6 | ⚠️ 部分成功 | 🟡 中 | Autotools | 1 | - | [📄](archives/p/patch/2.7.6/) |
+| **pkg-config** | 0.29.2 | ✅ 完全成功 | 🟢 高 | Autotools | **6** | - | [📄](archives/p/pkg-config/0.29.2/) |
 | **python** | 3.12.9、3.9.0、3.9.25 | 🧪 已测试 |  | Autotools | 82 | - | [📄](archives/p/python/3.9.25/) |
 | **readline** | 8.2 | ✅ 完全成功 | 🟢 高 | Autotools | 2 | - | [📄](archives/r/readline/8.2/) |
 | **rsync** | 3.3.0 | ⚠️ 部分成功 | 🟡 中 | Autotools | 2 | - | [📄](archives/r/rsync/3.3.0/) |
 | **scintilla** | 5.6.1 | ⚠️ 部分成功 | 🟡 中 | Makefile | 0 | - | [📄](archives/s/scintilla/5.6.1/) |
-| **sed** | 4.9 | ✅ 完全成功 | 🟢 高 | Autotools | 1 | - | [📄](archives/s/sed/4.9/) |
+| **sed** | 4.9 | ✅ 完全成功 | 🟢 高 | Autotools | **2** | - | [📄](archives/s/sed/4.9/) |
 | **strace** | 6.19 | ⚠️ 部分成功 | 🔴 低 | Autotools | 3 | - | [📄](archives/s/strace/6.19/) |
 | **tar** | 1.35 | ✅ 完全成功 | 🟢 高 | Autotools | 1 | - | [📄](archives/t/tar/1.35/) |
 | **texinfo** | 7.3 | ✅ 完全成功 | 🟢 高 | Autotools | 0 | - | [📄](archives/t/texinfo/7.3/) |

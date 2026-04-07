@@ -1,421 +1,333 @@
 # 贡献指南
 
-感谢您对 OpenHarmony 编译智能体项目的关注！本文档将帮助您了解如何为项目贡献新的软件编译档案。
+> 如何为鸿蒙编译知识库添加新软件或改进现有内容。
 
 ## 目录
 
-- [如何添加新软件档案](#如何添加新软件档案)
-- [补丁命名规范](#补丁命名规范)
-- [manifest.yaml 必填字段](#manifestyaml-必填字段)
-- [测试报告要求](#测试报告要求)
-- [PR 提交流程](#pr-提交流程)
+- [添加新软件](#添加新软件)
+- [归档目录结构](#归档目录结构)
+- [补丁规范](#补丁规范)
+- [预编译包制作](#预编译包制作)
+- [install.sh 规范](#installsh-规范)
+- [manifest.yaml 字段](#manifestyaml-必填字段)
+- [知识库更新](#知识库更新)
 
 ---
 
-## 如何添加新软件档案
+## 添加新软件
 
-### 1. 创建目录结构
+### 方式 A：使用 SKILL 五步走流程（推荐）
 
-软件档案按照首字母组织，目录结构如下：
+SKILL.md v4.0 定义了标准五步走流程：
 
 ```
-archives/{首字母}/{软件名}/{版本}/
-├── manifest.yaml        # 元数据清单（必须）
-├── README.md            # 编译说明（必须）
-├── patches/             # 补丁目录
-│   ├── 0001-xxx.patch
-│   └── 0002-xxx.patch
-├── reports/             # 报告目录
-│   ├── build-report.md  # 编译过程记录
-│   ├── test-report.md   # 测试报告
-│   └── compatibility.md # 兼容性评估
-├── scripts/             # 编译脚本（可选）
-│   └── build.sh
-└── logs/                # 完整日志（可选）
-    └── build.log
+Step 1:  init-build.sh          初始化（下载/解压/骨架）
+Step 2:  AI 编译                 configure + make + make install
+Step 2.5: 独立目录安装验证       干源码 + 补丁 + 独立 TEST_PREFIX
+Step 3:  make check / 功能验证   测试套件或手动功能测试
+Step 4:  verify-build.sh         质量门禁（G1-G4 四道检测）
+Step 5:  预编译包制作            10 步打包流程
+Step 5.5: finalize-archive.sh    归档收口
 ```
 
-### 2. 创建档案步骤
-
-#### 步骤 1: 创建目录
+一键启动：
 
 ```bash
-# 示例：添加 curl 7.88.1
-mkdir -p archives/c/curl/7.88.1/{patches,reports,scripts,logs,tests}
+./scripts/init-build.sh <软件名> <版本> [--url=<下载URL>]
+# 然后 AI 执行 Step 2 ~ Step 5.5
+./scripts/finish-build.sh <软件名> <版本> success
 ```
 
-#### 步骤 2: 使用模板创建文件
+### 方式 B：手动创建档案
+
+如果不用 init-build.sh，手动按以下步骤：
+
+#### 1. 创建目录结构
 
 ```bash
-# 复制模板
-cp templates/manifest.yaml archives/c/curl/7.88.1/
-cp templates/README.md archives/c/curl/7.88.1/
-cp templates/build-report.md archives/c/curl/7.88.1/reports/
-cp templates/test-report.md archives/c/curl/7.88.1/reports/
+mkdir -p archives/{首字母}/{软件名}/{版本}/{patches,reports,packaging}
 ```
 
-#### 步骤 3: 填写 manifest.yaml
+**双层结构**（v4.0 强制）：
 
-编辑 `manifest.yaml`，填写软件信息（详见下文必填字段说明）。
+```
+archives/{首字母}/{软件名}/          ← 软件级（跨版本共享）
+├── README.md                        # 编译说明
+├── RELEASENOTE.md                   # 发布说明（多版本聚合，自动生成）
+├── install.sh                       # 安装脚本（参数化: sh -s -- <ver>）
+│
+└── {版本}/                          ← 版本级（每次编译快照）
+    ├── manifest.yaml                # 元数据
+    ├── PROGRESS.md                  # 进展记录
+    ├── patches/                     # 补丁文件
+    │   ├── 0001-xxx.patch
+    │   └── 0002-yyy.patch
+    ├── reports/                     # 报告
+    │   ├── test-report.md
+    │   ├── quality-report.md
+    │   └── skill-feedback.md
+    └── packaging/                  # 预编译包
+        ├── {name}-{ver}-ohos-aarch64.tar.gz        # Release 包
+        └── {name}-{ver}-ohos-aarch64-debug.tar.gz  # Debug 符号包
+```
 
-#### 步骤 4: 生成补丁文件
+#### 2. 填写 manifest.yaml
 
-如果您对源码进行了修改，生成补丁文件：
+见下方 [manifest.yaml 必填字段](#manifestyaml-必填字段)。
+
+#### 3. 生成补丁
 
 ```bash
-# 在源码目录下
-diff -Naur original_source/ modified_source/ > 0001-description.patch
+# 使用 refresh-patch.sh 自动生成（推荐）
+./scripts/refresh-patch.sh --auto <软件名> <版本>
 
-# 或使用 git
-git diff > 0001-description.patch
+# 或手动生成
+diff -Naur original/ modified/ > patches/0001-description.patch
 ```
 
-#### 步骤 5: 更新索引
-
-编辑 `archives/_index.yaml`，添加新软件的索引信息：
-
-```yaml
-software_index:
-  # ...
-  curl:
-    versions: ["7.88.1"]
-    build_system: autotools
-    status: success
-    path: archives/c/curl
-```
-
-### 3. 使用辅助脚本
-
-我们提供了辅助脚本来简化流程：
+#### 4. 验证
 
 ```bash
-# 自动创建档案目录结构
-./scripts/create-archive.sh <软件名> <版本>
+# 质量门禁
+./scripts/verify-build.sh <软件名> <版本>
 
-# 检测构建系统类型
-./scripts/detect-build-system.sh <源码目录>
-
-# 验证补丁文件
-./scripts/validate-patch.sh <补丁文件> <源码目录>
+# 归档收口（自动清理+校验+生成 RELEASENOTE）
+./scripts/finalize-archive.sh <软件名> <版本>
 ```
 
 ---
 
-## 补丁命名规范
+## 归档目录结构
+
+### 文件命名统一
+
+| 用途 | 正确名称 | 禁止名称 |
+|------|---------|----------|
+| 测试报告 | `test-report.md` | `TEST_REPORT.md` `build-report.md` |
+| 质量报告 | `quality-report.md` | （verify-build.sh 固定输出） |
+| SKILL 反馈 | `skill-feedback.md` | `feedback.md` |
+| 进展记录 | `PROGRESS.md` | `progress.md` `STATUS.md` |
+| 安装脚本 | `install.sh` | `{name}-install.sh` |
+| 发布说明 | `RELEASENOTE.md` | `CHANGES.md` `HISTORY.md` |
+
+### 一致性检查项
+
+| 检查项 | 方法 | 允许差异 |
+|--------|------|---------|
+| 状态一致性 | grep status: manifest vs PROGRESS | 不允许 |
+| 补丁数量 | manifest patches_applied vs 磁盘 *.patch 数 | 不允许 |
+| 对话记录 | PROGRESS.md 中对话出现次数 | 至少 1 轮 |
+
+---
+
+## 补丁规范
 
 ### 命名格式
 
-补丁文件必须遵循以下命名格式：
-
 ```
-NNNN-description.patch
+NNNN-{文件名}.patch
 ```
 
-- **NNNN**: 四位数字序号（0001-9999）
-- **description**: 简短描述，使用小写字母和连字符
+- **NNNN**: 四位数字序号（0001 开始，连续编号）
+- **{文件名}**: 小写字母 + 连字符
 
 ### 示例
 
 ```
 patches/
-├── 0001-add-harmonyos-support.patch
-├── 0002-fix-configure-ac.patch
-├── 0003-update-config-guess.patch
-└── 0004-fix-musl-compat.patch
+├── 0001-config.guess.patch      # config.guess HarmonyOS 检测
+├── 0002-config.sub.patch        # config.sub ohos 三元组
+└── 0003-fix-include-path.patch  # 头文件路径修复
 ```
 
-### 命名最佳实践
+### 要求
 
-1. **序号连续**: 从 0001 开始连续编号
-2. **描述清晰**: 补丁用途一目了然
+1. **格式**: unified diff（`diff -u` 或 `git diff`）
+2. **上下文**: 至少 3 行
 3. **单一职责**: 每个补丁解决一个问题
-4. **避免空格**: 使用连字符代替空格
+4. **可复现**: 原始 tarball + 补丁集 → 100% 重现相同产物
+5. **可验证**: `patch --dry-run -p1` 干净通过
+6. **可上游**: 有 `#ifdef __OHOS__` 守卫，可提交给上游
 
-### 补丁文件要求
+### 禁止
 
-1. **格式标准**: 使用 unified diff 格式
-2. **包含上下文**: 至少保留 3 行上下文
-3. **添加说明**: 在补丁文件开头添加注释说明用途
+- sed 直接改 configure/Makefile 等生成文件（不可复现）
+- 修改层级优先级：① configure.ac/CMakeLists.txt/源码 > ② .in 文件 > ③ Makefile > ④ ❌ 禁止改二进制
 
-示例：
+---
 
-```diff
-From: Your Name <your.email@example.com>
-Date: Mon, 1 Jan 2024 00:00:00 +0000
-Subject: [PATCH] Add HarmonyOS platform support
+## 预编译包制作
 
-This patch adds configuration support for HarmonyOS platform
-by updating config.guess and config.sub scripts.
+详见 [knowledge/packaging.md](knowledge/packaging.md) v2.3。
 
-diff --git a/config.guess b/config.guess
---- a/config.guess
-+++ b/config.guess
-@@ -1,4 +1,4 @@
--#!/bin/sh
-+#!/bin/bash
- # Attempt to guess a canonical system name.
+### 核心要求
+
+1. **tar.gz 内部必须为扁平结构**：bin/ share/ lib/ 在顶层，禁止嵌套
+2. **打包命令**：`cd $PKGDIR && tar czf output.tar.gz *`
+3. **debug 包必须打包**
+4. **ELF 签名**：binary-sign-tool adhoc self-sign
+5. **权限修复**：签名后必须 chmod +x（签名工具会重置权限）
+
+### 10 步流程概要
+
 ```
+Step 1:  make install 到独立目录
+Step 2:  清理缓存和非必要文件
+Step 3:  符号链接替换（wrapper/cp）
+Step 4:  收集外部依赖库到 lib/external/
+Step 5:  设置 RPATH（$ORIGIN 相对路径）
+Step 6:  Strip debug 符号 + 分离保存
+Step 7:  ELF 签名（adhoc self-sign）
+Step 8:  统一修复执行权限（必做！）
+Step 9:  创建 install.sh（单独托管，不打包进 tar.gz）
+Step 10: 打包 tar.gz（扁平结构）
+```
+
+---
+
+## install.sh 规范
+
+每个软件的 install.sh 基于 [scripts/install-template.sh](scripts/install-template.sh) 生成。
+
+### 核心原则
+
+| 原则 | 说明 |
+|------|------|
+| 极简依赖 | 只用 POSIX sh + tar + curl + cp + chmod |
+| 纯 ASCII | 禁止 emoji/颜色码/多字节字符 |
+| 扁平释放 | bin/lib/share 直接落到 ~/usr/local/ |
+| 管道安全 | 禁止 heredoc（与 \| sh 冲突） |
+| 参数化 | `sh -s -- {version}` 接受版本参数 |
+
+### 目录约定
+
+```
+~/usr/local/           # 公共根（所有软件共享）
+├── bin/               # 所有命令汇聚
+├── lib/
+│   ├── pkgconfig/     # .pc 文件池
+│   └── external/      # 外部依赖库
+└── share/
+    └── man/man1/
+```
+
+### 禁止事项
+
+| 禁止项 | 原因 |
+|--------|------|
+| set -e | cp 遇保护文件报错中断后续步骤 |
+| heredoc (<< EOF) | 与 \| sh stdin 冲突 |
+| emoji / Unicode | toybox ash 截断多字节 |
+| --strip-components | toybox tar 不支持 |
+| source / . | 非 POSIX 标准 |
+| [[ ]] | bashism |
 
 ---
 
 ## manifest.yaml 必填字段
 
-### 核心必须字段
-
-以下字段是**必须填写**的：
+### 核心字段
 
 ```yaml
-# 软件名称（小写）
-software: example
-
-# 版本号
-version: 1.0.0
-
-# 编译状态
-# - success: 编译成功，测试通过
-# - partial: 编译成功，部分功能异常
-# - failed: 编译失败
-status: success
-
-# 构建系统类型
-# - autotools: configure + make
-# - cmake: CMakeLists.txt
-# - custom-perl: 自定义 Perl Configure（如 OpenSSL）
-# - meson: meson.build
-# - makefile: 直接 Makefile
-# - qmake: .pro 文件
-build_system: autotools
-
-# 编译日期（YYYY-MM-DD）
-compile_date: 2024-01-01
+software: example              # 软件名称（小写）
+version: 1.0.0                 # 版本号
+status: success               # success | partial | failed
+build_system: autotools        # autotools | cmake | meson | makefile | custom-perl
+compile_date: 2026-04-08      # YYYY-MM-DD
 ```
 
-### 推荐填写字段
-
-以下字段建议填写以提供完整信息：
+### 推荐字段
 
 ```yaml
-# 依赖信息
 dependencies:
-  required: []      # 必需依赖
-  optional: []      # 可选依赖
-  recommended: []   # 推荐依赖
+  required: []                 # 必需依赖
+  optional: []                 # 可选依赖
 
-# 编译配置
 build_config:
   target: aarch64-unknown-linux-ohos
-  configure_options: []
-  cflags: ""
-  ldflags: ""
+  options: []                  # 额外 configure 参数（尽量为空！）
 
-# 补丁信息
-patches_applied:
+patches_applied:              # refresh-patch.sh 自动填充
   - file: 0001-xxx.patch
-    purpose: 补丁用途说明
-    lines_changed: 50
+    purpose: HarmonyOS 平台检测
 
-# 兼容性评估
+patch_generation:             # refresh-patch.sh 自动填充
+  method: auto
+  source_hash: sha256:...
+  patch_hash: sha256:...
+
+build_cleanliness:            # P0 参数最少化原则
+  standard_params_only: true
+  extra_params: []             # 技术债务列表
+
 compatibility:
-  level: high       # high | medium | low
+  level: high                  # high | medium | low
   issues: []
   notes: ""
 
-# 测试结果
 test_results:
-  type: official     # official | manual | skipped
-  total: 0
-  passed: 0
-  failed: 0
+  type: official               # official | manual | skipped
+  total: N
+  passed: N
+  failed: N
   note: ""
 
-# 知识沉淀
-knowledge_gained: []
-
-# 参考链接
-references: []
+knowledge_gained: []          # 本次沉淀的 L3 笔记
+skill_feedback: []             # 流程自省反馈
 ```
-
-### 完整模板
-
-完整的 `manifest.yaml` 模板位于 `templates/manifest.yaml`。
 
 ---
 
-## 测试报告要求
+## 知识库更新
 
-### 测试类型
+### 写入时机
 
-1. **official**: 使用官方测试套件
-2. **manual**: 手动功能测试
-3. **skipped**: 跳过测试（需说明原因）
+每次 Phase 3 编译过程中遇到新问题时，判断是否通用：
 
-### 测试报告内容
-
-在 `reports/test-report.md` 中应包含：
-
-#### 1. 基本信息
-
-- 软件名称和版本
-- 测试日期
-- 测试环境（系统版本、编译器版本等）
-- 测试类型
-
-#### 2. 测试执行
-
-##### 测试命令
-```bash
-make test
-# 或
-python -m pytest
+```
+问题 → "下一个不同软件也会遇到吗？"
+  ├─ 是 → L1（平台真理）或 L2（类别模式）→ 写入 knowledge/
+  └─ 否 → L3（版本笔记）→ 写入 manifest.yaml knowledge_gained
 ```
 
-##### 测试结果
-- 总测试数: 100
-- 通过: 95
-- 失败: 3
-- 跳过: 2
+### error-patterns.md 新增条目
 
-#### 3. 失败分析
-
-对于失败的测试，需要：
-
-- 列出失败的测试用例
-- 分析失败原因（系统限制、平台差异等）
-- 评估对核心功能的影响
-
-#### 4. 关键功能验证
-
-列出验证过的关键功能：
+格式：`E{NNN}: {简短描述}`
 
 ```markdown
-## 关键功能验证
-
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| 基本操作 | ✓ | 正常工作 |
-| 网络通信 | ✓ | SSL/TLS 正常 |
-| 文件操作 | ✗ | 权限问题 |
+### E068: 示例错误描述
+- 类别: 编译/链接/运行时/打包
+- 现象: 错误信息特征
+- 根因: 为什么发生
+- 解决方案: 具体操作步骤
+- 影响: 哪些软件可能遇到
 ```
 
-### 兼容性评估
+### 更新 PREBUILD_TODOLIST.md
 
-在 `reports/compatibility.md` 中记录：
-
-1. **兼容性等级**：high / medium / low
-2. **可用功能列表**
-3. **限制和注意事项**
-4. **系统调用兼容性**
+每完成一个软件的编译和打包后：
+1. 状态改为 "✅ 完成"
+2. 填写包路径和大小
+3. 记录补丁数和备注
+4. 更新顶部统计
 
 ---
 
-## PR 提交流程
+## 辅助脚本一览
 
-### 1. Fork 和克隆
-
-```bash
-# Fork 仓库后克隆
-git clone https://github.com/YOUR_USERNAME/build_in_harmonyos.git
-cd build_in_harmonyos
-
-# 添加上游仓库
-git remote add upstream https://github.com/ORIGINAL_REPO/build_in_harmonyos.git
-```
-
-### 2. 创建分支
-
-```bash
-# 创建新分支
-git checkout -b add-software-curl
-```
-
-### 3. 添加新软件档案
-
-按照上述流程创建新的软件档案。
-
-### 4. 验证更改
-
-```bash
-# 验证目录结构
-find archives/c/curl -type f
-
-# 验证 manifest.yaml 格式
-python -c "import yaml; yaml.safe_load(open('archives/c/curl/7.88.1/manifest.yaml'))"
-
-# 验证补丁文件
-./scripts/validate-patch.sh archives/c/curl/7.88.1/patches/*.patch
-
-# 测试补丁应用
-cd /path/to/source
-patch --dry-run -p1 < /path/to/archives/c/curl/7.88.1/patches/0001-xxx.patch
-```
-
-### 5. 提交更改
-
-```bash
-# 添加文件
-git add archives/c/curl/7.88.1/
-git add archives/_index.yaml
-
-# 提交
-git commit -m "Add curl 7.88.1 archive with HarmonyOS support
-
-- Add build configuration for HarmonyOS
-- Fix configure script for platform detection
-- Tested with manual test suite
-
-Closes #XXX"
-```
-
-### 6. 推送并创建 PR
-
-```bash
-# 推送到您的 fork
-git push origin add-software-curl
-
-# 在 GitHub 上创建 Pull Request
-```
-
-### 7. PR 检查清单
-
-在提交 PR 前，请确保：
-
-- [ ] 目录结构正确（`archives/{首字母}/{软件名}/{版本}/`）
-- [ ] `manifest.yaml` 包含所有必填字段
-- [ ] 补丁文件命名符合规范（`NNNN-description.patch`）
-- [ ] 补丁可以正确应用到源码
-- [ ] 更新了 `archives/_index.yaml` 索引
-- [ ] 提供了测试报告
-- [ ] README.md 包含编译说明
-- [ ] 代码审查后及时响应反馈
-
-### 8. 代码审查
-
-PR 提交后会进行代码审查，关注点包括：
-
-1. **档案结构完整性**
-2. **补丁质量和可维护性**
-3. **manifest.yaml 信息准确性**
-4. **测试覆盖充分性**
-5. **文档清晰度**
-
-### 9. 合并标准
-
-PR 将在以下条件满足后合并：
-
-- 通过所有自动检查
-- 至少一位维护者审查通过
-- 解决所有讨论的问题
-- 符合项目代码规范
+| 脚本 | 用途 | 调用方式 |
+|------|------|----------|
+| `init-build.sh` | 编译初始化 | Step 1 入口 |
+| `finish-build.sh` | 收尾管线（4步） | Step 3 结束后 |
+| `refresh-patch.sh --auto` | 补丁自动生成 | finish 内部 |
+| `verify-build.sh` | 质量门禁 G1-G4 | Step 4 必须 |
+| `finalize-archive.sh` | 归档收口（5阶段） | Step 5.5 必须 |
+| `init-archive.sh` | 档案骨架创建 | init 内部 |
+| `install-template.sh` | install.sh 模板 | 打包时参考 |
+| `detect-build-system.sh` | 构建系统检测 | 可选 |
+| `search-download-url.sh` | URL 搜索 | init fallback |
+| `check-env.sh` | 环境变量检查 | init 内部 |
 
 ---
 
-## 需要帮助？
-
-如果您在贡献过程中遇到问题：
-
-1. 查看 `knowledge/` 目录下的知识库文档
-2. 参考 `archives/` 下已有的软件档案示例
-3. 在 GitHub Issues 中提问
-4. 联系项目维护者
-
-感谢您的贡献！
+*最后更新: 2026-04-08 | 对齐 SKILL.md v4.0*
