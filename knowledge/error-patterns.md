@@ -60,6 +60,9 @@
 | [E052](#e052-rpath-缺失导致子进程找不到-libpython) | 构建/RPATH | subprocess exit 127, libpython3.9.so not found, LD_LIBRARY_PATH | 🔴 阻塞 |
 | [E053](#e053-cc1plus-不可用必须使用-clang) | 工具链 | cc1plus: error, CXX compiler cannot create executables | 🔴 阻塞 |
 | [E054](#e054-外来二进制首次执行被安全确认弹窗阻止) | 安全机制 | Permission denied, 首次执行后消失, make check 误判 | 🟡 中等 |
+| [E055](#e055-posix_spawn-与-forkexec-行为差异) | 子进程 | posix_spawn 行为差异 | 🟡 中等 |
+| [E056](#e056-unittestskipif-reason-换行反转导致-indentationerror) | 测试 | 多行 reason 缩进错误 | 🔴 阻塞 |
+| [E057](#e057-regrtest-默认多worker导致并发竞态) | 测试 | 并发测试竞态 | 🟡 中等 |
 | [E058](#e058-sed-操作生成文件导致补丁不可复现) | 补丁质量 | sed on configure/Makefile, 不可复现 | 🔴 阻塞 |
 | [E059](#e059-源码修改未保存为-patch-文件) | 补丁质量 | 对话中修改了源码但无 .patch 文件 | 🔴 阻塞 |
 | [E060](#e060-补丁缺少-__ohos__-守卫无法上游化) | 补丁质量 | 硬编码修改, 无平台隔离, 上游拒绝 | 🟡 中等 |
@@ -2501,13 +2504,6 @@ ls -Z /path/to/file
 
 ---
 
-*文档版本: 2.9*
-*最后更新: 2026-03-30*
-*加强 E008：新增 lseek() 对非文件 fd 的限制*
-*新增 E054：外来二进制首次执行被安全确认弹窗阻止*
-
----
-
 ## E055: posix_spawn 与 fork+exec 行为差异（Python 3.12+）
 
 ### 错误特征
@@ -2582,6 +2578,13 @@ regrtest 默认按 `os.cpu_count()` 开启 worker（鸿蒙=18），与 `MAKEFLAG
 ```bash
 MAKEFLAGS="-j1" make test TESTOPTS="-j1 --ignore=smtpnet ..."
 ```
+
+---
+
+*文档版本: 2.9*
+*最后更新: 2026-03-30*
+*加强 E008：新增 lseek() 对非文件 fd 的限制*
+*新增 E054：外来二进制首次执行被安全确认弹窗阻止*
 
 ---
 

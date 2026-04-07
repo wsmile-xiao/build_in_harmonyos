@@ -51,7 +51,7 @@ curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download
 | 状态 | 数量 | 代表软件 |
 |------|------|----------|
 | ✅ 完全成功 | 23 | bash, gawk, openssl, ncurses, jq, file, ... |
-| ⚠️ 部分成功 | 7 | coreutils, htop, wget, rsync, strace, ... |
+| ⚠️ 部分成功 | 8（含 🧪 已测试 1 款，详见 SUMMARY.md） | coreutils, htop, patch, wget, rsync, strace, ... |
 | ❌ 失败 | 0 | — |
 
 完整兼容性总览见 [SUMMARY.md](SUMMARY.md)。

@@ -132,14 +132,19 @@ else
 fi
 
 if [ "$_PATCH_EXISTS" -eq 0 ] && [ "$STATUS" != "failed" ]; then
-    echo ""
-    echo "  🔄 自动触发补丁管线..."
-    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-    if "$SCRIPT_DIR/refresh-patch.sh" --auto "$SOFTWARE_NAME" "$VERSION"; then
-        echo "  ✅ 补丁管线完成"
+    # 检查是否已被 finish-build.sh 的 Step [1/3] 调用过
+    if [ "${_SKIP_PATCH_GENERATION:-false}" = "true" ]; then
+        echo "  ⏭️  补丁管线已由 finish-build.sh 执行，跳过"
     else
-        echo "  ⚠️  补丁管线失败（退出码 $?），继续关闭档案"
-        echo "     可稍后手动执行: ./scripts/refresh-patch.sh --auto ${SOFTWARE_NAME} ${VERSION}"
+        echo ""
+        echo "  🔄 自动触发补丁管线..."
+        SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+        if "$SCRIPT_DIR/refresh-patch.sh" --auto "$SOFTWARE_NAME" "$VERSION"; then
+            echo "  ✅ 补丁管线完成"
+        else
+            echo "  ⚠️  补丁管线失败（退出码 $?），继续关闭档案"
+            echo "     可稍后手动执行: ./scripts/refresh-patch.sh --auto ${SOFTWARE_NAME} ${VERSION}"
+        fi
     fi
 elif [ "$_PATCH_EXISTS" -eq 0 ] && [ "$STATUS" = "failed" ]; then
     echo "  ➖ 编译失败，跳过补丁生成"

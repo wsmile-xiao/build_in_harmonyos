@@ -130,18 +130,27 @@ for elf in $(find "$PREFIX/bin" -type f 2>/dev/null); do
         if [ -z "$NEEEDED" ]; then
             log_pass "$(basename $elf): 无动态依赖（静态链接或无 NEEDED）"
         else
-            # 检查每个依赖是否存在
+            # 使用临时文件避免管道子 shell 丢失计数
+            _DEP_TMP="${TMPDIR:-$HOME/tmp}/.dep_check_$$.txt"
+            : > "$_DEP_TMP"
             echo "$NEEEDED" | while read -r line; do
                 lib=$(echo "$line" | sed 's/.*\[\(.*\)].*/\1/')
                 if [ -n "$lib" ]; then
                     if find "$PREFIX/lib" -name "$lib*" 2>/dev/null | grep -q .; then
                         : # 依赖存在
                     else
-                        log_warn "$(basename $elf): 缺少依赖 ${lib}"
-                        MISSING_DEPS=$((MISSING_DEPS + 1))
+                        echo "WARN:$(basename $elf): 缺少依赖 ${lib}" >> "$_DEP_TMP"
                     fi
                 fi
             done
+            # 在父 shell 中统计缺失依赖
+            if [ -f "$_DEP_TMP" ]; then
+                _missing_count=$(grep -c '^WARN:' "$_DEP_TMP" 2>/dev/null || echo "0")
+                _missing_count=$(echo "$_missing_count" | tr -d ' ')
+                MISSING_DEPS=$((MISSING_DEPS + _missing_count))
+                cat "$_DEP_TMP" | while IFS=: read -r _type _msg; do log_warn "$_msg"; done
+                rm -f "$_DEP_TMP"
+            fi
         fi
     fi
 done
@@ -468,7 +477,7 @@ fi
 
 # G4-6: finish-build.sh 是否已执行（强制门禁）
 echo ""
-echo "[G4-6/4] finish-build 收尾检查..."
+echo "[G4-extra] finish-build 收尾检查..."
 
 FEEDBACK_FILE="${ARCHIVE_DIR}/reports/skill-feedback.md"
 if [ -f "$FEEDBACK_FILE" ] && [ "$(wc -l < "$FEEDBACK_FILE" | tr -d ' ')" -gt 5 ]; then

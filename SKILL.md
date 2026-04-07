@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙系统编译智能体——三方库预编译框架
-version: 3.0.0
+version: 4.0.0
 author: OpenHarmony PC Developer社区
 permissions: 文件读写权限、Shell执行权限、网络访问权限
 ---

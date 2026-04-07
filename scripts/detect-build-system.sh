@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 # detect-build-system.sh - 检测软件使用的构建系统类型
 # 用法: ./detect-build-system.sh <源码目录>
 

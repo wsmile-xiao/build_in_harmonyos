@@ -52,7 +52,7 @@ show_help() {
   ./scripts/init-build.sh --resume                 # 恢复上次
 
 输出文件:
-  .build-context-<name>-<version>  — JSON 格式上下文文件
+  .build-context-<name>-<version>  — Shell source 格式上下文文件（export KEY=value）
 
 依赖:
   - scripts/software-registry.yaml  — 软件元数据注册表

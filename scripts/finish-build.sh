@@ -32,7 +32,8 @@ show_help() {
 步骤:
   1. 补丁生成 (refresh-patch.sh --auto)
   2. 归档收尾 (close-archive.sh)
-  3. 总结报告 (gen_summary.py)
+  3. 归档校验 (finalize-archive.sh)
+  4. 总结报告 (gen_summary.py)
 
 示例:
   ./scripts/finish-build.sh sed 4.9
@@ -42,7 +43,7 @@ show_help() {
 退出码:
   0  全部成功
   1  参数错误
-  N  失败步骤编号（1=补丁, 2=归档, 3=总结）
+  N  失败步骤编号（1=补丁, 2=归档, 3=校验, 4=总结）
 HELPEOF
     exit 0
 }
@@ -66,7 +67,7 @@ echo ""
 # ---- Step 1: 补丁生成 ----
 STEP1_OK=false
 if [ -x "${SCRIPT_DIR}/refresh-patch.sh" ]; then
-    echo "[1/3] 补丁生成..."
+    echo "[1/4] 补丁生成..."
     if "${SCRIPT_DIR}/refresh-patch.sh" --auto "$SOFTWARE" "$VERSION"; then
         STEP1_OK=true
         echo "  ✅ 补丁生成完成"
@@ -83,7 +84,7 @@ echo ""
 STEP2_OK=false
 if [ -x "${SCRIPT_DIR}/close-archive.sh" ]; then
     echo "[2/4] 归档收尾..."
-    if "${SCRIPT_DIR}/close-archive.sh" "$SOFTWARE" "$VERSION" "$STATUS"; then
+    if _SKIP_PATCH_GENERATION=true "${SCRIPT_DIR}/close-archive.sh" "$SOFTWARE" "$VERSION" "$STATUS"; then
         STEP2_OK=true
         echo "  ✅ 归档完成"
     else

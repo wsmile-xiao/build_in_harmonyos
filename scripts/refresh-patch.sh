@@ -481,7 +481,9 @@ auto_mode() {
     fi
 
     # 按文件逐个生成 patch（自动粒度拆分）
-    echo "$_diff_files" | while read _f; do
+    # 使用位置参数循环避免管道子shell变量丢失问题
+    set -- $_diff_files
+    for _f do
         _patch_num=$((_patch_num + 1))
         _patch_file="${PATCH_DIR}/$(printf '%04d' $_patch_num)-$(echo "$_f" | tr '/' '-').patch"
 
@@ -509,6 +511,8 @@ auto_mode() {
         fi
         _total_files=$((_total_files + 1))
     done
+    # 恢复位置参数（防御性）
+    set --
 
     rm -rf "$WORK"
 

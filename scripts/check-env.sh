@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/bin/sh
 # check-env.sh - 鸿蒙编译环境检查脚本
-# 用法: source scripts/check-env.sh 或 bash scripts/check-env.sh
+# 用法: source scripts/check-env.sh 或 sh scripts/check-env.sh
 
 echo "=========================================="
 echo "  鸿蒙编译环境检查"
@@ -14,18 +14,19 @@ WARNINGS=0
 echo "=== 必要环境变量 ==="
 
 check_var() {
-    local var=$1
-    local desc=$2
-    local required=$3
-    
-    if [ -n "${!var}" ]; then
-        echo "✅ $var=${!var}"
-    elif [ "$required" = "required" ]; then
-        echo "❌ $var 未设置 ($desc)"
-        ((ERRORS++))
+    _cv_var=$1
+    _cv_desc=$2
+    _cv_required=$3
+
+    _cv_val=$(eval "echo \"\${$_cv_var}\"")
+    if [ -n "$_cv_val" ]; then
+        echo "✅ $_cv_var=$_cv_val"
+    elif [ "$_cv_required" = "required" ]; then
+        echo "❌ $_cv_var 未设置 ($_cv_desc)"
+        ERRORS=$((ERRORS + 1))
     else
-        echo "⚠️  $var 未设置 ($desc)"
-        ((WARNINGS++))
+        echo "⚠️  $_cv_var 未设置 ($_cv_desc)"
+        WARNINGS=$((WARNINGS + 1))
     fi
 }
 
@@ -40,14 +41,14 @@ echo ""
 echo "=== 必要目录 ==="
 
 check_dir() {
-    local dir=$1
-    local desc=$2
-    
-    if [ -d "$dir" ]; then
-        echo "✅ $desc: $dir"
+    _cd_dir=$1
+    _cd_desc=$2
+
+    if [ -d "$_cd_dir" ]; then
+        echo "✅ $_cd_desc: $_cd_dir"
     else
-        echo "❌ $desc 不存在: $dir"
-        ((ERRORS++))
+        echo "❌ $_cd_desc 不存在: $_cd_dir"
+        ERRORS=$((ERRORS + 1))
     fi
 }
 
@@ -59,15 +60,15 @@ echo ""
 echo "=== 编译器 ==="
 
 check_cmd() {
-    local cmd=$1
-    local desc=$2
-    
-    if command -v "$cmd" >/dev/null 2>&1; then
-        local version=$($cmd --version 2>/dev/null | head -1)
-        echo "✅ $cmd: $version"
+    _cc_cmd=$1
+    _cc_desc=$2
+
+    if command -v "$_cc_cmd" >/dev/null 2>&1; then
+        _cc_version=$($_cc_cmd --version 2>/dev/null | head -1)
+        echo "✅ $_cc_cmd: $_cc_version"
     else
-        echo "❌ $cmd 不存在"
-        ((ERRORS++))
+        echo "❌ $_cc_cmd 不存在"
+        ERRORS=$((ERRORS + 1))
     fi
 }
 

@@ -40,101 +40,6 @@ HELPEOF
     exit 0
 }
 
-# ---------- 初始化计数器 ----------
-broken_count=0
-ok_count=0
-warn_count=0
-total_count=0
-
-# ---------- 检查单个软链接 ----------
-check_symlink() {
-    _link="$1"
-    total_count=$(( total_count + 1 ))
-
-    _target="$(readlink "$_link" 2>/dev/null)"
-
-    # 检查 1: readlink 能否读取
-    if [ -z "$_target" ]; then
-        echo "❌ [不可读] $_link"
-        broken_count=$(( broken_count + 1 ))
-        return
-    fi
-
-    # 检查 2: 使用 ls -la 检查目标是否存在
-    # 在 HMDFS 上 test -e 可能不准确，使用 ls 作为替代
-    _ls_info="$(ls -lad "$_link" 2>/dev/null)"
-
-    if [ $? -ne 0 ]; then
-        echo "❌ [悬空] $_link -> $_target"
-        broken_count=$(( broken_count + 1 ))
-        return
-    fi
-
-    # 检查 ls 输出中是否显示目标不可访问
-    # ls 会在悬空链接后显示 "No such file or directory"
-    if echo "$_ls_info" | grep -q "No such file or directory"; then
-        echo "❌ [悬空] $_link -> $_target"
-        broken_count=$(( broken_count + 1 ))
-        return
-    fi
-
-    # 检查是否为绝对路径 vs 相对路径
-    case "$_target" in
-        /*)
-            # 绝对路径 - 检查目标文件是否存在
-            if [ ! -e "$_target" ]; then
-                echo "❌ [目标不存在] $_link -> $_target"
-                broken_count=$(( broken_count + 1 ))
-                return
-            fi
-            ;;
-        *)
-            # 相对路径 - 解析为绝对路径再检查
-            _link_dir="$(dirname "$_link")"
-            _resolved_target="${_link_dir}/${_target}"
-            if [ ! -e "$_resolved_target" ]; then
-                echo "⚠️  [相对路径目标不存在] $_link -> $_target"
-                warn_count=$(( warn_count + 1 ))
-                return
-            fi
-            ;;
-    esac
-
-    # 检查 3: 对 .so 文件额外检查
-    case "$_link" in
-        *.so|*.so.*)
-            # 检查链接目标是否是有效的 ELF
-            _real_path="$(readlink -f "$_link" 2>/dev/null || echo "")"
-            if [ -n "$_real_path" ] && [ -f "$_real_path" ]; then
-                _magic="$(head -c 4 "$_real_path" 2>/dev/null)"
-                if echo "$_magic" | grep -q 'ELF'; then
-                    : # ELF 文件，正常
-                else
-                    echo "⚠️  [非ELF .so] $_link -> $_target"
-                    warn_count=$(( warn_count + 1 ))
-                    return
-                fi
-            fi
-            ;;
-    esac
-
-    # 检查循环链接
-    _resolved="$(readlink -f "$_link" 2>/dev/null)"
-    if [ -n "$_resolved" ]; then
-        # 检查解析后的路径是否是自身
-        case "$_resolved" in
-            "$_link"|"$_link/"*)
-                echo "❌ [循环链接] $_link -> $_target"
-                broken_count=$(( broken_count + 1 ))
-                return
-                ;;
-        esac
-    fi
-
-    echo "✅ [OK] $_link -> $_target"
-    ok_count=$(( ok_count + 1 ))
-}
-
 # ============ 主入口 ============
 if [ $# -lt 1 ]; then
     echo "❌ 缺少参数。使用 --help 查看帮助。"
@@ -157,14 +62,9 @@ fi
 echo "🔍 检查软链接: ${TARGET_DIR}"
 echo "────────────────────────────"
 
-# 使用 find 递归查找所有软链接
-find "$TARGET_DIR" -type l 2>/dev/null | while read -r _symlink; do
-    check_symlink "$_symlink"
-done
-
 # 由于管道的子 shell 问题，需要在管道外收集结果
 # 使用临时文件
-RESULT_FILE="/tmp/symlink_verify_$$.tmp"
+RESULT_FILE="${TMPDIR:-$HOME/tmp}/symlink_verify_$$.tmp"
 broken_count=0
 ok_count=0
 warn_count=0
