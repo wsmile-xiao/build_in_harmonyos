@@ -2,7 +2,7 @@
 
 > 创建时间: 2026-04-04
 > 目标：为无基础工具的鸿蒙机器制作预编译包（tar.gz）
-> 工作目录: `/storage/Users/currentUser/renshang/build_in_harmonyos`
+> 工作目录: `$PROJECT_DIR`
 > 参考: Python 3.12.9 的 `scripts/package_python.sh`（10步打包流程）
 
 ---
@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | 1 |
-| 编译成功 | 1 (pkg-config) |
-| 打包成功 | 1 (pkg-config 1.3M) |
+| 已完成 | 2 |
+| 编译成功 | 2 (pkg-config, sed) |
+| 打包成功 | 2 (pkg-config, sed) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -45,13 +45,13 @@
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 01 | pkg-config | 0.29.2 | ✅ 完成 | ✅ 成功 | ✅ 成功 | prebuild_packages/pkg-config-0.29.2-ohos-aarch64.tar.gz (1.3M) | 3个补丁(glib兼容性), 无外部依赖 |
+| 01 | pkg-config | 0.29.2 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/pkg-config-0.29.2-ohos-aarch64.tar.gz (687K) | 6个补丁, 无外部依赖, 已重打包(strip+签名) |
+| 02 | sed | 4.9 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/sed-4.9-ohos-aarch64.tar.gz (410K) | 2个补丁(config.guess+config.sub), 零额外参数 |
 
 ### 第一阶段：基础工具链（无外部依赖）
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 02 | sed | 4.9 | ⬜ 待编译 | - | - | - | 替代 toybox sed |
 | 03 | coreutils | 9.10 | ⬜ 待编译 | - | - | - | 替代 toybox (含expr) ⚠️ 原partial |
 | 04 | gawk | 5.3.0 | ⬜ 待编译 | - | - | - | 替代 toybox awk |
 
@@ -137,27 +137,36 @@
 | 文件 | 更新内容 | 状态 |
 |------|---------|------|
 | dependencies.md | 补充每款的「静态/共享」标注和环境变量风险说明 | ⬜ 待更新 |
-| packaging.md | 补充通用打包脚本模板（从 python3.12.9 抽象） | ⬜ 待更新 |
+| packaging.md | ✅ 已更新至 v2.3（10步流程+扁平结构规范+install.sh托管） | ✅ 完成 |
 | environment.md | 补充 §12「LD_LIBRARY_PATH 优先级陷阱与静态库策略」 | ⬜ 待更新 |
-| SKILL.md | Phase 4 补充「预编译包制作」标准步骤 | ⬜ 待更新 |
+| SKILL.md | ✅ 已更新至 v4.0（五步走+R10+预编译包+归档标准化） | ✅ 完成 |
+| install-template.sh | ✅ 已简化为 33 行极简版（cp -r * + $HOME/tmp） | ✅ 完成 |
+| error-patterns.md | ✅ 新增 E066/E067（tar格式+grep元字符） | ✅ 完成 |
+| finalize-archive.sh | ✅ 新建归档收口脚本（5阶段清理+校验+报告） | ✅ 完成 |
+| init-archive.sh | ✅ 升级支持 --clean 模式 + README 保护 | ✅ 完成 |
+| verify-build.sh | ✅ G4 补丁验证修复（三级降级+tarball重建） | ✅ 完成 |
+| finish-build.sh | ✅ 新增 Step 3 调用 finalize-archive.sh（4步流程） | ✅ 完成 |
+| create-archive.sh | ⚠️ 标记为 .deprecated（被 init-archive.sh 取代） | ✅ 处理 |
+| releasenote-template.md | ⚠️ 标记为 .deprecated（被 finalize-archive 取代） | ✅ 处理 |
+| knowledge_section_new.txt | 🗑️ 已删除（内容已整合进 SKILL §5） | ✅ 清理 |
 
 ---
 
 ## 📦 打包标准流程（10步）
 
-参考 `archives/p/python/3.12.9/scripts/package_python.sh`
+> 参考 `knowledge/packaging.md` v2.3（权威参考）
 
 ```
 Step 1:  make install 到独立目录（PKGDIR）
-Step 2:  清理缓存和非必要文件（__pycache__/.pyc/.bak/pip）
-Step 3:  符号链接替换（bin→wrapper脚本, lib→cp复制）
-Step 4:  收集外部依赖库到 lib/external/（llvm-readelf 分析 NEEDED）
-Step 5:  设置 RPATH（$ORIGIN 相对路径，patchelf）
-Step 6:  Strip debug 符号 + 分离保存（llvm-objcopy）
+Step 2:  清理缓存和非必要文件
+Step 3:  符号链接替换（wrapper脚本/cp复制）
+Step 4:  收集外部依赖库到 lib/external/
+Step 5:  设置 RPATH（$ORIGIN 相对路径）
+Step 6:  Strip debug 符号 + 分离保存
 Step 7:  ELF 签名（移除旧签名 → binary-sign-tool self-sign）
-Step 8:  统一修复执行权限（必做！签名后权限被重置）
-Step 9:  创建 activate.sh / README.md
-Step 10: 打包 tar.gz（主包 + debug包）
+Step 8:  ⭐ 统一修复执行权限（必做！签名后权限被重置）
+Step 9:  创建 install.sh（单独托管，不打包进 tar.gz）
+Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 ```
 
 ### 工具路径
@@ -180,4 +189,8 @@ Step 10: 打包 tar.gz（主包 + debug包）
 
 ---
 
-*最后更新: 2026-04-04*
+*最后更新: 2026-04-08*
+*v4.0 同步更新：*
+*  - sed 4.9 标记为已完成（编译+打包+gitcode上传）*
+*  - pkg-config 重打包（strip+签名+扁平结构）*
+*  - Skill 更新清单大幅更新（12项完成，3项待处理）*

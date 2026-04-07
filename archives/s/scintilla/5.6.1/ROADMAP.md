@@ -1,6 +1,6 @@
 # Scintilla 5.6.1 HarmonyOS 适配 - 路线图
 
-> 本路线图服务于 BlueNotePad 项目（/renshang/BlueNotePad），提供其 C++ 编辑器内核。
+> 本路线图服务于 BlueNotePad 项目（`$PROJECT_DIR/../BlueNotePad`），提供其 C++ 编辑器内核。
 
 ---
 

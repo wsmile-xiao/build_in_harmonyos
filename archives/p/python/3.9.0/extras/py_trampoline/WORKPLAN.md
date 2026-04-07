@@ -3,7 +3,7 @@
 > **创建日期**: 2026-03-28
 > **状态**: 🔄 规划完成，待实施
 > **源码目录**: `~/python/Python-3.9.0-clean-v5`
-> **知识库**: `/storage/Users/currentUser/renshang/build_in_harmonyos`
+> **知识库**: `$PROJECT_DIR`
 > **关联 E045**: `knowledge/error-patterns.md` — mmap RWX 被拒（W^X 策略）
 
 ---
