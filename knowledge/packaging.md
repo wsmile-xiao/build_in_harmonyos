@@ -19,6 +19,30 @@
 
 ---
 
+## 1.5 tar.gz 内部结构规范（⭐ 必须遵守）
+
+所有预编译包的 tar.gz **必须为扁平结构**：
+
+```
+{name}-{ver}-ohos-aarch64.tar.gz   ← 解压后顶层就是这些目录
+├── bin/           # 可执行文件 (ELF, 已签名, 已 strip, 有执行权限)
+│   ├── {name}     # 主二进制
+│   └── ...
+├── share/         # 文档和数据
+│   └── man/
+└── lib/           # 外部依赖库 (如有)
+```
+
+**禁止嵌套结构**（如 `pkg-config-0.29.2/bin/`）。打包命令必须从包含 `bin/` 的目录执行：
+```bash
+cd "$PKGDIR" && tar czf "output.tar.gz" *   # ✅ 扁平（自动包含 bin share lib）
+# 而非: tar czf "output.tar.gz" "$PKGDIR"              # ❌ 可能多一层目录
+```
+
+**install.sh 依据此规范**：直接 `cp -r $TMP/bin $DST/`，无需检测嵌套结构。
+
+---
+
 ## 2. 标准化可移植包制作流程（完整 10 步）
 
 > 本流程综合 Python 3.9.25（strip+debug 分离）和 Python 3.12.9（独立安装+缓存清理）的最佳实践。
@@ -355,79 +379,80 @@ else
 fi
 ```
 
-### Step 9: 创建激活脚本和使用说明
+### Step 9: 创建 install.sh（单独托管，不打包进 tar.gz）
+
+> **⚠️ 重要变更（v2.3）**：不再将 activate.sh/README 打入 tar.gz。
+> install.sh 单独托管在 gitcode releases，用户通过 `curl | sh` 安装。
 
 ```bash
-# 9a. activate.sh（兼容 toybox ash，不用 ${BASH_SOURCE}）
-cat > "$PKGDIR/activate.sh" << 'ACTEOF'
-#!/bin/sh
-# Portable activation script for HarmonyOS (toybox ash compatible)
-if [ -n "$_OLD_PORTABLE_PATH" ]; then
-    echo "Already activated."
-    return 2>/dev/null || exit 0
-fi
-_PORTABLE_DIR="$(cd "$(dirname "$0")" && pwd)"
-_OLD_PORTABLE_PATH="$PATH"
-_OLD_LD_PATH="${LD_LIBRARY_PATH:-}"
-export PATH="$_PORTABLE_DIR/bin:$PATH"
-export LD_LIBRARY_PATH="$_PORTABLE_DIR/lib${_OLD_LD_PATH:+:$_OLD_LD_PATH}"
-export PYTHONHOME="$_PORTABLE_DIR"  # Python 特有
-[ -n "$PS1" ] && _OLD_PS1="$PS1" && export PS1="(portable) $PS1"
-deactivate_portable() {
-    export PATH="$_OLD_PORTABLE_PATH"
-    export LD_LIBRARY_PATH="$_OLD_LD_PATH"
-    unset PYTHONHOME
-    [ -n "$_OLD_PS1" ] && export PS1="$_OLD_PS1" && unset _OLD_PS1
-    unset _PORTABLE_DIR _OLD_PORTABLE_PATH _OLD_LD_PATH
-    unset -f deactivate_portable
-    echo "Deactivated."
-}
-echo "Activated: $_PORTABLE_DIR"
-ACTEOF
-chmod +x "$PKGDIR/activate.sh"
+# 9a. 基于 scripts/install-template.sh 生成 install.sh
+#     只需修改 PKG_NAME 和 PKG_VERSION 两行
+#     禁止事项：heredoc / emoji / --strip-components / set -e / [[ ]] / source
 
-# 9b. README.md（含安装说明中的权限提示）
-cat > "$PKGDIR/README.md" << REOF
-# ${PACKAGE_NAME} for HarmonyOS
+# 9b. 验证 install.sh
+#     sh -n <install.sh>           # 语法检查
+#     LC_ALL=C grep -nP '[^\x00-\x7F]' <install.sh>  # 纯ASCII
+#     cat <install.sh> | sh         # 干跑测试
 
-## Quick Start
-\`\`\`bash
-tar xzf ${PACKAGE_NAME}.tar.gz -C ~/usr/
-find ${PACKAGE_NAME}/ -type f -name '*.so*' -exec chmod +x {} \;
-chmod +x ${PACKAGE_NAME}/bin/*
-. ~/${PACKAGE_NAME}/activate.sh
-\`\`\`
-
-> ⚠️ **解压后必须 chmod +x**（HarmonyOS 签名机制导致 tar 包内丢失执行权限）
-REOF
+# 9c. install.sh 托管位置：gitcode releases（与 tar.gz 同目录）
+#     用户执行: curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}
 ```
 
-### Step 10: 打包 tar.gz
+### Step 10: 打包干净的 release tar.gz
 
 ```bash
 OUTPUT_DIR="/path/to/output"
 cd "$OUTPUT_DIR"
 
-# 10a. 主包（不含 debug 目录）
-tar -czf "${PACKAGE_NAME}.tar.gz" "$PKGDIR_NAME"
-MAIN_SIZE=$(du -h "${PACKAGE_NAME}.tar.gz" | cut -f1)
-echo "📦 主包: ${PACKAGE_NAME}.tar.gz ($MAIN_SIZE)"
+# 10a. 主包（干净产物：bin/ + share/，不含 install.sh/README）
+tar -czf "${PKG_NAME}-${PKG_VERSION}-ohos-${ARCH}.tar.gz" -C "$PKGDIR" *
+echo "📦 主包: ${PKG_NAME}-${PKG_VERSION}-ohos-${ARCH}.tar.gz ($(du -h "${PKG_NAME}-${PKG_VERSION}-ohos-${ARCH}.tar.gz" | cut -f1))"
 
-# 10b. Debug 符号包（仅 debug 文件）
+# 10b. Debug 符号包（⭐ 必须打包）
 if [ -d "$DEBUG_DIR" ] && [ "$(ls -A "$DEBUG_DIR")" ]; then
-    tar -czf "${PACKAGE_NAME}-debug.tar.gz" -C "$(dirname "$DEBUG_DIR")" "$(basename "$DEBUG_DIR")"
-    DEBUG_SIZE=$(du -h "${PACKAGE_NAME}-debug.tar.gz" | cut -f1)
-    echo "🔧 Debug: ${PACKAGE_NAME}-debug.tar.gz ($DEBUG_SIZE)"
+    tar -czf "${PKG_NAME}-${PKG_VERSION}-ohos-${ARCH}-debug.tar.gz" -C "$(dirname "$DEBUG_DIR")" "$(basename "$DEBUG_DIR")"
+    echo "🔧 Debug: ${PKG_NAME}-${PKG_VERSION}-ohos-${ARCH}-debug.tar.gz ($(du -h "${PKG_NAME}-${PKG_VERSION}-ohos-${ARCH}-debug.tar.gz" | cut -f1))"
 fi
 
-# 10c. 最终统计
+# 10c. 最终统计 + 安装验证
 echo ""
 echo "=== 打包统计 ==="
 echo "  总文件数: $(find "$PKGDIR" -type f | wc -l | tr -d ' ')"
 echo "  ELF 文件: $(find "$PKGDIR" -type f -exec file {} \; | grep -ci elf)"
 echo "  外部依赖: $(ls "$PKGDIR/lib/external/" 2>/dev/null | wc -l | tr -d ' ')"
 echo "  残留符号链接: $(find "$PKGDIR" -type l | wc -l | tr -d ' ')"
+
+# 10d. 安装验证（模拟 install.sh 流程）
+VERIFY_DIR="${TMPDIR:-$HOME/tmp}/pkg-verify-$$"
+rm -rf "$VERIFY_DIR"; mkdir -p "$VERIFY_DIR"
+tar xzf "${PKG_NAME}-${PKG_VERSION}-ohos-${ARCH}.tar.gz" -C "$VERIFY_DIR"
+chmod +x "$VERIFY_DIR/bin/"* 2>/dev/null
+"$VERIFY_DIR/bin/${PKG_NAME}" --version >/dev/null 2>&1 && echo "✅ 安装验证通过" || echo "❌ 安装验证失败"
+rm -rf "$VERIFY_DIR"
 ```
+
+---
+
+## 10. 完整交付物清单
+
+每个预编译软件的 `packaging/` 目录应包含：
+
+```
+archives/{首字母}/{软件名}/{版本}/packaging/
+├── {name}-{ver}-ohos-aarch64.tar.gz        ← Release 制品（干净二进制，已 strip）
+├── {name}-{ver}-ohos-aarch64-debug.tar.gz   ← Debug 符号包（必须）
+└── install.sh                                ← 安装脚本（gitcode 单独托管）
+```
+
+### 发布到 gitcode 的步骤
+
+1. 上传 `{name}-{version}-ohos-aarch64.tar.gz` 到 gitcode releases
+2. 上传 `{name}-install.sh` 到同一 release 页面
+3. （可选）上传 debug 包
+4. 用户安装命令：
+   ```bash
+   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}
+   ```
 
 ---
 
@@ -652,6 +677,8 @@ chmod +x package-dir/bin/*
 
 > **定位**：所有预编译软件的 `install.sh` 必须基于此模板生成，确保统一部署体验。
 > 模板文件：`scripts/install-template.sh`（可直接复制修改 PKG_NAME/PKG_VERSION）。
+> **重要（v2.3）**：install.sh 单独托管在 gitcode releases，**不打包进 tar.gz**。
+> 用户通过 `curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}` 安装，tar.gz 只包含干净二进制产物。
 
 ### 9.1 设计原则
 
@@ -720,6 +747,14 @@ PKG_VERSION="${PKG_VERSION:-0.29.2}"      # <-- 改这里
 | README.md / activate.sh 放入 tar.gz | 用户要求不放包内 |
 | 包名子目录 `~/usr/<name>-ver/` | 要求扁平释放到 `~/usr/local/` |
 
-*文档版本: 2.2*
+*文档版本: 2.3*
 *最后更新: 2026-04-07*
-*v2.2 更新: 新增 §9 install.sh 通用安装脚本模板*
+*v2.0 更新：*
+*  - 综合 3.9.25 + 3.12.9 最佳实践，建立 10 步标准化流程*
+*  - 新增 Step 4: 外部依赖收集（必做）*
+*  - 新增 Step 8: 统一权限修复（必做），含根因分析*
+*v2.1 更新：头部增加 SKILL.md Phase 4 Step 5.5 交叉引用*
+*v2.2 更新：新增 §9 install.sh 通用安装脚本模板*
+*v2.3 更新：*
+*  - Step 9 改为 install.sh（替代 activate.sh），单独托管不打包进 tar.gz*
+*  - Step 10 增加安装验证步骤 + §10 完整交付物清单和 gitcode 发布流程*

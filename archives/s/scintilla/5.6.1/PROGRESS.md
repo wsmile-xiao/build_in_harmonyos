@@ -1,482 +1,205 @@
-# Scintilla 5.6.1 OHOS 适配进展
+# BlueNotePad_v2 进展记录
 
-## 🎉 最新状态（2026-04-06 23:33 — Patch-0042 TypefaceCreateFromFile直接加载系统字体（待设备验证）
-
-### 当前 scintilla .so 版本：Patch-0032b + 0033f + 0034 + 0035 + 0036 + 0037 + 0039 + 0040 + 0041（2026-04-06 22:21 编译部署）
-- **上下方向键** ✅ 列保持 + 边界 no-op (Patch-0032b)
-- **Home/End/PageUp/PageDown** ✅ KeyToMessageBox 映射表修正 (Patch-0033f)
-- **IME TextEditorProxy** ✅ 14回调实现+Attach成功 (Patch-0034)
-- **Redraw→宿主通知** ✅ wMain.InvalidateAll() (Patch-0035)
-- **Paint诊断日志** ✅ MNP-DRAW tag确认Paint()调用但view.PaintText零输出 (Patch-0036)
-- **IME跨线程修复** ✅ 回调只写缓冲区+mutex，主线程PerformDraw消费 (Patch-0037) — 已验证
-- **Canvas状态保护** ✅ Paint()外层CanvasSave/Restore (Patch-0039) — 已验证
-- **CJK字体三阶段回退** ⏳ Phase1已知字体+Phase2系统枚举+Phase3文件注册 (Patch-0041) — **待设备验证**
-- **TOFU显示模式** ⏳ TEXT_NO_GLYPH_USE_TOFU，缺失字形显示□而非空白 (Patch-0041) — **待设备验证**
-- **修改文件**：`ohos/ScintillaOHOS.cxx`（Init TOFU + 头文件）, `ohos/PlatOHOS.cxx`（FontHandleOHOS 三阶段回退）
-
-### 应用层近期修复（不涉及 scintilla 源码，记录在此供参考）
-| 补丁 | 内容 | 文件 |
-|------|------|------|
-| Patch-0033 | Native Ctrl 追踪 + Ctrl+Z/Y Undo/Redo | napi_init.cpp |
-| Patch-0033b | SetText 后 SetSavePoint 防撤销清空 | napi_init.cpp |
-| Patch-0033c | 字母范围保护 + 空格/Numpad*/NumpadEnter/Delete keyCode | napi_init.cpp |
-| Patch-0033d | ArkTS onKeyEvent 精简为纯日志 | Index.ets |
-| Patch-0033e | Home(2081)/PageUp(2068)/End(2082)/PageDown(2069) 真实keyCode映射 | napi_init.cpp |
+> 最后更新：2026-04-06 22:28 (Patch-0041 三阶段CJK字体回退+TOFU显示模式，待设备验证)
 
 ---
 
-### Patch-0039: Canvas 状态保护（已验证通过 ✅）
-- **根因**：Paint() 内部 SetClip(Save)/PopClip(Restore) 不平衡时 canvas save/restore 栈损坏
-- **修复**：PerformDraw() 中 Paint() 调用外层包 OH_Drawing_CanvasSave/CanvasRestore
-- **结果**：原始文本持续显示正常，诊断矩形 Paint 前后均可见
+## 🟢 当前状态：基础编辑功能基本可用
+
+### 已验证功能（设备测试通过）
+| 功能 | 状态 | 修复补丁 |
+|------|------|----------|
+| 应用启动不崩溃 | ✅ | — |
+| 文字正常显示 | ✅ | — |
+| 光标闪烁(500ms) | ✅ | — |
+| **触摸点击定位精确** | ✅ | Patch-0025 (VPR×1.9) |
+| **拖选高亮动态变化** | ✅ | Patch-0026 (DoButtonMove T2修正) |
+| **单击不误选中整行** | ✅ | Patch-0028+0029 (DOWN/UP全绕过) |
+| **英文输入正常（不重复）** | ✅ | Patch-0030c (ArkTS移除功能键fallback) |
+| **退格键正常（不删2字符）** | ✅ | Patch-0030c |
+| **回车换行正常（不换2行）** | ✅ | Patch-0030c |
+| **左右方向键** | ✅ | Patch-0030e (keyCode修正2014/2015) |
+| **上下方向键（含边界）** | ✅ | Patch-0032+0032b (GetColumn+FindColumn+边界no-op) |
+| **双击选中单词** | ✅ | Patch-0030f (去掉双重除法) |
+| **三击选中整行** | ✅ | Patch-0030f |
+| **Ctrl+Z/Y 撤销重做** | ✅ | Patch-0033 (Native层Ctrl追踪+SetSavePoint基线) |
+| **字母键 a~z 全部正常** | ✅ | Patch-0033c (删除c/d/s错误映射+字母范围保护) |
+| **空格键** | ✅ | Patch-0033c (显式处理keyCode=2050) |
+| **反引号 ` / 波浪号 ~** | ✅ | Patch-0033c (移除2056→Delete错误映射) |
+| **Delete 键** | ✅ | Patch-0033c (case 2047+2071→Delete) |
+| **Home/End/PageUp/PageDown** | ✅ | Patch-0033e+0033f (真实keyCode + scintilla映射表修正) |
+| **Numpad \*** | ✅ | Patch-0033e (unicode=56→强制插入'*') |
+| **Numpad Enter** | ✅ | Patch-0033e (case 2119→Enter) |
+
+### 待验证（代码已修改，待编译测试）
+
+| 功能 | 状态 | 说明 |
+|------|------|------|
+| **F1-F12 / Insert** | ⏳ 待测（需外接全键盘） | Patch-0033g 已添加映射(1001-1012/2095) |
+| **Shift 大写字母** | ⏳ 待测 | Shift 修饰键追踪(g_ctrlPressed 同理) |
+| **中文 IME 输入** | ⏳ **待验证** | Patch-0037+0039+0045+0046: 中文IME输入+渲染+代码清理 ✅ 已验证通过 |
+| **长按选词/右键菜单** | 🔲 待开发 | 移动端编辑体验 |
+| **文件打开/保存** | 🔲 待开发 | 应用层功能 |
+| **清理诊断日志** | 🔲 待办 | KEY_DIAG/CTRL_SHORTCUT/KEY_UNMAPPED 等 |
+
+### 架构改进
+| 改进 | 状态 | 说明 |
+|------|------|------|
+| **ArkTS onKeyEvent 精简** | ✅ 已改 | 去掉所有按键处理，只留日志。Native NODE_ON_KEY_EVENT 统一处理，根除双层 bug |
+| **Native Ctrl 键状态追踪** | ✅ 已改 | g_ctrlPressed 原子变量追踪 LeftCtrl(2072)/RightCtrl(2073)，解决 NDK 无 GetModifierKey API 问题 |
+
+---
+
+## 补丁历史
+
+### Patch-0034 系列：Native IME InputMethod_TextEditorProxy 对接
+- **Patch-0034**: 实现 14 个 TextEditorProxy 回调（InsertText/SetPreviewText/DeleteForward+Backward/SendKeyboardStatus/SendEnterKey/MoveCursor/HandleSetSelection/GetLeft+RightTextOfCursor/GetTextIndexAtCursor/GetTextConfig）
+- **Patch-0034-fix**: SetCallbackInMainThread(false) 使 IPC 线程回调可触发（true 时回调挂起不执行）
+- **Patch-0034-fix2**: InsertText 改用 ReplaceSel 替代 ChangeInsertion；OnCharInput 跳过非 ASCII 防止双插
+- **Patch-0034-fix3**: 补全 handleExtendActionFunc + receivePrivateCommandFunc（ImsaKit IsValidTextEditorProxy 要求所有回调非空）
+
+### Patch-0035: IME/Paste 渲染空白根因修复
+- **根因**：`Redraw()` override 只设 `needsRedraw=true`，未调用 `wMain.InvalidateAll()` 通知 ArkTS 宿主触发 OnDraw→PerformDraw
+- **现象**：IME 输入中文后 docLen 正确增长但 DrawTextNoClip=0（PerformDraw 根本没被宿主调用）
+- **修复**：`Redraw()` 和 `RedrawRect()` 中添加 `wMain.InvalidateAll()` → 触发 `s_redrawRequested()` 回调 → 宿主 XComponent.invalidate() → 下一帧 OnDraw
+- **修改文件**：`scintilla/ohos/ScintillaOHOS.cxx` → Redraw()/RedrawRect()
+- **状态**：⏳ 待验证（需在设备上测试中文输入和粘贴）
+
+### Patch-0036: Paint 诊断日志
+- **目的**：确认 Paint() 是否被调用、ps 状态、rc 值
+- **发现**：Paint() 每次都被调用（ps=0 非 abandoned），但首次之后 view.PaintText 零输出
+- **修改文件**：`scintilla/ohos/ScintillaOHOS.cxx` → PerformDraw()
+
+### Patch-0037: IME 跨线程 bug 根因修复（**当前重点**）
+- **根因**：IME 回调在 IPC 线程(11219)调用 WndProc(ReplaceSel)，主线程(11032)同时在 Paint() → Scintilla 内部状态损坏 → 后续所有 Paint 的 view.PaintText 输出零 DrawTextNoClip
+- **证据**：日志显示 `11032-11219 MNP-IME InsertText` vs `11032-11032 MNP-CARET PerformDraw`
+- **修复**：
+  - 新增 `imePendingText`(string) + `imePendingFlag`(bool) + `imePendingMutex`(mutex)
+  - InsertText/SetPreviewText 回调只写缓冲区（加锁），**不再调用任何 Scintilla API**
+  - PerformDraw 开头（主线程）检查 flag，消费缓冲区调用 WndProc(ReplaceSel)
+- **修改文件**：`scintilla/ohos/ScintillaOHOS.cxx` → 成员变量 + IME回调 + PerformDraw()
+- **状态**：⏳ 待验证
+
+### Patch-0039: Canvas 状态保护（已验证通过）
+- **根因**：Paint() 内部 SetClip(Save)/PopClip(Restore) 不平衡时，canvas save/restore 栈损坏 → 后续所有绘制操作（包括诊断矩形）被跳过
+- **修复**：Paint() 外层包 OH_Drawing_CanvasSave/CanvasRestore，确保无论 Paint 内部如何退出都恢复 canvas 状态
+- **修改文件**：`scintilla/ohos/ScintillaOHOS.cxx` → PerformDraw()
+- **状态**：✅ 已验证 — 原始文本持续显示正常
 
 ### Patch-0040: CJK 字体回退（已被 0041 取代）
-- 6 种备选字体全部 MatchFamilyStyle 返回 nullptr
-
-### Patch-0041: CJK 字体三阶段回退 + TOFU 显示模式（**当前待验证**）
-- **根因**：设备上无匹配 CJK typeface → 含中文行渲染空白
-- **Phase 1**: `HarmonyOS Sans` / `HarmonyOS Sans Condensed` + 原6种备选 → FontMgrMatchFamilyStyle
-- **Phase 2**: `OH_Drawing_GetSystemFontConfigInfo()` 枚举系统字体逐个尝试
-- **Phase 3**: `OH_Drawing_RegisterFont()` 注册 `/system/fonts/HarmonyOS_Sans.ttf` 等系统字体文件
-- **TOFU**: `OH_Drawing_SetTextUndefinedGlyphDisplay(TEXT_NO_GLYPH_USE_TOFU)` — 缺失字形显示□
-- **新增头文件**: drawing_text_global.h, drawing_font_collection.h, drawing_register_font.h
-- **修改文件**: ScintillaOHOS.cxx (Init+头文件), PlatOHOS.cxx (FontHandleOHOS构造函数)
-- **编译**: 2026-04-06 22:21 ✅ (1.34MB, 零 warning)
-- **状态**: ⏳ 待设备验证
-
----
-
-### Patch-0032b: 上下方向键边界情况修复（当前 so 版本）
-- **文件**：`ohos/ScintillaOHOS.cxx` → `DoKeyDown()` Up/Down 分支
-- **根因链**：
-  ```
-  WndProc(LineDown) → CursorUpOrDown → PositionUpOrDown
-    → SPositionFromLocation(Point(lastX-xOffset, newY))
-      → EditView::SPositionFromLocation() line714: if(surface && ll) → surface=nullptr!
-        → line756: return SelectionPosition(posLineStart) ← 总是返回行首！
-  ```
-- **现象**：按↓从第2行→第2行行首，第3行→第2行行首
-- **修复**：对 Up/Down 键**完全绕过 WndProc(LineDown/LineUp)**，改用纯文档 API：
-  - `pdoc->GetColumn(caretPos)` 获取光标显示列（含Tab展开）
-  - `pdoc->FindColumn(targetLine, displayCol)` 在目标行找同列位置
-  - `SetEmptySelection(targetPos)` 直接设置光标
-  - 无需 surface 测量，不经过 SPositionFromLocation
-- **状态**：代码已修改，待编译部署 + 设备验证
-
----
-
-### Patch-0031 (2026-04-05 17:30) — 已被 Patch-0032 取代
-- GetColumn 替换错误 FindColumn — lastXChosen 计算修正了，但未解决 SPositionFromLocation(null surface) 返回行首的根本问题
-
----
-
-## 🎯 上次状态（2026-04-05 16:42）— Patch-0030f 双击+lastXChosen修复
-
----
-
-### Phase 2: 触摸定位精度修复（2026-04-04 ~ 2026-04-05）
-
-#### 已知问题根因
-- **触摸点击位置不精确** — Plan C (Patch-0018) 的 `CreateMeasurementSurface()` 返回 nullptr → `SPositionFromLocation` 跳过 LayoutLine 测量 → 返回 `invalidPosition` → 光标跳到文档开头
-
-#### Patch-0020: 恢复 ButtonDownWithModifiers
-- DoButtonDown 从 Plan C 估算定位改回调用 ButtonDownWithModifiers
-- 结果：不崩溃，但定位不准
-
-#### Patch-0021: avgCharWidth 位置修正（T3 等宽估算）
-- 在 ButtonDownWithModifiers 后检测无效位置，用 `xRel / vs.aveCharWidth` 估算列偏移
-- 结果：**中文场景偏差 ~2倍**（avgCharWidth=14.2px 是半角宽度，CJK 全角实际~28px）
-
-#### Patch-0022: T1 原生路径修复（当前版本，已部署）
-- **Override CreateMeasurementSurface()** 返回 CachedMeasurementSurface（Patch-0015 静态存储 bitmap+canvas）
-- **清理 DoButtonDown**：移除 T3 估算代码和重复调用
-- **删除旧 Plan C 代码**：移除 "return nullptr" 版本
-- 编译通过（1.3MB），已部署到 BlueNotePad_v2
-- **待设备验证**
-
-#### 三种方案对比
-| 层级 | 方案 | 精度 | CJK支持 | 状态 |
-|------|------|------|---------|------|
-| T1 原生 | SPositionFromLocation + LayoutLine + FindPositionFromX | 像素级 | ✓ | ✅ Patch-0022 |
-| T2 Font测量 | OH_Drawing_FontGetWidths 逐字符测量 | 高 | ✓ | 备选 |
-| T3 等宽估算 | x / avgCharWidth | 低 | ✗(差2倍) | 已废弃 |
-
----
-
-### 历史状态（2026-04-03）— SurfaceHolder 路径打通！
-
-**当前项目**: `/storage/Users/currentUser/renshang/BlueNotePad_v2/`
-**日志文件**: `/storage/Users/currentUser/renshang/BlueNotePad_v2/日志.txt`
-
-### v2 项目验证结果
-```
-SurfaceHolder=有效 ✅ | OnSurfaceCreated 触发 ✅ | AccessibilityProvider 有效 ✅
-OnFrameCallback 持续运行 ✅ | 光标闪烁正常 ✅ | 键盘输入正常 ✅ | 显示正常 ✅
-鼠标点击正常 ✅ | 鼠标拖动 SIGABRT → 正向修复中（两阶段尺寸不一致）
-```
-
-### 关键发现
-- **必须基于 demo 项目模板 (`ArkUISurfaceHolder-main`) 构建**，不能从零创建
-- **模块名必须是 `nativerender`**，不能用 `entry` 或其他自定义名
-- **`.bitfun/project.json` 的 name 字段必须与实际目录匹配**
-- `OH_ArkUI_SurfaceHolder_Create()` 在非 demo 项目模板中始终返回 null（7 个实验排除所有代码/配置因素）
-
-### 当前待修复
-- 鼠标拖动 SIGABRT：两阶段尺寸不一致导致 Scintilla 内部几何状态异常
-  - OnSurfaceCreated GET_BUFFER_GEOMETRY 返回 0x0 → fallback Init(800×600)
-  - OnSurfaceChanged 收到正确尺寸(2090×1203) 但未完整重绘
-  - **修复方案**：OnSurfaceCreated 不初始化，统一在 OnSurfaceChanged 中完整 Init+RenderFrame
-
----
-
-# MyNotePad 项目进展（历史记录）
-
-## 项目概述
-
-基于 Scintilla 5.6.1 的 HarmonyOS 原生文本编辑器，采用 DevEco Studio 开发。
-
-## 架构设计
-
-```
-entry/libs/arm64-v8a/libscintilla_ohos.so  ← 预编译 Scintilla 引擎 (1.49MB, 1419 symbols)
-entry/libs/arm64-v8a/libentry.so           ← NAPI 桥接层 (编译产生)
-entry/src/main/cpp/napi_init.cpp           ← NAPI 注册 + XComponent 回调
-entry/src/main/ets/pages/Index.ets         ← ArkTS UI (XComponent 容器)
-```
-
-- **libscintilla_ohos.so**: Scintilla 核心 + OHOS 平台层 + 集成层（`--whole-archive` 链接）
-- **libentry.so**: NAPI 桥接层，链接预编译 .so + 系统库
-- Scintilla 源码不参与 DevEco 编译，通过 `entry/libs/${OHOS_ARCH}/` 引入
-
-## 进展时间线
-
-### ✅ 2026-03-31 — Scintilla 引擎适配
-
-- [x] Phase 0-4: 源码解压、编译环境搭建、33 个核心源文件编译通过
-- [x] Phase 5-8: Editor 初始化、触摸/键盘事件、IME 中文输入、剪贴板适配
-- [x] Phase 9-10: CMake 构建配置、编译链接验证
-- [x] libscintilla_ohos.so 符号修复（--whole-archive，1419 个动态符号）
-
-### ✅ 2026-03-31 — DevEco 工程集成
-
-- [x] 创建 DevEco Studio 工程，NAPI 注册 9 个函数
-- [x] ArkTS UI：XComponent + 标题栏 + 状态栏
-- [x] HAP 打包签名成功
-
-### ✅ 2026-03-31 — 设备部署与 .so 修复
-
-- [x] RUNPATH 修复（$ORIGIN）
-- [x] DT_NEEDED 修复（link_directories + 短库名）
-- [x] PlatOHOS.o 残缺版本修复
-
-### ✅ 2026-04-01 — 编译修复
-
-- [x] ArkTS `onDisappear` → `onDisAppear`（大小写命名）
-- [x] `OH_Drawing_Rect` opaque type → `OH_Drawing_RectCreate()` 动态创建
-- [x] 函数前向声明（SciRegisterXComponent/Unregister）
-- [x] `<atomic>` 头文件缺失
-- [x] `%llu` → `%lu`（aarch64 格式符）
-- [x] 链接 `libhilog_ndk.z.so`（OH_LOG_Print 符号）
-- [x] XComponent `.onAppear()` 不触发 → 改用 `.onLoad()`/`.onDestroy()`
-
-### 🔧 2026-04-01 — XComponent 回调注册调试
-
-- [x] libentry.so 加载成功，SciCreate 正常
-- [x] XComponent `.onLoad()` 正常触发（ArkTS 侧日志确认）
-- [x] `__NATIVE_XCOMPONENT_OBJ__` 全局对象获取成功
-- [x] **发现 API 12 变更**：
-  - `OH_NativeXComponent_GetNativeXComponent()` 参数从 `char*` 改为 `ArkUI_NodeHandle`
-  - `__NATIVE_XCOMPONENT_OBJ__` 不支持 `napi_get_property_names()`（调用直接 SIGSEGV）
-  - 正确流程：`xcompObj[id]` → external → `ArkUI_NodeHandle` → `GetNativeXComponent(node)`
-- [x] 修复 SIGSEGV：属性查找失败后 early return
-- [x] 修复 `SciRegisterXComponent`：使用正确的 API 12 流程（nodeHandle 转换）
-- [x] 回调注册成功，OnSurfaceCreated 正常触发
-- [x] NativeWindow 获取成功（OH_NativeWindow_CreateNativeWindowFromSurfaceId）
-
-### ✅ 2026-04-01 — 渲染管线跑通
-
-- [x] **virAddr 为 NULL**：GPU buffer 不映射用户空间
-- [x] **mmap fallback**：`mmap(handle->fd, handle->size, PROT_WRITE, MAP_SHARED)` 映射
-- [x] **BitmapCreate 无像素**：改用 `malloc + BitmapCreateFromPixels`
-- [x] **两阶段渲染**：独立 Bitmap 渲染 → memcpy 到 NativeWindow buffer
-- [x] **白屏显示成功**，BN_Sci_OnDraw 被调用
-
-### ✅ 2026-04-01 — 文本渲染 Bug 修复
-
-- [x] 修复时序：sciSetFont/sciSetText 从 aboutToAppear 移到 onLoad
-- [x] **根因定位**：`PerformDraw()` 中 `surf->Initialised()` 在 `surf->Init()` 之前执行
-  - 刚分配的 SurfaceImplOHOS 的 canvas=nullptr → Initialised() 返回 false
-  - **整个 Paint() 被跳过**，导致白屏+黑线（只有 napi_init.cpp 侧绘制的背景+光标线）
-- [x] **修复**：将 `Init()` 移到 `Initialised()` 检查之前
-- [x] **PlatOHOS 诊断日志**：FontHandleOHOS + DrawTextNoClip 添加 hilog（tag: `PlatOHOS`）
-- [x] **独立编译脚本**：`/storage/Users/currentUser/tmp/builds/scintilla/build_ohos.sh`
-- [x] **新 .so 部署**：零 warning 编译，已替换 `entry/libs/arm64-v8a/libscintilla_ohos.so`
-- [ ] **待设备验证**：重新 Build & Deploy 确认文字正常显示
-
-### 🔧 2026-04-02 — Stride Mismatch 修复 & 日志脱敏突破
-
-- [x] **斜花条纹根因定位**：`napi_init.cpp` RenderFrame 用 `surfaceWidth * 4` 做行字节数做简单 `memcpy`，但 NativeWindow buffer 的实际 stride (`handle->stride`) 可能更大（GPU 对齐），导致每行像素错位产生斜纹
-- [x] **修复**：改为逐行拷贝 — 每行只拷贝 `min(srcStride, dstStride)` 字节，行偏移分别用 `srcStride` 和 `handle->stride`
-- [x] **日志脱敏突破**：发现 `%{public}` 格式修饰符可绕过 hilog 脱敏
-  - 之前 `snprintf` 预格式化 + `%s` 的方式**失败**：hilog 会扫描最终字符串内容替换数值
-  - 正确做法：`%{public}s`、`%{public}d`、`%{public}p` 等直接在 hilog 格式字符串中声明公开
-  - 备选：`fprintf(stderr, ...)` 完全绕过 hilog
-- [x] `napi_init.cpp` 全部日志改用 `%{public}` 格式符
-- [x] `PlatOHOS.cxx` `PLAT_DBG` 宏改用 `snprintf` + `%{public}s`
-- [x] `libscintilla_ohos.so` 重新编译部署（零 warning）
-- [ ] **待设备验证**：clean build + 确认斜纹消失、日志数值正常显示
-
-### 🔧 2026-04-02 — 字体指标符号修复
-
-- [x] **问题**：渲染内容堆积到左上角，无法看清
-- [x] **根因**：OH_Drawing（底层 Skia）的 `FontMetrics.ascent` 返回**负值**（Skia 坐标系 Y 轴向下，ascent 向上为负），但 Scintilla 期望正值
-  - 日志：`fontSizePx=24.9 ascent=-23.1 descent=6.1 height=-17.0` — 负 height 导致行高计算错误
-  - DrawTextNoClip 坐标：`rc=(21,0,40,7) ybase=1.0` — 每行只有 7px 高，挤在左上角
-- [x] **修复**：`GetAscent()` 返回 `-metrics.ascent`（取绝对值），`GetHeight()` 用 `-metrics.ascent + metrics.descent`，`GetInternalLeading()` 同理
-- [ ] **待设备验证**：clean build + 确认文字正常显示、行高正确
-
-### 🔧 2026-04-02 — 持续渲染机制
-
-- [x] **问题**：Scintilla 调用 `Window::InvalidateAll()`/`InvalidateRectangle()` 请求重绘，但这些是空 stub，请求被吞掉
-- [x] **修复**：添加全局回调机制
-  - `PlatOHOS.cxx`：`static void (*s_redrawRequested)(void)` + `PlatOHOS_SetRedrawCallback()`
-  - `Window::InvalidateAll()`/`InvalidateRectangle()` 调用回调
-  - `ScintillaOHOS`：`BN_Sci_SetRedrawCallback(cb)` 委托到 PlatOHOS
-  - `napi_init.cpp`：`SciCreate()` 中注册 `BN_Sci_SetRedrawCallback(RequestRedraw)`
-- [x] **补丁 0004 重建**（含 redraw callback + font metrics + diagnostics）
-
-### 🔧 2026-04-02 — 键盘输入调研结论
-
-- [x] **NDK 原生方案测试结果**：
-  - `OH_NativeXComponent_SetNeedSoftKeyboard(component, true)` → 框架判定获焦节点（Column）不需要键盘，被覆盖关闭
-  - `OH_NativeXComponent_RegisterKeyEventCallback(component, cb)` → **ret=0 成功** ✅
-  - `OH_NativeXComponent_RegisterUIInputEventCallback(component, cb, ARKUI_UIINPUTEVENT_TYPE_KEY)` → **ret=401 失败** ❌
-- [x] **设备不支持软键盘**（当前为 2in1 平板设备），键盘方案暂缓
-- [x] **物理键盘**：KeyEvent 回调注册成功（ret=0），但未收到任何按键事件
-- [x] **结论**：NDK 纯原生键盘方案在当前设备上行不通，保留代码待后续设备验证
-
-### 🔧 2026-04-02 — 设备测试结果（关键阻塞）
-
-- [x] **文本渲染**：文字正常显示，斜纹已修复，行高正确 ✅
-- [x] **Stride mismatch**：逐行拷贝正常工作 ✅
-- [x] **持续渲染**：redraw callback 机制正常工作 ✅
-- [x] **字体 fallback**：`HarmonyOS Sans` 匹配失败，使用 default typeface 正常显示
-- [ ] **触摸事件**：`inputMode is invalid`，2in1 设备特有问题，`OnDispatchTouchEvent` 未被调用 ❌
-- [ ] **物理键盘**：回调注册成功但无事件到达 ❌（可能与 inputMode 问题同一根因）
-- [ ] **光标闪烁**：未看到 caret 闪烁 ❌（可能需要事件循环驱动）
-
-### 🔧 2026-04-02 — 核心阻塞问题分析与修复（inputMode bypass）
-
-- [x] **调研结论**：NDK 头文件（`ace/xcomponent/native_interface_xcomponent.h`）中无 `inputMode` 相关 API
-  - `OH_NativeXComponent_RegisterCallback` / `SetNeedSoftKeyboard` / `RegisterKeyEventCallback` 等均与 inputMode 无关
-  - `inputMode is invalid` 是 ArkUI 框架内部（DeviceXComponent）在 2in1 设备上的事件路由问题
-  - XComponent 的 `DispatchTouchEvent` 回调依赖框架先完成 inputMode 初始化才能派发事件
-  - **结论：NDK 侧无法修复此问题**
-- [x] **修复方案：ArkTS 事件拦截 + NAPI 转发**
-  - 在 ArkTS 侧通过 `.onTouch()` 和 `.onKeyEvent()` 拦截所有输入事件
-  - 通过 NAPI 函数（`sciOnTouch` / `sciOnKeyDown` / `sciOnChar`）转发到 native 层
-  - 完全绕过 XComponent 的内部 inputMode 事件路由
-  - 保留原有 native 回调（OnDispatchTouchEvent 等）作为备用，修复 inputMode 后可恢复
-- [x] **napi_init.cpp 新增**：
-  - `SciOnTouch()` — 接收 (editor, type, x, y, timestamp)，type: 0=Down, 1=Up, 2=Move
-  - `SciRequestRedraw()` — ArkTS 侧触发重绘
-- [x] **Index.ets 修改**：
-  - 添加 `.defaultFocus(true)` — 自动获焦，辅助键盘事件路由
-  - 添加 `.onTouch()` — 拦截触摸事件，遍历 `event.touches`，调用 `sciOnTouch()`
-  - 添加 `.onKeyEvent()` — 拦截键盘事件，映射 ArkUI keyCode 到 Scintilla virtual key，可打印字符通过 `sciOnChar()` 转发
-- [x] **Index.d.ts 更新**：添加 `sciOnTouch`、`sciOnChar`、`sciOnKeyDown`、`sciRequestRedraw` 声明
-- [ ] **待设备验证**：clean build + 确认触摸交互、键盘输入正常工作
-
-### 🔧 2026-04-02 — XComponent 无 libraryname 方案（重大突破）
-
-- [x] **inputMode is invalid 彌底消除** ✅
-  - 根因： `inputMode is invalid` 只在 XComponent 配置了 `libraryname` 时出现
-  - 方案：**去掉 libraryname**，改用 `XComponentController` 管理 Surface 生命周期
-  - ArkTS 层 `.onTouch()` / `.onKeyEvent()` 事件回调**不再被屏蔽**
-- [x] **Surface 创建** ✅ — `XComponentController.onSurfaceCreated` → `sciRegisterXComponent(surfaceId)`
-- [x] **NativeWindow 获取** ✅ — `OH_NativeWindow_CreateNativeWindowFromSurfaceId` → 从 NativeWindow 直接获取尺寸
-- [x] **文本渲染正常** ✅ — 示例文本显示正确，字体和行高正确
-- [x] **鼠标点击不再崩溃** ✅ — SciOnTouch 去掉 BN_Sci 调用后鼠标事件安全
-- [x] **键盘事件不再崩溃** ✅ — 去掉 XComponent 的 `.focusable()` 避免了 secure_field 问题
-- [x] **OH_ArkUI_SurfaceHolder/registerNodeEvent 返回 106103**（ARKTS_NODE_NOT_SUPPORTED）
-  - ArkTS 声明式 XComponent 和 typeNode.createNode 创建的节点均不支持 NDK 事件注册
-  - 只有纯 NDK `nodeAPI->createNode(ARKUI_NODE_XCOMPONENT)` 创建的节点才支持，但改动量过大暂缓
-
-### ✅ 2026-04-02 — 触摸/键盘/光标三大阻塞修复
-
-- [x] **触摸事件恢复**：
-  - `SciOnTouch` 中恢复 `BN_Sci_OnTouchDown/Move/Up` 调用（之前因崩溃被注释）
-  - **根因**：`BN_Sci_OnTouch*` → Scintilla 内部 → `InvalidateAll` → `RequestRedraw()` → `RenderFrame()` 嵌套调用导致崩溃
-  - **修复**：`RenderFrame()` 添加 `g_rendering` (atomic int) 重入保护，嵌套时仅设 dirty flag 不执行渲染
-  - ArkTS 侧 `.onTouch()` 末尾追加 `sciRequestRedraw()` 确保帧刷新到屏幕
-- [x] **键盘事件恢复**：
-  - `.onKeyEvent()` 追加 `sciRequestRedraw()` 确保按键后屏幕更新
-  - `.focusable(true)` + `.defaultFocus(true)` + `.focusOnTouch(true)` 保持配置（no-libraryname 方案已消除 secure_field 问题）
-- [x] **光标闪烁机制**：
-  - **根因**：Scintilla 的 `FineTickerStart/Cancel/Running` 只是 bitset 存根，没有实际定时器驱动 `TickFor(caret)`
-  - **修复**：
-    - `ScintillaOHOSEditor` 新增 `DoTickCaret()` public 包装器（绕过 protected 访问限制）
-    - `ScintillaOHOS::Tick()` → `DoTickCaret()`
-    - NAPI 新增 `SciTick()` 函数 + `sciTick` 导出
-    - ArkTS `setInterval(500ms)` 调用 `libentry.sciTick(editor)` 驱动 caret 闪烁
-    - `aboutToDisappear()` 中 `clearInterval()` 清理定时器
-- [x] **libscintilla_ohos.so 重新编译部署**（零 warning，1.3MB）
-- [ ] **待设备验证**：clean build + 部署，确认触摸选中文本、键盘输入、光标闪烁正常
-
-### ✅ 2026-04-03 — 三大问题正向修复（键盘崩溃/光标不可见/拖选刷新）
-
-- [x] **键盘输入 SIGABRT 崩溃 — 正向修复（非 siglongjmp workaround）**：
-  - **根因定位**：`Editor::KeyDownWithModifiers()` 首行调用 `DwellEnd(false)` → `NotifyDwelling(ptMouseLast, false)` → `PositionFromLocation(pt, true, false, false)` → `CreateMeasurementSurface()` → `OH_Drawing/Skia 内部 abort`
-  - 与触摸 Move 崩溃完全相同的根因链（DwellEnd → NotifyDwelling）
-  - **修复**：重写 `DoKeyDown()` 方法，跳过 `DwellEnd(false)` 调用，直接执行 `kmap.Find + WndProc/KeyDefault`
-  - `OnKeyDown` 和 `OnCharInput` 添加 `AbortGuard` 防护（defense-in-depth）
-- [x] **光标不可见 — 双重根因修复**：
-  - **根因 A**：从未调用 `SetFocus(true)` → `hasFocus=false` → `ShowCaretAtCurrentPosition()` 设置 `caret.active=false` → `TickFor(caret)` 跳过 `InvalidateCaret()`
-    - **修复**：在 `OnSurfaceCreatedNative` 和 `OnSurfaceCreated` 中 `BN_Sci_Init` 后立即调用 `BN_Sci_SetFocus(g_editor, 1)`
-  - **根因 B**：`DoTickCaret()` 检查 `FineTickerRunning(TickReason::caret)` 但该函数是空 stub 永远返回 false → `TickFor` 从未被调用
-    - **修复**：移除 `FineTickerRunning` 检查，`DoTickCaret()` 无条件调用 `TickFor(TickReason::caret)`
-- [x] **鼠标拖选动态刷新 — 确认链路正常**：
-  - 日志分析确认：Move → DoButtonMove → RequestRedraw → RenderFrame 完整链路正常执行
-  - nonWhite 像素恒定可能是因为测试文本量小，选区视觉变化不足以影响采样
-- [x] **napi_init.cpp 清理**：移除所有 `sigaction/siglongjmp/sigjmp_buf/SIGABRT` 相关代码及 `<signal.h>/<setjmp.h>` 头文件
-- [x] **libscintilla_ohos.so 重新编译部署**（零 warning，1.4MB）
-
-### 🔧 2026-04-03 — 键盘输入精细化修复（keyCode映射/诊断日志/光标宽度）
-
-- [x] **Backspace keyCode 映射错误修复**（Index.ets）：
-  - `2055`(KEYCODE_DEL) 从 `Delete(46)` 改为 `BackSpace(8)`
-  - 新增 `2055`(KEYCODE_FWD_DEL?) 映射到 `Delete(308)`
-  - 方向键改用 Scintilla SCK 常量（302/303/301/300）
-- [x] **字母键诊断增强**：
-  - keyText 条件从 `===1` 改为 `>=1 && <=2`
-  - 所有分支添加 console.info 日志
-  - 未映射 keyCode（>=2000）打印帮助识别遗漏
-- [x] **ScintillaOHOS.cxx 诊断日志**：
-  - `DoTickCaret()`：前后 caret 状态日志
-  - `PerformDraw()`：Paint 前 caret 状态 + width
-  - `OnCharInput()`：完成/abort 日志
-  - `DoKeyDown()`：kmap.Find 结果 + WndProc/KeyDefault 完成日志
-- [x] **光标宽度显式设置**：Init() 中新增 `SetCaretWidth(2)`
-- [x] **零 warning 编译部署**（1.3MB）
-
-### 🔧 2026-04-03 — 字母键根因修复 + 光标焦点修复
-
-- [x] **字母键不上屏 — 根因：keyText 是 KEYCODE 名称**：
-  - 日志证据：`keyText='KEYCODE_A' len=9`（非 `'a'`）
-  - sciOnChar 从未被调用，字母键走了错误的 sciOnKeyDown(SCK_End) 路径
-  - **修复**：Index.ets 新增 `mapKeyCodeToChar(keyCode)` 方法：
-    - 2001-2010 → '1'-'0', 2017-2042 → 'a'-'z', 2044→空格, 2057-2067→标点, 2108-2123→小数字符
-    - 优先走映射路径，fallback 到 keyText 单字符判断
-- [x] **光标不可见 — 根因：hasFocus 始终=0**：
-  - 日志证据：所有采样点 active=0 hasFocus=0（on 正常翻转）
-  - no-libraryname 路径的 SciRegisterXComponent 缺少 BN_Sci_SetFocus 调用
-  - **修复 A**：SciRegisterXComponent 中 Init 后添加 SetFocus(1)
-  - **修复 B**：SciOnTouch case 0(Down) 中先调用 SetFocus(1)
-- [ ] **待设备验证**：rebuild + 测试 abcd1234 输入、退格键、光标
-
-### 🔲 当前阻塞问题
-
-1. ~~**无光标显示**~~ → **已修复**：SetFocus(true) + DoTickCaret 移除 FineTickerRunning 检查
-2. ~~**键盘输入崩溃**~~ → **已修复**：DoKeyDown 跳过 DwellEnd + AbortGuard 防护
-3. ~~**触摸交互禁用**~~ → **已修复**：恢复 `BN_Sci_OnTouch*` 调用 + `RenderFrame()` 重入保护（`g_rendering` atomic flag）
-
-### 🔧 2026-04-03 — SurfaceHolder 根因最终定位：需要 typeNode.createNode 动态节点
-
-- [x] **根因**：`OH_ArkUI_SurfaceHolder_Create()` 需要 `typeNode.createNode()` 动态创建的 XComponent 节点
-  - 声明式 `XComponent{}` 的框架节点 → 返回 null
-  - 动态 `typeNode.createNode('XComponent')` 节点 → 应返回有效 holder
-- [x] **修复**：改造为 NodeController + NodeContainer 模式（参考 CSDN 文章）
-- [ ] **待设备验证**
-
-### 📋 下一步计划
-
-1. ~~**恢复触摸事件处理**~~ ✅
-2. ~~**解决键盘焦点问题**~~ ✅
-3. ~~**恢复键盘事件转发**~~ ✅
-4. ~~**光标渲染**~~ ✅
-5. ~~**黑屏修复：SurfaceHolder 动态节点模式**~~ ✅ — NodeController 改造完成
-6. **设备验证（当前步骤）**：
-   - [ ] SurfaceHolder 是否有效（关键！）
-   - [ ] 显示是否正常
-   - [ ] 触摸/鼠标/键盘/空格
-   - [ ] 光标闪烁
-
-## 踩坑记录
-
-### 1. DT_NEEDED 绝对路径泄露
-直接传 .so 路径给 `target_link_libraries` → 改用 `link_directories()` + 短库名
-
-### 2. --whole-archive 必需
-虚函数间接引用导致链接器丢弃符号 → `-Wl,--whole-archive`
-
-### 3. PlatOHOS.o 残缺版本
-构建目录中的旧 .o 与源码不匹配 → 从 707 行完整版重新编译
-
-### 4. RUNPATH 修复
-`BUILD_WITH_INSTALL_RPATH=TRUE` + `INSTALL_RPATH="$ORIGIN"`
-
-### 5. XComponent onAppear 不触发
-改用 XComponent 专用 `.onLoad()` / `.onDestroy()` 回调
-
-### 6. __NATIVE_XCOMPONENT_OBJ__ SIGSEGV
-API 12 的 `__NATIVE_XCOMPONENT_OBJ__` 不支持 `napi_get_property_names()`，调用直接崩溃。
-正确做法：`napi_get_named_property(xcompObj, id)` → external → `ArkUI_NodeHandle` → `OH_NativeXComponent_GetNativeXComponent(node)`
-
-### 7. Init 中 RegisterCallback 导致 SIGBUS
-在 Init 函数中调用 `OH_NativeXComponent_RegisterCallback` 会导致框架内部崩溃（signal 7）。
-**修复**：Init 中只保存 NativeXComponent 指针，回调注册延迟到 ArkTS onLoad。
-
-### 8. NativeWindow virAddr 为 NULL
-通过 `OH_NativeWindow_CreateNativeWindowFromSurfaceId` 创建的窗口，其 buffer 的 `virAddr` 为 NULL（GPU buffer 不映射用户空间）。
-**修复**：用 `mmap(handle->fd, handle->size, PROT_WRITE, MAP_SHARED)` 映射后写入像素，再 msync + munmap。
-
-### 9. OH_Drawing_BitmapCreate() 无像素内存
-`OH_Drawing_BitmapCreate()`（无参版本）创建的 bitmap 没有分配像素内存，`OH_Drawing_BitmapGetPixels()` 返回 NULL。
-**修复**：用 `malloc(width*4*height)` 分配缓冲区，再用 `OH_Drawing_BitmapCreateFromPixels(&info, buf, stride)` 包装。
-
-### 10. napi_init.cpp 反复损坏
-文件末尾容易残留垃圾（`===============` + 重复代码块），导致编译失败。
-**原因**：多次 editFile/sed 操作累积错误。每次修改后务必验证 `tail -3` + `wc -l` + `grep -c RegisterEntryModule`。
-
-### 11. HarmonyOS 日志脱敏（已解决）
-设备日志中所有数值参数显示为 `<private>`，无法直接诊断。
-**错误尝试**：`snprintf(dbg, sizeof(dbg), "value=%d", x); MYLOGI("%s", dbg);` — 无效！hilog 会扫描最终字符串内容，把其中的数值替换为 `<private>`。
-**正确方案**：使用 `%{public}` 格式修饰符声明参数为公开数据：`MYLOGI("value=%{public}d", x);`、`MYLOGI("ptr=%{public}p", p);`。
-**组合用法**：`snprintf` 预格式化 + `MYLOGI("%{public}s", dbg)` — hilog 不会对 `%{public}s` 传递的字符串做二次扫描。
-**备选**：`fprintf(stderr, ...)` 完全绕过 hilog。
-
-### 12. PerformDraw 时序 Bug（致命，已修复）
-**问题**：`ScintillaOHOS.cxx` 的 `PerformDraw()` 中，`surf->Initialised()` 在 `surf->Init()` 之前调用。刚分配的 `SurfaceImplOHOS` 的 `canvas` 成员为 nullptr，`Initialised()` 返回 false，导致整个 `Paint()` 从未被调用。
-**表现**：白屏+黑线（光标由 napi_init.cpp 独立绘制，不经过 Scintilla）。
-**修复**：将 `surf->Init(sid, wid)` 移到 `if (!surf->Initialised()) return` 之前。
-
-### 13. NativeWindow Stride Mismatch 导致斜纹（已修复）
-**问题**：`napi_init.cpp` RenderFrame 用 `surfaceWidth * 4` 作为行字节数做整块 `memcpy`，但 NativeWindow buffer 的 `handle->stride` 可能不等于 `width * 4`（GPU 对齐，如 128 字节对齐），导致每行像素错位，产生经典的**斜花条纹** artifact。
-**修复**：改为逐行拷贝循环：
-```cpp
-for (uint32_t y = 0; y < h; y++) {
-    memcpy(dstRow, srcRow, min(srcStride, dstStride));
-    srcRow += srcStride;  // 我们的 bitmap stride = width*4
-    dstRow += dstStride;  // NativeWindow buffer stride = handle->stride
-}
-```
-
-### 14. OH_Drawing FontMetrics 符号与 Scintilla 不一致（已修复）
-**问题**：OH_Drawing（底层 Skia）的 `FontMetrics.ascent` 返回负值（Skia 坐标系 Y 轴向下），`descent` 返回正值。Scintilla 期望 ascent 和 descent 都是正值。
-**表现**：`height = ascent + descent = -23 + 6 = -17`（负行高），所有文本挤压到左上角。
-**修复**：`GetAscent()` 返回 `-metrics.ascent`，`GetHeight()` 返回 `-metrics.ascent + metrics.descent`。
-
-### 15. 2in1 设备 XComponent inputMode 无效导致事件不派发（已修复）
-**问题**：2in1 平板设备上，XComponent 内部的 `inputMode` 未正确初始化，ArkUI 框架日志反复输出 `inputMode is invalid` + `mouseTransform is invalid`。由于 inputMode 无效，框架不会将触摸/鼠标事件派发到 XComponent 的 `DispatchTouchEvent` 回调，键盘事件也不会到达 `KeyEventCallback`。
-**根因**：ArkUI 框架在 2in1 设备上需要确定输入模式（触摸/鼠标）才能正确路由事件，XComponent surface 模式下该初始化可能存在缺陷。NDK 头文件中无任何 `inputMode` 相关 API。
-**修复**：**ArkTS 侧事件拦截 + NAPI 转发**。在 Index.ets 中给 XComponent 添加 `.onTouch()` 和 `.onKeyEvent()` 事件处理器，直接在 ArkTS 层拦截输入事件，然后通过 NAPI（`sciOnTouch`/`sciOnKeyDown`/`sciOnChar`）转发到 native Scintilla 引擎。完全绕过 XComponent 内部的事件路由机制。
-
-## 构建环境
-
-- DevEco Studio SDK: `/data/app/sdk.org/sdk_1.0.0/default`
-- OHOS NDK (命令行): `/data/service/hnp/ohos-sdk.org/ohos-sdk_6.1.0.27/ohos/native`
-- 交叉编译器: `/data/service/hnp/bin/aarch64-unknown-linux-ohos-clang++` (clang 15.0.4)
-- Scintilla 源码: `/storage/Users/currentUser/tmp/builds/scintilla/` (含 ohos/ 平台层)
-- Scintilla 构建脚本: `/storage/Users/currentUser/tmp/builds/scintilla/build_ohos.sh`
-- Scintilla 头文件: `/storage/Users/currentUser/renshang/mynotepad/entry/src/main/cpp/scintilla/{include,src}/`
-- 日志文件: `/storage/Users/currentUser/renshang/mynotepad/日志.txt`
+- **内容**：FontHandleOHOS 构造函数中 HarmonyOS Sans 失败后尝试 6 种备选字体
+- **结果**：全部 MatchFamilyStyle 返回 nullptr → 被 0041 三阶段策略取代
+
+### Patch-0041: CJK 字体三阶段回退 + TOFU 显示模式（**当前重点**）
+- **根因**：Patch-0040 的 6 种备选字体全部 `FontMgrMatchFamilyStyle` 返回 nullptr，设备上无匹配的 CJK typeface → 含中文行渲染为空白
+- **修复**：三阶段回退策略
+  - **Phase 1**: 尝试已知字体名（`HarmonyOS Sans` / `HarmonyOS Sans Condensed` + 原6种备选）
+  - **Phase 2**: 运行时调用 `OH_Drawing_GetSystemFontConfigInfo()` 枚举系统所有已注册字体逐个尝试
+  - **Phase 3**: 最后手段 — `OH_Drawing_RegisterFont()` 直接注册系统字体文件（`/system/fonts/HarmonyOS_Sans.ttf` 等）
+  - **TOFU 模式**：Init() 中调用 `OH_Drawing_SetTextUndefinedGlyphDisplay(TEXT_NO_GLYPH_USE_TOFU)` 使缺失字形显示 □ 而非空白
+- **新增头文件**：`drawing_text_global.h`, `drawing_font_collection.h`, `drawing_register_font.h`
+- **修改文件**：`scintilla/ohos/ScintillaOHOS.cxx`（Init + 头文件）, `scintilla/ohos/PlatOHOS.cxx`（FontHandleOHOS 构造函数）
+- **状态**：⏳ 已被 0045 取代
+
+### Patch-0045: 使用完整 CJK 字体文件（**当前待验证**）
+- **🎯 根因最终确认**（经过 0040→0045 共 6 个补丁的排查）：
+  - `HarmonyOS_Sans.ttf` (342KB) 是 **Latin-only 子集字体**
+  - 有 CJK glyph 表头数据 → FontCountText>0, GetWidths>0, TextBlob≠null
+  - 但 **无 CJK 轮廓数据** → Skia rasterizer 输出零像素 → 完全空白
+  - 设备上真正的 CJK 字体是 `HarmonyOS_Sans_SC.ttf` (20.6MB, SC=Simplified Chinese)
+- **修复**：字体路径改为 `/system/fonts/HarmonyOS_Sans_SC.ttf`
+  - 备选：FZHeiT-SC-Regular / FZKaiT-SC / FZFangS-SC（方正中文字体族）
+- **修改文件**：PlatOHOS.cxx → FontHandleOHOS 构造函数（fontFilePaths 数组）
+- **编译**：2026-04-07 10:09 ✅ (1.33MB)
+- **状态**：✅ 已验证通过 — 中文正常显示！
+
+### Patch-0046: 清理所有临时诊断代码（**已完成**）
+- **删除内容**：
+  - ScintillaOHOS.cxx PerformDraw(): 删除 Paint 前后所有诊断绘制
+    (红色矩形、DIRECT TEXT OK、绿色中文测试、POST-PAINT OK、橙色中文ABC、蓝色矩形)
+  - PlatOHOS.cxx FontHandleOHOS 构造函数: 删除 CJK 能力检测(FontCountText+GetWidths)
+  - PlatOHOS.cxx DrawTextNoClip(): 恢复简洁版日志(移除 hasNonASCII/preview 增强)
+- **保留内容**：
+  - CanvasSave/Restore 保护(Patch-0039) — 生产必需
+  - TOFU 显示模式(Patch-0041) — 无害防御
+  - HarmonyOS_Sans_SC.ttf 字体加载(Patch-0045) — 核心修复
+  - DrawTextNoClip 前50次基础日志 — 调试友好
+- **修改文件**：ScintillaOHOS.cxx, PlatOHOS.cxx
+- **编译**：2026-04-07 10:58 ✅ (1.33MB)
+- **状态**：✅ 完成
+
+
+
+
+
+### Patch-0044: Post-Paint CJK 诊断 + DrawTextNoClip 文本内容日志（**当前待验证**）
+- **Patch-0043 关键发现**：CJK DIAG SUCCESS 但屏幕上看不到绿色中文 → 被 Paint() 背景填充覆盖！
+- **修复内容**：
+  - 将 CJK 诊断绘制移到 Paint() 之后（不再被覆盖）：绿色 POST-PAINT OK + 橙色 中文ABC
+  - DrawTextNoClip 增强：显示 text 前40字符预览 + hasNonASCII 标志（可看到是否在绘制含中文的行）
+  - 日志限制放宽到 100 次
+- **关键问题**：如果后置诊断能看到 → 问题在 Scintilla 内部管线；如果仍看不到 → canvas 本身有问题
+- **修改文件**：ScintillaOHOS.cxx (后置诊断), PlatOHOS.cxx (DrawTextNoClip 文本预览)
+- **编译**：2026-04-07 02:20 ✅ (1.33MB)
+- **状态**：⏳ 待设备验证
+
+
+
+### Patch-0043: CJK 渲染能力诊断与检测（**当前待验证**）
+- **问题**：Patch-0042 字体文件加载成功但中文行仍空白
+- **根因分析发现**：
+  1. "Raw text SUCCESS" 诊断用的是 TypefaceCreateDefault()+硬编码ASCII，不能证明CJK能力
+  2. s_drawTextCount&lt;5 限制掩盖了首帧后 DrawTextNoClip 的真实调用情况
+  3. 最可能原因：HarmonyOS_Sans.ttf 加载成功但不含CJK字形 → TextBlob静默失败
+- **修复内容**：
+  - **方案A**: FontHandleOHOS 构造函数中添加 CJK glyph 能力检测（FontCountText+GetWidths）
+  - **方案B**: DrawTextNoClip 放宽日志限制(5→50) + 非 ASCII TextBlob 失败时输出 ERROR 级日志
+  - **方案D**: PerformDraw 中用 Scintilla 实际字体(vs.styles[STYLE_DEFAULT].font) 绘制绿色 CJK 诊断文本(y=115)
+- **修改文件**：ScintillaOHOS.cxx (方案D), PlatOHOS.cxx (方案A+B)
+- **编译**：2026-04-07 01:14 ✅ (1.33MB)
+- **状态**：⏳ 待设备验证 — 关注日志中 [Patch-0043] 关键词
+
+
+
+### Patch-0042: TypefaceCreateFromFile 直接加载系统字体（**当前待验证**）
+- **根因**：Patch-0041 三阶段回退全部失败 — FontMgrMatchFamilyStyle 对所有字体名（包括注册到 FontCollection 的）均返回 nullptr。FontMgr 与 FontCollection 是 Skia 中独立的字体管理器，不共享数据。
+- **关键发现**：OH_Drawing API 12+ 提供 `OH_Drawing_TypefaceCreateFromFile(path, index)`，可直接从字体文件创建 typeface，完全绕过 FontMgr 名称匹配。
+- **修复**：用 TypefaceCreateFromFile 替换三阶段回退，依次尝试：
+  1. `/system/fonts/HarmonyOS_Sans.ttf` (系统默认)
+  2. `/system/fonts/NotoSansCJK-Regular.ttc` (ttc 集合: SC/TC/JP/KC)
+  3. NotoSansSC / NotoSansCJKsc / SourceHanSansSC (.otf)
+- **附带发现**：DrawTextNoClip 日志的 s_drawTextCount<5 限制导致首帧后无日志输出，DrawTextNoClip=0 是假象
+- **修改文件**：`scintilla/ohos/PlatOHOS.cxx` → FontHandleOHOS 构造函数
+- **编译**：2026-04-06 23:33 ✅ (1.33MB)
+- **状态**：⏳ 待设备验证
+
+- **Patch-0033**: Native 层 Ctrl 快捷键拦截（g_ctrlPressed 追踪 + Ctrl+Z→Undo/Ctrl+Y→Redo）
+- **Patch-0033a**: ArkTS Z keyCode 修正 2043→2042
+- **Patch-0033b**: SetText 后 SetSavePoint() 防止撤销清空全部内容
+- **Patch-0033c**: 字母键范围保护 + 空格显式处理 + Delete keyCode 2056→2047 + 移除 Home/End/PgUp/PgDown 错误映射
+- **Patch-0033d**: ArkTS onKeyEvent 精简为纯日志（消除双层处理根源）
+- **修改文件**：`entry/src/main/cpp/napi_init.cpp`, `entry/src/main/ets/pages/Index.ets`
+
+### Patch-0032 系列：上下方向键列保持（已验证通过）
+- **Patch-0032**: Up/Down 完全绕过 SPositionFromLocation，用 GetColumn+FindColumn 纯文档 API
+- **Patch-0032b**: 边界情况（首行↑/末行↓）直接 no-op，避免 fall through 到有 bug 的旧路径
+- **修改文件**：`scintilla/ohos/ScintillaOHOS.cxx` → DoKeyDown()
+
+### OHOS keyCode 参考表（从日志实测）
+| 按键 | keyCode | 备注 |
+|------|---------|------|
+| a-z | 2017-2042 | 字母范围，不可用于功能键映射 |
+| 方向键 ↑↓←→ | 2012-2015 | Up=2013, Down=2012, Left=2014, Right=2015 |
+| Home | 2016 | |
+| Delete | **2047 / 2071** | ⚠️ 2047被框架拦截，实际设备上报2071 |
+| `,` `.` | 2043-2044 | |
+| Tab | 2049 | |
+| Space | 2050 | unicode=0 需特殊处理 |
+| Enter | 2054 | |
+| Backspace | 2055 | |
+| **反引号 `` ` ``** | **2056** | ⚠️ 不是Delete！ |
+| `-` `=` | 2057-2058 | |
+| `[` `]` `\` | 2059-2061 | |
+| `;` `'` `/` | 2062-2064 | |
+| Escape | 2070 | |
+| LeftCtrl / RightCtrl | 2072 / 2073 | |

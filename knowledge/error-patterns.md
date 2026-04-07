@@ -63,6 +63,11 @@
 | [E058](#e058-sed-操作生成文件导致补丁不可复现) | 补丁质量 | sed on configure/Makefile, 不可复现 | 🔴 阻塞 |
 | [E059](#e059-源码修改未保存为-patch-文件) | 补丁质量 | 对话中修改了源码但无 .patch 文件 | 🔴 阻塞 |
 | [E060](#e060-补丁缺少-__ohos__-守卫无法上游化) | 补丁质量 | 硬编码修改, 无平台隔离, 上游拒绝 | 🟡 中等 |
+| [E061](#e061-gnulib-stdbool-h-模块缺失) | gnulib/conftest | stdbool.h does not exist, Use stdbool-c99 instead | 🔴 阻塞 |
+| [E062](#e062-flexible_array_member-未定义) | gnulib | FLEXIBLE_ARRAY_MEMBER undeclared | 🟡 中等 |
+| [E063](#e063--werror-导致警告变错误) | 编译 | -Werror=int-conversion / -Wincompatible-pointer-types | 🔴 阻塞 |
+| [E064](#e064-conftest-无法执行导致配置检测失败) | configure | cannot run C compiled programs, conftest inaccessible | 🔴 阻塞 |
+| [E065](#e065-gnulib-头文件包含顺序导致符号未声明) | 编译 | undeclared identifier xzalloc / size_t | 🟡 中等 |
 
 ---
 
@@ -2768,8 +2773,428 @@ if (open(path, O_RDONLY) < 0) {
 
 ---
 
-*文档版本: 3.0*
-*最后更新: 2026-04-04*
-*新增 E058：sed 操作生成文件导致补丁不可复现*
-*新增 E059：源码修改未保存为 .patch 文件*
-*新增 E060：补丁缺少 __OHOS__ 守卫无法上游化*
+## E061: gnulib stdbool.h 模块缺失
+
+### 错误特征
+
+```
+./config.h:2555:6: error: "<stdbool.h> does not exist on this platform. Use gnulib module 'stdbool-c99' instead of gnulib module 'stdbool'."
+```
+
+### 根因
+
+GNU 软件使用 gnulib 提供 POSIX 兼容层。gnulib 的 `stdbool` 模块在较新版本中被标记为 deprecated，应使用 `stdbool-c99` 替代。但 configure 检测时如果 conftest 无法执行（见 E064），会回退到错误的默认值。
+
+**问题链**：
+```
+configure 运行 conftest 测试
+    ↓
+conftest 二进制无法执行（安全弹窗 / SELinux）
+    ↓
+检测结果默认为"不可用"
+    ↓
+gnulib 选择 fallback 模块（如 stdbool 而非 stdbool-c99）
+    ↓
+编译时报错：模块不兼容当前平台
+```
+
+### 解决方案
+
+**方案 1：让 configure 的 conftest 正常执行**
+- 首次运行编译产物触发安全弹窗确认
+- 或在 configure 前设置 `ac_cv_func_*` 缓存变量跳过检测
+
+**方案 2：强制使用正确的 gnulib 模块**
+
+```bash
+# 在 configure.ac 中（源码级修改）:
+gl_STDLIB_H  # 替代 gl_STDBOOL_H
+
+# 或通过环境变量强制:
+export gl_cv_header_stdbool_h=yes
+```
+
+**方案 3：CFLAGS 禁用该检查（临时绕过）**
+
+```bash
+# 如果是 Werror 导致的级联错误，先修 Werror（E063）可能一并解决
+```
+
+### 涉及软件
+
+sed 4.9、以及所有使用新版 gnulib 的 GNU 软件（grep, coreutils, gawk 等）
+
+### 相关模式
+
+- [E064](#e064-conftest-无法执行导致配置检测失败) — 根因
+- [E063](#e063--werror-导致警告变错误) — 可能的级联原因
+
+---
+
+## E062: FLEXIBLE_ARRAY_MEMBER 未定义
+
+### 错误特征
+
+```
+lib/dfa.h:42:13: error: use of undeclared identifier 'FLEXIBLE_ARRAY_MEMBER'
+```
+
+### 根因
+
+C99 的灵活数组成员（Flexible Array Member）在某些平台上需要宏定义。gnulib 的 `flexmember.h` 提供了可移植实现，但如果头文件包含顺序错误或 gnulib 检测失败，该宏未被定义。
+
+### 解决方案
+
+```c
+// 在受影响的 .h 文件顶部添加:
+#if !defined(FLEXIBLE_ARRAY_MEMBER)
+#if __STDC_VERSION__ >= 199901L
+#define FLEXIBLE_ARRAY_MEMBER // C99: 空（FAM 直接用 []）
+#else
+#define FLEXIBLE_ARRAY_MEMBER 1  // C89: 大小为 1
+#endif
+#endif
+```
+
+或确保 gnulib 的 `flexmember.h` 在使用前被正确包含：
+
+```bash
+# configure 时指定:
+export gl_cv_flexmember=yes
+```
+
+### 涉及软件
+
+sed 4.9（lib/dfa.h）、其他使用 gnulib FAM 的软件
+
+---
+
+## E063: -Werror 导致警告变错误
+
+### 错误特征
+
+```
+sed/compile.c:205:9: error: incompatible integer to pointer conversion initializing 'char *' with an expression of type 'int' [-Wint-conversion]
+sed/compile.c:422:15: error: incompatible integer to pointer conversion assigning to 'char *' from 'int' [-Wint-conversion]
+18 warnings and 12 errors generated.
+```
+
+注意：**warnings 数量 > 0 但 errors = 0 是正常的；errors > 0 则是 -Werror 把 warning 升级成了 error。**
+
+### 根因
+
+项目启用了 `-Werror`（或某些类别如 `-Werror=implicit-function-declaration`），将所有编译器警告视为错误。musl/clang 组合下会产生一些与 glibc 不同的警告：
+
+| 警告类型 | 触发场景 | musl 特有 |
+|---------|---------|---------|
+| `-Wint-conversion` | int→指针 隐式转换 | ✅ musl size_t 差异 |
+| `-Wincompatible-pointer-types` | 不同类型指针赋值 | ✅ 常见 |
+| `-Wimplicit-function-declaration` | 未声明函数调用 | ✅ 头文件差异 |
+| `-Wformat-truncation` | 格式化字符串截断 | ✅ 常见 |
+
+### 解决方案
+
+**方案 1（推荐）：在 Makefile 中对特定 warning 禁用 error**
+
+```makefile
+# 在编译规则中添加（不改 configure.ac）:
+CFLAGS += -Wno-error=int-conversion
+CFLAGS += -Wno-error=incompatible-pointer-types
+```
+
+**方案 2：configure.ac 中条件性禁用（可 upstream）**
+
+```m4
+# 在 configure.ac 的 compiler flag 检测之后:
+case "$host_os" in
+    *ohos*|*linux-musl*)
+        AX_APPEND_FLAG([CFLAGS], [-Wno-error=int-conversion])
+        AX_APPEND_FLAG([CFLAGS], [-Wno-error=incompatible-pointer-types])
+        ;;
+esac
+```
+
+**方案 3：仅用于本次编译的临时 workaround**
+
+```bash
+make CFLAGS="-O2 -fPIC -Wno-error=int-conversion -Wno-error=incompatible-pointer-types"
+```
+
+### 判断方法
+
+```bash
+# 区分"真正的 error"和"warning 被 -Werror 升级":
+make 2>&1 | grep "error:" 
+# 如果看到 "-Werror" 或 "[-Wxxx]" 字样 → 就是 E063
+# 如果只有 "undefined reference" / "No such file" → 不是 E063
+```
+
+### 涉及范围
+
+**所有使用 `-Werror` 的软件在鸿蒙上都可能遇到**。这是最普遍的适配问题之一。
+
+### 相关知识
+
+- SKILL.md R1 参数最少化原则：额外 CFLAGS 应记录为技术债务
+- `knowledge/build-systems.md` §3 — CFLAGS hack 消除策略
+
+---
+
+## E064: conftest 无法执行导致配置检测失败
+
+### 错误特征
+
+```
+configure: error: cannot run C compiled programs.
+If you meant to cross compile, use '--host'.
+See 'config.log' for more details.
+
+config.log: ./conftest: inaccessible or not found
+configure:5796: $? = 127
+```
+
+### 根因
+
+autotools 的 configure 脚本通过**编译并运行小测试程序**来检测平台能力（如函数是否存在、类型大小等）。在鸿蒙上：
+
+1. configure 编译出 `conftest` 二进制
+2. 尝试执行 `./conftest`
+3. **首次执行非系统二进制需要安全确认弹窗**
+4. 弹窗超时未点 → 进程被杀 → configure 认为程序无法运行
+5. **得出错误结论："此平台不能运行编译出的程序"→ 误判为交叉编译**
+
+**关键区别**：
+
+| 场景 | conftest 结果 | configure 行为 |
+|------|--------------|---------------|
+| 正常（点了弹窗） | exit 0 + 输出 | 正确检测平台能力 |
+| 弹窗超时 | exit 127 / Permission denied | **误判为 cross compile** |
+| 真正交叉编译 | 不能执行（架构不同） | 正确判断 |
+
+### 影响
+
+当 configure 误判为交叉编译后：
+- 大量检测使用**硬编码默认值**而非实际检测结果
+- gnulib 模块选择错误（E061）
+- 函数可用性检测跳过
+- 最终导致编译错误（E062/E063 级联失败）
+
+### 解决方案
+
+**方案 1（首选）：手动触发弹窗后再跑 configure**
+
+```bash
+# 1. 先跑一次 configure（会卡在弹窗）
+./configure --prefix=$PREFIX &
+# 2. 快速点击所有弹窗
+# 3. 等 configure 完成
+# 4. 如果超时被杀，重新跑（此时弹窗已确认过）
+./configure --prefix=$PREFIX
+```
+
+**方案 2：预填充 ac_cv_* 缓存变量**
+
+```bash
+# 从成功的 config.log 中提取关键变量，创建 cache 文件
+cat > config.cache <<'EOF'
+ac_cv_c_bigendian=no
+ac_cv_func_mmap_fixed_mapped=yes
+ac_cv_func_strerror_r_char_p=no
+ac_cv_file__dev_ptmx=yes
+ac_cv_type_uid_t=yes
+ac_cv_type_size_t=yes
+EOF
+./configure --prefix=$PREFIX --cache-file=config.cache
+```
+
+**方案 3（禁止）：加 --host 参数**
+
+```bash
+# ❌ 违反 R1 参数最少化原则
+# 且会导致更多问题（预定义宏、库路径等全部错误）
+./configure --prefix=$PREFIX --host=aarch64-unknown-linux-ohos
+```
+
+### 如何区分真交叉编译 vs 弹窗超时
+
+```bash
+# 查看 config.log 关键行:
+grep "cannot run\|inaccessible\|conftest.*exit" config.log
+
+# 弹窗超时的特征:
+#   ./conftest: inaccessible or not found   ← 权限问题
+#   $? = 127                               ← 找不到/不能执行
+
+# 真交叉编译的特征:
+#   file format not recognized             ← 架构完全不匹配
+#   Exec format error                       ← 同上
+```
+
+### 涉及范围
+
+**所有 autotools 项目**。这是鸿蒙编译中最常见的根因性问题。
+
+### 相关模式
+
+- [E054](#e054-外来二进制首次执行被安全确认弹窗阻止) — 弹窗机制本身
+- [E061](#e061-gnulib-stdbool-h-模块缺失) — 级联后果之一
+- [E008](#e008-fstat-返回-eacces) — 类似的 conftest 运行环境问题
+
+---
+
+## E065: gnulib 头文件包含顺序导致符号未声明
+
+### 错误特征
+
+```
+sed/compile.c:988:7: error: use of undeclared identifier 'xzalloc'
+sed/compile.c:1299:62: unexpected type name 'size_t': expected expression
+sed/compile.c:1321:67: expected expression
+```
+
+### 根因
+
+gnulib 提供的头文件之间有依赖顺序要求。例如：
+- `xzalloc()` 定义在 `lib/xalloc.h`
+- `size_t` 需要 `<stddef.h>` 或 `<sys/types.h>`
+- 如果 `.c` 文件的 `#include` 顺序不符合 gnulib 的预期，或者 gnulib 的替换头文件未正确覆盖系统头文件，就会导致符号未声明。
+
+这通常是 **E064（conftest 失败）** 的二级后果：gnulib 的 `config.h` 中包含了错误的 `#define` 配置。
+
+### 解决方案
+
+```bash
+# 方案 1：确保 CFLAGS 包含必要的路径
+export CPPFLAGS="-I$BUILD_SRC_DIR/lib -I$BUILD_SRC_DIR"
+
+# 方案 2：在受影响的 .c 文件中显式包含所需头文件
+// 在 compile.c 顶部添加:
+#include <stddef.h>      // 提供 size_t
+#include "xalloc.h"       // 提供 xzalloc/xzalloc
+
+# 方案 3：清理后重新 configure（解决 E064 后通常会顺带解决）
+make distclean
+./configure --prefix=$PREFIX  # 这次弹窗已确认
+```
+
+### 涉及软件
+
+sed 4.9、以及其他深度依赖 gnulib 的 GNU 软件
+
+### 诊断流程
+
+```
+遇到 "undeclared identifier" 错误
+    │
+    ├─ 该符号来自系统头文件（size_t, FILE*, etc.）
+    │   → 缺少 #include → 补上即可
+    │
+    ├─ 该符号来自 gnulib 替代模块（xzalloc, xmemdup, etc.）
+    │   → gnulib 头文件包含顺序问题 → 检查 CPPFLAGS / I 路径
+    │
+    └─ 该符号来自项目自身
+        → 正常编译错误 → 修复源码
+```
+
+---
+
+## E066: refresh-patch.sh 不支持 .tar.xz 格式
+
+### 错误特征
+
+```
+refresh-patch.sh --auto sed 4.9
+# tar: Error is not recoverable: exiting now
+# 或: tar: Cannot open: No such file
+# 补丁管线失败，跳过补丁生成
+```
+
+### 根因
+
+`refresh-patch.sh` 内部硬编码 `tar xzf` 解压原始 tarball，只支持 `.tar.gz` 格式。
+但 GNU 软件越来越多使用 `.tar.xz`（xz 压缩率更高，文件更小）。
+
+| 格式 | tar 参数 | 使用频率 |
+|------|----------|---------|
+| `.tar.gz` / `.tgz` | `tar xzf` | 传统格式 |
+| `.tar.xz` / `.txz` | `tar xJf` | **现代 GNU 软件主流**（sed 4.9, grep 3.12+, coreutils 9.14+） |
+| `.tar.bz2` / `.tbz2` | `tar xjf` | 较少 |
+
+### 解决方案
+
+```bash
+# refresh-patch.sh 应按扩展名选择解压方式
+case "$TARBALL" in
+    *.tar.gz|*.tgz)  tar xzf "$TARBALL" -C "$DIR" ;;
+    *.tar.xz|*.txz)  tar xJf "$TARBALL" -C "$DIR" ;;
+    *.tar.bz2|*.tbz2) tar xjf "$TARBALL" -C "$DIR" ;;
+    *)               tar xf  "$TARBALL" -C "$DIR" ;;  # 自动检测
+esac
+```
+
+### 涉及范围
+
+所有使用 `.tar.xz` 源码的软件。**这是 refresh-patch.sh 的脚本缺陷，不是平台问题。**
+
+### 相关知识
+
+- SKILL.md Step 3（finish-build.sh 调用 refresh-patch.sh）
+- `scripts/refresh-patch.sh` 第 ~430 行
+
+---
+
+## E067: grep 匹配含正则元字符的固定字符串失败
+
+### 错误特征
+
+```
+# 测试版本信息：
+$SED --version | head -1 | grep "GNU sed 4.9"
+# 返回空（匹配失败），但输出明明包含该字符串
+
+# 原始输出:
+# /storage/Users/currentUser/tmp/sed-test-install/bin/sed (GNU sed) 4.9
+```
+
+### 根因
+
+`grep` 默认使用**基本正则表达式 (BRE)** 模式。当待匹配字符串含正则元字符时：
+- `(` `)` → 分组符号
+- `[` `]` → 字符类
+- `$` → 行尾锚定
+
+本例中 `(GNU)` 的括号被 grep 当作分组元字符，导致匹配失败。
+
+### 验证命令
+
+```bash
+V=$($SED --version | head -1)
+echo "[$V]"
+echo "$V" | grep "GNU sed 4.9"    # ❌ 失败：( 是正则元字符
+echo "$V" | grep -F "GNU sed 4.9"   # ✅ 成功：-F 固定字符串匹配
+case "$V" in *GNU sed 4.9*) echo OK;; esac  # ✅ 成功：shell 原生模式匹配
+```
+
+### 解决方案
+
+| 场景 | 推荐方式 |
+|------|---------|
+| 匹配固定字符串（含元字符风险） | `grep -F` （强制固定字符串模式） |
+| shell 变量模式匹配 | `case "$var" in *pattern*)` （POSIX 原生，无元字符问题） |
+| 简单子串检查 | `case "$var" in *substring*)` |
+
+### 涉及范围
+
+所有在鸿蒙上编写测试脚本或验证逻辑时。**这是 AI 编程疏忽，不是平台问题。**
+
+### 相关规范
+
+- SKILL.md §1.2 AI 执行风格规范 — grep -F 原则
+- E010 toybox 兼容性问题（部分 grep 实现差异）
+
+---
+
+*文档版本: 3.2*
+*最后更新: 2026-04-07*
+*新增 E066: refresh-patch.sh tar 格式不支持*
+*新增 E067: grep 匹配含正则元字符的固定字符串失败*

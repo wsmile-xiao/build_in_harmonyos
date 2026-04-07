@@ -496,17 +496,25 @@ else
     log_info "无历史档案（首次编译）"
 fi
 
-# ---- Step 6: 创建/恢复档案骨架 ----
-echo "[6/8] 创建档案骨架..."
+# ---- Step 6: 创建/恢复档案骨架（保留已有内容）----
+echo "[6/8] 检查/恢复档案骨架..."
 
-if [ "$HISTORY_FOUND" = "true" ] && [ "$HISTORY_STATUS" = "compiling" ]; then
-    log_info "档案已存在且状态为 compiling，跳过创建"
+if [ "$HISTORY_FOUND" = "true" ]; then
+    _PROGRESS_LINES=$(wc -l < "$ARCHIVE_DIR/PROGRESS.md" 2>/dev/null | tr -d ' ')
+    _MANIFEST_LINES=$(wc -l < "$ARCHIVE_DIR/manifest.yaml" 2>/dev/null | tr -d ' ')
+    if [ "${_PROGRESS_LINES:-0}" -gt 15 ] && [ "${_MANIFEST_LINES:-0}" -gt 10 ]; then
+        log_info "历史档案完整（PROGRESS:${_PROGRESS_LINES}行 manifest:${_MANIFEST_LINES}行），保留"
+    else
+        log_warn "历史档案不完整，重新生成..."
+        if [ -x "${SCRIPT_DIR}/init-archive.sh" ]; then
+            "${SCRIPT_DIR}/init-archive.sh" "$SOFTWARE_NAME" "$VERSION" "$DOWNLOAD_URL" "$BUILD_SYSTEM" 2>&1 \
+                | while IFS= read -r line; do printf '     %s\n' "$line"; done
+        fi
+    fi
 elif [ -x "${SCRIPT_DIR}/init-archive.sh" ]; then
-    # 调用已有脚本
     "${SCRIPT_DIR}/init-archive.sh" "$SOFTWARE_NAME" "$VERSION" "$DOWNLOAD_URL" "$BUILD_SYSTEM" 2>&1 \
         | while IFS= read -r line; do printf '     %s\n' "$line"; done
 else
-    # 手动创建最小骨架
     mkdir -p "$ARCHIVE_DIR"/{patches,reports,scripts,logs}
     log_info "手动创建骨架: $ARCHIVE_DIR"
 fi

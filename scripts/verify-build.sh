@@ -341,14 +341,78 @@ if [ -d "$ARCHIVE_DIR/patches" ]; then
     PATCH_COUNT=$(find "$ARCHIVE_DIR/patches" -name "000*.patch" -type f 2>/dev/null | wc -l | tr -d ' ')
     if [ "$PATCH_COUNT" -gt 0 ]; then
         REBUILD_OK=true
+        # 确定源码目录（用于真 dry-run）
+        SRC_DIR_FOR_PATCH=""
+        _TMPDIR_BASE="${TMPDIR:-$HOME/tmp}"
+        
+        # 策略1: 从 build-context 文件读取
+        _CTX="${PROJECT_DIR}/.build-context-${SOFTWARE}-${VERSION}"
+        if [ -f "$_CTX" ]; then
+            _SRC=$(grep "^BUILD_SRC_DIR=" "$_CTX" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')
+            [ -n "$_SRC" ] && [ -d "$_SRC" ] && SRC_DIR_FOR_PATCH="$_SRC"
+        fi
+        # 策略2: 常见临时测试目录
+        if [ -z "$SRC_DIR_FOR_PATCH" ]; then
+            _TMP_TEST="${_TMPDIR_BASE}/builds/${SOFTWARE}-${VERSION}-test"
+            [ -d "$_TMP_TEST" ] && SRC_DIR_FOR_PATCH="$_TMP_TEST"
+        fi
+        if [ -z "$SRC_DIR_FOR_PATCH" ]; then
+            _TMP_MAIN="${_TMPDIR_BASE}/builds/${SOFTWARE}-${VERSION}"
+            [ -d "$_TMP_MAIN" ] && SRC_DIR_FOR_PATCH="$_TMP_MAIN"
+        fi
+        # 策略3: 从原始 tarball 重建干净源码（最可靠）
+        if [ -z "$SRC_DIR_FOR_PATCH" ] && [ -f "${ARCHIVE_DIR}/manifest.yaml" ]; then
+            _TAR_URL=$(grep "^source_url:" "${ARCHIVE_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' "')
+            if [ -n "$_TAR_URL" ]; then
+                _REBUILD_SRC="${_TMPDIR_BASE}/.verify-rebuild-${SOFTWARE}-${VERSION}-$$"
+                mkdir -p "$_REBUILD_SRC" || true
+                echo "     [INFO] 源码不存在，从 ${_TAR_URL##*/} 重建..."
+                # 根据扩展名选择解压方式
+                case "$_TAR_URL" in
+                    *.tar.xz)  curl -fsSL "$_TAR_URL" 2>/dev/null | tar xJf - -C "$_REBUILD_SRC" ;;
+                    *.tar.gz|*.tgz) curl -fsSL "$_TAR_URL" 2>/dev/null | tar xzf - -C "$_REBUILD_SRC" ;;
+                    *.tar.bz2) curl -fsSL "$_TAR_URL" 2>/dev/null | tar xjf - -C "$_REBUILD_SRC" ;;
+                    *)         curl -fsSL "$_TAR_URL" -o "${_REBUILD_SRC}/dl.tar" 2>/dev/null && tar xf "${_REBUILD_SRC}/dl.tar" -C "$_REBUILD_SRC" ;;
+                esac
+                # 找到解压出的顶层目录
+                _EXTRACTED=$(ls -1d "$_REBUILD_SRC"/*/ 2>/dev/null | head -1)
+                if [ -n "$_EXTRACTED" ] && [ -d "$_EXTRACTED" ]; then
+                    SRC_DIR_FOR_PATCH="$(echo "$_EXTRACTED" | sed 's:/$::')"
+                    echo "     [INFO] 重建成功: $SRC_DIR_FOR_PATCH"
+                else
+                    rm -rf "$_REBUILD_SRC"
+                fi
+            fi
+        fi
+        
         for p in "$ARCHIVE_DIR"/patches/000*.patch; do
             [ -f "$p" ] || continue
-            DRY_RUN=$(patch -p1 --dry-run -i "$p" -d /tmp 2>&1) || REBUILD_OK=false
+            if [ -n "$SRC_DIR_FOR_PATCH" ] && [ -d "$SRC_DIR_FOR_PATCH" ]; then
+                DRY_RUN=$(patch -p1 --dry-run -i "$p" -d "$SRC_DIR_FOR_PATCH" 2>&1)
+                _RC=$?
+                if [ $_RC -ne 0 ]; then
+                    # "already applied/reversed" 不算失败（configure 可能改过文件）
+                    echo "$DRY_RUN" | grep -qiE 'already applied|reversed|previously' && continue
+                    REBUILD_OK=false
+                fi
+            else
+                # 无源码且无法重建 → 仅验证 patch 格式合法性
+                if head -1 "$p" | grep -qE '^(---|\+\+\+|\*\*\*|===) '; then
+                    : # 格式合法
+                else
+                    REBUILD_OK=false
+                fi
+            fi
         done
+        
+        # 清理临时重建的源码
+        if [ -n "$_REBUILD_SRC" ] && [ -d "$_REBUILD_SRC" ]; then
+            rm -rf "$_REBUILD_SRC"
+        fi
         if [ "$REBUILD_OK" = "true" ]; then
-            g4_pass "补丁重建: ${PATCH_COUNT} 个补丁全部可通过 dry-run"
+            g4_pass "补丁重建: ${PATCH_COUNT} 个补丁全部可通过验证"
         else
-            g4_fail "补丁重建: 部分 patch dry-run 失败"
+            g4_fail "补丁重建: 部分 patch 验证失败"
         fi
     else
         g4_warn "补丁重建: patches/ 目录为空（首次编译？）"
@@ -400,6 +464,34 @@ if [ -f "$ARCHIVE_DIR/PROGRESS.md" ]; then
     esac
 else
     g4_warn "PROGRESS.md: 不存在"
+fi
+
+# G4-6: finish-build.sh 是否已执行（强制门禁）
+echo ""
+echo "[G4-6/4] finish-build 收尾检查..."
+
+FEEDBACK_FILE="${ARCHIVE_DIR}/reports/skill-feedback.md"
+if [ -f "$FEEDBACK_FILE" ] && [ "$(wc -l < "$FEEDBACK_FILE" | tr -d ' ')" -gt 5 ]; then
+    g4_pass "finish-build: skill-feedback.md 存在且有内容 ($(wc -l < "$FEEDBACK_FILE" | tr -d ' ') 行)"
+    FINISH_DONE=true
+elif [ -f "$ARCHIVE_DIR/manifest.yaml" ]; then
+    # 备选：manifest 已被 finish-build 更新过（有 build_cleanliness 字段）
+    if grep -q "build_cleanliness:" "$ARCHIVE_DIR/manifest.yaml" 2>/dev/null; then
+        g4_pass "finish-build: manifest 含 build_cleanliness 字段（已执行收尾）"
+        FINISH_DONE=true
+    else
+        g4_fail "finish-build: 未检测到收尾记录（缺少 skill-feedback.md 和 build_cleanliness）"
+        g4_fail "  → 请执行: ./scripts/finish-build.sh ${SOFTWARE} ${VERSION} success|partial"
+        FINISH_DONE=false
+    fi
+else
+    g4_fail "finish-build: 归档目录不完整，无法确认收尾状态"
+    FINISH_DONE=false
+fi
+
+# 如果 finish-build 未执行，直接 FAIL（不允许跳过）
+if [ "$FINISH_DONE" = "false" ]; then
+    FINAL_VERDICT="FAIL-G4"
 fi
 
 echo ""

@@ -186,29 +186,6 @@ public:
 			OH_Drawing_FontSetEdging(ohFont, FONT_EDGING_SUBPIXEL_ANTI_ALIAS);
 			OH_Drawing_FontSetBaselineSnap(ohFont, true);
 			UpdateMetrics();
-
-			// [Patch-0043] CJK capability detection — verify loaded font can render CJK
-			{
-				const char *cjkTest = "\xe6\xb5\x8b\xe8\xaf\x95"; // "测试" in UTF-8
-				int cjkGlyphCount = OH_Drawing_FontCountText(ohFont, cjkTest, 6, TEXT_ENCODING_UTF8);
-				float totalCjkWidth = 0.0f;
-				if (cjkGlyphCount > 0) {
-					std::vector<uint16_t> testGlyphs(cjkGlyphCount);
-					OH_Drawing_FontTextToGlyphs(ohFont, cjkTest, 6,
-						TEXT_ENCODING_UTF8, testGlyphs.data(), cjkGlyphCount);
-					std::vector<float> testWidths(cjkGlyphCount);
-					OH_Drawing_FontGetWidths(ohFont, testGlyphs.data(), cjkGlyphCount, testWidths.data());
-					for (int w = 0; w < cjkGlyphCount; w++) totalCjkWidth += testWidths[w];
-				}
-				if (totalCjkWidth > 0.0f) {
-					PLAT_LOG("[Patch-0043] Font CJK test: glyphCount=%d totalWidth=%.1f — CJK-READY ✅",
-						cjkGlyphCount, totalCjkWidth);
-				} else {
-					PLAT_ERR("[Patch-0043] Font CJK test: glyphCount=%d totalWidth=%.1f — CJK-UNAVAILABLE ⚠️ TextBlob will silently fail for Chinese text!",
-						cjkGlyphCount, totalCjkWidth);
-				}
-			}
-
 			PLAT_DBG("Font created: fontSizePx=%.1f ascent=%.1f descent=%.1f height=%.1f avgCharW=%.1f leading=%.1f",
 				fontSizePx, GetAscent(), GetDescent(), GetHeight(), GetAvgCharWidth(), GetLeading());
 		} else {
@@ -552,41 +529,13 @@ public:
 		auto *blob = OH_Drawing_TextBlobCreateFromText(
 			text.data(), text.size(), fh->ohFont, TEXT_ENCODING_UTF8);
 		if (blob) {
-			// [Patch-0044] Log non-ASCII text content for CJK debugging
-			if (s_drawTextCount < 100) {
-				bool hasNonAscii = false;
-				char preview[48] = {0};
-				size_t previewLen = std::min(text.size(), sizeof(preview)-1);
-				for (size_t i = 0; i < previewLen; i++) {
-					if ((unsigned char)text[i] >= 0x80) hasNonAscii = true;
-					preview[i] = (text[i] >= 32 && text[i] < 127) ? text[i] : '?';
-				}
-				PLAT_DBG("DrawTextNoClip[%d]: rc=(%.0f,%.0f,%.0f,%.0f) ybase=%.1f "
-					"textLen=%zu hasNonASCII=%d preview=\"%.40s\" rgba=0x%08x",
-					s_drawTextCount++, (double)rc.left, (double)rc.top,
-					(double)rc.right, (double)rc.bottom,
-					(double)ybase, text.size(), (int)hasNonAscii, preview,
-					ColourToARGB(fore));
-			} else {
-				s_drawTextCount++;
-			}
 			ApplyBrush(fore);
 			OH_Drawing_CanvasDrawTextBlob(canvas, blob,
 				static_cast<float>(rc.left), static_cast<float>(ybase));
 			DetachBrush();
 			OH_Drawing_TextBlobDestroy(blob);
-		} else {
-			// [Patch-0043] Detect CJK TextBlob failure
-			bool hasNonAscii = false;
-			for (size_t i = 0; i < text.size(); i++) {
-				if ((unsigned char)text[i] >= 0x80) { hasNonAscii = true; break; }
-			}
-			if (hasNonAscii) {
-				PLAT_ERR("[Patch-0043] DrawTextNoClip: TextBlob FAILED for non-ASCII text! len=%zu hasCJK=1 font=%p — font lacks CJK glyphs!",
-					text.size(), (void*)fh->ohFont);
-			} else if (s_drawTextCount < 50) {
-				PLAT_DBG("DrawTextNoClip[%d]: TextBlob FAILED len=%zu font=%p", s_drawTextCount++, text.size(), (void*)fh->ohFont);
-			}
+		} else if (s_drawTextCount < 50) {
+			PLAT_DBG("DrawTextNoClip[%d]: TextBlob FAILED len=%zu font=%p", s_drawTextCount++, text.size(), (void*)fh->ohFont);
 		}
 	}
 

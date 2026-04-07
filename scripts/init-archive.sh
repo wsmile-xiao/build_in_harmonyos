@@ -1,9 +1,16 @@
 #!/bin/sh
-# init-archive.sh - 创建编译档案骨架（Phase 1.5）
+# init-archive.sh - 创建/恢复编译档案骨架（Phase 1.5）
 # 用法: ./init-archive.sh <软件名> <版本> [源码下载URL] [构建系统类型]
 #
-# 在 archives/ 目录下创建完整的软件编译档案目录结构，
-# 包括 manifest.yaml、PROGRESS.md 和必要的子目录。
+# 核心原则: 重编译时最大化复用已有归档内容，不主动删除任何文件。
+#   - manifest.yaml / PROGRESS.md / README.md → 有实质内容则保留
+#   - patches/*.patch → 全部保留（AI 在 Step 2 可选择性应用）
+#   - reports/* / packaging/* / logs/* → 全部保留（历史记录）
+#   - *.tmp / .bak 等临时文件 → 不在此处清理，由最终归档收口步骤处理
+#   - 只有 --clean 标志才强制清空 patches/ 和 packaging/（用于完全重置场景）
+#
+# 关键改进：检测到已有非空档案时保留 PROGRESS.md 和 manifest.yaml，
+# 不再用空模板覆盖历史记录。
 
 set -e
 
@@ -18,28 +25,28 @@ show_help() {
   ./init-archive.sh <软件名> <版本> [源码下载URL] [构建系统类型]
 
 描述:
-  创建编译档案骨架（Phase 1.5），包括：
-  - 目录结构：archives/{letter}/{name}/{version}/{patches,reports,scripts,logs}
-  - manifest.yaml（编译元数据）
-  - PROGRESS.md（编译进度跟踪）
-  - 创建 _meta.yaml 索引元数据
+  创建或恢复编译档案骨架（Phase 1.5），包括：
+  - 目录结构：archives/{letter}/{name}/{version}/{patches,reports,scripts,logs,packaging}
+  - manifest.yaml（编译元数据，已有则保留）
+  - PROGRESS.md（编译进度跟踪，已有则保留）
+  - README.md（编译说明，已有则保留）
+  - _meta.yaml 索引元数据
+
+重编译行为:
+  - 默认模式: 保留所有已有文件（复用旧补丁/报告/PROGRESS），仅创建缺失的骨架
+  - --clean: 清空 patches/ 和 packaging/（完全重置，用于丢弃旧补丁重新开始）
 
 参数:
   <软件名>          软件名称（如 openssl, zlib, curl）
   <版本>            版本号（如 3.0.1, 1.2.13）
   [源码下载URL]     源码下载地址（可选）
-  [构建系统类型]    构建系统类型：cmake|autotools|meson|make|custom（可选，默认 unknown）
-
-示例:
-  ./init-archive.sh openssl 3.0.1 https://www.openssl.org/source/openssl-3.0.1.tar.gz
-  ./init-archive.sh zlib 1.2.13 https://zlib.net/zlib-1.2.13.tar.gz cmake
-  ./init-archive.sh libfoo 2.0
+  [构建系统类型]    构建系统类型：cmake|autotools|meson|make|custom（默认 unknown）
+  [--clean]         强制清空 patches/ 和 packaging/（完全重置模式）
 
 退出码:
   0  成功
   1  参数错误
   2  目录创建失败
-  3  模板创建失败
 HELPEOF
     exit 0
 }
@@ -60,6 +67,15 @@ SOFTWARE_NAME="$1"
 VERSION="$2"
 SOURCE_URL="${3:-}"
 BUILD_SYSTEM="${4:-unknown}"
+CLEAN_MODE="false"
+
+# 解析可选参数
+shift 4
+for arg in "$@"; do
+    case "$arg" in
+        --clean) CLEAN_MODE="true" ;;
+    esac
+done
 
 # ---------- 计算首字母 ----------
 FIRST_LETTER="$(echo "$SOFTWARE_NAME" | cut -c1 | tr 'A-Z' 'a-z')"
@@ -68,7 +84,7 @@ FIRST_LETTER="$(echo "$SOFTWARE_NAME" | cut -c1 | tr 'A-Z' 'a-z')"
 SOFTWARE_DIR="${ARCHIVES_DIR}/${FIRST_LETTER}/${SOFTWARE_NAME}"
 VERSION_DIR="${SOFTWARE_DIR}/${VERSION}"
 
-echo "📝 创建编译档案骨架"
+echo "📝 创建/恢复编译档案骨架"
 echo "  软件:   ${SOFTWARE_NAME}"
 echo "  版本:   ${VERSION}"
 echo "  构建:   ${BUILD_SYSTEM}"
@@ -79,9 +95,9 @@ echo "  路径:   ${VERSION_DIR}"
 echo ""
 
 # ---------- 步骤 1: 创建目录结构 ----------
-echo "[1/5] 创建目录结构..."
+echo "[1/6] 创建目录结构..."
 
-SUBDIRS="patches reports scripts logs"
+SUBDIRS="patches reports scripts logs packaging"
 for subdir in $SUBDIRS; do
     _target="${VERSION_DIR}/${subdir}"
     if mkdir -p "$_target"; then
@@ -92,14 +108,25 @@ for subdir in $SUBDIRS; do
     fi
 done
 
-# ---------- 步骤 2: 创建 manifest.yaml ----------
-echo "[2/5] 创建 manifest.yaml..."
+# --clean 模式：清空 patches/ 和 packaging/（完全重置）
+if [ "$CLEAN_MODE" = "true" ]; then
+    echo "  🧹 [--clean] 清空旧补丁和打包产物..."
+    rm -f "${VERSION_DIR}"/patches/*.patch 2>/dev/null || true
+    rm -f "${VERSION_DIR}"/packaging/*.tar.gz "${VERSION_DIR}"/packaging/*.sh 2>/dev/null || true
+    rm -rf "${VERSION_DIR}"/packaging/bin "${VERSION_DIR}"/packaging/debug "${VERSION_DIR}"/packaging/share 2>/dev/null || true
+    echo "  ✅ patches/ 和 packaging/ 已清空"
+fi
 
+# ---------- 步骤 2: manifest.yaml（已有实质内容则保留）----------
 TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
+echo "[2/5] 检查 manifest.yaml..."
 
-cat > "${VERSION_DIR}/manifest.yaml" <<EOF
+if [ -f "${VERSION_DIR}/manifest.yaml" ] && [ "$(wc -l < "${VERSION_DIR}/manifest.yaml" | tr -d ' ')" -gt 10 ]; then
+    echo "  ✅ manifest.yaml 已存在（$(wc -l < "${VERSION_DIR}/manifest.yaml" | tr -d ' ') 行），保留"
+else
+    cat > "${VERSION_DIR}/manifest.yaml" <<EOF
 # 编译档案 manifest
-# 由 init-archive.sh 自动生成
+# 由 init-archive.sh 自动生成 / 恢复
 # 生成时间: ${TIMESTAMP}
 
 software: ${SOFTWARE_NAME}
@@ -108,47 +135,24 @@ status: compiling
 
 build_system: ${BUILD_SYSTEM}
 EOF
-
-if [ -n "$SOURCE_URL" ]; then
-    cat >> "${VERSION_DIR}/manifest.yaml" <<EOF
-source_url: ${SOURCE_URL}
-EOF
-fi
-
-cat >> "${VERSION_DIR}/manifest.yaml" <<EOF
-
-# 编译环境信息
-created_at: ${TIMESTAMP}
-
-# 知识积累
-knowledge_gained: []
-
-# 补丁列表
-patches_applied: []
-
-# 编译日志
-build_log: logs/build.log
-EOF
-
-if [ -f "${VERSION_DIR}/manifest.yaml" ]; then
+    if [ -n "$SOURCE_URL" ]; then
+        printf 'source_url: %s\n' "$SOURCE_URL" >> "${VERSION_DIR}/manifest.yaml"
+    fi
+    printf '\n# 编译环境信息\ncreated_at: %s\n\n# 知识积累\nknowledge_gained: []\n\n# 补丁列表\npatches_applied: []\n\n# 编译日志\nbuild_log: logs/build.log\n' \
+        "$TIMESTAMP" >> "${VERSION_DIR}/manifest.yaml"
     echo "  ✅ manifest.yaml 已创建"
+fi
+
+# ---------- 步骤 3: PROGRESS.md（已有实质内容则保留）----------
+echo "[3/5] 检查 PROGRESS.md..."
+
+if [ -f "${VERSION_DIR}/PROGRESS.md" ] && [ "$(wc -l < "${VERSION_DIR}/PROGRESS.md" | tr -d ' ')" -gt 15 ]; then
+    echo "  ✅ PROGRESS.md 已存在（$(wc -l < "${VERSION_DIR}/PROGRESS.md" | tr -d ' ') 行），保留"
 else
-    echo "  ❌ manifest.yaml 创建失败"
-    exit 3
-fi
-
-# ---------- 步骤 3: 创建 PROGRESS.md ----------
-echo "[3/5] 创建 PROGRESS.md..."
-
-SOURCE_PATH=""
-if [ -n "$SOURCE_URL" ]; then
-    SOURCE_PATH="${SOURCE_URL}"
-fi
-
-cat > "${VERSION_DIR}/PROGRESS.md" <<EOF
+    cat > "${VERSION_DIR}/PROGRESS.md" <<EOF
 # ${SOFTWARE_NAME} ${VERSION} — 编译进度
 
-> 档案创建时间: ${TIMESTAMP}
+> 档案创建/恢复时间: ${TIMESTAMP}
 
 ## 基本信息
 
@@ -159,14 +163,10 @@ cat > "${VERSION_DIR}/PROGRESS.md" <<EOF
 | 状态 | 🔵 编译中 |
 | 构建系统 | ${BUILD_SYSTEM} |
 EOF
-
-if [ -n "$SOURCE_PATH" ]; then
-    cat >> "${VERSION_DIR}/PROGRESS.md" <<EOF
-| 源码路径 | ${SOURCE_PATH} |
-EOF
-fi
-
-cat >> "${VERSION_DIR}/PROGRESS.md" <<'EOF'
+    if [ -n "$SOURCE_URL" ]; then
+        printf '| 源码路径 | %s |\n' "$SOURCE_URL" >> "${VERSION_DIR}/PROGRESS.md"
+    fi
+    cat >> "${VERSION_DIR}/PROGRESS.md" <<'PROGEOF'
 
 ## 编译阶段
 
@@ -191,17 +191,48 @@ cat >> "${VERSION_DIR}/PROGRESS.md" <<'EOF'
 
 <!-- 编译过程中发现的问题、解决方案和知识积累记录在这里 -->
 
-EOF
-
-if [ -f "${VERSION_DIR}/PROGRESS.md" ]; then
+PROGEOF
     echo "  ✅ PROGRESS.md 已创建"
-else
-    echo "  ❌ PROGRESS.md 创建失败"
-    exit 3
 fi
 
-# ---------- 步骤 4: 创建 _meta.yaml ----------
-echo "[4/5] 创建 _meta.yaml..."
+# ---------- 步骤 4: README.md（已有实质内容则保留）----------
+echo "[4/6] 检查 README.md..."
+
+if [ -f "${VERSION_DIR}/README.md" ] && [ "$(wc -l < "${VERSION_DIR}/README.md" | tr -d ' ')" -gt 10 ]; then
+    echo "  ✅ README.md 已存在（$(wc -l < "${VERSION_DIR}/README.md" | tr -d ' ') 行），保留"
+else
+    cat > "${VERSION_DIR}/README.md" <<EOF
+# ${SOFTWARE_NAME} ${VERSION} for HarmonyOS/OpenHarmony
+
+> **编译日期**: ${TIMESTAMP}
+> **状态**: 🔵 编译中
+> **构建系统**: ${BUILD_SYSTEM}
+
+## 一、软件简介
+
+（待编译完成后填写）
+
+## 二、编译指导
+
+（待编译完成后填写）
+
+## 三、补丁清单
+
+（待补丁生成后填写）
+
+## 四、已知限制
+
+（待测试后填写）
+
+## 五、功能验证
+
+（待验证后填写）
+EOF
+    echo "  ✅ README.md 已创建（模板）"
+fi
+
+# ---------- 步骤 5: _meta.yaml（总是更新，因为含时间戳）----------
+echo "[5/6] 更新 _meta.yaml..."
 
 META_FILE="${VERSION_DIR}/_meta.yaml"
 COMPILE_DATE="$(date '+%Y-%m-%d')"
@@ -213,25 +244,17 @@ letter: ${FIRST_LETTER}
 status: compiling
 build_system: ${BUILD_SYSTEM}
 compatibility: unknown
-patches_count: 0
+patches_count: $(find "${VERSION_DIR}/patches" -name "000*.patch" -type f 2>/dev/null | wc -l | tr -d ' ')
 archive_path: archives/${FIRST_LETTER}/${SOFTWARE_NAME}/${VERSION}
 compile_date: ${COMPILE_DATE}
 EOF
+echo "  ✅ _meta.yaml 已更新"
 
-if [ -f "$META_FILE" ]; then
-    echo "  ✅ _meta.yaml 已创建"
-else
-    echo "  ❌ _meta.yaml 创建失败"
-    exit 3
-fi
-
-echo "  ℹ️  不再修改 _index.yaml，请使用 aggregate-index.sh 在 main 分支生成"
-
-# ---------- 步骤 5: 验证 ----------
-echo "[5/5] 验证档案完整性..."
+# ---------- 步骤 6: 验证 + 归档状态报告 ----------
+echo "[6/6] 验证档案完整性..."
 
 _validate_ok=true
-for _item in manifest.yaml PROGRESS.md patches reports scripts logs; do
+for _item in manifest.yaml PROGRESS.md README.md patches reports scripts logs packaging; do
     if [ -e "${VERSION_DIR}/${_item}" ]; then
         echo "  ✅ ${_item}"
     else
@@ -240,14 +263,30 @@ for _item in manifest.yaml PROGRESS.md patches reports scripts logs; do
     fi
 done
 
+# 归档状态摘要
 echo ""
+echo "════════════════════════════"
 if $_validate_ok; then
-    echo "════════════════════════════"
-    echo "✅ 编译档案骨架创建成功！"
+    # 统计已有内容
+    _patch_count=$(find "${VERSION_DIR}/patches" -name "000*.patch" -type f 2>/dev/null | wc -l | tr -d ' ')
+    _report_count=$(find "${VERSION_DIR}/reports" -name "*.md" -type f 2>/dev/null | wc -l | tr -d ' ')
+    _pkg_count=$(find "${VERSION_DIR}/packaging" -name "*.tar.gz" -o -name "install.sh" 2>/dev/null | wc -l | tr -d ' ')
+    _tmp_count=$(find "${VERSION_DIR}" -maxdepth 2 -name "*.tmp" -type f 2>/dev/null | wc -l | tr -d ' ')
+    
+    echo "✅ 编译档案就绪！"
     echo "  📂 路径: ${VERSION_DIR}"
-    echo "  📋 下一步: 下载源码，开始 Phase 1 编译"
-    echo "════════════════════════════"
+    echo "  📋 补丁: ${_patch_count} 个 | 报告: ${_report_count} 个 | 打包产物: ${_pkg_count} 个"
+    if [ "$_tmp_count" -gt 0 ]; then
+        echo "  ⚠️  残留临时文件: ${_tmp_count} 个（最终归档前由收口步骤统一清理）"
+    fi
+    echo "  📋 下一步: 开始 Phase 3 编译执行"
 else
-    echo "⚠️  档案创建完成，但部分文件验证失败。"
+    echo "⚠️  档案存在，但部分文件缺失。"
     exit 3
 fi
+echo "════════════════════════════"
+
+# 提示归档收口
+echo ""
+echo "💡 提示: 最终完成所有编译步骤后，请执行归档收口（清理+校验）:"
+echo "   见 SKILL.md Step 5.5 或运行: ./scripts/finalize-archive.sh ${SOFTWARE_NAME} ${VERSION}"

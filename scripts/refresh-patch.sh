@@ -428,7 +428,13 @@ auto_mode() {
     ORIG_DIR="${TMPDIR}/.patch-orig-${_software}-${_version}"
     rm -rf "$ORIG_DIR"
     mkdir -p "$ORIG_DIR"
-    tar xzf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1
+    # 根据扩展名选择解压方式（支持 .tar.gz / .tar.xz / .tar.bz2）
+    case "$ORIG_TARBALL" in
+        *.tar.gz|*.tgz)  tar xzf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
+        *.tar.xz|*.txz)  tar xJf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
+        *.tar.bz2|*.tbz2) tar xjf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
+        *) tar xf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
+    esac
 
     # tarball 可能解压为子目录
     ORIG_SRC=$(find "$ORIG_DIR" -maxdepth 2 -name "configure" -type f 2>/dev/null | head -1)

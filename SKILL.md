@@ -12,7 +12,7 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限
 
 # 一、快速参考卡（AI 先看这里）
 
-## 1.1 标准工作流：四条命令
+## 1.1 标准工作流：五步走（含独立测试）
 
 ```bash
 # ═══ Step 1: 初始化（全自动，~30秒）═══
@@ -23,9 +23,19 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限
 # ═══ Step 2: 编译（唯一需要 AI 的步骤）═══
 source .build-context-<name>-<ver>   # 加载上下文变量
 cd $BUILD_SRC_DIR                   # 进入源码目录
-./configure --prefix=$DEFAULT_PREFIX && make && make install
+./configure --prefix=$DEFAULT_PREFIX && make -j1 && make install
 #   记录修改意图到 PROGRESS.md
 #   触发安全弹窗确认
+#   ⚠️ configure 可能需要 3-10 分钟（autotools 大量 conftest），不要提前中断！
+
+# ═══ Step 2.5: 独立目录安装验证（⭐ 新增标准步骤）═══
+#   目的：验证"原始 tarball + 补丁集"可独立复现（核心质量保证）
+TEST_SRC="$TMPDIR/builds/<name>-<ver>-test"    # 干净解压
+TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
+#   ① 解压干净 tarball → ② 应用 patches/*.patch
+#   ③ ./configure --prefix=$TEST_PREFIX && make && make install
+#   ④ 功能回归测试（--version + 核心功能）
+#   ⑤ 通过后才进入 finish-build.sh
 
 # ═══ Step 3: 收尾（全自动，~10秒）═══
 ./scripts/finish-build.sh <软件名> <版本> success|partial|failed
@@ -36,7 +46,26 @@ cd $BUILD_SRC_DIR                   # 进入源码目录
 #   4 道门禁: 二进制完整性 → 功能可用性 → 可移植性 → 档案完整性
 #   输出: reports/quality-report.md + PASS/FAIL 判定
 #   FAIL 则不能标记为 success，只能 partial 或 failed
+
+# ═══ Step 5: 预编译包制作（⭐ verify PASS 后必须执行）═══
+#   按 packaging.md 10 步流程：清理→链接替换→依赖收集→RPATH→Strip→签名→权限→install.sh→tar.gz
+#   交付物: {name}-{ver}-ohos-aarch64.tar.gz + debug.tar.gz + install.sh
+
+# ═══ Step 5.5: 归档收口（⭐ 最终完成前必须执行）═══
+#   清理临时文件 + 必填文件校验 + 信息一致性检查
+#   ./scripts/finalize-archive.sh <软件名> <版本>
 ```
+
+### configure 预期耗时参考
+
+| 构建系统 | 典型软件 | 预期耗时 | 说明 |
+|----------|---------|---------|------|
+| autotools | 小工具(sed/grep) | 3-8 min | 大量 conftest 编译 |
+| autotools | 大型(gcc/bash) | 10-20 min | 更多特性检测 |
+| cmake | 一般项目 | 1-3 min | 较快 |
+| meson | 一般项目 | <1 min | 最快 |
+
+⚠️ **首次 configure 必须等完成**（用于触发安全弹窗确认）。timeout 建议：autotools ≥600s，其他 ≥300s。
 
 **特殊情况**：
 ```bash
@@ -50,7 +79,7 @@ cd $BUILD_SRC_DIR                   # 进入源码目录
 ./scripts/refresh-patch.sh --auto <软件名> <版本>
 ```
 
-## 1.2 九条铁律（违反任何一条都是 bug）
+## 1.2 十条铁律（违反任何一条都是 bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -63,6 +92,32 @@ cd $BUILD_SRC_DIR                   # 进入源码目录
 | R7 | **安全弹窗必须先触发再测试** | make install 后 `find $PREFIX/bin -exec {} --version \;` 扫一遍 | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
 | R8 | **源码修改"四不"准则** | `#ifdef __OHOS__` 守卫 / 保持上游风格 / 追加平台分支 | 删跨平台代码 / 硬编码路径 / 改原逻辑流 / 偏离代码风格 |
 | R9 | **质量门禁 FAIL 禁止标 success** | verify-build.sh 非零 → partial 或 failed | 产物有问题仍标记成功分发 |
+| R10 | **临时文件必须用 $TMPDIR** | 所有 tmp 文件操作使用 `$TMPDIR` 或 `$HOME/tmp` | 硬编码 `/tmp`（鸿蒙 /tmp 只读，见 E002） |
+
+### AI 执行风格规范（⭐ 新增）
+
+> **原则：在鸿蒙 toybox ash 环境下，复杂 shell 脚本是地雷区。保持简单。**
+
+#### 测试脚本原则
+
+| ✅ 推荐 | ❌ 禁止 |
+|---------|--------|
+| 每个测试一条独立的 `[ ] && echo OK \|\| echo FAIL` | 单次 tool_call 写 >30 行复杂 shell 脚本 |
+| 变量先赋值再使用，避免管道内嵌套命令替换 | heredoc（与 `curl \| sh` 冲突，toybox ash 支持差） |
+| 用 `$TMPDIR/$HOME/tmp` 替代 `/tmp`（R10） | `for desc cmd exp in ...` 多变量循环 + 引号嵌套 |
+| `grep -F` 做固定字符串匹配（防正则元字符陷阱） | grep 不加 `-F` 匹配含 `()` `[]` `$` 的输出 |
+| `case "$var" in *pattern*)` 做 shell 原生模式匹配 | 复杂 awk/sed 管道做简单字符串判断 |
+| 逐条顺序执行，每步可独立验证 | 一次性提交大量命令，出错后难以定位 |
+
+#### configure/make 长时间命令
+
+```bash
+# ✅ 正确：给足够 timeout，不提前中断
+cd $BUILD_SRC_DIR && ./configure --prefix=$DEFAULT_PREFIX 2>&1 | tail -3
+#   autotools 项目 timeout=600s, 其他 timeout=300s
+
+# ❌ 错误：频繁中断重启（浪费每次 3-10 分钟的 conftest 编译）
+```
 
 ### R8 详细说明：源码修改"四不"准则
 
@@ -219,6 +274,38 @@ make PREFIX=$DEFAULT_PREFIX && make PREFIX=$DEFAULT_PREFIX install
 
 **⚠️ P0 参数最少化**：理想状态只需 `--prefix`。如果必须加额外参数（`--build/--host`/`--without-shared`/CFLAGS hack），记录到 PROGRESS.md 并在 manifest.yaml `build_cleanliness` 字段标注为技术债务。
 
+### 2.2.1 make check / make test（⭐ 标准步骤）
+
+> **make install 之后、finish-build 之前，必须执行软件自带的测试套件。**
+
+```bash
+# Autotools 项目（首选 make check，fallback 到 make test）
+make -j1 check 2>&1 | tail -20    # 记录结果到 reports/test-report.md
+# 或: make -j1 test 2>&1 | tail -20
+
+# CMake 项目
+ctest --output-on-failure 2>&1 | tail -20
+
+# Meson 项目
+meson test -C builddir 2>&1 | tail -20
+```
+
+**测试结果处理**：
+
+| 结果 | 处理方式 |
+|------|---------|
+| **全通过 (PASS)** | 记录到 `reports/test-report.md`，继续下一步 |
+| **部分失败但核心功能 OK** | 分析失败原因 → 平台限制(E051/E046等)则记录并继续；真正的 bug 则修复后重测 |
+| **全部失败或 core dump** | 检查是否漏触发安全弹窗(R7) → 重新触发后再跑 |
+
+**⚠️ 鸿蒙特有限制**（导致部分测试预期失败，不阻塞发布）：
+- E046: chmod() 不生效 → 权限相关测试失败
+- E051: 未实现 syscall → setreuid/chroot 等测试 crash
+- `/tmp` 只读（E002）→ 依赖 /tmp 的测试失败
+- SELinux 域转换 → 子进程执行 SDK 工具失败
+
+**关键原则**：测试套件的目的是**发现真正的功能回归**，不是追求 100% 通过率。平台限制导致的预期失败应记录原因但不阻塞流程。
+
 ### 2.3 错误处理与恢复
 
 #### 错误分类与标准对策
@@ -363,11 +450,128 @@ FAIL-Gx  → 对应门禁失败 → 只能 partial 或 failed，修复后重验
 - `reports/quality-report.md` — 详细报告
 - exit 0 = 通过, exit 1 = 失败
 
-### 可选：制作预编译分发包
+### Step 5: 预编译分发包（⭐ verify PASS 后必须执行）
 
-如果需要分发（列入 PREBUILD_TODOLIST 或用户要求），在 finish-build 之后执行 10 步打包流程：
+> **时机**：verify-build.sh PASS 之后（确保产物质量合格才打包）。
+> **所有编译成功（status=success 或 partial）的软件都必须制作预编译包。**
+> 只有 status=failed 才跳过。
 
-详见 `knowledge/packaging.md`（RPATH → Strip → 签名 → 权限 → activate.sh → tar.gz）。
+#### 触发条件
+
+| 状态 | 是否必须打包 | 说明 |
+|------|------------|------|
+| `success` | ✅ **必须** | 编译通过 + 测试通过 + 补丁完整 |
+| `partial` | ✅ **必须** | 编译通过但部分功能不可用（标注限制后仍可分发） |
+| `failed` | ❌ 跳过 | 编译失败，无产物可打包 |
+
+#### 执行流程
+
+按 `knowledge/packaging.md` 10 步标准流程：
+
+```
+Step 1:  安装到独立目录
+Step 2:  清理缓存和非必要文件
+Step 3:  符号链接替换（wrapper/cp）
+Step 4:  收集外部依赖库到 lib/external/
+Step 5:  设置 RPATH（$ORIGIN 相对路径）
+Step 6:  Strip Debug 符号 + 分离保存
+Step 7:  ELF 签名（adhoc self-sign）
+Step 8:  统一修复执行权限（必做！）
+Step 9:  创建 install.sh（单独托管 gitcode，不打包进 tar.gz）
+Step 10: 打包干净 tar.gz + 安装验证
+```
+
+#### 交付物（2 个 tar.gz + 1 个软件级 install.sh）
+
+```
+archives/{首字母}/{软件名}/
+├── install.sh                                # 安装脚本（软件级，参数化: sh -s -- <ver>）
+├── RELEASENOTE.md                             # 发布说明（软件级）
+│
+└── {版本}/packaging/
+    ├── {name}-{ver}-ohos-aarch64.tar.gz        # Release 制品（干净二进制，已 strip）
+    └── {name}-{ver}-ohos-aarch64-debug.tar.gz   # Debug 符号包（必须）
+```
+
+用户安装：`curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}`
+
+## Step 5.5: 归档收口（⭐ 最终完成前必须执行）
+
+> **时机**：Step 5（预编译包制作）完成之后、`attemptCompletion(success)` 之前。
+> **目的**：确保归档目录干净、完整、一致，可以安全关闭。
+
+### 为什么需要独立的收口步骤？
+
+```
+整个编译过程中产生的文件:
+  ✅ 正式产物: manifest.yaml / PROGRESS.md / README.md / patches/*.patch
+  ✅ 正式产物: packaging/*.tar.gz / packaging/install.sh
+  ⚠️ 临时文件: *.tmp (refresh-patch 中断残留) / .bak (编辑备份)
+  ⚠️ 过时数据: 旧 test-report.md (重编译前) / 旧 debug 符号
+  ❌ 不一致: PROGRESS 写 success 但 manifest 写 compiling
+
+问题: init-archive.sh 策略是"保留一切"（为了复用旧信息）
+结果: 重编译后目录里混合了新旧数据，需要统一清理+校验
+```
+
+### 执行方式
+
+```bash
+./scripts/finalize-archive.sh <软件名> <版本>
+```
+
+### 内部执行的 4 个阶段
+
+| 阶段 | 内容 | 失败处理 |
+|------|------|---------|
+| **[1] 清理** | 删除 `*.tmp`、`.bak`、debug/ 残留文件 | 无则跳过 |
+| **[2] 必填校验** | 6 个必填项存在性 + 内容非空模板 + packaging 交付物完整性 | 缺失 → exit 2 |
+| **[3] 一致性检查** | manifest vs PROGRESS 状态一致 / 补丁数量匹配 / 对话记录存在 | 警告但不阻塞 |
+| **[4] 最终报告** | 输出汇总：补丁数/报告数/打包数/问题数 | 通过 → 可安全关闭 |
+
+### 必填文件清单
+
+| 文件 | 最小行数 | 说明 |
+|------|---------|------|
+| `manifest.yaml` | >10 行 | 元数据（init-archive 有内容则保留） |
+| `README.md` | >10 行 | 编译指导 + 适配原因（版本级） |
+| `PROGRESS.md` | >15 行 | 进展 + 对话记录（断点续传，版本级） |
+| `RELEASENOTE.md` | >15 行 | 发布说明（软件级，finalize-archive 自动生成） |
+| `install.sh` | 文件存在 | 安装脚本（软件级，参数化: sh -s -- <ver>） |
+| `patches/` | 目录存在 | 补丁目录 |
+| `reports/` | 目录存在 | 报告目录 |
+| `packaging/*-ohos-aarch64.tar.gz` | 文件存在 | release 包（success/partial 时） |
+| `packaging/*-debug.tar.gz` | 文件存在 | debug 包（必须） |
+| `install.sh`（软件级） | 文件存在 | 安装脚本（参数化） |
+
+### 一致性检查项
+
+| 检查项 | 方法 | 允许差异 |
+|--------|------|---------|
+| 状态一致性 | grep status: manifest vs PROGRESS | 不允许 |
+| 补丁数量 | manifest patches_applied vs 磁盘 *.patch 数 | 不允许 |
+| 对话记录 | PROGRESS.md 中 `### 对话 #N` 出现次数 | 至少 1 轮 |
+
+### 与 init-archive.sh 的分工
+
+| 脚本 | 时机 | 策略 | 删除文件？ |
+|------|------|------|----------|
+| `init-archive.sh` | 编译开始前 | **保留**已有内容，只创建缺失骨架 | 否（除非 --clean） |
+| `finalize-archive.sh` | 全部完成后 | 清理垃圾 + 校验 + 报告 | 是（*.tmp/.bak/不一致） |
+
+### --clean 模式（完全重置）
+
+当需要**丢弃所有旧补丁和打包产物重新开始**时：
+
+```bash
+# 方式 A: init 时指定 --clean
+./scripts/init-build.sh <软件名> <版本> --clean
+
+# 方式 B: 手动清空后重新 init
+rm -rf archives/<首字母>/<软件名>/<版本>/patches/*
+rm -rf archives/<首字母>/<软件名>/<版本>/packaging/*
+./scripts/init-build.sh <软件名> <version>
+```
 
 ---
 
@@ -514,6 +718,7 @@ HMDFS 文件系统限制软链接：
 | `sign-elf.sh` | ELF 签名四步流程 | 打包时 | Layer1 |
 | `check-knowledge-gap.sh` | 知识提取遗漏检查 | finish 后可选 | Layer1 |
 | `verify-build.sh` | **产物质量门禁**：4道检测(二进制/功能/可移植/档案) | **Step 4（必须）** | Layer1 |
+| `finalize-archive.sh` | **归档收口**：清理+校验+一致性检查 | **Step 5.5（必须）** | Layer1 |
 | `close-archive.sh` | 归档收尾 | finish 内部 | Layer1 |
 | `software-registry.yaml` | 软件元数据缓存（自动增长） | init 读取/写入 | 数据 |
 
@@ -558,27 +763,142 @@ HMDFS 文件系统限制软链接：
 
 # 六、附录
 
-## 6.1 档案目录结构
+## 6.1 标准归档目录结构（⭐ 强制规范）
+
+> **每个归档必须包含以下文件。** init-archive.sh 创建骨架时应生成全部必填文件。
 
 ```
-archives/{首字母}/{软件名}/{版本}/
-├── manifest.yaml        # 元数据（必须）✅ git 追踪
-├── README.md            # 编译说明（必须）✅ git 追踪
-├── patches/             # 补丁（refresh-patch.sh 自动生成）✅ git 追踪
-│   ├── 0001-xxx.patch
-│   └── ...
-├── reports/
-│   ├── skill-feedback.md   # SKILL 流程反馈（每次必填）✅ git 追踪
-│   ├── test-report.md      ✅ git 追踪
-│   └── compatibility.md    ✅ git 追踪
-├── scripts/             # 编译脚本（可选）✅ git 追踪
-├── logs/                # 完整日志（可选）
-├── *.tar.gz             # ❌ 原始源码包 — .gitignore，不上传
-├── bin/ lib/ include/   # ❌ 编译产物 — .gitignore，可从补丁重建
-└── share/               # ❌ 同上
+archives/{首字母}/{软件名}/                    ← 软件级（跨版本）
+│
+├── README.md              # ⭐ 必填：编译说明 + 平台适配要点（版本级）
+├── RELEASENOTE.md         # ⭐ 必填：发布说明（软件级，聚合多版本）
+├── install.sh            # ⭐ 必填：安装脚本（软件级，参数化: sh -s -- <ver>）
+│
+└── {版本}/               ← 版本级（每次编译的快照）
+    ├── manifest.yaml      # ⭐ 必填：元数据
+    ├── PROGRESS.md        # ⭐ 必填：编译进展记录
+    │
+    ├── patches/           # ⭐ 必填：补丁目录
+    │   ├── 0001-{file}.patch
+    │   └── ...
+    │
+    ├── reports/           # ⭐ 必填：报告目录
+    │   ├── test-report.md
+    │   ├── skill-feedback.md
+    │   └── quality-report.md
+    │
+    └── packaging/         # 🟡 预编译包（verify PASS 后必须）
+        ├── {name}-{ver}-ohos-aarch64.tar.gz
+        └── {name}-{ver}-ohos-aarch64-debug.tar.gz
 ```
 
-> **git 追踪原则**：git 只追踪"怎么编译"（补丁 + manifest + 知识库），不追踪"编译结果"（tarball + 二进制）。任何人在任何机器上拿到仓库后，通过 `init-build.sh` 下载源码 + 应用 patches 即可 100% 复现相同产物。
+#### 必填文件内容规范
+
+| 文件 | 最小内容要求 | 模板/参考 |
+|------|-------------|----------|
+| **manifest.yaml** | §6.2 全部字段 | init-archive.sh 自动生成 |
+| **README.md** | 软件简介 + 构建命令 + 补丁清单 + 已知限制 + 验证方法 | 见下方模板 |
+| **PROGRESS.md** | 各 Phase 状态(checkbox) + configure 参数 + 编译结果 + 源码修改清单表 | 见下方模板 |
+| **test-report.md** | 测试套件类型 + 通过/失败数 + 失败原因分析(平台限制 vs 真bug) | 无固定模板 |
+| **skill-feedback.md** | F编号列表(流程缺失/矛盾/脚本问题) + 严重度 + 建议 | §6.6 格式 |
+
+#### PROGRESS.md 最小模板
+
+```markdown
+# {软件名} {版本} — 编译进度
+
+> 档案创建时间: YYYY-MM-DD HH:MM:SS
+> 最后更新: YYYY-MM-DD (当前状态)
+> 当前会话 ID: (可选，用于多轮对话追踪)
+
+## 一、基本信息
+| 项目 | 值 |
+|------|-----|
+| 软件 | ... |
+| 版本 | ... |
+| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
+| 构建系统 | autotools/cmake/meson/... |
+| 源码路径 | URL |
+
+## 二、编译阶段（checkbox 实时更新）
+
+### Phase 1: 环境准备
+- [ ] init-build.sh 完成 / 源码下载解压
+
+### Phase 2: 编译（configure + make + make install）
+- [ ] configure 完成（记录参数和耗时）
+- [ ] make 编译完成（记录错误和修复）
+- [ ] make install 完成
+
+### Phase 2.5: 独立目录安装验证（⭐ 必须做）
+- [ ] 干净源码 + 补丁应用
+- [ ] 独立 TEST_PREFIX configure + make install
+- [ ] 功能回归测试结果
+
+### Phase 3: 测试验证
+- [ ] make check / make test 结果
+- [ ] 安全弹窗触发确认
+
+### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
+- [ ] Step 1-10 打包流程（见 packaging.md）
+
+### Phase 5: 归档收尾
+- [ ] 补丁生成（refresh-patch.sh --auto）
+- [ ] manifest.yaml / README.md / PROGRESS.md 更新
+- [ ] verify-build.sh 质量门禁
+
+## 三、对话记录（⭐ 断点续传核心）
+
+> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
+
+### 对话 #N — YYYY-MM-DD HH:MM
+**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
+**结果**: （成功/失败/部分成功，附关键输出摘要）
+**发现的问题**: （遇到的坑、错误信息、根因分析）
+**当前状态**: （精确到哪个步骤，下一步该做什么）
+**遗留问题**: （未解决的、需要下轮继续的）
+
+---
+
+### 对话 #1 — 2026-04-07 14:00
+**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
+**结果**: ✅ 成功（~310秒），零额外参数
+**发现的问题**: 无
+**当前状态**: Phase 2 configure 完成，下一步执行 make
+**遗留问题**: 无
+
+### 对话 #2 — 2026-04-07 14:30
+**操作**: make -j1 && make install
+**结果**: ✅ 成功，二进制已安装到 $DEFAULT_PREFIX/bin/sed
+**发现的问题**: 无
+**当前状态**: Phase 2 完成，下一步进入 Phase 2.5 独立测试
+**遗留问题**: 无
+
+（后续每轮对话追加...）
+
+## 四、源码修改清单
+| 文件 | 原因 | 方式 | 补丁状态 |
+|------|------|------|---------|
+| ... | ... | ... | ... |
+
+## 五、预编译包交付物
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| ... | ... | ... |
+
+## 六、结束记录
+- **最终状态**: ...
+- **结束时间**: ...
+```
+
+#### 文件命名统一
+
+| 用途 | 正确名称 | 禁止名称 |
+|------|---------|---------|
+| 测试报告 | `test-report.md` | `TEST_REPORT.md` `build-report.md` |
+| 质量报告 | `quality-report.md` | （verify-build.sh 固定输出） |
+| SKILL 反馈 | `skill-feedback.md` | `feedback.md` |
+| 进展记录 | `PROGRESS.md` | `progress.md` `STATUS.md` |
 
 ## 6.2 manifest.yaml 必填字段
 
@@ -647,5 +967,12 @@ Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
 
 ---
 
-*SKILL.md v3.1 — 最后更新: 2026-04-04*
-*设计原则：精准（四步走）| 优雅（自动降级）| 可复用（registry 增长）| 可社区（三可补丁）| 可信赖（质量门禁保证产物可用）*
+*SKILL.md v4.0 — 最后更新: 2026-04-07*
+*v4.0 更新：*
+*  - 四步走 → 五步走（新增 Phase 2.5 独立目录安装验证 + Step 5 预编译包）*
+*  - 九条铁律 → 十条铁律（+R10: $TMPDIR 强制规则）*
+*  - 新增 §1.2 AI 执行风格规范（shell 脚本原则 / configure 耗时参考）*
+*  - 新增 §2.2.1 make check / make test 标准步骤*
+*  - 新增 §1.4/Step 5 预编译包三级触发条件*
+*  - §6.1 归档目录结构标准化（必填文件清单 + 命名统一 + README/PROGRESS 模板）*
+*设计原则：精准（五步走）| 可复现（独立测试保证）| 可分发（预编译包标准）| 可信赖（质量门禁 + 测试套件）*
