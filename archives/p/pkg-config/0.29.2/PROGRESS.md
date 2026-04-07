@@ -1,73 +1,63 @@
-# pkg-config 0.29.2 — 编译进度
+# PROGRESS.md — pkg-config 0.29.2 编译进度
 
-> 档案创建时间: 2026-04-04
-> 完成时间: 2026-04-04
+## 编译信息
+- **软件**: pkg-config 0.29.2
+- **构建系统**: autotools
+- **开始时间**: 2026-04-06 21:50
+- **完成时间**: 2026-04-06 22:52
+- **状态**: compiling → success (pending finish)
 
-## 基本信息
+## 源码修改清单
 
-| 项目 | 值 |
-|------|-----|
-| 软件 | pkg-config |
-| 版本 | 0.29.2 |
-| 状态 | ✅ 已完成 |
-| 构建系统 | autotools |
-| 源码路径 | https://pkg-config.freedesktop.org/releases/pkg-config-0.29.2.tar.gz |
+| 文件 | 原因 | 方式 | 补丁状态 |
+|------|------|------|----------|
+| config.guess | 添加 HarmonyOS 平台识别 (aarch64-unknown-linux-ohos) | sed 追加 case 分支 | 待 refresh-patch |
+| glib/config.guess | 同上（glib 子目录独立副本） | sed 追加 case 分支 | 待 refresh-patch |
+| glib/glib/Makefile | gatomic.c 类型警告在 aarch64+clang 下被 -Werror 升级为错误 | 追加 -Wno-error=int-conversion -Wno-error=incompatible-pointer-types 到 GLIB_WARN_CFLAGS | 待 refresh-patch |
 
-## 编译阶段
+## 已应用的历史补丁 (6 个)
+1. 0001-config.guess.patch — config.guess 版权更新+ohos 框架
+2. 0002-config.sub.patch — config.sub 版权更新+ohos triplet
+3. 0003-configure.patch — conftest pipe 修复 (\| cat)
+4. 0004-glib-config.guess.patch — glib/config.guess 同 #1
+5. 0005-glib-config.sub.patch — glib/config.sub 同 #2
+6. 0006-glib-configure.patch — glib/configure conftest 修复
 
-### Phase 1: 环境准备
-- [x] 环境检查完成
-- [x] 源码下载完成
-- [x] config.sub/config.guess 更新（支持 ohos 三元组）
+## 遇到的问题与解决
 
-### Phase 2: 编译过程
-- [x] 配置完成（显式三元组 + --with-internal-glib）
-- [x] 编译完成（需移除 glib -Werror 标志）
-- [x] 安装完成（硬链接用 cp 替代）
+### P1: config.guess 不识别 HarmonyOS
+- **错误**: `configure: error: cannot guess build type`
+- **原因**: 标准 GNU config.guess 无 HarmonyOS 条目
+- **解决**: 在主 case 语句后追加 `*:HarmonyOS:*:*)` 分支
+- **知识归类**: L1 平台真理（所有 autotools 软件都需要）
 
-### Phase 3: 测试验证
-- [x] 功能测试（pkg-config --version → 0.29.2）
-- [x] 链接验证（ELF NEEDED: 仅 libc.so）
+### P2: glib 子目录同样问题
+- **错误**: `./configure failed for glib`
+- **原因**: glib 有独立的 config.guess 副本
+- **解决**: 同 P1，对 glib/config.guess 施以相同修复
+- **知识归类**: L1 平台真理
 
-### Phase 4: 归档收尾
-- [x] 知识提取
-- [x] 预编译包制作（10步流程）
-- [x] 档案归档
+### P3: glib gatomic.c 类型错误 (-Werror)
+- **错误**: `error: incompatible integer to pointer conversion` in gatomic.c (4 处)
+- **原因**: 旧版 glib (2.56.0) 的原子操作包装函数在 64 位平台上将整数类型传给指针操作宏
+- **解决**: 在 glib/glib/Makefile 的 GLIB_WARN_CFLAGS 追加 `-Wno-error=int-conversion -Wno-error=incompatible-pointer-types`（vendor 代码，不需 upstream）
+- **技术债务**: 是（见 manifest.yaml build_cleanliness）
 
-## 发现与知识
+### P4: HMDFS ln -f 限制
+- **错误**: `ln: cannot create hard link ... Operation not permitted`
+- **原因**: HMDFS 文件系统不允许硬链接/软链接覆盖
+- **解决**: 用 wrapper 脚本替代 (`exec /path/to/pkg-config "$@"`)
+- **知识归类**: L1 平台真理
 
-### 问题1：config.guess 无法识别 HarmonyOS
-**现象**: `configure: error: cannot guess build type; you must specify one`
-**原因**: HarmonyOS 的 `uname -s` 返回 `HarmonyOS`，不在 config.guess 数据库中
-**解决**: 显式指定 `--build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos --target=aarch64-unknown-linux-ohos`
-**影响范围**: 所有 autotools 项目在鸿蒙上都需要此参数
-
-### 问题2：内部 GLib 编译失败（gatomic.c 类型错误）
-**现象**: `error: incompatible integer to pointer conversion passing 'gsize' to 'gpointer'`
-**原因**: glib 2.38.2 的 gatomic.c 使用整数调用需要指针的宏，clang 15 严格类型检查
-**解决**: 在 glib/glib/Makefile 中添加 `-Wno-int-conversion -Wno-incompatible-pointer-types` 到 `GLIB_WARN_CFLAGS`
-**注意**: 同时需移除所有 `-Werror=*` 标志，否则 `-Wno-*` 不生效
-
-### 问题3：install-exec-hook 硬链接失败
-**现象**: `ln: cannot create hard link: Operation not permitted`
-**原因**: 鸿蒙 SELinux/Hmmac 限制硬链接创建
-**解决**: 用 `cp` 替代硬链接创建别名二进制
-
-## 预编译包信息
-
-| 项目 | 值 |
-|------|-----|
-| 主包 | `prebuild_packages/pkg-config-0.29.2-ohos-aarch64.tar.gz` (1.4M) |
-| Debug 包 | `prebuild_packages/pkg-config-0.29.2-ohos-aarch64-debug.tar.gz` (236K) |
-| 文件数 | 6 |
-| 外部依赖 | 无（仅 musl libc） |
-| RPATH | `$ORIGIN/../lib:$ORIGIN/../lib/external` |
+### P5: 安全弹窗
+- **操作**: make install 后执行 `pkg-config --version` 触发
+- **结果**: 弹窗确认成功，版本输出正常
 
 ---
 
 ## 编译结束
 
-- **结束时间**: 2026-04-04 18:09:47
+- **结束时间**: 2026-04-06 22:56:02
 - **最终状态**: ✅ 编译成功
 - **关闭操作**: 由 close-archive.sh 执行
 

@@ -468,6 +468,39 @@ embedded_dependencies:
 2. **内嵌依赖不应有独立的归档目录**——它是主软件的一部分
 3. **如果内嵌依赖可以解耦为外部依赖，优先解耦**（便于复用和单独更新）
 
+### 典型场景：pkg-config 内嵌 glib 2.38.2
+
+这是目前遇到的最复杂的内嵌依赖案例，值得详细记录：
+
+```
+pkg-config 0.29.2
+└── glib 2.38.2 (内嵌, --with-internal-glib)
+    ├── configure.ac / configure    ← 需要打 OHOS 平台补丁
+    ├── config.guess (2014 年版)     ← 缺少 HarmonyOS 检测
+    ├── config.sub (2014 年版)      ← 缺少 ohos-linux 支持
+    ├── Makefile (生成的)            ← -Werror 导致编译失败
+    └── glib/ 目录下的源码           ← 可能需要兼容性补丁
+```
+
+**补丁分布示例**：
+
+```
+archives/p/pkg-config/0.29.2/patches/
+├── 0001-ohos-update-config-sub-for-ohos.patch      # 主包的 config.sub
+├── 0002-ohos-update-config-guess-for-harmonyos.patch # 主包的 config.guess
+├── 0003-ohos-fix-configure-conftest-exec-pipe.patch  # 主包的 configure
+├── 0004-ohos-fix-glib-configure-conftest.patch       # ⚬ 内嵌 glib 的 configure
+├── 0005-ohos-fix-glib-Makefile-Werror.patch          # ⚬ 内嵌 glib 的 Makefile
+└── scripts/
+    └── post-configure-hook.sh                         # Makefile sed 自动化
+```
+
+**glib 特殊处理要点**：
+- glib 2.38.2 太老，无法可靠地 `autoreconf` → 补丁只能打在② configure / ③ Makefile 层级
+- `--with-internal-glib` 是唯一可行选项（系统无可用 glib）
+- glib 的 `make clean` 会重新生成 Makefile → 需要 post-configure hook 脚本
+- 如果未来 pkg-config 更新到使用更新的 glib 版本，应评估是否可以解耦为外部依赖
+
 ---
 
 *最后更新：2026-04-04*

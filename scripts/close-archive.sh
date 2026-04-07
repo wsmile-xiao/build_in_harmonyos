@@ -114,8 +114,39 @@ fi
 
 TIMESTAMP="$(date '+%Y-%m-%d %H:%M:%S')"
 
+# ---------- 步骤 0: 补丁管线（自动触发） ----------
+echo "[0/6] 检查补丁状态..."
+
+PATCH_DIR="${VERSION_DIR}/patches"
+_PATCH_EXISTS=0
+if [ -d "$PATCH_DIR" ]; then
+    _PATCH_COUNT=$(find "$PATCH_DIR" -name "000*.patch" -type f 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_PATCH_COUNT" -gt 0 ]; then
+        _PATCH_EXISTS=1
+        echo "  ✅ 已有 ${_PATCH_COUNT} 个补丁文件"
+    else
+        echo "  ⚠️  patches/ 目录存在但无补丁文件"
+    fi
+else
+    echo "  ⚠️  patches/ 目录不存在"
+fi
+
+if [ "$_PATCH_EXISTS" -eq 0 ] && [ "$STATUS" != "failed" ]; then
+    echo ""
+    echo "  🔄 自动触发补丁管线..."
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if "$SCRIPT_DIR/refresh-patch.sh" --auto "$SOFTWARE_NAME" "$VERSION"; then
+        echo "  ✅ 补丁管线完成"
+    else
+        echo "  ⚠️  补丁管线失败（退出码 $?），继续关闭档案"
+        echo "     可稍后手动执行: ./scripts/refresh-patch.sh --auto ${SOFTWARE_NAME} ${VERSION}"
+    fi
+elif [ "$_PATCH_EXISTS" -eq 0 ] && [ "$STATUS" = "failed" ]; then
+    echo "  ➖ 编译失败，跳过补丁生成"
+fi
+
 # ---------- 步骤 1: 更新 manifest.yaml ----------
-echo "[1/5] 更新 manifest.yaml..."
+echo "[1/6] 更新 manifest.yaml..."
 # 使用 sed 替换 status 行
 if sed -i "s/^status: compiling/status: ${STATUS}/" "$MANIFEST_FILE" 2>/dev/null; then
     echo "  ✅ status 已更新为: ${STATUS}"
@@ -137,7 +168,7 @@ else
 fi
 
 # ---------- 步骤 2: 更新 _meta.yaml ----------
-echo "[2/5] 更新 _meta.yaml..."
+echo "[2/6] 更新 _meta.yaml..."
 META_FILE="${VERSION_DIR}/_meta.yaml"
 
 if [ -f "$META_FILE" ]; then
@@ -173,7 +204,7 @@ else
 fi
 
 # ---------- 步骤 3: 更新 PROGRESS.md ----------
-echo "[3/5] 更新 PROGRESS.md..."
+echo "[3/6] 更新 PROGRESS.md..."
 
 cat >> "$PROGRESS_FILE" <<EOF
 
@@ -195,12 +226,12 @@ else
 fi
 
 # ---------- 步骤 4: 提示运行 gen_summary.py ----------
-echo "[4/5] 后续建议..."
+echo "[4/6] 后续建议..."
 echo "  📋 建议运行: python3 scripts/gen_summary.py"
 echo "     生成编译总结报告。"
 
 # ---------- 步骤 5: 检查待评估知识条目 ----------
-echo "[5/5] 检查知识条目..."
+echo "[5/6] 检查知识条目..."
 
 _pending_count=$(grep -c '⏳\|待评估\|TODO\|FIXME' "$PROGRESS_FILE" 2>/dev/null || echo 0)
 _pending_count=$(echo "$_pending_count" | tr -d ' ')

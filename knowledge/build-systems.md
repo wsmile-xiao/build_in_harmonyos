@@ -55,6 +55,72 @@ check_build_system() {
 
 ### 3.1 修改 config.guess
 
+> **⚠️ 关键发现（F002）**：config.guess 有**多个** `case ... in` 语句，HarmonyOS 检测代码必须插入**主 case**（匹配 `$UNAME_MACHINE:$UNAME_SYSTEM:...`），而非其他位置。插错位置会导致检测完全失效。
+
+#### config.guess 结构图示
+
+```
+config.guess 执行流程（GNU 2025-07-10 版，~1818 行）
+│
+├── [行 1-50]   头部/版权/shebang
+├── [行 51-100]  辅助函数定义
+│
+├── [行 ~120]    ┌─────────────────────────────────────┐
+│   ⭐ 主 CASE    │ case $UNAME_MACHINE:$UNAME_SYSTEM:  │ ← 必须在此插入！
+│   （行 ~158）   │     $UNAME_RELEASE:$UNAME_VERSION   │
+│                 │   in                                │
+│                 │     *:HarmonyOS:*:*)                │ ← OHOS 插入点
+│                 │         GUESS=...-linux-ohos        │
+│                 │         ;;                          │
+│                 │     *:Darwin:*)                     │
+│                 │     *:QNX:*)                        │
+│                 │     ...                             │
+│                 └─────────────────────────────────────┘
+│
+├── [行 ~200]    LIBC 检测（#ifdef __OHOS__ → LIBC=ohos）
+│
+├── [行 ~239]    ┌─────────────────────────────────────┐
+│   ❌ 错误位置！ │ case "$UNAME_RELEASE" in             │ ← 不要在这里插入
+│   ($UNAME_REL)  │   *:HarmonyOS:*)                    │   （只匹配 RELEASE 部分）
+│                 └─────────────────────────────────────┘
+│
+├── [行 ~300+]   各架构/系统的精细匹配
+└── [末尾]       输出 GUESS 变量
+```
+
+#### 插入规则
+
+| 规则 | 说明 |
+|------|------|
+| **必须插入主 case** | 匹配完整的四元组 `$UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION` |
+| **模式用 `*:HarmonyOS:*:*`** | 通配架构和版本，精确匹配系统名 |
+| **在 Darwin/QNX 之前** | 字母序 H 在 D/Q 之间 |
+| **不要插入 $UNAME_RELEASE case** | 那里只匹配版本号，不包含系统信息 |
+
+#### 常见错误
+
+| 错误做法 | 症状 | 正确做法 |
+|---------|------|---------|
+| 插入 `$UNAME_RELEASE` case | configure 仍报 "unrecognized system" | 插入主 case |
+| 用 `*ohos*` 而非 `*:HarmonyOS:*:*` | 可能误匹配其他含 ohos 的字符串 | 用完整模式 |
+| 只改一处不验证 | 静默失败，configure 用默认值 | 改完后 `./config.guess` 测试输出 |
+
+#### 验证方法
+
+```bash
+# 修改后立即测试
+cd /path/to/source
+chmod +x config.guess
+./config.guess
+# 期望输出: aarch64-unknown-linux-ohos（或对应架构）
+
+# 如果输出不是 *-ohos，说明插入位置错误
+```
+
+#### 两种修改策略
+
+**策略 A：增量补丁（推荐用于旧版 config.guess）**
+
 在两个位置添加代码：
 
 **位置 1：LIBC 检测**
@@ -66,28 +132,105 @@ LIBC=ohos
 #else
 ```
 
-**位置 2：系统识别**
+**位置 2：主 case 系统识别（⭐ 关键位置）**
 ```bash
 case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in
     *:HarmonyOS:*:*)
         GUESS=$UNAME_MACHINE-unknown-linux-ohos
         ;;
-    # ... 其他系统
+    # ... 其他系统（Darwin, QNX 等）
 ```
+
+**策略 B：整文件替换（推荐用于极旧版 config.guess < 2018）**
+
+当原始 config.guess 太旧（如 2015 年 pkg-config 自带的），增量修补工作量大于替换：
+- 从 GNU config.git 获取最新版（2025-07-10 或更新）
+- 新版已内置 HarmonyOS 检测（`__OHOS__` + `*:HarmonyOS:*:*`）
+- 补丁为整文件 diff（较大但可靠）
+
+| 策略 | 适用场景 | 补丁大小 | 可上游性 |
+|------|---------|---------|---------|
+| A 增量 | config.guess 版本 ≥ 2018 | 小 (~20 行) | ✅ 高 |
+| B 替换 | config.guess 版本 < 2018 | 大 (>3000 行) | ⚠️ 取决于 GNU 是否接受 |
 
 ### 3.2 修改 config.sub
 
-添加 `ohos-linux` 支持：
+> **⚠️ 关键发现（F003）**：config.sub 的 `maybe_os` 变量提取的是 OS 名的**末尾两段**（非一段），导致 case 匹配时模式必须是 `linux-ohos` 而非 `ohos-linux`。
+
+#### config.sub 三阶段处理流程
+
+```
+输入三元组: aarch64-unknown-linux-ohos
+│
+├── 阶段①: maybe_os 预提取
+│   │
+│   │  从三元组中提取可能的 OS 标识符
+│   │  规则: 取最后一个 '-' 分隔段及其前一段的组合
+│   │
+│   │  aarch64-unknown-linux-ohos
+│   │                           ^^^^ ^^^^
+│   │                           last  prev → maybe_os="linux-ohos"
+│   │
+│   │  ⚠️ 注意: 不是取最后一段 ("ohos")!
+│   │     是取最后两段 ("linux-ohos")
+│   │
+│   ▼
+├── 阶段②: case $maybe_os 匹配
+│   │
+│   │  case $maybe_os in
+│   │      linux-android)      basic_os=linux-android ;;
+│   │      linux-musl)         basic_os=linux-musl ;;  
+│   │      linux-ohos)         basic_os=linux-ohos ;;   ← ⭐ OHOS 在这里!
+│   │      linux-uclibc)       basic_os=linux-uclibc ;;
+│   │  esac
+│   │
+│   │  ⚠️ 常见错误: 写成 ohos-linux) → 永远不匹配!
+│   │     因为 maybe_os="linux-ohos" 不是 "ohos-linux"
+│   │
+│   ▼
+├── 阶段③: case $os 后处理 / kernel-os 验证
+│   │
+│   │  进一步处理 basic_os，最终确定:
+│   │  - basic_machine = aarch64-unknown
+│   │  - basic_os = linux-ohos
+│   │
+│   │  同时需要在以下位置添加 ohos* 允许:
+│   │  1. OS 允许列表: | ohos* \          (行 ~2075)
+│   │  2. kernel-os 验证: | linux-ohos*- )  (行 ~2219)
+│   │
+│   ▼
+└── 输出: 验证通过的三元组
+```
+
+#### 必须修改的三处位置
+
+| # | 位置 | 修改内容 | 漏掉会怎样 |
+|---|------|---------|-----------|
+| 1 | `case $maybe_os` | 添加 `linux-ohos)` 分支 | basic_os 无法识别 |
+| 2 | OS 允许列表 | 添加 `\| ohos* \` | "invalid OS" 错误 |
+| 3 | kernel-os 验证 | 添加 `\| linux-ohos*- )` | 内核-OS 组合不合法 |
+
+#### 完整补丁模板
 
 ```bash
-android-linux)
+# 位置 1: case $maybe_os（通常在 android-linux 之后）
+linux-android)
     basic_machine=$field1-unknown
     basic_os=linux-android
     ;;
-ohos-linux)
-    basic_machine=$field1-unknown
-    basic_os=linux-ohos
-    ;;
++ohos-linux)
++    basic_machine=$field1-unknown
++    basic_os=linux-ohos
++    ;;
+
+# 位置 2: OS 允许列表（搜索 "| android*" 附近）
+-            | android* \
++            | android* \
++            | ohos* \
+
+# 位置 3: kernel-os 验证（搜索 "linux-uclibc*" 附近）
+-            | linux-relibc*- | linux-uclibc*- )
++            | linux-relibc*- | linux-uclibc*- | linux-ohos*- )
 ```
 
 ### 3.3 编译命令
@@ -338,6 +481,112 @@ AM_CONDITIONAL([OHOS], [echo "$host_os" | grep -q "ohos"])
 | 变量名 | `_ohos` 后缀 | `ac_cv_func_xxx_ohos` |
 | 补丁文件描述 | 以 `ohos-` 开头 | `0001-ohos-fix-fstat-for-non-file-fd.patch` |
 | 条件编译注释 | 以 `HarmonyOS:` 开头 | `/* HarmonyOS: musl 不支持 */` |
+
+### 3.8 补丁文件元数据规范（P0 三可原则的落地）
+
+> 每个补丁文件必须包含完整的元数据 header，确保可追溯、可验证。
+
+#### 必需的 header 字段
+
+```diff
+From: OpenHarmony PC Developer <community@example.com>
+Date: Mon, 01 Jan 2026 00:00:00 +0000
+Subject: [PATCH N/NN] ohos-fix-xxx-for-harmonyos
+
+Description: 一句话说明修改原因（< 80 字符）
+Origin: source | generated (二选一)
+  - source: 基于原始源码与构建产物的 diff
+  - generated: AI 生成的功能性修复（必须标注）
+Upstream: yes | no | partial (三选一)
+  - yes: 可直接提交给上游
+  - no: OHOS 特有，不可上游
+  - partial: 部分逻辑可上游，OHOS 条件编译部分除外
+Source-Commit: <被修改文件的原始 commit hash，如已知>
+  - 例: Source-Commit: a1b2c3d (config.guess 2025-07-10 from GNU)
+  - 如未知则写 Source-Commit: unknown (需追溯)
+Modification-Layer: ① | ② | ③ (对应 §3.6 决策树层级)
+Knowledge-Ref: error-patterns.md E0XX / build-systems.md §X (关联知识条目)
+---
+```
+
+#### 来源追溯要求
+
+| 被修改的文件类型 | Source-Commit 要求 | 追溯方法 |
+|-----------------|-------------------|---------|
+| config.guess / config.sub | **必须** | GNU autoconf git repo 的 commit hash |
+| configure（autoconf 生成） | 推荐 | 对应 configure.ac 版本的 autoconf 生成结果 |
+| Makefile.in（automake 生成） | 推荐 | 对应 Makefile.am 版本的 automake 生成结果 |
+| Makefile（make 生成） | 可选 | 通常不追溯（优先级③） |
+| .c / .h 源码 | 必须 | 上游版本库的 commit hash |
+| 内嵌依赖的文件 | **必须 + 单独标注** | 标注内嵌依赖的名称和版本 |
+
+> **为什么需要 Source-Commit？**
+> pkg-config 编译中发现：GNU 最新版 config.guess(2025-07-10) 居然不含 HarmonyOS 检测代码。
+> 如果没有记录来源 commit hash，无法回溯"这个 config.guess 到底是从哪来的"、
+> "是官方发行版还是某个发行版的 fork"。这直接影响补丁的可复现性。
+
+### 3.9 Makefile sed 自动化机制
+
+> 当必须在优先级③（Makefile）做修改时（如 glib 太老无法 re-autoconf），需要确保修改在 `make clean` 后不会丢失。
+
+#### 问题场景
+
+```
+./configure → 生成 Makefile
+sed -i 's/-Werror//' Makefile    # 临时修改
+make && make install               # ✅ 成功
+make clean                         # 清理
+# 此时 Makefile 可能被重新生成或保留，取决于项目
+./configure                        # 再次 configure
+# sed 修改丢失！❌ 需要重新执行 sed
+```
+
+#### 推荐方案：post-configure hook 脚本
+
+```bash
+# 创建 scripts/post-configure-hook.sh（放在软件档案目录下）
+#!/bin/sh
+# post-configure-hook.sh — 在每次 ./configure 之后执行
+# 用于处理无法通过补丁解决的优先级③修改
+
+set -e
+
+BUILD_DIR="${1:-.}"
+
+# Example: glib Werror fix for pkg-config's embedded glib 2.38.2
+if [ -f "$BUILD_DIR/glib/Makefile" ]; then
+    sed -i 's/CFLAGS = /CFLAGS = -Wno-error=deprecated-declarations /' \
+        "$BUILD_DIR/glib/Makefile"
+    echo "  [hook] Applied glib CFLAGS workaround"
+fi
+
+echo "  [hook] post-configure complete"
+```
+
+**使用方式**：
+
+```bash
+# 在 Phase 3 编译执行中：
+./configure --prefix=$PREFIX ...
+bash scripts/post-configure-hook.sh "$(pwd)"   # ← 每次 configure 后执行
+make -j1
+```
+
+**manifest.yaml 中记录**：
+
+```yaml
+build_config:
+  post_configure_hook: scripts/post-configure-hook.sh
+  hook_reason: "glib 2.38.2 Makefile uses -Werror, cannot patch at layer ①/②"
+```
+
+#### 方案对比
+
+| 方案 | 可靠性 | 复杂度 | 推荐度 |
+|------|--------|--------|--------|
+| post-configure hook 脚本 | ✅ 高（显式、可审计） | 低 | ⭐⭐⭐ **首选** |
+| PROGRESS.md 手动记录步骤 | ⚠️ 中（依赖人记忆） | 最低 | ⚠️ 仅用于极简情况 |
+| 写入 Makefile 的 EXTRA_CFLAGS 覆盖 | ✅ 高（如果支持） | 中 | ⭐⭐ （需 configure 支持） |
 
 ---
 

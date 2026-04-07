@@ -70,10 +70,15 @@
 extern "C" {
 #include <native_drawing/drawing_canvas.h>
 #include <native_drawing/drawing_bitmap.h>
+#include <native_drawing/drawing_font.h>
 }
 
 // Forward declarations from PlatOHOS.cxx
 class SurfaceImplOHOS;
+namespace Scintilla { namespace Internal { class Surface; } }
+using Surface = Scintilla::Internal::Surface;
+Surface* PlatOHOS_GetCachedMeasurementSurface();
+OH_Drawing_Font* PlatOHOS_GetFontHandle(const Scintilla::Internal::Font *font);
 
 // Our public header
 #include "ScintillaOHOS.h"
@@ -171,12 +176,16 @@ public:
     std::function<void(const std::string &)> clipboardSetter;
 
     // FineTicker support
-    std::bitset<static_cast<size_t>(TickReason::dwell)> tickerReasons;
+    std::bitset<static_cast<size_t>(TickReason::dwell) + 1> tickerReasons;
 
     // Size state
     int editorWidth = 800;
     int editorHeight = 600;
     bool needsRedraw = false;
+
+    // Font initialization tracking.
+    // Fonts are initialized in PerformDraw using the real drawing canvas.
+    bool fontsInitialized = false;
 
     // Mouse capture state — tracks whether a mouse button is held down.
     // SetMouseCapture(true) is called by ButtonDown, (false) by ButtonUp.
@@ -305,6 +314,13 @@ public:
     // Editor virtual overrides
     // ----------------------------------------------------------------
 
+    // Patch-0023: Return nullptr to prevent T1 SPositionFromLocation from using
+    // the measurement surface (Skia crashes on off-screen canvas text measurement).
+    // Position correction is done via T2 (font-based measurement) in DoButtonDown.
+    std::unique_ptr<Surface> CreateMeasurementSurface() const override {
+        return nullptr;
+    }
+
     std::string UTF8FromEncoded(std::string_view encoded) const override {
         // We operate internally in UTF-8, so just pass through
         return std::string(encoded);
@@ -313,14 +329,6 @@ public:
     std::string EncodedFromUTF8(std::string_view utf8) const override {
         // We operate internally in UTF-8, so just pass through
         return std::string(utf8);
-    }
-
-    std::unique_ptr<Surface> CreateMeasurementSurface() const override {
-        auto surf = Surface::Allocate(technology);
-        if (surf) {
-            surf->Init(wMain.GetID());
-        }
-        return surf;
     }
 
     std::unique_ptr<Surface> CreateDrawingSurface(SurfaceID sid,
@@ -356,14 +364,17 @@ public:
     // ----------------------------------------------------------------
 
     bool FineTickerRunning(TickReason reason) override {
-        return tickerReasons.test(static_cast<size_t>(reason));
+        const size_t idx = static_cast<size_t>(reason);
+        return (idx < tickerReasons.size()) ? tickerReasons.test(idx) : false;
     }
     void FineTickerStart(TickReason reason, int millis, int tolerance) override {
-        tickerReasons.set(static_cast<size_t>(reason));
+        const size_t idx = static_cast<size_t>(reason);
+        if (idx < tickerReasons.size()) tickerReasons.set(idx);
         (void)millis; (void)tolerance;
     }
     void FineTickerCancel(TickReason reason) override {
-        tickerReasons.reset(static_cast<size_t>(reason));
+        const size_t idx = static_cast<size_t>(reason);
+        if (idx < tickerReasons.size()) tickerReasons.reset(idx);
     }
 
     // Allow the host to check/clear the redraw flag
@@ -403,6 +414,32 @@ public:
         if (cw > 0 && ch > 0 && (cw != editorWidth || ch != editorHeight)) {
             SetSize(cw, ch);
         }
+        
+        // Plan C (Patch-0018): Initialize fonts using the REAL drawing canvas.
+        // OH_Drawing/Skia text measurement only works reliably on the actual
+        // drawing surface (not on a separate measurement surface).
+        // On first paint, create a temporary Surface wrapper around the real canvas
+        // and call vs.Refresh() to realize all fonts. After this, DrawTextNoClip
+        // will have valid ohFont pointers and text will render correctly.
+        if (!fontsInitialized) {
+            auto surf = Surface::Allocate(technology);
+            if (surf) {
+                surf->Init(static_cast<SurfaceID>(canvas), wMain.GetID());
+                if (surf->Initialised()) {
+                    vs.Refresh(*surf.get(), 1);
+                    OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-INIT",
+                        "Fonts initialized via real drawing canvas — text should now display");
+                }
+            }
+            fontsInitialized = true;
+        }
+        
+        // Log caret state before painting for diagnostics
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-CARET",
+            "PerformDraw: active=%{public}d on=%{public}d hasFocus=%{public}d period=%{public}d width=%.1f size=%dx%{public}d",
+            (int)caret.active, (int)caret.on, (int)hasFocus, (int)caret.period,
+            (float)vs.caret.width, cw, ch);
+        
         auto surf = Surface::Allocate(technology);
         if (!surf) return;
         surf->Init(static_cast<SurfaceID>(canvas), wMain.GetID());
@@ -413,43 +450,290 @@ public:
     }
 
     // Public wrappers for protected event methods
-    void DoButtonDown(Point pt, unsigned int t, KeyMod m) { ButtonDownWithModifiers(pt, t, m); }
-    void DoButtonMove(Point pt, unsigned int t, KeyMod m) {
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove ENTER pt=(%.1f,%.1f) t=%u haveCapture=%{public}d", pt.x, pt.y, t, (int)mouseCaptured);
-        
-        // Step-by-step replication of Editor::ButtonMoveWithModifiers to find exact crash point
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [A] before ptMouseLast check");
-        bool moved = (ptMouseLast != pt);
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [B] moved=%{public}d, before DwellEnd", (int)moved);
-        if (moved) {
-            // SKIP DwellEnd(true) — it calls NotifyDwelling + FineTickerCancel,
-            // and NotifyDwelling triggers SCN_DWELLINGEND notification which can
-            // cause re-entrant state issues on HarmonyOS (SIGABRT in MUSL-SIGCHAIN).
-            // DwellEnd only cancels hover tooltips — not essential for editing.
-            // ticksToDwell = dwellDelay;  // reset for next potential dwell
-            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [C] DwellEnd SKIPPED");
+    void DoButtonDown(Point pt, unsigned int t, KeyMod m) {
+        // Patch-0028: Complete bypass of ButtonDownWithModifiers.
+        // Root cause: BDMW uses SPositionFromLocation which returns ~0
+        // (surface=nullptr), setting anchor=0 and polluting multiple
+        // selection states (originalAnchorPos, sel.Rectangular(),
+        // selectionUnit, moveExtendsSelection, etc.).  No amount of
+        // post-correction via SetSelection/sel.Clear/sel.SetSelection
+        // can fully undo all side effects — the selection leaks as
+        // [anchor=0 .. caret=correct] highlighting the whole line.
+        //
+        // Fix: Replicate only the minimal BDMW operations we need
+        // (mouse capture, ptMouseLast, lastXChosen) and perform
+        // all selection logic ourselves via T2 font measurement.
+        if (!fontsInitialized) {
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+                "DoButtonDown: fonts not ready, cursor to 0");
+            SetSelection(0, 0);
+            SetLastXChosen();
+            return;
         }
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [D] before SPositionFromLocation");
-        SelectionPosition movePos = SPositionFromLocation(pt, false, false, false);
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [E] SPFL done pos=%{public}d", (int)movePos.Position());
-        movePos = MovePositionOutsideChar(movePos, sel.MainCaret() - movePos.Position());
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "BMW [F] MoveOutsideChar done pos=%{public}d", (int)movePos.Position());
-        
-        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove EXIT (step-by-step OK)");
+        WndProc(Message::SetFocus, 1, 0);
+
+        // --- Minimal BDMW state (no selection side effects) ---
+        SetMouseCapture(true);
+        ptMouseLast = pt;
+
+        // --- T2 position correction (font-based measurement) ---
+        const Sci::Position docLen = pdoc->Length();
+        if (docLen <= 0) {
+            SetLastXChosen();
+            return;
+        }
+
+        const XYPOSITION xRel = pt.x - vs.textStart;
+        const Sci::Line clickedLine = std::clamp<Sci::Line>(
+            static_cast<Sci::Line>(pt.y / vs.lineHeight),
+            0, pdoc->LinesTotal() - 1);
+        const Sci::Position lineStart = pdoc->LineStart(clickedLine);
+        const Sci::Position lineEnd = pdoc->LineEnd(clickedLine);
+        const Sci::Position lineLen = lineEnd - lineStart;
+
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+            "DoButtonDown: DIAG pt_x=%{public}d pt_y=%{public}d textStart=%{public}d "
+            "xRel=%{public}d lh=%{public}d surfW=%{public}d surfH=%{public}d line=%{public}d docLen=%{public}d",
+            (int)pt.x, (int)pt.y, (int)vs.textStart, (int)xRel,
+            (int)vs.lineHeight, editorWidth, editorHeight,
+            (int)clickedLine, (int)docLen);
+
+        Sci::Position estimated = lineStart;
+
+        if (xRel < 0) {
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+                "DoButtonDown: margin click -> line=%{public}d pos=%{public}d",
+                (int)clickedLine, (int)lineStart);
+            estimated = lineStart;
+        } else {
+            std::string lineText(lineLen, '\0');
+            pdoc->GetCharRange(lineText.data(), lineStart, lineLen);
+            const Font *fontRaw = vs.styles[STYLE_DEFAULT].font.get();
+            OH_Drawing_Font *ohFont = PlatOHOS_GetFontHandle(fontRaw);
+
+            if (ohFont && !lineText.empty()) {
+                int n = OH_Drawing_FontCountText(ohFont,
+                    lineText.data(), lineText.size(), TEXT_ENCODING_UTF8);
+                if (n > 0) {
+                    std::vector<uint16_t> glyphs(n);
+                    OH_Drawing_FontTextToGlyphs(ohFont,
+                        lineText.data(), static_cast<uint32_t>(lineText.size()),
+                        TEXT_ENCODING_UTF8, glyphs.data(), n);
+                    std::vector<float> widths(n);
+                    OH_Drawing_FontGetWidths(ohFont, glyphs.data(), n, widths.data());
+                    float accX = 0.0f;
+                    int charIdx = 0;
+                    for (; charIdx < n; charIdx++) {
+                        float halfW = widths[charIdx] * 0.5f;
+                        if (accX + halfW > xRel) break;
+                        accX += widths[charIdx];
+                    }
+                    int byteIdx = 0, utf8CharCount = 0;
+                    while (byteIdx < static_cast<int>(lineText.size()) && utf8CharCount < charIdx) {
+                        unsigned char c = static_cast<unsigned char>(lineText[byteIdx]);
+                        byteIdx += (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 :
+                                 ((c & 0xF0) == 0xE0) ? 3 : 4;
+                        utf8CharCount++;
+                    }
+                    estimated = lineStart + std::min(byteIdx, static_cast<int>(lineLen));
+                } else {
+                    estimated = lineStart + static_cast<Sci::Position>(xRel / vs.aveCharWidth);
+                }
+            } else {
+                estimated = lineStart + static_cast<Sci::Position>(xRel / vs.aveCharWidth);
+            }
+            estimated = std::clamp(estimated, lineStart, lineEnd);
+
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+                "DoButtonDown: T2 pos=%{public}d (line=%{public}d xRel=%{public}.1f ohFont=%{public}p len=%{public}d)",
+                (int)estimated, (int)clickedLine, xRel, (void*)ohFont, (int)lineLen);
+        }
+
+        // --- Clean selection: zero-length range at corrected position ---
+        sel.SetMoveExtends(false);
+        sel.selType = Selection::SelTypes::stream;
+
+        // [Patch-0030] Double/triple click detection
+        const unsigned int clickDelta = (t >= lastClickTime) ? (t - lastClickTime) : 0;
+        const bool isDoubleClick = (clickDelta > 0 && clickDelta < 500);   // < 500ms = double-click
+        const bool isTripleClick = (isDoubleClick && sel.selType == Selection::SelTypes::stream
+                                    && selectionUnit == TextUnit::word);
+
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+            "DoButtonDown: click delta=%{public}u double=%{public}d triple=%{public}d unit=%{public}d",
+            clickDelta, (int)isDoubleClick, (int)isTripleClick, (int)selectionUnit);
+
+        if (isTripleClick) {
+            // Triple-click: select entire line
+            selectionUnit = TextUnit::wholeLine;
+            originalAnchorPos = lineStart;
+            sel.SetSelection(SelectionRange(lineStart, lineEnd));
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+                "DoButtonDown: TRIPLE CLICK -> line [%{public}d,%{public}d]",
+                (int)lineStart, (int)lineEnd);
+        } else if (isDoubleClick) {
+            // Double-click: select word under cursor
+            selectionUnit = TextUnit::word;
+            const Sci::Position wordStart = static_cast<Sci::Position>(
+                WndProc(Message::WordStartPosition, estimated, 0));
+            const Sci::Position wordEnd = static_cast<Sci::Position>(
+                WndProc(Message::WordEndPosition, estimated, 0));
+            originalAnchorPos = wordStart;
+            sel.SetSelection(SelectionRange(wordStart, wordEnd));
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+                "DoButtonDown: DOUBLE CLICK -> word [%{public}d,%{public}d]",
+                (int)wordStart, (int)wordEnd);
+        } else {
+            // Single click: place cursor
+            selectionUnit = TextUnit::character;
+            originalAnchorPos = estimated;
+            sel.SetSelection(SelectionRange(estimated));
+        }
+
+        SetLastXChosen();
+        needsRedraw = true;
     }
-    void DoButtonUp(Point pt, unsigned int t, KeyMod m) { ButtonUpWithModifiers(pt, t, m); }
+    void DoButtonMove(Point pt, unsigned int t, KeyMod m) {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+            "DoButtonMove ENTER pt=(%.1f,%.1f) t=%u haveCapture=%{public}d",
+            pt.x, pt.y, t, (int)mouseCaptured);
+
+        // Block DwellEnd path (same as before)
+        bool wasDwelling = dwelling;
+        if (wasDwelling) {
+            dwelling = false;
+            FineTickerCancel(TickReason::dwell);
+        }
+
+        // Run original Scintilla path (maintains mouseCapture state etc.)
+        ButtonMoveWithModifiers(pt, t, m);
+
+        // Patch-0026: T2 position correction for drag selection.
+        // SPositionFromLocation returns ~0 (surface=nullptr), so
+        // ButtonMoveWithModifiers moved selection to wrong position.
+        // Correct it using font-based measurement (same as DoButtonDown).
+        if (fontsInitialized && mouseCaptured) {
+            const Sci::Position docLen = pdoc->Length();
+            if (docLen > 0) {
+                const XYPOSITION xRel = pt.x - vs.textStart;
+                const Sci::Line clickedLine = std::clamp<Sci::Line>(
+                    static_cast<Sci::Line>(pt.y / vs.lineHeight),
+                    0, pdoc->LinesTotal() - 1);
+                const Sci::Position lineStart = pdoc->LineStart(clickedLine);
+                const Sci::Position lineEnd = pdoc->LineEnd(clickedLine);
+                const Sci::Position lineLen = lineEnd - lineStart;
+
+                Sci::Position corrected = lineStart;
+                if (xRel >= 0 && lineLen > 0) {
+                    std::string lineText(lineLen, '\0');
+                    pdoc->GetCharRange(lineText.data(), lineStart, lineLen);
+                    const Font *fontRaw = vs.styles[STYLE_DEFAULT].font.get();
+                    OH_Drawing_Font *ohFont = PlatOHOS_GetFontHandle(fontRaw);
+                    if (ohFont) {
+                        int n = OH_Drawing_FontCountText(ohFont,
+                            lineText.data(), lineText.size(), TEXT_ENCODING_UTF8);
+                        if (n > 0) {
+                            std::vector<uint16_t> glyphs(n);
+                            OH_Drawing_FontTextToGlyphs(ohFont,
+                                lineText.data(), static_cast<uint32_t>(lineText.size()),
+                                TEXT_ENCODING_UTF8, glyphs.data(), n);
+                            std::vector<float> widths(n);
+                            OH_Drawing_FontGetWidths(ohFont, glyphs.data(), n, widths.data());
+                            float accX = 0.0f;
+                            int charIdx = 0;
+                            for (; charIdx < n; charIdx++) {
+                                float halfW = widths[charIdx] * 0.5f;
+                                if (accX + halfW > xRel) break;
+                                accX += widths[charIdx];
+                            }
+                            int byteIdx = 0, utf8CharCount = 0;
+                            while (byteIdx < static_cast<int>(lineText.size()) && utf8CharCount < charIdx) {
+                                unsigned char c = static_cast<unsigned char>(lineText[byteIdx]);
+                                byteIdx += (c < 0x80) ? 1 : ((c & 0xE0) == 0xC0) ? 2 :
+                                         ((c & 0xF0) == 0xE0) ? 3 : 4;
+                                utf8CharCount++;
+                            }
+                            corrected = lineStart + std::min(byteIdx, static_cast<int>(lineLen));
+                        } else {
+                            corrected = lineStart + static_cast<Sci::Position>(xRel / vs.aveCharWidth);
+                        }
+                    } else {
+                        corrected = lineStart + static_cast<Sci::Position>(xRel / vs.aveCharWidth);
+                    }
+                    corrected = std::clamp(corrected, lineStart, lineEnd);
+                }
+
+                // Extend selection to corrected position (stream selection from anchor)
+                MovePositionTo(corrected, Selection::SelTypes::stream);
+                needsRedraw = true;
+
+                OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+                    "DoButtonMove: T2 corrected pos=%{public}d", (int)corrected);
+            }
+        }
+
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "DoButtonMove EXIT OK");
+    }
+    void DoButtonUp(Point pt, unsigned int t, KeyMod m) {
+        // [Patch-0029] Skip ButtonUpWithModifiers — it calls SPositionFromLocation
+        // which returns ~0 (surface=nullptr), then SetSelection(~0, anchor)
+        // creates a selection [0..anchor] highlighting the entire line.
+        // Only perform the minimal necessary cleanup:
+        if (HaveMouseCapture()) {
+            ChangeMouseCapture(false);
+        }
+        inDragDrop = DragDrop::none;
+        lastClickTime = t;
+        lastClick = pt;
+        lastXChosen = static_cast<int>(pt.x) + xOffset;
+        EnsureCaretVisible(false);
+        needsRedraw = true;
+
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+            "DoButtonUp: skipped ButtonUpWithModifiers, released capture");
+    }
     void DoRightButtonDown(Point pt, unsigned int t, KeyMod m) { RightButtonDownWithModifiers(pt, t, m); }
-    void DoKeyDown(Keys k, KeyMod m, bool *c) { KeyDownWithModifiers(k, m, c); }
+    void DoKeyDown(Keys k, KeyMod m, bool *c) {
+        // Skip DwellEnd(false) — it calls NotifyDwelling → PositionFromLocation
+        // → CreateMeasurementSurface → OH_Drawing/Skia abort on HarmonyOS.
+        // Same root cause as DoButtonMove touch crash (patch 0010).
+        // DwellEnd only cancels hover tooltips — non-essential for keyboard input.
+        const Message msg = kmap.Find(k, m);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+            "DoKeyDown: key=%{public}d mod=%{public}d msg=%{public}d", (int)k, (int)m, (int)msg);
+        if (msg != static_cast<Message>(0)) {
+            if (c) *c = true;
+            WndProc(msg, 0, 0);
+            needsRedraw = true;
+            OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+                "DoKeyDown: WndProc completed OK");
+            return;
+        }
+        if (c) *c = false;
+        KeyDefault(k, m);
+        needsRedraw = true;
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+            "DoKeyDown: KeyDefault completed OK");
+    }
     void DoInsertChar(std::string_view sv, CharacterSource cs) { InsertCharacter(sv, cs); }
 
     // Public wrapper for protected TickFor
     void DoTick(TickReason reason) { TickFor(reason); }
 
-    // Tick caret blink — checks if running then toggles + invalidates
+    // Tick caret blink — unconditionally toggle caret visibility.
+    // We drive ticking externally via SciTick (ArkTS setInterval),
+    // so we do NOT check FineTickerRunning() — it's a no-op stub
+    // that always returns false, which would prevent TickFrom from ever running.
     void DoTickCaret() {
-        if (FineTickerRunning(TickReason::caret)) {
-            TickFor(TickReason::caret);
-        }
+        // Log caret state BEFORE toggle for diagnostics
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-CARET",
+            "DoTickCaret: before active=%{public}d on=%{public}d hasFocus=%{public}d period=%{public}d",
+            (int)caret.active, (int)caret.on, (int)hasFocus, (int)caret.period);
+        TickFor(TickReason::caret);
+        // Log caret state AFTER toggle
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-CARET",
+            "DoTickCaret: after  active=%{public}d on=%{public}d hasFocus=%{public}d",
+            (int)caret.active, (int)caret.on, (int)hasFocus);
     }
 };
 
@@ -515,6 +799,7 @@ void ScintillaOHOS::Init(int width, int height) {
     // Set caret properties
     ed->WndProc(Message::SetCaretPeriod, 500, 0);
     ed->WndProc(Message::SetCaretStyle, CARETSTYLE_LINE, 0);
+    ed->WndProc(Message::SetCaretWidth, 2, 0);  // Explicit 2px width for visibility
 
     // Set default selection colours
     ed->WndProc(Message::SetSelFore, 1, 0xFFFFFF);
@@ -836,18 +1121,33 @@ void ScintillaOHOS::OnKeyDown(int keyCode, bool shift, bool ctrl, bool alt, bool
     // Map keyCode to Scintilla::Keys
     Keys key = MapArkUIKeyToScintilla(keyCode);
 
-    // Try KeyDownWithModifiers first
-    bool consumed = false;
-    ed->DoKeyDown(key, modifiers, &consumed);
+    // Guard against any remaining abort sources (defense-in-depth)
+    AbortGuard guard;
+    if (guard.enter()) {
+        bool consumed = false;
+        ed->DoKeyDown(key, modifiers, &consumed);
+    } else {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnKeyDown recovered from abort via longjmp");
+    }
 }
 
 void ScintillaOHOS::OnCharInput(const char *utf8Char, int charLen) {
     if (!m_impl->editor || !utf8Char || charLen <= 0) return;
     auto *ed = m_impl->editor.get();
 
-    // Insert the character directly
+    OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+        "OnCharInput: char='%s' len=%{public}d editor=%p", utf8Char, charLen, (void*)ed);
+
+    // Insert the character directly (with abort guard for safety)
     std::string_view sv(utf8Char, static_cast<size_t>(charLen));
-    ed->DoInsertChar(sv, CharacterSource::DirectInput);
+    AbortGuard guard;
+    if (guard.enter()) {
+        ed->DoInsertChar(sv, CharacterSource::DirectInput);
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH",
+            "OnCharInput: DoInsertChar completed OK");
+    } else {
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-TOUCH", "OnCharInput recovered from abort via longjmp");
+    }
 }
 
 void ScintillaOHOS::OnScroll(float deltaX, float deltaY, bool ctrl) {
@@ -942,6 +1242,16 @@ void *ScintillaOHOS::GetScintillaPtr() const {
 void ScintillaOHOS::Tick() {
     if (!m_impl->editor) return;
     m_impl->editor->DoTickCaret();
+}
+
+// ---- Reset Fonts (Fix C-05) ----
+
+void ScintillaOHOS::ResetFonts() {
+    if (m_impl && m_impl->editor) {
+        m_impl->editor->fontsInitialized = false;
+        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-RESET",
+            "ScintillaOHOS::ResetFonts: fontsInitialized reset to false");
+    }
 }
 
 // ============================================================================
@@ -1325,6 +1635,13 @@ void BN_Sci_Tick(void *editor) {
     if (editor) {
         static_cast<ScintillaOHOS *>(editor)->Tick();
     }
+}
+
+// ---- ResetFonts (Fix C-05) ----
+
+void BN_Sci_ResetFonts(void *editor) {
+    if (!editor) return;
+    static_cast<ScintillaOHOS*>(editor)->ResetFonts();
 }
 
 } // extern "C"

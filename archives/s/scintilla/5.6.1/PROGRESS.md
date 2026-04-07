@@ -1,6 +1,109 @@
 # Scintilla 5.6.1 OHOS 适配进展
 
-## 🎉 最新状态（2026-04-03）— SurfaceHolder 路径打通！
+## 🎉 最新状态（2026-04-06 23:33 — Patch-0042 TypefaceCreateFromFile直接加载系统字体（待设备验证）
+
+### 当前 scintilla .so 版本：Patch-0032b + 0033f + 0034 + 0035 + 0036 + 0037 + 0039 + 0040 + 0041（2026-04-06 22:21 编译部署）
+- **上下方向键** ✅ 列保持 + 边界 no-op (Patch-0032b)
+- **Home/End/PageUp/PageDown** ✅ KeyToMessageBox 映射表修正 (Patch-0033f)
+- **IME TextEditorProxy** ✅ 14回调实现+Attach成功 (Patch-0034)
+- **Redraw→宿主通知** ✅ wMain.InvalidateAll() (Patch-0035)
+- **Paint诊断日志** ✅ MNP-DRAW tag确认Paint()调用但view.PaintText零输出 (Patch-0036)
+- **IME跨线程修复** ✅ 回调只写缓冲区+mutex，主线程PerformDraw消费 (Patch-0037) — 已验证
+- **Canvas状态保护** ✅ Paint()外层CanvasSave/Restore (Patch-0039) — 已验证
+- **CJK字体三阶段回退** ⏳ Phase1已知字体+Phase2系统枚举+Phase3文件注册 (Patch-0041) — **待设备验证**
+- **TOFU显示模式** ⏳ TEXT_NO_GLYPH_USE_TOFU，缺失字形显示□而非空白 (Patch-0041) — **待设备验证**
+- **修改文件**：`ohos/ScintillaOHOS.cxx`（Init TOFU + 头文件）, `ohos/PlatOHOS.cxx`（FontHandleOHOS 三阶段回退）
+
+### 应用层近期修复（不涉及 scintilla 源码，记录在此供参考）
+| 补丁 | 内容 | 文件 |
+|------|------|------|
+| Patch-0033 | Native Ctrl 追踪 + Ctrl+Z/Y Undo/Redo | napi_init.cpp |
+| Patch-0033b | SetText 后 SetSavePoint 防撤销清空 | napi_init.cpp |
+| Patch-0033c | 字母范围保护 + 空格/Numpad*/NumpadEnter/Delete keyCode | napi_init.cpp |
+| Patch-0033d | ArkTS onKeyEvent 精简为纯日志 | Index.ets |
+| Patch-0033e | Home(2081)/PageUp(2068)/End(2082)/PageDown(2069) 真实keyCode映射 | napi_init.cpp |
+
+---
+
+### Patch-0039: Canvas 状态保护（已验证通过 ✅）
+- **根因**：Paint() 内部 SetClip(Save)/PopClip(Restore) 不平衡时 canvas save/restore 栈损坏
+- **修复**：PerformDraw() 中 Paint() 调用外层包 OH_Drawing_CanvasSave/CanvasRestore
+- **结果**：原始文本持续显示正常，诊断矩形 Paint 前后均可见
+
+### Patch-0040: CJK 字体回退（已被 0041 取代）
+- 6 种备选字体全部 MatchFamilyStyle 返回 nullptr
+
+### Patch-0041: CJK 字体三阶段回退 + TOFU 显示模式（**当前待验证**）
+- **根因**：设备上无匹配 CJK typeface → 含中文行渲染空白
+- **Phase 1**: `HarmonyOS Sans` / `HarmonyOS Sans Condensed` + 原6种备选 → FontMgrMatchFamilyStyle
+- **Phase 2**: `OH_Drawing_GetSystemFontConfigInfo()` 枚举系统字体逐个尝试
+- **Phase 3**: `OH_Drawing_RegisterFont()` 注册 `/system/fonts/HarmonyOS_Sans.ttf` 等系统字体文件
+- **TOFU**: `OH_Drawing_SetTextUndefinedGlyphDisplay(TEXT_NO_GLYPH_USE_TOFU)` — 缺失字形显示□
+- **新增头文件**: drawing_text_global.h, drawing_font_collection.h, drawing_register_font.h
+- **修改文件**: ScintillaOHOS.cxx (Init+头文件), PlatOHOS.cxx (FontHandleOHOS构造函数)
+- **编译**: 2026-04-06 22:21 ✅ (1.34MB, 零 warning)
+- **状态**: ⏳ 待设备验证
+
+---
+
+### Patch-0032b: 上下方向键边界情况修复（当前 so 版本）
+- **文件**：`ohos/ScintillaOHOS.cxx` → `DoKeyDown()` Up/Down 分支
+- **根因链**：
+  ```
+  WndProc(LineDown) → CursorUpOrDown → PositionUpOrDown
+    → SPositionFromLocation(Point(lastX-xOffset, newY))
+      → EditView::SPositionFromLocation() line714: if(surface && ll) → surface=nullptr!
+        → line756: return SelectionPosition(posLineStart) ← 总是返回行首！
+  ```
+- **现象**：按↓从第2行→第2行行首，第3行→第2行行首
+- **修复**：对 Up/Down 键**完全绕过 WndProc(LineDown/LineUp)**，改用纯文档 API：
+  - `pdoc->GetColumn(caretPos)` 获取光标显示列（含Tab展开）
+  - `pdoc->FindColumn(targetLine, displayCol)` 在目标行找同列位置
+  - `SetEmptySelection(targetPos)` 直接设置光标
+  - 无需 surface 测量，不经过 SPositionFromLocation
+- **状态**：代码已修改，待编译部署 + 设备验证
+
+---
+
+### Patch-0031 (2026-04-05 17:30) — 已被 Patch-0032 取代
+- GetColumn 替换错误 FindColumn — lastXChosen 计算修正了，但未解决 SPositionFromLocation(null surface) 返回行首的根本问题
+
+---
+
+## 🎯 上次状态（2026-04-05 16:42）— Patch-0030f 双击+lastXChosen修复
+
+---
+
+### Phase 2: 触摸定位精度修复（2026-04-04 ~ 2026-04-05）
+
+#### 已知问题根因
+- **触摸点击位置不精确** — Plan C (Patch-0018) 的 `CreateMeasurementSurface()` 返回 nullptr → `SPositionFromLocation` 跳过 LayoutLine 测量 → 返回 `invalidPosition` → 光标跳到文档开头
+
+#### Patch-0020: 恢复 ButtonDownWithModifiers
+- DoButtonDown 从 Plan C 估算定位改回调用 ButtonDownWithModifiers
+- 结果：不崩溃，但定位不准
+
+#### Patch-0021: avgCharWidth 位置修正（T3 等宽估算）
+- 在 ButtonDownWithModifiers 后检测无效位置，用 `xRel / vs.aveCharWidth` 估算列偏移
+- 结果：**中文场景偏差 ~2倍**（avgCharWidth=14.2px 是半角宽度，CJK 全角实际~28px）
+
+#### Patch-0022: T1 原生路径修复（当前版本，已部署）
+- **Override CreateMeasurementSurface()** 返回 CachedMeasurementSurface（Patch-0015 静态存储 bitmap+canvas）
+- **清理 DoButtonDown**：移除 T3 估算代码和重复调用
+- **删除旧 Plan C 代码**：移除 "return nullptr" 版本
+- 编译通过（1.3MB），已部署到 BlueNotePad_v2
+- **待设备验证**
+
+#### 三种方案对比
+| 层级 | 方案 | 精度 | CJK支持 | 状态 |
+|------|------|------|---------|------|
+| T1 原生 | SPositionFromLocation + LayoutLine + FindPositionFromX | 像素级 | ✓ | ✅ Patch-0022 |
+| T2 Font测量 | OH_Drawing_FontGetWidths 逐字符测量 | 高 | ✓ | 备选 |
+| T3 等宽估算 | x / avgCharWidth | 低 | ✗(差2倍) | 已废弃 |
+
+---
+
+### 历史状态（2026-04-03）— SurfaceHolder 路径打通！
 
 **当前项目**: `/storage/Users/currentUser/renshang/BlueNotePad_v2/`
 **日志文件**: `/storage/Users/currentUser/renshang/BlueNotePad_v2/日志.txt`

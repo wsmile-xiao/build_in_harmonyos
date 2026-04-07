@@ -13,12 +13,18 @@ SCRIPT_NAME="$(basename "$0")"
 show_help() {
     cat <<'HELPEOF'
 用法:
-  ./refresh-patch.sh <补丁编号> <原始目录> <修改后目录> [输出目录]
+  ./refresh-patch.sh --auto <软件名> <版本>          # 自动模式（推荐）
   ./refresh-patch.sh --all <原始目录> <修改后目录> <输出目录>
+  ./refresh-patch.sh <补丁编号> <原始目录> <修改后目录> [输出目录]
 
 描述:
-  基于三目录法刷新/重新生成补丁文件。
-  对比原始目录和修改后目录的差异，生成 .patch 文件。
+  补丁管线唯一入口。自动完成 diff → 粒度拆分 → 格式校验 → 验证 → hash 绑定。
+
+  模式说明：
+    --auto:     全自动。自动查找 tarball + 构建目录，按文件拆分补丁，写入 manifest.yaml
+                这是 SKILL.md Phase 4 Step 3 的唯一推荐用法
+    --all:      手动指定目录，生成单个 all-changes.patch
+    单个补丁:   手动指定编号和目录
 
   自动排除以下目录的变更：
     build/ .git/ autom4te.cache/ CMakeFiles/ __pycache__/
@@ -35,8 +41,9 @@ show_help() {
   [输出目录]    补丁输出目录（默认: patches/）
 
 示例:
+  ./refresh-patch.sh --auto pkg-config 0.29.2              # 自动模式（推荐）
+  ./refresh-patch.sh --all /path/to/orig /path/to/mod patches/
   ./refresh-patch.sh 0001 /path/to/orig /path/to/modified patches/
-  ./refresh-patch.sh --all /path/to/orig /path/to/modified patches/
 
 退出码:
   0  成功
@@ -44,6 +51,16 @@ show_help() {
   2  目录不存在
   3  diff 执行失败
   4  补丁 dry-run 验证失败
+  5  补丁格式校验失败（双 diff 头 / 绝对路径）
+
+格式校验（自动执行）:
+  脚本在生成补丁后自动调用 validate_patch_format() 检测：
+  - E058-1: 双 diff 头（git diff + unified diff 混用）
+  - E058-2: 绝对路径（--- 行以 / 开头）
+  - E058-3: 缺失 diff 头行（HarmonyOS musl diff 特性，自动修复）
+  - E058-4: 空补丁或无效文件
+
+  详见: build-systems.md §3.8 / error-patterns.md E058
 HELPEOF
     exit 0
 }
@@ -62,6 +79,92 @@ build_exclude_args() {
         _args="${_args} --exclude=${_pat}"
     done
     echo "$_args"
+}
+
+# ---------- 补丁格式校验（F001: 双 diff 头 / 绝对路径 / 缺失 diff 头） ----------
+#
+# 检测以下格式问题：
+#   E058-1: 双 diff 头（同时存在 diff -ruN 和 --- / +++ 的多套头）
+#   E058-2: 绝对路径（--- / +++ 行以 / 开头）
+#   E058-3: 缺失 diff 头行（没有 ^diff 开头的行）
+#   E058-4: 空补丁或过小
+#
+# 返回值: 0=通过, 1=警告(可修复), 2=错误(必须人工处理)
+
+validate_patch_format() {
+    _patch_file="$1"
+    _errors=0
+    _warnings=0
+
+    if [ ! -f "$_patch_file" ]; then
+        echo "  ❌ [E058-4] 补丁文件不存在: $_patch_file"
+        return 2
+    fi
+
+    _size=$(wc -c < "$_patch_file" | tr -d ' ')
+    if [ "$_size" -lt 10 ]; then
+        echo "  ❌ [E058-4] 补丁文件过小 (${_size} bytes)，可能为空"
+        return 2
+    fi
+
+    # 检查 1: diff 头数量
+    _diff_count=$(grep -c '^diff ' "$_patch_file" 2>/dev/null || echo 0)
+    _diff_count=$(echo "$_diff_count" | tr -d ' ')
+
+    # 也检查 HarmonyOS musl diff 可能不输出 diff 行的情况
+    _has_minus_plus=$(grep -q '^--- ' "$_patch_file" 2>/dev/null && grep -q '^+++ ' "$_patch_file" 2>/dev/null && echo "yes" || echo "no")
+
+    if [ "$_diff_count" -eq 0 ] && [ "$_has_minus_plus" = "yes" ]; then
+        echo "  ⚠️  [E058-3] 缺失 diff 头行（HarmonyOS musl diff 不输出 ^diff 行）"
+        echo "     → 自动修复：在顶部插入 diff -ruN 头"
+        _warnings=$((_warnings + 1))
+        # 自动修复：提取 --- 和 +++ 路径，插入 diff 头
+        _orig_path=$(head -1 "$_patch_file" | sed 's/^--- //')
+        _mod_path=$(sed -n '2s/^+++ //p' "$_patch_file")
+        _tmpfile="${TMPDIR:-$HOME/tmp}/.patch-validate-$$.tmp"
+        {
+            echo "diff -ruN ${_orig_path} ${_mod_path}"
+            cat "$_patch_file"
+        } > "$_tmpfile"
+        mv "$_tmpfile" "$_patch_file"
+        _diff_count=1
+    elif [ "$_diff_count" -eq 0 ]; then
+        echo "  ❌ [E058-4] 无 diff 头且无 ---/+++ 行，不是有效补丁"
+        return 2
+    fi
+
+    if [ "$_diff_count" -gt 1 ]; then
+        echo "  ❌ [E058-1] 双 diff 头问题：检测到 ${_diff_count} 个 ^diff 行"
+        grep -n '^diff ' "$_patch_file" | while read _line; do
+            echo "       → 第 ${_line}"
+        done
+        echo "     → 原因：可能混用了 git diff 和 unified diff 格式"
+        echo "     → 修复：重新生成补丁，确保只用一种 diff 方式"
+        _errors=$((_errors + 1))
+    fi
+
+    # 检查 2: 绝对路径
+    _abs_count=$(grep -c '^--- /' "$_patch_file" 2>/dev/null || echo 0)
+    _abs_count=$(echo "$_abs_count" | tr -d ' ')
+
+    if [ "$_abs_count" -gt 0 ]; then
+        echo "  ⚠️  [E058-2] 检测到 ${_abs_count} 个绝对路径（以 / 开头的 --- 行）"
+        echo "     → 这会导致 patch -p1 无法正确应用"
+        echo "     → 建议：使用相对路径的 diff（cd 公共父目录后执行 diff -ruN）"
+        _warnings=$((_warnings + 1))
+    fi
+
+    # 输出结果
+    if [ "$_errors" -gt 0 ]; then
+        echo "  ❌ 格式校验失败: ${_errors} 个错误, ${_warnings} 个警告"
+        return 2
+    elif [ "$_warnings" -gt 0 ]; then
+        echo "  ⚠️  格式校验通过（有 ${_warnings} 个已自动修复的警告）"
+        return 1
+    else
+        echo "  ✅ 格式校验通过（单 diff 头、相对路径、完整）"
+        return 0
+    fi
 }
 
 # ---------- 分析补丁统计 ----------
@@ -165,7 +268,11 @@ refresh_single() {
         return 0
     fi
 
-    echo "  [2/3] 干运行验证补丁..."
+    echo "  [2/3] 格式校验..."
+    validate_patch_format "$_patch_file"
+    _format_result=$?
+
+    echo "  [3/3] 干运行验证补丁..."
     # 在原始目录中测试补丁
     if (cd "$_norm_orig" && patch --dry-run -p1 < "$_patch_file" > /dev/null 2>&1); then
         echo "  ✅ 补丁 dry-run 通过"
@@ -231,11 +338,234 @@ refresh_all() {
         return 0
     fi
 
-    echo "  [2/2] 补丁统计..."
+    echo "  [2/3] 格式校验..."
+    validate_patch_format "$_all_patch"
+
+    echo "  [3/3] 补丁统计..."
     patch_stats "$_all_patch"
 
     echo ""
     echo "  ✅ 补丁已生成: ${_all_patch}"
+}
+
+# ============ 自动模式：--auto ============
+#
+# 自动查找原始 tarball 和构建目录，执行完整补丁管线。
+# 这是 SKILL.md Phase 4 Step 3 的唯一推荐入口。
+
+auto_mode() {
+    _software="$1"
+    _version="$2"
+
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    ARCHIVES_DIR="${PROJECT_DIR}/archives"
+    TMPDIR="${TMPDIR:-$HOME/tmp}"
+
+    echo "🤖 补丁管线（自动模式）"
+    echo "  软件:   ${_software}"
+    echo "  版本:   ${_version}"
+    echo ""
+
+    # ---- Step 1: 自动定位路径 ----
+    FIRST_LETTER="$(echo "$_software" | cut -c1 | tr 'A-Z' 'a-z')"
+    PATCH_DIR="${ARCHIVES_DIR}/${FIRST_LETTER}/${_software}/${_version}/patches"
+    MANIFEST_FILE="${ARCHIVES_DIR}/${FIRST_LETTER}/${_software}/${_version}/manifest.yaml"
+
+    if [ ! -d "${PATCH_DIR}" ]; then
+        mkdir -p "$PATCH_DIR"
+        echo "  [1/7] 创建补丁目录: ${PATCH_DIR}"
+    else
+        echo "  [1/7] 补丁目录已存在: ${PATCH_DIR}"
+    fi
+
+    # ---- Step 2: 查找原始 tarball ----
+    ORIG_TARBALL=""
+    # 优先级: archives/ 下 → TMPDIR/builds/ → 当前目录
+    for _candidate in \
+        "${ARCHIVES_DIR}/${FIRST_LETTER}/${_software}/${_version}/${_software}-${_version}.tar"* \
+        "${TMPDIR}/builds/${_software}-${_version}.tar"* \
+        "./${_software}-${_version}.tar"*; do
+        if [ -f "$_candidate" ]; then
+            ORIG_TARBALL="$_candidate"
+            break
+        fi
+    done
+
+    if [ -z "$ORIG_TARBALL" ]; then
+        echo "  ❌ 无法找到原始 tarball"
+        echo "     搜索位置:"
+        echo "       ${ARCHIVES_DIR}/${FIRST_LETTER}/${_software}/${_version}/${_software}-${_version}.tar*"
+        echo "       ${TMPDIR}/builds/${_software}-${_version}.tar*"
+        echo "     请手动指定: ./refresh-patch.sh --all <原始目录> <修改后目录> ${PATCH_DIR}"
+        exit 2
+    fi
+
+    echo "  [2/7] 原始 tarball: $(basename "$ORIG_TARBALL")"
+
+    # ---- Step 3: 查找修改后的源码目录 ----
+    MOD_DIR=""
+    for _candidate in \
+        "${TMPDIR}/builds/${_software}-${_version}" \
+        "${TMPDIR}/${_software}-${_version}"; do
+        if [ -d "$_candidate" ] && [ -f "$_candidate/configure" -o -f "$_candidate/CMakeLists.txt" -o -f "$_candidate/Makefile" ]; then
+            MOD_DIR="$_candidate"
+            break
+        fi
+    done
+
+    if [ -z "$MOD_DIR" ]; then
+        echo "  ❌ 无法找到修改后的源码目录"
+        echo "     搜索位置:"
+        echo "       ${TMPDIR}/builds/${_software}-${_version}/"
+        echo "     请确认编译已完成且源码目录存在"
+        exit 2
+    fi
+
+    echo "  [3/7] 修改后源码: ${MOD_DIR}"
+
+    # ---- Step 4: 解压原始源码到临时目录 ----
+    ORIG_DIR="${TMPDIR}/.patch-orig-${_software}-${_version}"
+    rm -rf "$ORIG_DIR"
+    mkdir -p "$ORIG_DIR"
+    tar xzf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1
+
+    # tarball 可能解压为子目录
+    ORIG_SRC=$(find "$ORIG_DIR" -maxdepth 2 -name "configure" -type f 2>/dev/null | head -1)
+    if [ -n "$ORIG_SRC" ]; then
+        ORIG_DIR="$(dirname "$ORIG_SRC")"
+    else
+        # 尝试找其他构建系统标记
+        ORIG_SRC=$(find "$ORIG_DIR" -maxdepth 2 -name "CMakeLists.txt" -type f 2>/dev/null | head -1)
+        if [ -n "$ORIG_SRC" ]; then
+            ORIG_DIR="$(dirname "$ORIG_SRC")"
+        else
+            echo "  ❌ 无法从 tarball 确定源码根目录"
+            exit 2
+        fi
+    fi
+
+    echo "  [4/7] 原始源码已解压: $(basename "$ORIG_DIR")"
+
+    # ---- Step 5: 清空旧补丁 + 执行 per-file diff ----
+    echo "  [5/7] 生成补丁文件..."
+    rm -f "$PATCH_DIR"/*.patch
+
+    _exclude_args=$(build_exclude_args)
+    _norm_orig="$(cd "$ORIG_DIR" && pwd)"
+    _norm_mod="$(cd "$MOD_DIR" && pwd)"
+
+    # 使用 symlink 确保相对路径 diff
+    WORK="${TMPDIR}/.patch-work-${_software}"
+    rm -rf "$WORK" && mkdir -p "$WORK"
+    ln -sf "$_norm_orig" "$WORK/orig"
+    ln -sf "$_norm_mod" "$WORK/mod"
+
+    _patch_num=0
+    _total_files=0
+    _total_patches=0
+
+    # 获取所有有差异的文件列表（去掉 orig/ 前缀）
+    _diff_files=$(cd "$WORK" && eval diff -rq $_exclude_args orig mod 2>/dev/null | grep "^Files " | sed 's|Files orig/||;s| and mod/.*||' || true)
+
+    if [ -z "$_diff_files" ]; then
+        echo "  ⚠️  无差异（源码未修改或修改已被还原）"
+        rm -rf "$WORK" "$ORIG_DIR"
+        return 0
+    fi
+
+    # 按文件逐个生成 patch（自动粒度拆分）
+    echo "$_diff_files" | while read _f; do
+        _patch_num=$((_patch_num + 1))
+        _patch_file="${PATCH_DIR}/$(printf '%04d' $_patch_num)-$(echo "$_f" | tr '/' '-').patch"
+
+        # 从 WORK 目录执行 diff，路径为 orig/_f 和 mod/_f
+        ( cd "$WORK" && diff -u "orig/$_f" "mod/$_f" ) > "$_patch_file" 2>/dev/null || true
+
+        # 去掉路径中的 orig/ 和 mod/ 前缀，使 patch -p1 可用
+        if [ -s "$_patch_file" ]; then
+            _tmp_patch=$(mktemp)
+            sed 's|^--- orig/|--- a/|;s|^+++ mod/|+++ b/|' "$_patch_file" > "$_tmp_patch"
+            mv "$_tmp_patch" "$_patch_file"
+        fi
+
+        # 格式校验 + 自动修复（补 diff 头行）
+        validate_patch_format "$_patch_file" > /dev/null 2>&1 || true
+
+        # dry-run 验证（-p1 匹配 a/ b/ 或直接路径）
+        if [ -s "$_patch_file" ] && (cd "$_norm_orig" && patch --dry-run -p1 < "$_patch_file" > /dev/null 2>&1); then
+            size=$(wc -c < "$_patch_file" | tr -d ' ')
+            printf "    ✅ [%04d] %s (%d bytes)\n" "$_patch_num" "$_f" "$size"
+        elif [ -s "$_patch_file" ]; then
+            printf "    ⚠️  [%04d] %s (dry-run 失败, %d bytes)\n" "$_patch_num" "$_f" "$(wc -c < "$_patch_file" | tr -d ' ')"
+        else
+            printf "    ➖ [%04d] %s (空文件，可能无差异)\n" "$_patch_num" "$_f"
+        fi
+        _total_files=$((_total_files + 1))
+    done
+
+    rm -rf "$WORK"
+
+    # 统计实际生成的补丁数
+    _generated=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | wc -l | tr -d ' ')
+
+    # ---- Step 6: 输出 hash 绑定信息 ----
+    ORIG_HASH=$(cd "$_norm_orig" && find . -type f | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+    MOD_HASH=$(cd "$_norm_mod" && find . -type f ! -path './build/*' ! -path './.git/*' ! -name '*.o' ! -name '*.lo' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+
+    echo ""
+    echo "  [6/7] Hash 绑定:"
+    echo "     原始源码 hash: ${ORIG_HASH:0:16}..."
+    echo "     修改源码 hash: ${MOD_HASH:0:16}..."
+    echo "     生成补丁数:   ${_generated}"
+
+    # ---- Step 7: 更新 manifest.yaml（如果存在）----
+    if [ -f "$MANIFEST_FILE" ]; then
+        echo "  [7/7] 更新 manifest.yaml..."
+
+        # 检查是否已有 patch_generation 字段
+        if ! grep -q '^patch_generation:' "$MANIFEST_FILE"; then
+            cat >> "$MANIFEST_FILE" <<EOF
+
+patch_generation:
+  method: "refresh-patch.sh --auto"
+  source_tarball: "$(basename "$ORIG_TARBALL")"
+  source_orig_hash: "${ORIG_HASH}"
+  source_modified_hash: "${MOD_HASH}"
+  generated_at: "$(date '+%Y-%m-%dT%H:%M:%S%z')"
+  tool_version: "v2.2-auto"
+  patches_count: ${_generated}
+EOF
+            echo "     ✅ 已写入 patch_generation 字段"
+        else
+            # 更新已有字段
+            _tmp="${MANIFEST_FILE}.tmp"
+            sed "s|^source_modified_hash:.*|source_modified_hash: \"${MOD_HASH}\"|" \
+                | sed "s|^patches_count:.*|patches_count: ${_generated}|" \
+                | sed "s|^generated_at:.*|generated_at: \"$(date '+%Y-%m-%dT%H:%M:%S%z')\"|" \
+                > "$_tmp" 2>/dev/null
+            # 如果 sed 链失败，跳过更新
+            if [ $? -eq 0 ] && [ -s "$_tmp" ]; then
+                mv "$_tmp" "$MANIFEST_FILE"
+                echo "     ✅ 已更新 patch_generation 字段"
+            else
+                rm -f "$_tmp"
+                echo "     ⚠️  manifest.yaml 更新跳过（格式不兼容）"
+            fi
+        fi
+    else
+        echo "  [7/7] ⚠️  manifest.yaml 不存在，跳过 hash 绑定写入"
+    fi
+
+    # 清理临时目录
+    rm -rf "${TMPDIR}/.patch-orig-${_software}-${_version}"
+
+    echo ""
+    echo "═════════════════════════════"
+    echo "✅ 补丁管线完成"
+    echo "  📂 输出: ${PATCH_DIR}/"
+    echo "  📊 补丁: ${_generated} 个文件"
+    echo "═════════════════════════════"
 }
 
 # ============ 主入口 ============
@@ -247,6 +577,13 @@ fi
 case "$1" in
     --help|-h)
         show_help
+        ;;
+    --auto)
+        if [ $# -lt 3 ]; then
+            echo "❌ --auto 模式需要 2 个参数: <软件名> <版本>"
+            exit 1
+        fi
+        auto_mode "$2" "$3"
         ;;
     --all)
         if [ $# -lt 4 ]; then

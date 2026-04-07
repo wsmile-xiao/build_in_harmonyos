@@ -31,7 +31,7 @@
 // Forward declare C API types
 extern "C" {
 typedef struct OH_Drawing_Canvas OH_Drawing_Canvas;
-typedef struct ArkUI_NodeContent ArkUI_NodeContentHandle;
+// ArkUI_NodeContentHandle is already defined in <arkui/native_type.h> — do not redefine here
 }
 
 // ============================================================================
@@ -118,6 +118,9 @@ public:
 
     // ---- Tick / Timer (call periodically from host for caret blink) ----
     void Tick();  // calls TickFor(caret) + triggers redraw if needed
+
+    // ---- Reset fonts (call on Surface recreate) ----
+    void ResetFonts();  // resets fontsInitialized flag
 
     // ---- Access underlying Scintilla for advanced use ----
     void *GetScintillaPtr() const;  // returns ScintillaBase*
@@ -208,6 +211,9 @@ void BN_Sci_SetNotifyHandler(void *editor, BN_NotifyFunc handler, void *userData
 
 // Tick — advance caret blink timer (call from ArkTS setInterval ~500ms)
 void BN_Sci_Tick(void *editor);
+
+// ResetFonts — force font re-init on next PerformDraw (call on Surface recreate)
+void BN_Sci_ResetFonts(void *editor);
 
 #ifdef __cplusplus
 }

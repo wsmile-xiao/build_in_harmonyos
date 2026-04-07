@@ -246,20 +246,69 @@ echo "  共处理 $elf_count 个 ELF 文件"
 
 ### Step 7: ELF 签名（adhoc self-sign）
 
+> **⚠️ 签名工具稳定性问题**：`binary-sign-tool` 在某些情况下可能失败（权限不足、文件被占用、内部状态异常）。
+> **必须使用 fallback 策略**，不能因签名失败而中断整个打包流程。
+
 ```bash
 SIGNTOOL="/data/service/hnp/bin/binary-sign-tool"
 
 sign_elf() {
     local file="$1"
+    local max_retries=3
+    local retry=0
+
     # 移除旧签名段（必须先做，否则 sign 报错）
     $OBJCOPY --remove-section .codesign "$file" 2>/dev/null || true
-    # 重新签名
-    $SIGNTOOL sign -inFile "$file" -outFile "$file" -selfSign 1 2>/dev/null || true
+
+    while [ $retry -lt $max_retries ]; do
+        retry=$((retry + 1))
+        if $SIGNTOOL sign -inFile "$file" -outFile "$file" -selfSign 1 2>/dev/null; then
+            return 0  # 成功
+        fi
+        echo "  ⚠️ 签名失败 (尝试 $retry/$max_retries): $(basename $file)"
+        sleep 1
+    done
+
+    # 所有重试都失败 → 标记为 unsigned 但不中断打包流程
+    echo "  ❌ 签名最终失败（已重试 $max_retries 次）: $(basename $file)"
+    touch "${file}.unsigned"
 }
 
+# 批量签名 + 统计结果
+sign_success=0
+sign_failed=0
 for elf in $(find "$PKGDIR" -type f -exec file {} \; | grep 'ELF' | cut -d: -f1); do
     sign_elf "$elf"
+    if [ -f "${elf}.unsigned" ]; then
+        sign_failed=$((sign_failed + 1))
+    else
+        sign_success=$((sign_success + 1))
+    fi
 done
+
+echo "  签名结果: ✅ $sign_success 成功 / ❌ $sign_failed 失败(标记unsigned)"
+if [ "$sign_failed" -gt 0 ]; then
+    echo "  ⚠️ 有 $sign_failed 个文件未签名。包可用但非正式签名版本。"
+fi
+```
+
+**签名失败的后续处理策略**：
+
+| 场景 | 处理方式 | 用户侧操作 |
+|------|---------|-----------|
+| 少数文件签名失败 | 标记 `.unsigned`，继续打包 | 解压后手动 `binary-sign-tool sign -inFile xxx -selfSign 1` |
+| 全部签名失败 | 打包但 README 标注 `UNSIGNED` | 用户需自行签名或从源码编译 |
+| 权限错误 | 检查 SELinux 上下文和文件权限 | `ls -Z` 检查，可能需 `restorecon` |
+
+**Step 8 中增加签名完整性检查（在权限修复后执行）**：
+```bash
+echo "=== 签名完整性检查 ==="
+unsigned_count=$(find "$PKGDIR" -name "*.unsigned" | wc -l | tr -d ' ')
+if [ "$unsigned_count" -gt 0 ]; then
+    echo "  ⚠️ $unsigned_count 个文件未签名（见 *.unsigned 标记）"
+else
+    echo "  ✅ 所有 ELF 文件已签名"
+fi
 ```
 
 ### Step 8: ⭐ 统一修复执行权限（必做！）
@@ -596,3 +645,81 @@ chmod +x package-dir/bin/*
 # - openssl 的 .so 仍需收集到 lib/external/ 并设置 RPATH
 # - 最终可执行文件不依赖 libreadline.so，但依赖 libssl.so
 ```
+
+---
+
+## 9. install.sh 通用安装脚本模板
+
+> **定位**：所有预编译软件的 `install.sh` 必须基于此模板生成，确保统一部署体验。
+> 模板文件：`scripts/install-template.sh`（可直接复制修改 PKG_NAME/PKG_VERSION）。
+
+### 9.1 设计原则
+
+| 原则 | 说明 |
+|------|------|
+| **极简依赖** | 只用 POSIX sh 内置 + tar + curl + cp + chmod（所有鸿蒙设备均有） |
+| **纯 ASCII** | 禁止 emoji/颜色码/多字节字符（toybox ash 不支持） |
+| **扁平释放** | bin/lib/share 直接落到 `~/usr/local/`，所有软件自然共存 |
+| **管道安全** | 禁止 heredoc（与 `curl \| sh` 的 stdin 冲突），全部用 printf |
+| **幂等** | 重复运行不重复写 .zshrc，PATH 已有则跳过 |
+
+### 9.2 目录结构约定
+
+```
+~/usr/local/                          <-- 公共根（所有软件共享）
+├── bin/                              <-- 所有命令汇聚
+│   ├── pkg-config                    <-- 软件A 二进制
+│   ├── aarch64-*-pkg-config          <-- triplet 别名
+│   ├── sed                          <-- 软件B 二进制
+│   └── ...
+├── lib/
+│   ├── pkgconfig/                   <-- 公共 .pc 池 (PKG_CONFIG_PATH)
+│   └── external/                    <-- 外部依赖库
+├── share/
+│   ├── aclocal/
+│   └── man/man1/
+└── (无 README, 无 activate.sh)       <-- 不在包内
+```
+
+### 9.3 模板代码
+
+完整模板见 `scripts/install-template.sh`（64 行 / 2.2KB）。
+
+每个软件只需修改两行：
+```sh
+PKG_NAME="${PKG_NAME:-pkg-config}"        # <-- 改这里
+PKG_VERSION="${PKG_VERSION:-0.29.2}"      # <-- 改这里
+```
+
+4 步流程：
+- **Step 1**: 获取 tarball（本地优先 → gitcode → gitee）
+- **Step 2**: 解压到 `~/usr/local/`（兼容 toybox tar 无 --strip-components）
+- **Step 3**: `chmod +x` bin/*
+- **Step 4**: PATH 缺失时写入 `.zshrc`（已有则跳过）
+
+### 9.4 各软件生成 install.sh 的步骤
+
+1. `cp scripts/install-template.sh packaging/<name>-install.sh`
+2. 修改 `PKG_NAME` 和 `PKG_VERSION` 两行
+3. `sh -n <install.sh>` 验证语法
+4. `LC_ALL=C grep -nP '[^\x00-\x7F]' <install.sh>` 确认纯 ASCII
+5. `cat <install.sh> | sh` 在干净环境测试
+6. 上传到 gitcode releases
+
+### 9.5 禁止事项
+
+| 禁止项 | 原因 |
+|--------|------|
+| `set -e` | cp 遇系统保护文件报错中断后续步骤 |
+| heredoc (`<< EOF`) | 与 `curl \| sh` stdin 冲突 → syntax error |
+| emoji / Unicode | toybox ash 截断多字节 → function not found |
+| `\033[...m` 颜色码 | 部分 echo 不支持转义序列 |
+| `--strip-components` | toybox tar 不支持 |
+| `source` / `.` | 非 POSIX 标准 |
+| `[[ ]]` | bashism |
+| README.md / activate.sh 放入 tar.gz | 用户要求不放包内 |
+| 包名子目录 `~/usr/<name>-ver/` | 要求扁平释放到 `~/usr/local/` |
+
+*文档版本: 2.2*
+*最后更新: 2026-04-07*
+*v2.2 更新: 新增 §9 install.sh 通用安装脚本模板*
