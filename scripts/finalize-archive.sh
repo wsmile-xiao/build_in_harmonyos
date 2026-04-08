@@ -1,4 +1,13 @@
 #!/bin/sh
+# ==============================================================================
+# [Layer 1] finalize-archive.sh - 归档收口校验（全自动清理+校验+整合）
+# ==============================================================================
+# 层级: L1(全自动)
+# 决策点: 无（完全确定性清理和校验流程）
+# 入口: ./scripts/finalize-archive.sh <软件名> <版本>
+# 依赖: manifest.yaml, PROGRESS.md, _meta.yaml
+# 调用者: finish-build.sh, close-archive.sh, AI / 用户
+# ==============================================================================
 # finalize-archive.sh - 归档收口（清理+校验+整合）
 # 用法: ./scripts/finalize-archive.sh <软件名> <版本>
 #
@@ -15,6 +24,21 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 ARCHIVES_DIR="${PROJECT_DIR}/archives"
 
+# ---- 临时文件清理 trap ----
+_TMP_FILES=""
+_cleanup_tmp() {
+    # shellcheck disable=SC2086
+    rm -f $_TMP_FILES
+}
+trap '_cleanup_tmp; exit $?' EXIT INT TERM
+_mktmp() {
+    _mt_p="${TMPDIR:-$HOME/tmp}/finalize_$$_${1}.$$"
+    : > "$_mt_p" 2>/dev/null || _mt_p="/tmp/finalize_$$_${1}.$$"
+    : > "$_mt_p"
+    _TMP_FILES="$_TMP_FILES $_mt_p"
+    printf '%s' "$_mt_p"
+}
+
 if [ $# -lt 2 ]; then
     echo "❌ 用法: $0 <软件名> <版本>"
     exit 1
@@ -22,6 +46,13 @@ fi
 
 SOFTWARE_NAME="$1"
 VERSION="$2"
+
+# ---------- 路径遍历防护 ----------
+sanitize_path_component() {
+    echo "$1" | sed 's/[^a-zA-Z0-9._+-]//g'
+}
+SOFTWARE_NAME=$(sanitize_path_component "$SOFTWARE_NAME")
+VERSION=$(sanitize_path_component "$VERSION")
 FIRST_LETTER="$(echo "$SOFTWARE_NAME" | cut -c1 | tr 'A-Z' 'a-z')"
 SOFTWARE_DIR="${ARCHIVES_DIR}/${FIRST_LETTER}/${SOFTWARE_NAME}"
 VERSION_DIR="${SOFTWARE_DIR}/${VERSION}"
@@ -48,21 +79,28 @@ _tmp_count=0; _bak_count=0
 for _sub in "" patches reports scripts logs packaging; do
     [ -n "$_sub" ] && _target="${VERSION_DIR}/${_sub}" || _target="$VERSION_DIR"
     [ ! -d "$_target" ] && continue
-    for _f in $(ls -1a "$_target"/*.tmp 2>/dev/null); do
-        [ -z "$_f" ] && continue
-        rm -f "$_target/$(basename "$_f")" 2>/dev/null; _tmp_count=$((_tmp_count + 1))
+    # [FIX#5] 原: for _f in $(ls -1a "$_target"/*.tmp) — word-split 反模式
+    # 改为安全的 glob 循环，文件名含空格不再崩溃
+    for _f in "$_target"/*.tmp; do
+        [ -e "$_f" ] || continue
+        rm -f "$_f" 2>/dev/null; _tmp_count=$((_tmp_count + 1))
     done
-    for _f in $(ls -1a "$_target"/*.bak 2>/dev/null); do
-        [ -z "$_f" ] && continue
-        rm -f "$_target/$(basename "$_f")" 2>/dev/null; _bak_count=$((_bak_count + 1))
+    # [FIX#5] 同上, .bak 文件
+    for _f in "$_target"/*.bak; do
+        [ -e "$_f" ] || continue
+        rm -f "$_f" 2>/dev/null; _bak_count=$((_bak_count + 1))
     done
 done
 
 _DEBUG_DIR="${VERSION_DIR}/packaging/debug"
 if [ -d "$_DEBUG_DIR" ]; then
-    for _f in $(ls -1a "$_DEBUG_DIR" 2>/dev/null); do
-        case "$_f" in *.debug|.|..) continue ;; esac
-        [ -f "$_DEBUG_DIR/$_f" ] && rm -f "$_DEBUG_DIR/$_f"
+    # [FIX#5] 原: for _f in $(ls -1a "$_DEBUG_DIR") — word-split 反模式
+    # 改为安全 glob 遍历目录内容
+    for _f in "$_DEBUG_DIR"/*; do
+        [ -e "$_f" ] || continue
+        _fb="$(basename "$_f")"
+        case "$_fb" in *.debug|.|..) continue ;; esac
+        [ -f "$_f" ] && rm -f "$_f"
     done
 fi
 
@@ -87,12 +125,18 @@ fi
 
 _BIN_NAME="$SOFTWARE_NAME"; _PKG_FILENAME=""; _PKG_SIZE="未知"
 if [ -d "${VERSION_DIR}/packaging" ]; then
-    for _f in $(ls -1 "${VERSION_DIR}/packaging/"*-ohos-aarch64.tar.gz 2>/dev/null); do
+    # [FIX#5] 原: for _f in $(ls -1 "${VERSION_DIR}/packaging/"*-ohos-aarch64.tar.gz)
+    for _f in "${VERSION_DIR}/packaging/"*-ohos-aarch64.tar.gz; do
         [ -f "$_f" ] && _PKG_FILENAME="$(basename "$_f")" && break
     done
     [ -n "$_PKG_FILENAME" ] && _PKG_SIZE=$(du -h "${VERSION_DIR}/packaging/${_PKG_FILENAME}" 2>/dev/null | cut -f1)
     if [ -d "${VERSION_DIR}/packaging/bin" ]; then
-        _BN=$(ls -1 "${VERSION_DIR}/packaging/bin/" 2>/dev/null | head -1)
+        # [FIX#5] 原: _BN=$(ls -1 "${VERSION_DIR}/packaging/bin/" | head -1)
+        # 改为安全 glob 取首个条目
+        _BN=""
+        for _bf in "${VERSION_DIR}/packaging/bin/"*; do
+            [ -e "$_bf" ] && _BN="$(basename "$_bf")" && break
+        done
         [ -n "$_BN" ] && _BIN_NAME="$_BN"
     fi
 fi
@@ -103,14 +147,33 @@ _QR="${VERSION_DIR}/reports/quality-report.md"
 
 _PATCHDIR="${VERSION_DIR}/patches"
 _TOTAL_PATCHES=0
-[ -d "$_PATCHDIR" ] && _TOTAL_PATCHES=$(ls -1 "$_PATCHDIR"/000*.patch 2>/dev/null | wc -l | tr -d ' ')
+if [ -d "$_PATCHDIR" ]; then
+    # [FIX#5] 原: _TOTAL_PATCHES=$(ls -1 "$_PATCHDIR"/000*.patch | wc -l)
+    # 改为安全循环计数
+    _tpc=0
+    for _pf in "$_PATCHDIR"/000*.patch; do
+        [ -f "$_pf" ] && _tpc=$((_tpc + 1))
+    done
+    _TOTAL_PATCHES=$_tpc
+fi
 
-# 收集已有版本列表（用于聚合显示）
+# 收集已有版本列表（用于聚合显示）— 需要 sort -V，使用临时文件
 _VERSION_LIST=""
-for _vd in $(ls -1d "$SOFTWARE_DIR"/[0-9]* 2>/dev/null | sort -V); do
-    _v=$(basename "$_vd")
-    [ -f "$_vd/manifest.yaml" ] && _VERSION_LIST="${_VERSION_LIST}${_v} "
-done
+if [ -d "$SOFTWARE_DIR" ]; then
+    _vdlst=$(_mktmp verdirs)
+    # [FIX#5] 原: for _vd in $(ls -1d "$SOFTWARE_DIR"/[0-9]* | sort -V)
+    # 改为 find 输出到临时文件，sort 后读取
+    find "$SOFTWARE_DIR" -maxdepth 1 -type d -name '[0-9]*' > "$_vdlst" 2>/dev/null || true
+    if [ -s "$_vdlst" ]; then
+        sort -V "$_vdlst" > "${_vdlst}.sorted" 2>/dev/null || sort -t'/' -k6 -n "$_vdlst" > "${_vdlst}.sorted" 2>/dev/null
+        while IFS= read -r _vd; do
+            [ -d "$_vd" ] || continue
+            _v=$(basename "$_vd")
+            [ -f "$_vd/manifest.yaml" ] && _VERSION_LIST="${_VERSION_LIST}${_v} "
+        done < "${_vdlst}.sorted"
+        rm -f "${_vdlst}.sorted"
+    fi
+fi
 
 cat > "$_RN" <<RNEOF
 # ${SOFTWARE_NAME} — HarmonyOS aarch64 预编译包
@@ -125,14 +188,32 @@ cat > "$_RN" <<RNEOF
 
 | 版本 | 状态 | 补丁数 | 质量门禁 |
 |------|------|--------|---------|
-$(for _vd in $(ls -1d "$SOFTWARE_DIR"/[0-9]* 2>/dev/null | sort -Vr); do
-    _v=$(basename "$_vd")
-    _st="unknown"; _pc=0; _ql="--"
-    [ -f "$_vd/manifest.yaml" ] && _st=$(grep "^status:" "$_vd/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d ' ')
-    [ -d "$_vd/patches" ] && _pc=$(ls -1 "$_vd"/patches/000*.patch 2>/dev/null | wc -l | tr -d ' ')
-    [ -f "$_vd/reports/quality-report.md" ] && _ql=$(grep -oE 'PASS|FAIL' "$_vd/reports/quality-report.md" 2>/dev/null | head -1)
-    echo "| ${_v} | ${_st} | ${_pc} | ${_ql:-未测} |"
-done)
+$(# [FIX#5] heredoc 内的原 $(ls -1d ... | sort -Vr) 反模式
+# 使用预排序的版本目录列表（倒序）
+if [ -d "$SOFTWARE_DIR" ]; then
+    _vdlst2=$(_mktmp verdirs2)
+    find "$SOFTWARE_DIR" -maxdepth 1 -type d -name '[0-9]*' > "$_vdlst2" 2>/dev/null || true
+    if [ -s "$_vdlst2" ]; then
+        sort -Vr "$_vdlst2" > "${_vdlst2}.sorted" 2>/dev/null || sort -t'/' -k6 -nr "$_vdlst2" > "${_vdlst2}.sorted" 2>/dev/null
+        while IFS= read -r _vd; do
+            [ -d "$_vd" ] || continue
+            _v=$(basename "$_vd")
+            _st="unknown"; _pc=0; _ql="--"
+            [ -f "$_vd/manifest.yaml" ] && _st=$(grep "^status:" "$_vd/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d ' ')
+            # [FIX#5] 原: _pc=$(ls -1 "$_vd"/patches/000*.patch | wc -l)
+            if [ -d "$_vd/patches" ]; then
+                _tpc2=0
+                for _pf2 in "$_vd"/patches/000*.patch; do
+                    [ -f "$_pf2" ] && _tpc2=$((_tpc2 + 1))
+                done
+                _pc=$_tpc2
+            fi
+            [ -f "$_vd/reports/quality-report.md" ] && _ql=$(grep -oE 'PASS|FAIL' "$_vd/reports/quality-report.md" 2>/dev/null | head -1)
+            echo "| ${_v} | ${_st} | ${_pc} | ${_ql:-未测} |"
+        done < "${_vdlst2}.sorted"
+        rm -f "${_vdlst2}.sorted"
+    fi
+fi)
 
 ## 当前版本 (${VERSION}) 详情
 
@@ -163,7 +244,8 @@ done)
 ### 已知适配
 
 $(if [ "$_TOTAL_PATCHES" -gt 0 ]; then
-    for _p in $(ls -1 "${VERSION_DIR}/patches/"000*.patch 2>/dev/null); do
+    # [FIX#5] 原: for _p in $(ls -1 "${VERSION_DIR}/patches/"000*.patch)
+    for _p in "${VERSION_DIR}/patches/"000*.patch; do
         [ -f "$_p" ] && echo "- ✅ $(basename "$_p")"
     done
 else
@@ -246,11 +328,13 @@ _status="unknown"
 if [ "$_status" = "success" ] || [ "$_status" = "partial" ]; then
     _PKGDIR="${VERSION_DIR}/packaging"
     _has_release=0
-    for _f in $(ls -1 "$_PKGDIR"/*-ohos-aarch64.tar.gz 2>/dev/null); do
+    # [FIX#5] 原: for _f in $(ls -1 "$_PKGDIR"/*-ohos-aarch64.tar.gz)
+    for _f in "$_PKGDIR"/*-ohos-aarch64.tar.gz; do
         [ -f "$_f" ] && _has_release=1 && break
     done
     _has_debug=0
-    for _f in $(ls -1 "$_PKGDIR"/*-ohos-aarch64-debug.tar.gz 2>/dev/null); do
+    # [FIX#5] 原: for _f in $(ls -1 "$_PKGDIR"/*-ohos-aarch64-debug.tar.gz)
+    for _f in "$_PKGDIR"/*-ohos-aarch64-debug.tar.gz; do
         [ -f "$_f" ] && _has_debug=1 && break
     done
     
@@ -311,11 +395,25 @@ echo "════════════════════════�
 
 _TOTAL_REPORTS=0
 _RPTDIR="${VERSION_DIR}/reports"
-[ -d "$_RPTDIR" ] && _TOTAL_REPORTS=$(ls -1 "$_RPTDIR"/*.md 2>/dev/null | wc -l | tr -d ' ')
+if [ -d "$_RPTDIR" ]; then
+    # [FIX#5] 原: _TOTAL_REPORTS=$(ls -1 "$_RPTDIR"/*.md | wc -l)
+    _rc=0
+    for _rf in "$_RPTDIR"/*.md; do
+        [ -f "$_rf" ] && _rc=$((_rc + 1))
+    done
+    _TOTAL_REPORTS=$_rc
+fi
 
 _TOTAL_PKGS=0
 _PKGDIR="${VERSION_DIR}/packaging"
-[ -d "$_PKGDIR" ] && _TOTAL_PKGS=$(ls -1 "$_PKGDIR"/*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+if [ -d "$_PKGDIR" ]; then
+    # [FIX#5] 原: _TOTAL_PKGS=$(ls -1 "$_PKGDIR"/*.tar.gz | wc -l)
+    _kc=0
+    for _kf in "$_PKGDIR"/*.tar.gz; do
+        [ -f "$_kf" ] && _kc=$((_kc + 1))
+    done
+    _TOTAL_PKGS=$_kc
+fi
 
 echo "  软件:       ${SOFTWARE_NAME} ${VERSION}"
 echo "  状态:       ${_manifest_status:-unknown}"

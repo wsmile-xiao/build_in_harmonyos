@@ -1,4 +1,14 @@
 #!/bin/sh
+# ==============================================================================
+# [Layer 1] sign-elf.sh - 鸿蒙 ELF 文件签名（全自动四步流程）
+# ==============================================================================
+# 层级: L1(全自动)
+# 决策点: 无（完全确定性签名流程）
+# 入口: ./scripts/sign-elf.sh <ELF文件> [RPATH路径]
+#        ./scripts/sign-elf.sh --batch <目录>
+# 依赖: patchelf, llvm-objcopy, binary-sign-tool, llvm-readelf
+# 调用者: verify-build.sh, finish-build.sh, AI / 用户
+# ==============================================================================
 # sign-elf.sh - 鸿蒙 ELF 文件签名（四步流程）
 # 用法: ./sign-elf.sh <ELF文件> [RPATH路径]
 #       ./sign-elf.sh --batch <目录>
@@ -189,9 +199,16 @@ batch_sign() {
     _failed=0
     _skipped=0
 
-    # 使用 find 递归查找 ELF 文件
-    # 注意：POSIX find 不支持 -print0，使用换行分隔
-    find "$_dir" -type f 2>/dev/null | while read -r _f; do
+    # [FIX#8] 原: find ... | while read — 管道创建子 shell，计数器在子 shell 中递增，
+    #         父 shell 的 _total/_success/_failed/_skipped 永远为 0！
+    # 改为: find 输出到临时文件，while read 从文件读取（同一 shell，计数器正确传播）
+    _bs_tmp="${TMPDIR:-$HOME/tmp}/sign_batch_$$.lst"
+    : > "$_bs_tmp" 2>/dev/null || _bs_tmp="/tmp/sign_batch_$$.lst"
+    find "$_dir" -type f > "$_bs_tmp" 2>/dev/null || true
+
+    while IFS= read -r _f; do
+        [ -z "$_f" ] && continue
+        [ -f "$_f" ] || continue
         _total=$(( _total + 1 ))
         if is_elf "$_f"; then
             if sign_single_elf "$_f" ""; then
@@ -202,7 +219,9 @@ batch_sign() {
         else
             _skipped=$(( _skipped + 1 ))
         fi
-    done
+    done < "$_bs_tmp"
+
+    rm -f "$_bs_tmp"
 
     echo ""
     echo "════════════════════════════"

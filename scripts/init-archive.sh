@@ -1,4 +1,13 @@
 #!/bin/sh
+# ==============================================================================
+# [Layer 1] init-archive.sh - 编译档案骨架创建/恢复（全自动）
+# ==============================================================================
+# 层级: L1(全自动)
+# 决策点: 无（完全确定性目录创建和模板填充）
+# 入口: ./scripts/init-archive.sh <软件名> <版本> [源码URL] [构建系统] [--clean]
+# 依赖: templates/PROGRESS.md（可选，有则用模板）
+# 调用者: init-build.sh, AI / 用户
+# ==============================================================================
 # init-archive.sh - 创建/恢复编译档案骨架（Phase 1.5）
 # 用法: ./init-archive.sh <软件名> <版本> [源码下载URL] [构建系统类型]
 #
@@ -26,7 +35,7 @@ show_help() {
 
 描述:
   创建或恢复编译档案骨架（Phase 1.5），包括：
-  - 目录结构：archives/{letter}/{name}/{version}/{patches,reports,scripts,logs,packaging}
+  - 目录结构：archives/{letter}/{name}/{version}/{patches,reports,packaging}
   - manifest.yaml（编译元数据，已有则保留）
   - PROGRESS.md（编译进度跟踪，已有则保留）
   - README.md（编译说明，已有则保留）
@@ -69,6 +78,13 @@ SOURCE_URL="${3:-}"
 BUILD_SYSTEM="${4:-unknown}"
 CLEAN_MODE="false"
 
+# ---------- 路径遍历防护 ----------
+sanitize_path_component() {
+    echo "$1" | sed 's/[^a-zA-Z0-9._+-]//g'
+}
+SOFTWARE_NAME=$(sanitize_path_component "$SOFTWARE_NAME")
+VERSION=$(sanitize_path_component "$VERSION")
+
 # 解析可选参数
 shift 4
 for arg in "$@"; do
@@ -97,7 +113,10 @@ echo ""
 # ---------- 步骤 1: 创建目录结构 ----------
 echo "[1/6] 创建目录结构..."
 
-SUBDIRS="patches reports scripts logs packaging"
+# 注：不预创建 scripts/ 和 logs/ 目录（D3 优化）
+# 原因：当前流程中没有任何步骤向这两个目录写入文件
+# 如未来需要，可在对应步骤按需创建
+SUBDIRS="patches reports packaging"
 for subdir in $SUBDIRS; do
     _target="${VERSION_DIR}/${subdir}"
     if mkdir -p "$_target"; then
@@ -149,7 +168,20 @@ echo "[3/5] 检查 PROGRESS.md..."
 if [ -f "${VERSION_DIR}/PROGRESS.md" ] && [ "$(wc -l < "${VERSION_DIR}/PROGRESS.md" | tr -d ' ')" -gt 15 ]; then
     echo "  ✅ PROGRESS.md 已存在（$(wc -l < "${VERSION_DIR}/PROGRESS.md" | tr -d ' ') 行），保留"
 else
-    cat > "${VERSION_DIR}/PROGRESS.md" <<EOF
+    # 使用 D4 规定的权威模板（templates/PROGRESS.md）
+    _TEMPLATE_FILE="${PROJECT_DIR}/templates/PROGRESS.md"
+    if [ -f "$_TEMPLATE_FILE" ]; then
+        cp "$_TEMPLATE_FILE" "${VERSION_DIR}/PROGRESS.md"
+        # 替换占位符
+        sed -i "s/{{SOFTWARE_NAME}}/${SOFTWARE_NAME}/g" "${VERSION_DIR}/PROGRESS.md"
+        sed -i "s/{{VERSION}}/${VERSION}/g" "${VERSION_DIR}/PROGRESS.md"
+        sed -i "s/{{DATE}}/$(date '+%Y-%m-%d')/g" "${VERSION_DIR}/PROGRESS.md"
+        sed -i "s/{{STATUS}}/initialized/g" "${VERSION_DIR}/PROGRESS.md"
+        echo "  ✅ PROGRESS.md 已创建（来自权威模板 templates/PROGRESS.md）"
+    else
+        log_warn "templates/PROGRESS.md 不存在，使用内嵌模板"
+        # Fallback：内嵌简化模板（原硬编码逻辑）
+        cat > "${VERSION_DIR}/PROGRESS.md" <<EOF
 # ${SOFTWARE_NAME} ${VERSION} — 编译进度
 
 > 档案创建/恢复时间: ${TIMESTAMP}
@@ -163,10 +195,10 @@ else
 | 状态 | 🔵 编译中 |
 | 构建系统 | ${BUILD_SYSTEM} |
 EOF
-    if [ -n "$SOURCE_URL" ]; then
-        printf '| 源码路径 | %s |\n' "$SOURCE_URL" >> "${VERSION_DIR}/PROGRESS.md"
-    fi
-    cat >> "${VERSION_DIR}/PROGRESS.md" <<'PROGEOF'
+        if [ -n "$SOURCE_URL" ]; then
+            printf '| 源码路径 | %s |\n' "$SOURCE_URL" >> "${VERSION_DIR}/PROGRESS.md"
+        fi
+        cat >> "${VERSION_DIR}/PROGRESS.md" <<'PROGEOF'
 
 ## 编译阶段
 
@@ -192,7 +224,8 @@ EOF
 <!-- 编译过程中发现的问题、解决方案和知识积累记录在这里 -->
 
 PROGEOF
-    echo "  ✅ PROGRESS.md 已创建"
+        echo "  ⚠️ PROGRESS.md 已创建（内嵌 fallback 模板，缺少 Phase 2.5 和对话记录）"
+    fi
 fi
 
 # ---------- 步骤 4: README.md（已有实质内容则保留）----------
@@ -254,7 +287,7 @@ echo "  ✅ _meta.yaml 已更新"
 echo "[6/6] 验证档案完整性..."
 
 _validate_ok=true
-for _item in manifest.yaml PROGRESS.md README.md patches reports scripts logs packaging; do
+for _item in manifest.yaml PROGRESS.md README.md patches reports packaging; do
     if [ -e "${VERSION_DIR}/${_item}" ]; then
         echo "  ✅ ${_item}"
     else

@@ -1,5 +1,13 @@
 #!/bin/sh
-# close-archive.sh - 关闭编译档案（Phase 4 收尾）
+# ==============================================================================
+# [Layer 2] close-archive.sh - 关闭编译档案（Phase 4 收尾）
+# ==============================================================================
+# 层级: L2(半自动)
+# 决策点: 极少(补丁管线条件触发、状态校验分支)
+# 入口: ./scripts/close-archive.sh <软件名> <版本> <最终状态>
+# 依赖: refresh-patch.sh(自动触发), manifest.yaml, PROGRESS.md
+# 调用者: finish-build.sh / AI / 用户
+# ==============================================================================
 # 用法: ./close-archive.sh <软件名> <版本> <最终状态>
 #   最终状态: success | partial | failed
 #
@@ -61,6 +69,13 @@ esac
 SOFTWARE_NAME="$1"
 VERSION="$2"
 STATUS="$3"
+
+# ---------- 路径遍历防护 ----------
+sanitize_path_component() {
+    echo "$1" | sed 's/[^a-zA-Z0-9._+-]//g'
+}
+SOFTWARE_NAME=$(sanitize_path_component "$SOFTWARE_NAME")
+VERSION=$(sanitize_path_component "$VERSION")
 
 # 验证状态参数
 case "$STATUS" in

@@ -1,11 +1,15 @@
 #!/bin/sh
+# ==============================================================================
+# [Layer 3] search-download-url.sh - URL 搜索辅助工具（AI 主导）
+# ==============================================================================
+# 层级: L3(辅助工具)
+# 决策点: AI主导（搜索结果需 AI 判断选择）
+# 入口: ./scripts/search-download-url.sh <软件名> [版本]
+# 依赖: curl
+# 调用者: init-build.sh（registry 未命中时自动调用）, AI
+# ==============================================================================
 # search-download-url.sh — URL 搜索辅助工具（Layer 3）
 # 用法: ./scripts/search-download-url.sh <软件名> [版本]
-#
-# 当 software-registry.yaml 中没有 URL 时，AI 调用此工具
-# 搜索候选下载 URL 并返回列表供 AI 选择。
-#
-# Layer: Layer3（辅助工具，供 AI 调用）
 
 set -e
 
@@ -19,6 +23,13 @@ fi
 
 NAME="$1"
 VERSION="${2:-latest}"
+
+# ---------- 路径遍历防护 ----------
+sanitize_path_component() {
+    echo "$1" | sed 's/[^a-zA-Z0-9._+-]//g'
+}
+NAME=$(sanitize_path_component "$NAME")
+VERSION=$(sanitize_path_component "$VERSION")
 
 echo "🔍 搜索 ${NAME} ${VERSION} 的下载 URL..."
 echo ""
@@ -40,9 +51,9 @@ echo "=== [策略 2/5] GitHub Releases ==="
 # 常见的 GitHub org 映射
 for ORG_REPO in \
     "${NAME}/${NAME}" \
-    "gnu-${name}/${name}" \
-    "${name}-project/${name}" \
-    "lib${name}/lib${name}"; do
+    "gnu-${NAME}/${NAME}" \
+    "${NAME}-project/${NAME}" \
+    "lib${NAME}/lib${NAME}"; do
     URL="https://github.com/${ORG_REPO}/releases/download/v${VERSION}/${NAME}-${VERSION}.tar.gz"
     HTTP_CODE=$(curl -sI --connect-timeout 5 "$URL" 2>/dev/null | head -1 | tr -d '\r' | awk '{print $2}')
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "302" ]; then

@@ -1,4 +1,13 @@
 #!/usr/bin/env python3
+# ==============================================================================
+# [Layer 3] gen_summary.py - 编译档案总结报告生成工具（AI 主导）
+# ==============================================================================
+# 层级: L3(辅助工具)
+# 决策点: AI主导（报告内容供 AI 审阅和决策参考）
+# 入口: python3 scripts/gen_summary.py（无参数，自动扫描 archives/）
+# 依赖: PyYAML, archives/_index.yaml, 各 manifest.yaml
+# 调用者: finish-build.sh, close-archive.sh, AI / 用户
+# ==============================================================================
 """
 gen_summary.py - 从编译档案生成人可读的 summary.md
 
@@ -28,11 +37,10 @@ BUILD_SYSTEM_NAMES = {
     "script": "Script",
 }
 
-# 状态徽标
+# 状态徽标（统一状态值体系: success / partial / failed）
 STATUS_BADGE = {
     "success": "✅ 完全成功",
     "partial": "⚠️ 部分成功",
-    "tested": "🧪 已测试",
     "failed": "❌ 编译失败",
 }
 
@@ -170,7 +178,6 @@ def generate_summary():
     lines.append(f"| 软件版本 | **{total_versions}** 个 |")
     lines.append(f"| ✅ 完全成功 | {by_status.get('success', 0)} |")
     lines.append(f"| ⚠️ 部分成功 | {by_status.get('partial', 0)} |")
-    lines.append(f"| 🧪 已测试 | {by_status.get('tested', 0)} |")
     lines.append(f"| ❌ 编译失败 | {by_status.get('failed', 0)} |")
     lines.append("")
 

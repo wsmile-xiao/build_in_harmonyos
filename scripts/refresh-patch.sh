@@ -1,4 +1,13 @@
 #!/bin/sh
+# ==============================================================================
+# [Layer 1] refresh-patch.sh - 补丁管线（全自动 diff → 粒度拆分 → 格式校验）
+# ==============================================================================
+# 层级: L1(全自动)
+# 决策点: 无（完全确定性流程）
+# 入口: ./scripts/refresh-patch.sh --auto <软件名> <版本>
+# 依赖: diff, patch, curl, tar
+# 调用者: finish-build.sh, close-archive.sh, AI / 用户
+# ==============================================================================
 # refresh-patch.sh - 刷新/重新生成补丁（基于三目录法）
 # 用法: ./refresh-patch.sh <补丁编号> <原始目录> <修改后目录> [输出目录]
 #       ./refresh-patch.sh --all <原始目录> <修改后目录> <输出目录>
@@ -299,15 +308,16 @@ refresh_all() {
     echo "  输出: ${_output_dir}"
     echo ""
 
-    # 清空现有补丁
-    if [ -d "$_output_dir" ]; then
-        _existing=$(ls "$_output_dir"/*.patch 2>/dev/null | wc -l | tr -d ' ')
-        if [ "$_existing" -gt 0 ]; then
-            echo "  ⚠️  清理 ${_existing} 个旧补丁文件..."
-            rm -f "$_output_dir"/*.patch
-        fi
-    else
-        mkdir -p "$_output_dir"
+    # 先写入临时目录，验证后原子替换（避免无差异时丢失旧补丁）
+    _STAGING="${_output_dir}/.patch-staging"
+    rm -rf "$_STAGING" && mkdir -p "$_output_dir" "$_STAGING"
+    
+    _existing=$(ls "$_output_dir"/*.patch 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$_existing" -gt 0 ]; then
+        echo "  ⚠️  备份 ${_existing} 个旧补丁..."
+        _backup="${_output_dir}/.patch-backup-$(date +%Y%m%d%H%M%S)"
+        mkdir -p "$_backup"
+        cp "$_output_dir"/*.patch "$_backup/" 2>/dev/null || true
     fi
 
     # 生成一个完整的补丁文件
@@ -316,7 +326,7 @@ refresh_all() {
 
     _exclude_args=$(build_exclude_args)
 
-    _all_patch="${_output_dir}/0001-all-changes.patch"
+    _all_patch="${_STAGING}/0001-all-changes.patch"
 
     echo "  [1/2] 执行全量 diff..."
     if eval diff -U 10 -r "$_exclude_args" "$_norm_orig" "$_norm_mod" > "$_all_patch" 2>/dev/null; then
@@ -346,6 +356,24 @@ refresh_all() {
 
     echo ""
     echo "  ✅ 补丁已生成: ${_all_patch}"
+
+    # ---- 原子替换（有新补丁才替换，无差异则保留旧补丁）----
+    _all_size=$(wc -c < "$_all_patch" 2>/dev/null | tr -d ' ')
+    if [ -z "$_all_size" ] || [ "$_all_size" -lt 10 ]; then
+        rm -f "$_all_patch"
+        _existing=$(ls "$_output_dir"/*.patch 2>/dev/null | wc -l | tr -d ' ')
+        echo "  ⚠️  全量补丁为空，保留现有 ${_existing} 个补丁"
+    else
+        if ls "$_output_dir"/*.patch >/dev/null 2>&1; then
+            _backup="${_output_dir}/.patch-backup-$(date +%Y%m%d%H%M%S)"
+            mkdir -p "$_backup"
+            cp "$_output_dir"/*.patch "$_backup/" 2>/dev/null || true
+            echo "  📦 已备份旧补丁到 $(basename "$_backup")/"
+            rm -f "$_output_dir"/*.patch
+        fi
+        mv "$_all_patch" "$_output_dir/0001-all-changes.patch"
+    fi
+    rm -rf "$_STAGING"
 }
 
 # ============ 自动模式：--auto ============
@@ -362,7 +390,13 @@ auto_mode() {
     ARCHIVES_DIR="${PROJECT_DIR}/archives"
     TMPDIR="${TMPDIR:-$HOME/tmp}"
 
-    echo "🤖 补丁管线（自动模式）"
+    # 加载构建上下文（获取双轨制路径变量）
+    _CTX_FILE="${PROJECT_DIR}/.build-context-${_software}-${_version}"
+    if [ -f "$_CTX_FILE" ]; then
+        . "$_CTX_FILE" 2>/dev/null || true
+    fi
+
+    echo "🤖 补丁管线（自动模式 — 双轨制）"
     echo "  软件:   ${_software}"
     echo "  版本:   ${_version}"
     echo ""
@@ -379,83 +413,76 @@ auto_mode() {
         echo "  [1/7] 补丁目录已存在: ${PATCH_DIR}"
     fi
 
-    # ---- Step 2: 查找原始 tarball ----
-    ORIG_TARBALL=""
-    # 优先级: archives/ 下 → TMPDIR/builds/ → 当前目录
-    for _candidate in \
-        "${ARCHIVES_DIR}/${FIRST_LETTER}/${_software}/${_version}/${_software}-${_version}.tar"* \
-        "${TMPDIR}/builds/${_software}-${_version}.tar"* \
-        "./${_software}-${_version}.tar"*; do
-        if [ -f "$_candidate" ]; then
-            ORIG_TARBALL="$_candidate"
-            break
-        fi
-    done
+    # ---- Step 2: 定位 .orig/ 基准目录（不再依赖 tarball）----
+    # 双轨制: init-build.sh 已创建 .orig/(只读) + .work/(可写)
+    # 优先级: BUILD_SRC_ORIG_DIR(上下文) → 同级 .orig/ 目录
+    ORIG_DIR=""
+    if [ -n "$BUILD_SRC_ORIG_DIR" ] && [ -d "$BUILD_SRC_ORIG_DIR" ]; then
+        ORIG_DIR="$BUILD_SRC_ORIG_DIR"
+    elif [ -d "${PATCH_DIR}/../${_software}-${_version}.orig" ]; then
+        ORIG_DIR="$(cd "${PATCH_DIR}/../${_software}-${_version}.orig" && pwd)"
+    fi
 
-    if [ -z "$ORIG_TARBALL" ]; then
-        echo "  ❌ 无法找到原始 tarball"
-        echo "     搜索位置:"
-        echo "       ${ARCHIVES_DIR}/${FIRST_LETTER}/${_software}/${_version}/${_software}-${_version}.tar*"
-        echo "       ${TMPDIR}/builds/${_software}-${_version}.tar*"
-        echo "     请手动指定: ./refresh-patch.sh --all <原始目录> <修改后目录> ${PATCH_DIR}"
+    if [ -z "$ORIG_DIR" ] || [ ! -f "$ORIG_DIR/configure" -a ! -f "$ORIG_DIR/CMakeLists.txt" -a ! -f "$ORIG_DIR/Makefile" ]; then
+        echo "  ❌ 无法找到 .orig/ 基准目录"
+        echo "     请先运行: ./scripts/init-build.sh ${_software} ${_version}"
+        echo "     或手动指定: ./scripts/refresh-patch.sh --all <原始目录> <修改后目录> ${PATCH_DIR}"
         exit 2
     fi
 
-    echo "  [2/7] 原始 tarball: $(basename "$ORIG_TARBALL")"
+    echo "  [2/7] 基准目录 (.orig/): $(basename "$ORIG_DIR")"
 
-    # ---- Step 3: 查找修改后的源码目录 ----
+    # ---- Step 3: 定位 .work/ 工作副本（编译后的源码）----
     MOD_DIR=""
-    for _candidate in \
-        "${TMPDIR}/builds/${_software}-${_version}" \
-        "${TMPDIR}/${_software}-${_version}"; do
-        if [ -d "$_candidate" ] && [ -f "$_candidate/configure" -o -f "$_candidate/CMakeLists.txt" -o -f "$_candidate/Makefile" ]; then
-            MOD_DIR="$_candidate"
-            break
-        fi
-    done
+    if [ -n "$BUILD_SRC_DIR" ] && [ -d "$BUILD_SRC_DIR" ]; then
+        MOD_DIR="$BUILD_SRC_DIR"
+    elif [ -d "${PATCH_DIR}/../${_software}-${_version}.work" ]; then
+        MOD_DIR="$(cd "${PATCH_DIR}/../${_software}-${_version}.work" && pwd)"
+    fi
+
+    # 回退：在 TMPDIR/builds 中查找（兼容旧流程）
+    if [ -z "$MOD_DIR" ] || [ ! -f "$MOD_DIR/configure" -a ! -f "$MOD_DIR/CMakeLists.txt" -a ! -f "$MOD_DIR/Makefile" ]; then
+        for _candidate in \
+            "${TMPDIR}/builds/${_software}-${_version}" \
+            "${TMPDIR}/${_software}-${_version}"; do
+            if [ -d "$_candidate" ] && [ -f "$_candidate/configure" -o -f "$_candidate/CMakeLists.txt" -o -f "$_candidate/Makefile" ]; then
+                MOD_DIR="$_candidate"
+                break
+            fi
+        done
+    fi
 
     if [ -z "$MOD_DIR" ]; then
-        echo "  ❌ 无法找到修改后的源码目录"
+        echo "  ❌ 无法找到 .work/ 工作副本目录"
         echo "     搜索位置:"
+        echo "       \${BUILD_SRC_DIR} (上下文变量)"
+        echo "       ../${_software}-${_version}.work/"
         echo "       ${TMPDIR}/builds/${_software}-${_version}/"
-        echo "     请确认编译已完成且源码目录存在"
         exit 2
     fi
 
-    echo "  [3/7] 修改后源码: ${MOD_DIR}"
+    echo "  [3/7] 工作副本 (.work/): $(basename "$MOD_DIR")"
 
-    # ---- Step 4: 解压原始源码到临时目录 ----
-    ORIG_DIR="${TMPDIR}/.patch-orig-${_software}-${_version}"
-    rm -rf "$ORIG_DIR"
-    mkdir -p "$ORIG_DIR"
-    # 根据扩展名选择解压方式（支持 .tar.gz / .tar.xz / .tar.bz2）
-    case "$ORIG_TARBALL" in
-        *.tar.gz|*.tgz)  tar xzf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
-        *.tar.xz|*.txz)  tar xJf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
-        *.tar.bz2|*.tbz2) tar xjf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
-        *) tar xf "$ORIG_TARBALL" -C "$ORIG_DIR" >/dev/null 2>&1 ;;
-    esac
+    # ---- Step 4: 校验基准完整性（不再解压 tarball）----
+    # .orig/ 由 init-build.sh 管理，这里只做存在性检查
+    _norm_orig="$(cd "$ORIG_DIR" && pwd)"
+    _norm_mod="$(cd "$MOD_DIR" && pwd)"
 
-    # tarball 可能解压为子目录
-    ORIG_SRC=$(find "$ORIG_DIR" -maxdepth 2 -name "configure" -type f 2>/dev/null | head -1)
-    if [ -n "$ORIG_SRC" ]; then
-        ORIG_DIR="$(dirname "$ORIG_SRC")"
-    else
-        # 尝试找其他构建系统标记
-        ORIG_SRC=$(find "$ORIG_DIR" -maxdepth 2 -name "CMakeLists.txt" -type f 2>/dev/null | head -1)
-        if [ -n "$ORIG_SRC" ]; then
-            ORIG_DIR="$(dirname "$ORIG_SRC")"
-        else
-            echo "  ❌ 无法从 tarball 确定源码根目录"
-            exit 2
-        fi
+    # 防御性：确保 orig 和 mod 不是同一个目录
+    if [ "$_norm_orig" = "$_norm_mod" ]; then
+        echo "  ❌ 错误：.orig/ 和 .work/ 指向同一目录 (${_norm_orig})"
+        echo "     这意味着源码未被正确复制。请运行 init-build.sh 重建工作副本。"
+        exit 2
     fi
 
-    echo "  [4/7] 原始源码已解压: $(basename "$ORIG_DIR")"
+    echo "  [4/7] 基准校验通过: orig≠work ✅"
 
-    # ---- Step 5: 清空旧补丁 + 执行 per-file diff ----
+    # ---- Step 5: 生成补丁（先写入临时目录，验证后原子替换）----
+    # 安全策略: 不直接删除旧补丁！先写到 .patch-staging/，
+    #   有新补丁→替换旧补丁；无差异(空)→保留旧补丁不变
     echo "  [5/7] 生成补丁文件..."
-    rm -f "$PATCH_DIR"/*.patch
+    _STAGING="${PATCH_DIR}/.patch-staging"
+    rm -rf "$_STAGING" && mkdir -p "$_STAGING"
 
     _exclude_args=$(build_exclude_args)
     _norm_orig="$(cd "$ORIG_DIR" && pwd)"
@@ -475,8 +502,9 @@ auto_mode() {
     _diff_files=$(cd "$WORK" && eval diff -rq $_exclude_args orig mod 2>/dev/null | grep "^Files " | sed 's|Files orig/||;s| and mod/.*||' || true)
 
     if [ -z "$_diff_files" ]; then
-        echo "  ⚠️  无差异（源码未修改或修改已被还原）"
-        rm -rf "$WORK" "$ORIG_DIR"
+        echo "  ⚠️  无差异（.work/ 与 .orig/ 完全相同，源码未修改或补丁已还原）"
+        rm -rf "$WORK"
+        # 不再删除 ORIG_DIR（它是持久化基准目录）
         return 0
     fi
 
@@ -485,7 +513,7 @@ auto_mode() {
     set -- $_diff_files
     for _f do
         _patch_num=$((_patch_num + 1))
-        _patch_file="${PATCH_DIR}/$(printf '%04d' $_patch_num)-$(echo "$_f" | tr '/' '-').patch"
+        _patch_file="${_STAGING}/$(printf '%04d' $_patch_num)-$(echo "$_f" | tr '/' '-').patch"
 
         # 从 WORK 目录执行 diff，路径为 orig/_f 和 mod/_f
         ( cd "$WORK" && diff -u "orig/$_f" "mod/$_f" ) > "$_patch_file" 2>/dev/null || true
@@ -516,17 +544,43 @@ auto_mode() {
 
     rm -rf "$WORK"
 
-    # 统计实际生成的补丁数
-    _generated=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | wc -l | tr -d ' ')
+    # ---- Step 5.5: 原子替换（有新补丁才替换，无差异则保留旧补丁）----
+    _generated=$(ls "$_STAGING"/*.patch 2>/dev/null | wc -l | tr -d ' ')
+    _generated_size=0
+    for _pf in "$_STAGING"/*.patch; do
+        [ -f "$_pf" ] || continue
+        _ps=$(wc -c < "$_pf" | tr -d ' ')
+        _generated_size=$((_generated_size + _ps))
+    done
+
+    if [ "$_generated" -gt 0 ] && [ "$_generated_size" -ge 10 ]; then
+        # 新补丁有效 → 备份旧补丁后替换
+        if ls "$PATCH_DIR"/*.patch >/dev/null 2>&1; then
+            _backup="${PATCH_DIR}/.patch-backup-$(date +%Y%m%d%H%M%S)"
+            mkdir -p "$_backup"
+            cp "$PATCH_DIR"/*.patch "$_backup/" 2>/dev/null || true
+            echo "  📦 已备份 ${_generated} 个旧补丁到 $(basename "$_backup")/"
+        fi
+        rm -f "$PATCH_DIR"/*.patch
+        mv "$_STAGING"/*.patch "$PATCH_DIR/" 2>/dev/null
+        echo "  ✅ 补丁已更新: ${_generated} 个文件"
+    else
+        # 无新补丁（源码无差异）→ 保留旧补丁不变！
+        rm -rf "$_STAGING"
+        _existing=$(ls "$PATCH_DIR"/*.patch 2>/dev/null | wc -l | tr -d ' ')
+        echo "  ⚠️  无差异（源码未修改或修改已还原），保留现有 ${_existing} 个补丁"
+        _generated="$_existing"
+    fi
+    rm -rf "$_STAGING"
 
     # ---- Step 6: 输出 hash 绑定信息 ----
-    ORIG_HASH=$(cd "$_norm_orig" && find . -type f | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
+    ORIG_HASH=$(cd "$_norm_orig" && find . -type f ! -name '.tarball-sha256' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
     MOD_HASH=$(cd "$_norm_mod" && find . -type f ! -path './build/*' ! -path './.git/*' ! -name '*.o' ! -name '*.lo' | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -d' ' -f1)
 
     echo ""
     echo "  [6/7] Hash 绑定:"
-    echo "     原始源码 hash: ${ORIG_HASH:0:16}..."
-    echo "     修改源码 hash: ${MOD_HASH:0:16}..."
+    echo "     基准目录 (.orig/) hash: ${ORIG_HASH:0:16}..."
+    echo "     工作副本 (.work/) hash: ${MOD_HASH:0:16}..."
     echo "     生成补丁数:   ${_generated}"
 
     # ---- Step 7: 更新 manifest.yaml（如果存在）----
@@ -538,23 +592,23 @@ auto_mode() {
             cat >> "$MANIFEST_FILE" <<EOF
 
 patch_generation:
-  method: "refresh-patch.sh --auto"
-  source_tarball: "$(basename "$ORIG_TARBALL")"
+  method: "refresh-patch.sh --auto (dual-track)"
+  source_orig_dir: "$(basename "$_norm_orig")"
+  source_work_dir: "$(basename "$_norm_mod")"
   source_orig_hash: "${ORIG_HASH}"
-  source_modified_hash: "${MOD_HASH}"
+  source_work_hash: "${MOD_HASH}"
   generated_at: "$(date '+%Y-%m-%dT%H:%M:%S%z')"
-  tool_version: "v2.2-auto"
+  tool_version: "v3.0-dual-track"
   patches_count: ${_generated}
 EOF
             echo "     ✅ 已写入 patch_generation 字段"
         else
             # 更新已有字段
             _tmp="${MANIFEST_FILE}.tmp"
-            sed "s|^source_modified_hash:.*|source_modified_hash: \"${MOD_HASH}\"|" \
+            sed "s|^source_modified_hash:.*|source_work_hash: \"${MOD_HASH}\"|" \
                 | sed "s|^patches_count:.*|patches_count: ${_generated}|" \
                 | sed "s|^generated_at:.*|generated_at: \"$(date '+%Y-%m-%dT%H:%M:%S%z')\"|" \
                 > "$_tmp" 2>/dev/null
-            # 如果 sed 链失败，跳过更新
             if [ $? -eq 0 ] && [ -s "$_tmp" ]; then
                 mv "$_tmp" "$MANIFEST_FILE"
                 echo "     ✅ 已更新 patch_generation 字段"
@@ -567,12 +621,11 @@ EOF
         echo "  [7/7] ⚠️  manifest.yaml 不存在，跳过 hash 绑定写入"
     fi
 
-    # 清理临时目录
-    rm -rf "${TMPDIR}/.patch-orig-${_software}-${_version}"
-
-    echo ""
+    # 清理临时目录（不再需要清理 .patch-orig-* 因为用的是 .orig/ 基准）
     echo "═════════════════════════════"
-    echo "✅ 补丁管线完成"
+    echo "✅ 补丁管线完成（双轨制）"
+    echo "  📂 基准: ${_norm_orig} (.orig/)"
+    echo "  📂 工作: ${_norm_mod} (.work/)"
     echo "  📂 输出: ${PATCH_DIR}/"
     echo "  📊 补丁: ${_generated} 个文件"
     echo "═════════════════════════════"

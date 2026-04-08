@@ -37,15 +37,17 @@ TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
 #   ④ 功能回归测试（--version + 核心功能）
 #   ⑤ 通过后才进入 finish-build.sh
 
-# ═══ Step 3: 收尾（全自动，~10秒）═══
+# ═══ Step 3: 收尾（全自动，~30秒）═══
 ./scripts/finish-build.sh <软件名> <版本> success|partial|failed
-#   完成: 补丁生成+归档+总结报告
+#   完成: 补丁生成→归档收尾→**质量门禁(verify)**→归档校验→总结报告
+#   ⚠️ verify-build.sh 在此步骤内自动调用，无需单独执行
 
-# ═══ Step 4: 质量门禁（全自动，~15秒）═══  ← 编译成功 != 产物可用！
+# ═══ Step 4: 质量门禁复查（可选，~15秒）═══  ← 仅在需要单独复查时使用
 ./scripts/verify-build.sh <软件名> <版本>
 #   4 道门禁: 二进制完整性 → 功能可用性 → 可移植性 → 档案完整性
 #   输出: reports/quality-report.md + PASS/FAIL 判定
 #   FAIL 则不能标记为 success，只能 partial 或 failed
+#   ⚠️ 正常流程已在 Step 3 自动执行，此步骤仅用于补充验证
 
 # ═══ Step 5: 预编译包制作（⭐ verify PASS 后必须执行）═══
 #   按 packaging.md 10 步流程：清理→链接替换→依赖收集→RPATH→Strip→签名→权限→install.sh→tar.gz
@@ -89,7 +91,7 @@ TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
 | R4 | **危险库必须静态编译** | ncurses `--without-shared` | 编译共享库导致系统崩溃 |
 | R5 | **软链接必须验证可执行 + 禁止 ln -sf** | `verify-symlinks.sh` + `rm -f && ln -s` | 只检查 `-L` 存在性 / `ln -sf` 覆盖 |
 | R6 | **禁止修改生成文件** | 只改 configure.ac/CMakeLists.txt/*.c/*.h（源码层） | sed 改 configure/Makefile/Makefile.in（不可复现） |
-| R7 | **安全弹窗必须先触发再测试** | make install 后 `find $PREFIX/bin -exec {} --version \;` 扫一遍 | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
+| R7 | **安全弹窗必须先触发再测试** | make install 后 `find $DEFAULT_PREFIX/bin -exec {} --version \;` 扫一遍 | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
 | R8 | **源码修改"四不"准则** | `#ifdef __OHOS__` 守卫 / 保持上游风格 / 追加平台分支 | 删跨平台代码 / 硬编码路径 / 改原逻辑流 / 偏离代码风格 |
 | R9 | **质量门禁 FAIL 禁止标 success** | verify-build.sh 非零 → partial 或 failed | 产物有问题仍标记成功分发 |
 | R10 | **临时文件必须用 $TMPDIR** | 所有 tmp 文件操作使用 `$TMPDIR` 或 `$HOME/tmp` | 硬编码 `/tmp`（鸿蒙 /tmp 只读，见 E002） |
@@ -222,7 +224,19 @@ BUILD_SRC_DIR      # 源码目录绝对路径
 BUILD_ARCHIVE_DIR   # 归档目录绝对路径
 BUILD_URL          # 下载 URL
 BUILD_HISTORY_FOUND # 是否有历史档案 (true/false)
+DEFAULT_PREFIX     # ⭐ 唯一权威的安装前缀路径（所有脚本统一使用）
 ```
+
+### 变量命名规范（⭐ C01 统一）
+
+> **消除歧义：整个管线中，安装前缀只用 `$DEFAULT_PREFIX` 一个变量名。**
+
+| 变量名 | 含义 | 谁设置 | 谁使用 | 作用域 |
+|--------|------|--------|--------|--------|
+| **`DEFAULT_PREFIX`** | **唯一权威**的安装前缀路径 | `init-build.sh` export + 写入 .build-context | **所有脚本**（verify-build.sh, package.sh, AI Phase 3） | 全局 |
+| `PKGDIR` | 打包工作目录（package.sh 内部临时目录） | `package.sh` 设置 | 仅 `package.sh` 内部 | 局部 |
+
+**历史遗留**：旧文档/代码中可能出现 `$PREFIX`，等同于 `$DEFAULT_PREFIX`（兼容别名），新代码统一使用 `$DEFAULT_PREFIX`。
 
 ### registry 自动增长机制
 
@@ -396,6 +410,237 @@ find $HOME/usr/local/bin -type f -exec {} --version \; 2>/dev/null || true
 - 错误信息 + 根因 + 解决方案
 - 源码修改清单（表格：文件 | 原因 | 方式 | 补丁状态）
 
+### 2.8 Phase 2.5: 独立目录安装验证（⭐ 必须执行）
+
+> **目的**：验证编译产物可以在干净的独立目录中正确安装和运行，排除对构建环境的隐性依赖。
+> **时机**：Phase 2 (`make install` 成功) 之后、`finish-build.sh` 之前。
+> **重要性**：这是保证"可复现性"的核心步骤——没有它，你无法确认补丁集 + tarball 能在另一台机器上产出相同结果。
+
+#### 前置条件
+
+| 条件 | 检查方式 |
+|------|---------|
+| Phase 2 编译成功 | `make install` 已执行且 `$DEFAULT_PREFIX` 下有文件 |
+| 原始 tarball 存在 | `.build-context-*` 中 `BUILD_URL` 可用或 `archives/` 有源码 |
+| 补丁集完整 | `archives/.../patches/000*.patch` 存在 |
+| 磁盘空间足够 | 至少 200MB 可用空间（用于独立编译） |
+
+#### Step 2.5.1: 创建独立测试目录
+
+```bash
+# 使用 $TMPDIR 遵守 R10（禁止硬编码 /tmp）
+TEST_SRC="${TMPDIR:-$HOME/tmp}/builds/${SOFTWARE}-${VERSION}-test"
+TEST_PREFIX="${TMPDIR:-$HOME/tmp}/test-install-${SOFTWARE}-${VERSION}"
+
+# 清理旧残留（防止上次中断的脏数据影响结果）
+rm -rf "$TEST_SRC" "$TEST_PREFIX"
+mkdir -p "$TEST_SRC" "$TEST_PREFIX/bin" "$TEST_PREFIX/lib" "$TEST_PREFIX/include"
+
+echo "[2.5.1] 独立测试目录已创建:"
+echo "  TEST_SRC=$TEST_SRC"
+echo "  TEST_PREFIX=$TEST_PREFIX"
+```
+
+#### Step 2.5.2: 解压干净源码 + 应用补丁
+
+```bash
+echo "[2.5.2] 解压原始 tarball..."
+
+# 从 manifest.yaml 获取源码 URL（最可靠）
+TAR_URL=$(grep "^source_url:" "${BUILD_ARCHIVE_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' "')
+
+# 或从 build-context 获取
+if [ -z "$TAR_URL" ] && [ -f ".build-context-${SOFTWARE}-${VERSION}" ]; then
+    TAR_URL=$(grep "^BUILD_URL=" ".build-context-${SOFTWARE}-${VERSION}" | cut -d= -f2- | tr -d '"')
+fi
+
+if [ -n "$TAR_URL" ]; then
+    # 根据扩展名选择解压方式
+    case "$TAR_URL" in
+        *.tar.xz)  curl -fsSL "$TAR_URL" 2>/dev/null | tar xJf - -C "$TEST_SRC" ;;
+        *.tar.gz|*.tgz) curl -fsSL "$TAR_URL" 2>/dev/null | tar xzf - -C "$TEST_SRC" ;;
+        *.tar.bz2) curl -fsSL "$TAR_URL" 2>/dev/null | tar xjf - -C "$TEST_SRC" ;;
+        *)         curl -fsSL "$TAR_URL" -o "${TEST_SRC}/dl.tar" 2>/dev/null && tar xf "${TEST_SRC}/dl.tar" -C "$TEST_SRC" ;;
+    esac
+    echo "  ✅ 解压完成"
+else
+    echo "  ⚠️ 无法获取 tarball URL，尝试复制现有源码..."
+    cp -a "$BUILD_SRC_DIR" "${TEST_SRC}/$(basename "$BUILD_SRC_DIR")"
+fi
+
+# 找到解压出的顶层目录
+EXTRACTED_DIR=$(ls -1d "$TEST_SRC"/*/ 2>/dev/null | head -1 | sed 's:/$::')
+if [ -z "$EXTRACTED_DIR" ]; then
+    echo "[FAIL] 解压失败：未找到源码目录"
+    exit 1
+fi
+echo "  源码目录: $EXTRACTED_DIR"
+
+# 应用所有补丁
+echo "[2.5.2] 应用补丁集..."
+PATCH_COUNT=0
+for p in "${BUILD_ARCHIVE_DIR}"/patches/000*.patch; do
+    [ -f "$p" ] || continue
+    if patch -p1 --dry-run -i "$p" -d "$EXTRACTED_DIR" >/dev/null 2>&1; then
+        patch -p1 < "$p" -d "$EXTRACTED_DIR" >/dev/null 2>&1
+        PATCH_COUNT=$((PATCH_COUNT + 1))
+    else
+        echo "  ⚠️ 补丁 $(basename $p) dry-run 失败，跳过"
+    fi
+done
+echo "  ✅ 已应用 ${PATCH_COUNT} 个补丁"
+```
+
+#### Step 2.5.3: 独立目录 configure + make + make install
+
+```bash
+echo "[2.5.3] 独立目录编译安装..."
+
+cd "$EXTRACTED_DIR"
+
+# 使用与 Phase 2 相同的 configure 参数（保持一致性）
+# 注意 prefix 使用独立的 TEST_PREFIX
+./configure --prefix="$TEST_PREFIX" 2>&1 | tail -3
+CONFIGURE_RC=$?
+
+if [ $CONFIGURE_RC -ne 0 ]; then
+    echo "[FAIL] 独立目录 configure 失败 (rc=${CONFIGURE_RC})"
+    echo "  → 这意味着产物不可在其他环境复现！需要排查原因"
+    exit 1
+fi
+
+make -j1 2>&1 | tail -5
+MAKE_RC=$?
+
+if [ $MAKE_RC -ne 0 ]; then
+    echo "[FAIL] 独立目录 make 失败 (rc=${MAKE_RC})"
+    exit 1
+fi
+
+make install 2>&1 | tail -3
+INSTALL_RC=$?
+
+if [ $INSTALL_RC -ne 0 ]; then
+    echo "[FAIL] 独立目录 make install 失败 (rc=${INSTALL_RC})"
+    exit 1
+fi
+
+echo "  ✅ 独立编译安装成功"
+```
+
+> **⚠️ 如果 Makefile 不支持 DESTDIR**（常见于简单 Makefile 项目）：
+> ```bash
+> # fallback 方案：直接从已安装目录复制
+> cp -a "$DEFAULT_PREFIX/bin/"* "$TEST_PREFIX/bin/" 2>/dev/null || true
+> cp -a "$DEFAULT_PREFIX/lib/"* "$TEST_PREFIX/lib/" 2>/dev/null || true
+> cp -a "$DEFAULT_PREFIX/include/"* "$TEST_PREFIX/include/" 2>/dev/null || true
+> ```
+
+#### Step 2.5.4: 文件完整性验证 + 运行时功能回归测试
+
+```bash
+echo "[2.5.4] 文件完整性检查..."
+
+# 统计安装产物
+BIN_COUNT=$(find "$TEST_PREFIX/bin" -type f 2>/dev/null | wc -l | tr -d ' ')
+LIB_COUNT=$(find "$TEST_PREFIX/lib" -type f 2>/dev/null | wc -l | tr -d ' ')
+INC_COUNT=$(find "$TEST_PREFIX/include" -type f 2>/dev/null | wc -l | tr -d ' ')
+
+echo "  二进制文件: ${BIN_COUNT}"
+echo "  库文件:     ${LIB_COUNT}"
+echo "  头文件:     ${INC_COUNT}"
+
+if [ "$BIN_COUNT" -eq 0 ] && [ "$LIB_COUNT" -eq 0 ]; then
+    echo "[FAIL] 独立安装目录为空！"
+    exit 1
+fi
+
+echo ""
+echo "[2.5.4] 运行时功能回归测试..."
+
+# 设置独立环境变量（关键：使用 TEST_PREFIX 而非 DEFAULT_PREFIX）
+export LD_LIBRARY_PATH="$TEST_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export PATH="$TEST_PREFIX/bin:${PATH}"
+
+PASS_COUNT=0; FAIL_COUNT=0; WARN_COUNT=0
+
+# 测试每个二进制的 --version（与 G2 类似但更轻量）
+for cmd in "$TEST_PREFIX/bin"/*; do
+    [ -x "$cmd" ] || continue
+    name=$(basename "$cmd")
+    
+    # 跳过脚本类 wrapper
+    head -1 "$cmd" 2>/dev/null | grep -q "^#!" && continue
+    
+    output=$("$cmd" --version 2>&1 | head -1)
+    if [ -n "$output" ]; then
+        echo "  ✅ $name: $output"
+        PASS_COUNT=$((PASS_COUNT + 1))
+    else
+        # 尝试 --help 作为 fallback
+        output=$("$cmd" --help 2>&1 | head -1)
+        if [ -n "$output" ]; then
+            echo "  ⚠️ $name: 无 --version，--help 有输出"
+            WARN_COUNT=$((WARN_COUNT + 1))
+        else
+            echo "  ❌ $name: 无可用输出"
+            FAIL_COUNT=$((FAIL_COUNT + 1))
+        fi
+    fi
+done
+
+echo ""
+echo "  回归测试结果: ${PASS_COUNT} 通过 / ${FAIL_COUNT} 失败 / ${WARN_COUNT} 警告"
+
+# 恢复环境变量（避免污染后续步骤）
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$TEST_PREFIX/lib:}"
+export PATH="${PATH#$TEST_PREFIX/bin:}"
+```
+
+#### Step 2.5.5: 清理或保留策略
+
+```bash
+echo "[2.5.5] 清理独立测试目录..."
+
+# 默认行为：清理以节省空间（R10: 使用 $TMPDIR）
+if [ "${KEEP_TEST_DIR:-0}" != "1" ]; then
+    rm -rf "$TEST_SRC" "$TEST_PREFIX"
+    echo "  ✅ 已清理独立测试目录（节省空间）"
+    echo "  💡 如需保留用于调试: KEEP_TEST_DIR=1 ./scripts/prep-test.sh"
+else
+    echo "  📁 保留测试目录（KEEP_TEST_DIR=1）:"
+    echo "     TEST_SRC=$TEST_SRC"
+    echo "     TEST_PREFIX=$TEST_PREFIX"
+fi
+
+echo ""
+echo "════════════════════════════════════════"
+echo "  Phase 2.5 结果: PASS → 可进入 finish-build.sh"
+echo "════════════════════════════════════════"
+```
+
+#### Phase 2.5 判定标准
+
+| 结果 | 条件 | 后续操作 |
+|------|------|---------|
+| **Phase 2.5 判定: PASS** | configure + make + install 全部成功 + 回归测试无失败 | 进入 Step 3 `finish-build.sh success` |
+| **Phase 2.5 判定: PARTIAL** | 安装成功但部分功能测试失败 | → `finish-build.sh partial`，分析失败原因→平台限制则记录并继续；真正的 bug 则修复 |
+| **Phase 2.5 判定: FAIL** | configure/make/install 任一步骤失败 | → `finish-build.sh failed`，**必须修复**——意味着产物不可复现 |
+
+#### 与 prep-test.sh 的关系
+
+`prep-test.sh` 负责 Phase 2.5 的**前置准备**（弹窗触发 + 环境设置），而 Phase 2.5 本身的**完整流程**（解压→编译→安装→测试）由 AI 在本节指导下手动执行。两者关系：
+
+```
+make install (Phase 2 完成)
+    │
+    ├── ./scripts/prep-test.sh              ← 触发弹窗 + 设置 MAKEFLAGS=-j1
+    │
+    └── Phase 2.5 本流程 (§2.8)             ← AI 手动执行 5 步独立验证
+        │
+        └── 通过 → ./scripts/finish-build.sh  ← 自动收尾
+```
+
 ## Step 3: finish-build.sh — Phase 4 全自动
 
 > **编译成功后一条命令完成所有收尾工作。**
@@ -404,28 +649,52 @@ find $HOME/usr/local/bin -type f -exec {} --version \; 2>/dev/null || true
 ./scripts/finish-build.sh <软件名> <版本> success|partial|failed
 ```
 
-### 内部执行的 3 个步骤
+### 内部执行的 5 个步骤
 
 | 步骤 | 脚本 | 内容 | 失败处理 |
 |------|------|------|---------|
-| [1/3] | refresh-patch.sh --auto | 从原始 tarball diff → per-file 补丁 → 格式校验 → dry-run → hash 绑定 → 写入 manifest | 失败跳过，继续归档 |
-| [2/3] | close-archive.sh | 更新 status → 关闭 PROGRESS.md → 检查知识条目 | 失败则退出(2) |
-| [3/3] | gen_summary.py | 重新生成 SUMMARY.md | 失败非致命 |
+| [1/5] | refresh-patch.sh --auto | 从原始 tarball diff → per-file 补丁 → 格式校验 → dry-run → hash 绑定 → 写入 manifest | 失败跳过，继续归档 |
+| [2/5] | close-archive.sh | 更新 status → 关闭 PROGRESS.md → 检查知识条目 | 失败则退出(2) |
+| [3/5] | **verify-build.sh** | **质量门禁 G1-G4（二进制/功能/可移植/档案）** | **非阻塞：失败降级状态，不中断管线** |
+| [4/5] | finalize-archive.sh | 清理+校验+一致性检查+RELEASENOTE | 失败非致命 |
+| [5/5] | gen_summary.py | 重新生成 SUMMARY.md | 失败非致命 |
 
 ### 状态选择指南
 
-| 状态 | 使用场景 |
-|------|---------|
-| `success` | 编译成功 + 测试通过 + 补丁完整 |
-| `partial` | 编译成功但部分功能不可用（如 coreutils 只有部分命令可用） |
-| `failed` | 编译失败且无法绕过（记录失败原因供后续参考） |
+> **统一状态值体系**：整个项目仅使用以下三个状态值，所有脚本和文档必须一致。
+
+| 状态 | 含义 | 使用场景 |
+|------|------|---------|
+| `success` | 编译+测试+验证全通过 | finish-build.sh, close-archive.sh, PROGRESS.md |
+| `partial` | 编译成功但部分测试/验证失败 | 同上（标注限制后仍可分发） |
+| `failed` | 编译失败且无法绕过 | init-build.sh --resume 判断，跳过打包 |
+
+**已废弃的状态值**（历史遗留，不得在新代码中使用）：
+- ~~`pass`/``fail``~~ → 仅用于 G1-G4 单项门禁判定（PASS/FAIL-Gx），不作为整体状态
+- ~~`completed`/`closed`/`tested`~~ → 幽灵状态，已从所有脚本清除
+
+**状态转换规则**（finish-build.sh 内部自动执行）：
+```
+输入状态 ──[verify 通过]──→ 输出状态
+success  ─────────────────→ success （不变）
+partial  ─────────────────→ partial （不变）
+failed   ─────────────────→ partial （升级：验证通过至少是 partial）
+
+输入状态 ──[verify 失败]──→ 输出状态
+success  ─────────────────→ partial  （降级）
+partial  ─────────────────→ failed  （降级）
+failed   ─────────────────→ failed  （不变）
+```
 
 ## Step 4: verify-build.sh — 质量门禁（必须）
 
 > **编译成功 ≠ 产物可用。** 这是交付前的最后一道关卡。
+> **⚠️ 此步骤已在 finish-build.sh Step 3 中自动调用，通常无需手动执行。**
+> 手动执行适用于：单独复查、finish 之后补充验证、调试门禁逻辑。
 
 ```bash
 ./scripts/verify-build.sh <软件名> <版本>
+# 或由 finish-build.sh Step 3 自动调用（传入 --archive-dir）
 ```
 
 ### 4 道门禁
@@ -579,13 +848,13 @@ rm -rf archives/<首字母>/<软件名>/<版本>/packaging/*
 
 ## 3.1 P0 参数最少化原则
 
-**目标命令**：`./configure --prefix=$PREFIX && make && make install`（零额外参数）
+**目标命令**：`./configure --prefix=$DEFAULT_PREFIX && make && make install`（零额外参数）
 
 超出 `--prefix` 和软件自身选项的参数 = 技术债务。
 
 | 参数类型 | 是否应该存在 | 消除方法 |
 |---------|-------------|---------|
-| `--prefix=$PREFIX` | ✅ 必须 | — |
+| `--prefix=$DEFAULT_PREFIX` | ✅ 必须 | — |
 | 软件自身选项（如 `--with-internal-glib`） | ✅ 正常 | — |
 | 平台约束（如 `--without-shared`） | ⚠️ 记录为债务 | 见 dependencies.md |
 | `--build/--host/--target` | ❌ 应消除 | 完善 config.guess/sub |
@@ -675,24 +944,26 @@ HMDFS 文件系统限制软链接：
                     ▼ Step 3: finish
               ┌─────────────────────┐
               │  finish-build.sh    │
-              └──┬──────────┬───────┘
-                 ▼          ▼
-         ┌──────────┐ ┌──────────┐
-         │refresh-  │ │close-    │
-         │patch.sh  │ │archive.sh│
-         │ --auto   │ │          │
-         └────┬─────┘ └────┬─────┘
-              ▼           ▼
-         ┌──────────┐ ┌──────────┐
-         │gen_summary│ │manifest  │
-         │   .py    │ │ .yaml    │
-         │          │ │ (自动更新)│
-         └──────────┘ └──────────┘
+              └──┬──────────┬───────┬┘
+                 │          │       │
+         ┌──────▼───┐ ┌───▼───┐ ┌──▼──────┐
+         │refresh-  │ │close-  │ │verify-  │ ← 新增: 自动调用
+         │patch.sh  │ │archive│ │build.sh │   质量门禁 G1-G4
+         │ --auto   │ │  .sh   │ │         │
+         └────┬─────┘ └───┬───┘ └────┬────┘
+              │           │          │
+              ▼           ▼          ▼
+         (补丁完成)   (归档关闭)  (门禁报告)
+                                │
+                    ┌───────────▼───────────┐
+                    │ finalize-archive.sh    │  ← Step 4 (原 Step 3)
+                    │ gen_summary.py         │  ← Step 5 (原 Step 4)
+                    └────────────────────────┘
 
                            │
-                    ▼ Step 4: 质量门禁（必须）
+                    ▼ Step 4: 质量门禁复查（可选）
               ┌─────────────────────┐
-              │  verify-build.sh     │
+              │  verify-build.sh     │  ← 仅单独复查时手动执行
               │  G1:二进制 G2:功能    │
               │  G3:可移植 G4:档案    │
               └──────────┬──────────┘
@@ -708,7 +979,7 @@ HMDFS 文件系统限制软链接：
 | 脚本 | 用途 | 调用时机 | 层级 |
 |------|------|---------|------|
 | `init-build.sh` | 编译初始化（下载/解压/检索/骨架/环境/上下文） | Step 1 | Layer2 |
-| `finish-build.sh` | 编译收尾（补丁+归档+总结） | Step 3 | Layer1 |
+| `finish-build.sh` | **编译收尾**（补丁+归档+**质量门禁**+校验+总结） | Step 3 | Layer1 |
 | `refresh-patch.sh --auto` | 补丁管线（diff/拆分/校验/验证/hash） | finish 内部 | Layer1 |
 | `search-download-url.sh` | URL 搜索（5 种策略） | init 内部 fallback | Layer3 |
 | `init-archive.sh` | 档架骨架创建 | init 内部 | Layer1 |
@@ -717,7 +988,7 @@ HMDFS 文件系统限制软链接：
 | `verify-symlinks.sh` | 软链接验证 | Step 2 安装后 | Layer1 |
 | `sign-elf.sh` | ELF 签名四步流程 | 打包时 | Layer1 |
 | `check-knowledge-gap.sh` | 知识提取遗漏检查 | finish 后可选 | Layer1 |
-| `verify-build.sh` | **产物质量门禁**：4道检测(二进制/功能/可移植/档案) | **Step 4（必须）** | Layer1 |
+| `verify-build.sh` | **产物质量门禁**：4道检测(二进制/功能/可移植/档案) | **finish-build.sh Step 3（自动）/ Step 4（复查）** | Layer1 |
 | `finalize-archive.sh` | **归档收口**：清理+校验+一致性检查 | **Step 5.5（必须）** | Layer1 |
 | `close-archive.sh` | 归档收尾 | finish 内部 | Layer1 |
 | `software-registry.yaml` | 软件元数据缓存（自动增长） | init 读取/写入 | 数据 |
@@ -803,6 +1074,8 @@ archives/{首字母}/{软件名}/                    ← 软件级（跨版本�
 | **skill-feedback.md** | F编号列表(流程缺失/矛盾/脚本问题) + 严重度 + 建议 | §6.6 格式 |
 
 #### PROGRESS.md 最小模板
+
+> 📌 **权威模板源**: `templates/PROGRESS.md`。init-archive.sh 和此处定义均引用同一文件。修改模板时只需更新该文件即可全局生效。
 
 ```markdown
 # {软件名} {版本} — 编译进度
@@ -946,6 +1219,44 @@ archives/{首字母}/{软件名}/                    ← 软件级（跨版本�
 第四阶段: wget → rsync → jq → file → tar → dos2unix  (网络/文件)
 第五阶段: bash → htop → strace → patch   (高级工具)
 第六阶段: texinfo → help2man → libpipeline  (文档/辅助)
+第七阶段: man-db                          (文档系统)
+```
+
+> **注意**：使用 `init-build.sh` 时无需手动关注此顺序——单个软件的依赖在 registry 的 `known_issues` 中标注。批量编译时参考此顺序。
+
+## 6.6 流程自省（简化版）
+
+编译过程中发现 SKILL 自身问题时，记录到 `reports/skill-feedback.md`：
+
+```markdown
+### F{NNN}: {简短描述}
+- 类别: 流程缺失 / 矛盾 / 脚本问题 / 导航错误
+- 严重: 🔴🟡🟢
+- 场景: {在哪步发现的}
+- 建议: {怎么改}
+```
+
+Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
+
+---
+
+*SKILL.md v4.1 — 最后更新: 2026-04-08*
+*v4.1 更新：*
+*  - **#3 修复**: finish-build.sh 新增 Step 3 自动调用 verify-build.sh（质量门禁不再遗漏）*
+*  - **#7 修复**: 统一状态值体系为 success/partial/failed（清除 pass/fail/completed/closed/tested 幽灵状态）*
+*  - §1.3 决策树新增：编译后状态判定分支 + 质量门禁结果处理*
+*  - finish-build.sh 3 步 → 5 步（补丁→归档→**验证**→校验→总结）*
+*  - verify-build.sh 支持 --software/--version/--archive-dir 参数（可被 finish-build 调用）*
+*  - 新增状态转换规则表（verify 通过/失败时的自动升降级逻辑）*
+*v4.0 更新：*
+*  - 四步走 → 五步走（新增 Phase 2.5 独立目录安装验证 + Step 5 预编译包）*
+*  - 九条铁律 → 十条铁律（+R10: $TMPDIR 强制规则）*
+*  - 新增 §1.2 AI 执行风格规范（shell 脚本原则 / configure 耗时参考）*
+*  - 新增 §2.2.1 make check / make test 标准步骤*
+*  - 新增 §1.4/Step 5 预编译包三级触发条件*
+*  - §6.1 归档目录结构标准化（必填文件清单 + 命名统一 + README/PROGRESS 模板）*
+*设计原则：精准（五步走）| 可复现（独立测试保证）| 可分发（预编译包标准）| 可信赖（质量门禁 + 测试套件）*
+�档/辅助)
 第七阶段: man-db                          (文档系统)
 ```
 

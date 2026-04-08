@@ -1,12 +1,21 @@
 #!/bin/sh
-# verify-build.sh — 产物质量门禁（Step 4）
-# 用法: ./scripts/verify-build.sh <软件名> <版本>
+# ==============================================================================
+# [Layer 1] verify-build.sh - 产物质量门禁（四道全自动校验）
+# ==============================================================================
+# 层级: L1(全自动)
+# 决策点: 无（完全确定性门禁检测）
+# 入口: ./scripts/verify-build.sh <软件名> <版本>
+#       ./scripts/verify-build.sh --software <名> --version <ver> --archive-dir <dir>
+# 依赖: file, llvm-readelf, patchelf, find, patch
+# 调用者: finish-build.sh (Step 3), AI / 用户
+# ==============================================================================
+# verify-build.sh — 产物质量门禁（finish-build.sh Step 3 / 独立 Step 4）
+# 用法:
+#   ./scripts/verify-build.sh <软件名> <版本>
+#   ./scripts/verify-build.sh --software <名> --version <ver> --archive-dir <归档目录>
 #
 # 4 道门禁验证编译产物是否真正可用。
 # 编译成功 ≠ 产物可用。本脚本确保交付的是"可交给别人用的三方库"。
-#
-# Layer: Layer1（完全确定性，无 AI 决策点）
-# 触发条件: finish-build.sh success 之后，或手动执行
 
 set -e
 
@@ -17,10 +26,16 @@ show_help() {
     cat <<'HELPEOF'
 用法:
   ./scripts/verify-build.sh <软件名> <版本>
+  ./scripts/verify-build.sh --software <名> --version <ver> [--archive-dir <归档目录>]
 
 描述:
   产物质量门禁。4 道自动检测 + 输出质量报告。
-  在 finish-build.sh success 之后执行。
+  在 finish-build.sh Step 3 中自动调用，也可独立执行。
+
+参数:
+  <软件名>          软件名称（位置参数或 --software）
+  <版本>            版本号（位置参数或 --version）
+  --archive-dir     归档目录路径（可选，默认自动计算）
 
 门禁:
   G1: 二进制完整性（ELF 可执行 / ldd 无缺 / file 正确）
@@ -46,22 +61,73 @@ fi
 
 case "$1" in --help|-h) show_help ;; esac
 
-SOFTWARE="$1"
-VERSION="$2"
+# 解析参数（支持位置参数和可选标志）
+SOFTWARE="$2"
+VERSION=""
+ARCHIVE_DIR_OVERRIDE=""
+
+# 逐个解析参数
+_i=1
+while [ $_i -le $# ]; do
+    _arg="$(eval echo "\${$_i}")"
+    case "$_arg" in
+        --software)
+            _i=$((_i+1))
+            SOFTWARE="$(eval echo "\${$_i}")"
+            ;;
+        --version)
+            _i=$((_i+1))
+            VERSION="$(eval echo "\${$_i}")"
+            ;;
+        --archive-dir)
+            _i=$((_i+1))
+            ARCHIVE_DIR_OVERRIDE="$(eval echo "\${$_i}")"
+            ;;
+        -*)
+            # 跳过未知选项（兼容性）
+            ;;
+        *)
+            # 位置参数：第一个非选项是 software，第二个是 version
+            if [ -z "$SOFTWARE" ] || [ "$SOFTWARE" = "$_arg" ] && [ $_i -eq 1 ]; then
+                : # SOFTWARE 已从 $1 设置或保持默认
+            elif [ -z "$VERSION" ]; then
+                VERSION="$_arg"
+            fi
+            ;;
+    esac
+    _i=$((_i+1))
+done
+
+# 回退：如果 --version 未提供但位置参数有 $2，使用 $2
+if [ -z "$VERSION" ] && [ -n "$2" ]; then
+    VERSION="$2"
+fi
 
 echo "[CHECK] 产物质量门禁"
 echo "  软件: ${SOFTWARE} ${VERSION}"
 echo ""
 
 # ---- 找到安装目录和归档目录 ----
-PREFIX="${DEFAULT_PREFIX:-$HOME/usr/local}"
-if [ ! -d "$PREFIX/bin" ] && [ ! -d "$PREFIX/lib" ]; then
-    echo "[FAIL] 安装目录不存在: $PREFIX"
+# DEFAULT_PREFIX 是唯一权威的安装前缀变量（由 init-build.sh export 或环境变量传入）
+# fallback: 如果未设置则使用默认路径
+if [ -z "${DEFAULT_PREFIX:-}" ]; then
+    DEFAULT_PREFIX="$HOME/usr/local"
+fi
+
+if [ ! -d "$DEFAULT_PREFIX/bin" ] && [ ! -d "$DEFAULT_PREFIX/lib" ]; then
+    echo "[FAIL] 安装目录不存在: $DEFAULT_PREFIX"
     exit 1
 fi
 
 FIRST_LETTER="$(echo "$SOFTWARE" | cut -c1 | tr 'A-Z' 'a-z')"
-ARCHIVE_DIR="${PROJECT_DIR}/archives/${FIRST_LETTER}/${SOFTWARE}/${VERSION}"
+
+# 支持通过 --archive-dir 直接指定，或自动计算
+if [ -n "$ARCHIVE_DIR_OVERRIDE" ] && [ -d "$ARCHIVE_DIR_OVERRIDE" ]; then
+    ARCHIVE_DIR="$ARCHIVE_DIR_OVERRIDE"
+else
+    ARCHIVE_DIR="${PROJECT_DIR}/archives/${FIRST_LETTER}/${SOFTWARE}/${VERSION}"
+fi
+
 REPORT_DIR="${ARCHIVE_DIR}/reports"
 
 mkdir -p "$REPORT_DIR"
@@ -99,8 +165,11 @@ ELF_COUNT=0
 MISSING_DEPS=0
 BROKEN_ELFS=0
 
-# 收集所有 ELF 文件
-for elf in $(find "$PREFIX/bin" -type f 2>/dev/null); do
+# 收集所有 ELF 文件（使用临时文件避免 word-split 反模式）
+_tmp_g1_bin="${TMPDIR:-$HOME/tmp}/verify_find_g1_bin_$$.lst"
+find "$DEFAULT_PREFIX/bin" -type f > "$_tmp_g1_bin" 2>/dev/null || true
+while IFS= read -r elf; do
+    [ -f "$elf" ] || continue
     ELF_COUNT=$((ELF_COUNT + 1))
     
     # G1-1: file 命令识别
@@ -136,7 +205,7 @@ for elf in $(find "$PREFIX/bin" -type f 2>/dev/null); do
             echo "$NEEEDED" | while read -r line; do
                 lib=$(echo "$line" | sed 's/.*\[\(.*\)].*/\1/')
                 if [ -n "$lib" ]; then
-                    if find "$PREFIX/lib" -name "$lib*" 2>/dev/null | grep -q .; then
+                    if find "$DEFAULT_PREFIX/lib" -name "$lib*" 2>/dev/null | grep -q .; then
                         : # 依赖存在
                     else
                         echo "WARN:$(basename $elf): 缺少依赖 ${lib}" >> "$_DEP_TMP"
@@ -153,17 +222,22 @@ for elf in $(find "$PREFIX/bin" -type f 2>/dev/null); do
             fi
         fi
     fi
-done
+done < "$_tmp_g1_bin"
+rm -f "$_tmp_g1_bin"
 
-# 也检查 lib 目录下的共享库
-for lib in $(find "$PREFIX/lib" -name "*.so" -type f 2>/dev/null); do
+# 也检查 lib 目录下的共享库（使用临时文件避免 word-split 反模式）
+_tmp_g1_lib="${TMPDIR:-$HOME/tmp}/verify_find_g1_lib_$$.lst"
+find "$DEFAULT_PREFIX/lib" -name "*.so" -type f > "$_tmp_g1_lib" 2>/dev/null || true
+while IFS= read -r lib; do
+    [ -f "$lib" ] || continue
     ELF_COUNT=$((ELF_COUNT + 1))
     LIB_TYPE=$(file -b "$lib" 2>/dev/null || echo "unknown")
     case "$LIB_TYPE" in
         *ELF*) log_pass "lib/$(basename $lib): 共享库 OK" ;;
         *)    log_warn "lib/$(basename $lib): ${LIB_TYPE}" ;;
     esac
-done
+done < "$_tmp_g1_lib"
+rm -f "$_tmp_g1_lib"
 
 echo ""
 echo "  G1 结果: ${G1_PASS}/${G1_TOTAL} 通过, ${G1_FAIL} 失败, ${G1_WARN} 警告"
@@ -175,8 +249,14 @@ echo "         (共 ${ELF_COUNT} 个文件, ${MISSING_DEPS} 缺依赖, ${BROKEN_
 echo ""
 echo "[G2/4] 功能可用性..."
 
-# G2-1: --version 测试
-for bin in $(find "$PREFIX/bin" -type f -executable 2>/dev/null | head -10); do
+# G2-1: --version 测试（使用临时文件避免 word-split 反模式）
+_tmp_g2_bin="${TMPDIR:-$HOME/tmp}/verify_find_g2_bin_$$.lst"
+find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g2_bin" 2>/dev/null || true
+_head=0
+while IFS= read -r bin; do
+    [ -f "$bin" ] || continue
+    _head=$((_head + 1))
+    [ "$_head" -gt 10 ] && break
     BN=$(basename "$bin")
     # 跳过 wrapper 脚本
     head -1 "$bin" 2>/dev/null | grep -q "^#!" && continue
@@ -188,61 +268,65 @@ for bin in $(find "$PREFIX/bin" -type f -executable 2>/dev/null | head -10); do
     else
         g2_warn "${BN}: --version 失败 (exit=$RC) — 可能需要弹窗确认或该命令不支持 --version"
     fi
-done
+done < "$_tmp_g2_bin"
+rm -f "$_tmp_g2_bin"
 
-# G2-2: 核心功能测试（按软件名匹配）
-case "$SOFTWARE" in
-    sed)
-        TEST_RESULT=$(echo "hello world" | "$PREFIX/bin/sed" 's/world/harmonyos/' 2>&1) && RC=$? || RC=$?
-        if [ "$TEST_RESULT" = "hello harmonyos" ]; then
-            g2_pass "sed: 替换测试通过 (output: ${TEST_RESULT})"
+# G2-2: 核心功能测试（从外部配置加载）
+G2_CONFIG="${PROJECT_DIR}/config/g2-tests.conf"
+
+if [ -f "$G2_CONFIG" ]; then
+    # 加载配置并逐条执行测试（仅匹配当前 SOFTWARE 的条目）
+    _g2_config_matched=0
+    while IFS= read -r line; do
+        # 跳过注释和空行
+        case "$line" in \#*|"") continue ;; esac
+
+        # 解析配置行（TAB 分隔格式: TEST_NAME=...<TAB>TEST_CMD=...<TAB>TEST_EXPECT=...）
+        _test_name=$(echo "$line" | cut -f1 | sed 's/TEST_NAME=//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        _test_cmd=$(echo "$line" | cut -f2 | sed 's/^TEST_CMD=//')
+        _test_expect=$(echo "$line" | cut -f3 | sed 's/^TEST_EXPECT=//')
+
+        [ -z "$_test_name" ] && continue
+
+        # 仅执行与当前 SOFTWARE 匹配的测试（或通用测试）
+        if [ "$_test_name" != "$SOFTWARE" ]; then
+            continue
+        fi
+        _g2_config_matched=$((_g2_config_matched + 1))
+
+        # 处理特殊标记
+        case "$_test_cmd" in
+            "@SKIP") g2_pass "G2 [SKIP] $_test_name (配置跳过)" ; continue ;;
+        esac
+
+        # 执行测试命令并捕获输出
+        _output=$(eval "$_test_cmd" 2>&1) && _rc=$? || _rc=$?
+
+        # 根据期望值判定结果
+        if echo "$_output" | grep -qE "$_test_expect"; then
+            g2_pass "${_test_name}: 功能测试通过 → $(echo "$_output" | head -1)"
         else
-            g2_fail "sed: 替换测试失败 (rc=${RC}, output: ${TEST_RESULT})"
+            g2_fail "${_test_name}: 功能测试失败 (rc=${_rc}, output: ${_output:-无输出}, expect: ${_test_expect})"
         fi
-        ;;
-    coreutils)
-        if [ -x "$PREFIX/bin/ls" ]; then
-            LS_OUT=$("$PREFIX/bin/ls" /tmp 2>&1 | head -3) && RC=$? || RC=$?
-            if [ $RC -eq 0 ] && [ -n "$LS_OUT" ]; then
-                g2_pass "ls: 目录列表正常"
-            else
-                g2_fail "ls: 目录列表失败 (rc=${RC})"
-            fi
-        fi
-        if [ -x "$PREFIX/bin/cat" ]; then
-            CAT_TEST=$("$PREFIX/bin/cat" /etc/os-release 2>/dev/null | head -1) && RC=$? || RC=$?
-            if [ $RC -eq 0 ] && [ -n "$CAT_TEST" ]; then
-                g2_pass "cat: 文件读取正常"
-            else
-                g2_fail "cat: 文件读取失败 (rc=${RC})"
-            fi
-        fi
-        ;;
-    gawk)
-        AWK_TEST=$(echo "1 2 3" | "$PREFIX/bin/gawk" '{print $1+$2+$3}' 2>&1) && RC=$? || RC=$?
-        if [ "$AWK_TEST" = "6" ]; then
-            g2_pass "gawk: 计算测试通过 (=6)"
-        else
-            g2_fail "gawk: 计算测试失败 (rc=${RC}, output=${AWK_TEST})"
-        fi
-        ;;
-    pkg-config)
-        PC_OUT=$("$PREFIX/bin/pkg-config" --version 2>&1) && RC=$? || RC=$?
-        if [ $RC -eq 0 ] && [ -n "$PC_OUT" ]; then
-            g2_pass "pkg-config: --version → ${PC_OUT}"
-        else
-            g2_fail "pkg-config: --version 失败 (rc=${RC})"
-        fi
-        ;;
-    *)
-        # 通用：至少测了 --version 就算过
+    done < "$G2_CONFIG"
+
+    # 如果配置中没有匹配当前 SOFTWARE 的条目，走默认逻辑
+    if [ "$_g2_config_matched" -eq 0 ]; then
         if [ $G2_PASS -gt 0 ]; then
-            g2_pass "通用功能测试: --version 已覆盖"
+            g2_pass "通用功能测试 (${SOFTWARE}): 配置中无专属条目，--version 已覆盖"
         else
-            g2_warn "通用功能测试: 无可执行的二进制用于测试"
+            g2_warn "通用功能测试 (${SOFTWARE}): 无可执行的二进制用于测试"
         fi
-        ;;
-esac
+    fi
+else
+    g2_warn "G2 测试配置文件不存在 ($G2_CONFIG)，使用默认检测"
+    # fallback: 通用 --version 已在 G2-1 中完成，此处仅做兜底
+    if [ $G2_PASS -gt 0 ]; then
+        g2_pass "通用功能测试: --version 已覆盖（配置文件缺失，使用 fallback）"
+    else
+        g2_warn "通用功能测试: 无可执行的二进制用于测试（配置文件缺失）"
+    fi
+fi
 
 echo ""
 echo "  G2 结果: ${G2_PASS}/${G2_TOTAL} 通过, ${G2_FAIL} 失败, ${G2_WARN} 警告"
@@ -253,10 +337,13 @@ echo "  G2 结果: ${G2_PASS}/${G2_TOTAL} 通过, ${G2_FAIL} 失败, ${G2_WARN} 
 echo ""
 echo "[G3/4] 可移植性..."
 
-# G3-1: RPATH 检查
+# G3-1: RPATH 检查（使用临时文件避免 word-split 反模式）
 RPATH_OK=0; RPATH_BAD=0
 if command -v patchelf >/dev/null 2>&1; then
-    for elf in $(find "$PREFIX/bin" -type f -executable 2>/dev/null); do
+    _tmp_g3_rpath="${TMPDIR:-$HOME/tmp}/verify_find_g3_rpath_$$.lst"
+    find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g3_rpath" 2>/dev/null || true
+    while IFS= read -r elf; do
+        [ -f "$elf" ] || continue
         RPATH=$(patchelf --print-rpath "$elf" 2>/dev/null || true)
         if echo "$RPATH" | grep -q '\$ORIGIN'; then
             RPATH_OK=$((RPATH_OK + 1))
@@ -267,16 +354,20 @@ if command -v patchelf >/dev/null 2>&1; then
             g3_pass "$(basename $elf): RPATH=${RPATH}"
             RPATH_OK=$((RPATH_OK + 1))
         fi
-    done
+    done < "$_tmp_g3_rpath"
+    rm -f "$_tmp_g3_rpath"
 else
     g3_warn "patchelf 不可用，跳过 RPATH 检查"
 fi
 
-# G3-2: ELF 签名检查
+# G3-2: ELF 签名检查（使用临时文件避免 word-split 反模式）
 SIGNED_OK=0; SIGNED_BAD=0
 if command -v sign-elf.sh >/dev/null 2>&1; then
     # 只检查签名是否存在，不重新签名
-    for elf in $(find "$PREFIX/bin" -type f -executable 2>/dev/null); do
+    _tmp_g3_sign="${TMPDIR:-$HOME/tmp}/verify_find_g3_sign_$$.lst"
+    find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g3_sign" 2>/dev/null || true
+    while IFS= read -r elf; do
+        [ -f "$elf" ] || continue
         # 鸿蒙的签名状态可以通过特定方式检测
         SIGN_CHECK=$(file -b "$elf" 2>/dev/null)
         case "$SIGN_CHECK" in
@@ -289,14 +380,18 @@ if command -v sign-elf.sh >/dev/null 2>&1; then
                 SIGNED_BAD=$((SIGNED_BAD + 1))
                 ;;
         esac
-    done
+    done < "$_tmp_g3_sign"
+    rm -f "$_tmp_g3_sign"
 else
     g3_warn "sign-elf.sh 不可用，跳过签名检查"
 fi
 
-# G3-3: 解压后可运行模拟（检查关键路径是否为相对路径）
+# G3-3: 解压后可运行模拟（使用临时文件避免 word-split 反模式）
 REL_PATH_ISSUE=0
-for elf in $(find "$PREFIX/bin" -type f -executable 2>/dev/null); do
+_tmp_g3_interp="${TMPDIR:-$HOME/tmp}/verify_find_g3_interp_$$.lst"
+find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g3_interp" 2>/dev/null || true
+while IFS= read -r elf; do
+    [ -f "$elf" ] || continue
     INTERP=$(patchelf --print-interpreter "$elf" 2>/dev/null || true)
     if [ -n "$INTERP" ] && echo "$INTERP" | grep -q '^/'; then
         # 绝对路径解释器 — 在其他系统可能不存在
@@ -310,7 +405,8 @@ for elf in $(find "$PREFIX/bin" -type f -executable 2>/dev/null); do
                 ;;
         esac
     fi
-done
+done < "$_tmp_g3_interp"
+rm -f "$_tmp_g3_interp"
 
 echo ""
 echo "  G3 结果: ${G3_PASS}/${G3_TOTAL} 通过, ${G3_FAIL} 失败, ${G3_WARN} 警告"
@@ -322,12 +418,18 @@ echo "         (RPATH: ${RPATH_OK} OK / ${RPATH_BAD} 缺, 签名: ${SIGNED_OK} O
 echo ""
 echo "[G4/4] 档案完整性..."
 
-# G4-1: man page
-MAN_COUNT=$(find "$PREFIX/share/man" -name "*.${SOFTWARE}*" -type f 2>/dev/null | wc -l | tr -d ' ')
+# G4-1: man page（使用临时文件避免 word-split 反模式）
+_tmp_g4_man="${TMPDIR:-$HOME/tmp}/verify_find_g4_man_$$.lst"
+find "$DEFAULT_PREFIX/share/man" -name "*.${SOFTWARE}*" -type f > "$_tmp_g4_man" 2>/dev/null || true
+MAN_COUNT=$(wc -l < "$_tmp_g4_man" 2>/dev/null | tr -d ' ')
+rm -f "$_tmp_g4_man"
 if [ "$MAN_COUNT" -gt 0 ]; then
     g4_pass "man page: 找到 ${MAN_COUNT} 个相关手册页"
 else
-    MAN_ANY=$(find "$PREFIX/share/man" -name "*.1" -o -name "*.gz" 2>/dev/null | wc -l | tr -d ' ')
+    _tmp_g4_man_any="${TMPDIR:-$HOME/tmp}/verify_find_g4_man_any_$$.lst"
+    find "$DEFAULT_PREFIX/share/man" -name "*.1" -o -name "*.gz" > "$_tmp_g4_man_any" 2>/dev/null || true
+    MAN_ANY=$(wc -l < "$_tmp_g4_man_any" 2>/dev/null | tr -d ' ')
+    rm -f "$_tmp_g4_man_any"
     if [ "$MAN_ANY" -gt 0 ]; then
         g4_warn "man page: 未找到 ${SOFTWARE} 专用手册（但有 ${MAN_ANY} 个通用手册）"
     else
@@ -335,8 +437,11 @@ else
     fi
 fi
 
-# G4-2: pkg-config .pc 文件
-PC_COUNT=$(find "$PREFIX/lib/pkgconfig" -name "*.pc" -type f 2>/dev/null | wc -l | tr -d ' ')
+# G4-2: pkg-config .pc 文件（使用临时文件避免 word-split 反模式）
+_tmp_g4_pc="${TMPDIR:-$HOME/tmp}/verify_find_g4_pc_$$.lst"
+find "$DEFAULT_PREFIX/lib/pkgconfig" -name "*.pc" -type f > "$_tmp_g4_pc" 2>/dev/null || true
+PC_COUNT=$(wc -l < "$_tmp_g4_pc" 2>/dev/null | tr -d ' ')
+rm -f "$_tmp_g4_pc"
 if [ "$PC_COUNT" -gt 0 ]; then
     g4_pass "pkg-config: 找到 ${PC_COUNT} 个 .pc 文件"
 elif [ "$SOFTWARE" = "pkg-config" ]; then
@@ -347,7 +452,10 @@ fi
 
 # G4-3: 补丁集可 rebuild
 if [ -d "$ARCHIVE_DIR/patches" ]; then
-    PATCH_COUNT=$(find "$ARCHIVE_DIR/patches" -name "000*.patch" -type f 2>/dev/null | wc -l | tr -d ' ')
+    _tmp_g4_patch="${TMPDIR:-$HOME/tmp}/verify_find_g4_patch_$$.lst"
+    find "$ARCHIVE_DIR/patches" -name "000*.patch" -type f > "$_tmp_g4_patch" 2>/dev/null || true
+    PATCH_COUNT=$(wc -l < "$_tmp_g4_patch" 2>/dev/null | tr -d ' ')
+    rm -f "$_tmp_g4_patch"
     if [ "$PATCH_COUNT" -gt 0 ]; then
         REBUILD_OK=true
         # 确定源码目录（用于真 dry-run）
@@ -466,10 +574,11 @@ fi
 if [ -f "$ARCHIVE_DIR/PROGRESS.md" ]; then
     STATUS=$(grep '^status:' "$ARCHIVE_DIR/PROGRESS.md" 2>/dev/null | head -1 | sed 's/status: *//')
     case "$STATUS" in
-        completed|success|closed) g4_pass "PROGRESS.md: 已关闭 (${STATUS})" ;;
-        compiling)              g4_warn "PROGRESS.md: 仍处于编译中" ;;
-        failed)                 g4_fail "PROGRESS.md: 状态为 failed" ;;
-        *)                      g4_warn "PROGRESS.md: 状态未知 (${STATUS})" ;;
+        success)  g4_pass "PROGRESS.md: 已关闭 (${STATUS})" ;;
+        partial)  g4_pass "PROGRESS.md: 已关闭 (${STATUS})" ;;
+        failed)   g4_fail "PROGRESS.md: 状态为 failed" ;;
+        compiling) g4_warn "PROGRESS.md: 仍处于编译中" ;;
+        *)        g4_warn "PROGRESS.md: 状态未知 (${STATUS})" ;;
     esac
 else
     g4_warn "PROGRESS.md: 不存在"

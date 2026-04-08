@@ -224,6 +224,9 @@ public:
     // AutoSurface and can trigger OH_Drawing/Skia abort on 2in1 devices).
     bool mouseCaptured = false;
 
+    // [Patch-0048] Paint cycle counter for correlating DF diagnostics
+    static int s_paintCount;
+
     ScintillaOHOSEditor() {
         // Ensure wMain has a non-null ID (required by CreateMeasurementSurface)
         wMain = reinterpret_cast<void *>(const_cast<char *>(&kWindowSentinel));
@@ -536,7 +539,8 @@ public:
         PRectangle rcPaint = GetClientRectangle();
         bool hadRedraw = CheckAndClearRedraw();
         OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-DRAW",
-            "Paint: rc=(%d,%d,%d,%d) hadRedraw=%{public}d ps=%{public}d surfOK=%{public}d canvas=%p docLen=%{public}zd topLine=%{public}d linesOnScreen=%{public}d textStart=%{public}d lh=%{public}d",
+            "Paint#%d: rc=(%d,%d,%d,%d) hadRedraw=%{public}d ps=%{public}d surfOK=%{public}d canvas=%p docLen=%{public}zd topLine=%{public}d linesOnScreen=%{public}d textStart=%{public}d lh=%{public}d",
+            (int)++s_paintCount,
             (int)rcPaint.left, (int)rcPaint.top, (int)rcPaint.right, (int)rcPaint.bottom,
             (int)hadRedraw, (int)paintState, (int)surf->Initialised(), (void*)canvas,
             pdoc ? pdoc->Length() : -1, (int)topLine, (int)LinesOnScreen(),
@@ -904,6 +908,9 @@ public:
             (int)caret.active, (int)caret.on, (int)hasFocus);
     }
 };
+
+// [Patch-0048] Static member definition — required by C++ ODR (One Definition Rule)
+int ScintillaOHOSEditor::s_paintCount = 0;
 
 // ============================================================================
 // ScintillaOHOS::Impl - Pimpl implementation
