@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/env zsh
 # ==============================================================================
 # [Layer L1.5] package.sh — 预编译包一键打包工具
 # ==============================================================================
@@ -28,11 +28,13 @@ PATCHELF="${PATCHELF:-patchelf}"
 SOFTWARE_NAME=""
 VERSION=""
 STATIC_BUILD=false
-DEBUG_BUILD=false
+DEBUG_BUILD=true   # debug 包默认启用（SKILL §6.1 必填文件要求）
 SKIP_SIGN=false
 # DEFAULT_PREFIX: 唯一权威的安装前缀变量（由 init-build.sh export 或环境变量传入）
 # --prefix 参数可覆盖，否则通过 fallback 自动检测
+# 注意：v4.3+ 优先使用 $TEST_PREFIX（staging 目录）作为打包来源
 DEFAULT_PREFIX="${DEFAULT_PREFIX:-}"
+TEST_PREFIX="${TEST_PREFIX:-}"
 
 # ============ 帮助信息 ============
 show_help() {
@@ -75,6 +77,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --static)     STATIC_BUILD=true ;;
         --debug)      DEBUG_BUILD=true ;;
+        --no-debug)   DEBUG_BUILD=false ;;
         --skip-sign)  SKIP_SIGN=true ;;
         --prefix=*)   DEFAULT_PREFIX="${1#--prefix=}" ;;
         -h|--help)    show_help; exit 0 ;;
@@ -229,12 +232,26 @@ find "$PKGDIR" -name '*.info-*' -delete 2>/dev/null || true
 echo "  OK: cache cleaned"
 
 # ================================================================
-# Step 2b: 从安装目录 ($DEFAULT_PREFIX) 复制文件到 PKGDIR
+
+# Step 2b: 从 staging 目录 复制文件到 PKGDIR
 # ================================================================
-# 这是实际的 "安装到独立目录" 操作
-# 将 $DEFAULT_PREFIX 下的产物复制到干净的 PKGDIR
+# v4.3+: 优先从 $TEST_PREFIX（staging 目录）复制
+# fallback 到 $DEFAULT_PREFIX（兼容旧流程）
 #
 echo "[Step 2b/10] 从安装目录复制文件..."
+
+# 确定源目录：优先 TEST_PREFIX
+_SRC_PREFIX="$TEST_PREFIX"
+if [ -z "$_SRC_PREFIX" ] || [ ! -d "$_SRC_PREFIX/bin" ]; then
+    _SRC_PREFIX="$DEFAULT_PREFIX"
+fi
+
+if [ -z "$_SRC_PREFIX" ] || [ ! -d "$_SRC_PREFIX" ]; then
+    echo "  ERROR: 无法找到安装目录 (\$TEST_PREFIX=$TEST_PREFIX, \$DEFAULT_PREFIX=$DEFAULT_PREFIX)"
+    exit 1
+fi
+
+echo "  源目录: $_SRC_PREFIX"
 
 _copy_count=0
 copy_dir_safe() {
@@ -247,14 +264,54 @@ copy_dir_safe() {
     fi
 }
 
-copy_dir_safe "$DEFAULT_PREFIX/bin"     "${PKGDIR}/bin"
-copy_dir_safe "$DEFAULT_PREFIX/lib"     "${PKGDIR}/lib"
-copy_dir_safe "$DEFAULT_PREFIX/include" "${PKGDIR}/include"
-copy_dir_safe "$DEFAULT_PREFIX/share"   "${PKGDIR}/share"
+copy_dir_safe "$_SRC_PREFIX/bin"     "${PKGDIR}/bin"
+copy_dir_safe "$_SRC_PREFIX/lib"     "${PKGDIR}/lib"
+copy_dir_safe "$_SRC_PREFIX/include" "${PKGDIR}/include"
+copy_dir_safe "$_SRC_PREFIX/share"   "${PKGDIR}/share"
 
 _bin_count=$(find "${PKGDIR}/bin" -type f 2>/dev/null | wc -l | tr -d ' ')
 _lib_count=$(find "${PKGDIR}/lib" -type f 2>/dev/null | wc -l | tr -d ' ')
 echo "  OK: $_bin_count binaries, $_lib_count library files copied"
+
+
+# Step 2e: 应用 EXCLUDE_LIST（打包排除列表）
+# ================================================================
+# 排除编译通过但有问题的命令/库（平台限制无法规避）
+# 排除列表位置（按优先级）:
+#   1. archives/{name}/{version}/EXCLUDE_LIST   (版本级)
+#   2. archives/{name}/EXCLUDE_LIST              (软件级)
+# 格式: 每行一个文件名（bin/ 或 lib/ 下的 basename）
+#       # 开头为注释
+#
+_EXCLUDE_FILE=""
+if [ -f "${ARCHIVE_DIR}/EXCLUDE_LIST" ]; then
+    _EXCLUDE_FILE="${ARCHIVE_DIR}/EXCLUDE_LIST"
+elif [ -f "${ARCHIVE_DIR}/../EXCLUDE_LIST" ]; then
+    _EXCLUDE_FILE="${ARCHIVE_DIR}/../EXCLUDE_LIST"
+fi
+
+if [ -n "$_EXCLUDE_FILE" ]; then
+    echo "[Step 2e/10] 应用排除列表: $(basename "$_EXCLUDE_FILE")"
+    _EXCLUDED=0
+    while IFS= read -r _line || [ -n "$_line" ]; do
+        # 跳过空行和注释
+        case "$_line" in \#*|"") continue ;; esac
+        _target=$(echo "$_line" | sed 's/[[:space:]]*$//')  # trim
+        [ -z "$_target" ] && continue
+
+        # 在 PKGDIR 的 bin/ lib/ 中查找并删除
+        for _loc in bin lib; do
+            if [ -f "${PKGDIR}/${_loc}/${_target}" ]; then
+                rm -f "${PKGDIR}/${_loc}/${_target}"
+                _EXCLUDED=$((_EXCLUDED + 1))
+                echo "    excluded: ${_loc}/${_target}"
+            fi
+        done
+    done < "$_EXCLUDE_FILE"
+    echo "  OK: $_EXCLUDED files excluded"
+else
+    echo "[Step 2e/10] 无排除列表，跳过"
+fi
 
 # ================================================================
 # Step 3: 符号链接替换
@@ -335,6 +392,7 @@ SKIP_LIBS_PATTERN='^libc\.so|^libm\.so|^libdl\.so|^libpthread\.so|^ld-.*\.so|^li
 # 搜索路径 (按优先级)
 LIB_SEARCH_DIRS=""
 for _sd in \
+    "${_SRC_PREFIX:-$TEST_PREFIX}/lib" \
     "${DEFAULT_PREFIX}/lib" \
     "/storage/Users/currentUser/usr/local/lib" \
     "${HNP_BIN}/../lib" \
@@ -389,7 +447,7 @@ collect_deps() {
         done
         IFS="$_save_ifs"
 
-        if [ -n "_found" ] && [ -f "$_found" ]; then
+        if [ -n "$_found" ] && [ -f "$_found" ]; then
             cp -L "$_found" "${PKGDIR}/lib/external/" 2>/dev/null
             DEPS_COLLECTED=$((DEPS_COLLECTED + 1))
             DEBUG_COLLECT="${DEBUG_COLLECT}  collected: ${_lib}
@@ -404,18 +462,13 @@ collect_deps() {
 }
 
 # 对所有 ELF 文件执行依赖收集
-for _elf in $(find "${PKGDIR}/bin" "${PKGDIR}/lib" -type f -exec file {} \; 2>/dev/null | grep -E ': ELF .* (shared object|executable)' | cut -d: -f1); do
+# zsh glob qualifier: **/*(.) 只匹配普通文件, 比 find|file|grep 管道快 100x
+_ELF_COUNT=0
+for _elf in ${PKGDIR}/bin/**/*(.N) ${PKGDIR}/lib/**/*(.N); do
+    [[ "$(head -c 4 $_elf 2>/dev/null)" == '\x7fELF' ]] || continue
     collect_deps "$_elf" 0
+    _ELF_COUNT=$(( _ELF_COUNT + 1 ))
 done
-
-# 对扩展模块也做分析 (如 Python lib-dynload)
-find "$PKGDIR" -path '*/lib-dynload/*.so' -type f 2>/dev/null | while read -r _so; do
-    collect_deps "$_so" 0
-done
-
-_external_count=$(find "${PKGDIR}/lib/external" -type f 2>/dev/null | wc -l | tr -d ' ')
-echo "  OK: ${_external_count} external dependencies collected into lib/external/"
-
 # ================================================================
 # Step 5: 设置 RPATH ($ORIGIN 相对路径)
 # ================================================================

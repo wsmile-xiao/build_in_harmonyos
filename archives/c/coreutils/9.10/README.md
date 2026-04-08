@@ -146,7 +146,9 @@ make -j$(nproc)
 |------|------|
 | getlimits | 系统限制输出 |
 
-#### 不推荐安装的命令（共 12 个）
+#### 不推荐安装的命令（共 14 个）
+
+**类别 A: SELinux 软链接权限限制 (12个)**
 
 以下命令受 SELinux 限制无法正常处理软链接，建议使用系统 toybox：
 
@@ -164,6 +166,13 @@ make -j$(nproc)
 | link | 可能受软链接影响 | `/bin/link` |
 | unlink | 可能受软链接影响 | `/bin/unlink` |
 | realpath | 无法解析软链接 | `/bin/realpath` |
+
+**类别 B: HarmonyOS 系统兼容性 (2个)**
+
+| 命令 | 问题 | 建议 |
+|------|------|------|
+| chroot | HarmonyOS 不支持 chroot syscall, Signal 31 core dump | 无（容器场景不适用） |
+| tac | >16KB 单行输入触发 double-free (musl libc xrealloc) | `tail -r` |
 
 #### 不包含在 coreutils 中的命令
 
@@ -221,6 +230,34 @@ echo "alias mv='/bin/mv'"
 2. `lib/freadahead.c` - 适配 musl libc 的 FILE 结构
 3. `lib/freadptr.c` - 适配 musl libc 的 FILE 结构
 4. `lib/freadseek.c` - 适配 musl libc 的 FILE 结构
+
+### 补丁3: 0003-fix-od-fstat-for-harmonyos.patch（新增）
+
+**发现过程：** make check 发现 `tests/od/od.pl` 的 `trad-dot1` 和 `trad-dot512` 两个测试失败：
+```
+od.pl: test trad-dot1 failed: exit status mismatch: expected 0, got 1
+od.pl: test trad-dot512 failed: exit status mismatch: expected 0, got 1
+```
+
+**根因：** od.c 的 `skip()` 函数在处理传统偏移格式（如 `+1.`、`+1.b`）时调用 `fstat()` 判断文件类型。
+HarmonyOS 上 fstat 对管道返回 EACCES，导致 od 直接报错退出。这是与补丁 0002 同类的 bug，
+但 od.c 在原始补丁中被遗漏了。
+
+**修改文件：**
+- `src/od.c` - skip() 函数添加 `#ifdef __OHOS__` 守卫
+
+**修复方案：** 在 fstat 返回 EACCES/EPERM 时，降级到 fread 逐字节跳过（与补丁 0002 模式一致）。
+
+**验证结果：**
+```bash
+# 修复前
+echo 'a' | ./src/od +1.    # exit 1 (Permission denied)
+printf 'a%.0s' {1..512} | ./src/od +1.b  # exit 1
+
+# 修复后
+echo 'a' | ./src/od +1.    # exit 0 ✅ 输出: 0000001 000012
+printf 'a%.0s' {1..512} | ./src/od +1.b  # exit 0 ✅ 输出: 0001000
+```
 
 ### 补丁2: 0002-fix-fstat-for-harmonyos.patch
 
@@ -437,3 +474,5 @@ chcon u:object_r:toybox_exec:s0 $HOME/usr/local/bin/rm
 | 2026-03-17 | 5.0 | 深入分析 SELinux 策略限制，确认根本原因 |
 | 2026-03-17 | 6.0 | 添加选择性安装策略，创建 install-selected.sh 脚本 |
 | 2026-03-17 | 7.0 | 完整命令分类（85个），更新安装脚本（73个推荐，12个使用 toybox）；修正 sed 不在 coreutils、install 命名为 ginstall、uptime 编译失败 |
+| 2026-04-08 | 8.0 | 发现并修复 od.c fstat EACCES 遗漏（补丁0003）；创建 EXCLUDE_LIST 正式排除 13 个受限命令；重新打包产物 8.9MB (88个二进制)；make check 深度分析：18 FAIL 中 11 个属排除命令、5 个平台限制、2 个已由补丁3修复 |
+| 2026-04-08 | 9.0 | 完整 make check (1117测试: P334/F128/S573/E82)；新增排除 chroot(syscall不支持) + tac(double-free边界case)；EXCLUDE_LIST 12→14；最终产物 86个二进制 |

@@ -558,7 +558,7 @@ if [ -d "$SRC_ORIG_DIR" ] && [ -f "$SRC_ORIG_DIR/configure" -o -f "$SRC_ORIG_DIR
             log_info ".orig/ 基准已存在且 tarball 未变: $SRC_ORIG_DIR"
         else
             log_warn ".orig/ 存在但 tarball 已变，重建..."
-            rm -rf "$SRC_ORIG_DIR"
+            rm -rf "$SRC_ORIG_DIR" 2>/dev/null || true  # sandbox 兼容 2>/dev/null || true
             _NEED_EXTRACT=true
         fi
     else
@@ -609,7 +609,7 @@ fi
 if [ -d "$SRC_WORK_DIR" ] && [ -f "$SRC_WORK_DIR/configure" -o -f "$SRC_WORK_DIR/CMakeLists.txt" -o -f "$SRC_WORK_DIR/Makefile" ]; then
     log_info ".work/ 工作副本已存在: $SRC_WORK_DIR"
 else
-    rm -rf "$SRC_WORK_DIR"
+    rm -rf "$SRC_WORK_DIR" 2>/dev/null || true  # sandbox 下部分文件可能锁死，不阻塞
     # 优先尝试硬链接复制（秒级、省空间），不可用时降级为常规复制
     if ! cp -al "$SRC_ORIG_DIR" "$SRC_WORK_DIR" 2>/dev/null; then
         log_warn "硬链接不可用，降级为常规复制..."
@@ -704,6 +704,9 @@ export BUILD_MODE="${MODE}"
 # --- 安装前缀（唯一权威变量，所有脚本统一使用）---
 export DEFAULT_PREFIX="${DEFAULT_PREFIX}"
 
+# --- Staging 目录（configure --prefix 目标，隔离编译产物）---
+export TEST_PREFIX="${TMPDIR:-$HOME/tmp}/test-install-${SOFTWARE_NAME}-${VERSION}"
+
 # --- 路径（双轨制）---
 export BUILD_TARBALL="${TARBALL_PATH}"
 export BUILD_SRC_DIR="${SRC_WORK_DIR}"           # ← AI 编译工作目录（可写）
@@ -737,20 +740,42 @@ if [ "$REG_STATIC" = "true" ]; then
     echo "# ⚠️ 静态编译要求: 此软件在 dependencies.md 危险库分级表中标记为必须静态" >> "$CONTEXT_FILE"
 fi
 
+# 追加 README 摘要（如有历史归档）
+_README="${ARCHIVE_DIR}/README.md"
+if [ -f "$_README" ] && [ "$(wc -l < "$_README" 2>/dev/null | tr -d ' ')" -gt 5 ]; then
+    echo "" >> "$CONTEXT_FILE"
+    echo "# --- README 编译要点摘要 ---" >> "$CONTEXT_FILE"
+    grep -E '已知限制|不支持的|跳过|禁用|必须|注意| workaround|替代' "$_README" 2>/dev/null | \
+        sed 's|^|#   |' | head -20 >> "$CONTEXT_FILE"
+fi
+
+# HarmonyOS 标准 make install 参数（解决 sandbox 兼容性问题）
+cat >> "$CONTEXT_FILE" <<'CTXEOF'
+
+# --- HarmonyOS 标准 make install 参数 ---
+# 鸿蒙 sandbox 环境下以下参数可能需要：
+#   SED=$(find_tool sed)           # 动态检测：优先 GNU sed（功能更强），fallback toybox
+#   INSTALL=$(find_tool install)   # 动态检测：同上
+#   HELP2MAN=/bin/true          (help2man 权限不足)
+#   MAKEINFO=/bin/true            (texinfo 工具缺失)
+# 用法: make install SED=/usr/bin/sed INSTALL=/bin/install HELP2MAN=/bin/true
+CTXEOF
+
 cat >> "$CONTEXT_FILE" <<'CTXEOF'
 
 # --- 下一步 ---
 # AI 请执行以下操作:
 #   1. 读取 PROGRESS.md:  cat ${BUILD_ARCHIVE_DIR}/PROGRESS.md
 #   2. 进入源码目录:  cd ${BUILD_SRC_DIR}
-#   3. 执行 Phase 3 编译:
+#   3. 执行 Phase 3 编译（--prefix 指向 $TEST_PREFIX 隔离目录）:
 #      a. 如有历史补丁:  for p in ${BUILD_ARCHIVE_DIR}/patches/*.patch; do patch -p1 < $p; done
-#      b. ./configure --prefix=${DEFAULT_PREFIX}  (或其他必要参数)
+#      b. ./configure --prefix=${TEST_PREFIX}  (或其他必要参数)
 #      c. make -j1
-#      d. make install
-#      e. 触发安全弹窗:  ${BUILD_SRC_DIR}/.../<binary> --version
-#   4. 编译成功后执行:
-#      ./scripts/finish-build.sh ${BUILD_SOFTWARE} ${BUILD_VERSION} success
+#      d. make install (产物进入 ${TEST_PREFIX})
+#      e. 触发安全弹窗:  find ${TEST_PREFIX}/bin -type f -exec {} --version \;
+#   4. Staging 验证 + make check
+#   5. package.sh 打包 + install.sh 部署到 ${DEFAULT_PREFIX}
+#   6. 编译成功后执行:  ./scripts/finish-build.sh ${BUILD_SOFTWARE} ${BUILD_VERSION} success
 # ============================================================
 CTXEOF
 

@@ -73,6 +73,71 @@ echo "  软件: ${SOFTWARE} ${VERSION}"
 echo "  状态: ${STATUS}"
 echo ""
 
+# ════════════════════════════════════════
+#   Step 0: 前置关卡闸门（流程完整性检查）
+# ════════════════════════════════════════
+#   检查 AI 是否跳过了必要步骤，缺失则 warn + 记录 + 可能降级状态
+echo "[0/6] 流程完整性关卡..."
+
+_GATE_MISS=0
+_GATE_WARNINGS=""
+
+# --- 关卡 A: test-report.md（make check / make test 结果）---
+if [ ! -f "${ARCHIVE_DIR}/reports/test-report.md" ]; then
+    echo "  ⚠️  [关卡A] 缺少 test-report.md"
+    echo "      → 请在 finish-build 前执行: make check 或 make test"
+    echo "      → 将结果写入: reports/test-report.md"
+    _GATE_MISS=$((_GATE_MISS + 1))
+    _GATE_WARNINGS="${_GATE_WARNINGS} test-report:missing"
+    # success → partial（测试是质量保证的核心步骤）
+    if [ "$STATUS" = "success" ]; then
+        STATUS="partial"
+        echo "      → 状态降级: success → partial"
+    fi
+else
+    echo "  ✅ [关卡A] test-report.md 存在"
+fi
+
+# --- 关卡 B: Staging 目录验证标记（原 Phase 2.5）---
+_25_MARK="${ARCHIVE_DIR}/.staging-verified"
+if [ ! -f "$_25_MARK" ]; then
+    echo "  ⚠️  [关卡B] 缺少 Staging 验证标记 (${_25_MARK})"
+    echo "      → 请执行 SKILL.md §2.8 Staging 目录验证"
+    _GATE_MISS=$((_GATE_MISS + 1))
+    _GATE_WARNINGS="${_GATE_WARNINGS} staging:missing"
+else
+    echo "  ✅ [关卡B] Phase 2.5 已通过 ($(cat "$_25_MARK" 2>/dev/null | head -1))"
+fi
+
+# --- 关卡 C: 预编译包交付物 ---
+if [ ! -d "${ARCHIVE_DIR}/packaging" ] || \
+   [ -z "$(ls "${ARCHIVE_DIR}/packaging/"*ohos-aarch64*.tar.gz 2>/dev/null)" ]; then
+    echo "  ⚠️  [关卡C] 缺少预编译包交付物 (packaging/*-ohos-aarch64.tar.gz)"
+    echo "      → 请执行 SKILL.md §Step 5 打包流程 (package.sh)"
+    _GATE_MISS=$((_GATE_MISS + 1))
+    _GATE_WARNINGS="${_GATE_WARNINGS} packaging:missing"
+else
+    _PKG_COUNT=$(ls "${ARCHIVE_DIR}/packaging/"*ohos-aarch64*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
+    echo "  ✅ [关卡C] 预编译包存在 (${_PKG_COUNT} 个 tar.gz)"
+fi
+
+# --- 关卡汇总 ---
+if [ "$_GATE_MISS" -gt 0 ]; then
+    echo ""
+    echo "  🚨 关卡结果: ${_GATE_MISS} 个必要步骤被跳过"
+    echo "     缺失项:${_GATE_WARNINGS}"
+    echo "     建议: 按 SKILL.md 五步走完整执行后再运行 finish-build.sh"
+    # 写入 manifest 以便追踪
+    if [ -f "${ARCHIVE_DIR}/manifest.yaml" ]; then
+        sed -i '/^skipped_gates:/d' "${ARCHIVE_DIR}/manifest.yaml"
+        echo "skipped_gates: ${_GATE_WARNINGS}" >> "${ARCHIVE_DIR}/manifest.yaml"
+    fi
+else
+    echo ""
+    echo "  ✅ 全部关卡通过"
+fi
+echo ""
+
 # ---- Step 1: 补丁生成 ----
 STEP1_OK=false
 if [ -x "${SCRIPT_DIR}/refresh-patch.sh" ]; then

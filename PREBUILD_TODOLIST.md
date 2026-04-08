@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | 2 |
-| 编译成功 | 2 (pkg-config, sed) |
-| 打包成功 | 2 (pkg-config, sed) |
+| 已完成 | **3** |
+| 编译成功 | 3 (pkg-config, sed, coreutils) |
+| 打包成功 | 3 (pkg-config, sed, coreutils) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -52,7 +52,7 @@
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 03 | coreutils | 9.10 | ⬜ 待编译 | - | - | - | 替代 toybox (含expr) ⚠️ 原partial |
+| 03 | coreutils | 9.10 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/coreutils-9.10-ohos-aarch64.tar.gz (11M) | 3个补丁, 86二进制(排除14个), 100man页, 已签名 |
 | 04 | gawk | 5.3.0 | ⬜ 待编译 | - | - | - | 替代 toybox awk |
 
 ### 第二阶段：Autotools 工具链
@@ -126,7 +126,25 @@
 
 > 每款软件编译中发现的问题、与历史档案的差异、skill更新建议记录在此。
 
-（待填充）
+### coreutils 9.10（对话 #3）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **make install Permission denied** | `configure --prefix=` 为空，默认安装到系统 `/bin` | 使用 `make install prefix=/path/to/dest` 指定安装目录 | ✅ |
+| **package.sh Step 4 卡死** | `$TEST_PREFIX` 未传递 → fallback 到全局 `/usr/local` → 复制了 10889 个无关 lib 文件 → 对垃圾文件逐个 ELF 检测超时 | 确保 `$TEST_PREFIX` 在环境变量中；或直接 `make install` 到 packaging 目录 | ✅ |
+| **EXCLUDE_LIST 不生效 (0 files excluded)** | Step 2e(排除)在 Step 2b(复制)**之前**执行，PKGDIR 为空时删不到任何东西 | 调整顺序：Step 2b(复制) → Step 2e(排除) | ✅ |
+| **finalize-archive.sh RELEASENOTE.md 未生成** | 嵌套 heredoc (`$(if ... cat <<EOF ... EOF fi)` 在无引号 heredoc 内部) 静默失败 | 重写为分段写入（6 个独立的 `cat >>` 操作） | ✅ |
+| **RELEASENOTE 变量未展开** | 使用 `'EOF'`(单引号)阻止变量替换 | 改为 `<< EOF`(无引号允许展开) | ✅ |
+| **_BSYS=unknown** | manifest.yaml 中 `build_system:` 有缩进(`build_config:` 子字段)，`^build_system:` 错配 | 改为 `grep "build_system:"`(去掉 `^` 锚定) | ✅ |
+| **排除列表含注释** | manifest.yaml 行内注释(`# syscall不支持`)被当命令名 | 加 `cut -d"#" -f1` 清理 | ✅ |
+| **zsh glob 无匹配报错** | `set -euo pipefail` + zsh 默认 NOMATCH 导致 `*.tmp` 等模式报错退出 | shebang 改为 `#!/bin/zsh` + `setopt +o NOMATCH` | ✅ |
+| **PROGRESS status 匹配 WARN** | grep `-oE 'success\|...'` 从 `success#final` 只截取 `success` | 扩展为支持 `success#final` | ✅ |
+
+### 关键经验
+
+1. **`make install prefix=` 可以绕过重新 configure** — 当 prefix 配置错误时无需 distclean
+2. **coreutils 是零依赖纯二进制包** — lib/ 目录为空，不需要 Step 4 收集外部依赖
+3. **heredoc 嵌套是反模式** — 分段写入更可靠、更易调试
 
 ---
 
@@ -142,7 +160,8 @@
 | SKILL.md | ✅ 已更新至 v4.0（五步走+R10+预编译包+归档标准化） | ✅ 完成 |
 | install-template.sh | ✅ 已简化为 33 行极简版（cp -r * + $HOME/tmp） | ✅ 完成 |
 | error-patterns.md | ✅ 新增 E066/E067（tar格式+grep元字符） | ✅ 完成 |
-| finalize-archive.sh | ✅ 新建归档收口脚本（5阶段清理+校验+报告） | ✅ 完成 |
+| finalize-archive.sh | ✅ 升级：zsh 迁移 + RELEASENOTE 分段写入 + 变量补全 + 排除列表清理 + status#final 匹配 | ✅ 完成 |
+| package.sh / sign-elf.sh | ✅ shebang 改为 `#!/bin/zsh`；package.sh Step 2e/2b 顺序修复（排除在复制之后） | ✅ 完成 |
 | init-archive.sh | ✅ 升级支持 --clean 模式 + README 保护 | ✅ 完成 |
 | verify-build.sh | ✅ G4 补丁验证修复（三级降级+tarball重建） | ✅ 完成 |
 | finish-build.sh | ✅ 新增 Step 3 调用 finalize-archive.sh（4步流程） | ✅ 完成 |
@@ -189,8 +208,9 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 
 ---
 
-*最后更新: 2026-04-08*
-*v4.0 同步更新：*
-*  - sed 4.9 标记为已完成（编译+打包+gitcode上传）*
-*  - pkg-config 重打包（strip+签名+扁平结构）*
-*  - Skill 更新清单大幅更新（12项完成，3项待处理）*
+*最后更新: 2026-04-09*
+*v4.1 同步更新：*
+*  - coreutils 9.10 标记为已完成（编译+打包+签名+归档收口，86二进制/11M）*
+*  - package.sh / sign-elf.sh / finalize-archive.sh 统一迁移为 zsh*
+*  - finalize-archive.sh RELEASENOTE.md 重写为分段写入模式*
+*  - 问题记录新增 coreutils 9.10 对话 #3 的 8 个问题及修复*

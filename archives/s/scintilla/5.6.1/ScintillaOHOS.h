@@ -125,6 +125,9 @@ public:
     // ---- Reset fonts (call on Surface recreate) ----
     void ResetFonts();  // resets fontsInitialized flag
 
+    // [Fix-0055b] IME composing state check
+    bool IsComposing() const;  // true when IME is actively composing (pinyin input)
+
     // ---- Access underlying Scintilla for advanced use ----
     void *GetScintillaPtr() const;  // returns ScintillaBase*
 
@@ -220,6 +223,12 @@ void BN_Sci_Tick(void *editor);
 
 // ResetFonts — force font re-init on next PerformDraw (call on Surface recreate)
 void BN_Sci_ResetFonts(void *editor);
+
+// [Fix-0055d] IME composing state check — returns 1 when pinyin input is active
+int BN_Sci_IsComposing(void *editor);
+
+// [Fix-0055f] Mark IME session start — record caret position before potential pinyin
+void BN_Sci_MarkImeSession(void *editor);
 
 #ifdef __cplusplus
 }

@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙系统编译智能体——三方库预编译框架
-version: 4.0.0
+version: 4.6
 author: OpenHarmony PC Developer社区
 permissions: 文件读写权限、Shell执行权限、网络访问权限
 ---
@@ -15,7 +15,13 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限
 ## 1.1 标准工作流：五步走（含独立测试）
 
 ```bash
-# ═══ Step 1: 初始化（全自动，~30秒）═══
+# ═══ 推荐：一键全流程（v4.3+，11步自动执行）═══
+./scripts/build-driver.sh <软件名> [<版本>] [--skip-check]
+#   自动完成: init → 补丁 → configure(→staging) → make → install(→staging)
+#             → 弹窗(R7) → make check → Staging验证 → package(排除) → deploy → finish
+#   AI 应优先使用此入口，禁止跳过步骤
+
+# ═══ Step 1: 初始化（手动分步时用）═══
 ./scripts/init-build.sh <软件名> [<版本>] [--url=URL]
 #   输出: .build-context-<name>-<ver>
 #   完成: 下载/解压/检索历史/创建骨架/环境检查
@@ -23,7 +29,9 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限
 # ═══ Step 2: 编译（唯一需要 AI 的步骤）═══
 source .build-context-<name>-<ver>   # 加载上下文变量
 cd $BUILD_SRC_DIR                   # 进入源码目录
-./configure --prefix=$DEFAULT_PREFIX && make -j1 && make install
+./configure --prefix=$TEST_PREFIX && make -j1 && make install
+#   ⚠️ --prefix 指向隔离的 staging 目录，不是系统目录！
+#   验证通过后才由 install.sh 部署到 $DEFAULT_PREFIX
 #   记录修改意图到 PROGRESS.md
 #   触发安全弹窗确认
 #   ⚠️ configure 可能需要 3-10 分钟（autotools 大量 conftest），不要提前中断！
@@ -115,7 +123,7 @@ TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
 
 ```bash
 # ✅ 正确：给足够 timeout，不提前中断
-cd $BUILD_SRC_DIR && ./configure --prefix=$DEFAULT_PREFIX 2>&1 | tail -3
+cd $BUILD_SRC_DIR && ./configure --prefix=$TEST_PREFIX 2>&1 | tail -3
 #   autotools 项目 timeout=600s, 其他 timeout=300s
 
 # ❌ 错误：频繁中断重启（浪费每次 3-10 分钟的 conftest 编译）
@@ -249,6 +257,16 @@ DEFAULT_PREFIX     # ⭐ 唯一权威的安装前缀路径（所有脚本统一�
 ## Step 2: AI 编译执行 — Phase 3（唯一智能步骤）
 
 > **这是整个流程中唯一需要 AI 判断的环节。** 其余全部自动化。
+> 
+> **⚠️ 核心原则：`--prefix` 必须指向隔离的 staging 目录（$TEST_PREFIX），绝不能直接安装到系统目录。**
+> 
+> **完整执行顺序**：
+> ```
+> configure(--prefix=$TEST_PREFIX) → make → make install(到$TEST_PREFIX)
+>   → 安全弹窗(R7) → make check(在$TEST_PREFIX环境中)
+>   → 功能验证 → package.sh(从$TEST_PREFIX打包)
+>   → install.sh deploy(验证通过后，才部署到$DEFAULT_PREFIX)
+> ```
 
 ### 2.1 开始编译前的准备
 
@@ -270,27 +288,65 @@ fi
 ./scripts/detect-build-system.sh .  # 可选，context 已含 BUILD_SYSTEM
 ```
 
-### 2.2 执行编译
+### 2.2 执行编译（--prefix 指向 $TEST_PREFIX 隔离目录）
+
+> **⚠️ 每次操作前必须 source 上下文文件（R11）**：
+> ```bash
+> # 新会话 / 重新操作前必须执行：
+> source .build-context-<name>-<ver>
+> echo "TEST_PREFIX=$TEST_PREFIX"   # 确认不为空
+> ```
+> 否则 `$TEST_PREFIX` 为空 → configure 报错 → 浪费 10+ 分钟重跑。
 
 ```bash
-# Autotools 项目
-./configure --prefix=$DEFAULT_PREFIX && make -j1 && make install
+# 方式 A: configure 时指定 prefix（标准做法）
+./configure --prefix=$TEST_PREFIX && make -j1 && make install
+
+# 方式 B: configure 不指定，make install 时指定（更灵活，推荐）
+#    优势：同一编译产物可安装到不同位置，无需重跑 configure
+./configure && make -j1 && make install prefix=$TEST_PREFIX
+
+# 方式 C: DESTDIR staging（最常用，package.sh 内部使用）
+./configure && make -j1 && make install DESTDIR=$TEST_PREFIX
 
 # CMake 项目
-cmake -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX .. && make && make install
+cmake -DCMAKE_INSTALL_PREFIX=$TEST_PREFIX .. && make && make install
 
 # Meson 项目
-meson setup builddir --prefix=$DEFAULT_PREFIX && ninja -C builddir && ninja -C builddir install
+meson setup builddir --prefix=$TEST_PREFIX && ninja -C builddir && ninja -C builddir install
 
 # Makefile 项目（无 configure）
-make PREFIX=$DEFAULT_PREFIX && make PREFIX=$DEFAULT_PREFIX install
+make PREFIX=$TEST_PREFIX && make PREFIX=$TEST_PREFIX install
 ```
+
+**⚠️ P0 参数最少化**：理想状态只需 `--prefix=$TEST_PREFIX`。
+
+### $TEST_PREFIX vs $DEFAULT_PREFIX
+
+| 变量 | 值 | 用途 |
+|------|-----|------|
+| `$TEST_PREFIX` | `${TMPDIR:-$HOME/tmp}/test-install-{name}-{ver}` | **configure --prefix 目标**（staging） |
+| `$DEFAULT_PREFIX` | `/storage/Users/currentUser/usr/local` | **最终部署目标**（install.sh 写入） |
+
+**为什么不用 $DEFAULT_PREFIX？**
+1. 失败时系统目录已被污染 → 清理困难
+2. 无法区分"编译产物"和"已部署状态"
+3. package.sh 打包来源不明确
+4. 不再需要 Phase 2.5 二次编译（本身就是隔离的）
 
 **⚠️ P0 参数最少化**：理想状态只需 `--prefix`。如果必须加额外参数（`--build/--host`/`--without-shared`/CFLAGS hack），记录到 PROGRESS.md 并在 manifest.yaml `build_cleanliness` 字段标注为技术债务。
 
 ### 2.2.1 make check / make test（⭐ 标准步骤）
 
 > **make install 之后、finish-build 之前，必须执行软件自带的测试套件。**
+>
+> **⚠️ 遇到问题时的处理顺序（禁止直接跳过）：**
+> 1. **先诊断**：是超时？哪个测试卡住？还是编译错误？
+> 2. **再尝试**：用 `RUN_TEST_FAILURES=yes` 跳过卡住的测试重跑
+> 3. **分析失败原因**：平台限制(E051/E046/E002) vs 真正 bug
+> 4. **最后才标记 partial**：确认无法解决后记录原因，继续后续步骤
+>
+> build-driver.sh 的 Step 7 已内置此诊断+恢复逻辑（后台监控→卡住检测→SIGUSR1→选择性跳过→重试）
 
 ```bash
 # Autotools 项目（首选 make check，fallback 到 make test）
@@ -333,6 +389,36 @@ meson test -C builddir 2>&1 | tail -20
 | **compile** | `warning: -Werror` | 警告变错误 → CFLAGS 加 -Wno-error 或改 configure.ac |
 | **link** | `undefined reference to xxx` | 缓库 → LDFLAGS 加 -lxxx 或查 NEEDED |
 | **install** | `symlink: File exists` | HMDFS 限制 → 用 wrapper 脚本或 cp 替代 |
+| **install** | `Permission denied` (help2man/sed/install) | 鸿蒙 sandbox 兼容性问题 → 见下方标准参数 |
+
+#### make install 标准参数（鸿蒙 sandbox 兼容）
+
+> ⚠️ 以下参数在鸿蒙环境下几乎总是需要，**应作为 configure/make 的默认参数**：
+> 
+> ```bash
+> # configure 阶段（从源头避免）--prefix 指向 $TEST_PREFIX
+> ./configure --prefix=$TEST_PREFIX \
+>     SED=$(find_tool sed) \          # 动态检测：优先 GNU sed，fallback toybox
+>     HELP2MAN=/bin/true          # help2man 权限不足（跳过 man page）
+>     MAKEINFO=/bin/true           # texinfo 工具缺失
+> 
+> # 或在 make install 阶段覆盖（如 configure 已完成）
+> make install \
+>     SED=$(find_tool sed) \
+>     INSTALL=$(find_tool install) \  # 动态检测：优先 GNU install
+>     HELP2MAN=/bin/true \
+>     MAKEINFO=/bin/true
+> ```
+>
+> **动态检测逻辑**（build-driver.sh 内置 `find_tool()` 函数）：
+> 1. 先找 `$DEFAULT_PREFIX/bin/sed` → `$TEST_PREFIX/bin/sed` → PATH 中的版本
+> 2. 检查 `--version` 输出是否含 "GNU" → 是则使用（功能更强）
+> 3. 否则 fallback 到 `/bin/sed`（系统原生 toybox）
+> 
+> 如果仍失败，可跳过非关键子目录：
+> ```bash
+> make install-binPROGRAMS install-binSCRIPTS SED=... INSTALL=...   # 只装 bin/
+> ```
 
 #### 失败恢复操作序列
 
@@ -397,8 +483,8 @@ Q1: 此问题只与本软件有关？
 鸿蒙系统首次执行非系统二进制会弹安全确认框，超时未点则进程被杀。
 
 ```bash
-# make install 后立即触发
-find $HOME/usr/local/bin -type f -exec {} --version \; 2>/dev/null || true
+# make install 后立即触发（在 $TEST_PREFIX 中验证）
+find $TEST_PREFIX/bin -type f -exec {} --version \; 2>/dev/null || true
 
 # make check 前确保已完成弹窗确认
 ```
@@ -410,240 +496,83 @@ find $HOME/usr/local/bin -type f -exec {} --version \; 2>/dev/null || true
 - 错误信息 + 根因 + 解决方案
 - 源码修改清单（表格：文件 | 原因 | 方式 | 补丁状态）
 
-### 2.8 Phase 2.5: 独立目录安装验证（⭐ 必须执行）
+### 2.8 Staging 目录验证（⭐ 必须执行）
 
-> **目的**：验证编译产物可以在干净的独立目录中正确安装和运行，排除对构建环境的隐性依赖。
-> **时机**：Phase 2 (`make install` 成功) 之后、`finish-build.sh` 之前。
-> **重要性**：这是保证"可复现性"的核心步骤——没有它，你无法确认补丁集 + tarball 能在另一台机器上产出相同结果。
+> **目的**：验证 $TEST_PREFIX 中的安装产物完整且功能正常。
+> **时机**：`make install` 到 $TEST_PREFIX 成功之后、package.sh 之前。
+> 
+> **重要变化（v4.3）**：由于 configure --prefix 现在直接指向隔离的 $TEST_PREFIX，
+> **不再需要"重新解压+二次编译"**。本步骤变为轻量级的产物验证。
 
-#### 前置条件
-
-| 条件 | 检查方式 |
-|------|---------|
-| Phase 2 编译成功 | `make install` 已执行且 `$DEFAULT_PREFIX` 下有文件 |
-| 原始 tarball 存在 | `.build-context-*` 中 `BUILD_URL` 可用或 `archives/` 有源码 |
-| 补丁集完整 | `archives/.../patches/000*.patch` 存在 |
-| 磁盘空间足够 | 至少 200MB 可用空间（用于独立编译） |
-
-#### Step 2.5.1: 创建独立测试目录
+#### 验证内容
 
 ```bash
-# 使用 $TMPDIR 遵守 R10（禁止硬编码 /tmp）
-TEST_SRC="${TMPDIR:-$HOME/tmp}/builds/${SOFTWARE}-${VERSION}-test"
-TEST_PREFIX="${TMPDIR:-$HOME/tmp}/test-install-${SOFTWARE}-${VERSION}"
+echo "[Staging 验证] 检查 $TEST_PREFIX 安装产物..."
 
-# 清理旧残留（防止上次中断的脏数据影响结果）
-rm -rf "$TEST_SRC" "$TEST_PREFIX"
-mkdir -p "$TEST_SRC" "$TEST_PREFIX/bin" "$TEST_PREFIX/lib" "$TEST_PREFIX/include"
-
-echo "[2.5.1] 独立测试目录已创建:"
-echo "  TEST_SRC=$TEST_SRC"
-echo "  TEST_PREFIX=$TEST_PREFIX"
-```
-
-#### Step 2.5.2: 解压干净源码 + 应用补丁
-
-```bash
-echo "[2.5.2] 解压原始 tarball..."
-
-# 从 manifest.yaml 获取源码 URL（最可靠）
-TAR_URL=$(grep "^source_url:" "${BUILD_ARCHIVE_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' "')
-
-# 或从 build-context 获取
-if [ -z "$TAR_URL" ] && [ -f ".build-context-${SOFTWARE}-${VERSION}" ]; then
-    TAR_URL=$(grep "^BUILD_URL=" ".build-context-${SOFTWARE}-${VERSION}" | cut -d= -f2- | tr -d '"')
-fi
-
-if [ -n "$TAR_URL" ]; then
-    # 根据扩展名选择解压方式
-    case "$TAR_URL" in
-        *.tar.xz)  curl -fsSL "$TAR_URL" 2>/dev/null | tar xJf - -C "$TEST_SRC" ;;
-        *.tar.gz|*.tgz) curl -fsSL "$TAR_URL" 2>/dev/null | tar xzf - -C "$TEST_SRC" ;;
-        *.tar.bz2) curl -fsSL "$TAR_URL" 2>/dev/null | tar xjf - -C "$TEST_SRC" ;;
-        *)         curl -fsSL "$TAR_URL" -o "${TEST_SRC}/dl.tar" 2>/dev/null && tar xf "${TEST_SRC}/dl.tar" -C "$TEST_SRC" ;;
-    esac
-    echo "  ✅ 解压完成"
-else
-    echo "  ⚠️ 无法获取 tarball URL，尝试复制现有源码..."
-    cp -a "$BUILD_SRC_DIR" "${TEST_SRC}/$(basename "$BUILD_SRC_DIR")"
-fi
-
-# 找到解压出的顶层目录
-EXTRACTED_DIR=$(ls -1d "$TEST_SRC"/*/ 2>/dev/null | head -1 | sed 's:/$::')
-if [ -z "$EXTRACTED_DIR" ]; then
-    echo "[FAIL] 解压失败：未找到源码目录"
-    exit 1
-fi
-echo "  源码目录: $EXTRACTED_DIR"
-
-# 应用所有补丁
-echo "[2.5.2] 应用补丁集..."
-PATCH_COUNT=0
-for p in "${BUILD_ARCHIVE_DIR}"/patches/000*.patch; do
-    [ -f "$p" ] || continue
-    if patch -p1 --dry-run -i "$p" -d "$EXTRACTED_DIR" >/dev/null 2>&1; then
-        patch -p1 < "$p" -d "$EXTRACTED_DIR" >/dev/null 2>&1
-        PATCH_COUNT=$((PATCH_COUNT + 1))
-    else
-        echo "  ⚠️ 补丁 $(basename $p) dry-run 失败，跳过"
-    fi
-done
-echo "  ✅ 已应用 ${PATCH_COUNT} 个补丁"
-```
-
-#### Step 2.5.3: 独立目录 configure + make + make install
-
-```bash
-echo "[2.5.3] 独立目录编译安装..."
-
-cd "$EXTRACTED_DIR"
-
-# 使用与 Phase 2 相同的 configure 参数（保持一致性）
-# 注意 prefix 使用独立的 TEST_PREFIX
-./configure --prefix="$TEST_PREFIX" 2>&1 | tail -3
-CONFIGURE_RC=$?
-
-if [ $CONFIGURE_RC -ne 0 ]; then
-    echo "[FAIL] 独立目录 configure 失败 (rc=${CONFIGURE_RC})"
-    echo "  → 这意味着产物不可在其他环境复现！需要排查原因"
-    exit 1
-fi
-
-make -j1 2>&1 | tail -5
-MAKE_RC=$?
-
-if [ $MAKE_RC -ne 0 ]; then
-    echo "[FAIL] 独立目录 make 失败 (rc=${MAKE_RC})"
-    exit 1
-fi
-
-make install 2>&1 | tail -3
-INSTALL_RC=$?
-
-if [ $INSTALL_RC -ne 0 ]; then
-    echo "[FAIL] 独立目录 make install 失败 (rc=${INSTALL_RC})"
-    exit 1
-fi
-
-echo "  ✅ 独立编译安装成功"
-```
-
-> **⚠️ 如果 Makefile 不支持 DESTDIR**（常见于简单 Makefile 项目）：
-> ```bash
-> # fallback 方案：直接从已安装目录复制
-> cp -a "$DEFAULT_PREFIX/bin/"* "$TEST_PREFIX/bin/" 2>/dev/null || true
-> cp -a "$DEFAULT_PREFIX/lib/"* "$TEST_PREFIX/lib/" 2>/dev/null || true
-> cp -a "$DEFAULT_PREFIX/include/"* "$TEST_PREFIX/include/" 2>/dev/null || true
-> ```
-
-#### Step 2.5.4: 文件完整性验证 + 运行时功能回归测试
-
-```bash
-echo "[2.5.4] 文件完整性检查..."
-
-# 统计安装产物
+# 1. 文件完整性
 BIN_COUNT=$(find "$TEST_PREFIX/bin" -type f 2>/dev/null | wc -l | tr -d ' ')
 LIB_COUNT=$(find "$TEST_PREFIX/lib" -type f 2>/dev/null | wc -l | tr -d ' ')
-INC_COUNT=$(find "$TEST_PREFIX/include" -type f 2>/dev/null | wc -l | tr -d ' ')
+echo "  二进制: ${BIN_COUNT}, 库文件: ${LIB_COUNT}"
 
-echo "  二进制文件: ${BIN_COUNT}"
-echo "  库文件:     ${LIB_COUNT}"
-echo "  头文件:     ${INC_COUNT}"
-
-if [ "$BIN_COUNT" -eq 0 ] && [ "$LIB_COUNT" -eq 0 ]; then
-    echo "[FAIL] 独立安装目录为空！"
+if [ "$BIN_COUNT" -eq 0 ]; then
+    echo "[FAIL] staging 目录为空！"
     exit 1
 fi
 
-echo ""
-echo "[2.5.4] 运行时功能回归测试..."
-
-# 设置独立环境变量（关键：使用 TEST_PREFIX 而非 DEFAULT_PREFIX）
-export LD_LIBRARY_PATH="$TEST_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+# 2. 功能回归测试（使用 $TEST_PREFIX 环境）
 export PATH="$TEST_PREFIX/bin:${PATH}"
+export LD_LIBRARY_PATH="$TEST_PREFIX/lib:${LD_LIBRARY_PATH:-}"
 
-PASS_COUNT=0; FAIL_COUNT=0; WARN_COUNT=0
-
-# 测试每个二进制的 --version（与 G2 类似但更轻量）
+PASS=0; FAIL=0
 for cmd in "$TEST_PREFIX/bin"/*; do
     [ -x "$cmd" ] || continue
     name=$(basename "$cmd")
-    
-    # 跳过脚本类 wrapper
-    head -1 "$cmd" 2>/dev/null | grep -q "^#!" && continue
-    
     output=$("$cmd" --version 2>&1 | head -1)
     if [ -n "$output" ]; then
-        echo "  ✅ $name: $output"
-        PASS_COUNT=$((PASS_COUNT + 1))
+        PASS=$((PASS+1))
     else
-        # 尝试 --help 作为 fallback
-        output=$("$cmd" --help 2>&1 | head -1)
-        if [ -n "$output" ]; then
-            echo "  ⚠️ $name: 无 --version，--help 有输出"
-            WARN_COUNT=$((WARN_COUNT + 1))
-        else
-            echo "  ❌ $name: 无可用输出"
-            FAIL_COUNT=$((FAIL_COUNT + 1))
-        fi
+        FAIL=$((FAIL+1))
+        echo "  ❌ $name"
     fi
 done
+echo "  结果: ${PASS} 通过 / ${FAIL} 失败"
 
-echo ""
-echo "  回归测试结果: ${PASS_COUNT} 通过 / ${FAIL_COUNT} 失败 / ${WARN_COUNT} 警告"
-
-# 恢复环境变量（避免污染后续步骤）
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$TEST_PREFIX/lib:}"
+# 3. 恢复环境
 export PATH="${PATH#$TEST_PREFIX/bin:}"
+export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$TEST_PREFIX/lib:}"
 ```
 
-#### Step 2.5.5: 清理或保留策略
+#### 判定标准
 
-```bash
-echo "[2.5.5] 清理独立测试目录..."
+| 结果 | 条件 | 后续 |
+|------|------|------|
+| **PASS** | BIN_COUNT > 0 + FAIL=0 | → 创建 `.staging-verified` 标记 → make check → package |
+| **PARTIAL** | BIN_COUNT > 0 + 少量 FAIL（平台限制） | → 记录原因，继续 |
+| **FAIL** | BIN_COUNT=0 或大量 FAIL | → 排查 configure/install，修复后重试 |
 
-# 默认行为：清理以节省空间（R10: 使用 $TMPDIR）
-if [ "${KEEP_TEST_DIR:-0}" != "1" ]; then
-    rm -rf "$TEST_SRC" "$TEST_PREFIX"
-    echo "  ✅ 已清理独立测试目录（节省空间）"
-    echo "  💡 如需保留用于调试: KEEP_TEST_DIR=1 ./scripts/prep-test.sh"
-else
-    echo "  📁 保留测试目录（KEEP_TEST_DIR=1）:"
-    echo "     TEST_SRC=$TEST_SRC"
-    echo "     TEST_PREFIX=$TEST_PREFIX"
-fi
+> **PASS 后必须创建标记文件**（finish-build.sh 关卡 B 检查此文件）：
+> ```bash
+> touch "${BUILD_ARCHIVE_DIR}/.staging-verified"
+> ```
 
-echo ""
-echo "════════════════════════════════════════"
-echo "  Phase 2.5 结果: PASS → 可进入 finish-build.sh"
-echo "════════════════════════════════════════"
-```
-
-#### Phase 2.5 判定标准
-
-| 结果 | 条件 | 后续操作 |
-|------|------|---------|
-| **Phase 2.5 判定: PASS** | configure + make + install 全部成功 + 回归测试无失败 | 进入 Step 3 `finish-build.sh success` |
-| **Phase 2.5 判定: PARTIAL** | 安装成功但部分功能测试失败 | → `finish-build.sh partial`，分析失败原因→平台限制则记录并继续；真正的 bug 则修复 |
-| **Phase 2.5 判定: FAIL** | configure/make/install 任一步骤失败 | → `finish-build.sh failed`，**必须修复**——意味着产物不可复现 |
-
-#### 与 prep-test.sh 的关系
-
-`prep-test.sh` 负责 Phase 2.5 的**前置准备**（弹窗触发 + 环境设置），而 Phase 2.5 本身的**完整流程**（解压→编译→安装→测试）由 AI 在本节指导下手动执行。两者关系：
-
-```
-make install (Phase 2 完成)
-    │
-    ├── ./scripts/prep-test.sh              ← 触发弹窗 + 设置 MAKEFLAGS=-j1
-    │
-    └── Phase 2.5 本流程 (§2.8)             ← AI 手动执行 5 步独立验证
-        │
-        └── 通过 → ./scripts/finish-build.sh  ← 自动收尾
-```
-
-## Step 3: finish-build.sh — Phase 4 全自动
+## Step 3: finish-build.sh — Phase 4 全自动（⚠️ 有前置条件）
 
 > **编译成功后一条命令完成所有收尾工作。**
+> 
+> ⚠️ **强制前置条件**（finish-build.sh 内部会自动检查，不满足则降级状态）：
+> 
+> | # | 前置步骤 | 检查方式 | 缺失时处理 |
+> |---|---------|---------|-----------|
+> | **P1** | `make check` / `make test` 已执行 | `reports/test-report.md` 存在且非空 | 降级为 partial，提示补充 |
+> | **P2** | Staging 目录验证已完成（§2.8） | PROGRESS.md 中 staging checkbox 勾选 | 降级为 partial，提示执行 |
+> | **P3** | 预编译包已制作（Step 5） | `packaging/*-ohos-aarch64.tar.gz` 存在 | 降级为 partial，提示打包 |
+> 
+> **AI 执行顺序必须遵循**：
+> ```
+> configure(--prefix=$TEST_PREFIX) → make → make install(到$TEST_PREFIX)
+>   → 安全弹窗(R7) → make check → Staging验证(§2.8)
+>   → package(§Step 5) → finish-build(本节)
+> ```
 
 ```bash
 ./scripts/finish-build.sh <软件名> <版本> success|partial|failed
@@ -656,7 +585,7 @@ make install (Phase 2 完成)
 | [1/5] | refresh-patch.sh --auto | 从原始 tarball diff → per-file 补丁 → 格式校验 → dry-run → hash 绑定 → 写入 manifest | 失败跳过，继续归档 |
 | [2/5] | close-archive.sh | 更新 status → 关闭 PROGRESS.md → 检查知识条目 | 失败则退出(2) |
 | [3/5] | **verify-build.sh** | **质量门禁 G1-G4（二进制/功能/可移植/档案）** | **非阻塞：失败降级状态，不中断管线** |
-| [4/5] | finalize-archive.sh | 清理+校验+一致性检查+RELEASENOTE | 失败非致命 |
+| [4/5] | finalize-archive.sh | **清理(.tmp/.bak + staging目录/构建产物/超大日志)** + 校验+一致性+RELEASENOTE | 失败非致命 |
 | [5/5] | gen_summary.py | 重新生成 SUMMARY.md | 失败非致命 |
 
 ### 状态选择指南
@@ -706,6 +635,11 @@ failed   ─────────────────→ failed  （不�
 | **G3 可移植性** | RPATH=\$ORIGIN / ELF 签名有效 | 其他鸿蒙设备上不可用 |
 | **G4 档案完整性** | man page / .pc 文件 / 补丁可 rebuild / manifest 完整 | 无法复现或被依赖方无法使用 |
 
+> **G4 man page 缺失的常见原因与修复**：
+> - `help2man: Permission denied` → configure 时加 `HELP2MAN=/bin/true` 或 `--disable-man-pages`
+> - `make install` 中断于 man 子目录 → 用 `make install-binPROGRAMS install-binSCRIPTS` 跳过
+> - G4 因 man page 失败**不阻塞分发**（降级为 PASS-WARN），但应在下次编译时修复 configure 参数
+
 ### 判定标准
 
 ```
@@ -735,10 +669,14 @@ FAIL-Gx  → 对应门禁失败 → 只能 partial 或 failed，修复后重验
 
 #### 执行流程
 
+> **打包来源**：$TEST_PREFIX（staging 目录，即 make install 的目标）。
+> **打包产物**：干净的 tar.gz，可分发到任意设备。
+> **部署方式**：用户通过 `install.sh` 安装到其 $DEFAULT_PREFIX。
+
 按 `knowledge/packaging.md` 10 步标准流程：
 
 ```
-Step 1:  安装到独立目录
+Step 1:  从 $TEST_PREFIX 收集已安装文件（已在隔离目录中）
 Step 2:  清理缓存和非必要文件
 Step 3:  符号链接替换（wrapper/cp）
 Step 4:  收集外部依赖库到 lib/external/
@@ -754,6 +692,7 @@ Step 10: 打包干净 tar.gz + 安装验证
 
 ```
 archives/{首字母}/{软件名}/
+├── EXCLUDE_LIST              # 🟡 可选：打包排除列表（有问题的命令/库）
 ├── install.sh                                # 安装脚本（软件级，参数化: sh -s -- <ver>）
 ├── RELEASENOTE.md                             # 发布说明（软件级）
 │
@@ -761,6 +700,38 @@ archives/{首字母}/{软件名}/
     ├── {name}-{ver}-ohos-aarch64.tar.gz        # Release 制品（干净二进制，已 strip）
     └── {name}-{ver}-ohos-aarch64-debug.tar.gz   # Debug 符号包（必须）
 ```
+
+### 打包排除列表（EXCLUDE_LIST）
+
+> **某些命令虽然编译通过，但在鸿蒙上实际使用有问题或影响系统，且无法通过源码修复规避。**
+> **这些命令必须在打包阶段移除，不进入分发的 tar.gz。**
+>
+> **⚠️ 排除流程（v4.4+，实测驱动）：**
+> 1. **build-driver.sh Step 8** 对每个二进制执行实际功能测试（--version + 深度调用测试）
+> 2. 失败的命令自动加入 `archives/{name}/EXCLUDE_LIST`
+> 3. **package.sh Step 2e** 读取 EXCLUDE_LIST 并从打包产物中物理删除
+> 4. 如误排除：从 EXCLUDE_LIST 删除对应行并重新 package
+>
+> **禁止预定义排除列表**——必须基于实测失败数据。
+
+**文件位置**：
+- 软件级（所有版本共享）：`archives/{首字母}/{软件名}/EXCLUDE_LIST`
+- 版本级（覆盖软件级）：`archives/{首字母}/{软件名}/{版本}/EXCLUDE_LIST`
+
+**格式**（每行一个 basename，`#` 开头为注释）：
+```bash
+# EXCLUDE_LIST — 打包时自动移除的文件
+# 需要 setuid/chroot 等 syscall (E051)
+chroot
+# 依赖 /proc/self/fd (E052)
+stdbuf
+# 可能替换系统关键命令导致问题
+kill
+```
+
+**何时创建**：Staging 验证(§2.8)中发现某命令 crash/无输出 → 加入排除列表
+
+**执行时机**：package.sh **Step 2e**（复制文件后、符号链接处理前），从 PKGDIR 中物理删除匹配文件
 
 用户安装：`curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}`
 
@@ -848,13 +819,13 @@ rm -rf archives/<首字母>/<软件名>/<版本>/packaging/*
 
 ## 3.1 P0 参数最少化原则
 
-**目标命令**：`./configure --prefix=$DEFAULT_PREFIX && make && make install`（零额外参数）
+**目标命令**：`./configure && make && make install prefix=$TEST_PREFIX`（零额外参数，安装到隔离 staging 目录）
 
-超出 `--prefix` 和软件自身选项的参数 = 技术债务。
+超出 `--prefix=$TEST_PREFIX` 和软件自身选项的参数 = 技术债务。
 
 | 参数类型 | 是否应该存在 | 消除方法 |
 |---------|-------------|---------|
-| `--prefix=$DEFAULT_PREFIX` | ✅ 必须 | — |
+| `--prefix=$TEST_PREFIX` | ✅ 必须 | — |
 | 软件自身选项（如 `--with-internal-glib`） | ✅ 正常 | — |
 | 平台约束（如 `--without-shared`） | ⚠️ 记录为债务 | 见 dependencies.md |
 | `--build/--host/--target` | ❌ 应消除 | 完善 config.guess/sub |
@@ -978,18 +949,19 @@ HMDFS 文件系统限制软链接：
 
 | 脚本 | 用途 | 调用时机 | 层级 |
 |------|------|---------|------|
-| `init-build.sh` | 编译初始化（下载/解压/检索/骨架/环境/上下文） | Step 1 | Layer2 |
-| `finish-build.sh` | **编译收尾**（补丁+归档+**质量门禁**+校验+总结） | Step 3 | Layer1 |
+| `build-driver.sh` | **编译驱动**（11步全自动：init→补丁→configure→make→install→弹窗→check→Staging→package→deploy→**清理**+finish） | **推荐主入口（v4.3+）** | Layer1 |
+| `init-build.sh` | 编译初始化（下载/解压/检索/骨架/环境/上下文） | Step 1 / driver 内部调用 | Layer2 |
+| `finish-build.sh` | **编译收尾**（补丁+归档+verify+**清理**） | Step 3 | Layer1 |
 | `refresh-patch.sh --auto` | 补丁管线（diff/拆分/校验/验证/hash） | finish 内部 | Layer1 |
 | `search-download-url.sh` | URL 搜索（5 种策略） | init 内部 fallback | Layer3 |
 | `init-archive.sh` | 档架骨架创建 | init 内部 | Layer1 |
 | `check-env.sh` | 环境变量检查 | init 内部 | Layer1 |
 | `detect-build-system.sh` | 构建系统检测 | Step 2 可选 | Layer1 |
 | `verify-symlinks.sh` | 软链接验证 | Step 2 安装后 | Layer1 |
-| `sign-elf.sh` | ELF 签名四步流程 | 打包时 | Layer1 |
+| `sign-elf.sh` | ELF 签名四步流程（**工具可用**: binary-sign-tool + llvm-objcopy + llvm-readelf 均在 /data/service/hnp/bin/，**不应使用 --skip-sign**） | 打包时 | Layer1 |
 | `check-knowledge-gap.sh` | 知识提取遗漏检查 | finish 后可选 | Layer1 |
 | `verify-build.sh` | **产物质量门禁**：4道检测(二进制/功能/可移植/档案) | **finish-build.sh Step 3（自动）/ Step 4（复查）** | Layer1 |
-| `finalize-archive.sh` | **归档收口**：清理+校验+一致性检查 | **Step 5.5（必须）** | Layer1 |
+| `finalize-archive.sh` | **归档校验+清理**（*.tmp/.bak + **临时文件**: staging/exclude-candidates/pkg-verify/超大日志） | finish 内部调用 | Layer1 |
 | `close-archive.sh` | 归档收尾 | finish 内部 | Layer1 |
 | `software-registry.yaml` | 软件元数据缓存（自动增长） | init 读取/写入 | 数据 |
 
@@ -1098,14 +1070,13 @@ archives/{首字母}/{软件名}/                    ← 软件级（跨版本�
 ### Phase 1: 环境准备
 - [ ] init-build.sh 完成 / 源码下载解压
 
-### Phase 2: 编译（configure + make + make install）
-- [ ] configure 完成（记录参数和耗时）
+### Phase 2: 编译（configure + make + make install 到 $TEST_PREFIX）
+- [ ] configure 完成（--prefix=$TEST_PREFIX，记录参数和耗时）
 - [ ] make 编译完成（记录错误和修复）
-- [ ] make install 完成
+- [ ] make install 到 $TEST_PREFIX 完成
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [ ] 干净源码 + 补丁应用
-- [ ] 独立 TEST_PREFIX configure + make install
+### Staging 验证（⭐ 必须做）
+- [ ] $TEST_PREFIX 文件完整性检查
 - [ ] 功能回归测试结果
 
 ### Phase 3: 测试验证
@@ -1133,18 +1104,18 @@ archives/{首字母}/{软件名}/                    ← 软件级（跨版本�
 
 ---
 
-### 对话 #1 — 2026-04-07 14:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
+### 对话 #1 — YYYY-MM-DD HH:MM
+**操作**: 执行 ./configure --prefix=$TEST_PREFIX
 **结果**: ✅ 成功（~310秒），零额外参数
 **发现的问题**: 无
 **当前状态**: Phase 2 configure 完成，下一步执行 make
 **遗留问题**: 无
 
-### 对话 #2 — 2026-04-07 14:30
-**操作**: make -j1 && make install
-**结果**: ✅ 成功，二进制已安装到 $DEFAULT_PREFIX/bin/sed
+### 对话 #2 — YYYY-MM-DD HH:MM
+**操作**: make -j1 && make install（到 $TEST_PREFIX）
+**结果**: ✅ 成功，二进制已安装到 $TEST_PREFIX/bin/
 **发现的问题**: 无
-**当前状态**: Phase 2 完成，下一步进入 Phase 2.5 独立测试
+**当前状态**: Phase 2 完成，下一步 Staging 验证(§2.8) + make check
 **遗留问题**: 无
 
 （后续每轮对话追加...）
@@ -1240,50 +1211,21 @@ Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
 
 ---
 
-*SKILL.md v4.1 — 最后更新: 2026-04-08*
-*v4.1 更新：*
-*  - **#3 修复**: finish-build.sh 新增 Step 3 自动调用 verify-build.sh（质量门禁不再遗漏）*
-*  - **#7 修复**: 统一状态值体系为 success/partial/failed（清除 pass/fail/completed/closed/tested 幽灵状态）*
-*  - §1.3 决策树新增：编译后状态判定分支 + 质量门禁结果处理*
-*  - finish-build.sh 3 步 → 5 步（补丁→归档→**验证**→校验→总结）*
-*  - verify-build.sh 支持 --software/--version/--archive-dir 参数（可被 finish-build 调用）*
-*  - 新增状态转换规则表（verify 通过/失败时的自动升降级逻辑）*
-*v4.0 更新：*
-*  - 四步走 → 五步走（新增 Phase 2.5 独立目录安装验证 + Step 5 预编译包）*
-*  - 九条铁律 → 十条铁律（+R10: $TMPDIR 强制规则）*
-*  - 新增 §1.2 AI 执行风格规范（shell 脚本原则 / configure 耗时参考）*
-*  - 新增 §2.2.1 make check / make test 标准步骤*
-*  - 新增 §1.4/Step 5 预编译包三级触发条件*
-*  - §6.1 归档目录结构标准化（必填文件清单 + 命名统一 + README/PROGRESS 模板）*
-*设计原则：精准（五步走）| 可复现（独立测试保证）| 可分发（预编译包标准）| 可信赖（质量门禁 + 测试套件）*
-�档/辅助)
-第七阶段: man-db                          (文档系统)
-```
-
-> **注意**：使用 `init-build.sh` 时无需手动关注此顺序——单个软件的依赖在 registry 的 `known_issues` 中标注。批量编译时参考此顺序。
-
-## 6.6 流程自省（简化版）
-
-编译过程中发现 SKILL 自身问题时，记录到 `reports/skill-feedback.md`：
-
-```markdown
-### F{NNN}: {简短描述}
-- 类别: 流程缺失 / 矛盾 / 脚本问题 / 导航错误
-- 严重: 🔴🟡🟢
-- 场景: {在哪步发现的}
-- 建议: {怎么改}
-```
-
-Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
-
----
-
-*SKILL.md v4.0 — 最后更新: 2026-04-07*
-*v4.0 更新：*
-*  - 四步走 → 五步走（新增 Phase 2.5 独立目录安装验证 + Step 5 预编译包）*
-*  - 九条铁律 → 十条铁律（+R10: $TMPDIR 强制规则）*
-*  - 新增 §1.2 AI 执行风格规范（shell 脚本原则 / configure 耗时参考）*
-*  - 新增 §2.2.1 make check / make test 标准步骤*
-*  - 新增 §1.4/Step 5 预编译包三级触发条件*
-*  - §6.1 归档目录结构标准化（必填文件清单 + 命名统一 + README/PROGRESS 模板）*
-*设计原则：精准（五步走）| 可复现（独立测试保证）| 可分发（预编译包标准）| 可信赖（质量门禁 + 测试套件）*
+*SKILL.md v4.6 — 最后更新: 2026-04-08*
+*v4.6 更新（清理阶段 + 签名工具说明 + 结构修复）:*
+*  - **#1 新增临时文件清理阶段**: finalize-archive + build-driver Step 12 清理临时文件(staging/exclude-candidates/pkg-verify/超大日志) *
+*  - **#2 签名工具可用性确认**: binary-sign-tool/llvm-objcopy/llvm-readelf 均可用，不应 --skip-sign *
+*  - **#3 工具表恢复**: §4.2 恢复完整 16 个脚本条目 *
+*  - **#4 编译产物不删除**: 清理范围限定为临时文件，不碰 .o/config.log/Makefile 等编译产物 *
+*v4.5 更新（路径修正 + 多框架 + 排除流程）:*
+*  - SED/INSTALL 动态检测(find_tool: GNU优先 > toybox fallback) *
+*  - EXCLUDE_LIST 实测驱动(Step 8 功能测试 → 失败才加入) *
+*  - build-driver.sh 六种构建框架支持(autotools/cmake/meson/perl/makefile/python) *
+*v4.4 更新（编译驱动 + 遵从性强化）:*
+*  - 新增 build-driver.sh: 11步硬编码编译驱动，AI 只需调用一次 *
+*  - 遵从性保障: 文档约束 → 脚本强制 *
+*v4.3 更新（staging 架构重构）:*
+*  - configure --prefix 从 $DEFAULT_PREFIX 改为 $TEST_PREFIX (隔离 staging) *
+*  - install.sh 成为唯一部署通道 *
+*v4.2 更新（流程闸门修复）:*
+*  - finish-build.sh 三道关卡闸门(P1 test-report / P2 staging / P3 package) *

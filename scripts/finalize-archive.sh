@@ -1,4 +1,5 @@
-#!/bin/sh
+#!/bin/env zsh
+setopt +o NOMATCH
 # ==============================================================================
 # [Layer 1] finalize-archive.sh - 归档收口校验（全自动清理+校验+整合）
 # ==============================================================================
@@ -117,9 +118,28 @@ echo "[2/5] 生成软件级 RELEASENOTE.md..."
 _RN="${SOFTWARE_DIR}/RELEASENOTE.md"
 
 _BSYS="unknown"; _SRC_URL=""
+
+# 收集包内容统计
+_BIN_COUNT=$(grep "^binary_count:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d " ")
+_MAN_COUNT=$(grep "^man_page_count:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d " ")
+
+# 收集排除列表
+if grep -q "^exclude_list:" "${VERSION_DIR}/manifest.yaml"; then
+    _EXCLUDE_COUNT=$(grep "^ *count:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d " ")
+    _EXCLUDE_LIST=$(sed -n "/^exclude_list:/,/^patches:/p" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | grep "^ *-" | sed "s/^ *- //" | cut -d"#" -f1 | tr -s " " | tr "\n" "," | sed "s/,$//")
+fi
 if [ -f "${VERSION_DIR}/manifest.yaml" ]; then
-    _BSYS=$(grep "^build_system:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' "')
+    _BSYS=$(grep "build_system:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' "')
     [ -z "$_BSYS" ] && _BSYS="unknown"
+
+# 收集包内容统计
+_BIN_COUNT=$(grep "^binary_count:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d " ")
+_MAN_COUNT=$(grep "^man_page_count:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d " ")
+
+# 收集排除列表
+if grep -q "^exclude_list:" "${VERSION_DIR}/manifest.yaml"; then
+    _EXCLUDE_COUNT=$(grep "^ *count:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d " ")
+fi
     _SRC_URL=$(grep "^source_url:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' "')
 fi
 
@@ -175,21 +195,31 @@ if [ -d "$SOFTWARE_DIR" ]; then
     fi
 fi
 
-cat > "$_RN" <<RNEOF
+# --- 分段生成软件级 RELEASENOTE.md ---
+cat > "$_RN" << EOF
 # ${SOFTWARE_NAME} — HarmonyOS aarch64 预编译包
 
 > **一行安装，开箱即用。** 从源码编译，适配鸿蒙系统。
 
-## 快速使用
+## 快速安装
 
-从 [cmd-pkgs releases](https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases) 下载对应版本的 tar.gz，解压到 ~/usr/local/ 即可使用。
+\`\`\`bash
+tar xzf ${_PKG_FILENAME:-$SOFTWARE_NAME-$VERSION-ohos-aarch64.tar.gz} -C ~/usr/local/
+~/usr/local/bin/cat --version
+\`\`\`
+
+或使用 install.sh 一键安装：
+\`\`\`bash
+sh install-${SOFTWARE_NAME}-${VERSION}.sh
+\`\`\`
 
 ## 可用版本
 
-| 版本 | 状态 | 补丁数 | 质量门禁 |
-|------|------|--------|---------|
-$(# [FIX#5] heredoc 内的原 $(ls -1d ... | sort -Vr) 反模式
-# 使用预排序的版本目录列表（倒序）
+| 版本 | 状态 | 补丁数 |
+|------|------|--------|
+EOF
+
+# 追加版本表（动态）
 if [ -d "$SOFTWARE_DIR" ]; then
     _vdlst2=$(_mktmp verdirs2)
     find "$SOFTWARE_DIR" -maxdepth 1 -type d -name '[0-9]*' > "$_vdlst2" 2>/dev/null || true
@@ -198,76 +228,90 @@ if [ -d "$SOFTWARE_DIR" ]; then
         while IFS= read -r _vd; do
             [ -d "$_vd" ] || continue
             _v=$(basename "$_vd")
-            _st="unknown"; _pc=0; _ql="--"
+            _st="unknown"; _pc=0
             [ -f "$_vd/manifest.yaml" ] && _st=$(grep "^status:" "$_vd/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d ' ')
-            # [FIX#5] 原: _pc=$(ls -1 "$_vd"/patches/000*.patch | wc -l)
             if [ -d "$_vd/patches" ]; then
                 _tpc2=0
-                for _pf2 in "$_vd"/patches/000*.patch; do
+                for _pf2 in "$_vd"/patches/"000"*.patch; do
                     [ -f "$_pf2" ] && _tpc2=$((_tpc2 + 1))
                 done
                 _pc=$_tpc2
             fi
-            [ -f "$_vd/reports/quality-report.md" ] && _ql=$(grep -oE 'PASS|FAIL' "$_vd/reports/quality-report.md" 2>/dev/null | head -1)
-            echo "| ${_v} | ${_st} | ${_pc} | ${_ql:-未测} |"
+            echo "| ${_v} | ${_st} | ${_pc} |" >> "$_RN"
         done < "${_vdlst2}.sorted"
         rm -f "${_vdlst2}.sorted"
     fi
-fi)
+fi
+
+# 追加当前版本详情（静态部分）
+cat >> "$_RN" << EOF
 
 ## 当前版本 (${VERSION}) 详情
 
-### 包含内容
+### 包内容
 
-| 内容 | 数量/大小 | 说明 |
-|------|----------|------|
-| 主二进制 bin/${_BIN_NAME} | ELF aarch64, 已签名 | 核心程序 |
-| Debug 符号包 | 独立下载 | GDB 调试用 |
+| 项目 | 数量 |
+|------|------|
+| 二进制 (bin/) | ${_BIN_COUNT:-未知} 个 ELF aarch64，已签名 |
+| 手册页 | ${_MAN_COUNT:-未知} 个 |
+| 主包大小 | ${_PKG_SIZE:-未知} |
+EOF
 
-### 环境要求
+# 追加排除列表（条件）
+if [ -n "$_EXCLUDE_LIST" ] && [ "${_EXCLUDE_COUNT:-0}" -gt 0 ]; then
+    cat >> "$_RN" << EXCLEOF
 
-- **平台**: HarmonyOS (OpenHarmony) aarch64
-- **依赖**: 仅 musl libc（系统自带，无需额外安装）
-- **磁盘**: ~${_PKG_SIZE}（解压后）
+### 排除命令 (${_EXCLUDE_COUNT} 个)
+
+以下命令因平台限制未包含，请使用系统 **toybox** 替代：
+
+\`\`\`
+${_EXCLUDE_LIST}
+\`\`\`
+EXCLEOF
+fi
+
+# 追加编译信息 + 补丁列表（静态部分）
+cat >> "$_RN" << EOF
 
 ### 编译信息
 
 | 项目 | 值 |
 |------|-----|
-| 源码 | ${_SRC_URL:-见 manifest.yaml} |
-| 构建系统 | $_BSYS |
-| 编译器 | clang + musl libc |
-| 目标 triplet | aarch64-unknown-linux-ohos |
-| 补丁数 | ${_TOTAL_PATCHES} 个 |
-| 质量门禁 | ${_QUALITY} |
+| 构建系统 | ${_BSYS} |
+| 编译器 | clang + musl libc (HarmonyOS NDK) |
+| 目标 | aarch64-unknown-linux-ohos |
+| 补丁 | ${_TOTAL_PATCHES} 个 |
 
-### 已知适配
+### 补丁列表
+EOF
 
-$(if [ "$_TOTAL_PATCHES" -gt 0 ]; then
-    # [FIX#5] 原: for _p in $(ls -1 "${VERSION_DIR}/patches/"000*.patch)
+# 追加补丁列表（动态）
+if [ "$_TOTAL_PATCHES" -gt 0 ]; then
     for _p in "${VERSION_DIR}/patches/"000*.patch; do
-        [ -f "$_p" ] && echo "- ✅ $(basename "$_p")"
+        [ -f "$_p" ] && echo "- ✅ $(basename "$_p")" >> "$_RN"
     done
 else
-    echo "- 无补丁（原生兼容）"
-fi)
+    echo "- 无补丁（原生兼容）" >> "$_RN"
+fi
 
-### 安装说明
+# 追加尾部（静态）
+cat >> "$_RN" << EOF
 
-1. 从 releases 页面下载 \`${_PKG_FILENAME}\`
-2. 解压到目标目录: tar xzf <文件> -C ~/usr/local/
-3. 修复权限: chmod +x ~/usr/local/bin/*
-4. 验证: \${_BIN_NAME} --version → \${VERSION}
+## 环境要求
 
-> 或使用同目录下的 install.sh 一键安装（支持参数化版本选择）
+- **平台**: HarmonyOS / OpenHarmony, aarch64
+- **依赖**: musl libc（系统自带）
 
 ## 许可证
 
-见原始上游源码（许可证不变）
+见原始上游源码
 
 ---
 *由 finalize-archive.sh 自动生成 · $(date '+%Y-%m-%d %H:%M')*
-RNEOF
+EOF
+
+echo "  OK 软件级 RELEASENOTE.md ($(wc -l < "$_RN" | tr -d ' ') 行)"
 
 echo "  OK 软件级 RELEASENOTE.md ($(wc -l < "$_RN" | tr -d ' ') 行)"
 
@@ -353,7 +397,7 @@ echo "[4/5] 信息一致性检查..."
 _issues=0
 
 _prog_status=""; _manifest_status=""
-[ -f "${VERSION_DIR}/PROGRESS.md" ] && _prog_status=$(grep -oE 'success|partial|failed|compiling' "${VERSION_DIR}/PROGRESS.md" 2>/dev/null | head -1)
+[ -f "${VERSION_DIR}/PROGRESS.md" ] && _prog_status=$(grep -oE 'success#final|success|partial|failed|compiling' "${VERSION_DIR}/PROGRESS.md" 2>/dev/null | head -1)
 [ -f "${VERSION_DIR}/manifest.yaml" ] && _manifest_status=$(grep "^status:" "${VERSION_DIR}/manifest.yaml" 2>/dev/null | head -1 | cut -d: -f2 | tr -d ' ')
 
 if [ -n "$_prog_status" ] && [ -n "$_manifest_status" ]; then

@@ -91,6 +91,15 @@ extern "C" {
 class SurfaceImplOHOS;
 namespace Scintilla { namespace Internal { class Surface; } }
 using Surface = Scintilla::Internal::Surface;
+
+// [Fix-0055f] Forward decl — defined with other IME statics below class
+static std::atomic<Sci::Position> s_imeSessionStart{0};
+
+// [Fix-0055f] Mark IME session start — forward decl, body after class definition
+extern "C" void BN_Sci_MarkImeSession(void *editor);
+
+// [Fix-0055c] IME activity notification (defined in napi_init.cpp)
+extern "C" void NoteImeActivity();
 Surface* PlatOHOS_GetCachedMeasurementSurface();
 OH_Drawing_Font* PlatOHOS_GetFontHandle(const Scintilla::Internal::Font *font);
 
@@ -181,6 +190,9 @@ static const char kWindowSentinel = 'W';
 // ============================================================================
 // ScintillaOHOSEditor - ScintillaBase subclass for HarmonyOS
 // ============================================================================
+
+// [Fix-0055d] IME composing gate — file-level static
+static std::atomic<bool> s_imeComposingActive{false};
 
 class ScintillaOHOSEditor : public ScintillaBase {
 public:
@@ -492,8 +504,33 @@ public:
                 OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-IME",
                     "PerformDraw: consuming pending IME text len=%{public}zu (main thread)",
                     pending.size());
+
+                // [Fix-0055f] Delete leaked pinyin: remove everything from session
+                // start to current caret, then insert committed CJK text.
+                // This handles spaces/other chars that may have been inserted between
+                // pinyin letters and the IME commit (which broke the old char-scan approach).
+                {
+                    Sci::Position pos = sel.MainCaret();
+                    Sci::Position sessionStart = s_imeSessionStart.load();
+                    if (pos > sessionStart && sessionStart > 0) {
+                        Sci::Position toDelete = pos - sessionStart;
+                        OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-IME",
+                            "Fix-0055f: deleting leaked input len=%d (sessionStart=%d pos=%d)",
+                            (int)toDelete, (int)sessionStart, (int)pos);
+                        WndProc(Message::SetSelection, sessionStart, pos);
+                        WndProc(Message::Clear, 0, 0);
+                        // Caret is now at sessionStart; ReplaceSel will insert here
+                    }
+                }
+
                 WndProc(Message::ReplaceSel, 0, reinterpret_cast<sptr_t>(pending.c_str()));
                 WndProc(Message::Colourise, 0, -1);
+
+                // [Fix-0055f] Update session start to AFTER the committed CJK text,
+                // so next round of pinyin (if any) will be tracked from here.
+                s_imeSessionStart.store(sel.MainCaret());
+                // [Fix-0055c] Note IME activity for pinyin suppression window
+                NoteImeActivity();
                 needsRedraw = true;
             }
         }
@@ -1073,6 +1110,9 @@ void ScintillaOHOS::Init(int width, int height) {
                     }
                     // Write to pending buffer (thread-safe)
                     {
+                        // [Fix-0055d] Composing ends — IME committing final text
+                        s_imeComposingActive.store(false);
+                        NoteImeActivity();
                         std::lock_guard<std::mutex> lock(s_imeEditor->imePendingMutex);
                         s_imeEditor->imePendingText = std::move(utf8);
                         s_imeEditor->imePendingFlag = true;
@@ -1086,6 +1126,9 @@ void ScintillaOHOS::Init(int width, int height) {
             OH_TextEditorProxy_SetSetPreviewTextFunc(ed->imeProxy,
                 [](InputMethod_TextEditorProxy*, const char16_t *text, size_t length, int32_t start, int32_t end) -> int32_t {
                     if (!s_imeEditor || !text || length == 0) return -1;
+                    // [Fix-0055d] Mark composing active — keyboard letters must be suppressed
+                    s_imeComposingActive.store(true);
+                    NoteImeActivity();
                     // [Patch-0037] Buffer only — DO NOT call WndProc from IPC thread!
                     std::string utf8;
                     utf8.reserve(length * 4);
@@ -1108,6 +1151,8 @@ void ScintillaOHOS::Init(int width, int height) {
             OH_TextEditorProxy_SetFinishTextPreviewFunc(ed->imeProxy,
                 [](InputMethod_TextEditorProxy*) {
                     if (!s_imeEditor) return;
+                    // [Fix-0055d] Composing finished — clear gate
+                    s_imeComposingActive.store(false);
                     // Composing text is already inserted via SetPreviewText/InsertText
                     // Just clear the composing state
                     s_imeEditor->imeComposingText.clear();
@@ -1586,8 +1631,14 @@ void ScintillaOHOS::OnTouchUp(float x, float y, uint32_t timestamp) {
 }
 
 void ScintillaOHOS::OnKeyDown(int keyCode, bool shift, bool ctrl, bool alt, bool meta) {
-    if (!m_impl->editor) return;
-    auto *ed = m_impl->editor.get();
+	if (!m_impl->editor) return;
+	auto *ed = m_impl->editor.get();
+
+	// [Fix-0053/0054] Filter out modifier-only keys (>=2070) AND
+	// mis-mapped keys from 2in1 hardware: LShift=2047, RShift=2048.
+	// These should only affect modifier flags, NOT execute as action keys.
+	static const int kModifierMin = 2070;  // LeftCtrl=2072, RightCtrl=2073
+	if (keyCode >= kModifierMin || keyCode == 2047 || keyCode == 2048) return;
 
     // Build KeyMod from modifier flags
     KeyMod modifiers = KeyMod::Norm;
@@ -1743,6 +1794,18 @@ void ScintillaOHOS::ResetFonts() {
         OH_LOG_Print(LOG_APP, LOG_INFO, 0xF100, "MNP-RESET",
             "ScintillaOHOS::ResetFonts: fontsInitialized reset to false");
     }
+}
+
+// [Fix-0055b] Check if IME is in composing state.
+// When composing, keyboard letter events (pinyin input) should be suppressed —
+// only the IME InsertText callback should insert the final committed text.
+bool ScintillaOHOS::IsComposing() const {
+    // [Fix-0055d] Check IME composing gate flag (set by SetPreviewText IPC callback,
+    // cleared by InsertText/FinishTextPreview). This is the primary gate — it's set
+    // immediately when IME starts composing, before any keyboard letters arrive.
+    if (s_imeComposingActive.load()) return true;
+    // Also check preview text as fallback
+    return m_impl && m_impl->editor && !m_impl->editor->imeComposingText.empty();
 }
 
 // ============================================================================
@@ -2151,6 +2214,25 @@ void BN_Sci_Tick(void *editor) {
 void BN_Sci_ResetFonts(void *editor) {
     if (!editor) return;
     static_cast<ScintillaOHOS*>(editor)->ResetFonts();
+}
+
+// [Fix-0055b] IME composing state check
+
+int BN_Sci_IsComposing(void *editor) {
+    if (editor) {
+        return static_cast<ScintillaOHOS*>(editor)->IsComposing() ? 1 : 0;
+    }
+    return 0;
+}
+
+// [Fix-0055f] Mark IME session start — record caret position before potential pinyin
+extern "C" void BN_Sci_MarkImeSession(void *editor) {
+    if (!editor) return;
+    Sci::Position pos = static_cast<Sci::Position>(BN_Sci_GetCurPos(editor));
+    Sci::Position current = s_imeSessionStart.load();
+    if (current == 0 || pos < current) {
+        s_imeSessionStart.store(pos);
+    }
 }
 
 } // extern "C"

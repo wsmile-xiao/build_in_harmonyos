@@ -1,6 +1,6 @@
-# BlueNotePad_v2 进展记录
+# Scintilla 5.6.1 for HarmonyOS — 补丁归档
 
-> 最后更新：2026-04-06 22:28 (Patch-0041 三阶段CJK字体回退+TOFU显示模式，待设备验证)
+> 最后更新：2026-04-09 02:03 (Fix-0053~0055f 键盘输入修复链)
 
 ---
 
@@ -203,3 +203,26 @@
 | `;` `'` `/` | 2062-2064 | |
 | Escape | 2070 | |
 | LeftCtrl / RightCtrl | 2072 / 2073 | |
+
+---
+
+## Fix 系列：键盘输入完整修复链（2026-04-08 ~ 2026-04-09）
+
+### Fix-0051: MeasureWidths 字节索引映射（✅ 已验证）
+- **根因**：OH_Drawing_FontCountText 返回 Unicode 字符数，Scintilla positions[] 按字节索引 → CJK 行 positions[] 末尾为 0 → 零宽度 → 行不显示
+- **修复**：PlatOHOS.cxx MeasureWidths() 新增多字节 UTF-8 路径，glyph→字节索引映射
+
+### Fix-0053: OnKeyDown 过滤修饰键（✅ 已验证）
+- **修复**：ScintillaOHOS.cxx OnKeyDown() 入口过滤 keyCode>=2070
+
+### Fix-0054: 2in1 左 Shift 映射 Delete（✅ 已验证）
+- **修复**：napi_init.cpp switch 前过滤 diagKeyCode==2047||2048
+
+### Fix-0055: 英文字母 keyUp 输入（✅ 已验证）
+- **修复**：napi_init.cpp type 检查后移，允许可打印字符 keyDown+keyUp
+
+### Fix-0055f: IME 会话位置追踪 + 提交时回删（✅ 已验证）
+- **新增 API**: BN_Sci_MarkImeSession(), BN_Sci_IsComposing()
+- **新增静态变量**: s_imeComposingActive, s_imeSessionStart
+- **逻辑**: 字母按键记录 caret → IME 提交时删除 [sessionStart, pos) → 插入中文
+- **修改文件**: ScintillaOHOS.cxx, ScintillaOHOS.h

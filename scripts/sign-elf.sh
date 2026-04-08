@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/env zsh
 # ==============================================================================
 # [Layer 1] sign-elf.sh - 鸿蒙 ELF 文件签名（全自动四步流程）
 # ==============================================================================
@@ -39,7 +39,7 @@ show_help() {
     cat <<'HELPEOF'
 用法:
   ./sign-elf.sh <ELF文件> [RPATH路径]       签名单个 ELF 文件
-  ./sign-elf.sh --batch <目录>              批量签名目录下所有 ELF 文件
+  ./sign-elf.sh --batch <目录>              并行批量签名目录下所有 ELF 文件（自动使用 CPU 核心数并发）
 
 描述:
   对鸿蒙系统下的 ELF 文件执行四步签名流程：
@@ -182,7 +182,9 @@ sign_single_elf() {
     return 0
 }
 
-# ---------- 批量处理 ----------
+# ---------- 批量处理（并行化）----------
+# 使用 zsh 后台进程池实现并行签名
+# 并发数 = min(CPU核心数, 文件数, 8) 上限
 batch_sign() {
     _dir="$1"
 
@@ -191,47 +193,84 @@ batch_sign() {
         exit 1
     fi
 
-    echo "📦 批量模式: $_dir"
+    # 收集所有 ELF 文件
+    _elf_list="${TMPDIR:-$HOME/tmp}/sign_elf_list_$$.txt"
+    : > "$_elf_list" 2>/dev/null || _elf_list="/tmp/sign_elf_list_$$.txt"
+    find "$_dir" -type f > "$_elf_list" 2>/dev/null || true
+
+    # 过滤出 ELF 文件
+    _real_list="${TMPDIR:-$HOME/tmp}/sign_real_list_$$.txt"
+    : > "$_real_list" 2>/dev/null || _real_list="/tmp/sign_real_list_$$.txt"
+    while IFS= read -r _f; do
+        [ -f "$_f" ] || continue
+        is_elf "$_f" && echo "$_f" >> "$_real_list"
+    done < "$_elf_list"
+    rm -f "$_elf_list"
+
+    _total=$(wc -l < "$_real_list" | tr -d ' ')
+    if [ "$_total" -eq 0 ]; then
+        echo "⚠️  未找到任何 ELF 文件: $_dir"
+        rm -f "$_real_list"
+        return 0
+    fi
+
+    # 确定并发数（CPU 核心数，上限 8）
+    _NCPU=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
+    _JOBS=$(( _NCPU > 8 ? 8 : _NCPU ))
+    [ "$_JOBS" -gt "$_total" ] && _JOBS="$_total"
+
+    echo "📦 批量并行模式: $_dir"
+    echo "   ELF 文件: $_total 个 | 并发数: $_JOBS | CPU: ${_NCPU}核"
     echo ""
 
-    _total=0
     _success=0
     _failed=0
-    _skipped=0
+    _running=0
+    _pids=""
 
-    # [FIX#8] 原: find ... | while read — 管道创建子 shell，计数器在子 shell 中递增，
-    #         父 shell 的 _total/_success/_failed/_skipped 永远为 0！
-    # 改为: find 输出到临时文件，while read 从文件读取（同一 shell，计数器正确传播）
-    _bs_tmp="${TMPDIR:-$HOME/tmp}/sign_batch_$$.lst"
-    : > "$_bs_tmp" 2>/dev/null || _bs_tmp="/tmp/sign_batch_$$.lst"
-    find "$_dir" -type f > "$_bs_tmp" 2>/dev/null || true
+    # 进程池：启动最多 _JOBS 个后台任务
+    while IFS= read -r _elf_file; do
+        [ -z "$_elf_file" ] && continue
 
-    while IFS= read -r _f; do
-        [ -z "$_f" ] && continue
-        [ -f "$_f" ] || continue
-        _total=$(( _total + 1 ))
-        if is_elf "$_f"; then
-            if sign_single_elf "$_f" ""; then
-                _success=$(( _success + 1 ))
-            else
-                _failed=$(( _failed + 1 ))
-            fi
-        else
-            _skipped=$(( _skipped + 1 ))
-        fi
-    done < "$_bs_tmp"
+        # 等待有空位（运行中的任务数 >= _JOBS 时阻塞）
+        while [ "$_running" -ge "$_JOBS" ]; do
+            wait -n 2>/dev/null || sleep 0.05
+            # 检查已完成的任务并更新计数
+            _new_pids=""
+            for _pid in $_pids; do
+                if kill -0 "$_pid" 2>/dev/null; then
+                    _new_pids="${_new_pids} ${_pid}"
+                else
+                    wait "$_pid" 2>/dev/null
+                    _rc=$?
+                    [ "$_rc" -eq 0 ] && _success=$((_success + 1)) || _failed=$((_failed + 1))
+                    _running=$((_running - 1))
+                fi
+            done
+            _pids="$_new_pids"
+        done
 
-    rm -f "$_bs_tmp"
+        # 启动新后台任务
+        sign_single_elf "$_elf_file" "" &
+        _pids="${_pids} $!"
+        _running=$((_running + 1))
+    done < "$_real_list"
+
+    # 等待所有剩余任务完成
+    for _pid in $_pids; do
+        wait "$_pid" 2>/dev/null
+        _rc=$?
+        [ "$_rc" -eq 0 ] && _success=$((_success + 1)) || _failed=$((_failed + 1))
+    done
+
+    rm -f "$_real_list"
 
     echo ""
     echo "════════════════════════════"
-    echo "📊 批量处理完成"
-    echo "  ✅ 成功: $_success"
+    echo "📊 批量并行处理完成 (并发=${_JOBS})"
+    echo "  ✅ 成功: $_success / $_total"
     if [ "$_failed" -gt 0 ]; then
-        echo "  ❌ 失败: $_failed"
-    fi
-    if [ "$_skipped" -gt 0 ]; then
-        echo "  ⏭️  跳过（非 ELF）: $_skipped"
+        echo "  ❌ 失败: $_failed / $_total"
     fi
     echo "════════════════════════════"
 
