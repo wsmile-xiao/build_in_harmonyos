@@ -65,12 +65,9 @@ update_task_card() {
         s/| — |/| ${_now_time} |/
     }" "$TASK_CARD" 2>/dev/null
     
-    # 如果有备注且该行为空备注，填入
+    # 如果有备注且该行为空备注，填入（用 awk 避免 sed / 分隔符冲突）
     if [ -n "$_step_note" ]; then
-        sed -i "/^| ${_step_num} |/{
-            s/| $/| ${_step_note} |/
-            s/| finish-build 子步骤 |/| ${_step_note} |/
-        }" "$TASK_CARD" 2>/dev/null
+        awk -F'|' -v step="$_step_num" -v note="$_step_note" '{if($2~"[ ]*"step"[ ]*"){nf=split($0,a,"|");a[nf-1]=" "note " ";for(i=1;i<=nf;i++)printf "%s%s",a[i],(i<nf?"|":"\n")} else print}' "$TASK_CARD" > "$TASK_CARD.tmp" && mv "$TASK_CARD.tmp" "$TASK_CARD" 2>/dev/null
     fi
 }
 

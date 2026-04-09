@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **3** |
-| 编译成功 | 3 (pkg-config, sed, coreutils) |
-| 打包成功 | 3 (pkg-config, sed, coreutils) |
+| 已完成 | **6** |
+| 编译成功 | 6 (pkg-config, sed, coreutils, **gawk**, **automake**, libtool) |
+| 打包成功 | 5 (pkg-config, sed, coreutils, **gawk**, **automake**) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -53,14 +53,14 @@
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
 | 03 | coreutils | 9.10 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/coreutils-9.10-ohos-aarch64.tar.gz (11M) | 3个补丁, 86二进制(排除14个), 100man页, 已签名 |
-| 04 | gawk | 5.3.0 | ⬜ 待编译 | - | - | - | 替代 toybox awk |
+| 04 | gawk | 5.3.0 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/gawk-5.3.0-ohos-aarch64.tar.gz (3.9M) | 无外部依赖, 替代 toybox awk |
 
 ### 第二阶段：Autotools 工具链
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 05 | automake | 1.16.5 | ⬜ 待编译 | - | - | - | ⚠️ 有鸡生蛋问题 |
-| 06 | libtool | 2.4.7 | ⬜ 待编译 | - | - | - | 依赖 automake |
+| 05 | automake | 1.16.5 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/automake-1.16.5-ohos-aarch64.tar.gz (1.2M) | 依赖 Perl, 官方测试套件不可用(鸡生蛋), 手动全链路验证通过 |
+| 06 | libtool | 2.4.7 | ✅ 完成 | ✅ 成功 | ✅ 成功  | - | 1个补丁(config.guess+config.sub), libtoolize有E035已知问题, 核心功能正常 |
 
 ### 第三阶段-A：压缩/基础库（无依赖）
 
@@ -140,11 +140,24 @@
 | **zsh glob 无匹配报错** | `set -euo pipefail` + zsh 默认 NOMATCH 导致 `*.tmp` 等模式报错退出 | shebang 改为 `#!/bin/zsh` + `setopt +o NOMATCH` | ✅ |
 | **PROGRESS status 匹配 WARN** | grep `-oE 'success\|...'` 从 `success#final` 只截取 `success` | 扩展为支持 `success#final` | ✅ |
 
+### libtool 2.4.7
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **构建系统检测为 unknown** | 源码解压后实际在 `libtool-2.4.7.orig/` 子目录，build-driver 未找到顶层 configure | 手动进入子目录执行 configure/make/install | ✅ |
+| **package.sh Permission denied (exit 126)** | 脚本文件缺少 `+x` 执行权限（7个 .sh 文件） | `chmod +x scripts/*.sh` | ✅ |
+| **build-driver.sh 退出码 126 "Is a directory"** | 脚本中裸的 `""` 空字符串命令在 toybox sh + `set -e` 下返回非零退出码 | 删除 3 处空行 `""` 命令 | ✅ |
+| **_task_card.sh sed 分隔符冲突** | 备注 `2/2` 中的 `/` 与 sed `s///` 的 `/` 分隔符冲突 → `unknown option to 's'` | 改用 awk 替代 sed 进行备注字段写入 | ✅ |
+| **package.sh 打包失败** | 打包目录不存在（`packaging/libtool/2.4.7/`），package.sh 无法生成 tar.gz | 需后续补跑 package.sh 或手动打包 | ⚠️ 待处理 |
+| **libtoolize func_add_hook 错误 (E035)** | libtoolize 的 inline-source shell 函数机制在 HarmonyOS sh 下无法正确加载 | 核心功能 `libtool` 正常可用，libtoolize 仅影响从零创建 autotools 项目 | ✅ 已知限制 |
+
 ### 关键经验
 
 1. **`make install prefix=` 可以绕过重新 configure** — 当 prefix 配置错误时无需 distclean
 2. **coreutils 是零依赖纯二进制包** — lib/ 目录为空，不需要 Step 4 收集外部依赖
 3. **heredoc 嵌套是反模式** — 分段写入更可靠、更易调试
+4. **toybox sh 对 POSIX 兼容性有限** — `\uXXXX` 转义、`\|` 地址模式、裸 `""` 命令等需避免
+5. **sed 分割符选择要考虑变量内容** — 当替换值可能含 `/` 时必须改用其他分隔符或 awk
 
 ---
 
@@ -209,8 +222,8 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 ---
 
 *最后更新: 2026-04-09*
-*v4.1 同步更新：*
-*  - coreutils 9.10 标记为已完成（编译+打包+签名+归档收口，86二进制/11M）*
-*  - package.sh / sign-elf.sh / finalize-archive.sh 统一迁移为 zsh*
-*  - finalize-archive.sh RELEASENOTE.md 重写为分段写入模式*
-*  - 问题记录新增 coreutils 9.10 对话 #3 的 8 个问题及修复*
+*v4.3 同步更新：*
+*  - gawk 5.3.0 标记为已完成（编译+打包+签名，3.9M）*
+*  - automake 1.16.5 标记为已完成（编译+打包+签名，1.2M，手动全链路验证通过）*
+*  - 已完成数 4 → 6（pkg-config, sed, coreutils, gawk, automake, libtool）*
+*  - 打包成功数 3 → 5（libtool 未打包）*

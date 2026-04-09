@@ -78,6 +78,12 @@ echo ""
 FIRST_LETTER="$(echo "$SOFTWARE" | cut -c1 | tr 'A-Z' 'a-z')"
 ARCHIVE_DIR="${PROJECT_DIR}/archives/${FIRST_LETTER}/${SOFTWARE}/${VERSION}"
 
+# ---- 任务卡（与 build-driver 共享）----
+TASK_CARD="${ARCHIVE_DIR}/TASK_CARD.md"
+if [ -f "${SCRIPT_DIR}/_task_card.sh" ]; then
+    . "${SCRIPT_DIR}/_task_card.sh"
+fi
+
 # ════════════════════════════════════════
 #   Step 0: 前置关卡闸门（流程完整性检查）
 # ════════════════════════════════════════
@@ -150,12 +156,15 @@ if [ -x "${SCRIPT_DIR}/refresh-patch.sh" ]; then
     if "${SCRIPT_DIR}/refresh-patch.sh" --auto "$SOFTWARE" "$VERSION"; then
         STEP1_OK=true
         echo "  ✅ 补丁生成完成"
+        update_task_card 11a "✅完成" "refresh-patch OK"
     else
         echo "  ⚠️  补丁生成失败（退出码 $?），继续归档..."
+        update_task_card 11a "⚠️部分" "refresh-patch 失败"
     fi
 else
     echo "  ⏭️  refresh-patch.sh 不存在，跳过"
     STEP1_OK=true  # 不存在不算失败
+    update_task_card 11a "⏭️跳过" "脚本不存在"
 fi
 echo ""
 
@@ -166,13 +175,16 @@ if [ -x "${SCRIPT_DIR}/close-archive.sh" ]; then
     if _SKIP_PATCH_GENERATION=true "${SCRIPT_DIR}/close-archive.sh" "$SOFTWARE" "$VERSION" "$STATUS"; then
         STEP2_OK=true
         echo "  ✅ 归档完成"
+        update_task_card 11b "✅完成" "close-archive OK"
     else
         RC=$?
         echo "  ❌ 归档失败 (exit code: $RC)，继续后续步骤..."
+        update_task_card 11b "❌失败" "exit $RC"
         # 不再 exit 2！允许 finalize-archive 等后续步骤继续执行
     fi
 else
     echo "  ⚠️  close-archive.sh 不存在"
+    update_task_card 11b "⏭️跳过" "脚本不存在"
 fi
 echo ""
 
@@ -200,6 +212,7 @@ if [ -f "${PROJECT_DIR}/scripts/verify-build.sh" ]; then
     if [ "$VERIFY_RC" -eq 0 ]; then
         echo "  ✅ 质量门禁全部通过"
         STEP3_OK=true
+        update_task_card 11c "✅完成" "G1-G4 全通过"
         # 保持或升级状态：验证通过不降低已有状态
         case "$STATUS" in
             failed) STATUS="partial" ;;   # 验证通过至少是 partial
@@ -208,6 +221,7 @@ if [ -f "${PROJECT_DIR}/scripts/verify-build.sh" ]; then
     else
         echo "  ⚠️  质量门禁有警告/失败 (RC=$VERIFY_RC)，继续归档但标记状态"
         STEP3_OK=true  # 非阻塞，继续后续步骤
+        update_task_card 11c "⚠️部分" "G1-G4 RC=$VERIFY_RC"
         # 验证失败则降级状态
         case "$STATUS" in
             success) STATUS="partial" ;;
@@ -218,6 +232,7 @@ if [ -f "${PROJECT_DIR}/scripts/verify-build.sh" ]; then
 else
     echo "  ⏭️  verify-build.sh 不存在，跳过验证"
     STEP3_OK=true  # 不存在不算失败
+    update_task_card 11c "⏭️跳过" "脚本不存在"
 fi
 echo ""
 
@@ -228,13 +243,16 @@ if [ -x "${SCRIPT_DIR}/finalize-archive.sh" ]; then
     if "${SCRIPT_DIR}/finalize-archive.sh" "$SOFTWARE" "$VERSION"; then
         STEP4_OK=true
         echo "  ✅ 归档校验通过"
+        update_task_card 11d "✅完成" "finalize OK"
     else
         echo "  ⚠️  归档校验有警告（非阻塞）"
         STEP4_OK=true
+        update_task_card 11d "⚠️部分" "有警告"
     fi
 else
     echo "  ⏭️  finalize-archive.sh 不存在，跳过"
     STEP4_OK=true
+    update_task_card 11d "⏭️跳过" "脚本不存在"
 fi
 echo ""
 
@@ -248,17 +266,21 @@ if command -v python3 >/dev/null 2>&1; then
         if python3 "$GEN_SUMMARY" 2>/dev/null; then
             STEP5_OK=true
             echo "  ✅ SUMMARY.md 已更新"
+            update_task_card 11e "✅完成" "gen_summary OK"
         else
             echo "  ⚠️  gen_summary.py 执行失败（可能非致命）"
             STEP5_OK=true
+            update_task_card 11e "⚠️部分" "执行失败"
         fi
     else
         echo "  ⏭️  gen_summary.py 不存在"
         STEP5_OK=true
+        update_task_card 11e "⏭️跳过" "脚本不存在"
     fi
 else
     echo "  ⏭️  python3 不可用"
     STEP5_OK=true
+    update_task_card 11e "⏭️跳过" "python3不可用"
 fi
 echo ""
 
