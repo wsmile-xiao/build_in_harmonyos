@@ -62,7 +62,7 @@ fi
 case "$1" in --help|-h) show_help ;; esac
 
 # 解析参数（支持位置参数和可选标志）
-SOFTWARE="$2"
+SOFTWARE="$1"
 VERSION=""
 ARCHIVE_DIR_OVERRIDE=""
 
@@ -108,14 +108,42 @@ echo "  软件: ${SOFTWARE} ${VERSION}"
 echo ""
 
 # ---- 找到安装目录和归档目录 ----
-# DEFAULT_PREFIX 是唯一权威的安装前缀变量（由 init-build.sh export 或环境变量传入）
-# fallback: 如果未设置则使用默认路径
+# DEFAULT_PREFIX 是全局安装前缀（由 init-build.sh export 或环境变量传入）
 if [ -z "${DEFAULT_PREFIX:-}" ]; then
     DEFAULT_PREFIX="$HOME/usr/local"
 fi
 
-if [ ! -d "$DEFAULT_PREFIX/bin" ] && [ ! -d "$DEFAULT_PREFIX/lib" ]; then
-    echo "[FAIL] 安装目录不存在: $DEFAULT_PREFIX"
+# 优先从 build-context 读取 TEST_PREFIX（staging 隔离目录）
+# 这是当前软件的实际安装位置，避免扫描全局目录中其他软件的产物
+_TEST_PREFIX=""
+# 精确匹配
+_CTX_FILE="${PROJECT_DIR}/.build-context-${SOFTWARE}-${VERSION}"
+if [ -f "$_CTX_FILE" ]; then
+    _TEST_PREFIX=$(grep "^TEST_PREFIX=\|^export TEST_PREFIX=" "$_CTX_FILE" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')
+fi
+# 兜底: glob 匹配（容错参数顺序问题）
+if [ -z "$_TEST_PREFIX" ]; then
+    _CTX_GLOB=$(ls "${PROJECT_DIR}/.build-context-${SOFTWARE}-"*-${VERSION} "${PROJECT_DIR}/.build-context-${VERSION}-${SOFTWARE}"* 2>/dev/null | head -1)
+    if [ -n "$_CTX_GLOB" ] && [ -f "$_CTX_GLOB" ]; then
+        _TEST_PREFIX=$(grep "^TEST_PREFIX=\|^export TEST_PREFIX=" "$_CTX_GLOB" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')
+    fi
+fi
+# 也支持直接通过环境变量传入
+if [ -z "$_TEST_PREFIX" ] && [ -n "${TEST_PREFIX:-}" ]; then
+    _TEST_PREFIX="$TEST_PREFIX"
+fi
+
+# INSTALL_PREFIX: 产物扫描用此路径（staging 优先，fallback 到全局）
+if [ -n "$_TEST_PREFIX" ] && [ -d "$_TEST_PREFIX/bin" ]; then
+    INSTALL_PREFIX="$_TEST_PREFIX"
+    echo "[INFO] 使用 staging 目录: $INSTALL_PREFIX"
+else
+    INSTALL_PREFIX="$DEFAULT_PREFIX"
+    echo "[INFO] staging 未找到，回退到全局目录: $INSTALL_PREFIX"
+fi
+
+if [ ! -d "$INSTALL_PREFIX/bin" ] && [ ! -d "$INSTALL_PREFIX/lib" ]; then
+    echo "[FAIL] 安装目录不存在: $INSTALL_PREFIX"
     exit 1
 fi
 
@@ -167,7 +195,7 @@ BROKEN_ELFS=0
 
 # 收集所有 ELF 文件（使用临时文件避免 word-split 反模式）
 _tmp_g1_bin="${TMPDIR:-$HOME/tmp}/verify_find_g1_bin_$$.lst"
-find "$DEFAULT_PREFIX/bin" -type f > "$_tmp_g1_bin" 2>/dev/null || true
+find "$INSTALL_PREFIX/bin" -type f > "$_tmp_g1_bin" 2>/dev/null || true
 while IFS= read -r elf; do
     [ -f "$elf" ] || continue
     ELF_COUNT=$((ELF_COUNT + 1))
@@ -227,7 +255,7 @@ rm -f "$_tmp_g1_bin"
 
 # 也检查 lib 目录下的共享库（使用临时文件避免 word-split 反模式）
 _tmp_g1_lib="${TMPDIR:-$HOME/tmp}/verify_find_g1_lib_$$.lst"
-find "$DEFAULT_PREFIX/lib" -name "*.so" -type f > "$_tmp_g1_lib" 2>/dev/null || true
+find "$INSTALL_PREFIX/lib" -name "*.so" -type f > "$_tmp_g1_lib" 2>/dev/null || true
 while IFS= read -r lib; do
     [ -f "$lib" ] || continue
     ELF_COUNT=$((ELF_COUNT + 1))
@@ -251,7 +279,7 @@ echo "[G2/4] 功能可用性..."
 
 # G2-1: --version 测试（使用临时文件避免 word-split 反模式）
 _tmp_g2_bin="${TMPDIR:-$HOME/tmp}/verify_find_g2_bin_$$.lst"
-find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g2_bin" 2>/dev/null || true
+find "$INSTALL_PREFIX/bin" -type f -executable > "$_tmp_g2_bin" 2>/dev/null || true
 _head=0
 while IFS= read -r bin; do
     [ -f "$bin" ] || continue
@@ -341,7 +369,7 @@ echo "[G3/4] 可移植性..."
 RPATH_OK=0; RPATH_BAD=0
 if command -v patchelf >/dev/null 2>&1; then
     _tmp_g3_rpath="${TMPDIR:-$HOME/tmp}/verify_find_g3_rpath_$$.lst"
-    find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g3_rpath" 2>/dev/null || true
+    find "$INSTALL_PREFIX/bin" -type f -executable > "$_tmp_g3_rpath" 2>/dev/null || true
     while IFS= read -r elf; do
         [ -f "$elf" ] || continue
         RPATH=$(patchelf --print-rpath "$elf" 2>/dev/null || true)
@@ -365,7 +393,7 @@ SIGNED_OK=0; SIGNED_BAD=0
 if command -v sign-elf.sh >/dev/null 2>&1; then
     # 只检查签名是否存在，不重新签名
     _tmp_g3_sign="${TMPDIR:-$HOME/tmp}/verify_find_g3_sign_$$.lst"
-    find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g3_sign" 2>/dev/null || true
+    find "$INSTALL_PREFIX/bin" -type f -executable > "$_tmp_g3_sign" 2>/dev/null || true
     while IFS= read -r elf; do
         [ -f "$elf" ] || continue
         # 鸿蒙的签名状态可以通过特定方式检测
@@ -389,7 +417,7 @@ fi
 # G3-3: 解压后可运行模拟（使用临时文件避免 word-split 反模式）
 REL_PATH_ISSUE=0
 _tmp_g3_interp="${TMPDIR:-$HOME/tmp}/verify_find_g3_interp_$$.lst"
-find "$DEFAULT_PREFIX/bin" -type f -executable > "$_tmp_g3_interp" 2>/dev/null || true
+find "$INSTALL_PREFIX/bin" -type f -executable > "$_tmp_g3_interp" 2>/dev/null || true
 while IFS= read -r elf; do
     [ -f "$elf" ] || continue
     INTERP=$(patchelf --print-interpreter "$elf" 2>/dev/null || true)
@@ -420,14 +448,14 @@ echo "[G4/4] 档案完整性..."
 
 # G4-1: man page（使用临时文件避免 word-split 反模式）
 _tmp_g4_man="${TMPDIR:-$HOME/tmp}/verify_find_g4_man_$$.lst"
-find "$DEFAULT_PREFIX/share/man" -name "*.${SOFTWARE}*" -type f > "$_tmp_g4_man" 2>/dev/null || true
+find "$INSTALL_PREFIX/share/man" -name "*.${SOFTWARE}*" -type f > "$_tmp_g4_man" 2>/dev/null || true
 MAN_COUNT=$(wc -l < "$_tmp_g4_man" 2>/dev/null | tr -d ' ')
 rm -f "$_tmp_g4_man"
 if [ "$MAN_COUNT" -gt 0 ]; then
     g4_pass "man page: 找到 ${MAN_COUNT} 个相关手册页"
 else
     _tmp_g4_man_any="${TMPDIR:-$HOME/tmp}/verify_find_g4_man_any_$$.lst"
-    find "$DEFAULT_PREFIX/share/man" -name "*.1" -o -name "*.gz" > "$_tmp_g4_man_any" 2>/dev/null || true
+    find "$INSTALL_PREFIX/share/man" -name "*.1" -o -name "*.gz" > "$_tmp_g4_man_any" 2>/dev/null || true
     MAN_ANY=$(wc -l < "$_tmp_g4_man_any" 2>/dev/null | tr -d ' ')
     rm -f "$_tmp_g4_man_any"
     if [ "$MAN_ANY" -gt 0 ]; then
@@ -439,7 +467,7 @@ fi
 
 # G4-2: pkg-config .pc 文件（使用临时文件避免 word-split 反模式）
 _tmp_g4_pc="${TMPDIR:-$HOME/tmp}/verify_find_g4_pc_$$.lst"
-find "$DEFAULT_PREFIX/lib/pkgconfig" -name "*.pc" -type f > "$_tmp_g4_pc" 2>/dev/null || true
+find "$INSTALL_PREFIX/lib/pkgconfig" -name "*.pc" -type f > "$_tmp_g4_pc" 2>/dev/null || true
 PC_COUNT=$(wc -l < "$_tmp_g4_pc" 2>/dev/null | tr -d ' ')
 rm -f "$_tmp_g4_pc"
 if [ "$PC_COUNT" -gt 0 ]; then

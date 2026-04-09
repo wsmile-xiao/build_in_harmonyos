@@ -488,11 +488,20 @@ auto_mode() {
     _norm_orig="$(cd "$ORIG_DIR" && pwd)"
     _norm_mod="$(cd "$MOD_DIR" && pwd)"
 
-    # 使用 symlink 确保相对路径 diff
+    # 使用 symlink 确保相对路径 diff（fallback: 硬链接 → 复制）
     WORK="${TMPDIR}/.patch-work-${_software}"
     rm -rf "$WORK" && mkdir -p "$WORK"
-    ln -sf "$_norm_orig" "$WORK/orig"
-    ln -sf "$_norm_mod" "$WORK/mod"
+    if ln -sf "$_norm_orig" "$WORK/orig" 2>/dev/null && \
+       ln -sf "$_norm_mod" "$WORK/mod" 2>/dev/null; then
+        : # 符号链接成功（大多数 Linux 系统）
+    elif cp -al "$_norm_orig" "$WORK/orig" 2>/dev/null && \
+         cp -al "$_norm_mod" "$WORK/mod" 2>/dev/null; then
+        : # 硬链接成功（HarmonyOS 不支持 symlink 时 fallback）
+    else
+        # 最终 fallback: 完整复制
+        cp -a "$_norm_orig" "$WORK/orig"
+        cp -a "$_norm_mod" "$WORK/mod"
+    fi
 
     _patch_num=0
     _total_files=0

@@ -4,7 +4,7 @@
 # ==============================================================================
 # 层级: L1.5 (半自动, 大部分步骤自动)
 # 决策点: 极少 (仅签名失败和 RPATH 策略需人工确认)
-# 入口: ./scripts/package.sh <software_name> <version> [--static] [--debug] [--skip-sign]
+# 入口: ./scripts/package.sh <software_name> <version> [--static] [--debug]
 # 依赖: llvm-objcopy, llvm-readelf, binary-sign-tool, patchelf(可选), strip
 # 调用者: AI 在 verify-build PASS 后调用; 或手动执行
 # 基于: knowledge/packaging.md v2.3
@@ -29,7 +29,6 @@ SOFTWARE_NAME=""
 VERSION=""
 STATIC_BUILD=false
 DEBUG_BUILD=true   # debug 包默认启用（SKILL §6.1 必填文件要求）
-SKIP_SIGN=false
 # DEFAULT_PREFIX: 唯一权威的安装前缀变量（由 init-build.sh export 或环境变量传入）
 # --prefix 参数可覆盖，否则通过 fallback 自动检测
 # 注意：v4.3+ 优先使用 $TEST_PREFIX（staging 目录）作为打包来源
@@ -52,14 +51,12 @@ show_help() {
                 - Step 5 RPATH 只处理可执行文件
                 - Step 6 .a 文件跳过 strip
   --debug      同时生成 debug 包 (含调试符号, .debug 文件)
-  --skip-sign  跳过 ELF 签名步骤 (Step 7)
   --prefix=PATH  指定安装前缀路径 (默认自动检测)
   -h, --help   显示此帮助
 
 示例:
   ./scripts/package.sh sed 4.9
   ./scripts/package.sh openssl 3.0.13 --static --debug
-  ./scripts/package.sh python 3.9.25 --skip-sign
   ./scripts/package.sh ncurses 6.4 --static --prefix=$HOME/usr/local
 
 输出位置:
@@ -78,7 +75,6 @@ while [ $# -gt 0 ]; do
         --static)     STATIC_BUILD=true ;;
         --debug)      DEBUG_BUILD=true ;;
         --no-debug)   DEBUG_BUILD=false ;;
-        --skip-sign)  SKIP_SIGN=true ;;
         --prefix=*)   DEFAULT_PREFIX="${1#--prefix=}" ;;
         -h|--help)    show_help; exit 0 ;;
         -*)
@@ -122,7 +118,7 @@ echo "  Archive: ${ARCHIVE_DIR}"
 echo "  PkgDir : ${PKGDIR}"
 echo "  Static : $([ "$STATIC_BUILD" = true ] && echo 'YES' || echo 'NO')"
 echo "  Debug  : $([ "$DEBUG_BUILD" = true ] && echo 'YES' || echo 'NO')"
-echo "  Sign   : $([ "$SKIP_SIGN" = true ] && echo 'SKIP' || echo 'YES')"
+echo "  Sign   : YES"
 echo "============================================"
 
 # ============ 前置检查 ============
@@ -598,18 +594,13 @@ echo "  OK: stripped $STRIP_COUNT files${DEBUG_BUILD:+, separated $DEBUG_COUNT d
 #   - binary-sign-tool sign -inFile -outFile -selfSign 1
 #   - 最多重试 3 次
 #   - 失败标记为 .unsigned 但不中断流程
-#   - --skip-sign 完全跳过此步
 #
 echo "[Step 7/10] ELF 签名..."
 SIGN_OK=0
 SIGN_FAIL=0
 SIGN_SKIP=0
 
-if [ "$SKIP_SIGN" = true ]; then
-    echo "  SKIP: signing disabled (--skip-sign)"
-    SIGN_SKIP=$(find "$PKGDIR" -type f -exec file {} \; 2>/dev/null | grep -ci 'ELF' || echo "0")
-
-elif [ -x "$BINARY_SIGN_TOOL" ]; then
+if [ -x "$BINARY_SIGN_TOOL" ]; then
 
     sign_elf_single() {
         _file="$1"
@@ -765,6 +756,21 @@ printf '"$DST/bin/%s" --version | head -1\n' "$SOFTWARE_NAME" >> "$_INSTALL_SH"
 
 chmod +x "$_INSTALL_SH"
 echo "  OK: install.sh generated at ${_INSTALL_SH}"
+
+# ---- 9b: 生成软件级 install.sh（基于模板，供所有版本共享）----
+_SW_INSTALL="${ARCHIVES_DIR}/${FIRST_LETTER}/${SOFTWARE_NAME}/install.sh"
+_TEMPLATE="${PROJECT_DIR}/scripts/install-template.sh"
+if [ -f "$_TEMPLATE" ]; then
+    if [ ! -f "$_SW_INSTALL" ] || [ "$(wc -l < "$_SW_INSTALL" 2>/dev/null)" -lt 5 ]; then
+        sed "s/{PKG_NAME}/${SOFTWARE_NAME}/g" "$_TEMPLATE" > "$_SW_INSTALL"
+        chmod +x "$_SW_INSTALL"
+        echo "  OK: software-level install.sh generated at ${_SW_INSTALL}"
+    else
+        echo "  OK: software-level install.sh already exists ($(wc -l < "$_SW_INSTALL" | tr -d ' ') lines), skipped"
+    fi
+else
+    echo "  WARN: install-template.sh not found at ${_TEMPLATE}, skipping software-level install.sh"
+fi
 
 # ================================================================
 # Step 10: 打包 tar.gz (扁平结构)

@@ -264,6 +264,23 @@ EOF
     echo "  ✅ README.md 已创建（模板）"
 fi
 
+# ---------- 步骤 4b: 软件级元文件同步（版本级 → 软件级）----------
+# 软件级目录 archives/{letter}/{name}/ 下的 README.md 和 RELEASENOTE.md
+# 如果不存在或为空，从版本级复制一份作为默认值
+_SOFTWARE_DIR="${ARCHIVES_DIR}/${FIRST_LETTER}/${SOFTWARE_NAME}"
+for _meta_file in README.md RELEASENOTE.md; do
+    _SW_FILE="${SOFTWARE_DIR}/${_meta_file}"
+    _VER_FILE="${VERSION_DIR}/${_meta_file}"
+    if [ ! -f "$_SW_FILE" ] || [ "$(wc -l < "$_SW_FILE" 2>/dev/null)" -lt 3 ]; then
+        if [ -f "$_VER_FILE" ] && [ "$(wc -l < "$_VER_FILE" 2>/dev/null)" -gt 3 ]; then
+            cp -f "$_VER_FILE" "$_SW_FILE"
+            echo "  ✅ ${_meta_file} 已同步到软件级目录"
+        fi
+    else
+        echo "  OK: ${_meta_file} 软件级已存在（$(wc -l < "$_SW_FILE" | tr -d ' ') 行），跳过"
+    fi
+done
+
 # ---------- 步骤 5: _meta.yaml（总是更新，因为含时间戳）----------
 echo "[5/6] 更新 _meta.yaml..."
 

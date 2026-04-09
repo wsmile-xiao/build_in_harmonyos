@@ -17,7 +17,8 @@
 #   4. finalize-archive.sh ...    (归档校验+RELEASENOTE)
 #   5. python3 gen_summary.py      (总结报告)
 
-set -e
+# ⚠️ 不使用 set -e：每个步骤独立判断成败，一步失败不阻塞后续步骤
+#    （旧版用 set-e 导致 close-archive 失败时 finalize-archive 永远不被调用）
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -72,6 +73,10 @@ echo "🏁 编译收尾管线"
 echo "  软件: ${SOFTWARE} ${VERSION}"
 echo "  状态: ${STATUS}"
 echo ""
+
+# 计算归档目录（必须在关卡检查之前）
+FIRST_LETTER="$(echo "$SOFTWARE" | cut -c1 | tr 'A-Z' 'a-z')"
+ARCHIVE_DIR="${PROJECT_DIR}/archives/${FIRST_LETTER}/${SOFTWARE}/${VERSION}"
 
 # ════════════════════════════════════════
 #   Step 0: 前置关卡闸门（流程完整性检查）
@@ -163,8 +168,8 @@ if [ -x "${SCRIPT_DIR}/close-archive.sh" ]; then
         echo "  ✅ 归档完成"
     else
         RC=$?
-        echo "  ❌ 归档失败 (exit code: $RC)"
-        exit 2
+        echo "  ❌ 归档失败 (exit code: $RC)，继续后续步骤..."
+        # 不再 exit 2！允许 finalize-archive 等后续步骤继续执行
     fi
 else
     echo "  ⚠️  close-archive.sh 不存在"
@@ -175,9 +180,7 @@ echo ""
 STEP3_OK=false
 echo "[3/5] 运行质量门禁验证 (verify-build.sh)..."
 
-# 计算归档目录（与 close-archive.sh 相同逻辑）
-FIRST_LETTER="$(echo "$SOFTWARE" | cut -c1 | tr 'A-Z' 'a-z')"
-ARCHIVE_DIR="${PROJECT_DIR}/archives/${FIRST_LETTER}/${SOFTWARE}/${VERSION}"
+# 计算归档目录（与 close-archive.sh 相同逻辑）— 已在 Step 0 前计算
 VERIFY_LOG="${ARCHIVE_DIR}/logs/verify-${TIMESTAMP:-$(date '+%Y%m%d%H%M%S')}.log"
 
 if [ -f "${PROJECT_DIR}/scripts/verify-build.sh" ]; then
@@ -190,6 +193,7 @@ if [ -f "${PROJECT_DIR}/scripts/verify-build.sh" ]; then
         --software "$SOFTWARE" \
         --version "$VERSION" \
         --archive-dir "$ARCHIVE_DIR" \
+        --install-prefix "${TEST_PREFIX:-$DEFAULT_PREFIX}" \
         2>&1 | tee "$VERIFY_LOG"
     VERIFY_RC=${PIPESTATUS[0]:-$?}
 

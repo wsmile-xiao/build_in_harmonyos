@@ -8,7 +8,7 @@ my $prefix = "$home/usr/local";
 my $pkg = 'automake';
 my $ver = '1.16.5';
 my $api = '1.16';
-my $perl_path = '/data/service/hnp/bin/perl';
+my $perl_path = '/bin/env perl';
 
 my %vars = (
   '@PERL@'              => $perl_path,
@@ -38,7 +38,7 @@ sub subst_file {
   while (<$in>) {
     $line_num++;
     if ($line_num == 1 && /^#!.*perl/) {
-      s|^#!.*perl.*|#!$perl_path -w|;
+      s|^#!.*perl.*|#!/bin/env perl|;
     }
     if (defined $script_name) {
       s|\@configure_input\@|Generated from $infile; do not edit by hand.|;

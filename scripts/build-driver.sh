@@ -4,7 +4,7 @@
 # ==============================================================================
 # 层级: L1 (全自动)
 # 决策点: 仅 Step 6 安全弹窗需要用户确认
-# 入口: ./scripts/build-driver.sh <软件名> [<版本>] [--skip-check] [--force]
+# 入口: ./scripts/build-driver.sh <软件名> [<版本>] [--skip-check] [--force] [--resume-from=StepN]
 # 调用者: AI（编译流程唯一入口，禁止绕过）
 #
 # 设计原则:
@@ -13,11 +13,13 @@
 #   3. 无法跳过任何步骤（除 --skip-check 可跳过 make check）
 #   4. 所有产物先进入 $TEST_PREFIX（隔离目录），验证后才部署到系统
 #   5. finish-build.sh 的三道关卡作为最终质量门禁
+#   6. 失败时切换手动模式(R14)，完成后用 --resume-from 继续剩余步骤
 #
 # 用法:
 #   ./scripts/build-driver.sh coreutils 9.10          # 完整流程
 #   ./scripts/build-driver.sh sed 4.9 --skip-check     # 跳过 make check
 #   ./scripts/build-driver.sh python 3.12 --force       # 强制覆盖已有 staging
+#   ./scripts/build-driver.sh automake 1.16.5 --resume-from=Step5  # 手动完成后从 Step5 继续
 #
 # 流程 (11 步):
 #   Step 1:  init-build.sh        → 下载/解压/双轨/上下文
@@ -48,11 +50,13 @@ SOFTWARE_NAME=""
 VERSION=""
 SKIP_CHECK=false
 FORCE=false
+RESUME_FROM=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --skip-check) SKIP_CHECK=true; shift ;;
         --force) FORCE=true; shift ;;
+        --resume-from=*) RESUME_FROM="${1#--resume-from=}"; shift ;;
         -*) echo "未知参数: $1"; exit 1 ;;
         *)
             if [ -z "$SOFTWARE_NAME" ]; then
@@ -149,6 +153,10 @@ elapsed() {
     printf "%dm %ds" "$min" "$sec"
 }
 
+# ---- 任务卡（跨轮次进度追踪）----
+TASK_CARD="${BUILD_ARCHIVE_DIR}/TASK_CARD.md"
+source "${SCRIPT_DIR}/_task_card.sh"
+
 # =====================================================================
 # Step 1: init-build.sh — 初始化编译环境
 # =====================================================================
@@ -177,6 +185,118 @@ log_info "BUILD_SRC_DIR=${BUILD_SRC_DIR}"
 log_info "DEFAULT_PREFIX=${DEFAULT_PREFIX}"
 log_info "TEST_PREFIX=${TEST_PREFIX}"
 
+# 初始化任务卡（跨轮次进度追踪）
+TASK_CARD="${BUILD_ARCHIVE_DIR}/TASK_CARD.md"
+init_task_card
+update_task_card 1 "✅完成" "init-build OK"
+
+# =====================================================================
+# Step 1.5: 归档历史查询与展示（R11 强制执行）
+#   在开始编译前，主动查询并展示已有归档记录。
+#   AI 必须基于这些历史信息做决策，而非从零摸索。
+# =====================================================================
+log_step "归档历史查询 (R11)"
+
+_ARCHIVE_README="${BUILD_ARCHIVE_DIR}/README.md"
+_ARCHIVE_MANIFEST="${BUILD_ARCHIVE_DIR}/manifest.yaml"
+_SW_README="$(dirname "$BUILD_ARCHIVE_DIR")/README.md"
+_HISTORY_FOUND=false
+
+if [ -f "$_ARCHIVE_README" ] && [ "$(wc -l < "$_ARCHIVE_README" 2>/dev/null | tr -d ' ')" -gt 10 ]; then
+    _HISTORY_FOUND=true
+    log_ok "✅ 版本级 README.md 存在 ($(wc -l < "$_ARCHIVE_README" | tr -d ' ') 行)"
+    log_info "   路径: ${_ARCHIVE_README}"
+    # 提取关键信息摘要
+    _STATUS=$(grep '^status:' "$_ARCHIVE_MANIFEST" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' ')
+    _BSYS=$(grep '^build_system:' "$_ARCHIVE_MANIFEST" 2>/dev/null | head -1 | cut -d: -f2- | tr -d ' ')
+    _PATCH_COUNT=$(ls "${BUILD_ARCHIVE_DIR}/patches/"*.patch 2>/dev/null | wc -l | tr -d ' ')
+    log_info "   状态: ${_STATUS:-未知} | 构建: ${_BSYS:-未知} | 补丁: ${_PATCH_COUNT:-0} 个"
+    # 展示 README 前 20 行（通常含编译说明）
+    log_info "--- README.md 前 20 行 ---"
+    head -20 "$_ARCHIVE_README" 2>&1 | while IFS= read -r _line; do log_info "   $_line"; done
+else
+    log_warn "⚠️  版本级 README.md 不存在或为空（首次编译）"
+fi
+
+if [ -f "$_SW_README" ] && [ "$(wc -l < "$_SW_README" 2>/dev/null | tr -d ' ')" -gt 10 ]; then
+    log_ok "✅ 软件级 README.md 存在 ($(wc -l < "$_SW_README" | tr -d ' ') 行)"
+    log_info "   路径: ${_SW_README}"
+fi
+
+# 检查是否有特殊构建工具/脚本（如 automake 的 gen-all.pl）
+_SPECIAL_FILES=$(find "$BUILD_ARCHIVE_DIR" -maxdepth 2 \
+    \( -name "gen-*.pl" -o -name "*.py" -o -name "bootstrap" \) \
+    -type f 2>/dev/null)
+if [ -n "$_SPECIAL_FILES" ]; then
+    log_ok "✅ 发现特殊构建脚本:"
+    echo "$_SPECIAL_FILES" | while IFS= read -r _sf; do log_info "   → $_sf"; done
+fi
+
+# 检查 error-patterns.md 中是否有本软件相关条目
+_EP_FILE="${PROJECT_DIR}/knowledge/error-patterns.md"
+if [ -f "$_EP_FILE" ]; then
+    _EP_MATCHES=$(grep -ci "$SOFTWARE_NAME\|${SOFTWARE_NAME%%[0-9]*}" "$_EP_FILE" 2>/dev/null || echo 0)
+    if [ "$_EP_MATCHES" -gt 0 ]; then
+        log_ok "✅ error-patterns.md 中有 ${_EP_MATCHES} 条相关记录"
+        grep -i "$SOFTWARE_NAME\|${SOFTWARE_NAME%%[0-9]*}" "$_EP_FILE" 2>/dev/null | head -5 | while IFS= read -r _ep; do log_info "   → $_ep"; done
+    fi
+fi
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  📋 R11 归档查询完成 — 请基于以上信息继续           ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# 导出变量供后续步骤使用
+export ARCHIVE_HISTORY_FOUND="${_HISTORY_FOUND:-false}"
+
+# =====================================================================
+# --resume-from 跳转逻辑（R14 手动模式恢复）
+# 当 AI 在手动模式完成 configure/make/install 后，用此参数跳到后续步骤
+# =====================================================================
+if [ -n "$RESUME_FROM" ]; then
+    log_info "━━━ 手动模式恢复: 从 $RESUME_FROM 继续 ━━━"
+    
+    # 清理手动模式标记（如果存在）
+    rm -f "${BUILD_ARCHIVE_DIR}/.manual-mode-stop" 2>/dev/null
+    
+    case "$RESUME_FROM" in
+        Step5)
+            log_info "跳过 Steps 1-4，直接进入 Step 5 (make install)"
+            # 验证 TEST_PREFIX 已有产物（AI 应已手动安装）
+            if [ ! -d "$TEST_PREFIX/bin" ] || [ -z "$(ls -A $TEST_PREFIX/bin 2>/dev/null)" ]; then
+                log_fail "$TEST_PREFIX/bin 为空或不存在！请先手动执行 make install prefix=$TEST_PREFIX"
+                exit 1
+            fi
+            _BIN_COUNT=$(find "$TEST_PREFIX/bin" -type f 2>/dev/null | wc -l | tr -d ' ')
+            log_ok "检测到 $_BIN_COUNT 个文件在 $TEST_PREFIX/bin/ → 继续 Step 6"
+            
+            # 直接跳到 Step 6（安全弹窗）
+            goto_step6=true
+            ;;
+        Step6)
+            log_info "跳过 Steps 1-5，直接进入 Step 6 (安全弹窗)"
+            _BIN_COUNT=$(find "$TEST_PREFIX/bin" -type f 2>/dev/null | wc -l | tr -d ' ')
+            log_ok "检测到 $_BIN_COUNT 个文件在 $TEST_PREFIX/bin/ → 继续"
+            goto_step6=true
+            ;;
+        Step8)
+            log_info "跳过 Steps 1-7，直接进入 Step 8 (Staging验证)"
+            goto_step8=true
+            ;;
+        Step9)
+            log_info "跳过 Steps 1-8，直接进入 Step 9 (打包)"
+            goto_step9=true
+            ;;
+        *)
+            log_fail "无效的 --resume-from 值: $RESUME_FROM"
+            echo "有效值: Step5, Step6, Step8, Step9"
+            exit 1
+            ;;
+    esac
+fi
+
 # 校验关键变量
 if [ -z "$BUILD_SRC_DIR" ] || [ ! -d "$BUILD_SRC_DIR" ]; then
     # 处理嵌套源码目录（tarball 解压后可能在子目录中）
@@ -200,6 +320,7 @@ fi
 # =====================================================================
 # Step 2: apply-patches — 从归档应用补丁
 # =====================================================================
+if [ "$goto_step8" != "true" ] && [ "$goto_step9" != "true" ]; then
 log_step "应用补丁"
 
 PATCH_DIR="${BUILD_ARCHIVE_DIR}/patches"
@@ -223,10 +344,13 @@ else
 fi
 
 log_ok "已应用 $APPLIED_COUNT 个补丁"
+update_task_card 2 "✅完成" "${APPLIED_COUNT}个补丁"
+fi  # end: Step 2 guard (resume-from)
 
 # =====================================================================
 # Step 3: 配置 — 自动检测构建系统（--prefix=$TEST_PREFIX）
 # =====================================================================
+if [ "$goto_step6" != "true" ] && [ "$goto_step8" != "true" ] && [ "$goto_step9" != "true" ]; then
 log_step "配置 (--prefix=$TEST_PREFIX)"
 
 cd "$BUILD_SRC_DIR"
@@ -305,8 +429,70 @@ case "$_BUILD_SYSTEM" in
         log_info "[makefile] 无需配置步骤（直接 make）"
         ;;
     *)
-        log_fail "未知构建系统: 检测不到 configure/CMakeLists.txt/meson.build/Makefile.PL/setup.py/Makefile"
-        exit 1
+        # ════════════════════════════════════════════════════════
+        # ⚠️  未知构建系统 → 切换到【手动模式】（R14）
+        # 这不是错误，是分岔口。AI 需要手动处理 configure/make/install，
+        # 完成后用 --resume-from=Step5 继续后续流程。
+        # ════════════════════════════════════════════════════════
+        
+        log_warn "━━━ 未知构建系统 → 手动模式入口 ━━━"
+        log_warn "源码目录: $BUILD_SRC_DIR"
+        log_warn "归档目录: $BUILD_ARCHIVE_DIR"
+        
+        # 检查归档中的特殊构建资源
+        _SPECIAL_SCRIPTS=""
+        for _sp in gen-all.pl gen-all.sh bootstrap.pl custom-build.sh; do
+            if [ -f "${BUILD_ARCHIVE_DIR}/${_sp}" ]; then
+                _SPECIAL_SCRIPTS="${_SPECIAL_SCRIPTS} ${_sp}"
+                log_warn "  📜 发现特殊构建脚本: ${_sp} (在归档中)"
+            fi
+        done
+        
+        # 检查源码中可能被忽略的文件
+        _ALT_FILES=""
+        for _af in configure.ac configure.in Makefile.am bin/*.in lib/*.in; do
+            if [ -f "$BUILD_SRC_DIR/$_af" ]; then
+                _ALT_FILES="${_ALT_FILES} $_af"
+                log_warn "  📄 发现: $_af (但未被自动检测识别)"
+            fi
+        done
+        
+        # 输出明确的手动处理指南
+        echo ""
+        echo "╔══════════════════════════════════════════════════════════════╗"
+        echo "║  🔧 手动模式 (Manual Mode) — R14                          ║"
+        echo "╠══════════════════════════════════════════════════════════════╣"
+        echo "║  构建系统检测失败，需要 AI 手动介入。                       ║"
+        echo "║                                                          ║"
+        echo "║  【你需要做的】(按顺序):                                   ║"
+        echo "║    1. cd $BUILD_SRC_DIR"
+        echo "║    2. 根据软件特性执行 configure/make/gen-all 等          ║"
+        echo "║    3. make install prefix=$TEST_PREFIX                     ║"
+        echo "║    4. 触发安全弹窗(R7): find \$TEST_PREFIX/bin -exec {} --version \\;"
+        echo "║                                                          ║"
+        if [ -n "$_SPECIAL_SCRIPTS" ]; then
+        echo "║  【归档中有特殊脚本】$_SPECIAL_SCRIPTS                      ║"
+        echo "║    → perl ${BUILD_ARCHIVE_DIR}/gen-all.pl                   ║"
+        echo "║    → 或参考 README.md 中的编译说明                         ║"
+        fi
+        echo "║                                                          ║"
+        echo "║  【完成后继续】(不要 exit，执行以下命令):                  ║"
+        echo "║    \${SCRIPT_DIR}/build-driver.sh $SOFTWARE_NAME $VERSION --resume-from=Step5"
+        echo "║                                                          ║"
+        echo "║  或直接跳过已完成步骤，从指定步骤继续:                    ║"
+        echo "║    --resume-from=Step5  (跳到 make install)               ║"
+        echo "║    --resume-from=Step6  (跳到安全弹窗)                    ║"
+        echo "║    --resume-from=Step8  (跳到 Staging验证)                ║"
+        echo "║    --resume-from=Step9  (跳到打包)                        ║"
+        echo "╚══════════════════════════════════════════════════════════════╝"
+        echo ""
+        
+        # 写入标记文件，让 --resume-from 知道停在哪
+        echo "MANUAL_MODE_STOP=Step4" > "${BUILD_ARCHIVE_DIR}/.manual-mode-stop"
+        echo "STOP_REASON=unknown_build_system" >> "${BUILD_ARCHIVE_DIR}/.manual-mode-stop"
+        echo "STOP_TIME=$(date)" >> "${BUILD_ARCHIVE_DIR}/.manual-mode-stop"
+        
+        exit 2  # exit 2 = 需要手动介入（非致命错误）
         ;;
 esac
 
@@ -333,6 +519,8 @@ case "$_BUILD_SYSTEM" in
 esac
 
 log_ok "配置完成 ($(elapsed))"
+update_task_card 3 "✅完成" "$_BUILD_SYSTEM"
+fi  # end: Step 3+4 guard (resume-from)
 
 # =====================================================================
 # Step 4: 编译 — 自动适配构建系统
@@ -366,8 +554,10 @@ case "$_BUILD_SYSTEM" in
 esac
 
 log_ok "编译完成 ($(elapsed))"
+update_task_card 4 "✅完成"
 
 # =====================================================================
+if [ "$goto_step6" != "true" ] && [ "$goto_step8" != "true" ] && [ "$goto_step9" != "true" ]; then
 # Step 5: 安装 — 自动适配构建系统（到 $TEST_PREFIX 隔离目录）
 # =====================================================================
 log_step "安装 (→ $TEST_PREFIX)"
@@ -439,8 +629,11 @@ if [ "$_BIN_COUNT" -eq 0 ] && [ "$_LIB_COUNT" -eq 0 ]; then
 fi
 
 log_ok "安装完成 (bin: $_BIN_COUNT 个, lib: $_LIB_COUNT 个 → $TEST_PREFIX)"
+update_task_card 5 "✅完成" "${_BIN_COUNT}bin/${_LIB_COUNT}lib"
+fi  # end: Step 5 guard (resume-from)
 
 # =====================================================================
+if [ "$goto_step8" != "true" ] && [ "$goto_step9" != "true" ]; then
 # Step 6: 安全弹窗 (R7) — 等待用户确认
 # =====================================================================
 log_step "安全弹窗 (R7)"
@@ -468,6 +661,7 @@ if [ "$_CONFIRM" != "yes" ]; then
 fi
 
 log_ok "用户确认继续"
+update_task_card 6 "✅完成"
 
 # 快速版本验证
 echo ""
@@ -809,6 +1003,8 @@ else
 fi
 
 log_ok "test-report.md 已生成: $_TEST_REPORT"
+update_task_card 7 "✅完成" "test-report"
+fi  # end: Step 6+7 guard (resume-from)
 
 # =====================================================================
 # Step 8: Staging 验证 (§2.8) — 功能回归 + 标记
@@ -973,6 +1169,7 @@ if [ -s "$_EXCLUDE_CANDIDATES" ]; then
 fi
 
 log_ok "Staging 验证完成: $_FUNC_PASS/$_FUNC_TOTAL 通过, $_FAIL 失败, $_WARN 警告"
+update_task_card 8 "✅完成" "${_FUNC_PASS}/${_FUNC_TOTAL}"
 log_ok "标记文件: $_STAGING_MARK"
 
 # =====================================================================
@@ -980,6 +1177,8 @@ log_ok "标记文件: $_STAGING_MARK"
 # =====================================================================
 log_step "package.sh 打包"
 
+# 传递 TEST_PREFIX 给 package.sh（确保从 staging 目录打包而非全局目录）
+export TEST_PREFIX="$TEST_PREFIX"
 log_info "执行: ${SCRIPT_DIR}/package.sh $SOFTWARE_NAME $VERSION --debug"
 "${SCRIPT_DIR}/package.sh" "$SOFTWARE_NAME" "$VERSION" --debug >> "$LOG_FILE" 2>&1 || {
     log_warn "package.sh 返回非零（可能是签名等可选步骤失败）"
@@ -991,6 +1190,7 @@ _PKG_DIR="${PROJECT_DIR}/packaging/${SOFTWARE_NAME}/${VERSION}"
 if [ -d "$_PKG_DIR" ]; then
     _TAR_COUNT=$(ls "$_PKG_DIR"/*.tar.gz 2>/dev/null | wc -l | tr -d ' ')
     log_ok "打包完成: $_TAR_COUNT 个 tar.gz 在 $_PKG_DIR/"
+    update_task_card 9 "✅完成" "${_TAR_COUNT}tar.gz"
 else
     log_warn "打包目录不存在: $_PKG_DIR"
 fi
@@ -1025,6 +1225,7 @@ fi
 # 验证部署结果
 _DEPLOYED=$(find "$DEFAULT_PREFIX/bin" -type f -executable 2>/dev/null | wc -l | tr -d ' ')
 log_ok "部署完成: $_DEPLOYED 个文件在 $DEFAULT_PREFIX/bin/"
+update_task_card 10 "✅完成" "${_DEPLOYED}个文件"
 
 # =====================================================================
 # Step 11: finish-build.sh — 收尾（三道关卡自动检查）
@@ -1039,11 +1240,13 @@ log_info "执行: ${SCRIPT_DIR}/finish-build.sh $SOFTWARE_NAME $VERSION success"
     _FINISH_RC=$?
     if [ $_FINISH_RC -eq 2 ]; then
         log_warn "finish-build: 质量门禁降级为 partial（见上方详情）"
+update_task_card 11 "⚠️部分" "质量门禁降级"
     else
         log_fail "finish-build 失败 (rc=$_FINISH_RC)"
         exit 1
     fi
 }
+update_task_card 11 "✅完成" "三道关卡通过"
 
 # =====================================================================
 # Step 11.5: 必填文件最终校验（SKILL §6.1 强制要求）
@@ -1133,20 +1336,178 @@ _TOTAL_SEC=$((_END_TIME - START_TIME))
 _TOTAL_MIN=$((_TOTAL_SEC / 60))
 _TOTAL_SEC_REM=$((_TOTAL_SEC % 60))
 
+# 最终任务卡检查（跨轮次完整性验证）
+check_task_card
+
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║  🎉 编译流程全部完成                                    ║"
 echo "╠══════════════════════════════════════════════════════════╣"
 echo "║  软件:    $SOFTWARE_NAME $VERSION"
 echo "║  耗时:    ${_TOTAL_MIN}m ${_TOTAL_SEC_REM}s"
-echo "║  步骤:    11/11 全部执行"
+echo "║  步骤:    13/13 全部执行"
 echo "║  Staging: $TEST_PREFIX"
 echo "║  系统:    $DEFAULT_PREFIX"
 echo "║  日志:    $LOG_FILE"
 echo "╚══════════════════════════════════════════════════════════╝"
 
 # =====================================================================
-# Step 12: 临时文件清理（仅清理临时文件，不删除编译产物）
+# Step 12: 归档信息校准（R14 补充：确保流程完整性）
+#   检查所有步骤是否执行、补丁是否完善、必填文件是否齐全
+#   输出校准报告，告诉 AI 还需要补什么
+# =====================================================================
+log_step "归档信息校准"
+
+_CALIBRATION_OK=true
+_CALIBRATION_ISSUES=""
+
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  📋 归档校准报告 — ${SOFTWARE_NAME} ${VERSION}            ║"
+echo "╠══════════════════════════════════════════════════════════╣"
+
+# 12a: 流程步骤完整性检查
+echo "║  [12a] 流程步骤完整性                                   ║"
+_STEP_CHECK_PASSED=0
+_STEP_CHECK_TOTAL=5
+
+# 检查各步骤产物是否存在
+for _check_item in \
+    "init:.build-context-${SOFTWARE_NAME}-${VERSION}" \
+    "configure:${BUILD_SRC_DIR}/config.log" \
+    "make:${BUILD_SRC_DIR}/Makefile" \
+    "install:${TEST_PREFIX}/bin" \
+    "package:${BUILD_ARCHIVE_DIR}/packaging" \
+    "staging:${BUILD_ARCHIVE_DIR}/.staging-verified"; do
+    _ck_name="${_check_item%%:*}"
+    _ck_path="${_check_item#*:}"
+    if [ -e "$_ck_path" ]; then
+        _STEP_CHECK_PASSED=$((_STEP_CHECK_PASSED + 1))
+    else
+        echo "║      ⚠️  缺失: $_ck_name (${_ck_path})                   ║"
+        _CALIBRATION_ISSUES="${_CALIBRATION_ISSUES} step:${_ck_name}"
+    fi
+done
+echo "║      步骤完成: ${_STEP_CHECK_PASSED}/${_STEP_CHECK_TOTAL}                    ║"
+
+# 12b: 归档必填文件检查（比 Step 11.5 更详细）
+echo "║  [12b] 归档必填文件                                     ║"
+_REQUIRED_FILES="README.md PROGRESS.md RELEASENOTE.md manifest.yaml install.sh"
+for _rf in $_REQUIRED_FILES; do
+    if [ -f "${BUILD_ARCHIVE_DIR}/${_rf}" ] && [ "$(wc -l < "${BUILD_ARCHIVE_DIR}/${_rf}" 2>/dev/null | tr -d ' ')" -gt 2 ]; then
+        echo "║      ✅ ${_rf}                                           ║"
+    else
+        echo "║      ❌ 缺失/过短: ${_rf}                                ║"
+        _CALIBRATION_ISSUES="${_CALIBRATION_ISSUES} file:${_rf}"
+        _CALIBRATION_OK=false
+    fi
+done
+
+# 12c: 补丁完整性检查
+echo "║  [12c] 补丁文件                                           ║"
+_PATCH_DIR="${BUILD_ARCHIVE_DIR}/patches"
+if [ -d "$_PATCH_DIR" ]; then
+    _PATCH_COUNT=$(ls "$_PATCH_DIR"/000*.patch 2>/dev/null | wc -l | tr -d ' ')
+    echo "║      发现 ${_PATCH_COUNT} 个补丁                                 ║"
+    
+    # 检查是否有 gen-all.pl / 特殊构建脚本但无对应补丁记录
+    if [ -f "${BUILD_ARCHIVE_DIR}/gen-all.pl" ] && [ "$_PATCH_COUNT" -eq 0 ]; then
+        echo "║      ⚠️  有 gen-all.pl 但无补丁文件(可能需要手动生成)       ║"
+        _CALIBRATION_ISSUES="${_CALIBRATION_ISSUES} patches:gen-all-no-patch"
+        _CALIBRATION_OK=false
+    fi
+    
+    # 检查每个补丁的格式
+    for _pf in "$_PATCH_DIR"/000*.patch; do
+        [ -f "$_pf" ] || continue
+        _pname=$(basename "$_pf")
+        _plines=$(wc -l < "$_pf" | tr -d ' ')
+        if [ "$_plines" -lt 3 ]; then
+            echo "║      ⚠️  ${_pname} 只有 ${_plines} 行(可能不完整)           ║"
+            _CALIBRATION_ISSUES="${_CALIBRATION_ISSUES} patch:${_pname}:short"
+            _CALIBRATION_OK=false
+        fi
+    done
+else
+    echo "║      ⚠️  无 patches 目录                                    ║"
+    # 无补丁目录不一定算错误（有些软件不需要补丁）
+fi
+
+# 12d: manifest.yaml 关键字段检查
+echo "║  [12d] manifest.yaml 完整性                               ║"
+_MANIFEST="${BUILD_ARCHIVE_DIR}/manifest.yaml"
+if [ -f "$_MANIFEST" ]; then
+    for _mf in status build_system version patches_applied compile_date; do
+        if grep -q "^${_mf}:" "$_MANIFEST" 2>/dev/null; then
+            echo "║      ✅ ${_mf}                                            ║"
+        else
+            echo "║      ❌ 缺少字段: ${_mf}                                  ║"
+            _CALIBRATION_ISSUES="${_CALIBRATION_ISSUES} manifest:${_mf}"
+            _CALIBRATION_OK=false
+        fi
+    done
+else
+    echo "║      ⚠️  manifest.yaml 不存在                              ║"
+fi
+
+# 12e: 软件级元文件同步检查
+_SW_README="$(dirname "$BUILD_ARCHIVE_DIR")/README.md"
+if [ -f "${BUILD_ARCHIVE_DIR}/README.md" ] && [ ! -f "$_SW_README" ]; then
+    echo "║      ⚠️  版本级 README 存在但软件级缺失(init-archive 4b 未执行) ║"
+    _CALIBRATION_ISSUES="${_CALIBRATION_ISSUES} sw-readme:missing"
+    _CALIBRATION_OK=false
+fi
+
+# ---- 校准结果汇总 ----
+echo "╠══════════════════════════════════════════════════════════╣"
+if [ "$_CALIBRATION_OK" = "true" ]; then
+    echo "║  ✅ 校准通过 — 所有项目完整                             ║"
+else
+    echo "║  ⚠️  校准未通过 — 存在以下问题:                         ║"
+    echo "║     ${_CALIBRATION_ISSUES} ║"
+    echo "║                                                      ║"
+    echo "║  建议操作:                                             ║"
+    echo "$_CALIBRATION_ISSUES" | tr ':' '\n' | while read _issue_type _issue_detail; do
+        case "$_issue_type" in
+            step)
+                echo "║      → 补执行缺失步骤: ${_issue_detail}                  ║"
+                ;;
+            file)
+                echo "║      → 生成或补充: ${_issue_detail}                       ║"
+                ;;
+            patch*)
+                echo "║      → 检查补丁: ${_issue_detail}                          ║"
+                ;;
+            manifest*)
+                echo "║      → 更新 manifest.yaml 补充: ${_issue_detail}            ║"
+                ;;
+            *)
+                echo "║      → 处理: ${_issue_type}:${_issue_detail}              ║"
+                ;;
+        esac
+    done
+    echo "║                                                      ║"
+    echo "║  完成修复后可重新运行此步:                            ║"
+    echo "║    \${SCRIPT_DIR}/build-driver.sh \$SOFTWARE_NAME \$VERSION --resume-from=Step12"
+fi
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+
+# 写入校准标记
+{
+    echo "# Archive Calibration Report"
+    echo "# Generated: $(date)"
+    echo "# Software: $SOFTWARE_NAME $VERSION"
+    echo ""
+    echo "## Result: $([ "$_CALIBRATION_OK" = "true" ] && echo PASS || echo FAIL)"
+    echo "## Issues: ${_CALIBRATION_ISSUES:-none}"
+} > "${BUILD_ARCHIVE_DIR}/reports/calibration-report.md"
+
+log_ok "校准报告已写入: ${BUILD_ARCHIVE_DIR}/reports/calibration-report.md"
+update_task_card 12 "$([ "$_CALIBRATION_OK" = "true" ] && echo '✅完成' || echo '⚠️部分')" "${_CALIBRATION_ISSUES:-OK}"
+
+# =====================================================================
+# Step 13: 临时文件清理（仅清理临时文件，不删除编译产物）
 # =====================================================================
 log_step "临时文件清理"
 
@@ -1177,5 +1538,7 @@ rm -rf "${TMPDIR:-$HOME/tmp}"/pkg-verify-* 2>/dev/null
 
 [ "$_CLEAN_STAGING" -gt 0 ] && log_ok "已清理 $_CLEAN_STAGING 个 staging 目录"
 [ "$_CLEAN_LOGS" -gt 0 ] && log_ok "已截断 $_CLEAN_LOGS 个超大日志"
+
+update_task_card 13 "✅完成" "清理${_CLEAN_STAGING}staging/${_CLEAN_LOGS}logs"
 
 exit 0

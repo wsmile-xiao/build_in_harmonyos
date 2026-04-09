@@ -1,7 +1,7 @@
 # 🐛 错误模式知识库 — 主索引
 
-> **版本**: v3.0 (模块化) | **总条目**: 67 (E001-E067)
-> 📂 **子文件**: [core.md](./error-patterns-core.md) (E001-E020) · [compile.md](./error-patterns-compile.md) (E021-E048) · [runtime.md](./error-patterns-runtime.md) (E049-E067)
+> **版本**: v3.0 (模块化) | **总条目**: 68 (E001-E068)
+> 📂 **子文件**: [core.md](./error-patterns-core.md) (E001-E020) · [compile.md](./error-patterns-compile.md) (E021-E049) · [runtime.md](./error-patterns-runtime.md) (E050-E068)
 
 ## 🔍 快速检索
 
@@ -65,8 +65,8 @@ grep -n "关键词" knowledge/error-patterns*.md   # 跨文件搜索所有子文
 | E046 | SELinux/FS | 🟡 | chmod, Permission denied, st_mode unchanged, 不生效 | [compile](./error-patterns-compile.md#e046-chmod-完全不生效) |
 | E047 | FS | 🟢 | st_mode, other-read, 0o004, umask, HMDFS, 0o640 | [compile](./error-patterns-compile.md#e047-文件权限-other-read-被额外屏蔽) |
 | E048 | 内核 | 🟢 | UDPLITE, IPPROTO_UDPLITE, Permission denied, socket | [compile](./error-patterns-compile.md#e048-udplite-协议不支持) |
-| E049 | 系统调用 | 🟡 | find_library, ldconfig, SubprocessError, ctypes, cffi | [runtime](./error-patterns-runtime.md#e049-find_library-崩溃ldconfig-不存在) |
-| E050 | FS/链接 | 🔴 | HMDFS, symlink, unable to find library, ld.lld | [runtime](./error-patterns-runtime.md#e050-hmdfs-符号链接不可跟踪导致链接器找不到库) |
+| E049 | 构建/脚本 | 🟡 | shebang, 硬编码路径, /bin/env, 可移植性, env 参数 | [compile](./error-patterns-compile.md#e049-脚本-shebang-硬编码绝对路径导致不可移植) |
+| E050 | 系统调用 | 🟡 | find_library, ldconfig, SubprocessError, ctypes, cffi | [runtime](./error-patterns-runtime.md#e050-find_library-崩溃ldconfig-不存在) |
 | E051 | 内核/信号 | 🔴 | SIGSYS, setreuid, setregid, chroot, exit 159, core dump | [runtime](./error-patterns-runtime.md#e051-未实现-syscall-触发-sigsys-导致进程崩溃) |
 | E052 | 构建/RPATH | 🔴 | rpath, libpython, LD_LIBRARY_PATH, 子进程, exit 127 | [runtime](./error-patterns-runtime.md#e052-rpath-缺失导致子进程找不到-libpython) |
 | E053 | 工具链 | 🔴 | cc1plus, clang++, CXX compiler, C++ 编译器 | [runtime](./error-patterns-runtime.md#e053-cc1plus-不可用必须使用-clang) |
@@ -90,9 +90,9 @@ grep -n "关键词" knowledge/error-patterns*.md   # 跨文件搜索所有子文
 | 类别 | 范围 | 数量 | 子文件 |
 |------|------|------|--------|
 | 平台/环境 | E001-E020 | **20** | core.md |
-| 编译/构建 | E021-E048 | **28** | compile.md |
-| 运行时/测试 | E049-E067 | **19** | runtime.md |
-| **合计** | **E001-E067** | **67** | — |
+| 编译/构建 | E021-E049 | **29** | compile.md |
+| 运行时/测试 | E050-E068 | **19** | runtime.md |
+| **合计** | **E001-E068** | **68** | — |
 
 严重度: 🔴阻塞=23 · 🟡中等=33 · 🟢轻微=6 · ✅已解决=1 · 🟡待确认=2
 

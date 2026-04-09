@@ -1,12 +1,37 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙系统编译智能体——三方库预编译框架
-version: 4.6
+version: 4.8
 author: OpenHarmony PC Developer社区
 permissions: 文件读写权限、Shell执行权限、网络访问权限
 ---
 
 > **每次编译任务前先读本文档。** 本文档回答"怎么做"，KNOW_YOUR_WHY.md 回答"为什么"。
+
+## 0. Skill 目录（⭐ 所有资源统一存放于此）
+
+> **本 Skill 的全部资源（脚本 / 归档 / 知识库 / 模板）都在 SKILL.md 所在的项目目录中。**
+> AI 开始任何操作前，先执行以下初始化（复制粘贴即可，无需修改）：
+
+```bash
+# ═══ Skill 路径初始化（每次会话开头执行一次）════
+# 从 ~/.opendesk 自动定位 SKILL.md，派生出所有路径
+_SKILL_MD=$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openharmony-compile-agent*" 2>/dev/null | head -1)
+if [ -z "$_SKILL_MD" ]; then
+    echo "❌ 找不到 SKILL.md，请确认 skill 已正确安装"
+    return 1 2>/dev/null || exit 1
+fi
+export SKILL_ROOT="$(dirname "$_SKILL_MD")"
+export SCRIPT_DIR="${SKILL_ROOT}/scripts"     # 所有脚本
+export ARCHIVE_ROOT="${SKILL_ROOT}/archives" # 所有归档
+export KNOWLEDGE_DIR="${SKILL_ROOT}/knowledge" # 知识库
+echo "✅ Skill 根目录: ${SKILL_ROOT}"
+unset _SKILL_MD
+```
+
+> **之后所有脚本调用格式**：`${SCRIPT_DIR}/build-driver.sh gawk 5.3.0`
+>
+> **⚠️ R13（铁律）：禁止 `./scripts/xxx.sh` 相对路径。** AI 工作目录不固定，相对路径会在错误的目录下查找脚本。
 
 ---
 
@@ -16,13 +41,13 @@ permissions: 文件读写权限、Shell执行权限、网络访问权限
 
 ```bash
 # ═══ 推荐：一键全流程（v4.3+，11步自动执行）═══
-./scripts/build-driver.sh <软件名> [<版本>] [--skip-check]
+${SKILL_ROOT}/scripts/build-driver.sh <软件名> [<版本>] [--skip-check]
 #   自动完成: init → 补丁 → configure(→staging) → make → install(→staging)
 #             → 弹窗(R7) → make check → Staging验证 → package(排除) → deploy → finish
 #   AI 应优先使用此入口，禁止跳过步骤
 
 # ═══ Step 1: 初始化（手动分步时用）═══
-./scripts/init-build.sh <软件名> [<版本>] [--url=URL]
+${SKILL_ROOT}/scripts/init-build.sh <软件名> [<版本>] [--url=URL]
 #   输出: .build-context-<name>-<ver>
 #   完成: 下载/解压/检索历史/创建骨架/环境检查
 
@@ -46,12 +71,12 @@ TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
 #   ⑤ 通过后才进入 finish-build.sh
 
 # ═══ Step 3: 收尾（全自动，~30秒）═══
-./scripts/finish-build.sh <软件名> <版本> success|partial|failed
+${SKILL_ROOT}/scripts/finish-build.sh <软件名> <版本> success|partial|failed
 #   完成: 补丁生成→归档收尾→**质量门禁(verify)**→归档校验→总结报告
 #   ⚠️ verify-build.sh 在此步骤内自动调用，无需单独执行
 
 # ═══ Step 4: 质量门禁复查（可选，~15秒）═══  ← 仅在需要单独复查时使用
-./scripts/verify-build.sh <软件名> <版本>
+${SKILL_ROOT}/scripts/verify-build.sh <软件名> <版本>
 #   4 道门禁: 二进制完整性 → 功能可用性 → 可移植性 → 档案完整性
 #   输出: reports/quality-report.md + PASS/FAIL 判定
 #   FAIL 则不能标记为 success，只能 partial 或 failed
@@ -63,7 +88,7 @@ TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
 
 # ═══ Step 5.5: 归档收口（⭐ 最终完成前必须执行）═══
 #   清理临时文件 + 必填文件校验 + 信息一致性检查
-#   ./scripts/finalize-archive.sh <软件名> <版本>
+#   ${SKILL_ROOT}/scripts/finalize-archive.sh <软件名> <版本>
 ```
 
 ### configure 预期耗时参考
@@ -80,16 +105,16 @@ TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
 **特殊情况**：
 ```bash
 # 新软件（registry 无记录）→ 自动搜索 URL 或手动指定
-./scripts/init-build.sh libnew 1.0 --url=https://...
+${SKILL_ROOT}/scripts/init-build.sh libnew 1.0 --url=https://...
 
 # 会话中断后恢复
-./scripts/init-build.sh --resume
+${SKILL_ROOT}/scripts/init-build.sh --resume
 
 # 只做补丁不重新编译
-./scripts/refresh-patch.sh --auto <软件名> <版本>
+${SKILL_ROOT}/scripts/refresh-patch.sh --auto <软件名> <版本>
 ```
 
-## 1.2 十条铁律（违反任何一条都是 bug）
+## 1.2 十四条铁律（违反任何一条都是 bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -103,6 +128,66 @@ TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
 | R8 | **源码修改"四不"准则** | `#ifdef __OHOS__` 守卫 / 保持上游风格 / 追加平台分支 | 删跨平台代码 / 硬编码路径 / 改原逻辑流 / 偏离代码风格 |
 | R9 | **质量门禁 FAIL 禁止标 success** | verify-build.sh 非零 → partial 或 failed | 产物有问题仍标记成功分发 |
 | R10 | **临时文件必须用 $TMPDIR** | 所有 tmp 文件操作使用 `$TMPDIR` 或 `$HOME/tmp` | 硬编码 `/tmp`（鸿蒙 /tmp 只读，见 E002） |
+| **R11** | **脚本步骤失败必须先查归档再动手** | 读 `archives/{pkg}/{ver}/README.md` + `manifest.yaml` 获取历史方案 | 直接手动摸索 / 忽略已有补丁和解决方案 |
+| **R12** | **遇到错误必须先匹配错误模式再修复** | 搜索 `knowledge/error-patterns.md` + 同类软件 manifest 的 known_issues | 凭直觉试错 / 重复踩已知坑 |
+| **R13** | **脚本调用必须使用绝对路径** | `${SKILL_ROOT}/scripts/xxx.sh` 或 `${SCRIPT_DIR}/xxx.sh` | `./scripts/xxx.sh` 相对路径（工作目录不固定时调用失败） |
+| **R14** | **脚本失败=手动模式入口，非终止** | 失败时按提示切换手动模式，完成后 `--resume-from=StepN` 继续 | 脚本 exit 后 AI 放弃/什么都不做（如 automake 会话） |
+
+### 失败处理标准流程（R11 + R12 强制执行）
+
+> **任何脚本步骤失败或编译错误触发时，必须按以下顺序执行。跳过任何一步都是 bug。**
+
+```
+脚本/编译步骤失败
+  │
+  ├─ [R11] 第一步：查归档记录
+  │   │
+  │   ├─ ① 读 archives/{pkg}/{ver}/README.md
+  │   │    → 已有完整方案？（补丁/特殊构建方式/gen-all.pl 等）
+  │   │    → 有 → 直接使用历史方案重新执行
+  │   │    → 无 → 继续 ②
+  │   │
+  │   ├─ ② 读 archives/{pkg}/{ver}/manifest.yaml
+  │   │    → status=success？说明之前成功过，对比差异
+  │   │    → patches_applied 有补丁？确认是否已正确应用
+  │   │    → knowledge_gained 有经验？参考历史做法
+  │   │
+  │   └─ ③ 读 archives/{pkg}/README.md（软件级）
+  │        → 其他版本的通用经验（如 automake 的鸡生蛋问题）
+  │
+  ├─ [R12] 第二步：匹配错误模式
+  │   │
+  │   ├─ ① 搜索 knowledge/error-patterns.md（按错误关键词）
+  │   │    → config.guess 不识别？→ E002 级标准解法
+  │   │    → conftest pipe 问题？→ E003 级标准解法
+  │   │    → 缺依赖？→ dependencies.md 编译顺序
+  │   │    → 软链接权限？→ environment.md §9
+  │   │
+  │   └─ ② 搜索同类软件的 manifest.yaml（同 build_system）
+  │        → autotools 项目怎么处理的？→ 参考其 configure 参数
+  │        → 同类错误别人怎么修的？→ 直接复用方案
+  │
+  └─ [诊断完成] 第三步：基于历史方案动手修复
+      → 如果归档和知识库都没有 → 记录为新问题（§2.5 实时知识提取）
+      → 修复后更新 PROGRESS.md + 继续执行
+```
+
+> **典型反面案例（automake 会话实录）**：
+> ```
+> ❌ build-driver Step 3 失败（unknown build system）
+>    → 放弃 build-driver，手动 ls 目录找 configure
+>    → 手动跑 configure → config.guess 不识别
+>    → 从 GNU FTP 下载最新版 → 还是不识别
+>    → 试 --build 参数 → 用户杀掉进程
+>
+> ✅ 正确流程（遵循 R11+R12）：
+>    → build-driver Step 3 失败
+>    → [R11] 读 archives/a/automake/1.16.5/README.md
+>       → 发现：需要 gen-all.pl 鸡生蛋绕过 + 已有补丁
+>    → [R11] 读 manifest.yaml → status=success, 有 0001-port-for-ohos.patch
+>    → [R12] 错误是 config.guess 不识别 → E002 标准解法：应用已有补丁
+>    → 应用补丁后重新跑 build-driver → 通过
+> ```
 
 ### AI 执行风格规范（⭐ 新增）
 
@@ -167,11 +252,11 @@ echo "#define OHOS_FIX 1" >> config.h
 遇到一个新三方库？
 │
 ├─ registry 有记录？
-│   ├─ 是 → ./scripts/init-build.sh <name> <ver>     （全自动）
+│   ├─ 是 → ${SKILL_ROOT}/scripts/init-build.sh <name> <ver>     （全自动）
 │   └─ 否 → 有 URL？
-│       ├─ 是 → ./scripts/init-build.sh <name> <ver> --url=URL
+│       ├─ 是 → ${SKILL_ROOT}/scripts/init-build.sh <name> <ver> --url=URL
 │       │        → 自动注册到 registry（下次直接命中）
-│       └─ 否 → ./scripts/search-download-url.sh <name> <ver>
+│       └─ 否 → ${SKILL_ROOT}/scripts/search-download-url.sh <name> <ver>
 │                → 从候选列表选 URL → 重试上一步
 │
 configure 失败？
@@ -194,16 +279,16 @@ configure 失败？
 
 ```bash
 # 标准用法（registry 有记录时全自动）
-./scripts/init-build.sh sed 4.9
+${SKILL_ROOT}/scripts/init-build.sh sed 4.9
 
 # 自定义 URL（首次遇到新软件时）
-./scripts/init-build.sh libnew 2.0 --url=https://example.com/libnew-2.0.tar.gz
+${SKILL_ROOT}/scripts/init-build.sh libnew 2.0 --url=https://example.com/libnew-2.0.tar.gz
 
 # 跳过下载（源码已存在时）
-./scripts/init-build.sh sed 4.9 --no-download
+${SKILL_ROOT}/scripts/init-build.sh sed 4.9 --no-download
 
 # 恢复中断的会话
-./scripts/init-build.sh --resume
+${SKILL_ROOT}/scripts/init-build.sh --resume
 ```
 
 ### 内部完成的 8 个步骤
@@ -285,7 +370,7 @@ if [ "$BUILD_HISTORY_FOUND" = "true" ]; then
 fi
 
 # ④ 识别构建系统（如需要）
-./scripts/detect-build-system.sh .  # 可选，context 已含 BUILD_SYSTEM
+${SKILL_ROOT}/scripts/detect-build-system.sh .  # 可选，context 已含 BUILD_SYSTEM
 ```
 
 ### 2.2 执行编译（--prefix 指向 $TEST_PREFIX 隔离目录）
@@ -575,7 +660,7 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$TEST_PREFIX/lib:}"
 > ```
 
 ```bash
-./scripts/finish-build.sh <软件名> <版本> success|partial|failed
+${SKILL_ROOT}/scripts/finish-build.sh <软件名> <版本> success|partial|failed
 ```
 
 ### 内部执行的 5 个步骤
@@ -622,7 +707,7 @@ failed   ─────────────────→ failed  （不�
 > 手动执行适用于：单独复查、finish 之后补充验证、调试门禁逻辑。
 
 ```bash
-./scripts/verify-build.sh <软件名> <版本>
+${SKILL_ROOT}/scripts/verify-build.sh <软件名> <版本>
 # 或由 finish-build.sh Step 3 自动调用（传入 --archive-dir）
 ```
 
@@ -757,7 +842,7 @@ kill
 ### 执行方式
 
 ```bash
-./scripts/finalize-archive.sh <软件名> <版本>
+${SKILL_ROOT}/scripts/finalize-archive.sh <软件名> <版本>
 ```
 
 ### 内部执行的 4 个阶段
@@ -805,12 +890,12 @@ kill
 
 ```bash
 # 方式 A: init 时指定 --clean
-./scripts/init-build.sh <软件名> <版本> --clean
+${SKILL_ROOT}/scripts/init-build.sh <软件名> <版本> --clean
 
 # 方式 B: 手动清空后重新 init
 rm -rf archives/<首字母>/<软件名>/<版本>/patches/*
 rm -rf archives/<首字母>/<软件名>/<版本>/packaging/*
-./scripts/init-build.sh <软件名> <version>
+${SKILL_ROOT}/scripts/init-build.sh <软件名> <version>
 ```
 
 ---
@@ -1211,7 +1296,13 @@ Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
 
 ---
 
-*SKILL.md v4.6 — 最后更新: 2026-04-08*
+*SKILL.md v4.7 — 最后更新: 2026-04-09*
+*v4.7 更新（绝对路径 + R13 + Step 1.5 归档查询）:*
+*  - **#0 新增 §0 路径常量**: 定义 SKILL_ROOT/ARCHIVE_ROOT/SCRIPT_DIR/KNOWLEDGE_DIR 绝对路径 *
+*  - **#1 R13 铁律**: 禁止使用相对路径 ./scripts/ 调用脚本，必须用 ${SKILL_ROOT}/scripts/ *
+*  - **#2 全局替换**: 所有 22 处 ./scripts/xxx.sh → ${SKILL_ROOT}/scripts/xxx.sh *
+*  - **#3 build-driver.sh Step 1.5**: 编译前自动查询并展示归档历史（R11 硬约束） *
+*  - **#4 归档路径确认**: ARCHIVE_ROOT = ${SKILL_ROOT}/archives/（skill 内部） *
 *v4.6 更新（清理阶段 + 签名工具说明 + 结构修复）:*
 *  - **#1 新增临时文件清理阶段**: finalize-archive + build-driver Step 12 清理临时文件(staging/exclude-candidates/pkg-verify/超大日志) *
 *  - **#2 签名工具可用性确认**: binary-sign-tool/llvm-objcopy/llvm-readelf 均可用，不应 --skip-sign *

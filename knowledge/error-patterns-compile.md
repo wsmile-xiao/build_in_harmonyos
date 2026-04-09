@@ -1306,4 +1306,84 @@ if skip_if_no_udplite():
 Python 3.9.0（test_socket）
 
 ---
+
+## E049: 脚本 shebang 硬编码绝对路径导致不可移植
+
+### 错误特征
+
+```bash
+#!/data/service/hnp/bin/perl -w
+# 或
+#!/usr/local/bin/python3
+```
+
+脚本在构建机器上能运行，但换一台 perl/python 路径不同的机器就全部失效。
+
+### 根因
+
+构建脚本（如 automake 的 `gen-all.pl`）在生成输出脚本时，将解释器路径硬编码到 shebang 中：
+
+```perl
+# gen-all.pl 中的问题代码（修复前）
+my $perl_path = '/data/service/hnp/bin/perl';          # ❌ 硬编码平台特定路径
+s|^#!.*perl.*|#!$perl_path -w|;                        # ❌ 写死到输出脚本
+```
+
+生成的 `bin/automake`、`bin/aclocal` 等脚本第一行变成：
+```
+#!/data/service/hnp/bin/perl -w    # 仅在当前构建环境有效
+```
+
+### 影响范围
+
+| 场景 | 影响 |
+|------|------|
+| 换机部署 | 解释器路径不同 → 所有脚本无法执行 |
+| 多 Perl 版本共存 | 绑定特定版本 → 无法切换 |
+| 可移植包分发 | 接收方无该路径 → 包不可用 |
+| `env + 参数` | `#!/bin/env perl -w` → env 把 `perl -w` 当文件名查找 |
+
+### 正确做法
+
+使用 `/bin/env` 作为中间层，由 PATH 查找解释器：
+
+```bash
+# ✅ 正确的 shebang（可移植）
+#!/bin/env perl
+#!/bin/env python3
+#!/bin/env bash
+```
+
+**注意**：`/bin/env` 不支持传递参数给解释器。以下写法是错误的：
+
+```bash
+# ❌ 错误：-w 会被 env 当作文件名
+#!/bin/env perl -w
+
+# ✅ 正确：用代码内部启用 warnings
+#!/bin/env perl
+# 脚本体中：
+use warnings;    # Perl
+# 或 set -o nounset 等  # Shell
+```
+
+### 验证命令
+
+```bash
+# 检查已安装脚本的 shebang 是否可移植
+head -1 $PREFIX/bin/*
+# 应看到 #!/bin/env xxx 而非 #!/xxx/path/xxx
+```
+
+### 通用规则
+
+> **所有构建系统生成的脚本、以及手动编写的安装/配置脚本，shebang 必须使用 `/bin/env` 格式。**
+> 硬编码解释器路径是可移植性头号杀手。
+
+### 涉及软件
+
+automake 1.16.5（gen-all.pl 生成的 automake/aclocal 脚本）
+通用（所有生成脚本或编写 shell/perl/python 脚本的场景）
+
+---
 *属于 [error-patterns.md](./error-patterns.md) 的模块化子集*
