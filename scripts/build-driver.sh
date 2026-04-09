@@ -1157,17 +1157,18 @@ fi
 
 # 将排除候选写入正式 EXCLUDE_LIST（版本级，覆盖软件级）
 if [ -s "$_EXCLUDE_CANDIDATES" ]; then
-    {
-        "# EXCLUDE_LIST — 由 build-driver.sh Step 8 自动生成"
-        "# 生成时间: $(date)"
-        "# 来源: Staging 深度功能测试失败的命令"
-        "# 注意: 这些命令编译通过但在鸿蒙上实际运行有问题且无法通过源码修复规避"
+    cat > "${BUILD_ARCHIVE_DIR}/EXCLUDE_LIST" << XLEOF
+# EXCLUDE_LIST — 由 build-driver.sh Step 8 自动生成
+# 生成时间: $(date)
+# 来源: Staging 深度功能测试失败的命令
+# 注意: 这些命令编译通过但在鸿蒙上实际运行有问题且无法通过源码修复规避
 
-        "# --- 以下命令在测试中失败 ---"
-        cat "$_EXCLUDE_CANDIDATES"
+# --- 以下命令在测试中失败 ---
+$(cat "$_EXCLUDE_CANDIDATES")
 
-        "# --- 如需恢复，删除对应行即可 ---"
-    } > "${BUILD_ARCHIVE_DIR}/EXCLUDE_LIST"
+# --- 如需恢复，删除对应行即可 ---
+XLEOF
+    _CAND_COUNT=$(wc -l < "$_EXCLUDE_CANDIDATES" | tr -d ' ')
     log_ok "EXCLUDE_LIST 已生成: ${BUILD_ARCHIVE_DIR}/EXCLUDE_LIST ($_CAND_COUNT 个)"
 fi
 

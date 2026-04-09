@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **6** |
-| 编译成功 | 6 (pkg-config, sed, coreutils, **gawk**, **automake**, libtool) |
-| 打包成功 | 5 (pkg-config, sed, coreutils, **gawk**, **automake**) |
+| 已完成 | **7** |
+| 编译成功 | 7 (pkg-config, sed, coreutils, **gawk**, **automake**, libtool, **zlib**) |
+| 打包成功 | 6 (pkg-config, sed, coreutils, **gawk**, **automake**, **zlib**) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -66,7 +66,7 @@
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 07 | zlib | 1.3.1 | ⬜ 待编译 | - | - | - | ⚠️ 建议静态库 |
+| 07 | zlib | 1.3.1 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/zlib-1.3.1-ohos-aarch64.tar.gz (244K) | 静态库 libz.a, make test 全通过(32+64bit), ⚠️ fossils URL, package.sh 纯库检测已修复 |
 | 08 | bzip2 | 1.0.8 | ⬜ 待编译 | - | - | - | 无依赖 |
 | 09 | xz/lzma | 5.6.2 | ⬜ 待编译 | - | - | - | 无依赖 |
 | 10 | gzip | 1.13 | ⬜ 待编译 | - | - | - | 无依赖 |
@@ -151,6 +151,14 @@
 | **package.sh 打包失败** | 打包目录不存在（`packaging/libtool/2.4.7/`），package.sh 无法生成 tar.gz | 需后续补跑 package.sh 或手动打包 | ⚠️ 待处理 |
 | **libtoolize func_add_hook 错误 (E035)** | libtoolize 的 inline-source shell 函数机制在 HarmonyOS sh 下无法正确加载 | 核心功能 `libtool` 正常可用，libtoolize 仅影响从零创建 autotools 项目 | ✅ 已知限制 |
 
+### zlib 1.3.1（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **主站下载 URL 404** | `zlib.net/zlib-1.3.1.tar.gz` 已归档（当前最新版 1.3.2） | 改用 `zlib.net/fossils/zlib-1.3.1.tar.gz` | ✅ |
+| **package.sh fallback 到 usr/local** | 纯库无 bin/，staging 检测 `[ ! -d "$_SRC_PREFIX/bin" ]` 必然命中 fallback | 改为检查 lib/ 或 include/ 任一存在即可 | ✅ |
+| **源码嵌套子目录** | tar 解压后实际在 `zlib-1.3.1.work/zlib-1.3.1.orig/` | 手动定位 REAL_SRC_DIR 执行编译 | ⚠️ init-build 解压逻辑待优化 |
+
 ### 关键经验
 
 1. **`make install prefix=` 可以绕过重新 configure** — 当 prefix 配置错误时无需 distclean
@@ -158,6 +166,8 @@
 3. **heredoc 嵌套是反模式** — 分段写入更可靠、更易调试
 4. **toybox sh 对 POSIX 兼容性有限** — `\uXXXX` 转义、`\|` 地址模式、裸 `""` 命令等需避免
 5. **sed 分割符选择要考虑变量内容** — 当替换值可能含 `/` 时必须改用其他分隔符或 awk
+6. **纯库软件 staging 检测不能用 bin/ 存在性判断** — 应检查 lib/ 或 include/，否则必然 fallback 到全局前缀
+7. **zlib 旧版本在 fossils 子目录** — 主站只保留最新版，历史版本 URL 需加 `/fossils/` 路径段
 
 ---
 
@@ -222,6 +232,11 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 ---
 
 *最后更新: 2026-04-09*
+*v4.4 同步更新：*
+*  - zlib 1.3.1 标记为已完成（编译+测试+打包+部署，244K 静态库）*
+*  - 已完成数 6 → 7（新增 zlib）*
+*  - 打包成功数 5 → 6（新增 zlib）*
+*  - package.sh 纯库 staging 检测 bug 已修复（bin/ → lib/ 或 include/）*
 *v4.3 同步更新：*
 *  - gawk 5.3.0 标记为已完成（编译+打包+签名，3.9M）*
 *  - automake 1.16.5 标记为已完成（编译+打包+签名，1.2M，手动全链路验证通过）*

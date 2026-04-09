@@ -18,7 +18,7 @@ sh install-bzip2-1.0.8.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.0.8 | success | 2 |
+| 1.0.8 | success | 1 |
 
 ## 当前版本 (1.0.8) 详情
 
@@ -28,7 +28,7 @@ sh install-bzip2-1.0.8.sh
 |------|------|
 | 二进制 (bin/) | 未知 个 ELF aarch64，已签名 |
 | 手册页 | 未知 个 |
-| 主包大小 | 824K |
+| 主包大小 | 820K |
 
 ### 编译信息
 
@@ -37,11 +37,10 @@ sh install-bzip2-1.0.8.sh
 | 构建系统 | makefile |
 | 编译器 | clang + musl libc (HarmonyOS NDK) |
 | 目标 | aarch64-unknown-linux-ohos |
-| 补丁 | 2 个 |
+| 补丁 | 1 个 |
 
 ### 补丁列表
 - ✅ 0001-bzip2-1.0.8.orig-Makefile.patch
-- ✅ 0002-bzip2-1.0.8.orig-Makefile-libbz2_so.patch
 
 ## 环境要求
 
@@ -53,4 +52,4 @@ sh install-bzip2-1.0.8.sh
 见原始上游源码
 
 ---
-*由 finalize-archive.sh 自动生成 · 2026-04-09 17:58*
+*由 finalize-archive.sh 自动生成 · 2026-04-09 19:08*

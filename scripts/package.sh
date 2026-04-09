@@ -237,8 +237,9 @@ echo "  OK: cache cleaned"
 echo "[Step 2b/10] 从安装目录复制文件..."
 
 # 确定源目录：优先 TEST_PREFIX
+# 检查 lib/ 或 include/（纯库软件如 zlib 没有 bin/）
 _SRC_PREFIX="$TEST_PREFIX"
-if [ -z "$_SRC_PREFIX" ] || [ ! -d "$_SRC_PREFIX/bin" ]; then
+if [ -z "$_SRC_PREFIX" ] || { [ ! -d "$_SRC_PREFIX/lib" ] && [ ! -d "$_SRC_PREFIX/include" ]; }; then
     _SRC_PREFIX="$DEFAULT_PREFIX"
 fi
 
@@ -580,9 +581,11 @@ for _elf in $(find "${PKGDIR}/bin" "${PKGDIR}/lib" -type f -exec file {} \; 2>/d
 done
 
 # 也处理 lib/external 中的 ELF
-find "${PKGDIR}/lib/external" -type f -exec file {} \; 2>/dev/null | grep -E ': ELF' | cut -d: -f1 | while read -r _e; do
-    strip_debug_single "$_e"
-done
+if [ -d "${PKGDIR}/lib/external" ] && [ -n "$(ls -A ${PKGDIR}/lib/external 2>/dev/null)" ]; then
+    find "${PKGDIR}/lib/external" -type f -exec file {} \; 2>/dev/null | grep -E ': ELF' | cut -d: -f1 | while read -r _e; do
+        strip_debug_single "$_e"
+    done || true
+fi
 
 echo "  OK: stripped $STRIP_COUNT files${DEBUG_BUILD:+, separated $DEBUG_COUNT debug symbols}"
 
