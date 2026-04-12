@@ -1,0 +1,100 @@
+"""Close compilation archive — update status, patches, metadata.
+"""
+from __future__ import annotations
+import os
+import re
+import subprocess
+from datetime import datetime
+from pathlib import Path
+
+from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
+from .refresh_patch import auto_mode as refresh_patch_auto
+
+
+def close_archive(name: str, version: str, status: str,
+                  skip_patch: bool = False, pdir: str | None = None) -> int:
+    project = Path(pdir) if pdir else Path(find_project_dir())
+    script_dir = project / "scripts"
+    letter = name[0].lower()
+    ver_dir = project / "archives" / letter / name / version
+
+    if status not in ("success", "partial", "failed"):
+        log_fail(f"无效状态: {status}")
+        return 1
+    if not ver_dir.exists():
+        log_fail(f"档案不存在: {ver_dir}")
+        return 2
+
+    manifest = ver_dir / "manifest.yaml"
+    progress = ver_dir / "PROGRESS.md"
+    meta = ver_dir / "_meta.yaml"
+    if not manifest.exists() or not progress.exists():
+        log_fail("manifest.yaml 或 PROGRESS.md 缺失")
+        return 2
+
+    log_info(f"关闭档案: {name} {version} → {status}")
+
+    # Step 0: Patch pipeline (conditional)
+    patches = list((ver_dir / "patches").glob("000*.patch"))
+    if not patches and status != "failed" and not skip_patch:
+        log_info("  触发补丁管线...")
+        try:
+            rc = refresh_patch_auto(name, version, pdir=str(project))
+            if rc == 0:
+                log_ok("  补丁生成成功")
+            else:
+                log_warn(f"  补丁管线失败 (RC={rc})")
+        except Exception as e:
+            log_warn(f"  补丁管线异常: {e}")
+
+    # Step 1: Update manifest.yaml status
+    content = manifest.read_text(encoding="utf-8")
+    content = re.sub(r'status:\s*\w+', f'status: {status}', content)
+    manifest.write_text(content, encoding="utf-8")
+    log_ok(f"  manifest.yaml → {status}")
+
+    # Step 2: Update _meta.yaml
+    if meta.exists():
+        mc = meta.read_text(encoding="utf-8")
+        mc = re.sub(r'status:\s*\w+', f'status: {status}', mc)
+        mc = re.sub(r'compile_date:.*', f'compile_date: {datetime.now().strftime("%Y-%m-%d")}', mc)
+        # Count patches
+        pcnt = len(list((ver_dir / "patches").glob("*.patch")))
+        mc = re.sub(r'patches_count:\s*\d+', f'patches_count: {pcnt}', mc)
+        # Extract compatibility from manifest
+        m = re.search(r'compatibility:\s*(\S+)', content)
+        if m:
+            mc = re.sub(r'compatibility:\s*\S+', f'compatibility: {m.group(1)}', mc)
+        meta.write_text(mc, encoding="utf-8")
+        log_ok("  _meta.yaml 已更新")
+
+    # Step 3: Update PROGRESS.md
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    append_text = f"\n---\n\n**编译结束**: {ts}\n**最终状态**: {status}\n"
+    with open(progress, "a", encoding="utf-8") as f:
+        f.write(append_text)
+    log_ok("  PROGRESS.md 已更新")
+
+    # Step 5: Check pending items
+    pcontent = progress.read_text(encoding="utf-8")
+    pending = len(re.findall(r'(⏳|待评估|TODO|FIXME)', pcontent))
+    if pending > 0:
+        log_warn(f"  ⚠️ 存在 {pending} 个待评估知识条目")
+        return 4
+
+    log_ok(f"✅ 档案已关闭: {status}")
+    return 0
+
+
+def close_archive_cli(argv: list[str] | None = None) -> int:
+    import argparse
+    parser = argparse.ArgumentParser(prog="ohc close-archive")
+    parser.add_argument("software")
+    parser.add_argument("version")
+    parser.add_argument("status", choices=["success", "partial", "failed"])
+    parser.add_argument("--skip-patch", action="store_true")
+    parser.add_argument("--project-dir")
+    args = parser.parse_args(argv)
+    skip = args.skip_patch or os.environ.get("_SKIP_PATCH_GENERATION") == "true"
+    return close_archive(args.software, args.version, args.status,
+                          skip, getattr(args, "project_dir", None))

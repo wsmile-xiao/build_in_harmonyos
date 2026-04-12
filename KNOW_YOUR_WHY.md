@@ -193,7 +193,7 @@
 □ Phase 2.5 独立目录验证通过了？
 □ make check / 功能测试结果？
 □ PROGRESS.md 的每个检查点都已填写？
-□ 准备好做质量门禁（verify-build.sh）？
+□ 准备好做质量门禁（ohc-run.py verify-build）？
 ```
 
 > ⚠️ **这是最危险的转换点**。编译成功的兴奋感会让你想直接结束。
@@ -202,7 +202,7 @@
 ## Phase 4 + Step 5 + Step 5.5 完成前，自检：
 
 ```
-□ G1-G4 质量门禁通过？（verify-build.sh）
+□ G1-G4 质量门禁通过？（ohc-run.py verify-build）
 □ 每个源码修改都有对应的补丁文件？（diff 校验确认）
 □ 补丁能干净应用？（patch --dry-run 验证）
 □ manifest.yaml 创建了？字段完整？knowledge_gained 和 knowledge_ref 都填了？
@@ -212,7 +212,7 @@
 □ knowledge/ 中有重复条目吗？→ 合并而非新增
 □ 预编译包制作完成？（10 步流程，见 packaging.md）
 □ install.sh 已生成并测试？（curl | sh -s -- <ver>）
-□ finalize-archive.sh 执行通过？（归档收口+RELEASENOTE生成）
+□ ohc-run.py finalize-archive 执行通过？（归档收口+RELEASENOTE生成）
 □ PREBUILD_TODOLIST.md 已更新？
 ```
 
@@ -234,7 +234,7 @@
 
 ## 📎 延伸阅读
 
-- **[协作指南](./knowledge/collaboration-guidelines.md)** — 多 Agent 编排规范（子任务拆分三原则、上下文传递模式、降智预防）、工作流改进规则（D4-D7 流程级致命约束、S4-S12 流程级严重约束含 S12.1 保护性约束）
+- **[协作指南](./knowledge/collaboration.md)** — 协作架构与工作流（分支规范、PR 提交、主编审核、Agent 分支生命周期）、子任务拆分与质量保障（三原则、上下文传递模式、降智预防）、工作流改进规则（D4-D7 致命约束、S4-S12 严重约束含 S12.1 保护性约束）、防遗忘策略
 - **[防遗忘规则](./knowledge/anti-forgetting-rules.md)** — 防遗忘原则（上下文压缩后的生存策略）、遗忘测试数据（各信息类型遗忘率统计、遗忘曲线阶段分析）、防遗忘设计模式
 
 ---

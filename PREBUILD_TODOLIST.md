@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **7** |
-| 编译成功 | 7 (pkg-config, sed, coreutils, **gawk**, **automake**, libtool, **zlib**) |
-| 打包成功 | 6 (pkg-config, sed, coreutils, **gawk**, **automake**, **zlib**) |
+| 已完成 | **9** |
+| 编译成功 | 9 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, **xz**) |
+| 打包成功 | 8 (pkg-config, sed, coreutils, gawk, automake, zlib, bzip2, **xz**) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -66,9 +66,9 @@
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 07 | zlib | 1.3.1 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/zlib-1.3.1-ohos-aarch64.tar.gz (244K) | 静态库 libz.a, make test 全通过(32+64bit), ⚠️ fossils URL, package.sh 纯库检测已修复 |
-| 08 | bzip2 | 1.0.8 | ⬜ 待编译 | - | - | - | 无依赖 |
-| 09 | xz/lzma | 5.6.2 | ⬜ 待编译 | - | - | - | 无依赖 |
+| 07 | zlib | 1.3.1 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/zlib-1.3.1-ohos-aarch64.tar.gz (244K) | 静态库 libz.a, make test 全通过(32+64bit), ⚠️ fossils URL, ohc-run.py package 纯库检测已修复 |
+| 08 | bzip2 | 1.0.8 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/bzip2-1.0.8-ohos-aarch64.tar.gz (820K) | **1个补丁**(平台自动检测ohos→-fPIC), CC/AR/RANLIB/PREFIX全环境变量覆盖, 零硬编码 |
+| 09 | xz/lzma | 5.6.2 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/xz-5.6.2-ohos-aarch64.tar.gz (3.5M) | **2个补丁**(config.guess+config.sub, 方案A标准打补丁), 28二进制(排除lzcmp), 静态liblzma.a, 压缩/解压功能验证通过, --disable-assembler |
 | 10 | gzip | 1.13 | ⬜ 待编译 | - | - | - | 无依赖 |
 
 ### 第三阶段-B：SSL/加密/终端
@@ -131,9 +131,9 @@
 | 问题 | 根因 | 修复 | 状态 |
 |------|------|------|------|
 | **make install Permission denied** | `configure --prefix=` 为空，默认安装到系统 `/bin` | 使用 `make install prefix=/path/to/dest` 指定安装目录 | ✅ |
-| **package.sh Step 4 卡死** | `$TEST_PREFIX` 未传递 → fallback 到全局 `/usr/local` → 复制了 10889 个无关 lib 文件 → 对垃圾文件逐个 ELF 检测超时 | 确保 `$TEST_PREFIX` 在环境变量中；或直接 `make install` 到 packaging 目录 | ✅ |
+| **ohc-run.py package Step 4 卡死** | `$TEST_PREFIX` 未传递 → fallback 到全局 `/usr/local` → 复制了 10889 个无关 lib 文件 → 对垃圾文件逐个 ELF 检测超时 | 确保 `$TEST_PREFIX` 在环境变量中；或直接 `make install` 到 packaging 目录 | ✅ |
 | **EXCLUDE_LIST 不生效 (0 files excluded)** | Step 2e(排除)在 Step 2b(复制)**之前**执行，PKGDIR 为空时删不到任何东西 | 调整顺序：Step 2b(复制) → Step 2e(排除) | ✅ |
-| **finalize-archive.sh RELEASENOTE.md 未生成** | 嵌套 heredoc (`$(if ... cat <<EOF ... EOF fi)` 在无引号 heredoc 内部) 静默失败 | 重写为分段写入（6 个独立的 `cat >>` 操作） | ✅ |
+| **ohc-run.py finalize-archive RELEASENOTE.md 未生成** | 嵌套 heredoc (`$(if ... cat <<EOF ... EOF fi)` 在无引号 heredoc 内部) 静默失败 | 重写为分段写入（6 个独立的 `cat >>` 操作） | ✅ |
 | **RELEASENOTE 变量未展开** | 使用 `'EOF'`(单引号)阻止变量替换 | 改为 `<< EOF`(无引号允许展开) | ✅ |
 | **_BSYS=unknown** | manifest.yaml 中 `build_system:` 有缩进(`build_config:` 子字段)，`^build_system:` 错配 | 改为 `grep "build_system:"`(去掉 `^` 锚定) | ✅ |
 | **排除列表含注释** | manifest.yaml 行内注释(`# syscall不支持`)被当命令名 | 加 `cut -d"#" -f1` 清理 | ✅ |
@@ -145,18 +145,33 @@
 | 问题 | 根因 | 修复 | 状态 |
 |------|------|------|------|
 | **构建系统检测为 unknown** | 源码解压后实际在 `libtool-2.4.7.orig/` 子目录，build-driver 未找到顶层 configure | 手动进入子目录执行 configure/make/install | ✅ |
-| **package.sh Permission denied (exit 126)** | 脚本文件缺少 `+x` 执行权限（7个 .sh 文件） | `chmod +x scripts/*.sh` | ✅ |
-| **build-driver.sh 退出码 126 "Is a directory"** | 脚本中裸的 `""` 空字符串命令在 toybox sh + `set -e` 下返回非零退出码 | 删除 3 处空行 `""` 命令 | ✅ |
-| **_task_card.sh sed 分隔符冲突** | 备注 `2/2` 中的 `/` 与 sed `s///` 的 `/` 分隔符冲突 → `unknown option to 's'` | 改用 awk 替代 sed 进行备注字段写入 | ✅ |
-| **package.sh 打包失败** | 打包目录不存在（`packaging/libtool/2.4.7/`），package.sh 无法生成 tar.gz | 需后续补跑 package.sh 或手动打包 | ⚠️ 待处理 |
+| **ohc-run.py package Permission denied (exit 126)** | 脚本文件缺少 `+x` 执行权限（7个 .sh 文件） | `chmod +x scripts/*.sh` | ✅ |
+| **ohc-run.py build 退出码 126 "Is a directory"** | 脚本中裸的 `""` 空字符串命令在 toybox sh + `set -e` 下返回非零退出码 | 删除 3 处空行 `""` 命令 | ✅ |
+| **_task_card (已归档到 _archive_bash/) sed 分隔符冲突** | 备注 `2/2` 中的 `/` 与 sed `s///` 的 `/` 分隔符冲突 → `unknown option to 's'` | 改用 awk 替代 sed 进行备注字段写入 | ✅ |
+| **ohc-run.py package 打包失败** | 打包目录不存在（`packaging/libtool/2.4.7/`），ohc-run.py package 无法生成 tar.gz | 需后续补跑 ohc-run.py package 或手动打包 | ⚠️ 待处理 |
 | **libtoolize func_add_hook 错误 (E035)** | libtoolize 的 inline-source shell 函数机制在 HarmonyOS sh 下无法正确加载 | 核心功能 `libtool` 正常可用，libtoolize 仅影响从零创建 autotools 项目 | ✅ 已知限制 |
+
+### bzip2 1.0.8（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **ohc-run.py package Step 6 空管道退出** | `lib/external/` 为空时 `find ... \| while read` 返回 EOF，`set -e` 触发退出 | 添加空目录检查：`[ -d dir ] && [ -n "$(ls -A dir)" ]` | ✅ 已修复 ohc-run.py package |
+| **strip 命令缺失** | 系统无 `/usr/bin/strip`，只有 `llvm-strip` | 创建 wrapper: `/tmp/bin/strip → llvm-strip` | ⚠️ 临时方案 |
+| **bzip2 --version 读 stdin 阻塞** | bzip2 无参数时从 stdin 读取，非 TTY 下永久挂起 | 验证步骤改用 `-f -z/-d` 实际文件操作代替 `--version` | ✅ |
+| **鸿蒙 ln -sf bug** | `ln -sf` 创建带随机后缀文件而非覆盖符号链接 | 先 `/bin/rm -f` 再 `/bin/ln -s` | ✅ 已知限制 |
+
+### 关键经验
+
+8. **Makefile CFLAGS 直接赋值 vs 条件赋值** — 直接赋值(`=`)导致 `make CFLAGS=xxx` 必须完整复制原值；条件赋值(`?=`)或追加(`+=`)才支持环境变量覆盖
+9. **平台检测优于硬编码** — `$(shell $(CC) -dumpmachine \| grep -q "ohos")` 可实现跨平台兼容的 Makefile 补丁
+10. **纯 Makefile 项目(无 configure) 的补丁策略** — 只需 patch CFLAGS 行做平台适配，其余 CC/AR/RANLIB/PREFIX 全部通过 make 参数传入
 
 ### zlib 1.3.1（对话 #N）
 
 | 问题 | 根因 | 修复 | 状态 |
 |------|------|------|------|
 | **主站下载 URL 404** | `zlib.net/zlib-1.3.1.tar.gz` 已归档（当前最新版 1.3.2） | 改用 `zlib.net/fossils/zlib-1.3.1.tar.gz` | ✅ |
-| **package.sh fallback 到 usr/local** | 纯库无 bin/，staging 检测 `[ ! -d "$_SRC_PREFIX/bin" ]` 必然命中 fallback | 改为检查 lib/ 或 include/ 任一存在即可 | ✅ |
+| **ohc-run.py package fallback 到 usr/local** | 纯库无 bin/，staging 检测 `[ ! -d "$_SRC_PREFIX/bin" ]` 必然命中 fallback | 改为检查 lib/ 或 include/ 任一存在即可 | ✅ |
 | **源码嵌套子目录** | tar 解压后实际在 `zlib-1.3.1.work/zlib-1.3.1.orig/` | 手动定位 REAL_SRC_DIR 执行编译 | ⚠️ init-build 解压逻辑待优化 |
 
 ### 关键经验
@@ -168,6 +183,28 @@
 5. **sed 分割符选择要考虑变量内容** — 当替换值可能含 `/` 时必须改用其他分隔符或 awk
 6. **纯库软件 staging 检测不能用 bin/ 存在性判断** — 应检查 lib/ 或 include/，否则必然 fallback 到全局前缀
 7. **zlib 旧版本在 fossils 子目录** — 主站只保留最新版，历史版本 URL 需加 `/fossils/` 路径段
+
+### xz 5.6.2（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **主站下载超时 (curl exit 28)** | tukaani.org 从国内访问慢，30s 超时 | 手动下载到工作目录后用 `--url=file://` 传入 init-build | ✅ |
+| **/tmp 只读 (erofs)** | 鸿蒙 /tmp 挂载为只读文件系统 | 使用 `$TMPDIR=$HOME/tmp`（已由 SKILL R10 处理） | ✅ 已知限制 |
+| **构建系统检测为 unknown** | tar.xz 解压后源码嵌套在 `.work/xz-5.6.2.orig/` 子目录，build-driver 的 `find -maxdepth 2` 未修正 BUILD_SRC_DIR | 手动定位 REAL_SRC 编译；**已记录 F068 待修复 build-driver** | ⚠️ 脚本 bug |
+| **config.guess 无法识别 HarmonyOS** | GNU config.guess (2024-01-01) 无 HarmonyOS/uname 检测分支 | **方案A**: 打补丁修改 config.guess(`__OHOS__`+HarmonyOS块) + config.sub(ohos-linux+ohos*+linux-ohos*)；**禁止用 --build/--host 绕过**(autotools-patterns.md §0 铁律) | ✅ |
+| **perl $UNAME_MACHINE 被插值为空** | perl 双引号 heredoc 中 `$UNAME_MACHINE` 被 shell 变量替换为空 | 改用 `<<'EOB'`(单引号 heredoc) 或 `\Q$UNAME_MACHINE\E` 转义 | ✅ 已沉淀到标准脚本 |
+| **config.sub linux-uclibc 匹配失败** | 文档示例写 `linux-uclibc* )`，实际文件是 `linux-uclibc*- )`（多 `-`） | 修正 autotools-patterns.md §3.3 增加变体说明；标准脚本用 `[/-]?` 兼容两种格式 | ✅ |
+| **Perl `-r` 测试与 shell `test -r` 行为不同** | HarmonyOS 文件系统上 Perl 的 `-r` 返回 false 但文件可读 | 标准脚本改用 `-e` 判断 | ✅ |
+| **lzcmp 功能测试失败** | lzcmp 是 cmp 的软链接包装，依赖 `/usr/bin/cmp`，鸿蒙上行为异常 | 加入 EXCLUDE_LIST（1/23 排除），不影响核心 xz 功能 | ✅ 已知限制 |
+| **ohc-run.py package 打包路径不匹配** | build-driver Step 9 中 `packaging/xz/5.6.2/` 不存在（实际在 `archives/x/xz/5.6.2/packaging/`） | ohc-run.py package 回退但未阻塞部署；fallback deploy 成功 | ⚠️ 轻微 |
+
+### 关键经验
+
+8. **方案A > 方案B（铁律）** — autotools 项目必须打补丁修改 config.guess/config.sub，禁止用 `--build=`/`--host=` 绕过。后者导致交叉编译误判 → AC_RUN_IFELSE 全跳过 → config.h 错误
+9. **Perl heredoc 变量安全** — Perl 双引号 heredoc (`<<"HEREDOC"`) 会展开 `$VAR`，shell 变量会覆盖 Perl 变量。必须用单引号 heredoc (`<<'HEREDOC'`) 或 `\Q\E` 转义
+10. **config.sub 版本差异** — 不同软件打包的 config.sub 版本不同，`linux-uclibc` 条目可能是 `linux-uclibc*)` 或 `linux-uclibc*-)`。脚本需兼容两种变体
+11. **嵌套源码目录是常见模式** — tar.xz/tar.bz2 解压经常产生 `软件-版本.orig/` 子目录。build-driver 应在 init 阶段就递归查找 configure 并修正 BUILD_SRC_DIR
+12. **标准补丁工具应内置** — 每次 Perl 正则调试耗时且易出错。`patch-autotools-ohos.pl` 已沉淀为 `${SKILL_ROOT}/scripts/` 标准工具
 
 ---
 
@@ -181,14 +218,20 @@
 | packaging.md | ✅ 已更新至 v2.3（10步流程+扁平结构规范+install.sh托管） | ✅ 完成 |
 | environment.md | 补充 §12「LD_LIBRARY_PATH 优先级陷阱与静态库策略」 | ⬜ 待更新 |
 | SKILL.md | ✅ 已更新至 v4.0（五步走+R10+预编译包+归档标准化） | ✅ 完成 |
-| install-template.sh | ✅ 已简化为 33 行极简版（cp -r * + $HOME/tmp） | ✅ 完成 |
+| ohc-run.py install-template (已归档) | ✅ 已简化为 33 行极简版（cp -r * + $HOME/tmp） | ✅ 完成 |
 | error-patterns.md | ✅ 新增 E066/E067（tar格式+grep元字符） | ✅ 完成 |
-| finalize-archive.sh | ✅ 升级：zsh 迁移 + RELEASENOTE 分段写入 + 变量补全 + 排除列表清理 + status#final 匹配 | ✅ 完成 |
-| package.sh / sign-elf.sh | ✅ shebang 改为 `#!/bin/zsh`；package.sh Step 2e/2b 顺序修复（排除在复制之后） | ✅ 完成 |
-| init-archive.sh | ✅ 升级支持 --clean 模式 + README 保护 | ✅ 完成 |
-| verify-build.sh | ✅ G4 补丁验证修复（三级降级+tarball重建） | ✅ 完成 |
-| finish-build.sh | ✅ 新增 Step 3 调用 finalize-archive.sh（4步流程） | ✅ 完成 |
-| create-archive.sh | ⚠️ 标记为 .deprecated（被 init-archive.sh 取代） | ✅ 处理 |
+| error-patterns-runtime.md | ✅ 新增 **E007**（config.guess 无法识别 HarmonyOS，含方案A铁律/标准工具引用/交叉索引） | ✅ 完成 |
+| autotools-patterns.md | ✅ 新增 **§0 铁律**（禁止 --build/--host 绕过）；**§3.3 变体说明**；**§7 标准工具** `patch-autotools-ohos.pl` | ✅ 完成 |
+| FAQ.md | ✅ Q5/Q18 同步增加 --build/--host 禁令说明和"唯一做法"表述 | ✅ 完成 |
+| scripts/patch-autotools-ohos.pl | ✅ **新增** — 标准 autotools OHOS 补丁工具（5项检查+grep验证+变体兼容） | ✅ 完成 |
+| reports/skill-feedback.md | ✅ 新增 F068(嵌套目录检测)/F069(运行时错误匹配缺失)/F070(覆盖面不一致) | ✅ 完成 |
+| ohc-run.py finalize-archive | ✅ 升级：zsh 迁移 + RELEASENOTE 分段写入 + 变量补全 + 排除列表清理 + status#final 匹配 | ✅ 完成 |
+| ohc-run.py finalize-archive | ✅ 升级：zsh 迁移 + RELEASENOTE 分段写入 + 变量补全 + 排除列表清理 + status#final 匹配 | ✅ 完成 |
+| ohc-run.py package / ohc-run.py sign-elf | ✅ shebang 改为 `#!/bin/zsh`；ohc-run.py package Step 2e/2b 顺序修复（排除在复制之后） | ✅ 完成 |
+| ohc-run.py init-archive | ✅ 升级支持 --clean 模式 + README 保护 | ✅ 完成 |
+| ohc-run.py verify-build | ✅ G4 补丁验证修复（三级降级+tarball重建） | ✅ 完成 |
+| ohc-run.py finish | ✅ 新增 Step 3 调用 ohc-run.py finalize-archive（4步流程） | ✅ 完成 |
+| create-archive.sh | ⚠️ 标记为 .deprecated（被 ohc-run.py init-archive 取代） | ✅ 处理 |
 | releasenote-template.md | ⚠️ 标记为 .deprecated（被 finalize-archive 取代） | ✅ 处理 |
 | knowledge_section_new.txt | 🗑️ 已删除（内容已整合进 SKILL §5） | ✅ 清理 |
 
@@ -232,11 +275,25 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 ---
 
 *最后更新: 2026-04-09*
-*v4.4 同步更新：*
+*v4.7 同步更新：*
+*  - **xz 5.6.2 标记为已完成**（编译+测试+打包+部署，3.5M 主包 + 474K debug）*
+*  - 已完成数 8 → **9**（新增 xz）*
+*  - 打包成功数 7 → **8**（新增 xz）*
+*  - xz 补丁方案: 方案A标准打补丁(config.guess+config.sub)，禁止方案B(--build/--host绕过)*
+*  - 新增标准工具 `scripts/patch-autotools-ohos.pl`（一键 autotools OHOS 适配）*
+*  - error-patterns-runtime.md 新增 E007（config.guess 无法识别 HarmonyOS）*
+*  - autotools-patterns.md 新增 §0 铁律 + §3.3 变体修正 + §7 标准工具引用*
+*  - FAQ.md Q5/Q18 同步增加禁令说明*
+*  - skill-feedback.md 新增 F068/F069/F070 三项流程缺陷记录*
+*v4.6 同步更新：*
+*  - bzip2 1.0.8 标记为已完成（编译+测试+打包+部署，820K）*
+*  - 已完成数 7 → 8（新增 bzip2）*
+*  - 打包成功数 6 → 7（新增 bzip2）*
+*  - bzip2 补丁方案升级：从"5行sed硬编码"→"1个平台自动检测patch + 环境变量覆盖"*
 *  - zlib 1.3.1 标记为已完成（编译+测试+打包+部署，244K 静态库）*
 *  - 已完成数 6 → 7（新增 zlib）*
 *  - 打包成功数 5 → 6（新增 zlib）*
-*  - package.sh 纯库 staging 检测 bug 已修复（bin/ → lib/ 或 include/）*
+*  - ohc-run.py package 纯库 staging 检测 bug 已修复（bin/ → lib/ 或 include/）*
 *v4.3 同步更新：*
 *  - gawk 5.3.0 标记为已完成（编译+打包+签名，3.9M）*
 *  - automake 1.16.5 标记为已完成（编译+打包+签名，1.2M，手动全链路验证通过）*

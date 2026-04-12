@@ -1,0 +1,61 @@
+# Layer 0: 错误面
+id:                     E076
+trigger_tool:           cc|clang|coreutils
+phase:                  runtime|compilation
+error_signature:        fstat.*EACCES|lseek.*EACCES|fstat.*EPERM|lseek.*EPERM|Bad file descriptor|cannot seek
+
+# Layer 1: 识别层
+severity:               2
+category:               filesystem|syscall|runtime-behavior
+match_keywords:         fstat, lseek, pipe, tty, socket, EACCES, EPERM, non-file fd, FIFO, coreutils, cat, head, tail, dd, seek, blksize, st_mode
+
+# Layer 2: 诊断层
+root_cause:             鸿蒙内核对管道(pipe)、终端(tty)、套接字(socket)等非文件描述符的 fstat() 和 lseek() 系统调用返回 EACCES/EPERM，
+                        而非 Linux 的正常行为（fstat 返回有效信息，lseek 返回 ESPIPE）。
+                        GNU coreutils 的 cat/head/tail/dd 等工具在处理管道输入时调用 fstat(STDIN_FILENO)
+                        或 lseek 判断输入类型，因 EACCES 导致报错或输出异常。
+affected_scope:          所有调用 fstat/lseek 处理 stdin/stdout 的 C/C++ 软件，尤其是 GNU coreutils 全家桶
+verification_cmd:       |
+  # 编译测试程序验证
+  echo '#include <sys/stat.h>
+  #include <unistd.h>
+  #include <stdio.h>
+  #include <errno.h>
+  int main() { struct stat st; int r = fstat(0, &st); printf("fstat(0)=%d errno=%d\n", r, errno); return 0; }' | clang -xc - -o /tmp/test_fstat && echo "" | /tmp/test_fstat
+  # 期望: fstat(0)=-1 errno=1 (EPERM/EACCES)
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           source-patch-ifdef
+rec_description:        在源码中用 #ifdef __OHOS__ 守卫，对 fstat/lseek 的 EACCES/EPERM 返回值做兼容处理。
+rec_command:            |
+  # 标准修复模板：在调用 fstat(fd, &st) 处替换为 OHOS_FSTAT 宏
+  # 参见 doc/E076.md 中的 harmonyos-fstat-compat.h 模板
+rec_auto_fix:          false
+rec_impl:               source-patch-ifdef
+
+fallback_priority:      2
+fallback_approach:      env-var-workaround
+fallback_description:   对于 shell 命令场景，使用 toybox 版本替代 GNU coreutils（toybox 内部已做兼容）。
+fallback_command:      alias cat='/bin/cat'; alias head='/bin/head'; alias tail='/bin/tail'
+fallback_auto_fix:     true
+fallback_impl:          set-env-var
+
+forbid_1_pattern:      忽略 EACCES 继续执行或反复重试
+forbid_1_reason:        这是内核级行为差异，不会因重试而改变，每次调用都会返回相同错误
+forbid_1_consequence:   工具持续报错、输出乱码或数据损坏（如 dd 可能写入错误数据）
+
+# Layer 4: 原则引用
+principles:             P-SYSCALL-001
+
+# 关系图
+causes:                 []                  # 不导致其他错误模式
+caused_by:              [E009]              # 同源：鸿蒙内核 syscall 行为差异
+similar_to:             [E051,E022]         # E051(SIGSYS未实现syscall), E022(POSIX信号量差异含pthread_cond_timedwait) — 都是内核行为差异类
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               doc/E076.md
+last_updated:           2026-04-10
+source_event:           harmonyos-specifics.md §9 + coreutils 9.10 补丁经验

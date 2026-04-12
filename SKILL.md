@@ -1,1322 +1,376 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙系统编译智能体——三方库预编译框架
-version: 4.8
-author: OpenHarmony PC Developer社区
-permissions: 文件读写权限、Shell执行权限、网络访问权限
 ---
 
-> **每次编译任务前先读本文档。** 本文档回答"怎么做"，KNOW_YOUR_WHY.md 回答"为什么"。
+> **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
+> KNOW_YOUR_WHY.md 回答"为什么"，本文档回答"怎么做"。
 
-## 0. Skill 目录（⭐ 所有资源统一存放于此）
-
-> **本 Skill 的全部资源（脚本 / 归档 / 知识库 / 模板）都在 SKILL.md 所在的项目目录中。**
-> AI 开始任何操作前，先执行以下初始化（复制粘贴即可，无需修改）：
+## §0 初始化
 
 ```bash
-# ═══ Skill 路径初始化（每次会话开头执行一次）════
-# 从 ~/.opendesk 自动定位 SKILL.md，派生出所有路径
-_SKILL_MD=$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openharmony-compile-agent*" 2>/dev/null | head -1)
-if [ -z "$_SKILL_MD" ]; then
-    echo "❌ 找不到 SKILL.md，请确认 skill 已正确安装"
-    return 1 2>/dev/null || exit 1
-fi
-export SKILL_ROOT="$(dirname "$_SKILL_MD")"
-export SCRIPT_DIR="${SKILL_ROOT}/scripts"     # 所有脚本
-export ARCHIVE_ROOT="${SKILL_ROOT}/archives" # 所有归档
-export KNOWLEDGE_DIR="${SKILL_ROOT}/knowledge" # 知识库
-echo "✅ Skill 根目录: ${SKILL_ROOT}"
-unset _SKILL_MD
+SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openharmony-compile-agent*" 2>/dev/null | head -1)")"
 ```
 
-> **之后所有脚本调用格式**：`${SCRIPT_DIR}/build-driver.sh gawk 5.3.0`
->
-> **⚠️ R13（铁律）：禁止 `./scripts/xxx.sh` 相对路径。** AI 工作目录不固定，相对路径会在错误的目录下查找脚本。
+> `ohc-run.py` 内部自动定位项目根目录（`find_project_dir()`），不需要手动 `export` 环境变量。
+> **R13**: 用完整路径调用，如 `python3 $SKILL_ROOT/scripts/ohc-run.py build ...`。不要用相对路径 `./scripts/xxx`。
 
 ---
 
-# 一、快速参考卡（AI 先看这里）
+## §1 快速参考
 
-## 1.1 标准工作流：五步走（含独立测试）
+### 1.1 两套模式
 
+**模式 A：全自动（推荐，适合大多数三方库）**
 ```bash
-# ═══ 推荐：一键全流程（v4.3+，11步自动执行）═══
-${SKILL_ROOT}/scripts/build-driver.sh <软件名> [<版本>] [--skip-check]
-#   自动完成: init → 补丁 → configure(→staging) → make → install(→staging)
-#             → 弹窗(R7) → make check → Staging验证 → package(排除) → deploy → finish
-#   AI 应优先使用此入口，禁止跳过步骤
+python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> [<版本>]
+# → 内含 13 步：init→patches→configure→make→install→staging→package→deploy→finish→...
+```
+脚本遇到 configure/make 错误时自动输出 HANDOFF 块，AI 修复后 `--resume-from=StepN` 继续。
 
-# ═══ Step 1: 初始化（手动分步时用）═══
-${SKILL_ROOT}/scripts/init-build.sh <软件名> [<版本>] [--url=URL]
-#   输出: .build-context-<name>-<ver>
-#   完成: 下载/解压/检索历史/创建骨架/环境检查
+**模式 B：AI 手动编译（适合复杂/首次编译的软件）**
+```bash
+# Step 1: 初始化（自动）
+python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=URL]
 
-# ═══ Step 2: 编译（唯一需要 AI 的步骤）═══
-source .build-context-<name>-<ver>   # 加载上下文变量
-cd $BUILD_SRC_DIR                   # 进入源码目录
-./configure --prefix=$TEST_PREFIX && make -j1 && make install
-#   ⚠️ --prefix 指向隔离的 staging 目录，不是系统目录！
-#   验证通过后才由 install.sh 部署到 $DEFAULT_PREFIX
-#   记录修改意图到 PROGRESS.md
-#   触发安全弹窗确认
-#   ⚠️ configure 可能需要 3-10 分钟（autotools 大量 conftest），不要提前中断！
+# Step 2: 读取上下文，手动编译（唯一需要 AI 的步骤）
+# 读取 .build-context-<name>-<ver> 获取 BUILD_SRC_DIR, TEST_PREFIX 等变量
+cd $BUILD_SRC_DIR
+./configure --prefix=$TEST_PREFIX && make -j$(nproc) && make install
 
-# ═══ Step 2.5: 独立目录安装验证（⭐ 新增标准步骤）═══
-#   目的：验证"原始 tarball + 补丁集"可独立复现（核心质量保证）
-TEST_SRC="$TMPDIR/builds/<name>-<ver>-test"    # 干净解压
-TEST_PREFIX="$TMPDIR/<name>-test-install"        # 独立前缀
-#   ① 解压干净 tarball → ② 应用 patches/*.patch
-#   ③ ./configure --prefix=$TEST_PREFIX && make && make install
-#   ④ 功能回归测试（--version + 核心功能）
-#   ⑤ 通过后才进入 finish-build.sh
+# Step 3: 收尾（6 步自动）
+python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|failed
 
-# ═══ Step 3: 收尾（全自动，~30秒）═══
-${SKILL_ROOT}/scripts/finish-build.sh <软件名> <版本> success|partial|failed
-#   完成: 补丁生成→归档收尾→**质量门禁(verify)**→归档校验→总结报告
-#   ⚠️ verify-build.sh 在此步骤内自动调用，无需单独执行
+# Step 4: 质量门禁复查（可选，finish 已自动执行）
+python3 $SKILL_ROOT/scripts/ohc-run.py verify-build <软件名> <版本>
 
-# ═══ Step 4: 质量门禁复查（可选，~15秒）═══  ← 仅在需要单独复查时使用
-${SKILL_ROOT}/scripts/verify-build.sh <软件名> <版本>
-#   4 道门禁: 二进制完整性 → 功能可用性 → 可移植性 → 档案完整性
-#   输出: reports/quality-report.md + PASS/FAIL 判定
-#   FAIL 则不能标记为 success，只能 partial 或 failed
-#   ⚠️ 正常流程已在 Step 3 自动执行，此步骤仅用于补充验证
-
-# ═══ Step 5: 预编译包制作（⭐ verify PASS 后必须执行）═══
-#   按 packaging.md 10 步流程：清理→链接替换→依赖收集→RPATH→Strip→签名→权限→install.sh→tar.gz
-#   交付物: {name}-{ver}-ohos-aarch64.tar.gz + debug.tar.gz + install.sh
-
-# ═══ Step 5.5: 归档收口（⭐ 最终完成前必须执行）═══
-#   清理临时文件 + 必填文件校验 + 信息一致性检查
-#   ${SKILL_ROOT}/scripts/finalize-archive.sh <软件名> <版本>
+# Step 5: 预编译包制作（verify PASS 后必须执行）
+# 按 references/packaging-guide.md 10 步流程
 ```
 
-### configure 预期耗时参考
-
-| 构建系统 | 典型软件 | 预期耗时 | 说明 |
-|----------|---------|---------|------|
-| autotools | 小工具(sed/grep) | 3-8 min | 大量 conftest 编译 |
-| autotools | 大型(gcc/bash) | 10-20 min | 更多特性检测 |
-| cmake | 一般项目 | 1-3 min | 较快 |
-| meson | 一般项目 | <1 min | 最快 |
-
-⚠️ **首次 configure 必须等完成**（用于触发安全弹窗确认）。timeout 建议：autotools ≥600s，其他 ≥300s。
+**如何选择**：已知软件/简单编译 → 模式 A；首次编译/复杂依赖/需深度调试 → 模式 B。
 
 **特殊情况**：
 ```bash
-# 新软件（registry 无记录）→ 自动搜索 URL 或手动指定
-${SKILL_ROOT}/scripts/init-build.sh libnew 1.0 --url=https://...
-
-# 会话中断后恢复
-${SKILL_ROOT}/scripts/init-build.sh --resume
-
-# 只做补丁不重新编译
-${SKILL_ROOT}/scripts/refresh-patch.sh --auto <软件名> <版本>
+python3 $SKILL_ROOT/scripts/ohc-run.py init-build libnew 1.0 --url=https://...    # 新软件
+python3 $SKILL_ROOT/scripts/ohc-run.py init-build --resume                          # 恢复中断
+python3 $SKILL_ROOT/scripts/ohc-run.py refresh-patch --auto <软件名> <版本>         # 只做补丁
+# 查看所有进行中编译状态（跨对话恢复首选）
+python3 $SKILL_ROOT/scripts/ohc-run.py status
+# 独立运行知识图谱引擎匹配
+python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-## 1.2 十四条铁律（违反任何一条都是 bug）
+### 1.2 铁律摘要（14 条，违反=bug）
 
-| # | 规则 | 正确做法 | 禁止 |
-|---|------|---------|------|
-| R1 | **参数最少化** | `./configure --prefix=$P && make` | 加 `--build/--host`/CFLAGS hack |
-| R2 | **Phase 3 不生成 .patch** | 只改源码+记录到 PROGRESS.md | diff/sed 结果写文件 |
-| R3 | **补丁只用 refresh-patch.sh** | `refresh-patch.sh --auto` | 手动 diff/AI 写 patch |
-| R4 | **危险库必须静态编译** | ncurses `--without-shared` | 编译共享库导致系统崩溃 |
-| R5 | **软链接必须验证可执行 + 禁止 ln -sf** | `verify-symlinks.sh` + `rm -f && ln -s` | 只检查 `-L` 存在性 / `ln -sf` 覆盖 |
-| R6 | **禁止修改生成文件** | 只改 configure.ac/CMakeLists.txt/*.c/*.h（源码层） | sed 改 configure/Makefile/Makefile.in（不可复现） |
-| R7 | **安全弹窗必须先触发再测试** | make install 后 `find $DEFAULT_PREFIX/bin -exec {} --version \;` 扫一遍 | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
-| R8 | **源码修改"四不"准则** | `#ifdef __OHOS__` 守卫 / 保持上游风格 / 追加平台分支 | 删跨平台代码 / 硬编码路径 / 改原逻辑流 / 偏离代码风格 |
-| R9 | **质量门禁 FAIL 禁止标 success** | verify-build.sh 非零 → partial 或 failed | 产物有问题仍标记成功分发 |
-| R10 | **临时文件必须用 $TMPDIR** | 所有 tmp 文件操作使用 `$TMPDIR` 或 `$HOME/tmp` | 硬编码 `/tmp`（鸿蒙 /tmp 只读，见 E002） |
-| **R11** | **脚本步骤失败必须先查归档再动手** | 读 `archives/{pkg}/{ver}/README.md` + `manifest.yaml` 获取历史方案 | 直接手动摸索 / 忽略已有补丁和解决方案 |
-| **R12** | **遇到错误必须先匹配错误模式再修复** | 搜索 `knowledge/error-patterns.md` + 同类软件 manifest 的 known_issues | 凭直觉试错 / 重复踩已知坑 |
-| **R13** | **脚本调用必须使用绝对路径** | `${SKILL_ROOT}/scripts/xxx.sh` 或 `${SCRIPT_DIR}/xxx.sh` | `./scripts/xxx.sh` 相对路径（工作目录不固定时调用失败） |
-| **R14** | **脚本失败=手动模式入口，非终止** | 失败时按提示切换手动模式，完成后 `--resume-from=StepN` 继续 | 脚本 exit 后 AI 放弃/什么都不做（如 automake 会话） |
+| # | 规则 | 一句话 | 详解 |
+|---|------|--------|------|
+| R1 | 参数最少化 | 只需 `--prefix` | references/iron-rules.md |
+| R2 | Phase 3 不生成 .patch | 只改源码+记录 PROGRESS | references/patch-pipeline.md |
+| R3 | 补丁只用 ohc-run.py refresh-patch | `ohc-run.py refresh-patch --auto` | references/patch-pipeline.md |
+| R4 | 危险库静态编译 | ncurses `--without-shared` | §7 Gotchas |
+| R5 | 软链接验证可执行+禁止 ln -sf | `rm -f && ln -s` | §7 Gotchas |
+| R6 | 禁止改生成文件 | 只改 configure.ac/CMakeLists/源码 | references/iron-rules.md |
+| R7 | 安全弹窗先触发再测试 | make install 后扫一遍 --version | references/compile-guide.md |
+| R8 | 源码"四不"准则 | `#ifdef __OHOS__` 守卫 | references/iron-rules.md |
+| R9 | 门禁 FAIL 禁标 success | 降级为 partial/failed | references/iron-rules.md |
+| R10 | 临时文件用 $TMPDIR | 禁硬编码 /tmp（只读） | §7 Gotchas |
+| R11 | 失败先查归档再动手 | 读 README.md + manifest.yaml | references/failure-handling.md |
+| R12 | 先匹配错误模式再修复 | 引擎匹配 graph/index.tsv | references/failure-handling.md |
+| R13 | 脚本用完整路径 | `python3 $SKILL_ROOT/scripts/ohc-run.py <cmd>` | §0 |
+| R14 | 脚本失败=手动模式入口 | `--resume-from=StepN` 继续 | references/failure-handling.md |
 
-### 失败处理标准流程（R11 + R12 强制执行）
-
-> **任何脚本步骤失败或编译错误触发时，必须按以下顺序执行。跳过任何一步都是 bug。**
+### 1.3 决策树
 
 ```
-脚本/编译步骤失败
-  │
-  ├─ [R11] 第一步：查归档记录
-  │   │
-  │   ├─ ① 读 archives/{pkg}/{ver}/README.md
-  │   │    → 已有完整方案？（补丁/特殊构建方式/gen-all.pl 等）
-  │   │    → 有 → 直接使用历史方案重新执行
-  │   │    → 无 → 继续 ②
-  │   │
-  │   ├─ ② 读 archives/{pkg}/{ver}/manifest.yaml
-  │   │    → status=success？说明之前成功过，对比差异
-  │   │    → patches_applied 有补丁？确认是否已正确应用
-  │   │    → knowledge_gained 有经验？参考历史做法
-  │   │
-  │   └─ ③ 读 archives/{pkg}/README.md（软件级）
-  │        → 其他版本的通用经验（如 automake 的鸡生蛋问题）
-  │
-  ├─ [R12] 第二步：匹配错误模式
-  │   │
-  │   ├─ ① 搜索 knowledge/error-patterns.md（按错误关键词）
-  │   │    → config.guess 不识别？→ E002 级标准解法
-  │   │    → conftest pipe 问题？→ E003 级标准解法
-  │   │    → 缺依赖？→ dependencies.md 编译顺序
-  │   │    → 软链接权限？→ environment.md §9
-  │   │
-  │   └─ ② 搜索同类软件的 manifest.yaml（同 build_system）
-  │        → autotools 项目怎么处理的？→ 参考其 configure 参数
-  │        → 同类错误别人怎么修的？→ 直接复用方案
-  │
-  └─ [诊断完成] 第三步：基于历史方案动手修复
-      → 如果归档和知识库都没有 → 记录为新问题（§2.5 实时知识提取）
-      → 修复后更新 PROGRESS.md + 继续执行
-```
+新三方库？
+├─ registry 有记录 → ohc-run.py init-build <name> <ver>           （全自动）
+├─ 有 URL → ohc-run.py init-build <name> <ver> --url=URL          （自动注册）
+└─ 都没有 → ohc-run.py search-url <name> <ver>           → 从候选选 URL
 
-> **典型反面案例（automake 会话实录）**：
-> ```
-> ❌ build-driver Step 3 失败（unknown build system）
->    → 放弃 build-driver，手动 ls 目录找 configure
->    → 手动跑 configure → config.guess 不识别
->    → 从 GNU FTP 下载最新版 → 还是不识别
->    → 试 --build 参数 → 用户杀掉进程
->
-> ✅ 正确流程（遵循 R11+R12）：
->    → build-driver Step 3 失败
->    → [R11] 读 archives/a/automake/1.16.5/README.md
->       → 发现：需要 gen-all.pl 鸡生蛋绕过 + 已有补丁
->    → [R11] 读 manifest.yaml → status=success, 有 0001-port-for-ohos.patch
->    → [R12] 错误是 config.guess 不识别 → E002 标准解法：应用已有补丁
->    → 应用补丁后重新跑 build-driver → 通过
-> ```
-
-### AI 执行风格规范（⭐ 新增）
-
-> **原则：在鸿蒙 toybox ash 环境下，复杂 shell 脚本是地雷区。保持简单。**
-
-#### 测试脚本原则
-
-| ✅ 推荐 | ❌ 禁止 |
-|---------|--------|
-| 每个测试一条独立的 `[ ] && echo OK \|\| echo FAIL` | 单次 tool_call 写 >30 行复杂 shell 脚本 |
-| 变量先赋值再使用，避免管道内嵌套命令替换 | heredoc（与 `curl \| sh` 冲突，toybox ash 支持差） |
-| 用 `$TMPDIR/$HOME/tmp` 替代 `/tmp`（R10） | `for desc cmd exp in ...` 多变量循环 + 引号嵌套 |
-| `grep -F` 做固定字符串匹配（防正则元字符陷阱） | grep 不加 `-F` 匹配含 `()` `[]` `$` 的输出 |
-| `case "$var" in *pattern*)` 做 shell 原生模式匹配 | 复杂 awk/sed 管道做简单字符串判断 |
-| 逐条顺序执行，每步可独立验证 | 一次性提交大量命令，出错后难以定位 |
-
-#### configure/make 长时间命令
-
-```bash
-# ✅ 正确：给足够 timeout，不提前中断
-cd $BUILD_SRC_DIR && ./configure --prefix=$TEST_PREFIX 2>&1 | tail -3
-#   autotools 项目 timeout=600s, 其他 timeout=300s
-
-# ❌ 错误：频繁中断重启（浪费每次 3-10 分钟的 conftest 编译）
-```
-
-### R8 详细说明：源码修改"四不"准则
-
-> **核心原则：你的修改对非鸿蒙平台必须是透明的。**
-> **检验方法：去掉所有 `#ifdef __OHOS__` 块后，上游代码应与原始 tarball 一模一样。**
-
-| 不 | 含义 | 错误示例 | 正确做法 |
-|----|------|---------|---------|
-| **不破坏上游逻辑** | 不删除/反转/改变原有代码行为 | 删除某个 `if (linux)` 分支 | 用 `#elif defined(__OHOS__)` 追加新分支 |
-| **不破坏跨平台兼容性** | 不删除其他平台的已有适配 | 删掉 `#ifdef _WIN32` 块因为它"用不到" | 保留所有平台守卫，在旁边加 `__OHOS__` |
-| **不绕过鸿蒙标识机制** | 不硬编码平台特征 | `if (strstr(path, "/usr/local") != NULL)` | `#ifdef __OHOS__` + config.guess/sub 统一处理 |
-| **不偏离上游代码风格** | 缩进/命名/注释风格与项目一致 | 项目 4 空格你用 tab | 读周边 50 行代码，保持一致 |
-
-**常见反模式（绝对禁止）**：
-```bash
-# ❌ 硬编码路径 — 换设备就挂
-sed -i 's|/usr/bin|/data/local/tmp/usr/bin|g' Makefile
-
-# ❌ 删除跨平台检测 — 破坏 macOS/Windows 构建
-sed -i '/case.*darwin/d' config.sub
-
-# ❌ 条件注入 — 无法 upstream
-echo "#define OHOS_FIX 1" >> config.h
-
-# ✅ 正确方式：平台守卫 + 可 upstream
-# 在 configure.ac 中追加:
-#   AC_CHECK_DECLS([__OHOS__], [ohos_fix=1])
-# 在 C 代码中:
-#   #if defined(__OHOS__)
-#   /* 鸿蒙特定修复 */
-#   #endif
-```
-
-## 1.3 决策树
-
-```
-遇到一个新三方库？
-│
-├─ registry 有记录？
-│   ├─ 是 → ${SKILL_ROOT}/scripts/init-build.sh <name> <ver>     （全自动）
-│   └─ 否 → 有 URL？
-│       ├─ 是 → ${SKILL_ROOT}/scripts/init-build.sh <name> <ver> --url=URL
-│       │        → 自动注册到 registry（下次直接命中）
-│       └─ 否 → ${SKILL_ROOT}/scripts/search-download-url.sh <name> <ver>
-│                → 从候选列表选 URL → 重试上一步
-│
 configure 失败？
-│
-├─ 缺依赖？ → 查 dependencies.md 编译顺序 → 先编依赖
-├─ 平台不识别？ → 改 config.guess/sub（见 build-systems.md §3.1）
-├─ conftest pipe 问题？ → configure 中 `\| cat` 修复
-└─ 其他？ → 查 error-patterns.md → 按 E编号查找
+├─ 缺依赖 → 查 dependencies.md 编译顺序 → 先编依赖
+├─ 平台不识别 → 改 config.guess/sub（build-systems.md §3.1）
+├─ conftest pipe → configure 中 `| cat` 修复
+└─ 其他 → 引擎匹配 graph/index.tsv → 按 E 编号查找
 ```
 
 ---
 
-# 二、核心流程详解
+## §2 文件检索时机
 
-## Step 1: init-build.sh — Phase 0→2 全自动
+| 触发场景 | 加载文件 | 何时 |
+|---------|---------|------|
+| 技能触发 | **SKILL.md**（本文档） | 每次 |
+| 开始编译 | references/compile-guide.md | Step 2 前 |
+| 编译出错 | knowledge/graph/index.tsv → graph/E*.kv | 错误发生时 |
+| 失败处理 | references/failure-handling.md | R11+R12 流程 |
+| 补丁生成 | references/patch-pipeline.md | Phase 3/4 |
+| Staging 验证 | references/staging-verify.md | make install 后 |
+| 打包阶段 | references/packaging-guide.md + knowledge/operations/packaging.md | Step 5 |
+| 归档收尾 | references/archive-spec.md | Step 5.5 |
+| 生成总览 | — | finish 内部自动 |
+| 铁律详解 | references/iron-rules.md | 需要时 |
+| 人类浏览错误 | knowledge/error-patterns.md | 人类查看 |
+| 构建系统适配 | knowledge/operations/build-systems.md | configure 前 |
+| 环境问题 | knowledge/operations/environment.md | 平台限制 |
+| 依赖查询 | knowledge/operations/dependencies.md | 编译顺序 |
+| 上下文裁剪 | references/context-trimming-protocol.md | 问题解决后 |
 
-> **AI 不需要手动执行 Phase 0/1/2 的任何步骤。** 这条命令完成全部。
+---
 
-### 调用方式
+## §3 核心流程
 
-```bash
-# 标准用法（registry 有记录时全自动）
-${SKILL_ROOT}/scripts/init-build.sh sed 4.9
-
-# 自定义 URL（首次遇到新软件时）
-${SKILL_ROOT}/scripts/init-build.sh libnew 2.0 --url=https://example.com/libnew-2.0.tar.gz
-
-# 跳过下载（源码已存在时）
-${SKILL_ROOT}/scripts/init-build.sh sed 4.9 --no-download
-
-# 恢复中断的会话
-${SKILL_ROOT}/scripts/init-build.sh --resume
-```
-
-### 内部完成的 8 个步骤
-
-| 步骤 | 内容 | 失败时 |
-|------|------|--------|
-| [1/8] | 查询 software-registry.yaml 元数据 | 未命中 → 降级搜索 |
-| [2/8] | 确定 URL（注册表 / 自定义 / 搜索） | 无 URL → 输出候选列表 |
-| [3/8] | 下载 tarball + HTML 页面检测 | 失败 → 尝试备用 URL |
-| [4/8] | 解压到 $TMPDIR/builds/<name>-<ver>/ | 失败 → 检查格式 |
-| [5/8] | 检索 archives/ 历史档案 | 无历史 → 标记首次编译 |
-| [6/8] | 创建/恢复档案骨架 (init-archive.sh) | 失败 → 手动创建最小骨架 |
-| [7/8] | 环境检查 (check-env.sh) | 缺变量 → 提示设置 |
-| [8/8] | 输出 .build-context 文件 | — |
-
-### 输出：.build-context 文件
-
-init-build.sh 成功后输出 `.build-context-<name>-<ver>`，包含所有路径变量。AI 在 Step 2 中 source 它即可获得完整上下文。
-
-**关键变量**：
-```
-BUILD_SOFTWARE    # 软件名
-BUILD_VERSION      # 版本号
-BUILD_SYSTEM       # 构建系统 (autotools/cmake/meson/...)
-BUILD_SRC_DIR      # 源码目录绝对路径
-BUILD_ARCHIVE_DIR   # 归档目录绝对路径
-BUILD_URL          # 下载 URL
-BUILD_HISTORY_FOUND # 是否有历史档案 (true/false)
-DEFAULT_PREFIX     # ⭐ 唯一权威的安装前缀路径（所有脚本统一使用）
-```
-
-### 变量命名规范（⭐ C01 统一）
-
-> **消除歧义：整个管线中，安装前缀只用 `$DEFAULT_PREFIX` 一个变量名。**
-
-| 变量名 | 含义 | 谁设置 | 谁使用 | 作用域 |
-|--------|------|--------|--------|--------|
-| **`DEFAULT_PREFIX`** | **唯一权威**的安装前缀路径 | `init-build.sh` export + 写入 .build-context | **所有脚本**（verify-build.sh, package.sh, AI Phase 3） | 全局 |
-| `PKGDIR` | 打包工作目录（package.sh 内部临时目录） | `package.sh` 设置 | 仅 `package.sh` 内部 | 局部 |
-
-**历史遗留**：旧文档/代码中可能出现 `$PREFIX`，等同于 `$DEFAULT_PREFIX`（兼容别名），新代码统一使用 `$DEFAULT_PREFIX`。
-
-### registry 自动增长机制
-
-当 registry 未命中但提供了 `--url` 时，脚本**自动将软件信息追加到 `software-registry.yaml`**：
-- 推断构建系统（从 URL 域名）
-- 推断 tar 格式（从 URL 后缀）
-- 标记 `category: auto-discovered`
-- 下次再编同一软件直接命中缓存
-
-## Step 2: AI 编译执行 — Phase 3（唯一智能步骤）
-
-> **这是整个流程中唯一需要 AI 判断的环节。** 其余全部自动化。
-> 
-> **⚠️ 核心原则：`--prefix` 必须指向隔离的 staging 目录（$TEST_PREFIX），绝不能直接安装到系统目录。**
-> 
-> **完整执行顺序**：
-> ```
-> configure(--prefix=$TEST_PREFIX) → make → make install(到$TEST_PREFIX)
->   → 安全弹窗(R7) → make check(在$TEST_PREFIX环境中)
->   → 功能验证 → package.sh(从$TEST_PREFIX打包)
->   → install.sh deploy(验证通过后，才部署到$DEFAULT_PREFIX)
-> ```
-
-### 2.1 开始编译前的准备
+### Step 1: ohc-run.py init-build — 全自动
 
 ```bash
-# ① 加载上下文
+$SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=URL] [--no-download] [--resume]
+```
+
+内部 8 步：registry 查询 → URL 确定 → 下载 → 解压 → 历史检索 → 骨架创建 → 环境检查 → 输出 `.build-context-<name>-<ver>`。
+
+**关键输出变量**：`BUILD_SOFTWARE`, `BUILD_VERSION`, `BUILD_SYSTEM`, `BUILD_SRC_DIR`, `BUILD_ARCHIVE_DIR`, `DEFAULT_PREFIX`（唯一权威安装前缀）。
+
+### Step 2: AI 编译 — 唯一智能步骤
+
+> **详解**: references/compile-guide.md
+> **Staging 验证**: references/staging-verify.md
+> **补丁规则**: references/patch-pipeline.md
+
+```bash
 source .build-context-<name>-<ver>
-
-# ② 进入源码目录
 cd $BUILD_SRC_DIR
-
-# ③ 如有历史补丁，应用它们
-if [ "$BUILD_HISTORY_FOUND" = "true" ]; then
-    for p in $BUILD_ARCHIVE_DIR/patches/*.patch; do
-        patch -p1 < "$p"
-    done
-fi
-
-# ④ 识别构建系统（如需要）
-${SKILL_ROOT}/scripts/detect-build-system.sh .  # 可选，context 已含 BUILD_SYSTEM
-```
-
-### 2.2 执行编译（--prefix 指向 $TEST_PREFIX 隔离目录）
-
-> **⚠️ 每次操作前必须 source 上下文文件（R11）**：
-> ```bash
-> # 新会话 / 重新操作前必须执行：
-> source .build-context-<name>-<ver>
-> echo "TEST_PREFIX=$TEST_PREFIX"   # 确认不为空
-> ```
-> 否则 `$TEST_PREFIX` 为空 → configure 报错 → 浪费 10+ 分钟重跑。
-
-```bash
-# 方式 A: configure 时指定 prefix（标准做法）
 ./configure --prefix=$TEST_PREFIX && make -j1 && make install
-
-# 方式 B: configure 不指定，make install 时指定（更灵活，推荐）
-#    优势：同一编译产物可安装到不同位置，无需重跑 configure
-./configure && make -j1 && make install prefix=$TEST_PREFIX
-
-# 方式 C: DESTDIR staging（最常用，package.sh 内部使用）
-./configure && make -j1 && make install DESTDIR=$TEST_PREFIX
-
-# CMake 项目
-cmake -DCMAKE_INSTALL_PREFIX=$TEST_PREFIX .. && make && make install
-
-# Meson 项目
-meson setup builddir --prefix=$TEST_PREFIX && ninja -C builddir && ninja -C builddir install
-
-# Makefile 项目（无 configure）
-make PREFIX=$TEST_PREFIX && make PREFIX=$TEST_PREFIX install
 ```
 
-**⚠️ P0 参数最少化**：理想状态只需 `--prefix=$TEST_PREFIX`。
+**执行顺序**：configure → make → install(到 $TEST_PREFIX) → 安全弹窗(R7) → make check → Staging 验证 → package → finish。
 
-### $TEST_PREFIX vs $DEFAULT_PREFIX
+$TEST_PREFIX 是隔离 staging 目录，$DEFAULT_PREFIX 是最终部署目标（由 install.sh 写入）。
 
-| 变量 | 值 | 用途 |
-|------|-----|------|
-| `$TEST_PREFIX` | `${TMPDIR:-$HOME/tmp}/test-install-{name}-{ver}` | **configure --prefix 目标**（staging） |
-| `$DEFAULT_PREFIX` | `/storage/Users/currentUser/usr/local` | **最终部署目标**（install.sh 写入） |
+### HANDOFF 协议（脚本 → AI 交接格式）
 
-**为什么不用 $DEFAULT_PREFIX？**
-1. 失败时系统目录已被污染 → 清理困难
-2. 无法区分"编译产物"和"已部署状态"
-3. package.sh 打包来源不明确
-4. 不再需要 Phase 2.5 二次编译（本身就是隔离的）
+> 脚本在需要 AI 介入时输出结构化交接块。AI 读到后按 `AI NEXT ACTIONS` 执行，完成后运行 `RESUME_CMD`。
 
-**⚠️ P0 参数最少化**：理想状态只需 `--prefix`。如果必须加额外参数（`--build/--host`/`--without-shared`/CFLAGS hack），记录到 PROGRESS.md 并在 manifest.yaml `build_cleanliness` 字段标注为技术债务。
+```
+╔═══ HANDOFF ══════════════════════════════════╗
+║ EXIT_REASON: configure_failed                ║
+║ EXIT_CODE: 2 (resumable) / 1 (fatal)         ║
+║ STEP_FAILED: Step3                           ║
+║ RESUME_CMD: python3 $SKILL_ROOT/scripts/ohc-run.py build ... --resume-from=Step3
+║ KNOWLEDGE_HIT: E007 (config.guess) / none    ║
+║ KNOWLEDGE_GAP: true/false                    ║
+║ LOG_FILE: <日志路径>                          ║
+║ SRC_DIR: <源码路径>                           ║
+║ TASK_CARD: <任务卡路径>                       ║
+║ AI NEXT ACTIONS:                             ║
+║   1. 具体操作                                 ║
+║   2. 运行 RESUME_CMD 继续                     ║
+╚══════════════════════════════════════════════╝
+```
 
-### 2.2.1 make check / make test（⭐ 标准步骤）
+**恢复编译时的规则**：
+1. **新对话首选**：`python3 $SKILL_ROOT/scripts/ohc-run.py status` — 查看所有进行中编译，自动发现停在哪步、失败原因、HANDOFF 信息
+2. 读取 `.handoff.json`（若存在）— 获取上一轮的完整上下文（失败原因、知识图谱命中、AI 操作指引）
+3. **然后读 TASK_CARD.md**（了解之前完成了哪些步骤）
+4. 执行 `AI NEXT ACTIONS`
+5. `KNOWLEDGE_GAP: true` → 修复成功后必须沉淀到知识图谱
+6. `EXIT_CODE: 1` → 不可恢复，需手动从头处理
 
-> **make install 之后、finish-build 之前，必须执行软件自带的测试套件。**
->
-> **⚠️ 遇到问题时的处理顺序（禁止直接跳过）：**
-> 1. **先诊断**：是超时？哪个测试卡住？还是编译错误？
-> 2. **再尝试**：用 `RUN_TEST_FAILURES=yes` 跳过卡住的测试重跑
-> 3. **分析失败原因**：平台限制(E051/E046/E002) vs 真正 bug
-> 4. **最后才标记 partial**：确认无法解决后记录原因，继续后续步骤
->
-> build-driver.sh 的 Step 7 已内置此诊断+恢复逻辑（后台监控→卡住检测→SIGUSR1→选择性跳过→重试）
+### Step 3: ohc-run.py finish — 6 步自动收尾
 
 ```bash
-# Autotools 项目（首选 make check，fallback 到 make test）
-make -j1 check 2>&1 | tail -20    # 记录结果到 reports/test-report.md
-# 或: make -j1 test 2>&1 | tail -20
-
-# CMake 项目
-ctest --output-on-failure 2>&1 | tail -20
-
-# Meson 项目
-meson test -C builddir 2>&1 | tail -20
+$SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|failed
 ```
 
-**测试结果处理**：
-
-| 结果 | 处理方式 |
-|------|---------|
-| **全通过 (PASS)** | 记录到 `reports/test-report.md`，继续下一步 |
-| **部分失败但核心功能 OK** | 分析失败原因 → 平台限制(E051/E046等)则记录并继续；真正的 bug 则修复后重测 |
-| **全部失败或 core dump** | 检查是否漏触发安全弹窗(R7) → 重新触发后再跑 |
-
-**⚠️ 鸿蒙特有限制**（导致部分测试预期失败，不阻塞发布）：
-- E046: chmod() 不生效 → 权限相关测试失败
-- E051: 未实现 syscall → setreuid/chroot 等测试 crash
-- `/tmp` 只读（E002）→ 依赖 /tmp 的测试失败
-- SELinux 域转换 → 子进程执行 SDK 工具失败
-
-**关键原则**：测试套件的目的是**发现真正的功能回归**，不是追求 100% 通过率。平台限制导致的预期失败应记录原因但不阻塞流程。
-
-### 2.3 错误处理与恢复
-
-#### 错误分类与标准对策
-
-| 阶段 | 常见错误 | 标准对策 |
-|------|---------|---------|
-| **configure** | `command not found: xxx` | 缺工具 → 安装或设 ACLOCAL=/bin=true 绕过 |
-| **configure** | `cannot run test program` | conftest pipe 问题 → `\| cat` 修复 |
-| **configure** | `invalid host: aarch64-unknown-linux-ohos` | config.guess/sub 未识别 → 打补丁 |
-| **compile** | `error: xxx.h: No such file` | 缺头文件 → 查依赖链/CFLAGS 加 -I |
-| **compile** | `warning: -Werror` | 警告变错误 → CFLAGS 加 -Wno-error 或改 configure.ac |
-| **link** | `undefined reference to xxx` | 缓库 → LDFLAGS 加 -lxxx 或查 NEEDED |
-| **install** | `symlink: File exists` | HMDFS 限制 → 用 wrapper 脚本或 cp 替代 |
-| **install** | `Permission denied` (help2man/sed/install) | 鸿蒙 sandbox 兼容性问题 → 见下方标准参数 |
-
-#### make install 标准参数（鸿蒙 sandbox 兼容）
-
-> ⚠️ 以下参数在鸿蒙环境下几乎总是需要，**应作为 configure/make 的默认参数**：
-> 
-> ```bash
-> # configure 阶段（从源头避免）--prefix 指向 $TEST_PREFIX
-> ./configure --prefix=$TEST_PREFIX \
->     SED=$(find_tool sed) \          # 动态检测：优先 GNU sed，fallback toybox
->     HELP2MAN=/bin/true          # help2man 权限不足（跳过 man page）
->     MAKEINFO=/bin/true           # texinfo 工具缺失
-> 
-> # 或在 make install 阶段覆盖（如 configure 已完成）
-> make install \
->     SED=$(find_tool sed) \
->     INSTALL=$(find_tool install) \  # 动态检测：优先 GNU install
->     HELP2MAN=/bin/true \
->     MAKEINFO=/bin/true
-> ```
->
-> **动态检测逻辑**（build-driver.sh 内置 `find_tool()` 函数）：
-> 1. 先找 `$DEFAULT_PREFIX/bin/sed` → `$TEST_PREFIX/bin/sed` → PATH 中的版本
-> 2. 检查 `--version` 输出是否含 "GNU" → 是则使用（功能更强）
-> 3. 否则 fallback 到 `/bin/sed`（系统原生 toybox）
-> 
-> 如果仍失败，可跳过非关键子目录：
-> ```bash
-> make install-binPROGRAMS install-binSCRIPTS SED=... INSTALL=...   # 只装 bin/
-> ```
-
-#### 失败恢复操作序列
-
-```
-configure 失败:
-  1. make distclean          # 清理旧配置
-  2. 查 error-patterns.md    # 按错误信息匹配已知方案
-  3. 修改源码/补丁/configure
-  4. 重新 ./configure ...
-
-编译失败 (make):
-  1. 读最后 20 行错误         # 定位具体文件和行号
-  2. 修复该文件              # 最小改动原则
-  3. make -j1                 # 单线程重新编译（避免并行干扰）
-  4. 如果还不行 → make clean && make -j1
-
-安装失败 (make install):
-  1. 检查是否是软链接问题      # verify-symlinks.sh
-  2. 是 → wrapper 脚本替代
-  3. 不是 → 检查权限/磁盘空间
-```
-
-### 2.4 Phase 3 补丁管线规则（⚠️ 强制）
-
-**Phase 3 绝对禁止生成 .patch 文件。**
-
-Phase 3 的职责只有两件事：
-1. **修改源码**解决编译问题
-2. **在 PROGRESS.md 记录**每个修改的意图
-
-原因：Phase 3 源码处于频繁试错状态，此时生成的补丁是中间态。
-补丁生成**唯一入口**是 Phase 4 的 `refresh-patch.sh --auto`。
-
-**允许的操作**：
-- ✅ `sed` / 直接编辑源码（解决编译问题）
-- ✅ 创建 post-configure hook 脚本（§3.9）
-- ✅ 在 PROGRESS.md「源码修改清单」中记录
-
-**禁止的操作**：
-- ❌ 生成任何 `.patch` 文件
-- ❌ 手动写 diff 内容到文件
-- ❌ AI 生成补丁文本写入文件
-- ❌ copy 之前的 `.patch` 文件
-
-### 2.5 实时知识提取
-
-每解决一个问题后，立即判断：
-
-```
-Q1: 此问题只与本软件有关？
-    → 是：只记录到 PROGRESS.md
-    → 否（其他软件也可能遇到）：
-        Q2: 与平台机制相关？（musl/SELinux/文件系统/内核）
-            → 是：立即更新 knowledge/（L1 平台真理）
-            → 否：是构建系统模式？（autotools/cmake 通用问题）
-                → 是：更新 knowledge/（L2 模式经验）
-                → 否：标记 "⏳ 待评估"（Phase 4 处理）
-```
-
-### 2.6 安全弹窗验证
-
-鸿蒙系统首次执行非系统二进制会弹安全确认框，超时未点则进程被杀。
-
-```bash
-# make install 后立即触发（在 $TEST_PREFIX 中验证）
-find $TEST_PREFIX/bin -type f -exec {} --version \; 2>/dev/null || true
-
-# make check 前确保已完成弹窗确认
-```
-
-### 2.7 更新 PROGRESS.md
-
-每解决一个问题后**立即**更新 PROGRESS.md：
-- 当前阶段和时间
-- 错误信息 + 根因 + 解决方案
-- 源码修改清单（表格：文件 | 原因 | 方式 | 补丁状态）
-
-### 2.8 Staging 目录验证（⭐ 必须执行）
-
-> **目的**：验证 $TEST_PREFIX 中的安装产物完整且功能正常。
-> **时机**：`make install` 到 $TEST_PREFIX 成功之后、package.sh 之前。
-> 
-> **重要变化（v4.3）**：由于 configure --prefix 现在直接指向隔离的 $TEST_PREFIX，
-> **不再需要"重新解压+二次编译"**。本步骤变为轻量级的产物验证。
-
-#### 验证内容
-
-```bash
-echo "[Staging 验证] 检查 $TEST_PREFIX 安装产物..."
-
-# 1. 文件完整性
-BIN_COUNT=$(find "$TEST_PREFIX/bin" -type f 2>/dev/null | wc -l | tr -d ' ')
-LIB_COUNT=$(find "$TEST_PREFIX/lib" -type f 2>/dev/null | wc -l | tr -d ' ')
-echo "  二进制: ${BIN_COUNT}, 库文件: ${LIB_COUNT}"
-
-if [ "$BIN_COUNT" -eq 0 ]; then
-    echo "[FAIL] staging 目录为空！"
-    exit 1
-fi
-
-# 2. 功能回归测试（使用 $TEST_PREFIX 环境）
-export PATH="$TEST_PREFIX/bin:${PATH}"
-export LD_LIBRARY_PATH="$TEST_PREFIX/lib:${LD_LIBRARY_PATH:-}"
-
-PASS=0; FAIL=0
-for cmd in "$TEST_PREFIX/bin"/*; do
-    [ -x "$cmd" ] || continue
-    name=$(basename "$cmd")
-    output=$("$cmd" --version 2>&1 | head -1)
-    if [ -n "$output" ]; then
-        PASS=$((PASS+1))
-    else
-        FAIL=$((FAIL+1))
-        echo "  ❌ $name"
-    fi
-done
-echo "  结果: ${PASS} 通过 / ${FAIL} 失败"
-
-# 3. 恢复环境
-export PATH="${PATH#$TEST_PREFIX/bin:}"
-export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$TEST_PREFIX/lib:}"
-```
-
-#### 判定标准
-
-| 结果 | 条件 | 后续 |
-|------|------|------|
-| **PASS** | BIN_COUNT > 0 + FAIL=0 | → 创建 `.staging-verified` 标记 → make check → package |
-| **PARTIAL** | BIN_COUNT > 0 + 少量 FAIL（平台限制） | → 记录原因，继续 |
-| **FAIL** | BIN_COUNT=0 或大量 FAIL | → 排查 configure/install，修复后重试 |
-
-> **PASS 后必须创建标记文件**（finish-build.sh 关卡 B 检查此文件）：
-> ```bash
-> touch "${BUILD_ARCHIVE_DIR}/.staging-verified"
-> ```
-
-## Step 3: finish-build.sh — Phase 4 全自动（⚠️ 有前置条件）
-
-> **编译成功后一条命令完成所有收尾工作。**
-> 
-> ⚠️ **强制前置条件**（finish-build.sh 内部会自动检查，不满足则降级状态）：
-> 
-> | # | 前置步骤 | 检查方式 | 缺失时处理 |
-> |---|---------|---------|-----------|
-> | **P1** | `make check` / `make test` 已执行 | `reports/test-report.md` 存在且非空 | 降级为 partial，提示补充 |
-> | **P2** | Staging 目录验证已完成（§2.8） | PROGRESS.md 中 staging checkbox 勾选 | 降级为 partial，提示执行 |
-> | **P3** | 预编译包已制作（Step 5） | `packaging/*-ohos-aarch64.tar.gz` 存在 | 降级为 partial，提示打包 |
-> 
-> **AI 执行顺序必须遵循**：
-> ```
-> configure(--prefix=$TEST_PREFIX) → make → make install(到$TEST_PREFIX)
->   → 安全弹窗(R7) → make check → Staging验证(§2.8)
->   → package(§Step 5) → finish-build(本节)
-> ```
-
-```bash
-${SKILL_ROOT}/scripts/finish-build.sh <软件名> <版本> success|partial|failed
-```
-
-### 内部执行的 5 个步骤
-
-| 步骤 | 脚本 | 内容 | 失败处理 |
-|------|------|------|---------|
-| [1/5] | refresh-patch.sh --auto | 从原始 tarball diff → per-file 补丁 → 格式校验 → dry-run → hash 绑定 → 写入 manifest | 失败跳过，继续归档 |
-| [2/5] | close-archive.sh | 更新 status → 关闭 PROGRESS.md → 检查知识条目 | 失败则退出(2) |
-| [3/5] | **verify-build.sh** | **质量门禁 G1-G4（二进制/功能/可移植/档案）** | **非阻塞：失败降级状态，不中断管线** |
-| [4/5] | finalize-archive.sh | **清理(.tmp/.bak + staging目录/构建产物/超大日志)** + 校验+一致性+RELEASENOTE | 失败非致命 |
-| [5/5] | gen_summary.py | 重新生成 SUMMARY.md | 失败非致命 |
-
-### 状态选择指南
-
-> **统一状态值体系**：整个项目仅使用以下三个状态值，所有脚本和文档必须一致。
-
-| 状态 | 含义 | 使用场景 |
+| 步骤 | 内容 | 失败处理 |
 |------|------|---------|
-| `success` | 编译+测试+验证全通过 | finish-build.sh, close-archive.sh, PROGRESS.md |
-| `partial` | 编译成功但部分测试/验证失败 | 同上（标注限制后仍可分发） |
-| `failed` | 编译失败且无法绕过 | init-build.sh --resume 判断，跳过打包 |
+| [1/6] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
+| [2/6] close-archive | 归档关闭 | exit 2 |
+| [3/6] verify-build | 质量门禁 G1-G4 | 非阻塞，降级状态 |
+| [4/6] finalize-archive | 清理+校验+RELEASENOTE | 非致命 |
+| [5/6] check-knowledge-gap | 知识完整性检查 | 非阻塞，提醒补充 |
+| [6/6] gen_summary | 重新生成 SUMMARY.md | 非致命 |
 
-**已废弃的状态值**（历史遗留，不得在新代码中使用）：
-- ~~`pass`/``fail``~~ → 仅用于 G1-G4 单项门禁判定（PASS/FAIL-Gx），不作为整体状态
-- ~~`completed`/`closed`/`tested`~~ → 幽灵状态，已从所有脚本清除
+**前置条件**：P1=test-report 存在, P2=Staging 验证完成, P3=预编译包已制作。
 
-**状态转换规则**（finish-build.sh 内部自动执行）：
-```
-输入状态 ──[verify 通过]──→ 输出状态
-success  ─────────────────→ success （不变）
-partial  ─────────────────→ partial （不变）
-failed   ─────────────────→ partial （升级：验证通过至少是 partial）
+**状态值**：`success`（全通过）| `partial`（部分失败可分发）| `failed`（编译失败）。verify 通过升级状态，失败降级。
 
-输入状态 ──[verify 失败]──→ 输出状态
-success  ─────────────────→ partial  （降级）
-partial  ─────────────────→ failed  （降级）
-failed   ─────────────────→ failed  （不变）
-```
-
-## Step 4: verify-build.sh — 质量门禁（必须）
-
-> **编译成功 ≠ 产物可用。** 这是交付前的最后一道关卡。
-> **⚠️ 此步骤已在 finish-build.sh Step 3 中自动调用，通常无需手动执行。**
-> 手动执行适用于：单独复查、finish 之后补充验证、调试门禁逻辑。
+### Step 4: 质量门禁复查（可选）
 
 ```bash
-${SKILL_ROOT}/scripts/verify-build.sh <软件名> <版本>
-# 或由 finish-build.sh Step 3 自动调用（传入 --archive-dir）
+$SKILL_ROOT/scripts/ohc-run.py verify-build <软件名> <版本>
 ```
 
-### 4 道门禁
+4 道门禁：G1 二进制完整性 → G2 功能可用性 → G3 可移植性（RPATH/签名）→ G4 档案完整性。正常流程已在 Step 3 自动执行。
 
-| 门禁 | 检测内容 | 失败后果 |
-|------|---------|---------|
-| **G1 二进制完整性** | ELF 可执行 / ldd 无缺依赖 / file 正确 | 产物在目标设备无法运行 |
-| **G2 功能可用性** | --version 正常 / 核心功能端到端测试 | 编译通过但功能异常 |
-| **G3 可移植性** | RPATH=\$ORIGIN / ELF 签名有效 | 其他鸿蒙设备上不可用 |
-| **G4 档案完整性** | man page / .pc 文件 / 补丁可 rebuild / manifest 完整 | 无法复现或被依赖方无法使用 |
+### Step 5: 预编译包制作
 
-> **G4 man page 缺失的常见原因与修复**：
-> - `help2man: Permission denied` → configure 时加 `HELP2MAN=/bin/true` 或 `--disable-man-pages`
-> - `make install` 中断于 man 子目录 → 用 `make install-binPROGRAMS install-binSCRIPTS` 跳过
-> - G4 因 man page 失败**不阻塞分发**（降级为 PASS-WARN），但应在下次编译时修复 configure 参数
+> **详解**: references/packaging-guide.md
 
-### 判定标准
+verify PASS 后**必须**执行。按 packaging.md 10 步：收集 → 清理 → 链接替换 → 依赖收集 → RPATH → Strip → 签名 → 权限 → install.sh → tar.gz。
 
-```
-PASS     → 全部通过 → 标记 success，可分发
-PASS-WARN → 通过但 >10 警告 → 可分发但需关注
-FAIL-Gx  → 对应门禁失败 → 只能 partial 或 failed，修复后重验
-```
+交付物：`{name}-{ver}-ohos-aarch64.tar.gz` + `debug.tar.gz` + `install.sh`。
 
-### 输出
-
-- `reports/quality-report.md` — 详细报告
-- exit 0 = 通过, exit 1 = 失败
-
-### Step 5: 预编译分发包（⭐ verify PASS 后必须执行）
-
-> **时机**：verify-build.sh PASS 之后（确保产物质量合格才打包）。
-> **所有编译成功（status=success 或 partial）的软件都必须制作预编译包。**
-> 只有 status=failed 才跳过。
-
-#### 触发条件
-
-| 状态 | 是否必须打包 | 说明 |
-|------|------------|------|
-| `success` | ✅ **必须** | 编译通过 + 测试通过 + 补丁完整 |
-| `partial` | ✅ **必须** | 编译通过但部分功能不可用（标注限制后仍可分发） |
-| `failed` | ❌ 跳过 | 编译失败，无产物可打包 |
-
-#### 执行流程
-
-> **打包来源**：$TEST_PREFIX（staging 目录，即 make install 的目标）。
-> **打包产物**：干净的 tar.gz，可分发到任意设备。
-> **部署方式**：用户通过 `install.sh` 安装到其 $DEFAULT_PREFIX。
-
-按 `knowledge/packaging.md` 10 步标准流程：
-
-```
-Step 1:  从 $TEST_PREFIX 收集已安装文件（已在隔离目录中）
-Step 2:  清理缓存和非必要文件
-Step 3:  符号链接替换（wrapper/cp）
-Step 4:  收集外部依赖库到 lib/external/
-Step 5:  设置 RPATH（$ORIGIN 相对路径）
-Step 6:  Strip Debug 符号 + 分离保存
-Step 7:  ELF 签名（adhoc self-sign）
-Step 8:  统一修复执行权限（必做！）
-Step 9:  创建 install.sh（单独托管 gitcode，不打包进 tar.gz）
-Step 10: 打包干净 tar.gz + 安装验证
-```
-
-#### 交付物（2 个 tar.gz + 1 个软件级 install.sh）
-
-```
-archives/{首字母}/{软件名}/
-├── EXCLUDE_LIST              # 🟡 可选：打包排除列表（有问题的命令/库）
-├── install.sh                                # 安装脚本（软件级，参数化: sh -s -- <ver>）
-├── RELEASENOTE.md                             # 发布说明（软件级）
-│
-└── {版本}/packaging/
-    ├── {name}-{ver}-ohos-aarch64.tar.gz        # Release 制品（干净二进制，已 strip）
-    └── {name}-{ver}-ohos-aarch64-debug.tar.gz   # Debug 符号包（必须）
-```
-
-### 打包排除列表（EXCLUDE_LIST）
-
-> **某些命令虽然编译通过，但在鸿蒙上实际使用有问题或影响系统，且无法通过源码修复规避。**
-> **这些命令必须在打包阶段移除，不进入分发的 tar.gz。**
->
-> **⚠️ 排除流程（v4.4+，实测驱动）：**
-> 1. **build-driver.sh Step 8** 对每个二进制执行实际功能测试（--version + 深度调用测试）
-> 2. 失败的命令自动加入 `archives/{name}/EXCLUDE_LIST`
-> 3. **package.sh Step 2e** 读取 EXCLUDE_LIST 并从打包产物中物理删除
-> 4. 如误排除：从 EXCLUDE_LIST 删除对应行并重新 package
->
-> **禁止预定义排除列表**——必须基于实测失败数据。
-
-**文件位置**：
-- 软件级（所有版本共享）：`archives/{首字母}/{软件名}/EXCLUDE_LIST`
-- 版本级（覆盖软件级）：`archives/{首字母}/{软件名}/{版本}/EXCLUDE_LIST`
-
-**格式**（每行一个 basename，`#` 开头为注释）：
-```bash
-# EXCLUDE_LIST — 打包时自动移除的文件
-# 需要 setuid/chroot 等 syscall (E051)
-chroot
-# 依赖 /proc/self/fd (E052)
-stdbuf
-# 可能替换系统关键命令导致问题
-kill
-```
-
-**何时创建**：Staging 验证(§2.8)中发现某命令 crash/无输出 → 加入排除列表
-
-**执行时机**：package.sh **Step 2e**（复制文件后、符号链接处理前），从 PKGDIR 中物理删除匹配文件
-
-用户安装：`curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}`
-
-## Step 5.5: 归档收口（⭐ 最终完成前必须执行）
-
-> **时机**：Step 5（预编译包制作）完成之后、`attemptCompletion(success)` 之前。
-> **目的**：确保归档目录干净、完整、一致，可以安全关闭。
-
-### 为什么需要独立的收口步骤？
-
-```
-整个编译过程中产生的文件:
-  ✅ 正式产物: manifest.yaml / PROGRESS.md / README.md / patches/*.patch
-  ✅ 正式产物: packaging/*.tar.gz / packaging/install.sh
-  ⚠️ 临时文件: *.tmp (refresh-patch 中断残留) / .bak (编辑备份)
-  ⚠️ 过时数据: 旧 test-report.md (重编译前) / 旧 debug 符号
-  ❌ 不一致: PROGRESS 写 success 但 manifest 写 compiling
-
-问题: init-archive.sh 策略是"保留一切"（为了复用旧信息）
-结果: 重编译后目录里混合了新旧数据，需要统一清理+校验
-```
-
-### 执行方式
+### Step 5.5: 归档收口
 
 ```bash
-${SKILL_ROOT}/scripts/finalize-archive.sh <软件名> <版本>
+python3 $SKILL_ROOT/scripts/ohc-run.py finalize-archive <软件名> <版本>
 ```
 
-### 内部执行的 4 个阶段
-
-| 阶段 | 内容 | 失败处理 |
-|------|------|---------|
-| **[1] 清理** | 删除 `*.tmp`、`.bak`、debug/ 残留文件 | 无则跳过 |
-| **[2] 必填校验** | 6 个必填项存在性 + 内容非空模板 + packaging 交付物完整性 | 缺失 → exit 2 |
-| **[3] 一致性检查** | manifest vs PROGRESS 状态一致 / 补丁数量匹配 / 对话记录存在 | 警告但不阻塞 |
-| **[4] 最终报告** | 输出汇总：补丁数/报告数/打包数/问题数 | 通过 → 可安全关闭 |
-
-### 必填文件清单
-
-| 文件 | 最小行数 | 说明 |
-|------|---------|------|
-| `manifest.yaml` | >10 行 | 元数据（init-archive 有内容则保留） |
-| `README.md` | >10 行 | 编译指导 + 适配原因（版本级） |
-| `PROGRESS.md` | >15 行 | 进展 + 对话记录（断点续传，版本级） |
-| `RELEASENOTE.md` | >15 行 | 发布说明（软件级，finalize-archive 自动生成） |
-| `install.sh` | 文件存在 | 安装脚本（软件级，参数化: sh -s -- <ver>） |
-| `patches/` | 目录存在 | 补丁目录 |
-| `reports/` | 目录存在 | 报告目录 |
-| `packaging/*-ohos-aarch64.tar.gz` | 文件存在 | release 包（success/partial 时） |
-| `packaging/*-debug.tar.gz` | 文件存在 | debug 包（必须） |
-| `install.sh`（软件级） | 文件存在 | 安装脚本（参数化） |
-
-### 一致性检查项
-
-| 检查项 | 方法 | 允许差异 |
-|--------|------|---------|
-| 状态一致性 | grep status: manifest vs PROGRESS | 不允许 |
-| 补丁数量 | manifest patches_applied vs 磁盘 *.patch 数 | 不允许 |
-| 对话记录 | PROGRESS.md 中 `### 对话 #N` 出现次数 | 至少 1 轮 |
-
-### 与 init-archive.sh 的分工
-
-| 脚本 | 时机 | 策略 | 删除文件？ |
-|------|------|------|----------|
-| `init-archive.sh` | 编译开始前 | **保留**已有内容，只创建缺失骨架 | 否（除非 --clean） |
-| `finalize-archive.sh` | 全部完成后 | 清理垃圾 + 校验 + 报告 | 是（*.tmp/.bak/不一致） |
-
-### --clean 模式（完全重置）
-
-当需要**丢弃所有旧补丁和打包产物重新开始**时：
-
-```bash
-# 方式 A: init 时指定 --clean
-${SKILL_ROOT}/scripts/init-build.sh <软件名> <版本> --clean
-
-# 方式 B: 手动清空后重新 init
-rm -rf archives/<首字母>/<软件名>/<版本>/patches/*
-rm -rf archives/<首字母>/<软件名>/<版本>/packaging/*
-${SKILL_ROOT}/scripts/init-build.sh <软件名> <version>
-```
+清理临时文件 + 6 项必填校验 + 一致性检查 + 最终报告。详见 references/archive-spec.md。
 
 ---
 
-# 三、核心规范
+## §4 失败处理（R11+R12）
 
-## 3.1 P0 参数最少化原则
+> **详解 + 反面案例**: references/failure-handling.md
 
-**目标命令**：`./configure && make && make install prefix=$TEST_PREFIX`（零额外参数，安装到隔离 staging 目录）
-
-超出 `--prefix=$TEST_PREFIX` 和软件自身选项的参数 = 技术债务。
-
-| 参数类型 | 是否应该存在 | 消除方法 |
-|---------|-------------|---------|
-| `--prefix=$TEST_PREFIX` | ✅ 必须 | — |
-| 软件自身选项（如 `--with-internal-glib`） | ✅ 正常 | — |
-| 平台约束（如 `--without-shared`） | ⚠️ 记录为债务 | 见 dependencies.md |
-| `--build/--host/--target` | ❌ 应消除 | 完善 config.guess/sub |
-| `-Wno-error` 等 CFLAGS hack | ❌ 应消除 | 在 configure.ac 加 `*ohos*` 分支 |
-| `sed` 操作生成文件 | ❌ 绝对禁止 | 改为正式 .patch 补丁 |
-
-**每次编译后在 manifest.yaml 记录**：
-```yaml
-build_cleanliness:
-  standard_params_only: true/false
-  extra_params: []  # 技术债务列表
+```
+失败发生
+├─ [R11] 查归档：README.md → manifest.yaml → 软件级 README
+├─ [R12] 匹配错误：引擎匹配 graph/index.tsv → E*.kv → 方案
+└─ 动手修复：归档+知识库都没有 → 记录新问题 → 修复 → 继续
 ```
 
-## 3.2 补丁"三可"原则
-
-所有源码修改必须以 `.patch` 文件保存（由 `refresh-patch.sh --auto` 生成），满足：
-
-- **可复现**：原始 tarball + 补丁集 → 100% 重现相同产物
-- **可验证**：`patch --dry-run -p1` 干净通过
-- **可上游**：逻辑清晰、有 `#ifdef __OHOS__` 守卫、可提交给上游
-
-**禁止**：sed 直接改 configure/Makefile 等生成文件（不可复现）。修改层级优先级：① configure.ac/CMakeLists.txt/源码 > ② configure/Makefile.in > ③ Makefile > ④ 禁止改二进制。
-
-## 3.3 危险库静态编译要求
-
-以下库**必须静态编译**（LD_LIBRARY_PATH 陷阱会导致系统工具崩溃）：
-
-| 库 | 等级 | 编译要求 |
-|---|------|---------|
-| ncurses | 🔴 致命 | `--without-shared` |
-| readline | 🟠 高 | 建议静态 |
-| zlib | 🟠 高 | 建议静态 |
-
-详见 `dependencies.md` 完整分级表。
-
-## 3.4 软链接处理（鸿蒙特有）
-
-HMDFS 文件系统限制软链接：
-1. 不能仅检查 `-L` 存在性，必须验证可执行
-2. 禁止 `ln -sf` 覆盖（会产生随机后缀文件）
-3. 必须用 `rm -f` + `ln -s`
-4. 不可用时用 wrapper 脚本替代
-
-详见 `environment.md` 第 9 节。
+**知识提取决策**：平台相关 → L1 立即写 knowledge/；构建模式 → L2 写 knowledge/；仅本软件 → L3 写 manifest。
 
 ---
 
-# 四、工具参考表
+## §5 知识图谱
 
-## 4.1 脚本调用关系图
-
-```
-                    ┌─────────────────────┐
-                    │   用户/AI 入口       │
-                    └──────┬──────────────┘
-                           │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-     ┌──────────┐  ┌──────────┐  ┌──────────┐
-     │init-build│  │--resume  │  │search-url│
-     │   .sh    │  │          │  │   .sh    │
-     └────┬─────┘  └──────────┘  └──────────┘
-          │
-    ┌─────┼───────────────┬──────────────┐
-    ▼     ▼               ▼              ▼
-┌────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────┐
-│registry│  │init-archive│  │check-env │  │auto_discover│
-│_append │  │   .sh    │  │   .sh    │  │registry_append│
-└────────┘  └──────────┘  └──────────┘  └──────────────┘
-                                           
-                    (Step 1 完成: .build-context 就绪)
-                    
-                           │
-                    ▼ Step 2: AI 编译
-                  ┌─────────────┐
-                  │  Phase 3     │
-                  │ (AI 决策)    │
-                  └──────┬──────┘
-                         │
-              ┌────────────┼────────────┐
-              ▼            ▼            ▼
-     ┌──────────┐  ┌──────────┐  ┌──────────┐
-     │detect-bld│  │verify-sym│  │sign-elf  │
-     │  sys .sh │  │  links.sh│  │   .sh    │
-     └──────────┘  └──────────┘  └──────────┘
-                         │
-                    ▼ Step 3: finish
-              ┌─────────────────────┐
-              │  finish-build.sh    │
-              └──┬──────────┬───────┬┘
-                 │          │       │
-         ┌──────▼───┐ ┌───▼───┐ ┌──▼──────┐
-         │refresh-  │ │close-  │ │verify-  │ ← 新增: 自动调用
-         │patch.sh  │ │archive│ │build.sh │   质量门禁 G1-G4
-         │ --auto   │ │  .sh   │ │         │
-         └────┬─────┘ └───┬───┘ └────┬────┘
-              │           │          │
-              ▼           ▼          ▼
-         (补丁完成)   (归档关闭)  (门禁报告)
-                                │
-                    ┌───────────▼───────────┐
-                    │ finalize-archive.sh    │  ← Step 4 (原 Step 3)
-                    │ gen_summary.py         │  ← Step 5 (原 Step 4)
-                    └────────────────────────┘
-
-                           │
-                    ▼ Step 4: 质量门禁复查（可选）
-              ┌─────────────────────┐
-              │  verify-build.sh     │  ← 仅单独复查时手动执行
-              │  G1:二进制 G2:功能    │
-              │  G3:可移植 G4:档案    │
-              └──────────┬──────────┘
-                         │
-                 ▼ PASS/FAIL
-              ┌─────────────────────┐
-              │ quality-report.md    │
-              └─────────────────────┘
-```
-
-## 4.2 工具一览
-
-| 脚本 | 用途 | 调用时机 | 层级 |
-|------|------|---------|------|
-| `build-driver.sh` | **编译驱动**（11步全自动：init→补丁→configure→make→install→弹窗→check→Staging→package→deploy→**清理**+finish） | **推荐主入口（v4.3+）** | Layer1 |
-| `init-build.sh` | 编译初始化（下载/解压/检索/骨架/环境/上下文） | Step 1 / driver 内部调用 | Layer2 |
-| `finish-build.sh` | **编译收尾**（补丁+归档+verify+**清理**） | Step 3 | Layer1 |
-| `refresh-patch.sh --auto` | 补丁管线（diff/拆分/校验/验证/hash） | finish 内部 | Layer1 |
-| `search-download-url.sh` | URL 搜索（5 种策略） | init 内部 fallback | Layer3 |
-| `init-archive.sh` | 档架骨架创建 | init 内部 | Layer1 |
-| `check-env.sh` | 环境变量检查 | init 内部 | Layer1 |
-| `detect-build-system.sh` | 构建系统检测 | Step 2 可选 | Layer1 |
-| `verify-symlinks.sh` | 软链接验证 | Step 2 安装后 | Layer1 |
-| `sign-elf.sh` | ELF 签名四步流程（**工具可用**: binary-sign-tool + llvm-objcopy + llvm-readelf 均在 /data/service/hnp/bin/，**不应使用 --skip-sign**） | 打包时 | Layer1 |
-| `check-knowledge-gap.sh` | 知识提取遗漏检查 | finish 后可选 | Layer1 |
-| `verify-build.sh` | **产物质量门禁**：4道检测(二进制/功能/可移植/档案) | **finish-build.sh Step 3（自动）/ Step 4（复查）** | Layer1 |
-| `finalize-archive.sh` | **归档校验+清理**（*.tmp/.bak + **临时文件**: staging/exclude-candidates/pkg-verify/超大日志） | finish 内部调用 | Layer1 |
-| `close-archive.sh` | 归档收尾 | finish 内部 | Layer1 |
-| `software-registry.yaml` | 软件元数据缓存（自动增长） | init 读取/写入 | 数据 |
-
----
-
-# 五、知识检索路径与知识库价值
-
-> **核心原则：知识库是 SKILL 最有价值的资产，值得消耗上下文来积累和维护。**
-> 每个 error-patterns.md 条目 = 节省未来 10-30 分钟的调试时间。
-> 每次 Phase 3 遇到的新问题 -> 立即判断是否通用 -> 是则写入 knowledge/ -> 下次直接命中。
-
-## 5.1 检索路径
-
-| 需要找什么 | 去哪找 | 价值 |
-|-----------|--------|------|
-| 某软件的历史编译方案 | `archives/{首字母}/{软件名}/{版本}/` | 复用完整方案（补丁+配置） |
-| **某类错误的通用解法** | **`knowledge/error-patterns.md`（按 E 编号查找）** | **最高价值——避免重复踩坑** |
-| 构建系统适配策略 | `knowledge/build-systems.md` | config.guess/sub/修改层级 |
-| 平台限制（musl/SELinux/签名） | `knowledge/environment.md` + `harmonyos-specifics.md` | 平台真理 L1 |
-| **依赖编译顺序** | **`dependencies.md` + `PREBUILD_TODOLIST.md`** | **防止顺序错误导致连锁失败** |
-| 打包/RPATH/签名 | `knowledge/packaging.md` | 可移植性保证 |
-| 所有软件兼容性总览 | `SUMMARY.md`（自动生成） | 全局视图 |
-
-## 5.2 知识库增长曲线
+### 5.1 目录结构
 
 ```
-第 1 个软件: error-patterns.md 有 ~20 条（基础平台问题）
-第 5 个软件: error-patterns.md 有 ~40 条（常见构建模式）
-第 10 个软件: error-patterns.md 有 ~60 条（大部分错误已覆盖）
-第 20 个软件: 新错误 80%+ 已在库中 → 编译时间从 2h 缩减到 30min
-第 29 个软件: 接近"一键编译"体验
+knowledge/graph/        # 结构化数据
+├── index.tsv           # 主索引（80+ 条目）
+├── principles.kv       # 编译原则（16 条）
+├── E001.kv ~ E080.kv   # 错误模式条目
+knowledge/doc/          # 人类可读文档
+├── E001.md ~ E080.md
+knowledge/error-patterns.md  # 人类浏览入口
 ```
 
-## 5.3 知识积累的 ROI
+### 5.2 引擎匹配（五阶段）
 
-| 投入 | 回报 |
-|------|------|
-| 写一条 E-编号错误模式（~5min） | 未来每次遇到同类问题节省 10-30min |
-| 记录一个 configure.ac 补丁模板 | 同构建系统的所有后续软件复用 |
-| 更新 dependencies.md 危险表 | 所有依赖该库的软件受益 |
-| 完善 build-systems.md 决策树 | AI 不再纠结"改哪层" |
+Phase A: index.tsv 粗筛 → Phase B: .kv 精排 → Phase C: 方案生成 → Phase D: 原则过滤 → Phase E: 输出执行。
 
-# 六、附录
+### 5.3 管理命令
 
-## 6.1 标准归档目录结构（⭐ 强制规范）
+```bash
+# 新增条目
+python3 $SKILL_ROOT/scripts/ohc-run.py graph add E{NNN}
 
-> **每个归档必须包含以下文件。** init-archive.sh 创建骨架时应生成全部必填文件。
+# 更新条目
+python3 $SKILL_ROOT/scripts/ohc-run.py graph update E{NNN}
 
-```
-archives/{首字母}/{软件名}/                    ← 软件级（跨版本）
-│
-├── README.md              # ⭐ 必填：编译说明 + 平台适配要点（版本级）
-├── RELEASENOTE.md         # ⭐ 必填：发布说明（软件级，聚合多版本）
-├── install.sh            # ⭐ 必填：安装脚本（软件级，参数化: sh -s -- <ver>）
-│
-└── {版本}/               ← 版本级（每次编译的快照）
-    ├── manifest.yaml      # ⭐ 必填：元数据
-    ├── PROGRESS.md        # ⭐ 必填：编译进展记录
-    │
-    ├── patches/           # ⭐ 必填：补丁目录
-    │   ├── 0001-{file}.patch
-    │   └── ...
-    │
-    ├── reports/           # ⭐ 必填：报告目录
-    │   ├── test-report.md
-    │   ├── skill-feedback.md
-    │   └── quality-report.md
-    │
-    └── packaging/         # 🟡 预编译包（verify PASS 后必须）
-        ├── {name}-{ver}-ohos-aarch64.tar.gz
-        └── {name}-{ver}-ohos-aarch64-debug.tar.gz
+# 校验一致性
+python3 $SKILL_ROOT/scripts/ohc-run.py graph validate
+
+# 归档/删除
+python3 $SKILL_ROOT/scripts/ohc-run.py graph remove E{NNN} [--archive]
+
+# 独立引擎匹配
+python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-#### 必填文件内容规范
-
-| 文件 | 最小内容要求 | 模板/参考 |
-|------|-------------|----------|
-| **manifest.yaml** | §6.2 全部字段 | init-archive.sh 自动生成 |
-| **README.md** | 软件简介 + 构建命令 + 补丁清单 + 已知限制 + 验证方法 | 见下方模板 |
-| **PROGRESS.md** | 各 Phase 状态(checkbox) + configure 参数 + 编译结果 + 源码修改清单表 | 见下方模板 |
-| **test-report.md** | 测试套件类型 + 通过/失败数 + 失败原因分析(平台限制 vs 真bug) | 无固定模板 |
-| **skill-feedback.md** | F编号列表(流程缺失/矛盾/脚本问题) + 严重度 + 建议 | §6.6 格式 |
-
-#### PROGRESS.md 最小模板
-
-> 📌 **权威模板源**: `templates/PROGRESS.md`。init-archive.sh 和此处定义均引用同一文件。修改模板时只需更新该文件即可全局生效。
-
-```markdown
-# {软件名} {版本} — 编译进度
-
-> 档案创建时间: YYYY-MM-DD HH:MM:SS
-> 最后更新: YYYY-MM-DD (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
-
-## 一、基本信息
-| 项目 | 值 |
-|------|-----|
-| 软件 | ... |
-| 版本 | ... |
-| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
-| 构建系统 | autotools/cmake/meson/... |
-| 源码路径 | URL |
-
-## 二、编译阶段（checkbox 实时更新）
-
-### Phase 1: 环境准备
-- [ ] init-build.sh 完成 / 源码下载解压
-
-### Phase 2: 编译（configure + make + make install 到 $TEST_PREFIX）
-- [ ] configure 完成（--prefix=$TEST_PREFIX，记录参数和耗时）
-- [ ] make 编译完成（记录错误和修复）
-- [ ] make install 到 $TEST_PREFIX 完成
-
-### Staging 验证（⭐ 必须做）
-- [ ] $TEST_PREFIX 文件完整性检查
-- [ ] 功能回归测试结果
-
-### Phase 3: 测试验证
-- [ ] make check / make test 结果
-- [ ] 安全弹窗触发确认
-
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [ ] Step 1-10 打包流程（见 packaging.md）
-
-### Phase 5: 归档收尾
-- [ ] 补丁生成（refresh-patch.sh --auto）
-- [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] verify-build.sh 质量门禁
-
-## 三、对话记录（⭐ 断点续传核心）
-
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — YYYY-MM-DD HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — YYYY-MM-DD HH:MM
-**操作**: 执行 ./configure --prefix=$TEST_PREFIX
-**结果**: ✅ 成功（~310秒），零额外参数
-**发现的问题**: 无
-**当前状态**: Phase 2 configure 完成，下一步执行 make
-**遗留问题**: 无
-
-### 对话 #2 — YYYY-MM-DD HH:MM
-**操作**: make -j1 && make install（到 $TEST_PREFIX）
-**结果**: ✅ 成功，二进制已安装到 $TEST_PREFIX/bin/
-**发现的问题**: 无
-**当前状态**: Phase 2 完成，下一步 Staging 验证(§2.8) + make check
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| ... | ... | ... | ... |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ... | ... | ... |
-
-## 六、结束记录
-- **最终状态**: ...
-- **结束时间**: ...
-```
-
-#### 文件命名统一
-
-| 用途 | 正确名称 | 禁止名称 |
-|------|---------|---------|
-| 测试报告 | `test-report.md` | `TEST_REPORT.md` `build-report.md` |
-| 质量报告 | `quality-report.md` | （verify-build.sh 固定输出） |
-| SKILL 反馈 | `skill-feedback.md` | `feedback.md` |
-| 进展记录 | `PROGRESS.md` | `progress.md` `STATUS.md` |
-
-## 6.2 manifest.yaml 必填字段
-
-| 字段 | 说明 |
-|------|------|
-| software, version, status | 名称/版本/ success\|partial\|failed |
-| build_system | autotools\|cmake\|meson\|makefile\|custom-perl |
-| compile_date | YYYY-MM-DD |
-| dependencies | required + optional 列表 |
-| build_config | target/options |
-| patches_applied | file + purpose（refresh-patch 自动填充） |
-| patch_generation | hash 绑定（refresh-patch 自动填充） |
-| build_cleanliness | standard_params_only + extra_params（P0 记录） |
-| compatibility | level + issues + notes |
-| test_results | type + passed + failed + note |
-| knowledge_gained | 本次沉淀（L3 笔记） |
-
-## 6.3 补丁命名规范
-
-- 格式：`NNNN-{文件名}.patch`（四位序号 + 文件名）
-- 例：`0001-config.sub.patch`、`0003-configure.patch`
-- 内嵌依赖加前缀：`0004-glib-config.guess.patch`
-
-## 6.4 知识分层
+### 5.4 知识分层
 
 | 层 | 归属 | 特征 | 写入时机 |
 |----|------|------|---------|
-| L1 平台真理 | `knowledge/*.md` | 任何软件都可能遇到 | Phase 3 实时 |
-| L2 模式经验 | `knowledge/*.md` 章节 | 同类构建系统复现 | Phase 3 实时 |
-| L3 本版笔记 | `manifest.yaml` knowledge_gained | 仅本软件本版本 | Phase 3+4 |
+| L1 平台真理 | knowledge/*.md | 任何软件可能遇到 | Phase 3 实时 |
+| L2 模式经验 | knowledge/*.md 章节 | 同类构建系统复现 | Phase 3 实时 |
+| L3 本版笔记 | manifest.yaml knowledge_gained | 仅本软件本版本 | Phase 3+4 |
 
-不确定时先标 `⏳ 待评估`，Phase 4 再决定。
+### 5.5 上下文裁剪协议（⭐ 控制上下文膨胀）
 
-## 6.5 PREBUILD_TODOLIST 依赖顺序
+问题解决后执行 4 步：沉淀知识 → 写索引行 → 裁剪遗忘 → 后续查图谱。
 
-编译多款软件时，按此顺序执行（下层依赖上层）：
-
-```
-第零阶段: pkg-config
-第一阶段: sed → coreutils → gawk          (无外部依赖)
-第二阶段: automake → libtool             (Autotools 链)
-第三阶段-A: zlib → bzip2 → xz → gzip    (压缩库)
-第三阶段-B: openssl → ncurses → libffi   (SSL/终端)
-第三阶段-C: gdbm → readline             (数据库/编辑)
-第四阶段: wget → rsync → jq → file → tar → dos2unix  (网络/文件)
-第五阶段: bash → htop → strace → patch   (高级工具)
-第六阶段: texinfo → help2man → libpipeline  (文档/辅助)
-第七阶段: man-db                          (文档系统)
-```
-
-> **注意**：使用 `init-build.sh` 时无需手动关注此顺序——单个软件的依赖在 registry 的 `known_issues` 中标注。批量编译时参考此顺序。
-
-## 6.6 流程自省（简化版）
-
-编译过程中发现 SKILL 自身问题时，记录到 `reports/skill-feedback.md`：
-
-```markdown
-### F{NNN}: {简短描述}
-- 类别: 流程缺失 / 矛盾 / 脚本问题 / 导航错误
-- 严重: 🔴🟡🟢
-- 场景: {在哪步发现的}
-- 建议: {怎么改}
-```
-
-Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
+> 完整协议: references/context-trimming-protocol.md
 
 ---
 
-*SKILL.md v4.7 — 最后更新: 2026-04-09*
-*v4.7 更新（绝对路径 + R13 + Step 1.5 归档查询）:*
-*  - **#0 新增 §0 路径常量**: 定义 SKILL_ROOT/ARCHIVE_ROOT/SCRIPT_DIR/KNOWLEDGE_DIR 绝对路径 *
-*  - **#1 R13 铁律**: 禁止使用相对路径 ./scripts/ 调用脚本，必须用 ${SKILL_ROOT}/scripts/ *
-*  - **#2 全局替换**: 所有 22 处 ./scripts/xxx.sh → ${SKILL_ROOT}/scripts/xxx.sh *
-*  - **#3 build-driver.sh Step 1.5**: 编译前自动查询并展示归档历史（R11 硬约束） *
-*  - **#4 归档路径确认**: ARCHIVE_ROOT = ${SKILL_ROOT}/archives/（skill 内部） *
-*v4.6 更新（清理阶段 + 签名工具说明 + 结构修复）:*
-*  - **#1 新增临时文件清理阶段**: finalize-archive + build-driver Step 12 清理临时文件(staging/exclude-candidates/pkg-verify/超大日志) *
-*  - **#2 签名工具可用性确认**: binary-sign-tool/llvm-objcopy/llvm-readelf 均可用，不应 --skip-sign *
-*  - **#3 工具表恢复**: §4.2 恢复完整 16 个脚本条目 *
-*  - **#4 编译产物不删除**: 清理范围限定为临时文件，不碰 .o/config.log/Makefile 等编译产物 *
-*v4.5 更新（路径修正 + 多框架 + 排除流程）:*
-*  - SED/INSTALL 动态检测(find_tool: GNU优先 > toybox fallback) *
-*  - EXCLUDE_LIST 实测驱动(Step 8 功能测试 → 失败才加入) *
-*  - build-driver.sh 六种构建框架支持(autotools/cmake/meson/perl/makefile/python) *
-*v4.4 更新（编译驱动 + 遵从性强化）:*
-*  - 新增 build-driver.sh: 11步硬编码编译驱动，AI 只需调用一次 *
-*  - 遵从性保障: 文档约束 → 脚本强制 *
-*v4.3 更新（staging 架构重构）:*
-*  - configure --prefix 从 $DEFAULT_PREFIX 改为 $TEST_PREFIX (隔离 staging) *
-*  - install.sh 成为唯一部署通道 *
-*v4.2 更新（流程闸门修复）:*
-*  - finish-build.sh 三道关卡闸门(P1 test-report / P2 staging / P3 package) *
+## §6 归档规范摘要
+
+> **完整规范**: references/archive-spec.md
+
+### 目录结构
+
+```
+archives/{首字母}/{软件名}/          ← 软件级
+├── README.md + RELEASENOTE.md + install.sh
+└── {版本}/                         ← 版本级
+    ├── manifest.yaml + PROGRESS.md
+    ├── patches/*.patch
+    ├── reports/
+    └── packaging/*.tar.gz
+```
+
+### 必填文件
+
+manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, reports/, packaging/*.tar.gz
+
+### 补丁命名
+
+`NNNN-{文件名}.patch`，如 `0001-config.sub.patch`。
+
+### 依赖顺序（批量编译参考）
+
+按 `software-registry.yaml` 中的 category 分阶段编译，基础顺序: pkg-config → sed/coreutils/gawk → automake/libtool → ...（详见 knowledge/operations/dependencies.md）
+
+---
+
+## §7 Gotchas（鸿蒙关键陷阱）
+
+| 陷阱 | 说明 | 对策 |
+|------|------|------|
+| /tmp 只读 | E002，写入报 Read-only | 用 `$TMPDIR` 或 `$HOME/tmp` |
+| HMDFS 软链接 | 不能 ln -sf 覆盖 | `rm -f && ln -s` 或 wrapper |
+| 安全弹窗 | 首次执行二进制弹确认框 | make install 后扫一遍 bin/ |
+| chmod 不生效 | E046，SELinux 限制 | 记录为平台限制，不阻塞 |
+| 未实现 syscall | E051，setreuid/chroot 等 | 加入 EXCLUDE_LIST 排除 |
+| toybox sh 限制 | 缺 bash 特性，heredoc 差 | Python 化后已解决；仅限用户手动操作 shell 时注意 |
+| ELF 签名 | 必须签名否则不可执行 | `python3 $SKILL_ROOT/scripts/ohc-run.py sign-elf`，工具在 /data/service/hnp/bin/ |
+| ncurses 共享库 | 编译为 .so 会导致系统崩溃 | `--without-shared`（R4） |
+
+### 流程自省
+
+发现 SKILL 自身问题时记录到 `reports/skill-feedback.md`：
+```
+### F{NNN}: {简短描述}
+- 类别: 流程缺失/矛盾/脚本问题
+- 严重: 🔴🟡🟢
+- 建议: {怎么改}
+```
+
+---
+
+## §8 工具一览
+
+| 脚本 | 用途 | 调用时机 |
+|------|------|---------|
+| `ohc-run.py build` | 13 步编译驱动（唯一入口） | ★ 主入口 |
+| `ohc-run.py init-build` | 下载/解压/骨架/环境 | Step 1 |
+| `ohc-run.py finish` | 补丁+归档+verify+校验+知识+总结（6 步） | Step 3 |
+| `ohc-run.py verify-build` | G1-G4 质量门禁 | finish 内部 / 可选复查 |
+| `ohc-run.py refresh-patch` | 补丁管线 | finish 内部 |
+| `ohc-run.py close-archive` | 归档关闭 | finish 内部 |
+| `ohc-run.py finalize-archive` | 清理+校验+RELEASENOTE | finish 内部 |
+| `ohc-run.py package` | 预编译包 10 步流程 | Step 5 |
+| `ohc-run.py sign-elf` | ELF 签名 | 打包时 |
+| `ohc-run.py init-archive` | 档架骨架创建 | init 内部 |
+| `ohc-run.py check-env` | 环境检查 | init 内部 |
+| `ohc-run.py search-url` | URL 搜索 5 策略 | init fallback |
+| `ohc-run.py check-knowledge-gap` | 知识遗漏检查 | finish Step 5 |
+| `ohc-run.py graph add` | 知识图谱新增条目 | AI 手动 |
+| `ohc-run.py graph update` | 知识图谱更新条目 | AI 手动 |
+| `ohc-run.py graph remove` | 知识图谱归档/删除 | AI 手动 |
+| `ohc-run.py graph validate` | 图谱一致性校验 | add/update 内部 |
+| `ohc-run.py engine` | 独立错误匹配引擎 | AI 手动 |
+| `ohc-run.py status` | 跨对话编译状态扫描 | 恢复编译时 |
+| `ohc-run.py handoff` | HANDOFF 上下文输出 | 恢复编译时 |
+| `ohc-run.py summary` | 生成 SUMMARY.md | finish Step 6 |
+| `software-registry.yaml` | 软件元数据缓存 | init 读写 |
+
+---
+
+*SKILL.md v7.0 — 2026-04-11 — Python 统一入口（ohc-run.py）全量实现*

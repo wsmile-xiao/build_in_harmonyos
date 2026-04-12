@@ -1,0 +1,85 @@
+# Layer 0: 错误面
+id:                     E077
+trigger_tool:           patchelf|strip|llvm-objcopy|binary-sign-tool
+phase:                  post-install
+error_signature:        operation not permitted|Operation not permitted|Permission denied.*ELF|codesign|section already exists|cannot open.*elf
+
+# Layer 1: 识别层
+severity:               1
+category:               elf-signing|post-processing|packaging
+match_keywords:         ELF, signature, codesign, patchelf, strip, objcopy, binary-sign-tool, RPATH, RUNPATH, operation not permitted, re-sign, .note.ohos.ident, permission denied
+
+# Layer 2: 诊断层
+root_cause:             鸿蒙系统的 ELF 可执行文件必须包含有效的 `.codesign` 签名段才能被内核加载执行。
+                        patchelf（修改 RPATH）、llvm-strip（移除调试符号）、llvm-objcopy（修改段）
+                        等工具修改 ELF 文件后会使签名失效。
+                        binary-sign-tool 无法覆盖已有签名段（报 "section already exists"），
+                        必须先移除旧签名再重新签名。签名后文件权限归零需重新 chmod +x。
+                        四步流程顺序不可变，任何一步跳过都会导致运行失败。
+affected_scope:          所有 make install 后需要修改 ELF 文件的 C/C++ 软件（设 RPATH、strip、debug 分离等）
+verification_cmd:       |
+  # 检查签名状态
+  llvm-readelf -S $PREFIX/bin/<executable> | grep codesign
+  # 有 [N] .codesign → 签名存在
+  # 尝试执行
+  $PREFIX/bin/<executable> --version
+  # "operation not permitted" → 签名失效或缺失
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           post-install-script
+rec_description:        遵循四步 post-install 流程：移除签名 → 修改 ELF → 重新签名 → 恢复权限。顺序不可变。
+rec_command:            |
+  # Step 1: 移除旧签名（必须先做！）
+  llvm-objcopy --remove-section .codesign $TARGET_FILE
+
+  # Step 2: 修改 ELF（patchelf/strip/objcopy 等）
+  patchelf --set-rpath '$ORIGIN/../lib' $TARGET_FILE
+  # 或: llvm-strip $TARGET_FILE
+  # 或: llvm-objcopy --only-keep-debug ...
+
+  # Step 3: 重新签名（必须！）
+  binary-sign-tool sign -inFile $TARGET_FILE -outFile $TARGET_FILE -selfSign 1
+
+  # Step 4: 恢复权限（签名后权限归零！）
+  chmod a+x $TARGET_FILE
+rec_auto_fix:          false
+rec_impl:               post-install-script
+
+fallback_priority:      2
+fallback_approach:      batch-script
+fallback_description:   对安装目录下所有 ELF 文件批量执行四步流程（参考 package_python.sh 的 patch_strip_sign 函数）。
+fallback_command:      |
+  find $PREFIX/bin $PREFIX/lib -type f -exec sh -c '
+    f="$1"
+    llvm-objcopy --remove-section .codesign "$f" 2>/dev/null
+    patchelf --set-rpath '"'"'$ORIGIN/../lib'"'"' "$f" 2>/dev/null
+    binary-sign-tool sign -inFile "$f" -outFile "$f" -selfSign 1 2>/dev/null
+    chmod a+x "$f"
+  ' _ {}
+fallback_auto_fix:     false
+fallback_impl:          batch-script
+
+forbid_1_pattern:      跳过重新签名步骤直接运行修改后的 ELF
+forbid_1_reason:        未签名的 ELF 被鸿蒙内核拒绝加载，报 "operation not permitted"，无论 chmod 权限如何设置都无法执行
+forbid_1_consequence:   安装后的可执行文件完全无法运行，表现为 Permission denied，容易被误判为文件权限问题而反复 chmod（无效）
+
+forbid_2_pattern:      先签名再用 patchelf 修改 RPATH
+forbid_2_reason:        patchelf 修改 ELF 内容后再次使签名失效，回到未签名状态，且此时 binary-sign-tool 因已有签名段而拒绝覆盖
+forbid_2_consequence:   进入死循环：签名→修改→失效→无法覆盖→手动删除段→重新签名...浪费大量调试时间
+
+# Layer 4: 原则引用
+principles:
+  - P-PACK-001  # 可移植打包必须包含 post-install 签名步骤
+
+# 关系图
+causes:                 [E046]                # 签名后 chmod 归零，需重新 chmod +x（E046 的特殊触发场景）
+caused_by:              []                    # 上游是 ELF 修改操作
+similar_to:             [E046]                # 都涉及 ELF 文件权限问题
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               doc/E077.md
+last_updated:           2026-04-10
+source_event:           harmonyos-specifics.md §2 + Python 3.9.0 打包经验

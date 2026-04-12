@@ -13,10 +13,10 @@
 
 | 策略 | 说明 | 示例 |
 |------|------|------|
-| **工具优于记忆** | 所有多步确定性操作封装为脚本 | sign-elf.sh、prep-test.sh、verify-symlinks.sh |
+| **工具优于记忆** | 所有多步确定性操作封装为脚本 | `ohc-run.py sign-elf`、`ohc-run.py verify-build` |
 | **PROGRESS.md 是外部记忆** | 压缩后读取 PROGRESS.md 恢复上下文 | 不需要记住历史对话，读文件即可 |
 | **约束速查嵌入** | PROGRESS.md 模板内嵌致命级约束速查清单 | 即使遗忘了也能从模板中重新获取 |
-| **REFERENCE_CARD 是快速入口** | 编译前先读 REFERENCE_CARD.md 恢复关键信息 | ~100 行，上下文开销极小 |
+| **SKILL.md 是快速入口** | 编译前先读 SKILL.md 恢复关键信息 | ~100 行，上下文开销极小 |
 
 ## 遗忘测试数据
 
@@ -26,16 +26,16 @@
 
 | 信息类型 | 遗忘率 | 说明 | 对策 |
 |---------|--------|------|------|
-| **致命级约束 (D1-D3)** | **57%** | 最高优先级规则仍有过半遗忘 | 嵌入 PROGRESS.md 模板 + REFERENCE_CARD.md |
+| **致命级约束 (D1-D3)** | **57%** | 最高优先级规则仍有过半遗忘 | 嵌入 PROGRESS.md 模板 + SKILL.md |
 | **工具脚本名称/用法** | **75%** | 脚本参数和调用方式容易混淆 | 封装为更高级脚本或写入速查表 |
-| **知识文件路径/内容** | **83%** | knowledge/ 下具体哪个文件存什么最易遗忘 | SKILL.md §5.1 检索路径表 + REFERENCE_CARD.md 目录结构 |
-| **十铁律 (R1-R10)** | ~40% | 相对较低但仍不可忽视 | REFERENCE_CARD.md 第二章集中呈现 |
+| **知识文件路径/内容** | **83%** | knowledge/ 下具体哪个文件存什么最易遗忘 | SKILL.md §5.1 检索路径表 + SKILL.md 目录结构 |
+| **十铁律 (R1-R10)** | ~40% | 相对较低但仍不可忽视 | SKILL.md 第二章集中呈现 |
 | **错误模式编号 (E0XX)** | ~65% | 记住编号但忘记对应方案 | error-patterns.md 按 E 编号索引 |
 
 ### 关键发现
 
 1. **只靠记忆不可靠**：即使是最重要的约束，遗忘率也超过 50%
-2. **外部记忆是必须的**：PROGRESS.md、REFERENCE_CARD.md、SKILL.md 构成三级记忆体系
+2. **外部记忆是必须的**：PROGRESS.md、SKILL.md、SKILL.md 构成三级记忆体系
 3. **工具化是最好的防遗忘**：将流程固化为脚本后，AI 只需记住"调什么脚本"而不是"怎么做"
 4. **上下文压缩是常态**：长任务必然触发上下文压缩，设计时就必须考虑压缩后的生存能力
 
@@ -59,7 +59,7 @@
 上下文压缩后:
   - 几乎只有当前消息
   - 遗忘率 > 80%
-  - → REFERENCE_CARD.md + PROGRESS.md 是唯一依靠
+  - → SKILL.md + PROGRESS.md 是唯一依靠
 ```
 
 ## 防遗忘设计模式
@@ -76,7 +76,7 @@ PROGRESS.md 模板中包含：
 ### 模式 2：分层文档体系
 
 ```
-Level 0: REFERENCE_CARD.md   (~100 行)  ← 压缩后首先读取
+Level 0: SKILL.md   (~100 行)  ← 压缩后首先读取
 Level 1: SKILL.md             (~550 行)  ← 需要详细规范时读取
 Level 2: KNOW_YOUR_WHY.md     (~400 行精简后) ← 需要理解"为什么"时读取
 Level 3: knowledge/*.md       (按需)     ← 具体问题时按需查阅
@@ -90,7 +90,7 @@ Level 3: knowledge/*.md       (按需)     ← 具体问题时按需查阅
 - 调用示例
 - 常见错误
 
-→ AI 不需要记住用法，`./script.sh --help` 即可获取
+→ AI 不需要记住用法，`python3 $SKILL_ROOT/scripts/ohc-run.py <command> --help` 即可获取
 
 ---
 

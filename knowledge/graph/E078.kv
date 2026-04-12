@@ -1,0 +1,77 @@
+# Layer 0: 错误面
+id:                     E078
+trigger_tool:           cc|clang|python|perl|ruby|ld.lld
+phase:                  linking|runtime
+error_signature:        Error relocating.*symbol not found|ImportError.*symbol not found|cannot find symbol|undefined symbol.*_Py|BIND_NOW
+
+# Layer 1: 识别层
+severity:               1
+category:               libc|linking|musl|dynamic-linking
+match_keywords:         musl, BIND_NOW, BIND_LAZY, dlopen, symbol not found, relocating, ImportError, LDSHARED, BLDSHARED, extension module, .so, NEEDED, circular dependency, libpython, libperl, libruby
+
+# Layer 2: 诊断层
+root_cause:             musl libc 的动态链接器默认使用 BIND_NOW（加载时立即解析所有符号），而非 glibc 的 BIND_LAZY（首次使用时延迟解析）。
+                        解释型语言（Python/Perl/Ruby）的扩展模块（.so）通过 dlopen() 加载时，
+                        其 NEEDED 列表通常只有 libc.so，不包含主解释器库（libpython/libperl/libruby）。
+                        BIND_NOW 要求所有符号在 dlopen 时即可解析，但 Python API 符号（如 _PyType_Name）
+                        定义在 libpython 中而非 libc 中，导致 ImportError。
+affected_scope:          所有使用 musl libc 系统上编译的解释型语言扩展模块（Python C 扩展、Perl XS、Ruby 原生模块）
+verification_cmd:       |
+  # 检查扩展模块的动态段
+  llvm-readelf -d <module>.so | grep -E "NEEDED|BIND"
+  # 如果只有 NEEDED: libc.so 且 FLAGS 含 BIND_NOW → 命中 E078
+  # 正确应包含 libpythonX.Y.so 或 libperl.so 等
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           build-var-override
+rec_description:        在 LDSHARED（构建扩展模块的链接标志）中显式添加主库链接参数，
+                        使扩展模块的 NEEDED 包含主解释器库。
+                        关键：必须区分 BLDSHARED（构建主库本身，不能含主库链接否则循环依赖）
+                        与 LDSHARED（构建扩展模块，必须含主库链接）。
+rec_command:            |
+  # Python 示例：修改 Makefile 或 configure.ac
+  # LDSHARED 用于构建 .so 扩展模块 — 必须包含 -lpython
+  LDSHARED='$(CC) -shared -L. -lpython$(LDVERSION)'
+  
+  # BLDSHARED 用于构建 libpython.so 本身 — 不能包含 -lpython（循环依赖！）
+  BLDSHARED='$(CC) -shared'
+rec_auto_fix:          false
+rec_impl:               build-var-override
+
+fallback_priority:      2
+fallback_approach:      configure-patch
+fallback_description:   在 configure.ac/configure 中添加平台分支，为 HarmonyOS/musl 设置正确的 LDSHARED/BLDSHARED。
+fallback_command:      |
+  case $ac_sys_system in
+      HarmonyOS*|*linux-musl*)
+          BLDSHARED='$(CC) -shared'
+          LDSHARED='$(CC) -shared -L. -lpython$(LDVERSION)'
+          ;;
+  esac
+fallback_auto_fix:     false
+fallback_impl:          source-patch-ifdef
+
+forbid_1_pattern:      在 BLDSHARED 中添加 -lpython/-lperl/-lruby
+forbid_1_reason:        BLDSHARED 用于构建主共享库本身（如 libpython.so），如果链接自身会形成循环依赖 → 链接器报 "undefined reference to itself" 或无限递归
+forbid_1_consequence:   主共享库无法生成，整个构建流程中断
+
+forbid_2_pattern:      用 BIND_LAZY 标志覆盖 musl 默认行为
+forbid_2_reason:        musl 链接器可能忽略或错误处理 BIND_LAZY，且即使成功也会将问题推迟到运行时（首次调用该函数时崩溃），比编译期更难排查
+forbid_2_consequence:   表面编译成功但运行时随机崩溃，调试难度大幅增加
+
+# Layer 4: 原则引用
+principles:
+  - P-LINKAGE-001  # musl BIND_NOW 要求显式链接依赖
+
+# 关系图
+causes:                 [E042]                # 同属动态链接问题（E042 是 RPATH，本条是符号解析）
+caused_by:              []                    # 上游是 musl 链接器设计
+similar_to:             [E042,E068]          # E042(RPATH), E068(find_library/dlopen)
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               doc/E078.md
+last_updated:           2026-04-10
+source_event:           musl-compat.md §3 + Python 3.9.0/3.9.25 编译经验

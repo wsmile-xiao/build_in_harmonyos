@@ -1,0 +1,515 @@
+"""Unified error-pattern matching engine (v3).
+
+
+Five phases:
+  A. index.tsv coarse filter (keyword matching + severity weight)
+  B. .kv fine ranking (error_signature exact matching)
+  C. Solution generation (load full .kv data)
+  D. Principle filtering (lookup principles.kv for display)
+  E. Formatted output (interactive / json / autofix / inline)
+"""
+from __future__ import annotations
+
+import json
+import os
+import sys
+from dataclasses import dataclass, field
+from typing import Optional
+
+from .models import (
+    ErrorEntry, IndexEntry, Principle, Severity,
+    parse_error_entry, parse_index_tsv, parse_principles,
+)
+from .utils import graph_dir
+
+
+# ═══════════════════════════════════════════════════════
+# Match result
+# ═══════════════════════════════════════════════════════
+
+@dataclass
+class MatchResult:
+    """Output of the matching engine."""
+    matched: bool = False
+    match_id: str = ""
+    phase_a_score: int = 0
+    phase_b_score: int = 0
+    total_score: int = 0
+    entry: ErrorEntry | None = None
+    principle_names: list[str] = field(default_factory=list)
+
+
+# ═══════════════════════════════════════════════════════
+# Phase A: Coarse filter via index.tsv
+# ═══════════════════════════════════════════════════════
+
+@dataclass
+class _Candidate:
+    entry: IndexEntry
+    score: int = 0
+
+
+def _phase_a(
+    error_text: str,
+    index_entries: list[IndexEntry],
+    min_score: int = 2,
+    top_n: int = 5,
+) -> list[_Candidate]:
+    """Scan index.tsv rows, score by keyword hits × severity weight."""
+    error_lower = error_text.lower()
+    candidates: list[_Candidate] = []
+
+    for entry in index_entries:
+        if not entry.id.startswith("E"):
+            continue
+        if not entry.keywords:
+            continue
+
+        score = 0
+        for kw in entry.keywords:
+            if len(kw) < 2:
+                continue
+            if kw.lower() in error_lower:
+                score += 1
+
+        # Severity weight (same as build-driver inline version)
+        if entry.severity >= 3:
+            score *= 3
+        elif entry.severity >= 2:
+            score *= 2
+
+        if score >= min_score:
+            candidates.append(_Candidate(entry=entry, score=score))
+
+    candidates.sort(key=lambda c: c.score, reverse=True)
+    return candidates[:top_n]
+
+
+# ═══════════════════════════════════════════════════════
+# Phase B: Fine ranking via .kv error_signature
+# ═══════════════════════════════════════════════════════
+
+def _phase_b(
+    error_text: str,
+    candidates: list[_Candidate],
+    gdir: str,
+    sig_bonus: int = 5,
+) -> tuple[str, int, int]:
+    """Load .kv for each candidate, score by error_signature matching.
+
+    Returns (best_match_id, phase_b_score, phase_a_score).
+    If no Phase B hit, falls back to Phase A top candidate.
+    """
+    error_lower = error_text.lower()
+    best_id = ""
+    best_b = 0
+    best_a = 0
+
+    for cand in candidates:
+        kv_path = os.path.join(gdir, f"{cand.entry.id}.kv")
+        if not os.path.isfile(kv_path):
+            continue
+
+        raw: dict[str, str] = {}
+        try:
+            from .models import parse_kv_file
+            raw = parse_kv_file(kv_path)
+        except Exception:
+            continue
+
+        sig = raw.get("error_signature", "")
+        match_score = 0
+
+        if sig:
+            for pattern in sig.split("|"):
+                pattern = pattern.strip().lower()
+                if pattern and pattern in error_lower:
+                    match_score += sig_bonus
+                    break  # Same as build-driver inline: first match only
+
+        # match_keywords bonus (+1 each)
+        mkw = raw.get("match_keywords", "")
+        if mkw:
+            for kw in mkw.split(","):
+                kw = kw.strip()
+                if kw and kw.lower() in error_lower:
+                    match_score += 1
+
+        if match_score > best_b:
+            best_b = match_score
+            best_id = cand.entry.id
+            best_a = cand.score
+
+    # Fallback to Phase A top candidate
+    if not best_id and candidates:
+        best_id = candidates[0].entry.id
+        best_b = 0
+        best_a = candidates[0].score
+
+    return best_id, best_b, best_a
+
+
+# ═══════════════════════════════════════════════════════
+# Phase C: Solution generation
+# ═══════════════════════════════════════════════════════
+
+def _phase_c(match_id: str, gdir: str) -> ErrorEntry | None:
+    """Load the full .kv for the best match."""
+    kv_path = os.path.join(gdir, f"{match_id}.kv")
+    if not os.path.isfile(kv_path):
+        return None
+    try:
+        return parse_error_entry(kv_path)
+    except Exception:
+        return None
+
+
+# ═══════════════════════════════════════════════════════
+# Phase D: Principle filtering
+# ═══════════════════════════════════════════════════════
+
+def _phase_d(
+    entry: ErrorEntry,
+    principles: list[Principle],
+) -> list[str]:
+    """Look up principle names for the entry's principle references."""
+    if not entry.principles:
+        return []
+
+    p_map = {p.id: p.name for p in principles}
+    names: list[str] = []
+    for pid in entry.principles:
+        pid = pid.strip().strip("#").strip()
+        if pid:
+            names.append(p_map.get(pid, pid))
+    return names
+
+
+# ═══════════════════════════════════════════════════════
+# Phase E: Output formatters
+# ═══════════════════════════════════════════════════════
+
+def _truncate(s: str, maxlen: int = 120) -> str:
+    if not s:
+        return ""
+    s = s.replace("\n", " ").strip()
+    return s[:maxlen - 3] + "..." if len(s) > maxlen else s
+
+
+def _escape_json(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+
+def format_interactive(result: MatchResult) -> str:
+    """Human-readable interactive output (default mode)."""
+    if not result.matched or not result.entry:
+        return "❌ 未找到匹配的错误模式。\n"
+    e = result.entry
+    lines: list[str] = []
+    lines.append("╔══════════════════════════════════════════════╗")
+    lines.append(f"║  🎯 命中: {e.id}  (Phase B: {result.phase_b_score})")
+    lines.append("╚══════════════════════════════════════════════╝")
+    lines.append("")
+    lines.append("📋 基本信息:")
+    lines.append(f"   严重度: {int(e.severity)}  |  类别: {'|'.join(e.category)}")
+    lines.append(f"   触发工具: {'|'.join(e.trigger_tool)}  |  阶段: {'|'.join(e.phase)}")
+    lines.append("")
+    lines.append("🔍 根因分析:")
+    lines.append(f"   {e.root_cause}")
+    lines.append(f"   影响范围: {e.affected_scope}")
+    lines.append("")
+    lines.append(f"★ 推荐方案 (优先级 {e.rec_priority}): {e.rec_approach}")
+    lines.append(f"   {e.rec_description}")
+    if e.rec_command:
+        lines.append(f"   命令: {e.rec_command}")
+    lines.append(f"   自动修复: {'true' if e.rec_auto_fix else 'false'}  |  实现: {e.rec_impl}")
+
+    if e.fallback:
+        fb = e.fallback
+        lines.append("")
+        lines.append(f"↩️  回退方案 (优先级 {fb.priority}): {fb.approach}")
+        if fb.description:
+            lines.append(f"   {fb.description}")
+        if fb.command:
+            lines.append(f"   命令: {fb.command}")
+
+    if e.forbid_rules:
+        lines.append("")
+        lines.append("🚫 禁止做法:")
+        for rule in e.forbid_rules:
+            if rule.pattern:
+                lines.append(f"   ❌ {rule.pattern}")
+            if rule.reason:
+                lines.append(f"   原因: {rule.reason}")
+            if rule.consequence:
+                lines.append(f"   后果: {rule.consequence}")
+
+    if result.principle_names:
+        lines.append("")
+        lines.append("⚖️  原则引用:")
+        for name in result.principle_names:
+            lines.append(f"   ✅ {name}")
+
+    rel = e.relations
+    if any([rel.causes, rel.similar_to, rel.conflicts_with]):
+        lines.append("")
+        parts = []
+        if rel.causes:
+            parts.append(f"导致=[{','.join(rel.causes)}]")
+        if rel.similar_to:
+            parts.append(f"相似=[{','.join(rel.similar_to)}]")
+        if rel.conflicts_with:
+            parts.append(f"冲突=[{','.join(rel.conflicts_with)}]")
+        lines.append(f"🔗 关联: {' '.join(parts)}")
+
+    if e.doc_file:
+        lines.append(f"📄 文档: {e.doc_file}")
+    if e.verification_cmd:
+        lines.append(f"✅ 验证: {_truncate(e.verification_cmd, 80)}")
+
+    return "\n".join(lines) + "\n"
+
+
+def format_json(result: MatchResult) -> str:
+    """JSON output (--json mode)."""
+    if not result.matched or not result.entry:
+        return json.dumps({"status": "no_match"}, ensure_ascii=False, indent=2) + "\n"
+    e = result.entry
+    obj = {
+        "status": "matched",
+        "match_id": e.id,
+        "phase_b_score": result.phase_b_score,
+        "total_score": result.total_score,
+        "severity": str(int(e.severity)),
+        "category": "|".join(e.category),
+        "root_cause": e.root_cause,
+        "recommendation": {
+            "approach": e.rec_approach,
+            "description": e.rec_description,
+            "command": e.rec_command or "",
+            "auto_fix": e.rec_auto_fix,
+            "impl": e.rec_impl,
+        },
+        "forbidden": {},
+        "principles": ",".join(e.principles),
+    }
+    if e.fallback:
+        obj["fallback"] = {
+            "approach": e.fallback.approach,
+            "description": e.fallback.description,
+            "command": e.fallback.command or "",
+            "auto_fix": e.fallback.auto_fix,
+        }
+    if e.forbid_rules and e.forbid_rules[0].pattern:
+        obj["forbidden"] = {
+            "pattern": e.forbid_rules[0].pattern,
+            "reason": e.forbid_rules[0].reason or "",
+        }
+    return json.dumps(obj, ensure_ascii=False, indent=2) + "\n"
+
+
+def format_autofix(result: MatchResult) -> str:
+    """Autofix command output (--autofix mode)."""
+    if not result.matched or not result.entry:
+        return "# ❌ 未找到匹配的错误模式\n"
+    e = result.entry
+    lines: list[str] = []
+    lines.append(f"# === 错误模式匹配: {e.id} (severity={int(e.severity)}) ===")
+    lines.append(f"# 根因: {_truncate(e.root_cause, 120)}")
+    lines.append("")
+
+    if e.rec_auto_fix and e.rec_command:
+        lines.append(f"# ★ 推荐方案 (优先级 {e.rec_priority}): {e.rec_approach}")
+        lines.append(e.rec_command)
+    else:
+        lines.append(f"# ⚠️  推荐方案需人工操作: {e.rec_approach}")
+        lines.append(f"# {e.rec_description}")
+        if e.fallback and e.fallback.auto_fix and e.fallback.command:
+            lines.append(f"# 回退方案: {e.fallback.approach}")
+            lines.append(e.fallback.command)
+
+    if e.forbid_rules and e.forbid_rules[0].pattern:
+        lines.append(f"# ❌ 禁止: {e.forbid_rules[0].pattern}")
+        if e.forbid_rules[0].reason:
+            lines.append(f"# 原因: {e.forbid_rules[0].reason}")
+
+    return "\n".join(lines) + "\n"
+
+
+def format_inline(result: MatchResult) -> str:
+    """Inline log output (integration mode).
+
+    This is the format printed when the engine hits a match.
+    """
+    if not result.matched or not result.entry:
+        return ""
+    e = result.entry
+    lines: list[str] = []
+    lines.append("  ⚠️")
+    lines.append(f"  ⚠️  ═══ 🧠 知识图谱命中: {e.id} (评分:{result.total_score}) ═══")
+    lines.append(f"  ⚠️  步骤: {'|'.join(e.phase)} | 方案: {e.rec_approach}")
+    lines.append(f"  ⚠️  根因: {_truncate(e.root_cause, 120)}")
+    if e.forbid_rules and e.forbid_rules[0].pattern:
+        lines.append(f"  ⚠️  禁止: {e.forbid_rules[0].pattern}")
+    lines.append("  ⚠️")
+    if e.rec_auto_fix and e.rec_command:
+        lines.append(f"  → 🔧 v3 自动修复: {e.rec_command}")
+    if e.doc_file:
+        doc_path = os.path.join(
+            os.path.dirname(graph_dir()), e.doc_file
+        )
+        if os.path.isfile(doc_path):
+            with open(doc_path, "r", encoding="utf-8") as f:
+                doc_lines = [l.rstrip("\n") for l in f.readlines()[:40]]
+            lines.append("  → --- {} 详细文档 ---".format(e.id))
+            for dl in doc_lines:
+                lines.append(f"  →   {dl}")
+    lines.append("  ⚠️")
+    lines.append("  ⚠️  ═══ 以上来自 knowledge/graph/ (v3 引擎) ═══")
+    lines.append("  ⚠️")
+    return "\n".join(lines) + "\n"
+
+
+# ═══════════════════════════════════════════════════════
+# Public API: run engine
+# ═══════════════════════════════════════════════════════
+
+def run_engine(
+    error_text: str,
+    project_dir: str | None = None,
+    top_n: int = 5,
+    sig_bonus: int = 5,
+) -> MatchResult:
+    """Run the full five-phase matching engine.
+
+    Args:
+        error_text: The error log text to match against.
+        project_dir: Project root (auto-detected if None).
+        top_n: Number of Phase A candidates to pass to Phase B.
+        sig_bonus: Score bonus per error_signature hit (default 5, same as inline).
+
+    Returns:
+        MatchResult with the best match.
+    """
+    gdir = graph_dir(project_dir)
+    if not os.path.isdir(gdir):
+        return MatchResult()
+
+    # Load data
+    index_file = os.path.join(gdir, "index.tsv")
+    principles_file = os.path.join(gdir, "principles.kv")
+
+    index_entries = parse_index_tsv(index_file) if os.path.isfile(index_file) else []
+    principles = parse_principles(principles_file) if os.path.isfile(principles_file) else []
+
+    if not index_entries:
+        return MatchResult()
+
+    # Phase A: coarse filter
+    candidates = _phase_a(error_text, index_entries, top_n=top_n)
+    if not candidates:
+        return MatchResult()
+
+    # Phase B: fine ranking
+    match_id, b_score, a_score = _phase_b(error_text, candidates, gdir, sig_bonus=sig_bonus)
+    if not match_id:
+        return MatchResult()
+
+    # Phase C: load full entry
+    entry = _phase_c(match_id, gdir)
+    if not entry:
+        return MatchResult()
+
+    # Phase D: principle lookup
+    p_names = _phase_d(entry, principles)
+
+    total = a_score + b_score
+    return MatchResult(
+        matched=True,
+        match_id=match_id,
+        phase_a_score=a_score,
+        phase_b_score=b_score,
+        total_score=total,
+        entry=entry,
+        principle_names=p_names,
+    )
+
+
+# ═══════════════════════════════════════════════════════
+# CLI entry
+# ═══════════════════════════════════════════════════════
+
+def engine_cli(argv: list[str] | None = None) -> int:
+    """CLI for: python3 -m ohc engine [options] <error_text>"""
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog="ohc engine",
+        description="Knowledge graph error pattern matching engine",
+    )
+    parser.add_argument("error_text", nargs="?", help="Error log text to match")
+    parser.add_argument("--json", action="store_true", help="Output as JSON")
+    parser.add_argument("--autofix", action="store_true", help="Output autofix commands")
+    parser.add_argument("--inline", action="store_true", help="Output inline log format (for build-driver)")
+    parser.add_argument("--list", action="store_true", help="List all error patterns")
+    parser.add_argument("--show", metavar="ID", help="Show details for a specific pattern")
+    parser.add_argument("--project-dir", help="Project root directory")
+    parser.add_argument("--file", metavar="PATH", help="Read error text from file")
+    parser.add_argument("--top-n", type=int, default=5, help="Phase A top-N candidates (default 5)")
+
+    args = parser.parse_args(argv)
+
+    gdir = graph_dir(args.project_dir)
+
+    # --list mode
+    if args.list:
+        index_file = os.path.join(gdir, "index.tsv")
+        if not os.path.isfile(index_file):
+            print("❌ index.tsv not found", file=sys.stderr)
+            return 1
+        entries = parse_index_tsv(index_file)
+        for e in entries:
+            print(f"{e.id}\tsev={int(e.severity)}\t{e.approach}\t{','.join(e.keywords[:3])}")
+        return 0
+
+    # --show mode
+    if args.show:
+        kv_path = os.path.join(gdir, f"{args.show}.kv")
+        if not os.path.isfile(kv_path):
+            print(f"❌ {args.show} not found", file=sys.stderr)
+            return 1
+        entry = parse_error_entry(kv_path)
+        # Reuse MatchResult to format
+        mr = MatchResult(matched=True, match_id=entry.id, entry=entry,
+                         principle_names=[])
+        # Load principles for display
+        p_file = os.path.join(gdir, "principles.kv")
+        if os.path.isfile(p_file):
+            ps = parse_principles(p_file)
+            mr.principle_names = _phase_d(entry, ps)
+        print(format_interactive(mr), end="")
+        return 0
+
+    # Match mode
+    if not args.error_text and not args.file:
+        parser.print_help(sys.stderr)
+        return 2
+
+    error_text = args.error_text or ""
+    if args.file:
+        with open(args.file, "r", encoding="utf-8") as f:
+            error_text = f.read()
+
+    result = run_engine(error_text, project_dir=args.project_dir, top_n=args.top_n)
+
+    if args.json:
+        print(format_json(result), end="")
+    elif args.autofix:
+        print(format_autofix(result), end="")
+    elif args.inline:
+        out = format_inline(result)
+        if out:
+            print(out, end="")
+    else:
+        print(format_interactive(result), end="")
+
+    return 0 if result.matched else 1

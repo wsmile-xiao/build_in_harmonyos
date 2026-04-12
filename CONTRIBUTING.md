@@ -21,26 +21,26 @@
 SKILL.md v4.0 定义了标准五步走流程：
 
 ```
-Step 1:  init-build.sh          初始化（下载/解压/骨架）
+Step 1:  ohc-run.py init-build          初始化（下载/解压/骨架）
 Step 2:  AI 编译                 configure + make + make install
 Step 2.5: 独立目录安装验证       干源码 + 补丁 + 独立 TEST_PREFIX
 Step 3:  make check / 功能验证   测试套件或手动功能测试
-Step 4:  verify-build.sh         质量门禁（G1-G4 四道检测）
+Step 4:  ohc-run.py verify-build         质量门禁（G1-G4 四道检测）
 Step 5:  预编译包制作            10 步打包流程
-Step 5.5: finalize-archive.sh    归档收口
+Step 5.5: ohc-run.py finalize-archive    归档收口
 ```
 
 一键启动：
 
 ```bash
-./scripts/init-build.sh <软件名> <版本> [--url=<下载URL>]
+./scripts/ohc-run.py init-build <软件名> <版本> [--url=<下载URL>]
 # 然后 AI 执行 Step 2 ~ Step 5.5
-./scripts/finish-build.sh <软件名> <版本> success
+./scripts/ohc-run.py finish <软件名> <版本> success
 ```
 
 ### 方式 B：手动创建档案
 
-如果不用 init-build.sh，手动按以下步骤：
+如果不用 ohc-run.py init-build，手动按以下步骤：
 
 #### 1. 创建目录结构
 
@@ -78,8 +78,8 @@ archives/{首字母}/{软件名}/          ← 软件级（跨版本共享）
 #### 3. 生成补丁
 
 ```bash
-# 使用 refresh-patch.sh 自动生成（推荐）
-./scripts/refresh-patch.sh --auto <软件名> <版本>
+# 使用 ohc-run.py refresh-patch 自动生成（推荐）
+./scripts/ohc-run.py refresh-patch --auto <软件名> <版本>
 
 # 或手动生成
 diff -Naur original/ modified/ > patches/0001-description.patch
@@ -89,10 +89,10 @@ diff -Naur original/ modified/ > patches/0001-description.patch
 
 ```bash
 # 质量门禁
-./scripts/verify-build.sh <软件名> <版本>
+./scripts/ohc-run.py verify-build <软件名> <版本>
 
 # 归档收口（自动清理+校验+生成 RELEASENOTE）
-./scripts/finalize-archive.sh <软件名> <版本>
+./scripts/ohc-run.py finalize-archive <软件名> <版本>
 ```
 
 ---
@@ -104,7 +104,7 @@ diff -Naur original/ modified/ > patches/0001-description.patch
 | 用途 | 正确名称 | 禁止名称 |
 |------|---------|----------|
 | 测试报告 | `test-report.md` | `TEST_REPORT.md` `build-report.md` |
-| 质量报告 | `quality-report.md` | （verify-build.sh 固定输出） |
+| 质量报告 | `quality-report.md` | （ohc-run.py verify-build 固定输出） |
 | SKILL 反馈 | `skill-feedback.md` | `feedback.md` |
 | 进展记录 | `PROGRESS.md` | `progress.md` `STATUS.md` |
 | 安装脚本 | `install.sh` | `{name}-install.sh` |
@@ -158,7 +158,7 @@ patches/
 
 ## 预编译包制作
 
-详见 [knowledge/packaging.md](knowledge/packaging.md) v2.3。
+详见 [knowledge/operations/packaging.md](knowledge/operations/packaging.md) v2.3。
 
 ### 核心要求
 
@@ -187,7 +187,7 @@ Step 10: 打包 tar.gz（扁平结构）
 
 ## install.sh 规范
 
-每个软件的 install.sh 基于 [scripts/install-template.sh](scripts/install-template.sh) 生成。
+每个软件的 install.sh 基于 [scripts/ohc-run.py install-template (已归档)](scripts/ohc-run.py install-template (已归档)) 生成。
 
 ### 核心原则
 
@@ -247,11 +247,11 @@ build_config:
   target: aarch64-unknown-linux-ohos
   options: []                  # 额外 configure 参数（尽量为空！）
 
-patches_applied:              # refresh-patch.sh 自动填充
+patches_applied:              # ohc-run.py refresh-patch 自动填充
   - file: 0001-xxx.patch
     purpose: HarmonyOS 平台检测
 
-patch_generation:             # refresh-patch.sh 自动填充
+patch_generation:             # ohc-run.py refresh-patch 自动填充
   method: auto
   source_hash: sha256:...
   patch_hash: sha256:...
@@ -317,16 +317,16 @@ skill_feedback: []             # 流程自省反馈
 
 | 脚本 | 用途 | 调用方式 |
 |------|------|----------|
-| `init-build.sh` | 编译初始化 | Step 1 入口 |
-| `finish-build.sh` | 收尾管线（4步） | Step 3 结束后 |
-| `refresh-patch.sh --auto` | 补丁自动生成 | finish 内部 |
-| `verify-build.sh` | 质量门禁 G1-G4 | Step 4 必须 |
-| `finalize-archive.sh` | 归档收口（5阶段） | Step 5.5 必须 |
-| `init-archive.sh` | 档案骨架创建 | init 内部 |
-| `install-template.sh` | install.sh 模板 | 打包时参考 |
-| `detect-build-system.sh` | 构建系统检测 | 可选 |
-| `search-download-url.sh` | URL 搜索 | init fallback |
-| `check-env.sh` | 环境变量检查 | init 内部 |
+| `ohc-run.py init-build` | 编译初始化 | Step 1 入口 |
+| `ohc-run.py finish` | 收尾管线（4步） | Step 3 结束后 |
+| `ohc-run.py refresh-patch --auto` | 补丁自动生成 | finish 内部 |
+| `ohc-run.py verify-build` | 质量门禁 G1-G4 | Step 4 必须 |
+| `ohc-run.py finalize-archive` | 归档收口（5阶段） | Step 5.5 必须 |
+| `ohc-run.py init-archive` | 档案骨架创建 | init 内部 |
+| `ohc-run.py install-template (已归档)` | install.sh 模板 | 打包时参考 |
+| `ohc-run.py detect-build-system (已归档)` | 构建系统检测 | 可选 |
+| `ohc-run.py search-url` | URL 搜索 | init fallback |
+| `ohc-run.py check-env` | 环境变量检查 | init 内部 |
 
 ---
 

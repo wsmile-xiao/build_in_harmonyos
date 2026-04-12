@@ -1,7 +1,7 @@
 # 🐛 错误模式知识库 — 主索引
 
-> **版本**: v3.0 (模块化) | **总条目**: 68 (E001-E068)
-> 📂 **子文件**: [core.md](./error-patterns-core.md) (E001-E020) · [compile.md](./error-patterns-compile.md) (E021-E049) · [runtime.md](./error-patterns-runtime.md) (E050-E068)
+> **版本**: v3.2 | **总条目**: 75 (E001-E075)
+> 📂 **子文件**: [doc/E001.md~E020.md](./doc/) (E001-E020) · [doc/E021.md~E049.md](./doc/) (E021-E049) · [doc/E050.md~E080.md](./doc/) (E050-E080) · 结构化数据见 [graph/*.kv](./graph/)
 
 ## 🔍 快速检索
 
@@ -17,35 +17,35 @@ grep -n "关键词" knowledge/error-patterns*.md   # 跨文件搜索所有子文
 
 | # | 类型 | 严重度 | 搜索关键词 | 所在文件 |
 |---|------|--------|-----------|---------|
-| E001 | 工具链 | 🔴 | configure, cc not found, C compiler, clang, PATH | [core](./error-patterns-core.md#e001-找不到编译器) |
-| E002 | 环境 | 🔴 | /tmp, temporary directory, read-only, erofs, TMPDIR | [core](./error-patterns-core.md#e002-临时目录不可写) |
-| E003 | 链接 | 🟡 | pthread, undefined reference, -lpthread, -pthread | [core](./error-patterns-core.md#e003-找不到-pthread) |
-| E004 | 链接 | 🔴 | symbol not found, musl, BIND_NOW, ImportError, dlopen | [core](./error-patterns-core.md#e004-符号找不到-musl-bind_now) |
-| E005 | 编译 | 🟡 | relocation, -fPIC, R_AARCH64, static library, PIC | [core](./error-patterns-core.md#e005-静态库链接共享库失败) |
-| E006 | SSL | 🔴 | OpenSSL, BAD_SIGNATURE, RSA_verify, no-asm, SSL | [core](./error-patterns-core.md#e006-openssl-bad_signature) |
-| E007 | 配置 | 🟡 | config.guess, build type, HarmonyOS, autoconf | [core](./error-patterns-core.md#e007-configguess-无法识别系统) |
-| E008 | 系统调用 | 🟡 | fstat, Permission denied, pipe, lseek, EACCES | [core](./error-patterns-core.md#e008-fstat-返回-eacces) |
-| E009 | SELinux | 🔴 | SELinux, domain transition, subprocess, adhoc_bin | [core](./error-patterns-core.md#e009-selinux-域转换限制) |
-| E010 | 工具 | 🟡 | toybox, sed, expr, GNU coreutils, 正则表达式 | [core](./error-patterns-core.md#e010-toybox-兼容性问题) |
-| E011 | 编译 | 🟡 | __OHOS__, undefined, macro, compiler flag, -D | [core](./error-patterns-core.md#e011-__ohos__-未定义) |
-| E012 | 工具链 | 🔴 | llvm-ar, ar command not found, LLVM toolchain, RANLIB | [core](./error-patterns-core.md#e012-找不到-llvm-ar) |
-| E013 | 链接 | 🟡 | dlopen, dlsym, undefined reference, -ldl, libdl | [core](./error-patterns-core.md#e013-动态链接错误) |
-| E014 | 系统调用 | 🟡 | syslog, getrandom, syscall, unimplemented, NO_SYSLOG | [core](./error-patterns-core.md#e014-系统调用不可用) |
-| E015 | 编译 | 🟡 | sys/socket.h, No such file, header, CPPFLAGS, sysroot | [core](./error-patterns-core.md#e015-找不到头文件) |
-| E016 | 编译 | 🟡 | assembler error, unknown instruction, ARM, --disable-asm | [core](./error-patterns-core.md#e016-汇编代码错误) |
-| E017 | 网络 | 🟡 | GitHub, wget timeout, curl timed out, network, mirror | [core](./error-patterns-core.md#e017-github-下载慢) |
-| E18 | SELinux | 🟡 | symbolic link, ln, Permission denied, wrapper script | [core](./error-patterns-core.md#e018-软链接创建失败) |
-| E019 | 运行时 | 🔴 | shared libraries, LD_LIBRARY_PATH, rpath, cannot open | [core](./error-patterns-core.md#e019-库加载失败) |
-| E020 | 兼容性 | 🟡 | FILE structure, _IO_read_ptr, musl, incomplete type, glibc | [core](./error-patterns-core.md#e020-musl-file-结构差异) |
-| E021 | 配置 | 🟡 | BUILDEXEEXT, .exe, case insensitive, configure | [compile](./error-patterns-compile.md#e021-buildexeext-异常) |
-| E022 | 系统调用 | 🟢 | sem_unlink, POSIX semaphore, /dev/shm, FileNotFoundError | [compile](./error-patterns-compile.md#e022-posix-信号量差异) |
-| E023 | 系统 | 🟢 | locale, FAIL, UTF-8, LC_ALL, test_strcoll, test_locale | [compile](./error-patterns-compile.md#e023-locale-支持不完整) |
-| E024 | 系统 | 🟡 | Unix socket, bind, AF_UNIX, multiprocessing, PermissionError | [compile](./error-patterns-compile.md#e024-unix-domain-socket-受限) |
-| E025 | 编译 | 🟡 | CAN_RAW_FD_FRAMES, CAN socket, undeclared, pyconfig.h | [compile](./error-patterns-compile.md#e025-can-socket-宏未定义) |
-| E026 | 兼容性 | 🟡 | TLS, thread-local storage, __thread, _Thread_local, musl | [compile](./error-patterns-compile.md#e026-线程局部存储tls-差异) |
-| E027 | 链接 | 🟡 | libintl_gettext, gettext, -lnls, --disable-nls, NLS | [compile](./error-patterns-compile.md#e027-libintl_gettext-链接失败) |
-| E028 | 运行时 | 🔴 | 共享库冲突, ncurses, system library, --without-shared | [compile](./error-patterns-compile.md#e028-用户编译的共享库与系统库冲突) |
-| E029 | 运行时 | 🟡 | bash-malloc, musl incompatible, --without-bash-malloc | [compile](./error-patterns-compile.md#e029-bash-内置-malloc-与-musl-不兼容) |
+| ~~E001~~ | ~~工具链~~ | ~~🔴~~ | ~~configure, cc not found, C compiler, clang, PATH~~ | **→ [graph/E001.kv](./graph/E001.kv) + [doc/E001.md](./doc/E001.md)** |
+| ~~E002~~ | ~~环境~~ | ~~🔴~~ | ~~/tmp, temporary directory, read-only, erofs, TMPDIR~~ | **→ [graph/E002.kv](./graph/E002.kv) + [doc/E002.md](./doc/E002.md)** |
+| ~~E003~~ | ~~链接~~ | ~~🟡~~ | ~~pthread, undefined reference, -lpthread, -pthread~~ | **→ [graph/E003.kv](./graph/E003.kv) + [doc/E003.md](./doc/E003.md)** |
+| ~~E004~~ | ~~链接~~ | ~~🔴~~ | ~~symbol not found, musl, BIND_NOW, ImportError, dlopen~~ | **→ [graph/E004.kv](./graph/E004.kv) + [doc/E004.md](./doc/E004.md)** |
+| ~~E005~~ | ~~编译~~ | ~~🟡~~ | ~~relocation, -fPIC, R_AARCH64, static library, PIC~~ | **→ [graph/E005.kv](./graph/E005.kv) + [doc/E005.md](./doc/E005.md)** |
+| ~~E006~~ | ~~SSL~~ | ~~🔴~~ | ~~OpenSSL, BAD_SIGNATURE, RSA_verify, no-asm, SSL~~ | **→ [graph/E006.kv](./graph/E006.kv) + [doc/E006.md](./doc/E006.md)** |
+| ~~E007~~ | ~~配置~~ | ~~🟡~~ | ~~config.guess, build type, HarmonyOS, autoconf~~ | **→ [graph/E007.kv](./graph/E007.kv) + [doc/E007.md](./doc/E007.md)** |
+| ~~E008~~ | ~~系统调用~~ | ~~🟡~~ | ~~fstat, Permission denied, pipe, lseek, EACCES~~ | **→ [graph/E008.kv](./graph/E008.kv) + [doc/E008.md](./doc/E008.md)** |
+| ~~E009~~ | ~~SELinux~~ | ~~🔴~~ | ~~SELinux, domain transition, subprocess, adhoc_bin~~ | **→ [graph/E009.kv](./graph/E009.kv) + [doc/E009.md](./doc/E009.md)** |
+| ~~E010~~ | ~~工具~~ | ~~🟡~~ | ~~toybox, sed, expr, GNU coreutils, 正则表达式~~ | **→ [graph/E010.kv](./graph/E010.kv) + [doc/E010.md](./doc/E010.md)** |
+| ~~E011~~ | ~~编译~~ | ~~🟡~~ | ~~__OHOS__, undefined, macro, -D~~ | **→ 已废弃(工具链默认包含)** |
+| ~~E012~~ | ~~工具链~~ | ~~🔴~~ | ~~llvm-ar, ar command not found, LLVM toolchain, RANLIB~~ | **→ [graph/E012.kv](./graph/E012.kv) + [doc/E012.md](./doc/E012.md)** |
+| ~~E013~~ | ~~链接~~ | ~~🟡~~ | ~~dlopen, dlsym, undefined reference, -ldl, libdl~~ | **→ [graph/E013.kv](./graph/E013.kv) + [doc/E013.md](./doc/E013.md)** |
+| ~~E014~~ | ~~系统调用~~ | ~~🟡~~ | ~~syslog, getrandom, syscall, NO_SYSLOG~~ | **→ [graph/E014.kv](./graph/E014.kv) + [doc/E014.md](./doc/E014.md)** |
+| ~~E015~~ | ~~编译~~ | ~~🟡~~ | ~~sys/socket.h, No such file, header, CPPFLAGS, sysroot~~ | **→ 已废弃(编译器自动搜索sysroot)** |
+| ~~E016~~ | ~~汇编~~ | ~~🟡~~ | ~~assembler error, unknown instruction, ARM, --disable-asm~~ | **→ [graph/E016.kv](./graph/E016.kv) + [doc/E016.md](./doc/E016.md)** |
+| ~~E017~~ | ~~网络~~ | ~~🟡~~ | ~~GitHub, wget timeout, curl timed out, network, mirror~~ | **→ [graph/E017.kv](./graph/E017.kv) + [doc/E017.md](./doc/E017.md)** |
+| ~~E018~~ | ~~SELinux~~ | ~~🟡~~ | ~~symbolic link, ln, Permission denied, wrapper script~~ | **→ [graph/E018.kv](./graph/E018.kv) + [doc/E018.md](./doc/E018.md)** |
+| ~~E019~~ | ~~运行时~~ | ~~🔴~~ | ~~shared libraries, LD_LIBRARY_PATH, rpath, cannot open~~ | **→ [graph/E019.kv](./graph/E019.kv) + [doc/E019.md](./doc/E019.md)** |
+| ~~E020~~ | ~~兼容性~~ | ~~🟡~~ | ~~FILE structure, _IO_read_ptr, musl, incomplete type, glibc~~ | **→ [graph/E020.kv](./graph/E020.kv) + [doc/E020.md](./doc/E020.md)** |
+| ~~E021~~ | ~~配置~~ | ~~🟡~~ | ~~BUILDEXEEXT, .exe, case insensitive, configure~~ | **→ [graph/E021.kv](./graph/E021.kv) + [doc/E021.md](./doc/E021.md)** |
+| ~~E022~~ | ~~系统调用~~ | ~~🟢~~ | ~~sem_unlink, POSIX semaphore, /dev/shm, FileNotFoundError~~ | **→ [graph/E022.kv](./graph/E022.kv) + [doc/E022.md](./doc/E022.md)** |
+| ~~E023~~ | ~~系统~~ | ~~🟢~~ | ~~locale, FAIL, UTF-8, LC_ALL, test_strcoll, test_locale~~ | **→ [graph/E023.kv](./graph/E023.kv) + [doc/E023.md](./doc/E023.md)** |
+| ~~E024~~ | ~~系统~~ | ~~🟡~~ | ~~Unix socket, bind, AF_UNIX, multiprocessing, PermissionError~~ | **→ [graph/E024.kv](./graph/E024.kv) + [doc/E024.md](./doc/E024.md)** |
+| ~~E025~~ | ~~编译~~ | ~~🟡~~ | ~~CAN_RAW_FD_FRAMES, CAN socket, undeclared, pyconfig.h~~ | **→ [graph/E025.kv](./graph/E025.kv) + [doc/E025.md](./doc/E025.md)** |
+| ~~E026~~ | ~~兼容性~~ | ~~🟡~~ | ~~TLS, thread-local storage, __thread, _Thread_local, musl~~ | **→ [graph/E026.kv](./graph/E026.kv) + [doc/E026.md](./doc/E026.md)** |
+| ~~E027~~ | ~~链接~~ | ~~🟡~~ | ~~libintl_gettext, gettext, -lnls, --disable-nls, NLS~~ | **→ [graph/E027.kv](./graph/E027.kv) + [doc/E027.md](./doc/E027.md)** |
+| ~~E028~~ | ~~运行时~~ | ~~🔴~~ | ~~共享库冲突, ncurses, system library, --without-shared~~ | **→ [graph/E028.kv](./graph/E028.kv) + [doc/E028.md](./doc/E028.md)** |
+| ~~E029~~ | ~~运行时~~ | ~~🟡~~ | ~~bash-malloc, musl incompatible, --without-bash-malloc~~ | **→ [graph/E029.kv](./graph/E029.kv) + [doc/E029.md](./doc/E029.md)** |
 | E030 | 配置 | 🟡 | m32, 32-bit, strace, personality, --disable-mpers | [compile](./error-patterns-compile.md#e030-鸿蒙无-32-位兼容层导致-strace-编译失败) |
 | E031 | 运行时 | 🔴 | /proc/stat, htop, Permission denied, procfs, SELinux | [compile](./error-patterns-compile.md#e031-proc-文件系统-selinux-访问限制) |
 | E032 | 编译 | 🟡 | _GNU_SOURCE, DIR, dirent, opendir, _BSD_SOURCE | [compile](./error-patterns-compile.md#e032-_gnu_source-未定义导致-dirent-api-不完整) |
@@ -82,8 +82,17 @@ grep -n "关键词" knowledge/error-patterns*.md   # 跨文件搜索所有子文
 | E063 | 编译 | 🔴 | -Werror, warning, int-conversion, Wno-error, 警告升级 | [runtime](./error-patterns-runtime.md#e063--werror-导致警告变错误) |
 | E064 | configure | 🔴 | conftest, inaccessible, cross compile, cache, ac_cv_ | [runtime](./error-patterns-runtime.md#e064-conftest-无法执行导致配置检测失败) |
 | E065 | 编译 | 🟡 | xzalloc, size_t, undeclared, gnulib, xalloc.h, CPPFLAGS | [runtime](./error-patterns-runtime.md#e065-gnulib-头文件包含顺序导致符号未声明) |
-| E066 | 脚本 | 🟡 | tar xzf, .tar.xz, refresh-patch.sh, tar xJf | [runtime](./error-patterns-runtime.md#e066-refresh-patchsh-不支持-tarxz-格式) |
+| E066 | 脚本 | 🟡 | tar xzf, .tar.xz, ohc-run.py refresh-patch, tar xJf | [runtime](./error-patterns-runtime.md#e066-refresh-patchsh-不支持-tarxz-格式) |
 | E067 | 脚本 | 🟡 | grep, 正则元字符, grep -F, fixed string, BRE | [runtime](./error-patterns-runtime.md#e067-grep-匹配含正则元字符的固定字符串失败) |
+| E072 | 配置 | 🔴 | config.sub, invalid triplet, ohos, unknown operating system | **→ [graph/E072.kv](./graph/E072.kv) + [doc/E072.md](./doc/E072.md)** |
+| E073 | 运行时/FS | 🔴 | shared library, .so, symlink, cannot load, dlopen, HMDFS | **→ [graph/E073.kv](./graph/E073.kv) + [doc/E073.md](./doc/E073.md)** |
+| E074 | 构建/SELinux | 🟡 | make -j, FIFO, jobserver, hang, parallel build | **→ [graph/E074.kv](./graph/E074.kv) + [doc/E074.md](./doc/E074.md)** |
+| E075 | 配置/环境 | 🟡 | C_INCLUDE_PATH, pkg-config, cflags empty, header not found | **→ [graph/E075.kv](./graph/E075.kv) + [doc/E075.md](./doc/E075.md)** |
+| **E076** | **文件系统/系统调用** | **🟡** | **fstat, lseek, pipe, EACCES, coreutils (cat/head/tail/dd)** | **→ [graph/E076.kv](./graph/E076.kv) + [doc/E076.md](./doc/E076.md)** |
+| **E077** | **ELF签名/打包后处理** | **🔴** | **patchelf/strip 后签名失效, operation not permitted, 四步重签流程** | **→ [graph/E077.kv](./graph/E077.kv) + [doc/E077.md](./doc/E077.md)** |
+| **E078** | **musl动态链接/BIND_NOW** | **🔴** | **Error relocating .so: symbol not found, ImportError, LDSHARED vs BLDSHARED** | **→ [graph/E078.kv](./graph/E078.kv) + [doc/E078.md](./doc/E078.md)** |
+| **E079** | **HMDFS硬链接不支持** | **🟡** | **cannot create hard link: Operation not permitted, make install/git/ccache/cargo/pnpm** | **→ [graph/E079.kv](./graph/E079.kv) + [doc/E079.md](./doc/E079.md)** |
+| **E080** | **Python venv lib64 symlink 被拒** | **🟡** | **Permission denied: lib->lib64, venv, HMDFS os.symlink** | **→ [graph/E080.kv](./graph/E080.kv) + [doc/E080.md](./doc/E080.md)** |
 
 ## 📊 统计
 
@@ -91,10 +100,10 @@ grep -n "关键词" knowledge/error-patterns*.md   # 跨文件搜索所有子文
 |------|------|------|--------|
 | 平台/环境 | E001-E020 | **20** | core.md |
 | 编译/构建 | E021-E049 | **29** | compile.md |
-| 运行时/测试 | E050-E068 | **19** | runtime.md |
-| **合计** | **E001-E068** | **68** | — |
+| 运行时/测试 | E050-E073 | **24** | runtime.md + troubleshooting.md |
+| **合计** | **E001-E080** | **80** | — |
 
-严重度: 🔴阻塞=23 · 🟡中等=33 · 🟢轻微=6 · ✅已解决=1 · 🟡待确认=2
+严重度: 🔴阻塞=27 · 🟡中等=39 · 🟢轻微=6 · ✅已解决=1 · 🟡待确认=2
 
 ---
 *v3.0 模块化版 | 2026-04-08 | 从 v2.6 单文件拆分为 4 文件*

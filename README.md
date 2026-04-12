@@ -1,173 +1,128 @@
-# build_in_harmonyos
+# OpenHarmony Compile Agent
 
-> 鸿蒙系统开源软件编译知识库与预编译包发布平台
+> 鸿蒙 (OpenHarmony) 平台开源软件预编译框架
+> 版本: v7.0 (Python 全量实现)
 
-## 一句话
+## 概述
 
-**让任何开源软件在 HarmonyOS PC 上可编译、可安装、可运行。**
+自动化编译、打包和分发开源软件到 HarmonyOS (OpenHarmony) aarch64 平台。
+支持从源码下载到签名打包的完整 13 步编译管线，内置五阶段错误匹配引擎和跨对话恢复机制。
 
-## 项目定位
-
-```
-源码编译 → 知识沉淀 → 预编译包 → 一键安装
-```
-
-| 维度 | 说明 |
-|------|------|
-| **知识库** | 29 篇文档覆盖环境特性、构建系统、错误模式（67+ 条）、打包规范 |
-| **编译档案** | 30 款软件、33 个版本的完整记录，含补丁、配置和测试报告 |
-| **预编译包** | 已发布 sed 4.9、pkg-config 0.29.2，持续增加中 |
-| **AI 工作流** | SKILL.md v4.0 定义五步走编译流程，可复现、可分发 |
-
-## 快速使用
-
-### 安装预编译包
+## 快速开始
 
 ```bash
-# sed
-curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/sed/install.sh | sh -s -- 4.9
+# 初始化编译
+python3 scripts/ohc-run.py init-build sed 4.9
 
-# pkg-config
-curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkg-config/install.sh | sh -s -- 0.29.2
+# 一键全流程（13步）
+python3 scripts/ohc-run.py build sed 4.9
+
+# 从失败步骤恢复
+python3 scripts/ohc-run.py build sed 4.9 --resume-from=Step3
+
+# 查看编译状态
+python3 scripts/ohc-run.py status
 ```
-
-### 从源码编译新软件
-
-详见 [SKILL.md](SKILL.md)（AI 编译智能体技能定义，v4.0）。
-
-## 编译成果
-
-### 已发布预编译包
-
-| 软件 | 版本 | 大小 | 状态 |
-|------|------|------|------|
-| sed | 4.9 | 410K (release) + 50K (debug) | ✅ 完全可用 |
-| pkg-config | 0.29.2 | 687K (release) + 88K (debug) | ✅ 完全可用 |
-
-> 更多预编译包制作中，见 [PREBUILD_TODOLIST.md](PREBUILD_TODOLIST.md)
-
-### 历史编译档案（30 款 / 33 版本）
-
-| 状态 | 数量 | 代表软件 |
-|------|------|----------|
-| ✅ 完全成功 | 23 | bash, gawk, openssl, ncurses, jq, file, ... |
-| ⚠️ 部分成功 | 8（含 🧪 已测试 1 款，详见 SUMMARY.md） | coreutils, htop, patch, wget, rsync, strace, ... |
-| ❌ 失败 | 0 | — |
-
-完整兼容性总览见 [SUMMARY.md](SUMMARY.md)。
-
-## 知识库
-
-### 核心文档（必读）
-
-| 文档 | 内容 |
-|------|------|
-| [SKILL.md](SKILL.md) | AI 编译流程定义（五步走 + 十条铁律）v4.0 |
-| [KNOW_YOUR_WHY.md](KNOW_YOUR_WHY.md) | 核心目的、约束分级、知识分层原则 |
-| [packaging.md](knowledge/packaging.md) | 可移植打包指南 v2.3（10步流程+扁平结构） |
-| [error-patterns.md](knowledge/error-patterns.md) | 错误模式库 E001-E067+ |
-| [environment.md](knowledge/environment.md) | 环境变量、工具链、系统限制 |
-| [harmonyos-specifics.md](knowledge/harmonyos-specifics.md) | ELF签名、SELinux、软链接限制 |
-
-### 专题文档
-
-| 文档 | 内容 |
-|------|------|
-| [build-systems.md](knowledge/build-systems.md) | Autotools/CMake/Custom-Perl 适配策略 |
-| [dependencies.md](knowledge/dependencies.md) | 编译依赖关系与推荐顺序 |
-| [autotools-patterns.md](knowledge/autotools-patterns.md) | Autotools 通用适配模式 |
-| [musl-compat.md](knowledge/musl-compat.md) | musl vs glibc 兼容方案 |
-| [best-practices.md](knowledge/best-practices.md) | 编译最佳实践 |
-| [troubleshooting.md](knowledge/troubleshooting.md) | 问题排查指南 |
-| [FAQ.md](knowledge/FAQ.md) | 常见问题解答 |
-
-### 深度分析
-
-| 文档 | 内容 |
-|------|------|
-| [filesystem-analysis.md](knowledge/filesystem-analysis.md) | HMFS/HMDFS/EROFS 架构分析 |
-| [python-extensions.md](knowledge/python-extensions.md) | Python C 扩展模块编译方法 |
-| [ptrace-alternatives.md](knowledge/ptrace-alternatives.md) | ptrace 替代调试方案 |
 
 ## 项目结构
 
 ```
-build_in_harmonyos/
-├── SKILL.md                     # AI 编译流程定义（v4.0）
-├── KNOW_YOUR_WHY.md             # 核心目的与约束
-├── PREBUILD_TODOLIST.md         # 预编译进度跟踪
-├── SUMMARY.md                   # 兼容性总览（自动生成）
-│
-├── knowledge/                   # 知识库（29 篇）
-│   ├── packaging.md             # 打包规范
-│   ├── error-patterns.md        # 错误模式库
-│   └── ...                      # 27 篇更多文档
-│
-├── scripts/                     # 辅助脚本
-│   ├── init-build.sh            # Step 1: 编译初始化
-│   ├── finish-build.sh          # Step 3: 收尾管线（4步）
-│   ├── refresh-patch.sh         # 补丁生成
-│   ├── verify-build.sh          # 质量门禁（G1-G4）
-│   ├── finalize-archive.sh      # 归档收口（5阶段）
-│   ├── init-archive.sh          # 归档骨架创建
-│   └── install-template.sh      # install.sh 模板（33行）
-│
-├── archives/                    # 编译档案（双层结构）
-│   ├── s/sed/                   # 软件级
-│   │   ├── README.md            # 编译说明
-│   │   ├── RELEASENOTE.md       # 发布说明
-│   │   ├── install.sh           # 安装脚本
-│   │   └── 4.9/                 # 版本级
-│   │       ├── manifest.yaml    # 元数据
-│   │       ├── PROGRESS.md      # 进展记录
-│   │       ├── patches/         # 补丁
-│   │       ├── reports/         # 报告
-│   │       └── packaging/       # 预编译包 tar.gz
-│   └── p/pkg-config/           # 同上结构
-│
-└── .opendesk/                   # AI 智能体配置
+scripts/
+├── ohc-run.py              # 统一 CLI 入口（18 子命令）
+├── ohc/                    # Python 包（24 个 .py，零外部依赖）
+│   ├── driver.py           # 13 步编译驱动
+│   ├── engine.py           # 五阶段错误匹配引擎
+│   ├── handoff.py          # HANDOFF 持久化 + 跨对话恢复
+│   ├── status.py           # 编译状态扫描
+│   ├── graph.py            # 知识图谱 CRUD
+│   └── ...                 # 其余 18 个模块
+└── _archive_bash/          # 原始 bash 备份（仅供参考）
+
+knowledge/
+├── graph/                  # 错误模式知识图谱（E001-E080+）
+├── doc/                    # 错误模式文档（E001.md~E080.md）
+├── operations/             # 运维知识（打包、环境、调试等 13 篇）
+└── principles.yaml         # 编译铁律
+
+archives/                   # 编译档案（30 款 / 33 版本）
+references/                 # 参考资料（编译指南、打包规范等 10 篇）
+templates/                  # 模板文件（PROGRESS.md, manifest.yaml 等）
 ```
 
-## 目标平台
+## CLI 子命令
 
-| 项目 | 值 |
-|------|-----|
-| 系统 | HarmonyOS (OpenHarmony) |
-| 架构 | aarch64 |
-| C 库 | musl libc |
-| 编译器 | Clang 15.0.4 (LLVM) |
-| Shell | toybox ash (HiShell) |
-| 终端 | DevBox (VS Code Remote SSH) |
-
-## 鸿蒙 vs Linux 关键差异
-
-| 差异点 | Linux | HarmonyOS | 影响 |
-|--------|-------|-----------|------|
-| C 库 | glibc | musl libc | iconv、FILE 结构差异 |
-| Shell | bash | toybox ash | 无数组、无 `${BASH_SOURCE}` |
-| /tmp | 可写 | **只读** | 必须用 `$HOME/tmp` |
-| SELinux | 通常禁用 | **强制启用** | 软链接/子进程/ptrace 受限 |
-| ELF 执行 | 无需签名 | **adhoc 签名** | 改 ELF 后必须重签名 |
-| 并行构建 | `make -jN` | **`make -j1`** | FIFO 被 SELinux 限制 |
-
-## 发布渠道
-
-预编译包发布于 gitcode releases：
-
-```
-https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases
-```
-
-URL 格式：`cmd-pkgs/{name}/{name}-{ver}-ohos-aarch64.tar.gz`
-
-## 相关项目
-
-| 项目 | 说明 |
+| 命令 | 说明 |
 |------|------|
-| [ohos-python-release](https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release) | Python 预编译包 |
+| `build` | 13 步编译驱动（主入口） |
+| `init-build` | 初始化（下载 → 解压 → 骨架 → 环境检查） |
+| `finish` | 6 步收尾管线 |
+| `engine` | 五阶段错误匹配引擎 |
+| `status` | 跨对话编译状态扫描 |
+| `handoff` | HANDOFF 上下文输出 |
+| `graph` | 知识图谱管理 (add/update/remove/validate) |
+| `verify-build` | 4 道质量门禁 |
+| `package` | 10 步打包 |
+| `sign-elf` | ELF 二进制签名 |
+| `refresh-patch` | 补丁生成（difflib） |
+| `finalize-archive` | 归档校验 |
+| `close-archive` | 关闭归档 |
+| `init-archive` | 档案骨架创建 |
+| `check-env` | 环境检查 |
+| `check-knowledge-gap` | 知识完整性检查 |
+| `search-url` | URL 搜索 |
+| `summary` | 生成 SUMMARY.md |
+
+## 知识库
+
+### 知识图谱
+- **80+ 错误模式** (E001-E080+): 每条含 5 阶段匹配规则、修复方案、鸿蒙特化处理
+- **9 条编译铁律** (P-001~P-009): 不变量规则，所有编译必须遵守
+
+### 运维知识 (`knowledge/operations/`)
+| 文档 | 说明 |
+|------|------|
+| `best-practices.md` | 编译最佳实践 |
+| `build-systems.md` | 构建系统指南 |
+| `debug-methodology.md` | 调试方法论 |
+| `dependencies.md` | 依赖管理 |
+| `dependency-resolution.md` | 依赖冲突解决 |
+| `environment.md` | 环境配置 |
+| `filesystem-analysis.md` | 文件系统分析 |
+| `harmonyos-specifics.md` | 鸿蒙特化适配 |
+| `ohos-adaptation-patterns.md` | 适配模式集 |
+| `packaging.md` | 打包规范 |
+| `ptrace-alternatives.md` | ptrace 替代方案 |
+| `python-extensions.md` | Python 扩展编译 |
+| `release.md` | 发布流程 |
+
+### 参考资料 (`references/`)
+| 文档 | 说明 |
+|------|------|
+| `compile-guide.md` | 编译指南 |
+| `failure-handling.md` | 失败处理 |
+| `iron-rules.md` | 铁律详解 |
+| `packaging-guide.md` | 打包指南 |
+| `patch-pipeline.md` | 补丁管线 |
+| `staging-verify.md` | Staging 验证 |
+| `archive-spec.md` | 归档规范 |
+| `sudo-analysis.md` | sudo 分析 |
+| `design/` | 设计文档 |
+
+## 统计
+
+- **已编译软件**: 30 款 / 33 个版本
+- **错误模式**: 80+ 条
+- **文档**: 50+ 篇
+- **Python 模块**: 24 个（零外部依赖）
+- **CLI 子命令**: 18 个
+
+## 设计原则
+
+- **零 bash 依赖**: 所有逻辑纯 Python 实现
+- **零外部 Python 依赖**: 仅用标准库
+- **跨对话恢复**: HANDOFF 持久化 + status 扫描
+- **双轨源码**: .orig（只读基准）+ .work（可写副本）
 
 ## 许可证
-
-MIT License
 
 Copyright (c) 2024-2026 OpenHarmony PC Developer 社区

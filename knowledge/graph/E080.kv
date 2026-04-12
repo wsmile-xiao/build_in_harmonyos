@@ -1,0 +1,74 @@
+# Layer 0: 错误面
+id:                     E080
+trigger_tool:           python|venv
+phase:                  runtime
+error_signature:        Permission denied.*symlink.*lib64|venv.*Permission denied|os.symlink.*Errno 13|ensure_directories.*link_path
+
+# Layer 1: 识别层
+severity:               2
+category:               python|hmdfs|filesystem|runtime-linking
+match_keywords:         venv, lib64, symlink, Permission denied, HMDFS, os.symlink, ensure_directories, virtual environment, EnvBuilder, platlibdir
+
+# Layer 2: 诊断层
+root_cause:             Python 3.9+ 的 venv.EnvBuilder.ensure_directories() 在 64 位 POSIX 系统上强制创建 `lib64 -> lib` 符号链接（Issue #21197）。
+                        鸿蒙用户主目录 $HOME 挂载于 HMDFS，HMDFS 不支持符号链接创建（E050），导致 os.symlink() 抛出 OSError(13)。
+                        venv 创建流程中断，虚拟环境无法生成。
+affected_scope:          所有在鸿蒙上使用 Python venv 创建虚拟环境的场景（pip install --user、tox、nox、poetry 等）
+verification_cmd:       |
+  # 复现检查
+  python3 -c "import os; os.symlink('a', '$HOME/tmp/.test_symlink')" 2>&1
+  # 期望: OSError: [Errno 13] Permission denied
+  
+  # 触发 venv 创建
+  python3 -m venv /tmp/test_venv 2>&1
+  # 期望: Error: [Errno 13] Permission denied: 'lib' -> '.../lib64'
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           source-patch-try-except
+rec_description:        在 Lib/venv/__init__.py 的 ensure_directories() 中对 os.symlink() 加 try/except，
+                        except 分支用 os.makedirs() 替代 symlink（platlibdir 始终为 'lib'，lib64/ 永远不会被遍历）。
+rec_command:            |
+  try:
+      os.symlink('lib', link_path)
+  except OSError:
+      os.makedirs(link_path, exist_ok=True)
+rec_auto_fix:          false
+rec_impl:               source-patch-try-except
+
+fallback_priority:      2
+fallback_approach:      runtime-workaround
+fallback_description:   运行时 workaround：预创建 lib64 目录让 venv 跳过 symlink 逻辑，并 monkey-patch os.symlink 防御。
+fallback_command:      |
+  import os, venv
+  env_dir = '/path/to/venv'
+  os.makedirs(os.path.join(env_dir, 'lib64'), exist_ok=True)
+  _orig = os.symlink
+  def _safe_symlink(src, dst, *a, **kw):
+      try: _orig(src, dst, *a, **kw)
+      except OSError:
+          if not os.path.exists(dst): os.makedirs(dst, exist_ok=True)
+  os.symlink = _safe_symlink
+  try: venv.EnvBuilder(with_pip=True, symlinks=False).create(env_dir)
+  finally: os.symlink = _orig
+fallback_auto_fix:     true
+fallback_impl:          monkey-patch
+
+forbid_1_pattern:      使用 symlinks=False 参数绕过
+forbid_1_reason:        symlinks=False 只控制 bin/ 下的脚本是否使用 symlink，不控制 lib64→lib 的 symlink 创建
+forbid_1_consequence:   venv 仍然失败，同样的 Permission denied 错误
+
+# Layer 4: 原则引用
+principles:             P-HMDFS-001
+
+# 关系图
+causes:                 []
+caused_by:              [E050]
+similar_to:             [E073,E050,E079]
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               doc/E080.md
+last_updated:           2026-04-10
+source_event:           python-extensions.md §3.5 + Python 3.9.0 补丁 0011

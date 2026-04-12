@@ -1,0 +1,64 @@
+# Layer 0: 错误面
+id:                     E075
+trigger_tool:           configure|cmake|cc
+phase:                  configuration
+error_signature:        pkg-config.*--cflags.*empty|No such file or directory.*\.h|cannot find.*header|fatal error:.*\.h: No such file
+
+# Layer 1: 识别层
+severity:               2
+category:               configuration|environment|pkg-config
+match_keywords:         C_INCLUDE_PATH, pkg-config, cflags empty, header not found, system include path, PKG_CONFIG_PATH, configure, cmake, environment variable trap
+
+# Layer 2: 诊断层
+root_cause:             设置了 C_INCLUDE_PATH 环境变量后，pkg-config 将其视为"系统头文件路径"，
+                        在返回 --cflags 时过滤掉所有匹配的 -I 标志（认为冗余）。
+                        结果是 configure/cmake 通过 pkg-config 获取不到 -I 路径，
+                        编译时报 xxx.h: No such file or directory。
+                        这是一个配置陷阱：C_INCLUDE_PATH 本意是帮助找到头文件，
+                        反而导致构建系统找不到头文件。
+affected_scope:          所有使用 pkg-config 检测依赖的 C/C++ 项目（autotools、cmake、meson）
+verification_cmd:       |
+  echo "C_INCLUDE_PATH=$C_INCLUDE_PATH"
+  pkg-config --cflags openssl 2>&1          # 如果为空则命中
+  pkg-config --debug --cflags openssl 2>&1  # 查看 "Removing ... from cflags"
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           env-var-remove
+rec_description:        从 shell 配置中移除 C_INCLUDE_PATH 和 LIBRARY_PATH，
+                        仅使用 PKG_CONFIG_PATH 让构建系统自动发现依赖路径。
+rec_command:            |
+  unset C_INCLUDE_PATH
+  unset CPLUS_INCLUDE_PATH
+  unset LIBRARY_PATH
+  export PKG_CONFIG_PATH=$HOME/usr/local/lib/pkgconfig:$PKG_CONFIG_PATH
+rec_auto_fix:          true
+rec_impl:               env-var-remove
+
+fallback_priority:      2
+fallback_approach:      env-var-override
+fallback_description:   临时设置 PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 强制保留系统路径标志（治标不治本）。
+fallback_command:      export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+fallback_auto_fix:     true
+fallback_impl:          set-env-var
+
+forbid_1_pattern:      同时设置 C_INCLUDE_PATH 和 PKG_CONFIG_PATH
+forbid_1_reason:        两者语义冲突：pkg-config 会把 C_INCLUDE_PATH 当系统目录过滤 -I 标志，
+                        导致 PKG_CONFIG_PATH 设置的库被发现但头文件路径被抹除
+forbid_1_consequence:   configure 能检测到库存在（--libs 正常）但找不到头文件（--cflags 为空），
+                        编译阶段批量报 fatal error: xxx.h: No such file or directory
+
+# Layer 4: 原则引用
+principles:             P-ENV-001
+
+# 关系图
+causes:                 [E001,E012,E032,E033]
+caused_by:              []
+similar_to:             [E032,E033]
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               doc/E075.md
+last_updated:           2026-04-10
+source_event:           environment.md §11 + 实际编译排查经验

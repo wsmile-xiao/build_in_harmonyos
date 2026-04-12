@@ -16,7 +16,7 @@
 ## 二、编译阶段（checkbox 实时更新）
 
 ### Phase 1: 环境准备
-- [ ] init-build.sh 完成 / 源码下载解压
+- [ ] ohc-run.py init-build 完成 / 源码下载解压
 
 ### Phase 2: 编译（configure + make + make install）
 - [ ] configure 完成（记录参数和耗时）
@@ -36,9 +36,9 @@
 - [ ] Step 1-10 打包流程（见 packaging.md）
 
 ### Phase 5: 归档收尾
-- [ ] 补丁生成（refresh-patch.sh --auto）
+- [ ] 补丁生成（ohc-run.py refresh-patch --auto）
 - [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] verify-build.sh 质量门禁
+- [ ] ohc-run.py verify-build 质量门禁
 
 ## 三、对话记录（⭐ 断点续传核心）
 

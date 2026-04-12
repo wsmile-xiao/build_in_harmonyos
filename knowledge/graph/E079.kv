@@ -1,0 +1,62 @@
+# Layer 0: 错误面
+id:                     E079
+trigger_tool:           ln|git|ccache|cargo|pnpm|make
+phase:                  installation|runtime
+error_signature:        cannot create hard link.*Operation not permitted|hard link.*not supported|ln.*Operation not permitted
+
+# Layer 1: 识别层
+severity:               2
+category:               filesystem|hmdfs|runtime-linking
+match_keywords:         hard link, ln, HMDFS, Operation not permitted, make install, git clone, ccache, cargo, pnpm, content-addressable store, fdupes, man page alias
+
+# Layer 2: 诊断层
+root_cause:             用户主目录 $HOME 挂载于 HMDFS（分布式文件系统），HMDFS 的 nodev 挂载选项和分布式架构不支持硬链接（跨设备 inode 不具备唯一性）。
+                        无 -s 参数的 ln 命令尝试创建硬链接时返回 "Operation not permitted"。
+                        受影响操作：make install 安装 man 页别名、git clone --local、ccache 缓存原子替换、pnpm content-addressable store 等。
+affected_scope:          所有在 $HOME 下执行硬链接操作的软件：autotools (man page)、git、ccache/sccache、cargo/rustc、npm/pnpm、文件去重工具
+verification_cmd:       |
+  # 在 $HOME 上测试
+  echo "test" > ~/hl_test && ln ~/hl_test ~/hl_dst 2>&1; rm -f ~/hl_test ~/hl_dst
+  # 期望: ln: cannot create hard link: Operation not permitted
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           command-substitute
+rec_description:        将硬链接操作替换为复制（cp）。对于 make install 场景，使用 DESTDIR + 手动安装，或 configure 层面设置 ac_cv_prog_ln_s="cp -p"。
+rec_command:            |
+  # configure 层面禁用硬链接
+  ./configure --prefix=$PREFIX ac_cv_prog_ln_s="cp -p"
+  # 或 make install 时
+  make install DESTDIR=$PWD/staging && cp -rP staging/$PREFIX/* $PREFIX/
+rec_auto_fix:          false
+rec_impl:               command-substitute
+
+fallback_priority:      2
+fallback_approach:      env-var-workaround
+fallback_description:   对于 git/cargo/pnpm 等工具通过参数或配置绕过硬链接依赖。
+fallback_command:      |
+  git clone --no-hardlinks <repo>
+  export CCACHE_DIR=/dev/shm/ccache
+  npm config set store-dir /dev/shm/pnpm-store
+fallback_auto_fix:     true
+fallback_impl:          set-env-var
+
+forbid_1_pattern:      反复重试 ln 创建硬链接或换路径尝试
+forbid_1_reason:        这是 HMDFS 分布式文件系统的固有限制，任何路径下都无法创建硬链接
+forbid_1_consequence:   无限循环报错 Operation not permitted
+
+# Layer 4: 原则引用
+principles:
+  - P-FS-001  # HMDFS 不支持硬链接和 FIFO，必须用替代方案
+
+# 关系图
+causes:                 []
+caused_by:              [E050]
+similar_to:             [E050,E073,E074]
+conflicts_with:         []
+prerequisite_of:        []
+
+# 元数据
+doc_file:               doc/E079.md
+last_updated:           2026-04-10
+source_event:           filesystem-analysis.md §10.1 + 实机验证
