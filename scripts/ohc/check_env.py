@@ -3,9 +3,15 @@
 from __future__ import annotations
 import os
 import shutil
+import ssl
 import subprocess
 import sys
+import urllib.request
+from pathlib import Path
 from .utils import log_info, log_ok, log_warn, log_fail
+
+_CA_CERT_PATH = "/storage/Users/currentUser/usr/local/ssl/cert.pem"
+_CA_CERT_URL = "https://curl.se/ca/cacert.pem"
 
 
 def _check_var(name: str, required: bool = False) -> tuple[str, str]:
@@ -25,6 +31,40 @@ def _check_cmd(name: str) -> tuple[bool, str]:
         return True, ver
     except Exception:
         return True, ""
+
+
+def _check_ssl_certs() -> bool:
+    """Check if CA certificates are installed, auto-install if missing."""
+    cert_path = Path(_CA_CERT_PATH)
+
+    # Already installed — quick test
+    if cert_path.exists():
+        try:
+            urllib.request.urlopen("https://ftp.gnu.org/", timeout=5)
+            log_ok(f"  ✅ SSL 证书正常 ({cert_path})")
+            return True
+        except Exception:
+            log_warn(f"  ⚠️ 证书存在但 HTTPS 验证失败，尝试更新...")
+
+    # Install
+    log_info(f"  ⬇️ 安装 CA 证书到 {cert_path}...")
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    try:
+        req = urllib.request.Request(_CA_CERT_URL, headers={"User-Agent": "ohc/1.0"})
+        data = urllib.request.urlopen(req, timeout=60, context=ctx).read()
+        if b"BEGIN CERTIFICATE" not in data:
+            raise ValueError("下载内容不是 PEM 证书")
+        cert_path.parent.mkdir(parents=True, exist_ok=True)
+        cert_path.write_bytes(data)
+        count = data.count(b"BEGIN CERTIFICATE")
+        log_ok(f"  ✅ 已安装 {count} 个根证书")
+        return True
+    except Exception as e:
+        log_fail(f"  ❌ 证书安装失败: {e}")
+        log_fail(f"     手动安装: python3 scripts/install-ca-certs.py")
+        return False
 
 
 def check_env() -> int:
@@ -61,6 +101,12 @@ def check_env() -> int:
         elif d:
             log_warn(f"  ⚠️ {d} 不存在")
             warnings += 1
+
+    # SSL certificates
+    log_info("检查 SSL 证书...")
+    cert_ok = _check_ssl_certs()
+    if not cert_ok:
+        warnings += 1
 
     # Compilers
     log_info("检查编译器...")

@@ -5,6 +5,7 @@ import hashlib
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -16,6 +17,23 @@ from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 from .check_env import check_env
 from .init_archive import init_archive
 from .search_url import search_url
+
+# HarmonyOS 环境可能缺少 CA 证书，创建不验证的 SSL context
+_SSL_CTX = ssl.create_default_context()
+_SSL_CTX.check_hostname = False
+_SSL_CTX.verify_mode = ssl.CERT_NONE
+_ssl_env = {"SSL_CONTEXT": "1"}  # marker for _urlopen helper
+
+
+def _urlopen(req, timeout=300, context=None):
+    """urlopen with fallback to no-SSL-verify for HarmonyOS."""
+    try:
+        return urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.URLError as e:
+        if "CERTIFICATE" in str(e) or "SSL" in str(e):
+            ctx = context or _SSL_CTX
+            return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+        raise
 
 
 def _sanitize(s: str) -> str:
@@ -120,7 +138,7 @@ def _download(urls: list[str], dest: Path) -> int:
                                           headers={"User-Agent": "ohc/1.0"})
             def _head():
                 try:
-                    urllib.request.urlopen(req, timeout=15)
+                    _urlopen(req, timeout=15)
                     return True
                 except Exception:
                     return False

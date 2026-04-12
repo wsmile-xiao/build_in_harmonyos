@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **9** |
-| 编译成功 | 9 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, **xz**) |
-| 打包成功 | 8 (pkg-config, sed, coreutils, gawk, automake, zlib, bzip2, **xz**) |
+| 已完成 | **14** |
+| 编译成功 | 14 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, **gdbm**) |
+| 打包成功 | 13 (pkg-config, sed, coreutils, gawk, automake, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, **gdbm**) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -30,8 +30,8 @@
 | **ncurses** | 🔴 致命 | 系统zsh依赖 libncursesw.so.6，之前编译共享库直接导致Shell崩溃 | ✅ 必须 `--without-shared` 静态 |
 | **readline** | 🟠 高 | bash/交互式工具链接它，版本不匹配导致行编辑异常 | ✅ 建议静态链接 |
 | **zlib** | 🟠 高 | 几乎所有工具间接依赖，LD_LIBRARY_PATH 劫持全局符号解析 | ✅ 建议静态编译 |
-| **openssl** | 🟡 中 | 系统自有SSL栈，路径不同影响较小 | 可共享 |
-| **libffi** | 🟡 中 | 主要被Python等用户态程序使用 | 可共享 |
+| **openssl** | 🟡 中 | 系统自有SSL栈，路径不同影响较小 | ✅ 已编译共享（no-asm） |
+| **libffi** | 🟡 中 | 主要被Python等用户态程序使用 | ✅ 已编译共享 |
 | **gdbm** | 🟢 低 | 少数程序使用，冲突概率低 | 可共享 |
 | **bzip2/xz** | 🟢 低 | 工具链自身使用 | 可共享 |
 
@@ -69,22 +69,22 @@
 | 07 | zlib | 1.3.1 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/zlib-1.3.1-ohos-aarch64.tar.gz (244K) | 静态库 libz.a, make test 全通过(32+64bit), ⚠️ fossils URL, ohc-run.py package 纯库检测已修复 |
 | 08 | bzip2 | 1.0.8 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/bzip2-1.0.8-ohos-aarch64.tar.gz (820K) | **1个补丁**(平台自动检测ohos→-fPIC), CC/AR/RANLIB/PREFIX全环境变量覆盖, 零硬编码 |
 | 09 | xz/lzma | 5.6.2 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/xz-5.6.2-ohos-aarch64.tar.gz (3.5M) | **2个补丁**(config.guess+config.sub, 方案A标准打补丁), 28二进制(排除lzcmp), 静态liblzma.a, 压缩/解压功能验证通过, --disable-assembler |
-| 10 | gzip | 1.13 | ⬜ 待编译 | - | - | - | 无依赖 |
+| 10 | gzip | 1.13 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/gzip-1.13-ohos-aarch64.tar.gz (297K) | **2个补丁**(config.guess+config.sub, 含patch-autotools-ohos.pl bug修复), shell脚本因shebang限制需通过sh调用 |
 
 ### 第三阶段-B：SSL/加密/终端
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 11 | openssl | 1.1.1w | ⬜ 待编译 | - | - | - | 依赖 zlib, `no-asm` |
-| 12 | ncurses | 6.4 | ⬜ 待编译 | - | - | - | 🔴 **必须 --without-shared** |
-| 13 | libffi | 3.5.2 | ⬜ 待编译 | - | - | - | 取最新版 |
+| 11 | openssl | 1.1.1w | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/openssl-1.1.1w-ohos-aarch64.tar.gz (14M) | **2个补丁**(openharmony平台配置+Configure检测), `no-asm`必须, HMDFS需`cp -a`替代`ln -s`, gitee镜像可用 |
+| 12 | ncurses | 6.4 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/ncurses-6.4-ohos-aarch64.tar.gz (8.7M) | 🔴 **必须 --without-shared**，1个补丁(config.guess+config.sub), 4个静态库(libncursesw/panelw/menuw/formw), 11工具+2851 terminfo, --enable-widec+--enable-overwrite, ⚠️ 历史manifest错误使用了--with-shared已纠正 |
+| 13 | libffi | 3.5.2 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/libffi-3.5.2-ohos-aarch64.tar.gz (634K) | **2个补丁**(config.guess/sub + closure HMDFS路径回退), ffi_call核心功能+版本API通过, ffi_closure需额外补丁, ghfast.top加速下载 |
 
 ### 第三阶段-C：数据库/终端编辑
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 14 | gdbm | 1.23 | ⬜ 待编译 | - | - | - | 无外部依赖 |
-| 15 | readline | 8.2 | ⬜ 待编译 | - | - | - | 依赖 ncurses, ⚠️ 建议静态 |
+| 14 | gdbm | 1.23 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/gdbm-1.23-ohos-aarch64.tar.gz (962K) | **2个补丁**(config.guess+config.sub), `--enable-libgdbm-compat`兼容ndbm/dbm, 3工具+2组库, gdbm_open/store/fetch全通过, ⚠️ gdbm_open路径不能用/tmp |
+| 15 | readline | 8.2 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/readline-8.2-ohos-aarch64.tar.gz (3.0M) | **2个补丁**(config.guess/sub + shlib TERMCAP_LIB), `--with-curses`, ncurses静态嵌入libreadline.so(NEEDED仅libc.so), TERMCAP_LIB需改为-lncursesw |
 
 ### 第四阶段：网络/文件工具
 
@@ -206,6 +206,95 @@
 11. **嵌套源码目录是常见模式** — tar.xz/tar.bz2 解压经常产生 `软件-版本.orig/` 子目录。build-driver 应在 init 阶段就递归查找 configure 并修正 BUILD_SRC_DIR
 12. **标准补丁工具应内置** — 每次 Perl 正则调试耗时且易出错。`patch-autotools-ohos.pl` 已沉淀为 `${SKILL_ROOT}/scripts/` 标准工具
 
+### gzip 1.13（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **config.guess 不识别 HarmonyOS** | gzip 1.13 的 config.guess 无 HarmonyOS 检测分支 | `patch-autotools-ohos.pl` 标准补丁 | ✅ |
+| **patch-autotools-ohos.pl config.sub 产出重复行** | 补丁脚本的 `ohos-linux` 块生成重复的 `basic_machine=` 和残留 `linux-android` | 手动修复 3 处：去重、修正 `basic_os=linux-ohos`、添加 `linux-ohos*` 到允许列表 | ⚠️ 脚本 bug 待修 |
+| **`linux-ohos*` 不在 config.sub 允许列表** | 补丁脚本只修改了 `ohos-linux` 入口，未在 `linux-gnu*` 行追加 `linux-ohos*` | 手动追加 `linux-ohos*` 到第 1765 行的 `linux-gnu* | ...` 条件 | ✅ |
+| **R15 历史参数含 --build/--host** | 历史归档 manifest 中有 `--build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos`，违反铁律 R15 | 本次编译去掉 --build/--host，仅用 `--prefix` | ✅ |
+| **shell 脚本 Permission denied** | gunzip/zcat/zgrep 等脚本的 shebang `/bin/sh` 在 OpenHarmony 上需 ELF 签名才能直接执行 | 通过 `sh script.sh` 调用可正常工作，打包时 install.sh 处理 | ✅ 已知限制 |
+| **ohc-run.py package 缺少 import re** | `package_builder.py` 使用 `re.sub` 但未 import re | 手动添加 `import re` | ⚠️ 脚本 bug 待修 |
+| **refresh-patch 报错 str/str 拼接** | `refresh-patch --auto` 内部路径拼接使用 `/` 操作符于两个字符串 | 手动 diff 生成补丁 | ⚠️ 脚本 bug 待修 |
+
+### openssl 1.1.1w（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **主站下载超时 (SSL + 网络不通)** | openssl.org 和 GitHub releases 均超时 | 改用 gitee.com/mirrors/openssl (GitHub mirror)，10MB 源码成功下载 | ✅ |
+| **tarball 损坏 (首次下载不完整)** | 超时后留下 9.5KB 残缺文件，解压缺少 util/perl 目录 | 从 gitee 重新下载完整 tarball (10MB) | ✅ |
+| **Configure 找不到 OpenSSL/Glob.pm** | tarball 不完整时 util/perl/ 目录缺失 | 完整 tarball 解压后正常 | ✅ |
+| **HMDFS `ln -s` Permission denied** | `ln -sf` 和 `ln -s` 在 HMDFS 文件系统上被拒绝（即使目标不存在） | `sed -i 's/ln -s /cp -a /g; s/ln -sf/cp -a/g' Makefile` 批量替换 | ✅ |
+| **`cp -a` 可替代 `ln -s`** | HMDFS 上 `cp -a` 可以复制文件，效果等价于硬拷贝"链接" | 对 openssl 的 .so 链接场景足够（运行时不依赖 symlink） | ✅ |
+| **动态库加载失败** | `libssl.so.1.1` 和 `libcrypto.so.1.1` 不在默认搜索路径 | 设置 `LD_LIBRARY_PATH=$PREFIX/lib`，install.sh 中自动处理 | ✅ |
+| **R15 no-asm 确认** | 历史记录中 `no-asm` 是必须的，否则 RSA-PSS 签名可能失败 | 本次编译使用 `no-asm`，全部测试通过 | ✅ |
+
+### ncurses 6.4（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **🔴 历史manifest使用 --with-shared** | 历史归档错误地用了 `--with-shared`，共享 libncursesw.so 会通过 LD_LIBRARY_PATH 劫持系统库导致 zsh 崩溃 | 本次改用 `--without-shared`，仅生成 .a 静态库 | ✅ 已纠正 |
+| **R15 触发提醒** | init-build 检测到历史参数缺少 `--without-shared`，自动警告 | 确认使用 `--without-shared` | ✅ |
+| **preinstall Error 1（make all 阶段）** | `DIRS_TO_MAKE` 的 `mkdir` 目标在某些情况下返回非零 | 直接重新 make 成功（目录已存在） | ✅ 非阻塞 |
+| **misc/terminfo.tmp Error 1** | 首次 make misc 时 `sed -f run_tic.sed` 执行后后续步骤失败 | 重新 make 时 terminfo.tmp 已生成，不再报错 | ✅ 非阻塞 |
+| **terminfo symlink 兼容性 warning** | `cp: cannot stat '../share/terminfo': No such file or directory` + `could not sym-link ... for compatibility` | HMDFS 不支持 symlink，非关键功能 | ✅ 已知限制 |
+
+### 关键经验
+
+13. **HMDFS 完全不支持符号链接** — `ln -s`/`ln -sf` 均失败，`cp -a` 是唯一替代方案。Makefile 中所有 `ln -s` 都需要 `sed` 替换
+14. **gitee.com/mirrors/ 可作为国内镜像** — openssl 等主流项目在 gitee 有官方 mirror，格式 `gitee.com/mirrors/<软件>/repository/archive/<tag>.tar.gz`
+15. **tarball 完整性检查很重要** — 超时下载的残缺 tarball 解压后可能少目录/文件，需 `file` 命令检查 + `tar tzf | wc -l` 核对文件数
+16. **OpenSSL 使用自定义 Perl Configure** — 不是 autotools，用 `perl Configure <target>` 而非 `./configure`。target 名称由 `Configurations/` 目录下的 `.conf` 文件定义
+17. **`cp -a` 对共享库链接的影响** — `cp -a` 产生独立副本而非符号链接，升级时需同时替换所有副本。对于预编译包场景可接受
+18. **ncurses 共享库是核弹级危险** — `--with-shared` 产出的 libncursesw.so.6 会通过 LD_LIBRARY_PATH 劫持系统 zsh 的依赖，导致 Shell 立即崩溃。必须 `--without-shared`
+19. **--enable-widec 是 readline/bash 的前提** — readline 链接 `libncursesw`（宽字符版），普通版 `libncurses` 不兼容
+
+### libffi 3.5.2（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **libffi 3.5.2 版本不存在于公共下载** | GitHub releases 和 GNU FTP 均无法直接下载（SSL/网络问题） | 使用 `ghfast.top` GitHub 加速代理成功下载 1.4MB tarball | ✅ |
+| **configure `-print-multi-os-directory` 警告** | clang 15 不支持 `-print-multi-os-directory` 选项 | 非致命，configure 仍成功退出 | ✅ 非阻塞 |
+| **历史 manifest 提到 .so 截断问题** | 之前 make install 产出的 .so 文件只有 10K，需从 .libs/ 手动拷贝 | 本次编译 .so 文件正常（109K），问题未复现 | ✅ |
+| **ffi_closure 闭包功能不可用** | 鸿蒙禁止 mmap/mprotect 使用 PROT_EXEC（W^X 策略） | 历史归档有 `0002-closure-port-for-ohos.patch`（FFI_EXEC_STATIC_TRAMP 方案），闭包功能仍有限制 | ⚠️ 已知限制 |
+
+### 关键经验
+
+20. **ghfast.top 可作为 GitHub 加速代理** — 格式 `https://ghfast.top/https://github.com/...`，libffi 1.4MB 9秒下载完成
+21. **libffi closure 在鸿蒙上受限** — W^X 策略禁止 PROT_EXEC，ffi_closure 需要 FFI_EXEC_STATIC_TRAMP 补丁（复用 .so 内 trampoline_code_table + MAP_FIXED）
+22. **libffi 与 Python 3 强绑定** — Python ctypes 依赖 libffi，是后续编译 Python 的前置依赖
+
+### gdbm 1.23（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **ghfast.top 无法加速 GNU FTP** | `ghfast.top/https://ftp.gnu.org/...` 返回 14B 重定向页而非文件 | 直接用 `curl -kL` 从 ftp.gnu.org 下载（~85s，1.1MB） | ✅ |
+| **gdbm_open 失败（C 测试程序）** | 测试程序使用 `/tmp` 路径，HMDFS 上 `/tmp` 为只读 | 改用 `$TMPDIR`（`/storage/Users/currentUser/tmp`） | ✅ |
+| **libtool .so 安装为 cp 副本** | HMDFS 上 `ln -s` 失败，libtool 自动降级为 `cp`（与 openssl 相同） | 非关键，功能正常 | ✅ 已知限制 |
+
+### 关键经验
+
+23. **gdbm_open 路径不能用 /tmp** — HMDFS 上 `/tmp` 为只读 erofs，gdbm_open 创建数据库文件需使用 `$TMPDIR`
+24. **ghfast.top 只加速 GitHub，不加速 GNU FTP** — GNU FTP 需直接用 curl -kL 下载（慢但可靠）
+25. **gdbm 是 Python gdbm 模块和 man-db 的前置依赖** — `--enable-libgdbm-compat` 提供 ndbm/dbm 兼容接口
+
+### readline 8.2（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **补丁 0001 Hunk 1 失败** | config.sub 补丁的上下文行不匹配（缩进差异） | 手动 `sed` 添加 `linux-ohos*`、`ohos*`、`linux-ohos*` 三处 | ✅ |
+| **config.sub 需 3 处 ohos 修改** | 补丁只含 `linux-ohos*` 在 maybe_os 行，缺少 OS 允许列表和 kernel-os 白名单 | 手动修复：第 145 行 + 第 1723 行 `ohos*` + 第 1772 行 `linux-ohos*` | ✅ |
+| **链接失败 `-lncurses` 找不到** | ncurses 编译为 `--without-shared` 只有 `libncursesw.a`，Makefile 中 `TERMCAP_LIB=-lncurses` | 改为 `TERMCAP_LIB=-lncursesw`（Makefile + shlib/Makefile） | ✅ |
+| **HMDFS `ln -s` 失败** | make install 创建 .so 符号链接失败 | `cp -a` 替代，手动创建 libreadline.so/libhistory.so | ✅ 已知限制 |
+| **ncurses 静态嵌入 libreadline.so** | `--with-curses` + ncurses `--without-shared` → 链接时自动静态嵌入 | libreadline.so NEEDED 只有 libc.so，无需运行时 libncursesw | ✅ 正合预期 |
+
+### 关键经验
+
+26. **readline 的 TERMCAP_LIB 必须是 -lncursesw** — 因为 ncurses 编译为 wide-char 版（libncursesw），不存在 libncurses
+27. **ncurses --without-shared 时 readline 自动静态嵌入** — libreadline.so 的 NEEDED 只有 libc.so，不需要运行时 ncurses 库
+28. **config.sub 补丁必须修改 3 处** — maybe_os 行(`linux-ohos*`) + OS 允许列表(`ohos*`) + kernel-os 白名单(`linux-ohos*`)，缺一不可
+
 ---
 
 ## 🔧 Skill 更新清单
@@ -231,7 +320,9 @@
 | ohc-run.py init-archive | ✅ 升级支持 --clean 模式 + README 保护 | ✅ 完成 |
 | ohc-run.py verify-build | ✅ G4 补丁验证修复（三级降级+tarball重建） | ✅ 完成 |
 | ohc-run.py finish | ✅ 新增 Step 3 调用 ohc-run.py finalize-archive（4步流程） | ✅ 完成 |
-| create-archive.sh | ⚠️ 标记为 .deprecated（被 ohc-run.py init-archive 取代） | ✅ 处理 |
+| scripts/patch-autotools-ohos.pl | ⚠️ config.sub 补丁生成重复行+缺少 `linux-ohos*` 允许列表 | ⬜ 待修复 |
+| scripts/ohc/package_builder.py | ⚠️ 缺少 `import re` | ⬜ 待修复 |
+| scripts/ohc-run.py refresh-patch | ⚠️ `str / str` 路径拼接类型错误 | ⬜ 待修复 |
 | releasenote-template.md | ⚠️ 标记为 .deprecated（被 finalize-archive 取代） | ✅ 处理 |
 | knowledge_section_new.txt | 🗑️ 已删除（内容已整合进 SKILL §5） | ✅ 清理 |
 
@@ -274,7 +365,45 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 
 ---
 
-*最后更新: 2026-04-09*
+*最后更新: 2026-04-12*
+*v5.3 同步更新：*
+*  - **readline 8.2 标记为已完成**（编译+测试+打包+部署，3.0M）*
+*  - 已完成数 14 → **15**（新增 readline）*
+*  - 打包成功数 13 → **14**（新增 readline）*
+*  - readline: 2个补丁(config.guess/sub + shlib TERMCAP_LIB), --with-curses, ncurses静态嵌入*
+*  - 静态库强制要求表：readline 标记为已编译共享（ncurses静态嵌入）*
+*  - 新增 3 条关键经验 (#26-#28)：TERMCAP_LIB=-lncursesw、ncurses静态嵌入、config.sub 3处修改*
+*v5.2 同步更新：*
+*  - **gdbm 1.23 标记为已完成**（编译+测试+打包+部署，962K）*
+*  - 已完成数 13 → **14**（新增 gdbm）*
+*  - 打包成功数 12 → **13**（新增 gdbm）*
+*  - gdbm: 2个补丁(config.guess+config.sub), --enable-libgdbm-compat, 3工具+2组库*
+*  - 静态库强制要求表：gdbm 标记为已编译共享（+compat）*
+*  - 新增 3 条关键经验 (#23-#25)：gdbm_open路径限制、ghfast.top局限、gdbm前置依赖*
+*v5.1 同步更新：*
+*  - **libffi 3.5.2 标记为已完成**（编译+测试+打包+部署，634K）*
+*  - 已完成数 12 → **13**（新增 libffi）*
+*  - 打包成功数 11 → **12**（新增 libffi）*
+*  - libffi: 2个补丁(config.guess/sub + closure HMDFS路径回退), ffi_call核心功能+版本API通过*
+*  - 静态库强制要求表：libffi 标记为已编译共享*
+*  - 新增 3 条关键经验 (#20-#22)：ghfast.top 加速代理、ffi_closure 受限、libffi 与 Python 绑定*
+*v5.0 同步更新：*
+*  - **ncurses 6.4 标记为已完成**（编译+测试+打包+部署，8.7M 静态库包）*
+*  - 已完成数 11 → **12**（新增 ncurses）*
+*  - 打包成功数 10 → **11**（新增 ncurses）*
+*  - 🔴 ncurses 必须 --without-shared 静态编译，历史 manifest 错误使用 --with-shared 已纠正*
+*  - 静态库强制要求表：ncurses 标记为已编译静态*
+*  - 新增 2 条关键经验 (#18-#19)：ncurses 共享库核弹级危险、--enable-widec 前提*
+*  - ncurses 问题记录：历史参数错误纠正 + preinstall/terminfo 非阻塞问题*
+*v4.9 同步更新：*
+*  - **gzip 1.13 标记为已完成**（编译+测试+打包+部署，297K）*
+*  - **openssl 1.1.1w 标记为已完成**（编译+测试+打包+部署，14M）*
+*  - 已完成数 9 → **11**（新增 gzip, openssl）*
+*  - 打包成功数 8 → **10**（新增 gzip, openssl）*
+*  - gzip: 2个补丁(config.guess+config.sub)，修复 patch-autotools-ohos.pl 的 config.sub 产出 bug*
+*  - openssl: 2个补丁(平台配置+Configure)，发现 HMDFS 完全不支持 ln -s 需 cp -a 替代*
+*  - 新增 3 个脚本 bug 待修：patch-autotools-ohos.pl 重复行、package_builder.py 缺 import re、refresh-patch 路径拼接*
+*  - 新增 5 条关键经验 (#13-#17)：HMDFS 无 symlink、gitee 镜像、tarball 完整性、OpenSSL Perl Configure、cp -a 影响*
 *v4.7 同步更新：*
 *  - **xz 5.6.2 标记为已完成**（编译+测试+打包+部署，3.5M 主包 + 474K debug）*
 *  - 已完成数 8 → **9**（新增 xz）*

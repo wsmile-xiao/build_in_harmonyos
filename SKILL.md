@@ -37,6 +37,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=
 # 读取 .build-context-<name>-<ver> 获取 BUILD_SRC_DIR, TEST_PREFIX 等变量
 cd $BUILD_SRC_DIR
 ./configure --prefix=$TEST_PREFIX && make -j$(nproc) && make install
+make check  # 必须执行，超时可 Ctrl+C 跳过并记录原因
 
 # Step 3: 收尾（6 步自动）
 python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|failed
@@ -144,9 +145,11 @@ cd $BUILD_SRC_DIR
 ./configure --prefix=$TEST_PREFIX && make -j1 && make install
 ```
 
-**执行顺序**：configure → make → install(到 $TEST_PREFIX) → 安全弹窗(R7) → make check → Staging 验证 → package → finish。
+**执行顺序**：configure → make → install(到 $TEST_PREFIX) → 安全弹窗(R7) → **make check**(必须执行，超时可 Ctrl+C 跳过) → Staging 验证 → package → finish。
 
 $TEST_PREFIX 是隔离 staging 目录，$DEFAULT_PREFIX 是最终部署目标（由 install.sh 写入）。
+
+> **make check 注意事项**：部分软件的测试套会卡住（如 coreutils cat-self、bash 多线程测试），遇到卡住可 `Ctrl+C` 跳过并在 PROGRESS.md 记录跳过原因。`make check` 的结果会写入 `reports/test-report.md`。
 
 ### HANDOFF 协议（脚本 → AI 交接格式）
 
