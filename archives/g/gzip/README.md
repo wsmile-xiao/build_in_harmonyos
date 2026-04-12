@@ -19,8 +19,6 @@
 ```bash
 ./configure \
   --prefix=/storage/Users/currentUser/usr/local \
-  --build=aarch64-unknown-linux-gnu \
-  --host=aarch64-unknown-linux-gnu \
   CC=clang \
   CFLAGS="-I/storage/Users/currentUser/usr/local/include" \
   LDFLAGS="-L/storage/Users/currentUser/usr/local/lib"

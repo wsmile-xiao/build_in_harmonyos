@@ -61,7 +61,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-### 1.2 铁律摘要（14 条，违反=bug）
+### 1.2 铁律摘要（15 条，违反=bug）
 
 | # | 规则 | 一句话 | 详解 |
 |---|------|--------|------|
@@ -79,6 +79,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R12 | 先匹配错误模式再修复 | 引擎匹配 graph/index.tsv | references/failure-handling.md |
 | R13 | 脚本用完整路径 | `python3 $SKILL_ROOT/scripts/ohc-run.py <cmd>` | §0 |
 | R14 | 脚本失败=手动模式入口 | `--resume-from=StepN` 继续 | references/failure-handling.md |
+| R15 | 历史仅供参考，不盲从 | 实际参数以本次编译为准，成功后回写 manifest | §4.1 |
 
 ### 1.3 决策树
 
@@ -233,6 +234,40 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finalize-archive <软件名> <版本>
 ```
 
 **知识提取决策**：平台相关 → L1 立即写 knowledge/；构建模式 → L2 写 knowledge/；仅本软件 → L3 写 manifest。
+
+### 4.1 历史信息纠正（R15）
+
+> **核心问题**：历史编译记录可能包含错误方案（如用 `--build/--host` 绕过 config.guess），盲目复用会导致重复失败或引入隐患。
+
+**触发条件**：以下任一情况出现时，进入纠错流程：
+1. 历史记录的 configure 参数在本次失败
+2. 历史记录包含禁用参数（`--build`, `--host`, `--target`）— 本平台是 native 编译
+3. 历史记录缺少关键参数（如 `--without-shared`）
+4. AI 在手动调试中发现历史方案有误
+
+**纠错 4 步**：
+```
+1. 识别差距 → 对比历史参数 vs 本次成功参数，定位遗漏项
+2. 手动编译 → 用正确参数完成编译（模式 B Step 2）
+3. 回写历史 → 更新 manifest.yaml 的 configure_options + PROGRESS.md
+4. 沉淀知识 → 如果是通用平台发现，写入 knowledge/ L1/L2
+```
+
+**常见平台必需参数**（R15 补充表）：
+
+| 参数 | 适用场景 | 说明 |
+|------|---------|------|
+| `--without-shared` | ncurses（R4） | 防止 .so 导致系统崩溃 |
+| `--no-asm` | OpenSSL | 无汇编支持 |
+| `--without-bash-malloc` | bash | 使用系统 malloc |
+
+**禁用参数**（native 编译，禁止使用）：
+
+| 禁用项 | 错误原因 | 正确做法 |
+|--------|---------|---------|
+| `--build=...` | 本平台是 native 编译 | 修改 config.guess/config.sub（见 E007） |
+| `--host=...` | 同上 | 同上 |
+| `--target=...` | 同上 | 同上 |
 
 ---
 

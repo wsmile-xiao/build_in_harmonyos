@@ -70,6 +70,9 @@ class BuildDriver:
         self.ep_fix_cmd = ""
         self.ep_auto_retry = False
 
+        # Actual configure command (for write-back to manifest.yaml)
+        self._actual_configure_cmd: str = ""
+
     def should_run(self, step: float) -> bool:
         return step >= self.resume_from
 
@@ -382,31 +385,41 @@ class BuildDriver:
         self._log(f"构建系统: {self.build_system}")
 
         if self.build_system == "autotools":
+            _configure_cmd = f"./configure --prefix={self.test_prefix} {extra_str}".strip()
+            self._actual_configure_cmd = _configure_cmd
+
             def do_configure():
-                return self._run(f"./configure --prefix={self.test_prefix} {extra_str}")
+                return self._run(_configure_cmd)
 
             def do_retry(fix_cmd):
                 self._run("make distclean 2>/dev/null || true")
-                return self._run(f"./configure --prefix={self.test_prefix} {fix_cmd} {extra_str}")
+                retry_cmd = f"./configure --prefix={self.test_prefix} {fix_cmd} {extra_str}".strip()
+                return self._run(retry_cmd)
 
             self._error_recovery("configure", 3, do_configure, do_retry)
 
         elif self.build_system == "cmake":
+            _configure_cmd = f"cmake -DCMAKE_INSTALL_PREFIX={self.test_prefix} -DCMAKE_BUILD_TYPE=Release {extra_str} ..".strip()
+            self._actual_configure_cmd = _configure_cmd
             self._run("mkdir -p build")
-            rc = self._run(f"cmake -DCMAKE_INSTALL_PREFIX={self.test_prefix} -DCMAKE_BUILD_TYPE=Release {extra_str} ..",
+            rc = self._run(_configure_cmd,
                           cwd=str(self.build_src_dir / "build"))
             if rc != 0:
                 self._emit_handoff("cmake_failed", 2, "Step3",
                     actions=["检查 CMakeLists.txt 配置", "运行 RESUME_CMD 继续"])
 
         elif self.build_system == "meson":
-            rc = self._run(f"meson setup builddir --prefix={self.test_prefix} {extra_str}")
+            _configure_cmd = f"meson setup builddir --prefix={self.test_prefix} {extra_str}".strip()
+            self._actual_configure_cmd = _configure_cmd
+            rc = self._run(_configure_cmd)
             if rc != 0:
                 self._emit_handoff("meson_failed", 2, "Step3",
                     actions=["检查 meson.build 配置", "运行 RESUME_CMD 继续"])
 
         elif self.build_system == "perl":
-            rc = self._run(f"perl Makefile.PL PREFIX={self.test_prefix} {extra_str}")
+            _configure_cmd = f"perl Makefile.PL PREFIX={self.test_prefix} {extra_str}".strip()
+            self._actual_configure_cmd = _configure_cmd
+            rc = self._run(_configure_cmd)
             if rc != 0:
                 self._emit_handoff("perl_configure_failed", 2, "Step3")
 
@@ -676,12 +689,91 @@ class BuildDriver:
 
     # ── Step 12: calibrate ──
 
+    def _write_back_configure_options(self) -> None:
+        """Write actual configure args back to manifest.yaml (line-level, no PyYAML)."""
+        if not self._actual_configure_cmd:
+            return
+
+        # Extract args from the actual command
+        parts = self._actual_configure_cmd.split()
+        args = []
+        for p in parts[1:]:
+            if p.startswith("-"):
+                args.append(p)
+
+        if not args:
+            return
+
+        manifest = self.archive_dir / "manifest.yaml"
+        if not manifest.exists():
+            return
+
+        content = manifest.read_text(encoding="utf-8")
+        lines = content.split("\n")
+
+        # Build the new configure_options lines
+        args_yaml = "configure_options:\n" + "\n".join(
+            f"  - \"{a}\"" for a in args
+        )
+
+        # Find and replace the configure_options section
+        new_lines = []
+        i = 0
+        replaced = False
+        while i < len(lines):
+            stripped = lines[i].lstrip()
+            # Match the start of configure_options: under build_config
+            if not replaced and stripped.startswith("configure_options:"):
+                # Determine indent level (same as this line)
+                indent = lines[i][:len(lines[i]) - len(lines[i].lstrip())]
+                # Collect all following lines that are deeper-indented list items
+                j = i + 1
+                while j < len(lines):
+                    next_stripped = lines[j].lstrip()
+                    next_indent = lines[j][:len(lines[j]) - len(lines[j].lstrip())]
+                    if next_stripped.startswith("- ") and len(next_indent) > len(indent):
+                        j += 1
+                    elif next_stripped == "":
+                        j += 1
+                    else:
+                        break
+                # Replace with new args (preserve original indent)
+                for arg_line in args_yaml.split("\n"):
+                    if arg_line.startswith("configure_options:"):
+                        new_lines.append(indent + arg_line)
+                    else:
+                        new_lines.append(indent + arg_line)
+                i = j
+                replaced = True
+            else:
+                new_lines.append(lines[i])
+                i += 1
+
+        if replaced:
+            manifest.write_text("\n".join(new_lines), encoding="utf-8")
+            self._log(f"✅ 已回写 configure 参数到 manifest.yaml ({len(args)} 项)")
+        else:
+            # configure_options section not found; try to insert under build_config
+            for idx, line in enumerate(lines):
+                if "build_config:" in line:
+                    indent = line[:len(line) - len(line.lstrip())] + "  "
+                    insert_lines = [indent + l for l in args_yaml.split("\n")]
+                    for offset, il in enumerate(insert_lines):
+                        new_lines.insert(idx + 1 + offset, il)
+                    manifest.write_text("\n".join(new_lines), encoding="utf-8")
+                    self._log(f"✅ 已新增 configure_options 到 manifest.yaml ({len(args)} 项)")
+                    return
+            self._log("⚠️ manifest.yaml 中未找到 build_config 段，跳过回写")
+
     def _step12_calibrate(self) -> None:
         self._log("═══ [12/13] 归档校准 ═══")
         # Simplified calibration check
         self._log(f"归档目录: {self.archive_dir}")
         patches = list((self.archive_dir / "patches").glob("*.patch")) if (self.archive_dir / "patches").exists() else []
         self._log(f"补丁数: {len(patches)}")
+
+        # ── Write back actual configure options to manifest.yaml ──
+        self._write_back_configure_options()
 
     # ── Step 13: cleanup ──
 

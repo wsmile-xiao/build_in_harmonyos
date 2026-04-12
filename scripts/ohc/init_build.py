@@ -297,6 +297,9 @@ def _create_dual_track(orig_dir: Path, work_dir: Path,
             (work_dir / ".tarball-sha256").unlink(missing_ok=True)
             log_ok(f"  .work 已创建 (硬链接): {work_dir}")
         except OSError:
+            # HMDFS may reject hard-links; clean partial dir then fallback to copy
+            if work_dir.exists():
+                shutil.rmtree(work_dir)
             shutil.copytree(orig_dir, work_dir)
             log_ok(f"  .work 已创建 (复制): {work_dir}")
         # F068: ensure work_dir also has build markers at top level
@@ -334,6 +337,7 @@ def _generate_context(path: Path, **kw) -> None:
         "",
         f"export BUILD_HISTORY_FOUND=\"{kw.get('history_found', False)}\"",
         f"export BUILD_HISTORY_STATUS=\"{kw.get('history_status', '')}\"",
+        f"export BUILD_HISTORY_CONFIGURE_OPTIONS=\"{kw.get('history_configure_options', '')}\"",
         "",
         f"# 下一步: python3 ohc-run.py build {kw['software']} {kw['version']}",
     ]
@@ -433,18 +437,52 @@ def init_build(software: str, version: str = "", mode: str = "auto",
     if rc != 0:
         return rc
 
-    # Step 5: Check history
+    # Step 5: Check history + validate parameters (R15)
     archive_dir = project / "archives" / software[0].lower() / software / version
     history_found = archive_dir.is_dir()
     history_status = ""
+    history_configure_options: list[str] = []
     if history_found:
         mf = archive_dir / "manifest.yaml"
         if mf.exists():
+            in_options = False
             for line in mf.read_text(encoding="utf-8", errors="replace").split("\n"):
-                if line.strip().startswith("status:"):
+                stripped = line.strip()
+                if stripped.startswith("status:"):
                     history_status = line.split(":", 1)[1].strip()
-                    break
+                elif stripped.startswith("configure_options:"):
+                    in_options = True
+                elif in_options:
+                    if line.startswith("    - "):
+                        history_configure_options.append(stripped[2:].strip())
+                    elif not line.startswith(" "):
+                        in_options = False
         log_info(f"  历史档案: {history_status or 'unknown'}")
+
+        # R15: Validate history configure parameters
+        _FORBIDDEN_PARAMS = ["--build=", "--host=", "--target="]
+        _DANGER_PARAMS = {"ncurses": ["--without-shared"],
+                          "openssl": ["--no-asm"],
+                          "bash": ["--without-bash-malloc"]}
+        forbidden_found = []
+        for fp in _FORBIDDEN_PARAMS:
+            if any(fp in opt for opt in history_configure_options):
+                forbidden_found.append(fp.rstrip("="))
+        danger_missing = []
+        for dp in _DANGER_PARAMS.get(software, []):
+            if not any(dp in opt for opt in history_configure_options):
+                danger_missing.append(dp)
+
+        if forbidden_found:
+            log_warn(f"  ⚠️ R15: 历史参数包含禁用项: {', '.join(forbidden_found)}")
+            log_warn(f"     本平台为 native 编译，禁止 --build/--host/--target")
+            log_warn(f"     正确做法: 修改 config.guess/config.sub（见 E007）")
+        if danger_missing:
+            log_warn(f"  ⚠️ R15: 历史参数缺少危险库参数: {', '.join(danger_missing)}")
+        if not forbidden_found and not danger_missing and history_configure_options:
+            log_ok(f"  ✅ 历史参数验证通过 ({len(history_configure_options)} 项)")
+        elif not history_configure_options:
+            log_warn(f"  ⚠️ R15: 历史记录无 configure_options（可能为旧格式）")
 
     # Step 6: Scaffold archive
     need_scaffold = True
@@ -470,6 +508,7 @@ def init_build(software: str, version: str = "", mode: str = "auto",
         orig_dir=orig_dir, archive_dir=archive_dir,
         download_url=download_url, tar_format=tar_format,
         history_found=history_found, history_status=history_status,
+        history_configure_options=" ".join(history_configure_options),
     )
     log_ok(f"✅ 上下文文件: {ctx_file.name}")
     log_ok(f"   源码: {work_dir}")
