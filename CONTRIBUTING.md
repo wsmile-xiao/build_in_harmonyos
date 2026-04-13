@@ -1,10 +1,15 @@
 # 贡献指南
 
 > 如何为鸿蒙编译知识库添加新软件或改进现有内容。
+> 对齐 SKILL.md v7.2 · 多 Agent 协作模式
 
 ## 目录
 
+- [角色与权限](#角色与权限)
 - [添加新软件](#添加新软件)
+- [依赖管理](#依赖管理)
+- [提交工作成果](#提交工作成果)
+- [主编审核](#主编审核)
 - [归档目录结构](#归档目录结构)
 - [补丁规范](#补丁规范)
 - [预编译包制作](#预编译包制作)
@@ -14,20 +19,49 @@
 
 ---
 
+## 角色与权限
+
+本项目采用 **协作者 / 主编** 双角色模式，通过 **Git 分支 + GitCode PR** 协作。
+
+| 操作 | 协作者 | 主编 |
+|------|--------|------|
+| 编译软件 (`init-build`, `build`) | ✅ | 不做 |
+| 知识图谱草稿 (`graph add --draft`) | ✅ | 不做 |
+| 创建分支、推送、创建 PR | ✅ | 不做 |
+| 合并 PR / 拒绝 PR（GitCode 平台） | ❌ | ✅ |
+| 本地审核 (`review`) | ❌ | ✅ |
+| 修改 index.tsv / SUMMARY.md | ❌ 禁止 | ✅（合并 PR 时自动） |
+| 修改 SKILL.md / references / templates / scripts | ❌ 禁止 | ✅ |
+
+**身份声明**：
+```bash
+# 协作者（默认，可省略）
+export OHC_AGENT_ID="A7F3"    # 4 位十六进制随机 ID
+
+# 主编
+export OHC_ROLE=editor
+export OHC_AGENT_ID="EDIT"
+```
+
+详细协作规范见 [knowledge/collaboration.md](knowledge/collaboration.md)，提交教程见 [knowledge/collaboration-tutorial.md](knowledge/collaboration-tutorial.md)。
+
+---
+
 ## 添加新软件
 
-### 方式 A：使用 SKILL 五步走流程（推荐）
+### 方式 A：使用 SKILL 编译管线（推荐）
 
-SKILL.md v4.0 定义了标准五步走流程：
+SKILL.md v7.2 定义了标准编译管线：
 
 ```
-Step 1:  ohc-run.py init-build          初始化（下载/解压/骨架）
+Step 1:  ohc-run.py init-build          初始化（下载/解压/骨架/依赖检查）
 Step 2:  AI 编译                 configure + make + make install
 Step 2.5: 独立目录安装验证       干源码 + 补丁 + 独立 TEST_PREFIX
 Step 3:  make check / 功能验证   测试套件或手动功能测试
 Step 4:  ohc-run.py verify-build         质量门禁（G1-G4 四道检测）
 Step 5:  预编译包制作            10 步打包流程
 Step 5.5: ohc-run.py finalize-archive    归档收口
+Step 6:  ohc-run.py submit              提交工作成果
 ```
 
 一键启动：
@@ -36,6 +70,8 @@ Step 5.5: ohc-run.py finalize-archive    归档收口
 ./scripts/ohc-run.py init-build <软件名> <版本> [--url=<下载URL>]
 # 然后 AI 执行 Step 2 ~ Step 5.5
 ./scripts/ohc-run.py finish <软件名> <版本> success
+# 提交成果
+./scripts/ohc-run.py submit <软件名> <版本>
 ```
 
 ### 方式 B：手动创建档案
@@ -93,6 +129,207 @@ diff -Naur original/ modified/ > patches/0001-description.patch
 
 # 归档收口（自动清理+校验+生成 RELEASENOTE）
 ./scripts/ohc-run.py finalize-archive <软件名> <版本>
+```
+
+---
+
+## 依赖管理
+
+### 自动依赖解析
+
+`init-build` 在 Step 7 自动检查编译所需的依赖。如果有预编译包可用（来自 [cmd-pkgs](https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs)），自动安装。
+
+```bash
+# 查看某软件缺少哪些依赖
+./scripts/ohc-run.py resolve-deps wget
+# 输出: 可安装: openssl 1.1.1w, zlib 1.3.1
+
+# 自动安装缺失依赖
+./scripts/ohc-run.py resolve-deps --install wget
+
+# 列出所有可用预编译包（23 款）
+./scripts/ohc-run.py resolve-deps --list-available
+
+# 从远程仓库刷新索引
+./scripts/ohc-run.py resolve-deps --refresh
+```
+
+### 手动安装预编译包
+
+如果不想用 resolve-deps，也可以手动安装：
+
+```bash
+# 通用格式
+curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{软件名}/install.sh" | sh -s -- {版本}
+
+# 示例
+curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/openssl/install.sh" | sh -s -- 1.1.1w
+curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/readline/install.sh" | sh -s -- 8.2
+```
+
+### 依赖编译顺序
+
+当预编译包不可用时，按 `knowledge/operations/dependencies.md` 中的顺序手动编译。常见链路：
+
+```
+基础: pkg-config → zlib → bzip2 → xz → openssl
+扩展: ncurses → readline → bash
+Python: openssl + zlib + libffi + ncurses + readline + gdbm + xz + bzip2 → python
+```
+
+---
+
+## 提交工作成果
+
+### 协作者提交流程（Git + GitCode PR）
+
+编译完成并通过质量门禁后，通过 Git 分支 + GitCode Pull Request 提交工作成果：
+
+#### Step 1：自检
+
+```bash
+# 本地验证（不实际提交，只检查完整性）
+./scripts/ohc-run.py submit --check <软件名> <版本>
+```
+
+#### Step 2：创建分支
+
+```bash
+# 分支命名格式: {type}/{software}-{version}
+# type: feat（新增）/ fix（修复）/ update（更新）
+git checkout -b feat/<软件名>-<版本>
+```
+
+#### Step 3：暂存文件
+
+```bash
+# 添加相关文件到暂存区
+git add archives/<首字母>/<软件名>/<版本>/
+git add knowledge/graph/draft/        # 知识图谱草稿（如有）
+```
+
+#### Step 4：提交
+
+```bash
+# 提交信息可自由填写，PR 合并时会 Squash 为一条
+git commit -m "feat(<软件名>): <版本> 编译完成"
+```
+
+#### Step 5：同步最新
+
+```bash
+# 确保基于最新 main 分支
+git rebase main
+```
+
+#### Step 6：推送
+
+```bash
+git push origin feat/<软件名>-<版本>
+```
+
+#### Step 7：在 GitCode 创建 Pull Request
+
+在 GitCode 平台上创建 PR，格式要求：
+
+- **标题**：`feat(<软件名>): <版本> 编译完成` 或 `fix(<软件名>): <版本> 修复描述`
+- **描述三要素**：
+  1. **变更内容**：新增/修改了哪些文件（archives/、knowledge/graph/draft/ 等）
+  2. **质量状态**：质量门禁结果（verify-build 通过 / 跳过原因）
+  3. **特殊说明**：补丁说明、依赖变更、已知问题等
+
+### 提交自检 12 项
+
+提交前 `submit --check` 会自动检查：
+
+| # | 检查项 | 说明 |
+|---|--------|------|
+| 1 | 补丁完整性 | patches/ 目录有实际 .patch 文件 |
+| 2 | manifest.yaml | status / software / version / build_system 等字段齐全 |
+| 3 | 禁止文件 | 无 .o / .lo / .la / Makefile 等构建残留 |
+| 4 | PROGRESS.md | 已关闭（status != in_progress） |
+| 5 | 临时文件 | 无 *.tmp / *.bak / *.orig |
+| 6 | knowledge_ref | 引用的 E 编号在 graph/ 中存在 |
+| 7 | 打包产物 | packaging/ 有 tar.gz 产物 |
+| 8 | test_results | manifest 中测试结果已填写 |
+| 9 | 草稿冲突 | draft/ 中的 E 编号不与正式冲突 |
+| 10 | 知识去重 | 草稿关键词不与已有条目重复 |
+| 11 | 提交自检 | submission.yaml 格式正确 |
+| 12 | 总体评估 | 综合判定 |
+
+### 知识图谱草稿
+
+编译过程中积累的经验以草稿形式提交：
+
+```bash
+# 添加知识草稿
+./scripts/ohc-run.py graph add --draft \
+  --title "openssl 1.1.1w configure 检测问题" \
+  --error-pattern "cannot detect aarch64-unknown-linux-ohos" \
+  --solution "替换 config.guess + config.sub → E007" \
+  --match-keywords "config.guess,platform detect,ohos triplet"
+```
+
+草稿写入 `knowledge/graph/draft/`，随 PR 一起提交，主编合并 PR 时自动移入正式目录。
+
+---
+
+## 主编审核
+
+### 审核流程（本地审核 → GitCode PR 操作）
+
+#### 1. 查看待审 PR
+
+在 GitCode 平台上查看待审 Pull Request 列表，确认新提交的 PR。
+
+#### 2. 本地审核
+
+```bash
+# 拉取远程分支
+git fetch origin
+
+# 检出 PR 分支进行本地检查
+git checkout feat/<软件名>-<版本>
+
+# 检查变更内容
+git diff main...HEAD --stat          # 变更文件概览
+git diff main...HEAD -- archives/    # 归档文件差异
+
+# 使用 review 命令辅助检查（执行 12 项自检 + 额外审核）
+./scripts/ohc-run.py review --check <软件名> <版本>
+```
+
+#### 3. 通过 → 接受 PR
+
+在 GitCode 平台上接受 PR（选择 **Squash 合并**）：
+
+- 合并方式：Squash and Merge（保持 main 分支历史整洁）
+- 合并后本地同步：
+
+```bash
+git checkout main
+git pull origin main
+```
+
+#### 4. 拒绝 → 拒绝 PR
+
+在 GitCode 平台上拒绝 PR，附评论说明原因：
+
+- 注明具体问题（如：补丁缺失、manifest 字段不完整、构建残留未清理等）
+- 协作者修复后重新推送分支并创建新 PR
+
+#### 5. 合并后自动操作
+
+PR 合并到 main 后，主编在本地执行以下操作：
+
+```
+① draft/ 草稿 → knowledge/graph/ 正式目录
+② 重建 knowledge/graph/index.tsv
+③ 重建 archives/_index.yaml
+④ 重建 SUMMARY.md
+⑤ 收割版本级 skill-feedback → 根级
+⑥ 提交索引更新到 main 分支
+⑦ 输出操作摘要
 ```
 
 ---
@@ -274,6 +511,7 @@ test_results:
 
 knowledge_gained: []          # 本次沉淀的 L3 笔记
 skill_feedback: []             # 流程自省反馈
+knowledge_ref: []             # 引用的 E 编号列表（主编审核用）
 ```
 
 ---
@@ -282,26 +520,26 @@ skill_feedback: []             # 流程自省反馈
 
 ### 写入时机
 
-每次 Phase 3 编译过程中遇到新问题时，判断是否通用：
+每次编译过程中遇到新问题时，判断是否通用：
 
 ```
 问题 → "下一个不同软件也会遇到吗？"
-  ├─ 是 → L1（平台真理）或 L2（类别模式）→ 写入 knowledge/
+  ├─ 是 → L1（平台真理）或 L2（类别模式）→ graph add --draft → 草稿
   └─ 否 → L3（版本笔记）→ 写入 manifest.yaml knowledge_gained
 ```
 
-### error-patterns.md 新增条目
+### 知识图谱新增条目
 
-格式：`E{NNN}: {简短描述}`
-
-```markdown
-### E068: 示例错误描述
-- 类别: 编译/链接/运行时/打包
-- 现象: 错误信息特征
-- 根因: 为什么发生
-- 解决方案: 具体操作步骤
-- 影响: 哪些软件可能遇到
+```bash
+# 协作者：添加草稿
+./scripts/ohc-run.py graph add --draft \
+  --title "E082: 描述" \
+  --error-pattern "错误特征" \
+  --solution "解决方案" \
+  --match-keywords "关键词1,关键词2"
 ```
+
+主编 approve 时自动移入正式目录并重建索引。
 
 ### 更新 PREBUILD_TODOLIST.md
 
@@ -315,19 +553,22 @@ skill_feedback: []             # 流程自省反馈
 
 ## 辅助脚本一览
 
-| 脚本 | 用途 | 调用方式 |
-|------|------|----------|
-| `ohc-run.py init-build` | 编译初始化 | Step 1 入口 |
-| `ohc-run.py finish` | 收尾管线（4步） | Step 3 结束后 |
-| `ohc-run.py refresh-patch --auto` | 补丁自动生成 | finish 内部 |
-| `ohc-run.py verify-build` | 质量门禁 G1-G4 | Step 4 必须 |
-| `ohc-run.py finalize-archive` | 归档收口（5阶段） | Step 5.5 必须 |
-| `ohc-run.py init-archive` | 档案骨架创建 | init 内部 |
-| `ohc-run.py install-template (已归档)` | install.sh 模板 | 打包时参考 |
-| `ohc-run.py detect-build-system (已归档)` | 构建系统检测 | 可选 |
-| `ohc-run.py search-url` | URL 搜索 | init fallback |
-| `ohc-run.py check-env` | 环境变量检查 | init 内部 |
+| 脚本 | 用途 | 角色 |
+|------|------|------|
+| `ohc-run.py init-build` | 编译初始化（含依赖检查） | 协作者 |
+| `ohc-run.py build` | 13 步编译驱动 | 协作者 |
+| `ohc-run.py finish` | 收尾管线（4步） | 协作者 |
+| `ohc-run.py resolve-deps` | 依赖预编译包查询/安装 | 协作者 |
+| `ohc-run.py refresh-patch --auto` | 补丁自动生成 | 协作者 |
+| `ohc-run.py verify-build` | 质量门禁 G1-G4 | 协作者 |
+| `ohc-run.py finalize-archive` | 归档收口（5阶段） | 协作者 |
+| `ohc-run.py submit --check` | 提交自检（本地验证） | 协作者 |
+| `ohc-run.py graph add --draft` | 添加知识草稿 | 协作者 |
+| `ohc-run.py review --check` | 辅助审核检查 | 主编 |
+| `ohc-run.py summary` | 生成 SUMMARY.md | 主编 |
+| `ohc-run.py search-url` | URL 搜索 | 协作者 |
+| `ohc-run.py check-env` | 环境变量检查 | 协作者 |
 
 ---
 
-*最后更新: 2026-04-08 | 对齐 SKILL.md v4.0*
+*最后更新: 2026-04-13 | 对齐 SKILL.md v7.2*

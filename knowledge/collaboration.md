@@ -8,18 +8,18 @@
 # 第一部分：协作架构与工作流
 
 > 本部分定义了多个 AI 实例协作编译开源软件、提交知识、审核合并的完整工作流。
-> 核心机制：**文件系统 + 提交单 + 随机 Agent ID**，不依赖 Git。
+> 核心机制：**Git + GitCode PR + 随机 Agent ID**，基于分支和 Pull Request 实现协作。
 
 ## §1 协作模式概述
 
-本系统运行在 OpenDesk 的 skill 环境中，多个 Agent 实例共享同一个文件系统目录。通过 **提交单（submission）** 机制实现协作者与主编之间的工作交接，无需版本控制系统。
+本系统运行在 OpenDesk 的 skill 环境中，多个 Agent 实例基于 **Git + GitCode PR** 工作流实现协作。协作者在独立分支上工作，通过创建 Pull Request（PR）提交工作成果，主编在 GitCode 平台上审核并合并 PR。
 
 ### 两种角色模式
 
 | 模式 | 对应角色 | 核心职责 | 数量 |
 |------|---------|---------|------|
-| **协作者模式**（默认） | 贡献者 Agent | 编译软件、编写补丁、提取知识、提交工作成果 | 多个 |
-| **主编模式** | 主编 Agent | 审核提交单、知识去重、编号统一、重建索引 | 1 个 |
+| **协作者模式**（默认） | 贡献者 Agent | 创建分支、编译软件、编写补丁、提取知识、提交 PR | 多个 |
+| **主编模式** | 主编 Agent | 审核 PR、知识去重、编号统一、合并 PR、重建索引 | 1 个 |
 
 ### 切换方式
 
@@ -41,9 +41,9 @@ python3 scripts/ohc-run.py mode
 |------|--------|------|
 | **可写区域** | 自己的 archive 目录 + knowledge/graph/draft/ | 所有区域 + 索引文件 |
 | **禁止写入** | knowledge/graph/ 正式目录、index.tsv、_index.yaml、SUMMARY.md | 无限制 |
-| **提交方式** | 生成提交单到 submissions/pending/ | 审核并处理提交单 |
-| **知识操作** | 写草稿到 draft/ | 审核草稿、去重、编号、移入正式目录 |
-| **索引操作** | 只读 | 重建 index.tsv、_index.yaml、SUMMARY.md |
+| **提交方式** | 创建 Git 分支，提交 PR 到 GitCode | 审核 PR，在平台上接受或拒绝 |
+| **知识操作** | 写草稿到 draft/（在分支上提交） | 审核草稿、去重、编号、合并 PR 后移入正式目录 |
+| **索引操作** | 只读 | 合并 PR 后重建 index.tsv、_index.yaml、SUMMARY.md |
 
 ## §2 Agent ID 机制
 
@@ -77,11 +77,11 @@ Archive: archives/c/curl/8.7.1
 
 | 场景 | 用途说明 |
 |------|---------|
-| **提交单标识** | contributor_id 字段记录由哪个 Agent 提交 |
+| **PR 标识** | contributor_id 字段记录由哪个 Agent 提交 |
 | **PROGRESS.md 记录** | 标注当前正在编译此软件的 Agent ID |
 | **草稿文件归属** | knowledge/graph/draft/ 下的草稿文件包含 contributor_id |
 | **协作审计** | 通过 Agent ID 追溯每项工作的来源 |
-| **主编审核日志** | 记录哪个主编审核、批准了哪些提交单 |
+| **主编审核日志** | 记录哪个主编审核、批准了哪些 PR |
 
 ## §3 文件所有权矩阵
 
@@ -89,92 +89,108 @@ Archive: archives/c/curl/8.7.1
 
 | 分区 | 路径 | 协作者 | 主编 | 说明 |
 |------|------|--------|------|------|
-| **贡献区** | `archives/{letter}/{name}/{version}/` | ✅ 独占读写 | ✅ 审核时读取 | 不同软件目录天然隔离，每个协作者只操作自己负责的目录 |
-| **待审区** | `submissions/pending/` | ✅ 创建提交单 | ✅ 消费提交单 | 协作者写入，主编读取并处理 |
-| **已审区** | `submissions/approved/` `submissions/rejected/` | ❌ 只读 | ✅ 移动提交单 | 主编处理后将提交单从 pending 移至此处 |
-| **共享知识区（草稿）** | `knowledge/graph/draft/` | ✅ 写入草稿 | ✅ 审核草稿 | 协作者写入新知识草稿，主编审核 |
-| **共享知识区（正式）** | `knowledge/graph/*.yaml` `knowledge/*.md` | ❌ 只读 | ✅ 独占写入 | 只有主编能修改正式知识文件 |
-| **编辑独占区** | `knowledge/graph/index.tsv` `knowledge/graph/_index.yaml` `SUMMARY.md` | ❌ 禁止修改 | ✅ 独占写入 | 索引文件只由主编在 approve 时重建 |
+| **贡献区** | `archives/{letter}/{name}/{version}/` | ✅ 独占读写（分支上） | ✅ 审核时读取 | 不同软件目录天然隔离，每个协作者只操作自己负责的目录 |
+| **Git 分支** | `feat/{software}-{version}` | ✅ 创建和推送分支 | ✅ fetch 并审核 | 协作者在独立分支上工作，主编通过 git fetch 获取分支内容进行审核 |
+| **GitCode PR 状态** | GitCode 平台 | ✅ 创建 PR | ✅ 审核并接受/拒绝 PR | PR 状态（open/merged/closed）在 GitCode 平台上管理 |
+| **共享知识区（草稿）** | `knowledge/graph/draft/` | ✅ 写入草稿（分支上） | ✅ 审核草稿 | 协作者在分支上写入新知识草稿，主编在 PR 审核时检查 |
+| **共享知识区（正式）** | `knowledge/graph/*.yaml` `knowledge/*.md` | ❌ 只读 | ✅ 独占写入（main 分支） | 只有主编能修改正式知识文件 |
+| **编辑独占区** | `knowledge/graph/index.tsv` `knowledge/graph/_index.yaml` `SUMMARY.md` | ❌ 禁止修改 | ✅ 独占写入 | 索引文件只由主编在合并 PR 后重建 |
 | **反馈渠道（版本级）** | `archives/{letter}/{name}/{version}/feedback.md` | ✅ 写入 | ✅ 读取 | 协作者在编译中发现的问题记录在此 |
 | **反馈渠道（根级）** | `reports/skill-feedback.md` | ❌ 禁止修改 | ✅ 收割汇总 | 主编从各版本级 feedback.md 汇总至此 |
 
+### Git 操作权限说明
+
+| 操作 | 协作者 | 主编 | 说明 |
+|------|--------|------|------|
+| `git checkout -b feat/xxx` | ✅ 允许 | ✅ 允许 | 协作者创建功能分支 |
+| `git push origin feat/xxx` | ✅ 允许 | ✅ 允许 | 协作者推送自己的分支 |
+| `git push origin main` | ❌ 禁止 | ✅ 允许 | 只有主编能推送 main 分支 |
+| 在 GitCode 创建 PR | ✅ 允许 | ✅ 允许 | 协作者创建 PR 请求合并 |
+| 在 GitCode 合并 PR | ❌ 禁止 | ✅ 允许 | 只有主编能合并 PR |
+| `git merge main`（本地） | ✅ 允许（rebase） | ✅ 允许 | 协作者通过 rebase 同步 main |
+| 直接修改 main 分支文件 | ❌ 禁止 | ✅ 允许 | 主编可通过 hotfix 直接修改 main |
+
 ### 关键原则
 
-1. **目录天然隔离**：每个协作者只在自己的 `archives/{letter}/{name}/{version}/` 下工作，无需额外锁机制
-2. **知识通过草稿隔离**：协作者不直接修改 `knowledge/` 正式文件，而是写入 `knowledge/graph/draft/`，由主编审核后移入
-3. **索引文件主编独占**：`index.tsv`、`_index.yaml`、`SUMMARY.md` 只在主编执行 `approve` 时自动重建，协作者永不触碰
+1. **Git 分支天然隔离**：每个协作者在自己的 `feat/{software}-{version}` 分支上工作，通过 PR 请求合并，避免直接修改 main
+2. **知识通过草稿隔离**：协作者不直接修改 `knowledge/` 正式文件，而是写入 `knowledge/graph/draft/`（在分支上提交），由主编审核后通过合并 PR 移入
+3. **索引文件主编独占**：`index.tsv`、`_index.yaml`、`SUMMARY.md` 只在主编合并 PR 后自动重建，协作者永不触碰
 
-## §4 提交单规范
+## §4 PR 规范（GitCode Pull Request）
 
-### 目录结构
+> 替代原有的提交单（submission）机制。所有协作者通过 Git 分支和 GitCode PR 提交工作成果。
+
+### PR 标题格式
 
 ```
-submissions/
-├── pending/              # 等待主编审核
-│   └── curl-8.7.1-A7F3.yaml
-├── approved/             # 主编已批准
-│   └── curl-8.7.1-A7F3.yaml
-└── rejected/             # 主编已拒绝
-    └── python-3.9.25-B2E1.yaml
+feat: 编译 {软件名} {版本} - {状态}
 ```
 
-### 提交单 YAML 格式
-
-```yaml
-# submissions/pending/curl-8.7.1-A7F3.yaml
-submission_id: curl-8.7.1-A7F3
-contributor_id: A7F3
-software: curl
-version: 8.7.1
-status: success                    # success | partial | failed
-build_system: autotools
-compile_date: 2026-04-13
-
-new_knowledge:
-  error_patterns: [E055, E056, E057]          # 新增的错误模式编号（草稿中）
-  harmonyos_specifics: [§19]                   # 新增或修改的章节
-  graph_drafts: [E055, E056, E057]            # knowledge/graph/draft/ 中的草稿文件
-
-patches:
-  - file: 0001-config.guess-harmonyos.patch
-    purpose: 平台识别
-  - file: 0002-fix-musl-compat.patch
-    purpose: musl 兼容性
-
-test_results:
-  type: official
-  passed: 29
-  failed: 6
-  total: 35
-  failure_reason: SELinux 软链接限制（非功能问题）
-
-archive_path: archives/c/curl/8.7.1/
-progress_file: archives/c/curl/8.7.1/PROGRESS.md
+示例：
+```
+feat: 编译 curl 8.7.1 - success
+feat: 编译 python 3.9.25 - partial (89.4% 测试通过)
+fix: 修复 E055 错误模式描述不准确
+opt: 优化 knowledge 索引重建流程
 ```
 
-### 生命周期
+### PR 描述三要素
+
+每个 PR 的描述必须包含以下三个部分：
+
+```markdown
+## 背景
+编译 curl 8.7.1，目标平台 HarmonyOS NEXT (musl libc)。
+已有知识库条目：§15 (autotools)、§19 (HarmonyOS 特性)。
+
+## 修改
+- 新增补丁：0001-config.guess-harmonyos.patch（平台识别）
+- 新增补丁：0002-fix-musl-compat.patch（musl 兼容性）
+- 新增知识草稿：E055, E056, E057（knowledge/graph/draft/）
+- 更新 PROGRESS.md（编译过程记录）
+- 更新 manifest.yaml（构建信息和测试结果）
+
+## 测试
+- make check: 29 passed / 6 failed / 35 total
+- 失败原因：SELinux 软链接限制（非功能问题）
+- 本地自检通过：ohc-run.py submit --check curl 8.7.1
+```
+
+### Squash 合并说明
+
+主编在 GitCode 平台上合并 PR 时，默认使用 **Squash Merge**：
+- 将分支上的所有提交压缩为一个提交，保持 main 分支历史整洁
+- 压缩后的提交消息格式：`feat: 编译 {软件名} {版本} - {状态}`
+- 如需保留完整提交历史，在 PR 标题前添加 `[NOSQUASH]` 标记
+
+### PR 生命周期
 
 ```
 协作者编译完成
       │
       ▼
-ohc-run.py submit --check <name> <version>    # 自检
+ohc-run.py submit --check <name> <version>    # 本地自检
       │
       ▼ 通过
-ohc-run.py submit <name> <version>            # 生成提交单到 pending/
+git add . && git commit -m "feat: 编译 {name} {version} - {status}"
+git rebase main && git push origin feat/{software}-{version}
       │
       ▼
-submissions/pending/{name}-{version}-{agent_id}.yaml
+在 GitCode 上创建 PR（填写标题 + 描述三要素）
       │
-      ├──► 主编 review ──► approve ──► submissions/approved/
-      │                               │
-      │                               ├─ 移动 draft → 正式知识目录
-      │                               ├─ 重建 index.tsv
-      │                               ├─ 重建 _index.yaml
-      │                               └─ 重建 SUMMARY.md
+      ▼
+GitCode PR 状态：Open
       │
-      └──► 主编 review ──► reject ──► submissions/rejected/
-                                      └─ 保留草稿供协作者修改后重新提交
+      ├──► 主编本地审核 ──► 通过 ──► GitCode 平台接受 PR（Squash Merge）
+      │                                    │
+      │                                    ├─ 本地 git pull origin main
+      │                                    ├─ 移动 draft → 正式知识目录
+      │                                    ├─ 重建 index.tsv
+      │                                    ├─ 重建 _index.yaml
+      │                                    └─ 重建 SUMMARY.md
+      │
+      └──► 主编本地审核 ──► 拒绝 ──► GitCode 平台拒绝 PR
+                                           └─ 附评论说明原因，协作者可修改后重新提交
 ```
 
 ## §5 协作者工作流
@@ -187,7 +203,12 @@ submissions/pending/{name}-{version}-{agent_id}.yaml
 2. 获取任务（编译某软件）
    → 由主编或任务分配系统指定软件名和版本
 
-3. 执行编译流程（SKILL.md Step 1-5）
+3. 同步并创建分支
+   git pull origin main
+   git checkout -b feat/{software}-{version}
+   → 确保基于最新 main 创建分支
+
+4. 执行编译流程（SKILL.md Step 1-5）
    - Step 1: 下载源码
    - Step 2: 检索历史知识
    - Step 2.5: ohc-run.py init-archive → 创建工作目录和 PROGRESS.md
@@ -195,24 +216,33 @@ submissions/pending/{name}-{version}-{agent_id}.yaml
    - Step 4: 测试 + 补丁校验
    - Step 5: 归档准备
 
-4. 发现新知识 → 写入草稿
+5. 发现新知识 → 写入草稿
    python3 scripts/ohc-run.py graph add E055 --draft
    → 写入 knowledge/graph/draft/E055-A7F3.yaml
    → 包含 contributor_id: A7F3 字段
 
-5. 自检
+6. 本地自检
    python3 scripts/ohc-run.py submit --check <name> <version>
    → 检查：补丁完整性、PROGRESS.md 已关闭、manifest.yaml 字段完整
    → 报告通过/失败项
 
-6. 提交
-   python3 scripts/ohc-run.py submit <name> <version>
-   → 生成 submissions/pending/{name}-{version}-{agent_id}.yaml
-   → 自动归集：补丁列表、测试结果、新增知识草稿清单
+7. 提交并推送到 Git 分支
+   git add .
+   git commit -m "feat: 编译 {name} {version} - {status}"
+   → 包含所有变更：补丁、manifest、PROGRESS.md、知识草稿
 
-7. 等待主编审核
-   → 主编审核通过后，提交单移至 approved/
-   → 主编审核拒绝后，协作者可修改后重新提交
+8. Rebase 并推送
+   git rebase main                    # 与 main 同步，解决可能的冲突
+   git push origin feat/{software}-{version}
+
+9. 在 GitCode 创建 PR
+   → 标题格式：feat: 编译 {软件名} {版本} - {状态}
+   → 描述包含三要素：背景、修改、测试
+   → 等待主编审核
+
+10. 等待主编审核
+   → 主编审核通过 → PR 被 Squash 合并到 main
+   → 主编审核拒绝 → 协作者根据评论修改后重新推送并更新 PR
 ```
 
 ## §6 主编工作流
@@ -222,49 +252,57 @@ submissions/pending/{name}-{version}-{agent_id}.yaml
    python3 scripts/ohc-run.py whoami
    → 确认角色为 editor（OHC_ROLE=editor）
 
-2. 列出待审提交单
-   python3 scripts/ohc-run.py review --list
-   → 显示 submissions/pending/ 下所有提交单
-   → 每条显示：提交单ID、软件名、版本、协作者ID、状态
+2. 查看 GitCode 待审 PR
+   → 在 GitCode 平台上查看所有 Open 状态的 PR
+   → 每条显示：PR 标题、软件名、版本、协作者 ID、状态
 
-3. 审核提交单
-   python3 scripts/ohc-run.py review <submission-id>
-   → 显示提交单详情
-   → 显示变更的文件列表
-   → 显示新增知识草稿内容
-   → 显示 PROGRESS.md 中的知识提取记录
+3. 本地审核 — 获取 PR 分支
+   git fetch origin feat/{software}-{version}
+   git checkout feat/{software}-{version}
+   → 切换到协作者的工作分支
+
+4. 本地审核 — 检查变更
+   git diff main...feat/{software}-{version}   # 查看所有变更文件列表
+   → 检查提交单详情（manifest.yaml、PROGRESS.md）
+   → 检查新增知识草稿内容
+   → 检查 PROGRESS.md 中的知识提取记录
    → 与已有知识进行去重比对
+   → 可使用 ohc-run.py review 辅助检查
 
-4. 知识去重和编号统一
+5. 知识去重和编号统一
    → 检查草稿中的新知识是否与已有条目语义重复
    → 如果有重复，合并或标注
    → 确定最终的编号（可能与草稿中的临时编号不同）
 
-5. 批准（审核通过）
-   python3 scripts/ohc-run.py approve <submission-id>
-   → 自动执行以下操作：
-     a. 移动提交单：pending/ → approved/
-     b. 移动知识草稿：knowledge/graph/draft/ → knowledge/graph/ 正式目录
-     c. 合并新知识到 knowledge/*.md（如 error-patterns.md）
-     d. 重建 knowledge/graph/index.tsv
-     e. 重建 knowledge/graph/_index.yaml
-     f. 重建 SUMMARY.md
-     g. 记录审核日志（含主编 Agent ID）
+6. 通过 → 平台接受 PR（Squash Merge）
+   → 在 GitCode 平台上接受 PR，选择 Squash Merge
+   → 本地同步：
+     git checkout main
+     git pull origin main
+   → 执行合并后操作：
+     a. 移动知识草稿：knowledge/graph/draft/ → knowledge/graph/ 正式目录
+     b. 合并新知识到 knowledge/*.md（如 error-patterns.md）
+     c. 重建 knowledge/graph/index.tsv
+     d. 重建 knowledge/graph/_index.yaml
+     e. 重建 SUMMARY.md
+     f. 记录审核日志（含主编 Agent ID）
+   → 将重建结果提交到 main：
+     git add . && git commit -m "chore: 重建索引 - 合并 {software} {version}"
+     git push origin main
 
-6. 或拒绝（审核不通过）
-   python3 scripts/ohc-run.py reject <submission-id> --reason="具体拒绝原因"
-   → 移动提交单：pending/ → rejected/
-   → 草稿文件保留在 draft/ 中，协作者可修改后重新提交
-   → 拒绝原因记录在提交单 YAML 的 reject_reason 字段中
+7. 或拒绝 → 平台拒绝 PR
+   → 在 GitCode 平台上关闭/拒绝 PR
+   → 附评论说明具体拒绝原因
+   → 草稿文件保留在协作者的分支中，协作者可修改后重新推送并更新 PR
 ```
 
 ## §7 主编审核清单
 
-主编对每个提交单执行以下检查：
+主编对每个 PR 执行以下检查：
 
 ```
 □ 补丁完整性：diff 校验通过，每个源码修改都有对应补丁文件
-□ 提交单格式正确：YAML 格式合法，所有必须字段已填写
+□ PR 格式正确：标题格式符合 feat: 编译 {软件名} {版本} - {状态}
 □ 知识无重复：新增的知识条目与已有条目无语义重复
 □ manifest.yaml 完整：所有必须字段已填写，test_results 非零值
 □ PROGRESS.md 已关闭：末尾有"编译结束"时间戳
@@ -273,77 +311,104 @@ submissions/pending/{name}-{version}-{agent_id}.yaml
 □ 已执行 ohc-run.py check-knowledge-gap：无遗漏的"⏳ 待评估"条目
 □ 临时文件已清理：无 DIAGNOSIS_*.md / MISSING_*.md 等临时文件
 □ 知识草稿完整：draft/ 中的草稿文件包含完整的 YAML 字段
-□ Agent ID 记录：提交单和草稿中的 contributor_id 与实际 Agent ID 一致
+□ Agent ID 记录：PR 和草稿中的 contributor_id 与实际 Agent ID 一致
 □ 无越权修改：协作者未修改 knowledge/ 正式文件、索引文件或 SUMMARY.md
+□ 分支命名规范：分支名符合 feat/{software}-{version} 格式
+□ PR 描述完整：包含背景、修改、测试三要素
 ```
 
-### 审核通过后的自动操作
+### 审核通过后的操作
 
-`ohc-run.py approve` 命令自动执行以下操作：
+主编在 GitCode 平台 Squash 合并 PR 后，本地执行以下操作：
 
-1. 移动提交单到 `submissions/approved/`
+1. `git checkout main && git pull origin main`
 2. 移动知识草稿从 `draft/` 到正式目录，合并到 `knowledge/*.md`
 3. 重建 `knowledge/graph/index.tsv`
 4. 重建 `knowledge/graph/_index.yaml`
 5. 重建 `SUMMARY.md`
+6. `git add . && git commit -m "chore: 重建索引" && git push origin main`
 
 ## §8 并发安全
 
 ### 隔离机制
 
-OpenDesk skill 环境中，多个 Agent 实例共享同一个文件系统。并发安全通过**目录隔离 + 角色权限**保证，无需加锁或版本控制。
+OpenDesk skill 环境中，多个 Agent 实例通过 **Git 分支天然隔离 + 目录隔离 + 角色权限** 保证并发安全，无需额外加锁。
 
 | 资源 | 冲突风险 | 安全机制 |
 |------|---------|---------|
 | `archives/{letter}/{name}/{version}/` | 🟢 无 | 目录天然隔离——不同软件、不同版本 |
+| Git 分支 `feat/{software}-{version}` | 🟢 无 | Git 分支天然隔离——每个协作者在独立分支上工作 |
 | `knowledge/graph/draft/` | 🟢 低 | 草稿文件包含 Agent ID 后缀（如 E055-A7F3.yaml），天然隔离 |
-| `knowledge/*.md`（正式） | 🟢 无 | 协作者禁止写入，只有主编修改 |
+| `knowledge/*.md`（正式） | 🟢 无 | 协作者禁止写入，只有主编修改 main 分支 |
 | `knowledge/graph/index.tsv` | 🟢 无 | 只有主编写入 |
 | `knowledge/graph/_index.yaml` | 🟢 无 | 只有主编写入 |
 | `SUMMARY.md` | 🟢 无 | 只有主编写入 |
-| `submissions/pending/` | 🟢 低 | 文件名含 Agent ID，不会碰撞 |
 | `SKILL.md` | 🟢 低 | 很少修改，主编统一管理 |
-| `scripts/*.py` | 🟡 中 | 新增脚本需在提交单中说明 |
+| `scripts/*.py` | 🟡 中 | 新增脚本需在 PR 中说明 |
 | `templates/*.md` | 🟢 低 | 模板稳定后很少变 |
 
 ### 为什么不需要编号区间预留
 
-在 Git 工作流中，多个协作者直接修改同一个知识文件（如 error-patterns.md），需要预留编号区间来避免冲突。
-
-在提交单工作流中：
+在 Git + PR 工作流中：
+- 每个协作者在独立的 `feat/{software}-{version}` 分支上工作，互不干扰
 - 协作者将新知识写入 `knowledge/graph/draft/` 的独立 YAML 文件（含 Agent ID 后缀）
-- 多个协作者的知识条目互不冲突
-- 主编审核时统一编号、去重、合并
+- 多个协作者的知识条目在不同分支上，互不冲突
+- 主编在合并 PR 时统一编号、去重、合并
 - **无需预协商编号区间**，主编拥有最终编号权
 
-## §9 提交规范
+## §9 提交规范（GitCode PR 规范）
 
-### 提交单标题格式
+> 参照 GitCode 多人协作提交规范。所有工作通过 Git 分支和 Pull Request 提交。
 
-```
-[编译] {软件名} {版本} - {状态}
-[编译] curl 8.7.1 - success
-[编译] python 3.9.25 - partial (89.4% 测试通过)
-[知识] 修复 E055 错误模式描述不准确
-```
+### 分支命名规范
 
-### 提交单 YAML 字段说明
-
-| 字段 | 必填 | 说明 |
+| 类型 | 格式 | 示例 |
 |------|------|------|
-| `submission_id` | ✅ | 格式：`{name}-{version}-{agent_id}`，全局唯一 |
-| `contributor_id` | ✅ | 协作者的 4 位十六进制 Agent ID |
-| `software` | ✅ | 软件名称 |
-| `version` | ✅ | 软件版本 |
-| `status` | ✅ | `success` / `partial` / `failed` |
-| `build_system` | ✅ | 构建系统类型（autotools/cmake/meson等） |
-| `compile_date` | ✅ | 编译日期，ISO 8601 格式 |
-| `new_knowledge` | ✅ | 新增知识清单（可为空列表） |
-| `patches` | ✅ | 补丁文件列表（可为空列表） |
-| `test_results` | ✅ | 测试结果 |
-| `archive_path` | ✅ | 归档目录路径 |
-| `progress_file` | ✅ | PROGRESS.md 路径 |
-| `reject_reason` | 仅拒绝时 | 主编填写的拒绝原因 |
+| 新功能（编译） | `feat/{software}-{version}` | `feat/curl-8.7.1` |
+| 修复 | `fix/{description}` | `fix/e055-error-pattern` |
+| 优化 | `opt/{description}` | `opt/knowledge-index` |
+
+### PR 标题格式
+
+```
+feat: 编译 {软件名} {版本} - {状态}
+```
+
+| 状态 | 说明 |
+|------|------|
+| `success` | 编译成功，测试全部通过 |
+| `partial ({通过率}%)` | 编译成功，部分测试失败 |
+| `failed` | 编译失败（需附失败原因） |
+
+示例：
+```
+feat: 编译 curl 8.7.1 - success
+feat: 编译 python 3.9.25 - partial (89.4% 测试通过)
+fix: 修复 E055 错误模式描述不准确
+opt: 优化 knowledge 索引重建流程
+```
+
+### PR 描述格式
+
+```markdown
+## 背景
+{为什么做这个 PR，相关上下文}
+
+## 修改
+- {变更项 1}
+- {变更项 2}
+- ...
+
+## 测试
+- {测试方法和结果}
+- 本地自检：ohc-run.py submit --check {name} {version} → {通过/失败}
+```
+
+### Squash 合并规则
+
+- **默认使用 Squash Merge**：将分支上所有提交压缩为一个，保持 main 历史整洁
+- 压缩后的提交消息与 PR 标题一致
+- **特殊情况 `[NOSQUASH]`**：如果 PR 包含多个逻辑独立的提交且需要保留完整历史，在 PR 标题前添加 `[NOSQUASH]` 标记，主编将使用普通 Merge
 
 ---
 
@@ -687,4 +752,4 @@ objective: |
 
 ---
 
-*文档版本: 4.0 | 基于 submission 提交单协作模式 | 2026-04-13*
+*文档版本: 5.0 | 基于 Git + GitCode PR 协作模式 | 2026-04-13*
