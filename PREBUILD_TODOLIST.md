@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **23** |
-| 编译成功 | 23 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, jq, file, tar, dos2unix, bash, **htop**) |
-| 打包成功 | 22 (除 libtool 外全部打包成功) |
+| 已完成 | **24** |
+| 编译成功 | 24 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, jq, file, tar, dos2unix, bash, htop, **patch**) |
+| 打包成功 | 23 (除 libtool 外全部打包成功) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -104,7 +104,7 @@
 | 22 | bash | 5.3 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/bash-5.3-ohos-aarch64.tar.gz | `--without-bash-malloc`，依赖 readline+ncurses |
 | 23 | htop | 3.4.1 | ✅ 完成(partial) | ✅ 成功 | ✅ 成功 | packaging/htop-3.4.1-ohos-aarch64.tar.gz (603K) | 3个补丁(build-aux/config.guess+config.sub+IOPriorityPanel.h), ncursesw静态嵌入, 需sudo运行, ✅ 补丁合规性已修正+按10步流程重打包 |
 | 24 | strace | 6.19 | ⬜ 待编译 | - | - | - | ⚠️ ptrace受限, 可能不打包 |
-| 25 | patch | 2.7.6 | ⬜ 待编译 | - | - | - | ⚠️ 原partial |
+| 25 | patch | 2.7.6 | ✅ 完成(partial) | ✅ 成功 | ✅ 成功 | packaging/patch-2.7.6-ohos-aarch64.tar.gz (188K) | 2个补丁(config.guess+config.sub), 32/44测试通过, 核心功能可用, 失败项为鸿蒙平台兼容性问题(umask/SELinux/shell) |
 
 ### 第六阶段：文档/辅助工具
 
@@ -172,6 +172,21 @@
 ### 关键经验
 
 43. **补丁合规性三查** — (1) 非源码文件不能当补丁（.patch-ai-review.txt、.dirstamp）；(2) 生成文件不能当补丁（htop.1 man page，违反 R6）；(3) 补丁内容不能有重复行/错误缩进
+
+### patch 2.7.6（对话 #当前）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **补丁应用失败（所有 strip level）** | 归档中的旧补丁 `config.guess.orig` 路径与 work 目录不匹配 | 手动修改 config.guess（添加 HarmonyOS 检测块）和 config.sub（3 处 ohos 修改） | ✅ |
+| **configure RC=127** | config.guess 无法识别 HarmonyOS 系统（E007）+ config.sub 不接受 ohos 三元组（E072） | E007 + E072 标准修复：config.guess 添加 HarmonyOS 分支，config.sub 添加 linux-ohos*/ohos*/linux-ohos* 三处 | ✅ |
+| **ohc-run.py package 步骤崩溃** | `_resolve_prefix()` fallback 到全局 `$HOME/usr/local/bin`，复制了无关二进制（`[` 等其他软件的文件）导致 sendfile I/O error | 手动打包：只复制 patch 二进制，strip + ELF 签名 + tar.gz | ⚠️ 脚本限制 |
+| **refresh-patch 生成 122 个补丁** | 无构建产物过滤，Makefile/config.h/测试日志等全部生成为补丁 | 手动清理为 2 个源码补丁（config.guess + config.sub），删除其余 + .patch-backup 目录 | ✅ |
+| **9/44 测试失败** | umask 差异(file-modes)、shell shift 行为差异(merge)、SELinux 软链接限制(symlinks) | 已知鸿蒙平台兼容性限制，核心补丁功能验证可用 | ⚠️ 已知限制 |
+
+### 关键经验
+
+46. **ohc-run.py package 需指定精确 staging 路径** — 当 `$HOME/usr/local/bin` 混有多个软件的产物时，package 步骤会尝试复制所有文件导致崩溃。需指定 `--prefix` 或手动打包
+47. **补丁清理：只保留源码修改** — refresh-patch --auto 可能将构建产物（Makefile、config.h、.log）也生成为补丁。编译完成后应人工审查，只保留源码级补丁
 44. **ohc-run.py package 需要正确 staging 路径** — 默认查找 `$TMPDIR/test-install-{name}-{ver}`，实际路径不同时需 `--prefix` 指定
 45. **install.sh 不应在 tar.gz 内** — 按 packaging-guide.md 规范，install.sh 独立存放在 `packaging/` 目录
 
@@ -480,6 +495,12 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 ---
 
 *最后更新: 2026-04-14*
+*v6.3 同步更新：*
+*  - **patch 2.7.6 标记为已完成**（编译+打包+归档，188K，2个补丁，32/44测试通过）*
+*  - 已完成数 23 → **24**（新增 patch）*
+*  - 打包成功数 22 → **23**（新增 patch）*
+*  - patch: 2个补丁(config.guess+config.sub E007/E072), partial(9项平台兼容性测试失败)*
+*  - 新增 2 条关键经验 (#46-#47)：package staging 路径、补丁清理只保留源码修改*
 *v6.2 同步更新：*
 *  - **htop 3.4.1 补丁合规性修正+按10步流程重打包***
 *  - 补丁 5→3（删除 .patch-ai-review.txt + htop.1 生成文件，修复 config.sub 重复行）*

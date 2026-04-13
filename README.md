@@ -10,6 +10,7 @@
 
 ### v7.2 新特性
 
+- **多任务编译调度**: `dispatch` 命令支持拓扑排序、分阶段异步子任务派发、批量状态监控
 - **依赖预编译包自动解析**: 编译前自动检查依赖，有预编译包直接从 [cmd-pkgs](https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs) 安装
 - **多 Agent 协作**: 协作者提交 → 主编审核 → 批准/拒绝，支持多人并行编译
 - **提交单系统**: 替代 Git PR 的轻量级提交机制
@@ -68,7 +69,7 @@ python3 scripts/ohc-run.py review sed 4.9
 
 ```
 scripts/
-├── ohc-run.py              # 统一 CLI 入口（22 子命令）
+├── ohc-run.py              # 统一 CLI 入口（23 子命令）
 ├── ohc/                    # Python 包（27 个 .py，零外部依赖）
 │   ├── driver.py           # 13 步编译驱动
 │   ├── engine.py           # 五阶段错误匹配引擎
@@ -76,6 +77,7 @@ scripts/
 │   ├── status.py           # 编译状态扫描
 │   ├── graph.py            # 知识图谱 CRUD（支持 --draft）
 │   ├── dependency_resolver.py  # 依赖预编译包解析
+│   ├── dispatch.py         # 多任务编译调度（拓扑排序 + 子任务生成）
 │   ├── submission.py       # 提交单系统（submit/review/approve/reject）
 │   └── ...                 # 其余模块
 └── _archive_bash/          # 原始 bash 备份（仅供参考）
@@ -121,6 +123,7 @@ templates/                  # 模板文件（PROGRESS.md, manifest.yaml 等）
 | `submit` | 提交前本地自检 | 协作者 |
 | `review` | 本地审核辅助（12 项检查） | 主编 |
 | `post-merge` | 合并后重建索引 | 主编 |
+| `dispatch` | 多任务编译调度（plan/status/objective/script） | 协作者 |
 
 ## 知识库
 
@@ -183,7 +186,7 @@ curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/relea
 - **可用预编译包**: 23 款（cmd-pkgs 仓库）
 - **文档**: 50+ 篇
 - **Python 模块**: 27 个（零外部依赖）
-- **CLI 子命令**: 22 个
+- **CLI 子命令**: 23 个（含 dispatch 多任务调度）
 
 ## 设计原则
 
@@ -197,4 +200,3 @@ curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/relea
 ## 许可证
 
 Copyright (c) 2024-2026 OpenHarmony PC Developer 社区
-6 OpenHarmony PC Developer 社区
