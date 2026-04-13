@@ -246,7 +246,18 @@ class VerifyBuild:
             encoding="utf-8")
 
         log_ok(f"  质量报告: {verdict}")
-        return 0 if verdict != "FAIL" else 1
+
+        marker = Path(self.archive_dir) / ".verify-passed"
+        if verdict != "FAIL":
+            marker.write_text(
+                f"verified_at={__import__('datetime').datetime.now().isoformat()}\n"
+                f"verdict={verdict}\n",
+                encoding="utf-8",
+            )
+            return 0
+        else:
+            marker.unlink(missing_ok=True)
+            return 1
 
 
 def verify_build_cli(argv: list[str] | None = None) -> int:
