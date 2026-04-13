@@ -17,6 +17,7 @@ _MODULES = {
     "review": "submission",
     "approve": "submission",
     "reject": "submission",
+    "resolve-deps": "dependency_resolver",
 }
 
 

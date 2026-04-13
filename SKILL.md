@@ -103,6 +103,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R15 | 历史仅供参考，不盲从 | 实际参数以本次编译为准，成功后回写 manifest | §4.1 |
 | R16 | 协作不越权 | 不修改主编独占文件 | knowledge/collaboration.md |
 | R17 | 知识先草稿 | graph add --draft | knowledge/collaboration.md |
+| R18 | 依赖先查预编译 | resolve-deps --install 优先于手动编译 | §1.3 决策树 |
 
 ### 1.3 决策树
 
@@ -111,6 +112,11 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ├─ registry 有记录 → ohc-run.py init-build <name> <ver>           （全自动）
 ├─ 有 URL → ohc-run.py init-build <name> <ver> --url=URL          （自动注册）
 └─ 都没有 → ohc-run.py search-url <name> <ver>           → 从候选选 URL
+
+缺依赖？
+├─ 有预编译包 → ohc-run.py resolve-deps --install <name>         （自动安装）
+├─ 无预编译包 → 查 dependencies.md 编译顺序 → 先编依赖
+└─ 不确定 → ohc-run.py resolve-deps --list-available             （查看可用包）
 
 configure 失败？
 ├─ 缺依赖 → 查 dependencies.md 编译顺序 → 先编依赖
@@ -128,6 +134,7 @@ configure 失败？
 | 技能触发 | **SKILL.md**（本文档） | 每次 |
 | 开始编译 | references/compile-guide.md | Step 2 前 |
 | 编译出错 | knowledge/graph/index.tsv → graph/E*.kv | 错误发生时 |
+| 缺少依赖 | ohc-run.py resolve-deps --list-available | init-build Step 7 |
 | 失败处理 | references/failure-handling.md | R11+R12 流程 |
 | 补丁生成 | references/patch-pipeline.md | Phase 3/4 |
 | Staging 验证 | references/staging-verify.md | make install 后 |
@@ -151,7 +158,9 @@ configure 失败？
 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=URL] [--no-download] [--resume]
 ```
 
-内部 8 步：registry 查询 → URL 确定 → 下载 → 解压 → 历史检索 → 骨架创建 → 环境检查 → 输出 `.build-context-<name>-<ver>`。
+内部 **9 步**：registry 查询 → URL 确定 → 下载 → 解压 → 历史检索 → 骨架创建 → **依赖解析** → 环境检查 → 输出 `.build-context-<name>-<ver>`。
+
+> **Step 7 依赖解析（新）**：自动检查编译所需的依赖是否已安装。如果有预编译包可用（来自 [cmd-pkgs](https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/blob/main/README.md)），自动安装。无预编译包的依赖会发出警告。
 
 **关键输出变量**：`BUILD_SOFTWARE`, `BUILD_VERSION`, `BUILD_SYSTEM`, `BUILD_SRC_DIR`, `BUILD_ARCHIVE_DIR`, `DEFAULT_PREFIX`（唯一权威安装前缀）。
 
@@ -255,6 +264,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finalize-archive <软件名> <版本>
 失败发生
 ├─ [R11] 查归档：README.md → manifest.yaml → 软件级 README
 ├─ [R12] 匹配错误：引擎匹配 graph/index.tsv → E*.kv → 方案
+├─ 缺依赖？→ ohc-run.py resolve-deps --install <name>（预编译包优先）
 └─ 动手修复：归档+知识库都没有 → 记录新问题 → 修复 → 继续
 ```
 
@@ -339,6 +349,12 @@ python3 $SKILL_ROOT/scripts/ohc-run.py review --list            # 列出待审�
 python3 $SKILL_ROOT/scripts/ohc-run.py review <submission-id>   # 审核提交
 python3 $SKILL_ROOT/scripts/ohc-run.py approve <submission-id>  # 批准并合并
 python3 $SKILL_ROOT/scripts/ohc-run.py reject <submission-id> --reason="..."  # 拒绝
+
+# 依赖解析（预编译包）
+python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps <软件名>           # 检查依赖
+python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --install <软件名>  # 自动安装
+python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --list-available    # 列出可用包
+python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --refresh           # 刷新远程索引
 ```
 
 ### 5.4 知识分层
@@ -441,8 +457,9 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, rep
 | `ohc-run.py review` | 审核提交单（12 项检查） | 主编 |
 | `ohc-run.py approve` | 批准提交（合并知识+重建索引） | 主编 |
 | `ohc-run.py reject` | 拒绝提交 | 主编 |
+| `ohc-run.py resolve-deps` | 查询/安装预编译依赖 | init-build Step 7 |
 | `software-registry.yaml` | 软件元数据缓存 | init 读写 |
 
 ---
 
-*SKILL.md v7.1 — 2026-04-13 — 增加协作模式（submit/review/approve/reject）*
+*SKILL.md v7.2 — 2026-04-13 — 增加依赖预编译包自动解析（resolve-deps）*

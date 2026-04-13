@@ -17,6 +17,7 @@ from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 from .check_env import check_env
 from .init_archive import init_archive
 from .search_url import search_url
+from .dependency_resolver import get_missing_deps, resolve_and_install
 
 # HarmonyOS 环境可能缺少 CA 证书，创建不验证的 SSL context
 _SSL_CTX = ssl.create_default_context()
@@ -514,10 +515,25 @@ def init_build(software: str, version: str = "", mode: str = "auto",
     if need_scaffold:
         init_archive(software, version, download_url, build_system, pdir=str(project))
 
-    # Step 7: Environment check
+    # Step 7: Dependency resolution
+    log_info("检查编译依赖...")
+    prefix = os.environ.get("DEFAULT_PREFIX", os.path.expanduser("~/usr/local"))
+    missing = get_missing_deps(software, prefix)
+    if missing:
+        missing_prebuilt = [d for d in missing if resolve_and_install.__module__ and True]
+        log_warn(f"  缺失依赖: {', '.join(missing)}")
+        # 尝试自动安装有预编译包的依赖
+        rc = resolve_and_install(software, version, prefix, dry_run=False)
+        if rc != 0:
+            log_warn("  ⚠️ 部分依赖无法自动安装，编译可能会失败")
+            log_warn("  提示: 手动安装预编译包 → ohc-run.py resolve-deps --install <name>")
+    else:
+        log_ok("  所有依赖已就绪")
+
+    # Step 8: Environment check
     check_env()
 
-    # Step 8: Generate context file
+    # Step 9: Generate context file
     ctx_file = project / f".build-context-{software}-{version}"
     _generate_context(
         ctx_file,
