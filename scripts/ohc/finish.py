@@ -147,13 +147,15 @@ class FinishPipeline:
         try:
             rc = v.run()
         except Exception as e:
-            log_warn(f"  verify-build 异常: {e}"); self.steps["step3"] = True; return
-        self.steps["step3"] = True
+            log_warn(f"  verify-build 异常: {e}"); self.steps["step3"] = False; return
         if rc == 0:
+            self.steps["step3"] = True
             self._task_card("11c", "✅完成", "G1-G4 全通过"); log_ok("  G1-G4 全通过")
             if self.status == "failed": self.status = "partial"
         else:
-            self._task_card("11c", "⚠️部分", f"G1-G4 RC={rc}")
+            self.steps["step3"] = False
+            self._task_card("11c", "❌失败", f"G1-G4 RC={rc}")
+            log_fail(f"  质量门禁未通过 (RC={rc})，请修复后重新 verify")
             if self.status == "success": self.status = "partial"
             elif self.status == "partial": self.status = "failed"
 

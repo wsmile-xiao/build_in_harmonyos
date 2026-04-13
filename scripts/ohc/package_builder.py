@@ -250,6 +250,13 @@ class PackageBuilder:
         if not self.archive_dir.exists():
             log_fail(f"归档目录不存在: {self.archive_dir}")
             return 1
+        # Gate: verify must pass before packaging
+        verify_marker = Path(self.archive_dir) / ".verify-passed"
+        if not verify_marker.exists():
+            log_fail("  ❌ 质量门禁未通过（缺少 .verify-passed 标记）")
+            log_fail("     必须先通过: python3 $SKILL_ROOT/scripts/ohc-run.py verify-build <软件> <版本>")
+            return 1
+        log_ok("  质量门禁 ✅")
         self.step1_create_pkgdir()
         self.step2_copy()
         self.step3_symlinks()

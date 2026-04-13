@@ -231,7 +231,7 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|faile
 |------|------|---------|
 | [1/6] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
 | [2/6] close-archive | 归档关闭 | exit 2 |
-| [3/6] verify-build | 质量门禁 G1-G4 | 非阻塞，降级状态 |
+| [3/6] verify-build | 质量门禁 G1-G4 | ❌ 阻塞（未通过则 finish 失败） |
 | [4/6] finalize-archive | 清理+校验+RELEASENOTE | 非致命 |
 | [5/6] check-knowledge-gap | 知识完整性检查 | 非阻塞，提醒补充 |
 | [6/6] gen_summary | 重新生成 SUMMARY.md | 非致命 |
