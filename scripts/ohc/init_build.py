@@ -18,6 +18,7 @@ from .check_env import check_env
 from .init_archive import init_archive
 from .search_url import search_url
 from .dependency_resolver import get_missing_deps, resolve_and_install
+from .edit_tracker import snapshot as edit_tracker_snapshot
 
 # HarmonyOS 环境可能缺少 CA 证书，创建不验证的 SSL context
 _SSL_CTX = ssl.create_default_context()
@@ -325,6 +326,9 @@ def _create_dual_track(orig_dir: Path, work_dir: Path,
         _promote_nested_source(work_dir)
     else:
         log_ok(f"  .work 已存在: {work_dir}")
+
+    # Create edit tracker baseline (for precise patch generation)
+    edit_tracker_snapshot(work_dir, software="", version="")
 
     return 0
 

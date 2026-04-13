@@ -17,23 +17,22 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 
 ### §0.1 协作模式（⭐ 默认生效）
 
-本 skill 默认以**协作者模式**运行。详见 `knowledge/collaboration.md`。
+本 skill 默认以**协作者模式**运行，基于 Git + GitCode PR 协作。详见 `knowledge/collaboration.md` 和 `knowledge/collaboration-tutorial.md`。
 
 | 模式 | 触发方式 | 职责 |
 |------|---------|------|
-| 协作者（默认） | 直接使用 | 编译软件、提取知识、提交工作成果 |
-| 主编 | `OHC_ROLE=editor` 或 `ohc-run.py review` | 审核提交、合并知识、重建索引 |
+| 协作者（默认） | 直接使用 | 编译软件、提取知识、创建分支并提交 PR |
+| 主编 | `OHC_ROLE=editor` | 审核 PR、合并知识、重建索引 |
 
-**协作者铁律（违反=越权）**：
+**协作者 Git 铁律（违反=越权）**：
+- ❌ 不要直接推送到 main 分支，必须创建功能分支
 - ❌ 不要修改 `knowledge/graph/index.tsv`、`archives/_index.yaml`、`SUMMARY.md`
 - ❌ 不要修改 `SKILL.md`、`references/`、`templates/`、`scripts/`
 - ❌ 不要修改不属于自己负责的软件归档目录
-- ❌ 不要删除或重命名 `knowledge/` 下的任何现有文件
-- ❌ 发现问题写入 `reports/skill-feedback.md`（版本级），不要直接修复全局文件
 - ✅ 新增知识用 `ohc-run.py graph add E{N} --draft`（写草稿目录）
-- ✅ 完成后用 `ohc-run.py submit <软件名> <版本>` 提交工作成果
+- ✅ 完成后创建 PR：`git checkout -b feat/{软件名}-{版本}` → commit → push → GitCode PR
 
-**Agent ID**：每个 Agent 实例自动获取 4 位随机标识（如 `A7F3`），用于提交单和草稿归属。可通过 `OHC_AGENT_ID` 环境变量预设。
+**Agent ID**：每个 Agent 实例自动获取 4 位随机标识（如 `A7F3`），用于分支后缀和草稿归属。可通过 `OHC_AGENT_ID` 环境变量预设。
 
 ---
 
@@ -82,7 +81,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-### 1.2 铁律摘要（15 条，违反=bug）
+### 1.2 铁律摘要（19 条，违反=bug）
 
 | # | 规则 | 一句话 | 详解 |
 |---|------|--------|------|
@@ -91,7 +90,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R3 | 补丁只用 ohc-run.py refresh-patch | `ohc-run.py refresh-patch --auto` | references/patch-pipeline.md |
 | R4 | 危险库静态编译 | ncurses `--without-shared` | §7 Gotchas |
 | R5 | 软链接验证可执行+禁止 ln -sf | `rm -f && ln -s` | §7 Gotchas |
-| R6 | 禁止改生成文件 | 只改 configure.ac/CMakeLists/源码 | references/iron-rules.md |
+| R6 | 只改源文件不改生成文件 | 用 `track-edit` 追踪，refresh-patch 只生成追踪文件的补丁 | references/iron-rules.md |
 | R7 | 安全弹窗先触发再测试 | make install 后扫一遍 --version | references/compile-guide.md |
 | R8 | 源码"四不"准则 | `#ifdef __OHOS__` 守卫 | references/iron-rules.md |
 | R9 | 门禁 FAIL 禁标 success | 降级为 partial/failed | references/iron-rules.md |
@@ -101,9 +100,10 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R13 | 脚本用完整路径 | `python3 $SKILL_ROOT/scripts/ohc-run.py <cmd>` | §0 |
 | R14 | 脚本失败=手动模式入口 | `--resume-from=StepN` 继续 | references/failure-handling.md |
 | R15 | 历史仅供参考，不盲从 | 实际参数以本次编译为准，成功后回写 manifest | §4.1 |
-| R16 | 协作不越权 | 不修改主编独占文件 | knowledge/collaboration.md |
+| R16 | 协作不越权 | 不推送 main，走 PR 流程 | knowledge/collaboration.md |
 | R17 | 知识先草稿 | graph add --draft | knowledge/collaboration.md |
 | R18 | 依赖先查预编译 | resolve-deps --install 优先于手动编译 | §1.3 决策树 |
+| R19 | 禁止手动打包 | 必须用 ohc-run.py package 10 步管线 | §3 Step 5 |
 
 ### 1.3 决策树
 
@@ -241,6 +241,7 @@ $SKILL_ROOT/scripts/ohc-run.py verify-build <软件名> <版本>
 ### Step 5: 预编译包制作
 
 > **详解**: references/packaging-guide.md
+> **R19: 禁止手动打包！必须用 `ohc-run.py package`。** 手动 `tar czf` 会导致 ELF 未签名（鸿蒙上不可执行）、缺少 RPATH、未 strip 符号等问题。
 
 verify PASS 后**必须**执行。按 packaging.md 10 步：收集 → 清理 → 链接替换 → 依赖收集 → RPATH → Strip → 签名 → 权限 → install.sh → tar.gz。
 
@@ -342,13 +343,9 @@ python3 $SKILL_ROOT/scripts/ohc-run.py graph remove E{NNN} [--archive]
 # 独立引擎匹配
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 
-# 协作命令
-python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本>   # 提交工作成果
-python3 $SKILL_ROOT/scripts/ohc-run.py submit --check <软件名> <版本>  # 仅自检
-python3 $SKILL_ROOT/scripts/ohc-run.py review --list            # 列出待审提交
-python3 $SKILL_ROOT/scripts/ohc-run.py review <submission-id>   # 审核提交
-python3 $SKILL_ROOT/scripts/ohc-run.py approve <submission-id>  # 批准并合并
-python3 $SKILL_ROOT/scripts/ohc-run.py reject <submission-id> --reason="..."  # 拒绝
+# 协作命令（协作者）
+python3 $SKILL_ROOT/scripts/ohc-run.py submit --check <软件名> <版本>  # 本地自检（提交 PR 前）
+python3 $SKILL_ROOT/scripts/ohc-run.py review <软件名> <版本>         # 主编本地辅助审核
 
 # 依赖解析（预编译包）
 python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps <软件名>           # 检查依赖
@@ -453,13 +450,14 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, rep
 | `ohc-run.py status` | 跨对话编译状态扫描 | 恢复编译时 |
 | `ohc-run.py handoff` | HANDOFF 上下文输出 | 恢复编译时 |
 | `ohc-run.py summary` | 生成 SUMMARY.md | finish Step 6 |
-| `ohc-run.py submit` | 提交工作成果（自检+生成提交单） | 协作者 Step 5.5 后 |
-| `ohc-run.py review` | 审核提交单（12 项检查） | 主编 |
-| `ohc-run.py approve` | 批准提交（合并知识+重建索引） | 主编 |
-| `ohc-run.py reject` | 拒绝提交 | 主编 |
+| `ohc-run.py submit` | 提交前本地自检 | 协作者 PR 前 |
+| `ohc-run.py review` | 本地审核辅助（12 项检查） | 主编 |
+| `ohc-run.py post-merge` | 合并后重建索引（5 步） | 主编 |
 | `ohc-run.py resolve-deps` | 查询/安装预编译依赖 | init-build Step 7 |
+| `ohc-run.py track-edit` | 追踪/查询源码编辑记录 | 编译中每次修改源文件时 |
 | `software-registry.yaml` | 软件元数据缓存 | init 读写 |
 
 ---
 
-*SKILL.md v7.2 — 2026-04-13 — 增加依赖预编译包自动解析（resolve-deps）*
+*SKILL.md v7.3 — 2026-04-13 — 协作模式改为 Git+GitCode PR 流程*
+.md v7.3 — 2026-04-13 — 协作模式改为 Git+GitCode PR 流程*

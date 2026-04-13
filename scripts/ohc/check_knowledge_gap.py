@@ -80,8 +80,18 @@ def check_knowledge_gap(name: str, version: str, pdir: str | None = None) -> int
     has_gap = pending > 0 or failed > 0 or unreferenced > 0
     if has_gap:
         log_warn(f"⚠️ 存在知识遗漏: pending={pending} failed={failed} unreferenced={unreferenced}")
+        # Remove stale marker if exists
+        marker = ver_dir / ".knowledge-done"
+        marker.unlink(missing_ok=True)
         return 3
 
+    # Write completion marker (finish.py checks this as a gate)
+    marker = ver_dir / ".knowledge-done"
+    marker.write_text(
+        f"checked_at={__import__('datetime').datetime.now().isoformat()}\n"
+        f"pending={pending}\nfailed={failed}\nunreferenced={unreferenced}\n",
+        encoding="utf-8",
+    )
     log_ok("✅ 知识完整性检查通过")
     return 0
 

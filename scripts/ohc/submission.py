@@ -1,12 +1,11 @@
-"""协作提交单系统 — submit / review / approve / reject。
+"""协作辅助工具 — 本地自检 + 审核辅助 + 合并后重建。
 
-替代 Git PR，用于多 Agent 协作场景下的提交审核流程。
+适配 Git + GitCode PR 工作流，替代原有提交单系统。
 
 Usage:
     python3 ohc-run.py submit <software> <version>
-    python3 ohc-run.py review [--list | <submission-id> | --all-pending]
-    python3 ohc-run.py approve <submission-id>
-    python3 ohc-run.py reject <submission-id> --reason="..."
+    python3 ohc-run.py review <software> <version>
+    python3 ohc-run.py post-merge <software> <version>
 """
 from __future__ import annotations
 
@@ -33,29 +32,6 @@ from .utils import (
 # ═══════════════════════════════════════════════════════
 # Path helpers
 # ═══════════════════════════════════════════════════════
-
-def _submissions_dir(pdir: str | None = None) -> Path:
-    """Return submissions/ directory root."""
-    return Path(pdir or find_project_dir()) / "submissions"
-
-
-def _pending_dir(pdir: str | None = None) -> Path:
-    d = _submissions_dir(pdir) / "pending"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _approved_dir(pdir: str | None = None) -> Path:
-    d = _submissions_dir(pdir) / "approved"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def _rejected_dir(pdir: str | None = None) -> Path:
-    d = _submissions_dir(pdir) / "rejected"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
 
 def _archive_dir(letter: str, name: str, version: str,
                  pdir: str | None = None) -> Path:
@@ -282,11 +258,11 @@ def _scan_knowledge_ref(ver_dir: Path) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════
-# cmd: submit
+# cmd: submit — 纯自检
 # ═══════════════════════════════════════════════════════
 
 def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
-    """Create a submission for the given software+version."""
+    """Run self-check for the given software+version (no YAML generation)."""
     project_dir = pdir or find_project_dir()
     agent_id = get_agent_id(project_dir)
     letter = software[0].lower()
@@ -363,207 +339,54 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
             content = rf.read_text(encoding="utf-8", errors="replace")
             new_issues += len(re.findall(r'❌|FAIL|失败|issue', content, re.I))
 
-    # ── Generate submission YAML ──
-    today_str = datetime.now().strftime("%Y%m%d")
-    submission_id = f"{software}-{version}-{today_str}"
-    submitted_at = datetime.now().isoformat()
+    # ── Print summary ──
+    passed_count = sum(1 for v in checklist.values() if v)
+    total_count = len(checklist)
 
-    submission_data = {
-        "submission_id": submission_id,
-        "submitted_at": submitted_at,
-        "contributor_id": agent_id,
-        "deliverables": {
-            "archive_path": f"archives/{letter}/{software}/{version}/",
-            "patches_count": patches_count,
-            "packaging": packaging_files,
-        },
-        "build_result": {
-            "status": status,
-            "build_system": build_system,
-            "test_passed": test_passed_val,
-            "test_failed": test_failed_val,
-            "test_note": test_note,
-        },
-        "knowledge_new": {
-            "draft_entries": draft_entries,
-            "l1_writes": l1_writes,
-            "l2_writes": l2_writes,
-        },
-        "feedback": {
-            "skill_feedback_path": f"archives/{letter}/{software}/{version}/reports/skill-feedback.md",
-            "new_issues": new_issues,
-        },
-        "checklist": checklist,
-    }
-
-    # ── Write submission file (overwrite if exists) ──
-    pending_dir = _pending_dir(project_dir)
-    # Find and remove any existing submission for same software+version
-    existing_pattern = f"{software}-{version}-*.yaml"
-    for existing in pending_dir.glob(existing_pattern):
-        existing.unlink()
-        log_info(f"覆盖已有提交单: {existing.name}")
-
-    submission_path = pending_dir / f"{submission_id}.yaml"
-    _write_yaml_structured(submission_path, submission_data)
-
-    log_ok(f"提交单已创建: {submission_path}")
-    print(f"\n  📋 Submission: {submission_id}")
+    print(f"\n  ✅ 自检完成: {passed_count}/{total_count} PASS")
     print(f"     Contributor: {agent_id}")
     print(f"     Status: {status}")
     print(f"     Patches: {patches_count}")
-    print(f"     Checklist: {sum(checklist.values())}/{len(checklist)} passed")
+    print(f"     Knowledge: {len(knowledge_gained)} gained, {len(knowledge_ref)} ref")
+    print(f"     Issues found: {new_issues}")
+    print()
+    print(f"  下一步:")
+    print(f"    git checkout -b feat/{software}-{version}")
+    print(f"    git add archives/ knowledge/graph/draft/")
+    print(f"    git commit -m \"feat: 编译 {software} {version}\"")
+    print(f"    git push origin feat/{software}-{version}")
+    print(f"    然后在 GitCode 创建 PR")
 
     return 0
 
 
-def _write_yaml_structured(path: Path, data: dict, indent: int = 0) -> None:
-    """Write a nested dict to YAML format."""
-    lines: list[str] = []
-    _flatten_yaml(data, lines, indent=0)
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def _flatten_yaml(data, lines: list[str], indent: int = 0) -> None:
-    """Recursively flatten a dict/list into YAML lines."""
-    prefix = "  " * indent
-    if isinstance(data, dict):
-        for key, value in data.items():
-            if isinstance(value, (dict, list)):
-                lines.append(f"{prefix}{key}:")
-                _flatten_yaml(value, lines, indent + 1)
-            elif isinstance(value, bool):
-                lines.append(f"{prefix}{key}: {'true' if value else 'false'}")
-            elif isinstance(value, int):
-                lines.append(f"{prefix}{key}: {value}")
-            elif isinstance(value, list):
-                if not value:
-                    lines.append(f"{prefix}{key}: []")
-                else:
-                    lines.append(f"{prefix}{key}:")
-                    _flatten_yaml(value, lines, indent + 1)
-            else:
-                # String value
-                val_str = str(value)
-                if "\n" in val_str or ":" in val_str:
-                    lines.append(f'{prefix}{key}: "{val_str}"')
-                else:
-                    lines.append(f"{prefix}{key}: {val_str}")
-    elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                # Not expected in our simple format
-                lines.append(f"{prefix}- {item}")
-            elif isinstance(item, bool):
-                lines.append(f"{prefix}- {'true' if item else 'false'}")
-            else:
-                val_str = str(item)
-                lines.append(f"{prefix}- {val_str}")
-    else:
-        lines.append(f"{prefix}{data}")
-
-
 # ═══════════════════════════════════════════════════════
-# cmd: review
+# cmd: review — 本地审核辅助
 # ═══════════════════════════════════════════════════════
 
-def cmd_review(submission_id: str | None = None, *,
-               list_pending: bool = False, all_pending: bool = False,
+def cmd_review(software: str, version: str,
                pdir: str | None = None) -> int:
-    """Review one or all pending submissions."""
+    """Review a software+version by directly scanning archive directory."""
     project_dir = pdir or find_project_dir()
-    pending_dir = _pending_dir(project_dir)
+    letter = software[0].lower()
+    ver_dir = _archive_dir(letter, software, version, project_dir)
 
-    # ── List mode ──
-    if list_pending:
-        submissions = sorted(pending_dir.glob("*.yaml"))
-        if not submissions:
-            log_info("无待审核提交单")
-            return 0
-        print(f"\n  📋 Pending Submissions ({len(submissions)}):\n")
-        print(f"  {'ID':<35} {'Contributor':<12} {'Software':<20} {'Status':<10} {'Time'}")
-        print(f"  {'─' * 95}")
-        for sp in submissions:
-            data = _parse_yaml_simple(sp)
-            sid = data.get("submission_id", sp.stem)
-            contrib = data.get("contributor_id", "?")
-            deliverables = data.get("deliverables", {})
-            archive_path = deliverables if isinstance(deliverables, str) else str(deliverables.get("archive_path", "?"))
-            # Extract software name from archive_path
-            parts = archive_path.split("/")
-            sw_name = parts[2] if len(parts) > 2 else "?"
-            br = data.get("build_result", {})
-            status = br.get("status", "?") if isinstance(br, dict) else "?"
-            submitted = data.get("submitted_at", "?")
-            if len(submitted) > 19:
-                submitted = submitted[:19]
-            print(f"  {sid:<35} {contrib:<12} {sw_name:<20} {status:<10} {submitted}")
-        print()
-        return 0
-
-    # ── All-pending mode ──
-    if all_pending:
-        submissions = sorted(pending_dir.glob("*.yaml"))
-        if not submissions:
-            log_info("无待审核提交单")
-            return 0
-        total_pass = 0
-        total_fail = 0
-        for sp in submissions:
-            print(f"\n{'═' * 60}")
-            result = _review_single(sp, project_dir)
-            if result == 0:
-                total_pass += 1
-            else:
-                total_fail += 1
-        print(f"\n{'═' * 60}")
-        log_info(f"审核完成: {total_pass} PASS, {total_fail} FAIL")
-        return 0 if total_fail == 0 else 1
-
-    # ── Single submission ──
-    if not submission_id:
-        log_fail("请指定 submission-id 或使用 --list / --all-pending")
+    if not ver_dir.exists():
+        log_fail(f"版本目录不存在: {ver_dir}")
         return 1
 
-    # Find the submission file
-    sub_path = pending_dir / f"{submission_id}.yaml"
-    if not sub_path.exists():
-        # Try glob
-        candidates = list(pending_dir.glob(f"{submission_id}*.yaml"))
-        if len(candidates) == 1:
-            sub_path = candidates[0]
-        elif len(candidates) > 1:
-            log_fail(f"多个匹配: {[c.name for c in candidates]}")
-            return 1
-        else:
-            log_fail(f"提交单不存在: {submission_id}")
-            return 1
-
-    return _review_single(sub_path, project_dir)
+    return _review_single(software, version, ver_dir, project_dir)
 
 
-def _review_single(sub_path: Path, project_dir: str) -> int:
-    """Review a single submission and output results."""
-    data = _parse_yaml_simple(sub_path)
-    sid = data.get("submission_id", sub_path.stem)
+def _review_single(software: str, version: str,
+                   ver_dir: Path, project_dir: str) -> int:
+    """Review a single software+version and output results."""
+    sid = f"{software}-{version}"
     print(f"\n  🔍 Reviewing: {sid}")
-    log_info(f"Contributor: {data.get('contributor_id', '?')}")
 
-    # Extract archive path info
-    deliverables = data.get("deliverables", {})
-    if isinstance(deliverables, dict):
-        archive_path = deliverables.get("archive_path", "")
-    else:
-        archive_path = ""
-
-    # Parse archive path: archives/{letter}/{name}/{version}/
-    parts = archive_path.strip("/").split("/")
-    if len(parts) < 4:
-        log_fail(f"无法解析 archive_path: {archive_path}")
-        return 1
-
-    letter, sw_name, version = parts[1], parts[2], parts[3]
-    ver_dir = Path(project_dir) / "archives" / letter / sw_name / version
+    # Load manifest for status
+    manifest = _parse_yaml_simple(ver_dir / "manifest.yaml")
+    status = str(manifest.get("status", "unknown"))
 
     checks: list[tuple[str, str, str]] = []  # (name, status, detail)
     pass_count = 0
@@ -685,13 +508,6 @@ def _review_single(sub_path: Path, project_dir: str) -> int:
         _record("4. Manifest完整性", "FAIL", "manifest.yaml 不存在")
 
     # ── Check 5: 未修改禁止文件 ──
-    # In our submission system (no git), we check if _index.yaml or SUMMARY.md
-    # appear in the archive directory (they shouldn't be there)
-    idx_path = Path(project_dir) / "archives" / "_index.yaml"
-    summary_path = Path(project_dir) / "SUMMARY.md"
-    forbidden_modified = False
-    # Since there's no git, we just note this check passes by default
-    # A real implementation would check timestamps or checksums
     _record("5. 禁止文件检查", "PASS", "archives/_index.yaml 和 SUMMARY.md 未在提交范围")
 
     # ── Check 6: PROGRESS.md 已关闭 ──
@@ -724,8 +540,6 @@ def _review_single(sub_path: Path, project_dir: str) -> int:
         _record("8. knowledge_ref引用", "PASS", "无引用")
 
     # ── Check 9: 打包产物 ──
-    br = data.get("build_result", {})
-    status = br.get("status", "unknown") if isinstance(br, dict) else "unknown"
     if _check_packaging_present(ver_dir, status):
         _record("9. 打包产物", "PASS")
     else:
@@ -737,17 +551,21 @@ def _review_single(sub_path: Path, project_dir: str) -> int:
     else:
         _record("10. 测试报告", "WARN", "缺少 reports/test-report.md")
 
-    # ── Check 11: Checklist from submission ──
-    checklist = data.get("checklist", {})
-    if isinstance(checklist, dict):
-        all_passed = all(v for v in checklist.values() if isinstance(v, bool))
-        if all_passed:
-            _record("11. 提交自检", "PASS")
-        else:
-            failed_checks = [k for k, v in checklist.items() if v is False]
-            _record("11. 提交自检", "WARN", f"未通过: {failed_checks}")
+    # ── Check 11: 提交自检 ──
+    checklist = {
+        "manifest_complete": _check_manifest_complete(ver_dir),
+        "progress_closed": _check_progress_closed(ver_dir),
+        "patches_valid": _check_patches_valid(ver_dir),
+        "packaging_present": _check_packaging_present(ver_dir, status),
+        "no_temp_files": _check_no_temp_files(ver_dir),
+        "test_report_present": _check_test_report(ver_dir),
+    }
+    all_passed = all(v for v in checklist.values() if isinstance(v, bool))
+    if all_passed:
+        _record("11. 提交自检", "PASS")
     else:
-        _record("11. 提交自检", "WARN", "提交单中无自检结果")
+        failed_checks = [k for k, v in checklist.items() if v is False]
+        _record("11. 提交自检", "WARN", f"未通过: {failed_checks}")
 
     # ── Check 12: Overall assessment ──
     if fail_count == 0:
@@ -758,9 +576,9 @@ def _review_single(sub_path: Path, project_dir: str) -> int:
     # ── Print summary ──
     print(f"\n  📋 Review Summary for {sid}:")
     print(f"  {'─' * 60}")
-    for name, status, detail in checks:
-        icon = "✅" if status == "PASS" else "⚠️" if status == "WARN" else "❌"
-        line = f"  {icon} {name}: {status}"
+    for name, chk_status, detail in checks:
+        icon = "✅" if chk_status == "PASS" else "⚠️" if chk_status == "WARN" else "❌"
+        line = f"  {icon} {name}: {chk_status}"
         if detail:
             line += f" — {detail}"
         print(line)
@@ -768,50 +586,31 @@ def _review_single(sub_path: Path, project_dir: str) -> int:
     print(f"  {'─' * 60}")
     total = pass_count + warn_count + fail_count
     print(f"  结果: {pass_count} PASS / {warn_count} WARN / {fail_count} FAIL (共 {total} 项)")
+    print(f"\n  → 在 GitCode 平台 Merge PR 或 Close PR")
 
     return 1 if fail_count > 0 else 0
 
 
 # ═══════════════════════════════════════════════════════
-# cmd: approve
+# cmd: post-merge — 合并后重建
 # ═══════════════════════════════════════════════════════
 
-def cmd_approve(submission_id: str, pdir: str | None = None) -> int:
-    """Approve a pending submission and merge its artifacts."""
+def cmd_post_merge(software: str, version: str,
+                   pdir: str | None = None) -> int:
+    """Post-merge rebuild: move drafts, rebuild indexes, harvest feedback."""
     from .models import parse_kv_file, write_kv_file
     from .graph import _regenerate_index, _kv_to_tsv_row
 
     project_dir = pdir or find_project_dir()
-    pending_dir = _pending_dir(project_dir)
-    approved_dir = _approved_dir(project_dir)
+    letter = software[0].lower()
+    ver_dir = _archive_dir(letter, software, version, project_dir)
 
-    # Find submission
-    sub_path = pending_dir / f"{submission_id}.yaml"
-    if not sub_path.exists():
-        candidates = list(pending_dir.glob(f"{submission_id}*.yaml"))
-        if len(candidates) == 1:
-            sub_path = candidates[0]
-        elif len(candidates) > 1:
-            log_fail(f"多个匹配: {[c.name for c in candidates]}")
-            return 1
-        else:
-            log_fail(f"提交单不存在: {submission_id}")
-            return 1
-
-    data = _parse_yaml_simple(sub_path)
-    sid = data.get("submission_id", sub_path.stem)
-
-    # Extract archive path
-    deliverables = data.get("deliverables", {})
-    archive_path = deliverables.get("archive_path", "") if isinstance(deliverables, dict) else ""
-    parts = archive_path.strip("/").split("/")
-    if len(parts) < 4:
-        log_fail(f"无法解析 archive_path: {archive_path}")
+    if not ver_dir.exists():
+        log_fail(f"版本目录不存在: {ver_dir}")
         return 1
 
-    letter, sw_name, version = parts[1], parts[2], parts[3]
-
-    log_info(f"Approving: {sid}")
+    sid = f"{software}-{version}"
+    log_info(f"Post-merge rebuild: {sid}")
 
     # ── Step 1: Move draft .kv files to formal knowledge/graph/ ──
     draft_dir = Path(graph_dir(project_dir)) / "draft"
@@ -887,9 +686,8 @@ def cmd_approve(submission_id: str, pdir: str | None = None) -> int:
         log_ok(f"  重建 index.tsv ({len(rows)} 行)")
 
     # ── Step 3: Rebuild archives/_index.yaml ──
-    # Use summary.py's scan logic indirectly
     try:
-        from .summary import _scan_archives_dir, _parse_yaml_simple as _sum_yaml
+        from .summary import _scan_archives_dir
         archives_dir = Path(project_dir) / "archives"
         index_yaml_path = archives_dir / "_index.yaml"
         archive_entries = _scan_archives_dir(archives_dir)
@@ -915,79 +713,27 @@ def cmd_approve(submission_id: str, pdir: str | None = None) -> int:
         log_warn(f"  重建 SUMMARY.md 失败: {e}")
 
     # ── Step 5: Harvest version-level skill-feedback ──
-    feedback_path = (Path(project_dir) / "archives" / letter / sw_name / version
+    feedback_path = (Path(project_dir) / "archives" / letter / software / version
                      / "reports" / "skill-feedback.md")
     root_feedback = Path(project_dir) / "reports" / "skill-feedback.md"
     if feedback_path.exists():
         root_feedback.parent.mkdir(parents=True, exist_ok=True)
         feedback_content = feedback_path.read_text(encoding="utf-8")
-        separator = f"\n\n---\n## {sw_name} {version} (from {sid})\n\n"
+        separator = f"\n\n---\n## {software} {version} (post-merge)\n\n"
         with open(root_feedback, "a", encoding="utf-8") as f:
             f.write(separator + feedback_content)
         log_ok("  收割 skill-feedback.md")
 
-    # ── Step 6: Move submission to approved/ ──
-    target = approved_dir / sub_path.name
-    shutil.move(str(sub_path), str(target))
-    # Append approval metadata
-    _append_yaml_fields(target, {
-        "approved_at": datetime.now().isoformat(),
-        "status": "approved",
-    })
-
-    # ── Step 7: Output summary ──
-    print(f"\n  ✅ Approval Summary:")
-    print(f"     Submission: {sid}")
+    # ── Step 6: Output summary ──
+    print(f"\n  ✅ Post-merge Summary:")
+    print(f"     Software: {software}")
+    print(f"     Version: {version}")
     print(f"     Draft entries moved: {moved_count}")
-    print(f"     Archive: {archive_path}")
-    print(f"     Moved to: submissions/approved/{sub_path.name}")
-
-    return 0
-
-
-# ═══════════════════════════════════════════════════════
-# cmd: reject
-# ═══════════════════════════════════════════════════════
-
-def cmd_reject(submission_id: str, reason: str = "",
-               pdir: str | None = None) -> int:
-    """Reject a pending submission."""
-    project_dir = pdir or find_project_dir()
-    pending_dir = _pending_dir(project_dir)
-    rejected_dir = _rejected_dir(project_dir)
-
-    # Find submission
-    sub_path = pending_dir / f"{submission_id}.yaml"
-    if not sub_path.exists():
-        candidates = list(pending_dir.glob(f"{submission_id}*.yaml"))
-        if len(candidates) == 1:
-            sub_path = candidates[0]
-        elif len(candidates) > 1:
-            log_fail(f"多个匹配: {[c.name for c in candidates]}")
-            return 1
-        else:
-            log_fail(f"提交单不存在: {submission_id}")
-            return 1
-
-    data = _parse_yaml_simple(sub_path)
-    sid = data.get("submission_id", sub_path.stem)
-
-    # Move to rejected/
-    target = rejected_dir / sub_path.name
-    shutil.move(str(sub_path), str(target))
-
-    # Append rejection metadata
-    _append_yaml_fields(target, {
-        "status": "rejected",
-        "rejected_at": datetime.now().isoformat(),
-        "editor_notes": reason,
-    })
-
-    log_ok(f"已拒绝提交单: {sid}")
-    print(f"\n  ❌ Rejected: {sid}")
-    if reason:
-        print(f"     原因: {reason}")
-    print(f"     移动到: submissions/rejected/{sub_path.name}")
+    print(f"     Archive: archives/{letter}/{software}/{version}/")
+    print(f"\n  下一步:")
+    print(f"    git add .")
+    print(f"    git commit -m \"chore: post-merge rebuild for {software} {version}\"")
+    print(f"    git push")
 
     return 0
 
@@ -1000,7 +746,7 @@ def submit_cli(argv: list[str] | None = None) -> int:
     """CLI entry point: ohc submit <software> <version>"""
     parser = argparse.ArgumentParser(
         prog="ohc submit",
-        description="创建协作提交单",
+        description="编译自检（不生成提交单）",
     )
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", help="版本号")
@@ -1011,50 +757,31 @@ def submit_cli(argv: list[str] | None = None) -> int:
 
 
 def review_cli(argv: list[str] | None = None) -> int:
-    """CLI entry point: ohc review [--list | <id> | --all-pending]"""
+    """CLI entry point: ohc review <software> <version>"""
     parser = argparse.ArgumentParser(
         prog="ohc review",
-        description="审核协作提交单",
+        description="本地审核辅助（直接扫描目录）",
     )
-    parser.add_argument("submission_id", nargs="?", default=None,
-                        help="提交单 ID（可选）")
-    parser.add_argument("--list", "-l", action="store_true",
-                        help="列出所有待审核提交单")
-    parser.add_argument("--all-pending", "-a", action="store_true",
-                        help="审核所有待审核提交单")
+    parser.add_argument("software", help="软件名称")
+    parser.add_argument("version", help="版本号")
     parser.add_argument("--project-dir", "-p", default=None)
     args = parser.parse_args(argv)
     return cmd_review(
-        args.submission_id,
-        list_pending=args.list,
-        all_pending=args.all_pending,
+        args.software,
+        args.version,
         pdir=getattr(args, "project_dir", None),
     )
 
 
-def approve_cli(argv: list[str] | None = None) -> int:
-    """CLI entry point: ohc approve <submission-id>"""
+def post_merge_cli(argv: list[str] | None = None) -> int:
+    """CLI entry point: ohc post-merge <software> <version>"""
     parser = argparse.ArgumentParser(
-        prog="ohc approve",
-        description="批准协作提交单并合并",
+        prog="ohc post-merge",
+        description="合并后重建（draft→正式, 重建索引, 收割反馈）",
     )
-    parser.add_argument("submission_id", help="提交单 ID")
+    parser.add_argument("software", help="软件名称")
+    parser.add_argument("version", help="版本号")
     parser.add_argument("--project-dir", "-p", default=None)
     args = parser.parse_args(argv)
-    return cmd_approve(args.submission_id,
-                       pdir=getattr(args, "project_dir", None))
-
-
-def reject_cli(argv: list[str] | None = None) -> int:
-    """CLI entry point: ohc reject <submission-id> --reason='...'"""
-    parser = argparse.ArgumentParser(
-        prog="ohc reject",
-        description="拒绝协作提交单",
-    )
-    parser.add_argument("submission_id", help="提交单 ID")
-    parser.add_argument("--reason", "-r", default="",
-                        help="拒绝原因")
-    parser.add_argument("--project-dir", "-p", default=None)
-    args = parser.parse_args(argv)
-    return cmd_reject(args.submission_id, reason=args.reason,
-                      pdir=getattr(args, "project_dir", None))
+    return cmd_post_merge(args.software, args.version,
+                          pdir=getattr(args, "project_dir", None))

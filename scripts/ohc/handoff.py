@@ -47,18 +47,37 @@ class HandoffData:
 
 def format_handoff_block(data: HandoffData) -> str:
     """Format the HANDOFF block for stdout (same visual format as bash)."""
+    is_knowledge = data.exit_reason in ("finish_success", "finish_knowledge_required")
+
+    if is_knowledge:
+        is_blocking = data.exit_reason == "finish_knowledge_required"
+        header = "KNOWLEDGE CONSOLIDATION — MANDATORY" if is_blocking else "KNOWLEDGE CONSOLIDATION"
+        exit_hint = "⚠️ 阻塞！必须完成知识整理后重新 finish" if is_blocking else "知识整理已完成"
+    else:
+        header = "HANDOFF"
+        exit_hint = f"{'resumable' if data.exit_code == 2 else 'fatal'}"
+
     lines = [
         "",
-        "╔═══ HANDOFF ══════════════════════════════════╗",
+        f"╔═══ {header} ══════════════════════════════════╗",
         f"║ EXIT_REASON: {data.exit_reason}",
-        f"║ EXIT_CODE: {data.exit_code} ({'resumable' if data.exit_code == 2 else 'fatal'})",
+        f"║ EXIT_CODE: {data.exit_code} ({exit_hint})",
         f"║ STEP_FAILED: {data.step_failed}",
         f"║ RESUME_CMD: {data.resume_cmd}",
-        f"║ KNOWLEDGE_HIT: {data.knowledge_hit}",
-        f"║ KNOWLEDGE_GAP: {'true' if data.knowledge_gap else 'false'}",
-        f"║ LOG_FILE: {data.log_file}",
-        f"║ SRC_DIR: {data.src_dir}",
-        f"║ TASK_CARD: {data.task_card}",
+    ]
+
+    if not is_knowledge:
+        lines += [
+            f"║ KNOWLEDGE_HIT: {data.knowledge_hit}",
+            f"║ KNOWLEDGE_GAP: {'true' if data.knowledge_gap else 'false'}",
+            f"║ LOG_FILE: {data.log_file}",
+            f"║ SRC_DIR: {data.src_dir}",
+            f"║ TASK_CARD: {data.task_card}",
+        ]
+
+    lines += [
+        f"║ SOFTWARE: {data.software_name} {data.software_version}",
+        f"║ ARCHIVE_DIR: {data.archive_dir}",
         "║",
         "║ AI NEXT ACTIONS:",
     ]

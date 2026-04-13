@@ -15,9 +15,9 @@ _MODULES = {
     "summary": "summary",
     "submit": "submission",
     "review": "submission",
-    "approve": "submission",
-    "reject": "submission",
+    "post-merge": "submission",
     "resolve-deps": "dependency_resolver",
+    "track-edit": "edit_tracker",
 }
 
 
@@ -48,6 +48,11 @@ def _print_help():
 Usage: python3 ohc-run.py <command> [options]
 
 Commands: {' | '.join(sorted(_MODULES.keys()))}
+
+协作流程 (Git + GitCode PR):
+  submit <software> <version>       编译自检，不生成提交单
+  review <software> <version>        本地审核辅助，直接扫描目录
+  post-merge <software> <version>    PR 合并后重建索引与知识库
 
 Run 'python3 ohc-run.py <command> --help' for details.""")
 

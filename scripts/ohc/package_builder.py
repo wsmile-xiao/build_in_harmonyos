@@ -260,6 +260,13 @@ class PackageBuilder:
         self.step8_permissions()
         self.step9_install_sh()
         self.step10_tarball()
+        # Write completion marker (finish.py uses this to verify)
+        marker = self.packaging_dir / ".packaged"
+        marker.write_text(
+            f"software={self.software}\nversion={self.version}\n"
+            f"timestamp={__import__('datetime').datetime.now().isoformat()}\n",
+            encoding="utf-8",
+        )
         log_ok(f"✅ 打包完成: {self.software} {self.version}")
         return 0
 

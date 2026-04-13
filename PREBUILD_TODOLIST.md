@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **21** |
-| 编译成功 | 21 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, **jq, file, tar, dos2unix**) |
-| 打包成功 | 20 (除 libtool 外全部打包成功) |
+| 已完成 | **23** |
+| 编译成功 | 23 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, jq, file, tar, dos2unix, bash, **htop**) |
+| 打包成功 | 22 (除 libtool 外全部打包成功) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -101,8 +101,8 @@
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 22 | bash | 5.3 | ⬜ 待编译 | - | - | - | ⚠️ `--without-bash-malloc` |
-| 23 | htop | 3.4.1 | ⬜ 待编译 | - | - | - | 依赖 ncurses, ⚠️ 原partial |
+| 22 | bash | 5.3 | ✅ 完成 | ✅ 成功 | ✅ 成功 | packaging/bash-5.3-ohos-aarch64.tar.gz | `--without-bash-malloc`，依赖 readline+ncurses |
+| 23 | htop | 3.4.1 | ✅ 完成(partial) | ✅ 成功 | ✅ 成功 | packaging/htop-3.4.1-ohos-aarch64.tar.gz (603K) | 3个补丁(build-aux/config.guess+config.sub+IOPriorityPanel.h), ncursesw静态嵌入, 需sudo运行, ✅ 补丁合规性已修正+按10步流程重打包 |
 | 24 | strace | 6.19 | ⬜ 待编译 | - | - | - | ⚠️ ptrace受限, 可能不打包 |
 | 25 | patch | 2.7.6 | ⬜ 待编译 | - | - | - | ⚠️ 原partial |
 
@@ -159,6 +159,21 @@
 | **strip 命令缺失** | 系统无 `/usr/bin/strip`，只有 `llvm-strip` | 创建 wrapper: `/tmp/bin/strip → llvm-strip` | ⚠️ 临时方案 |
 | **bzip2 --version 读 stdin 阻塞** | bzip2 无参数时从 stdin 读取，非 TTY 下永久挂起 | 验证步骤改用 `-f -z/-d` 实际文件操作代替 `--version` | ✅ |
 | **鸿蒙 ln -sf bug** | `ln -sf` 创建带随机后缀文件而非覆盖符号链接 | 先 `/bin/rm -f` 再 `/bin/ln -s` | ✅ 已知限制 |
+
+### htop 3.4.1（对话 #N）
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **5个补丁中3个不合规** | 上个会话未按流程处理：(1) `.patch-ai-review.txt` AI元数据误当补丁；(2) `htop.1` 生成文件当补丁违反 R6；(3) `config.sub` 含重复行+缩进错误 | 删除2个无效补丁，修复 config.sub 源文件后 `refresh-patch --auto` 重新生成3个合规补丁 | ✅ |
+| **打包未按10步流程** | 上个会话手动打包，install.sh 包在 tar.gz 内，未走 `ohc-run.py package` | 用 `ohc-run.py package --prefix=...` 重走10步流程：strip + RUNPATH 设置 + ELF 签名 + 独立 install.sh | ✅ |
+| **config.sub ohos-linux 块损坏** | 补丁脚本生成重复行（`basic_machine=` 出现2次，残留 `linux-android`） | 手动修复为标准缩进+正确的 `basic_os=linux-ohos` | ✅ |
+| **.patch-backup 目录残留** | refresh-patch 保留旧备份目录 | `rm -rf .patch-backup-*` 清理 | ✅ |
+
+### 关键经验
+
+43. **补丁合规性三查** — (1) 非源码文件不能当补丁（.patch-ai-review.txt、.dirstamp）；(2) 生成文件不能当补丁（htop.1 man page，违反 R6）；(3) 补丁内容不能有重复行/错误缩进
+44. **ohc-run.py package 需要正确 staging 路径** — 默认查找 `$TMPDIR/test-install-{name}-{ver}`，实际路径不同时需 `--prefix` 指定
+45. **install.sh 不应在 tar.gz 内** — 按 packaging-guide.md 规范，install.sh 独立存放在 `packaging/` 目录
 
 ### 关键经验
 
@@ -464,7 +479,16 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 
 ---
 
-*最后更新: 2026-04-13*
+*最后更新: 2026-04-14*
+*v6.2 同步更新：*
+*  - **htop 3.4.1 补丁合规性修正+按10步流程重打包***
+*  - 补丁 5→3（删除 .patch-ai-review.txt + htop.1 生成文件，修复 config.sub 重复行）*
+*  - 重打包 539K→603K（strip + RUNPATH + ELF签名 + 独立 install.sh）*
+*  - 新增 3 条关键经验 (#43-#45)：补丁合规三查、staging 路径、install.sh 规范*
+*v6.1 同步更新：*
+*  - **bash 5.3 标记为已完成**（编译+打包+归档）*
+*  - 已完成数 21 → **22**（新增 bash）*
+*  - 打包成功数 20 → **21**（新增 bash）*
 *v6.0 同步更新：*
 *  - **jq 1.7.1 标记为已完成**（编译+打包+归档，5.7M，2个补丁，7/8测试通过）*
 *  - **file 5.45 标记为已完成**（编译+打包+归档，8.9M，7个补丁，72/72测试全通过）*
@@ -550,6 +574,12 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 *v4.3 同步更新：*
 *  - gawk 5.3.0 标记为已完成（编译+打包+签名，3.9M）*
 *  - automake 1.16.5 标记为已完成（编译+打包+签名，1.2M，手动全链路验证通过）*
+*  - 已完成数 4 → 6（pkg-config, sed, coreutils, gawk, automake, libtool）*
+*  - 打包成功数 3 → 5（libtool 未打包）*
+�验证通过）*
+*  - 已完成数 4 → 6（pkg-config, sed, coreutils, gawk, automake, libtool）*
+*  - 打包成功数 3 → 5（libtool 未打包）*
+ automake 1.16.5 标记为已完成（编译+打包+签名，1.2M，手动全链路验证通过）*
 *  - 已完成数 4 → 6（pkg-config, sed, coreutils, gawk, automake, libtool）*
 *  - 打包成功数 3 → 5（libtool 未打包）*
 �验证通过）*

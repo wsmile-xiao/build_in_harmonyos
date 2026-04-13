@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
+from .edit_tracker import get_tracked_files, has_tracker, scan as tracker_scan
 
 EXCLUDE_DIRS = {"build", ".git", "autom4te.cache", "CMakeFiles",
                 "__pycache__", ".libs", ".deps"}
@@ -379,21 +380,51 @@ def auto_mode(software: str, version: str, pdir: str | None = None) -> int:
         shutil.rmtree(staging)
     staging.mkdir()
 
-    # Find differences using filecmp (replaces diff -rq)
-    log_info("  扫描差异文件...")
-    diff_pairs, uncertain_pairs = _find_differences(orig_dir, work_dir)
+    # ── Tracker-based mode (precise) vs fallback (rule-based) ──
+    use_tracker = has_tracker(work_dir)
+    diff_pairs: list[tuple[Path | None, Path]] = []
+    uncertain_pairs: list[tuple[Path | None, Path]] = []
 
-    # AI classification for uncertain files
-    if uncertain_pairs:
-        log_info(f"  ⚠️ {len(uncertain_pairs)} 个文件无法自动判断（源码 vs 构建产物）")
-        ai_source_set = _ai_classify_uncertain(uncertain_pairs, work_dir, orig_dir)
-        # Add AI-classified source files to diff_pairs
-        for orig_file, mod_file in uncertain_pairs:
-            rel = str(mod_file.relative_to(work_dir) if mod_file.is_relative_to(work_dir) else mod_file.name)
-            if rel in ai_source_set:
+    if use_tracker:
+        # Scan for changes first (compare current files with baseline)
+        log_info("  扫描变更（基于编辑追踪器）...")
+        tracker_scan(work_dir)
+        tracked = get_tracked_files(work_dir)
+
+        if not tracked:
+            log_ok("  编辑追踪器无变更记录，保留现有补丁")
+            shutil.rmtree(staging)
+            return 0
+
+        log_info(f"  追踪到 {len(tracked)} 个文件变更:")
+        for rel in tracked:
+            mod_file = work_dir / rel
+            orig_file = orig_dir / rel
+            if not mod_file.exists():
+                continue
+            if orig_file.exists():
                 diff_pairs.append((orig_file, mod_file))
+                log_info(f"    ✏️ {rel}")
             else:
-                log_info(f"  ⏭️ AI 判定为构建产物: {rel}")
+                diff_pairs.append((None, mod_file))
+                log_info(f"    ➕ {rel} (新增)")
+        log_info(f"  精准模式: 只对 {len(diff_pairs)} 个追踪文件生成补丁（无需排除规则）")
+    else:
+        # Fallback: rule-based diff (original logic)
+        log_info("  ⚠️ 无编辑追踪器，使用排除规则扫描差异...")
+        log_info("  扫描差异文件...")
+        diff_pairs, uncertain_pairs = _find_differences(orig_dir, work_dir)
+
+        # AI classification for uncertain files
+        if uncertain_pairs:
+            log_info(f"  ⚠️ {len(uncertain_pairs)} 个文件无法自动判断（源码 vs 构建产物）")
+            ai_source_set = _ai_classify_uncertain(uncertain_pairs, work_dir, orig_dir)
+            for orig_file, mod_file in uncertain_pairs:
+                rel = str(mod_file.relative_to(work_dir) if mod_file.is_relative_to(work_dir) else mod_file.name)
+                if rel in ai_source_set:
+                    diff_pairs.append((orig_file, mod_file))
+                else:
+                    log_info(f"  ⏭️ AI 判定为构建产物: {rel}")
 
     if not diff_pairs:
         log_ok("  无差异，保留现有补丁")
