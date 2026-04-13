@@ -150,13 +150,26 @@ class BuildDriver:
     # ── Engine & Handoff ──
 
     def _run_engine(self, log_file: Path | None = None, tail: int = 50) -> bool:
-        """Run error pattern matching engine. Returns True if hit."""
+        """Run error pattern matching engine. Returns True if hit.
+        
+        For configure failures, also reads config.log to get the real error
+        (e.g. config.sub rejection) instead of only the driver's own log
+        which may just say 'configure failed (RC=127)'.
+        """
         lf = log_file or self.log_file
         if not lf.exists():
             return False
         error_text = lf.read_text(encoding="utf-8", errors="replace")[-tail * 200:]
         if not error_text.strip():
             return False
+
+        # Supplement with config.log tail for configure failures
+        if self.build_src_dir:
+            config_log = self.build_src_dir / "config.log"
+            if config_log.exists():
+                config_tail = config_log.read_text(encoding="utf-8", errors="replace")[-tail * 200:]
+                # Append config.log errors to engine input for accurate matching
+                error_text = error_text + "\n--- config.log ---\n" + config_tail
 
         result = run_engine(error_text)
         if not result.matched or not result.entry:
@@ -238,6 +251,10 @@ class BuildDriver:
 
     def _step1_init(self) -> None:
         if not self.should_run(1):
+            # Even when resuming past Step1, we must load the build context
+            # because all subsequent steps depend on BUILD_SRC_DIR etc.
+            if not self.ctx_data:
+                self._load_context()
             return
         self._log("═══ [1/13] init-build ═══")
 
@@ -261,7 +278,20 @@ class BuildDriver:
                 raise RuntimeError("init-build 未生成 .build-context 文件")
             self.ctx_file = ctx_files[0]
 
-        # Load context
+        self._load_context()
+        self._task_card_update("1", "✅完成", "init-build OK")
+        self._log(f"✅ 源码: {self.build_src_dir}")
+
+    def _load_context(self) -> None:
+        """Load build context from .build-context file into instance vars."""
+        if not self.ctx_file:
+            ctx_pattern = f".build-context-{self.software}-{self.version}*"
+            ctx_files = list(self.pdir.glob(ctx_pattern))
+            if not ctx_files:
+                log_fail("未找到 .build-context 文件")
+                raise RuntimeError("未找到 .build-context 文件")
+            self.ctx_file = ctx_files[0]
+
         self.ctx_data = parse_build_context(str(self.ctx_file))
         self.build_src_dir = Path(self.ctx_data.get("BUILD_SRC_DIR", ""))
         self.default_prefix = self.ctx_data.get("DEFAULT_PREFIX", self.default_prefix)
@@ -271,9 +301,6 @@ class BuildDriver:
         if not self.build_src_dir or not self.build_src_dir.exists():
             log_fail(f"BUILD_SRC_DIR 不存在: {self.build_src_dir}")
             raise RuntimeError(f"BUILD_SRC_DIR 不存在: {self.build_src_dir}")
-
-        self._task_card_update("1", "✅完成", "init-build OK")
-        self._log(f"✅ 源码: {self.build_src_dir}")
 
     # ── Step 1.5: Archive history ──
 
@@ -311,19 +338,29 @@ class BuildDriver:
 
         applied = 0
         for p in patches:
-            # Dry run first
-            rc, _ = self._run_capture(
-                f"patch -p1 --dry-run < {p}", cwd=str(self.build_src_dir)
-            )
-            if rc == 0:
-                rc, _ = self._run_capture(
-                    f"patch -p1 < {p}", cwd=str(self.build_src_dir)
+            # Try multiple strip levels (-p1, -p0, -p2) to handle path mismatches
+            applied_this = False
+            for strip_level in [1, 0, 2]:
+                rc, out = self._run_capture(
+                    f"patch -p{strip_level} --dry-run < {p}", cwd=str(self.build_src_dir)
                 )
                 if rc == 0:
-                    applied += 1
-                    self._log(f"  ✅ {p.name}")
-            else:
-                self._log(f"  ⏭️ {p.name} (已应用或冲突)")
+                    rc2, _ = self._run_capture(
+                        f"patch -p{strip_level} < {p}", cwd=str(self.build_src_dir)
+                    )
+                    if rc2 == 0:
+                        applied += 1
+                        applied_this = True
+                        self._log(f"  ✅ {p.name} (strip=-p{strip_level})")
+                        break
+                else:
+                    # Distinguish: already applied vs path mismatch vs other
+                    if "Reversed (or previously applied) patch detected" in out:
+                        self._log(f"  ⏭️ {p.name} (已应用)")
+                        applied_this = True
+                        break
+            if not applied_this:
+                self._log(f"  ⚠️ {p.name} (所有 strip level 均失败，需手动应用)")
 
         self._task_card_update("2", "✅完成", f"{applied} patches applied")
         self._log(f"✅ 应用 {applied}/{len(patches)} 个补丁")

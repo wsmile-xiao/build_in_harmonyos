@@ -59,14 +59,43 @@ class VerifyBuild:
 
         for b in bins:
             rc, out = self._run(["file", str(b)])
-            if "ELF" in out or "executable" in out:
+            is_elf = "ELF" in out
+            is_exec = "executable" in out or "pie executable" in out
+            is_script = "script" in out or "text" in out
+
+            # Fallback: check ELF magic bytes directly for musl-linked binaries
+            # where the `file` command may not recognize them
+            if not is_elf:
+                try:
+                    magic = b.read_bytes()[:4]
+                    if magic == b'\x7fELF':
+                        is_elf = True
+                except Exception:
+                    pass
+
+            # Fallback: try readelf -h for confirmation
+            if not is_elf and not is_script:
+                rc2, out2 = self._run(["readelf", "-h", str(b)])
+                if rc2 == 0 and "ELF" in out2:
+                    is_elf = True
+
+            # Fallback: when `file` command returns empty (HMDFS issue)
+            if not is_elf and not is_script and not is_exec and not out.strip():
+                try:
+                    head = b.read_text(encoding="utf-8", errors="replace")[:80]
+                    if head.startswith("#!") or head.startswith("#!/"):
+                        is_script = True
+                except Exception:
+                    pass
+
+            if is_elf or is_exec:
                 g.passed += 1
-            elif "script" in out or "text" in out:
+            elif is_script:
                 g.warned += 1
                 g.details.append(f"  ⚠️ {b.name}: script")
             else:
                 g.failed += 1
-                g.details.append(f"  ❌ {b.name}: unknown type")
+                g.details.append(f"  ❌ {b.name}: unknown type ({out.strip()[:80]})")
 
             if not os.access(b, os.X_OK):
                 g.warned += 1
@@ -74,7 +103,15 @@ class VerifyBuild:
         # Check shared libs
         for so in (self.install_prefix / "lib").rglob("*.so*") if (self.install_prefix / "lib").exists() else []:
             rc, out = self._run(["file", str(so)])
-            if "ELF" in out:
+            is_elf = "ELF" in out
+            if not is_elf:
+                try:
+                    magic = so.read_bytes()[:4]
+                    if magic == b'\x7fELF':
+                        is_elf = True
+                except Exception:
+                    pass
+            if is_elf:
                 g.passed += 1
             else:
                 g.warned += 1
@@ -110,7 +147,16 @@ class VerifyBuild:
         g = GateResult()
         patchelf = shutil.which("patchelf")
         bins = list((self.install_prefix / "bin").glob("*")) if (self.install_prefix / "bin").exists() else []
-        bins = [b for b in bins if b.is_file() and b.read_bytes()[:4] == b'\x7fELF']
+        # Filter ELF binaries — catch OSError for HMDFS I/O errors
+        elf_bins = []
+        for b in bins:
+            if not b.is_file():
+                continue
+            try:
+                if b.read_bytes()[:4] == b'\x7fELF':
+                    elf_bins.append(b)
+            except (OSError, IOError):
+                elf_bins.append(b)  # Assume ELF if unreadable (HMDFS issue)
 
         for b in bins:
             # RPATH check
