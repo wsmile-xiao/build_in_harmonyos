@@ -206,9 +206,16 @@ def cmd_add(
     non_interactive: bool = False,
     fields: list[str] | None = None,
     pdir: str | None = None,
+    draft: bool = False,
 ) -> int:
+    from .utils import get_agent_id
+
     gdir = _gdir(pdir)
     docdir = _docdir(pdir)
+
+    # ── Draft mode setup ──
+    if draft:
+        agent_id = get_agent_id(pdir)
 
     # ID
     if not id_str:
@@ -221,12 +228,19 @@ def cmd_add(
     if not eid:
         return 1
 
-    kv_path = _kv_path(eid, pdir)
-    md_path = _md_path(eid, pdir)
+    if draft:
+        # In draft mode, write to draft/ directory
+        draft_dir = gdir / "draft"
+        draft_dir.mkdir(exist_ok=True)
+        kv_path = draft_dir / f"{eid}-draft-{agent_id}.kv"
+        md_path = draft_dir / f"{eid}-draft-{agent_id}.md"
+    else:
+        kv_path = _kv_path(eid, pdir)
+        md_path = _md_path(eid, pdir)
 
     # Check not exists
     if kv_path.exists():
-        log_fail(f"{eid}.kv already exists")
+        log_fail(f"{kv_path.name} already exists")
         return 1
 
     # Template
@@ -239,6 +253,10 @@ def cmd_add(
     content = template.read_text(encoding="utf-8")
     content = content.replace("Ennn", eid).replace("E{NNN}", eid)
     content = re.sub(r'last_updated:.*', f'last_updated: {today}', content)
+
+    # In draft mode, tag the contributor
+    if draft:
+        content += f"\ndraft: true\ncontributor_id: {agent_id}\n"
 
     kv_path.write_text(content, encoding="utf-8")
     log_ok(f"Created {kv_path}")
@@ -281,8 +299,8 @@ def cmd_add(
     for k, v in field_dict.items():
         _kv_set(kv_path, k, v)
 
-    # Interactive edit
-    if not non_interactive and sys.stdin.isatty():
+    # Interactive edit (skip in draft mode)
+    if not draft and not non_interactive and sys.stdin.isatty():
         editor = os.environ.get("EDITOR", "vi")
         log_info(f"Press Enter to edit {eid}.kv with {editor} (or 's' to skip)...")
         try:
@@ -297,7 +315,7 @@ def cmd_add(
     missing = [f for f in _REQUIRED_FIELDS if f not in data or not data[f].strip()]
     if missing:
         log_warn(f"Missing required fields: {missing}")
-        if not non_interactive and sys.stdin.isatty():
+        if not draft and not non_interactive and sys.stdin.isatty():
             try:
                 choice = input("Continue adding to index? (y/n): ").strip().lower()
             except EOFError:
@@ -305,6 +323,11 @@ def cmd_add(
             if choice != "y":
                 log_info("Cancelled. Files created but not indexed.")
                 return 0
+
+    # In draft mode: do NOT write to index.tsv, do NOT validate
+    if draft:
+        log_ok(f"Draft {eid} created (contributor: {agent_id}) — not indexed")
+        return 0
 
     # Append to index.tsv
     _sync_index(eid, pdir)
@@ -729,6 +752,8 @@ def graph_cli(argv: list[str] | None = None) -> int:
     p_add.add_argument("-n", "--non-interactive", action="store_true")
     p_add.add_argument("--field", action="append", metavar="K=V")
     p_add.add_argument("--project-dir")
+    p_add.add_argument("--draft", action="store_true",
+                       help="Write to draft/ directory (not indexed, not validated)")
 
     # update
     p_upd = sub.add_parser("update", help="Update existing entry")
@@ -763,6 +788,7 @@ def graph_cli(argv: list[str] | None = None) -> int:
             non_interactive=args.non_interactive,
             fields=args.field,
             pdir=getattr(args, 'project_dir', None),
+            draft=getattr(args, 'draft', False),
         )
     elif args.graph_command == "update":
         return cmd_update(

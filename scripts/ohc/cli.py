@@ -13,6 +13,10 @@ _MODULES = {
     "verify-build": "verify_build", "sign-elf": "sign_elf",
     "package": "package_builder",
     "summary": "summary",
+    "submit": "submission",
+    "review": "submission",
+    "approve": "submission",
+    "reject": "submission",
 }
 
 
@@ -24,6 +28,11 @@ def main() -> int:
     sub_argv = sys.argv[2:]
     if command in _MODULES:
         mod = __import__(f"ohc.{_MODULES[command]}", fromlist=[_MODULES[command]])
+        # 查找 {command}_cli 函数
+        cli_fn = f"{command.replace('-', '_')}_cli"
+        if hasattr(mod, cli_fn):
+            return getattr(mod, cli_fn)(sub_argv)
+        # fallback: 找第一个 *_cli 函数
         cli_fns = [k for k in dir(mod) if k.endswith("_cli")]
         if cli_fns:
             return getattr(mod, cli_fns[0])(sub_argv)

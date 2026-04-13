@@ -1,186 +1,324 @@
 # 多 Agent 协作与任务编排规范
 
 > **用途**: 定义多 Agent 实例协作编译、子任务拆分、审核合并的完整工作流，以及从历史执行中提炼的流程改进规则。
-> **覆盖范围**: 协作架构、分支规范、子任务拆分原则、质量保障、工作流改进规则、防遗忘策略。
+> **覆盖范围**: 协作架构、提交单规范、子任务拆分原则、质量保障、工作流改进规则、防遗忘策略。
 
 ---
 
 # 第一部分：协作架构与工作流
 
 > 本部分定义了多个 AI 实例协作编译开源软件、提交知识、审核合并的完整工作流。
+> 核心机制：**文件系统 + 提交单 + 随机 Agent ID**，不依赖 Git。
 
-## 协作模式
+## §1 协作模式概述
 
-- **纯 AI 协作**：多个 AI 实例同时编译不同的开源软件
-- **各自提交 PR**：每个 AI 实例在自己的 Git 分支上工作，编译完成后提交 PR
-- **主编 AI 审核**：一个"主编"AI 实例负责审核每个 PR（知识质量、去重、格式规范）
+本系统运行在 OpenDesk 的 skill 环境中，多个 Agent 实例共享同一个文件系统目录。通过 **提交单（submission）** 机制实现协作者与主编之间的工作交接，无需版本控制系统。
 
-## §1 协作架构概述
+### 两种角色模式
 
-```
-AI 实例 A (编译 curl)     AI 实例 B (编译 nginx)     AI 实例 C (编译 redis)
-     │                         │                         │
-     ├─ git checkout -b feature/curl-8.7.1
-     ├─ Phase 0-4 编译
-     ├─ git add + commit
-     ├─ git push origin feature/curl-8.7.1
-     └─ 创建 PR ────────┐
-                       │
-     ├─ git checkout -b feature/nginx-1.25
-     ├─ Phase 0-4 编译
-     ├─ git add + commit
-     ├─ git push origin feature/nginx-1.25
-     └─ 创建 PR ──────┤
-                     │
-     ├─ git checkout -b feature/redis-7.2
-     ├─ Phase 0-4 编译
-     ├─ git add + commit
-     ├─ git push origin feature/redis-7.2
-     └─ 创建 PR ───┐
-                   │
-                   ▼
-            ┌──────────────┐
-            │  主编 AI 审核  │
-            │  - 知识去重    │
-            │  - 编号修正    │
-            │  - 格式校验    │
-            │  - 冲突解决    │
-            └──────┬───────┘
-                   │
-                   ▼
-            merge to main
-                   │
-                   ▼
-            gen_summary.py
-            生成 SUMMARY.md
-```
+| 模式 | 对应角色 | 核心职责 | 数量 |
+|------|---------|---------|------|
+| **协作者模式**（默认） | 贡献者 Agent | 编译软件、编写补丁、提取知识、提交工作成果 | 多个 |
+| **主编模式** | 主编 Agent | 审核提交单、知识去重、编号统一、重建索引 | 1 个 |
 
-## §2 分支命名规范
-
-```
-feature/{软件名}-{版本}
-
-示例：
-  feature/curl-8.7.1
-  feature/python-3.9.25
-  feature/openssl-3.0
-  feature/knowledge-fix-E055    # 纯知识修复分支
-```
-
-分支从 main 最新提交创建。每个分支只负责一个软件的编译归档。
-
-## §3 知识文件并发冲突解决方案
-
-**核心问题**：多个 AI 同时往 error-patterns.md / harmonyos-specifics.md 等文件追加内容，导致 Git merge 冲突。
-
-**解决方案：编号区间预留 + 分支隔离 + 主编去重**
-
-### §3.1 编号区间分配
-
-error-patterns.md 的错误编号（E0xx）分配规则：
-
-```
-当前 main 分支最大编号：E054
-
-AI 实例 A 在创建分支时：
-  → 预留 E055-E069（15 个编号）
-  → 在分支的 error-patterns.md 中从 E055 开始编号
-
-AI 实例 B 在创建分支时（稍后创建）：
-  → 预留 E070-E084（15 个编号）
-  → 在分支的 error-patterns.md 中从 E070 开始编号
-
-预留方式：在分支创建时，在 error-patterns.md 末尾追加注释：
-  <!-- RESERVED: E055-E069 for feature/curl-8.7.1 -->
-  <!-- RESERVED: E070-E084 for feature/nginx-1.25 -->
-```
-
-**预留脚本**（AI 在分支创建时执行）：
+### 切换方式
 
 ```bash
-#!/bin/sh
-# reserve-range.sh <分支名>
-# 用法：./scripts/reserve-range.sh feature/curl-8.7.1
+# 方式一：环境变量（推荐，启动时指定）
+export OHC_ROLE=editor
 
-BRANCH="$1"
-FILE="knowledge/error-patterns.md"
-NEXT_NUM=$(grep -oP 'E\d+' "$FILE" | tail -1 | grep -oP '\d+' | sed 's/^0*//')
-END_NUM=$((NEXT_NUM + 14))
-START_NUM=$(printf "E%03d" $((NEXT_NUM + 1))))
-END_LABEL=$(printf "E%03d" $END_NUM)
+# 方式二：运行时切换
+python3 scripts/ohc-run.py mode editor    # 切换为主编模式
+python3 scripts/ohc-run.py mode contributor  # 切回协作者模式（默认）
 
-echo "" >> "$FILE"
-echo "<!-- RESERVED: ${START_NUM}-${END_LABEL} for ${BRANCH} -->" >> "$FILE"
-
-echo "已预留 $START_NUM-$END_LABEL 给 $BRANCH"
-echo "在此分支中，新增的错误编号应从 $START_NUM 开始"
+# 查看当前模式
+python3 scripts/ohc-run.py mode
 ```
 
-### §3.2 知识文件冲突风险矩阵
+### 角色对比
 
-| 知识文件 | 冲突风险 | 处理策略 |
-|---------|---------|---------|
-| error-patterns.md | 🔴 高（频繁追加） | 编号区间预留 + 主编合并去重 |
-| harmonyos-specifics.md | 🟡 中（章节内追加） | 按章节分工，主编合并 |
-| build-systems.md | 🟡 中 | 同上 |
-| musl-compat.md | 🟢 低（很少修改） | 正常 Git merge |
-| best-practices.md | 🟢 低 | 正常 Git merge |
-| troubleshooting.md | 🟡 中 | 编号区间预留 |
+| 维度 | 协作者 | 主编 |
+|------|--------|------|
+| **可写区域** | 自己的 archive 目录 + knowledge/graph/draft/ | 所有区域 + 索引文件 |
+| **禁止写入** | knowledge/graph/ 正式目录、index.tsv、_index.yaml、SUMMARY.md | 无限制 |
+| **提交方式** | 生成提交单到 submissions/pending/ | 审核并处理提交单 |
+| **知识操作** | 写草稿到 draft/ | 审核草稿、去重、编号、移入正式目录 |
+| **索引操作** | 只读 | 重建 index.tsv、_index.yaml、SUMMARY.md |
 
-### §3.3 主编合并流程
+## §2 Agent ID 机制
 
-主编 AI 收到 PR 后的审核步骤：
+每个 Agent 实例拥有一个 **4 位十六进制 ID**（如 `A7F3`），用于标识提交来源、归属草稿文件、记录协作历史。
 
-1. **冲突检测**：检查 PR 与 main 的 diff，识别是否有 merge 冲突
-2. **编号重映射**：如果多个 PR 预留了不同区间，合并后主编统一重新编号
-3. **知识去重**：检查新增知识是否与 main 已有条目重复（语义级别去重，不只看字面）
-4. **格式校验**：检查 Markdown 格式、manifest.yaml 字段完整性
-5. **交叉引用更新**：检查 manifest.yaml 的 knowledge_ref 是否指向正确的 knowledge/ 文件和编号
-6. **SUMMARY.md 重新生成**：所有 PR 合并后，运行 gen_summary.py
-
-## ⚠️ §4 索引架构（过时 — 仅供参考）
-
-> ⚠️ **过时提示**：本节描述的 `_meta.yaml` / `_index.yaml` 架构已被 `manifest.yaml` 体系取代。当前各软件的索引信息已通过 `manifest.yaml` 统一管理，`aggregate-index.sh` 和 `_index.yaml` 不再使用。以下内容保留供历史参考。
-
-### §4.1 原始方案：拆分为独立 meta 文件 + 聚合脚本
-
-原设计为每个软件新增 `_meta.yaml`：
+### ID 生成优先级
 
 ```
-archives/p/python/3.9.0/_meta.yaml     # Python 3.9.0 的索引条目
-archives/c/curl/8.7.1/_meta.yaml       # curl 8.7.1 的索引条目
+1. 环境变量 OHC_AGENT_ID        → 如果已设置，直接使用
+2. .agent-id 文件               → 如果项目根目录存在此文件，读取其中 ID
+3. 自动生成                      → 随机生成 4 位十六进制，写入 .agent-id
 ```
 
-`archives/_index.yaml` 原为自动聚合文件，由脚本扫描所有 `_meta.yaml` 生成。
-
-**原规范**（已不再适用）：
-- 工作分支上只修改 `archives/{letter}/{name}/{version}/_meta.yaml`
-- **禁止在工作分支上直接修改 `archives/_index.yaml`**
-- `_index.yaml` 只在 main 分支由主编 AI 生成
-
-### §4.2 当前替代方案
-
-当前使用 `manifest.yaml` 作为每个软件的唯一元数据文件，索引信息从 manifest.yaml 中聚合。脚本 `gen_summary.py` 负责从 manifest.yaml 生成 `SUMMARY.md`。
-
-## §5 PROGRESS.md 与会话恢复（多实例）
-
-**问题**：多个 AI 实例同时编译不同软件，每个实例需要独立恢复自己的进度。
-
-**解决方案**：PROGRESS.md 已在每个软件的 archive 目录下（Phase 1.5 创建），天然隔离。恢复流程：
+### 自动生成示例
 
 ```bash
-# AI 实例启动时，扫描自己负责的软件的 PROGRESS.md
-# 而不是扫描所有 status: compiling 的条目
+# 首次运行时自动生成
+$ python3 scripts/ohc-run.py whoami
+Agent ID: A7F3 (auto-generated, saved to .agent-id)
+Role: contributor
+Archive: (not assigned)
 
-# 恢复命令
-cat archives/c/curl/8.7.1/PROGRESS.md
+# 后续运行读取已保存的 ID
+$ python3 scripts/ohc-run.py whoami
+Agent ID: A7F3 (from .agent-id)
+Role: contributor
+Archive: archives/c/curl/8.7.1
 ```
 
-**关键**：不要用 `_index.yaml status: compiling` 来发现进行中的编译（多实例会互相干扰），而是直接读取特定软件的 PROGRESS.md。
+### 用途
 
-## §6 PR 提交规范
+| 场景 | 用途说明 |
+|------|---------|
+| **提交单标识** | contributor_id 字段记录由哪个 Agent 提交 |
+| **PROGRESS.md 记录** | 标注当前正在编译此软件的 Agent ID |
+| **草稿文件归属** | knowledge/graph/draft/ 下的草稿文件包含 contributor_id |
+| **协作审计** | 通过 Agent ID 追溯每项工作的来源 |
+| **主编审核日志** | 记录哪个主编审核、批准了哪些提交单 |
 
-### PR 标题格式
+## §3 文件所有权矩阵
+
+### 所有权分区
+
+| 分区 | 路径 | 协作者 | 主编 | 说明 |
+|------|------|--------|------|------|
+| **贡献区** | `archives/{letter}/{name}/{version}/` | ✅ 独占读写 | ✅ 审核时读取 | 不同软件目录天然隔离，每个协作者只操作自己负责的目录 |
+| **待审区** | `submissions/pending/` | ✅ 创建提交单 | ✅ 消费提交单 | 协作者写入，主编读取并处理 |
+| **已审区** | `submissions/approved/` `submissions/rejected/` | ❌ 只读 | ✅ 移动提交单 | 主编处理后将提交单从 pending 移至此处 |
+| **共享知识区（草稿）** | `knowledge/graph/draft/` | ✅ 写入草稿 | ✅ 审核草稿 | 协作者写入新知识草稿，主编审核 |
+| **共享知识区（正式）** | `knowledge/graph/*.yaml` `knowledge/*.md` | ❌ 只读 | ✅ 独占写入 | 只有主编能修改正式知识文件 |
+| **编辑独占区** | `knowledge/graph/index.tsv` `knowledge/graph/_index.yaml` `SUMMARY.md` | ❌ 禁止修改 | ✅ 独占写入 | 索引文件只由主编在 approve 时重建 |
+| **反馈渠道（版本级）** | `archives/{letter}/{name}/{version}/feedback.md` | ✅ 写入 | ✅ 读取 | 协作者在编译中发现的问题记录在此 |
+| **反馈渠道（根级）** | `reports/skill-feedback.md` | ❌ 禁止修改 | ✅ 收割汇总 | 主编从各版本级 feedback.md 汇总至此 |
+
+### 关键原则
+
+1. **目录天然隔离**：每个协作者只在自己的 `archives/{letter}/{name}/{version}/` 下工作，无需额外锁机制
+2. **知识通过草稿隔离**：协作者不直接修改 `knowledge/` 正式文件，而是写入 `knowledge/graph/draft/`，由主编审核后移入
+3. **索引文件主编独占**：`index.tsv`、`_index.yaml`、`SUMMARY.md` 只在主编执行 `approve` 时自动重建，协作者永不触碰
+
+## §4 提交单规范
+
+### 目录结构
+
+```
+submissions/
+├── pending/              # 等待主编审核
+│   └── curl-8.7.1-A7F3.yaml
+├── approved/             # 主编已批准
+│   └── curl-8.7.1-A7F3.yaml
+└── rejected/             # 主编已拒绝
+    └── python-3.9.25-B2E1.yaml
+```
+
+### 提交单 YAML 格式
+
+```yaml
+# submissions/pending/curl-8.7.1-A7F3.yaml
+submission_id: curl-8.7.1-A7F3
+contributor_id: A7F3
+software: curl
+version: 8.7.1
+status: success                    # success | partial | failed
+build_system: autotools
+compile_date: 2026-04-13
+
+new_knowledge:
+  error_patterns: [E055, E056, E057]          # 新增的错误模式编号（草稿中）
+  harmonyos_specifics: [§19]                   # 新增或修改的章节
+  graph_drafts: [E055, E056, E057]            # knowledge/graph/draft/ 中的草稿文件
+
+patches:
+  - file: 0001-config.guess-harmonyos.patch
+    purpose: 平台识别
+  - file: 0002-fix-musl-compat.patch
+    purpose: musl 兼容性
+
+test_results:
+  type: official
+  passed: 29
+  failed: 6
+  total: 35
+  failure_reason: SELinux 软链接限制（非功能问题）
+
+archive_path: archives/c/curl/8.7.1/
+progress_file: archives/c/curl/8.7.1/PROGRESS.md
+```
+
+### 生命周期
+
+```
+协作者编译完成
+      │
+      ▼
+ohc-run.py submit --check <name> <version>    # 自检
+      │
+      ▼ 通过
+ohc-run.py submit <name> <version>            # 生成提交单到 pending/
+      │
+      ▼
+submissions/pending/{name}-{version}-{agent_id}.yaml
+      │
+      ├──► 主编 review ──► approve ──► submissions/approved/
+      │                               │
+      │                               ├─ 移动 draft → 正式知识目录
+      │                               ├─ 重建 index.tsv
+      │                               ├─ 重建 _index.yaml
+      │                               └─ 重建 SUMMARY.md
+      │
+      └──► 主编 review ──► reject ──► submissions/rejected/
+                                      └─ 保留草稿供协作者修改后重新提交
+```
+
+## §5 协作者工作流
+
+```
+1. 确认身份
+   python3 scripts/ohc-run.py whoami
+   → 确认 Agent ID 和角色（contributor）
+
+2. 获取任务（编译某软件）
+   → 由主编或任务分配系统指定软件名和版本
+
+3. 执行编译流程（SKILL.md Step 1-5）
+   - Step 1: 下载源码
+   - Step 2: 检索历史知识
+   - Step 2.5: ohc-run.py init-archive → 创建工作目录和 PROGRESS.md
+   - Step 3: 环境准备 + 编译 + 实时知识提取
+   - Step 4: 测试 + 补丁校验
+   - Step 5: 归档准备
+
+4. 发现新知识 → 写入草稿
+   python3 scripts/ohc-run.py graph add E055 --draft
+   → 写入 knowledge/graph/draft/E055-A7F3.yaml
+   → 包含 contributor_id: A7F3 字段
+
+5. 自检
+   python3 scripts/ohc-run.py submit --check <name> <version>
+   → 检查：补丁完整性、PROGRESS.md 已关闭、manifest.yaml 字段完整
+   → 报告通过/失败项
+
+6. 提交
+   python3 scripts/ohc-run.py submit <name> <version>
+   → 生成 submissions/pending/{name}-{version}-{agent_id}.yaml
+   → 自动归集：补丁列表、测试结果、新增知识草稿清单
+
+7. 等待主编审核
+   → 主编审核通过后，提交单移至 approved/
+   → 主编审核拒绝后，协作者可修改后重新提交
+```
+
+## §6 主编工作流
+
+```
+1. 确认身份
+   python3 scripts/ohc-run.py whoami
+   → 确认角色为 editor（OHC_ROLE=editor）
+
+2. 列出待审提交单
+   python3 scripts/ohc-run.py review --list
+   → 显示 submissions/pending/ 下所有提交单
+   → 每条显示：提交单ID、软件名、版本、协作者ID、状态
+
+3. 审核提交单
+   python3 scripts/ohc-run.py review <submission-id>
+   → 显示提交单详情
+   → 显示变更的文件列表
+   → 显示新增知识草稿内容
+   → 显示 PROGRESS.md 中的知识提取记录
+   → 与已有知识进行去重比对
+
+4. 知识去重和编号统一
+   → 检查草稿中的新知识是否与已有条目语义重复
+   → 如果有重复，合并或标注
+   → 确定最终的编号（可能与草稿中的临时编号不同）
+
+5. 批准（审核通过）
+   python3 scripts/ohc-run.py approve <submission-id>
+   → 自动执行以下操作：
+     a. 移动提交单：pending/ → approved/
+     b. 移动知识草稿：knowledge/graph/draft/ → knowledge/graph/ 正式目录
+     c. 合并新知识到 knowledge/*.md（如 error-patterns.md）
+     d. 重建 knowledge/graph/index.tsv
+     e. 重建 knowledge/graph/_index.yaml
+     f. 重建 SUMMARY.md
+     g. 记录审核日志（含主编 Agent ID）
+
+6. 或拒绝（审核不通过）
+   python3 scripts/ohc-run.py reject <submission-id> --reason="具体拒绝原因"
+   → 移动提交单：pending/ → rejected/
+   → 草稿文件保留在 draft/ 中，协作者可修改后重新提交
+   → 拒绝原因记录在提交单 YAML 的 reject_reason 字段中
+```
+
+## §7 主编审核清单
+
+主编对每个提交单执行以下检查：
+
+```
+□ 补丁完整性：diff 校验通过，每个源码修改都有对应补丁文件
+□ 提交单格式正确：YAML 格式合法，所有必须字段已填写
+□ 知识无重复：新增的知识条目与已有条目无语义重复
+□ manifest.yaml 完整：所有必须字段已填写，test_results 非零值
+□ PROGRESS.md 已关闭：末尾有"编译结束"时间戳
+□ knowledge_ref 正确：manifest.yaml 中的 knowledge_ref 指向实际存在的章节
+□ 格式规范：补丁命名（NNNN-description.patch）、manifest.yaml 格式
+□ 已执行 ohc-run.py check-knowledge-gap：无遗漏的"⏳ 待评估"条目
+□ 临时文件已清理：无 DIAGNOSIS_*.md / MISSING_*.md 等临时文件
+□ 知识草稿完整：draft/ 中的草稿文件包含完整的 YAML 字段
+□ Agent ID 记录：提交单和草稿中的 contributor_id 与实际 Agent ID 一致
+□ 无越权修改：协作者未修改 knowledge/ 正式文件、索引文件或 SUMMARY.md
+```
+
+### 审核通过后的自动操作
+
+`ohc-run.py approve` 命令自动执行以下操作：
+
+1. 移动提交单到 `submissions/approved/`
+2. 移动知识草稿从 `draft/` 到正式目录，合并到 `knowledge/*.md`
+3. 重建 `knowledge/graph/index.tsv`
+4. 重建 `knowledge/graph/_index.yaml`
+5. 重建 `SUMMARY.md`
+
+## §8 并发安全
+
+### 隔离机制
+
+OpenDesk skill 环境中，多个 Agent 实例共享同一个文件系统。并发安全通过**目录隔离 + 角色权限**保证，无需加锁或版本控制。
+
+| 资源 | 冲突风险 | 安全机制 |
+|------|---------|---------|
+| `archives/{letter}/{name}/{version}/` | 🟢 无 | 目录天然隔离——不同软件、不同版本 |
+| `knowledge/graph/draft/` | 🟢 低 | 草稿文件包含 Agent ID 后缀（如 E055-A7F3.yaml），天然隔离 |
+| `knowledge/*.md`（正式） | 🟢 无 | 协作者禁止写入，只有主编修改 |
+| `knowledge/graph/index.tsv` | 🟢 无 | 只有主编写入 |
+| `knowledge/graph/_index.yaml` | 🟢 无 | 只有主编写入 |
+| `SUMMARY.md` | 🟢 无 | 只有主编写入 |
+| `submissions/pending/` | 🟢 低 | 文件名含 Agent ID，不会碰撞 |
+| `SKILL.md` | 🟢 低 | 很少修改，主编统一管理 |
+| `scripts/*.py` | 🟡 中 | 新增脚本需在提交单中说明 |
+| `templates/*.md` | 🟢 低 | 模板稳定后很少变 |
+
+### 为什么不需要编号区间预留
+
+在 Git 工作流中，多个协作者直接修改同一个知识文件（如 error-patterns.md），需要预留编号区间来避免冲突。
+
+在提交单工作流中：
+- 协作者将新知识写入 `knowledge/graph/draft/` 的独立 YAML 文件（含 Agent ID 后缀）
+- 多个协作者的知识条目互不冲突
+- 主编审核时统一编号、去重、合并
+- **无需预协商编号区间**，主编拥有最终编号权
+
+## §9 提交规范
+
+### 提交单标题格式
 
 ```
 [编译] {软件名} {版本} - {状态}
@@ -189,247 +327,23 @@ cat archives/c/curl/8.7.1/PROGRESS.md
 [知识] 修复 E055 错误模式描述不准确
 ```
 
-### PR 描述模板
+### 提交单 YAML 字段说明
 
-```markdown
-## 编译信息
-- 软件：{name}
-- 版本：{version}
-- 构建系统：{build_system}
-- 状态：{status}
-
-## 新增知识
-- error-patterns.md: E055-E060（6 条新错误模式）
-- harmonyos-specifics.md: §19（新增 lseek 限制）
-
-## 补丁列表
-| # | 补丁文件名 | 作用 |
-|---|-----------|------|
-| 0001 | config.guess-harmonyos.patch | 平台识别 |
-| 0002 | fix-musl-compat.patch | musl 兼容性 |
-
-## 测试结果
-- 类型：official
-- 通过：29 / 失败：6
-- 失败原因：SELinux 软链接限制（非功能问题）
-
-## 冲突说明
-- 本 PR 预留了 E055-E069 编号区间
-- 修改了 archives/c/curl/8.7.1/_meta.yaml（新增，不修改 _index.yaml）
-```
-
-## §7 主编 AI 审核清单
-
-主编 AI 对每个 PR 执行以下检查：
-
-```
-□ 补丁完整性：diff 校验通过，每个源码修改都有对应补丁
-□ 编号无冲突：预留区间未与其他 PR 重叠
-□ 知识无重复：新增的 E0xx 与 main 分支已有的条目无语义重复
-□ manifest.yaml 完整：所有必须字段已填写，test_results 非零
-□ _meta.yaml 已创建：status 正确
-□ 未直接修改 _index.yaml：确认 _index.yaml 无变更
-□ 未直接修改 SUMMARY.md：确认 SUMMARY.md 无变更
-□ PROGRESS.md 已关闭：末尾有"编译结束"时间戳
-□ knowledge_ref 正确：manifest.yaml 中的 knowledge_ref 指向实际存在的章节
-□ 格式规范：补丁命名（NNNN-description.patch）、manifest.yaml 格式
-□ 已执行 ohc-run.py check-knowledge-gap：无遗漏的"⏳ 待评估"条目
-□ 临时文件已清理：无 DIAGNOSIS_*.md / MISSING_*.md 等临时文件
-```
-
-### 审核通过后的操作
-
-1. 合并 PR 到 main
-3. 运行 `python3 scripts/gen_summary.py` 更新 `SUMMARY.md`
-4. 提交索引和总览的更新
-
-## §8 Agent 分支工作流（完整生命周期）
-
-### §8.1 角色
-
-| 角色 | 职责 | Git 身份 | 数量 |
-|------|------|---------|------|
-| **贡献者 Agent** | 编译软件、编写补丁、提取知识、提交 PR | `Author: contributor-{id}` | 多个 |
-| **主编 Agent** | 审核 PR、解决冲突、校验知识、合并到 main | `Author: editor` `Committer: editor` | 1 个 |
-
-**区分方式**：
-- **贡献者**：创建 feature 分支并提交 commit 的人。在 Git 中通过 `Author` 字段标识。
-- **主编**：审核 PR 并执行 merge 的人。在 Git 中通过 merge commit 的 `Author` 字段标识。
-- **区分时机**：在 PR 创建阶段就已经区分了——创建 PR 的人就是贡献者，处理 PR 的人就是主编。
-
-### §8.2 贡献者 Agent 工作流
-
-```
-1. 拉取仓库
-   git clone <repo-url> <skill-dir>
-   cd <skill-dir>
-   git checkout main && git pull
-
-2. 创建工作分支
-   git checkout -b feature/{软件名}-{版本}
-
-3. 预留知识编号区间
-   ./scripts/reserve-range.sh feature/{软件名}-{版本}
-   → 输出: "已预留 E055-E069"
-
-4. 执行编译流程 (Phase 0 → 4)
-   - Phase 0: 下载源码
-   - Phase 1: 检索历史知识
-   - Phase 1.5: ohc-run.py init-archive → 创建 _meta.yaml
-   - Phase 2: 环境准备
-   - Phase 3: 编译 + 实时知识提取
-   - Phase 4: 测试 + 归档 + ohc-run.py close-archive → 更新 _meta.yaml
-
-5. 提交到自己的分支
-   git add archives/{letter}/{name}/{version}/
-   git add knowledge/
-   git add scripts/ (如有新增)
-   git commit -m "[编译] {软件名} {版本} - {status}
-
-   - 补丁: {N} 个
-   - 新增知识: E{xxx}-E{yyy}
-   - 测试: {passed}/{total}
-
-   编译环境: HarmonyOS {kernel_version} aarch64
-   Agent: contributor-{id}"
-
-   git push origin feature/{软件名}-{版本}
-
-6. 创建 PR (通过 GitCode API 或 CLI)
-   标题: [编译] {软件名} {版本} - {status}
-   描述: 按 §6 模板填写
-```
-
-### §8.3 主编 Agent 工作流
-
-```
-1. 接收 PR 通知
-   → 获取 PR 信息：分支名、提交者、变更文件列表、diff
-
-2. 本地合并（保留贡献者信息）
-   git fetch origin feature/{软件名}-{版本}
-   git checkout main && git pull
-   git merge --no-ff feature/{软件名}-{版本} \
-     -m "Merge PR #{N}: [编译] {软件名} {版本}
-
-   Contributed-by: contributor-{id} <agent-{id}@opendesk>
-   Reviewed-By: editor <editor@opendesk>"
-
-   ⚠️ 关键：使用 git merge --no-ff 而不是 git am / 手动应用 patch
-   这样贡献者的 commit 历史完整保留
-
-3. 如果有冲突，解决冲突
-   # 查看冲突文件
-   git diff --name-only --diff-filter=U
-   
-   # 手动解决冲突后
-   git add <resolved-files>
-   git commit --no-edit  # 保留 merge commit message
-   
-   ⚠️ 冲突解决原则：
-   - knowledge/*.md: 保留双方的条目，主编负责去重和重新编号
-   - _index.yaml: 不应出现在冲突中（工作分支不应修改）
-   - SUMMARY.md: 不应出现在冲突中
-
-4. 审核（按 §7 审核清单）
-   □ 所有 12 项检查通过
-
-5. 重新生成索引
-   python3 scripts/gen_summary.py
-   git add archives/_index.yaml SUMMARY.md
-   git commit -m "chore: 更新索引和总览 (PR #{N})"
-
-6. 推送到 main
-   git push origin main
-
-7. 关闭 PR
-   在 GitCode 上关闭 PR，添加审核评论
-```
-
-### §8.4 Git 贡献归属详解
-
-**核心原则：使用 `git merge` 而不是 `git am` 或手动应用 patch。**
-
-```
-提交者 Agent 的 commit:
-┌──────────────────────────────────────────────────┐
-│ commit abc1234                                    │
-│ Author: contributor-A <agent-a@opendesk>  ← 提交者│
-│ Date:   2026-03-30 14:00                          │
-│                                                  │
-│     [编译] curl 8.7.1 - success                    │
-│     补丁: 3 个, 新增知识: E055-E058               │
-└──────────────────────────────────────────────────┘
-                      │
-                      ▼ git merge --no-ff
-                      │
-主编 Agent 的 merge commit:
-┌──────────────────────────────────────────────────┐
-│ commit def5678 (HEAD -> main)                     │
-│ Author: editor <editor@opendesk>           ← 主编 │
-│ Merge: xyz..abc                                    │
-│ Date:   2026-03-30 14:30                          │
-│                                                  │
-│     Merge PR #42: [编译] curl 8.7.1               │
-│     Contributed-by: contributor-A ...              │
-│     Reviewed-By: editor ...                        │
-└──────────────────────────────────────────────────┘
-```
-
-**查看贡献归属**：
-```bash
-# 查看某个贡献者的所有提交
-git log --author="contributor-A"
-
-# 查看主编合并了哪些 PR
-git log --author="editor" --merges
-
-# 查看完整贡献统计
-git shortlog -sn --all
-
-# PR 页面上也会显示贡献者信息和合并者信息
-```
-
-**为什么不用 `git am` / 手动应用 patch**：
-- `git am` 会把所有 commit 变成主编的 commit，原始 Author 丢失
-- 手动应用 patch 同上
-- `git merge --no-ff` 完整保留双方的历史，是 Git 社区的标准做法
-
-### §8.5 Skill 目录管理
-
-每个 Agent 实例的本地 skill 目录结构：
-
-```
-<agent-home>/
-└── build_in_harmonyos/     # git clone 到这里
-    ├── SKILL.md
-    ├── KNOW_YOUR_WHY.md
-    ├── knowledge/
-    ├── archives/
-    ├── scripts/
-    └── templates/
-```
-
-**关键规范**：
-- Agent 启动时 `git clone` 或 `git pull` 获取最新代码
-- 编译过程中所有文件变更都在这个目录内
-- Phase 4 完成后，只 commit 自己负责的文件
-- **不要 commit 临时文件**（遵循 S9 清理规则）
-- **不要 commit 自动生成的文件**（_index.yaml、SUMMARY.md）
-
-### §8.6 多 Agent 并发安全矩阵
-
-| 资源 | 冲突风险 | 安全机制 |
-|------|---------|---------|
-| `archives/{letter}/{name}/{version}/` | 🟢 无（不同软件） | 目录天然隔离 |
-| `knowledge/error-patterns.md` | 🔴 高 | 编号区间预留 |
-| `knowledge/harmonyos-specifics.md` | 🟡 中 | 按章节分工 |
-| `knowledge/build-systems.md` | 🟡 中 | 按章节分工 |
-| `archives/_index.yaml` | 🔴 高 | 禁止工作分支修改 |
-| `SUMMARY.md` | 🔴 高 | 禁止工作分支修改 |
-| `SKILL.md` | 🟢 低（很少修改） | 主编统一管理 |
-| `scripts/*.sh` | 🟡 中 | 新增脚本需 PR 说明 |
-| `templates/*.md` | 🟢 低 | 模板稳定后很少变 |
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `submission_id` | ✅ | 格式：`{name}-{version}-{agent_id}`，全局唯一 |
+| `contributor_id` | ✅ | 协作者的 4 位十六进制 Agent ID |
+| `software` | ✅ | 软件名称 |
+| `version` | ✅ | 软件版本 |
+| `status` | ✅ | `success` / `partial` / `failed` |
+| `build_system` | ✅ | 构建系统类型（autotools/cmake/meson等） |
+| `compile_date` | ✅ | 编译日期，ISO 8601 格式 |
+| `new_knowledge` | ✅ | 新增知识清单（可为空列表） |
+| `patches` | ✅ | 补丁文件列表（可为空列表） |
+| `test_results` | ✅ | 测试结果 |
+| `archive_path` | ✅ | 归档目录路径 |
+| `progress_file` | ✅ | PROGRESS.md 路径 |
+| `reject_reason` | 仅拒绝时 | 主编填写的拒绝原因 |
 
 ---
 
@@ -628,8 +542,8 @@ objective: |
 |------|---------|------|
 | **编译产出** | make install 成功，核心功能验证通过 | 必须 |
 | **补丁完整性** | diff 校验通过，每个源码修改都有对应补丁 | 必须 |
-| **知识提取** | PROGRESS.md 无 ⏳ 待评估条目，HIGH_IMPACT 发现已写入 knowledge/ | 必须 |
-| **索引同步** | _index.yaml 包含新版本，gen_summary.py 已执行 | 必须 |
+| **知识提取** | PROGRESS.md 无 ⏳ 待评估条目，HIGH_IMPACT 发现已写入知识草稿 | 必须 |
+| **提交完整** | 提交单 YAML 格式正确，所有字段已填写 | 必须 |
 
 - **为什么**：3.9.25 任务在编译产出方面质量很高（80 补丁、89.4% 通过率），但知识提取严重不足、索引未更新、PROGRESS.md 未创建。
 
@@ -675,19 +589,19 @@ objective: |
 - **项目根目录只保留**：SKILL.md / KNOW_YOUR_WHY.md / README.md / SUMMARY.md / CONTRIBUTING.md / PREBUILD_TODOLIST.md
 
 ### S10. 协作规范（多人 AI 实例并行编译时必须遵守）
-> **核心原则：工作分支只修改自己负责的文件，公共文件由主编 AI 在合并时生成。**
+> **核心原则：协作者只修改自己负责的归档目录和知识草稿，公共文件由主编在审核批准时统一更新。**
 
-- **分支隔离**：每个 AI 实例在自己的 `feature/{软件名}-{版本}` 分支上工作
-- **禁止在分支上修改**：`archives/_index.yaml`、`SUMMARY.md`（只在 main 分支由主编生成）
-- **索引用 _meta.yaml**：每个软件的索引信息存在 `archives/{letter}/{name}/{version}/_meta.yaml`
-- **知识编号预留**：error-patterns.md 的 E0xx 编号在分支创建时预留区间
-- **贡献归属**：使用 `git merge --no-ff` 合并 PR，保留 commit 历史
+- **目录隔离**：每个 AI 实例只在自己的 `archives/{letter}/{name}/{version}/` 下工作
+- **禁止协作者修改**：`knowledge/` 正式文件、`knowledge/graph/index.tsv`、`knowledge/graph/_index.yaml`、`SUMMARY.md`（只由主编在 `approve` 时自动生成）
+- **知识写入草稿**：新知识通过 `ohc-run.py graph add E{N} --draft` 写入 `knowledge/graph/draft/`
+- **提交单规范**：编译完成后通过 `ohc-run.py submit` 生成提交单，不直接修改公共文件
+- **贡献归属**：提交单中的 `contributor_id` 字段标识工作来源，主编审核记录中保留完整归属信息
 
 ### S12. 流程自省（最高优先级，贯穿始终）
 > **你的双重身份：编译执行者 + 流程质检员。质检员优先级更高。**
 
 - **每次编译都是 SKILL.md 的实战检验**——发现文档问题比完成编译更重要
-- **实时记录，不过夜**：发现问题立即写入 `reports/skill-feedback.md`
+- **实时记录，不过夜**：发现问题立即写入 `reports/skill-feedback.md`（主编）或 `archives/.../feedback.md`（协作者）
 - **Phase 4 额外步骤**：汇总 feedback → 回顾卡壳点 → 写入 manifest.yaml
 - **监控 8 类问题**：流程缺失/冲突/冗余、脚本问题、知识导航错误、约束不生效、模板不完整、文档矛盾
 
@@ -705,7 +619,7 @@ objective: |
 - ❌ 不要创建临时报告文件（按 S9 规则）
 
 **如果发现需要修改的内容**：
-- 文档描述不清楚 → 写入 `reports/skill-feedback.md`
+- 文档描述不清楚 → 写入 `archives/.../feedback.md`（协作者）或 `reports/skill-feedback.md`（主编）
 - 知识文件内容有误 → 在使用时标注 DEPRECATED，同时写入 feedback
 - 模板需要新增内容 → 写入 feedback，标注"建议新增"
 - 脚本有 bug → 写入 feedback，标注具体报错和复现步骤
@@ -735,18 +649,19 @@ objective: |
    ```markdown
    ## ⚠️ 致命约束速查（不可遗忘）
    - [ ] 补丁完整性：diff -ruN original/ modified/ > all_changes.diff
-   - [ ] 索引同步：ohc-run.py init-archive 创建 _meta.yaml（不修改 _index.yaml）
+   - [ ] 提交单自检：ohc-run.py submit --check <name> <version>
    - [ ] 测试前置：弹窗预确认 + MAKEFLAGS=-j1 + timeout 1800
    - [ ] Phase 1.5 不可跳过
    - [ ] 实时知识提取：每次解决问题后判断 L1/L2/L3
    - [ ] 知识证伪：发现与知识库矛盾立即标注 DEPRECATED
-   - [ ] 任务完成度：编译+补丁+知识+索引 四维度
+   - [ ] 任务完成度：编译+补丁+知识+提交单 四维度
    ```
 
 2. **工具脚本封装确定性操作**：所有"记住一个多步流程然后手动执行"的场景都应该有脚本：
-   - `prep-test.sh` — 封装测试前置三步（弹窗+j1+timeout）
-   - `full-archive.sh` — 封装完整的归档收尾流程
-   - 这些脚本即使 AI 遗忘了细节，只需要记住"调用这个脚本"
+   - `ohc-run.py submit --check` — 封装提交前自检
+   - `ohc-run.py submit` — 封装完整的提交单生成
+   - `ohc-run.py approve` — 封装主编批准后的所有重建操作
+   - 这些脚本即使 AI 遗忘了细节，只需要记住"调用这个命令"
 
 **P1 — 应该尽快实施**（减少效率损失）：
 
@@ -772,5 +687,4 @@ objective: |
 
 ---
 
-*文档版本: 3.0 | 合并自 collaboration.md v1.1 + collaboration-guidelines.md v2.3*
-*最后更新: 2026-04-11*
+*文档版本: 4.0 | 基于 submission 提交单协作模式 | 2026-04-13*

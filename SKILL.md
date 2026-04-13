@@ -15,6 +15,26 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 > `ohc-run.py` 内部自动定位项目根目录（`find_project_dir()`），不需要手动 `export` 环境变量。
 > **R13**: 用完整路径调用，如 `python3 $SKILL_ROOT/scripts/ohc-run.py build ...`。不要用相对路径 `./scripts/xxx`。
 
+### §0.1 协作模式（⭐ 默认生效）
+
+本 skill 默认以**协作者模式**运行。详见 `knowledge/collaboration.md`。
+
+| 模式 | 触发方式 | 职责 |
+|------|---------|------|
+| 协作者（默认） | 直接使用 | 编译软件、提取知识、提交工作成果 |
+| 主编 | `OHC_ROLE=editor` 或 `ohc-run.py review` | 审核提交、合并知识、重建索引 |
+
+**协作者铁律（违反=越权）**：
+- ❌ 不要修改 `knowledge/graph/index.tsv`、`archives/_index.yaml`、`SUMMARY.md`
+- ❌ 不要修改 `SKILL.md`、`references/`、`templates/`、`scripts/`
+- ❌ 不要修改不属于自己负责的软件归档目录
+- ❌ 不要删除或重命名 `knowledge/` 下的任何现有文件
+- ❌ 发现问题写入 `reports/skill-feedback.md`（版本级），不要直接修复全局文件
+- ✅ 新增知识用 `ohc-run.py graph add E{N} --draft`（写草稿目录）
+- ✅ 完成后用 `ohc-run.py submit <软件名> <版本>` 提交工作成果
+
+**Agent ID**：每个 Agent 实例自动获取 4 位随机标识（如 `A7F3`），用于提交单和草稿归属。可通过 `OHC_AGENT_ID` 环境变量预设。
+
 ---
 
 ## §1 快速参考
@@ -81,6 +101,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R13 | 脚本用完整路径 | `python3 $SKILL_ROOT/scripts/ohc-run.py <cmd>` | §0 |
 | R14 | 脚本失败=手动模式入口 | `--resume-from=StepN` 继续 | references/failure-handling.md |
 | R15 | 历史仅供参考，不盲从 | 实际参数以本次编译为准，成功后回写 manifest | §4.1 |
+| R16 | 协作不越权 | 不修改主编独占文件 | knowledge/collaboration.md |
+| R17 | 知识先草稿 | graph add --draft | knowledge/collaboration.md |
 
 ### 1.3 决策树
 
@@ -309,6 +331,14 @@ python3 $SKILL_ROOT/scripts/ohc-run.py graph remove E{NNN} [--archive]
 
 # 独立引擎匹配
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
+
+# 协作命令
+python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本>   # 提交工作成果
+python3 $SKILL_ROOT/scripts/ohc-run.py submit --check <软件名> <版本>  # 仅自检
+python3 $SKILL_ROOT/scripts/ohc-run.py review --list            # 列出待审提交
+python3 $SKILL_ROOT/scripts/ohc-run.py review <submission-id>   # 审核提交
+python3 $SKILL_ROOT/scripts/ohc-run.py approve <submission-id>  # 批准并合并
+python3 $SKILL_ROOT/scripts/ohc-run.py reject <submission-id> --reason="..."  # 拒绝
 ```
 
 ### 5.4 知识分层
@@ -407,8 +437,12 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, rep
 | `ohc-run.py status` | 跨对话编译状态扫描 | 恢复编译时 |
 | `ohc-run.py handoff` | HANDOFF 上下文输出 | 恢复编译时 |
 | `ohc-run.py summary` | 生成 SUMMARY.md | finish Step 6 |
+| `ohc-run.py submit` | 提交工作成果（自检+生成提交单） | 协作者 Step 5.5 后 |
+| `ohc-run.py review` | 审核提交单（12 项检查） | 主编 |
+| `ohc-run.py approve` | 批准提交（合并知识+重建索引） | 主编 |
+| `ohc-run.py reject` | 拒绝提交 | 主编 |
 | `software-registry.yaml` | 软件元数据缓存 | init 读写 |
 
 ---
 
-*SKILL.md v7.0 — 2026-04-11 — Python 统一入口（ohc-run.py）全量实现*
+*SKILL.md v7.1 — 2026-04-13 — 增加协作模式（submit/review/approve/reject）*
