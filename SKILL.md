@@ -81,7 +81,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-### 1.2 铁律摘要（19 条，违反=bug）
+### 1.2 铁律摘要（20 条，违反=bug）
 
 | # | 规则 | 一句话 | 详解 |
 |---|------|--------|------|
@@ -104,6 +104,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R17 | 知识先草稿 | graph add --draft | knowledge/collaboration.md |
 | R18 | 依赖先查预编译 | resolve-deps --install 优先于手动编译 | §1.3 决策树 |
 | R19 | 禁止手动打包 | 必须用 ohc-run.py package 10 步管线 | §3 Step 5 |
+| R20 | **--prefix 必须指向 $TEST_PREFIX** | **禁止 --prefix=$DEFAULT_PREFIX**（打包会混入系统文件） | §3 Step 2 |
 
 ### 1.3 决策树
 
@@ -176,9 +177,18 @@ cd $BUILD_SRC_DIR
 ./configure --prefix=$TEST_PREFIX && make -j1 && make install
 ```
 
-**执行顺序**：configure → make → install(到 $TEST_PREFIX) → 安全弹窗(R7) → **make check**(必须执行，超时可 Ctrl+C 跳过) → Staging 验证 → package → finish。
+> **⛔ R20 铁律：`--prefix` 必须指向 `$TEST_PREFIX`！**
+>
+> | 变量 | 路径 | 用途 |
+> |------|------|------|
+> | `$TEST_PREFIX` | `~/tmp/test-install-{name}-{ver}` | **configure --prefix 目标**（隔离 staging，打包源） |
+> | `$DEFAULT_PREFIX` | `~/usr/local` | **最终部署目标**（install.sh 写入，不用于 configure） |
+>
+> **禁止写** `--prefix=$DEFAULT_PREFIX` 或 `--prefix=/usr/local`。否则 `ohc-run.py package` 会从 `~/usr/local` 收集文件，混入系统已有文件，打包体积暴增且产物不纯净。
+>
+> **正确流程**：`configure --prefix=$TEST_PREFIX` → `make install` → `package`（从 TEST_PREFIX 打包）→ 用户运行 `install.sh` 部署到 DEFAULT_PREFIX
 
-$TEST_PREFIX 是隔离 staging 目录，$DEFAULT_PREFIX 是最终部署目标（由 install.sh 写入）。
+**执行顺序**：configure → make → install(到 $TEST_PREFIX) → 安全弹窗(R7) → **make check**(必须执行，超时可 Ctrl+C 跳过) → Staging 验证 → package → finish。
 
 > **make check 注意事项**：部分软件的测试套会卡住（如 coreutils cat-self、bash 多线程测试），遇到卡住可 `Ctrl+C` 跳过并在 PROGRESS.md 记录跳过原因。`make check` 的结果会写入 `reports/test-report.md`。
 
@@ -425,7 +435,91 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, rep
 
 ---
 
-## §8 工具一览
+## §8 多任务模式
+
+### 8.1 架构
+
+```
+主任务（当前会话）
+├── 编排调度：依赖排序 → 分阶段派发
+├── 监控进度：dispatch status 查看各任务状态
+├── 结果审计：review 各子任务输出
+└── 最终提交：git add → commit → push → PR
+
+子任务（createSubTask，异步并行）
+└── 独立加载 skill → 完整编译流程 → 输出结果摘要
+```
+
+### 8.2 使用方式
+
+**生成批量计划**:
+```bash
+python3 $SKILL_ROOT/scripts/ohc-run.py dispatch plan zlib openssl wget
+```
+输出分阶段的 createSubTask 调用指令，主任务 AI 按此执行。
+
+**查看任务状态**:
+```bash
+python3 $SKILL_ROOT/scripts/ohc-run.py dispatch status zlib openssl wget
+```
+
+**生成子任务目标**（供 createSubTask 的 objective 参数）:
+```bash
+python3 $SKILL_ROOT/scripts/ohc-run.py dispatch objective zlib 1.3.1
+```
+
+**生成调度脚本**（完整 createSubTask 调用序列）:
+```bash
+python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
+```
+
+### 8.3 主任务 AI 操作流程
+
+```bash
+# Step 1: 生成计划
+python3 $SKILL_ROOT/scripts/ohc-run.py dispatch plan zlib bzip2 openssl wget
+
+# Step 2: 按计划创建异步子任务（Phase 0: 无依赖的软件）
+# 直接调用 createSubTask 工具，objective 使用 dispatch 生成的文本
+
+# Step 3: 等待 Phase 0 完成
+# waitSubTask 检查结果
+
+# Step 4: 创建 Phase 1 子任务（依赖 Phase 0 的软件）
+# ...
+
+# Step 5: 全部完成后审计
+python3 $SKILL_ROOT/scripts/ohc-run.py dispatch status zlib bzip2 openssl wget
+python3 $SKILL_ROOT/scripts/ohc-run.py review zlib 1.3.1
+
+# Step 6: 提交
+git add . && git commit -m "feat: batch compile ..." && git push
+```
+
+### 8.4 子任务 isolation
+
+每个子任务独立运行，互不干扰：
+- 不同的 BUILD_SRC_DIR（~/tmp/builds/{name}-{ver}.work）
+- 不同的 ARCHIVE_DIR（archives/{letter}/{name}/{ver}/）
+- 独立的 .edit-tracker.json
+- 独立的 .build-context-{name}-{ver}
+
+唯一共享的资源：
+- 项目根目录的 knowledge/（写草稿，不冲突）
+- ~/usr/local（安装前缀，package 时独立 tar.gz）
+
+### 8.5 子命令一览
+
+| 子命令 | 说明 |
+|--------|------|
+| `dispatch plan <sw1> <sw2> ...` | 生成分阶段执行计划 |
+| `dispatch status <sw1> <sw2> ...` | 查看各软件编译状态 |
+| `dispatch objective <sw> <ver>` | 输出子任务 objective 文本 |
+| `dispatch script <sw1> <sw2> ...` | 生成 createSubTask 调度脚本 |
+
+---
+
+## §9 工具一览
 
 | 脚本 | 用途 | 调用时机 |
 |------|------|---------|
@@ -459,5 +553,4 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, rep
 
 ---
 
-*SKILL.md v7.3 — 2026-04-13 — 协作模式改为 Git+GitCode PR 流程*
-.md v7.3 — 2026-04-13 — 协作模式改为 Git+GitCode PR 流程*
+*SKILL.md v7.4 — 2026-04-13 — 新增 §8 多任务模式（dispatch 调度系统）*
