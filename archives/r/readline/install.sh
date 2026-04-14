@@ -1,24 +1,31 @@
 #!/bin/sh
-# Install script for readline (OpenHarmony)
-set -e
-VERSION="${1:-8.2}"
-PREFIX="${2:-$HOME/usr/local}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PKG_DIR="$SCRIPT_DIR/$VERSION/packaging"
+# readline for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
 
-if [ ! -d "$PKG_DIR" ]; then
-    echo "Error: version $VERSION not found" >&2; exit 1
-fi
-cd "$PKG_DIR"
-TAR_GZ=$(ls readline-${VERSION}-ohos-aarch64.tar.gz 2>/dev/null)
-if [ -z "$TAR_GZ" ]; then
-    echo "Error: package not found" >&2; exit 1
-fi
-TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
-tar xzf "$TAR_GZ" -C "$TMPDIR"
-for d in bin lib include share; do
-  [ -d "$TMPDIR/$d" ] && mkdir -p "$PREFIX/$d" && cp -a "$TMPDIR/$d/" "$PREFIX/$d/"
-done
-chmod +x "$PREFIX/bin/"* 2>/dev/null || true
-echo "export LD_LIBRARY_PATH=$PREFIX/lib:\$LD_LIBRARY_PATH"
-echo "readline $VERSION installed to $PREFIX"
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
+
+TMP="$HOME/tmp/install-readline-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/readline/readline-${VER}-ohos-aarch64.tar.gz"
+
+mkdir -p "$TMP" "$DST" || exit 1
+
+# 1. 下载
+curl -fSL -o "$TMP/readline.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
+
+# 2. 解压 + 安装
+tar xzf "$TMP/readline.tar.gz" -C "$TMP"
+rm -f "$TMP/readline.tar.gz"
+cp -r "$TMP"/* "$DST/"
+
+# 3. 清理
+rm -rf "$TMP"
+
+# 4. 权限（纯库，无 bin/）
+chmod +x "$DST/bin/"* 2>/dev/null || true
+
+# 5. 验证库文件
+ls "$DST/lib/libreadline.so" "$DST/lib/libhistory.so" >/dev/null 2>&1 && echo "readline OK" || echo "Warning: readline libs not found"
+
+echo "=== readline $VER installed ==="

@@ -172,10 +172,12 @@ def track(work_dir: str | Path, file_path: str) -> int:
 # ═══════════════════════════════════════════════════════
 
 def scan(work_dir: str | Path) -> int:
-    """Scan work_dir and detect all files changed since baseline.
+    """Scan work_dir and detect files whose hash changed since baseline.
 
-    Compares current file hashes with baseline fingerprints.
-    Records new edits and additions.
+    Only detects edited files (hash mismatch). Does NOT auto-scan for
+    new files — new files should be recorded via track() explicitly.
+    This avoids pulling in build artifacts (Makefile, config.h, etc.)
+    as false-positive additions.
     """
     work_dir = Path(work_dir)
     tracker_file = _tracker_path(work_dir)
@@ -188,9 +190,8 @@ def scan(work_dir: str | Path) -> int:
     baseline = data.get("baseline", {})
 
     edited: list[str] = []
-    added: list[str] = []
 
-    # Check existing files for changes
+    # Check existing files for hash changes only
     for f in sorted(work_dir.rglob("*")):
         if not f.is_file() or f.name == _TRACKER_FILE:
             continue
@@ -203,14 +204,9 @@ def scan(work_dir: str | Path) -> int:
             current_hash = _sha256_file(f)
             if current_hash and current_hash != baseline[rel]:
                 edited.append(rel)
-        else:
-            # New file — check if it's source (not build artifact)
-            if _is_source_file(f):
-                added.append(rel)
 
-    # Update tracker
+    # Update tracker (only edited; added is managed by track() only)
     data["edited"] = sorted(set(data.get("edited", []) + edited))
-    data["added"] = sorted(set(data.get("added", []) + added))
     data["scanned_at"] = datetime.now().isoformat()
 
     tracker_file.write_text(json.dumps(data, ensure_ascii=False, indent=None),
@@ -220,15 +216,8 @@ def scan(work_dir: str | Path) -> int:
         log_ok(f"  变更文件 ({len(edited)}):")
         for f in edited:
             log_ok(f"    ✏️ {f}")
-    if added:
-        log_ok(f"  新增文件 ({len(added)}):")
-        for f in added:
-            log_ok(f"    ➕ {f}")
-
-    if not edited and not added:
-        log_info("  无变更")
     else:
-        log_ok(f"  共追踪 {len(edited)} 变更 + {len(added)} 新增")
+        log_info("  无变更")
 
     return 0
 

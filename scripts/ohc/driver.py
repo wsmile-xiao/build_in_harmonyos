@@ -192,6 +192,14 @@ class BuildDriver:
         stop_file = self.pdir / ".manual-mode-stop"
         stop_file.write_text(f"{self.software} {self.version}\n{step}\n{reason}\n", encoding="utf-8")
 
+        # Inject track-edit reminder into actions (R6 enforcement)
+        final_actions = list(actions or [])
+        track_reminder = (
+            f"⚠️ R6: 每次修改源文件后必须运行: "
+            f"python3 {self.script_dir}/ohc-run.py track-edit add {self.software} {self.version} <修改的文件路径>"
+        )
+        final_actions.insert(0, track_reminder)
+
         # Build HandoffData and emit directly
         data = HandoffData(
             exit_reason=reason,
@@ -206,7 +214,7 @@ class BuildDriver:
             software_name=self.software,
             software_version=self.version,
             archive_dir=str(self.archive_dir),
-            ai_next_actions=actions or [],
+            ai_next_actions=final_actions,
         )
         emit_handoff(data)
         sys.exit(exit_code)

@@ -1,29 +1,33 @@
 #!/bin/sh
-# Install script for bash (OpenHarmony)
-# Usage: curl -fsSL <url>/install.sh | sh -s -- [version]
-set -e
-PREFIX="${HOME}/usr/local"
-VERSION="${1:-5.3}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PKG_DIR="${SCRIPT_DIR}/${VERSION}/packaging"
+# bash for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
 
-if [ ! -f "${PKG_DIR}/bash-${VERSION}-ohos-aarch64.tar.gz" ]; then
-    echo "Error: bash ${VERSION} package not found"
-    exit 1
-fi
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
 
-TMPDIR="${TMPDIR:-$HOME/tmp}"
-EXTRACT_DIR="${TMPDIR}/bash-${VERSION}-install"
-rm -rf "${EXTRACT_DIR}"
-mkdir -p "${EXTRACT_DIR}"
+TMP="$HOME/tmp/install-bash-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/bash/bash-${VER}-ohos-aarch64.tar.gz"
 
-tar xzf "${PKG_DIR}/bash-${VERSION}-ohos-aarch64.tar.gz" -C "${EXTRACT_DIR}"
+mkdir -p "$TMP" "$DST" || exit 1
 
-for d in bin lib include share; do
-    [ -d "${EXTRACT_DIR}/$d" ] && cp -a "${EXTRACT_DIR}/$d/" "${PREFIX}/$d/"
-done
+# 1. 下载
+curl -fSL -o "$TMP/bash.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
 
-chmod +x "${PREFIX}/bin/"* 2>/dev/null || true
-rm -rf "${EXTRACT_DIR}"
+# 2. 解压 + 安装
+tar xzf "$TMP/bash.tar.gz" -C "$TMP"
+rm -f "$TMP/bash.tar.gz"
+cp -r "$TMP"/* "$DST/"
 
-echo "bash ${VERSION} installed to ${PREFIX}"
+# 3. 清理
+rm -rf "$TMP"
+
+# 4. 权限 + PATH
+chmod +x "$DST/bin/"* 2>/dev/null || true
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+
+# 5. 预触发安全弹窗
+"$DST/bin/bash" --version >/dev/null 2>&1 || true
+
+echo "=== bash $VER installed ==="

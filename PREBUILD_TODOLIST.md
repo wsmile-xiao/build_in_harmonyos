@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **24** |
-| 编译成功 | 24 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, jq, file, tar, dos2unix, bash, htop, **patch**) |
-| 打包成功 | 23 (除 libtool 外全部打包成功) |
+| 已完成 | **25** |
+| 编译成功 | 25 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, jq, file, tar, dos2unix, bash, htop, patch, **libpipeline**) |
+| 打包成功 | 24 (除 libtool 外全部打包成功，man-db 有 tar.gz 但存在架构问题) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -112,13 +112,13 @@
 |---|------|------|------|------|------|--------|------|
 | 26 | texinfo | 7.3 | ⬜ 待编译 | - | - | - | |
 | 27 | help2man | 1.49.3 | ⬜ 待编译 | - | - | - | 脚本类型 |
-| 28 | libpipeline | 1.5.8 | ⬜ 待编译 | - | - | - | man-db 核心依赖 |
+| 28 | libpipeline | 1.5.8 | ✅ 编译成功 | ✅ 成功 | ✅ 成功 | packaging/libpipeline-1.5.8-ohos-aarch64.tar.gz | 2个补丁(config.guess+config.sub), 无外部依赖, man-db 核心依赖 |
 
 ### 第七阶段：文档系统
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 29 | man-db | 2.13.1 | ⬜ 待编译 | - | - | - | 依赖 libpipeline+gdbm, ⚠️ VPATH构建 |
+| 29 | man-db | 2.13.1 | ⚠️ 架构问题 | ✅ 成功 | ✅ 成功 | packaging/man-db-2.13.1-ohos-aarch64.tar.gz (2350K) | 5个补丁, --disable-setuid, ⚠️ **R20 DESTDIR 架构问题待解决**（见下方架构问题记录） |
 
 ---
 
@@ -413,6 +413,129 @@
 
 ---
 
+## 🏗️ 架构问题：R20 (--prefix=$TEST_PREFIX) 与硬编码路径软件冲突
+
+> **优先级**: 🔴 P0 — 影响 man-db、groff 等硬编码路径的软件
+> **发现时间**: 2026-04-15（man-db 2.13.1 编译过程中发现）
+> **状态**: 方案已出，待审核后执行
+
+### 问题描述
+
+R20 铁律规定 `--prefix` 必须指向 `$TEST_PREFIX`（`~/tmp/test-install-{name}-{ver}`），目的是隔离打包。
+
+但对于 **man-db 这类将路径硬编码到二进制中的软件**，`--prefix=$TEST_PREFIX` 导致二进制中记录的是 staging 路径（如 `~/tmp/test-install-man-db-2.13.1/etc/man_db.conf`），部署到 `$HOME/usr/local` 后路径不匹配，运行时找不到配置文件和辅助程序。
+
+### man-db 二进制中硬编码的路径
+
+```
+$TEST_PREFIX/etc/man_db.conf          # 配置文件
+$TEST_PREFIX/lib/man-db               # 共享库目录
+$TEST_PREFIX/libexec/man-db/manconv   # 格式转换
+$TEST_PREFIX/libexec/man-db/zsoelim   # 预处理器
+$TEST_PREFIX/libexec/man-db/globbing  # glob 扩展
+$TEST_PREFIX/bin/man                  # 内部调用
+$TEST_PREFIX/bin/apropos              # 内部调用
+```
+
+### 官方做法（Fedora/Debian）
+
+```bash
+# Fedora man-db.spec（标准做法）
+%configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
+%make_install DESTDIR=%{buildroot}
+
+# 结果：
+#   二进制硬编码 /etc/man_db.conf → 运行时正确 ✅
+#   DESTDIR 做隔离，不影响最终路径
+```
+
+**核心原则**：`--prefix` = 运行时路径，`DESTDIR` = staging 隔离。二进制中的硬编码路径天然正确。
+
+### 我们的当前做法（有问题）
+
+```bash
+# SKILL.md R20 当前规定
+./configure --prefix=$TEST_PREFIX
+make install
+
+# 结果：
+#   二进制硬编码 $TEST_PREFIX/etc/man_db.conf → 运行时不存在 ❌
+#   需要路径重写 hack
+```
+
+### 方案：改为 DESTDIR 模式
+
+```bash
+# 新方案
+./configure --prefix=$HOME/usr/local
+make install DESTDIR=$STAGING
+
+# 文件安装到：
+#   $STAGING/$HOME/usr/local/bin/man
+#   $STAGING/$HOME/usr/local/etc/man_db.conf
+#   $STAGING/$HOME/usr/local/libexec/man-db/manconv
+
+# 二进制硬编码 $HOME/usr/local/etc/man_db.conf → 运行时正确 ✅
+# package_builder 从 $STAGING/$HOME/usr/local/ 收集文件
+```
+
+### 需要改动的文件
+
+| 文件 | 改动 | 影响 |
+|------|------|------|
+| **SKILL.md** R20 | `--prefix=$TEST_PREFIX` → `--prefix=$DEFAULT_PREFIX` + `DESTDIR=$TEST_PREFIX` | 所有软件 |
+| **driver.py** `_step3_configure` | `--prefix={test_prefix}` → `--prefix={default_prefix}` | 所有软件 |
+| **driver.py** `_step5_install` | `make install` → `make install DESTDIR={test_prefix}` | 所有软件 |
+| **package_builder.py** `_resolve_prefix` | 从 `$STAGING/$HOME/usr/local/` 收集 | 所有软件 |
+| **references/iron-rules.md** | 更新 R20 说明 | 文档 |
+
+### 风险评估
+
+1. **架构级改动**：影响所有已编译的 25 款软件的编译流程
+2. **路径深度**：`$STAGING/$HOME/usr/local/` 比当前 `$TEST_PREFIX/` 更深
+3. **兼容性**：部分软件可能不支持 `DESTDIR`（但大多数 autotools 软件都支持）
+4. **用户唯一性**：HarmonyOS 只有 `currentUser` 一个用户，`$HOME` 固定，预编译包可在不同机器间复用
+
+### 建议
+
+- 先在 man-db 上验证 DESTDIR 模式
+- 确认无问题后推广到所有软件
+- 已编译的 24 款软件无需重编译（大多数不硬编码路径），只需更新流程文档
+
+### 相关问题（已在 man-db 中修复，不依赖 DESTDIR 改动）
+
+| 问题 | 修复 | 状态 |
+|------|------|------|
+| **软件级 install.sh 格式错误** — 用本地查找而非远程下载 | `step9_install_sh` 改为纯远程下载模板（参考 automake） | ✅ 已修复 |
+| **`{sw}` 占位符未替换** — 软件名写入字面量 `{sw}` | f-string 中用 `{self.software}` | ✅ 已修复 |
+| **软件级 install.sh "已存在则跳过"** — 第二次 package 不更新 | 每次都重新生成 | ✅ 已修复 |
+| **sbin/libexec 未打包** — `step2_copy` 只复制 bin/lib/include/share | 待改为自动扫描目录 | ⬜ 待修复 |
+| **lib/man-db 子目录不在 RPATH** — man 找不到 libmandb.so | `step5_rpath` 自动扫描 lib/ 子目录加入 RPATH | ✅ 已修复 |
+| **etc/ 未打包** — `step2_copy` 硬编码目录列表不含 etc | 待改为自动扫描目录 | ⬜ 待修复 |
+| **man_db.conf 内容不适配 HarmonyOS** — Linux 标准路径不存在 | install.sh 中 sed 替换 | ⬜ 待修复（依赖 DESTDIR 或路径重写） |
+
+### man-db 2.13.1 编译详情
+
+| 项目 | 内容 |
+|------|------|
+| 补丁 | 5 个（config.guess, config.sub, encodings.c, security.c, man.c） |
+| configure 选项 | `--prefix=$TEST_PREFIX --disable-setuid --with-systemdtmpfilesdir=no --with-systemdsystemunitdir=no` |
+| 依赖 | gdbm 1.23, libpipeline 1.5.8, bzip2, groff(运行时) |
+| VPATH 构建 | ✅ source_dir=man-db-2.13.1.work, build_dir=man-db-build |
+| 外部依赖收集 | libgdbm.so.6, libpipeline.so.1 |
+| tar.gz 大小 | 2350K |
+| 已知兼容性问题 | musl iconv 不支持 //IGNORE → apropos/whatis 不可用 |
+
+### 关键经验
+
+48. **R20 `--prefix=$TEST_PREFIX` 与硬编码路径软件冲突** — man-db、groff 等软件将 `${prefix}` 路径硬编码到二进制中。官方做法是 `--prefix=运行时路径` + `DESTDIR=staging`。我们的 R20 用 `--prefix=staging` 导致路径不匹配，需改为 DESTDIR 模式
+49. **`step5_rpath` 必须自动扫描 lib/ 子目录** — 部分软件（如 man-db）将库安装在 `lib/man-db/` 子目录下，RPATH 需要包含 `$ORIGIN/../lib/man-db`，不能只有 `$ORIGIN/../lib`
+50. **`step2_copy` 硬编码目录列表** — 只复制 bin/lib/include/share，漏掉 sbin/libexec/etc。应改为自动扫描 `src_prefix` 顶层目录
+51. **`step10_tarball` 硬编码打包目录** — 应改为动态扫描 pkgdir 顶层目录
+52. **Fedora spec 中 `%configure` 自动设置完整路径体系** — `--prefix=/usr --sysconfdir=/etc --localstatedir=/var --libexecdir=/usr/libexec`，每个目录独立控制。我们的 `--prefix` 一个参数决定了所有子路径
+
+---
+
 ## 🔧 Skill 更新清单
 
 > 预编译过程中发现的 skill 文件需要更新的点，汇总后批量处理。
@@ -440,6 +563,12 @@
 | ohc-run.py finish | ✅ 新增 Step 3 调用 ohc-run.py finalize-archive（4步流程） | ✅ 完成 |
 | scripts/patch-autotools-ohos.pl | ⚠️ config.sub 补丁生成重复行+缺少 `linux-ohos*` 允许列表 | ⬜ 待修复 |
 | scripts/ohc/package_builder.py | ⚠️ 缺少 `import re` | ⬜ 待修复 |
+| scripts/ohc/package_builder.py | ✅ step9_install_sh: 软件级 install.sh 改为纯远程下载模板 | ✅ 已修复 |
+| scripts/ohc/package_builder.py | ✅ step5_rpath: 自动扫描 lib/ 子目录加入 RPATH | ✅ 已修复 |
+| scripts/ohc/package_builder.py | ⚠️ step2_copy: 硬编码 bin/lib/include/share，漏 sbin/libexec/etc | ⬜ 待修复 |
+| scripts/ohc/package_builder.py | ⚠️ step10_tarball: 硬编码打包目录列表 | ⬜ 待修复 |
+| SKILL.md R20 | 🔴 `--prefix=$TEST_PREFIX` 需改为 DESTDIR 模式（架构级改动） | ⬜ 待审核 |
+| driver.py | 🔴 configure/install 需适配 DESTDIR 模式 | ⬜ 待审核 |
 | scripts/ohc/driver.py | ✅ P1: configure 失败时从 config.log 追加错误到引擎日志 | ✅ 已修复 |
 | scripts/ohc/driver.py | ✅ P2: resume_from 拆出 _load_context() 无条件加载 | ✅ 已修复 |
 | scripts/ohc/driver.py | ✅ P5: 补丁应用尝试多级 strip(-p0/-p1/-p2) | ✅ 已修复 |
@@ -494,7 +623,20 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 
 ---
 
-*最后更新: 2026-04-14*
+*最后更新: 2026-04-15*
+*v7.0 同步更新：*
+*  - **libpipeline 1.5.8 标记为已完成**（编译+打包+归档）*
+*  - **man-db 2.13.1 编译打包完成**，但发现架构级问题*
+*  - 已完成数 24 → **25**（新增 libpipeline）*
+*  - 🔴 **P0 架构问题**：R20 (`--prefix=$TEST_PREFIX`) 与硬编码路径软件（man-db、groff）冲突*
+*  - 官方做法：`--prefix=运行时路径` + `DESTDIR=staging`，二进制硬编码路径天然正确*
+*  - 我们的错误做法：`--prefix=staging`，需要路径重写 hack*
+*  - 方案已出，待审核：改为 DESTDIR 模式*
+*  - 已修复 3 个 package_builder 问题：*
+*    - step9_install_sh: 软件级 install.sh 改为纯远程下载模板*
+*    - step5_rpath: 自动扫描 lib/ 子目录加入 RPATH*
+*    - `{sw}` 占位符未替换*
+*  - 新增 5 条关键经验 (#48-#52)：R20 DESTDIR、RPATH 子目录扫描、step2_copy 硬编码目录、Fedora 路径体系*
 *v6.3 同步更新：*
 *  - **patch 2.7.6 标记为已完成**（编译+打包+归档，188K，2个补丁，32/44测试通过）*
 *  - 已完成数 23 → **24**（新增 patch）*

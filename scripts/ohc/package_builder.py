@@ -143,15 +143,28 @@ class PackageBuilder:
         if not patchelf:
             log_warn("  patchelf/chrpath 不可用，跳过"); return
 
+        # 扫描 lib/ 下的子目录（如 lib/man-db/），自动加入 RPATH
+        lib_subdirs = set()
+        lib_dir = self.pkgdir / "lib"
+        if lib_dir.exists():
+            for item in lib_dir.iterdir():
+                if item.is_dir() and item.name != "external":
+                    lib_subdirs.add(item.name)
+
         for f in self.pkgdir.rglob("*"):
             if not f.is_file() or not is_elf(f):
                 continue
             rel = f.relative_to(self.pkgdir)
             if rel.parts[0] == "bin":
-                rpath = "$ORIGIN/../lib:$ORIGIN/../lib/external"
+                # bin/ 需要: ../lib + ../lib/external + ../lib/{subdir}...
+                parts = ["$ORIGIN/../lib", "$ORIGIN/../lib/external"]
+                for sd in sorted(lib_subdirs):
+                    parts.append(f"$ORIGIN/../lib/{sd}")
+                rpath = ":".join(parts)
             elif rel.parts[0] == "lib" and "external" in rel.parts:
                 rpath = "$ORIGIN"
             elif rel.parts[0] == "lib":
+                # lib/ 和 lib/{subdir}/ 的 ELF: 自身目录 + external
                 rpath = "$ORIGIN:$ORIGIN/external"
             else:
                 continue
@@ -202,21 +215,118 @@ class PackageBuilder:
 
     def step9_install_sh(self):
         log_info("Step 9/10: 生成 install.sh...")
-        install_sh = self.packaging_dir / f"install-{self.software}-{self.version}.sh"
-        install_sh.write_text(
+        sw, ver = self.software, self.version
+        tar_name = f"{sw}-{ver}-ohos-aarch64"
+
+        # ── 版本级 install.sh：本地 tar.gz 安装 ──
+        version_install_script = (
             f"#!/bin/sh\n"
-            f"# Install script for {self.software} {self.version}\n"
+            f"# install.sh for {sw} {ver} (OpenHarmony aarch64)\n"
+            f"# Usage: sh install.sh [prefix]\n"
+            f"#   Default prefix: $HOME/usr/local\n"
             f"set -e\n"
+            f"\n"
             f"PREFIX=${{1:-$HOME/usr/local}}\n"
             f"SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-            f"cd \"$SCRIPT_DIR\"\n"
-            f"for d in bin lib include share; do\n"
-            f"  [ -d \"$d\" ] && cp -a \"$d/\" \"$PREFIX/$d/\"\n"
+            f"\n"
+            f"# Find tarball (local packaging dir or version-specific subdir)\n"
+            f"TAR_GZ=\"\"\n"
+            f"for candidate in \\\n"
+            f"    \"$SCRIPT_DIR/{tar_name}.tar.gz\" \\\n"
+            f"    \"$SCRIPT_DIR/packaging/{tar_name}.tar.gz\" \\\n"
+            f"    \"$SCRIPT_DIR/{ver}/packaging/{tar_name}.tar.gz\"; do\n"
+            f"    if [ -f \"$candidate\" ]; then\n"
+            f"        TAR_GZ=\"$candidate\"\n"
+            f"        break\n"
+            f"    fi\n"
             f"done\n"
+            f"\n"
+            f"if [ -z \"$TAR_GZ\" ]; then\n"
+            f"    echo 'Error: {tar_name}.tar.gz not found' >&2\n"
+            f"    exit 1\n"
+            f"fi\n"
+            f"\n"
+            f"# Extract and install\n"
+            f"TMPDIR=$(mktemp -d)\n"
+            f"trap 'rm -rf \"$TMPDIR\"' EXIT\n"
+            f"tar xzf \"$TAR_GZ\" -C \"$TMPDIR\"\n"
+            f"\n"
+            f"for d in bin lib include share doc; do\n"
+            f"    [ -d \"$TMPDIR/$d\" ] && mkdir -p \"$PREFIX/$d\" && cp -a \"$TMPDIR/$d/\" \"$PREFIX/$d/\"\n"
+            f"done\n"
+            f"\n"
+            f"# Fix permissions\n"
             f"chmod +x \"$PREFIX/bin/\"* 2>/dev/null || true\n"
-            f"echo '{self.software} {self.version} installed to $PREFIX'\n",
-            encoding="utf-8")
-        os.chmod(install_sh, 0o755)
+            f"\n"
+            f"# Pre-trigger binary confirmation dialogs (HarmonyOS security)\n"
+            f"for bin in \"$PREFIX/bin/\"*; do\n"
+            f"    [ -f \"$bin\" ] && \"$bin\" --version >/dev/null 2>&1 || true\n"
+            f"done\n"
+            f"\n"
+            f"echo '{sw} {ver} installed to $PREFIX'\n"
+        )
+
+        # Write version-level install.sh to packaging dir
+        install_sh_pkg = self.packaging_dir / f"install-{sw}-{ver}.sh"
+        install_sh_pkg.write_text(version_install_script, encoding="utf-8")
+        os.chmod(install_sh_pkg, 0o755)
+
+        # ── 软件级 install.sh：纯远程下载（上传到 cmd-pkgs release） ──
+        # 格式参考 archives/a/automake/install.sh
+        # curl -fsSL <url>/install.sh | sh -s -- <version>
+        sw_level_dir = self.archive_dir.parent  # archives/{letter}/{name}/
+        install_sh_sw = sw_level_dir / "install.sh"
+
+        # 检测一个用于预触发安全弹窗的代表二进制
+        bin_dir = self.pkgdir / "bin"
+        bin_example = sw  # fallback
+        if bin_dir.exists():
+            for f in sorted(bin_dir.iterdir()):
+                if f.is_file() and os.access(f, os.X_OK):
+                    bin_example = f.name
+                    break
+
+        sw_install_script = (
+            f"#!/bin/sh\n"
+            f"# {sw} for HarmonyOS — install.sh\n"
+            f"# curl -fsSL <url>/install.sh | sh -s -- <version>\n"
+            f"#\n"
+            f"# tar.gz 为扁平结构 (bin/ lib/ share/ 在顶层)，直接 cp 即可。\n"
+            f"\n"
+            f'VER="${{1:-}}"\n'
+            f'[ -z "$VER" ] && {{ echo "Usage: sh install.sh <version>"; exit 1; }}\n'
+            f"\n"
+            f'TMP="$HOME/tmp/install-{sw}-$$"\n'
+            f'DST="$HOME/usr/local"\n'
+            f'URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{sw}/{sw}-${{VER}}-ohos-aarch64.tar.gz"\n'
+            f"\n"
+            f'mkdir -p "$TMP" "$DST" || exit 1\n'
+            f"\n"
+            f"# 1. 下载\n"
+            f'curl -fSL -o "$TMP/{sw}.tar.gz" "$URL" || {{ rm -rf "$TMP"; echo "Download failed"; exit 1; }}\n'
+            f"\n"
+            f"# 2. 解压 + 安装（扁平结构: bin/ lib/ share/ 在顶层）\n"
+            f'tar xzf "$TMP/{sw}.tar.gz" -C "$TMP"\n'
+            f'rm -f "$TMP/{sw}.tar.gz"\n'
+            f'cp -r "$TMP"/* "$DST/"\n'
+            f"\n"
+            f"# 3. 清理\n"
+            f'rm -rf "$TMP"\n'
+            f"\n"
+            f"# 4. 权限 + PATH\n"
+            f'chmod +x "$DST/bin/"* 2>/dev/null || true\n'
+            f'grep -q \'usr/local/bin\' "$HOME/.zshrc" 2>/dev/null || \\\\\n'
+            f'    echo \'export PATH="$HOME/usr/local/bin:$PATH"\' >> "$HOME/.zshrc"\n'
+            f"\n"
+            f"# 5. 预触发安全弹窗（HarmonyOS 首次执行二进制需确认）\n"
+            f'"$DST/bin/{bin_example}" --version >/dev/null 2>&1 || true\n'
+            f"\n"
+            f'echo "=== {sw} $VER installed ==="\n'
+        )
+
+        install_sh_sw.write_text(sw_install_script, encoding="utf-8")
+        os.chmod(install_sh_sw, 0o755)
+        log_ok(f"  install.sh → {install_sh_pkg.name} + {install_sh_sw.relative_to(self.pdir)}")
 
     def step10_tarball(self):
         log_info("Step 10/10: 打包 tar.gz...")

@@ -1,11 +1,33 @@
 #!/bin/sh
-# Install script for file 5.45
-set -e
-PREFIX=${1:-$HOME/usr/local}
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-cd "$SCRIPT_DIR"
-for d in bin lib include share; do
-  [ -d "$d" ] && cp -a "$d/" "$PREFIX/$d/"
-done
-chmod +x "$PREFIX/bin/"* 2>/dev/null || true
-echo 'file 5.45 installed to $PREFIX'
+# file for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
+
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
+
+TMP="$HOME/tmp/install-file-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/file/file-${VER}-ohos-aarch64.tar.gz"
+
+mkdir -p "$TMP" "$DST" || exit 1
+
+# 1. 下载
+curl -fSL -o "$TMP/file.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
+
+# 2. 解压 + 安装
+tar xzf "$TMP/file.tar.gz" -C "$TMP"
+rm -f "$TMP/file.tar.gz"
+cp -r "$TMP"/* "$DST/"
+
+# 3. 清理
+rm -rf "$TMP"
+
+# 4. 权限 + PATH
+chmod +x "$DST/bin/"* 2>/dev/null || true
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+
+# 5. 预触发安全弹窗
+"$DST/bin/file" --version >/dev/null 2>&1 || true
+
+echo "=== file $VER installed ==="

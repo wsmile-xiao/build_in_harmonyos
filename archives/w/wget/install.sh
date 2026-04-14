@@ -1,30 +1,33 @@
 #!/bin/sh
-# Install script for wget — parameterized version
-set -e
-VERSION="${1:-1.19.1}"
-PREFIX="${2:-$HOME/usr/local}"
-ARCHIVE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# wget for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
 
-echo "Installing wget $VERSION to $PREFIX..."
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
 
-# Extract tarball
-TAR="$ARCHIVE_DIR/$VERSION/packaging/wget-$VERSION-ohos-aarch64.tar.gz"
-if [ ! -f "$TAR" ]; then
-    echo "Error: $TAR not found"
-    exit 1
-fi
+TMP="$HOME/tmp/install-wget-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/wget/wget-${VER}-ohos-aarch64.tar.gz"
 
-TMPDIR="${TMPDIR:-$HOME/tmp}"
-TMP=$(mktemp -d "$TMPDIR/wget-install.XXXXXX")
-tar xzf "$TAR" -C "$TMP"
+mkdir -p "$TMP" "$DST" || exit 1
 
-# Copy files
-for d in bin lib include share doc; do
-    [ -d "$TMP/$d" ] && cp -a "$TMP/$d/" "$PREFIX/$d/" 2>/dev/null || true
-done
+# 1. 下载
+curl -fSL -o "$TMP/wget.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
 
+# 2. 解压 + 安装
+tar xzf "$TMP/wget.tar.gz" -C "$TMP"
+rm -f "$TMP/wget.tar.gz"
+cp -r "$TMP"/* "$DST/"
+
+# 3. 清理
 rm -rf "$TMP"
-chmod +x "$PREFIX/bin/wget" 2>/dev/null || true
 
-echo "wget $VERSION installed to $PREFIX"
-echo "Run: wget --version"
+# 4. 权限 + PATH
+chmod +x "$DST/bin/"* 2>/dev/null || true
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+
+# 5. 预触发安全弹窗
+"$DST/bin/wget" --version >/dev/null 2>&1 || true
+
+echo "=== wget $VER installed ==="

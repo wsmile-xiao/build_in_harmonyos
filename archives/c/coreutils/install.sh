@@ -28,5 +28,7 @@ rm -rf "$TMP"
 chmod +x "$DST/bin/"* 2>/dev/null || true
 grep -q "usr/local/bin" "$HOME/.zshrc" 2>/dev/null || echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
 
-=== coreutils $VER installed ===
-"$DST/bin/coreutils" --version | head -1
+# 5. 预触发安全弹窗（HarmonyOS 首次执行二进制需确认）
+for bin in "$DST/bin/"*; do [ -f "$bin" ] && "$bin" --version >/dev/null 2>&1 || true; done
+
+echo "=== coreutils $VER installed ==="
