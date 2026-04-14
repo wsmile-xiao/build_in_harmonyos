@@ -277,7 +277,8 @@ class FinishPipeline:
 
         # 6. Ensure edit tracker is up to date
         actions.append(
-            f"确保编辑追踪器已记录所有修改: python3 scripts/ohc-run.py track-edit scan {self.software} {self.version}"
+            f"⚠️ R6: 确认所有源码修改已记录: python3 scripts/ohc-run.py track-edit scan {self.software} {self.version}"
+            f"（如有遗漏，用 track-edit add 补录）"
         )
 
         # 7. Always: self-check + git instructions

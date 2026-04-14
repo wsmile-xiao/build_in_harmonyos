@@ -1,33 +1,33 @@
 #!/bin/sh
-# Install script for gzip (OpenHarmony)
-# Usage: sh install.sh [version] [prefix]
-#   or:  sh install.sh [prefix]  (installs latest)
-set -e
+# gzip for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
 
-VERSION="${1:-1.13}"
-PREFIX="${2:-$HOME/usr/local}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PKG_DIR="$SCRIPT_DIR/$VERSION/packaging"
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
 
-if [ ! -d "$PKG_DIR" ]; then
-    echo "Error: version $VERSION not found" >&2
-    exit 1
-fi
+TMP="$HOME/tmp/install-gzip-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/gzip/gzip-${VER}-ohos-aarch64.tar.gz"
 
-cd "$PKG_DIR"
-TAR_GZ=$(ls gzip-${VERSION}-ohos-aarch64.tar.gz 2>/dev/null)
-if [ -z "$TAR_GZ" ]; then
-    echo "Error: package not found for version $VERSION" >&2
-    exit 1
-fi
+mkdir -p "$TMP" "$DST" || exit 1
 
-TMPDIR=$(mktemp -d)
-trap 'rm -rf "$TMPDIR"' EXIT
-tar xzf "$TAR_GZ" -C "$TMPDIR"
+# 1. 下载
+curl -fSL -o "$TMP/gzip.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
 
-for d in bin lib include share; do
-  [ -d "$TMPDIR/$d" ] && mkdir -p "$PREFIX/$d" && cp -a "$TMPDIR/$d/" "$PREFIX/$d/"
-done
+# 2. 解压 + 安装
+tar xzf "$TMP/gzip.tar.gz" -C "$TMP"
+rm -f "$TMP/gzip.tar.gz"
+cp -r "$TMP"/* "$DST/"
 
-chmod +x "$PREFIX/bin/"* 2>/dev/null || true
-echo "gzip $VERSION installed to $PREFIX"
+# 3. 清理
+rm -rf "$TMP"
+
+# 4. 权限 + PATH
+chmod +x "$DST/bin/"* 2>/dev/null || true
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+
+# 5. 预触发安全弹窗
+"$DST/bin/gzip" --version >/dev/null 2>&1 || true
+
+echo "=== gzip $VER installed ==="

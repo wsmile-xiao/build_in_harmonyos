@@ -33,10 +33,7 @@ cp -r "$TMP"/* "$DST/"
 # 3. 清理
 rm -rf "$TMP"
 
-# 4. 权限 + PATH
-chmod +x "$DST/bin/"* 2>/dev/null || true
-grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
-    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+# 4. 验证库文件存在
+ls "$DST/lib/libz.a" >/dev/null 2>&1 && echo "libz.a OK" || echo "Warning: libz.a not found"
 
 echo "=== zlib $VER installed ==="
-"$DST/bin/zlib" --version | head -1

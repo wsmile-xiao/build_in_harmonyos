@@ -1,24 +1,33 @@
 #!/bin/sh
-# Install script for ncurses (OpenHarmony)
-set -e
-VERSION="${1:-6.4}"
-PREFIX="${2:-$HOME/usr/local}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PKG_DIR="$SCRIPT_DIR/$VERSION/packaging"
+# ncurses for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
 
-if [ ! -d "$PKG_DIR" ]; then
-    echo "Error: version $VERSION not found" >&2; exit 1
-fi
-cd "$PKG_DIR"
-TAR_GZ=$(ls ncurses-${VERSION}-ohos-aarch64.tar.gz 2>/dev/null)
-if [ -z "$TAR_GZ" ]; then
-    echo "Error: package not found" >&2; exit 1
-fi
-TMPDIR=$(mktemp -d); trap 'rm -rf "$TMPDIR"' EXIT
-tar xzf "$TAR_GZ" -C "$TMPDIR"
-for d in bin lib include share; do
-  [ -d "$TMPDIR/$d" ] && mkdir -p "$PREFIX/$d" && cp -a "$TMPDIR/$d/" "$PREFIX/$d/"
-done
-chmod +x "$PREFIX/bin/"* 2>/dev/null || true
-echo "ncurses $VERSION (static) installed to $PREFIX"
-echo "Libraries: libncursesw.a libpanelw.a libmenuw.a libformw.a"
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
+
+TMP="$HOME/tmp/install-ncurses-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/ncurses/ncurses-${VER}-ohos-aarch64.tar.gz"
+
+mkdir -p "$TMP" "$DST" || exit 1
+
+# 1. 下载
+curl -fSL -o "$TMP/ncurses.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
+
+# 2. 解压 + 安装
+tar xzf "$TMP/ncurses.tar.gz" -C "$TMP"
+rm -f "$TMP/ncurses.tar.gz"
+cp -r "$TMP"/* "$DST/"
+
+# 3. 清理
+rm -rf "$TMP"
+
+# 4. 权限 + PATH
+chmod +x "$DST/bin/"* 2>/dev/null || true
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+
+# 5. 预触发安全弹窗
+"$DST/bin/tic" -V >/dev/null 2>&1 || true
+
+echo "=== ncurses $VER installed ==="

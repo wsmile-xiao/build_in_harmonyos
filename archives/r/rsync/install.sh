@@ -1,20 +1,33 @@
 #!/bin/sh
-set -e
-VERSION="${1:-3.3.0}"
-PREFIX="${2:-$HOME/usr/local}"
-ARCHIVE_DIR="$(cd "$(dirname "$0")" && pwd)"
+# rsync for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
 
-echo "Installing rsync $VERSION to $PREFIX..."
-TAR="$ARCHIVE_DIR/$VERSION/packaging/rsync-$VERSION-ohos-aarch64.tar.gz"
-if [ ! -f "$TAR" ]; then echo "Error: $TAR not found"; exit 1; fi
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
 
-TMPDIR="${TMPDIR:-$HOME/tmp}"
-TMP=$(mktemp -d "$TMPDIR/rsync-install.XXXXXX")
-tar xzf "$TAR" -C "$TMP"
-for d in bin lib include share doc; do
-    [ -d "$TMP/$d" ] && cp -a "$TMP/$d/" "$PREFIX/$d/" 2>/dev/null || true
-done
+TMP="$HOME/tmp/install-rsync-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/rsync/rsync-${VER}-ohos-aarch64.tar.gz"
+
+mkdir -p "$TMP" "$DST" || exit 1
+
+# 1. 下载
+curl -fSL -o "$TMP/rsync.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
+
+# 2. 解压 + 安装
+tar xzf "$TMP/rsync.tar.gz" -C "$TMP"
+rm -f "$TMP/rsync.tar.gz"
+cp -r "$TMP"/* "$DST/"
+
+# 3. 清理
 rm -rf "$TMP"
-chmod +x "$PREFIX/bin/rsync" "$PREFIX/bin/rsync-ssl" 2>/dev/null || true
-echo "rsync $VERSION installed to $PREFIX"
-echo "Run: rsync --version"
+
+# 4. 权限 + PATH
+chmod +x "$DST/bin/"* 2>/dev/null || true
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+
+# 5. 预触发安全弹窗
+"$DST/bin/rsync" --version >/dev/null 2>&1 || true
+
+echo "=== rsync $VER installed ==="

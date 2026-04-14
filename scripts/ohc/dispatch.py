@@ -167,6 +167,7 @@ def generate_subtask_objective(
    - init-build: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py init-build {software} {version}`
    - 读取 .build-context-{software}-{version} 获取 BUILD_SRC_DIR 等变量
    - 手动编译（configure/make/install），遇到错误先用 engine 匹配知识图谱
+   - ⚠️ **每次修改源文件后必须立即记录**: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py track-edit add {software} {version} <修改的文件路径>`
    - track-edit scan: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py track-edit scan {software} {version}`
    - verify: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py verify-build {software} {version}`
    - package: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py package {software} {version}`
@@ -176,7 +177,7 @@ def generate_subtask_objective(
 3. **铁律提醒**:
    - ⛔ R20: configure --prefix 必须指向 $TEST_PREFIX（隔离目录），禁止 --prefix=$DEFAULT_PREFIX
    - R19: 禁止手动 tar 打包，必须用 ohc-run.py package
-   - R6: 只改源文件，用 track-edit 追踪
+   - ⛔ R6: 只改源文件，每次修改后**必须** `track-edit add` 记录，否则 refresh-patch 会遗漏补丁
    - R4: ncurses 必须 --without-shared
    - R10: 临时文件用 $TMPDIR 不用 /tmp
 4. **已知问题**:

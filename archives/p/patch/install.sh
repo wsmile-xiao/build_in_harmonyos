@@ -1,35 +1,33 @@
 #!/bin/sh
-# install-patch-2.7.6.sh — GNU patch 2.7.6 预编译包安装脚本
-# 目标: HarmonyOS/OpenHarmony aarch64
+# patch for HarmonyOS — install.sh
+# Usage: sh install.sh <version> [prefix]
 
-set -e
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
 
-PREFIX="${1:-$HOME/usr/local}"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TMP="$HOME/tmp/install-patch-$$"
+DST="${2:-$HOME/usr/local}"
+URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/patch/patch-${VER}-ohos-aarch64.tar.gz"
 
-# 如果从 tar.gz 解压运行，SCRIPT_DIR 就是解压目录
-# 如果从归档目录运行，需要指向 packaging 子目录
-if [ -d "$SCRIPT_DIR/bin" ]; then
-    SRC="$SCRIPT_DIR"
-elif [ -d "$SCRIPT_DIR/packaging/pkg-patch-2.7.6" ]; then
-    SRC="$SCRIPT_DIR/packaging/pkg-patch-2.7.6"
-else
-    echo "错误: 找不到 bin/ 目录" >&2
-    exit 1
-fi
+mkdir -p "$TMP" "$DST" || exit 1
 
-echo "安装 GNU patch 2.7.6 → $PREFIX"
+# 1. 下载
+curl -fSL -o "$TMP/patch.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
 
-mkdir -p "$PREFIX/bin"
+# 2. 解压 + 安装
+tar xzf "$TMP/patch.tar.gz" -C "$TMP"
+rm -f "$TMP/patch.tar.gz"
+cp -r "$TMP"/* "$DST/"
 
-# 安装二进制
-cp "$SRC/bin/patch" "$PREFIX/bin/patch"
-chmod 755 "$PREFIX/bin/patch"
+# 3. 清理
+rm -rf "$TMP"
 
-# 验证
-if "$PREFIX/bin/patch" --version >/dev/null 2>&1; then
-    echo "✅ patch 2.7.6 安装成功: $PREFIX/bin/patch"
-else
-    echo "❌ 安装验证失败" >&2
-    exit 1
-fi
+# 4. 权限 + PATH
+chmod +x "$DST/bin/"* 2>/dev/null || true
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+
+# 5. 预触发安全弹窗
+"$DST/bin/patch" --version >/dev/null 2>&1 || true
+
+echo "=== patch $VER installed ==="

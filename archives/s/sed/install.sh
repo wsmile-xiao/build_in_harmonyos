@@ -27,5 +27,7 @@ chmod +x "$DST/bin/"* 2>/dev/null || true
 grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \
     echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
 
+# 5. 预触发安全弹窗（HarmonyOS 首次执行二进制需确认）
+"$DST/bin/sed" --version >/dev/null 2>&1 || true
+
 echo "=== sed $VER installed ==="
-"$DST/bin/sed" --version | head -1
