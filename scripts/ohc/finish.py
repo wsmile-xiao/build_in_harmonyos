@@ -136,6 +136,17 @@ class FinishPipeline:
             self.steps["step2"] = False
             self._task_card("11b", "❌失败", f"exit {rc}"); log_fail(f"  close-archive 失败 (RC={rc})")
 
+    # Step 2.5: G0 clean build verification
+    def step25_g0_clean_verify(self):
+        log_info("Step 2.5/6: G0 干净构建验证...")
+        from .clean_verify import clean_verify
+        rc = clean_verify(self.software, self.version, pdir=str(self.pdir))
+        if rc != 0:
+            log_fail("G0 干净构建验证失败！请修复补丁后重试")
+            log_fail("运行 ohc-run.py clean-verify 获取详细错误")
+            raise SystemExit(2)
+        log_ok("G0 干净构建验证通过")
+
     # Step 3: verify-build
     def step3_verify_build(self):
         log_info("Step 3/6: 质量门禁 G1-G4...")
@@ -345,6 +356,7 @@ class FinishPipeline:
         self.check_prerequisites()
         self.step1_refresh_patch()
         self.step2_close_archive()
+        self.step25_g0_clean_verify()
         self.step3_verify_build()
         self.step4_finalize_archive()
         self.step5_check_knowledge_gap()

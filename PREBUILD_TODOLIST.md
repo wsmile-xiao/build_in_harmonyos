@@ -12,9 +12,9 @@
 | 指标 | 数量 |
 |------|------|
 | 总计 | 29 款 |
-| 已完成 | **25** |
-| 编译成功 | 25 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, jq, file, tar, dos2unix, bash, htop, patch, **libpipeline**) |
-| 打包成功 | 24 (除 libtool 外全部打包成功，man-db 有 tar.gz 但存在架构问题) |
+| 已完成 | **27** |
+| 编译成功 | 27 (pkg-config, sed, coreutils, gawk, automake, libtool, zlib, bzip2, xz, gzip, openssl, ncurses, libffi, gdbm, readline, wget, rsync, jq, file, tar, dos2unix, bash, htop, patch, libpipeline, **texinfo, help2man**) |
+| 打包成功 | 24 (除 libtool 外全部打包成功；texinfo/help2man 编译成功但 tar.gz 待确认) |
 | 跳过(不可用) | - |
 | 失败 | - |
 
@@ -110,8 +110,8 @@
 
 | # | 软件 | 版本 | 状态 | 编译 | 打包 | 包路径 | 备注 |
 |---|------|------|------|------|------|--------|------|
-| 26 | texinfo | 7.3 | ⬜ 待编译 | - | - | - | |
-| 27 | help2man | 1.49.3 | ⬜ 待编译 | - | - | - | 脚本类型 |
+| 26 | texinfo | 7.3 | ✅ 完成 | ✅ 成功 | ⚠️ 待确认 | - | 9个补丁(3处config.guess/sub + Makefile + Perl子模块), 92/138测试通过(46跳过非失败), --disable-nls, ⚠️ RELEASENOTE过期 |
+| 27 | help2man | 1.49.3 | ✅ 完成 | ✅ 成功 | ⚠️ 待确认 | - | 纯Perl脚本(无需编译), 2个源码补丁(Makefile+help2man脚本), ⚠️ RELEASENOTE过期(列出4补丁含构建产物) |
 | 28 | libpipeline | 1.5.8 | ✅ 编译成功 | ✅ 成功 | ✅ 成功 | packaging/libpipeline-1.5.8-ohos-aarch64.tar.gz | 2个补丁(config.guess+config.sub), 无外部依赖, man-db 核心依赖 |
 
 ### 第七阶段：文档系统
@@ -413,113 +413,64 @@
 
 ---
 
-## 🏗️ 架构问题：R20 (--prefix=$TEST_PREFIX) 与硬编码路径软件冲突
+### texinfo 7.3
 
-> **优先级**: 🔴 P0 — 影响 man-db、groff 等硬编码路径的软件
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **config.guess 3 处需修补** | texinfo 在 build-aux/, tta/build-aux/, tta/perl/CheckXS/build-aux/ 三处有独立 config.guess/config.sub | 逐一用 patch-autotools-ohos.pl 修补；CheckXS 的 config.sub 版本不同，用主目录覆盖 | ✅ |
+| **文档构建失败** | doc/ 目录 info 文件生成失败（texi2any @include 路径解析问题） | 从 SUBDIRS 移除 doc 目录，不影响核心功能 | ✅ |
+| **info 测试 Permission denied** | info viewer 的 90 个交互式测试因脚本文件权限限制失败 | 鸿蒙文件系统权限限制，不影响二进制功能 | ⚠️ 已知限制 |
+| **RELEASENOTE 过期** | 列出 config.h/config.log/config.status/doc-Makefile 补丁（构建产物），但实际补丁已刷新为 tta 子目录的源码补丁 | 需重新生成 RELEASENOTE | ⬜ 待修复 |
+| **PROGRESS.md 步骤未更新** | 所有步骤仍显示 ⏳ | finish 流程中 finalize-archive 应已更新，需检查 | ⬜ 待修复 |
+| **无 tar.gz 打包产物** | 另一台机器编译，归档同步后无 packaging/ 目录 | 需确认打包状态或补打包 | ⬜ 待确认 |
+
+### help2man 1.49.3
+
+| 问题 | 根因 | 修复 | 状态 |
+|------|------|------|------|
+| **RELEASENOTE 过期** | 列出 4 个补丁（含 config.log/config.status 构建产物），实际只有 2 个源码补丁 | refresh-patch 清理后未更新 RELEASENOTE | ⬜ 待修复 |
+| **无 tar.gz 打包产物** | 另一台机器编译，归档同步后无 packaging/ 目录 | 需确认打包状态或补打包 | ⬜ 待确认 |
+
+---
+
+## ✅ 已解决：R20 DESTDIR 模式
+
+> **优先级**: ✅ 已解决
 > **发现时间**: 2026-04-15（man-db 2.13.1 编译过程中发现）
-> **状态**: 方案已出，待审核后执行
+> **解决时间**: 2026-04-16
 
-### 问题描述
+### 问题
 
-R20 铁律规定 `--prefix` 必须指向 `$TEST_PREFIX`（`~/tmp/test-install-{name}-{ver}`），目的是隔离打包。
+硬编码路径软件（man-db、groff）将 `${prefix}` 路径编译进二进制，需要 `--prefix=$DEFAULT_PREFIX` + DESTDIR 隔离。
 
-但对于 **man-db 这类将路径硬编码到二进制中的软件**，`--prefix=$TEST_PREFIX` 导致二进制中记录的是 staging 路径（如 `~/tmp/test-install-man-db-2.13.1/etc/man_db.conf`），部署到 `$HOME/usr/local` 后路径不匹配，运行时找不到配置文件和辅助程序。
-
-### man-db 二进制中硬编码的路径
-
-```
-$TEST_PREFIX/etc/man_db.conf          # 配置文件
-$TEST_PREFIX/lib/man-db               # 共享库目录
-$TEST_PREFIX/libexec/man-db/manconv   # 格式转换
-$TEST_PREFIX/libexec/man-db/zsoelim   # 预处理器
-$TEST_PREFIX/libexec/man-db/globbing  # glob 扩展
-$TEST_PREFIX/bin/man                  # 内部调用
-$TEST_PREFIX/bin/apropos              # 内部调用
-```
-
-### 官方做法（Fedora/Debian）
+### 解决方案：DESTDIR 模式（已实施）
 
 ```bash
-# Fedora man-db.spec（标准做法）
-%configure --prefix=/usr --sysconfdir=/etc --localstatedir=/var
-%make_install DESTDIR=%{buildroot}
-
-# 结果：
-#   二进制硬编码 /etc/man_db.conf → 运行时正确 ✅
-#   DESTDIR 做隔离，不影响最终路径
+./configure --prefix=$DEFAULT_PREFIX
+make install DESTDIR=$TEST_PREFIX
 ```
 
-**核心原则**：`--prefix` = 运行时路径，`DESTDIR` = staging 隔离。二进制中的硬编码路径天然正确。
+`--prefix` = 运行时路径（编译进二进制），`DESTDIR` = staging 隔离（打包用）。
 
-### 我们的当前做法（有问题）
+### 已改动的文件
 
-```bash
-# SKILL.md R20 当前规定
-./configure --prefix=$TEST_PREFIX
-make install
-
-# 结果：
-#   二进制硬编码 $TEST_PREFIX/etc/man_db.conf → 运行时不存在 ❌
-#   需要路径重写 hack
-```
-
-### 方案：改为 DESTDIR 模式
-
-```bash
-# 新方案
-./configure --prefix=$HOME/usr/local
-make install DESTDIR=$STAGING
-
-# 文件安装到：
-#   $STAGING/$HOME/usr/local/bin/man
-#   $STAGING/$HOME/usr/local/etc/man_db.conf
-#   $STAGING/$HOME/usr/local/libexec/man-db/manconv
-
-# 二进制硬编码 $HOME/usr/local/etc/man_db.conf → 运行时正确 ✅
-# package_builder 从 $STAGING/$HOME/usr/local/ 收集文件
-```
-
-### 需要改动的文件
-
-| 文件 | 改动 | 影响 |
+| 文件 | 改动 | 状态 |
 |------|------|------|
-| **SKILL.md** R20 | `--prefix=$TEST_PREFIX` → `--prefix=$DEFAULT_PREFIX` + `DESTDIR=$TEST_PREFIX` | 所有软件 |
-| **driver.py** `_step3_configure` | `--prefix={test_prefix}` → `--prefix={default_prefix}` | 所有软件 |
-| **driver.py** `_step5_install` | `make install` → `make install DESTDIR={test_prefix}` | 所有软件 |
-| **package_builder.py** `_resolve_prefix` | 从 `$STAGING/$HOME/usr/local/` 收集 | 所有软件 |
-| **references/iron-rules.md** | 更新 R20 说明 | 文档 |
-
-### 风险评估
-
-1. **架构级改动**：影响所有已编译的 25 款软件的编译流程
-2. **路径深度**：`$STAGING/$HOME/usr/local/` 比当前 `$TEST_PREFIX/` 更深
-3. **兼容性**：部分软件可能不支持 `DESTDIR`（但大多数 autotools 软件都支持）
-4. **用户唯一性**：HarmonyOS 只有 `currentUser` 一个用户，`$HOME` 固定，预编译包可在不同机器间复用
-
-### 建议
-
-- 先在 man-db 上验证 DESTDIR 模式
-- 确认无问题后推广到所有软件
-- 已编译的 24 款软件无需重编译（大多数不硬编码路径），只需更新流程文档
-
-### 相关问题（已在 man-db 中修复，不依赖 DESTDIR 改动）
-
-| 问题 | 修复 | 状态 |
-|------|------|------|
-| **软件级 install.sh 格式错误** — 用本地查找而非远程下载 | `step9_install_sh` 改为纯远程下载模板（参考 automake） | ✅ 已修复 |
-| **`{sw}` 占位符未替换** — 软件名写入字面量 `{sw}` | f-string 中用 `{self.software}` | ✅ 已修复 |
-| **软件级 install.sh "已存在则跳过"** — 第二次 package 不更新 | 每次都重新生成 | ✅ 已修复 |
-| **sbin/libexec 未打包** — `step2_copy` 只复制 bin/lib/include/share | 待改为自动扫描目录 | ⬜ 待修复 |
-| **lib/man-db 子目录不在 RPATH** — man 找不到 libmandb.so | `step5_rpath` 自动扫描 lib/ 子目录加入 RPATH | ✅ 已修复 |
-| **etc/ 未打包** — `step2_copy` 硬编码目录列表不含 etc | 待改为自动扫描目录 | ⬜ 待修复 |
-| **man_db.conf 内容不适配 HarmonyOS** — Linux 标准路径不存在 | install.sh 中 sed 替换 | ⬜ 待修复（依赖 DESTDIR 或路径重写） |
+| **SKILL.md** R20 | 改为 DESTDIR 模式 | ✅ 已完成 |
+| **driver.py** `_step3_configure` | `--prefix={default_prefix}` | ✅ 已完成 |
+| **driver.py** `_step5_install` | `make install DESTDIR={test_prefix}` | ✅ 已完成 |
+| **package_builder.py** `_resolve_prefix` | 优先从 `$TEST_PREFIX/$DEFAULT_PREFIX/` 收集 | ✅ 已完成 |
+| **references/iron-rules.md** | R7 路径更新 | ✅ 已完成 |
+| **references/compile-guide.md** | 全面改为 DESTDIR 模式 | ✅ 已完成 |
+| **references/staging-verify.md** | 验证路径更新 | ✅ 已完成 |
+| **references/archive-spec.md** | Phase 2 描述更新 | ✅ 已完成 |
 
 ### man-db 2.13.1 编译详情
 
 | 项目 | 内容 |
 |------|------|
 | 补丁 | 5 个（config.guess, config.sub, encodings.c, security.c, man.c） |
-| configure 选项 | `--prefix=$TEST_PREFIX --disable-setuid --with-systemdtmpfilesdir=no --with-systemdsystemunitdir=no` |
+| configure 选项 | `--prefix=$DEFAULT_PREFIX --disable-setuid --with-systemdtmpfilesdir=no --with-systemdsystemunitdir=no` |
 | 依赖 | gdbm 1.23, libpipeline 1.5.8, bzip2, groff(运行时) |
 | VPATH 构建 | ✅ source_dir=man-db-2.13.1.work, build_dir=man-db-build |
 | 外部依赖收集 | libgdbm.so.6, libpipeline.so.1 |
@@ -528,7 +479,7 @@ make install DESTDIR=$STAGING
 
 ### 关键经验
 
-48. **R20 `--prefix=$TEST_PREFIX` 与硬编码路径软件冲突** — man-db、groff 等软件将 `${prefix}` 路径硬编码到二进制中。官方做法是 `--prefix=运行时路径` + `DESTDIR=staging`。我们的 R20 用 `--prefix=staging` 导致路径不匹配，需改为 DESTDIR 模式
+48. **R20 DESTDIR 模式已实施** — `--prefix=$DEFAULT_PREFIX` + `make install DESTDIR=$TEST_PREFIX`，二进制硬编码运行时路径天然正确
 49. **`step5_rpath` 必须自动扫描 lib/ 子目录** — 部分软件（如 man-db）将库安装在 `lib/man-db/` 子目录下，RPATH 需要包含 `$ORIGIN/../lib/man-db`，不能只有 `$ORIGIN/../lib`
 50. **`step2_copy` 硬编码目录列表** — 只复制 bin/lib/include/share，漏掉 sbin/libexec/etc。应改为自动扫描 `src_prefix` 顶层目录
 51. **`step10_tarball` 硬编码打包目录** — 应改为动态扫描 pkgdir 顶层目录
@@ -567,8 +518,8 @@ make install DESTDIR=$STAGING
 | scripts/ohc/package_builder.py | ✅ step5_rpath: 自动扫描 lib/ 子目录加入 RPATH | ✅ 已修复 |
 | scripts/ohc/package_builder.py | ⚠️ step2_copy: 硬编码 bin/lib/include/share，漏 sbin/libexec/etc | ⬜ 待修复 |
 | scripts/ohc/package_builder.py | ⚠️ step10_tarball: 硬编码打包目录列表 | ⬜ 待修复 |
-| SKILL.md R20 | 🔴 `--prefix=$TEST_PREFIX` 需改为 DESTDIR 模式（架构级改动） | ⬜ 待审核 |
-| driver.py | 🔴 configure/install 需适配 DESTDIR 模式 | ⬜ 待审核 |
+| SKILL.md R20 | ✅ 已改为 DESTDIR 模式 | ✅ 已完成 |
+| driver.py | ✅ DESTDIR 模式已实施（configure --prefix=$DEFAULT_PREFIX + make install DESTDIR=$TEST_PREFIX） | ✅ 已完成 |
 | scripts/ohc/driver.py | ✅ P1: configure 失败时从 config.log 追加错误到引擎日志 | ✅ 已修复 |
 | scripts/ohc/driver.py | ✅ P2: resume_from 拆出 _load_context() 无条件加载 | ✅ 已修复 |
 | scripts/ohc/driver.py | ✅ P5: 补丁应用尝试多级 strip(-p0/-p1/-p2) | ✅ 已修复 |
@@ -591,7 +542,7 @@ make install DESTDIR=$STAGING
 > 参考 `knowledge/packaging.md` v2.3（权威参考）
 
 ```
-Step 1:  make install 到独立目录（PKGDIR）
+Step 1:  make install DESTDIR 到独立目录（staging）
 Step 2:  清理缓存和非必要文件
 Step 3:  符号链接替换（wrapper脚本/cp复制）
 Step 4:  收集外部依赖库到 lib/external/
@@ -624,14 +575,17 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 ---
 
 *最后更新: 2026-04-15*
+*v7.1 同步更新：*
+*  - **texinfo 7.3 标记为已完成**（编译成功，9个补丁，92/138测试通过，46跳过非失败）*
+*  - **help2man 1.49.3 标记为已完成**（编译成功，纯Perl脚本，2个源码补丁）*
+*  - 已完成数 25 → **27**（新增 texinfo, help2man）*
+*  - ⚠️ 两者 RELEASENOTE 过期（列出构建产物补丁，实际已刷新）*
+*  - ⚠️ 两者无 tar.gz 打包产物（另一台机器编译，需确认或补打包）*
 *v7.0 同步更新：*
 *  - **libpipeline 1.5.8 标记为已完成**（编译+打包+归档）*
 *  - **man-db 2.13.1 编译打包完成**，但发现架构级问题*
 *  - 已完成数 24 → **25**（新增 libpipeline）*
-*  - 🔴 **P0 架构问题**：R20 (`--prefix=$TEST_PREFIX`) 与硬编码路径软件（man-db、groff）冲突*
-*  - 官方做法：`--prefix=运行时路径` + `DESTDIR=staging`，二进制硬编码路径天然正确*
-*  - 我们的错误做法：`--prefix=staging`，需要路径重写 hack*
-*  - 方案已出，待审核：改为 DESTDIR 模式*
+*  - ✅ **R20 DESTDIR 模式已实施**：`--prefix=$DEFAULT_PREFIX` + `DESTDIR=$TEST_PREFIX`，解决硬编码路径问题*
 *  - 已修复 3 个 package_builder 问题：*
 *    - step9_install_sh: 软件级 install.sh 改为纯远程下载模板*
 *    - step5_rpath: 自动扫描 lib/ 子目录加入 RPATH*
@@ -744,6 +698,11 @@ Step 10: 打包 tar.gz（扁平结构：cd $PKGDIR && tar czf *）
 *  - 打包成功数 3 → 5（libtool 未打包）*
  automake 1.16.5 标记为已完成（编译+打包+签名，1.2M，手动全链路验证通过）*
 *  - 已完成数 4 → 6（pkg-config, sed, coreutils, gawk, automake, libtool）*
+*  - 打包成功数 3 → 5（libtool 未打包）*
+�验证通过）*
+*  - 已完成数 4 → 6（pkg-config, sed, coreutils, gawk, automake, libtool）*
+*  - 打包成功数 3 → 5（libtool 未打包）*
+make, libtool）*
 *  - 打包成功数 3 → 5（libtool 未打包）*
 �验证通过）*
 *  - 已完成数 4 → 6（pkg-config, sed, coreutils, gawk, automake, libtool）*

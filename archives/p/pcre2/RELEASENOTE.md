@@ -12,20 +12,23 @@ cd pcre2-10.40-ohos-aarch64 && sh install-pcre2-10.40.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 10.40 | partial | 0 |
+| 10.40 | success | 1 |
 
 ## 当前版本 (10.40) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: N/A
+- 包大小: 5.0MB
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 0
+- 补丁数: 1
+
+### 补丁列表
+- 0001-config-guess-config-sub-harmonyos.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64
-- `build_in_harmonyos/usr/local/bin` in PATH
+- `openharmony-compile-agent/usr/local/bin` in PATH

@@ -189,7 +189,7 @@ Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
 **遗留问题**: 无
 
 ### 对话 #2 — YYYY-MM-DD HH:MM
-**操作**: make -j1 && make install（到 $TEST_PREFIX）
+**操作**: make -j1 && make install DESTDIR=$TEST_PREFIX
 **结果**: ✅ 成功，二进制已安装到 $TEST_PREFIX/bin/
 **发现的问题**: 无
 **当前状态**: Phase 2 完成，下一步 Staging 验证(§2.8) + make check
@@ -222,3 +222,4 @@ Phase 4 归档时汇总 feedback 到 manifest.yaml `skill_feedback` 字段。
 | 质量报告 | `quality-report.md` | （ohc-run.py verify-build 固定输出） |
 | SKILL 反馈 | `skill-feedback.md` | `feedback.md` |
 | 进展记录 | `PROGRESS.md` | `progress.md` `STATUS.md` |
+d` `STATUS.md` |

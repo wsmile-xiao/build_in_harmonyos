@@ -1,11 +1,11 @@
 #!/bin/sh
 # coreutils for HarmonyOS — install.sh
-# curl -fsSL <url>/install-coreutils.sh | sh -s -- <version>
+# curl -fsSL <url>/install.sh | sh -s -- <version>
 #
-# tar.gz is flat structure (bin/ share/ lib/ at top level)
+# tar.gz 为扁平结构 (bin/ lib/ share/ 在顶层)，直接 cp 即可。
 
-VER="${1:-9.10}"
-[ -z "$VER" ] && { echo "Usage: sh install-coreutils.sh <version>"; exit 1; }
+VER="${1:-}"
+[ -z "$VER" ] && { echo "Usage: sh install.sh <version>"; exit 1; }
 
 TMP="$HOME/tmp/install-coreutils-$$"
 DST="$HOME/usr/local"
@@ -13,22 +13,23 @@ URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/coreu
 
 mkdir -p "$TMP" "$DST" || exit 1
 
-# 1. Download
+# 1. 下载
 curl -fSL -o "$TMP/coreutils.tar.gz" "$URL" || { rm -rf "$TMP"; echo "Download failed"; exit 1; }
 
-# 2. Extract + Install (flat structure)
+# 2. 解压 + 安装（扁平结构: bin/ lib/ share/ 在顶层）
 tar xzf "$TMP/coreutils.tar.gz" -C "$TMP"
 rm -f "$TMP/coreutils.tar.gz"
 cp -r "$TMP"/* "$DST/"
 
-# 3. Cleanup
+# 3. 清理
 rm -rf "$TMP"
 
-# 4. Permissions + PATH
+# 4. 权限 + PATH
 chmod +x "$DST/bin/"* 2>/dev/null || true
-grep -q "usr/local/bin" "$HOME/.zshrc" 2>/dev/null || echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
+grep -q 'usr/local/bin' "$HOME/.zshrc" 2>/dev/null || \\
+    echo 'export PATH="$HOME/usr/local/bin:$PATH"' >> "$HOME/.zshrc"
 
 # 5. 预触发安全弹窗（HarmonyOS 首次执行二进制需确认）
-for bin in "$DST/bin/"*; do [ -f "$bin" ] && "$bin" --version >/dev/null 2>&1 || true; done
+"$DST/bin/[" --version >/dev/null 2>&1 || true
 
 echo "=== coreutils $VER installed ==="

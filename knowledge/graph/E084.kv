@@ -1,0 +1,72 @@
+id: E084
+severity: 2
+category: java|jni|build-pattern
+trigger_tool: javac|clang|jar
+phase: compilation|packaging
+keywords: JNA, JNI, Java, javac, jar, libjnidispatch, libffi, ffi_closure, callback, Native.load, Java Native Access, TEMPLATE, Version.java
+forbid_cnt: 0
+auto_fix: false
+approach: manual-java-native-build
+principles: P-JNI-001
+doc: doc/E084.md
+
+summary: |
+  Java 库（如 JNA）的鸿蒙适配需要同时编译 Java 层和 Native JNI 层。
+  无 ant/maven 时可手动构建：javac 编译 Java + 生成 JNI 头文件，
+  clang 编译 native .c，静态链接 libffi，最后 jar 打包。
+
+symptoms:
+  - "JNA TEMPLATE version mismatch"
+  - "harmonyos-aarch64 not found in JAR"
+  - "需要编译 JNI 库但没有 ant/maven"
+
+build_steps:
+  - title: "修改版本号"
+    description: |
+      JNA 的 Version.java 使用 TEMPLATE 占位符，需替换为实际版本号：
+      VERSION = "5.19.0"
+      VERSION_NATIVE = "5.19.0"
+
+  - title: "编译 Java 源码 + 生成 JNI 头文件"
+    cmd: |
+      javac -d build/classes -h build/jni-headers \
+        -sourcepath src $(find src/com/sun/jna -name "*.java")
+
+  - title: "编译 Native 层（静态链接 libffi）"
+    cmd: |
+      clang -O2 -fPIC -D_REENTRANT -DHAVE_PROTECTION -DNO_JAWT \
+        -DJNA_JNI_VERSION='"5.19.0"' -DCHECKSUM='"0"' \
+        -I$JAVA_HOME/include -I$JAVA_HOME/include/linux \
+        -I$FFI_HOME/include -Ibuild/jni-headers -Inative/ \
+        -c native/dispatch.c -o build/dispatch.o
+
+      clang -O2 -fPIC ... -c native/callback.c -o build/callback.o
+
+      clang -shared -o build/libjnidispatch.so \
+        build/dispatch.o build/callback.o $FFI_HOME/lib/libffi.a
+
+  - title: "打包 JAR（含平台 native library）"
+    cmd: |
+      mkdir -p build/classes/com/sun/jna/harmonyos-aarch64/
+      cp build/libjnidispatch.so build/classes/com/sun/jna/harmonyos-aarch64/
+      cd build/classes && jar cf dist/jna.jar com/sun/jna/
+
+  - title: "签名"
+    cmd: "python3 $SKILL_ROOT/scripts/ohc-run.py sign-elf build/libjnidispatch.so"
+
+key_points:
+  - "静态链接 libffi.a 避免运行时依赖，部署只需 libc.so"
+  - "JNA 在鸿蒙识别为 harmonyos-aarch64（不是 linux-aarch64），JAR 需包含对应路径"
+  - "-DNO_JAWT 禁用 AWT（鸿蒙无 X11）"
+  - "ffi_closure (回调) 在鸿蒙上正常工作"
+  - "需使用已签名的 JDK 副本运行（见 E083）"
+
+platform_specific:
+  harmonyos_prefix: "harmonyos-aarch64"
+  linux_prefix: "linux-aarch64"
+  note: "建议 JAR 中同时包含两个路径以兼容不同 JDK"
+
+scope:
+  platform: HarmonyOS
+  java: BiSheng JDK 17+
+  affected: "JNA, JNR, JFFI, lwjgl 等含 JNI native 层的 Java 库"

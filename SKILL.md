@@ -55,8 +55,15 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=
 # Step 2: 读取上下文，手动编译（唯一需要 AI 的步骤）
 # 读取 .build-context-<name>-<ver> 获取 BUILD_SRC_DIR, TEST_PREFIX 等变量
 cd $BUILD_SRC_DIR
-./configure --prefix=$TEST_PREFIX && make -j$(nproc) && make install
+./configure --prefix=$DEFAULT_PREFIX && make -j$(nproc) && make install DESTDIR=$TEST_PREFIX
 make check  # 必须执行，超时可 Ctrl+C 跳过并记录原因
+
+# Step 2.5: 预编译包制作
+python3 $SKILL_ROOT/scripts/ohc-run.py package <软件名> <版本>
+
+# Step 2.6: 部署到本地 + 用户验证（模拟普通用户部署 install.sh 后的状态）
+make install  # 不带 DESTDIR，直接安装到 $DEFAULT_PREFIX（~/usr/local）
+$DEFAULT_PREFIX/bin/<软件> --version  # 验证本地安装可用
 
 # Step 3: 收尾（6 步自动）
 python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|failed
@@ -81,7 +88,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-### 1.2 铁律摘要（20 条，违反=bug）
+### 1.2 铁律摘要（23 条，违反=bug）
 
 | # | 规则 | 一句话 | 详解 |
 |---|------|--------|------|
@@ -104,7 +111,10 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R17 | 知识先草稿 | graph add --draft | knowledge/collaboration.md |
 | R18 | 依赖先查预编译 | resolve-deps --install 优先于手动编译 | §1.3 决策树 |
 | R19 | 禁止手动打包 | 必须用 ohc-run.py package 10 步管线 | §3 Step 5 |
-| R20 | **--prefix 必须指向 $TEST_PREFIX** | **禁止 --prefix=$DEFAULT_PREFIX**（打包会混入系统文件） | §3 Step 2 |
+| R20 | **DESTDIR 模式** | `--prefix=$DEFAULT_PREFIX` + `DESTDIR=$TEST_PREFIX` | §3 Step 2 |
+| R21 | **Phase 3 结束必须自检零介入** | 按 §2.4.1 清单逐项检查，所有手动操作已固化 | 不自检就调 finish |
+| R22 | **finish 前必须通过干净构建验证** | `ohc-run.py clean-verify` G0 门禁通过 | G0 FAIL 仍标 success |
+| R23 | **平台检测机制优先于改生成文件** | 用 hints/config.guess/cmake 检查 | 手动 sed config.sh/config.h |
 
 ### 1.3 决策树
 
@@ -174,21 +184,33 @@ $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=URL] [--
 ```bash
 source .build-context-<name>-<ver>
 cd $BUILD_SRC_DIR
-./configure --prefix=$TEST_PREFIX && make -j1 && make install
+./configure --prefix=$DEFAULT_PREFIX && make -j1 && make install DESTDIR=$TEST_PREFIX
 ```
 
-> **⛔ R20 铁律：`--prefix` 必须指向 `$TEST_PREFIX`！**
+> **⛔ R20 铁律：DESTDIR 模式（v8.0+）**
 >
 > | 变量 | 路径 | 用途 |
 > |------|------|------|
-> | `$TEST_PREFIX` | `~/tmp/test-install-{name}-{ver}` | **configure --prefix 目标**（隔离 staging，打包源） |
-> | `$DEFAULT_PREFIX` | `~/usr/local` | **最终部署目标**（install.sh 写入，不用于 configure） |
+> | `$DEFAULT_PREFIX` | `~/usr/local` | **configure --prefix 目标**（运行时路径，编译进二进制） |
+> | `$TEST_PREFIX` | `~/tmp/test-install-{name}-{ver}` | **DESTDIR staging 根**（make install DESTDIR=） |
 >
-> **禁止写** `--prefix=$DEFAULT_PREFIX` 或 `--prefix=/usr/local`。否则 `ohc-run.py package` 会从 `~/usr/local` 收集文件，混入系统已有文件，打包体积暴增且产物不纯净。
+> **文件安装到**：`$TEST_PREFIX/$DEFAULT_PREFIX/bin/`, `$TEST_PREFIX/$DEFAULT_PREFIX/lib/` 等
 >
-> **正确流程**：`configure --prefix=$TEST_PREFIX` → `make install` → `package`（从 TEST_PREFIX 打包）→ 用户运行 `install.sh` 部署到 DEFAULT_PREFIX
+> **二进制硬编码**：`$DEFAULT_PREFIX/share/misc/magic` → 运行时路径正确 ✅
+>
+> **流程**：`configure --prefix=$DEFAULT_PREFIX` → `make install DESTDIR=$TEST_PREFIX` → `package`（从 `$TEST_PREFIX/$DEFAULT_PREFIX/` 打包）→ 用户运行 `install.sh` 部署到 `$DEFAULT_PREFIX`
 
-**执行顺序**：configure → make → install(到 $TEST_PREFIX) → 安全弹窗(R7) → **make check**(必须执行，超时可 Ctrl+C 跳过) → Staging 验证 → package → finish。
+**执行顺序**：
+1. `configure --prefix=$DEFAULT_PREFIX` → `make`
+2. `make install DESTDIR=$TEST_PREFIX`（staging 隔离，打包用）
+3. 安全弹窗(R7) → **make check**（必须执行，超时可 Ctrl+C 跳过）
+4. Staging 验证
+5. `ohc-run.py package`（预编译包制作）
+6. ⭐ `make install`（不带 DESTDIR，安装到 `$DEFAULT_PREFIX`，模拟用户部署）
+7. 用户验证（运行 `$DEFAULT_PREFIX/bin/*` 确认可用）
+8. `ohc-run.py finish`
+
+> **Step 6 的意义**：打包验证完成后，`make install` 将软件安装到本地 `~/usr/local`，模拟普通用户下载预编译包、运行 `install.sh` 后的真实状态。这一步能发现打包遗漏（缺库、路径错误、配置文件缺失）等问题。
 
 > **make check 注意事项**：部分软件的测试套会卡住（如 coreutils cat-self、bash 多线程测试），遇到卡住可 `Ctrl+C` 跳过并在 PROGRESS.md 记录跳过原因。`make check` 的结果会写入 `reports/test-report.md`。
 
@@ -221,6 +243,29 @@ cd $BUILD_SRC_DIR
 5. `KNOWLEDGE_GAP: true` → 修复成功后必须沉淀到知识图谱
 6. `EXIT_CODE: 1` → 不可恢复，需手动从头处理
 
+### Step 2.5: 干净构建验证（⭐ R22 强制，脚本自动执行）
+
+> **时机**：Phase 3 编译完成 + AI 自检通过 (R21) + refresh-patch 完成之后。
+> **执行者**：`ohc-run.py clean-verify`（在 finish Step 3 内自动触发）。
+
+```bash
+python3 $SKILL_ROOT/scripts/ohc-run.py clean-verify <软件名> <版本>
+```
+
+脚本自动执行：
+1. 解压原始 tarball 到临时目录（不影响工作目录）
+2. 应用 `patches/*.patch`
+3. 运行 `./configure`（使用 manifest.yaml 中的 `configure_options`）
+4. `make -j1`
+5. `make install DESTDIR=...`
+6. 检查产物完整性
+7. 清理临时目录
+
+**PASS** → 继续 finish 的 G1-G4 门禁。
+**FAIL** → 输出 HANDOFF 块（见 staging-verify.md G0），AI 修复后重跑 clean-verify。
+
+**设计目的**：暴露 Phase 3 中所有"手动操作但未固化为补丁/规则"的遗漏。
+
 ### Step 3: ohc-run.py finish — 6 步自动收尾
 
 ```bash
@@ -246,7 +291,9 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|faile
 $SKILL_ROOT/scripts/ohc-run.py verify-build <软件名> <版本>
 ```
 
-4 道门禁：G1 二进制完整性 → G2 功能可用性 → G3 可移植性（RPATH/签名）→ G4 档案完整性。正常流程已在 Step 3 自动执行。
+5 道门禁：G0 干净构建验证（补丁自包含性）→ G1 二进制完整性 → G2 功能可用性 → G3 可移植性（RPATH/签名）→ G4 档案完整性。
+G0 由 `ohc-run.py clean-verify` 执行，在 finish Step 3 自动触发。G0 FAIL 阻塞后续所有门禁。
+正常流程已在 Step 3 自动执行。
 
 ### Step 5: 预编译包制作
 
@@ -416,12 +463,12 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, rep
 |------|------|------|
 | /tmp 只读 | E002，写入报 Read-only | 用 `$TMPDIR` 或 `$HOME/tmp` |
 | HMDFS 软链接 | 不能 ln -sf 覆盖 | `rm -f && ln -s` 或 wrapper |
-| 安全弹窗 | 首次执行二进制弹确认框 | make install 后扫一遍 bin/ |
+| 安全弹窗 | 首次执行二进制弹确认框 | make install 后扫一遍 bin/ ✅ **HongMeng Kernel 1.12.0 已解决：已安装二进制可直接执行，不再弹窗** |
 | chmod 不生效 | E046，SELinux 限制 | 记录为平台限制，不阻塞 |
 | 未实现 syscall | E051，setreuid/chroot 等 | 加入 EXCLUDE_LIST 排除 |
-| toybox sh 限制 | 缺 bash 特性，heredoc 差 | Python 化后已解决；仅限用户手动操作 shell 时注意 |
+| toybox sh 限制 | 缺 bash 特性，heredoc 差 | Python 化后已解决；仅限用户手动操作 shell 时注意 ✅ **HongMeng Kernel 1.12.0 已解决：GNU bash 5.3.0 已预装，heredoc 在 sh/bash 均正常** |
 | ELF 签名 | 必须签名否则不可执行 | `python3 $SKILL_ROOT/scripts/ohc-run.py sign-elf`，工具在 /data/service/hnp/bin/ |
-| ncurses 共享库 | 编译为 .so 会导致系统崩溃 | `--without-shared`（R4） |
+| ncurses 共享库 | 编译为 .so 会导致系统崩溃 | `--without-shared`（R4） ✅ **HongMeng Kernel 1.12.0 已解决：已正确编译为静态库（--without-shared）** |
 
 ### 流程自省
 
@@ -527,6 +574,7 @@ git add . && git commit -m "feat: batch compile ..." && git push
 | `ohc-run.py init-build` | 下载/解压/骨架/环境 | Step 1 |
 | `ohc-run.py finish` | 补丁+归档+verify+校验+知识+总结（6 步） | Step 3 |
 | `ohc-run.py verify-build` | G1-G4 质量门禁 | finish 内部 / 可选复查 |
+| `ohc-run.py clean-verify` | G0 干净构建验证 | finish Step 3 前置 / AI 手动 |
 | `ohc-run.py refresh-patch` | 补丁管线 | finish 内部 |
 | `ohc-run.py close-archive` | 归档关闭 | finish 内部 |
 | `ohc-run.py finalize-archive` | 清理+校验+RELEASENOTE | finish 内部 |
