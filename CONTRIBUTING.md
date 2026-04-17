@@ -556,7 +556,7 @@ knowledge_ref: []             # 引用的 E 编号列表（主编审核用）
 | 脚本 | 用途 | 角色 |
 |------|------|------|
 | `ohc-run.py init-build` | 编译初始化（含依赖检查） | 协作者 |
-| `ohc-run.py build` | 13 步编译驱动 | 协作者 |
+| `ohc-run.py build` | 14 步编译驱动 | 协作者 |
 | `ohc-run.py finish` | 收尾管线（4步） | 协作者 |
 | `ohc-run.py resolve-deps` | 依赖预编译包查询/安装 | 协作者 |
 | `ohc-run.py refresh-patch --auto` | 补丁自动生成 | 协作者 |

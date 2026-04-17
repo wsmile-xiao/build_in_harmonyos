@@ -63,7 +63,7 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
         return 1
     
     # Read configure_options from manifest
-    configure_cmd = "./configure"
+    configure_cmd = "/bin/sh ./configure"
     configure_options = ""
     if manifest.exists():
         content = manifest.read_text(encoding="utf-8")
@@ -110,7 +110,7 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
             log_info(f"G0: 应用 {len(patches)} 个补丁...")
             for pf in patches:
                 r = subprocess.run(
-                    ["patch", "-p1", "--input", str(pf)],
+                    ["patch", "-p1", "-i", str(pf)],
                     cwd=str(src_dir), capture_output=True, timeout=30
                 )
                 if r.returncode != 0:
@@ -126,15 +126,24 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
         log_info("G0: 运行 configure...")
         full_cmd = f"{configure_cmd} --prefix={default_prefix} {configure_options}"
         log_file = tmpdir / "g0-configure.log"
+        g0_env = os.environ.copy()
+        g0_env["TMPDIR"] = str(tmpdir)
+        default_prefix = ctx_vars.get("DEFAULT_PREFIX", os.path.expanduser("~/usr/local"))
+        g0_env["PKG_CONFIG_PATH"] = f"{default_prefix}/lib/pkgconfig:{default_prefix}/share/pkgconfig:{g0_env.get('PKG_CONFIG_PATH', '')}"
+        g0_env["LD_LIBRARY_PATH"] = f"{default_prefix}/lib:{g0_env.get('LD_LIBRARY_PATH', '')}"
+        g0_env["PCRE2_CFLAGS"] = f"-I{default_prefix}/include"
+        g0_env["PCRE2_LIBS"] = f"-L{default_prefix}/lib -lpcre2-8"
         with open(log_file, "w") as lf:
             r = subprocess.run(
                 full_cmd, shell=True,
                 cwd=str(src_dir), stdout=lf, stderr=subprocess.STDOUT,
+                env=g0_env,
                 timeout=600  # 10 minutes for configure
             )
         if r.returncode != 0:
             log_fail(f"G0: configure 失败 (exit {r.returncode})")
             _emit_handoff("configure", str(log_file), src_dir, tmpdir)
+            
             return 1
         log_ok("G0: configure 成功")
         
@@ -145,6 +154,7 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
             r = subprocess.run(
                 ["make", "-j1"],
                 cwd=str(src_dir), stdout=lf, stderr=subprocess.STDOUT,
+                env=g0_env,
                 timeout=1800  # 30 minutes for make
             )
         if r.returncode != 0:
@@ -162,6 +172,7 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
             r = subprocess.run(
                 ["make", "install", f"DESTDIR={destdir}"],
                 cwd=str(src_dir), stdout=lf, stderr=subprocess.STDOUT,
+                env=g0_env,
                 timeout=300
             )
         if r.returncode != 0:

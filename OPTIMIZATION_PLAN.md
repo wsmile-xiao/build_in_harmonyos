@@ -29,7 +29,7 @@ scripts/
 ├── ohc-run.py              # 统一 CLI 入口（18 子命令）
 ├── ohc/                    # Python 包（24 个 .py）
 │   ├── cli.py              # 命令分发（argparse 子命令路由）
-│   ├── driver.py           # 13 步编译驱动
+│   ├── driver.py           # 14 步编译驱动
 │   ├── init_build.py       # 初始化管线（registry→async下载→tarfile解压→骨架→环境检查）
 │   ├── finish.py           # 6 步收尾管线
 │   ├── engine.py           # 五阶段错误匹配引擎
@@ -61,7 +61,7 @@ scripts/
 
 | 子命令 | 模块 | 说明 |
 |--------|------|------|
-| `build` | driver.py | 13 步编译驱动（主流程） |
+| `build` | driver.py | 14 步编译驱动（主流程） |
 | `init-build` | init_build.py | 初始化（registry→下载→解压→骨架→env-check） |
 | `finish` | finish.py | 6 步收尾管线 |
 | `engine` | engine.py | 五阶段错误匹配引擎（独立调用） |
@@ -88,7 +88,7 @@ scripts/
 
 | 模块 | 职责 | 关键接口 |
 |------|------|---------|
-| `driver.py` | 13 步编译驱动，编排整个编译生命周期 | `build(name, version, **opts)` |
+| `driver.py` | 14 步编译驱动，编排整个编译生命周期 | `build(name, version, **opts)` |
 | `init_build.py` | 初始化管线：registry 查询 → asyncio 并行探测 → urllib 下载 → tarfile 解压 → 骨架创建 → 环境检查 | `init_build(name, version, **opts)` |
 | `finish.py` | 6 步收尾管线：补丁 → 归档 → 门禁 → 校验 → 知识 → 摘要 | `finish(name, version, status)` |
 | `cli.py` | 命令分发，argparse 子命令路由 | `main()` |

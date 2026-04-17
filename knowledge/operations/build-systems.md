@@ -301,6 +301,25 @@ make -j$(nproc)
 make install
 ```
 
+### 4.3 Header-only CMake 库
+
+Header-only C++ 库（如 doctest、catch2、fmt header-only 模式）使用 CMake 在鸿蒙上编译无需任何源码修改。只需标准 cmake configure + make install DESTDIR 流程。
+
+**特征识别**：
+- `CMakeLists.txt` 中无 `add_library(... SHARED|STATIC)` 或只有 `INTERFACE` 库
+- 产物仅为头文件（`.h`/`.hpp`），无二进制输出
+
+**编译流程**：
+```bash
+cmake -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX -DCMAKE_BUILD_TYPE=Release ..
+make -j$(nproc)
+make install DESTDIR=$TEST_PREFIX
+```
+
+**验证**：确认安装目录仅含 `include/`，无 `bin/`、`lib/`（或仅有 cmake 配置文件）。
+
+**适用软件**：doctest 2.5.2 及类似 header-only 库。
+
 ## 5. 自定义 Perl Configure（OpenSSL 风格）
 
 ### 5.1 添加配置文件
