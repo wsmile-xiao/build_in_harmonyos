@@ -34,7 +34,7 @@ CHECK_STUCK_THRESHOLD = 120  # 2 min no output
 _SHELL = shutil.which("zsh") or shutil.which("sh") or "/system/bin/sh"
 
 _STEP_MAP = {
-    "Step1": 1, "Step1.5": 1.5, "Step2": 2, "Step3": 3, "Step4": 4,
+    "Step1": 1, "Step1.5": 1.5, "Step2": 2, "Step2.5": 2.5, "Step3": 3, "Step4": 4,
     "Step5": 5, "Step6": 6, "Step7": 7, "Step8": 8, "Step9": 9,
 }
 
@@ -388,6 +388,48 @@ class BuildDriver:
 
         self._task_card_update("2", "✅完成", f"{applied} patches applied")
         self._log(f"✅ 应用 {applied}/{len(patches)} 个补丁")
+
+    # ── Step 2.5: pre-scan ──
+
+    def _step2b_prescan(self) -> None:
+        if not self.should_run(2.5):
+            return
+        if not self.build_src_dir or not self.build_src_dir.exists():
+            return
+
+        self._log("═══ [2.5/13] 预编译风险扫描 (pre-scan) ═══")
+
+        rules_path = self.pdir / "knowledge" / "graph" / "pre-scan-rules.yaml"
+        report_path = self.build_src_dir / ".pre-scan-report.yaml"
+
+        try:
+            from .pre_scan import PreScanner
+            scanner = PreScanner(str(self.build_src_dir),
+                                 rules_path=str(rules_path) if rules_path.exists() else None)
+            report = scanner.save_report(str(report_path))
+        except Exception as e:
+            self._log(f"⚠️ pre-scan 异常（非阻塞）: {e}")
+            self._task_card_update("2.5", "⚠️跳过", str(e)[:60])
+            return
+
+        # Log summary
+        summary = report.get("summary", {})
+        emoji_map = {"critical": "🔴", "high": "🟠", "medium": "🟡", "low": "🟢", "info": "ℹ️", "auto": "🔧"}
+        total = sum(summary.values())
+        for level in ("critical", "high", "medium", "low", "info", "auto"):
+            count = summary.get(level, 0)
+            if count > 0:
+                self._log(f"  {emoji_map.get(level, '?')} {level}: {count} 项")
+
+        # Highlight critical/high findings
+        for finding in report.get("findings", []):
+            if finding["severity"] in ("critical", "high"):
+                self._log(f"  ⚡ {finding['rule_id']}: {finding['description']}")
+                if finding.get("solution_hint"):
+                    self._log(f"     → {finding['solution_hint']}")
+
+        self._task_card_update("2.5", "✅完成", f"{total} findings")
+        self._log(f"✅ 预扫描报告: {report_path}")
 
     # ── Build system detection ──
 
@@ -887,6 +929,7 @@ class BuildDriver:
         self._step1_init()
         self._step15_history()
         self._step2_patches()
+        self._step2b_prescan()
         self._step3_configure()
         self._step4_make()
         self._step5_install()

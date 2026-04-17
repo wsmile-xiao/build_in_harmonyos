@@ -6,10 +6,11 @@
 ## 概述
 
 自动化编译、打包和分发开源软件到 HarmonyOS (OpenHarmony) aarch64 平台。
-支持从源码下载到签名打包的完整 13 步编译管线，内置五阶段错误匹配引擎、跨对话恢复机制和多 Agent 协作模式。
+支持从源码下载到签名打包的完整 14 步编译管线（含预编译风险扫描），内置五阶段错误匹配引擎、跨对话恢复机制和多 Agent 协作模式。
 
 ### v7.2 新特性
 
+- **预编译风险扫描**: 源码展开后自动扫描 musl 缺失函数、HMDFS 限制、构建系统问题，在 configure 前预判风险
 - **多任务编译调度**: `dispatch` 命令支持拓扑排序、分阶段异步子任务派发、批量状态监控
 - **依赖预编译包自动解析**: 编译前自动检查依赖，有预编译包直接从 [cmd-pkgs](https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs) 安装
 - **多 Agent 协作**: 协作者提交 → 主编审核 → 批准/拒绝，支持多人并行编译
@@ -22,7 +23,7 @@
 # 初始化编译（自动检查依赖并安装预编译包）
 python3 scripts/ohc-run.py init-build sed 4.9
 
-# 一键全流程（13步）
+# 一键全流程（14步）
 python3 scripts/ohc-run.py build sed 4.9
 
 # 从失败步骤恢复
@@ -70,8 +71,9 @@ python3 scripts/ohc-run.py review sed 4.9
 ```
 scripts/
 ├── ohc-run.py              # 统一 CLI 入口（23 子命令）
-├── ohc/                    # Python 包（27 个 .py，零外部依赖）
-│   ├── driver.py           # 13 步编译驱动
+├── ohc/                    # Python 包（28 个 .py，零外部依赖）
+│   ├── driver.py           # 14 步编译驱动
+│   ├── pre_scan.py         # 预编译风险扫描引擎
 │   ├── engine.py           # 五阶段错误匹配引擎
 │   ├── handoff.py          # HANDOFF 持久化 + 跨对话恢复
 │   ├── status.py           # 编译状态扫描
@@ -84,6 +86,7 @@ scripts/
 
 knowledge/
 ├── graph/                  # 错误模式知识图谱（E001-E080+）
+│   ├── pre-scan-rules.yaml # 预编译风险扫描规则集（闭环增长）
 │   └── draft/              # 草稿区（协作者写入，主编审核）
 ├── doc/                    # 错误模式文档（E001.md~E080.md）
 ├── operations/             # 运维知识（打包、环境、调试等 13 篇）
@@ -101,7 +104,7 @@ templates/                  # 模板文件（PROGRESS.md, manifest.yaml 等）
 
 | 命令 | 说明 | 角色 |
 |------|------|------|
-| `build` | 13 步编译驱动（主入口） | 协作者 |
+| `build` | 14 步编译驱动（主入口） | 协作者 |
 | `init-build` | 初始化（下载 → 解压 → 骨架 → 依赖 → 环境检查） | 协作者 |
 | `finish` | 6 步收尾管线 | 协作者 |
 | `engine` | 五阶段错误匹配引擎 | 协作者 |
@@ -129,6 +132,7 @@ templates/                  # 模板文件（PROGRESS.md, manifest.yaml 等）
 
 ### 知识图谱
 - **80+ 错误模式** (E001-E080+): 每条含 5 阶段匹配规则、修复方案、鸿蒙特化处理
+- **15 条预扫描规则** (pre-scan-rules.yaml): 源码风险预判，闭环增长
 - **18 条编译铁律** (R1-R18): 不变量规则，所有编译必须遵守
 
 ### 运维知识 (`knowledge/operations/`)
@@ -183,9 +187,10 @@ curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/relea
 
 - **已编译软件**: 30 款 / 33 个版本
 - **错误模式**: 80+ 条
+- **预扫描规则**: 15 条（闭环增长）
 - **可用预编译包**: 23 款（cmd-pkgs 仓库）
 - **文档**: 50+ 篇
-- **Python 模块**: 27 个（零外部依赖）
+- **Python 模块**: 28 个（零外部依赖）
 - **CLI 子命令**: 23 个（含 dispatch 多任务调度）
 
 ## 设计原则
@@ -196,6 +201,7 @@ curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/relea
 - **双轨源码**: .orig（只读基准）+ .work（可写副本）
 - **依赖优先预编译**: resolve-deps 优先安装 cmd-pkgs 预编译包
 - **协作分区隔离**: 7 个文件分区，协作者/主编各司其职
+- **预扫描闭环**: 编译新发现自动回填规则集，预判能力持续增长
 
 ## 许可证
 

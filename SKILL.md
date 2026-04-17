@@ -43,7 +43,7 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 **模式 A：全自动（推荐，适合大多数三方库）**
 ```bash
 python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> [<版本>]
-# → 内含 13 步：init→patches→configure→make→install→staging→package→deploy→finish→...
+# → 内含 14 步：init→patches→pre-scan→configure→make→install→staging→package→deploy→finish→...
 ```
 脚本遇到 configure/make 错误时自动输出 HANDOFF 块，AI 修复后 `--resume-from=StepN` 继续。
 
@@ -144,6 +144,7 @@ configure 失败？
 |---------|---------|------|
 | 技能触发 | **SKILL.md**（本文档） | 每次 |
 | 开始编译 | references/compile-guide.md | Step 2 前 |
+| 预编译风险扫描 | knowledge/graph/pre-scan-rules.yaml | build Step 2.5（自动） |
 | 编译出错 | knowledge/graph/index.tsv → graph/E*.kv | 错误发生时 |
 | 缺少依赖 | ohc-run.py resolve-deps --list-available | init-build Step 7 |
 | 失败处理 | references/failure-handling.md | R11+R12 流程 |
@@ -372,6 +373,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finalize-archive <软件名> <版本>
 knowledge/graph/        # 结构化数据
 ├── index.tsv           # 主索引（80+ 条目）
 ├── principles.kv       # 编译原则（16 条）
+├── pre-scan-rules.yaml # 预编译风险扫描规则集（闭环：编译新发现→自动回填）
 ├── E001.kv ~ E080.kv   # 错误模式条目
 knowledge/doc/          # 人类可读文档
 ├── E001.md ~ E080.md
@@ -570,8 +572,9 @@ git add . && git commit -m "feat: batch compile ..." && git push
 
 | 脚本 | 用途 | 调用时机 |
 |------|------|---------|
-| `ohc-run.py build` | 13 步编译驱动（唯一入口） | ★ 主入口 |
+| `ohc-run.py build` | 14 步编译驱动（唯一入口） | ★ 主入口 |
 | `ohc-run.py init-build` | 下载/解压/骨架/环境 | Step 1 |
+| `pre_scan.py` | 预编译源码风险扫描（规则集 + musl 函数检测） | build Step 2.5 |
 | `ohc-run.py finish` | 补丁+归档+verify+校验+知识+总结（6 步） | Step 3 |
 | `ohc-run.py verify-build` | G1-G4 质量门禁 | finish 内部 / 可选复查 |
 | `ohc-run.py clean-verify` | G0 干净构建验证 | finish Step 3 前置 / AI 手动 |

@@ -42,6 +42,39 @@ fi
 ${SKILL_ROOT}/scripts/ohc-run.py detect-build-system (已归档) .  # 可选，context 已含 BUILD_SYSTEM
 ```
 
+### 2.1.1 预编译风险扫描（build Step 2.5，自动执行）
+
+> `ohc-run.py build` 在 Step 2（apply-patches）之后、Step 3（configure）之前自动执行 pre-scan。
+
+**不需要手动运行。** 但如果使用模式 B（AI 手动编译），建议先运行：
+
+```bash
+python3 $SKILL_ROOT/scripts/ohc/pre_scan.py $BUILD_SRC_DIR \
+    --rules $SKILL_ROOT/knowledge/graph/pre-scan-rules.yaml \
+    --output $BUILD_SRC_DIR/.pre-scan-report.yaml
+```
+
+**扫描内容**：
+1. **规则集扫描**：从 `pre-scan-rules.yaml` 读取已知风险 pattern，grep 源码
+2. **Musl 函数检测**：自动扫描 pthread_cancel、mremap、ppoll、secure_getenv 等高频缺失函数
+3. **构建系统检测**：config.guess 存在性、CMake find_library(LIBM m) 等
+4. **文件系统风险**：/tmp 硬编码、/etc 路径硬编码
+
+**输出报告**：`$BUILD_SRC_DIR/.pre-scan-report.yaml`
+
+```yaml
+findings:
+  - rule_id: PSCAN-MUSL-001
+    severity: critical
+    description: "pthread_cancel 在 musl/OHOS 上不可用"
+    hits: ["src/worker.c:42: pthread_cancel(t);"]
+    solution_hint: "#ifdef __OHOS__ 跳过 cancel，改用标志位+pthread_join"
+```
+
+**AI 如何使用**：阅读 `.pre-scan-report.yaml`，对 critical/high 级别发现提前准备补丁，避免编译失败。
+
+**闭环机制**：编译中新发现的问题在 `graph add` 时可填写 `pre_scan_*` 字段，下次 pre-scan 自动识别同类问题。
+
 ---
 
 ## 2.2 执行编译（--prefix 指向 $TEST_PREFIX 隔离目录）
