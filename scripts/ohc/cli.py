@@ -19,6 +19,7 @@ _MODULES = {
     "resolve-deps": "dependency_resolver",
     "track-edit": "edit_tracker",
     "dispatch": "dispatch",
+    "clean-verify": "clean_verify",
 }
 
 

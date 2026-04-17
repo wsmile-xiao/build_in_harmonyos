@@ -30,6 +30,9 @@ MAKE_JOBS = 2  # HarmonyOS sandbox limit
 CHECK_TIMEOUT = 600  # 10 min total
 CHECK_STUCK_THRESHOLD = 120  # 2 min no output
 
+# Shell for subprocess — HarmonyOS restricts fork+exec to signed binaries
+_SHELL = shutil.which("zsh") or shutil.which("sh") or "/system/bin/sh"
+
 _STEP_MAP = {
     "Step1": 1, "Step1.5": 1.5, "Step2": 2, "Step3": 3, "Step4": 4,
     "Step5": 5, "Step6": 6, "Step7": 7, "Step8": 8, "Step9": 9,
@@ -73,6 +76,19 @@ class BuildDriver:
         # Actual configure command (for write-back to manifest.yaml)
         self._actual_configure_cmd: str = ""
 
+    @property
+    def staging_prefix(self) -> Path:
+        """DESTDIR staging install path: $DESTDIR/$PREFIX/
+
+        With DESTDIR mode:
+          configure --prefix=$DEFAULT_PREFIX  (runtime path, hardcoded into binary)
+          make install DESTDIR=$TEST_PREFIX   (files land at $TEST_PREFIX/$DEFAULT_PREFIX/)
+
+        Binary hardcoded paths are $DEFAULT_PREFIX (correct runtime path).
+        Package builder collects from this staging path.
+        """
+        return self.test_prefix / self.default_prefix.lstrip("/")
+
     def should_run(self, step: float) -> bool:
         return step >= self.resume_from
 
@@ -89,7 +105,7 @@ class BuildDriver:
              env_extra: dict | None = None, capture: bool = False) -> int:
         """Run command, return exit code."""
         if isinstance(cmd, str):
-            cmd = ["zsh", "-c", cmd]
+            cmd = [_SHELL, "-c", cmd]
         env = os.environ.copy()
         if env_extra:
             env.update(env_extra)
@@ -108,7 +124,7 @@ class BuildDriver:
     def _run_capture(self, cmd: str | list[str], **kw) -> tuple[int, str]:
         """Run command, return (exit_code, output)."""
         if isinstance(cmd, str):
-            cmd = ["zsh", "-c", cmd]
+            cmd = [_SHELL, "-c", cmd]
         env = os.environ.copy()
         if "env_extra" in kw:
             env.update(kw.pop("env_extra"))
@@ -392,28 +408,44 @@ class BuildDriver:
         return "unknown"
 
     def _read_extra_args(self) -> list[str]:
-        """Read extra configure args from manifest.yaml."""
+        """Read extra configure args from manifest.yaml configure_options."""
         manifest = self.archive_dir / "manifest.yaml"
         if not manifest.exists():
             return []
         args = []
         content = manifest.read_text(encoding="utf-8")
-        # Simple YAML parse for build_config section
-        in_section = False
+        # Find configure_options: section and parse its list items
+        in_opts = False
         for line in content.split("\n"):
-            if "build_config:" in line:
-                in_section = True
+            stripped = line.lstrip()
+            if stripped.startswith("configure_options:"):
+                in_opts = True
                 continue
-            if in_section:
-                if line.startswith("  ") or line.startswith("\t"):
-                    val = line.strip().split(":")[-1].strip().strip('"').strip("'")
+            if in_opts:
+                if stripped.startswith("- "):
+                    # Extract value from list item, strip quotes
+                    val = stripped[2:].strip().strip('"').strip("'")
+                    # Skip --prefix — driver always sets it via --prefix={default_prefix}
+                    if val.startswith("--prefix="):
+                        continue
                     if val and val not in ("null", "~"):
                         args.append(val)
+                elif stripped == "" or stripped.startswith("#"):
+                    continue
                 else:
                     break
         return args
 
     # ── Step 3: configure ──
+
+    @property
+    def vpath_dir(self) -> Path | None:
+        """VPATH build directory (separate from source)."""
+        if self.build_src_dir:
+            d = self.build_src_dir.parent / f"{self.software}-{self.version}-build"
+            if d.exists():
+                return d
+        return None
 
     def _step3_configure(self) -> None:
         if not self.should_run(3):
@@ -430,21 +462,35 @@ class BuildDriver:
         self._log(f"构建系统: {self.build_system}")
 
         if self.build_system == "autotools":
-            _configure_cmd = f"./configure --prefix={self.test_prefix} {extra_str}".strip()
+            # Use VPATH build: configure runs in a separate build directory
+            # to avoid Permission denied errors when source tree is owned by
+            # a different UID (HarmonyOS sandbox).
+            vpath_dir = self.build_src_dir.parent / f"{self.software}-{self.version}-build"
+            vpath_dir.mkdir(parents=True, exist_ok=True)
+
+            _configure_cmd = f"sh {self.build_src_dir}/configure --prefix={self.default_prefix} {extra_str}".strip()
             self._actual_configure_cmd = _configure_cmd
 
+            # TMPDIR: config.status uses "mktemp -d ./confXXXXXX" which fails
+            # on HarmonyOS due to SGID + umask 077 conflict.  Point TMPDIR
+            # to $HOME/tmp where the user has unrestricted write access.
+            _env_extra = {
+                "PKG_CONFIG_PATH": f"{self.default_prefix}/lib/pkgconfig",
+                "TMPDIR": str(Path(self.tmpdir)),
+            }
+
             def do_configure():
-                return self._run(_configure_cmd)
+                return self._run(_configure_cmd, cwd=str(vpath_dir), env_extra=_env_extra)
 
             def do_retry(fix_cmd):
-                self._run("make distclean 2>/dev/null || true")
-                retry_cmd = f"./configure --prefix={self.test_prefix} {fix_cmd} {extra_str}".strip()
-                return self._run(retry_cmd)
+                self._run("make distclean 2>/dev/null || true", cwd=str(vpath_dir))
+                retry_cmd = f"sh {self.build_src_dir}/configure --prefix={self.default_prefix} {fix_cmd} {extra_str}".strip()
+                return self._run(retry_cmd, cwd=str(vpath_dir), env_extra=_env_extra)
 
             self._error_recovery("configure", 3, do_configure, do_retry)
 
         elif self.build_system == "cmake":
-            _configure_cmd = f"cmake -DCMAKE_INSTALL_PREFIX={self.test_prefix} -DCMAKE_BUILD_TYPE=Release {extra_str} ..".strip()
+            _configure_cmd = f"cmake -DCMAKE_INSTALL_PREFIX={self.default_prefix} -DCMAKE_BUILD_TYPE=Release {extra_str} ..".strip()
             self._actual_configure_cmd = _configure_cmd
             self._run("mkdir -p build")
             rc = self._run(_configure_cmd,
@@ -454,7 +500,7 @@ class BuildDriver:
                     actions=["检查 CMakeLists.txt 配置", "运行 RESUME_CMD 继续"])
 
         elif self.build_system == "meson":
-            _configure_cmd = f"meson setup builddir --prefix={self.test_prefix} {extra_str}".strip()
+            _configure_cmd = f"meson setup builddir --prefix={self.default_prefix} {extra_str}".strip()
             self._actual_configure_cmd = _configure_cmd
             rc = self._run(_configure_cmd)
             if rc != 0:
@@ -462,7 +508,7 @@ class BuildDriver:
                     actions=["检查 meson.build 配置", "运行 RESUME_CMD 继续"])
 
         elif self.build_system == "perl":
-            _configure_cmd = f"perl Makefile.PL PREFIX={self.test_prefix} {extra_str}".strip()
+            _configure_cmd = f"perl Makefile.PL PREFIX={self.default_prefix} {extra_str}".strip()
             self._actual_configure_cmd = _configure_cmd
             rc = self._run(_configure_cmd)
             if rc != 0:
@@ -501,13 +547,13 @@ class BuildDriver:
             return f"make -j{MAKE_JOBS}"
 
         def do_make():
-            return self._run(get_make_cmd())
+            cwd = str(self.vpath_dir) if self.vpath_dir else None
+            return self._run(get_make_cmd(), cwd=cwd)
 
         def do_retry(fix_cmd):
-            self._run("make clean 2>/dev/null || true")
-            env_extra = {}
-            # fix_cmd might be env vars or extra flags
-            return self._run(f"{get_make_cmd()} {fix_cmd}", env_extra=env_extra)
+            cwd = str(self.vpath_dir) if self.vpath_dir else None
+            self._run("make clean 2>/dev/null || true", cwd=cwd)
+            return self._run(f"{get_make_cmd()} {fix_cmd}", cwd=cwd)
 
         self._error_recovery("make", 4, do_make, do_retry)
         self._task_card_update("4", "✅完成", "make OK")
@@ -517,7 +563,7 @@ class BuildDriver:
     def _step5_install(self) -> None:
         if not self.should_run(5):
             return
-        self._log("═══ [5/13] make install ═══")
+        self._log("═══ [5/13] make install (DESTDIR mode) ═══")
 
         if self.force and self.test_prefix.exists():
             import shutil
@@ -527,32 +573,36 @@ class BuildDriver:
         install_tool = self._find_tool("install")
         sed_tool = self._find_tool("sed")
         install_args = f"INSTALL={install_tool} HELP2MAN=/bin/true MAKEINFO=/bin/true SED={sed_tool}"
+        destdir = f"DESTDIR={self.test_prefix}"
 
         rc = 1
+        # VPATH: autotools build dir (make install must run where Makefile is)
+        make_cwd = str(self.vpath_dir) if self.vpath_dir else None
         if self.build_system in ("autotools", "perl", "makefile"):
-            # Three-tier fallback
-            rc = self._run(f"make install-binPROGRAMS install-binSCRIPTS {install_args}")
+            # Three-tier fallback with DESTDIR
+            rc = self._run(f"make install-binPROGRAMS install-binSCRIPTS {destdir} {install_args}", cwd=make_cwd)
             if rc != 0:
-                rc = self._run(f"make install {install_args}")
+                rc = self._run(f"make install {destdir} {install_args}", cwd=make_cwd)
             if rc != 0:
-                rc = self._run(f"make install SUBDIRS=\"lib src\" {install_args}")
+                rc = self._run(f"make install SUBDIRS=\"lib src\" {destdir} {install_args}", cwd=make_cwd)
         elif self.build_system == "cmake":
-            rc = self._run(f"make -C build install {install_args}")
+            rc = self._run(f"make -C build install {destdir} {install_args}")
         elif self.build_system == "meson":
-            rc = self._run(f"ninja -C builddir install")
+            rc = self._run(f"DESTDIR={self.test_prefix} ninja -C builddir install")
         elif self.build_system == "python":
-            rc = self._run(f"pip install --prefix={self.test_prefix} --no-deps .")
+            rc = self._run(f"pip install --root={self.test_prefix} --prefix={self.default_prefix} --no-deps .")
 
-        # Verify output
-        bin_count = len(list(self.test_prefix.rglob("bin/*"))) if self.test_prefix.exists() else 0
-        lib_count = len(list(self.test_prefix.rglob("lib*/*.so*"))) + len(list(self.test_prefix.rglob("lib*/*.a")))
+        # Verify output (use staging_prefix, not test_prefix)
+        sp = self.staging_prefix
+        bin_count = len(list(sp.rglob("bin/*"))) if sp.exists() else 0
+        lib_count = len(list(sp.rglob("lib*/*.so*"))) + len(list(sp.rglob("lib*/*.a")))
 
         if bin_count == 0 and lib_count == 0:
-            log_fail("安装无产物")
+            log_fail(f"安装无产物 (staging: {sp})")
             raise RuntimeError("安装无产物")
 
         self._task_card_update("5", "✅完成", f"bin={bin_count} lib={lib_count}")
-        self._log(f"✅ 安装完成: bin={bin_count} lib={lib_count}")
+        self._log(f"✅ 安装完成: bin={bin_count} lib={lib_count} (staging: {sp})")
 
     # ── Step 6: safety popup ──
 
@@ -562,7 +612,7 @@ class BuildDriver:
         self._log("═══ [6/13] 安全弹窗 (R7) ═══")
 
         # Quick version check for first 5 binaries
-        bins = sorted(self.test_prefix.rglob("bin/*"))[:5]
+        bins = sorted(self.staging_prefix.rglob("bin/*"))[:5]
         for b in bins:
             if b.is_file() and os.access(b, os.X_OK):
                 self._run_capture([str(b), "--version"], timeout=5)
@@ -596,7 +646,7 @@ class BuildDriver:
         # Run with timeout (simplified from bash's complex monitoring)
         start_time = time.time()
         proc = subprocess.Popen(
-            ["zsh", "-c", check_cmd],
+            [_SHELL, "-c", check_cmd],
             cwd=str(self.build_src_dir),
             stdout=open(check_log, "w"),
             stderr=subprocess.STDOUT,
@@ -632,7 +682,7 @@ class BuildDriver:
         self._log("═══ [8/13] Staging 验证 ═══")
 
         mark = self.archive_dir / ".staging-verified"
-        bins = list(self.test_prefix.rglob("bin/*")) if self.test_prefix.exists() else []
+        bins = list(self.staging_prefix.rglob("bin/*")) if self.staging_prefix.exists() else []
         exes = [b for b in bins if b.is_file() and os.access(b, os.X_OK)]
 
         verified = 0
@@ -662,7 +712,7 @@ class BuildDriver:
         self._log("═══ [9/13] package ═══")
 
         builder = PackageBuilder(self.software, self.version,
-                                  debug=True, prefix=str(self.test_prefix),
+                                  debug=True, prefix=str(self.staging_prefix),
                                   pdir=str(self.pdir))
         rc = builder.run()
         self._task_card_update("9", "✅完成" if rc == 0 else "⚠️部分", f"RC={rc}")
@@ -673,16 +723,13 @@ class BuildDriver:
         self._log("═══ [10/13] deploy ═══")
 
         rc = 0
-        for subdir in ["bin", "lib", "include", "share"]:
-            src = self.test_prefix / subdir
-            dst = Path(self.default_prefix) / subdir
-            if src.exists():
+        for item in self.staging_prefix.iterdir() if self.staging_prefix.exists() else []:
+            dst = Path(self.default_prefix) / item.name
+            if item.is_dir():
                 dst.mkdir(parents=True, exist_ok=True)
-                for item in src.iterdir():
-                    if item.is_dir():
-                        shutil.copytree(str(item), str(dst / item.name), dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(str(item), str(dst / item.name))
+                shutil.copytree(str(item), str(dst), dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(item), str(dst))
 
         # Ensure executables
         dst_bin = Path(self.default_prefix) / "bin"
@@ -887,3 +934,4 @@ def build_cli(argv: list[str] | None = None) -> int:
     except RuntimeError as e:
         log_fail(str(e))
         return 1
+

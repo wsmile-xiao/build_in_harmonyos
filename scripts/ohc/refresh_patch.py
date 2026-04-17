@@ -520,6 +520,32 @@ def auto_mode(software: str, version: str, pdir: str | None = None) -> int:
         manifest.write_text(content + gen_info, encoding="utf-8")
 
     log_ok(f"✅ 生成 {len(new_patches)} 个补丁")
+
+    # Patch classification annotation
+    patch_list = []
+    for p in sorted(patch_dir.glob("*.patch")):
+        patch_list.append({
+            "file": p.name,
+            "type": "auto",  # AI should classify later
+            "platform_only": True,  # default assumption for OHOS patches
+            "guard": "pending"  # AI should fill: __OHOS__ / $^O / none
+        })
+    
+    if patch_list and manifest.exists():
+        import yaml
+        # Read existing manifest
+        content = manifest.read_text(encoding="utf-8")
+        # Append patch classification
+        class_text = "\npatch_classification:\n"
+        for pc in patch_list:
+            class_text += f"  - file: {pc['file']}\n"
+            class_text += f"    type: {pc['type']}\n"
+            class_text += f"    platform_only: {pc['platform_only']}\n"
+            class_text += f"    guard: '{pc['guard']}'\n"
+        content = re.sub(r'\npatch_classification:.*', '', content, flags=re.DOTALL)
+        manifest.write_text(content + class_text, encoding="utf-8")
+        log_info("  补丁分类标注已写入 manifest.yaml（请 AI 补充 type/guard）")
+
     return 0
 
 

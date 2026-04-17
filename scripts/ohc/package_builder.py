@@ -29,14 +29,28 @@ class PackageBuilder:
 
     def _resolve_prefix(self) -> Path:
         tmpdir = os.environ.get("TMPDIR", os.path.expanduser("~/tmp"))
-        p = Path(tmpdir) / f"test-install-{self.software}-{self.version}"
-        if p.exists():
-            return p
-        return Path(os.environ.get("DEFAULT_PREFIX", os.path.expanduser("~/usr/local")))
+        staging_root = Path(tmpdir) / f"test-install-{self.software}-{self.version}"
+
+        # DESTDIR mode: files at $STAGING_ROOT/$DEFAULT_PREFIX/
+        default_prefix = os.environ.get("DEFAULT_PREFIX", os.path.expanduser("~/usr/local"))
+        dest = staging_root / default_prefix.lstrip("/")
+        if dest.exists():
+            return dest
+
+        # Legacy mode (old --prefix=$TEST_PREFIX style)
+        if staging_root.exists() and any(
+            (staging_root / d).exists() for d in ["bin", "lib", "include", "share"]
+        ):
+            return staging_root
+
+        log_fail(f"staging 目录不存在: {dest}")
+        log_fail(f"也不存在旧式目录: {staging_root}")
+        log_fail("请用 --prefix 指定，或确认 make install DESTDIR= 已执行")
+        raise FileNotFoundError(str(dest))
 
     def _run(self, cmd: list[str] | str, **kw) -> tuple[int, str]:
         if isinstance(cmd, str):
-            cmd = ["zsh", "-c", cmd]
+            cmd = ["/bin/sh", "-c", cmd]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True, timeout=60, **kw)
             return r.returncode, (r.stdout or "") + (r.stderr or "")
@@ -47,20 +61,35 @@ class PackageBuilder:
         log_info("Step 1/10: 创建打包目录...")
         if self.pkgdir.exists():
             shutil.rmtree(self.pkgdir)
-        for d in ["bin", "lib", "lib/external", "include", "share", "doc"]:
-            (self.pkgdir / d).mkdir(parents=True, exist_ok=True)
+        self.pkgdir.mkdir(parents=True, exist_ok=True)
+        # lib/external always needed for dependency collection in step4
+        (self.pkgdir / "lib" / "external").mkdir(parents=True, exist_ok=True)
 
     def step2_copy(self):
         log_info("Step 2/10: 复制文件...")
-        for subdir in ["bin", "lib", "include", "share"]:
-            src = self.src_prefix / subdir
-            dst = self.pkgdir / subdir
-            if src.exists():
-                for item in src.iterdir():
-                    if item.is_dir():
-                        shutil.copytree(str(item), str(dst / item.name), dirs_exist_ok=True)
-                    else:
-                        shutil.copy2(str(item), str(dst / item.name))
+        # Dynamic scan: copy all top-level dirs and files from src_prefix
+        if self.src_prefix.exists():
+            for item in sorted(self.src_prefix.iterdir()):
+                if item.is_dir():
+                    dst = self.pkgdir / item.name
+                    # HMDFS (E050): symlinks are not trackable, cp -a fails on them.
+                    # Use cp -rL to follow symlinks and copy actual files instead.
+                    dst.mkdir(parents=True, exist_ok=True)
+                    rc, err = self._run(f"cp -rL '{item}/.' '{dst}/' 2>&1")
+                    if rc != 0:
+                        log_warn(f"  cp -rL failed for {item.name}: {err.strip()}")
+                        # Fallback: shutil with symlinks=False (copies symlink targets)
+                        try:
+                            shutil.copytree(str(item), str(dst),
+                                            dirs_exist_ok=True, symlinks=False)
+                        except shutil.Error as exc:
+                            # Last resort: skip broken symlinks
+                            log_warn(f"  shutil fallback partial failure: {exc}")
+                elif item.is_file():
+                    shutil.copy2(str(item), str(self.pkgdir / item.name))
+
+        # Ensure lib/external exists for step4
+        (self.pkgdir / "lib" / "external").mkdir(parents=True, exist_ok=True)
 
         # Apply exclude list
         for excl_file in [self.archive_dir / "EXCLUDE_LIST",
@@ -70,7 +99,7 @@ class PackageBuilder:
                     name = line.strip()
                     if not name or name.startswith("#"):
                         continue
-                    for d in ["bin", "lib"]:
+                    for d in ["bin", "lib", "sbin", "libexec"]:
                         target = self.pkgdir / d / name
                         if target.exists():
                             target.unlink()
@@ -125,11 +154,14 @@ class PackageBuilder:
                 # Find in search paths
                 for sp in search_paths:
                     candidate = sp / lib
-                    if candidate.exists() and is_elf(candidate):
-                        shutil.copy2(str(candidate), str(ext_dir / lib))
-                        collected.add(lib)
-                        collect(ext_dir / lib, depth + 1)
-                        break
+                    try:
+                        if candidate.exists() and is_elf(candidate):
+                            shutil.copy2(str(candidate), str(ext_dir / lib))
+                            collected.add(lib)
+                            collect(ext_dir / lib, depth + 1)
+                            break
+                    except (PermissionError, OSError):
+                        continue
 
         for f in self.pkgdir.rglob("*"):
             if f.is_file() and is_elf(f):
@@ -251,15 +283,22 @@ class PackageBuilder:
             f"trap 'rm -rf \"$TMPDIR\"' EXIT\n"
             f"tar xzf \"$TAR_GZ\" -C \"$TMPDIR\"\n"
             f"\n"
-            f"for d in bin lib include share doc; do\n"
-            f"    [ -d \"$TMPDIR/$d\" ] && mkdir -p \"$PREFIX/$d\" && cp -a \"$TMPDIR/$d/\" \"$PREFIX/$d/\"\n"
+            f"# Copy all top-level directories (dynamic: bin lib share sbin libexec etc ...)\n"
+            f"for d in \"$TMPDIR\"/*/; do\n"
+            f"    dname=$(basename \"$d\")\n"
+            f"    mkdir -p \"$PREFIX/$dname\" && cp -a \"$d\" \"$PREFIX/$dname/\"\n"
+            f"done\n"
+            f"# Copy top-level files if any\n"
+            f"for f in \"$TMPDIR\"/*; do\n"
+            f"    [ -f \"$f\" ] && cp -a \"$f\" \"$PREFIX/\"\n"
             f"done\n"
             f"\n"
             f"# Fix permissions\n"
             f"chmod +x \"$PREFIX/bin/\"* 2>/dev/null || true\n"
+            f"chmod +x \"$PREFIX/sbin/\"* 2>/dev/null || true\n"
             f"\n"
             f"# Pre-trigger binary confirmation dialogs (HarmonyOS security)\n"
-            f"for bin in \"$PREFIX/bin/\"*; do\n"
+            f"for bin in \"$PREFIX/bin/\"* \"$PREFIX/sbin/\"*; do\n"
             f"    [ -f \"$bin\" ] && \"$bin\" --version >/dev/null 2>&1 || true\n"
             f"done\n"
             f"\n"
@@ -332,21 +371,25 @@ class PackageBuilder:
         log_info("Step 10/10: 打包 tar.gz...")
         tar_name = f"{self.software}-{self.version}-ohos-aarch64"
 
+        # Dynamic: collect all top-level directories in pkgdir
+        top_dirs = sorted(d.name for d in self.pkgdir.iterdir() if d.is_dir())
+
         # Main tarball
         tar_gz = self.packaging_dir / f"{tar_name}.tar.gz"
-        subprocess.run(
-            ["tar", "czf", str(tar_gz), "bin", "lib", "include", "share", "doc"],
-            cwd=str(self.pkgdir), capture_output=True,
-        )
+        if top_dirs:
+            subprocess.run(
+                ["tar", "czf", str(tar_gz)] + top_dirs,
+                cwd=str(self.pkgdir), capture_output=True,
+            )
+        else:
+            log_warn("  打包目录为空")
+            return
+
         if tar_gz.exists():
             size = tar_gz.stat().st_size
             log_ok(f"  {tar_gz.name}: {size // 1024}KB")
         else:
-            # Fallback: fewer dirs
-            subprocess.run(
-                ["tar", "czf", str(tar_gz), "bin", "lib", "share"],
-                cwd=str(self.pkgdir), capture_output=True,
-            )
+            log_fail(f"  打包失败: {tar_gz}")
 
         # Debug tarball
         if self.debug and self.debug_dir.exists() and any(self.debug_dir.iterdir()):

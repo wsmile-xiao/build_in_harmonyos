@@ -174,6 +174,8 @@ Unix 权限位 (DAC) → 忽略（装饰性）
 | mmap RWX | ✅ | ❌ W^X 策略 | ctypes 回调不可用 |
 | PTY | ✅ | ❌ 不可用 | 终端调试受限 |
 
+> ✅ **HongMeng Kernel 1.12.0 已解决**：W^X 策略已放宽，mmap(PROT_READ|PROT_WRITE|PROT_EXEC) 正常工作，ctypes CFUNCTYPE 回调可用。
+
 ---
 
 ## 2. ELF 可执行文件签名

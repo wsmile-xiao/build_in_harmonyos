@@ -165,7 +165,7 @@
 ## Phase 2 → Phase 2.5 转换前（编译完成后，安装验证前），自检：
 
 ```
-□ make install 成功了？
+□ make install DESTDIR=$TEST_PREFIX 成功了？
 □ 准备好独立目录安装验证（Phase 2.5）？
 ```
 

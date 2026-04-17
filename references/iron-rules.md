@@ -1,6 +1,6 @@
 > 本文件从 SKILL.md v4.8 提取，详细内容供按需加载。
 
-# 十四条铁律与 AI 执行风格规范
+# 铁律与 AI 执行风格规范
 
 来源: SKILL.md §1.2
 
@@ -14,7 +14,7 @@
 | R4 | **危险库必须静态编译** | ncurses `--without-shared` | 编译共享库导致系统崩溃 |
 | R5 | **软链接必须验证可执行 + 禁止 ln -sf** | `ls -la` 验证 + `rm -f && ln -s` | 只检查 `-L` 存在性 / `ln -sf` 覆盖 |
 | R6 | **禁止修改生成文件** | 只改 configure.ac/CMakeLists.txt/*.c/*.h（源码层） | sed 改 configure/Makefile/Makefile.in（不可复现） |
-| R7 | **安全弹窗必须先触发再测试** | make install 后 `find $DEFAULT_PREFIX/bin -exec {} --version \;` 扫一遍 | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
+| R7 | **安全弹窗必须先触发再测试** | make install DESTDIR 后 `find $TEST_PREFIX/$DEFAULT_PREFIX/bin -type f -exec {} --version \;` | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
 | R8 | **源码修改"四不"准则** | `#ifdef __OHOS__` 守卫 / 保持上游风格 / 追加平台分支 | 删跨平台代码 / 硬编码路径 / 改原逻辑流 / 偏离代码风格 |
 | R9 | **质量门禁 FAIL 禁止标 success** | ohc-run.py verify-build 非零 → partial 或 failed | 产物有问题仍标记成功分发 |
 | R10 | **临时文件必须用 $TMPDIR** | 所有 tmp 文件操作使用 `$TMPDIR` 或 `$HOME/tmp` | 硬编码 `/tmp`（鸿蒙 /tmp 只读，见 E002） |
@@ -22,6 +22,44 @@
 | **R12** | **遇到错误必须先匹配错误模式再修复** | 搜索 `knowledge/error-patterns.md` + 同类软件 manifest 的 known_issues | 凭直觉试错 / 重复踩已知坑 |
 | **R13** | **脚本调用必须使用完整路径** | `python3 $SKILL_ROOT/scripts/ohc-run.py <command>` | `./scripts/xxx` 相对路径（工作目录不固定时调用失败） |
 | **R14** | **脚本失败=手动模式入口，非终止** | 失败时按提示切换手动模式，完成后 `--resume-from=StepN` 继续 | 脚本 exit 后 AI 放弃/什么都不做（如 automake 会话） |
+| **R21** | **Phase 3 结束必须自检零介入** | 按 compile-guide.md §2.4.1 清单逐项检查 | 不自检就调 finish |
+| **R22** | **finish 前必须通过干净构建验证** | `ohc-run.py clean-verify` 通过 | G0 FAIL 仍标 success |
+| **R23** | **平台检测机制优先于改生成文件** | 用 hints/config.guess/cmake 检查 | 手动 sed config.sh/config.h |
+
+---
+
+### R21 详细说明：Phase 3 自包含性检查
+
+Phase 3 是试错阶段，AI 可能通过手动操作绕过问题（直接改 config.sh、手动编译 .o、手动 cp 文件等）。这些操作在调试阶段是合理的，但**不能作为交付物**。
+
+Phase 3 结束时，AI 必须自检：所有手动操作是否已固化为补丁/Makefile 规则/hints 配置？
+如果还有未固化的手动操作，说明补丁不自包含，`ohc-run.py finish` 会在 G0 阶段失败。
+
+**perl 5.42.2 教训**：编译成功后回头整理 patch 时，才发现 Configure 中 266 处 `./script` → `sh ./script` 的修改、installperl 的可写检查删除、hints 中缺少的 `runnm=false` 等问题。如果在 Phase 3 结束时就做自检 + G0 干净验证，可以在 finish 之前一次性修复。
+
+### R22 详细说明：干净构建验证（G0）
+
+`ohc-run.py finish` 的 Step 3 (verify-build) 之前，自动执行 G0 干净构建验证：
+1. 解压原始 tarball 到临时目录
+2. 应用所有 patches/*.patch
+3. 运行 ./configure（使用 manifest 中的 configure_options）
+4. make
+5. make install
+6. 检查产物
+
+任何步骤失败 → 输出 HANDOFF 块 → AI 修复 → 重新 G0 验证。
+G0 不通过 = finish 阻塞（同 R9: 质量门禁 FAIL 禁标 success）。
+
+### R23 详细说明：平台检测机制优先
+
+许多软件构建系统提供了平台检测钩子。修改生成文件（config.h/config.sh/Makefile）是**最后手段**。
+
+优先级：
+1. 软件自带的平台检测机制（hints/config.guess/cmake 检查）
+2. 源文件（configure.ac/CMakeLists.txt/*.c）
+3. 生成文件（configure/Makefile）—— 仅作为最后手段
+
+手动 `sed -i` config.sh 是调试手段，不是交付物。交付时必须通过 Configure 参数或平台检测机制替代。
 
 ---
 

@@ -8,14 +8,16 @@
 
 > **这是整个流程中唯一需要 AI 判断的环节。** 其余全部自动化。
 >
-> **⚠️ 核心原则：`--prefix` 必须指向隔离的 staging 目录（$TEST_PREFIX），绝不能直接安装到系统目录。**
+> **⚠️ 核心原则：`--prefix` 指向运行时路径（$DEFAULT_PREFIX），用 DESTDIR 做隔离安装。**
 >
 > **完整执行顺序**：
 > ```
-> configure(--prefix=$TEST_PREFIX) → make → make install(到$TEST_PREFIX)
->   → 安全弹窗(R7) → make check(在$TEST_PREFIX环境中)
->   → 功能验证 → ohc-run.py package(从$TEST_PREFIX打包)
->   → install.sh deploy(验证通过后，才部署到$DEFAULT_PREFIX)
+> configure(--prefix=$DEFAULT_PREFIX) → make → make install DESTDIR=$TEST_PREFIX
+>   → 安全弹窗(R7) → make check
+>   → Staging 验证 → ohc-run.py package
+>   → ⭐ make install（不带 DESTDIR，安装到 $DEFAULT_PREFIX）
+>   → 用户验证（模拟普通用户部署）
+>   → ohc-run.py finish
 > ```
 
 ---
@@ -145,6 +147,30 @@ meson test -C builddir 2>&1 | tail -20
 
 ---
 
+## 2.2.2 部署到本地 + 用户验证（⭐ package 完成后必须执行）
+
+> **时机**：`ohc-run.py package` 完成后、`ohc-run.py finish` 之前。
+> **目的**：将软件安装到 `$DEFAULT_PREFIX`（~/usr/local），模拟普通用户下载预编译包、运行 `install.sh` 后的真实状态。
+
+```bash
+# 安装到本地（不带 DESTDIR，直接安装到 ~/usr/local）
+make install
+
+# 验证本地安装可用
+$DEFAULT_PREFIX/bin/<软件> --version   # 确认可用
+pkg-config --modversion <软件>          # 确认 pkg-config 可找到（如适用）
+```
+
+> **这一步能发现的问题**：
+> - 打包遗漏（缺库、路径错误、配置文件缺失）
+> - 二进制硬编码路径与实际安装路径不匹配
+> - pkg-config 文件中路径错误
+> - 运行时找不到数据文件/配置文件
+>
+> 这是整个流程的最终闭环验证：staging 中的路径经过 DESTDIR 天然正确，但 install.sh 部署后可能有差异。`make install` 到本地等于模拟了这个过程。
+
+---
+
 ## 2.3 错误处理与恢复
 
 ### 错误分类与标准对策
@@ -165,14 +191,14 @@ meson test -C builddir 2>&1 | tail -20
 > ⚠️ 以下参数在鸿蒙环境下几乎总是需要，**应作为 configure/make 的默认参数**：
 >
 > ```bash
-> # configure 阶段（从源头避免）--prefix 指向 $TEST_PREFIX
-> ./configure --prefix=$TEST_PREFIX \
+> # configure 阶段（从源头避免）
+> ./configure --prefix=$DEFAULT_PREFIX \
 >     SED=$(find_tool sed) \          # 动态检测：优先 GNU sed，fallback toybox
 >     HELP2MAN=/bin/true          # help2man 权限不足（跳过 man page）
 >     MAKEINFO=/bin/true           # texinfo 工具缺失
 >
 > # 或在 make install 阶段覆盖（如 configure 已完成）
-> make install \
+> make install DESTDIR=$TEST_PREFIX \
 >     SED=$(find_tool sed) \
 >     INSTALL=$(find_tool install) \  # 动态检测：优先 GNU install
 >     HELP2MAN=/bin/true \
@@ -236,7 +262,75 @@ Phase 3 的职责只有两件事：
 
 ---
 
-## 2.5 实时知识提取决策树
+## 2.4.1 Phase 3 自包含性检查清单（⭐ R21 强制）
+
+> **时机**：AI 认为编译完成、准备调用 `ohc-run.py finish` 之前。
+> **目的**：确保所有手动操作已固化为补丁/规则，构建过程零人工介入。
+
+AI 必须逐项自检：
+
+### 自检清单
+
+- [ ] **config.sh 未手动修改**：所有配置差异都通过 `Configure -D` 参数或 `hints/{osname}.sh` 实现？
+  - ❌ 反面：`sed -i 's|lddlflags=.*|...|' config.sh`
+  - ✅ 正确：`hints/harmonyos.sh` 中设置 `lddlflags='-shared'`
+
+- [ ] **无手动编译命令**：所有编译都通过 `make` 规则自动完成？
+  - ❌ 反面：`clang -c -o DynaLoader.o DynaLoader.c` 手动执行
+  - ✅ 正确：修复 Makefile.PL 依赖后由 `make` 自动编译
+
+- [ ] **无手动文件操作**：没有在构建过程中手动 cp/mv/touch 文件？
+  - ❌ 反面：`cp libperl.a /some/path/` 手动复制
+  - ✅ 正确：Makefile install 规则自动处理
+
+- [ ] **补丁覆盖所有修改**：`track-edit` 记录的每个修改都有对应补丁？
+  - 用 `ohc-run.py track-edit --status` 检查
+  - 未覆盖的修改需要说明原因
+
+- [ ] **平台代码有守卫**：所有 `#ifdef`/条件分支使用 `__OHOS__` 或 `$^O eq 'harmonyos'`？
+  - 非鸿蒙平台编译不受影响
+
+- [ ] **可以一条龙**：确认 `tar xf → patch → Configure → make → make install` 能无人工介入完成？
+
+### 不通过的处理
+
+任何一项不通过 → 不要调用 `ohc-run.py finish`，继续修复：
+1. 将手动操作固化为补丁/Makefile 规则/hints 配置
+2. 重新运行 `make clean && make` 验证
+3. 全部通过后再调用 finish
+
+---
+
+## 2.5 平台检测机制优先（⭐ R23）
+
+> **核心原则**：在修改生成文件（config.h/config.sh/Makefile）之前，先检查软件是否有平台检测钩子。
+> 优先使用软件自身机制，不手动修改生成文件（R6 的扩展）。
+
+### 常见软件的平台检测机制
+
+| 构建系统 | 机制 | 示例 |
+|----------|------|------|
+| autotools | config.guess/config.sub 补丁 | `aarch64-unknown-linux-ohos`（E007） |
+| perl | `hints/{osname}.sh` | `hints/harmonyos.sh` |
+| cmake | `CMAKE_SYSTEM_NAME` 检查 | `if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")` |
+| python | `configure.ac` 平台分支 | `AC_DEFINE(__OHOS__, 1, ...)` |
+| makefile | `uname` 条件判断 | `ifeq ($(shell uname -s),HarmonyOS)` |
+| node.js | `process.platform` 检查 | `platform === 'ohos'` |
+
+### 决策优先级
+
+```
+需要改配置？
+├─ 有平台检测机制？→ 用它！（hints/config.guess/cmake 检查）
+├─ 没有 → 改 configure.ac/configure.in（源文件）
+└─ 没有 .ac → 改 configure（生成文件，最后手段）
+```
+
+**铁律**：手动修改 config.sh/config.h 是 Phase 3 的调试手段，不是交付物。交付时必须通过 Configure 参数或平台检测机制替代。
+
+---
+
+## 2.6 实时知识提取决策树
 
 每解决一个问题后，立即判断：
 
@@ -253,7 +347,7 @@ Q1: 此问题只与本软件有关？
 
 ---
 
-## 2.6 安全弹窗验证代码
+## 2.7 安全弹窗验证代码
 
 鸿蒙系统首次执行非系统二进制会弹安全确认框，超时未点则进程被杀。
 
@@ -266,9 +360,10 @@ find $TEST_PREFIX/bin -type f -exec {} --version \; 2>/dev/null || true
 
 ---
 
-## 2.7 更新 PROGRESS.md
+## 2.8 更新 PROGRESS.md
 
 每解决一个问题后**立即**更新 PROGRESS.md：
 - 当前阶段和时间
 - 错误信息 + 根因 + 解决方案
 - 源码修改清单（表格：文件 | 原因 | 方式 | 补丁状态）
+� | 方式 | 补丁状态）

@@ -6,13 +6,66 @@
 
 ---
 
-> **目的**：验证 $TEST_PREFIX 中的安装产物完整且功能正常。
-> **时机**：`make install` 到 $TEST_PREFIX 成功之后、ohc-run.py package 之前。
+> **目的**：验证 `$TEST_PREFIX/$DEFAULT_PREFIX/` 中的安装产物完整且功能正常。
+> **时机**：`make install DESTDIR=$TEST_PREFIX` 成功之后、ohc-run.py package 之前。
 >
-> **重要变化（v4.3）**：由于 configure --prefix 现在直接指向隔离的 $TEST_PREFIX，
-> **不再需要"重新解压+二次编译"**。本步骤变为轻量级的产物验证。
+> DESTDIR 模式下，`configure --prefix=$DEFAULT_PREFIX`，`make install DESTDIR=$TEST_PREFIX` 将文件安装到 `$TEST_PREFIX/$DEFAULT_PREFIX/`。
 
-## 验证内容
+## G0: 干净构建验证（补丁自包含性检查）
+
+> **目的**：验证补丁集 + hints/configure 参数足以让构建从零完成，无需任何人工介入。
+> **时机**：refresh-patch 之后、verify-build (G1-G4) 之前。
+> **执行者**：`ohc-run.py clean-verify`（脚本自动执行，finish Step 3 前置关卡）。
+
+### 验证步骤
+
+```bash
+# G0 由 ohc-run.py clean-verify 自动执行：
+# 1. 解压原始 tarball 到临时目录
+# 2. 应用所有 patches/*.patch
+# 3. 运行 ./configure（使用 manifest 中的 configure_options + hints）
+# 4. make -j1
+# 5. make install DESTDIR=...
+# 6. 检查是否有二进制产物
+# 7. 清理临时目录
+```
+
+### 结果判定
+
+| 结果 | 条件 | 后续 |
+|------|------|------|
+| **PASS** | configure + make + make install 全部无人工介入完成 | → G1-G4 质量门禁 |
+| **FAIL** | 任何步骤失败或需要人工介入 | → 输出 HANDOFF 块，AI 修复后重新验证 |
+
+### HANDOFF 格式（脚本 → AI）
+
+```
+╔═══ G0 HANDOFF ══════════════════════════════════╗
+║ G0_CHECK: clean-build-verify                    ║
+║ RESULT: FAIL                                     ║
+║ FAILED_STEP: configure|make|make_install         ║
+║ ERROR_LOG: <日志路径>                             ║
+║ PATCHES_APPLIED: N/N                             ║
+║ AI NEXT ACTIONS:                                 ║
+║   1. 读取错误日志，诊断根因                        ║
+║   2. 修复补丁或 hints                            ║
+║   3. 重新运行 ohc-run.py clean-verify            ║
+╚══════════════════════════════════════════════════╝
+```
+
+### 设计理念
+
+此步骤解决的核心问题：Phase 3 编译过程中，AI 可能通过手动操作（直接改 config.sh、手动运行编译命令、手动 cp/mv 文件等）绕过了问题，但这些手动操作没有被固化为补丁或构建规则。G0 通过从干净源码重建来暴露这些遗漏。
+
+典型遗漏场景：
+- 手动修改了 config.sh 但没有通过 Configure -D 参数或 hints 文件替代
+- 手动编译了某个 .o 文件但没有修复 Makefile 规则
+- 手动运行了辅助脚本但没有集成进 Makefile
+- 补丁遗漏了某个必要的源码修改
+
+---
+
+## 验证内容（Staging 产物检查，G1-G4 前置）
 
 ```bash
 echo "[Staging 验证] 检查 $TEST_PREFIX 安装产物..."
@@ -59,6 +112,11 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$TEST_PREFIX/lib:}"
 | **FAIL** | BIN_COUNT=0 或大量 FAIL | → 排查 configure/install，修复后重试 |
 
 > **PASS 后必须创建标记文件**（ohc-run.py finish 关卡 B 检查此文件）：
+> ```bash
+> touch "${BUILD_ARCHIVE_DIR}/.staging-verified"
+> ```
+g-verified"
+> ```*（ohc-run.py finish 关卡 B 检查此文件）：
 > ```bash
 > touch "${BUILD_ARCHIVE_DIR}/.staging-verified"
 > ```

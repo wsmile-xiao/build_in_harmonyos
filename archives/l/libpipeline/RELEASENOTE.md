@@ -12,30 +12,23 @@ cd libpipeline-1.5.8-ohos-aarch64 && sh install-libpipeline-1.5.8.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.5.8 | success | 9 |
+| 1.5.8 | success | 2 |
 
 ## 当前版本 (1.5.8) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 2.1MB
+- 包大小: N/A
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 9
+- 补丁数: 2
 
 ### 补丁列表
-- 0001-Makefile.patch
-- 0002-build-aux-config.guess.patch
-- 0003-build-aux-config.sub.patch
-- 0004-config.h.patch
-- 0005-config.log.patch
-- 0006-config.status.patch
-- 0007-configure.log.patch
-- 0008-gl-lib-Makefile.patch
-- 0009-gl-lib-alloca.h.patch
+- 0001-build-aux-config.guess.patch
+- 0002-build-aux-config.sub.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

@@ -185,6 +185,8 @@ command -v clang >/dev/null && echo "✅ clang: $(clang --version | head -1)" ||
 
 <!-- ~~#### /usr/bin/env 不存在~~ → 已迁移至 graph/E037.kv + doc/E037.md -->
 
+> ✅ **HongMeng Kernel 1.12.0 已解决**：`/usr/bin/env` 现已存在（指向 toybox 的符号链接），`#!/usr/bin/env xxx` shebang 写法可用。
+
 <!-- ~~#### CA 证书包缺失~~ → 已迁移至 graph/E034.kv + doc/E034.md -->
 
 ## 6. 三元组格式
@@ -234,6 +236,8 @@ ln -sf /target /path/to/link
 rm -f /path/to/link
 ln -s /target /path/to/link
 ```
+
+> ✅ **HongMeng Kernel 1.12.0 已解决**：`ln -sf` 不再创建带随机后缀的文件，覆盖操作正常工作。但建议保留 `rm -f && ln -s` 作为最佳实践。
 
 ### 9.2 软链接可用性检查函数
 
@@ -401,3 +405,4 @@ make && make install
 ```
 
 <!-- ~~## 11. 头文件搜索路径：PKG_CONFIG_PATH vs C_INCLUDE_PATH~~ → 已迁移至 graph/E075.kv + doc/E075.md -->
+v + doc/E075.md -->

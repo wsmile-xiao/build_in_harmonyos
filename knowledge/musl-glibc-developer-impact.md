@@ -291,6 +291,8 @@ pthread_attr_destroy(&attr);
 
 **影响范围**: 几乎所有使用 pthread 的程序都需要检查。
 
+> ✅ **HongMeng Kernel 1.12.0 已解决**：默认线程栈已从 128KB 提升到 1024KB (1MB)，大幅减少栈溢出风险。
+
 #### 2.1.3 bash malloc 与 musl 不兼容
 
 GNU bash 默认使用内置 malloc，针对 glibc 优化。在 musl 上导致运行时内存问题。
@@ -424,6 +426,8 @@ setlocale(LC_ALL, "zh_CN.UTF-8");  // 返回 NULL
 - 依赖 locale 切换的国际化功能不可用
 - `LC_COLLATE` 排序规则只有 C/UTF-8
 - 日期、货币格式不受 locale 影响
+
+> ✅ **HongMeng Kernel 1.12.0 部分改善**：locale 支持已扩展，zh_CN.UTF-8、en_US.UTF-8 等常见 locale 的 setlocale 现在返回成功。
 
 #### 2.5.2 `iconv` 编码覆盖
 
@@ -748,3 +752,4 @@ LDFLAGS="-static"  # musl 静态链接非常高效
 ---
 
 *文档结束。最后更新：2026-03-23*
+��更新：2026-03-23*
