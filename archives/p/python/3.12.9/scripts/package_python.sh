@@ -312,6 +312,44 @@ else
     log_warn "  未发现额外外部依赖库（所有依赖均为系统 musl 库或包内已有）"
 fi
 
+# ----------------------------------------------------------
+log_step "4.5" "⭐ 拷贝外部依赖到 lib-dynload/（HarmonyOS namespace 限制）"
+# ----------------------------------------------------------
+# HarmonyOS musl 动态链接器使用 namespace 配置，完全忽略 RUNPATH/LD_LIBRARY_PATH。
+# lib-dynload/ 下的 Python 扩展模块依赖的外部库必须拷贝到同目录下才能被加载。
+log_info "分析 lib-dynload/ 模块依赖并拷贝外部库 ..."
+
+DYNDLOAD_DIR="$PACKAGE_DIR/lib/python${PY_VER_SHORT}/lib-dynload"
+COPIED_TO_DYNDLOAD=0
+
+while IFS= read -r so; do
+    [ -z "$so" ] && continue
+    # 提取 NEEDED 库列表
+    needed=$($READELF -d "$so" 2>/dev/null | grep NEEDED | sed 's/.*\[\(.*\)\].*/\1/')
+    for lib in $needed; do
+        # 跳过系统库和 libpython 自身
+        echo "$lib" | grep -qE "$SKIP_LIBS_PATTERN|libpython" && continue
+        # 已经在 lib-dynload/ 下了就跳过
+        [ -f "$DYNDLOAD_DIR/$lib" ] && continue
+        # 从 lib/ 或 lib/external/ 查找
+        found=""
+        for d in "$PACKAGE_DIR/lib" "$PACKAGE_DIR/lib/external"; do
+            [ -f "$d/$lib" ] && found="$d/$lib" && break
+        done
+        if [ -n "$found" ]; then
+            cp -L "$found" "$DYNDLOAD_DIR/$lib"
+            log_info "  📦 → lib-dynload/$lib (needed by $(basename "$so"))"
+            COPIED_TO_DYNDLOAD=$((COPIED_TO_DYNDLOAD + 1))
+        fi
+    done
+done < <(find "$DYNDLOAD_DIR" -name '*.so' -type f 2>/dev/null)
+
+if [ "$COPIED_TO_DYNDLOAD" -gt 0 ]; then
+    log_info "  ✅ 拷贝 $COPIED_TO_DYNDLOAD 个依赖库到 lib-dynload/"
+else
+    log_info "  无需额外拷贝（lib-dynload/ 模块无外部依赖）"
+fi
+
 # ============================================================
 # ============================================================
 # 可靠的 ELF 文件检测函数（基于 ELF 魔数，不依赖 file 命令）
@@ -359,7 +397,9 @@ echo "$ELF_FILES" | while IFS= read -r elf; do
             RPATH='$ORIGIN'
             ;;
         */lib-dynload/*)
-            RPATH='$ORIGIN:$ORIGIN/..:$ORIGIN/../external'
+            # HarmonyOS musl 忽略 RUNPATH/LD_LIBRARY_PATH，使用 namespace 配置
+            # $ORIGIN 是唯一可靠路径，外部依赖必须拷贝到此目录
+            RPATH='$ORIGIN'
             ;;
         */lib/*)
             RPATH='$ORIGIN:$ORIGIN/external'

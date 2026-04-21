@@ -12,7 +12,7 @@ cd intltool-0.51.0-ohos-aarch64 && sh install-intltool-0.51.0.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 0.51.0 | partial | 1 |
+| 0.51.0 | success | 1 |
 
 ## 当前版本 (0.51.0) 详情
 

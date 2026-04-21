@@ -370,23 +370,19 @@ else
 fi
 ```
 
-### Step 9: 创建 install.sh（单独托管，不打包进 tar.gz）
+### Step 9: install.sh（使用统一通用脚本，不再按软件生成）
 
-> **⚠️ 重要变更（v2.3）**：不再将 activate.sh/README 打入 tar.gz。
-> install.sh 单独托管在 gitcode releases，用户通过 `curl | sh` 安装。
+> **⚠️ 重要变更（v2.4）**：不再为每个软件生成独立的 install.sh。
+> 使用统一通用脚本 `templates/universal-install.sh`，托管在 cmd-pkgs 的 `pkgs` release tag 下。
+> 用户通过 `curl | sh -s -- <name> <version>` 安装。
 
 ```bash
-# 9a. 基于 scripts/ohc-run.py install-template (已归档) 生成 install.sh
-#     只需修改 PKG_NAME 和 PKG_VERSION 两行
-#     禁止事项：heredoc / emoji / --strip-components / set -e / [[ ]] / source
+# 9a. 无需手动创建 install.sh，使用统一脚本
+#     通用脚本: templates/universal-install.sh
+#     托管位置: cmd-pkgs releases → pkgs tag
 
-# 9b. 验证 install.sh
-#     sh -n <install.sh>           # 语法检查
-#     LC_ALL=C grep -nP '[^\x00-\x7F]' <install.sh>  # 纯ASCII
-#     cat <install.sh> | sh         # 干跑测试
-
-# 9c. install.sh 托管位置：gitcode releases（与 tar.gz 同目录）
-#     用户执行: curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}
+# 9b. 用户安装命令
+#     curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- <name> <version>
 ```
 
 ### Step 10: 打包干净的 release tar.gz
@@ -431,18 +427,16 @@ rm -rf "$VERIFY_DIR"
 ```
 archives/{首字母}/{软件名}/{版本}/packaging/
 ├── {name}-{ver}-ohos-aarch64.tar.gz        ← Release 制品（干净二进制，已 strip）
-├── {name}-{ver}-ohos-aarch64-debug.tar.gz   ← Debug 符号包（必须）
-└── install.sh                                ← 安装脚本（gitcode 单独托管）
+└── {name}-{ver}-ohos-aarch64-debug.tar.gz   ← Debug 符号包（必须）
 ```
 
 ### 发布到 gitcode 的步骤
 
-1. 上传 `{name}-{version}-ohos-aarch64.tar.gz` 到 gitcode releases
-2. 上传 `{name}-install.sh` 到同一 release 页面
-3. （可选）上传 debug 包
-4. 用户安装命令：
+1. 上传 `{name}-{version}-ohos-aarch64.tar.gz` 到 cmd-pkgs 的 `pkgs` release tag
+2. （可选）上传 debug 包到同一 release tag
+3. 用户安装命令：
    ```bash
-   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}
+   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- {name} {ver}
    ```
 
 ---
@@ -664,12 +658,11 @@ chmod +x package-dir/bin/*
 
 ---
 
-## 9. install.sh 通用安装脚本模板
+## 9. install.sh 通用安装脚本
 
-> **定位**：所有预编译软件的 `install.sh` 必须基于此模板生成，确保统一部署体验。
-> 模板文件：`scripts/ohc-run.py install-template (已归档)`（可直接复制修改 PKG_NAME/PKG_VERSION）。
-> **重要（v2.3）**：install.sh 单独托管在 gitcode releases，**不打包进 tar.gz**。
-> 用户通过 `curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}` 安装，tar.gz 只包含干净二进制产物。
+> **定位**：统一通用安装脚本 `templates/universal-install.sh`，接受 `<name> <version>` 参数。
+> **重要（v2.4）**：不再为每个软件生成独立 install.sh，统一使用 cmd-pkgs 的 `pkgs` release tag 下的一个通用脚本。
+> 用户通过 `curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- <name> <version>` 安装，tar.gz 只包含干净二进制产物。
 
 ### 9.1 设计原则
 
@@ -749,3 +742,5 @@ PKG_VERSION="${PKG_VERSION:-0.29.2}"      # <-- 改这里
 *v2.3 更新：*
 *  - Step 9 改为 install.sh（替代 activate.sh），单独托管不打包进 tar.gz*
 *  - Step 10 增加安装验证步骤 + §10 完整交付物清单和 gitcode 发布流程*
+流程*
+�*

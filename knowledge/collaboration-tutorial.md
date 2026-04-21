@@ -457,7 +457,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps wget
 python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --install wget
 
 # 方式 C：手动安装特定依赖
-curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/openssl/install.sh" | sh -s -- 1.1.1w
+curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh" | sh -s -- openssl 1.1.1w
 ```
 
 ### Q6: rebase 时遇到冲突怎么办？

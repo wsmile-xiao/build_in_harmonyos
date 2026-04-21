@@ -5,10 +5,18 @@ Only uses Python standard library.
 from __future__ import annotations
 
 import csv
+import keyword
 import os
+import re
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Optional
+
+# Valid KV field name: starts with lowercase letter, contains only lowercase
+# letters, digits, and underscores.  Rejects Python code tokens like
+# "except MemoryError", "print('Mode", etc.  Also used to skip Python
+# keywords (try, import, …) that happen to look like valid identifiers.
+_VALID_KEY_RE = re.compile(r'^[a-z][a-z0-9_]*$')
 
 
 # ═══════════════════════════════════════════════════════
@@ -46,13 +54,28 @@ def _parse_bracket_list(value: str) -> list[str]:
 # KV file parser
 # ═══════════════════════════════════════════════════════
 
+def _is_valid_kv_key(key: str) -> bool:
+    """Return True if *key* looks like a legitimate .kv field name.
+
+    Rejects:
+    - keys containing spaces, parentheses, quotes, or uppercase letters
+      (e.g. ``except MemoryError``, ``print('Mode``)
+    - Python keywords (e.g. ``try``, ``import``)
+    """
+    if not _VALID_KEY_RE.match(key):
+        return False
+    if keyword.iskeyword(key):
+        return False
+    return True
+
+
 def parse_kv_file(filepath: str) -> dict[str, str]:
     """Parse a .kv file into a flat key→value dict.
 
     Handles:
     - ``#`` comment lines (skipped)
     - blank lines (skipped)
-    - ``key: value`` pairs
+    - ``key: value`` pairs  (key must pass :func:`_is_valid_kv_key`)
     - continuation lines (leading whitespace → append with ``\\n``)
     - UTF-8 encoding
     """
@@ -74,6 +97,11 @@ def parse_kv_file(filepath: str) -> dict[str, str]:
                     continue
                 key = line[:idx].strip()
                 value = line[idx + 1 :].strip()
+                if not _is_valid_kv_key(key):
+                    # Not a real field — reset current_key so subsequent
+                    # continuation lines are not attached to it.
+                    current_key = None
+                    continue
                 result[key] = value
                 current_key = key
 
@@ -109,6 +137,9 @@ def parse_multi_kv_file(filepath: str) -> list[dict[str, str]]:
                     continue
                 key = line[:idx].strip()
                 value = line[idx + 1 :].strip()
+                if not _is_valid_kv_key(key):
+                    current_key = None
+                    continue
                 current[key] = value
                 current_key = key
 

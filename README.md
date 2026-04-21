@@ -177,7 +177,7 @@ templates/                  # 模板文件（PROGRESS.md, manifest.yaml 等）
 
 ```bash
 # 示例：安装 pkg-config
-curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkg-config/install.sh" | sh -s -- 0.29.2
+curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh" | sh -s -- pkg-config 0.29.2
 
 # Python 有独立安装源
 curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/installer/install.sh" | sh -s -- 3.12.9

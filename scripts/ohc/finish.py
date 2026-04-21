@@ -108,6 +108,34 @@ class FinishPipeline:
             log_fail("  ❌ 知识整理未完成（缺少 .knowledge-done 标记）")
             log_fail("     必须先整理知识图谱（graph add --draft），再重新运行 finish")
 
+            # Check for empty drafts — block finish if any exist
+            draft_dir = self.pdir / "knowledge" / "graph" / "draft"
+            if draft_dir.is_dir():
+                empty_drafts = []
+                for dkv in draft_dir.glob("E*-draft-*.kv"):
+                    try:
+                        content = dkv.read_text(encoding="utf-8")
+                        # Check if key fields are still template placeholders
+                        has_root_cause = False
+                        has_error_sig = False
+                        for line in content.split("\n"):
+                            stripped = line.strip()
+                            if stripped.startswith("root_cause:") and len(stripped) > 20 and "[简短" not in stripped:
+                                has_root_cause = True
+                            if stripped.startswith("error_signature:") and len(stripped) > 25 and "configure|cmake" not in stripped:
+                                has_error_sig = True
+                        if not has_root_cause or not has_error_sig:
+                            empty_drafts.append(dkv.name)
+                    except Exception:
+                        pass
+                if empty_drafts:
+                    log_fail(f"  ❌ 发现 {len(empty_drafts)} 个空草稿: {', '.join(empty_drafts)}")
+                    log_fail("     草稿必须填写实际内容后才能通过 finish！")
+                    log_fail("     填写后创建 .knowledge-done 标记:")
+                    log_fail(f"     touch {self.archive_dir / '.knowledge-done'}")
+                    if self.status == "success":
+                        self.status = "partial"
+
     # Step 1: refresh-patch
     def step1_refresh_patch(self):
         log_info("Step 1/6: 补丁生成...")
