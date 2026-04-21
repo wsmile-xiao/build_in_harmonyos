@@ -18,7 +18,7 @@ cd zlib-1.3.1-ohos-aarch64 && sh install-zlib-1.3.1.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 242.1KB
+- 包大小: N/A
 
 ### 编译信息
 - 构建系统: makefile
