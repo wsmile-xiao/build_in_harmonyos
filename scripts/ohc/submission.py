@@ -573,6 +573,27 @@ def _review_single(software: str, version: str,
     else:
         _record("12. 总体评估", "FAIL", f"{fail_count} FAIL, {warn_count} WARN")
 
+    # ── Check 13: Knowledge graph format compliance ──
+    try:
+        from .graph import cmd_validate as graph_validate
+        from io import StringIO
+        import io
+        # Capture validate output
+        old_stdout = sys.stdout
+        sys.stdout = captured = StringIO()
+        validate_result = graph_validate(pdir=project_dir)
+        sys.stdout = old_stdout
+        output = captured.getvalue()
+        if validate_result == 0:
+            _record("13. 知识图谱合规", "PASS")
+        else:
+            # Count errors from output
+            err_lines = [l for l in output.split("\n") if "❌" in l or "[C" in l]
+            _record("13. 知识图谱合规", "FAIL",
+                    f"{len(err_lines)} 个问题，运行 graph validate --verbose 查看详情")
+    except Exception as e:
+        _record("13. 知识图谱合规", "WARN", f"无法验证: {e}")
+
     # ── Print summary ──
     print(f"\n  📋 Review Summary for {sid}:")
     print(f"  {'─' * 60}")
@@ -684,6 +705,17 @@ def cmd_post_merge(software: str, version: str,
         content = "\n".join(comment_lines + rows) + "\n"
         index_path.write_text(content, encoding="utf-8")
         log_ok(f"  重建 index.tsv ({len(rows)} 行)")
+
+    # ── Step 2.5: Validate knowledge graph consistency ──
+    try:
+        from .graph import cmd_validate
+        result = cmd_validate(verbose=True, fix=True, pdir=project_dir)
+        if result != 0:
+            log_warn("  知识图谱验证发现问题（已尝试自动修复），请人工检查")
+        else:
+            log_ok("  知识图谱验证通过")
+    except Exception as e:
+        log_warn(f"  知识图谱验证失败: {e}")
 
     # ── Step 3: Rebuild archives/_index.yaml ──
     try:

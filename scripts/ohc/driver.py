@@ -804,7 +804,7 @@ class BuildDriver:
     def _step11b_required_files(self) -> None:
         self._log("═══ [11.5/13] 必填文件校验 ═══")
 
-        required = ["manifest.yaml", "README.md", "PROGRESS.md", "RELEASENOTE.md", "install.sh"]
+        required = ["manifest.yaml", "README.md", "PROGRESS.md", "RELEASENOTE.md"]
         missing = []
         for f in required:
             if not (self.archive_dir / f).exists():

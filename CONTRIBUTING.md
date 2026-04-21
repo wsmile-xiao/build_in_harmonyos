@@ -90,7 +90,6 @@ mkdir -p archives/{首字母}/{软件名}/{版本}/{patches,reports,packaging}
 archives/{首字母}/{软件名}/          ← 软件级（跨版本共享）
 ├── README.md                        # 编译说明
 ├── RELEASENOTE.md                   # 发布说明（多版本聚合，自动生成）
-├── install.sh                       # 安装脚本（参数化: sh -s -- <ver>）
 │
 └── {版本}/                          ← 版本级（每次编译快照）
     ├── manifest.yaml                # 元数据
@@ -163,8 +162,8 @@ diff -Naur original/ modified/ > patches/0001-description.patch
 curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{软件名}/install.sh" | sh -s -- {版本}
 
 # 示例
-curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/openssl/install.sh" | sh -s -- 1.1.1w
-curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/readline/install.sh" | sh -s -- 8.2
+curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh" | sh -s -- openssl 1.1.1w
+curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh" | sh -s -- readline 8.2
 ```
 
 ### 依赖编译顺序
@@ -416,7 +415,7 @@ Step 5:  设置 RPATH（$ORIGIN 相对路径）
 Step 6:  Strip debug 符号 + 分离保存
 Step 7:  ELF 签名（adhoc self-sign）
 Step 8:  统一修复执行权限（必做！）
-Step 9:  创建 install.sh（单独托管，不打包进 tar.gz）
+Step 9:  (已简化，使用统一通用 install.sh)
 Step 10: 打包 tar.gz（扁平结构）
 ```
 
@@ -567,6 +566,12 @@ knowledge_ref: []             # 引用的 E 编号列表（主编审核用）
 | `ohc-run.py review --check` | 辅助审核检查 | 主编 |
 | `ohc-run.py summary` | 生成 SUMMARY.md | 主编 |
 | `ohc-run.py search-url` | URL 搜索 | 协作者 |
+| `ohc-run.py check-env` | 环境变量检查 | 协作者 |
+
+---
+
+*最后更新: 2026-04-13 | 对齐 SKILL.md v7.2*
+�索 | 协作者 |
 | `ohc-run.py check-env` | 环境变量检查 | 协作者 |
 
 ---

@@ -42,7 +42,6 @@ Step 10: 打包干净 tar.gz + 安装验证
 ```
 archives/{首字母}/{软件名}/
 ├── EXCLUDE_LIST              # 🟡 可选：打包排除列表（有问题的命令/库）
-├── install.sh                                # 安装脚本（软件级，参数化: sh -s -- <ver>）
 ├── RELEASENOTE.md                             # 发布说明（软件级）
 │
 └── {版本}/packaging/
@@ -50,7 +49,7 @@ archives/{首字母}/{软件名}/
     └── {name}-{ver}-ohos-aarch64-debug.tar.gz   # Debug 符号包（必须）
 ```
 
-用户安装：`curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{name}/install.sh | sh -s -- {ver}`
+用户安装：`curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- {name} {ver}`
 
 ### 打包排除列表（EXCLUDE_LIST）
 

@@ -1,54 +1,84 @@
-id: E083
-severity: 3
-category: jvm|security|signing
-trigger_tool: java|javac|jni|System.load
-phase: runtime
-keywords: System.load, Permission denied, dlopen, JNI library, BiSheng JDK, bishengjdk, ELF signature, selfSign, binary-sign-tool, .codesign, NativeLibraries, UnsatisfiedLinkError
-forbid_cnt: 1
-auto_fix: false
-approach: sign-jdk-and-library
-principles: P-SIGN-001
-doc: doc/E083.md
+#====================================================================
+# E083.kv — BiSheng JDK System.load 签名校验拒绝自签名 .so
+#====================================================================
 
-summary: |
-  BiSheng JDK 的 System.load / System.loadLibrary 会校验 .so 的 ELF 签名，
-  要求 JNI 库与 JVM 使用同一签名体系。自签名 (selfSign) 的 .so 在原始系统 JDK 下
-  加载失败 (Permission denied / UnsatisfiedLinkError)，即使 C 层 dlopen 正常。
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E083
+trigger_tool:           java|System.load|System.loadLibrary
+phase:                  runtime
+error_signature:        UnsatisfiedLinkError.*Permission denied|
+                         System\.loadLibrary.*Permission denied|
+                         dlopen.*Permission denied.*JNI|
+                         NativeLibraries\.load.*denied
 
-symptoms:
-  - "java.lang.UnsatisfiedLinkError: /path/to/libfoo.so: Permission denied"
-  - "System.loadLibrary 加载自签名 .so 失败，但 dlopen 在 C 程序中正常"
-  - "JNA/Py4J 等 JNI 框架在鸿蒙上报 Permission denied 加载 native library"
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               jvm|security|signing
+match_keywords:         System.load, Permission denied, dlopen, JNI library,
+                         BiSheng JDK, bishengjdk, ELF signature, selfSign,
+                         binary-sign-tool, .codesign, NativeLibraries,
+                         UnsatisfiedLinkError
 
-root_cause: |
-  BiSheng JDK 的 NativeLibraries.load() native 方法内部在调用 dlopen 之前
-  额外校验 .so 的 ELF 签名 (.codesign 段) 是否与 JVM 自身签名匹配。
-  系统预装的 JDK (/data/service/hnp/) 拥有系统级签名，而用户编译的 .so 只有
-  binary-sign-tool -selfSign 1 生成的自签名，签名不匹配导致拒绝加载。
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             BiSheng JDK 的 NativeLibraries.load() native 方法内部在调用 dlopen 之前
+                        额外校验 .so 的 ELF 签名 (.codesign 段) 是否与 JVM 自身签名匹配。
+                        系统预装的 JDK (/data/service/hnp/) 拥有系统级签名，
+                        而用户编译的 .so 只有 binary-sign-tool -selfSign 1 生成的自签名，
+                        签名不匹配导致拒绝加载。
+                        注意：C 层 dlopen 不校验签名，所以 C 程序加载正常。
+affected_scope:         HarmonyOS (HongMeng Kernel) 上所有使用 JNI 的 Java 应用。
+                        受影响 JDK: BiSheng JDK 17.0.13。
+                        受影响框架: JNA, JNR, JFFI, Py4J 等 JNI 框架。
+verification_cmd:       |
+  # 确认 JDK 签名
+  python3 $SKILL_ROOT/scripts/ohc-run.py check-sign /data/service/hnp/bishengjdk17*/bin/java
+  # 确认 .so 签名
+  python3 $SKILL_ROOT/scripts/ohc-run.py check-sign /path/to/libfoo.so
+  # 测试 System.load
+  $HOME/usr/local/bishengjdk17/bin/java -cp test TestLoad
 
-  注意：C 层 dlopen 不校验签名，所以 C 程序加载正常。
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           sign-jdk-and-library
+rec_description:        拷贝 JDK 至可写路径，批量签名 JDK 所有 ELF 文件，
+                        再用同一签名体系签名 JNI 库，最后使用签名后的 JDK 运行。
+rec_command:            |
+  # 1. 拷贝 JDK 至可写路径
+  cp -a /data/service/hnp/bishengjdk17* $HOME/usr/local/bishengjdk17
+  # 2. 批量签名 JDK 所有 ELF 文件
+  python3 $SKILL_ROOT/scripts/ohc-run.py sign-elf --batch $HOME/usr/local/bishengjdk17
+  # 3. 签名 JNI 库（同一签名体系）
+  python3 $SKILL_ROOT/scripts/ohc-run.py sign-elf libfoo.so
+  # 4. 使用签名后的 JDK 运行
+  $HOME/usr/local/bishengjdk17/bin/java -cp app.jar Main
+rec_auto_fix:           false
+rec_impl:               sign-jdk-and-library
 
-fix:
-  steps:
-    - title: "拷贝 JDK 至可写路径"
-      cmd: "cp -a /data/service/hnp/bishengjdk17* $HOME/usr/local/bishengjdk17"
-    - title: "批量签名 JDK 所有 ELF 文件"
-      cmd: "python3 $SKILL_ROOT/scripts/ohc-run.py sign-elf --batch $HOME/usr/local/bishengjdk17"
-    - title: "签名 JNI 库（同一签名体系）"
-      cmd: "python3 $SKILL_ROOT/scripts/ohc-run.py sign-elf libfoo.so"
-    - title: "使用签名后的 JDK 运行"
-      cmd: "$HOME/usr/local/bishengjdk17/bin/java -cp app.jar Main"
+fallback_priority:      2
+fallback_approach:      use-system-jdk-prebuilt
+fallback_description:   如果可获取系统级签名的预编译 JDK，直接使用预装 JDK 并要求 .so 也使用系统签名。
+                        适用于企业内部署场景。
+fallback_command:       
+fallback_auto_fix:      false
+fallback_impl:          
 
-  verification: |
-    # 测试 System.load 是否工作
-    $HOME/usr/local/bishengjdk17/bin/java -cp test TestLoad
+# ★ 禁止策略 ★
+forbid_1_pattern:       chmod 777|chmod a\+rwx.*\.so
+forbid_1_reason:         权限问题不是文件系统权限导致的，而是 ELF 签名校验失败。
+                         chmod 777 不能解决 BiSheng JDK 的签名校验。
+forbid_1_consequence:   权限修改无效，System.load 仍然失败，且降低系统安全性。
 
-scope:
-  platform: HarmonyOS (HongMeng Kernel)
-  jdk: BiSheng JDK 17.0.13
-  affected: "所有使用 JNI 的 Java 应用（JNA, JNR, JFFI, Py4J 等）"
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-SIGN-001
 
-related:
-  - E077  # ELF 签名基础
-  - E002  # /tmp 只读
-  - E009  # SELinux 限制
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E077, E002, E009]
+conflicts_with:         []
+prerequisite_of:        [E084]
+
+# ═══ 元数据 ═══
+doc_file:               doc/E083.md
+last_updated:           2026-04-21
+source_event:           BiSheng JDK JNI 签名校验失败（ELF signature mismatch on self-signed .so）

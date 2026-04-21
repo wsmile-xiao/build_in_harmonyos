@@ -175,7 +175,7 @@ def finalize_archive(software: str, version: str, pdir: str | None = None) -> in
     missing = 0
 
     # Software level
-    for f in ["README.md", "RELEASENOTE.md", "install.sh"]:
+    for f in ["README.md", "RELEASENOTE.md"]:
         p = sw_dir / f
         if not p.exists() or len(p.read_text(encoding="utf-8", errors="replace").splitlines()) < 5:
             log_warn(f"  ⚠️ 软件级缺失: {f}")

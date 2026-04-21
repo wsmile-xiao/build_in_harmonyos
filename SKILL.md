@@ -447,7 +447,7 @@ archives/{首字母}/{软件名}/          ← 软件级
 
 ### 必填文件
 
-manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, install.sh, patches/, reports/, packaging/*.tar.gz
+manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, patches/, reports/, packaging/*.tar.gz
 
 ### 补丁命名
 

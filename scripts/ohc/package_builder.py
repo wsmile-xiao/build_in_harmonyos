@@ -246,7 +246,7 @@ class PackageBuilder:
         log_ok(f"  修复 {fixed} 个文件权限")
 
     def step9_install_sh(self):
-        log_info("Step 9/10: 生成 install.sh...")
+        log_info("Step 9/10: 生成 install.sh (版本级本地安装)...")
         sw, ver = self.software, self.version
         tar_name = f"{sw}-{ver}-ohos-aarch64"
 
@@ -310,62 +310,11 @@ class PackageBuilder:
         install_sh_pkg.write_text(version_install_script, encoding="utf-8")
         os.chmod(install_sh_pkg, 0o755)
 
-        # ── 软件级 install.sh：纯远程下载（上传到 cmd-pkgs release） ──
-        # 格式参考 archives/a/automake/install.sh
-        # curl -fsSL <url>/install.sh | sh -s -- <version>
-        sw_level_dir = self.archive_dir.parent  # archives/{letter}/{name}/
-        install_sh_sw = sw_level_dir / "install.sh"
+        # NOTE: 软件级 install.sh 已废弃（v8.1+）
+        # 统一使用 templates/universal-install.sh，托管在 cmd-pkgs release 的 pkgs tag 下
+        # 用户安装: curl -fsSL .../pkgs/install.sh | sh -s -- <name> <version>
 
-        # 检测一个用于预触发安全弹窗的代表二进制
-        bin_dir = self.pkgdir / "bin"
-        bin_example = sw  # fallback
-        if bin_dir.exists():
-            for f in sorted(bin_dir.iterdir()):
-                if f.is_file() and os.access(f, os.X_OK):
-                    bin_example = f.name
-                    break
-
-        sw_install_script = (
-            f"#!/bin/sh\n"
-            f"# {sw} for HarmonyOS — install.sh\n"
-            f"# curl -fsSL <url>/install.sh | sh -s -- <version>\n"
-            f"#\n"
-            f"# tar.gz 为扁平结构 (bin/ lib/ share/ 在顶层)，直接 cp 即可。\n"
-            f"\n"
-            f'VER="${{1:-}}"\n'
-            f'[ -z "$VER" ] && {{ echo "Usage: sh install.sh <version>"; exit 1; }}\n'
-            f"\n"
-            f'TMP="$HOME/tmp/install-{sw}-$$"\n'
-            f'DST="$HOME/usr/local"\n'
-            f'URL="https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/{sw}/{sw}-${{VER}}-ohos-aarch64.tar.gz"\n'
-            f"\n"
-            f'mkdir -p "$TMP" "$DST" || exit 1\n'
-            f"\n"
-            f"# 1. 下载\n"
-            f'curl -fSL -o "$TMP/{sw}.tar.gz" "$URL" || {{ rm -rf "$TMP"; echo "Download failed"; exit 1; }}\n'
-            f"\n"
-            f"# 2. 解压 + 安装（扁平结构: bin/ lib/ share/ 在顶层）\n"
-            f'tar xzf "$TMP/{sw}.tar.gz" -C "$TMP"\n'
-            f'rm -f "$TMP/{sw}.tar.gz"\n'
-            f'cp -r "$TMP"/* "$DST/"\n'
-            f"\n"
-            f"# 3. 清理\n"
-            f'rm -rf "$TMP"\n'
-            f"\n"
-            f"# 4. 权限 + PATH\n"
-            f'chmod +x "$DST/bin/"* 2>/dev/null || true\n'
-            f'grep -q \'usr/local/bin\' "$HOME/.zshrc" 2>/dev/null || \\\\\n'
-            f'    echo \'export PATH="$HOME/usr/local/bin:$PATH"\' >> "$HOME/.zshrc"\n'
-            f"\n"
-            f"# 5. 预触发安全弹窗（HarmonyOS 首次执行二进制需确认）\n"
-            f'"$DST/bin/{bin_example}" --version >/dev/null 2>&1 || true\n'
-            f"\n"
-            f'echo "=== {sw} $VER installed ==="\n'
-        )
-
-        install_sh_sw.write_text(sw_install_script, encoding="utf-8")
-        os.chmod(install_sh_sw, 0o755)
-        log_ok(f"  install.sh → {install_sh_pkg.name} + {install_sh_sw.relative_to(self.pdir)}")
+        log_ok(f"  install.sh -> {install_sh_pkg.name}")
 
     def step10_tarball(self):
         log_info("Step 10/10: 打包 tar.gz...")

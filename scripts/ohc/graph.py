@@ -33,6 +33,41 @@ _REQUIRED_FIELDS = [
 
 _VALID_RELATIONS = {"causes", "caused_by", "similar_to", "conflicts_with", "prerequisite_of"}
 
+# Field names allowed in .kv files (from _template.kv + known extensions)
+_TEMPLATE_FIELDS = {
+    # Layer 0: Error Surface
+    "id", "trigger_tool", "phase", "error_signature",
+    # Layer 1: Recognition
+    "severity", "category", "match_keywords",
+    # Layer 2: Diagnosis
+    "root_cause", "affected_scope", "verification_cmd",
+    # Layer 3: Solution (recommended)
+    "rec_priority", "rec_approach", "rec_description", "rec_command",
+    "rec_auto_fix", "rec_impl",
+    # Layer 3: Solution (fallback)
+    "fallback_priority", "fallback_approach", "fallback_description",
+    "fallback_command", "fallback_auto_fix", "fallback_impl",
+    # Layer 3: Solution (second fallback tier)
+    "fallback_2_priority", "fallback_2_approach", "fallback_2_description",
+    "fallback_2_command", "fallback_2_auto_fix", "fallback_2_impl",
+    # Forbid rules (dynamic N)
+    "forbid_1_pattern", "forbid_1_reason", "forbid_1_consequence",
+    "forbid_2_pattern", "forbid_2_reason", "forbid_2_consequence",
+    # Layer 4: Principles
+    "principles",
+    # Relations
+    "causes", "caused_by", "similar_to", "conflicts_with", "prerequisite_of",
+    # Metadata
+    "doc_file", "last_updated", "source_event",
+    # Known extensions (used by multiple existing entries)
+    "resolved_in", "resolved_note",
+    # Draft-specific (allowed but stripped on merge)
+    "draft", "contributor_id",
+}
+
+# Regex pattern for dynamic forbid_N_xxx fields
+_FORBID_FIELD_RE = re.compile(r'^forbid_\d+_(pattern|reason|consequence)$')
+
 # ── Path helpers ──
 
 def _gdir(pdir: str | None = None) -> Path:
@@ -146,6 +181,19 @@ def _kv_to_tsv_row(data: dict[str, str]) -> str:
     def flat(key: str, default: str = "") -> str:
         return data.get(key, default).replace("\n", " ").strip()
 
+    # Clean principles: strip "- " prefix and inline comments
+    raw_principles = flat("principles")
+    cleaned = []
+    for p in raw_principles.split(","):
+        p = p.strip()
+        if p.startswith("- "):
+            p = p[2:].strip()
+        if " #" in p:
+            p = p[:p.index(" #")].strip()
+        if p:
+            cleaned.append(p)
+    principles_str = ", ".join(cleaned)
+
     return "\t".join([
         flat("id"),
         flat("severity", "1"),
@@ -156,7 +204,7 @@ def _kv_to_tsv_row(data: dict[str, str]) -> str:
         str(forbid_cnt),
         flat("rec_auto_fix", "false"),
         flat("rec_approach"),
-        flat("principles"),
+        principles_str,
         flat("doc_file"),
     ])
 
@@ -324,10 +372,79 @@ def cmd_add(
                 log_info("Cancelled. Files created but not indexed.")
                 return 0
 
+    # Validate principles references (non-draft only)
+    if not draft:
+        princs = [s.strip() for s in data.get("principles", "").split(",") if s.strip()]
+        if princs:
+            p_file = gdir / "principles.kv"
+            if p_file.exists():
+                known_principles = set()
+                for p in parse_principles(str(p_file)):
+                    known_principles.add(p.id)
+                unknown_princs = [p for p in princs if p not in known_principles]
+                if unknown_princs:
+                    log_fail(f"Unknown principle(s): {unknown_princs} "
+                             f"(valid: {sorted(known_principles)})")
+                    log_info("Available principles: " + ", ".join(sorted(known_principles)))
+                    return 1
+
     # In draft mode: do NOT write to index.tsv, do NOT validate
     if draft:
-        log_ok(f"Draft {eid} created (contributor: {agent_id}) — not indexed")
-        return 0
+        # Check if key fields were provided via --field
+        data = parse_kv_file(str(kv_path))
+        has_content = (
+            data.get("root_cause", "").strip() and
+            len(data.get("root_cause", "").strip()) > 20 and
+            data.get("error_signature", "").strip() and
+            "configure|cmake|meson" not in data.get("error_signature", "")
+        )
+
+        if has_content:
+            log_ok(f"Draft {eid} created with content (contributor: {agent_id}) — not indexed")
+            print(f"\n  ✅ 草稿已包含实质性内容（root_cause + error_signature 已填写）")
+            print(f"  📄 KV: {kv_path}")
+            print(f"  📄 MD: {md_path}")
+            print(f"  下一步: 继续编译流程或在 finish 前补充更多字段\n")
+            return 0
+        else:
+            log_ok(f"Draft {eid} created (contributor: {agent_id}) — EMPTY TEMPLATE")
+
+            # Emit HANDOFF block — this is a STRONG signal
+            print()
+            print("╔═══ ⚠️  DRAFT KNOWLEDGE HANDOFF — AI ACTION REQUIRED ═╗")
+            print(f"║ DRAFT_ID: {eid}")
+            print(f"║ KV_FILE: {kv_path}")
+            print(f"║ MD_FILE: {md_path}")
+            print(f"║ CONTRIBUTOR: {agent_id}")
+            print("║ STATUS: ❌ template EMPTY — must fill content before finish")
+            print("║")
+            print("║ ❗ finish 管线会拒绝空草稿！必须先填写内容！")
+            print("║")
+            print("║ 方式 A（推荐）: 直接写入文件")
+            print(f"║   使用 filemgr-editFile 编辑 {kv_path}")
+            print("║   必填字段:")
+            print("║     - error_signature: 典型错误日志正则（| 分隔）")
+            print("║     - root_cause: 根因分析（为什么会出现这个错误）")
+            print("║     - match_keywords: 检索关键词（逗号分隔）")
+            print("║     - rec_description: 推荐解决方案描述")
+            print("║     - rec_command: 一行修复命令")
+            print("║     - affected_scope: 受影响的软件范围")
+            print("║     - verification_cmd: 验证修复的命令")
+            print("║     - category: 分类标签")
+            print("║")
+            print("║ 方式 B: 重新创建时带 --field 参数")
+            print("║   python3 ohc-run.py graph add E090 --draft \\")
+            print("║     --field 'root_cause=实际根因' \\")
+            print("║     --field 'error_signature=实际正则' \\")
+            print("║     --field 'match_keywords=关键词列表'")
+            print("║")
+            print(f"║ MD 文件也需填写: {md_path}")
+            print("║")
+            print("║ ⚠️  不填写内容，finish 将失败！草稿会被主编审核拒绝！")
+            print("╚═════════════════════════════════════════════════════╝")
+            print()
+            # Return exit code 2 to signal "needs AI intervention"
+            return 2
 
     # Append to index.tsv
     _sync_index(eid, pdir)
@@ -401,7 +518,9 @@ def cmd_update(
             for p in parse_principles(str(p_file)):
                 known.add(p.id)
         if add_principle not in known:
-            log_warn(f"Principle {add_principle} not found in principles.kv")
+            log_fail(f"Principle {add_principle} not found in principles.kv")
+            log_info(f"Available: {', '.join(sorted(known))}")
+            return 1
         current = [s.strip() for s in _kv_get(kv_path, "principles").split(",") if s.strip()]
         if add_principle not in current:
             current.append(add_principle)
@@ -591,6 +710,29 @@ def cmd_validate(
     for k in sorted(only_kv):
         log_fail(f"[C1] {k}.kv exists but {k}.md missing")
         errors += 1
+        if fix:
+            # Auto-create missing .md skeleton
+            md_skeleton = f"""# {k} — [简短错误描述]
+
+## 错误特征
+[待补充]
+
+## 根因分析
+[待补充]
+
+## 解决方案
+[待补充]
+
+## 验证
+```bash
+[待补充]
+```
+"""
+            skeleton_path = docdir / f"{k}.md"
+            skeleton_path.parent.mkdir(parents=True, exist_ok=True)
+            skeleton_path.write_text(md_skeleton, encoding="utf-8")
+            log_info(f"[C1] Auto-created {skeleton_path}")
+            md_ids.add(k)
     for m in sorted(only_md):
         log_fail(f"[C1] {m}.md exists but {m}.kv missing")
         errors += 1
@@ -629,13 +771,62 @@ def cmd_validate(
     if verbose:
         log_ok(f"[C4] Required fields checked")
 
+    # Check 4.5: non-standard field names
+    for kvf in kv_files:
+        data = parse_kv_file(str(kvf))
+        unknown = set()
+        for key in data:
+            if key in _TEMPLATE_FIELDS or _FORBID_FIELD_RE.match(key):
+                continue
+            unknown.add(key)
+        if unknown:
+            log_fail(f"[C4.5] {kvf.stem}: non-standard fields: {sorted(unknown)}")
+            errors += 1
+            if fix:
+                # Auto-fix: rename 'doc' → 'doc_file'
+                if "doc" in unknown and "doc_file" not in data:
+                    lines = kvf.read_text(encoding="utf-8").split("\n")
+                    for i, line in enumerate(lines):
+                        if line.startswith("doc:") and not line.startswith("doc_file:"):
+                            lines[i] = "doc" + line[3:].replace("doc:", "doc_file:", 1)
+                            lines[i] = f"doc_file:{line[4:]}"
+                            break
+                    kvf.write_text("\n".join(lines), encoding="utf-8")
+                    log_info(f"[C4.5] {kvf.stem}: auto-renamed 'doc' → 'doc_file'")
+
+    # Check 4.6: 'doc' field alias (should be 'doc_file')
+    for kvf in kv_files:
+        data = parse_kv_file(str(kvf))
+        if "doc" in data and "doc_file" not in data:
+            log_fail(f"[C4.6] {kvf.stem}: uses 'doc' instead of standard 'doc_file'")
+            errors += 1
+            if fix:
+                _kv_set(kvf, "doc_file", data["doc"])
+                # Remove old 'doc' line
+                lines = kvf.read_text(encoding="utf-8").split("\n")
+                new_lines = [l for l in lines if not l.startswith("doc:") or l.startswith("doc_file:")]
+                kvf.write_text("\n".join(new_lines), encoding="utf-8")
+                log_info(f"[C4.6] {kvf.stem}: auto-fixed 'doc' → 'doc_file'")
+
     # Check 5: principles references
     known_principles = set()
     if principles_path.exists():
         for p in parse_principles(str(principles_path)):
             known_principles.add(p.id)
     for kvf in kv_files:
-        princs = [s.strip() for s in _kv_get(kvf, "principles").split(",") if s.strip()]
+        princs_raw = _kv_get(kvf, "principles")
+        # Strip inline comments (e.g., "- P-XXX  # reason")
+        princs = []
+        for s in princs_raw.split(","):
+            s = s.strip()
+            # Remove "- " prefix if present
+            if s.startswith("- "):
+                s = s[2:].strip()
+            # Remove inline comments
+            if " #" in s:
+                s = s[:s.index(" #")].strip()
+            if s:
+                princs.append(s)
         for p in princs:
             if p not in known_principles and known_principles:
                 log_fail(f"[C5] {kvf.stem}: unknown principle {p}")

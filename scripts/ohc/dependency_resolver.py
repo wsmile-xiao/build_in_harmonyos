@@ -1,20 +1,28 @@
 """依赖预编译包解析与安装。
 
-从 cmd-pkgs 仓库查询预编译包，自动安装编译所需的依赖软件。
+从 cmd-pkgs 仓库动态查询预编译包，自动安装编译所需的依赖软件。
+
+索引获取方式（按优先级）：
+  1. 本地缓存 .cmd-pkgs-cache.tsv
+  2. git clone --sparse 从 cmd-pkgs 仓库获取 README.md 解析
+  3. 内置最小索引（仅基础工具，作为离线 fallback）
 
 Usage:
     python3 ohc-run.py resolve-deps <software> [<version>]
     python3 ohc-run.py resolve-deps --install <software> [<version>]
     python3 ohc-run.py resolve-deps --list-available
+    python3 ohc-run.py resolve-deps --refresh
 """
 from __future__ import annotations
 
+import json
 import os
 import re
-import ssl
+import shutil
 import subprocess
 import sys
-import urllib.request
+import tempfile
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -22,58 +30,56 @@ from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 
 # ── Constants ──
 
-# cmd-pkgs 仓库的预编译包安装 URL 模板
+# cmd-pkgs 仓库的统一通用安装脚本 URL（托管在 pkgs release tag 下）
+# 用法: curl -fsSL <url> | sh -s -- <name> <version>
 _CMD_PKGS_INSTALL_URL = (
     "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/"
-    "releases/download/{name}/install.sh"
+    "releases/download/pkgs/install.sh"
 )
 
-# Python 有独立的安装源
-_PYTHON_INSTALL_URL = (
-    "https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/"
-    "releases/download/installer/install.sh"
-)
+# cmd-pkgs 仓库地址
+_CMD_PKGS_REPO = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs.git"
 
 # README 索引缓存路径（项目根目录下）
-_CACHE_FILE = ".cmd-pkgs-cache.tsv"
+_CACHE_FILE = ".cmd-pkgs-cache.json"
 
-# HarmonyOS 环境可能缺少 CA 证书
-_SSL_CTX = ssl.create_default_context()
-_SSL_CTX.check_hostname = False
-_SSL_CTX.verify_mode = ssl.CERT_NONE
+# 缓存有效期（秒）：4 小时
+_CACHE_TTL = 4 * 3600
 
 
 # ═══════════════════════════════════════════════════════
-# 预编译包索引（内置 + 可刷新）
+# 预编译包索引（动态 + 缓存 + 内置 fallback）
 # ═══════════════════════════════════════════════════════
 
-# 内置索引：从 cmd-pkgs README.md 提取的已知预编译包
-# 格式: name → (version, install_url_template)
-# special="python" 表示使用 python 专用安装源
+# 索引格式: name → {"ver": "x.y.z", "versions": ["x.y.z", ...], "install_script": "install.sh"}
+# 多版本软件会在 versions 列表中列出所有可用版本
 _BUILTIN_INDEX: dict[str, dict] = {
-    "pkg-config":  {"ver": "0.29.2", "source": "cmd-pkgs"},
-    "python":      {"ver": "3.12.9", "source": "python", "versions": ["3.9.0", "3.9.25", "3.12.9"]},
-    "sed":         {"ver": "4.9",    "source": "cmd-pkgs"},
-    "coreutils":   {"ver": "9.10",   "source": "cmd-pkgs"},
-    "gawk":        {"ver": "5.3.0",  "source": "cmd-pkgs"},
-    "automake":    {"ver": "1.16.5", "source": "cmd-pkgs"},
-    "libtool":     {"ver": "2.4.7",  "source": "cmd-pkgs"},
-    "zlib":        {"ver": "1.3.1",  "source": "cmd-pkgs"},
-    "bzip2":       {"ver": "1.0.8",  "source": "cmd-pkgs"},
-    "xz":          {"ver": "5.6.2",  "source": "cmd-pkgs"},
-    "gzip":        {"ver": "1.13",   "source": "cmd-pkgs"},
-    "openssl":     {"ver": "1.1.1w", "source": "cmd-pkgs"},
-    "libffi":      {"ver": "3.5.2",  "source": "cmd-pkgs"},
-    "ncurses":     {"ver": "6.4",    "source": "cmd-pkgs"},
-    "gdbm":        {"ver": "1.23",   "source": "cmd-pkgs"},
-    "readline":    {"ver": "8.2",    "source": "cmd-pkgs"},
-    "wget":        {"ver": "1.19.1", "source": "cmd-pkgs"},
-    "rsync":       {"ver": "3.3.0",  "source": "cmd-pkgs"},
-    "jq":          {"ver": "1.7.1",  "source": "cmd-pkgs"},
-    "tar":         {"ver": "1.35",   "source": "cmd-pkgs"},
-    "file":        {"ver": "5.45",   "source": "cmd-pkgs"},
-    "dos2unix":    {"ver": "7.5.4",  "source": "cmd-pkgs"},
+    "pkg-config":  {"ver": "0.29.2", "install_script": "install.sh"},
+    "python":      {"ver": "3.12.9", "versions": ["3.9.0", "3.9.25", "3.12.9"], "install_script": "install.sh"},
+    "sed":         {"ver": "4.9",    "install_script": "install.sh"},
+    "coreutils":   {"ver": "9.10",   "install_script": "install.sh"},
+    "gawk":        {"ver": "5.3.0",  "install_script": "install.sh"},
+    "automake":    {"ver": "1.16.5", "install_script": "install.sh"},
+    "libtool":     {"ver": "2.4.7",  "install_script": "install.sh"},
+    "zlib":        {"ver": "1.3.1",  "install_script": "install.sh"},
+    "bzip2":       {"ver": "1.0.8",  "install_script": "install.sh"},
+    "xz":          {"ver": "5.6.2",  "install_script": "install.sh"},
+    "gzip":        {"ver": "1.13",   "install_script": "install.sh"},
+    "openssl":     {"ver": "1.1.1w", "install_script": "install.sh"},
+    "libffi":      {"ver": "3.5.2",  "versions": ["3.4.4", "3.5.2"], "install_script": "install.sh"},
+    "ncurses":     {"ver": "6.4",    "install_script": "install.sh"},
+    "gdbm":        {"ver": "1.23",   "install_script": "install.sh"},
+    "readline":    {"ver": "8.2",    "install_script": "install.sh"},
+    "wget":        {"ver": "1.19.1", "install_script": "install.sh"},
+    "rsync":       {"ver": "3.3.0",  "install_script": "install.sh"},
+    "jq":          {"ver": "1.7.1",  "install_script": "install.sh"},
+    "tar":         {"ver": "1.35",   "install_script": "install.sh"},
+    "file":        {"ver": "5.45",   "install_script": "install.sh"},
+    "dos2unix":    {"ver": "7.5.4",  "install_script": "install.sh"},
 }
+
+# 运行时索引（初始化时从缓存/远程/内置加载）
+_runtime_index: dict[str, dict] | None = None
 
 
 # ═══════════════════════════════════════════════════════
@@ -119,34 +125,183 @@ _KNOWN_DEPS: dict[str, dict] = {
 # Core functions
 # ═══════════════════════════════════════════════════════
 
-def get_install_url(name: str) -> str | None:
-    """获取预编译包的安装命令 URL。
+def _get_index() -> dict[str, dict]:
+    """获取运行时索引（优先缓存 → 远程 → 内置 fallback）。"""
+    global _runtime_index
+    if _runtime_index is not None:
+        return _runtime_index
+
+    # 1. 尝试加载本地缓存
+    project_dir = Path(find_project_dir())
+    cache_path = project_dir / _CACHE_FILE
+    if cache_path.exists():
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            ts = data.get("_timestamp", "")
+            if ts:
+                age = (datetime.now() - datetime.fromisoformat(ts)).total_seconds()
+                if age < _CACHE_TTL:
+                    entries = {k: v for k, v in data.items() if not k.startswith("_")}
+                    _runtime_index = entries
+                    log_info(f"使用缓存索引 ({len(entries)} 个包，{int(age/60)} 分钟前)")
+                    return _runtime_index
+        except Exception:
+            pass
+
+    # 2. 尝试从远程刷新
+    rc = _fetch_remote_index()
+    if rc == 0 and _runtime_index:
+        return _runtime_index
+
+    # 3. 内置 fallback
+    _runtime_index = dict(_BUILTIN_INDEX)
+    log_warn(f"远程索引获取失败，使用内置索引 ({len(_runtime_index)} 个包)")
+    return _runtime_index
+
+
+def _fetch_remote_index() -> int:
+    """通过 git sparse-checkout 从 cmd-pkgs 仓库获取 README.md 并解析。
+
+    GitCode 的 raw URL 返回 JS SPA 页面，无法直接 curl 获取。
+    改用 git clone --sparse 只获取 README.md（浅克隆，约 1s）。
+    """
+    global _runtime_index
+
+    log_info("从 cmd-pkgs 仓库刷新预编译包索引...")
+
+    tmpdir = tempfile.mkdtemp(prefix="ohc-cmd-pkgs-")
+    try:
+        # git init + sparse-checkout 只拉 README.md
+        cmds = [
+            ["git", "init"],
+            ["git", "remote", "add", "origin", _CMD_PKGS_REPO],
+            ["git", "sparse-checkout", "init", "--cone"],
+            ["git", "sparse-checkout", "set", "README.md"],
+            ["git", "fetch", "--depth=1", "origin", "main"],
+            ["git", "checkout", "origin/main"],
+        ]
+        for cmd in cmds:
+            result = subprocess.run(cmd, cwd=tmpdir, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0 and "checkout" not in cmd[0]:
+                log_warn(f"  git 命令失败: {' '.join(cmd)}")
+                return 1
+
+        readme_path = Path(tmpdir) / "README.md"
+        if not readme_path.exists():
+            log_warn("  README.md 不存在")
+            return 1
+
+        content = readme_path.read_text(encoding="utf-8")
+        index = _parse_readme(content)
+
+        if not index:
+            log_warn("  README 解析失败，未找到有效包条目")
+            return 1
+
+        _runtime_index = index
+        _save_cache(index)
+        log_ok(f"远程索引刷新完成: {len(index)} 个包")
+        return 0
+
+    except subprocess.TimeoutExpired:
+        log_warn("  git clone 超时")
+        return 1
+    except Exception as e:
+        log_warn(f"  远程索引获取异常: {e}")
+        return 1
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def _parse_readme(content: str) -> dict[str, dict]:
+    """解析 README.md 的表格，提取预编译包索引。
+
+    支持的表格格式：
+    |软件|版本|安装命令|
 
     Returns:
-        install.sh 的 URL，或 None（如果没有预编译包）。
+        {name: {"ver": "最新版", "versions": [...], "install_script": "install.sh"}}
     """
-    info = _BUILTIN_INDEX.get(name)
+    index: dict[str, dict] = {}
+    for line in content.split("\n"):
+        line = line.strip()
+        if not line.startswith("|") or "curl" not in line or "install" not in line:
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) < 4:
+            continue
+        name = parts[1].strip()
+        ver = parts[2].strip()
+        cmd = parts[3].strip()
+        if not name or not ver or "curl" not in cmd:
+            continue
+
+        # 判断安装脚本类型
+        if "install-jdk.sh" in cmd:
+            install_script = "install-jdk.sh"
+        else:
+            install_script = "install.sh"
+
+        if name not in index:
+            index[name] = {
+                "ver": ver,
+                "versions": [ver],
+                "install_script": install_script,
+            }
+        else:
+            # 多版本：保持第一个遇到的为默认版本，追加到 versions
+            if ver not in index[name]["versions"]:
+                index[name]["versions"].append(ver)
+
+    return index
+
+
+def _save_cache(index: dict[str, dict]) -> None:
+    """保存索引到本地 JSON 缓存。"""
+    project_dir = Path(find_project_dir())
+    cache_path = project_dir / _CACHE_FILE
+    data = dict(index)
+    data["_timestamp"] = datetime.now().isoformat()
+    data["_source"] = "cmd-pkgs-remote"
+    cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# ═══════════════════════════════════════════════════════
+# Public API
+# ═══════════════════════════════════════════════════════
+
+def get_install_url(name: str) -> str | None:
+    """获取预编译包的安装命令 URL。"""
+    idx = _get_index()
+    info = idx.get(name)
     if not info:
         return None
-
-    source = info.get("source", "cmd-pkgs")
-    if source == "python":
-        return _PYTHON_INSTALL_URL
-    else:
-        return _CMD_PKGS_INSTALL_URL.format(name=name)
+    script = info.get("install_script", "install.sh")
+    base = _CMD_PKGS_INSTALL_URL.rsplit("/", 1)[0]
+    return f"{base}/{script}"
 
 
 def get_available_version(name: str) -> str | None:
-    """获取预编译包的可用版本。"""
-    info = _BUILTIN_INDEX.get(name)
+    """获取预编译包的默认版本。"""
+    idx = _get_index()
+    info = idx.get(name)
     if not info:
         return None
     return info.get("ver")
 
 
+def get_available_versions(name: str) -> list[str]:
+    """获取预编译包的所有可用版本。"""
+    idx = _get_index()
+    info = idx.get(name)
+    if not info:
+        return []
+    return info.get("versions", [info.get("ver", "")])
+
+
 def is_prebuilt_available(name: str) -> bool:
     """检查是否有预编译包可用。"""
-    return name in _BUILTIN_INDEX
+    return name in _get_index()
 
 
 def is_installed(name: str, prefix: str | None = None) -> bool:
@@ -216,17 +371,9 @@ def get_missing_deps(software: str, prefix: str | None = None) -> list[str]:
 
 
 def install_prebuilt(name: str, version: str = "", prefix: str | None = None) -> int:
-    """通过 curl | sh 安装预编译包。
-
-    Args:
-        name: 软件名称
-        version: 版本号（空则使用默认版本）
-        prefix: 安装路径
-
-    Returns:
-        0=成功, 1=失败
-    """
-    info = _BUILTIN_INDEX.get(name)
+    """通过 curl | sh 安装预编译包。"""
+    idx = _get_index()
+    info = idx.get(name)
     if not info:
         log_fail(f"无预编译包: {name}")
         return 1
@@ -242,9 +389,8 @@ def install_prebuilt(name: str, version: str = "", prefix: str | None = None) ->
     log_info(f"安装预编译包: {name} {version}")
     log_info(f"  来源: {install_url}")
 
-    # Build command
     install_prefix = prefix or os.path.expanduser("~/usr/local")
-    cmd = f'curl -fsSL "{install_url}" | sh -s -- {version}'
+    cmd = f'curl -fsSL "{install_url}" | sh -s -- {name} {version}'
 
     log_info(f"  执行: {cmd}")
 
@@ -265,7 +411,6 @@ def install_prebuilt(name: str, version: str = "", prefix: str | None = None) ->
         else:
             log_fail(f"  安装失败 (exit {result.returncode})")
             if result.stderr:
-                # Print last 5 lines of error
                 err_lines = result.stderr.strip().split("\n")[-5:]
                 for line in err_lines:
                     print(f"    {line}", file=sys.stderr)
@@ -340,75 +485,45 @@ def resolve_and_install(software: str, version: str = "",
 
 def list_available() -> None:
     """列出所有可用的预编译包。"""
-    print(f"\n  📦 可用预编译包 ({len(_BUILTIN_INDEX)} 个):\n")
+    idx = _get_index()
+    print(f"\n  📦 可用预编译包 ({len(idx)} 个):\n")
     print(f"  {'软件':<15} {'版本':<12} {'已安装':<8} {'安装命令'}")
     print(f"  {'─' * 80}")
 
     prefix = os.path.expanduser("~/usr/local")
 
-    for name in sorted(_BUILTIN_INDEX.keys()):
-        info = _BUILTIN_INDEX[name]
+    for name in sorted(idx.keys()):
+        info = idx[name]
         ver = info.get("ver", "?")
+        versions = info.get("versions", [])
         installed = "✅" if is_installed(name, prefix) else "❌"
         url = get_install_url(name)
-        print(f"  {name:<15} {ver:<12} {installed:<8} curl -fsSL {url} | sh -s -- {ver}")
+        ver_display = ver if len(versions) <= 1 else f"{ver} (+{len(versions)-1})"
+        print(f"  {name:<15} {ver_display:<12} {installed:<8} curl -fsSL {url} | sh -s -- {name} {ver}")
+        if len(versions) > 1:
+            for v in versions:
+                if v != ver:
+                    print(f"  {'':15} {v:<12} {'':8} curl -fsSL {url} | sh -s -- {name} {v}")
     print()
 
 
 # ═══════════════════════════════════════════════════════
-# Refresh index from remote README
+# Refresh index
 # ═══════════════════════════════════════════════════════
 
 def refresh_index(pdir: str | None = None) -> int:
-    """从 cmd-pkgs 仓库刷新预编译包索引。"""
+    """从 cmd-pkgs 仓库刷新预编译包索引（强制跳过缓存）。"""
+    global _runtime_index
+    _runtime_index = None  # 清除运行时缓存
+
+    # 清除本地缓存文件
     project_dir = Path(pdir or find_project_dir())
-
-    log_info("从 cmd-pkgs 仓库刷新预编译包索引...")
-
-    readme_url = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/-/raw/main/README.md"
-    try:
-        req = urllib.request.Request(readme_url, headers={"User-Agent": "ohc/1.0"})
-        try:
-            resp = urllib.request.urlopen(req, timeout=30)
-        except urllib.error.URLError:
-            resp = urllib.request.urlopen(req, timeout=30, context=_SSL_CTX)
-        content = resp.read().decode("utf-8", errors="replace")
-    except Exception as e:
-        log_warn(f"无法获取远程索引: {e}")
-        log_info("使用内置索引")
-        return 0
-
-    # Parse README table: |软件|版本|安装命令|
-    count = 0
-    for line in content.split("\n"):
-        line = line.strip()
-        if line.startswith("|") and "curl" in line and "install.sh" in line:
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) >= 4:
-                name = parts[1].strip()
-                ver = parts[2].strip()
-                cmd = parts[3].strip()
-                if name and ver and "curl" in cmd:
-                    # Determine source
-                    if "ohos-python-release" in cmd:
-                        source = "python"
-                    else:
-                        source = "cmd-pkgs"
-                    _BUILTIN_INDEX[name] = {"ver": ver, "source": source}
-                    count += 1
-
-    if count:
-        log_ok(f"刷新完成: {count} 个预编译包")
-
-    # Save cache
     cache_path = project_dir / _CACHE_FILE
-    lines = ["name\tversion\tsource"]
-    for name in sorted(_BUILTIN_INDEX.keys()):
-        info = _BUILTIN_INDEX[name]
-        lines.append(f"{name}\t{info.get('ver', '')}\t{info.get('source', 'cmd-pkgs')}")
-    cache_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    if cache_path.exists():
+        cache_path.unlink()
+        log_info("已清除本地缓存")
 
-    return 0
+    return _fetch_remote_index()
 
 
 # ═══════════════════════════════════════════════════════
