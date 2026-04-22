@@ -38,7 +38,7 @@ _TEMPLATE_FIELDS = {
     # Layer 0: Error Surface
     "id", "trigger_tool", "phase", "error_signature",
     # Layer 1: Recognition
-    "severity", "category", "match_keywords",
+    "severity", "category", "match_keywords", "title",
     # Layer 2: Diagnosis
     "root_cause", "affected_scope", "verification_cmd",
     # Layer 3: Solution (recommended)
@@ -50,6 +50,9 @@ _TEMPLATE_FIELDS = {
     # Layer 3: Solution (second fallback tier)
     "fallback_2_priority", "fallback_2_approach", "fallback_2_description",
     "fallback_2_command", "fallback_2_auto_fix", "fallback_2_impl",
+    # Layer 3: Solution (third fallback tier - extreme)
+    "fallback2_priority", "fallback2_approach", "fallback2_description",
+    "fallback2_command", "fallback2_auto_fix", "fallback2_impl",
     # Forbid rules (dynamic N)
     "forbid_1_pattern", "forbid_1_reason", "forbid_1_consequence",
     "forbid_2_pattern", "forbid_2_reason", "forbid_2_consequence",

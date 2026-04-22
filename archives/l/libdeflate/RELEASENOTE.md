@@ -18,7 +18,7 @@ cd libdeflate-1.25-ohos-aarch64 && sh install-libdeflate-1.25.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 669.1KB
+- 包大小: N/A
 
 ### 编译信息
 - 构建系统: autotools

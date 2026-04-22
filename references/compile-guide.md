@@ -363,7 +363,7 @@ AI 必须逐项自检：
 
 ---
 
-## 2.6 实时知识提取决策树
+## 2.6 实时知识提取决策树（⭐ R17 强制）
 
 每解决一个问题后，立即判断：
 
@@ -372,11 +372,69 @@ Q1: 此问题只与本软件有关？
     → 是：只记录到 PROGRESS.md
     → 否（其他软件也可能遇到）：
         Q2: 与平台机制相关？（musl/SELinux/文件系统/内核）
-            → 是：立即更新 knowledge/（L1 平台真理）
+            → 是：立即创建知识图谱草稿（L1 平台真理）
             → 否：是构建系统模式？（autotools/cmake 通用问题）
-                → 是：更新 knowledge/（L2 模式经验）
+                → 是：创建知识图谱草稿（L2 模式经验）
                 → 否：标记 "⏳ 待评估"（Phase 4 处理）
 ```
+
+### 创建草稿的完整流程
+
+```bash
+# Step 1: 先用引擎检查是否已有匹配条目
+python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志关键行"
+# → 如果输出匹配结果（如 "E007 (config.guess)"），直接复用方案
+# → 如果没有匹配，继续 Step 2
+
+# Step 2: 查找下一个可用 ID
+python3 $SKILL_ROOT/scripts/ohc-run.py graph add
+# → 输出 "下一个可用 ID: E096"
+
+# Step 3: 创建草稿（写到 draft/ 目录，不影响正式图谱）
+python3 $SKILL_ROOT/scripts/ohc-run.py graph add E096 --draft
+
+# Step 4: 填写关键字段（编辑 .kv 文件）
+# 必填：
+#   error_signature: 典型错误日志正则（| 分隔，如 "undefined reference to.*getpass|implicit declaration.*getpass"）
+#   root_cause: 根因分析（为什么会出现这个错误）
+#   match_keywords: 检索关键词（逗号分隔）
+#   category: 分类标签（如 libc-compat|musl, platform_detection|cmake）
+#   severity: 3=阻塞 / 2=中等 / 1=轻微
+#   title: 一句话描述（如 "musl 缺 getpass() GNU 扩展"）
+# 推荐：
+#   rec_description: 推荐解决方案描述
+#   rec_command: 一行修复命令
+#   affected_scope: 受影响的软件范围
+#   similar_to: 类似的已有条目（如 [E081, E085]）
+
+# Step 5: 补充 .md 文档（编辑 draft 中的 .md 文件）
+# 写入：错误特征、根因分析、解决方案、禁止做法、验证命令
+
+# Step 6: 在 PROGRESS.md 记录 "知识图谱草稿: E096"
+```
+
+### 常见分类标签
+
+| category | 含义 | 示例条目 |
+|----------|------|---------|
+| `libc-compat\|musl` | musl libc 兼容性 | E081, E085, E093 |
+| `platform_detection\|cmake` | CMake 平台检测 | E092 |
+| `platform_detection\|autotools` | autotools 平台检测 | E007, E072 |
+| `platform_detection\|meson` | Meson 平台检测 | E090 |
+| `toolchain\|custom-configure` | 自定义构建系统 | E095 |
+| `filesystem\|hmdfs` | HMDFS 文件系统限制 | E011, E018, E050 |
+| `security\|selinux` | SELinux 安全策略 | E009, E045, E046 |
+| `linkage\|rpath` | 动态链接/RPATH | E042, E073 |
+
+### 草稿位置
+
+```
+knowledge/graph/draft/
+├── E096-draft-A7F3.kv   # {E编号}-draft-{AgentID}.kv
+└── E096-draft-A7F3.md   # {E编号}-draft-{AgentID}.md
+```
+
+主编审核后用 `graph add E096` 合并到正式图谱。
 
 ---
 

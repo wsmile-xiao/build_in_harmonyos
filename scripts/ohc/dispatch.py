@@ -158,46 +158,46 @@ def generate_subtask_objective(
 
     letter = software[0].lower()
 
-    objective = f"""你是一个编译协作者，负责编译 {software} {version}。
+    objective = f"""你是 OpenHarmony 三方库编译协作者，负责**端到端**编译 {software} {version}。
 
-## 任务要求
+## 第一步：加载技能（必须，不可跳过）
 
-1. **加载技能**: 首先调用 LoadSkill 加载 openharmony-compile-agent 技能
-2. **执行完整编译流程**（模式 B — AI 手动编译）:
-   - init-build: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py init-build {software} {version}`
-   - 读取 .build-context-{software}-{version} 获取 BUILD_SRC_DIR 等变量
-   - 手动编译（configure/make/install），遇到错误先用 engine 匹配知识图谱
-   - ⚠️ **每次修改源文件后必须立即记录**: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py track-edit add {software} {version} <修改的文件路径>`
-   - track-edit scan: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py track-edit scan {software} {version}`
-   - verify: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py verify-build {software} {version}`
-   - package: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py package {software} {version}`
-   - 整理知识图谱（graph add --draft）
-   - check-knowledge-gap: 确保通过（会写 .knowledge-done 标记）
-   - finish: `python3 ${{SKILL_ROOT}}/scripts/ohc-run.py finish {software} {version} success`
-3. **铁律提醒**:
-   - ⛔ R20: configure --prefix 必须指向 $TEST_PREFIX（隔离目录），禁止 --prefix=$DEFAULT_PREFIX
-   - R19: 禁止手动 tar 打包，必须用 ohc-run.py package
-   - ⛔ R6: 只改源文件，每次修改后**必须** `track-edit add` 记录，否则 refresh-patch 会遗漏补丁
-   - R4: ncurses 必须 --without-shared
-   - R10: 临时文件用 $TMPDIR 不用 /tmp
-4. **已知问题**:
+调用 `LoadSkill` 加载 `openharmony-compile-agent` 技能。加载后你会获得完整的 SKILL.md，它是你执行编译的**唯一权威指南**。所有流程、铁律、命令格式、失败处理均以 SKILL.md 为准。
+
+## 第二步：按 SKILL.md 执行完整的模式 B 编译流程
+
+加载技能后，**严格遵循 SKILL.md §3 核心流程**，执行端到端编译：
+
+1. **init-build** → 下载/解压/骨架/依赖解析
+2. **AI 编译（Step 2）** → configure → make → make install DESTDIR → staging 验证 → make check → package → make install（不带 DESTDIR）→ 用户验证
+3. **finish（Step 3）** → refresh-patch → close-archive → verify-build → finalize-archive → check-knowledge-gap → gen_summary
+
+关键要求（详见 SKILL.md）：
+- 遇到错误时：先 `ohc-run.py engine "错误日志"` 匹配知识图谱（R12），再按匹配方案修复
+- 每次修改源文件后：必须 `track-edit add` 记录（R6）
+- R17 知识图谱草稿：遇到新错误模式（知识图谱无匹配），必须用 `graph add E{{N}} --draft` 创建草稿
+- 所有铁律（R1-R23）以 SKILL.md 中的描述为准
+
+## 软件信息
+- 软件: {software} {version}
+- 构建系统: {build_system}
+- 已知问题:
 {issues_text}
-5. **构建系统**: {build_system}
 
 ## 关键路径
-- 项目根目录: {project_root}
-- SKILL_ROOT: {project_root}
+- 项目根目录 / SKILL_ROOT: {project_root}
 - 源码目录: ~/tmp/builds/{software}-{version}.work
 - 归档目录: {project_root}/archives/{letter}/{software}/{version}/
 
 ## 完成标准
-- archives/{letter}/{software}/{version}/manifest.yaml 存在且 status=success
-- packaging/.packaged 标记存在
-- .knowledge-done 标记存在
-- finish 返回 0
+- finish 返回 0（manifest status=success, .packaged + .knowledge-done 标记存在）
+- 如有新错误模式 → knowledge/graph/draft/ 中有对应草稿
 
 ## 输出要求
-最后输出编译结果摘要：软件名、版本、状态、关键问题（如有）。
+编译结果摘要：
+1. 软件名、版本、最终状态（success/partial/failed）
+2. 遇到的关键问题及解决方式
+3. 创建的知识图谱草稿 ID（如有新发现）
 """
     return objective
 
