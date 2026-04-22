@@ -557,6 +557,15 @@ git add . && git commit -m "feat: batch compile ..." && git push
 - 项目根目录的 knowledge/（写草稿，不冲突）
 - ~/usr/local（安装前缀，package 时独立 tar.gz）
 
+**子任务知识提取职责（⭐ R17）**：
+子任务不仅是编译执行者，也是知识发现者。编译过程中遇到的每个新错误模式：
+1. 先用 `engine` 检查是否已有匹配条目
+2. 无匹配 → 用 `graph add E{N} --draft` 创建草稿到 `knowledge/graph/draft/`
+3. 草稿写入 `PROGRESS.md` 的知识提取记录
+4. 主任务从 draft/ 目录收集所有草稿，审核后合并到正式图谱
+
+`dispatch objective` 命令已内置此要求，生成的 objective 包含完整的 R17 草稿创建流程。
+
 ### 8.5 子命令一览
 
 | 子命令 | 说明 |
