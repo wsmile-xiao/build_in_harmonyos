@@ -12,22 +12,19 @@ cd lzip-1.26-ohos-aarch64 && sh install-lzip-1.26.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.26 | success | 1 |
+| 1.26 | success | 0 |
 
 ## 当前版本 (1.26) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: N/A
+- 包大小: 212.1KB
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 1
-
-### 补丁列表
-- 0001-Makefile.patch
+- 补丁数: 0
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64
