@@ -3,6 +3,11 @@
 > 鸿蒙 (OpenHarmony) 平台开源软件预编译框架
 > 版本: v7.2 (Python 全量实现 · 多 Agent 协作)
 
+快速部署引导，在鸿蒙终端命令行中执行以下命令：
+```
+curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/download/init/setup_wizard.sh | sh
+```
+
 ## 概述
 
 自动化编译、打包和分发开源软件到 HarmonyOS (OpenHarmony) aarch64 平台。
