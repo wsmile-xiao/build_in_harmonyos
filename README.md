@@ -5,7 +5,7 @@
 
 快速部署引导，在鸿蒙终端命令行中执行以下命令：
 ```
-curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/download/init/setup_wizard.sh | sh
+wget https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/download/init/setup_wizard.sh && chmod 777 ./setup_wizard.sh && ./setup_wizard.sh
 ```
 
 ## 概述
