@@ -1,19 +1,28 @@
-# zutils 1.16 — OpenHarmony 编译记录
+# zutils
 
-## 基本信息
-- 软件: zutils
-- 版本: 1.16
-- 构建系统: autotools
-- 目标: ohos-aarch64
+Utilities dealing with compressed files - transparently handle gzip, bzip2, lzip, and xz compressed files.
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 版本列表
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+| 版本 | 状态 | 日期 |
+|------|------|------|
+| 1.15 | partial | 2026-04-24 |
 
-## 已知限制
-<!-- 平台相关限制 -->
+## 工具列表
 
-## 功能验证
-<!-- 验证命令和结果 -->
+- zcat - 查看 gzip/bzip2/lzip/xz 压缩文件内容
+- zcmp - 比较 gzip/bzip2/lzip/xz 压缩文件
+- zdiff - 比较 gzip/bzip2/lzip/xz 压缩文件差异
+- zgrep - 在 gzip/bzip2/lzip/xz 压缩文件中搜索
+- zegrep - 在压缩文件中使用 egrep 搜索
+- zfgrep - 在压缩文件中使用 fgrep 搜索
+- ztest - 测试压缩文件完整性
+- zupdate - 将压缩文件更新到更好的压缩格式
+
+## 运行依赖
+
+- gzip, bzip2, lzip, xz
+
+## 官网
+
+https://savannah.gnu.org/projects/zutils/

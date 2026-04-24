@@ -1,8 +1,8 @@
-# bzip3 1.4.0 — OpenHarmony 编译记录
+# bzip3 1.5.3 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: bzip3
-- 版本: 1.4.0
+- 版本: 1.5.3
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

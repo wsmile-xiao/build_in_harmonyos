@@ -3,25 +3,25 @@
 ## 快速安装
 
 ```bash
-tar xzf lerc-2.2-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf lerc-4.0.0-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd lerc-2.2-ohos-aarch64 && sh install-lerc-2.2.sh
+cd lerc-4.0.0-ohos-aarch64 && sh install-lerc-4.0.0.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 2.2 | partial | 0 |
+| 4.0.0 | partial | 0 |
 
-## 当前版本 (2.2) 详情
+## 当前版本 (4.0.0) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 1.3MB
+- 包大小: 843.7KB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0

@@ -3,22 +3,22 @@
 ## 快速安装
 
 ```bash
-tar xzf lzlib-1.9-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf lzlib-1.15-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd lzlib-1.9-ohos-aarch64 && sh install-lzlib-1.9.sh
+cd lzlib-1.15-ohos-aarch64 && sh install-lzlib-1.15.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.9 | success | 0 |
+| 1.15 | partial | 0 |
 
-## 当前版本 (1.9) 详情
+## 当前版本 (1.15) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: N/A
+- 包大小: 127.5KB
 
 ### 编译信息
 - 构建系统: autotools

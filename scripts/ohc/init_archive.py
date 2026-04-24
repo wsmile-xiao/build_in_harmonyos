@@ -1,4 +1,6 @@
 """Create/restore compilation archive skeleton.
+
+⭐ D4 规则：必须使用 templates/ 目录的模板文件，禁止硬编码模板。
 """
 from __future__ import annotations
 import re
@@ -8,9 +10,89 @@ from pathlib import Path
 
 from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 
+# 模板目录路径（相对于 scripts/ohc/）
+TEMPLATES_DIR = Path(__file__).parent.parent.parent / "templates"
+
 
 def _sanitize(s: str) -> str:
     return re.sub(r'[^a-zA-Z0-9._+\-]', '', s)
+
+
+def _load_template(template_name: str, name: str, version: str, 
+                   date: str = None, build_system: str = "unknown",
+                   source_url: str = "") -> str:
+    """从 templates/ 目录加载模板并填充变量（⭐ D4 规则）
+    
+    Args:
+        template_name: 模板文件名（如 PROGRESS.md, README.md）
+        name: 软件名
+        version: 版本号
+        date: 日期（可选）
+        build_system: 构建系统（可选）
+        source_url: 源码 URL（可选）
+    
+    Returns:
+        填充后的模板内容
+    """
+    template_path = TEMPLATES_DIR / template_name
+    if not template_path.exists():
+        log_warn(f"模板文件不存在: {template_path}，使用默认骨架")
+        return _fallback_template(template_name, name, version, date, build_system)
+    
+    content = template_path.read_text(encoding="utf-8")
+    
+    # 替换所有占位符格式
+    replacements = {
+        "{软件名}": name,
+        "{{SOFTWARE_NAME}}": name,
+        "{版本号}": version,
+        "{{VERSION}}": version,
+        "{版本}": version,
+        "{构建系统}": build_system,
+        "{autotools/cmake/etc}": build_system,
+        "{下载链接}": source_url,
+        "{源码下载链接}": source_url,
+        "{日期}": date or datetime.now().strftime("%Y-%m-%d"),
+        "{{DATE}}": date or datetime.now().strftime("%Y-%m-%d"),
+        "YYYY-MM-DD": date or datetime.now().strftime("%Y-%m-%d"),
+    }
+    
+    for old, new in replacements.items():
+        content = content.replace(old, new)
+    
+    # 处理时间戳格式
+    content = re.sub(r'YYYY-MM-DD HH:MM:SS', 
+                     datetime.now().strftime("%Y-%m-%d %H:%M:%S"), content)
+    content = re.sub(r'YYYY-MM-DD HH:MM', 
+                     datetime.now().strftime("%Y-%m-%d %H:%M"), content)
+    
+    return content
+
+
+def _fallback_template(template_name: str, name: str, version: str,
+                       date: str, build_system: str) -> str:
+    """模板文件不存在时的降级骨架（仅作为后备）"""
+    if template_name == "PROGRESS.md":
+        return (f"# {name} {version} 编译进度\n\n"
+                f"**日期**: {date}\n**状态**: 🔄 编译中\n\n"
+                f"## 步骤记录\n\n"
+                f"| 步骤 | 状态 | 备注 |\n|------|------|------|\n"
+                f"| Step 1 init | ⏳ | |\n| Step 2 patches | ⏳ | |\n"
+                f"| Step 3 configure | ⏳ | |\n| Step 4 make | ⏳ | |\n"
+                f"| Step 5 install | ⏳ | |\n| Step 6 safety | ⏳ | |\n"
+                f"| Step 7 check | ⏳ | |\n| Step 8 staging | ⏳ | |\n"
+                f"| Step 9 package | ⏳ | |\n| Step 10 deploy | ⏳ | |\n"
+                f"| Step 11 finish | ⏳ | |\n\n"
+                f"## 发现与知识\n\n<!-- 编译过程中发现的问题和解决方案 -->\n")
+    elif template_name == "README.md":
+        return (f"# {name} {version} — OpenHarmony 编译记录\n\n"
+                f"## 基本信息\n- 软件: {name}\n- 版本: {version}\n"
+                f"- 构建系统: {build_system}\n- 目标: ohos-aarch64\n\n"
+                f"## 编译指导\n<!-- 编译注意事项 -->\n\n"
+                f"## 补丁清单\n<!-- patches/ 目录中的补丁说明 -->\n\n"
+                f"## 已知限制\n<!-- 平台相关限制 -->\n\n"
+                f"## 功能验证\n<!-- 验证命令和结果 -->\n")
+    return ""
 
 
 def init_archive(name: str, version: str, source_url: str = "",
@@ -52,21 +134,22 @@ def init_archive(name: str, version: str, source_url: str = "",
     else:
         log_ok("  manifest.yaml 已存在，保留")
 
-    # PROGRESS.md
+    # PROGRESS.md（⭐ D4: 使用 templates/PROGRESS.md）
     pf = ver_dir / "PROGRESS.md"
     if not pf.exists() or len(pf.read_text(encoding="utf-8").split("\n")) < 15:
         today = datetime.now().strftime("%Y-%m-%d")
-        content = _progress_template(name, version, today)
+        content = _load_template("PROGRESS.md", name, version, today, build_system, source_url)
         pf.write_text(content, encoding="utf-8")
-        log_ok("  PROGRESS.md 已生成")
+        log_ok("  PROGRESS.md 已生成（使用 templates/PROGRESS.md）")
     else:
         log_ok("  PROGRESS.md 已存在，保留")
 
-    # README.md
+    # README.md（⭐ D4: 使用 templates/README.md）
     rm = ver_dir / "README.md"
     if not rm.exists() or len(rm.read_text(encoding="utf-8").split("\n")) < 10:
-        rm.write_text(_readme_template(name, version, build_system), encoding="utf-8")
-        log_ok("  README.md 已生成")
+        content = _load_template("README.md", name, version, None, build_system, source_url)
+        rm.write_text(content, encoding="utf-8")
+        log_ok("  README.md 已生成（使用 templates/README.md）")
     else:
         log_ok("  README.md 已存在，保留")
 
@@ -111,28 +194,9 @@ def _manifest_template(name: str, version: str, bs: str, url: str) -> str:
     return t
 
 
-def _progress_template(name: str, version: str, date: str) -> str:
-    return (f"# {name} {version} 编译进度\n\n"
-            f"**日期**: {date}\n**状态**: 🔄 编译中\n\n"
-            f"## 步骤记录\n\n"
-            f"| 步骤 | 状态 | 备注 |\n|------|------|------|\n"
-            f"| Step 1 init | ⏳ | |\n| Step 2 patches | ⏳ | |\n"
-            f"| Step 3 configure | ⏳ | |\n| Step 4 make | ⏳ | |\n"
-            f"| Step 5 install | ⏳ | |\n| Step 6 safety | ⏳ | |\n"
-            f"| Step 7 check | ⏳ | |\n| Step 8 staging | ⏳ | |\n"
-            f"| Step 9 package | ⏳ | |\n| Step 10 deploy | ⏳ | |\n"
-            f"| Step 11 finish | ⏳ | |\n\n"
-            f"## 发现与知识\n\n<!-- 编译过程中发现的问题和解决方案 -->\n")
-
-
-def _readme_template(name: str, version: str, bs: str) -> str:
-    return (f"# {name} {version} — OpenHarmony 编译记录\n\n"
-            f"## 基本信息\n- 软件: {name}\n- 版本: {version}\n"
-            f"- 构建系统: {bs}\n- 目标: ohos-aarch64\n\n"
-            f"## 编译指导\n<!-- 编译注意事项 -->\n\n"
-            f"## 补丁清单\n<!-- patches/ 目录中的补丁说明 -->\n\n"
-            f"## 已知限制\n<!-- 平台相关限制 -->\n\n"
-            f"## 功能验证\n<!-- 验证命令和结果 -->\n")
+# ⭐ D4 规则：_progress_template 和 _readme_template 已废弃
+# 现在使用 _load_template() 从 templates/ 目录加载模板
+# 保留 _fallback_template() 作为后备（模板文件不存在时）
 
 
 def init_archive_cli(argv: list[str] | None = None) -> int:

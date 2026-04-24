@@ -12,19 +12,23 @@ cd liblzf-3.6-ohos-aarch64 && sh install-liblzf-3.6.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 3.6 | partial | 0 |
+| 3.6 | partial | 2 |
 
 ## 当前版本 (3.6) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 216.1KB
+- 包大小: 121.6KB
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 0
+- 补丁数: 2
+
+### 补丁列表
+- 0001-Makefile.patch
+- 0002-config.h.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

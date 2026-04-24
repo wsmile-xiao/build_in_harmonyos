@@ -122,6 +122,12 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
         else:
             log_info("G0: 无补丁")
         
+        # Ensure configure script is executable (patch doesn't preserve mode)
+        configure_script = src_dir / "configure"
+        if configure_script.exists():
+            configure_script.chmod(0o755)
+            log_info("G0: 设置 configure 可执行权限")
+        
         # Step 3: Configure
         log_info("G0: 运行 configure...")
         full_cmd = f"{configure_cmd} --prefix={default_prefix} {configure_options}"
@@ -133,6 +139,11 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
         g0_env["LD_LIBRARY_PATH"] = f"{default_prefix}/lib:{g0_env.get('LD_LIBRARY_PATH', '')}"
         g0_env["PCRE2_CFLAGS"] = f"-I{default_prefix}/include"
         g0_env["PCRE2_LIBS"] = f"-L{default_prefix}/lib -lpcre2-8"
+        # Ensure CC/CXX are set for Makefile projects
+        if "CC" not in g0_env:
+            g0_env["CC"] = "clang"
+        if "CXX" not in g0_env:
+            g0_env["CXX"] = "clang++"
         with open(log_file, "w") as lf:
             r = subprocess.run(
                 full_cmd, shell=True,
@@ -150,13 +161,22 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
         # Step 4: Make
         log_info("G0: 运行 make...")
         log_file = tmpdir / "g0-make.log"
+        # Run make with proper output capture
+        r = subprocess.run(
+            ["make", "-j1"],
+            cwd=str(src_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=g0_env,
+            timeout=1800,  # 30 minutes for make
+            check=False
+        )
+        # Write output to log file
         with open(log_file, "w") as lf:
-            r = subprocess.run(
-                ["make", "-j1"],
-                cwd=str(src_dir), stdout=lf, stderr=subprocess.STDOUT,
-                env=g0_env,
-                timeout=1800  # 30 minutes for make
-            )
+            lf.write(r.stdout.decode("utf-8", errors="replace"))
+        # Print to console for debugging
+        if r.stdout:
+            print(r.stdout.decode("utf-8", errors="replace"), flush=True)
         if r.returncode != 0:
             log_fail(f"G0: make 失败 (exit {r.returncode})")
             _emit_handoff("make", str(log_file), src_dir, tmpdir)
@@ -199,10 +219,15 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
             encoding="utf-8"
         )
         log_ok("✅ G0 干净构建验证通过")
+        shutil.rmtree(tmpdir, ignore_errors=True)
         return 0
         
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    except Exception as e:
+        log_fail(f"G0: 异常: {e}")
+        print(f"[DEBUG] 保留临时目录: {tmpdir}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
 
 def _emit_handoff(failed_step: str, error_ref: str, src_dir: Path, tmpdir: Path):
@@ -214,6 +239,7 @@ def _emit_handoff(failed_step: str, error_ref: str, src_dir: Path, tmpdir: Path)
 ║ FAILED_STEP: {failed_step:<37}║
 ║ ERROR_REF: {error_ref:<37}║
 ║ SRC_DIR: {str(src_dir):<37}║
+║ TMPDIR: {str(tmpdir):<37} (保留用于调试)          ║
 ║ AI NEXT ACTIONS:                                 ║
 ║   1. 读取错误日志，诊断根因                        ║
 ║   2. 修复补丁或 hints                            ║

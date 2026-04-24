@@ -21,7 +21,7 @@ cd libdeflate-1.25-ohos-aarch64 && sh install-libdeflate-1.25.sh
 - 包大小: N/A
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0

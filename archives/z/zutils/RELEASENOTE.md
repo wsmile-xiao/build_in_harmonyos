@@ -3,27 +3,27 @@
 ## 快速安装
 
 ```bash
-tar xzf zutils-1.16-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf zutils-1.15-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd zutils-1.16-ohos-aarch64 && sh install-zutils-1.16.sh
+cd zutils-1.15-ohos-aarch64 && sh install-zutils-1.15.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.16 | partial | 0 |
+| 1.15 | partial | 0 |
 
-## 当前版本 (1.16) 详情
+## 当前版本 (1.15) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 869.7KB
+- 包大小: 10.0KB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: unknown
 - 目标: ohos-aarch64
-- 质量门禁: PASS
+- 质量门禁: FAIL-WARN
 - 补丁数: 0
 
 ## 环境要求

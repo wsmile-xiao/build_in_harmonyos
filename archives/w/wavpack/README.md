@@ -1,8 +1,8 @@
-# wavpack 5.7.0 — OpenHarmony 编译记录
+# wavpack 5.8.1 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: wavpack
-- 版本: 5.7.0
+- 版本: 5.8.1
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

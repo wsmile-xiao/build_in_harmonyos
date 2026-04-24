@@ -1,8 +1,8 @@
-# zstd 1.5.6 — OpenHarmony 编译记录
+# zstd 1.5.7 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: zstd
-- 版本: 1.5.6
+- 版本: 1.5.7
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

@@ -1,8 +1,8 @@
-# 7zip 23.01 — OpenHarmony 编译记录
+# 7zip 25.01 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: 7zip
-- 版本: 23.01
+- 版本: 25.01
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

@@ -12,23 +12,22 @@ cd lzo-2.10-ohos-aarch64 && sh install-lzo-2.10.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 2.10 | success | 2 |
+| 2.10 | partial | 1 |
 
 ## 当前版本 (2.10) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: N/A
+- 包大小: 861.2KB
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 2
+- 补丁数: 1
 
 ### 补丁列表
-- 0001-autoconf-config.guess.patch
-- 0002-autoconf-config.sub.patch
+- 0001-CMakeLists.txt.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

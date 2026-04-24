@@ -18,7 +18,7 @@ cd jbig2dec-0.20-ohos-aarch64 && sh install-jbig2dec-0.20.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 536.1KB
+- 包大小: 676.6KB
 
 ### 编译信息
 - 构建系统: autotools

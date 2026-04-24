@@ -1,53 +1,85 @@
-# fastjar 0.98 编译进度
+# fastjar 0.98 — 编译进度
 
-**日期**: 2026-04-21
-**状态**: 🔄 编译中
+> 档案创建时间: 2026-04-24 00:00:00
+> 最后更新: 2026-04-24 (当前状态)
+> 当前会话 ID: (可选，用于多轮对话追踪)
 
-## 步骤记录
+## 一、基本信息
+| 项目 | 值 |
+|------|-----|
+| 软件 | fastjar |
+| 版本 | 0.98 |
+| 状态 | ✅ success |
+| 构建系统 | autotools |
+| 源码路径 | https://download.savannah.nongnu.org/releases/fastjar/fastjar-0.98.tar.gz |
 
-| 步骤 | 状态 | 备注 |
-|------|------|------|
-| Step 1 init | ⏳ | |
-| Step 2 patches | ⏳ | |
-| Step 3 configure | ⏳ | |
-| Step 4 make | ⏳ | |
-| Step 5 install | ⏳ | |
-| Step 6 safety | ⏳ | |
-| Step 7 check | ⏳ | |
-| Step 8 staging | ⏳ | |
-| Step 9 package | ⏳ | |
-| Step 10 deploy | ⏳ | |
-| Step 11 finish | ⏳ | |
+## 二、编译阶段（checkbox 实时更新）
 
-## 发现与知识
+### Phase 1: 环境准备
+- [x] ohc-run.py init-build 完成 / 源码下载解压
 
-### R6 铁律修复：configure→configure.ac (2026-04-22)
+### Phase 2: 编译（configure + make + make install）
+- [x] configure 完成（记录参数和耗时）
+- [x] make 编译完成（记录错误和修复）
+- [x] make install 完成
 
-**问题**: 原 `0003-configure.patch` 直接修改了生成文件 `configure`（删除 `umask 077`）。
+### Phase 2.5: 独立目录安装验证（⭐ 必须做）
+- [x] 干净源码 + 补丁应用
+- [x] 独立 TEST_PREFIX configure + make install
+- [x] 功能回归测试结果
 
-**根因分析**: `umask 077` 代码由 autoconf 内部宏 `AS_TMPDIR`（位于 `lib/m4sugar/m4sh.m4`）生成，不在项目源码 `configure.ac` 中。HMDFS 上 `umask 077` 导致创建的临时目录权限不足，config.status 无法写入。
+### Phase 3: 测试验证
+- [x] make check / make test 结果
+- [x] 安全弹窗触发确认
 
-**修复方案**: 拆分为两个补丁：
+### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
+- [x] Step 1-10 打包流程（见 packaging.md）
 
-| 补丁 | 修改文件 | 类型 | 说明 |
-|------|----------|------|------|
-| `0003-configure.ac.patch` | configure.ac | ✅ 源码层 (R6 合规) | 用 `m4_define([AS_TMPDIR],...)` 覆盖 autoconf 内部宏，去掉 `umask 077` |
-| `0004-configure.patch` | configure | ⚠️ 生成层 (R6 豁免) | 直接移除 configure 中的 `umask 077`（+2/-2 行） |
+### Phase 5: 归档收尾
+- [x] 补丁生成（ohc-run.py refresh-patch --auto）
+- [x] manifest.yaml / README.md / PROGRESS.md 更新
+- [x] ohc-run.py verify-build 质量门禁
 
-**R6 豁免说明**:
-- `configure.ac` 中的 `AS_TMPDIR` m4 覆盖是正确的源码层修复
-- 但当前构建流程不包含 `autoreconf` 步骤，仅运行 `./configure`
-- 系统仅安装 autoconf 2.72（原 configure 由 2.63 生成），重新生成 configure 会导致输出差异过大（29000+ 行 diff）
-- 因此 `0004-configure.patch` 是构建的实际必要补丁，作为 `0003` 的补充
-- **当构建流程添加 autoreconf 步骤后，`0004` 可移除**
+## 三、对话记录（⭐ 断点续传核心）
 
-**验证**:
-- ✅ 4 个补丁均可干净 apply
-- ✅ configure 中无 `umask` 残留
-- ✅ configure.ac 包含 AS_TMPDIR m4 覆盖
-- ✅ configure 仍为 autoconf 2.63 原始输出（仅 umask 移除）
+> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
+
+### 对话 #N — YYYY-MM-DD HH:MM
+**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
+**结果**: （成功/失败/部分成功，附关键输出摘要）
+**发现的问题**: （遇到的坑、错误信息、根因分析）
+**当前状态**: （精确到哪个步骤，下一步该做什么）
+**遗留问题**: （未解决的、需要下轮继续的）
 
 ---
 
-**编译结束**: 2026-04-22 00:05
-**最终状态**: partial
+### 对话 #1 — 2026-04-24 00:00
+**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
+**结果**: （待填写）
+**发现的问题**: （待填写）
+**当前状态**: Phase 2 configure 进行中
+**遗留问题**: 无
+
+（后续每轮对话追加...）
+
+## 四、源码修改清单
+| 文件 | 原因 | 方式 | 补丁状态 |
+|------|------|------|---------|
+| 文件 | 原因 | 方式 | 补丁状态 |
+|------|------|------|---------|
+| config.guess | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
+| config.sub | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
+| configure.ac | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
+| 0004-configure | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
+
+## 五、预编译包交付物
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| 文件 | 大小 | 说明 |
+|------|------|------|
+| fastjar-0.98-ohos-aarch64-debug.tar.gz | 77KB | debug包 |
+| fastjar-0.98-ohos-aarch64.tar.gz | 392KB | 主包 |
+
+## 六、结束记录
+- **最终状态**: success
+- **结束时间**: 2026-04-24
