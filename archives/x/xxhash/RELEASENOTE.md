@@ -18,10 +18,10 @@ cd xxhash-0.8.3-ohos-aarch64 && sh install-xxhash-0.8.3.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 521.1KB
+- 包大小: 544.1KB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: make
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0
