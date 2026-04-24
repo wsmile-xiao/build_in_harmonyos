@@ -18,10 +18,10 @@ cd libjpeg-turbo-3.1.4.1-ohos-aarch64 && sh install-libjpeg-turbo-3.1.4.1.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 5.8MB
+- 包大小: 4.4MB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0

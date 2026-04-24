@@ -1,8 +1,8 @@
-# icu 74.2 — OpenHarmony 编译记录
+# sed 4.10 — OpenHarmony 编译记录
 
 ## 基本信息
-- 软件: icu
-- 版本: 74.2
+- 软件: sed
+- 版本: 4.10
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

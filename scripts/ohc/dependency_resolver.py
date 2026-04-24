@@ -2,10 +2,8 @@
 
 从 cmd-pkgs 仓库动态查询预编译包，自动安装编译所需的依赖软件。
 
-索引获取方式（按优先级）：
-  1. 本地缓存 .cmd-pkgs-cache.tsv
-  2. git clone --sparse 从 cmd-pkgs 仓库获取 README.md 解析
-  3. 内置最小索引（仅基础工具，作为离线 fallback）
+⭐ R18 铁律：预编译包优先，禁止本地缓存。
+索引获取方式：每次都从 cmd-pkgs README（远程）获取，不使用本地缓存。
 
 Usage:
     python3 ohc-run.py resolve-deps <software> [<version>]
@@ -40,19 +38,18 @@ _CMD_PKGS_INSTALL_URL = (
 # cmd-pkgs 仓库地址
 _CMD_PKGS_REPO = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs.git"
 
-# README 索引缓存路径（项目根目录下）
-_CACHE_FILE = ".cmd-pkgs-cache.json"
-
-# 缓存有效期（秒）：4 小时
-_CACHE_TTL = 4 * 3600
+# cmd-pkgs README.md 的 raw URL（通过 git sparse checkout 获取）
+_CMD_PKGS_README_RAW = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/raw/main/README.md"
 
 
 # ═══════════════════════════════════════════════════════
-# 预编译包索引（动态 + 缓存 + 内置 fallback）
+# 预编译包索引（强制远程获取，禁止本地缓存）
 # ═══════════════════════════════════════════════════════
 
 # 索引格式: name → {"ver": "x.y.z", "versions": ["x.y.z", ...], "install_script": "install.sh"}
 # 多版本软件会在 versions 列表中列出所有可用版本
+
+# 内置最小索引（仅作为离线 fallback，网络完全不可达时使用）
 _BUILTIN_INDEX: dict[str, dict] = {
     "pkg-config":  {"ver": "0.29.2", "install_script": "install.sh"},
     "python":      {"ver": "3.12.9", "versions": ["3.9.0", "3.9.25", "3.12.9"], "install_script": "install.sh"},
@@ -78,47 +75,8 @@ _BUILTIN_INDEX: dict[str, dict] = {
     "dos2unix":    {"ver": "7.5.4",  "install_script": "install.sh"},
 }
 
-# 运行时索引（初始化时从缓存/远程/内置加载）
+# 运行时索引（初始化时从远程强制获取）
 _runtime_index: dict[str, dict] | None = None
-
-
-# ═══════════════════════════════════════════════════════
-# 依赖声明（software-registry.yaml 中的 dependencies）
-# ═══════════════════════════════════════════════════════
-
-# 各软件的已知依赖（从实际编译经验总结）
-# 格式: software → {"required": [...], "optional": [...]}
-_KNOWN_DEPS: dict[str, dict] = {
-    "pkg-config":   {"required": [], "optional": []},
-    "sed":          {"required": [], "optional": []},
-    "coreutils":    {"required": [], "optional": []},
-    "gawk":         {"required": [], "optional": []},
-    "automake":     {"required": ["autoconf"], "optional": []},
-    "libtool":      {"required": ["automake"], "optional": []},
-    "zlib":         {"required": [], "optional": []},
-    "bzip2":        {"required": [], "optional": []},
-    "xz":           {"required": [], "optional": []},
-    "gzip":         {"required": [], "optional": []},
-    "openssl":      {"required": ["zlib"], "optional": []},
-    "ncurses":      {"required": [], "optional": []},
-    "libffi":       {"required": [], "optional": []},
-    "gdbm":         {"required": [], "optional": []},
-    "readline":     {"required": ["ncurses"], "optional": []},
-    "wget":         {"required": ["openssl"], "optional": []},
-    "rsync":        {"required": [], "optional": []},
-    "jq":           {"required": [], "optional": []},
-    "tar":          {"required": [], "optional": []},
-    "file":         {"required": [], "optional": []},
-    "dos2unix":     {"required": [], "optional": []},
-    "bash":         {"required": ["ncurses", "readline"], "optional": []},
-    "htop":         {"required": ["ncurses"], "optional": []},
-    "strace":       {"required": [], "optional": []},
-    "python":       {"required": ["openssl", "zlib", "libffi", "ncurses", "readline", "gdbm", "xz", "bzip2"], "optional": []},
-    "man-db":       {"required": ["gdbm", "libpipeline"], "optional": []},
-    "texinfo":      {"required": [], "optional": []},
-    "help2man":     {"required": [], "optional": []},
-    "libpipeline":  {"required": [], "optional": []},
-}
 
 
 # ═══════════════════════════════════════════════════════
@@ -126,36 +84,25 @@ _KNOWN_DEPS: dict[str, dict] = {
 # ═══════════════════════════════════════════════════════
 
 def _get_index() -> dict[str, dict]:
-    """获取运行时索引（优先缓存 → 远程 → 内置 fallback）。"""
+    """获取运行时索引（强制远程获取，禁止本地缓存）。
+    
+    ⭐ R18 铁律：预编译包列表必须从远程获取最新版本，
+    不能使用本地缓存（避免版本过时、遗漏新增包）。
+    """
     global _runtime_index
     if _runtime_index is not None:
         return _runtime_index
 
-    # 1. 尝试加载本地缓存
-    project_dir = Path(find_project_dir())
-    cache_path = project_dir / _CACHE_FILE
-    if cache_path.exists():
-        try:
-            data = json.loads(cache_path.read_text(encoding="utf-8"))
-            ts = data.get("_timestamp", "")
-            if ts:
-                age = (datetime.now() - datetime.fromisoformat(ts)).total_seconds()
-                if age < _CACHE_TTL:
-                    entries = {k: v for k, v in data.items() if not k.startswith("_")}
-                    _runtime_index = entries
-                    log_info(f"使用缓存索引 ({len(entries)} 个包，{int(age/60)} 分钟前)")
-                    return _runtime_index
-        except Exception:
-            pass
-
-    # 2. 尝试从远程刷新
+    # 1. 强制从远程获取（不走缓存）
+    log_info("从 cmd-pkgs 仓库获取预编译包索引（远程）...")
     rc = _fetch_remote_index()
     if rc == 0 and _runtime_index:
         return _runtime_index
 
-    # 3. 内置 fallback
+    # 2. 远程失败时使用内置 fallback（仅网络完全不可达时）
     _runtime_index = dict(_BUILTIN_INDEX)
-    log_warn(f"远程索引获取失败，使用内置索引 ({len(_runtime_index)} 个包)")
+    log_warn(f"远程索引获取失败，使用内置 fallback ({len(_runtime_index)} 个包)")
+    log_warn("  ⚠️ 内置索引可能过时，请检查网络连接后重试 --refresh")
     return _runtime_index
 
 
@@ -164,10 +111,10 @@ def _fetch_remote_index() -> int:
 
     GitCode 的 raw URL 返回 JS SPA 页面，无法直接 curl 获取。
     改用 git clone --sparse 只获取 README.md（浅克隆，约 1s）。
+    
+    ⭐ 不保存本地缓存（R18 铁律），每次调用都从远程获取最新数据。
     """
     global _runtime_index
-
-    log_info("从 cmd-pkgs 仓库刷新预编译包索引...")
 
     tmpdir = tempfile.mkdtemp(prefix="ohc-cmd-pkgs-")
     try:
@@ -199,8 +146,8 @@ def _fetch_remote_index() -> int:
             return 1
 
         _runtime_index = index
-        _save_cache(index)
-        log_ok(f"远程索引刷新完成: {len(index)} 个包")
+        # ⭐ 不保存缓存（R18 铁律）
+        log_ok(f"远程索引获取完成: {len(index)} 个包")
         return 0
 
     except subprocess.TimeoutExpired:
@@ -256,14 +203,43 @@ def _parse_readme(content: str) -> dict[str, dict]:
     return index
 
 
-def _save_cache(index: dict[str, dict]) -> None:
-    """保存索引到本地 JSON 缓存。"""
-    project_dir = Path(find_project_dir())
-    cache_path = project_dir / _CACHE_FILE
-    data = dict(index)
-    data["_timestamp"] = datetime.now().isoformat()
-    data["_source"] = "cmd-pkgs-remote"
-    cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+# ═══════════════════════════════════════════════════════
+# 依赖声明（software-registry.yaml 中的 dependencies）
+# ═══════════════════════════════════════════════════════
+
+# 各软件的已知依赖（从实际编译经验总结）
+# 格式: software → {"required": [...], "optional": [...]}
+_KNOWN_DEPS: dict[str, dict] = {
+    "pkg-config":   {"required": [], "optional": []},
+    "sed":          {"required": [], "optional": []},
+    "coreutils":    {"required": [], "optional": []},
+    "gawk":         {"required": [], "optional": []},
+    "automake":     {"required": ["autoconf"], "optional": []},
+    "libtool":      {"required": ["automake"], "optional": []},
+    "zlib":         {"required": [], "optional": []},
+    "bzip2":        {"required": [], "optional": []},
+    "xz":           {"required": [], "optional": []},
+    "gzip":         {"required": [], "optional": []},
+    "openssl":      {"required": ["zlib"], "optional": []},
+    "ncurses":      {"required": [], "optional": []},
+    "libffi":       {"required": [], "optional": []},
+    "gdbm":         {"required": [], "optional": []},
+    "readline":     {"required": ["ncurses"], "optional": []},
+    "wget":         {"required": ["openssl"], "optional": []},
+    "rsync":        {"required": [], "optional": []},
+    "jq":           {"required": [], "optional": []},
+    "tar":          {"required": [], "optional": []},
+    "file":         {"required": [], "optional": []},
+    "dos2unix":     {"required": [], "optional": []},
+    "bash":         {"required": ["ncurses", "readline"], "optional": []},
+    "htop":         {"required": ["ncurses"], "optional": []},
+    "strace":       {"required": [], "optional": []},
+    "python":       {"required": ["openssl", "zlib", "libffi", "ncurses", "readline", "gdbm", "xz", "bzip2"], "optional": []},
+    "man-db":       {"required": ["gdbm", "libpipeline"], "optional": []},
+    "texinfo":      {"required": [], "optional": []},
+    "help2man":     {"required": [], "optional": []},
+    "libpipeline":  {"required": [], "optional": []},
+}
 
 
 # ═══════════════════════════════════════════════════════
@@ -512,17 +488,14 @@ def list_available() -> None:
 # ═══════════════════════════════════════════════════════
 
 def refresh_index(pdir: str | None = None) -> int:
-    """从 cmd-pkgs 仓库刷新预编译包索引（强制跳过缓存）。"""
+    """从 cmd-pkgs 仓库刷新预编译包索引（强制重新获取）。
+    
+    ⭐ R18 铁律：不保存本地缓存，每次调用都从远程获取最新数据。
+    """
     global _runtime_index
     _runtime_index = None  # 清除运行时缓存
 
-    # 清除本地缓存文件
-    project_dir = Path(pdir or find_project_dir())
-    cache_path = project_dir / _CACHE_FILE
-    if cache_path.exists():
-        cache_path.unlink()
-        log_info("已清除本地缓存")
-
+    log_info("强制刷新预编译包索引（从远程获取最新数据）...")
     return _fetch_remote_index()
 
 

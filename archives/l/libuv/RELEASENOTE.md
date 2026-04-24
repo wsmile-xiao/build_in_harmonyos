@@ -22,7 +22,7 @@ cd libuv-1.52.1-ohos-aarch64 && sh install-libuv-1.52.1.sh
 - 包大小: 882.7KB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 4

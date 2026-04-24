@@ -88,7 +88,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-### 1.2 铁律摘要（23 条，违反=bug）
+### 1.2 铁律摘要（25 条，违反=bug）
 
 | # | 规则 | 一句话 | 详解 |
 |---|------|--------|------|
@@ -115,6 +115,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R21 | **Phase 3 结束必须自检零介入** | 按 §2.4.1 清单逐项检查，所有手动操作已固化 | 不自检就调 finish |
 | R22 | **finish 前必须通过干净构建验证** | `ohc-run.py clean-verify` G0 门禁通过 | G0 FAIL 仍标 success |
 | R23 | **平台检测机制优先于改生成文件** | 用 hints/config.guess/cmake 检查 | 手动 sed config.sh/config.h |
+| R24 | **归档清理：failed必删，空归档删** | 无产物无补丁的归档无价值 | §6 归档清理规则 |
+| R25 | **PROGRESS.md 防重复：先删后写** | finish 自动清理旧记录，只保留最后一次 | §3 Step 3.1 |
 
 ### 1.3 决策树
 
@@ -124,17 +126,43 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ├─ 有 URL → ohc-run.py init-build <name> <ver> --url=URL          （自动注册）
 └─ 都没有 → ohc-run.py search-url <name> <ver>           → 从候选选 URL
 
-缺依赖？
-├─ 有预编译包 → ohc-run.py resolve-deps --install <name>         （自动安装）
-├─ 无预编译包 → 查 dependencies.md 编译顺序 → 先编依赖
-└─ 不确定 → ohc-run.py resolve-deps --list-available             （查看可用包）
+缺依赖？（⭐ 运行时发现优先）
+├─ 从 cmd-pkgs README 查询预编译包 → curl 远程获取最新列表
+│   ├─ 有预编译包 → curl install.sh | sh -s -- <name> <ver>（优先安装，避免重编译）
+│   └─ 无预编译包 → 查 dependencies.md 编译顺序 → 先编依赖
+└─ 依赖类型识别：
+    ├─ 构建工具缺失（automake/libtool/pkg-config等）→ 优先预编译包
+    ├─ 库依赖缺失（zlib/openssl/ncurses等）→ 优先预编译包
+    ├─ 命令差异（GNU sed vs toybox sed）→ 优先预编译包（GNU版本功能更强）
+    └─ 特殊依赖（无预编译包）→ 手动编译
 
 configure 失败？
-├─ 缺依赖 → 查 dependencies.md 编译顺序 → 先编依赖
+├─ 缺依赖 → 输出 HANDOFF → AI 查 cmd-pkgs README → 安装预编译包 → --resume-from=Step3
 ├─ 平台不识别 → 改 config.guess/sub（build-systems.md §3.1）
 ├─ conftest pipe → configure 中 `| cat` 修复
 └─ 其他 → 引擎匹配 graph/index.tsv → 按 E 编号查找
 ```
+
+> **⭐ R18 强化：预编译包优先原则**
+> 
+> 编译过程中发现的任何依赖缺失，**必须先查 cmd-pkgs README**（https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/blob/main/README.md）。
+> 
+> **原因**：
+> 1. 预编译包已通过 ELF 签名，可直接执行
+> 2. 预编译包已处理平台适配（config.guess、umask等）
+> 3. 避免编译链过长浪费时间
+> 4. 本地编译可能引入新问题
+>
+> **只有以下情况才手动编译依赖**：
+> - cmd-pkgs 中没有该软件的预编译包
+> - 需要特定版本（预编译包版本不兼容）
+> - 需要特殊编译选项（预编译包不支持）
+>
+> **software.tsv 的作用**：
+> - 已有存档的软件可预填依赖信息
+> - **但不能阻塞运行时依赖发现**
+> - 新软件的依赖在 configure/make 时动态发现
+> - 脚本捕获缺失依赖 → HANDOFF → AI 安装 → 继续
 
 ---
 
@@ -172,7 +200,26 @@ $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=URL] [--
 
 内部 **9 步**：registry 查询 → URL 确定 → 下载 → 解压 → 历史检索 → 骨架创建 → **依赖解析** → 环境检查 → 输出 `.build-context-<name>-<ver>`。
 
-> **Step 7 依赖解析（新）**：自动检查编译所需的依赖是否已安装。如果有预编译包可用（来自 [cmd-pkgs](https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/blob/main/README.md)），自动安装。无预编译包的依赖会发出警告。
+> **Step 7 依赖解析（运行时发现优先）**：
+> 
+> 依赖发现的**核心时机是 configure 执行时**，而非 init-build 静态阶段。
+> 
+> **静态阶段（init-build）**：
+> - 查 `software.tsv`（如有）→ 预填已知依赖
+> - 无记录 → 不阻塞，继续到运行时发现
+> 
+> **运行时阶段（configure/make）**：
+> 1. configure 输出 `checking for xxx... no` 或 `Package 'xxx' not found`
+> 2. 脚本捕获 → 输出 HANDOFF（EXIT_REASON: dependency_missing）
+> 3. AI 读取 HANDOFF → 查 cmd-pkgs README（远程）
+> 4. 有预编译包 → `curl install.sh | sh -s -- <name> <ver>` 安装
+> 5. 无预编译包 → 查 dependencies.md 编译顺序 → 子任务编译
+> 6. `--resume-from=Step3` 继续编译
+> 
+> **预编译包列表来源**：
+> - **远程**：https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/blob/main/README.md
+> - **命令**：`python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --list-available --refresh`
+> - **禁止本地缓存**：每次都从远程获取最新列表
 
 **关键输出变量**：`BUILD_SOFTWARE`, `BUILD_VERSION`, `BUILD_SYSTEM`, `BUILD_SRC_DIR`, `BUILD_ARCHIVE_DIR`, `DEFAULT_PREFIX`（唯一权威安装前缀）。
 
@@ -222,11 +269,17 @@ cd $BUILD_SRC_DIR
 ```
 ╔═══ HANDOFF ══════════════════════════════════╗
 ║ EXIT_REASON: configure_failed                ║
+║                | dependency_missing ⭐ 新增  ║
+║                | build_tool_missing ⭐ 新增  ║
 ║ EXIT_CODE: 2 (resumable) / 1 (fatal)         ║
 ║ STEP_FAILED: Step3                           ║
 ║ RESUME_CMD: python3 $SKILL_ROOT/scripts/ohc-run.py build ... --resume-from=Step3
 ║ KNOWLEDGE_HIT: E007 (config.guess) / none    ║
 ║ KNOWLEDGE_GAP: true/false                    ║
+║ MISSING_DEPENDENCY: <软件名> ⭐ 新增字段      ║
+║ MISSING_VERSION: <所需版本> ⭐ 新增字段       ║
+║ DEPENDENCY_TYPE: library|tool|command ⭐新增 ║
+║ PRECOMPILED_AVAILABLE: yes/no ⭐ 新增字段    ║
 ║ LOG_FILE: <日志路径>                          ║
 ║ SRC_DIR: <源码路径>                           ║
 ║ TASK_CARD: <任务卡路径>                       ║
@@ -234,6 +287,34 @@ cd $BUILD_SRC_DIR
 ║   1. 具体操作                                 ║
 ║   2. 运行 RESUME_CMD 继续                     ║
 ╚══════════════════════════════════════════════╝
+```
+
+**EXIT_REASON 类型说明**：
+
+| EXIT_REASON | 含义 | AI 操作 |
+|-------------|------|--------|
+| `configure_failed` | configure 脚本失败（非依赖） | 匹配知识图谱 → 修复 → resume |
+| `dependency_missing` ⭐ | 缺少库依赖（如 zlib/openssl） | 查 cmd-pkgs README → 安装预编译包 → resume |
+| `build_tool_missing` ⭐ | 缺少构建工具（如 automake/libtool） | 查 cmd-pkgs README → 安装预编译包 → resume |
+| `command_mismatch` | 命令行为差异（如 toybox sed） | 安装 GNU 版本预编译包 → resume |
+
+**dependency_missing 处理流程**：
+
+```
+收到 HANDOFF（EXIT_REASON: dependency_missing）
+  │
+  ├─ PRECOMPILED_AVAILABLE: yes
+  │   │
+  │   ├─ curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- <name> <ver>
+  │   ├─ 验证安装: pkg-config --modversion <name> 或 <name> --version
+  │   └─ 运行 RESUME_CMD 继续
+  │
+  └─ PRECOMPILED_AVAILABLE: no
+      │
+      ├─ 查 dependencies.md 编译顺序
+      ├─ 创建子任务编译依赖（createSubTask）
+      ├─ 等待子任务完成（waitSubTask）
+      └─ 运行 RESUME_CMD 继续
 ```
 
 **恢复编译时的规则**：
@@ -285,6 +366,25 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|faile
 **前置条件**：P1=test-report 存在, P2=Staging 验证完成, P3=预编译包已制作。
 
 **状态值**：`success`（全通过）| `partial`（部分失败可分发）| `failed`（编译失败）。verify 通过升级状态，失败降级。
+
+#### Step 3.1: close-archive 自动清理（⭐ R25）
+
+> **PROGRESS.md 防重复规则**：`close-archive` 脚本在写入编译结束记录前，**自动清理所有旧记录**。
+
+```python
+# close_archive.py 第 70-85 行
+# 先删除所有旧的编译结束块，再写入新记录
+pattern = r'\n---\n\n\*\*编译结束\*\*:.*?\n\*\*最终状态\*\*:.*?\n'
+pcontent_new = re.sub(pattern, '', pcontent, flags=re.DOTALL)
+pcontent_new = pcontent_new.rstrip() + append_text
+```
+
+**原因**：
+- 多次 finish（如修复后重跑）会产生重复记录
+- 重复记录导致 PROGRESS.md 混乱，无法判断最终状态
+- 自动清理确保每个软件只有一条最新的编译结束记录
+
+**工具约束**：脚本自动执行，无需手动干预。
 
 ### Step 4: 质量门禁复查（可选）
 
@@ -457,6 +557,59 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, patches/, reports/, packa
 
 按 `software-registry.yaml` 中的 category 分阶段编译，基础顺序: pkg-config → sed/coreutils/gawk → automake/libtool → ...（详见 knowledge/operations/dependencies.md）
 
+### 归档清理规则（⭐ R24 新增）
+
+> **核心原则**：归档是知识沉淀，不是废纸堆。无价值的归档应及时清理。
+
+**状态判定标准**：
+
+| 状态 | 定义 | 产物 | 补丁 | 知识 | 处理 |
+|------|------|------|------|------|------|
+| **success** | 编译成功，产物可用 | ✅ 有 | 可能有 | 有 | 保留（核心资产） |
+| **partial** | 部分成功，可分发 | ✅ 有 | 有 | 有 | 保留（有价值） |
+| **partial** | 仅骨架，无产物 | ❌ 无 | ❌ 无 | ❌ 无 | ⚠️ 清理（空归档） |
+| **failed** | 编译失败，无产物 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 删除（无价值） |
+| **compiling** | 进行中，未完成 | ❌ 无 | ❌ 无 | ❌ 无 | ⚠️ 清理（旧状态） |
+
+**清理操作**：
+
+```bash
+# 1. 删除 failed 状态的归档（无产物无知识）
+rm -rf archives/{letter}/{软件}/{版本}/
+
+# 2. 删除 partial 但无产物的空归档
+#    判断：manifest.yaml status=partial + 无 tar.gz + 无 .patch
+find archives -name "manifest.yaml" -exec grep -l "status: partial" {} \; | while read m; do
+    dir=$(dirname "$m")
+    pkg_count=$(ls "$dir/packaging/*.tar.gz" 2>/dev/null | wc -l)
+    patch_count=$(ls "$dir/patches/*.patch" 2>/dev/null | wc -l)
+    if [ "$pkg_count" -eq 0 ] && [ "$patch_count" -eq 0 ]; then
+        rm -rf "$dir"
+    fi
+done
+
+# 3. 更新有产物的 partial 为 success
+sed -i 's/^status: partial$/status: success/' archives/{letter}/{软件}/{版本}/manifest.yaml
+
+# 4. 清理多版本中的无用版本（保留最新成功版本）
+#    判断：同一软件有多版本，旧版本 partial/compiling 且无产物
+rm -rf archives/{letter}/{软件}/{旧版本}/
+```
+
+**多版本处理策略**：
+
+| 场景 | 处理 |
+|------|------|
+| 同软件多版本都 success | 全部保留（用户可能需要不同版本） |
+| 最新版本 success，旧版本 partial | 清理旧版本（无价值） |
+| 最新版本 failed，旧版本 success | 清理最新版本，保留旧版本 |
+| 多版本都 partial 无产物 | 全部清理（空归档） |
+
+**清理时机**：
+- finish 时自动检查：status=failed → 警告并建议删除
+- 定期审计（主编职责）：扫描空归档、清理废弃版本
+- PR 合并前：协作者自检，确保无 failed/partial 空归档提交
+
 ---
 
 ## §7 Gotchas（鸿蒙关键陷阱）
@@ -613,4 +766,4 @@ git add . && git commit -m "feat: batch compile ..." && git push
 
 ---
 
-*SKILL.md v7.4 — 2026-04-13 — 新增 §8 多任务模式（dispatch 调度系统）*
+*SKILL.md v7.7 — 2026-04-24 — PROGRESS.md 防重复（R25）、工具自动清理旧记录*

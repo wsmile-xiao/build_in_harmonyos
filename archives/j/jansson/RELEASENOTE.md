@@ -19,7 +19,7 @@ cd jansson-2.15.0-ohos-aarch64 && sh install-jansson-2.15.0.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 187.0KB
+- 包大小: 190.0KB
 
 ### 编译信息
 - 构建系统: autotools
