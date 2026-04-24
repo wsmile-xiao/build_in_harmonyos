@@ -43,13 +43,18 @@
 - **L1 平台真理**: OHOS 缺少 Linux mmsg API（可写入 knowledge/operations/platform-gaps.md）
 - **L2 构建模式**: libuv 编译需要修改 CMakeLists.txt 添加 HarmonyOS 平台识别
 
----
-
-**编译结束**: 2026-04-21 23:50
-**最终状态**: partial（缺少 test-report.md）
 
 ## 产物信息
 - 预编译包: libuv-1.52.1-ohos-aarch64.tar.gz (802KB)
 - 调试符号包: libuv-1.52.1-ohos-aarch64-debug.tar.gz (81KB)
 - 安装脚本: install-libuv-1.52.1.sh
 - 补丁数量: 4 个
+
+---
+
+**编译结束**: 2026-04-24 00:30
+**最终状态**: partial
+
+---
+
+**编译结束**: 202

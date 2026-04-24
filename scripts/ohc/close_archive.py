@@ -68,12 +68,23 @@ def close_archive(name: str, version: str, status: str,
         meta.write_text(mc, encoding="utf-8")
         log_ok("  _meta.yaml 已更新")
 
-    # Step 3: Update PROGRESS.md
+    # Step 3: Update PROGRESS.md (⭐ R25: 防止重复记录)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    # 先读取现有内容，检查是否有旧的编译结束记录
+    pcontent = progress.read_text(encoding="utf-8")
+    
+    # 删除所有旧的编译结束块（---\n\n**编译结束**:...\n**最终状态**:...\n）
+    # 使用正则表达式匹配并删除
+    pattern = r'\n---\n\n\*\*编译结束\*\*:.*?\n\*\*最终状态\*\*:.*?\n'
+    pcontent_new = re.sub(pattern, '', pcontent, flags=re.DOTALL)
+    
+    # 在末尾添加新的编译结束记录
     append_text = f"\n---\n\n**编译结束**: {ts}\n**最终状态**: {status}\n"
-    with open(progress, "a", encoding="utf-8") as f:
-        f.write(append_text)
-    log_ok("  PROGRESS.md 已更新")
+    pcontent_new = pcontent_new.rstrip() + append_text
+    
+    progress.write_text(pcontent_new, encoding="utf-8")
+    log_ok("  PROGRESS.md 已更新（已清理旧记录）")
 
     # Step 5: Check pending items
     pcontent = progress.read_text(encoding="utf-8")

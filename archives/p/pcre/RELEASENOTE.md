@@ -18,7 +18,7 @@ cd pcre-8.45-ohos-aarch64 && sh install-pcre-8.45.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 2.0MB
+- 包大小: N/A
 
 ### 编译信息
 - 构建系统: autotools

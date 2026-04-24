@@ -27,10 +27,6 @@
 - HMDFS 软链接问题：打包时 symlinks 读取受限，需手动处理
 - clang `-print-multi-os-directory` 不支持（非致命，不影响构建）
 
----
-
-**编译结束**: 2026-04-21 14:10
-**最终状态**: success
 
 ---
 

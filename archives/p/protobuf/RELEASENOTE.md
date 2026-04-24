@@ -21,7 +21,7 @@ cd protobuf-34.1-ohos-aarch64 && sh install-protobuf-34.1.sh
 - 包大小: 57.8MB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0

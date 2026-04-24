@@ -164,9 +164,49 @@ def generate_subtask_objective(
 
 调用 `LoadSkill` 加载 `openharmony-compile-agent` 技能。加载后你会获得完整的 SKILL.md，它是你执行编译的**唯一权威指南**。所有流程、铁律、命令格式、失败处理均以 SKILL.md 为准。
 
-## 第二步：按 SKILL.md 执行完整的模式 B 编译流程
+## 第二步：⭐ 前置依赖检查与安装（优先预编译包）
 
-加载技能后，**严格遵循 SKILL.md §3 核心流程**，执行端到端编译：
+> **R18 铁律**：任何依赖缺失，**必须优先从 cmd-pkgs 安装预编译包**，避免重编译。
+
+执行 init-build 后，在 configure 之前：
+
+1. **检查构建工具是否可用**（automake, libtool, pkg-config, sed, gawk 等）：
+   ```bash
+   # 检查关键工具
+   which automake libtool pkg-config sed gawk 2>/dev/null
+   
+   # 如果缺失，立即安装预编译包：
+   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- automake 1.16.5
+   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- libtool 2.4.7
+   ```
+
+2. **检查库依赖是否可用**（通过 pkg-config 或 ls）：
+   ```bash
+   # 检查常见库依赖
+   pkg-config --modversion zlib openssl ncurses readline libffi 2>/dev/null
+   
+   # 或直接检查库文件
+   ls ~/usr/local/lib/lib*.a ~/usr/local/lib/lib*.so 2>/dev/null | head -20
+   
+   # 如果缺失，立即安装预编译包：
+   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- zlib 1.3.1
+   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- openssl 1.1.1w
+   ```
+
+3. **收到 HANDOFF (dependency_missing) 时**：
+   - 从 cmd-pkgs README 查询预编译包列表（远程获取）
+   - 有预编译包 → 安装 → `--resume-from=Step3` 继续
+   - 无预编译包 → 查 dependencies.md → 创建子任务编译依赖
+
+**预编译包列表获取**：
+```bash
+# 从远程获取最新列表（禁止使用本地缓存）
+curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/raw/main/README.md | grep -E "^\\|[^|]+\\|" | head -50
+```
+
+## 第三步：按 SKILL.md 执行完整的模式 B 编译流程
+
+加载技能并安装依赖后，**严格遵循 SKILL.md §3 核心流程**，执行端到端编译：
 
 1. **init-build** → 下载/解压/骨架/依赖解析
 2. **AI 编译（Step 2）** → configure → make → make install DESTDIR → staging 验证 → make check → package → make install（不带 DESTDIR）→ 用户验证
@@ -197,7 +237,8 @@ def generate_subtask_objective(
 编译结果摘要：
 1. 软件名、版本、最终状态（success/partial/failed）
 2. 遇到的关键问题及解决方式
-3. 创建的知识图谱草稿 ID（如有新发现）
+3. 安装的预编译依赖包列表（如有）
+4. 创建的知识图谱草稿 ID（如有新发现）
 """
     return objective
 

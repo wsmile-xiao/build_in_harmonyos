@@ -59,10 +59,6 @@
 4. Perl regex warnings (unescaped braces) are non-fatal and cosmetic only
 5. Test suite selftest fails due to HMDFS execution restrictions (non-blocking)
 
----
-
-**编译结束**: 2026-04-17 14:49
-**最终状态**: partial
 
 ---
 

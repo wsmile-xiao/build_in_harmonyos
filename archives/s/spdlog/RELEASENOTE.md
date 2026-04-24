@@ -21,7 +21,7 @@ cd spdlog-1.17.0-ohos-aarch64 && sh install-spdlog-1.17.0.sh
 - 包大小: 2.3MB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0

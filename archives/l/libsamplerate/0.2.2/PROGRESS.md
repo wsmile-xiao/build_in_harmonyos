@@ -249,10 +249,6 @@ ar archive
 | 内容 | 库文件、头文件、安装脚本 |
 | 安装脚本 | install-libsamplerate-0.2.2.sh |
 
----
-
-**编译结束**: 2026-04-20 23:04  
-**最终状态**: ✅ success  
 **归档路径**: archives/l/libsamplerate/0.2.2/
 ---
 

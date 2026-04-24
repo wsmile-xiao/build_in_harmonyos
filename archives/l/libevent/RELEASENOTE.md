@@ -12,19 +12,23 @@ cd libevent-2.1.12-stable-ohos-aarch64 && sh install-libevent-2.1.12-stable.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 2.1.12-stable | partial | 0 |
+| 2.1.12-stable | partial | 2 |
 
 ## 当前版本 (2.1.12-stable) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: N/A
+- 包大小: 1.6MB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 0
+- 补丁数: 2
+
+### 补丁列表
+- 0001-config.guess.patch
+- 0002-config.sub.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64
