@@ -1,8 +1,8 @@
-# gsm 1.0.22 — OpenHarmony 编译记录
+# gsm 1.0.23 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: gsm
-- 版本: 1.0.22
+- 版本: 1.0.23
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

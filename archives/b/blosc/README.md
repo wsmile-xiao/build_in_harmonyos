@@ -1,8 +1,8 @@
-# blosc 1.21.5 — OpenHarmony 编译记录
+# blosc 1.21.6 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: blosc
-- 版本: 1.21.5
+- 版本: 1.21.6
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

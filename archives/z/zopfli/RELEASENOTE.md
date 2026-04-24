@@ -18,16 +18,16 @@ cd zopfli-1.0.3-ohos-aarch64 && sh install-zopfli-1.0.3.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 1.4MB
+- 包大小: 1.5MB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: makefile
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 1
 
 ### 补丁列表
-- 0001-CMakeLists.txt.patch
+- 0001-Makefile.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

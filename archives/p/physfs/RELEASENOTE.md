@@ -18,7 +18,7 @@ cd physfs-3.2.0-ohos-aarch64 && sh install-physfs-3.2.0.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 722.2KB
+- 包大小: 836.2KB
 
 ### 编译信息
 - 构建系统: autotools

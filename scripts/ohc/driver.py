@@ -163,6 +163,33 @@ class BuildDriver:
                 break
         tc.write_text("\n".join(lines), encoding="utf-8")
 
+    def _emit_checkpoint(self, step: str, step_name: str, doc_actions: list[str]) -> None:
+        """⭐ D8 规则：成功阶段后提醒 AI 更新文档。
+        
+        输出 CHECKPOINT 块（类似 HANDOFF 但用于成功阶段），
+        提醒 AI 在 PROGRESS.md 和 README.md 中记录此阶段的操作。
+        """
+        lines = [
+            "",
+            "╔═══ 📝 CHECKPOINT — 文档更新提醒 ═══════════════════╗",
+            f"║ STEP: {step} ({step_name})",
+            f"║ SOFTWARE: {self.software} {self.version}",
+            f"║ ARCHIVE_DIR: {self.archive_dir}",
+            "║",
+            "║ ⭐ D8 规则要求：此阶段完成后必须更新文档",
+            "║",
+            "║ 文档更新要求:",
+        ]
+        for action in doc_actions:
+            lines.append(f"║   - {action}")
+        lines += [
+            "║",
+            "║ 提醒：这些记录是断点续传的关键，请勿跳过！",
+            "╚══════════════════════════════════════════════════╝",
+            "",
+        ]
+        print("\n".join(lines), file=sys.stdout)
+
     # ── Engine & Handoff ──
 
     def _run_engine(self, log_file: Path | None = None, tail: int = 50) -> bool:
@@ -568,6 +595,13 @@ class BuildDriver:
                 actions=["手动确认构建系统并配置", "运行 RESUME_CMD 继续"])
 
         self._task_card_update("3", "✅完成", f"{self.build_system} OK")
+        
+        # ⭐ D8 规则：configure 完成后提醒更新文档
+        self._emit_checkpoint("Step3", "configure", [
+            "PROGRESS.md: 在对话记录部分写入 configure 参数和耗时",
+            "PROGRESS.md: 更新 Phase 2 checkbox 为完成",
+            f"configure 参数: {self._actual_configure_cmd or '自动检测'}",
+        ])
 
     # ── Step 4: make ──
 
@@ -599,6 +633,12 @@ class BuildDriver:
 
         self._error_recovery("make", 4, do_make, do_retry)
         self._task_card_update("4", "✅完成", "make OK")
+        
+        # ⭐ D8 规则：make 完成后提醒更新文档
+        self._emit_checkpoint("Step4", "make", [
+            "PROGRESS.md: 在对话记录部分写入编译结果和遇到的问题",
+            "README.md: 如有补丁应用，在补丁说明部分记录用途",
+        ])
 
     # ── Step 5: install ──
 
@@ -645,6 +685,13 @@ class BuildDriver:
 
         self._task_card_update("5", "✅完成", f"bin={bin_count} lib={lib_count}")
         self._log(f"✅ 安装完成: bin={bin_count} lib={lib_count} (staging: {sp})")
+        
+        # ⭐ D8 规则：install 完成后提醒更新文档
+        self._emit_checkpoint("Step5", "install", [
+            "PROGRESS.md: 更新 Phase 2.5 checkbox 为完成",
+            "PROGRESS.md: 在源码修改清单部分记录安装文件",
+            "README.md: 如遇到问题已解决，在遇到的问题部分记录解决方案",
+        ])
 
     # ── Step 6: safety popup ──
 

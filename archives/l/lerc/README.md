@@ -1,8 +1,8 @@
-# lerc 2.2 — OpenHarmony 编译记录
+# lerc 4.0.0 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: lerc
-- 版本: 2.2
+- 版本: 4.0.0
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

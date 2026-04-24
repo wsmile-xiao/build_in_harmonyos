@@ -3,22 +3,22 @@
 ## 快速安装
 
 ```bash
-tar xzf brotli-1.1.0-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf brotli-1.2.0-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd brotli-1.1.0-ohos-aarch64 && sh install-brotli-1.1.0.sh
+cd brotli-1.2.0-ohos-aarch64 && sh install-brotli-1.2.0.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.1.0 | success | 0 |
+| 1.2.0 | partial | 0 |
 
-## 当前版本 (1.1.0) 详情
+## 当前版本 (1.2.0) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: N/A
+- 包大小: 1.3MB
 
 ### 编译信息
 - 构建系统: autotools

@@ -18,7 +18,7 @@ cd pax-20240817-ohos-aarch64 && sh install-pax-20240817.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 725.6KB
+- 包大小: 713.6KB
 
 ### 编译信息
 - 构建系统: autotools

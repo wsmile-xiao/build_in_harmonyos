@@ -3,22 +3,22 @@
 ## 快速安装
 
 ```bash
-tar xzf zstd-1.5.6-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf zstd-1.5.7-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd zstd-1.5.6-ohos-aarch64 && sh install-zstd-1.5.6.sh
+cd zstd-1.5.7-ohos-aarch64 && sh install-zstd-1.5.7.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.5.6 | success | 0 |
+| 1.5.7 | partial | 0 |
 
-## 当前版本 (1.5.6) 详情
+## 当前版本 (1.5.7) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 2.6MB
+- 包大小: 2.3MB
 
 ### 编译信息
 - 构建系统: autotools

@@ -1,9 +1,9 @@
-# brotli 1.1.0 — OpenHarmony 编译记录
+# brotli 1.2.0 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: brotli
-- 版本: 1.1.0
-- 构建系统: custom
+- 版本: 1.2.0
+- 构建系统: autotools
 - 目标: ohos-aarch64
 
 ## 编译指导

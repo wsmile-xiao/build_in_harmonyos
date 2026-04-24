@@ -3,28 +3,31 @@
 ## 快速安装
 
 ```bash
-tar xzf ciso-1.0-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf ciso-1.0.0-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd ciso-1.0-ohos-aarch64 && sh install-ciso-1.0.sh
+cd ciso-1.0.0-ohos-aarch64 && sh install-ciso-1.0.0.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.0 | success | 0 |
+| 1.0.0 | partial | 1 |
 
-## 当前版本 (1.0) 详情
+## 当前版本 (1.0.0) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 191.1KB
+- 包大小: 107.1KB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: makefile
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 0
+- 补丁数: 1
+
+### 补丁列表
+- 0001-Makefile.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

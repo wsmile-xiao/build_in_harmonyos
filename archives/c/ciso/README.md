@@ -1,8 +1,8 @@
-# ciso 1.0 — OpenHarmony 编译记录
+# ciso 1.0.0 — OpenHarmony 编译记录
 
 ## 基本信息
 - 软件: ciso
-- 版本: 1.0
+- 版本: 1.0.0
 - 构建系统: autotools
 - 目标: ohos-aarch64
 

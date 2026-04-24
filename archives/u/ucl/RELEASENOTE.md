@@ -12,23 +12,19 @@ cd ucl-1.03-ohos-aarch64 && sh install-ucl-1.03.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.03 | partial | 2 |
+| 1.03 | partial | 0 |
 
 ## 当前版本 (1.03) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 223.1KB
+- 包大小: 133.5KB
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 2
-
-### 补丁列表
-- 0001-acconfig-config.guess.patch
-- 0002-acconfig-config.sub.patch
+- 补丁数: 0
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

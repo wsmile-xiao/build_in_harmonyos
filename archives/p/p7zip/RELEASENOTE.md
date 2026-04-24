@@ -18,7 +18,7 @@ cd p7zip-17.05-ohos-aarch64 && sh install-p7zip-17.05.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 4.4MB
+- 包大小: 3.1MB
 
 ### 编译信息
 - 构建系统: autotools

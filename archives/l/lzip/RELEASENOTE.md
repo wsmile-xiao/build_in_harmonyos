@@ -3,22 +3,22 @@
 ## 快速安装
 
 ```bash
-tar xzf lzip-1.26-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf lzip-1.25-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd lzip-1.26-ohos-aarch64 && sh install-lzip-1.26.sh
+cd lzip-1.25-ohos-aarch64 && sh install-lzip-1.25.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.26 | success | 0 |
+| 1.25 | partial | 0 |
 
-## 当前版本 (1.26) 详情
+## 当前版本 (1.25) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 212.1KB
+- 包大小: 286.6KB
 
 ### 编译信息
 - 构建系统: autotools
