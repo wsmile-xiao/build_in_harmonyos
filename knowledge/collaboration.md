@@ -53,22 +53,36 @@ python3 scripts/ohc-run.py mode
 
 ```
 1. 环境变量 OHC_AGENT_ID        → 如果已设置，直接使用
-2. .agent-id 文件               → 如果项目根目录存在此文件，读取其中 ID
-3. 自动生成                      → 随机生成 4 位十六进制，写入 .agent-id
+2. 时间戳哈希随机生成            → 每次调用基于当前时间戳 MD5 哈希生成，不持久化
 ```
+
+### 生成机制说明
+
+**为什么不使用 .agent-id 文件持久化？**
+
+- 多个协作者可能共享同一个 skill 目录（如远程服务器）
+- 文件持久化会导致 ID 冲突（协作者 A 的 ID 被协作者 B 读取）
+- 时间戳哈希随机生成确保每次调用都有不同的 ID，避免冲突
 
 ### 自动生成示例
 
 ```bash
-# 首次运行时自动生成
+# 每次调用都生成新的 ID
 $ python3 scripts/ohc-run.py whoami
-Agent ID: A7F3 (auto-generated, saved to .agent-id)
+Agent ID: A7F3 (timestamp-hash generated)
 Role: contributor
 Archive: (not assigned)
 
-# 后续运行读取已保存的 ID
+# 同一会话中多次调用会生成不同 ID
 $ python3 scripts/ohc-run.py whoami
-Agent ID: A7F3 (from .agent-id)
+Agent ID: B2E8 (timestamp-hash generated)
+Role: contributor
+Archive: archives/c/curl/8.7.1
+
+# 如需固定 ID，使用环境变量
+$ export OHC_AGENT_ID=F3A2
+$ python3 scripts/ohc-run.py whoami
+Agent ID: F3A2 (from OHC_AGENT_ID)
 Role: contributor
 Archive: archives/c/curl/8.7.1
 ```

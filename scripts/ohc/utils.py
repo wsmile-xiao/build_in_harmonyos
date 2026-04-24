@@ -70,36 +70,21 @@ def get_agent_id(project_dir: str | None = None) -> str:
 
     优先级：
     1. 环境变量 OHC_AGENT_ID
-    2. 项目根目录下的 .agent-id 文件
-    3. 自动生成并持久化到 .agent-id 文件
+    2. 每次调用基于时间戳哈希随机生成（不持久化，避免多协作者冲突）
 
     Returns:
         4位大写十六进制字符串，如 "A7F3"
     """
-    import random
+    import hashlib
+    import time
 
     # 1. 环境变量
     env_id = os.environ.get("OHC_AGENT_ID", "").strip()
     if env_id:
         return env_id.upper().zfill(4)[:4]
 
-    # 2. 项目根目录下的 .agent-id 文件
-    pdir = project_dir or find_project_dir()
-    agent_id_file = os.path.join(pdir, ".agent-id")
-    if os.path.isfile(agent_id_file):
-        try:
-            existing = open(agent_id_file, "r", encoding="utf-8").read().strip()
-            if existing:
-                return existing.upper().zfill(4)[:4]
-        except OSError:
-            pass
-
-    # 3. 自动生成并持久化
-    new_id = f"{random.randint(0, 0xFFFF):04X}"
-    try:
-        with open(agent_id_file, "w", encoding="utf-8") as f:
-            f.write(new_id + "\n")
-    except OSError:
-        pass  # 如果无法写入文件，仅使用内存中的 ID
-
-    return new_id
+    # 2. 基于时间戳哈希随机生成（每次调用生成新ID，不持久化）
+    # 使用当前时间戳的 MD5 哈希前4位，确保每次调用都有不同ID
+    ts = str(time.time())
+    hash_val = hashlib.md5(ts.encode()).hexdigest()[:4].upper()
+    return hash_val

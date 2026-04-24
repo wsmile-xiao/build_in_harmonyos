@@ -10,7 +10,7 @@
 | 软件 | lzlib |
 | 版本 | 1.15 |
 | 状态 | ✅ success |
-| 构建系统 | autotools |
+| 构建系统 | custom_configure |
 | 源码路径 | https://download.savannah.gnu.org/releases/lzip/lzlib/lzlib-1.15.tar.gz |
 
 ## 二、编译阶段（checkbox 实时更新）
