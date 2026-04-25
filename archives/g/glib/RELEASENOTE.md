@@ -3,24 +3,25 @@
 ## 快速安装
 
 ```bash
-tar xzf glib-latest-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf glib-2.88.0-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd glib-latest-ohos-aarch64 && sh install-glib-latest.sh
+cd glib-2.88.0-ohos-aarch64 && sh install-glib-2.88.0.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
+| 2.88.0 | partial | 4 |
 
-## 当前版本 (latest) 详情
+## 当前版本 (2.88.0) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 139.1MB
+- 包大小: 143.9MB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: meson
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 4

@@ -243,7 +243,253 @@ _KNOWN_DEPS: dict[str, dict] = {
 
 
 # ═══════════════════════════════════════════════════════
-# Public API
+# 通用工具检查与自动安装（泛化 R18 扩展）
+# ═══════════════════════════════════════════════════════
+
+# 工具名 → cmd-pkgs 包名映射（动态扩展）
+# 有些工具名和包名不同，需要映射
+_TOOL_TO_PACKAGE_MAP = {
+    # 工具名: (cmd_pkgs包名, 默认版本)
+    "sed": ("sed", "4.9"),
+    "gawk": ("gawk", "5.3.0"),
+    "awk": ("gawk", "5.3.0"),  # awk 通常指向 gawk
+    "grep": ("grep", "3.11"),  # grep 可能不在 cmd-pkgs，查实际可用
+    "find": ("findutils", "4.9"),  # find 属于 findutils
+    "install": ("coreutils", "9.10"),  # install 属于 coreutils
+    "cp": ("coreutils", "9.10"),
+    "mv": ("coreutils", "9.10"),
+    "ls": ("coreutils", "9.10"),
+    "cat": ("coreutils", "9.10"),
+    "head": ("coreutils", "9.10"),
+    "tail": ("coreutils", "9.10"),
+    "cut": ("coreutils", "9.10"),
+    "sort": ("coreutils", "9.10"),
+    "uniq": ("coreutils", "9.10"),
+    "tr": ("coreutils", "9.10"),
+    "automake": ("automake", "1.16.5"),
+    "autoconf": ("autoconf", "2.72"),  # 可能不在 cmd-pkgs
+    "libtool": ("libtool", "2.4.7"),
+    "pkg-config": ("pkg-config", "0.29.2"),
+    "make": ("make", "4.4"),  # GNU make
+    "cmake": ("cmake", "3.28"),  # 可能不在 cmd-pkgs
+    "ninja": ("ninja", "1.11"),  # 可能不在 cmd-pkgs
+    "meson": ("meson", "1.3"),  # 可能不在 cmd-pkgs
+    "python": ("python", "3.12.9"),
+    "python3": ("python", "3.12.9"),
+    "perl": ("perl", "5.38"),  # 可能不在 cmd-pkgs
+    "curl": ("curl", "8.6"),  # curl 可能在 cmd-pkgs
+    "wget": ("wget", "1.21"),
+    "tar": ("tar", "1.35"),
+    "gzip": ("gzip", "1.13"),
+    "bzip2": ("bzip2", "1.0.8"),
+    "xz": ("xz", "5.6.2"),
+    "unzip": ("unzip", "6.0"),  # 可能不在 cmd-pkgs
+    "patch": ("patch", "2.7"),  # 可能不在 cmd-pkgs
+    "diff": ("diffutils", "3.10"),  # 可能不在 cmd-pkgs
+    "file": ("file", "5.45"),
+    "jq": ("jq", "1.7.1"),
+    "rsync": ("rsync", "3.3.0"),
+    "dos2unix": ("dos2unix", "7.5.4"),
+    "help2man": ("help2man", "1.49"),  # 可能不在 cmd-pkgs
+    "texinfo": ("texinfo", "7.1"),  # 可能不在 cmd-pkgs
+}
+
+
+def check_tool_available(tool_name: str, prefix: str | None = None) -> tuple[bool, str]:
+    """检查工具是否可用，返回 (是否可用, 版本或原因)。
+
+    Args:
+        tool_name: 工具名（如 sed, gawk, automake）
+        prefix: 安装前缀（默认 ~/usr/local）
+
+    Returns:
+        (True, "GNU sed 4.9") 或 (False, "未安装") 或 (False, "toybox 版本")
+    """
+    import shutil
+    
+    prefix = prefix or os.path.expanduser("~/usr/local")
+    
+    # 优先检查 ~/usr/local/bin（我们安装的 GNU 版本）
+    local_bin = os.path.join(prefix, "bin", tool_name)
+    if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
+        # 尝试获取版本
+        try:
+            result = subprocess.run(
+                [local_bin, "--version"],
+                capture_output=True, text=True, timeout=5
+            )
+            first_line = result.stdout.split("\n")[0] if result.stdout else ""
+            if result.returncode == 0 and first_line:
+                return True, first_line[:50]
+        except:
+            pass
+        return True, f"{local_bin}"
+    
+    # 检查系统 PATH
+    tool_path = shutil.which(tool_name)
+    if not tool_path:
+        return False, "未安装"
+    
+    # 获取版本信息
+    try:
+        result = subprocess.run(
+            [tool_path, "--version"],
+            capture_output=True, text=True, timeout=5
+        )
+        first_line = result.stdout.split("\n")[0] if result.stdout else ""
+        
+        if result.returncode == 0 and "GNU" in first_line:
+            return True, first_line[:50]
+        elif result.returncode == 0 and first_line:
+            # 非 GNU 但有版本输出
+            return True, f"非GNU: {first_line[:30]}"
+        else:
+            # 可能是 toybox（不支持 --version）
+            # 尝试其他方式判断
+            try:
+                result2 = subprocess.run(
+                    [tool_path, "--help"],
+                    capture_output=True, text=True, timeout=3
+                )
+                if "toybox" in result2.stdout.lower() or "toybox" in result2.stderr.lower():
+                    return False, "toybox 版本（功能受限）"
+            except:
+                pass
+            return True, f"系统版本 ({tool_path})"
+    except subprocess.TimeoutExpired:
+        return True, f"系统版本 ({tool_path})"
+    except Exception:
+        return True, f"系统版本 ({tool_path})"
+
+
+def get_package_for_tool(tool_name: str) -> tuple[str | None, str | None]:
+    """根据工具名获取对应的 cmd-pkgs 包名和版本。
+
+    Args:
+        tool_name: 工具名
+
+    Returns:
+        (包名, 版本) 或 (None, None) 如果无映射
+    """
+    # 先查映射表
+    if tool_name in _TOOL_TO_PACKAGE_MAP:
+        pkg_name, pkg_ver = _TOOL_TO_PACKAGE_MAP[tool_name]
+        # 验证 cmd-pkgs 是否真的有这个包
+        if is_prebuilt_available(pkg_name):
+            actual_ver = get_available_version(pkg_name) or pkg_ver
+            return pkg_name, actual_ver
+        # 映射表中有但 cmd-pkgs 无，返回 None
+        return None, None
+    
+    # 工具名直接作为包名尝试（很多情况下一致）
+    if is_prebuilt_available(tool_name):
+        return tool_name, get_available_version(tool_name)
+    
+    return None, None
+
+
+def auto_install_tool(tool_name: str, prefix: str | None = None) -> int:
+    """自动检查并安装缺失的工具。
+
+    Args:
+        tool_name: 工具名
+        prefix: 安装前缀
+
+    Returns:
+        0=已安装或安装成功, 1=无预编译包或安装失败
+    """
+    available, info = check_tool_available(tool_name, prefix)
+    if available:
+        log_ok(f"工具 {tool_name} 已可用: {info}")
+        return 0
+    
+    # 尝试从 cmd-pkgs 安装
+    pkg_name, pkg_ver = get_package_for_tool(tool_name)
+    if not pkg_name:
+        log_warn(f"工具 {tool_name} 无预编译包，需手动安装")
+        return 1
+    
+    log_info(f"安装工具 {tool_name}（包: {pkg_name} {pkg_ver})")
+    return install_prebuilt(pkg_name, pkg_ver, prefix)
+
+
+def auto_install_missing_tools_from_log(log_text: str, prefix: str | None = None) -> list[str]:
+    """分析错误日志，自动安装缺失的工具。
+
+    从日志中提取 "command not found"、"which: no xxx" 等模式，
+    自动识别缺失的工具并安装。
+
+    Args:
+        log_text: 错误日志文本
+        prefix: 安装前缀
+
+    Returns:
+        安装成功的工具列表
+    """
+    import re
+    
+    patterns = [
+        r"([a-zA-Z0-9_-]+): command not found",
+        r"which: no ([a-zA-Z0-9_-]+) in",
+        r"([a-zA-Z0-9_-]+): not found",
+        r"checking for ([a-zA-Z0-9_-]+)\.\.\. no",
+        r"configure: error: ([a-zA-Z0-9_-]+) not found",
+        r"Can't locate ([a-zA-Z0-9_-]+)",  # Perl 模块
+    ]
+    
+    missing_tools = set()
+    for pattern in patterns:
+        matches = re.findall(pattern, log_text, re.IGNORECASE)
+        for m in matches:
+            tool_name = m.lower()
+            # 过滤掉一些非工具的匹配（如库文件名）
+            if tool_name.endswith(".so") or tool_name.endswith(".a"):
+                continue
+            if tool_name.startswith("lib"):
+                continue
+            missing_tools.add(tool_name)
+    
+    installed = []
+    for tool in sorted(missing_tools):
+        pkg_name, pkg_ver = get_package_for_tool(tool)
+        if pkg_name:
+            log_info(f"发现缺失工具: {tool} → 自动安装 {pkg_name} {pkg_ver}")
+            rc = install_prebuilt(pkg_name, pkg_ver, prefix)
+            if rc == 0:
+                installed.append(tool)
+            else:
+                log_warn(f"  安装失败: {tool}")
+        else:
+            log_warn(f"发现缺失工具: {tool} → 无预编译包")
+    
+    return installed
+
+
+def check_common_build_tools(prefix: str | None = None) -> dict[str, tuple[bool, str]]:
+    """检查常见构建工具的可用性，返回状态字典。
+
+    Args:
+        prefix: 安装前缀
+
+    Returns:
+        {tool_name: (is_available, version_info)}
+    """
+    common_tools = [
+        "sed", "gawk", "grep", "find", "make",
+        "automake", "autoconf", "libtool", "pkg-config",
+        "curl", "tar", "gzip", "bzip2", "xz",
+        "patch", "file", "diff",
+    ]
+    
+    results = {}
+    for tool in common_tools:
+        results[tool] = check_tool_available(tool, prefix)
+    
+    return results
+
+
+# ═══════════════════════════════════════════════════════
+# Public API: 预编译包检查
 # ═══════════════════════════════════════════════════════
 
 def get_install_url(name: str) -> str | None:
@@ -520,6 +766,8 @@ def resolve_deps_cli(argv: list[str] | None = None) -> int:
                         help="列出所有可用的预编译包")
     parser.add_argument("--refresh", action="store_true",
                         help="从远程仓库刷新索引")
+    parser.add_argument("--check-tools", "-t", action="store_true",
+                        help="检查常见构建工具可用性")
     parser.add_argument("--prefix", default=None,
                         help="安装前缀（默认 ~/usr/local）")
     parser.add_argument("--project-dir", "-p", default=None)
@@ -532,8 +780,35 @@ def resolve_deps_cli(argv: list[str] | None = None) -> int:
         list_available()
         return 0
 
+    if args.check_tools:
+        # ⭐ 新增：检查常见构建工具
+        print("\n  🔧 构建工具可用性检查:\n")
+        print(f"  {'工具':<12} {'状态':<8} {'版本信息'}")
+        print(f"  {'─' * 60}")
+        
+        results = check_common_build_tools(args.prefix)
+        for tool, (available, info) in results.items():
+            status = "✅" if available else "❌"
+            pkg_name, pkg_ver = get_package_for_tool(tool)
+            pkg_hint = f"（可安装: {pkg_name} {pkg_ver})" if pkg_name and not available else ""
+            print(f"  {tool:<12} {status:<8} {info[:40]}{pkg_hint}")
+        
+        # 统计缺失工具
+        missing = [t for t, (a, _) in results.items() if not a]
+        if missing:
+            print(f"\n  ⚠️ 缺失工具: {', '.join(missing)}")
+            print(f"  安装命令:")
+            for tool in missing:
+                pkg_name, pkg_ver = get_package_for_tool(tool)
+                if pkg_name:
+                    print(f"    curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- {pkg_name} {pkg_ver}")
+        else:
+            print(f"\n  ✅ 所有构建工具已就绪")
+        print()
+        return 0
+
     if not args.software:
-        log_fail("请指定软件名，或使用 --list-available / --refresh")
+        log_fail("请指定软件名，或使用 --list-available / --refresh / --check-tools")
         return 1
 
     return resolve_and_install(

@@ -23,6 +23,11 @@ from .handoff import handoff_cli, emit_handoff, HandoffData
 from .init_build import init_build
 from .package_builder import PackageBuilder
 from .finish import FinishPipeline
+from .dependency_resolver import (
+    is_prebuilt_available, get_available_version, get_install_url,
+    check_tool_available, get_package_for_tool, auto_install_tool,
+    auto_install_missing_tools_from_log, check_common_build_tools,
+)
 
 
 # ── Constants ──
@@ -190,7 +195,102 @@ class BuildDriver:
         ]
         print("\n".join(lines), file=sys.stdout)
 
-    # ── Engine & Handoff ──
+    # ── Engine & Handoff & Dependency Detection ──
+
+    # ⭐ 新增：GNU 工具必需列表（toybox 版本行为差异会导致编译失败）
+    # 这些工具在 configure/make 中会被高频使用，行为差异会导致静默失败
+    _GNU_TOOLS_REQUIRED = {
+        "sed": {"cmd_pkgs_ver": "4.9", "reason": "正则匹配能力"},
+        "gawk": {"cmd_pkgs_ver": "5.3.0", "reason": "复杂脚本处理"},
+        "grep": {"cmd_pkgs_ver": "3.11", "reason": "-P 正则支持"},
+        "find": {"cmd_pkgs_ver": "", "reason": "-newer 等选项"},
+        "coreutils": {"cmd_pkgs_ver": "9.10", "reason": "install、cp 等命令"},
+    }
+
+    # ⭐ 新增：依赖缺失模式识别
+    _DEPENDENCY_PATTERNS = [
+        # pkg-config 模式
+        (r"Package '([^']+)', required by '[^']+', not found", "library"),
+        (r"Package '([^']+)' not found", "library"),
+        (r"Could not find ([a-zA-Z0-9_-]+)\.pc", "library"),
+        # autotools 模式
+        (r"checking for ([a-zA-Z0-9_-]+)\.\.\. no", "library"),
+        (r"configure: error: ([a-zA-Z0-9_-]+) not found", "library"),
+        (r"configure: error: ([a-zA-Z0-9_-]+) development files not found", "library"),
+        (r"([a-zA-Z0-9_-]+)-development files not found", "library"),
+        # cmake 模式
+        (r"Could NOT find ([A-Za-z0-9_]+)", "library"),
+        (r"FIND_PACKAGE([^)]+) could not find ([A-Za-z0-9_]+)", "library"),
+        # 构建工具缺失
+        (r"([a-zA-Z0-9_-]+): command not found", "tool"),
+        (r"which: no ([a-zA-Z0-9_-]+) in", "tool"),
+        (r"([a-zA-Z0-9_-]+) is required to build", "tool"),
+        # 命令差异
+        (r"([a-zA-Z0-9_-]+): unsupported option", "command"),
+    ]
+
+    def _detect_dependency_missing(self) -> tuple[str, str, str, bool]:
+        """解析 configure 输出和 config.log，检测依赖缺失。
+
+        Returns:
+            (missing_dep, missing_ver, dep_type, prebuilt_available)
+            如 ("openssl", "1.1.1", "library", True)
+            或未检测到时返回 ("", "", "", False)
+        """
+        # 读取 build log
+        if not self.log_file.exists():
+            return "", "", "", False
+        log_text = self.log_file.read_text(encoding="utf-8", errors="replace")
+
+        # 读取 config.log（configure 失败时更详细的错误信息）
+        config_log = ""
+        if self.build_src_dir:
+            cl = self.build_src_dir / "config.log"
+            if cl.exists():
+                config_log = cl.read_text(encoding="utf-8", errors="replace")
+            # VPATH build 时 config.log 在 build 目录
+            if self.vpath_dir:
+                cl2 = self.vpath_dir / "config.log"
+                if cl2.exists():
+                    config_log += "\n" + cl2.read_text(encoding="utf-8", errors="replace")
+
+        combined = log_text + "\n" + config_log
+
+        for pattern, dep_type in self._DEPENDENCY_PATTERNS:
+            match = re.search(pattern, combined, re.IGNORECASE)
+            if match:
+                dep_name = match.group(1).lower()
+                # 规范化依赖名（处理常见变体）
+                dep_name = self._normalize_dep_name(dep_name)
+                # 检查是否有预编译包
+                prebuilt = is_prebuilt_available(dep_name)
+                # 获取所需版本（如果有）
+                ver_match = re.search(rf"{dep_name}[^\d]*(\d+\.\d+\.\d+|\d+\.\d+)", combined)
+                missing_ver = ver_match.group(1) if ver_match else ""
+                return dep_name, missing_ver, dep_type, prebuilt
+
+        return "", "", "", False
+
+    def _normalize_dep_name(self, name: str) -> str:
+        """规范化依赖名称，处理常见变体。"""
+        # 处理 lib 前缀
+        name = name.lower()
+        if name.startswith("lib"):
+            name = name[3:]
+        # 处理常见别名
+        aliases = {
+            "ssl": "openssl",
+            "crypto": "openssl",
+            "crypto.so": "openssl",
+            "ffi": "libffi",
+            "pcreposix": "pcre",
+            "pcrecpp": "pcre",
+            "pcre2-posix": "pcre2",
+            "pcre2-8": "pcre2",
+            "ncursesw": "ncurses",
+            "curl": "libcurl",  # 注意：curl 在 cmd-pkgs 中是工具名，库是 libcurl
+        }
+        return aliases.get(name, name)
 
     def _run_engine(self, log_file: Path | None = None, tail: int = 50) -> bool:
         """Run error pattern matching engine. Returns True if hit.
@@ -226,7 +326,9 @@ class BuildDriver:
 
     def _emit_handoff(self, reason: str, exit_code: int, step: str,
                       ep_id: str = "none", gap: bool = False,
-                      actions: list[str] | None = None) -> None:
+                      actions: list[str] | None = None,
+                      missing_dep: str = "", missing_ver: str = "",
+                      dep_type: str = "", prebuilt: bool = False) -> None:
         """Emit HANDOFF block and exit."""
         resume_step_num = int(re.sub(r'[^0-9]', '', step))
         resume_cmd = f"python3 {self.script_dir}/ohc-run.py build {self.software} {self.version} --resume-from=Step{resume_step_num + 1}"
@@ -243,6 +345,28 @@ class BuildDriver:
         )
         final_actions.insert(0, track_reminder)
 
+        # ⭐ 新增：依赖缺失时的专用 actions
+        if reason in ("dependency_missing", "build_tool_missing", "command_mismatch"):
+            if prebuilt:
+                # 有预编译包：生成安装命令
+                install_url = get_install_url(missing_dep) or ""
+                ver_to_install = missing_ver or get_available_version(missing_dep) or ""
+                dep_actions = [
+                    f"⭐ R18 铁律：依赖缺失，必须先安装预编译包",
+                    f"安装命令: curl -fsSL {install_url} | sh -s -- {missing_dep} {ver_to_install}",
+                    f"验证安装: pkg-config --modversion {missing_dep} 或 {missing_dep} --version",
+                    "运行 RESUME_CMD 继续",
+                ]
+            else:
+                # 无预编译包：需要手动编译
+                dep_actions = [
+                    f"⭐ 依赖 {missing_dep} 无预编译包，需手动编译",
+                    f"查 dependencies.md 编译顺序，先编 {missing_dep}",
+                    f"或创建子任务编译: createSubTask(objective='编译 {missing_dep}')",
+                    "运行 RESUME_CMD 继续",
+                ]
+            final_actions = dep_actions
+
         # Build HandoffData and emit directly
         data = HandoffData(
             exit_reason=reason,
@@ -258,18 +382,63 @@ class BuildDriver:
             software_version=self.version,
             archive_dir=str(self.archive_dir),
             ai_next_actions=final_actions,
+            # ⭐ 新增字段
+            missing_dependency=missing_dep,
+            missing_version=missing_ver,
+            dependency_type=dep_type,
+            precompiled_available=prebuilt,
         )
         emit_handoff(data)
         sys.exit(exit_code)
 
     def _error_recovery(self, step_name: str, step_num: float,
                         cmd_fn, retry_fn=None) -> int:
-        """Unified error recovery pipeline (R15)."""
+        """Unified error recovery pipeline (R15 + R18 依赖检测 + 工具自动安装)."""
         rc = cmd_fn()
         if rc == 0:
             return 0
 
         self._log(f"❌ {step_name} failed (RC={rc})")
+
+        # 读取错误日志
+        log_text = ""
+        if self.log_file.exists():
+            log_text = self.log_file.read_text(encoding="utf-8", errors="replace")
+        
+        # 补充 config.log（configure 失败时更详细）
+        if step_name == "configure" and self.build_src_dir:
+            for cl_path in [
+                self.build_src_dir / "config.log",
+                (self.vpath_dir or self.build_src_dir) / "config.log"
+            ]:
+                if cl_path.exists():
+                    log_text += "\n--- config.log ---\n" + cl_path.read_text(encoding="utf-8", errors="replace")
+
+        # ⭐ R18 扩展：先尝试自动安装缺失的工具
+        installed = auto_install_missing_tools_from_log(log_text, self.default_prefix)
+        if installed:
+            self._log(f"🔄 已自动安装工具: {', '.join(installed)}，重试...")
+            # 重试
+            rc2 = cmd_fn()
+            if rc2 == 0:
+                self._log(f"✅ 重试成功")
+                return 0
+            self._log(f"❌ 重试仍然失败")
+
+        # ⭐ R18 铁律：检测依赖缺失
+        if step_name == "configure":
+            dep_name, dep_ver, dep_type, prebuilt = self._detect_dependency_missing()
+            if dep_name:
+                self._log(f"⚠️ 检测到依赖缺失: {dep_name} {dep_ver} (类型={dep_type}, 预编译包={prebuilt})")
+                # 根据依赖类型设置 EXIT_REASON
+                exit_reason = "dependency_missing" if dep_type == "library" else \
+                              "build_tool_missing" if dep_type == "tool" else "command_mismatch"
+                self._emit_handoff(
+                    exit_reason, 2, f"Step{int(step_num)}",
+                    missing_dep=dep_name, missing_ver=dep_ver,
+                    dep_type=dep_type, prebuilt=prebuilt,
+                )
+                return rc  # unreachable
 
         # Run engine
         hit = self._run_engine()
@@ -520,6 +689,36 @@ class BuildDriver:
         if not self.should_run(3):
             return
         self._log("═══ [3/13] configure ═══")
+
+        # ⭐ R18 扩展：configure 前检查常见构建工具可用性（动态发现）
+        self._log("  检查构建工具可用性...")
+        tool_status = check_common_build_tools(self.default_prefix)
+        missing_tools = []
+        
+        for tool, (available, info) in tool_status.items():
+            if available and "GNU" in info:
+                self._log(f"  ✅ {tool}: {info[:40]}")
+            elif available:
+                self._log(f"  ⚠️ {tool}: {info[:40]}")
+                # 记录可能需要替换的工具（toybox 版本）
+                pkg_name, _ = get_package_for_tool(tool)
+                if pkg_name:
+                    missing_tools.append(tool)
+            else:
+                self._log(f"  ❌ {tool}: {info}")
+                pkg_name, _ = get_package_for_tool(tool)
+                if pkg_name:
+                    missing_tools.append(tool)
+        
+        # 自动安装缺失的工具（如果有预编译包）
+        if missing_tools:
+            self._log(f"  发现 {len(missing_tools)} 个工具需安装: {', '.join(missing_tools)}")
+            for tool in missing_tools[:3]:  # 最多尝试安装 3 个，避免太慢
+                rc = auto_install_tool(tool, self.default_prefix)
+                if rc == 0:
+                    self._log(f"  ✅ 已安装: {tool}")
+                else:
+                    self._log(f"  ⚠️ 安装失败: {tool}")
 
         self._run("make distclean 2>/dev/null || true")
         self._run("rm -rf build builddir _build")

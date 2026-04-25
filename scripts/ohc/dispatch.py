@@ -164,44 +164,48 @@ def generate_subtask_objective(
 
 调用 `LoadSkill` 加载 `openharmony-compile-agent` 技能。加载后你会获得完整的 SKILL.md，它是你执行编译的**唯一权威指南**。所有流程、铁律、命令格式、失败处理均以 SKILL.md 为准。
 
-## 第二步：⭐ 前置依赖检查与安装（优先预编译包）
+## 第二步：⭐ 前置工具检查与自动安装（动态发现）
 
-> **R18 铁律**：任何依赖缺失，**必须优先从 cmd-pkgs 安装预编译包**，避免重编译。
+> **R18 扩展**：任何工具缺失，**优先从 cmd-pkgs 自动安装**。随着 cmd-pkgs 包库扩展，可用工具会动态增长。
 
 执行 init-build 后，在 configure 之前：
 
-1. **检查构建工具是否可用**（automake, libtool, pkg-config, sed, gawk 等）：
+1. **运行通用工具检查**：
    ```bash
-   # 检查关键工具
-   which automake libtool pkg-config sed gawk 2>/dev/null
+   # 使用 SKILL 内置的通用检查函数（不硬编码特定工具）
+   python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --check-tools
    
-   # 如果缺失，立即安装预编译包：
-   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- automake 1.16.5
-   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- libtool 2.4.7
+   # 或手动检查：
+   for tool in sed gawk grep find automake libtool pkg-config make; do
+     if which $tool >/dev/null 2>&1; then
+       version=$(timeout 5 $tool --version 2>&1 | head -1)
+       echo "$tool: $version"
+     else
+       echo "$tool: ❌ 未安装"
+     fi
+   done
    ```
 
-2. **检查库依赖是否可用**（通过 pkg-config 或 ls）：
+2. **收到 "command not found" 或工具缺失时**：
+   - 脚本会自动调用 `auto_install_missing_tools_from_log()`
+   - 从错误日志提取缺失工具名 → 查 cmd-pkgs → 自动安装 → 重试
+   - 无需人工判断具体是哪个工具
+
+3. **预编译包动态列表获取**：
    ```bash
-   # 检查常见库依赖
-   pkg-config --modversion zlib openssl ncurses readline libffi 2>/dev/null
+   # 从远程获取最新列表（每次都刷新，不依赖本地缓存）
+   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/raw/main/README.md | grep -E "^\\|[^|]+\\|"
    
-   # 或直接检查库文件
-   ls ~/usr/local/lib/lib*.a ~/usr/local/lib/lib*.so 2>/dev/null | head -20
-   
-   # 如果缺失，立即安装预编译包：
-   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- zlib 1.3.1
-   curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- openssl 1.1.1w
+   # 或使用 resolve-deps 命令
+   python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --refresh
+   python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --list-available
    ```
 
-3. **收到 HANDOFF (dependency_missing) 时**：
-   - 从 cmd-pkgs README 查询预编译包列表（远程获取）
-   - 有预编译包 → 安装 → `--resume-from=Step3` 继续
-   - 无预编译包 → 查 dependencies.md → 创建子任务编译依赖
-
-**预编译包列表获取**：
-```bash
-# 从远程获取最新列表（禁止使用本地缓存）
-curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/raw/main/README.md | grep -E "^\\|[^|]+\\|" | head -50
+**自动安装流程**（脚本自动执行，无需人工干预）：
+```
+发现工具缺失 → 查 cmd-pkgs 索引 → 有预编译包 → curl install.sh | sh → 重试 configure
+              ↓ 无预编译包
+              → HANDOFF (build_tool_missing) → AI 手动编译依赖
 ```
 
 ## 第三步：按 SKILL.md 执行完整的模式 B 编译流程
