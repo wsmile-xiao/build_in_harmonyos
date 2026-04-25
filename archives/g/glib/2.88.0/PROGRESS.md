@@ -66,28 +66,7 @@ meson setup builddir --prefix=$HOME/usr/local \
 - ✅ [E081] Meson 在 HarmonyOS 上检测 host_system 为 'harmonyos', 不是 'linux' → draft/E081
 - ✅ [E082] OHOS 内核头文件 linux/socket.h 与 musl sys/socket.h 有 struct sockaddr_storage 冲突 → draft/E082
 - ✅ [L2] 静态构建 glib 可避免共享库运行时加载签名问题 (default_library=static) → manifest.yaml
-
 ---
 
-**编译结束**: 2026-04-21 20:40
-**最终状态**: partial
-
----
-
-**编译结束**: 2026-04-21 20:42
-**最终状态**: partial
-
----
-
-**编译结束**: 2026-04-21 20:43
-**最终状态**: partial
-
----
-
-**编译结束**: 2026-04-21 20:44
-**最终状态**: partial
-
----
-
-**编译结束**: 2026-04-21 20:44
+**编译结束**: 2026-04-25 05:49
 **最终状态**: partial

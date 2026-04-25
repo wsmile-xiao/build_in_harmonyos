@@ -23,6 +23,7 @@ from .utils import find_project_dir
 class HandoffData:
     """Structured HANDOFF block."""
     exit_reason: str          # configure_failed | make_failed | cmake_build_failed | ninja_build_failed
+                              # | dependency_missing ⭐ 新增 | build_tool_missing ⭐ 新增
     exit_code: int            # 1=fatal, 2=resumable
     step_failed: str          # Step3 | Step4
     resume_cmd: str           # Full command to resume
@@ -35,6 +36,12 @@ class HandoffData:
     software_version: str     # e.g. "4.9"
     archive_dir: str          # Path to archive directory
     ai_next_actions: list[str] = None  # List of actions for AI
+    
+    # ⭐ 新增字段：依赖缺失信息
+    missing_dependency: str = ""       # 缺失的依赖名称（如 "openssl", "zlib"）
+    missing_version: str = ""          # 所需版本（如 "1.1.1"）
+    dependency_type: str = ""          # library | tool | command
+    precompiled_available: bool = False  # cmd-pkgs 是否有预编译包
 
     def __post_init__(self):
         if self.ai_next_actions is None:
@@ -48,11 +55,15 @@ class HandoffData:
 def format_handoff_block(data: HandoffData) -> str:
     """Format the HANDOFF block for stdout (same visual format as bash)."""
     is_knowledge = data.exit_reason in ("finish_success", "finish_knowledge_required")
+    is_dep_missing = data.exit_reason in ("dependency_missing", "build_tool_missing", "command_mismatch")
 
     if is_knowledge:
         is_blocking = data.exit_reason == "finish_knowledge_required"
         header = "KNOWLEDGE CONSOLIDATION — MANDATORY" if is_blocking else "KNOWLEDGE CONSOLIDATION"
         exit_hint = "⚠️ 阻塞！必须完成知识整理后重新 finish" if is_blocking else "知识整理已完成"
+    elif is_dep_missing:
+        header = "HANDOFF — ⭐ 依赖缺失"
+        exit_hint = f"resumable（安装依赖后继续）"
     else:
         header = "HANDOFF"
         exit_hint = f"{'resumable' if data.exit_code == 2 else 'fatal'}"
@@ -66,7 +77,16 @@ def format_handoff_block(data: HandoffData) -> str:
         f"║ RESUME_CMD: {data.resume_cmd}",
     ]
 
-    if not is_knowledge:
+    # ⭐ 新增：依赖缺失信息
+    if is_dep_missing and data.missing_dependency:
+        lines += [
+            f"║ MISSING_DEPENDENCY: {data.missing_dependency}",
+            f"║ MISSING_VERSION: {data.missing_version or 'any'}",
+            f"║ DEPENDENCY_TYPE: {data.dependency_type}",
+            f"║ PRECOMPILED_AVAILABLE: {'yes' if data.precompiled_available else 'no'}",
+        ]
+
+    if not is_knowledge and not is_dep_missing:
         lines += [
             f"║ KNOWLEDGE_HIT: {data.knowledge_hit}",
             f"║ KNOWLEDGE_GAP: {'true' if data.knowledge_gap else 'false'}",
@@ -126,6 +146,11 @@ def persist_handoff(data: HandoffData, project_dir: str | None = None) -> None:
         "src_dir": data.src_dir,
         "task_card": data.task_card,
         "ai_next_actions": data.ai_next_actions,
+        # ⭐ 新增字段
+        "missing_dependency": data.missing_dependency,
+        "missing_version": data.missing_version,
+        "dependency_type": data.dependency_type,
+        "precompiled_available": data.precompiled_available,
     }
     with open(handoff_path, "w", encoding="utf-8") as f:
         json.dump(handoff_dict, f, ensure_ascii=False, indent=2)
@@ -148,6 +173,9 @@ def persist_handoff(data: HandoffData, project_dir: str | None = None) -> None:
         "log_file": data.log_file,
         "task_card": data.task_card,
         "timestamp": now,
+        # ⭐ 新增字段
+        "missing_dependency": data.missing_dependency,
+        "precompiled_available": data.precompiled_available,
     }
 
     with open(status_path, "w", encoding="utf-8") as f:

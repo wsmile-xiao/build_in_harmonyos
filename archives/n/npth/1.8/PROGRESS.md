@@ -250,3 +250,7 @@ make -f Makefile.simple install
 1. 更新 manifest.yaml
 2. 安装到 $DEFAULT_PREFIX
 3. 执行 ohc-run.py finish 完成归档
+---
+
+**编译结束**: 2026-04-25 07:12
+**最终状态**: partial
