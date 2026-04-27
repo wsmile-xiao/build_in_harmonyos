@@ -12,18 +12,18 @@ cd ncurses-6.4-ohos-aarch64 && sh install-ncurses-6.4.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 6.4 | success | 1 |
+| 6.4 | partial | 1 |
 
 ## 当前版本 (6.4) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 9.0MB
+- 包大小: 13.9MB
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
-- 质量门禁: FAIL-WARN
+- 质量门禁: PASS
 - 补丁数: 1
 
 ### 补丁列表

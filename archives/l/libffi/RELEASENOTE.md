@@ -3,9 +3,9 @@
 ## 快速安装
 
 ```bash
-tar xzf libffi-3.4.4-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf libffi-3.4.6-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd libffi-3.4.4-ohos-aarch64 && sh install-libffi-3.4.4.sh
+cd libffi-3.4.6-ohos-aarch64 && sh install-libffi-3.4.6.sh
 ```
 
 ## 可用版本
@@ -13,22 +13,20 @@ cd libffi-3.4.4-ohos-aarch64 && sh install-libffi-3.4.4.sh
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
 | 3.5.2 | success | 2 |
-| 3.4.4 | success | 1 |
+| 3.4.6 | partial | 0 |
+| 3.4.4 | success | 2 |
 
-## 当前版本 (3.4.4) 详情
+## 当前版本 (3.4.6) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 41.5KB
+- 包大小: N/A
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 1
-
-### 补丁列表
-- 0001-port-for-ohos.patch
+- 补丁数: 0
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64
