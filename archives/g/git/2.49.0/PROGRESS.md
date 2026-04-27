@@ -79,3 +79,56 @@
 
 **编译结束**: 2026-04-25 20:38
 **最终状态**: partial
+
+## 七、发现的问题及解决方案（2026-04-27 补充）
+
+### 问题 1：templates 目录缺失
+
+**症状**：
+```
+warning: templates not found in /storage/Users/currentUser/usr/local/share/git-core/templates
+```
+
+**根因**：
+- git 源码中有 templates 目录（包含 hooks/*.sample、info、description）
+- 打包时只复制了空目录，没有复制 templates 内容
+- 原因：使用 DESTDIR 模式时 templates 没有被正确复制
+
+**解决方案**：
+- 从系统预装 git 复制 templates 内容
+- 打包时包含完整的 share/git-core/templates/ 目录
+
+### 问题 2：safe.directory 权限检查
+
+**症状**：
+```
+fatal: detected dubious ownership in repository at '/storage/Users/currentUser/Runner004/cmd-pkgs'
+```
+
+**根因**：
+- git 2.35+ 引入的安全特性
+- HMDFS 文件系统有特殊的 UID 映射
+- 仓库目录的 owner 和当前用户不一致时拒绝执行
+
+**解决方案**：
+- 创建系统级 gitconfig 配置 `safe.directory = *`
+- 在预编译包中包含 etc/gitconfig 文件
+- 安装脚本自动复制到 ~/usr/local/etc/gitconfig
+
+## 八、修订后的预编译包结构
+
+```
+git-2.49.0-ohos-aarch64.tar.gz
+├── bin/git                    # git 二进制
+├── share/git-core/templates/  # 完整 templates
+│   ├── hooks/*.sample         # git hooks 示例
+│   ├── info/exclude           # exclude 文件
+│   └── description            # 描述文件
+├── etc/gitconfig              # 系统级配置 (safe.directory=*)
+└── install-git-2.49.0.sh      # 安装脚本
+```
+
+---
+
+**修订日期**: 2026-04-27
+**修订内容**: 补充 templates 和 safe.directory 问题的解决方案
