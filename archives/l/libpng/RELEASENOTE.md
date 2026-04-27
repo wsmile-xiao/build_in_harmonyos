@@ -18,7 +18,7 @@ cd libpng-1.6.43-ohos-aarch64 && sh install-libpng-1.6.43.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 938.2KB
+- 包大小: 1.6MB
 
 ### 编译信息
 - 构建系统: autotools

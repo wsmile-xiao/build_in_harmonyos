@@ -1,4 +1,4 @@
-# libogg 1.3.5 for HarmonyOS
+# libogg 1.3.6 for HarmonyOS
 
 ## 概述
 
@@ -9,8 +9,8 @@ libogg 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 | 项目 | 值 |
 |------|-----|
 | 名称 | libogg |
-| 版本 | 1.3.5 |
-| 下载地址 | https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz |
+| 版本 | 1.3.6 |
+| 下载地址 | https://ftp.osuosl.org/pub/xiph/releases/ogg/libogg-1.3.6.tar.xz |
 | 官方文档 | {文档链接} |
 
 ## 鸿蒙环境
@@ -26,7 +26,7 @@ libogg 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 
 ```bash
 # 1. 下载源码
-wget https://downloads.xiph.org/releases/ogg/libogg-1.3.5.tar.gz
+wget https://ftp.osuosl.org/pub/xiph/releases/ogg/libogg-1.3.6.tar.xz
 tar -xzf {源码包}
 cd {源码目录}
 

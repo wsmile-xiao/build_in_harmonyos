@@ -18,7 +18,7 @@ cd pixman-0.46.4-ohos-aarch64 && sh install-pixman-0.46.4.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 6.9MB
+- 包大小: 2.3MB
 
 ### 编译信息
 - 构建系统: autotools

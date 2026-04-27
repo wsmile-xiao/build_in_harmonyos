@@ -1,4 +1,4 @@
-# libb2 0.98.1 for HarmonyOS
+# libb2 20190724 for HarmonyOS
 
 ## 概述
 
@@ -9,8 +9,8 @@ libb2 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 | 项目 | 值 |
 |------|-----|
 | 名称 | libb2 |
-| 版本 | 0.98.1 |
-| 下载地址 | https://api.github.com/repos/BLAKE2/libb2/tarball/v0.98.1 |
+| 版本 | 20190724 |
+| 下载地址 | https://github.com/BLAKE2/BLAKE2/archive/refs/tags/20190724.tar.gz |
 | 官方文档 | {文档链接} |
 
 ## 鸿蒙环境
@@ -26,7 +26,7 @@ libb2 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 
 ```bash
 # 1. 下载源码
-wget https://api.github.com/repos/BLAKE2/libb2/tarball/v0.98.1
+wget https://github.com/BLAKE2/BLAKE2/archive/refs/tags/20190724.tar.gz
 tar -xzf {源码包}
 cd {源码目录}
 

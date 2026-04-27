@@ -3,21 +3,22 @@
 ## 快速安装
 
 ```bash
-tar xzf zlib-ng-latest-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf zlib-ng-2.3.3-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd zlib-ng-latest-ohos-aarch64 && sh install-zlib-ng-latest.sh
+cd zlib-ng-2.3.3-ohos-aarch64 && sh install-zlib-ng-2.3.3.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
+| 2.3.3 | partial | 0 |
 
-## 当前版本 (latest) 详情
+## 当前版本 (2.3.3) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 320.6KB
+- 包大小: 515.1KB
 
 ### 编译信息
 - 构建系统: cmake

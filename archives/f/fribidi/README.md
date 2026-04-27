@@ -1,4 +1,4 @@
-# fribidi 1.0.16 for HarmonyOS
+# fribidi 1.0.13 for HarmonyOS
 
 ## 概述
 
@@ -9,8 +9,8 @@ fribidi 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 | 项目 | 值 |
 |------|-----|
 | 名称 | fribidi |
-| 版本 | 1.0.16 |
-| 下载地址 | https://api.github.com/repos/fribidi/fribidi/tarball/v1.0.16 |
+| 版本 | 1.0.13 |
+| 下载地址 | https://github.com/fribidi/fribidi/releases/download/v1.0.13/fribidi-1.0.13.tar.xz |
 | 官方文档 | {文档链接} |
 
 ## 鸿蒙环境
@@ -26,7 +26,7 @@ fribidi 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 
 ```bash
 # 1. 下载源码
-wget https://api.github.com/repos/fribidi/fribidi/tarball/v1.0.16
+wget https://github.com/fribidi/fribidi/releases/download/v1.0.13/fribidi-1.0.13.tar.xz
 tar -xzf {源码包}
 cd {源码目录}
 

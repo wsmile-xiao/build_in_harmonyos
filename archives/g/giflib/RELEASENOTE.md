@@ -18,7 +18,7 @@ cd giflib-5.2.2-ohos-aarch64 && sh install-giflib-5.2.2.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 850.7KB
+- 包大小: 849.2KB
 
 ### 编译信息
 - 构建系统: autotools

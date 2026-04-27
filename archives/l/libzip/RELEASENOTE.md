@@ -3,22 +3,23 @@
 ## 快速安装
 
 ```bash
-tar xzf libzip-1.10.1-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf libzip-1.11.4-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd libzip-1.10.1-ohos-aarch64 && sh install-libzip-1.10.1.sh
+cd libzip-1.11.4-ohos-aarch64 && sh install-libzip-1.11.4.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
+| 1.11.4 | partial | 0 |
 | 1.10.1 | partial | 0 |
 
-## 当前版本 (1.10.1) 详情
+## 当前版本 (1.11.4) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 1.2MB
+- 包大小: 5.3MB
 
 ### 编译信息
 - 构建系统: autotools
