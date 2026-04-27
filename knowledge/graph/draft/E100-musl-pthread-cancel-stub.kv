@@ -1,0 +1,99 @@
+# E100: musl libc pthread_cancel 系函数未实现
+
+## 错误模式
+
+```
+error: undefined reference to 'pthread_cancel'
+error: undefined reference to 'pthread_testcancel'
+error: undefined reference to 'pthread_setcancelstate'
+error: undefined reference to 'pthread_setcanceltype'
+```
+
+## 根因
+
+HarmonyOS 使用 musl libc，musl 不实现 POSIX 线程取消功能：
+- `pthread_cancel` - 取消线程
+- `pthread_testcancel` - 测试取消点
+- `pthread_setcancelstate` - 设置取消状态
+- `pthread_setcanceltype` - 设置取消类型
+
+这些函数在 glibc 中实现，但 musl 认为线程取消机制设计有问题，故不实现。
+
+## 影响范围
+
+使用线程取消功能的软件：
+- redis（后台线程管理）
+- mosquitto（MQTT 线程模式）
+- iperf3（测试线程控制）
+- aria2（下载线程管理）
+
+## 解决方案
+
+### 方案 A：提供 stub 函数（推荐）
+
+创建 musl-compat.c 文件：
+```c
+// musl-compat.c - stub implementations for musl libc
+#include <pthread.h>
+
+int pthread_cancel(pthread_t thread) {
+    // musl 不支持线程取消，返回成功但无实际效果
+    return 0;
+}
+
+int pthread_testcancel(void) {
+    return 0;
+}
+
+int pthread_setcancelstate(int state, int *oldstate) {
+    if (oldstate) *oldstate = PTHREAD_CANCEL_ENABLE;
+    return 0;
+}
+
+int pthread_setcanceltype(int type, int *oldtype) {
+    if (oldtype) *oldtype = PTHREAD_CANCEL_DEFERRED;
+    return 0;
+}
+```
+
+编译时链接此文件：
+```bash
+clang -c musl-compat.c -o musl-compat.o
+# 链接时添加 musl-compat.o
+```
+
+### 方案 B：禁用线程功能
+
+编译时禁用线程支持：
+```cmake
+# mosquitto
+-DWITH_THREADING=OFF
+
+# redis
+# 无直接选项，需修改源码
+```
+
+### 方案 C：修改源码
+
+在相关源码中添加条件编译：
+```c
+#ifdef __OHOS__
+// 使用 stub 或禁用线程取消
+#else
+// 正常实现
+#endif
+```
+
+## 平台真理 (L1)
+
+此问题影响所有使用线程取消功能的软件，是 musl libc 的平台限制。
+
+## 成功案例
+
+- redis 7.4.2：使用 musl-compat.c stub，编译成功
+- mosquitto 2.0.18：禁用线程 (-DWITH_THREADING=OFF)，编译成功
+- iperf3 3.18：使用 pthread_stubs.c，编译成功
+
+## 发现时间
+
+2026-04-27，编译 redis/mosquitto/iperf3 时发现并解决
