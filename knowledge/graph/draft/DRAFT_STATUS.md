@@ -1,46 +1,59 @@
 # 知识图谱草稿状态报告
 
 > 协作者提交的草稿，等待主编审核
+> 最后更新: 2026-04-27
 
 ## 草稿目录: `knowledge/graph/draft/`
 
-### 本次新增草稿（与机器C编译相关）
+### ✅ 已批准并合并（2026-04-27）
 
-| 草稿ID | 标题 | 状态 | 说明 |
-|--------|------|------|------|
-| E080 | musl pthread_cancel缺失 | 待审核 | HarmonyOS使用musl libc，不支持POSIX线程取消 |
-| E081 | CMake C++标准检测失败 | 待审核 | 需显式设置CMAKE_CXX_STANDARD |
-| E096 | libjpeg-turbo SIMD链接失败 | 待审核 | 禁用SIMD扩展(WITH_SIMD=0) |
+| 原草稿 | 新编号 | 标题 | 合并方式 |
+|--------|--------|------|---------|
+| E081-draft-0D0A | **E096** | CMake C++ 标准检测失败 | 直接改编号 |
+| E082-bearssl-build-system | **E097** | BearSSL 自定义构建系统 | 转写为标准 .kv |
+| E085-missing-install-command | **E098** | 缺少 install 命令 | 直接改编号 |
+| E095-draft-f8ae | **E099** | Boost b2 不兼容 OHOS | 直接改编号 |
+| E096-draft-0D0A | **E100** | libjpeg-turbo SIMD 链接失败 | 直接改编号 |
+| E103-git-safe-directory-hmdfs | **E101** | git safe.directory HMDFS | 新建 .md |
+| E093-draft-f8ae | **E102** | mmsg API 缺失 | 直接改编号 + 新建 .md |
+| E096-olm-cmake-version | **E103** | CMake minimum_required < 3.5 | 转写为标准 .kv |
+| E097-olm-version-script | **E104** | libolm version_script 缺失 | 转写为标准 .kv |
 
-### 历史草稿（之前提交）
+### 🟡 待处理（与已有条目重复，需合并补充）
 
-| 草稿ID | 标题 | 状态 | 说明 |
-|--------|------|------|------|
-| E082 | BearSSL自定义构建系统 | 待审核 | 无标准configure/make install流程 |
-| E092 | OHOS缺少CPU亲和性API | 待审核 | sched_setaffinity等API缺失 |
-| E093 | mmsg API缺失 | 待审核 | struct mmsghdr, recvmmsg, sendmmsg |
-| E094 | CMake平台检测失败 | 待审核 | check_c_source_compiles等检测失败 |
-| E095 | Boost b2构建系统不兼容 | 待审核 | 无法识别OHOS平台 |
-| E096-olm-cmake-version | CMake版本问题 | 待审核 | cmake_minimum_required < 3.5 |
-| E097 | libolm version script缺失 | 待审核 | Makefile缺少version_script.ver |
-| E098 | libolm项目弃用 | 待审核 | 2024-07-31官方弃用 |
-| draft-pcre-ohos-support | pcre OHOS支持 | 待审核 | config.sub缺少ohos支持 |
+| 原草稿 | 重复条目 | 建议处理 |
+|--------|---------|---------|
+| E080-draft-f8ae | E085 (pthread_cancel) | 合并 stub 函数列表到 E085 |
+| E081-draft-HGFD | E011 (umask/config.status) | 合并详细方案到 E011 |
+| E082-HMDFS-mktemp-permission | E011 | 同上 |
+| E099-hmdfs-autotools-tmpdir | E011 | 同上（第三个重复） |
+| E083-ohos-sdk-header-conflict | E091 (sockaddr_storage) | 合并验证命令和补丁到 E091 |
+| E084-musl-rpath-unsupported | E019 (runtime shared lib) | 合并 RPATH 细节到 E019 |
+| E092-draft-main | E094 (CPU affinity) | 合并条件编译模式到 E094 |
+| E094-draft-f8ae | E092 (CMake detection) | 合并 HAVE_* 定义模式到 E092 |
+| E096-draft-f8ae (HMDFS硬链接) | E079 (hard link) | 合并到 E079 |
+| E100-musl-pthread-cancel-stub | E085 | 合并完整 stub 到 E085 |
+| draft-pcre-ohos-support | E007 (config.sub) | 合并基本类型列表补充到 E007 |
+
+### 🗑️ 待删除（空模板/无内容）
+
+| 文件 | 原因 |
+|------|------|
+| E093-draft-f8ae.md | 纯模板占位符 |
+| E096-draft-f8ae.md | 纯模板占位符 |
+| E096-draft-G1H3.md | 纯模板占位符 |
+
+### 🟡 不适合作为错误模式条目
+
+| 原草稿 | 原因 | 建议 |
+|--------|------|------|
+| E098-olm-deprecated | 软件状态说明，非错误模式 | 放入 knowledge/operations/ 作为备忘 |
+| E101-rocksdb-ohos-headers | L3 软件特化，不够通用 | 放入 manifest.yaml |
+| E102-git-templates-missing | 打包遗漏，非编译错误 | 放入 packaging 注意事项 |
 
 ---
 
-## 主编审核流程
-
-1. 检查草稿格式是否符合模板规范
-2. 验证错误特征和解决方案的正确性
-3. 批准后执行：
-   ```bash
-   mv knowledge/graph/draft/E0XX-*.kv knowledge/graph/E0XX.kv
-   # 重建索引
-   ./scripts/ohc-run.py summary --refresh-index
-   ```
-
----
-
-*生成时间: 2026-04-27*
-*草稿总数: 13*
-*本次新增: 3*
+*主编审核时间: 2026-04-27*
+*批准: 9 条 → 正式图谱 E096–E104*
+*待合并: 11 条 → 补充到已有条目*
+*待删除: 3 条*

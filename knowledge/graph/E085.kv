@@ -4,9 +4,11 @@
 
 id:                     E085
 title: musl pthread_cancel 缺失导致线程检测失败
-trigger_tool:           configure|make|clang|gcc
+trigger_tool:           configure|make|clang|gcc|ld
 phase:                  compilation|linking
 error_signature:        undefined reference to pthread_cancel|
+                         undefined symbol: pthread_cancel|
+                         undefined symbol: pthread_testcancel|
                          pthread_cancel.*weak|
                          PTHREAD_IN_USE_DETECTION|
                          posix-lock\.c.*pthread_cancel|
@@ -14,22 +16,30 @@ error_signature:        undefined reference to pthread_cancel|
 
 severity:               2
 category:               libc-compat|musl|threading
-match_keywords:         pthread_cancel, PTHREAD_IN_USE_DETECTION,
+match_keywords:         pthread_cancel, pthread_testcancel,
+                         pthread_setcancelstate, pthread_setcanceltype,
+                         undefined symbol,
+                         PTHREAD_IN_USE_DETECTION,
                          posix-lock, musl, weak symbol,
                          pthread threading detection,
                          lock hard, _hard
 
-root_cause:             musl libc（OpenHarmony 使用）不实现 pthread_cancel()。
+root_cause:             musl libc（OpenHarmony 使用）不实现 POSIX 线程取消 API，
+                         包括 pthread_cancel()、pthread_testcancel()、
+                         pthread_setcancelstate()、pthread_setcanceltype()。
                          部分 GNU 软件（如 libgpg-error）使用
                          `#pragma weak pthread_cancel` 来运行时检测
                          pthread 是否可用。但在 musl 上，链接器
                          找不到 pthread_cancel 的 weak symbol，
                          导致检测逻辑失败或链接错误。
-                         需要#define PTHREAD_IN_USE_DETECTION_HARD=1
-                         切换到使用 pthread_create 做检测。
-affected_scope:         libgpg-error 及所有使用 gnulib/gcry 线程检测的 GnuPG 生态软件
+                         另一类场景是软件直接调用 pthread_cancel 等函数，
+                         链接阶段出现 ld.lld: undefined symbol 错误。
+affected_scope:         libgpg-error 及所有使用 gnulib/gcry 线程检测的 GnuPG 生态软件,
+                         squashfs-tools, redis, mosquitto, iperf3,
+                         其他使用 POSIX 线程取消功能的软件
 verification_cmd:       echo '#include <pthread.h>' | clang -E - 2>&1 | grep pthread_cancel;
-                         grep -r "pthread_cancel" src/ 2>/dev/null | head -3
+                         grep -r "pthread_cancel" src/ 2>/dev/null | head -3;
+                         nm -D /system/lib/llvm/libc.so | grep pthread_cancel || echo "Not found"
 
 rec_priority:           1
 rec_approach:           define-pthread-detection-hard
@@ -41,8 +51,20 @@ rec_impl:               source-patch
 
 fallback_priority:      2
 fallback_approach:      stub-pthread-cancel
-fallback_description:   添加空的 pthread_cancel() stub 函数以满足链接
-fallback_command:       echo 'void pthread_cancel(void* t) { (void)t; }' >> src/stubs.c
+fallback_description:   创建 stub 文件（如 pthread_compat.c 或 musl-compat.c）提供
+                         POSIX 线程取消 API 的空实现，满足链接要求。需覆盖以下 4 个函数：
+                         pthread_cancel, pthread_testcancel,
+                         pthread_setcancelstate, pthread_setcanceltype。
+                         示例代码：
+                         #include <pthread.h>
+                         int pthread_cancel(pthread_t t) { (void)t; return 0; }
+                         int pthread_testcancel(void) { return 0; }
+                         int pthread_setcancelstate(int s, int *os) {
+                           if(os) *os = PTHREAD_CANCEL_ENABLE; return 0; }
+                         int pthread_setcanceltype(int t, int *ot) {
+                           if(ot) *ot = PTHREAD_CANCEL_DEFERRED; return 0; }
+                         编译: clang -c pthread_compat.c && 链接时添加 pthread_compat.o
+fallback_command:       cat > pthread_compat.c << 'EOF'\n#include <pthread.h>\nint pthread_cancel(pthread_t t) { (void)t; return 0; }\nint pthread_testcancel(void) { return 0; }\nint pthread_setcancelstate(int s, int *os) { if(os) *os = PTHREAD_CANCEL_ENABLE; return 0; }\nint pthread_setcanceltype(int t, int *ot) { if(ot) *ot = PTHREAD_CANCEL_DEFERRED; return 0; }\nEOF
 fallback_auto_fix:      false
 fallback_impl:
 
@@ -54,10 +76,10 @@ principles:             P-PATCH-001
 
 causes:                 []
 caused_by:              []
-similar_to:             [E003]
+similar_to:             [E003, E080, E100]
 conflicts_with:         []
 prerequisite_of:        [E086]
 
 doc_file:               doc/E085.md
-last_updated:           2026-04-21
-source_event:           archives/l/libgpg-error/1.55
+last_updated:           2026-04-27
+source_event:           archives/l/libgpg-error/1.55, squashfs-tools 4.6.1, redis 7.4.2, mosquitto 2.0.18, iperf3 3.18
