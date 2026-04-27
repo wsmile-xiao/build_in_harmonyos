@@ -3,25 +3,25 @@
 ## 快速安装
 
 ```bash
-tar xzf libogg-1.3.5-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf libogg-1.3.6-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd libogg-1.3.5-ohos-aarch64 && sh install-libogg-1.3.5.sh
+cd libogg-1.3.6-ohos-aarch64 && sh install-libogg-1.3.6.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 1.3.5 | partial | 2 |
+| 1.3.6 | partial | 2 |
 
-## 当前版本 (1.3.5) 详情
+## 当前版本 (1.3.6) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 528.1KB
+- 包大小: 645.1KB
 
 ### 编译信息
-- 构建系统: cmake
+- 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 2

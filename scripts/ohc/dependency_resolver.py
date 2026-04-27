@@ -43,40 +43,55 @@ _CMD_PKGS_README_RAW = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/raw/
 
 
 # ═══════════════════════════════════════════════════════
-# 预编译包索引（强制远程获取，禁止本地缓存）
+# 预编译包索引（git仓库缓存，每次fetch更新）
 # ═══════════════════════════════════════════════════════
 
 # 索引格式: name → {"ver": "x.y.z", "versions": ["x.y.z", ...], "install_script": "install.sh"}
 # 多版本软件会在 versions 列表中列出所有可用版本
 
-# 内置最小索引（仅作为离线 fallback，网络完全不可达时使用）
-_BUILTIN_INDEX: dict[str, dict] = {
-    "pkg-config":  {"ver": "0.29.2", "install_script": "install.sh"},
-    "python":      {"ver": "3.12.9", "versions": ["3.9.0", "3.9.25", "3.12.9"], "install_script": "install.sh"},
-    "sed":         {"ver": "4.9",    "install_script": "install.sh"},
-    "coreutils":   {"ver": "9.10",   "install_script": "install.sh"},
-    "gawk":        {"ver": "5.3.0",  "install_script": "install.sh"},
-    "automake":    {"ver": "1.16.5", "install_script": "install.sh"},
-    "libtool":     {"ver": "2.4.7",  "install_script": "install.sh"},
-    "zlib":        {"ver": "1.3.1",  "install_script": "install.sh"},
-    "bzip2":       {"ver": "1.0.8",  "install_script": "install.sh"},
-    "xz":          {"ver": "5.6.2",  "install_script": "install.sh"},
-    "gzip":        {"ver": "1.13",   "install_script": "install.sh"},
-    "openssl":     {"ver": "1.1.1w", "install_script": "install.sh"},
-    "libffi":      {"ver": "3.5.2",  "versions": ["3.4.4", "3.5.2"], "install_script": "install.sh"},
-    "ncurses":     {"ver": "6.4",    "install_script": "install.sh"},
-    "gdbm":        {"ver": "1.23",   "install_script": "install.sh"},
-    "readline":    {"ver": "8.2",    "install_script": "install.sh"},
-    "wget":        {"ver": "1.19.1", "install_script": "install.sh"},
-    "rsync":       {"ver": "3.3.0",  "install_script": "install.sh"},
-    "jq":          {"ver": "1.7.1",  "install_script": "install.sh"},
-    "tar":         {"ver": "1.35",   "install_script": "install.sh"},
-    "file":        {"ver": "5.45",   "install_script": "install.sh"},
-    "dos2unix":    {"ver": "7.5.4",  "install_script": "install.sh"},
-}
+# 本地git仓库缓存路径（sparse checkout只拉README.md）
+_INDEX_CACHE_DIR = os.path.expanduser("~/.opendesk/cache/cmd-pkgs")
 
-# 运行时索引（初始化时从远程强制获取）
+# 运行时索引
 _runtime_index: dict[str, dict] | None = None
+
+# git命令路径（自动检测）
+_GIT_CMD: str | None = None
+
+def _find_git() -> str:
+    """查找git命令路径。"""
+    global _GIT_CMD
+    if _GIT_CMD:
+        return _GIT_CMD
+    
+    # 优先检查常见路径
+    candidates = [
+        "/data/service/hnp/bin/git",  # OpenHarmony默认位置
+        "/usr/bin/git",
+        "/usr/local/bin/git",
+        os.path.expanduser("~/usr/local/bin/git"),
+    ]
+    
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            _GIT_CMD = path
+            return path
+    
+    # 尝试从PATH查找
+    import shutil
+    git_path = shutil.which("git")
+    if git_path:
+        _GIT_CMD = git_path
+        return git_path
+    
+    raise RuntimeError("git命令未找到，请安装git")
+
+
+def _run_git(cmd_args: list[str], cwd: str | None = None, **kwargs) -> subprocess.CompletedProcess:
+    """执行git命令。"""
+    git = _find_git()
+    full_cmd = [git] + cmd_args
+    return subprocess.run(full_cmd, cwd=cwd, capture_output=True, text=True, timeout=30, **kwargs)
 
 
 # ═══════════════════════════════════════════════════════
@@ -84,80 +99,133 @@ _runtime_index: dict[str, dict] | None = None
 # ═══════════════════════════════════════════════════════
 
 def _get_index() -> dict[str, dict]:
-    """获取运行时索引（强制远程获取，禁止本地缓存）。
+    """获取运行时索引（git仓库缓存，每次fetch更新）。
     
-    ⭐ R18 铁律：预编译包列表必须从远程获取最新版本，
-    不能使用本地缓存（避免版本过时、遗漏新增包）。
+    流程：
+    1. 缓存仓库不存在 → 初始化sparse clone
+    2. 缓存仓库存在 → fetch检查更新
+    3. 解析README.md并返回索引
     """
     global _runtime_index
     if _runtime_index is not None:
         return _runtime_index
 
-    # 1. 强制从远程获取（不走缓存）
-    log_info("从 cmd-pkgs 仓库获取预编译包索引（远程）...")
-    rc = _fetch_remote_index()
-    if rc == 0 and _runtime_index:
-        return _runtime_index
+    # 1. 确保缓存仓库存在并更新
+    rc = _update_index_repo()
+    if rc != 0:
+        log_fail("索引仓库更新失败，无法继续。请检查网络连接后重试 --refresh")
+        raise RuntimeError("无法获取预编译包索引")
 
-    # 2. 远程失败时使用内置 fallback（仅网络完全不可达时）
-    _runtime_index = dict(_BUILTIN_INDEX)
-    log_warn(f"远程索引获取失败，使用内置 fallback ({len(_runtime_index)} 个包)")
-    log_warn("  ⚠️ 内置索引可能过时，请检查网络连接后重试 --refresh")
+    # 2. 解析README.md
+    readme_path = Path(_INDEX_CACHE_DIR) / "README.md"
+    if not readme_path.exists():
+        log_fail("README.md不存在于缓存仓库")
+        raise RuntimeError("缓存仓库缺少README.md")
+
+    content = readme_path.read_text(encoding="utf-8")
+    _runtime_index = _parse_readme(content)
+    
+    if not _runtime_index:
+        log_fail("README解析失败")
+        raise RuntimeError("无法解析预编译包索引")
+    
+    log_ok(f"索引加载完成: {len(_runtime_index)} 个包")
     return _runtime_index
 
 
-def _fetch_remote_index() -> int:
-    """通过 git sparse-checkout 从 cmd-pkgs 仓库获取 README.md 并解析。
-
-    GitCode 的 raw URL 返回 JS SPA 页面，无法直接 curl 获取。
-    改用 git clone --sparse 只获取 README.md（浅克隆，约 1s）。
+def _update_index_repo() -> int:
+    """更新索引git仓库（初始化或fetch）。
     
-    ⭐ 不保存本地缓存（R18 铁律），每次调用都从远程获取最新数据。
+    使用sparse checkout只拉取README.md，减少空间占用。
+    每次都fetch检查更新。
     """
-    global _runtime_index
+    repo_dir = Path(_INDEX_CACHE_DIR)
+    
+    # 检查是否是有效的git仓库
+    git_dir = repo_dir / ".git"
+    
+    if not git_dir.exists():
+        # 初始化sparse clone
+        log_info("初始化索引仓库（sparse clone）...")
+        return _init_sparse_clone()
+    
+    # 已存在，fetch检查更新
+    log_info("检查索引仓库更新...")
+    return _fetch_update()
 
-    tmpdir = tempfile.mkdtemp(prefix="ohc-cmd-pkgs-")
+
+def _init_sparse_clone() -> int:
+    """初始化sparse clone仓库，只拉取README.md。"""
+    repo_dir = Path(_INDEX_CACHE_DIR)
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    
     try:
-        # git init + sparse-checkout 只拉 README.md
-        cmds = [
-            ["git", "init"],
-            ["git", "remote", "add", "origin", _CMD_PKGS_REPO],
-            ["git", "sparse-checkout", "init", "--cone"],
-            ["git", "sparse-checkout", "set", "README.md"],
-            ["git", "fetch", "--depth=1", "origin", "main"],
-            ["git", "checkout", "origin/main"],
-        ]
-        for cmd in cmds:
-            result = subprocess.run(cmd, cwd=tmpdir, capture_output=True, text=True, timeout=30)
-            if result.returncode != 0 and "checkout" not in cmd[0]:
-                log_warn(f"  git 命令失败: {' '.join(cmd)}")
-                return 1
-
-        readme_path = Path(tmpdir) / "README.md"
-        if not readme_path.exists():
-            log_warn("  README.md 不存在")
-            return 1
-
-        content = readme_path.read_text(encoding="utf-8")
-        index = _parse_readme(content)
-
-        if not index:
-            log_warn("  README 解析失败，未找到有效包条目")
-            return 1
-
-        _runtime_index = index
-        # ⭐ 不保存缓存（R18 铁律）
-        log_ok(f"远程索引获取完成: {len(index)} 个包")
-        return 0
-
-    except subprocess.TimeoutExpired:
-        log_warn("  git clone 超时")
+        git = _find_git()
+    except RuntimeError as e:
+        log_fail(str(e))
         return 1
-    except Exception as e:
-        log_warn(f"  远程索引获取异常: {e}")
+    
+    # 设置safe.directory避免HMDFS问题
+    _run_git(["config", "--global", "--add", "safe.directory", str(repo_dir)])
+    
+    cmds = [
+        ["init"],
+        ["remote", "add", "origin", _CMD_PKGS_REPO],
+        ["sparse-checkout", "init", "--cone"],
+        ["sparse-checkout", "set", "README.md"],
+        ["fetch", "--depth=1", "origin", "main"],
+        ["checkout", "origin/main"],
+    ]
+    
+    for cmd_args in cmds:
+        result = _run_git(cmd_args, cwd=repo_dir)
+        if result.returncode != 0 and "checkout" not in cmd_args[0]:
+            log_warn(f"git命令失败: git {' '.join(cmd_args)}")
+            return 1
+    
+    log_ok("索引仓库初始化完成")
+    return 0
+
+
+def _fetch_update() -> int:
+    """fetch检查更新，有更新则checkout。"""
+    repo_dir = Path(_INDEX_CACHE_DIR)
+    
+    try:
+        git = _find_git()
+    except RuntimeError as e:
+        log_fail(str(e))
         return 1
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    
+    # 设置safe.directory
+    _run_git(["config", "--global", "--add", "safe.directory", str(repo_dir)])
+    
+    # fetch检查更新
+    result = _run_git(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
+    
+    if result.returncode != 0:
+        log_warn(f"fetch失败: {result.stderr[:100]}")
+        return 1
+    
+    # 检查是否有更新
+    result_local = _run_git(["rev-parse", "HEAD"], cwd=repo_dir)
+    result_remote = _run_git(["rev-parse", "origin/main"], cwd=repo_dir)
+    
+    local_sha = result_local.stdout.strip()
+    remote_sha = result_remote.stdout.strip()
+    
+    if local_sha != remote_sha:
+        # 有更新，checkout新版本
+        log_info("发现新版本，更新索引...")
+        result = _run_git(["checkout", "origin/main"], cwd=repo_dir)
+        if result.returncode != 0:
+            log_warn(f"checkout失败")
+            return 1
+        log_ok("索引已更新")
+    else:
+        log_ok("索引无更新")
+    
+    return 0
 
 
 def _parse_readme(content: str) -> dict[str, dict]:
@@ -734,15 +802,20 @@ def list_available() -> None:
 # ═══════════════════════════════════════════════════════
 
 def refresh_index(pdir: str | None = None) -> int:
-    """从 cmd-pkgs 仓库刷新预编译包索引（强制重新获取）。
-    
-    ⭐ R18 铁律：不保存本地缓存，每次调用都从远程获取最新数据。
-    """
+    """强制刷新索引仓库（重新clone）。"""
     global _runtime_index
-    _runtime_index = None  # 清除运行时缓存
-
-    log_info("强制刷新预编译包索引（从远程获取最新数据）...")
-    return _fetch_remote_index()
+    
+    # 清除运行时缓存
+    _runtime_index = None
+    
+    # 删除旧仓库并重新clone
+    repo_dir = Path(_INDEX_CACHE_DIR)
+    if repo_dir.exists():
+        shutil.rmtree(repo_dir, ignore_errors=True)
+        log_info("删除旧缓存仓库...")
+    
+    log_info("强制重新clone索引仓库...")
+    return _init_sparse_clone()
 
 
 # ═══════════════════════════════════════════════════════

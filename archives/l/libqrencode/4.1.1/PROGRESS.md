@@ -1,7 +1,7 @@
 # libqrencode 4.1.1 — 编译进度
 
-> 档案创建时间: 2026-04-27 00:00:00
-> 最后更新: 2026-04-27 (当前状态)
+> 档案创建时间: 2026-04-25 00:00:00
+> 最后更新: 2026-04-25 (当前状态)
 > 当前会话 ID: (可选，用于多轮对话追踪)
 
 ## 一、基本信息
@@ -44,7 +44,7 @@
 
 > **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
 
-### 对话 #N — 2026-04-27 HH:MM
+### 对话 #N — 2026-04-25 HH:MM
 **操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
 **结果**: （成功/失败/部分成功，附关键输出摘要）
 **发现的问题**: （遇到的坑、错误信息、根因分析）
@@ -53,7 +53,7 @@
 
 ---
 
-### 对话 #1 — 2026-04-27 00:00
+### 对话 #1 — 2026-04-25 00:00
 **操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
 **结果**: （待填写）
 **发现的问题**: （待填写）
@@ -75,7 +75,30 @@
 ## 六、结束记录
 - **最终状态**: ...
 - **结束时间**: ...
+
+### Phase 4: 打包与归档
+
+**构建系统**: CMake（autotools/libtoolize 在本环境不可用）
+
+**编译命令**:
+```bash
+mkdir build && cd build
+cmake .. -DCMAKE_INSTALL_PREFIX=$HOME/usr/local -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+make -j$(nproc)
+make install DESTDIR=$TEST_PREFIX
+```
+
+**质量门禁**: PASS (G1-G4)
+
+**预编译包**: libqrencode-4.1.1-ohos-aarch64.tar.gz (250KB)
+
+**依赖说明**: 
+- qrencode 工具依赖 libpng16.so.16
+- 打包脚本未收集外部依赖（lib/external 为空）
+- 用户需先安装 libpng 预编译包或自行编译
+
+**安装验证**: qrencode 需要 LD_LIBRARY_PATH 包含 libpng 路径
 ---
 
-**编译结束**: 2026-04-27 11:04
+**编译结束**: 2026-04-25 23:47
 **最终状态**: partial

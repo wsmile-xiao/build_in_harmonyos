@@ -10,7 +10,7 @@ pixman 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 |------|-----|
 | 名称 | pixman |
 | 版本 | 0.46.4 |
-| 下载地址 | https://www.cairographics.org/releases/pixman-0.46.4.tar.gz |
+| 下载地址 | https://cairographics.org/releases/pixman-0.46.4.tar.gz |
 | 官方文档 | {文档链接} |
 
 ## 鸿蒙环境
@@ -26,7 +26,7 @@ pixman 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 
 ```bash
 # 1. 下载源码
-wget https://www.cairographics.org/releases/pixman-0.46.4.tar.gz
+wget https://cairographics.org/releases/pixman-0.46.4.tar.gz
 tar -xzf {源码包}
 cd {源码目录}
 

@@ -12,22 +12,23 @@ cd libb2-0.98.1-ohos-aarch64 && sh install-libb2-0.98.1.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 0.98.1 | partial | 1 |
+| 0.98.1 | partial | 2 |
 
 ## 当前版本 (0.98.1) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 44.0KB
+- 包大小: 149.1KB
 
 ### 编译信息
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 1
+- 补丁数: 2
 
 ### 补丁列表
 - 0001-Makefile.am.patch
+- 0002-configure.ac.patch
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64

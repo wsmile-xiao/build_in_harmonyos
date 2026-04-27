@@ -1,4 +1,4 @@
-# libdmtx 0.7.5 for HarmonyOS
+# libdmtx 0.7.8 for HarmonyOS
 
 ## 概述
 
@@ -9,8 +9,8 @@ libdmtx 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 | 项目 | 值 |
 |------|-----|
 | 名称 | libdmtx |
-| 版本 | 0.7.5 |
-| 下载地址 | file:///storage/Users/currentUser/tmp/downloads/libdmtx-0.7.5.tar.gz |
+| 版本 | 0.7.8 |
+| 下载地址 | https://api.github.com/repos/dmtx/libdmtx/tarball/refs/tags/v0.7.8 |
 | 官方文档 | {文档链接} |
 
 ## 鸿蒙环境
@@ -26,7 +26,7 @@ libdmtx 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 
 ```bash
 # 1. 下载源码
-wget file:///storage/Users/currentUser/tmp/downloads/libdmtx-0.7.5.tar.gz
+wget https://api.github.com/repos/dmtx/libdmtx/tarball/refs/tags/v0.7.8
 tar -xzf {源码包}
 cd {源码目录}
 

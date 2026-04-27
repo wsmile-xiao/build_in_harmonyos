@@ -10,7 +10,7 @@ expat 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 |------|-----|
 | 名称 | expat |
 | 版本 | 2.7.1 |
-| 下载地址 | file:///storage/Users/currentUser/downloads/expat-2.7.1.tar.gz |
+| 下载地址 | https://github.com/libexpat/libexpat/releases/download/R_2_7_1/expat-2.7.1.tar.gz |
 | 官方文档 | {文档链接} |
 
 ## 鸿蒙环境
@@ -26,7 +26,7 @@ expat 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 
 ```bash
 # 1. 下载源码
-wget file:///storage/Users/currentUser/downloads/expat-2.7.1.tar.gz
+wget https://github.com/libexpat/libexpat/releases/download/R_2_7_1/expat-2.7.1.tar.gz
 tar -xzf {源码包}
 cd {源码目录}
 

@@ -12,22 +12,19 @@ cd libqrencode-4.1.1-ohos-aarch64 && sh install-libqrencode-4.1.1.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 4.1.1 | partial | 1 |
+| 4.1.1 | partial | 0 |
 
 ## 当前版本 (4.1.1) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 216.6KB
+- 包大小: 289.6KB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 1
-
-### 补丁列表
-- 0001-CMakeLists.txt.patch
+- 补丁数: 0
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64
