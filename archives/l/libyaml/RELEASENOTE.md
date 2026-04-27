@@ -18,7 +18,7 @@ cd libyaml-0.2.5-ohos-aarch64 && sh install-libyaml-0.2.5.sh
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 211.1KB
+- 包大小: 398.6KB
 
 ### 编译信息
 - 构建系统: autotools

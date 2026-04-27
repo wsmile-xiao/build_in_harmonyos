@@ -3,26 +3,27 @@
 ## 快速安装
 
 ```bash
-tar xzf mbedtls-2.28.8-ohos-aarch64.tar.gz -C ~/usr/local
+tar xzf mbedtls-4.1.0-ohos-aarch64.tar.gz -C ~/usr/local
 
-cd mbedtls-2.28.8-ohos-aarch64 && sh install-mbedtls-2.28.8.sh
+cd mbedtls-4.1.0-ohos-aarch64 && sh install-mbedtls-4.1.0.sh
 ```
 
 ## 可用版本
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
+| 4.1.0 | partial | 0 |
 | 3.6.6 | partial | 0 |
 | 2.28.8 | partial | 0 |
 
-## 当前版本 (2.28.8) 详情
+## 当前版本 (4.1.0) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 3.4MB
+- 包大小: 12.3MB
 
 ### 编译信息
-- 构建系统: cmake
+- 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0

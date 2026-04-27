@@ -13,16 +13,15 @@ cd jansson-2.15.0-ohos-aarch64 && sh install-jansson-2.15.0.sh
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
 | 2.15.0 | partial | 0 |
-| 2.14 | partial | 0 |
 
 ## 当前版本 (2.15.0) 详情
 
 ### 包内容
 - 二进制: N/A
-- 包大小: 190.0KB
+- 包大小: 191.5KB
 
 ### 编译信息
-- 构建系统: autotools
+- 构建系统: cmake  # 实际使用 cmake，因为缺少 automake 无法生成 configure 脚本
 - 目标: ohos-aarch64
 - 质量门禁: PASS
 - 补丁数: 0
