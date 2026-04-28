@@ -1,43 +1,25 @@
 # testssl.sh
 
-TLS/SSL security testing tool for checking server's TLS/SSL ciphers, protocols and cryptographic flaws.
+## 简介
+TLS/SSL 安全测试工具，检查服务器的密码套件、协议版本和加密缺陷。
 
-## Version
-- 3.2.3 (bugfix release)
+## OHOS 适配
+- 纯 Shell 脚本工具，无需编译
+- 需移除捆绑的 x86_64 OpenSSL 二进制文件
+- 创建系统 OpenSSL 符号链接到 bin/ 目录
+- 需修补 AWS-LC 兼容性（openssl version -d → openssl version）
 
-## Description
-testssl.sh is a free command line tool which checks a server's service on any port for:
-- TLS/SSL cipher support
-- Protocol versions
-- Cryptographic flaws
-- Recent vulnerabilities
-
-## Key Features
-- Clear output format
-- Machine readable output (CSV, JSON, HTML)
-- No installation required - works out of the box
-- Works on Linux, MacOS, FreeBSD, NetBSD, WSL2, MSYS2/Cygwin, OpenBSD
-
-## Dependencies
+## 依赖
 - bash >= 3.2
-- OpenSSL (system or bundled)
-- Standard Unix tools (sed, awk, grep)
+- OpenSSL
+- 标准 Unix 工具 (sed, awk, grep)
 
-## Installation
-Simply copy the files to the target directory:
-```
-./install.sh
-```
-
-## Usage
+## 功能验证
 ```bash
-testssl.sh --help
+testssl.sh --version
 testssl.sh https://example.com
-testssl.sh example.com:443
 ```
 
-## License
-GPL-2.0
-
-## Homepage
-https://testssl.sh
+## 参考
+- 官网: https://testssl.sh
+- 源码: https://github.com/testssl/testssl.sh

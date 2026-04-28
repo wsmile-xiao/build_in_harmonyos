@@ -210,7 +210,7 @@
 □ 有遗漏的 →Xb 提取吗？→ 立即补提取
 □ 有应提升为 L1/L2 但被遗漏的 manifest 条目吗？→ 立即提升
 □ knowledge/ 中有重复条目吗？→ 合并而非新增
-□ 预编译包制作完成？（10 步流程，见 packaging.md）
+□ 预编译包制作完成？（9 步流程，见 packaging.md）
 □ install.sh 已生成并测试？（curl | sh -s -- <ver>）
 □ ohc-run.py finalize-archive 执行通过？（归档收口+RELEASENOTE生成）
 □ PREBUILD_TODOLIST.md 已更新？

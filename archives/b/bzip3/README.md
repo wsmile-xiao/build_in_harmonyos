@@ -1,19 +1,12 @@
-# bzip3 1.5.3 — OpenHarmony 编译记录
+# bzip3 — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: bzip3
-- 版本: 1.5.3
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+bzip3 是下一代 bzip 压缩工具，使用现代算法提供更高压缩比和更快的解压速度。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配要点
+- 推荐 v1.5.3 使用 CMake 构建
+- v1.5.3 需要 config.guess 补丁支持 HarmonyOS
+- autotools 构建时 HMDFS 临时目录问题需处理
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [bzip3 GitHub](https://github.com/kspalaiologos/bzip3)

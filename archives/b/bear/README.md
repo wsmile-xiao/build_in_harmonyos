@@ -1,19 +1,11 @@
-# bear 3.1.6 — OpenHarmony 编译记录
+# Bear — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: bear
-- 版本: 3.1.6
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+Bear (Build EAR) 是编译命令捕获工具，通过拦截编译调用生成 compile_commands.json，用于 IDE 集成和静态分析。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配要点
+- CMake 构建，依赖 grpc（bundled 第三方库）
+- 需要补丁修改 CMakeLists.txt 的平台检测逻辑
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [Bear GitHub](https://github.com/rizsotto/Bear)

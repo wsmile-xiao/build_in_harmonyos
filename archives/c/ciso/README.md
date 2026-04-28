@@ -1,19 +1,26 @@
-# ciso 1.0.0 — OpenHarmony 编译记录
+# ciso
 
-## 基本信息
-- 软件: ciso
-- 版本: 1.0.0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+ciso 是一个 PSP ISO 镜像压缩和解压工具，可将 ISO 文件压缩为 CSO 格式以节省存储空间。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+- ISO → CSO 压缩（减小镜像体积）
+- CSO → ISO 解压（还原原始镜像）
+- 支持多种压缩级别
+- 轻量级命令行工具
 
-## 已知限制
-<!-- 平台相关限制 -->
+## OHOS 适配
 
-## 功能验证
-<!-- 验证命令和结果 -->
+- 原始 Makefile 硬编码 gcc，需改为 clang 编译
+- 链接 zlib 库（-lz）
+- Format string warnings（uint64_t vs long long）为非致命警告
+- 无 configure 脚本，直接 make 即可
+
+## 依赖关系
+
+- zlib（压缩/解压）
+- clang 编译器
+
+## 参考资料
+
+- 源码: https://sourceforge.net/projects/ciso/

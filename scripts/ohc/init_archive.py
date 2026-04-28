@@ -24,7 +24,7 @@ def _load_template(template_name: str, name: str, version: str,
     """从 templates/ 目录加载模板并填充变量（⭐ D4 规则）
     
     Args:
-        template_name: 模板文件名（如 PROGRESS.md, README.md）
+        template_name: 模板文件名（如 notes.md, README.md）
         name: 软件名
         version: 版本号
         date: 日期（可选）
@@ -72,7 +72,7 @@ def _load_template(template_name: str, name: str, version: str,
 def _fallback_template(template_name: str, name: str, version: str,
                        date: str, build_system: str) -> str:
     """模板文件不存在时的降级骨架（仅作为后备）"""
-    if template_name == "PROGRESS.md":
+    if template_name == "notes.md":
         return (f"# {name} {version} 编译进度\n\n"
                 f"**日期**: {date}\n**状态**: 🔄 编译中\n\n"
                 f"## 步骤记录\n\n"
@@ -134,45 +134,26 @@ def init_archive(name: str, version: str, source_url: str = "",
     else:
         log_ok("  manifest.yaml 已存在，保留")
 
-    # PROGRESS.md（⭐ D4: 使用 templates/PROGRESS.md）
-    pf = ver_dir / "PROGRESS.md"
+    # notes.md（⭐ D4: 使用 templates/notes.md）
+    pf = ver_dir / "notes.md"
     if not pf.exists() or len(pf.read_text(encoding="utf-8").split("\n")) < 15:
         today = datetime.now().strftime("%Y-%m-%d")
-        content = _load_template("PROGRESS.md", name, version, today, build_system, source_url)
+        content = _load_template("notes.md", name, version, today, build_system, source_url)
         pf.write_text(content, encoding="utf-8")
-        log_ok("  PROGRESS.md 已生成（使用 templates/PROGRESS.md）")
+        log_ok("  notes.md 已生成（使用 templates/notes.md）")
     else:
-        log_ok("  PROGRESS.md 已存在，保留")
+        log_ok("  notes.md 已存在，保留")
 
-    # README.md（⭐ D4: 使用 templates/README.md）
-    rm = ver_dir / "README.md"
-    if not rm.exists() or len(rm.read_text(encoding="utf-8").split("\n")) < 10:
-        content = _load_template("README.md", name, version, None, build_system, source_url)
-        rm.write_text(content, encoding="utf-8")
-        log_ok("  README.md 已生成（使用 templates/README.md）")
-    else:
-        log_ok("  README.md 已存在，保留")
-
-    # Software-level meta sync
-    for fname in ["README.md", "RELEASENOTE.md"]:
-        src = ver_dir / fname
-        dst = sw_dir / fname
-        if src.exists() and not dst.exists():
-            shutil.copy2(src, dst)
-
-    # _meta.yaml — always regenerate
-    meta = ver_dir / "_meta.yaml"
-    patches_count = len(list((ver_dir / "patches").glob("*.patch")))
-    meta.write_text(
-        f"software: {name}\nversion: {version}\nletter: {letter}\n"
-        f"status: compiling\nbuild_system: {build_system}\n"
-        f"compatibility: unknown\npatches_count: {patches_count}\n"
-        f"archive_path: {ver_dir}\ncompile_date: {datetime.now().strftime('%Y-%m-%d')}\n",
-        encoding="utf-8")
+    # 软件级 meta 同步（仅 README.md）
+    fname = "README.md"
+    src = ver_dir / fname
+    dst = sw_dir / fname
+    if src.exists() and not dst.exists():
+        shutil.copy2(src, dst)
 
     # Verify
     missing = []
-    for req in ["manifest.yaml", "PROGRESS.md", "README.md", "patches", "reports", "packaging"]:
+    for req in ["manifest.yaml", "notes.md", "patches", "reports", "packaging"]:
         if not (ver_dir / req).exists():
             missing.append(req)
     if missing:
@@ -186,12 +167,33 @@ def init_archive(name: str, version: str, source_url: str = "",
 
 
 def _manifest_template(name: str, version: str, bs: str, url: str) -> str:
-    t = (f"software: {name}\nversion: {version}\nstatus: compiling\n"
-         f"build_system: {bs}\ncreated_at: {datetime.now().strftime('%Y-%m-%d')}\n"
-         f"knowledge_gained: []\npatches_applied: []\nbuild_log: logs/build.log\n")
+    """从 templates/manifest-version.yaml 加载 manifest 模板（⭐ D4 规则）"""
+    template_path = TEMPLATES_DIR / "manifest-version.yaml"
+    if not template_path.exists():
+        log_warn(f"模板文件不存在: {template_path}，使用内联骨架")
+        t = (f"software: {name}\nversion: {version}\nstatus: archived\n"
+             f"build_system: {bs}\ncreated_at: {datetime.now().strftime('%Y-%m-%d')}\n"
+             f"knowledge_gained: []\npatches_applied: []\nbuild_log: logs/build.log\n")
+        if url:
+            t += f"source_url: {url}\n"
+        return t
+
+    content = template_path.read_text(encoding="utf-8")
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # 替换占位符
+    content = content.replace("{version}", version)
+    content = content.replace("{YYYY-MM-DD}", today)
+    content = content.replace("system: cmake", f"system: {bs}")
+
     if url:
-        t += f"source_url: {url}\n"
-    return t
+        content = content.replace('url: "https://..."', f'url: "{url}"')
+
+    # 插入 software 字段（模板中无此字段，但 manifest 规范要求）
+    if "software:" not in content:
+        content = f"software: {name}\n" + content
+
+    return content
 
 
 # ⭐ D4 规则：_progress_template 和 _readme_template 已废弃

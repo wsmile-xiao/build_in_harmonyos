@@ -1,4 +1,5 @@
 # 测试报告模板
+<!-- 放置路径: archives/{letter}/{name}/{version}/reports/test-report.md -->
 
 > **项目**: {软件名}  
 > **测试日期**: {YYYY-MM-DD}  

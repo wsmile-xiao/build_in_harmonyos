@@ -16,8 +16,8 @@ def check_knowledge_gap(name: str, version: str, pdir: str | None = None) -> int
         log_fail(f"档案不存在: {ver_dir}")
         return 2
 
-    # Scan PROGRESS.md
-    progress = ver_dir / "PROGRESS.md"
+    # Scan notes.md
+    progress = ver_dir / "notes.md"
     extracted = pending = failed = 0
     pending_items: list[str] = []
 
@@ -69,7 +69,7 @@ def check_knowledge_gap(name: str, version: str, pdir: str | None = None) -> int
 
     # Report
     total = extracted + pending + failed
-    log_info(f"PROGRESS.md: total={total} extracted={extracted} pending={pending} failed={failed}")
+    log_info(f"notes.md: total={total} extracted={extracted} pending={pending} failed={failed}")
     log_info(f"manifest.yaml: knowledge_count={knowledge_count} unreferenced={unreferenced}")
 
     if pending_items:

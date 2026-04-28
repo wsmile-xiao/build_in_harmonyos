@@ -18,7 +18,7 @@ def close_archive(name: str, version: str, status: str,
     letter = name[0].lower()
     ver_dir = project / "archives" / letter / name / version
 
-    if status not in ("success", "partial", "failed"):
+    if status not in ("published", "built", "failed", "archived"):
         log_fail(f"无效状态: {status}")
         return 1
     if not ver_dir.exists():
@@ -26,10 +26,9 @@ def close_archive(name: str, version: str, status: str,
         return 2
 
     manifest = ver_dir / "manifest.yaml"
-    progress = ver_dir / "PROGRESS.md"
-    meta = ver_dir / "_meta.yaml"
+    progress = ver_dir / "notes.md"
     if not manifest.exists() or not progress.exists():
-        log_fail("manifest.yaml 或 PROGRESS.md 缺失")
+        log_fail("manifest.yaml 或 notes.md 缺失")
         return 2
 
     log_info(f"关闭档案: {name} {version} → {status}")
@@ -53,22 +52,7 @@ def close_archive(name: str, version: str, status: str,
     manifest.write_text(content, encoding="utf-8")
     log_ok(f"  manifest.yaml → {status}")
 
-    # Step 2: Update _meta.yaml
-    if meta.exists():
-        mc = meta.read_text(encoding="utf-8")
-        mc = re.sub(r'status:\s*\w+', f'status: {status}', mc)
-        mc = re.sub(r'compile_date:.*', f'compile_date: {datetime.now().strftime("%Y-%m-%d")}', mc)
-        # Count patches
-        pcnt = len(list((ver_dir / "patches").glob("*.patch")))
-        mc = re.sub(r'patches_count:\s*\d+', f'patches_count: {pcnt}', mc)
-        # Extract compatibility from manifest
-        m = re.search(r'compatibility:\s*(\S+)', content)
-        if m:
-            mc = re.sub(r'compatibility:\s*\S+', f'compatibility: {m.group(1)}', mc)
-        meta.write_text(mc, encoding="utf-8")
-        log_ok("  _meta.yaml 已更新")
-
-    # Step 3: Update PROGRESS.md (⭐ R25: 防止重复记录)
+    # Step 2: Update notes.md (⭐ R25: 防止重复记录)
     ts = datetime.now().strftime("%Y-%m-%d %H:%M")
     
     # 先读取现有内容，检查是否有旧的编译结束记录
@@ -84,7 +68,7 @@ def close_archive(name: str, version: str, status: str,
     pcontent_new = pcontent_new.rstrip() + append_text
     
     progress.write_text(pcontent_new, encoding="utf-8")
-    log_ok("  PROGRESS.md 已更新（已清理旧记录）")
+    log_ok("  notes.md 已更新（已清理旧记录）")
 
     # Step 5: Check pending items
     pcontent = progress.read_text(encoding="utf-8")
@@ -102,7 +86,7 @@ def close_archive_cli(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ohc close-archive")
     parser.add_argument("software")
     parser.add_argument("version")
-    parser.add_argument("status", choices=["success", "partial", "failed"])
+    parser.add_argument("status", choices=["published", "built", "failed", "archived"])
     parser.add_argument("--skip-patch", action="store_true")
     parser.add_argument("--project-dir")
     args = parser.parse_args(argv)

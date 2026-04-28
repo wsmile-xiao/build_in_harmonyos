@@ -1,19 +1,24 @@
-# gsm 1.0.23 — OpenHarmony 编译记录
+# gsm
 
-## 基本信息
-- 软件: gsm
-- 版本: 1.0.23
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+GSM 06.10 语音编解码库 — 实现欧洲 GSM 全速率语音编解码标准。附带 toast/untoast 压缩工具。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 使用简单 Makefile，需修改 `CC=gcc` → `CC=clang`
+- 需添加 `-fPIC` 到 CCFLAGS
+- HMDFS 不支持硬链接，需设置 `LN=ln -s`
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 编译依赖：无
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+toast -h 2>&1 | head
+# 压缩测试
+echo "test audio data" > test.pcm
+toast test.pcm
+untoast test.gsm
+```
+
+## 参考
+- 官方网站：https://www.quut.com/gsm/

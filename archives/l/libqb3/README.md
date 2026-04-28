@@ -1,19 +1,17 @@
-# libqb3 1.3.2 — OpenHarmony 编译记录
+# libqb3
 
-## 基本信息
-- 软件: libqb3
-- 版本: 1.3.2
+## 简介
+QB3 raster compression library
+
+## OHOS 适配
 - 构建系统: autotools
-- 目标: ohos-aarch64
+- 详见各版本 notes.md 获取适配详情
 
-## 编译指导
-<!-- 编译注意事项 -->
-
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+待补充
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+待补充
+
+## 参考
+- https://github.com/lucianpls/QB3

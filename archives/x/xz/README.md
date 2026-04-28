@@ -1,25 +1,21 @@
-# xz 5.6.2 for HarmonyOS/OpenHarmony
+# XZ Utils
 
-> **编译日期**: 2026-04-09 19:26:39
-> **状态**: 🔵 编译中
-> **构建系统**: unknown
+## 简介
+通用数据压缩软件，提供高压缩比的 LZMA2/XZ 格式支持，包含 xz、lzma、xzcat 等工具。
 
-## 一、软件简介
+## OHOS 适配
+- 需修补 config.guess/config.sub 和 po 文件
+- autotools 构建
+- 12 个补丁文件（含自动生成的构建文件）
 
-（待编译完成后填写）
+## 依赖
+- 标准 C 库
 
-## 二、编译指导
+## 功能验证
+```bash
+xz --version
+echo "test" | xz | xz -d
+```
 
-（待编译完成后填写）
-
-## 三、补丁清单
-
-（待补丁生成后填写）
-
-## 四、已知限制
-
-（待测试后填写）
-
-## 五、功能验证
-
-（待验证后填写）
+## 参考
+- 官网: https://tukaani.org/xz/

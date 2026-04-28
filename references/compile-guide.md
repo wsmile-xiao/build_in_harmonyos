@@ -39,7 +39,7 @@ if [ "$BUILD_HISTORY_FOUND" = "true" ]; then
 fi
 
 # ④ 识别构建系统（如需要）
-${SKILL_ROOT}/scripts/ohc-run.py detect-build-system (已归档) .  # 可选，context 已含 BUILD_SYSTEM
+${SKILL_ROOT}/scripts/ohc-run.py detect-build-system (已废弃，请使用 ohc-run.py engine) .  # 可选，context 已含 BUILD_SYSTEM
 ```
 
 ### 2.1.1 预编译风险扫描（build Step 2.5，自动执行）
@@ -77,53 +77,63 @@ findings:
 
 ---
 
-## 2.2 执行编译（--prefix 指向 $TEST_PREFIX 隔离目录）
+## 2.2 执行编译（DESTDIR 路径隔离模式）
 
 > **⚠️ 每次操作前必须 source 上下文文件（R11）**：
 > ```bash
 > # 新会话 / 重新操作前必须执行：
 > source .build-context-<name>-<ver>
 > echo "TEST_PREFIX=$TEST_PREFIX"   # 确认不为空
+> echo "DEFAULT_PREFIX=$DEFAULT_PREFIX"
 > ```
-> 否则 `$TEST_PREFIX` 为空 → configure 报错 → 浪费 10+ 分钟重跑。
+> 否则变量为空 → configure 报错 → 浪费 10+ 分钟重跑。
 
+### DESTDIR 路径隔离模式（⭐ 统一标准）
+
+| 变量 | 值 | 说明 |
+|------|------|------|
+| `$DEFAULT_PREFIX` | `/storage/Users/currentUser/usr/local` | **运行时安装路径**（configure --prefix 使用） |
+| `$TEST_PREFIX` | `$TMPDIR/test-install-{name}-{ver}` | **临时安装隔离根**（DESTDIR 使用） |
+| `$STAGING_PREFIX` | `$TEST_PREFIX/$DEFAULT_PREFIX`（去掉开头 `/`） | **实际产物位置**（验证/打包时使用） |
+
+> `$STAGING_PREFIX` 示例：`/home/currentUser/tmp/test-install-xxx/storage/Users/currentUser/usr/local`
+
+**原理**：
 ```bash
-# 方式 A: configure 时指定 prefix（标准做法）
-./configure --prefix=$TEST_PREFIX && make -j1 && make install
+# configure 使用运行时路径（会被 bake 进二进制）
+./configure --prefix=$DEFAULT_PREFIX
 
-# 方式 B: configure 不指定，make install 时指定（更灵活，推荐）
-#    优势：同一编译产物可安装到不同位置，无需重跑 configure
-./configure && make -j1 && make install prefix=$TEST_PREFIX
+# install 时通过 DESTDIR 隔离到临时目录（不影响系统）
+make install DESTDIR=$TEST_PREFIX
 
-# 方式 C: DESTDIR staging（最常用，ohc-run.py package 内部使用）
-./configure && make -j1 && make install DESTDIR=$TEST_PREFIX
-
-# CMake 项目
-cmake -DCMAKE_INSTALL_PREFIX=$TEST_PREFIX .. && make && make install
-
-# Meson 项目
-meson setup builddir --prefix=$TEST_PREFIX && ninja -C builddir && ninja -C builddir install
-
-# Makefile 项目（无 configure）
-make PREFIX=$TEST_PREFIX && make PREFIX=$TEST_PREFIX install
+# 产物实际位置
+ls $STAGING_PREFIX/bin/    # 验证二进制
+ls $STAGING_PREFIX/lib/    # 验证库文件
 ```
 
-**⚠️ P0 参数最少化**：理想状态只需 `--prefix=$TEST_PREFIX`。
+**为什么用 DESTDIR**：
+1. 二进制硬编码路径天然正确（$DEFAULT_PREFIX 而非临时路径）
+2. GNU 标准做法，autotools/cmake/meson 原生支持
+3. 打包时直接从 staging 收集，路径结构匹配
+4. 无需额外的路径修复步骤
 
-### $TEST_PREFIX vs $DEFAULT_PREFIX
+### 各构建系统的 DESTDIR 命令
 
-| 变量 | 值 | 用途 |
-|------|-----|------|
-| `$TEST_PREFIX` | `${TMPDIR:-$HOME/tmp}/test-install-{name}-{ver}` | **configure --prefix 目标**（staging） |
-| `$DEFAULT_PREFIX` | `/storage/Users/currentUser/usr/local` | **最终部署目标**（install.sh 写入） |
+```bash
+# Autotools 项目（标准做法）
+./configure --prefix=$DEFAULT_PREFIX && make -j1 && make install DESTDIR=$TEST_PREFIX
 
-**为什么不用 $DEFAULT_PREFIX？**
-1. 失败时系统目录已被污染 → 清理困难
-2. 无法区分"编译产物"和"已部署状态"
-3. ohc-run.py package 打包来源不明确
-4. 不再需要 Phase 2.5 二次编译（本身就是隔离的）
+# CMake 项目
+cmake -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX .. && make && make install DESTDIR=$TEST_PREFIX
 
-**⚠️ P0 参数最少化**：理想状态只需 `--prefix`。如果必须加额外参数（`--build/--host`/`--without-shared`/CFLAGS hack），记录到 PROGRESS.md 并在 manifest.yaml `build_cleanliness` 字段标注为技术债务。
+# Meson 项目
+meson setup builddir --prefix=$DEFAULT_PREFIX && ninja -C builddir && ninja -C builddir install
+
+# Makefile 项目（无 configure，使用 PREFIX/DESTDIR）
+make PREFIX=$DEFAULT_PREFIX && make PREFIX=$DEFAULT_PREFIX DESTDIR=$TEST_PREFIX install
+```
+
+**⚠️ P0 参数最少化**：理想状态只需 `--prefix=$DEFAULT_PREFIX` + `DESTDIR=$TEST_PREFIX`。如果必须加额外参数（`--build/--host`/`--without-shared`/CFLAGS hack），记录到 notes.md 并在 manifest.yaml `build_cleanliness` 字段标注为技术债务。
 
 ### 变量命名规范（⭐ C01 统一）
 
@@ -183,11 +193,14 @@ meson test -C builddir 2>&1 | tail -20
 ## 2.2.2 部署到本地 + 用户验证（⭐ package 完成后必须执行）
 
 > **时机**：`ohc-run.py package` 完成后、`ohc-run.py finish` 之前。
-> **目的**：将软件安装到 `$DEFAULT_PREFIX`（~/usr/local），模拟普通用户下载预编译包、运行 `install.sh` 后的真实状态。
+> **目的**：将软件安装到 `$DEFAULT_PREFIX`（~/usr/local），模拟普通用户下载预编译包、通过 cmd-pkgs 公共安装脚本部署后的真实状态。
+>
+> **注意**：driver.py Step 10 已自动执行 deploy（从 staging 复制到 $DEFAULT_PREFIX）。此处为手动验证步骤。
 
 ```bash
-# 安装到本地（不带 DESTDIR，直接安装到 ~/usr/local）
-make install
+# driver.py 已自动部署，此处验证安装结果
+# 如需手动部署（模拟），可用 make install 不带 DESTDIR：
+make install    # 直接安装到 $DEFAULT_PREFIX（configure 已设置 --prefix=$DEFAULT_PREFIX）
 
 # 验证本地安装可用
 $DEFAULT_PREFIX/bin/<软件> --version   # 确认可用
@@ -200,7 +213,7 @@ pkg-config --modversion <软件>          # 确认 pkg-config 可找到（如适
 > - pkg-config 文件中路径错误
 > - 运行时找不到数据文件/配置文件
 >
-> 这是整个流程的最终闭环验证：staging 中的路径经过 DESTDIR 天然正确，但 install.sh 部署后可能有差异。`make install` 到本地等于模拟了这个过程。
+> 这是整个流程的最终闭环验证：DESTDIR 模式下 --prefix=$DEFAULT_PREFIX 被硬编码进二进制，天然正确。但公共安装脚本部署后仍需验证实际运行效果。
 
 ---
 
@@ -239,7 +252,7 @@ pkg-config --modversion <软件>          # 确认 pkg-config 可找到（如适
 > ```
 >
 > **动态检测逻辑**（ohc-run.py build 内置 `find_tool()` 函数）：
-> 1. 先找 `$DEFAULT_PREFIX/bin/sed` → `$TEST_PREFIX/bin/sed` → PATH 中的版本
+> 1. 先找 `$DEFAULT_PREFIX/bin/sed` → `$STAGING_PREFIX/bin/sed` → PATH 中的版本
 > 2. 检查 `--version` 输出是否含 "GNU" → 是则使用（功能更强）
 > 3. 否则 fallback 到 `/bin/sed`（系统原生 toybox）
 >
@@ -277,7 +290,7 @@ configure 失败:
 
 Phase 3 的职责只有两件事：
 1. **修改源码**解决编译问题
-2. **在 PROGRESS.md 记录**每个修改的意图
+2. **在 notes.md 记录**每个修改的意图
 
 原因：Phase 3 源码处于频繁试错状态，此时生成的补丁是中间态。
 补丁生成**唯一入口**是 Phase 4 的 `ohc-run.py refresh-patch --auto`。
@@ -285,7 +298,7 @@ Phase 3 的职责只有两件事：
 **允许的操作**：
 - ✅ `sed` / 直接编辑源码（解决编译问题）
 - ✅ 创建 post-configure hook 脚本（§3.9）
-- ✅ 在 PROGRESS.md「源码修改清单」中记录
+- ✅ 在 notes.md「源码修改清单」中记录
 
 **禁止的操作**：
 - ❌ 生成任何 `.patch` 文件
@@ -304,26 +317,26 @@ AI 必须逐项自检：
 
 ### 自检清单
 
-- [ ] **config.sh 未手动修改**：所有配置差异都通过 `Configure -D` 参数或 `hints/{osname}.sh` 实现？
+- **config.sh 未手动修改**：所有配置差异都通过 `Configure -D` 参数或 `hints/{osname}.sh` 实现？
   - ❌ 反面：`sed -i 's|lddlflags=.*|...|' config.sh`
   - ✅ 正确：`hints/harmonyos.sh` 中设置 `lddlflags='-shared'`
 
-- [ ] **无手动编译命令**：所有编译都通过 `make` 规则自动完成？
+- **无手动编译命令**：所有编译都通过 `make` 规则自动完成？
   - ❌ 反面：`clang -c -o DynaLoader.o DynaLoader.c` 手动执行
   - ✅ 正确：修复 Makefile.PL 依赖后由 `make` 自动编译
 
-- [ ] **无手动文件操作**：没有在构建过程中手动 cp/mv/touch 文件？
+- **无手动文件操作**：没有在构建过程中手动 cp/mv/touch 文件？
   - ❌ 反面：`cp libperl.a /some/path/` 手动复制
   - ✅ 正确：Makefile install 规则自动处理
 
-- [ ] **补丁覆盖所有修改**：`track-edit` 记录的每个修改都有对应补丁？
+- **补丁覆盖所有修改**：`track-edit` 记录的每个修改都有对应补丁？
   - 用 `ohc-run.py track-edit --status` 检查
   - 未覆盖的修改需要说明原因
 
-- [ ] **平台代码有守卫**：所有 `#ifdef`/条件分支使用 `__OHOS__` 或 `$^O eq 'harmonyos'`？
+- **平台代码有守卫**：所有 `#ifdef`/条件分支使用 `__OHOS__` 或 `$^O eq 'harmonyos'`？
   - 非鸿蒙平台编译不受影响
 
-- [ ] **可以一条龙**：确认 `tar xf → patch → Configure → make → make install` 能无人工介入完成？
+- **可以一条龙**：确认 `tar xf → patch → Configure → make → make install` 能无人工介入完成？
 
 ### 不通过的处理
 
@@ -369,7 +382,7 @@ AI 必须逐项自检：
 
 ```
 Q1: 此问题只与本软件有关？
-    → 是：只记录到 PROGRESS.md
+    → 是：只记录到 notes.md
     → 否（其他软件也可能遇到）：
         Q2: 与平台机制相关？（musl/SELinux/文件系统/内核）
             → 是：立即创建知识图谱草稿（L1 平台真理）
@@ -410,7 +423,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py graph add E096 --draft
 # Step 5: 补充 .md 文档（编辑 draft 中的 .md 文件）
 # 写入：错误特征、根因分析、解决方案、禁止做法、验证命令
 
-# Step 6: 在 PROGRESS.md 记录 "知识图谱草稿: E096"
+# Step 6: 在 notes.md 记录 "知识图谱草稿: E096"
 ```
 
 ### 常见分类标签
@@ -443,17 +456,17 @@ knowledge/graph/draft/
 鸿蒙系统首次执行非系统二进制会弹安全确认框，超时未点则进程被杀。
 
 ```bash
-# make install 后立即触发（在 $TEST_PREFIX 中验证）
-find $TEST_PREFIX/bin -type f -exec {} --version \; 2>/dev/null || true
+# make install 后立即触发（在 staging 目录中验证）
+find $STAGING_PREFIX/bin -type f -exec {} --version \; 2>/dev/null || true
 
 # make check 前确保已完成弹窗确认
 ```
 
 ---
 
-## 2.8 更新 PROGRESS.md
+## 2.8 更新 notes.md
 
-每解决一个问题后**立即**更新 PROGRESS.md：
+每解决一个问题后**立即**更新 notes.md：
 - 当前阶段和时间
 - 错误信息 + 根因 + 解决方案
 - 源码修改清单（表格：文件 | 原因 | 方式 | 补丁状态）

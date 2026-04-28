@@ -1,19 +1,21 @@
-# libdeflate 1.25 — OpenHarmony 编译记录
+# libdeflate
 
-## 基本信息
-- 软件: libdeflate
-- 版本: 1.25
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+libdeflate 是优化的 DEFLATE/zlib/gzip 压缩库，提供高性能压缩和解压缩。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- CMake 构建，编译过程简单
+- 提供静态库和共享库
+- 附带 libdeflate-gzip/libdeflate-gunzip 工具
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 无编译依赖
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+libdeflate-gzip --help
+ls -la $HOME/usr/local/lib/libdeflate*
+```
+
+## 参考
+- 主页: https://github.com/ebiggers/libdeflate

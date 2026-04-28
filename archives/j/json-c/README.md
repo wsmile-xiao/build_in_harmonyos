@@ -1,19 +1,21 @@
-# json-c 0.17 — OpenHarmony 编译记录
+# json-c
 
-## 基本信息
-- 软件: json-c
-- 版本: 0.17
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+json-c 是一个 C 语言的 JSON 库，提供 JSON 对象的创建、解析、操作和序列化功能。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 标准autotools 项目，需要 config.guess/config.sub 补丁识别 HarmonyOS 系统
+- 需要小补丁修复 json_util.c 中的平台兼容问题
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 编译依赖：clang, make
+- 运行依赖：libc
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+# 检查库安装
+ls -la $HOME/usr/local/lib/libjson-c*
+```
+
+## 参考
+- 源码：https://github.com/json-c/json-c

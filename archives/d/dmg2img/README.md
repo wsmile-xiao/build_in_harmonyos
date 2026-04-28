@@ -1,19 +1,22 @@
-# dmg2img 1.6.7 — OpenHarmony 编译记录
+# dmg2img
 
-## 基本信息
-- 软件: dmg2img
-- 版本: 1.6.7
-- 构建系统: autotools
-- 目标: ohos-aarch64
+dmg2img 是一个将 Apple DMG（Disk Image）格式转换为 IMG/raw 格式的命令行工具。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
+- 将 DMG 格式转换为 raw/IMG 格式
+- 支持加密 DMG 解密（通过 vfdecrypt）
+- 支持压缩 DMG 转换
+- 依赖 zlib 和 bzip2 进行解压
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## OHOS 适配
+- 纯 Makefile 项目，无 configure 脚本
+- 需要修改 Makefile 添加交叉编译支持（CC、CFLAGS、LDFLAGS）
+- vfdecrypt.c 使用了 OpenSSL 1.1.1 已废弃的 API（EVP_CIPHER_CTX、HMAC_CTX），需要适配
+- 编译和安装过程简单直接
 
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖关系
+- **编译依赖**: zlib, bzip2, openssl
+- **运行依赖**: zlib, bzip2, openssl（共享库）
 
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- 官网: http://vu1tur.eu.org/tools/

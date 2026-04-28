@@ -368,7 +368,7 @@ name:                   CFLAGS hack 必须记录为技术债务
 level:                  medium
 scope:                   E005, E011, E032, E033, E063
 statement:              CFLAGS/CPPFLAGS/LDFLAGS 强制绕过编译错误时，
-                         必须在 PROGRESS.md 记录技术债务及期望的上游修复方式。
+                         必须在 notes.md 记录技术债务及期望的上游修复方式。
 forbid_1_pattern:
 forbid_1_auto_reject:
 

@@ -66,7 +66,7 @@ class PackageBuilder:
         (self.pkgdir / "lib" / "external").mkdir(parents=True, exist_ok=True)
 
     def step2_copy(self):
-        log_info("Step 2/10: 复制文件...")
+        log_info("Step 2/9: 复制文件...")
         # Dynamic scan: copy all top-level dirs and files from src_prefix
         if self.src_prefix.exists():
             for item in sorted(self.src_prefix.iterdir()):
@@ -245,79 +245,8 @@ class PackageBuilder:
                 fixed += 1
         log_ok(f"  修复 {fixed} 个文件权限")
 
-    def step9_install_sh(self):
-        log_info("Step 9/10: 生成 install.sh (版本级本地安装)...")
-        sw, ver = self.software, self.version
-        tar_name = f"{sw}-{ver}-ohos-aarch64"
-
-        # ── 版本级 install.sh：本地 tar.gz 安装 ──
-        version_install_script = (
-            f"#!/bin/sh\n"
-            f"# install.sh for {sw} {ver} (OpenHarmony aarch64)\n"
-            f"# Usage: sh install.sh [prefix]\n"
-            f"#   Default prefix: $HOME/usr/local\n"
-            f"set -e\n"
-            f"\n"
-            f"PREFIX=${{1:-$HOME/usr/local}}\n"
-            f"SCRIPT_DIR=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\n"
-            f"\n"
-            f"# Find tarball (local packaging dir or version-specific subdir)\n"
-            f"TAR_GZ=\"\"\n"
-            f"for candidate in \\\n"
-            f"    \"$SCRIPT_DIR/{tar_name}.tar.gz\" \\\n"
-            f"    \"$SCRIPT_DIR/packaging/{tar_name}.tar.gz\" \\\n"
-            f"    \"$SCRIPT_DIR/{ver}/packaging/{tar_name}.tar.gz\"; do\n"
-            f"    if [ -f \"$candidate\" ]; then\n"
-            f"        TAR_GZ=\"$candidate\"\n"
-            f"        break\n"
-            f"    fi\n"
-            f"done\n"
-            f"\n"
-            f"if [ -z \"$TAR_GZ\" ]; then\n"
-            f"    echo 'Error: {tar_name}.tar.gz not found' >&2\n"
-            f"    exit 1\n"
-            f"fi\n"
-            f"\n"
-            f"# Extract and install\n"
-            f"TMPDIR=$(mktemp -d)\n"
-            f"trap 'rm -rf \"$TMPDIR\"' EXIT\n"
-            f"tar xzf \"$TAR_GZ\" -C \"$TMPDIR\"\n"
-            f"\n"
-            f"# Copy all top-level directories (dynamic: bin lib share sbin libexec etc ...)\n"
-            f"for d in \"$TMPDIR\"/*/; do\n"
-            f"    dname=$(basename \"$d\")\n"
-            f"    mkdir -p \"$PREFIX/$dname\" && cp -a \"$d\" \"$PREFIX/$dname/\"\n"
-            f"done\n"
-            f"# Copy top-level files if any\n"
-            f"for f in \"$TMPDIR\"/*; do\n"
-            f"    [ -f \"$f\" ] && cp -a \"$f\" \"$PREFIX/\"\n"
-            f"done\n"
-            f"\n"
-            f"# Fix permissions\n"
-            f"chmod +x \"$PREFIX/bin/\"* 2>/dev/null || true\n"
-            f"chmod +x \"$PREFIX/sbin/\"* 2>/dev/null || true\n"
-            f"\n"
-            f"# Pre-trigger binary confirmation dialogs (HarmonyOS security)\n"
-            f"for bin in \"$PREFIX/bin/\"* \"$PREFIX/sbin/\"*; do\n"
-            f"    [ -f \"$bin\" ] && \"$bin\" --version >/dev/null 2>&1 || true\n"
-            f"done\n"
-            f"\n"
-            f"echo '{sw} {ver} installed to $PREFIX'\n"
-        )
-
-        # Write version-level install.sh to packaging dir
-        install_sh_pkg = self.packaging_dir / f"install-{sw}-{ver}.sh"
-        install_sh_pkg.write_text(version_install_script, encoding="utf-8")
-        os.chmod(install_sh_pkg, 0o755)
-
-        # NOTE: 软件级 install.sh 已废弃（v8.1+）
-        # 统一使用 templates/universal-install.sh，托管在 cmd-pkgs release 的 pkgs tag 下
-        # 用户安装: curl -fsSL .../pkgs/install.sh | sh -s -- <name> <version>
-
-        log_ok(f"  install.sh -> {install_sh_pkg.name}")
-
-    def step10_tarball(self):
-        log_info("Step 10/10: 打包 tar.gz...")
+    def step9_tarball(self):
+        log_info("Step 9/9: 打包 tar.gz...")
         tar_name = f"{self.software}-{self.version}-ohos-aarch64"
 
         # Dynamic: collect all top-level directories in pkgdir
@@ -367,8 +296,14 @@ class PackageBuilder:
         self.step6_strip()
         self.step7_sign()
         self.step8_permissions()
-        self.step9_install_sh()
-        self.step10_tarball()
+        self.step9_tarball()
+        # Clean up temporary directories
+        if self.pkgdir.exists():
+            shutil.rmtree(self.pkgdir, ignore_errors=True)
+            log_info("  清理临时目录: pkg-*/")
+        if self.debug_dir.exists():
+            shutil.rmtree(self.debug_dir, ignore_errors=True)
+            log_info("  清理临时目录: debug-symbols/")
         # Write completion marker (finish.py uses this to verify)
         marker = self.packaging_dir / ".packaged"
         marker.write_text(

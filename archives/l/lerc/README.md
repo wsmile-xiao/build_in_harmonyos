@@ -1,19 +1,19 @@
-# lerc 4.0.0 — OpenHarmony 编译记录
+# lerc
 
-## 基本信息
-- 软件: lerc
-- 版本: 4.0.0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+Lerc (Limited Error Raster Compression) 是 Esri 开发的栅格数据压缩库，支持有损/无损压缩。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 2.2 版本使用 autotools，4.0.0 版本使用 CMake
+- CMake 版本编译无特殊问题
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 无编译依赖
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+ls -la $HOME/usr/local/lib/libLerc*
+```
+
+## 参考
+- 主页: https://github.com/Esri/lerc

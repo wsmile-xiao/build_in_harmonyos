@@ -1,19 +1,17 @@
-# libjpeg-turbo 3.1.4.1 — OpenHarmony 编译记录
+# libjpeg-turbo
 
-## 基本信息
-- 软件: libjpeg-turbo
-- 版本: 3.1.4.1
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+JPEG image codec with SIMD acceleration
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 构建系统: cmake
+- 详见各版本 notes.md 获取适配详情
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+待补充
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+待补充
+
+## 参考
+- https://libjpeg-turbo.org/

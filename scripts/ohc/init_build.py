@@ -510,7 +510,7 @@ def init_build(software: str, version: str = "", mode: str = "auto",
     # Step 6: Scaffold archive
     need_scaffold = True
     if history_found:
-        prog = archive_dir / "PROGRESS.md"
+        prog = archive_dir / "notes.md"
         mf = archive_dir / "manifest.yaml"
         if prog.exists() and len(prog.read_text(encoding="utf-8", errors="replace").splitlines()) > 15:
             if mf.exists() and len(mf.read_text(encoding="utf-8", errors="replace").splitlines()) > 10:

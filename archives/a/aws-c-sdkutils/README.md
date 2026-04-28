@@ -1,19 +1,16 @@
-# aws-c-sdkutils 0.2.4 — OpenHarmony 编译记录
+# AWS C SDK Utils — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: aws-c-sdkutils
-- 版本: 0.2.4
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+aws-c-sdkutils 提供 AWS SDK 实用工具，包括端点解析器和配置管理。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
+- AWS 端点解析
+- SDK 配置管理
+- 环境变量/配置文件解析
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖关系
+- 编译依赖: aws-c-common
+- 被依赖: aws-c-auth, aws-c-s3
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [aws-c-sdkutils GitHub](https://github.com/awslabs/aws-c-sdkutils)

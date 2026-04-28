@@ -59,7 +59,7 @@ Step 2:  AI 编译                 configure + make + make install
 Step 2.5: 独立目录安装验证       干源码 + 补丁 + 独立 TEST_PREFIX
 Step 3:  make check / 功能验证   测试套件或手动功能测试
 Step 4:  ohc-run.py verify-build         质量门禁（G1-G4 四道检测）
-Step 5:  预编译包制作            10 步打包流程
+Step 5:  预编译包制作            9 步打包流程
 Step 5.5: ohc-run.py finalize-archive    归档收口
 Step 6:  ohc-run.py submit              提交工作成果
 ```
@@ -404,7 +404,7 @@ patches/
 4. **ELF 签名**：binary-sign-tool adhoc self-sign
 5. **权限修复**：签名后必须 chmod +x（签名工具会重置权限）
 
-### 10 步流程概要
+### 9 步流程概要
 
 ```
 Step 1:  make install 到独立目录
@@ -555,7 +555,7 @@ knowledge_ref: []             # 引用的 E 编号列表（主编审核用）
 | 脚本 | 用途 | 角色 |
 |------|------|------|
 | `ohc-run.py init-build` | 编译初始化（含依赖检查） | 协作者 |
-| `ohc-run.py build` | 14 步编译驱动 | 协作者 |
+| `ohc-run.py build` | 13 步编译驱动 | 协作者 |
 | `ohc-run.py finish` | 收尾管线（4步） | 协作者 |
 | `ohc-run.py resolve-deps` | 依赖预编译包查询/安装 | 协作者 |
 | `ohc-run.py refresh-patch --auto` | 补丁自动生成 | 协作者 |

@@ -1,19 +1,21 @@
-# aws-c-io 0.26.3 — OpenHarmony 编译记录
+# AWS C IO — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: aws-c-io
-- 版本: 0.26.3
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+aws-c-io 处理所有 IO 和 TLS 工作，提供事件循环、Socket 通道和异步 IO 操作。是 AWS C SDK 的 IO 基础层。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
+- 事件循环（基于 Linux epoll）
+- Socket 通道（TCP/UDP）
+- TLS 通道（BYO_CRYPTO 模式）
+- 异步 IO 操作
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## OHOS 适配要点
+- **关键**: 使用 `-DBYO_CRYPTO=ON` 禁用 s2n TLS 依赖
+- CMake 不识别 HarmonyOS，使用 `-DCMAKE_SYSTEM_NAME=Linux`
 
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖关系
+- 编译依赖: aws-c-common, aws-c-cal, aws-c-compression
+- 被依赖: aws-c-http, aws-c-mqtt, aws-c-s3, aws-crt-cpp
 
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [aws-c-io GitHub](https://github.com/awslabs/aws-c-io)

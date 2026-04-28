@@ -1,19 +1,20 @@
-# zopfli 1.0.3 — OpenHarmony 编译记录
+# Zopfli
 
-## 基本信息
-- 软件: zopfli
-- 版本: 1.0.3
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+Google 开发的压缩库，能生成比标准 zlib 更小的 gzip/zlib 输出（压缩比提升 3-8%），但速度较慢。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- Makefile 构建，无 configure 步骤
+- 需添加 install 目标支持 DESTDIR 安装
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 标准 C 库
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+zopfli --help
+zopflipng --help
+```
+
+## 参考
+- 源码: https://github.com/google/zopfli

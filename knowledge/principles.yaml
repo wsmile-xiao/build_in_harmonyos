@@ -4,8 +4,10 @@
 # match_error_pattern() v3 引擎在生成修复方案后，
 # 会用这些原则对候选方案进行过滤/拒绝/降级。
 #
-# 格式: 每条原则有 id, name, scope(适用模式列表), statement,
-#       forbidden_patterns(自动检测+拒绝的正则列表)
+# level: critical=自动拒绝 | high=警告+记录 | medium=仅记录
+# forbid_N_auto_reject: true=引擎自动拒绝含此pattern的方案
+#
+# 本文件与 graph/principles.kv 保持同步，是原则的人类可读版本。
 
 principles:
   # ═══════════════════════════════════════════
@@ -14,44 +16,32 @@ principles:
 
   - id: P-AUTOTOOLS-001
     name: "禁止 --build/--host 绕过系统检测"
-    severity: critical
+    level: critical
     scope: [E007, E064]
     statement: >
-      在鸿蒙上编译 autotools 项目时，严禁使用 --build= 或 --host= 参数
-      让 configure 绕过 config.guess/config.sub 的系统类型检测。
-      鸿蒙是**原生编译环境**（aarch64 架构，本地执行），不是交叉编译。
-      使用这些参数会导致：
-        1. configure 误判 cross_compiling=yes
-        2. AC_RUN_IFELSE / AC_TRY_RUN 等运行时检测全部跳过
-        3. 大量平台能力使用硬编码默认值（通常基于 Linux glibc）
-        4. 生成的 config.h 与实际平台不匹配
-        5. 后续链接、运行时出现难以排查的级联错误
-      正确做法是修改 config.guess/config.sub 添加 HarmonyOS 检测分支。
+      鸿蒙是原生编译环境(aarch64)，不是交叉编译。
+      使用 --build/--host 绕过 config.guess 会导致:
+      cross_compiling=yes → AC_RUN_IFELSE 跳过 → config.h 错误
     forbidden_patterns:
       - pattern: "--build=.*linux-|--host=.*linux-"
         auto_reject: true
-        reason: "将鸿蒙伪装为 Linux，导致交叉编译误判"
-        suggest: "使用 patch-autotools-ohos.pl 或下载最新 GNU config"
+        suggest: "使用 download-gnuconfig 或 patch-autotools-ohos.pl"
       - pattern: "--build=.*gnu|--host=.*gnu"
         auto_reject: true
-        reason: "同上，任何 --build/--host 绕过都是错误的"
         suggest: "同上"
 
   - id: P-AUTOTOOLS-002
     name: "conftest 必须能正常执行"
-    severity: critical
+    level: critical
     scope: [E064, E061, E062, E063, E065]
     statement: >
-      autotools configure 通过编译并执行 conftest 测试程序来检测平台能力。
-      在鸿蒙上 conftest 首次执行可能被安全弹窗拦截。必须确保：
-        1. 首次运行前先触发安全弹窗确认（手动执行一次任意二进制）
-        2. 或使用 ac_cv_* 缓存变量预填充检测结果
-        3. 绝不使用 --host 绕过（见 P-AUTOTOOLS-001）
+      configure 通过编译+执行 conftest 检测平台能力。
+      鸿蒙上首次执行二进制需安全弹窗确认。
+      弹窗超时 → configure 误判交叉编译 → 级联错误。
     forbidden_patterns:
       - pattern: "cross.compiling=yes"
         auto_reject: false
-        reason: "警告：configure 可能已进入交叉编译模式"
-        suggest: "检查是否触发了安全弹窗超时"
+        suggest: "先手动触发安全弹窗，再用 ac_cv_* 缓存变量"
 
   # ═══════════════════════════════════════════
   # 补丁质量原则
@@ -59,50 +49,49 @@ principles:
 
   - id: P-PATCH-001
     name: "修改生成文件必须保存为 .patch"
-    severity: high
-    scope: [E058, E059, E007, E008, E063]
+    level: high
+    scope: [E007, E008, E063]
     statement: >
-      对 configure/Makefile/config.h 等 autotools **生成文件**的 sed 修改：
-        - 如果源码有 configure.ac → 应修改 configure.ac 并重新生成（优先级①）
-        - 如果只有 configure（上游 tarball）→ 直接修改 configure 并存为 .patch（优先级②）
-        - **绝对不允许**只做 sed 不存 patch（下次 distclean 后丢失）
+      configure/Makefile/config.h 是 autotools 生成文件。
+      sed 修改后必须存为 .patch，否则 distclean 后丢失。
     forbidden_patterns:
       - pattern: "sed -i.*(configure|Makefile|config\\.h)"
         auto_reject: false
-        reason: "警告：检测到对生成文件的 sed 操作，请确认已保存为 .patch"
-        suggest: "检查 patches/ 目录是否有对应 .patch 文件"
+        suggest: "确认 patches/ 目录有对应 .patch 文件"
 
   - id: P-PATCH-002
-    name: "__OHOS__ 守卫是平台隔离的标准写法"
-    severity: high
-    scope: [E008, E011, E051, E060, E004, E020]
+    name: "__OHOS__ 守卫是平台隔离标准写法"
+    level: high
+    scope: [E008, E011, E051, E004, E020]
     statement: >
-      所有鸿蒙适配代码必须使用 `#ifdef __OHOS__` 守卫。
-      这是 clang 在鸿蒙平台上自动定义的宏，精确且唯一。
-      禁止使用的替代写法：
-        ❌ `#ifndef __linux__` — 排除了所有非 Linux 系统（BSD, macOS 等）
-        ❌ `#if !defined(__GLIBC__)` — 排除了 musl 的其他使用者
-        ❌ 硬编码路径如 `/data/service/hnp/` — 不可移植
+      #ifdef __OHOS__ 是 clang 自动定义的宏，精确唯一。
+      禁止 #ifndef __linux__(排除BSD/macOS)和硬编码路径。
     forbidden_patterns:
       - pattern: "#ifndef\\s*__linux__"
         auto_reject: true
-        reason: "用 Linux 排除法做平台隔离，影响可上游化"
         suggest: "改为 #ifdef __OHOS__"
-      - pattern: "#if.*!defined\\(__GLIBC__\\)"
-        auto_reject: false
-        reason: "建议改用 __OHOS__ 守卫（但 musl 兼容场景可接受）"
-        suggest: "评估是否可以改为 #ifdef __OHOS__"
 
   - id: P-PATCH-003
     name: "补丁必须可向上游提交"
-    severity: medium
-    scope: [E058, E059, E060, E008, E039]
+    level: medium
+    scope: [E008, E039]
     statement: >
-      所有源码修改应遵循上游编码风格：
-        1. 使用标准 POSIX/C99 特性，避免 GNU 扩展依赖
-        2. 注释用英文（HarmonyOS: <reason> 格式）
-        3. 不引入鸿蒙特有的 SDK/API 依赖（除非绝对必要）
-        4. 守卫条件尽可能精确（__OHOS__ > musl 检测 > Linux 检测）
+      遵循上游编码风格。英文注释(HarmonyOS: reason格式)。
+      不引入鸿蒙特有SDK/API依赖(除非绝对必要)。
+    forbidden_patterns: []
+
+  - id: P-PATCH-004
+    name: "补丁文件必须包含完整元数据 header"
+    level: high
+    scope: [E007, E008, E039, E063]
+    statement: >
+      每个补丁必须含 Source-Commit(被改文件的原始commit)、
+      Modification-Layer(修改层级①②③)、Knowledge-Ref(关联知识)。
+      缺失则无法追溯来源和复现补丁。
+    forbidden_patterns:
+      - pattern: "(diff|patch).*无Source-Commit|From:.*\\n(?!(Description|Origin|Upstream|Source-Commit))"
+        auto_reject: false
+        suggest: "补丁 header 必须包含: Description/Origin/Upstream/Source-Commit/Modification-Layer/Knowledge-Ref"
 
   # ═══════════════════════════════════════════
   # 编译参数原则
@@ -110,55 +99,48 @@ principles:
 
   - id: P-CFLAGS-001
     name: "CFLAGS hack 必须记录为技术债务"
-    severity: medium
+    level: medium
     scope: [E005, E011, E032, E033, E063]
     statement: >
-      通过 CFLAGS/CPPFLAGS/LDFLAGS 强制添加编译参数来绕过错误时：
-        1. 必须在 PROGRESS.md 记录为"技术债务"
-        2. 注明期望的上游修复方式（源码级修改）
-        3. 下个版本升级时应尝试移除此 hack
-      这类 hack 包括但不限于：-fPIC, -D_GNU_SOURCE, -Wno-error=*, -D__OHOS__
+      CFLAGS/CPPFLAGS/LDFLAGS 强制绕过编译错误时，
+      必须在 notes.md 记录技术债务及期望的上游修复方式。
     forbidden_patterns: []
 
   - id: P-CFLAGS-002
     name: "-Werror 禁用应精准到具体 warning 类别"
-    severity: low
+    level: medium
     scope: [E063]
     statement: >
       禁止全局禁用 -Werror（如 CFLAGS="-Wno-error"）。
       应精准到具体的 warning 类别（如 -Wno-error=int-conversion）。
       全局禁用会掩盖真正的编译错误。
+    forbidden_patterns: []
 
   # ═══════════════════════════════════════════
   # 运行时安全原则
   # ═══════════════════════════════════════════
 
   - id: P-RUNTIME-001
-    name: "未实现 syscall 必须在调用前拦截"
-    severity: critical
+    name: "未实现 syscall 必须调用前拦截"
+    level: critical
     scope: [E051]
     statement: >
-      鸿蒙内核对未实现的 syscall 发送 SIGSYS（signal 31）。
-      关键发现：setreuid/setregid 的 SIGSYS **不可被 signal handler 捕获**，
-      进程直接终止（exit code 159）。
-      因此**信号处理方案完全不可行**，必须在源码层面用 #ifdef __OHOS__
-      在 syscall 调用前直接返回 ENOSYS。
+      setreuid/setregid 的 SIGSYS 不可被 handler 捕获,
+      进程直接终止(exit 159)。信号处理方案完全不可行。
+      必须用 #ifdef __OHOS__ 在调用前 return ENOSYS。
     forbidden_patterns:
       - pattern: "signal\\(SIGSYS"
         auto_reject: true
-        reason: "SIGSYS handler 在 setreuid/setregid 上不会触发，进程仍会被杀"
-        suggest: "使用 #ifdef __OHOS__ 在调用前 return ENOSYS"
+        suggest: "用 #ifdef __OHOS__ 在调用前 return ENOSYS"
 
   - id: P-RUNTIME-002
-    name: "RPATH 设置必须覆盖所有 NEEDED 库"
-    severity: high
-    scope: [E042, E019, E052]
+    name: "RPATH 必须覆盖所有 NEEDED 库"
+    level: high
+    scope: [E042, E019]
     statement: >
-      打包可移植包时，RPATH 设置必须覆盖：
-        1. 主程序的直接 NEEDED
-        2. 共享库的传递性 NEEDED
-        3. 扩展模块（lib-dynload/*.so）的 NEEDED（最容易被遗漏）
-      遗漏任何一层都会在部署目标机上出现 ImportError。
+      可移植包 RPATH 必须: 主程序→共享库→扩展模块,
+      任何一层遗漏都会在目标机出现 ImportError。
+    forbidden_patterns: []
 
   # ═══════════════════════════════════════════
   # 工具链原则
@@ -166,17 +148,169 @@ principles:
 
   - id: P-TOOLCHAIN-001
     name: "必须使用 LLVM 工具链"
-    severity: high
+    level: high
     scope: [E012, E053]
     statement: >
-      鸿蒙 SDK 只提供 LLVM/Clang 工具链，没有 GCC/binutils。
-      所有 ar/ranlib/nm/strip/objcopy 必须使用 llvm-* 版本。
-      C++ 编译器是 clang++（无 cc1plus）。
+      鸿蒙 SDK 只有 LLVM/Clang。ar/ranlib/nm/strip 用 llvm-* 版本。
+      C++ 编译器是 clang++ (无 cc1plus)。
     forbidden_patterns:
       - pattern: "\\bar\\b(?!llvm-ar)"
         auto_reject: false
-        reason: "警告：检测到 ar 调用，确认使用的是 llvm-ar"
         suggest: "export AR=llvm-ar RANLIB=llvm-ranlib NM=llvm-nm"
 
+  # ═══════════════════════════════════════════
+  # 链接原则
+  # ═══════════════════════════════════════════
+
+  - id: P-LINKAGE-001
+    name: "静态库优先原则（系统库冲突防护）"
+    level: high
+    scope: [E042, E019, E067]
+    statement: >
+      鸿蒙系统关键组件(/bin/zsh 等)依赖系统共享库。
+      用户编译的同名共享库会覆盖系统库→系统不稳定。
+      判断标准: ldd /bin/xxx | grep <库名> → 有输出则必须用 --without-shared。
+    forbidden_patterns:
+      - pattern: "--with-shared(?!.*无系统依赖确认)"
+        auto_reject: false
+        suggest: "先检查系统是否已有同名库: ldd /bin/* | grep <库名>；有则用 --without-shared 编译静态库"
+
+  # ═══════════════════════════════════════════
+  # 构建原则
+  # ═══════════════════════════════════════════
+
+  - id: P-BUILD-001
+    name: "平台限制必须降级而非绕过"
+    level: high
+    scope: [E074, E046, E048, E055, E057]
+    statement: >
+      鸿蒙平台限制(FIFO/SELinux/HMDFS)是系统级行为差异，
+      不因重试而改变。遇到此类限制必须降级到可用方案(如单线程/skip-test/wrapper)，
+      禁止反复重试或忽略错误继续执行。
+    forbidden_patterns:
+      - pattern: "反复重试.*make -j|忽略.*Permission denied.*继续|skipIf.*False"
+        auto_reject: true
+        suggest: "识别限制类型后选择对应降级方案"
+
+  # ═══════════════════════════════════════════
+  # 环境原则
+  # ═══════════════════════════════════════════
+
+  - id: P-ENV-001
+    name: "环境变量与构建系统语义冲突陷阱"
+    level: medium
+    scope: [E075, E002, E074]
+    statement: >
+      某些环境变量(C_INCLUDE_PATH/LD_LIBRARY_PATH等)与pkg-config/make等
+      构建工具存在语义冲突。设置这些变量可能反而导致问题。
+      应优先使用构建系统原生机制(PKG_CONFIG_PATH/RPATH/Makefile变量)。
+    forbidden_patterns:
+      - pattern: "同时设置 C_INCLUDE_PATH 和 PKG_CONFIG_PATH"
+        auto_reject: false
+        suggest: "unset C_*_INCLUDE_PATH / LIBRARY_PATH，仅用 PKG_CONFIG_PATH"
+
+  # ═══════════════════════════════════════════
+  # Syscall 原则
+  # ═══════════════════════════════════════════
+
+  - id: P-SYSCALL-001
+    name: "内核 syscall 行为差异必须源码适配"
+    level: high
+    scope: [E076, E008, E051, E022, E025]
+    statement: >
+      鸿蒙内核对部分 syscall(fstat/lseek/setreuid/sigaction等)的返回值
+      与 Linux glibc 不同。这类差异无法通过环境变量或编译参数绕过，
+      必须在源码中用 #ifdef __OHOS__ 守卫做兼容处理。
+    forbidden_patterns:
+      - pattern: "忽略.*EACCES.*继续执行|suppress.*syscall.*error"
+        auto_reject: true
+        suggest: "用 #ifdef __OHOS__ 在调用处做兼容处理"
+
+  # ═══════════════════════════════════════════
+  # 文件系统原则
+  # ═══════════════════════════════════════════
+
+  - id: P-HMDFS-001
+    name: "HMDFS 文件系统限制必须用替代方案"
+    level: critical
+    scope: [E050, E073, E079, E080, E018]
+    statement: >
+      HMDFS(HarmonyOS 分布式文件系统)不支持符号链接和硬链接创建。
+      所有 ln -s / ln / symlink() 调用都会失败。
+      必须用 cp 复制、wrapper 脚本、makedirs 或 monkey-patch 替代。
+    forbidden_patterns:
+      - pattern: "ln -s.*HMDFS|symlink.*force|os\\.symlink.*ignore.*OSError"
+        auto_reject: true
+        suggest: "cp 复制替代软链接；wrapper 脚本替代 bin 软链接；try/except OSError"
+
+  - id: P-FS-001
+    name: "HMDFS 不支持硬链接和 FIFO，必须用替代方案"
+    level: high
+    scope: [E079, E018, E074]
+    statement: >
+      HMDFS(HarmonyOS 分布式文件系统)不支持硬链接(ln)和 FIFO(mkfifo)。
+      ccache、cargo、pnpm、git 等工具内部使用硬链接或 FIFO，
+      在 HMDFS 上会报 Operation not permitted。
+      必须用符号链接、文件拷贝或环境变量切换到兼容模式替代。
+    forbidden_patterns:
+      - pattern: "ln.*HMDFS|mkfifo.*HMDFS|hard.*link.*force"
+        auto_reject: true
+        suggest: "用 cp 替代硬链接；设置 CCACHE_NOLINK=1 等"
+
+  # ═══════════════════════════════════════════
+  # 签名原则
+  # ═══════════════════════════════════════════
+
+  - id: P-SIGN-001
+    name: "ELF 签名必须与运行环境匹配"
+    level: critical
+    scope: [E083, E077]
+    statement: >
+      HarmonyOS 的 musl 动态链接器和 BiSheng JDK 在加载 .so 时
+      校验 ELF 签名(.codesign 段)。系统预装的二进制拥有系统级签名，
+      用户编译的二进制使用 binary-sign-tool -selfSign 自签名。
+      两种签名体系不兼容：自签名的 .so 在系统 JDK 下加载失败(Permission denied)，
+      反之亦然。必须确保同一运行环境中所有 ELF 文件使用同一签名体系。
+    forbidden_patterns:
+      - pattern: "chmod.*777.*绕过签名|skip.*sign.*elf"
+        auto_reject: true
+        suggest: "拷贝 JDK 到用户路径后批量签名，或使用 sign-elf --batch 统一签名"
+
+  # ═══════════════════════════════════════════
+  # JNI 原则
+  # ═══════════════════════════════════════════
+
+  - id: P-JNI-001
+    name: "JNI 库必须与 JDK 签名体系一致且平台标识正确"
+    level: high
+    scope: [E084, E083]
+    statement: >
+      Java JNI 库在鸿蒙上需要特殊处理：
+      1. 平台标识为 harmonyos-aarch64（非 linux-aarch64），JAR 中的 native library 路径必须匹配
+      2. .so 文件必须与运行 JDK 使用同一 ELF 签名体系（见 P-SIGN-001）
+      3. 静态链接依赖（如 libffi.a）避免运行时依赖
+      4. 无 ant/maven 时可用 javac+clang+jar 手动构建
+    forbidden_patterns:
+      - pattern: "linux-aarch64.*only|harmonyos.*fallback.*linux"
+        auto_reject: false
+        suggest: "JAR 同时包含 harmonyos-aarch64 和 linux-aarch64 路径以兼容"
+
+  # ═══════════════════════════════════════════
+  # 打包原则
+  # ═══════════════════════════════════════════
+
+  - id: P-PACK-001
+    name: "可移植打包必须包含 post-install 签名步骤"
+    level: high
+    scope: [E077, E042]
+    statement: >
+      预编译包在目标机上解压后，ELF 文件可能被修改（patchelf RPATH、strip 等），
+      导致签名失效。公共安装脚本必须包含重新签名步骤。
+      任何修改 ELF 的操作后都必须重新签名。
+    forbidden_patterns:
+      - pattern: "patchelf.*without.*re-sign|strip.*without.*re-sign"
+        auto_reject: true
+        suggest: "公共安装脚本末尾调用 sign-elf --batch 重新签名所有 ELF"
+
 ---
-*principles.yaml · knowledge graph Layer 4 · v1 draft · 2026-04-09*
+*principles.yaml · knowledge graph Layer 4 · synced with principles.kv · 2026-04-28*

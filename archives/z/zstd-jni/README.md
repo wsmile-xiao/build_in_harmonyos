@@ -1,19 +1,16 @@
-# zstd-jni 1.5.6-5 — OpenHarmony 编译记录
+# zstd-jni
 
-## 基本信息
-- 软件: zstd-jni
-- 版本: 1.5.6-5
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+Zstandard 压缩的 JNI 封装，提供 Java 访问 Zstandard 压缩的能力。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- JNI 项目可使用本地 jni.h 头文件编译
+- 自包含，不需要外部 zstd 库
+- 需修补 CMakeLists.txt 添加 JNI include 路径
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖
+- JDK (jni.h)
+- CMake
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考
+- 源码: https://github.com/luben/zstd-jni

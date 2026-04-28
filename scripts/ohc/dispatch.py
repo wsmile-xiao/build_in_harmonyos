@@ -306,7 +306,7 @@ def check_task_status(software: str, version: str) -> str:
     if manifest_status == "failed":
         return "failed"
 
-    if (manifest_status == "success" and has_packaged and has_knowledge_done):
+    if (manifest_status == "published" and has_packaged and has_knowledge_done):
         return "finished"
 
     if has_knowledge_done:

@@ -1,39 +1,27 @@
-# dos2unix 7.5.4 编译说明
-
-## 概述
+# dos2unix
 
 dos2unix/unix2dos 是 DOS/MAC 与 Unix 文本格式转换工具，版本 7.5.4，支持 Unicode UTF-16。
 
-## 编译环境
+## 功能概述
+- CRLF ↔ LF 转换（DOS ↔ Unix）
+- CR ↔ LF 转换（Classic Mac ↔ Unix）
+- Unicode UTF-16/UTF-8 转换
+- 支持标准输入/输出管道操作
+- 二进制文件自动跳过
+- 支持文件编码检测和转换
 
-- **平台**: HarmonyOS (aarch64)
-- **编译器**: clang 15.0.4
-- **构建系统**: Makefile (无 configure)
+## OHOS 适配
+- 纯 Makefile 项目，无 configure 脚本
+- **必须禁用 NLS**：HarmonyOS 缺少 libintl/gettext
+- **注意**：`ENABLE_NLS = 0` 也会被 `ifdef` 视为 true（"0" 非空），必须设为空值 `ENABLE_NLS =`
+- **软链接问题**：HarmonyOS SELinux 限制 `ln -sf` 在部分目录的使用，需改为 `ln -s` 或 `cp`
+- 核心功能（dos2unix/unix2dos）完全可用（83/115 测试通过）
+- mac2unix/unix2mac 相关测试因软链接限制失败，不影响实际功能
 
-## 编译步骤
+## 依赖关系
+- **编译依赖**: 无（NLS 已禁用）
+- **运行依赖**: 无
 
-```bash
-# 下载
-curl -fSL -o dos2unix-7.5.4.tar.gz \
-  "https://downloads.sourceforge.net/project/dos2unix/dos2unix/7.5.4/dos2unix-7.5.4.tar.gz"
-tar -xf dos2unix-7.5.4.tar.gz && cd dos2unix-7.5.4
-
-# 应用补丁
-patch -p1 < patches/0001-disable-nls-and-fix-symlink-creation.patch
-
-# 编译
-make -j1 dos2unix unix2dos
-
-# 安装
-make -j1 install-bin prefix=$HOME/usr/local
-```
-
-## 适配说明
-
-1. **禁用 NLS**: HarmonyOS 缺少 libintl/gettext，需禁用国际化支持
-2. **软链接**: Makefile 默认 `ln -sf` 在部分目录受限，改为 `ln -s`
-
-## 已知限制
-
-- 不支持国际化（NLS 已禁用）
-- 测试套件中 mac2unix/unix2mac 和 symlink 相关测试因 HarmonyOS 软链接限制失败
+## 参考资料
+- 官网: https://waterlan.home.xs4all.nl/dos2unix.html
+- 源码: https://sourceforge.net/projects/dos2unix/

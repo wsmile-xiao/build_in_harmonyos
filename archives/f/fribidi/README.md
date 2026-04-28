@@ -1,100 +1,23 @@
-# fribidi 1.0.13 for HarmonyOS
+# FriBidi
 
-## 概述
+## 简介
+GNU FriBidi 是 Unicode 双向算法 (Bidirectional Algorithm) 的实现库，用于正确处理阿拉伯语、希伯来语等从右到左（RTL）文本与从左到右（LTR）文本的混合排版。
 
-fribidi 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## OHOS 适配
+- **构建系统**: 使用 meson（非 autotools）
+- **meson 安装**: 需要手动安装 `pip install --user meson`
+- **编译器设置**: 需显式设置 CC, CXX, AR 等环境变量
+- **符号链接**: meson 在 OHOS 上无法创建符号链接，需手动创建
 
-## 软件信息
+## 依赖
+- 编译工具: clang, meson
+- 无额外库依赖
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | fribidi |
-| 版本 | 1.0.13 |
-| 下载地址 | https://github.com/fribidi/fribidi/releases/download/v1.0.13/fribidi-1.0.13.tar.xz |
-| 官方文档 | {文档链接} |
-
-## 鸿蒙环境
-
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
-
-## 编译步骤
-
+## 功能验证
 ```bash
-# 1. 下载源码
-wget https://github.com/fribidi/fribidi/releases/download/v1.0.13/fribidi-1.0.13.tar.xz
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
+fribidi --version
+fribidi --help
 ```
 
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
-
-## 参考资料
-
-- {参考链接1}
-- {参考链接2}
+## 参考
+- GitHub: https://github.com/fribidi/fribidi

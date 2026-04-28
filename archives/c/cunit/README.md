@@ -1,100 +1,27 @@
-# cunit 2.1-3 for HarmonyOS
+# CUnit
 
-## 概述
+CUnit 是一个 C 语言的单元测试框架，提供编写、管理和运行测试用例的系统。
 
-cunit 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## 功能概述
 
-## 软件信息
+- C 语言单元测试框架
+- 支持测试套件和测试用例的组织
+- 多种输出界面（控制台、自动、Basic 等）
+- 断言宏
+- 注册和执行测试
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | cunit |
-| 版本 | 2.1-3 |
-| 下载地址 | http://downloads.sourceforge.net/project/cunit/CUnit/2.1-3/CUnit-2.1-3.tar.bz2 |
-| 官方文档 | {文档链接} |
+## OHOS 适配
 
-## 鸿蒙环境
+- autotools configure 在 HarmonyOS 上因临时文件权限问题失败
+- 需要手动编译方式绕过：
+  1. 手动替换 CUnit.h.in 中的 @VERSION@ 和 @RELEASE@
+  2. 手动编译源文件
+  3. 创建静态库 libcunit.a
 
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
+## 依赖关系
 
-## 编译步骤
-
-```bash
-# 1. 下载源码
-wget http://downloads.sourceforge.net/project/cunit/CUnit/2.1-3/CUnit-2.1-3.tar.bz2
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
-```
-
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
+- C 编译器
 
 ## 参考资料
 
-- {参考链接1}
-- {参考链接2}
+- 官网: https://cunit.sourceforge.net/

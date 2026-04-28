@@ -1,19 +1,20 @@
-# lemon 3.53.0 — OpenHarmony 编译记录
+# lemon
 
-## 基本信息
-- 软件: lemon
-- 版本: 3.53.0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+Lemon 是 SQLite 使用的 LALR(1) 解析器生成器，类似于 yacc/bison。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 需要手动修改 Makefile
+- 单文件工具，编译简单
+- 补丁仅修改 Makefile
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 无编译依赖
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+lemon --version  # 或验证二进制可执行
+```
+
+## 参考
+- 主页: https://www.sqlite.org/src/doc/trunk/doc/lemon.html

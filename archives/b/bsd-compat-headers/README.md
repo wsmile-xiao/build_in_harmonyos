@@ -1,19 +1,11 @@
-# bsd-compat-headers latest — OpenHarmony 编译记录
+# BSD Compat Headers — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: bsd-compat-headers
-- 版本: latest
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+提供 OpenHarmony 系统缺失的 BSD 兼容头文件，包括 sys/cdefs.h、sys/queue.h 和 sys/tree.h。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配要点
+- 纯头文件安装，无需编译步骤
+- 这些头文件是许多第三方库编译的必要条件
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [bsd-compat-headers](https://github.com/OpenHarmonyPCDeveloper/bsd-compat-headers)

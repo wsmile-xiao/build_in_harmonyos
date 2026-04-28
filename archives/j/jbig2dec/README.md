@@ -1,19 +1,20 @@
-# jbig2dec 0.20 — OpenHarmony 编译记录
+# jbig2dec
 
-## 基本信息
-- 软件: jbig2dec
-- 版本: 0.20
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+jbig2dec 是 JBIG2 图像压缩标准的解码器实现，主要用于 PDF 文档中的 JBIG2 图像解码。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 标准 autotools 项目，无特殊适配需求
+- 标准 configure/make/make install 流程即可完成编译安装
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 编译依赖：clang, make
+- 运行依赖：libc
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+jbig2dec --version
+```
+
+## 参考
+- 源码：https://github.com/ArtifexSoftware/jbig2dec
