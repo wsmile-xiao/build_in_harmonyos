@@ -19,7 +19,7 @@
   │    → 无 → 继续 ②
   │
   ├─ ② 读 archives/{pkg}/{ver}/manifest.yaml
-  │    → status=success？说明之前成功过，对比差异
+  │    → status in ("published", "built")？说明之前成功过，对比差异
   │    → patches_applied 有补丁？确认是否已正确应用
   │    → knowledge_gained 有经验？参考历史做法
   │
@@ -89,7 +89,7 @@
   │
   └─ [诊断完成] 基于历史方案动手修复
       → 如果归档和知识库都没有 → 记录为新问题（§2.5 实时知识提取）
-      → 修复后更新 PROGRESS.md + 继续执行
+      → 修复后更新 notes.md + 继续执行
 ```
 
 ---
@@ -118,7 +118,7 @@
    → build-driver Step 3 失败
    → [R11] 读 archives/a/automake/1.16.5/README.md
       → 发现：需要 gen-all.pl 鸡生蛋绕过 + 已有补丁
-   → [R11] 读 manifest.yaml → status=success, 有 0001-port-for-ohos.patch
+   → [R11] 读 manifest.yaml → status=published, 有 0001-port-for-ohos.patch
    → [R12] 错误是 config.guess 不识别 → E002 标准解法：应用已有补丁
    → 应用补丁后重新跑 build-driver → 通过
 ```
@@ -135,4 +135,4 @@
 |------|-----------|-----------|
 | build-driver 失败 | AI 放弃，什么都不做 | 按 R11+R12 诊断，手动执行对应步骤 |
 | 手动步骤完成后 | 停在手动模式 | `--resume-from=StepN` 继续自动流程 |
-| 所有脚本都失败 | 彻底放弃 | 记录到 PROGRESS.md，标记 failed，执行 finish-build |
+| 所有脚本都失败 | 彻底放弃 | 记录到 notes.md，标记 failed，执行 finish-build |

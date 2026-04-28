@@ -1,100 +1,26 @@
-# check 0.15.2 for HarmonyOS
+# Check
 
-## 概述
+Check 是一个 C 语言的单元测试框架，支持多种测试模式和自动检测内存泄漏。
 
-check 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## 功能概述
 
-## 软件信息
+- 提供 C 单元测试框架
+- 支持 Suite/TC/TCase 多层测试组织
+- 自动检测内存泄漏
+- 支持 fork 模式隔离测试
+- 输出 XML/HTML/TAP 格式测试报告
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | check |
-| 版本 | 0.15.2 |
-| 下载地址 | https://github.com/libcheck/check/releases/download/0.15.2/check-0.15.2.tar.gz |
-| 官方文档 | {文档链接} |
+## OHOS 适配
 
-## 鸿蒙环境
+- 构建系统为 autotools，需要 2 个补丁（config.guess + config.sub）
+- 用于其他 C 项目的单元测试
 
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
+## 依赖关系
 
-## 编译步骤
-
-```bash
-# 1. 下载源码
-wget https://github.com/libcheck/check/releases/download/0.15.2/check-0.15.2.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
-```
-
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
+- C 编译器
+- autotools 构建工具链
 
 ## 参考资料
 
-- {参考链接1}
-- {参考链接2}
+- 官网: https://libcheck.github.io/check/
+- 源码: https://github.com/libcheck/check

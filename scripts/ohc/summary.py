@@ -25,9 +25,10 @@ BUILD_SYSTEM_NAMES = {
 
 # ── Status badges ──
 STATUS_BADGE = {
-    "success": "✅ 完全成功",
-    "partial": "⚠️ 部分成功",
+    "published": "✅ 已发布",
+    "built": "✅ 已编译",
     "failed": "❌ 编译失败",
+    "archived": "📦 已归档",
 }
 
 # ── Compatibility level icons ──
@@ -35,7 +36,7 @@ COMPAT_LEVEL = {
     "high": "🟢 高",
     "medium": "🟡 中",
     "low": "🔴 低",
-    "partial": "🟡 中",
+    "built": "🟡 中",
     "unknown": "",
     "": "",
 }
@@ -515,8 +516,8 @@ def generate_summary(pdir: str | None = None) -> str:
     lines.append("|------|------|")
     lines.append(f"| 收录软件 | **{total_software}** 款 |")
     lines.append(f"| 软件版本 | **{total_versions}** 个 |")
-    lines.append(f"| ✅ 完全成功 | {by_status.get('success', 0)} |")
-    lines.append(f"| ⚠️ 部分成功 | {by_status.get('partial', 0)} |")
+    lines.append(f"| ✅ 已发布 | {by_status.get('published', 0)} |")
+    lines.append(f"| ✅ 已编译 | {by_status.get('built', 0)} |")
     lines.append(f"| ❌ 编译失败 | {by_status.get('failed', 0)} |")
     lines.append("")
 

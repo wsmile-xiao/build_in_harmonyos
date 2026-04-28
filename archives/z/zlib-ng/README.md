@@ -1,19 +1,11 @@
-# zlib-ng latest — OpenHarmony 编译记录
+# zlib-ng
 
-## 基本信息
-- 软件: zlib-ng
-- 版本: latest
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+zlib 的下一代替代版本，针对现代 CPU 进行性能优化，API 与 zlib 不兼容。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- CMake 构建
+- 需要使用 zlib-ng-compat 版本获得 zlib API 兼容性
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考
+- 源码: https://github.com/zlib-ng/zlib-ng

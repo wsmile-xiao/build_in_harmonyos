@@ -1,19 +1,9 @@
-# argp-standalone latest — OpenHarmony 编译记录
+# argp-standalone
 
-## 基本信息
-- 软件: argp-standalone
-- 版本: latest
-- 构建系统: autotools
-- 目标: ohos-aarch64
+独立的 GNU argp 命令行参数解析库，提供从 glibc 中提取的 argp 接口。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 版本列表
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+| 版本 | 状态 | 编译日期 |
+|------|------|----------|
+| [1.5.0](./1.5.0/) | built | 2026-04-21 |

@@ -1,4 +1,5 @@
 # 编译过程记录模板
+<!-- 放置路径: archives/{letter}/{name}/{version}/reports/build-report.md -->
 
 ## 基本信息
 

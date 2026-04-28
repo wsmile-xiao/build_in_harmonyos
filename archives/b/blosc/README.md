@@ -1,19 +1,19 @@
-# blosc 1.21.6 — OpenHarmony 编译记录
+# c-blosc — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: blosc
-- 版本: 1.21.6
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+c-blosc 是高性能块压缩库，设计用于在 CPU 缓存层级高效压缩数据。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
+- 多线程压缩/解压
+- 支持多种压缩算法（blosclz, lz4, snappy, zlib, zstd）
+- 零拷贝操作
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## OHOS 适配要点
+- CMake 标准构建
+- 推荐使用 PREFER_EXTERNAL_ZSTD=ON
 
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖关系
+- 可选依赖: zstd, lz4, snappy, zlib
 
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [c-blosc GitHub](https://github.com/Blosc/c-blosc)

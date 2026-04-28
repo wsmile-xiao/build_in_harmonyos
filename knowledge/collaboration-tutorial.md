@@ -91,8 +91,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish wget 1.21 success
 提交前确保归档目录干净、完整，并写入知识草稿：
 
 ```bash
-# 确认 PROGRESS.md 已关闭
-grep "status:" archives/w/wget/1.21/PROGRESS.md
+# 确认 notes.md 已关闭
+grep "status:" archives/w/wget/1.21/notes.md
 # 应输出: status: success（或 partial）
 
 # 确认 manifest.yaml 完整
@@ -118,7 +118,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py submit --check wget 1.21
 | 3 | 知识去重 | 草稿关键词不与已有条目严重重复 |
 | 4 | Manifest 完整性 | 必填字段齐全，test_results 非全零 |
 | 5 | 禁止文件检查 | 未修改 `_index.yaml`、`SUMMARY.md` 等 |
-| 6 | PROGRESS 关闭 | `PROGRESS.md` 包含结束标记 |
+| 6 | notes.md 关闭 | `notes.md` 包含结束标记 |
 | 7 | 临时文件 | 无 `DIAGNOSIS_*`、`MISSING_*` 等临时文件 |
 | 8 | knowledge_ref 引用 | manifest 中引用的知识文件均存在 |
 | 9 | 打包产物 | `packaging/` 下有 `tar.gz`（success/partial 时） |
@@ -276,7 +276,7 @@ git checkout main
 
 ```
 拒绝原因：
-1. PROGRESS.md 未包含结束标记
+1. notes.md 未包含结束标记
 2. E083 与 E020 语义重复，请合并到 E020 后重新提交
 3. 补丁 0002-fix-musl-compat.patch 的 diff 格式不合法
 
@@ -397,7 +397,7 @@ opt: 优化 nginx 编译，禁用无用模块
 # 确保还在功能分支上
 git checkout feat/wget-1.21
 
-# 修复问题（如关闭 PROGRESS.md、合并重复知识条目）
+# 修复问题（如关闭 notes.md、合并重复知识条目）
 # ...
 
 # 重新自检
@@ -499,7 +499,7 @@ git push origin feat/wget-1.21 --force-with-lease
 | 违规行为 | 处理 |
 |----------|------|
 | 跳过 `submit --check` 直接创建 PR | 主编 review 可能 FAIL 多项，PR 被关闭，影响审核效率 |
-| PROGRESS.md 未关闭 | PR 被拒绝，要求补填后重新提交 |
+| notes.md 未关闭 | PR 被拒绝，要求补填后重新提交 |
 | 直接修改 `index.tsv` / `SUMMARY.md` / `_index.yaml` | 视为越权操作，PR 被拒绝，主编回退变更 |
 | 知识图谱直接写正式目录（跳过 `--draft`） | 主编不认，需走 `--draft` 流程重新提交 |
 | 不 rebase 直接推 PR | GitCode 半线性检查不通过，PR 无法合并 |

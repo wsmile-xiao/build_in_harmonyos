@@ -212,7 +212,7 @@ def update_build_status(
         json.dump(status, f, ensure_ascii=False, indent=2)
 
     # If completed, clean up the per-build .handoff.json
-    if new_status in ("completed", "success"):
+    if new_status in ("completed", "published"):
         archive_dir = status[status_key].get("archive_dir", "")
         if archive_dir:
             hp = _handoff_json_path(archive_dir)

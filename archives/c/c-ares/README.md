@@ -1,100 +1,26 @@
-# c-ares 1.34.4 for HarmonyOS
+# c-ares
 
-## 概述
+c-ares 是一个 C 库，用于异步 DNS 请求（包括名称解析）。
 
-c-ares 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## 功能概述
 
-## 软件信息
+- 异步 DNS 解析（A、AAAA、CNAME、MX、NS、TXT 等）
+- 支持 IPv4 和 IPv6
+- 多平台 C 库，被 curl、libcurl 等广泛使用
+- 线程安全，事件驱动
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | c-ares |
-| 版本 | 1.34.4 |
-| 下载地址 | https://github.com/c-ares/c-ares/releases/download/v1.34.4/c-ares-1.34.4.tar.gz |
-| 官方文档 | {文档链接} |
+## OHOS 适配
 
-## 鸿蒙环境
+- 构建系统为 autotools，需要更新 config.guess/config.sub 以识别 HarmonyOS/ohos
+- 1.34.6 版本有 2 个平台适配补丁（config.guess + config.sub）
+- 1.34.4 版本编译进行中，尚未应用补丁
 
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
+## 依赖关系
 
-## 编译步骤
-
-```bash
-# 1. 下载源码
-wget https://github.com/c-ares/c-ares/releases/download/v1.34.4/c-ares-1.34.4.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
-```
-
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
+- 无外部编译依赖
+- 可能依赖系统 libc 的 DNS 相关接口
 
 ## 参考资料
 
-- {参考链接1}
-- {参考链接2}
+- 官网: https://c-ares.org/
+- 源码: https://github.com/c-ares/c-ares

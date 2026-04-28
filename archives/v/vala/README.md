@@ -1,19 +1,21 @@
-# vala 0.56.18 — OpenHarmony 编译记录
+# Vala
 
-## 基本信息
-- 软件: vala
-- 版本: 0.56.18
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+面向对象的编程语言，自托管编译器，目标是 GObject 系统，语法类似 C#。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 需修补 config.guess/config.sub 添加 HarmonyOS 识别
+- autotools 构建
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- GLib/GObject
+- flex/bison
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+vala --version
+valac --version
+```
+
+## 参考
+- 官网: https://wiki.gnome.org/Projects/Vala

@@ -194,10 +194,10 @@ class VerifyBuild:
                 if f"{field}:" not in content:
                     g.failed += 1; g.details.append(f"  ❌ manifest 缺少 {field}")
 
-        # PROGRESS.md
-        prog = self.archive_dir / "PROGRESS.md"
+        # notes.md
+        prog = self.archive_dir / "notes.md"
         if not prog.exists():
-            g.warned += 1; g.details.append("  ⚠️ PROGRESS.md 缺失")
+            g.warned += 1; g.details.append("  ⚠️ notes.md 缺失")
 
         # Patches
         patches = list((self.archive_dir / "patches").glob("000*.patch")) if (self.archive_dir / "patches").exists() else []

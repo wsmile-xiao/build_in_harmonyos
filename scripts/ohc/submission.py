@@ -165,8 +165,8 @@ def _check_manifest_complete(ver_dir: Path) -> bool:
 
 
 def _check_progress_closed(ver_dir: Path) -> bool:
-    """Check that PROGRESS.md has a closing marker."""
-    progress = ver_dir / "PROGRESS.md"
+    """Check that notes.md has a closing marker."""
+    progress = ver_dir / "notes.md"
     if not progress.exists():
         return False
     content = progress.read_text(encoding="utf-8", errors="replace")
@@ -190,7 +190,7 @@ def _check_patches_valid(ver_dir: Path) -> bool:
 
 def _check_packaging_present(ver_dir: Path, status: str) -> bool:
     """Check that packaging/ has tar.gz for success/partial builds."""
-    if status not in ("success", "partial"):
+    if status not in ("published", "built"):
         return True  # Not required for failed builds
     packaging_dir = ver_dir / "packaging"
     if not packaging_dir.is_dir():
@@ -510,11 +510,11 @@ def _review_single(software: str, version: str,
     # ── Check 5: 未修改禁止文件 ──
     _record("5. 禁止文件检查", "PASS", "archives/_index.yaml 和 SUMMARY.md 未在提交范围")
 
-    # ── Check 6: PROGRESS.md 已关闭 ──
+    # ── Check 6: notes.md 已关闭 ──
     if _check_progress_closed(ver_dir):
-        _record("6. PROGRESS关闭", "PASS")
+        _record("6. notes.md关闭", "PASS")
     else:
-        _record("6. PROGRESS关闭", "FAIL", "PROGRESS.md 未包含结束标记")
+        _record("6. notes.md关闭", "FAIL", "notes.md 未包含结束标记")
 
     # ── Check 7: 临时文件检查 ──
     if _check_no_temp_files(ver_dir):

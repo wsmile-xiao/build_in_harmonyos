@@ -21,7 +21,7 @@ from .summary import generate_summary
 class FinishPipeline:
     """6-step finishing pipeline for completed compilations."""
 
-    def __init__(self, software, version, status="success", pdir=None):
+    def __init__(self, software, version, status="published", pdir=None):
         self.software = software
         self.version = version
         self.status = status
@@ -67,9 +67,9 @@ class FinishPipeline:
         if not tr.exists():
             self.gate_miss += 1
             self.gate_warnings.append("test-report:missing")
-            if self.status == "success":
-                self.status = "partial"
-                log_warn("  test-report.md 缺失 → 降级为 partial")
+            if self.status == "published":
+                self.status = "built"
+                log_warn("  test-report.md 缺失 → 降级为 built")
         else:
             log_ok("  test-report.md ✅")
         sv = self.archive_dir / ".staging-verified"
@@ -95,8 +95,8 @@ class FinishPipeline:
             log_fail("  ❌ 预编译包存在但未经工具化打包（缺少 .packaged 标记）")
             log_fail("     必须使用 ohc-run.py package 完成打包（签名/RPATH/strip/权限）")
             log_fail("     手动 tar 打包的产物在鸿蒙上无法执行（ELF 未签名）")
-            if self.status == "success":
-                self.status = "partial"
+            if self.status == "published":
+                self.status = "built"
 
         # Knowledge consolidation gate
         kd_marker = self.archive_dir / ".knowledge-done"
@@ -133,8 +133,8 @@ class FinishPipeline:
                     log_fail("     草稿必须填写实际内容后才能通过 finish！")
                     log_fail("     填写后创建 .knowledge-done 标记:")
                     log_fail(f"     touch {self.archive_dir / '.knowledge-done'}")
-                    if self.status == "success":
-                        self.status = "partial"
+                    if self.status == "published":
+                        self.status = "built"
 
     # Step 1: refresh-patch
     def step1_refresh_patch(self):
@@ -191,17 +191,17 @@ class FinishPipeline:
         if rc == 0:
             self.steps["step3"] = True
             self._task_card("11c", "✅完成", "G1-G4 全通过"); log_ok("  G1-G4 全通过")
-            if self.status == "failed": self.status = "partial"
+            if self.status == "failed": self.status = "built"
         else:
             self.steps["step3"] = False
             self._task_card("11c", "❌失败", f"G1-G4 RC={rc}")
             log_fail(f"  质量门禁未通过 (RC={rc})，请修复后重新 verify")
-            if self.status == "success": self.status = "partial"
-            elif self.status == "partial": self.status = "failed"
+            if self.status == "published": self.status = "built"
+            elif self.status == "built": self.status = "failed"
 
     # Step 4: finalize-archive
     def step4_finalize_archive(self):
-        log_info("Step 4/6: 归档校验 + RELEASENOTE...")
+        log_info("Step 4/6: 归档校验...")
         try:
             rc = finalize_archive(self.software, self.version, pdir=str(self.pdir))
         except Exception as e:
@@ -226,7 +226,7 @@ class FinishPipeline:
             self.steps["step5b"] = False
             self._task_card("11e", "⚠️部分", "有知识遗漏"); log_warn("  知识库存在遗漏")
         else:
-            self.steps["step5b"] = True
+            self.steps["step5b"] = False
             self._task_card("11e", "⚠️部分", f"检查异常 RC={rc}")
 
     # Step 6: gen_summary
@@ -245,7 +245,7 @@ class FinishPipeline:
         actions = []
 
         # 1. Check knowledge gaps
-        progress = self.archive_dir / "PROGRESS.md"
+        progress = self.archive_dir / "notes.md"
         pending_items = []
         if progress.exists():
             import re
@@ -266,7 +266,7 @@ class FinishPipeline:
 
         if pending_items:
             actions.append(
-                f"PROGRESS.md 有 {len(pending_items)} 条待处理知识条目，逐条判断 L1/L2/L3 并写入对应位置"
+                f"notes.md 有 {len(pending_items)} 条待处理知识条目，逐条判断 L1/L2/L3 并写入对应位置"
             )
 
         # 2. Check manifest knowledge_gained
@@ -404,8 +404,8 @@ def finish_cli(argv=None):
         description="编译收尾 6 步管线")
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", help="版本号")
-    parser.add_argument("status", nargs="?", default="success",
-        choices=["success", "partial", "failed"], help="编译状态")
+    parser.add_argument("status", nargs="?", default="published",
+        choices=["published", "built", "failed", "archived"], help="编译状态")
     parser.add_argument("--project-dir")
     args = parser.parse_args(argv)
     pipeline = FinishPipeline(args.software, args.version, args.status,

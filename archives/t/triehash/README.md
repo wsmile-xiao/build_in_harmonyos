@@ -1,19 +1,14 @@
-# triehash 0.3 — OpenHarmony 编译记录
+# triehash
 
-## 基本信息
-- 软件: triehash
-- 版本: 0.3
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+从一组关键字生成 trie 哈希函数的 Perl 脚本，常用于 dpkg 的架构检测。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 纯 Perl 脚本，无需编译
+- shebang 需修改为 OpenHarmony perl 路径
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖
+- Perl
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考
+- 源码: https://github.com/julian-klode/triehash

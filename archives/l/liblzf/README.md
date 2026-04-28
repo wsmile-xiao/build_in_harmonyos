@@ -1,19 +1,17 @@
-# liblzf 3.6 — OpenHarmony 编译记录
+# liblzf
 
-## 基本信息
-- 软件: liblzf
-- 版本: 3.6
+## 简介
+Fast LZF compression library
+
+## OHOS 适配
 - 构建系统: autotools
-- 目标: ohos-aarch64
+- 详见各版本 notes.md 获取适配详情
 
-## 编译指导
-<!-- 编译注意事项 -->
-
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+待补充
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+待补充
+
+## 参考
+- https://software.schmorp.de/pkg/liblzf.html

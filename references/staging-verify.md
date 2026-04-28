@@ -111,12 +111,9 @@ export LD_LIBRARY_PATH="${LD_LIBRARY_PATH#$TEST_PREFIX/lib:}"
 | **PARTIAL** | BIN_COUNT > 0 + 少量 FAIL（平台限制） | → 记录原因，继续 |
 | **FAIL** | BIN_COUNT=0 或大量 FAIL | → 排查 configure/install，修复后重试 |
 
-> **PASS 后必须创建标记文件**（ohc-run.py finish 关卡 B 检查此文件）：
+> **标记文件说明**：`.staging-verified` 是编译流程的运行时状态标记，由 `.gitignore` 管理且不提交到仓库。它作为 `ohc-run.py finish` 关卡的前置检查，但**不作为归档必检项**（归档完整性由 finalize-archive 校验）。同类标记文件还包括 `.g0-verified`、`.verify-passed`、`.knowledge-done` 等，均属运行时状态，在 `.gitignore` 中统一管理。
+> 
 > ```bash
-> touch "${BUILD_ARCHIVE_DIR}/.staging-verified"
-> ```
-g-verified"
-> ```*（ohc-run.py finish 关卡 B 检查此文件）：
-> ```bash
+> # 创建标记（脚本自动执行）
 > touch "${BUILD_ARCHIVE_DIR}/.staging-verified"
 > ```

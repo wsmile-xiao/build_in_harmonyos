@@ -104,7 +104,7 @@ def format_status(builds: list[dict]) -> str:
         # Status emoji
         if status == "completed":
             icon = "✅"
-        elif status == "success":
+        elif status == "published":
             icon = "✅"
         elif status == "paused":
             icon = "🔄"

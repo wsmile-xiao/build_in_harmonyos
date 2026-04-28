@@ -9,7 +9,7 @@
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
 | R1 | **参数最少化** | `./configure --prefix=$P && make` | 加 `--build/--host`/CFLAGS hack |
-| R2 | **Phase 3 不生成 .patch** | 只改源码+记录到 PROGRESS.md | diff/sed 结果写文件 |
+| R2 | **Phase 3 不生成 .patch** | 只改源码+记录到 notes.md | diff/sed 结果写文件 |
 | R3 | **补丁只用 ohc-run.py refresh-patch** | `ohc-run.py refresh-patch --auto` | 手动 diff/AI 写 patch |
 | R4 | **危险库必须静态编译** | ncurses `--without-shared` | 编译共享库导致系统崩溃 |
 | R5 | **软链接必须验证可执行 + 禁止 ln -sf** | `ls -la` 验证 + `rm -f && ln -s` | 只检查 `-L` 存在性 / `ln -sf` 覆盖 |
@@ -151,7 +151,7 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$TEST_PREFIX 2>&1 | tail -3
   │   │    → 无 → 继续 ②
   │   │
   │   ├─ ② 读 archives/{pkg}/{ver}/manifest.yaml
-  │   │    → status=success？说明之前成功过，对比差异
+  │   │    → status in ("published", "built")？说明之前成功过，对比差异
   │   │    → patches_applied 有补丁？确认是否已正确应用
   │   │    → knowledge_gained 有经验？参考历史做法
   │   │
@@ -183,7 +183,7 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$TEST_PREFIX 2>&1 | tail -3
   │
   └─ [诊断完成] 第三步：基于历史方案动手修复
       → 如果归档和知识库都没有 → 记录为新问题（§2.5 实时知识提取）
-      → 修复后更新 PROGRESS.md + 继续执行
+      → 修复后更新 notes.md + 继续执行
 ```
 
 ### 典型反面案例（automake 会话实录）
@@ -199,7 +199,7 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$TEST_PREFIX 2>&1 | tail -3
    → build-driver Step 3 失败
    → [R11] 读 archives/a/automake/1.16.5/README.md
       → 发现：需要 gen-all.pl 鸡生蛋绕过 + 已有补丁
-   → [R11] 读 manifest.yaml → status=success, 有 0001-port-for-ohos.patch
+   → [R11] 读 manifest.yaml → status=published, 有 0001-port-for-ohos.patch
    → [R12] 错误是 config.guess 不识别 → E002 标准解法：应用已有补丁
    → 应用补丁后重新跑 build-driver → 通过
 ```

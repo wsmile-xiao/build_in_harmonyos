@@ -13,7 +13,7 @@ if [ -f "$SERIES" ]; then
         case "$line" in
             ""|\#*) continue ;;
         esac
-        patch_file="$PATCH_DIR/patches/$line"
+        patch_file="$PATCH_DIR/$line"
         if [ -f "$patch_file" ]; then
             echo "应用: $line"
             patch -p1 < "$patch_file" || {

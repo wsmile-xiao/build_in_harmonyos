@@ -12,7 +12,7 @@
 
 Phase 3 的职责只有两件事：
 1. **修改源码**解决编译问题
-2. **在 PROGRESS.md 记录**每个修改的意图
+2. **在 notes.md 记录**每个修改的意图
 
 原因：Phase 3 源码处于频繁试错状态，此时生成的补丁是中间态。
 补丁生成**唯一入口**是 Phase 4 的 `ohc-run.py refresh-patch --auto`。
@@ -21,7 +21,7 @@ Phase 3 的职责只有两件事：
 
 - ✅ `sed` / 直接编辑源码（解决编译问题）
 - ✅ 创建 post-configure hook 脚本（§3.9）
-- ✅ 在 PROGRESS.md「源码修改清单」中记录
+- ✅ 在 notes.md「源码修改清单」中记录
 
 ### 禁止的操作
 

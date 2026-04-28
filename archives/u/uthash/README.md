@@ -1,19 +1,14 @@
-# uthash 2.3.0 — OpenHarmony 编译记录
+# uthash
 
-## 基本信息
-- 软件: uthash
-- 版本: 2.3.0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+为 C 结构体提供哈希表和链表实现的 Header-only 库，支持高效的增删查操作。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- Header-only 库，无需编译
+- 直接复制头文件即可使用
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖
+- C 编译器（仅使用时需要）
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考
+- 源码: https://github.com/troydhanson/uthash

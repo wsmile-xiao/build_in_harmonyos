@@ -1,19 +1,20 @@
-# ttaenc 3.4.1 — OpenHarmony 编译记录
+# ttaenc
 
-## 基本信息
-- 软件: ttaenc
-- 版本: 3.4.1
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+TTA (True Audio) 无损音频编解码器，支持高压缩比的音频压缩。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- Makefile 构建，无 configure 步骤
+- 需手动添加 install 目标
+- 4 个补丁文件
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 标准 C 库
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+ttaenc -h
+```
+
+## 参考
+- 官网: https://tausoft.org/

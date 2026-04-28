@@ -1,19 +1,18 @@
-# libassuan 3.0.2 — OpenHarmony 编译记录
+# libassuan
 
-## 基本信息
-- 软件: libassuan
-- 版本: 3.0.2
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+libassuan 是 GnuPG 生态系统的进程间通信 (IPC) 库。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- autotools 构建，无特殊问题
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- libgpg-error
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+ls -la $HOME/usr/local/lib/libassuan*
+```
+
+## 参考
+- 主页: https://gnupg.org/software/libassuan/

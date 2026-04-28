@@ -1,19 +1,14 @@
-# ucl 1.03 — OpenHarmony 编译记录
+# UCL
 
-## 基本信息
-- 软件: ucl
-- 版本: 1.03
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+UCL 是一个可移植的无损数据压缩库，由 NRV (Not Really Vanished) 算法的作者开发。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 需修补 config.guess/config.sub 添加 HarmonyOS 平台识别
+- autotools 构建
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖
+- 标准 C 库
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考
+- 官网: https://www.oberhumer.com/opensource/ucl/

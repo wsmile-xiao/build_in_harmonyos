@@ -30,7 +30,7 @@ cd "$PKGDIR" && tar czf "output.tar.gz" *   # ✅ 扁平（自动包含 bin shar
 # 而非: tar czf "output.tar.gz" "$PKGDIR"              # ❌ 可能多一层目录
 ```
 
-**install.sh 依据此规范**：直接 `cp -r $TMP/bin $DST/`，无需检测嵌套结构。
+**公共安装脚本依据此规范**：直接 `cp -r $TMP/bin $DST/`，无需检测嵌套结构。
 
 ---
 
@@ -370,15 +370,15 @@ else
 fi
 ```
 
-### Step 9: install.sh（使用统一通用脚本，不再按软件生成）
+### Step 9: 打包 tar.gz（install.sh 由 cmd-pkgs 公共安装脚本提供，不包含在 tar.gz 中）
 
 > **⚠️ 重要变更（v2.4）**：不再为每个软件生成独立的 install.sh。
-> 使用统一通用脚本 `templates/universal-install.sh`，托管在 cmd-pkgs 的 `pkgs` release tag 下。
+> 使用 cmd-pkgs 公共安装脚本，托管在 cmd-pkgs 的 `pkgs` release tag 下。
 > 用户通过 `curl | sh -s -- <name> <version>` 安装。
 
 ```bash
-# 9a. 无需手动创建 install.sh，使用统一脚本
-#     通用脚本: templates/universal-install.sh
+# 9a. 无需手动创建 install.sh，使用 cmd-pkgs 公共安装脚本
+#     公共脚本: templates/universal-install.sh
 #     托管位置: cmd-pkgs releases → pkgs tag
 
 # 9b. 用户安装命令
@@ -658,10 +658,10 @@ chmod +x package-dir/bin/*
 
 ---
 
-## 9. install.sh 通用安装脚本
+## 9. cmd-pkgs 公共安装脚本
 
-> **定位**：统一通用安装脚本 `templates/universal-install.sh`，接受 `<name> <version>` 参数。
-> **重要（v2.4）**：不再为每个软件生成独立 install.sh，统一使用 cmd-pkgs 的 `pkgs` release tag 下的一个通用脚本。
+> **定位**：cmd-pkgs 仓库提供的统一公共安装脚本，接受 `<name> <version>` 参数。
+> **重要（v2.4）**：不再为每个软件生成独立 install.sh，统一使用 cmd-pkgs 的 `pkgs` release tag 下的公共安装脚本。
 > 用户通过 `curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- <name> <version>` 安装，tar.gz 只包含干净二进制产物。
 
 ### 9.1 设计原则
@@ -694,7 +694,7 @@ chmod +x package-dir/bin/*
 
 ### 9.3 模板代码
 
-完整模板见 `scripts/ohc-run.py install-template (已归档)`（64 行 / 2.2KB）。
+完整模板见 cmd-pkgs 仓库的 `pkgs` release tag（64 行 / 2.2KB）。
 
 每个软件只需修改两行：
 ```sh
@@ -708,14 +708,14 @@ PKG_VERSION="${PKG_VERSION:-0.29.2}"      # <-- 改这里
 - **Step 3**: `chmod +x` bin/*
 - **Step 4**: PATH 缺失时写入 `.zshrc`（已有则跳过）
 
-### 9.4 各软件生成 install.sh 的步骤
+### 9.4 使用 cmd-pkgs 公共安装脚本
 
-1. `cp scripts/ohc-run.py install-template (已归档) packaging/<name>-install.sh`
-2. 修改 `PKG_NAME` 和 `PKG_VERSION` 两行
-3. `sh -n <install.sh>` 验证语法
-4. `LC_ALL=C grep -nP '[^\x00-\x7F]' <install.sh>` 确认纯 ASCII
-5. `cat <install.sh> | sh` 在干净环境测试
-6. 上传到 gitcode releases
+安装脚本由 cmd-pkgs 仓库统一维护，不再需要为每个软件单独生成。
+
+1. 公共脚本托管在 `cmd-pkgs` 仓库的 `pkgs` release tag 下
+2. 通过 `curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- <name> <version>` 安装
+3. 脚本会自动从 gitcode 下载对应的 tar.gz 并解压到 `~/usr/local/`
+4. 如需修改安装脚本，向 cmd-pkgs 仓库提交 PR
 
 ### 9.5 禁止事项
 
@@ -738,9 +738,13 @@ PKG_VERSION="${PKG_VERSION:-0.29.2}"      # <-- 改这里
 *  - 新增 Step 4: 外部依赖收集（必做）*
 *  - 新增 Step 8: 统一权限修复（必做），含根因分析*
 *v2.1 更新：头部增加 SKILL.md Phase 4 Step 5.5 交叉引用*
-*v2.2 更新：新增 §9 install.sh 通用安装脚本模板*
+*v2.2 更新：新增 §9 install.sh 通用安装脚本模板（已废弃，改为 cmd-pkgs 公共脚本）*
 *v2.3 更新：*
-*  - Step 9 改为 install.sh（替代 activate.sh），单独托管不打包进 tar.gz*
+*  - Step 9 改为 install.sh（替代 activate.sh，已废弃），单独托管不打包进 tar.gz*
 *  - Step 10 增加安装验证步骤 + §10 完整交付物清单和 gitcode 发布流程*
 流程*
 �*
+��*
+流程*
+�*
+

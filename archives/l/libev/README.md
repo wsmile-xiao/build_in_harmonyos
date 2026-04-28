@@ -1,100 +1,26 @@
-# libev 4.33 for HarmonyOS
+# libev
 
-## 概述
+## 简介
+libev 是高性能事件循环库，支持 epoll、kqueue、select 等多种后端。
 
-libev 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## OHOS 适配
+- autotools 构建因 HMDFS 文件系统限制导致 config.status 失败
+- 采用手动编译方式：`clang -c -fPIC -O2 ev.c event.c`
+- 需要更新 config.guess/config.sub 支持 HarmonyOS
+- tar.gz 在 HMDFS 上创建失败(ustar header 限制)，预编译包使用 zip 格式
 
-## 软件信息
+## 排除与替代
+- autotools 不可用 → 手动编译替代
+- tar.gz 不可用 → zip 格式替代
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | libev |
-| 版本 | 4.33 |
-| 下载地址 | http://dist.schmorp.de/libev/libev-4.33.tar.gz |
-| 官方文档 | {文档链接} |
+## 依赖
+- 无编译依赖
 
-## 鸿蒙环境
-
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
-
-## 编译步骤
-
+## 功能验证
 ```bash
-# 1. 下载源码
-wget http://dist.schmorp.de/libev/libev-4.33.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
+ls -la $HOME/usr/local/lib/libev*
+# 测试程序验证 libev version: 4.33
 ```
 
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
-
-## 参考资料
-
-- {参考链接1}
-- {参考链接2}
+## 参考
+- 主页: http://software.schmorp.de/pkg/libev.html

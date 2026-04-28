@@ -1,19 +1,22 @@
-# jansson 2.14 — OpenHarmony 编译记录
+# Jansson
 
-## 基本信息
-- 软件: jansson
-- 版本: 2.14
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+Jansson 是一个 C 语言 JSON 库，提供 JSON 的编码、解码和操作功能，API 简洁，符合 RFC 8259 标准。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 同时支持 autotools 和 CMake，缺少 automake 时使用 CMake 构建
+- 所有 215 个测试通过，无平台兼容性问题
+- 无需任何补丁
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 编译依赖：cmake, clang
+- 运行依赖：libc
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+# 检查库安装
+ls -la $HOME/usr/local/lib/libjansson*
+```
+
+## 参考
+- 源码：https://github.com/akheron/jansson

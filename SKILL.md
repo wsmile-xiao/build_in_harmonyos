@@ -43,7 +43,7 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 **模式 A：全自动（推荐，适合大多数三方库）**
 ```bash
 python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> [<版本>]
-# → 内含 14 步：init→patches→pre-scan→configure→make→install→staging→package→deploy→finish→...
+# → 内含 13 步：init→patches→pre-scan→configure→make→install→staging→package→deploy→finish→...
 ```
 脚本遇到 configure/make 错误时自动输出 HANDOFF 块，AI 修复后 `--resume-from=StepN` 继续。
 
@@ -55,24 +55,24 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=
 # Step 2: 读取上下文，手动编译（唯一需要 AI 的步骤）
 # 读取 .build-context-<name>-<ver> 获取 BUILD_SRC_DIR, TEST_PREFIX 等变量
 cd $BUILD_SRC_DIR
-./configure --prefix=$DEFAULT_PREFIX && make -j$(nproc) && make install DESTDIR=$TEST_PREFIX
+./configure --prefix=$DEFAULT_PREFIX && make -j2 && make install DESTDIR=$TEST_PREFIX
 make check  # 必须执行，超时可 Ctrl+C 跳过并记录原因
 
 # Step 2.5: 预编译包制作
 python3 $SKILL_ROOT/scripts/ohc-run.py package <软件名> <版本>
 
-# Step 2.6: 部署到本地 + 用户验证（模拟普通用户部署 install.sh 后的状态）
+# Step 2.6: 部署到本地 + 用户验证（模拟 cmd-pkgs 公共安装脚本部署后的状态）
 make install  # 不带 DESTDIR，直接安装到 $DEFAULT_PREFIX（~/usr/local）
 $DEFAULT_PREFIX/bin/<软件> --version  # 验证本地安装可用
 
 # Step 3: 收尾（6 步自动）
-python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|failed
+python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|failed|archived
 
 # Step 4: 质量门禁复查（可选，finish 已自动执行）
 python3 $SKILL_ROOT/scripts/ohc-run.py verify-build <软件名> <版本>
 
-# Step 5: 预编译包制作（verify PASS 后必须执行）
-# 按 references/packaging-guide.md 10 步流程
+# Step 5: 预编译包制作（staging verify 后自动执行，模式 A 中为 build Step 9 内置）
+# 按 references/packaging-guide.md 9 步流程
 ```
 
 **如何选择**：已知软件/简单编译 → 模式 A；首次编译/复杂依赖/需深度调试 → 模式 B。
@@ -93,7 +93,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | # | 规则 | 一句话 | 详解 |
 |---|------|--------|------|
 | R1 | 参数最少化 | 只需 `--prefix` | references/iron-rules.md |
-| R2 | Phase 3 不生成 .patch | 只改源码+记录 PROGRESS | references/patch-pipeline.md |
+| R2 | Phase 3 不生成 .patch | 只改源码+记录 notes.md | references/patch-pipeline.md |
 | R3 | 补丁只用 ohc-run.py refresh-patch | `ohc-run.py refresh-patch --auto` | references/patch-pipeline.md |
 | R4 | 危险库静态编译 | ncurses `--without-shared` | §7 Gotchas |
 | R5 | 软链接验证可执行+禁止 ln -sf | `rm -f && ln -s` | §7 Gotchas |
@@ -110,13 +110,13 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 | R16 | 协作不越权 | 不推送 main，走 PR 流程 | knowledge/collaboration.md |
 | R17 | 知识先草稿 | graph add --draft | knowledge/collaboration.md |
 | R18 | 依赖先查预编译 | resolve-deps --install 优先于手动编译 | §1.3 决策树 |
-| R19 | 禁止手动打包 | 必须用 ohc-run.py package 10 步管线 | §3 Step 5 |
+| R19 | 禁止手动打包 | 必须用 ohc-run.py package 9 步管线 | §3 Step 5 |
 | R20 | **DESTDIR 模式** | `--prefix=$DEFAULT_PREFIX` + `DESTDIR=$TEST_PREFIX` | §3 Step 2 |
 | R21 | **Phase 3 结束必须自检零介入** | 按 §2.4.1 清单逐项检查，所有手动操作已固化 | 不自检就调 finish |
-| R22 | **finish 前必须通过干净构建验证** | `ohc-run.py clean-verify` G0 门禁通过 | G0 FAIL 仍标 success |
+| R22 | **finish 内自动触发 G0 干净构建验证** | `ohc-run.py clean-verify` G0 门禁通过 | G0 FAIL 阻塞后续门禁 |
 | R23 | **平台检测机制优先于改生成文件** | 用 hints/config.guess/cmake 检查 | 手动 sed config.sh/config.h |
 | R24 | **归档清理：failed必删，空归档删** | 无产物无补丁的归档无价值 | §6 归档清理规则 |
-| R25 | **PROGRESS.md 防重复：先删后写** | finish 自动清理旧记录，只保留最后一次 | §3 Step 3.1 |
+| R25 | **notes.md 防重复：先删后写** | finish 自动清理旧记录，只保留最后一次 | §3 Step 3.1 |
 
 ### 1.3 决策树
 
@@ -179,7 +179,7 @@ configure 失败？
 | 补丁生成 | references/patch-pipeline.md | Phase 3/4 |
 | Staging 验证 | references/staging-verify.md | make install 后 |
 | 打包阶段 | references/packaging-guide.md + knowledge/operations/packaging.md | Step 5 |
-| 归档收尾 | references/archive-spec.md | Step 5.5 |
+| 归档收尾 | knowledge/ARCHIVE-SPEC.md | Step 5.5 |
 | 生成总览 | — | finish 内部自动 |
 | 铁律详解 | references/iron-rules.md | 需要时 |
 | 人类浏览错误 | knowledge/error-patterns.md | 人类查看 |
@@ -246,7 +246,7 @@ cd $BUILD_SRC_DIR
 >
 > **二进制硬编码**：`$DEFAULT_PREFIX/share/misc/magic` → 运行时路径正确 ✅
 >
-> **流程**：`configure --prefix=$DEFAULT_PREFIX` → `make install DESTDIR=$TEST_PREFIX` → `package`（从 `$TEST_PREFIX/$DEFAULT_PREFIX/` 打包）→ 用户运行 `install.sh` 部署到 `$DEFAULT_PREFIX`
+> **流程**：`configure --prefix=$DEFAULT_PREFIX` → `make install DESTDIR=$TEST_PREFIX` → `package`（从 `$TEST_PREFIX/$DEFAULT_PREFIX/` 打包）→ 用户通过 cmd-pkgs 公共安装脚本部署到 `$DEFAULT_PREFIX`
 
 **执行顺序**：
 1. `configure --prefix=$DEFAULT_PREFIX` → `make`
@@ -258,9 +258,9 @@ cd $BUILD_SRC_DIR
 7. 用户验证（运行 `$DEFAULT_PREFIX/bin/*` 确认可用）
 8. `ohc-run.py finish`
 
-> **Step 6 的意义**：打包验证完成后，`make install` 将软件安装到本地 `~/usr/local`，模拟普通用户下载预编译包、运行 `install.sh` 后的真实状态。这一步能发现打包遗漏（缺库、路径错误、配置文件缺失）等问题。
+> **Step 6 的意义**：打包验证完成后，`make install` 将软件安装到本地 `~/usr/local`，模拟普通用户下载预编译包、通过 cmd-pkgs 公共安装脚本安装后的真实状态。这一步能发现打包遗漏（缺库、路径错误、配置文件缺失）等问题。
 
-> **make check 注意事项**：部分软件的测试套会卡住（如 coreutils cat-self、bash 多线程测试），遇到卡住可 `Ctrl+C` 跳过并在 PROGRESS.md 记录跳过原因。`make check` 的结果会写入 `reports/test-report.md`。
+> **make check 注意事项**：部分软件的测试套会卡住（如 coreutils cat-self、bash 多线程测试），遇到卡住可 `Ctrl+C` 跳过并在 notes.md 记录跳过原因。`make check` 的结果会写入 `reports/test-report.md`。
 
 ### HANDOFF 协议（脚本 → AI 交接格式）
 
@@ -351,7 +351,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py clean-verify <软件名> <版本>
 ### Step 3: ohc-run.py finish — 6 步自动收尾
 
 ```bash
-$SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|failed
+$SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|failed
 ```
 
 | 步骤 | 内容 | 失败处理 |
@@ -359,17 +359,17 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> success|partial|faile
 | [1/6] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
 | [2/6] close-archive | 归档关闭 | exit 2 |
 | [3/6] verify-build | 质量门禁 G1-G4 | ❌ 阻塞（未通过则 finish 失败） |
-| [4/6] finalize-archive | 清理+校验+RELEASENOTE | 非致命 |
+| [4/6] finalize-archive | 清理+校验+软件级 manifest 版本索引 | 非致命 |
 | [5/6] check-knowledge-gap | 知识完整性检查 | 非阻塞，提醒补充 |
 | [6/6] gen_summary | 重新生成 SUMMARY.md | 非致命 |
 
 **前置条件**：P1=test-report 存在, P2=Staging 验证完成, P3=预编译包已制作。
 
-**状态值**：`success`（全通过）| `partial`（部分失败可分发）| `failed`（编译失败）。verify 通过升级状态，失败降级。
+**状态值**：`published`（已编译并发布）| `built`（编译成功，未发布）| `failed`（编译失败）| `archived`（旧版本归档）。verify 通过升级状态，失败降级。
 
 #### Step 3.1: close-archive 自动清理（⭐ R25）
 
-> **PROGRESS.md 防重复规则**：`close-archive` 脚本在写入编译结束记录前，**自动清理所有旧记录**。
+> **notes.md 防重复规则**：`close-archive` 脚本在写入编译结束记录前，**自动清理所有旧记录**。
 
 ```python
 # close_archive.py 第 70-85 行
@@ -381,7 +381,7 @@ pcontent_new = pcontent_new.rstrip() + append_text
 
 **原因**：
 - 多次 finish（如修复后重跑）会产生重复记录
-- 重复记录导致 PROGRESS.md 混乱，无法判断最终状态
+- 重复记录导致 notes.md 混乱，无法判断最终状态
 - 自动清理确保每个软件只有一条最新的编译结束记录
 
 **工具约束**：脚本自动执行，无需手动干预。
@@ -401,9 +401,9 @@ G0 由 `ohc-run.py clean-verify` 执行，在 finish Step 3 自动触发。G0 FA
 > **详解**: references/packaging-guide.md
 > **R19: 禁止手动打包！必须用 `ohc-run.py package`。** 手动 `tar czf` 会导致 ELF 未签名（鸿蒙上不可执行）、缺少 RPATH、未 strip 符号等问题。
 
-verify PASS 后**必须**执行。按 packaging.md 10 步：收集 → 清理 → 链接替换 → 依赖收集 → RPATH → Strip → 签名 → 权限 → install.sh → tar.gz。
+verify PASS 后**必须**执行。按 packaging.md 9 步：收集 → 清理 → 链接替换 → 依赖收集 → RPATH → Strip → 签名 → 权限 → tar.gz + 安装验证。
 
-交付物：`{name}-{ver}-ohos-aarch64.tar.gz` + `debug.tar.gz` + `install.sh`。
+交付物：`{name}-{ver}-ohos-aarch64.tar.gz`（安装脚本由 cmd-pkgs 公共仓库提供）。
 
 ### Step 5.5: 归档收口
 
@@ -411,7 +411,7 @@ verify PASS 后**必须**执行。按 packaging.md 10 步：收集 → 清理 �
 python3 $SKILL_ROOT/scripts/ohc-run.py finalize-archive <软件名> <版本>
 ```
 
-清理临时文件 + 6 项必填校验 + 一致性检查 + 最终报告。详见 references/archive-spec.md。
+清理临时文件 + 必填校验 + 一致性检查 + 最终报告。详见 knowledge/ARCHIVE-SPEC.md。
 
 ---
 
@@ -443,7 +443,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finalize-archive <软件名> <版本>
 ```
 1. 识别差距 → 对比历史参数 vs 本次成功参数，定位遗漏项
 2. 手动编译 → 用正确参数完成编译（模式 B Step 2）
-3. 回写历史 → 更新 manifest.yaml 的 configure_options + PROGRESS.md
+3. 回写历史 → 更新 manifest.yaml 的 configure_options + notes.md
 4. 沉淀知识 → 如果是通用平台发现，写入 knowledge/ L1/L2
 ```
 
@@ -471,8 +471,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finalize-archive <软件名> <版本>
 
 ```
 knowledge/graph/        # 结构化数据
-├── index.tsv           # 主索引（80+ 条目）
-├── principles.kv       # 编译原则（16 条）
+├── index.tsv           # 主索引（100+ 条目）
+├── principles.kv       # 编译原则（20 条）
 ├── pre-scan-rules.yaml # 预编译风险扫描规则集（闭环：编译新发现→自动回填）
 ├── E001.kv ~ E080.kv   # 错误模式条目
 knowledge/doc/          # 人类可读文档
@@ -531,27 +531,32 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --refresh           # 刷新
 
 ## §6 归档规范摘要
 
-> **完整规范**: references/archive-spec.md
+> **完整规范**: knowledge/ARCHIVE-SPEC.md
 
 ### 目录结构
 
 ```
-archives/{首字母}/{软件名}/          ← 软件级
-├── README.md + RELEASENOTE.md + install.sh
-└── {版本}/                         ← 版本级
-    ├── manifest.yaml + PROGRESS.md
-    ├── patches/*.patch
-    ├── reports/
-    └── packaging/*.tar.gz
+archives/{letter}/{name}/
+  ├── manifest.yaml              # 软件级元数据 + 版本索引
+  ├── README.md                  # 软件描述
+  └── {version}/
+      ├── manifest.yaml          # 版本级编译元数据
+      ├── notes.md               # 适配笔记（替代旧 PROGRESS.md）
+      ├── patches/               # 补丁（按需，有则保留）
+      ├── packaging/             # 仅 .tar.gz（按需，有产物时）
+      └── reports/               # 构建报告（按需）
 ```
 
 ### 必填文件
 
-manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, patches/, reports/, packaging/*.tar.gz
+- **软件级（必须）**：manifest.yaml, README.md
+- **版本级（必须）**：manifest.yaml
+- **版本级（推荐）**：notes.md
+- **版本级（按需）**：patches/, packaging/, reports/
 
 ### 补丁命名
 
-`NNNN-{文件名}.patch`，如 `0001-config.sub.patch`。
+`NNNN-{描述}.patch`，如 `0001-config.sub.patch`。
 
 ### 依赖顺序（批量编译参考）
 
@@ -565,11 +570,11 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, patches/, reports/, packa
 
 | 状态 | 定义 | 产物 | 补丁 | 知识 | 处理 |
 |------|------|------|------|------|------|
-| **success** | 编译成功，产物可用 | ✅ 有 | 可能有 | 有 | 保留（核心资产） |
-| **partial** | 部分成功，可分发 | ✅ 有 | 有 | 有 | 保留（有价值） |
-| **partial** | 仅骨架，无产物 | ❌ 无 | ❌ 无 | ❌ 无 | ⚠️ 清理（空归档） |
+| **published** | 已编译并发布到 cmd-pkgs | ✅ 有 | 可能有 | 有 | 保留（核心资产） |
+| **built** | 编译成功，未发布 | ✅ 有 | 有 | 有 | 保留（有价值） |
+| **built** | 仅骨架，无产物 | ❌ 无 | ❌ 无 | ❌ 无 | ⚠️ 清理（空归档） |
 | **failed** | 编译失败，无产物 | ❌ 无 | ❌ 无 | ❌ 无 | ❌ 删除（无价值） |
-| **compiling** | 进行中，未完成 | ❌ 无 | ❌ 无 | ❌ 无 | ⚠️ 清理（旧状态） |
+| **archived** | 旧版本归档 | 可能有 | 可能有 | 有 | 保留 |
 
 **清理操作**：
 
@@ -577,9 +582,9 @@ manifest.yaml, README.md, PROGRESS.md, RELEASENOTE.md, patches/, reports/, packa
 # 1. 删除 failed 状态的归档（无产物无知识）
 rm -rf archives/{letter}/{软件}/{版本}/
 
-# 2. 删除 partial 但无产物的空归档
-#    判断：manifest.yaml status=partial + 无 tar.gz + 无 .patch
-find archives -name "manifest.yaml" -exec grep -l "status: partial" {} \; | while read m; do
+# 2. 删除 built 但无产物的空归档
+#    判断：manifest.yaml status=built + 无 tar.gz + 无 .patch
+find archives -name "manifest.yaml" -exec grep -l "status: built" {} \; | while read m; do
     dir=$(dirname "$m")
     pkg_count=$(ls "$dir/packaging/*.tar.gz" 2>/dev/null | wc -l)
     patch_count=$(ls "$dir/patches/*.patch" 2>/dev/null | wc -l)
@@ -588,11 +593,11 @@ find archives -name "manifest.yaml" -exec grep -l "status: partial" {} \; | whil
     fi
 done
 
-# 3. 更新有产物的 partial 为 success
-sed -i 's/^status: partial$/status: success/' archives/{letter}/{软件}/{版本}/manifest.yaml
+# 3. 更新有产物的 built 为 published
+sed -i 's/^status: built$/status: published/' archives/{letter}/{软件}/{版本}/manifest.yaml
 
-# 4. 清理多版本中的无用版本（保留最新成功版本）
-#    判断：同一软件有多版本，旧版本 partial/compiling 且无产物
+# 4. 清理多版本中的无用版本（保留最新 published 版本）
+#    判断：同一软件有多版本，旧版本 built/failed 且无产物
 rm -rf archives/{letter}/{软件}/{旧版本}/
 ```
 
@@ -600,15 +605,15 @@ rm -rf archives/{letter}/{软件}/{旧版本}/
 
 | 场景 | 处理 |
 |------|------|
-| 同软件多版本都 success | 全部保留（用户可能需要不同版本） |
-| 最新版本 success，旧版本 partial | 清理旧版本（无价值） |
-| 最新版本 failed，旧版本 success | 清理最新版本，保留旧版本 |
-| 多版本都 partial 无产物 | 全部清理（空归档） |
+| 同软件多版本都 published | 全部保留（用户可能需要不同版本） |
+| 最新版本 published，旧版本 built | 清理旧版本（无价值） |
+| 最新版本 failed，旧版本 published | 清理最新版本，保留旧版本 |
+| 多版本都 built 无产物 | 全部清理（空归档） |
 
 **清理时机**：
 - finish 时自动检查：status=failed → 警告并建议删除
 - 定期审计（主编职责）：扫描空归档、清理废弃版本
-- PR 合并前：协作者自检，确保无 failed/partial 空归档提交
+- PR 合并前：协作者自检，确保无 failed/built 空归档提交
 
 ---
 
@@ -714,7 +719,7 @@ git add . && git commit -m "feat: batch compile ..." && git push
 子任务不仅是编译执行者，也是知识发现者。编译过程中遇到的每个新错误模式：
 1. 先用 `engine` 检查是否已有匹配条目
 2. 无匹配 → 用 `graph add E{N} --draft` 创建草稿到 `knowledge/graph/draft/`
-3. 草稿写入 `PROGRESS.md` 的知识提取记录
+3. 草稿写入 `notes.md` 的知识提取记录
 4. 主任务从 draft/ 目录收集所有草稿，审核后合并到正式图谱
 
 `dispatch objective` 命令已内置此要求，生成的 objective 包含完整的 R17 草稿创建流程。
@@ -734,16 +739,16 @@ git add . && git commit -m "feat: batch compile ..." && git push
 
 | 脚本 | 用途 | 调用时机 |
 |------|------|---------|
-| `ohc-run.py build` | 14 步编译驱动（唯一入口） | ★ 主入口 |
+| `ohc-run.py build` | 13 步编译驱动（唯一入口） | ★ 主入口 |
 | `ohc-run.py init-build` | 下载/解压/骨架/环境 | Step 1 |
-| `pre_scan.py` | 预编译源码风险扫描（规则集 + musl 函数检测） | build Step 2.5 |
+| `pre_scan.py` | 预编译源码风险扫描（规则集 + musl 函数检测）⚠️ build 管线内部模块，非独立 CLI | build Step 2.5 |
 | `ohc-run.py finish` | 补丁+归档+verify+校验+知识+总结（6 步） | Step 3 |
 | `ohc-run.py verify-build` | G1-G4 质量门禁 | finish 内部 / 可选复查 |
 | `ohc-run.py clean-verify` | G0 干净构建验证 | finish Step 3 前置 / AI 手动 |
 | `ohc-run.py refresh-patch` | 补丁管线 | finish 内部 |
 | `ohc-run.py close-archive` | 归档关闭 | finish 内部 |
-| `ohc-run.py finalize-archive` | 清理+校验+RELEASENOTE | finish 内部 |
-| `ohc-run.py package` | 预编译包 10 步流程 | Step 5 |
+| `ohc-run.py finalize-archive` | 清理+校验+软件级 manifest 版本索引 | finish 内部 |
+| `ohc-run.py package` | 预编译包 9 步流程 | Step 5 |
 | `ohc-run.py sign-elf` | ELF 签名 | 打包时 |
 | `ohc-run.py init-archive` | 档架骨架创建 | init 内部 |
 | `ohc-run.py check-env` | 环境检查 | init 内部 |
@@ -766,4 +771,5 @@ git add . && git commit -m "feat: batch compile ..." && git push
 
 ---
 
-*SKILL.md v7.7 — 2026-04-24 — PROGRESS.md 防重复（R25）、工具自动清理旧记录*
+*SKILL.md v7.8 — 2026-04-28 — ARCHIVE-SPEC v2.0 迁移（notes.md/published/built）、删除 archive-spec.md 重复文件*
+�、删除 archive-spec.md 重复文件*

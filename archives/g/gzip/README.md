@@ -1,53 +1,22 @@
-# gzip 1.13 编译说明
+# gzip
 
-## 编译信息
+## 简介
+GNU gzip — 文件压缩/解压工具，实现 deflate 压缩算法。是 Linux/Unix 系统最基础的压缩工具之一。
 
-- **软件名**: gzip
-- **版本**: 1.13
-- **编译日期**: 2026-03-30
-- **构建系统**: autotools
-- **目标平台**: aarch64-unknown-linux-gnu
+## OHOS 适配
+- 需 config.guess/config.sub 补丁支持 HarmonyOS
+- config.sub 需在 `linux-gnu*` 行加入 `linux-ohos*`
+- shell 脚本因 shebang 限制无法直接执行，需通过 `sh` 调用（如 `sh zless`）
+- 核心压缩解压功能正常，gzip/gunzip/zcat 二进制完全可用
 
-## 编译环境
-
-- **编译器**: clang 15.0.4
-- **操作系统**: HarmonyOS (HongMeng Kernel 1.12.0)
-- **安装前缀**: /storage/Users/currentUser/usr/local
-
-## 编译配置
-
-```bash
-./configure \
-  --prefix=/storage/Users/currentUser/usr/local \
-  CC=clang \
-  CFLAGS="-I/storage/Users/currentUser/usr/local/include" \
-  LDFLAGS="-L/storage/Users/currentUser/usr/local/lib"
-```
-
-## 编译产物
-
-- `gzip` - 主压缩程序 (182K)
-- `gunzip` - 解压工具 (2.2K)
-- `zcat` - cat 到 gzip 工具 (1.9K)
-- `zless` - less 查看 gzip 文件 (2.3K)
-- `zmore` - more 查看 gzip 文件 (1.7K)
+## 依赖
+- 编译依赖：无必须依赖
 
 ## 功能验证
+```bash
+gzip --version
+echo "test" | gzip | gunzip
+```
 
-所有工具链均已验证通过：
-- ✅ gzip 1.13 版本正确
-- ✅ 压缩/解压功能正常
-- ✅ 所有软链接可执行
-
-## 兼容性说明
-
-- **兼容性等级**: high
-- **已知问题**: 无
-- **备注**: 核心压缩功能正常，所有工具链验证通过
-
-## 编译备注
-
-- gzip 1.13 在 HarmonyOS 上使用 autotools 编译成功
-- 无需特殊补丁
-- 使用 clang 编译器
-- 构建系统类型为 autotools
+## 参考
+- 官方网站：https://www.gnu.org/software/gzip/

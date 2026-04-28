@@ -1,19 +1,25 @@
-# cryptopp 8.9.0 — OpenHarmony 编译记录
+# Crypto++
 
-## 基本信息
-- 软件: cryptopp
-- 版本: 8.9.0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+Crypto++ 是一个免费的 C++ 加密算法库，包含大量加密方案的实现。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+- 对称加密：AES、DES、Blowfish 等
+- 非对称加密：RSA、DSA、ECDSA 等
+- 哈希函数：SHA、MD5、BLAKE2 等
+- 消息认证码：HMAC、CMAC 等
+- 数字签名和证书
 
-## 已知限制
-<!-- 平台相关限制 -->
+## OHOS 适配
 
-## 功能验证
-<!-- 验证命令和结果 -->
+- 大型加密库（107.6MB 包大小）
+- 编译进行中
+
+## 依赖关系
+
+- C++ 编译器
+
+## 参考资料
+
+- 官网: https://www.cryptopp.com/
+- 源码: https://github.com/weidai11/cryptopp

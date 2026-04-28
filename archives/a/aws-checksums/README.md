@@ -1,19 +1,16 @@
-# aws-checksums 0.2.10 — OpenHarmony 编译记录
+# AWS Checksums — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: aws-checksums
-- 版本: 0.2.10
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+aws-checksums 提供高效校验和计算库，支持 CRC32/CRC32C（SIMD 优化）、CRC64、MD5 和 SHA 系列。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
+- CRC32/CRC32C（NEON 加速）
+- CRC64（S3 用）
+- MD5, SHA-1/SHA-256
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖关系
+- 编译依赖: aws-c-common
+- 被依赖: aws-c-s3, aws-c-event-stream
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [aws-checksums GitHub](https://github.com/awslabs/aws-checksums)

@@ -1,19 +1,14 @@
-# zlib-ng-compat 2.3.3 — OpenHarmony 编译记录
+# zlib-ng (compat mode)
 
-## 基本信息
-- 软件: zlib-ng-compat
-- 版本: 2.3.3
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+zlib-ng 在 zlib-compat 模式下构建，提供与 zlib 兼容的 API，可直接替换 zlib。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 使用 --zlib-compat 和 --static 构建选项
+- 编译验证通过
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖
+- 标准 C 库
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考
+- 源码: https://github.com/zlib-ng/zlib-ng

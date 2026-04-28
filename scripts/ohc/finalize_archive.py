@@ -1,4 +1,4 @@
-"""Finalize compilation archive — cleanup, RELEASENOTE, validation.
+"""Finalize compilation archive — cleanup, validation.
 """
 from __future__ import annotations
 import re
@@ -79,110 +79,27 @@ def finalize_archive(software: str, version: str, pdir: str | None = None) -> in
             if f.suffix != ".debug":
                 f.unlink()
 
-    # Phase 2: Generate software-level RELEASENOTE.md
-    log_info("  Phase 2: 生成 RELEASENOTE.md...")
-    rn = sw_dir / "RELEASENOTE.md"
-
-    build_system = str(mf.get("build_system", "unknown"))
-    source_url = str(mf.get("source_url", ""))
-    binary_count = str(mf.get("binary_count", "N/A"))
-    exclude_list = mf.get("exclude_list", [])
-    if isinstance(exclude_list, str):
-        exclude_list = [exclude_list]
-
-    # Quality report
-    quality = "N/A"
-    qr = ver_dir / "reports" / "quality-report.md"
-    if qr.exists():
-        content = qr.read_text(encoding="utf-8", errors="replace")
-        if "PASS" in content and "FAIL" not in content:
-            quality = "PASS"
-        elif "FAIL" in content:
-            quality = "FAIL-WARN"
-
-    # Patches
-    patches = sorted((ver_dir / "patches").glob("000*.patch"))
-    patch_names = [p.name for p in patches]
-
-    # Package info
-    tars = list((ver_dir / "packaging").glob("*-ohos-aarch64*.tar.gz"))
-    pkg_size = _human_size(sum(t.stat().st_size for t in tars)) if tars else "N/A"
-    pkg_names = [t.name for t in tars]
-
-    # Binary names
-    bins = list((ver_dir / "packaging" / "bin").glob("*")) if (ver_dir / "packaging" / "bin").exists() else []
-    bin_names = [b.name for b in bins[:5]]
-
-    # Version list
-    versions = sorted([d.name for d in sw_dir.iterdir() if d.is_dir() and d.name[0].isdigit()], reverse=True)
-
-    # Build RELEASENOTE
-    lines = [
-        f"# {software} — HarmonyOS aarch64 预编译包\n",
-        f"## 快速安装\n",
-        f"```bash\ntar xzf {software}-{version}-ohos-aarch64.tar.gz -C ~/usr/local\n",
-        f"cd {software}-{version}-ohos-aarch64 && sh install-{software}-{version}.sh\n```\n",
-        f"## 可用版本\n",
-        f"| 版本 | 状态 | 补丁数 |",
-        f"|------|------|--------|",
-    ]
-    for v in versions:
-        vm = sw_dir / v / "manifest.yaml"
-        vmf = _parse_manifest(vm)
-        vs = str(vmf.get("status", "unknown"))
-        vp = len(list((sw_dir / v / "patches").glob("000*.patch")))
-        lines.append(f"| {v} | {vs} | {vp} |")
-
-    lines.extend([
-        f"\n## 当前版本 ({version}) 详情\n",
-        f"### 包内容",
-        f"- 二进制: {binary_count}",
-        f"- 包大小: {pkg_size}",
-    ])
-    if bin_names:
-        lines.append(f"- 命令: {', '.join(bin_names)}")
-
-    if exclude_list:
-        lines.extend([
-            f"\n### 排除命令",
-            f"- {', '.join(str(e) for e in exclude_list[:10])}",
-        ])
-
-    lines.extend([
-        f"\n### 编译信息",
-        f"- 构建系统: {build_system}",
-        f"- 目标: ohos-aarch64",
-        f"- 质量门禁: {quality}",
-        f"- 补丁数: {len(patches)}",
-    ])
-
-    if patch_names:
-        lines.append(f"\n### 补丁列表")
-        for pn in patch_names:
-            lines.append(f"- {pn}")
-
-    lines.extend([
-        f"\n## 环境要求",
-        f"- HarmonyOS/OpenHarmony aarch64",
-        f"- `{project.name}/usr/local/bin` in PATH\n",
-    ])
-
-    rn.write_text("\n".join(lines), encoding="utf-8")
-    log_ok(f"  RELEASENOTE.md 已生成 ({len(lines)} 行)")
-
-    # Phase 3: Required files check
-    log_info("  Phase 3: 必填文件校验...")
+    # Phase 2: Required files check
+    log_info("  Phase 2: 必填文件校验...")
     missing = 0
 
-    # Software level
-    for f in ["README.md", "RELEASENOTE.md"]:
+    # Software level: README.md + manifest.yaml
+    for f in ["README.md"]:
         p = sw_dir / f
         if not p.exists() or len(p.read_text(encoding="utf-8", errors="replace").splitlines()) < 5:
             log_warn(f"  ⚠️ 软件级缺失: {f}")
             missing += 1
 
-    # Version level files
-    for f in ["manifest.yaml", "PROGRESS.md"]:
+    # Version level files (notes.md)
+    notes_path = ver_dir / "notes.md"
+    notes_ok = False
+    if notes_path.exists() and len(notes_path.read_text(encoding="utf-8", errors="replace").splitlines()) >= 5:
+        notes_ok = True
+    if not notes_ok:
+        log_warn("  ⚠️ 版本级缺失: notes.md")
+        missing += 1
+
+    for f in ["manifest.yaml"]:
         p = ver_dir / f
         if not p.exists() or len(p.read_text(encoding="utf-8", errors="replace").splitlines()) < 5:
             log_warn(f"  ⚠️ 版本级缺失: {f}")
@@ -194,8 +111,8 @@ def finalize_archive(software: str, version: str, pdir: str | None = None) -> in
             log_warn(f"  ⚠️ 目录缺失: {d}")
             missing += 1
 
-    # Packaging deliverables (only for success/partial)
-    if status in ("success", "partial"):
+    # Packaging deliverables (only for published/built)
+    if status in ("published", "built"):
         rel_tars = list((ver_dir / "packaging").glob("*-ohos-aarch64.tar.gz"))
         debug_tars = list((ver_dir / "packaging").glob("*-debug.tar.gz"))
         if not rel_tars:
@@ -204,22 +121,22 @@ def finalize_archive(software: str, version: str, pdir: str | None = None) -> in
         if not debug_tars:
             log_warn("  ⚠️ 缺少 debug tar.gz")
 
-    # Phase 4: Consistency check
-    log_info("  Phase 4: 一致性检查...")
+    # Phase 3: Consistency check
+    log_info("  Phase 3: 一致性检查...")
     issues = 0
 
-    # Status consistency
-    progress = ver_dir / "PROGRESS.md"
+    # Status consistency (notes.md)
+    progress = ver_dir / "notes.md"
     if progress.exists():
         pc = progress.read_text(encoding="utf-8", errors="replace")
         progress_status = "unknown"
         for m in re.finditer(r'(?:状态|status)[：:]\s*(.+)', pc, re.I):
             progress_status = m.group(1).strip()
         if progress_status != "unknown" and status not in progress_status:
-            log_warn(f"  ⚠️ 状态不一致: PROGRESS={progress_status} vs manifest={status}")
+            log_warn(f"  ⚠️ 状态不一致: notes={progress_status} vs manifest={status}")
             issues += 1
         if "### 对话 #" not in pc:
-            log_warn("  ⚠️ PROGRESS.md 无对话记录")
+            log_warn("  ⚠️ notes.md 无对话记录")
             issues += 1
 
     # Patch count consistency
@@ -231,7 +148,8 @@ def finalize_archive(software: str, version: str, pdir: str | None = None) -> in
             log_warn(f"  ⚠️ 补丁数不一致: manifest={mf_count} vs disk={disk_count}")
             issues += 1
 
-    # Phase 5: Report
+    # Phase 4: Report
+    patches = sorted((ver_dir / "patches").glob("000*.patch"))
     reports = len(list((ver_dir / "reports").glob("*.md")))
     pkg_count = len(list((ver_dir / "packaging").glob("*.tar.gz")))
 

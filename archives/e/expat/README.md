@@ -1,100 +1,25 @@
-# expat 2.7.1 for HarmonyOS
+# expat
 
-## 概述
+expat 是一个高性能的 C 语言 XML 解析库，使用流式 SAX（Simple API for XML）解析器设计。
 
-expat 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## 功能概述
+- 流式 SAX 解析器，内存占用低
+- 支持 XML 1.0/1.1 规范
+- 命名空间支持
+- DTD 验证
+- 随附 xmlwf 命令行工具（XML 文件校验）
+- 同时支持 autotools 和 CMake 构建
 
-## 软件信息
+## OHOS 适配
+- **推荐使用 CMake 构建**：autotools configure 在 HarmonyOS 上因 HMDFS 文件系统限制可能卡住或权限不足
+- 使用 autotools 构建时需要更新 config.guess/config.sub
+- CMake 构建无需补丁
+- xmlwf 命令行工具可正常使用
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | expat |
-| 版本 | 2.7.1 |
-| 下载地址 | https://github.com/libexpat/libexpat/releases/download/R_2_7_1/expat-2.7.1.tar.gz |
-| 官方文档 | {文档链接} |
-
-## 鸿蒙环境
-
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
-
-## 编译步骤
-
-```bash
-# 1. 下载源码
-wget https://github.com/libexpat/libexpat/releases/download/R_2_7_1/expat-2.7.1.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
-```
-
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
+## 依赖关系
+- **编译依赖**: 无（CMake 可选依赖：docbook2x）
+- **运行依赖**: 无
 
 ## 参考资料
-
-- {参考链接1}
-- {参考链接2}
+- 官网: https://libexpat.github.io/
+- 源码: https://github.com/libexpat/libexpat

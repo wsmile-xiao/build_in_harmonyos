@@ -10,12 +10,12 @@
 
 ```
 1. 沉淀知识 → 判断层级（L1/L2/L3），写入对应位置
-2. 写索引行 → 在 PROGRESS.md 对话记录中写一行摘要
+2. 写索引行 → 在 notes.md 中写一行摘要
 3. 裁剪遗忘 → 向上下文压缩系统声明可遗忘的内容
 4. 后续查图谱 → 遇同类问题先查 graph/index.tsv，不重新调试
 ```
 
-## PROGRESS.md 索引行格式
+## notes.md 索引行格式
 
 ```markdown
 ### 对话 #N — YYYY-MM-DD HH:MM

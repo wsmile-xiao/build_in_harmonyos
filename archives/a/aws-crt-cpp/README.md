@@ -1,19 +1,17 @@
-# aws-crt-cpp 0.38.5 — OpenHarmony 编译记录
+# AWS CRT C++ — OpenHarmony 编译档案
 
-## 基本信息
-- 软件: aws-crt-cpp
-- 版本: 0.38.5
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 软件简介
+aws-crt-cpp 是 AWS C 运行时的 C++ 封装库，提供 RAII 内存管理和所有 aws-c-* 库的 C++ API。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## 功能概述
+- C++ API 封装
+- RAII 内存管理
+- 异步操作（C++ 协程）
+- MQTT5/S3 C++ 客户端
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+## 依赖关系
+- 编译依赖: 所有 aws-c-* 库
+- 被依赖: AWS SDK for C++ v2
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+## 参考资料
+- [aws-crt-cpp GitHub](https://github.com/awslabs/aws-crt-cpp)

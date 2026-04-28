@@ -29,7 +29,7 @@ scripts/
 ├── ohc-run.py              # 统一 CLI 入口（18 子命令）
 ├── ohc/                    # Python 包（24 个 .py）
 │   ├── cli.py              # 命令分发（argparse 子命令路由）
-│   ├── driver.py           # 14 步编译驱动
+│   ├── driver.py           # 13 步编译驱动
 │   ├── init_build.py       # 初始化管线（registry→async下载→tarfile解压→骨架→环境检查）
 │   ├── finish.py           # 6 步收尾管线
 │   ├── engine.py           # 五阶段错误匹配引擎
@@ -37,7 +37,7 @@ scripts/
 │   ├── status.py           # 跨对话状态扫描
 │   ├── graph.py            # 知识图谱 CRUD（add/update/remove/validate）
 │   ├── verify_build.py     # 4 道质量门禁 G1-G4
-│   ├── package_builder.py  # 10 步打包
+│   ├── package_builder.py  # 9 步打包
 │   ├── sign_elf.py         # ELF 签名（单文件 + 批量并行）
 │   ├── refresh_patch.py    # 补丁生成（difflib + filecmp 替代外部 diff）
 │   ├── finalize_archive.py # 归档校验（清理 + RELEASENOTE + 完整性）
@@ -61,7 +61,7 @@ scripts/
 
 | 子命令 | 模块 | 说明 |
 |--------|------|------|
-| `build` | driver.py | 14 步编译驱动（主流程） |
+| `build` | driver.py | 13 步编译驱动（主流程） |
 | `init-build` | init_build.py | 初始化（registry→下载→解压→骨架→env-check） |
 | `finish` | finish.py | 6 步收尾管线 |
 | `engine` | engine.py | 五阶段错误匹配引擎（独立调用） |
@@ -77,7 +77,7 @@ scripts/
 | `finalize-archive` | finalize_archive.py | 归档校验（清理 + RELEASENOTE + 完整性） |
 | `verify-build` | verify_build.py | 4 道质量门禁（G1-G4） |
 | `sign-elf` | sign_elf.py | ELF 签名（单文件 + 批量并行） |
-| `package` | package_builder.py | 10 步打包 |
+| `package` | package_builder.py | 9 步打包 |
 | `summary` | summary.py | 生成 SUMMARY.md |
 
 ---
@@ -88,7 +88,7 @@ scripts/
 
 | 模块 | 职责 | 关键接口 |
 |------|------|---------|
-| `driver.py` | 14 步编译驱动，编排整个编译生命周期 | `build(name, version, **opts)` |
+| `driver.py` | 13 步编译驱动，编排整个编译生命周期 | `build(name, version, **opts)` |
 | `init_build.py` | 初始化管线：registry 查询 → asyncio 并行探测 → urllib 下载 → tarfile 解压 → 骨架创建 → 环境检查 | `init_build(name, version, **opts)` |
 | `finish.py` | 6 步收尾管线：补丁 → 归档 → 门禁 → 校验 → 知识 → 摘要 | `finish(name, version, status)` |
 | `cli.py` | 命令分发，argparse 子命令路由 | `main()` |
@@ -128,7 +128,7 @@ scripts/
 
 | 模块 | 职责 | 关键接口 |
 |------|------|---------|
-| `package_builder.py` | 10 步打包：收集→清理→链接→依赖→RPATH→strip→签名→权限→install.sh→tar.gz | `build_package(name, version)` |
+| `package_builder.py` | 9 步打包：收集→清理→链接→依赖→RPATH→strip→签名→权限→install.sh→tar.gz | `build_package(name, version)` |
 | `summary.py` | 生成 SUMMARY.md（遍历 archives/ + 知识图谱统计） | `generate_summary()` |
 
 ### 4.7 辅助模块

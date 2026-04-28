@@ -9,35 +9,32 @@
 ### 总体格式
 
 ```
-{软件名}-{上游版本}-{适配版本}
+{软件名}-{上游版本}-ohos-{arch}.tar.gz
 ```
 
 ### 适配版本格式
 
 ```
-ohos{N}
-  - ohos1: 首次适配
-  - ohos2: 补丁更新/兼容性改进
-  - ohos3: 重大变更
+ohos-{arch}
+  - {arch} 为目标架构标识，如 aarch64、x86_64
 ```
 
 ### 示例
 
 ```
-python-3.9.0-ohos1.tar.gz        # Python 3.9.0 首次鸿蒙适配
-python-3.9.0-ohos2.tar.gz        # 修复了补丁/改进了兼容性
-openssl-1.1.1w-ohos1.tar.gz      # OpenSSL 首次适配
+python-3.9.0-ohos-aarch64.tar.gz        # Python 3.9.0 鸿蒙 aarch64 适配
+openssl-1.1.1w-ohos-aarch64.tar.gz      # OpenSSL 鸿蒙 aarch64 适配
 ```
 
 ### 产物包命名
 
 ```
-{软件名}-{上游版本}-ohos{N}-{arch}.tar.gz          # 产物包（按架构）
-{软件名}-{上游版本}-ohos{N}-{arch}-debug.tar.gz    # Debug 符号包
+{软件名}-{上游版本}-ohos-{arch}.tar.gz          # 产物包（按架构）
+{软件名}-{上游版本}-ohos-{arch}-debug.tar.gz    # Debug 符号包
 {软件名}-{上游版本}-patches.tar.gz                  # 补丁包（源码分发）
 ```
 
-其中 `{arch}` 为目标架构标识，例如 `aarch64`、`x86_64` 等。
+其中 `{arch}` 为目标架构标识，例如 `aarch64`（与 packaging.md §1.5 一致）。
 
 ---
 
@@ -45,22 +42,34 @@ openssl-1.1.1w-ohos1.tar.gz      # OpenSSL 首次适配
 
 ### 产物包（二进制分发）
 
+> **⚠️ 与 packaging.md §1.5 保持一致**：tar.gz 内部为扁平结构，只含 bin/share/lib。
+
 ```
-{软件名}-{版本}-ohos-{arch}/
-├── bin/               # 可执行文件（wrapper 脚本替代软链接）
-├── lib/               # 共享库
-│   └── external/      # 外部依赖库
-├── include/           # 头文件
-├── README.md          # 使用说明
-├── VERSION            # 版本信息文件
-└── install.sh         # 一键安装脚本
+{name}-{ver}-ohos-aarch64.tar.gz   ← 解压后顶层就是这些目录
+├── bin/           # 可执行文件 (ELF, 已签名, 已 strip, 有执行权限)
+│   ├── {name}     # 主二进制
+│   └── ...
+├── share/         # 文档和数据（如 man 页、locale 等）
+└── lib/           # 共享库 + 外部依赖（如有）
+    └── external/  # 外部依赖库（非系统库，通过 patchelf 设置 $ORIGIN RPATH）
 ```
 
 说明：
-- **bin/** 下的可执行文件应直接放置，install.sh 负责创建 wrapper 脚本到用户 PATH 目录
+- **tar.gz 不含 install.sh/README.md/VERSION**：安装由 cmd-pkgs 公共安装脚本统一处理
+- **bin/** 下不使用软链接（鸿蒙 SELinux 限制），用 wrapper 脚本或 cp 替代
 - **lib/external/** 存放本软件依赖的外部共享库（非系统库），通过 patchelf 设置 `$ORIGIN` 相对 RPATH
-- **VERSION** 文件内容示例：`python 3.9.0 ohos1 aarch64`
-- **README.md** 包含安装步骤、已知限制、目录结构说明
+- 打包命令必须从包含 `bin/` 的目录执行：`cd "$PKGDIR" && tar czf "output.tar.gz" *`
+
+### ~~install.sh（已废弃）~~
+
+> **已迁移至 cmd-pkgs 公共安装脚本**。不再为每个软件生成独立 install.sh。
+> 使用 cmd-pkgs 公共安装脚本，托管在 cmd-pkgs 的 `pkgs` release tag 下。
+> 用户通过 `curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- <name> <version>` 安装。
+> 详见 packaging.md §9。
+
+### ~~VERSION 文件（已废弃）~~
+
+> 版本信息由 manifest.yaml 和 Release Notes 提供，不再在 tar.gz 中包含 VERSION 文件。
 
 ### 补丁包（源码分发）
 
@@ -88,16 +97,15 @@ openssl-1.1.1w-ohos1.tar.gz      # OpenSSL 首次适配
 
 ### Step 1：收集产物
 
-从 `$DEFAULT_PREFIX`（默认为 `$HOME/build/_install/{软件名}`）收集安装好的文件：
+从 staging 目录（`$STAGING_PREFIX`）收集安装好的文件：
 
 ```sh
-SRC_DIR="$HOME/build/_install/$SOFTWARE_NAME"
+SRC_DIR="$STAGING_PREFIX"   # 即 $TEST_PREFIX/$DEFAULT_PREFIX
 DST_DIR="$HOME/build/_release/$SOFTWARE_NAME-$VERSION-ohos-$ARCH"
 
-mkdir -p "$DST_DIR"/{bin,lib/external,include}
-cp -a "$SRC_DIR/bin/"* "$DST_DIR/bin/"
-cp -a "$SRC_DIR/lib/"* "$DST_DIR/lib/"
-cp -a "$SRC_DIR/include/"* "$DST_DIR/include/" 2>/dev/null || true
+mkdir -p "$DST_DIR"
+cd "$SRC_DIR"
+tar cf - bin share lib 2>/dev/null | (cd "$DST_DIR" && tar xf -)
 ```
 
 ### Step 2：依赖分析
@@ -106,7 +114,7 @@ cp -a "$SRC_DIR/include/"* "$DST_DIR/include/" 2>/dev/null || true
 
 ```sh
 echo "=== 依赖分析 ==="
-find "$DST_DIR/bin" "$DST_DIR/lib" -type f \( -executable -o -name "*.so" -o -name "*.so.*" \) | while read elf; do
+find "$DST_DIR/bin" "$DST_DIR/lib" -type f \( -executable -o -name "*.so" -o -name "*.so.*" \) 2>/dev/null | while read elf; do
     echo "--- $elf ---"
     llvm-readelf -d "$elf" 2>/dev/null | grep NEEDED || true
 done > "$DST_DIR/deps.txt"
@@ -124,40 +132,39 @@ done > "$DST_DIR/deps.txt"
 
 ### Step 8：生成 README.md
 
+> **⚠️ 注意**：tar.gz 不含 README.md。以下 README 仅作为 Release Notes 参考内容，发布到 GitCode Release 页面。
+
 ```sh
 cat > "$DST_DIR/README.md" << EOF
 # $SOFTWARE_NAME $VERSION - HarmonyOS 适配版
 
 ## 安装
 
+使用 cmd-pkgs 公共安装脚本（一行命令安装）：
+
 \`\`\`sh
-tar -xzf $SOFTWARE_NAME-$VERSION-ohos${N}-$ARCH.tar.gz
-cd $SOFTWARE_NAME-$VERSION-ohos-$ARCH
-sh install.sh [安装路径]
+curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- $SOFTWARE_NAME $VERSION
 \`\`\`
 
-默认安装路径：\`~/usr/\`
+默认安装路径：\`~/usr/local/\`
 
 ## 环境变量
 
 安装后请将以下内容添加到 \`~/.bashrc\`：
 
 \`\`\`sh
-export PATH="~/usr/bin:\$PATH"
+export PATH="~/usr/local/bin:\$PATH"
 export TMPDIR=/data/local/tmp
 \`\`\`
 
 ## 目录结构
 
 \`\`\`
-$SOFTWARE_NAME-$VERSION-ohos-$ARCH/
+$SOFTWARE_NAME-$VERSION-ohos-aarch64/
 ├── bin/          # 可执行文件
-├── lib/          # 共享库
-│   └── external/ # 外部依赖库
-├── include/      # 头文件
-├── install.sh    # 安装脚本
-├── uninstall.sh  # 卸载脚本
-└── VERSION       # 版本信息
+├── share/        # 文档和数据
+└── lib/          # 共享库
+    └── external/ # 外部依赖库
 \`\`\`
 
 ## 已知限制
@@ -183,21 +190,21 @@ EOF
 ### Step 1：创建 Git Tag
 
 ```sh
-git tag -a "v${SOFTWARE_NAME}-${VERSION}-ohos${N}" -m "${SOFTWARE_NAME} ${VERSION} HarmonyOS 适配版 ohos${N}"
-git push origin "v${SOFTWARE_NAME}-${VERSION}-ohos${N}"
+git tag -a "v${SOFTWARE_NAME}-${VERSION}-ohos" -m "${SOFTWARE_NAME} ${VERSION} HarmonyOS 适配版"
+git push origin "v${SOFTWARE_NAME}-${VERSION}-ohos"
 ```
 
-Tag 命名格式：`v{软件名}-{版本}-ohos{N}`
+Tag 命名格式：`v{软件名}-{版本}-ohos`
 
 ### Step 2：创建 Release
 
 在 GitCode 上创建 Release，填写以下信息：
 
-- **标题**：`{软件名} {版本} - HarmonyOS 适配版 ohos{N}`
+- **标题**：`{软件名} {版本} - HarmonyOS 适配版`
 - **附件**：
-  - `{软件名}-{版本}-ohos{N}-{arch}.tar.gz`（产物包）
+  - `{软件名}-{版本}-ohos-{arch}.tar.gz`（产物包）
   - `{软件名}-{版本}-patches.tar.gz`（补丁包）
-  - `{软件名}-{版本}-ohos{N}-{arch}-debug.tar.gz`（debug 包，可选）
+  - `{软件名}-{版本}-ohos-{arch}-debug.tar.gz`（debug 包，可选）
 - **Release Notes**：从 `manifest.yaml` 生成，包含：
   - 版本信息
   - 适配内容概述
@@ -208,7 +215,7 @@ Tag 命名格式：`v{软件名}-{版本}-ohos{N}`
 ### Release Notes 模板
 
 ```markdown
-## {软件名} {版本} - HarmonyOS 适配版 ohos{N}
+## {软件名} {版本} - HarmonyOS 适配版
 
 ### 适配内容
 - 基于 {软件名} {上游版本} 进行鸿蒙适配
@@ -217,15 +224,13 @@ Tag 命名格式：`v{软件名}-{版本}-ohos{N}`
 ### 下载
 | 文件 | 说明 |
 |------|------|
-| `{软件名}-{版本}-ohos{N}-{arch}.tar.gz` | 产物包（{架构}） |
+| `{软件名}-{版本}-ohos-{arch}.tar.gz` | 产物包（{架构}） |
 | `{软件名}-{版本}-patches.tar.gz` | 补丁包（源码分发） |
-| `{软件名}-{版本}-ohos{N}-{arch}-debug.tar.gz` | Debug 符号包 |
+| `{软件名}-{版本}-ohos-{arch}-debug.tar.gz` | Debug 符号包 |
 
 ### 安装
 \```sh
-tar -xzf {软件名}-{版本}-ohos{N}-{arch}.tar.gz
-cd {软件名}-{版本}-ohos-{arch}
-sh install.sh
+curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- {软件名} {版本}
 \```
 
 ### 已知限制
@@ -244,3 +249,5 @@ sh install.sh
 - [packaging.md](./packaging.md) — ELF 签名七步流程
 - [SKILL.md](../SKILL.md) — 完整编译流程（Phase 1-4）
 - Python 3.9.0 打包方式（业界参考）
+.0 打包方式（业界参考）
+��式（业界参考）

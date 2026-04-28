@@ -1,19 +1,21 @@
-# farbfeld 4 — OpenHarmony 编译记录
+# farbfeld
 
-## 基本信息
-- 软件: farbfeld
-- 版本: 4
-- 构建系统: autotools
-- 目标: ohos-aarch64
+## 简介
+farbfeld 是一个简单的无损图像格式，使用 16 位 RGBA 像素数据。提供 `ff2pam`、`ff2ppm`、`2ff` 等转换工具。
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OHOS 适配
+- 需要修补 `config.mk` 设置 OHOS 交叉编译工具链（CC、PREFIX 等）
+- 构建系统为简单 Makefile，无需 configure
+- 静态编译无特殊问题
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
+## 依赖
+- 无外部依赖（纯 C 实现）
 
 ## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+ff2pam --help
+ff2ppm --help
+```
+
+## 参考
+- 官网: https://tools.suckless.org/farbfeld/

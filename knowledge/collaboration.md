@@ -92,7 +92,7 @@ Archive: archives/c/curl/8.7.1
 | 场景 | 用途说明 |
 |------|---------|
 | **PR 标识** | contributor_id 字段记录由哪个 Agent 提交 |
-| **PROGRESS.md 记录** | 标注当前正在编译此软件的 Agent ID |
+| **notes.md 记录** | 标注当前正在编译此软件的 Agent ID |
 | **草稿文件归属** | knowledge/graph/draft/ 下的草稿文件包含 contributor_id |
 | **协作审计** | 通过 Agent ID 追溯每项工作的来源 |
 | **主编审核日志** | 记录哪个主编审核、批准了哪些 PR |
@@ -161,7 +161,7 @@ opt: 优化 knowledge 索引重建流程
 - 新增补丁：0001-config.guess-harmonyos.patch（平台识别）
 - 新增补丁：0002-fix-musl-compat.patch（musl 兼容性）
 - 新增知识草稿：E055, E056, E057（knowledge/graph/draft/）
-- 更新 PROGRESS.md（编译过程记录）
+- 更新 notes.md（编译过程记录）
 - 更新 manifest.yaml（构建信息和测试结果）
 
 ## 测试
@@ -225,7 +225,7 @@ GitCode PR 状态：Open
 4. 执行编译流程（SKILL.md Step 1-5）
    - Step 1: 下载源码
    - Step 2: 检索历史知识
-   - Step 2.5: ohc-run.py init-archive → 创建工作目录和 PROGRESS.md
+   - Step 2.5: ohc-run.py init-archive → 创建工作目录和 notes.md
    - Step 3: 环境准备 + 编译 + 实时知识提取
    - Step 4: 测试 + 补丁校验
    - Step 5: 归档准备
@@ -237,13 +237,13 @@ GitCode PR 状态：Open
 
 6. 本地自检
    python3 scripts/ohc-run.py submit --check <name> <version>
-   → 检查：补丁完整性、PROGRESS.md 已关闭、manifest.yaml 字段完整
+   → 检查：补丁完整性、notes.md 已关闭、manifest.yaml 字段完整
    → 报告通过/失败项
 
 7. 提交并推送到 Git 分支
    git add .
    git commit -m "feat: 编译 {name} {version} - {status}"
-   → 包含所有变更：补丁、manifest、PROGRESS.md、知识草稿
+   → 包含所有变更：补丁、manifest、notes.md、知识草稿
 
 8. Rebase 并推送
    git rebase main                    # 与 main 同步，解决可能的冲突
@@ -277,9 +277,9 @@ GitCode PR 状态：Open
 
 4. 本地审核 — 检查变更
    git diff main...feat/{software}-{version}   # 查看所有变更文件列表
-   → 检查提交单详情（manifest.yaml、PROGRESS.md）
+   → 检查提交单详情（manifest.yaml、notes.md）
    → 检查新增知识草稿内容
-   → 检查 PROGRESS.md 中的知识提取记录
+   → 检查 notes.md 中的知识提取记录
    → 与已有知识进行去重比对
    → 可使用 ohc-run.py review 辅助检查
 
@@ -319,7 +319,7 @@ GitCode PR 状态：Open
 □ PR 格式正确：标题格式符合 feat: 编译 {软件名} {版本} - {状态}
 □ 知识无重复：新增的知识条目与已有条目无语义重复
 □ manifest.yaml 完整：所有必须字段已填写，test_results 非零值
-□ PROGRESS.md 已关闭：末尾有"编译结束"时间戳
+□ notes.md 已关闭：末尾有"编译结束"时间戳
 □ knowledge_ref 正确：manifest.yaml 中的 knowledge_ref 指向实际存在的章节
 □ 格式规范：补丁命名（NNNN-description.patch）、manifest.yaml 格式
 □ 已执行 ohc-run.py check-knowledge-gap：无遗漏的"⏳ 待评估"条目
@@ -508,17 +508,17 @@ opt: 优化 knowledge 索引重建流程
 ```
 objective: |
   ## 背景
-  SKILL.md 的 Phase 1.5 要求创建 PROGRESS.md，但 §4 目录结构中遗漏了此文件。
+  SKILL.md 的 Phase 1.5 要求创建 notes.md，但 §4 目录结构中遗漏了此文件。
 
   ## 任务
-  在 SKILL.md 的 §4 目录结构中，templates/ 列表里添加 PROGRESS.md。
+  在 SKILL.md 的 §4 目录结构中，templates/ 列表里添加 notes.md。
 
   ## 具体操作
   文件: /path/to/SKILL.md
-  找到 "├── manifest.yaml" 这行，在其后添加 "│   ├── PROGRESS.md"
+  找到 "├── manifest.yaml" 这行，在其后添加 "│   ├── notes.md"
 
   ## 验证
-  grep "PROGRESS.md" SKILL.md 确认添加成功
+  grep "notes.md" SKILL.md 确认添加成功
 ```
 
 ### 模式 A'：编译任务（⭐ 必须包含文档更新要求）
@@ -539,7 +539,7 @@ objective: |
   5. ohc-run.py verify-build {软件名} {版本}
 
   ## ⭐ 文档更新要求（必须完成）
-  ### PROGRESS.md 更新
+  ### notes.md 更新
   - configure 完成后：在"对话记录"部分写入：
     - configure 参数（完整命令）
     - 关键发现（如平台检测结果）
@@ -552,7 +552,7 @@ objective: |
   ## 输出要求
   - 预编译包: {软件名}-{版本}-ohos-aarch64.tar.gz
   - Debug 包: {软件名}-{版本}-ohos-aarch64-debug.tar.gz（如适用）
-  - 归档完整性: manifest.yaml + PROGRESS.md + README.md 都有实际内容
+  - 归档完整性: manifest.yaml + notes.md + README.md 都有实际内容
 ```
 
 - **为什么**：2026-04-24 批量编译发现子任务完成后文档都是骨架模板，无法断点续传。
@@ -630,11 +630,11 @@ objective: |
 
 ## 💀 流程级致命约束
 
-### D4. Phase 1.5 必须使用 templates/PROGRESS.md
-> **ohc-run.py init-archive 必须复制 templates/PROGRESS.md 并填充变量，禁止在脚本中硬编码模板。**
+### D4. Phase 1.5 必须使用 templates/notes.md
+> **ohc-run.py init-archive 必须复制 templates/notes.md 并填充变量，禁止在脚本中硬编码模板。**
 
-- **为什么**：历史上存在三套不一致的 PROGRESS.md 模板（SKILL.md 内联 / templates/ / ohc-run.py init-archive 硬编码），Phase 编号、字段名、检查点结构各不相同。恢复会话时 AI 读到的格式不可预测。
-- **怎么做**：ohc-run.py init-archive 改为 `cp templates/PROGRESS.md "${VERSION_DIR}/PROGRESS.md"` + sed 替换占位符
+- **为什么**：历史上存在三套不一致的 notes.md 模板（SKILL.md 内联 / templates/ / ohc-run.py init-archive 硬编码），Phase 编号、字段名、检查点结构各不相同。恢复会话时 AI 读到的格式不可预测。
+- **怎么做**：ohc-run.py init-archive 改为 `cp templates/notes.md "${VERSION_DIR}/notes.md"` + sed 替换占位符
 
 ### D5. 测试前置准备（Phase 3→4 转换时强制执行）
 > **`make check` 前必须完成三个前置步骤。**
@@ -657,23 +657,23 @@ objective: |
 |------|---------|------|
 | **编译产出** | make install 成功，核心功能验证通过 | 必须 |
 | **补丁完整性** | diff 校验通过，每个源码修改都有对应补丁 | 必须 |
-| **知识提取** | PROGRESS.md 无 ⏳ 待评估条目，HIGH_IMPACT 发现已写入知识草稿 | 必须 |
+| **知识提取** | notes.md 无 ⏳ 待评估条目，HIGH_IMPACT 发现已写入知识草稿 | 必须 |
 | **提交完整** | 提交单 YAML 格式正确，所有字段已填写 | 必须 |
 
-- **为什么**：3.9.25 任务在编译产出方面质量很高（80 补丁、89.4% 通过率），但知识提取严重不足、索引未更新、PROGRESS.md 未创建。
+- **为什么**：3.9.25 任务在编译产出方面质量很高（80 补丁、89.4% 通过率），但知识提取严重不足、索引未更新、notes.md 未创建。
 
 ### D8. Phase 2-4 过程记录（⭐ 新增 2026-04-24）
-> **每个子步骤完成后，必须立即更新 PROGRESS.md 和 README.md 对应条目。**
+> **每个子步骤完成后，必须立即更新 notes.md 和 README.md 对应条目。**
 
 | 阶段 | 完成后操作 | 写入位置 |
 |------|-----------|----------|
-| **configure** | 记录参数、耗时、关键发现 | PROGRESS.md 对话记录 |
+| **configure** | 记录参数、耗时、关键发现 | notes.md 对话记录 |
 | **补丁应用** | 记录补丁用途、修改文件 | README.md 补丁说明 |
-| **make** | 记录错误、修复方式 | PROGRESS.md 对话记录 |
-| **make install** | 记录安装路径、文件清单 | PROGRESS.md 源码修改清单 |
+| **make** | 记录错误、修复方式 | notes.md 对话记录 |
+| **make install** | 记录安装路径、文件清单 | notes.md 源码修改清单 |
 | **问题解决** | 记录现象、原因、方案 | README.md 遇到的问题 |
 
-- **为什么**：2026-04-24 批量编译发现 32 个归档的 PROGRESS.md/README.md 都是骨架模板，编译过程没有自动更新文档的机制，导致无法断点续传、无法复现编译过程。
+- **为什么**：2026-04-24 批量编译发现 32 个归档的 notes.md/README.md 都是骨架模板，编译过程没有自动更新文档的机制，导致无法断点续传、无法复现编译过程。
 - **怎么做**：driver.py 在每个 Phase 结束时调用 `update_progress_*()` 函数；子任务 objective 中明确包含文档更新要求。
 
 ## 🔴 流程级严重约束
@@ -682,7 +682,7 @@ objective: |
 > **当发现知识库中某条 L1/L2 知识与实际行为矛盾时，必须立即标注 `⚠️ DEPRECATED`。**
 
 - **为什么**：3.9.0 记录了"posix_spawn() 不受 SELinux 限制"，3.9.25 实测所有子进程创建方式均被阻止。
-- **怎么做**：在 PROGRESS.md 增加"知识证伪"条目；在 knowledge/ 对应位置立即标注 DEPRECATED 并指向正确方案。
+- **怎么做**：在 notes.md 增加"知识证伪"条目；在 knowledge/ 对应位置立即标注 DEPRECATED 并指向正确方案。
 
 ### S5. manifest.yaml 自动填充
 > **禁止用骨架模板的零值归档。test_results、compile_date 等字段必须用实际数据填充。**
@@ -707,7 +707,7 @@ objective: |
 ### S8. 长任务中期盘点
 > **编译消息超过 30 条时，强制执行一次中期知识盘点。**
 
-- 使用 `scripts/ohc-run.py check-knowledge-gap` 扫描 PROGRESS.md 中的待评估条目
+- 使用 `scripts/ohc-run.py check-knowledge-gap` 扫描 notes.md 中的待评估条目
 - 目的：防止 76 条消息的长任务中知识遗漏累积到不可收拾
 
 ### S9. 临时文件清理（Phase 4 收尾时执行）
@@ -742,7 +742,7 @@ objective: |
 
 - ❌ 不要修改 SKILL.md：章节结构、约束定义、Phase 流程是主编 AI 的职责
 - ❌ 不要修改 KNOW_YOUR_WHY.md：约束规则由主编统一维护
-- ❌ 不要修改 templates/PROGRESS.md 模板：模板已经过 4 轮遗忘曲线优化
+- ❌ 不要修改 templates/notes.md 模板：模板已经过 4 轮遗忘曲线优化
 - ❌ 不要修改其他软件的档案目录：只修改自己负责的版本目录
 - ❌ 不要删除或重命名 knowledge/ 下的知识文件
 - ❌ 不要创建临时报告文件（按 S9 规则）
@@ -774,7 +774,7 @@ objective: |
 
 **P0 — 必须立即实施**（防止致命约束遗忘）：
 
-1. **PROGRESS.md 内嵌约束速查**：在 PROGRESS.md 模板的"编译过程"章节前，嵌入 D1-D7 的速查清单：
+1. **notes.md 内嵌约束速查**：在 notes.md 模板的"编译过程"章节前，嵌入 D1-D7 的速查清单：
    ```markdown
    ## ⚠️ 致命约束速查（不可遗忘）
    - [ ] 补丁完整性：diff -ruN original/ modified/ > all_changes.diff
@@ -812,7 +812,7 @@ objective: |
 
 - 记住"用 `./scripts/ohc-run.py sign-elf`"比记住"先 llvm-objcopy --remove-section .codesign 再 binary-sign-tool 再 chmod"容易 100 倍
 - 记住"遇到编译错误查 `knowledge/debug-methodology.md`"比记住"编译错误的处理步骤"容易 10 倍
-- PROGRESS.md 就是 AI 的"外部记忆"——压缩后只需要读取 PROGRESS.md 就能恢复上下文
+- notes.md 就是 AI 的"外部记忆"——压缩后只需要读取 notes.md 就能恢复上下文
 
 ---
 
