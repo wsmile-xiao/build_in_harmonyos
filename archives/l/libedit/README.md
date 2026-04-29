@@ -1,4 +1,4 @@
-# libedit 20240817 for HarmonyOS
+# libedit for HarmonyOS
 
 ## 概述
 
@@ -9,14 +9,14 @@ libedit 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 | 项目 | 值 |
 |------|-----|
 | 名称 | libedit |
-| 版本 | 20240817 |
-| 下载地址 | http://thrysoee.dk/editline/libedit-20240808-3.1.tar.gz |
-| 官方文档 | {文档链接} |
+| 版本 | 20240808, 20251016-3.1 |
+| 下载地址 | https://thrysoee.dk/editline/ |
+| 官方文档 | https://thrysoee.dk/editline/ |
 
 ## 鸿蒙环境
 
 | 项目 | 值 |
-|------|-----|
+|------|------|
 | 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
 | 架构 | aarch64 |
 | 编译器 | clang (LLVM) |
@@ -26,9 +26,9 @@ libedit 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 
 ```bash
 # 1. 下载源码
-wget http://thrysoee.dk/editline/libedit-20240808-3.1.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
+wget https://thrysoee.dk/editline/libedit-{version}.tar.gz
+tar -xzf libedit-{version}.tar.gz
+cd libedit-{version}
 
 # 2. 应用补丁（如有）
 patch -p1 < patches/0001-xxx.patch
@@ -45,56 +45,27 @@ make install
 
 ## 补丁说明
 
-### 0001-xxx.patch
+### 0001-chartype-ohos-support.patch
 
-**目的**: {补丁用途说明}
+**目的**: 添加 HarmonyOS 系统支持
 
 **修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
+- `chartype.h`: 添加宽字符支持
 
 ## 测试结果
 
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
+详见各版本目录下的 PROGRESS.md
 
 ## 验证安装
 
 ```bash
 # 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
+ls -la $HOME/usr/local/lib/libedit*
 
 # 检查功能
-{验证命令}
+ldd $HOME/usr/local/lib/libedit.so
 ```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
 
 ## 参考资料
 
-- {参考链接1}
-- {参考链接2}
+- https://thrysoee.dk/editline/
