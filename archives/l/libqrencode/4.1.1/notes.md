@@ -100,5 +100,5 @@ make install DESTDIR=$TEST_PREFIX
 **安装验证**: qrencode 需要 LD_LIBRARY_PATH 包含 libpng 路径
 ---
 
-**编译结束**: 2026-04-25 23:47
-**最终状态**: partial
+**编译结束**: 2026-04-30 00:13
+**最终状态**: built
