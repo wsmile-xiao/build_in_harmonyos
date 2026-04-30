@@ -1,27 +1,26 @@
 # 鸿蒙平台开源软件编译兼容性总览
 
 > 最后更新：2026-04-30
-> 已收录软件：331 款 / 381 个版本
+> 已收录软件：346 款 / 395 个版本
 
 ## 📊 总体统计
 
 | 指标 | 数量 |
 |------|------|
-| 收录软件 | **331** 款 |
-| 软件版本 | **381** 个 |
-| ✅ 已发布 | 13 |
-| ✅ 已编译 | 31 |
-| ❌ 编译失败 | 0 |
+| 收录软件 | **346** 款 |
+| 软件版本 | **395** 个 |
+| ✅ 已发布 | 20 |
+| ✅ 已编译 | 30 |
+| ❌ 编译失败 | 7 |
 
 | 构建系统 | 数量 |
 |----------|------|
-| Autotools | 144 |
+| Autotools | 143 |
 | unknown | 101 |
-| CMake | 43 |
-| Makefile | 30 |
+| CMake | 42 |
+| Makefile | 28 |
 | Meson | 6 |
-| custom | 3 |
-| python | 1 |
+| custom | 2 |
 | perl | 1 |
 | perl_makemaker | 1 |
 | custom-configure | 1 |
@@ -35,10 +34,11 @@
 |------|------|------|--------|----------|--------|------|------|
 | **7zip** | 23.01、25.01 | uploaded |  | unknown | 0 | - | [📄](archives/7/7zip/25.01/) |
 | **abseil-cpp** | 20260107.1、20240116.1 | partial |  | Autotools | 1 | - | [📄](archives/a/abseil-cpp/20240116.1/) |
+| **apr** | 1.7.6 | ✅ 已编译 |  |  | 3 | - | [📄](archives/a/apr/1.7.6/) |
+| **apr-util** | 1.6.1、1.6.3 | ✅ 已发布 |  |  | 0 | - | [📄](archives/a/apr-util/1.6.3/) |
 | **argon2** | 20190702 | uploaded |  | unknown | 0 | - | [📄](archives/a/argon2/20190702/) |
 | **argp-standalone** | 1.5.0 | uploaded |  | unknown | 0 | - | [📄](archives/a/argp-standalone/1.5.0/) |
 | **aria2** | 1.37.0 | 📦 已归档 |  |  | - | - | [📄](archives/a/aria2/1.37.0/) |
-| **asciidoc** | 10.2.1 | ✅ 已编译 |  | python | 3 | - | [📄](archives/a/asciidoc/10.2.1/) |
 | **autoconf** | 2.72 | uploaded |  | Autotools | 0 | - | [📄](archives/a/autoconf/2.72/) |
 | **autoconf-archive** | 2024.10.16 | uploaded |  | unknown | 0 | - | [📄](archives/a/autoconf-archive/2024.10.16/) |
 | **automake** | 1.16.5、1.17 | uploaded |  | Autotools | 0 | - | [📄](archives/a/automake/1.17/) |
@@ -58,7 +58,6 @@
 | **aws-lc** | 1.72.0 | uploaded |  | unknown | 0 | - | [📄](archives/a/aws-lc/1.72.0/) |
 | **b3sum** | 1.8.4 | uploaded |  | CMake | 0 | - | [📄](archives/b/b3sum/1.8.4/) |
 | **bash** | 5.3 | verified |  | Autotools | 0 | - | [📄](archives/b/bash/5.3/) |
-| **bash-completion** | 2.17.0 | ✅ 已编译 |  |  | 2 | - | [📄](archives/b/bash-completion/2.17.0/) |
 | **bbe** | 0.2.2 | partial |  |  | 2 | - | [📄](archives/b/bbe/0.2.2/) |
 | **bc** | 1.07.1 | partial |  | Autotools | - | - | [📄](archives/b/bc/1.07.1/) |
 | **bcrypt** | 1.0 | uploaded |  | unknown | 0 | - | [📄](archives/b/bcrypt/1.0/) |
@@ -74,10 +73,9 @@
 | **bzip3** | 1.4.0、1.5.3 | uploaded |  | Autotools | 0 | - | [📄](archives/b/bzip3/1.5.3/) |
 | **c-ares** | 1.34.4、1.34.6 | uploaded |  | Autotools | 0 | - | [📄](archives/c/c-ares/1.34.6/) |
 | **c-blosc** | 1.21.6 | success |  | CMake | - | - | [📄](archives/c/c-blosc/1.21.6/) |
-| **ca-certificates** | 20250416 | uploaded |  | unknown | 0 | - | [📄](archives/c/ca-certificates/20250416/) |
-| **cairo** | 1.18.4 | ✅ 已编译 |  |  | 2 | - | [📄](archives/c/cairo/1.18.4/) |
+| **ca-certificates** | 20250416、20250419 | ✅ 已编译 |  |  | 0 | - | [📄](archives/c/ca-certificates/20250419/) |
 | **ccache** | 4.12.1 | uploaded |  | Makefile | 0 | - | [📄](archives/c/ccache/4.12.1/) |
-| **check** | 0.15.2 | partial |  |  | 2 | - | [📄](archives/c/check/0.15.2/) |
+| **check** | 0.15.2 | ✅ 已编译 |  |  | 2 | - | [📄](archives/c/check/0.15.2/) |
 | **chibi-scheme** | 0.12 | success |  | Makefile | - | - | [📄](archives/c/chibi-scheme/0.12/) |
 | **ciso** | 1.0、1.0.0 | uploaded |  | unknown | 0 | - | [📄](archives/c/ciso/1.0.0/) |
 | **cjson** | 1.7.18 | uploaded |  | Autotools | 0 | - | [📄](archives/c/cjson/1.7.18/) |
@@ -97,7 +95,7 @@
 | **dash** | 0.5.12 | partial |  | Autotools | 2 | - | [📄](archives/d/dash/0.5.12/) |
 | **dbus** | 1.14.10 | partial |  | Autotools | 4 | - | [📄](archives/d/dbus/1.14.10/) |
 | **dialog** | 1.3-20240307 | partial |  | Autotools | 2 | - | [📄](archives/d/dialog/1.3-20240307/) |
-| **discount** | 2.2.7、2.2.7b | partial |  | Autotools | 1 | - | [📄](archives/d/discount/2.2.7b/) |
+| **discount** | 2.2.7b | partial |  | Autotools | 1 | - | [📄](archives/d/discount/2.2.7b/) |
 | **distcc** | 3.4 | uploaded |  | Makefile | 0 | - | [📄](archives/d/distcc/3.4/) |
 | **dmg2img** | 1.6.7 | uploaded |  | unknown | 0 | - | [📄](archives/d/dmg2img/1.6.7/) |
 | **dmidecode** | 3.6 | uploaded |  | Makefile | 0 | - | [📄](archives/d/dmidecode/3.6/) |
@@ -108,6 +106,7 @@
 | **duckdb** | 1.2.0 | partial |  | Autotools | - | - | [📄](archives/d/duckdb/1.2.0/) |
 | **dwarfutils** | 2.3.1 | success |  | CMake | 1 | - | [📄](archives/d/dwarfutils/2.3.1/) |
 | **eigen** | 3.4.0 | uploaded |  | CMake | 0 | - | [📄](archives/e/eigen/3.4.0/) |
+| **enchant** | 2.8.15 | ✅ 已发布 |  |  | 0 | - | [📄](archives/e/enchant/2.8.15/) |
 | **exiftool** | 13.50 | partial |  | perl_makemaker | - | - | [📄](archives/e/exiftool/13.50/) |
 | **expat** | 2.7.1、2.8.0 | uploaded |  | Autotools | 0 | - | [📄](archives/e/expat/2.8.0/) |
 | **farbfeld** | 4 | uploaded |  | unknown | 0 | - | [📄](archives/f/farbfeld/4/) |
@@ -117,31 +116,39 @@
 | **file** | 5.45 | verified |  | Autotools | 0 | - | [📄](archives/f/file/5.45/) |
 | **fish** | 3.7.1 | partial |  | Autotools | - | - | [📄](archives/f/fish/3.7.1/) |
 | **flac** | 1.4.3 | uploaded |  | Autotools | 0 | - | [📄](archives/f/flac/1.4.3/) |
-| **flex** | 2.6.4 | ✅ 已编译 |  |  | 5 | - | [📄](archives/f/flex/2.6.4/) |
+| **flex** | 2.6.4 | ✅ 已编译 |  |  | 111 | - | [📄](archives/f/flex/2.6.4/) |
 | **fontconfig** | 2.16.0 | uploaded |  | Autotools | 0 | - | [📄](archives/f/fontconfig/2.16.0/) |
 | **freetype** | 2.14.3 | uploaded |  | Autotools | 0 | - | [📄](archives/f/freetype/2.14.3/) |
 | **fribidi** | 1.0.13、1.0.16 | uploaded |  | Meson | 0 | - | [📄](archives/f/fribidi/1.0.16/) |
 | **ftxui** | 6.1.9 | uploaded |  | unknown | 0 | - | [📄](archives/f/ftxui/6.1.9/) |
 | **gawk** | 5.3.0 | verified |  | Autotools | 0 | - | [📄](archives/g/gawk/5.3.0/) |
 | **gd** | 2.3.3 | uploaded |  | unknown | 0 | - | [📄](archives/g/gd/2.3.3/) |
+| **gdb** | 15.2 | ❌ 编译失败 |  |  | - | - | [📄](archives/g/gdb/15.2/) |
 | **gdbm** | 1.23 | verified |  | Autotools | 0 | - | [📄](archives/g/gdbm/1.23/) |
+| **gettext** | 0.26 | ✅ 已发布 |  |  | 0 | - | [📄](archives/g/gettext/0.26/) |
 | **gflags** | 2.2.2 | partial |  | Autotools | - | - | [📄](archives/g/gflags/2.2.2/) |
 | **giflib** | 5.2.2 | uploaded |  | unknown | 0 | - | [📄](archives/g/giflib/5.2.2/) |
 | **git** | 2.49.0、2.45 | partial |  | Autotools | - | - | [📄](archives/g/git/2.45/) |
-| **glances** | 4.5.4 | ✅ 已编译 |  |  | 2 | - | [📄](archives/g/glances/4.5.4/) |
+| **glib** | 2.88.0、2.86.5 | ❌ 编译失败 |  |  | - | - | [📄](archives/g/glib/2.86.5/) |
 | **glm** | 0.9.9.8 | uploaded |  | CMake | 0 | - | [📄](archives/g/glm/0.9.9.8/) |
 | **glog** | 0.7.1 | partial |  | Autotools | 1 | - | [📄](archives/g/glog/0.7.1/) |
-| **glproto** | 1.4.17 | compiling |  | Autotools | 0 | - | [📄](archives/g/glproto/1.4.17/) |
+| **glproto** | 1.4.17 | compiling |  | Autotools | - | - | [📄](archives/g/glproto/1.4.17/) |
+| **gmp** | 6.3.0 | ❌ 编译失败 |  |  | - | - | [📄](archives/g/gmp/6.3.0/) |
 | **gmssl** | 3.1.1 | uploaded |  | CMake | 0 | - | [📄](archives/g/gmssl/3.1.1/) |
+| **gperf** | 3.1 | ❌ 编译失败 |  |  | 5 | - | [📄](archives/g/gperf/3.1/) |
+| **gpgme** | 2.0.1 | ✅ 已发布 |  |  | 0 | - | [📄](archives/g/gpgme/2.0.1/) |
+| **gsl** | 2.8 | ❌ 编译失败 |  |  | - | - | [📄](archives/g/gsl/2.8/) |
 | **gsm** | 1.0.22、1.0.23 | uploaded |  | unknown | 0 | - | [📄](archives/g/gsm/1.0.23/) |
 | **gzip** | 1.13 | verified |  | Autotools | 0 | - | [📄](archives/g/gzip/1.13/) |
 | **harfbuzz** | 14.2.0 | uploaded |  | Meson | 0 | - | [📄](archives/h/harfbuzz/14.2.0/) |
 | **hdrhistogram** | 0.11.9 | ✅ 已发布 |  |  | 1 | - | [📄](archives/h/hdrhistogram/0.11.9/) |
 | **help2man** | 1.49.3 | verified |  | Autotools | 0 | - | [📄](archives/h/help2man/1.49.3/) |
+| **hidapi** | 0.14.0 | ✅ 已编译 |  |  | 0 | - | [📄](archives/h/hidapi/0.14.0/) |
 | **hiredis** | 1.2.0 | uploaded |  | Autotools | 0 | - | [📄](archives/h/hiredis/1.2.0/) |
 | **htop** | 3.4.1 | verified |  | Makefile | 0 | - | [📄](archives/h/htop/3.4.1/) |
-| **hwinfo** | 25.2 | ✅ 已编译 |  | Makefile | 1 | [] | [📄](archives/h/hwinfo/25.2/) |
+| **hunspell** | 1.7.2 | ✅ 已编译 |  |  | 10 | - | [📄](archives/h/hunspell/1.7.2/) |
 | **hwloc** | 2.11.0 | partial |  | Autotools | 1 | - | [📄](archives/h/hwloc/2.11.0/) |
+| **icu** | 74.2 | ✅ 已发布 |  |  | 0 | - | [📄](archives/i/icu/74.2/) |
 | **intltool** | 0.51.0 | uploaded |  | Autotools | 0 | - | [📄](archives/i/intltool/0.51.0/) |
 | **iperf3** | 3.18 | uploaded |  | unknown | 0 | - | [📄](archives/i/iperf3/3.18/) |
 | **isa-l_crypto** | 2.26 | uploaded |  | CMake | 0 | - | [📄](archives/i/isa-l_crypto/2.26/) |
@@ -152,6 +159,8 @@
 | **jpeg** | 10 | success |  | Autotools | 2 | - | [📄](archives/j/jpeg/10/) |
 | **jq** | 1.7.1 | verified |  | Autotools | 0 | - | [📄](archives/j/jq/1.7.1/) |
 | **json-c** | 0.16 | partial |  |  | 1 | - | [📄](archives/j/json-c/0.16/) |
+| **jsoncpp** | 1.9.7 | ❌ 编译失败 |  |  | - | - | [📄](archives/j/jsoncpp/1.9.7/) |
+| **krb5** | 1.22.2 | ✅ 已编译 |  |  | 3 | - | [📄](archives/k/krb5/1.22.2/) |
 | **laszip** | 3.5.0 | uploaded |  | unknown | 0 | - | [📄](archives/l/laszip/3.5.0/) |
 | **lcms2** | 2.19 | uploaded |  | unknown | 0 | - | [📄](archives/l/lcms2/2.19/) |
 | **lemon** | 3.53.0 | uploaded |  | unknown | 0 | - | [📄](archives/l/lemon/3.53.0/) |
@@ -166,47 +175,46 @@
 | **libatomic_ops** | 7.8.2 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libatomic_ops/7.8.2/) |
 | **libb2** | 0.98.1 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libb2/0.98.1/) |
 | **libbcrypt** | 1.3 | uploaded |  | unknown | 0 | - | [📄](archives/l/libbcrypt/1.3/) |
-| **libbsd** | 0.11.7、0.12.2 | ✅ 已编译 |  |  | - | - | [📄](archives/l/libbsd/0.12.2/) |
+| **libbsd** | 0.12.2 | ✅ 已编译 |  |  | 0 | - | [📄](archives/l/libbsd/0.12.2/) |
 | **libcap** | 2.69 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libcap/2.69/) |
 | **libconfig** | 1.7.3 | uploaded |  | CMake | 0 | - | [📄](archives/l/libconfig/1.7.3/) |
+| **libconfuse** | 3.3 | ✅ 已编译 |  |  | 2 | - | [📄](archives/l/libconfuse/3.3/) |
 | **libcuckoo** | 0.3.1 | uploaded |  | CMake | 0 | - | [📄](archives/l/libcuckoo/0.3.1/) |
 | **libdaemon** | 0.14 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libdaemon/0.14/) |
 | **libdatrie** | 0.2.14 | partial |  | Autotools | 2 | - | [📄](archives/l/libdatrie/0.2.14/) |
 | **libde265** | 1.0.18 | ✅ 已编译 |  |  | 2 | - | [📄](archives/l/libde265/1.0.18/) |
 | **libdeflate** | 1.25、1.21 | partial |  | Autotools | - | - | [📄](archives/l/libdeflate/1.21/) |
 | **libdmtx** | 0.7.8、0.7.5 | ✅ 已编译 |  |  | - | - | [📄](archives/l/libdmtx/0.7.5/) |
-| **libdrm** | 2.4.133 | ✅ 已编译 |  |  | 0 | - | [📄](archives/l/libdrm/2.4.133/) |
 | **libedit** | 20240808、20240817、20251016-3.1 | partial |  | Autotools | 2 | - | [📄](archives/l/libedit/20251016-3.1/) |
-| **libepoxy** | 1.5.10 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libepoxy/1.5.10/) |
 | **libev** | 4.33 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libev/4.33/) |
 | **libevent** | 2.1.12-stable、2.1.12 | partial |  | Autotools | 4 | - | [📄](archives/l/libevent/2.1.12/) |
 | **libffi** | 3.4.4、3.5.2、3.4.6 | partial |  | Autotools | 3 | - | [📄](archives/l/libffi/3.4.6/) |
 | **libgcrypt** | 1.11.0 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libgcrypt/1.11.0/) |
 | **libgpg-error** | 1.50、1.55 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libgpg-error/1.55/) |
-| **libgpiod** | 2.0、2.1.3 | ✅ 已编译 |  |  | 4 | - | [📄](archives/l/libgpiod/2.1.3/) |
+| **libgpiod** | 2.0 | 📦 已归档 |  |  | - | - | [📄](archives/l/libgpiod/2.0/) |
 | **libiconv** | 1.17 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libiconv/1.17/) |
-| **libidn** | 1.43 | 📦 已归档 |  |  | - | - | [📄](archives/l/libidn/1.43/) |
-| **libiio** | 0.26 | ✅ 已编译 |  |  | - | - | [📄](archives/l/libiio/0.26/) |
-| **libjpeg-turbo** | 3.1.4.1、2.1.5.1 | partial |  | Autotools | 0 | - | [📄](archives/l/libjpeg-turbo/2.1.5.1/) |
+| **libidn** | 1.43 | compiling |  |  | 0 | [] | [📄](archives/l/libidn/1.43/) |
+| **libidn2** | 2.3.8 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libidn2/2.3.8/) |
+| **libimagequant** | 4.4.1 | ❌ 编译失败 |  |  | - | - | [📄](archives/l/libimagequant/4.4.1/) |
+| **libjpeg-turbo** | 3.1.4.1、2.1.5.1 | partial |  | Autotools | - | - | [📄](archives/l/libjpeg-turbo/2.1.5.1/) |
 | **libksba** | 1.6.7 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libksba/1.6.7/) |
 | **liblinear** | 2.50 | uploaded |  | Autotools | 0 | - | [📄](archives/l/liblinear/2.50/) |
 | **liblzf** | 3.6 | uploaded |  | unknown | 0 | - | [📄](archives/l/liblzf/3.6/) |
 | **libmd** | 1.1.0 | ✅ 已编译 |  |  | - | - | [📄](archives/l/libmd/1.1.0/) |
 | **libmnl** | 1.0.5 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libmnl/1.0.5/) |
 | **libmspack** | 0.11alpha | uploaded |  | unknown | 0 | - | [📄](archives/l/libmspack/0.11alpha/) |
-| **libnetfilter_conntrack** | 1.1.0 | ✅ 已编译 |  | Autotools | 2 | - | [📄](archives/l/libnetfilter_conntrack/1.1.0/) |
+| **libnl** | 3.7.0 | ✅ 已编译 |  |  | 3 | - | [📄](archives/l/libnl/3.7.0/) |
 | **libntlm** | 1.2 | 📦 已归档 |  |  | - | - | [📄](archives/l/libntlm/1.2/) |
 | **libogg** | 1.3.5、1.3.6 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libogg/1.3.6/) |
-| **liboqs** | 0.15.0 | ✅ 已编译 |  |  | - | - | [📄](archives/l/liboqs/0.15.0/) |
 | **libpcap** | 1.10.6 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libpcap/1.10.6/) |
-| **libpciaccess** | 0.17 | 📦 已归档 |  |  | - | - | [📄](archives/l/libpciaccess/0.17/) |
+| **libpciaccess** | 0.17 | ✅ 已编译 |  |  | 0 | - | [📄](archives/l/libpciaccess/0.17/) |
 | **libpipeline** | 1.5.8 | verified |  | unknown | 0 | - | [📄](archives/l/libpipeline/1.5.8/) |
 | **libpsl** | 0.21.5 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libpsl/0.21.5/) |
 | **libqb3** | 1.3.2 | uploaded |  | unknown | 0 | - | [📄](archives/l/libqb3/1.3.2/) |
 | **libqrcodegen** | 1.8.0 | uploaded |  | unknown | 0 | - | [📄](archives/l/libqrcodegen/1.8.0/) |
 | **libqrencode** | 4.1.1 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libqrencode/4.1.1/) |
 | **libraw** | 0.22.1 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libraw/0.22.1/) |
-| **libraw1394** | 2.1.2 | ✅ 已发布 |  |  | 3 | - | [📄](archives/l/libraw1394/2.1.2/) |
+| **libraw1394** | 2.1.2 | ✅ 已编译 |  |  | 2 | - | [📄](archives/l/libraw1394/2.1.2/) |
 | **librdkafka** | 2.5.3 | uploaded |  | unknown | 0 | - | [📄](archives/l/librdkafka/2.5.3/) |
 | **libressl** | 4.3.1 | uploaded |  | CMake | 0 | - | [📄](archives/l/libressl/4.3.1/) |
 | **libsamplerate** | 0.2.2 | ✅ 已发布 |  |  | - | - | [📄](archives/l/libsamplerate/0.2.2/) |
@@ -214,22 +222,24 @@
 | **libsoxr** | 0.1.3 | 📦 已归档 |  |  | - | - | [📄](archives/l/libsoxr/0.1.3/) |
 | **libssh** | 0.11.4 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libssh/0.11.4/) |
 | **libssh2** | 1.11.0 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libssh2/1.11.0/) |
+| **libtap** | 0.1.0 | ✅ 已编译 |  |  | 0 | - | [📄](archives/l/libtap/0.1.0/) |
 | **libtasn1** | 4.21.0 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libtasn1/4.21.0/) |
+| **libtextstyle** | 0.8 | partial |  |  | 0 | ncurses | [📄](archives/l/libtextstyle/0.8/) |
 | **libtiff** | 4.6.0 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libtiff/4.6.0/) |
 | **libtommath** | 1.3.0 | unknown |  | Makefile | - | [] | [📄](archives/l/libtommath/1.3.0/) |
-| **libtool** | 2.4.7 | verified |  | Autotools | 0 | autoconf,automake,m4 | [📄](archives/l/libtool/2.4.7/) |
-| **libunistring** | 1.0 | uploaded |  | unknown | 0 | - | [📄](archives/l/libunistring/1.0/) |
-| **libusb** | 1.0.27 | uploaded |  | unknown | 0 | - | [📄](archives/l/libusb/1.0.27/) |
+| **libtool** | 2.4.7 | verified |  | Autotools | 0 | - | [📄](archives/l/libtool/2.4.7/) |
+| **libunistring** | 1.0、1.4.2 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libunistring/1.4.2/) |
+| **libusb** | 1.0.27、1.0.29 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libusb/1.0.29/) |
+| **libusb-compat** | 0.1.8 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libusb-compat/0.1.8/) |
 | **libuv** | 1.52.1 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libuv/1.52.1/) |
 | **libwebp** | 1.3.2 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libwebp/1.3.2/) |
-| **libxau** | 1.0.11 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libxau/1.0.11/) |
-| **libxcb** | 1.16 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libxcb/1.16/) |
-| **libxdmcp** | 1.1.4 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libxdmcp/1.1.4/) |
-| **libzip** | 1.10.1、1.11.4 | ✅ 已编译 |  |  | 0 | - | [📄](archives/l/libzip/1.11.4/) |
+| **libxml2** | 2.15.3 | ✅ 已编译 |  |  | 6 | - | [📄](archives/l/libxml2/2.15.3/) |
+| **libxslt** | 1.1.45 | ✅ 已编译 |  |  | 0 | - | [📄](archives/l/libxslt/1.1.45/) |
+| **libzip** | 1.10.1、1.11.4 | ✅ 已编译 |  |  | - | - | [📄](archives/l/libzip/1.11.4/) |
 | **llhttp** | 9.3.1 | ✅ 已发布 |  |  | - | - | [📄](archives/l/llhttp/9.3.1/) |
 | **lm-sensors** | 3.6.0 | uploaded |  | Makefile | 0 | - | [📄](archives/l/lm-sensors/3.6.0/) |
 | **lmdb** | 0.9.33、0.9.35 | uploaded |  | Autotools | 0 | - | [📄](archives/l/lmdb/0.9.35/) |
-| **lshw** | B.02.20 | ✅ 已编译 |  |  | 2 | - | [📄](archives/l/lshw/B.02.20/) |
+| **lshw** | B.02.20 | ✅ 已编译 |  |  | 1 | - | [📄](archives/l/lshw/B.02.20/) |
 | **lsof** | 4.99.0 | ✅ 已编译 |  |  | 2 | - | [📄](archives/l/lsof/4.99.0/) |
 | **lz4** | 1.10.0 | uploaded |  | unknown | 0 | - | [📄](archives/l/lz4/1.10.0/) |
 | **lz4jsoncat** | v2 | uploaded |  | Makefile | 0 | - | [📄](archives/l/lz4jsoncat/v2/) |
@@ -243,7 +253,7 @@
 | **man-db** | 2.13.1 | verified |  | Autotools | 0 | - | [📄](archives/m/man-db/2.13.1/) |
 | **mandoc** | 1.14.6 | success |  | custom-configure | 1 | - | [📄](archives/m/mandoc/1.14.6/) |
 | **mbedtls** | 2.28.8、3.6.6、4.1.0 | uploaded |  | CMake | 0 | - | [📄](archives/m/mbedtls/4.1.0/) |
-| **meson** | 1.11.0、1.11.1、1.5.1 | ✅ 已编译 |  |  | - | - | [📄](archives/m/meson/1.5.1/) |
+| **meson** | 1.11.0、1.5.1 | ✅ 已编译 |  |  | - | - | [📄](archives/m/meson/1.5.1/) |
 | **minizip** | 1.3.1 | uploaded |  | unknown | 0 | - | [📄](archives/m/minizip/1.3.1/) |
 | **minizip-ng** | 4.1.1 | uploaded |  | unknown | 0 | - | [📄](archives/m/minizip-ng/4.1.1/) |
 | **mongoc-driver** | 1.29.0 | partial |  | cmake-ninja | - | openssl 1.1.1w,zlib 1.3.1 (bundled),zstd 1.5.7,snappy | [📄](archives/m/mongoc-driver/1.29.0/) |
@@ -253,7 +263,10 @@
 | **musl-obstack** | 1.2.3 | uploaded |  | unknown | 0 | - | [📄](archives/m/musl-obstack/1.2.3/) |
 | **ncurses** | 6.4 | verified |  | Autotools | 0 | - | [📄](archives/n/ncurses/6.4/) |
 | **nettle** | 3.10.2、3.10 | partial |  | Autotools | 47 | - | [📄](archives/n/nettle/3.10/) |
+| **nghttp2** | 1.69.0 | ✅ 已编译 |  |  | 1 | - | [📄](archives/n/nghttp2/1.69.0/) |
+| **nghttp3** | 1.15.0 | success |  | CMake | 1 | [] | [📄](archives/n/nghttp3/1.15.0/) |
 | **nginx** | 1.26.2 | partial |  | Autotools | - | - | [📄](archives/n/nginx/1.26.2/) |
+| **ngtcp2** | 1.22.1 | ✅ 已发布 |  |  | 0 | - | [📄](archives/n/ngtcp2/1.22.1/) |
 | **ninja** | 1.12.1 | uploaded |  | Makefile | 0 | - | [📄](archives/n/ninja/1.12.1/) |
 | **nlohmann-json** | 3.11.2 | uploaded |  | CMake | 0 | - | [📄](archives/n/nlohmann-json/3.11.2/) |
 | **nmap** | 7.95 | compiling |  | Autotools | - | - | [📄](archives/n/nmap/7.95/) |
@@ -277,10 +290,10 @@
 | **pciutils** | 3.13.0 | uploaded |  | Makefile | 0 | - | [📄](archives/p/pciutils/3.13.0/) |
 | **pcre** | 8.45 | uploaded |  | Autotools | 0 | - | [📄](archives/p/pcre/8.45/) |
 | **pcre2** | 10.40 | uploaded |  | Autotools | 0 | [] | [📄](archives/p/pcre2/10.40/) |
-| **perf** | 6.6.9 | ✅ 已编译 |  |  | - | - | [📄](archives/p/perf/6.6.9/) |
 | **perl** | 5.42.2 | uploaded |  | Autotools | 0 | - | [📄](archives/p/perl/5.42.2/) |
 | **physfs** | 3.2.0 | uploaded |  | unknown | 0 | - | [📄](archives/p/physfs/3.2.0/) |
 | **pigz** | 2.8 | uploaded |  | Makefile | 0 | zlib | [📄](archives/p/pigz/2.8/) |
+| **pinentry** | 1.3.2 | ✅ 已编译 |  |  | 2 | - | [📄](archives/p/pinentry/1.3.2/) |
 | **pixman** | 0.46.4 | uploaded |  | Autotools | 0 | [] | [📄](archives/p/pixman/0.46.4/) |
 | **pkg-config** | 0.29.2 | uploaded |  | Makefile | 0 | - | [📄](archives/p/pkg-config/0.29.2/) |
 | **plzip** | 1.13 | uploaded |  | Makefile | 0 | lzlib | [📄](archives/p/plzip/1.13/) |
@@ -288,13 +301,13 @@
 | **protobuf** | 34.1 | uploaded |  | CMake | 0 | abseil-cpp (20260107.1) | [📄](archives/p/protobuf/34.1/) |
 | **psmisc** | 23.6 | partial |  | Autotools | - | ncurses | [📄](archives/p/psmisc/23.6/) |
 | **python** | 3.12.9、3.9.0、3.9.25 | verified |  | Autotools | 0 | - | [📄](archives/p/python/3.9.25/) |
-| **rabbitmq-c** | 0.13.0、0.15.0 | ✅ 已编译 |  | CMake | - | openssl/1.1.1w | [📄](archives/r/rabbitmq-c/0.15.0/) |
+| **rabbitmq-c** | 0.13.0 | partial |  | Autotools | - | - | [📄](archives/r/rabbitmq-c/0.13.0/) |
 | **ragel** | 6.10 | uploaded |  | unknown | 0 | - | [📄](archives/r/ragel/6.10/) |
 | **rapidjson** | 1.1.0 | uploaded |  | CMake | 0 | - | [📄](archives/r/rapidjson/1.1.0/) |
 | **re2** | 2024-04-01、2024-07-01 | partial |  | unknown | - | - | [📄](archives/r/re2/2024-07-01/) |
 | **re2c** | 4.3.1 | uploaded |  | unknown | 0 | - | [📄](archives/r/re2c/4.3.1/) |
 | **readline** | 8.2 | verified |  | Autotools | 0 | name: ncurses | [📄](archives/r/readline/8.2/) |
-| **redis** | 7.4.2、8.6.0 | ✅ 已编译 |  | Makefile | 4 | - | [📄](archives/r/redis/8.6.0/) |
+| **redis** | 7.4.2 | partial |  | Makefile | 3 | - | [📄](archives/r/redis/7.4.2/) |
 | **rhash** | 1.4.4 | uploaded |  | unknown | 0 | openssl (optimized algorithms),gettext (internationalization) - disabled due to compatibility | [📄](archives/r/rhash/1.4.4/) |
 | **robin-map** | 1.4.1 | uploaded |  | CMake | 0 | - | [📄](archives/r/robin-map/1.4.1/) |
 | **rocksdb** | 9.10.0 | uploaded |  | CMake | 0 | - | [📄](archives/r/rocksdb/9.10.0/) |
@@ -306,6 +319,7 @@
 | **scons** | 4.10.0 | uploaded |  | custom | 0 | - | [📄](archives/s/scons/4.10.0/) |
 | **screen** | 5.0.0 | uploaded |  | Makefile | 0 | - | [📄](archives/s/screen/5.0.0/) |
 | **sed** | 4.10、4.9 | verified |  | Autotools | 0 | - | [📄](archives/s/sed/4.9/) |
+| **serf** | 1.3.10 | ✅ 已发布 |  |  | 0 | - | [📄](archives/s/serf/1.3.10/) |
 | **sevenzip** | 26.00 | success |  | custom-makefile | 1 | - | [📄](archives/s/sevenzip/26.00/) |
 | **simdjson** | 4.6.3 | uploaded |  | CMake | 0 | - | [📄](archives/s/simdjson/4.6.3/) |
 | **smartmontools** | 7.4 | uploaded |  | Makefile | 0 | - | [📄](archives/s/smartmontools/7.4/) |
@@ -320,13 +334,13 @@
 | **sshpass** | 1.10 | success |  | Autotools | 2 | [] | [📄](archives/s/sshpass/1.10/) |
 | **strace** | 6.19、6.10 | partial |  | Autotools | 67 | - | [📄](archives/s/strace/6.10/) |
 | **stunnel** | 5.73 | partial |  | Autotools | - | - | [📄](archives/s/stunnel/5.73/) |
+| **subversion** | 1.14.5 | compiling |  | Autotools | - | - | [📄](archives/s/subversion/1.14.5/) |
 | **swig** | 4.4.0 | uploaded |  | unknown | 0 | - | [📄](archives/s/swig/4.4.0/) |
 | **sysfsutils** | 2.1.0 | uploaded |  | Makefile | 0 | - | [📄](archives/s/sysfsutils/2.1.0/) |
 | **tar** | 1.35 | verified |  | Autotools | 0 | - | [📄](archives/t/tar/1.35/) |
 | **testssl** | 3.2.3 | uploaded |  | unknown | 0 | - | [📄](archives/t/testssl/3.2.3/) |
 | **texinfo** | 7.3 | verified |  | Autotools | 0 | - | [📄](archives/t/texinfo/7.3/) |
 | **tinyssh** | 20260401 | uploaded |  | unknown | 0 | - | [📄](archives/t/tinyssh/20260401/) |
-| **toml11** | 4.4.0 | ✅ 已编译 |  | CMake | - | - | [📄](archives/t/toml11/4.4.0/) |
 | **tomlplusplus** | 3.4.0 | uploaded |  | CMake | 0 | - | [📄](archives/t/tomlplusplus/3.4.0/) |
 | **tree** | 2.1.3 | uploaded |  | Makefile | 0 | - | [📄](archives/t/tree/2.1.3/) |
 | **triehash** | 0.3 | uploaded |  | CMake | 0 | - | [📄](archives/t/triehash/0.3/) |
@@ -345,8 +359,8 @@
 | **wget** | 1.19.1 | verified |  | Autotools | 0 | - | [📄](archives/w/wget/1.19.1/) |
 | **which** | 2.21 | partial |  | Autotools | 2 | - | [📄](archives/w/which/2.21/) |
 | **wimlib** | 1.14.5 | uploaded |  | unknown | 0 | - | [📄](archives/w/wimlib/1.14.5/) |
-| **xmlrpc-c** | 1.64.03 | ✅ 已编译 |  | Autotools | 2 | - | [📄](archives/x/xmlrpc-c/1.64.03/) |
-| **xorgproto** | 2024.1 | success |  | Meson | 2 | [] | [📄](archives/x/xorgproto/2024.1/) |
+| **xmlsec1** | 1.3.11 | ✅ 已发布 |  |  | 0 | - | [📄](archives/x/xmlsec1/1.3.11/) |
+| **xmlstarlet** | 1.6.1 | partial |  |  | 3 | - | [📄](archives/x/xmlstarlet/1.6.1/) |
 | **xxd** | 9.1.0 | success |  | simple_makefile | - | - | [📄](archives/x/xxd/9.1.0/) |
 | **xxhash** | 0.8.3、0.8.2 | partial |  | Autotools | - | - | [📄](archives/x/xxhash/0.8.2/) |
 | **xz** | 5.6.2 | verified |  | Autotools | 0 | - | [📄](archives/x/xz/5.6.2/) |
