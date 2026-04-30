@@ -25,3 +25,7 @@
 
 ## 注意事项
 - 6 个补丁涉及：CMakeLists.txt、pthread_stubs.c、config.guess、config.sub、iperf_config.h、version.h
+---
+
+**编译结束**: 2026-04-30 02:49
+**最终状态**: built
