@@ -1,0 +1,288 @@
+--- blockhash-0.1.orig/blockhash.c	2026-05-06 17:42:56.000000000 +0800
++++ blockhash-0.1.work/blockhash.c	2026-05-07 11:54:05.766093281 +0800
+@@ -3,15 +3,20 @@
+  *
+  * Copyright 2014 Commons Machinery http://commonsmachinery.se/
+  * Distributed under an MIT license, please see LICENSE in the top dir.
++ *
++ * Modified for HarmonyOS: replaced MagickWand with stb_image
+  */
+ 
++#define STB_IMAGE_IMPLEMENTATION
++#include "stb_image.h"
++
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <getopt.h>
+ #include <string.h>
+ #include <math.h>
+ 
+-#include <wand/MagickWand.h>
++#define VERSION "0.3.2-harmonyos"
+ 
+ // comparing functions for qsort
+ 
+@@ -39,7 +44,7 @@
+     qsort(sorted, n, sizeof(int), cmpint);
+ 
+     if (n % 2 == 0) {
+-        result = (float) (sorted[n / 2] + sorted[n / 2 + 1]) / 2;
++        result = (float) (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+     } else {
+         result = (float) sorted[n / 2];
+     }
+@@ -58,7 +63,7 @@
+     qsort(sorted, n, sizeof(float), cmpfloat);
+ 
+     if (n % 2 == 0) {
+-        result = (sorted[n / 2] + sorted[n / 2 + 1]) / 2;
++        result = (sorted[n / 2 - 1] + sorted[n / 2]) / 2;
+     } else {
+         result = sorted[n / 2];
+     }
+@@ -67,6 +72,51 @@
+     return result;
+ }
+ 
++/** Compare medians across four horizontal bands
++ *
++ * Output a 1 if the block is brighter than the median.
++ * With images dominated by black or white, the median may
++ * end up being 0 or the max value, and thus having a lot
++ * of blocks of value equal to the median.  To avoid
++ * generating hashes of all zeros or ones, in that case output
++ * 0 if the median is in the lower value space, 1 otherwise
++ */
++void translate_blocks_to_bits(int *blocks, int nblocks, int pixels_per_block)
++{
++    float half_block_value;
++    int bandsize, i, j;
++    int m, v;
++
++    half_block_value = pixels_per_block * 256 * 3 / 2;
++    bandsize = nblocks / 4;
++
++    for (i = 0; i < 4; i++) {
++        m = median(&blocks[i * bandsize], bandsize);
++        for (j = i * bandsize; j < (i + 1) * bandsize; j++) {
++            v = blocks[j];
++            blocks[j] = v > m || (abs(v - m) < 1 && m > half_block_value);
++        }
++    }
++}
++
++void translate_blocks_to_bitsf(float *blocks, int *result, int nblocks, int pixels_per_block)
++{
++    float half_block_value;
++    int bandsize, i, j;
++    float m, v;
++
++    half_block_value = pixels_per_block * 256 * 3 / 2;
++    bandsize = nblocks / 4;
++
++    for (i = 0; i < 4; i++) {
++        m = medianf(&blocks[i * bandsize], bandsize);
++        for (j = i * bandsize; j < (i + 1) * bandsize; j++) {
++            v = blocks[j];
++            result[j] = v > m || (fabsf(v - m) < 1 && m > half_block_value);
++        }
++    }
++}
++
+ /** Convert array of bits to hexadecimal string representation.
+  * Hash length should be a multiple of 4.
+  *
+@@ -116,18 +166,16 @@
+ */
+ void blockhash_quick(int bits, unsigned char *data, int width, int height, int **hash)
+ {
+-    int    i, x, y, ix, iy;
++    int    x, y, ix, iy;
+     int    ii, alpha, value;
+     int    block_width;
+     int    block_height;
+     int   *blocks;
+-    float  m;
+ 
+     block_width = width / bits;
+     block_height = height / bits;
+ 
+-    blocks = malloc(bits * bits * sizeof(int));
+-
++    blocks = calloc(bits * bits, sizeof(int));
+     for (y = 0; y < bits; y++) {
+         for (x = 0; x < bits; x++) {
+             value = 0;
+@@ -149,16 +197,7 @@
+         }
+     }
+ 
+-    m = median(blocks, bits * bits);
+-
+-    for (i = 0; i < bits * bits; i++) {
+-        if (blocks[i] < m) {
+-            blocks[i] = 0;
+-        } else {
+-            blocks[i] = 1;
+-        }
+-    }
+-
++    translate_blocks_to_bits(blocks, bits * bits, block_width * block_height);
+     *hash = blocks;
+ }
+ 
+@@ -185,11 +224,10 @@
+     float   x_mod, y_mod;
+     float   weight_top, weight_bottom, weight_left, weight_right;
+     int     block_top, block_bottom, block_left, block_right;
+-    int     i, x, y, ii, alpha;
++    int     x, y, ii, alpha;
+     float   value;
+     float  *blocks;
+     int    *result;
+-    float   m;
+ 
+     if (width % bits == 0 && height % bits == 0) {
+         return blockhash_quick(bits, data, width, height, hash);
+@@ -248,49 +286,23 @@
+         }
+     }
+ 
+-    m = medianf(blocks, bits * bits);
+-
+-    for (i = 0; i < bits * bits; i++) {
+-        if (blocks[i] < m) {
+-            result[i] = 0;
+-        } else {
+-            result[i] = 1;
+-        }
+-    }
+-
++    translate_blocks_to_bitsf(blocks, result, bits * bits, block_width * block_height);
+     *hash = result;
+     free(blocks);
+ }
+ 
+-int process_image(char * fn, int bits, int quick, int debug)
++void process_image(char * fn, int bits, int quick, int debug)
+ {
+-    int i, j;
+-    size_t width, height;
++    int i;
++    int width, height, channels;
+     unsigned char *image_data;
+     int *hash;
+-    MagickBooleanType status;
+-    MagickWand *magick_wand;
+-
+-    magick_wand = NewMagickWand();
+-    status = MagickReadImage(magick_wand, fn);
+-
+-    if (status == MagickFalse) {
+-        printf("Error opening image file %s\n", fn);
+-        exit(-1);
+-    }
+-
+-    // Remove color profiles for interoperability with other hashing tools
+-    MagickProfileImage(magick_wand, "*", NULL, 0);
+-
+-    width = MagickGetImageWidth(magick_wand);
+-    height = MagickGetImageHeight(magick_wand);
+ 
+-    image_data = malloc(width * height * 4);
++    /* Load image using stb_image (force RGBA format) */
++    image_data = stbi_load(fn, &width, &height, &channels, 4);
+ 
+-    status = MagickExportImagePixels(magick_wand, 0, 0, width, height, "RGBA", CharPixel, image_data);
+-
+-    if (status == MagickFalse) {
+-        printf("Error converting image data to RGBA\n");
++    if (image_data == NULL) {
++        fprintf(stderr, "Error opening image file %s: %s\n", fn, stbi_failure_reason());
+         exit(-1);
+     }
+ 
+@@ -312,13 +324,11 @@
+     }
+ 
+     char* hex = bits_to_hexhash(hash, bits*bits);
+-    printf("%s %s\n", fn, hex);
++    printf("%s  %s\n", hex, fn);
+ 
+     free(hex);
+     free(hash);
+-    free(image_data);
+-
+-    DestroyMagickWand(magick_wand);
++    stbi_image_free(image_data);
+ }
+ 
+ void help() {
+@@ -326,24 +336,23 @@
+            "\n"
+            "Optional arguments:\n"
+            "-h, --help            Show this help message and exit\n"
++           "-v, --version         Show the version and exit\n"
+            "-q, --quick           Use quick hashing method.\n"
+            "-b, --bits BITS       Create hash of size N^2 bits. Default: 16\n"
+            "--debug               Print hashes as 2D maps (for debugging)\n");
+ }
+ 
+-void main (int argc, char **argv) {
+-    MagickWandGenesis();
+-
++int main (int argc, char **argv) {
+     int quick = 0;
+     int debug = 0;
+     int bits = 16;
+-    int x;
+ 
+     int option_index = 0;
+     int c;
+ 
+     struct option long_options[] = {
+         {"help",    no_argument,        0, 'h'},
++        {"version", no_argument,        0, 'v'},
+         {"quick",   no_argument,        0, 'q'},
+         {"bits",    required_argument,  0, 'b'},
+         {"debug",   no_argument,        0, 'd'},
+@@ -355,23 +364,27 @@
+         exit(0);
+     }
+ 
+-    while ((c = getopt_long(argc, argv, "hqb:d",
++    while ((c = getopt_long(argc, argv, "hvqb:d",
+                  long_options, &option_index)) != -1) {
+         switch (c) {
+         case 'h':
+             help();
+             exit(0);
+             break;
++        case 'v':
++            printf("%s\n", VERSION);
++            exit(0);
++            break;
+         case 'q':
+             quick = 1;
+             break;
+         case 'b':
+             if (sscanf(optarg, "%d", &bits) != 1) {;
+-                printf("Error: couldn't parse bits argument\n");
++                fprintf(stderr, "Error: couldn't parse bits argument\n");
+                 exit(-1);
+             }
+             if (bits % 4 != 0) {
+-                printf("Error: bits argument should be a multiple of 4\n");
++                fprintf(stderr, "Error: bits argument should be a multiple of 4\n");
+                 exit(-1);
+             }
+             break;
+@@ -390,5 +403,5 @@
+         }
+     }
+ 
+-    MagickWandTerminus();
+-}
++    exit(0);
++}
+\ No newline at end of file
