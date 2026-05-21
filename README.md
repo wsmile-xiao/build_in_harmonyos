@@ -3,6 +3,9 @@
 > 鸿蒙 (OpenHarmony) 平台开源软件预编译框架
 > 版本: v7.8 (Python 全量实现 · 多 Agent 协作 · 知识图谱驱动)
 
+## 加入项目
+[邀请链接](https://gitcode.com/invite/link/afd045a86cd9425aa888)， 您可以在点击后通过issue告知我们
+
 快速部署引导，在鸿蒙终端命令行中执行以下命令：
 ```
 wget https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/download/init/setup_wizard.sh && chmod 777 ./setup_wizard.sh && ./setup_wizard.sh
