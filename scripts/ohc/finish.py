@@ -14,7 +14,7 @@ from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 from .close_archive import close_archive
 from .check_knowledge_gap import check_knowledge_gap
 from .refresh_patch import auto_mode as refresh_patch_auto
-from .verify_build import VerifyBuild
+from .verify_build import VerifyBuild  # legacy, still used for archive checks
 from .finalize_archive import finalize_archive
 from .summary import generate_summary
 
@@ -79,24 +79,20 @@ class FinishPipeline:
             log_warn("  .staging-verified 缺失")
         else:
             log_ok(f"  .staging-verified ✅")
-        pkg_dir = self.archive_dir / "packaging"
-        tars = list(pkg_dir.glob("*ohos-aarch64*.tar.gz")) if pkg_dir.exists() else []
-        packaged_marker = pkg_dir / ".packaged" if pkg_dir.exists() else None
-        if not tars:
-            self.gate_miss += 1
-            self.gate_warnings.append("packaging:missing")
-            log_warn("  预编译包缺失")
-        elif packaged_marker and packaged_marker.exists():
-            log_ok(f"  预编译包 ✅ ({len(tars)} 个，工具化打包)")
+        # v3.0: Check for conanfile.py (preferred) or legacy packaging
+        conanfile = self.archive_dir / "conanfile.py"
+        if conanfile.exists():
+            log_ok("  conanfile.py ✅ (v3.0 配方)")
         else:
-            # tar.gz exists but not via ohc-run.py package — manual packaging
-            self.gate_miss += 1
-            self.gate_warnings.append("packaging:manual")
-            log_fail("  ❌ 预编译包存在但未经工具化打包（缺少 .packaged 标记）")
-            log_fail("     必须使用 ohc-run.py package 完成打包（签名/RPATH/strip/权限）")
-            log_fail("     手动 tar 打包的产物在鸿蒙上无法执行（ELF 未签名）")
-            if self.status == "published":
-                self.status = "built"
+            # Legacy: check for packaging
+            pkg_dir = self.archive_dir / "packaging"
+            tars = list(pkg_dir.glob("*ohos-aarch64*.tar.gz")) if pkg_dir.exists() else []
+            if not tars:
+                self.gate_miss += 1
+                self.gate_warnings.append("packaging:missing")
+                log_warn("  预编译包缺失（无 conanfile.py 也无 tar.gz）")
+            else:
+                log_ok(f"  预编译包 ✅ ({len(tars)} 个，legacy)")
 
         # Knowledge consolidation gate
         kd_marker = self.archive_dir / ".knowledge-done"
@@ -176,28 +172,55 @@ class FinishPipeline:
         else:
             log_ok("G0 干净构建验证通过")
 
-    # Step 3: verify-build
+    # Step 3: verify (conan_verify for v3.0, or legacy verify_build)
     def step3_verify_build(self):
-        log_info("Step 3/6: 质量门禁 G1-G4...")
-        install_prefix = os.environ.get("TEST_PREFIX", "")
-        v = VerifyBuild(self.software, self.version,
-                        archive_dir=str(self.archive_dir),
-                        project_dir=str(self.pdir),
-                        install_prefix=install_prefix)
-        try:
-            rc = v.run()
-        except Exception as e:
-            log_warn(f"  verify-build 异常: {e}"); self.steps["step3"] = False; return
-        if rc == 0:
-            self.steps["step3"] = True
-            self._task_card("11c", "✅完成", "G1-G4 全通过"); log_ok("  G1-G4 全通过")
-            if self.status == "failed": self.status = "built"
+        log_info("Step 3/6: 质量验证...")
+
+        # v3.0: Use ConanVerifier if conanfile.py exists
+        conanfile = self.archive_dir / "conanfile.py"
+        if conanfile.exists():
+            log_info("  检测到 conanfile.py，使用 Conan 验证 (R29)...")
+            from .conan_verify import ConanVerifier
+            verifier = ConanVerifier(
+                self.software, self.version,
+                pdir=str(self.pdir),
+            )
+            try:
+                rc = verifier.run()
+            except Exception as e:
+                log_warn(f"  conan-verify 异常: {e}"); self.steps["step3"] = False; return
+            if rc == 0:
+                self.steps["step3"] = True
+                self._task_card("11c", "✅完成", "conan-verify PASS"); log_ok("  conan-verify 通过")
+                if self.status == "failed": self.status = "built"
+            else:
+                self.steps["step3"] = False
+                self._task_card("11c", "❌失败", f"conan-verify RC={rc}")
+                log_fail(f"  conan-verify 未通过 (RC={rc})，请修复 conanfile.py 后重新验证")
+                if self.status == "published": self.status = "built"
+                elif self.status == "built": self.status = "failed"
         else:
-            self.steps["step3"] = False
-            self._task_card("11c", "❌失败", f"G1-G4 RC={rc}")
-            log_fail(f"  质量门禁未通过 (RC={rc})，请修复后重新 verify")
-            if self.status == "published": self.status = "built"
-            elif self.status == "built": self.status = "failed"
+            # Legacy: Use old verify_build for archives without conanfile.py
+            log_info("  无 conanfile.py，使用传统 G1-G4 验证...")
+            install_prefix = os.environ.get("TEST_PREFIX", "")
+            v = VerifyBuild(self.software, self.version,
+                            archive_dir=str(self.archive_dir),
+                            project_dir=str(self.pdir),
+                            install_prefix=install_prefix)
+            try:
+                rc = v.run()
+            except Exception as e:
+                log_warn(f"  verify-build 异常: {e}"); self.steps["step3"] = False; return
+            if rc == 0:
+                self.steps["step3"] = True
+                self._task_card("11c", "✅完成", "G1-G4 全通过"); log_ok("  G1-G4 全通过")
+                if self.status == "failed": self.status = "built"
+            else:
+                self.steps["step3"] = False
+                self._task_card("11c", "❌失败", f"G1-G4 RC={rc}")
+                log_fail(f"  质量门禁未通过 (RC={rc})，请修复后重新 verify")
+                if self.status == "published": self.status = "built"
+                elif self.status == "built": self.status = "failed"
 
     # Step 4: finalize-archive
     def step4_finalize_archive(self):

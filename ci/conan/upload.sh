@@ -1,0 +1,100 @@
+#!/usr/bin/zsh
+# ci/conan/upload.sh — Upload built packages to Conan registry (CI, no AI)
+#
+# Contract: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos_ci/blob/main/docs/CI_SCRIPT_SPEC.md
+# Exit code: 0=success, non-0=failure
+# Timeout: 30 minutes
+#
+# ⚠️ SECURITY: Only CI_TASK_TYPE=release (post-merge) may call this script.
+#    PR check pipeline must NOT upload.
+#    Conan registry credentials (CONAN_REMOTE_USER/CONAN_REMOTE_PASS) are
+#    stored ONLY on CI execution machines, injected by Buildbot as env vars.
+#    Developer machines and this repository do NOT contain credentials.
+
+set -euo pipefail
+
+# ── Security gate ──
+if [ "${CI_TASK_TYPE:-}" != "release" ]; then
+    echo "[error] Upload is only allowed in release pipeline (CI_TASK_TYPE=release)"
+    echo "[error] Current CI_TASK_TYPE=${CI_TASK_TYPE:-unset}"
+    exit 1
+fi
+
+# ── Configuration ──
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="${CI_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+PROFILE="${CONAN_PROFILE:-ohos-aarch64}"
+PROFILE_FILE="$REPO_ROOT/ci/conan/profiles/$PROFILE"
+CONAN_USER="${CONAN_USER:-ohpcd}"
+CONAN_CHANNEL="${CONAN_CHANNEL:-stable}"
+CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
+SCAN_ROOT="${PKG_SCAN_ROOT:-archives}"
+
+if [ -f "$PROFILE_FILE" ]; then
+    PROFILE_ARGS="-pr:h=$PROFILE_FILE -pr:b=$PROFILE_FILE"
+else
+    PROFILE_ARGS="-pr:h=$PROFILE -pr:b=$PROFILE"
+fi
+
+echo "[step] Conan upload pipeline"
+echo "[step]   remote: ${CONAN_REMOTE_NAME}"
+echo "[step]   user/channel: ${CONAN_USER}/${CONAN_CHANNEL}"
+
+# ── 1. Authenticate ──
+if [ -z "${CONAN_REMOTE_USER:-}" ] || [ -z "${CONAN_REMOTE_PASS:-}" ]; then
+    echo "[error] Missing CONAN_REMOTE_USER or CONAN_REMOTE_PASS"
+    exit 1
+fi
+
+conan remote auth "${CONAN_REMOTE_NAME}" \
+    --user "${CONAN_REMOTE_USER}" \
+    --password "${CONAN_REMOTE_PASS}"
+echo "[step] Authenticated to ${CONAN_REMOTE_NAME} ✅"
+
+# ── 2. Discover packages ──
+PACKAGES=()
+while IFS= read -r f; do
+    pkg_dir=$(dirname "$f")
+    pkg_name=$(basename "$(dirname "$pkg_dir")")
+    pkg_ver=$(basename "$pkg_dir")
+    PACKAGES+=("${pkg_name}/${pkg_ver}@${CONAN_USER}/${CONAN_CHANNEL}")
+done < <(find "$REPO_ROOT/$SCAN_ROOT" -name "conanfile.py" \
+    -not -path "*/test_package/*" \
+    -not -path "*/.conan/*" \
+    2>/dev/null | sort)
+
+if [ ${#PACKAGES[@]} -eq 0 ]; then
+    echo "[error] No packages found to upload"
+    exit 1
+fi
+
+echo "[step] Found ${#PACKAGES[@]} package(s) to upload"
+
+# ── 3. Upload each package ──
+SUCCESS=0
+FAILED=0
+
+for ref in "${PACKAGES[@]}"; do
+    echo ""
+    echo "[step] Uploading: ${ref}"
+    if conan upload "$ref" -r="${CONAN_REMOTE_NAME}" -c 2>&1; then
+        echo "[ok] ${ref} uploaded"
+        SUCCESS=$((SUCCESS + 1))
+    else
+        echo "[fail] ${ref} upload failed"
+        FAILED=$((FAILED + 1))
+    fi
+done
+
+# ── 4. Summary ──
+echo ""
+echo "━━━ Upload Summary ━━━"
+echo "  Total:   ${#PACKAGES[@]}"
+echo "  Success: ${SUCCESS}"
+echo "  Failed:  ${FAILED}"
+
+if [ $FAILED -gt 0 ]; then
+    exit 1
+fi
+
+echo "[step] All packages uploaded successfully ✅"

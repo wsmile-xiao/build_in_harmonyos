@@ -21,7 +21,7 @@ from .models import parse_kv_file, parse_build_context
 from .engine import engine_cli, run_engine
 from .handoff import handoff_cli, emit_handoff, HandoffData
 from .init_build import init_build
-from .package_builder import PackageBuilder
+
 from .finish import FinishPipeline
 from .dependency_resolver import (
     is_prebuilt_available, get_available_version, get_install_url,
@@ -992,52 +992,65 @@ class BuildDriver:
         mark.write_text(report, encoding="utf-8")
         self._task_card_update("8", "✅完成", report)
 
-    # ── Step 9: package ──
+    # ── Step 9: conan recipe generation ──
 
-    def _step9_package(self) -> None:
+    def _step9_conan_recipe(self) -> None:
         if not self.should_run(9):
             return
-        self._log("═══ [9/13] package ═══")
+        self._log("═══ [9/13] Conan 配方生成 (conan-init) ═══")
 
-        # 端到端模式：staging verify 已验证产物可用性，自动创建 verify-passed 标记
-        # （standalone 模式下 verify-build 也会创建此标记，不会重复创建）
-        verify_marker = self.archive_dir / ".verify-passed"
-        staging_marker = self.archive_dir / ".staging-verified"
-        if not verify_marker.exists() and staging_marker.exists():
-            verify_marker.write_text("auto-passed-by-driver\n", encoding="utf-8")
-            self._log("  ✅ staging verify 已通过，自动创建 verify-passed 标记")
+        # Write back actual configure options to manifest.yaml BEFORE
+        # generating conanfile.py, so conan_init sees the real params.
+        self._write_back_configure_options()
 
-        builder = PackageBuilder(self.software, self.version,
-                                  debug=True, prefix=str(self.staging_prefix),
-                                  pdir=str(self.pdir))
-        rc = builder.run()
-        self._task_card_update("9", "✅完成" if rc == 0 else "⚠️部分", f"RC={rc}")
+        from .conan_recipe import conan_init
 
-    # ── Step 10: deploy ──
+        rc = conan_init(self.software, self.version, force=True, pdir=str(self.pdir))
+        if rc != 0:
+            self._log("⚠️ 配方生成失败，请手动生成后继续")
+            self._emit_handoff("conan_init_failed", 2, "Step9",
+                actions=[
+                    f"手动生成: python3 $SKILL_ROOT/scripts/ohc-run.py conan-init {self.software} {self.version}",
+                    "检查 manifest.yaml 中的 source.url 和 build.system",
+                    "运行 RESUME_CMD 继续",
+                ])
+        else:
+            self._task_card_update("9", "✅完成", "conan recipe generated")
 
-    def _step10_deploy(self) -> None:
-        self._log("═══ [10/13] deploy ═══")
+    # ── Step 10: conan verify ──
 
-        rc = 0
-        for item in self.staging_prefix.iterdir() if self.staging_prefix.exists() else []:
-            dst = Path(self.default_prefix) / item.name
-            if item.is_dir():
-                dst.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(str(item), str(dst), dirs_exist_ok=True)
-            else:
-                shutil.copy2(str(item), str(dst))
+    def _step10_conan_verify(self) -> None:
+        if not self.should_run(10):
+            return
+        self._log("═══ [10/13] Conan 配方验证 (conan-verify) ═══")
 
-        # Ensure executables
-        dst_bin = Path(self.default_prefix) / "bin"
-        if dst_bin.exists():
-            for f in dst_bin.iterdir():
-                if f.is_file():
-                    try:
-                        os.chmod(f, 0o755)
-                    except OSError:
-                        pass
+        from .conan_verify import ConanVerifier
 
-        self._task_card_update("10", "✅完成" if rc == 0 else "⚠️部分", "deploy")
+        verifier = ConanVerifier(
+            self.software, self.version,
+            pdir=str(self.pdir),
+        )
+        try:
+            rc = verifier.run()
+        except Exception as e:
+            self._log(f"⚠️ conan-verify 异常: {e}")
+            rc = 1
+
+        if rc == 0:
+            self._task_card_update("10", "✅完成", "conan verify PASS")
+            self._emit_checkpoint("Step10", "conan-verify", [
+                "notes.md: 记录 conan verify 结果",
+                "manifest.yaml: 确认 status=published",
+            ])
+        else:
+            self._task_card_update("10", "⚠️部分", "conan verify FAIL")
+            self._log("⚠️ conan verify 未通过，降级为 built")
+            self._emit_handoff("conan_verify_failed", 1, "Step10",
+                actions=[
+                    "检查 reports/conan-verify-report.md 了解失败原因",
+                    "修复 conanfile.py 后重新验证: ohc-run.py conan-verify",
+                    "如无法通过，标记 status=built 并记录原因",
+                ])
 
     # ── Step 11: finish ──
 
@@ -1182,8 +1195,8 @@ class BuildDriver:
         self._step6_safety()
         self._step7_check()
         self._step8_staging()
-        self._step9_package()
-        self._step10_deploy()
+        self._step9_conan_recipe()
+        self._step10_conan_verify()
         self._step11_finish()
         self._step11b_required_files()
         self._step12_calibrate()

@@ -10,8 +10,7 @@ _MODULES = {
     "check-knowledge-gap": "check_knowledge_gap",
     "close-archive": "close_archive", "search-url": "search_url",
     "refresh-patch": "refresh_patch", "finalize-archive": "finalize_archive",
-    "verify-build": "verify_build", "sign-elf": "sign_elf",
-    "package": "package_builder",
+    "verify-build": "verify_build",
     "summary": "summary",
     "submit": "submission",
     "review": "submission",
@@ -20,6 +19,10 @@ _MODULES = {
     "track-edit": "edit_tracker",
     "dispatch": "dispatch",
     "clean-verify": "clean_verify",
+    # v3.0: Conan recipe generation + verification
+    "conan-init": "conan_recipe",
+    "conan-verify": "conan_verify",
+    "conan-migrate": "conan_recipe",
 }
 
 
