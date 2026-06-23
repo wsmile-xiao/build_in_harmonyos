@@ -7,6 +7,7 @@ the recommended fix is displayed; if not, a draft knowledge entry is
 created in knowledge/drafts/ for later review.
 
 Gates:
+  G0  Pre-build assessment (knowledge graph proactive query)
   G1  Recipe completeness (conanfile.py + conandata.yml + test_package/)
   G2  conan create (clean build) + knowledge graph integration
   G3  Static linking verification (R26)
@@ -179,14 +180,36 @@ class ConanVerifier:
     def _create_draft_entry(self, error_text: str) -> Path | None:
         """Create a draft knowledge entry for an unmatched error.
 
-        The draft is written to knowledge/drafts/ and contains enough context
-        for a human (or AI) to turn it into a proper E-entry.
+        Before creating, checks for similar existing drafts to avoid duplicates.
         """
         drafts_dir = self.pdir / "knowledge" / "drafts"
         drafts_dir.mkdir(parents=True, exist_ok=True)
 
-        # Find next draft number
-        existing = sorted(drafts_dir.glob("DRAFT-*.kv"))
+        # Extract keywords for dedup check
+        keywords = self._extract_keywords(error_text)
+        keyword_set = set(keywords)
+
+        # Check for similar existing drafts (share >50% keywords)
+        existing_drafts = sorted(drafts_dir.glob("DRAFT-*.kv"))
+        for existing in existing_drafts:
+            try:
+                content = existing.read_text(encoding="utf-8", errors="replace")
+                # Extract keywords from existing draft
+                existing_kws = set()
+                for line in content.split("\n"):
+                    if line.startswith("keywords:"):
+                        kws = line.split(":", 1)[1].strip().strip(",")
+                        existing_kws = {k.strip() for k in kws.split(",") if k.strip()}
+                        break
+                # Check overlap
+                if existing_kws and keyword_set:
+                    overlap = len(keyword_set & existing_kws) / max(len(keyword_set), 1)
+                    if overlap > 0.5:
+                        log_info(f"  📝 发现相似草稿: {existing.name} (关键词重合 {overlap:.0%})，跳过生成")
+                        return existing
+            except Exception:
+                continue
+        existing = existing_drafts
         next_num = 1
         if existing:
             nums = [int(re.search(r'DRAFT-(\d+)', f.name).group(1))
@@ -278,6 +301,100 @@ full_log: {self.report_dir / "conan-create.log"}
                     words.add(w_lower)
 
         return sorted(words)[:12]
+
+    # ── Gate 0: Pre-build assessment (knowledge graph proactive query) ──
+
+    # Build system → known risk keywords mapping
+    _BUILD_SYSTEM_RISKS = {
+        "autotools": "autotools configure config.guess config.sub HarmonyOS cannot guess build type mktemp config.status umask permission denied",
+        "cmake": "cmake CMAKE_SYSTEM_NAME HarmonyOS platform detection unknown system ohos",
+        "meson": "meson host_system HarmonyOS platform detection undefined symbol",
+        "makefile": "makefile Makefile HarmonyOS build system install",
+    }
+
+    def _detect_build_system_from_conanfile(self, content: str) -> str:
+        """Detect build system from conanfile.py imports."""
+        if "from conan.tools.cmake import" in content or "CMakeToolchain" in content:
+            return "cmake"
+        if "from conan.tools.gnu import" in content or "AutotoolsToolchain" in content:
+            return "autotools"
+        if "from conan.tools.meson import" in content or "MesonToolchain" in content:
+            return "meson"
+        if "from conan.tools.make import" in content or "MakeToolchain" in content:
+            return "makefile"
+        return "unknown"
+
+    def _check_risk_addressed(self, content: str, eid: str) -> bool:
+        """Check if conanfile.py already addresses a known risk."""
+        if eid == "E007":  # config.guess — check for patches
+            conandata = (self.archive_dir / "conandata.yml").read_text(encoding="utf-8", errors="replace")
+            return "config.guess" in conandata or "config.sub" in conandata
+        if eid == "E011":  # mktemp/umask — check for TMPDIR or umask fix
+            return "TMPDIR" in content or "umask" in content or "CONFIG_SHELL" in content
+        if eid == "E092":  # CMAKE_SYSTEM_NAME — check for toolchain setting
+            return "CMAKE_SYSTEM_NAME" in content or "ohos" in content.lower()
+        if eid == "E090":  # meson platform — check for meson.options
+            return "meson.options" in content or "host_machine" in content
+        return False
+
+    def gate0_pre_build_assessment(self) -> VerifyResult:
+        """G0: Pre-build assessment — proactively query knowledge graph for known risks.
+
+        This gate runs BEFORE conan create to save time. It detects the build
+        system from conanfile.py, queries the knowledge graph for known issues
+        with that build system on HarmonyOS, and checks if the recipe already
+        addresses them. Non-blocking — only warns.
+        """
+        log_info("G0: 预构建风险评估 (知识图谱预查询)...")
+        g = VerifyResult(gate="G0", passed=True)
+
+        conanfile = self.archive_dir / "conanfile.py"
+        if not conanfile.exists():
+            g.details.append("  ⏭️ 跳过（无 conanfile.py）")
+            return g
+
+        content = conanfile.read_text(encoding="utf-8")
+        build_system = self._detect_build_system_from_conanfile(content)
+        g.details.append(f"  📦 构建系统: {build_system}")
+
+        if build_system == "unknown":
+            g.details.append("  ℹ️ 无法识别构建系统，跳过预查询")
+            return g
+
+        # Query knowledge graph with build-system-specific risk keywords
+        risk_query = self._BUILD_SYSTEM_RISKS.get(build_system, "")
+        if not risk_query:
+            return g
+
+        try:
+            from .engine import run_engine
+        except ImportError:
+            g.details.append("  ⚠️ 知识图谱引擎不可用")
+            return g
+
+        result = run_engine(risk_query, project_dir=str(self.pdir))
+        if not result.matched or not result.entry:
+            g.details.append("  ✅ 知识图谱未发现已知风险")
+            return g
+
+        e = result.entry
+        addressed = self._check_risk_addressed(content, e.id)
+
+        if addressed:
+            g.details.append(f"  ✅ 已知风险 {e.id} 已在配方中处理")
+            g.details.append(f"     {e.root_cause[:100]}")
+        else:
+            # Non-blocking warning — the risk exists but hasn't been addressed
+            g.details.append(f"  ⚠️ 已知风险 {e.id} 未在配方中处理")
+            g.details.append(f"     根因: {e.root_cause[:120]}")
+            g.details.append(f"     方案: {e.rec_approach}")
+            if e.rec_command:
+                g.details.append(f"     修复: {e.rec_command[:120]}")
+            g.details.append(f"     ⚡ G2 conan create 可能因此失败，建议先修复")
+            g.knowledge_hit = e.id
+
+        log_ok(f"  G0: {'PASS' if g.passed else 'WARN'}")
+        return g
 
     # ── Gate 1: Recipe completeness ──
 
@@ -765,6 +882,7 @@ full_log: {self.report_dir / "conan-create.log"}
             self._write_report([g1])
             return 1
 
+        g0 = self.gate0_pre_build_assessment()
         g2 = self.gate2_conan_create()
         skip = VerifyResult("", True, ["  ⏭️ 跳过（G2 未通过）"])
 
@@ -774,7 +892,7 @@ full_log: {self.report_dir / "conan-create.log"}
         l4 = self.gate_l4_security_scan() if g2.passed else skip
         l5 = self.gate_l5_baseline() if g2.passed else skip
 
-        gates = [g1, g2, g3, g4, l2, l4, l5]
+        gates = [g0, g1, g2, g3, g4, l2, l4, l5]
         self._write_report(gates)
 
         all_pass = all(g.passed for g in gates)
