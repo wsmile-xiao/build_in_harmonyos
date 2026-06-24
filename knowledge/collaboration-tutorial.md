@@ -121,7 +121,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py submit --check wget 1.21
 | 6 | notes.md 关闭 | `notes.md` 包含结束标记 |
 | 7 | 临时文件 | 无 `DIAGNOSIS_*`、`MISSING_*` 等临时文件 |
 | 8 | knowledge_ref 引用 | manifest 中引用的知识文件均存在 |
-| 9 | 打包产物 | `packaging/` 下有 `tar.gz`（success/partial 时） |
+| 9 | Conan 配方 | `conanfile.py` + `conandata.yml` + `test_package/` 存在 |
 | 10 | 测试报告 | `reports/test-report.md` 存在 |
 | 11 | 提交自检 | 以上各项综合评估 |
 | 12 | 总体评估 | PASS / WARN / FAIL 汇总 |
@@ -520,4 +520,4 @@ git push origin feat/wget-1.21 --force-with-lease
 ---
 
 *参照: GitCode 多人协作提交规范（Squash + 半线性合并配置）*
-*适配: OpenHarmony Compile Agent v7.3 Git+PR 工作流*
+*适配: OpenHarmony Compile Agent v8.3 Conan 配方体系 + Git+PR 工作流

@@ -535,8 +535,8 @@ objective: |
   1. ohc-run.py init-build {软件名} {版本}（下载源码、创建归档骨架）
   2. 应用补丁（如有历史补丁，检查是否需要更新）
   3. configure + make + make install
-  4. ohc-run.py pack {软件名} {版本}（生成预编译包）
-  5. ohc-run.py verify-build {软件名} {版本}
+  4. ohc-run.py conan-init {软件名} {版本}（生成 Conan 配方: conanfile.py + conandata.yml + test_package/）
+  5. ohc-run.py conan-verify {软件名} {版本}（8 道门禁验证: G0 预构建 + G1-G4 + L2/L4/L5）
 
   ## ⭐ 文档更新要求（必须完成）
   ### notes.md 更新
@@ -550,9 +550,8 @@ objective: |
   - 问题解决后：在"遇到的问题"部分写入解决方案
 
   ## 输出要求
-  - 预编译包: {软件名}-{版本}-ohos-aarch64.tar.gz
-  - Debug 包: {软件名}-{版本}-ohos-aarch64-debug.tar.gz（如适用）
-  - 归档完整性: manifest.yaml + notes.md + README.md 都有实际内容
+  - Conan 配方: conanfile.py + conandata.yml + test_package/ 存在且 conan-verify 通过
+  - 归档完整性: manifest.yaml + notes.md + patches/ 都有实际内容
 ```
 
 - **为什么**：2026-04-24 批量编译发现子任务完成后文档都是骨架模板，无法断点续传。
@@ -810,10 +809,10 @@ objective: |
 
 > **AI 不应该记住所有细节，而是记住"去哪里找"和"调用什么工具"。**
 
-- 记住"用 `./scripts/ohc-run.py sign-elf`"比记住"先 llvm-objcopy --remove-section .codesign 再 binary-sign-tool 再 chmod"容易 100 倍
+- 记住"用 `ci/artifacts/sign.sh`"比记住"GPG 签名 + ELF 签名"容易 100 倍
 - 记住"遇到编译错误查 `knowledge/debug-methodology.md`"比记住"编译错误的处理步骤"容易 10 倍
 - notes.md 就是 AI 的"外部记忆"——压缩后只需要读取 notes.md 就能恢复上下文
 
 ---
 
-*文档版本: 5.0 | 基于 Git + GitCode PR 协作模式 | 2026-04-13*
+*文档版本: 6.0 | Conan 配方体系 + Git+PR 协作模式 | 2026-06-23*
