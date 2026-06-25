@@ -341,14 +341,9 @@ def _generate_test_package(
         tmpl = _load_template(project_dir, "test_package/CMakeLists.txt.tmpl")
         content = tmpl.replace("{name}", software).replace("{NAME}", name_upper)
         (tp_dir / "CMakeLists.txt").write_text(content, encoding="utf-8")
-    else:
-        # Executable package: use subprocess-based test_package
-        tmpl = _load_template(project_dir, "test_package-executable/conanfile.py.tmpl")
-        content = tmpl.replace("{ClassName}", name_upper).replace("{name}", software)
-        (tp_dir / "conanfile.py").write_text(content, encoding="utf-8")
 
-    # Minimal test.c
-    test_c = f'''#include <stdio.h>
+        # Minimal test.c for CMake-based test
+        test_c = f'''#include <stdio.h>
 #include <stdlib.h>
 
 int main(void) {{
@@ -356,7 +351,17 @@ int main(void) {{
     return 0;
 }}
 '''
-    (tp_dir / "test.c").write_text(test_c, encoding="utf-8")
+        (tp_dir / "test.c").write_text(test_c, encoding="utf-8")
+    else:
+        # Executable package: use test.sh-based test_package
+        tmpl = _load_template(project_dir, "test_package-executable/conanfile.py.tmpl")
+        content = tmpl.replace("{ClassName}", name_upper).replace("{name}", software)
+        (tp_dir / "conanfile.py").write_text(content, encoding="utf-8")
+
+        # Generate test.sh (smoke test: --version / --help)
+        tmpl = _load_template(project_dir, "test_package-executable/test.sh.tmpl")
+        content = tmpl.replace("{name}", software)
+        (tp_dir / "test.sh").write_text(content, encoding="utf-8")
 
     return 0
 
