@@ -33,6 +33,19 @@ fi
 CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
 echo "[step] Conan version: $CONAN_VERSION"
 
+# ── 1b. Refresh stale settings.yml ──
+# conan caches settings.yml on first run; if conan was upgraded (e.g. OHOS
+# support added to default_settings.py), the cached file is stale and
+# conan will reject os=OHOS. Delete it to force regeneration.
+CONAN_HOME="${CONAN_HOME:-$HOME/.conan2}"
+SETTINGS_FILE="$CONAN_HOME/settings.yml"
+if [ -f "$SETTINGS_FILE" ]; then
+    if ! grep -q "OHOS" "$SETTINGS_FILE" 2>/dev/null; then
+        echo "[step] Refreshing stale settings.yml (missing OHOS enum)"
+        rm -f "$SETTINGS_FILE" "$SETTINGS_FILE.orig"
+    fi
+fi
+
 # ── 2. Register conan remote ──
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 CONAN_REMOTE_URL="${CONAN_REMOTE_URL:-https://conan.cnb.cool/OpenHarmonyPCDeveloper/Conan/-/packages/}"
