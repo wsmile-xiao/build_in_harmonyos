@@ -50,6 +50,12 @@ fi
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 CONAN_REMOTE_URL="${CONAN_REMOTE_URL:-https://conan.cnb.cool/OpenHarmonyPCDeveloper/Conan/-/packages/}"
 
+# Disable conancenter — these are private CI builds, no external deps needed
+if conan remote list 2>/dev/null | grep -q "^conancenter:"; then
+    echo "[step] Disabling conancenter (private CI, not needed)"
+    conan remote disable conancenter 2>/dev/null || true
+fi
+
 # Remove existing remote if URL changed (idempotent)
 EXISTING_URL=$(conan remote list 2>/dev/null | grep "^${CONAN_REMOTE_NAME}:" | head -1 | awk '{print $2}' || echo "")
 if [ -n "$EXISTING_URL" ] && [ "$EXISTING_URL" != "$CONAN_REMOTE_URL" ]; then
