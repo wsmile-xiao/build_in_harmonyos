@@ -3,6 +3,38 @@
 
 ⭐ **回答用户问题时保持简洁。先给命令，再给解释。不要重复 SKILL.md 的原文，直接执行。**
 
+## §0.0 环境准备（Python + Conan）
+
+> 前提条件。首次使用或环境缺失时按此安装。
+
+### Python 安装
+
+```bash
+# 注意：如果已安装"Python安装器"应用，需要先卸载
+curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- python 3.12.9
+```
+
+### pip 源配置（新社区源，必须配置）
+
+```bash
+python3 -m ensurepip                          # 首次安装 pip
+pip3 config set global.index-url https://pypi.cnb.cool/OpenHarmonyPCDeveloper/pypi/-/packages/simple
+pip3 config set global.trusted-host pypi.cnb.cool
+```
+
+> 鸿蒙社区 PyPI 源托管 OHOS 适配版 conan 及其他适配包，必须配置才能正确安装。
+
+### Conan 安装
+
+```bash
+pip3 install conan                            # 从配置的社区源安装 OHOS 适配版（基线 2.29.1）
+```
+
+> 此 conan 已适配 OHOS 平台（`os=OHOS` 枚举、`aarch64-linux-ohos` triplet、`CMAKE_SYSTEM_NAME` 映射等）。
+> 不要从官方 PyPI 安装，否则 `os=OHOS` 会报 `not a valid os`。
+
+---
+
 ## §0 初始化
 
 ```bash
@@ -69,7 +101,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status                                   
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                              # 独立运行知识图谱引擎
 ```
 
-### 1.2 铁律摘要（31 条，违反=bug）
+### 1.2 铁律摘要（32 条，违反=bug）
 
 | # | 规则 |
 |---|------|
@@ -79,6 +111,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 | R16-R20 | **协作与打包**：协作不越权(走PR)；知识先草稿(`graph add --draft`)；依赖先查预编译；禁止手动打包(用`conan create`+`conan upload`)；~~DESTDIR模式~~(废弃) |
 | R21-R25 | **自检与清理**：探索结束自检零介入；finish前必须通过conan验证；平台检测优先于改生成文件；归档清理failed必删；notes.md防重复(finish自动清理) |
 | R26-R31 | **Conan 配方**：终端工具必须静态链接(`BUILD_SHARED_LIBS=OFF`)；依赖引用必须`@ohpcd/stable`；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
+| R32 | **OHOS 平台兼容**：recipe 内 `settings.os` 判断必须 `in ("Linux", "OHOS")`，不能 `== "Linux"` |
 
 > 详解见 references/iron-rules.md
 
@@ -379,4 +412,4 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 
 ---
 
-*SKILL.md v8.3 — 2026-06-23 — SKILL 瘦身优化：§1.2 铁律分组压缩、§3 核心流程精简(HANDOFF移至references)、§6 归档精简、§9 工具按类别分组、新增简洁指导、G0预构建评估门禁、版本号v8.2→v8.3*
+*SKILL.md v8.4 — 2026-06-27 — 新增 §0.0 环境准备（Python/Conan 安装与社区源配置）、§1.2 铁律增至 32 条（R32 OHOS 平台兼容）、os=OHOS 适配、版本号v8.3→v8.4*

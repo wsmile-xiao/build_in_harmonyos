@@ -4,7 +4,7 @@
 
 来源: SKILL.md §1.2
 
-## 铁律总表（31 条，违反=bug）
+## 铁律总表（32 条，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -39,6 +39,7 @@
 | **R29** | **conan_verify 通过后才标记 published** | `ohc-run.py conan-verify` PASS + CI upload → published；PASS 未 upload → built；FAIL → failed | conan create 失败仍标记 published |
 | **R30** | **conan-verify 失败必须查询知识图谱** | G2 失败时调用 `run_engine()` 匹配 E-entry | 只打印错误不查图谱 |
 | **R31** | **知识图谱未命中必须生成草稿** | `knowledge/drafts/DRAFT-*.kv` 自动生成 | 未命中的错误丢弃不沉淀 |
+| **R32** | **Conan recipe 平台判断兼容 OHOS** | `self.settings.os in ("Linux", "OHOS")` | `self.settings.os == "Linux"` |
 
 ---
 
@@ -269,6 +270,24 @@ conan create 失败
 | **不破坏跨平台兼容性** | 不删除其他平台的已有适配 | 删掉 `#ifdef _WIN32` 块 | 保留所有平台守卫 |
 | **不绕过鸿蒙标识机制** | 不硬编码平台特征 | `if (strstr(path, "/usr/local") != NULL)` | `#ifdef __OHOS__` |
 | **不偏离上游代码风格** | 缩进/命名/注释风格与项目一致 | 项目 4 空格你用 tab | 读周边代码保持一致 |
+
+---
+
+### R32 详细说明：Conan recipe 平台判断兼容 OHOS
+
+> **核心原因**：目标平台 `os=OHOS`（见 profile `ohos-aarch64`）。如果 recipe 内部用 `self.settings.os == "Linux"` 做平台判断，OHOS 不命中，导致 Linux-like 行为（fPIC、system_libs 选择等）被错误跳过。
+
+```python
+# ❌ 禁止：OHOS 不命中
+if self.settings.os == "Linux":
+    self.cpp_info.system_libs = ["dl", "rt"]
+
+# ✅ 正确：OHOS 作为 Linux-like 平台同时命中
+if self.settings.os in ("Linux", "OHOS"):
+    self.cpp_info.system_libs = ["dl", "rt"]
+```
+
+注意：绝大多数 recipe 不需要手动判断 `settings.os`——CMakeToolchain / AutotoolsToolchain 会自动处理平台差异。只有 recipe 内部确实需要按平台分支时（如选择 system_libs、条件编译选项等），才适用本规则。
 
 ---
 
