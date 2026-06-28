@@ -243,18 +243,28 @@ for pkg_dir in "${PACKAGES[@]}"; do
             L5_DETAIL="no cache"
         fi
 
-        # L5: Static linking verification for terminal tools (R26)
-        if [ -n "$BINS" ]; then
-            for bin_file in "$BINS"/*; do
-                [ -f "$bin_file" ] || continue
-                if readelf -d "$bin_file" 2>/dev/null | grep -q NEEDED; then
-                    NON_SYS=$(readelf -d "$bin_file" 2>/dev/null | grep NEEDED | \
-                        grep -vE 'libc\.|libm\.|libdl\.|libpthread\.|librt\.|libutil\.|ld-musl|ld-linux' || true)
-                    if [ -n "$NON_SYS" ]; then
-                        echo "[warn] L5: ${bin_file##*/} has non-system dynamic deps:"
-                        echo "$NON_SYS"
+        # L5: System-lib collision check (R26)
+        # 新策略: 默认动态链接由 Conan 管理依赖链，仅检查系统同名 .so 冲突
+        if [ -n "$LIBS" ] && [ -d "$LIBS" ]; then
+            # 收集系统已有 .so 名单
+            SYS_SO=""
+            for sys_lib_dir in /lib /lib64; do
+                [ -d "$sys_lib_dir" ] || continue
+                SYS_SO="$SYS_SO $(ls "$sys_lib_dir"/*.so* 2>/dev/null | xargs -n1 basename 2>/dev/null || true)"
+            done
+            # 检查包产出的 .so 是否与系统同名
+            for lib_file in "$LIBS"/*.so*; do
+                [ -f "$lib_file" ] || continue
+                lib_basename="${lib_file##*/}"
+                # 去版本号后缀比较 (libfoo.so.1.2.3 -> libfoo.so)
+                lib_base="${lib_basename%%.so*}.so"
+                for sys_lib in $SYS_SO; do
+                    sys_base="${sys_lib%%.so*}.so"
+                    if [ "$lib_base" = "$sys_base" ]; then
+                        echo "[warn] L5/R26: ${lib_basename} conflicts with system ${sys_lib}"
+                        echo "[hint]      Add BUILD_SHARED_LIBS=OFF or --disable-shared to conanfile.py"
                     fi
-                fi
+                done
             done
         fi
 

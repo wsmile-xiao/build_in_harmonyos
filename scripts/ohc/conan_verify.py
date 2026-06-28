@@ -10,7 +10,7 @@ Gates:
   G0  Pre-build assessment (knowledge graph proactive query)
   G1  Recipe completeness (conanfile.py + conandata.yml + test_package/)
   G2  conan create (clean build) + knowledge graph integration
-  G3  Static linking verification (R26)
+  G3  System-lib collision verification (R26)
   G4  Artifact integrity (bin/lib/include)
   L2  Platform smoke test (binary --version)
   L4  Static security scan (NX/PIE/RELRO)
@@ -543,28 +543,25 @@ full_log: {self.report_dir / "conan-create.log"}
             g.details.append(f"  ⚠️ cache 路径无效: {cache_path}")
             return g
 
-        skip_libs = {
-            "libc.so", "libm.so", "libdl.so", "libpthread.so",
-            "librt.so", "libutil.so", "ld-musl", "ld-linux",
-            "libstdc++", "libgcc_s",
-        }
-
         bin_dir = Path(cache_path) / "bin"
-        if not bin_dir.exists():
-            for p in Path(cache_path).rglob("bin"):
-                if p.is_dir() and any(p.iterdir()):
-                    bin_dir = p
-                    break
 
         if not bin_dir.exists() or not any(bin_dir.iterdir()):
-            g.details.append("  ℹ️ 无 bin/ 目录（可能是纯库包，跳过 R26 bin 检查）")
-            return g
+            g.details.append("  ℹ️ 无 bin/ 目录（可能是纯库包）")
 
         # R26 新策略: 检查包是否输出了与系统同名的 .so
         # 如果 lib/ 目录下有 .so 且名字与系统 /lib /lib64 冲突 → 违规
         lib_dir = Path(cache_path) / "lib"
+        if not lib_dir.exists():
+            for p in Path(cache_path).rglob("lib"):
+                if p.is_dir() and any(p.iterdir()):
+                    lib_dir = p
+                    break
+
+        issues = []
         if lib_dir.exists():
-            system_so_names = set()
+            # 收集系统 /lib /lib64 下的 .so 基名（去掉版本后缀）
+            # libz.so.1.2.3 -> libz.so
+            system_so_base = set()
             for system_lib_dir in ["/lib", "/lib64"]:
                 try:
                     rc, out = self._run(["ls", system_lib_dir], timeout=5)
@@ -572,34 +569,19 @@ full_log: {self.report_dir / "conan-create.log"}
                         for line in out.split("\n"):
                             line = line.strip()
                             if line.startswith("lib") and ".so" in line:
-                                system_so_names.add(line)
+                                base = line.split(".so")[0] + ".so"
+                                system_so_base.add(base)
                 except Exception:
                     pass
 
             for lib_file in lib_dir.iterdir():
-                if lib_file.is_file() and lib_file.name in system_so_names:
-                    issues.append(f"  {lib_file.name}: 与系统 {system_lib_dir} 同名 .so 冲突")
-
-        issues = []
-        for bin_file in sorted(bin_dir.iterdir()):
-            if not bin_file.is_file():
-                continue
-            try:
-                if bin_file.read_bytes()[:4] != b'\x7fELF':
+                if not lib_file.is_file() or ".so" not in lib_file.name:
                     continue
-            except Exception:
-                continue
-
-            rc, out = self._run(["readelf", "-d", str(bin_file)], timeout=10)
-            if rc != 0:
-                rc, out = self._run(["llvm-readelf", "-d", str(bin_file)], timeout=10)
-            if rc != 0:
-                continue
-
-            for m in re.finditer(r'\(NEEDED\)\s+Shared library:\s+\[(.+?)\]', out):
-                lib = m.group(1)
-                if not any(s in lib for s in skip_libs):
-                    issues.append(f"  {bin_file.name}: 动态依赖 {lib}")
+                pkg_base = lib_file.name.split(".so")[0] + ".so"
+                if pkg_base in system_so_base:
+                    issues.append(f"  {lib_file.name}: 与系统同名 .so 冲突")
+        else:
+            g.details.append("  ℹ️ 无 lib/ 目录（纯可执行包）")
 
         if issues:
             g.passed = False
