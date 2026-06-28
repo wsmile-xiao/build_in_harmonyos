@@ -66,11 +66,12 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本> --force
 
 | 检查项 | 铁律 | 说明 |
 |--------|------|------|
-| `requirements()` | R27 | 依赖格式 `name/ver@ohpcd/stable` |
-| `generate()` 静态链接 | R26 | `BUILD_SHARED_LIBS=OFF` / `-static` |
+| `requirements()` | R27 | 依赖格式 `name/ver@ohpcd/stable`；无依赖则 `pass` |
+| `generate()` 系统同名库静态 | R26 | 仅系统同名库设 `BUILD_SHARED_LIBS=OFF`，其他默认动态 |
 | `package_info()` | — | `cpp_info.libs` 列表正确 |
 | `conandata.yml` sha256 | — | 必须是真实 SHA256，不能是占位符 |
 | `test_package/` | R28 | 存在且类型正确（库/可执行文件） |
+| 无硬编码系统路径 | — | 禁止 `-L/storage/.../usr/local/lib` 等隐式依赖 |
 
 **常见需要手动修正的地方**：
 - 补丁路径不正确 → 检查 `patches/` 目录与 `conandata.yml` 中的声明
@@ -91,7 +92,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 |------|------|---------|
 | G1 | 配方完整性 | 补全缺失文件/字段 |
 | G2 | conan create | 查看知识图谱建议（R30），修复 conanfile.py |
-| G3 | 静态链接 (R26) | 在 `generate()` 添加静态链接配置 |
+| G3 | 系统同名库静态 (R26) | 在 `generate()` 对系统同名库添加静态链接配置 |
 | G4 | 产物完整性 | 检查 `package()` 方法是否正确安装 |
 | L2 | 平台 smoke test | 检查二进制是否能在 HarmonyOS 运行 |
 | L4 | 安全扫描 | 检查 NX/PIE/RELRO（非阻塞警告） |
@@ -174,7 +175,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本> --force
 
 # 4. 检查生成的 conanfile.py
 # - 确认 requirements() 格式为 @ohpcd/stable (R27)
-# - 确认 generate() 有静态链接配置 (R26)
+# - 确认系统同名库有静态链接配置 (R26)，非系统同名库默认动态
+# - 确认无硬编码系统路径
 # - 确认 conandata.yml sha256 不是占位符
 
 # 5. 本地验证
@@ -244,9 +246,90 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> <版本> --url=<UR
 - [ ] `conandata.yml` 的 sha256 是真实值（非 `REPLACE_WITH_ACTUAL_SHA256`）
 - [ ] `test_package/conanfile.py` 存在且类型正确（库包用 CMake，可执行文件包用 subprocess）
 - [ ] `patches/` 中的补丁都在 `conandata.yml` 中声明
-- [ ] 终端工具的 `generate()` 有静态链接配置（R26）
+- [ ] 系统同名库的 `generate()` 有静态链接配置（R26），非系统同名库默认动态
 - [ ] 依赖引用格式为 `@ohpcd/stable`（R27）
+- [ ] 无硬编码系统路径（`-L/storage/.../usr/local/lib` 等隐式依赖）
+- [ ] 所有第三方依赖都在 `requirements()` 显式声明
 - [ ] `conan-verify` 全部门禁 PASS（或已知非阻塞警告）
 - [ ] `notes.md` 记录了适配过程和关键决策
 - [ ] 软件级 `manifest.yaml` 的版本索引已更新
 - [ ] PR 分支命名规范：`feat/<软件名>-<版本>`
+
+---
+
+## 7. 依赖管理策略
+
+### 背景
+
+旧体系无 Conan，用户无法自动下载依赖链，所有库默认静态链接以实现自包含。
+现在由 Conan 管理依赖链，策略变更为**默认动态链接 + 系统同名库例外**。
+
+### 链接策略决策树
+
+```
+构建一个库
+  │
+  ├─ 产出的 .so 与系统 /lib /lib64 同名？
+  │    │
+  │    ├─ 是 → 必须静态链接（R26）
+  │    │      例: zlib, ncurses, readline
+  │    │
+  │    └─ 否 → 默认动态链接
+  │             Conan 管理依赖链
+  │
+  └─ 检查方法: ls /lib*/**/lib<name>.so* 2>/dev/null
+```
+
+### 依赖声明规范
+
+**必须显式声明所有第三方依赖：**
+
+```python
+def requirements(self):
+    # 正确: 显式声明，Conan 自动解析传递依赖
+    self.requires("ncurses/6.4@ohpcd/stable")
+    self.requires("zlib/1.3.1@ohpcd/stable")
+```
+
+**禁止隐式系统依赖：**
+
+```python
+def build(self):
+    # 错误: 偷偷链接系统路径，Conan 无法感知
+    self.run("make LDFLAGS='-L/storage/Users/currentUser/usr/local/lib -lreadline'")
+```
+
+**无依赖的库：**
+
+```python
+def requirements(self):
+    pass  # 无第三方依赖，仅需 libc/libm/libdl
+```
+
+### 构建顺序（有依赖链时）
+
+当 A 依赖 B 时，构建顺序必须遵守：
+
+1. **先构建被依赖方**（B）并 `conan upload` 到 remote
+2. **后构建依赖方**（A），Conan 从 remote 自动拉取 B 的二进制
+3. CI 的 `--build=missing` 确保缺失的包从源码编译，已有的直接用二进制
+
+```
+B (被依赖) ──build+upload──→ Conan Remote
+                                   │
+A (依赖方)   ──build──→ 下载 B 二进制 → 链接 → upload
+```
+
+### 系统同名库清单（常见）
+
+以下库在鸿蒙系统 `/lib`、`/lib64` 下已有同名 `.so`，**必须静态链接**：
+
+| 库名 | 系统路径示例 | 静态配置 |
+|------|-------------|----------|
+| zlib | `/lib/libz.so*` | `BUILD_SHARED_LIBS=OFF` |
+| ncurses | `/lib/libncurses.so*` | `--without-shared` |
+| readline | `/lib/libreadline.so*` | `--disable-shared` |
+| sqlite | `/lib/libsqlite3.so*` | `BUILD_SHARED_LIBS=OFF` |
+| ffi | `/lib/libffi.so*` | `BUILD_SHARED_LIBS=OFF` |
+
+> 完整判断方法：`ls /lib*/**/lib<name>.so* 2>/dev/null`，有输出则必须静态。

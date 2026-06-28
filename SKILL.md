@@ -110,7 +110,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 | R11-R15 | **失败与历史**：失败先查归档再动手；先匹配错误模式再修复；脚本用完整路径；脚本失败=手动模式入口；历史仅供参考不盲从 |
 | R16-R20 | **协作与打包**：协作不越权(走PR)；知识先草稿(`graph add --draft`)；依赖先查预编译；禁止手动打包(用`conan create`+`conan upload`)；~~DESTDIR模式~~(废弃) |
 | R21-R25 | **自检与清理**：探索结束自检零介入；finish前必须通过conan验证；平台检测优先于改生成文件；归档清理failed必删；notes.md防重复(finish自动清理) |
-| R26-R31 | **Conan 配方**：终端工具必须静态链接(`BUILD_SHARED_LIBS=OFF`)；依赖引用必须`@ohpcd/stable`；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
+| R26-R31 | **Conan 配方**：系统同名库禁止动态链接(避免污染`/lib`/`/lib64`)，默认动态由Conan管理依赖链；依赖引用必须`@ohpcd/stable`；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
 | R32 | **OHOS 平台兼容**：recipe 内 `settings.os` 判断必须 `in ("Linux", "OHOS")`，不能 `== "Linux"` |
 
 > 详解见 references/iron-rules.md
@@ -136,7 +136,7 @@ configure 失败？
 
 编译成功 → 固化为 Conan 配方
 ├─ ohc-run.py conan-init <name> <ver>     生成 conanfile.py + conandata.yml + test_package/
-├─ 检查生成的配方（requirements, package_info, 静态链接配置）
+├─ 检查生成的配方（requirements, package_info, 系统同名库静态配置）
 └─ ohc-run.py conan-verify <name> <ver>   验证配方可复现
 ```
 
@@ -198,7 +198,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本>
 python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 ```
 
-**conan-init 后 AI 必须检查**：`requirements()`(R27 `@ohpcd/stable`)、`generate()`(R26 静态链接)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
+**conan-init 后 AI 必须检查**：`requirements()`(R27 `@ohpcd/stable`)、`generate()`(R26 系统同名库静态)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
 
 **conan-verify 8 道门禁**（G0-G4 + L2/L4/L5）：
 
@@ -207,7 +207,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 | **G0** | 预构建风险评估 | 知识图谱预查询，非阻塞 |
 | **G1** | 配方完整性 | conanfile.py + conandata.yml + test_package/ 存在且字段完整 |
 | **G2** | conan create | 从干净源码构建，验证配方自包含性 |
-| **G3** | 静态链接 (R26) | readelf -d 检查终端工具无非系统动态依赖 |
+| **G3** | 系统同名库隔离 (R26) | readelf -d 检查系统同名库未输出 .so 到系统路径 |
 | **G4** | 产物完整性 | bin/lib/include 产物检查 |
 | **L2/L4/L5** | smoke test / 安全扫描 / 产物基线 | `--version`可执行 / NX·PIE·RELRO / SHA256 基线对比 |
 
@@ -354,8 +354,9 @@ archives/{letter}/{name}/
 | 未实现 syscall | E051，setreuid/chroot 等 | 加入 EXCLUDE_LIST 排除 |
 | ELF 签名 | 必须签名否则不可执行 | CI 流水线 `ci/artifacts/sign.sh` |
 | ncurses 共享库 | 编译为 .so 会导致系统崩溃 | conanfile.py `generate()` `--without-shared`（R4） |
-| 静态链接 | DevBox 只拷 bin/，无 lib/ | conanfile.py `BUILD_SHARED_LIBS=OFF`（R26） |
-| RPATH 解析 | 鸿蒙 `$ORIGIN/../lib` 不稳定 | 终端工具强制静态链接（R26） |
+| 静态链接 | 系统同名库构建 .so 会污染 `/lib`、`/lib64` | conanfile.py `generate()` `BUILD_SHARED_LIBS=OFF`（R26），仅限系统同名库 |
+| 动态链接 | 非 system 同名库默认动态 | Conan 管理依赖链，用户 `conan install` 自动拉取全部依赖 |
+| RPATH 解析 | 鸿蒙 `$ORIGIN/../lib` 不稳定 | 系统同名库强制静态（R26）；其他库由 Conan RPATH 管理 |
 
 ### 流程自省
 

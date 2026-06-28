@@ -426,9 +426,9 @@ full_log: {self.report_dir / "conan-create.log"}
                 else:
                     g.details.append(f"  ✅ {desc}")
             if "BUILD_SHARED_LIBS" in content or "-static" in content or "default_library" in content:
-                g.details.append("  ✅ R26: 静态链接配置存在")
+                g.details.append("  ✅ R26: 系统同名库静态链接配置存在")
             else:
-                g.details.append("  ⚠️ R26: 未检测到静态链接配置")
+                g.details.append("  ℹ️ R26: 未检测到静态链接配置（非系统同名库无需静态）")
 
         conandata = self.archive_dir / "conandata.yml"
         if not conandata.exists():
@@ -526,11 +526,11 @@ full_log: {self.report_dir / "conan-create.log"}
         log_ok(f"  G2: {'PASS' if g.passed else 'FAIL'}")
         return g
 
-    # ── Gate 3: Static linking verification (R26) ──
+    # ── Gate 3: System-lib collision verification (R26) ──
 
     def gate3_static_linking(self) -> VerifyResult:
-        """Verify terminal tools are statically linked (R26)."""
-        log_info("G3: 静态链接验证 (R26)...")
+        """Verify system-name libraries don't output .so to system paths (R26)."""
+        log_info("G3: 系统同名库隔离验证 (R26)...")
         g = VerifyResult(gate="G3", passed=True)
 
         rc, cache_path = self._conan(["cache", "path", self.ref], timeout=30)
@@ -557,8 +557,28 @@ full_log: {self.report_dir / "conan-create.log"}
                     break
 
         if not bin_dir.exists() or not any(bin_dir.iterdir()):
-            g.details.append("  ℹ️ 无 bin/ 目录（可能是纯库包，跳过 R26 检查）")
+            g.details.append("  ℹ️ 无 bin/ 目录（可能是纯库包，跳过 R26 bin 检查）")
             return g
+
+        # R26 新策略: 检查包是否输出了与系统同名的 .so
+        # 如果 lib/ 目录下有 .so 且名字与系统 /lib /lib64 冲突 → 违规
+        lib_dir = Path(cache_path) / "lib"
+        if lib_dir.exists():
+            system_so_names = set()
+            for system_lib_dir in ["/lib", "/lib64"]:
+                try:
+                    rc, out = self._run(["ls", system_lib_dir], timeout=5)
+                    if rc == 0:
+                        for line in out.split("\n"):
+                            line = line.strip()
+                            if line.startswith("lib") and ".so" in line:
+                                system_so_names.add(line)
+                except Exception:
+                    pass
+
+            for lib_file in lib_dir.iterdir():
+                if lib_file.is_file() and lib_file.name in system_so_names:
+                    issues.append(f"  {lib_file.name}: 与系统 {system_lib_dir} 同名 .so 冲突")
 
         issues = []
         for bin_file in sorted(bin_dir.iterdir()):
@@ -583,12 +603,12 @@ full_log: {self.report_dir / "conan-create.log"}
 
         if issues:
             g.passed = False
-            g.details.append(f"  ❌ R26 违规: 发现非系统动态依赖")
+            g.details.append(f"  ❌ R26 违规: 系统同名库输出了 .so")
             for issue in issues[:10]:
                 g.details.append(f"     {issue}")
-            g.details.append("  💡 在 conanfile.py generate() 中添加 BUILD_SHARED_LIBS=OFF / -static")
+            g.details.append("  💡 在 conanfile.py generate() 中对系统同名库添加 BUILD_SHARED_LIBS=OFF / --disable-shared")
         else:
-            g.details.append("  ✅ 所有终端工具为静态链接或仅依赖系统库")
+            g.details.append("  ✅ 无系统同名库冲突（R26 通过）")
 
         log_ok(f"  G3: {'PASS' if g.passed else 'FAIL'}")
         return g

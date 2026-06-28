@@ -11,7 +11,7 @@
 | R1 | **参数最少化** | `./configure --prefix=$P && make` | 加 `--build/--host`/CFLAGS hack |
 | R2 | **探索阶段不生成 .patch** | 只改源码+记录到 notes.md | diff/sed 结果写文件 |
 | R3 | **补丁只用 ohc-run.py refresh-patch** | `ohc-run.py refresh-patch --auto` | 手动 diff/AI 写 patch |
-| R4 | **危险库静态编译** | 在 conanfile.py `generate()` 中设置 `--without-shared` / `BUILD_SHARED_LIBS=OFF` | 编译共享库导致系统崩溃 |
+| R4 | **危险库静态编译** | 在 conanfile.py `generate()` 中设置 `--without-shared` / `BUILD_SHARED_LIBS=OFF`（R26 子集） | 编译共享库导致系统崩溃 |
 | R5 | **软链接必须验证可执行 + 禁止 ln -sf** | `ls -la` 验证 + `rm -f && ln -s` | 只检查 `-L` 存在性 / `ln -sf` 覆盖 |
 | R6 | **禁止修改生成文件** | 只改 configure.ac/CMakeLists.txt/*.c/*.h（源码层） | sed 改 configure/Makefile/Makefile.in（不可复现） |
 | R7 | **安全弹窗必须先触发再测试** | make install 后 `find bin -type f -exec {} --version \;` | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
@@ -33,7 +33,7 @@
 | R23 | **平台检测机制优先于改生成文件** | 用 hints/config.guess/cmake 检查 | 手动 sed config.sh/config.h |
 | R24 | **归档清理：failed必删，空归档删** | 无产物无补丁的归档无价值 | 保留无用归档 |
 | R25 | **notes.md 防重复：先删后写** | finish 自动清理旧记录，只保留最后一次 | 多次 finish 产生重复记录 |
-| **R26** | **终端工具必须静态链接** | conanfile.py `generate()` 中强制 `BUILD_SHARED_LIBS=OFF` / `-static` / `default_library=static` | 动态链接导致 DevBox 部署后找不到 .so |
+| **R26** | **系统同名库禁止动态链接** | conanfile.py `generate()` 中对系统同名库强制 `BUILD_SHARED_LIBS=OFF` / `-static` | 构建系统同名 .so 污染 `/lib`/`/lib64` 导致其他应用崩溃 |
 | **R27** | **依赖引用必须 @ohpcd/stable** | `self.requires("name/ver@ohpcd/stable")` | 裸 `self.requires("name/ver")` |
 | **R28** | **conanfile.py 必须有 test_package/** | 生成 conanfile.py 时同时生成 test_package/ | 只有 conanfile.py 没有测试 |
 | **R29** | **conan_verify 通过后才标记 published** | `ohc-run.py conan-verify` PASS + CI upload → published；PASS 未 upload → built；FAIL → failed | conan create 失败仍标记 published |
@@ -43,32 +43,32 @@
 
 ---
 
-### R4 详细说明：危险库静态编译（v3.0 更新）
+### R4 详细说明：危险库静态编译（R26 子集）
 
-> **v3.0 变更**：R4 从探索阶段的 configure 参数迁移到 conanfile.py 的 `generate()` 方法。
+> R4 是 R26 的特例：某些库（如 ncurses）一旦构建为共享库会直接导致系统崩溃，这些库同时是系统同名库的极端案例。
 
-危险库（如 ncurses）编译为共享库会导致鸿蒙系统崩溃。在 conanfile.py 中：
+危险库（如 ncurses）编译为共享库会导致鸿蒙系统崩溃。这些库同时也是系统同名库（R26），在 conanfile.py 中：
 
 ```python
 # CMake 项目
 def generate(self):
     tc = CMakeToolchain(self)
-    tc.variables["BUILD_SHARED_LIBS"] = "OFF"  # R26 + R4
+    tc.variables["BUILD_SHARED_LIBS"] = False  # R26: 系统同名库静态
     tc.generate()
 
 # Autotools 项目（ncurses 特殊参数）
 def generate(self):
     tc = AutotoolsToolchain(self)
-    tc.configure_args.append("--without-shared")  # R4 特殊参数
-    tc.extra_ldflags.append("-static")             # R26 通用静态
+    tc.configure_args.append("--without-shared")  # ncurses 特殊参数
+    tc.configure_args.append("--disable-shared")   # R26 通用静态
     tc.generate()
 ```
 
 | 危险库 | 特殊参数 | 原因 |
 |--------|---------|------|
-| ncurses | `--without-shared` | .so 导致系统崩溃 |
-| openssl | `no-asm` | 无汇编支持 |
-| bash | `--without-bash-malloc` | 使用系统 malloc |
+| ncurses | `--without-shared` | .so 与系统同名，加载导致系统崩溃 |
+| readline | `--disable-shared` | .so 与系统同名 |
+| zlib | `BUILD_SHARED_LIBS=OFF` | .so 与系统同名 |
 
 ---
 
@@ -110,28 +110,38 @@ def generate(self):
 
 ---
 
-### R26 详细说明：终端工具必须静态链接
+### R26 详细说明：系统同名库禁止动态链接
 
-> **核心原因**：DevBox 部署终端工具时只拷贝 `bin/` 下的可执行文件，没有 `lib/` 目录。
+> **策略变更**：旧版要求所有终端工具一律静态链接，因为早期无 Conan 依赖管理，用户无法自动下载依赖链。
+> 现在由 Conan 管理依赖链，**默认改为动态链接**，仅系统同名库保留静态约束。
 
-鸿蒙 PC 的额外限制：
-- **无 root**：不能往 `/usr/lib` 装系统级动态库
-- **RPATH bug**：鸿蒙对 `$ORIGIN/../lib` 相对 RPATH 解析不稳定
-- **HMDFS**：分布式文件系统的软链接行为异常
+**核心原因**：构建产出的 `.so` 如果与系统 `/lib`、`/lib64` 下已有 `.so` 同名，
+安装后会覆盖系统库，导致其他应用加载错误版本而崩溃。
 
-**两类包的不同策略**：
+**链接策略**：
 
-| 包类型 | 举例 | 链接方式 | 部署方式 |
-|--------|------|----------|---------|
-| **终端工具** | curl, bash, make, bzip2 | 强制静态 | conan install → 拷 bin/ |
-| **开发库** | openssl, zlib, libcurl.a | 动态或静态均可 | 留 conan cache 供构建消费 |
+| 类型 | 链接方式 | 说明 |
+|------|----------|------|
+| 系统同名库 | **必须静态** | `.so` 名与 `/lib`、`/lib64` 冲突 → 静态链接 |
+| 其他库 | **默认动态** | Conan 管理依赖链，`conan install` 自动拉取全部传递依赖 |
 
-**各构建系统配置**：
+**系统同名库判断**：
+```bash
+ls /lib*/**/lib<name>.so* /lib/**/lib<name>.so* 2>/dev/null
+# 如果有同名 → 必须静态链接
+```
+
+**依赖管理原则**：
+- 所有第三方依赖**必须在 `requirements()` 显式声明**
+- **禁止**硬编码系统路径（`-L/storage/.../usr/local/lib`）
+- 系统库仅限 libc/libm/libdl 等基础运行时
+
+**各构建系统静态配置（仅系统同名库使用）**：
 
 | 构建系统 | 静态链接配置 | 在 conanfile.py 中的位置 |
 |----------|-------------|------------------------|
-| CMake | `tc.variables["BUILD_SHARED_LIBS"] = "OFF"` | `generate()` |
-| Autotools | `tc.extra_ldflags.append("-static")` + configure `--enable-static --disable-shared` | `generate()` |
+| CMake | `tc.variables["BUILD_SHARED_LIBS"] = False` | `generate()` |
+| Autotools | `--disable-shared --enable-static` | `generate()` |
 | Makefile | 只编译静态目标（不编译 shared） | `build()` |
 | Meson | `tc.project_options["default_library"] = "static"` | `generate()` |
 
@@ -185,7 +195,7 @@ def requirements(self):
 `conan_verify` 执行：
 1. `conan create` 从干净源码构建（验证配方自包含性）
 2. `conan test` 执行 test_package（L1 测试）
-3. `readelf -d` 检查静态链接（R26）
+3. `readelf -d` 检查系统同名库未输出 .so 到系统路径（R26）
 4. 产物完整性检查（bin/lib/include）
 
 只有 conan_verify PASS 才能标记 `status: published`。
