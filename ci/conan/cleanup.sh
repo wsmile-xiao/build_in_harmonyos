@@ -42,6 +42,8 @@ if command -v conan >/dev/null 2>&1; then
 fi
 
 # 1b. 物理删除所有缓存目录 (conan 可能残留 hash 目录)
+# 使用 nullglob 行为: 不匹配时不报错
+setopt nonomatch 2>/dev/null || true
 CONAN_CLEAN_DIRS=(p s t b)
 for subdir in "${CONAN_CLEAN_DIRS[@]}"; do
     if [ -d "$CONAN_HOME/$subdir" ]; then
@@ -127,22 +129,30 @@ done
 echo ""
 echo "── [4] $HOME 散落文件扫描 ──"
 
-# $HOME 下允许存在的条目 (初始部署状态 + 基础 shell 配置)
+# $HOME 下允许存在的条目 (初始部署状态 + OHOS 系统目录)
 # 如果构建过程中产生了不在清单中的文件/目录, 全部清理
 HOME_KEEP=(
-    ".conan2"            # conan 配置 (已在上一步精细清理)
-    "opt"                # buildbot-worker + ci-worker 运行时
-    ".bashrc"
-    ".zshrc"
-    ".profile"
-    ".bash_history"
-    ".zsh_history"
-    ".bash_profile"
-    ".zprofile"
-    ".config"            # 可能包含基础配置 (非 CI 产生)
-    ".local"             # 可能包含基础用户工具
-    ".ohpcd"             # ohpcd 平台配置
-    ".hnp"               # HNP 配置
+    # ── conan 配置 ──
+    ".conan2"
+    # ── CI 运行时 ──
+    "opt"
+    # ── shell 配置 ──
+    ".bashrc" ".zshrc" ".profile"
+    ".bash_profile" ".zprofile"
+    ".bash_history" ".zsh_history"
+    # ── OHOS 系统目录 (不可删除) ──
+    "Desktop" "Documents" "Download"
+    "Music" "Videos" "Images"
+    "Huawei Share"
+    "appdata" "tmp"
+    # ── OHOS 系统隐藏目录 ──
+    ".Recent" ".Trash" ".thumbs"
+    ".ohos_git" ".ssh"
+    # ── 基础配置/工具 ──
+    ".config" ".local"
+    ".ohpcd" ".hnp"
+    # ── 用户安装 ──
+    "usr" "npm"
 )
 
 # 扫描 $HOME 下的顶层条目, 清理不在保护清单内的
@@ -221,7 +231,6 @@ REQUIRED_DIRS=(
     "$CONAN_HOME/profiles"
     "$CONAN_HOME/extensions"
     "$CONAN_HOME/migrations"
-    "$HOME_DIR/opt/ci-worker"
     "$HOME_DIR/opt/buildbot-worker/buildbot.tac"
 )
 
