@@ -27,7 +27,6 @@ PROFILE_FILE="$REPO_ROOT/ci/conan/profiles/$PROFILE"
 CONAN_USER="${CONAN_USER:-ohpcd}"
 CONAN_CHANNEL="${CONAN_CHANNEL:-stable}"
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
-SCAN_ROOT="${PKG_SCAN_ROOT:-archives}"
 
 if [ -f "$PROFILE_FILE" ]; then
     PROFILE_ARGS="-pr:h=$PROFILE_FILE -pr:b=$PROFILE_FILE"
@@ -42,20 +41,17 @@ echo "[step]   user/channel: ${CONAN_USER}/${CONAN_CHANNEL}"
 # Conan 认证由 worker app 预部署 (~/.conan2/.conan.db, 仅 Release 机器)
 # 本脚本不处理凭证, 直接 conan upload
 
-# ── 1. Discover packages ──
+# ── 1. Discover packages (only from CI_PACKAGES) ──
 PACKAGES=()
-while IFS= read -r f; do
-    pkg_dir=$(dirname "$f")
-    pkg_name=$(basename "$(dirname "$pkg_dir")")
-    pkg_ver=$(basename "$pkg_dir")
+for pkg_path in ${CI_PACKAGES:-}; do
+    # pkg_path 形如 archives/b/bash/5.3
+    pkg_ver=$(basename "$pkg_path")
+    pkg_name=$(basename "$(dirname "$pkg_path")")
     PACKAGES+=("${pkg_name}/${pkg_ver}@${CONAN_USER}/${CONAN_CHANNEL}")
-done < <(find "$REPO_ROOT/$SCAN_ROOT" -name "conanfile.py" \
-    -not -path "*/test_package/*" \
-    -not -path "*/.conan/*" \
-    2>/dev/null | sort)
+done
 
 if [ ${#PACKAGES[@]} -eq 0 ]; then
-    echo "[error] No packages found to upload"
+    echo "[error] No packages found to upload (CI_PACKAGES is empty)"
     exit 1
 fi
 
