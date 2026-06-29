@@ -71,6 +71,9 @@ class BashConan(ConanFile):
         autotools = Autotools(self)
         autotools.configure()
         autotools.make()
+        # L1: Run upstream official test suite (make check)
+        # bash 的 make check 会运行大量功能性测试用例
+        autotools.make(target="check")
 
     def package(self):
         autotools = Autotools(self)

@@ -45,6 +45,9 @@ class ZlibConan(ConanFile):
         self.run(f"{config_shell} ./configure --static --prefix=/")
         # R9: Use -j1 for parallel constraint on OHOS platform
         self.run("make -j1")
+        # L1: Run upstream official test suite (make check)
+        # zlib 的 make check 会编译并运行 example.c 和 infcover.c
+        self.run("make check")
 
     def package(self):
         # Install to Conan package folder via DESTDIR

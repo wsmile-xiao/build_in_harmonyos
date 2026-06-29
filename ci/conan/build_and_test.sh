@@ -11,10 +11,11 @@
 # Must complete:
 #   - Use CI_PACKAGES env var for targeted builds (BUG-9 fix)
 #   - Pass profile explicitly to conan create (BUG-10 fix)
-#   - Run L1 upstream official test (make check / ctest / meson test / pytest)
-#   - Run L2 minimal smoke test (--version / --help)
-#   - Run L4 static security scan (readelf NX/PIE/RELRO)
-#   - Run L5 baseline artifact check
+#   - L0: Quality gate (test_package structure + content + MANIFEST checks)
+#   - L1: Test execution verification (upstream make check in build() + test_package)
+#   - L2: Minimal smoke test (--version / --help)
+#   - L4: Static security scan (readelf NX/PIE/RELRO)
+#   - L5: Baseline artifact check
 #   - Generate ci-metadata.json (source_trace + build_trace + test_report)
 #   - Print L{n}_RESULT= test summary lines for PR reporter
 #   - Print build summary
@@ -89,7 +90,8 @@ for pkg_dir in "${PACKAGES[@]}"; do
     LIBS=""
     INCS=""
     PKG_CACHE=""
-    SRC_DIR=""
+    L0_RESULT="skip"
+    L0_DETAIL="not_run"
     L1_RESULT="skip"
     L1_DETAIL="not_run"
     L2_RESULT="skip"
@@ -98,6 +100,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
     L4_DETAIL="not_run"
     L5_RESULT="skip"
     L5_DETAIL="not_run"
+    L0_FAILED=false
     L1_FAILED=false
 
     echo ""
@@ -118,82 +121,139 @@ for pkg_dir in "${PACKAGES[@]}"; do
         --channel="$CONAN_CHANNEL"
     )
 
-    if conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" 2>&1; then
+    # ── L0: Quality gate (before conan create) ──
+    # 5 层防御: 防止适配组偷懒绕过测试
+    echo "[step] L0: Quality gate checks..."
+    TEST_PKG_DIR="$pkg_dir/test_package"
+    L0_FAILED=false
+    L0_ERRORS=""
+
+    # L0a: test_package/ 目录必须存在
+    if [ ! -d "$TEST_PKG_DIR" ]; then
+        echo "[fail] L0a: test_package/ directory missing"
+        L0_FAILED=true
+        L0_ERRORS="${L0_ERRORS} no_test_package_dir"
+    fi
+
+    # L0b: test_package/conanfile.py 必须存在
+    if [ ! -f "$TEST_PKG_DIR/conanfile.py" ]; then
+        echo "[fail] L0b: test_package/conanfile.py missing"
+        L0_FAILED=true
+        L0_ERRORS="${L0_ERRORS} no_test_conanfile"
+    fi
+
+    # L0c: test_package/ 下必须有测试源文件 (.c/.cpp/.cc/.cxx/.sh/.py)
+    TEST_SOURCES=""
+    for ext in c cpp cc cxx sh py; do
+        found=$(find "$TEST_PKG_DIR" -maxdepth 2 -name "*.$ext" -not -name "conanfile.py" 2>/dev/null | head -1)
+        if [ -n "$found" ]; then
+            TEST_SOURCES="$found"
+            break
+        fi
+    done
+    if [ -z "$TEST_SOURCES" ]; then
+        echo "[fail] L0c: No test source files in test_package/"
+        L0_FAILED=true
+        L0_ERRORS="${L0_ERRORS} no_test_sources"
+    fi
+
+    # L0d: test_package/conanfile.py 必须有 test() 且有 self.run()
+    if [ -f "$TEST_PKG_DIR/conanfile.py" ]; then
+        if ! grep -q "def test" "$TEST_PKG_DIR/conanfile.py" 2>/dev/null; then
+            echo "[fail] L0d: test_package/conanfile.py has no test() method"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} no_test_method"
+        elif ! grep -q "self\.run" "$TEST_PKG_DIR/conanfile.py" 2>/dev/null; then
+            echo "[fail] L0d: test() method has no self.run() call — likely a stub"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} stub_test_method"
+        fi
+    fi
+
+    # L0e: test_package/MANIFEST.yml 必须存在 (声明上游测试来源)
+    if [ ! -f "$TEST_PKG_DIR/MANIFEST.yml" ]; then
+        echo "[fail] L0e: test_package/MANIFEST.yml missing — upstream test declaration required"
+        L0_FAILED=true
+        L0_ERRORS="${L0_ERRORS} no_manifest"
+    fi
+
+    if [ "$L0_FAILED" = true ]; then
+        echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
+        L0_RESULT="fail"
+        L0_DETAIL="gate failed:${L0_ERRORS}"
+        echo "L0_RESULT=${L0_RESULT}: ${L0_DETAIL}"
+        echo "L1_RESULT=skip: blocked_by_L0"
+        echo "L2_RESULT=skip: blocked_by_L0"
+        echo "L4_RESULT=skip: blocked_by_L0"
+        echo "L5_RESULT=skip: blocked_by_L0"
+        FAILED=$((FAILED + 1))
+        FAILED_PKGS+=("${pkg_name}/${pkg_ver} (L0 gate:${L0_ERRORS})")
+        continue
+    fi
+
+    echo "[ok] L0: All quality gate checks passed"
+    L0_RESULT="pass"
+    L0_DETAIL="all checks passed"
+
+    # ── conan create (with upstream tests in build() + test_package auto-trigger) ──
+    BUILD_LOG="/tmp/conan_build_${pkg_name}_${pkg_ver}.log"
+    echo "[step] Running conan create (output logged to $BUILD_LOG)..."
+
+    if conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" 2>&1 | tee "$BUILD_LOG"; then
 
         echo "[ok] ${pkg_name}/${pkg_ver} — conan create passed"
 
-        # ── L1: Upstream official test (architect §5 requirement) ──
-        echo "[step] L1: Upstream official test..."
+        # ── L1: Test execution verification (from conan create log) ──
+        # 上一代方案用 conan cache source 获取源码目录跑 make check，
+        # 但 Conan 2.x 没有 cache source 子命令，且构建目录已被清理。
+        # 新方案: make check 在 conanfile.py 的 build() 方法中执行，
+        # test_package 在 conan create 的 test 阶段自动执行，
+        # CI 脚本从 conan create 日志中验证测试真实执行。
+        echo "[step] L1: Verifying test execution from conan create log..."
 
-        # Get source directory from conan cache
-        SRC_DIR=$(conan cache source "${pkg_name}/${pkg_ver}@${CONAN_USER}/${CONAN_CHANNEL}" 2>/dev/null || echo "")
+        MANIFEST_FILE="$TEST_PKG_DIR/MANIFEST.yml"
 
-        # Check whitelist (ci/config/no_official_test.txt)
-        if [ -f "$NO_TEST_FILE" ] && grep -qx "$pkg_name" "$NO_TEST_FILE" 2>/dev/null; then
-            echo "[step] L1: $pkg_name is in no_official_test whitelist — skipping"
-            L1_RESULT="skip"
-            L1_DETAIL="whitelisted"
-        elif [ -z "$SRC_DIR" ] || [ ! -d "$SRC_DIR" ]; then
-            echo "[step] L1: Source directory not available (conan cache may be cleaned) — skipping"
-            L1_RESULT="skip"
-            L1_DETAIL="no_source_dir"
+        # L1a: conan create 必须进入 test 阶段 (test_package 被执行)
+        if grep -qi "Testing package\|test_package" "$BUILD_LOG" 2>/dev/null; then
+            echo "[ok] L1a: test_package was executed by conan create"
+            L1_RESULT="pass"
+            L1_DETAIL="test_package executed"
         else
-            echo "[step] L1: Source directory: $SRC_DIR"
+            echo "[fail] L1a: No test_package execution trace in log — test was skipped!"
+            L1_RESULT="fail"
+            L1_DETAIL="test_package not executed"
+            L1_FAILED=true
+        fi
 
-            # Detect build system and run official tests
-            if [ -f "$SRC_DIR/Makefile" ] && make -C "$SRC_DIR" -n check >/dev/null 2>&1; then
-                echo "[step] L1: Detected Makefile with 'check' target"
-                if make -C "$SRC_DIR" check 2>&1; then
-                    echo "[ok] L1: make check passed"
-                    L1_RESULT="pass"
-                    L1_DETAIL="make check"
-                else
-                    echo "[fail] L1: make check failed"
-                    L1_RESULT="fail"
-                    L1_DETAIL="make check"
-                    L1_FAILED=true
-                fi
-            elif [ -f "$SRC_DIR/CTestTestfile.cmake" ]; then
-                echo "[step] L1: Detected CTest"
-                if (cd "$SRC_DIR" && ctest --output-on-failure 2>&1); then
-                    echo "[ok] L1: ctest passed"
-                    L1_RESULT="pass"
-                    L1_DETAIL="ctest"
-                else
-                    echo "[fail] L1: ctest failed"
-                    L1_RESULT="fail"
-                    L1_DETAIL="ctest"
-                    L1_FAILED=true
-                fi
-            elif [ -f "$SRC_DIR/meson.build" ]; then
-                echo "[step] L1: Detected meson"
-                if (cd "$SRC_DIR" && meson test 2>&1); then
-                    echo "[ok] L1: meson test passed"
-                    L1_RESULT="pass"
-                    L1_DETAIL="meson test"
-                else
-                    echo "[fail] L1: meson test failed"
-                    L1_RESULT="fail"
-                    L1_DETAIL="meson test"
-                    L1_FAILED=true
-                fi
-            elif [ -f "$SRC_DIR/pytest.ini" ] || [ -f "$SRC_DIR/setup.cfg" ] || \
-                 [ -n "$(find "$SRC_DIR" -maxdepth 1 -name 'test*.py' 2>/dev/null | head -1)" ]; then
-                echo "[step] L1: Detected pytest"
-                if (cd "$SRC_DIR" && python -m pytest 2>&1); then
-                    echo "[ok] L1: pytest passed"
-                    L1_RESULT="pass"
-                    L1_DETAIL="pytest"
-                else
-                    echo "[fail] L1: pytest failed"
-                    L1_RESULT="fail"
-                    L1_DETAIL="pytest"
-                    L1_FAILED=true
-                fi
+        # L1b: 检查测试程序真实编译和运行的痕迹
+        if [ "$L1_RESULT" != "fail" ]; then
+            TEST_COMPILE_LINES=$(grep -cE "(clang|gcc|cc|g\+\+|c\+\+)" "$BUILD_LOG" 2>/dev/null || echo "0")
+            TEST_RUN_LINES=$(grep -cE "(\./[a-z]|Running test|PASS|FAIL|ok\b)" "$BUILD_LOG" 2>/dev/null || echo "0")
+            if [ "${TEST_COMPILE_LINES:-0}" -gt 0 ] || [ "${TEST_RUN_LINES:-0}" -gt 0 ]; then
+                echo "[ok] L1b: Test execution evidence found in log"
             else
-                echo "[step] L1: No known test target found — skipping"
-                L1_RESULT="skip"
-                L1_DETAIL="no_test_target"
+                echo "[warn] L1b: No test compile/run evidence — test may be trivial"
+            fi
+        fi
+
+        # L1c: 如果 conanfile.py 的 build() 方法中有 make check/ctest，
+        # 验证日志中有执行痕迹
+        if [ "$L1_RESULT" != "fail" ]; then
+            if grep -qi "make.*check\|ctest\|meson test\|pytest" "$BUILD_LOG" 2>/dev/null; then
+                echo "[ok] L1c: Upstream official tests (make check/ctest) executed in build phase"
+                L1_DETAIL="upstream tests + test_package executed"
+            else
+                echo "[step] L1c: No upstream make check/ctest in log (may be in test_package only)"
+            fi
+        fi
+
+        # L1d: 检查 test() 方法不是假运行 (只有 echo/print)
+        if [ "$L1_RESULT" != "fail" ]; then
+            if grep -q "self\.run.*echo\|self\.run.*print\|self\.run.*true" "$TEST_PKG_DIR/conanfile.py" 2>/dev/null; then
+                echo "[fail] L1d: test() method appears to be a fake test (echo/print/true only)"
+                L1_RESULT="fail"
+                L1_DETAIL="fake test detected"
+                L1_FAILED=true
             fi
         fi
 
@@ -315,6 +375,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
 
         # ── Print PR reporter test summary lines ──
         echo ""
+        echo "L0_RESULT=${L0_RESULT}: ${L0_DETAIL}"
         echo "L1_RESULT=${L1_RESULT}: ${L1_DETAIL}"
         echo "L2_RESULT=${L2_RESULT}: ${L2_DETAIL}"
         echo "L4_RESULT=${L4_RESULT}: ${L4_DETAIL}"
@@ -357,6 +418,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
     "commit": "${BUILD_COMMIT}"
   },
   "test_report": {
+    "L0": {"result": "${L0_RESULT}", "detail": "${L0_DETAIL}"},
     "L1": {"result": "${L1_RESULT}", "detail": "${L1_DETAIL}"},
     "L2": {"result": "${L2_RESULT}", "detail": "${L2_DETAIL}"},
     "L4": {"result": "${L4_RESULT}", "detail": "${L4_DETAIL}"},
