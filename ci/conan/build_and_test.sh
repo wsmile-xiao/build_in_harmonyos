@@ -201,7 +201,10 @@ for pkg_dir in "${PACKAGES[@]}"; do
     mkdir -p "$REPO_ROOT/.ci_logs" 2>/dev/null || true
     echo "[step] Running conan create (output logged to $BUILD_LOG)..."
 
-    if conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" 2>&1 | tee "$BUILD_LOG"; then
+    # CI 必须始终重新构建目标包, 确保运行 make check + test_package
+    # --build=missing: 依赖包用缓存
+    # --build="${pkg_name}/*": 目标包强制重建
+    if conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" --build="${pkg_name}/*" 2>&1 | tee "$BUILD_LOG"; then
 
         echo "[ok] ${pkg_name}/${pkg_ver} — conan create passed"
 
