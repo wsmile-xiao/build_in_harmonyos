@@ -1,6 +1,6 @@
 # 鸿蒙平台开源软件编译兼容性总览
 
-> 最后更新：2026-06-28
+> 最后更新：2026-06-30
 > 已收录软件：444 款 / 500 个版本
 
 ## 📊 总体统计
@@ -10,14 +10,14 @@
 | 收录软件 | **444** 款 |
 | 软件版本 | **500** 个 |
 | ✅ 已发布 | 36 |
-| ✅ 已编译 | 82 |
+| ✅ 已编译 | 83 |
 | ❌ 编译失败 | 0 |
 
 | 构建系统 | 数量 |
 |----------|------|
-| Autotools | 177 |
+| Autotools | 176 |
 | unknown | 101 |
-| CMake | 66 |
+| CMake | 67 |
 | Makefile | 41 |
 | Meson | 16 |
 | custom | 5 |
@@ -78,7 +78,7 @@
 | **bearssl** | 0.6 | uploaded |  | CMake | 0 | - | [📄](archives/b/bearssl/0.6/) |
 | **bind** | 9.20.22 | ✅ 已编译 |  | Autotools | - | - | [📄](archives/b/bind/9.20.22/) |
 | **bison** | 3.8.2 | ✅ 已编译 |  |  | 5 | - | [📄](archives/b/bison/3.8.2/) |
-| **blake3** | 1.8.3 | success |  | Autotools | - | - | [📄](archives/b/blake3/1.8.3/) |
+| **blake3** | 1.8.3 | ✅ 已编译 |  | CMake | 0 | - | [📄](archives/b/blake3/1.8.3/) |
 | **blockhash** | 0.1 | ✅ 已发布 |  |  | 1 | - | [📄](archives/b/blockhash/0.1/) |
 | **blosc** | 1.21.5、1.21.6 | uploaded |  | unknown | 0 | - | [📄](archives/b/blosc/1.21.6/) |
 | **boxes** | 2.3.1 | uploaded |  | unknown | 0 | - | [📄](archives/b/boxes/2.3.1/) |

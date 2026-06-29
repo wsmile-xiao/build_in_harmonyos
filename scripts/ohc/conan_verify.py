@@ -458,6 +458,14 @@ full_log: {self.report_dir / "conan-create.log"}
         else:
             g.details.append("  ✅ test_package/ 存在 (R28)")
 
+        # Check test_package/MANIFEST.yml (required by CI L0e)
+        manifest_yml = self.archive_dir / "test_package" / "MANIFEST.yml"
+        if not manifest_yml.exists():
+            g.passed = False
+            g.details.append("  ❌ test_package/MANIFEST.yml 缺失 (CI L0e 门禁要求)")
+        else:
+            g.details.append("  ✅ test_package/MANIFEST.yml 存在")
+
         log_ok(f"  G1: {'PASS' if g.passed else 'FAIL'}")
         return g
 

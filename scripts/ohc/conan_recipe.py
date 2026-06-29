@@ -363,6 +363,52 @@ int main(void) {{
         content = tmpl.replace("{name}", software)
         (tp_dir / "test.sh").write_text(content, encoding="utf-8")
 
+    # ── Generate MANIFEST.yml (required by CI L0e gate) ──
+    manifest_path = archive_dir / "manifest.yaml"
+    sw_manifest_path = archive_dir.parent / "manifest.yaml"
+    sw_manifest = _parse_manifest(sw_manifest_path)
+    homepage = sw_manifest.get("homepage", "")
+
+    # Determine check command based on build system
+    conanfile_content = conanfile_path.read_text(encoding="utf-8") if conanfile_path.exists() else ""
+    if "cmake.test()" in conanfile_content:
+        check_cmd = "ctest"
+        test_cmd = "cmake.test()"
+    elif "meson.test()" in conanfile_content:
+        check_cmd = "meson test"
+        test_cmd = "meson.test()"
+    elif "make(target=\"check\")" in conanfile_content or "autotools.make(target=" in conanfile_content:
+        check_cmd = "make check"
+        test_cmd = "make check"
+    elif 'self.run("make check"' in conanfile_content:
+        check_cmd = "make check"
+        test_cmd = "make check"
+    else:
+        check_cmd = "make check"
+        test_cmd = ""
+
+    has_upstream_test = bool(test_cmd)
+
+    manifest_tmpl = _load_template(project_dir, "test_package/MANIFEST.yml.tmpl")
+    manifest_content = (
+        manifest_tmpl
+        .replace("{name}", software)
+        .replace("{version}", version)
+        .replace("{homepage}", homepage)
+        .replace("{check_command}", check_cmd)
+        .replace("{test_in_build}", str(has_upstream_test).lower())
+        .replace("{test_command}", test_cmd)
+        .replace("{test_file}", "<TODO: 测试源文件>")
+        .replace("{source_archive}", f"{software}-{version}")
+        .replace("{test_description}", "<TODO: 测试描述>")
+        .replace("{test_binary}", "<TODO: 测试程序>")
+        .replace("{test_package_file}", "test.c")
+        .replace("{test_package_description}", "消费者测试")
+        .replace("{test_package_binary}", f"test_{software}")
+        .replace("{assertion_count}", "<TODO: 断言数>")
+    )
+    (tp_dir / "MANIFEST.yml").write_text(manifest_content, encoding="utf-8")
+
     return 0
 
 
@@ -453,12 +499,13 @@ def conan_init(
     print("╔═══ CONAN RECIPE GENERATED ═══════════════════════╗")
     print(f"║ Software:  {software} {version}")
     print(f"║ Archive:   {archive_dir.relative_to(project)}")
-    print(f"║ Files:     conanfile.py + conandata.yml + test_package/")
+    print(f"║ Files:     conanfile.py + conandata.yml + test_package/ + MANIFEST.yml")
     print("║")
     print("║ ⭐ 下一步:")
     print("║   1. 检查 conanfile.py 的 requirements() 和 package_info()")
     print("║   2. 检查 conandata.yml 的 sha256 是否正确")
-    print("║   3. 运行验证: ohc-run.py conan-verify " + f"{software} {version}")
+    print("║   3. 填写 test_package/MANIFEST.yml 的上游测试声明")
+    print("║   4. 运行验证: ohc-run.py conan-verify " + f"{software} {version}")
     print("╚══════════════════════════════════════════════════╝")
 
     return 0
