@@ -43,7 +43,7 @@ PACKAGES=()
 if [ -n "${CI_PACKAGES:-}" ]; then
     # CI 传入了定向包列表（空格分隔的相对路径，如 "archives/b/bash/5.3"）
     echo "[step] CI_PACKAGES received: $CI_PACKAGES"
-    for pkg_path in $CI_PACKAGES; do
+    for pkg_path in ${=CI_PACKAGES}; do
         # Handle both relative and absolute paths
         if [[ "$pkg_path" = /* ]]; then
             pkg_dir="$pkg_path"
