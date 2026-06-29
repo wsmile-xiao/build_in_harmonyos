@@ -219,7 +219,8 @@ for pkg_dir in "${PACKAGES[@]}"; do
         MANIFEST_FILE="$TEST_PKG_DIR/MANIFEST.yml"
 
         # L1a: conan create 必须进入 test 阶段 (test_package 被执行)
-        if grep -qi "Testing package\|test_package" "$BUILD_LOG" 2>/dev/null; then
+        # 使用 -e 多模式匹配, 避免 \| 在某些 grep 实现上不支持
+        if grep -qiE "Launching test_package|Testing the package|Running test\(\)" "$BUILD_LOG" 2>/dev/null; then
             echo "[ok] L1a: test_package was executed by conan create"
             L1_RESULT="pass"
             L1_DETAIL="test_package executed"
@@ -244,7 +245,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
         # L1c: 如果 conanfile.py 的 build() 方法中有 make check/ctest，
         # 验证日志中有执行痕迹
         if [ "$L1_RESULT" != "fail" ]; then
-            if grep -qi "make.*check\|ctest\|meson test\|pytest" "$BUILD_LOG" 2>/dev/null; then
+            if grep -qiE "make.*check|ctest|meson test|pytest" "$BUILD_LOG" 2>/dev/null; then
                 echo "[ok] L1c: Upstream official tests (make check/ctest) executed in build phase"
                 L1_DETAIL="upstream tests + test_package executed"
             else
@@ -254,7 +255,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
 
         # L1d: 检查 test() 方法不是假运行 (只有 echo/print)
         if [ "$L1_RESULT" != "fail" ]; then
-            if grep -q "self\.run.*echo\|self\.run.*print\|self\.run.*true" "$TEST_PKG_DIR/conanfile.py" 2>/dev/null; then
+            if grep -qE "self\.run.*(echo|print|true)" "$TEST_PKG_DIR/conanfile.py" 2>/dev/null; then
                 echo "[fail] L1d: test() method appears to be a fake test (echo/print/true only)"
                 L1_RESULT="fail"
                 L1_DETAIL="fake test detected"

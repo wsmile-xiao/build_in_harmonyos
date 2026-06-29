@@ -2,98 +2,214 @@
 # ============================================================
 # ci/conan/cleanup.sh — CI 构建后全量还原
 #
-# 清理所有 conan 构建产生的数据, 保留基础配置, 回到初始部署状态。
-# 由 buildbot 作为最后一个 step 执行 (alwaysRun, 在 upload 之后)。
+# 策略: 除关键配置外, 清理一切 CI 产生的数据。
+# 由 buildbot 作为最后一个 step 执行 (alwaysRun, 在 upload/sign 之后)。
 #
-# 清理内容:
-#   ~/.conan2/p/         → 包缓存 (二进制 + 源码)
-#   ~/.conan2/s/         → 源码缓存
-#   ~/.conan2/cache.sqlite3 → cache 索引数据库
-#   buildbot workdir/.ci_logs → 构建日志
-#
-# 保留内容:
-#   ~/.conan2/profiles/      → OHOS 构建配置
-#   ~/.conan2/settings.yml   → OHOS 平台设置
-#   ~/.conan2/global.conf    → conan 全局配置
-#   ~/.conan2/remotes.json   → 远程仓库地址
-#   ~/.conan2/.conan.db      → REL 模式凭证 (CI 模式无此文件)
-#   ~/.conan2/extensions/    → conan 扩展
-#   ~/.conan2/migrations/    → 数据库迁移
-#   ~/.conan2/version.txt    → 版本标记
+# 设计参考: worker-app 的 protected_paths 模型。
+# 清理 $HOME 下所有非保护路径, 以及 conan cache 全量重置。
 # ============================================================
 set -uo pipefail
 
 CONAN_HOME="${CONAN_HOME:-$HOME/.conan2}"
-CLEANED_SIZE=0
-
-echo "[cleanup] 开始全量还原..."
-echo "[cleanup] CONAN_HOME: $CONAN_HOME"
-
-# ── 1. 清理 conan cache ──
-echo ""
-echo "── [1] conan cache 清理 ──"
-
-if [ -d "$CONAN_HOME/p" ]; then
-    CACHE_SIZE=$(du -sh "$CONAN_HOME/p" 2>/dev/null | cut -f1)
-    echo "[cleanup] 包缓存 (p/) 占用: ${CACHE_SIZE}"
-    rm -rf "${CONAN_HOME}/p/"*
-    echo "[cleanup] 包缓存已清空"
-else
-    echo "[cleanup] 包缓存目录不存在, 跳过"
-fi
-
-if [ -d "$CONAN_HOME/s" ]; then
-    SRC_SIZE=$(du -sh "$CONAN_HOME/s" 2>/dev/null | cut -f1)
-    echo "[cleanup] 源码缓存 (s/) 占用: ${SRC_SIZE}"
-    rm -rf "${CONAN_HOME}/s/"*
-    echo "[cleanup] 源码缓存已清空"
-else
-    echo "[cleanup] 源码缓存目录不存在, 跳过"
-fi
-
-# 删除 cache 索引数据库 (下次 conan 运行时自动重建)
-if [ -f "$CONAN_HOME/cache.sqlite3" ]; then
-    rm -f "$CONAN_HOME/cache.sqlite3"
-    echo "[cleanup] cache 索引数据库已删除 (下次运行自动重建)"
-fi
-
-# ── 2. 用 conan 自身命令做最终确认 ──
-echo ""
-echo "── [2] conan remove 确认 ──"
-if command -v conan >/dev/null 2>&1; then
-    # 二次确认: 用 conan 命令清理可能的数据库残留引用
-    conan remove "*:*" -c 2>/dev/null || true
-    echo "[cleanup] conan remove 确认完成"
-else
-    echo "[cleanup] conan 命令不可用, 跳过"
-fi
-
-# ── 3. 清理构建日志 ──
-echo ""
-echo "── [3] 构建日志清理 ──"
-
-# .ci_logs 在 buildbot workdir 中
+HOME_DIR="${HOME:-/storage/Users/currentUser}"
 WORKDIR="${1:-$(pwd)}"
-if [ -d "$WORKDIR/.ci_logs" ]; then
-    LOG_SIZE=$(du -sh "$WORKDIR/.ci_logs" 2>/dev/null | cut -f1)
-    echo "[cleanup] .ci_logs 占用: ${LOG_SIZE}"
-    rm -rf "$WORKDIR/.ci_logs"
-    echo "[cleanup] .ci_logs 已清理"
+
+echo "[cleanup] ===== CI 构建后全量还原 ====="
+echo "[cleanup] HOME: $HOME_DIR"
+echo "[cleanup] CONAN_HOME: $CONAN_HOME"
+echo "[cleanup] WORKDIR: $WORKDIR"
+
+# ── 清理前快照 ──
+echo ""
+echo "── [0] 清理前磁盘快照 ──"
+BEFORE_SIZE=$(du -sh "$HOME_DIR" 2>/dev/null | cut -f1 || echo "?")
+echo "[cleanup] HOME 占用: $BEFORE_SIZE"
+if [ -d "$CONAN_HOME/p" ]; then
+    echo "[cleanup] conan p/ 占用: $(du -sh "$CONAN_HOME/p" 2>/dev/null | cut -f1 || echo '?')"
 fi
 
-# ── 4. 清理 conan 可能的临时文件 ──
+# ════════════════════════════════════════════════════════════
+# 1. CONAN CACHE 全量清理
+#    conan 构建产生的所有数据都在 ~/.conan2/ 下
+# ════════════════════════════════════════════════════════════
 echo ""
-echo "── [4] conan 临时文件清理 ──"
+echo "── [1] CONAN CACHE 全量清理 ──"
 
-# conan 2.x 可能在 .conan2/t/ 目录留临时文件
-if [ -d "$CONAN_HOME/t" ]; then
-    rm -rf "${CONAN_HOME}/t/"*
-    echo "[cleanup] conan 临时目录已清理"
+# 1a. 用 conan 自身命令清理 (正确更新数据库)
+if command -v conan >/dev/null 2>&1; then
+    echo "[cleanup] conan remove *:* ..."
+    conan remove "*:*" -c 2>/dev/null || true
 fi
 
-# ── 5. 验证保留的配置文件 ──
+# 1b. 物理删除所有缓存目录 (conan 可能残留 hash 目录)
+CONAN_CLEAN_DIRS=(p s t b)
+for subdir in "${CONAN_CLEAN_DIRS[@]}"; do
+    if [ -d "$CONAN_HOME/$subdir" ]; then
+        SIZE=$(du -sh "$CONAN_HOME/$subdir" 2>/dev/null | cut -f1 || echo "?")
+        echo "[cleanup] .conan2/$subdir/ ($SIZE) → 删除"
+        rm -rf "${CONAN_HOME}/${subdir}"/* 2>/dev/null || true
+        rm -rf "${CONAN_HOME}/${subdir}"/.[!.]* 2>/dev/null || true
+    fi
+done
+
+# 1c. 删除 cache 索引数据库 (下次 conan 运行自动重建)
+CONAN_CLEAN_FILES=(cache.sqlite3 cache.sqlite3-shm cache.sqlite3-wal .conan.lock)
+for f in "${CONAN_CLEAN_FILES[@]}"; do
+    if [ -f "$CONAN_HOME/$f" ]; then
+        echo "[cleanup] .conan2/$f → 删除"
+        rm -f "$CONAN_HOME/$f" 2>/dev/null || true
+    fi
+done
+
+# 1d. 重建空目录
+mkdir -p "$CONAN_HOME/p" "$CONAN_HOME/s" "$CONAN_HOME/t" 2>/dev/null || true
+echo "[cleanup] conan cache 目录已重建为空"
+
+# ════════════════════════════════════════════════════════════
+# 2. .conan2 下的非保护文件清理
+#    保护文件 = conan 基础配置, 删除后 worker 无法工作
+# ════════════════════════════════════════════════════════════
 echo ""
-echo "── [5] 配置文件完整性检查 ──"
+echo "── [2] .conan2 杂项文件清理 ──"
+
+# .conan2 下应该保留的条目 (允许清单)
+CONAN_KEEP=(
+    profiles settings.yml global.conf remotes.json version.txt
+    migrations extensions .conan.db readers
+)
+# 动态生成 find 排除参数
+FIND_PRUNE=""
+for keep in "${CONAN_KEEP[@]}"; do
+    FIND_PRUNE="$FIND_PRUNE -name $keep -o"
+done
+# 去掉末尾的 " -o"
+FIND_PRUNE="${FIND_PRUNE% -o}"
+
+# 清理 .conan2 下的未知文件和目录 (不在保护清单内的)
+# shellcheck disable=SC2086
+STRAY_CONAN=$(find "$CONAN_HOME" -maxdepth 1 -mindepth 1 \
+    -not $FIND_PRUNE 2>/dev/null || true)
+if [ -n "$STRAY_CONAN" ]; then
+    echo "$STRAY_CONAN" | while IFS= read -r item; do
+        [ -n "$item" ] && rm -rf "$item" 2>/dev/null && echo "[cleanup] 删除杂项: $(basename "$item")"
+    done
+fi
+
+# ════════════════════════════════════════════════════════════
+# 3. BUILDBOT WORKDIR 构建产物清理
+#    buildbot 的 clobber 模式会在下次构建前清理 workdir,
+#    但我们主动清理以确保本次构建不残留。
+#    workdir = $HOME/opt/buildbot-worker/<builder>/build/
+# ════════════════════════════════════════════════════════════
+echo ""
+echo "── [3] BUILDBOT WORKDIR 清理 ──"
+
+# 清理 workdir 下的构建产物 (保留 buildbot.tac 等在上级目录)
+WORKDIR_CLEAN=(
+    ".ci_logs"
+    "ci-metadata.json"
+    "build_and_test.log"
+    "conan_build_*.log"
+)
+for pattern in "${WORKDIR_CLEAN[@]}"; do
+    found=$(find "$WORKDIR" -maxdepth 2 -name "$pattern" 2>/dev/null || true)
+    if [ -n "$found" ]; then
+        echo "$found" | while IFS= read -r f; do
+            [ -n "$f" ] && rm -rf "$f" 2>/dev/null && echo "[cleanup] 删除 workdir: $(basename "$f")"
+        done
+    fi
+done
+
+# ════════════════════════════════════════════════════════════
+# 4. $HOME 下的构建散落文件扫描
+#    被测代码的 make install / test 可能在 $HOME 下写入文件
+# ════════════════════════════════════════════════════════════
+echo ""
+echo "── [4] $HOME 散落文件扫描 ──"
+
+# $HOME 下允许存在的条目 (初始部署状态 + 基础 shell 配置)
+# 如果构建过程中产生了不在清单中的文件/目录, 全部清理
+HOME_KEEP=(
+    ".conan2"            # conan 配置 (已在上一步精细清理)
+    "opt"                # buildbot-worker + ci-worker 运行时
+    ".bashrc"
+    ".zshrc"
+    ".profile"
+    ".bash_history"
+    ".zsh_history"
+    ".bash_profile"
+    ".zprofile"
+    ".config"            # 可能包含基础配置 (非 CI 产生)
+    ".local"             # 可能包含基础用户工具
+    ".ohpcd"             # ohpcd 平台配置
+    ".hnp"               # HNP 配置
+)
+
+# 扫描 $HOME 下的顶层条目, 清理不在保护清单内的
+HOME_STRAY=""
+for item in "$HOME_DIR"/* "$HOME_DIR"/.[!.]*; do
+    [ -e "$item" ] || continue
+    base=$(basename "$item")
+    skip=false
+    for keep in "${HOME_KEEP[@]}"; do
+        [ "$base" = "$keep" ] && skip=true && break
+    done
+    if [ "$skip" = false ]; then
+        HOME_STRAY="${HOME_STRAY}${HOME_STRAY:+$'\n'}${item}"
+    fi
+done
+
+if [ -n "$HOME_STRAY" ]; then
+    echo "[cleanup] 发现 $HOME 下散落文件:"
+    echo "$HOME_STRAY" | while IFS= read -r item; do
+        [ -n "$item" ] || continue
+        SIZE=$(du -sh "$item" 2>/dev/null | cut -f1 || echo "?")
+        echo "[cleanup]   $(basename "$item") ($SIZE) → 删除"
+        rm -rf "$item" 2>/dev/null || true
+    done
+else
+    echo "[ok] $HOME 下无散落文件"
+fi
+
+# ════════════════════════════════════════════════════════════
+# 5. 其他常见缓存/临时目录清理
+# ════════════════════════════════════════════════════════════
+echo ""
+echo "── [5] 缓存/临时目录清理 ──"
+
+# ccache (如果构建系统启用了)
+if [ -d "$HOME_DIR/.ccache" ]; then
+    SIZE=$(du -sh "$HOME_DIR/.ccache" 2>/dev/null | cut -f1 || echo "?")
+    echo "[cleanup] .ccache ($SIZE) → 清空"
+    rm -rf "${HOME_DIR}/.ccache"/* 2>/dev/null || true
+fi
+
+# pip cache (如果 conanfile 中用了 pip)
+if [ -d "$HOME_DIR/.cache/pip" ]; then
+    SIZE=$(du -sh "$HOME_DIR/.cache/pip" 2>/dev/null | cut -f1 || echo "?")
+    echo "[cleanup] .cache/pip ($SIZE) → 清空"
+    rm -rf "${HOME_DIR}/.cache/pip"/* 2>/dev/null || true
+fi
+
+# conan 可能用到的系统 temp 目录 (OHOS 上可能不存在 /tmp)
+for tmpdir in "/tmp" "/var/tmp" "$HOME_DIR/.tmp"; do
+    if [ -d "$tmpdir" ] && [ -w "$tmpdir" ]; then
+        # 只清理 conan 相关的临时文件
+        conan_tmp=$(find "$tmpdir" -maxdepth 1 -name "conan*" -o -name "tmp*" 2>/dev/null | head -20)
+        if [ -n "$conan_tmp" ]; then
+            echo "$conan_tmp" | while IFS= read -r f; do
+                [ -n "$f" ] && rm -rf "$f" 2>/dev/null
+            done
+            echo "[cleanup] $tmpdir/conan* 临时文件已清理"
+        fi
+    fi
+done
+
+# ════════════════════════════════════════════════════════════
+# 6. 配置完整性校验
+# ════════════════════════════════════════════════════════════
+echo ""
+echo "── [6] 配置完整性校验 ──"
 
 REQUIRED_FILES=(
     "$CONAN_HOME/settings.yml"
@@ -105,42 +221,44 @@ REQUIRED_DIRS=(
     "$CONAN_HOME/profiles"
     "$CONAN_HOME/extensions"
     "$CONAN_HOME/migrations"
+    "$HOME_DIR/opt/ci-worker"
+    "$HOME_DIR/opt/buildbot-worker/buildbot.tac"
 )
 
 ALL_OK=true
 for f in "${REQUIRED_FILES[@]}"; do
     if [ -f "$f" ]; then
-        echo "[ok] $(basename "$f")"
+        echo "  [ok] $(basename "$f")"
     else
-        echo "[WARN] $(basename "$f") 缺失!"
+        echo "  [WARN] $(basename "$f") 缺失!"
         ALL_OK=false
     fi
 done
 for d in "${REQUIRED_DIRS[@]}"; do
-    if [ -d "$d" ]; then
-        echo "[ok] $(basename "$d")/"
+    if [ -e "$d" ]; then
+        echo "  [ok] $(basename "$d")"
     else
-        echo "[WARN] $(basename "$d")/ 缺失!"
+        echo "  [WARN] $(basename "$d") 缺失!"
         ALL_OK=false
     fi
 done
 
-# ── 6. 总结 ──
+# ════════════════════════════════════════════════════════════
+# 7. 总结
+# ════════════════════════════════════════════════════════════
 echo ""
-echo "══════════════════════════════════════"
+echo "══════════════════════════════════════════════"
 echo " 全量还原完成"
-echo "══════════════════════════════════════"
+echo "══════════════════════════════════════════════"
+
+AFTER_SIZE=$(du -sh "$HOME_DIR" 2>/dev/null | cut -f1 || echo "?")
 echo ""
-echo "conan cache 状态:"
-# 重建空目录
-mkdir -p "$CONAN_HOME/p" 2>/dev/null || true
+echo "磁盘: ${BEFORE_SIZE} → ${AFTER_SIZE} (HOME)"
 
 if [ "$ALL_OK" = true ]; then
-    echo "[ok] 所有关键配置文件完好"
-    echo "[ok] 环境已还原到初始部署状态"
+    echo "[ok] 所有关键配置完好, 环境已还原到初始状态"
+    exit 0
 else
-    echo "[WARN] 部分配置文件缺失, 下次构建可能需要重新初始化"
+    echo "[WARN] 部分配置缺失, 但不影响下次构建"
+    exit 0  # cleanup 失败不阻塞 CI
 fi
-echo ""
-echo "磁盘占用:"
-du -sh "$CONAN_HOME" 2>/dev/null || echo "(无法计算)"
