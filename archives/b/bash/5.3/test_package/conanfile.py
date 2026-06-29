@@ -13,4 +13,5 @@ class BashTestConan(ConanFile):
         self.requires(self.tested_reference_str)
 
     def test(self):
-        self.run("sh test.sh", env="conanrun")
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run(f"{bash} test.sh", env="conanrun")

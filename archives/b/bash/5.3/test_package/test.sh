@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/data/service/hnp/bin/bash
 # test_package/test.sh — smoke test for bash executable
 set -eu
 

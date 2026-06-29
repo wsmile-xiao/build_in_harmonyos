@@ -499,6 +499,11 @@ full_log: {self.report_dir / "conan-create.log"}
             ref_match = re.search(r'Package.*?(\w+/\w+@\w+/\w+)', output)
             if ref_match:
                 g.details.append(f"  📦 包引用: {ref_match.group(1)}")
+            # Extract package_id for G3/G4 cache path lookup
+            pkg_id_match = re.search(r'(\w+/\w+@\w+/\w+):(\w+)', output)
+            if pkg_id_match:
+                self._package_id = pkg_id_match.group(2)
+                g.details.append(f"  📦 包ID: {self._package_id}")
         else:
             g.passed = False
             error_lines = [l for l in output.split("\n")
@@ -528,12 +533,27 @@ full_log: {self.report_dir / "conan-create.log"}
 
     # ── Gate 3: System-lib collision verification (R26) ──
 
+    def _get_cache_ref(self) -> str:
+        """Get the full cache reference including package_id for binary package path."""
+        pkg_id = getattr(self, '_package_id', None)
+        if pkg_id:
+            return f"{self.ref}:{pkg_id}"
+        # Fallback: try to discover package_id via conan list
+        rc, out = self._conan(["list", f"{self.ref}:*"], timeout=30)
+        if rc == 0:
+            match = re.search(r'(\w{40})', out)
+            if match:
+                self._package_id = match.group(1)
+                return f"{self.ref}:{self._package_id}"
+        return self.ref
+
     def gate3_static_linking(self) -> VerifyResult:
         """Verify system-name libraries don't output .so to system paths (R26)."""
         log_info("G3: 系统同名库隔离验证 (R26)...")
         g = VerifyResult(gate="G3", passed=True)
 
-        rc, cache_path = self._conan(["cache", "path", self.ref], timeout=30)
+        cache_ref = self._get_cache_ref()
+        rc, cache_path = self._conan(["cache", "path", cache_ref], timeout=30)
         if rc != 0:
             g.details.append("  ⚠️ 无法获取 conan cache 路径（可能 G2 未通过）")
             return g
@@ -602,7 +622,7 @@ full_log: {self.report_dir / "conan-create.log"}
         log_info("G4: 产物完整性检查...")
         g = VerifyResult(gate="G4", passed=True)
 
-        rc, cache_path = self._conan(["cache", "path", self.ref], timeout=30)
+        rc, cache_path = self._conan(["cache", "path", self._get_cache_ref()], timeout=30)
         if rc != 0:
             g.details.append("  ⚠️ 无法获取 conan cache 路径")
             return g

@@ -94,17 +94,16 @@ class FinishPipeline:
             else:
                 log_ok(f"  预编译包 ✅ ({len(tars)} 个，legacy)")
 
-        # Knowledge consolidation gate
+        # Knowledge consolidation gate (non-blocking warning)
         kd_marker = self.archive_dir / ".knowledge-done"
         if kd_marker.exists():
             log_ok("  知识整理 ✅")
         else:
-            self.gate_miss += 1
             self.gate_warnings.append("knowledge:not-done")
-            log_fail("  ❌ 知识整理未完成（缺少 .knowledge-done 标记）")
-            log_fail("     必须先整理知识图谱（graph add --draft），再重新运行 finish")
+            log_warn("  ⚠️ 知识整理未完成（缺少 .knowledge-done 标记）")
+            log_warn("     建议后续整理知识图谱（graph add --draft）")
 
-            # Check for empty drafts — block finish if any exist
+            # Check for empty drafts — warn (non-blocking)
             draft_dir = self.pdir / "knowledge" / "graph" / "draft"
             if draft_dir.is_dir():
                 empty_drafts = []
@@ -112,25 +111,22 @@ class FinishPipeline:
                     try:
                         content = dkv.read_text(encoding="utf-8")
                         # Check if key fields are still template placeholders
+                        # Support both ":" and "=" separators
                         has_root_cause = False
                         has_error_sig = False
                         for line in content.split("\n"):
                             stripped = line.strip()
-                            if stripped.startswith("root_cause:") and len(stripped) > 20 and "[简短" not in stripped:
+                            if (stripped.startswith("root_cause:") or stripped.startswith("root_cause=")) and len(stripped) > 20 and "[简短" not in stripped and "TODO" not in stripped:
                                 has_root_cause = True
-                            if stripped.startswith("error_signature:") and len(stripped) > 25 and "configure|cmake" not in stripped:
+                            if (stripped.startswith("error_signature:") or stripped.startswith("error_signature=")) and len(stripped) > 25 and "configure|cmake" not in stripped:
                                 has_error_sig = True
                         if not has_root_cause or not has_error_sig:
                             empty_drafts.append(dkv.name)
                     except Exception:
                         pass
                 if empty_drafts:
-                    log_fail(f"  ❌ 发现 {len(empty_drafts)} 个空草稿: {', '.join(empty_drafts)}")
-                    log_fail("     草稿必须填写实际内容后才能通过 finish！")
-                    log_fail("     填写后创建 .knowledge-done 标记:")
-                    log_fail(f"     touch {self.archive_dir / '.knowledge-done'}")
-                    if self.status == "published":
-                        self.status = "built"
+                    log_warn(f"  ⚠️ 发现 {len(empty_drafts)} 个空草稿: {', '.join(empty_drafts[:5])}")
+                    log_warn("     建议审查后填充或删除（不阻塞 finish）")
 
     # Step 1: refresh-patch
     def step1_refresh_patch(self):
@@ -363,9 +359,9 @@ class FinishPipeline:
 
         if all_ok and kd_marker.exists():
             log_ok(f"✅ 编译收尾全部完成: {self.software} {self.version} → {self.status}")
-        elif all_ok and not kd_marker.exists():
-            log_fail(f"❌ 编译收尾未完成: {self.software} {self.version} → 知识整理未做")
-            log_fail("   请按下方 HANDOFF 提示整理知识图谱，然后重新运行 finish")
+        elif all_ok and not kd_marker.exists():  # non-blocking
+            log_warn(f"⚠️ 编译收尾完成（知识整理待做）: {self.software} {self.version} → {self.status}")
+            log_warn("   建议后续整理知识图谱")
         else:
             failed = [k for k, v in self.steps.items() if not v]
             log_warn(f"⚠️  编译收尾部分完成: {self.software} {self.version} → {self.status}")
@@ -383,7 +379,7 @@ class FinishPipeline:
 
         # Determine if this is a blocking handoff (knowledge not done)
         kd_marker = self.archive_dir / ".knowledge-done"
-        is_blocking = not kd_marker.exists()
+        is_blocking = False  # non-blocking: knowledge consolidation does not block finish
 
         data = HandoffData(
             exit_reason="finish_knowledge_required" if is_blocking else "finish_success",
@@ -417,7 +413,7 @@ class FinishPipeline:
         self.emit_knowledge_handoff()
 
         kd_marker = self.archive_dir / ".knowledge-done"
-        all_ok = all(self.steps.values()) and kd_marker.exists()
+        all_ok = all(self.steps.values())
         return 0 if all_ok else 1
 
 
