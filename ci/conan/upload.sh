@@ -7,9 +7,8 @@
 #
 # ⚠️ SECURITY: Only CI_TASK_TYPE=release (post-merge) may call this script.
 #    PR check pipeline must NOT upload.
-#    Conan registry credentials (CONAN_REMOTE_USER/CONAN_REMOTE_PASS) are
-#    stored ONLY on CI execution machines, injected by Buildbot as env vars.
-#    Developer machines and this repository do NOT contain credentials.
+#    Conan registry credentials are pre-deployed by worker app as ~/.conan2/.conan.db
+#    (Release machines only). This script does NOT handle credentials.
 
 set -euo pipefail
 
@@ -40,18 +39,10 @@ echo "[step] Conan upload pipeline"
 echo "[step]   remote: ${CONAN_REMOTE_NAME}"
 echo "[step]   user/channel: ${CONAN_USER}/${CONAN_CHANNEL}"
 
-# ── 1. Authenticate ──
-if [ -z "${CONAN_REMOTE_USER:-}" ] || [ -z "${CONAN_REMOTE_PASS:-}" ]; then
-    echo "[error] Missing CONAN_REMOTE_USER or CONAN_REMOTE_PASS"
-    exit 1
-fi
+# Conan 认证由 worker app 预部署 (~/.conan2/.conan.db, 仅 Release 机器)
+# 本脚本不处理凭证, 直接 conan upload
 
-conan remote auth "${CONAN_REMOTE_NAME}" \
-    --user "${CONAN_REMOTE_USER}" \
-    --password "${CONAN_REMOTE_PASS}"
-echo "[step] Authenticated to ${CONAN_REMOTE_NAME} ✅"
-
-# ── 2. Discover packages ──
+# ── 1. Discover packages ──
 PACKAGES=()
 while IFS= read -r f; do
     pkg_dir=$(dirname "$f")

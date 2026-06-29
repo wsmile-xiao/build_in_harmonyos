@@ -7,7 +7,7 @@
 #
 # Must complete:
 #   - Detect/install Conan (pip install conan)
-#   - Register conan remote (OHPCD Conan registry on CNB)
+#   - Verify conan remote (预部署, 不做注册/认证)
 #   - Ensure ohos-aarch64 profile exists
 #   - Set conan configuration
 
@@ -46,9 +46,10 @@ if [ -f "$SETTINGS_FILE" ]; then
     fi
 fi
 
-# ── 2. Register conan remote ──
+# ── 2. Verify conan remote (预部署校验) ──
+# Conan 配置 (remotes.json, profiles, settings.yml) 由 worker app 文件预部署到 ~/.conan2/
+# setup.sh 不做 remote 注册/认证, 仅校验 remote 已就绪
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
-CONAN_REMOTE_URL="${CONAN_REMOTE_URL:-https://conan.cnb.cool/OpenHarmonyPCDeveloper/Conan/-/packages/}"
 
 # Disable conancenter — these are private CI builds, no external deps needed
 if conan remote list 2>/dev/null | grep -q "^conancenter:"; then
@@ -56,26 +57,11 @@ if conan remote list 2>/dev/null | grep -q "^conancenter:"; then
     conan remote disable conancenter 2>/dev/null || true
 fi
 
-# Remove existing remote if URL changed (idempotent)
-EXISTING_URL=$(conan remote list 2>/dev/null | grep "^${CONAN_REMOTE_NAME}:" | head -1 | awk '{print $2}' || echo "")
-if [ -n "$EXISTING_URL" ] && [ "$EXISTING_URL" != "$CONAN_REMOTE_URL" ]; then
-    echo "[step] Updating remote URL for ${CONAN_REMOTE_NAME}"
-    conan remote remove "${CONAN_REMOTE_NAME}" 2>/dev/null || true
-fi
-
-# Add remote if not exists (idempotent)
 if ! conan remote list 2>/dev/null | grep -q "^${CONAN_REMOTE_NAME}:"; then
-    echo "[step] Adding conan remote: ${CONAN_REMOTE_NAME} -> ${CONAN_REMOTE_URL}"
-    conan remote add "${CONAN_REMOTE_NAME}" "${CONAN_REMOTE_URL}" || true
+    echo "[error] remote '${CONAN_REMOTE_NAME}' 不存在, 请检查 worker app 预部署"
+    exit 1
 fi
-
-# Authenticate if credentials provided
-if [ -n "${CONAN_REMOTE_USER:-}" ] && [ -n "${CONAN_REMOTE_PASS:-}" ]; then
-    echo "[step] Authenticating to ${CONAN_REMOTE_NAME}..."
-    conan remote auth "${CONAN_REMOTE_NAME}" \
-        --user "${CONAN_REMOTE_USER}" \
-        --password "${CONAN_REMOTE_PASS}" 2>/dev/null || true
-fi
+echo "[step] remote 已就绪: ${CONAN_REMOTE_NAME}"
 
 # ── 3. Ensure ohos-aarch64 profile exists ──
 PROFILE_NAME="${CONAN_PROFILE:-ohos-aarch64}"
@@ -104,6 +90,6 @@ fi
 conan config set general.revisions_enabled=1 2>/dev/null || true
 
 echo "[step] Conan environment ready ✅"
-echo "[step]   remote: ${CONAN_REMOTE_NAME} -> ${CONAN_REMOTE_URL}"
+echo "[step]   remote: ${CONAN_REMOTE_NAME}"
 echo "[step]   profile: ${PROFILE_NAME}"
 echo "[step]   conan: ${CONAN_VERSION}"
