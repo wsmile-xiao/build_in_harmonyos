@@ -196,7 +196,9 @@ for pkg_dir in "${PACKAGES[@]}"; do
     L0_DETAIL="all checks passed"
 
     # ── conan create (with upstream tests in build() + test_package auto-trigger) ──
-    BUILD_LOG="/tmp/conan_build_${pkg_name}_${pkg_ver}.log"
+    # OHOS /tmp is read-only, use build directory instead
+    BUILD_LOG="$REPO_ROOT/.ci_logs/conan_build_${pkg_name}_${pkg_ver}.log"
+    mkdir -p "$REPO_ROOT/.ci_logs" 2>/dev/null || true
     echo "[step] Running conan create (output logged to $BUILD_LOG)..."
 
     if conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" 2>&1 | tee "$BUILD_LOG"; then

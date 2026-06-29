@@ -222,6 +222,40 @@ curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/downloa
 curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/ohos-python-release/releases/download/installer/install.sh" | sh -s -- 3.12.9
 ```
 
+## CI 质量体系
+
+CI 流水线对每个包强制执行 5 层质量门禁，保障发布质量：
+
+| 门禁 | 检查内容 |
+|------|---------|
+| L0 | test_package 结构 + 内容 + MANIFEST 声明 |
+| L1 | 上游官方测试 (make check) 真实执行验证 |
+| L2 | 烟雾测试 (--version / --help) |
+| L4 | 静态安全扫描 (NX/PIE/RELRO) |
+| L5 | 产物完整性检查 |
+
+### 相关文档
+
+| 文档 | 说明 | 读者 |
+|------|------|------|
+| [ADAPTATION_GUIDE.md](docs/ADAPTATION_GUIDE.md) | AI 适配操作手册 (新库适配的唯一入口) | AI / 适配人员 |
+| [TEST_QUALITY_SPEC.md](docs/TEST_QUALITY_SPEC.md) | 测试质量规范 (5 层防御门禁详情) | AI / 适配人员 |
+| [MIGRATION_GUIDE.md](docs/MIGRATION_GUIDE.md) | 旧归档软件迁移指南 | AI / 适配人员 |
+
+### conan 配方库
+
+```
+archives/<首字母>/<包名>/<版本号>/
+├── conanfile.py          # 主配方 (build 方法含 make check)
+├── conandata.yml         # 源码 URL + 补丁
+└── test_package/
+    ├── conanfile.py      # 消费者测试
+    ├── MANIFEST.yml      # 上游测试声明
+    └── *.c / *.sh        # 测试源文件
+```
+
+参考实现: `archives/z/zlib/1.3.1/` (Makefile), `archives/b/bash/5.3/` (Autotools)
+
 ## 统计
 
 - **已归档软件**: 276 款 / 309 个版本
