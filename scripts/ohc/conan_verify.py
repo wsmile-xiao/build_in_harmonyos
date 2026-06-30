@@ -630,7 +630,25 @@ full_log: {self.report_dir / "conan-create.log"}
         log_info("G4: 产物完整性检查...")
         g = VerifyResult(gate="G4", passed=True)
 
-        rc, cache_path = self._conan(["cache", "path", self._get_cache_ref()], timeout=30)
+        # In Conan 2, `conan cache path <recipe_ref>` returns the recipe
+        # exports path, not the package path.  Query the package ID first.
+        rc, list_out = self._conan(["list", self.ref + ":*", "--format=json"], timeout=30)
+        if rc != 0:
+            g.details.append("  ⚠️ 无法查询包列表")
+            return g
+
+        try:
+            import json
+            listing = json.loads(list_out)
+            pkgs = list(listing["Local Cache"][self.software][self.ref]
+                        ["revisions"].values())[0]["packages"]
+            pkg_id = next(iter(pkgs))
+        except (KeyError, IndexError, StopIteration):
+            g.details.append("  ⚠️ 无法找到程序包 ID")
+            return g
+
+        pkg_ref = f"{self.ref}:{pkg_id}"
+        rc, cache_path = self._conan(["cache", "path", pkg_ref], timeout=30)
         if rc != 0:
             g.details.append("  ⚠️ 无法获取 conan cache 路径")
             return g
