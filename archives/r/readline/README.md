@@ -99,7 +99,7 @@ CFLAGS="-fPIC -O2" ./configure --prefix=$HOME/usr/local --with-curses
    # ❌ 错误：只在当前 shell 生效，configure 是子进程
    CFLAGS="-fPIC -O2"
    ./configure
-   
+
    # ✅ 正确：export 后子进程可继承
    export CFLAGS="-fPIC -O2"
    ./configure
@@ -238,12 +238,25 @@ export LD_LIBRARY_PATH=$HOME/usr/local/lib:$LD_LIBRARY_PATH
 重新编译 readline，确保设置 `CFLAGS="-fPIC -O2"`：
 
 ```bash
-cd readline-8.2
+cd readline-8.3
 make clean
 CFLAGS="-fPIC -O2" ./configure --prefix=$HOME/usr/local --with-curses
 make -j$(nproc)
 make install
 ```
+
+## 版本历史
+
+### 8.3 (2026-06-05)
+- ✅ 功能测试全部通过 (17/17)
+- ✅ 静态库和动态库编译成功
+- ✅ 预编译包: readline-8.3-ohos-aarch64.tar.gz
+- 补丁: 0001-config.guess-harmonyos.patch
+
+### 8.2 (2026-04-12)
+- ✅ 基础功能可用
+- 预编译包: readline-8.2-ohos-aarch64.tar.gz
+- 补丁: 0001-port-for-ohos.patch
 
 ## 验证编译结果
 
