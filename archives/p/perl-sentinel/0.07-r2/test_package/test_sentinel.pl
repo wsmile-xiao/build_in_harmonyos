@@ -1,0 +1,14 @@
+use strict;
+use warnings;
+use Sentinel;
+die 'version mismatch' unless Sentinel->VERSION eq '0.07';
+my $x = sentinel(get => sub { 42 });
+die 'get callback failed' unless $x == 42;
+my $y = sentinel(value => 100);
+die 'value param failed' unless $y == 100;
+my $z = sentinel(get => sub { 'hello' });
+die 'string get failed' unless $z eq 'hello';
+my $obj = bless { val => 99 }, 'TestObj';
+my $w = sentinel(obj => $obj, get => sub { $_[0]->{val} });
+die 'obj param failed' unless $w == 99;
+print 'Sentinel module loaded and working\n';
