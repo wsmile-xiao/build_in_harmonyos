@@ -1,0 +1,406 @@
+diff -ruN /dev/null b/src/baobab-cli.c
+--- /dev/null
++++ b/src/baobab-cli.c
+@@ -0,0 +1,402 @@
++/* -*- mode: c; c-basic-offset: 4; -*-
++ * baobab-cli.c — Simplified CLI disk usage analyzer for OpenHarmony
++ *
++ * This is a simplified version of GNOME Baobab (Disk Usage Analyzer)
++ * adapted for OpenHarmony where GTK4 and libadwaita are not available.
++ * It provides the core disk scanning functionality as a CLI tool.
++ *
++ * Copyright (C) 2024 Free Software Foundation
++ * Copyright (C) 2024 OpenHarmony Port Contributors
++ *
++ * This program is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * as published by the Free Software Foundation; either version 2
++ * of the License, or (at your option) any later version.
++ *
++ * On OpenHarmony, this replaces the GUI baobab with a CLI equivalent.
++ * #ifdef __OHOS__ guards are used for all OpenHarmony-specific code.
++ */
++
++#ifdef __OHOS__
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <errno.h>
++#include <dirent.h>
++#include <sys/stat.h>
++#include <sys/types.h>
++#include <unistd.h>
++#include <getopt.h>
++#include <limits.h>
++#include <locale.h>
++#include "config.h"
++
++/* Hard link tracking to avoid double-counting */
++typedef struct {
++    ino_t inode;
++    dev_t device;
++} HardLinkEntry;
++
++typedef struct {
++    HardLinkEntry *entries;
++    int count;
++    int capacity;
++} HardLinkTable;
++
++/* Scan result for a directory */
++typedef struct ScanResult {
++    char name[PATH_MAX];
++    char display_name[PATH_MAX];
++    unsigned long long size;        /* bytes */
++    unsigned long long alloc_size;  /* allocated bytes (st_blocks * 512) */
++    int elements;                   /* number of files/dirs inside */
++    double percent;                 /* percentage of parent */
++    int is_dir;
++    int has_error;
++    int max_depth;
++    struct ScanResult *children;
++    int child_count;
++    int child_capacity;
++} ScanResult;
++
++/* Global state */
++static int opt_all_fs = 0;        /* -a: scan all filesystems */
++static int opt_show_version = 0;  /* -v: show version */
++static int opt_verbose = 0;       /* -l: long format */
++static int opt_depth = -1;        /* -d: max depth */
++static dev_t root_device = 0;     /* root filesystem device */
++
++/* Initialize hard link table */
++static void hardlink_table_init(HardLinkTable *tbl) {
++    tbl->entries = NULL;
++    tbl->count = 0;
++    tbl->capacity = 0;
++}
++
++/* Check if hard link already seen, add if not */
++static int hardlink_table_check_add(HardLinkTable *tbl, ino_t inode, dev_t device) {
++    for (int i = 0; i < tbl->count; i++) {
++        if (tbl->entries[i].inode == inode && tbl->entries[i].device == device) {
++            return 1; /* already seen */
++        }
++    }
++    /* Add new entry */
++    if (tbl->count >= tbl->capacity) {
++        tbl->capacity = tbl->capacity ? tbl->capacity * 2 : 64;
++        tbl->entries = realloc(tbl->entries, tbl->capacity * sizeof(HardLinkEntry));
++        if (!tbl->entries) return 0;
++    }
++    tbl->entries[tbl->count].inode = inode;
++    tbl->entries[tbl->count].device = device;
++    tbl->count++;
++    return 0; /* new entry */
++}
++
++/* Free hard link table */
++static void hardlink_table_free(HardLinkTable *tbl) {
++    free(tbl->entries);
++    tbl->entries = NULL;
++    tbl->count = 0;
++    tbl->capacity = 0;
++}
++
++/* Initialize scan result */
++static ScanResult *scan_result_new(const char *name, int is_dir) {
++    ScanResult *r = calloc(1, sizeof(ScanResult));
++    if (!r) return NULL;
++    strncpy(r->name, name, PATH_MAX - 1);
++    strncpy(r->display_name, name, PATH_MAX - 1);
++    r->is_dir = is_dir;
++    r->child_capacity = 0;
++    r->child_count = 0;
++    r->children = NULL;
++    return r;
++}
++
++/* Add child result to parent */
++static void scan_result_add_child(ScanResult *parent, ScanResult *child) {
++    if (parent->child_count >= parent->child_capacity) {
++        parent->child_capacity = parent->child_capacity ? parent->child_capacity * 2 : 16;
++        parent->children = realloc(parent->children,
++                                    parent->child_capacity * sizeof(ScanResult));
++        if (!parent->children) return;
++    }
++    parent->children[parent->child_count] = *child;
++    parent->child_count++;
++}
++
++/* Recursive directory scanner */
++static ScanResult *scan_directory(const char *path, HardLinkTable *hltable,
++                                  int current_depth, int max_depth) {
++    DIR *dir;
++    struct dirent *entry;
++    struct stat st;
++    ScanResult *result = NULL;
++    unsigned long long total_size = 0;
++    int total_elements = 1;
++
++    if (max_depth >= 0 && current_depth > max_depth) {
++        return NULL;
++    }
++
++    if (lstat(path, &st) != 0) {
++        /* Can't stat path */
++        result = scan_result_new(path, 0);
++        if (result) {
++            result->has_error = 1;
++            result->size = 0;
++        }
++        return result;
++    }
++
++    result = scan_result_new(path, S_ISDIR(st.st_mode));
++    if (!result) return NULL;
++
++    if (S_ISDIR(st.st_mode)) {
++        result->alloc_size = (unsigned long long)st.st_blocks * 512;
++        result->size = st.st_size;
++
++        /* Check filesystem boundary if -a not set */
++#ifdef __OHOS__
++        if (!opt_all_fs && root_device != 0 && st.st_dev != root_device) {
++            result->has_error = 1;
++            result->size = 0;
++            return result;
++        }
++#endif
++
++        dir = opendir(path);
++        if (!dir) {
++            result->has_error = 1;
++            result->size = 0;
++            return result;
++        }
++
++        while ((entry = readdir(dir)) != NULL) {
++            char child_path[PATH_MAX];
++            struct stat child_st;
++
++            /* Skip . and .. */
++            if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
++                continue;
++
++            snprintf(child_path, PATH_MAX, "%s/%s", path, entry->d_name);
++
++            if (lstat(child_path, &child_st) != 0) {
++                /* Can't stat child - skip */
++                continue;
++            }
++
++            if (S_ISDIR(child_st.st_mode)) {
++                ScanResult *child_result = scan_directory(child_path, hltable,
++                                                          current_depth + 1, max_depth);
++                if (child_result) {
++                    total_size += child_result->size;
++                    total_elements += child_result->elements;
++                    scan_result_add_child(result, child_result);
++                    free(child_result);
++                }
++            } else if (S_ISREG(child_st.st_mode)) {
++                /* Check for hard links */
++                if (child_st.st_nlink > 1) {
++                    if (hardlink_table_check_add(hltable, child_st.st_ino, child_st.st_dev)) {
++                        /* Already counted this hard link */
++                        continue;
++                    }
++                }
++
++                unsigned long long file_size = child_st.st_size;
++                unsigned long long file_alloc = (unsigned long long)child_st.st_blocks * 512;
++
++                ScanResult child;
++                memset(&child, 0, sizeof(child));
++                strncpy(child.name, entry->d_name, PATH_MAX - 1);
++                strncpy(child.display_name, entry->d_name, PATH_MAX - 1);
++                child.is_dir = 0;
++                child.size = file_size;
++                child.alloc_size = file_alloc;
++                child.elements = 1;
++
++                total_size += file_size;
++                total_elements++;
++                scan_result_add_child(result, &child);
++            }
++            /* Skip other types (symlinks, sockets, devices) */
++        }
++
++        closedir(dir);
++    } else {
++        /* Regular file or other */
++        result->size = st.st_size;
++        result->alloc_size = (unsigned long long)st.st_blocks * 512;
++    }
++
++    result->size += total_size;
++    if (result->is_dir) {
++        result->elements = total_elements;
++    }
++
++    return result;
++}
++
++/* Format size in human-readable format */
++static const char *format_size(unsigned long long size) {
++    static char buf[32];
++    if (size >= 1073741824ULL) {
++        snprintf(buf, sizeof(buf), "%.1f GiB", (double)size / 1073741824.0);
++    } else if (size >= 1048576ULL) {
++        snprintf(buf, sizeof(buf), "%.1f MiB", (double)size / 1048576.0);
++    } else if (size >= 1024ULL) {
++        snprintf(buf, sizeof(buf), "%.1f KiB", (double)size / 1024.0);
++    } else {
++        snprintf(buf, sizeof(buf), "%llu B", size);
++    }
++    return buf;
++}
++
++/* Print scan results as tree */
++static void print_tree(ScanResult *result, int depth, double parent_size) {
++    char indent[256] = "";
++    int i;
++
++    for (i = 0; i < depth && i < 50; i++) {
++        strcat(indent, "  ");
++    }
++
++    double percent = 0.0;
++    if (parent_size > 0) {
++        percent = 100.0 * (double)result->size / parent_size;
++    }
++
++    if (opt_verbose) {
++        printf("%s%-40s %10s  %6.1f%%  %5d items\n",
++               indent,
++               result->display_name,
++               format_size(result->size),
++               percent,
++               result->is_dir ? result->elements : 1);
++    } else {
++        printf("%s%s  %s\n",
++               indent,
++               result->display_name,
++               format_size(result->size));
++    }
++
++    if (result->has_error) {
++        printf("%s  [error: %s]\n", indent, strerror(errno));
++    }
++
++    /* Print children */
++    for (i = 0; i < result->child_count; i++) {
++        print_tree(&result->children[i], depth + 1, result->size);
++    }
++}
++
++/* Free scan result tree */
++static void scan_result_free_tree(ScanResult *result) {
++    for (int i = 0; i < result->child_count; i++) {
++        scan_result_free_tree(&result->children[i]);
++    }
++    free(result->children);
++}
++
++/* Main entry point */
++int main(int argc, char *argv[]) {
++    static struct option long_options[] = {
++        {"all-file-systems", no_argument, 0, 'a'},
++        {"version",          no_argument, 0, 'v'},
++        {"verbose",          no_argument, 0, 'l'},
++        {"depth",            required_argument, 0, 'd'},
++        {"help",             no_argument, 0, 'h'},
++        {0, 0, 0, 0}
++    };
++
++    int opt;
++    int option_index = 0;
++
++    setlocale(LC_ALL, "");
++
++    while ((opt = getopt_long(argc, argv, "avld:h", long_options, &option_index)) != -1) {
++        switch (opt) {
++        case 'a':
++            opt_all_fs = 1;
++            break;
++        case 'v':
++            opt_show_version = 1;
++            break;
++        case 'l':
++            opt_verbose = 1;
++            break;
++        case 'd':
++            opt_depth = atoi(optarg);
++            break;
++        case 'h':
++            printf("Usage: baobab [OPTION]... [DIRECTORY]\n\n");
++            printf("Baobab — Disk Usage Analyzer (CLI version for OpenHarmony)\n\n");
++            printf("Options:\n");
++            printf("  -a, --all-file-systems  Do not skip directories on different file systems\n");
++            printf("  -v, --version           Print version and exit\n");
++            printf("  -l, --verbose           Show percentage and item count\n");
++            printf("  -d, --depth=N           Limit scan depth\n");
++            printf("  -h, --help              Show this help\n\n");
++            printf("Adapted from GNOME Baobab 46.0 for OpenHarmony (__OHOS__)\n");
++            return 0;
++        default:
++            fprintf(stderr, "Try 'baobab --help' for more information.\n");
++            return 1;
++        }
++    }
++
++    if (opt_show_version) {
++        printf("baobab %s (OpenHarmony CLI version)\n", VERSION);
++        printf("Original: GNOME Disk Usage Analyzer\n");
++        printf("Adapted for: OpenHarmony (__OHOS__)\n");
++        return 0;
++    }
++
++    /* Determine scan directory */
++    const char *scan_path;
++    if (optind < argc) {
++        scan_path = argv[optind];
++    } else {
++        scan_path = ".";
++    }
++
++    /* Get root device for filesystem boundary checking */
++    struct stat root_st;
++#ifdef __OHOS__
++    if (stat(scan_path, &root_st) == 0) {
++        root_device = root_st.st_dev;
++    }
++#endif
++
++    printf("Baobab Disk Usage Analyzer %s (OpenHarmony CLI)\n", VERSION);
++    printf("Scanning: %s\n\n", scan_path);
++
++    /* Initialize hard link table */
++    HardLinkTable hltable;
++    hardlink_table_init(&hltable);
++
++    /* Perform scan */
++    ScanResult *result = scan_directory(scan_path, &hltable, 0, opt_depth);
++
++    if (result) {
++        result->percent = 100.0;
++        print_tree(result, 0, 0);
++
++        printf("\n--- Summary ---\n");
++        printf("Total size:     %s\n", format_size(result->size));
++        printf("Total items:    %d\n", result->elements);
++
++        scan_result_free_tree(result);
++        free(result);
++    } else {
++        fprintf(stderr, "Error: could not scan %s\n", scan_path);
++    }
++
++    hardlink_table_free(&hltable);
++    return result ? 0 : 1;
++}
++
++#endif /* __OHOS__ */
