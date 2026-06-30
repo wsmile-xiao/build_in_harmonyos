@@ -1,29 +1,28 @@
-# autoconf-archive 2024.10.16 适配笔记
+# autoconf-archive 2024.10.16 — 适配笔记
 
-## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-04-21 ~ 2026-04-24
-- 编译器: clang/clang++
-- 状态: partial（编译完成但部分流程未走完）
+## 平台
+- 目标: OpenHarmony (aarch64, musl libc)
+- 构建系统: autotools (纯 M4 宏集合，无 C 代码)
 
 ## 编译步骤
-1. 标准 autotools 流程 configure → make → make install
+1. 应用 3 个已有补丁 (configure, stamp-vti, version.texi)
+2. `./configure --prefix=$DEFAULT_PREFIX`
+3. `make -j2` (doc 构建因 makeinfo Perl 模块路径问题跳过)
+4. `cp m4/*.m4 $PREFIX/share/aclocal/` (手动安装宏文件)
 
-## 遇到的问题与解决方案
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| （无具体问题记录） | | | |
+## 关键信息
+- 总共安装 594 个 M4 宏文件 (586 个 ax_* 宏)
+- 安装路径: $PREFIX/share/aclocal/
+- autoconf 可通过 `aclocal` 自动发现这些宏
 
-## 源码修改
-- `configure` — 平台适配 (0001-configure.patch, platform_only)
-- `doc/stamp-vti` — 平台适配 (0002-doc-stamp-vti.patch, platform_only)
-- `doc/version.texi` — 平台适配 (0003-doc-version.texi.patch, platform_only)
+## 已知限制
+- doc/Makefile 因 makeinfo 的 Perl Texinfo::ModulePath 模块未正确加载而失败
+- 文档安装可跳过，不影响宏文件使用
 
-## 交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| autoconf-archive-2024.10.16-ohos-aarch64.tar.gz | 2.5MB | 预编译安装包 |
-
-## 注意事项
-- 3 个补丁均为平台适配类（auto, platform_only）
-- 状态为 partial，可能需要后续完成打包流程
+## 验证
+```
+$ ls /usr/local/share/aclocal/ | wc -l
+594
+$ ls /usr/local/share/aclocal/ax_*.m4 | wc -l
+586
+```
