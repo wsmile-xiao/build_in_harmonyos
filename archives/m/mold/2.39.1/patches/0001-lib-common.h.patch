@@ -1,0 +1,199 @@
+diff -ruN a/lib/common.h b/lib/common.h
+--- a/lib/common.h
++++ b/lib/common.h
+@@ -53,21 +53,194 @@
+     return hash_string(k);
+   }
+ 
+   static bool equal(const std::string_view &k1, const std::string_view &k2) {
+     return k1 == k2;
+   }
+ };
+ 
+ namespace mold {
+ 
+-namespace ranges = std::ranges;
++// OHOS shim: libc++ lacks full C++20 std::ranges support
++// Replace std::ranges with std wrappers that handle projections.
++// Key challenge: mold uses {} as default comparator argument,
++// which can't be deduced to a template param in C++17 style.
++// Solution: provide overloads for each call pattern mold uses.
++namespace ranges {
++
++// Simple subrange-like wrapper for ranges algorithm return values
++template<typename It>
++struct subrange {
++  It begin_it, end_it;
++  It begin() const { return begin_it; }
++  It end() const { return end_it; }
++  auto size() const { return end_it - begin_it; }
++};
++
++// ===== sort =====
++// ranges::sort(c, {}, proj)
++template<typename R, typename Proj>
++void sort(R&& r, std::less<> comp, Proj proj) {
++  std::sort(std::begin(r), std::end(r), [&](auto&& a, auto&& b) {
++    return std::invoke(proj, a) < std::invoke(proj, b);
++  });
++}
++
++// ranges::sort(it, it, {}, proj)
++template<typename It, typename Proj>
++void sort(It first, It last, std::less<> comp, Proj proj) {
++  std::sort(first, last, [&](auto&& a, auto&& b) {
++    return std::invoke(proj, a) < std::invoke(proj, b);
++  });
++}
++
++// ===== stable_sort =====
++// ranges::stable_sort(c) — no comparator, no projection
++template<typename R>
++void stable_sort(R&& r) {
++  std::stable_sort(std::begin(r), std::end(r));
++}
++
++// ranges::stable_sort(c, {}, proj) — default comparator + projection
++template<typename R, typename Proj>
++void stable_sort(R&& r, std::less<> comp, Proj proj) {
++  std::stable_sort(std::begin(r), std::end(r), [&](auto&& a, auto&& b) {
++    return std::invoke(proj, a) < std::invoke(proj, b);
++  });
++}
++
++// ===== unique =====
++// ranges::unique(it, it, {}, proj) — returns subrange
++template<typename It, typename Proj>
++auto unique(It first, It last, std::less<> comp, Proj proj) {
++  // Note: ranges::unique uses equal_to (==), not less (<)
++  auto new_end = std::unique(first, last, [&](auto&& a, auto&& b) {
++    return std::invoke(proj, a) == std::invoke(proj, b);
++  });
++  return subrange<It>{first, new_end};
++}
++
++// ===== lower_bound =====
++// ranges::lower_bound(c, val) — no comparator, no projection
++template<typename R, typename T>
++auto lower_bound(R&& r, const T& val) {
++  return std::lower_bound(std::begin(r), std::end(r), val);
++}
++
++// ranges::lower_bound(c, val, {}, proj) — default comparator + projection
++template<typename R, typename T, typename Proj>
++auto lower_bound(R&& r, const T& val, std::less<> comp, Proj proj) {
++  return std::lower_bound(std::begin(r), std::end(r), val, [&](auto&& a, const T& b) {
++    return std::invoke(proj, a) < b;
++  });
++}
++
++// ===== upper_bound =====
++// ranges::upper_bound(c, val) — no comparator, no projection
++template<typename R, typename T>
++auto upper_bound(R&& r, const T& val) {
++  return std::upper_bound(std::begin(r), std::end(r), val);
++}
++
++// ranges::upper_bound(c, val, {}, proj) — default comparator + projection
++template<typename R, typename T, typename Proj>
++auto upper_bound(R&& r, const T& val, std::less<> comp, Proj proj) {
++  return std::upper_bound(std::begin(r), std::end(r), val, [&](const T& a, auto&& b) {
++    return a < std::invoke(proj, b);
++  });
++}
++
++// ranges::upper_bound(c, val, explicit_comp, proj) — explicit comparator + projection
++template<typename R, typename T, typename Comp, typename Proj>
++auto upper_bound(R&& r, const T& val, Comp comp, Proj proj) {
++  return std::upper_bound(std::begin(r), std::end(r), val, [&](const T& a, auto&& b) {
++    return comp(a, std::invoke(proj, b));
++  });
++}
++
++// ===== is_sorted =====
++// ranges::is_sorted(c) — no comparator, no projection
++template<typename R>
++bool is_sorted(R&& r) {
++  return std::is_sorted(std::begin(r), std::end(r));
++}
++
++// ranges::is_sorted(c, {}, proj) — default comparator + projection
++template<typename R, typename Proj>
++bool is_sorted(R&& r, std::less<> comp, Proj proj) {
++  return std::is_sorted(std::begin(r), std::end(r), [&](auto&& a, auto&& b) {
++    return std::invoke(proj, a) < std::invoke(proj, b);
++  });
++}
++
++// ===== all_of =====
++// ranges::all_of(c, pred)
++template<typename R, typename Pred>
++bool all_of(R&& r, Pred pred) {
++  return std::all_of(std::begin(r), std::end(r), pred);
++}
++
++// ===== any_of =====
++// ranges::any_of(c, pred)
++template<typename R, typename Pred>
++bool any_of(R&& r, Pred pred) {
++  return std::any_of(std::begin(r), std::end(r), pred);
++}
++
++// ===== count =====
++// ranges::count(c, val)
++template<typename R, typename T>
++auto count(R&& r, const T& val) {
++  return std::count(std::begin(r), std::end(r), val);
++}
++
++// ===== reverse =====
++// ranges::reverse(c)
++template<typename R>
++void reverse(R&& r) {
++  std::reverse(std::begin(r), std::end(r));
++}
++
++// ===== partition =====
++// ranges::partition(c, pred) — returns subrange of second group
++template<typename R, typename Pred>
++auto partition(R&& r, Pred pred) {
++  auto it = std::partition(std::begin(r), std::end(r), pred);
++  return subrange<decltype(it)>{it, std::end(r)};
++}
++
++// ===== stable_partition =====
++// ranges::stable_partition(c, pred) — returns subrange of second group
++template<typename R, typename Pred>
++auto stable_partition(R&& r, Pred pred) {
++  auto it = std::stable_partition(std::begin(r), std::end(r), pred);
++  return subrange<decltype(it)>{it, std::end(r)};
++}
++
++// ===== equal_range =====
++// ranges::equal_range(c, val, {}, proj) — returns pair (structured binding)
++// Implemented using lower_bound + upper_bound to avoid std::equal_range
++// issues with mixed element/value types in the comparator
++template<typename R, typename T, typename Proj>
++auto equal_range(R&& r, const T& val, std::less<> comp, Proj proj) {
++  auto first = std::lower_bound(std::begin(r), std::end(r), val,
++    [&](auto&& a, const T& b) {
++      return std::invoke(proj, a) < b;
++    });
++  auto last = std::upper_bound(first, std::end(r), val,
++    [&](const T& a, auto&& b) {
++      return a < std::invoke(proj, b);
++    });
++  return std::make_pair(first, last);
++}
++
++} // namespace ranges
+ using namespace std::literals::string_literals;
+ using namespace std::literals::string_view_literals;
+ 
+ inline char *output_tmpfile;
+ 
+ inline u8 *output_buffer_start = nullptr;
+ inline u8 *output_buffer_end = nullptr;
+ 
+ extern std::string mold_git_hash;
+ 
