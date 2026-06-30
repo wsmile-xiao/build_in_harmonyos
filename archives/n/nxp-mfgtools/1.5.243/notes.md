@@ -1,0 +1,25 @@
+# nxp-mfgtools 1.5.243 适配笔记
+
+## 编译环境
+- 构建系统: cmake
+- 编译日期: 2026-06-01
+- 编译器: clang/clang++
+- 状态: built
+
+## 编译步骤
+
+```bash
+cd $BUILD_SRC_DIR
+cmake -B build -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX
+cmake --build build
+cmake --install build DESTDIR=$TEST_PREFIX
+```
+
+## 遇到的问题与解决方案
+
+无重大问题。cmake 直接编译成功。
+
+---
+
+**编译结束**: 2026-06-01
+**最终状态**: built
