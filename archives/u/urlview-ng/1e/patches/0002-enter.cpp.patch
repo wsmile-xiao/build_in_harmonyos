@@ -1,0 +1,140 @@
+diff -ruN a/enter.cpp b/enter.cpp
+--- a/enter.cpp
++++ b/enter.cpp
+@@ -1,65 +1,71 @@
+ // SPDX-License-Identifier: 0BSD
+ 
+ 
+ extern "C" {
++#undef bool  // OHOS: Prevent ncurses bool macro from conflicting with C++ bool
+ #include "enter.h"
++#undef bool
++#undef NCURSES_BOOL
+ }
+-
++// OHOS: ncursesw 函数声明缺失，手动添加
++extern "C" {
++extern int addnwstr(const wchar_t *, int);
++extern int mvaddnwstr(int, int, const wchar_t *, int);
++}
+ #include <algorithm>
+ #include <bit>
+ #include <ctype.h>
+ #include <limits.h>
+ #include <numeric>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <wchar.h>
+ #include <wctype.h>
+ 
+ 
+ struct character {
+ 	wchar_t c;
+ 	char seg[MB_LEN_MAX];
+-	unsigned seglen : std::bit_width(static_cast<unsigned>(MB_LEN_MAX));
++	unsigned seglen : 5;
+ 	unsigned width : 2;
+ 	bool space : 1;
+ 	bool word : 1;
++
+ };
+-static_assert(MB_LEN_MAX <= ((1 << std::bit_width(static_cast<unsigned>(MB_LEN_MAX))) - 1));
+-
+ 
+ extern "C" struct enter_string enter_string(const char * init, size_t initlen) {
+ 	int y, x;
+ 	getyx(stdscr, y, x);
+ 	km_dokey_load_termios();
+ 
+ #define MEASURE(character)                 \
+ 	mvaddnwstr(y, x, &character.c, 1);       \
+ 	character.width = getcurx(stdscr) - x;   \
+ 	character.space = iswspace(character.c); \
+ 	character.word  = iswalnum(character.c)
+ 
+ 	struct character * characters{};
+ 	size_t characters_len{}, characters_cap{};
+ #define BUMPCHAR()                                                                                                            \
+ 	do {                                                                                                                        \
+ 		if(characters_len == characters_cap) {                                                                                    \
+ 			characters_cap = characters_cap ? characters_cap * 2 : 16;                                                              \
+-			if(!(characters = reinterpret_cast<struct character *>(reallocarray(characters, characters_cap, sizeof(*characters))))) \
++			if(!(characters = reinterpret_cast<struct character *>(realloc(characters, characters_cap * sizeof(*characters))))) \
+ 				return {};                                                                                                            \
+ 		}                                                                                                                         \
+ 	} while(false)
+ 
+ 	while(initlen) {
+ 		if(!characters) {
+ 			characters_cap = initlen;
+-			if(!(characters = reinterpret_cast<struct character *>(reallocarray(characters, characters_cap, sizeof(*characters)))))
++			if(!(characters = reinterpret_cast<struct character *>(realloc(characters, characters_cap * sizeof(*characters)))))
+ 				return {};
+ 		}
+ 
+ 		struct character character = {};
+ 		mbstate_t state            = {};
+ 		switch(auto r = mbrtowc(&character.c, init, initlen, &state)) {
+ 			case(size_t)-2:  // too short
+ 				state       = {};
+ 				character.c = -1;
+ 				r           = std::min(initlen, (size_t)((1 << 5) - 1));
+@@ -100,33 +106,33 @@
+ 			moveright -= characters[++first_on_screen].width;       \
+ 	} while(false)
+ 	// Write out from first_on_screen, so long as the cursor fits on the screen, else move by a half-screen to find it.
+ 	// Start off with as much text as possible and cursor on the right margin; you can't return to this state; this mimicks how ≤1b did it
+ 	size_t first_on_screen = characters_cursor;
+ 	LEFTBY((getmaxx(stdscr) - x) - 1);
+ 
+ 	for(wint_t input;;) {
+ 		{
+ 			auto screen_width         = getmaxx(stdscr) - x;
+-			auto all_characters_width = std::accumulate(characters, characters + characters_len, 0z, [](auto acc, auto && c) { return acc + c.width; });
++			auto all_characters_width = std::accumulate(characters, characters + characters_len, 0UL, [](auto acc, auto && c) { return acc + c.width; });
+ 			if(all_characters_width < screen_width)
+ 				first_on_screen = 0;
+ 			else {
+ 				if(first_on_screen >= characters_len) {
+ 					first_on_screen = characters_cursor - 1;
+ 					LEFTBY(screen_width / 2);
+ 				} else if(characters_cursor < first_on_screen)
+ 					while(characters_cursor < first_on_screen)
+ 						LEFTBY(screen_width / 2);
+ 				else
+ 					for(;;) {
+-						auto last = std::find_if(characters + first_on_screen, characters + characters_len, [&, acc = 0z](auto && c) mutable {
++						auto last = std::find_if(characters + first_on_screen, characters + characters_len, [&, acc = 0UL](auto && c) mutable {
+ 							acc += c.width;
+ 							return acc > screen_width;
+ 						});
+ 
+ 						auto characters_on_screen = last - (characters + first_on_screen);
+ 						if(first_on_screen + characters_on_screen < characters_cursor)
+ 							RIGHTBY(screen_width / 2);
+ 						else
+ 							break;
+ 					}
+@@ -168,21 +174,21 @@
+ 					++characters_len;
+ 					characters[characters_cursor++] = character;
+ 				} else {
+ 				err:
+ 					flushinp();
+ 					beep();
+ 				}
+ 				break;
+ 
+ 			case OP_EDITOR_DONE: {
+-				struct enter_string ret = {0, std::accumulate(characters, characters + characters_len, 0zu, [](auto acc, auto && c) { return acc + c.seglen; })};
++				struct enter_string ret = {0, std::accumulate(characters, characters + characters_len, 0UL, [](auto acc, auto && c) { return acc + c.seglen; })};
+ 				if(!ret.len)
+ 					return free(characters), (struct enter_string){};
+ 				ret.data = reinterpret_cast<char *>(malloc(ret.len + 1));
+ 				if(!ret.data)
+ 					return free(characters), (struct enter_string){};
+ 				auto acc = ret.data;
+ 				for(auto itr = characters; itr != characters + characters_len; ++itr)
+ 					acc = reinterpret_cast<char *>(memcpy(acc, itr->seg, itr->seglen)) + itr->seglen;
+ 				*acc = '\0';
+ 				return free(characters), ret;
