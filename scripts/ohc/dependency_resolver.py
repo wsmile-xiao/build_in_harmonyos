@@ -277,6 +277,42 @@ def _parse_readme(content: str) -> dict[str, dict]:
 
 # 各软件的已知依赖（从实际编译经验总结）
 # 格式: software → {"required": [...], "optional": [...]}
+# 内置软件索引（软件名 → 默认版本等信息）
+# 用于 dispatch 获取版本信息
+_BUILTIN_INDEX: dict[str, dict] = {
+    "pkg-config":   {"ver": "0.29.2"},
+    "pkgconf":      {"ver": "2.2.0"},
+    "sed":          {"ver": "4.9"},
+    "coreutils":    {"ver": "9.10"},
+    "gawk":         {"ver": "5.3.0"},
+    "automake":     {"ver": "1.16.5"},
+    "autoconf":     {"ver": "2.72"},
+    "libtool":      {"ver": "2.4.7"},
+    "zlib":         {"ver": "1.3.1"},
+    "bzip2":        {"ver": "1.0.8"},
+    "xz":           {"ver": "5.6.2"},
+    "gzip":         {"ver": "1.13"},
+    "openssl":      {"ver": "3.3.1"},
+    "ncurses":      {"ver": "6.5"},
+    "libffi":       {"ver": "3.4.6"},
+    "gdbm":         {"ver": "1.23"},
+    "readline":     {"ver": "8.2"},
+    "wget":         {"ver": "1.21"},
+    "rsync":        {"ver": "3.3.0"},
+    "jq":           {"ver": "1.7.1"},
+    "tar":          {"ver": "1.35"},
+    "file":         {"ver": "5.45"},
+    "dos2unix":     {"ver": "7.5.4"},
+    "bash":         {"ver": "5.3.0"},
+    "htop":         {"ver": "3.3.0"},
+    "strace":       {"ver": "6.9"},
+    "python":       {"ver": "3.12.9"},
+    "man-db":       {"ver": "2.12"},
+    "texinfo":      {"ver": "7.1"},
+    "help2man":     {"ver": "1.49"},
+    "libpipeline":  {"ver": "1.5.7"},
+}
+
 _KNOWN_DEPS: dict[str, dict] = {
     "pkg-config":   {"required": [], "optional": []},
     "sed":          {"required": [], "optional": []},
