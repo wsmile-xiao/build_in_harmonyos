@@ -12,6 +12,9 @@ archives/{letter}/{name}/{version}/
   ├── conanfile.py        # Conan 配方（CI 唯一构建输入）
   ├── conandata.yml       # 源码 URL + SHA256 + 补丁声明
   ├── test_package/       # Conan L1 测试
+  │   ├── conanfile.py    # 消费者测试
+  │   ├── test.c          # 测试源码
+  │   └── MANIFEST.yml    # 上游测试声明（CI L0e 门禁强制要求）
   ├── patches/            # 补丁文件（按需）
   ├── notes.md            # 适配笔记（AI 参考）
   └── reports/            # 验证报告（按需）
@@ -245,6 +248,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> <版本> --url=<UR
 - [ ] `conanfile.py` 存在且字段完整（name, version, source, build, package, package_info）
 - [ ] `conandata.yml` 的 sha256 是真实值（非 `REPLACE_WITH_ACTUAL_SHA256`）
 - [ ] `test_package/conanfile.py` 存在且类型正确（库包用 CMake，可执行文件包用 subprocess）
+- [ ] `test_package/MANIFEST.yml` 存在且 `assertion_count > 0`（CI L0e 门禁强制要求）
+- [ ] `test_package/MANIFEST.yml` 存在且 `assertion_count > 0`（CI L0e 门禁强制要求）
 - [ ] `patches/` 中的补丁都在 `conandata.yml` 中声明
 - [ ] 系统同名库的 `generate()` 有静态链接配置（R26），非系统同名库默认动态
 - [ ] 依赖引用格式为 `@ohpcd/stable`（R27）
