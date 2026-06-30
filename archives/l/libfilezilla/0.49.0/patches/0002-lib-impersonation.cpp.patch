@@ -1,0 +1,98 @@
+diff -ruN a/lib/impersonation.cpp b/lib/impersonation.cpp
+--- a/lib/impersonation.cpp
++++ b/lib/impersonation.cpp
+@@ -1,22 +1,27 @@
+ #include "libfilezilla/impersonation.hpp"
+ 
+ #if FZ_UNIX || FZ_MAC
+ 
+ #include "libfilezilla/buffer.hpp"
+ 
+ #include <optional>
+ #include <tuple>
+ 
+ #if FZ_UNIX
++#ifdef __OHOS__
++// musl libc on HarmonyOS does not provide getspnam_r/crypt_r
++#include <shadow.h>
++#else
+ #include <crypt.h>
+ #include <shadow.h>
++#endif
+ #endif
+ #include <grp.h>
+ #include <limits.h>
+ #include <pwd.h>
+ #include <string.h>
+ #include <sys/types.h>
+ #include <unistd.h>
+ 
+ #if FZ_MAC
+ #include <CoreServices/CoreServices.h>
+@@ -112,31 +117,37 @@
+ 	struct spwd* shadow_{};
+ 
+ 	struct spwd shadow_buffer_;
+ 	buffer buf_{};
+ };
+ 
+ shadow_holder get_shadow(native_string const& username)
+ {
+ 	shadow_holder ret;
+ 
++#ifdef __OHOS__
++	// musl libc on HarmonyOS does not provide shadow password support
++	// Disable shadow password authentication completely
++	ret.shadow_ = nullptr;
++#else
+ 	size_t s = 1024;
+ 	int res{};
+ 	do {
+ 		s *= 2;
+ 		ret.buf_.get(s);
+ 		res = getspnam_r(username.c_str(), &ret.shadow_buffer_, reinterpret_cast<char*>(ret.buf_.get(s)), s, &ret.shadow_);
+ 	} while (res == ERANGE);
+ 
+ 	if (res) {
+ 		ret.shadow_ = nullptr;
+ 	}
++#endif
+ 
+ 	return ret;
+ }
+ #endif
+ }
+ 
+ class impersonation_token_impl final
+ {
+ public:
+ 	static impersonation_token_impl* get(impersonation_token const& t) {
+@@ -186,22 +197,28 @@
+ 		}
+ 	}
+ 	return ret;
+ }
+ 
+ bool check_auth(native_string const& username, native_string const& password)
+ {
+ #if FZ_UNIX
+ 	auto shadow = get_shadow(username);
+ 	if (shadow.shadow_) {
++#ifdef __OHOS__
++		// musl libc on HarmonyOS does not provide crypt_r
++		// Use non-thread-safe crypt as fallback
++		char* encrypted = crypt(password.c_str(), shadow.shadow_->sp_pwdp);
++#else
+ 		struct crypt_data data{};
+ 		char* encrypted = crypt_r(password.c_str(), shadow.shadow_->sp_pwdp, &data);
++#endif
+ 		if (encrypted && !strcmp(encrypted, shadow.shadow_->sp_pwdp)) {
+ 			return true;
+ 		}
+ 	}
+ #elif FZ_MAC
+ 	bool ret{};
+ 
+ 	CFStringRef cfu = CFStringCreateWithCString(NULL, username.c_str(), kCFStringEncodingUTF8);
+ 	if (cfu) {
+ 		CSIdentityQueryRef q = CSIdentityQueryCreateForName(kCFAllocatorDefault, cfu, kCSIdentityQueryStringEquals, kCSIdentityClassUser, CSGetDefaultIdentityAuthority());
