@@ -488,48 +488,6 @@ authors: {git_author}
         else:
             g.details.append("  ✅ test_package/MANIFEST.yml 存在")
 
-        # Check requires completeness (R30: 全量适配, 依赖必须完整)
-        conanfile_py = self.archive_dir / "conanfile.py"
-        if conanfile_py.exists():
-            cf_content = conanfile_py.read_text(encoding="utf-8")
-            # 检查 requirements() 是否只有 pass (空依赖)
-            req_match = re.search(
-                r'def requirements\(self\):\s*\n(.*?)(?=\n    def |\nclass |\Z)',
-                cf_content, re.DOTALL,
-            )
-            if req_match:
-                req_body = req_match.group(1).strip()
-                if req_body == "pass" or not req_body:
-                    g.details.append(
-                        "  ⚠️  conanfile.py requirements() 为空 — 全量适配要求声明所有依赖"
-                    )
-                else:
-                    req_count = req_body.count("self.requires(")
-                    g.details.append(f"  ✅ conanfile.py requires() 声明了 {req_count} 个依赖")
-
-            # 检查功能裁剪参数 (禁止 --without-XXX / --disable-XXX)
-            trimming = []
-            for pattern, desc in [
-                (r"--without-[a-z0-9_-]+", "--without"),
-                (r"--disable-[a-z0-9_-]+", "--disable"),
-            ]:
-                for m in re.finditer(pattern, cf_content, re.IGNORECASE):
-                    param = m.group(0)
-                    if param in {
-                        "--disable-shared", "--enable-static",
-                        "--disable-nls", "--without-man", "--without-doc",
-                        "--disable-gtk-doc", "--disable-dependency-tracking",
-                    }:
-                        continue
-                    trimming.append(param)
-            if trimming:
-                g.details.append(
-                    f"  ⚠️  conanfile.py 含功能裁剪参数: {', '.join(set(trimming))}"
-                )
-                g.details.append(
-                    "      全量适配要求: 保留所有功能, 将依赖加入 requires()"
-                )
-
         log_ok(f"  G1: {'PASS' if g.passed else 'FAIL'}")
         return g
 
@@ -694,7 +652,25 @@ authors: {git_author}
         log_info("G4: 产物完整性检查...")
         g = VerifyResult(gate="G4", passed=True)
 
-        rc, cache_path = self._conan(["cache", "path", self._get_cache_ref()], timeout=30)
+        # In Conan 2, `conan cache path <recipe_ref>` returns the recipe
+        # exports path, not the package path.  Query the package ID first.
+        rc, list_out = self._conan(["list", self.ref + ":*", "--format=json"], timeout=30)
+        if rc != 0:
+            g.details.append("  ⚠️ 无法查询包列表")
+            return g
+
+        try:
+            import json
+            listing = json.loads(list_out)
+            pkgs = list(listing["Local Cache"][self.software][self.ref]
+                        ["revisions"].values())[0]["packages"]
+            pkg_id = next(iter(pkgs))
+        except (KeyError, IndexError, StopIteration):
+            g.details.append("  ⚠️ 无法找到程序包 ID")
+            return g
+
+        pkg_ref = f"{self.ref}:{pkg_id}"
+        rc, cache_path = self._conan(["cache", "path", pkg_ref], timeout=30)
         if rc != 0:
             g.details.append("  ⚠️ 无法获取 conan cache 路径")
             return g

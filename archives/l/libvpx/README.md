@@ -1,44 +1,60 @@
-# libvpx
+# libvpx - VP8/VP9 Video Codec Library
 
-## 简介
+## 软件描述
 
-libvpx 是 VP8/VP9 视频编解码库，Google 开发，用于 WebM 视频格式。
+libvpx 是 Google 开发的开源视频编解码库，实现 VP8 和 VP9 视频编码格式。
+VP8/VP9 是 WebM 项目的一部分，广泛用于 Web 视频流媒体和 WebRTC 应用。
 
-## OHOS 适配要点
+**主要功能**：
+- VP8 编解码器（视频压缩）
+- VP9 编解码器（更高效的压缩，支持更高分辨率）
+- NEON SIMD 优化（ARM 平台）
 
-### rtcd.h 头文件生成（关键）
+**用途**：
+- WebRTC 视频通信
+- WebM 格式视频编码
+- FFmpeg、GStreamer 等多媒体框架的后端编解码器
 
-libvpx 使用 rtcd.pl Perl 脚本生成运行时 CPU 检测头文件：
-- vp8_rtcd.h, vp9_rtcd.h, vpx_dsp_rtcd.h, vpx_scale_rtcd.h
+## 版本列表
 
-**解决方案**：
+| 版本 | 状态 | 编译日期 | 说明 |
+|------|------|----------|------|
+| 1.14.1 | built | 2026-05-29 | G0 验证失败，需环境 hints |
+
+## 构建特性
+
+- **构建系统**：自定义 configure 脚本（非标准 autotools）
+- **目标平台**：arm64-linux-gcc
+- **产物类型**：静态库 (libvpx.a) + 工具 (vpxenc/vpxdec)
+- **优化**：NEON SIMD（自动检测）
+
+## 编译依赖
+
+- clang/clang++（OHOS SDK LLVM）
+- make（GNU Make 4.4.1+）
+- diff（GNU diffutils）
+
+## 环境要求
+
+编译前必须设置：
 ```bash
-perl build/make/rtcd.pl --arch=arm64 --sym=vpx_scale_rtcd --config=libs-arm64-linux-gcc.mk vpx_scale/vpx_scale_rtcd.pl > vpx_scale_rtcd.h
-perl build/make/rtcd.pl --arch=arm64 --sym=vpx_dsp_rtcd --config=libs-arm64-linux-gcc.mk vpx_dsp/vpx_dsp_rtcd_defs.pl > vpx_dsp_rtcd.h
-perl build/make/rtcd.pl --arch=arm64 --sym=vp8_rtcd --config=libs-arm64-linux-gcc.mk vp8/common/rtcd_defs.pl > vp8_rtcd.h
-perl build/make/rtcd.pl --arch=arm64 --sym=vp9_rtcd --config=libs-arm64-linux-gcc.mk vp9/common/vp9_rtcd_defs.pl > vp9_rtcd.h
+source archives/l/libvpx/hints/environment.sh
 ```
 
-### 编译器设置
+详见：`archives/l/libvpx/hints/README.md`
 
-系统只有 clang，需要设置环境变量：
+## 链接说明
+
+libvpx 编译为静态库，链接时需要：
 ```bash
-CC=clang CXX=clang++ ./configure --target=arm64-linux-gcc --prefix=$DEFAULT_PREFIX
+# pkg-config 方式
+pkg-config --cflags --libs vpx
+
+# 直接链接
+-lvpx -lpthread
 ```
 
-## 依赖
+## 文档
 
-无外部依赖（纯 C 库）
-
-## 功能验证
-
-```bash
-vpxenc --help
-vpxdec --help
-pkg-config --modversion vpx
-```
-
-## 参考
-
-- https://github.com/webmproject/libvpx
-- https://www.webmproject.org/code/
+- 官方文档：https://www.webmproject.org/docs/
+- GitHub：https://github.com/webmproject/libvpx
