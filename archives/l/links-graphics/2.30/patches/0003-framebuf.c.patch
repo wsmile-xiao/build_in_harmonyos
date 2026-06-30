@@ -1,0 +1,285 @@
+diff -ruN a/framebuf.c b/framebuf.c
+--- a/framebuf.c
++++ b/framebuf.c
+@@ -21,39 +21,43 @@
+ #define SIG_ACQ	SIGVTALRM
+ 
+ #if defined(FB_DEBUG) || defined(SC_DEBUG)
+ #define MESSAGE(a) fprintf(stderr,"%s",a);
+ #endif
+ 
+ #include "links.h"
+ 
+ #include "bits.h"
+ 
++#ifdef HAVE_LIBGPM
+ #include <gpm.h>
++#endif
+ 
+ #include <sys/mman.h>
+ #include <sys/ioctl.h>
+ 
+ #include <linux/fb.h>
+ #include <linux/kd.h>
+ #include <linux/vt.h>
+ 
+ #include "arrow.inc"
+ 
+ #ifndef MAP_FAILED
+ #define MAP_FAILED	((void *)-1L)
+ #endif
+ 
++#ifdef HAVE_LIBGPM
+ #ifdef GPM_HAVE_SMOOTH
+ #define gpm_smooth GPM_SMOOTH
+ #else
+ #define gpm_smooth 0
++#endif
+ #endif
+ 
+ #if defined(USE_FB_ACCEL)
+ #if !defined(FBIO_ACCEL_SUPPORT)
+ #define FBIO_ACCEL_SUPPORT		0x4630
+ #define FBIO_ACCEL_SYNC			0x4631
+ #define FBIO_ACCEL_FILLRECT		0x4632
+ #define FBIO_ACCEL_FILLRECT_SYNC	0x4633
+ #define FBIO_ACCEL_COPYAREA		0x4634
+ #define FBIO_ACCEL_COPYAREA_SYNC	0x4635
+@@ -85,25 +89,31 @@
+ #ifndef ROP_COPY
+ #define ROP_COPY	0
+ #endif
+ #ifndef ROP_XOR
+ #define ROP_XOR		1
+ #endif
+ #endif
+ 
+ static int TTY = 0;
+ 
++#ifdef HAVE_LIBGPM
+ static int fb_hgpm = -2;
++#endif
+ static int fb_hmice = -1;
+ static unsigned char ps2_mouse_mode;
+ 
++#ifdef HAVE_LIBGPM
+ #define fb_have_mouse	(fb_hgpm >= 0 || fb_hmice >= 0)
++#else
++#define fb_have_mouse	(fb_hmice >= 0)
++#endif
+ 
+ static int fb_console;
+ 
+ static struct itrm *fb_kbd;
+ 
+ static struct graphics_device *fb_old_vd;
+ static struct graphics_device *fb_block_dev;
+ 
+ static int fb_handle = -1;
+ static unsigned char *fb_mem, *fb_vmem;
+@@ -928,20 +938,21 @@
+ 	}
+ }
+ 
+ static void fb_ctrl_c(void *i_)
+ {
+ 	kbd_ctrl_c();
+ }
+ 
+ static void unhandle_fb_mouse(void);
+ 
++#ifdef HAVE_LIBGPM
+ static void fb_gpm_in(void *nic)
+ {
+ 	struct links_event ev;
+ 	int g;
+ 	Gpm_Event gev;
+ 	int rs;
+ 	again:
+ 	set_handlers(fb_hgpm, (void (*)(void *))NULL, (void (*)(void *))NULL, NULL);
+ 	save_gpm_signals();
+ 	g = Gpm_GetEvent(&gev);
+@@ -1027,20 +1038,21 @@
+ 	if (((ev.b & BM_ACT) == B_MOVE && !(ev.b & BM_BUTT)) || (ev.b & BM_ACT) == B_DRAG) {
+ 		if (can_read(fb_hgpm)) goto again;
+ 	}
+ 
+ 	last_mouse_buttons = (int)ev.b;
+ 	if (!current_virtual_device) return;
+ 	if (current_virtual_device->mouse_handler) current_virtual_device->mouse_handler(current_virtual_device, ev.x, ev.y, (int)ev.b);
+ 	redraw_mouse();
+ 	EINTRLOOP(rs, fsync(fb_handle));
+ }
++#endif /* HAVE_LIBGPM */
+ 
+ static void fb_ps2_in(void *nic)
+ {
+ 	unsigned char buffer[4];
+ 
+ 	int rs, dx, dy, dw, button;
+ 
+ 	int size = ps2_mouse_mode ? 4 : 3;
+ 	if (hard_read(fb_hmice, buffer, size) != size) {
+ 		unhandle_fb_mouse();
+@@ -1109,27 +1121,30 @@
+ 	last_mouse_buttons = button;
+ 	if (!current_virtual_device) return;
+ 	if (!fb_active) button = B_MOVE;
+ 	if (current_virtual_device->mouse_handler) current_virtual_device->mouse_handler(current_virtual_device, mouse_x, mouse_y, button);
+ 	redraw_mouse();
+ 	EINTRLOOP(rs, fsync(fb_handle));
+ }
+ 
+ static int handle_fb_mouse(void)
+ {
++#ifdef HAVE_LIBGPM
+ 	Gpm_Connect conn;
++#endif
+ 
+ 	fb_hmice = c_open(cast_uchar "/dev/input/mice", O_RDWR | O_NOCTTY);
+ 	if (fb_hmice != -1) {
+ 		unsigned char c;
+ 		static const unsigned char imps_seq[] = { 0xf3, 200, 0xf3, 100, 0xf3, 80, 0xf2 };
+ 		static const unsigned char imex_seq[] = { 0xf3, 200, 0xf3, 200, 0xf3, 80, 0xf2 };
++#ifdef HAVE_LIBGPM
+ 		if (hard_write(fb_hmice, imps_seq, sizeof(imps_seq)) != sizeof(imps_seq))
+ 			goto gpm_fallback;
+ 		do
+ 			if (hard_read(fb_hmice, &c, 1) != 1)
+ 				goto gpm_fallback;
+ 		while (c != 0xfa);
+ 		if (hard_read(fb_hmice, &ps2_mouse_mode, 1) != 1)
+ 			goto gpm_fallback;
+ 		if (!ps2_mouse_mode)
+ 			goto open_gpm;
+@@ -1141,22 +1156,75 @@
+ 		do
+ 			if (hard_read(fb_hmice, &c, 1) != 1)
+ 				goto gpm_fallback;
+ 		while (c != 0xfa);
+ 		if (hard_read(fb_hmice, &ps2_mouse_mode, 1) != 1)
+ 			goto gpm_fallback;
+ 		if (ps2_mouse_mode == 3)
+ 			goto open_gpm;
+ 		if (ps2_mouse_mode != 4)
+ 			goto gpm_fallback;
+-	}
+-
++#else
++		if (hard_write(fb_hmice, imps_seq, sizeof(imps_seq)) != sizeof(imps_seq)) {
++			close_socket(&fb_hmice);
++			unhandle_fb_mouse();
++			return -1;
++		}
++		do
++			if (hard_read(fb_hmice, &c, 1) != 1) {
++				close_socket(&fb_hmice);
++				unhandle_fb_mouse();
++				return -1;
++			}
++		while (c != 0xfa);
++		if (hard_read(fb_hmice, &ps2_mouse_mode, 1) != 1) {
++			close_socket(&fb_hmice);
++			unhandle_fb_mouse();
++			return -1;
++		}
++		if (!ps2_mouse_mode || ps2_mouse_mode != 3) {
++			close_socket(&fb_hmice);
++			unhandle_fb_mouse();
++			return -1;
++		}
++
++		if (hard_write(fb_hmice, imex_seq, sizeof(imex_seq)) != sizeof(imex_seq)) {
++			close_socket(&fb_hmice);
++			unhandle_fb_mouse();
++			return -1;
++		}
++		do
++			if (hard_read(fb_hmice, &c, 1) != 1) {
++				close_socket(&fb_hmice);
++				unhandle_fb_mouse();
++				return -1;
++			}
++		while (c != 0xfa);
++		if (hard_read(fb_hmice, &ps2_mouse_mode, 1) != 1) {
++			close_socket(&fb_hmice);
++			unhandle_fb_mouse();
++			return -1;
++		}
++		if (ps2_mouse_mode == 3) {
++			close_socket(&fb_hmice);
++			unhandle_fb_mouse();
++			return -1;
++		}
++		if (ps2_mouse_mode != 4) {
++			close_socket(&fb_hmice);
++			unhandle_fb_mouse();
++			return -1;
++		}
++#endif
++	}
++
++#ifdef HAVE_LIBGPM
+ open_gpm:
+ 	if (0) {
+ gpm_fallback:
+ 		close_socket(&fb_hmice);
+ 	}
+ 
+ 	fb_hgpm = -2;
+ 	conn.eventMask = (unsigned short)~0U;
+ 	conn.defaultMask = gpm_smooth;
+ 	conn.minMod = 0;
+@@ -1167,44 +1235,52 @@
+ 	if (fb_hgpm < 0) {
+ 		fb_hgpm = -2;
+ 		if (fb_hmice >= 0)
+ 			goto done;
+ 		unhandle_fb_mouse();
+ 		return -1;
+ 	}
+ done:
+ 	if (fb_hgpm >= 0)
+ 		set_handlers(fb_hgpm, fb_gpm_in, (void (*)(void *))NULL, NULL);
++#else
++	if (fb_hmice < 0) {
++		unhandle_fb_mouse();
++		return -1;
++	}
++#endif
+ 	if (fb_hmice != -1)
+ 		set_handlers(fb_hmice, fb_ps2_in, (void (*)(void *))NULL, NULL);
+ #ifdef SIGTSTP
+ 	install_signal_handler(SIGTSTP, sig_tstp, NULL, 0);
+ #endif
+ #ifdef SIGCONT
+ 	install_signal_handler(SIGCONT, sig_cont, NULL, 0);
+ #endif
+ #ifdef SIGTTIN
+ 	install_signal_handler(SIGTTIN, sig_tstp, NULL, 0);
+ #endif
+ 
+ 	return 0;
+ }
+ 
+ static void unhandle_fb_mouse(void)
+ {
++#ifdef HAVE_LIBGPM
+ 	if (fb_hgpm >= 0) set_handlers(fb_hgpm, (void (*)(void *))NULL, (void (*)(void *))NULL, NULL);
+ 	if (fb_hgpm >= -1) {
+ 		save_gpm_signals();
+ 		Gpm_Close();
+ 		restore_gpm_signals();
+ 	}
+ 	fb_hgpm = -2;
++#endif
+ 
+ 	close_socket(&fb_hmice);
+ #ifdef SIGTSTP
+ 	install_signal_handler(SIGTSTP, sig_tstp, NULL, 0);
+ #endif
+ #ifdef SIGCONT
+ 	install_signal_handler(SIGCONT, sig_cont, NULL, 0);
+ #endif
+ #ifdef SIGTTIN
+ 	install_signal_handler(SIGTTIN, sig_tstp, NULL, 0);
