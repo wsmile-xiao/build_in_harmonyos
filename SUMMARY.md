@@ -383,6 +383,7 @@
 | **psmisc** | 23.6 | partial |  | Autotools | - | ncurses | [📄](archives/p/psmisc/23.6/) |
 | **pwgen** | 2.08 | partial |  | Autotools | - | - | [📄](archives/p/pwgen/2.08/) |
 | **python** | 3.12.9、3.9.0、3.9.25 | verified |  | Autotools | 0 | - | [📄](archives/p/python/3.9.25/) |
+| **qtsvg** | 6.11.1 | ✅ 已编译 |  | CMake | 0 | - | [📄](archives/q/qtsvg/6.11.1/) |
 | **rabbitmq-c** | 0.13.0、0.15.0 | ✅ 已编译 |  | CMake | - | openssl/1.1.1w | [📄](archives/r/rabbitmq-c/0.15.0/) |
 | **ragel** | 6.10 | uploaded |  | unknown | 0 | - | [📄](archives/r/ragel/6.10/) |
 | **rapidjson** | 1.1.0 | uploaded |  | CMake | 0 | - | [📄](archives/r/rapidjson/1.1.0/) |
