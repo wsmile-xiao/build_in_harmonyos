@@ -1,0 +1,179 @@
+diff -ruN a/Makefile.PL b/Makefile.PL
+--- a/Makefile.PL
++++ b/Makefile.PL
+@@ -49,25 +49,54 @@
+ 		if ( prompt("Continue?", "N") !~ /^y/i ) {
+ 			print "Exiting\n";
+ 			exit(-1);
+ 		}
+ 	}
+ };
+ 
+ # Because DBI generates a postamble at configure-time, we need
+ # the required version of DBI very early.
+ my $DBI_required = 1.57;
++my $dbi_version = 0;
++
++# Try to load DBI normally first
+ eval {
+ 	require DBI;
++	$dbi_version = DBI->VERSION;
+ };
+-if ( $@ or DBI->VERSION < $DBI_required ) {
++
++# If loading fails (e.g., HMDFS SELinux restriction on XS modules),
++# try to extract version from DBI.pm file directly
++if ( $@ ) {
++	warn "Warning: Could not load DBI XS module: $@\n";
++	warn "Attempting to read version from DBI.pm file...\n";
++	foreach my $inc_dir (@INC) {
++		my $dbi_pm = File::Spec->catfile($inc_dir, 'DBI.pm');
++		if (-f $dbi_pm) {
++			open my $fh, '<', $dbi_pm or next;
++			while (<$fh>) {
++				if (/our\s+\$VERSION\s*=\s*['"]?(\d+\.\d+)/) {
++					$dbi_version = $1;
++					close $fh;
++					warn "Found DBI version $dbi_version in $dbi_pm\n";
++					last;
++				}
++			}
++			close $fh if $fh;
++			last if $dbi_version;
++		}
++	}
++}
++
++if ( $dbi_version < $DBI_required ) {
+ 	print "DBI $DBI_required is required to configure this module; please install it or upgrade your CPAN/CPANPLUS shell.\n";
++	print "(Detected DBI version: $dbi_version)\n";
+ 	exit(0);
+ }
+ 
+ # See if we have a C compiler
+ # The following code is adapted from Module::Install::Can
+ SCOPE: {
+ 	# Fix Cygwin bug on maybe_command();
+ 	if ( $^O eq 'cygwin' ) {
+ 		require ExtUtils::MM_Cygwin;
+ 		require ExtUtils::MM_Win32;
+@@ -115,21 +144,21 @@
+ }
+ 
+ # Determine if we are going to use the provided SQLite code, or an already-
+ # installed copy. To this end, look for two command-line parameters:
+ #
+ #    USE_LOCAL_SQLITE -- If non-false, force use of the installed version
+ #    SQLITE_LOCATION  -- If passed, look for headers and libs under this root
+ #
+ # In absense of either of those, expect SQLite 3.X.X libs and headers in the
+ # common places known to Perl or the C compiler.
+-# 
++#
+ # Note to Downstream Packagers:
+ # This block is if ( 0 ) to discourage casual users building against
+ # the system SQLite. We expect that anyone sophisticated enough to use
+ # a system sqlite is also sophisticated enough to have a patching system
+ # that can change the if ( 0 ) to if ( 1 )
+ my ($sqlite_local, $sqlite_base, $sqlite_lib, $sqlite_inc);
+ if ( 0 ) {
+ 	require File::Spec;
+ 	if ( $sqlite_base = (grep(/SQLITE_LOCATION=.*/, @ARGV))[0] ) {
+ 		$sqlite_base =~ /=(.*)/;
+@@ -293,21 +322,21 @@
+ }
+ 
+ my (@CCFLAGS, @LDFLAGS, @LDDLFLAGS);
+ 
+ if ($ENV{TEST_DBD_SQLITE_WITH_ASAN}) {
+     push @CCFLAGS, '-fsanitize=address -static-libasan -fuse-ld=gold -fno-omit-frame-pointer -g -O2';
+     push @LDFLAGS, '-fsanitize=address -static-libasan -fuse-ld=gold -fno-omit-frame-pointer -g -O2';
+     push @LDDLFLAGS, '-fsanitize=address -static-libasan -fuse-ld=gold -fno-omit-frame-pointer -g -O2';
+ }
+ 
+-# RT #70135: See if ld supports Bsymbolic; 
++# RT #70135: See if ld supports Bsymbolic;
+ unless ($^O eq 'MSWin32' && $Config{ld} =~ /link/) {
+ 	for my $path (File::Spec->path) {
+ 		if (MM->maybe_command("$path/ld")) {
+ 			my $devnull = File::Spec->devnull;
+ 			my $output = `$path/ld --help 2>$devnull`;
+ 			if ($output =~ /Bsymbolic/) {
+ 				push @CCFLAGS, '-Wl,-Bsymbolic';
+ 				push @LDFLAGS, '-Wl,-Bsymbolic';
+ 				push @LDDLFLAGS, '-Wl,-Bsymbolic';
+ 			}
+@@ -417,41 +446,67 @@
+ 	EXE_FILES        => [],
+ 
+ 	%CC_OPTIONS,
+ );
+ 
+ package MY;
+ 
+ use Config;
+ 
+ sub postamble {
+-	require DBI;
+-	require DBI::DBD;
+-	my $postamble = eval {
+-		DBI::DBD::dbd_postamble(@_)
++	my $postamble;
++	
++	# Try to load DBI::DBD, handle HMDFS SELinux XS loading restriction
++	eval {
++		require DBI;
++		require DBI::DBD;
++		$postamble = DBI::DBD::dbd_postamble(@_);
+ 	};
+-    if (-e 'sqlite3.c' && -e 'sqlite3.h' && -e 'sqlite3ext.h') {
+-		my $S = $^O eq 'MSWin32' ? '\\' : '/';  # only Win32 (not cygwin)
++	
++	if ( $@ ) {
++		warn "Warning: Could not load DBI::DBD: $@\n";
++		my $dbi_instarch_dir = '/storage/Users/currentUser/usr/local/lib/perl5/site_perl/5.42.0/aarch64-linux/auto/DBI';
++		my $dbi_driver_xst = $dbi_instarch_dir . '/Driver.xst';
++		
++		$postamble = '
++# --- Static paths (DBI XS cannot load due to HMDFS SELinux)
++DBI_INSTARCH_DIR='.$dbi_instarch_dir.'
++DBI_DRIVER_XST='.$dbi_driver_xst.'
++
++$(BASEEXT).c: $(BASEEXT).xsi
++
++$(BASEEXT)$(OBJ_EXT): $(BASEEXT).xsi
++
++$(BASEEXT).xsi: $(DBI_DRIVER_XST) 
++	$(PERL) -p -e "s/~DRIVER~/$(BASEEXT)/g" $(DBI_DRIVER_XST) > $(BASEEXT).xsi
++
++# ---
++';
++	}
++	
++    if (-e 'sqlite3.c' && -e 'sqlite3.h' && -e 'sqlite3ext.h' ) {
++		my $S = $^O eq 'MSWin32' ? '\\' : '/';
+ 		my $share = "\$(INST_LIB)${S}auto${S}share${S}dist${S}\$(DISTNAME)";
+ 		my $perm_dir = $ExtUtils::MakeMaker::VERSION >= 6.52 ? '$(PERM_DIR)' : '755';
+ 		$postamble .= <<"SHARE";
+ config ::
+ \t\$(NOECHO) \$(MKPATH) "$share"
+ \t\$(NOECHO) \$(CHMOD) $perm_dir "$share"
+ \t\$(NOECHO) \$(CP) "sqlite3.c" "$share${S}sqlite3.c"
+ \t\$(NOECHO) \$(CP) "sqlite3.h" "$share${S}sqlite3.h"
+ \t\$(NOECHO) \$(CP) "sqlite3ext.h" "$share${S}sqlite3ext.h"
+ SHARE
+ 	}
+ 	return $postamble;
+ }
+ 
++
+ sub libscan {
+ 	my ($self, $path) = @_;
+ 	return if $path =~ /\.pl$/;
+ 	($path =~ m/\~$/) ? undef : $path;
+ }
+ 
+ sub test_via_harness {
+ 	my ($self, $perl, $tests) = @_;
+ 	if ( $^O eq 'hpux' and $Config{osvers} <= 10.20 ) {
+ 		return qq{\tPERL_DL_NONLAZY=0 $perl "-MExtUtils::Command::MM" }
