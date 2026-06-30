@@ -63,7 +63,7 @@ def _find_git() -> str:
     global _GIT_CMD
     if _GIT_CMD:
         return _GIT_CMD
-    
+
     # 优先检查常见路径
     candidates = [
         "/data/service/hnp/bin/git",  # OpenHarmony默认位置
@@ -71,19 +71,19 @@ def _find_git() -> str:
         "/usr/local/bin/git",
         os.path.expanduser("~/usr/local/bin/git"),
     ]
-    
+
     for path in candidates:
         if os.path.isfile(path) and os.access(path, os.X_OK):
             _GIT_CMD = path
             return path
-    
+
     # 尝试从PATH查找
     import shutil
     git_path = shutil.which("git")
     if git_path:
         _GIT_CMD = git_path
         return git_path
-    
+
     raise RuntimeError("git命令未找到，请安装git")
 
 
@@ -100,7 +100,7 @@ def _run_git(cmd_args: list[str], cwd: str | None = None, **kwargs) -> subproces
 
 def _get_index() -> dict[str, dict]:
     """获取运行时索引（git仓库缓存，每次fetch更新）。
-    
+
     流程：
     1. 缓存仓库不存在 → 初始化sparse clone
     2. 缓存仓库存在 → fetch检查更新
@@ -124,31 +124,31 @@ def _get_index() -> dict[str, dict]:
 
     content = readme_path.read_text(encoding="utf-8")
     _runtime_index = _parse_readme(content)
-    
+
     if not _runtime_index:
         log_fail("README解析失败")
         raise RuntimeError("无法解析预编译包索引")
-    
+
     log_ok(f"索引加载完成: {len(_runtime_index)} 个包")
     return _runtime_index
 
 
 def _update_index_repo() -> int:
     """更新索引git仓库（初始化或fetch）。
-    
+
     使用sparse checkout只拉取README.md，减少空间占用。
     每次都fetch检查更新。
     """
     repo_dir = Path(_INDEX_CACHE_DIR)
-    
+
     # 检查是否是有效的git仓库
     git_dir = repo_dir / ".git"
-    
+
     if not git_dir.exists():
         # 初始化sparse clone
         log_info("初始化索引仓库（sparse clone）...")
         return _init_sparse_clone()
-    
+
     # 已存在，fetch检查更新
     log_info("检查索引仓库更新...")
     return _fetch_update()
@@ -158,16 +158,16 @@ def _init_sparse_clone() -> int:
     """初始化sparse clone仓库，只拉取README.md。"""
     repo_dir = Path(_INDEX_CACHE_DIR)
     repo_dir.mkdir(parents=True, exist_ok=True)
-    
+
     try:
         git = _find_git()
     except RuntimeError as e:
         log_fail(str(e))
         return 1
-    
+
     # 设置safe.directory避免HMDFS问题
     _run_git(["config", "--global", "--add", "safe.directory", str(repo_dir)])
-    
+
     cmds = [
         ["init"],
         ["remote", "add", "origin", _CMD_PKGS_REPO],
@@ -176,13 +176,13 @@ def _init_sparse_clone() -> int:
         ["fetch", "--depth=1", "origin", "main"],
         ["checkout", "origin/main"],
     ]
-    
+
     for cmd_args in cmds:
         result = _run_git(cmd_args, cwd=repo_dir)
         if result.returncode != 0 and "checkout" not in cmd_args[0]:
             log_warn(f"git命令失败: git {' '.join(cmd_args)}")
             return 1
-    
+
     log_ok("索引仓库初始化完成")
     return 0
 
@@ -190,30 +190,30 @@ def _init_sparse_clone() -> int:
 def _fetch_update() -> int:
     """fetch检查更新，有更新则checkout。"""
     repo_dir = Path(_INDEX_CACHE_DIR)
-    
+
     try:
         git = _find_git()
     except RuntimeError as e:
         log_fail(str(e))
         return 1
-    
+
     # 设置safe.directory
     _run_git(["config", "--global", "--add", "safe.directory", str(repo_dir)])
-    
+
     # fetch检查更新
     result = _run_git(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
-    
+
     if result.returncode != 0:
         log_warn(f"fetch失败: {result.stderr[:100]}")
         return 1
-    
+
     # 检查是否有更新
     result_local = _run_git(["rev-parse", "HEAD"], cwd=repo_dir)
     result_remote = _run_git(["rev-parse", "origin/main"], cwd=repo_dir)
-    
+
     local_sha = result_local.stdout.strip()
     remote_sha = result_remote.stdout.strip()
-    
+
     if local_sha != remote_sha:
         # 有更新，checkout新版本
         log_info("发现新版本，更新索引...")
@@ -224,7 +224,7 @@ def _fetch_update() -> int:
         log_ok("索引已更新")
     else:
         log_ok("索引无更新")
-    
+
     return 0
 
 
@@ -314,6 +314,7 @@ _BUILTIN_INDEX: dict[str, dict] = {
 }
 
 _KNOWN_DEPS: dict[str, dict] = {
+    "stm32flash":   {"required": [], "optional": []},
     "pkg-config":   {"required": [], "optional": []},
     "sed":          {"required": [], "optional": []},
     "coreutils":    {"required": [], "optional": []},
@@ -343,6 +344,16 @@ _KNOWN_DEPS: dict[str, dict] = {
     "texinfo":      {"required": [], "optional": []},
     "help2man":     {"required": [], "optional": []},
     "libpipeline":  {"required": [], "optional": []},
+}
+
+
+# ═══════════════════════════════════════════════════════
+# 内置软件版本索引（后备）
+# ═══════════════════════════════════════════════════════
+
+# 格式: software → {"ver": "x.y.z", "url": "...", "build_system": "autotools|cmake|make"}
+_BUILTIN_INDEX: dict[str, dict] = {
+    "stm32flash":   {"ver": "0.7", "url": "https://sourceforge.net/projects/stm32flash/files/stm32flash-0.7.tar.gz", "build_system": "make"},
 }
 
 
@@ -410,9 +421,9 @@ def check_tool_available(tool_name: str, prefix: str | None = None) -> tuple[boo
         (True, "GNU sed 4.9") 或 (False, "未安装") 或 (False, "toybox 版本")
     """
     import shutil
-    
+
     prefix = prefix or os.path.expanduser("~/usr/local")
-    
+
     # 优先检查 ~/usr/local/bin（我们安装的 GNU 版本）
     local_bin = os.path.join(prefix, "bin", tool_name)
     if os.path.isfile(local_bin) and os.access(local_bin, os.X_OK):
@@ -428,12 +439,12 @@ def check_tool_available(tool_name: str, prefix: str | None = None) -> tuple[boo
         except:
             pass
         return True, f"{local_bin}"
-    
+
     # 检查系统 PATH
     tool_path = shutil.which(tool_name)
     if not tool_path:
         return False, "未安装"
-    
+
     # 获取版本信息
     try:
         result = subprocess.run(
@@ -441,7 +452,7 @@ def check_tool_available(tool_name: str, prefix: str | None = None) -> tuple[boo
             capture_output=True, text=True, timeout=5
         )
         first_line = result.stdout.split("\n")[0] if result.stdout else ""
-        
+
         if result.returncode == 0 and "GNU" in first_line:
             return True, first_line[:50]
         elif result.returncode == 0 and first_line:
@@ -484,11 +495,11 @@ def get_package_for_tool(tool_name: str) -> tuple[str | None, str | None]:
             return pkg_name, actual_ver
         # 映射表中有但 cmd-pkgs 无，返回 None
         return None, None
-    
+
     # 工具名直接作为包名尝试（很多情况下一致）
     if is_prebuilt_available(tool_name):
         return tool_name, get_available_version(tool_name)
-    
+
     return None, None
 
 
@@ -506,13 +517,13 @@ def auto_install_tool(tool_name: str, prefix: str | None = None) -> int:
     if available:
         log_ok(f"工具 {tool_name} 已可用: {info}")
         return 0
-    
+
     # 尝试从 cmd-pkgs 安装
     pkg_name, pkg_ver = get_package_for_tool(tool_name)
     if not pkg_name:
         log_warn(f"工具 {tool_name} 无预编译包，需手动安装")
         return 1
-    
+
     log_info(f"安装工具 {tool_name}（包: {pkg_name} {pkg_ver})")
     return install_prebuilt(pkg_name, pkg_ver, prefix)
 
@@ -531,7 +542,7 @@ def auto_install_missing_tools_from_log(log_text: str, prefix: str | None = None
         安装成功的工具列表
     """
     import re
-    
+
     patterns = [
         r"([a-zA-Z0-9_-]+): command not found",
         r"which: no ([a-zA-Z0-9_-]+) in",
@@ -540,7 +551,7 @@ def auto_install_missing_tools_from_log(log_text: str, prefix: str | None = None
         r"configure: error: ([a-zA-Z0-9_-]+) not found",
         r"Can't locate ([a-zA-Z0-9_-]+)",  # Perl 模块
     ]
-    
+
     missing_tools = set()
     for pattern in patterns:
         matches = re.findall(pattern, log_text, re.IGNORECASE)
@@ -552,7 +563,7 @@ def auto_install_missing_tools_from_log(log_text: str, prefix: str | None = None
             if tool_name.startswith("lib"):
                 continue
             missing_tools.add(tool_name)
-    
+
     installed = []
     for tool in sorted(missing_tools):
         pkg_name, pkg_ver = get_package_for_tool(tool)
@@ -565,7 +576,7 @@ def auto_install_missing_tools_from_log(log_text: str, prefix: str | None = None
                 log_warn(f"  安装失败: {tool}")
         else:
             log_warn(f"发现缺失工具: {tool} → 无预编译包")
-    
+
     return installed
 
 
@@ -584,11 +595,11 @@ def check_common_build_tools(prefix: str | None = None) -> dict[str, tuple[bool,
         "curl", "tar", "gzip", "bzip2", "xz",
         "patch", "file", "diff",
     ]
-    
+
     results = {}
     for tool in common_tools:
         results[tool] = check_tool_available(tool, prefix)
-    
+
     return results
 
 
@@ -840,16 +851,16 @@ def list_available() -> None:
 def refresh_index(pdir: str | None = None) -> int:
     """强制刷新索引仓库（重新clone）。"""
     global _runtime_index
-    
+
     # 清除运行时缓存
     _runtime_index = None
-    
+
     # 删除旧仓库并重新clone
     repo_dir = Path(_INDEX_CACHE_DIR)
     if repo_dir.exists():
         shutil.rmtree(repo_dir, ignore_errors=True)
         log_info("删除旧缓存仓库...")
-    
+
     log_info("强制重新clone索引仓库...")
     return _init_sparse_clone()
 
@@ -894,14 +905,14 @@ def resolve_deps_cli(argv: list[str] | None = None) -> int:
         print("\n  🔧 构建工具可用性检查:\n")
         print(f"  {'工具':<12} {'状态':<8} {'版本信息'}")
         print(f"  {'─' * 60}")
-        
+
         results = check_common_build_tools(args.prefix)
         for tool, (available, info) in results.items():
             status = "✅" if available else "❌"
             pkg_name, pkg_ver = get_package_for_tool(tool)
             pkg_hint = f"（可安装: {pkg_name} {pkg_ver})" if pkg_name and not available else ""
             print(f"  {tool:<12} {status:<8} {info[:40]}{pkg_hint}")
-        
+
         # 统计缺失工具
         missing = [t for t, (a, _) in results.items() if not a]
         if missing:
