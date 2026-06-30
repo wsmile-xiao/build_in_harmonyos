@@ -177,6 +177,32 @@ for pkg_dir in "${PACKAGES[@]}"; do
         L0_ERRORS="${L0_ERRORS} no_manifest"
     fi
 
+    # L0f: conandata.yml patches 格式校验 (Conan 2.x 要求 dict-by-version)
+    CONANDATA="$pkg_dir/conandata.yml"
+    if [ -f "$CONANDATA" ] && grep -q "^patches:" "$CONANDATA" 2>/dev/null; then
+        # 提取 patches 段下的 key (缩进的行, 取第一个 token 去掉引号/冒号)
+        while IFS= read -r raw_key; do
+            # 去掉前导空格和引号
+            key=$(echo "$raw_key" | sed 's/^[[:space:]]*//; s/^["'"'"']//; s/["'"'"']:$//; s/:$//')
+            # 跳过子字段、列表项 (- 开头) 和空行
+            case "$key" in
+                patch_file*|patch_type*|patch_description*|-*|"") continue ;;
+            esac
+            # 正确格式: key 是版本号 (纯数字+点, 如 1.3.1)
+            # 错误格式: key 是文件名 (.patch/.diff 结尾)
+            if echo "$key" | grep -qE '\.(patch|diff)$'; then
+                echo "[fail] L0f: conandata.yml patches format wrong — key '$key' is a filename, not a version"
+                echo "       Conan 2.x uses dict-by-version format:"
+                echo "         patches:"
+                echo "           \"${pkg_ver}\":"
+                echo "             - patch_file: \"patches/$key\""
+                L0_FAILED=true
+                L0_ERRORS="${L0_ERRORS} bad_patch_format"
+                break
+            fi
+        done < <(sed -n '/^patches:/,/^[a-z]/p' "$CONANDATA" | grep '^[[:space:]]')
+    fi
+
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"
