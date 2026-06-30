@@ -1,0 +1,140 @@
+diff -ruN a/setup.py b/setup.py
+--- a/setup.py
++++ b/setup.py
+@@ -102,33 +102,37 @@
+                 assert isinstance(v, list)
+                 result[k].extend(v)
+         return result
+ 
+     try:
+         import pkgconfig as pc
+     except ImportError:
+         print("Warning: cannot import pkgconfig Python package.")
+         pc = None
+ 
+-    def lib_ext_kwargs(pc, prefix_env_var, lib_name, lib_pkg_name, pc_version, lib_subdir="lib"):
++    def lib_ext_kwargs(pc, prefix_env_var, lib_name, lib_pkg_name, pc_version, lib_subdir="lib", optional=False):
+         system_prefix = os.environ.get(prefix_env_var)
+         if system_prefix:
+             print(f"Detected and preferring {lib_pkg_name} [via {prefix_env_var}]")
+             return dict(
+                 include_dirs=[os.path.join(system_prefix, "include")],
+                 library_dirs=[os.path.join(system_prefix, lib_subdir)],
+                 libraries=[lib_name],
+             )
+ 
+         if pc and pc.installed(lib_pkg_name, pc_version):
+             print(f"Detected and preferring {lib_pkg_name} [via pkg-config]")
+             return pc.parse(lib_pkg_name)
++        if optional:
++            print(f"Warning: Optional dependency {lib_pkg_name} not found, building without it.")
++            stub_acl_dir = "src/borg/stub_acl"
++            return dict(libraries=[], extra_compile_args=["-DBORG_NO_ACL"], include_dirs=[stub_acl_dir])
+         raise Exception(
+             f"Could not find {lib_name} lib/headers, please set {prefix_env_var} "
+             f"or ensure {lib_pkg_name}.pc is in PKG_CONFIG_PATH."
+         )
+ 
+     crypto_extra_objects = []
+     if is_win32:
+         crypto_ext_lib = lib_ext_kwargs(pc, "BORG_OPENSSL_PREFIX", "libcrypto", "libcrypto", ">=1.1.1", lib_subdir="")
+     else:
+         crypto_ext_lib = lib_ext_kwargs(pc, "BORG_OPENSSL_PREFIX", "crypto", "libcrypto", ">=1.1.1")
+@@ -147,42 +151,49 @@
+         dict(extra_compile_args=cflags),
+     )
+ 
+     checksums_ext_kwargs = members_appended(
+         dict(sources=[checksums_source]),
+         lib_ext_kwargs(pc, "BORG_LIBXXHASH_PREFIX", "xxhash", "libxxhash", ">= 0.7.3"),
+         dict(extra_compile_args=cflags),
+     )
+ 
+     if sys.platform == "linux":
+-        linux_ext_kwargs = members_appended(
+-            dict(sources=[platform_linux_source]),
+-            lib_ext_kwargs(pc, "BORG_LIBACL_PREFIX", "acl", "libacl", ">= 2.2.47"),
+-            dict(extra_compile_args=cflags),
+-        )
++        try:
++            linux_ext_kwargs = members_appended(
++                dict(sources=[platform_linux_source]),
++                lib_ext_kwargs(pc, "BORG_LIBACL_PREFIX", "acl", "libacl", ">= 2.2.47", optional=True),
++                dict(extra_compile_args=cflags),
++            )
++        except Exception:
++            linux_ext_kwargs = members_appended(
++                dict(sources=[platform_linux_source], extra_compile_args=cflags + ["-DBORG_NO_ACL"]),
++            )
+     else:
+         linux_ext_kwargs = members_appended(
+             dict(sources=[platform_linux_source], libraries=["acl"], extra_compile_args=cflags)
+         )
+ 
+     # note: _chunker.c and _hashindex.c are relatively complex/large pieces of handwritten C code,
+     # thus we undef NDEBUG for them, so the compiled code will contain and execute assert().
+     ext_modules += [
+         Extension("borg.crypto.low_level", **crypto_ext_kwargs),
+         Extension("borg.compress", **compress_ext_kwargs),
+         Extension("borg.hashindex", [hashindex_source], extra_compile_args=cflags, undef_macros=["NDEBUG"]),
+         Extension("borg.item", [item_source], extra_compile_args=cflags),
+         Extension("borg.chunker", [chunker_source], extra_compile_args=cflags, undef_macros=["NDEBUG"]),
+         Extension("borg.algorithms.checksums", **checksums_ext_kwargs),
+     ]
+ 
+-    posix_ext = Extension("borg.platform.posix", [platform_posix_source], extra_compile_args=cflags)
++    # OpenHarmony: use stub ACL headers if libacl is not available
++    stub_acl_dir = "src/borg/stub_acl"
++    posix_ext = Extension("borg.platform.posix", [platform_posix_source], extra_compile_args=cflags, include_dirs=[stub_acl_dir])
+     linux_ext = Extension("borg.platform.linux", **linux_ext_kwargs)
+ 
+     syncfilerange_ext = Extension(
+         "borg.platform.syncfilerange", [platform_syncfilerange_source], extra_compile_args=cflags
+     )
+     freebsd_ext = Extension("borg.platform.freebsd", [platform_freebsd_source], extra_compile_args=cflags)
+     darwin_ext = Extension("borg.platform.darwin", [platform_darwin_source], extra_compile_args=cflags)
+     windows_ext = Extension("borg.platform.windows", [platform_windows_source], extra_compile_args=cflags)
+ 
+     if not is_win32:
+@@ -202,23 +213,23 @@
+     cythonizing = (
+         len(sys.argv) > 1
+         and sys.argv[1] not in (("clean", "egg_info", "--help-commands", "--version"))
+         and "--help" not in sys.argv[1:]
+     )
+ 
+     if cythonize and cythonizing:
+         # 3str is the default in Cython3 and we do not support older Cython releases.
+         # we only set this to avoid the related FutureWarning from Cython3.
+         cython_opts = dict(compiler_directives={"language_level": "3str"})
+-        if not is_win32:
+-            # compile .pyx extensions to .c in parallel, does not work on windows
+-            cython_opts["nthreads"] = cpu_threads
++        # OpenHarmony/musl: multiprocessing forkserver doesn't work, disable parallel cythonize
++        # if not is_win32:
++        #     cython_opts["nthreads"] = cpu_threads
+ 
+         # generate C code from Cython for ALL supported platforms, so we have them in the sdist.
+         # the sdist does not require Cython at install time, so we need all as C.
+         cythonize([posix_ext, linux_ext, syncfilerange_ext, freebsd_ext, darwin_ext, windows_ext], **cython_opts)
+         # generate C code from Cython for THIS platform (and for all platform-independent Cython parts).
+         ext_modules = cythonize(ext_modules, **cython_opts)
+ 
+ 
+ def long_desc_from_readme():
+     with open("README.rst") as fd:
+@@ -228,10 +239,14 @@
+         assert start >= 0
+         long_description = "\n" + long_description[start:]
+         # remove badges
+         long_description = re.compile(r"^\.\. start-badges.*^\.\. end-badges", re.M | re.S).sub("", long_description)
+         # remove unknown directives
+         long_description = re.compile(r"^\.\. highlight:: \w+$", re.M).sub("", long_description)
+         return long_description
+ 
+ 
+ setup(cmdclass=cmdclass, ext_modules=ext_modules, long_description=long_desc_from_readme())
++
++# multiprocessing safe import guard for OpenHarmony
++if __name__ == '__main__':
++    pass
