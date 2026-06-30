@@ -1,25 +1,25 @@
 # 鸿蒙平台开源软件编译兼容性总览
 
 > 最后更新：2026-05-27
-> 已收录软件：420 款 / 483 个版本
+> 已收录软件：418 款 / 480 个版本
 
 ## 📊 总体统计
 
 | 指标 | 数量 |
 |------|------|
-| 收录软件 | **420** 款 |
-| 软件版本 | **483** 个 |
-| ✅ 已发布 | 24 |
-| ✅ 已编译 | 75 |
+| 收录软件 | **418** 款 |
+| 软件版本 | **480** 个 |
+| ✅ 已发布 | 23 |
+| ✅ 已编译 | 72 |
 | ❌ 编译失败 | 2 |
 
 | 构建系统 | 数量 |
 |----------|------|
 | Autotools | 170 |
-| unknown | 100 |
-| CMake | 62 |
+| unknown | 101 |
+| CMake | 60 |
 | Makefile | 38 |
-| Meson | 13 |
+| Meson | 14 |
 | custom | 5 |
 | openssl-perl | 1 |
 | python | 1 |
@@ -143,7 +143,7 @@
 | **fdk-aac** | 2.0.3 | partial |  | CMake | - | [] | [📄](archives/f/fdk-aac/2.0.3/) |
 | **fftw** | 3.3.10 | uploaded |  | unknown | 0 | - | [📄](archives/f/fftw/3.3.10/) |
 | **figlet** | 2.2.5 | success |  | Makefile | 1 | - | [📄](archives/f/figlet/2.2.5/) |
-| **file** | 5.45、5.47 | ✅ 已编译 |  |  | 6 | - | [📄](archives/f/file/5.47/) |
+| **file** | 5.45 | verified |  | Autotools | 0 | - | [📄](archives/f/file/5.45/) |
 | **findutils** | 4.10.0 | ✅ 已编译 |  | Autotools | 2 | [] | [📄](archives/f/findutils/4.10.0/) |
 | **fio** | 3.41 | partial |  | Autotools | 1 | - | [📄](archives/f/fio/3.41/) |
 | **fish** | 3.7.1 | partial |  | Autotools | - | - | [📄](archives/f/fish/3.7.1/) |
@@ -164,7 +164,6 @@
 | **gifsicle** | 1.96 | ✅ 已编译 |  |  | - | - | [📄](archives/g/gifsicle/1.96/) |
 | **git** | 2.49.0、2.45 | partial |  | Autotools | - | - | [📄](archives/g/git/2.45/) |
 | **glances** | 4.5.4 | ✅ 已编译 |  |  | 2 | - | [📄](archives/g/glances/4.5.4/) |
-| **glfw** | 3.4 | ✅ 已发布 |  | CMake | 1 | - | [📄](archives/g/glfw/3.4/) |
 | **glib** | 2.84.0 | ✅ 已编译 |  | Meson | 3 | libffi >= 3.4.4,pcre2 >= 10.47,meson >= 1.11.1,ninja >= 1.13 | [📄](archives/g/glib/2.84.0/) |
 | **glm** | 0.9.9.8 | uploaded |  | CMake | 0 | - | [📄](archives/g/glm/0.9.9.8/) |
 | **glog** | 0.7.1 | partial |  | Autotools | 1 | - | [📄](archives/g/glog/0.7.1/) |
@@ -177,6 +176,7 @@
 | **gsm** | 1.0.22、1.0.23 | uploaded |  | unknown | 0 | - | [📄](archives/g/gsm/1.0.23/) |
 | **gzip** | 1.13 | verified |  | Autotools | 0 | - | [📄](archives/g/gzip/1.13/) |
 | **harfbuzz** | 14.2.0 | uploaded |  | Meson | 0 | - | [📄](archives/h/harfbuzz/14.2.0/) |
+| **hdf5** | 1.13.0 | ✅ 已发布 |  |  | 2 | - | [📄](archives/h/hdf5/1.13.0/) |
 | **hdrhistogram** | 0.11.9 | ✅ 已发布 |  |  | 1 | - | [📄](archives/h/hdrhistogram/0.11.9/) |
 | **help2man** | 1.49.3 | verified |  | Autotools | 0 | - | [📄](archives/h/help2man/1.49.3/) |
 | **hidapi** | 0.14.0 | ✅ 已编译 |  |  | - | - | [📄](archives/h/hidapi/0.14.0/) |
@@ -261,7 +261,7 @@
 | **libpcap** | 1.10.6 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libpcap/1.10.6/) |
 | **libpciaccess** | 0.17 | ✅ 已编译 |  |  | - | - | [📄](archives/l/libpciaccess/0.17/) |
 | **libpipeline** | 1.5.8 | verified |  | unknown | 0 | - | [📄](archives/l/libpipeline/1.5.8/) |
-| **libpng** | 1.6.39 | ✅ 已编译 |  | CMake | 0 | - | [📄](archives/l/libpng/1.6.39/) |
+| **libpng** | 1.6.39 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libpng/1.6.39/) |
 | **libpq** | 17.2 | ✅ 已编译 |  |  | 3 | - | [📄](archives/l/libpq/17.2/) |
 | **libpsl** | 0.21.5 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libpsl/0.21.5/) |
 | **libqb3** | 1.3.2 | uploaded |  | unknown | 0 | - | [📄](archives/l/libqb3/1.3.2/) |
@@ -354,7 +354,6 @@
 | **olm** | 3.2.16 | uploaded |  | unknown | 0 | - | [📄](archives/o/olm/3.2.16/) |
 | **openal-soft** | 1.24.3 | partial |  | Autotools | - | - | [📄](archives/o/openal-soft/1.24.3/) |
 | **openblas** | 0.3.33 | partial |  | Autotools | - | - | [📄](archives/o/openblas/0.3.33/) |
-| **openexr** | 3.1.5 | ✅ 已发布 |  |  | 0 | - | [📄](archives/o/openexr/3.1.5/) |
 | **openjpeg** | 2.5.0、2.5.2 | ✅ 已发布 |  |  | 0 | - | [📄](archives/o/openjpeg/2.5.2/) |
 | **openssh** | 10.0p1 | partial |  | Autotools | 2 | - | [📄](archives/o/openssh/10.0p1/) |
 | **openssl** | 1.1.1w、3.5.6、3.0.0 | ✅ 已发布 |  |  | 0 | - | [📄](archives/o/openssl/3.0.0/) |
@@ -364,7 +363,7 @@
 | **p11-kit** | 0.25.5 | uploaded |  | Autotools | 0 | - | [📄](archives/p/p11-kit/0.25.5/) |
 | **p7zip** | 17.05 | uploaded |  | unknown | 0 | - | [📄](archives/p/p7zip/17.05/) |
 | **paho-mqtt-c** | 1.3.13 | partial |  | CMake | - | openssl (1.1.1w, 预编译包已安装) | [📄](archives/p/paho-mqtt-c/1.3.13/) |
-| **pango** | 1.50.14 | ✅ 已发布 |  | Meson | - | - | [📄](archives/p/pango/1.50.14/) |
+| **pango** | 1.50.14 | ✅ 已编译 |  | Meson | 1 | glib/2.88.0,harfbuzz/14.2.0,fontconfig/2.16.0,freetype/2.14.3,cairo/1.18.4... | [📄](archives/p/pango/1.50.14/) |
 | **patch** | 2.7.6 | verified |  | Autotools | 0 | - | [📄](archives/p/patch/2.7.6/) |
 | **pax** | 20240817 | uploaded |  | unknown | 0 | - | [📄](archives/p/pax/20240817/) |
 | **pbzip2** | 1.1.13 | uploaded |  | Makefile | 0 | - | [📄](archives/p/pbzip2/1.1.13/) |
@@ -392,7 +391,7 @@
 | **ragel** | 6.10 | uploaded |  | unknown | 0 | - | [📄](archives/r/ragel/6.10/) |
 | **rapidjson** | 1.1.0 | uploaded |  | CMake | 0 | - | [📄](archives/r/rapidjson/1.1.0/) |
 | **rclone** | 1.72.1 | ✅ 已发布 |  |  | - | - | [📄](archives/r/rclone/1.72.1/) |
-| **re2** | 2024-04-01、2024-07-01 | ✅ 已编译 |  |  | 0 | - | [📄](archives/r/re2/2024-07-01/) |
+| **re2** | 2024-04-01、2024-07-01 | partial |  | unknown | - | - | [📄](archives/r/re2/2024-07-01/) |
 | **re2c** | 4.3.1 | uploaded |  | unknown | 0 | - | [📄](archives/r/re2c/4.3.1/) |
 | **readline** | 8.2 | verified |  | Autotools | 0 | name: ncurses | [📄](archives/r/readline/8.2/) |
 | **readosm** | 1.1.0a | ✅ 已编译 |  |  | 1 | - | [📄](archives/r/readosm/1.1.0a/) |
