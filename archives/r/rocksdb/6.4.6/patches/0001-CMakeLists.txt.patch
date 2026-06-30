@@ -1,0 +1,137 @@
+diff -ruN a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -178,21 +178,21 @@
+ if(MSVC)
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /Zi /nologo /EHsc /GS /Gd /GR /GF /fp:precise /Zc:wchar_t /Zc:forScope /errorReport:queue")
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /FC /d2Zi+ /W4 /wd4127 /wd4800 /wd4996 /wd4351 /wd4100 /wd4204 /wd4324")
+ else()
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -W -Wextra -Wall")
+   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wsign-compare -Wshadow -Wno-unused-parameter -Wno-unused-variable -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers -Wno-strict-aliasing")
+   if(MINGW)
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-format")
+     add_definitions(-D_POSIX_C_SOURCE=1)
+   endif()
+-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
++  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++17")
+   if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-omit-frame-pointer")
+     include(CheckCXXCompilerFlag)
+     CHECK_CXX_COMPILER_FLAG("-momit-leaf-frame-pointer" HAVE_OMIT_LEAF_FRAME_POINTER)
+     if(HAVE_OMIT_LEAF_FRAME_POINTER)
+       set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -momit-leaf-frame-pointer")
+     endif()
+   endif()
+ endif()
+ 
+@@ -399,36 +399,87 @@
+   add_definitions(-fno-builtin-memcmp -DCYGWIN)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "Darwin")
+   add_definitions(-DOS_MACOSX)
+   if(CMAKE_SYSTEM_PROCESSOR MATCHES arm)
+     add_definitions(-DIOS_CROSS_COMPILE -DROCKSDB_LITE)
+     # no debug info for IOS, that will make our library big
+     add_definitions(-DNDEBUG)
+   endif()
+ elseif(CMAKE_SYSTEM_NAME MATCHES "Linux")
+   add_definitions(-DOS_LINUX)
++elseif(CMAKE_SYSTEM_NAME MATCHES "HarmonyOS")
++  # OpenHarmony is Linux-based, use OS_LINUX code paths
++  add_definitions(-DOS_LINUX)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "SunOS")
+   add_definitions(-DOS_SOLARIS)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "FreeBSD")
+   add_definitions(-DOS_FREEBSD)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "NetBSD")
+   add_definitions(-DOS_NETBSD)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "OpenBSD")
+   add_definitions(-DOS_OPENBSD)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "DragonFly")
+   add_definitions(-DOS_DRAGONFLYBSD)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "Android")
+   add_definitions(-DOS_ANDROID)
+ elseif(CMAKE_SYSTEM_NAME MATCHES "Windows")
+   add_definitions(-DWIN32 -DOS_WIN -D_MBCS -DWIN64 -DNOMINMAX)
+   if(MINGW)
+     add_definitions(-D_WIN32_WINNT=_WIN32_WINNT_VISTA)
++  endif()
++endif()
++
++# OpenHarmony: exclude musl libc headers from ~/usr/local/include that conflict
++# with OHOS SDK sysroot. Dependencies (zlib, bzip2, etc.) are installed in
++# ~/usr/local, so find_package adds ~/usr/local/include as -isystem.
++# That directory also contains musl headers (pthread.h, stdlib.h, etc.)
++# which override the OHOS SDK sysroot versions and cause compilation errors
++# (e.g. missing pthread_cond_clockwait, abs declaration conflicts).
++# Fix: force-include the sysroot's versions of the specific headers that cause
++# compilation errors. Both musl and sysroot share the same include guards,
++# so the musl versions will be skipped when encountered later.
++# NOTE: Only include headers that cause actual errors, not all conflicting
++# headers. Including complex headers like sys/types.h can break kernel header
++# include ordering (e.g. __bitwise in linux/fs.h).
++if(CMAKE_SYSTEM_NAME MATCHES "HarmonyOS")
++  # Derive OHOS SDK sysroot from compiler real path (clang is symlink to SDK)
++  get_filename_component(_clang_real "${CMAKE_CXX_COMPILER}" REALPATH)
++  get_filename_component(_clang_dir "${_clang_real}" DIRECTORY)
++  get_filename_component(_ohos_sysroot "${_clang_dir}/../../sysroot" ABSOLUTE)
++  if(EXISTS "${_ohos_sysroot}/usr/include/pthread.h")
++    # Headers known to cause compilation errors when musl version overrides sysroot:
++    # - pthread.h: missing pthread_cond_clockwait declaration (libcxx __mutex_base)
++    # - stdlib.h: abs() declaration conflict with libcxx cstdlib
++    set(_ohos_conflict_headers pthread.h stdlib.h)
++    # Define __bitwise as empty: musl's linux/types.h (found via -isystem
++    # ~/usr/local/include before sysroot) does NOT define __bitwise, but
++    # linux/fs.h uses it (typedef int __bitwise __kernel_rwf_t).
++    # Cannot -include sysroot's linux/types.h because it has a different
++    # include guard (_UAPI_LINUX_TYPES_H vs musl's _LINUX_TYPES_H), so both
++    # get included and __u64 typedef conflicts.
++    # Instead, just define __bitwise to empty (which is what the sysroot
++    # version does: #define __bitwise__ / #define __bitwise __bitwise__).
++    set(_ohos_force_include "${CMAKE_BINARY_DIR}/ohos_sysroot_force_include.h")
++    file(WRITE "${_ohos_force_include}" "// Auto-generated: force-include OHOS sysroot headers\n")
++    file(APPEND "${_ohos_force_include}" "#ifndef __bitwise\n#define __bitwise\n#endif\n")
++    # Fix libcxx bug: cmath uses __promote (C++17+ only, #if _LIBCPP_STD_VER > 14)
++    # but doesn't include <__type_traits/promote.h> where it's defined.
++    # In C++11 mode the code is skipped, but in C++17 it causes compilation error.
++    file(APPEND "${_ohos_force_include}" "#ifdef __cplusplus\n#include <__type_traits/promote.h>\n#endif\n")
++    foreach(_hdr ${_ohos_conflict_headers})
++      if(EXISTS "${_ohos_sysroot}/usr/include/${_hdr}"
++         AND EXISTS "$ENV{HOME}/usr/local/include/${_hdr}")
++        file(APPEND "${_ohos_force_include}" "#include \"${_ohos_sysroot}/usr/include/${_hdr}\"\n")
++      endif()
++    endforeach()
++    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -include ${_ohos_force_include}")
++    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -include ${_ohos_force_include}")
+   endif()
+ endif()
+ 
+ if(NOT WIN32)
+   add_definitions(-DROCKSDB_PLATFORM_POSIX -DROCKSDB_LIB_IO_POSIX)
+ endif()
+ 
+ option(WITH_FALLOCATE "build with fallocate" ON)
+ if(WITH_FALLOCATE)
+   CHECK_CXX_SOURCE_COMPILES("
+@@ -772,21 +823,21 @@
+   set(SYSTEM_LIBS ${CMAKE_THREAD_LIBS_INIT})
+   set(LIBS ${ROCKSDB_SHARED_LIB} ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+ 
+   add_library(${ROCKSDB_SHARED_LIB} SHARED ${SOURCES})
+   target_link_libraries(${ROCKSDB_SHARED_LIB}
+     ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+   set_target_properties(${ROCKSDB_SHARED_LIB} PROPERTIES
+                         LINKER_LANGUAGE CXX
+                         VERSION ${ROCKSDB_VERSION}
+                         SOVERSION ${ROCKSDB_VERSION_MAJOR}
+-                        CXX_STANDARD 11
++                        CXX_STANDARD 17
+                         OUTPUT_NAME "rocksdb")
+ endif()
+ 
+ add_library(${ROCKSDB_STATIC_LIB} STATIC ${SOURCES})
+ target_link_libraries(${ROCKSDB_STATIC_LIB}
+   ${THIRDPARTY_LIBS} ${SYSTEM_LIBS})
+ 
+ if(WIN32)
+   add_library(${ROCKSDB_IMPORT_LIB} SHARED ${SOURCES})
+   target_link_libraries(${ROCKSDB_IMPORT_LIB}
