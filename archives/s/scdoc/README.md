@@ -1,100 +1,43 @@
-# scdoc 1.11.3 for HarmonyOS
+# scdoc
 
-## 概述
+## 软件简介
+scdoc 是一个简单的 man page 生成工具，使用自定义的标记语言编写，可以生成标准的 roff 格式 man pages。
 
-scdoc 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## 主要功能
+- 简洁的标记语法：比 roff 更易读易写
+- 自动生成标准 man page 格式
+- 支持表格、列表、代码块等格式
+- 静态编译，无外部依赖
 
-## 软件信息
+## OHOS 适配
+- 构建系统：Makefile（无 configure）
+- 编译器：Clang 15.0.4
+- 适配补丁：
+  - 修复 install 命令参数格式（toybox 兼容）
+  - 修复函数原型警告（strict-prototypes）
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | scdoc |
-| 版本 | 1.11.3 |
-| 下载地址 | file:///storage/Users/currentUser/tmp/scdoc-1.11.3.tar.gz |
-| 官方文档 | {文档链接} |
+## 依赖关系
+- 无外部依赖（静态编译）
 
-## 鸿蒙环境
-
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
-
-## 编译步骤
-
+## 安装方法
 ```bash
-# 1. 下载源码
-wget file:///storage/Users/currentUser/tmp/scdoc-1.11.3.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
+# 通过预编译包安装
+curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- scdoc 1.11.0
 ```
 
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
+## 使用示例
 ```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
+# 生成 man page
+scdoc < myprogram.scd > myprogram.1
 
-# 检查功能
-{验证命令}
+# 或直接处理文件
+scdoc myprogram.scd.1.in > myprogram.1
 ```
 
-## 经验总结
+## 版本历史
+| 版本 | 状态 | 备注 |
+|------|------|------|
+| 1.11.0 | built | 首次适配 |
 
-1. {经验1}
-2. {经验2}
-
-## 参考资料
-
-- {参考链接1}
-- {参考链接2}
+## 许可证
+MIT License
