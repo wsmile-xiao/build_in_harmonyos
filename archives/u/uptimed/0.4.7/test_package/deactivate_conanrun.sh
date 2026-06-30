@@ -1,0 +1,1 @@
+. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/u/uptimed/0.4.7/test_package/deactivate_conanrunenv-release-armv8.sh"
