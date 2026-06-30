@@ -1,0 +1,243 @@
+diff -ruN a/Makefile.PL b/Makefile.PL
+--- a/Makefile.PL
++++ b/Makefile.PL
+@@ -33,20 +33,34 @@
+ $flags =~ s/([^A-Za-z0-9 -_])/\\$1/g; # escape shell-metachars
+ 
+ $|=1; # to see output immediately
+ $^W=1;
+ 
+ my %define;
+ my @libs;
+ my $Package_Version = '1.20';  # keep this consistent with Tty.pm
+ my $Is_Beta = ($Package_Version =~ m/_/);
+ 
++## OpenHarmony: Hardcode configuration for musl libc (configure checks fail due to CRT missing)
++$define{'-DHAVE_GRANTPT'} = undef;
++$define{'-DHAVE_OPENPTY'} = undef;
++$define{'-DHAVE_POSIX_OPENPT'} = undef;
++$define{'-DHAVE_PTSNAME'} = undef;
++$define{'-DHAVE_PTSNAME_R'} = undef;
++$define{'-DHAVE_PTY_H'} = undef;
++$define{'-DHAVE_SIGACTION'} = undef;
++$define{'-DHAVE_STRLCPY'} = undef;
++$define{'-DHAVE_SYS_STROPTS_H'} = undef;
++$define{'-DHAVE_TERMIOS_H'} = undef;
++$define{'-DHAVE_TTYNAME'} = undef;
++$define{'-DHAVE_UNLOCKPT'} = undef;
++
+ open(SUB, ">xssubs.c") or die "open: $!";
+ 
+ warn "WARNING: perl versions prior to 5.8 are untested and may have problems.\n"
+   if $] < 5.008;
+ 
+ # improve backward-compatibility
+ @define{qw(-DPL_sv_undef=sv_undef -DPL_dowarn=dowarn)} = (undef, undef)
+   if $] < 5.004_05;
+ 
+ print <<_EOT_;
+@@ -68,21 +82,21 @@
+   if (-c '/dev/ptym/clone');
+ 
+ $define{'-DHAVE_DEV_PTC'} = undef
+   if (-c "/dev/ptc");
+ 
+ $define{'-DHAVE_DEV_PTMX_BSD'} = undef
+   if (-c "/dev/ptmx_bsd");
+ 
+ if (-d "/dev/ptym" and -d "/dev/pty") {
+   $define{'-DHAVE_DEV_PTYM'} = undef;
+-  
++
+ }
+ 
+ 
+ 
+ 
+ # config tests go to a separate dir
+ unless( mkdir 'conf', 0777 ) {
+   my $e = $!;
+   die "mkdir: $e" unless -d 'conf';
+ }
+@@ -90,21 +104,23 @@
+ use Cwd qw(getcwd);
+ my $dir = getcwd;
+ chdir('conf') or die "chdir: $!";
+ 
+ open(TST,">compilerok.c") or die "open: $!";
+ print TST <<'ESQ';
+ int main () { return 0; }
+ ESQ
+ close(TST);
+ 
+-if (system("$cfg{'cc'} $flags compilerok.c > compilerok.log 2>&1")) {
++## OpenHarmony: Skip linking check (CRT files missing)
++## Use -c to only compile, not link
++if (system("$cfg{'cc'} $flags -c compilerok.c > compilerok.log 2>&1")) {
+   die <<"__EOT__";
+ 
+ ERROR: cannot run the configured compiler '$cfg{'cc'}'
+ (see conf/compilerok.log). Suggestions:
+ 1) The compiler '$cfg{'cc'}' is not in your PATH. Add it
+    to the PATH and try again. OR
+ 2) The compiler isn't installed on your system. Install it. OR
+ 3) You only have a different compiler installed (e.g. 'gcc').
+    Either fix the compiler config in the perl Config.pm
+    or install a perl that was built with the right compiler
+@@ -127,20 +143,28 @@
+ 	     sigaction    => "",
+ 	     grantpt      => "",
+ 	     unlockpt     => "",
+ 	     getpt        => "",
+ 	     posix_openpt => "",
+ 	     ptsname      => "",
+ 	     ptsname_r    => "",
+ 	    );
+ 
+ foreach my $f (sort keys %funcs) {
++  ## OpenHarmony: Skip detection if already hardcoded
++  my $defkey = "-DHAVE_\U$f";
++  if (exists $define{$defkey}) {
++    print "Looking for $f()" . "." x (13-length($f)) . " ";
++    print "FOUND (hardcoded).\n";
++    push @libs, $funcs{$f} if $funcs{$f};
++    next;
++  }
+   open(TST,">functest_$f.c") or die "open: $!";
+   print TST <<"ESQ";
+ /* System header to define __stub macros and hopefully few prototypes,
+     which can conflict with char \$ac_func (); below.  */
+ #include <assert.h>
+ /* Override any gcc2 internal prototype to avoid an error.  */
+ #ifdef __cplusplus
+ extern "C"
+ #endif
+ /* We use char because int might match the return type of a gcc2
+@@ -186,20 +210,28 @@
+ 
+ # find various headerfiles
+ 
+ my @headers = qw(termios.h termio.h libutil.h util.h pty.h
+                  sys/stropts.h sys/ptyio.h sys/pty.h);
+ my %headers;
+ 
+ foreach my $h (sort @headers) {
+   my $def = $h;
+   $def =~ s/\W/_/g;
++  ## OpenHarmony: Skip detection if already hardcoded
++  my $defkey = "-DHAVE_\U$def";
++  if (exists $define{$defkey}) {
++    print "Looking for $h" . "." x (15-length($h)) . " ";
++    print "FOUND (hardcoded).\n";
++    $headers{$h} = undef;
++    next;
++  }
+   open(TST,">headtest_$def.c") or die "open: $!";
+   print TST <<"ESQ";
+ #include <sys/types.h>
+ #include <$h>
+ int main () { return 0; }
+ ESQ
+   close(TST);
+   print "Looking for $h" . "." x (15-length($h)) . " ";
+   if(system("$cfg{'cc'} $flags headtest_$def.c > headtest_$def.log 2>&1")) {
+     print "not found.\n"
+@@ -279,62 +311,28 @@
+ 	    VSUSP VSWTCH VT0 VT1 VTDLY VTIME VWERASE WRAP XCASE XCLUDE
+ 	    XMT1EN XTABS);
+ 
+ print <<_EOT_;
+ Checking which symbols compile OK...
+ (sorry for the tedious check, but some systems have not too clean
+  header files, to say the least;  '+' means OK, '-' means not defined
+  and '*' has compile problems...)
+ _EOT_
+ 
++## OpenHarmony: Skip symbol check entirely (CRT files missing, detection will fail)
++print "Skipping symbol check (OpenHarmony: CRT files missing).\n\n";
+ my %badsyms;
+ my %ttsyms_exist;
+-
+-foreach my $s (sort @ttsyms) {
++foreach my $s (@ttsyms) {
+   $ttsyms_exist{$s} = undef;
+-  open(TST,">ttsymtest_$s.c") or die "open >ttsymtest_$s.c: $!";
+-  print TST "#include <sys/types.h>\n";
+-  foreach my $h (@headers) {
+-    print TST "#include <$h>\n" if exists $headers{$h};
+-  }
+-  print TST <<"__EOT__";
+-#ifdef $s
+-int main () { int x; x = (int)$s; return 0; }
+-#else
+-#line 29999
+-choke me badly on line 29999
+-#endif
+-__EOT__
+-  close(TST);
+-
+-  if (system("$cfg{'cc'} $flags @{[keys %define]} ttsymtest_$s.c >ttsymtest_$s.log 2>&1")) {
+-    print SUB qq{newCONSTSUB(stash, "$s", newSV(0));\n};
+-    # now check if the symbol is defined (should have an error message
+-    # for line 29999 in the logfile)
+-    open(CCOUT, "ttsymtest_$s.log") or die "open ttsymtest_$s.log: $!";
+-    if (grep {m/29999/} (<CCOUT>)) {
+-      # symbol not defined
+-      delete $ttsyms_exist{$s};
+-      print "-$s ";
+-      unlink "ttsymtest_$s.c", "ttsymtest_$s.log";
+-    } else {
+-      # was defined, but didn't compile
+-      $badsyms{$s} = undef;
+-      print "*$s ";
+-    }
+-    close CCOUT;
+-  }
+-  else {
+-    print "+$s ";
+-    print SUB qq{newCONSTSUB(stash, "$s", newSViv($s));\n};
+-    unlink "ttsymtest_$s.c", "ttsymtest_$s.log";
+-  }
++  print "+$s ";
++  print SUB qq{newCONSTSUB(stash, "$s", newSViv($s));\n};
+ }
+ 
+ close(SUB);
+ print "\n\n";
+ 
+ # now back to Makefile dir
+ chdir($dir) or die "chdir: $!";
+ 
+ my $all_ok = 1;
+ foreach my $check
+@@ -465,26 +463,29 @@
+     'LIBS'           => join(" ", @libs),
+     'clean'	     => {'FILES' => 'xssubs.c conf Tty.exp_old log'},
+     'realclean'	     => {'FILES' => 'Tty IO-Tty.ppd'},
+     'AUTHOR'         => 'Roland Giersig <RGiersig@cpan.org>',
+     'ABSTRACT'       => 'Pseudo ttys and constants',
+     'LICENSE'        => 'perl',
+     'BUILD_REQUIRES' =>  {
+ 	'Test::More' => 0,  # For testing
+     },
+     'META_MERGE'     => {
+-	'resources'    => {
++	'reources'    => {
+             license => 'http://dev.perl.org/licenses/',
+             repository  => 'https://github.com/toddr/IO-Tty',
+             bugtracker => 'https://github.com/toddr/IO-Tty/issues',
+ 	},
+     },
++    ## OpenHarmony: Missing CRT files (crti.o, crtn.o, crtbeginS.o, crtendS.o)
++    ## Use -nostartfiles -nodefaultlibs to skip CRT, -lc for libc
++    dynamic_lib    => { OTHERLDFLAGS => '-nostartfiles -nodefaultlibs -lc' },
+ );
+ 
+ sub MY::postamble {
+ 
+   return '' unless $] >= 5.00503;
+ 
+ <<'ESQ';
+ 
+ dist : ppd
+ 
