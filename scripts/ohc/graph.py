@@ -66,6 +66,11 @@ _TEMPLATE_FIELDS = {
     "resolved_in", "resolved_note",
     # Draft-specific (allowed but stripped on merge)
     "draft", "contributor_id",
+    # Knowledge collaboration (authorship & provenance)
+    "authors", "source_pr", "source_commit",
+    # Quality metrics (方案 D)
+    "metrics_success_count", "metrics_fail_count",
+    "metrics_confidence", "metrics_last_used",
 }
 
 # Regex pattern for dynamic forbid_N_xxx fields
