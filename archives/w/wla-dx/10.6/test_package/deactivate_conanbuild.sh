@@ -1,1 +1,0 @@
-. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/w/wla-dx/10.6/test_package/deactivate_conanbuildenv-release-armv8.sh"

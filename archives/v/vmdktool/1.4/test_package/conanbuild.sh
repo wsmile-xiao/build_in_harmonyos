@@ -1,1 +1,0 @@
-. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/v/vmdktool/1.4/test_package/conanbuildenv-release-armv8.sh"

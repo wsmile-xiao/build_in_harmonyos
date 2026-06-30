@@ -1,1 +1,0 @@
-. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/f/fastgron/0.7.7/test_package/conanrunenv-release-armv8.sh"

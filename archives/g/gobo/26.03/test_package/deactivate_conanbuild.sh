@@ -1,1 +1,0 @@
-. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/g/gobo/26.03/test_package/deactivate_conanbuildenv-release-armv8.sh"
