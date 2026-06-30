@@ -1,24 +1,34 @@
 # recutils 1.9 适配笔记
 
 ## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-06-09
+- 构建系统: {cmake|autotools|makefile|meson|custom}
+- 编译日期: {2026-05-27}
 - 编译器: clang/clang++
-- 状态: built
+- 状态: {published|built|failed}
 
 ## 编译步骤
 
-1. 下载recutils 1.9源码 (https://ftpmirror.gnu.org/recutils/recutils-1.9.tar.gz)
-2. 应用补丁：sed -i 's/umask 077/umask 007/g' configure
-3. ./configure --prefix=$HOME/usr/local --disable-maintainer-mode
-4. make -j4
-5. make install
+{用文字描述实际编译步骤，包括关键的 configure/cmake 命令}
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | configure脚本umask 077创建临时目录不可访问 | HMFS文件系统权限继承机制 | sed替换umask 077为007 |
+{按需添加行}
+
+## 源码修改
+
+{如有补丁，列出文件名和修改内容；无则删除此节}
+
+## 依赖版本
+
+{列出本次编译依赖的具体软件版本}
+
+## 验证结果
+
+```bash
+{验证命令和结果}
+```
 
 ## 交付物
 

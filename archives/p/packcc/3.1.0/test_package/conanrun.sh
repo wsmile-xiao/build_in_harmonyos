@@ -1,1 +1,0 @@
-. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/p/packcc/3.1.0/test_package/conanrunenv-release-armv8.sh"
