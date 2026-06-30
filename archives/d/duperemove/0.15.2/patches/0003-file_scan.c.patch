@@ -1,0 +1,429 @@
+diff -ruN a/file_scan.c b/file_scan.c
+--- a/file_scan.c
++++ b/file_scan.c
+@@ -36,20 +36,23 @@
+ #include <inttypes.h>
+ #include <linux/magic.h>
+ #include <sys/statfs.h>
+ #include <fnmatch.h>
+ #include <blkid/blkid.h>
+ #include <libmount/libmount.h>
+ #include <sys/sysmacros.h>
+ #include <uuid/uuid.h>
+ #include <bsd/sys/queue.h>
+ 
++/* OpenHarmony compatibility for statx */
++#include "compat_statx.h"
++
+ #include <glib.h>
+ 
+ #include "csum.h"
+ #include "filerec.h"
+ #include "hash-tree.h"
+ #include "btrfs-util.h"
+ #include "debug.h"
+ #include "file_scan.h"
+ #include "dbfile.h"
+ #include "util.h"
+@@ -63,21 +66,21 @@
+ #define	XFS_SB_MAGIC		0x58465342	/* 'XFSB' */
+ #endif
+ 
+ struct exclude_file {
+ 	char *pattern;
+ 	SLIST_ENTRY(exclude_file) list;
+ };
+ 
+ SLIST_HEAD(exclude_list, exclude_file) exclude_head = SLIST_HEAD_INITIALIZER(exclude_head);
+ 
+-static int __scan_file(char *path, struct dbhandle *db, struct statx *st);
++static int __scan_file(char *path, struct dbhandle *db, struct compat_statx *st);
+ 
+ static struct threads_pool scan_pool;
+ 
+ #define READ_BUF_LEN (8*1024*1024) // 8MB
+ 
+ struct buffer {
+ 	char *buf;
+ 	size_t size; /* Size of buf */
+ 
+ 	/*
+@@ -208,21 +211,21 @@
+ 
+ 	return 0;
+ }
+ 
+ static inline void mnt_unref_table_cleanup(struct libmnt_table **tb)
+ {
+ 	if (tb && *tb)
+ 		mnt_unref_table(*tb);
+ }
+ 
+-static inline dev_t stx_to_dev(struct statx *stx)
++static inline dev_t stx_to_dev(struct compat_statx *stx)
+ {
+ 	return makedev(stx->stx_dev_major, stx->stx_dev_minor);
+ }
+ 
+ static char *extract_first_device(const char *fs_source)
+ {
+ 	char *first_device = NULL;
+ 	const char *colon;
+ 
+ 	if (!fs_source)
+@@ -240,21 +243,21 @@
+ 		first_device = strdup(fs_source);
+ 		if (!first_device)
+ 			return NULL;
+ 	}
+ 	return first_device;
+ }
+ 
+ /* Get the UUID associated with the FS that stores path */
+ int get_uuid(char *path, uuid_t *uuid)
+ {
+-	struct statx st;
++	struct compat_statx st;
+ 	int ret;
+ 	_cleanup_(mnt_unref_table_cleanup) struct libmnt_table *tb = NULL;
+ 	_cleanup_(closefd) int fd = open(path, O_RDONLY);
+ 	_cleanup_(freep) char *uuid_found = NULL;
+ 
+ 	struct libmnt_fs *dev = NULL;
+ 
+ 	if (fd == -1) {
+ 		eprintf("Cannot open %s: %s\n", path, strerror(errno));
+ 		return 1;
+@@ -267,44 +270,48 @@
+ 			eprintf("%s: btrfs_get_fsuuid failed\n",
+ 				path);
+ 			return 1;
+ 		}
+ 	} else {
+ 		const char *fs_source;
+ 		char *first_device;
+ 
+ 		dprintf("get_uuid: %s do not live on btrfs\n", path);
+ 
+-		ret = statx(0, path, 0, STATX_BASIC_STATS, &st);
++		ret = compat_statx(0, path, 0, STATX_BASIC_STATS, &st);
+ 		if (ret) {
+ 			eprintf("Failed to stat %s: %s\n",
+ 					path, strerror(errno));
+ 			return 1;
+ 		}
+ 
+ 		if (st.stx_dev_major == 0) {
+-			dprintf("%s lives on an unsupported filesystem, skipping. "
+-				"Please fill a bug if you think this is a mistake.\n",
+-					path);
+-			return 1;
++			/* OpenHarmony: Allow device major=0 */
++			dprintf("%s lives on a virtual filesystem. Generating synthetic UUID.\n", path);
++			/* OpenHarmony: Use a fixed UUID for all virtual filesystems */
++			/* UUID: e4871100-0000-0000-0000-000000000001 */
++			memset(uuid, 0, sizeof(uuid_t));
++			((uint32_t*)uuid)[0] = 0xe4871100;
++			((uint32_t*)uuid)[3] = 1;
++			return 0;
+ 		}
+ 
+ 		tb = mnt_new_table_from_file("/proc/self/mountinfo");
+ 		if (!tb) {
+ 			perror("unable to read and parse /proc/self/mountinfo");
+ 			return 1;
+ 		}
+ 
+ 		dev = mnt_table_find_devno(tb, stx_to_dev(&st), MNT_ITER_FORWARD);
+ 		if (!dev) {
+ 			eprintf("%s: unable to find the mount infos\n",
+-					path);
++				path);
+ 			return 1;
+ 		}
+ 
+ 		fs_source = mnt_fs_get_source(dev);
+ 		first_device = extract_first_device(fs_source);
+ 
+ 		if (!first_device) {
+ 			eprintf("Memory allocation failed\n");
+ 			return 1;
+ 		}
+@@ -317,21 +324,21 @@
+ 					"populate the cache.\n",
+ 					mnt_fs_get_source(dev));
+ 			return 1;
+ 		}
+ 
+ 		uuid_parse(uuid_found, *uuid);
+ 	}
+ 	return 0;
+ }
+ 
+-static inline uint64_t timestamp_to_nano(struct statx_timestamp t)
++static inline uint64_t timestamp_to_nano(struct compat_statx_timestamp t)
+ {
+ 	return t.tv_sec * 1000000000 + t.tv_nsec;
+ }
+ 
+ /*
+  * Check if path lives on a filesystem that is supported, eg
+  * that is known to support deduplication.
+  */
+ bool is_fs_supported(char *path)
+ {
+@@ -351,63 +358,68 @@
+ 
+ /* Check if path should be processed:
+  * - is path not excluded ?
+  * - is path a file or directory ?
+  * - is path not an empty file ?
+  * - does path lives on our locked filesystem ?
+  *   for files, we only do that check if the parent is not checked
+  *
+  * Returns true is the file is legit, false if not (or on error)
+  */
+-bool check_file(struct dbhandle *db, char *path, struct statx *st, bool parent_checked)
++bool check_file(struct dbhandle *db, char *path, struct compat_statx *st, bool parent_checked)
+ {
+ 	int ret;
+ 	struct dbfile_config cfg;
+ 	uuid_t uuid = {0,};
+ 
+-	if (is_excluded(path))
++
++	if (is_excluded(path)) {
+ 		return false;
++	}
+ 
+ 	if (!S_ISREG(st->stx_mode) && !S_ISDIR(st->stx_mode)) {
+ 		vprintf("Skipping non-regular/non-directory file %s\n", path);
+ 		return false;
+ 	}
+ 
+ 	if (S_ISREG(st->stx_mode) && st->stx_size == 0) {
+ 		vprintf("Skipping empty file %s\n", path);
+ 		return false;
+ 	}
+ 
+ 	/* There is no need to check if the file lives in our locked fs.
+ 	 * It is a regular file and we already check its parent.
+ 	 */
+-	if (S_ISREG(st->stx_mode) && parent_checked)
++	if (S_ISREG(st->stx_mode) && parent_checked) {
+ 		return true;
++	}
+ 
+ 	/* Locked-fs checks */
+ 	/* First, try to get uuid from the hashfile */
+ 	if (uuid_is_null(locked_fs.uuid)) {
+ 		dprintf("Looking our fs uuid from the hashfile\n");
+ 		ret = dbfile_get_config(db->db, &cfg);
+-		if (ret)
++		if (ret) {
+ 			return 1;
++		}
+ 
+ 		if (!uuid_is_null(cfg.fs_uuid))
+ 			uuid_copy(locked_fs.uuid, cfg.fs_uuid);
+ 	}
+ 
+ 	/* hashfile was empty. We lock on the file. */
+ 	if (uuid_is_null(locked_fs.uuid)) {
+ 		dprintf("Empty hashfile, locking on the current file\n");
+ 		ret = get_uuid(path, &locked_fs.uuid);
+-		if (ret)
++		if (ret) {
+ 			return false;
++		}
+ 
+ 		locked_fs.dev = stx_to_dev(st);
+ 		locked_fs.is_btrfs = is_btrfs(path);
+ 
+ 		if (!is_fs_supported(path))
+ 			eprintf("Warn: filesystem for %s is not known to "
+ 				"support deduplication.\n", path);
+ 
+ 		return true;
+ 	}
+@@ -448,31 +460,31 @@
+ 
+ void fs_get_locked_uuid(uuid_t *uuid)
+ {
+ 	if (uuid)
+ 		uuid_copy(*uuid, locked_fs.uuid);
+ }
+ 
+ static int get_dirent_type(struct dirent *entry, int fd, const char *path)
+ {
+ 	int ret;
+-	struct statx st;
++	struct compat_statx st;
+ 
+ 	if (entry->d_type != DT_UNKNOWN)
+ 		return entry->d_type;
+ 
+ 	/*
+ 	 * FS doesn't support file type in dirent, do this the old
+ 	 * fashioned way. We translate mode to DT_* for the
+ 	 * convenience of the caller.
+ 	 */
+-	ret = statx(fd, entry->d_name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &st);
++	ret = compat_statx(fd, entry->d_name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, &st);
+ 	if (ret || !(st.stx_mask & STATX_BASIC_STATS)) {
+ 		eprintf("Error %d: %s while getting type of file %s/%s. "
+ 			"Skipping.\n",
+ 			errno, strerror(errno), path, entry->d_name);
+ 		return DT_UNKNOWN;
+ 	}
+ 
+ 	if (S_ISREG(st.stx_mode))
+ 		return DT_REG;
+ 	if (S_ISDIR(st.stx_mode))
+@@ -491,21 +503,21 @@
+ 	return DT_UNKNOWN;
+ }
+ 
+ /*
+  * Returns nonzero on fatal errors only
+  */
+ static int walk_dir(char *path, struct dbhandle *db)
+ {
+ 	int ret = 0;
+ 	struct dirent *entry;
+-	struct statx st;
++	struct compat_statx st;
+ 	_cleanup_(closedirectory) DIR *dirp = opendir(path);
+ 
+ 	/* Overallocate to peace the compiler. An abort will check the actual values. */
+ 	char child[PATH_MAX + 257] = { 0, };
+ 
+ 	if (dirp == NULL) {
+ 		eprintf("Error %d: %s while opening directory %s\n",
+ 			errno, strerror(errno), path);
+ 		return 0;
+ 	}
+@@ -533,21 +545,21 @@
+ 			continue;
+ 
+ 		/* This should never happen */
+ 		abort_on(strlen(path) + strlen(entry->d_name) > PATH_MAX);
+ 
+ 		if (strcmp(path, "/") == 0)
+ 			sprintf(child, "/%s", entry->d_name);
+ 		else
+ 			sprintf(child, "%s/%s", path, entry->d_name);
+ 
+-		ret = statx(0, child, 0, STATX_BASIC_STATS, &st);
++		ret = compat_statx(0, child, 0, STATX_BASIC_STATS, &st);
+ 		if (ret || !(st.stx_mask | STATX_BASIC_STATS)) {
+ 			eprintf("Failed to stat %s: %s\n",
+ 					path, strerror(errno));
+ 			continue;
+ 		}
+ 
+ 		if (!check_file(db, child, &st, true))
+ 			continue;
+ 
+ 		if (entry->d_type == DT_REG)
+@@ -574,21 +586,21 @@
+ 	 */
+ 	return true ? lstat(path_in_db, &st) : false;
+ }
+ 
+ /*
+  * Returns nonzero on fatal errors only
+  * This function schedules csum_whole_file()
+  * The caller must call check_file() before and must not call
+  * this if path is not a regular file.
+  */
+-static int __scan_file(char *path, struct dbhandle *db, struct statx *st)
++static int __scan_file(char *path, struct dbhandle *db, struct compat_statx *st)
+ {
+ 	int ret;
+ 	struct file dbfile = {0,};
+ 	static unsigned int seq = 0, counter = 0;
+ 	GError *err = NULL;
+ 	struct file_to_scan *file;
+ 	int64_t fileid = 0;
+ 	bool file_renamed;
+ 	static uint64_t position = 0;
+ 
+@@ -703,50 +715,51 @@
+ 		free(file);
+ 		return 1;
+ 	}
+ 
+ 	return 0;
+ }
+ 
+ /* The entry point for files passed by the user */
+ int scan_file(char *in_path, struct dbhandle *db)
+ {
+-	struct statx st;
++	struct compat_statx st;
+ 	char path[PATH_MAX];
+ 	int ret;
+ 
+ 	/*
+ 	 * Sanitize the file name and get absolute path. This avoids:
+ 	 *
+ 	 * - needless filerec writes to the db when we have
+ 	 *   effectively the same filename but the components have extra '/'
+ 	 *
+ 	 * - Absolute path allows the user to re-run this hash from
+ 	 *   any directory.
+ 	 */
+ 	if (realpath(in_path, path) == NULL) {
+ 		eprintf("Error %d: %s while getting path to file %s. "
+ 			"Skipping.\n",
+ 			errno, strerror(errno), in_path);
+ 		return 0;
+ 	}
+ 
+-	ret = statx(0, path, 0, STATX_BASIC_STATS, &st);
++	ret = compat_statx(0, path, 0, STATX_BASIC_STATS, &st);
+ 	if (ret || !(st.stx_mask & STATX_BASIC_STATS)) {
+ 		eprintf("Error %d: %s while stating file %s. "
+ 			"Skipping.\n",
+ 			errno, strerror(errno), path);
+ 		return 0;
+ 	}
+ 
+-	if (!check_file(db, path, &st, false))
++	if (!check_file(db, path, &st, false)) {
+ 		return 0;
++	}
+ 
+ 	if (S_ISREG(st.stx_mode))
+ 		return __scan_file(path, db, &st);
+ 	else
+ 		return walk_dir(path, db);
+ }
+ 
+ /* Check if the block starting at buf is full of zeroes */
+ static inline int is_block_zeroed(void *buf)
+ {
+@@ -1243,20 +1256,20 @@
+ 	abort_on(!scan_pool.pool);
+ }
+ 
+ void filescan_free(void)
+ {
+ 	free_pool(&scan_pool);
+ }
+ 
+ void add_file_fdupes(char *path)
+ {
+-	struct statx st;
++	struct compat_statx st;
+ 	int ret;
+ 
+-	ret = statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, &st);
++	ret = compat_statx(AT_FDCWD, path, 0, STATX_BASIC_STATS, &st);
+ 	if (ret || !(st.stx_mask & STATX_BASIC_STATS)) {
+ 		eprintf("statx on %s: %s\n", path, strerror(errno));
+ 		return;
+ 	}
+ 	filerec_new(path, st.stx_ino, st.stx_size);
+ }
