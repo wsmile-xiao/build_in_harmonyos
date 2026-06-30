@@ -52,3 +52,43 @@
 ## 注意事项
 - 必须使用静态链接，动态链接因 SELinux 限制不可用
 - file 命令依赖 magic.mgc 数据文件，确保安装路径正确
+
+---
+
+## 归档处理记录（2026-05-27）
+
+### 问题诊断
+
+**旧记录问题**：
+- manifest.yaml 显示 status: built，但 packaging 目录不存在
+- 无 .tar.gz 预编译包文件（违反 R24 归档清理规则）
+- 有 7 个补丁文件存在，有知识沉淀
+
+**本次编译失败**：
+- 编译日期: 2026-05-27
+- 失败阶段: configure (Step3)
+- 失败原因: config.status 权限问题（OHOS 系统限制）
+- 错误信息: `config.status:982: error: could not setup config files machinery`
+- 知识匹配: E072（config.sub 三元组验证失败）— 但实际错误不同
+
+### 归档决定
+
+根据 R24 归档清理规则：
+- **方案选择**: 方案 A - 标记为 archived
+- **理由**: 旧记录有补丁、有知识，但无产物；本次编译失败是环境问题而非软件适配问题
+- **状态变更**: built → archived
+- **保留内容**: 7 个补丁文件供未来参考
+
+### 后续建议
+
+1. **环境问题**: config.status 权限问题是 OHOS HMDFS 文件系统的 UID 映射限制，与软件本身无关
+2. **尝试 E011 方案**: 可尝试修改 configure 中的 umask（`sed -i 's/umask 077/umask 022/g' configure`）
+3. **备选方案**: 如果 umask 修改无效，可考虑使用 E011 的极端方案（手动生成 config.h）
+4. **补丁有效性**: 已有的 7 个补丁文件仍然有效，可在解决环境问题后继续编译
+
+### 归档状态
+
+- manifest.yaml 状态: archived
+- archiving_reason: 已添加说明
+- notes.md: 已更新本次编译失败记录
+- 补丁文件: 已保留（0001-0007）

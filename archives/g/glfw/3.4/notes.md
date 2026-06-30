@@ -2,111 +2,104 @@
 
 ## 编译环境
 - 构建系统: cmake
-- 编译日期: 2026-05-19
+- 编译日期: 2026-05-27
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
-1. 下载源码（从 GitHub）：
+1. **下载源码**
    ```bash
-   curl -L "https://github.com/glfw/glfw/archive/refs/tags/3.4.tar.gz" -o ~/tmp/glfw-3.4.tar.gz
+   wget https://github.com/glfw/glfw/releases/download/3.4/glfw-3.4.zip
    ```
 
-2. 初始化编译环境：
+2. **设置环境**
    ```bash
-   python3 ohc-run.py init-build glfw 3.4 --url=file://~/tmp/glfw-3.4.tar.gz
+   export LD_LIBRARY_PATH="/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib:/storage/Users/currentUser/usr/local/lib"
+   export OHOS_SYSROOT="/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot"
    ```
 
-3. CMake 配置（需要添加 `_GNU_SOURCE` 宏）：
+3. **CMake 配置**
    ```bash
-   mkdir build && cd build
-   cmake .. -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX -DCMAKE_C_FLAGS="-D_GNU_SOURCE"
+   cmake \
+     -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX \
+     -DCMAKE_BUILD_TYPE=Release \
+     -DCMAKE_C_FLAGS="-isystem $OHOS_SYSROOT/usr/include -D_GNU_SOURCE" \
+     -DGLFW_BUILD_X11=OFF \
+     -DGLFW_BUILD_WAYLAND=OFF \
+     -DGLFW_BUILD_EXAMPLES=OFF \
+     -DGLFW_BUILD_TESTS=OFF \
+     -DGLFW_BUILD_DOCS=OFF \
+     -DBUILD_SHARED_LIBS=OFF \
+     ..
    ```
 
-4. 编译：
+4. **编译**
    ```bash
    make -j2
    ```
 
-5. 安装到 staging 目录：
+5. **安装**
    ```bash
-   make install DESTDIR=$TEST_PREFIX
-   ```
-
-6. 验证和打包：
-   ```bash
-   python3 ohc-run.py verify-build glfw 3.4
-   python3 ohc-run.py package glfw 3.4
-   ```
-
-7. 本地安装：
-   ```bash
-   make install
+   make install DESTDIR=$TEST_PREFIX  # staging
+   make install                       # local
    ```
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | CLOCK_REALTIME/CLOCK_MONOTONIC 未定义 | musl libc 需要特定的特性宏来启用 POSIX 定时器常量 | 添加 `#include <time.h>` 到 `src/posix_time.c` + 设置 `-DCMAKE_C_FLAGS="-D_GNU_SOURCE"` |
+| 1 | lld 链接器报 "Error loading shared library libxml2.so.16" | OHOS SDK 的 lld 依赖 libxml2.so.16，但 LD_LIBRARY_PATH 未包含 SDK 路径 | 设置 LD_LIBRARY_PATH 包含 `/data/service/hnp/ohos-sdk.org/ohos-sdk_*/ohos/native/llvm/lib` |
+| 2 | CLOCK_REALTIME/CLOCK_MONOTONIC undeclared identifier | musl libc 中 CLOCK_* 常量需要 POSIX 扩展宏启用 | 添加 `-D_GNU_SOURCE` 编译选项 |
+| 3 | GLFW 不支持 X11/Wayland | OpenHarmony 无 X11/Wayland | 禁用 X11/Wayland，只构建 Null platform |
 
 ## 源码修改
 
-### src/posix_time.c
-添加 `#include <time.h>` 头文件包含：
-```c
-#include "internal.h"
+**文件: src/posix_time.c**
+- 添加 `#include <time.h>` 头文件（第 27 行）
+- 实际问题通过编译选项 `-D_GNU_SOURCE` 解决
 
-#if defined(GLFW_BUILD_POSIX_TIMER)
-
-#include <unistd.h>
-#include <sys/time.h>
-#include <time.h>  // 新增：启用 clock_gettime 和 CLOCK_* 常量
-```
-
-**修改原因**：
-- HarmonyOS/musl libc 的 time.h 中定义了 `clock_gettime` 函数和 `CLOCK_REALTIME=0`、`CLOCK_MONOTONIC=1` 常量
-- 需要显式包含 time.h 并添加 `_GNU_SOURCE` 宏才能正确编译
-- 这是 musl libc 与 glibc 的行为差异
+补丁: `0001-src-posix_time.c.patch`
 
 ## 依赖版本
 
-- CMake 4.1.2
-- clang 15.0.4
-- POSIX 线程库（libpthread）
+无外部依赖（纯 C 库静态链接）
 
 ## 验证结果
 
 ```bash
-# 库文件验证
-ls -lh ~/usr/local/lib/libglfw3.a
-# 输出: 231K 静态库文件
+# 验证静态库
+llvm-ar t ~/usr/local/lib/libglfw3.a
+# 输出: context.c.obj init.c.obj input.c.obj ... (17 个对象文件)
 
-# 头文件验证
-ls -lh ~/usr/local/include/GLFW/
-# 输出: glfw3.h (236K), glfw3native.h (21K)
-
-# 质量门禁
-python3 ohc-run.py verify-build glfw 3.4
-# 结果: PASS (G1-G4 全部通过)
+# 验证头文件
+ls ~/usr/local/include/GLFW/
+# 输出: glfw3.h glfw3native.h
 ```
 
 ## 交付物
 
 | 文件 | 大小 | 说明 |
 |------|------|------|
-| glfw-3.4-ohos-aarch64.tar.gz | 507KB | 预编译包（静态库 + 头文件 + cmake 配置） |
+| libglfw3.a | 150KB | 静态库（Null platform） |
+| glfw3.h | 242KB | 主头文件 |
+| glfw3native.h | 21KB | 平台原生接口头文件 |
+| glfw3.pc | - | pkg-config 文件 |
+| cmake/glfw3/* | - | CMake 配置文件 |
 
 ## 注意事项
 
-1. **构建系统类型**：GLFW 使用 CMake 构建，不是 autotools。需要设置正确的构建系统参数。
-2. **CMake 平台检测**：CMake 会检测到 HarmonyOS 并提示"System is unknown to cmake"，但这不影响编译。
-3. **静态库编译**：GLFW 默认编译为静态库 `libglfw3.a`，无共享库版本。
-4. **无 GUI 后端**：当前编译仅包含基础功能，无实际图形界面支持（需要后续适配 Wayland/X11/Win32 等）。
-5. **测试程序**：GLFW 提供了丰富的测试程序（build/tests/ 目录），但运行需要图形系统支持。
-**预编译包**: archives/g/glfw/3.4/packaging/glfw-3.4-ohos-aarch64.tar.gz
+1. GLFW 3.4 在 OpenHarmony 上只支持 Null platform，无实际窗口功能
+2. Null platform 主要用于测试和开发，不能创建真实窗口
+3. 编译时必须添加 `-D_GNU_SOURCE` 以启用 POSIX 时钟定义
+4. 源码是 zip 格式，不是 tar.gz
+
+## 知识提取
+
+- E103: OHOS SDK lld libxml2 问题
+- E104: POSIX 时钟常量需要 _GNU_SOURCE
+- E105: GLFW Null platform 配置
 ---
 
-**编译结束**: 2026-05-19 14:58
+**编译结束**: 2026-05-27 12:12
 **最终状态**: built
