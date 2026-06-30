@@ -296,8 +296,7 @@ def _generate_conandata(
                 patch_type = "bugfix"
             elif "backport" in p.name.lower():
                 patch_type = "backport"
-            lines.append(f'  "{p.name}":')
-            lines.append(f'    patch_file: "patches/{p.name}"')
+            lines.append(f'  - patch_file: "patches/{p.name}"')
             lines.append(f'    patch_description: "{p.stem.replace("-", " ")}"')
             lines.append(f'    patch_type: "{patch_type}"')
     else:
