@@ -16,7 +16,16 @@ autotools configure 失败，采用手动编译：
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | config.status 创建临时文件权限错误 | HarmonyOS HMDFS 临时文件权限限制 | 手动编译绕过 autotools |
-| 2 | config.sub/config.guess 不识别 HarmonyOS | 需要更新为支持 ohos 的版本 | 更新配置文件 |
+| 2 | config.sub/config.guess 不识别 HarmonyOS | 需要更新为支持 ohos 的版本 | 更新配置文件 (E007) |
+| 3 | libtool 调用 gcc 链接共享库失败 | HarmonyOS 无 gcc，只有 clang；libtool 产生的 macOS 参数不兼容 lld | configure 添加 --disable-shared，手动创建 libcunit.a |
+
+## 本次编译记录 (2026-06-30)
+- **构建方式**: 自动构建 + 手动修复
+- **E007 补丁**: patch-autotools-ohos.pl 应用于 config.guess/config.sub
+- **configure**: 成功，识别 aarch64-unknown-linux-ohos
+- **make**: 源文件编译成功 (Framework/Automated/Basic/Console)，链接共享库失败
+- **手动修复**: 从 .libs/.o 文件创建 libcunit.a (114KB)
+- **产物**: libcunit.a + 12 个头文件
 
 ## 交付物
 | 文件 | 说明 |
