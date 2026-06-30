@@ -1,0 +1,30 @@
+/* Compatibility header for HarmonyOS/Linux systems */
+
+#ifndef _COMPAT_H
+#define _COMPAT_H
+
+#include <stdint.h>
+
+/* Byte order conversion functions for little-endian systems */
+#if defined(__linux__) || defined(__OHOS__)
+#include <byteswap.h>
+
+#define le16toh(x) (x)
+#define le32toh(x) (x)
+#define le64toh(x) (x)
+
+#define htole16(x) (x)
+#define htole32(x) (x)
+#define htole64(x) (x)
+
+#define be16toh(x) bswap16(x)
+#define be32toh(x) bswap32(x)
+#define be64toh(x) bswap64(x)
+
+#define htobe16(x) bswap16(x)
+#define htobe32(x) bswap32(x)
+#define htobe64(x) bswap64(x)
+
+#endif
+
+#endif /* _COMPAT_H */
