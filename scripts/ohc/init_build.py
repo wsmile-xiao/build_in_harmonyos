@@ -316,11 +316,12 @@ def _create_dual_track(orig_dir: Path, work_dir: Path,
             # Remove marker from work copy
             (work_dir / ".tarball-sha256").unlink(missing_ok=True)
             log_ok(f"  .work 已创建 (硬链接): {work_dir}")
-        except OSError:
+        except (OSError, shutil.Error, Exception):
             # HMDFS may reject hard-links; clean partial dir then fallback to copy
             if work_dir.exists():
                 shutil.rmtree(work_dir)
-            shutil.copytree(orig_dir, work_dir)
+            # Use copy2 for proper file copying on HMDFS
+            shutil.copytree(orig_dir, work_dir, copy_function=shutil.copy2)
             log_ok(f"  .work 已创建 (复制): {work_dir}")
         # F068: ensure work_dir also has build markers at top level
         _promote_nested_source(work_dir)
