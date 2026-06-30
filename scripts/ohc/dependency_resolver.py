@@ -352,6 +352,17 @@ _KNOWN_DEPS: dict[str, dict] = {
     "libpipeline":  {"required": [], "optional": []},
 }
 
+# 内建版本索引（作为最后回退）
+_BUILTIN_INDEX: dict[str, dict] = {
+    "podman":       {"ver": "5.8.3"},
+    "libseccomp":   {"ver": "2.6.0"},
+    "xterm":        {"ver": "410"},
+    "xclip":        {"ver": "0.13"},
+    "wimlib":       {"ver": "1.14.5"},
+    "autoconf-archive": {"ver": "2024.10.16"},
+    "libzip":       {"ver": "1.11.4"},
+}
+
 
 # ═══════════════════════════════════════════════════════
 # 通用工具检查与自动安装（泛化 R18 扩展）
