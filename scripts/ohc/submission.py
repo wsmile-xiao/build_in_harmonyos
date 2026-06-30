@@ -143,7 +143,7 @@ def _append_yaml_fields(path: Path, fields: dict) -> None:
 # ═══════════════════════════════════════════════════════
 
 _REQUIRED_MANIFEST_FIELDS = [
-    "status", "software", "version", "compile_date", "build_system",
+    "status", "software", "version", "build_date", "build_system",
 ]
 
 _TEMP_FILE_PREFIXES = ["DIAGNOSIS_", "MISSING_", "WORKFLOW_", "WORKPLAN_", "SCAN_"]
