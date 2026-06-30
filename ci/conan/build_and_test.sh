@@ -230,7 +230,22 @@ for pkg_dir in "${PACKAGES[@]}"; do
     # CI 必须始终重新构建目标包, 确保运行 make check + test_package
     # --build=missing: 依赖包用缓存
     # --build="${pkg_name}/*": 目标包强制重建
-    if conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" --build="${pkg_name}/*" 2>&1 | tee "$BUILD_LOG"; then
+    # timeout: 45 分钟硬超时, 防止交互式测试 (如 bash run-execscript) 卡住 worker
+    #   exit code 124 = timeout triggered
+    BUILD_TIMEOUT=2700
+    set -o pipefail
+    timeout --signal=KILL $BUILD_TIMEOUT conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" --build="${pkg_name}/*" 2>&1 | tee "$BUILD_LOG"
+    CONAN_RC=$?
+    set +o pipefail
+
+    if [ $CONAN_RC -eq 124 ]; then
+        echo "[fail] ${pkg_name}/${pkg_ver} — conan create TIMED OUT after ${BUILD_TIMEOUT}s (likely interactive test stuck)"
+        echo "L1_RESULT=fail: conan create timed out"
+        OVERALL_SUCCESS=false
+        continue
+    fi
+
+    if [ $CONAN_RC -eq 0 ]; then
 
         echo "[ok] ${pkg_name}/${pkg_ver} — conan create passed"
 
