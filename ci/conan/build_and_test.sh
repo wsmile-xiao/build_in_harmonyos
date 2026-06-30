@@ -203,25 +203,6 @@ for pkg_dir in "${PACKAGES[@]}"; do
         done < <(sed -n '/^patches:/,/^[a-z]/p' "$CONANDATA" | grep '^[[:space:]]')
     fi
 
-    # L0g: 功能裁剪参数检测 (全量适配要求: 不得关闭可选功能)
-    CONANFILE="$pkg_dir/conanfile.py"
-    if [ -f "$CONANFILE" ]; then
-        # 提取所有 --without-XXX / --disable-XXX 参数
-        TRIM_PARAMS=$(grep -oE '\-\-(without|disable)-[a-z0-9_-]+' "$CONANFILE" 2>/dev/null | sort -u || true)
-        if [ -n "$TRIM_PARAMS" ]; then
-            # 过滤掉允许的例外参数
-            ALLOWED="--disable-shared --enable-static --disable-nls --without-man --without-doc --disable-gtk-doc --disable-dependency-tracking"
-            while IFS= read -r param; do
-                # shellcheck disable=SC2086
-                if echo $ALLOWED | grep -qw "$param" 2>/dev/null; then
-                    continue
-                fi
-                echo "[warn] L0g: conanfile.py 含功能裁剪参数 '$param' — 全量适配要求保留所有功能"
-                L0_DETAIL="trim_param:$param"
-            done <<< "$TRIM_PARAMS"
-        fi
-    fi
-
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"

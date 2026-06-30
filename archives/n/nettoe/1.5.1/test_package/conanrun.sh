@@ -1,1 +1,0 @@
-. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/n/nettoe/1.5.1/test_package/conanrunenv-release-armv8.sh"
