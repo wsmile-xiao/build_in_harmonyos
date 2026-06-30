@@ -346,6 +346,15 @@ _KNOWN_DEPS: dict[str, dict] = {
     "libpipeline":  {"required": [], "optional": []},
 }
 
+# 内建版本索引（作为最后回退）
+# 格式: software → {"ver": "x.y.z"}
+_BUILTIN_INDEX: dict[str, dict] = {
+    "podman":       {"ver": "5.8.3"},
+    "libseccomp":   {"ver": "2.6.0"},
+    "xterm":        {"ver": "410"},
+    "xclip":        {"ver": "0.13"},
+}
+
 
 # ═══════════════════════════════════════════════════════
 # 内置软件版本索引（后备）
