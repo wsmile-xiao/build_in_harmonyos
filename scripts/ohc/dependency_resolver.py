@@ -311,6 +311,12 @@ _BUILTIN_INDEX: dict[str, dict] = {
     "texinfo":      {"ver": "7.1"},
     "help2man":     {"ver": "1.49"},
     "libpipeline":  {"ver": "1.5.7"},
+    # ── 合并自原重复定义 ──
+    "podman":       {"ver": "5.8.3"},
+    "libseccomp":   {"ver": "2.6.0"},
+    "xterm":        {"ver": "410"},
+    "xclip":        {"ver": "0.13"},
+    "stm32flash":   {"ver": "0.7", "url": "https://sourceforge.net/projects/stm32flash/files/stm32flash-0.7.tar.gz", "build_system": "make"},
 }
 
 _KNOWN_DEPS: dict[str, dict] = {
@@ -344,25 +350,6 @@ _KNOWN_DEPS: dict[str, dict] = {
     "texinfo":      {"required": [], "optional": []},
     "help2man":     {"required": [], "optional": []},
     "libpipeline":  {"required": [], "optional": []},
-}
-
-# 内建版本索引（作为最后回退）
-# 格式: software → {"ver": "x.y.z"}
-_BUILTIN_INDEX: dict[str, dict] = {
-    "podman":       {"ver": "5.8.3"},
-    "libseccomp":   {"ver": "2.6.0"},
-    "xterm":        {"ver": "410"},
-    "xclip":        {"ver": "0.13"},
-}
-
-
-# ═══════════════════════════════════════════════════════
-# 内置软件版本索引（后备）
-# ═══════════════════════════════════════════════════════
-
-# 格式: software → {"ver": "x.y.z", "url": "...", "build_system": "autotools|cmake|make"}
-_BUILTIN_INDEX: dict[str, dict] = {
-    "stm32flash":   {"ver": "0.7", "url": "https://sourceforge.net/projects/stm32flash/files/stm32flash-0.7.tar.gz", "build_system": "make"},
 }
 
 
@@ -714,6 +701,108 @@ def get_missing_deps(software: str, prefix: str | None = None) -> list[str]:
             else:
                 missing.append(dep)  # 仍然列出，即使没有预编译包
     return missing
+
+
+def get_conan_requires(conanfile_dir: str) -> list[str]:
+    """从 conanfile.py 的 requirements() 方法中提取依赖列表。
+
+    解析 conanfile.py 里的 self.requires("xxx/1.2.3@ohpcd/stable") 行，
+    返回纯软件名列表 (不含版本号)。
+
+    Args:
+        conanfile_dir: 包含 conanfile.py 的目录路径
+
+    Returns:
+        依赖软件名列表 (如 ["openssl", "zlib"])
+    """
+    conanfile = os.path.join(conanfile_dir, "conanfile.py")
+    if not os.path.isfile(conanfile):
+        return []
+    deps = []
+    try:
+        content = open(conanfile, encoding="utf-8").read()
+        # 匹配 self.requires("name/version@user/channel") 或 self.requires("name/version")
+        for m in re.finditer(r'self\.requires\(\s*["\']([a-zA-Z0-9_-]+)/', content):
+            dep_name = m.group(1)
+            if dep_name not in deps:
+                deps.append(dep_name)
+    except Exception:
+        pass
+    return deps
+
+
+def get_manifest_deps(manifest_path: str) -> list[str]:
+    """从 manifest.yaml 的 build.dependencies 段提取依赖列表。
+
+    Args:
+        manifest_path: manifest.yaml 文件路径
+
+    Returns:
+        依赖软件名列表
+    """
+    if not os.path.isfile(manifest_path):
+        return []
+    deps = []
+    try:
+        in_deps = False
+        for line in open(manifest_path, encoding="utf-8"):
+            stripped = line.strip()
+            # 进入 dependencies 段
+            if re.match(r'^dependencies:', stripped) or re.match(r'^build:', stripped):
+                in_deps = True
+                continue
+            # 退出 dependencies 段 (遇到新的顶层 key)
+            if in_deps and re.match(r'^[a-zA-Z]', line) and not stripped.startswith("-"):
+                in_deps = False
+                continue
+            if in_deps and stripped.startswith("-"):
+                # 提取依赖名: "- openssl/1.1.1w" → "openssl"
+                dep = stripped.lstrip("- ").split("/")[0].split("@")[0].strip().strip('"').strip("'")
+                if dep and dep not in deps:
+                    deps.append(dep)
+    except Exception:
+        pass
+    return deps
+
+
+def get_full_deps(software: str, version: str = "", prefix: str | None = None,
+                  conanfile_dir: str | None = None, manifest_path: str | None = None) -> list[str]:
+    """获取软件的完整依赖列表（聚合三个来源）。
+
+    优先级:
+        1. conanfile.py 的 requires (如果有 conanfile_dir)
+        2. manifest.yaml 的 dependencies (如果有 manifest_path)
+        3. _KNOWN_DEPS 硬编码表 (兜底)
+
+    Args:
+        software: 软件名称
+        version: 版本（当前未使用，保留接口）
+        prefix: 安装前缀
+        conanfile_dir: conanfile.py 所在目录
+        manifest_path: manifest.yaml 文件路径
+
+    Returns:
+        合并去重后的依赖名列表
+    """
+    deps: list[str] = []
+    # 1. conanfile.py requires
+    if conanfile_dir:
+        deps.extend(get_conan_requires(conanfile_dir))
+    # 2. manifest.yaml dependencies
+    if manifest_path:
+        deps.extend(get_manifest_deps(manifest_path))
+    # 3. _KNOWN_DEPS 兜底
+    deps_info = _KNOWN_DEPS.get(software, {})
+    deps.extend(deps_info.get("required", []))
+    # 去重 (保序)
+    seen = set()
+    unique = []
+    for d in deps:
+        key = d.lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(d)
+    return unique
 
 
 def install_prebuilt(name: str, version: str = "", prefix: str | None = None) -> int:
