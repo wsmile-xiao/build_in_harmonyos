@@ -1,25 +1,25 @@
 # 鸿蒙平台开源软件编译兼容性总览
 
 > 最后更新：2026-05-27
-> 已收录软件：418 款 / 480 个版本
+> 已收录软件：420 款 / 482 个版本
 
 ## 📊 总体统计
 
 | 指标 | 数量 |
 |------|------|
-| 收录软件 | **418** 款 |
-| 软件版本 | **480** 个 |
+| 收录软件 | **420** 款 |
+| 软件版本 | **482** 个 |
 | ✅ 已发布 | 23 |
-| ✅ 已编译 | 72 |
+| ✅ 已编译 | 75 |
 | ❌ 编译失败 | 2 |
 
 | 构建系统 | 数量 |
 |----------|------|
 | Autotools | 170 |
 | unknown | 101 |
-| CMake | 60 |
+| CMake | 62 |
 | Makefile | 38 |
-| Meson | 14 |
+| Meson | 13 |
 | custom | 5 |
 | openssl-perl | 1 |
 | python | 1 |
@@ -42,6 +42,7 @@
 | 软件 | 版本 | 状态 | 兼容性 | 构建系统 | 补丁数 | 依赖 | 详情 |
 |------|------|------|--------|----------|--------|------|------|
 | **7zip** | 23.01、25.01 | uploaded |  | unknown | 0 | - | [📄](archives/7/7zip/25.01/) |
+| **SDL2_image** | 2.6.0 | ✅ 已编译 |  | CMake | 2 | - | [📄](archives/s/SDL2_image/2.6.0/) |
 | **abseil-cpp** | 20260107.1、20240116.1 | partial |  | Autotools | 1 | - | [📄](archives/a/abseil-cpp/20240116.1/) |
 | **apr** | 1.7.6 | ✅ 已编译 |  |  | 3 | - | [📄](archives/a/apr/1.7.6/) |
 | **argon2** | 20190702 | uploaded |  | unknown | 0 | - | [📄](archives/a/argon2/20190702/) |
@@ -234,10 +235,11 @@
 | **libedit** | 20240808、20240817、20251016-3.1 | partial |  | Autotools | 2 | - | [📄](archives/l/libedit/20251016-3.1/) |
 | **libepoxy** | 1.5.10 | ✅ 已发布 |  |  | - | - | [📄](archives/l/libepoxy/1.5.10/) |
 | **libev** | 4.33 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libev/4.33/) |
-| **libevent** | 2.1.12-stable、2.1.12 | partial |  | Autotools | 4 | - | [📄](archives/l/libevent/2.1.12/) |
+| **libevent** | 2.1.12-stable、2.1.12 | ✅ 已编译 |  | Autotools | 5 | - | [📄](archives/l/libevent/2.1.12/) |
 | **libffi** | 3.4.4、3.5.2、3.4.6 | partial |  | Autotools | 3 | - | [📄](archives/l/libffi/3.4.6/) |
 | **libfontenc** | 1.1.9 | success |  | Autotools | 3 | xproto (手动安装头文件),zlib (预编译包已安装) | [📄](archives/l/libfontenc/1.1.9/) |
 | **libgcrypt** | 1.11.0 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libgcrypt/1.11.0/) |
+| **libgit2** | 1.9.4 | ✅ 已编译 |  |  | 0 | - | [📄](archives/l/libgit2/1.9.4/) |
 | **libgpg-error** | 1.50、1.55、1.61 | ✅ 已编译 |  |  | 1 | - | [📄](archives/l/libgpg-error/1.61/) |
 | **libgpiod** | 2.0、2.1.3 | ✅ 已编译 |  |  | 4 | - | [📄](archives/l/libgpiod/2.1.3/) |
 | **libgsm** | 1.0.18 | ✅ 已发布 |  | Makefile | 1 | [] | [📄](archives/l/libgsm/1.0.18/) |
@@ -261,7 +263,7 @@
 | **libpcap** | 1.10.6 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libpcap/1.10.6/) |
 | **libpciaccess** | 0.17 | ✅ 已编译 |  |  | - | - | [📄](archives/l/libpciaccess/0.17/) |
 | **libpipeline** | 1.5.8 | verified |  | unknown | 0 | - | [📄](archives/l/libpipeline/1.5.8/) |
-| **libpng** | 1.6.39 | ✅ 已发布 |  |  | 0 | - | [📄](archives/l/libpng/1.6.39/) |
+| **libpng** | 1.6.39 | ✅ 已编译 |  | CMake | 0 | - | [📄](archives/l/libpng/1.6.39/) |
 | **libpq** | 17.2 | ✅ 已编译 |  |  | 3 | - | [📄](archives/l/libpq/17.2/) |
 | **libpsl** | 0.21.5 | uploaded |  | Autotools | 0 | - | [📄](archives/l/libpsl/0.21.5/) |
 | **libqb3** | 1.3.2 | uploaded |  | unknown | 0 | - | [📄](archives/l/libqb3/1.3.2/) |
@@ -337,6 +339,7 @@
 | **mupdf-tools** | 1.27.2 | ✅ 已编译 |  |  | - | - | [📄](archives/m/mupdf-tools/1.27.2/) |
 | **musl-fts** | 1.2.7 | uploaded |  | unknown | 0 | - | [📄](archives/m/musl-fts/1.2.7/) |
 | **musl-obstack** | 1.2.3 | uploaded |  | unknown | 0 | - | [📄](archives/m/musl-obstack/1.2.3/) |
+| **nano** | 9.0 | ✅ 已发布 |  |  | 0 | - | [📄](archives/n/nano/9.0/) |
 | **ncurses** | 6.4 | verified |  | Autotools | 0 | - | [📄](archives/n/ncurses/6.4/) |
 | **nettle** | 3.10.2、3.10 | partial |  | Autotools | 47 | - | [📄](archives/n/nettle/3.10/) |
 | **nghttp2** | 1.69.0 | ✅ 已编译 |  |  | 1 | - | [📄](archives/n/nghttp2/1.69.0/) |
@@ -391,7 +394,7 @@
 | **ragel** | 6.10 | uploaded |  | unknown | 0 | - | [📄](archives/r/ragel/6.10/) |
 | **rapidjson** | 1.1.0 | uploaded |  | CMake | 0 | - | [📄](archives/r/rapidjson/1.1.0/) |
 | **rclone** | 1.72.1 | ✅ 已发布 |  |  | - | - | [📄](archives/r/rclone/1.72.1/) |
-| **re2** | 2024-04-01、2024-07-01 | partial |  | unknown | - | - | [📄](archives/r/re2/2024-07-01/) |
+| **re2** | 2024-04-01、2024-07-01 | partial |  | unknown | 0 | - | [📄](archives/r/re2/2024-07-01/) |
 | **re2c** | 4.3.1 | uploaded |  | unknown | 0 | - | [📄](archives/r/re2c/4.3.1/) |
 | **readline** | 8.2 | verified |  | Autotools | 0 | name: ncurses | [📄](archives/r/readline/8.2/) |
 | **readosm** | 1.1.0a | ✅ 已编译 |  |  | 1 | - | [📄](archives/r/readosm/1.1.0a/) |
@@ -435,6 +438,7 @@
 | **testssl** | 3.2.3 | uploaded |  | unknown | 0 | - | [📄](archives/t/testssl/3.2.3/) |
 | **texinfo** | 7.3 | verified |  | Autotools | 0 | - | [📄](archives/t/texinfo/7.3/) |
 | **tinyssh** | 20260401 | uploaded |  | unknown | 0 | - | [📄](archives/t/tinyssh/20260401/) |
+| **tmux** | 3.4 | ✅ 已发布 |  |  | 0 | - | [📄](archives/t/tmux/3.4/) |
 | **toml11** | 4.4.0 | ✅ 已编译 |  | CMake | - | - | [📄](archives/t/toml11/4.4.0/) |
 | **tomlplusplus** | 3.4.0 | uploaded |  | CMake | 0 | - | [📄](archives/t/tomlplusplus/3.4.0/) |
 | **traceroute** | 2.1.6 | ✅ 已编译 |  | Makefile | 1 | - | [📄](archives/t/traceroute/2.1.6/) |
