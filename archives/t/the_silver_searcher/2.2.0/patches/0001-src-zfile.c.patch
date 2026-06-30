@@ -1,0 +1,193 @@
+diff -ruN a/src/zfile.c b/src/zfile.c
+--- a/src/zfile.c
++++ b/src/zfile.c
+@@ -53,22 +53,26 @@
+ struct zfile {
+     FILE *in;              // Source FILE stream
+     uint64_t logic_offset, // Logical offset in output (forward seeks)
+         decode_offset,     // Where we've decoded to
+         actual_len;
+     uint32_t outbuf_start;
+ 
+     ag_compression_type ctype;
+ 
+     union {
++#ifdef HAVE_ZLIB_H
+         z_stream gz;
++#endif
++#ifdef HAVE_LZMA_H
+         lzma_stream lzma;
++#endif
+     } stream;
+ 
+     uint8_t inbuf[32 * KB];
+     uint8_t outbuf[256 * KB];
+     bool eof;
+ };
+ 
+ #define CAVAIL_IN(c) ((c)->ctype == AG_GZIP ? (c)->stream.gz.avail_in : (c)->stream.lzma.avail_in)
+ #define CNEXT_OUT(c) ((c)->ctype == AG_GZIP ? (c)->stream.gz.next_out : (c)->stream.lzma.next_out)
+ 
+@@ -200,87 +204,88 @@
+ 
+ /*
+  * Return number of bytes into buf, 0 on EOF, -1 on error.  Update stream
+  * offset.
+  */
+ static ssize_t
+ zfile_read(void *cookie_, char *buf, size_t size) {
+     struct zfile *cookie = cookie_;
+     size_t nb, ignorebytes;
+     ssize_t total = 0;
++#ifdef HAVE_LZMA_H
+     lzma_ret lzret;
++#endif
+     int ret;
+ 
+     assert(size <= SSIZE_MAX);
+ 
+     if (size == 0)
+         return 0;
+ 
+     if (cookie->eof)
+         return 0;
+ 
+     ret = Z_OK;
++#ifdef HAVE_LZMA_H
+     lzret = LZMA_OK;
++#endif
+ 
+     ignorebytes = cookie->logic_offset - cookie->decode_offset;
+-    assert(ignorebytes == 0);
+-
+-    do {
+-        size_t inflated;
+-
+-        /* Drain output buffer first */
+-        while (CNEXT_OUT(cookie) >
+-               &cookie->outbuf[cookie->outbuf_start]) {
+-            size_t left = CNEXT_OUT(cookie) -
+-                          &cookie->outbuf[cookie->outbuf_start];
+-            size_t ignoreskip = min(ignorebytes, left);
+-            size_t toread;
+-
+-            if (ignoreskip > 0) {
+-                ignorebytes -= ignoreskip;
+-                left -= ignoreskip;
+-                cookie->outbuf_start += ignoreskip;
+-                cookie->decode_offset += ignoreskip;
+-            }
+-
+-            // Ran out of output before we seek()ed up.
+-            if (ignorebytes > 0)
+-                break;
+-
+-            toread = min(left, size);
+-            memcpy(buf, &cookie->outbuf[cookie->outbuf_start],
+-                   toread);
+-
+-            buf += toread;
+-            size -= toread;
+-            left -= toread;
+-            cookie->outbuf_start += toread;
+-            cookie->decode_offset += toread;
+-            cookie->logic_offset += toread;
+-            total += toread;
+-
+-            if (size == 0)
+-                break;
+-        }
++    size_t inflated;
++
++    /* Drain output buffer first */
++    while (CNEXT_OUT(cookie) >
++           &cookie->outbuf[cookie->outbuf_start]) {
++        size_t left = CNEXT_OUT(cookie) -
++                      &cookie->outbuf[cookie->outbuf_start];
++        size_t ignoreskip = min(ignorebytes, left);
++        size_t toread;
++
++        if (ignoreskip > 0) {
++            ignorebytes -= ignoreskip;
++            left -= ignoreskip;
++            cookie->outbuf_start += ignoreskip;
++            cookie->decode_offset += ignoreskip;
++        }
++
++        // Ran out of output before we seek()ed up.
++        if (ignorebytes > 0)
++            break;
++
++        toread = min(left, size);
++        memcpy(buf, &cookie->outbuf[cookie->outbuf_start],
++               toread);
++
++        buf += toread;
++        size -= toread;
++        left -= toread;
++        cookie->outbuf_start += toread;
++        cookie->decode_offset += toread;
++        cookie->logic_offset += toread;
++        total += toread;
+ 
+         if (size == 0)
+             break;
+-
+-        /*
++    }
++
++    if (size == 0)
++        break;
++
++    /*
+ 		 * If we have not satisfied read, the output buffer must be
+ 		 * empty.
+ 		 */
+-        assert(cookie->stream.gz.next_out ==
+-               &cookie->outbuf[cookie->outbuf_start]);
+-
+-        if ((cookie->ctype == AG_XZ && lzret == LZMA_STREAM_END) ||
+-            (cookie->ctype == AG_GZIP && ret == Z_STREAM_END)) {
++    assert(cookie->stream.gz.next_out ==
++           &cookie->outbuf[cookie->outbuf_start]);
++
++    if ((cookie->ctype == AG_XZ && lzret == LZMA_STREAM_END) ||
++        (cookie->ctype == AG_GZIP && ret == Z_STREAM_END)) {
+             cookie->eof = true;
+             break;
+         }
+ 
+         /* Read more input if empty */
+         if (CAVAIL_IN(cookie) == 0) {
+             nb = fread(cookie->inbuf, 1, sizeof cookie->inbuf,
+                        cookie->in);
+             if (ferror(cookie->in)) {
+                 warn("error read core");
+@@ -309,25 +314,27 @@
+         }
+         cookie->outbuf_start = 0;
+ 
+         if (cookie->ctype == AG_GZIP) {
+             ret = inflate(&cookie->stream.gz, Z_NO_FLUSH);
+             if (ret != Z_OK && ret != Z_STREAM_END) {
+                 log_err("Found mem/data error while decompressing zlib stream: %s", zError(ret));
+                 return -1;
+             }
+         } else {
++#ifdef HAVE_LZMA_H
+             lzret = lzma_code(&cookie->stream.lzma, LZMA_RUN);
+             if (lzret != LZMA_OK && lzret != LZMA_STREAM_END) {
+                 log_err("Found mem/data error while decompressing xz/lzma stream: %d", lzret);
+                 return -1;
+             }
++#endif
+         }
+         inflated = CNEXT_OUT(cookie) - &cookie->outbuf[0];
+         cookie->actual_len += inflated;
+     } while (!ferror(cookie->in) && size > 0);
+ 
+     assert(total <= SSIZE_MAX);
+     return total;
+ }
+ 
+ static int
