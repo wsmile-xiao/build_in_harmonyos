@@ -6,7 +6,8 @@
 ## OHOS 适配
 - 需修补 config.guess/config.sub 和 po 文件
 - autotools 构建
-- 12 个补丁文件（含自动生成的构建文件）
+- 5.2.3: 3 个补丁（config.guess, config.sub, configure umask 修复）
+- 5.6.2: 12 个补丁文件（含自动生成的构建文件）
 
 ## 依赖
 - 标准 C 库
@@ -16,6 +17,10 @@
 xz --version
 echo "test" | xz | xz -d
 ```
+
+## 版本
+- 5.2.3: published (2026-06-25), 功能测试 67/67 PASS, liblzma API 完全正常
+- 5.6.2: partial (2026-04-20)
 
 ## 参考
 - 官网: https://tukaani.org/xz/
