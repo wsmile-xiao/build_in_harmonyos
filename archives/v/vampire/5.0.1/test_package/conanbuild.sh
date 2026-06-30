@@ -1,0 +1,1 @@
+. "/storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/v/vampire/5.0.1/test_package/conanbuildenv-release-armv8.sh"
