@@ -1,0 +1,103 @@
+--- a/png2ico.cpp	2024-10-28 07:51:25.000000000 +0800
++++ b/png2ico.cpp	2026-05-29 10:43:33.407862812 +0800
+@@ -15,6 +15,9 @@
+ Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
+ */
+ 
++/* Modified for HarmonyOS/OpenHarmony: replaced libspng dependency with
++   direct PNG IHDR parsing to avoid platform libpng NEON symbol issues */
++
+ #include <cstdio>
+ #include <cstring>
+ #include <cstdint>
+@@ -25,12 +28,11 @@
+ #include <stdexcept>
+ #include <memory>
+ #include <filesystem>
+-#include <spng.h>
+ #include "VERSION"
+ 
+ void usage()
+ {
+-	fprintf(stderr,version"\n");
++	fprintf(stderr,PNG2ICO_VERSION"\n");
+ 	fprintf(stderr,"USAGE: png2ico icofile [--colors <num>] pngfile1 [pngfile2 ...]\n");
+ }
+ 
+@@ -97,40 +99,43 @@
+ };
+ #pragma pack()
+ 
+-struct spng_deleter {
+-	void operator()(spng_ctx * ctx) const {
+-		spng_ctx_free(ctx);
+-	}
+-};
+-
+-struct file_deleter {
+-	void operator()(FILE * file) const {
+-		fclose(file);
+-	}
+-};
+-
+-using spng_ctx_ptr = std::unique_ptr<spng_ctx, spng_deleter>;
+-using file_ptr = std::unique_ptr<FILE, file_deleter>;
++// Read PNG dimensions directly from IHDR chunk without needing libpng/spng
++// PNG format: 8-byte signature, then chunks: 4-byte length, 4-byte type, data, 4-byte CRC
++// First chunk must be IHDR containing: width(4), height(4), bit_depth(1), color_type(1), etc.
++static const uint8_t PNG_SIGNATURE[8] = {137, 80, 78, 71, 13, 10, 26, 10};
++static const uint8_t IHDR_TYPE[4] = {'I', 'H', 'D', 'R'};
+ 
+ auto get_dimensions(const char * filename)
+ {
+-	file_ptr file(fopen(filename, "rb"));
++	std::ifstream file(filename, std::ios::binary);
+ 	if (!file) {
+ 		throw formatted_error("Cannot open %s: %s", filename, strerror(errno));
+ 	}
+-	spng_ctx_ptr ctx(spng_ctx_new(0));
+-	if (!ctx) {
+-		throw formatted_error("Cannot create spng context");
+-	} else if (const auto res = spng_set_png_file(ctx.get(), file.get()); res != 0) {
+-		throw formatted_error("Cannot attach file of %s: %s", filename, spng_strerror(res));
+-	}
+-	spng_ihdr header;
+-	if (const auto res = spng_get_ihdr(ctx.get(), &header); res != 0) {
+-		throw formatted_error("Cannot read PNG header of %s: %s", filename, spng_strerror(res));
++
++	// Read and verify PNG signature
++	uint8_t sig[8];
++	if (!file.read(reinterpret_cast<char*>(sig), 8) || memcmp(sig, PNG_SIGNATURE, 8) != 0) {
++		throw formatted_error("Not a valid PNG file: %s", filename);
+ 	}
++
++	// Read IHDR chunk header (4 bytes length + 4 bytes type)
++	uint8_t chunk_header[8];
++	if (!file.read(reinterpret_cast<char*>(chunk_header), 8) || memcmp(chunk_header + 4, IHDR_TYPE, 4) != 0) {
++		throw formatted_error("Cannot read PNG IHDR header of %s", filename);
++	}
++
++	// Read IHDR data: width(4), height(4) in big-endian
++	uint8_t ihdr_data[8];
++	if (!file.read(reinterpret_cast<char*>(ihdr_data), 8)) {
++		throw formatted_error("Cannot read PNG dimensions of %s", filename);
++	}
++
++	uint32_t width = (ihdr_data[0] << 24) | (ihdr_data[1] << 16) | (ihdr_data[2] << 8) | ihdr_data[3];
++	uint32_t height = (ihdr_data[4] << 24) | (ihdr_data[5] << 16) | (ihdr_data[6] << 8) | ihdr_data[7];
++
+ 	return std::make_pair(
+-		header.width <= 255 ? header.width : 0,
+-		header.height <= 255 ? header.height : 0
++		width <= 255 ? (uint8_t)width : 0,
++		height <= 255 ? (uint8_t)height : 0
+ 	);
+ }
+ 
+@@ -246,4 +251,4 @@
+ 		fprintf(stderr, "%s\n", e.what());
+ 	}
+ 	return 1;
+-}
++}
+\ No newline at end of file
