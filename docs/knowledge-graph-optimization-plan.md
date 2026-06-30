@@ -831,3 +831,179 @@ knowledge/graph/kb_index.db
 | 调整: 方案排序 | BM25 从 P0 调为 P0 (与归一化并列) |
 | 调整: 不做什么 | 新增禁止 pgvector 和社区投票 |
 | 新增: 5.2 节 | 业界对标数据表 |
+
+---
+
+## 附录 A: 架构设计决策（来自 DESIGN-knowledge-graph-v2.md）
+
+> 以下为知识图谱 V2 架构设计的核心决策摘要，补充本方案正文中的架构背景。
+
+### A.1 双消费者模型
+
+知识库有两个消费者，需求完全不同：
+
+| 消费者 | 需求 | 容错要求 | 读取方式 |
+|--------|------|---------|---------|
+| 脚本引擎 (engine.py) | 精确字段值：关键词、严重度、推荐方案、禁止模式 | 零容忍——错误策略导致编译失败 | 键值对提取 |
+| AI / Human (OpenDesk/开发者) | 完整上下文：根因链、影响范围、权衡分析 | 高容错——能理解模糊表述 | 自然语言阅读 |
+
+**设计决策**：双轨制。机器数据用结构化格式（graph/\*.kv），人类文档保留 Markdown（doc/\*.md）。两者通过条目 ID 关联，分别维护但语义一致。
+
+### A.2 从"错误列表"到"决策图"
+
+核心理念转变：知识库不应是"错误条目的编号列表"，而应是**一张带约束的修复决策图**。每个节点包含五个维度：
+
+- **识别**：什么特征会触发我？（error_signature + match_keywords）
+- **诊断**：为什么会发生？（root_cause + affected_scope，因果链）
+- **决策**：该怎么办？（有序推荐方案列表 + 禁止列表，约束优先）
+- **执行**：能自动修吗？（rec_auto_fix + rec_impl）
+- **关系**：和其他节点有什么联系？（causes / caused_by / similar_to 等）
+
+### A.3 约束优先原则
+
+**最关键的设计转变**：禁止策略是第一等公民，与推荐方案同级且优先级更高。
+
+旧结构中，禁止策略是"注释性的"（混在 Markdown 正文中，引擎看不到）。新结构中，禁止策略通过 `forbid_N_*` 字段和 `principles.kv` 原则库成为引擎强制检查项。
+
+决策流程：候选方案生成 → 原则过滤器（critical 级 auto_reject）→ 通过则输出 / 不通过则降级到 fallback 或拒绝。
+
+### A.4 KV 格式选择理由
+
+| 格式 | 表达力 | bash 原生解析 | 外部依赖 |
+|------|--------|-------------|---------|
+| YAML | ★★★★★ | ✗ 需要 yq/python | 有 |
+| JSON | ★★★★ | ✗ 需要 jq/python | 有 |
+| TOML | ★★★★ | ✗ 需要专门解析器 | 有 |
+| **自定义 KV** | ★★★☆ | ✓ grep/cut/awk/sed | **无** |
+
+选择 KV 的理由：
+1. ohc-run.py 可能运行在最小化环境（无 python/jq/yq）
+2. grep/cut/awk/sed 是 POSIX 保证可用的
+3. 表达力足够覆盖所有需要的字段
+4. 人类也可直接阅读和编辑
+
+> 注：本方案正文"方案 E"已计划渐进迁移到 YAML（保留 KV 兼容），此为架构演进方向，不否定原始 KV 选择的 rationale。
+
+### A.5 引擎评分公式
+
+```
+total_score =
+    keyword_hit_count          # match_keywords 命中数
+  × severity_weight            # severity: 3→×3, 2→×2, 1→×1
+  + signature_bonus            # error_signature 正则精确匹配: +5
+  + phase_bonus                # trigger_tool/phase 与当前步骤匹配: +3
+  - principle_penalty          # 方案触发原则警告: -2
+```
+
+### A.6 内置 auto_fix_impl 实现表
+
+每个 `rec_impl` / `fallback_impl` 字段对应引擎中的一个内置函数：
+
+| impl 名 | 功能 | 适用模式 |
+|---------|------|---------|
+| `download-gnuconfig` | 从 savannah 下载最新 config.guess + config.sub | E007 |
+| `set-env-var` | 设置 CC/CXX/AR/CFLAGS 等 env var 后重试 | E001,E002,E005,E011-E015,E032 |
+| `add-configure-flag` | 给 configure 追加特定 flag | E006,E016,E027,E030 |
+| `run-patch-script` | 调用 SKILL 内置补丁脚本 | E007 (fallback) |
+| `replace-symlink-with-copy` | ln → cp | E050 |
+| `fix-shebang` | 批量修正 shebang | E037,E049 |
+| `disable-werror` | Makefile 中精准禁用 -Werror | E063 |
+| `skip-test` | 加入排除候选列表 | E022-E024,E031,E046-E048 |
+| `none` | 仅输出方案描述，不自动执行 | 默认 |
+
+### A.7 关系图数据模型
+
+关系存储在每个条目的 `causes` / `caused_by` / `similar_to` / `conflicts_with` / `prerequisite_of` 字段中。全局视图通过 `relations.tsv` 提供：
+
+```tsv
+from    to       relation         description
+E064    E061     causes           conftest失败→gnulib选错模块
+E064    E062     causes           conftest失败→符号未声明
+E007    E021     similar_to       同为configure阶段问题
+E007    --build  conflicts_with   --build绕过与正确方案冲突
+```
+
+引擎利用关系图的场景：
+
+| 场景 | 利用方式 |
+|------|---------|
+| 批量修复 | 修好根因节点后，自动重新评估下游 caused 节点是否还需处理 |
+| 防误判 | similar_to 帮助区分特征相似但本质不同的错误 |
+| 冲突检测 | conflicts_with 直接排除冲突方案 |
+| 根因优先 | 同时命中多个模式时，优先修复无 caused_by 的根因节点 |
+
+---
+
+## 附录 B: 知识协作模式（来自 collaboration.md + collaboration-tutorial.md）
+
+> 以下为多 Agent 协作中与知识图谱相关的流程摘要。
+
+### B.1 草稿→正式条目审核提升流程
+
+**协作者提交草稿**：
+
+1. 编译过程中发现新知识 → 调用 `graph add --draft` 写入 `knowledge/graph/draft/`
+2. 草稿文件含 contributor_id 后缀（如 `E082-A7F3.kv`），标识来源
+3. 草稿随 Git 分支提交，通过 PR 请求合并到 main
+
+**主编审核**：
+
+1. fetch 协作者分支，检查 `knowledge/graph/draft/` 中的草稿内容
+2. 与已有知识进行去重比对（见 B.2）
+3. 决策：合并到已有条目 / 作为独立条目保留
+4. 审核通过 → 在 GitCode 平台 Squash 合并 PR
+
+**PR 合并后的知识整合**（主编执行）：
+
+1. `git pull origin main` 同步合并结果
+2. 将草稿从 `knowledge/graph/draft/` 移入 `knowledge/graph/` 正式目录
+3. 统一编号（可能与草稿中的临时编号不同）
+4. 重建 `knowledge/graph/index.tsv`、`_index.yaml`、`SUMMARY.md`
+5. 提交索引更新到 main
+
+### B.2 知识去重和编号统一
+
+**主编审核清单中的知识相关项**：
+
+- 知识无重复：新增条目与已有条目无语义重复
+- 知识草稿完整：draft/ 中的草稿文件包含完整字段
+- contributor_id 一致：PR 和草稿中的 contributor_id 与实际 Agent ID 一致
+
+**去重判断流程**：
+
+1. `submit --check` 第 3 项自动检查关键词重复（WARN 级）
+2. 主编读取草稿 .kv 文件，决定合并还是保留
+3. 如果合并 → 在 PR 评论中说明，协作者修改草稿后重推
+4. 如果保留 → approve 时自动移入正式目录，E 编号不变
+
+**编号统一**：
+
+- 协作者在草稿中使用临时编号
+- 主编在合并 PR 时拥有最终编号权
+- 无需预协商编号区间——协作者在独立 Git 分支工作，主编统一分配
+
+### B.3 作者追踪
+
+知识协作中的作者追踪机制：
+
+- 每个 Agent 拥有 4 位十六进制 ID（如 `A7F3`）
+- 草稿文件命名包含 contributor_id 后缀：`E082-A7F3.kv`
+- PR 中的 contributor_id 字段记录提交来源
+- 主编审核日志保留完整归属信息
+- Agent ID 基于时间戳哈希随机生成，不持久化，避免多协作者共享目录时的 ID 冲突
+
+### B.4 并发安全（draft/ 目录隔离机制）
+
+知识协作的并发安全通过三层隔离保证，无需额外加锁：
+
+| 资源 | 冲突风险 | 安全机制 |
+|------|---------|---------|
+| `knowledge/graph/draft/` | 低 | 草稿文件含 Agent ID 后缀，天然隔离 |
+| `knowledge/graph/*.kv`（正式） | 无 | 协作者禁止写入，只有主编修改 main 分支 |
+| `knowledge/graph/index.tsv` | 无 | 只有主编在合并 PR 后重建 |
+
+**核心原则**：
+
+- 协作者只写 `draft/`（在独立 Git 分支上），不触碰正式目录
+- 正式知识文件和索引由主编在 PR 合并后统一更新
+- Git 分支天然隔离：每个协作者在 `feat/{software}-{version}` 分支上工作，互不干扰

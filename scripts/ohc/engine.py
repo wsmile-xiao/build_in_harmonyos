@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
@@ -40,7 +41,47 @@ class MatchResult:
 
 
 # ═══════════════════════════════════════════════════════
-# Phase A: Coarse filter via index.tsv
+# Error normalization (方案 A, inspired by FixHive)
+# ═══════════════════════════════════════════════════════
+
+_NORMALIZE_RULES = [
+    # Quoted module/library names → {module} (before path rule)
+    (re.compile(r"'[a-zA-Z@/_.-]+'"), "'{module}'"),
+    (re.compile(r'"[a-zA-Z@/_.-]+"'), '"{module}"'),
+    # Shared library names → {lib}.so.{version}
+    (re.compile(r'\b([a-zA-Z_]\w+)\.so\.\d+'), r'{lib}.so.{version}'),
+    # File paths → {path}
+    (re.compile(r'/[\w./-]+\.\w{1,4}'), '{path}'),
+    # Version numbers → {version}
+    (re.compile(r'\b\d+\.\d+\.\d+\b'), '{version}'),
+    (re.compile(r'\b\d+\.\d+\b'), '{version}'),
+    # Line numbers → {line}
+    (re.compile(r':\d+:\d+'), ':{line}'),
+    (re.compile(r'line \d+'), 'line {line}'),
+    # Hex addresses → {addr}
+    (re.compile(r'\b0x[0-9a-fA-F]+\b'), '{addr}'),
+]
+
+
+def normalize_error(error_text: str) -> str:
+    """Normalize error text by replacing variable parts with placeholders.
+
+    Inspired by FixHive's signature normalization.
+    Different projects/versions with the same error type produce
+    the same normalized signature, boosting recall.
+
+    Examples:
+        "foo.c:42:5: error" → "{path}:{line}: error"
+        "Cannot find module 'react'" → "Cannot find module {module}"
+    """
+    result = error_text
+    for pattern, replacement in _NORMALIZE_RULES:
+        result = pattern.sub(replacement, result)
+    return result
+
+
+# ═══════════════════════════════════════════════════════
+# Phase A: Coarse filter via FTS5 BM25 (+ legacy fallback)
 # ═══════════════════════════════════════════════════════
 
 @dataclass
@@ -54,8 +95,91 @@ def _phase_a(
     index_entries: list[IndexEntry],
     min_score: int = 2,
     top_n: int = 5,
+    gdir: str | None = None,
 ) -> list[_Candidate]:
-    """Scan index.tsv rows, score by keyword hits × severity weight."""
+    """Scan index, score by BM25 (FTS5) with substring fallback."""
+    # Try FTS5 BM25 first (reads .kv files directly, auto-includes new entries)
+    if gdir:
+        try:
+            from .kb_index import fts_search, fts_available
+            if fts_available():
+                fts_results = fts_search(error_text, gdir, top_n=top_n)
+                if fts_results:
+                    candidates: list[_Candidate] = []
+                    for r in fts_results:
+                        entry = _find_entry_by_id(index_entries, r["id"])
+                        if entry:
+                            # BM25 score is negative; convert to positive weight
+                            # Severity boost: sev3 ×3, sev2 ×2
+                            raw_score = max(1, int(abs(r["score"]) * 2))
+                            if entry.severity >= 3:
+                                raw_score *= 3
+                            elif entry.severity >= 2:
+                                raw_score *= 2
+                            candidates.append(_Candidate(entry=entry, score=raw_score))
+                    if candidates:
+                        candidates.sort(key=lambda c: c.score, reverse=True)
+                        return candidates[:top_n]
+        except Exception:
+            pass  # Fall through to legacy
+
+    # Legacy: substring matching on index.tsv
+    return _phase_a_legacy(error_text, index_entries, min_score, top_n)
+
+
+def _phase_a_dual(
+    error_text: str,
+    normalized: str,
+    index_entries: list[IndexEntry],
+    min_score: int = 2,
+    top_n: int = 5,
+    gdir: str | None = None,
+) -> list[_Candidate]:
+    """Dual matching: raw text + normalized text, merge results.
+
+    方案 A: Entries matched by both raw and normalized text get
+    extra score (double-hit boost). Entries only matched by
+    normalized text still get a bonus for recall improvement.
+    """
+    raw_cands = _phase_a(error_text, index_entries, min_score, top_n, gdir)
+    norm_cands = _phase_a(normalized, index_entries, min_score, top_n, gdir)
+
+    if not raw_cands and not norm_cands:
+        return []
+    if not norm_cands:
+        return raw_cands
+    if not raw_cands:
+        return norm_cands
+
+    # Merge: raw + normalized, double-hit gets bonus
+    merged: dict[str, _Candidate] = {}
+    for c in raw_cands:
+        merged[c.entry.id] = _Candidate(entry=c.entry, score=c.score)
+    for c in norm_cands:
+        if c.entry.id in merged:
+            merged[c.entry.id].score += c.score  # Double-hit bonus
+        else:
+            merged[c.entry.id] = _Candidate(entry=c.entry, score=c.score + 2)
+
+    result = sorted(merged.values(), key=lambda x: x.score, reverse=True)
+    return result[:top_n]
+
+
+def _find_entry_by_id(entries: list[IndexEntry], eid: str) -> IndexEntry | None:
+    """Find an IndexEntry by ID."""
+    for e in entries:
+        if e.id == eid:
+            return e
+    return None
+
+
+def _phase_a_legacy(
+    error_text: str,
+    index_entries: list[IndexEntry],
+    min_score: int = 2,
+    top_n: int = 5,
+) -> list[_Candidate]:
+    """Legacy substring matching (fallback when FTS5 unavailable)."""
     error_lower = error_text.lower()
     candidates: list[_Candidate] = []
 
@@ -72,7 +196,6 @@ def _phase_a(
             if kw.lower() in error_lower:
                 score += 1
 
-        # Severity weight (same as build-driver inline version)
         if entry.severity >= 3:
             score *= 3
         elif entry.severity >= 2:
@@ -150,7 +273,51 @@ def _phase_b(
 
 
 # ═══════════════════════════════════════════════════════
-# Phase C: Solution generation
+# Phase B+: Relation network expansion
+# ═══════════════════════════════════════════════════════
+
+def _phase_b_plus(
+    best_id: str,
+    candidates: list[_Candidate],
+    gdir: str,
+    index_entries: list[IndexEntry],
+) -> list[_Candidate]:
+    """Expand candidates via relation edges (causes, caused_by, similar_to).
+
+    Loads the best match's .kv, reads relation fields, and adds related
+    entries as low-score candidates so Phase B's regex can promote them
+    if the error text also matches their signature.
+    """
+    kv_path = os.path.join(gdir, f"{best_id}.kv")
+    if not os.path.isfile(kv_path):
+        return candidates
+
+    try:
+        from .models import parse_kv_file
+        raw = parse_kv_file(kv_path)
+    except Exception:
+        return candidates
+
+    # Collect related IDs from all relation fields
+    related_ids: set[str] = set()
+    for field in ("similar_to", "caused_by", "causes"):
+        val = raw.get(field, "").strip()
+        if val:
+            for rid in re.findall(r"E\d+", val):
+                related_ids.add(rid)
+
+    if not related_ids:
+        return candidates
+
+    # Add related entries as candidates (low score, Phase B regex can boost)
+    existing_ids = {c.entry.id for c in candidates}
+    for rid in sorted(related_ids):
+        if rid not in existing_ids:
+            entry = _find_entry_by_id(index_entries, rid)
+            if entry:
+                candidates.append(_Candidate(entry=entry, score=1))
+
+    return candidates
 # ═══════════════════════════════════════════════════════
 
 def _phase_c(match_id: str, gdir: str) -> ErrorEntry | None:
@@ -405,8 +572,10 @@ def run_engine(
     if not index_entries:
         return MatchResult()
 
-    # Phase A: coarse filter
-    candidates = _phase_a(error_text, index_entries, top_n=top_n)
+    # Phase A: coarse filter (FTS5 BM25 with legacy fallback)
+    # Dual matching: raw text + normalized text (方案 A)
+    normalized = normalize_error(error_text)
+    candidates = _phase_a_dual(error_text, normalized, index_entries, top_n=top_n, gdir=gdir)
     if not candidates:
         return MatchResult()
 
@@ -414,6 +583,9 @@ def run_engine(
     match_id, b_score, a_score = _phase_b(error_text, candidates, gdir, sig_bonus=sig_bonus)
     if not match_id:
         return MatchResult()
+
+    # Phase B+: relation network expansion (adds related entries as candidates)
+    candidates = _phase_b_plus(match_id, candidates, gdir, index_entries)
 
     # Phase C: load full entry
     entry = _phase_c(match_id, gdir)

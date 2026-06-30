@@ -108,6 +108,46 @@ def parse_kv_file(filepath: str) -> dict[str, str]:
     return result
 
 
+def parse_kb_file(path: str) -> dict[str, str]:
+    """读取知识条目，自动识别 .yaml 和 .kv 格式。
+
+    优先读 .yaml 版本（如果 PyYAML 可用），回退到 .kv 解析。
+    返回扁平的 ``dict[str, str]``，与 :func:`parse_kv_file` 兼容。
+
+    YAML 中的列表字段（match_keywords, error_signature 等）在返回时
+    会被 join 成逗号分隔字符串，以保持与 KV 格式的兼容性。
+    """
+    # 优先读 .yaml 版本
+    yaml_path = path.rsplit(".", 1)[0] + ".yaml"
+    if os.path.exists(yaml_path):
+        try:
+            import yaml
+            with open(yaml_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if not isinstance(data, dict):
+                # YAML 文件内容不是 dict（可能为 list 或 None），回退
+                return parse_kv_file(path)
+            result: dict[str, str] = {}
+            for k, v in data.items():
+                if v is None:
+                    result[k] = ""
+                elif isinstance(v, str):
+                    result[k] = v
+                elif isinstance(v, list):
+                    # 列表字段 join 成逗号分隔字符串
+                    result[k] = ", ".join(str(item) for item in v)
+                elif isinstance(v, bool):
+                    # YAML 的 true/false → 小写字符串
+                    result[k] = "true" if v else "false"
+                else:
+                    result[k] = str(v)
+            return result
+        except ImportError:
+            pass  # PyYAML 不可用，回退到 KV
+    # 回退到 .kv 解析
+    return parse_kv_file(path)
+
+
 def parse_multi_kv_file(filepath: str) -> list[dict[str, str]]:
     """Parse a .kv file containing multiple entries separated by blank lines.
 

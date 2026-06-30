@@ -447,8 +447,22 @@ class BuildDriver:
             rc2 = retry_fn(self.ep_fix_cmd)
             if rc2 == 0:
                 self._log(f"✅ Auto-retry succeeded")
+                # 方案 D: 记录修复结果用于质量度量
+                try:
+                    from .kb_metrics import record_result
+                    from .utils import graph_dir as _graph_dir
+                    record_result(_graph_dir(str(self.pdir)), self.ep_match_id, success=True)
+                except Exception:
+                    pass  # 不阻塞主流程
                 return 0
             self._log(f"❌ Auto-retry also failed")
+            # 方案 D: 记录修复结果用于质量度量
+            try:
+                from .kb_metrics import record_result
+                from .utils import graph_dir as _graph_dir
+                record_result(_graph_dir(str(self.pdir)), self.ep_match_id, success=False)
+            except Exception:
+                pass  # 不阻塞主流程
 
         # Emit HANDOFF
         if hit:
