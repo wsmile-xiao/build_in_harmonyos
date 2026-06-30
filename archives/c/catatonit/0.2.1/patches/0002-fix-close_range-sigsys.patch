@@ -1,0 +1,61 @@
+diff -ruN a/catatonit.c b/catatonit.c
+--- a/catatonit.c
++++ b/catatonit.c
+@@ -143,7 +143,12 @@
+  * Set of signals that the kernel sends us if *we* screwed something up. We
+  * don't block these signals because we want to die if we hit a bug.
+  *
+- * NOTE: SIGSYS is removed from this list for OpenHarmony compatibility,
+- * where close_range syscall may not be supported and triggers SIGSYS.
++ * NOTE: SIGSYS is removed from this list for platforms where certain
++ * syscalls (like close_range) may not be supported. Keeping SIGSYS
++ * blocked allows the process to handle it gracefully through signalfd
++ * rather than immediately crashing.
++ *
++ * Original: {SIGFPE, SIGILL, SIGSEGV, SIGBUS, SIGABRT, SIGTRAP, SIGSYS}
+  */
+-int kernel_signals[] = {SIGFPE, SIGILL, SIGSEGV, SIGBUS, SIGABRT, SIGTRAP, SIGSYS};
++int kernel_signals[] = {SIGFPE, SIGILL, SIGSEGV, SIGBUS, SIGABRT, SIGTRAP};
+
+ #define ARRAY_LEN(arr) (sizeof(arr) / sizeof(*arr))
+
+@@ -150,6 +155,7 @@
+ #ifdef HAVE_LINUX_CLOSE_RANGE_H
+ # include <linux/close_range.h>
+ #else
++# include <errno.h>
+ # include <sys/syscall.h>
+ #endif
+
+@@ -165,10 +171,29 @@
+ static int close_range_fds_ge_than(int n, int exclude_fd)
+ {
++#ifdef __NR_close_range
++	/*
++	 * Runtime detection of close_range syscall support.
++	 * Some platforms (like OpenHarmony) may not implement this syscall,
++	 * and calling it would trigger SIGSYS. We detect this once and
++	 * fallback to the close() loop if unsupported.
++	 */
++	static int close_range_supported = -1;  /* -1: unknown, 0: unsupported, 1: supported */
++
++	if (close_range_supported == -1) {
++		/* Test syscall with a safe range (high FDs that likely don't exist) */
++		int ret = syscall(__NR_close_range, 1000, UINT_MAX, 0);
++		close_range_supported = (ret == 0 || errno != ENOSYS) ? 1 : 0;
++		debug("close_range syscall detection: %s",
++		      close_range_supported ? "supported" : "not supported");
++	}
++
++	if (!close_range_supported)
++		return -1;  /* Fallback to close() loop */
++#endif
++
++#ifdef HAVE_CLOSE_RANGE
+ 	return close_range(n, UINT_MAX, 0);
++#else
++	return (int) syscall(__NR_close_range, n, UINT_MAX, 0);
++#endif
+ }
+
+ static int close_range_fds_ge_than(int n, int exclude_fd)
