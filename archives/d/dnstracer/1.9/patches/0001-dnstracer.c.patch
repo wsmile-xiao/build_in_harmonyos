@@ -1,0 +1,268 @@
+diff -ruN a/dnstracer.c b/dnstracer.c
+--- a/dnstracer.c
++++ b/dnstracer.c
+@@ -31,30 +31,32 @@
+ 
+ #ifdef WIN32
+     #include <winsock.h>
+     #include <io.h>
+     #include "getopt.h"
+     // To reduce the amount of #ifdef's, these two are defined.
+     // rand()/srand() is ISO C89 naming but it's obsoleted according
+     // to the man-page.
+     #define random	rand
+     #define srandom	srand
++    #define strcasecmp stricmp
+ #else
+     #include <unistd.h>
+     #include <sys/time.h>
+     #include <sys/param.h>
+     #include <sys/socket.h>
+     #include <netinet/in.h>
+     #include <arpa/inet.h>
+     #include <arpa/nameser.h>
+     #include <netdb.h>
+     #include <resolv.h>
++    #include <strings.h>  // For strcasecmp on some systems
+ #endif
+ 
+ #include <sys/types.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <time.h>
+ 
+ #include "dnstracer_broken.h"
+ #include "config.h"
+@@ -72,20 +74,57 @@
+ 
+ int	verbose = 0;
+ int	global_overview = DEFAULT_OVERVIEW;
+ int	global_retries = DEFAULT_RETRIES;
+ int	global_caching = DEFAULT_CACHING;
+ int	global_negative_caching = DEFAULT_NEGATIVE_CACHING;
+ int	global_querytype = DEFAULT_QUERYTYPE;
+ int	global_noipv6 = DEFAULT_NOIPV6;
+ int	global_timeout = 0;
+ char *	global_source_address = NULL;
++
++/*****************************************************************************/
++
++#ifndef WIN32
++// Function to read DNS server from /etc/resolv.conf
++// This is a replacement for the _res structure method which doesn't work with musl libc
++char *get_dns_server_from_resolv_conf(void) {
++    FILE *fp;
++    char line[256];
++    char *nameserver = NULL;
++
++    fp = fopen("/etc/resolv.conf", "r");
++    if (fp == NULL) {
++        return NULL;
++    }
++
++    while (fgets(line, sizeof(line), fp) != NULL) {
++        // Skip comments and empty lines
++        if (line[0] == '#' || line[0] == '\n' || line[0] == '\0') {
++            continue;
++        }
++
++        // Look for "nameserver" directive
++        if (strncmp(line, "nameserver", 10) == 0) {
++            char ip[64];
++            // Extract IP address after "nameserver"
++            if (sscanf(line, "nameserver %63s", ip) == 1) {
++                nameserver = strdup(ip);
++                break;  // Use the first nameserver found
++            }
++        }
++    }
++
++    fclose(fp);
++    return nameserver;
++}
++#endif
+ 
+ /*****************************************************************************/
+ 
+ struct arecord {
+     char *		server_name;
+     char *		server_ip;
+     int			type;
+     char *		rr_name;
+     char *		rr_data;
+     struct arecord *	next;
+@@ -221,21 +260,21 @@
+ 
+ //
+ // Extract information from received packets.
+ //
+ 
+ int
+ strnrcasecmp(const char *big, const char *little, size_t len)
+ {
+     char *p;
+     size_t lenl, lenb;
+- 
++
+     lenl = strlen(little);
+     lenb = strlen(big);
+ 
+     if (lenl > lenb)
+ 	return -1;
+     if (len > lenl)
+ 	return -1;
+ 
+     p = (char *)big + lenb - len;
+     return strncasecmp(p, little, len);
+@@ -296,21 +335,21 @@
+ 	    compressing = 1;
+ 	    continue;
+ 	}
+ 
+ 	//
+ 	// Just copy p[0]+1 bytes (+1 to save the length-byte). If
+ 	// compression is not going on, move the end-of-this-name
+ 	// pointer. The check for the next character being 0 is a
+ 	// hack to make sure the end-of-name marked is skipped over
+ 	// before returning the packet.
+-	// 
++	//
+ 	//
+ 	memcpy(hostname + strlen(hostname), p, p[0] + 1);
+ 	if (compressing == 0) {
+ 	    *thisname += p[0] + 1;
+ 	    if (*thisname[0] == 0) *thisname += 1;
+ 	}
+ 	p += p[0] + 1;
+     }
+ 
+     return hostname;
+@@ -321,21 +360,21 @@
+ {
+     struct dnsrr *	RR;
+     char *		domainname;
+     char *		p;
+ 
+     RR = (struct dnsrr *)calloc(1, sizeof(struct dnsrr));
+     RR->next = *rr;
+ 
+     //
+     // Extract just one resource-record.
+-    // If the record is a ns_t_ns or ns_t_cname, cache the name 
++    // If the record is a ns_t_ns or ns_t_cname, cache the name
+     // into data_string.
+     //
+     domainname = getname(session, &thisrr);
+     RR->domainname = strdup(domainname);
+     RR->domainname_string = strdup(printablename(domainname, 1));
+     RR->type = getshort(thisrr);
+     RR->class = getshort(thisrr + 2);
+     RR->ttl = getlong(thisrr + 4);
+     RR->datalength = getshort(thisrr + 8);
+     RR->data = (unsigned char *)calloc(1, RR->datalength);
+@@ -603,21 +642,21 @@
+ 	char rname[NS_MAXDNAME];
+ 	unsigned long ul;
+ 
+ 	strcpy(mname, printablename(getname(session, &buffer), dots));
+ 	strcpy(rname, printablename(getname(session, &buffer), dots));
+ 
+ 	ul = getlong(buffer);
+ 	sprintf(retval, "serial: %ld mname: %s rname: %s", ul, mname, rname);
+ 	return retval;
+     }
+-	
++
+     default: return "unknown";
+     }
+ 
+ }
+ 
+ void
+ dump_question(struct dnsquestion *question)
+ {
+     printf("- Queryname:            %s\n", printablename(question->query, 0));
+     printf("- Type:                 %hu (%s)\n",
+@@ -1164,21 +1203,21 @@
+ 	printf("(%s) Not queried", server_ip);
+ 	return 1;
+     }
+ #endif
+ 
+     printf("(%s) ", server_ip);
+     fflush(stdout);
+ 
+     //
+     // If this address is already being queried, ignore it to prevent
+-    // recursion. Do not add it as being cached, because one or more 
++    // recursion. Do not add it as being cached, because one or more
+     // records in it might be unreachable.
+     //
+     if (is_busy(server_ip) == 1) {
+ 	printf("Lame server ");
+ 	fflush(stdout);
+ 	return 0;
+     }
+ 
+     //
+     // Ignore things we have already displayed
+@@ -1512,29 +1551,26 @@
+     char *	server_name = "127.0.0.1";
+     char *	server_ip = "0000:0000:0000:0000:0000:0000:0000:0000";
+     char	ipaddress[NS_MAXDNAME];
+     char	argv0[NS_MAXDNAME];
+     int		server_root = 0;
+     int		ipv6 = 0;
+ 
+ #ifndef WIN32
+     //
+     // Get the first nameserver from /etc/resolv.conf
+-    //
+-    // This piece of code was donated by Moritz Barsnick. 
+-    //
+-    if (!(_res.options & RES_INIT))
+-	res_init();
+-
+-    if (_res.nscount > 0) {
+-	server_ip = strdup(inet_ntoa(_res.nsaddr_list[0].sin_addr));
+-	server_name = strdup(server_ip);
++    // This is a replacement for the _res structure method which doesn't work with musl libc
++    //
++    char *dns_server = get_dns_server_from_resolv_conf();
++    if (dns_server != NULL) {
++	server_ip = dns_server;
++	server_name = strdup(dns_server);
+     }
+ #endif
+ 
+ #ifdef WIN32
+     wsockinit();
+ #endif
+ 
+     while ((ch = getopt(argc, argv, "4cCoq:r:S:s:t:v")) != -1) {
+ 	switch (ch) {
+ 	case '4':
+@@ -1553,21 +1589,21 @@
+ 	    global_negative_caching = 1;
+ 	    break;
+ 
+ 	case 'o':
+ 	    global_overview = 1;
+ 	    break;
+ 
+ 	case 'q':
+ 	    if ((global_querytype = atoi(optarg)) < 1) {
+ 		#define compare(s, v) \
+-			if (strcmp((s), optarg) == 0) global_querytype = (v)
++			if (strcasecmp((s), optarg) == 0) global_querytype = (v)
+ 
+ 		compare("a", 	ns_t_a		);
+ 		compare("aaaa", ns_t_aaaa	);
+ 		compare("a6", 	ns_t_aaaa	);
+ 		compare("ptr", 	ns_t_ptr	);
+ 		compare("cname",ns_t_cname	);
+ 		compare("hinfo",ns_t_hinfo	);
+ 		compare("mx", 	ns_t_mx		);
+ 		compare("ns", 	ns_t_ns		);
+ 		compare("txt", 	ns_t_txt	);
