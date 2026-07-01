@@ -158,7 +158,7 @@ class FinishPipeline:
 
     # Step 2.5: G0 clean build verification
     def step25_g0_clean_verify(self):
-        log_info("Step 2.5/6: G0 干净构建验证...")
+        log_info("Step 2.5/8: G0 干净构建验证...")
         from .clean_verify import clean_verify
         rc = clean_verify(self.software, self.version, pdir=str(self.pdir))
         if rc != 0:
@@ -218,9 +218,22 @@ class FinishPipeline:
                 if self.status == "published": self.status = "built"
                 elif self.status == "built": self.status = "failed"
 
+    # Step 3.5: Local CI simulation (W3)
+    def step35_local_ci(self):
+        log_info("Step 3.5/8: 本地 CI 模拟 (W3)...")
+        from .workflow_checks import run_local_ci
+        rc = run_local_ci(self.software, self.version, pdir=str(self.pdir))
+        if rc == 0:
+            self.steps["step35"] = True
+            self._task_card("11c2", "✅完成", "local CI OK")
+        else:
+            self.steps["step35"] = False
+            self._task_card("11c2", "⚠️部分", "CI模拟未通过")
+            log_warn("  ⚠️ 本地 CI 模拟未通过，提交 PR 前必须修复！")
+
     # Step 4: finalize-archive
     def step4_finalize_archive(self):
-        log_info("Step 4/6: 归档校验...")
+        log_info("Step 4/8: 归档校验...")
         try:
             rc = finalize_archive(self.software, self.version, pdir=str(self.pdir))
         except Exception as e:
@@ -231,17 +244,21 @@ class FinishPipeline:
         else:
             self._task_card("11d", "⚠️部分", "有警告"); log_warn(f"  finalize-archive 有警告 (RC={rc})")
 
-    # Step 5: check-knowledge-gap
+    # Step 5: knowledge completeness (W4)
     def step5_check_knowledge_gap(self):
-        log_info("Step 5/6: 知识完整性检查...")
+        log_info("Step 5/8: 知识图谱完整性检查 (W4)...")
+        # W4: Enhanced knowledge graph completeness check
+        from .workflow_checks import check_knowledge_completeness
+        rc = check_knowledge_completeness(pdir=str(self.pdir))
+        # Also run archive-specific knowledge gap check
         try:
-            rc = check_knowledge_gap(self.software, self.version, pdir=str(self.pdir))
+            rc2 = check_knowledge_gap(self.software, self.version, pdir=str(self.pdir))
         except Exception as e:
             rc = 1; log_warn(f"  check_knowledge_gap 异常: {e}")
-        if rc == 0:
+        if rc == 0 and rc2 in (0, 3):
             self.steps["step5b"] = True
-            self._task_card("11e", "✅完成", "knowledge-gap OK"); log_ok("  知识完整性通过")
-        elif rc == 3:
+            self._task_card("11e", "✅完成", "knowledge OK"); log_ok("  知识图谱完整性通过")
+        elif rc2 == 3:
             self.steps["step5b"] = False
             self._task_card("11e", "⚠️部分", "有知识遗漏"); log_warn("  知识库存在遗漏")
         else:
@@ -250,7 +267,7 @@ class FinishPipeline:
 
     # Step 6: gen_summary
     def step6_gen_summary(self):
-        log_info("Step 6/6: 生成 SUMMARY.md...")
+        log_info("Step 6/8: 生成 SUMMARY.md...")
         try:
             generate_summary(pdir=str(self.pdir))
             self.steps["step6"] = True
@@ -258,6 +275,19 @@ class FinishPipeline:
         except Exception as e:
             self.steps["step6"] = True
             self._task_card("11f", "⚠️部分", str(e)); log_warn(f"  gen_summary 失败: {e}")
+
+    # Step 7: PR atomicity check (W2)
+    def step7_pr_atomicity(self):
+        log_info("Step 7/8: PR 原子性检查 (W2)...")
+        from .workflow_checks import check_pr_atomicity
+        rc = check_pr_atomicity(pdir=str(self.pdir))
+        if rc == 0:
+            self.steps["step7"] = True
+            self._task_card("11g", "✅完成", "PR atomicity OK")
+        else:
+            self.steps["step7"] = False
+            self._task_card("11g", "⚠️部分", "框架文件混入")
+            log_warn("  ⚠️ 发现框架文件变更，请拆分到独立 PR")
 
     def _collect_knowledge_actions(self):
         """Collect AI next actions for knowledge consolidation."""
@@ -406,9 +436,11 @@ class FinishPipeline:
         self.step2_close_archive()
         self.step25_g0_clean_verify()
         self.step3_verify_build()
+        self.step35_local_ci()
         self.step4_finalize_archive()
         self.step5_check_knowledge_gap()
         self.step6_gen_summary()
+        self.step7_pr_atomicity()
         self.print_summary()
         self.emit_knowledge_handoff()
 

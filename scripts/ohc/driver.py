@@ -492,6 +492,10 @@ class BuildDriver:
             return
         self._log("═══ [1/13] init-build ═══")
 
+        # W1: Check git sync before starting (non-blocking warning)
+        from .workflow_checks import check_git_sync
+        check_git_sync(str(self.pdir), blocking=False)
+
         # Find or create context file
         ctx_pattern = f".build-context-{self.software}-{self.version}*"
         ctx_files = list(self.pdir.glob(ctx_pattern))
