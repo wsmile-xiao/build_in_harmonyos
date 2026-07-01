@@ -937,6 +937,94 @@ def _regenerate_index(kv_files: list[Path], index_path: Path) -> None:
 
 
 # ═══════════════════════════════════════════════════════
+# cmd: promote (draft → official)
+# ═══════════════════════════════════════════════════════
+
+def cmd_promote(
+    draft_id: str,
+    *,
+    target_id: str | None = None,
+    pdir: str | None = None,
+) -> int:
+    """Promote a draft to official knowledge graph entry.
+
+    1. Reads draft from knowledge/drafts/DRAFT-###.kv
+    2. Strips draft-specific fields (draft, contributor_id)
+    3. Assigns next available E-number (or uses target_id)
+    4. Fills missing required fields with defaults
+    5. Writes knowledge/graph/E###.kv + knowledge/doc/E###.md
+    6. Regenerates index.tsv
+    7. Removes the draft file
+    """
+    project = Path(pdir) if pdir else Path(find_project_dir())
+    graph_dir = project / "knowledge" / "graph"
+    drafts_dir = project / "knowledge" / "drafts"
+    doc_dir = project / "knowledge" / "doc"
+
+    if not draft_id.startswith("DRAFT"):
+        draft_id = f"DRAFT-{draft_id}"
+    draft_path = drafts_dir / f"{draft_id}.kv"
+    if not draft_path.exists():
+        log_fail(f"草稿不存在: {draft_path}")
+        return 1
+
+    content = draft_path.read_text(encoding="utf-8")
+    for field in ("draft", "contributor_id"):
+        content = re.sub(rf'^{field}:.*$\n?', '', content, flags=re.MULTILINE)
+
+    if not target_id:
+        existing = {f.stem for f in graph_dir.iterdir()
+                    if f.name.startswith("E") and f.suffix == ".kv" and f.name != "_template.kv"}
+        n = 1
+        while f"E{n:03d}" in existing:
+            n += 1
+        target_id = f"E{n:03d}"
+
+    fields = {}
+    for line in content.split('\n'):
+        line = line.strip()
+        if not line or line.startswith('#'): continue
+        m = re.match(r'^(\w+):\s*(.*)', line)
+        if m and m.group(1) not in fields:
+            fields[m.group(1)] = m.group(2).strip()
+
+    defaults = {'id': target_id, 'severity': '2', 'rec_auto_fix': 'false',
+                'rec_impl': 'manual', 'rec_priority': '1',
+                'last_updated': str(date.today())}
+    additions = [f'{k}:               {v}' for k, v in defaults.items()
+                 if k not in fields or not fields.get(k)]
+    if additions:
+        content = content.rstrip('\n') + '\n' + '\n'.join(additions) + '\n'
+    content = re.sub(r'^id:.*$', f'id:                     {target_id}', content, flags=re.MULTILINE)
+
+    kv_path = graph_dir / f"{target_id}.kv"
+    kv_path.write_text(content, encoding="utf-8")
+    log_ok(f"✅ 正式条目: {kv_path.relative_to(project)}")
+
+    doc_dir.mkdir(parents=True, exist_ok=True)
+    app = fields.get('rec_approach', fields.get('root_cause', ''))[:60]
+    doc_path = doc_dir / f"{target_id}.md"
+    doc_path.write_text(
+        f"# {target_id}: {app or '未命名错误模式'}\n\n"
+        f"## 基本信息\n- **严重度**: {fields.get('severity', '2')}\n"
+        f"- **类别**: {fields.get('category', '')}\n\n"
+        f"## 错误特征\n```\n{fields.get('error_signature', '(待补充)')}\n```\n\n"
+        f"## 根因分析\n{fields.get('root_cause', '(待补充)')}\n\n"
+        f"## 来源\n- 草稿: {draft_id}\n- 提升日期: {date.today()}\n",
+        encoding="utf-8")
+    log_ok(f"✅ 配套文档: {doc_path.relative_to(project)}")
+
+    kv_files = sorted(graph_dir.glob("E[0-9]*.kv"))
+    kv_files = [f for f in kv_files if re.match(r'^E\d+\.kv$', f.name)]
+    _regenerate_index(kv_files, graph_dir / "index.tsv")
+    log_ok(f"✅ index.tsv 已更新")
+
+    draft_path.unlink()
+    log_info(f"🎉 {draft_id} → {target_id} 提升完成")
+    return 0
+
+
+# ═══════════════════════════════════════════════════════
 # CLI entry
 # ═══════════════════════════════════════════════════════
 
@@ -979,6 +1067,12 @@ def graph_cli(argv: list[str] | None = None) -> int:
     p_val.add_argument("--coverage", "-c", action="store_true")
     p_val.add_argument("--project-dir")
 
+    # promote
+    p_promo = sub.add_parser("promote", help="Promote draft to official entry")
+    p_promo.add_argument("draft_id", help="Draft ID (e.g. DRAFT-001 or 001)")
+    p_promo.add_argument("--target-id", help="Target E-number (auto-assigned if omitted)")
+    p_promo.add_argument("--project-dir")
+
     args = parser.parse_args(argv)
 
     if args.graph_command == "add":
@@ -1012,6 +1106,12 @@ def graph_cli(argv: list[str] | None = None) -> int:
             verbose=args.verbose,
             fix=args.fix,
             coverage=args.coverage,
+            pdir=getattr(args, 'project_dir', None),
+        )
+    elif args.graph_command == "promote":
+        return cmd_promote(
+            args.draft_id,
+            target_id=getattr(args, 'target_id', None),
             pdir=getattr(args, 'project_dir', None),
         )
     else:

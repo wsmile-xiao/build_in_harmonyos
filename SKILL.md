@@ -354,6 +354,43 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps <软件名> [--install] # �
 | L2 模式经验 | knowledge/*.md 章节 | 同类构建系统复现 | 探索阶段实时 |
 | L3 本版笔记 | conanfile.py + manifest.yaml | 仅本软件本版本 | 探索阶段+固化阶段 |
 
+### 5.5 知识生命周期（可成长性机制）
+
+知识图谱通过**草稿→审核→正式**流转自动成长：
+
+```
+编译失败(conan-verify G2)
+  → 引擎未命中 → 自动生成草稿 knowledge/drafts/DRAFT-###.kv
+    → 自动提取: match_keywords(从错误日志)、error_excerpt(错误行)
+    → 自动去重: 与现有草稿关键词重合>50%则跳过
+    → AI 补充: error_signature、root_cause、rec_approach
+      → graph promote DRAFT-### → 正式条目 E###.kv
+        → 自动: 生成 doc/E###.md、更新 index.tsv、填充 last_updated
+```
+
+**命令**：
+```bash
+# 查看草稿
+ls knowledge/drafts/DRAFT-*.kv
+
+# 提升草稿为正式条目（自动分配E编号+生成doc+更新index）
+python3 $SKILL_ROOT/scripts/ohc-run.py graph promote DRAFT-001
+
+# 指定目标编号提升
+python3 $SKILL_ROOT/scripts/ohc-run.py graph promote DRAFT-001 --target-id E215
+
+# 新增草稿（手动）
+python3 $SKILL_ROOT/scripts/ohc-run.py graph add E{NNN} --draft
+
+# 更新条目（自动刷新 last_updated）
+python3 $SKILL_ROOT/scripts/ohc-run.py graph update E{NNN} --field root_cause="..."
+```
+
+**自维护**：
+- `last_updated` 字段：`graph add/update` 自动填充当日日期
+- `graph validate`：一致性校验（doc↔kv 配套、字段完整、severity 合法、引用有效）
+- `principles.kv`：20 条编译原则（P001-P020），Phase D 原则过滤引用
+
 ---
 
 ## §6 归档规范摘要
@@ -453,4 +490,4 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 
 ---
 
-*SKILL.md v8.5 — 2026-07-01 — 新增 §0.2 适配工作流规程（W1-W4：同步main/PR原子性/本地CI模拟/知识图谱完整性检查）、铁律摘要增补 W1-W4 行
+*SKILL.md v8.6 — 2026-07-01 — 新增 §5.5 知识生命周期（草稿→审核→正式流转，graph promote命令）、principles重编号P001-P020、可成长性机制文档化
