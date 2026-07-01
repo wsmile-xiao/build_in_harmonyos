@@ -490,4 +490,4 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 
 ---
 
-*SKILL.md v8.6 — 2026-07-01 — 新增 §5.5 知识生命周期（草稿→审核→正式流转，graph promote命令）、principles重编号P001-P020、可成长性机制文档化
+*SKILL.md v8.7 — 2026-07-01 — 新增预分析流程(Step0)+需求图谱(req命令)+promote质量看护(合并+贡献者+门禁)

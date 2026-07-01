@@ -23,6 +23,9 @@ _MODULES = {
     "conan-init": "conan_recipe",
     "conan-verify": "conan_verify",
     "conan-migrate": "conan_recipe",
+    # v8.6: Pre-analysis + Requirements graph
+    "pre-analysis": "pre_analysis",
+    "req": "requirements",
 }
 
 

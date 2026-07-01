@@ -936,6 +936,16 @@ def _regenerate_index(kv_files: list[Path], index_path: Path) -> None:
     index_path.write_text(content, encoding="utf-8")
 
 
+def _get_git_author() -> str:
+    """Get current git user name."""
+    import subprocess
+    try:
+        r = subprocess.run(["git", "config", "user.name"], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 # ═══════════════════════════════════════════════════════
 # cmd: promote (draft → official)
 # ═══════════════════════════════════════════════════════
@@ -944,17 +954,18 @@ def cmd_promote(
     draft_id: str,
     *,
     target_id: str | None = None,
+    force: bool = False,
+    no_merge: bool = False,
     pdir: str | None = None,
 ) -> int:
     """Promote a draft to official knowledge graph entry.
 
-    1. Reads draft from knowledge/drafts/DRAFT-###.kv
-    2. Strips draft-specific fields (draft, contributor_id)
-    3. Assigns next available E-number (or uses target_id)
-    4. Fills missing required fields with defaults
-    5. Writes knowledge/graph/E###.kv + knowledge/doc/E###.md
-    6. Regenerates index.tsv
-    7. Removes the draft file
+    1. Quality gate: error_signature/root_cause/rec_approach must be non-empty (--force to bypass)
+    2. Merge detection: scan all drafts for similar ones (keyword overlap >50%)
+    3. Contributors: first author from draft, merged drafts append as 2nd/3rd
+    4. Strips draft-specific fields, assigns E-number
+    5. Writes E###.kv + doc/E###.md, regenerates index.tsv
+    6. Removes promoted draft(s)
     """
     project = Path(pdir) if pdir else Path(find_project_dir())
     graph_dir = project / "knowledge" / "graph"
@@ -968,10 +979,74 @@ def cmd_promote(
         log_fail(f"草稿不存在: {draft_path}")
         return 1
 
+    # ── Parse draft fields ──
+    def _parse_fields(text):
+        fields = {}
+        for line in text.split('\n'):
+            line = line.strip()
+            if not line or line.startswith('#'): continue
+            m = re.match(r'^(\w+):\s*(.*)', line)
+            if m and m.group(1) not in fields:
+                fields[m.group(1)] = m.group(2).strip()
+        return fields
+
     content = draft_path.read_text(encoding="utf-8")
+    fields = _parse_fields(content)
+
+    # ── Quality gate ──
+    quality_fields = ['error_signature', 'root_cause', 'rec_approach']
+    missing_quality = [f for f in quality_fields if not fields.get(f, '').strip()]
+    if missing_quality and not force:
+        log_fail(f"❌ 质量门禁未通过: 以下字段为空: {missing_quality}")
+        log_info("   补充后重试，或使用 --force 跳过质量检查")
+        return 1
+    elif missing_quality and force:
+        log_warn(f"⚠️ 质量门禁跳过 (--force): 空字段 {missing_quality}")
+
+    # ── Merge detection ──
+    merged_drafts = []
+    merged_contributors = []
+    if not no_merge:
+        target_kws = set(k.strip() for k in fields.get('match_keywords', '').split(',') if k.strip())
+        for other in sorted(drafts_dir.glob("DRAFT-*.kv")):
+            if other.name == draft_path.name:
+                continue
+            other_fields = _parse_fields(other.read_text(encoding='utf-8'))
+            other_kws = set(k.strip() for k in other_fields.get('match_keywords', '').split(',') if k.strip())
+            if target_kws and other_kws:
+                overlap = len(target_kws & other_kws) / max(len(target_kws), 1)
+                if overlap > 0.5:
+                    merged_drafts.append((other, other_fields, overlap))
+                    other_contrib = other_fields.get('contributor_id', other_fields.get('authors', ''))
+                    if other_contrib and other_contrib not in merged_contributors:
+                        merged_contributors.append(other_contrib)
+                    log_info(f"  🔀 发现相似草稿: {other.stem} (关键词重合 {overlap:.0%})")
+
+    # Merge fields from similar drafts (fill empty fields only)
+    for other_path, other_fields, _ in merged_drafts:
+        for k, v in other_fields.items():
+            if k in ('id', 'draft', 'contributor_id', 'authors'):
+                continue
+            if not fields.get(k, '').strip() and v.strip():
+                fields[k] = v
+                log_info(f"    合并字段 {k} ← {other_path.stem}")
+
+    # ── Contributors ──
+    primary_contrib = fields.get('contributor_id', fields.get('authors', _get_git_author()))
+    all_contributors = [primary_contrib] + merged_contributors
+    # Deduplicate
+    seen = set()
+    unique_contributors = []
+    for c in all_contributors:
+        if c and c not in seen:
+            seen.add(c)
+            unique_contributors.append(c)
+
+    # ── Strip draft-specific fields ──
     for field in ("draft", "contributor_id"):
         content = re.sub(rf'^{field}:.*$\n?', '', content, flags=re.MULTILINE)
 
+    # ── Assign E-number ──
     if not target_id:
         existing = {f.stem for f in graph_dir.iterdir()
                     if f.name.startswith("E") and f.suffix == ".kv" and f.name != "_template.kv"}
@@ -980,47 +1055,54 @@ def cmd_promote(
             n += 1
         target_id = f"E{n:03d}"
 
-    fields = {}
-    for line in content.split('\n'):
-        line = line.strip()
-        if not line or line.startswith('#'): continue
-        m = re.match(r'^(\w+):\s*(.*)', line)
-        if m and m.group(1) not in fields:
-            fields[m.group(1)] = m.group(2).strip()
-
+    # ── Fill defaults ──
     defaults = {'id': target_id, 'severity': '2', 'rec_auto_fix': 'false',
                 'rec_impl': 'manual', 'rec_priority': '1',
-                'last_updated': str(date.today())}
+                'last_updated': str(date.today()),
+                'authors': ', '.join(unique_contributors[:3])}
     additions = [f'{k}:               {v}' for k, v in defaults.items()
                  if k not in fields or not fields.get(k)]
     if additions:
         content = content.rstrip('\n') + '\n' + '\n'.join(additions) + '\n'
     content = re.sub(r'^id:.*$', f'id:                     {target_id}', content, flags=re.MULTILINE)
 
+    # ── Write KV ──
     kv_path = graph_dir / f"{target_id}.kv"
     kv_path.write_text(content, encoding="utf-8")
     log_ok(f"✅ 正式条目: {kv_path.relative_to(project)}")
 
+    # ── Write doc ──
     doc_dir.mkdir(parents=True, exist_ok=True)
     app = fields.get('rec_approach', fields.get('root_cause', ''))[:60]
     doc_path = doc_dir / f"{target_id}.md"
+    contrib_line = ', '.join(unique_contributors[:3]) if unique_contributors else 'unknown'
     doc_path.write_text(
         f"# {target_id}: {app or '未命名错误模式'}\n\n"
         f"## 基本信息\n- **严重度**: {fields.get('severity', '2')}\n"
         f"- **类别**: {fields.get('category', '')}\n\n"
         f"## 错误特征\n```\n{fields.get('error_signature', '(待补充)')}\n```\n\n"
         f"## 根因分析\n{fields.get('root_cause', '(待补充)')}\n\n"
-        f"## 来源\n- 草稿: {draft_id}\n- 提升日期: {date.today()}\n",
+        f"## 来源\n- 草稿: {draft_id}\n- 合并: {', '.join(d.stem for _, _, d in [(d[0], d[1], d[0]) for d in merged_drafts]) or '无'}\n"
+        f"- 贡献者: {contrib_line}\n- 提升日期: {date.today()}\n",
         encoding="utf-8")
     log_ok(f"✅ 配套文档: {doc_path.relative_to(project)}")
 
+    # ── Regenerate index ──
     kv_files = sorted(graph_dir.glob("E[0-9]*.kv"))
     kv_files = [f for f in kv_files if re.match(r'^E\d+\.kv$', f.name)]
     _regenerate_index(kv_files, graph_dir / "index.tsv")
     log_ok(f"✅ index.tsv 已更新")
 
+    # ── Remove drafts ──
     draft_path.unlink()
-    log_info(f"🎉 {draft_id} → {target_id} 提升完成")
+    for other_path, _, _ in merged_drafts:
+        other_path.unlink()
+        log_info(f"  🗑️ 已移除合并草稿: {other_path.stem}")
+
+    log_info(f"🎉 {draft_id} → {target_id} 提升完成"
+             f"{' (合并 ' + str(len(merged_drafts)) + ' 草稿)' if merged_drafts else ''}")
+    if unique_contributors:
+        log_info(f"   贡献者: {', '.join(unique_contributors[:3])}")
     return 0
 
 
@@ -1071,6 +1153,8 @@ def graph_cli(argv: list[str] | None = None) -> int:
     p_promo = sub.add_parser("promote", help="Promote draft to official entry")
     p_promo.add_argument("draft_id", help="Draft ID (e.g. DRAFT-001 or 001)")
     p_promo.add_argument("--target-id", help="Target E-number (auto-assigned if omitted)")
+    p_promo.add_argument("--force", action="store_true", help="Skip quality gate")
+    p_promo.add_argument("--no-merge", action="store_true", help="Skip merge detection")
     p_promo.add_argument("--project-dir")
 
     args = parser.parse_args(argv)
@@ -1112,6 +1196,8 @@ def graph_cli(argv: list[str] | None = None) -> int:
         return cmd_promote(
             args.draft_id,
             target_id=getattr(args, 'target_id', None),
+            force=getattr(args, 'force', False),
+            no_merge=getattr(args, 'no_merge', False),
             pdir=getattr(args, 'project_dir', None),
         )
     else:

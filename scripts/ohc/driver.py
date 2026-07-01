@@ -481,6 +481,20 @@ class BuildDriver:
             )
         return rc  # unreachable
 
+    # ── Step 0: pre-analysis ──
+
+    def _step0_pre_analysis(self) -> None:
+        self._log("═══ [0/14] 预分析 (鸿蒙PC平台适配) ═══")
+        try:
+            from .pre_analysis import run_pre_analysis
+            rc = run_pre_analysis(self.software, self.version, pdir=str(self.pdir))
+            if rc == 0:
+                self._task_card_update("0", "✅完成", "pre-analysis")
+            else:
+                self._log("⚠️ 预分析未完成（源码可能未下载），跳过")
+        except Exception as e:
+            self._log(f"⚠️ 预分析异常: {e}，跳过继续")
+
     # ── Step 1: init-build ──
 
     def _step1_init(self) -> None:
@@ -1203,6 +1217,7 @@ class BuildDriver:
         self._log(f"🚀 开始编译: {self.software} {self.version}")
         self._log(f"   恢复模式: {self.resume_from or '从Step1开始'}")
 
+        self._step0_pre_analysis()
         self._step1_init()
         self._step15_history()
         self._step2_patches()
