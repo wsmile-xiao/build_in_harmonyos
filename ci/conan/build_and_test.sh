@@ -192,10 +192,11 @@ for pkg_dir in "${PACKAGES[@]}"; do
             # 错误格式: key 是文件名 (.patch/.diff 结尾)
             if echo "$key" | grep -qE '\.(patch|diff)$'; then
                 echo "[fail] L0f: conandata.yml patches format wrong — key '$key' is a filename, not a version"
-                echo "       Conan 2.x uses dict-by-version format:"
+                echo "       Use list format (recommended):"
                 echo "         patches:"
-                echo "           \"${pkg_ver}\":"
-                echo "             - patch_file: \"patches/$key\""
+                echo "           - patch_file: \"patches/$key\""
+                echo "             patch_description: \"...\""
+                echo "             patch_type: \"portability\""
                 L0_FAILED=true
                 L0_ERRORS="${L0_ERRORS} bad_patch_format"
                 break
@@ -233,15 +234,22 @@ for pkg_dir in "${PACKAGES[@]}"; do
     # timeout: 45 分钟硬超时, 防止交互式测试 (如 bash run-execscript) 卡住 worker
     #   exit code 124 = timeout triggered
     BUILD_TIMEOUT=2700
-    set -o pipefail
+    # Disable set -e around conan create — we need to capture the exit code
+    # and continue to the next package on failure (BUG: set -e caused premature exit)
+    set +e
     timeout --signal=KILL $BUILD_TIMEOUT conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" --build="${pkg_name}/*" 2>&1 | tee "$BUILD_LOG"
-    CONAN_RC=$?
-    set +o pipefail
+    CONAN_RC=${PIPESTATUS[0]:-$?}
+    set -e
 
     if [ $CONAN_RC -eq 124 ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — conan create TIMED OUT after ${BUILD_TIMEOUT}s (likely interactive test stuck)"
+        echo "L0_RESULT=${L0_RESULT}: ${L0_DETAIL}"
         echo "L1_RESULT=fail: conan create timed out"
-        OVERALL_SUCCESS=false
+        echo "L2_RESULT=skip: not run"
+        echo "L4_RESULT=skip: not run"
+        echo "L5_RESULT=skip: not run"
+        FAILED=$((FAILED + 1))
+        FAILED_PKGS+=("${pkg_name}/${pkg_ver} (timeout)")
         continue
     fi
 

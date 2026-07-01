@@ -24,7 +24,7 @@ wget https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/down
 
 - **Conan 配方体系**：conanfile.py + conandata.yml + test_package/ 三件套，`conan create` 验证 + `conan upload` 发布
 - **32 条编译铁律** (R1-R32)：覆盖参数/补丁/链接/源码/协作/打包/自检/Conan 配方/平台兼容
-- **知识图谱**：100+ 错误模式条目 (E001-E080+)，五阶段引擎匹配，草稿→审核→正式流转
+- **知识图谱**：211 错误模式条目 (E001-E211)，五阶段引擎匹配，草稿→审核→正式流转
 - **8 道验证门禁** (G0-G4 + L2/L4/L5)：预构建评估→配方完整性→conan create→系统同名库隔离→产物完整性→烟雾测试→安全扫描→基线对比
 - **CI 流水线**：纯 shell + conan，PR 校验不上传，合并 main 后自动上传 CNB 制品仓
 - **多 Agent 协作**：协作者提交 PR → 主编审核 → 合并，支持多人并行编译

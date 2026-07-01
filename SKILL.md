@@ -46,7 +46,7 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 
 ### §0.1 协作模式（⭐ 默认生效）
 
-本 skill 默认以**协作者模式**运行，基于 Git + GitCode PR 协作。详见 `knowledge/collaboration.md` 和 `knowledge/collaboration-tutorial.md`。| 模式 | 触发方式 | 职责 |
+本 skill 默认以**协作者模式**运行，基于 Git + GitCode PR 协作。详见 `CONTRIBUTING.md`。| 模式 | 触发方式 | 职责 |
 |------|---------|------|
 | 协作者（默认） | 直接使用 | 编译软件、提取知识、生成 conanfile.py、创建分支并提交 PR |
 | 主编 | `OHC_ROLE=editor` | 审核 PR、合并知识、重建索引 |
@@ -152,7 +152,7 @@ configure 失败？
 |---------|---------|------|
 | 技能触发 | **SKILL.md**（本文档） | 每次 |
 | 开始编译 | references/compile-guide.md | Step 2 前 |
-| 生成 Conan 配方 | templates/conanfile-*.py.tmpl + docs/CONANFILE_GUIDE.md | conan-init 时 |
+| 生成 Conan 配方 | templates/conanfile-*.py.tmpl + docs/ADAPTATION_GUIDE.md | conan-init 时 |
 | 验证 Conan 配方 | ci/conan/profiles/ohos-aarch64 | conan-verify 时 |
 | 预编译风险扫描 | knowledge/graph/pre-scan-rules.yaml | build Step 2.5（自动） |
 | 编译出错 | knowledge/graph/index.tsv → graph/E*.kv | 错误发生时 |
@@ -164,7 +164,7 @@ configure 失败？
 | 铁律详解 | references/iron-rules.md | 需要时 |
 | 软件迁移/新适配 | references/migration-guide.md | 迁移或新软件适配时 |
 | 构建系统适配 | knowledge/operations/build-systems.md | configure 前 |
-| CI 脚本契约 | docs/CI_SCRIPT_SPEC.md（外部参考） | ci/ 脚本修改时 |
+| CI 脚本契约 | ci/conan/build_and_test.sh（内联注释） | ci/ 脚本修改时 |
 
 ---
 
@@ -282,13 +282,13 @@ $SKILL_ROOT/scripts/ohc-run.py verify-build <软件名> <版本>
 
 ```
 knowledge/graph/           # 结构化数据
-├── index.tsv              # 主索引（100+ 条目）
+├── index.tsv              # 主索引（211 条目）
 ├── principles.kv          # 编译原则（20 条）
 ├── pre-scan-rules.yaml    # 预编译风险扫描规则集
-├── E001.kv ~ E080.kv      # 错误模式条目
+├── E001.kv ~ E211.kv      # 错误模式条目
 knowledge/drafts/          # 草稿目录（conan-verify 自动生成，R31）
 ├── DRAFT-001.kv ~         # 待审查的草稿条目
-knowledge/doc/             # 人类可读文档（E001.md ~ E080.md）
+knowledge/doc/             # 人类可读文档（E001.md ~ E211.md）
 knowledge/error-patterns.md  # 人类浏览入口
 ```
 
