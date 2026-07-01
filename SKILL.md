@@ -59,6 +59,45 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 
 **Agent ID**：自动获取 4 位随机标识（如 `A7F3`），用于分支后缀和草稿归属，可通过 `OHC_AGENT_ID` 预设。
 
+### §0.2 适配工作流规程（⭐ 强制执行）
+
+以下 4 条规程在每次软件适配中**强制执行**，违反=流程缺陷：
+
+**W1 — 同步主仓库**
+每次适配新软件前，**必须**拉取主仓库 main 最新变更，以匹配最新框架要求与知识库：
+```bash
+git checkout main
+git pull origin main
+# 仓库地址：
+#   https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos.git
+#   git@gitcode.com:OpenHarmonyPCDeveloper/build_in_harmonyos.git
+```
+> 不同步=用过期知识库+旧框架要求工作，可能重复踩已修复的坑。
+
+**W2 — PR 原子性**
+每个 PR **只允许包含一个配方软件及其知识图谱草稿**。如果对 SKILL 框架本身有修改（`scripts/`/`templates/`/`ci/`/`SKILL.md`/`references/` 等），**必须单独提交 PR**。
+> 混合提交=审核困难+回滚困难。配方 PR 和框架 PR 的审核标准不同。
+
+**W3 — 本地 CI 模拟**
+每个配方适配完成后，**必须**按照 CI 模式本地模拟验证通过后再提交 PR：
+```bash
+# 使用 CI 同款脚本验证
+bash ci/conan/setup.sh                          # 环境初始化
+bash ci/conan/build_and_test.sh <软件名>/<版本>  # conan create + L4/L5
+```
+> 本地不过=CI 必挂。不要把已知失败的配方推给 CI。
+
+**W4 — 知识图谱完整性检查**
+适配结束时**必须**检查知识图谱内容的完整性和合规性：
+```bash
+# 检查草稿/正式条目字段完整性
+python3 $SKILL_ROOT/scripts/ohc-run.py graph validate
+# 确认草稿已生成（如本次编译有新错误模式）
+ls knowledge/drafts/DRAFT-*.kv 2>/dev/null
+# 确认 doc/ 与 graph/ 配套（E###.md ↔ E###.kv）
+```
+> 每个 E###.kv 必须有配套的 doc/E###.md，关键字段（error_signature、root_cause、rec_approach）不得为空。
+
 ---
 
 ## §1 快速参考
@@ -112,6 +151,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 | R21-R25 | **自检与清理**：探索结束自检零介入；finish前必须通过conan验证；平台检测优先于改生成文件；归档清理failed必删；notes.md防重复(finish自动清理) |
 | R26-R31 | **Conan 配方**：系统同名库禁止动态链接(避免污染`/lib`/`/lib64`)，默认动态由Conan管理依赖链；依赖引用必须`@ohpcd/stable`；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
 | R32 | **OHOS 平台兼容**：recipe 内 `settings.os` 判断必须 `in ("Linux", "OHOS")`，不能 `== "Linux"` |
+| W1-W4 | **适配工作流**：每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
 
 > 详解见 references/iron-rules.md
 
@@ -413,4 +453,4 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 
 ---
 
-*SKILL.md v8.4 — 2026-06-27 — 新增 §0.0 环境准备（Python/Conan 安装与社区源配置）、§1.2 铁律增至 32 条（R32 OHOS 平台兼容）、os=OHOS 适配、版本号v8.3→v8.4*
+*SKILL.md v8.5 — 2026-07-01 — 新增 §0.2 适配工作流规程（W1-W4：同步main/PR原子性/本地CI模拟/知识图谱完整性检查）、铁律摘要增补 W1-W4 行
