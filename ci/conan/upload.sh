@@ -28,12 +28,6 @@ CONAN_USER="${CONAN_USER:-ohpcd}"
 CONAN_CHANNEL="${CONAN_CHANNEL:-stable}"
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 
-if [ -f "$PROFILE_FILE" ]; then
-    PROFILE_ARGS="-pr:h=$PROFILE_FILE -pr:b=$PROFILE_FILE"
-else
-    PROFILE_ARGS="-pr:h=$PROFILE -pr:b=$PROFILE"
-fi
-
 echo "[step] Conan upload pipeline"
 echo "[step]   remote: ${CONAN_REMOTE_NAME}"
 echo "[step]   user/channel: ${CONAN_USER}/${CONAN_CHANNEL}"
@@ -43,7 +37,7 @@ echo "[step]   user/channel: ${CONAN_USER}/${CONAN_CHANNEL}"
 
 # ── 1. Discover packages (only from CI_PACKAGES) ──
 PACKAGES=()
-for pkg_path in ${CI_PACKAGES:-}; do
+for pkg_path in ${=CI_PACKAGES:-}; do
     # pkg_path 形如 archives/b/bash/5.3
     pkg_ver=$(basename "$pkg_path")
     pkg_name=$(basename "$(dirname "$pkg_path")")

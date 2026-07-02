@@ -2,6 +2,7 @@
 from __future__ import annotations
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -133,7 +134,8 @@ def clean_verify(software: str, version: str, pdir: str | None = None) -> int:
         
         # Step 3: Configure
         log_info("G0: 运行 configure...")
-        full_cmd = f"{configure_cmd} --prefix={default_prefix} {configure_options}"
+        # Use shlex.quote() to prevent command injection from manifest.yaml
+        full_cmd = f"{configure_cmd} --prefix={shlex.quote(str(default_prefix))} {shlex.quote(configure_options)}" if configure_options else f"{configure_cmd} --prefix={shlex.quote(str(default_prefix))}"
         log_file = tmpdir / "g0-configure.log"
         g0_env = os.environ.copy()
         g0_env["TMPDIR"] = str(tmpdir)

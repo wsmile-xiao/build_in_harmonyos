@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -718,6 +719,15 @@ def get_missing_deps(software: str, prefix: str | None = None) -> list[str]:
 
 def install_prebuilt(name: str, version: str = "", prefix: str | None = None) -> int:
     """通过 curl | sh 安装预编译包。"""
+    # Security: validate name and version to prevent command injection
+    _SAFE_PATTERN = re.compile(r'^[a-zA-Z0-9._-]+$')
+    if not name or not _SAFE_PATTERN.match(name):
+        log_fail(f"无效的包名(含非法字符): {name!r}")
+        return 1
+    if version and not _SAFE_PATTERN.match(version):
+        log_fail(f"无效的版本号(含非法字符): {version!r}")
+        return 1
+
     idx = _get_index()
     info = idx.get(name)
     if not info:
@@ -736,7 +746,8 @@ def install_prebuilt(name: str, version: str = "", prefix: str | None = None) ->
     log_info(f"  来源: {install_url}")
 
     install_prefix = prefix or os.path.expanduser("~/usr/local")
-    cmd = f'curl -fsSL "{install_url}" | sh -s -- {name} {version}'
+    # Security: use shlex.quote to escape name and version (defense-in-depth)
+    cmd = f'curl -fsSL "{install_url}" | sh -s -- {shlex.quote(name)} {shlex.quote(version)}'
 
     log_info(f"  执行: {cmd}")
 

@@ -177,7 +177,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
         L0_ERRORS="${L0_ERRORS} no_manifest"
     fi
 
-    # L0f: conandata.yml patches 格式校验 (Conan 2.x 要求 dict-by-version)
+    # L0f: conandata.yml patches 格式校验 (Conan 2.x 要求 list 格式)
     CONANDATA="$pkg_dir/conandata.yml"
     if [ -f "$CONANDATA" ] && grep -q "^patches:" "$CONANDATA" 2>/dev/null; then
         # 提取 patches 段下的 key (缩进的行, 取第一个 token 去掉引号/冒号)
@@ -265,7 +265,12 @@ for pkg_dir in "${PACKAGES[@]}"; do
         # CI 脚本从 conan create 日志中验证测试真实执行。
         echo "[step] L1: Verifying test execution from conan create log..."
 
-        MANIFEST_FILE="$TEST_PKG_DIR/MANIFEST.yml"
+        # Check whitelist: if package name is in no_official_test.txt, skip L1
+        if [ -f "$NO_TEST_FILE" ] && grep -qx "$pkg_name" "$NO_TEST_FILE" 2>/dev/null; then
+            echo "[step] L1: Package '$pkg_name' is in no_official_test.txt whitelist — skipping L1 check"
+            L1_RESULT="skip"
+            L1_DETAIL="whitelisted (no official test)"
+        else
 
         # L1a: conan create 必须进入 test 阶段 (test_package 被执行)
         # 使用 -e 多模式匹配, 避免 \| 在某些 grep 实现上不支持
@@ -311,6 +316,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
                 L1_FAILED=true
             fi
         fi
+        fi  # end of L1 whitelist else
 
         # ── L4: Static security scan on patches ──
         PATCH_DIR="$pkg_dir/patches"

@@ -134,7 +134,7 @@ def _download(urls: list[str], dest: Path) -> int:
     import asyncio
 
     async def _probe(session_url: str) -> tuple[str, bool]:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             req = urllib.request.Request(session_url, method="HEAD",
                                           headers={"User-Agent": "ohc/1.0"})
@@ -179,7 +179,12 @@ def _extract(tarball: Path, dest: Path, fmt: str) -> bool:
         else:
             mode = {"tar.gz": "r:gz", "tar.xz": "r:xz", "tar.bz2": "r:bz2"}.get(fmt, "r:gz")
             with tarfile.open(tarball, mode) as tf:
-                tf.extractall(dest)
+                # CVE-2007-4559: use filter='data' to prevent path traversal
+                try:
+                    tf.extractall(dest, filter='data')
+                except TypeError:
+                    # Python < 3.12 does not support the filter parameter
+                    tf.extractall(dest)
         # Handle subdirectory promotion (single level)
         children = list(dest.iterdir())
         if len(children) == 1 and children[0].is_dir():
@@ -525,7 +530,6 @@ def init_build(software: str, version: str = "", mode: str = "auto",
     prefix = os.environ.get("DEFAULT_PREFIX", os.path.expanduser("~/usr/local"))
     missing = get_missing_deps(software, prefix)
     if missing:
-        missing_prebuilt = [d for d in missing if resolve_and_install.__module__ and True]
         log_warn(f"  缺失依赖: {', '.join(missing)}")
         # 尝试自动安装有预编译包的依赖
         rc = resolve_and_install(software, version, prefix, dry_run=False)

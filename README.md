@@ -1,7 +1,7 @@
 # OpenHarmony Compile Agent
 
 > 鸿蒙 (OpenHarmony) 平台开源软件编译兼容性框架
-> 版本: v8.4 (Conan 配方体系 · 知识图谱驱动 · 多 Agent 协作)
+> 版本: v8.7 (Conan 配方体系 · 知识图谱驱动 · 多 Agent 协作)
 
 ## 加入项目
 
@@ -20,7 +20,7 @@ wget https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/down
 
 **当前规模**：已收录 **427** 款软件 / **490** 个版本（详见 [SUMMARY.md](SUMMARY.md)）
 
-### v8.4 核心特性
+### v8.7 核心特性
 
 - **Conan 配方体系**：conanfile.py + conandata.yml + test_package/ 三件套，`conan create` 验证 + `conan upload` 发布
 - **32 条编译铁律** (R1-R32)：覆盖参数/补丁/链接/源码/协作/打包/自检/Conan 配方/平台兼容
@@ -163,7 +163,7 @@ curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/downloa
 
 | 文档 | 说明 |
 |------|------|
-| [SKILL.md](SKILL.md) | 主操作手册（v8.4），每次编译前必读 |
+| [SKILL.md](SKILL.md) | 主操作手册（v8.7），每次编译前必读 |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
 | [KNOW_YOUR_WHY.md](KNOW_YOUR_WHY.md) | 核心设计理念与约束 |
 | [docs/ADAPTATION_GUIDE.md](docs/ADAPTATION_GUIDE.md) | AI 适配操作手册（新库适配入口） |

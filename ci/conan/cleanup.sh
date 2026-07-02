@@ -88,9 +88,10 @@ done
 FIND_PRUNE="${FIND_PRUNE% -o}"
 
 # 清理 .conan2 下的未知文件和目录 (不在保护清单内的)
+# 使用 \( \) 分组确保 -not 对整个 prune 列表生效, 避免 -o 分支导致保护文件被删除
 # shellcheck disable=SC2086
 STRAY_CONAN=$(find "$CONAN_HOME" -maxdepth 1 -mindepth 1 \
-    -not $FIND_PRUNE 2>/dev/null || true)
+    -not \( $FIND_PRUNE \) 2>/dev/null || true)
 if [ -n "$STRAY_CONAN" ]; then
     echo "$STRAY_CONAN" | while IFS= read -r item; do
         [ -n "$item" ] && rm -rf "$item" 2>/dev/null && echo "[cleanup] 删除杂项: $(basename "$item")"

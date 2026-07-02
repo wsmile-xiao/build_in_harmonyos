@@ -89,7 +89,7 @@
 | 已发布（published） | 26 |
 | 已编译（built） | 76 |
 | 编译失败 | 5 |
-| 错误模式 | 100+ 条（E001-E080+） |
+| 错误模式 | 211 条（E001-E211） |
 | 编译铁律 | 32 条（R1-R32） |
 
 > 数据来源：[SUMMARY.md](SUMMARY.md)（自动生成，请勿手动编辑）
@@ -100,7 +100,7 @@
 
 | 文档 | 说明 |
 |------|------|
-| [SKILL.md](SKILL.md) | 主操作手册（v8.4），回答"怎么做" |
+| [SKILL.md](SKILL.md) | 主操作手册（v8.7），回答"怎么做" |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | 贡献指南 |
 | [docs/ADAPTATION_GUIDE.md](docs/ADAPTATION_GUIDE.md) | AI 适配操作手册 |
 | [docs/TEST_QUALITY_SPEC.md](docs/TEST_QUALITY_SPEC.md) | 测试质量规范 |
@@ -109,4 +109,4 @@
 ---
 
 *本文档是 SKILL.md 的精简伴侣。SKILL.md 回答"怎么做"，本文档回答"为什么"和"绝对不能忘什么"。*
-*对齐 SKILL.md v8.4 · 2026-06-27*
+*对齐 SKILL.md v8.7 · 2026-07-01*

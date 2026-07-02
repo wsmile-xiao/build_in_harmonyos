@@ -1,7 +1,7 @@
 # 贡献指南
 
 > 如何为鸿蒙编译知识库添加新软件或改进现有内容。
-> 对齐 SKILL.md v8.4 · Conan 配方体系
+> 对齐 SKILL.md v8.7 · Conan 配方体系
 
 ## 角色与权限
 
@@ -267,7 +267,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --install <软件名>
 
 | 文档 | 说明 |
 |------|------|
-| [SKILL.md](SKILL.md) | 主操作手册（v8.4） |
+| [SKILL.md](SKILL.md) | 主操作手册（v8.7） |
 | [KNOW_YOUR_WHY.md](KNOW_YOUR_WHY.md) | 核心设计理念与约束 |
 | [docs/ADAPTATION_GUIDE.md](docs/ADAPTATION_GUIDE.md) | AI 适配操作手册 |
 | [docs/TEST_QUALITY_SPEC.md](docs/TEST_QUALITY_SPEC.md) | 测试质量规范 |
@@ -275,4 +275,4 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --install <软件名>
 
 ---
 
-*对齐 SKILL.md v8.4 · 2026-06-27*
+*对齐 SKILL.md v8.7 · 2026-07-01*

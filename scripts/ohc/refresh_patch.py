@@ -285,11 +285,12 @@ def _patch_stats(patch_file: Path) -> dict:
 def _dry_run(patch_file: Path, orig_dir: Path) -> bool:
     """Verify patch with dry-run (requires external patch command)."""
     try:
-        r = subprocess.run(
-            ["patch", "--dry-run", "-p1"],
-            stdin=open(patch_file), cwd=str(orig_dir),
-            capture_output=True, timeout=30,
-        )
+        with open(patch_file) as f:
+            r = subprocess.run(
+                ["patch", "--dry-run", "-p1"],
+                stdin=f, cwd=str(orig_dir),
+                capture_output=True, timeout=30,
+            )
         return r.returncode == 0
     except Exception:
         return False

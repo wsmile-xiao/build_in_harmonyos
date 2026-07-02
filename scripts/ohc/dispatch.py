@@ -18,7 +18,7 @@ from typing import Optional
 
 import yaml
 
-from .dependency_resolver import _KNOWN_DEPS, _BUILTIN_INDEX
+from .dependency_resolver import _KNOWN_DEPS, get_available_version
 from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 
 
@@ -65,9 +65,12 @@ def _get_version(software: str) -> str:
         )
         if versions:
             return versions[0]
-    # Fallback to BUILTIN_INDEX
-    info = _BUILTIN_INDEX.get(software, {})
-    return info.get("ver", "")
+    # Fallback to runtime index (cmd-pkgs)
+    try:
+        ver = get_available_version(software)
+        return ver or ""
+    except Exception:
+        return ""
 
 
 # ═══════════════════════════════════════════════════════

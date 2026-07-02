@@ -158,7 +158,7 @@ class VerifyBuild:
             except (OSError, IOError):
                 elf_bins.append(b)  # Assume ELF if unreadable (HMDFS issue)
 
-        for b in bins:
+        for b in elf_bins:
             # RPATH check
             if patchelf:
                 rc, rpath = self._run([patchelf, "--print-rpath", str(b)])

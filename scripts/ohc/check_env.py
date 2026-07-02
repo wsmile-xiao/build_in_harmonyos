@@ -30,7 +30,7 @@ def _check_cmd(name: str) -> tuple[bool, str]:
         ver = (r.stdout or "").split("\n")[0].strip()
         return True, ver
     except Exception:
-        return True, ""
+        return False, str(e)
 
 
 def _check_ssl_certs() -> bool:
