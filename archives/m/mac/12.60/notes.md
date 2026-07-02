@@ -110,13 +110,11 @@
 - 源码是 SDK ZIP 格式，不是 tar.gz，需 unzip 解压
 - aarch64 平台自动包含 NNFilterNeon.cpp（NEON SIMD 优化）
 - 构建产物包含共享库 libMAC.so 和命令行工具 mac（非 Windows 下输出名 MAC）
-- BSD-3-Clause 许可证，可自由使用和分发
+- BSD-3-Clause 许可证，可自由使用和分发---
 
+**编译结束**: 2026-07-02 11:19
+**最终状态**: built
 ---
 
-**编译结束**: 2026-05-26 21:12
-**最终状态**: published
----
-
-**编译结束**: 2026-05-26 21:16
+**编译结束**: 2026-07-02 11:21
 **最终状态**: published
