@@ -62,7 +62,7 @@ class TclConan(ConanFile):
 
     def package(self):
         autotools = Autotools(self)
-        autotools.install(target="install-binaries install-libraries")
+        autotools.install(target="install-binaries install-libraries install-headers")
 
 
     def package_info(self):
