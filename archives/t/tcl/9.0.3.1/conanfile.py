@@ -63,7 +63,38 @@ class TclConan(ConanFile):
     def package(self):
         autotools = Autotools(self)
         autotools.install(target="install-binaries install-libraries install-headers")
+        self._relocate_tclconfig()
 
+    def _relocate_tclconfig(self):
+        # 【手加，非 skill 生成】tclConfig.sh 里烤死了绝对路径：TCL_SRC_DIR/TCL_BUILD_* 指向已消失的
+        # 构建缓存目录，TCL_*_SPEC 是 --prefix=/ 拼出的字面 //lib //include。消费方（如 tk，用
+        # $(TCL_SRC_DIR)/generic 取头、-L//lib -ltclstub 链接）会拿到坏路径。重定位为 ${TCL_ROOT}
+        # 相对（package_info 把 TCL_ROOT 设成消费方缓存里本包的实际目录）。
+        import os
+        cfg = os.path.join(self.package_folder, "lib", "tclConfig.sh")
+        if not os.path.isfile(cfg):
+            return
+        with open(cfg, encoding="utf-8") as f:
+            text = f.read()
+        # 构建缓存绝对路径 → ${TCL_ROOT}（先长后短，避免短前缀先匹配）
+        for _p, _r in sorted(
+            [(self.build_folder, "${TCL_ROOT}/lib"), (self.source_folder, "${TCL_ROOT}")],
+            key=lambda x: -len(x[0]),
+        ):
+            text = text.replace(_p, _r)
+        # --prefix=/ 的字面 //lib //include
+        text = text.replace("-I//include", "-I${TCL_ROOT}/include")
+        text = text.replace("-L//lib", "-L${TCL_ROOT}/lib")
+        text = text.replace("'//lib/", "'${TCL_ROOT}/lib/")
+        text = text.replace("TCL_PREFIX='/'", "TCL_PREFIX='${TCL_ROOT}'")
+        text = text.replace("TCL_EXEC_PREFIX='/'", "TCL_EXEC_PREFIX='${TCL_ROOT}'")
+        with open(cfg, "w", encoding="utf-8") as f:
+            f.write(text)
+        # tk 用 $(TCL_SRC_DIR)/generic、/unix 取 tcl 头，而包里头装在 include/ → 建软链兜住
+        for _sub in ("generic", "unix"):
+            _link = os.path.join(self.package_folder, _sub)
+            if not os.path.lexists(_link):
+                os.symlink("include", _link)
 
     def package_info(self):
         explicit_libs = ['tcl9.0']
@@ -75,6 +106,8 @@ class TclConan(ConanFile):
             self.cpp_info.set_property("pkg_config_name", pkg)
         if self.settings.os in ("Linux", "OHOS"):
             self.cpp_info.system_libs = ['dl', 'm', 'pthread', 'z']
+        # 消费方 source 重定位后的 tclConfig.sh 时，${TCL_ROOT} 展开为本包在其缓存的实际目录
+        self.buildenv_info.define("TCL_ROOT", self.package_folder)
         import os
         for _env in []:
             _k, _v = _env.split("=", 1)
