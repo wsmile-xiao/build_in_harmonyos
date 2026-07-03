@@ -11,17 +11,23 @@ TCL 是一种动态编程语言，由 John Ousterhout 创建。它被设计为�
 - 支持 OOP（通过 TclOO）
 
 ## 编译版本
-- **8.6.14** (2024-02-24) - 最新稳定版本
+- **9.0.3.1** (2026-07-02) — Tcl 9.0，**动态库**形态（`libtcl9.0.so` 供 dlopen；及作 tk 等的依赖）
+- **8.6.14** (2026-05-26) — Tcl 8.6，静态形态（`libtcl8.6.a` + `tclsh8.6` 终端工具）
 
 ## 编译信息
-- 构建系统: Autotools
-- 编译器: Clang
-- 平台: HarmonyOS HongMeng Kernel 1.12.0
+- 构建系统: 9.0.3.1 = Autotools（标准 conan，CI 原生 clang）；8.6.14 = Autotools
+- 编译器: Clang（OHOS NDK）
+- 平台: HarmonyOS PC / HongMeng Kernel
+
+## OHOS 适配要点
+- 9.0.3.1 产**动态** `libtcl9.0.so`（非系统同名库，R26 默认动态），供设备上 dlopen；
+- `--disable-zipfs` 出**干净 ELF**（避免脚本库 zip 尾拼破坏链接器自签）→ 链接器自签有效、独立 dlopen 可加载、无需显式重签；
+- 脚本库以**散文件**装 `lib/tcl9.0`，运行期靠 `TCL_LIBRARY` 指过去；
+- 系统识别 uname shim + `tcl_cv_sys_version=Linux-6.6`；`umask 077→022`（E011）；跳过可选子包。
 
 ## 安装产物
-- tclsh8.6 - TCL shell 解释器
-- libtcl8.6.a - TCL 静态库
-- libtclstub8.6.a - TCL stub 库（用于扩展开发）
+- **9.0.3.1**：`libtcl9.0.so`（动态库）、`bin/tclsh`、`tclConfig.sh`、`libtclstub.a`、公共头、`lib/tcl9.0/`（散脚本库）
+- **8.6.14**：`tclsh8.6`、`libtcl8.6.a`、`libtclstub8.6.a`
 
 ## 使用示例
 ```tcl
