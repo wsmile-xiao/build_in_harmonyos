@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""Pre-commit hook for Conan recipe quality (L0 local gate).
+
+Runs before `git commit` and checks recipe files for common CI failures.
+Based on CI failure analysis (Build #1~#76, 195 failures, 49% recipe quality).
+
+Usage:
+  1. cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+  2. Or add to .pre-commit-config.yaml
+
+Checks (each maps to a CI L0 gate):
+  L0a: conanfile.py exists and has no Python syntax errors
+  L0b: sha256 in conandata.yml is not a placeholder or empty
+  L0c: test_package/ directory exists and has source files (.c/.cpp/.py/.sh)
+  L0d: test() method calls self.run() or cmake.test() (not just `pass`)
+  L0e: test_package/MANIFEST.yml exists
+  L0f: patch files can be validated (proper unified diff format)
+  L0g: GitHub URL mirror check (warn, not block)
+  L0h: Go/Rust language detection (warn, not block)
+"""
+from __future__ import annotations
+import os
+import re
+import sys
+import ast
+from pathlib import Path
+
+# Colors
+RED = "\033[31m"
+YELLOW = "\033[33m"
+GREEN = "\033[32m"
+RESET = "\033[0m"
+
+errors: list[str] = []
+warnings: list[str] = []
+
+
+def find_recipe_dirs(staged_files: list[str], project_root: Path) -> list[Path]:
+    """Find archive version directories from staged files."""
+    recipe_dirs: set[Path] = set()
+    for f in staged_files:
+        p = Path(f)
+        # Match archives/{letter}/{name}/{version}/conanfile.py
+        parts = p.parts
+        if "archives" in parts:
+            try:
+                idx = parts.index("archives")
+                if idx + 3 < len(parts):
+                    ver_dir = project_root / Path(*parts[:idx + 4])
+                    if (ver_dir / "conanfile.py").exists() or f.endswith("conanfile.py"):
+                        recipe_dirs.add(ver_dir)
+            except (ValueError, IndexError):
+                pass
+    return sorted(recipe_dirs)
+
+
+def check_conanfile_syntax(ver_dir: Path) -> None:
+    """L0a: conanfile.py exists and has no syntax errors."""
+    conanfile = ver_dir / "conanfile.py"
+    if not conanfile.exists():
+        errors.append(f"  L0a ❌ {ver_dir.name}: conanfile.py 缺失")
+        return
+    try:
+        source = conanfile.read_text(encoding="utf-8")
+        ast.parse(source)
+    except SyntaxError as e:
+        errors.append(f"  L0a ❌ {ver_dir.name}: conanfile.py 语法错误: {e}")
+
+
+def check_sha256(ver_dir: Path) -> None:
+    """L0b: sha256 in conandata.yml is not a placeholder or empty."""
+    conandata = ver_dir / "conandata.yml"
+    if not conandata.exists():
+        return  # Skip if no conandata.yml
+    content = conandata.read_text(encoding="utf-8")
+    if "REPLACE_WITH" in content:
+        errors.append(f"  L0b ❌ {ver_dir.name}: conandata.yml sha256 仍为占位符 REPLACE_WITH_*")
+    # Check for empty sha256
+    sha_match = re.search(r'sha256:\s*["\']?\s*["\']?\s*$', content, re.MULTILINE)
+    if sha_match:
+        errors.append(f"  L0b ❌ {ver_dir.name}: conandata.yml sha256 为空")
+
+
+def check_test_package_sources(ver_dir: Path) -> None:
+    """L0c: test_package/ has source files."""
+    tp = ver_dir / "test_package"
+    if not tp.is_dir():
+        errors.append(f"  L0c ❌ {ver_dir.name}: test_package/ 目录缺失")
+        return
+    # Look for source files (not build artifacts)
+    source_exts = {".c", ".cpp", ".cc", ".cxx", ".py", ".sh", ".go", ".rs"}
+    build_dirs = {"build", "__pycache__", "CMakeFiles"}
+    has_source = False
+    for f in tp.rglob("*"):
+        if not f.is_file():
+            continue
+    for f in tp.iterdir():
+        if f.is_file() and f.suffix in source_exts:
+            has_source = True
+            break
+    if not has_source:
+        # Check subdirectories excluding build dirs
+        for sub in tp.rglob("*"):
+            if sub.is_file() and sub.suffix in source_exts:
+                if not any(d in sub.parts for d in build_dirs):
+                    has_source = True
+                    break
+    if not has_source:
+        # Check if test_package/conanfile.py has subprocess.run or self.run in test()
+        tp_conanfile = tp / "conanfile.py"
+        if tp_conanfile.exists():
+            content = tp_conanfile.read_text(encoding="utf-8")
+            if "subprocess.run" in content or "self.run(" in content:
+                # Test logic is inline in conanfile.py (acceptable for CLI tools)
+                return
+        errors.append(f"  L0c ❌ {ver_dir.name}: test_package/ 无测试源文件 (.c/.cpp/.py/.sh)")
+
+
+def check_test_method(ver_dir: Path) -> None:
+    """L0d: test() method is not a stub."""
+    # Check main conanfile.py
+    for conanfile_path in [ver_dir / "conanfile.py", ver_dir / "test_package" / "conanfile.py"]:
+        if not conanfile_path.exists():
+            continue
+        content = conanfile_path.read_text(encoding="utf-8")
+        # Find test() method
+        test_match = re.search(r'def\s+test\s*\(self.*?\):\s*\n(.*?)(?=\n    def |\nclass |\Z)',
+                               content, re.DOTALL)
+        if test_match:
+            body = test_match.group(1)
+            # Check if body is just pass or empty
+            stripped = body.strip()
+            if stripped == "pass" or not stripped:
+                errors.append(f"  L0d ❌ {conanfile_path.name}: test() 方法是空壳 (仅 pass)")
+            # Check if self.run() or cmake.test() is called
+            elif "self.run(" not in body and "cmake.test()" not in body and "subprocess" not in body:
+                warnings.append(f"  L0d ⚠️ {conanfile_path.name}: test() 方法未调用 self.run()/cmake.test()")
+
+
+def check_manifest_yml(ver_dir: Path) -> None:
+    """L0e: test_package/MANIFEST.yml exists."""
+    manifest = ver_dir / "test_package" / "MANIFEST.yml"
+    if not manifest.exists():
+        warnings.append(f"  L0e ⚠️ {ver_dir.name}: test_package/MANIFEST.yml 缺失")
+
+
+def check_patches(ver_dir: Path) -> None:
+    """L0f: patch files are valid unified diff."""
+    patch_dir = ver_dir / "patches"
+    if not patch_dir.is_dir():
+        return
+    for pf in patch_dir.glob("*.patch"):
+        content = pf.read_text(encoding="utf-8", errors="replace")
+        if not content.startswith("---"):
+            errors.append(f"  L0f ❌ {pf.name}: 不是有效的 unified diff (应以 --- 开头)")
+        elif not re.search(r'^@@', content, re.MULTILINE):
+            errors.append(f"  L0f ❌ {pf.name}: unified diff 缺少 @@ hunk 头")
+
+
+def check_github_url(ver_dir: Path) -> None:
+    """L0g: warn if GitHub URL without mirror."""
+    conandata = ver_dir / "conandata.yml"
+    if not conandata.exists():
+        return
+    content = conandata.read_text(encoding="utf-8")
+    if "github.com" in content and "gitcode.com" not in content and "ghfast" not in content:
+        warnings.append(f"  L0g ⚠️ {ver_dir.name}: 源码 URL 使用 github.com，建议使用 gitcode.com 镜像")
+
+
+def check_language(ver_dir: Path) -> None:
+    """L0h: warn if Go/Rust project."""
+    conanfile = ver_dir / "conanfile.py"
+    if not conanfile.exists():
+        return
+    content = conanfile.read_text(encoding="utf-8")
+    if "go/1." in content or "goroot" in content.lower() or "go build" in content:
+        warnings.append(f"  L0h ⚠️ {ver_dir.name}: Go 项目，鸿蒙 PC 原生环境可能未预装 Go 工具链")
+    if "cargo" in content.lower() or "rustc" in content.lower():
+        warnings.append(f"  L0h ⚠️ {ver_dir.name}: Rust 项目，鸿蒙 PC 原生环境无 Rust 工具链")
+
+
+def run_all_checks(ver_dir: Path) -> None:
+    """Run all L0 checks on a recipe directory."""
+    check_conanfile_syntax(ver_dir)
+    check_sha256(ver_dir)
+    check_test_package_sources(ver_dir)
+    check_test_method(ver_dir)
+    check_manifest_yml(ver_dir)
+    check_patches(ver_dir)
+    check_github_url(ver_dir)
+    check_language(ver_dir)
+
+
+def main() -> int:
+    project_root = Path(__file__).resolve().parent
+    # Walk up to find project root (with archives/ dir)
+    while project_root.parent != project_root:
+        if (project_root / "archives").is_dir():
+            break
+        project_root = project_root.parent
+
+    # Get staged files
+    import subprocess
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACMR"],
+        capture_output=True, text=True, cwd=str(project_root)
+    )
+    staged = [f.strip() for f in result.stdout.splitlines() if f.strip()]
+
+    if not staged:
+        return 0  # Nothing staged
+
+    # Find recipe directories from staged files
+    recipe_dirs = find_recipe_dirs(staged, project_root)
+
+    # Also check if any staged file is in a recipe directory
+    for f in staged:
+        p = project_root / f
+        if p.name == "conanfile.py" or p.name == "conandata.yml":
+            # Find the version directory
+            for parent in p.parents:
+                if (parent / "conanfile.py").exists() or (parent / "conandata.yml").exists():
+                    if parent not in recipe_dirs:
+                        recipe_dirs.append(parent)
+                    break
+
+    if not recipe_dirs:
+        return 0  # No recipe files staged
+
+    print(f"\n{'='*60}")
+    print(f"  Conan Recipe Pre-commit Check (L0)")
+    print(f"  Checking {len(recipe_dirs)} recipe(s)...")
+    print(f"{'='*60}\n")
+
+    for ver_dir in recipe_dirs:
+        run_all_checks(ver_dir)
+
+    # Print results
+    if warnings:
+        print(f"{YELLOW}⚠️  Warnings:{RESET}")
+        for w in warnings:
+            print(w)
+        print()
+
+    if errors:
+        print(f"{RED}❌ Errors:{RESET}")
+        for e in errors:
+            print(e)
+        print(f"\n{RED}Commit rejected. Fix the above errors before committing.{RESET}")
+        print(f"  Tip: Run `python3 scripts/ohc-run.py submit --check <name> <version>` for details.\n")
+        return 1
+
+    if warnings:
+        print(f"{YELLOW}⚠️  {len(warnings)} warning(s). Commit allowed but please review.{RESET}\n")
+    else:
+        print(f"{GREEN}✅ All checks passed.{RESET}\n")
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
