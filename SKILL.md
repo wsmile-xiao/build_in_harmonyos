@@ -468,16 +468,33 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 
 | 子命令 | 用途 |
 |--------|------|
-| `build` | 13 步编译驱动（含 conan 配方生成+验证）★ 主入口 |
+| `build` | 14 步编译驱动（含预分析+conan 配方生成+验证）★ 主入口 |
 | `init-build` | 下载/解压/骨架/环境/依赖解析 |
+| `pre-analysis` | ⭐ 鸿蒙PC平台适配预分析（图形/音视频/系统集成/平台代码扫描） |
 | `conan-init` | 生成 conanfile.py + conandata.yml + test_package/ ⭐ |
 | `conan-verify` | conan create + G0-G4 + L2/L4/L5 + 知识图谱(R30) + 草稿(R31) ⭐ |
-| `finish` | 补丁+归档+conan-verify+校验+知识+摘要（6 步） |
-| `engine` / `graph add|update|validate` | 知识图谱查询/管理 |
+| `finish` | 补丁+归档+conan-verify+CI模拟+知识+PR原子性+摘要（8 步） |
+| `engine` / `graph add\|update\|validate\|promote` | 知识图谱查询/管理/草稿提升 |
+| `req add\|list\|close\|validate` | ⭐ 需求图谱管理（系统能力缺口跟踪） |
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
-| `search-url` / `submit` / `review` | URL 搜索 / PR 自检 / 主编审核 |
+
+**独立脚本**（`scripts/` 目录，不通过 ohc-run.py）：
+
+| 脚本 | 用途 |
+|------|------|
+| `scripts/gen-test-packages.py` | 批量为缺 test_package/ 的配方生成测试文件 |
+| `scripts/sync-recipes.py` | 从 conan 缓存同步配方到 archives/ |
+| `scripts/migrate_kv_to_yaml.py` | KV→YAML 渐进迁移 |
+
+### Pre-commit Hook（⭐ 建议安装）
+
+```bash
+cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
+```
+
+提交前自动检查 L0a-L0h（conanfile 语法/sha256/test源码/test()方法/MANIFEST/patch格式/环境变量依赖）。
 
 ### CI 脚本（ci/ 目录，由 Buildbot Worker 执行，纯 shell，无 AI）
 
@@ -491,4 +508,4 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 
 ---
 
-*SKILL.md v8.8 — 2026-07-06 — 新增 R33（build() 禁止依赖未定义 shell 环境变量）、L0h 门禁（shell 环境变量检测）、makefile 模板编译器获取修正；v8.7→v8.8*
+*SKILL.md v8.9 — 2026-07-06 — 模板统一(删除重复无.tmpl模板)+Step0 checkpoint+pre-commit L0h修复(R33对齐)+§9新脚本文档

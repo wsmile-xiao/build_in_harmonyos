@@ -490,6 +490,11 @@ class BuildDriver:
             rc = run_pre_analysis(self.software, self.version, pdir=str(self.pdir))
             if rc == 0:
                 self._task_card_update("0", "✅完成", "pre-analysis")
+                self._emit_checkpoint("Step0", "pre-analysis", [
+                    f"查阅 archives/{self.software[:1].lower()}/{self.software}-{self.version}/pre-analysis.md",
+                    "确认图形/音视频/系统集成/平台代码适配需求",
+                    "如有系统能力缺失，用 req add 提交需求条目",
+                ])
             else:
                 self._log("⚠️ 预分析未完成（源码可能未下载），跳过")
         except Exception as e:
