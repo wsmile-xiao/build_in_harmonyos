@@ -14,20 +14,38 @@ type: project
 
 ## 一、欺骗性行为检测（⭐ 最高优先级，一律 request changes）
 
+以下行为不论其他检查是否通过，一律拒绝。
+
 ### 1. 空壳测试 (R34)
-test_package 必须调用被测包的 API 或执行其二进制。禁止只打印字符串、include 头文件但不调用函数。
+test_package 必须调用被测包的 API 或执行其二进制。
+```cpp
+// 欺骗 — 只打印不调用 API
+int main() { printf("test passed\n"); return 0; }
+// 欺骗 — include 了但不用
+#include <zlib.h>
+int main() { return 0; }
+// 正确 — 实际调用
+#include <zlib.h>
+int main() { return zlibVersion() ? 0 : 1; }
+```
 
 ### 2. 跳过测试 / 伪造通过 (R9)
-禁止 `def test(self): pass`、注释掉 `cmake.test()`、用 `exit 0` 强制通过。
+禁止 `def test(self): pass`、注释掉 `cmake.test()`、用 `os.system("exit 0")` 强制通过。
 
 ### 3. 伪造状态标记
 manifest.yaml 状态必须真实：`published`=CI upload 成功，`built`=验证通过未 upload，`failed`=编译失败。禁止将 failed 标为 published。
 
-### 4. 伪造 sha256 / 绕过校验
-conandata.yml 中 sha256 必须是源码包真实哈希。禁止全零、全 f、删除字段。
+### 4. 伪造 sha256
+conandata.yml 中 sha256 必须是源码包真实哈希。禁止全零、全 f、明显过短、删除字段。
 
 ### 5. 禁止 `#ifdef __OHOS__` (R8)
-源码不得引入平台条件编译宏。应通过 POSIX 接口适配或 patch 处理。检查 patches/ 目录下的补丁内容。
+源码和 patches/ 补丁不得引入平台条件编译宏。应通过 POSIX 接口适配：
+```c
+// 禁止
+#ifdef __OHOS__
+    return 0;
+#endif
+```
 
 ### 6. 手动打包绕过 conan create (R19)
 PR 中禁止包含预编译的 `.so`/`.a`/二进制文件。所有产物必须由 CI 从源码构建。
@@ -37,25 +55,46 @@ PR 中禁止包含预编译的 `.so`/`.a`/二进制文件。所有产物必须�
 ## 二、conanfile.py 配方质量
 
 ### 7. 版本号策略 (R37)
-首次适配用上游版本（`1.3.1`），适配修复加后缀（`1.3.1.1`）。修改已发布版本的 conanfile.py 必须递增后缀。
+首次适配用上游版本（`1.3.1`），适配修复加后缀（`1.3.1.1`、`1.3.1.2`）。修改已发布版本的 conanfile.py/conandata.yml 必须递增后缀。
 
 ### 8. 系统同名库静态链接 (R26)
-库名与系统库同名时（zlib/openssl/libxml2 等），必须 `BUILD_SHARED_LIBS=False`。
+库名与系统库同名时（zlib/openssl/libxml2/ncurses 等），必须静态编译：
+```python
+tc.variables["BUILD_SHARED_LIBS"] = False
+```
 
 ### 9. OHOS 平台兼容 (R32)
-`settings.os` 判断必须用 `in ("Linux", "OHOS")`，不能只写 `== "Linux"`。
+```python
+# 正确
+if self.settings.os in ("Linux", "OHOS"):
+# 错误 — OHOS 场景下漏匹配
+if self.settings.os == "Linux":
+```
 
 ### 10. 禁止裸用 shell 环境变量 (R33)
-编译器和标志必须从 Conan Toolchain 获取，禁止裸用 `os.environ`（release worker 上为空→静默失败）。
+```python
+# 错误 — release worker 上为空→静默失败
+os.environ["CC"] = "aarch64-linux-gnu-gcc"
+# 正确 — 从 Conan Toolchain 获取
+tc = CMakeToolchain(self)
+```
 
 ### 11. conandata.yml 规范
 URL 必须 HTTPS，必须有 sha256。补丁需在 patches 字段声明且文件实际存在。
 
 ### 12. 只改源文件不改生成文件 (R6)
-禁止修改 `config.h`、`configure`、`Makefile.in` 等生成产物。应通过 `generate()` 或 patches/ 处理。
+禁止修改 `config.h`、`configure`、`Makefile.in`、`CMakeCache.txt` 等生成产物。应通过 `generate()` 或 patches/ 处理。
 
 ### 13. 命令行工具声明 commands.json (R38)
-构建可执行文件的包（有 `RUNTIME DESTINATION bin` 或 `cpp_info.bindirs`），必须在**软件级别**目录创建 `commands.json`（`archives/{letter}/{name}/commands.json`）。库类型不需要。`type` 必须为 `"tool"`，`name` 匹配包名。
+构建可执行文件的包（conanfile.py 中有 `RUNTIME DESTINATION bin` 或 `cpp_info.bindirs`），必须在**软件级别**目录创建 `commands.json`。库类型不需要。
+```json
+{
+  "name": "strace", "type": "tool",
+  "description": "系统调用追踪工具",
+  "versions": { "6.19": { "ref": "strace/6.19", "binary": false } }
+}
+```
+路径：`archives/{letter}/{name}/commands.json`（与 manifest.yaml 同级，非版本目录下）。`type` 必须为 `"tool"`，`name` 匹配包名。
 
 ### 14. Conan 2.x API
 用 `from conan import ConanFile`，禁止旧版 `from conans`。用 `conan.tools.cmake`。
@@ -67,7 +106,7 @@ URL 必须 HTTPS，必须有 sha256。补丁需在 patches 字段声明且文件
 ### 15. 归档目录结构
 ```
 archives/{letter}/{name}/
-  ├── manifest.yaml / README.md / commands.json(tool)
+  ├── manifest.yaml / README.md / commands.json(仅tool)
   └── {version}/
       ├── conanfile.py / conandata.yml / test_package/
       ├── patches/ / manifest.yaml / notes.md
