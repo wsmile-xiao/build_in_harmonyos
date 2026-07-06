@@ -4,7 +4,7 @@
 
 来源: SKILL.md §1.2
 
-## 铁律总表（36 条，违反=bug）
+## 铁律总表（37 条，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -44,6 +44,7 @@
 | **R34** | **test 必须实质依赖被测包** | test_package 源文件调用被测包 API / 执行被测包二进制 | 只打印字符串的空壳 test（即使链接了被测库但不调用任何函数） |
 | **R35** | **禁止用 conan list/search 判断 binary 是否存在** | 用 `conan install --requires=...`（dry-run）或 `conan download` 验证预编译包 | 用 `conan list "*/*:*/*" -r=xxx` 判断（cnb.cool 服务端搜索 API 对 binary 返回不完整） |
 | **R36** | **依赖必须先发布再构建下游** | 依赖包必须先通过 release 流水线发布到制品仓（`conan upload` 完成），再适配/构建依赖它的下游包 | 在依赖包尚未发布时就构建下游包（`--build=missing` 会尝试从源码编译依赖，耗时且容易失败） |
+| **R37** | **版本号 = 上游版本，不加后缀** | `zlib/1.3.1` 始终是 `1.3.1`，适配修复重新 upload 即生成新 recipe revision | 给适配版本加后缀（`zlib/1.3.1.1`），导致下游需要更新引用 |
 
 ---
 
@@ -534,6 +535,78 @@ C (本次构建)
 - **R18** 是适配阶段的原则：优先查预编译包，有就用、没有再考虑编译
 - **R36** 是发布阶段的优先级原则：**没有发布的依赖，必须先走发布流程**
 - 两者结合：适配时先查预编译（R18），如果发现依赖未发布，先发布依赖（R36），再继续适配
+
+---
+
+### R37 详细说明：版本号 = 上游版本，不加后缀
+
+> **核心原因**：Conan 2.x 的 recipe revision 机制已原生解决"同一版本多次适配"的区分问题。每次 `conan upload` 同一版本时，Conan 根据 conanfile.py 内容自动生成 recipe revision（RREV），制品仓保留历史 revision，`requires("zlib/1.3.1")` 默认拉最新。加版本后缀（如 1.3.1.1）是多余的，且会导致下游引用需要频繁更新。
+
+#### Conan revision 机制图解
+
+```
+zlib/1.3.1                          ← 版本号（=上游，永不变）
+  ├── #54b6c17d (RREV #1)           ← 首次适配, conanfile.py v1
+  │     └── package_id#251f04a7     ← 二进制 (PREV)
+  ├── #a8f2e3c1 (RREV #2, latest)   ← 修复 CMake 标志, conanfile.py v2
+  │     └── package_id#b3d9f072     ← 新二进制
+  └── (历史 revision 可追溯)
+```
+
+#### 正确做法
+
+```bash
+# 首次适配
+conan create . --name=zlib --version=1.3.1
+conan upload "zlib/1.3.1" -r=ohpcd -c
+
+# 修复适配问题后重新发布 (版本号不变!)
+# 修改 conanfile.py (如修复 CMake 标志)
+conan create . --name=zlib --version=1.3.1
+conan upload "zlib/1.3.1" -r=ohpcd -c
+# → Conan 自动生成新 recipe revision, 覆盖为 latest
+```
+
+```python
+# 下游 conanfile.py 引用永不需要改
+self.requires("zlib/1.3.1")  # 自动拉最新 revision
+```
+
+#### 反面案例
+
+```bash
+# ❌ 不要给适配版本加后缀
+conan create . --name=zlib --version=1.3.1.1  # 错误!
+# 后果:
+# 1. 下游 requires("zlib/1.3.1") 查不到 1.3.1.1
+# 2. 下游需要改为 requires("zlib/1.3.1.1") — 无意义的连锁修改
+# 3. 制品仓出现 1.3.1 和 1.3.1.1 两个不关联的包
+```
+
+#### 何时改版本号
+
+| 场景 | 改版本号？ | 说明 |
+|------|-----------|------|
+| 修复 conanfile.py 的构建标志 | 不改 | recipe revision 自动更新 |
+| 增加补丁文件 | 不改 | conandata.yml 的 patches 配置变更, revision 自动更新 |
+| 上游发布新版本 | 改 | 匹配新上游版本 |
+| 上游停更, 我们 fork | 不改 | conandata.yml url 指向 fork 仓库 |
+| 不兼容的 API 变更（我们的修改） | 改 | 按	semver 规则升版本 |
+
+#### 追溯适配历史
+
+不需要通过版本号追溯，用以下方式：
+
+```bash
+# 查看某包的所有 recipe revision
+conan list "zlib/1.3.1" -r=ohpcd
+
+# 查看具体 revision 的内容
+conan download "zlib/1.3.1#<rrev>" -r=ohpcd --only-recipe
+
+# Git log 查看适配修改历史
+git log --oneline -- "archives/z/zlib/1.3.1/"
+```
 
 ---
 
