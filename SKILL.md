@@ -169,6 +169,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 
 **原因**：cnb.cool 制品仓不支持同版本多 recipe revision 并存（上传新 revision 会被 409 拒绝），必须用版本号后缀区分适配修复。
 
+**CI 门禁（L0j）**：PR 阶段自动检查——如果制品仓中已存在同版本，且 conanfile.py/conandata.yml 有修改，直接 fail 并提示递增版本号。
+
 **下游引用规范**：
 ```python
 self.requires("zlib/1.3.1")      # 精确引用首次版本
@@ -559,4 +561,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v10.2 — 2026-07-07 — R37 版本号策略改为后缀方案 (cnb.cool 不支持多 revision 并存)；v10.1→v10.2*
+*SKILL.md v10.3 — 2026-07-07 — 新增 L0j 门禁 (版本号占用检查, 防止同版本重复修改导致 release 409)；v10.2→v10.3*

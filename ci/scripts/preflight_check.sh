@@ -134,6 +134,32 @@ for dep in $DEPS; do
     fi
 done
 
+# ── 版本号占用检查 (R37) ──
+echo ""
+print_info "检查版本号是否已被占用 (R37)..."
+if conan download "${PKG_REF}" -r="${REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
+    # 制品仓中已存在该版本, 检查 conanfile.py 是否有修改
+    REMOTE_CACHE_DIR=$(conan cache path "${PKG_REF}" 2>/dev/null || echo "")
+    if [ -n "$REMOTE_CACHE_DIR" ] && [ -f "$CONANFILE" ] && [ -f "$REMOTE_CACHE_DIR/conanfile.py" ]; then
+        if diff -q "$CONANFILE" "$REMOTE_CACHE_DIR/conanfile.py" >/dev/null 2>&1; then
+            print_ok "版本号已发布, conanfile.py 未修改: ${PKG_REF}"
+        else
+            print_fail "版本号 ${PKG_REF} 已发布, 但 conanfile.py 有修改 (R37)"
+            echo ""
+            echo -e "  ${RED}cnb.cool 制品仓不支持同版本多 revision 并存${NC}"
+            echo -e "  ${YELLOW}请递增版本号后缀:${NC}"
+            BASE_VER="${PKG_REF#*/}"
+            echo "    ${PKG_REF} → ${PKG_REF%%/*}/${BASE_VER}.1"
+            echo ""
+            exit 1
+        fi
+    else
+        print_warn "版本号已发布: ${PKG_REF} (无法比较 conanfile.py, 请确认是否有修改)"
+    fi
+else
+    print_ok "版本号未被占用: ${PKG_REF}"
+fi
+
 # ── 结果汇总 ──
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

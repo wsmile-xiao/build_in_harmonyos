@@ -274,6 +274,45 @@ PYEOF
         fi
     fi
 
+    # ── L0j: 版本号占用检查 (R37) ──
+    # cnb.cool 制品仓不支持同版本多 revision 并存
+    # 如果制品仓中已有该版本, 且 conanfile.py/conandata.yml 有修改 → 必须递增版本号
+    echo "[step] L0j: Checking version collision with registry (R37)..."
+    if conan download "${pkg_name}/${pkg_ver}" -r="${CONAN_REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
+        # 制品仓中已存在该版本, 比较 recipe 内容
+        REMOTE_CACHE_DIR=$(conan cache path "${pkg_name}/${pkg_ver}" 2>/dev/null || echo "")
+        if [ -n "$REMOTE_CACHE_DIR" ]; then
+            RECIPE_CHANGED=false
+            # 比较 conanfile.py
+            if [ -f "$REMOTE_CACHE_DIR/conanfile.py" ]; then
+                if ! diff -q "$CONANFILE" "$REMOTE_CACHE_DIR/conanfile.py" >/dev/null 2>&1; then
+                    RECIPE_CHANGED=true
+                fi
+            fi
+            # 比较 conandata.yml (如果存在)
+            if [ -f "$CONANDATA" ] || [ -f "$REMOTE_CACHE_DIR/conandata.yml" ]; then
+                if ! diff -q "$CONANDATA" "$REMOTE_CACHE_DIR/conandata.yml" >/dev/null 2>&1; then
+                    RECIPE_CHANGED=true
+                fi
+            fi
+
+            if [ "$RECIPE_CHANGED" = true ]; then
+                echo "[fail] L0j: ${pkg_name}/${pkg_ver} already published with different recipe (R37)"
+                echo "       制品仓中已存在 ${pkg_name}/${pkg_ver}, 且本次修改了 conanfile.py 或 conandata.yml"
+                echo "       cnb.cool 制品仓不支持同版本多 revision 并存 (409 Conflict)"
+                echo "[hint] 适配修复必须递增版本号后缀:"
+                echo "         ${pkg_name}/${pkg_ver} → ${pkg_name}/${pkg_ver}.1"
+                echo "       并更新 archives/ 目录和所有下游引用"
+                L0_FAILED=true
+                L0_ERRORS="${L0_ERRORS} version_not_incremented"
+            else
+                echo "        [ok] recipe unchanged (same content as registry)"
+            fi
+        fi
+    else
+        echo "        [ok] version not in registry yet (first publish)"
+    fi
+
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"

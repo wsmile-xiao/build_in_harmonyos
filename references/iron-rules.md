@@ -607,6 +607,24 @@ conan download "zlib/1.3.1"   -r=ohpcd
 conan download "zlib/1.3.1.2" -r=ohpcd
 ```
 
+#### CI 门禁 (L0j)
+
+PR 构建时，CI 自动执行版本号占用检查：
+
+1. 用 `conan download` 检查制品仓中是否已存在 `pkg_name/pkg_ver`
+2. 如果已存在，diff 比较本地 conanfile.py/conandata.yml 与制品仓中的
+3. 内容不同 → **fail**，提示递增版本号
+
+```
+[fail] L0j: zlib/1.3.1 already published with different recipe (R37)
+       制品仓中已存在 zlib/1.3.1, 且本次修改了 conanfile.py 或 conandata.yml
+       cnb.cool 制品仓不支持同版本多 revision 并存 (409 Conflict)
+[hint] 适配修复必须递增版本号后缀:
+         zlib/1.3.1 → zlib/1.3.1.1
+```
+
+本地预检也可用 preflight_check.sh 提前发现此问题。
+
 #### 追溯适配历史
 
 ```bash
