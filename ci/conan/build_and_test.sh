@@ -596,7 +596,7 @@ PYEOF
                 SYS_SO="$SYS_SO $(ls "$sys_lib_dir"/*.so* 2>/dev/null | xargs -n1 basename 2>/dev/null || true)"
             done
             # 检查包产出的 .so 是否与系统同名
-            for lib_file in "$LIBS"/*.so*; do
+            for lib_file in "$LIBS"/*.so*(N); do
                 [ -f "$lib_file" ] || continue
                 lib_basename="${lib_file##*/}"
                 # 去版本号后缀比较 (libfoo.so.1.2.3 -> libfoo.so)
@@ -638,7 +638,7 @@ PYEOF
 
             # 可执行文件 bin/* → 替换为 /bin/false
             if [ -n "$BINS" ] && [ -d "$BINS" ]; then
-                for bin_file in "$BINS"/*; do
+                for bin_file in "$BINS"/*(N); do
                     [ -f "$bin_file" ] || continue
                     cp "$bin_file" "$_BACKUP_DIR/" 2>/dev/null
                     cp /bin/false "$bin_file" 2>/dev/null || printf '#!/bin/sh\nexit 1\n' > "$bin_file"
@@ -671,19 +671,21 @@ PYEOF
             fi
 
             # 恢复产物
-            for _bf in "$_BACKUP_DIR"/*; do
-                [ -f "$_bf" ] || continue
-                _bn=$(basename "$_bf")
-                find "$PKG_CACHE" -name "$_bn" -exec cp "$_bf" {} \; 2>/dev/null
-            done
-            rm -rf "$_BACKUP_DIR"
+            if [ -d "$_BACKUP_DIR" ]; then
+                for _bf in "$_BACKUP_DIR"/*(N); do
+                    [ -f "$_bf" ] || continue
+                    _bn=$(basename "$_bf")
+                    find "$PKG_CACHE" -name "$_bn" -exec cp "$_bf" {} \; 2>/dev/null
+                done
+            fi
+            rm -rf "$_BACKUP_DIR" 2>/dev/null || true
         fi
 
         # ── L2: Minimal smoke test (--version / --help) ──
         echo "[step] L2: Smoke test (version/help check)..."
         if [ -n "$BINS" ] && [ -d "$BINS" ]; then
             _found_exec=false
-            for bin_file in "$BINS"/*; do
+            for bin_file in "$BINS"/*(N); do
                 [ -f "$bin_file" ] || continue
                 [ -x "$bin_file" ] || continue
                 _found_exec=true
