@@ -297,7 +297,10 @@ PYEOF
     set -e
 
     if [ $CONAN_RC -eq 124 ]; then
-        echo "[fail] ${pkg_name}/${pkg_ver} — conan create TIMED OUT after ${BUILD_TIMEOUT}s (likely interactive test stuck)"
+        echo "[fail] ${pkg_name}/${pkg_ver} — conan create TIMED OUT after ${BUILD_TIMEOUT}s"
+        echo "[hint] 构建超时 (${BUILD_TIMEOUT} 秒限制)"
+        echo "       常见原因: 1) 源码包过大 2) 交互式测试卡住 3) 编译死循环"
+        echo "       建议: 1) 检查 test_package 是否有 input() 等交互调用 2) 检查是否需要 -j1 限制并行"
         echo "L0_RESULT=${L0_RESULT}: ${L0_DETAIL}"
         echo "L1_RESULT=fail: conan create timed out"
         echo "L2_RESULT=skip: not run"
@@ -626,6 +629,141 @@ JSONEOF
         echo "L2_RESULT=skip: not run"
         echo "L4_RESULT=skip: not run"
         echo "L5_RESULT=skip: not run"
+
+        # ── 错误诊断提示引擎: 分析 BUILD_LOG 提取可操作的修复建议 ──
+        echo ""
+        echo "─── 修复建议 ───"
+        _HINT_GIVEN=false
+
+        # 1. Go/Rust 工具链缺失 (鸿蒙PC原生环境限制)
+        if grep -qiE 'go (compiler|toolchain).*not found|go:.*not found' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] 鸿蒙 PC 原生环境不含 Go 工具链, 暂不支持 Go 包构建"
+            echo "       如需支持, 需要在 worker 上安装 Go 工具链 (当前不在 CI 范围内)"
+            _HINT_GIVEN=true
+        fi
+        if grep -qiE 'cargo.*not found|rustc.*not found' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] 鸿蒙 PC 原生环境不含 Rust 工具链, 暂不支持 Rust 包构建"
+            _HINT_GIVEN=true
+        fi
+
+        # 2. GitHub 网络问题
+        if grep -qiE 'github\.com.*(timed.?out|ConnectTimeout|Max retries|Connection.*refused|Connection.*reset)' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] GitHub 源码下载失败 (worker 网络无法直连 github.com)"
+            echo "       CI 已自动配置镜像源 fallback (ghproxy/gitclone/moeyy), 如仍失败:"
+            echo "       请在 conandata.yml 中将 github.com URL 改为 gitcode.com 镜像 URL"
+            _HINT_GIVEN=true
+        fi
+
+        # 3. 429 限流
+        if grep -qiE '429|rate.?limit|Too Many Requests' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] 源码服务器返回 429 (请求过多/限流)"
+            echo "       请稍后重试, 或在 conandata.yml 中使用镜像源 URL"
+            _HINT_GIVEN=true
+        fi
+
+        # 4. 其他网络问题
+        if grep -qiE 'HTTPSConnectionPool|Connection.*reset|download.*failed' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] 源码下载失败, 请检查 conandata.yml 中 URL 是否可访问"
+            _HINT_GIVEN=true
+        fi
+
+        # 5. 依赖包缺失
+        if grep -qiE 'not found in (local cache|remotes)|Unable to find.*remotes|not resolved|Unable to find package' "$BUILD_LOG" 2>/dev/null; then
+            _MISSING_DEP=$(grep -oiE "not found.*['\"]([a-z0-9_-]+/[0-9][^'\"]*)['\"]" "$BUILD_LOG" 2>/dev/null | head -1 | grep -oE "[a-z0-9_-]+/[0-9][^'\"]*" || true)
+            if [ -n "$_MISSING_DEP" ]; then
+                echo "[hint] 依赖包 ${_MISSING_DEP} 未在 conan remote 中找到"
+            else
+                echo "[hint] 依赖包未构建, 请先提交依赖包的 PR 并等待 CI 通过"
+            fi
+            echo "       请检查 conanfile.py 的 requirements() 是否正确声明了所有依赖"
+            _HINT_GIVEN=true
+        fi
+
+        # 6. Python 语法错误
+        if grep -qiE 'SyntaxError|unterminated string|unexpected EOF' "$BUILD_LOG" 2>/dev/null; then
+            _SYN_ERR=$(grep -E 'SyntaxError|unterminated|unexpected' "$BUILD_LOG" | tail -1)
+            echo "[hint] conanfile.py Python 语法错误:"
+            echo "       $_SYN_ERR"
+            echo "       请检查引号/括号是否闭合, 缩进是否正确"
+            _HINT_GIVEN=true
+        fi
+
+        # 7. sha256 占位符
+        if grep -qiE 'REPLACE_WITH|sha256.*placeholder|Provided hash.*REPLACE' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] conandata.yml 中 sha256 仍是占位符"
+            echo "       请下载源码包后计算实际 sha256 值: sha256sum xxx.tar.gz"
+            echo "       并替换 conandata.yml 中的 REPLACE_WITH 实际值"
+            _HINT_GIVEN=true
+        fi
+
+        # 8. patch 文件错误
+        if grep -qiE 'patch.*(does not exist|Failed to apply|Failed to parse)|source.*file does not exist' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] patch 文件路径或格式错误"
+            echo "       请检查 conandata.yml 中 patch_file 路径与 patches/ 目录下文件是否一致"
+            _HINT_GIVEN=true
+        fi
+
+        # 9. conanfile.py 加载/导入错误
+        if grep -qiE 'Unable to load conanfile|Error loading conanfile|import.*failed' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] conanfile.py 加载失败"
+            echo "       请检查 import 语句是否正确, Conan 2.x 的 import 路径是否匹配"
+            _HINT_GIVEN=true
+        fi
+
+        # 10. Conan API 调用错误
+        if grep -qiE 'takes 1 positional argument|env argument.*should be a list|AssertionError.*env' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] Conan API 调用方式有误 (Conan 2.x 与 1.x API 差异)"
+            echo "       请参考 SKILL.md 中的模板和 Conan 2.x 官方文档"
+            _HINT_GIVEN=true
+        fi
+
+        # 11. 编译错误 — 链接失败
+        if grep -qiE 'undefined reference|cannot find -l|ld returned' "$BUILD_LOG" 2>/dev/null; then
+            _UNDEF_SYM=$(grep -oE "undefined reference to .[a-z_][a-z0-9_]*" "$BUILD_LOG" | head -1 || true)
+            echo "[hint] 链接错误: ${_UNDEF_SYM:-找不到符号或库}"
+            echo "       请在 conanfile.py 的 requirements() 中声明提供该符号的依赖包"
+            _HINT_GIVEN=true
+        fi
+
+        # 12. 编译错误 — 头文件缺失
+        if grep -qiE 'fatal error.*\.h.*No such file|Cannot find.*\.h' "$BUILD_LOG" 2>/dev/null; then
+            _MISSING_HDR=$(grep -oE '[a-z_][a-z0-9_/]*\.h' "$BUILD_LOG" | tail -1 || true)
+            echo "[hint] 缺少头文件: ${_MISSING_HDR}"
+            echo "       请在 conanfile.py 的 requirements() 中声明提供该头文件的依赖包"
+            _HINT_GIVEN=true
+        fi
+
+        # 13. configure 失败
+        if grep -qiE 'configure.*[Ee]rror|configure.*failed|config\.status.*error' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] configure 脚本执行失败"
+            echo "       请检查: 1) 系统依赖是否满足 2) configure 参数是否正确"
+            echo "       可参考 SKILL.md 中 Autotools 模板的 configure 选项配置"
+            _HINT_GIVEN=true
+        fi
+
+        # 14. make 编译错误 (最后的兜底)
+        if grep -qiE '(make|cc|clang|gcc).*[Ee]rror [0-9]|^.*error:' "$BUILD_LOG" 2>/dev/null; then
+            _MAKE_ERR=$(grep -E '[Ee]rror' "$BUILD_LOG" | grep -v '^\[' | tail -1 | head -c 200 || true)
+            echo "[hint] 编译失败:"
+            echo "       ${_MAKE_ERR}"
+            echo "       请检查源码在鸿蒙 PC (clang/ohos) 上的兼容性"
+            echo "       常见原因: 1) 编译器差异(gcc→clang) 2) 平台宏未覆盖 3) 缺少系统头文件"
+            _HINT_GIVEN=true
+        fi
+
+        # 15. OHOS NDK/SDK 缺失
+        if grep -qiE 'OHOS NDK.*not found|clang.*not found|OHOS_NDK_ROOT' "$BUILD_LOG" 2>/dev/null; then
+            echo "[hint] OHOS NDK/SDK 缺失, worker 环境异常"
+            echo "       请联系 CI 管理员检查 worker 上的 OHOS SDK 安装"
+            _HINT_GIVEN=true
+        fi
+
+        # 兜底: 无法分类
+        if [ "$_HINT_GIVEN" = false ]; then
+            echo "[hint] 未能自动诊断失败原因, 请查看上方完整构建日志"
+            echo "       常见排查: 1) conanfile.py 语法 2) conandata.yml URL/sha256 3) 系统依赖"
+        fi
+        echo "─── end 修复建议 ───"
         FAILED=$((FAILED + 1))
         FAILED_PKGS+=("${pkg_name}/${pkg_ver}")
     fi
