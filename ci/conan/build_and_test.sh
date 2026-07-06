@@ -561,7 +561,10 @@ PYEOF
 
         # ── L5: Baseline check — verify package artifacts ──
         echo "[step] L5: Baseline artifact check..."
-        PKG_CACHE=$(conan cache path "${pkg_name}/${pkg_ver}" 2>/dev/null || echo "")
+        # Conan 2.x: `conan cache path "name/version"` returns the recipe cache
+        # (only conanfile.py + conandata.yml), not the package cache (lib/, include/).
+        # Parse the Package folder path from the conan create build log instead.
+        PKG_CACHE=$(grep "Package folder" "$BUILD_LOG" 2>/dev/null | tail -1 | sed 's/.*Package folder //')
         if [ -n "$PKG_CACHE" ] && [ -d "$PKG_CACHE" ]; then
             BINS=$(find "$PKG_CACHE" -name "bin" -type d 2>/dev/null | head -1)
             LIBS=$(find "$PKG_CACHE" -name "lib" -type d 2>/dev/null | head -1)
@@ -656,9 +659,11 @@ PYEOF
 
             # 重新 conan test (会重新编译 test_package 源码 + 链接 + 运行)
             # 预期失败: 被 set -e 拦截, 用 || 捕获退出码
+            # 用 PROFILE_FILE (文件路径) 而非 CONAN_PROFILE (profile 名称),
+            # 与 conan create 的 -pr:h="$PROFILE_FILE" 保持一致
             _NEG_EXIT=0
             conan test "$TEST_PKG_DIR" "${pkg_name}/${pkg_ver}" \
-                -pr "$CONAN_PROFILE" --build=missing >/dev/null 2>&1 || _NEG_EXIT=$?
+                -pr "$PROFILE_FILE" --build=missing >/dev/null 2>&1 || _NEG_EXIT=$?
 
             if [ $_NEG_EXIT -eq 0 ]; then
                 echo "[fail] L1e: test passed WITHOUT package artifacts — fake test detected (R34)"
