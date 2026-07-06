@@ -273,7 +273,7 @@ PYEOF
                 while IFS= read -r dep_ref; do
                     [ -z "$dep_ref" ] && continue
                     # R35: 用 conan download 验证 (禁止用 conan list 判断)
-                    if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --recipe >/dev/null 2>&1; then
+                    if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
                         echo "        [ok] dependency in registry: ${dep_ref}"
                     else
                         dep_short=$(echo "$dep_ref" | sed 's/@.*//')

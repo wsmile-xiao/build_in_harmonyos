@@ -70,7 +70,7 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 bash ci/scripts/preflight_check.sh <软件名>/<版本>
 
 # 方法二：手动检查（R35: 禁止用 conan list 判断，必须用 conan download）
-conan download "依赖包名/版本@ohpcd/stable" -r=ohpcd --recipe
+conan download "依赖包名/版本@ohpcd/stable" -r=ohpcd --only-recipe
 ```
 检查结果决定下一步：
 - **所有依赖已发布** → 正常继续适配

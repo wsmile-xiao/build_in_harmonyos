@@ -149,7 +149,7 @@ PUBLISHED=""
 
 for dep in $DEPS; do
     # R35: 用 conan download --recipe 验证（禁止用 conan list）
-    if conan download "$dep" -r="${REMOTE_NAME}" --recipe >/dev/null 2>&1; then
+    if conan download "$dep" -r="${REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
         print_ok "已发布: ${dep}"
         PUBLISHED="${PUBLISHED} ${dep}"
     else
