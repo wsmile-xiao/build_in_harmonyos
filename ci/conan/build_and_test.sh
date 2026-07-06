@@ -216,9 +216,9 @@ for pkg_dir in "${PACKAGES[@]}"; do
 
     # L0i: 依赖发布检查 (R36: 依赖必须先发布到制品仓)
     # 从 conanfile.py 中提取 requires/requirements 声明的依赖, 验证是否已发布
-    # R36: 依赖必须先发布到制品仓, CI 用无 channel 格式验证
+    # R36: 依赖必须先发布到制品仓
     if [ -f "$CONANFILE" ]; then
-        # 提取所有依赖引用, 去掉 @user/channel 后缀 (统一用无 channel 格式)
+        # 提取所有依赖引用
         DEP_REFS=$(python3 - "$CONANFILE" 2>/dev/null <<'PYEOF'
 import re, sys
 src = open(sys.argv[1]).read()
@@ -227,8 +227,7 @@ for m in re.finditer(r'(?:self\.)?requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
     if '/' not in ref:
         continue
-    # 去掉 @user/channel 后缀, 统一用无 channel 格式
-    ref = ref.split('@')[0]
+    ref = ref.split('@')[0]  # 兼容性: 去掉可能的 @user/channel 后缀
     refs.add(ref)
 for m in re.finditer(r'tool_requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()

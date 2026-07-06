@@ -34,7 +34,7 @@
 | R24 | **归档清理：failed必删，空归档删** | 无产物无补丁的归档无价值 | 保留无用归档 |
 | R25 | **notes.md 防重复：先删后写** | finish 自动清理旧记录，只保留最后一次 | 多次 finish 产生重复记录 |
 | **R26** | **系统同名库禁止动态链接** | conanfile.py `generate()` 中对系统同名库强制 `BUILD_SHARED_LIBS=OFF` / `-static` | 构建系统同名 .so 污染 `/lib`/`/lib64` 导致其他应用崩溃 |
-| **R27** | **依赖引用用无 channel 格式** | `self.requires("name/ver")` | 裸 `self.requires("name/ver@ohpcd/stable")` 等带 channel 的旧格式 |
+| **R27** | *(已废弃 — 制品仓已完成无 channel 迁移，依赖引用默认就是 `name/version` 格式)* | — | — |
 | **R28** | **conanfile.py 必须有 test_package/** | 生成 conanfile.py 时同时生成 test_package/ | 只有 conanfile.py 没有测试 |
 | **R29** | **conan_verify 通过后才标记 published** | `ohc-run.py conan-verify` PASS + CI upload → published；PASS 未 upload → built；FAIL → failed | conan create 失败仍标记 published |
 | **R30** | **conan-verify 失败必须查询知识图谱** | G2 失败时调用 `run_engine()` 匹配 E-entry | 只打印错误不查图谱 |
@@ -149,30 +149,6 @@ ls /lib*/**/lib<name>.so* /lib/**/lib<name>.so* 2>/dev/null
 | Autotools | `--disable-shared --enable-static` | `generate()` |
 | Makefile | 只编译静态目标（不编译 shared） | `build()` |
 | Meson | `tc.project_options["default_library"] = "static"` | `generate()` |
-
----
-
-### R27 详细说明：依赖引用用无 channel 格式
-
-所有 conanfile.py 中的依赖引用统一使用无 channel 格式（`name/version`）：
-
-```python
-# ✅ 正确 — 无 channel 格式
-def requirements(self):
-    self.requires("openssl/1.1.1w")
-    self.requires("zlib/1.3.1")
-
-# ❌ 错误 — 旧格式带 @ohpcd/stable
-def requirements(self):
-    self.requires("openssl/1.1.1w@ohpcd/stable")
-    self.requires("zlib/1.3.1@ohpcd/stable")
-```
-
-**原因**：
-1. CI 的 `conan create` 和 `conan upload` 统一使用无 channel 格式
-2. 无 channel 更简洁，贡献者不需要记住 `@ohpcd/stable` 后缀
-3. 制品仓只有我们一个上传者，不存在多来源冲突，channel 是冗余信息
-4. `name/version` 和 `name/version@ohpcd/stable` 是 Conan 中两个完全不同的包，不互通
 
 ---
 
@@ -498,7 +474,7 @@ conan list "*/*:*/*" -r=cnb-conan
   │       └─ A 发布成功后，再回来构建 B
   │
   ├─ Step 2: 在 B 的 conanfile.py 中声明依赖
-  │   self.requires("A/x.x")   # R27
+  │   self.requires("A/x.x")
   │
   └─ Step 3: CI 构建 B 时，--build=missing 从制品仓拉取 A 的预编译包
 ```

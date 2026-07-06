@@ -10,25 +10,13 @@ type: project
 
 ## 一、conanfile.py 配方审查（最常见 PR 类型）
 
-### 1. 依赖引用格式 (R27) — 关键
-依赖引用必须使用**无 channel 格式**，不加 `@ohpcd/stable`：
-
-```python
-# 正确
-self.requires("zlib/1.3.1")
-self.requires("openssl/1.1.1w")
-
-# 错误 — 会导致制品仓匹配失败
-self.requires("zlib/1.3.1@ohpcd/stable")
-```
-
-### 2. 版本号策略 (R37) — 关键
+### 1. 版本号策略 (R37) — 关键
 - 首次适配：版本号 = 上游版本（如 `1.3.1`）
 - 适配修复（修改 conanfile.py/conandata.yml）：版本号加后缀（`1.3.1.1`、`1.3.1.2`）
 - 原因：cnb.cool 制品仓不支持同版本多 revision 并存（上传新 revision 返回 409）
 - 如果 PR 修改了已发布版本的 conanfile.py，**必须递增版本号后缀**
 
-### 3. 系统同名库静态链接 (R26)
+### 2. 系统同名库静态链接 (R26)
 库名与系统库同名时（如 `zlib`、`openssl`、`libxml2`），必须静态编译，避免污染目标系统的 `/lib`、`/lib64`：
 
 ```python
@@ -38,7 +26,7 @@ def generate(self):
     tc.generate()
 ```
 
-### 4. OHOS 平台兼容 (R32)
+### 3. OHOS 平台兼容 (R32)
 `settings.os` 判断必须用 `in ("Linux", "OHOS")`，不能只写 `== "Linux"`：
 
 ```python
@@ -51,7 +39,7 @@ if self.settings.os == "Linux":
     ...
 ```
 
-### 5. 禁止裸用 shell 环境变量 (R33)
+### 4. 禁止裸用 shell 环境变量 (R33)
 编译器和编译标志必须从 Conan Toolchain 或 `self.conf_info` 获取：
 
 ```python
@@ -64,7 +52,7 @@ os.environ["CC"] = "aarch64-linux-gnu-gcc"
 os.environ["CFLAGS"] = "-fPIC"
 ```
 
-### 6. test_package 必须实质测试 (R34)
+### 5. test_package 必须实质测试 (R34)
 test_package 的源文件必须**调用被测包的 API** 或执行被测包的二进制：
 
 ```python
@@ -102,7 +90,7 @@ int main() {
 
 禁止只打印字符串的空壳测试（如 `printf("hello\n"); return 0;`）。
 
-### 7. conandata.yml 安全规范
+### 6. conandata.yml 安全规范
 源码 URL 必须使用 HTTPS，且必须包含 `sha256` 校验：
 
 ```yaml
@@ -120,18 +108,18 @@ sources:
 
 ## 二、PR 结构审查
 
-### 8. PR 原子性 (W2)
+### 7. PR 原子性 (W2)
 - 一个 PR **只允许包含一个配方软件**及其知识图谱草稿
 - 对 `ci/`、`scripts/`、`SKILL.md`、`references/`、`templates/` 的修改必须**单独提交 PR**
 - 配方 PR 和框架 PR 混合 = **要求拆分**
 
-### 9. 文件权限边界
+### 8. 文件权限边界
 协作者提交的 PR **不得修改**以下文件（主编专属）：
 - `SKILL.md` / `references/` / `templates/`
 - `scripts/` / `ci/`
 - `index.tsv` / `SUMMARY.md`
 
-### 10. 归档目录规范
+### 9. 归档目录规范
 配方文件必须放在 `archives/` 下的标准路径：
 ```
 archives/{首字母}/{软件名}/{版本}/
@@ -145,7 +133,7 @@ archives/{首字母}/{软件名}/{版本}/
 
 ## 三、制品仓与依赖链审查
 
-### 11. 依赖发布优先级 (R36)
+### 10. 依赖发布优先级 (R36)
 如果 PR 中的配方依赖了其他包，那些依赖包**必须已经发布到制品仓**。检查方法：
 
 ```bash
@@ -158,23 +146,23 @@ conan download "zlib/1.3.1" -r=ohpcd --only-recipe
 
 ## 四、CI 门禁逻辑审查（仅当 PR 修改 ci/ 目录时）
 
-### 12. L0i 门禁
+### 11. L0i 门禁
 检查 conanfile.py 中的依赖引用格式和依赖发布状态。PR 阶段为 warn（软提示），release 阶段为 fail（硬拦截）。
 
-### 13. L0j 门禁
+### 12. L0j 门禁
 检查版本号是否与制品仓中已有版本冲突。如果制品仓已有同名同版本，且 conanfile.py 内容不同，直接 fail。
 
-### 14. 禁止用 conan list 判断 binary (R35)
+### 13. 禁止用 conan list 判断 binary (R35)
 CI 脚本中判断预编译包是否存在时，必须用 `conan download` 或 `conan install --requires=`，禁止用 `conan list`（cnb.cool 搜索 API 对 binary 返回不完整）。
 
 ## 五、通用代码规范
 
-### 15. shell 脚本
+### 14. shell 脚本
 - 使用 `set -euo pipefail` 开头
 - 变量引用加双引号：`"$VAR"` 而非 `$VAR`
 - 不使用 `--recipe`（已废弃），Conan 2.x 正确参数是 `--only-recipe`
 
-### 16. Python 脚本
+### 15. Python 脚本
 - conanfile.py 中 `from conan import ConanFile`（不是旧版 `from conans`）
 - 使用 `conan.tools.cmake`（不是旧版 `cmake`）
 - Python 3 类型注解可选，不强制

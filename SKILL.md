@@ -192,7 +192,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R11-R15 | **失败与历史**：失败先查归档再动手；先匹配错误模式再修复；脚本用完整路径；脚本失败=手动模式入口；历史仅供参考不盲从 |
 | R16-R20 | **协作与打包**：协作不越权(走PR)；知识先草稿(`graph add --draft`)；依赖先查预编译；禁止手动打包(用`conan create`+`conan upload`)；~~DESTDIR模式~~(废弃) |
 | R21-R25 | **自检与清理**：探索结束自检零介入；finish前必须通过conan验证；平台检测优先于改生成文件；归档清理failed必删；notes.md防重复(finish自动清理) |
-| R26-R31 | **Conan 配方**：系统同名库禁止动态链接(避免污染`/lib`/`/lib64`)，默认动态由Conan管理依赖链；依赖引用用无 channel 格式 `name/version`；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
+| R26-R31 | **Conan 配方**：系统同名库禁止动态链接(避免污染`/lib`/`/lib64`)，默认动态由Conan管理依赖链；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
 | R32 | **OHOS 平台兼容**：recipe 内 `settings.os` 判断必须 `in ("Linux", "OHOS")`，不能 `== "Linux"` |
 | R33 | **build() 禁止依赖未定义的 shell 环境变量**：编译器/标志必须从 Conan Toolchain 或 `self.conf_info` 获取，不能裸用 `${CC}`/`${CFLAGS}` 等 shell 变量（release worker 上为空→编译静默失败） |
 | R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
@@ -291,7 +291,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本>
 python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 ```
 
-**conan-init 后 AI 必须检查**：`requirements()`(R27 无 channel 格式 `name/version`，**不加 `@ohpcd/stable`**)、`generate()`(R26 系统同名库静态)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
+**conan-init 后 AI 必须检查**：`requirements()`(依赖格式 `name/version`)、`generate()`(R26 系统同名库静态)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
 
 **conan-verify 8 道门禁**（G0-G4 + L2/L4/L5）：
 

@@ -92,8 +92,7 @@ for m in re.finditer(r'(?:self\.)?requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
     if '/' not in ref:
         continue
-    # 去掉 @user/channel 后缀, 统一用无 channel 格式
-    ref = ref.split('@')[0]
+    ref = ref.split('@')[0]  # 兼容性: 去掉可能的 @user/channel 后缀
     refs.add(ref)
 for m in re.finditer(r'tool_requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()

@@ -217,8 +217,7 @@ def _generate_conanfile(
     # Generate requirements() body
     req_lines = []
     for dep in dependencies:
-        # 无 channel 格式: "openssl/1.1.1w" (不加 @ohpcd/stable)
-        dep = dep.split('@')[0]
+        dep = dep.split('@')[0]  # 兼容性: 去掉可能的 @user/channel 后缀
         req_lines.append(f'        self.requires("{dep}")')
 
     if req_lines:
