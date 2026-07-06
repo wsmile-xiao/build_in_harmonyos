@@ -204,6 +204,19 @@ for pkg_dir in "${PACKAGES[@]}"; do
         done < <(sed -n '/^patches:/,/^[a-z]/p' "$CONANDATA" | grep '^[[:space:]]')
     fi
 
+    # L0h: shell 环境变量依赖检测 (R33: 禁止在 self.run() 中裸用 ${CC}/${CFLAGS} 等)
+    CONANFILE="$pkg_dir/conanfile.py"
+    if [ -f "$CONANFILE" ]; then
+        # 检测 self.run() 或 self.run(...) 中的 ${CC}, ${CXX}, ${CFLAGS}, ${LDFLAGS}
+        SHELL_ENV_VARS=$(grep -nE 'self\.run\(.*\$\{(CC|CXX|CFLAGS|CXXFLAGS|LDFLAGS|AR|RANLIB)\}' "$CONANFILE" 2>/dev/null || true)
+        if [ -n "$SHELL_ENV_VARS" ]; then
+            BAD_VAR=$(echo "$SHELL_ENV_VARS" | head -1 | grep -oE '\$\{[A-Z]+\}' | head -1)
+            echo "[fail] L0h: conanfile.py 在 self.run() 中依赖未定义 shell 变量 ${BAD_VAR} — 用 self.conf.get() 代替 (R33)"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} shell_env_var_in_run"
+        fi
+    fi
+
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"

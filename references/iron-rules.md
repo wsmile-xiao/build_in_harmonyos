@@ -40,6 +40,7 @@
 | **R30** | **conan-verify 失败必须查询知识图谱** | G2 失败时调用 `run_engine()` 匹配 E-entry | 只打印错误不查图谱 |
 | **R31** | **知识图谱未命中必须生成草稿** | `knowledge/drafts/DRAFT-*.kv` 自动生成 | 未命中的错误丢弃不沉淀 |
 | **R32** | **Conan recipe 平台判断兼容 OHOS** | `self.settings.os in ("Linux", "OHOS")` | `self.settings.os == "Linux"` |
+| **R33** | **build() 禁止依赖未定义 shell 环境变量** | 从 Conan Toolchain / `self.conf_info` / `AutotoolsToolchain` 获取编译器路径与标志 | 裸用 `${CC}` / `${CFLAGS}` / `${CXX}` 等 shell 变量 |
 
 ---
 
@@ -298,6 +299,78 @@ if self.settings.os in ("Linux", "OHOS"):
 ```
 
 注意：绝大多数 recipe 不需要手动判断 `settings.os`——CMakeToolchain / AutotoolsToolchain 会自动处理平台差异。只有 recipe 内部确实需要按平台分支时（如选择 system_libs、条件编译选项等），才适用本规则。
+
+---
+
+### R33 详细说明：build() 禁止依赖未定义的 shell 环境变量
+
+> **核心原因**：CI/release worker 上 shell 环境变量（`$CC`、`$CFLAGS`、`$CXX` 等）可能未设置。在 `self.run()` 中裸用 `${CC}` 时，shell 展开为空字符串，导致 make 用空值编译——**编译静默失败（Error 127），但 make 继续执行**，最终 package() 打出空包，test() 找不到二进制。
+
+#### 典型反面案例（sponge/0.70 真实事故）
+
+```python
+# ❌ 禁止：$CC 和 $CFLAGS 在 release worker 上为空
+def build(self):
+    apply_conandata_patches(self)
+    self.run('make sponge -j1 CC="${CC}" CFLAGS="${CFLAGS} -Wall"')
+    # 实际执行: make sponge -j1 CC="" CFLAGS=" -Wall"
+    # make 输出: Wall sponge.c -o sponge → Wall: No such file or directory
+    # Error 127 (ignored by make) → 无 sponge 二进制 → test() 失败
+```
+
+#### 正确做法（按构建系统分类）
+
+**CMake 项目**（不需要手动传编译器，Toolchain 自动处理）：
+```python
+def build(self):
+    apply_conandata_patches(self)
+    cmake = CMake(self)
+    cmake.configure()
+    cmake.build()
+```
+
+**Autotools 项目**（AutotoolsToolchain 自动注入 CC/CFLAGS）：
+```python
+def generate(self):
+    tc = AutotoolsToolchain(self)
+    tc.generate()  # 自动写入 CC、CFLAGS、LDFLAGS 到 conanbuildenv
+
+def build(self):
+    autotools = AutotoolsToolchain(self)
+    autotools.configure()
+    autotools.make()
+```
+
+**Makefile 项目**（必须显式传入编译器，不能依赖 shell 变量）：
+```python
+def generate(self):
+    env = VirtualBuildEnv(self)
+    env.generate()
+    # 从 Conan settings 获取编译器路径
+    cc = self.conf.get("tools.build:compiler_executables:c", "clang", check_type=str)
+    cxx = self.conf.get("tools.build:compiler_executables:cpp", "clang++", check_type=str)
+    # 写入 env 确保可追溯
+    env = Environment()
+    env.define("CC", cc)
+    env.define("CXX", cxx)
+    env.vars(self).save_script("conanbuild")
+
+def build(self):
+    apply_conandata_patches(self)
+    self.run("make -j1 CC=$CC CXX=$CXX")
+    # $CC 此处来自 Conan 生成的 env 脚本，不是 shell 环境变量
+```
+
+#### 经验法则
+
+| 场景 | 正确获取方式 | 错误获取方式 |
+|------|-------------|-------------|
+| 编译器路径 (CC/CXX) | `self.conf.get("tools.build:compiler_executables:c")` | `$CC` / `${CC}` |
+| 编译标志 (CFLAGS/CXXFLAGS) | `AutotoolsToolchain` / `CMakeToolchain` 自动注入 | `$CFLAGS` / `${CFLAGS}` |
+| 链接器路径 (LDFLAGS) | `requirements()` 声明依赖，Conan 自动处理 | 手动 `-L/path -lfoo` |
+| 架构标志 (ARCH) | `self.settings.arch` | `$ARCH` / `${ARCH}` |
+
+> **L0h 门禁**：CI 在 conan create 之前会扫描 conanfile.py，检测 `self.run()` 中的 `${CC}` / `${CFLAGS}` / `${CXX}` / `${LDFLAGS}` 模式，命中则直接拦截。
 
 ---
 
