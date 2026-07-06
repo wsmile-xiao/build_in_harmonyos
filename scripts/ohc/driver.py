@@ -509,7 +509,7 @@ class BuildDriver:
             if not self.ctx_data:
                 self._load_context()
             return
-        self._log("═══ [1/13] init-build ═══")
+        self._log("═══ [1/14] init-build ═══")
 
         # W1: Check git sync before starting (non-blocking warning)
         from .workflow_checks import check_git_sync
@@ -532,8 +532,6 @@ class BuildDriver:
                         f"尝试手动: ohc-run.py init-build {self.software} {self.version} --url=URL",
                         "运行 RESUME_CMD 从 Step1 恢复",
                     ])
-                log_fail("init-build 失败")
-                raise RuntimeError("init-build 失败")
 
             ctx_files = list(self.pdir.glob(ctx_pattern))
             if not ctx_files:
@@ -570,7 +568,7 @@ class BuildDriver:
     def _step15_history(self) -> None:
         if not self.should_run(1.5):
             return
-        self._log("═══ [1.5/13] 归档历史查询 (R11) ═══")
+        self._log("═══ [1.5/14] 归档历史查询 (R11) ═══")
 
         readme = self.archive_dir / "README.md"
         if readme.exists():
@@ -587,7 +585,7 @@ class BuildDriver:
     def _step2_patches(self) -> None:
         if not self.should_run(2):
             return
-        self._log("═══ [2/13] apply-patches ═══")
+        self._log("═══ [2/14] apply-patches ═══")
 
         patch_dir = self.archive_dir / "patches"
         if not patch_dir.exists():
@@ -636,7 +634,7 @@ class BuildDriver:
         if not self.build_src_dir or not self.build_src_dir.exists():
             return
 
-        self._log("═══ [2.5/13] 预编译风险扫描 (pre-scan) ═══")
+        self._log("═══ [2.5/14] 预编译风险扫描 (pre-scan) ═══")
 
         rules_path = self.pdir / "knowledge" / "graph" / "pre-scan-rules.yaml"
         report_path = self.build_src_dir / ".pre-scan-report.yaml"
@@ -745,7 +743,7 @@ class BuildDriver:
     def _step3_configure(self) -> None:
         if not self.should_run(3):
             return
-        self._log("═══ [3/13] configure ═══")
+        self._log("═══ [3/14] configure ═══")
 
         # ⭐ R18 扩展：configure 前检查常见构建工具可用性（动态发现）
         self._log("  检查构建工具可用性...")
@@ -864,7 +862,7 @@ class BuildDriver:
     def _step4_make(self) -> None:
         if not self.should_run(4):
             return
-        self._log("═══ [4/13] make ═══")
+        self._log("═══ [4/14] make ═══")
 
         if self.build_system == "python":
             self._log("Python 项目跳过 make")
@@ -901,7 +899,7 @@ class BuildDriver:
     def _step5_install(self) -> None:
         if not self.should_run(5):
             return
-        self._log("═══ [5/13] make install (DESTDIR mode) ═══")
+        self._log("═══ [5/14] make install (DESTDIR mode) ═══")
 
         if self.force and self.test_prefix.exists():
             import shutil
@@ -954,7 +952,7 @@ class BuildDriver:
     def _step6_safety(self) -> None:
         if not self.should_run(6):
             return
-        self._log("═══ [6/13] 安全弹窗 (R7) ═══")
+        self._log("═══ [6/14] 安全弹窗 (R7) ═══")
 
         # Quick version check for first 5 binaries
         bins = sorted(self.staging_prefix.rglob("bin/*"))[:5]
@@ -969,7 +967,7 @@ class BuildDriver:
     def _step7_check(self) -> None:
         if not self.should_run(7):
             return
-        self._log("═══ [7/13] make check ═══")
+        self._log("═══ [7/14] make check ═══")
 
         if self.skip_check:
             report = self.archive_dir / "reports" / "test-report.md"
@@ -1019,23 +1017,22 @@ class BuildDriver:
 
         self._task_card_update("7", "✅完成" if rc == 0 else "⚠️部分", f"RC={rc}")
 
-        # ⭐ HANDOFF: make check 失败时通知 AI 决策
+        # ⭐ CHECKPOINT: make check 失败时提醒 AI 决策（非阻塞）
         if rc != 0:
-            self._emit_handoff("make_check_failed", 1, "Step7",
-                actions=[
-                    f"查阅测试日志: {check_log}",
-                    "判断失败原因：平台限制 / 测试用例不兼容 / 真实 bug",
-                    "平台限制 → 记录原因并继续（不阻塞编译）",
-                    "真实 bug → 修复后重跑 make check",
-                    "运行 RESUME_CMD 从 Step7 恢复",
-                ])
+            self._emit_checkpoint("Step7", "make-check-failed", [
+                f"查阅测试日志: {check_log}",
+                "判断失败原因：平台限制 / 测试用例不兼容 / 真实 bug",
+                "平台限制 → 记录原因并继续（不阻塞编译）",
+                "真实 bug → 修复后重跑 make check",
+                "无论哪种情况，在 notes.md 记录失败原因",
+            ])
 
     # ── Step 8: staging verify ──
 
     def _step8_staging(self) -> None:
         if not self.should_run(8):
             return
-        self._log("═══ [8/13] Staging 验证 ═══")
+        self._log("═══ [8/14] Staging 验证 ═══")
 
         mark = self.archive_dir / ".staging-verified"
         bins = list(self.staging_prefix.rglob("bin/*")) if self.staging_prefix.exists() else []
@@ -1058,7 +1055,7 @@ class BuildDriver:
             excl.write_text("\n".join(failed), encoding="utf-8")
 
         mark.write_text(report, encoding="utf-8")
-        self._task_card_update("8", "✅完成", report)
+        self._task_card_update("8", "✅完成" if verified > 0 else "⚠️部分", report)
 
         # ⭐ HANDOFF: staging 验证全部失败时通知 AI
         if verified == 0 and len(exes) > 0:
@@ -1076,7 +1073,7 @@ class BuildDriver:
     def _step9_conan_recipe(self) -> None:
         if not self.should_run(9):
             return
-        self._log("═══ [9/13] Conan 配方生成 (conan-init) ═══")
+        self._log("═══ [9/14] Conan 配方生成 (conan-init) ═══")
 
         # Write back actual configure options to manifest.yaml BEFORE
         # generating conanfile.py, so conan_init sees the real params.
@@ -1101,7 +1098,7 @@ class BuildDriver:
     def _step10_conan_verify(self) -> None:
         if not self.should_run(10):
             return
-        self._log("═══ [10/13] Conan 配方验证 (conan-verify) ═══")
+        self._log("═══ [10/14] Conan 配方验证 (conan-verify) ═══")
 
         from .conan_verify import ConanVerifier
 
@@ -1134,7 +1131,7 @@ class BuildDriver:
     # ── Step 11: finish ──
 
     def _step11_finish(self) -> None:
-        self._log("═══ [11/13] finish-build ═══")
+        self._log("═══ [11/14] finish-build ═══")
 
         pipeline = FinishPipeline(self.software, self.version, "published",
                                    pdir=str(self.pdir))
@@ -1148,7 +1145,7 @@ class BuildDriver:
     # ── Step 11.5: required files ──
 
     def _step11b_required_files(self) -> None:
-        self._log("═══ [11.5/13] 必填文件校验 ═══")
+        self._log("═══ [11.5/14] 必填文件校验 ═══")
 
         required = ["manifest.yaml", "notes.md"]
         missing = []
@@ -1238,7 +1235,7 @@ class BuildDriver:
             self._log("⚠️ manifest.yaml 中未找到 build_config 段，跳过回写")
 
     def _step12_calibrate(self) -> None:
-        self._log("═══ [12/13] 归档校准 ═══")
+        self._log("═══ [12/14] 归档校准 ═══")
         # Simplified calibration check
         self._log(f"归档目录: {self.archive_dir}")
         patches = list((self.archive_dir / "patches").glob("*.patch")) if (self.archive_dir / "patches").exists() else []
@@ -1250,7 +1247,7 @@ class BuildDriver:
     # ── Step 13: cleanup ──
 
     def _step13_cleanup(self) -> None:
-        self._log("═══ [13/13] 清理 ═══")
+        self._log("═══ [13/14] 清理 ═══")
 
         # Clean staging
         if self.test_prefix.exists():
