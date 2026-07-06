@@ -8,7 +8,7 @@ Build: ./configure --static && make -j1 (R9 parallel constraint).
 import os
 
 from conan import ConanFile
-from conan.tools.files import get, copy, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.tools.layout import basic_layout
 
 
@@ -38,11 +38,16 @@ class ZlibConan(ConanFile):
 
     def build(self):
         apply_conandata_patches(self)
+        # R33: Get compiler from Conan conf, not shell env vars
+        compilers = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
+        cc = compilers.get("c", "clang") if compilers else "clang"
         # R26: zlib is a system same-name library (/lib/libz.so*),
         # must build static only to avoid polluting system lib paths.
-        # Use CONFIG_SHELL or sh to run configure (OHOS /bin/sh may not exist)
-        config_shell = os.environ.get("CONFIG_SHELL", "sh")
-        self.run(f"{config_shell} ./configure --static --prefix=/")
+        # CONFIG_SHELL is set by profile [buildenv] on OHOS;
+        # default to OHOS bash path for safety (R5: OHOS has no /bin/sh)
+        config_shell = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        # Set CC and CONFIG_SHELL explicitly for configure to pick up
+        self.run(f"CONFIG_SHELL={config_shell} CC={cc} {config_shell} ./configure --static --prefix=/")
         # R9: Use -j1 for parallel constraint on OHOS platform
         self.run("make -j1")
         # L1: Run upstream official test suite (make check)
