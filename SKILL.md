@@ -263,7 +263,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本>
 python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 ```
 
-**conan-init 后 AI 必须检查**：`requirements()`(R27 `@ohpcd/stable`)、`generate()`(R26 系统同名库静态)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
+**conan-init 后 AI 必须检查**：`requirements()`(R27 `@ohpcd/stable`，**缺少后缀会导致 Conan 无法匹配制品仓中的包**)、`generate()`(R26 系统同名库静态)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
 
 **conan-verify 8 道门禁**（G0-G4 + L2/L4/L5）：
 
@@ -539,4 +539,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v9.3 — 2026-07-07 — W0 适配前依赖发布检查 + preflight_check.sh + L0i 分阶段门禁（PR警告/Release拦截）；v9.2→v9.3*
+*SKILL.md v9.4 — 2026-07-07 — L0i 门禁修复(去掉@ohpcd/stable自动补全,缺少直接fail) + preflight同步修复；v9.3→v9.4*

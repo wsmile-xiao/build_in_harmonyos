@@ -92,20 +92,43 @@ for m in re.finditer(r'(?:self\.)?requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
     if '/' not in ref:
         continue
-    if '@' not in ref:
-        ref = ref + '@ohpcd/stable'
+    # R27: 不自动补全, 保留原始引用
     refs.add(ref)
 for m in re.finditer(r'tool_requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
     if '/' not in ref:
         continue
-    if '@' not in ref:
-        ref = ref + '@ohpcd/stable'
     refs.add(ref)
 for r in sorted(refs):
     print(r)
 PYEOF
 )
+        # 检查是否有缺少 @ohpcd/stable 的引用 (R27)
+        BAD_REFS=""
+        GOOD_REFS=""
+        while IFS= read -r dep; do
+            [ -z "$dep" ] && continue
+            if [[ "$dep" != *@* ]]; then
+                BAD_REFS="${BAD_REFS} ${dep}"
+            else
+                GOOD_REFS="${GOOD_REFS} ${dep}"
+            fi
+        done <<< "$DEPS"
+
+        if [ -n "$BAD_REFS" ]; then
+            echo ""
+            print_fail "依赖引用缺少 @ohpcd/stable (R27):"
+            for d in $BAD_REFS; do
+                echo "  ${RED}${d}${NC} → 应改为 ${GREEN}${d}@ohpcd/stable${NC}"
+            done
+            echo ""
+            echo "  Conan 不会自动补全 user/channel, 不带 @ohpcd/stable 的引用无法匹配制品仓中的包"
+            echo "  请在 conanfile.py 中将 requires 改为 '包名/版本@ohpcd/stable'"
+            echo ""
+            exit 1
+        fi
+
+        DEPS="$GOOD_REFS"
     fi
 fi
 

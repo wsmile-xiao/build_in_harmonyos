@@ -220,66 +220,84 @@ for pkg_dir in "${PACKAGES[@]}"; do
 
     # L0i: 依赖发布检查 (R36: 依赖必须先发布到制品仓)
     # 从 conanfile.py 中提取 requires/requirements 声明的依赖, 验证是否已发布
+    # R27: 依赖引用必须带 @ohpcd/stable, 否则 Conan 无法匹配制品仓中的包
     if [ -f "$CONANFILE" ]; then
-        DEP_REFS=$(python3 - "$CONANFILE" 2>/dev/null <<'PYEOF'
+        # 输出两行: 第一行是缺少 @ohpcd/stable 的引用, 第二行是正常的引用
+        DEP_ANALYSIS=$(python3 - "$CONANFILE" 2>/dev/null <<'PYEOF'
 import re, sys
 src = open(sys.argv[1]).read()
 refs = set()
 # 匹配 self.requires("xxx"), self.requires('xxx'), requires = "xxx"
 for m in re.finditer(r'(?:self\.)?requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
-    # 跳过 tool_requires 和非标准格式
     if '/' not in ref:
         continue
-    # 标准化: 确保有 @user/channel
-    if '@' not in ref:
-        ref = ref + '@ohpcd/stable'
     refs.add(ref)
 # 也匹配 tool_requires
 for m in re.finditer(r'tool_requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
     if '/' not in ref:
         continue
-    if '@' not in ref:
-        ref = ref + '@ohpcd/stable'
     refs.add(ref)
-for r in sorted(refs):
-    print(r)
+
+bad_refs = sorted([r for r in refs if '@' not in r])
+good_refs = sorted([r for r in refs if '@' in r])
+# 用不同前缀输出, 便于 shell 解析
+for r in bad_refs:
+    print(f"BAD:{r}")
+for r in good_refs:
+    print(f"OK:{r}")
 PYEOF
 )
-        if [ -n "$DEP_REFS" ]; then
-            echo "[step] L0i: Checking dependency availability in registry (R36)..."
-            UNPUBLISHED_DEPS=""
-            while IFS= read -r dep_ref; do
-                [ -z "$dep_ref" ] && continue
-                # R35: 用 conan download 验证 (禁止用 conan list 判断)
-                # 只检查 recipe 是否存在即可, 不强制要求 binary
-                if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --recipe >/dev/null 2>&1; then
-                    echo "        [ok] dependency in registry: ${dep_ref}"
-                else
-                    dep_short=$(echo "$dep_ref" | sed 's/@.*//')
-                    UNPUBLISHED_DEPS="${UNPUBLISHED_DEPS} ${dep_short}"
-                    echo "        [warn] dependency NOT in registry: ${dep_ref}"
-                fi
-            done <<< "$DEP_REFS"
+        if [ -n "$DEP_ANALYSIS" ]; then
+            # 检查是否有缺少 @ohpcd/stable 的依赖引用 (R27)
+            BAD_REFS=$(echo "$DEP_ANALYSIS" | grep '^BAD:' | sed 's/^BAD://' || true)
+            GOOD_REFS=$(echo "$DEP_ANALYSIS" | grep '^OK:' | sed 's/^OK://' || true)
 
-            if [ -n "$UNPUBLISHED_DEPS" ]; then
-                if [ "${CI_TASK_TYPE:-}" = "release" ]; then
-                    # Release 阶段: 硬拦截 — 不能发布依赖不完整的包
-                    echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
-                    echo "       These packages must be published FIRST (via release pipeline)."
-                    echo "[hint] 依赖未发布到制品仓 (R36)。请先发布以下依赖包:"
-                    for d in $UNPUBLISHED_DEPS; do
-                        echo "         - $d"
-                    done
-                    L0_FAILED=true
-                    L0_ERRORS="${L0_ERRORS} unpublished_deps"
-                else
-                    # PR 阶段: 软警告 — 让贡献者看到编译结果，但提醒依赖未发布
-                    echo "[warn] L0i: Dependencies not yet published (R36):${UNPUBLISHED_DEPS}"
-                    echo "       Release 时将被拦截。请先适配并发布以上依赖包。"
-                    echo "       当前 PR 构建将使用 --build=missing 从源码编译依赖（可能较慢）"
-                    echo "[hint] 运行 'bash ci/scripts/preflight_check.sh ${pkg_name}/${pkg_ver}' 检查依赖状态"
+            if [ -n "$BAD_REFS" ]; then
+                echo "[fail] L0i: Dependency references missing @ohpcd/stable (R27):"
+                while IFS= read -r bad_ref; do
+                    [ -z "$bad_ref" ] && continue
+                    echo "       ${bad_ref} → should be ${bad_ref}@ohpcd/stable"
+                done <<< "$BAD_REFS"
+                echo "[hint] Conan 不会自动补全 user/channel, 不带 @ohpcd/stable 的引用无法匹配制品仓中的包"
+                echo "       请在 conanfile.py 中将 requires 改为 '包名/版本@ohpcd/stable'"
+                L0_FAILED=true
+                L0_ERRORS="${L0_ERRORS} dep_ref_missing_channel"
+            fi
+
+            # 检查正常引用的依赖是否已发布到制品仓 (R36)
+            if [ -n "$GOOD_REFS" ]; then
+                echo "[step] L0i: Checking dependency availability in registry (R36)..."
+                UNPUBLISHED_DEPS=""
+                while IFS= read -r dep_ref; do
+                    [ -z "$dep_ref" ] && continue
+                    # R35: 用 conan download 验证 (禁止用 conan list 判断)
+                    if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --recipe >/dev/null 2>&1; then
+                        echo "        [ok] dependency in registry: ${dep_ref}"
+                    else
+                        dep_short=$(echo "$dep_ref" | sed 's/@.*//')
+                        UNPUBLISHED_DEPS="${UNPUBLISHED_DEPS} ${dep_short}"
+                        echo "        [warn] dependency NOT in registry: ${dep_ref}"
+                    fi
+                done <<< "$GOOD_REFS"
+
+                if [ -n "$UNPUBLISHED_DEPS" ]; then
+                    if [ "${CI_TASK_TYPE:-}" = "release" ]; then
+                        echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
+                        echo "       These packages must be published FIRST (via release pipeline)."
+                        echo "[hint] 依赖未发布到制品仓 (R36)。请先发布以下依赖包:"
+                        for d in $UNPUBLISHED_DEPS; do
+                            echo "         - $d"
+                        done
+                        L0_FAILED=true
+                        L0_ERRORS="${L0_ERRORS} unpublished_deps"
+                    else
+                        echo "[warn] L0i: Dependencies not yet published (R36):${UNPUBLISHED_DEPS}"
+                        echo "       Release 时将被拦截。请先适配并发布以上依赖包。"
+                        echo "       当前 PR 构建将使用 --build=missing 从源码编译依赖（可能较慢）"
+                        echo "[hint] 运行 'bash ci/scripts/preflight_check.sh ${pkg_name}/${pkg_ver}' 检查依赖状态"
+                    fi
                 fi
             fi
         fi
