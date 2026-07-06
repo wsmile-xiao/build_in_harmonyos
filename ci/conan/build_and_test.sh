@@ -264,15 +264,23 @@ PYEOF
             done <<< "$DEP_REFS"
 
             if [ -n "$UNPUBLISHED_DEPS" ]; then
-                echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
-                echo "       These packages must be adapted and published FIRST (via release pipeline)."
-                echo "       Publish order (topological): resolve leaf dependencies before downstream packages."
-                echo "[hint] 依赖未发布到制品仓 (R36)。请先适配并发布以下依赖包:"
-                for d in $UNPUBLISHED_DEPS; do
-                    echo "         - $d"
-                done
-                L0_FAILED=true
-                L0_ERRORS="${L0_ERRORS} unpublished_deps"
+                if [ "${CI_TASK_TYPE:-}" = "release" ]; then
+                    # Release 阶段: 硬拦截 — 不能发布依赖不完整的包
+                    echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
+                    echo "       These packages must be published FIRST (via release pipeline)."
+                    echo "[hint] 依赖未发布到制品仓 (R36)。请先发布以下依赖包:"
+                    for d in $UNPUBLISHED_DEPS; do
+                        echo "         - $d"
+                    done
+                    L0_FAILED=true
+                    L0_ERRORS="${L0_ERRORS} unpublished_deps"
+                else
+                    # PR 阶段: 软警告 — 让贡献者看到编译结果，但提醒依赖未发布
+                    echo "[warn] L0i: Dependencies not yet published (R36):${UNPUBLISHED_DEPS}"
+                    echo "       Release 时将被拦截。请先适配并发布以上依赖包。"
+                    echo "       当前 PR 构建将使用 --build=missing 从源码编译依赖（可能较慢）"
+                    echo "[hint] 运行 'bash ci/scripts/preflight_check.sh ${pkg_name}/${pkg_ver}' 检查依赖状态"
+                fi
             fi
         fi
     fi

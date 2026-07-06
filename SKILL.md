@@ -61,7 +61,23 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 
 ### §0.2 适配工作流规程（⭐ 强制执行）
 
-以下 4 条规程在每次软件适配中**强制执行**，违反=流程缺陷：
+以下 5 条规程在每次软件适配中**强制执行**，违反=流程缺陷：
+
+**W0 — 依赖发布检查（适配前第一件事）**
+开始适配任何软件前，**必须**先检查其所有依赖是否已发布到制品仓。这是适配的第一步，**在拉代码、看源码之前就要做**：
+```bash
+# 方法一：运行本地预检脚本（推荐）
+bash ci/scripts/preflight_check.sh <软件名>/<版本>
+
+# 方法二：手动检查（R35: 禁止用 conan list 判断，必须用 conan download）
+conan download "依赖包名/版本@ohpcd/stable" -r=ohpcd --recipe
+```
+检查结果决定下一步：
+- **所有依赖已发布** → 正常继续适配
+- **有依赖未发布** → **停止当前适配**，先适配并发布缺失的依赖（R36）
+- **多层依赖链 C→B→A** → 按拓扑序从最底层 A 开始，逐层适配→发布→再回到上层
+
+> 跳过此步=可能花数小时编译后发现依赖链断裂，浪费大量时间。先查依赖，再动手。
 
 **W1 — 同步主仓库**
 每次适配新软件前，**必须**拉取主仓库 main 最新变更，以匹配最新框架要求与知识库：
@@ -155,7 +171,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 | R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
 | R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
 | R36 | **依赖必须先发布再构建下游**：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C |
-| W1-W4 | **适配工作流**：每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
+| W0-W4 | **适配工作流**：适配前先查依赖是否已发布(W0)；每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
 
 > 详解见 references/iron-rules.md
 
@@ -523,4 +539,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v9.2 — 2026-07-07 — 新增 R35（禁止 conan list 判断 binary）+ R36（依赖发布优先级）；v9.1→v9.2*
+*SKILL.md v9.3 — 2026-07-07 — W0 适配前依赖发布检查 + preflight_check.sh + L0i 分阶段门禁（PR警告/Release拦截）；v9.2→v9.3*
