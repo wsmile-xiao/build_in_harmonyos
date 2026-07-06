@@ -158,20 +158,22 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 
 ### 1.2 版本号策略（⭐ 强制执行）
 
-**版本号 = 上游版本，永远一致。** 不加任何后缀。
+**版本号 = 上游版本 + 可选适配修复后缀。**
 
-| 场景 | 版本号 | 说明 |
+| 场景 | 版本号 | 示例 |
 |------|--------|------|
 | 首次适配上游 X.Y.Z | `X.Y.Z` | `zlib/1.3.1` |
-| 修复适配问题（补丁、CMake 标志等） | `X.Y.Z` 不变 | Conan 自动生成新 recipe revision，覆盖旧版本为 latest |
-| 上游发布新版本 | 新版本号 | `zlib/1.3.2` |
+| 同一上游版本，修复适配问题 | `X.Y.Z.N`（N 从 1 递增） | `zlib/1.3.1.1`、`zlib/1.3.1.2` |
+| 上游发布新版本 | 新版本号，后缀重置 | `zlib/1.3.2` |
 | 上游停更，我们 fork 维护 | `X.Y.Z` 不变 | conandata.yml 指向 fork 源码 |
 
-**为什么不用版本后缀（如 1.3.1.1）**：
-- Conan 原生的 recipe revision 已解决"同版本多次适配"的区分问题
-- `requires("zlib/1.3.1")` 默认拉最新 revision，下游无需改引用
-- 与 ConanCenter 行为一致，降低贡献者认知负担
-- 适配修复历史通过 git log 和 Conan revision 追溯
+**原因**：cnb.cool 制品仓不支持同版本多 recipe revision 并存（上传新 revision 会被 409 拒绝），必须用版本号后缀区分适配修复。
+
+**下游引用规范**：
+```python
+self.requires("zlib/1.3.1")      # 精确引用首次版本
+self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
+```
 
 ### 1.3 铁律摘要（37 条，违反=bug）
 
@@ -188,7 +190,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 | R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
 | R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
 | R36 | **依赖必须先发布再构建下游**：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C |
-| R37 | **版本号 = 上游版本，不加后缀**：适配修复靠 Conan recipe revision 区分（重新 upload 即生成新 revision），不修改版本号。`zlib/1.3.1` 始终是 `1.3.1`，不会变成 `1.3.1.1` |
+| R37 | **版本号 = 上游版本 + 适配修复后缀**：首次适配用上游版本 `X.Y.Z`，修复适配问题后加后缀 `X.Y.Z.N`（N 从 1 递增）。原因：cnb.cool 制品仓不支持同版本多 revision 并存，必须用版本号区分 |
 | W0-W4 | **适配工作流**：适配前先查依赖是否已发布(W0)；每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
 
 > 详解见 references/iron-rules.md
@@ -557,4 +559,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v10.1 — 2026-07-07 — 新增 R37 版本号策略 (=上游版本, 不加后缀, 靠 Conan revision 区分)；v10.0→v10.1*
+*SKILL.md v10.2 — 2026-07-07 — R37 版本号策略改为后缀方案 (cnb.cool 不支持多 revision 并存)；v10.1→v10.2*
