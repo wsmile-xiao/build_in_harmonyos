@@ -235,6 +235,48 @@ for pkg_dir in "${PACKAGES[@]}"; do
     L0_RESULT="pass"
     L0_DETAIL="all checks passed"
 
+    # ── GitHub mirror fallback (只处理 github.com, 不影响其他托管平台) ──
+    # 将 conandata.yml 中 github.com 的 url 从单值改为列表, 自动加上镜像源 fallback
+    # Conan 2.x 的 get() 支持 url 列表, 会逐个尝试直到成功
+    if [ -f "$CONANDATA" ] && grep -q 'github\.com' "$CONANDATA" 2>/dev/null; then
+        # 只处理精确匹配 https://github.com 的 URL (不影响 gitlab/bitbucket/codeberg 等其他平台)
+        if grep -qE 'url:.*https://github\.com/' "$CONANDATA" 2>/dev/null; then
+            echo "[step] GitHub mirror fallback: rewriting github.com URLs in conandata.yml..."
+            cp "$CONANDATA" "${CONANDATA}.orig" 2>/dev/null
+
+            python3 - "$CONANDATA" <<'PYEOF'
+import re, sys
+
+path = sys.argv[1]
+with open(path, 'r') as f:
+    content = f.read()
+
+def replace_github_url(match):
+    indent = match.group(1)
+    quote = match.group(2)
+    url = match.group(3)
+    mirrors = [
+        'https://ghproxy.com/' + url,
+        'https://gitclone.com/' + url[len('https://'):],
+        'https://moeyy.cn/gh-proxy/' + url,
+        url,
+    ]
+    subindent = indent + '  '
+    lines = [indent + 'url:'] + [subindent + '- ' + quote + m + quote for m in mirrors]
+    return '\n'.join(lines)
+
+# 只匹配单值 url: "https://github.com/..." (不处理已经是列表的)
+pattern = r'^([ \t]*)url:[ \t]*(["\'])(https://github\.com/[^\s"\']+)\2[ \t]*$'
+content = re.sub(pattern, replace_github_url, content, flags=re.MULTILINE)
+
+with open(path, 'w') as f:
+    f.write(content)
+PYEOF
+
+            echo "        [ok] GitHub URLs rewritten with mirror fallback (ghproxy -> gitclone -> moeyy -> direct)"
+        fi
+    fi
+
     # ── conan create (with upstream tests in build() + test_package auto-trigger) ──
     # OHOS /tmp is read-only, use build directory instead
     BUILD_LOG="$REPO_ROOT/.ci_logs/conan_build_${pkg_name}_${pkg_ver}.log"
