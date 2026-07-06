@@ -66,6 +66,18 @@ class TkConan(ConanFile):
     def package(self):
         autotools = Autotools(self)
         autotools.install()
+        # tk.h `#include <X11/Xlib.h>` / `<X11/X.h>`——autotools install-headers 只装公开 tk 头，
+        # 不装源码 xlib/ 的 X11 stub 头。任何编译 tk.h 的消费方（如 CPython _tkinter）都需要它们，
+        # 故把 xlib/X11/*.h 装进包 include/X11/（Xlib.h 引的 "tkIntXlibDecls.h" 已在包 include/）。
+        import os
+        import glob
+        import shutil
+        x11_src = os.path.join(self.source_folder, "xlib", "X11")
+        if os.path.isdir(x11_src):
+            x11_dst = os.path.join(self.package_folder, "include", "X11")
+            os.makedirs(x11_dst, exist_ok=True)
+            for h in glob.glob(os.path.join(x11_src, "*.h")):
+                shutil.copy2(h, x11_dst)
 
 
     def package_info(self):
