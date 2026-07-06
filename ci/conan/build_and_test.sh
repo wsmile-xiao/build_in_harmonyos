@@ -313,10 +313,12 @@ PYEOF
     fi
 
     # ── L0k: 命令行工具声明检查 (R38) ──
-    # 如果 conanfile.py 构建产物包含可执行文件 (bin/), 必须有 commands.json
+    # 如果 conanfile.py 构建产物包含可执行文件 (bin/), 必须有 commands.json (软件级)
     echo "[step] L0k: Checking commands.json for CLI tools (R38)..."
     CONANFILE_DIR="$(dirname "$CONANFILE")"
-    COMMANDS_JSON="${CONANFILE_DIR}/commands.json"
+    # commands.json 在软件级别目录 (上两级: {version}/ → {name}/)
+    PKG_SOFTWARE_DIR="$(dirname "$CONANFILE_DIR")"
+    COMMANDS_JSON="${PKG_SOFTWARE_DIR}/commands.json"
     # 检查 conanfile.py 是否构建可执行文件 (package_info 中有 bindirs 或 build install bin/)
     HAS_BINDIRS=$(grep -c 'bindirs\|cpp_info\.bindirs\|bindirs\s*=' "$CONANFILE" 2>/dev/null || echo 0)
     HAS_BIN_INSTALL=$(grep -c 'RUNTIME DESTINATION bin\|install.*bin\|install.*TARGETS.*bin' "$CONANFILE" 2>/dev/null || echo 0)
@@ -363,9 +365,9 @@ except Exception:
             fi
         else
             echo "        [warn] L0k: CLI tool detected but commands.json missing (R38)"
-            echo "[hint] 此软件构建可执行文件, 应在版本目录下创建 commands.json:"
+            echo "[hint] 此软件构建可执行文件, 应在软件级别目录下创建 commands.json:"
             echo "         cp templates/commands.json.template ${COMMANDS_JSON}"
-            echo "       参考 archives/s/strace/6.19/commands.json 示例"
+            echo "       参考 archives/s/strace/commands.json 示例"
         fi
     else
         # 库类型, 不需要 commands.json

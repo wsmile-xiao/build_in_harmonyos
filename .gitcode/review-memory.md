@@ -155,13 +155,14 @@ PR 中不应包含对自动生成文件的修改（如 `config.h`、`configure`�
 - 不直接修改 configure 脚本等生成产物
 
 ### 13. 命令行工具声明 commands.json (R38)
-如果软件构建产物包含可执行文件（命令行工具），必须在版本目录下创建 `commands.json`。库类型不需要。
+如果软件构建产物包含可执行文件（命令行工具），必须在**软件级别**目录（`archives/{letter}/{name}/commands.json`）下创建 `commands.json`。库类型不需要。
 
 检查方法：
 - conanfile.py 中有 `RUNTIME DESTINATION bin`、`cpp_info.bindirs`、或 `package_type = "application"` → 是工具
 - 如果是工具但缺少 commands.json → **request changes**
 - 如果是库但误加了 commands.json → **request changes**
 - commands.json 的 `type` 必须是 `"tool"`，`name` 必须匹配包名
+- 新增版本时往 `versions` 字段追加条目，一个软件只一个 commands.json
 
 ### 14. Conan 2.x API 规范
 ```python

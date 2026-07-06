@@ -199,7 +199,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
 | R36 | **依赖必须先发布再构建下游**：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C |
 | R37 | **版本号 = 上游版本 + 适配修复后缀**：首次适配用上游版本 `X.Y.Z`，修复适配问题后加后缀 `X.Y.Z.N`（N 从 1 递增）。原因：cnb.cool 制品仓不支持同版本多 revision 并存，必须用版本号区分 |
-| R38 | **命令行工具必须声明 commands.json**：如果构建产物包含可执行文件，必须在版本目录下创建 `commands.json`（hicmd 格式）。库类型不需要。CI 门禁 L0k 自动校验 |
+| R38 | **命令行工具必须声明 commands.json**：如果构建产物包含可执行文件，必须在**软件级别**目录下创建 `commands.json`（hicmd 格式）。库类型不需要。CI 门禁 L0k 自动校验 |
 | W0-W4 | **适配工作流**：适配前先查依赖是否已发布(W0)；每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
 
 > 详解见 references/iron-rules.md
@@ -295,7 +295,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 **conan-init 后 AI 必须检查**：`requirements()`(依赖格式 `name/version`)、`generate()`(R26 系统同名库静态)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
 
 **conan-init 后 AI 必须判断软件类型 (R38)**：
-- 如果构建产物包含**可执行文件**（命令行工具，如 `strace`、`bash`、`curl`）→ 在版本目录下创建 `commands.json`（参考 [templates/commands.json.template](templates/commands.json.template)）
+- 如果构建产物包含**可执行文件**（命令行工具，如 `strace`、`bash`、`curl`）→ 在**软件级别**目录（`archives/{letter}/{name}/`）下创建 `commands.json`（参考 [templates/commands.json.template](templates/commands.json.template)）
 - 如果构建产物只有**库文件**（.a/.so，如 `zlib`、`openssl`）→ 不需要 commands.json
 - 判断依据：conanfile.py 的 `package_info()` 中 `cpp_info.libs` vs `cpp_info.bindirs`/构建系统 install 了可执行文件到 `bin/`
 
@@ -464,12 +464,12 @@ python3 $SKILL_ROOT/scripts/ohc-run.py graph update E{NNN} --field root_cause=".
 archives/{letter}/{name}/
   ├── manifest.yaml              # 软件级元数据 + 版本索引
   ├── README.md                  # 软件描述
+  ├── commands.json              # 命令行工具声明（软件级，仅 tool 类型，R38）
   └── {version}/
       ├── conanfile.py           # 【CI 输入】Conan 配方
       ├── conandata.yml          # 【CI 输入】源码 + 补丁声明
       ├── test_package/          # 【CI 输入】Conan L1 测试
       ├── patches/               # 【CI 输入】补丁文件
-      ├── commands.json          # 【CI 输入】命令行工具声明（仅 tool 类型，R38）
       ├── manifest.yaml          # 【AI 元数据】编译元数据 + 状态
       ├── notes.md               # 【AI 元数据】适配笔记
       └── reports/               # 【AI 元数据】验证报告
@@ -478,7 +478,7 @@ archives/{letter}/{name}/
 | 分类 | 文件 | CI 读取 | AI 读取 |
 |------|------|---------|---------|
 | CI 输入 | conanfile.py / conandata.yml / test_package/ / patches/ | ✅ | ✅ |
-| CI 输入 | commands.json（仅 tool 类型） | ✅ | ✅ |
+| CI 输入 | commands.json（软件级，仅 tool 类型） | ✅ | ✅ |
 | AI 元数据 | manifest.yaml / notes.md / reports/ | ❌ | ✅ |
 
 > 状态定义见 §3 Step 3。归档清理规则（R24）见 knowledge/ARCHIVE-SPEC.md。

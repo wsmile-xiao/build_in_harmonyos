@@ -45,7 +45,7 @@
 | **R35** | **禁止用 conan list/search 判断 binary 是否存在** | 用 `conan install --requires=...`（dry-run）或 `conan download` 验证预编译包 | 用 `conan list "*/*:*/*" -r=xxx` 判断（cnb.cool 服务端搜索 API 对 binary 返回不完整） |
 | **R36** | **依赖必须先发布再构建下游** | 依赖包必须先通过 release 流水线发布到制品仓（`conan upload` 完成），再适配/构建依赖它的下游包 | 在依赖包尚未发布时就构建下游包（`--build=missing` 会尝试从源码编译依赖，耗时且容易失败） |
 | **R37** | **版本号 = 上游版本 + 适配修复后缀** | 首次用 `X.Y.Z`，修复适配问题后用 `X.Y.Z.N`（N 从 1 递增） | 同一版本号重复上传不同 revision（制品仓 409 拒绝），或每次修复都改版本号 |
-| **R38** | **命令行工具必须声明 commands.json** | 构建产物包含可执行文件的包，必须在版本目录下创建 `commands.json` | 命令行工具缺少 commands.json，或库类型误加 commands.json |
+| **R38** | **命令行工具必须声明 commands.json** | 构建产物包含可执行文件的包，必须在**软件级别**目录下创建 `commands.json` | 命令行工具缺少 commands.json，或库类型误加 commands.json |
 
 ---
 
@@ -633,8 +633,10 @@ git log --oneline -- "archives/z/zlib/"
 #### 文件位置
 
 ```
-archives/{letter}/{name}/{version}/commands.json
+archives/{letter}/{name}/commands.json
 ```
+
+**软件级别**（与 manifest.yaml、README.md 同级），一个软件一个文件，`versions` 字段聚合所有版本。新增版本时往 `versions` 中追加条目即可。
 
 #### 格式
 
