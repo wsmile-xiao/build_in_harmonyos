@@ -320,9 +320,12 @@ PYEOF
     PKG_SOFTWARE_DIR="$(dirname "$CONANFILE_DIR")"
     COMMANDS_JSON="${PKG_SOFTWARE_DIR}/commands.json"
     # 检查 conanfile.py 是否构建可执行文件 (package_info 中有 bindirs 或 build install bin/)
-    HAS_BINDIRS=$(grep -c 'bindirs\|cpp_info\.bindirs\|bindirs\s*=' "$CONANFILE" 2>/dev/null || echo 0)
-    HAS_BIN_INSTALL=$(grep -c 'RUNTIME DESTINATION bin\|install.*bin\|install.*TARGETS.*bin' "$CONANFILE" 2>/dev/null || echo 0)
-    HAS_EXECUTABLE=$(grep -c 'package_type.*=.*"application"\|package_type.*=.*'\''application' "$CONANFILE" 2>/dev/null || echo 0)
+    HAS_BINDIRS=$(grep -c 'bindirs\|cpp_info\.bindirs\|bindirs\s*=' "$CONANFILE" 2>/dev/null || true)
+    HAS_BIN_INSTALL=$(grep -c 'RUNTIME DESTINATION bin\|install.*bin\|install.*TARGETS.*bin' "$CONANFILE" 2>/dev/null || true)
+    HAS_EXECUTABLE=$(grep -c 'package_type.*=.*"application"\|package_type.*=.*'\''application' "$CONANFILE" 2>/dev/null || true)
+    HAS_BINDIRS=${HAS_BINDIRS:-0}
+    HAS_BIN_INSTALL=${HAS_BIN_INSTALL:-0}
+    HAS_EXECUTABLE=${HAS_EXECUTABLE:-0}
 
     if [ "$HAS_BINDIRS" -gt 0 ] || [ "$HAS_BIN_INSTALL" -gt 0 ] || [ "$HAS_EXECUTABLE" -gt 0 ]; then
         # 这是一个命令行工具, 检查 commands.json 是否存在
@@ -506,8 +509,8 @@ PYEOF
 
         # L1b: 检查测试程序真实编译和运行的痕迹
         if [ "$L1_RESULT" != "fail" ]; then
-            TEST_COMPILE_LINES=$(grep -cE "(clang|gcc|cc|g\+\+|c\+\+)" "$BUILD_LOG" 2>/dev/null || echo "0")
-            TEST_RUN_LINES=$(grep -cE "(\./[a-z]|Running test|PASS|FAIL|ok\b)" "$BUILD_LOG" 2>/dev/null || echo "0")
+            TEST_COMPILE_LINES=$(grep -cE "(clang|gcc|cc|g\+\+|c\+\+)" "$BUILD_LOG" 2>/dev/null || true)
+            TEST_RUN_LINES=$(grep -cE "(\./[a-z]|Running test|PASS|FAIL|ok\b)" "$BUILD_LOG" 2>/dev/null || true)
             if [ "${TEST_COMPILE_LINES:-0}" -gt 0 ] || [ "${TEST_RUN_LINES:-0}" -gt 0 ]; then
                 echo "[ok] L1b: Test execution evidence found in log"
             else
@@ -652,9 +655,10 @@ PYEOF
             echo "        [sabotage] headers emptied"
 
             # 重新 conan test (会重新编译 test_package 源码 + 链接 + 运行)
+            # 预期失败: 被 set -e 拦截, 用 || 捕获退出码
+            _NEG_EXIT=0
             conan test "$TEST_PKG_DIR" "${pkg_name}/${pkg_ver}" \
-                -pr "$CONAN_PROFILE" --build=missing >/dev/null 2>&1
-            _NEG_EXIT=$?
+                -pr "$CONAN_PROFILE" --build=missing >/dev/null 2>&1 || _NEG_EXIT=$?
 
             if [ $_NEG_EXIT -eq 0 ]; then
                 echo "[fail] L1e: test passed WITHOUT package artifacts — fake test detected (R34)"
