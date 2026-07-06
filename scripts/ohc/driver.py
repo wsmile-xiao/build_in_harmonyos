@@ -526,6 +526,12 @@ class BuildDriver:
             rc = init_build(self.software, self.version, mode="auto",
                             force=self.force, pdir=str(self.pdir))
             if rc != 0:
+                self._emit_handoff("init_build_failed", 2, "Step1",
+                    actions=[
+                        "检查网络连接和 URL 是否有效",
+                        f"尝试手动: ohc-run.py init-build {self.software} {self.version} --url=URL",
+                        "运行 RESUME_CMD 从 Step1 恢复",
+                    ])
                 log_fail("init-build 失败")
                 raise RuntimeError("init-build 失败")
 
@@ -663,6 +669,20 @@ class BuildDriver:
 
         self._task_card_update("2.5", "✅完成", f"{total} findings")
         self._log(f"✅ 预扫描报告: {report_path}")
+
+        # ⭐ Checkpoint: 提醒 AI 查阅风险扫描结果
+        critical_count = summary.get("critical", 0) + summary.get("high", 0)
+        if critical_count > 0:
+            self._emit_checkpoint("Step2.5", "pre-scan", [
+                f"⚠️ 发现 {critical_count} 个高风险项，查阅 {report_path}",
+                "根据风险等级决定是否需要特殊适配处理",
+                "critical/high 项需在编译前制定应对方案",
+            ])
+        else:
+            self._emit_checkpoint("Step2.5", "pre-scan", [
+                f"预扫描完成，{total} 个发现（无高风险）",
+                "查阅 .pre-scan-report.yaml 了解详情",
+            ])
 
     # ── Build system detection ──
 
@@ -999,6 +1019,17 @@ class BuildDriver:
 
         self._task_card_update("7", "✅完成" if rc == 0 else "⚠️部分", f"RC={rc}")
 
+        # ⭐ HANDOFF: make check 失败时通知 AI 决策
+        if rc != 0:
+            self._emit_handoff("make_check_failed", 1, "Step7",
+                actions=[
+                    f"查阅测试日志: {check_log}",
+                    "判断失败原因：平台限制 / 测试用例不兼容 / 真实 bug",
+                    "平台限制 → 记录原因并继续（不阻塞编译）",
+                    "真实 bug → 修复后重跑 make check",
+                    "运行 RESUME_CMD 从 Step7 恢复",
+                ])
+
     # ── Step 8: staging verify ──
 
     def _step8_staging(self) -> None:
@@ -1028,6 +1059,17 @@ class BuildDriver:
 
         mark.write_text(report, encoding="utf-8")
         self._task_card_update("8", "✅完成", report)
+
+        # ⭐ HANDOFF: staging 验证全部失败时通知 AI
+        if verified == 0 and len(exes) > 0:
+            self._emit_handoff("staging_verify_failed", 2, "Step8",
+                actions=[
+                    f"所有 {len(exes)} 个二进制 --version 检查失败",
+                    "检查 ELF 签名是否匹配运行环境",
+                    "检查 RPATH 和依赖库路径",
+                    "可能需要加入 EXCLUDE_LIST 排除不兼容的二进制",
+                    "运行 RESUME_CMD 从 Step8 恢复",
+                ])
 
     # ── Step 9: conan recipe generation ──
 
@@ -1215,6 +1257,17 @@ class BuildDriver:
             import shutil
             shutil.rmtree(self.test_prefix, ignore_errors=True)
             self._log(f"清理 staging: {self.test_prefix}")
+
+        # ⭐ Final checkpoint: 构建完成摘要
+        self._emit_checkpoint("Step13", "cleanup-complete", [
+            f"🎉 {self.software} {self.version} 编译流程完成",
+            f"归档目录: archives/{self.software[:1].lower()}/{self.software}/{self.version}/",
+            "确认 conanfile.py + conandata.yml + test_package/ + MANIFEST.yml 齐全",
+            "确认 manifest.yaml status 字段正确 (published/built/failed)",
+            "如遇新错误模式 → graph add --draft 提交知识草稿",
+            "如遇系统能力缺失 → req add 提交需求条目",
+            "提交前运行: bash ci/conan/build_and_test.sh 进行本地 CI 模拟 (W3)",
+        ])
 
     # ── Main run ──
 
