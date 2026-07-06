@@ -1,5 +1,6 @@
 import os
 import glob
+import subprocess
 from conan import ConanFile
 from conan.tools.build import cross_building
 
@@ -10,30 +11,23 @@ class TestPkg(ConanFile):
     def requirements(self):
         self.requires(self.tested_reference_str)
 
-    def test(self):
-        if cross_building(self):
-            self.output.info("cross-building：跳过运行期 import")
-            return
+    def _tkinter_so(self):
         pkg = self.dependencies["cpython-tkinter"]
         sos = glob.glob(os.path.join(str(pkg.package_folder),
                                      "lib", "python3.12", "lib-dynload", "_tkinter*.so"))
         if not sos:
             raise Exception("包内未见 _tkinter*.so")
-        so_dir = os.path.dirname(sos[0])
-        tcl = self.dependencies["tcl"].cpp_info
-        tk = self.dependencies["tk"].cpp_info
-        tcl_lib = tcl.libdirs[0]
-        tk_lib = tk.libdirs[0]
-        # 脚本库：tcl/tk 包的 lib/tcl9.0 与 lib/tk9.0
-        tcl_root = os.path.dirname(tcl_lib) if os.path.basename(tcl_lib) == "lib" else str(self.dependencies["tcl"].package_folder)
-        tk_root = str(self.dependencies["tk"].package_folder)
-        env = (
-            'PYTHONPATH="{sd}" '
-            'LD_LIBRARY_PATH="{tcll}:{tkl}:${{LD_LIBRARY_PATH:-}}" '
-            'TCL_LIBRARY="{tclr}/lib/tcl9.0" '
-            'TK_LIBRARY="{tkr}/lib/tk9.0" '
-        ).format(sd=so_dir, tcll=tcl_lib, tkl=tk_lib, tclr=tcl_root, tkr=tk_root)
-        # PATH 无关地找 python3（CI 构建环境常不把 python3 放进 PATH，但 HOME 有设）
+        return sos[0]
+
+    def build(self):
+        # test.c 编成 test_probe，dlopen 目标烤进 -DTARGET_SO（.so 全路径构建期已知）
+        so = self._tkinter_so()
+        cc = os.environ.get("CC", "clang")
+        self.run("{cc} test.c -o test_probe -DTARGET_SO='\"{so}\"' -ldl".format(cc=cc, so=so))
+
+    def _libpython_dir(self):
+        # _tkinter.so NEEDED libpython3.12.so.1.0；run test_probe 前须让它在 LD_LIBRARY_PATH 上。
+        # 用 python3 的 /proc/self/maps 问其实际加载的 libpython 目录（ground truth，跨环境可靠）。
         import shutil
         py = None
         for c in [os.environ.get("TKINTER_PYTHON"), shutil.which("python3"),
@@ -41,5 +35,26 @@ class TestPkg(ConanFile):
             if c and os.path.isfile(c):
                 py = c
                 break
-        test_py = os.path.join(self.source_folder, "test.py")
-        self.run(env + py + ' "' + test_py + '"')
+        if not py:
+            return ""
+        code = ("import os;"
+                "m=[l.split()[-1] for l in open('/proc/self/maps') if 'libpython3.12.so' in l];"
+                "print(os.path.dirname(m[0]) if m else '')")
+        try:
+            return subprocess.check_output([py, "-c", code], text=True).strip()
+        except Exception:
+            return ""
+
+    def test(self):
+        if cross_building(self):
+            self.output.info("cross-building：只验编译+链接")
+            return
+        tcl_lib = self.dependencies["tcl"].cpp_info.libdirs[0]
+        tk_lib = self.dependencies["tk"].cpp_info.libdirs[0]
+        pylib = self._libpython_dir()
+        paths = ":".join(p for p in (tcl_lib, tk_lib, pylib) if p)
+        # 加载者是现编的 test_probe（自签 adhoc）——CI 域可 dlopen 自签 .so（tcl 实证）；SDK 签名的
+        # python3 不行，故不用 import。RTLD_NOW 会解析 _tkinter 的全部 Py/Tcl/Tk 符号（不初始化解释器）。
+        env = 'LD_LIBRARY_PATH="{paths}:${{LD_LIBRARY_PATH:-}}"'.format(paths=paths)
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run('{env} {bash} -c "./test_probe"'.format(env=env, bash=bash))
