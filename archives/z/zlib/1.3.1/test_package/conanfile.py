@@ -1,29 +1,30 @@
 #!/usr/bin/env python3
 """Conan test_package for zlib 1.3.1 — Conan L1 official test.
 
-Uses direct compilation instead of CMake to keep test simple.
+Uses CMake to build the test (CMakeLists.txt already exists).
+CMakeToolchain handles compiler settings automatically (R33 compliant).
 CI runs this automatically via `conan create` (which invokes test_package).
 """
 import os
 
 from conan import ConanFile
+from conan.tools.cmake import CMake, cmake_layout
 
 
 class ZlibTestConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
+    generators = "CMakeDeps", "CMakeToolchain"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
 
+    def layout(self):
+        cmake_layout(self)
+
     def build(self):
-        # Direct compilation: link against zlib from Conan package
-        dep = self.dependencies["zlib"]
-        cpp = dep.cpp_info
-        inc_flags = " ".join(f"-I{d}" for d in cpp.includedirs)
-        lib_flags = " ".join(f"-L{d}" for d in cpp.libdirs)
-        link_flags = " ".join(f"-l{l}" for l in cpp.libs)
-        cc = os.environ.get("CC", "clang")
-        self.run(f"{cc} test.c -o test_zlib {inc_flags} {lib_flags} {link_flags}")
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
 
     def test(self):
         # OHOS: /system/bin/sh (mksh) cannot execute ELF binaries.

@@ -1,98 +1,61 @@
-# zlib 1.3.1 — 编译进度
+# zlib 1.3.1 — 适配笔记
 
-> 档案创建时间: 2026-04-09 00:00:00
-> 最后更新: 2026-04-09 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> 档案创建时间: 2026-04-09
+> 最后更新: 2026-07-07
+> 状态: built (conan-verify 待重新验证)
 
 ## 一、基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | zlib |
 | 版本 | 1.3.1 |
-| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
-| 构建系统 | autotools/cmake/meson/... |
-| 源码路径 | URL |
+| 构建系统 | Makefile (configure) |
+| 源码 | https://zlib.net/fossils/zlib-1.3.1.tar.gz |
 
-## 二、编译阶段（checkbox 实时更新）
+## 二、适配修正记录 (2026-07-07)
 
-### Phase 1: 环境准备
-- [ ] init-build.sh 完成 / 源码下载解压
+### 修正 1: 移除 R6 违规补丁
+- **问题**: `0001-Makefile.patch` 补丁修改的是 configure 生成的 Makefile（生成文件），且包含硬编码机器路径 `/storage/Users/currentUser/usr/local`
+- **问题**: `0002-zconf.h.patch` 补丁修改的是 configure 生成的 zconf.h（生成文件）
+- **修复**: 删除两个补丁文件，从 conandata.yml 移除 patches 段
+- **原因**: configure 在 build() 中运行，会从 Makefile.in 和 zconf.h.in 重新生成这两个文件，补丁被覆盖，属于无效操作
 
-### Phase 2: 编译（configure + make + make install）
-- [ ] configure 完成（记录参数和耗时）
-- [ ] make 编译完成（记录错误和修复）
-- [ ] make install 完成
+### 修正 2: R33 编译器获取
+- **问题**: conanfile.py 未从 Conan conf 获取编译器路径，依赖 configure 自动检测
+- **修复**: 添加 `cc = self.conf.get("tools.build:compiler_executables:c", "clang", check_type=str)`，通过 `env={"CC": cc}` 传递给 configure
+- **原因**: CI/release worker 上 shell 环境变量可能未设置，裸用会导致编译静默失败
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [ ] 干净源码 + 补丁应用
-- [ ] 独立 TEST_PREFIX configure + make install
-- [ ] 功能回归测试结果
+### 修正 3: CONFIG_SHELL 默认值
+- **问题**: 默认值为 `"sh"`，OHOS 上 `/bin/sh` 可能不存在或是 mksh
+- **修复**: 改为 `/data/service/hnp/bin/bash`（与 profile [buildenv] 一致）
 
-### Phase 3: 测试验证
-- [ ] make check / make test 结果
-- [ ] 安全弹窗触发确认
+### 修正 4: test_package 改用 CMake
+- **问题**: test_package 使用 `os.environ.get("CC", "clang")` 获取编译器（R33 违规），且 CMakeLists.txt 已存在但未使用
+- **修复**: 改用 CMake 方式（CMakeDeps + CMakeToolchain），编译器设置由 CMakeToolchain 自动处理
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [ ] Step 1-10 打包流程（见 packaging.md）
+### 修正 5: manifest 状态修正
+- **问题**: 软件级 manifest 标记 `published`，版本级标记 `built`，不一致
+- **修复**: 统一为 `built`（未 upload 到制品仓）
 
-### Phase 5: 归档收尾
-- [ ] 补丁生成（refresh-patch.sh --auto）
-- [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] verify-build.sh 质量门禁
-
-## 三、对话记录（⭐ 断点续传核心）
-
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — YYYY-MM-DD HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — 2026-04-09 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
+## 三、源码修改清单
 | 文件 | 原因 | 方式 | 补丁状态 |
 |------|------|------|---------|
-| ... | ... | ... | ... |
+| (无) | configure 原生支持 OHOS | 无需修改 | 无补丁 |
 
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ... | ... | ... |
+## 四、编译命令
+```bash
+# 探索性编译
+source .build-context-zlib-1.3.1
+cd $BUILD_SRC_DIR
+sh ./configure --static --prefix=/
+make -j1
+make check
+make install DESTDIR=$TEST_PREFIX
 
-## 六、结束记录
-- **最终状态**: ...
-- **结束时间**: ...
+# Conan 验证
+python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify zlib 1.3.1
+```
 
----
-
-## 编译结束
-
-- **结束时间**: 2026-04-09 16:50:17
-- **最终状态**: ⚠️  部分成功
-- **关闭操作**: 由 close-archive.sh 执行
-
-
----
-
-## 编译结束
-
-- **结束时间**: 2026-04-09 17:17:45
-- **最终状态**: ✅ 编译成功
-- **关闭操作**: 由 close-archive.sh 执行
----
-
-**编译结束**: 2026-06-28 21:44
-**最终状态**: built
+## 五、结束记录
+- **最终状态**: built (待 conan-verify 重新验证)
+- **结束时间**: 2026-07-07
