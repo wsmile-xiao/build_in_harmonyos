@@ -1,3 +1,9 @@
+---
+name: openharmony-compile-agent
+description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
+version: 10.3
+---
+
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
 > KNOW_YOUR_WHY.md 回答"为什么"，本文档回答"怎么做"。
 
