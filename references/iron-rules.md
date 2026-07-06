@@ -41,6 +41,7 @@
 | **R31** | **知识图谱未命中必须生成草稿** | `knowledge/drafts/DRAFT-*.kv` 自动生成 | 未命中的错误丢弃不沉淀 |
 | **R32** | **Conan recipe 平台判断兼容 OHOS** | `self.settings.os in ("Linux", "OHOS")` | `self.settings.os == "Linux"` |
 | **R33** | **build() 禁止依赖未定义 shell 环境变量** | 从 Conan Toolchain / `self.conf_info` / `AutotoolsToolchain` 获取编译器路径与标志 | 裸用 `${CC}` / `${CFLAGS}` / `${CXX}` 等 shell 变量 |
+| **R34** | **test 必须实质依赖被测包** | test_package 源文件调用被测包 API / 执行被测包二进制 | 只打印字符串的空壳 test（即使链接了被测库但不调用任何函数） |
 
 ---
 
@@ -371,6 +372,69 @@ def build(self):
 | 架构标志 (ARCH) | `self.settings.arch` | `$ARCH` / `${ARCH}` |
 
 > **L0h 门禁**：CI 在 conan create 之前会扫描 conanfile.py，检测 `self.run()` 中的 `${CC}` / `${CFLAGS}` / `${CXX}` / `${LDFLAGS}` 模式，命中则直接拦截。
+
+---
+
+### R34 详细说明：test 必须实质依赖被测包
+
+> **核心原因**：PR #1795 (bird/3.1.6) 的 test_package/test.c 只有一个 `printf("test bird 3.1.6: OK\n")`，不调用 bird 的任何 API，即使 bird 库完全损坏也能通过。这是"形式合规、实质空壳"的假测试——通过了 L0c（有源文件）、L0d（test() 调了 self.run()）、L1d（不是 echo/print/true）所有检查。
+
+#### 典型反面案例
+
+```c
+// ❌ bird/test_package/test.c — 假测试
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    printf("test bird 3.1.6: OK\n");  // 不调用 bird 的任何函数
+    return 0;
+}
+```
+
+即使 CMakeLists.txt 写了 `target_link_libraries(test bird)`，链接器发现 test.c 没有引用 bird 的符号，不会从 libbird.a 提取任何 .o，链接照样成功。
+
+#### 正确做法
+
+```c
+// ✅ 真测试 — 调用被测包 API
+#include <stdio.h>
+#include <bird/bird.h>   // 引入被测包头文件
+
+int main(void) {
+    bird_ctx *ctx = bird_init();      // 调用被测包函数
+    if (!ctx) {
+        fprintf(stderr, "FAIL: bird_init() returned NULL\n");
+        return 1;
+    }
+    bird_route *r = bird_lookup(ctx, "192.168.1.0/24");
+    printf("test bird: route lookup OK (r=%p)\n", (void*)r);
+    bird_free(ctx);
+    return 0;
+}
+```
+
+#### L1e 破坏性反向验证（CI 兜底，无法绕过）
+
+CI 在 conan create 成功后执行 L1e：
+
+1. 从 conan cache 找到被测包产物
+2. **替换为损坏版本**（.a→空归档，.so→删除，bin→/bin/false，.h→清空）
+3. 重新 `conan test`（重新编译 test 源码 + 链接 + 运行）
+4. 如果仍然 PASS → 假测试（test 不依赖被测包）
+5. 如果 FAIL → 真测试（链接/运行确实依赖被测包）
+6. 恢复原始产物
+
+**无法绕过的底层保证**：
+
+| 包类型 | 破坏方式 | 真测试的表现 | 底层保证 |
+|--------|---------|-------------|---------|
+| 静态库 .a | 替换为空归档 | 链接器找不到符号 → undefined reference | 链接器只提取被引用的 .o |
+| 动态库 .so | 删除 .so | 加载器找不到库 → cannot open shared object | NEEDED 记录强制加载 |
+| 可执行包 bin | 替换为 /bin/false | test 执行 bin 得到错误结果 | 进程执行不可伪造 |
+| 头文件库 | 清空 .h | 编译器找不到声明 → implicit declaration | 预处理器必须解析声明 |
+
+> 提交者无论在 CMakeLists.txt、源码、conanfile.py 哪一层做手脚，都无法改变链接器/加载器/预处理器的确定行为。
 
 ---
 

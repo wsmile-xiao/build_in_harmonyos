@@ -402,6 +402,73 @@ for pkg_dir in "${PACKAGES[@]}"; do
             done
         fi
 
+        # ── L1e: 破坏性反向验证 (R34: test 必须实质依赖被测包) ──
+        # 原理: 将被测包产物替换为损坏版本，重新 conan test (重新编译+链接+运行)
+        #   仍 PASS = 假测试 (test 不依赖被测包)
+        #   FAIL   = 真测试 (链接/运行确实依赖被测包)
+        if [ "$L1_RESULT" != "fail" ] && [ -n "$PKG_CACHE" ] && [ -d "$PKG_CACHE" ]; then
+            echo "[step] L1e: Destructive negative test (R34)..."
+
+            _BACKUP_DIR="${TMPDIR:-$HOME/tmp}/l1e_backup_${pkg_name}_$$"
+            mkdir -p "$_BACKUP_DIR"
+
+            # 备份并破坏产物 — 静态库 .a 替换为空归档
+            find "$PKG_CACHE" -name '*.a' -type f 2>/dev/null | while read -r lib_file; do
+                cp "$lib_file" "$_BACKUP_DIR/" 2>/dev/null
+                rm -f "$lib_file"
+                ar rcs "$lib_file" 2>/dev/null
+                echo "        [sabotage] $(basename "$lib_file") → empty archive"
+            done
+
+            # 动态库 .so* → 临时移走
+            find "$PKG_CACHE" -name '*.so*' -type f 2>/dev/null | while read -r lib_file; do
+                cp "$lib_file" "$_BACKUP_DIR/" 2>/dev/null
+                rm -f "$lib_file"
+                echo "        [sabotage] $(basename "$lib_file") → removed"
+            done
+
+            # 可执行文件 bin/* → 替换为 /bin/false
+            if [ -n "$BINS" ] && [ -d "$BINS" ]; then
+                for bin_file in "$BINS"/*; do
+                    [ -f "$bin_file" ] || continue
+                    cp "$bin_file" "$_BACKUP_DIR/" 2>/dev/null
+                    cp /bin/false "$bin_file" 2>/dev/null || printf '#!/bin/sh\nexit 1\n' > "$bin_file"
+                    chmod +x "$bin_file" 2>/dev/null
+                    echo "        [sabotage] $(basename "$bin_file") → /bin/false"
+                done
+            fi
+
+            # 头文件 *.h → 清空
+            find "$PKG_CACHE" -name '*.h' -type f 2>/dev/null | while read -r hdr_file; do
+                cp "$hdr_file" "$_BACKUP_DIR/" 2>/dev/null
+                : > "$hdr_file"
+            done
+            echo "        [sabotage] headers emptied"
+
+            # 重新 conan test (会重新编译 test_package 源码 + 链接 + 运行)
+            conan test "$TEST_PKG_DIR" "${pkg_name}/${pkg_ver}@${CONAN_USER}/${CONAN_CHANNEL}" \
+                -pr "$CONAN_PROFILE" --build=missing >/dev/null 2>&1
+            _NEG_EXIT=$?
+
+            if [ $_NEG_EXIT -eq 0 ]; then
+                echo "[fail] L1e: test passed WITHOUT package artifacts — fake test detected (R34)"
+                echo "        test does not depend on ${pkg_name} — must call its API or execute its binary"
+                L1_RESULT="fail"
+                L1_DETAIL="negative test: test does not depend on package"
+                L1_FAILED=true
+            else
+                echo "[ok] L1e: Negative test confirmed — test genuinely depends on ${pkg_name}"
+            fi
+
+            # 恢复产物
+            for _bf in "$_BACKUP_DIR"/*; do
+                [ -f "$_bf" ] || continue
+                _bn=$(basename "$_bf")
+                find "$PKG_CACHE" -name "$_bn" -exec cp "$_bf" {} \; 2>/dev/null
+            done
+            rm -rf "$_BACKUP_DIR"
+        fi
+
         # ── L2: Minimal smoke test (--version / --help) ──
         echo "[step] L2: Smoke test (version/help check)..."
         if [ -n "$BINS" ] && [ -d "$BINS" ]; then

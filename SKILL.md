@@ -140,7 +140,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status                                   
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                              # 独立运行知识图谱引擎
 ```
 
-### 1.2 铁律摘要（33 条，违反=bug）
+### 1.2 铁律摘要（34 条，违反=bug）
 
 | # | 规则 |
 |---|------|
@@ -152,6 +152,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 | R26-R31 | **Conan 配方**：系统同名库禁止动态链接(避免污染`/lib`/`/lib64`)，默认动态由Conan管理依赖链；依赖引用必须`@ohpcd/stable`；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
 | R32 | **OHOS 平台兼容**：recipe 内 `settings.os` 判断必须 `in ("Linux", "OHOS")`，不能 `== "Linux"` |
 | R33 | **build() 禁止依赖未定义的 shell 环境变量**：编译器/标志必须从 Conan Toolchain 或 `self.conf_info` 获取，不能裸用 `${CC}`/`${CFLAGS}` 等 shell 变量（release worker 上为空→编译静默失败） |
+| R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
 | W1-W4 | **适配工作流**：每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
 
 > 详解见 references/iron-rules.md
@@ -515,4 +516,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v9.0 — 2026-07-06 — 自洽性修复: §1.1步骤13→14/§3 finish 6→9步表格/§9补全27命令/L0h→L0i范围
+*SKILL.md v9.1 — 2026-07-06 — 新增 R34（test 必须实质依赖被测包）+ L1e 破坏性反向验证门禁；v9.0→v9.1*
