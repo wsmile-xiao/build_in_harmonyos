@@ -31,6 +31,7 @@ PROFILE="${CONAN_PROFILE:-ohos-aarch64}"
 PROFILE_FILE="$REPO_ROOT/ci/conan/profiles/$PROFILE"
 CONAN_USER="${CONAN_USER:-ohpcd}"
 CONAN_CHANNEL="${CONAN_CHANNEL:-stable}"
+CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 SCAN_ROOT="${PKG_SCAN_ROOT:-archives}"
 NO_TEST_FILE="$REPO_ROOT/ci/config/no_official_test.txt"
 
@@ -214,6 +215,65 @@ for pkg_dir in "${PACKAGES[@]}"; do
             echo "[fail] L0h: conanfile.py 在 self.run() 中依赖未定义 shell 变量 ${BAD_VAR} — 用 self.conf.get() 代替 (R33)"
             L0_FAILED=true
             L0_ERRORS="${L0_ERRORS} shell_env_var_in_run"
+        fi
+    fi
+
+    # L0i: 依赖发布检查 (R36: 依赖必须先发布到制品仓)
+    # 从 conanfile.py 中提取 requires/requirements 声明的依赖, 验证是否已发布
+    if [ -f "$CONANFILE" ]; then
+        DEP_REFS=$(python3 - "$CONANFILE" 2>/dev/null <<'PYEOF'
+import re, sys
+src = open(sys.argv[1]).read()
+refs = set()
+# 匹配 self.requires("xxx"), self.requires('xxx'), requires = "xxx"
+for m in re.finditer(r'(?:self\.)?requires?\s*\(\s*["\']([^"\']+)["\']', src):
+    ref = m.group(1).strip()
+    # 跳过 tool_requires 和非标准格式
+    if '/' not in ref:
+        continue
+    # 标准化: 确保有 @user/channel
+    if '@' not in ref:
+        ref = ref + '@ohpcd/stable'
+    refs.add(ref)
+# 也匹配 tool_requires
+for m in re.finditer(r'tool_requires?\s*\(\s*["\']([^"\']+)["\']', src):
+    ref = m.group(1).strip()
+    if '/' not in ref:
+        continue
+    if '@' not in ref:
+        ref = ref + '@ohpcd/stable'
+    refs.add(ref)
+for r in sorted(refs):
+    print(r)
+PYEOF
+)
+        if [ -n "$DEP_REFS" ]; then
+            echo "[step] L0i: Checking dependency availability in registry (R36)..."
+            UNPUBLISHED_DEPS=""
+            while IFS= read -r dep_ref; do
+                [ -z "$dep_ref" ] && continue
+                # R35: 用 conan download 验证 (禁止用 conan list 判断)
+                # 只检查 recipe 是否存在即可, 不强制要求 binary
+                if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --recipe >/dev/null 2>&1; then
+                    echo "        [ok] dependency in registry: ${dep_ref}"
+                else
+                    dep_short=$(echo "$dep_ref" | sed 's/@.*//')
+                    UNPUBLISHED_DEPS="${UNPUBLISHED_DEPS} ${dep_short}"
+                    echo "        [warn] dependency NOT in registry: ${dep_ref}"
+                fi
+            done <<< "$DEP_REFS"
+
+            if [ -n "$UNPUBLISHED_DEPS" ]; then
+                echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
+                echo "       These packages must be adapted and published FIRST (via release pipeline)."
+                echo "       Publish order (topological): resolve leaf dependencies before downstream packages."
+                echo "[hint] 依赖未发布到制品仓 (R36)。请先适配并发布以下依赖包:"
+                for d in $UNPUBLISHED_DEPS; do
+                    echo "         - $d"
+                done
+                L0_FAILED=true
+                L0_ERRORS="${L0_ERRORS} unpublished_deps"
+            fi
         fi
     fi
 

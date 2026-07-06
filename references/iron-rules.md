@@ -4,7 +4,7 @@
 
 来源: SKILL.md §1.2
 
-## 铁律总表（32 条，违反=bug）
+## 铁律总表（36 条，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -42,6 +42,8 @@
 | **R32** | **Conan recipe 平台判断兼容 OHOS** | `self.settings.os in ("Linux", "OHOS")` | `self.settings.os == "Linux"` |
 | **R33** | **build() 禁止依赖未定义 shell 环境变量** | 从 Conan Toolchain / `self.conf_info` / `AutotoolsToolchain` 获取编译器路径与标志 | 裸用 `${CC}` / `${CFLAGS}` / `${CXX}` 等 shell 变量 |
 | **R34** | **test 必须实质依赖被测包** | test_package 源文件调用被测包 API / 执行被测包二进制 | 只打印字符串的空壳 test（即使链接了被测库但不调用任何函数） |
+| **R35** | **禁止用 conan list/search 判断 binary 是否存在** | 用 `conan install --requires=...`（dry-run）或 `conan download` 验证预编译包 | 用 `conan list "*/*:*/*" -r=xxx` 判断（cnb.cool 服务端搜索 API 对 binary 返回不完整） |
+| **R36** | **依赖必须先发布再构建下游** | 依赖包必须先通过 release 流水线发布到制品仓（`conan upload` 完成），再适配/构建依赖它的下游包 | 在依赖包尚未发布时就构建下游包（`--build=missing` 会尝试从源码编译依赖，耗时且容易失败） |
 
 ---
 
@@ -435,6 +437,102 @@ CI 在 conan create 成功后执行 L1e：
 | 头文件库 | 清空 .h | 编译器找不到声明 → implicit declaration | 预处理器必须解析声明 |
 
 > 提交者无论在 CMakeLists.txt、源码、conanfile.py 哪一层做手脚，都无法改变链接器/加载器/预处理器的确定行为。
+
+---
+
+### R35 详细说明：禁止用 conan list/search 判断 binary 是否存在
+
+> **核心原因**：cnb.cool 的 Conan 服务端对搜索 API（`/v2/conans/search`）的 binary package 查询支持不完整——`conan list "*/*:*/*" -r=xxx` 返回 recipe 信息但显示 "No packages found for this revision"，即使该包的预编译二进制已成功上传且可正常下载。这会导致 AI 和人工误判"制品仓没有预编译包"，进而做出错误的决策（如重新编译、修改 upload 逻辑等）。
+
+#### 三套 API 路径对比
+
+| 操作 | Conan API 路径 | cnb.cool 支持情况 |
+|------|---------------|------------------|
+| `conan list "*/*:*/*" -r=xxx` | 搜索 API (`/v2/conans/search`) | recipe ✅ binary ❌（返回空） |
+| `conan install --requires=...` | 解析 API (`/v2/conans/resolve`) | recipe ✅ binary ✅ |
+| `conan download "pkg/ver@user/ch"` | 下载 API (`/v2/conans/download`) | recipe ✅ binary ✅ |
+
+#### 正确做法
+
+```bash
+# ✅ 验证某个包是否有预编译 binary — 方法一：dry-run install
+conan install --requires="zlib/1.3.1@ohpcd/stable" -pr="ohos-aarch64" --build=missing
+
+# ✅ 验证某个包是否有预编译 binary — 方法二：直接 download
+conan download "zlib/1.3.1@ohpcd/stable" -r=cnb-conan
+
+# ✅ 查看制品仓有哪些 recipe（仅 recipe 列表，不含 binary 状态）
+conan list "*/*" -r=cnb-conan
+
+# ❌ 错误 — 用 list 查 binary，会得到 "No packages found" 的误判
+conan list "*/*:*/*" -r=cnb-conan
+```
+
+#### 判断规则
+
+- 需要**判断 binary 是否存在** → 用 `conan install` 或 `conan download`
+- 需要**列出制品仓有哪些包**（recipe 层面） → `conan list "*/*" -r=xxx` 可以用，但结果只反映 recipe，不代表 binary 状态
+- **绝对禁止**用 `conan list "*/*:*/*"` 的结果判断"制品仓是否有预编译包"
+
+---
+
+### R36 详细说明：依赖必须先发布再构建下游
+
+> **核心原因**：公开制品仓的核心价值是"一次发布、多方复用"。如果依赖包 A 尚未发布到制品仓，下游包 B 声明了 `self.requires("A/x.x@ohpcd/stable")`，CI 构建时 `--build=missing` 会尝试从源码编译 A——这通常因为缺少 A 的构建依赖（工具链/传递依赖）而失败，或者耗时数倍于预期。更严重的是，即使侥幸成功，本地产物与制品仓中的正式版本可能不一致，破坏可复现性。
+
+#### 依赖发布优先级流程
+
+```
+适配包 B（依赖 A）
+  │
+  ├─ Step 1: 检查 A 是否已发布到制品仓
+  │   conan install --requires="A/x.x@ohpcd/stable" -r=cnb-conan
+  │
+  │   ├─ 已发布 → 继续 Step 2（正常流程）
+  │   │
+  │   └─ 未发布 → 必须先适配并发布 A
+  │       ├─ 切换到 A 的适配流程
+  │       ├─ A 通过 CI + release 流水线发布到制品仓
+  │       └─ A 发布成功后，再回来构建 B
+  │
+  ├─ Step 2: 在 B 的 conanfile.py 中声明依赖
+  │   self.requires("A/x.x@ohpcd/stable")   # R27
+  │
+  └─ Step 3: CI 构建 B 时，--build=missing 从制品仓拉取 A 的预编译包
+```
+
+#### 反面案例
+
+```python
+# ❌ B 的 conanfile.py 依赖了 A，但 A 还没发布
+class BConan(ConanFile):
+    requires = "A/1.0@ohpcd/stable"  # A 尚未发布到制品仓
+    # CI 构建时: --build=missing 试图从源码编译 A
+    # 结果: 缺少 A 的构建依赖 → 编译失败 → 误判为 B 的适配问题
+```
+
+#### 多层依赖链
+
+当依赖链为 `C → B → A` 时：
+
+1. **先发布 A**（无外部依赖的基础库，如 zlib/openssl）
+2. **再发布 B**（声明 `requires("A/...@ohpcd/stable")`，从制品仓拉取 A）
+3. **最后发布 C**（声明 `requires("B/...@ohpcd/stable")`，从制品仓拉取 B）
+
+**CI 在构建 C 时，完整的依赖解析链为**：
+```
+C (本次构建)
+  → B (制品仓预编译包)
+    → A (制品仓预编译包)
+```
+
+只有每一层都先发布，下游才能通过 `--build=missing` 快速拉取预编译依赖，避免全链路从源码编译。
+
+#### 与 R18（依赖先查预编译）的关系
+
+- **R18** 是适配阶段的原则：优先查预编译包，有就用、没有再考虑编译
+- **R36** 是发布阶段的优先级原则：**没有发布的依赖，必须先走发布流程**
+- 两者结合：适配时先查预编译（R18），如果发现依赖未发布，先发布依赖（R36），再继续适配
 
 ---
 

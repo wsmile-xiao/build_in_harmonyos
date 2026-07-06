@@ -140,7 +140,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py status                                   
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                              # 独立运行知识图谱引擎
 ```
 
-### 1.2 铁律摘要（34 条，违反=bug）
+### 1.2 铁律摘要（36 条，违反=bug）
 
 | # | 规则 |
 |---|------|
@@ -153,6 +153,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 | R32 | **OHOS 平台兼容**：recipe 内 `settings.os` 判断必须 `in ("Linux", "OHOS")`，不能 `== "Linux"` |
 | R33 | **build() 禁止依赖未定义的 shell 环境变量**：编译器/标志必须从 Conan Toolchain 或 `self.conf_info` 获取，不能裸用 `${CC}`/`${CFLAGS}` 等 shell 变量（release worker 上为空→编译静默失败） |
 | R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
+| R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
+| R36 | **依赖必须先发布再构建下游**：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C |
 | W1-W4 | **适配工作流**：每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
 
 > 详解见 references/iron-rules.md
@@ -168,7 +170,10 @@ python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"                    
 缺依赖？
 ├─ 从 cmd-pkgs README 查询预编译包 → curl install.sh | sh
 ├─ conan 制品仓有 → conan install --requires=name/ver@ohpcd/stable
-└─ 无预编译包 → 查 dependencies.md 编译顺序 → 先编依赖
+├─ 制品仓没有 → 先适配并发布依赖包（R36：依赖发布优先级）
+│   ├─ 依赖包走完整适配流程 → conan create → CI → release → conan upload
+│   └─ 依赖发布成功后，回来继续构建当前包
+└─ 多层依赖链 C→B→A → 按拓扑序从最底层 A 开始逐层发布
 
 configure 失败？
 ├─ 缺依赖 → HANDOFF → AI 安装预编译包 → --resume-from=Step3
@@ -182,9 +187,11 @@ configure 失败？
 └─ ohc-run.py conan-verify <name> <ver>   验证配方可复现
 ```
 
-> **⭐ R18 强化：预编译包优先原则**
-> 编译过程中发现的任何依赖缺失，**必须先查 cmd-pkgs README** 和 Conan 制品仓。
-> 只有两者都没有才手动编译依赖。
+> **⭐ R18+R35+R36 强化：预编译包优先 + 查询方式 + 发布优先级**
+>
+> - **R18**：编译过程中发现的任何依赖缺失，**必须先查 cmd-pkgs README** 和 Conan 制品仓。只有两者都没有才手动编译依赖。
+> - **R35**：查制品仓时**禁止用 `conan list "*/*:*/*"` 判断 binary 是否存在**（cnb.cool 搜索 API 对 binary 返回不完整）。必须用 `conan install --requires=name/ver@ohpcd/stable` 或 `conan download` 验证。
+> - **R36**：如果依赖包尚未发布到制品仓，**必须先适配并发布依赖包**（走 release 流水线 `conan upload`），再回来构建当前包。多层依赖按拓扑序逐层发布。
 
 ---
 
@@ -516,4 +523,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v9.1 — 2026-07-06 — 新增 R34（test 必须实质依赖被测包）+ L1e 破坏性反向验证门禁；v9.0→v9.1*
+*SKILL.md v9.2 — 2026-07-07 — 新增 R35（禁止 conan list 判断 binary）+ R36（依赖发布优先级）；v9.1→v9.2*
