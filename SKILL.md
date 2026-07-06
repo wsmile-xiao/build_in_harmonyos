@@ -199,6 +199,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
 | R36 | **依赖必须先发布再构建下游**：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C |
 | R37 | **版本号 = 上游版本 + 适配修复后缀**：首次适配用上游版本 `X.Y.Z`，修复适配问题后加后缀 `X.Y.Z.N`（N 从 1 递增）。原因：cnb.cool 制品仓不支持同版本多 revision 并存，必须用版本号区分 |
+| R38 | **命令行工具必须声明 commands.json**：如果构建产物包含可执行文件，必须在版本目录下创建 `commands.json`（hicmd 格式）。库类型不需要。CI 门禁 L0k 自动校验 |
 | W0-W4 | **适配工作流**：适配前先查依赖是否已发布(W0)；每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；适配结束检查知识图谱完整性(W4) |
 
 > 详解见 references/iron-rules.md
@@ -293,6 +294,11 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 
 **conan-init 后 AI 必须检查**：`requirements()`(依赖格式 `name/version`)、`generate()`(R26 系统同名库静态)、`package_info()`(cpp_info.libs)、`conandata.yml`(sha256)。
 
+**conan-init 后 AI 必须判断软件类型 (R38)**：
+- 如果构建产物包含**可执行文件**（命令行工具，如 `strace`、`bash`、`curl`）→ 在版本目录下创建 `commands.json`（参考 [templates/commands.json.template](templates/commands.json.template)）
+- 如果构建产物只有**库文件**（.a/.so，如 `zlib`、`openssl`）→ 不需要 commands.json
+- 判断依据：conanfile.py 的 `package_info()` 中 `cpp_info.libs` vs `cpp_info.bindirs`/构建系统 install 了可执行文件到 `bin/`
+
 **conan-verify 8 道门禁**（G0-G4 + L2/L4/L5）：
 
 | 门禁 | 名称 | 说明 |
@@ -306,7 +312,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 
 **知识图谱集成（R30/R31）**：G2 失败时自动调用 `run_engine()` 匹配 E-entry。命中→展示根因+修复命令；未命中→自动生成 `knowledge/drafts/DRAFT-*.kv` 草稿。G2 通过 = 可标记 `published`（R29）。
 
-### Step 3: finish — 9 步自动收尾
+### Step 3: finish — 10 步自动收尾
 
 ```bash
 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|failed
@@ -314,15 +320,16 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 
 | 步骤 | 内容 | 失败处理 |
 |------|------|---------|
-| [1/9] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
-| [2/9] close-archive | 归档关闭 | exit 2 |
-| [2.5/9] G0 干净构建验证 | clean-verify 重建 | 非阻塞（平台限制可跳过） |
-| [3/9] conan-verify | Conan 配方验证（⭐ v3.0） | ❌ 阻塞 |
-| [3.5/9] 本地 CI 模拟 (W3) | build_and_test.sh 模拟 | 非阻塞（警告） |
-| [4/9] finalize-archive | 清理+校验+版本索引 | 非致命 |
-| [5/9] check-knowledge-gap | 知识完整性检查 (W4) | 非阻塞 |
-| [6/9] gen_summary | 重新生成 SUMMARY.md | 非致命 |
-| [7/9] PR 原子性检查 (W2) | 确认一配方一PR | 非阻塞 |
+| [1/10] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
+| [2/10] close-archive | 归档关闭 | exit 2 |
+| [2.5/10] G0 干净构建验证 | clean-verify 重建 | 非阻塞（平台限制可跳过） |
+| [3/10] conan-verify | Conan 配方验证（⭐ v3.0） | ❌ 阻塞 |
+| [3.5/10] 本地 CI 模拟 (W3) | build_and_test.sh 模拟 | 非阻塞（警告） |
+| [4/10] commands.json 检查 (R38) | 命令行工具声明验证 | 非阻塞（警告） |
+| [5/10] finalize-archive | 清理+校验+版本索引 | 非致命 |
+| [6/10] check-knowledge-gap | 知识完整性检查 (W4) | 非阻塞 |
+| [7/10] gen_summary | 重新生成 SUMMARY.md | 非致命 |
+| [8/10] PR 原子性检查 (W2) | 确认一配方一PR | 非阻塞 |
 
 **前置条件**：test-report 存在 + Staging 验证完成 + conanfile.py 存在。
 **状态值**：`published`(verify通过+CI upload) | `built`(verify通过未upload) | `failed`(编译或验证失败) | `archived`(旧版本归档)。
@@ -462,6 +469,7 @@ archives/{letter}/{name}/
       ├── conandata.yml          # 【CI 输入】源码 + 补丁声明
       ├── test_package/          # 【CI 输入】Conan L1 测试
       ├── patches/               # 【CI 输入】补丁文件
+      ├── commands.json          # 【CI 输入】命令行工具声明（仅 tool 类型，R38）
       ├── manifest.yaml          # 【AI 元数据】编译元数据 + 状态
       ├── notes.md               # 【AI 元数据】适配笔记
       └── reports/               # 【AI 元数据】验证报告
@@ -470,6 +478,7 @@ archives/{letter}/{name}/
 | 分类 | 文件 | CI 读取 | AI 读取 |
 |------|------|---------|---------|
 | CI 输入 | conanfile.py / conandata.yml / test_package/ / patches/ | ✅ | ✅ |
+| CI 输入 | commands.json（仅 tool 类型） | ✅ | ✅ |
 | AI 元数据 | manifest.yaml / notes.md / reports/ | ❌ | ✅ |
 
 > 状态定义见 §3 Step 3。归档清理规则（R24）见 knowledge/ARCHIVE-SPEC.md。
@@ -567,4 +576,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v10.3 — 2026-07-07 — 新增 L0j 门禁 (版本号占用检查, 防止同版本重复修改导致 release 409)；v10.2→v10.3*
+*SKILL.md v11.0 — 2026-07-07 — 新增 R38 + commands.json (命令行工具声明, hicmd 集成)；v10.3→v11.0*

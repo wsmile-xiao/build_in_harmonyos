@@ -312,6 +312,70 @@ PYEOF
         echo "        [ok] version not in registry yet (first publish)"
     fi
 
+    # ── L0k: 命令行工具声明检查 (R38) ──
+    # 如果 conanfile.py 构建产物包含可执行文件 (bin/), 必须有 commands.json
+    echo "[step] L0k: Checking commands.json for CLI tools (R38)..."
+    CONANFILE_DIR="$(dirname "$CONANFILE")"
+    COMMANDS_JSON="${CONANFILE_DIR}/commands.json"
+    # 检查 conanfile.py 是否构建可执行文件 (package_info 中有 bindirs 或 build install bin/)
+    HAS_BINDIRS=$(grep -c 'bindirs\|cpp_info\.bindirs\|bindirs\s*=' "$CONANFILE" 2>/dev/null || echo 0)
+    HAS_BIN_INSTALL=$(grep -c 'RUNTIME DESTINATION bin\|install.*bin\|install.*TARGETS.*bin' "$CONANFILE" 2>/dev/null || echo 0)
+    HAS_EXECUTABLE=$(grep -c 'package_type.*=.*"application"\|package_type.*=.*'\''application' "$CONANFILE" 2>/dev/null || echo 0)
+
+    if [ "$HAS_BINDIRS" -gt 0 ] || [ "$HAS_BIN_INSTALL" -gt 0 ] || [ "$HAS_EXECUTABLE" -gt 0 ]; then
+        # 这是一个命令行工具, 检查 commands.json 是否存在
+        if [ -f "$COMMANDS_JSON" ]; then
+            # 验证 JSON 格式和 type 字段
+            if command -v python3 >/dev/null 2>&1; then
+                JSON_VALID=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$COMMANDS_JSON'))
+    if d.get('type') != 'tool':
+        print('BAD_TYPE')
+    elif '$pkg_name' not in d.get('name', ''):
+        print('BAD_NAME')
+    elif '$pkg_ver' not in d.get('versions', {}):
+        print('BAD_VERSION')
+    else:
+        print('OK')
+except Exception:
+    print('INVALID_JSON')
+" 2>/dev/null)
+                case "$JSON_VALID" in
+                    OK)
+                        echo "        [ok] commands.json valid (type=tool)"
+                        ;;
+                    INVALID_JSON)
+                        echo "        [warn] L0k: commands.json exists but is invalid JSON"
+                        echo "[hint] 参考 templates/commands.json.template 格式"
+                        ;;
+                    BAD_TYPE)
+                        echo "        [warn] L0k: commands.json type should be \"tool\""
+                        ;;
+                    BAD_NAME)
+                        echo "        [warn] L0k: commands.json name mismatch (expected: $pkg_name)"
+                        ;;
+                    BAD_VERSION)
+                        echo "        [warn] L0k: commands.json missing version $pkg_ver"
+                        ;;
+                esac
+            fi
+        else
+            echo "        [warn] L0k: CLI tool detected but commands.json missing (R38)"
+            echo "[hint] 此软件构建可执行文件, 应在版本目录下创建 commands.json:"
+            echo "         cp templates/commands.json.template ${COMMANDS_JSON}"
+            echo "       参考 archives/s/strace/6.19/commands.json 示例"
+        fi
+    else
+        # 库类型, 不需要 commands.json
+        if [ -f "$COMMANDS_JSON" ]; then
+            echo "        [warn] L0k: commands.json exists but package looks like a library (no bindirs/bin install)"
+        else
+            echo "        [ok] library package, commands.json not required"
+        fi
+    fi
+
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"

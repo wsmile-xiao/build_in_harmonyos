@@ -154,7 +154,16 @@ PR 中不应包含对自动生成文件的修改（如 `config.h`、`configure`�
 - patches/ 目录下的补丁文件（仅修改源文件）
 - 不直接修改 configure 脚本等生成产物
 
-### 13. Conan 2.x API 规范
+### 13. 命令行工具声明 commands.json (R38)
+如果软件构建产物包含可执行文件（命令行工具），必须在版本目录下创建 `commands.json`。库类型不需要。
+
+检查方法：
+- conanfile.py 中有 `RUNTIME DESTINATION bin`、`cpp_info.bindirs`、或 `package_type = "application"` → 是工具
+- 如果是工具但缺少 commands.json → **request changes**
+- 如果是库但误加了 commands.json → **request changes**
+- commands.json 的 `type` 必须是 `"tool"`，`name` 必须匹配包名
+
+### 14. Conan 2.x API 规范
 ```python
 # 正确 — Conan 2.x
 from conan import ConanFile
@@ -169,7 +178,7 @@ from conans.tools import CMake
 
 ## 三、文件规范与归档结构
 
-### 14. 归档目录结构
+### 15. 归档目录结构
 配方文件必须放在标准路径下：
 ```
 archives/{首字母}/{软件名}/{版本}/
@@ -186,13 +195,13 @@ archives/{首字母}/{软件名}/{版本}/
 
 缺失 conanfile.py / conandata.yml / test_package/ 中的任何一个 = **request changes**。
 
-### 15. 补丁文件规范 (R3)
+### 16. 补丁文件规范 (R3)
 - 补丁只能通过 `ohc-run.py refresh-patch --auto` 生成
 - 不得手动创建 .patch 文件后直接提交
 - 补丁文件名应有序编号（001-、002-...）
 - 补丁内容不得修改自动生成文件（configure、Makefile.in 等）
 
-### 16. PR 中不应包含的文件
+### 17. PR 中不应包含的文件
 以下文件出现在 PR 中应标记为 **需要清理**：
 - `.build-context-*`（构建上下文临时文件）
 - `test-report`（测试报告临时文件）
@@ -205,12 +214,12 @@ archives/{首字母}/{软件名}/{版本}/
 
 ## 四、PR 合规性审查
 
-### 17. PR 原子性 (W2)
+### 18. PR 原子性 (W2)
 - 一个 PR 只允许包含一个配方软件及其知识图谱草稿
 - 对 `ci/`、`scripts/`、`SKILL.md`、`references/`、`templates/` 的修改必须单独提交 PR
 - 配方 PR 和框架 PR 混合 = **要求拆分**
 
-### 18. 文件权限边界
+### 19. 文件权限边界
 协作者提交的 PR **不得修改**以下文件（主编专属）：
 - `SKILL.md` / `references/` / `templates/`
 - `scripts/` / `ci/`
@@ -219,7 +228,7 @@ archives/{首字母}/{软件名}/{版本}/
 
 如果协作者 PR 包含对以上文件的修改 = **标记越权，要求移除**。
 
-### 19. 依赖发布优先级 (R36)
+### 20. 依赖发布优先级 (R36)
 如果 PR 中的配方依赖了其他包，检查那些依赖是否已发布：
 
 ```bash
@@ -235,7 +244,7 @@ conan download "zlib/1.3.1" -r=ohpcd --only-recipe
 
 ## 五、CI 脚本与安全审查（仅当 PR 修改 ci/ 或 scripts/ 时）
 
-### 20. Upload 安全边界
+### 21. Upload 安全边界
 - CI upload 只在 PR 合并到 main 后执行，PR 校验阶段禁止 upload
 - 密钥/token 不得硬编码在脚本中，必须从环境变量读取
 - PR 中不应出现 token、密钥、密码等敏感信息
@@ -248,17 +257,17 @@ CONAN_REMOTE_URL="${CONAN_REMOTE_URL}"  # 从环境变量读取
 CONAN_TOKEN="ghp_xxxxxxxxxxxx"
 ```
 
-### 21. CI 门禁不可绕过
+### 22. CI 门禁不可绕过
 ci/ 目录下的门禁脚本（L0a-L0j）不得被修改为降低检查标准：
 - 不得注释掉门禁检查逻辑
 - 不得将 fail 改为 warn 来放行问题
 - 不得删除 L0j 版本号占用检查
 - 新增门禁需要说明理由
 
-### 22. 禁止用 conan list 判断 binary (R35)
+### 23. 禁止用 conan list 判断 binary (R35)
 CI 脚本中判断预编译包是否存在时，必须用 `conan download` 或 `conan install --requires=`。
 
-### 23. shell 脚本规范
+### 24. shell 脚本规范
 - 使用 `set -euo pipefail` 开头
 - 变量引用加双引号：`"$VAR"`
 - Conan 2.x 参数用 `--only-recipe`，不用已废弃的 `--recipe`

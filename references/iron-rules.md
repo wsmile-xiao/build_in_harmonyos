@@ -4,7 +4,7 @@
 
 来源: SKILL.md §1.2
 
-## 铁律总表（37 条，违反=bug）
+## 铁律总表（38 条，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -45,6 +45,7 @@
 | **R35** | **禁止用 conan list/search 判断 binary 是否存在** | 用 `conan install --requires=...`（dry-run）或 `conan download` 验证预编译包 | 用 `conan list "*/*:*/*" -r=xxx` 判断（cnb.cool 服务端搜索 API 对 binary 返回不完整） |
 | **R36** | **依赖必须先发布再构建下游** | 依赖包必须先通过 release 流水线发布到制品仓（`conan upload` 完成），再适配/构建依赖它的下游包 | 在依赖包尚未发布时就构建下游包（`--build=missing` 会尝试从源码编译依赖，耗时且容易失败） |
 | **R37** | **版本号 = 上游版本 + 适配修复后缀** | 首次用 `X.Y.Z`，修复适配问题后用 `X.Y.Z.N`（N 从 1 递增） | 同一版本号重复上传不同 revision（制品仓 409 拒绝），或每次修复都改版本号 |
+| **R38** | **命令行工具必须声明 commands.json** | 构建产物包含可执行文件的包，必须在版本目录下创建 `commands.json` | 命令行工具缺少 commands.json，或库类型误加 commands.json |
 
 ---
 
@@ -610,6 +611,89 @@ conan search "zlib/*" -r=ohpcd
 # Git log 查看适配修改历史
 git log --oneline -- "archives/z/zlib/"
 ```
+
+---
+
+### R38 详细说明：命令行工具必须声明 commands.json
+
+> **核心原因**：hicmd 项目通过 commands.json 自动发现和安装命令行工具。如果工具类型包缺少此文件，hicmd 无法感知该包提供的命令行能力，用户无法通过 hicmd 安装。
+
+#### 判断标准
+
+| 类型 | 判断依据 | commands.json |
+|------|---------|---------------|
+| **tool** | 构建产物包含可执行文件（`bin/` 目录下有二进制） | **必须**创建 |
+| **library** | 构建产物只有库文件（`.a`/`.so`）和头文件 | 不需要 |
+
+**自动判断方法**（CI L0k 门禁使用）：
+- conanfile.py 中 `package_info()` 设置了 `cpp_info.bindirs`
+- conanfile.py 中有 `RUNTIME DESTINATION bin` 或类似的可执行文件安装
+- conanfile.py 中 `package_type = "application"`
+
+#### 文件位置
+
+```
+archives/{letter}/{name}/{version}/commands.json
+```
+
+#### 格式
+
+```json
+{
+  "name": "strace",
+  "description": "系统调用追踪工具，用于诊断和调试程序",
+  "homepage": "https://strace.io",
+  "type": "tool",
+  "versions": {
+    "6.19": {
+      "ref": "strace/6.19",
+      "binary": true
+    }
+  }
+}
+```
+
+| 字段 | 说明 |
+|------|------|
+| name | 包名（与 conan 包名一致） |
+| description | 中文描述（一句话说明功能） |
+| homepage | 上游官网 URL |
+| type | 固定 `"tool"` |
+| versions.{ver}.ref | Conan 引用（`name/version`） |
+| versions.{ver}.binary | 是否已发布二进制到制品仓 |
+
+#### binary 字段更新规则
+
+- `false`：尚未发布到制品仓（适配中）
+- `true`：已通过 release 流水线发布
+
+适配完成并 CI upload 成功后，由 AI 或 finish 步骤将 binary 更新为 `true`。
+
+#### 反面案例
+
+```json
+// ❌ 库类型误加 commands.json
+{
+  "name": "zlib",
+  "type": "tool",        // 错误! zlib 是库不是工具
+  ...
+}
+
+// ❌ commands.json 缺少 version 条目
+{
+  "name": "strace",
+  "type": "tool",
+  "versions": {}         // 空! 缺少当前版本
+}
+```
+
+#### CI 门禁 (L0k)
+
+PR 构建时自动检查：
+1. 扫描 conanfile.py 判断是否构建可执行文件
+2. 如果是工具类型 → 检查 commands.json 是否存在且格式有效
+3. 如果是库类型 → 检查不应有 commands.json
+4. warn 级别（不阻塞 PR，但会提示）
 
 ---
 
