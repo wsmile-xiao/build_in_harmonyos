@@ -15,7 +15,7 @@ from conan.tools.layout import basic_layout
 class ZlibConan(ConanFile):
     name = "zlib"
     version = "1.3.1"
-    description = "Massively-used data compression library (DEFLATE/inflate)"
+    description = "Massively-used data compression library (DEFLATE/inflate)."
     license = "Zlib"
     homepage = "https://zlib.net/"
     url = ""  # CI fills this
