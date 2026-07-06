@@ -107,7 +107,7 @@ ls knowledge/drafts/DRAFT-*.kv 2>/dev/null
 **模式 A：Conan 驱动（推荐，适合已有 conanfile.py 的软件）**
 ```bash
 python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> [<版本>]
-# → 内含 13 步：init→patches→pre-scan→configure→make→install→staging→conan-init→conan-verify→finish→...
+# → 内含 14 步：预分析→init→patches→pre-scan→configure→make→install→staging→conan-init→conan-verify→finish→...
 ```
 
 **模式 B：探索性编译（适合首次/复杂软件）**
@@ -254,7 +254,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 
 **知识图谱集成（R30/R31）**：G2 失败时自动调用 `run_engine()` 匹配 E-entry。命中→展示根因+修复命令；未命中→自动生成 `knowledge/drafts/DRAFT-*.kv` 草稿。G2 通过 = 可标记 `published`（R29）。
 
-### Step 3: finish — 6 步自动收尾
+### Step 3: finish — 9 步自动收尾
 
 ```bash
 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|failed
@@ -262,12 +262,15 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 
 | 步骤 | 内容 | 失败处理 |
 |------|------|---------|
-| [1/6] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
-| [2/6] close-archive | 归档关闭 | exit 2 |
-| [3/6] conan-verify | Conan 配方验证（⭐ v3.0） | ❌ 阻塞 |
-| [4/6] finalize-archive | 清理+校验+版本索引 | 非致命 |
-| [5/6] check-knowledge-gap | 知识完整性检查 | 非阻塞 |
-| [6/6] gen_summary | 重新生成 SUMMARY.md | 非致命 |
+| [1/9] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
+| [2/9] close-archive | 归档关闭 | exit 2 |
+| [2.5/9] G0 干净构建验证 | clean-verify 重建 | 非阻塞（平台限制可跳过） |
+| [3/9] conan-verify | Conan 配方验证（⭐ v3.0） | ❌ 阻塞 |
+| [3.5/9] 本地 CI 模拟 (W3) | build_and_test.sh 模拟 | 非阻塞（警告） |
+| [4/9] finalize-archive | 清理+校验+版本索引 | 非致命 |
+| [5/9] check-knowledge-gap | 知识完整性检查 (W4) | 非阻塞 |
+| [6/9] gen_summary | 重新生成 SUMMARY.md | 非致命 |
+| [7/9] PR 原子性检查 (W2) | 确认一配方一PR | 非阻塞 |
 
 **前置条件**：test-report 存在 + Staging 验证完成 + conanfile.py 存在。
 **状态值**：`published`(verify通过+CI upload) | `built`(verify通过未upload) | `failed`(编译或验证失败) | `archived`(旧版本归档)。
@@ -473,12 +476,16 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `pre-analysis` | ⭐ 鸿蒙PC平台适配预分析（图形/音视频/系统集成/平台代码扫描） |
 | `conan-init` | 生成 conanfile.py + conandata.yml + test_package/ ⭐ |
 | `conan-verify` | conan create + G0-G4 + L2/L4/L5 + 知识图谱(R30) + 草稿(R31) ⭐ |
-| `finish` | 补丁+归档+conan-verify+CI模拟+知识+PR原子性+摘要（8 步） |
+| `finish` | 补丁+归档+G0+conan-verify+CI模拟+知识+PR原子性+摘要（9 步） |
 | `engine` / `graph add\|update\|validate\|promote` | 知识图谱查询/管理/草稿提升 |
 | `req add\|list\|close\|validate` | ⭐ 需求图谱管理（系统能力缺口跟踪） |
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
+| `search-url` / `submit` / `review` / `post-merge` | URL 搜索 / PR 自检 / 主编审核 / 合并后索引 |
+| `init-archive` / `close-archive` / `finalize-archive` | 归档初始化 / 关闭 / 清理校验 |
+| `check-env` / `clean-verify` / `check-knowledge-gap` | 环境检查 / 干净构建验证 / 知识缺口检查 |
+| `dispatch` / `summary` / `conan-migrate` | 多任务调度 / 统计摘要 / Conan 迁移辅助 |
 
 **独立脚本**（`scripts/` 目录，不通过 ohc-run.py）：
 
@@ -494,7 +501,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ```
 
-提交前自动检查 L0a-L0h（conanfile 语法/sha256/test源码/test()方法/MANIFEST/patch格式/环境变量依赖）。
+提交前自动检查 L0a-L0i（conanfile 语法/sha256/test源码/test()方法/MANIFEST/patch格式/环境变量依赖/Go-Rust检测）。
 
 ### CI 脚本（ci/ 目录，由 Buildbot Worker 执行，纯 shell，无 AI）
 
@@ -508,4 +515,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v8.9 — 2026-07-06 — 模板统一(删除重复无.tmpl模板)+Step0 checkpoint+pre-commit L0h修复(R33对齐)+§9新脚本文档
+*SKILL.md v9.0 — 2026-07-06 — 自洽性修复: §1.1步骤13→14/§3 finish 6→9步表格/§9补全27命令/L0h→L0i范围
