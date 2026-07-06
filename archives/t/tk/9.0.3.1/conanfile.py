@@ -26,7 +26,7 @@ class TkConan(ConanFile):
         get(self, **self.conan_data["sources"], strip_root=True)
 
     def requirements(self):
-        self.requires("tcl/9.0.3.1@ohpcd/stable")
+        self.requires("tcl/9.0.3.1")
 
     def layout(self):
         basic_layout(self, src_folder=".")

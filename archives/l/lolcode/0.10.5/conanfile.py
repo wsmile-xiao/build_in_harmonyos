@@ -31,7 +31,7 @@ class LolcodeConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        pass  # No dependencies (R27: would use @ohpcd/stable if any)
+        pass  # No dependencies (R27: would use  if any)
 
     def layout(self):
         basic_layout(self)

@@ -30,7 +30,7 @@ class DoubleConversionConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        # No external dependencies (R27: use @ohpcd/stable for any deps)
+        # No external dependencies (R27: use  for any deps)
         pass
 
     def layout(self):

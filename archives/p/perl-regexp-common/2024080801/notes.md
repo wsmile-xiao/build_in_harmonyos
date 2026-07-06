@@ -61,7 +61,7 @@ Result: PASS
 ### Conan 验证 (conan create + test_package)
 ```bash
 $ conan create archives/p/perl-regexp-common/2024080801 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing --user=ohpcd --channel=stable
-perl-regexp-common/2024080801@ohpcd/stable: Package created
+perl-regexp-common/2024080801: Package created
 test_package: Regexp::Common loaded successfully: OK
 test_package: Version OK
 test_package: Submodules OK

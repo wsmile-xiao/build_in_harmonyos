@@ -35,7 +35,7 @@ RT::Extension::CommandByMail 允许用户通过发送包含特殊命令的邮件
 通过 Conan 安装：
 
 ```bash
-conan install --requires=perl-rt-extension-commandbymail/3.02@ohpcd/stable
+conan install --requires=perl-rt-extension-commandbymail/3.02
 ```
 
 模块安装到 `lib/perl5/RT/` 目录下，通过 `PERL5LIB` 环境变量自动加载。

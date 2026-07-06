@@ -39,7 +39,7 @@ QXlsx 是一个基于 Qt 框架的 C++ 库，用于读写 Microsoft Excel (.xlsx
 - **Qt5** (5.15.2)：Core 和 Gui 运行时库
 
 ### Conan 依赖
-- `qt/5.15.2@ohpcd/stable`：Qt5 系统 wrapper 包
+- `qt/5.15.2`：Qt5 系统 wrapper 包
 
 ## 参考资料
 

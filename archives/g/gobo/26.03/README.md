@@ -59,7 +59,7 @@ Gobo Eiffel 使用 Bootstrap 机制编译：
 
 ## Conan 配方
 
-- **引用**: `gobo/26.03@ohpcd/stable`
+- **引用**: `gobo/26.03`
 - **conanfile.py**: 自定义构建方法（非 autotools）
 - **test_package/**: 验证 6 个核心工具的 --version 输出
 - **验证状态**: conan-verify 全部 8 道门禁通过

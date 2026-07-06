@@ -6,7 +6,7 @@ Part of the LibreOffice project.
 
 This recipe enforces:
   R26: Static linking (--enable-static --disable-shared)
-  R27: Dependencies use @ohpcd/stable
+  R27: Dependencies use 
 """
 import os
 import stat
@@ -33,8 +33,8 @@ class LibpagemakerConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        # R27: Dependencies must use @ohpcd/stable
-        self.requires("librevenge/0.0.5@ohpcd/stable")
+        # R27: Dependencies must use 
+        self.requires("librevenge/0.0.5")
 
     def layout(self):
         basic_layout(self)

@@ -1,7 +1,7 @@
 # Conan Verify Report — valijson 1.1.1
 
 **Verdict**: PASS
-**Reference**: `valijson/1.1.1@ohpcd/stable`
+**Reference**: `valijson/1.1.1`
 **Profile**: ohos-aarch64
 **Date**: 2026-07-04T11:42:18.049470
 

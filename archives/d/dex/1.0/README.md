@@ -26,7 +26,7 @@
 | ncurses | 系统预装静态库 | libncursesw.a，位于 /storage/Users/currentUser/usr/local/lib/ |
 | libc | 系统库 | 动态链接 |
 
-无 Conan @ohpcd/stable 依赖（ncurses 为系统级预装库）。
+无 Conan  依赖（ncurses 为系统级预装库）。
 
 ## 构建命令
 
@@ -51,7 +51,7 @@ make test CC=clang HOST_CC=clang
 
 ## Conan 配方
 
-- **引用**: `dex/1.0@ohpcd/stable`
+- **引用**: `dex/1.0`
 - **Profile**: ohos-aarch64
 - **静态链接 (R26)**: BUILD_SHARED_LIBS=OFF，ncurses 使用 .a 静态库
 - **test_package**: 验证 bin/dex 存在且为有效 ELF 文件

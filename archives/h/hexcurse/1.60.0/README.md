@@ -14,7 +14,7 @@
 - **目标平台**: OpenHarmony aarch64 (aarch64-unknown-linux-ohos)
 - **编译器**: clang 15
 - **链接方式**: 完全静态链接 (R26)
-- **Conan 引用**: hexcurse/1.60.0@ohpcd/stable
+- **Conan 引用**: hexcurse/1.60.0
 - **编译状态**: published
 
 ## 依赖

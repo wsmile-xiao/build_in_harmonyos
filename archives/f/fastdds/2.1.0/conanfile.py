@@ -2,7 +2,7 @@
 """Conan recipe for Fast-DDS v2.1.0
 
 Based on ConanCenter recipe, adapted for OHOS (OpenHarmony) platform.
-Dependencies use @ohpcd/stable format (R27).
+Dependencies use  format (R27).
 """
 import os
 
@@ -51,13 +51,13 @@ class FastDDSConan(ConanFile):
         cmake_layout(self, src_folder="src")
 
     def requirements(self):
-        # R27: All dependencies MUST use @ohpcd/stable format
-        self.requires("tinyxml2/8.0.0@ohpcd/stable")
-        self.requires("asio/1.18.0@ohpcd/stable")
-        self.requires("fast-cdr/1.0.16@ohpcd/stable", transitive_headers=True, transitive_libs=True)
-        self.requires("foonathan-memory/0.6-2@ohpcd/stable")
+        # R27: All dependencies MUST use  format
+        self.requires("tinyxml2/8.0.0")
+        self.requires("asio/1.18.0")
+        self.requires("fast-cdr/1.0.16", transitive_headers=True, transitive_libs=True)
+        self.requires("foonathan-memory/0.6-2")
         if self.options.with_ssl:
-            self.requires("openssl/1.1.1w@ohpcd/stable")
+            self.requires("openssl/1.1.1w")
 
     def validate(self):
         check_min_cppstd(self, 11)
@@ -68,7 +68,7 @@ class FastDDSConan(ConanFile):
             )
 
     def build_requirements(self):
-        self.tool_requires("cmake/3.16.3@ohpcd/stable")
+        self.tool_requires("cmake/3.16.3")
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)

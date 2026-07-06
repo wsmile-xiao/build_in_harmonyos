@@ -3,7 +3,7 @@
 
 Pure Perl module — provides patterns for CIDR blocks.
 Build system: ExtUtils::MakeMaker (replacement Makefile.PL, avoiding Module::Install).
-Requires: Regexp::Common (Conan dependency: perl-regexp-common/2024080801@ohpcd/stable).
+Requires: Regexp::Common (Conan dependency: perl-regexp-common/2024080801).
 """
 import os
 import glob
@@ -30,7 +30,7 @@ class PerlRegexpCommonNetCidrConan(ConanFile):
         basic_layout(self, src_folder=".")
 
     def requirements(self):
-        self.requires("perl-regexp-common/2024080801@ohpcd/stable")
+        self.requires("perl-regexp-common/2024080801")
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)

@@ -26,7 +26,7 @@ Safe::Isa 提供了安全的 `isa`/`can`/`does`/`DOES` 调用方式，用于处�
 - **Perl**: 5.42.0
 - **无需补丁**: 源码无需任何修改即可编译
 - **无 XS 依赖**: 不受鸿蒙 .so 加载限制影响
-- **Conan 引用**: `perl-safe-isa/1.000010@ohpcd/stable`
+- **Conan 引用**: `perl-safe-isa/1.000010`
 
 ## 导出变量
 

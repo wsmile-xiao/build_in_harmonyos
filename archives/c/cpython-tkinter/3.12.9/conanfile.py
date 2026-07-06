@@ -24,8 +24,8 @@ class CPythonTkinterConan(ConanFile):
     exports_sources = "src/*"
 
     def requirements(self):
-        self.requires("tcl/9.0.3.1@ohpcd/stable")
-        self.requires("tk/9.0.3.1@ohpcd/stable")
+        self.requires("tcl/9.0.3.1")
+        self.requires("tk/9.0.3.1")
 
     # --- 找目标 python3（PATH 无关：CI 构建环境常不把 python3 放进 PATH，但 HOME 有设）---
     # 优先各环境提供的「完整」python：CI 用 which 得到的 hnp python（带 dev 头 + 共享 libpython），

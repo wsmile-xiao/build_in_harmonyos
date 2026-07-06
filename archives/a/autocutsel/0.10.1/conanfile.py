@@ -28,7 +28,7 @@ class AutocutselConan(ConanFile):
 
     def requirements(self):
         # X11 system libraries are managed outside Conan (cmd-pkgs / system)
-        # If Conan packages become available, use @ohpcd/stable channel (R27)
+        # If Conan packages become available, use  channel (R27)
         pass
 
     def layout(self):

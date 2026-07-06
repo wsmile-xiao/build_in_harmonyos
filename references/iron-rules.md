@@ -34,7 +34,7 @@
 | R24 | **归档清理：failed必删，空归档删** | 无产物无补丁的归档无价值 | 保留无用归档 |
 | R25 | **notes.md 防重复：先删后写** | finish 自动清理旧记录，只保留最后一次 | 多次 finish 产生重复记录 |
 | **R26** | **系统同名库禁止动态链接** | conanfile.py `generate()` 中对系统同名库强制 `BUILD_SHARED_LIBS=OFF` / `-static` | 构建系统同名 .so 污染 `/lib`/`/lib64` 导致其他应用崩溃 |
-| **R27** | **依赖引用必须 @ohpcd/stable** | `self.requires("name/ver@ohpcd/stable")` | 裸 `self.requires("name/ver")` |
+| **R27** | **依赖引用用无 channel 格式** | `self.requires("name/ver")` | 裸 `self.requires("name/ver@ohpcd/stable")` 等带 channel 的旧格式 |
 | **R28** | **conanfile.py 必须有 test_package/** | 生成 conanfile.py 时同时生成 test_package/ | 只有 conanfile.py 没有测试 |
 | **R29** | **conan_verify 通过后才标记 published** | `ohc-run.py conan-verify` PASS + CI upload → published；PASS 未 upload → built；FAIL → failed | conan create 失败仍标记 published |
 | **R30** | **conan-verify 失败必须查询知识图谱** | G2 失败时调用 `run_engine()` 匹配 E-entry | 只打印错误不查图谱 |
@@ -151,26 +151,27 @@ ls /lib*/**/lib<name>.so* /lib/**/lib<name>.so* 2>/dev/null
 
 ---
 
-### R27 详细说明：依赖引用必须 @ohpcd/stable
+### R27 详细说明：依赖引用用无 channel 格式
 
-所有 conanfile.py 中的依赖引用必须使用完整格式：
+所有 conanfile.py 中的依赖引用统一使用无 channel 格式（`name/version`）：
 
 ```python
-# ✅ 正确
-def requirements(self):
-    self.requires("openssl/1.1.1w@ohpcd/stable")
-    self.requires("zlib/1.3.1@ohpcd/stable")
-
-# ❌ 错误 — 缺少 user/channel
+# ✅ 正确 — 无 channel 格式
 def requirements(self):
     self.requires("openssl/1.1.1w")
     self.requires("zlib/1.3.1")
+
+# ❌ 错误 — 旧格式带 @ohpcd/stable
+def requirements(self):
+    self.requires("openssl/1.1.1w@ohpcd/stable")
+    self.requires("zlib/1.3.1@ohpcd/stable")
 ```
 
 **原因**：
-1. CI 的 `conan create` 使用 `--user=ohpcd --channel=stable` 统一注入
-2. 依赖图的自动生成靠解析 `self.requires(...)` 中的 `@ohpcd/stable`
-3. CNB Conan 制品仓的包标识格式为 `{name}/{version}@{user}/{channel}`
+1. CI 的 `conan create` 和 `conan upload` 统一使用无 channel 格式
+2. 无 channel 更简洁，贡献者不需要记住 `@ohpcd/stable` 后缀
+3. 制品仓只有我们一个上传者，不存在多来源冲突，channel 是冗余信息
+4. `name/version` 和 `name/version@ohpcd/stable` 是 Conan 中两个完全不同的包，不互通
 
 ---
 
@@ -456,10 +457,10 @@ CI 在 conan create 成功后执行 L1e：
 
 ```bash
 # ✅ 验证某个包是否有预编译 binary — 方法一：dry-run install
-conan install --requires="zlib/1.3.1@ohpcd/stable" -pr="ohos-aarch64" --build=missing
+conan install --requires="zlib/1.3.1" -pr="ohos-aarch64" --build=missing
 
 # ✅ 验证某个包是否有预编译 binary — 方法二：直接 download
-conan download "zlib/1.3.1@ohpcd/stable" -r=cnb-conan
+conan download "zlib/1.3.1" -r=cnb-conan
 
 # ✅ 查看制品仓有哪些 recipe（仅 recipe 列表，不含 binary 状态）
 conan list "*/*" -r=cnb-conan
@@ -478,7 +479,7 @@ conan list "*/*:*/*" -r=cnb-conan
 
 ### R36 详细说明：依赖必须先发布再构建下游
 
-> **核心原因**：公开制品仓的核心价值是"一次发布、多方复用"。如果依赖包 A 尚未发布到制品仓，下游包 B 声明了 `self.requires("A/x.x@ohpcd/stable")`，CI 构建时 `--build=missing` 会尝试从源码编译 A——这通常因为缺少 A 的构建依赖（工具链/传递依赖）而失败，或者耗时数倍于预期。更严重的是，即使侥幸成功，本地产物与制品仓中的正式版本可能不一致，破坏可复现性。
+> **核心原因**：公开制品仓的核心价值是"一次发布、多方复用"。如果依赖包 A 尚未发布到制品仓，下游包 B 声明了 `self.requires("A/x.x")`，CI 构建时 `--build=missing` 会尝试从源码编译 A——这通常因为缺少 A 的构建依赖（工具链/传递依赖）而失败，或者耗时数倍于预期。更严重的是，即使侥幸成功，本地产物与制品仓中的正式版本可能不一致，破坏可复现性。
 
 #### 依赖发布优先级流程
 
@@ -486,7 +487,7 @@ conan list "*/*:*/*" -r=cnb-conan
 适配包 B（依赖 A）
   │
   ├─ Step 1: 检查 A 是否已发布到制品仓
-  │   conan install --requires="A/x.x@ohpcd/stable" -r=cnb-conan
+  │   conan install --requires="A/x.x" -r=cnb-conan
   │
   │   ├─ 已发布 → 继续 Step 2（正常流程）
   │   │
@@ -496,7 +497,7 @@ conan list "*/*:*/*" -r=cnb-conan
   │       └─ A 发布成功后，再回来构建 B
   │
   ├─ Step 2: 在 B 的 conanfile.py 中声明依赖
-  │   self.requires("A/x.x@ohpcd/stable")   # R27
+  │   self.requires("A/x.x")   # R27
   │
   └─ Step 3: CI 构建 B 时，--build=missing 从制品仓拉取 A 的预编译包
 ```
@@ -506,7 +507,7 @@ conan list "*/*:*/*" -r=cnb-conan
 ```python
 # ❌ B 的 conanfile.py 依赖了 A，但 A 还没发布
 class BConan(ConanFile):
-    requires = "A/1.0@ohpcd/stable"  # A 尚未发布到制品仓
+    requires = "A/1.0"  # A 尚未发布到制品仓
     # CI 构建时: --build=missing 试图从源码编译 A
     # 结果: 缺少 A 的构建依赖 → 编译失败 → 误判为 B 的适配问题
 ```
@@ -516,8 +517,8 @@ class BConan(ConanFile):
 当依赖链为 `C → B → A` 时：
 
 1. **先发布 A**（无外部依赖的基础库，如 zlib/openssl）
-2. **再发布 B**（声明 `requires("A/...@ohpcd/stable")`，从制品仓拉取 A）
-3. **最后发布 C**（声明 `requires("B/...@ohpcd/stable")`，从制品仓拉取 B）
+2. **再发布 B**（声明 `requires("A/...")`，从制品仓拉取 A）
+3. **最后发布 C**（声明 `requires("B/...")`，从制品仓拉取 B）
 
 **CI 在构建 C 时，完整的依赖解析链为**：
 ```

@@ -32,7 +32,7 @@ Net::Async::IRC 提供了一个基于 IO::Async 的 IRC 客户端协议实现。
 
 ```bash
 # 安装包
-conan install --requires=perl-net-async-irc/0.12-r0@ohpcd/stable
+conan install --requires=perl-net-async-irc/0.12-r0
 
 # 设置 PERL5LIB（注意：需同时包含系统 Perl 库路径）
 export PERL5LIB="$CONAN_PACKAGE_DIR/lib:$(perl -e 'print join(":", grep {/site_perl/} @INC)')"

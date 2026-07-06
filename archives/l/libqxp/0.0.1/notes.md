@@ -170,13 +170,13 @@ CI 流水线使用 `conan create`，会执行 conanfile.py 的 `generate()` 方�
 **编译结束**: 2026-06-25 20:15
 **功能测试**: 2026-06-26 (84/84 PASS)
 **预编译包**: 2026-06-26 (conan-verify G0-G4+L2/L4/L5 全部 PASS)
-**最终状态**: published (libqxp/0.0.1@ohpcd/stable)
+**最终状态**: published (libqxp/0.0.1)
 
 ## 预编译包生成
 
 ### conan create 流程
 1. 配置 ohpcd conan remote (`https://conan.cnb.cool/OpenHarmonyPCDeveloper/Conan/-/packages/`)
-2. 为依赖创建本地 conan 包: librevenge/0.0.5@ohpcd/stable, icu/77.1@ohpcd/stable
+2. 为依赖创建本地 conan 包: librevenge/0.0.5, icu/77.1
 3. 修复 Python lzma 模块: `LD_LIBRARY_PATH` 需包含 `/data/service/hnp/python.org/python_3.12/lib`
 4. conanfile.py 改进:
    - 添加 `PkgConfigDeps` 生成器 (让 configure 通过 pkg-config 找到依赖)

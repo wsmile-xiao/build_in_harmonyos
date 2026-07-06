@@ -42,9 +42,9 @@
 
 ```bash
 $ conan create . --profile=ohos-aarch64
-perl-net-dns/1.53-r0@ohpcd/stable: Exported package recipe
-perl-net-dns/1.53-r0@ohpcd/stable: Test package: Running test()
-perl-net-dns/1.53-r0@ohpcd/stable: RUN: perl -e "use Net::DNS; print Net::DNS->version"
+perl-net-dns/1.53-r0: Exported package recipe
+perl-net-dns/1.53-r0: Test package: Running test()
+perl-net-dns/1.53-r0: RUN: perl -e "use Net::DNS; print Net::DNS->version"
 1.53
 ```
 

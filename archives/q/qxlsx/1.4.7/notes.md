@@ -107,8 +107,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify QXlsx 1.4.7
 ```bash
 $ conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing --user=ohpcd --channel=stable
 ...
-qxlsx/1.4.7@ohpcd/stable (test package): Running test()
-qxlsx/1.4.7@ohpcd/stable (test package): RUN: ./test_QXlsx
+qxlsx/1.4.7 (test package): Running test()
+qxlsx/1.4.7 (test package): RUN: ./test_QXlsx
 PASS: Read A1 = "Hello QXlsx!"
 PASS: Saved to "/storage/Users/currentUser/qxlsx_test_output.xlsx"
 PASS: Loaded A1 = "Hello QXlsx!"
@@ -126,7 +126,7 @@ $ ohc-run.py conan-verify QXlsx 1.4.7
 ## 注意事项
 
 1. Conan conandata.yml 中 source URL 使用本地 `file://` URL（因 GitHub 下载超时），生产环境应替换为官方 GitHub URL
-2. Qt5 wrapper 包 `qt/5.15.2@ohpcd/stable` 是系统 wrapper，指向本地安装的 Qt5
+2. Qt5 wrapper 包 `qt/5.15.2` 是系统 wrapper，指向本地安装的 Qt5
 3. conanfile.py 中 `generate()` 显式指定 `generator="Unix Makefiles"` 以覆盖 CI profile 中的无效设置
 4. test_package 的 test.cpp 使用 `getenv("TMPDIR")` 获取可写目录路径
 5. 产物名为 `libQXlsxQt5.a`（非 libQXlsx.a），cpp_info.libs 设置为 `QXlsxQt5`

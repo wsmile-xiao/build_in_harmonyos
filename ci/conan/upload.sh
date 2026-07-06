@@ -24,13 +24,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${CI_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 PROFILE="${CONAN_PROFILE:-ohos-aarch64}"
 PROFILE_FILE="$REPO_ROOT/ci/conan/profiles/$PROFILE"
-CONAN_USER="${CONAN_USER:-ohpcd}"
-CONAN_CHANNEL="${CONAN_CHANNEL:-stable}"
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 
 echo "[step] Conan upload pipeline"
 echo "[step]   remote: ${CONAN_REMOTE_NAME}"
-echo "[step]   user/channel: ${CONAN_USER}/${CONAN_CHANNEL}"
+echo "[step]   channel: (no channel — plain name/version)"
 
 # Conan 认证由 worker app 预部署 (~/.conan2/.conan.db, 仅 Release 机器)
 # 本脚本不处理凭证, 直接 conan upload
@@ -41,7 +39,7 @@ for pkg_path in ${=CI_PACKAGES:-}; do
     # pkg_path 形如 archives/b/bash/5.3
     pkg_ver=$(basename "$pkg_path")
     pkg_name=$(basename "$(dirname "$pkg_path")")
-    PACKAGES+=("${pkg_name}/${pkg_ver}@${CONAN_USER}/${CONAN_CHANNEL}")
+    PACKAGES+=("${pkg_name}/${pkg_ver}")
 done
 
 if [ ${#PACKAGES[@]} -eq 0 ]; then

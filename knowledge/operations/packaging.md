@@ -84,7 +84,7 @@ libc.so, libm.so, libdl.so, libpthread.so, ld-musl-*.so, librt.so, libutil.so
 | libsqlite3.so.* | SQLite 数据库 | sqlite |
 | libbz2.so.* | bzip2 压缩 | bzip2 |
 
-> **Conan 方式**：上述依赖应在 `conanfile.py` 的 `requirements()` 中声明 `@ohpcd/stable` 引用，Conan 自动管理依赖链。
+> **Conan 方式**：上述依赖应在 `conanfile.py` 的 `requirements()` 中声明 `` 引用，Conan 自动管理依赖链。
 
 ---
 

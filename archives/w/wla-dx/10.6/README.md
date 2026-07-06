@@ -60,7 +60,7 @@ wla-dx 是一套支持多种 CPU 架构的交叉汇编器包，包含汇编器�
 
 ```bash
 # 通过 Conan 安装
-conan install --requires=wla-dx/10.6@ohpcd/stable -pr:h=ohos-aarch64
+conan install --requires=wla-dx/10.6 -pr:h=ohos-aarch64
 ```
 
 ## 已知限制

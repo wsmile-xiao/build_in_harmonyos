@@ -35,8 +35,8 @@ libqxp 是一个用于解析 QuarkXPress 文档文件的 C++ 库，属于 LibreO
 
 | 依赖 | 版本 | 来源 |
 |------|------|------|
-| librevenge | 0.0.5 | Conan `@ohpcd/stable` |
-| icu | 77.1 | Conan `@ohpcd/stable` |
+| librevenge | 0.0.5 | Conan `` |
+| icu | 77.1 | Conan `` |
 | boost | (headers) | 预编译包 |
 | cppunit | — | 预编译包（make check 用，Conan 配方中 `--disable-tests` 跳过） |
 

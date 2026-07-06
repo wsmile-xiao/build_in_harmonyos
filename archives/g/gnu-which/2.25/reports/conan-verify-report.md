@@ -1,7 +1,7 @@
 # Conan Verify Report — gnu-which 2.25
 
 **Verdict**: PASS
-**Reference**: `gnu-which/2.25@ohpcd/stable`
+**Reference**: `gnu-which/2.25`
 **Profile**: ohos-aarch64
 **Date**: 2026-07-03T15:21:48.517475
 

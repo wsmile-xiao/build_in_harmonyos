@@ -64,7 +64,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish <name> <ver> published|built|faile
 ### 2.3 conan-init：生成 Conan 配方
 
 生成 `conanfile.py` + `conandata.yml` + `test_package/`。AI 必须检查：
-- `requirements()` 依赖引用必须 `@ohpcd/stable`（R27）
+- `requirements()` 依赖引用必须 ``（R27）
 - `generate()` 系统同名库 `BUILD_SHARED_LIBS=OFF`（R26，避免污染 `/lib`）
 - `package_info()` 的 `cpp_info.libs` 正确声明
 - `conandata.yml` 有 SHA256 校验
@@ -156,7 +156,7 @@ patches:
 
 ### 4.3 预编译包优先（R18）
 
-依赖缺失**必须先查**：①cmd-pkgs README → `curl install.sh | sh` ②Conan 制品仓 → `conan install --requires=name/ver@ohpcd/stable` ③两者都没有 → 手动编译。
+依赖缺失**必须先查**：①cmd-pkgs README → `curl install.sh | sh` ②Conan 制品仓 → `conan install --requires=name/ver` ③两者都没有 → 手动编译。
 
 ### 4.4 失败恢复
 

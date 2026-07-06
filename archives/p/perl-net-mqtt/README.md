@@ -24,10 +24,10 @@ Net-MQTT 提供了 MQTT 协议的 Perl 实现，包括：
 
 ```bash
 # 通过 Conan 安装
-conan install --requires=perl-net-mqtt/1.163170-r0@ohpcd/stable
+conan install --requires=perl-net-mqtt/1.163170-r0
 
 # 设置 PERL5LIB
-export PERL5LIB=$(conan cache path perl-net-mqtt/1.163170-r0@ohpcd/stable)/lib
+export PERL5LIB=$(conan cache path perl-net-mqtt/1.163170-r0)/lib
 
 # 使用 MQTT 发布
 perl -MNet::MQTT::Constants -e 'print "Module loaded OK\n"'

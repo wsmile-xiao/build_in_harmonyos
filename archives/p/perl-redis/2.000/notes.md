@@ -71,7 +71,7 @@ Files=18, Tests=7, 7 wallclock secs
 Result: PASS
 
 $ conan create archives/p/perl-redis/2.000 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing --user=ohpcd --channel=stable
-perl-redis/2.000@ohpcd/stable: Package created
+perl-redis/2.000: Package created
 test_package: Redis loaded successfully: OK
 test_package: Version OK
 test_package: Submodules OK

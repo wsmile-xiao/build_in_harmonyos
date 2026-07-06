@@ -4,7 +4,7 @@
 Tk 是 Tcl 的图形界面工具包，提供按钮、画布、文本框等 GUI 组件。依赖 Tcl。
 
 ## 编译版本
-- **9.0.3.1** (2026-07-03) — Tk 9.0，**动态库**形态（`libtcl9tk9.0.so`），依赖 `tcl/9.0.3.1@ohpcd/stable`
+- **9.0.3.1** (2026-07-03) — Tk 9.0，**动态库**形态（`libtcl9tk9.0.so`），依赖 `tcl/9.0.3.1`
 
 ## 编译信息
 - 构建系统: Autotools（标准 conan，CI 原生 clang）
@@ -22,7 +22,7 @@ Tk 是 Tcl 的图形界面工具包，提供按钮、画布、文本框等 GUI �
 - `libtcl9tk9.0.so`（动态库）、`tkConfig.sh`、`libtkstub.a`、公共头、`lib/tk9.0/`（散脚本库）
 
 ## 依赖关系
-- `tcl/9.0.3.1@ohpcd/stable`
+- `tcl/9.0.3.1`
 
 ## 相关链接
 - 官网: https://www.tcl-lang.org/

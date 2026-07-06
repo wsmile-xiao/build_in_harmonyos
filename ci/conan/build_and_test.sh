@@ -29,8 +29,6 @@ REPO_ROOT="${CI_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 # ── Configuration ──
 PROFILE="${CONAN_PROFILE:-ohos-aarch64}"
 PROFILE_FILE="$REPO_ROOT/ci/conan/profiles/$PROFILE"
-CONAN_USER="${CONAN_USER:-ohpcd}"
-CONAN_CHANNEL="${CONAN_CHANNEL:-stable}"
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 SCAN_ROOT="${PKG_SCAN_ROOT:-archives}"
 NO_TEST_FILE="$REPO_ROOT/ci/config/no_official_test.txt"
@@ -38,7 +36,7 @@ NO_TEST_FILE="$REPO_ROOT/ci/config/no_official_test.txt"
 echo "[step] Conan build + test pipeline (CI, no AI)"
 echo "[step]   scan_root: $SCAN_ROOT"
 echo "[step]   profile: $PROFILE"
-echo "[step]   user/channel: ${CONAN_USER}/${CONAN_CHANNEL}"
+echo "[step]   channel: (no channel — plain name/version)"
 
 # ── 1. Discover packages (BUG-9: respect CI_PACKAGES) ──
 PACKAGES=()
@@ -118,8 +116,6 @@ for pkg_dir in "${PACKAGES[@]}"; do
     fi
     CONAN_CREATE_ARGS+=(
         --build=missing
-        --user="$CONAN_USER"
-        --channel="$CONAN_CHANNEL"
     )
 
     # ── L0: Quality gate (before conan create) ──
@@ -220,84 +216,59 @@ for pkg_dir in "${PACKAGES[@]}"; do
 
     # L0i: 依赖发布检查 (R36: 依赖必须先发布到制品仓)
     # 从 conanfile.py 中提取 requires/requirements 声明的依赖, 验证是否已发布
-    # R27: 依赖引用必须带 @ohpcd/stable, 否则 Conan 无法匹配制品仓中的包
+    # R36: 依赖必须先发布到制品仓, CI 用无 channel 格式验证
     if [ -f "$CONANFILE" ]; then
-        # 输出两行: 第一行是缺少 @ohpcd/stable 的引用, 第二行是正常的引用
-        DEP_ANALYSIS=$(python3 - "$CONANFILE" 2>/dev/null <<'PYEOF'
+        # 提取所有依赖引用, 去掉 @user/channel 后缀 (统一用无 channel 格式)
+        DEP_REFS=$(python3 - "$CONANFILE" 2>/dev/null <<'PYEOF'
 import re, sys
 src = open(sys.argv[1]).read()
 refs = set()
-# 匹配 self.requires("xxx"), self.requires('xxx'), requires = "xxx"
 for m in re.finditer(r'(?:self\.)?requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
     if '/' not in ref:
         continue
+    # 去掉 @user/channel 后缀, 统一用无 channel 格式
+    ref = ref.split('@')[0]
     refs.add(ref)
-# 也匹配 tool_requires
 for m in re.finditer(r'tool_requires?\s*\(\s*["\']([^"\']+)["\']', src):
     ref = m.group(1).strip()
     if '/' not in ref:
         continue
+    ref = ref.split('@')[0]
     refs.add(ref)
-
-bad_refs = sorted([r for r in refs if '@' not in r])
-good_refs = sorted([r for r in refs if '@' in r])
-# 用不同前缀输出, 便于 shell 解析
-for r in bad_refs:
-    print(f"BAD:{r}")
-for r in good_refs:
-    print(f"OK:{r}")
+for r in sorted(refs):
+    print(r)
 PYEOF
 )
-        if [ -n "$DEP_ANALYSIS" ]; then
-            # 检查是否有缺少 @ohpcd/stable 的依赖引用 (R27)
-            BAD_REFS=$(echo "$DEP_ANALYSIS" | grep '^BAD:' | sed 's/^BAD://' || true)
-            GOOD_REFS=$(echo "$DEP_ANALYSIS" | grep '^OK:' | sed 's/^OK://' || true)
+        if [ -n "$DEP_REFS" ]; then
+            echo "[step] L0i: Checking dependency availability in registry (R36)..."
+            UNPUBLISHED_DEPS=""
+            while IFS= read -r dep_ref; do
+                [ -z "$dep_ref" ] && continue
+                # R35: 用 conan download 验证 (禁止用 conan list 判断)
+                if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
+                    echo "        [ok] dependency in registry: ${dep_ref}"
+                else
+                    UNPUBLISHED_DEPS="${UNPUBLISHED_DEPS} ${dep_ref}"
+                    echo "        [warn] dependency NOT in registry: ${dep_ref}"
+                fi
+            done <<< "$DEP_REFS"
 
-            if [ -n "$BAD_REFS" ]; then
-                echo "[fail] L0i: Dependency references missing @ohpcd/stable (R27):"
-                while IFS= read -r bad_ref; do
-                    [ -z "$bad_ref" ] && continue
-                    echo "       ${bad_ref} → should be ${bad_ref}@ohpcd/stable"
-                done <<< "$BAD_REFS"
-                echo "[hint] Conan 不会自动补全 user/channel, 不带 @ohpcd/stable 的引用无法匹配制品仓中的包"
-                echo "       请在 conanfile.py 中将 requires 改为 '包名/版本@ohpcd/stable'"
-                L0_FAILED=true
-                L0_ERRORS="${L0_ERRORS} dep_ref_missing_channel"
-            fi
-
-            # 检查正常引用的依赖是否已发布到制品仓 (R36)
-            if [ -n "$GOOD_REFS" ]; then
-                echo "[step] L0i: Checking dependency availability in registry (R36)..."
-                UNPUBLISHED_DEPS=""
-                while IFS= read -r dep_ref; do
-                    [ -z "$dep_ref" ] && continue
-                    # R35: 用 conan download 验证 (禁止用 conan list 判断)
-                    if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
-                        echo "        [ok] dependency in registry: ${dep_ref}"
-                    else
-                        dep_short=$(echo "$dep_ref" | sed 's/@.*//')
-                        UNPUBLISHED_DEPS="${UNPUBLISHED_DEPS} ${dep_short}"
-                        echo "        [warn] dependency NOT in registry: ${dep_ref}"
-                    fi
-                done <<< "$GOOD_REFS"
-
-                if [ -n "$UNPUBLISHED_DEPS" ]; then
-                    if [ "${CI_TASK_TYPE:-}" = "release" ]; then
-                        echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
-                        echo "       These packages must be published FIRST (via release pipeline)."
-                        echo "[hint] 依赖未发布到制品仓 (R36)。请先发布以下依赖包:"
-                        for d in $UNPUBLISHED_DEPS; do
-                            echo "         - $d"
-                        done
-                        L0_FAILED=true
-                        L0_ERRORS="${L0_ERRORS} unpublished_deps"
-                    else
-                        echo "[warn] L0i: Dependencies not yet published (R36):${UNPUBLISHED_DEPS}"
-                        echo "       Release 时将被拦截。请先适配并发布以上依赖包。"
-                        echo "       当前 PR 构建将使用 --build=missing 从源码编译依赖（可能较慢）"
-                        echo "[hint] 运行 'bash ci/scripts/preflight_check.sh ${pkg_name}/${pkg_ver}' 检查依赖状态"
-                    fi
+            if [ -n "$UNPUBLISHED_DEPS" ]; then
+                if [ "${CI_TASK_TYPE:-}" = "release" ]; then
+                    echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
+                    echo "       These packages must be published FIRST (via release pipeline)."
+                    echo "[hint] 依赖未发布到制品仓 (R36)。请先发布以下依赖包:"
+                    for d in $UNPUBLISHED_DEPS; do
+                        echo "         - $d"
+                    done
+                    L0_FAILED=true
+                    L0_ERRORS="${L0_ERRORS} unpublished_deps"
+                else
+                    echo "[warn] L0i: Dependencies not yet published (R36):${UNPUBLISHED_DEPS}"
+                    echo "       Release 时将被拦截。请先适配并发布以上依赖包。"
+                    echo "       当前 PR 构建将使用 --build=missing 从源码编译依赖（可能较慢）"
+                    echo "[hint] 运行 'bash ci/scripts/preflight_check.sh ${pkg_name}/${pkg_ver}' 检查依赖状态"
                 fi
             fi
         fi
@@ -483,7 +454,7 @@ PYEOF
 
         # ── L5: Baseline check — verify package artifacts ──
         echo "[step] L5: Baseline artifact check..."
-        PKG_CACHE=$(conan cache path "${pkg_name}/${pkg_ver}@${CONAN_USER}/${CONAN_CHANNEL}" 2>/dev/null || echo "")
+        PKG_CACHE=$(conan cache path "${pkg_name}/${pkg_ver}" 2>/dev/null || echo "")
         if [ -n "$PKG_CACHE" ] && [ -d "$PKG_CACHE" ]; then
             BINS=$(find "$PKG_CACHE" -name "bin" -type d 2>/dev/null | head -1)
             LIBS=$(find "$PKG_CACHE" -name "lib" -type d 2>/dev/null | head -1)
@@ -577,7 +548,7 @@ PYEOF
             echo "        [sabotage] headers emptied"
 
             # 重新 conan test (会重新编译 test_package 源码 + 链接 + 运行)
-            conan test "$TEST_PKG_DIR" "${pkg_name}/${pkg_ver}@${CONAN_USER}/${CONAN_CHANNEL}" \
+            conan test "$TEST_PKG_DIR" "${pkg_name}/${pkg_ver}" \
                 -pr "$CONAN_PROFILE" --build=missing >/dev/null 2>&1
             _NEG_EXIT=$?
 
@@ -682,8 +653,6 @@ PYEOF
   },
   "build_trace": {
     "profile": "${PROFILE}",
-    "user": "${CONAN_USER}",
-    "channel": "${CONAN_CHANNEL}",
     "hostname": "${BUILD_HOST}",
     "timestamp": "${BUILD_TIMESTAMP}",
     "runner": "${BUILD_RUNNER}",

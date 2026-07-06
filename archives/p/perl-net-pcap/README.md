@@ -21,7 +21,7 @@ Net::Pcap 是一个 Perl XS 模块，提供对 libpcap 库的 Perl 接口，用�
 
 ```bash
 # 使用 Conan 构建
-conan install --requires=perl-net-pcap/0.21-r2@ohpcd/stable
+conan install --requires=perl-net-pcap/0.21-r2
 ```
 
 ## OHOS 平台说明

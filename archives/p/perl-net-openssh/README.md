@@ -19,7 +19,7 @@ Net::OpenSSH 是一个基于 OpenSSH `ssh` 命令的 Perl SSH 客户端模块。
 通过 Conan 安装：
 
 ```bash
-conan install --requires=perl-net-openssh/0.84-r1@ohpcd/stable
+conan install --requires=perl-net-openssh/0.84-r1
 ```
 
 安装后设置 PERL5LIB 环境变量指向包的 `lib/perl5` 目录。

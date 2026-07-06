@@ -55,7 +55,7 @@
 ```bash
 # Conan 配方验证
 $ conan create archives/p/perl-ref-util/0.204 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing --user=ohpcd --channel=stable
-perl-ref-util/0.204@ohpcd/stable: Package created
+perl-ref-util/0.204: Package created
 test_package: Ref::Util loaded successfully: OK
 test_package: Version OK
 test_package: Submodules OK

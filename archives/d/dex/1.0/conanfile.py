@@ -29,7 +29,7 @@ class DexConan(ConanFile):
 
     def requirements(self):
         # ncurses is a system-level pre-installed dependency (static lib)
-        # No Conan @ohpcd/stable dependency needed
+        # No Conan  dependency needed
         pass
 
     def layout(self):

@@ -16,7 +16,7 @@ class LibqxpTestConan(ConanFile):
 
     def requirements(self):
         self.requires(self.tested_reference_str)
-        self.requires("librevenge/0.0.5@ohpcd/stable")
+        self.requires("librevenge/0.0.5")
 
     def layout(self):
         cmake_layout(self)

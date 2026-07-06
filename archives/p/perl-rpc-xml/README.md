@@ -61,7 +61,7 @@ RPC::XML 提供 XML-RPC 协议的完整实现，包括：
 通过 Conan 安装：
 
 ```bash
-conan install --requires=perl-rpc-xml/0.82@ohpcd/stable
+conan install --requires=perl-rpc-xml/0.82
 ```
 
 模块安装到 `lib/perl5/RPC/XML/` 目录，通过 `PERL5LIB` 环境变量自动加载。

@@ -28,7 +28,7 @@ MQTT 协议接口。支持以下功能：
 
 ```bash
 # 通过 Conan 安装
-conan install --requires=perl-net-mqtt-simple/1.33-r0@ohpcd/stable
+conan install --requires=perl-net-mqtt-simple/1.33-r0
 ```
 
 ### 基本用法

@@ -21,7 +21,7 @@
 |---|------|------|----------|
 | 1 | 原始 Makefile.PL 使用 Module::Install (inc::Module::Install) | Module::Install 在隔离环境中触发自动安装依赖，导致编译失败 | 替换为标准 ExtUtils::MakeMaker Makefile.PL |
 | 2 | conanfile.py 硬编码 Perl 路径 (5.42.0) | 路径中硬编码了版本号和本地路径 | 改用 glob 动态发现 Perl 版本路径 + 从 Conan 依赖获取 |
-| 3 | 未声明 Conan 依赖 | conanfile.py 没有 requirements()，通过硬编码 PERL5LIB 引用 Regexp::Common | 添加 requirements() 声明 perl-regexp-common/2024080801@ohpcd/stable |
+| 3 | 未声明 Conan 依赖 | conanfile.py 没有 requirements()，通过硬编码 PERL5LIB 引用 Regexp::Common | 添加 requirements() 声明 perl-regexp-common/2024080801 |
 | 4 | package_info() 硬编码路径 | 使用硬编码 lib/perl5 而非动态发现 | 改用 glob 动态发现 site_perl 路径 |
 | 5 | test_package 硬编码本地路径 | 测试脚本中硬编码了 /storage/Users/currentUser/... 路径 | 改为动态检测系统 Perl site_perl 路径 + 从依赖包动态发现 |
 | 6 | test_package 缺少功能测试 | 仅检查模块加载和版本 | 新增 IPv4 CIDR 模式匹配测试、无效输入拒绝测试、-keep 选项测试 |
@@ -36,7 +36,7 @@
 ## Conan 配方变更 (2026-06-29)
 
 ### conanfile.py 修复
-1. **添加 requirements()** — 声明 perl-regexp-common/2024080801@ohpcd/stable 为 Conan 依赖
+1. **添加 requirements()** — 声明 perl-regexp-common/2024080801 为 Conan 依赖
 2. **移除硬编码 Perl 路径** — 改用 _get_perl5lib() 方法动态从 Conan 依赖 + 系统 Perl 路径构建 PERL5LIB
 3. **统一打包路径** — 与 perl-regexp-common 保持一致，保留 site_perl 路径结构
 4. **修复 package_info()** — 使用 glob 动态发现 site_perl 路径
@@ -49,7 +49,7 @@
 
 ## 依赖版本
 
-- Regexp::Common (2024080801) — 通过 Conan 依赖 perl-regexp-common/2024080801@ohpcd/stable 提供
+- Regexp::Common (2024080801) — 通过 Conan 依赖 perl-regexp-common/2024080801 提供
 - Perl 5.42.0 — 系统安装
 
 ## 验证结果
@@ -59,7 +59,7 @@ $ make test
 No tests defined for this extension (跳过)
 
 $ conan create archives/p/perl-regexp-common-net-cidr/0.03 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing --user=ohpcd --channel=stable
-perl-regexp-common-net-cidr/0.03@ohpcd/stable: Package created
+perl-regexp-common-net-cidr/0.03: Package created
 test_package: Regexp::Common::net::CIDR loaded successfully: OK
 test_package: Version OK
 test_package: CIDR pattern matching test OK

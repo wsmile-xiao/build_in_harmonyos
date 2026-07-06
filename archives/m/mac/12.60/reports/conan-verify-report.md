@@ -1,7 +1,7 @@
 # Conan Verify Report — mac 12.60
 
 **Verdict**: PASS
-**Reference**: `mac/12.60@ohpcd/stable`
+**Reference**: `mac/12.60`
 **Profile**: ohos-aarch64
 **Date**: 2026-07-02T11:21:21.708768
 

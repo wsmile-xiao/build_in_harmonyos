@@ -6,7 +6,7 @@ wla-dx is a cross-assembler package producing multiple binary executables
 No shared libraries are produced.
 
 R26: Terminal tools must be statically linked (BUILD_SHARED_LIBS=OFF).
-R27: Dependencies must reference @ohpcd/stable.
+R27: Dependencies must reference .
 """
 import os
 
@@ -30,7 +30,7 @@ class WlaDxConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        # R27: Dependencies must reference @ohpcd/stable
+        # R27: Dependencies must reference 
         pass
 
     def layout(self):

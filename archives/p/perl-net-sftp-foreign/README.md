@@ -26,7 +26,7 @@ SFTP 协议通信。与需要 XS/C 编译的模块不同，本模块完全由 Pe
 
 ```bash
 # 通过 Conan 安装
-conan install --requires=perl-net-sftp-foreign/1.93-r0@ohpcd/stable
+conan install --requires=perl-net-sftp-foreign/1.93-r0
 
 # 设置环境变量
 source conanrun.sh

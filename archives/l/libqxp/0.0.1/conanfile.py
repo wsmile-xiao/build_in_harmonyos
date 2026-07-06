@@ -6,7 +6,7 @@ Part of the LibreOffice project.
 
 This recipe enforces:
   R26: Static linking (BUILD_SHARED_LIBS=OFF via --disable-shared --enable-static)
-  R27: Dependencies use @ohpcd/stable
+  R27: Dependencies use 
 """
 import os
 import stat
@@ -33,9 +33,9 @@ class LibqxpConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        # R27: Dependencies must use @ohpcd/stable
-        self.requires("librevenge/0.0.5@ohpcd/stable")
-        self.requires("icu/77.1@ohpcd/stable")
+        # R27: Dependencies must use 
+        self.requires("librevenge/0.0.5")
+        self.requires("icu/77.1")
 
     def layout(self):
         basic_layout(self)

@@ -36,7 +36,7 @@ Role::Tiny 提供轻量级的角色（Role）组合功能，支持 `with`、`req
 通过 Conan 安装：
 
 ```bash
-conan install --requires=perl-role-tiny/2.002004@ohpcd/stable
+conan install --requires=perl-role-tiny/2.002004
 ```
 
 模块安装到 `lib/perl5/Role/Tiny.pm` 和 `lib/perl5/Role/Tiny/With.pm`，通过 `PERL5LIB` 环境变量自动加载。

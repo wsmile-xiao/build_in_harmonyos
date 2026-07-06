@@ -21,7 +21,7 @@ Net::Jabber::Bot 是一个基于 Moose 和 Net::Jabber 的 Perl 模块，提供�
 
 ```bash
 # 通过 Conan 安装
-conan install --requires=perl-net-jabber-bot/2.1.7-r0@ohpcd/stable
+conan install --requires=perl-net-jabber-bot/2.1.7-r0
 
 # 或直接使用已安装的 Perl
 perl -MNet::Jabber::Bot -e 'print "OK\n"'

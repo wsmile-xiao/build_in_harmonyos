@@ -67,7 +67,7 @@ $ make check
 ## Conan 配方
 
 - conanfile.py: 使用 AutotoolsToolchain，配置 --disable-werror
-- 依赖: librevenge/0.0.5@ohpcd/stable (system-wrapper recipe)
+- 依赖: librevenge/0.0.5 (system-wrapper recipe)
 - generate(): 使用 `-static` + `-Wl,-Bstatic` 强制静态链接 (R26)
   - `-static`: libtool 标志，使 libtool 优先使用 .a 而非 .so
   - `-Wl,-Bstatic`: 链接器标志，保持静态模式用于编译器自动添加的库 (libc++ 等)

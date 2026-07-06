@@ -13,7 +13,7 @@ conan create . -pr ohos-native
 
 ## 消费(部署到设备)
 ```bash
-conan install --requires cpython-tkinter/3.12.9@ohpcd/stable tcl/9.0.3.1@ohpcd/stable tk/9.0.3.1@ohpcd/stable \
+conan install --requires cpython-tkinter/3.12.9 tcl/9.0.3.1 tk/9.0.3.1 \
   -pr ohos-native --deployer=usr_local --deployer-folder=$HOME/usr/local
 ```
 `usr_local` deployer 会把 `_tkinter.so` 铺进 `~/usr/local/lib/python3.12/lib-dynload/`、tcl/tk 铺进 `~/usr/local/lib`。

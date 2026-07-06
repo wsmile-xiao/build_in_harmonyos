@@ -66,7 +66,7 @@ conan-verify 结果: 8/8 门禁全部通过
   L2 PASS | L4 PASS | L5 PASS
 
 test_package 结果: 34 small + 16 large encodings found
-Conan 包: fonts-encodings/1.1.0@ohpcd/stable
+Conan 包: fonts-encodings/1.1.0
 ```
 
 ## 注意事项

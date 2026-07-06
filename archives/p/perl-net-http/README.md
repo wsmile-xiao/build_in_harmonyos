@@ -26,7 +26,7 @@ Net::HTTP 是一个低级 HTTP 连接客户端模块，提供 HTTP/1.1 协议支
 ### 安装
 ```bash
 # Conan 安装
-conan install --requires=perl-net-http/6.24-r0@ohpcd/stable
+conan install --requires=perl-net-http/6.24-r0
 
 # 或直接使用系统已安装版本
 perl -MNet::HTTP -e 'print $Net::HTTP::VERSION'

@@ -64,7 +64,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> <版本>
 ### Conan 配方检查清单
 
 `conan-init` 后 AI 必须检查：
-- `requirements()`：依赖引用必须 `@ohpcd/stable`（R27）
+- `requirements()`：依赖引用必须 ``（R27）
 - `generate()`：系统同名库必须 `BUILD_SHARED_LIBS=OFF`（R26）
 - `package_info()`：`cpp_info.libs` 正确声明
 - `conandata.yml`：包含 sha256 校验

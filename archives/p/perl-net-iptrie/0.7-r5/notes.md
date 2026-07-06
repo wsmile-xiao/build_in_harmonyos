@@ -51,7 +51,7 @@ Result: PASS
 
 ```bash
 # conan create 结果 (使用修正后 profile: arch=armv8)
-perl-net-iptrie/0.7-r5@ohpcd/stable: Package created
+perl-net-iptrie/0.7-r5: Package created
 test perl-net-iptrie 0.7-r5: 8/8 OK
 ```
 

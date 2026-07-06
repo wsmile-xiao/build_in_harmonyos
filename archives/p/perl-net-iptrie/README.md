@@ -32,7 +32,7 @@ make install DESTDIR=/path/to/staging
 
 ```bash
 # 安装预编译包
-conan install --requires=perl-net-iptrie/0.7-r5@ohpcd/stable
+conan install --requires=perl-net-iptrie/0.7-r5
 
 # 使用模块
 perl -I<path_from_conan> -MNet::IPTrie -e '...'

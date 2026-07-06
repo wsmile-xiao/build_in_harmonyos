@@ -12,7 +12,7 @@ libpagemaker 是 Document Liberation Project (DLP) 的一部分，用于导入�
 - Conan 配方包含 mktemp wrapper 解决 HMDFS 兼容性问题
 
 ## 依赖
-- librevenge-0.0 (librevenge/0.0.5@ohpcd/stable)
+- librevenge-0.0 (librevenge/0.0.5)
 - boost (headers only)
 
 ## 功能验证

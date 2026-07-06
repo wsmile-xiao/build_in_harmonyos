@@ -67,5 +67,5 @@ $ vampire socrates.p
 ## Conan 引用
 
 ```
-vampire/5.0.1@ohpcd/stable
+vampire/5.0.1
 ```

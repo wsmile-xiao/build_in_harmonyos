@@ -32,7 +32,7 @@ Regexp::IPv6 提供一个匹配 IPv6 地址的正则表达式 `$IPv6_re`，可�
 通过 Conan 安装：
 
 ```bash
-conan install --requires=perl-regexp-ipv6/0.03@ohpcd/stable
+conan install --requires=perl-regexp-ipv6/0.03
 ```
 
 模块安装到 `lib/perl5/Regexp/IPv6.pm`，通过 `PERL5LIB` 环境变量自动加载。

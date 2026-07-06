@@ -18,8 +18,7 @@ set -euo pipefail
 # ── Configuration ──
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${CI_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
-CONAN_USER="${CONAN_USER:-ohpcd}"
-CONAN_CHANNEL="${CONAN_CHANNEL:-stable}"
+CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 GPG_KEY_ID="${GPG_KEY_ID:-}"
 SCAN_ROOT="${PKG_SCAN_ROOT:-archives}"
 
@@ -55,7 +54,7 @@ SKIPPED=0
 
 for ref in "${PACKAGES[@]}"; do
     # Get conan cache path for the package
-    PKG_PATH=$(conan cache path "${ref}@${CONAN_USER}/${CONAN_CHANNEL}" 2>/dev/null || echo "")
+    PKG_PATH=$(conan cache path "${ref}" 2>/dev/null || echo "")
 
     if [ -z "$PKG_PATH" ] || [ ! -d "$PKG_PATH" ]; then
         echo "[warn] Cannot locate cache for ${ref}, skipping"

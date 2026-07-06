@@ -45,9 +45,9 @@ class OctaveConan(ConanFile):
     def requirements(self):
         # Dependencies are built from source, not Conan packages.
         # In a full CI pipeline, these would be:
-        # self.requires("blas/3.12.0@ohpcd/stable")
-        # self.requires("lapack/3.12.1@ohpcd/stable")
-        # self.requires("pcre/8.45@ohpcd/stable")
+        # self.requires("blas/3.12.0")
+        # self.requires("lapack/3.12.1")
+        # self.requires("pcre/8.45")
         pass
 
     def layout(self):

@@ -19,7 +19,7 @@ libbinio 是一个二进制 I/O 流类库，提供 C++ 接口用于读写二进�
 | 编译器 | clang 15.0.4 / clang++ 15.0.4 |
 | 构建日期 | 2026-06-26 |
 | 状态 | published |
-| Conan 引用 | libbinio/1.5@ohpcd/stable |
+| Conan 引用 | libbinio/1.5 |
 
 ## 产物
 
@@ -50,7 +50,7 @@ libbinio 是一个二进制 I/O 流类库，提供 C++ 接口用于读写二进�
 ### Conan 方式
 
 ```bash
-conan install --requires=libbinio/1.5@ohpcd/stable \
+conan install --requires=libbinio/1.5 \
   -pr:h=ci/conan/profiles/ohos-aarch64 \
   -pr:b=ci/conan/profiles/ohos-aarch64 \
   --build=missing

@@ -7,7 +7,7 @@ Dependency: Qt5 (Core, Gui + GuiPrivate headers).
 
 This recipe enforces:
   R26: BUILD_SHARED_LIBS=OFF (static linking for terminal tools)
-  R27: Dependencies use @ohpcd/stable format
+  R27: Dependencies use  format
 """
 import os
 
@@ -30,8 +30,8 @@ class QXlsxConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        # R27: All dependencies MUST use @ohpcd/stable format
-        self.requires("qt/5.15.2@ohpcd/stable")
+        # R27: All dependencies MUST use  format
+        self.requires("qt/5.15.2")
 
     def layout(self):
         cmake_layout(self)

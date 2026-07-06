@@ -60,7 +60,7 @@ versions:
   "3.30.0":
     status: published             # published | built | failed | archived
     build_date: "2026-04-15"
-    conan_ref: "cmake/3.30.0@ohpcd/stable"  # Conan 引用格式
+    conan_ref: "cmake/3.30.0"  # Conan 引用格式
   "3.28.3":
     status: archived
     build_date: "2026-03-20"
@@ -96,7 +96,7 @@ versions:
 
 **强制规则**：
 - 终端工具：`generate()` 中必须设置 `BUILD_SHARED_LIBS=OFF`（CMake）或 `-static`（Autotools）或 `default_library=static`（Meson）（R26）
-- 依赖引用：`self.requires("name/version@ohpcd/stable")`（R27）
+- 依赖引用：`self.requires("name/version")`（R27）
 - 补丁应用：`apply_conandata_patches(self)`（从 conandata.yml 读取）
 - 禁止 `--build`/`--host`/`--target` 三元组（native 编译，R1）
 
@@ -131,7 +131,7 @@ patches:
 version: "3.30.0"
 status: published                 # published | built | failed | archived
 build_date: "2026-04-15"
-conan_ref: "cmake/3.30.0@ohpcd/stable"  # Conan 引用
+conan_ref: "cmake/3.30.0"  # Conan 引用
 
 source:
   url: "https://github.com/Kitware/CMake/releases/download/v3.30.0/cmake-3.30.0.tar.gz"
@@ -229,7 +229,7 @@ test_package/
 | build_system | 推荐 | string | 常用构建系统 |
 | ohos_adaptation | 推荐 | object | 跨版本适配知识 |
 | versions | ✅ | map | 版本索引 |
-| versions.{ver}.conan_ref | 推荐 | string | Conan 引用格式 name/ver@ohpcd/stable |
+| versions.{ver}.conan_ref | 推荐 | string | Conan 引用格式 name/ver |
 
 ### 4.2 版本级 manifest.yaml 字段
 
@@ -238,7 +238,7 @@ test_package/
 | version | ✅ | string | 版本号 |
 | status | ✅ | string | published / built / failed / archived |
 | build_date | ✅ | string | 编译日期 (YYYY-MM-DD) |
-| conan_ref | 推荐 | string | Conan 引用 (name/ver@ohpcd/stable) |
+| conan_ref | 推荐 | string | Conan 引用 (name/ver) |
 | source.url | ✅ | string | 源码下载 URL（与 conandata.yml 一致） |
 | source.sha256 | 推荐 | string | 源码校验和 |
 | source.tar_format | 推荐 | string | 压缩格式 |
@@ -267,7 +267,7 @@ test_package/
 
 ### 文件名
 - 补丁：`{4位序号}-{简短描述}.patch`
-- Conan 包引用：`{name}/{version}@ohpcd/stable`
+- Conan 包引用：`{name}/{version}`
 
 ## 6. 与 CI 的关系
 

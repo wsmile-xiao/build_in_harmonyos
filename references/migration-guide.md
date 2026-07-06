@@ -69,7 +69,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本> --force
 
 | 检查项 | 铁律 | 说明 |
 |--------|------|------|
-| `requirements()` | R27 | 依赖格式 `name/ver@ohpcd/stable`；无依赖则 `pass` |
+| `requirements()` | R27 | 依赖格式 `name/ver`；无依赖则 `pass` |
 | `generate()` 系统同名库静态 | R26 | 仅系统同名库设 `BUILD_SHARED_LIBS=OFF`，其他默认动态 |
 | `package_info()` | — | `cpp_info.libs` 列表正确 |
 | `conandata.yml` sha256 | — | 必须是真实 SHA256，不能是占位符 |
@@ -177,7 +177,7 @@ rm -f  archives/<字母>/<软件名>/<版本>/.staging-verified
 python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <软件名> <版本> --force
 
 # 4. 检查生成的 conanfile.py
-# - 确认 requirements() 格式为 @ohpcd/stable (R27)
+# - 确认 requirements() 格式为  (R27)
 # - 确认系统同名库有静态链接配置 (R26)，非系统同名库默认动态
 # - 确认无硬编码系统路径
 # - 确认 conandata.yml sha256 不是占位符
@@ -252,7 +252,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> <版本> --url=<UR
 - [ ] `test_package/MANIFEST.yml` 存在且 `assertion_count > 0`（CI L0e 门禁强制要求）
 - [ ] `patches/` 中的补丁都在 `conandata.yml` 中声明
 - [ ] 系统同名库的 `generate()` 有静态链接配置（R26），非系统同名库默认动态
-- [ ] 依赖引用格式为 `@ohpcd/stable`（R27）
+- [ ] 依赖引用格式为 ``（R27）
 - [ ] 无硬编码系统路径（`-L/storage/.../usr/local/lib` 等隐式依赖）
 - [ ] 所有第三方依赖都在 `requirements()` 显式声明
 - [ ] `conan-verify` 全部门禁 PASS（或已知非阻塞警告）
@@ -292,8 +292,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> <版本> --url=<UR
 ```python
 def requirements(self):
     # 正确: 显式声明，Conan 自动解析传递依赖
-    self.requires("ncurses/6.4@ohpcd/stable")
-    self.requires("zlib/1.3.1@ohpcd/stable")
+    self.requires("ncurses/6.4")
+    self.requires("zlib/1.3.1")
 ```
 
 **禁止隐式系统依赖：**

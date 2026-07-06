@@ -42,7 +42,7 @@ Regexp::Common 是一个 Perl 模块，提供常用正则表达式的统一接�
 - 平台: HarmonyOS (aarch64)
 - 编译器: clang/clang++
 - 无需源码补丁
-- Conan 配方: `perl-regexp-common/2024080801@ohpcd/stable`
+- Conan 配方: `perl-regexp-common/2024080801`
 
 ## 测试结果
 
