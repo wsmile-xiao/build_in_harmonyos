@@ -152,8 +152,7 @@ HOME_KEEP=(
     # ── 基础配置/工具 ──
     ".config" ".local"
     ".ohpcd" ".hnp"
-    # ── 用户安装 ──
-    "usr" "npm"
+    # NOTE: ~/usr/ 不再保护 — make install 可能写入未签名的 .so 污染环境
 )
 
 # 扫描 $HOME 下的顶层条目, 清理不在保护清单内的
