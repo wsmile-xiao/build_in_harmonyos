@@ -627,41 +627,31 @@ PYEOF
             _BACKUP_DIR="${TMPDIR:-$HOME/tmp}/l1e_backup_${pkg_name}_$$"
             mkdir -p "$_BACKUP_DIR"
 
-            # 确保产物目录可写 (鸿蒙下 make install 的文件可能只读)
-            chmod -R u+w "$PKG_CACHE" 2>/dev/null || true
+            # 破坏策略: mv 整个产物子目录 (而非逐个文件操作)
+            # 原因: make install 的文件在鸿蒙下可能只读 (MAC 策略),
+            #        但 Conan 创建的 package 目录本身当前用户可写
+            _SABOTAGED=0
 
-            # 备份并破坏产物 — 静态库 .a 替换为空归档
-            find "$PKG_CACHE" -name '*.a' -type f 2>/dev/null | while read -r lib_file; do
-                cp "$lib_file" "$_BACKUP_DIR/" 2>/dev/null
-                rm -f "$lib_file" 2>/dev/null || true
-                ar rcs "$lib_file" 2>/dev/null
-                echo "        [sabotage] $(basename "$lib_file") → empty archive"
-            done
-
-            # 动态库 .so* → 临时移走
-            find "$PKG_CACHE" -name '*.so*' -type f 2>/dev/null | while read -r lib_file; do
-                cp "$lib_file" "$_BACKUP_DIR/" 2>/dev/null
-                rm -f "$lib_file" 2>/dev/null || true
-                echo "        [sabotage] $(basename "$lib_file") → removed"
-            done
-
-            # 可执行文件 bin/* → 替换为 /bin/false
+            # bin/ → 移走 (破坏可执行文件和命令行工具)
             if [ -n "$BINS" ] && [ -d "$BINS" ]; then
-                for bin_file in "$BINS"/*(N); do
-                    [ -f "$bin_file" ] || continue
-                    cp "$bin_file" "$_BACKUP_DIR/" 2>/dev/null
-                    cp /bin/false "$bin_file" 2>/dev/null || printf '#!/bin/sh\nexit 1\n' > "$bin_file" 2>/dev/null || true
-                    chmod +x "$bin_file" 2>/dev/null || true
-                    echo "        [sabotage] $(basename "$bin_file") → /bin/false"
-                done
+                mv "$BINS" "$_BACKUP_DIR/bin" 2>/dev/null && _SABOTAGED=$((_SABOTAGED + 1)) && echo "        [sabotage] bin/ moved away"
             fi
 
-            # 头文件 *.h → 清空
-            find "$PKG_CACHE" -name '*.h' -type f 2>/dev/null | while read -r hdr_file; do
-                cp "$hdr_file" "$_BACKUP_DIR/" 2>/dev/null
-                : > "$hdr_file" 2>/dev/null || true
-            done
-            echo "        [sabotage] headers emptied"
+            # lib/ → 移走 (破坏静态库和动态库)
+            if [ -n "$LIBS" ] && [ -d "$LIBS" ]; then
+                mv "$LIBS" "$_BACKUP_DIR/lib" 2>/dev/null && _SABOTAGED=$((_SABOTAGED + 1)) && echo "        [sabotage] lib/ moved away"
+            fi
+
+            # include/ → 移走 (破坏头文件)
+            if [ -n "$INCS" ] && [ -d "$INCS" ]; then
+                mv "$INCS" "$_BACKUP_DIR/include" 2>/dev/null && _SABOTAGED=$((_SABOTAGED + 1)) && echo "        [sabotage] include/ moved away"
+            fi
+
+            # 如果什么都没破坏到, 说明产物结构异常, 跳过 L1e
+            if [ "$_SABOTAGED" -eq 0 ]; then
+                echo "        [skip] L1e: No standard artifact dirs found to sabotage"
+                rm -rf "$_BACKUP_DIR" 2>/dev/null || true
+            else
 
             # 重新 conan test (会重新编译 test_package 源码 + 链接 + 运行)
             # 预期失败: 被 set -e 拦截, 用 || 捕获退出码
@@ -681,15 +671,21 @@ PYEOF
                 echo "[ok] L1e: Negative test confirmed — test genuinely depends on ${pkg_name}"
             fi
 
-            # 恢复产物
-            if [ -d "$_BACKUP_DIR" ]; then
-                for _bf in "$_BACKUP_DIR"/*(N); do
-                    [ -f "$_bf" ] || continue
-                    _bn=$(basename "$_bf")
-                    find "$PKG_CACHE" -name "$_bn" -exec cp "$_bf" {} \; 2>/dev/null
-                done
+            # 恢复产物: mv 目录回原位
+            if [ -d "$_BACKUP_DIR/bin" ]; then
+                rm -rf "$BINS" 2>/dev/null || true
+                mv "$_BACKUP_DIR/bin" "$BINS" 2>/dev/null || true
+            fi
+            if [ -d "$_BACKUP_DIR/lib" ]; then
+                rm -rf "$LIBS" 2>/dev/null || true
+                mv "$_BACKUP_DIR/lib" "$LIBS" 2>/dev/null || true
+            fi
+            if [ -d "$_BACKUP_DIR/include" ]; then
+                rm -rf "$INCS" 2>/dev/null || true
+                mv "$_BACKUP_DIR/include" "$INCS" 2>/dev/null || true
             fi
             rm -rf "$_BACKUP_DIR" 2>/dev/null || true
+            fi  # end _SABOTAGED > 0
         fi
 
         # ── L2: Minimal smoke test (--version / --help) ──
