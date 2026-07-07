@@ -4,7 +4,7 @@
 - 构建系统: cmake
 - 编译日期: 2026-04-22
 - 编译器: clang
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 ```bash
