@@ -132,6 +132,7 @@ archives/{letter}/{name}/
 
 ### 18. PR 中禁止的文件
 `.build-context-*`、`test-report`、`*.log`、`.DS_Store`、`__pycache__/`、预编译二进制（.o/.so/.a）。
+**禁止修改 `SUMMARY.md`** — 该文件由 CI 自动生成维护，人工修改会被覆盖。
 
 ---
 
