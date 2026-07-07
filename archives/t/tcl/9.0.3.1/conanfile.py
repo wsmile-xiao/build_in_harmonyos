@@ -21,6 +21,10 @@ class TclConan(ConanFile):
         if self.options.shared:
             self.options.rm_safe("fPIC")
 
+    def export_sources(self):
+        # Conan 2.x: conandata.yml auto-exported; patches dir exported if present
+        pass
+
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
 
