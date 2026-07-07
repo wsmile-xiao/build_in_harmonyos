@@ -82,10 +82,24 @@ tc = CMakeToolchain(self)
 ### 11. conandata.yml 规范
 URL 必须 HTTPS，必须有 sha256。补丁需在 patches 字段声明且文件实际存在。
 
-### 12. 只改源文件不改生成文件 (R6)
+### 12. 源码 URL 必须为官方源 (R39)
+conandata.yml 中的 URL 必须指向**官方正式源**或**权威镜像源**，禁止不明来源：
+```yaml
+# 正确 — 官方 GitHub release/tag
+url: "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+# 正确 — 官方网站
+url: "https://www.zlib.net/zlib-1.3.1.tar.gz"
+# 禁止 — 个人 fork / 非官方镜像 / 不明仓库
+url: "https://github.com/someone/zlib/archive/v1.3.1.tar.gz"
+# 禁止 — 网盘 / 不明 CDN
+url: "https://pan.baidu.com/s/xxxx/zlib.tar.gz"
+```
+CI 会自动为 GitHub URL 添加镜像 fallback（gh-proxy/ghproxy/gitclone/moeyy/kkgithub），因此 conandata.yml 中只需写官方原始 URL，不要手动加镜像前缀。
+
+### 13. 只改源文件不改生成文件 (R6)
 禁止修改 `config.h`、`configure`、`Makefile.in`、`CMakeCache.txt` 等生成产物。应通过 `generate()` 或 patches/ 处理。
 
-### 13. 命令行工具声明 commands.json (R38)
+### 14. 命令行工具声明 commands.json (R38)
 构建可执行文件的包（conanfile.py 中有 `RUNTIME DESTINATION bin` 或 `cpp_info.bindirs`），必须在**软件级别**目录创建 `commands.json`。库类型不需要。
 ```json
 {
@@ -96,14 +110,14 @@ URL 必须 HTTPS，必须有 sha256。补丁需在 patches 字段声明且文件
 ```
 路径：`archives/{letter}/{name}/commands.json`（与 manifest.yaml 同级，非版本目录下）。`type` 必须为 `"tool"`，`name` 匹配包名。
 
-### 14. Conan 2.x API
+### 15. Conan 2.x API
 用 `from conan import ConanFile`，禁止旧版 `from conans`。用 `conan.tools.cmake`。
 
 ---
 
 ## 三、文件规范
 
-### 15. 归档目录结构
+### 16. 归档目录结构
 ```
 archives/{letter}/{name}/
   ├── manifest.yaml / README.md / commands.json(仅tool)
@@ -113,30 +127,30 @@ archives/{letter}/{name}/
 ```
 缺 conanfile.py / conandata.yml / test_package/ = request changes。
 
-### 16. 补丁文件规范 (R3)
+### 17. 补丁文件规范 (R3)
 补丁只能通过 `refresh-patch --auto` 生成，不得手动创建。文件名有序编号（001-、002-...）。
 
-### 17. PR 中禁止的文件
+### 18. PR 中禁止的文件
 `.build-context-*`、`test-report`、`*.log`、`.DS_Store`、`__pycache__/`、预编译二进制（.o/.so/.a）。
 
 ---
 
 ## 四、PR 合规性与安全
 
-### 18. PR 原子性 (W2)
+### 19. PR 原子性 (W2)
 一个 PR 只包含一个配方。配方 PR 和框架 PR 混合 = 要求拆分。
 
-### 19. 文件权限边界
+### 20. 文件权限边界
 协作者 PR 不得修改 `SKILL.md`/`references/`/`templates/`/`scripts/`/`ci/`/`index.tsv`。越权 = 要求移除。
 
-### 20. 依赖发布优先级 (R36)
+### 21. 依赖发布优先级 (R36)
 依赖包必须已发布到制品仓。用 `conan download "name/ver" --only-recipe` 验证，禁止用 `conan list`（R35: 搜索 API 对 binary 返回不完整）。
 
-### 21. Upload 安全边界
+### 22. Upload 安全边界
 密钥/token 必须从环境变量读取，禁止硬编码。PR 校验阶段禁止 upload。
 
-### 22. CI 门禁不可绕过
+### 23. CI 门禁不可绕过
 不得注释掉门禁检查、将 fail 改为 warn、删除 L0j/L0k 检查。
 
-### 23. shell 脚本规范
+### 24. shell 脚本规范
 `set -euo pipefail` 开头，变量加双引号，Conan 2.x 用 `--only-recipe`（非 `--recipe`）。
