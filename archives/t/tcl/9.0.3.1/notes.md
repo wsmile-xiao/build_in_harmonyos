@@ -27,8 +27,12 @@
 - `bin/tclsh`、`lib/tclConfig.sh`、`lib/libtclstub.a`、`include/*.h`、`lib/tcl9.0/`（散脚本库）
 
 ## 验证
-- test_package：`clang` 编译 → `dlopen`（注入全路径）libtcl9.0.so + `dlsym Tcl_CreateInterp` → OK（真机）。
-- CI：L0/L1/L4 pass，L2 skip（库类无 `--version` 可执行），L5 warn（artifact 基线扫描未命中，非阻塞）。
+- test_package：`clang` 编译 → `dlopen`（注入全路径）libtcl9.0.so + `dlsym Tcl_CreateInterp` 并调用 → OK（真机+CI）。
+  - R34 破坏性反向验证（L1e）：移走 bin/lib/include 后 test 失败 → test 确实依赖 tcl ✅
+- conan-verify：G0-G4 + L2/L4/L5 全部 PASS（2026-07-08）
+- CI 本地模拟（W3）：L0 PASS，conan create PASS，L1a/L1b PASS，L1e PASS，L5 PASS
+  - L2 smoke test：tclsh9.0 为交互式 shell，--version 进入交互模式（非阻塞，已知行为）
+  - L0k：commands.json 已补齐（R38）
 
 ## 知识提取
 - **tcl 9 的 zipfs 尾拼**：`ZIPFS_BUILD=1` 把脚本库 zip `cat >>` 进 libtcl9.0.so，破坏链接器自签；
@@ -37,4 +41,4 @@
 - **系统识别**：uname shim + `tcl_cv_sys_version` 缓存覆盖，让 tcl 认 Linux 才建动态库。
 
 ---
-**状态**：built（CI conan create + test 通过）
+**状态**：built（conan-verify 全门禁通过 + CI 本地模拟通过，待 CI upload 后标 published）
