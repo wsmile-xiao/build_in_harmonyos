@@ -420,9 +420,12 @@ def replace_github_url(match):
     quote = match.group(2)
     url = match.group(3)
     mirrors = [
+        'https://gh-proxy.com/' + url,
+        'https://mirror.ghproxy.com/' + url,
         'https://ghproxy.com/' + url,
         'https://gitclone.com/' + url[len('https://'):],
         'https://moeyy.cn/gh-proxy/' + url,
+        url.replace('https://github.com', 'https://kkgithub.com'),
         url,
     ]
     subindent = indent + '  '
@@ -437,7 +440,7 @@ with open(path, 'w') as f:
     f.write(content)
 PYEOF
 
-            echo "        [ok] GitHub URLs rewritten with mirror fallback (ghproxy -> gitclone -> moeyy -> direct)"
+            echo "        [ok] GitHub URLs rewritten with mirror fallback (gh-proxy -> mirror.ghproxy -> ghproxy -> gitclone -> moeyy -> kkgithub -> direct)"
         fi
     fi
 
