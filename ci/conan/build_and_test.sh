@@ -627,10 +627,13 @@ PYEOF
             _BACKUP_DIR="${TMPDIR:-$HOME/tmp}/l1e_backup_${pkg_name}_$$"
             mkdir -p "$_BACKUP_DIR"
 
+            # 确保产物目录可写 (鸿蒙下 make install 的文件可能只读)
+            chmod -R u+w "$PKG_CACHE" 2>/dev/null || true
+
             # 备份并破坏产物 — 静态库 .a 替换为空归档
             find "$PKG_CACHE" -name '*.a' -type f 2>/dev/null | while read -r lib_file; do
                 cp "$lib_file" "$_BACKUP_DIR/" 2>/dev/null
-                rm -f "$lib_file"
+                rm -f "$lib_file" 2>/dev/null || true
                 ar rcs "$lib_file" 2>/dev/null
                 echo "        [sabotage] $(basename "$lib_file") → empty archive"
             done
@@ -638,7 +641,7 @@ PYEOF
             # 动态库 .so* → 临时移走
             find "$PKG_CACHE" -name '*.so*' -type f 2>/dev/null | while read -r lib_file; do
                 cp "$lib_file" "$_BACKUP_DIR/" 2>/dev/null
-                rm -f "$lib_file"
+                rm -f "$lib_file" 2>/dev/null || true
                 echo "        [sabotage] $(basename "$lib_file") → removed"
             done
 
@@ -647,8 +650,8 @@ PYEOF
                 for bin_file in "$BINS"/*(N); do
                     [ -f "$bin_file" ] || continue
                     cp "$bin_file" "$_BACKUP_DIR/" 2>/dev/null
-                    cp /bin/false "$bin_file" 2>/dev/null || printf '#!/bin/sh\nexit 1\n' > "$bin_file"
-                    chmod +x "$bin_file" 2>/dev/null
+                    cp /bin/false "$bin_file" 2>/dev/null || printf '#!/bin/sh\nexit 1\n' > "$bin_file" 2>/dev/null || true
+                    chmod +x "$bin_file" 2>/dev/null || true
                     echo "        [sabotage] $(basename "$bin_file") → /bin/false"
                 done
             fi
@@ -656,7 +659,7 @@ PYEOF
             # 头文件 *.h → 清空
             find "$PKG_CACHE" -name '*.h' -type f 2>/dev/null | while read -r hdr_file; do
                 cp "$hdr_file" "$_BACKUP_DIR/" 2>/dev/null
-                : > "$hdr_file"
+                : > "$hdr_file" 2>/dev/null || true
             done
             echo "        [sabotage] headers emptied"
 
