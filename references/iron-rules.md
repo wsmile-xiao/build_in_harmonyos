@@ -402,20 +402,26 @@ int main(void) {
 CI 在 conan create 成功后执行 L1e：
 
 1. 从 conan cache 找到被测包产物
-2. **替换为损坏版本**（.a→空归档，.so→删除，bin→/bin/false，.h→清空）
+2. **mv 移走整个产物子目录**（bin/、lib/、include/）
 3. 重新 `conan test`（重新编译 test 源码 + 链接 + 运行）
 4. 如果仍然 PASS → 假测试（test 不依赖被测包）
 5. 如果 FAIL → 真测试（链接/运行确实依赖被测包）
-6. 恢复原始产物
+6. mv 目录回原位，恢复产物
+
+**破坏策略选择 mv 目录而非逐文件篡改的原因**：
+
+- 鸿蒙系统 MAC 策略下，`make install` 安装的文件可能只读，`cp`/`printf` 覆盖会报 `operation not permitted`
+- Conan 创建的 package 目录本身当前用户可写，mv 目录只需父目录权限
+- mv 整个目录比逐文件 find/cp/rm 更可靠，且无 zsh glob 兼容性问题
 
 **无法绕过的底层保证**：
 
 | 包类型 | 破坏方式 | 真测试的表现 | 底层保证 |
 |--------|---------|-------------|---------|
-| 静态库 .a | 替换为空归档 | 链接器找不到符号 → undefined reference | 链接器只提取被引用的 .o |
-| 动态库 .so | 删除 .so | 加载器找不到库 → cannot open shared object | NEEDED 记录强制加载 |
-| 可执行包 bin | 替换为 /bin/false | test 执行 bin 得到错误结果 | 进程执行不可伪造 |
-| 头文件库 | 清空 .h | 编译器找不到声明 → implicit declaration | 预处理器必须解析声明 |
+| 静态库 .a | mv lib/ 移走 | 链接器找不到库 → cannot find -lxxx | 链接器必须找到库文件 |
+| 动态库 .so | mv lib/ 移走 | 加载器找不到库 → cannot open shared object | NEEDED 记录强制加载 |
+| 可执行包 bin | mv bin/ 移走 | test 执行 bin 找不到命令 → command not found | 进程执行不可伪造 |
+| 头文件库 | mv include/ 移走 | 编译器找不到声明 → No such file or directory | 预处理器必须解析声明 |
 
 > 提交者无论在 CMakeLists.txt、源码、conanfile.py 哪一层做手脚，都无法改变链接器/加载器/预处理器的确定行为。
 
