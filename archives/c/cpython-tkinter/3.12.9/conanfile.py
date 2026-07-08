@@ -1,5 +1,6 @@
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
+from conan.tools.files import apply_conandata_patches
 import os
 import glob
 import json
@@ -22,6 +23,12 @@ class CPythonTkinterConan(ConanFile):
     version = "3.12.9"
     settings = "os", "arch", "compiler", "build_type"
     exports_sources = "src/*"
+
+    def export_sources(self):
+        pass
+
+    def source(self):
+        pass
 
     def requirements(self):
         self.requires("tcl/9.0.3.1")
@@ -110,6 +117,7 @@ class CPythonTkinterConan(ConanFile):
         return execs.get("c", "clang")
 
     def build(self):
+        apply_conandata_patches(self)
         src = os.path.join(self.source_folder, "src")
         py = self._py()
         tcl = self.dependencies["tcl"].cpp_info
