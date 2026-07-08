@@ -38,6 +38,16 @@ echo "[step]   scan_root: $SCAN_ROOT"
 echo "[step]   profile: $PROFILE"
 echo "[step]   channel: (no channel — plain name/version)"
 
+# ── 0. Ensure conan remote exists (idempotent) ──
+# CI 机 .conan.db 无 remote 定义,需自动添加; 发布机已有则跳过
+if conan remote list 2>/dev/null | grep -q "^${CONAN_REMOTE_NAME}:"; then
+    echo "[step]   remote: ${CONAN_REMOTE_NAME} (already configured)"
+else
+    conan remote add "${CONAN_REMOTE_NAME}" \
+        "https://conan.cnb.cool/OpenHarmonyPCDeveloper/Conan/-/packages/"
+    echo "[step]   remote: ${CONAN_REMOTE_NAME} (auto-added, anonymous read)"
+fi
+
 # ── 1. Discover packages (BUG-9: respect CI_PACKAGES) ──
 PACKAGES=()
 if [ -n "${CI_PACKAGES:-}" ]; then
@@ -211,6 +221,17 @@ for pkg_dir in "${PACKAGES[@]}"; do
             echo "[fail] L0h: conanfile.py 在 self.run() 中依赖未定义 shell 变量 ${BAD_VAR} — 用 self.conf.get() 代替 (R33)"
             L0_FAILED=true
             L0_ERRORS="${L0_ERRORS} shell_env_var_in_run"
+        fi
+    fi
+
+    # L0g: 禁止 conanfile.py 中硬编码 remote 名称 (remote 属于环境配置)
+    if [ -f "$CONANFILE" ]; then
+        REMOTE_HARDCODE=$(grep -nE 'conan\s+(install|download|create|upload|export).*\s-r[= ]' "$CONANFILE" 2>/dev/null || true)
+        if [ -n "$REMOTE_HARDCODE" ]; then
+            echo "[fail] L0g: conanfile.py 禁止硬编码 remote 名称 (-r=), remote 属于 CI 环境配置"
+            echo "       $(echo "$REMOTE_HARDCODE" | head -1)"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} hardcoded_remote"
         fi
     fi
 
