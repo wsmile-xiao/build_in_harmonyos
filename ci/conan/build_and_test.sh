@@ -38,16 +38,6 @@ echo "[step]   scan_root: $SCAN_ROOT"
 echo "[step]   profile: $PROFILE"
 echo "[step]   channel: (no channel — plain name/version)"
 
-# ── 0. Ensure conan remote exists (idempotent) ──
-# CI 机 .conan.db 无 remote 定义,需自动添加; 发布机已有则跳过
-if conan remote list 2>/dev/null | grep -q "^${CONAN_REMOTE_NAME}:"; then
-    echo "[step]   remote: ${CONAN_REMOTE_NAME} (already configured)"
-else
-    conan remote add "${CONAN_REMOTE_NAME}" \
-        "https://conan.cnb.cool/OpenHarmonyPCDeveloper/Conan/-/packages/"
-    echo "[step]   remote: ${CONAN_REMOTE_NAME} (auto-added, anonymous read)"
-fi
-
 # ── 1. Discover packages (BUG-9: respect CI_PACKAGES) ──
 PACKAGES=()
 if [ -n "${CI_PACKAGES:-}" ]; then
