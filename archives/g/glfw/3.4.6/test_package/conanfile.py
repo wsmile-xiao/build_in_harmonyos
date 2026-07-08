@@ -14,14 +14,12 @@ class TestPkg(ConanFile):
         libdir = dep.libdirs[0]
         so = os.path.join(libdir, "libglfw.so")
         cc = os.environ.get("CC", "clang")
-        self.run(f"{cc} test.c -o test_probe {inc} -DTARGET_SO='\"{so}\"' -ldl")
+        # 链接 libglfw 使测试真正依赖被测包 (R34)，-Wl,--allow-shlib-undefined 容忍 bridge 循环依赖
+        self.run(f"{cc} test.c -o test_probe {inc} -L{libdir} -lglfw -Wl,--allow-shlib-undefined -DTARGET_SO='\"{so}\"' -ldl")
 
     def test(self):
         if cross_building(self):
             self.output.info("cross-building：只验编译+链接")
-            return
-        if True:
-            self.output.info("skip_test_run：GUI/app 库只验编译+链接")
             return
         bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
         self.run(f"{bash} -c './test_probe'", env="conanrun")
