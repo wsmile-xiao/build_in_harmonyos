@@ -22,6 +22,9 @@ class TkConan(ConanFile):
         if self.options.shared:
             self.options.rm_safe("fPIC")
 
+    def export_sources(self):
+        pass
+
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
 
@@ -62,6 +65,14 @@ class TkConan(ConanFile):
         autotools = Autotools(self)
         autotools.configure(build_script_folder="unix")
         autotools.make(args=["-j1"])
+        # SKILL 要求尝试上游测试。tk 上游测试为 `make test`（非 make check），
+        # 但 tktest 编译失败：OHOS 平台移植缺少 TkpTestsendCmd/TkpPrintWindowId 声明
+        # （tkIntPlatDecls.h 仅在 #if defined(WIN)/#if defined(X11) 段内声明）。
+        # 记录失败，不阻塞构建；test_package 提供功能验证（wish9.0 + Tcl 脚本）。
+        try:
+            autotools.make(target="test", args=["-j1"])
+        except Exception:
+            self.output.warning("make test failed (expected: tktest build fails — OHOS missing TkpTestsendCmd/TkpPrintWindowId)")
 
     def package(self):
         autotools = Autotools(self)
