@@ -26,10 +26,15 @@ if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
     echo "[step] Conan not found or broken, (re)installing..."
     # 安装 OHOS 适配版 conan（私有 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）
     # 不要钉死官方旧版本号，应从配置的 PyPI 源安装最新适配版
-    pip3 install --force-reinstall conan || {
+    # Use python3 -m pip to bypass potentially broken pip3 shebang
+    # (HNP pip3/conan binaries may have shebangs pointing to non-existent
+    #  build-machine paths with ^M line endings)
+    python3 -m pip install --user --force-reinstall conan || {
         echo "[error] Failed to install conan"
         exit 1
     }
+    # Ensure user-installed binaries are found before any broken HNP version
+    export PATH="$HOME/.local/bin:$PATH"
 fi
 
 CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
