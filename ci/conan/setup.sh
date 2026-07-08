@@ -20,11 +20,13 @@ REPO_ROOT="${CI_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
 echo "[step] Conan environment setup..."
 
 # ── 1. Detect/install Conan ──
-if ! command -v conan &>/dev/null; then
-    echo "[step] Conan not found, installing..."
+# Check both that conan exists AND is functional (conan --version succeeds)
+# If conan binary exists but is broken, force-reinstall to fix
+if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
+    echo "[step] Conan not found or broken, (re)installing..."
     # 安装 OHOS 适配版 conan（私有 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）
     # 不要钉死官方旧版本号，应从配置的 PyPI 源安装最新适配版
-    pip3 install conan || {
+    pip3 install --force-reinstall conan || {
         echo "[error] Failed to install conan"
         exit 1
     }
