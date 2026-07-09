@@ -493,6 +493,48 @@ PYEOF
         fi
     fi
 
+    # ── Conf compatibility patch (conan 2.29.1 兼容层) ──
+    # ConanCenter 配方可能使用上游新版 conf (如 tools.gnu:gcc:ar),
+    # 但 OHOS 适配版 conan 2.29.1 未注册这些 conf, 导致 get() 抛异常.
+    # 在 conan create 之前, 将这些 conf 调用替换为环境变量读取.
+    if [ -f "$CONANFILE" ]; then
+        if grep -qE 'tools\.gnu:gcc:(ar|ranlib|nm)' "$CONANFILE" 2>/dev/null; then
+            echo "[step] Conf compat: patching tools.gnu:gcc:* references..."
+            cp "$CONANFILE" "${CONANFILE}.confbak" 2>/dev/null
+            python3 - "$CONANFILE" <<'PYEOF'
+import re, sys
+
+path = sys.argv[1]
+with open(path, 'r') as f:
+    content = f.read()
+
+# Map: conf name → {replacement value, env var}
+conf_map = {
+    'tools.gnu:gcc:ar':     {'val': 'llvm-ar',     'env': 'AR'},
+    'tools.gnu:gcc:ranlib': {'val': 'llvm-ranlib', 'env': 'RANLIB'},
+    'tools.gnu:gcc:nm':     {'val': 'llvm-nm',     'env': 'NM'},
+}
+
+for conf, info in conf_map.items():
+    # Replace: self.conf.get("tools.gnu:gcc:ar", default="...", check_type=str)
+    # With:   os.environ.get("AR", "llvm-ar")
+    escaped = re.escape(conf)
+    pattern = (
+        r'self\.conf\.get\(\s*["\']' + escaped + r'["\']'
+        r'(?:\s*,\s*default\s*=\s*[^)]+)?'
+        r'(?:\s*,\s*check_type\s*=\s*[^)]+)?\s*\)'
+    )
+    replacement = f'os.environ.get("{info["env"]}", "{info["val"]}")'
+    if re.search(pattern, content):
+        content = re.sub(pattern, replacement, content)
+        print(f'  patched: {conf} → os.environ.get("{info["env"]}", "{info["val"]}")')
+
+with open(path, 'w') as f:
+    f.write(content)
+PYEOF
+        fi
+    fi
+
     # ── conan create (with upstream tests in build() + test_package auto-trigger) ──
     # OHOS /tmp is read-only, use build directory instead
     BUILD_LOG="$REPO_ROOT/.ci_logs/conan_build_${pkg_name}_${pkg_ver}.log"
