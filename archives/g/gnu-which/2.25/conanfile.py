@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
-"""Conan recipe template — Autotools projects (configure + make).
-
-Usage: Replace Gnuwhich, gnu-which, 2.25, gnu-which 2.25, MIT, 
-       Fill in requires(), configure_args, and cpp_info.libs as needed.
-
-This template enforces R26: static linking for terminal tools.
-"""
+"""Conan recipe for gnu-which 2.25 — Autotools project."""
 import os
 import shutil
 
 from conan import ConanFile
-from conan.tools.files import get, copy, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.layout import basic_layout
 
@@ -39,32 +33,22 @@ class GnuwhichConan(ConanFile):
 
     def generate(self):
         tc = AutotoolsToolchain(self)
+        # R5: OHOS has no /bin/sh, configure needs bash
+        if self.settings.os in ("Linux", "OHOS"):
+            bash = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
+            tc.configure_args.append(f"SHELL={bash}")
         tc.generate()
 
     def build(self):
         apply_conandata_patches(self)
         autotools = Autotools(self)
-        # Pass CC/CXX/SHELL as configure args to override conan profile env vars
-        # that may point to non-existent paths (e.g. /data/service/hnp/bin/...)
-        configure_args = []
-        if self.settings.os in ("Linux", "OHOS"):
-            bash_path = shutil.which("bash") or "/bin/sh"
-            cc_path = shutil.which("clang") or "clang"
-            cxx_path = shutil.which("clang++") or "clang++"
-            configure_args = [
-                f'CC={cc_path}',
-                f'CXX={cxx_path}',
-                f'SHELL={bash_path}',
-            ]
-        autotools.configure(args=configure_args)
+        autotools.configure()
         autotools.make(args=["-j1"])
+        autotools.make(target="check")
 
     def package(self):
         autotools = Autotools(self)
         autotools.install()
 
     def package_info(self):
-        # gnu-which is a command-line tool, not a library
-        self.cpp_info.libs = []
-        self.cpp_info.includedirs = []
-        self.cpp_info.libdirs = []
+        self.cpp_info.bindirs = ["bin"]
