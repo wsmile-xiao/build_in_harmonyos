@@ -38,12 +38,19 @@ manifest.yaml 状态必须真实：`published`=CI upload 成功，`built`=验证
 ### 4. 伪造 sha256
 conandata.yml 中 sha256 必须是源码包真实哈希。禁止全零、全 f、明显过短、删除字段。
 
-### 5. 禁止 `#ifdef __OHOS__` (R8)
-源码和 patches/ 补丁不得引入平台条件编译宏。应通过 POSIX 接口适配：
+### 5. `#ifdef __OHOS__` 必须有实质逻辑 (R8)
+源码和 patches/ 中可以使用 `#ifdef __OHOS__` 平台守卫（R8 允许），但必须有实质性适配逻辑，禁止空壳 stub：
 ```c
-// 禁止
+// 禁止 — 空壳 stub, 绕过功能
 #ifdef __OHOS__
-    return 0;
+    return 0;  // 直接返回, 无实际适配
+#endif
+// 正确 — 有实质逻辑的平台分支
+#ifdef __OHOS__
+    // 鸿蒙使用 procfs 读取, 替代 /sys/class 读取
+    fd = open("/proc/cpuinfo", O_RDONLY);
+#else
+    fd = open("/sys/class/...", O_RDONLY);
 #endif
 ```
 
