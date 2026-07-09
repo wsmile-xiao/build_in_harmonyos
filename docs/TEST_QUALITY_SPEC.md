@@ -125,6 +125,12 @@ archives/z/zlib/1.3.1/
 | L0c | test_package/ 下有 .c/.cpp/.sh/.py 源文件 | `no_test_sources` |
 | L0d | test() 方法存在且有 self.run() | `no_test_method` / `stub_test_method` |
 | L0e | test_package/MANIFEST.yml 存在 | `no_manifest` |
+| L0f | conanfile.py 中检测 Go/Rust 源文件，阻止非 C/C++ 项目 | `non_cpp_project` |
+| L0g | conanfile.py 语法检查 + conandata.yml sha256 校验 | `invalid_conanfile` / `missing_sha256` |
+| L0h | 扫描 self.run() 中的 ${CC}/${CFLAGS}/${CXX}/${LDFLAGS}，命中拦截 (R33) | `env_var_dependency` |
+| L0i | patch 格式检查（命名规范 `{seq}-{desc}.patch`、patch_file 路径有效） | `invalid_patch_format` |
+| L0j | conan download 检查制品仓是否已存在同版本，已存在且配方有修改则拦截 (R37) | `version_conflict` |
+| L0k | 工具类型包（产物含 bin/）必须有 commands.json，库类型不应有 (R38) | `missing_commands_json` |
 
 L0 任一检查失败 → **构建直接终止**，不进入编译阶段。
 
@@ -136,8 +142,19 @@ L0 任一检查失败 → **构建直接终止**，不进入编译阶段。
 | L1b | 日志中有编译/运行测试程序的证据 |
 | L1c | 如果 MANIFEST 声明了 make check，检查日志中有执行痕迹 |
 | L1d | test() 不是假运行 (echo/print/true only) |
+| L1e | 破坏性反向验证：mv 产物目录重新 conan test，验证 test 真实依赖被测包 (R34) |
 
-### 5.3 测试结果说明
+### 5.3 L2/L4/L5 门禁 (conan-verify 阶段)
+
+| 检查项 | 说明 | 失败码 |
+|--------|------|--------|
+| L2 | smoke test：构建产物中有可执行文件时，执行 `--version` 验证可运行 | `smoke_test_fail` |
+| L4 | 安全扫描：readelf 检查 NX / PIE / RELRO 安全属性 | `security_scan_fail` |
+| L5 | 产物基线：SHA256 产物基线对比，确保产物一致性 | `baseline_mismatch` |
+
+L2/L4/L5 在 conan-verify 阶段执行，与 G0-G4 门禁配合。L2/L4/L5 失败 → conan-verify 失败 → 不可标记 published。
+
+### 5.4 测试结果说明
 
 | 结果 | 含义 |
 |------|------|
@@ -156,6 +173,13 @@ L0 任一检查失败 → **构建直接终止**，不进入编译阶段。
 | 假测试源码 (int main) | 代码审查 + L1b |
 | 不写 MANIFEST.yml | L0e |
 | 不跑 make check | L1c (日志无痕迹) |
+| 提交 Go/Rust 项目（非 C/C++） | L0f |
+| conanfile.py 语法错误/缺 sha256 | L0g |
+| self.run() 中裸用 ${CC}/${CFLAGS} | L0h (R33) |
+| patch 命名不规范/路径无效 | L0i |
+| 同版本号重复上传不同配方 | L0j (R37) |
+| 工具包缺少 commands.json | L0k (R38) |
+| test 不调用被测包 API（假测试） | L1e (破坏性反向验证) |
 
 ## 7. 新增库的标准流程
 

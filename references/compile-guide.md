@@ -1,6 +1,6 @@
 # 编译执行指南（Conan 体系）
 
-> 从 SKILL.md v8.4 提取，供 Step 2 前/按需加载。替代旧版 DESTDIR 模式。
+> 与 SKILL.md 同步更新，供 Step 2 前/按需加载。替代旧版 DESTDIR 模式。
 
 ---
 
@@ -55,7 +55,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-init <name> <ver>
 # Step 2.6: 验证配方（8 道门禁）
 python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <name> <ver>
 
-# Step 3: 收尾（6 步自动）
+# Step 3: 9 步自动收尾（详见 SKILL.md §3 Step 3）
 python3 $SKILL_ROOT/scripts/ohc-run.py finish <name> <ver> published|built|failed
 ```
 
@@ -171,3 +171,4 @@ patches:
 ### 4.5 鸿蒙 sandbox 兼容参数
 
 configure/make 阶段常需：`SED=$(find_tool sed)`、`HELP2MAN=/bin/true`、`MAKEINFO=/bin/true`。详见 `ohc-run.py build` 内置 `find_tool()` 动态检测逻辑。
+)` 动态检测逻辑。

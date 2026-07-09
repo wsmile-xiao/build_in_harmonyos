@@ -1,6 +1,6 @@
 # 鸿蒙编译常见问题快速参考
 
-> 详细错误排查见 `error-patterns.md` 和 `knowledge/graph/`（E001-E080）。
+> 详细错误排查见 `error-patterns.md` 和 `knowledge/graph/`（E001-E211）。
 
 ## 环境变量速查
 
@@ -27,16 +27,16 @@
 
 | 文件 | 内容 |
 |------|------|
-| environment.md | 系统环境特性 |
-| build-systems.md | 构建系统识别与适配 |
-| troubleshooting.md | 问题排查流程 |
-| error-patterns.md | 错误模式总览（E001-E080） |
+| operations/environment.md | 系统环境特性 |
+| operations/build-systems.md | 构建系统识别与适配 |
+| operations/debug-methodology.md | 问题排查流程 |
+| error-patterns.md | 错误模式总览（E001-E211） |
 | musl-compat.md | musl/glibc 兼容性差异 |
 | operations/packaging.md | Conan 打包技术参考 |
-| python-extensions.md | Python 扩展编译 |
-| dependencies.md | 依赖关系图 |
-| harmonyos-specifics.md | 鸿蒙特异性 |
+| operations/python-extensions.md | Python 扩展编译 |
+| operations/dependencies.md | 依赖关系图 |
+| operations/harmonyos-specifics.md | 鸿蒙特异性 |
 
 ---
 
-*文档版本: 2.0 · Conan 体系适配*
+*文档版本: 2.1 · Conan 体系适配*

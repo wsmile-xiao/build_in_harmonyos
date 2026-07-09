@@ -4,7 +4,7 @@
 
 来源: SKILL.md §1.2
 
-## 铁律总表（38 条，违反=bug）
+## 铁律总表（40 条，含 2 条已废弃，38 条活跃，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -15,7 +15,7 @@
 | R5 | **软链接必须验证可执行 + 禁止 ln -sf** | `ls -la` 验证 + `rm -f && ln -s` | 只检查 `-L` 存在性 / `ln -sf` 覆盖 |
 | R6 | **禁止修改生成文件** | 只改 configure.ac/CMakeLists.txt/*.c/*.h（源码层） | sed 改 configure/Makefile/Makefile.in（不可复现） |
 | R7 | **安全弹窗必须先触发再测试** | make install 后 `find bin -type f -exec {} --version \;` | 直接跑 make check 不触发弹窗→进程被杀→假阴性 |
-| R8 | **源码修改"四不"准则** | `#ifdef __OHOS__` 守卫 / 保持上游风格 / 追加平台分支 | 删跨平台代码 / 硬编码路径 / 改原逻辑流 / 偏离代码风格 |
+| R8 | **源码修改"四不"准则** | `#ifdef __OHOS__` 守卫（须有实质逻辑，禁止空壳 stub）/ 保持上游风格 / 追加平台分支 | 删跨平台代码 / 硬编码路径 / 改原逻辑流 / 偏离代码风格 / `#ifdef __OHOS__` 空壳 stub（return 0 绕过功能） |
 | R9 | **质量门禁 FAIL 禁止标 success** | conan_verify 非零 → 降级为 built/failed | 产物有问题仍标记成功 |
 | R10 | **临时文件必须用 $TMPDIR** | 所有 tmp 文件操作使用 `$TMPDIR` 或 `$HOME/tmp` | 硬编码 `/tmp`（鸿蒙 /tmp 只读，见 E002） |
 | R11 | **脚本步骤失败必须先查归档再动手** | 读 `archives/{pkg}/{ver}/README.md` + `manifest.yaml` 获取历史方案 | 直接手动摸索 / 忽略已有补丁和解决方案 |
@@ -258,6 +258,8 @@ conan create 失败
 ### R8 详细说明：源码修改"四不"准则
 
 > **核心原则：你的修改对非鸿蒙平台必须是透明的。**
+>
+> **注意**：源码中可以使用 `#ifdef __OHOS__` 守卫（允许），但 patches/ 补丁文件中不应引入 `#ifdef __OHOS__`，应通过 POSIX 兼容方式修复（如修改 config.guess/config.sub、条件检查等）。
 
 | 不 | 含义 | 错误示例 | 正确做法 |
 |----|------|---------|---------|

@@ -1,7 +1,11 @@
 # AI 适配操作手册 (ADAPTATION_GUIDE)
 
-本文件是 AI / 人类适配人员在 HarmonyOS (OHOS) 平台上适配三方库的**唯一入口**。
+本文件是 AI / 人类适配人员在 HarmonyOS (OHOS) 平台上适配三方库的**操作手册**。
 按步骤执行即可完成一个库的适配。
+
+> 💡 **适用于人工手动适配场景**。AI 驱动的自动化适配流程详见 **SKILL.md §3 核心流程**
+> （含 `ohc-run.py` 脚本自动化：init-build → AI 编译 → conan-init → conan-verify → finish）。
+> 推荐优先使用 SKILL.md §3 的 AI 驱动流程，本手册作为手动参考和模板来源。
 
 ## 1. 框架概述
 
@@ -47,6 +51,9 @@ build_in_harmonyos/
 
 ### Step 1: 确定目录位置
 
+> ⚠️ **W0 — 依赖发布检查**（适配前第一件事）：先检查所有依赖是否已发布到制品仓（R36）。
+> **R37 — 版本号策略**：首次适配用上游版本 `X.Y.Z`，后续修复用 `X.Y.Z.N`（N 从 1 递增）。
+
 ```
 archives/<首字母>/<包名>/<版本号>/
 ```
@@ -91,6 +98,13 @@ ls configure.ac Makefile.in CMakeLists.txt meson.build Makefile
 - [ ] `build()` 方法末尾有上游测试调用 (`make check` / `cmake.test()` / 等)
 - [ ] `conandata.yml` 填写了源码 URL 和 SHA256
 
+> ⚠️ **铁律提示**:
+> - **R26**: 系统同名库（如 ncurses/zlib/readline）必须在 `generate()` 中设置静态编译（`BUILD_SHARED_LIBS=OFF` / `--disable-shared`），避免 `.so` 污染 `/lib`/`/lib64`
+> - **R28**: conanfile.py 必须配套 `test_package/` 目录（Conan L1 官方测试）
+> - **R32**: recipe 内平台判断用 `self.settings.os in ("Linux", "OHOS")`，不能 `== "Linux"`
+> - **R33**: `build()` 中禁止裸用 `${CC}`/`${CFLAGS}` 等 shell 环境变量，必须从 Conan Toolchain / `self.conf` 获取（详见 §4.3 Makefile 模板）
+> - **R37**: 版本号 = 上游版本 + 适配修复后缀（首次 `X.Y.Z`，修复 `X.Y.Z.N`）
+
 ### Step 4: 提取上游测试
 
 ```bash
@@ -119,6 +133,9 @@ test_package/
 - [ ] 测试源文件不是 `int main(){return 0;}` 这种空文件
 - [ ] MANIFEST.yml 的 `assertion_count` 不为 0
 
+> ⚠️ **R34**: test_package 源文件必须**实质调用被测包的 API** / 执行被测包的二进制，
+> 禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证会兜底拦截）。
+
 ### Step 6: 本地验证
 
 ```bash
@@ -132,13 +149,24 @@ conan create . --user=ohpcd --channel=stable -pr:h=$HOME/.conan2/profiles/ohos -
 - [ ] 日志中出现 "Testing package"
 - [ ] 日志中出现 make check / ctest 的执行痕迹
 
+> ⚠️ **R29**: `conan_verify` 通过后才可标记 `published`；未通过只能标 `built` 或 `failed`。
+
 ### Step 7: 提交 PR
 
-```bash
-git add archives/<字母>/<包名>/<版本号>/
-git commit -m "feat: add <包名>/<版本号>"
-git push
-```
+> ⚠️ **禁止直接 `git push`**。必须按 **SKILL.md §0.2 适配工作流规程**（W0-W5）执行：
+
+| 规程 | 内容 |
+|------|------|
+| **W0** | 依赖发布检查 — 适配前检查所有依赖是否已发布到制品仓（R36） |
+| **W1** | 同步主仓库 — `git checkout main && git pull origin main` |
+| **W2** | PR 原子性 — 一个配方一个 PR，框架修改单独 PR |
+| **W3** | 本地 CI 模拟 — `bash ci/conan/build_and_test.sh <软件名>/<版本>` 通过后再提 PR |
+| **W4** | 知识图谱完整性 — 确认 `E###.kv` 与 `doc/E###.md` 配套 |
+| **W5** | Pre-PR 独立审计 — `python3 $SKILL_ROOT/scripts/pre_pr_audit.py` 审计通过后方可 push |
+
+**R16**: 协作不越权 — 创建功能分支 `git checkout -b feat/{软件名}-{版本}`，走 GitCode PR 流程。
+
+**版本号策略 (R37)**: 首次适配用上游版本 `X.Y.Z`；修复适配问题后递增后缀 `X.Y.Z.N`（N 从 1 递增）。制品仓不支持同版本多 revision 并存。
 
 CI 自动触发 L0-L5 门禁检查。
 
@@ -181,9 +209,14 @@ class PackageConan(ConanFile):
     def package(self):
         autotools = Autotools(self)
         autotools.install()
-        # 清理不需要的文件
-        for pattern in ["*.la", "*.so*", "*.dylib"]:
+        # 清理不需要的文件（.la / .dylib 一律删除）
+        for pattern in ["*.la", "*.dylib"]:
             copy(self, pattern, dst=os.path.join(self.package_folder, "lib"), src=os.path.join(self.package_folder, "lib"), keep_path=False, delete=True)
+        # R26: 仅系统同名库删除 .so（避免污染 /lib/ /lib64/）
+        # 判断方法：检查 /lib 和 /lib64 下是否已有同名 .so
+        # <TODO: 如果本库是系统同名库（如 ncurses/zlib/readline），取消下面的注释>
+        # copy(self, "*.so*", dst=os.path.join(self.package_folder, "lib"), src=os.path.join(self.package_folder, "lib"), keep_path=False, delete=True)
+        # 非系统同名库保留 .so（默认动态链接，由 Conan 管理依赖链）
 
     def package_info(self):
         self.cpp_info.libs = ["<库名>"]
@@ -228,9 +261,14 @@ class PackageConan(ConanFile):
 
 ### 4.3 Makefile 项目 (zlib 等)
 
+> ⚠️ **R33**: Makefile 项目无法像 CMake/Autotools 那样通过 Toolchain 自动注入编译器路径。
+> **必须**在 `generate()` 中从 Conan conf 获取编译器路径并写入环境变量脚本，
+> `build()` 中的 `$CC`/`$CXX` 来自 Conan 生成的 env 脚本（`conanbuildenv`），而非 shell 环境变量。
+
 ```python
 from conan import ConanFile
 from conan.tools.files import get, apply_conandata_patches
+from conan.tools.env import VirtualBuildEnv, Environment
 import os
 
 class PackageConan(ConanFile):
@@ -242,12 +280,27 @@ class PackageConan(ConanFile):
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
 
+    def generate(self):
+        # R33: 从 Conan conf 获取编译器路径，禁止依赖 shell 环境变量
+        env = VirtualBuildEnv(self)
+        env.generate()
+        # 从 Conan settings 获取编译器路径（CI/release worker 上 $CC 可能为空）
+        cc = self.conf.get("tools.build:compiler_executables:c", "clang", check_type=str)
+        cxx = self.conf.get("tools.build:compiler_executables:cpp", "clang++", check_type=str)
+        # 写入 env 确保可追溯（$CC 由此脚本提供，不是 shell 变量）
+        env = Environment()
+        env.define("CC", cc)
+        env.define("CXX", cxx)
+        env.define("AR", self.conf.get("tools.build:compiler_executables:ar", "llvm-ar", check_type=str))
+        env.define("RANLIB", self.conf.get("tools.build:compiler_executables:ranlib", "llvm-ranlib", check_type=str))
+        env.vars(self).save_script("conanbuild")
+
     def build(self):
         apply_conandata_patches(self)
         # <TODO: 按 Makefile 参数调整>
-        config_shell = os.environ.get("CONFIG_SHELL", "sh")
-        self.run(f"{config_shell} ./configure --static --prefix=/")
-        self.run("make -j1")
+        # R33: $CC/$CXX 来自 generate() 生成的 conanbuild env 脚本，不是 shell 变量
+        self.run("sh ./configure --static --prefix=/")
+        self.run("make -j1 CC=$CC CXX=$CXX")
         # ── 上游官方测试 (必做) ──
         self.run("make check")
 
@@ -344,6 +397,8 @@ assertion_count: <测试断言数>
 
 ## 7. conandata.yml 模板
 
+> ⚠️ **R39**: 源码 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源，禁止使用个人 fork、网盘、不明 CDN。
+
 ```yaml
 sources:
   - url: "https://example.com/package-1.0.tar.gz"
@@ -369,11 +424,15 @@ patches:
 ```
 [ ] conanfile.py 的 build() 方法末尾有 make check / cmake.test() / meson.test()
 [ ] test_package/conanfile.py 有 test() 方法且含 self.run()
-[ ] test_package/ 下有测试源文件
+[ ] test_package/ 下有测试源文件（R34: 必须实质调用被测包 API）
 [ ] test_package/MANIFEST.yml 已填写, assertion_count > 0
-[ ] conandata.yml 有源码 URL 和 SHA256
+[ ] conandata.yml 有源码 URL 和 SHA256（R39: URL 必须为官方源）
 [ ] 本地 conan create 成功通过 (含测试)
 [ ] 日志中有 make check / test_package 执行痕迹
+[ ] 系统同名库已配置静态链接（R26）
+[ ] 命令行工具已创建 commands.json（R38: 软件级别目录）
+[ ] 版本号正确（R37: 首次 X.Y.Z / 修复 X.Y.Z.N）
+[ ] 已通过 W3 本地 CI 模拟 + W5 Pre-PR 审计
 ```
 
 ## 10. 参考实现
