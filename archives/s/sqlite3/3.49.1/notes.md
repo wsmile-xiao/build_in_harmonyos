@@ -23,8 +23,7 @@
 
 1. **autosetup jimsh0 exec 限制**: autosetup 的 bootstrap TCL 解释器 jimsh0 在 HarmonyOS HMDFS 上无法 exec 子进程，导致基于 autosetup 的项目 configure 失败。解决方案是手动编译（等同于 Makefile.fallback）。
 2. **sqlite3 手动编译**: sqlite3 autoconf 包非常简洁，核心只需 `clang -c sqlite3.c` + `clang -o sqlite3 shell.c sqlite3.c`。
-
 ---
 
-**编译结束**: 2026-04-16 09:10
-**最终状态**: success
+**编译结束**: 2026-07-08 18:27
+**最终状态**: built
