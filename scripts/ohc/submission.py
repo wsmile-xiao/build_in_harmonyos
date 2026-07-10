@@ -10,9 +10,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -258,26 +260,142 @@ def _scan_knowledge_ref(ver_dir: Path) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════
-# cmd: submit — 纯自检
+# cmd: submit — 门禁 + 自检 + git push
 # ═══════════════════════════════════════════════════════
 
+def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
+                         project_dir: str, reason: str,
+                         actions: list[str]) -> None:
+    """Emit HANDOFF block for submit gate failure."""
+    from .handoff import HandoffData, emit_handoff
+    data = HandoffData(
+        exit_reason=reason,
+        exit_code=2,
+        step_failed="submit",
+        resume_cmd=f"python3 scripts/ohc-run.py submit {software} {version}",
+        knowledge_hit="none",
+        knowledge_gap=False,
+        log_file="",
+        src_dir="",
+        task_card="",
+        software_name=software,
+        software_version=version,
+        archive_dir=str(ver_dir),
+        ai_next_actions=actions,
+    )
+    emit_handoff(data, project_dir=project_dir)
+
+
 def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
-    """Run self-check for the given software+version (no YAML generation)."""
+    """Submit PR: blocking gates → self-check → git push.
+
+    Gates (all blocking with HANDOFF):
+    1. finish completed (manifest.yaml exists)
+    2. W3 local CI passed (.ci-result.json with exit_code=0)
+    3. W4 pre-PR audit passed (audit-result.json with verdict=pass, P0/P1=0)
+    """
     project_dir = pdir or find_project_dir()
     agent_id = get_agent_id(project_dir)
     letter = software[0].lower()
     ver_dir = _archive_dir(letter, software, version, project_dir)
 
     if not ver_dir.exists():
-        log_fail(f"版本目录不存在: {ver_dir}")
+        log_fail(f"❌ 版本目录不存在: {ver_dir}")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "finish_not_run",
+            ["版本目录不存在，请先执行 finish",
+             f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
         return 1
 
-    # Load manifest
+    # ── Gate 1/3: finish completed (manifest.yaml exists) ──
+    manifest_path = ver_dir / "manifest.yaml"
+    if not manifest_path.exists():
+        log_fail("❌ Gate 1/3: finish 未完成 (manifest.yaml 不存在)")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "finish_not_run",
+            ["请先执行 finish 完成编译收尾",
+             f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
+        return 1
+    log_ok("✅ Gate 1/3: finish 已完成")
+
+    # ── Gate 2/3: W3 local CI passed (.ci-result.json) ──
+    ci_result_path = ver_dir / ".ci-result.json"
+    if not ci_result_path.exists():
+        log_fail("❌ Gate 2/3: W3 本地 CI 模拟未通过 (.ci-result.json 不存在)")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "w3_not_passed",
+            ["W3 本地 CI 模拟未执行或失败，请重新 finish",
+             f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
+        return 1
+    try:
+        ci_data = json.loads(ci_result_path.read_text(encoding="utf-8"))
+        if ci_data.get("exit_code", -1) != 0:
+            log_fail(f"❌ Gate 2/3: W3 本地 CI 模拟未通过 (exit_code={ci_data.get('exit_code')})")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "w3_not_passed",
+                ["W3 本地 CI 模拟未通过，请修复后重新 finish",
+                 f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
+            return 1
+        # Verify integrity hash (prevent AI forgery)
+        import hashlib
+        ts = ci_data.get("timestamp", "")
+        ec = ci_data.get("exit_code", -1)
+        raw = f"{ts}:{software}:{version}:{ec}"
+        expected_hash = hashlib.sha256(raw.encode()).hexdigest()[:16]
+        actual_hash = ci_data.get("integrity_hash", "")
+        if actual_hash != expected_hash:
+            log_fail("❌ Gate 2/3: .ci-result.json integrity_hash 不匹配（疑似伪造）")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "w3_forged",
+                [".ci-result.json 完整性校验失败，请重新 finish（不要手动创建此文件）",
+                 f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
+            return 1
+    except (json.JSONDecodeError, OSError) as e:
+        log_fail(f"❌ Gate 2/3: .ci-result.json 格式无效: {e}")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "w3_invalid",
+            [".ci-result.json 格式无效，请重新 finish"])
+        return 1
+    log_ok("✅ Gate 2/3: W3 本地 CI 模拟已通过")
+
+    # ── Gate 3/3: W4 Pre-PR audit ──
+    audit_result_path = ver_dir / "reports" / "audit-result.json"
+    if not audit_result_path.exists():
+        log_fail("❌ Gate 3/3: W4 Pre-PR 审计未执行 (audit-result.json 不存在)")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "w4_audit_not_done",
+            ["W4 Pre-PR 审计未执行，请先完成审计",
+             f"python3 scripts/pre_pr_audit.py generate --repo-dir {project_dir} --package {software} --version {version}",
+             "审计子任务完成后将结果保存为 reports/audit-result.json",
+             f"重新提交: python3 scripts/ohc-run.py submit {software} {version}"])
+        return 1
+    try:
+        audit_data = json.loads(audit_result_path.read_text(encoding="utf-8"))
+        verdict = audit_data.get("verdict", "unknown")
+        issues = audit_data.get("issues", [])
+        p0_count = sum(1 for i in issues if i.get("severity") == "P0")
+        p1_count = sum(1 for i in issues if i.get("severity") == "P1")
+        if verdict != "pass" or p0_count > 0 or p1_count > 0:
+            log_fail(f"❌ Gate 3/3: W4 审计未通过 (verdict={verdict}, P0={p0_count}, P1={p1_count})")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "w4_audit_failed",
+                ["W4 Pre-PR 审计未通过，必须修复 P0/P1 问题",
+                 "修复后重新生成审计输入并重新审计",
+                 f"python3 scripts/pre_pr_audit.py generate --repo-dir {project_dir} --package {software} --version {version}",
+                 f"审计通过后重新提交: python3 scripts/ohc-run.py submit {software} {version}"])
+            return 1
+    except (json.JSONDecodeError, OSError) as e:
+        log_fail(f"❌ Gate 3/3: audit-result.json 格式无效: {e}")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "w4_audit_invalid",
+            ["audit-result.json 格式无效，请重新审计"])
+        return 1
+    log_ok("✅ Gate 3/3: W4 Pre-PR 审计通过")
+
+    # ── All gates passed, run self-check checklist ──
     manifest = _parse_yaml_simple(ver_dir / "manifest.yaml")
     status = str(manifest.get("status", "unknown"))
-    build_system = str(manifest.get("build_system", "unknown"))
 
-    # ── Checklist ──
     log_info("执行自检 (checklist)...")
     checklist = {
         "manifest_complete": _check_manifest_complete(ver_dir),
@@ -293,70 +411,80 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
         else:
             log_warn(f"  {check_name}: FAIL")
 
-    # ── Scan patches ──
-    patches_dir = ver_dir / "patches"
-    patches_count = 0
-    packaging_files: list[str] = []
-    if patches_dir.is_dir():
-        patches_count = len(list(patches_dir.glob("*.patch")))
-    packaging_dir = ver_dir / "packaging"
-    if packaging_dir.is_dir():
-        packaging_files = sorted([f.name for f in packaging_dir.glob("*.tar.gz")])
+    failed_checks = [k for k, v in checklist.items() if v is False]
+    if failed_checks:
+        log_fail(f"❌ 自检未通过: {failed_checks}")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "self_check_failed",
+            [f"自检未通过: {failed_checks}",
+             "修复后重新 submit",
+             f"python3 scripts/ohc-run.py submit {software} {version}"])
+        return 1
 
-    # ── Test results ──
-    test_passed = manifest.get("test_results", {})
-    if isinstance(test_passed, dict):
-        test_passed_val = test_passed.get("passed", 0)
-        test_failed_val = test_passed.get("failed", 0)
-        test_note = test_passed.get("note", "")
-    else:
-        # Try flat keys
-        test_passed_val = manifest.get("test_passed", 0)
-        test_failed_val = manifest.get("test_failed", 0)
-        test_note = manifest.get("test_note", "")
+    # ── Execute git operations ──
+    branch_name = f"feat/{software}-{version}"
+    log_info(f"创建分支并提交: {branch_name}")
 
-    # ── Knowledge ──
-    draft_entries = _scan_draft_entries(software, project_dir)
-    knowledge_gained = _scan_knowledge_gained(ver_dir)
-    knowledge_ref = _scan_knowledge_ref(ver_dir)
+    result = subprocess.run(
+        ["git", "checkout", "-b", branch_name],
+        cwd=project_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        result2 = subprocess.run(
+            ["git", "checkout", branch_name],
+            cwd=project_dir, capture_output=True, text=True)
+        if result2.returncode != 0:
+            log_fail(f"❌ 创建/切换分支失败: {result.stderr.strip()}")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "git_branch_failed",
+                [f"创建分支失败: {result.stderr.strip()}",
+                 f"手动执行: git checkout -b {branch_name}",
+                 f"然后重新 submit: python3 scripts/ohc-run.py submit {software} {version}"])
+            return 1
+    log_ok(f"  分支切换 ✅ ({branch_name})")
 
-    # Classify knowledge gained into L1/L2
-    l1_writes: list[str] = []
-    l2_writes: list[str] = []
-    for entry in knowledge_gained:
-        # Simple heuristic: entries mentioning platform/system → L1
-        if any(kw in entry.lower() for kw in ["平台", "platform", "系统", "system",
-                                                "kernel", "bionic", "musl"]):
-            l1_writes.append(entry)
+    result = subprocess.run(
+        ["git", "add", "archives/", "knowledge/graph/draft/"],
+        cwd=project_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        log_fail(f"❌ git add 失败: {result.stderr.strip()}")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "git_add_failed",
+            [f"git add 失败: {result.stderr.strip()}"])
+        return 1
+    log_ok("  git add ✅")
+
+    commit_msg = f"feat: 编译 {software} {version}"
+    result = subprocess.run(
+        ["git", "commit", "-m", commit_msg],
+        cwd=project_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        if "nothing to commit" in result.stdout.lower() or "nothing to commit" in result.stderr.lower():
+            log_warn("  ⚠️ git commit: 无变更（可能已提交）")
         else:
-            l2_writes.append(entry)
+            log_fail(f"❌ git commit 失败: {result.stderr.strip()}")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "git_commit_failed",
+                [f"git commit 失败: {result.stderr.strip()}"])
+            return 1
+    else:
+        log_ok("  git commit ✅")
 
-    # ── New issues count ──
-    reports_dir = ver_dir / "reports"
-    new_issues = 0
-    if reports_dir.is_dir():
-        for rf in reports_dir.glob("*.md"):
-            content = rf.read_text(encoding="utf-8", errors="replace")
-            new_issues += len(re.findall(r'❌|FAIL|失败|issue', content, re.I))
+    result = subprocess.run(
+        ["git", "push", "origin", branch_name],
+        cwd=project_dir, capture_output=True, text=True)
+    if result.returncode != 0:
+        log_fail(f"❌ git push 失败: {result.stderr.strip()}")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "git_push_failed",
+            [f"git push 失败: {result.stderr.strip()}",
+             "检查远端仓库配置和权限",
+             f"手动推送后重新 submit: python3 scripts/ohc-run.py submit {software} {version}"])
+        return 1
+    log_ok("  git push ✅")
 
-    # ── Print summary ──
-    passed_count = sum(1 for v in checklist.values() if v)
-    total_count = len(checklist)
-
-    print(f"\n  ✅ 自检完成: {passed_count}/{total_count} PASS")
-    print(f"     Contributor: {agent_id}")
-    print(f"     Status: {status}")
-    print(f"     Patches: {patches_count}")
-    print(f"     Knowledge: {len(knowledge_gained)} gained, {len(knowledge_ref)} ref")
-    print(f"     Issues found: {new_issues}")
-    print()
-    print(f"  下一步:")
-    print(f"    git checkout -b feat/{software}-{version}")
-    print(f"    git add archives/ knowledge/graph/draft/")
-    print(f"    git commit -m \"feat: 编译 {software} {version}\"")
-    print(f"    git push origin feat/{software}-{version}")
-    print(f"    然后在 GitCode 创建 PR")
-
+    print(f"\n  ✅ PR 提交完成: {software} {version}")
+    print(f"     分支: {branch_name}")
+    print(f"     请在 GitCode 创建 Pull Request")
     return 0
 
 
@@ -778,7 +906,7 @@ def submit_cli(argv: list[str] | None = None) -> int:
     """CLI entry point: ohc submit <software> <version>"""
     parser = argparse.ArgumentParser(
         prog="ohc submit",
-        description="编译自检（不生成提交单）",
+        description="门禁检查(完成/W3/W4) + 自检 + git push（阻塞式，失败 emit HANDOFF）",
     )
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", help="版本号")

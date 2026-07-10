@@ -218,18 +218,69 @@ class FinishPipeline:
                 if self.status == "published": self.status = "built"
                 elif self.status == "built": self.status = "failed"
 
-    # Step 3.5: Local CI simulation (W3)
+    # Step 3.5: Local CI simulation (W3) — BLOCKING with HANDOFF
     def step35_local_ci(self):
-        log_info("Step 3.5/8: 本地 CI 模拟 (W3)...")
+        log_info("Step 3.5/8: 本地 CI 模拟 (W3) [阻塞门禁]...")
         from .workflow_checks import run_local_ci
         rc = run_local_ci(self.software, self.version, pdir=str(self.pdir))
         if rc == 0:
             self.steps["step35"] = True
             self._task_card("11c2", "✅完成", "local CI OK")
+            self._write_ci_result(passed=True)
+            log_ok("  ✅ W3 本地 CI 模拟通过")
         else:
             self.steps["step35"] = False
-            self._task_card("11c2", "⚠️部分", "CI模拟未通过")
-            log_warn("  ⚠️ 本地 CI 模拟未通过，提交 PR 前必须修复！")
+            self._task_card("11c2", "❌失败", "CI模拟失败")
+            log_fail("  ❌ W3 本地 CI 模拟失败 — 阻塞！不可继续 finish")
+            self._emit_w3_handoff()
+            sys.exit(1)
+
+    def _write_ci_result(self, passed: bool):
+        """Write .ci-result.json with integrity info (防伪造)."""
+        import json
+        import hashlib
+        ts = datetime.now().isoformat()
+        # Integrity hash: prevents AI from forging this file manually
+        raw = f"{ts}:{self.software}:{self.version}:{0 if passed else 1}"
+        integrity_hash = hashlib.sha256(raw.encode()).hexdigest()[:16]
+        ci_result = {
+            "timestamp": ts,
+            "exit_code": 0 if passed else 1,
+            "software": self.software,
+            "version": self.version,
+            "step": "W3_local_ci",
+            "archive_dir": str(self.archive_dir),
+            "integrity_hash": integrity_hash,
+        }
+        ci_path = self.archive_dir / ".ci-result.json"
+        ci_path.write_text(
+            json.dumps(ci_result, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _emit_w3_handoff(self):
+        """Emit HANDOFF block for W3 local CI failure (blocking)."""
+        from .handoff import HandoffData, emit_handoff
+        data = HandoffData(
+            exit_reason="w3_local_ci_failed",
+            exit_code=2,
+            step_failed="Step3.5",
+            resume_cmd=f"python3 scripts/ohc-run.py finish {self.software} {self.version} {self.status}",
+            knowledge_hit="none",
+            knowledge_gap=False,
+            log_file="",
+            src_dir="",
+            task_card=str(self.archive_dir / "TASK_CARD.md"),
+            software_name=self.software,
+            software_version=self.version,
+            archive_dir=str(self.archive_dir),
+            ai_next_actions=[
+                "W3 本地 CI 模拟失败，必须修复后重新 finish",
+                "查看上方错误输出，定位 setup.sh 或 build_and_test.sh 失败原因",
+                f"修复后重新运行: python3 scripts/ohc-run.py finish {self.software} {self.version} {self.status}",
+            ],
+        )
+        emit_handoff(data, project_dir=str(self.pdir))
 
     # Step 4: finalize-archive
     def step4_finalize_archive(self):

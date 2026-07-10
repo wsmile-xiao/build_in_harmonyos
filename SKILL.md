@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 11.1
+version: 11.4
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -96,72 +96,71 @@ git pull origin main
 ```
 > 不同步=用过期知识库+旧框架要求工作，可能重复踩已修复的坑。
 
-**W2 — PR 原子性**
+**W2 — PR 原子性 + 结构完整性（嵌入 finish）**
 每个 PR **只允许包含一个配方软件及其知识图谱草稿**。如果对 SKILL 框架本身有修改（`scripts/`/`templates/`/`ci/`/`SKILL.md`/`references/` 等），**必须单独提交 PR**。
 > 混合提交=审核困难+回滚困难。配方 PR 和框架 PR 的审核标准不同。
-
-**W3 — 本地 CI 模拟**
-每个配方适配完成后，**必须**按照 CI 模式本地模拟验证通过后再提交 PR：
-```bash
-# 使用 CI 同款脚本验证
-bash ci/conan/setup.sh                          # 环境初始化
-bash ci/conan/build_and_test.sh <软件名>/<版本>  # conan create + L4/L5
-# 标记 W3 通过 (写入 JSON 结果，供 W4 前置检查，不可伪造)
-python3 -c "
-import json, time
-json.dump({
-    'timestamp': time.strftime('%Y-%m-%dT%H:%M:%S'),
-    'exit_code': 0,
-    'log_path': 'ci-local-output.log'
-}, open('.ci-result.json', 'w'), indent=2)
-"
-```
-> 本地不过=CI 必挂。不要把已知失败的配方推给 CI。
-> W4 前置检查会验证 `.ci-result.json` 的 timestamp 和 exit_code 字段完整性，空文件或字段缺失将拒绝。
-
-**W4 — Pre-PR 独立审计（⭐ 质量门禁，不可跳过）**
-
-> **⚠️ 这是提PR前的最后一道质量门禁。跳过 W4 = 流程缺陷 = PR 必被拒绝。**
 >
-> 每次适配完成后，在 `git push` + 创建 PR **之前**，**必须**执行独立审计。
-> 审计使用 `.gitcode/` 下的两个规则文件，由**独立子任务**执行（上下文隔离，避免自审盲区）。
-> W4 在 finish 完成后独立执行，不在 finish 内部。
+> **结构完整性由 `finish` step [5/9] 强制执行**（L0a-L0e 等效检查）：test_package/ 目录
+> 存在、conanfile.py 存在、测试源文件存在、MANIFEST.yml 存在。不通过 → HANDOFF + exit 1。
+> 历史教训：CI 审计发现 181 个结构缺失失败（115 缺测试源 + 66 缺 MANIFEST）。
 
-**前置条件**：W3 本地 CI 模拟已通过（`.ci-result.json` 标记存在且字段完整）。
+**W3 — 本地编译验证（⭐ 嵌入 finish step [5/9]，HANDOFF 强制）**
 
-**执行流程**：
+> **不是散乱脚本，而是 finish 流程内部的阻塞步骤。** AI 跑 finish 时自动执行，
+> 无法跳过。失败输出 HANDOFF 块（含根因+修复命令+resume 指令），AI 修复后 `--resume` 继续。
 
-```bash
-# 1. 检查前置条件 (W3 是否通过)
-python3 $SKILL_ROOT/scripts/pre_pr_audit.py check --repo-dir $REPO_DIR
+`finish` step [5/9] 内部执行：
+1. **W2 结构检查**（L0a-L0e）：test_package/ 完整性 → 不通过 HANDOFF
+2. **R36 依赖检查**：`conan download --only-recipe` 验证依赖已发布 → 未发布 HANDOFF
+3. **conan create 编译验证**：实际运行 `conan create` → 失败 HANDOFF（含知识图谱匹配的根因）
+4. **通过** → 自动写入 `.ci-result.json`（含 conan create 日志 SHA256 哈希，防伪造）
 
-# 2. 生成审计输入 (收集变更文件 + 加载 .gitcode/ 规则)
-python3 $SKILL_ROOT/scripts/pre_pr_audit.py generate \
-    --repo-dir $REPO_DIR --package <软件名> --version <版本>
+> **⚠️ 禁止手动创建或修改 `.ci-result.json`**。此文件由 finish step [5/9] 写入，
+> 含日志哈希。`submit` 会验证此哈希与实际日志匹配。
+> 历史教训：CI 审计发现 431 个编译失败流入 CI（55%），根因是 AI 跳过 conan create
+> 验证或手动伪造 `.ci-result.json`。嵌入式 HANDOFF 从结构上消除此可能。
 
-# 3. 派发审计子任务 (createSubTask)
-#    objective 内容: templates/audit-prompt.md
-#    审计子任务读取 /tmp/audit-input-*.json，输出 /tmp/audit-result-*.json
+**W4 — Pre-PR 独立审计（⭐ 嵌入 submit，HANDOFF 强制）**
 
-# 4. 处理审计报告
-python3 $SKILL_ROOT/scripts/pre_pr_audit.py report \
-    --audit-result /tmp/audit-result-*.json
+> **不是独立脚本，而是 submit 流程内部的前置检查。** AI 跑 submit 时自动检查 W4 是否完成，
+> 未完成则 HANDOFF 拒绝 push。审计本身由独立子任务执行（上下文隔离，避免自审盲区）。
+
+**`submit` 内部执行**：
+1. 检查 finish 已完成（manifest 状态 = published/built）→ ❌ HANDOFF "先完成 finish"
+2. 检查 W4 审计结果存在（`.audit-result.json`）→ ❌ HANDOFF 输出审计步骤：
+
 ```
+┌── HANDOFF ──────────────────────────────────────┐
+│ W4 REQUIRED: Pre-PR audit not yet completed       │
+│                                                    │
+│ Step 1: 生成审计输入                                │
+│   python3 $SKILL_ROOT/scripts/pre_pr_audit.py generate \  │
+│     --repo-dir $REPO_DIR --package <软件名> --version <版本>   │
+│                                                    │
+│ Step 2: 派发审计子任务 (createSubTask)              │
+│   objective: templates/audit-prompt.md            │
+│   输入: /tmp/audit-input-*.json                    │
+│   输出: /tmp/audit-result-*.json                  │
+│                                                    │
+│ Step 3: 处理审计报告                                │
+│   python3 $SKILL_ROOT/scripts/pre_pr_audit.py report \  │
+│     --audit-result /tmp/audit-result-*.json       │
+│                                                    │
+│ Resume: ohc-run.py submit <软件名> <版本> --resume │
+└────────────────────────────────────────────────────┘
+```
+
+3. 检查审计判定 = pass（P0/P1 清零）→ ❌ HANDOFF "修复 P0/P1 后重新审计"
+4. **全部通过** → `git push` + 创建 PR
 
 **审计规则文件**（位于仓库 `.gitcode/` 目录）：
 - `code-style.md` — 代码规范性标准 (conanfile.py/shell/C++/YAML/Python)
 - `review-memory.md` — PR 审查规则 (欺骗检测/配方质量/文件规范/PR合规)
 
-**审计判定**：
-- P0 (欺骗行为) / P1 (配方错误) 问题 → ❌ 必须修复后重新审计
-- P2 (代码规范) / P3 (建议) → ⚠️ 警告，不阻塞但建议修复
-- 全部 P0/P1 清零 → ✅ 审计通过，方可 `git push` + 创建 PR
+**审计判定**：P0/P1 → ❌ 必须修复 | P2/P3 → ⚠️ 警告不阻塞 | 全部 P0/P1 清零 → ✅ 通过
 
-> **为什么不能跳过 W4？**
-> - AI 自审存在盲区（自己写的代码自己看不出问题）
-> - `.gitcode/` 规则文件由项目维护者持续更新，包含最新审查标准
-> - gitcode-bot 的 CI 审查会在 PR 创建后自动执行，W4 提前拦截可避免反复修复
-> - **历史教训**：sqlite3 首次 PR 因硬编码 `llvm-ar` 被审查打回，W4 可提前发现此类问题
+> **为什么 W4 不能跳过？** submit 是唯一的 PR 创建入口，W4 是 submit 的前置条件。
+> AI 无法绕过 submit 直接 `git push`（无 finish 标记 = submit 拒绝 = 无法创建 PR）。
 
 **W5 — 知识图谱完整性检查**
 适配结束时**必须**检查知识图谱内容的完整性和合规性：
@@ -203,6 +202,9 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 
 # Step 3: 收尾（9 步自动，详见 §3 Step 3）
 python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|failed|archived
+
+# Step 4: 提交 PR（内含 W4 前置检查，HANDOFF 强制）
+python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本>
 ```
 
 **如何选择**：已有 conanfile.py / 简单编译 → 模式 A；首次编译 / 复杂依赖 / 需深度调试 → 模式 B。
@@ -251,12 +253,12 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R33 | **build() 禁止依赖未定义的 shell 环境变量**：编译器/标志必须从 Conan Toolchain 或 `self.conf_info` 获取，不能裸用 `${CC}`/`${CFLAGS}` 等 shell 变量（release worker 上为空→编译静默失败） |
 | R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
 | R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
-| R36 | **依赖必须先发布再构建下游**：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C |
+| R36 | **依赖必须先发布再构建下游**（机械门禁）：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C。`finish` step [5/9] 和 CI L0i 均 Hard Fail（不止警告） |
 | R37 | **版本号 = 上游版本 + 适配修复后缀**：首次适配用上游版本 `X.Y.Z`，修复适配问题后加后缀 `X.Y.Z.N`（N 从 1 递增）。原因：cnb.cool 制品仓不支持同版本多 revision 并存，必须用版本号区分 |
 | R38 | **命令行工具必须声明 commands.json**：如果构建产物包含可执行文件，必须在**软件级别**目录下创建 `commands.json`（hicmd 格式）。库类型不需要。CI 门禁 L0k 自动校验 |
 | R39 | **源码 URL 必须为官方源**：conandata.yml 中 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源，禁止个人 fork/网盘/不明 CDN。CI 自动添加镜像 fallback |
 | R40 | **深度适配库需验证适配完整性**：图形渲染/UI框架/多媒体/外设/系统底层类库，编译通过≠适配完成，需检查实质性平台适配代码（非 stub/return 0） |
-| W0-W5 | **适配工作流**：适配前先查依赖是否已发布(W0)；每次适配前同步main(W1)；PR原子性=一配方一PR(W2)；本地CI模拟通过再提PR(W3)；提PR前独立审计(W4)；适配结束检查知识图谱完整性(W5) |
+| W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
 
@@ -383,13 +385,15 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 | [2/9] close-archive | 归档关闭 | exit 2 |
 | [3/9] clean-verify 重建 | 干净构建验证（非阻塞，平台限制可跳过） | 非阻塞 |
 | [4/9] conan-verify | Conan 配方验证（如 Step 2.6 已通过且配方未修改则跳过） | ❌ 阻塞 |
-| [5/9] 本地 CI 模拟 (W3) | build_and_test.sh 模拟，写入 .ci-result.json | 非阻塞（警告） |
+| [5/9] W2结构+R36依赖+W3编译 | 结构检查(L0a-L0e)+依赖发布(conan download)+conan create，写入.ci-result.json(含日志哈希) | ❌ 阻塞 (HANDOFF) |
 | [6/9] commands.json 检查 (R38) | 命令行工具声明验证 | 非阻塞（警告） |
 | [7/9] finalize-archive | 清理+校验+版本索引 | 非致命 |
 | [8/9] check-knowledge-gap | 知识完整性检查 (W5) | 非阻塞 |
 | [9/9] gen_summary + PR 原子性 | 重新生成 SUMMARY.md (W2 检查) | 非致命 |
 
-> **W4 Pre-PR 独立审计不在 finish 内部**，在 finish 完成后独立执行。流程顺序：finish → W4 审计 → git push → 创建 PR。
+> **W4 Pre-PR 独立审计不在 finish 内部**，在 `submit` 内部作为前置检查执行。
+> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR）。
+> AI 操作路径：`finish` → `submit`，两条命令，不可跳过。
 
 **前置条件**：test-report 存在 + Staging 验证完成 + conanfile.py 存在。
 **状态值**：`published`(verify通过+CI upload) | `built`(verify通过未upload) | `failed`(编译或验证失败) | `archived`(旧版本归档)。
@@ -597,13 +601,13 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `pre-analysis` | ⭐ 鸿蒙PC平台适配预分析（图形/音视频/系统集成/平台代码扫描） |
 | `conan-init` | 生成 conanfile.py + conandata.yml + test_package/ ⭐ |
 | `conan-verify` | conan create + G0-G4 + L2/L4/L5 + 知识图谱(R30) + 草稿(R31) ⭐ |
-| `finish` | 补丁+归档+clean-verify+conan-verify+CI模拟+知识+摘要（9 步），W4审计在finish后独立执行 |
+| `finish` | 补丁+归档+clean-verify+conan-verify+W2结构+R36依赖+W3编译(阻塞,HANDOFF)+知识+摘要（9步）⭐ |
 | `engine` / `graph add\|update\|validate\|promote` | 知识图谱查询/管理/草稿提升 |
 | `req add\|list\|close\|validate` | ⭐ 需求图谱管理（系统能力缺口跟踪） |
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
-| `search-url` / `submit` / `review` / `post-merge` | URL 搜索 / PR 自检 / 主编审核 / 合并后索引 |
+| `search-url` / `submit` / `review` / `post-merge` | URL搜索 / **PR提交(前置W4检查,HANDOFF强制)** / 主编审核 / 合并后索引 |
 | `init-archive` / `close-archive` / `finalize-archive` | 归档初始化 / 关闭 / 清理校验 |
 | `check-env` / `clean-verify` / `check-knowledge-gap` | 环境检查 / 干净构建验证 / 知识缺口检查 |
 | `dispatch` / `summary` / `conan-migrate` | 多任务调度 / 统计摘要 / Conan 迁移辅助 |
@@ -615,7 +619,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `scripts/gen-test-packages.py` | 批量为缺 test_package/ 的配方生成测试文件 |
 | `scripts/sync-recipes.py` | 从 conan 缓存同步配方到 archives/ |
 | `scripts/migrate_kv_to_yaml.py` | KV→YAML 渐进迁移 |
-| `scripts/pre_pr_audit.py` | ⭐ W5: Pre-PR 独立审计 (收集变更+加载规则+生成审计输入+判定报告) |
+| `scripts/pre_pr_audit.py` | ⭐ W4: Pre-PR 审计工具 (generate/report/check 子命令，由 submit 内部调用) |
 | `scripts/gitcode_pr.py` | ⭐ GitCode PR 管理 (创建PR/获取评论/CI状态/回复评论) |
 
 ### Pre-commit Hook（⭐ 建议安装）
@@ -638,4 +642,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v11.2 — 2026-07-09 — 全量审计修复：H1(R8矛盾统一) H2(R39/R40补入) H3(frontmatter版本) H4(finish步骤统一9步) H5(W4审计拆出finish) H6(.ci-result.json防伪造) M1(W4/W5重编号) M2(conan-verify缓存)；v11.1→v11.2*
+*SKILL.md v11.4 — 2026-07-10 — HANDOFF嵌入式门禁：W2/W3嵌入finish step[5/9](阻塞+HANDOFF)、W4嵌入submit前置检查(HANDOFF强制)、移除pre_pr_gate.sh独立脚本、pre_pr_audit.py收编为submit内部调用、模式B增submit步骤；AI路径简化为finish→submit两步不可跳过；v11.3→v11.4*
