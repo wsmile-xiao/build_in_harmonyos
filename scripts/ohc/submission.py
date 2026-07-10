@@ -555,9 +555,9 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
         return 1
     log_ok("  git add ✅")
 
-    commit_msg = f"feat: 编译 {software} {version}"
+    pr_title = f"feat({software}): {version} 适配完成"
     result = subprocess.run(
-        ["git", "commit", "-m", commit_msg],
+        ["git", "commit", "-m", pr_title],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
         if "nothing to commit" in result.stdout.lower() or "nothing to commit" in result.stderr.lower():
@@ -590,8 +590,9 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
 
     print(f"\n  ✅ PR 提交完成: {software} {version}")
     print(f"     分支: {branch_name}")
+    print(f"     PR 标题: {pr_title}")
     print(f"     PR body: {pr_body_path}")
-    print(f"     请在 GitCode 创建 Pull Request，使用 reports/pr-body.md 作为 PR 描述")
+    print(f"     请在 GitCode 创建 Pull Request，使用上述标题和 reports/pr-body.md 作为描述")
     return 0
 
 

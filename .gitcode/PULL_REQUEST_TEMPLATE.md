@@ -1,3 +1,23 @@
+<!--
+PR 标题规范（Conventional Commits + 三方库名）
+
+格式：<type>(<库名>): <版本> <简要描述>
+
+type 取值:
+  feat  — 新增三方库适配         示例: feat(sqlite3): 3.49.1 适配 HarmonyOS PC
+  fix   — 修复已有配方编译问题    示例: fix(openssl): 1.1.1 修复 aarch64 链接错误
+  chore — 版本升级/维护           示例: chore(zlib): 1.3.1 版本升级
+  docs  — 知识图谱/文档更新      示例: docs(knowledge): 新增 E012 静态库链接经验
+
+规则:
+  1. type 必须小写，取值仅限上表四种
+  2. scope = 三方库名（小写，与 archives/ 目录名一致）
+  3. 版本号紧跟 scope 后
+  4. 描述用中文，简洁明了（≤20字）
+  5. 不加活动标签、不加 emoji
+  6. commit message 与 PR title 保持一致
+-->
+
 ## PR 信息
 - **三方库名称**：{{SOFTWARE}}
 - **上游版本**：{{VERSION}}
