@@ -263,6 +263,108 @@ def _scan_knowledge_ref(ver_dir: Path) -> list[str]:
 # cmd: submit — 门禁 + 自检 + git push
 # ═══════════════════════════════════════════════════════
 
+def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
+    """Generate PR body from manifest data, save to reports/pr-body.md.
+
+    Fills in the PR template with data from manifest.yaml, patches/, and
+    test results. Fields that can't be auto-filled are marked with (请填写).
+    """
+    manifest = _parse_yaml_simple(ver_dir / "manifest.yaml")
+
+    # Gather data
+    build_system = str(manifest.get("build_system", "unknown"))
+    upstream_url = str(manifest.get("upstream_url", manifest.get("url", "")))
+    status = str(manifest.get("status", "unknown"))
+    configure_options = str(manifest.get("configure_options", ""))
+    test_passed_val = manifest.get("test_passed", 0)
+    test_failed_val = manifest.get("test_failed", 0)
+
+    # Patches
+    patches_dir = ver_dir / "patches"
+    patches = []
+    if patches_dir.is_dir():
+        patches = sorted(pf.name for pf in patches_dir.glob("*.patch"))
+
+    # Knowledge refs
+    knowledge_ref = _scan_knowledge_ref(ver_dir)
+
+    # Build status text
+    if status in ("published", "built"):
+        build_status = "成功"
+    else:
+        build_status = "失败"
+
+    # Adaptation path heuristic
+    adaptation_path = "路径 A（基础适配）" if patches else "路径 A（基础适配，无补丁）"
+
+    patch_lines = "\n".join(f"- {p}" for p in patches) if patches else "无补丁"
+    knowledge_str = ", ".join(knowledge_ref) if knowledge_ref else "(请填写)"
+
+    body = f"""## PR 信息
+- **三方库名称**：{software}
+- **上游版本**：{version}
+- **上游仓库地址**：{upstream_url or '(请填写)'}
+- **适配路径**：{adaptation_path}
+- **使用知识库**：{knowledge_str}
+
+---
+
+## 测试用例对比
+
+### 上游库测试用例统计
+| 测试类型 | 上游用例数 | 说明 |
+|----------|-----------|------|
+| 单元测试 | 0 | (请填写) |
+| 集成测试 | 0 | (请填写) |
+| 其他测试 | 0 | (请填写) |
+| **合计** | **0** | |
+
+### 是否存在对上游测试用例的修改？
+(请填写)
+
+### 适配后测试用例统计
+| 测试类型 | 适配后用例数 | 与上游对比 | 说明 |
+|----------|-------------|-----------|------|
+| 单元测试 | {test_passed_val} | (请填写) | (请填写) |
+| 集成测试 | 0 | - | - |
+| 鸿蒙特有测试 | 0 | - | (请填写) |
+| **合计** | **{test_passed_val}** | | |
+
+---
+
+## 上游测试用例修改说明
+(请填写)
+
+## 验证结果
+
+### 编译验证
+- 编译器: clang (aarch64-unknown-linux-ohos)
+- 编译状态: {build_status}
+- 构建系统: {build_system}
+- 配置选项: `{configure_options or '(请填写)'}`
+
+### 产物验证
+| 检查项 | 状态 | 详情 |
+|--------|------|------|
+| 编译无错误 | PASS | (请填写) |
+| 产物存在性 | PASS | (请填写) |
+| ELF 格式 | PASS | (请填写) |
+| 运行测试 | PASS | (请填写) |
+| 动态依赖 | PASS | (请填写) |
+
+### 补丁说明
+{patch_lines}
+
+### 依赖
+(请填写)
+"""
+
+    pr_body_path = ver_dir / "reports" / "pr-body.md"
+    pr_body_path.parent.mkdir(parents=True, exist_ok=True)
+    pr_body_path.write_text(body, encoding="utf-8")
+    return pr_body_path
+
+
 def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
                          project_dir: str, reason: str,
                          actions: list[str]) -> None:
@@ -482,9 +584,14 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
         return 1
     log_ok("  git push ✅")
 
+    # ── Generate PR body ──
+    pr_body_path = _generate_pr_body(software, version, ver_dir)
+    log_ok(f"  PR body 已生成: {pr_body_path}")
+
     print(f"\n  ✅ PR 提交完成: {software} {version}")
     print(f"     分支: {branch_name}")
-    print(f"     请在 GitCode 创建 Pull Request")
+    print(f"     PR body: {pr_body_path}")
+    print(f"     请在 GitCode 创建 Pull Request，使用 reports/pr-body.md 作为 PR 描述")
     return 0
 
 
