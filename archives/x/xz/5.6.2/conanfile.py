@@ -23,7 +23,6 @@ class XzConan(ConanFile):
     description = "XZ Utils — general-purpose data compression with high ratio (LZMA2)"
     license = "0BSD"
     homepage = "https://tukaani.org/xz/"
-    url = ""  # CI fills this
 
     settings = "os", "compiler", "build_type", "arch"
 
