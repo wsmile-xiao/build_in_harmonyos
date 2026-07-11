@@ -34,9 +34,24 @@ from pathlib import Path
 from datetime import datetime
 
 
+def _find_git() -> str:
+    """Find git: env var GIT_BIN → PATH → common dirs → fallback."""
+    env_val = os.environ.get("GIT_BIN", "").strip()
+    if env_val and os.path.isfile(env_val) and os.access(env_val, os.X_OK):
+        return env_val
+    found = shutil.which("git")
+    if found:
+        return found
+    for d in ["/data/service/hnp/bin", "/usr/local/bin", "/usr/bin", "/system/bin"]:
+        p = os.path.join(d, "git")
+        if os.path.isfile(p) and os.access(p, os.X_OK):
+            return p
+    return "git"
+
+
 def run_git(repo_dir, *args):
     """执行 git 命令并返回输出。"""
-    git_bin = shutil.which("git") or "git"
+    git_bin = _find_git()
     result = subprocess.run(
         [git_bin, "-C", str(repo_dir)] + list(args),
         capture_output=True, text=True, timeout=30

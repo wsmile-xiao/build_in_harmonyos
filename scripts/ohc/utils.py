@@ -1,6 +1,33 @@
 """Logging and path utilities for ohc."""
 import os
+import shutil
 import sys
+
+# ── Executable finder ──
+
+_COMMON_BIN_DIRS = [
+    "/data/service/hnp/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/system/bin",
+]
+
+
+def find_executable(name: str) -> str:
+    """Find an executable: env var {NAME}_BIN → PATH → common dirs → fallback."""
+    env_key = f"{name.upper()}_BIN"
+    env_val = os.environ.get(env_key, "").strip()
+    if env_val and os.path.isfile(env_val) and os.access(env_val, os.X_OK):
+        return env_val
+    found = shutil.which(name)
+    if found:
+        return found
+    for bin_dir in _COMMON_BIN_DIRS:
+        candidate = os.path.join(bin_dir, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return name
+
 
 # ── ANSI colors ──
 _RED = "\033[31m"

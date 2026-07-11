@@ -20,9 +20,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-_GIT = shutil.which("git") or "git"
+_GIT = find_executable("git")
 
-from .utils import (
+from .utils import (find_executable,
     find_project_dir,
     get_agent_id,
     graph_dir,
