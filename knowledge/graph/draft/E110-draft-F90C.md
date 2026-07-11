@@ -1,0 +1,60 @@
+# E110: l64a() missing in OHOS libc (musl)
+
+## 错误特征
+
+```
+/usr/lib/clang/.../ld.lld: error: undefined reference to l64a
+>>> referenced by main.c
+>>>               main.o:(main)
+```
+
+## 根因
+
+OHOS 使用 musl libc，而 musl 不提供 `l64a()` 函数。该函数将 `long` 值转换为
+radix-64 字符串（base64 编码），GNU glibc 中有此函数但 musl 没有。
+
+## 解决方案
+
+1. 在项目源文件中实现 `l64a()` 函数（参考 glibc 实现）：
+
+```c
+char *l64a(long value) {
+    static char buf[7];
+    char *p = buf;
+    int i;
+    if (value < 0) value = 0;
+    for (i = 0; i < 6; i++) {
+        *p++ = "./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"[value & 0x3f];
+        value >>= 6;
+        if (value == 0) break;
+    }
+    *p = '\0';
+    return buf;
+}
+```
+
+2. **关键**：在调用 `l64a()` 的文件中添加 `extern` 声明：
+
+```c
+extern char *l64a(long value);
+```
+
+如果不添加 `extern` 声明，C 编译器会假设返回 `int` 而非 `char*`，
+在 aarch64 上会导致指针截断和运行时 segfault。
+
+## 验证
+
+```bash
+# 验证 l64a 不可用
+echo "int main(){return (int)(long)l64a(0L);}" | clang -x c - -o /dev/null 2>&1 | grep l64a
+# 应输出: undefined reference to l64a
+```
+
+## 适用范围
+
+- 任何直接或间接调用 `l64a()` 的软件
+- 典型案例: bitwise 0.50
+
+## 相似条目
+
+- E085: pthread_cancel 等缺失函数的 stub 实现
