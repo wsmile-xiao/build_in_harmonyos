@@ -361,7 +361,17 @@ def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
 
     pr_body_path = ver_dir / "reports" / "pr-body.md"
     pr_body_path.parent.mkdir(parents=True, exist_ok=True)
-    pr_body_path.write_text(body, encoding="utf-8")
+    if not pr_body_path.exists():
+        pr_body_path.write_text(body, encoding="utf-8")
+    else:
+        # Preserve existing content if already filled in by AI
+        existing = pr_body_path.read_text(encoding="utf-8")
+        if "(请填写)" not in existing:
+            # Already filled in, don't overwrite
+            pass
+        else:
+            # Has placeholders, overwrite with fresh generated content
+            pr_body_path.write_text(body, encoding="utf-8")
     return pr_body_path
 
 
@@ -392,14 +402,15 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     """Submit PR: gates → self-check → git push → create PR → monitor CI → check review.
 
     Gates (all blocking with HANDOFF):
+    0. GitCode token configured (~/.gitcode-token or GITCODE_TOKEN env)
     1. finish completed (manifest.yaml exists)
     2. W3 local CI passed (.ci-result.json with exit_code=0)
     3. W4 pre-PR audit passed (audit-result.json with verdict=pass, P0/P1=0)
 
-    After gates + self-check + git push:
+    After gates + self-check + git push (with rebase retry):
     4. Create PR via gitcode_pr.py create-pr
-    5. Monitor CI via gitcode_pr.py ci-status (poll, 10min timeout)
-    6. Check AI Review via gitcode_pr.py get-review-comments
+    5. Monitor CI via gitcode_pr.py ci-status (poll, 10min timeout, blocking)
+    6. Check AI Review via gitcode_pr.py get-review-comments (3 retries, 30s interval)
     """
     project_dir = pdir or find_project_dir()
     agent_id = get_agent_id(project_dir)
@@ -414,7 +425,19 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
              f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
         return 1
 
-    # ── Gate 1/3: finish completed (manifest.yaml exists) ──
+    # ── Gate 0/4: GitCode token pre-check ──
+    token_file = Path.home() / ".gitcode-token"
+    if not token_file.exists() and not os.environ.get("GITCODE_TOKEN"):
+        log_fail("❌ Gate 0/4: GitCode token 未配置")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "token_not_configured",
+            ["GitCode access_token 未配置，无法自动创建 PR",
+             "请先配置 token: python3 scripts/gitcode_pr.py setup",
+             f"配置后重新 submit: python3 scripts/ohc-run.py submit {software} {version}"])
+        return 1
+    log_ok("✅ Gate 0/4: GitCode token 已配置")
+
+    # ── Gate 1/4: finish completed (manifest.yaml exists) ──
     manifest_path = ver_dir / "manifest.yaml"
     if not manifest_path.exists():
         log_fail("❌ Gate 1/3: finish 未完成 (manifest.yaml 不存在)")
@@ -425,7 +448,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
         return 1
     log_ok("✅ Gate 1/3: finish 已完成")
 
-    # ── Gate 2/3: W3 local CI passed (.ci-result.json) ──
+    # ── Gate 2/4: W3 local CI passed (.ci-result.json) ──
     ci_result_path = ver_dir / ".ci-result.json"
     if not ci_result_path.exists():
         log_fail("❌ Gate 2/3: W3 本地 CI 模拟未通过 (.ci-result.json 不存在)")
@@ -549,8 +572,11 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
             return 1
     log_ok(f"  分支切换 ✅ ({branch_name})")
 
+    # R26/W2: Only add the current package's archive path + knowledge drafts
+    archive_path = f"archives/{letter}/{software}/{version}/"
+    software_archive_root = f"archives/{letter}/{software}/"
     result = subprocess.run(
-        ["git", "add", "archives/", "knowledge/graph/draft/"],
+        ["git", "add", archive_path, "knowledge/graph/draft/"],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
         log_fail(f"❌ git add 失败: {result.stderr.strip()}")
@@ -558,6 +584,31 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
             "git_add_failed",
             [f"git add 失败: {result.stderr.strip()}"])
         return 1
+
+    # Verify staged files only belong to the current package
+    staged_result = subprocess.run(
+        ["git", "diff", "--cached", "--name-only"],
+        cwd=project_dir, capture_output=True, text=True)
+    if staged_result.returncode == 0:
+        staged_files = [f for f in staged_result.stdout.strip().split("\n") if f]
+        unexpected = []
+        for f in staged_files:
+            # Allow: current package archive, software-level files (commands.json etc), knowledge drafts
+            if not f.startswith(archive_path) \
+               and not (f.startswith(software_archive_root) and f.count("/") <= 3) \
+               and not f.startswith("knowledge/graph/draft/"):
+                unexpected.append(f)
+        if unexpected:
+            log_fail(f"❌ 暂存了不属于当前包的文件 (违反 W2 原子性):")
+            for f in unexpected:
+                log_fail(f"   {f}")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "git_add_atomicity_violation",
+                [f"git add 暂存了不属于 {software}/{version} 的文件: {unexpected}",
+                 "请检查工作区是否有其他包的未提交变更",
+                 f"清理后重新 submit: python3 scripts/ohc-run.py submit {software} {version}"])
+            return 1
+
     log_ok("  git add ✅")
 
     pr_title = f"feat({software}): {version} 适配完成"
@@ -576,10 +627,41 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     else:
         log_ok("  git commit ✅")
 
-    result = subprocess.run(
-        ["git", "push", "origin", branch_name],
-        cwd=project_dir, capture_output=True, text=True)
-    if result.returncode != 0:
+    # Push with rebase retry (handles non-fast-forward)
+    max_retries = 2
+    push_success = False
+    for attempt in range(max_retries + 1):
+        result = subprocess.run(
+            ["git", "push", "origin", branch_name],
+            cwd=project_dir, capture_output=True, text=True)
+        if result.returncode == 0:
+            push_success = True
+            break
+
+        stderr_lower = result.stderr.lower()
+        if ("non-fast-forward" in stderr_lower or "rejected" in stderr_lower
+            or "fetch first" in stderr_lower) and attempt < max_retries:
+            log_warn(f"  ⚠️ git push 被拒绝 (non-fast-forward)，尝试 rebase 后重试 ({attempt+1}/{max_retries})...")
+            rebase_result = subprocess.run(
+                ["git", "pull", "--rebase", "origin", branch_name],
+                cwd=project_dir, capture_output=True, text=True, timeout=60)
+            if rebase_result.returncode != 0:
+                log_fail(f"❌ rebase 冲突，需手动解决")
+                _emit_submit_handoff(software, version, ver_dir, project_dir,
+                    "rebase_conflict",
+                    [f"rebase 冲突: {rebase_result.stderr.strip()[:200]}",
+                     "手动解决冲突后:",
+                     "  git rebase --continue",
+                     f"  git push origin {branch_name}",
+                     f"  然后重新 submit: python3 scripts/ohc-run.py submit {software} {version}"])
+                return 1
+            log_ok(f"  rebase 成功，重试 push...")
+            continue
+        else:
+            # Non-retryable error or max retries reached
+            break
+
+    if not push_success:
         log_fail(f"❌ git push 失败: {result.stderr.strip()}")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "git_push_failed",
@@ -645,21 +727,47 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
              f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
         return 1
     elif ci_status == "TIMEOUT":
-        log_warn(f"  ⚠️ CI 监控超时 (10分钟)，请稍后手动检查")
-        print(f"     检查 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}")
+        log_fail(f"❌ CI 监控超时 (10分钟)")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "ci_monitor_timeout",
+            [f"CI 监控超时，请稍后手动检查 PR #{pr_number} 的 CI 状态",
+             f"检查 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}",
+             f"CI 通过后可等待自动合并，或手动提醒审核者"])
+        return 1
     elif ci_status == "PASSED":
         log_ok(f"  ✅ CI 构建通过")
 
     # ── Check AI Review ──
     log_info(f"检查 AI Review (PR #{pr_number})...")
     import time as _time
-    _time.sleep(15)  # Wait for AI review to finish
-    review_result = subprocess.run(
-        ["python3", gitcode_pr, "get-review-comments",
-         "--repo", repo, "--number", str(pr_number)],
-        capture_output=True, text=True, timeout=30)
 
-    if "🔴" in review_result.stdout or "🟠" in review_result.stdout:
+    review_result = None
+    review_stdout = ""
+    for attempt in range(3):
+        _time.sleep(30 if attempt > 0 else 15)
+        review_result = subprocess.run(
+            ["python3", gitcode_pr, "get-review-comments",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=30)
+        if review_result.returncode != 0:
+            log_warn(f"  AI Review 查询失败 (尝试 {attempt+1}/3): {review_result.stderr.strip()[:100]}")
+            continue
+        review_stdout = review_result.stdout
+        # Check if review has been posted (look for bot comments)
+        if "🔴" in review_stdout or "🟠" in review_stdout or "检视" in review_stdout or "Priority" in review_stdout:
+            break  # Review content found, proceed to analysis
+        if attempt < 2:
+            log_info(f"  AI Review 尚未完成，等待重试 ({attempt+1}/3)...")
+
+    if review_result is None or review_result.returncode != 0:
+        log_fail(f"❌ AI Review 查询失败（3次重试均失败）")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "ai_review_query_failed",
+            [f"AI Review 查询失败，请手动检查 PR #{pr_number}",
+             f"查看: python3 scripts/gitcode_pr.py get-review-comments --repo {repo} --number {pr_number}"])
+        return 1
+
+    if "🔴" in review_stdout or "🟠" in review_stdout:
         log_fail(f"❌ AI Review 发现 Critical/High 问题")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "ai_review_failed",
@@ -667,7 +775,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
              "修复问题后 push 新 commit",
              f"回复评论: python3 scripts/gitcode_pr.py reply-comment --repo {repo} --number {pr_number} --discussion-id <id> --body '已修复'"])
         return 1
-    elif "检视" in review_result.stdout or "Priority" in review_result.stdout:
+    elif "检视" in review_stdout or "Priority" in review_stdout:
         log_warn(f"  ⚠️ AI Review 有意见，请查看 PR #{pr_number}")
         print(f"     查看: python3 scripts/gitcode_pr.py get-review-comments --repo {repo} --number {pr_number}")
     else:
@@ -722,7 +830,7 @@ def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
             return "PASSED"
         elif "FAILED" in output:
             return "FAILED"
-        elif "RUNNING" in output or "QUEUED" in output:
+        elif "RUNNING" in output or "QUEUED" in output or "未找到" in output or "排队" in output:
             log_info(f"  CI 进行中... ({elapsed}s/{timeout}s)")
             _time.sleep(interval)
             elapsed += interval

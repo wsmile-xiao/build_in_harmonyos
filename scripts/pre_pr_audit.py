@@ -28,6 +28,7 @@ import argparse
 import json
 import os
 import subprocess
+import shutil
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -35,8 +36,9 @@ from datetime import datetime
 
 def run_git(repo_dir, *args):
     """执行 git 命令并返回输出。"""
+    git_bin = shutil.which("git") or "git"
     result = subprocess.run(
-        ["git", "-C", str(repo_dir)] + list(args),
+        [git_bin, "-C", str(repo_dir)] + list(args),
         capture_output=True, text=True, timeout=30
     )
     return result.stdout.strip()

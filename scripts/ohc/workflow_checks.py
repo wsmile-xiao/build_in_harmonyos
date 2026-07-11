@@ -180,11 +180,11 @@ def run_local_ci(software: str, version: str, pdir: str | None = None) -> int:
 
     # Run build_and_test.sh
     log_info(f"  [2/2] build_and_test.sh {software}/{version}...")
-    pkg_spec = f"{software}/{version}"
+    pkg_spec = f"archives/{software[0]}/{software}/{version}"
     rc, out = _run(
-        ["bash", str(build_sh), pkg_spec],
+        ["zsh", str(build_sh), pkg_spec],
         cwd=str(project),
-        env_extra={"CI_PACKAGES": pkg_spec},
+        env_extra={"CI_PACKAGES": pkg_spec, "CI_REPO_ROOT": str(project)},
         timeout=600,
     )
     if rc != 0:
