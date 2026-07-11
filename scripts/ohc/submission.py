@@ -12,13 +12,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import shutil
+import re
 import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+_GIT = shutil.which("git") or "git"
 
 from .utils import (
     find_project_dir,
@@ -556,11 +558,11 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     log_info(f"创建分支并提交: {branch_name}")
 
     result = subprocess.run(
-        ["git", "checkout", "-b", branch_name],
+        [_GIT, "checkout", "-b", branch_name],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
         result2 = subprocess.run(
-            ["git", "checkout", branch_name],
+            [_GIT, "checkout", branch_name],
             cwd=project_dir, capture_output=True, text=True)
         if result2.returncode != 0:
             log_fail(f"❌ 创建/切换分支失败: {result.stderr.strip()}")
@@ -576,7 +578,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     archive_path = f"archives/{letter}/{software}/{version}/"
     software_archive_root = f"archives/{letter}/{software}/"
     result = subprocess.run(
-        ["git", "add", archive_path, "knowledge/graph/draft/"],
+        [_GIT, "add", archive_path, "knowledge/graph/draft/"],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
         log_fail(f"❌ git add 失败: {result.stderr.strip()}")
@@ -587,7 +589,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
 
     # Verify staged files only belong to the current package
     staged_result = subprocess.run(
-        ["git", "diff", "--cached", "--name-only"],
+        [_GIT, "diff", "--cached", "--name-only"],
         cwd=project_dir, capture_output=True, text=True)
     if staged_result.returncode == 0:
         staged_files = [f for f in staged_result.stdout.strip().split("\n") if f]
@@ -613,7 +615,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
 
     pr_title = f"feat({software}): {version} 适配完成"
     result = subprocess.run(
-        ["git", "commit", "-m", pr_title],
+        [_GIT, "commit", "-m", pr_title],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
         if "nothing to commit" in result.stdout.lower() or "nothing to commit" in result.stderr.lower():
@@ -632,7 +634,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     push_success = False
     for attempt in range(max_retries + 1):
         result = subprocess.run(
-            ["git", "push", "origin", branch_name],
+            [_GIT, "push", "origin", branch_name],
             cwd=project_dir, capture_output=True, text=True)
         if result.returncode == 0:
             push_success = True
@@ -643,7 +645,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
             or "fetch first" in stderr_lower) and attempt < max_retries:
             log_warn(f"  ⚠️ git push 被拒绝 (non-fast-forward)，尝试 rebase 后重试 ({attempt+1}/{max_retries})...")
             rebase_result = subprocess.run(
-                ["git", "pull", "--rebase", "origin", branch_name],
+                [_GIT, "pull", "--rebase", "origin", branch_name],
                 cwd=project_dir, capture_output=True, text=True, timeout=60)
             if rebase_result.returncode != 0:
                 log_fail(f"❌ rebase 冲突，需手动解决")
