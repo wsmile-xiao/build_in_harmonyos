@@ -263,9 +263,10 @@ def _validate_patch_format(patch_file: Path) -> tuple[int, list[str]]:
         first_plus = next(i for i, l in enumerate(lines) if l.startswith("+++ "))
         orig_path = lines[first_minus][4:].split("\t")[0]
         mod_path = lines[first_plus][4:].split("\t")[0]
-        header = f"diff -ruN {orig_path} {mod_path}\n"
-        patch_file.write_text(header + content, encoding="utf-8")
-        warnings.append("E058-3: missing diff header (auto-fixed)")
+        # Do NOT add 'diff -ruN' header — pre-commit hooks reject it.
+        # Unified diff format only requires --- and +++ lines.
+        patch_file.write_text(content, encoding="utf-8")
+        warnings.append("E058-3: missing diff header (auto-fixed, no diff command line)")
         return 1, warnings
 
     if diff_count == 0 and not has_header:

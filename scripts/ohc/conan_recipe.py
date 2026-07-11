@@ -141,8 +141,8 @@ def _parse_dependencies(manifest_path: Path) -> list[str]:
     return deps
 
 
-def _detect_build_system(manifest: dict) -> str:
-    """Detect build system from manifest or fallback."""
+def _detect_build_system(manifest: dict, source_dir: Path | None = None) -> str:
+    """Detect build system from manifest or source directory scan."""
     # Check manifest build.system
     build = manifest.get("build", {})
     if isinstance(build, dict):
@@ -153,6 +153,18 @@ def _detect_build_system(manifest: dict) -> str:
     bs = manifest.get("build_system", "")
     if bs:
         return bs
+
+    # Fallback: scan source directory for build system markers
+    if source_dir and source_dir.is_dir():
+        if (source_dir / "CMakeLists.txt").exists():
+            return "cmake"
+        if (source_dir / "meson.build").exists():
+            return "meson"
+        if (source_dir / "configure").exists() or (source_dir / "configure.ac").exists():
+            return "autotools"
+        if (source_dir / "Makefile").exists() or (source_dir / "makefile").exists():
+            return "makefile"
+
     return "autotools"  # default
 
 
@@ -443,7 +455,19 @@ def conan_init(
         return 1
 
     # Extract info
-    build_system = _detect_build_system(manifest)
+    # Try to get source dir from build context for build system auto-detection
+    source_dir = None
+    ctx_file = project / f".build-context-{software}-{version}"
+    if ctx_file.exists():
+        try:
+            ctx_content = ctx_file.read_text(encoding="utf-8")
+            for line in ctx_content.split("\n"):
+                if line.startswith("export BUILD_SRC_DIR="):
+                    source_dir = Path(line.split("=", 1)[1].strip().strip('"'))
+                    break
+        except Exception:
+            pass
+    build_system = _detect_build_system(manifest, source_dir)
     source_url, source_sha = _get_source_info(manifest)
     dependencies = _parse_dependencies(manifest_path)
     configure_options = _parse_configure_options(manifest_path)

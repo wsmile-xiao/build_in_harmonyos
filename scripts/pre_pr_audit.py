@@ -177,7 +177,10 @@ def cmd_generate(args):
     }
 
     # 7. 输出审计输入
-    output_file = args.output or f"/tmp/audit-input-{current_branch}.json"
+    default_dir = os.path.join(os.path.expanduser("~"), "tmp")
+    os.makedirs(default_dir, exist_ok=True)
+    safe_branch = current_branch.replace("/", "-")
+    output_file = args.output or os.path.join(default_dir, f"audit-input-{safe_branch}.json")
     with open(output_file, "w", encoding="utf-8") as f:
         json.dump(audit_input, f, ensure_ascii=False, indent=2)
 
