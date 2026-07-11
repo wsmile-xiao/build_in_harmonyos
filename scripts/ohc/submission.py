@@ -412,7 +412,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
 
     After gates + self-check + git push (with rebase retry):
     4. Create PR via gitcode_pr.py create-pr
-    5. Monitor CI via gitcode_pr.py ci-status (poll, 10min timeout, blocking)
+    5. Monitor CI via gitcode_pr.py ci-status (poll, 40min timeout, blocking)
     6. Check AI Review via gitcode_pr.py get-review-comments (3 retries, 30s interval)
     """
     project_dir = pdir or find_project_dir()
@@ -717,9 +717,9 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     log_ok(f"  PR #{pr_number} 已创建/找到")
     pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
 
-    # ── Monitor CI (poll every 30s, timeout 10min) ──
+    # ── Monitor CI (poll every 30s, timeout 40min) ──
     log_info(f"监控 CI 状态 (PR #{pr_number})...")
-    ci_status = _monitor_ci(gitcode_pr, repo, pr_number, timeout=600)
+    ci_status = _monitor_ci(gitcode_pr, repo, pr_number, timeout=2400)
 
     if ci_status == "FAILED":
         log_fail(f"❌ CI 构建失败")
