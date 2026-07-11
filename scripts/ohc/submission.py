@@ -685,7 +685,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
 
     log_info("创建 GitCode PR...")
     pr_result = subprocess.run(
-        ["python3", gitcode_pr, "create-pr",
+        [sys.executable, gitcode_pr, "create-pr",
          "--repo", repo,
          "--source", branch_name,
          "--target", "main",
@@ -699,7 +699,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     elif "already exists" in pr_result.stderr.lower() or "409" in pr_result.stderr:
         log_warn("  PR 已存在，查找现有 PR 编号...")
         list_result = subprocess.run(
-            ["python3", gitcode_pr, "list-prs",
+            [sys.executable, gitcode_pr, "list-prs",
              "--repo", repo, "--source-branch", branch_name],
             capture_output=True, text=True, timeout=15)
         pr_number = _parse_pr_number(list_result.stdout)
@@ -749,7 +749,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     for attempt in range(3):
         _time.sleep(30 if attempt > 0 else 15)
         review_result = subprocess.run(
-            ["python3", gitcode_pr, "get-review-comments",
+            [sys.executable, gitcode_pr, "get-review-comments",
              "--repo", repo, "--number", str(pr_number)],
             capture_output=True, text=True, timeout=30)
         if review_result.returncode != 0:
@@ -824,7 +824,7 @@ def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
 
     while elapsed < timeout:
         result = subprocess.run(
-            ["python3", gitcode_pr, "ci-status",
+            [sys.executable, gitcode_pr, "ci-status",
              "--repo", repo, "--number", str(pr_number)],
             capture_output=True, text=True, timeout=15)
 
