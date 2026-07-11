@@ -172,7 +172,7 @@ def run_local_ci(software: str, version: str, pdir: str | None = None) -> int:
     # Run setup.sh
     if setup_sh.exists():
         log_info("  [1/2] setup.sh...")
-        rc, out = _run(["bash", str(setup_sh)], cwd=str(project), timeout=120)
+        rc, out = _run(["zsh", str(setup_sh)], cwd=str(project), timeout=120)
         if rc != 0:
             log_fail(f"  ❌ setup.sh 失败 (RC={rc})")
             return 1
