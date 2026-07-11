@@ -160,7 +160,7 @@ def run_local_ci(software: str, version: str, pdir: str | None = None) -> int:
     Returns 0 if pass, 1 if fail.
     """
     project = Path(pdir) if pdir else Path(find_project_dir())
-    setup_sh = project / "ci" / "conan" "setup.sh"
+    setup_sh = project / "ci" / "conan" / "setup.sh"
     build_sh = project / "ci" / "conan" / "build_and_test.sh"
 
     if not build_sh.exists():

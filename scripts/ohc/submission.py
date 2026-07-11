@@ -440,18 +440,18 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     # ── Gate 1/4: finish completed (manifest.yaml exists) ──
     manifest_path = ver_dir / "manifest.yaml"
     if not manifest_path.exists():
-        log_fail("❌ Gate 1/3: finish 未完成 (manifest.yaml 不存在)")
+        log_fail("❌ Gate 1/4: finish 未完成 (manifest.yaml 不存在)")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "finish_not_run",
             ["请先执行 finish 完成编译收尾",
              f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
         return 1
-    log_ok("✅ Gate 1/3: finish 已完成")
+    log_ok("✅ Gate 1/4: finish 已完成")
 
     # ── Gate 2/4: W3 local CI passed (.ci-result.json) ──
     ci_result_path = ver_dir / ".ci-result.json"
     if not ci_result_path.exists():
-        log_fail("❌ Gate 2/3: W3 本地 CI 模拟未通过 (.ci-result.json 不存在)")
+        log_fail("❌ Gate 2/4: W3 本地 CI 模拟未通过 (.ci-result.json 不存在)")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "w3_not_passed",
             ["W3 本地 CI 模拟未执行或失败，请重新 finish",
@@ -460,7 +460,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     try:
         ci_data = json.loads(ci_result_path.read_text(encoding="utf-8"))
         if ci_data.get("exit_code", -1) != 0:
-            log_fail(f"❌ Gate 2/3: W3 本地 CI 模拟未通过 (exit_code={ci_data.get('exit_code')})")
+            log_fail(f"❌ Gate 2/4: W3 本地 CI 模拟未通过 (exit_code={ci_data.get('exit_code')})")
             _emit_submit_handoff(software, version, ver_dir, project_dir,
                 "w3_not_passed",
                 ["W3 本地 CI 模拟未通过，请修复后重新 finish",
@@ -474,24 +474,24 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
         expected_hash = hashlib.sha256(raw.encode()).hexdigest()[:16]
         actual_hash = ci_data.get("integrity_hash", "")
         if actual_hash != expected_hash:
-            log_fail("❌ Gate 2/3: .ci-result.json integrity_hash 不匹配（疑似伪造）")
+            log_fail("❌ Gate 2/4: .ci-result.json integrity_hash 不匹配（疑似伪造）")
             _emit_submit_handoff(software, version, ver_dir, project_dir,
                 "w3_forged",
                 [".ci-result.json 完整性校验失败，请重新 finish（不要手动创建此文件）",
                  f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
             return 1
     except (json.JSONDecodeError, OSError) as e:
-        log_fail(f"❌ Gate 2/3: .ci-result.json 格式无效: {e}")
+        log_fail(f"❌ Gate 2/4: .ci-result.json 格式无效: {e}")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "w3_invalid",
             [".ci-result.json 格式无效，请重新 finish"])
         return 1
-    log_ok("✅ Gate 2/3: W3 本地 CI 模拟已通过")
+    log_ok("✅ Gate 2/4: W3 本地 CI 模拟已通过")
 
-    # ── Gate 3/3: W4 Pre-PR audit ──
+    # ── Gate 3/4: W4 Pre-PR audit ──
     audit_result_path = ver_dir / "reports" / "audit-result.json"
     if not audit_result_path.exists():
-        log_fail("❌ Gate 3/3: W4 Pre-PR 审计未执行 (audit-result.json 不存在)")
+        log_fail("❌ Gate 3/4: W4 Pre-PR 审计未执行 (audit-result.json 不存在)")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "w4_audit_not_done",
             ["W4 Pre-PR 审计未执行，请先完成审计",
@@ -506,7 +506,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
         p0_count = sum(1 for i in issues if i.get("severity") == "P0")
         p1_count = sum(1 for i in issues if i.get("severity") == "P1")
         if verdict != "pass" or p0_count > 0 or p1_count > 0:
-            log_fail(f"❌ Gate 3/3: W4 审计未通过 (verdict={verdict}, P0={p0_count}, P1={p1_count})")
+            log_fail(f"❌ Gate 3/4: W4 审计未通过 (verdict={verdict}, P0={p0_count}, P1={p1_count})")
             _emit_submit_handoff(software, version, ver_dir, project_dir,
                 "w4_audit_failed",
                 ["W4 Pre-PR 审计未通过，必须修复 P0/P1 问题",
@@ -515,12 +515,12 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
                  f"审计通过后重新提交: python3 scripts/ohc-run.py submit {software} {version}"])
             return 1
     except (json.JSONDecodeError, OSError) as e:
-        log_fail(f"❌ Gate 3/3: audit-result.json 格式无效: {e}")
+        log_fail(f"❌ Gate 3/4: audit-result.json 格式无效: {e}")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "w4_audit_invalid",
             ["audit-result.json 格式无效，请重新审计"])
         return 1
-    log_ok("✅ Gate 3/3: W4 Pre-PR 审计通过")
+    log_ok("✅ Gate 3/4: W4 Pre-PR 审计通过")
 
     # ── All gates passed, run self-check checklist ──
     manifest = _parse_yaml_simple(ver_dir / "manifest.yaml")
