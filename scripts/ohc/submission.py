@@ -260,7 +260,7 @@ def _scan_knowledge_ref(ver_dir: Path) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════
-# cmd: submit — 门禁 + 自检 + git push
+# cmd: submit — 门禁 + 自检 + git push + 创建PR + CI监控 + AI Review
 # ═══════════════════════════════════════════════════════
 
 def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
@@ -389,12 +389,17 @@ def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
 
 
 def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
-    """Submit PR: blocking gates → self-check → git push.
+    """Submit PR: gates → self-check → git push → create PR → monitor CI → check review.
 
     Gates (all blocking with HANDOFF):
     1. finish completed (manifest.yaml exists)
     2. W3 local CI passed (.ci-result.json with exit_code=0)
     3. W4 pre-PR audit passed (audit-result.json with verdict=pass, P0/P1=0)
+
+    After gates + self-check + git push:
+    4. Create PR via gitcode_pr.py create-pr
+    5. Monitor CI via gitcode_pr.py ci-status (poll, 10min timeout)
+    6. Check AI Review via gitcode_pr.py get-review-comments
     """
     project_dir = pdir or find_project_dir()
     agent_id = get_agent_id(project_dir)
@@ -587,13 +592,146 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     # ── Generate PR body ──
     pr_body_path = _generate_pr_body(software, version, ver_dir)
     log_ok(f"  PR body 已生成: {pr_body_path}")
+    pr_body_text = pr_body_path.read_text(encoding="utf-8")
 
+    # ── Create PR via gitcode_pr.py ──
+    gitcode_pr = str(Path(__file__).resolve().parent.parent / "gitcode_pr.py")
+    repo = "OpenHarmonyPCDeveloper/build_in_harmonyos"
+
+    log_info("创建 GitCode PR...")
+    pr_result = subprocess.run(
+        ["python3", gitcode_pr, "create-pr",
+         "--repo", repo,
+         "--source", branch_name,
+         "--target", "main",
+         "--title", pr_title,
+         "--description", pr_body_text],
+        capture_output=True, text=True, timeout=30)
+
+    pr_number = None
+    if pr_result.returncode == 0:
+        pr_number = _parse_pr_number(pr_result.stdout)
+    elif "already exists" in pr_result.stderr.lower() or "409" in pr_result.stderr:
+        log_warn("  PR 已存在，查找现有 PR 编号...")
+        list_result = subprocess.run(
+            ["python3", gitcode_pr, "list-prs",
+             "--repo", repo, "--source-branch", branch_name],
+            capture_output=True, text=True, timeout=15)
+        pr_number = _parse_pr_number(list_result.stdout)
+
+    if not pr_number:
+        log_fail(f"❌ PR 创建/查找失败")
+        log_fail(f"   stdout: {pr_result.stdout[-200:]}")
+        log_fail(f"   stderr: {pr_result.stderr[-200:]}")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "pr_creation_failed",
+            [f"PR 创建失败",
+             f"手动创建: python3 scripts/gitcode_pr.py create-pr --repo {repo} --source {branch_name} --target main --title '{pr_title}'"])
+        return 1
+
+    log_ok(f"  PR #{pr_number} 已创建/找到")
+    pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
+
+    # ── Monitor CI (poll every 30s, timeout 10min) ──
+    log_info(f"监控 CI 状态 (PR #{pr_number})...")
+    ci_status = _monitor_ci(gitcode_pr, repo, pr_number, timeout=600)
+
+    if ci_status == "FAILED":
+        log_fail(f"❌ CI 构建失败")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "ci_build_failed",
+            [f"CI 构建失败，请查看 PR #{pr_number} 的 CI 评论",
+             f"修复后 push 新 commit: git push origin {branch_name}",
+             f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
+        return 1
+    elif ci_status == "TIMEOUT":
+        log_warn(f"  ⚠️ CI 监控超时 (10分钟)，请稍后手动检查")
+        print(f"     检查 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}")
+    elif ci_status == "PASSED":
+        log_ok(f"  ✅ CI 构建通过")
+
+    # ── Check AI Review ──
+    log_info(f"检查 AI Review (PR #{pr_number})...")
+    import time as _time
+    _time.sleep(15)  # Wait for AI review to finish
+    review_result = subprocess.run(
+        ["python3", gitcode_pr, "get-review-comments",
+         "--repo", repo, "--number", str(pr_number)],
+        capture_output=True, text=True, timeout=30)
+
+    if "🔴" in review_result.stdout or "🟠" in review_result.stdout:
+        log_fail(f"❌ AI Review 发现 Critical/High 问题")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "ai_review_failed",
+            [f"AI Review 发现 Critical/High 问题，请查看 PR #{pr_number}",
+             "修复问题后 push 新 commit",
+             f"回复评论: python3 scripts/gitcode_pr.py reply-comment --repo {repo} --number {pr_number} --discussion-id <id> --body '已修复'"])
+        return 1
+    elif "检视" in review_result.stdout or "Priority" in review_result.stdout:
+        log_warn(f"  ⚠️ AI Review 有意见，请查看 PR #{pr_number}")
+        print(f"     查看: python3 scripts/gitcode_pr.py get-review-comments --repo {repo} --number {pr_number}")
+    else:
+        log_ok(f"  ✅ AI Review 通过")
+
+    # ── Success ──
     print(f"\n  ✅ PR 提交完成: {software} {version}")
+    print(f"     PR: #{pr_number}")
+    print(f"     URL: {pr_url}")
     print(f"     分支: {branch_name}")
-    print(f"     PR 标题: {pr_title}")
-    print(f"     PR body: {pr_body_path}")
-    print(f"     请在 GitCode 创建 Pull Request，使用上述标题和 reports/pr-body.md 作为描述")
+    print(f"     标题: {pr_title}")
     return 0
+
+
+def _parse_pr_number(output: str) -> int | None:
+    """Parse PR number from gitcode_pr.py output."""
+    import re
+    # Try "编号: #1234" format
+    m = re.search(r'#(\d+)', output)
+    if m:
+        return int(m.group(1))
+    # Try JSON format
+    if "--- JSON ---" in output:
+        json_part = output.split("--- JSON ---")[-1].strip()
+        try:
+            data = json.loads(json_part)
+            num = data.get("number")
+            if isinstance(num, int):
+                return num
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
+                timeout: int = 600, interval: int = 30) -> str:
+    """Poll CI status until completion or timeout.
+
+    Returns: 'PASSED', 'FAILED', 'TIMEOUT', or 'UNKNOWN'
+    """
+    import time as _time
+    elapsed = 0
+
+    while elapsed < timeout:
+        result = subprocess.run(
+            ["python3", gitcode_pr, "ci-status",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=15)
+
+        output = result.stdout
+        if "PASSED" in output:
+            return "PASSED"
+        elif "FAILED" in output:
+            return "FAILED"
+        elif "RUNNING" in output or "QUEUED" in output:
+            log_info(f"  CI 进行中... ({elapsed}s/{timeout}s)")
+            _time.sleep(interval)
+            elapsed += interval
+        else:
+            log_warn(f"  CI 状态未知，继续等待...")
+            _time.sleep(interval)
+            elapsed += interval
+
+    return "TIMEOUT"
 
 
 # ═══════════════════════════════════════════════════════
@@ -1014,7 +1152,7 @@ def submit_cli(argv: list[str] | None = None) -> int:
     """CLI entry point: ohc submit <software> <version>"""
     parser = argparse.ArgumentParser(
         prog="ohc submit",
-        description="门禁检查(完成/W3/W4) + 自检 + git push（阻塞式，失败 emit HANDOFF）",
+        description="门禁检查(完成/W3/W4) + 自检 + git push + 自动创建PR + CI监控 + AI Review检查（阻塞式，失败 emit HANDOFF）",
     )
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", help="版本号")
