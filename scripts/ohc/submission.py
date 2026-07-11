@@ -20,7 +20,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-_GIT = find_executable("git")
 
 from .utils import (find_executable,
     find_project_dir,
@@ -31,6 +30,8 @@ from .utils import (find_executable,
     log_warn,
     log_fail,
 )
+
+_GIT = find_executable("git")
 
 
 # ═══════════════════════════════════════════════════════
