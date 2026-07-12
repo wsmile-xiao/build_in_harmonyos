@@ -105,6 +105,8 @@ for pkg_dir in "${PACKAGES[@]}"; do
     echo ""
     echo "━━━ Building: ${pkg_name}/${pkg_ver} ━━━"
 
+    # Unset CONAN_USER/CONAN_CHANNEL to prevent channel injection into dependency resolution
+    unset CONAN_USER CONAN_CHANNEL
     # ── conan create (BUG-10: explicit profile + settings) ──
     # Build profile args as array for safe word-splitting
     CONAN_CREATE_ARGS=()
