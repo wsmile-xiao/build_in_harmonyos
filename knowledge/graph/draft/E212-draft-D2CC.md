@@ -1,0 +1,61 @@
+# E212: Shell script interactive read blocks non-interactive execution
+
+> **Contributor**: D2CC | **Status**: DRAFT | **Created**: 2026-07-02
+> **Severity**: 🟡 non-blocking | **Category**: L2 模式经验
+
+## 错误特征
+
+```
+# Process hangs indefinitely when run with --version or --help
+# L2 smoke test times out after 10 seconds
+# Output may show: "Press ENTER to continue, or CTRL+C to cancel"
+# read -r void  ← blocks waiting for stdin
+```
+
+## 根因分析
+
+Shell 脚本工具（如安全审计工具 lynis）在初始化阶段有交互式安全检查，
+使用 `read -r var` 等待用户按 ENTER 确认。在非交互环境（conan test_package、CI、L2 smoke test）
+中，stdin 没有输入，`read` 会永久阻塞，直到被超时机制杀死。
+
+## 解决方案
+
+### 方案 1: 非阻塞 read
+```bash
+# 修改前
+read -r void
+
+# 修改后
+read -r void < /dev/null 2>/dev/null || true
+```
+
+### 方案 2: 早期参数处理（推荐配合方案 1）
+```bash
+# 在初始化之前添加 --version 的早期处理
+for arg in "$@"; do
+    case "$arg" in
+        --version|-V) echo "Tool $VERSION"; exit 0 ;;
+    esac
+done
+```
+
+### 方案 3: 终端检测
+```bash
+# 只在交互式终端中提示
+[ -t 0 ] && read -r var || true
+```
+
+## 验证
+
+```bash
+timeout 10 ./tool --version && echo "PASS" || echo "FAIL"
+```
+
+## 涉及软件
+
+- lynis 3.1.7（安全审计工具，有文件权限安全检查）
+- 可能影响：rkhunter, chkrootkit 等有交互式提示的 shell 工具
+
+## 相关模式
+
+- E165 — shebang 修复（同为 shell 脚本在 OpenHarmony 上的适配问题）
