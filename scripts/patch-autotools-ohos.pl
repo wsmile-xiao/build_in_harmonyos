@@ -84,7 +84,7 @@ my $changes = 0;
 unless ($sc =~ /ohos-linux/) {
     # Match the android-linux block (tabs for indentation)
     if ($sc =~ s{^(\s*android-linux\)\s*\n)((\s*)basic_machine=\$field1-unknown\s*\n)((\s*)basic_os=linux-android\s*\n)(\s*;;\s*\n)}
-                    {$1$2$4$5\tohos-linux)\n$3basic_machine=\$field1-unknown\n$5basic_os=linux-ohos\n$6}m) {
+                    {$1$2$4$6\tohos-linux)\n$3basic_machine=\$field1-unknown\n$5basic_os=linux-ohos\n$6}m) {
         print "  [ok] Added ohos-linux triplet\n"; $changes++;
     } else {
         warn "  [warn] Could not find android-linux in config.sub\n";

@@ -241,6 +241,14 @@ def _phase_b(
     best_b = 0
     best_a = 0
 
+    # Pre-compute phase context from error text (for dampening)
+    error_phase_context: set[str] = set()
+    for phase, markers in _PHASE_MARKERS.items():
+        for marker in markers:
+            if marker.lower() in error_lower:
+                error_phase_context.add(phase)
+                break
+
     for cand in candidates:
         kv_path = os.path.join(gdir, f"{cand.entry.id}.kv")
         if not os.path.isfile(kv_path):
