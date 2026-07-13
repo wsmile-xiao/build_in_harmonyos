@@ -97,5 +97,9 @@
 ## 六、结束记录
 - **最终状态**: ✅ success
 - **结束时间**: 2026-04-25T23:20:00
-- **预编译包路径**: /storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/l/libpcap/1.10.6/packaging/libpcap-1.10.6-ohos-aarch64.zip
-- **归档目录**: /storage/Users/currentUser/.opendesk/apps/skills/resources/openharmony-compile-agent/archives/l/libpcap/1.10.6/
+- **预编译包路径**: packaging/libpcap-1.10.6-ohos-aarch64.zip (本地, 不在 PR 范围内)
+- **归档目录**: archives/l/libpcap/1.10.6/
+---
+
+**编译结束**: 2026-07-13 15:47
+**最终状态**: built
