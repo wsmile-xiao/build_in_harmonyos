@@ -508,55 +508,72 @@ authors: {git_author}
         else:
             pr_args = f"-pr:h={self.profile} -pr:b={self.profile}"
 
-        cmd = (
-            f"{self._conan_path} create {self.archive_dir} "
-            f"{pr_args} "
-            f"--build=missing "
-            f"--user={self.user} --channel={self.channel}"
-        )
-        log_info(f"  Running: {cmd}")
+        # ── E017 prevention: inject ghfast.top mirror for GitHub URLs ──
+        conandata_path = self.archive_dir / "conandata.yml"
+        _url_injected = False
+        _original_conandata = None
+        if conandata_path.exists():
+            _original_conandata = conandata_path.read_text(encoding="utf-8")
+            if "github.com" in _original_conandata and "ghfast.top" not in _original_conandata:
+                modified = _original_conandata.replace("https://github.com", "https://ghfast.top/https://github.com")
+                conandata_path.write_text(modified, encoding="utf-8")
+                _url_injected = True
+                log_info("  🔧 E017 预防: GitHub URL 已临时注入 ghfast.top 镜像")
 
-        rc, output = self._run(cmd, timeout=3600, cwd=str(self.pdir))
+        try:
+            cmd = (
+                f"{self._conan_path} create {self.archive_dir} "
+                f"{pr_args} "
+                f"--build=missing "
+                f"--user={self.user} --channel={self.channel}"
+            )
+            log_info(f"  Running: {cmd}")
 
-        # Save full log
-        self.report_dir.mkdir(parents=True, exist_ok=True)
-        log_file = self.report_dir / "conan-create.log"
-        log_file.write_text(output, encoding="utf-8")
+            rc, output = self._run(cmd, timeout=3600, cwd=str(self.pdir))
 
-        if rc == 0:
-            g.details.append(f"  ✅ conan create 成功")
-            g.details.append(f"  📄 日志: {log_file.relative_to(self.pdir)}")
-            ref_match = re.search(r'Package.*?(\w+/\w+@\w+/\w+)', output)
-            if ref_match:
-                g.details.append(f"  📦 包引用: {ref_match.group(1)}")
-            # Extract package_id for G3/G4 cache path lookup
-            pkg_id_match = re.search(r'(\w+/\w+@\w+/\w+):(\w+)', output)
-            if pkg_id_match:
-                self._package_id = pkg_id_match.group(2)
-                g.details.append(f"  📦 包ID: {self._package_id}")
-        else:
-            g.passed = False
-            error_lines = [l for l in output.split("\n")
-                          if "ERROR" in l or "error:" in l.lower()]
-            if error_lines:
-                g.details.append(f"  ❌ conan create 失败:")
-                for line in error_lines[:5]:
-                    g.details.append(f"     {line.strip()}")
+            # Save full log
+            self.report_dir.mkdir(parents=True, exist_ok=True)
+            log_file = self.report_dir / "conan-create.log"
+            log_file.write_text(output, encoding="utf-8")
+
+            if rc == 0:
+                g.details.append(f"  ✅ conan create 成功")
+                g.details.append(f"  📄 日志: {log_file.relative_to(self.pdir)}")
+                ref_match = re.search(r'Package.*?(\w+/\w+@\w+/\w+)', output)
+                if ref_match:
+                    g.details.append(f"  📦 包引用: {ref_match.group(1)}")
+                # Extract package_id for G3/G4 cache path lookup
+                pkg_id_match = re.search(r'(\w+/\w+@\w+/\w+):(\w+)', output)
+                if pkg_id_match:
+                    self._package_id = pkg_id_match.group(2)
+                    g.details.append(f"  📦 包ID: {self._package_id}")
             else:
-                g.details.append(f"  ❌ conan create 失败 (RC={rc})")
-            g.details.append(f"  📄 日志: {log_file.relative_to(self.pdir)}")
+                g.passed = False
+                error_lines = [l for l in output.split("\n")
+                              if "ERROR" in l or "error:" in l.lower()]
+                if error_lines:
+                    g.details.append(f"  ❌ conan create 失败:")
+                    for line in error_lines[:5]:
+                        g.details.append(f"     {line.strip()}")
+                else:
+                    g.details.append(f"  ❌ conan create 失败 (RC={rc})")
+                g.details.append(f"  📄 日志: {log_file.relative_to(self.pdir)}")
 
-            # ── Knowledge graph integration ──
-            log_info("  🧠 查询知识图谱...")
-            kg_result = self._query_knowledge_graph(output)
-            if kg_result:
-                g.details.append(f"  {kg_result}")
-                # Extract matched E-entry ID
-                match = re.search(r'(E\d+)', kg_result)
-                if match:
-                    g.knowledge_hit = match.group(1)
-            else:
-                g.details.append("  ⚠️ 知识图谱查询失败")
+                # ── Knowledge graph integration ──
+                log_info("  🧠 查询知识图谱...")
+                kg_result = self._query_knowledge_graph(output)
+                if kg_result:
+                    g.details.append(f"  {kg_result}")
+                    # Extract matched E-entry ID
+                    match = re.search(r'(E\d+)', kg_result)
+                    if match:
+                        g.knowledge_hit = match.group(1)
+                else:
+                    g.details.append("  ⚠️ 知识图谱查询失败")
+        finally:
+            if _url_injected and _original_conandata is not None:
+                conandata_path.write_text(_original_conandata, encoding="utf-8")
+                log_info("  🔄 已恢复原始 conandata.yml")
 
         log_ok(f"  G2: {'PASS' if g.passed else 'FAIL'}")
         return g

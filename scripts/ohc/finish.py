@@ -340,6 +340,56 @@ class FinishPipeline:
             self._task_card("11g", "⚠️部分", "框架文件混入")
             log_warn("  ⚠️ 发现框架文件变更，请拆分到独立 PR")
 
+    def step8_submit_readiness(self):
+        """Step 8/8: Submit readiness pre-check."""
+        log_info("Step 8/8: submit 就绪预检...")
+        checks = []
+
+        # Check test-report.md
+        test_report = self.archive_dir / "reports" / "test-report.md"
+        if test_report.exists():
+            checks.append(("✅", "test-report.md", ""))
+        else:
+            checks.append(("❌", "test-report.md", "需创建 reports/test-report.md"))
+
+        # Check packaging directory
+        packaging_dir = self.archive_dir / "packaging"
+        if packaging_dir.exists() and any(packaging_dir.iterdir()):
+            checks.append(("✅", "packaging/", ""))
+        else:
+            checks.append(("❌", "packaging/", "需创建 packaging/ 目录并打包"))
+
+        # Check .staging-verified
+        staging = self.archive_dir / ".staging-verified"
+        if staging.exists():
+            checks.append(("✅", ".staging-verified", ""))
+        else:
+            checks.append(("❌", ".staging-verified", "需创建 .staging-verified 空文件"))
+
+        # Check .build-closed or 编译结束 marker in notes.md
+        build_closed = self.archive_dir / ".build-closed"
+        notes = self.archive_dir / "notes.md"
+        has_marker = build_closed.exists()
+        if not has_marker and notes.exists():
+            has_marker = "编译结束" in notes.read_text(encoding="utf-8", errors="replace")
+        if has_marker:
+            checks.append(("✅", "build-closed marker", ""))
+        else:
+            checks.append(("❌", "build-closed marker", "需运行 close-archive 或手动添加标记"))
+
+        failed = [c for c in checks if c[0] == "❌"]
+        for icon, name, hint in checks:
+            log_info(f"  {icon} {name}" + (f" — {hint}" if hint else ""))
+
+        if failed:
+            log_warn(f"  ⚠️ {len(failed)} 项未就绪，submit 前需修复")
+            self._task_card("12", "⚠️部分", f"submit readiness: {len(failed)} 项未就绪")
+        else:
+            log_ok("  ✅ submit 就绪")
+            self._task_card("12", "✅完成", "submit readiness OK")
+
+        self.steps["step8"] = len(failed) == 0
+
     def _collect_knowledge_actions(self):
         """Collect AI next actions for knowledge consolidation."""
         actions = []
@@ -492,6 +542,7 @@ class FinishPipeline:
         self.step5_check_knowledge_gap()
         self.step6_gen_summary()
         self.step7_pr_atomicity()
+        self.step8_submit_readiness()
         self.print_summary()
         self.emit_knowledge_handoff()
 

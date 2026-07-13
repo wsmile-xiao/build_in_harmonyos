@@ -17,7 +17,7 @@ from .edit_tracker import get_tracked_files, has_tracker, scan as tracker_scan
 EXCLUDE_DIRS = {"build", ".git", "autom4te.cache", "CMakeFiles",
                 "__pycache__", ".libs", ".deps"}
 EXCLUDE_SUFFIXES = (".o", ".lo", ".la", ".so", ".a")
-EXCLUDE_FILES = {"config.status", "config.log"}
+EXCLUDE_FILES = {"config.status", "config.log", ".patch-ai-review.txt"}
 
 # Known build-system generated file names (only used for NEW files in right_only)
 _GENERATED_NAMES = frozenset({

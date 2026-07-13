@@ -143,6 +143,10 @@ def _parse_dependencies(manifest_path: Path) -> list[str]:
 
 def _detect_build_system(manifest: dict, source_dir: Path | None = None) -> str:
     """Detect build system from manifest or source directory scan."""
+    # Check BUILD_SYSTEM env var (set by init-build)
+    env_bs = os.environ.get("BUILD_SYSTEM", "").strip()
+    if env_bs:
+        return env_bs
     # Check manifest build.system
     build = manifest.get("build", {})
     if isinstance(build, dict):

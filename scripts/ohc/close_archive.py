@@ -70,6 +70,11 @@ def close_archive(name: str, version: str, status: str,
     progress.write_text(pcontent_new, encoding="utf-8")
     log_ok("  notes.md 已更新（已清理旧记录）")
 
+    # Also write .build-closed marker file (B3: protect against notes.md edits)
+    build_closed = progress.parent / ".build-closed"
+    build_closed.write_text(f"{ts}\n{status}\n", encoding="utf-8")
+    log_ok("  .build-closed 标记文件已创建")
+
     # Step 5: Check pending items
     pcontent = progress.read_text(encoding="utf-8")
     pending = len(re.findall(r'(⏳|待评估|TODO|FIXME)', pcontent))

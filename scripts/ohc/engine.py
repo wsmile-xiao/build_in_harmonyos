@@ -209,6 +209,19 @@ def _phase_a_legacy(
 
 
 # ═══════════════════════════════════════════════════════
+# Phase context markers (for phase-aware score dampening)
+# ═══════════════════════════════════════════════════════
+
+_PHASE_MARKERS = {
+    "download": ["download", "fetch", "AuthenticationException", "403", "Connection timed out", "could not resolve"],
+    "patch": ["patch", "does not exist", "hunk failed", "patch unexpectedly"],
+    "configure": ["configure", "bad interpreter", "no such file or directory", "unrecognized option"],
+    "compilation": ["error:", "warning:", "undefined reference", "sockaddr_storage", "redefinition"],
+    "install": ["install", "cp:", "cannot create", "permission denied"],
+}
+
+
+# ═══════════════════════════════════════════════════════
 # Phase B: Fine ranking via .kv error_signature
 # ═══════════════════════════════════════════════════════
 
@@ -257,6 +270,15 @@ def _phase_b(
                 kw = kw.strip()
                 if kw and kw.lower() in error_lower:
                     match_score += 1
+
+        # Phase context boost: dampen entries whose phase doesn't match
+        # the error's phase context (pure penalty, never increases score)
+        if error_phase_context and match_score > 0:
+            entry_phases = set()
+            if hasattr(cand.entry, 'phase') and cand.entry.phase:
+                entry_phases = set(p.lower() for p in cand.entry.phase)
+            if entry_phases and error_phase_context and not (entry_phases & error_phase_context):
+                match_score = max(0, match_score - 2)  # dampen mismatched phase
 
         if match_score > best_b:
             best_b = match_score
