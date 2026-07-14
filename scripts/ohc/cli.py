@@ -15,6 +15,7 @@ _MODULES = {
     "submit": "submission",
     "review": "submission",
     "post-merge": "submission",
+    "feedback": "feedback",
     "resolve-deps": "dependency_resolver",
     "track-edit": "edit_tracker",
     "dispatch": "dispatch",
@@ -61,6 +62,7 @@ Commands: {' | '.join(sorted(_MODULES.keys()))}
   submit <software> <version>       编译自检，不生成提交单
   review <software> <version>        本地审核辅助，直接扫描目录
   post-merge <software> <version>    PR 合并后重建索引与知识库
+  feedback <software> <version>      SKILL_FEEDBACK 流程终态反馈报告
 
 Run 'python3 ohc-run.py <command> --help' for details.""")
 

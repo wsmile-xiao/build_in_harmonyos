@@ -181,3 +181,30 @@ archives/{letter}/{name}/
 
 ### 25. shell 脚本规范
 `set -euo pipefail` 开头，变量加双引号，Conan 2.x 用 `--only-recipe`（非 `--recipe`）。
+
+### 26. PR body 禁止残留占位符
+PR 描述中禁止出现 `(请填写)` 占位符。submit 命令从 conandata.yml/conanfile.py/test-report.md/notes.md/patches/ 自动填充。残留占位符 = 未完成，要求补充。
+
+### 27. AI 检视意见必须闭环 (R41)
+PR 创建后 atomgit-bot 自动进行 AI 代码检视。检视意见**不一定正确**，但**必须逐条响应**：
+- 合理的意见 → 修改代码并 push
+- 不合理的意见 → 在 PR 上回复说明原因
+- 仅有"正在生成合并请求摘要"和"AI 代码检视正在进行中"→ 检视未完成，不应合并
+- 检视意见未闭环（无回复/无修改）= request changes
+
+---
+
+## 五、SKILL_FEEDBACK 反馈规范
+
+### 28. SKILL_FEEDBACK 强制生成
+submit 成功后（CI 通过）自动进入 SKILL_FEEDBACK 阶段，生成 `feedback/SKILL_FEEDBACK_{random}.md`。PR 合并前应确认反馈报告已生成且完整（无 `(请填写)` 残留）。
+
+### 29. 反馈报告完整性
+SKILL_FEEDBACK 报告必须包含：
+- **背景**：软件名称、版本、构建系统、上游仓库、依赖、补丁、状态
+- **情况**：执行概要、失败分析、知识图谱、AI 检视、CI、效率分析
+- **建议**：SKILL 设计改进、模板改进、自动化补全、知识图谱覆盖（禁止 `(请填写)` 残留）
+- **作者**：姓名、邮箱（git config）、Agent ID、时间戳、PR 编号
+
+### 30. 状态文件不可伪造
+`.ci-result.json` 含 SHA256 完整性哈希，伪造 = 欺诈行为（参见规则 3）。`.submit-state.json` 和 `.feedback-state.json` 为流程状态文件，禁止手动编辑或伪造。

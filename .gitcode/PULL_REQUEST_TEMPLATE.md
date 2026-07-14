@@ -75,3 +75,15 @@ type 取值:
 
 ### 依赖
 {{DEPENDENCIES}}
+
+### 测试结论
+- 总体评价: {{TEST_CONCLUSION}}
+- 已知限制: {{KNOWN_LIMITATIONS}}
+
+### 遇到的问题与解决方案
+{{ISSUES_AND_SOLUTIONS}}
+
+### 验证命令
+```
+{{VERIFICATION_COMMANDS}}
+```

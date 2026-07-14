@@ -763,12 +763,21 @@ def cmd_submit(software: str, version: str,
         elif ci_status == "PASSED":
             log_ok(f"  ✅ CI 构建通过")
 
+        # ── SKILL_FEEDBACK (final phase) ──
+        log_info("生成 SKILL_FEEDBACK 报告...")
+        feedback_ret = 0
+        try:
+            from .feedback import cmd_feedback
+            feedback_ret = cmd_feedback(software, version, pdir=project_dir)
+        except Exception as e:
+            log_warn(f"  ⚠️ SKILL_FEEDBACK 生成失败: {e}")
+
         # ── Success ──
         print(f"\n  ✅ PR 提交完成: {software} {version}")
         print(f"     PR: #{pr_number}")
         print(f"     URL: {pr_url}")
         print(f"     分支: {branch_name}")
-        return 0
+        return feedback_ret
 
     # ── Gate 0/4: GitCode token pre-check ──
     token_file = Path.home() / ".gitcode-token"
@@ -1122,13 +1131,22 @@ def cmd_submit(software: str, version: str,
     elif ci_status == "PASSED":
         log_ok(f"  ✅ CI 构建通过")
 
+    # ── SKILL_FEEDBACK (final phase) ──
+    log_info("生成 SKILL_FEEDBACK 报告...")
+    feedback_ret = 0
+    try:
+        from .feedback import cmd_feedback
+        feedback_ret = cmd_feedback(software, version, pdir=project_dir)
+    except Exception as e:
+        log_warn(f"  ⚠️ SKILL_FEEDBACK 生成失败: {e}")
+
     # ── Success ──
     print(f"\n  ✅ PR 提交完成: {software} {version}")
     print(f"     PR: #{pr_number}")
     print(f"     URL: {pr_url}")
     print(f"     分支: {branch_name}")
     print(f"     标题: {pr_title}")
-    return 0
+    return feedback_ret
 
 
 def _parse_pr_number(output: str) -> int | None:

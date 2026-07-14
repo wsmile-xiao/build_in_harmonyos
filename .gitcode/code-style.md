@@ -217,3 +217,39 @@ scope 取值：软件名 或 模块名（如 `R38`、`zlib`、`CI`）
 ### 21. 行尾
 - 文本文件用 LF（Unix 风格），禁止 CRLF
 - 文件末尾保留一个空行
+
+---
+
+## 七、PR 与反馈规范
+
+### 22. PR body 禁止残留占位符
+PR 描述（pr-body.md）中禁止出现 `(请填写)` 占位符。submit 命令自动从以下数据源填充：
+- `conandata.yml` → 上游仓库地址
+- `conanfile.py` → 编译依赖
+- `test-report.md` → 测试统计、测试结论
+- `notes.md` → 问题与解决方案、验证命令
+- `patches/` → 补丁描述
+- `manifest.yaml` → 构建配置、知识引用
+
+残留占位符 = submit 门禁阻塞，必须编辑 `reports/pr-body.md` 补充后重新提交。
+
+### 23. SKILL_FEEDBACK 文件格式
+流程结束时自动生成 `feedback/SKILL_FEEDBACK_{8位随机hex}.md`（项目根 `feedback/` 目录）：
+- 文件名格式：`SKILL_FEEDBACK_a1b2c3d4.md`（`secrets.token_hex(4)` 生成）
+- 必须包含四个部分：背景、情况、建议、作者
+- 「建议」部分禁止残留 `(请填写)`（HANDOFF 强制，AI 填充后 `--resume` 验证）
+- 作者信息从 `git config user.name/user.email` 获取
+
+### 24. 状态文件禁止提交
+以下状态文件仅用于本地流程状态管理，**禁止提交到 PR**：
+- `.submit-state.json` — submit 流程状态（PR编号、review_phase）
+- `.feedback-state.json` — feedback 流程状态（feedback_id）
+- `.ci-result.json` — 本地 CI 模拟结果（含完整性哈希，防伪造）
+
+这些文件应加入 `.gitignore` 或在 `git add` 时不包含。
+
+### 25. feedback/ 目录规范
+- 路径：项目根 `feedback/`（与 `archives/`、`knowledge/` 同级）
+- 内容：`SKILL_FEEDBACK_*.md` 文件，每个文件对应一次完整的 SKILL 执行流程
+- 命名：`SKILL_FEEDBACK_` 前缀 + 8 位随机 hex + `.md` 后缀
+- 禁止手动创建或重命名 feedback 文件

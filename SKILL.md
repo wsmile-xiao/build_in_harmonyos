@@ -224,6 +224,13 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|bui
 python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本>
 # 如 AI Review HANDOFF 后修复并继续:
 python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本> --resume
+
+# Step 5: SKILL_FEEDBACK (submit 成功后自动调用，也可手动运行)
+python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本>
+# 如 HANDOFF 后填写建议并验证:
+python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本> --resume
+# 如 HANDOFF 后填写建议并验证:
+python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本> --resume
 ```
 
 **如何选择**：已有 conanfile.py / 简单编译 → 模式 A；首次编译 / 复杂依赖 / 需深度调试 → 模式 B。
@@ -411,7 +418,7 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 | [9/9] gen_summary + PR 原子性 | 重新生成 SUMMARY.md (W2 检查) | 非致命 |
 
 > **W4 Pre-PR 独立审计不在 finish 内部**，在 `submit` 内部作为前置检查执行。
-> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**AI Review 监控**(5阶段)→**CI 监控**）。
+> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**AI Review 监控**(5阶段)→**CI 监控**→**SKILL_FEEDBACK 自动生成**）。
 > AI 操作路径：`finish` → `submit`，两条命令，不可跳过。
 >
 > **⭐ AI Review 监控（5 阶段，嵌入 submit，HANDOFF 强制）**：
@@ -455,6 +462,31 @@ $SKILL_ROOT/scripts/ohc-run.py verify-build <软件名> <版本>
 **CI 只读 4 文件**：`conanfile.py`/`conandata.yml`/`test_package/`/`patches/`。不读 `manifest.yaml`/`notes.md`/`reports/`。
 
 > 详解见 references/compile-guide.md
+
+### Step 6: SKILL_FEEDBACK — 流程终态反馈
+
+```bash
+# submit 成功后自动调用，也可手动运行
+$SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本>
+```
+
+在 SKILL 整个流程结束时自动生成反馈报告，写入 `feedback/SKILL_FEEDBACK_{random}.md`（项目根，与 `knowledge/` 同级）。
+
+**报告结构**：
+| 部分 | 内容 | 自动填充 |
+|------|------|---------|
+| 背景 | 软件/版本/构建系统/上游仓库/依赖/补丁/状态 | ✅ |
+| 情况 | 执行概要/失败分析/知识图谱/AI检视/CI/效率 | ✅ (部分需 AI 补充) |
+| 建议 | SKILL设计/模板/自动化/知识图谱覆盖 | ❌ (AI 填写) |
+| 作者 | 姓名/邮箱 (git config)/Agent ID/时间戳/PR编号 | ✅ |
+
+**数据来源**：manifest.yaml + conandata.yml + conanfile.py + notes.md + test-report.md + .ci-result.json + .submit-state.json + patches/ + knowledge/graph/draft/
+
+**文件命名**：`SKILL_FEEDBACK_{8位随机hex}.md`（`secrets.token_hex(4)` 生成，防碰撞）
+
+**HANDOFF 强制**：生成后检查 `(请填写)` 占位符，有残留则 emit HANDOFF（step_failed=feedback），AI 填充建议后 `--resume` 验证完整性。状态文件 `.feedback-state.json` 记录 feedback_id。
+
+> 模板: templates/skill-feedback.md
 
 ---
 
@@ -603,7 +635,8 @@ archives/{letter}/{name}/
 
 ### 流程自省
 
-发现 SKILL 自身问题时记录到 `reports/skill-feedback.md`。
+发现 SKILL 自身问题时记录到 `reports/skill-feedback.md`（版本级）。
+流程结束时自动生成 `feedback/SKILL_FEEDBACK_*.md` 结构化反馈报告（含背景/情况/建议/作者），由 `feedback` 命令驱动。残留 `(请填写)` 时 emit HANDOFF，AI 填充后 `--resume` 验证。
 
 ---
 
@@ -644,7 +677,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
-| `search-url` / `submit` / `review` / `post-merge` | URL搜索 / **PR提交(W4前置+AI Review 5阶段+CI监控,HANDOFF强制,支持--resume)** / 主编审核 / 合并后索引 |
+| `search-url` / `submit` / `review` / `post-merge` / `feedback` | URL搜索 / **PR提交(W4→AI Review→CI→SKILL_FEEDBACK,HANDOFF,--resume)** / 主编审核 / 合并后索引 / **流程终态反馈(HANDOFF,--resume)** |
 | `init-archive` / `close-archive` / `finalize-archive` | 归档初始化 / 关闭 / 清理校验 |
 | `check-env` / `clean-verify` / `check-knowledge-gap` | 环境检查 / 干净构建验证 / 知识缺口检查 |
 | `dispatch` / `summary` / `conan-migrate` | 多任务调度 / 统计摘要 / Conan 迁移辅助 |
@@ -679,4 +712,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v11.5 — 2026-07-14 — AI Review监控增强：submit流程新增atomgit-bot 5阶段检视监控(Phase1等待变更摘要→Phase2评估摘要→Phase3等待检视意见→Phase4处理检视意见→Phase5进入CI)，每5分钟轮询，HANDOFF强制，--resume支持；CI监控移至AI Review之后；gitcode_pr.py新增monitor-review子命令；submission.py新增.submit-state.json状态文件；v11.4→v11.5*
+*SKILL.md v11.6 — 2026-07-14 — SKILL_FEEDBACK 阶段：新增 feedback 子命令和 ohc/feedback.py 模块，submit 成功后自动生成 feedback/SKILL_FEEDBACK_{random}.md（项目根，与knowledge同级）；HANDOFF强制（残留(请填写)则emit，step_failed=feedback），--resume验证完整性，.feedback-state.json状态文件；git config获取作者，secrets.token_hex生成随机ID；新增templates/skill-feedback.md模板；v11.5→v11.6*
