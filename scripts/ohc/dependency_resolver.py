@@ -51,7 +51,9 @@ _CMD_PKGS_README_RAW = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/raw/
 # 多版本软件会在 versions 列表中列出所有可用版本
 
 # 本地git仓库缓存路径（sparse checkout只拉README.md）
-_INDEX_CACHE_DIR = os.path.expanduser("~/.opendesk/cache/cmd-pkgs")
+_ATOMCODE_CACHE = os.path.expanduser("~/.atomcode/cache/cmd-pkgs")
+_OPENDESK_CACHE = os.path.expanduser("~/.opendesk/cache/cmd-pkgs")
+_INDEX_CACHE_DIR = _ATOMCODE_CACHE if os.path.isdir(_ATOMCODE_CACHE) else _OPENDESK_CACHE
 
 # 运行时索引
 _runtime_index: dict[str, dict] | None = None
