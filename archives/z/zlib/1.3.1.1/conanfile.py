@@ -4,6 +4,8 @@
 区别于远端 zlib：远端 `./configure --static` 不加 -fPIC，libz.a 非 PIC，
 链进共享库（如 libcairo.so）会报 R_AARCH64 relocation。这里 CFLAGS=-fPIC 编，
 静态 libz.a 的对象可被共享库吸收，且不引入运行期 libz.so（不污染系统 /lib/libz.so*）。
+
+消费者：qpdf/cairo 等把 zlib 静态链进 .so 的库，须 require zlib/1.3.1.1（非 1.3.1）。
 """
 import os
 
