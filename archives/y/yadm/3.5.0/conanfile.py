@@ -33,10 +33,20 @@ class YadmConan(ConanFile):
         pass
 
     def package(self):
-        copy(self, "yadm", self.source_folder, os.path.join(self.package_folder, "bin"))
+        bin_dir = os.path.join(self.package_folder, "bin")
+        copy(self, "yadm", self.source_folder, bin_dir)
         copy(self, "yadm.1", self.source_folder, os.path.join(self.package_folder, "share", "man", "man1"))
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "share", "doc", "yadm"))
         copy(self, "CHANGES", self.source_folder, os.path.join(self.package_folder, "share", "doc", "yadm"))
+
+        # OHOS: /bin/sh 不存在，修改 shebang 为鸿蒙 bash 路径
+        yadm_path = os.path.join(bin_dir, "yadm")
+        with open(yadm_path, "r") as f:
+            content = f.read()
+        content = content.replace("#!/bin/sh", "#!/data/service/hnp/bin/bash", 1)
+        with open(yadm_path, "w") as f:
+            f.write(content)
+        os.chmod(yadm_path, 0o755)
 
     def package_info(self):
         self.cpp_info.bindirs = ["bin"]
