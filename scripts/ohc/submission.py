@@ -263,30 +263,243 @@ def _scan_knowledge_ref(ver_dir: Path) -> list[str]:
 
 
 # ═══════════════════════════════════════════════════════
-# cmd: submit — 门禁 + 自检 + git push + 创建PR + CI监控 + AI Review
+# cmd: submit — 门禁 + 自检 + git push + 创建PR + AI Review 监控 + CI 监控
 # ═══════════════════════════════════════════════════════
 
-def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
-    """Generate PR body from manifest data, save to reports/pr-body.md.
+# ═══════════════════════════════════════════════════════
+# PR body 数据提取辅助
+# ═══════════════════════════════════════════════════════
 
-    Fills in the PR template with data from manifest.yaml, patches/, and
-    test results. Fields that can't be auto-filled are marked with (请填写).
+def _extract_conandata_info(ver_dir: Path) -> dict:
+    """Extract source URL and SHA256 from conandata.yml."""
+    result = {"url": "", "sha256": ""}
+    conandata = ver_dir / "conandata.yml"
+    if not conandata.exists():
+        return result
+    content = conandata.read_text(encoding="utf-8", errors="replace")
+    for line in content.split("\n"):
+        line = line.strip()
+        if line.startswith("url:"):
+            val = line.split(":", 1)[1].strip().strip('"').strip("'")
+            if val:
+                result["url"] = val
+        elif line.startswith("sha256:"):
+            val = line.split(":", 1)[1].strip().strip('"').strip("'")
+            if val:
+                result["sha256"] = val
+    return result
+
+
+def _extract_conanfile_deps(ver_dir: Path) -> list[str]:
+    """Extract dependencies from conanfile.py (self.requires calls)."""
+    conanfile = ver_dir / "conanfile.py"
+    if not conanfile.exists():
+        return []
+    content = conanfile.read_text(encoding="utf-8", errors="replace")
+    deps = re.findall(r'self\.requires\(\s*["\']([^"\']+)["\']', content)
+    return deps
+
+
+def _extract_test_summary(ver_dir: Path) -> dict:
+    """Extract test summary from test-report.md."""
+    result = {"total": 0, "passed": 0, "failed": 0, "skipped": 0,
+              "conclusion": "", "limitations": []}
+    report = ver_dir / "reports" / "test-report.md"
+    if not report.exists():
+        return result
+    content = report.read_text(encoding="utf-8", errors="replace")
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if "总测试数" in stripped:
+            m = re.search(r'\|\s*(\d+)\s', stripped)
+            if m:
+                result["total"] = int(m.group(1))
+        elif "通过" in stripped and "PASS" in stripped:
+            m = re.search(r'\|\s*(\d+)\s', stripped)
+            if m:
+                result["passed"] = int(m.group(1))
+        elif "失败" in stripped and "FAIL" in stripped:
+            m = re.search(r'\|\s*(\d+)\s', stripped)
+            if m:
+                result["failed"] = int(m.group(1))
+        elif "跳过" in stripped and "SKIP" in stripped:
+            m = re.search(r'\|\s*(\d+)\s', stripped)
+            if m:
+                result["skipped"] = int(m.group(1))
+    # Conclusion
+    if "✅" in content:
+        result["conclusion"] = "通过"
+    elif "⚠️" in content:
+        result["conclusion"] = "部分通过（有已知限制）"
+    elif "❌" in content:
+        result["conclusion"] = "不通过"
+    # Known limitations
+    in_limits = False
+    for line in content.split("\n"):
+        if "已知限制" in line:
+            in_limits = True
+            continue
+        if in_limits:
+            if line.startswith("## ") or line.startswith("---"):
+                in_limits = False
+                continue
+            stripped = line.strip()
+            if stripped and stripped[0].isdigit():
+                result["limitations"].append(stripped)
+    return result
+
+
+def _extract_notes_info(ver_dir: Path) -> dict:
+    """Extract adaptation info from notes.md."""
+    result = {"issues": [], "dependencies": "", "verification": "",
+              "source_mods": ""}
+    notes = ver_dir / "notes.md"
+    if not notes.exists():
+        return result
+    content = notes.read_text(encoding="utf-8", errors="replace")
+    lines = content.split("\n")
+
+    # Issues table
+    in_issues = False
+    for line in lines:
+        if "问题" in line and "解决方案" in line:
+            in_issues = True
+            continue
+        if in_issues:
+            if line.startswith("## "):
+                in_issues = False
+                continue
+            if line.startswith("|") and "---" not in line and "#" not in line:
+                cols = [c.strip() for c in line.split("|")]
+                if len(cols) >= 4 and cols[1] and cols[1] != "#":
+                    result["issues"].append(
+                        f"- **{cols[1]}**: 根因={cols[2]}, 解决方案={cols[3]}")
+
+    # Dependencies section
+    in_deps = False
+    dep_lines = []
+    for line in lines:
+        if "依赖版本" in line or "依赖" in line and line.startswith("##"):
+            in_deps = True
+            continue
+        if in_deps:
+            if line.startswith("## "):
+                in_deps = False
+                break
+            if line.strip() and not line.startswith("#"):
+                dep_lines.append(line.strip())
+    if dep_lines:
+        result["dependencies"] = "\n".join(dep_lines)
+
+    # Verification section
+    in_verify = False
+    in_code = False
+    verify_lines = []
+    for line in lines:
+        if "验证结果" in line:
+            in_verify = True
+            continue
+        if in_verify:
+            if line.startswith("## "):
+                in_verify = False
+                break
+            if line.strip() == "```":
+                in_code = not in_code
+                verify_lines.append(line)
+                continue
+            if in_code or line.strip():
+                verify_lines.append(line)
+    if verify_lines:
+        result["verification"] = "\n".join(verify_lines)
+
+    # Source modifications
+    in_mods = False
+    mod_lines = []
+    for line in lines:
+        if "源码修改" in line:
+            in_mods = True
+            continue
+        if in_mods:
+            if line.startswith("## "):
+                in_mods = False
+                break
+            if line.strip():
+                mod_lines.append(line.strip())
+    if mod_lines:
+        result["source_mods"] = "\n".join(mod_lines)
+
+    return result
+
+
+def _extract_patch_info(ver_dir: Path) -> list[dict]:
+    """Extract patch names and descriptions from patch files."""
+    patches_dir = ver_dir / "patches"
+    if not patches_dir.is_dir():
+        return []
+    result = []
+    for pf in sorted(patches_dir.glob("*.patch")):
+        desc = pf.name
+        try:
+            content = pf.read_text(encoding="utf-8", errors="replace")
+            for line in content.split("\n")[:10]:
+                if line.startswith("Subject:") or line.startswith("Description:"):
+                    desc = line.split(":", 1)[1].strip()
+                    break
+                if line.startswith("diff --git"):
+                    parts = line.split()
+                    if len(parts) >= 4:
+                        desc = f"{pf.name} (修改文件: {parts[3]})"
+                        break
+        except Exception:
+            pass
+        result.append({"name": pf.name, "description": desc})
+    return result
+
+
+def _count_placeholders(text: str) -> int:
+    """Count (请填写) placeholders in text."""
+    return text.count("(请填写)")
+
+
+def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
+    """Generate PR body from all available data sources.
+
+    Auto-fills from: manifest.yaml, conandata.yml, conanfile.py,
+    test-report.md, notes.md, patches/.
+    Remaining unavailable fields are marked with (请填写).
     """
     manifest = _parse_yaml_simple(ver_dir / "manifest.yaml")
 
-    # Gather data
+    # ── Gather data from all sources ──
     build_system = str(manifest.get("build_system", "unknown"))
-    upstream_url = str(manifest.get("upstream_url", manifest.get("url", "")))
     status = str(manifest.get("status", "unknown"))
     configure_options = str(manifest.get("configure_options", ""))
     test_passed_val = manifest.get("test_passed", 0)
     test_failed_val = manifest.get("test_failed", 0)
 
-    # Patches
-    patches_dir = ver_dir / "patches"
-    patches = []
-    if patches_dir.is_dir():
-        patches = sorted(pf.name for pf in patches_dir.glob("*.patch"))
+    # From conandata.yml
+    conandata = _extract_conandata_info(ver_dir)
+    upstream_url = conandata["url"] or str(
+        manifest.get("upstream_url", manifest.get("url", "")))
+
+    # From conanfile.py
+    conan_deps = _extract_conanfile_deps(ver_dir)
+    # Also from manifest dependencies list
+    manifest_deps = manifest.get("dependencies", [])
+    if isinstance(manifest_deps, list) and manifest_deps:
+        for d in manifest_deps:
+            if d not in conan_deps:
+                conan_deps.append(d)
+
+    # From test-report.md
+    test_summary = _extract_test_summary(ver_dir)
+
+    # From notes.md
+    notes_info = _extract_notes_info(ver_dir)
+
+    # From patches/
+    patch_info = _extract_patch_info(ver_dir)
+    patches = [p["name"] for p in patch_info]
 
     # Knowledge refs
     knowledge_ref = _scan_knowledge_ref(ver_dir)
@@ -297,11 +510,53 @@ def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
     else:
         build_status = "失败"
 
-    # Adaptation path heuristic
+    # Adaptation path
     adaptation_path = "路径 A（基础适配）" if patches else "路径 A（基础适配，无补丁）"
 
-    patch_lines = "\n".join(f"- {p}" for p in patches) if patches else "无补丁"
-    knowledge_str = ", ".join(knowledge_ref) if knowledge_ref else "(请填写)"
+    # ── Build PR body ──
+    patch_lines = "\n".join(
+        f"- `{p['name']}`: {p['description']}" for p in patch_info
+    ) if patch_info else "无补丁"
+    knowledge_str = ", ".join(knowledge_ref) if knowledge_ref else "无"
+
+    # Test statistics
+    total_tests = test_summary["total"] or test_passed_val
+    passed_tests = test_summary["passed"] or test_passed_val
+    failed_tests = test_summary["failed"] or test_failed_val
+    skipped_tests = test_summary["skipped"]
+    test_conclusion = test_summary["conclusion"] or ("通过" if status in ("published", "built") else "—")
+
+    # Dependencies
+    dep_str = "\n".join(f"- {d}" for d in conan_deps) if conan_deps else notes_info["dependencies"] or "(请填写)"
+
+    # Issues from notes
+    issues_str = "\n".join(notes_info["issues"]) if notes_info["issues"] else "无已知问题"
+
+    # Verification
+    verify_str = notes_info["verification"] or "(请填写验证命令和结果)"
+
+    # Source modifications
+    source_mods_str = notes_info["source_mods"] or ("无" if not patches else "(请填写)")
+
+    # Known limitations
+    limitations_str = "\n".join(f"- {l}" for l in test_summary["limitations"]) if test_summary["limitations"] else "无"
+
+    # Product verification details
+    product_verifications = [
+        ("编译无错误", "PASS" if status in ("published", "built") else "FAIL",
+         f"构建系统: {build_system}, 状态: {status}"),
+        ("产物存在性", "PASS" if status in ("published", "built") else "—",
+         f"conan create 验证{'通过' if status == 'published' else ''}"),
+        ("ELF 格式", "PASS" if status in ("published", "built") else "—",
+         "aarch64-unknown-linux-ohos"),
+        ("运行测试", test_conclusion if test_conclusion != "—" else "—",
+         f"通过: {passed_tests}, 失败: {failed_tests}, 跳过: {skipped_tests}"),
+        ("动态依赖", "PASS" if status in ("published", "built") else "—",
+         f"依赖: {', '.join(conan_deps) if conan_deps else '无'}"),
+    ]
+    product_table = "\n".join(
+        f"| {name} | {st} | {detail} |" for name, st, detail in product_verifications
+    )
 
     body = f"""## PR 信息
 - **三方库名称**：{software}
@@ -317,26 +572,26 @@ def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
 ### 上游库测试用例统计
 | 测试类型 | 上游用例数 | 说明 |
 |----------|-----------|------|
-| 单元测试 | 0 | (请填写) |
-| 集成测试 | 0 | (请填写) |
-| 其他测试 | 0 | (请填写) |
-| **合计** | **0** | |
+| 单元测试 | {total_tests} | 上游测试套件 |
+| 集成测试 | 0 | - |
+| 其他测试 | {skipped_tests} | 跳过的测试 |
+| **合计** | **{total_tests}** | |
 
 ### 是否存在对上游测试用例的修改？
-(请填写)
+{'否' if not patches else '是，见下方补丁说明'}
 
 ### 适配后测试用例统计
 | 测试类型 | 适配后用例数 | 与上游对比 | 说明 |
 |----------|-------------|-----------|------|
-| 单元测试 | {test_passed_val} | (请填写) | (请填写) |
+| 单元测试 | {passed_tests} | {'一致' if passed_tests == total_tests else '有差异'} | 通过 {passed_tests}/{total_tests} |
 | 集成测试 | 0 | - | - |
-| 鸿蒙特有测试 | 0 | - | (请填写) |
-| **合计** | **{test_passed_val}** | | |
+| 鸿蒙特有测试 | 0 | - | 新增 |
+| **合计** | **{passed_tests}** | | |
 
 ---
 
 ## 上游测试用例修改说明
-(请填写)
+{source_mods_str}
 
 ## 验证结果
 
@@ -344,22 +599,28 @@ def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
 - 编译器: clang (aarch64-unknown-linux-ohos)
 - 编译状态: {build_status}
 - 构建系统: {build_system}
-- 配置选项: `{configure_options or '(请填写)'}`
+- 配置选项: `{configure_options or '默认配置'}`
 
 ### 产物验证
-| 检查项 | 状态 | 详情 |
-|--------|------|------|
-| 编译无错误 | PASS | (请填写) |
-| 产物存在性 | PASS | (请填写) |
-| ELF 格式 | PASS | (请填写) |
-| 运行测试 | PASS | (请填写) |
-| 动态依赖 | PASS | (请填写) |
+{product_table}
 
 ### 补丁说明
 {patch_lines}
 
 ### 依赖
-(请填写)
+{dep_str}
+
+### 测试结论
+- 总体评价: {test_conclusion}
+- 已知限制: {limitations_str}
+
+### 遇到的问题与解决方案
+{issues_str}
+
+### 验证命令
+```
+{verify_str}
+```
 """
 
     pr_body_path = ver_dir / "reports" / "pr-body.md"
@@ -367,27 +628,33 @@ def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
     if not pr_body_path.exists():
         pr_body_path.write_text(body, encoding="utf-8")
     else:
-        # Preserve existing content if already filled in by AI
         existing = pr_body_path.read_text(encoding="utf-8")
         if "(请填写)" not in existing:
-            # Already filled in, don't overwrite
-            pass
+            pass  # Already filled in
         else:
-            # Has placeholders, overwrite with fresh generated content
             pr_body_path.write_text(body, encoding="utf-8")
     return pr_body_path
 
 
 def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
                          project_dir: str, reason: str,
-                         actions: list[str]) -> None:
-    """Emit HANDOFF block for submit gate failure."""
+                         actions: list[str],
+                         resume_with_flag: bool = False) -> None:
+    """Emit HANDOFF block for submit gate failure.
+
+    Args:
+        resume_with_flag: If True, resume_cmd includes --resume (for AI Review
+            HANDOFFs where gates already passed and PR already created).
+    """
     from .handoff import HandoffData, emit_handoff
+    resume_cmd = f"python3 scripts/ohc-run.py submit {software} {version}"
+    if resume_with_flag:
+        resume_cmd += " --resume"
     data = HandoffData(
         exit_reason=reason,
         exit_code=2,
         step_failed="submit",
-        resume_cmd=f"python3 scripts/ohc-run.py submit {software} {version}",
+        resume_cmd=resume_cmd,
         knowledge_hit="none",
         knowledge_gap=False,
         log_file="",
@@ -401,8 +668,9 @@ def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
     emit_handoff(data, project_dir=project_dir)
 
 
-def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
-    """Submit PR: gates → self-check → git push → create PR → monitor CI → check review.
+def cmd_submit(software: str, version: str,
+               pdir: str | None = None, resume: bool = False) -> int:
+    """Submit PR: gates → self-check → git push → create PR → AI Review → CI.
 
     Gates (all blocking with HANDOFF):
     0. GitCode token configured (~/.gitcode-token or GITCODE_TOKEN env)
@@ -412,8 +680,13 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
 
     After gates + self-check + git push (with rebase retry):
     4. Create PR via gitcode_pr.py create-pr
-    5. Monitor CI via gitcode_pr.py ci-status (poll, 40min timeout, blocking)
-    6. Check AI Review via gitcode_pr.py get-review-comments (3 retries, 30s interval)
+    5. Monitor AI Review (atomgit-bot): 5-phase flow with HANDOFF
+       Phase 1: Wait for "变更摘要" (poll 5min, 30min timeout)
+       Phase 2: AI evaluates summary → HANDOFF (mandatory fix check)
+       Phase 3: Wait for review opinions (poll 5min, 30min timeout)
+       Phase 4: AI evaluates opinions → HANDOFF (strict reasonability check)
+       Phase 5: Review complete → proceed to CI
+    6. Monitor CI via gitcode_pr.py ci-status (poll 30s, 40min timeout)
     """
     project_dir = pdir or find_project_dir()
     agent_id = get_agent_id(project_dir)
@@ -427,6 +700,75 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
             ["版本目录不存在，请先执行 finish",
              f"python3 scripts/ohc-run.py finish {software} {version} <status>"])
         return 1
+
+    # ── Resume: skip gates + git ops, go directly to monitoring ──
+    if resume:
+        state = _load_submit_state(ver_dir)
+        saved_pr = state.get("pr_number")
+        saved_branch = state.get("branch_name", f"feat/{software}-{version}")
+        review_phase = state.get("review_phase", 1)
+
+        if not saved_pr:
+            log_fail("❌ --resume 但状态文件中无 PR 编号，无法恢复")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "resume_no_state",
+                ["状态文件 .submit-state.json 中无 PR 编号",
+                 f"请重新提交: python3 scripts/ohc-run.py submit {software} {version}"])
+            return 1
+
+        gitcode_pr = str(Path(__file__).resolve().parent.parent / "gitcode_pr.py")
+        repo = "OpenHarmonyPCDeveloper/build_in_harmonyos"
+        pr_number = saved_pr
+        branch_name = saved_branch
+        pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
+
+        log_ok(f"  📂 恢复提交: PR #{pr_number}, Phase {review_phase}, 分支 {branch_name}")
+
+        if review_phase < 5:
+            # Still in AI Review phases
+            log_info(f"监控 AI Review (PR #{pr_number})...")
+            review_result = _monitor_ai_review(
+                gitcode_pr, repo, pr_number,
+                software, version,
+                ver_dir, project_dir,
+                branch_name, resume=True)
+
+            if review_result in ("handoff_summary", "handoff_opinions"):
+                return 1
+            elif review_result == "timeout":
+                return 1
+            elif review_result == "review_complete":
+                pass  # Proceed to CI
+
+        # Phase 5: CI monitoring
+        log_info(f"监控 CI 状态 (PR #{pr_number})...")
+        ci_status = _monitor_ci(gitcode_pr, repo, pr_number, timeout=2400)
+
+        if ci_status == "FAILED":
+            log_fail(f"❌ CI 构建失败")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "ci_build_failed",
+                [f"CI 构建失败，请查看 PR #{pr_number} 的 CI 评论",
+                 f"修复后 push 新 commit: git push origin {branch_name}",
+                 f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
+            return 1
+        elif ci_status == "TIMEOUT":
+            log_fail(f"❌ CI 监控超时")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "ci_monitor_timeout",
+                [f"CI 监控超时，请稍后手动检查 PR #{pr_number} 的 CI 状态",
+                 f"检查 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}",
+                 f"CI 通过后可等待自动合并，或手动提醒审核者"])
+            return 1
+        elif ci_status == "PASSED":
+            log_ok(f"  ✅ CI 构建通过")
+
+        # ── Success ──
+        print(f"\n  ✅ PR 提交完成: {software} {version}")
+        print(f"     PR: #{pr_number}")
+        print(f"     URL: {pr_url}")
+        print(f"     分支: {branch_name}")
+        return 0
 
     # ── Gate 0/4: GitCode token pre-check ──
     token_file = Path.home() / ".gitcode-token"
@@ -679,6 +1021,22 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     log_ok(f"  PR body 已生成: {pr_body_path}")
     pr_body_text = pr_body_path.read_text(encoding="utf-8")
 
+    # ── PR body completeness gate (no (请填写) allowed) ──
+    placeholder_count = _count_placeholders(pr_body_text)
+    if placeholder_count > 0:
+        log_fail(f"❌ PR body 仍有 {placeholder_count} 处 (请填写) 未填充")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "pr_body_incomplete",
+            [f"PR body 有 {placeholder_count} 处 (请填写) 未填充",
+             f"请编辑 {pr_body_path} 补充以下内容：",
+             "  - 上游仓库地址（如 conandata.yml 中无）",
+             "  - 上游测试用例修改说明（如有补丁）",
+             "  - 验证命令和结果",
+             "  - 其他 (请填写) 标记处",
+             f"填充后重新 submit: python3 scripts/ohc-run.py submit {software} {version}"])
+        return 1
+    log_ok(f"  PR body 完整性检查 ✅ (0 处待填写)")
+
     # ── Create PR via gitcode_pr.py ──
     gitcode_pr = str(Path(__file__).resolve().parent.parent / "gitcode_pr.py")
     repo = "OpenHarmonyPCDeveloper/build_in_harmonyos"
@@ -717,6 +1075,30 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
     log_ok(f"  PR #{pr_number} 已创建/找到")
     pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
 
+    # ── Save initial submit state ──
+    if not resume:
+        _save_submit_state(ver_dir, {
+            "pr_number": pr_number,
+            "review_phase": 1,
+            "branch_name": branch_name,
+        })
+
+    # ── Monitor AI Review (atomgit-bot): 5-phase flow ──
+    log_info(f"监控 AI Review (PR #{pr_number})...")
+    review_result = _monitor_ai_review(
+        gitcode_pr, repo, pr_number,
+        software, version,
+        ver_dir, project_dir,
+        branch_name, resume=resume)
+
+    if review_result in ("handoff_summary", "handoff_opinions"):
+        # HANDOFF already emitted by _monitor_ai_review
+        return 1
+    elif review_result == "timeout":
+        return 1
+    elif review_result == "review_complete":
+        pass  # Proceed to CI monitoring
+
     # ── Monitor CI (poll every 30s, timeout 40min) ──
     log_info(f"监控 CI 状态 (PR #{pr_number})...")
     ci_status = _monitor_ci(gitcode_pr, repo, pr_number, timeout=2400)
@@ -730,7 +1112,7 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
              f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
         return 1
     elif ci_status == "TIMEOUT":
-        log_fail(f"❌ CI 监控超时 (10分钟)")
+        log_fail(f"❌ CI 监控超时")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "ci_monitor_timeout",
             [f"CI 监控超时，请稍后手动检查 PR #{pr_number} 的 CI 状态",
@@ -739,50 +1121,6 @@ def cmd_submit(software: str, version: str, pdir: str | None = None) -> int:
         return 1
     elif ci_status == "PASSED":
         log_ok(f"  ✅ CI 构建通过")
-
-    # ── Check AI Review ──
-    log_info(f"检查 AI Review (PR #{pr_number})...")
-    import time as _time
-
-    review_result = None
-    review_stdout = ""
-    for attempt in range(3):
-        _time.sleep(30 if attempt > 0 else 15)
-        review_result = subprocess.run(
-            [sys.executable, gitcode_pr, "get-review-comments",
-             "--repo", repo, "--number", str(pr_number)],
-            capture_output=True, text=True, timeout=30)
-        if review_result.returncode != 0:
-            log_warn(f"  AI Review 查询失败 (尝试 {attempt+1}/3): {review_result.stderr.strip()[:100]}")
-            continue
-        review_stdout = review_result.stdout
-        # Check if review has been posted (look for bot comments)
-        if "🔴" in review_stdout or "🟠" in review_stdout or "检视" in review_stdout or "Priority" in review_stdout:
-            break  # Review content found, proceed to analysis
-        if attempt < 2:
-            log_info(f"  AI Review 尚未完成，等待重试 ({attempt+1}/3)...")
-
-    if review_result is None or review_result.returncode != 0:
-        log_fail(f"❌ AI Review 查询失败（3次重试均失败）")
-        _emit_submit_handoff(software, version, ver_dir, project_dir,
-            "ai_review_query_failed",
-            [f"AI Review 查询失败，请手动检查 PR #{pr_number}",
-             f"查看: python3 scripts/gitcode_pr.py get-review-comments --repo {repo} --number {pr_number}"])
-        return 1
-
-    if "🔴" in review_stdout or "🟠" in review_stdout:
-        log_fail(f"❌ AI Review 发现 Critical/High 问题")
-        _emit_submit_handoff(software, version, ver_dir, project_dir,
-            "ai_review_failed",
-            [f"AI Review 发现 Critical/High 问题，请查看 PR #{pr_number}",
-             "修复问题后 push 新 commit",
-             f"回复评论: python3 scripts/gitcode_pr.py reply-comment --repo {repo} --number {pr_number} --discussion-id <id> --body '已修复'"])
-        return 1
-    elif "检视" in review_stdout or "Priority" in review_stdout:
-        log_warn(f"  ⚠️ AI Review 有意见，请查看 PR #{pr_number}")
-        print(f"     查看: python3 scripts/gitcode_pr.py get-review-comments --repo {repo} --number {pr_number}")
-    else:
-        log_ok(f"  ✅ AI Review 通过")
 
     # ── Success ──
     print(f"\n  ✅ PR 提交完成: {software} {version}")
@@ -843,6 +1181,305 @@ def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
             elapsed += interval
 
     return "TIMEOUT"
+
+
+# ═══════════════════════════════════════════════════════
+# AI Review 监控 (atomgit-bot) — 5 阶段流程
+# ═══════════════════════════════════════════════════════
+#
+# Phase 1: 等待"变更摘要"生成（每 5 分钟轮询，30 分钟超时）
+#   → atomgit-bot 先发"正在生成合并请求摘要"和"AI 代码检视正在进行中"
+#   → 出现"变更摘要"字段 → 进入 Phase 2
+# Phase 2: AI 评估变更摘要（HANDOFF）
+#   → 检查摘要中是否有必须修改的点
+#   → AI 评估后 push 修复（如有）并 --resume
+# Phase 3: 等待检视意见出现（每 5 分钟轮询，30 分钟超时）
+#   → 继续等待 atomgit-bot 评论中出现三类以外的检视意见
+#   → 出现检视意见 → 进入 Phase 4
+#   → 超时无新意见 → 直接进入 CI 监控
+# Phase 4: AI 处理检视意见（HANDOFF）
+#   → ⚠️ 检视意见不一定正确，需严格判断合理性
+#   → 合理的修改并 push，不合理的回复说明原因
+#   → 所有意见处理完毕后 --resume
+# Phase 5: AI Review 完成，进入 CI 监控
+
+
+def _load_submit_state(ver_dir: Path) -> dict:
+    """Load submit state from .submit-state.json."""
+    state_path = ver_dir / ".submit-state.json"
+    if not state_path.exists():
+        return {}
+    try:
+        return json.loads(state_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_submit_state(ver_dir: Path, state: dict) -> None:
+    """Save submit state to .submit-state.json."""
+    state_path = ver_dir / ".submit-state.json"
+    state["last_updated"] = datetime.now().isoformat()
+    state_path.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2),
+        encoding="utf-8")
+
+
+def _call_monitor_review(gitcode_pr: str, repo: str, pr_number: int) -> dict | None:
+    """Call gitcode_pr.py monitor-review --json and parse result."""
+    result = subprocess.run(
+        [sys.executable, gitcode_pr, "monitor-review",
+         "--repo", repo, "--number", str(pr_number), "--json"],
+        capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        return None
+    # Parse JSON from stdout (after "--- JSON ---" marker)
+    if "--- JSON ---" in result.stdout:
+        json_part = result.stdout.split("--- JSON ---")[-1].strip()
+        try:
+            return json.loads(json_part)
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
+                       software: str, version: str,
+                       ver_dir: Path, project_dir: str,
+                       branch_name: str,
+                       resume: bool = False) -> str:
+    """Monitor atomgit-bot AI review with 5-phase flow.
+
+    Returns:
+        'review_complete' — all phases passed, proceed to CI
+        'handoff_summary'  — Phase 2 HANDOFF emitted, AI must evaluate summary
+        'handoff_opinions' — Phase 4 HANDOFF emitted, AI must evaluate opinions
+        'timeout'          — polling timed out
+    """
+    import time as _time
+
+    POLL_INTERVAL = 300    # 5 minutes
+    POLL_TIMEOUT = 1800    # 30 minutes
+
+    state = _load_submit_state(ver_dir)
+
+    # ── Determine starting phase ──
+    # Phase numbers: 1=wait_summary, 3=wait_opinions, 5=done
+    # (Phase 2 and 4 are HANDOFF emission points, state advances past them)
+    current_phase = state.get("review_phase", 1)
+    if resume and current_phase:
+        phase = current_phase
+    else:
+        phase = 1
+
+    # ── Phase 1: Wait for "变更摘要" ──
+    if phase <= 1:
+        log_info(f"Phase 1: 等待变更摘要生成 (每 {POLL_INTERVAL//60} 分钟轮询, "
+                 f"超时 {POLL_TIMEOUT//60} 分钟)...")
+        elapsed = 0
+        while elapsed < POLL_TIMEOUT:
+            review_data = _call_monitor_review(gitcode_pr, repo, pr_number)
+            if review_data is None:
+                log_warn("  获取检视状态失败，重试...")
+                _time.sleep(POLL_INTERVAL)
+                elapsed += POLL_INTERVAL
+                continue
+
+            review_state = review_data.get("state", "unknown")
+            log_info(f"  AI Review 状态: {review_state} "
+                     f"({elapsed//60}min/{POLL_TIMEOUT//60}min)")
+
+            if review_state in ("summary_ready", "has_opinions"):
+                # Summary is ready, advance to Phase 2
+                _save_submit_state(ver_dir, {
+                    "pr_number": pr_number,
+                    "review_phase": 2,
+                    "branch_name": branch_name,
+                })
+                phase = 2
+                break
+            elif review_state == "no_bot_comments":
+                log_info("  尚无 atomgit-bot 评论，继续等待...")
+            elif review_state == "generating":
+                log_info("  AI 检视进行中（摘要尚未生成），继续等待...")
+
+            _time.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+        else:
+            log_fail(f"❌ Phase 1 超时：变更摘要未在 {POLL_TIMEOUT//60} 分钟内生成")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "ai_review_summary_timeout",
+                [f"变更摘要未在 {POLL_TIMEOUT//60} 分钟内生成，请稍后手动检查 PR #{pr_number}",
+                 f"检查: python3 scripts/gitcode_pr.py monitor-review --repo {repo} --number {pr_number} --json",
+                 f"摘要出现后: python3 scripts/ohc-run.py submit {software} {version} --resume"],
+                resume_with_flag=True)
+            return "timeout"
+
+    # ── Phase 2: AI 评估变更摘要 (HANDOFF) ──
+    if phase == 2:
+        review_data = _call_monitor_review(gitcode_pr, repo, pr_number)
+        if review_data is None:
+            log_fail("❌ 获取检视状态失败")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "ai_review_query_failed",
+                [f"获取检视状态失败，请手动检查 PR #{pr_number}"],
+                resume_with_flag=True)
+            return "timeout"
+
+        review_state = review_data.get("state", "unknown")
+        summary_content = review_data.get("summary_content", "") or ""
+
+        # If opinions already appeared, skip to Phase 4
+        if review_state == "has_opinions":
+            phase = 4
+            _save_submit_state(ver_dir, {
+                "pr_number": pr_number,
+                "review_phase": 4,
+                "branch_name": branch_name,
+            })
+        else:
+            # Emit HANDOFF for AI to evaluate summary
+            log_info("Phase 2: 变更摘要已生成，需要 AI 评估是否有必须修改的点")
+
+            # Truncate summary for HANDOFF display
+            summary_display = summary_content[:3000] if summary_content else "(空)"
+
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "ai_review_summary_ready",
+                [
+                    "变更摘要已生成，请评估是否有必须修改的点：",
+                    "",
+                    "--- 变更摘要 ---",
+                    summary_display,
+                    "--- 摘要结束 ---",
+                    "",
+                    "操作步骤：",
+                    "1. 阅读变更摘要，判断是否有必须修改的问题",
+                    f"2. 如有，修改代码并: git push origin {branch_name}",
+                    "3. 如无必须修改的点，直接继续",
+                    f"4. 继续: python3 scripts/ohc-run.py submit {software} {version} --resume",
+                ],
+                resume_with_flag=True)
+            # Advance state to Phase 3 so resume skips this HANDOFF
+            _save_submit_state(ver_dir, {
+                "pr_number": pr_number,
+                "review_phase": 3,
+                "branch_name": branch_name,
+            })
+            return "handoff_summary"
+
+    # ── Phase 3: Wait for review opinions ──
+    if phase == 3:
+        log_info(f"Phase 3: 等待检视意见出现 (每 {POLL_INTERVAL//60} 分钟轮询, "
+                 f"超时 {POLL_TIMEOUT//60} 分钟)...")
+        elapsed = 0
+        while elapsed < POLL_TIMEOUT:
+            review_data = _call_monitor_review(gitcode_pr, repo, pr_number)
+            if review_data is None:
+                log_warn("  获取检视状态失败，重试...")
+                _time.sleep(POLL_INTERVAL)
+                elapsed += POLL_INTERVAL
+                continue
+
+            review_state = review_data.get("state", "unknown")
+            opinions = review_data.get("review_opinions", [])
+
+            log_info(f"  AI Review 状态: {review_state}, "
+                     f"检视意见: {len(opinions)} 条 "
+                     f"({elapsed//60}min/{POLL_TIMEOUT//60}min)")
+
+            if review_state == "has_opinions" and opinions:
+                phase = 4
+                _save_submit_state(ver_dir, {
+                    "pr_number": pr_number,
+                    "review_phase": 4,
+                    "branch_name": branch_name,
+                })
+                break
+
+            _time.sleep(POLL_INTERVAL)
+            elapsed += POLL_INTERVAL
+        else:
+            log_warn(f"⚠️ Phase 3 超时：{POLL_TIMEOUT//60} 分钟内无新检视意见")
+            log_info("  AI 检视可能已完成且无意见，直接进入 CI 监控")
+            _save_submit_state(ver_dir, {
+                "pr_number": pr_number,
+                "review_phase": 5,
+                "branch_name": branch_name,
+            })
+            return "review_complete"
+
+    # ── Phase 4: AI 处理检视意见 (HANDOFF) ──
+    if phase == 4:
+        review_data = _call_monitor_review(gitcode_pr, repo, pr_number)
+        if review_data is None:
+            log_fail("❌ 获取检视意见失败")
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "ai_review_query_failed",
+                [f"获取检视意见失败，请手动检查 PR #{pr_number}"],
+                resume_with_flag=True)
+            return "timeout"
+
+        opinions = review_data.get("review_opinions", [])
+
+        if not opinions:
+            # No opinions (shouldn't happen if we got here, but handle gracefully)
+            log_info("  无检视意见，直接进入 CI 监控")
+            _save_submit_state(ver_dir, {
+                "pr_number": pr_number,
+                "review_phase": 5,
+                "branch_name": branch_name,
+            })
+            return "review_complete"
+        else:
+            # Build HANDOFF with review opinions
+            opinions_text = ""
+            for i, op in enumerate(opinions):
+                opinions_text += f"\n{'='*60}\n"
+                opinions_text += f"### 检视意见 [{i+1}/{len(opinions)}]\n"
+                opinions_text += f"comment_id: {op.get('comment_id', '')}\n"
+                did = op.get("discussion_id", "")
+                if did:
+                    opinions_text += f"discussion_id: {did}\n"
+                opinions_text += f"内容:\n{op.get('body', '')[:1000]}\n"
+            opinions_text += f"\n{'='*60}\n"
+
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "ai_review_opinions",
+                [
+                    f"atomgit-bot 已发布 {len(opinions)} 条检视意见，请逐条评估：",
+                    "",
+                    "⚠️ 注意：检视意见不一定正确，需严格判断是否合理后再修改！",
+                    "",
+                    opinions_text,
+                    "操作步骤：",
+                    "1. 逐条阅读检视意见",
+                    "2. 评估每条意见是否合理",
+                    f"3. 合理的意见 → 修改代码并: git push origin {branch_name}",
+                    f"4. 不合理的意见 → 在 PR #{pr_number} 上回复说明原因",
+                    "5. 所有意见处理完毕后:",
+                    f"   python3 scripts/ohc-run.py submit {software} {version} --resume",
+                    "",
+                    "回复检视评论命令:",
+                    f"   python3 scripts/gitcode_pr.py reply-comment --repo {repo} "
+                    f"--number {pr_number} --discussion-id <id> --body '回复内容'",
+                ],
+                resume_with_flag=True)
+            # Advance state to Phase 5 so resume proceeds to CI
+            _save_submit_state(ver_dir, {
+                "pr_number": pr_number,
+                "review_phase": 5,
+                "branch_name": branch_name,
+            })
+            return "handoff_opinions"
+
+    # ── Phase 5: Review complete ──
+    log_ok("✅ AI Review 流程完成")
+    _save_submit_state(ver_dir, {
+        "pr_number": pr_number,
+        "review_phase": 5,
+        "branch_name": branch_name,
+    })
+    return "review_complete"
 
 
 # ═══════════════════════════════════════════════════════
@@ -1263,14 +1900,18 @@ def submit_cli(argv: list[str] | None = None) -> int:
     """CLI entry point: ohc submit <software> <version>"""
     parser = argparse.ArgumentParser(
         prog="ohc submit",
-        description="门禁检查(完成/W3/W4) + 自检 + git push + 自动创建PR + CI监控 + AI Review检查（阻塞式，失败 emit HANDOFF）",
+        description="门禁检查(完成/W3/W4) + 自检 + git push + 自动创建PR + "
+                    "AI Review 监控(5阶段,HANDOFF) + CI 监控（阻塞式，失败 emit HANDOFF）",
     )
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", help="版本号")
     parser.add_argument("--project-dir", "-p", default=None)
+    parser.add_argument("--resume", action="store_true",
+                         help="从上次 HANDOFF 处恢复（跳过已完成阶段，从状态文件继续）")
     args = parser.parse_args(argv)
     return cmd_submit(args.software, args.version,
-                      pdir=getattr(args, "project_dir", None))
+                      pdir=getattr(args, "project_dir", None),
+                      resume=getattr(args, "resume", False))
 
 
 def review_cli(argv: list[str] | None = None) -> int:

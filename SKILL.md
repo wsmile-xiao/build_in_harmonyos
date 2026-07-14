@@ -220,8 +220,10 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 # Step 3: 收尾（9 步自动，详见 §3 Step 3）
 python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|failed|archived
 
-# Step 4: 提交 PR（内含 W4 前置检查，HANDOFF 强制）
+# Step 4: 提交 PR（内含 W4 前置检查 + AI Review 监控 + CI 监控，HANDOFF 强制）
 python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本>
+# 如 AI Review HANDOFF 后修复并继续:
+python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本> --resume
 ```
 
 **如何选择**：已有 conanfile.py / 简单编译 → 模式 A；首次编译 / 复杂依赖 / 需深度调试 → 模式 B。
@@ -409,8 +411,26 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 | [9/9] gen_summary + PR 原子性 | 重新生成 SUMMARY.md (W2 检查) | 非致命 |
 
 > **W4 Pre-PR 独立审计不在 finish 内部**，在 `submit` 内部作为前置检查执行。
-> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR）。
+> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**AI Review 监控**(5阶段)→**CI 监控**）。
 > AI 操作路径：`finish` → `submit`，两条命令，不可跳过。
+>
+> **⭐ AI Review 监控（5 阶段，嵌入 submit，HANDOFF 强制）**：
+> PR 创建后，submit 自动进入 atomgit-bot AI 检视监控流程：
+> - Phase 1: 等待"变更摘要"生成（每 5 分钟轮询，30 分钟超时）
+>   - atomgit-bot 先发"正在生成合并请求摘要"和"AI 代码检视正在进行中" → 继续等待
+>   - 出现"变更摘要"字段 → 进入 Phase 2
+> - Phase 2: AI 评估变更摘要（HANDOFF）→ 检查摘要中是否有必须修改的点
+>   - AI 评估后 push 修复（如有）并 `--resume` 继续
+> - Phase 3: 等待检视意见出现（每 5 分钟轮询，30 分钟超时）
+>   - 继续等待 atomgit-bot 评论中出现三类以外的检视意见
+>   - 出现检视意见 → 进入 Phase 4；超时无新意见 → 直接进入 CI 监控
+> - Phase 4: AI 处理检视意见（HANDOFF）
+>   - ⚠️ **检视意见不一定正确，需严格判断是否合理才能修改**
+>   - 合理的修改并 push，不合理的回复说明原因
+>   - 所有意见处理完毕后 `--resume` 继续
+> - Phase 5: AI Review 完成 → 进入 CI 监控
+>
+> 状态文件 `.submit-state.json` 记录 review_phase（1/3/5），`--resume` 从正确阶段恢复。
 
 **前置条件**：test-report 存在 + Staging 验证完成 + conanfile.py 存在。
 **状态值**：`published`(verify通过+CI upload) | `built`(verify通过未upload) | `failed`(编译或验证失败) | `archived`(旧版本归档)。
@@ -624,7 +644,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
-| `search-url` / `submit` / `review` / `post-merge` | URL搜索 / **PR提交(前置W4检查,HANDOFF强制)** / 主编审核 / 合并后索引 |
+| `search-url` / `submit` / `review` / `post-merge` | URL搜索 / **PR提交(W4前置+AI Review 5阶段+CI监控,HANDOFF强制,支持--resume)** / 主编审核 / 合并后索引 |
 | `init-archive` / `close-archive` / `finalize-archive` | 归档初始化 / 关闭 / 清理校验 |
 | `check-env` / `clean-verify` / `check-knowledge-gap` | 环境检查 / 干净构建验证 / 知识缺口检查 |
 | `dispatch` / `summary` / `conan-migrate` | 多任务调度 / 统计摘要 / Conan 迁移辅助 |
@@ -637,7 +657,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `scripts/sync-recipes.py` | 从 conan 缓存同步配方到 archives/ |
 | `scripts/migrate_kv_to_yaml.py` | KV→YAML 渐进迁移 |
 | `scripts/pre_pr_audit.py` | ⭐ W4: Pre-PR 审计工具 (generate/report/check 子命令，由 submit 内部调用) |
-| `scripts/gitcode_pr.py` | ⭐ GitCode PR 管理 (创建PR/获取评论/CI状态/回复评论) |
+| `scripts/gitcode_pr.py` | ⭐ GitCode PR 管理 (创建PR/获取评论/CI状态/回复评论/monitor-review AI检视监控) |
 
 ### Pre-commit Hook（⭐ 建议安装）
 
@@ -659,4 +679,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 ---
 
-*SKILL.md v11.4 — 2026-07-10 — HANDOFF嵌入式门禁：W2/W3嵌入finish step[5/9](阻塞+HANDOFF)、W4嵌入submit前置检查(HANDOFF强制)、移除pre_pr_gate.sh独立脚本、pre_pr_audit.py收编为submit内部调用、模式B增submit步骤；AI路径简化为finish→submit两步不可跳过；v11.3→v11.4*
+*SKILL.md v11.5 — 2026-07-14 — AI Review监控增强：submit流程新增atomgit-bot 5阶段检视监控(Phase1等待变更摘要→Phase2评估摘要→Phase3等待检视意见→Phase4处理检视意见→Phase5进入CI)，每5分钟轮询，HANDOFF强制，--resume支持；CI监控移至AI Review之后；gitcode_pr.py新增monitor-review子命令；submission.py新增.submit-state.json状态文件；v11.4→v11.5*

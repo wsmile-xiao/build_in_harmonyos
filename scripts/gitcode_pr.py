@@ -590,6 +590,164 @@ def cmd_get_review_comments(args):
     return review_comments
 
 
+# ── AI Review 监控 ────────────────────────────────────────────────
+
+# atomgit-bot 评论分类关键词
+SUMMARY_GENERATING_MARKERS = ["正在生成合并请求摘要", "正在生成合并请求摘要，请稍候"]
+REVIEW_IN_PROGRESS_MARKERS = ["AI 代码检视正在进行中", "AI 代码检视正在进行中，请稍候"]
+SUMMARY_READY_MARKERS = ["变更摘要"]
+
+
+def classify_comment(body: str) -> str:
+    """将 atomgit-bot 评论内容分类。
+
+    Returns:
+        "summary_generating" — 正在生成摘要
+        "review_in_progress" — AI 检视进行中
+        "summary_ready"      — 变更摘要已生成
+        "review_opinion"     — 检视意见（需处理）
+        "unknown"            — 未知类型
+    """
+    if not body:
+        return "unknown"
+    for marker in SUMMARY_GENERATING_MARKERS:
+        if marker in body:
+            return "summary_generating"
+    for marker in REVIEW_IN_PROGRESS_MARKERS:
+        if marker in body:
+            return "review_in_progress"
+    for marker in SUMMARY_READY_MARKERS:
+        if marker in body:
+            return "summary_ready"
+    return "review_opinion"
+
+
+def cmd_monitor_review(args):
+    """监控 atomgit-bot AI 检视状态，返回结构化 JSON。
+
+    检视状态 (state):
+        no_bot_comments    — 尚无 atomgit-bot 评论
+        generating         — 仅含"正在生成"和"检视进行中"，尚未出摘要
+        summary_ready      — 变更摘要已生成，无检视意见
+        has_opinions       — 已出现检视意见，需 AI 评估处理
+
+    输出 JSON 字段:
+        state              — 上述状态之一
+        phase              — 数字阶段 (0=未开始, 1=等待摘要, 2=摘要就绪, 3=有检视意见)
+        summary_content    — 变更摘要评论全文 (state=summary_ready/has_opinions 时)
+        review_opinions    — 检视意见列表 [{comment_id, body, created_at, discussion_id}]
+        bot_comment_count  — atomgit-bot 评论总数
+        all_comments_count — 全部评论数 (含人工)
+    """
+    path = f"/repos/{args.repo}/pulls/{args.number}/comments"
+    params = {"per_page": 100, "page": 1}
+
+    all_comments = []
+    while True:
+        result = api_request("GET", path, params=params)
+        if not result:
+            break
+        all_comments.extend(result)
+        if len(result) < params["per_page"]:
+            break
+        params["page"] += 1
+
+    # 筛选 atomgit-bot 评论（按时间排序）
+    bot_comments = [
+        c for c in all_comments
+        if is_bot_user(c.get("user", {}).get("login", ""))
+    ]
+    # 按创建时间排序
+    bot_comments.sort(key=lambda c: c.get("created_at", ""))
+
+    # 分类每条评论
+    classified = []
+    summary_content = None
+    review_opinions = []
+
+    for c in bot_comments:
+        body = c.get("body", "")
+        category = classify_comment(body)
+        entry = {
+            "comment_id": c.get("id", ""),
+            "discussion_id": c.get("discussion_id", c.get("in_reply_to", "")),
+            "created_at": c.get("created_at", ""),
+            "category": category,
+            "body": body,
+        }
+        classified.append(entry)
+
+        if category == "summary_ready":
+            summary_content = body
+        elif category == "review_opinion":
+            review_opinions.append({
+                "comment_id": c.get("id", ""),
+                "discussion_id": c.get("discussion_id", c.get("in_reply_to", "")),
+                "created_at": c.get("created_at", ""),
+                "body": body,
+            })
+
+    # 判断整体状态
+    categories = [c["category"] for c in classified]
+    has_summary = "summary_ready" in categories
+    has_opinions = len(review_opinions) > 0
+
+    if not bot_comments:
+        state = "no_bot_comments"
+        phase = 0
+    elif not has_summary and not has_opinions:
+        # 只有"正在生成"和"检视进行中"
+        state = "generating"
+        phase = 1
+    elif has_summary and not has_opinions:
+        state = "summary_ready"
+        phase = 2
+    elif has_opinions:
+        state = "has_opinions"
+        phase = 3
+    else:
+        state = "unknown"
+        phase = 0
+
+    output = {
+        "state": state,
+        "phase": phase,
+        "summary_content": summary_content,
+        "review_opinions": review_opinions,
+        "bot_comment_count": len(bot_comments),
+        "all_comments_count": len(all_comments),
+        "classified_comments": classified,
+    }
+
+    # 人类可读输出
+    state_desc = {
+        "no_bot_comments": "尚无 atomgit-bot 评论",
+        "generating": "⏳ AI 检视进行中（摘要尚未生成）",
+        "summary_ready": "📋 变更摘要已生成，等待检视意见",
+        "has_opinions": "🔍 已有检视意见，需评估处理",
+        "unknown": "❓ 未知状态",
+    }
+    print(f"AI Review 状态: {state_desc.get(state, state)}")
+    print(f"  Phase: {phase}")
+    print(f"  atomgit-bot 评论数: {len(bot_comments)}")
+    print(f"  全部评论数: {len(all_comments)}")
+    if summary_content:
+        print(f"\n--- 变更摘要 ---")
+        print(truncate(summary_content, 2000))
+    if review_opinions:
+        print(f"\n--- 检视意见 ({len(review_opinions)} 条) ---")
+        for i, op in enumerate(review_opinions):
+            print(f"\n[{i+1}] comment_id: {op['comment_id']}")
+            if op.get("discussion_id"):
+                print(f"    discussion_id: {op['discussion_id']}")
+            print(f"    {truncate(op['body'], 800)}")
+
+    if args.json:
+        print("\n--- JSON ---")
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+    return output
+
+
 # ── CLI ───────────────────────────────────────────────────────────
 
 def main():
@@ -680,6 +838,12 @@ def main():
     p.add_argument("--number", type=int, required=True)
     p.add_argument("--max-length", type=int, default=800)
     p.set_defaults(func=cmd_get_review_comments)
+
+    # monitor-review
+    p = sub.add_parser("monitor-review", help="监控 atomgit-bot AI 检视状态")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--number", type=int, required=True)
+    p.set_defaults(func=cmd_monitor_review)
 
     args = parser.parse_args()
     if not args.command:
