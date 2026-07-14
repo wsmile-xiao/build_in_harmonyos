@@ -1,60 +1,47 @@
-# libjpeg 10 编译笔记
+# libjpeg 10 适配笔记
 
-## 编译开始
-- 时间：2026-05-19
-- 软件：libjpeg（IJG 版本）
-- 版本：10（release 2026-01-25）
+## 基本信息
+- 上游：IJG（Independent JPEG Group）参考实现，https://www.ijg.org/files/jpegsrc.v10.tar.gz
+- 版本：10（JPEG_LIB_VERSION = 100）
+- 构建系统：autotools（源码包自带 configure / Makefile.in，无需 autoreconf）
+- 依赖：无（纯 C，仅依赖 libc）
 
-## 平台信息
-- 系统：HarmonyOS HongMeng Kernel 1.12.0 aarch64
-- 编译器：clang 15.0.4
+## 配方要点
+- `--enable-static --disable-shared`：libjpeg 与系统库同名（R26）。仅产出 `libjpeg.a`，
+  避免动态库落到系统库搜索路径造成覆盖，同时规避 HMDFS 下 `libjpeg.so.10` 加载失败的历史问题。
+- `build()` 在 `make` 之后执行 `make check`，直接复用上游 `Makefile.am` 的 `check-local`。
+- `package()` 额外拷贝 `README`（IJG 许可证正文）到 `licenses/`。
+- 产物：`libjpeg.a`，头文件 `jpeglib.h`/`jconfig.h`/`jerror.h`/`jmorecfg.h`，
+  可执行文件 `cjpeg`/`djpeg`/`jpegtran`/`rdjpgcom`/`wrjpgcom`（因此软件级补充 `commands.json`，R38）。
 
-## 构建系统
-- 类型：autotools（configure + make）
+## 补丁
 
-## 依赖
-- 无依赖（纯 C 实现）
+### 0001-config.guess.patch（E007 平台识别）
+源码包自带的 `config.guess`（timestamp 2024-07-27）按 `uname -s` 分派，鸿蒙上 `UNAME_SYSTEM=HarmonyOS`
+不落入任何分支，configure 报 `cannot guess build type`。补丁新增 `*:HarmonyOS:*:*` 分支，
+按 `uname -m` 归一化后输出 `aarch64-unknown-linux-ohos`。
 
-## 编译参数
-```bash
-# configure 参数
-./configure --prefix=$DEFAULT_PREFIX --disable-shared
+注：`config.sub`（timestamp 2024-05-27）已内置 `ohos*` 与 `linux-ohos*` 三元组，无需补丁——
+旧归档里的 `0002-config.sub.patch` 是历史遗留（且内容含重复行损坏），本次一并移除。
 
-# 关键参数说明：
-# --disable-shared: 禁用动态库，使用静态链接（HMDFS 平台限制应对）
-```
+### 0002-configure.patch（E011 HMDFS umask）
+`configure` 用 `umask 077 && mktemp -d` 创建临时目录，HMDFS 上 700 权限目录内无法再创建文件，
+`config.status` 报 `can't create ./confXXX/subs1.awk: Permission denied`。补丁把两处 `umask 077` 改为 `umask 022`。
 
-## 遇到的问题和解决方案
+## 测试
 
-### 问题 1：config.guess 无法识别 HarmonyOS 系统（E007）
-- 症状：`configure: error: cannot guess build type`
-- 解决：使用 `patch-autotools-ohos.pl` 补丁修复 config.guess 和 config.sub
-- 命令：`perl $SKILL_ROOT/scripts/patch-autotools-ohos.pl config.guess config.sub`
+### 上游测试（已集成进 build()）
+`make check` → `check-local`：`djpeg` 解码 `testorig.jpg`（ppm/gif/bmp 三种输出）、
+`cjpeg` 编码 `testimg.ppm`（基线 + 渐进）、`jpegtran` 无损转换 `testprog.jpg`，
+随后 7 条 `cmp` 与参考图像逐字节比对，任一不一致即 make 失败。
 
-### 问题 2：HMDFS 平台 umask 限制导致 config.status 失败（E011）
-- 症状：`./config.status[989]: can't create ./confXXX/subs1.awk: Permission denied`
-- 解决：修改 configure 和 config.status 中的 `umask 077` 为 `umask 022`
-- 命令：`sed -i 's/umask 077/umask 022/g' configure` 和 `sed -i 's/umask 077/umask 022/g' config.status`
+### test_package（消费者视角）
+`test.c` 用 `jpeg_mem_dest` 将 64x48 RGB 渐变图以质量 90 编码进内存，校验 SOI 标记（0xFFD8）与输出长度；
+再用 `jpeg_mem_src` + `jpeg_read_header` + `jpeg_read_scanlines` 解回，校验尺寸与分量数，
+并对每行全部像素与原图逐字节比对（有损编码，阈值 16）。
 
-### 问题 3：动态库加载失败（HMDFS 平台限制）
-- 症状：`Error loading shared library libjpeg.so.10`
-- 解决：重新编译为静态链接模式（--disable-shared）
+本地预验证（macOS/clang，非鸿蒙）：上游 `make check` 7 条 cmp 全部通过；`test.c` 链接 `libjpeg.a` 运行输出
+`libjpeg version: 100 / encoded 1041 bytes / libjpeg test: OK`，退出码 0。鸿蒙 aarch64 上的编译与运行由 CI 验证。
 
-## 功能测试
-- ✅ cjpeg 编码测试通过
-- ✅ djpeg 解码测试通过
-- ✅ jpegtran 无损转换测试通过
-- ✅ libjpeg 库 API 测试通过
-
-## 产物
-- cjpeg（166KB，静态链接）
-- djpeg（170KB，静态链接）
-- jpegtran（170KB，静态链接）
-- rdjpgcom（22KB）
-- wrjpgcom（27KB）
-- libjpeg.a（312KB，静态库）
-- 头文件：jconfig.h, jerror.h, jmorecfg.h, jpeglib.h
----
-
-**编译结束**: 2026-05-19 21:35
-**最终状态**: built
+## 状态
+- status: built（配方验证通过，待 CI 在鸿蒙 worker 上 conan create 并发布）
