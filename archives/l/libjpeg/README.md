@@ -38,13 +38,11 @@ djpeg -h
 ```
 
 ## 编译选项
-- `--disable-shared`: 使用静态链接模式，避免 HMDFS 动态库加载问题
+- `--enable-static --disable-shared`: 与系统同名库，仅构建静态库（R26），同时规避 HMDFS 动态库加载问题
 
 ## 补丁说明
-1. **0001-config.guess.patch**: HarmonyOS 平台识别支持
-2. **0002-config.sub.patch**: linux-ohos 平台三元组支持
-3. **0003-umask.patch**: HMDFS 文件系统 umask 限制修复
+1. **0001-config.guess.patch**: HarmonyOS 平台识别支持（config.sub 已内置 linux-ohos，无需补丁）
+2. **0002-configure.patch**: HMDFS 文件系统 umask 限制修复
 
 ## 注意事项
-- 使用静态链接模式，避免 HMDFS 动态库加载问题
-- 可执行文件均为静态链接，无外部依赖
+- 仅提供静态库 `libjpeg.a`，可执行文件无外部依赖（仅 libc）
