@@ -28,3 +28,7 @@ CFLAGS="-fPIC -O2" ./configure --static --prefix=/  →  make -j1  →  make che
 ## 验证结果
 
 - 真机 conan create + test_package 通过（fPIC libz.a 被 libcairo.so 吸收，全链 cairo ALL_PASS）
+
+## 消费者（须用本版而非 1.3.1）
+所有把 zlib 静态链进**共享库**的下游都必须 require `zlib/1.3.1.1`（-fPIC），不能用 `zlib/1.3.1`（非 -fPIC，
+链进 .so 报 R_AARCH64 relocation）：cairo、libpng、**qpdf**、后续 **libtiff** 等。本版首发到制品仓即为解此依赖。
