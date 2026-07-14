@@ -44,7 +44,9 @@ pip3 install conan                            # 从配置的社区源安装 OHOS
 ## §0 初始化
 
 ```bash
-SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openharmony-compile-agent*" 2>/dev/null | head -1)")"
+SKILL_ROOT="$(dirname "$(find "${ATOMCODE_HOME:-$HOME/.atomcode}" -name "SKILL.md" -path "*openharmony-compile-agent*" 2>/dev/null | head -1)")"
+# 回退到 OpenDesk
+[ -z "$SKILL_ROOT" ] && SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openharmony-compile-agent*" 2>/dev/null | head -1)")"
 ```
 
 > `ohc-run.py` 内部自动定位项目根目录（`find_project_dir()`），不需要手动 `export` 环境变量。
@@ -56,6 +58,21 @@ SKILL_ROOT="$(dirname "$(find "$HOME/.opendesk" -name "SKILL.md" -path "*openhar
 |------|---------|------|
 | 协作者（默认） | 直接使用 | 编译软件、提取知识、生成 conanfile.py、创建分支并提交 PR |
 | 主编 | `OHC_ROLE=editor` | 审核 PR、合并知识、重建索引 |
+
+### §0.2 积分赛事 PR 模板（⭐ 积分赛事专用）
+
+使用 AtomCode 提交积分赛事 PR 时，必须使用专用模板：
+
+- **模板文件**：`templates/积分赛事PR模板.md`
+- **触发条件**：提示词中包含 **"积分模板"** 时自动启用
+- **PR 标题**：必须以 `【积分赛事】` 为前缀
+- **PR 正文**：严格按 `templates/积分赛事PR模板.md` 填写，包含：
+  - 三方库信息（名称、版本、仓库地址、适配路径、使用知识库）
+  - 测试用例对比（上游 vs 适配后）
+  - 上游测试用例修改说明
+  - 补全测试用例说明
+  - 验证结果（编译状态、测试通过率）
+  - 补充说明
 
 **协作者 Git 铁律（违反=越权）**：
 - ❌ 不推 main，不走捷径：创建功能分支 `git checkout -b feat/{软件名}-{版本}` → push → GitCode PR
