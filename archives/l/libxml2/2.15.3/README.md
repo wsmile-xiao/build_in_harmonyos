@@ -1,54 +1,47 @@
-# libxml2 2.15.3 — OpenHarmony 预编译说明
+# libxml2 2.15.3 — 鸿蒙 PC conan 制品
 
-## 基本信息
+`os=OHOS, arch=armv8`(= aarch64)的 conan 包，支持两种消费形态。
 
-- **软件**: libxml2 2.15.3
-- **目标平台**: OpenHarmony aarch64 (HongMeng Kernel 1.12.0)
-- **构建系统**: meson/ninja (autotools 在 HMDFS 上不可用)
-- **编译器**: clang/clang++
-- **状态**: built
-
-## 预编译包内容
-
-- `bin/xmllint` — XML 命令行工具 (ELF 已签名)
-- `lib/libxml2.so.16.1.3` — 共享库 (ELF 已签名)
-- `lib/libxml2.so.16` / `lib/libxml2.so` — 符号链接
-- `include/libxml2/libxml/*.h` — 开发头文件
-
-## 补丁说明
-
-1. **0001-config.guess.patch** (+11/-0): 添加 OpenHarmony 系统检测，识别 `aarch64-linux-ohos` 三元组
-2. **0002-config.sub.patch** (+11/-3): 在 config.sub 中添加 `linux-ohos*` 操作系统识别规则
-
-## 使用方法
+## 出包（鸿蒙 PC CI）
 
 ```bash
-# 解压预编译包
-tar xzf libxml2-2.15.3-ohos-aarch64.tar.gz -C /target/dir
-
-# 设置库路径
-export LD_LIBRARY_PATH=/target/dir/lib:$LD_LIBRARY_PATH
-
-# 运行 xmllint
-/target/dir/bin/xmllint --version
-# 输出: xmllint: using libxml version 21503
-
-# XML 解析示例
-/target/dir/bin/xmllint document.xml
-
-# XPath 查询示例
-/target/dir/bin/xmllint --xpath "//element/text()" document.xml
+# 鸿蒙 PC 设备原生编译
+conan create . -pr ohos-native
 ```
 
-## 注意事项
+> 源码由 `conandata.yml` 的 url 在 `conan create` 时下载并 sha256 校验（`source()` 用 `get()`）。
 
-- xmllint 和 libxml2.so 已完成 ELF 签名，可直接在 OpenHarmony 上执行
-- 本地 ninja install 的未签名二进制无法直接执行（报 "operation not permitted"），必须使用预编译包中的签名版本
-- 需通过 LD_LIBRARY_PATH 指向 libxml2.so.16 所在目录，避免与系统旧版 libxml2.so.2 冲突
+## 前提
 
-## 编译知识要点
+> 所用 conan 的 settings 须含 `os=OHOS`（大写）及 `compiler.version=15`；stock conan 2 默认不含 OHOS。推荐在 `~/.conan2/settings_user.yml` 的 `os:` 下加一行 `    OHOS:`（非侵入扩展，不改 settings.yml），或使用 OpenHarmonyPCDeveloper 分发的 conan。
 
-1. HMDFS 文件系统上 mktemp -d 创建的临时目录权限为 0700 (umask 077)，非 owner 用户无法写入，导致 autotools configure 失败 → 使用 meson 替代
-2. libxml2 2.15.x 官方推荐 meson 构建系统，autotools 支持不完整（缺少 config.h.in）
-3. meson 预编译包需要修复 shebang 和 PYTHONPATH wrapper 才能在 OpenHarmony 上运行
-4. config.sub/config.guess 需要添加 linux-ohos* 三元组支持
+## .so 签名
+
+**签名默认关**：本 recipe 的 `package()` 不自签 `.so`，靠链接器自签（构建时 clang 直接产出有效自签 ELF，无需事后重签）。见 ML-0043。
+
+若构建过程有步骤在链接后改动 `.so` 二进制，需用 `--sign-so` 生成显式重签 recipe，或改用不改动 `.so` 的构建选项（推荐后者）。
+
+## 消费 A：conan 工程（CMake/pkg-config 消费本库）
+
+```bash
+# 鸿蒙 PC：显式给 profile
+conan install --requires=libxml2/2.15.3 -pr ohos-native
+```
+
+生成 `libxml2-config.cmake` / `libxml-2.0.pc`（指向 cache）；`find_package(libxml2)` 消费，运行期 `source conanrun.sh`。
+
+## 消费 B：裸程序（设备 ~/usr/local + dlopen）
+
+```bash
+conan install --requires=libxml2/2.15.3 -pr ohos-native \
+    --deployer=usr_local --deployer-folder=$HOME/usr/local
+```
+
+头文件/库/.pc 展开到 `~/usr/local/{include,lib,bin}`；裸 `dlopen` 全路径即可命中。
+
+## 点对点搬运预编译包（免 remote）
+
+```bash
+conan cache save "libxml2/2.15.3:*" --file libxml2.tgz   # 出包机导出（recipe + 二进制）
+conan cache restore libxml2.tgz                               # 目标机导入
+```
