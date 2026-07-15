@@ -1,44 +1,10 @@
-# libgpg-error 1.55 编译进度
+# libgpg-error 1.55 编译笔记（HarmonyOS PC · 标准 Conan autotools）
 
-**日期**: 2026-04-17
-**状态**: 🔄 编译中
+## 定位
+- 产出动态 liblibgpg-error.so，供 dlopen 及作依赖。
 
-## 步骤记录
+## 关键适配
+- （填：系统识别 / umask / 子包 / zipfs / 签名等）
 
-| 步骤 | 状态 | 备注 |
-|------|------|------|
-| Step 1 init | ⏳ | |
-| Step 2 patches | ⏳ | |
-| Step 3 configure | ⏳ | |
-| Step 4 make | ⏳ | |
-| Step 5 install | ⏳ | |
-| Step 6 safety | ⏳ | |
-| Step 7 check | ⏳ | |
-| Step 8 staging | ⏳ | |
-| Step 9 package | ⏳ | |
-| Step 10 deploy | ⏳ | |
-| Step 11 finish | ⏳ | |
-
-## 发现与知识
-
-<!-- 编译过程中发现的问题和解决方案 -->
-
----
-
-**编译结束**: 2026-04-21 13:00
-**最终状态**: partial
-
----
-
-**编译结束**: 2026-04-21 13:00
-**最终状态**: partial
-
----
-
-**编译结束**: 2026-04-21 13:01
-**最终状态**: partial
-
----
-
-**编译结束**: 2026-04-21 13:02
-**最终状态**: partial
+## 状态
+built（CI conan create + test 通过）
