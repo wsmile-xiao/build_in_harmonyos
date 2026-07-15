@@ -684,7 +684,7 @@ def cmd_submit(software: str, version: str,
        Phase 1: Wait for "变更摘要" (poll 5min, 30min timeout)
        Phase 2: AI evaluates summary → HANDOFF (mandatory fix check)
        Phase 3: Wait for review opinions (poll 5min, 30min timeout)
-       Phase 4: AI evaluates opinions → HANDOFF (strict reasonability check)
+       Phase 4: AI evaluates opinions → HANDOFF (accept: fix+resolve, reject: reply only)
        Phase 5: Review complete → proceed to CI
     6. Monitor CI via gitcode_pr.py ci-status (poll 30s, 40min timeout)
     """
@@ -1217,7 +1217,9 @@ def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
 #   → 超时无新意见 → 直接进入 CI 监控
 # Phase 4: AI 处理检视意见（HANDOFF）
 #   → ⚠️ 检视意见不一定正确，需严格判断合理性
-#   → 合理的修改并 push，不合理的回复说明原因
+#   → 接纳的意见：修改代码 + 回复 + AI 标记已解决
+#   → 拒绝的意见：回复说明原因 + 请审核人员评估，AI 不标记已解决
+#   → CI 状态通知（ohpcd-robot）不是检视意见，不需要回复
 #   → 所有意见处理完毕后 --resume
 # Phase 5: AI Review 完成，进入 CI 监控
 
@@ -1243,10 +1245,10 @@ def _save_submit_state(ver_dir: Path, state: dict) -> None:
 
 
 def _call_monitor_review(gitcode_pr: str, repo: str, pr_number: int) -> dict | None:
-    """Call gitcode_pr.py monitor-review --json and parse result."""
+    """Call gitcode_pr.py --json monitor-review and parse result."""
     result = subprocess.run(
-        [sys.executable, gitcode_pr, "monitor-review",
-         "--repo", repo, "--number", str(pr_number), "--json"],
+        [sys.executable, gitcode_pr, "--json", "monitor-review",
+         "--repo", repo, "--number", str(pr_number)],
         capture_output=True, text=True, timeout=30)
     if result.returncode != 0:
         return None
@@ -1327,7 +1329,7 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
             _emit_submit_handoff(software, version, ver_dir, project_dir,
                 "ai_review_summary_timeout",
                 [f"变更摘要未在 {POLL_TIMEOUT//60} 分钟内生成，请稍后手动检查 PR #{pr_number}",
-                 f"检查: python3 scripts/gitcode_pr.py monitor-review --repo {repo} --number {pr_number} --json",
+                 f"检查: python3 scripts/gitcode_pr.py --json monitor-review --repo {repo} --number {pr_number}",
                  f"摘要出现后: python3 scripts/ohc-run.py submit {software} {version} --resume"],
                 resume_with_flag=True)
             return "timeout"
@@ -1464,22 +1466,37 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
             _emit_submit_handoff(software, version, ver_dir, project_dir,
                 "ai_review_opinions",
                 [
-                    f"atomgit-bot 已发布 {len(opinions)} 条检视意见，请逐条评估：",
+                    f"atomgit-bot 已发布 {len(opinions)} 条检视意见，请逐条评估并处理：",
                     "",
                     "⚠️ 注意：检视意见不一定正确，需严格判断是否合理后再修改！",
                     "",
                     opinions_text,
-                    "操作步骤：",
-                    "1. 逐条阅读检视意见",
-                    "2. 评估每条意见是否合理",
-                    f"3. 合理的意见 → 修改代码并: git push origin {branch_name}",
-                    f"4. 不合理的意见 → 在 PR #{pr_number} 上回复说明原因",
-                    "5. 所有意见处理完毕后:",
-                    f"   python3 scripts/ohc-run.py submit {software} {version} --resume",
+                    "━━━ 处理方式 ━━━",
+                    "每条检视意见用 handle-review-opinion 命令处理：",
+                    "  · accept（接纳）：修改代码 + 回复 + 脚本自动标记已解决",
+                    "  · reject（拒绝）：仅回复说明原因 + 请审核人员评估，不标记已解决",
                     "",
-                    "回复检视评论命令:",
-                    f"   python3 scripts/gitcode_pr.py reply-comment --repo {repo} "
-                    f"--number {pr_number} --discussion-id <id> --body '回复内容'",
+                    "━━━ 操作命令 ━━━",
+                    "",
+                    "【接纳意见并修复】",
+                    f"  1. 修改代码并: git push origin {branch_name}",
+                    f"  2. 处理: python3 scripts/gitcode_pr.py handle-review-opinion \\",
+                    f"       --repo {repo} --number {pr_number} \\",
+                    f"       --discussion-id <id> --action accept \\",
+                    f"       --reason '修改了xxx，添加了yyy'",
+                    "",
+                    "【拒绝意见（不修改）】",
+                    f"  python3 scripts/gitcode_pr.py handle-review-opinion \\",
+                    f"       --repo {repo} --number {pr_number} \\",
+                    f"       --discussion-id <id> --action reject \\",
+                    f"       --reason '该意见不适用，因为...'",
+                    "",
+                    "━━━ 完成条件 ━━━",
+                    f"  所有 {len(opinions)} 条检视意见都已处理后，继续:",
+                    f"  python3 scripts/ohc-run.py submit {software} {version} --resume",
+                    "",
+                    "  其中：接纳的意见已由脚本标记已解决；拒绝的意见已请审核人员评估。",
+                    "  ⚠️ 非 CI 状态通知（如 ohpcd-robot 的 CI 排队/构建/失败）不需要回复。",
                 ],
                 resume_with_flag=True)
             # Advance state to Phase 5 so resume proceeds to CI

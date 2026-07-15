@@ -405,19 +405,91 @@ def cmd_ci_status(args):
 
 
 def cmd_reply_comment(args):
-    """回复 PR 评论。"""
-    body = {"body": args.body}
-    path = f"/repos/{args.repo}/pulls/{args.number}/discussions/{args.discussion_id}/comments"
+    """回复 PR 评论。
+
+    使用简单评论 API (POST /repos/{repo}/pulls/{number}/comments) 配合
+    in_reply_to 参数回复指定讨论。discussions API 需要额外权限，
+    简单评论 API 兼容性更好。
+    """
+    body = {"body": args.body, "in_reply_to": args.discussion_id}
+    path = f"/repos/{args.repo}/pulls/{args.number}/comments"
     result = api_request("POST", path, body=body)
 
     print("✅ 回复成功")
-    print(f"   comment_id: {result.get('id', 'N/A')}")
-    print(f"   URL: {result.get('html_url', 'N/A')}")
+    print(f"   note_id: {result.get('note_id', 'N/A')}")
+    print(f"   discussion_id: {args.discussion_id}")
 
     if args.json:
         print("\n--- JSON ---")
         print(json.dumps(result, ensure_ascii=False, indent=2))
     return result
+
+
+def cmd_resolve_comment(args):
+    """修改检视意见解决状态（标记为已解决/未解决）。
+
+    API: PUT /repos/{owner}/{repo}/pulls/{number}/comments/{discussion_id}
+    Body: {"resolved": true/false}
+    """
+    resolved = not args.unresolved if args.unresolved else True
+    body = {"resolved": resolved}
+    path = f"/repos/{args.repo}/pulls/{args.number}/comments/{args.discussion_id}"
+    result = api_request("PUT", path, body=body)
+
+    status_text = "已解决" if resolved else "未解决"
+    print(f"✅ 检视意见标记为{status_text}")
+    print(f"   discussion_id: {args.discussion_id}")
+
+    if args.json:
+        print("\n--- JSON ---")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
+
+
+def cmd_handle_review_opinion(args):
+    """处理单条检视意见：回复 + （接纳时）标记已解决。
+
+    封装检视意见处理流程，确保规则一致性：
+    - accept: 回复"已修复: {reason}" + 标记已解决
+    - reject: 回复"不接纳: {reason}。请审核人员评估..."（不标记已解决）
+
+    AI 只需传入 action 和 reason，脚本保证流程正确。
+    """
+    if args.action == "accept":
+        reply_body = f"✅ 已修复: {args.reason}"
+    else:
+        reply_body = (f"❌ 不接纳: {args.reason}\n\n"
+                       "请审核人员评估是否无需解决，"
+                       "如无需解决，由审核人员标记已解决。")
+
+    # Step 1: 回复评论
+    reply_data = {"body": reply_body, "in_reply_to": args.discussion_id}
+    reply_path = f"/repos/{args.repo}/pulls/{args.number}/comments"
+    reply_result = api_request("POST", reply_path, body=reply_data)
+
+    print(f"✅ 已回复检视意见 ({args.action})")
+    print(f"   discussion_id: {args.discussion_id}")
+    print(f"   回复内容: {reply_body[:100]}")
+
+    # Step 2: 标记已解决（仅接纳时）
+    if args.action == "accept":
+        resolve_data = {"resolved": True}
+        resolve_path = f"/repos/{args.repo}/pulls/{args.number}/comments/{args.discussion_id}"
+        resolve_result = api_request("PUT", resolve_path, body=resolve_data)
+        print(f"✅ 已标记为已解决")
+    else:
+        print(f"⏸️  未标记已解决（拒绝意见，留待审核人员评估）")
+
+    if args.json:
+        output = {
+            "action": args.action,
+            "discussion_id": args.discussion_id,
+            "reply_body": reply_body,
+            "resolved": args.action == "accept",
+        }
+        print("\n--- JSON ---")
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+    return {"action": args.action, "resolved": args.action == "accept"}
 
 
 def cmd_update_pr(args):
@@ -596,15 +668,20 @@ def cmd_get_review_comments(args):
 SUMMARY_GENERATING_MARKERS = ["正在生成合并请求摘要", "正在生成合并请求摘要，请稍候"]
 REVIEW_IN_PROGRESS_MARKERS = ["AI 代码检视正在进行中", "AI 代码检视正在进行中，请稍候"]
 SUMMARY_READY_MARKERS = ["变更摘要"]
+# CI 状态评论关键词（ohpcd-robot 等，非检视意见，不需要回复）
+CI_STATUS_MARKERS = ["CI 校验", "CI 构建", "CI 检验", "CI 自动", "CI流水线",
+                     "校验排队", "校验通过", "校验失败",
+                     "构建已启动", "构建成功", "构建失败"]
 
 
 def classify_comment(body: str) -> str:
-    """将 atomgit-bot 评论内容分类。
+    """将 bot 评论内容分类。
 
     Returns:
         "summary_generating" — 正在生成摘要
         "review_in_progress" — AI 检视进行中
         "summary_ready"      — 变更摘要已生成
+        "ci_status"          — CI 状态通知（非检视意见，不需要回复）
         "review_opinion"     — 检视意见（需处理）
         "unknown"            — 未知类型
     """
@@ -619,6 +696,10 @@ def classify_comment(body: str) -> str:
     for marker in SUMMARY_READY_MARKERS:
         if marker in body:
             return "summary_ready"
+    # CI 状态通知（非检视意见）
+    for marker in CI_STATUS_MARKERS:
+        if marker in body:
+            return "ci_status"
     return "review_opinion"
 
 
@@ -802,6 +883,24 @@ def main():
     p.add_argument("--discussion-id", required=True, help="讨论 ID")
     p.add_argument("--body", required=True, help="回复内容")
     p.set_defaults(func=cmd_reply_comment)
+
+    # resolve-comment
+    p = sub.add_parser("resolve-comment", help="修改检视意见解决状态 (标记为已解决/未解决)")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--number", type=int, required=True)
+    p.add_argument("--discussion-id", required=True, help="讨论 ID")
+    p.add_argument("--unresolved", action="store_true", help="标记为未解决 (默认标记为已解决)")
+    p.set_defaults(func=cmd_resolve_comment)
+
+    # handle-review-opinion
+    p = sub.add_parser("handle-review-opinion", help="处理单条检视意见 (回复+标记已解决)")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--number", type=int, required=True)
+    p.add_argument("--discussion-id", required=True, help="检视意见讨论 ID")
+    p.add_argument("--action", required=True, choices=["accept", "reject"],
+                   help="accept=接纳并修复(回复+标记已解决), reject=拒绝(仅回复)")
+    p.add_argument("--reason", required=True, help="修复说明或拒绝原因")
+    p.set_defaults(func=cmd_handle_review_opinion)
 
     # update-pr
     p = sub.add_parser("update-pr", help="更新 PR 信息")
