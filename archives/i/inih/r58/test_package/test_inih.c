@@ -22,7 +22,6 @@ typedef struct {
     char names[10][64];
     char values[10][64];
     int count;
-    int fail;
 } test_ctx;
 
 /* Handler that collects parsed pairs into test_ctx */
@@ -32,7 +31,6 @@ static int collect_handler(void* user, const char* section,
     test_ctx* ctx = (test_ctx*)user;
     if (ctx->count >= 10) {
         fprintf(stderr, "FAIL: too many pairs (limit 10)\n");
-        ctx->fail = 1;
         return 0;
     }
     strncpy(ctx->sections[ctx->count], section, sizeof(ctx->sections[0]) - 1);

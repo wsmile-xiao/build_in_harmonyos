@@ -36,5 +36,8 @@ class InihTestConan(ConanFile):
     def test(self):
         # OHOS: /system/bin/sh (mksh) cannot exec ELF binaries.
         # Use bash to wrap binary execution.
-        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-        self.run(f"{bash} -c './test_inih'", env="conanrun")
+        if self.settings.os == "OHOS":
+            bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+            self.run(f"{bash} -c './test_inih'", env="conanrun")
+        else:
+            self.run("./test_inih", env="conanrun")
