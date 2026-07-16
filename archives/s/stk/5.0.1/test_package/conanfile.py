@@ -38,8 +38,19 @@ class StkTestConan(ConanFile):
             f'"{src}" "{lib_path}" {ld_flags} -o "{out}"'
         )
 
+    def _prepare_ohos_executable(self, exe):
+        objcopy = "/data/service/hnp/bin/llvm-objcopy"
+        signer = "/data/service/hnp/bin/binary-sign-tool"
+        signed = exe + ".signed"
+        self.run(f'"{objcopy}" --remove-section .codesign "{exe}" 2>/dev/null || true')
+        self.run(
+            f'"{signer}" sign -inFile "{exe}" -outFile "{signed}" -selfSign 1'
+        )
+        os.replace(signed, exe)
+        os.chmod(exe, 0o755)
+
     def test(self):
         exe = os.path.join(self.build_folder, "test_stk")
         if str(self.settings.os) == "OHOS":
-            os.chmod(exe, 0o755)
+            self._prepare_ohos_executable(exe)
         self.run(f'"{exe}"', env="conanrun")
