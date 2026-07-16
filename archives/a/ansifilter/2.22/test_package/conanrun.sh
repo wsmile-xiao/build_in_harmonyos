@@ -1,0 +1,1 @@
+. "/storage/Users/currentUser/build_in_harmonyos/archives/a/ansifilter/2.22/test_package/conanrunenv-release-armv8.sh"
