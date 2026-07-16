@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Conan test_package for stk 5.0.1."""
 import os
+import subprocess
 
 from conan import ConanFile
 from conan.tools.layout import basic_layout
@@ -42,7 +43,12 @@ class StkTestConan(ConanFile):
         objcopy = "/data/service/hnp/bin/llvm-objcopy"
         signer = "/data/service/hnp/bin/binary-sign-tool"
         signed = exe + ".signed"
-        self.run(f'"{objcopy}" --remove-section .codesign "{exe}" 2>/dev/null || true')
+        subprocess.run(
+            [objcopy, "--remove-section", ".codesign", exe],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
         self.run(
             f'"{signer}" sign -inFile "{exe}" -outFile "{signed}" -selfSign 1'
         )
