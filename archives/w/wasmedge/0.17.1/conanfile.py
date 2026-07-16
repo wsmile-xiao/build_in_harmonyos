@@ -30,6 +30,45 @@ class WasmEdgeConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        third_party = {
+            "fmt": (
+                [
+                    "https://gh-proxy.com/https://github.com/fmtlib/fmt/archive/refs/tags/11.0.2.tar.gz",
+                    "https://github.com/fmtlib/fmt/archive/refs/tags/11.0.2.tar.gz",
+                ],
+                "6cb1e6d37bdcb756dbbe59be438790db409cdb4868c66e888d5df9f13f7c027f",
+            ),
+            "spdlog": (
+                [
+                    "https://gh-proxy.com/https://github.com/gabime/spdlog/archive/refs/tags/v1.13.0.tar.gz",
+                    "https://github.com/gabime/spdlog/archive/refs/tags/v1.13.0.tar.gz",
+                ],
+                "534f2ee1a4dcbeb22249856edfb2be76a1cf4f708a20b0ac2ed090ee24cfdbc9",
+            ),
+            "simdjson": (
+                [
+                    "https://gh-proxy.com/https://github.com/simdjson/simdjson/archive/refs/tags/v3.10.0.tar.gz",
+                    "https://github.com/simdjson/simdjson/archive/refs/tags/v3.10.0.tar.gz",
+                ],
+                "9c30552f1dd0ee3d0832bb1c6b7b97d813b18d5ef294c10dcb6fc242e5947de8",
+            ),
+            "stb": (
+                [
+                    "https://gh-proxy.com/https://github.com/nothings/stb/archive/2dfbe86bef853be33cbbda07abcb4db58c7f817d.tar.gz",
+                    "https://github.com/nothings/stb/archive/2dfbe86bef853be33cbbda07abcb4db58c7f817d.tar.gz",
+                ],
+                "f8803386a38269bb4ac3088bbf6b3ebc4ea3072a1bcc9bfdd59ccfc5d66550eb",
+            ),
+        }
+        for name, (urls, sha256) in third_party.items():
+            get(
+                self,
+                url=urls,
+                sha256=sha256,
+                destination=os.path.join(self.source_folder, "third_party", name),
+                strip_root=True,
+                filename=f"{name}.tar.gz",
+            )
 
     def generate(self):
         tc = CMakeToolchain(self)
@@ -45,6 +84,11 @@ class WasmEdgeConan(ConanFile):
         tc.variables["WASMEDGE_FORCE_DISABLE_LTO"] = "ON"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
         tc.variables["CMAKE_CXX_FLAGS"] = "-Wno-error=maybe-uninitialized -Wno-error=array-bounds"
+        third_party = os.path.join(self.source_folder, "third_party")
+        tc.variables["FETCHCONTENT_SOURCE_DIR_FMT"] = os.path.join(third_party, "fmt")
+        tc.variables["FETCHCONTENT_SOURCE_DIR_SPDLOG"] = os.path.join(third_party, "spdlog")
+        tc.variables["FETCHCONTENT_SOURCE_DIR_SIMDJSON"] = os.path.join(third_party, "simdjson")
+        tc.variables["FETCHCONTENT_SOURCE_DIR_STB"] = os.path.join(third_party, "stb")
         tc.generate()
 
     def build(self):
