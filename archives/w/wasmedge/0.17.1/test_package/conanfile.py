@@ -1,20 +1,27 @@
 import os
 
 from conan import ConanFile
+from conan.tools.build import can_run
+from conan.tools.cmake import CMake, cmake_layout
 
 
 class WasmEdgeTestConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
+    generators = "CMakeDeps", "CMakeToolchain"
     test_type = "explicit"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
 
+    def layout(self):
+        cmake_layout(self)
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+
     def test(self):
-        dep = self.dependencies["wasmedge"]
-        header = os.path.join(dep.package_folder, "include", "wasmedge", "wasmedge.h")
-        library_dir = os.path.join(dep.package_folder, "lib")
-        if not os.path.exists(header):
-            raise Exception("wasmedge public C API header was not packaged")
-        if not os.path.isdir(library_dir):
-            raise Exception("wasmedge library directory was not packaged")
+        if can_run(self):
+            test_bin = os.path.join(self.cpp.build.bindirs[0], "test_wasmedge")
+            self.run(test_bin, env="conanrun")
