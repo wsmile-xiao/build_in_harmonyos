@@ -40,4 +40,6 @@ class StkTestConan(ConanFile):
 
     def test(self):
         exe = os.path.join(self.build_folder, "test_stk")
+        if str(self.settings.os) == "OHOS":
+            os.chmod(exe, 0o755)
         self.run(f'"{exe}"', env="conanrun")
