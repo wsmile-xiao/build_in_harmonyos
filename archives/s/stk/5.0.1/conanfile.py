@@ -7,7 +7,13 @@ left out so the package has no ALSA/JACK/CoreAudio/device dependency on OHOS.
 import os
 
 from conan import ConanFile
-from conan.tools.files import copy, get, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import (
+    apply_conandata_patches,
+    copy,
+    export_conandata_patches,
+    get,
+    replace_in_file,
+)
 from conan.tools.layout import basic_layout
 
 
@@ -66,6 +72,13 @@ class StkConan(ConanFile):
             "--prefix=/",
         ]
         if str(self.settings.os) == "OHOS":
+            # HMDFS rejects Autotools config.status temp files created with umask 077.
+            replace_in_file(
+                self,
+                os.path.join(self.source_folder, "configure"),
+                "umask 077",
+                "umask 022",
+            )
             configure_args.append(f"--build={self._build_triplet()}")
 
         self.run(
