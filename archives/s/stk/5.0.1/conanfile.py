@@ -42,6 +42,15 @@ class StkConan(ConanFile):
                                   default={}, check_type=dict) or {}
         return compilers.get("cpp", "clang++")
 
+    def _build_triplet(self):
+        arch = str(self.settings.arch)
+        arch_map = {
+            "armv8": "aarch64",
+            "armv8.3": "aarch64",
+            "x86_64": "x86_64",
+        }
+        return f"{arch_map.get(arch, arch)}-unknown-linux-gnu"
+
     def build(self):
         apply_conandata_patches(self)
 
@@ -50,9 +59,17 @@ class StkConan(ConanFile):
         os.environ["CXX"] = cxx
         os.environ["CONFIG_SHELL"] = config_shell
 
+        configure_args = [
+            "--disable-realtime",
+            "--disable-shared",
+            "--enable-static",
+            "--prefix=/",
+        ]
+        if str(self.settings.os) == "OHOS":
+            configure_args.append(f"--build={self._build_triplet()}")
+
         self.run(
-            f'"{config_shell}" ./configure '
-            "--disable-realtime --disable-shared --enable-static --prefix=/",
+            f'"{config_shell}" ./configure {" ".join(configure_args)}',
             cwd=self.source_folder,
         )
         self.run("make -C src -j1", cwd=self.source_folder)
