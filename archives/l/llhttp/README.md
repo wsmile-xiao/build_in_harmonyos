@@ -251,19 +251,19 @@ Parse complete!
 
 ## 测试结果摘要
 
-自定义测试通过率：**88%**（22/25 测试）
+test_package 通过率：**100%**（21/21 断言，容器 `conan create` + test_package 真实运行）
 
-核心功能测试：
-- HTTP 方法（GET/POST/PUT/DELETE/HEAD/OPTIONS）：100% 通过
-- Headers 解析：100% 通过
-- Chunked encoding：100% 通过
-- 流式处理：100% 通过
-- 错误处理：100% 通过
+测试覆盖（`test_package/test.c`）：
+- GET 基础解析（`llhttp_execute` + 回调触发）：7 项
+- PATCH 方法识别（`on_method` / `llhttp_get_method` / `llhttp_method_name`）：5 项
+- 错误原因获取（`llhttp_execute` 报错 / `llhttp_get_errno` / `llhttp_get_error_reason`）：4 项
+- pause/resume 状态（`HPE_PAUSED` / `llhttp_resume` / 多轮续解析）：5 项
 
-3 个失败为非关键功能：
-- PATCH 方法识别（可通过升级解决）
-- pause 状态处理（边缘场景）
-- error reason 获取（非核心功能）
+> 备注：早期设备端临时测试（2026-04-20）曾跑 25 个用例得 88%，标注 PATCH 方法识别、
+> pause 状态处理、error reason 获取 3 项失败。经核实，这 3 项均为 llhttp 9.3.1 原生支持
+> 的功能（见 `include/llhttp.h`：`HTTP_PATCH=28`、`llhttp_pause`/`llhttp_resume`、
+> `llhttp_get_error_reason`），当时失败源自临时测试程序的用法/断言问题，已在 test_package
+> 补充针对性用例并全部验证通过。
 
 ## 参考资料
 
