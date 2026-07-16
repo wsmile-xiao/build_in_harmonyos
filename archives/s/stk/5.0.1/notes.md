@@ -15,6 +15,8 @@ Only `src/libstk.a` is packaged. The top-level `make` target builds example prog
 
 - Realtime audio and MIDI backends are disabled to avoid ALSA, JACK, CoreAudio, and device access requirements.
 - The package has no external Conan dependency.
+- The Conan package is static-only and declares `shared=False` for Conan 2 library metadata.
+- STK 5.0.1 ships an older `config.guess`; OHOS builds pass an explicit GNU build triplet to `configure`.
 - Public headers are limited to the offline synthesis, filtering, file I/O, and instrument APIs that are present in `libstk.a`.
 - `rawwaves/` is shipped under `share/stk/rawwaves` for consumers that need sample-based instruments.
 
