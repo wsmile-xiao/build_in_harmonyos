@@ -32,7 +32,7 @@ class LightGBMConan(ConanFile):
         get(self, **self.conan_data["sources"], strip_root=True)
         submodules = {
             "external_libs/compute": ("https://github.com/boostorg/compute/archive/36350b7de849300bd3d72a05d8bf890ca405a014.tar.gz", "compute"),
-            "external_libs/eigen": ("https://gitlab.com/libeigen/eigen/-/archive/3147391d946bb4b6c68edd901f2add6ac1f31f8c/eigen-3147391d946bb4b6c68edd901f2add6ac1f31f8c.tar.gz", "eigen"),
+            "external_libs/eigen": ("https://github.com/eigenteam/eigen-git-mirror/archive/3147391d946bb4b6c68edd901f2add6ac1f31f8c.tar.gz", "eigen"),
             "external_libs/fmt": ("https://github.com/fmtlib/fmt/archive/8303d140a1a11f19b982a9f664bbe59a1ccda3f4.tar.gz", "fmt"),
             "external_libs/fast_double_parser": ("https://github.com/lemire/fast_double_parser/archive/252029ddac664370bdda3f0761675785d92a1573.tar.gz", "fast_double_parser"),
         }
