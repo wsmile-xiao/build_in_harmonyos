@@ -51,7 +51,6 @@ class DfuProgrammerConan(ConanFile):
             f"PKG_CONFIG_PATH={pkgconfig_dir}:{libusb_prefix}/lib/pkgconfig:{self._sys_prefix}/lib/pkgconfig",
             f"CPPFLAGS={include_flags}",
             f"LDFLAGS={ld_flags}",
-            "LIBS=-lusb-1.0",
             f"LIBUSB_CFLAGS={include_flags}",
             f"LIBUSB_LIBS={lib_flags}",
             "ac_cv_search_libusb_init=-lusb-1.0",
