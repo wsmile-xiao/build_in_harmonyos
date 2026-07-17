@@ -10,7 +10,7 @@ from conan.tools.layout import basic_layout
 
 class FlashConan(ConanFile):
     name = "flash"
-    version = "homebrew"
+    version = "2.7.2"
     package_type = "application"
 
     description = "Command-line script to flash SD card images of any kind"
