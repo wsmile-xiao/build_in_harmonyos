@@ -123,6 +123,9 @@ endif()''',
             "test_cross_process_lock_works_in_proc|"
             "test_cross_process_lock_works_cross_proc"
         )
+        # cmake.test() without a filter runs OHOS-incompatible upstream tests;
+        # this explicit ctest call keeps the official test target while excluding
+        # only known unsupported direct-IO and cross-process-lock cases.
         self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure -E "{excluded_tests}"')
 
     def package(self):
