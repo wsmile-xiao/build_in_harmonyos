@@ -45,8 +45,8 @@ class DfuProgrammerConan(ConanFile):
         tc.extra_cflags.extend(include_flags.split())
         tc.extra_ldflags.extend([f"-L{libusb_prefix}/lib", f"-L{self._sys_prefix}/lib"])
         tc.configure_args.extend([
-            "--build=aarch64-unknown-linux-ohos",
-            "--host=aarch64-unknown-linux-ohos",
+            "--build=aarch64-unknown-linux-gnu",
+            "--host=aarch64-unknown-linux-gnu",
             f"PKG_CONFIG_PATH={pkgconfig_dir}:{libusb_prefix}/lib/pkgconfig:{self._sys_prefix}/lib/pkgconfig",
             f"LIBUSB_CFLAGS={include_flags}",
             f"LIBUSB_LIBS={lib_flags}",
