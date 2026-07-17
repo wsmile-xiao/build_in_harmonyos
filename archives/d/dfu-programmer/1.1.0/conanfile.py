@@ -165,6 +165,7 @@ class DfuProgrammerConan(ConanFile):
             ])
 
     def _prepare_libusb_include(self):
+        # CI exposes the staged libusb header as libusb.h in the include path.
         replacements = [("<libusb-1.0/libusb.h>", "<libusb.h>")]
         self._replace_in_existing("src/dfu.c", replacements)
         self._replace_in_existing("src/dfu.h", replacements)
