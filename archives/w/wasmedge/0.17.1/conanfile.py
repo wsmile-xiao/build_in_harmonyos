@@ -92,6 +92,9 @@ class WasmEdgeConan(ConanFile):
         tc.generate()
 
     def build(self):
+        tmpdir = os.path.join(self.build_folder, "tmp")
+        os.makedirs(tmpdir, exist_ok=True)
+        os.environ["TMPDIR"] = tmpdir
         apply_conandata_patches(self)
         cmake = CMake(self)
         cmake.configure()
