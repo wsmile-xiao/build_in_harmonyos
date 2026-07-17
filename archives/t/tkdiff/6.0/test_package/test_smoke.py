@@ -15,7 +15,7 @@ def main() -> int:
     script = os.path.join(package_folder, "bin", "tkdiff")
     assert os.path.isfile(script), f"missing tkdiff script: {script}"
 
-    with open(script, "r", encoding="utf-8", errors="ignore") as handle:
+    with open(script, "r", encoding="utf-8", errors="replace") as handle:
         content = handle.read()
     assert content.startswith("#!/usr/bin/env sh"), "tkdiff shebang was not adapted for HarmonyOS"
     assert "package require Tk" in content, "tkdiff Tcl/Tk entry point missing"

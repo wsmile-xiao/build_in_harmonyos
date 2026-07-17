@@ -34,7 +34,7 @@ class TkdiffConan(ConanFile):
 
     def build(self):
         script = os.path.join(self.source_folder, "tkdiff")
-        with open(script, "r", encoding="utf-8", errors="ignore") as f:
+        with open(script, "r", encoding="utf-8", errors="replace") as f:
             content = f.read()
         content = content.replace("#!/bin/sh", "#!/usr/bin/env sh", 1)
         with open(script, "w", encoding="utf-8") as f:
