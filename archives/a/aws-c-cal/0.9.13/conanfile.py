@@ -64,6 +64,7 @@ class AwsCCalConan(ConanFile):
             "project(aws-c-cal LANGUAGES C VERSION 0.1.0)",
             """project(aws-c-cal LANGUAGES C VERSION 0.1.0)
 
+include(CTest)
 if(NOT TARGET test)
     add_custom_target(test COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure)
 endif()""",
