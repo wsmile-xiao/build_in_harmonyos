@@ -15,7 +15,6 @@ class LuvConan(ConanFile):
 
     def requirements(self):
         self.requires("libuv/1.52.1")
-        self.requires("luajit/2.1.0")
 
     def layout(self):
         basic_layout(self)
@@ -33,7 +32,9 @@ class LuvConan(ConanFile):
             "BUILD_MODULE": "OFF",
             "LUV_USE_SYSTEM_LIBUV": "ON",
             "LUA_BUILD_TYPE": "System",
-            "WITH_SHARED_LIBUV": "ON"
+            "WITH_SHARED_LIBUV": "ON",
+            "LUA_INCLUDE_DIR": os.path.join(self.source_folder, "deps", "luajit", "src"),
+            "LUA_LIBRARIES": os.path.join(self.source_folder, "deps", "luajit", "src", "libluajit.a")
         })
         cmake.build()
 
