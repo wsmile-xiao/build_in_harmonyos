@@ -20,4 +20,5 @@ class XorgServerTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            self.run("echo 'Xorg Server package test passed'")
+            # 运行编译出的测试二进制
+            self.run(os.path.join(self.build_folder, "test_xorg"), run_environment=True)
