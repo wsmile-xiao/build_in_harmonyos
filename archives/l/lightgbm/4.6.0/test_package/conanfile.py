@@ -12,13 +12,15 @@ class LightGBMTestConan(ConanFile):
         self.requires(self.tested_reference_str)
 
     def test(self):
+        if not can_run(self):
+            return
         dep = self.dependencies["lightgbm"]
         candidates = [
             os.path.join(dep.package_folder, "bin", "lightgbm"),
             os.path.join(dep.package_folder, "bin", "lightgbm.exe"),
         ]
-        if can_run(self):
-            for candidate in candidates:
-                if os.path.exists(candidate):
-                    self.run(f'"{candidate}" --help || test $? -eq 255', env="conanrun")
-                    break
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                self.run(f'"{candidate}" --help || test $? -eq 255', env="conanrun")
+                return
+        raise Exception(f"lightgbm binary not found in package: {', '.join(candidates)}")

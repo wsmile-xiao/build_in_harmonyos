@@ -30,24 +30,15 @@ class LightGBMConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
-        submodules = {
-            "external_libs/compute": ("boostorg/compute", "36350b7de849300bd3d72a05d8bf890ca405a014", "compute"),
-            "external_libs/eigen": ("eigenteam/eigen-git-mirror", "3147391d946bb4b6c68edd901f2add6ac1f31f8c", "eigen"),
-            "external_libs/fmt": ("fmtlib/fmt", "8303d140a1a11f19b982a9f664bbe59a1ccda3f4", "fmt"),
-            "external_libs/fast_double_parser": ("lemire/fast_double_parser", "252029ddac664370bdda3f0761675785d92a1573", "fast_double_parser"),
-        }
-        for destination, (repo, commit, filename) in submodules.items():
-            github_url = f"https://github.com/{repo}/archive/{commit}.tar.gz"
-            urls = [
-                f"https://gh-proxy.com/{github_url}",
-                f"https://mirror.ghproxy.com/{github_url}",
-                f"https://ghproxy.com/{github_url}",
-                f"https://gitclone.com/github.com/{repo}/archive/{commit}.tar.gz",
-                f"https://moeyy.cn/gh-proxy/{github_url}",
-                f"https://kkgithub.com/{repo}/archive/{commit}.tar.gz",
-                github_url,
-            ]
-            get(self, url=urls, destination=destination, strip_root=True, filename=f"{filename}.tar.gz")
+        for destination, metadata in self.conan_data.get("submodules", {}).items():
+            get(
+                self,
+                url=metadata["url"],
+                sha256=metadata["sha256"],
+                destination=destination,
+                strip_root=True,
+                filename=metadata["filename"],
+            )
 
     def generate(self):
         tc = CMakeToolchain(self)
