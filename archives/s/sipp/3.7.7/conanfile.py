@@ -5,7 +5,7 @@ import os
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import copy, get
+from conan.tools.files import copy, get, replace_in_file
 
 
 class SippConan(ConanFile):
@@ -18,6 +18,9 @@ class SippConan(ConanFile):
     package_type = "application"
 
     settings = "os", "compiler", "build_type", "arch"
+
+    def requirements(self):
+        self.requires("ncurses/6.5")
 
     def layout(self):
         cmake_layout(self)
@@ -33,6 +36,38 @@ class SippConan(ConanFile):
         tc.variables["USE_GSL"] = "OFF"
         tc.variables["BUILD_STATIC"] = False
         tc.variables["USE_ASAN"] = False
+
+        ncurses = self.dependencies["ncurses"]
+        if ncurses:
+            include_dirs = []
+            package_folder = ncurses.package_folder
+            for include_dir in ncurses.cpp_info.includedirs:
+                if not os.path.isabs(include_dir):
+                    include_dir = os.path.join(package_folder, include_dir)
+                include_dirs.append(include_dir)
+                include_dirs.append(os.path.join(include_dir, "ncursesw"))
+            lib_dirs = []
+            for lib_dir in ncurses.cpp_info.libdirs:
+                if not os.path.isabs(lib_dir):
+                    lib_dir = os.path.join(package_folder, lib_dir)
+                lib_dirs.append(lib_dir)
+            for lib_dir in lib_dirs:
+                for name in ("libncursesw.a", "libncursesw.so", "libcursesw.a", "libcursesw.so", "libncurses.a", "libncurses.so"):
+                    candidate = os.path.join(lib_dir, name)
+                    if os.path.exists(candidate):
+                        tc.variables["CURSES_LIBRARY"] = candidate
+                        break
+                if "CURSES_LIBRARY" in tc.variables:
+                    break
+            for lib_dir in lib_dirs:
+                for name in ("libtinfow.a", "libtinfow.so", "libtinfo.a", "libtinfo.so"):
+                    candidate = os.path.join(lib_dir, name)
+                    if os.path.exists(candidate):
+                        tc.variables["TINFO_LIBRARY"] = candidate
+                        break
+                if "TINFO_LIBRARY" in tc.variables:
+                    break
+            tc.variables["CURSES_LIBRARY_INCLUDE_DIRS"] = ";".join(dict.fromkeys(include_dirs))
 
         default_prefix = os.environ.get("DEFAULT_PREFIX")
         if default_prefix:
@@ -50,6 +85,13 @@ class SippConan(ConanFile):
         tc.generate()
 
     def build(self):
+        cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
+        replace_in_file(
+            self,
+            cmake_lists,
+            'if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TINFO_LIBRARY)',
+            'if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS") AND TINFO_LIBRARY)',
+        )
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
