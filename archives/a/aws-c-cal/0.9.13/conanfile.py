@@ -58,7 +58,7 @@ class AwsCCalConan(ConanFile):
             replace_in_file(
                 self,
                 config,
-                'if ((NOT WIN32 AND NOT APPLE) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE)
+                '''if ((NOT WIN32 AND NOT APPLE) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE)
     if (USE_OPENSSL)
         find_dependency(OpenSSL REQUIRED)
         find_dependency(Threads REQUIRED)
@@ -66,7 +66,7 @@ class AwsCCalConan(ConanFile):
         find_dependency(crypto)
     endif()
 endif()
-',
+''',
                 '',
             )
 

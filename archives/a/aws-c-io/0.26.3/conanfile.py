@@ -66,11 +66,11 @@ class AwsCIoConan(ConanFile):
             replace_in_file(
                 self,
                 config,
-                'if (UNIX AND NOT APPLE AND NOT BYO_CRYPTO)
+                '''if (UNIX AND NOT APPLE AND NOT BYO_CRYPTO)
     find_dependency(s2n)
 endif()
 
-',
+''',
                 '',
             )
 
