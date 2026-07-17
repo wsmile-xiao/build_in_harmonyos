@@ -2,12 +2,12 @@
 
 ## 编译环境
 - 构建系统: makefile（简单 Makefile，非 autotools，无 configure）
-- 编译日期: 2026-06-15
+- 编译日期: 2026-07-15
 - 编译器: clang 15.0.4 (clang version 15.0.4)
 - 编译参数: CC=clang CFLAGS="-Wall -O3 -fPIC" LDLIBS="-lm"
 - PREFIX: /storage/Users/currentUser/usr/local
 - DESTDIR: /storage/Users/currentUser/tmp/test-install-fakesteak-0.2.4
-- 状态: published
+- 状态: built
 
 ## 编译步骤（真实执行记录）
 
@@ -207,7 +207,7 @@ $ ls -lh fakesteak → 26K
 
 ---
 
-**编译开始**: 2026-06-15
+**编译开始**: 2026-07-15
 
-**编译结束**: 2026-06-15
-**最终状态**: published
+**编译结束**: 2026-07-15 15:46
+**最终状态**: built

@@ -4,7 +4,7 @@
 **Status**: PASS
 
 ## L1 Test (conan test_package)
-- **Test**: test.c — 验证 pcap_lib_version() 和 pcap_findalldevs()
+- **Test**: test.c — 验证 pcap_lib_version(), pcap_open_dead()+pcap_compile(), pcap_findalldevs()
 - **Result**: ✅ PASS
 
 ## conan-verify

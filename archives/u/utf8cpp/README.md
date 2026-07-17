@@ -1,42 +1,59 @@
-# UTF8CPP
+# UTF8-CPP
 
-> UTF-8 with C++ in a Portable Way
+UTF8-CPP 是一个 C++ 可移植 UTF-8 编解码库，提供高效、安全、易用的 UTF-8 字符串操作接口。
 
-## 简介
+## 功能概述
 
-UTF8CPP (utfcpp) 是一个轻量级的 C++ UTF-8 字符串处理库，提供简洁优雅的接口用于 UTF-8 编码/解码、验证和迭代。它是一个 header-only 库，只需包含头文件即可使用，无需编译链接。
+- **UTF-8 编解码**：UTF-8 与 UTF-16/UTF-32 互转
+- **字符迭代**：UTF-8 字符串迭代器，按字符而非字节遍历
+- **字符串校验**：检测无效 UTF-8 序列
+- **无效序列替换**：将无效字节替换为指定字符
+- **字符长度计算**：计算 UTF-8 字符串的字符数（非字节数）
+- **低层接口**：直接操作字节序列的 unchecked 接口
 
-该库广泛应用于需要处理 UTF-8 文本的 C++ 项目中，特别是在跨平台开发和国际化应用中。它提供了高效的 UTF-8 字符迭代器、编码转换函数和验证工具，完全符合 C++ 标准库风格。
+## OHOS 适配
 
-## OHOS 适配要点
+### 特性
+- **Header-only 库**：无需编译二进制，只需安装头文件
+- **CMake INTERFACE library**：通过 CMake 安装头文件和配置文件
+- **无依赖**：不依赖任何第三方库
 
-1. **Header-only 库特性**: utf8cpp 是纯头文件库，无需编译二进制文件，直接安装头文件即可使用
-2. **测试禁用**: 测试代码依赖额外的链接配置，本预编译包禁用了测试套件
-3. **镜像下载**: 中国大陆环境下建议使用 ghfast.top 等镜像加速 GitHub 源码下载
+### 已知问题
+- 无已知问题
 
-## 依赖
+### 与 Linux 的差异
+- 需设置 `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=aarch64` 规避鸿蒙平台未知问题
 
-| 依赖 | 版本 | 说明 |
-|------|------|------|
-| CMake | 3.28+ | 构建系统 |
-| clang/clang++ | 系统默认 | 编译器 |
+## 使用方式
 
-无外部库依赖。
-
-## 功能验证
-
-```bash
-# 验证头文件安装
-ls ~/usr/local/include/utf8cpp/
-# 输出: utf8.h 等头文件
-
-# C++ 程序中使用示例
-# #include <utf8cpp/utf8.h>
-# std::string str = "你好世界";
-# utf8::iterator it(str.begin());
+```cmake
+# CMakeLists.txt
+find_package(utf8cpp REQUIRED)
+target_link_libraries(my_app PRIVATE utf8cpp::utf8cpp)
 ```
 
-## 参考
+```cpp
+#include <utf8cpp/utf8.h>
+#include <string>
+#include <vector>
 
-- [官方仓库](https://github.com/nemtrif/utfcpp)
-- [文档](https://github.com/nemtrif/utfcpp#documentation)
+int main() {
+    std::string u8str = "你好";
+    // 计算字符数（非字节数）
+    auto char_count = utf8::distance(u8str.begin(), u8str.end());
+    // 转换为 UTF-32
+    std::vector<uint32_t> u32str;
+    utf8::utf8to32(u8str.begin(), u8str.end(), std::back_inserter(u32str));
+    return 0;
+}
+```
+
+## 版本列表
+
+| 版本 | 状态 | 编译日期 |
+|------|------|----------|
+| [4.1.1](./4.1.1/) | built | 2026-07-14 |
+
+## 参考资料
+
+- GitHub: https://github.com/nemtrif/utfcpp
