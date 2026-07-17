@@ -89,3 +89,10 @@ class AwsCAuthConan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["aws-c-auth"]
+        self.cpp_info.requires = [
+            "aws-c-cal::aws-c-cal",
+            "aws-c-common::aws-c-common",
+            "aws-c-http::aws-c-http",
+            "aws-c-io::aws-c-io",
+            "aws-c-sdkutils::aws-c-sdkutils",
+        ]
