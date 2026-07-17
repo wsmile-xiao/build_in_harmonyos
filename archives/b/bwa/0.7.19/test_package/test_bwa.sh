@@ -46,7 +46,7 @@ echo "[test] bwa samse"
 bwa samse "$WORK/ref.fa" "$WORK/read.sai" "$WORK/read.fq" > "$WORK/aln.sam" 2> "$WORK/samse.log"
 
 awk 'BEGIN { ok = 0 }
-     /^r1\t/ && $2 == 0 && $3 == "ref" && $6 == "24M" { ok = 1 }
+     $1 == "r1" && $2 == 0 && $3 == "ref" && $6 == "24M" { ok = 1 }
      END { exit ok ? 0 : 1 }' "$WORK/aln.sam"
 
 echo "bwa functional test: PASS"
