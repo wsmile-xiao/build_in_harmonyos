@@ -19,6 +19,9 @@ class LibkcapiConan(ConanFile):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
     def build(self):
+        # 生成 configure 脚本
+        self.run("autoreconf -ivf")
+        # 配置并编译
         self.run("./configure --prefix=/usr --disable-shared --enable-static")
         self.run("make -j$(nproc)")
 
