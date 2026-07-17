@@ -1,3 +1,3 @@
 #!/bin/sh
-set -eu
+set -euo pipefail
 lightgbm --help >/dev/null 2>&1 || test "$?" -eq 255
