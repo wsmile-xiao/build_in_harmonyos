@@ -224,6 +224,6 @@ class NcursesConan(ConanFile):
         autotools.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["ncursesw", "tinfow", "panelw", "menuw", "formw"]
+        self.cpp_info.libs = ["ncursesw", "panelw", "menuw", "formw"]
         self.cpp_info.includedirs = ["include"]
         self.cpp_info.set_property("pkg_config_name", "ncursesw")
