@@ -12,6 +12,8 @@ class AwsCIoConanTestConan(ConanFile):
 
     def requirements(self):
         self.requires(self.tested_reference_str)
+        self.requires("aws-c-common/0.12.6")
+        self.requires("aws-c-cal/0.9.13")
 
     def layout(self):
         cmake_layout(self)
