@@ -71,7 +71,11 @@ class UtftexConan(ConanFile):
     def _linker_flag(self):
         if str(self.settings.os) != "OHOS":
             return []
-        linker = os.environ.get("LD") or shutil.which("ld.lld") or shutil.which("ld")
+        linker = os.environ.get("LD")
+        if linker == "ld.lld":
+            linker = "lld"
+        if not linker:
+            linker = shutil.which("ld.lld") or shutil.which("ld")
         return [f"-fuse-ld={linker}"] if linker else []
 
     def _write_config_header(self, src_dir):
