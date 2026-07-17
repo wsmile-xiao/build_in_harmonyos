@@ -43,16 +43,14 @@ class DfuProgrammerConan(ConanFile):
         VirtualBuildEnv(self).generate()
         VirtualRunEnv(self).generate()
         libusb_prefix = self._libusb_prefix()
-        bundled_headers = os.path.join(self.source_folder, "res", "headers")
-        bundled_libusb = os.path.join(self.source_folder, "res", "libusb-1.0.a")
         include_flags = (
-            f"-I{bundled_headers} "
             f"-I{libusb_prefix}/include/libusb-1.0 "
             f"-I{libusb_prefix}/include "
             f"-I{self._sys_prefix}/include"
         )
         ld_flags = f"-L{libusb_prefix}/lib -L{self._sys_prefix}/lib"
-        lib_flags = bundled_libusb
+        static_libusb = os.path.join(libusb_prefix, "lib", "libusb-1.0.a")
+        lib_flags = static_libusb if os.path.isfile(static_libusb) else "-lusb-1.0"
         pkgconfig_dir = self._write_libusb_pc(libusb_prefix)
 
         tc = AutotoolsToolchain(self)
@@ -114,27 +112,6 @@ class DfuProgrammerConan(ConanFile):
     def _compiler_path(self):
         compilers = self.conf.get("tools.build:compiler_executables", default={}) or {}
         return compilers.get("c") or "cc"
-
-    def _build_libusb_compat(self):
-        src = os.path.join(self.source_folder, "res", "libusb_compat.c")
-        obj = os.path.join(self.source_folder, "res", "libusb_compat.o")
-        lib = os.path.join(self.source_folder, "res", "libusb-1.0.a")
-        headers = os.path.join(self.source_folder, "res", "headers")
-        if not os.path.isfile(src):
-            return
-        cc = self._compiler_path()
-        ar = os.environ.get("AR", "llvm-ar")
-        self.run(
-            f"{shlex.quote(cc)} -fPIC -O2 -I{shlex.quote(headers)} "
-            f"-c {shlex.quote(src)} -o {shlex.quote(obj)}",
-            env="conanbuild",
-            cwd=self.source_folder,
-        )
-        self.run(
-            f"{shlex.quote(ar)} rcs {shlex.quote(lib)} {shlex.quote(obj)}",
-            env="conanbuild",
-            cwd=self.source_folder,
-        )
 
     def _replace_in_existing(self, relpath, replacements):
         path = os.path.join(self.source_folder, relpath)
@@ -205,7 +182,6 @@ class DfuProgrammerConan(ConanFile):
         if not os.path.exists(configure) and os.path.exists(bootstrap):
             self.run(f"sh {shlex.quote(bootstrap)}", env="conanbuild", cwd=self.source_folder)
         self._prepare_autotools_helpers()
-        self._build_libusb_compat()
 
         autotools = Autotools(self)
         autotools.configure()
