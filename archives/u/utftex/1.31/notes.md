@@ -67,6 +67,10 @@
 - 调试包: utftex-1.31-ohos-aarch64-debug.tar.gz (58KB)
 - 补丁: 0 个
 
+## CI 复验
+
+- 2026-07-18: 清理未使用补丁后，CI #7201 通过，Conan test_package 已执行。
+
 ## 平台限制（G0 干净构建验证）
 
 **G0 失败原因**：utftex 使用 autogen.sh 生成 configure 脚本和相关辅助文件（install-sh, compile, config.guess, config.sub, ltmain.sh）。原始 tarball 不包含这些生成文件，干净构建时需要先运行 autogen.sh，但 G0 验证流程不支持 autogen.sh 步骤。
