@@ -165,9 +165,9 @@ class DfuProgrammerConan(ConanFile):
             ])
 
     def _prepare_libusb_include(self):
-        self._replace_in_existing("src/dfu-device.h", [
-            ("<libusb-1.0/libusb.h>", "<libusb.h>"),
-        ])
+        replacements = [("<libusb-1.0/libusb.h>", "<libusb.h>")]
+        self._replace_in_existing("src/dfu-device.h", replacements)
+        self._replace_in_existing("src/libdfu.c", replacements)
 
     def _stage_bash_completion_helper(self):
         helper = "update-bash-completion.sh"
