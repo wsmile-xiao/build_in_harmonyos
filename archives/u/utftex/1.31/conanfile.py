@@ -38,6 +38,9 @@ class UtftexConan(ConanFile):
 
     def build(self):
         apply_conandata_patches(self)
+        configure = os.path.join(self.source_folder, "configure")
+        if os.path.exists(configure):
+            os.chmod(configure, 0o755)
         autotools = Autotools(self)
         autotools.configure()
         autotools.make(args=["-j1"])
