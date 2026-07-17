@@ -436,8 +436,9 @@ except Exception:
     # 将 conandata.yml 中已知域名的 url 从单值改为列表, 自动加上镜像源 fallback
     # Conan 2.x 的 get() 支持 url 列表, 会逐个尝试直到成功
     # 支持: github.com, ftpmirror.gnu.org, ftp.gnu.org, download.savannah.gnu.org
+    # 支持: archives.boost.io, github.com, ftpmirror.gnu.org, ftp.gnu.org, download.savannah.gnu.org
     if [ -f "$CONANDATA" ]; then
-        if grep -qE 'url:.*https://(github\.com|ftpmirror\.gnu\.org|ftp\.gnu\.org|download\.savannah\.gnu\.org)/' "$CONANDATA" 2>/dev/null; then
+        if grep -qE 'url:.*https://(archives\.boost\.io|github\.com|ftpmirror\.gnu\.org|ftp\.gnu\.org|download\.savannah\.gnu\.org)/' "$CONANDATA" 2>/dev/null; then
             echo "[step] Mirror fallback: rewriting source URLs in conandata.yml..."
             cp "$CONANDATA" "${CONANDATA}.orig" 2>/dev/null
 
@@ -452,6 +453,11 @@ def get_mirrors(url):
     """根据 URL 域名返回镜像列表（含原始 URL）。
     p 包含完整路径（含 /gnu/ 等子路径），镜像 URL 用根路径拼接。
     """
+    # ── archives.boost.io → SourceForge (官方源慢, SF 国内可达 600KB/s) ──
+    if re.match(r'^https?://archives\.boost\.io/release/([\d.]+)/source/(.+)$', url):
+        ver, fn = re.match(r'^https?://archives\.boost\.io/release/([\d.]+)/source/(.+)$', url).groups()
+        sf = f'https://downloads.sourceforge.net/project/boost/boost/{ver}/{fn}'
+        return [sf, url]
     # ── GitHub ──
     if re.match(r'^https?://github\.com/', url):
         return [
