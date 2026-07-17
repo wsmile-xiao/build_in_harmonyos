@@ -205,7 +205,11 @@ class NcursesConan(ConanFile):
                 match = pattern.match(line.rstrip("\n"))
                 if match:
                     value = top_srcdir if match.group(2) == "top_srcdir" else "."
-                    line = f"{match.group(1)}{match.group(2)}{match.group(3)} {value}\n"
+                    # Avoid whitespace after '=': misc/install exports these
+                    # make variables as shell assignments (top_srcdir=${...}).
+                    # A leading value space becomes `top_srcdir= ..`, causing
+                    # the shell to execute `..` as a command.
+                    line = f"{match.group(1)}{match.group(2)}={value}\n"
                     changed = True
                 patched.append(line)
 
