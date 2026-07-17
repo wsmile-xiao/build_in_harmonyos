@@ -5,7 +5,7 @@ import sys
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, replace_in_file
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, load, replace_in_file
 
 
 def _export_local_aws_recipes(conanfile, refs):
@@ -86,16 +86,19 @@ class AwsCIoConan(ConanFile):
         cmake.install()
         config = os.path.join(self.package_folder, "lib", "cmake", "aws-c-io", "aws-c-io-config.cmake")
         if os.path.exists(config):
-            replace_in_file(
-                self,
-                config,
-                '''if (UNIX AND NOT APPLE AND NOT BYO_CRYPTO)
+            s2n_dependency_block = '''if (UNIX AND NOT APPLE AND NOT BYO_CRYPTO)
     find_dependency(s2n)
 endif()
 
-''',
+'''
+            if s2n_dependency_block not in load(self, config):
+                self.output.warning("aws-c-io s2n dependency block already absent")
+                return
+            replace_in_file(
+                self,
+                config,
+                s2n_dependency_block,
                 '',
-                strict=False,
             )
 
     def package_info(self):

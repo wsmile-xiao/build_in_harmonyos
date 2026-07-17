@@ -5,7 +5,7 @@ import sys
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, replace_in_file
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, load, replace_in_file
 
 
 def _export_local_aws_recipes(conanfile, refs):
@@ -78,10 +78,7 @@ class AwsCCalConan(ConanFile):
         cmake.install()
         config = os.path.join(self.package_folder, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
         if os.path.exists(config):
-            replace_in_file(
-                self,
-                config,
-                '''if ((NOT WIN32 AND NOT APPLE) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE)
+            openssl_dependency_block = '''if ((NOT WIN32 AND NOT APPLE) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE)
     if (USE_OPENSSL)
         find_dependency(OpenSSL REQUIRED)
         find_dependency(Threads REQUIRED)
@@ -89,7 +86,14 @@ class AwsCCalConan(ConanFile):
         find_dependency(crypto)
     endif()
 endif()
-''',
+'''
+            if openssl_dependency_block not in load(self, config):
+                self.output.warning("aws-c-cal OpenSSL dependency block already absent")
+                return
+            replace_in_file(
+                self,
+                config,
+                openssl_dependency_block,
                 '',
             )
 
