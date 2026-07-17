@@ -21,7 +21,9 @@ if ! grep -qi "SIPp" "$tmp_output"; then
     exit 1
 fi
 
-if ! grep -qi "free software\|license\|author" "$tmp_output"; then
+if ! grep -qi "free software" "$tmp_output" \
+    && ! grep -qi "license" "$tmp_output" \
+    && ! grep -qi "author" "$tmp_output"; then
     echo "expected informational banner from 'sipp -v'" >&2
     cat "$tmp_output" >&2
     exit 1
