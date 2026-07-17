@@ -24,14 +24,6 @@ class DfuProgrammerConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     _sys_prefix = os.path.join(os.path.expanduser("~"), "usr", "local")
 
-    def export_sources(self):
-        res_src = os.path.join(self.recipe_folder, "res")
-        if os.path.isdir(res_src):
-            res_dst = os.path.join(self.export_folder, "res")
-            if os.path.exists(res_dst):
-                shutil.rmtree(res_dst)
-            shutil.copytree(res_src, res_dst)
-
     def layout(self):
         basic_layout(self)
 
@@ -43,7 +35,6 @@ class DfuProgrammerConan(ConanFile):
             destination=os.path.join(self.source_folder, "_libusb_header"),
             strip_root=True,
         )
-        self._copy_exported_res()
 
     def generate(self):
         VirtualBuildEnv(self).generate()
@@ -107,15 +98,6 @@ class DfuProgrammerConan(ConanFile):
                 ])
             )
         return pkgconfig_dir
-
-    def _copy_exported_res(self):
-        export_dir = os.path.join(os.path.dirname(self.source_folder), "e")
-        res_src = os.path.join(export_dir, "res")
-        if os.path.isdir(res_src):
-            res_dst = os.path.join(self.source_folder, "res")
-            if os.path.exists(res_dst):
-                shutil.rmtree(res_dst)
-            shutil.copytree(res_src, res_dst)
 
     def _compiler_path(self):
         compilers = self.conf.get("tools.build:compiler_executables", default={}) or {}
