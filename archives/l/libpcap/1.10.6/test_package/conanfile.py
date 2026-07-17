@@ -30,4 +30,7 @@ class LibpcapTestConan(ConanFile):
     def test(self):
         cmake = CMake(self)
         cmake.test()
-        self.run(os.path.join(self.cpp.build.bindirs[0], "test_libpcap"), env="conanrun")
+        # OHOS: /system/bin/sh (mksh) cannot execute ELF binaries.
+        # Use bash to wrap binary execution.
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run(f"{bash} -c './test_libpcap'", env="conanrun")
