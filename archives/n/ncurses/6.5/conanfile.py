@@ -54,7 +54,7 @@ class NcursesConan(ConanFile):
         config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
         tmpdir = os.path.join(self.build_folder, "_tmp")
         os.makedirs(tmpdir, exist_ok=True)
-        os.chmod(tmpdir, 0o777)
+        os.chmod(tmpdir, 0o700)
         os.environ["CONFIG_SHELL"] = config_shell
         os.environ["SHELL"] = config_shell
         os.environ["TMPDIR"] = tmpdir
@@ -111,7 +111,7 @@ class NcursesConan(ConanFile):
             self,
             os.path.join(self.source_folder, "configure"),
             "umask 077",
-            "umask 000",
+            "umask 022",
             strict=False,
         )
         # With --no-create ncurses would still try make preinstall even though
@@ -143,11 +143,11 @@ class NcursesConan(ConanFile):
 
         fixed_tmp = os.path.join(tmpdir, "ncurses-config-status")
         os.makedirs(fixed_tmp, exist_ok=True)
-        os.chmod(fixed_tmp, 0o777)
+        os.chmod(fixed_tmp, 0o700)
         with open(config_status, "r", encoding="utf-8") as file:
             content = file.read()
 
-        content = content.replace("umask 077", "umask 000")
+        content = content.replace("umask 077", "umask 022")
         # OHOS ships toybox expr, whose alternation handling corrupts the
         # autoconf config.status directory extraction used for sub-Makefiles.
         # When this happens, generated Makefiles point top_srcdir at mojibake
@@ -158,7 +158,7 @@ class NcursesConan(ConanFile):
             'ac_dir=`false && $as_expr X"$ac_file" :',
             1,
         )
-        for umask in ("077", "000"):
+        for umask in ("077", "000", "022"):
             content = content.replace(
                 f'tmp=`(umask {umask} && mktemp -d -q "$TMPDIR/csXXXXXX") 2>/dev/null` &&\n'
                 '  test -n "$tmp" && test -d "$tmp"',
