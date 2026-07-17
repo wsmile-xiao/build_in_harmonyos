@@ -178,6 +178,18 @@ class DfuProgrammerConan(ConanFile):
                 ("| android* | linux-dietlibc", "| android* | ohos* | linux-dietlibc"),
             ])
 
+    def _stage_bash_completion_helper(self):
+        helper = "update-bash-completion.sh"
+        src = os.path.join(self.source_folder, helper)
+        dst = os.path.join(self.build_folder, helper)
+        os.makedirs(self.build_folder, exist_ok=True)
+        if os.path.isfile(src):
+            shutil.copy2(src, dst)
+        else:
+            with open(dst, "w", encoding="utf-8") as handle:
+                handle.write("#!/bin/sh\nexit 0\n")
+        os.chmod(dst, 0o755)
+
     def build(self):
         configure = os.path.join(self.source_folder, "configure")
         bootstrap = os.path.join(self.source_folder, "bootstrap.sh")
@@ -188,6 +200,7 @@ class DfuProgrammerConan(ConanFile):
 
         autotools = Autotools(self)
         autotools.configure()
+        self._stage_bash_completion_helper()
         autotools.make(args=["-j1"])
 
     def package(self):
