@@ -27,14 +27,17 @@ class LuvConan(ConanFile):
         tc.generate()
 
     def build(self):
+        # 编译 LuaJIT
+        luajit_dir = os.path.join(self.source_folder, "deps", "luajit")
+        self.run(f"cd {luajit_dir} && make -j$(nproc)")
+        # 编译 luv
         cmake = CMake(self)
         cmake.configure(variables={
             "BUILD_MODULE": "OFF",
             "LUV_USE_SYSTEM_LIBUV": "ON",
-            "LUA_BUILD_TYPE": "System",
             "WITH_SHARED_LIBUV": "ON",
-            "LUA_INCLUDE_DIR": os.path.join(self.source_folder, "deps", "luajit", "src"),
-            "LUA_LIBRARIES": os.path.join(self.source_folder, "deps", "luajit", "src", "libluajit.a")
+            "LUAJIT_INCLUDE_DIR": os.path.join(luajit_dir, "src"),
+            "LUAJIT_LIBRARIES": os.path.join(luajit_dir, "src", "libluajit.a")
         })
         cmake.build()
 
