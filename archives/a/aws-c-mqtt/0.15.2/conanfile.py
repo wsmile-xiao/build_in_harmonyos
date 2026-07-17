@@ -91,3 +91,5 @@ class AwsCMqttConan(ConanFile):
             "aws-c-http::aws-c-http",
             "aws-c-io::aws-c-io",
         ]
+        self.cpp_info.set_property("cmake_file_name", "aws-c-mqtt")
+        self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-mqtt")

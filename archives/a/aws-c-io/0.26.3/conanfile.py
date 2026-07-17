@@ -95,6 +95,7 @@ endif()
 
 ''',
                 '',
+                strict=False,
             )
 
 
