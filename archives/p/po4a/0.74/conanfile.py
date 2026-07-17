@@ -26,8 +26,6 @@ class Po4aConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     _scripts = (
         "po4a",
-        "po4a-display-man",
-        "po4a-display-pod",
         "po4a-gettextize",
         "po4a-normalize",
         "po4a-translate",
