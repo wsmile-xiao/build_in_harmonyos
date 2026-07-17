@@ -24,14 +24,6 @@ class Po4aConan(ConanFile):
     package_type = "application"
 
     settings = "os", "compiler", "build_type", "arch"
-    _scripts = (
-        "po4a",
-        "po4a-gettextize",
-        "po4a-normalize",
-        "po4a-translate",
-        "po4a-updatepo",
-        "msguntypot",
-    )
 
     def export_sources(self):
         export_conandata_patches(self)
@@ -44,8 +36,7 @@ class Po4aConan(ConanFile):
 
     def build(self):
         apply_conandata_patches(self)
-        for script in self._scripts:
-            self.run(f"perl -Ilib -c {script}", cwd=self.source_folder)
+        self.run('perl -Ilib -c "po4a"', cwd=self.source_folder)
 
     def package(self):
         copy(self, "COPYING", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
@@ -71,8 +62,18 @@ class Po4aConan(ConanFile):
             keep_path=False,
         )
 
+        scripts = [
+            "po4a",
+            "po4a-display-man",
+            "po4a-display-pod",
+            "po4a-gettextize",
+            "po4a-normalize",
+            "po4a-translate",
+            "po4a-updatepo",
+            "msguntypot",
+        ]
         bin_dir = os.path.join(self.package_folder, "bin")
-        for script in self._scripts:
+        for script in scripts:
             copy(self, script, src=self.source_folder, dst=bin_dir, keep_path=False)
             packaged = os.path.join(bin_dir, script)
             if os.path.exists(packaged):

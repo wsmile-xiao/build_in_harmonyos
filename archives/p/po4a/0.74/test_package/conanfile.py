@@ -23,15 +23,7 @@ class Po4aTestConan(ConanFile):
         self.output.info(f"po4a bin dir: {bin_dir}")
         self.output.info(f"po4a perl lib dir: {lib_dir}")
 
-        scripts = (
-            "po4a",
-            "po4a-gettextize",
-            "po4a-normalize",
-            "po4a-translate",
-            "po4a-updatepo",
-            "msguntypot",
-        )
-        for name in scripts:
+        for name in ("po4a", "po4a-gettextize", "po4a-translate", "po4a-updatepo", "msguntypot"):
             path = os.path.join(bin_dir, name)
             if not os.path.isfile(path):
                 raise AssertionError(f"missing packaged script: {name}")

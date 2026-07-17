@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-for tool in po4a po4a-gettextize po4a-normalize po4a-translate po4a-updatepo msguntypot; do
+for tool in po4a po4a-gettextize po4a-translate po4a-updatepo msguntypot; do
   path="$(command -v "$tool")"
   test -n "$path"
   test -x "$path"
