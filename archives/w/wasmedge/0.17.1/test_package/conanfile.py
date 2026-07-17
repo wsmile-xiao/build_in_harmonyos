@@ -26,8 +26,9 @@ class WasmEdgeTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            bindirs = getattr(self.cpp.build, "bindirs", [])
-            if not bindirs:
-                raise RuntimeError("test_package bindirs is empty")
-            test_bin = os.path.join(bindirs[0], "test_wasmedge")
+            test_bin = os.path.join(self.build_folder, "test_wasmedge")
+            if self.settings.os == "Windows":
+                test_bin += ".exe"
+            if not os.path.exists(test_bin):
+                raise RuntimeError(f"test_package binary not found: {test_bin}")
             self.run(test_bin, env="conanrun")
