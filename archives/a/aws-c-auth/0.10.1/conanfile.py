@@ -96,3 +96,5 @@ class AwsCAuthConan(ConanFile):
             "aws-c-io::aws-c-io",
             "aws-c-sdkutils::aws-c-sdkutils",
         ]
+        self.cpp_info.set_property("cmake_file_name", "aws-c-auth")
+        self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-auth")

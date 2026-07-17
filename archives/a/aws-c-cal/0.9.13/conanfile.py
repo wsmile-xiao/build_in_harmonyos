@@ -69,6 +69,25 @@ class AwsCCalConan(ConanFile):
 
     def build(self):
         apply_conandata_patches(self)
+        config_template = os.path.join(self.source_folder, "cmake", "aws-c-cal-config.cmake")
+        replace_in_file(
+            self,
+            config_template,
+            '''if (NOT @BYO_CRYPTO@ AND (@AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE@ OR (NOT WIN32 AND NOT APPLE)))
+    if (@USE_OPENSSL@ AND NOT ANDROID)
+        # aws-c-cal has been built with a dependency on OpenSSL::Crypto,
+        # therefore consumers of this library have a dependency on OpenSSL and must have it found
+        find_dependency(OpenSSL REQUIRED)
+        find_dependency(Threads REQUIRED)
+    else()
+        list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/modules")
+        find_dependency(crypto)
+    endif()
+endif()
+
+''',
+            '',
+        )
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
@@ -76,24 +95,6 @@ class AwsCCalConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
-        config = os.path.join(self.package_folder, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
-        if os.path.exists(config):
-            replace_in_file(
-                self,
-                config,
-                '''if ((NOT WIN32 AND NOT APPLE) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE)
-    if (USE_OPENSSL)
-        find_dependency(OpenSSL REQUIRED)
-        find_dependency(Threads REQUIRED)
-    else()
-        find_dependency(crypto)
-    endif()
-endif()
-''',
-                '',
-                strict=False,
-            )
-
 
     def package_info(self):
         self.cpp_info.libs = ['aws-c-cal']
