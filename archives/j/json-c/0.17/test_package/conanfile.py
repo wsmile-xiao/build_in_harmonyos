@@ -24,4 +24,4 @@ class TestJsonCConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            self.run(os.path.join(self.test_build_folder, "test_json_c"), env="conanrun")
+            self.run(os.path.join(self.build_folder, "test_json_c"), env="conanrun")
