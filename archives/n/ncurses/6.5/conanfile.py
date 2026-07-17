@@ -103,7 +103,7 @@ class NcursesConan(ConanFile):
             self,
             os.path.join(self.source_folder, "configure"),
             "#! /bin/sh",
-            f"#! {config_shell}",
+            f"#! {config_shell}\nTMPDIR='{tmpdir}'\nexport TMPDIR",
         )
 
         autotools = Autotools(self)
