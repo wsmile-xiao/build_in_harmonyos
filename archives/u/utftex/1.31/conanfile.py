@@ -34,16 +34,37 @@ class UtftexConan(ConanFile):
         VirtualRunEnv(self).generate()
         tc = AutotoolsToolchain(self)
         tc.configure_args.extend(["--disable-shared", "--enable-static"])
+        tc.extra_ldflags.append("-fuse-ld=/data/service/hnp/bin/ld")
         tc.generate()
 
     def build(self):
         apply_conandata_patches(self)
+        self._ensure_autotools_aux_files()
         configure = os.path.join(self.source_folder, "configure")
         if os.path.exists(configure):
+            self._relax_configure_umask(configure)
             os.chmod(configure, 0o755)
         autotools = Autotools(self)
         autotools.configure()
         autotools.make(args=["-j1"])
+
+    def _ensure_autotools_aux_files(self):
+        required = ["install-sh", "compile", "config.guess", "config.sub", "ltmain.sh"]
+        if all(os.path.exists(os.path.join(self.source_folder, name)) for name in required):
+            return
+        autogen = os.path.join(self.source_folder, "autogen.sh")
+        if os.path.exists(autogen):
+            os.chmod(autogen, 0o755)
+            self.run("sh ./autogen.sh", cwd=self.source_folder, env="conanbuild")
+        else:
+            self.run("autoreconf -fi", cwd=self.source_folder, env="conanbuild")
+
+    def _relax_configure_umask(self, configure):
+        with open(configure, "r", encoding="utf-8", errors="ignore") as source:
+            content = source.read()
+        content = content.replace("umask 077", "umask 022")
+        with open(configure, "w", encoding="utf-8") as source:
+            source.write(content)
 
     def package(self):
         Autotools(self).install()
