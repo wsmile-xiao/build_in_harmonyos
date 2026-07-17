@@ -10,7 +10,7 @@ from conan.tools.files import apply_conandata_patches, export_conandata_patches,
 
 def _replace_if_needed(conanfile, path, old, new):
     content = load(conanfile, path)
-    if new in content:
+    if old not in content:
         return
     replace_in_file(conanfile, path, old, new)
 

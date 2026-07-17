@@ -8,6 +8,13 @@ from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, load, replace_in_file
 
 
+def _replace_if_needed(conanfile, path, old, new):
+    content = load(conanfile, path)
+    if old not in content:
+        return
+    replace_in_file(conanfile, path, old, new)
+
+
 def _export_local_aws_recipes(conanfile, refs):
     repo_root = os.path.abspath(os.path.join(conanfile.recipe_folder, "..", "..", "..", ".."))
     for ref in refs:
@@ -51,6 +58,13 @@ class AwsCIoConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
+        _replace_if_needed(
+            self,
+            cmake_lists,
+            'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")',
+            'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")',
+        )
 
     def generate(self):
         deps = CMakeDeps(self)
@@ -70,13 +84,6 @@ class AwsCIoConan(ConanFile):
 
     def build(self):
         apply_conandata_patches(self)
-        cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
-        replace_in_file(
-            self,
-            cmake_lists,
-            'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")',
-            'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")',
-        )
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
