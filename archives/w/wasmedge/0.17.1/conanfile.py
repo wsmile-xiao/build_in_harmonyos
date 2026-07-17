@@ -2,12 +2,8 @@
 """Conan recipe for WasmEdge 0.17.1."""
 
 import os
-import re
-import shutil
-import tempfile
 
 from conan import ConanFile
-from conan.errors import ConanException
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get
 
@@ -36,17 +32,7 @@ class WasmEdgeConan(ConanFile):
         cmake_layout(self)
 
     def source(self):
-        try:
-            get(self, **self.conan_data["sources"], strip_root=True)
-        except ConanException:
-            self.output.warning(
-                "Falling back to GitCode mirror for wasmedge after official tarball download failed"
-            )
-            self._clone_mirror(
-                "https://gitcode.com/gh_mirrors/wa/WasmEdge.git",
-                "0502c560d787d969c66f5676b9e11ac64bba3656",
-                self.source_folder,
-            )
+        get(self, **self.conan_data["sources"], strip_root=True)
         third_party = {
             "fmt": (
                 [
@@ -71,56 +57,19 @@ class WasmEdgeConan(ConanFile):
                     "https://github.com/nothings/stb/archive/2dfbe86bef853be33cbbda07abcb4db58c7f817d.tar.gz",
                 ],
                 "f8803386a38269bb4ac3088bbf6b3ebc4ea3072a1bcc9bfdd59ccfc5d66550eb",
-                "https://gitcode.com/gh_mirrors/st/stb.git",
-                "2dfbe86bef853be33cbbda07abcb4db58c7f817d",
             ),
         }
         for name, metadata in third_party.items():
             destination = os.path.join(self.source_folder, "third_party", name)
             urls, sha256 = metadata[:2]
-            try:
-                get(
-                    self,
-                    url=urls,
-                    sha256=sha256,
-                    destination=destination,
-                    strip_root=True,
-                    filename=f"{name}.tar.gz",
-                )
-            except ConanException:
-                if len(metadata) < 4:
-                    raise
-                mirror_repo, mirror_ref = metadata[2:]
-                self.output.warning(
-                    f"Falling back to GitCode mirror for {name} after official tarball download failed"
-                )
-                self._clone_mirror(mirror_repo, mirror_ref, destination)
-
-    def _clone_mirror(self, repo_url, ref, destination):
-        safe_url = self._safe_git_arg(repo_url, "mirror URL")
-        safe_ref = self._safe_git_arg(ref, "mirror ref")
-        tmpdir = tempfile.mkdtemp(prefix=f"{self.name}-mirror-")
-        clone_dir = os.path.join(tmpdir, "src")
-        try:
-            if os.path.exists(destination):
-                try:
-                    shutil.rmtree(destination)
-                except OSError as exc:
-                    raise ConanException(
-                        f"failed to remove existing mirror destination {destination!r}: {exc}"
-                    )
-            self.run(f'git clone --filter=blob:none --no-checkout "{safe_url}" "{clone_dir}"')
-            self.run(f'git -C "{clone_dir}" checkout --detach "{safe_ref}"')
-            shutil.rmtree(os.path.join(clone_dir, ".git"), ignore_errors=True)
-            shutil.copytree(clone_dir, destination)
-        finally:
-            shutil.rmtree(tmpdir, ignore_errors=True)
-
-    @staticmethod
-    def _safe_git_arg(value, label):
-        if not re.fullmatch(r"[A-Za-z0-9._~:/@%+\-=]+", value):
-            raise ValueError(f"unsafe {label}: {value!r}")
-        return value
+            get(
+                self,
+                url=urls,
+                sha256=sha256,
+                destination=destination,
+                strip_root=True,
+                filename=f"{name}.tar.gz",
+            )
 
     def generate(self):
         tc = CMakeToolchain(self)
