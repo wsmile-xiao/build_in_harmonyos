@@ -1,6 +1,21 @@
+import os
+import subprocess
+
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
+
+
+def _export_local_aws_recipes(conanfile, refs):
+    repo_root = os.path.abspath(os.path.join(conanfile.recipe_folder, "..", "..", "..", ".."))
+    for ref in refs:
+        name, version = ref.split("/", 1)
+        dep_dir = os.path.join(repo_root, "archives", "a", name, version)
+        if not os.path.isfile(os.path.join(dep_dir, "conanfile.py")):
+            conanfile.output.warning(f"local dependency recipe not found: {ref}")
+            continue
+        conanfile.output.info(f"Exporting local dependency recipe: {ref}")
+        subprocess.run(["conan", "export", dep_dir], check=True)
 
 
 class AwsCHttpConan(ConanFile):
@@ -17,6 +32,12 @@ class AwsCHttpConan(ConanFile):
     default_options = {"shared": False, "fPIC": True}
 
     def export_sources(self):
+        _export_local_aws_recipes(self, [
+            "aws-c-common/0.12.6",
+            "aws-c-cal/0.9.13",
+            "aws-c-compression/0.3.2",
+            "aws-c-io/0.26.3",
+        ])
         export_conandata_patches(self)
 
     def config_options(self):
@@ -41,6 +62,11 @@ class AwsCHttpConan(ConanFile):
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
         tc.variables["BUILD_TESTING"] = "OFF"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
+        common_root = self.dependencies["aws-c-common"].package_folder
+        tc.variables["CMAKE_MODULE_PATH"] = ";".join([
+            os.path.join(common_root, "lib", "cmake"),
+            os.path.join(common_root, "lib", "cmake", "aws-c-common"),
+        ])
         tc.generate()
 
     def build(self):
