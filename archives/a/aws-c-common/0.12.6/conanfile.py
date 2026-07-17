@@ -49,6 +49,16 @@ class AwsCCommonConan(ConanFile):
         replace_in_file(
             self,
             cmake_lists,
+            'project(aws-c-common LANGUAGES C VERSION 0.1.0)',
+            '''project(aws-c-common LANGUAGES C VERSION 0.1.0)
+find_package(Threads REQUIRED)
+if(NOT TARGET Threads::Threads)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+endif()''',
+        )
+        replace_in_file(
+            self,
+            cmake_lists,
             'elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")',
             'elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR ${CMAKE_SYSTEM_NAME} STREQUAL "HarmonyOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "OHOS")',
         )
