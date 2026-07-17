@@ -28,5 +28,3 @@ if ! grep -qi "free software" "$tmp_output" \
     cat "$tmp_output" >&2
     exit 1
 fi
-
-cat "$tmp_output" >/dev/null

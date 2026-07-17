@@ -81,20 +81,6 @@ class SippConan(ConanFile):
                 if "TINFO_LIBRARY" in tc.variables:
                     break
             tc.variables["CURSES_LIBRARY_INCLUDE_DIRS"] = ";".join(dict.fromkeys(include_dirs))
-
-        default_prefix = os.environ.get("DEFAULT_PREFIX")
-        if default_prefix:
-            include_dir = os.path.join(default_prefix, "include")
-            lib_dir = os.path.join(default_prefix, "lib")
-            curses_library = os.path.join(lib_dir, "libncursesw.a")
-            tinfo_library = os.path.join(lib_dir, "libtinfow.a")
-            if not os.path.exists(tinfo_library):
-                tinfo_library = os.path.join(lib_dir, "libtinfo.a")
-            if os.path.exists(curses_library):
-                tc.variables["CURSES_LIBRARY"] = curses_library
-                if os.path.exists(tinfo_library):
-                    tc.variables["TINFO_LIBRARY"] = tinfo_library
-                tc.variables["CURSES_LIBRARY_INCLUDE_DIRS"] = ";".join([include_dir, os.path.join(include_dir, "ncursesw")])
         tc.generate()
 
     def build(self):
