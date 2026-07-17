@@ -91,7 +91,6 @@ class AwsCCalConan(ConanFile):
 endif()
 ''',
                 '',
-                strict=False,
             )
 
 
