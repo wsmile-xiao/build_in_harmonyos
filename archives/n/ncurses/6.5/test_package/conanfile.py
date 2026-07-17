@@ -21,4 +21,6 @@ class TestConan(ConanFile):
 
     def test(self):
         if not cross_building(self):
-            self.run(os.path.join(self.cpp.build.bindirs[0], "test_ncurses"), env="conanrun", check=True)
+            # This CI's Conan self.run() API uses ignore_errors=False to fail
+            # the build on a non-zero exit code; it does not accept check=True.
+            self.run(os.path.join(self.cpp.build.bindirs[0], "test_ncurses"), env="conanrun", ignore_errors=False)

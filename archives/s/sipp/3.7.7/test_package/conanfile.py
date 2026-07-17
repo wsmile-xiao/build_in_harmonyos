@@ -14,4 +14,6 @@ class SippTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            self.run("bash test_sipp.sh", cwd=self.source_folder, env="conanrun", check=True)
+            # This CI's Conan self.run() API uses ignore_errors=False to fail
+            # the build on a non-zero exit code; it does not accept check=True.
+            self.run("bash test_sipp.sh", cwd=self.source_folder, env="conanrun", ignore_errors=False)
