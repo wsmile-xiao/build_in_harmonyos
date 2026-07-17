@@ -32,7 +32,7 @@ class PassOtpTestConan(ConanFile):
             self.output.info("Cross-building; file layout check completed")
             return
 
-        bash = shutil.which("bash") or os.environ.get("CONFIG_SHELL") or "/data/service/hnp/bin/bash"
+        bash = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
         script = os.path.join(self.source_folder, "check_pass_otp.sh")
         self.run(
             f"{shlex.quote(bash)} {shlex.quote(script)} {shlex.quote(extension)}",
