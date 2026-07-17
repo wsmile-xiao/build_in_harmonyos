@@ -8,6 +8,13 @@ from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, load, replace_in_file
 
 
+def _replace_if_needed(conanfile, path, old, new):
+    content = load(conanfile, path)
+    if old not in content:
+        return
+    replace_in_file(conanfile, path, old, new)
+
+
 def _export_local_aws_recipes(conanfile, refs):
     repo_root = os.path.abspath(os.path.join(conanfile.recipe_folder, "..", "..", "..", ".."))
     for ref in refs:
@@ -50,6 +57,17 @@ class AwsCCalConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
+        _replace_if_needed(
+            self,
+            cmake_lists,
+            "project(aws-c-cal LANGUAGES C VERSION 0.1.0)",
+            """project(aws-c-cal LANGUAGES C VERSION 0.1.0)
+
+if(NOT TARGET test)
+    add_custom_target(test COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure)
+endif()""",
+        )
 
     def generate(self):
         deps = CMakeDeps(self)
