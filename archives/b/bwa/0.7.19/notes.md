@@ -56,3 +56,7 @@ bwa functional test: PASS
 - 如果 OHOS worker 上 `__ARM_NEON` 分支出现编译错误，优先检查本地 `neon_sse.h` 与 clang/aarch64 NEON intrinsic 兼容性；必要时再考虑引入 `sse2neon` 或强制 scalar path。
 - `bwa --version` / `bwa --help` 不是标准选项，CI L2 可能给出非阻塞 warning；功能测试已经覆盖真实命令链。
 - 本机没有 OHOS Conan 环境，尚未执行 `conan create`。最终状态保持 `built`，等待 CI/真机验证后再升级。
+
+## CI 复跑记录
+
+- 2026-07-17 19:55 CST：上一轮 CI #5728 失败在 `conan-setup` 阶段，pip 安装 Conan 时无法解析 `requests<3.0.0,>=2.25`，尚未进入 `bwa` 配方构建。当前比赛 CI 环境已有多个 PR 通过 `conan-setup` 与 `conan-build-test`，本次仅更新适配笔记以触发恢复后的流水线复跑，配方逻辑不变。
