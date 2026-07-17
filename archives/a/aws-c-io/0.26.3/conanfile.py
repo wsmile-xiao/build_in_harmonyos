@@ -1,5 +1,7 @@
 import os
+import shutil
 import subprocess
+import sys
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
@@ -15,7 +17,8 @@ def _export_local_aws_recipes(conanfile, refs):
             conanfile.output.warning(f"local dependency recipe not found: {ref}")
             continue
         conanfile.output.info(f"Exporting local dependency recipe: {ref}")
-        subprocess.run(["conan", "export", dep_dir], check=True)
+        conan_cmd = [shutil.which("conan")] if shutil.which("conan") else [sys.executable, "-m", "conan"]
+        subprocess.run(conan_cmd + ["export", dep_dir], check=True)
 
 
 class AwsCIoConan(ConanFile):
