@@ -43,14 +43,17 @@ class DfuProgrammerConan(ConanFile):
             destination=os.path.join(self.source_folder, "_libusb_header"),
             strip_root=True,
         )
+        self._prepare_libusb_header_tree()
         self._copy_exported_res()
 
     def generate(self):
         VirtualBuildEnv(self).generate()
         VirtualRunEnv(self).generate()
         libusb_prefix = self._libusb_prefix()
-        libusb_header = os.path.join(self.source_folder, "_libusb_header", "libusb")
+        libusb_header_root = os.path.join(self.source_folder, "_libusb_header")
+        libusb_header = os.path.join(libusb_header_root, "libusb")
         include_flags = (
+            f"-I{libusb_header_root} "
             f"-I{libusb_header} "
             f"-I{libusb_prefix}/include/libusb-1.0 "
             f"-I{libusb_prefix}/include "
@@ -142,6 +145,13 @@ class DfuProgrammerConan(ConanFile):
             if os.path.isfile(src) and os.path.isfile(dst):
                 shutil.copy2(src, dst)
                 os.chmod(dst, 0o755)
+
+    def _prepare_libusb_header_tree(self):
+        header_root = os.path.join(self.source_folder, "_libusb_header")
+        src_dir = os.path.join(header_root, "libusb")
+        compat_dir = os.path.join(header_root, "libusb-1.0")
+        if os.path.isdir(src_dir) and not os.path.isdir(compat_dir):
+            shutil.copytree(src_dir, compat_dir)
 
     def _prepare_autotools_helpers(self):
         self._refresh_config_helpers()
