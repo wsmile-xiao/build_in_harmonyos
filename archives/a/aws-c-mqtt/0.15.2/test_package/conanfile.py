@@ -12,6 +12,9 @@ class AwsCMqttTestConan(ConanFile):
 
     def requirements(self):
         self.requires(self.tested_reference_str)
+        self.requires("aws-c-common/0.12.6")
+        self.requires("aws-c-http/0.10.14")
+        self.requires("aws-c-io/0.26.3")
 
     def layout(self):
         cmake_layout(self)
