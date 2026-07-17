@@ -5,6 +5,9 @@ import subprocess
 import sys
 
 
+if len(sys.argv) != 2:
+    raise SystemExit("usage: check_flash.py <flash-bin>")
+
 flash = sys.argv[1]
 
 assert os.path.isfile(flash), flash
