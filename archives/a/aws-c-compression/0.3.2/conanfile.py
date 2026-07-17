@@ -71,6 +71,7 @@ class AwsCCompressionConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
+        cmake.test()
 
     def package(self):
         cmake = CMake(self)
