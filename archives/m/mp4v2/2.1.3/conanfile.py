@@ -18,9 +18,13 @@ class Mp4v2Conan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
-        # 修复 CMake 版本（直接用 sed 更可靠）
+        # 直接重写 CMakeLists.txt 第一行
         cmake_file = os.path.join(self.source_folder, "CMakeLists.txt")
-        self.run(f"sed -i 's/cmake_minimum_required(VERSION 2.8)/cmake_minimum_required(VERSION 3.15)/g' {cmake_file}")
+        with open(cmake_file, "r") as f:
+            lines = f.readlines()
+        lines[0] = "cmake_minimum_required(VERSION 3.15)\n"
+        with open(cmake_file, "w") as f:
+            f.writelines(lines)
 
     def generate(self):
         tc = CMakeToolchain(self)
