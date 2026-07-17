@@ -38,7 +38,8 @@ class DfuProgrammerConan(ConanFile):
             f"-I{libusb_prefix}/include "
             f"-I{self._sys_prefix}/include"
         )
-        lib_flags = f"-L{libusb_prefix}/lib -L{self._sys_prefix}/lib -lusb-1.0"
+        ld_flags = f"-L{libusb_prefix}/lib -L{self._sys_prefix}/lib"
+        lib_flags = f"{ld_flags} -lusb-1.0"
         pkgconfig_dir = self._write_libusb_pc(libusb_prefix)
 
         tc = AutotoolsToolchain(self)
@@ -48,8 +49,12 @@ class DfuProgrammerConan(ConanFile):
             "--build=aarch64-unknown-linux-gnu",
             "--host=aarch64-unknown-linux-gnu",
             f"PKG_CONFIG_PATH={pkgconfig_dir}:{libusb_prefix}/lib/pkgconfig:{self._sys_prefix}/lib/pkgconfig",
+            f"CPPFLAGS={include_flags}",
+            f"LDFLAGS={ld_flags}",
+            "LIBS=-lusb-1.0",
             f"LIBUSB_CFLAGS={include_flags}",
             f"LIBUSB_LIBS={lib_flags}",
+            "ac_cv_search_libusb_init=-lusb-1.0",
         ])
         tc.generate()
 
