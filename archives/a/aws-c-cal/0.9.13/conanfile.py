@@ -91,10 +91,12 @@ class AwsCCalConan(ConanFile):
 endif()
 ''',
                 '',
+                strict=False,
             )
 
 
     def package_info(self):
         self.cpp_info.libs = ['aws-c-cal']
+        self.cpp_info.requires = ["aws-c-common::aws-c-common"]
         self.cpp_info.set_property("cmake_file_name", "aws-c-cal")
         self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-cal")
