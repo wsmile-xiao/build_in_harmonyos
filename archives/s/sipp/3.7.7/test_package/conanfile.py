@@ -14,4 +14,4 @@ class SippTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            self.run("sipp -v", env="conanrun")
+            self.run("bash test_sipp.sh", cwd=self.source_folder, env="conanrun")

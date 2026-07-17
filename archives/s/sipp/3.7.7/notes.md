@@ -10,7 +10,7 @@ SIPp is a traffic generator and test tool for the SIP protocol. The recipe build
 - Upstream source: `https://github.com/SIPp/sipp/releases/download/v3.7.7/sipp-3.7.7.tar.gz`
 - SHA256: `e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69`
 - Disabled options: SSL, PCAP, SCTP, GSL, static linking, ASAN
-- Conan smoke test: runs `sipp -v` from the packaged binary.
+- Conan smoke test: runs `sipp -v` from the packaged binary, verifies the upstream version banner, and expects SIPp's documented informational exit code `99` (`EXIT_OTHER`) rather than forcing an artificial zero-exit assumption.
 
 ## OpenHarmony notes
 
