@@ -5,7 +5,7 @@ import sys
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, replace_in_file
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
 
 
 def _export_local_aws_recipes(conanfile, refs):
@@ -75,7 +75,6 @@ class AwsCCompressionConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
-
 
     def package_info(self):
         self.cpp_info.libs = ['aws-c-compression']

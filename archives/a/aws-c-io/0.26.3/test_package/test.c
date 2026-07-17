@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <aws/cal/cal.h>
 #include <aws/common/common.h>
 #include <aws/common/allocator.h>
 #include <aws/io/io.h>
