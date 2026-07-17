@@ -85,3 +85,8 @@ class AwsCHttpConan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["aws-c-http"]
+        self.cpp_info.requires = [
+            "aws-c-common::aws-c-common",
+            "aws-c-compression::aws-c-compression",
+            "aws-c-io::aws-c-io",
+        ]
