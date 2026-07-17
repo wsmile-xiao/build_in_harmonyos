@@ -2,6 +2,7 @@
 """Conan recipe for ncurses 6.5 — OHOS static build."""
 
 import os
+import shutil
 
 from conan import ConanFile
 from conan.tools.files import get, replace_in_file
@@ -41,6 +42,13 @@ class NcursesConan(ConanFile):
         tc.generate()
 
     def build(self):
+        config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
+        tmpdir = os.path.join(self.build_folder, "_tmp")
+        os.makedirs(tmpdir, exist_ok=True)
+        os.environ["CONFIG_SHELL"] = config_shell
+        os.environ["SHELL"] = config_shell
+        os.environ["TMPDIR"] = tmpdir
+
         replace_in_file(
             self,
             os.path.join(self.source_folder, "config.guess"),
@@ -82,6 +90,12 @@ class NcursesConan(ConanFile):
             os.path.join(self.source_folder, "config.sub"),
             "| linux-relibc*- | linux-uclibc*- )",
             "| linux-relibc*- | linux-uclibc*- | linux-ohos*- )",
+        )
+        replace_in_file(
+            self,
+            os.path.join(self.source_folder, "configure"),
+            "#! /bin/sh",
+            f"#! {config_shell}",
         )
 
         autotools = Autotools(self)
