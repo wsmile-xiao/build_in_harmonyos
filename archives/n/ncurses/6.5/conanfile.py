@@ -25,7 +25,7 @@ class NcursesConan(ConanFile):
     default_options = {"shared": False, "fPIC": True}
 
     def layout(self):
-        basic_layout(self)
+        basic_layout(self, src_folder=".")
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
