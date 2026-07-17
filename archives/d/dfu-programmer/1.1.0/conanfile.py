@@ -37,13 +37,21 @@ class DfuProgrammerConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        get(
+            self,
+            **self.conan_data["libusb_header"],
+            destination=os.path.join(self.source_folder, "_libusb_header"),
+            strip_root=True,
+        )
         self._copy_exported_res()
 
     def generate(self):
         VirtualBuildEnv(self).generate()
         VirtualRunEnv(self).generate()
         libusb_prefix = self._libusb_prefix()
+        libusb_header = os.path.join(self.source_folder, "_libusb_header", "libusb")
         include_flags = (
+            f"-I{libusb_header} "
             f"-I{libusb_prefix}/include/libusb-1.0 "
             f"-I{libusb_prefix}/include "
             f"-I{self._sys_prefix}/include"
