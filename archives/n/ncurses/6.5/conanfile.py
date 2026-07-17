@@ -3,12 +3,10 @@
 
 import os
 import shutil
-import stat
 
 from conan import ConanFile
 from conan.tools.files import get, replace_in_file
 from conan.tools.gnu import Autotools, AutotoolsToolchain
-from conan.tools.layout import basic_layout
 
 
 class NcursesConan(ConanFile):
@@ -25,7 +23,11 @@ class NcursesConan(ConanFile):
     default_options = {"shared": False, "fPIC": True}
 
     def layout(self):
-        basic_layout(self, src_folder=".")
+        # ncurses' config.status is fragile in out-of-source builds on OHOS/HMDFS:
+        # it creates subdirectory Makefiles through temporary sed fragments and may
+        # fail before the build tree mirrors the source tree. Build in-source so the
+        # generated files land in the upstream directories that already exist.
+        self.folders.source = "."
         self.folders.build = "."
 
     def source(self):
@@ -41,22 +43,20 @@ class NcursesConan(ConanFile):
         tc.configure_args.append("--without-cxx-binding")
         tc.configure_args.append("--enable-widec")
         tc.configure_args.append("--enable-overwrite")
+        # Generate config.status first, then patch its temporary-directory logic
+        # before it creates Makefiles. This mirrors the proven HMDFS pattern used
+        # by other autotools recipes in this repository.
+        tc.configure_args.append("--no-create")
         tc.generate()
 
     def build(self):
         config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
         tmpdir = os.path.join(self.build_folder, "_tmp")
         os.makedirs(tmpdir, exist_ok=True)
-        wrapper_dir = os.path.join(self.build_folder, "_ohos_bin")
-        os.makedirs(wrapper_dir, exist_ok=True)
-        mktemp_wrapper = os.path.join(wrapper_dir, "mktemp")
-        with open(mktemp_wrapper, "w", encoding="utf-8") as wrapper:
-            wrapper.write("#!/bin/sh\nexit 1\n")
-        os.chmod(mktemp_wrapper, os.stat(mktemp_wrapper).st_mode | stat.S_IEXEC)
+        os.chmod(tmpdir, 0o777)
         os.environ["CONFIG_SHELL"] = config_shell
         os.environ["SHELL"] = config_shell
         os.environ["TMPDIR"] = tmpdir
-        os.environ["PATH"] = wrapper_dir + os.pathsep + os.environ.get("PATH", "")
 
         replace_in_file(
             self,
@@ -106,16 +106,60 @@ class NcursesConan(ConanFile):
             "#! /bin/sh",
             f"#! {config_shell}\nTMPDIR='{tmpdir}'\nexport TMPDIR",
         )
+        replace_in_file(
+            self,
+            os.path.join(self.source_folder, "configure"),
+            "umask 077",
+            "umask 000",
+            strict=False,
+        )
+        # With --no-create ncurses would still try make preinstall even though
+        # Makefile has not been generated yet. Guard that ncurses-specific tail;
+        # we run preinstall manually after the patched config.status succeeds.
+        replace_in_file(
+            self,
+            os.path.join(self.source_folder, "configure"),
+            'fi\n${MAKE:-make} preinstall',
+            'fi\nif test "$no_create" != yes; then\n  ${MAKE:-make} preinstall\nfi',
+            strict=False,
+        )
 
         autotools = Autotools(self)
         autotools.configure()
-        # OHOS HMDFS noexec (E046): config.status 中临时 awk 脚本无法直接执行
-        self.run(
-            r"sed -i 's|\./conf[^/]*/subs1\.awk|$AWK -f &|g' config.status",
-            cwd=self.source_folder,
-            ignore_errors=True,
-        )
+        self._patch_config_status_tmp(tmpdir)
+        self.run(f'"{config_shell}" ./config.status', cwd=self.build_folder, env=["conanbuild"])
+        self.run("make -j1 preinstall", cwd=self.build_folder, env=["conanbuild"])
         autotools.make(args=["-j1"])
+
+    def _patch_config_status_tmp(self, tmpdir):
+        config_status = os.path.join(self.build_folder, "config.status")
+        if not os.path.exists(config_status):
+            config_status = os.path.join(self.source_folder, "config.status")
+        if not os.path.exists(config_status):
+            self.output.warning("config.status not found; skipping ncurses tmp patch")
+            return
+
+        fixed_tmp = os.path.join(tmpdir, "ncurses-config-status")
+        os.makedirs(fixed_tmp, exist_ok=True)
+        os.chmod(fixed_tmp, 0o777)
+        with open(config_status, "r", encoding="utf-8") as file:
+            content = file.read()
+
+        content = content.replace("umask 077", "umask 000")
+        for umask in ("077", "000"):
+            content = content.replace(
+                f'tmp=`(umask {umask} && mktemp -d -q "$TMPDIR/csXXXXXX") 2>/dev/null` &&\n'
+                '  test -n "$tmp" && test -d "$tmp"',
+                f'tmp="{fixed_tmp}" &&\n'
+                '  rm -rf "$tmp" && mkdir -p "$tmp" && chmod u+rwx "$tmp" && test -d "$tmp"',
+            )
+            content = content.replace(
+                f'tmp=$TMPDIR/cs$$-$RANDOM\n  (umask {umask} && mkdir "$tmp")',
+                f'tmp="{fixed_tmp}"\n  rm -rf "$tmp" && mkdir -p "$tmp" && chmod u+rwx "$tmp"',
+            )
+
+        with open(config_status, "w", encoding="utf-8") as file:
+            file.write(content)
 
     def package(self):
         autotools = Autotools(self)
