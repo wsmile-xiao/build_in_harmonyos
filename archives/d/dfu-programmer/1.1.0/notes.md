@@ -14,6 +14,7 @@
 1. HMDFS权限 → TMPDIR=/data/storage/el2/base/cache
 2. 无configure → bootstrap.sh
 3. libusb → LDFLAGS/CPPFLAGS
+4. CI #6144 config.sub 不识别 linux-ohos → 使用 linux-gnu canonical triplet 并刷新/修补 config helpers
 
 ## 质量门禁
 G1-G4 PASS
