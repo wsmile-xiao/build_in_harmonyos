@@ -4,6 +4,7 @@
 from conan import ConanFile
 from conan.tools.cmake import CMake, cmake_layout
 from conan.tools.build import can_run
+import os
 
 
 class TestJsonCConan(ConanFile):
@@ -23,5 +24,4 @@ class TestJsonCConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            cmake = CMake(self)
-            cmake.test()
+            self.run(os.path.join(self.test_build_folder, "test_json_c"), env="conanrun")
