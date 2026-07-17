@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Test package for ncurses 6.5."""
+
 import os
 from conan import ConanFile
 from conan.tools.cmake import CMake, cmake_layout
@@ -21,6 +24,9 @@ class TestConan(ConanFile):
 
     def test(self):
         if not cross_building(self):
+            bindirs = list(self.cpp.build.bindirs)
+            if not bindirs:
+                raise RuntimeError("test package did not produce a binary directory")
             # This CI's Conan self.run() API uses ignore_errors=False to fail
             # the build on a non-zero exit code; it does not accept check=True.
-            self.run(os.path.join(self.cpp.build.bindirs[0], "test_ncurses"), env="conanrun", ignore_errors=False)
+            self.run(os.path.join(bindirs[0], "test_ncurses"), env="conanrun", ignore_errors=False)

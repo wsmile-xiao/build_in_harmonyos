@@ -16,12 +16,12 @@ class NcursesConan(ConanFile):
     description = "The ncurses (new curses) library"
     license = "X11"
     homepage = "https://www.gnu.org/software/ncurses"
-    url = ""
+    url = "https://www.gnu.org/software/ncurses"
 
-    package_type = "library"
+    package_type = "static-library"
     settings = "os", "compiler", "build_type", "arch"
-    options = {"shared": [True, False], "fPIC": [True, False]}
-    default_options = {"shared": False, "fPIC": True}
+    options = {"fPIC": [True, False]}
+    default_options = {"fPIC": True}
 
     def layout(self):
         # ncurses' config.status is fragile in out-of-source builds on OHOS/HMDFS:
@@ -224,6 +224,6 @@ class NcursesConan(ConanFile):
         autotools.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["ncursesw", "panelw", "menuw", "formw"]
+        self.cpp_info.libs = ["ncursesw", "tinfow", "panelw", "menuw", "formw"]
         self.cpp_info.includedirs = ["include"]
         self.cpp_info.set_property("pkg_config_name", "ncursesw")
