@@ -72,11 +72,19 @@ class UtftexConan(ConanFile):
         if str(self.settings.os) != "OHOS":
             return []
         linker = os.environ.get("LD")
-        if linker == "ld.lld":
-            linker = "lld"
         if not linker:
             linker = shutil.which("ld.lld") or shutil.which("ld")
-        return [f"-fuse-ld={linker}"] if linker else []
+        linker_name = os.path.basename(linker) if linker else ""
+        linker_map = {
+            "ld.lld": "lld",
+            "lld": "lld",
+            "ld.gold": "gold",
+            "gold": "gold",
+            "ld.bfd": "bfd",
+            "bfd": "bfd",
+        }
+        linker_name = linker_map.get(linker_name)
+        return [f"-fuse-ld={linker_name}"] if linker_name else []
 
     def _write_config_header(self, src_dir):
         config = os.path.join(src_dir, "config.h")
