@@ -94,7 +94,23 @@ class UtftexConan(ConanFile):
         for binary in ("utftex", "utfstringinfo"):
             path = os.path.join(bin_dir, binary)
             if os.path.exists(path):
-                os.chmod(path, 0o755)
+                self._sign_binary(path)
+
+    def _sign_binary(self, path):
+        os.chmod(path, 0o755)
+        sign_tool = "/data/service/hnp/bin/binary-sign-tool"
+        objcopy = "/data/service/hnp/bin/llvm-objcopy"
+        if str(self.settings.os) != "OHOS" or not (os.path.exists(sign_tool) and os.path.exists(objcopy)):
+            return
+        tmp_signed = path + ".signed"
+        self.run(f"{shlex.quote(objcopy)} --remove-section .codesign {shlex.quote(path)}", quiet=True)
+        self.run(
+            f"{shlex.quote(sign_tool)} sign -inFile {shlex.quote(path)} "
+            f"-outFile {shlex.quote(tmp_signed)} -selfSign 1",
+            quiet=True,
+        )
+        os.replace(tmp_signed, path)
+        os.chmod(path, 0o755)
 
     def package_info(self):
         self.cpp_info.bindirs = ["bin"]
