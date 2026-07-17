@@ -32,7 +32,17 @@ class WasmEdgeConan(ConanFile):
         cmake_layout(self)
 
     def source(self):
-        get(self, **self.conan_data["sources"], strip_root=True)
+        try:
+            get(self, **self.conan_data["sources"], strip_root=True)
+        except ConanException:
+            self.output.warning(
+                "Falling back to GitCode mirror for wasmedge after official tarball download failed"
+            )
+            self._clone_mirror(
+                "https://gitcode.com/gh_mirrors/wa/WasmEdge.git",
+                "0.17.1",
+                self.source_folder,
+            )
         third_party = {
             "fmt": (
                 [
