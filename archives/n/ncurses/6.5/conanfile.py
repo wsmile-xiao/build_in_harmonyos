@@ -26,6 +26,7 @@ class NcursesConan(ConanFile):
 
     def layout(self):
         basic_layout(self, src_folder=".")
+        self.folders.build = "."
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
