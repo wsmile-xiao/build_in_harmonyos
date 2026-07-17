@@ -2,6 +2,7 @@
 """Conan recipe for ncurses 6.5 — OHOS static build."""
 
 import os
+import re
 import shutil
 
 from conan import ConanFile
@@ -128,6 +129,7 @@ class NcursesConan(ConanFile):
         autotools.configure()
         self._patch_config_status_tmp(tmpdir)
         self.run(f'"{config_shell}" ./config.status', cwd=self.build_folder, env=["conanbuild"])
+        self._patch_generated_makefiles()
         self.run("make -j1 preinstall", cwd=self.build_folder, env=["conanbuild"])
         autotools.make(args=["-j1"])
 
@@ -146,6 +148,16 @@ class NcursesConan(ConanFile):
             content = file.read()
 
         content = content.replace("umask 077", "umask 000")
+        # OHOS ships toybox expr, whose alternation handling corrupts the
+        # autoconf config.status directory extraction used for sub-Makefiles.
+        # When this happens, generated Makefiles point top_srcdir at mojibake
+        # paths such as ".../����kk./Caps".  Force the existing sed fallback
+        # for ac_dir extraction instead of executing the broken expr branch.
+        content = content.replace(
+            'ac_dir=`$as_expr X"$ac_file" :',
+            'ac_dir=`false && $as_expr X"$ac_file" :',
+            1,
+        )
         for umask in ("077", "000"):
             content = content.replace(
                 f'tmp=`(umask {umask} && mktemp -d -q "$TMPDIR/csXXXXXX") 2>/dev/null` &&\n'
@@ -160,6 +172,46 @@ class NcursesConan(ConanFile):
 
         with open(config_status, "w", encoding="utf-8") as file:
             file.write(content)
+
+    def _patch_generated_makefiles(self):
+        # On OHOS/HMDFS, ncurses' config.status can leak its temporary sed
+        # directory into generated Makefiles as srcdir/top_srcdir.  The temp
+        # directory name may contain non-portable bytes, so make later looks for
+        # include/Caps under a garbage path.  We build in-source, therefore all
+        # generated Makefiles can safely use relative source directories.
+        top_makefiles = {"Makefile": "."}
+        sub_makefiles = {
+            "include/Makefile",
+            "ncurses/Makefile",
+            "progs/Makefile",
+            "panel/Makefile",
+            "menu/Makefile",
+            "form/Makefile",
+            "misc/Makefile",
+        }
+        makefiles = {**top_makefiles, **{rel: ".." for rel in sub_makefiles}}
+        pattern = re.compile(r"^(\s*)(VPATH|top_srcdir|srcdir)(\s*=).*$")
+
+        for rel_path, top_srcdir in makefiles.items():
+            path = os.path.join(self.build_folder, *rel_path.split("/"))
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="surrogateescape") as file:
+                lines = file.readlines()
+
+            patched = []
+            changed = False
+            for line in lines:
+                match = pattern.match(line.rstrip("\n"))
+                if match:
+                    value = top_srcdir if match.group(2) == "top_srcdir" else "."
+                    line = f"{match.group(1)}{match.group(2)}{match.group(3)} {value}\n"
+                    changed = True
+                patched.append(line)
+
+            if changed:
+                with open(path, "w", encoding="utf-8", errors="surrogateescape") as file:
+                    file.writelines(patched)
 
     def package(self):
         autotools = Autotools(self)
