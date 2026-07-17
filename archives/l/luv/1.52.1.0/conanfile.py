@@ -15,6 +15,7 @@ class LuvConan(ConanFile):
 
     def requirements(self):
         self.requires("libuv/1.52.1")
+        self.requires("luajit/2.1.0")
 
     def layout(self):
         basic_layout(self)
