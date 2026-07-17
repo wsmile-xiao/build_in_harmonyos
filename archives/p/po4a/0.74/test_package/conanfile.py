@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Smoke tests for the po4a Conan package."""
 import os
+import shlex
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
@@ -33,8 +34,6 @@ class Po4aTestConan(ConanFile):
             raise ConanInvalidConfiguration("missing Locale::Po4a::Po module")
 
         if can_run(self):
-            self.run(
-                'perl -MLocale::Po4a::Po -e \'print "Locale::Po4a::Po loaded\\n"\'',
-                env="conanrun",
-            )
-            self.run("po4a --version", env="conanrun")
+            bash = os.environ.get("CONFIG_SHELL") or os.environ.get("BASH") or "bash"
+            script = os.path.join(self.source_folder, "test_po4a.sh")
+            self.run(f"{shlex.quote(bash)} {shlex.quote(script)}", env="conanrun")
