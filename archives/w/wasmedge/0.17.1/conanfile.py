@@ -44,7 +44,7 @@ class WasmEdgeConan(ConanFile):
             )
             self._clone_mirror(
                 "https://gitcode.com/gh_mirrors/wa/WasmEdge.git",
-                "0.17.1",
+                "0502c560d787d969c66f5676b9e11ac64bba3656",
                 self.source_folder,
             )
         third_party = {
