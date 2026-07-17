@@ -56,13 +56,6 @@ class XinitConan(ConanFile):
     def build(self):
         apply_conandata_patches(self)
         self._build_x11_compat()
-        x11_prefix = os.path.join(self.source_folder, "res", "x11")
-        include_flags = f"-I{x11_prefix}/include"
-        os.environ["CPPFLAGS"] = f"{include_flags} {os.environ.get('CPPFLAGS', '')}".strip()
-        os.environ["CFLAGS"] = f"{include_flags} {os.environ.get('CFLAGS', '')}".strip()
-        os.environ["LDFLAGS"] = f"-L{x11_prefix}/lib {os.environ.get('LDFLAGS', '')}".strip()
-        os.environ["XINIT_CFLAGS"] = include_flags
-        os.environ["XINIT_LIBS"] = os.path.join(x11_prefix, "lib", "libX11.a")
         autotools = Autotools(self)
         autotools.configure()
         autotools.make(args=["-j1"])
