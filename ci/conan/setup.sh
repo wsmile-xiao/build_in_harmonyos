@@ -33,8 +33,12 @@ if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
     # (HNP pip3/conan binaries may have shebangs pointing to non-existent
     #  build-machine paths with ^M line endings)
     python3 -m pip install --user --force-reinstall conan || {
-        echo "[error] Failed to install conan"
-        exit 1
+        echo "[warn] Direct conan install failed, trying to fix dependencies..."
+        python3 -m pip install --user --upgrade "requests>=2.25,<3.0" && \
+        python3 -m pip install --user --force-reinstall conan || {
+            echo "[error] Failed to install conan"
+            exit 1
+        }
     }
     # Ensure user-installed binaries are found before any broken HNP version
     export PATH="$HOME/.local/bin:$PATH"
