@@ -7,10 +7,8 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    if (aws_common_library_init(allocator) != AWS_OP_SUCCESS) {
-        fprintf(stderr, "aws_common_library_init failed\n");
-        return 1;
-    }
+    /* aws_common_library_init() returns void in aws-c-common 0.x. */
+    aws_common_library_init(allocator);
     aws_common_fatal_assert_library_initialized();
     aws_common_library_clean_up();
     printf("aws-c-common smoke test OK\n");
