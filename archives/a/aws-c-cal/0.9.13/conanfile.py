@@ -5,7 +5,14 @@ import sys
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, replace_in_file
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, load, replace_in_file
+
+
+def _replace_if_needed(conanfile, path, old, new):
+    content = load(conanfile, path)
+    if new in content:
+        return
+    replace_in_file(conanfile, path, old, new)
 
 
 def _export_local_aws_recipes(conanfile, refs):
@@ -70,7 +77,7 @@ class AwsCCalConan(ConanFile):
     def build(self):
         apply_conandata_patches(self)
         config_template = os.path.join(self.source_folder, "cmake", "aws-c-cal-config.cmake")
-        replace_in_file(
+        _replace_if_needed(
             self,
             config_template,
             '''if (NOT @BYO_CRYPTO@ AND (@AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE@ OR (NOT WIN32 AND NOT APPLE)))
