@@ -3,6 +3,7 @@
 
 import os
 import shutil
+import stat
 
 from conan import ConanFile
 from conan.tools.files import get, replace_in_file
@@ -45,9 +46,16 @@ class NcursesConan(ConanFile):
         config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
         tmpdir = os.path.join(self.build_folder, "_tmp")
         os.makedirs(tmpdir, exist_ok=True)
+        wrapper_dir = os.path.join(self.build_folder, "_ohos_bin")
+        os.makedirs(wrapper_dir, exist_ok=True)
+        mktemp_wrapper = os.path.join(wrapper_dir, "mktemp")
+        with open(mktemp_wrapper, "w", encoding="utf-8") as wrapper:
+            wrapper.write("#!/bin/sh\nexit 1\n")
+        os.chmod(mktemp_wrapper, os.stat(mktemp_wrapper).st_mode | stat.S_IEXEC)
         os.environ["CONFIG_SHELL"] = config_shell
         os.environ["SHELL"] = config_shell
         os.environ["TMPDIR"] = tmpdir
+        os.environ["PATH"] = wrapper_dir + os.pathsep + os.environ.get("PATH", "")
 
         replace_in_file(
             self,
