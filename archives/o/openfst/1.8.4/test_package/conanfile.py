@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 """Conan test_package - OpenFst 1.8.4."""
-import glob
 import os
 import shlex
 import shutil
@@ -21,8 +20,12 @@ class OpenfstTestConan(ConanFile):
         dep = self.dependencies["openfst"]
         fstcompile = os.path.join(dep.package_folder, "bin", "fstcompile")
         header = os.path.join(dep.package_folder, "include", "fst", "fstlib.h")
-        lib_candidates = glob.glob(os.path.join(dep.package_folder, "lib", "libfst*"))
-        libfst = lib_candidates[0] if lib_candidates else os.path.join(dep.package_folder, "lib", "libfst.so")
+        lib_dir = os.path.join(dep.package_folder, "lib")
+        lib_candidates = [
+            os.path.join(lib_dir, name)
+            for name in ("libfst.so", "libfst.dylib", "libfst.a")
+        ]
+        libfst = next((path for path in lib_candidates if os.path.exists(path)), lib_candidates[0])
 
         if not can_run(self):
             for path in (fstcompile, header, libfst):
@@ -31,7 +34,9 @@ class OpenfstTestConan(ConanFile):
             self.output.info("Cross-building; file layout check completed")
             return
 
-        bash = shutil.which("bash") or os.environ.get("CONFIG_SHELL") or "/data/service/hnp/bin/bash"
+        bash = shutil.which("bash") or os.environ.get("CONFIG_SHELL")
+        if not bash:
+            raise Exception("bash not found in PATH and CONFIG_SHELL is not set; cannot run test script")
         script = os.path.join(self.source_folder, "check_openfst.sh")
         self.run(
             f"{shlex.quote(bash)} {shlex.quote(script)} {shlex.quote(fstcompile)} "
