@@ -133,7 +133,7 @@ class NcursesConan(ConanFile):
         self._patch_generated_makefiles()
         self.run("make -j1 preinstall", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
         autotools.make(args=["-j1"])
-        self.run("make -j1 check", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
+        self.run("make check -j1", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
 
     def _patch_config_status_tmp(self, tmpdir):
         config_status = os.path.join(self.build_folder, "config.status")
