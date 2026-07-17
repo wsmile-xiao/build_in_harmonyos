@@ -65,14 +65,7 @@ class XinitConan(ConanFile):
         os.environ["XINIT_LIBS"] = os.path.join(x11_prefix, "lib", "libX11.a")
         autotools = Autotools(self)
         autotools.configure()
-        autotools.make(args=[
-            "-j1",
-            f"CPPFLAGS={os.environ['CPPFLAGS']}",
-            f"CFLAGS={os.environ['CFLAGS']}",
-            f"LDFLAGS={os.environ['LDFLAGS']}",
-            f"XINIT_CFLAGS={os.environ['XINIT_CFLAGS']}",
-            f"XINIT_LIBS={os.environ['XINIT_LIBS']}",
-        ])
+        autotools.make(args=["-j1"])
 
     def package(self):
         Autotools(self).install()
