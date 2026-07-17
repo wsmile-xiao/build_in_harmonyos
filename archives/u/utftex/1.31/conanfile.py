@@ -2,6 +2,7 @@
 """Conan recipe - utftex 1.31."""
 import os
 import shlex
+import shutil
 
 from conan import ConanFile
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
@@ -57,6 +58,22 @@ class UtftexConan(ConanFile):
         compilers = self.conf.get("tools.build:compiler_executables", default={}) or {}
         return compilers.get("c") or "cc"
 
+    def _optimization_flags(self):
+        build_type = str(self.settings.build_type)
+        if build_type == "Debug":
+            return ["-O0", "-g"]
+        if build_type == "RelWithDebInfo":
+            return ["-O2", "-g"]
+        if build_type == "MinSizeRel":
+            return ["-Os"]
+        return ["-O2"]
+
+    def _linker_flag(self):
+        if str(self.settings.os) != "OHOS":
+            return []
+        linker = os.environ.get("LD") or shutil.which("ld.lld") or shutil.which("ld")
+        return [f"-fuse-ld={linker}"] if linker else []
+
     def _write_config_header(self, src_dir):
         config = os.path.join(src_dir, "config.h")
         content = "\n".join([
@@ -72,10 +89,13 @@ class UtftexConan(ConanFile):
     def _build_binary(self, binary, sources, src_dir):
         cc = shlex.quote(self._compiler_path())
         source_args = " ".join(shlex.quote(source) for source in sources)
-        ldflags = ["-lm"]
-        if str(self.settings.os) == "OHOS":
-            ldflags.append("-fuse-ld=/data/service/hnp/bin/ld")
-        command = f"{cc} -I. -Wall -O2 -fPIC -o {shlex.quote(binary)} {source_args} {' '.join(ldflags)}"
+        cflags = ["-I.", "-Wall", *self._optimization_flags(), "-fPIC"]
+        ldflags = ["-lm", *self._linker_flag()]
+        command = (
+            f"{cc} {' '.join(shlex.quote(flag) for flag in cflags)} "
+            f"-o {shlex.quote(binary)} {source_args} "
+            f"{' '.join(shlex.quote(flag) for flag in ldflags)}"
+        )
         self.run(command, cwd=src_dir, env="conanbuild")
 
     def package(self):
@@ -98,9 +118,9 @@ class UtftexConan(ConanFile):
 
     def _sign_binary(self, path):
         os.chmod(path, 0o755)
-        sign_tool = "/data/service/hnp/bin/binary-sign-tool"
-        objcopy = "/data/service/hnp/bin/llvm-objcopy"
-        if str(self.settings.os) != "OHOS" or not (os.path.exists(sign_tool) and os.path.exists(objcopy)):
+        sign_tool = shutil.which("binary-sign-tool")
+        objcopy = shutil.which("llvm-objcopy")
+        if str(self.settings.os) != "OHOS" or not (sign_tool and objcopy):
             return
         tmp_signed = path + ".signed"
         self.run(f"{shlex.quote(objcopy)} --remove-section .codesign {shlex.quote(path)}", quiet=True)
