@@ -117,17 +117,13 @@ endif()''',
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        cmake.test(
-            cli_args=[
-                "-E",
-                (
-                    "test_file_path_read_from_offset_direct_io|"
-                    "test_file_path_read_from_offset_direct_io_chunking|"
-                    "test_cross_process_lock_works_in_proc|"
-                    "test_cross_process_lock_works_cross_proc"
-                ),
-            ]
+        excluded_tests = (
+            "test_file_path_read_from_offset_direct_io|"
+            "test_file_path_read_from_offset_direct_io_chunking|"
+            "test_cross_process_lock_works_in_proc|"
+            "test_cross_process_lock_works_cross_proc"
         )
+        self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure -E "{excluded_tests}"')
 
     def package(self):
         cmake = CMake(self)
