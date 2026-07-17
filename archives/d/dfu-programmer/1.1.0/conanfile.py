@@ -2,6 +2,7 @@
 """Conan recipe - dfu-programmer 1.1.0."""
 import os
 import shlex
+import shutil
 
 from conan import ConanFile
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
@@ -44,6 +45,8 @@ class DfuProgrammerConan(ConanFile):
         tc.extra_cflags.extend(include_flags.split())
         tc.extra_ldflags.extend([f"-L{libusb_prefix}/lib", f"-L{self._sys_prefix}/lib"])
         tc.configure_args.extend([
+            "--build=aarch64-unknown-linux-ohos",
+            "--host=aarch64-unknown-linux-ohos",
             f"PKG_CONFIG_PATH={pkgconfig_dir}:{libusb_prefix}/lib/pkgconfig:{self._sys_prefix}/lib/pkgconfig",
             f"LIBUSB_CFLAGS={include_flags}",
             f"LIBUSB_LIBS={lib_flags}",
@@ -82,11 +85,55 @@ class DfuProgrammerConan(ConanFile):
             )
         return pkgconfig_dir
 
+    def _replace_in_existing(self, relpath, replacements):
+        path = os.path.join(self.source_folder, relpath)
+        if not os.path.isfile(path):
+            return
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            content = handle.read()
+        updated = content
+        for old, new in replacements:
+            updated = updated.replace(old, new)
+        if updated != content:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+
+    def _refresh_config_helpers(self):
+        helper_dir = os.path.join(self._sys_prefix, "share", "automake-1.17")
+        for relpath in ("config.guess", "config.sub", "m4/config.guess", "m4/config.sub"):
+            src = os.path.join(helper_dir, os.path.basename(relpath))
+            dst = os.path.join(self.source_folder, relpath)
+            if os.path.isfile(src) and os.path.isfile(dst):
+                shutil.copy2(src, dst)
+                os.chmod(dst, 0o755)
+
+    def _prepare_autotools_helpers(self):
+        self._refresh_config_helpers()
+        for relpath in (
+            "configure",
+            "config.guess",
+            "config.sub",
+            "m4/config.guess",
+            "m4/config.sub",
+            "build-aux/config.guess",
+            "build-aux/config.sub",
+        ):
+            self._replace_in_existing(relpath, [("umask 077", "umask 022")])
+
+        for relpath in ("config.sub", "m4/config.sub", "build-aux/config.sub"):
+            self._replace_in_existing(relpath, [
+                ("| linux-gnu* | linux-android*", "| linux-gnu* | linux-android* | linux-ohos*"),
+                ("| linux-musl* | linux-gnu*", "| linux-musl* | linux-gnu* | linux-ohos*"),
+                ("| linux-android* | linux-dietlibc", "| linux-android* | linux-ohos* | linux-dietlibc"),
+                ("| android* | linux-dietlibc", "| android* | ohos* | linux-dietlibc"),
+            ])
+
     def build(self):
         configure = os.path.join(self.source_folder, "configure")
         bootstrap = os.path.join(self.source_folder, "bootstrap.sh")
         if not os.path.exists(configure) and os.path.exists(bootstrap):
-            self.run(f"sh {shlex.quote(bootstrap)}", env="conanbuild")
+            self.run(f"sh {shlex.quote(bootstrap)}", env="conanbuild", cwd=self.source_folder)
+        self._prepare_autotools_helpers()
 
         autotools = Autotools(self)
         autotools.configure()
