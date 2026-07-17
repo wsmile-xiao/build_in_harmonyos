@@ -40,18 +40,6 @@ class AwsCCommonConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
-
-    def generate(self):
-        deps = CMakeDeps(self)
-        deps.generate()
-        tc = CMakeToolchain(self)
-        tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
-        tc.variables["BUILD_TESTING"] = "OFF"
-        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
-        tc.generate()
-
-    def build(self):
-        apply_conandata_patches(self)
         cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
         _replace_if_needed(
             self,
@@ -75,6 +63,18 @@ endif()''',
             'if (UNIX AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
             'if ((UNIX OR ${CMAKE_SYSTEM_NAME} STREQUAL "HarmonyOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "OHOS") AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
         )
+
+    def generate(self):
+        deps = CMakeDeps(self)
+        deps.generate()
+        tc = CMakeToolchain(self)
+        tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
+        tc.variables["BUILD_TESTING"] = "OFF"
+        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
+        tc.generate()
+
+    def build(self):
+        apply_conandata_patches(self)
         cmake = CMake(self)
         cmake.configure()
         cmake.build()

@@ -57,25 +57,6 @@ class AwsCCalConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
-
-    def generate(self):
-        deps = CMakeDeps(self)
-        deps.generate()
-        tc = CMakeToolchain(self)
-        tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
-        tc.variables["BUILD_TESTING"] = "OFF"
-        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
-        tc.variables["BYO_CRYPTO"] = "ON"
-        common_root = self.dependencies["aws-c-common"].package_folder
-        tc.variables["CMAKE_MODULE_PATH"] = ";".join([
-            os.path.join(common_root, "lib", "cmake"),
-            os.path.join(common_root, "lib", "cmake", "aws-c-common"),
-            os.path.join(common_root, "lib", "cmake", "aws-c-common", "modules"),
-        ])
-        tc.generate()
-
-    def build(self):
-        apply_conandata_patches(self)
         config_template = os.path.join(self.source_folder, "cmake", "aws-c-cal-config.cmake")
         _replace_if_needed(
             self,
@@ -95,6 +76,25 @@ endif()
 ''',
             '',
         )
+
+    def generate(self):
+        deps = CMakeDeps(self)
+        deps.generate()
+        tc = CMakeToolchain(self)
+        tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
+        tc.variables["BUILD_TESTING"] = "OFF"
+        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
+        tc.variables["BYO_CRYPTO"] = "ON"
+        common_root = self.dependencies["aws-c-common"].package_folder
+        tc.variables["CMAKE_MODULE_PATH"] = ";".join([
+            os.path.join(common_root, "lib", "cmake"),
+            os.path.join(common_root, "lib", "cmake", "aws-c-common"),
+            os.path.join(common_root, "lib", "cmake", "aws-c-common", "modules"),
+        ])
+        tc.generate()
+
+    def build(self):
+        apply_conandata_patches(self)
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
