@@ -92,3 +92,5 @@ class AwsCHttpConan(ConanFile):
             "aws-c-compression::aws-c-compression",
             "aws-c-io::aws-c-io",
         ]
+        self.cpp_info.set_property("cmake_file_name", "aws-c-http")
+        self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-http")
