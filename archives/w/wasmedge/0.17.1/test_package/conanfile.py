@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Test package for WasmEdge 0.17.1."""
+
 import os
 
 from conan import ConanFile

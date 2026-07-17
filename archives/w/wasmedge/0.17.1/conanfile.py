@@ -1,4 +1,8 @@
+#!/usr/bin/env python3
+"""Conan recipe for WasmEdge 0.17.1."""
+
 import os
+import re
 import shutil
 import tempfile
 
@@ -93,16 +97,24 @@ class WasmEdgeConan(ConanFile):
                 self._clone_mirror(mirror_repo, mirror_ref, destination)
 
     def _clone_mirror(self, repo_url, ref, destination):
+        safe_url = self._safe_git_arg(repo_url, "mirror URL")
+        safe_ref = self._safe_git_arg(ref, "mirror ref")
         tmpdir = tempfile.mkdtemp(prefix=f"{self.name}-mirror-")
         clone_dir = os.path.join(tmpdir, "src")
         try:
             shutil.rmtree(destination, ignore_errors=True)
-            self.run(f'git clone --filter=blob:none --no-checkout "{repo_url}" "{clone_dir}"')
-            self.run(f'git -C "{clone_dir}" checkout --detach "{ref}"')
+            self.run(f'git clone --filter=blob:none --no-checkout "{safe_url}" "{clone_dir}"')
+            self.run(f'git -C "{clone_dir}" checkout --detach "{safe_ref}"')
             shutil.rmtree(os.path.join(clone_dir, ".git"), ignore_errors=True)
             shutil.copytree(clone_dir, destination)
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    @staticmethod
+    def _safe_git_arg(value, label):
+        if not re.fullmatch(r"[A-Za-z0-9._~:/@%+\-=]+", value):
+            raise ValueError(f"unsafe {label}: {value!r}")
+        return value
 
     def generate(self):
         tc = CMakeToolchain(self)
