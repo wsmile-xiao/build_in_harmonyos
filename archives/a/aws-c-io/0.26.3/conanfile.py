@@ -95,8 +95,8 @@ endif()
 
 ''',
                 '',
+                strict=False,
             )
-
 
     def package_info(self):
         self.cpp_info.libs = ['aws-c-io']
