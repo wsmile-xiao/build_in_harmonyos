@@ -3,6 +3,7 @@
 import os
 import shlex
 import shutil
+import subprocess
 
 from conan import ConanFile
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
@@ -184,16 +185,15 @@ class DfuProgrammerConan(ConanFile):
         dst = os.path.join(self.build_folder, helper)
         os.makedirs(self.build_folder, exist_ok=True)
         if os.path.isfile(src):
-            shutil.copy2(src, dst)
+            staged_src = dst + ".upstream"
+            shutil.copy2(src, staged_src)
+            os.chmod(staged_src, 0o755)
             bash = "/data/service/hnp/bin/bash"
             if not os.path.exists(bash):
-                bash = shutil.which("bash") or "/usr/bin/env bash"
-            with open(dst, "r", encoding="utf-8", errors="replace") as handle:
-                content = handle.read()
-            content = content.replace("#!/bin/bash", f"#!{bash}", 1)
-            content = content.replace("#! /bin/bash", f"#!{bash}", 1)
+                bash = shutil.which("bash") or "sh"
             with open(dst, "w", encoding="utf-8") as handle:
-                handle.write(content)
+                handle.write("#!/bin/sh\n")
+                handle.write(f"exec {shlex.quote(bash)} {shlex.quote(staged_src)} \"$@\"\n")
         else:
             with open(dst, "w", encoding="utf-8") as handle:
                 handle.write("#!/bin/sh\nexit 0\n")
@@ -225,11 +225,17 @@ class DfuProgrammerConan(ConanFile):
         if str(self.settings.os) != "OHOS" or not (os.path.exists(sign_tool) and os.path.exists(objcopy)):
             return
         tmp_signed = path + ".signed"
-        self.run(f"{shlex.quote(objcopy)} --remove-section .codesign {shlex.quote(path)}", quiet=True)
-        self.run(
-            f"{shlex.quote(sign_tool)} sign -inFile {shlex.quote(path)} "
-            f"-outFile {shlex.quote(tmp_signed)} -selfSign 1",
-            quiet=True,
+        subprocess.run(
+            [objcopy, "--remove-section", ".codesign", path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            [sign_tool, "sign", "-inFile", path, "-outFile", tmp_signed, "-selfSign", "1"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
         os.replace(tmp_signed, path)
         os.chmod(path, 0o755)
