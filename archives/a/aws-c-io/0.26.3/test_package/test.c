@@ -9,9 +9,21 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    aws_common_library_init(allocator);
-    aws_cal_library_init(allocator);
-    aws_io_library_init(allocator);
+    if (aws_common_library_init(allocator) != AWS_OP_SUCCESS) {
+        fprintf(stderr, "aws_common_library_init failed\n");
+        return 1;
+    }
+    if (aws_cal_library_init(allocator) != AWS_OP_SUCCESS) {
+        fprintf(stderr, "aws_cal_library_init failed\n");
+        aws_common_library_clean_up();
+        return 1;
+    }
+    if (aws_io_library_init(allocator) != AWS_OP_SUCCESS) {
+        fprintf(stderr, "aws_io_library_init failed\n");
+        aws_cal_library_clean_up();
+        aws_common_library_clean_up();
+        return 1;
+    }
     aws_io_fatal_assert_library_initialized();
     aws_io_library_clean_up();
     aws_cal_library_clean_up();
