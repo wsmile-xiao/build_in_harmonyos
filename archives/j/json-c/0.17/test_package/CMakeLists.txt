@@ -1,11 +1,11 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.15)
 project(test_json_c C)
 
-include(CTest)
-
-find_package(json-c REQUIRED CONFIG)
+# Find the package via Conan-generated CMakeDeps
+find_package(json-c REQUIRED)
 
 add_executable(test_json_c test.c)
-target_link_libraries(test_json_c PRIVATE json-c::json-c)
+target_link_libraries(test_json_c json-c::json-c)
 
-add_test(NAME json_c_version COMMAND test_json_c)
+enable_testing()
+add_test(NAME test_json_c COMMAND test_json_c)

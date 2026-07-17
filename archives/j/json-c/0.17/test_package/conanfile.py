@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
-"""Test package for json-c"""
+"""Conan test_package template — Conan L1 official test.
+
+This is the L1 test in the five-level test system.
+CI runs this automatically via `conan create` (which invokes test_package).
+
+File location: archives/j/json-c/0.17/test_package/conanfile.py
+"""
+import os
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, cmake_layout
-from conan.tools.build import can_run
-import os
 
 
-class TestJsonCConan(ConanFile):
+class JsoncTestConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     generators = "CMakeDeps", "CMakeToolchain"
 
@@ -23,5 +28,6 @@ class TestJsonCConan(ConanFile):
         cmake.build()
 
     def test(self):
-        if can_run(self):
-            self.run(os.path.join(self.build_folder, "test_json_c"), env="conanrun")
+        cmake = CMake(self)
+        cmake.test()
+        self.run(os.path.join(self.cpp.build.bindirs[0], "test_json_c"), env="conanrun")
