@@ -63,3 +63,4 @@ class OpenfstConan(ConanFile):
         self.cpp_info.libs = ["fst", "fstscript"]
         self.cpp_info.bindirs = ["bin"]
         self.runenv_info.prepend_path("PATH", os.path.join(self.package_folder, "bin"))
+        self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(self.package_folder, "lib"))
