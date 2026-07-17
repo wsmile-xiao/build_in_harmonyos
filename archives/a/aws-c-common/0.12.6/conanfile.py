@@ -69,7 +69,7 @@ endif()''',
         deps.generate()
         tc = CMakeToolchain(self)
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
-        tc.variables["BUILD_TESTING"] = "OFF"
+        tc.variables["BUILD_TESTING"] = "ON"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
         tc.generate()
 
