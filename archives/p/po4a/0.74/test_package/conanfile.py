@@ -4,7 +4,6 @@ import os
 import shlex
 
 from conan import ConanFile
-from conan.errors import ConanInvalidConfiguration
 from conan.tools.build import can_run
 
 
@@ -27,11 +26,11 @@ class Po4aTestConan(ConanFile):
         for name in ("po4a", "po4a-gettextize", "po4a-translate", "po4a-updatepo", "msguntypot"):
             path = os.path.join(bin_dir, name)
             if not os.path.isfile(path):
-                raise ConanInvalidConfiguration(f"missing packaged script: {name}")
+                raise AssertionError(f"missing packaged script: {name}")
 
         module = os.path.join(lib_dir, "Locale", "Po4a", "Po.pm")
         if not os.path.isfile(module):
-            raise ConanInvalidConfiguration("missing Locale::Po4a::Po module")
+            raise AssertionError("missing Locale::Po4a::Po module")
 
         if can_run(self):
             bash = os.environ.get("CONFIG_SHELL") or os.environ.get("BASH") or "bash"
