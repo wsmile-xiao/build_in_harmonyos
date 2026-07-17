@@ -21,4 +21,4 @@ class TestConan(ConanFile):
 
     def test(self):
         if not cross_building(self):
-            self.run(os.path.join(self.cpp.build.bindirs[0], "test_ncurses"), env="conanrun")
+            self.run(os.path.join(self.cpp.build.bindirs[0], "test_ncurses"), env="conanrun", ignore_errors=False)
