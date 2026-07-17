@@ -1,6 +1,9 @@
 import os
+import shutil
+import tempfile
 
 from conan import ConanFile
+from conan.errors import ConanException
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get
 
@@ -54,17 +57,42 @@ class WasmEdgeConan(ConanFile):
                     "https://github.com/nothings/stb/archive/2dfbe86bef853be33cbbda07abcb4db58c7f817d.tar.gz",
                 ],
                 "f8803386a38269bb4ac3088bbf6b3ebc4ea3072a1bcc9bfdd59ccfc5d66550eb",
+                "https://gitcode.com/gh_mirrors/st/stb.git",
+                "2dfbe86bef853be33cbbda07abcb4db58c7f817d",
             ),
         }
-        for name, (urls, sha256) in third_party.items():
-            get(
-                self,
-                url=urls,
-                sha256=sha256,
-                destination=os.path.join(self.source_folder, "third_party", name),
-                strip_root=True,
-                filename=f"{name}.tar.gz",
-            )
+        for name, metadata in third_party.items():
+            destination = os.path.join(self.source_folder, "third_party", name)
+            urls, sha256 = metadata[:2]
+            try:
+                get(
+                    self,
+                    url=urls,
+                    sha256=sha256,
+                    destination=destination,
+                    strip_root=True,
+                    filename=f"{name}.tar.gz",
+                )
+            except ConanException:
+                if len(metadata) < 4:
+                    raise
+                mirror_repo, mirror_ref = metadata[2:]
+                self.output.warning(
+                    f"Falling back to GitCode mirror for {name} after official tarball download failed"
+                )
+                self._clone_mirror(mirror_repo, mirror_ref, destination)
+
+    def _clone_mirror(self, repo_url, ref, destination):
+        tmpdir = tempfile.mkdtemp(prefix=f"{self.name}-mirror-")
+        clone_dir = os.path.join(tmpdir, "src")
+        try:
+            shutil.rmtree(destination, ignore_errors=True)
+            self.run(f'git clone --filter=blob:none --no-checkout "{repo_url}" "{clone_dir}"')
+            self.run(f'git -C "{clone_dir}" checkout --detach "{ref}"')
+            shutil.rmtree(os.path.join(clone_dir, ".git"), ignore_errors=True)
+            shutil.copytree(clone_dir, destination)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def generate(self):
         tc = CMakeToolchain(self)
