@@ -28,6 +28,7 @@ class JsonCConan(ConanFile):
         tc = CMakeToolchain(self)
         tc.variables["BUILD_SHARED_LIBS"] = self.options.shared
         tc.variables["BUILD_TESTING"] = False
+        tc.variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
         if self.settings.os in ("Linux", "OHOS"):
             tc.cache_variables["CMAKE_SYSTEM_NAME"] = "Linux"
         tc.generate()
