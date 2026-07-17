@@ -64,6 +64,7 @@ class AwsCIoConan(ConanFile):
         tc.variables["CMAKE_MODULE_PATH"] = ";".join([
             os.path.join(common_root, "lib", "cmake"),
             os.path.join(common_root, "lib", "cmake", "aws-c-common"),
+            os.path.join(common_root, "lib", "cmake", "aws-c-common", "modules"),
         ])
         tc.generate()
 
