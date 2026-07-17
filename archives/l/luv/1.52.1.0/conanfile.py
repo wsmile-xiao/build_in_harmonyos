@@ -28,7 +28,12 @@ class LuvConan(ConanFile):
 
     def build(self):
         cmake = CMake(self)
-        cmake.configure()
+        cmake.configure(variables={
+            "BUILD_MODULE": "OFF",
+            "LUV_USE_SYSTEM_LIBUV": "ON",
+            "LUA_BUILD_TYPE": "System",
+            "WITH_SHARED_LIBUV": "ON"
+        })
         cmake.build()
 
     def package(self):
