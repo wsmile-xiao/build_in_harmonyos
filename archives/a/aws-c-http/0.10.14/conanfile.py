@@ -49,6 +49,7 @@ class AwsCHttpConan(ConanFile):
 
     def requirements(self):
         self.requires("aws-c-common/0.12.6")
+        self.requires("aws-c-cal/0.9.13")
         self.requires("aws-c-io/0.26.3")
         self.requires("aws-c-compression/0.3.2")
 
@@ -87,6 +88,7 @@ class AwsCHttpConan(ConanFile):
         self.cpp_info.libs = ["aws-c-http"]
         self.cpp_info.requires = [
             "aws-c-common::aws-c-common",
+            "aws-c-cal::aws-c-cal",
             "aws-c-compression::aws-c-compression",
             "aws-c-io::aws-c-io",
         ]
