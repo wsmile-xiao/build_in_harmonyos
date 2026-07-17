@@ -1,6 +1,6 @@
 import os
 from conan import ConanFile
-from conan.tools.files import get
+from conan.tools.files import get, apply_conandata_patches
 from conan.tools.cmake import CMake, CMakeToolchain
 from conan.tools.layout import basic_layout
 
@@ -24,6 +24,7 @@ class Mp4v2Conan(ConanFile):
         tc.generate()
 
     def build(self):
+        apply_conandata_patches(self)
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
