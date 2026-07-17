@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Conan test_package for tkdiff 6.0."""
 import os
-import shutil
+import sys
 
 from conan import ConanFile
 
@@ -16,18 +16,5 @@ class TkdiffTestConan(ConanFile):
 
     def test(self):
         dep = self.dependencies["tkdiff"]
-        script = os.path.join(dep.package_folder, "bin", "tkdiff")
-        assert os.path.isfile(script), f"missing tkdiff script: {script}"
-
-        with open(script, "r", encoding="utf-8", errors="ignore") as f:
-            content = f.read()
-        assert content.startswith("#!/usr/bin/env sh"), "tkdiff shebang was not adapted for HarmonyOS"
-        assert "package require Tk" in content, "tkdiff Tcl/Tk entry point missing"
-        assert "^--help" in content and "^-h" in content, "tkdiff help switch handling missing"
-
-        if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
-            wish = shutil.which("wish")
-            if wish:
-                self.run(f'"{wish}" "{script}" --help', env="conanrun")
-        else:
-            self.output.info("No display server detected; static package validation completed")
+        test_script = os.path.join(self.recipe_folder, "test_smoke.py")
+        self.run(f'"{sys.executable}" "{test_script}" "{dep.package_folder}"', env="conanrun")
