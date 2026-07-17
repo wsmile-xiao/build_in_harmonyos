@@ -2,6 +2,7 @@
 """Conan recipe for SIPp 3.7.7."""
 
 import os
+import subprocess
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
@@ -18,6 +19,15 @@ class SippConan(ConanFile):
     package_type = "application"
 
     settings = "os", "compiler", "build_type", "arch"
+
+    def export_sources(self):
+        repo_root = os.path.abspath(os.path.join(self.recipe_folder, "..", "..", "..", ".."))
+        ncurses_dir = os.path.join(repo_root, "archives", "n", "ncurses", "6.5")
+        if os.path.isfile(os.path.join(ncurses_dir, "conanfile.py")):
+            self.output.info("Exporting local dependency recipe: ncurses/6.5")
+            subprocess.run(["conan", "export", ncurses_dir], check=True)
+        else:
+            self.output.warning("local dependency recipe not found: ncurses/6.5")
 
     def requirements(self):
         self.requires("ncurses/6.5")
