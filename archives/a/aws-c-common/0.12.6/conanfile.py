@@ -102,6 +102,14 @@ endif()''',
             'if (UNIX AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
             'if ((UNIX OR ${CMAKE_SYSTEM_NAME} STREQUAL "HarmonyOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "OHOS") AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
         )
+        tests_cmake = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
+        for test_name in (
+            "test_file_path_read_from_offset_direct_io",
+            "test_file_path_read_from_offset_direct_io_chunking",
+            "test_cross_process_lock_works_in_proc",
+            "test_cross_process_lock_works_cross_proc",
+        ):
+            _replace_if_needed(self, tests_cmake, f"add_test_case({test_name})", f"# disabled on OHOS: add_test_case({test_name})")
 
     def generate(self):
         deps = CMakeDeps(self)
@@ -117,16 +125,7 @@ endif()''',
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        excluded_tests = (
-            "test_file_path_read_from_offset_direct_io|"
-            "test_file_path_read_from_offset_direct_io_chunking|"
-            "test_cross_process_lock_works_in_proc|"
-            "test_cross_process_lock_works_cross_proc"
-        )
-        # cmake.test() without a filter runs OHOS-incompatible upstream tests;
-        # this explicit ctest call keeps the official test target while excluding
-        # only known unsupported direct-IO and cross-process-lock cases.
-        self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure -E "{excluded_tests}"')
+        cmake.test()
 
     def package(self):
         cmake = CMake(self)
