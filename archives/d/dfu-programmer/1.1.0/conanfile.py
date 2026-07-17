@@ -50,7 +50,7 @@ class DfuProgrammerConan(ConanFile):
         )
         ld_flags = f"-L{libusb_prefix}/lib -L{self._sys_prefix}/lib"
         static_libusb = os.path.join(libusb_prefix, "lib", "libusb-1.0.a")
-        lib_flags = static_libusb if os.path.isfile(static_libusb) else "-lusb-1.0"
+        lib_flags = "-l:libusb-1.0.a" if os.path.isfile(static_libusb) else "-lusb-1.0"
         pkgconfig_dir = self._write_libusb_pc(libusb_prefix)
 
         tc = AutotoolsToolchain(self)
@@ -64,7 +64,7 @@ class DfuProgrammerConan(ConanFile):
             f"LDFLAGS={ld_flags}",
             f"LIBUSB_CFLAGS={include_flags}",
             f"LIBUSB_LIBS={lib_flags}",
-            f"ac_cv_search_libusb_init={bundled_libusb}",
+            f"ac_cv_search_libusb_init={lib_flags}",
         ])
         tc.generate()
 
