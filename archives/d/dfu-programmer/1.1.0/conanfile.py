@@ -185,6 +185,15 @@ class DfuProgrammerConan(ConanFile):
         os.makedirs(self.build_folder, exist_ok=True)
         if os.path.isfile(src):
             shutil.copy2(src, dst)
+            bash = "/data/service/hnp/bin/bash"
+            if not os.path.exists(bash):
+                bash = shutil.which("bash") or "/usr/bin/env bash"
+            with open(dst, "r", encoding="utf-8", errors="replace") as handle:
+                content = handle.read()
+            content = content.replace("#!/bin/bash", f"#!{bash}", 1)
+            content = content.replace("#! /bin/bash", f"#!{bash}", 1)
+            with open(dst, "w", encoding="utf-8") as handle:
+                handle.write(content)
         else:
             with open(dst, "w", encoding="utf-8") as handle:
                 handle.write("#!/bin/sh\nexit 0\n")
