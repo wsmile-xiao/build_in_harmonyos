@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Conan recipe for ncurses 6.5 — OHOS static build."""
+
+import os
+
 from conan import ConanFile
-from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import get, replace_in_file
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.layout import basic_layout
 
@@ -18,9 +21,6 @@ class NcursesConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     options = {"shared": [True, False], "fPIC": [True, False]}
     default_options = {"shared": False, "fPIC": True}
-
-    def export_sources(self):
-        export_conandata_patches(self)
 
     def layout(self):
         basic_layout(self)
@@ -41,7 +41,49 @@ class NcursesConan(ConanFile):
         tc.generate()
 
     def build(self):
-        apply_conandata_patches(self)
+        replace_in_file(
+            self,
+            os.path.join(self.source_folder, "config.guess"),
+            """    *:Minix:*:*)
+	GUESS=$UNAME_MACHINE-unknown-minix
+	;;""",
+            """    *:Minix:*:*)
+	GUESS=$UNAME_MACHINE-unknown-minix
+	;;
+    *:HarmonyOS:*:*)
+	case "$UNAME_MACHINE" in
+	    aarch64|arm64)
+		MACHINE=aarch64
+		;;
+	    armv7*|armv8*)
+		MACHINE=arm
+		;;
+	    x86_64|amd64)
+		MACHINE=x86_64
+		;;
+	    i?86)
+		MACHINE=i686
+		;;
+	    *)
+		MACHINE="$UNAME_MACHINE"
+		;;
+	esac
+	GUESS=${MACHINE}-unknown-linux-ohos
+	;;""",
+        )
+        replace_in_file(
+            self,
+            os.path.join(self.source_folder, "config.sub"),
+            "| fiwix* | mlibc* | cos* | mbr* | ironclad* )",
+            "| fiwix* | mlibc* | cos* | mbr* | ironclad* | ohos* )",
+        )
+        replace_in_file(
+            self,
+            os.path.join(self.source_folder, "config.sub"),
+            "| linux-relibc*- | linux-uclibc*- )",
+            "| linux-relibc*- | linux-uclibc*- | linux-ohos*- )",
+        )
+
         autotools = Autotools(self)
         autotools.configure()
         # OHOS HMDFS noexec (E046): config.status 中临时 awk 脚本无法直接执行
