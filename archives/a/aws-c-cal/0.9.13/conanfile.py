@@ -57,6 +57,17 @@ class AwsCCalConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
+        _replace_if_needed(
+            self,
+            cmake_lists,
+            "project(aws-c-cal LANGUAGES C VERSION 0.1.0)",
+            """project(aws-c-cal LANGUAGES C VERSION 0.1.0)
+
+if(NOT TARGET test)
+    add_custom_target(test COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure)
+endif()""",
+        )
         config_template = os.path.join(self.source_folder, "cmake", "aws-c-cal-config.cmake")
         _replace_if_needed(
             self,
