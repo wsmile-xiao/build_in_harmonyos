@@ -102,7 +102,13 @@ class WasmEdgeConan(ConanFile):
         tmpdir = tempfile.mkdtemp(prefix=f"{self.name}-mirror-")
         clone_dir = os.path.join(tmpdir, "src")
         try:
-            shutil.rmtree(destination, ignore_errors=True)
+            if os.path.exists(destination):
+                try:
+                    shutil.rmtree(destination)
+                except OSError as exc:
+                    raise ConanException(
+                        f"failed to remove existing mirror destination {destination!r}: {exc}"
+                    )
             self.run(f'git clone --filter=blob:none --no-checkout "{safe_url}" "{clone_dir}"')
             self.run(f'git -C "{clone_dir}" checkout --detach "{safe_ref}"')
             shutil.rmtree(os.path.join(clone_dir, ".git"), ignore_errors=True)
