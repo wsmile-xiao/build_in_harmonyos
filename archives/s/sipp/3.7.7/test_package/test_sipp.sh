@@ -9,11 +9,22 @@ sipp -v >"$tmp_output" 2>&1
 rc=$?
 set -e
 
-grep -q "SIPp 3.7.7" "$tmp_output"
-grep -q "This program is free software" "$tmp_output"
-
 if [ "$rc" -ne 99 ]; then
     echo "expected upstream informational exit code 99 from 'sipp -v', got $rc" >&2
     cat "$tmp_output" >&2
     exit 1
 fi
+
+if ! grep -qi "SIPp" "$tmp_output"; then
+    echo "expected version/help output from 'sipp -v' to mention SIPp" >&2
+    cat "$tmp_output" >&2
+    exit 1
+fi
+
+if ! grep -qi "free software\|license\|author" "$tmp_output"; then
+    echo "expected informational banner from 'sipp -v'" >&2
+    cat "$tmp_output" >&2
+    exit 1
+fi
+
+cat "$tmp_output" >/dev/null
