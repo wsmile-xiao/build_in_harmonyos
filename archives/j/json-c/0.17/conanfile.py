@@ -2,7 +2,7 @@
 """Conan recipe - json-c 0.17 (CMake)"""
 
 from conan import ConanFile
-from conan.tools.cmake import CMake, CMakeToolchain
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import get
 
 
@@ -21,10 +21,15 @@ class JsonCConan(ConanFile):
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
 
+    def layout(self):
+        cmake_layout(self)
+
     def generate(self):
         tc = CMakeToolchain(self)
         tc.variables["BUILD_SHARED_LIBS"] = self.options.shared
         tc.variables["BUILD_TESTING"] = False
+        if self.settings.os in ("Linux", "OHOS"):
+            tc.cache_variables["CMAKE_SYSTEM_NAME"] = "Linux"
         tc.generate()
 
     def build(self):
