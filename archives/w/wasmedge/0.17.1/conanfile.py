@@ -83,7 +83,7 @@ class WasmEdgeConan(ConanFile):
         tc.variables["WASMEDGE_USE_LLVM"] = "OFF"
         tc.variables["WASMEDGE_FORCE_DISABLE_LTO"] = "ON"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
-        tc.variables["CMAKE_CXX_FLAGS"] = "-Wno-error=maybe-uninitialized -Wno-error=array-bounds"
+        tc.extra_cxxflags.extend(["-Wno-error=maybe-uninitialized", "-Wno-error=array-bounds"])
         third_party = os.path.join(self.source_folder, "third_party")
         tc.variables["FETCHCONTENT_SOURCE_DIR_FMT"] = os.path.join(third_party, "fmt")
         tc.variables["FETCHCONTENT_SOURCE_DIR_SPDLOG"] = os.path.join(third_party, "spdlog")
