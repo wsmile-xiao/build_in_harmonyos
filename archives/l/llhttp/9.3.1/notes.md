@@ -28,7 +28,7 @@
 | Step 9 package | ⏭️ | 打包步骤由 finish 自动处理 |
 | Step 10 deploy | ✅ | 安装到 DEFAULT_PREFIX |
 | Step 11 finish | ✅ | 归档完成，状态标记为 success |
-| Step 12 功能测试 | ✅ | 25个测试用例，22个通过（88%） |
+| Step 12 功能测试 | ✅ | test_package 21 项断言全部通过（含 PATCH/错误原因/pause-resume 针对性验证） |
 
 ## 遇到的问题与解决方案
 
@@ -86,14 +86,15 @@
 - 无法使用标准的测试流程
 
 **解决方案**:
-- 编写自定义测试程序（25个测试用例）
-- 测试覆盖：HTTP request/response 解析、错误处理、API 函数
-- 测试结果：22个通过，88%成功率
+- 编写 `test_package/test.c` 消费者测试（21 项断言），链接 libllhttp.so 验证核心 API
+- 测试覆盖：GET 基础解析、PATCH 方法识别、错误原因获取、pause/resume 状态
+- 测试结果：21/21 全部通过（容器 `conan create` + test_package 真实运行验证）
 
 **经验总结**:
-- llhttp 作为 Node.js 的 HTTP 解析库，依赖 Node.js 测试环境
-- 在 OpenHarmony 环境中需要编写独立测试程序
-- 核心功能测试通过，满足使用要求
+- llhttp 作为 Node.js 的 HTTP 解析库，依赖 Node.js 测试环境；CMake 构建无 native 测试目标
+- 早期（2026-04-20）设备端临时测试程序曾跑 25 个用例得 88%（3 项失败：PATCH 方法识别、pause 状态处理、error reason 获取），但该记录未保留失败明细
+- 经核实，上述 3 项均为 llhttp 9.3.1 原生支持功能（`HTTP_PATCH=28`、`llhttp_pause`/`llhttp_resume`、`llhttp_get_error_reason`），当时失败源自临时测试程序的用法/断言问题；已在 test_package 补充针对性用例并全部验证通过
+- 早期 88% 数据不再采用，本版以 test_package 实测 21/21 为准
 
 ### 问题 5: make jobserver fifo 权限问题
 
@@ -179,15 +180,13 @@ ls -lh $DEFAULT_PREFIX/include/llhttp.h
 
 ### 功能验证
 
-执行 25 个测试用例：
-- ✓ HTTP request 解析（GET/POST/PUT/DELETE/HEAD/OPTIONS）
-- ✓ HTTP response 解析（200/404/500/301）
-- ✓ Headers 解析
-- ✓ 分块传输编码
-- ✓ 错误处理
-- ✓ API 函数测试
+`test_package/test.c` 执行 21 项断言（容器 `conan create` + test_package 真实运行）：
+- ✓ GET 基础解析（`llhttp_execute` / 回调触发，7 项）
+- ✓ PATCH 方法识别（`on_method` / `llhttp_get_method` / `llhttp_method_name`，5 项）
+- ✓ 错误原因获取（`llhttp_execute` 报错 / `llhttp_get_errno` / `llhttp_get_error_reason`，4 项）
+- ✓ pause/resume 状态（`HPE_PAUSED` / `llhttp_resume` / 多轮续解析，5 项）
 
-**通过率**: 88.0% (22/25)
+**通过率**: 100% (21/21)
 
 ## 知识沉淀
 
@@ -207,7 +206,7 @@ ls -lh $DEFAULT_PREFIX/include/llhttp.h
 
 1. llhttp 9.3.1 在 OpenHarmony 上编译无障碍
 2. 核心 HTTP 解析功能正常
-3. PATCH 方法可能需要额外配置
+3. PATCH 方法经 test_package 验证可正常识别（llhttp 9.3.1 `HTTP_PATCH=28`）
 
 ## 对话记录
 
