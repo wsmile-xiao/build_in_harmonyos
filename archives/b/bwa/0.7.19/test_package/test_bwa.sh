@@ -5,7 +5,17 @@ set -euo pipefail
 WORK="$PWD/bwa-test-work"
 rm -rf "$WORK"
 mkdir -p "$WORK"
-trap 'rm -rf "$WORK"' EXIT
+
+cleanup() {
+    status=$?
+    if [ "$status" -eq 0 ]; then
+        rm -rf "$WORK"
+    else
+        echo "bwa functional test failed; preserving logs in $WORK" >&2
+        find "$WORK" -maxdepth 1 -type f -print >&2 || true
+    fi
+}
+trap cleanup EXIT
 
 echo "[test] bwa usage"
 bwa > "$WORK/usage.txt" 2>&1 || true
