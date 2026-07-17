@@ -20,8 +20,8 @@ class NcursesConan(ConanFile):
 
     package_type = "library"
     settings = "os", "compiler", "build_type", "arch"
-    options = {"shared": [True, False], "fPIC": [True, False]}
-    default_options = {"shared": False, "fPIC": True}
+    options = {"fPIC": [True, False]}
+    default_options = {"fPIC": True}
 
     def layout(self):
         # ncurses' config.status is fragile in out-of-source builds on OHOS/HMDFS:
