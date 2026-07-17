@@ -45,12 +45,11 @@ class StkTestConan(ConanFile):
         signed = exe + ".signed"
         subprocess.run(
             [objcopy, "--remove-section", ".codesign", exe],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
+            check=True,
         )
-        self.run(
-            f'"{signer}" sign -inFile "{exe}" -outFile "{signed}" -selfSign 1'
+        subprocess.run(
+            [signer, "sign", "-inFile", exe, "-outFile", signed, "-selfSign", "1"],
+            check=True,
         )
         os.replace(signed, exe)
         os.chmod(exe, 0o755)

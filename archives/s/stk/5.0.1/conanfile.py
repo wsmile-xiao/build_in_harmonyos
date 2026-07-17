@@ -51,9 +51,12 @@ class StkConan(ConanFile):
     def _build_triplet(self):
         arch = str(self.settings.arch)
         arch_map = {
+            "x86": "i686",
+            "x86_64": "x86_64",
+            "armv7": "arm",
             "armv8": "aarch64",
             "armv8.3": "aarch64",
-            "x86_64": "x86_64",
+            "riscv64": "riscv64",
         }
         return f"{arch_map.get(arch, arch)}-unknown-linux-gnu"
 
