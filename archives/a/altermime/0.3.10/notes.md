@@ -95,5 +95,5 @@ ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1), stripp
 4. **G0 验证失败**：SDK 环境 lld 缺少 libxml2，非 alterMIME 问题
 
 ---
-**编译结束**: 2026-06-18 10:08
-**最终状态**: published
+**编译结束**: 2026-07-15 15:19
+**最终状态**: built
