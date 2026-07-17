@@ -51,7 +51,9 @@ class NcursesConan(ConanFile):
         tc.generate()
 
     def build(self):
-        config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
+        config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash")
+        if not config_shell:
+            raise RuntimeError("bash is required to build ncurses on OHOS")
         tmpdir = os.path.join(self.build_folder, "_tmp")
         os.makedirs(tmpdir, exist_ok=True)
         os.chmod(tmpdir, 0o700)
