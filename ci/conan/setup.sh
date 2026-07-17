@@ -32,25 +32,10 @@ if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
     # Use python3 -m pip to bypass potentially broken pip3 shebang
     # (HNP pip3/conan binaries may have shebangs pointing to non-existent
     #  build-machine paths with ^M line endings)
-    if ! python3 -m pip install --user --force-reinstall conan; then
-        echo "[warn] Default Conan install failed; retrying with public dependency indexes..."
-        # Some CI workers are configured with a private PyPI mirror that has
-        # the OHOS-adapted conan wheel but misses transitive dependencies
-        # such as requests. Keep the same conan package request, but allow pip
-        # to resolve dependencies from public mirrors when the primary index is
-        # incomplete.
-        python3 -m pip install --user --force-reinstall \
-            --extra-index-url https://pypi.org/simple \
-            --extra-index-url https://pypi.tuna.tsinghua.edu.cn/simple \
-            conan || {
-            echo "[error] Failed to install conan"
-            echo "[diagnose] pip config:"
-            python3 -m pip config list 2>/dev/null || true
-            echo "[diagnose] installed conan-related packages:"
-            python3 -m pip show conan requests urllib3 PyYAML 2>/dev/null || true
-            exit 1
-        }
-    fi
+    python3 -m pip install --user --force-reinstall conan || {
+        echo "[error] Failed to install conan"
+        exit 1
+    }
     # Ensure user-installed binaries are found before any broken HNP version
     export PATH="$HOME/.local/bin:$PATH"
 fi
