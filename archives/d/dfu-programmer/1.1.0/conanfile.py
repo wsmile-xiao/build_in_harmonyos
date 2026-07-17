@@ -156,6 +156,11 @@ class DfuProgrammerConan(ConanFile):
                 ("| android* | linux-dietlibc", "| android* | ohos* | linux-dietlibc"),
             ])
 
+    def _prepare_libusb_include(self):
+        self._replace_in_existing("src/dfu-device.h", [
+            ("<libusb-1.0/libusb.h>", "<libusb.h>"),
+        ])
+
     def _stage_bash_completion_helper(self):
         helper = "update-bash-completion.sh"
         src = os.path.join(self.source_folder, helper)
@@ -182,6 +187,7 @@ class DfuProgrammerConan(ConanFile):
         if not os.path.exists(configure) and os.path.exists(bootstrap):
             self.run(f"sh {shlex.quote(bootstrap)}", env="conanbuild", cwd=self.source_folder)
         self._prepare_autotools_helpers()
+        self._prepare_libusb_include()
 
         autotools = Autotools(self)
         autotools.configure()

@@ -15,6 +15,7 @@
 2. 无configure → bootstrap.sh
 3. libusb → 使用 OHOS 预装/预编译的真实 libusb-1.0 头文件与库，避免以伪实现库伪造 USB 操作
 4. CI #6144 config.sub 不识别 linux-ohos → 使用 linux-gnu canonical triplet 并刷新/修补 config helpers
+5. 上游包含 `<libusb-1.0/libusb.h>`，CI 预置包暴露为 `libusb.h` → 构建前规范化 include 路径
 
 ## 质量门禁
 G1-G4 PASS
