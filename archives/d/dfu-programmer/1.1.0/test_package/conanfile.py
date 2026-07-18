@@ -25,6 +25,8 @@ class DfuProgrammerTestConan(ConanFile):
             self.output.info("Cross-building; file layout check completed")
             return
 
-        bash = shutil.which("bash") or os.environ.get("CONFIG_SHELL") or "/data/service/hnp/bin/bash"
+        bash = shutil.which("bash") or os.environ.get("CONFIG_SHELL")
+        if not bash:
+            raise Exception("bash not found in PATH and CONFIG_SHELL is not set; cannot run test script")
         script = os.path.join(self.source_folder, "check_dfu_programmer.sh")
         self.run(f"{shlex.quote(bash)} {shlex.quote(script)} {shlex.quote(dfu)}", env="conanrun")

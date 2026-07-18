@@ -163,9 +163,7 @@ class DfuProgrammerConan(ConanFile):
             staged_src = dst + ".upstream"
             shutil.copy2(src, staged_src)
             os.chmod(staged_src, 0o755)
-            bash = "/data/service/hnp/bin/bash"
-            if not os.path.exists(bash):
-                bash = shutil.which("bash") or "sh"
+            bash = shutil.which("bash") or os.environ.get("CONFIG_SHELL") or "sh"
             with open(dst, "w", encoding="utf-8") as handle:
                 handle.write("#!/bin/sh\n")
                 handle.write(f"exec {shlex.quote(bash)} {shlex.quote(staged_src)} \"$@\"\n")
