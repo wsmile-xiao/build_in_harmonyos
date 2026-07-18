@@ -28,4 +28,6 @@ G1-G4 PASS
 
 ## USB 适配说明
 
-dfu-programmer 的核心功能依赖 libusb 设备枚举、接口 claim、control transfer 等真实 USB 操作。本配方从官方 libusb 1.0.27 源码构建并静态链接 `libusb-1.0.a`，不再依赖 worker 预装库，也不打包返回固定错误码的兼容伪实现。实际硬件访问仍受 OpenHarmony USB 权限和运行域限制；如果普通应用沙箱无法访问 USB 设备，应在具备 USB 权限的运行环境中验证。
+dfu-programmer 的核心功能依赖 libusb 设备枚举、接口 claim、control transfer 等真实 USB 操作。本配方从官方 libusb 1.0.27 源码构建并静态链接 `libusb-1.0.a`，不再依赖 worker 预装库，也不打包返回固定错误码的兼容伪实现。
+
+需人工确认适配完整性：CI 环境没有真实 USB DFU 设备和设备访问权限，`test_package` 只能验证二进制可启动、链接到本配方构建的 libusb 并输出帮助信息，不能伪造 USB 枚举或固件读写结果。合入前应在具备 USB 权限的 OpenHarmony 运行环境中连接目标芯片，执行涉及真实 libusb 调用的设备枚举、dump/erase/flash 等 DFU 操作，确认权限、枚举和 control transfer 均正常。
