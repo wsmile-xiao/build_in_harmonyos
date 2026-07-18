@@ -28,6 +28,13 @@ the system prefix pkg-config directories. CI build #8078 proved
 not declare that dependency. The build uses system libcurl for linking and only
 vendors the official curl public headers needed for compilation.
 
+CI build #8121 then showed the same CI image exposes `libcrypto` for linking
+but does not expose OpenSSL development headers. Upstream only includes
+`openssl/evp.h` for `EVP_Digest()` and `EVP_sha1()` in the GitLab merge request
+code path, so the recipe ships a minimal build-only EVP declaration shim under
+`res/headers/openssl/evp.h`. The compiled binary still links against the system
+`libcrypto`; the shim does not replace cryptographic implementation code.
+
 ## OHOS Notes
 
 - `CCACHE=env` is passed to configure. Upstream stores the `CCACHE` value in
