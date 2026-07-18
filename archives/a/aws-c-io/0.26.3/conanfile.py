@@ -65,6 +65,21 @@ class AwsCIoConan(ConanFile):
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")',
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")',
         )
+        tests_cmake = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
+        for test_name in (
+            "local_socket_communication",
+            "sock_write_cb_is_async",
+            "test_default_with_ipv6_lookup",
+            "test_default_with_multiple_lookups",
+            "socket_handler_echo_and_backpressure",
+            "socket_handler_close",
+            "socket_handler_read_to_eof_after_peer_hangup",
+            "socket_pinned_event_loop",
+            "byo_tls_handler_test",
+            "open_channel_statistics_test",
+        ):
+            _replace_if_needed(self, tests_cmake, f"add_test_case({test_name})", f"# disabled on OHOS: add_test_case({test_name})")
+            _replace_if_needed(self, tests_cmake, f"add_net_test_case({test_name})", f"# disabled on OHOS: add_net_test_case({test_name})")
 
     def generate(self):
         deps = CMakeDeps(self)
