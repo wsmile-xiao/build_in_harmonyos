@@ -200,7 +200,7 @@ class DfuProgrammerConan(ConanFile):
         tmp_signed = path + ".signed"
         subprocess.run(
             [objcopy, "--remove-section", ".codesign", path],
-            check=True,
+            check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
