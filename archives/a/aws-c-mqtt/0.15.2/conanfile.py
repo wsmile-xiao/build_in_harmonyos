@@ -64,7 +64,7 @@ class AwsCMqttConan(ConanFile):
         deps.generate()
         tc = CMakeToolchain(self)
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
-        tc.variables["BUILD_TESTING"] = "OFF"
+        tc.variables["BUILD_TESTING"] = "ON"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
         common_root = self.dependencies["aws-c-common"].package_folder
         tc.variables["CMAKE_MODULE_PATH"] = ";".join([
@@ -79,8 +79,7 @@ class AwsCMqttConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        # Upstream network-oriented tests are not executed during OHOS cross builds;
-        # consumer coverage is provided by test_package/test.c.
+        cmake.test()
 
     def package(self):
         cmake = CMake(self)
