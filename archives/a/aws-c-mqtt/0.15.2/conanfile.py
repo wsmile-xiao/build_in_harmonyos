@@ -79,7 +79,8 @@ class AwsCMqttConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        self.run("ctest -N", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
+        # Upstream network-oriented tests are not executed during OHOS cross builds;
+        # consumer coverage is provided by test_package/test.c.
 
     def package(self):
         cmake = CMake(self)

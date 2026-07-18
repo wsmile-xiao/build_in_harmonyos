@@ -11,7 +11,14 @@ int main(void) {
     aws_common_library_init(allocator);
     aws_cal_library_init(allocator);
     aws_io_library_init(allocator);
-    aws_io_fatal_assert_library_initialized();
+
+    if (!aws_io_error_code_is_retryable(AWS_IO_DNS_QUERY_AGAIN)) {
+        aws_io_library_clean_up();
+        aws_cal_library_clean_up();
+        aws_common_library_clean_up();
+        return 1;
+    }
+
     aws_io_library_clean_up();
     aws_cal_library_clean_up();
     aws_common_library_clean_up();
