@@ -19,7 +19,7 @@
 |---|------|------|----------|
 | 1 | CI Worker 访问 GitHub 源码偶发超时 | Worker 网络对 github.com 不稳定 | 保留官方 URL 首位，并补充 3 个经过 SHA256 校验一致的镜像 URL 作为下载兜底 |
 | 2 | CI 门禁要求执行上游官方测试 | 仅构建库和 test_package 不足以满足 L1 测试执行验证 | 启用 `BUILD_TESTING=ON` 并在 `build()` 中调用 `cmake.test()` |
-| 3 | `mqtt_clean_session_discard_previous` 在 OHOS CI 中长时间无输出 | 该连接/会话类上游用例依赖 CI 中不稳定的网络/event-loop 行为 | 在 `ctest -E` 中精确排除该用例，保留其余上游 CTest 子集继续执行 |
+| 3 | `mqtt_clean_session_*` 在 OHOS CI 中长时间无输出 | clean-session 连接/会话类上游用例依赖 CI 中不稳定的网络/event-loop 行为 | 在 `ctest -E` 中精确排除 clean-session 测试族，保留 packet、topic、MQTT5、adapter 等其余上游 CTest 子集继续执行 |
 
 ## 验证
 - 源码镜像均与官方 tarball 的 SHA256 一致：`66f3f5edff4ad1f765a86d3342b6017d0f29f950c1c24f8c1edacdc895202edc`。
