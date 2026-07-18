@@ -31,6 +31,10 @@ build path explicit and reproducible inside the CI image.
 - `CCACHE=env` is passed to configure. Upstream stores the `CCACHE` value in
   Makefile command lines; using `env` is a no-op prefix and avoids a hard
   dependency on the `ccache` binary.
+- The recipe patches upstream configure's `find_program()` helper before
+  running it. OHOS shell command lookup can return values such as
+  `realpath=realpath`, which made the original `[ -x $(command -v ...)]` probe
+  fail before configure reached the compiler checks.
 - `CPPFLAGS`, `LDFLAGS`, and the package run environment include
   `$DEFAULT_PREFIX/include` and `$DEFAULT_PREFIX/lib` so the system libcurl and
   libcrypto headers/libraries are visible during build and smoke tests.

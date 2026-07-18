@@ -5,7 +5,7 @@ import shlex
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import copy, get
+from conan.tools.files import copy, get, replace_in_file
 from conan.tools.layout import basic_layout
 
 
@@ -99,6 +99,45 @@ class GcliConan(ConanFile):
         }
         return " ".join(f"{key}={shlex.quote(value)}" for key, value in assignments.items())
 
+    def _patch_configure(self, configure):
+        replace_in_file(
+            self,
+            configure,
+            """\tfor x in $*; do
+\t\tif command -v $x >/dev/null 2>&1 && [ -x $(command -v $x) ]; then
+\t\t\tbinary="$(command -v $x)"
+\t\t\tprintf " $binary\\n" >&2
+\t\t\techo "${binary}"
+\t\t\texit 0
+\t\tfi
+\tdone
+""",
+            """\tfor x in $*; do
+\t\tbinary="$(command -v "$x" 2>/dev/null || true)"
+\t\tcase "$binary" in
+\t\t\t*=*) binary="${binary#*=}" ;;
+\t\tesac
+\t\tif [ -n "$binary" ]; then
+\t\t\tprintf " $binary\\n" >&2
+\t\t\techo "${binary}"
+\t\t\texit 0
+\t\tfi
+\tdone
+""",
+            strict=True,
+        )
+        replace_in_file(
+            self,
+            configure,
+            """REALPATH=${REALPATH:-$(find_program realpath realpath grealpath)}
+[ $? -eq 0 ] || die "error: need realpath" # exit code of find_program()
+""",
+            """REALPATH=${REALPATH:-$(find_program realpath realpath grealpath)}
+[ -n "${REALPATH}" ] || die "error: need realpath"
+""",
+            strict=True,
+        )
+
     def build(self):
         args = [
             "--prefix=/",
@@ -109,15 +148,13 @@ class GcliConan(ConanFile):
             "--release",
         ]
         configure = os.path.join(self.source_folder, "configure")
+        self._patch_configure(configure)
         self.run(f"{self._env_prefix()} {shlex.quote(configure)} {' '.join(args)}")
         self.run("make -j1")
 
     def package(self):
         self.run(f"make install DESTDIR={shlex.quote(self.package_folder)}")
         copy(self, "LICENSE", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
-
-    def package_id(self):
-        self.info.clear()
 
     def package_info(self):
         sysroot = self._default_prefix()
