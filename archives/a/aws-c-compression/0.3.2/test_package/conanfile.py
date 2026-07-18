@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Conan test_package for aws-c-compression 0.3.2."""
+
 import os
 
 from conan import ConanFile

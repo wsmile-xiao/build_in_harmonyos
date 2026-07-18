@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Conan recipe for aws-c-http 0.10.14 built with CMake."""
+
 import os
 import shutil
 import subprocess
