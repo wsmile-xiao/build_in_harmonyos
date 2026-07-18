@@ -263,8 +263,6 @@ class DfuProgrammerConan(ConanFile):
         subprocess.run(
             [sign_tool, "sign", "-inFile", path, "-outFile", tmp_signed, "-selfSign", "1"],
             check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
         )
         os.replace(tmp_signed, path)
         os.chmod(path, 0o755)
