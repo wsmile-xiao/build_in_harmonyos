@@ -135,7 +135,7 @@ class UtftexConan(ConanFile):
         if str(self.settings.os) != "OHOS" or not (sign_tool and objcopy):
             return
         tmp_signed = path + ".signed"
-        self.run(f"{shlex.quote(objcopy)} --remove-section .codesign {shlex.quote(path)}", quiet=True)
+        self.run(f"{shlex.quote(objcopy)} --remove-section .codesign {shlex.quote(path)} 2>/dev/null || true", quiet=True)
         self.run(
             f"{shlex.quote(sign_tool)} sign -inFile {shlex.quote(path)} "
             f"-outFile {shlex.quote(tmp_signed)} -selfSign 1",
