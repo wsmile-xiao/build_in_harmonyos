@@ -196,6 +196,7 @@ class GcliConan(ConanFile):
     def _build_private_curl(self):
         curl_src = os.path.join(self.source_folder, "_curl")
         self._patch_curl_config_sub(curl_src)
+        self._patch_curl_configure(curl_src)
         openssl = self._dep_folder("openssl")
         zlib = self._dep_folder("zlib")
         args = [
@@ -260,6 +261,12 @@ class GcliConan(ConanFile):
                 "exec \"$(dirname \"$0\")/config.sub.orig\" \"$@\"\n"
             )
         os.chmod(config_sub, os.stat(config_sub).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
+    def _patch_curl_configure(self, curl_src):
+        configure = os.path.join(curl_src, "configure")
+        if not os.path.isfile(configure):
+            raise ConanInvalidConfiguration("curl configure is missing")
+        replace_in_file(self, configure, "umask 077", "umask 022", strict=False)
 
     def _patch_configure(self, configure):
         replace_in_file(

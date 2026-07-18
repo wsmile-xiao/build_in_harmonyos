@@ -31,7 +31,10 @@ other workers have no linkable `libcurl`, `libssl`, or `libcrypto` in
 that worker variance. CI build #8211 then showed curl 8.15.0's bundled
 `config.sub` rejects `aarch64-unknown-linux-ohos`; before configuring curl, the
 recipe wraps that helper to accept `*-linux-ohos` and delegate all other inputs
-to the original upstream script.
+to the original upstream script. CI build #8287 then reached curl
+`config.status` and failed because configure's `umask 077` made temporary awk
+helper files unreadable on HMDFS. The recipe changes that private curl
+configure umask to `022` before running it.
 
 ## OHOS Notes
 
