@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, load, replace_in_file
 
@@ -14,8 +15,7 @@ from conan.tools.files import apply_conandata_patches, export_conandata_patches,
 def _replace_if_needed(conanfile, path, old, new):
     content = load(conanfile, path)
     if old not in content:
-        conanfile.output.warning(f"expected text not found in {path}: {old[:80]}")
-        return
+        raise ConanInvalidConfiguration(f"Expected text not found while patching {path}: {old[:80]}")
     replace_in_file(conanfile, path, old, new)
 
 

@@ -5,6 +5,7 @@
 int main(void) {
     struct aws_allocator *allocator = aws_default_allocator();
     if (allocator == NULL) {
+        fprintf(stderr, "aws_default_allocator() returned NULL\n");
         return 1;
     }
     /* aws_common_library_init() returns void in aws-c-common 0.x. */
