@@ -101,6 +101,7 @@ class AwsCIoConan(ConanFile):
                 "socket_pinned_event_loop",
                 "byo_tls_handler_test",
                 "open_channel_statistics_test",
+                "channel_connect_some_hosts_timeout",
             ):
                 _replace_if_needed(self, tests_cmake, f"add_test_case({test_name})", f"# disabled on OHOS: add_test_case({test_name})")
                 _replace_if_needed(self, tests_cmake, f"add_net_test_case({test_name})", f"# disabled on OHOS: add_net_test_case({test_name})")
