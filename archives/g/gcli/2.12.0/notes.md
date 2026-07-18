@@ -7,9 +7,13 @@ tarball hosted at `herrhotzenplotz.de`. gcli uses a handwritten `configure`
 script and generated `Makefile.in`; it is not GNU autotools, so the recipe runs
 the configure script directly instead of using Conan's Autotools helper.
 
-The package is built as a CLI application. The recipe keeps the required
-networking dependencies, `curl/8.19.0` and `openssl/1.1.1w`, and disables
-optional interactive or presentation features:
+The package is built as a CLI application. The upstream build requires
+pkg-config modules named `libcurl` and `libcrypto`. There is no published
+Conan recipe for the Homebrew curl task in the contest repository, so
+the recipe uses the HarmonyOS PC libraries already installed under
+`DEFAULT_PREFIX` and generates sanitized `libcurl.pc` and `libcrypto.pc` files
+for upstream configure. Optional interactive or presentation features remain
+disabled:
 
 - `--disable-libedit`
 - `--disable-libreadline`
@@ -17,17 +21,19 @@ optional interactive or presentation features:
 - `--disable-librt`
 - `--release`
 
-gcli's configure script checks for pkg-config modules named `libcurl` and
-`libcrypto`. Conan packages provide the dependency folders, and the recipe
-adds those pkg-config directories to `PKG_CONFIG_PATH`. It also generates a
-small `libcrypto.pc` shim for the Conan OpenSSL package so configure does not
-depend on a system `/usr/local` OpenSSL installation.
+The generated pkg-config files are prepended to `PKG_CONFIG_PATH`, followed by
+`$DEFAULT_PREFIX/lib/pkgconfig` and `$DEFAULT_PREFIX/share/pkgconfig`. This
+avoids depending on an unpublished `curl` Conan package while still keeping the
+build path explicit and reproducible inside the CI image.
 
 ## OHOS Notes
 
 - `CCACHE=env` is passed to configure. Upstream stores the `CCACHE` value in
   Makefile command lines; using `env` is a no-op prefix and avoids a hard
   dependency on the `ccache` binary.
+- `CPPFLAGS`, `LDFLAGS`, and the package run environment include
+  `$DEFAULT_PREFIX/include` and `$DEFAULT_PREFIX/lib` so the system libcurl and
+  libcrypto headers/libraries are visible during build and smoke tests.
 - The install prefix is `/`, so `make install DESTDIR=<package_folder>` places
   `gcli` under `bin/gcli` and manpages under `share/man`.
 - Optional readline/libedit/lowdown support is intentionally disabled because

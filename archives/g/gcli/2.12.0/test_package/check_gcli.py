@@ -13,13 +13,19 @@ gcli = sys.argv[1]
 assert os.path.isfile(gcli), gcli
 assert os.access(gcli, os.X_OK), gcli
 
-version = subprocess.run([gcli, "version"], check=True, text=True, capture_output=True, timeout=15)
+default_prefix = os.environ.get("DEFAULT_PREFIX", "/storage/Users/currentUser/usr/local")
+env = dict(os.environ)
+env["LD_LIBRARY_PATH"] = os.pathsep.join(
+    path for path in [os.path.join(default_prefix, "lib"), env.get("LD_LIBRARY_PATH", "")] if path
+)
+
+version = subprocess.run([gcli, "version"], check=True, text=True, capture_output=True, timeout=15, env=env)
 version_output = version.stdout + version.stderr
 assert "gcli 2.12.0" in version_output, version_output
 assert "Using libcurl/" in version_output, version_output
 assert "Using vendored pdjson library" in version_output, version_output
 
-usage = subprocess.run([gcli], check=False, text=True, capture_output=True, timeout=15)
+usage = subprocess.run([gcli], check=False, text=True, capture_output=True, timeout=15, env=env)
 usage_output = usage.stdout + usage.stderr
 assert usage.returncode != 0, usage.returncode
 assert "usage: gcli" in usage_output, usage_output
