@@ -80,6 +80,13 @@ class AwsCIoConan(ConanFile):
         ):
             _replace_if_needed(self, tests_cmake, f"add_test_case({test_name})", f"# disabled on OHOS: add_test_case({test_name})")
             _replace_if_needed(self, tests_cmake, f"add_net_test_case({test_name})", f"# disabled on OHOS: add_net_test_case({test_name})")
+        tls_handler = os.path.join(self.source_folder, "source", "tls_channel_handler.c")
+        _replace_if_needed(
+            self,
+            tls_handler,
+            "void aws_tls_clean_up_static_state(void) {}\n\n#endif /* BYO_CRYPTO */",
+            "void aws_tls_clean_up_static_state(void) {}\n\nstruct aws_byte_buf aws_tls_handler_protocol(struct aws_channel_handler *handler) {\n    (void)handler;\n    return aws_byte_buf_from_array(NULL, 0);\n}\n\n#endif /* BYO_CRYPTO */",
+        )
 
     def generate(self):
         deps = CMakeDeps(self)

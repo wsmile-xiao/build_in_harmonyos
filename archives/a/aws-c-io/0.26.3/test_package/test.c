@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <aws/common/common.h>
 #include <aws/common/allocator.h>
+#include <aws/cal/cal.h>
 #include <aws/io/io.h>
 
 int main(void) {
