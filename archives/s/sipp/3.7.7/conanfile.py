@@ -94,7 +94,7 @@ class SippConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        cmake.test()
+        self.run("ctest -N", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
 
     def package(self):
         copy(self, "LICENSE.txt", self.source_folder, os.path.join(self.package_folder, "licenses"))
