@@ -98,7 +98,7 @@ class DfuProgrammerConan(ConanFile):
         path = os.path.join(root or self.source_folder, relpath)
         if not os.path.isfile(path):
             return
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+        with open(path, "r", encoding="utf-8") as handle:
             content = handle.read()
         updated = content
         for old, new in replacements:
