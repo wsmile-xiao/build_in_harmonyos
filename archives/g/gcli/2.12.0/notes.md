@@ -35,6 +35,10 @@ build path explicit and reproducible inside the CI image.
   running it. OHOS shell command lookup can return values such as
   `realpath=realpath`, which made the original `[ -x $(command -v ...)]` probe
   fail before configure reached the compiler checks.
+- The upstream tarball ships `parser.y` and `lexer.l`, but not generated
+  `lex.yy.c`. CI workers provide `yacc` but may not provide `lex`, so the
+  recipe patches `Makefile.in` to copy a bundled hand-written `pgen` lexer
+  source instead of invoking `lex`.
 - `CPPFLAGS`, `LDFLAGS`, and the package run environment include
   `$DEFAULT_PREFIX/include` and `$DEFAULT_PREFIX/lib` so the system libcurl and
   libcrypto headers/libraries are visible during build and smoke tests.

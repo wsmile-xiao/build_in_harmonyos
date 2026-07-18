@@ -2,6 +2,7 @@
 """Conan recipe for the Homebrew gcli 2.12.0 task."""
 import os
 import shlex
+import shutil
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
@@ -22,6 +23,14 @@ class GcliConan(ConanFile):
 
     settings = "os", "compiler", "build_type", "arch"
 
+    def export_sources(self):
+        res_src = os.path.join(self.recipe_folder, "res")
+        if os.path.isdir(res_src):
+            res_dst = os.path.join(self.export_folder, "res")
+            if os.path.exists(res_dst):
+                shutil.rmtree(res_dst)
+            shutil.copytree(res_src, res_dst)
+
     def validate(self):
         if self.settings.os not in ("Linux", "OHOS"):
             raise ConanInvalidConfiguration("gcli supports Linux/OHOS builds only")
@@ -31,6 +40,13 @@ class GcliConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        export_dir = os.path.join(os.path.dirname(self.source_folder), "e")
+        res_src = os.path.join(export_dir, "res")
+        if os.path.isdir(res_src):
+            res_dst = os.path.join(self.source_folder, "res")
+            if os.path.exists(res_dst):
+                shutil.rmtree(res_dst)
+            shutil.copytree(res_src, res_dst)
 
     def generate(self):
         self._write_libcurl_pc()
@@ -138,6 +154,27 @@ class GcliConan(ConanFile):
             strict=True,
         )
 
+    def _patch_makefile_in(self):
+        makefile_in = os.path.join(self.source_folder, "Makefile.in")
+        replace_in_file(
+            self,
+            makefile_in,
+            """lex.yy.c: y.tab.h @SRCDIR@/src/pgen/lexer.l
+\t$(LEX) @SRCDIR@/src/pgen/lexer.l
+""",
+            """lex.yy.c: @SRCDIR@/res/pgen_lexer.c
+\tcp @SRCDIR@/res/pgen_lexer.c lex.yy.c
+""",
+            strict=True,
+        )
+        replace_in_file(
+            self,
+            makefile_in,
+            "lex.yy.pgen$(OBJEXT_FOR_BUILD): lex.yy.c\n",
+            "lex.yy.pgen$(OBJEXT_FOR_BUILD): y.tab.h lex.yy.c\n",
+            strict=True,
+        )
+
     def build(self):
         args = [
             "--prefix=/",
@@ -149,6 +186,7 @@ class GcliConan(ConanFile):
         ]
         configure = os.path.join(self.source_folder, "configure")
         self._patch_configure(configure)
+        self._patch_makefile_in()
         self.run(f"{self._env_prefix()} {shlex.quote(configure)} {' '.join(args)}")
         self.run("make -j1")
 
