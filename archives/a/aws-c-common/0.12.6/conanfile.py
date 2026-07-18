@@ -63,15 +63,6 @@ endif()''',
             'if (UNIX AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
             'if ((UNIX OR ${CMAKE_SYSTEM_NAME} STREQUAL "HarmonyOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "OHOS") AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
         )
-        tests_cmake = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
-        if str(self.settings.os) in ("OHOS", "HarmonyOS"):
-            for test_name in (
-                "test_file_path_read_from_offset_direct_io",
-                "test_file_path_read_from_offset_direct_io_chunking",
-                "test_cross_process_lock_works_in_proc",
-                "test_cross_process_lock_works_cross_proc",
-            ):
-                _replace_if_needed(self, tests_cmake, f"add_test_case({test_name})", f"# disabled on OHOS: add_test_case({test_name})")
 
     def generate(self):
         deps = CMakeDeps(self)
@@ -84,6 +75,15 @@ endif()''',
 
     def build(self):
         apply_conandata_patches(self)
+        if str(self.settings.os) in ("OHOS", "HarmonyOS"):
+            tests_cmake = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
+            for test_name in (
+                "test_file_path_read_from_offset_direct_io",
+                "test_file_path_read_from_offset_direct_io_chunking",
+                "test_cross_process_lock_works_in_proc",
+                "test_cross_process_lock_works_cross_proc",
+            ):
+                _replace_if_needed(self, tests_cmake, f"add_test_case({test_name})", f"# disabled on OHOS: add_test_case({test_name})")
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
