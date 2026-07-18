@@ -254,12 +254,24 @@ class DfuProgrammerConan(ConanFile):
         if str(self.settings.os) != "OHOS" or not (os.path.exists(sign_tool) and os.path.exists(objcopy)):
             return
         tmp_signed = path + ".signed"
-        subprocess.run(
+        remove_result = subprocess.run(
             [objcopy, "--remove-section", ".codesign", path],
             check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
         )
+        remove_output = "\n".join(
+            part for part in (remove_result.stdout, remove_result.stderr) if part
+        ).strip()
+        missing_codesign = (
+            ".codesign" in remove_output
+            and "not found" in remove_output.lower()
+        )
+        if remove_result.returncode != 0 and not missing_codesign:
+            detail = remove_output or f"exit code {remove_result.returncode}"
+            raise RuntimeError(f"failed to remove stale .codesign section from {path}: {detail}")
+        if remove_result.returncode != 0:
+            self.output.warning(f"Skipping stale .codesign removal: {remove_output}")
         subprocess.run(
             [sign_tool, "sign", "-inFile", path, "-outFile", tmp_signed, "-selfSign", "1"],
             check=True,
