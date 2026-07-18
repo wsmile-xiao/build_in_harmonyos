@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""Conan test package for aws-c-mqtt 0.15.2."""
 import os
 
 from conan import ConanFile

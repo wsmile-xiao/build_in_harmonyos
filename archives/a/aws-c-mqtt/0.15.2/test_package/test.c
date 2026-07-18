@@ -8,7 +8,9 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    aws_common_library_init(allocator);
+    if (aws_common_library_init(allocator) != 0) {
+        return 1;
+    }
     aws_mqtt_library_init(allocator);
 
     struct aws_byte_cursor topic = aws_byte_cursor_from_c_str("openharmony/pc/test");

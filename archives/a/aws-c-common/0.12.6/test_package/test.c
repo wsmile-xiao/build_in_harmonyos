@@ -9,7 +9,9 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    aws_common_library_init(allocator);
+    if (aws_common_library_init(allocator) != 0) {
+        return 1;
+    }
     if (strcmp(aws_error_name(AWS_ERROR_INVALID_ARGUMENT), "AWS_ERROR_INVALID_ARGUMENT") != 0) {
         aws_common_library_clean_up();
         return 1;

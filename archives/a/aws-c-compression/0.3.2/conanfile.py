@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""Conan recipe for aws-c-compression 0.3.2 using CMake."""
 import os
 import shutil
 import subprocess

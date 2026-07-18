@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""Conan test package for aws-c-http 0.10.14."""
 import os
 
 from conan import ConanFile

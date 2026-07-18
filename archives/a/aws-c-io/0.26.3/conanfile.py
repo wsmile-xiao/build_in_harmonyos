@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""Conan recipe for aws-c-io 0.26.3 using CMake."""
 import os
 import shutil
 import subprocess

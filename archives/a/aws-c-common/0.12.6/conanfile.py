@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""Conan recipe for aws-c-common 0.12.6 using CMake."""
 import os
 
 from conan import ConanFile
