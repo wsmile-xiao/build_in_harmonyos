@@ -8,13 +8,12 @@ script and generated `Makefile.in`; it is not GNU autotools, so the recipe runs
 the configure script directly instead of using Conan's Autotools helper.
 
 The package is built as a CLI application. The upstream build requires
-pkg-config modules named `libcurl` and `libcrypto`. The CI image has libcurl
-libraries under `DEFAULT_PREFIX`, but CI build #8038 showed the corresponding
-development headers are not always installed. The recipe therefore vendors curl
-8.15.0 public headers as build resources, generates a sanitized `libcurl.pc`
-that points at those headers plus the system libcurl library, and keeps
-libcrypto on the HarmonyOS PC system prefix. Optional interactive or
-presentation features remain disabled:
+pkg-config modules named `libcurl` and `libcrypto`. The recipe builds a private
+static libcurl 8.15.0 from the official curl release tarball and points
+`libcurl.pc` at that private install prefix. OpenSSL and zlib come from
+published Conan recipes (`openssl/3.5.6` and `zlib/1.3.1`), so the build no
+longer depends on worker-local copies of `libcurl`, `libssl`, `libcrypto`, or
+`libz`. Optional interactive or presentation features remain disabled:
 
 - `--disable-libedit`
 - `--disable-libreadline`
@@ -25,15 +24,11 @@ presentation features remain disabled:
 The generated pkg-config files are prepended to `PKG_CONFIG_PATH`, followed by
 the system prefix pkg-config directories. CI build #8078 proved
 `curl/8.19.0` is not resolvable from the ohpcd Conan remote, so the recipe must
-not declare that dependency. The build uses system libcurl for linking and only
-vendors the official curl public headers needed for compilation.
-
-CI build #8121 then showed the same CI image exposes `libcrypto` for linking
-but does not expose OpenSSL development headers. Upstream only includes
-`openssl/evp.h` for `EVP_Digest()` and `EVP_sha1()` in the GitLab merge request
-code path, so the recipe ships a minimal build-only EVP declaration shim under
-`res/headers/openssl/evp.h`. The compiled binary still links against the system
-`libcrypto`; the shim does not replace cryptographic implementation code.
+not declare that dependency. CI build #8121 then showed some workers have
+linkable OpenSSL libraries without OpenSSL headers, and CI build #8138 showed
+other workers have no linkable `libcurl`, `libssl`, or `libcrypto` in
+`DEFAULT_PREFIX/lib`. Building private curl against Conan openssl/zlib removes
+that worker variance.
 
 ## OHOS Notes
 
@@ -48,11 +43,11 @@ code path, so the recipe ships a minimal build-only EVP declaration shim under
   `lex.yy.c`. CI workers provide `yacc` but may not provide `lex`, so the
   recipe patches `Makefile.in` to copy a bundled hand-written `pgen` lexer
   source instead of invoking `lex`.
-- `CPPFLAGS` includes the vendored resource header directory plus
-  `$DEFAULT_PREFIX/include`; `LDFLAGS` and the package run environment include
-  `$DEFAULT_PREFIX/lib`, so libcurl/libcrypto link and smoke-test paths stay on
-  the CI image's installed libraries without adding an unpublished Conan
-  dependency.
+- `CPPFLAGS` includes the private curl, Conan OpenSSL, Conan zlib, resource,
+  and `$DEFAULT_PREFIX/include` directories. `LDFLAGS` includes the matching
+  private/Conan library directories plus `$DEFAULT_PREFIX/lib`.
+- `package()` signs the installed `gcli` binary when the HarmonyOS
+  `binary-sign-tool` is available, so `test_package` can execute it on CI.
 - The install prefix is `/`, so `make install DESTDIR=<package_folder>` places
   `gcli` under `bin/gcli` and manpages under `share/man`.
 - Optional readline/libedit/lowdown support is intentionally disabled because

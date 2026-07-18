@@ -3,6 +3,7 @@
 import os
 import shlex
 import shutil
+import stat
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
@@ -31,6 +32,10 @@ class GcliConan(ConanFile):
                 shutil.rmtree(res_dst)
             shutil.copytree(res_src, res_dst)
 
+    def requirements(self):
+        self.requires("openssl/3.5.6")
+        self.requires("zlib/1.3.1")
+
     def validate(self):
         if self.settings.os not in ("Linux", "OHOS"):
             raise ConanInvalidConfiguration("gcli supports Linux/OHOS builds only")
@@ -40,6 +45,10 @@ class GcliConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        curl_src = os.path.join(self.source_folder, "_curl")
+        if os.path.exists(curl_src):
+            shutil.rmtree(curl_src)
+        get(self, **self.conan_data["curl_source"], destination=curl_src, strip_root=True)
         export_dir = os.path.join(os.path.dirname(self.source_folder), "e")
         res_src = os.path.join(export_dir, "res")
         if os.path.isdir(res_src):
@@ -58,8 +67,36 @@ class GcliConan(ConanFile):
     def _resource_headers(self):
         return os.path.join(self.source_folder, "res", "headers")
 
-    def _write_default_prefix_pc(self, filename, name, description, version, libs, cflags="-I${includedir}"):
-        prefix = self._default_prefix()
+    def _curl_prefix(self):
+        return os.path.join(self.build_folder, "curl-prefix")
+
+    def _dep_folder(self, name):
+        return self.dependencies[name].package_folder
+
+    def _machine(self):
+        arch = str(self.settings.arch)
+        machines = {
+            "armv8": "aarch64",
+            "armv8.3": "aarch64",
+            "armv8.4": "aarch64",
+            "x86_64": "x86_64",
+            "x86": "i686",
+            "armv7": "armv7a",
+        }
+        machine = machines.get(arch)
+        if machine is None:
+            raise ConanInvalidConfiguration(f"unsupported gcli architecture: {arch}")
+        return machine
+
+    def _build_triplet(self):
+        return f"{self._machine()}-unknown-linux-gnu"
+
+    def _host_triplet(self):
+        if self.settings.os == "OHOS":
+            return f"{self._machine()}-unknown-linux-ohos"
+        return f"{self._machine()}-unknown-linux-gnu"
+
+    def _write_pc(self, filename, prefix, name, description, version, libs, cflags="-I${includedir}"):
         os.makedirs(self.generators_folder, exist_ok=True)
         pc_path = os.path.join(self.generators_folder, filename)
         with open(pc_path, "w", encoding="utf-8") as pc:
@@ -70,27 +107,42 @@ class GcliConan(ConanFile):
                 f"Name: {name}\n"
                 f"Description: {description}\n"
                 f"Version: {version}\n"
-                f"Libs: -L${{libdir}} {libs}\n"
+                f"Libs: {libs}\n"
                 f"Cflags: {cflags}\n"
             )
 
     def _write_libcurl_pc(self):
-        self._write_default_prefix_pc(
+        openssl = self._dep_folder("openssl")
+        zlib = self._dep_folder("zlib")
+        self._write_pc(
             "libcurl.pc",
+            self._curl_prefix(),
             "libcurl",
-            "HarmonyOS PC libcurl from DEFAULT_PREFIX with bundled public headers",
+            "Private static libcurl built inside the gcli recipe",
             "8.15.0",
-            "-lcurl -lssl -lcrypto -lz",
-            f"-I{self._resource_headers()} -I${{includedir}}",
+            " ".join([
+                "-L${libdir}",
+                "-lcurl",
+                f"-L{openssl}/lib",
+                "-lssl",
+                "-lcrypto",
+                f"-L{zlib}/lib",
+                "-lz",
+                "-ldl",
+                "-pthread",
+            ]),
+            f"-I${{includedir}} -I{openssl}/include -I{zlib}/include",
         )
 
     def _write_libcrypto_pc(self):
-        self._write_default_prefix_pc(
+        openssl = self._dep_folder("openssl")
+        self._write_pc(
             "libcrypto.pc",
+            openssl,
             "libcrypto",
-            "HarmonyOS PC OpenSSL crypto library from DEFAULT_PREFIX",
+            "OpenSSL crypto library from Conan openssl/3.5.6",
             "3.5.6",
-            "-lcrypto",
+            "-L${libdir} -lcrypto -ldl -pthread",
         )
 
     def _pkg_config_path(self):
@@ -111,20 +163,85 @@ class GcliConan(ConanFile):
 
     def _env_prefix(self):
         sysroot = self._default_prefix()
+        curl_prefix = self._curl_prefix()
+        openssl = self._dep_folder("openssl")
+        zlib = self._dep_folder("zlib")
         resource_headers = self._resource_headers()
         assignments = {
             "PKG_CONFIG_PATH": self._pkg_config_path(),
             "CPPFLAGS": self._append_env(
                 "CPPFLAGS",
-                f"-I{resource_headers} -I{sysroot}/include",
+                " ".join([
+                    f"-I{curl_prefix}/include",
+                    f"-I{openssl}/include",
+                    f"-I{zlib}/include",
+                    f"-I{resource_headers}",
+                    f"-I{sysroot}/include",
+                ]),
             ),
             "LDFLAGS": self._append_env(
                 "LDFLAGS",
-                f"-L{sysroot}/lib -Wl,-rpath,{sysroot}/lib",
+                " ".join([
+                    f"-L{curl_prefix}/lib",
+                    f"-L{openssl}/lib",
+                    f"-L{zlib}/lib",
+                    f"-L{sysroot}/lib",
+                    f"-Wl,-rpath,{sysroot}/lib",
+                ]),
             ),
             "CCACHE": "env",
         }
         return " ".join(f"{key}={shlex.quote(value)}" for key, value in assignments.items())
+
+    def _build_private_curl(self):
+        curl_src = os.path.join(self.source_folder, "_curl")
+        openssl = self._dep_folder("openssl")
+        zlib = self._dep_folder("zlib")
+        args = [
+            f"--prefix={self._curl_prefix()}",
+            "--disable-shared",
+            "--enable-static",
+            f"--with-openssl={openssl}",
+            f"--with-zlib={zlib}",
+            "--without-libpsl",
+            "--without-brotli",
+            "--without-zstd",
+            "--without-nghttp2",
+            "--without-ngtcp2",
+            "--without-nghttp3",
+            "--disable-ldap",
+            "--disable-ldaps",
+            "--disable-rtsp",
+            "--disable-dict",
+            "--disable-telnet",
+            "--disable-tftp",
+            "--disable-pop3",
+            "--disable-imap",
+            "--disable-smb",
+            "--disable-smtp",
+            "--disable-gopher",
+            "--disable-mqtt",
+            "--disable-manual",
+            "--disable-docs",
+            "--disable-dependency-tracking",
+            f"--build={self._build_triplet()}",
+            f"--host={self._host_triplet()}",
+        ]
+        assignments = {
+            "CPPFLAGS": self._append_env(
+                "CPPFLAGS",
+                f"-I{openssl}/include -I{zlib}/include",
+            ),
+            "LDFLAGS": self._append_env(
+                "LDFLAGS",
+                f"-L{openssl}/lib -L{zlib}/lib",
+            ),
+            "LIBS": self._append_env("LIBS", "-ldl -pthread"),
+        }
+        env_prefix = " ".join(f"{key}={shlex.quote(value)}" for key, value in assignments.items())
+        self.run(f"{env_prefix} {shlex.quote(os.path.join(curl_src, 'configure'))} {' '.join(args)}", cwd=curl_src)
+        self.run("make -j1", cwd=curl_src)
+        self.run("make install", cwd=curl_src)
 
     def _patch_configure(self, configure):
         replace_in_file(
@@ -198,15 +315,34 @@ class GcliConan(ConanFile):
         configure = os.path.join(self.source_folder, "configure")
         self._patch_configure(configure)
         self._patch_makefile_in()
+        self._build_private_curl()
         self.run(f"{self._env_prefix()} {shlex.quote(configure)} {' '.join(args)}")
         self.run("make -j1")
 
+    def _sign_binary(self, path):
+        sign_tool = "/data/service/hnp/bin/binary-sign-tool"
+        objcopy = "/data/service/hnp/bin/llvm-objcopy"
+        if not (os.path.isfile(path) and os.path.isfile(sign_tool)):
+            return
+        if os.path.isfile(objcopy):
+            self.run(f"{objcopy} --remove-section .codesign {path}", quiet=True)
+        tmp_signed = path + ".signed"
+        self.run(f"{sign_tool} sign -inFile {path} -outFile {tmp_signed} -selfSign 1", quiet=True)
+        os.replace(tmp_signed, path)
+        os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
     def package(self):
         self.run(f"make install DESTDIR={shlex.quote(self.package_folder)}")
+        gcli = os.path.join(self.package_folder, "bin", "gcli")
+        if os.path.isfile(gcli):
+            os.chmod(gcli, os.stat(gcli).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+            self._sign_binary(gcli)
         copy(self, "LICENSE", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
 
     def package_info(self):
         sysroot = self._default_prefix()
+        self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(self._dep_folder("openssl"), "lib"))
+        self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(self._dep_folder("zlib"), "lib"))
         self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(sysroot, "lib"))
         self.cpp_info.bindirs = ["bin"]
         self.cpp_info.libdirs = []
