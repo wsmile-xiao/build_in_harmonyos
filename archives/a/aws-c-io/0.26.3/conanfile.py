@@ -127,6 +127,7 @@ endif()
                 config,
                 s2n_dependency_block,
                 '',
+                strict=False,
             )
 
     def package_info(self):
