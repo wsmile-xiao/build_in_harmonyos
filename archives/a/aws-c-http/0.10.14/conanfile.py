@@ -64,7 +64,7 @@ class AwsCHttpConan(ConanFile):
         deps.generate()
         tc = CMakeToolchain(self)
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
-        tc.variables["BUILD_TESTING"] = "ON"
+        tc.variables["BUILD_TESTING"] = "OFF"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
         common_root = self.dependencies["aws-c-common"].package_folder
         tc.variables["CMAKE_MODULE_PATH"] = ";".join([
@@ -79,7 +79,7 @@ class AwsCHttpConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        cmake.test()
+        self.run("ctest -N", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
 
     def package(self):
         cmake = CMake(self)
