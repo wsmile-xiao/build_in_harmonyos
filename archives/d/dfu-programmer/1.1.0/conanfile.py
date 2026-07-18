@@ -117,13 +117,9 @@ class DfuProgrammerConan(ConanFile):
             [(
                 "#include <sys/socket.h>\n#include <linux/netlink.h>",
                 "#include <sys/socket.h>\n\n"
-                "#ifdef __OHOS__\n"
                 "#define sockaddr_storage __linux_sockaddr_storage\n"
-                "#endif\n"
                 "#include <linux/netlink.h>\n"
-                "#ifdef __OHOS__\n"
                 "#undef sockaddr_storage\n"
-                "#endif",
             )],
             root=libusb_source,
         )
