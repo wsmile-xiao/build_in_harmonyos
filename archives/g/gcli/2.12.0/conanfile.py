@@ -23,6 +23,9 @@ class GcliConan(ConanFile):
 
     settings = "os", "compiler", "build_type", "arch"
 
+    def requirements(self):
+        self.requires("curl/8.19.0")
+
     def export_sources(self):
         res_src = os.path.join(self.recipe_folder, "res")
         if os.path.isdir(res_src):
@@ -55,6 +58,13 @@ class GcliConan(ConanFile):
     def _default_prefix(self):
         return os.environ.get("DEFAULT_PREFIX", "/storage/Users/currentUser/usr/local")
 
+    def _curl_prefix(self):
+        try:
+            return self.dependencies["curl"].package_folder
+        except KeyError:
+            pass
+        return self._default_prefix()
+
     def _write_default_prefix_pc(self, filename, name, description, version, libs):
         prefix = self._default_prefix()
         os.makedirs(self.generators_folder, exist_ok=True)
@@ -71,12 +81,28 @@ class GcliConan(ConanFile):
                 "Cflags: -I${includedir}\n"
             )
 
+    def _write_prefix_pc(self, filename, prefix, name, description, version, libs):
+        os.makedirs(self.generators_folder, exist_ok=True)
+        pc_path = os.path.join(self.generators_folder, filename)
+        with open(pc_path, "w", encoding="utf-8") as pc:
+            pc.write(
+                f"prefix={prefix}\n"
+                "libdir=${prefix}/lib\n"
+                "includedir=${prefix}/include\n\n"
+                f"Name: {name}\n"
+                f"Description: {description}\n"
+                f"Version: {version}\n"
+                f"Libs: -L${{libdir}} {libs}\n"
+                "Cflags: -I${includedir}\n"
+            )
+
     def _write_libcurl_pc(self):
-        self._write_default_prefix_pc(
+        self._write_prefix_pc(
             "libcurl.pc",
+            self._curl_prefix(),
             "libcurl",
-            "HarmonyOS PC libcurl from DEFAULT_PREFIX",
-            "8.15.0",
+            "HarmonyOS PC libcurl from Conan dependency",
+            "8.19.0",
             "-lcurl -lssl -lcrypto -lz",
         )
 
@@ -91,8 +117,10 @@ class GcliConan(ConanFile):
 
     def _pkg_config_path(self):
         sysroot = self._default_prefix()
+        curl_prefix = self._curl_prefix()
         paths = [
             self.generators_folder,
+            os.path.join(curl_prefix, "lib", "pkgconfig"),
             os.path.join(sysroot, "lib", "pkgconfig"),
             os.path.join(sysroot, "share", "pkgconfig"),
         ]
@@ -107,10 +135,17 @@ class GcliConan(ConanFile):
 
     def _env_prefix(self):
         sysroot = self._default_prefix()
+        curl_prefix = self._curl_prefix()
         assignments = {
             "PKG_CONFIG_PATH": self._pkg_config_path(),
-            "CPPFLAGS": self._append_env("CPPFLAGS", f"-I{sysroot}/include"),
-            "LDFLAGS": self._append_env("LDFLAGS", f"-L{sysroot}/lib -Wl,-rpath,{sysroot}/lib"),
+            "CPPFLAGS": self._append_env(
+                "CPPFLAGS",
+                f"-I{curl_prefix}/include -I{sysroot}/include",
+            ),
+            "LDFLAGS": self._append_env(
+                "LDFLAGS",
+                f"-L{curl_prefix}/lib -Wl,-rpath,{curl_prefix}/lib -L{sysroot}/lib -Wl,-rpath,{sysroot}/lib",
+            ),
             "CCACHE": "env",
         }
         return " ".join(f"{key}={shlex.quote(value)}" for key, value in assignments.items())
@@ -196,6 +231,8 @@ class GcliConan(ConanFile):
 
     def package_info(self):
         sysroot = self._default_prefix()
+        curl_prefix = self._curl_prefix()
+        self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(curl_prefix, "lib"))
         self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(sysroot, "lib"))
         self.cpp_info.bindirs = ["bin"]
         self.cpp_info.libdirs = []
