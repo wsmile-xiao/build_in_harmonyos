@@ -195,6 +195,7 @@ class GcliConan(ConanFile):
 
     def _build_private_curl(self):
         curl_src = os.path.join(self.source_folder, "_curl")
+        self._patch_curl_config_sub(curl_src)
         openssl = self._dep_folder("openssl")
         zlib = self._dep_folder("zlib")
         args = [
@@ -242,6 +243,23 @@ class GcliConan(ConanFile):
         self.run(f"{env_prefix} {shlex.quote(os.path.join(curl_src, 'configure'))} {' '.join(args)}", cwd=curl_src)
         self.run("make -j1", cwd=curl_src)
         self.run("make install", cwd=curl_src)
+
+    def _patch_curl_config_sub(self, curl_src):
+        config_sub = os.path.join(curl_src, "config.sub")
+        if not os.path.isfile(config_sub):
+            raise ConanInvalidConfiguration("curl config.sub is missing")
+        original = config_sub + ".orig"
+        if not os.path.exists(original):
+            shutil.copy2(config_sub, original)
+        with open(config_sub, "w", encoding="utf-8") as script:
+            script.write(
+                "#!/bin/sh\n"
+                "case \"$1\" in\n"
+                "    *-linux-ohos) echo \"$1\"; exit 0 ;;\n"
+                "esac\n"
+                "exec \"$(dirname \"$0\")/config.sub.orig\" \"$@\"\n"
+            )
+        os.chmod(config_sub, os.stat(config_sub).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     def _patch_configure(self, configure):
         replace_in_file(

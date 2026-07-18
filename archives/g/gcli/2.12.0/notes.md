@@ -28,7 +28,10 @@ not declare that dependency. CI build #8121 then showed some workers have
 linkable OpenSSL libraries without OpenSSL headers, and CI build #8138 showed
 other workers have no linkable `libcurl`, `libssl`, or `libcrypto` in
 `DEFAULT_PREFIX/lib`. Building private curl against Conan openssl/zlib removes
-that worker variance.
+that worker variance. CI build #8211 then showed curl 8.15.0's bundled
+`config.sub` rejects `aarch64-unknown-linux-ohos`; before configuring curl, the
+recipe wraps that helper to accept `*-linux-ohos` and delegate all other inputs
+to the original upstream script.
 
 ## OHOS Notes
 
