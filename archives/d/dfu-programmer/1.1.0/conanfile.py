@@ -31,25 +31,24 @@ class DfuProgrammerConan(ConanFile):
         get(self, **self.conan_data["sources"], strip_root=True)
         get(
             self,
-            **self.conan_data["libusb_header"],
-            destination=os.path.join(self.source_folder, "_libusb_header"),
+            **self.conan_data["libusb_source"],
+            destination=os.path.join(self.source_folder, "_libusb_source"),
             strip_root=True,
         )
 
     def generate(self):
         VirtualBuildEnv(self).generate()
         VirtualRunEnv(self).generate()
-        libusb_prefix = self._libusb_prefix()
-        libusb_header = os.path.join(self.source_folder, "_libusb_header", "libusb")
+        libusb_prefix = self._bundled_libusb_prefix()
+        libusb_archive = os.path.join(libusb_prefix, "lib", "libusb-1.0.a")
         include_flags = (
-            f"-I{libusb_header} "
             f"-I{libusb_prefix}/include/libusb-1.0 "
             f"-I{libusb_prefix}/include "
+            f"-I{self._libusb_source_folder()}/libusb "
             f"-I{self._sys_prefix}/include"
         )
         ld_flags = f"-L{libusb_prefix}/lib -L{self._sys_prefix}/lib"
-        static_libusb = os.path.join(libusb_prefix, "lib", "libusb-1.0.a")
-        lib_flags = "-l:libusb-1.0.a" if os.path.isfile(static_libusb) else "-lusb-1.0"
+        lib_flags = f"{libusb_archive} -lpthread"
         pkgconfig_dir = self._write_libusb_pc(libusb_prefix)
 
         tc = AutotoolsToolchain(self)
@@ -67,15 +66,11 @@ class DfuProgrammerConan(ConanFile):
         ])
         tc.generate()
 
-    def _libusb_prefix(self):
-        candidates = [
-            os.path.join(self._sys_prefix, "libusb-package"),
-            self._sys_prefix,
-        ]
-        for prefix in candidates:
-            if os.path.exists(os.path.join(prefix, "include")):
-                return prefix
-        return candidates[0]
+    def _libusb_source_folder(self):
+        return os.path.join(self.source_folder, "_libusb_source")
+
+    def _bundled_libusb_prefix(self):
+        return os.path.join(self.build_folder, "_libusb_prefix")
 
     def _write_libusb_pc(self, prefix):
         pkgconfig_dir = os.path.join(self.generators_folder, "pkgconfig")
@@ -92,19 +87,15 @@ class DfuProgrammerConan(ConanFile):
                     "Name: libusb-1.0",
                     "Description: USB access library",
                     "Version: 1.0.27",
-                    "Libs: -L${libdir} -lusb-1.0",
+                    "Libs: -L${libdir} -l:libusb-1.0.a -lpthread",
                     "Cflags: -I${includedir}",
                     "",
                 ])
             )
         return pkgconfig_dir
 
-    def _compiler_path(self):
-        compilers = self.conf.get("tools.build:compiler_executables", default={}) or {}
-        return compilers.get("c") or "cc"
-
-    def _replace_in_existing(self, relpath, replacements):
-        path = os.path.join(self.source_folder, relpath)
+    def _replace_in_existing(self, relpath, replacements, root=None):
+        path = os.path.join(root or self.source_folder, relpath)
         if not os.path.isfile(path):
             return
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
@@ -115,6 +106,74 @@ class DfuProgrammerConan(ConanFile):
         if updated != content:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(updated)
+
+    def _prepare_libusb_source(self):
+        libusb_source = self._libusb_source_folder()
+        for relpath in ("configure", "config.guess", "config.sub"):
+            self._replace_in_existing(relpath, [("umask 077", "umask 022")], root=libusb_source)
+
+        self._replace_in_existing(
+            "libusb/os/linux_netlink.c",
+            [(
+                "#include <sys/socket.h>\n#include <linux/netlink.h>",
+                "#include <sys/socket.h>\n\n"
+                "#ifdef __OHOS__\n"
+                "#define sockaddr_storage __linux_sockaddr_storage\n"
+                "#endif\n"
+                "#include <linux/netlink.h>\n"
+                "#ifdef __OHOS__\n"
+                "#undef sockaddr_storage\n"
+                "#endif",
+            )],
+            root=libusb_source,
+        )
+        self._replace_in_existing(
+            "libusb/os/linux_usbfs.c",
+            [(
+                "atoms = sscanf(uts.release, \"%d.%d.%d\", &ver->major, &ver->minor, &ver->sublevel);\n"
+                "\tif (atoms < 2) {\n"
+                "\t\tusbi_err(ctx, \"failed to parse uname release '%s'\", uts.release);\n"
+                "\t\treturn -1;\n"
+                "\t}",
+                "atoms = sscanf(uts.release, \"%d.%d.%d\", &ver->major, &ver->minor, &ver->sublevel);\n"
+                "\tif (atoms < 2) {\n"
+                "\t\tif (strstr(uts.release, \"HongMeng\") != NULL ||\n"
+                "\t\t    strstr(uts.release, \"OHOS\") != NULL) {\n"
+                "\t\t\tver->major = 5;\n"
+                "\t\t\tver->minor = 10;\n"
+                "\t\t\tver->sublevel = 0;\n"
+                "\t\t\tusbi_dbg(ctx, \"HongMeng/OHOS kernel detected (%s), assuming modern Linux kernel\", uts.release);\n"
+                "\t\t\treturn 0;\n"
+                "\t\t}\n"
+                "\t\tusbi_err(ctx, \"failed to parse uname release '%s'\", uts.release);\n"
+                "\t\treturn -1;\n"
+                "\t}",
+            )],
+            root=libusb_source,
+        )
+
+    def _build_libusb(self):
+        libusb_prefix = self._bundled_libusb_prefix()
+        libusb_archive = os.path.join(libusb_prefix, "lib", "libusb-1.0.a")
+        if os.path.isfile(libusb_archive):
+            return
+
+        self._prepare_libusb_source()
+        configure = os.path.join(self._libusb_source_folder(), "configure")
+        configure_args = [
+            shlex.quote(configure),
+            "--build=aarch64-unknown-linux-gnu",
+            "--host=aarch64-unknown-linux-gnu",
+            f"--prefix={shlex.quote(libusb_prefix)}",
+            "--disable-shared",
+            "--enable-static",
+            "--disable-udev",
+        ]
+        self.run(" ".join(configure_args), env="conanbuild", cwd=self._libusb_source_folder())
+        self.run("make -j1", env="conanbuild", cwd=self._libusb_source_folder())
+        self.run("make install", env="conanbuild", cwd=self._libusb_source_folder())
+        if not os.path.isfile(libusb_archive):
+            raise Exception(f"Bundled libusb static library was not produced: {libusb_archive}")
 
     def _refresh_config_helpers(self):
         helper_dir = os.path.join(self._sys_prefix, "share", "automake-1.17")
@@ -177,6 +236,7 @@ class DfuProgrammerConan(ConanFile):
         bootstrap = os.path.join(self.source_folder, "bootstrap.sh")
         if not os.path.exists(configure) and os.path.exists(bootstrap):
             self.run(f"sh {shlex.quote(bootstrap)}", env="conanbuild", cwd=self.source_folder)
+        self._build_libusb()
         self._prepare_autotools_helpers()
         self._prepare_libusb_include()
 
