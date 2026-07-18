@@ -129,6 +129,7 @@ endif()
                 config,
                 s2n_dependency_block,
                 '',
+                strict=False,
             )
 
 
