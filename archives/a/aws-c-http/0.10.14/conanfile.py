@@ -79,7 +79,6 @@ class AwsCHttpConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        self.run("ctest -N", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
 
     def package(self):
         cmake = CMake(self)
