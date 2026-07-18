@@ -10,8 +10,13 @@ if len(sys.argv) != 2:
 
 gcli = sys.argv[1]
 
-assert os.path.isfile(gcli), gcli
-assert os.access(gcli, os.X_OK), gcli
+def require(condition, message):
+    if not condition:
+        raise SystemExit(message)
+
+
+require(os.path.isfile(gcli), f"missing gcli executable: {gcli}")
+require(os.access(gcli, os.X_OK), f"gcli is not executable: {gcli}")
 
 default_prefix = os.environ.get("DEFAULT_PREFIX", "/storage/Users/currentUser/usr/local")
 env = dict(os.environ)
@@ -21,11 +26,11 @@ env["LD_LIBRARY_PATH"] = os.pathsep.join(
 
 version = subprocess.run([gcli, "version"], check=True, text=True, capture_output=True, timeout=15, env=env)
 version_output = version.stdout + version.stderr
-assert "gcli 2.12.0" in version_output, version_output
-assert "Using libcurl/" in version_output, version_output
-assert "Using vendored pdjson library" in version_output, version_output
+require("gcli 2.12.0" in version_output, version_output)
+require("Using libcurl/" in version_output, version_output)
+require("Using vendored pdjson library" in version_output, version_output)
 
 usage = subprocess.run([gcli], check=False, text=True, capture_output=True, timeout=15, env=env)
 usage_output = usage.stdout + usage.stderr
-assert usage.returncode != 0, usage.returncode
-assert "usage: gcli" in usage_output, usage_output
+require(usage.returncode != 0, f"expected non-zero usage exit, got {usage.returncode}")
+require("usage: gcli" in usage_output, usage_output)

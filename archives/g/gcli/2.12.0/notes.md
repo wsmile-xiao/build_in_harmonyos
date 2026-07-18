@@ -72,3 +72,7 @@ and repository pre-PR audit. Remote OHOS CI must run the Conan build and
 
 - `gcli version`, checking the 2.12.0 version string and libcurl reporting.
 - `gcli` with no arguments, checking general usage output.
+
+The Python smoke helper uses explicit `SystemExit` failures instead of
+`assert`, so the checks remain active even if Python is invoked with
+optimization flags.
