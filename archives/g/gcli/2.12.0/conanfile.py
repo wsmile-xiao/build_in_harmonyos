@@ -366,8 +366,10 @@ class GcliConan(ConanFile):
 
     def package_info(self):
         sysroot = self._default_prefix()
-        self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(self._dep_folder("openssl"), "lib"))
-        self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(self._dep_folder("zlib"), "lib"))
+        for dep_name in ("openssl", "zlib"):
+            dep_folder = self._dep_folder(dep_name)
+            if dep_folder:
+                self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(dep_folder, "lib"))
         self.runenv_info.prepend_path("LD_LIBRARY_PATH", os.path.join(sysroot, "lib"))
         self.cpp_info.bindirs = ["bin"]
         self.cpp_info.libdirs = []

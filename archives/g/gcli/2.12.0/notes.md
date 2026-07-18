@@ -34,7 +34,11 @@ recipe wraps that helper to accept `*-linux-ohos` and delegate all other inputs
 to the original upstream script. CI build #8287 then reached curl
 `config.status` and failed because configure's `umask 077` made temporary awk
 helper files unreadable on HMDFS. The recipe changes that private curl
-configure umask to `022` before running it.
+configure umask to `022` before running it. CI build #8307 then built and
+packaged gcli successfully, but failed during the test graph because Conan had
+skipped the openssl/zlib binaries and `package_info()` tried to join a `None`
+package folder. The run environment now prepends dependency library paths only
+when Conan exposes the dependency package folder.
 
 ## OHOS Notes
 
