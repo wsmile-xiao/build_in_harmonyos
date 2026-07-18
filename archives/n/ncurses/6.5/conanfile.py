@@ -133,7 +133,7 @@ class NcursesConan(ConanFile):
         self._patch_generated_makefiles()
         self.run("make -j1 preinstall", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
         autotools.make(args=["-j1"])
-        autotools.make(target="check")
+        self.run("make check", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
 
     def _patch_config_status_tmp(self, tmpdir):
         config_status = os.path.join(self.build_folder, "config.status")
@@ -224,6 +224,8 @@ class NcursesConan(ConanFile):
         autotools.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["ncursesw", "tinfow", "panelw", "menuw", "formw"]
+        # This recipe does not pass --with-termlib, so upstream keeps terminfo
+        # symbols in libncursesw instead of producing a separate libtinfow.
+        self.cpp_info.libs = ["ncursesw", "panelw", "menuw", "formw"]
         self.cpp_info.includedirs = ["include"]
         self.cpp_info.set_property("pkg_config_name", "ncursesw")
