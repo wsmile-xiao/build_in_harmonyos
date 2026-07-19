@@ -50,7 +50,11 @@ class AwsCAuthConan(ConanFile):
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
         copy(self, "*", os.path.join(self._private_prefix(), "include"), os.path.join(self.package_folder, "include"))
-        copy(self, "*.a", os.path.join(self._private_prefix(), "lib"), os.path.join(self.package_folder, "lib"), keep_path=False)
+        lib_src = os.path.join(self._private_prefix(), "lib")
+        lib_dst = os.path.join(self.package_folder, "lib")
+        copy(self, "*.a", lib_src, lib_dst, keep_path=False)
+        copy(self, "*.so*", lib_src, lib_dst, keep_path=False)
+        copy(self, "*.dylib*", lib_src, lib_dst, keep_path=False)
 
     def package_info(self):
         self.cpp_info.libs = [
