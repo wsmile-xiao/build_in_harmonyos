@@ -7,8 +7,13 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    aws_common_library_init(allocator);
-    aws_auth_library_init(allocator);
+    if (aws_common_library_init(allocator) != 0) {
+        return 1;
+    }
+    if (aws_auth_library_init(allocator) != 0) {
+        aws_common_library_clean_up();
+        return 1;
+    }
     aws_auth_library_clean_up();
     aws_common_library_clean_up();
     printf("aws-c-auth smoke test OK\n");
