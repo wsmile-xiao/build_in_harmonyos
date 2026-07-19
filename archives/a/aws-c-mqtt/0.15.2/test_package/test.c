@@ -8,8 +8,13 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    aws_common_library_init(allocator);
-    aws_mqtt_library_init(allocator);
+    if (aws_common_library_init(allocator) != 0) {
+        return 1;
+    }
+    if (aws_mqtt_library_init(allocator) != 0) {
+        aws_common_library_clean_up();
+        return 1;
+    }
 
     struct aws_byte_cursor topic = aws_byte_cursor_from_c_str("openharmony/pc/test");
     struct aws_byte_cursor wildcard_topic = aws_byte_cursor_from_c_str("openharmony/+/test");
