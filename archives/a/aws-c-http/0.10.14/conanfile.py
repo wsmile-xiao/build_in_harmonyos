@@ -37,6 +37,7 @@ class AwsCHttpConan(ConanFile):
     def build(self):
         prefix = self._private_prefix()
         self._build_private_cmake("aws-c-common")
+        self._ensure_common_threads_config(prefix)
         self._build_private_cmake("aws-c-cal", {"BYO_CRYPTO": "ON"})
         self._strip_cal_crypto_dependency(prefix)
         self._build_private_cmake("aws-c-compression")
@@ -134,7 +135,15 @@ include(CTest)""",
 
     def _ensure_threads_before_common(self, path):
         content = load(self, path)
+        if "add_library(Threads::Threads INTERFACE IMPORTED)" in content:
+            return
+        fallback = """if(NOT TARGET Threads::Threads)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+endif()
+
+"""
         if "find_package(Threads REQUIRED)" in content:
+            replace_in_file(self, path, "find_package(Threads REQUIRED)", "find_package(Threads REQUIRED)\n" + fallback.rstrip())
             return
         prelude = """find_package(Threads REQUIRED)
 if(NOT TARGET Threads::Threads)
@@ -146,6 +155,25 @@ endif()
             if marker in content:
                 replace_in_file(self, path, marker, prelude + marker)
                 return
+
+    def _ensure_common_threads_config(self, prefix):
+        config = os.path.join(prefix, "lib", "cmake", "aws-c-common", "aws-c-common-config.cmake")
+        if not os.path.exists(config):
+            return
+        content = load(self, config)
+        if "add_library(Threads::Threads INTERFACE IMPORTED)" in content:
+            return
+        fallback = """if(NOT TARGET Threads::Threads)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+endif()
+"""
+        marker = "find_package(Threads REQUIRED)\nendif()\n"
+        if marker in content:
+            replace_in_file(self, config, marker, "find_package(Threads REQUIRED)\nendif()\n" + fallback)
+            return
+        target_marker = "macro(aws_load_targets type)\n"
+        if target_marker in content:
+            replace_in_file(self, config, target_marker, fallback + "\n" + target_marker)
 
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
