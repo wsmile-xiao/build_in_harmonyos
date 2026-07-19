@@ -1,40 +1,29 @@
 #!/usr/bin/env python3
-"""Conan recipe for aws-c-common 0.12.6 built with CMake."""
+"""Conan recipe for aws-c-common 0.12.6 — AWS SDK for C core library.
 
-import os
-
+Provides cross-platform abstractions (memory, strings, lists, hash tables, threads, etc.).
+"""
 from conan import ConanFile
-from conan.errors import ConanInvalidConfiguration
-from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, load, replace_in_file
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 
 
-def _replace_if_needed(conanfile, path, old, new):
-    content = load(conanfile, path)
-    if old not in content:
-        raise ConanInvalidConfiguration(f"Expected text not found while patching {path}: {old[:80]}")
-    replace_in_file(conanfile, path, old, new)
-
-
-class AwsCCommonConan(ConanFile):
+class AwsccommonConan(ConanFile):
     name = "aws-c-common"
     version = "0.12.6"
-    description = "AWS SDK for C core primitives and platform abstraction"
+    description = "AWS SDK for C 核心基础库，提供跨平台抽象层（内存、字符串、列表、哈希表、线程等）"
     license = "Apache-2.0"
     homepage = "https://github.com/awslabs/aws-c-common"
     url = "https://github.com/awslabs/aws-c-common"
+
     package_type = "library"
 
     settings = "os", "compiler", "build_type", "arch"
-    options = {"shared": [True, False], "fPIC": [True, False]}
-    default_options = {"shared": False, "fPIC": True}
+    options = {"shared": [True, False]}
+    default_options = {"shared": False}
 
     def export_sources(self):
         export_conandata_patches(self)
-
-    def config_options(self):
-        if self.settings.os == "Windows":
-            del self.options.fPIC
 
     def requirements(self):
         pass
@@ -44,50 +33,16 @@ class AwsCCommonConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
-        cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
-        _replace_if_needed(
-            self,
-            cmake_lists,
-            'project(aws-c-common LANGUAGES C VERSION 0.1.0)',
-            '''project(aws-c-common LANGUAGES C VERSION 0.1.0)
-find_package(Threads REQUIRED)
-if(NOT TARGET Threads::Threads)
-    add_library(Threads::Threads INTERFACE IMPORTED)
-endif()''',
-        )
-        _replace_if_needed(
-            self,
-            cmake_lists,
-            'elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Linux")',
-            'elseif (${CMAKE_SYSTEM_NAME} STREQUAL "Linux" OR ${CMAKE_SYSTEM_NAME} STREQUAL "HarmonyOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "OHOS")',
-        )
-        _replace_if_needed(
-            self,
-            cmake_lists,
-            'if (UNIX AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
-            'if ((UNIX OR ${CMAKE_SYSTEM_NAME} STREQUAL "HarmonyOS" OR ${CMAKE_SYSTEM_NAME} STREQUAL "OHOS") AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
-        )
 
     def generate(self):
-        deps = CMakeDeps(self)
-        deps.generate()
         tc = CMakeToolchain(self)
+        # R26: System-name libraries default to static
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
         tc.variables["BUILD_TESTING"] = "OFF"
-        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
         tc.generate()
 
     def build(self):
         apply_conandata_patches(self)
-        if str(self.settings.os) in ("OHOS", "HarmonyOS"):
-            tests_cmake = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
-            for test_name in (
-                "test_file_path_read_from_offset_direct_io",
-                "test_file_path_read_from_offset_direct_io_chunking",
-                "test_cross_process_lock_works_in_proc",
-                "test_cross_process_lock_works_cross_proc",
-            ):
-                _replace_if_needed(self, tests_cmake, f"add_test_case({test_name})", f"# disabled on OHOS: add_test_case({test_name})")
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
@@ -96,10 +51,5 @@ endif()''',
         cmake = CMake(self)
         cmake.install()
 
-
     def package_info(self):
-        self.cpp_info.libs = ['aws-c-common']
-        self.cpp_info.system_libs = ['m']
-        self.cpp_info.builddirs = ["lib/cmake", "lib/cmake/aws-c-common", "lib/cmake/aws-c-common/modules"]
-        self.cpp_info.set_property("cmake_file_name", "aws-c-common")
-        self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-common")
+        self.cpp_info.libs = ["aws-c-common"]
