@@ -106,6 +106,16 @@ class WasmEdgeConan(ConanFile):
         cmake = CMake(self)
         cmake.install()
 
+        if self.options.shared:
+            build_lib_dirs = [
+                os.path.join(self.build_folder, "lib"),
+                os.path.join(self.build_folder, "_deps", "fmt-build"),
+                os.path.join(self.build_folder, "_deps", "spdlog-build"),
+            ]
+            for lib_dir in build_lib_dirs:
+                copy(self, "*.so*", lib_dir, os.path.join(self.package_folder, "lib"), keep_path=False)
+
     def package_info(self):
         self.cpp_info.libs = ["wasmedge"]
+        self.cpp_info.system_libs = ["dl", "rt", "pthread", "m"]
         self.cpp_info.bindirs = []
