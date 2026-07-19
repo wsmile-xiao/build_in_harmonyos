@@ -117,5 +117,9 @@ class WasmEdgeConan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["wasmedge"]
-        self.cpp_info.system_libs = ["dl", "rt", "pthread", "m"]
+        self.cpp_info.system_libs = []
+        if str(self.settings.os) in ("Linux", "OHOS"):
+            self.cpp_info.system_libs.extend(["dl", "pthread", "m"])
+        if str(self.settings.os) == "Linux":
+            self.cpp_info.system_libs.append("rt")
         self.cpp_info.bindirs = []
