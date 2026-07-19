@@ -55,7 +55,9 @@ class AwsCHttpConan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["aws-c-http", "aws-c-io", "aws-c-compression", "aws-c-cal", "aws-c-common"]
-        self.cpp_info.system_libs = ["m", "pthread", "rt", "dl"]
+        self.cpp_info.system_libs = ["m", "pthread"]
+        if str(self.settings.os) not in ("OHOS", "HarmonyOS"):
+            self.cpp_info.system_libs.extend(["rt", "dl"])
         self.cpp_info.set_property("cmake_file_name", "aws-c-http")
         self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-http")
 
