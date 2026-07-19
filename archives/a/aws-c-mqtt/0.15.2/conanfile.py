@@ -126,6 +126,8 @@ endif()''',
 
 include(CTest)""",
         )
+        for name in ("aws-c-cal", "aws-c-compression", "aws-c-io", "aws-c-http", "aws-c-mqtt"):
+            self._ensure_threads_before_common(os.path.join(self.source_folder, "_deps", name, "CMakeLists.txt") if name != "aws-c-mqtt" else os.path.join(self.source_folder, "CMakeLists.txt"))
         io = os.path.join(self.source_folder, "_deps", "aws-c-io", "CMakeLists.txt")
         self._replace_if_present(
             io,
@@ -137,6 +139,21 @@ include(CTest)""",
         content = load(self, path)
         if old in content and new not in content:
             replace_in_file(self, path, old, new)
+
+    def _ensure_threads_before_common(self, path):
+        content = load(self, path)
+        if "find_package(Threads REQUIRED)" in content:
+            return
+        prelude = """find_package(Threads REQUIRED)
+if(NOT TARGET Threads::Threads)
+    add_library(Threads::Threads INTERFACE IMPORTED)
+endif()
+
+"""
+        for marker in ("find_package(aws-c-common REQUIRED)", "find_package(aws-c-common)"):
+            if marker in content:
+                replace_in_file(self, path, marker, prelude + marker)
+                return
 
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
