@@ -291,7 +291,7 @@ PYEOF
     # recipes from the local archives/ directory so --build=missing can compile
     # them from source during conan create.
     if [ -n "${UNPUBLISHED_DEPS:-}" ]; then
-        for dep_ref in ${=UNPUBLISHED_DEPS}; do
+        for dep_ref in $UNPUBLISHED_DEPS; do
             dep_name=$(echo "$dep_ref" | cut -d'/' -f1)
             dep_ver=$(echo "$dep_ref" | cut -d'/' -f2)
             local_recipe=$(find "$REPO_ROOT/archives" -path "*/${dep_name}/${dep_ver}/conanfile.py" -not -path "*/test_package/*" 2>/dev/null | head -1)

@@ -1,9 +1,11 @@
+#!/usr/bin/env python3
+"""Conan test_package for aws-c-auth 0.10.1."""
+
 import os
 
 from conan import ConanFile
 from conan.tools.build import can_run
 from conan.tools.cmake import CMake, cmake_layout
-from conan.tools.files import save
 
 
 class AwsCAuthTestConan(ConanFile):
@@ -11,27 +13,8 @@ class AwsCAuthTestConan(ConanFile):
     generators = "CMakeDeps", "CMakeToolchain"
     test_type = "explicit"
 
-    def generate(self):
-        include_dirs = []
-        for dependency in self.dependencies.values():
-            package_folder = dependency.package_folder
-            if package_folder:
-                include_dir = os.path.join(package_folder, "include")
-                if os.path.isdir(include_dir):
-                    include_dirs.append(include_dir.replace("\\", "/"))
-        content = "set(AWS_TEST_INCLUDE_DIRS\n"
-        for include_dir in sorted(set(include_dirs)):
-            content += f'    "{include_dir}"\n'
-        content += ")\n"
-        save(self, os.path.join(self.generators_folder, "aws_test_includes.cmake"), content)
-
     def requirements(self):
         self.requires(self.tested_reference_str)
-        self.requires("aws-c-common/0.12.6")
-        self.requires("aws-c-cal/0.9.13")
-        self.requires("aws-c-http/0.10.14")
-        self.requires("aws-c-io/0.26.3")
-        self.requires("aws-c-sdkutils/0.2.4")
 
     def layout(self):
         cmake_layout(self)
