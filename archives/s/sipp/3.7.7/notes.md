@@ -10,8 +10,9 @@ SIPp is a traffic generator and test tool for the SIP protocol. The recipe build
 - Upstream source: `https://github.com/SIPp/sipp/releases/download/v3.7.7/sipp-3.7.7.tar.gz`
 - SHA256: `e55b15f567760e9febeef366a1ab51a5239d197a132ce931b78c826d22d31e69`
 - Disabled options: SSL, PCAP, SCTP, GSL, static linking, ASAN
+- Private build dependency: ncurses 6.5 is downloaded and built inside the SIPp build folder to satisfy SIPp's required curses UI linkage without submitting a second Conan recipe in this PR.
 - Conan smoke test: runs `sipp -v` from the packaged binary, accepts SIPp's documented informational exit code `99` (`EXIT_OTHER`), and verifies that the emitted banner still contains SIPp help/version text rather than assuming a single exact output line.
 
 ## OpenHarmony notes
 
-The core SIPp executable builds without extra third-party libraries when optional protocol extensions are disabled. This avoids depending on system OpenSSL, libpcap, lksctp-tools, or GSL in the base adaptation.
+The core SIPp executable builds with optional protocol extensions disabled, avoiding system OpenSSL, libpcap, lksctp-tools, or GSL in the base adaptation. SIPp still requires curses for its UI code path, so the recipe builds ncurses 6.5 privately inside the SIPp build tree and links that static library directly. The ncurses files are not submitted as a separate archive recipe in this PR.

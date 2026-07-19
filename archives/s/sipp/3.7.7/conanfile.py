@@ -2,6 +2,8 @@
 """Conan recipe for SIPp 3.7.7."""
 
 import os
+import re
+import shutil
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
@@ -19,14 +21,17 @@ class SippConan(ConanFile):
 
     settings = "os", "compiler", "build_type", "arch"
 
-    def requirements(self):
-        self.requires("ncurses/6.5")
-
     def layout(self):
         cmake_layout(self)
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
+        get(
+            self,
+            **self.conan_data["ncurses_sources"],
+            destination=os.path.join(self.source_folder, "_deps", "ncurses"),
+            strip_root=True,
+        )
 
     def generate(self):
         tc = CMakeToolchain(self)
@@ -37,51 +42,186 @@ class SippConan(ConanFile):
         tc.variables["BUILD_STATIC"] = False
         tc.variables["USE_ASAN"] = False
 
-        ncurses = self.dependencies["ncurses"]
-        if ncurses:
-            include_dirs = []
-            package_folder = ncurses.package_folder
-            for include_dir in ncurses.cpp_info.includedirs:
-                if not os.path.isabs(include_dir):
-                    include_dir = os.path.join(package_folder, include_dir)
-                include_dirs.append(include_dir)
-                include_dirs.append(os.path.join(include_dir, "ncursesw"))
-            lib_dirs = []
-            for lib_dir in ncurses.cpp_info.libdirs:
-                if not os.path.isabs(lib_dir):
-                    lib_dir = os.path.join(package_folder, lib_dir)
-                lib_dirs.append(lib_dir)
-            for lib_dir in lib_dirs:
-                for name in ("libncursesw.a", "libncursesw.so", "libcursesw.a", "libcursesw.so", "libncurses.a", "libncurses.so"):
-                    candidate = os.path.join(lib_dir, name)
-                    if os.path.exists(candidate):
-                        tc.variables["CURSES_LIBRARY"] = candidate
-                        break
-                if "CURSES_LIBRARY" in tc.variables:
-                    break
-            for lib_dir in lib_dirs:
-                for name in ("libtinfow.a", "libtinfow.so", "libtinfo.a", "libtinfo.so"):
-                    candidate = os.path.join(lib_dir, name)
-                    if os.path.exists(candidate):
-                        tc.variables["TINFO_LIBRARY"] = candidate
-                        break
-                if "TINFO_LIBRARY" in tc.variables:
-                    break
-            tc.variables["CURSES_LIBRARY_INCLUDE_DIRS"] = ";".join(dict.fromkeys(include_dirs))
+        ncurses_prefix = self._ncurses_prefix()
+        include_dir = os.path.join(ncurses_prefix, "include")
+        tc.variables["CURSES_LIBRARY"] = os.path.join(ncurses_prefix, "lib", "libncursesw.a")
+        tc.variables["CURSES_LIBRARY_INCLUDE_DIRS"] = ";".join([include_dir, os.path.join(include_dir, "ncursesw")])
         tc.generate()
 
     def build(self):
+        self._build_private_ncurses()
         cmake_lists = os.path.join(self.source_folder, "CMakeLists.txt")
         replace_in_file(
             self,
             cmake_lists,
             'if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND TINFO_LIBRARY)',
             'if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS") AND TINFO_LIBRARY)',
+            strict=False,
         )
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
         self.run("ctest -N", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
+
+    def _ncurses_prefix(self):
+        return os.path.join(self.build_folder, "_private_ncurses")
+
+    def _build_private_ncurses(self):
+        source_dir = os.path.join(self.source_folder, "_deps", "ncurses")
+        prefix = self._ncurses_prefix()
+        stamp = os.path.join(prefix, ".built")
+        if os.path.exists(stamp):
+            return
+
+        config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash")
+        if not config_shell:
+            raise RuntimeError("bash is required to build private ncurses")
+        tmpdir = os.path.join(self.build_folder, "_private_ncurses_tmp")
+        os.makedirs(tmpdir, exist_ok=True)
+        os.chmod(tmpdir, 0o700)
+        os.makedirs(prefix, exist_ok=True)
+
+        os.environ["CONFIG_SHELL"] = config_shell
+        os.environ["SHELL"] = config_shell
+        os.environ["TMPDIR"] = tmpdir
+
+        self._patch_ncurses_configure(source_dir, config_shell, tmpdir)
+        configure_args = [
+            f'"{os.path.join(source_dir, "configure")}"',
+            f'--prefix="{prefix}"',
+            "--without-shared",
+            "--without-debug",
+            "--without-ada",
+            "--without-manpages",
+            "--without-tests",
+            "--without-cxx-binding",
+            "--enable-widec",
+            "--enable-overwrite",
+            "--no-create",
+        ]
+        self.run(" ".join(configure_args), cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+        self._patch_ncurses_config_status(source_dir, tmpdir)
+        self.run(f'"{config_shell}" ./config.status', cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+        self._patch_ncurses_makefiles(source_dir)
+        self.run("make -j1 preinstall", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+        self.run("make -j1", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+        self.run("make install", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+        with open(stamp, "w", encoding="utf-8") as file:
+            file.write("ok\n")
+
+    def _patch_ncurses_configure(self, source_dir, config_shell, tmpdir):
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "config.guess"),
+            """    *:Minix:*:*)
+	GUESS=$UNAME_MACHINE-unknown-minix
+	;;""",
+            """    *:Minix:*:*)
+	GUESS=$UNAME_MACHINE-unknown-minix
+	;;
+    *:HarmonyOS:*:*)
+	case "$UNAME_MACHINE" in
+	    aarch64|arm64)
+		MACHINE=aarch64
+		;;
+	    armv7*|armv8*)
+		MACHINE=arm
+		;;
+	    x86_64|amd64)
+		MACHINE=x86_64
+		;;
+	    i?86)
+		MACHINE=i686
+		;;
+	    *)
+		MACHINE="$UNAME_MACHINE"
+		;;
+	esac
+	GUESS=${MACHINE}-unknown-linux-ohos
+	;;""",
+        )
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "config.sub"),
+            "| fiwix* | mlibc* | cos* | mbr* | ironclad* )",
+            "| fiwix* | mlibc* | cos* | mbr* | ironclad* | ohos* )",
+        )
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "config.sub"),
+            "| linux-relibc*- | linux-uclibc*- )",
+            "| linux-relibc*- | linux-uclibc*- | linux-ohos*- )",
+        )
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "configure"),
+            "#! /bin/sh",
+            f"#! {config_shell}\nTMPDIR='{tmpdir}'\nexport TMPDIR",
+        )
+        replace_in_file(self, os.path.join(source_dir, "configure"), "umask 077", "umask 022", strict=False)
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "configure"),
+            'fi\n${MAKE:-make} preinstall',
+            'fi\nif test "$no_create" != yes; then\n  ${MAKE:-make} preinstall\nfi',
+            strict=False,
+        )
+
+    def _patch_ncurses_config_status(self, source_dir, tmpdir):
+        config_status = os.path.join(source_dir, "config.status")
+        fixed_tmp = os.path.join(tmpdir, "ncurses-config-status")
+        os.makedirs(fixed_tmp, exist_ok=True)
+        os.chmod(fixed_tmp, 0o700)
+        with open(config_status, "r", encoding="utf-8") as file:
+            content = file.read()
+
+        content = content.replace("umask 077", "umask 022")
+        content = content.replace('ac_dir=`$as_expr X"$ac_file" :', 'ac_dir=`false && $as_expr X"$ac_file" :', 1)
+        for umask in ("077", "000", "022"):
+            content = content.replace(
+                f'tmp=`(umask {umask} && mktemp -d -q "$TMPDIR/csXXXXXX") 2>/dev/null` &&\n'
+                '  test -n "$tmp" && test -d "$tmp"',
+                f'tmp="{fixed_tmp}" &&\n'
+                '  rm -rf "$tmp" && mkdir -p "$tmp" && chmod u+rwx "$tmp" && test -d "$tmp"',
+            )
+            content = content.replace(
+                f'tmp=$TMPDIR/cs$$-$RANDOM\n  (umask {umask} && mkdir "$tmp")',
+                f'tmp="{fixed_tmp}"\n  rm -rf "$tmp" && mkdir -p "$tmp" && chmod u+rwx "$tmp"',
+            )
+
+        with open(config_status, "w", encoding="utf-8") as file:
+            file.write(content)
+
+    def _patch_ncurses_makefiles(self, source_dir):
+        makefiles = {
+            "Makefile": ".",
+            "include/Makefile": "..",
+            "ncurses/Makefile": "..",
+            "progs/Makefile": "..",
+            "panel/Makefile": "..",
+            "menu/Makefile": "..",
+            "form/Makefile": "..",
+            "misc/Makefile": "..",
+        }
+        pattern = re.compile(r"^(\s*)(VPATH|top_srcdir|srcdir)(\s*=).*$")
+        for rel_path, top_srcdir in makefiles.items():
+            path = os.path.join(source_dir, *rel_path.split("/"))
+            if not os.path.exists(path):
+                continue
+            with open(path, "r", encoding="utf-8", errors="surrogateescape") as file:
+                lines = file.readlines()
+            patched = []
+            changed = False
+            for line in lines:
+                match = pattern.match(line.rstrip("\n"))
+                if match:
+                    value = top_srcdir if match.group(2) == "top_srcdir" else "."
+                    line = f"{match.group(1)}{match.group(2)}={value}\n"
+                    changed = True
+                patched.append(line)
+            if changed:
+                with open(path, "w", encoding="utf-8", errors="surrogateescape") as file:
+                    file.writelines(patched)
 
     def package(self):
         copy(self, "LICENSE.txt", self.source_folder, os.path.join(self.package_folder, "licenses"))

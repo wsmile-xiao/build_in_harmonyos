@@ -1,5 +1,0 @@
-cmake_minimum_required(VERSION 3.5)
-project(test_ncurses)
-find_package(ncurses REQUIRED)
-add_executable(test_ncurses test.c)
-target_link_libraries(test_ncurses ncurses::ncurses)
