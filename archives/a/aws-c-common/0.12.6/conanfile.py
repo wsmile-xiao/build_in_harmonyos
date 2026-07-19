@@ -79,6 +79,7 @@ endif()''',
 
     def package_info(self):
         self.cpp_info.libs = ['aws-c-common']
+        self.cpp_info.system_libs = ['m']
         self.cpp_info.builddirs = ["lib/cmake", "lib/cmake/aws-c-common", "lib/cmake/aws-c-common/modules"]
         self.cpp_info.set_property("cmake_file_name", "aws-c-common")
         self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-common")
