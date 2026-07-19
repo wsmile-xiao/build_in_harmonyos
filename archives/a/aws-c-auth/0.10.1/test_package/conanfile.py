@@ -26,5 +26,8 @@ class AwsCAuthTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            test_bin = os.path.join(self.cpp.build.bindirs[0], "test_aws_c_auth")
+            bindirs = self.cpp.build.bindirs
+            if not bindirs:
+                raise RuntimeError("test_aws_c_auth executable directory was not produced")
+            test_bin = os.path.join(bindirs[0], "test_aws_c_auth")
             self.run(test_bin, env="conanrun")

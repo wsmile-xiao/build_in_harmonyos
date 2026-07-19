@@ -2,6 +2,7 @@
 """Conan recipe for aws-c-auth 0.10.1 built with private AWS CRT deps."""
 
 import os
+import shlex
 
 from conan import ConanFile
 from conan.tools.cmake import cmake_layout
@@ -66,7 +67,9 @@ class AwsCAuthConan(ConanFile):
             "aws-c-cal",
             "aws-c-common",
         ]
-        self.cpp_info.system_libs = ["m", "pthread", "rt", "dl"]
+        self.cpp_info.system_libs = ["m", "pthread"]
+        if str(self.settings.os) not in ("OHOS", "HarmonyOS"):
+            self.cpp_info.system_libs.extend(["rt", "dl"])
         self.cpp_info.set_property("cmake_file_name", "aws-c-auth")
         self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-auth")
 
@@ -82,20 +85,20 @@ class AwsCAuthConan(ConanFile):
         definitions = definitions or {}
         args = [
             "cmake",
-            "-S", f'"{source_dir}"',
-            "-B", f'"{build_dir}"',
+            "-S", shlex.quote(source_dir),
+            "-B", shlex.quote(build_dir),
             "-DCMAKE_BUILD_TYPE=Release",
-            f'-DCMAKE_INSTALL_PREFIX="{prefix}"',
+            "-DCMAKE_INSTALL_PREFIX={}".format(shlex.quote(prefix)),
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
             "-DBUILD_TESTING=OFF",
             f"-DCMAKE_POSITION_INDEPENDENT_CODE={'ON' if self.options.get_safe('fPIC', True) else 'OFF'}",
-            f'-DCMAKE_PREFIX_PATH="{prefix}"',
-            f'-DCMAKE_MODULE_PATH="{self._module_path(prefix)}"',
+            "-DCMAKE_PREFIX_PATH={}".format(shlex.quote(prefix)),
+            "-DCMAKE_MODULE_PATH={}".format(shlex.quote(self._module_path(prefix))),
         ]
         args.extend(f"-D{key}={value}" for key, value in definitions.items())
         self.run(" ".join(args), env=["conanbuild"], ignore_errors=False)
-        self.run(f'cmake --build "{build_dir}" -- -j2', env=["conanbuild"], ignore_errors=False)
-        self.run(f'cmake --install "{build_dir}"', env=["conanbuild"], ignore_errors=False)
+        self.run("cmake --build {} -- -j2".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
+        self.run("cmake --install {}".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
 
     def _module_path(self, prefix):
         return ";".join([
