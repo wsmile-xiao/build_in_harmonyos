@@ -11,6 +11,15 @@ from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
 
 
+def _conan_command():
+    if sys.argv and os.path.basename(sys.argv[0]).startswith("conan"):
+        return [sys.argv[0]]
+    conan = shutil.which("conan")
+    if conan:
+        return [conan]
+    raise RuntimeError("Conan executable not found")
+
+
 def _export_local_aws_recipes(conanfile, refs):
     repo_root = os.path.abspath(os.path.join(conanfile.recipe_folder, "..", "..", "..", ".."))
     for ref in refs:
@@ -20,8 +29,7 @@ def _export_local_aws_recipes(conanfile, refs):
             conanfile.output.warning(f"local dependency recipe not found: {ref}")
             continue
         conanfile.output.info(f"Exporting local dependency recipe: {ref}")
-        conan_cmd = [shutil.which("conan")] if shutil.which("conan") else [sys.executable, "-m", "conan"]
-        subprocess.run(conan_cmd + ["export", dep_dir], check=True)
+        subprocess.run(_conan_command() + ["export", dep_dir], check=True)
 
 
 class AwsCHttpConan(ConanFile):

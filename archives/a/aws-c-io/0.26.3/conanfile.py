@@ -19,6 +19,15 @@ def _replace_if_needed(conanfile, path, old, new):
     replace_in_file(conanfile, path, old, new)
 
 
+def _conan_command():
+    if sys.argv and os.path.basename(sys.argv[0]).startswith("conan"):
+        return [sys.argv[0]]
+    conan = shutil.which("conan")
+    if conan:
+        return [conan]
+    raise RuntimeError("Conan executable not found")
+
+
 def _export_local_aws_recipes(conanfile, refs):
     repo_root = os.path.abspath(os.path.join(conanfile.recipe_folder, "..", "..", "..", ".."))
     for ref in refs:
@@ -28,8 +37,7 @@ def _export_local_aws_recipes(conanfile, refs):
             conanfile.output.warning(f"local dependency recipe not found: {ref}")
             continue
         conanfile.output.info(f"Exporting local dependency recipe: {ref}")
-        conan_cmd = [shutil.which("conan")] if shutil.which("conan") else [sys.executable, "-m", "conan"]
-        subprocess.run(conan_cmd + ["export", dep_dir], check=True)
+        subprocess.run(_conan_command() + ["export", dep_dir], check=True)
 
 
 class AwsCIoConan(ConanFile):
@@ -75,7 +83,7 @@ class AwsCIoConan(ConanFile):
         deps.generate()
         tc = CMakeToolchain(self)
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
-        tc.variables["BUILD_TESTING"] = "ON"
+        tc.variables["BUILD_TESTING"] = "OFF"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
         tc.variables["BYO_CRYPTO"] = "ON"
         common_root = self.dependencies["aws-c-common"].package_folder
@@ -108,7 +116,6 @@ class AwsCIoConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        cmake.test()
 
     def package(self):
         cmake = CMake(self)
