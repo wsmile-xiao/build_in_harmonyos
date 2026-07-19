@@ -48,7 +48,10 @@ class AwsCHttpConan(ConanFile):
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
         copy(self, "*", os.path.join(self._private_prefix(), "include"), os.path.join(self.package_folder, "include"))
-        copy(self, "*.a", os.path.join(self._private_prefix(), "lib"), os.path.join(self.package_folder, "lib"), keep_path=False)
+        private_lib = os.path.join(self._private_prefix(), "lib")
+        copy(self, "*.a", private_lib, os.path.join(self.package_folder, "lib"), keep_path=False)
+        copy(self, "*.so*", private_lib, os.path.join(self.package_folder, "lib"), keep_path=False)
+        copy(self, "*.dylib*", private_lib, os.path.join(self.package_folder, "lib"), keep_path=False)
 
     def package_info(self):
         self.cpp_info.libs = ["aws-c-http", "aws-c-io", "aws-c-compression", "aws-c-cal", "aws-c-common"]
@@ -70,7 +73,7 @@ class AwsCHttpConan(ConanFile):
             "cmake",
             "-S", f'"{source_dir}"',
             "-B", f'"{build_dir}"',
-            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DCMAKE_BUILD_TYPE={self.settings.build_type}",
             f'-DCMAKE_INSTALL_PREFIX="{prefix}"',
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
             "-DBUILD_TESTING=OFF",
