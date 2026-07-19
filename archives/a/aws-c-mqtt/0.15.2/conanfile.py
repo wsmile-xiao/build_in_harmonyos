@@ -49,7 +49,6 @@ class AwsCMqttConan(ConanFile):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
         copy(self, "*", os.path.join(self._private_prefix(), "include"), os.path.join(self.package_folder, "include"))
         copy(self, "*.a", os.path.join(self._private_prefix(), "lib"), os.path.join(self.package_folder, "lib"), keep_path=False)
-        copy(self, "*.cmake", os.path.join(self._private_prefix(), "lib", "cmake"), os.path.join(self.package_folder, "lib", "cmake"))
 
     def package_info(self):
         self.cpp_info.libs = [
@@ -61,16 +60,6 @@ class AwsCMqttConan(ConanFile):
             "aws-c-common",
         ]
         self.cpp_info.system_libs = ["m", "pthread", "rt", "dl"]
-        self.cpp_info.builddirs = [
-            "lib/cmake",
-            "lib/cmake/aws-c-common",
-            "lib/cmake/aws-c-common/modules",
-            "lib/cmake/aws-c-cal",
-            "lib/cmake/aws-c-compression",
-            "lib/cmake/aws-c-io",
-            "lib/cmake/aws-c-http",
-            "lib/cmake/aws-c-mqtt",
-        ]
         self.cpp_info.set_property("cmake_file_name", "aws-c-mqtt")
         self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-mqtt")
 
