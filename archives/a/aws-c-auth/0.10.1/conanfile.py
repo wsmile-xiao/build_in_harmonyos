@@ -87,7 +87,7 @@ class AwsCAuthConan(ConanFile):
             "cmake",
             "-S", shlex.quote(source_dir),
             "-B", shlex.quote(build_dir),
-            "-DCMAKE_BUILD_TYPE=Release",
+            f"-DCMAKE_BUILD_TYPE={self.settings.build_type}",
             "-DCMAKE_INSTALL_PREFIX={}".format(shlex.quote(prefix)),
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
             "-DBUILD_TESTING=OFF",
