@@ -92,7 +92,7 @@ class SippConan(ConanFile):
             configure_args = [
                 shlex.quote(config_shell),
                 shlex.quote(os.path.join(source_dir, "configure")),
-                "--prefix=" + shlex.quote(prefix),
+                shlex.quote(f"--prefix={prefix}"),
                 "--without-shared",
                 "--without-debug",
                 "--without-ada",
