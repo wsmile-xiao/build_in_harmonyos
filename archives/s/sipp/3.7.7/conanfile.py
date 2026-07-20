@@ -3,6 +3,7 @@
 
 import os
 import re
+import shlex
 import shutil
 
 from conan import ConanFile
@@ -81,33 +82,46 @@ class SippConan(ConanFile):
         os.chmod(tmpdir, 0o700)
         os.makedirs(prefix, exist_ok=True)
 
-        os.environ["CONFIG_SHELL"] = config_shell
-        os.environ["SHELL"] = config_shell
-        os.environ["TMPDIR"] = tmpdir
+        saved_env = {name: os.environ.get(name) for name in ("CONFIG_SHELL", "SHELL", "TMPDIR")}
+        try:
+            os.environ["CONFIG_SHELL"] = config_shell
+            os.environ["SHELL"] = config_shell
+            os.environ["TMPDIR"] = tmpdir
 
-        self._patch_ncurses_configure(source_dir, config_shell, tmpdir)
-        configure_args = [
-            f'"{os.path.join(source_dir, "configure")}"',
-            f'--prefix="{prefix}"',
-            "--without-shared",
-            "--without-debug",
-            "--without-ada",
-            "--without-manpages",
-            "--without-tests",
-            "--without-cxx-binding",
-            "--enable-widec",
-            "--enable-overwrite",
-            "--no-create",
-        ]
-        self.run(" ".join(configure_args), cwd=source_dir, env=["conanbuild"], ignore_errors=False)
-        self._patch_ncurses_config_status(source_dir, tmpdir)
-        self.run(f'"{config_shell}" ./config.status', cwd=source_dir, env=["conanbuild"], ignore_errors=False)
-        self._patch_ncurses_makefiles(source_dir)
-        self.run("make -j1 preinstall", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
-        self.run("make -j1", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
-        self.run("make install", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
-        with open(stamp, "w", encoding="utf-8") as file:
-            file.write("ok\n")
+            self._patch_ncurses_configure(source_dir, config_shell, tmpdir)
+            configure_args = [
+                shlex.quote(os.path.join(source_dir, "configure")),
+                "--prefix=" + shlex.quote(prefix),
+                "--without-shared",
+                "--without-debug",
+                "--without-ada",
+                "--without-manpages",
+                "--without-tests",
+                "--without-cxx-binding",
+                "--enable-widec",
+                "--enable-overwrite",
+                "--no-create",
+            ]
+            self.run(" ".join(configure_args), cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+            self._patch_ncurses_config_status(source_dir, tmpdir)
+            self.run(
+                shlex.quote(config_shell) + " ./config.status",
+                cwd=source_dir,
+                env=["conanbuild"],
+                ignore_errors=False,
+            )
+            self._patch_ncurses_makefiles(source_dir)
+            self.run("make -j1 preinstall", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+            self.run("make -j1", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+            self.run("make install", cwd=source_dir, env=["conanbuild"], ignore_errors=False)
+            with open(stamp, "w", encoding="utf-8") as file:
+                file.write("ok\n")
+        finally:
+            for name, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
 
     def _patch_ncurses_configure(self, source_dir, config_shell, tmpdir):
         replace_in_file(
