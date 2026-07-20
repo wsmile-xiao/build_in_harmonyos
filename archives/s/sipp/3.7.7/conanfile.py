@@ -90,6 +90,7 @@ class SippConan(ConanFile):
 
             self._patch_ncurses_configure(source_dir, config_shell, tmpdir)
             configure_args = [
+                shlex.quote(config_shell),
                 shlex.quote(os.path.join(source_dir, "configure")),
                 "--prefix=" + shlex.quote(prefix),
                 "--without-shared",
@@ -170,7 +171,7 @@ class SippConan(ConanFile):
             self,
             os.path.join(source_dir, "configure"),
             "#! /bin/sh",
-            f"#! {shlex.quote(config_shell)}\nTMPDIR={shlex.quote(tmpdir)}\nexport TMPDIR",
+            f"#! /bin/sh\nCONFIG_SHELL={shlex.quote(config_shell)}\nSHELL={shlex.quote(config_shell)}\nTMPDIR={shlex.quote(tmpdir)}\nexport CONFIG_SHELL SHELL TMPDIR",
         )
         replace_in_file(self, os.path.join(source_dir, "configure"), "umask 077", "umask 022", strict=False)
         replace_in_file(
