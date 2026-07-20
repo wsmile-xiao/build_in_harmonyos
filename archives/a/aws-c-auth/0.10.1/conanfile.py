@@ -87,6 +87,8 @@ class AwsCAuthConan(ConanFile):
             "cmake",
             "-S", shlex.quote(source_dir),
             "-B", shlex.quote(build_dir),
+            f"-DCMAKE_SYSTEM_NAME={self._cmake_system_name()}",
+            f"-DCMAKE_SYSTEM_PROCESSOR={self._cmake_system_processor()}",
             f"-DCMAKE_BUILD_TYPE={self.settings.build_type}",
             "-DCMAKE_INSTALL_PREFIX={}".format(shlex.quote(prefix)),
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
@@ -99,6 +101,25 @@ class AwsCAuthConan(ConanFile):
         self.run(" ".join(args), env=["conanbuild"], ignore_errors=False)
         self.run("cmake --build {} -- -j2".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
         self.run("cmake --install {}".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
+
+    def _cmake_system_name(self):
+        os_name = str(self.settings.os)
+        if os_name in ("OHOS", "HarmonyOS"):
+            return "OHOS"
+        return os_name
+
+    def _cmake_system_processor(self):
+        arch = str(self.settings.arch)
+        return {
+            "armv8": "aarch64",
+            "armv8.3": "aarch64",
+            "armv8.4": "aarch64",
+            "armv8.5": "aarch64",
+            "armv8.6": "aarch64",
+            "armv8.7": "aarch64",
+            "armv8.8": "aarch64",
+            "x86_64": "x86_64",
+        }.get(arch, arch)
 
     def _module_path(self, prefix):
         return ";".join([
