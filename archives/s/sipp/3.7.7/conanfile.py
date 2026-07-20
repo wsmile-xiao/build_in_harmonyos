@@ -170,7 +170,7 @@ class SippConan(ConanFile):
             self,
             os.path.join(source_dir, "configure"),
             "#! /bin/sh",
-            f"#! {config_shell}\nTMPDIR='{tmpdir}'\nexport TMPDIR",
+            f"#! {shlex.quote(config_shell)}\nTMPDIR={shlex.quote(tmpdir)}\nexport TMPDIR",
         )
         replace_in_file(self, os.path.join(source_dir, "configure"), "umask 077", "umask 022", strict=False)
         replace_in_file(
@@ -195,12 +195,12 @@ class SippConan(ConanFile):
             content = content.replace(
                 f'tmp=`(umask {umask} && mktemp -d -q "$TMPDIR/csXXXXXX") 2>/dev/null` &&\n'
                 '  test -n "$tmp" && test -d "$tmp"',
-                f'tmp="{fixed_tmp}" &&\n'
+                f'tmp={shlex.quote(fixed_tmp)} &&\n'
                 '  rm -rf "$tmp" && mkdir -p "$tmp" && chmod u+rwx "$tmp" && test -d "$tmp"',
             )
             content = content.replace(
                 f'tmp=$TMPDIR/cs$$-$RANDOM\n  (umask {umask} && mkdir "$tmp")',
-                f'tmp="{fixed_tmp}"\n  rm -rf "$tmp" && mkdir -p "$tmp" && chmod u+rwx "$tmp"',
+                f'tmp={shlex.quote(fixed_tmp)}\n  rm -rf "$tmp" && mkdir -p "$tmp" && chmod u+rwx "$tmp"',
             )
 
         with open(config_status, "w", encoding="utf-8") as file:
