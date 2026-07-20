@@ -66,5 +66,5 @@ class LightGBMConan(ConanFile):
         cmake.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["_lightgbm"]
+        self.cpp_info.libs = ["lightgbm"]
         self.cpp_info.bindirs = ["bin"]
