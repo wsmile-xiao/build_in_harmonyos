@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+"""Conan recipe for LightGBM 4.6.0."""
 import os
 
 from conan import ConanFile
