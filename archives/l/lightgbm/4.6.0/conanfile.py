@@ -44,7 +44,7 @@ class LightGBMConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
-        tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
+        tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared == "True" else "OFF"
         tc.variables["USE_OPENMP"] = "OFF"
         tc.variables["USE_MPI"] = "OFF"
         tc.variables["USE_GPU"] = "OFF"
