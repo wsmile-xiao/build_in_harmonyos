@@ -816,7 +816,7 @@ PYEOF
                 [ -x "$bin_file" ] || continue
                 _found_exec=true
                 bin_name="${bin_file##*/}"
-                if "$bin_file" --version >/dev/null 2>&1; then
+                if timeout 15 "$bin_file" --version </dev/null >/dev/null 2>&1; then
                     echo "[ok] L2: $bin_name --version OK"
                     L2_RESULT="pass"
                     if [ -z "$L2_DETAIL" ] || [ "$L2_DETAIL" = "not_run" ]; then
@@ -824,7 +824,7 @@ PYEOF
                     else
                         L2_DETAIL="${L2_DETAIL}, $bin_name --version OK"
                     fi
-                elif "$bin_file" --help >/dev/null 2>&1; then
+                elif timeout 15 "$bin_file" --help </dev/null >/dev/null 2>&1; then
                     echo "[ok] L2: $bin_name --help OK"
                     L2_RESULT="pass"
                     if [ -z "$L2_DETAIL" ] || [ "$L2_DETAIL" = "not_run" ]; then
