@@ -42,6 +42,11 @@ echo "[step]   profile: $PROFILE"
 echo "[step]   channel: (no channel — plain name/version)"
 
 # ── 1. Discover packages (BUG-9: respect CI_PACKAGES) ──
+# CI_PACKAGES 可通过环境变量或位置参数传入（位置参数在部分鸿蒙 worker
+# 上比 env 更可靠，buildbot command= 也用位置参数传递）
+if [ -z "${CI_PACKAGES:-}" ] && [ $# -gt 0 ]; then
+    CI_PACKAGES="$*"
+fi
 PACKAGES=()
 if [ -n "${CI_PACKAGES:-}" ]; then
     # CI 传入了定向包列表（空格分隔的相对路径，如 "archives/b/bash/5.3"）
