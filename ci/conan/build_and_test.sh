@@ -21,6 +21,9 @@
 #   - Print build summary
 
 set -euo pipefail
+# 忽略 SIGPIPE：防止 grep|tail/head 等管道中读端提前关闭导致写端 exit 141
+# （zsh + pipefail 下 SIGPIPE 会令整个脚本崩溃）
+trap '' PIPE
 
 # ── Path resolution ──
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
