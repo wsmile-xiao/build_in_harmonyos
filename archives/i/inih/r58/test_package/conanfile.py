@@ -3,7 +3,12 @@
 
 Uses CMake (CMakeDeps + CMakeToolchain) so the compiler is handled
 by Conan toolchain, not raw shell env vars (R33).
+
+Emits HMBS evidence markers for preflight verification:
+  - HMBS_TEST_PACKAGE_RESULT: test_package consumer-side test results
+  - HMBS_UPSTREAM_TEST_RESULT: upstream test suite status (no_tests)
 """
+import json
 import os
 
 from conan import ConanFile
@@ -38,6 +43,33 @@ class InihTestConan(ConanFile):
         # Use bash to wrap binary execution.
         if self.settings.os == "OHOS":
             bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-            self.run(f"{bash} -c './test_inih'", env="conanrun")
+            cmd = f"{bash} -c './test_inih'"
         else:
-            self.run("./test_inih", env="conanrun")
+            cmd = "./test_inih"
+
+        rc = self.run(cmd, env="conanrun")
+        passed = (rc == 0)
+
+        # Emit HMBS evidence markers for preflight verification
+        test_package_result = {
+            "executed": True,
+            "passed": passed,
+            "command": cmd,
+        }
+        print(f"\nHMBS_TEST_PACKAGE_RESULT={json.dumps(test_package_result)}")
+
+        # inih upstream unittest.sh generates baseline files rather than
+        # validating test output; it requires Meson to compile test programs
+        # separately. Not suitable for conan build integration.
+        upstream_result = {
+            "status": "no_tests",
+            "framework": "none",
+            "command": "N/A",
+            "discovered": 0,
+            "executed": 0,
+            "passed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "reason": "inih upstream unittest.sh generates reference baseline files, not a test validator; requires separate Meson-based test compilation not integrated into conan recipe",
+        }
+        print(f"HMBS_UPSTREAM_TEST_RESULT={json.dumps(upstream_result)}")
