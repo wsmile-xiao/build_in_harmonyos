@@ -1,29 +1,9 @@
 # massdns
 
-High-performance DNS stub resolver for bulk DNS lookups.
+高性能 DNS 批量解析工具 — 针对需要解析大量域名（百万甚至十亿级）的场景。
 
-## Description
-
-MassDNS is a simple high-performance DNS stub resolver targeting those who seek to resolve a massive amount of domain names in the order of millions or even billions. It is designed to be extremely fast and efficient.
-
-## Features
-
-- High-performance DNS resolution
-- Supports batch processing of domain names
-- IPv4 and IPv6 support
-- Customizable DNS servers
-
-## Usage
-
-```bash
-massdns -r resolvers.txt domains.txt -o S -w results.txt
-```
-
-## Versions
-
-- 1.1.0 (2026-06-04) - Built for OpenHarmony aarch64
-
-## Links
-
-- GitHub: https://github.com/blechschmidt/massdns
-- Savannah: https://download.savannah.nongnu.org/releases/massdns/
+- **主页**: https://github.com/blechschmidt/massdns
+- **许可证**: GPL-3.0-only
+- **构建系统**: Makefile（纯 C，无 configure，无 make install）
+- **功能**: 高性能 DNS stub resolver，支持批量域名解析、IPv4/IPv6、自定义 DNS 服务器
+- **特性**: 基于 Linux epoll 机制的高并发 DNS 查询，支持多种输出格式（文本、JSON、二进制、域名列表）
