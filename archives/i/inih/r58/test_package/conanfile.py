@@ -111,14 +111,13 @@ class InihTestConan(ConanFile):
             ]))
             try:
                 self.run(compile_cmd)
-                run_cmd = (
-                    f"cd {shlex.quote(tests_dir)} && "
-                    f"{shlex.quote(executable)} > {shlex.quote(actual)}"
-                )
+                # NOTE: OHOS kernel cwd handling is fragile — avoid shell `cd`
+                # in subprocesses; use Conan's built-in cwd parameter instead.
+                run_cmd = f"{shlex.quote(executable)} > {shlex.quote(actual)}"
                 if self.settings.os == "OHOS":
-                    self.run(f"{shlex.quote(bash)} -c {shlex.quote(run_cmd)}")
+                    self.run(f"{shlex.quote(bash)} -c {shlex.quote(run_cmd)}", cwd=tests_dir)
                 else:
-                    self.run(run_cmd)
+                    self.run(run_cmd, cwd=tests_dir)
                 with open(os.path.join(tests_dir, baseline), "rb") as expected_file:
                     expected = expected_file.read()
                 with open(actual, "rb") as actual_file:
