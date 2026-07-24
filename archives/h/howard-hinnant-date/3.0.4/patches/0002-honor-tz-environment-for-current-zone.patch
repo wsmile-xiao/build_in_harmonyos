@@ -1,0 +1,108 @@
+Description: Honor IANA TZ names without blocking existing platform discovery
+Origin: vendor, OpenHarmony portability adaptation
+Upstream: not submitted; planned for https://github.com/HowardHinnant/date/pulls after portability validation
+Source-Commit: f94b8f36c6180be0021876c4a397a054fe50c6f2
+Modification-Layer: 1 (upstream library and regression-test source)
+Knowledge-Ref: P-PATCH-003, P-PATCH-004
+
+--- a/src/tz.cpp
++++ b/src/tz.cpp
+@@ -4195,6 +4195,27 @@ sniff_realpath(const char* timezone)
+ const time_zone*
+ tzdb::current_zone() const
+ {
++    // POSIX permits applications to select the process timezone through TZ.
++    // Use an IANA name when available, but do not let POSIX rule strings,
++    // colon-prefixed paths, or invalid values block platform discovery.
++    if (const char* tz = std::getenv("TZ"))
++    {
++        std::string result = tz;
++        if (!result.empty() && result.front() == ':')
++            result.erase(0, 1);
++        if (!result.empty())
++        {
++            try
++            {
++                return locate_zone(result);
++            }
++            catch (const std::runtime_error&)
++            {
++                // Continue with the pre-existing platform discovery chain.
++            }
++        }
++    }
++
+     // On some OS's a file called /etc/localtime may
+     // exist and it may be either a real file
+     // containing time zone details or a symlink to such a file.
+--- a/test/tz_test/zoned_time_deduction.pass.cpp
++++ b/test/tz_test/zoned_time_deduction.pass.cpp
+@@ -22,9 +22,11 @@
+ 
+ #include "tz.h"
+ #include "OffsetZone.h"
+ #include <cassert>
++#include <cstdlib>
++#include <stdexcept>
+ #include <type_traits>
+ #include <string>
+ 
+ #if HAS_DEDUCTION_GUIDES
+ #include <string_view>
+@@ -143,12 +145,56 @@ private:
+ template<typename T>
+ T const& to_const(T& t) { return t; }
+ 
++#ifndef _WIN32
++void
++testCurrentZoneTzEnvironmentFallback()
++{
++    const char* current_tz = std::getenv("TZ");
++    const bool had_tz = current_tz != nullptr;
++    const std::string saved_tz = had_tz ? current_tz : "";
++
++    assert(setenv("TZ", "UTC", 1) == 0);
++    assert(date::current_zone() != nullptr);
++
++    const char* unsupported_tz_values[] =
++    {
++        "UTC0",
++        "EST5EDT,M3.2.0/2,M11.1.0/2",
++        ":/etc/localtime",
++        "Not/A/Real_Zone"
++    };
++    for (const char* value : unsupported_tz_values)
++    {
++        assert(setenv("TZ", value, 1) == 0);
++        try
++        {
++            (void)date::current_zone();
++        }
++        catch (const std::runtime_error& e)
++        {
++            // A final discovery failure is allowed, but the candidate lookup
++            // must not leak its own exception and short-circuit the fallback.
++            assert(std::string(e.what()) == "Could not get current timezone");
++        }
++    }
++
++    if (had_tz)
++        assert(setenv("TZ", saved_tz.c_str(), 1) == 0);
++    else
++        assert(unsetenv("TZ") == 0);
++}
++#endif
++
+ 
+ int
+ main()
+ {
+     using namespace date;
+     using namespace std::chrono;
+     using date::sys_time, date::local_days, date::local_time;
+ 
++#ifndef _WIN32
++    testCurrentZoneTzEnvironmentFallback();
++#endif
++
+ #if HAS_DEDUCTION_GUIDES
