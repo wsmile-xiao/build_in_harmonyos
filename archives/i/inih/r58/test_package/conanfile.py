@@ -16,7 +16,7 @@ from conan import ConanFile
 from conan.errors import ConanException
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.env import VirtualRunEnv
-from conan.tools.files import get, mkdir
+from conan.tools.files import download, mkdir, unzip
 
 
 class InihTestConan(ConanFile):
@@ -66,13 +66,10 @@ class InihTestConan(ConanFile):
         root = os.path.join(self.build_folder, "upstream-r58")
         if not os.path.isfile(os.path.join(root, "ini.c")):
             mkdir(self, root)
-            get(
-                self,
-                url=self._upstream_url,
-                sha256=self._upstream_sha256,
-                destination=root,
-                strip_root=True,
-            )
+            tarball = os.path.join(self.build_folder, "upstream-r58.tar.gz")
+            download(self, url=self._upstream_url, filename=tarball,
+                     sha256=self._upstream_sha256, verify=True)
+            unzip(self, tarball, destination=root, strip_root=True)
         return root
 
     def _emit_upstream(self, status, executed, passed, failed, skipped, reason=None):
