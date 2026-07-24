@@ -73,3 +73,5 @@ class InihConan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["inih"]
+        self.cpp_info.set_property("cmake_file_name", "inih")
+        self.cpp_info.set_property("cmake_target_name", "inih::inih")

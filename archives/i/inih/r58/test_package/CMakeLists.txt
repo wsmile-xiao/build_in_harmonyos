@@ -1,4 +1,10 @@
 cmake_minimum_required(VERSION 3.15)
+
+# OHOS: CMake 4.1.2 cannot fully verify C compiler on unknown platforms
+# (HarmonyOS). Bypass the compiler-test-executable step; linking works
+# fine at actual build time via the Conan toolchain compiler setting.
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
 project(test_inih C)
 
 # Find the package via Conan-generated CMakeDeps
