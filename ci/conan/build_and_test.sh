@@ -694,9 +694,10 @@ PYEOF
         # Conan 2.x: `conan cache path "name/version"` returns the recipe cache
         # (only conanfile.py + conandata.yml), not the package cache (lib/, include/).
         # Parse the Package folder path from the conan create build log instead.
-        # NOTE: 用 `|| true` 隔离 grep 的 SIGPIPE（tail -1 关闭管道后 grep 写入触发 SIGPIPE → exit 141，
-        #   在 pipefail+set -e 下会导致整个脚本崩溃）
-        PKG_CACHE=$( { grep "Package folder" "$BUILD_LOG" 2>/dev/null || true; } | tail -1 | sed 's/.*Package folder //')
+        # NOTE: 用 awk 单进程替代 grep|tail|sed 管道，彻底消除 SIGPIPE (exit 141) 风险
+        #   （zsh + pipefail + set -e 下，grep 写入 tail 管道被提前关闭 → SIGPIPE → exit 141，
+        #    trap '' PIPE 和 || true 在 $(...) 子 shell 中不可靠）
+        PKG_CACHE=$(awk '/Package folder/{line=$0} END{sub(/.*Package folder /,"",line); print line}' "$BUILD_LOG" 2>/dev/null || true)
         if [ -n "$PKG_CACHE" ] && [ -d "$PKG_CACHE" ]; then
             BINS=$(find "$PKG_CACHE" -name "bin" -type d 2>/dev/null | head -1)
             LIBS=$(find "$PKG_CACHE" -name "lib" -type d 2>/dev/null | head -1)
@@ -879,8 +880,8 @@ PYEOF
         SOURCE_URL=""
         SOURCE_SHA256=""
         if [ -f "$CONANDATA_FILE" ]; then
-            SOURCE_URL=$(grep -E '^\s*url:' "$CONANDATA_FILE" 2>/dev/null | head -1 | sed 's/^\s*url:\s*//' | tr -d '"' || echo "")
-            SOURCE_SHA256=$(grep -E '^\s*sha256:' "$CONANDATA_FILE" 2>/dev/null | head -1 | sed 's/^\s*sha256:\s*//' | tr -d '"' || echo "")
+            SOURCE_URL=$(awk -F'"' '/^\s*url:/{gsub(/^[ \t]*url:[ \t]*/,""); gsub(/"/,""); print; exit}' "$CONANDATA_FILE" 2>/dev/null || echo "")
+            SOURCE_SHA256=$(awk -F'"' '/^\s*sha256:/{gsub(/^[ \t]*sha256:[ \t]*/,""); gsub(/"/,""); print; exit}' "$CONANDATA_FILE" 2>/dev/null || echo "")
         fi
 
         # Build trace info from environment / profile
