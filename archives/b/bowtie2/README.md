@@ -1,46 +1,55 @@
 # bowtie2
 
-**简介**: 快速灵敏的带间隔读段比对工具，用于测序数据比对
+**简介**: 快速灵敏的带间隔读段比对工具，用于将下一代测序数据比对到参考基因组
 
-**主页**: https://bowtie2.sourceforge.net/
+**主页**: https://bowtie-bio.sourceforge.net/bowtie2/
 
 **许可证**: GPL-3.0-or-later
 
 **分类**: data（生物信息数据处理）
 
+**构建系统**: Makefile（纯 Makefile，无 configure 脚本）
+
+## 版本
+
+| 版本 | 状态 | 编译日期 | 说明 |
+|------|------|----------|------|
+| 2.5.5 | built | 2026-07-17 | aarch64-OHOS 适配 |
+
+## 产物
+
+构建产物（6 个 ELF 二进制 + 3 个包装脚本）均安装到 `bin/`：
+
+| 文件 | 类型 | 说明 |
+|------|------|------|
+| bowtie2-align-s | ELF | 小索引比对器（small index, ≤4Gb 参考） |
+| bowtie2-align-l | ELF | 大索引比对器（large index, >4Gb 参考） |
+| bowtie2-build-s | ELF | 小索引构建器 |
+| bowtie2-build-l | ELF | 大索引构建器 |
+| bowtie2-inspect-s | ELF | 小索引查看器 |
+| bowtie2-inspect-l | ELF | 大索引查看器 |
+| bowtie2 | Perl 脚本 | 用户面向包装脚本（需 Perl） |
+| bowtie2-build | Python3 脚本 | 用户面向包装脚本（需 Python3） |
+| bowtie2-inspect | Python3 脚本 | 用户面向包装脚本（需 Python3） |
+
 ## OHOS 适配要点
 
-### 关键适配点
-- bowtie2 使用纯 Makefile（非 autotools），无 configure 脚本
-- 在 aarch64 上，SSE2 内联函数通过 SIMD Everywhere（simde/x86/sse2.h）实现可移植 SIMD
-- Release tarball 不包含 git submodule 内容，需单独下载并填充 third_party/simde 目录
-- `uname` 在 OHOS 返回 "HarmonyOS"（非 Linux），Makefile 通过 `uname -m` 正确识别 aarch64
-- 无标准 `make check` 目标，使用真实功能验证（建索引+比对）替代
-- 包装脚本：`bowtie2`（Perl）、`bowtie2-build`（Python3）、`bowtie2-inspect`（Python3）
+- 纯 Makefile 项目（无 configure 脚本），通过 SHELL/CC/CXX/CPPFLAGS/CXXFLAGS/LDFLAGS 环境变量注入编译配置
+- aarch64 上 SSE2 内联函数通过 SIMD Everywhere（simde/x86/sse2.h）实现可移植
+- Release tarball 不含 simde submodule，需在 source() 中从 simde-no-tests 仓库填充 third_party/simde
+- OHOS 无 /bin/bash，Makefile 内 shell 命令必须显式指定 SHELL=/data/service/hnp/bin/bash
+- R26: -stdlib=libc++ 必须同时出现在 CXXFLAGS 和 LDFLAGS
+- 无标准 make check 目标，上游 simple-test 依赖 Perl + aarch64 运行时，已加入 no_official_test.txt 白名单
 
-### 编译命令
-```bash
-# 填充 simde submodule（必须先做）
-curl -fsSL https://github.com/simd-everywhere/simde-no-tests/archive/refs/heads/master.tar.gz -o /tmp/simde.tar.gz
-tar xzf /tmp/simde.tar.gz && rm -rf third_party/simde && cp -a /tmp/simde-no-tests-master third_party/simde
+## 依赖
 
-# 编译
-make PREFIX=$DEFAULT_PREFIX CXX=clang++ CC=clang -j2
-make install PREFIX=$DEFAULT_PREFIX DESTDIR=$TEST_PREFIX
-```
+- **zlib/1.3.1** — Conan 仓库已发布（Makefile 硬编码 `-lz`）
+- **pthread** — sysroot 提供
+- **simde** — 上游 git submodule（third_party/simde），已在 conandata.yml 声明并自动填充
 
-### 依赖
-- zlib（通过 sysroot 提供）
-- pthread（通过 sysroot 提供）
-- simde（git submodule，需手动填充）
+## 已知限制
 
-### 已知问题
-- Release tarball 中 simde submodule 为空目录，需手动下载填充
-- Perl 包装脚本 `bowtie2` 需安装 Perl 才能使用
-- G0 clean-verify 无法运行（无 configure 脚本，工具限制）
-
-### 功能验证结果
-- 索引构建：✅ 成功（lambda_virus 示例）
-- 单端比对：✅ 94.04% 比对率
-- 双端比对：✅ 94.97% 比对率
-- 紧凑索引查看：✅ 正确输出
+- bowtie2 Perl 包装脚本（`bowtie2`）在无 Perl 环境下不可用；Python3 包装脚本可直接使用
+- 上游 `make simple-test` 因 Perl 依赖 + 交叉编译架构不匹配而跳过
+- 不支持 SRA 输入（`USE_SRA` 未启用）
+- 不支持 zstd 压缩（`WITH_ZSTD` 未启用）
