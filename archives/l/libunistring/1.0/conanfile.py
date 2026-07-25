@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """Conan recipe for libunistring 1.0 on OHOS."""
-import glob
 import os
 
 from conan import ConanFile
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
-from conan.tools.gnu import AutotoolsToolchain
 from conan.tools.layout import basic_layout
 
 
@@ -31,28 +29,21 @@ class LibunistringConan(ConanFile):
         get(self, **self.conan_data["sources"], strip_root=True)
 
     def _compiler(self):
-        candidates = sorted(
-            glob.glob("/storage/Users/currentUser/ohpc-ci-shadow/runs/*/tools/clang"),
-            key=os.path.getmtime,
-            reverse=True,
-        )
-        for candidate in candidates:
-            if os.access(candidate, os.X_OK):
-                return candidate
-        return "clang"
+        compilers = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
+        return compilers.get("c", "clang")
 
-    def generate(self):
-        tc = AutotoolsToolchain(self)
+    def _configure_args(self):
+        configure_args = []
         if self.options.shared:
-            tc.configure_args.extend(["--enable-shared", "--disable-static"])
+            configure_args.extend(["--enable-shared", "--disable-static"])
         else:
-            tc.configure_args.extend(["--disable-shared", "--enable-static"])
-        tc.configure_args.extend([
+            configure_args.extend(["--disable-shared", "--enable-static"])
+        configure_args.extend([
             "--disable-rpath",
             "--disable-dependency-tracking",
             "--cache-file=config.cache",
         ])
-        tc.generate()
+        return configure_args
 
     def build(self):
         apply_conandata_patches(self)
@@ -76,19 +67,15 @@ class LibunistringConan(ConanFile):
         shell = "/system/bin/sh"
         os.environ["SHELL"] = shell
         os.environ["CONFIG_SHELL"] = shell
-        configure_args = [
-            "--disable-shared",
-            "--enable-static",
+        configure_args = self._configure_args()
+        configure_args.extend([
             "--prefix=/",
             "--bindir=${prefix}/bin",
             "--sbindir=${prefix}/bin",
             "--libdir=${prefix}/lib",
             "--includedir=${prefix}/include",
             "--oldincludedir=${prefix}/include",
-            "--disable-rpath",
-            "--disable-dependency-tracking",
-            "--cache-file=config.cache",
-        ]
+        ])
         cc = self._compiler()
         build_env = f"SHELL={shell} CONFIG_SHELL={shell} CC={cc} LD=ld.lld AR=llvm-ar RANLIB=llvm-ranlib STRIP=:"
         self.run(f"{build_env} {shell} ./configure {' '.join(configure_args)}", cwd=self.source_folder)

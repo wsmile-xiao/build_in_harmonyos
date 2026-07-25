@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import glob
 import os
 
 from conan import ConanFile
@@ -17,15 +16,8 @@ class TestPackageConan(ConanFile):
         basic_layout(self)
 
     def _compiler(self):
-        candidates = sorted(
-            glob.glob("/storage/Users/currentUser/ohpc-ci-shadow/runs/*/tools/clang"),
-            key=os.path.getmtime,
-            reverse=True,
-        )
-        for candidate in candidates:
-            if os.access(candidate, os.X_OK):
-                return candidate
-        return "clang"
+        compilers = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
+        return compilers.get("c", "clang")
 
     def generate(self):
         runenv = VirtualRunEnv(self)
