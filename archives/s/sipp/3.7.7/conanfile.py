@@ -180,6 +180,57 @@ class SippConan(ConanFile):
             'fi\n${MAKE:-make} preinstall',
             'fi\nif test "$no_create" != yes; then\n  ${MAKE:-make} preinstall\nfi',
             strict=False,
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "config.guess"),
+            """    *:Minix:*:*)
+	GUESS=$UNAME_MACHINE-unknown-minix
+	;;""",
+            """    *:Minix:*:*)
+	GUESS=$UNAME_MACHINE-unknown-minix
+	;;
+    *:HarmonyOS:*:*)
+	case "$UNAME_MACHINE" in
+	    aarch64|arm64)
+		MACHINE=aarch64
+		;;
+	    armv7*|armv8*)
+		MACHINE=arm
+		;;
+	    x86_64|amd64)
+		MACHINE=x86_64
+		;;
+	    i?86)
+		MACHINE=i686
+		;;
+	    *)
+		MACHINE="$UNAME_MACHINE"
+		;;
+	esac
+	GUESS=${MACHINE}-unknown-linux-ohos
+	;;""",
+            strict=False,
+        )
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "config.sub"),
+            "| fiwix* | mlibc* | cos* | mbr* | ironclad* )",
+            "| fiwix* | mlibc* | cos* | mbr* | ironclad* | ohos* )",
+            strict=False,
+        )
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "config.sub"),
+            "| linux-relibc*- | linux-uclibc*- )",
+            "| linux-relibc*- | linux-uclibc*- | linux-ohos*- )",
+            strict=False,
+        )
+        replace_in_file(
+            self,
+            os.path.join(source_dir, "configure"),
+            "#! /bin/sh",
+            f"#! /bin/sh\nCONFIG_SHELL={shlex.quote(config_shell)}\nSHELL={shlex.quote(config_shell)}\nTMPDIR={shlex.quote(tmpdir)}\nexport CONFIG_SHELL SHELL TMPDIR",
+            strict=False,
         )
 
     def _patch_ncurses_config_status(self, source_dir, tmpdir):
