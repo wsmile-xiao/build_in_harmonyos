@@ -48,6 +48,7 @@ if [ -z "${CI_PACKAGES:-}" ] && [ $# -gt 0 ]; then
     CI_PACKAGES="$*"
 fi
 PACKAGES=()
+MISSING_CONANFILE=()
 if [ -n "${CI_PACKAGES:-}" ]; then
     # CI 传入了定向包列表（空格分隔的相对路径，如 "archives/b/bash/5.3"）
     echo "[step] CI_PACKAGES received: $CI_PACKAGES"
@@ -62,6 +63,7 @@ if [ -n "${CI_PACKAGES:-}" ]; then
             PACKAGES+=("$pkg_dir")
         else
             echo "[warn] Path in CI_PACKAGES has no conanfile.py: $pkg_path"
+            MISSING_CONANFILE+=("$pkg_path")
         fi
     done
 else
@@ -78,6 +80,25 @@ fi
 
 if [ ${#PACKAGES[@]} -eq 0 ]; then
     echo "[error] No packages to build"
+    echo ""
+    echo "─── 修复建议 ───"
+    if [ -n "${CI_PACKAGES:-}" ] && [ ${#MISSING_CONANFILE[@]} -gt 0 ]; then
+        # CI_PACKAGES 指定的路径都没找到 conanfile.py
+        echo "[hint] CI_PACKAGES 指定的路径中没有 conanfile.py"
+        echo "       CI_PACKAGES = $CI_PACKAGES"
+        echo ""
+        echo "       这通常意味着 PR 只改了 conandata.yml（源码下载元数据）"
+        echo "       但没有包含 conanfile.py（构建脚本）"
+        echo ""
+        echo "       请在以下目录创建 conanfile.py（参考 templates/ 目录模板）:"
+        for missing_path in "${MISSING_CONANFILE[@]}"; do
+            echo "         - $missing_path/conanfile.py"
+        done
+    else
+        echo "[hint] 在 $SCAN_ROOT/ 下没有找到任何 conanfile.py"
+        echo "       请确保 archives/字母/包名/版本/conanfile.py 文件存在"
+    fi
+    echo "─── end 修复建议 ───"
     exit 1
 fi
 
