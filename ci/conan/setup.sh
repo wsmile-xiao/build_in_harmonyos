@@ -27,15 +27,34 @@ export PATH="$HOME/.local/bin:$PATH"
 # If conan binary exists but is broken, force-reinstall to fix
 if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
     echo "[step] Conan not found or broken, (re)installing..."
-    # 安装 OHOS 适配版 conan（私有 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）
-    # 不要钉死官方旧版本号，应从配置的 PyPI 源安装最新适配版
-    # Use python3 -m pip to bypass potentially broken pip3 shebang
-    # (HNP pip3/conan binaries may have shebangs pointing to non-existent
-    #  build-machine paths with ^M line endings)
-    python3 -m pip install --user --force-reinstall conan || {
+    # 安装 OHOS 适配版 conan（社区 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）。
+    # 社区 PyPI 只托管适配版 conan wheel，不保证包含 requests/idna 等通用依赖；
+    # 因此分两步：先从社区源下载 conan wheel，再安装本地 wheel 并从公开 PyPI 解析依赖。
+    # 这样既避免误装官方 conan，又避免社区源缺依赖导致 CI setup 失败。
+    PIP_COMMUNITY_INDEX="${PIP_COMMUNITY_INDEX:-https://pypi.cnb.cool/OpenHarmonyPCDeveloper/pypi/-/packages/simple}"
+    PIP_PUBLIC_INDEX="${PIP_PUBLIC_INDEX:-https://pypi.org/simple}"
+    PIP_TMP_DIR="${TMPDIR:-$HOME/tmp}/conan-wheel-$$"
+    mkdir -p "$PIP_TMP_DIR"
+
+    python3 -m pip download --no-deps --dest "$PIP_TMP_DIR" \
+        --index-url "$PIP_COMMUNITY_INDEX" --trusted-host pypi.cnb.cool conan || {
+        echo "[error] Failed to download OHOS-adapted conan wheel"
+        exit 1
+    }
+
+    CONAN_WHEEL="$(find "$PIP_TMP_DIR" -name 'conan-*.whl' -type f | head -n 1)"
+    if [ -z "$CONAN_WHEEL" ]; then
+        echo "[error] OHOS-adapted conan wheel not found in $PIP_TMP_DIR"
+        exit 1
+    fi
+
+    # Use python3 -m pip to bypass potentially broken pip3 shebang.
+    python3 -m pip install --user --force-reinstall \
+        --index-url "$PIP_PUBLIC_INDEX" "$CONAN_WHEEL" || {
         echo "[error] Failed to install conan"
         exit 1
     }
+    rm -rf "$PIP_TMP_DIR" 2>/dev/null || true
     # Ensure user-installed binaries are found before any broken HNP version
     export PATH="$HOME/.local/bin:$PATH"
 fi
