@@ -43,7 +43,7 @@ if [ -f "$INPUT" ] && echo "$INPUT" | grep -qE '\.(tar\.gz|tgz|tar\.bz2|tar\.xz|
     mkdir -p "$WORK_DIR"
     tar xf "$INPUT" -C "$WORK_DIR"
     # 取解压后的顶层目录
-    SRC_DIR=$(ls -d "$WORK_DIR"/*/ 2>/dev/null | head -1)
+    SRC_DIR=$(find "$WORK_DIR" -maxdepth 1 -mindepth 1 -type d -print -quit 2>/dev/null)
     SRC_DIR="${SRC_DIR%/}"
 elif [ -d "$INPUT" ]; then
     SRC_DIR="$INPUT"
@@ -107,7 +107,7 @@ if [ "$BUILD_SYSTEM" = "autotools" ] || [ "$BUILD_SYSTEM" = "makefile" ]; then
     # Makefile 项目: make -n check
     if [ -f "$SRC_DIR/Makefile" ]; then
         echo "--- make -n check 输出 (前 50 行) ---"
-        (cd "$SRC_DIR" && make -n check 2>&1 | head -50) || echo "[warn] make -n check 失败 (可能需要先 ./configure)"
+        (cd "$SRC_DIR" && make -n check 2>&1 | head -50 || true) || echo "[warn] make -n check 失败 (可能需要先 ./configure)"
     else
         echo "[info] 没有 Makefile, 需要先运行 ./configure"
         echo "[info] 请手动执行:"
@@ -137,7 +137,7 @@ echo "── [3] 测试相关文件 ──────────────�
 echo ""
 echo "--- tests/ 目录 ---"
 if [ -d "$SRC_DIR/tests" ]; then
-    find "$SRC_DIR/tests" -maxdepth 2 -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.sh" -o -name "*.tests" -o -name "*.py" \) 2>/dev/null | head -30
+    find "$SRC_DIR/tests" -maxdepth 2 -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.sh" -o -name "*.tests" -o -name "*.py" \) 2>/dev/null | head -30 || true
 else
     echo "(无 tests/ 目录)"
 fi
@@ -145,14 +145,14 @@ echo ""
 
 echo "--- test/ 目录 ---"
 if [ -d "$SRC_DIR/test" ]; then
-    find "$SRC_DIR/test" -maxdepth 2 -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.sh" -o -name "*.py" \) 2>/dev/null | head -30
+    find "$SRC_DIR/test" -maxdepth 2 -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.sh" -o -name "*.py" \) 2>/dev/null | head -30 || true
 else
     echo "(无 test/ 目录)"
 fi
 echo ""
 
 echo "--- 源码目录下的测试文件 (example/test/check) ---"
-find "$SRC_DIR" -maxdepth 1 -type f \( -name "example*.c" -o -name "*test*.c" -o -name "*test*.cpp" -o -name "*check*.c" \) 2>/dev/null | head -20
+find "$SRC_DIR" -maxdepth 1 -type f \( -name "example*.c" -o -name "*test*.c" -o -name "*test*.cpp" -o -name "*check*.c" \) 2>/dev/null | head -20 || true
 echo ""
 
 # ── 4. 生成 MANIFEST.yml 骨架 ──

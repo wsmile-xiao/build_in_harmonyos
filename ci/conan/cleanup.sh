@@ -205,7 +205,7 @@ fi
 for tmpdir in "/tmp" "/var/tmp" "$HOME_DIR/.tmp"; do
     if [ -d "$tmpdir" ] && [ -w "$tmpdir" ]; then
         # 只清理 conan 相关的临时文件
-        conan_tmp=$(find "$tmpdir" -maxdepth 1 -name "conan*" -o -name "tmp*" 2>/dev/null | head -20)
+        conan_tmp=$(find "$tmpdir" -maxdepth 1 \( -name "conan*" -o -name "tmp*" \) 2>/dev/null | head -20 || true)
         if [ -n "$conan_tmp" ]; then
             echo "$conan_tmp" | while IFS= read -r f; do
                 [ -n "$f" ] && rm -rf "$f" 2>/dev/null

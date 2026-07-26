@@ -173,7 +173,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
     # L0c: test_package/ 下必须有测试源文件 (.c/.cpp/.cc/.cxx/.sh/.py)
     TEST_SOURCES=""
     for ext in c cpp cc cxx sh py; do
-        found=$(find "$TEST_PKG_DIR" -maxdepth 2 -name "*.$ext" -not -name "conanfile.py" 2>/dev/null | head -1)
+        found=$(find "$TEST_PKG_DIR" -maxdepth 2 -name "*.$ext" -not -name "conanfile.py" -print -quit 2>/dev/null)
         if [ -n "$found" ]; then
             TEST_SOURCES="$found"
             break
@@ -238,7 +238,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
         # 检测 self.run() 或 self.run(...) 中的 ${CC}, ${CXX}, ${CFLAGS}, ${LDFLAGS}
         SHELL_ENV_VARS=$(grep -nE 'self\.run\(.*\$\{(CC|CXX|CFLAGS|CXXFLAGS|LDFLAGS|AR|RANLIB)\}' "$CONANFILE" 2>/dev/null || true)
         if [ -n "$SHELL_ENV_VARS" ]; then
-            BAD_VAR=$( { echo "$SHELL_ENV_VARS" | head -1 | grep -oE '\$\{[A-Z]+\}' || true; } | head -1)
+            BAD_VAR=$(awk 'NR==1{line=$0} END{if(match(line,/\$\{[A-Z]+\}/)) print substr(line,RSTART,RLENGTH)}' <<< "$SHELL_ENV_VARS")
             echo "[fail] L0h: conanfile.py 在 self.run() 中依赖未定义 shell 变量 ${BAD_VAR} — 用 self.conf.get() 代替 (R33)"
             L0_FAILED=true
             L0_ERRORS="${L0_ERRORS} shell_env_var_in_run"
@@ -250,7 +250,7 @@ for pkg_dir in "${PACKAGES[@]}"; do
         REMOTE_HARDCODE=$(grep -nE 'conan\s+(install|download|create|upload|export).*\s-r[= ]' "$CONANFILE" 2>/dev/null || true)
         if [ -n "$REMOTE_HARDCODE" ]; then
             echo "[fail] L0g: conanfile.py 禁止硬编码 remote 名称 (-r=), remote 属于 CI 环境配置"
-            echo "       $(echo "$REMOTE_HARDCODE" | head -1)"
+            echo "       ${REMOTE_HARDCODE%%$'\n'*}"
             L0_FAILED=true
             L0_ERRORS="${L0_ERRORS} hardcoded_remote"
         fi
@@ -323,7 +323,7 @@ PYEOF
         for dep_ref in $UNPUBLISHED_DEPS; do
             dep_name=$(echo "$dep_ref" | cut -d'/' -f1)
             dep_ver=$(echo "$dep_ref" | cut -d'/' -f2)
-            local_recipe=$(find "$REPO_ROOT/archives" -path "*/${dep_name}/${dep_ver}/conanfile.py" -not -path "*/test_package/*" 2>/dev/null | head -1)
+            local_recipe=$(find "$REPO_ROOT/archives" -path "*/${dep_name}/${dep_ver}/conanfile.py" -not -path "*/test_package/*" -print -quit 2>/dev/null)
             if [ -n "$local_recipe" ]; then
                 echo "[step] Exporting local recipe for missing dependency: $dep_ref"
                 conan export "$(dirname "$local_recipe")" 2>/dev/null && \
@@ -720,9 +720,9 @@ PYEOF
         #    trap '' PIPE 和 || true 在 $(...) 子 shell 中不可靠）
         PKG_CACHE=$(awk '/Package folder/{line=$0} END{sub(/.*Package folder /,"",line); print line}' "$BUILD_LOG" 2>/dev/null || true)
         if [ -n "$PKG_CACHE" ] && [ -d "$PKG_CACHE" ]; then
-            BINS=$(find "$PKG_CACHE" -name "bin" -type d 2>/dev/null | head -1)
-            LIBS=$(find "$PKG_CACHE" -name "lib" -type d 2>/dev/null | head -1)
-            INCS=$(find "$PKG_CACHE" -name "include" -type d 2>/dev/null | head -1)
+            BINS=$(find "$PKG_CACHE" -name "bin" -type d -print -quit 2>/dev/null)
+            LIBS=$(find "$PKG_CACHE" -name "lib" -type d -print -quit 2>/dev/null)
+            INCS=$(find "$PKG_CACHE" -name "include" -type d -print -quit 2>/dev/null)
 
             if [ -n "$BINS" ] && [ -n "$(ls -A "$BINS" 2>/dev/null)" ]; then
                 echo "[ok] L5: bin/ has content"
