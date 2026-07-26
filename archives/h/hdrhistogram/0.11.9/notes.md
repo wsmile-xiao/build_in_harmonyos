@@ -4,7 +4,7 @@
 - 构建系统: cmake (4.1.2)
 - 编译日期: 2026-04-20
 - 编译器: clang 15.0.4
-- 状态: success
+- 状态: published
 
 ## 编译步骤
 1. 由于网络限制无法直接访问 GitHub，使用 jsdelivr CDN 镜像下载源文件
@@ -21,7 +21,8 @@
 ## 源码修改
 | 文件 | 修改内容 | 是否已生成补丁 |
 |------|----------|----------------|
-| src/hdr_time.c | 添加 time.h/unistd.h 头文件，定义 CLOCK_MONOTONIC/CLOCK_REALTIME 宏 | ✅ 0001-fix-openharmony-clock-functions.patch |
+| src/hdr_time.c | 添加 time.h/unistd.h 头文件，定义 CLOCK_MONOTONIC/CLOCK_REALTIME 宏 | ✅ 0001-src-hdr_time.c.patch |
+| test/hdr_histogram_perf.c | 添加 --version/--help 快速返回，避免性能基准在命令探测中长跑 | ✅ 0002-test-hdr_histogram_perf.c.patch |
 
 ## 依赖版本
 - pthread (libpthread)
@@ -44,3 +45,7 @@
 ## 注意事项
 - 编译时有 2 个警告（usleep/clock_gettime 隐式声明），不影响功能
 - 如需日志功能需安装 zlib 并重新编译
+---
+
+**编译结束**: 2026-07-13 19:32
+**最终状态**: published
