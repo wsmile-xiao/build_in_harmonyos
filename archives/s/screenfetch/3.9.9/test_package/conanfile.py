@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+"""Conan test_package for screenfetch 3.9.9 — Shell script smoke test.
+
+Verifies that the installed `screenfetch` command is functional by exercising
+its real entry points (`--version` and `--help`), which execute the packaged
+Bash script (R34: the test runs the package's binary, not a stub).
+"""
+import os
+import shutil
+
+from conan import ConanFile
+from conan.tools.build import can_run
+
+
+class ScreenfetchTestConan(ConanFile):
+    settings = "os", "arch"
+    test_type = "explicit"
+    generators = "VirtualRunEnv"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def test(self):
+        if can_run(self):
+            dep = self.dependencies["screenfetch"]
+            bin_dir = os.path.join(dep.package_folder, "bin")
+
+            bash_path = (
+                os.environ.get("CONFIG_SHELL")
+                or os.environ.get("SHELL")
+                or shutil.which("bash")
+                or "/data/service/hnp/bin/bash"
+            )
+
+            self.run(
+                f'cd "{self.source_folder}" && '
+                f'CONFIG_SHELL="{bash_path}" '
+                f'"{bash_path}" test.sh "{bin_dir}"',
+                env="conanrun",
+            )

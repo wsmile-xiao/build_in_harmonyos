@@ -43,6 +43,38 @@ fi
 CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
 echo "[step] Conan version: $CONAN_VERSION"
 
+# If conan still can't run after install/reinstall, diagnose the root cause
+if [ "$CONAN_VERSION" = "unknown" ]; then
+    echo "[error] conan 仍然无法运行, 诊断系统环境..."
+    # Check for common system-level issues
+    python3 -c "import sqlite3" 2>&1 || {
+        echo "[error] Python sqlite3 模块损坏 — libsqlite3.so.0 缺失"
+        echo "[error] 这不是 conan 问题, 需要在 Worker 上安装/链接 libsqlite3.so.0"
+        echo "[error] 修复: 找到 HNP 目录下的 libsqlite3.so.0 或从 OHOS 系统链接"
+        # Try to find and link it
+        SQLITE_LIB=$(find /data/service/hnp /system/lib* /usr/lib* -name 'libsqlite3.so*' 2>/dev/null | head -1)
+        if [ -n "$SQLITE_LIB" ]; then
+            echo "[step] 尝试设置 LD_LIBRARY_PATH: $(dirname "$SQLITE_LIB")"
+            export LD_LIBRARY_PATH="$(dirname "$SQLITE_LIB"):${LD_LIBRARY_PATH:-}"
+            CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
+            echo "[step] Retry conan version: $CONAN_VERSION"
+        fi
+    }
+    python3 -c "import ssl" 2>&1 || echo "[error] Python ssl 模块损坏 — libssl.so 缺失"
+    # Check for other missing shared libraries
+    PYTHON3_BIN=$(which python3 2>/dev/null)
+    if [ -n "$PYTHON3_BIN" ]; then
+        ldd "$PYTHON3_BIN" 2>/dev/null | grep "not found" | while read -r line; do
+            echo "[error] 缺失动态库: $line"
+        done
+    fi
+    # Final check — if still broken, exit with clear message
+    if [ "$CONAN_VERSION" = "unknown" ]; then
+        echo "[error] Conan 无法启动, Worker 环境需要修复 (非 CI 脚本问题)"
+        exit 1
+    fi
+fi
+
 # ── 1b. Refresh stale settings.yml ──
 # conan caches settings.yml on first run; if conan was upgraded (e.g. OHOS
 # support added to default_settings.py), the cached file is stale and

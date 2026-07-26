@@ -1,88 +1,55 @@
-# speexdsp 1.2.1 — 编译进度
+# speexdsp 1.2.1 — 适配笔记
 
-> 档案创建时间: 2026-04-24 00:00:00
-> 最后更新: 2026-04-24 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> 档案创建时间: 2026-07-15
+> 最后更新: 2026-07-15
 
 ## 一、基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | speexdsp |
 | 版本 | 1.2.1 |
-| 状态 | ✅ success |
+| 状态 | built |
 | 构建系统 | autotools |
 | 源码路径 | https://downloads.xiph.org/releases/speex/speexdsp-1.2.1.tar.gz |
 
-## 二、编译阶段（checkbox 实时更新）
+## 二、编译阶段
 
 ### Phase 1: 环境准备
 - [x] ohc-run.py init-build 完成 / 源码下载解压
+- [x] 补丁应用 (config.guess, config.sub, config.h.in)
 
 ### Phase 2: 编译（configure + make + make install）
-- [x] configure 完成（记录参数和耗时）
-- [x] make 编译完成（记录错误和修复）
+- [x] configure 完成（需要 replace_in_file 修复 mktemp 问题）
+- [x] make 编译完成
 - [x] make install 完成
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
+### Phase 2.5: 独立目录安装验证
 - [x] 干净源码 + 补丁应用
 - [x] 独立 TEST_PREFIX configure + make install
 - [x] 功能回归测试结果
 
 ### Phase 3: 测试验证
-- [x] make check / make test 结果
-- [x] 安全弹窗触发确认
-
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [x] Step 1-10 打包流程（见 packaging.md）
+- [x] make check 结果: PASS
+- [x] conan-verify G2 (conan create + test_package): PASS
 
 ### Phase 5: 归档收尾
 - [x] 补丁生成（ohc-run.py refresh-patch --auto）
-- [x] manifest.yaml / README.md / PROGRESS.md 更新
-- [x] ohc-run.py verify-build 质量门禁
+- [x] manifest.yaml / README.md 更新
+- [x] conan-verify 质量门禁: PASS
 
-## 三、对话记录（⭐ 断点续传核心）
+## 三、关键发现
 
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
+### config.status tmpdir 问题 (E002)
+configure 生成的 config.status 使用 `mktemp -d "./confXXXXXX"` 在 OHOS 上失败。
+解决方案: conanfile.py build() 中使用 `replace_in_file` 修复 configure 脚本，
+将 mktemp 模式替换为 `${TMPDIR:-/tmp}/conan-cs-$$`。
 
-### 对话 #N — YYYY-MM-DD HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
+### 补丁策略
+- 0001-config.h.in.patch: 修改 config.h.in 模板
+- 0003-config.guess.patch: 添加 HarmonyOS/OHOS 平台检测
+- 0004-config.sub.patch: 添加 HarmonyOS/OHOS 平台支持
+- 其他补丁（Makefile.manual, test files, config_types.h）为构建产物或 configure 生成的文件，不需要声明
 
----
-
-### 对话 #1 — 2026-04-24 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| Makefile.manual | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| config.guess | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| config.guess | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| config.sub | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| config.h.in | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| 0004-config.sub | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| 0005-include-speex-speexdsp_config_types.h | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| speexdsp-1.2.1-ohos-aarch64-debug.tar.gz | 106KB | debug包 |
-| speexdsp-1.2.1-ohos-aarch64.tar.gz | 1034KB | 主包 |
-
-## 六、结束记录
-- **最终状态**: success
-- **结束时间**: 2026-04-24
+## 四、最终状态
+- **最终状态**: built
+- **结束时间**: 2026-07-15

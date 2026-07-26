@@ -1,104 +1,36 @@
-# PR: harfbuzz v14.2.0 OpenHarmony 编译成功记录
+# HarfBuzz 14.2.0 Conan recipe
 
-## 概述
+## Scope
 
-本次 PR 记录了 harfbuzz v14.2.0 在 OpenHarmony 平台上的编译成功成果。通过使用 amalgamated 源码编译方式，成功绕过了 meson 在 HMDFS 上的 subprocess 限制，生成了完整的预编译包。
+This version provides a source-built Conan 2 recipe for HarfBuzz 14.2.0. It uses the official release archive, depends on `freetype/2.14.3`, and publishes core, subset, and vector library components. No prebuilt binary is committed.
 
-## 编译信息
+## Configuration
 
-- **软件**: harfbuzz
-- **版本**: 14.2.0
-- **构建系统**: meson（实际使用 amalgamated 源码）
-- **平台**: OpenHarmony aarch64
-- **编译器**: clang 15.0.4 (LLVM)
-- **编译日期**: 2026-05-22
+- Build system: Meson
+- Library modes: shared and static through the standard Conan option
+- OHOS toolchain handling: explicit Meson `ar`/`ranlib` paths resolved by the same version-aware helper as the test/signing tools, plus post-install shared-library signing
+- Upstream test tool handling: on Linux/OHOS, absolute `NM`/`OBJDUMP` paths are resolved from Conan's configured clang with the original symbol and static-initializer checks retained; Windows/MSVC keeps upstream Meson behavior
+- Review hardening: partial buffer-allocation failures are cleaned up; signing tools are resolved without fixed Worker paths, and all dynamic signing-command paths are POSIX-shell quoted
+- Static consumer metadata: propagates `pthread` and `m` from upstream `Libs.private`
+- Enabled: FreeType, subset, vector, upstream tests
+- Disabled: glib, gobject, cairo, chafa, png, zlib, ICU, graphite, raster, GPU, introspection, documentation, utilities, benchmark
+- Patches: none
 
-## 编译方法
+## Local validation
 
-### 问题：meson subprocess 限制
+- WSL Ubuntu with Clang 15/libc++ and Conan 2.29.1
+- shared `conan create`: passed
+- static `conan create`: passed
+- shared upstream Meson tests: 59/59 passed, 0 failed, 0 skipped
+- static upstream Meson tests: 57 passed, 0 failed, 2 shared-library-only checks skipped
+- consumer shaping test: 1/1 passed in both modes
 
-meson 配置过程中，执行 gen-hb-version.py 脚本时遇到 HMDFS subprocess 权限限制，导致配置失败。
+WSL is a Linux/x86_64 approximation. HarmonyOS/aarch64 status must be determined by repository CI on the submitted HEAD.
 
-### 解决方案：amalgamated 源码编译
+PR #2906 Build #7523 compiled successfully but ended with 56 passed, 2 failed, and 1 skipped upstream groups because OHOS Python could not launch bare `llvm-nm` and `llvm-objdump` names. The recipe injects resolved absolute paths for those two original checks; follow-up Build #7546 passed all CI steps on HEAD `636741ba00a19aa07b87af58309a67603ddf7f67`.
 
-harfbuzz 提供了 amalgamated 源码（harfbuzz.cc），可以直接编译静态库和工具：
+Initial AI Review findings were applied: the consumer test destroys a non-NULL buffer when internal allocation fails, and the OHOS signing step resolves `llvm-objcopy` and `binary-sign-tool` through the active toolchain/PATH instead of hard-coded Worker locations.
 
-```bash
-# 编译静态库
-clang++ -fPIC -O2 -std=c++11 -fno-exceptions -fno-rtti \
-    -I./src -I.. `pkg-config --cflags freetype2 glib-2.0` \
-    -c src/harfbuzz.cc -o harfbuzz.o
-llvm-ar rcs libharfbuzz.a harfbuzz.o
+The second AI Review finding was also applied: Meson's `ar` and `ranlib` injection now calls the same version-aware resolver, so `clang-15` consistently selects `llvm-ar-15` and `llvm-ranlib-15`.
 
-# 编译工具
-clang++ -fPIC -O2 -std=c++11 -I./src -I. \
-    `pkg-config --cflags freetype2 glib-2.0` \
-    util/hb-shape.cc src/harfbuzz.cc -o hb-shape \
-    /path/to/libfreetype.a /path/to/libglib-2.0.a \
-    /path/to/libintl.a /path/to/libpcre2-8.a \
-    -lm -lz -lpthread -ldl
-```
-
-## 依赖版本
-
-| 依赖 | 版本 | 状态 |
-|------|------|------|
-| freetype2 | 26.6.20 | ✅ 已安装 |
-| glib-2.0 | 2.88.0 | ✅ 已安装 |
-| zlib | 1.3.1 | ✅ 已安装 |
-
-## 编译产物
-
-### 静态库
-- libharfbuzz.a (2.1MB)
-- libharfbuzz-subset.a (6.3MB)
-
-### 工具
-- hb-shape (HarfBuzz 14.2.0)
-- hb-info
-
-### 制品包（packaging 目录）
-- **harfbuzz-14.2.0-ohos-aarch64.tar.gz** (13.5MB) ✅
-- **harfbuzz-14.2.0-ohos-aarch64-debug.tar.gz** (3.5MB) ✅
-
-## 功能验证
-
-```bash
-$ hb-shape --version
-hb-shape (HarfBuzz) 14.2.0
-```
-
-编译成功，功能验证通过。
-
-## 文件列表
-
-- `archives/h/harfbuzz/14.2.0/manifest.yaml`: 编译元数据（状态：built）
-- `archives/h/harfbuzz/14.2.0/notes.md`: 详细编译过程记录
-- `archives/h/harfbuzz/14.2.0/packaging/harfbuzz-14.2.0-ohos-aarch64.tar.gz`: 预编译包
-- `archives/h/harfbuzz/14.2.0/packaging/harfbuzz-14.2.0-ohos-aarch64-debug.tar.gz`: 调试符号包
-- `archives/h/harfbuzz/14.2.0/patches/`: 空目录（无需补丁）
-- `archives/h/harfbuzz/14.2.0/reports/quality-report.md`: 质量报告
-
-## 检查清单
-
-- [x] 源码下载成功
-- [x] 构建环境准备完成
-- [x] 编译成功
-- [x] 归档文件创建
-- [x] **aarch64 制品包生成** ✅
-- [x] **aarch64-debug 制品包生成** ✅
-- [x] 功能验证通过
-- [x] Git 提交完成
-
-## 技术要点
-
-1. **meson subprocess 问题**: HMDFS 文件系统的 subprocess 执行限制，导致 meson 无法运行配置脚本
-2. **amalgamated 源码**: harfbuzz 提供的单文件源码，可绕过构建系统限制
-3. **配置文件**: 需手动创建 hb-features.h（从模板生成）
-4. **循环依赖**: harfbuzz 与 freetype 存在循环依赖，需先编译不带 harfbuzz 的 freetype
-
-## 参考
-
-- 上游仓库: https://github.com/harfbuzz/harfbuzz
-- 版本: 14.2.0
-- 文档: https://harfbuzz.github.io/
+Build #7584 passed all CI steps on follow-up HEAD `6de3ea24626b8b0b00feebd494289aa8e039fa23`. The third AI Review finding was then applied locally: `shlex.join()` now serializes the resolved `llvm-objcopy`, `binary-sign-tool`, input-library, and output-library arguments without unsafe shell path concatenation. A new formal CI run is required after this change is pushed.
