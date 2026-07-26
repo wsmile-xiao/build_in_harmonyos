@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Conan recipe for the maintained MP4v2 2.1.3 release on OpenHarmony."""
+
 import os
 import re
 import subprocess
@@ -52,7 +55,10 @@ class Mp4v2Conan(ConanFile):
 
     def _test_standard_usage(self, tool):
         environment = os.environ.copy()
-        library_path = "LD_LIBRARY_PATH"
+        library_path = {
+            "Macos": "DYLD_LIBRARY_PATH",
+            "Windows": "PATH",
+        }.get(str(self.settings.os), "LD_LIBRARY_PATH")
         environment[library_path] = self.build_folder + os.pathsep + environment.get(library_path, "")
         cases = (
             ((), 1, (r"^Usage: \S+", r"^Try.*-h.*--help")),
