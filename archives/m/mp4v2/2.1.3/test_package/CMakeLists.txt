@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.15)
-project(test_mp4v2)
+project(test_mp4v2 CXX)
 
 find_package(mp4v2 REQUIRED)
 
