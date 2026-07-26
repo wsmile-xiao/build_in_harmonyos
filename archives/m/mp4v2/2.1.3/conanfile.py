@@ -7,6 +7,7 @@ import subprocess
 
 from conan import ConanFile
 from conan.errors import ConanException
+from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, get
 
@@ -48,10 +49,15 @@ class Mp4v2Conan(ConanFile):
         cmake.build()
 
         # Mirror the 28 standardUsage.exp assertions from the upstream DejaGnu suite.
-        self.output.info("Running 28 upstream standardUsage.exp assertions")
-        for tool in ("mp4art", "mp4file", "mp4subtitle", "mp4track"):
-            self._test_standard_usage(os.path.join(self.build_folder, tool))
-        self.output.info("Upstream standardUsage.exp assertions passed")
+        if can_run(self):
+            self.output.info("Running 28 upstream standardUsage.exp assertions")
+            for tool in ("mp4art", "mp4file", "mp4subtitle", "mp4track"):
+                self._test_standard_usage(os.path.join(self.build_folder, tool))
+            self.output.info("Upstream standardUsage.exp assertions passed")
+        else:
+            self.output.info(
+                "Skipping upstream standardUsage.exp assertions: target binaries cannot run on this build machine"
+            )
 
     def _test_standard_usage(self, tool):
         environment = os.environ.copy()
