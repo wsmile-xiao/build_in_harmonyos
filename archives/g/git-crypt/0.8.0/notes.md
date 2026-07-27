@@ -33,7 +33,7 @@ make install DESTDIR=/storage/Users/currentUser/test-install-git-crypt-0.8.0
 
 ## 依赖版本
 
-- openssl/系统版本
+- openssl/3.5.6
 - git/系统版本
 
 ## 验证结果
@@ -64,3 +64,8 @@ ls -lh ~/git-crypt-test/bin/git-crypt
 
 **编译结束**: 2026-05-25 20:33
 **最终状态**: built
+---
+
+**编译结束**: 2026-07-15 15:58
+**最终状态**: built
+lt
