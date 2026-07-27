@@ -16,6 +16,8 @@ class CattleConan(ConanFile):
     package_type = "library"
 
     settings = "os", "compiler", "build_type", "arch"
+    options = {"shared": [True, False]}
+    default_options = {"shared": False}
 
     def requirements(self):
         self.requires("glib/2.84.0")
@@ -34,13 +36,13 @@ class CattleConan(ConanFile):
 
     def generate(self):
         tc = AutotoolsToolchain(self)
+        library_args = (
+            ["--enable-shared", "--disable-static"]
+            if self.options.shared
+            else ["--disable-shared", "--enable-static"]
+        )
         tc.configure_args.extend(
-            [
-                "--disable-shared",
-                "--enable-static",
-                "--disable-introspection",
-                "--disable-gtk-doc",
-            ]
+            library_args + ["--disable-introspection", "--disable-gtk-doc"]
         )
         tc.generate()
         PkgConfigDeps(self).generate()
