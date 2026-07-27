@@ -61,6 +61,14 @@ class PerlConan(ConanFile):
             f'"{shell}" Configure {" ".join(configure_args)}',
             cwd=self.source_folder,
         )
+        # Configure silently drops the root Makefile on OHOS although it
+        # generates the other .SH outputs. Run its Makefile generator with
+        # the selected shell and require the generated file before building.
+        self.run(
+            f'if [ ! -f Makefile ]; then "{shell}" -x Makefile.SH; fi; '
+            'test -f Makefile',
+            cwd=self.source_folder,
+        )
         # OHOS does not support GNU make's jobserver FIFO implementation.
         self.run("make -j1", cwd=self.source_folder)
         self.run("make test", cwd=self.source_folder)
