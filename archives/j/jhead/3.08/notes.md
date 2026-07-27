@@ -5,7 +5,7 @@
 - 编译日期: 2026-06-06
 - 编译器: clang 15.0.4 (OpenHarmony SDK)
 - 链接器: GNU ld.bfd (binutils 2.45)，绕过有缺陷的 SDK lld
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -85,7 +85,9 @@ $ readelf -d jhead | grep NEEDED
 - jhead 使用 `-V` 参数查看版本号，而非 `--version`
 - 鸿蒙上执行 ELF 二进制前必须先签名（sign-elf）
 
+**编译结束**: 2026-07-15
+**最终状态**: built
 ---
 
-**编译结束**: 2026-06-06 15:06
-**最终状态**: published
+**编译结束**: 2026-07-17 10:55
+**最终状态**: built
