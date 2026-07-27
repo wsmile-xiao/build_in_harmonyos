@@ -62,6 +62,42 @@ class PerlConan(ConanFile):
                 'dflt=y\n\tcase "$silent" in\n\ttrue) ;;',
                 'dflt=n\n\tcase "$silent" in\n\ttrue) ;;',
             )
+            locale_source = os.path.join(self.source_folder, "locale.c")
+            # OHOS defines LC_IDENTIFICATION but not glibc's corresponding
+            # _NL_IDENTIFICATION_* langinfo values.
+            replace_in_file(
+                self,
+                locale_source,
+                "      case _NL_IDENTIFICATION_TITLE:\n"
+                "      case _NL_IDENTIFICATION_SOURCE:\n"
+                "      case _NL_IDENTIFICATION_ADDRESS:",
+                "#  ifdef _NL_IDENTIFICATION_TITLE\n"
+                "      case _NL_IDENTIFICATION_TITLE:\n"
+                "      case _NL_IDENTIFICATION_SOURCE:\n"
+                "      case _NL_IDENTIFICATION_ADDRESS:",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "      case _NL_IDENTIFICATION_CATEGORY:\n"
+                "#  ifdef USE_LOCALE_IDENTIFICATION\n"
+                "        cat_index = LC_IDENTIFICATION_INDEX_;\n"
+                "#  endif\n"
+                "        break;",
+                "      case _NL_IDENTIFICATION_CATEGORY:\n"
+                "#  ifdef USE_LOCALE_IDENTIFICATION\n"
+                "        cat_index = LC_IDENTIFICATION_INDEX_;\n"
+                "#  endif\n"
+                "        break;\n"
+                "#  endif",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if ! defined(HAS_SOME_LANGINFO) || ! LC_IDENTIFICATION_AVAIL_",
+                "#  if defined(_NL_IDENTIFICATION_TITLE) && "
+                "(! defined(HAS_SOME_LANGINFO) || ! LC_IDENTIFICATION_AVAIL_)",
+            )
         configure_args = [
             "-des",
             f"-Dprefix={self.package_folder}",
