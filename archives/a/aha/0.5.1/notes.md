@@ -1,9 +1,9 @@
 # 编译笔记 — aha 0.5.1
 
-**软件名称**: aha (ANSI HTML Adapter)  
-**版本**: 0.5.1  
-**编译日期**: 2026-05-20  
-**编译状态**: published ✅
+**软件名称**: aha (ANSI HTML Adapter)
+**版本**: 0.5.1
+**编译日期**: 2026-07-15
+**编译状态**: built ✅
 
 ---
 
@@ -43,13 +43,8 @@ make PREFIX=$DEFAULT_PREFIX -j1
 **问题**: 鸿蒙系统缺少 `install` 命令
 
 **解决方案**: 修改Makefile，将install命令替换为：
-```makefile
-mkdir -p $(DESTDIR)$(PREFIX)/bin
-cp aha $(DESTDIR)$(PREFIX)/bin
-chmod $(BINMODE) $(DESTDIR)$(PREFIX)/bin/aha
-```
 
-**安装路径**: 
+**安装路径**:
 - 测试安装: $TEST_PREFIX/$DEFAULT_PREFIX/bin/aha
 - 本地安装: $DEFAULT_PREFIX/bin/aha
 
@@ -74,16 +69,12 @@ python3 $SKILL_ROOT/scripts/ohc-run.py package aha 0.5.1
 ## 补丁说明
 
 ### 补丁1: 0001-Makefile.patch
-**类型**: 平台适配  
-**原因**: 鸿蒙系统缺少GNU install命令  
-**修改内容**: 将install命令替换为mkdir/cp/chchmod组合  
+**类型**: 平台适配
+**原因**: 鸿蒙系统缺少GNU install命令
+**修改内容**: 将install命令替换为mkdir/cp/chmod组合
 **影响**: 仅影响安装步骤，不影响编译
 
-### 补丁2: 0002-configure.patch  
-**类型**: 平台适配  
-**原因**: 手动Makefile项目无configure脚本  
-**修改内容**: 添加空的configure脚本以满足构建流程  
-**影响**: 仅用于通过构建流程的configure检查
+
 
 ---
 
@@ -140,6 +131,10 @@ file bin/aha
 
 ## 编译结束
 
-**最终状态**: published ✅  
-**产物路径**: $BUILD_ARCHIVE_DIR/packaging/aha-0.5.1-ohos-aarch64.tar.gz  
+**最终状态**: built ✅
+**产物路径**: $BUILD_ARCHIVE_DIR/packaging/aha-0.5.1-ohos-aarch64.tar.gz
 **二进制验证**: ARM64 ELF, 动态链接musl, 可正常执行 ✅
+---
+
+**编译结束**: 2026-07-15 22:52
+**最终状态**: built
