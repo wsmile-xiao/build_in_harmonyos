@@ -50,6 +50,9 @@ class PerlConan(ConanFile):
             f"-Dld={cc}",
             f"-Dar={ar}",
             f"-Dranlib={ranlib}",
+            # The OHOS libc.so is a linker script. Perl's optional nm scan
+            # cannot parse it and falls through to the unavailable `bld` tool.
+            "-Uusenm",
             "-Duseshrplib=false",
             "-Dman1dir=none",
             "-Dman3dir=none",
