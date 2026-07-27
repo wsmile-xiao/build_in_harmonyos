@@ -48,3 +48,12 @@ package_id `55a18723…`。
 ## 状态
 
 built —— 真机 `conan create` + test_package(8 断言) + 外部编解码器接线全绿，制品已上传制品仓。
+
+> **补注（harfbuzz 的版本界限）——本版正是起点**：实测 `ffmpeg-6.0.1/configure` 里
+> `drawtext_filter_deps="libfreetype"` 且**无 `libharfbuzz` 选项**；**6.1 起**才变为
+> `"libfreetype libharfbuzz"`。故本版（6.1.6）是该依赖的第一个版本，7.x / 8.x 沿用；
+> 而 5.1 / 4.4 不需要（给它们传 `--enable-libharfbuzz` 会被 `die_unknown` 打死）。
+>
+> ⚠️ 本目录 `conanfile.py` 的注释写「FFmpeg 7.0 起」，**措辞有误**（本配方即 6.1.6，却说依赖从
+> 7.0 才有）。未随本次更正是因为：改 `conanfile.py` 会改变 recipe revision，按 R37 须递增版本号
+> 并重发制品，为一句注释不成比例。**以本文件所述为准。**
