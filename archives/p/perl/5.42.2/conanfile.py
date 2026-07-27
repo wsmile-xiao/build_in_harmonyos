@@ -98,6 +98,103 @@ class PerlConan(ConanFile):
                 "#  if defined(_NL_IDENTIFICATION_TITLE) && "
                 "(! defined(HAS_SOME_LANGINFO) || ! LC_IDENTIFICATION_AVAIL_)",
             )
+            # The remaining _NL_* address through telephone groups are also
+            # glibc extensions. OHOS provides none of this family.
+            replace_in_file(
+                self,
+                locale_source,
+                "      case _NL_ADDRESS_POSTAL_FMT:\n"
+                "      case _NL_ADDRESS_COUNTRY_NAME:\n"
+                "      case _NL_ADDRESS_COUNTRY_POST:\n"
+                "      case _NL_ADDRESS_COUNTRY_AB2:\n"
+                "      case _NL_ADDRESS_COUNTRY_AB3:\n"
+                "      case _NL_ADDRESS_COUNTRY_CAR:\n"
+                "      case _NL_ADDRESS_COUNTRY_NUM:\n"
+                "      case _NL_ADDRESS_COUNTRY_ISBN:\n"
+                "      case _NL_ADDRESS_LANG_NAME:\n"
+                "      case _NL_ADDRESS_LANG_AB:\n"
+                "      case _NL_ADDRESS_LANG_TERM:\n"
+                "      case _NL_ADDRESS_LANG_LIB:\n"
+                "#  ifdef USE_LOCALE_ADDRESS",
+                "#  ifdef _NL_ADDRESS_POSTAL_FMT\n"
+                "      case _NL_ADDRESS_POSTAL_FMT:\n"
+                "      case _NL_ADDRESS_COUNTRY_NAME:\n"
+                "      case _NL_ADDRESS_COUNTRY_POST:\n"
+                "      case _NL_ADDRESS_COUNTRY_AB2:\n"
+                "      case _NL_ADDRESS_COUNTRY_AB3:\n"
+                "      case _NL_ADDRESS_COUNTRY_CAR:\n"
+                "      case _NL_ADDRESS_COUNTRY_NUM:\n"
+                "      case _NL_ADDRESS_COUNTRY_ISBN:\n"
+                "      case _NL_ADDRESS_LANG_NAME:\n"
+                "      case _NL_ADDRESS_LANG_AB:\n"
+                "      case _NL_ADDRESS_LANG_TERM:\n"
+                "      case _NL_ADDRESS_LANG_LIB:\n"
+                "#  ifdef USE_LOCALE_ADDRESS",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "      case _NL_TELEPHONE_INT_PREFIX:\n"
+                "#  ifdef USE_LOCALE_TELEPHONE\n"
+                "        cat_index = LC_TELEPHONE_INDEX_;\n"
+                "#  endif\n"
+                "        break;",
+                "      case _NL_TELEPHONE_INT_PREFIX:\n"
+                "#  ifdef USE_LOCALE_TELEPHONE\n"
+                "        cat_index = LC_TELEPHONE_INDEX_;\n"
+                "#  endif\n"
+                "        break;\n"
+                "#  endif",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if defined(USE_LOCALE_PAPER)                 \\\n"
+                "   || defined(USE_LOCALE_MEASUREMENT)           \\\n"
+                "   || defined(USE_LOCALE_ADDRESS)",
+                "#  if defined(_NL_ADDRESS_POSTAL_FMT) && (      \\\n"
+                "       defined(USE_LOCALE_PAPER)                 \\\n"
+                "    || defined(USE_LOCALE_MEASUREMENT)           \\\n"
+                "    || defined(USE_LOCALE_ADDRESS))",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if defined(USE_LOCALE_MEASUREMENT)\n\n"
+                "      case _NL_MEASUREMENT_MEASUREMENT:",
+                "#  if defined(USE_LOCALE_MEASUREMENT) && defined(_NL_ADDRESS_POSTAL_FMT)\n\n"
+                "      case _NL_MEASUREMENT_MEASUREMENT:",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if defined(USE_LOCALE_ADDRESS) || defined(USE_LOCALE_PAPER)\n"
+                "#    if defined(USE_LOCALE_ADDRESS)",
+                "#  if defined(_NL_ADDRESS_POSTAL_FMT) && (defined(USE_LOCALE_ADDRESS) || defined(USE_LOCALE_PAPER))\n"
+                "#    if defined(USE_LOCALE_ADDRESS)",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if ! defined(HAS_SOME_LANGINFO) || ! LC_ADDRESS_AVAIL_",
+                "#  if defined(_NL_ADDRESS_POSTAL_FMT) && "
+                "(! defined(HAS_SOME_LANGINFO) || ! LC_ADDRESS_AVAIL_)",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "      case _NL_TELEPHONE_TEL_INT_FMT:\n"
+                "        retval = \"+%c %a %l\";\n"
+                "        break;\n\n"
+                "#  endif\n\n"
+                "   /* When we have to emulate TIME-related items",
+                "      case _NL_TELEPHONE_TEL_INT_FMT:\n"
+                "        retval = \"+%c %a %l\";\n"
+                "        break;\n\n"
+                "#  endif\n"
+                "#  endif\n\n"
+                "   /* When we have to emulate TIME-related items",
+            )
         configure_args = [
             "-des",
             f"-Dprefix={self.package_folder}",
