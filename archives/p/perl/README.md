@@ -1,25 +1,7 @@
-# perl 5.42.2 for HarmonyOS/OpenHarmony
+# Perl 5.42.2
 
-> **编译日期**: 2026-04-09 17:34:03
-> **状态**: 🔵 编译中
-> **构建系统**: unknown
+Conan recipe for the Perl programming language interpreter on OHOS aarch64.
 
-## 一、软件简介
-
-（待编译完成后填写）
-
-## 二、编译指导
-
-（待编译完成后填写）
-
-## 三、补丁清单
-
-（待补丁生成后填写）
-
-## 四、已知限制
-
-（待测试后填写）
-
-## 五、功能验证
-
-（待验证后填写）
+The recipe pins the official `v5.42.2` Git tag to its immutable commit, builds
+with Perl's native `Configure` script, runs the upstream `make test` suite,
+and packages the installed `perl` executable for build-tool consumers.
