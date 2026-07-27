@@ -81,3 +81,17 @@
 ## 六、结束记录
 - **最终状态**: success
 - **结束时间**: 2026-04-24
+---
+
+**编译结束**: 2026-07-15 23:32
+**最终状态**: built
+
+---
+
+### 对话 #2 — 2026-07-17 二次校准
+**操作**: 修复 test_package test() 方法，使用 bash 包装 ELF 二进制执行
+**根因**: CI 报告 "Conan test_package: 失败"，原因是 OHOS /system/bin/sh (mksh) 无法直接执行 ELF 二进制。原 test() 使用 self.run(os.path.join(...)) 直接调用，CI 环境下可能通过 mksh 执行导致失败。
+**修复**: 采用 zlib/1.3.1 相同模式，用 CONFIG_SHELL (bash) 包装二进制执行:
+  `self.run(f"{bash} -c './test_zopfli'", env="conanrun")`
+**结果**: conan create PASS (含 test_package)，测试输出 "Compression successful: input=30 bytes, output=48 bytes"
+**当前状态**: 已修复，待 push 并跟踪 CI
