@@ -2,9 +2,8 @@ import os
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import copy
+from conan.tools.files import copy, get
 from conan.tools.layout import basic_layout
-from conan.tools.scm import Git
 
 
 class PerlConan(ConanFile):
@@ -27,9 +26,7 @@ class PerlConan(ConanFile):
         basic_layout(self, src_folder="src")
 
     def source(self):
-        git = Git(self, folder=self.source_folder)
-        git.clone(self.conan_data["sources"]["url"], target=".")
-        git.checkout(self.conan_data["sources"]["commit"])
+        get(self, **self.conan_data["sources"], strip_root=True)
 
     def _tools(self):
         compilers = self.conf.get(
