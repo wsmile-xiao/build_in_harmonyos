@@ -18,6 +18,7 @@ Checks (each maps to a CI L0 gate):
   L0g: GitHub URL mirror check (warn, not block)
   L0h: shell 环境变量依赖检测 (R33: 禁止 ${CC}/${CFLAGS} 等裸用)
   L0i: Go/Rust 语言检测 (warn, not block)
+  L0m: 目录结构校验 (R39: archives/<首字母>/<包名>/<版本>/ 三重一致性)
 """
 from __future__ import annotations
 import os
@@ -193,7 +194,55 @@ def check_go_rust(ver_dir: Path) -> None:
         warnings.append(f"  L0i ⚠️ {ver_dir.name}: Rust 项目，鸿蒙 PC 原生环境无 Rust 工具链")
 
 
-def run_all_checks(ver_dir: Path) -> None:
+def check_directory_structure(ver_dir: Path, project_root: Path) -> None:
+    """L0m: directory structure validation (R39).
+
+    Validates that ver_dir follows archives/<首字母>/<包名>/<版本>/ structure:
+    1. Path depth is exactly 4 segments under archives/
+    2. First segment is a single character matching package name's first letter
+    3. Version directory name matches conanfile.py version field
+    """
+    conanfile = ver_dir / "conanfile.py"
+    try:
+        rel = ver_dir.relative_to(project_root)
+    except ValueError:
+        return  # Not under project_root, skip
+    parts = rel.parts
+    if "archives" not in parts:
+        return  # Not in archives/, skip (e.g. test recipe)
+    idx = parts.index("archives")
+    sub = parts[idx + 1:]  # segments after archives/
+    if len(sub) < 3:
+        return  # Not deep enough to validate (may be incomplete path)
+    letter, pkg_name, pkg_ver = sub[0], sub[1], sub[2]
+    # Rule 1: letter must be single alphanumeric character
+    if len(letter) != 1 or not letter.isalnum():
+        errors.append(
+            f"  L0m ❌ {pkg_name}/{pkg_ver}: 首字母目录 '{letter}' 不是单字符"
+            f"（应为 {pkg_name[0].lower() if pkg_name else '?'}）"
+        )
+        return
+    # Rule 2: letter must match first letter of package name (case-insensitive)
+    if letter.lower() != pkg_name[0].lower():
+        errors.append(
+            f"  L0m ❌ {pkg_name}/{pkg_ver}: 首字母目录 '{letter}' 与包名 '{pkg_name}'"
+            f" 首字母 '{pkg_name[0].lower()}' 不一致"
+        )
+    # Rule 3: version dir must match conanfile.py version field
+    if conanfile.exists():
+        try:
+            text = conanfile.read_text(encoding="utf-8", errors="replace")
+            m = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+            if m and pkg_ver != m.group(1):
+                errors.append(
+                    f"  L0m ❌ {pkg_name}/{pkg_ver}: 版本目录 '{pkg_ver}'"
+                    f" 与 conanfile.py version='{m.group(1)}' 不一致"
+                )
+        except Exception:
+            pass  # Read errors handled by L0a
+
+
+def run_all_checks(ver_dir: Path, project_root: Path) -> None:
     """Run all L0 checks on a recipe directory."""
     check_conanfile_syntax(ver_dir)
     check_sha256(ver_dir)
@@ -204,6 +253,7 @@ def run_all_checks(ver_dir: Path) -> None:
     check_github_url(ver_dir)
     check_shell_env_vars(ver_dir)
     check_go_rust(ver_dir)
+    check_directory_structure(ver_dir, project_root)
 
 
 def main() -> int:
@@ -250,7 +300,7 @@ def main() -> int:
     print(f"{'='*60}\n")
 
     for ver_dir in recipe_dirs:
-        run_all_checks(ver_dir)
+        run_all_checks(ver_dir, project_root)
 
     # Print results
     if warnings:

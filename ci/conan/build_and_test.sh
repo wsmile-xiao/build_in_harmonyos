@@ -443,6 +443,54 @@ except Exception:
         fi
     fi
 
+    # ── L0m: 目录结构校验 (R39) ──
+    # archives/ 目录必须遵循 archives/<首字母>/<包名>/<版本>/ 结构
+    # 规则 1: 路径层级必须是 4 段 archives/<单字符>/<包名>/<版本>
+    # 规则 2: <首字母> 必须等于 <包名> 首字母（小写）
+    # 规则 3: <版本> 目录名必须与 conanfile.py 中 version = "..." 一致
+    echo "[step] L0m: Checking directory structure (R39)..."
+    STRUCTURE_CHECK=$(python3 - "$pkg_dir" "$REPO_ROOT" "$CONANFILE" <<'PYEOF'
+import os, re, sys
+pkg_dir, repo_root, conanfile = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    rel = os.path.relpath(pkg_dir, repo_root).replace("\\", "/")
+except ValueError:
+    print("ERR|无法计算相对路径")
+    sys.exit(0)
+parts = rel.split("/")
+if len(parts) != 4 or parts[0] != "archives":
+    print(f"ERR|目录层级不是 archives/<首字母>/<包名>/<版本>/，实际: {rel}")
+    sys.exit(0)
+letter, pkg_name, pkg_ver = parts[1], parts[2], parts[3]
+if len(letter) != 1 or not letter.isalnum():
+    print(f"ERR|首字母目录 '{letter}' 不是单字符（应为 {pkg_name[0].lower() if pkg_name else '?'}）")
+    sys.exit(0)
+if letter.lower() != pkg_name[0].lower():
+    print(f"ERR|首字母目录 '{letter}' 与包名 '{pkg_name}' 首字母 '{pkg_name[0].lower()}' 不一致")
+    sys.exit(0)
+try:
+    text = open(conanfile, encoding="utf-8", errors="replace").read()
+    m = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
+    if m and pkg_ver != m.group(1):
+        print(f"ERR|版本目录 '{pkg_ver}' 与 conanfile.py version='{m.group(1)}' 不一致")
+        sys.exit(0)
+except Exception:
+    pass  # conanfile.py 读不了由 L0b 处理
+print("OK")
+PYEOF
+)
+    if [ "${STRUCTURE_CHECK%%|*}" = "ERR" ]; then
+        ERR_MSG="${STRUCTURE_CHECK#*|}"
+        echo "[fail] L0m: 目录结构不合规 (R39): ${ERR_MSG}"
+        echo "[hint] 正确格式: archives/<首字母>/<包名>/<版本号>/conanfile.py"
+        echo "       例如: archives/f/fnt/1.9.1/conanfile.py"
+        echo "       不要用 'homebrew' 等非版本号字符串作为版本目录名"
+        L0_FAILED=true
+        L0_ERRORS="${L0_ERRORS} dir_structure_r39"
+    else
+        echo "        [ok] L0m: directory structure valid"
+    fi
+
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"
