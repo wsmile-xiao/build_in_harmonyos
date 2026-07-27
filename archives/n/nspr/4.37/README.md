@@ -113,9 +113,6 @@ archives/n/nspr/4.37/
 │       ├── prtypes.h
 │       ├── prthread.h
 │       └── ... (共 47 个头文件)
-├── patches/           # 补丁文件
-│   └── config.status-tmpdir.patch
-├── reports/           # 验证报告
 ├── packaging/         # 预编译包
 │   └── nspr-4.37-ohos-aarch64.tar.gz
 ├── manifest.yaml      # 元数据
