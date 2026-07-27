@@ -87,8 +87,7 @@ phoon 是纯 Makefile 项目，无 autotools configure 脚本。需手动修改 
 | 动态链接 | libc.so | libc.so |
 | RPATH | 无 | $ORIGIN/../lib:$ORIGIN/../lib/external |
 | 签名 | 未签名 | ✅ 已签名 |
-
 ---
 
-**编译结束**: 2026-06-15 23:39
-**最终状态**: built ✅
+**编译结束**: 2026-07-15 17:03
+**最终状态**: built
