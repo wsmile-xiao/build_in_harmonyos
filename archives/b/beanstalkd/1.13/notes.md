@@ -10,7 +10,7 @@
 
 1. 下载源码包：https://github.com/beanstalkd/beanstalkd/archive/refs/tags/v1.13.tar.gz
 2. 解压并初始化编译环境（ohc-run.py init-build）
-3. 创建平台适配文件：`ln -s linux.c harmonyos.c`（HarmonyOS 基于 Linux 内核，使用 epoll）
+3. 创建平台适配文件：`harmonyos.c`（复制 linux.c 内容，HarmonyOS 基于 Linux 内核，使用 epoll）
 4. 编译：`make PREFIX=$DEFAULT_PREFIX -j1`
 5. 安装到 staging：`make install PREFIX=$DEFAULT_PREFIX DESTDIR=$TEST_PREFIX`
 6. 本地安装：`make install PREFIX=$DEFAULT_PREFIX`
@@ -20,13 +20,13 @@
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | SSL 证书验证失败，无法下载源码包 | 鸿蒙系统 SSL 证书问题 | 使用 curl -k 手动下载 |
-| 2 | 编译时缺少 harmonyos.o | Makefile 根据 `uname` 选择平台文件，HarmonyOS 不在支持列表中 | 创建 `harmonyos.c -> linux.c` 软链接（HarmonyOS 基于 Linux 内核，支持 epoll） |
+| 2 | 编译时缺少 harmonyos.o | Makefile 根据 `uname` 选择平台文件，HarmonyOS 不在支持列表中 | 通过补丁添加 `harmonyos.c`（复制 linux.c 内容，HarmonyOS 基于 Linux 内核，支持 epoll） |
 | 3 | make check 失败（verc.sh Permission denied） | HMDFS 文件系统权限问题 | 手动执行 `./verc.sh > vers.c`，跳过 make check |
 
 ## 源码修改
 
-- **harmonyos.c**: 创建软链接指向 linux.c（HarmonyOS 平台适配）
-  - 文件类型：软链接（ln -s linux.c harmonyos.c）
+- **harmonyos.c**: 通过补丁添加的完整平台文件（内容与 linux.c 一致）
+  - 文件类型：完整文件副本（非软链接，避免 HMDFS 文件系统兼容性问题）
   - 修改原因：Makefile 使用 `$(uname)` 决定编译的平台文件，HarmonyOS 不在支持列表
   - 兼容性：HarmonyOS 基于 Linux 内核，支持 epoll API
 
@@ -67,11 +67,11 @@ Options:
 
 ## 注意事项
 
-1. **平台适配**：HarmonyOS 使用 Linux 内核 API，可通过软链接复用 linux.c
+1. **平台适配**：HarmonyOS 使用 Linux 内核 API，可通过添加 harmonyos.c（复制 linux.c 内容）复用 linux.c
 2. **测试跳过**：由于 HMDFS 权限问题，跳过 make check，但基本功能验证通过
 3. **版本参数**：beanstalkd 使用 `-v` 显示版本，而非 `--version`
 4. **无 systemd 支持**：未检测到 libsystemd，使用默认配置
 ---
 
-**编译结束**: 2026-06-06 11:53
+**编译结束**: 2026-07-15 22:13
 **最终状态**: built
