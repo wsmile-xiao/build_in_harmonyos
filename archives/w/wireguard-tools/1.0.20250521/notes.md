@@ -60,11 +60,6 @@ wg: ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1), no
 - 补丁适用于所有鸿蒙SDK版本，条件编译保证向后兼容性
 ---
 
-**编译结束**: 2026-05-19 12:16
-**最终状态**: published
-
----
-
 ## 质量门禁复查 (2026-05-19 12:22)
 
 ### G2 功能验证复查
@@ -96,3 +91,7 @@ $ readelf -S ~/tmp/wg-check/bin/wg | grep codesign
 
 **复查结束**: 2026-05-19 12:22
 **复查结论**: G2/G3 报告已修正，ELF 签名已验证，状态已更新为 published
+---
+
+**编译结束**: 2026-07-15 22:31
+**最终状态**: published
