@@ -30,3 +30,7 @@ make install PREFIX=$HOME/usr/local DESTDIR=$TEST_PREFIX
 ## 注意事项
 - configure 脚本只是提示信息，直接 make 即可
 - 平台检测通过 Makefile.detect 自动完成
+---
+
+**编译结束**: 2026-07-15 15:29
+**最终状态**: built
