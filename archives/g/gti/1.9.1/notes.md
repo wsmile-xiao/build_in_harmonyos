@@ -65,11 +65,6 @@ make -j2
 - 编译过程简单，主要问题在于 Makefile 的 DESTDIR 用法
 ---
 
-**编译结束**: 2026-06-05 21:06
-**最终状态**: built
-
----
-
 ## 后续修复（2026-06-06）
 
 ### 问题5: 预编译包缺少 ELF 签名
@@ -93,4 +88,7 @@ make -j2
 - 签名工具: `/data/service/hnp/bin/binary-sign-tool`
 - 签名参数: `-selfSign 1`（自签名模式，不需要 keystore）
 - 签名验证: 检查 `.codesign` section 是否存在
+---
 
+**编译结束**: 2026-07-15 16:06
+**最终状态**: built
