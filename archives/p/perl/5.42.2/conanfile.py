@@ -53,6 +53,14 @@ class PerlConan(ConanFile):
                 "$rm -f $firstmakefile",
                 'case "$osname" in harmonyos) ;; *) $rm -f $firstmakefile ;; esac',
             )
+            # miniperl has already been linked and executed by this point.
+            # OHOS rejects the following timestamp-only touch operation.
+            replace_in_file(
+                self,
+                os.path.join(self.source_folder, "Makefile.SH"),
+                "\t@touch $(MINIPERL_EXE)",
+                "\t-@touch $(MINIPERL_EXE)",
+            )
             # With -d, Configure otherwise answers yes to its final
             # "make depend" prompt. That target expects generated *.depends
             # files which do not exist on the initial OHOS build.
