@@ -62,10 +62,10 @@ class PerlConan(ConanFile):
             cwd=self.source_folder,
         )
         # Configure silently drops the root Makefile on OHOS although it
-        # generates the other .SH outputs. Run its Makefile generator with
-        # the selected shell and require the generated file before building.
+        # generates the other .SH outputs. Makefile.SH writes its result to
+        # stdout, so redirect it to the expected file before building.
         self.run(
-            f'if [ ! -f Makefile ]; then "{shell}" -x Makefile.SH; fi; '
+            f'if [ ! -f Makefile ]; then "{shell}" Makefile.SH > Makefile; fi; '
             'test -f Makefile',
             cwd=self.source_folder,
         )
