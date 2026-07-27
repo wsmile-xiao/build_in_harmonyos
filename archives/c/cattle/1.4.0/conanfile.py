@@ -2,7 +2,7 @@ import os
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import copy, get
+from conan.tools.files import copy, get, replace_in_file
 from conan.tools.gnu import Autotools, AutotoolsToolchain, PkgConfigDeps
 from conan.tools.layout import basic_layout
 
@@ -56,6 +56,15 @@ class CattleConan(ConanFile):
 
     def build(self):
         autotools = Autotools(self)
+        if self.settings.os == "OHOS":
+            # Autoconf embeds this in the generated config.status. On HMDFS,
+            # its 0700 temporary directory rejects the generated AWK script.
+            replace_in_file(
+                self,
+                os.path.join(self.source_folder, "configure"),
+                "umask 077",
+                "umask 022",
+            )
         glib_pc_dir = os.path.join(
             self.dependencies["glib"].package_folder, "lib", "pkgconfig"
         )
