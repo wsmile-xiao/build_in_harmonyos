@@ -17,13 +17,13 @@
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | 链接失败 libintl_gettext undefined | Makefile 默认 ENABLE_NLS=1，HarmonyOS 无 libintl | 设置 ENABLE_NLS 为空值（注意"0"也被 ifdef 视为 true） |
-| 2 | ln -sf 在构建目录 Permission denied | HarmonyOS SELinux 限制 ln -sf 在部分目录的使用 | Makefile 中 LINK 改为 ln -s（去掉 -f） |
+| 2 | ln -sf 在构建目录 Permission denied | HarmonyOS SELinux 限制 ln -sf 在部分目录的使用 | Makefile 中 LINK 改为 cp -f（规避软链限制） |
 
 ## 源码修改
 | 文件 | 修改内容 | 是否已生成补丁 |
 |------|----------|----------------|
 | Makefile | 禁用 ENABLE_NLS（设为空值） | ✅ 0001 |
-| Makefile | LINK 从 ln -sf 改为 ln -s | ✅ 0001 |
+| Makefile | LINK 从 ln -sf 改为 cp -f | ✅ 0001 |
 
 ## 依赖版本
 - 无外部依赖（NLS 已禁用）
@@ -46,3 +46,7 @@ unix2dos --version ✅
 - ENABLE_NLS 必须设为空值（不是 "0"），因为 Makefile 使用 `ifdef` 判断
 - 核心功能完全正常，失败测试均为环境限制
 - 详细的测试报告见 reports/test-report.md
+---
+
+**编译结束**: 2026-07-15 16:58
+**最终状态**: built
