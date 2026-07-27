@@ -6,7 +6,7 @@
 - 编译器: clang 15.0.4 / clang++ 15.0.4
 - 目标平台: HarmonyOS (aarch64, musl libc)
 - 安装前缀: ~/usr/local
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -110,5 +110,5 @@ echo -e "main.c\nutils.c\ntest_main.c\nhelper.c\nconfig.c\nmain.h" | fzy -e "mai
 
 ---
 
-**编译结束**: 2026-05-27 10:50
-**最终状态**: published
+**编译结束**: 2026-07-15 21:23
+**最终状态**: built
