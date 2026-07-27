@@ -4,7 +4,7 @@
 - 构建系统: makefile (libtool)
 - 编译日期: 2026-05-26
 - 编译器: clang
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -52,13 +52,11 @@ ls -la /storage/Users/currentUser/test-install-libvterm-0.3.3/usr/local/
 - libvterm 是纯 Makefile 项目，使用 libtool 构建动态库
 - 无需 configure 步骤，直接 make 即可
 - 编译生成的辅助工具：unterm, vterm-ctrl, vterm-dump
-- pkg-config 文件：vterm.pc（用于其他项目依赖查询）
+- pkg-config 文件：vterm.pc（用于其他项目依赖查询）---
 
+**编译结束**: 2026-07-15 23:10
+**最终状态**: built
 ---
 
-**编译结束**: 2026-05-26 20:24
-**最终状态**: published
----
-
-**编译结束**: 2026-05-26 21:37
-**最终状态**: published
+**编译结束**: 2026-07-16 00:34
+**最终状态**: built
