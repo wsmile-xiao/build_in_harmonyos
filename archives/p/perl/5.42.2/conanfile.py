@@ -50,8 +50,8 @@ class PerlConan(ConanFile):
             replace_in_file(
                 self,
                 os.path.join(self.source_folder, "Makefile.SH"),
-                "$rm -f makefile",
-                'case "$osname" in harmonyos) ;; *) $rm -f makefile ;; esac',
+                "$rm -f $firstmakefile",
+                'case "$osname" in harmonyos) ;; *) $rm -f $firstmakefile ;; esac',
             )
         configure_args = [
             "-des",
