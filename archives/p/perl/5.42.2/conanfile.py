@@ -49,7 +49,7 @@ class PerlConan(ConanFile):
             # resolves to the same path and deletes the generated Makefile.
             replace_in_file(
                 self,
-                os.path.join(self.source_folder, "Configure"),
+                os.path.join(self.source_folder, "Makefile.SH"),
                 "$rm -f makefile",
                 'case "$osname" in harmonyos) ;; *) $rm -f makefile ;; esac',
             )
