@@ -35,3 +35,7 @@
 - 使用 ref.c 参考实现，无 SIMD 优化
 - 需设置 KERNEL_NAME=Linux
 - 安装产物包含：bin/argon2, lib/libargon2.a, lib/libargon2.so.1, include/argon2.h, lib/pkgconfig/libargon2.pc
+---
+
+**编译结束**: 2026-07-15 21:48
+**最终状态**: built
