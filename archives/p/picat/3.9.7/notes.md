@@ -2,10 +2,10 @@
 
 ## 编译环境
 - 构建系统: makefile (自定义 Makefile)
-- 编译日期: 2026-06-11
+- 编译日期: 2026-07-15
 - 编译器: clang 15.0.4 / clang++ 15.0.4 (Target: aarch64-unknown-linux-ohos)
 - 平台: aarch64-unknown-linux-ohos (OpenHarmony, musl libc)
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -22,8 +22,7 @@ picat 使用自定义 Makefile，不支持标准 autotools/configure。编译步
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | `struct _IO_FILE` incomplete type error | musl libc 不暴露 FILE 内部结构，picat 直接访问 fdes->_fileno | 改用标准 POSIX fileno() 函数，添加 `__OHOS__` 守卫（R8准则） |
-| 2 | 无 Makefile 适配 OpenHarmony/clang | picat 只提供 linux64/mac64 等平台 Makefile | 创建 Makefile.ohos，使用 clang 替代 gcc/g++，添加 -D__OHOS__ |
-| 3 | init-build 嵌套源码检测错误提升 espresso 子目录 | espresso 是 emu/ 下的子组件而非顶层源码 | 手动修复目录结构，重新解压 tarball |
+| 2 | 无 Makefile 适配 OpenHarmony/clang | picat 只提供 linux64/mac64 等平台 Makefile | 创建 Makefile.ohos，使用 clang 替代 gcc/g++，添加 -fPIC 和 -D__OHOS__，保留 -DGCC 和 -DM64BITS |
 
 ## 源码修改
 
@@ -34,7 +33,7 @@ picat 使用自定义 Makefile，不支持标准 autotools/configure。编译步
 
 无外部依赖（picat 自包含，内嵌 espresso/kissat/fann）
 
-## 验证结果（真实执行输出）
+## 验证结果
 
 ### 版本号确认
 ```
@@ -44,67 +43,12 @@ Picat version 3.9#7
 
 ### 基本算术运算
 ```
-$ picat test_arith.pi
-3
-12
-5
-3.5
-3
-```
-
-### Fibonacci 函数
-```
-$ picat test_fib.pi
-89
-10946
-```
-
-### 列表操作
-```
-$ picat test_list.pi
+$ picat test_picat.pi
+hello_picat
+7
 [1,2,3,4,5]
-5
 15
-2
 ```
-
-### math模块
-```
-$ picat test_math.pi
-3.14159
-1.41421
-1.0
-1024
-```
-
-### 大整数运算
-```
-$ picat test_bigint.pi
-1000000000000000001
-1267650600228229401496703205376
-```
-
-### os模块
-```
-$ picat test_os.pi
-home = /storage/Users/currentUser
-```
-
-### 预编译包独立安装验证
-```
-$ ./bin/picat --version
-Picat version 3.9#7
-$ ./bin/picat test_verify.pi
-Package install verification OK
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| picat | 5.4MB | picat 可执行二进制（ELF 64-bit LSB arm64） |
-| lib/*.pi (26 files) | ~210KB | 预加载库模块 |
-| picat-3.9.7-ohos-aarch64.tar.gz | 5.7MB | 预编译包（1二进制+26库文件） |
 
 ## 注意事项
 
@@ -114,8 +58,7 @@ Package install verification OK
 - -D__OHOS__ 宏启用 OpenHarmony 平台守卫代码
 - musl libc 不暴露 FILE 内部结构，所有 `_fileno`/`_file` 直接访问需改为 `fileno()`
 - make check 不可用（picat 无标准测试套件）
-
 ---
 
-**编译结束**: 2026-06-11 01:22
-**最终状态**: published
+**编译结束**: 2026-07-15 23:14
+**最终状态**: built
