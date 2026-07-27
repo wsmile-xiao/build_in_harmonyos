@@ -106,3 +106,4 @@ class Mp4v2Conan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["mp4v2"]
+        self.cpp_info.bindirs = ["bin"]
