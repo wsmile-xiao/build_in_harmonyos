@@ -1,0 +1,70 @@
+from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
+from conan.tools.files import copy, get
+from conan.tools.gnu import Autotools, AutotoolsToolchain, PkgConfigDeps
+from conan.tools.layout import basic_layout
+
+
+class CattleConan(ConanFile):
+    name = "cattle"
+    version = "1.4.0"
+    description = "GObject-based Brainfuck language toolkit"
+    license = "GPL-2.0-or-later"
+    homepage = "https://kiyuko.org/software/cattle"
+    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
+    topics = ("brainfuck", "glib", "gobject", "interpreter")
+    package_type = "library"
+
+    settings = "os", "compiler", "build_type", "arch"
+
+    def requirements(self):
+        self.requires("glib/2.84.0")
+
+    def validate(self):
+        if self.settings.os not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration(
+                "cattle is supported on Linux and OHOS only"
+            )
+
+    def layout(self):
+        basic_layout(self, src_folder="src")
+
+    def source(self):
+        get(self, **self.conan_data["sources"], strip_root=True)
+
+    def generate(self):
+        tc = AutotoolsToolchain(self)
+        tc.configure_args.extend(
+            [
+                "--disable-shared",
+                "--enable-static",
+                "--disable-introspection",
+                "--disable-gtk-doc",
+            ]
+        )
+        tc.generate()
+        PkgConfigDeps(self).generate()
+
+    def build(self):
+        autotools = Autotools(self)
+        autotools.configure(build_script_folder=self.source_folder)
+        autotools.make()
+
+        # Upstream's check-local only invokes gtester when it is installed.
+        # Run its test programs directly as well, so all five real upstream
+        # test executables are verified on the OHOS build host.
+        autotools.make(target="check")
+        for test_name in ("buffer", "interpreter", "program", "references", "tape"):
+            self.run(f'"{self.build_folder}/tests/{test_name}"')
+
+    def package(self):
+        autotools = Autotools(self)
+        autotools.install()
+        copy(self, "COPYING", self.source_folder, f"{self.package_folder}/licenses")
+
+    def package_info(self):
+        self.cpp_info.set_property("cmake_file_name", "cattle")
+        self.cpp_info.set_property("cmake_target_name", "cattle::cattle")
+        self.cpp_info.set_property("pkg_config_name", "cattle-1.0")
+        self.cpp_info.libs = ["cattle-1.0"]
+        self.cpp_info.includedirs = ["include/cattle-1.0"]
