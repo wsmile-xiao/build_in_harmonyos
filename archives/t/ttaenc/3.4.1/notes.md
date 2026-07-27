@@ -1,86 +1,64 @@
-# ttaenc 3.4.1 — 编译进度
+# ttaenc 3.4.1 — 适配笔记
 
-> 档案创建时间: 2026-04-24 00:00:00
-> 最后更新: 2026-04-24 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> 档案创建时间: 2026-07-15
+> 最后更新: 2026-07-15
+> 状态: built
 
 ## 一、基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | ttaenc |
 | 版本 | 3.4.1 |
-| 状态 | ✅ success |
+| 状态 | ✅ built |
 | 构建系统 | makefile |
-| 源码路径 | http://downloads.sourceforge.net/tta/ttaenc-3.4.1-src.tgz |
+| 源码路径 | https://downloads.sourceforge.net/tta/ttaenc-3.4.1-src.tgz |
 
-## 二、编译阶段（checkbox 实时更新）
+## 二、编译阶段
 
 ### Phase 1: 环境准备
 - [x] ohc-run.py init-build 完成 / 源码下载解压
 
-### Phase 2: 编译（configure + make + make install）
-- [x] configure 完成（记录参数和耗时）
-- [x] make 编译完成（记录错误和修复）
-- [x] make install 完成
+### Phase 2: 编译
+- [x] make 编译完成 (clang, -Wall -O3 -fPIC)
+- [x] make install 完成 (DESTDIR staging)
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
+### Phase 2.5: 独立目录安装验证
 - [x] 干净源码 + 补丁应用
-- [x] 独立 TEST_PREFIX configure + make install
-- [x] 功能回归测试结果
+- [x] 独立 TEST_PREFIX make install
+- [x] 功能回归测试 (ttaenc -h / -v)
 
 ### Phase 3: 测试验证
-- [x] make check / make test 结果
+- [x] ttaenc -h (help) 正常输出
+- [x] ttaenc -v (version) 正常输出
 - [x] 安全弹窗触发确认
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [x] Step 1-10 打包流程（见 packaging.md）
-
 ### Phase 5: 归档收尾
-- [x] 补丁生成（ohc-run.py refresh-patch --auto）
-- [x] manifest.yaml / README.md / PROGRESS.md 更新
-- [x] ohc-run.py verify-build 质量门禁
+- [x] 补丁生成 (refresh-patch --auto)
+- [x] manifest.yaml / README.md 更新
+- [x] conan-verify 质量门禁通过
+- [x] W3 本地 CI 模拟通过
 
-## 三、对话记录（⭐ 断点续传核心）
-
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — YYYY-MM-DD HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — 2026-04-24 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| Makefile | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| ttaenc.h | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| configure | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| ttaenc.c | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-| 0004-ttaenc.h | 平台适配/问题修复 | 源码修改 | ✅ 已生成 |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
+## 三、源码修改清单
+| 文件 | 原因 | 补丁 |
 |------|------|------|
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ttaenc-3.4.1-ohos-aarch64-debug.tar.gz | 18KB | debug包 |
-| ttaenc-3.4.1-ohos-aarch64.tar.gz | 77KB | 主包 |
+| Makefile | 使用 $(CC) 代替 gcc, 添加 DESTDIR/PREFIX 支持, 移除 strip | 0001-Makefile.patch |
+| ttaenc.c | 替换 __inline 为 static inline (C99 合规) | 0002-ttaenc.c.patch |
+| ttaenc.h | 添加 stdint.h, 替换 __uint32_t/__uint64_t | 0003-ttaenc.h.patch |
 
-## 六、结束记录
-- **最终状态**: success
-- **结束时间**: 2026-04-24
+## 四、编译问题与修复
+
+### 问题 1: __uint32_t/__uint64_t 不可用
+- **原因**: clang 在 OHOS 上不提供 GNU 扩展类型 __uint32_t/__uint64_t
+- **修复**: 添加 #include <stdint.h>, 使用 uint32_t/uint64_t
+
+### 问题 2: __inline 不可用
+- **原因**: __inline 是 MSVC/GCC 特有的, clang 在 C99 模式下需要 static inline
+- **修复**: 替换所有 __inline 为 static inline
+
+### 问题 3: Makefile 硬编码 gcc
+- **原因**: 原始 Makefile 使用 gcc 编译, 不支持通过环境变量传递编译器
+- **修复**: 使用 $(CC) 代替 gcc, 添加 DESTDIR 和 PREFIX 支持
+
+## 五、结束记录
+- **最终状态**: built
+- **结束时间**: 2026-07-15
