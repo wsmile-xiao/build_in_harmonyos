@@ -125,9 +125,19 @@ FFmpeg 当前功能主线（`release/8.1`）的点版本，与本仓 `archives/f
 
 ### 这次踩的五个坑（其中两个已在上游依赖包修复）
 
-1. **drawtext 需要 harfbuzz，不只是 freetype**：FFmpeg 7.0 起
+1. **drawtext 需要 harfbuzz，不只是 freetype**：FFmpeg 6.1 起
    `drawtext_filter_deps="libfreetype libharfbuzz"`，少任一个滤镜就不编进去，且 configure **不报错**、
    只是静默不生成该滤镜。7.1.5 与 8.1.2 都是这条。
+
+> **版本界限已实测校正**：harfbuzz 是 **6.1 引入**的，不是 7.0——`ffmpeg-6.0.1/configure` 里
+> `drawtext_filter_deps="libfreetype"` 且**无 `libharfbuzz` 选项**；`6.1.6` 起才变成
+> `"libfreetype libharfbuzz"`。故 6.1 / 7.x / 8.x 需要 harfbuzz，5.1 / 4.4 不需要
+> （且给它们传 `--enable-libharfbuzz` 会被 `die_unknown` 打死）。
+>
+> 注：本目录 `conanfile.py` 里的同名注释仍写「7.0 起」，**未随本次一并更正**——修改
+> `conanfile.py` 会改变 recipe revision，按 R37 需把已发布版本号递增后缀并重发制品，
+> 为一句注释不值得。以本文件所述为准。
+
 
 2. **`ERROR: opus not found using pkg-config` 报错具误导性**：pkg-config 其实找得到 opus
    （`--exists` rc=0、`--modversion` 返回 1.5.2），失败的是紧随其后的 `check_func_headers` 编译探测。
