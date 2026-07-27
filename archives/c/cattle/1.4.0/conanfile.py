@@ -1,5 +1,8 @@
+import os
+
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
+from conan.tools.env import environment_append
 from conan.tools.files import copy, get
 from conan.tools.gnu import Autotools, AutotoolsToolchain, PkgConfigDeps
 from conan.tools.layout import basic_layout
@@ -54,15 +57,19 @@ class CattleConan(ConanFile):
 
     def build(self):
         autotools = Autotools(self)
-        autotools.configure(build_script_folder=self.source_folder)
-        autotools.make()
+        glib_pc_dir = os.path.join(
+            self.dependencies["glib"].package_folder, "lib", "pkgconfig"
+        )
+        with environment_append({"PKG_CONFIG_PATH": glib_pc_dir}):
+            autotools.configure(build_script_folder=self.source_folder)
+            autotools.make()
 
-        # Upstream's check-local only invokes gtester when it is installed.
-        # Run its test programs directly as well, so all five real upstream
-        # test executables are verified on the OHOS build host.
-        autotools.make(target="check")
-        for test_name in ("buffer", "interpreter", "program", "references", "tape"):
-            self.run(f'"{self.build_folder}/tests/{test_name}"')
+            # Upstream's check-local only invokes gtester when it is installed.
+            # Run its test programs directly as well, so all five real upstream
+            # test executables are verified on the OHOS build host.
+            autotools.make(target="check")
+            for test_name in ("buffer", "interpreter", "program", "references", "tape"):
+                self.run(f'"{self.build_folder}/tests/{test_name}"')
 
     def package(self):
         autotools = Autotools(self)
