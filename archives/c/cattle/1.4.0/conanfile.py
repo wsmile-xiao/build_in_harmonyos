@@ -44,6 +44,11 @@ class CattleConan(ConanFile):
         tc.configure_args.extend(
             library_args + ["--disable-introspection", "--disable-gtk-doc"]
         )
+        if self.settings.os == "OHOS":
+            # Cattle 1.4.0 bundles 2018 GNU config scripts, which predate
+            # HarmonyOS. The build is native aarch64, so this portable
+            # triplet avoids the obsolete config.guess probe.
+            tc.configure_args.append("--build=aarch64-unknown-linux-gnu")
         tc.generate()
         PkgConfigDeps(self).generate()
 
