@@ -2,7 +2,7 @@
 
 Homebrew Cask shell 补全脚本，为 bash 和 fish 提供 brew-cask 命令的自动补全支持。
 
-- **许可证**: GPL-2.0
+- **许可证**: BSD-2-Clause
 - **源码仓库**: https://github.com/xyb/homebrew-cask-completion
 - **分类**: shell-completion
 
