@@ -2,7 +2,7 @@ import os
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import copy, get
+from conan.tools.files import copy, get, replace_in_file
 from conan.tools.layout import basic_layout
 
 
@@ -43,6 +43,16 @@ class PerlConan(ConanFile):
     def build(self):
         cc, ar, ranlib = self._tools()
         shell = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        if self.settings.os == "OHOS":
+            # OHOS uses a case-insensitive filesystem. Configure generates
+            # Makefile, then its stale-file cleanup removes "makefile", which
+            # resolves to the same path and deletes the generated Makefile.
+            replace_in_file(
+                self,
+                os.path.join(self.source_folder, "Configure"),
+                "$rm -f makefile",
+                'case "$osname" in harmonyos) ;; *) $rm -f makefile ;; esac',
+            )
         configure_args = [
             "-des",
             f"-Dprefix={self.package_folder}",
@@ -59,14 +69,6 @@ class PerlConan(ConanFile):
         ]
         self.run(
             f'"{shell}" Configure {" ".join(configure_args)}',
-            cwd=self.source_folder,
-        )
-        # Configure silently drops the root Makefile on OHOS although it
-        # generates the other .SH outputs. Makefile.SH writes its result to
-        # stdout, so redirect it to the expected file before building.
-        self.run(
-            f'if [ ! -f Makefile ]; then "{shell}" Makefile.SH > Makefile; fi; '
-            'test -f Makefile',
             cwd=self.source_folder,
         )
         # OHOS does not support GNU make's jobserver FIFO implementation.
