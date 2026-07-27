@@ -112,7 +112,9 @@ FAILED (errors=140)
 
 ## 源码修改
 
-无源码修改，无需补丁。darkhttpd.c在OHOS平台原生编译通过。
+已引入补丁 `patches/0001-add-version-exit.patch`，修改 `darkhttpd.c` 的 `main()` 函数：
+当检测到 `--version` 参数时直接调用 `exit(EXIT_SUCCESS)` 退出，而非启动 HTTP 服务器。
+此补丁确保 `--version` 行为符合预期（仅打印版本后退出），用于 L2 smoke test 自动化验证。
 
 ## 依赖版本
 
@@ -145,7 +147,7 @@ HTTP功能测试详见 reports/test-report.md。
 
 ## 注意事项
 
-- darkhttpd --version会启动监听不退出，验证需timeout或--daemon
+- darkhttpd --version已通过补丁修复，打印版本后直接退出（原行为会启动监听不退出）
 - Makefile无install目标，打包需手动cp
 - 官方test.py在OHOS因socket限制无法运行，不影响核心HTTP服务功能
 - PIE可执行文件，仅依赖libc.so，适合OHOS轻量部署
@@ -156,4 +158,13 @@ HTTP功能测试详见 reports/test-report.md。
 
 ---
 **编译结束**: 2026-06-16
+**最终状态**: built
+---
+
+**编译结束**: 2026-07-15 21:28
+**最终状态**: built
+ilt
+---
+
+**编译结束**: 2026-07-15 21:28
 **最终状态**: built
