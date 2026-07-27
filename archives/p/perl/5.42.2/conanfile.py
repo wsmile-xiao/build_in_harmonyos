@@ -53,6 +53,15 @@ class PerlConan(ConanFile):
                 "$rm -f $firstmakefile",
                 'case "$osname" in harmonyos) ;; *) $rm -f $firstmakefile ;; esac',
             )
+            # With -d, Configure otherwise answers yes to its final
+            # "make depend" prompt. That target expects generated *.depends
+            # files which do not exist on the initial OHOS build.
+            replace_in_file(
+                self,
+                os.path.join(self.source_folder, "Configure"),
+                'dflt=y\n\tcase "$silent" in\n\ttrue) ;;',
+                'dflt=n\n\tcase "$silent" in\n\ttrue) ;;',
+            )
         configure_args = [
             "-des",
             f"-Dprefix={self.package_folder}",
