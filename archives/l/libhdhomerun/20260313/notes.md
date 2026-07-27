@@ -1,57 +1,43 @@
-# libhdhomerun 20260313 — 编译进度
+# libhdhomerun 20260313 — 适配笔记
 
-> 档案创建时间: 2026-06-04 15:25:00
-> 最后更新: 2026-06-04 (当前状态)
-
-## 一、基本信息
+## 基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | libhdhomerun |
 | 版本 | 20260313 |
-| 状态 | ✅ built |
-| 构建系统 | makefile |
-| 源码路径 | https://api.github.com/repos/Silicondust/libhdhomerun/tarball/20260313 |
+| 上游 | https://github.com/Silicondust/libhdhomerun |
+| 许可证 | LGPL-2.1 |
+| 构建系统 | Makefile |
+| 状态 | built |
 
-## 二、编译阶段（checkbox 实时更新）
+## 构建步骤
 
-### Phase 1: 环境准备
-- [x] ohc-run.py init-build 完成 / 源码下载解压
+1. 下载源码: `https://api.github.com/repos/Silicondust/libhdhomerun/tarball/20260313`
+2. 应用补丁: `patches/0001-hdhomerun_sock_netlink.c.patch`
+3. 编译: `make OS=Linux CC=clang -j1`
+   - OS=Linux 必须显式传递，因为 HarmonyOS 的 `uname -s` 返回 "HarmonyOS" 而非 "Linux"
+   - 这确保 Makefile 选择 netlink 接口检测并添加 `-lrt` 链接标志
+4. 产物:
+   - `libhdhomerun.so` — 共享库
+   - `hdhomerun_config` — 命令行工具
 
-### Phase 2: 编译（make）
-- [x] make 编译完成
-- [x] 安装完成
+## 适配修改
 
-### Phase 3: 测试验证
-- [x] 功能测试结果：PASS
+### 补丁 0001: hdhomerun_sock_netlink.c
+- **问题**: `linux/socket.h` 和 `sys/socket.h` 都定义了 `sockaddr_storage`，导致重定义冲突
+- **修复**: 在包含 `linux/netlink.h` 之前定义 `_UAPI_LINUX_SOCKET_H` 防止重复包含，并添加 `__kernel_sa_family_t` 的 typedef
 
-### Phase 4: 预编译包制作
-- [x] 打包流程完成
+### Makefile OS 检测
+- **问题**: Makefile 通过 `uname -s` 检测操作系统，HarmonyOS 返回 "HarmonyOS" 不匹配任何已知平台
+- **解决**: 在 conanfile.py build() 中显式传递 `OS=Linux`，使 Makefile 走 Linux 分支（netlink 接口检测 + -lrt）
 
-### Phase 5: 归档收尾
-- [x] 补丁生成
-- [x] manifest.yaml 更新
-- [x] ohc-run.py verify-build 质量门禁通过
+## 依赖
+- 无第三方依赖
+- 系统库: pthread, rt
 
-## 三、对话记录
+## 测试
+- test_package 调用 `hdhomerun_discover_validate_device_id()` 验证 API 可用性
+---
 
-### 对话 #1 — 2026-06-04
-**操作**: 执行编译任务
-**结果**: ✅ 编译成功，预编译包已生成
-**发现的问题**: 需要修复 sockaddr_storage 重定义冲突
-**当前状态**: 已完成
-**遗留问题**: 无
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| hdhomerun_sock_netlink.c | 避免 sockaddr_storage 重定义冲突 | 宏定义 + typedef | ✅ 已生成补丁 |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libhdhomerun-20260313-ohos-aarch64.tar.gz | 408KB | 主包 |
-| libhdhomerun-20260313-ohos-aarch64-debug.tar.gz | 90KB | debug包 |
-
-## 六、结束记录
-- **最终状态**: built
-- **结束时间**: 2026-06-04
+**编译结束**: 2026-07-15 21:59
+**最终状态**: built
