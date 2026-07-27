@@ -183,17 +183,30 @@ class PerlConan(ConanFile):
             replace_in_file(
                 self,
                 locale_source,
-                "      case _NL_TELEPHONE_TEL_INT_FMT:\n"
-                "        retval = \"+%c %a %l\";\n"
-                "        break;\n\n"
-                "#  endif\n\n"
-                "   /* When we have to emulate TIME-related items",
-                "      case _NL_TELEPHONE_TEL_INT_FMT:\n"
-                "        retval = \"+%c %a %l\";\n"
-                "        break;\n\n"
-                "#  endif\n"
-                "#  endif\n\n"
-                "   /* When we have to emulate TIME-related items",
+                "#  if ! defined(HAS_SOME_LANGINFO) || ! LC_MEASUREMENT_AVAIL_",
+                "#  if defined(_NL_MEASUREMENT_MEASUREMENT) && "
+                "(! defined(HAS_SOME_LANGINFO) || ! LC_MEASUREMENT_AVAIL_)",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if ! defined(HAS_SOME_LANGINFO) || ! LC_NAME_AVAIL_",
+                "#  if defined(_NL_NAME_NAME_FMT) && "
+                "(! defined(HAS_SOME_LANGINFO) || ! LC_NAME_AVAIL_)",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if ! defined(HAS_SOME_LANGINFO) || ! LC_PAPER_AVAIL_",
+                "#  if defined(_NL_PAPER_HEIGHT) && "
+                "(! defined(HAS_SOME_LANGINFO) || ! LC_PAPER_AVAIL_)",
+            )
+            replace_in_file(
+                self,
+                locale_source,
+                "#  if ! defined(HAS_SOME_LANGINFO) || ! LC_TELEPHONE_AVAIL_",
+                "#  if defined(_NL_TELEPHONE_TEL_INT_FMT) && "
+                "(! defined(HAS_SOME_LANGINFO) || ! LC_TELEPHONE_AVAIL_)",
             )
         configure_args = [
             "-des",
