@@ -62,11 +62,11 @@ class PerlConan(ConanFile):
             cwd=self.source_folder,
         )
         # OHOS does not support GNU make's jobserver FIFO implementation.
-        self.run("make -j1", cwd=self.build_folder)
-        self.run("make test", cwd=self.build_folder)
+        self.run("make -j1", cwd=self.source_folder)
+        self.run("make test", cwd=self.source_folder)
 
     def package(self):
-        self.run("make install", cwd=self.build_folder)
+        self.run("make install", cwd=self.source_folder)
         copy(self, "Artistic", self.source_folder, os.path.join(self.package_folder, "licenses"))
         copy(self, "Copying", self.source_folder, os.path.join(self.package_folder, "licenses"))
 
