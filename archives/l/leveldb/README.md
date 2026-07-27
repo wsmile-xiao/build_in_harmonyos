@@ -1,19 +1,24 @@
-# leveldb
+# LevelDB
 
-## 简介
-LevelDB 是 Google 开发的高性能键值存储库，使用 LSM-tree 数据结构。
+LevelDB is Google's ordered key-value storage library based on an LSM-tree.
 
-## OHOS 适配
-- CMake 构建
-- 需注意默认使用 C++ 标准库
+## HarmonyOS PC adaptation
 
-## 依赖
-- 无编译依赖（可选 tcmalloc, snappy）
+- Builds the official shared library with CMake.
+- Uses only the platform thread library; there are no third-party Conan
+  dependencies.
+- Explicitly disables the optional crc32c, Snappy, and tcmalloc probes so host
+  libraries cannot become undeclared package dependencies.
+- Compiles all 30 POSIX upstream test targets in a separate static build tree.
 
-## 功能验证
-```bash
-ls -la $HOME/usr/local/lib/libleveldb*
-```
+## Verification
 
-## 参考
-- 主页: https://github.com/google/leveldb
+The Conan consumer opens a temporary database and verifies Put, Get,
+WriteBatch, Delete, and cleanup behavior. Cross builds compile and link the
+consumer and upstream tests without claiming target-side execution. The
+resulting AArch64 binaries were also executed on a HarmonyOS PC: all 30
+upstream targets and the consumer passed (31/31).
+
+## Reference
+
+- https://github.com/google/leveldb
