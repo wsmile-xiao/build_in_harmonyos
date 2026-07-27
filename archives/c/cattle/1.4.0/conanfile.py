@@ -2,7 +2,6 @@ import os
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.env import environment_append
 from conan.tools.files import copy, get
 from conan.tools.gnu import Autotools, AutotoolsToolchain, PkgConfigDeps
 from conan.tools.layout import basic_layout
@@ -60,7 +59,13 @@ class CattleConan(ConanFile):
         glib_pc_dir = os.path.join(
             self.dependencies["glib"].package_folder, "lib", "pkgconfig"
         )
-        with environment_append({"PKG_CONFIG_PATH": glib_pc_dir}):
+        original_pkg_config_path = os.environ.get("PKG_CONFIG_PATH")
+        os.environ["PKG_CONFIG_PATH"] = (
+            glib_pc_dir
+            if not original_pkg_config_path
+            else glib_pc_dir + os.pathsep + original_pkg_config_path
+        )
+        try:
             autotools.configure(build_script_folder=self.source_folder)
             autotools.make()
 
@@ -70,6 +75,11 @@ class CattleConan(ConanFile):
             autotools.make(target="check")
             for test_name in ("buffer", "interpreter", "program", "references", "tape"):
                 self.run(f'"{self.build_folder}/tests/{test_name}"')
+        finally:
+            if original_pkg_config_path is None:
+                os.environ.pop("PKG_CONFIG_PATH", None)
+            else:
+                os.environ["PKG_CONFIG_PATH"] = original_pkg_config_path
 
     def package(self):
         autotools = Autotools(self)
