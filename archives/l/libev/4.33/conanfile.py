@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
-"""Conan recipe for libev 4.33 — CMake build (autotools has HMDFS issues on OHOS).
+"""Conan recipe for libev 4.33 using a generated CMake build.
 
 libev ships only autotools build files. On HarmonyOS, autotools config.status
 fails due to HMDFS filesystem restrictions on temporary directory creation.
 This recipe generates a CMakeLists.txt to build the library instead.
 """
 import os
+
 from conan import ConanFile
-from conan.tools.files import get, save, export_conandata_patches, apply_conandata_patches
+from conan.tools.files import (
+    apply_conandata_patches,
+    copy,
+    export_conandata_patches,
+    get,
+    save,
+)
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 
 
@@ -16,13 +23,13 @@ class LibevConan(ConanFile):
     version = "4.33"
     description = "High-performance event loop library (epoll, kqueue, etc.)"
     license = "BSD-2-Clause"
-    homepage = "http://software.schmorp.de/pkg/libev.html"
-    url = ""
+    homepage = "https://software.schmorp.de/pkg/libev.html"
+    url = "https://software.schmorp.de/pkg/libev.html"
 
     package_type = "library"
     settings = "os", "compiler", "build_type", "arch"
     options = {"shared": [True, False]}
-    default_options = {"shared": False}
+    default_options = {"shared": True}
 
     def export_sources(self):
         export_conandata_patches(self)
@@ -35,10 +42,11 @@ class LibevConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
-        if self.options.shared:
-            tc.variables["BUILD_SHARED_LIBS"] = True
-        else:
-            tc.variables["BUILD_SHARED_LIBS"] = False
+        tc.variables["BUILD_SHARED_LIBS"] = bool(self.options.shared)
+        tc.variables["LIBEV_OHOS"] = self.settings.os == "OHOS"
+        if self.options.shared and self.settings.os in ("Linux", "OHOS"):
+            tc.variables["CMAKE_BUILD_WITH_INSTALL_RPATH"] = True
+            tc.variables["CMAKE_INSTALL_RPATH"] = "$ORIGIN"
         tc.generate()
 
     def build(self):
@@ -97,10 +105,11 @@ cmake_minimum_required(VERSION 3.15)
 project(libev C)
 
 option(BUILD_SHARED_LIBS "Build shared libraries" OFF)
+option(LIBEV_OHOS "Build for HarmonyOS/OpenHarmony" OFF)
 
 include(CheckIncludeFile)
 include(CheckFunctionExists)
-include(CheckSymbolExists)
+include(CheckCSourceCompiles)
 
 check_include_file("sys/epoll.h" HAVE_SYS_EPOLL_H)
 check_include_file("sys/inotify.h" HAVE_SYS_INOTIFY_H)
@@ -132,13 +141,34 @@ check_function_exists("eventfd" HAVE_EVENTFD)
 check_function_exists("signalfd" HAVE_SIGNALFD)
 check_function_exists("floor" HAVE_FLOOR)
 
-check_symbol_exists("__kernel_rwf_t" "linux/fs.h" HAVE_KERNEL_RWF_T)
+check_c_source_compiles("#include <linux/fs.h>\nint main(void) { __kernel_rwf_t value = 0; return (int)value; }" HAVE_KERNEL_RWF_T)
 
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/config.h.cmake" "${CMAKE_CURRENT_SOURCE_DIR}/config.h")
 
 add_library(ev ev.c event.c)
-target_include_directories(ev PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-set_target_properties(ev PROPERTIES OUTPUT_NAME "ev")
+target_include_directories(ev PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
+    $<INSTALL_INTERFACE:include>
+)
+
+if(LIBEV_OHOS)
+    # io_uring is a newer Linux syscall family that is not available on OHOS.
+    target_compile_definitions(ev PRIVATE EV_USE_IOURING=0)
+endif()
+
+set_target_properties(ev PROPERTIES
+    OUTPUT_NAME "ev"
+    POSITION_INDEPENDENT_CODE ON
+    VERSION 4.0.0
+    SOVERSION 4
+)
+
+if(BUILD_SHARED_LIBS)
+    set_target_properties(ev PROPERTIES
+        BUILD_WITH_INSTALL_RPATH ON
+        INSTALL_RPATH "$ORIGIN"
+    )
+endif()
 
 install(TARGETS ev
     ARCHIVE DESTINATION lib
@@ -156,6 +186,13 @@ install(FILES ev.h ev++.h event.h DESTINATION include)
     def package(self):
         cmake = CMake(self)
         cmake.install()
+        copy(
+            self,
+            "LICENSE",
+            src=self.source_folder,
+            dst=os.path.join(self.package_folder, "licenses"),
+        )
 
     def package_info(self):
+        self.cpp_info.set_property("cmake_target_name", "libev::libev")
         self.cpp_info.libs = ["ev"]

@@ -9,12 +9,13 @@ File location: archives/{letter}/libev/{version}/test_package/conanfile.py
 import os
 
 from conan import ConanFile
+from conan.tools.build import can_run
 from conan.tools.cmake import CMake, cmake_layout
 
 
 class LibevTestConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
-    generators = "CMakeDeps", "CMakeToolchain"
+    generators = "CMakeDeps", "CMakeToolchain", "VirtualRunEnv"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
@@ -28,7 +29,10 @@ class LibevTestConan(ConanFile):
         cmake.build()
 
     def test(self):
+        if not can_run(self):
+            self.output.info("Cross-build detected; target execution skipped")
+            return
         cmake = CMake(self)
-        cmake.test()
-        # Alternatively, run the binary directly:
-        # self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_libev')}", env="conanrun")
+        cmake.ctest(cli_args=["--output-on-failure", "--no-tests=error"])
+        test_bin = os.path.join(self.cpp.build.bindirs[0], "test_libev")
+        self.run(test_bin, env="conanrun", cwd=self.build_folder)

@@ -1,67 +1,74 @@
-# libev 4.33 编译进度记录
+# libev 4.33 OHOS Conan adaptation
 
-## 编译信息
-- 软件名: libev
-- 版本: 4.33
-- 构建系统: CMake（替代autotools，因HMDFS限制）
-- 编译状态: built
-- 编译日期: 2026-07-15
+## Scope
 
-## 编译过程
+- Source: libev 4.33 release archive with verified SHA256.
+- Package: shared `libev` C library plus `ev.h`, `ev++.h`, and `event.h`.
+- Dependencies: no third-party Conan dependencies.
 
-### Phase 1: 初始化
-- 下载源码: http://dist.schmorp.de/libev/libev-4.33.tar.gz
-- SHA256: 507eb7b8d1015fbec5b935f34ebed15bf346bed04a11ab82b8eee848c4205aea
-- 解压成功
-- 环境检查通过
+## Build approach
 
-### Phase 2: autotools 配置尝试（失败）
-- 首次尝试: config.guess (2018-02-24版) 无法识别 HarmonyOS
-- 修复: 下载最新 config.guess/config.sub (2026版) + 应用 OHOS 补丁
-  - config.guess 输出: aarch64-unknown-linux-ohos
-  - config.sub 验证通过
-- 二次尝试: configure 成功完成所有检测，但 config.status 失败
-  - 错误: "can't create ./confXXX/subs1.awk: Permission denied"
-  - 原因: HMDFS 文件系统限制 autotools 临时目录创建
-  - VPATH 构建也失败（同样 HMDFS 限制）
+The archived autotools attempt failed when `config.status` created temporary
+files on HMDFS. The recipe therefore generates a small CMake project that
+builds the same upstream sources (`ev.c` and `event.c`) and derives `config.h`
+from compile/link feature checks.
 
-### Phase 3: CMake 构建（成功）
-- 由于 autotools 在 HMDFS 上无法工作，采用 CMake 替代
-- 在 conanfile.py build() 中动态生成:
-  - config.h.cmake: cmakedefine 模板，配合 CMake check_include_file/check_function_exists 自动检测
-  - CMakeLists.txt: 简单的 CMake 构建文件
-- CMake 自动检测到所有平台特性:
-  - epoll, inotify, poll, select, eventfd, signalfd, timerfd
-  - clock_gettime, nanosleep, floor, __kernel_rwf_t
-- 编译成功，生成 libev.a (静态库)
-- 测试通过: ev_version_major/minor + ev_default_loop + ev_loop_destroy
+SDK 11 does not contain a system `libev.so`, so the recipe defaults to a shared
+package. It assigns `VERSION 4.0.0` and `SOVERSION 4`, matching upstream
+libtool `-version-info 4:0:0`, and uses `$ORIGIN` as the install RUNPATH.
 
-### Phase 4: 安装和验证
-- 安装头文件: ev.h, ev++.h, event.h
-- 安装库文件: libev.a
-- 测试程序输出: "libev version: 4.33, Default loop created successfully, Test passed"
+OHOS does not implement the newer io_uring syscall family. The generated CMake
+target sets `EV_USE_IOURING=0` only for OHOS; portable epoll, poll, select,
+eventfd, signalfd, and timerfd capabilities remain controlled by feature checks.
+The Linux `__kernel_rwf_t` typedef is checked with a compile probe equivalent to
+upstream `AC_CHECK_TYPES`, rather than a symbol-address probe that rejects types.
 
-## 遇到的问题和解决方案
+## Tests and evidence boundary
 
-### 问题1: config.guess 无法识别 HarmonyOS (E007)
-- 解决方案: 下载最新版 + 应用 patch-autotools-ohos.pl 补丁
-- 知识沉淀: E007 (config.guess), E072 (config.sub)
+libev 4.33 ships no upstream test target. The Conan consumer validates the
+reported 4.33 version, creates the default event loop, and runs a one-shot
+timer callback. During a Windows-to-OHOS cross-build it is compiled and linked
+but not executed because `can_run()` is false. Target execution was verified
+separately on a HarmonyOS PC device.
 
-### 问题2: HMDFS 文件系统限制导致 config.status 失败
-- 现象: autotools config.status 无法创建临时子目录
-- 原因: HMDFS 的特殊权限限制
-- 解决方案: 放弃 autotools，使用 CMake 构建系统
-- conanfile.py 在 build() 中生成 CMakeLists.txt 和 config.h.cmake
+Three independent CTest unit cases now cover version constants, loop userdata
+and initial state, and one-shot timer activation/callback/event-mask behavior.
+They contain 11 assertions and compile/link together with the existing
+3-assertion consumer. The forced `conan create --build=libev/*` log SHA256 is
+`8D0866DEE4B767D50A76AC1546EF6A39744951419C21910CA3BAB4D95DDB6037`;
+the Windows-hosted cross-build still skips execution by design.
 
-## 构建产物
-- libev.a: 静态库 (~70KB)
-- 头文件: ev.h, ev++.h, event.h
+On 2026-07-24, the two AArch64 test executables and `libev.so.4` were uploaded
+to `/storage/Users/currentUser/codex-tests/pr-3009` on HarmonyOS PC
+`10.62.151.101:2222`. Each ELF was signed in its final HMDFS path. The consumer
+and the `version`, `loop_userdata`, and `timer_once` unit cases all exited 0,
+for a device result of 4/4. The consumer output confirmed libev 4.33 and the
+default-loop timer callback. Signed SHA256 values were
+`b437815ccf3dfb1dc47ef16dd7022e065205cf6e866426389592336d1b92f070`
+(`test_libev`),
+`c7943dcaa8e19c05edd5acf8b15412697e4e2ccc98c976ea9d4cd887c7e8c609`
+(`test_libev_unit`), and
+`b171e3108547d3d0ffcbcee2682680ced519b9344367ff3acfbb96d0528f5eea`
+(`libev.so.4`).
 
-## 后续工作
-- 无需补丁文件（CMake 构建不需要修改源码）
-- config.guess/config.sub 补丁仅在尝试 autotools 时使用，最终未包含在配方中
----
+The final `conan create` produced recipe revision
+`73333e435862e817075ecb36ab0f55b9`, package ID
+`01d92cf349a0dd98ff915f4bd99a04430171517f`, and package revision
+`03688af8a1f0696b9ad4f751a2d55240`. `llvm-readelf` confirmed AArch64 ELF64,
+SONAME `libev.so.4`, RUNPATH `$ORIGIN`, and only `libc.so` as a dynamic
+dependency. The package contains no static archive and no Windows path string.
 
-**编译结束**: 2026-07-15 15:00
-**最终状态**: built
-最终状态: built (编译结束)
+## Knowledge reuse and path classification
+
+- Reused `openharmony-conan-cmake-upstream-tests-cross-runpath` for the shared
+  library RUNPATH and host-path audit.
+- Reused the existing OHOS adaptation rule that unsupported new Linux syscalls
+  such as io_uring must not be enabled solely because Linux headers are present.
+- Added verified knowledge draft E217 (`knowledge/graph/draft/E217-draft-CX17.kv`
+  and `knowledge/graph/draft/E217-draft-CX17.md`) for the reusable rule that typedef availability must
+  be tested with a target compile probe rather than `check_symbol_exists`.
+  This is a path B knowledge innovation, so the dependency is classified as
+  path A + path B.
+- libev uses public C/CMake/Conan tooling, has no private system interface,
+  assembly, closed binary, special scheduler, or large dependency graph, so it
+  does not qualify for path C.
