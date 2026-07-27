@@ -1,19 +1,17 @@
-# sparsehash 2.0.4 — OpenHarmony 编译记录
+# sparsehash
 
-## 基本信息
-- 软件: sparsehash
-- 版本: 2.0.4
-- 构建系统: autotools
-- 目标: ohos-aarch64
+Sparsehash 2.0.4 provides memory-efficient C++ `dense_hash_map`,
+`dense_hash_set`, `sparse_hash_map`, `sparse_hash_set`, and `sparsetable`
+containers. It is a header-only BSD-3-Clause library.
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OpenHarmony package
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+- Target: OHOS AArch64 with Clang and libc++
+- Build system: Conan 2 with a generated CMake harness for upstream tests
+- Dependencies: none beyond the C++ standard library
+- CMake target: `sparsehash::sparsehash`
+- Include trees: `sparsehash/` and legacy-compatible `google/`
 
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+The 2.0.4 recipe compiles all seven upstream test programs and a real consumer
+test. Cross-build validation proves AArch64 compilation and linkability; target
+execution remains a native CI or connected-device requirement.
