@@ -491,6 +491,28 @@ PYEOF
         echo "        [ok] L0m: directory structure valid"
     fi
 
+    # ── L0n: 分支名与包名-版本匹配校验 (R40) ──
+    # PR 分支名必须包含 {pkg_name}-{pkg_ver}（如 feat/jsmn-1.1.0 包含 jsmn-1.1.0）
+    # 不做分支名分割，直接拼接已知值做包含检查，避免包名含 '-' 导致歧义
+    # REL 构建或 main/master/server 分支自动跳过
+    if [ -n "${CI_BRANCH:-}" ] && [ "${CI_BRANCH}" != "main" ] \
+       && [ "${CI_BRANCH}" != "master" ] && [ "${CI_BRANCH}" != "server" ]; then
+        echo "[step] L0n: Checking branch name matches package (R40)..."
+        EXPECTED_TAG="${pkg_name}-${pkg_ver}"
+        if echo "${CI_BRANCH}" | grep -q -- "${EXPECTED_TAG}"; then
+            echo "        [ok] L0n: branch '${CI_BRANCH}' contains '${EXPECTED_TAG}'"
+        else
+            echo "[fail] L0n: branch name mismatch (R40)"
+            echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
+            echo "[hint] 分支名应包含 包名-版本号，例如："
+            echo "         feat/${pkg_name}-${pkg_ver}"
+            echo "         fix/${pkg_name}-${pkg_ver}"
+            echo "         ${pkg_name}-${pkg_ver}"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} branch_name_mismatch_r40"
+        fi
+    fi
+
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"
