@@ -210,8 +210,11 @@ endif()
         if not os.path.exists(path):
             return
         content = load(self, path)
-        new_content, count = pattern.subn("", content, count=1)
-        if count != 1:
-            raise RuntimeError(f"Unable to remove {description} from {path}")
+        new_content, count = pattern.subn("", content)
+        if count == 0:
+            self.output.warning(f"{description} was already absent from {path}")
+            return
+        if count > 1:
+            raise RuntimeError(f"Refusing to remove {count} {description} blocks from {path}")
         with open(path, "w", encoding="utf-8") as file:
             file.write(new_content)
