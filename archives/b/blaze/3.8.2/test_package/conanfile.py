@@ -24,4 +24,4 @@ class BlazeTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            CMake(self).test()
+            self.run("ctest --output-on-failure", cwd=self.build_folder)
