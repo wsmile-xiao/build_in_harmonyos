@@ -205,10 +205,16 @@ endif()
 
     def _strip_io_s2n_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-io", "aws-c-io-config.cmake")
-        block = '''if (UNIX AND NOT APPLE AND NOT BYO_CRYPTO)
-    find_dependency(s2n)
-endif()
-
-'''
-        if os.path.exists(config) and block in load(self, config):
-            replace_in_file(self, config, block, "")
+        if not os.path.exists(config):
+            return
+        content = load(self, config)
+        pattern = re.compile(
+            r"if \(UNIX AND NOT APPLE AND NOT BYO_CRYPTO\)\s*"
+            r"find_dependency\(s2n\)\s*"
+            r"endif\(\)\s*",
+            re.MULTILINE,
+        )
+        new_content, count = pattern.subn("", content, count=1)
+        if count:
+            with open(config, "w", encoding="utf-8") as file:
+                file.write(new_content)
