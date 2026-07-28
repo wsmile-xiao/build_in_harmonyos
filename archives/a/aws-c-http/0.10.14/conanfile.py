@@ -86,7 +86,8 @@ class AwsCHttpConan(ConanFile):
         ]
         args.extend(f"-D{key}={value}" for key, value in definitions.items())
         self.run(" ".join(args), env=["conanbuild"], ignore_errors=False)
-        self.run(f'cmake --build "{build_dir}" -- -j2', env=["conanbuild"], ignore_errors=False)
+        build_jobs = self.conf.get("tools.build:jobs", default=2)
+        self.run(f'cmake --build "{build_dir}" -- -j{build_jobs}', env=["conanbuild"], ignore_errors=False)
         self.run(f'cmake --install "{build_dir}"', env=["conanbuild"], ignore_errors=False)
 
     def _module_path(self, prefix):
@@ -161,6 +162,7 @@ endif()
             if marker in content:
                 replace_in_file(self, path, marker, prelude + marker)
                 return
+        self.output.warning(f"Unable to inject Threads fallback before aws-c-common in {path}")
 
     def _ensure_common_threads_config(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-common", "aws-c-common-config.cmake")
@@ -180,6 +182,8 @@ endif()
         target_marker = "macro(aws_load_targets type)\n"
         if target_marker in content:
             replace_in_file(self, config, target_marker, fallback + "\n" + target_marker)
+            return
+        self.output.warning(f"Unable to inject Threads fallback into {config}")
 
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
