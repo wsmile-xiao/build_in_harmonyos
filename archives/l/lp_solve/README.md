@@ -14,24 +14,23 @@ lp_solve 使用 LGPL-2.1-or-later 许可证发布。
 - SOS（特殊有序集）支持
 - 内置 LUSOL 基分解引擎（默认）
 - 支持 LP 和 MPS 文件格式
-- 可通过共享库 API 嵌入其他程序
+- 可通过 C API 嵌入其他程序
 
-## 预编译包版本
+## 适配版本
 
 | 版本 | 状态 | 构建系统 | 日期 |
-|------|------|---------|------|
-| 5.5.2.14 | published | custom (Makefile) | 2026-06-09 |
+|------|------|----------|------|
+| 5.5.2.14 | adapted | Conan + generated CMake | 2026-07-27 |
 
-## OpenHarmony 适配要点
+## 当前 Conan 适配
 
-1. ⭐ 必须使用 GNU ld (ld.bfd) 替代 lld
-2. lp_solve 没有标准构建系统，使用自定义 `ccc` shell 脚本
-3. 预生成的 flex/bison 代码使用 `lp_` 前缀，需编译器 `-D` 映射
-4. 跨平台 API 用户应使用 `lp_lib.h` 而非 `lpsolve.h`
+本条目提供 Linux 和 OpenHarmony 消费者可用的 C 库及 `lp_solve`
+命令。recipe 根据上游 `ccc` 脚本的源码集合和预处理定义生成 CMake
+工程，使编译器、链接器、构建类型和目标架构均由 Conan 配置。
 
-## 安装验证
+`5.5.2.14` 源码包包含 demo，但没有正式的自动化测试 runner。消费测试
+通过公共 C API 求解确定性线性规划、验证命令行程序，并用不存在的模型
+文件覆盖失败路径；上游通过率因此记为 N/A，而不是 0/0。
 
-```bash
-lp_solve -h   # 显示版本 5.5.2.14
-lp_solve model.lp   # 求解 LP 模型文件
-```
+2026-06-09 的旧预编译包流程及其历史补丁记录保留在版本说明中，但这些
+补丁未被本次 Conan recipe 引用或应用。
