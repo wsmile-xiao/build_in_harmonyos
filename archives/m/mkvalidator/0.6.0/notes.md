@@ -15,9 +15,9 @@
 4. `cmake .. -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Linux`
 5. `make -j2` — 全部目标编译成功
 6. `make install DESTDIR=$TEST_PREFIX` — staging 验证安装成功
-7. `ohc verify-build` — G1-G4 全部 PASS
-8. `ohc package` — 生成 mkvalidator-0.6.0-ohos-aarch64.tar.gz (1524KB) 和 debug 包
-9. `ohc finish` — 归档收尾，状态 built
+7. `conan create` — 从干净源码构建验证配方自包含性（R19: 使用 conan create，禁止手动打包）
+8. `conan-verify` — G1-G4 全部 PASS
+9. `finish` — 归档收尾，状态 built
 
 ## 遇到的问题与解决方案
 
@@ -119,10 +119,5 @@ ERR201: Invalid 'SegmentUID' for profile 'webm'
 4. **所有依赖均为内置编译**: 无外部预编译依赖需求
 
 ---
-**编译结束**: 2026-06-17 03:07
-**最终状态**: built → 等待 published
-**知识图谱草稿**: E052-draft-5244 (CMAKE_SYSTEM_NAME UNIX 宏问题)
----
-
 **编译结束**: 2026-06-17 17:20
-**最终状态**: built
+**最终状态**: built（conan create 验证通过，待 conan upload 后标记 published）
