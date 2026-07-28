@@ -2,7 +2,7 @@ import os
 import shlex
 
 from conan import ConanFile
-from conan.tools.build import check_min_cppstd
+from conan.tools.build import can_run, check_min_cppstd
 from conan.tools.files import copy, get
 from conan.tools.layout import basic_layout
 
@@ -60,8 +60,14 @@ class BlazeConan(ConanFile):
             f"{shlex.quote(test_source)} -o {shlex.quote(executable)}",
             env="conanbuild",
         )
-        self.run(shlex.quote(executable), env="conanbuild")
-        self.output.info("blaze upstream DynamicVector ClassTest passed")
+        if can_run(self):
+            self.run(shlex.quote(executable), env="conanbuild")
+            self.output.info("blaze upstream DynamicVector ClassTest passed")
+        else:
+            self.output.info(
+                "Skipping blaze upstream DynamicVector ClassTest: "
+                "the target binary cannot run on this build machine"
+            )
 
     def package(self):
         source_root = self._source_root()
