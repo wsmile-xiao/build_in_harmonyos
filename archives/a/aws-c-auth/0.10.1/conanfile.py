@@ -2,6 +2,7 @@
 """Conan recipe for aws-c-auth 0.10.1 built with private AWS CRT deps."""
 
 import os
+import re
 import shlex
 
 from conan import ConanFile
@@ -215,24 +216,33 @@ endif()
 
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
-        block = '''if ((NOT WIN32 AND NOT APPLE) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE)
-    if (USE_OPENSSL)
-        find_dependency(OpenSSL REQUIRED)
-        find_dependency(Threads REQUIRED)
-    else()
-        find_dependency(crypto)
-    endif()
-endif()
-'''
-        if os.path.exists(config) and block in load(self, config):
-            replace_in_file(self, config, block, "")
+        pattern = (
+            r"(?ms)^if\s*\(\s*\(NOT\s+WIN32\s+AND\s+NOT\s+APPLE\)\s+OR\s+"
+            r"AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE\s*\)\s*\n"
+            r"\s*if\s*\(USE_OPENSSL\)\s*\n"
+            r"\s*find_dependency\(OpenSSL\s+REQUIRED\)\s*\n"
+            r"\s*find_dependency\(Threads\s+REQUIRED\)\s*\n"
+            r"\s*else\(\)\s*\n"
+            r"\s*find_dependency\(crypto\)\s*\n"
+            r"\s*endif\(\)\s*\n"
+            r"\s*endif\(\)\s*\n+"
+        )
+        self._remove_config_block(config, pattern)
 
     def _strip_io_s2n_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-io", "aws-c-io-config.cmake")
-        block = '''if (UNIX AND NOT APPLE AND NOT BYO_CRYPTO)
-    find_dependency(s2n)
-endif()
+        pattern = (
+            r"(?ms)^if\s*\(UNIX\s+AND\s+NOT\s+APPLE\s+AND\s+NOT\s+BYO_CRYPTO\)\s*\n"
+            r"\s*find_dependency\(s2n\)\s*\n"
+            r"\s*endif\(\)\s*\n+"
+        )
+        self._remove_config_block(config, pattern)
 
-'''
-        if os.path.exists(config) and block in load(self, config):
-            replace_in_file(self, config, block, "")
+    def _remove_config_block(self, path, pattern):
+        if not os.path.exists(path):
+            return
+        content = load(self, path)
+        updated, count = re.subn(pattern, "", content, count=1)
+        if count:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(updated)
