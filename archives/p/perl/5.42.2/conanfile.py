@@ -230,6 +230,10 @@ class PerlConan(ConanFile):
             "-Dman1dir=none",
             "-Dman3dir=none",
         ]
+        if self.settings.os == "OHOS":
+            # The libc symbol is visible to Configure but has no declaration
+            # in the OHOS headers, truncating returned pointers on aarch64.
+            configure_args.append("-Ud_memrchr")
         self.run(
             f'"{shell}" Configure {" ".join(configure_args)}',
             cwd=self.source_folder,
