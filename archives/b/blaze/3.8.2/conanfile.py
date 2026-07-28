@@ -42,6 +42,7 @@ class BlazeConan(ConanFile):
             "tools.build:compiler_executables", default={}, check_type=dict
         ).get("cpp", "c++")
         source_root = self._source_root()
+        test_include_root = os.path.join(source_root, "blazetest")
         test_source = os.path.join(
             source_root,
             "blazetest",
@@ -55,6 +56,7 @@ class BlazeConan(ConanFile):
         self.run(
             f"{shlex.quote(compiler)} -std=c++14 -O0 "
             f"-I{shlex.quote(source_root)} "
+            f"-I{shlex.quote(test_include_root)} "
             f"{shlex.quote(test_source)} -o {shlex.quote(executable)}",
             env="conanbuild",
         )
