@@ -495,6 +495,7 @@ PYEOF
     # PR 分支名必须包含 {pkg_name}-{pkg_ver}（如 feat/jsmn-1.1.0 包含 jsmn-1.1.0）
     # 不做分支名分割，直接拼接已知值做包含检查，避免包名含 '-' 导致歧义
     # REL 构建或 main/master/server 分支自动跳过
+    # ⚠️ 当前为提示模式（warn-only），2026-07-29 后改为强制失败
     if [ -n "${CI_BRANCH:-}" ] && [ "${CI_BRANCH}" != "main" ] \
        && [ "${CI_BRANCH}" != "master" ] && [ "${CI_BRANCH}" != "server" ]; then
         echo "[step] L0n: Checking branch name matches package (R40)..."
@@ -502,14 +503,13 @@ PYEOF
         if echo "${CI_BRANCH}" | grep -q -- "${EXPECTED_TAG}"; then
             echo "        [ok] L0n: branch '${CI_BRANCH}' contains '${EXPECTED_TAG}'"
         else
-            echo "[fail] L0n: branch name mismatch (R40)"
+            echo "[warn] L0n: branch name mismatch (R40) — 当前仅提示，不阻断构建"
             echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
             echo "[hint] 分支名应包含 包名-版本号，例如："
             echo "         feat/${pkg_name}-${pkg_ver}"
             echo "         fix/${pkg_name}-${pkg_ver}"
             echo "         ${pkg_name}-${pkg_ver}"
-            L0_FAILED=true
-            L0_ERRORS="${L0_ERRORS} branch_name_mismatch_r40"
+            echo "[hint] ⚠️ 2026-07-29 起此检查将升级为强制失败，请尽快修改分支名"
         fi
     fi
 
