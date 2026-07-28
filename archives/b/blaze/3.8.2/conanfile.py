@@ -32,13 +32,18 @@ class BlazeConan(ConanFile):
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
+    def _source_root(self):
+        archive_root = os.path.join(self.source_folder, f"blaze-{self.version}")
+        return archive_root if os.path.isdir(archive_root) else self.source_folder
+
     def build(self):
         # This is an upstream Blazetest program, not a recipe-owned substitute.
         compiler = self.conf.get(
             "tools.build:compiler_executables", default={}, check_type=dict
         ).get("cpp", "c++")
+        source_root = self._source_root()
         test_source = os.path.join(
-            self.source_folder,
+            source_root,
             "blazetest",
             "src",
             "mathtest",
@@ -49,7 +54,7 @@ class BlazeConan(ConanFile):
         executable = os.path.join(self.build_folder, "blaze-dynamicvector-test")
         self.run(
             f"{shlex.quote(compiler)} -std=c++14 -O0 "
-            f"-I{shlex.quote(self.source_folder)} "
+            f"-I{shlex.quote(source_root)} "
             f"{shlex.quote(test_source)} -o {shlex.quote(executable)}",
             env="conanbuild",
         )
@@ -57,16 +62,17 @@ class BlazeConan(ConanFile):
         self.output.info("blaze upstream DynamicVector ClassTest passed")
 
     def package(self):
+        source_root = self._source_root()
         copy(
             self,
             "*",
-            src=os.path.join(self.source_folder, "blaze"),
+            src=os.path.join(source_root, "blaze"),
             dst=os.path.join(self.package_folder, "include", "blaze"),
         )
         copy(
             self,
             "LICENSE",
-            src=self.source_folder,
+            src=source_root,
             dst=os.path.join(self.package_folder, "licenses"),
         )
 
