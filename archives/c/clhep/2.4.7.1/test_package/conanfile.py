@@ -24,4 +24,8 @@ class ClhepTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            self.run("ctest --output-on-failure", cwd=self.build_folder)
+            self.run(
+                "ctest --output-on-failure",
+                cwd=self.build_folder,
+                env="conanrun",
+            )
