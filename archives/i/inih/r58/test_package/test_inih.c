@@ -130,16 +130,21 @@ int main(void) {
     }
 
     /* ===== Test 4: Parse error detection ===== */
+    /* An invalid line (no '=') must be reported as a non-zero return and
+     * the valid pair (good=1) before it must still be parsed. */
     printf("Test 4: Parse error detection...\n");
     {
         const char* ini = "[ok]\ngood=1\nbad_line_no_equals\n";
         count = 0;
         ret = ini_parse_string(ini, count_handler, &count);
-        if (ret == 0) {
-            /* ini_parse may continue parsing past errors by default */
-            printf("  INFO: ini_parse returned 0 (non-strict mode), count=%d\n", count);
+        if (ret <= 0) {
+            fprintf(stderr, "FAIL: expected parse error (ret>0), got ret=%d\n", ret);
+            failures++;
+        } else if (count != 1) {
+            fprintf(stderr, "FAIL: expected 1 valid pair before error, got %d\n", count);
+            failures++;
         } else {
-            printf("  PASS: parse error detected at line %d\n", ret);
+            printf("  PASS: parse error detected at line %d, 1 pair parsed\n", ret);
         }
     }
 
