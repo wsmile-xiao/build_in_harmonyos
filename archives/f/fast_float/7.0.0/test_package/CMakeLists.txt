@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.8)
+project(test_fast_float LANGUAGES CXX)
+enable_testing()
+find_package(fast_float REQUIRED CONFIG)
+add_executable(test_fast_float test.cpp)
+target_link_libraries(test_fast_float fast_float::fast_float)
+add_test(NAME test_fast_float COMMAND test_fast_float)
