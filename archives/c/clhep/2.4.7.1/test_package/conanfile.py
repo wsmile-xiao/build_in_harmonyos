@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""Conan test package for CLHEP 2.4.7.1."""
+
+import os
+
 from conan import ConanFile
 from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
@@ -26,8 +31,9 @@ class ClhepTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
+            # CTest must expose CLHEP's component libraries to its child process.
+            lib_dir = os.path.join(self.dependencies["clhep"].package_folder, "lib")
             self.run(
-                "ctest --output-on-failure",
+                f"LD_LIBRARY_PATH={lib_dir} ctest --output-on-failure",
                 cwd=self.build_folder,
-                env="conanrun",
             )

@@ -1,3 +1,6 @@
+#!/usr/bin/env python3
+"""Conan recipe for CLHEP 2.4.7.1."""
+
 import os
 
 from conan import ConanFile
