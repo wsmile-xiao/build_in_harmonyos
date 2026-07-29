@@ -21,12 +21,12 @@
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | CMake configure failed | cmake_minimum_required(VERSION 2.8.12) 不兼容 CMake 4.x | 修改为 cmake_minimum_required(VERSION 3.10...4.0) |
+| 1 | CMake configure failed | cmake_minimum_required(VERSION 2.8.12) 不兼容 CMake 4.x | 修改为 cmake_minimum_required(VERSION 3.5...3.27) |
 
 ## 源码修改
 
 - CMakeLists.txt: 修改 cmake_minimum_required 版本以兼容 CMake 4.x
-  - 补丁文件: 0001-CMakeLists.txt.patch
+  - 补丁文件: 0001-fix-cmake-min-version.patch
 
 ## 依赖版本
 
