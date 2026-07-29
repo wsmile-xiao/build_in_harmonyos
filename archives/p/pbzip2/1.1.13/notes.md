@@ -91,6 +91,31 @@
 - **修复**: Makefile中添加`CXXFLAGS += -I$(PREFIX)/include`和`LDFLAGS = -L$(PREFIX)/lib`
 - **影响范围**: 所有依赖外部库且Makefile未自动检测路径的项目
 
+### 问题5: 上游源码结构澄清（代码审查 P0/P1 复议证据）
+- **背景**: 代码审查机器人声称 pbzip2 1.1.13 上游为"单文件项目，仅含 pbzip2.cpp"，据此判定补丁 0001（BZ2StreamScanner.cpp）和 0002（Makefile）为 critical 阻塞问题
+- **事实**: 上游 pbzip2-1.1.13.tar.gz 解压后包含以下独立源文件：
+  - `pbzip2.cpp` (117150 bytes) — 主程序
+  - `BZ2StreamScanner.cpp` (16289 bytes) — BZ2 流扫描器实现
+  - `BZ2StreamScanner.h` (4355 bytes)
+  - `ErrorContext.cpp` (1813 bytes) — 错误上下文实现
+  - `ErrorContext.h` (815 bytes)
+  - `Makefile` (2760 bytes)
+- **上游 Makefile 第 69 行**: `pbzip2: pbzip2.cpp BZ2StreamScanner.cpp ErrorContext.cpp`（与补丁 0002 上下文行完全一致）
+- **上游 BZ2StreamScanner.cpp 含 5 处 PRIuMAX 拼接问题**（第 114/155/515/555/683 行），与补丁 0001 修复内容一致
+- **验证方法**: `git apply --check -p1` 对纯净上游源码依次应用 0001~0004 全部 4 个补丁，均 CHECK OK + APPLIED 成功
+- **结论**: P0/P1 审查结论基于错误前提（误认上游为单文件项目），补丁实际可正常应用
+
+### 问题6: CI 编译失败 — bzlib.h not found (CI 真实阻塞)
+- **现象**: CI #11104 报 `pbzip2.cpp:33:10: fatal error: 'bzlib.h' file not found`，编译命令 `-I/storage/Users/currentUser/usr/local/include` 找不到头文件
+- **根因**: OHOS CI worker 的 `~/usr/local` 未预装 bzip2 开发文件（bzlib.h / libbz2.a）。bzip2 归档包（archives/b/bzip2/1.0.8）仅有 ohc-run.py manifest（status: published），无 conanfile.py，不能作为 Conan 依赖被 `requires()` 引用。file 包通过 `--disable-bzlib` 绕过，但 pbzip2 核心功能即 bzip2，无法禁用
+- **修复**: 在 conanfile.py 的 `_build_bzip2()` 中内联构建 bzip2 1.0.8 静态库：
+  1. `get()` 下载 bzip2 1.0.8 源码（sha256: ab5a03176...0c4a2269，来自 conan-center-index 权威记录）
+  2. `make libbz2.a` 编译静态库（显式 `-fPIC` 以便链接进 pbzip2 二进制）
+  3. 将 bzlib.h + libbz2.a 安装到 `<build_folder>/bzip2_prefix/{include,lib}`
+  4. pbzip2 的 `make PREFIX=<bzip2_prefix>` 通过 Makefile 的 `-I$(PREFIX)/include` 和 `-L$(PREFIX)/lib` 定位
+- **package_info 调整**: libbz2 静态链接进二进制后，`system_libs` 从 `["bz2","pthread"]` 改为 `["pthread"]`，移除 ~/usr/local/lib 的 LD_LIBRARY_PATH 设置
+- **验证**: sha256 已对照 conan-center-index 确认；源码解压含 Makefile/bzlib.h；Makefile 第 46 行有 libbz2.a 目标；conanfile.py 语法检查通过
+
 ## 五、预编译包交付物
 
 | 文件 | 大小 | 说明 |
