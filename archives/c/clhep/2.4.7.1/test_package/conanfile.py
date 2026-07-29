@@ -1,6 +1,7 @@
 from conan import ConanFile
 from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+from conan.tools.env import VirtualRunEnv
 
 
 class ClhepTestConan(ConanFile):
@@ -16,6 +17,7 @@ class ClhepTestConan(ConanFile):
     def generate(self):
         CMakeDeps(self).generate()
         CMakeToolchain(self).generate()
+        VirtualRunEnv(self).generate()
 
     def build(self):
         cmake = CMake(self)
