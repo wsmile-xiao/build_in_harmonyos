@@ -12,9 +12,9 @@
 ## 编译流程
 
 ### 1. 源码获取
-- 源码来源: GitHub geofft/timidity 仓库 (CVS 分支)
-- 下载地址: https://github.com/geofft/timidity/archive/refs/heads/cvs.tar.gz
-- 说明: 该仓库是 TiMidity++ 源码的临时托管（SourceForge 项目已失效）
+- 源码来源: SourceForge 官方 TiMidity++ 项目
+- 下载地址: https://sourceforge.net/projects/timidity/files/TiMidity%2B%2B/TiMidity%2B%2B-2.13.2/TiMidity%2B%2B-2.13.2.tar.gz/download
+- 说明: 使用 SourceForge 官方 release tarball，符合 R39 官方源要求
 
 ### 2. 平台适配问题
 
@@ -55,7 +55,7 @@ configure: error: cannot guess build type; you must specify one
 HMDFS 文件系统的 hmmac 强制访问控制（SELinux）限制 autotools 创建临时文件。
 
 **解决方案**:
-将源码目录移动到 `/data/storage/el2/base/cache` 目录下编译：
+通过 `patches/0003-configure-hmdfs-umask.patch` 将 configure 创建临时目录时的 umask 从 077 调整为 022，并在 `/data/storage/el2/base/cache` 目录下编译：
 ```bash
 mkdir -p /data/storage/el2/base/cache/timidity-build
 cd /data/storage/el2/base/cache/timidity-build
@@ -114,7 +114,8 @@ TiMidity++ version 2.13.2
 | 问题编号 | 类型 | 解决方案 |
 |---------|------|---------|
 | E007 | 平台识别 | 修改 config.guess/config.sub |
-| HMDFS 权限 | 文件系统 | 在 /data/storage/el2/base/cache 编译 |
+| E009 | 链接错误 | 添加 -fcommon 编译选项解决 clang/ld.lld 重复符号错误 |
+| HMDFS 权限 | 文件系统 | 通过补丁调整 umask，并在 /data/storage/el2/base/cache 编译 |
 | 编译器缺失 | 环境配置 | 使用 clang 编译器 |
 
 ## 质量门禁检查结果
@@ -155,8 +156,15 @@ TiMidity++ version 2.13.2
 
 ### HMDFS 权限限制问题
 **适用场景**: HMDFS 文件系统上执行 autotools 构建
-**解决方案**: 在 `/data/storage/el2/base/cache` 目录下编译
+**解决方案**: 通过补丁调整 configure 的临时目录 umask，并在 `/data/storage/el2/base/cache` 目录下编译
 **关键环境变量**: `TMPDIR=/data/storage/el2/base/cache`
+
+### E009: clang/ld.lld 重复符号链接错误
+**适用场景**: 老旧 C 项目（2004 年前后）使用 clang/ld.lld 编译链接
+**问题**: TiMidity++ 2.13.2 源码中多个 .c 文件对同名全局变量有临时定义（tentative definition），依赖旧版 GCC `-fcommon` 行为允许合并。clang 15 / ld.lld 默认 `-fno-common`，导致 `duplicate symbol` 链接错误
+**涉及符号**: `insertion_effect_gs`、`reverb_status_xg`、`chorus_status_gs`、`delay_status_gs`、`global_pink_noise_light` 等
+**解决方案**: 在 conanfile.py 的 generate() 中通过 `tc.cflags.append("-fcommon")` 启用 common 语义
+**通用性**: 该修复适用于所有依赖 `-fcommon` 的老项目
 
 ## 后续建议
 
