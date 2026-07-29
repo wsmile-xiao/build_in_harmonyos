@@ -5,8 +5,10 @@ flex (Fast Lexical Analyzer Generator) 是一个快速词法分析器生成器�
 
 ## OHOS 适配
 - 使用 autotools 构建系统
-- 可能需要更新 config.guess/config.sub 以支持 OHOS 平台
-- 当前编译状态：进行中
+- 通过 `--build=aarch64-unknown-linux-gnu` 绕过 config.guess 无法识别 OHOS 的问题
+- 补丁 0006: configure mktemp 模板改用 `${TMPDIR:-/tmp}` 避免 HMDFS 权限问题
+- 静态链接（R26 规则）
+- 当前编译状态：已完成（built）
 
 ## 依赖
 - 编译工具: clang, make, autotools
