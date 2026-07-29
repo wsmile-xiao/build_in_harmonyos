@@ -34,6 +34,7 @@ static int fail_after_http(void) {
 
 int main(void) {
     struct aws_allocator *allocator = aws_default_allocator();
+    const char *status_text = NULL;
     if (allocator == NULL) {
         return 1;
     }
@@ -52,7 +53,8 @@ int main(void) {
     if (aws_http_library_init(allocator) != 0) {
         return fail_after_compression();
     }
-    if (strcmp(aws_http_status_text(200), "OK") != 0) {
+    status_text = aws_http_status_text(200);
+    if (status_text == NULL || strcmp(status_text, "OK") != 0) {
         return fail_after_http();
     }
     aws_http_library_clean_up();
