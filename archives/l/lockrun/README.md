@@ -35,5 +35,5 @@ lockrun --lockfile=/tmp/myjob.lock -- my_command_here
 
 ## 参考
 
-- [官方网站](http://unixwiz.net/tools/lockrun.c)
-- [作者](http://www.unixwiz.net/)
+- [官方网站](https://unixwiz.net/tools/lockrun.html)
+- [作者](https://www.unixwiz.net/)
