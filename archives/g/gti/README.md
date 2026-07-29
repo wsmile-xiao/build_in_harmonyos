@@ -9,7 +9,7 @@ gti 是一个有趣的命令行工具，当你不小心输入 `gti` 而不是 `g
 - 支持所有 git 命令
 
 ## 编译版本
-- 1.9.1 (2026-06-05)
+- 1.9.1.1 (packaging revision for upstream v1.9.1, 2026-06-05)
 
 ## 许可证
 MIT License
