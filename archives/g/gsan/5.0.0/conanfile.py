@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
+"""Conan recipe for gsan 5.0.0 — TLS certificate subject alternative name scanner."""
 import os
-import sys
 from conan import ConanFile
 from conan.tools.files import (
     apply_conandata_patches,
