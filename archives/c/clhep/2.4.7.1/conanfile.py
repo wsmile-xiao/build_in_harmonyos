@@ -42,7 +42,7 @@ class ClhepConan(ConanFile):
 
     def build(self):
         cmake = CMake(self)
-        cmake.configure()
+        cmake.configure(build_script_folder=self.source_folder)
         cmake.build()
         if can_run(self):
             if self.settings.os == "OHOS":
