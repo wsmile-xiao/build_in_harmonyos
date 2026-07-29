@@ -79,7 +79,7 @@ class WasmEdgeConan(ConanFile):
         tc.variables["WASMEDGE_BUILD_STATIC_LIB"] = "OFF" if self.options.shared else "ON"
         tc.variables["WASMEDGE_BUILD_TOOLS"] = "OFF"
         tc.variables["WASMEDGE_BUILD_PLUGINS"] = "OFF"
-        tc.variables["WASMEDGE_BUILD_EXAMPLE"] = "OFF"
+        tc.variables["WASMEDGE_BUILD_EXAMPLES"] = "OFF"
         tc.variables["WASMEDGE_BUILD_WASI_NN_RPC"] = "OFF"
         tc.variables["WASMEDGE_USE_LLVM"] = "OFF"
         tc.variables["WASMEDGE_FORCE_DISABLE_LTO"] = "ON"
