@@ -7,3 +7,5 @@ This Path B adaptation keeps the upstream CLI behavior while removing runtime de
 - Patch: `0001-use-python-stdlib.patch`
 - Upstream tests: none found in the source archive.
 - Added consumer tests: 10 assertions covering CLI, SAN decoding, normalization, endpoint parsing, and JSON failure reporting.
+
+- `adaptation-analysis.md`: Path B 适配困难分析报告，记录依赖障碍、尝试方案和验证证据。
