@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(opus_consumer C)
+find_package(Opus CONFIG REQUIRED)
+add_executable(opus_consumer test_package.c)
+target_link_libraries(opus_consumer PRIVATE Opus::opus)
