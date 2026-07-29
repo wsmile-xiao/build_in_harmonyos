@@ -66,7 +66,7 @@ class AwsCMqttConan(ConanFile):
             "aws-c-common",
         ]
         self.cpp_info.system_libs = ["m", "pthread"]
-        if str(self.settings.os) not in ("OHOS", "HarmonyOS"):
+        if str(self.settings.os) in ("Linux", "OHOS", "HarmonyOS"):
             self.cpp_info.system_libs.extend(["rt", "dl"])
         self.cpp_info.set_property("cmake_file_name", "aws-c-mqtt")
         self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-mqtt")
