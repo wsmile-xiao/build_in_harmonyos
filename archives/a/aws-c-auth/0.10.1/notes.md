@@ -29,10 +29,12 @@
 - 本 recipe 私有构建依赖只用于产出单一 `aws-c-auth` Conan 包，未发布完整 AWS CRT 多包测试环境。
 
 当前 `test_package` 覆盖可稳定验证的基础路径：下游工程可链接 aws-c-auth 及其私有打包依赖，初始化/清理 aws-common 与 aws-auth 库。
+`aws_common_library_init` 与 `aws_auth_library_init` 在 aws-c-common 0.12.6 / aws-c-auth 0.10.1 官方头文件中均为 `void` 返回类型，因此 test_package 不检查不存在的返回码；改用 `aws_common_fatal_assert_library_initialized()` 验证 common 初始化状态，并按 auth -> common 顺序清理。
 
 ## 验证结果
 - 产物为纯静态库。
 - `test_package` 编译并链接 `aws-c-auth`，覆盖基础初始化与依赖链接场景。
+- 初始化 API 的 void 签名已按官方头文件处理，避免引入无效的返回值检查导致编译失败。
 - 上游认证/签名 CTest 套件已在 MANIFEST 中登记，未纳入当前 CI 的原因已说明；后续若建立完整 AWS CRT 测试环境，可优先迁移 SigV4 signing corpus 与 credentials 基础测试。
 
 ## 依赖版本
