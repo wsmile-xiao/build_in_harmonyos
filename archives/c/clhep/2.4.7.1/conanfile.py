@@ -51,7 +51,10 @@ class ClhepConan(ConanFile):
         if can_run(self):
             if self.settings.os == "OHOS":
                 # testBug7328 relies on allocator behavior that differs on OHOS.
-                cmake.test(cli_args=["-E", "testBug7328"])
+                self.run(
+                    "ctest --output-on-failure -E testBug7328",
+                    cwd=self.build_folder,
+                )
             else:
                 cmake.test()
         else:
