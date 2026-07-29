@@ -12,7 +12,7 @@ Fortran 编译器编 LAPACK。全程设备原生、走设备 CI、package() 里�
 import os
 import glob
 from conan import ConanFile
-from conan.tools.files import get, copy, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.errors import ConanInvalidConfiguration
 
 
@@ -37,8 +37,14 @@ class OpenblasConan(ConanFile):
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
-    def build(self):
-        apply_conandata_patches(self)
+    def _prepare_env(self):
+        """构建与打包共用的环境准备，并返回 make 变量串。
+
+        build() 与 package() 必须用**同一套** make 变量——Makefile.system 依据它们推导
+        库名（libopenblas_<TARGET><线程后缀>-r<ver>）与安装布局，两阶段不一致会导致
+        install 找不到 build 出来的产物。故集中在此，不用实例属性传递（那样 export-pkg
+        单独跑 package() 时会 AttributeError）。
+        """
         flang_pkg = self.dependencies.build["flang-ohos"].package_folder
         fc = os.path.join(flang_pkg, "bin", "flang")
         rt = os.path.join(flang_pkg, "lib", "libFortranRuntime.a")
@@ -61,25 +67,31 @@ class OpenblasConan(ConanFile):
         for k in ("CFLAGS", "CXXFLAGS", "CPPFLAGS", "LDFLAGS", "CMAKE_PREFIX_PATH", "PKG_CONFIG_PATH"):
             os.environ.pop(k, None)
 
-        target = str(self.options.blas_target)
-        cmd = (
-            'make -j%s TARGET=%s BINARY=64 HOSTCC="%s" CC="%s" FC="%s" '
-            'F_COMPILER=FLANGNEW NOFORTRAN=0 AR="%s" RANLIB="%s" NO_SHARED=0 '
-            'FEXTRALIB="%s %s -lm" shared'
-            % (os.cpu_count() or 8, target, cc, cc, fc, ar, ranlib, rt, dec)
-        )
-        self.run(cmd, cwd=self.source_folder)
+        return ('TARGET=%s BINARY=64 HOSTCC="%s" CC="%s" FC="%s" '
+                'F_COMPILER=FLANGNEW NOFORTRAN=0 AR="%s" RANLIB="%s" NO_SHARED=0 '
+                'FEXTRALIB="%s %s -lm"'
+                % (str(self.options.blas_target), cc, cc, fc, ar, ranlib, rt, dec))
+
+    def build(self):
+        apply_conandata_patches(self)
+        self.run("make -j%s %s shared" % (os.cpu_count() or 8, self._prepare_env()),
+                 cwd=self.source_folder)
 
     def package(self):
-        sf = self.source_folder
-        copy(self, "libopenblas*.so*", src=sf, dst=os.path.join(self.package_folder, "lib"))
-        copy(self, "libopenblas*.a", src=sf, dst=os.path.join(self.package_folder, "lib"))
-        copy(self, "cblas.h", src=sf, dst=os.path.join(self.package_folder, "include"))
-        for h in ("lapack.h", "lapacke.h", "lapacke_config.h", "lapacke_mangling.h",
-                  "lapacke_utils.h", "f77blas.h", "openblas_config.h"):
-            copy(self, h, src=sf, dst=os.path.join(self.package_folder, "include"), keep_path=False)
-        copy(self, "lapacke*.h", src=os.path.join(sf, "lapack-netlib", "LAPACKE", "include"),
-             dst=os.path.join(self.package_folder, "include"), keep_path=False)
+        # 【必须走 make install，不能直接 copy 源码树里的头文件】
+        # OpenBLAS 有三个头文件是 **install 期才产生/加工** 的：
+        #   · openblas_config.h —— Makefile.install 由 config.h + openblas_config_template.h 拼出，
+        #                          源码树里根本不存在
+        #   · lapack.h          —— 同样 install 期生成
+        #   · cblas.h           —— 源码树里的那份 #include "common.h"（OpenBLAS 内部头，不外发）；
+        #                          install 会 `sed 's/common/openblas_config/g'`（Makefile.install:88）
+        #                          后再装出去
+        # 本配方此前直接 copy 源文件，导致前两个悄悄缺失、cblas.h 则是坏的——消费方一旦
+        # `#include <cblas.h>` 就报 `'common.h' file not found`。该缺陷长期未被发现，
+        # 是因为原 test_package 用 dlopen、从不 include 任何头文件。
+        # make install 顺带还生成 lib/pkgconfig/openblas.pc 与 lib/cmake/openblas/。
+        self.run('make %s PREFIX="%s" install' % (self._prepare_env(), self.package_folder),
+                 cwd=self.source_folder)
         self._sign_so()
 
     def _sign_so(self):
