@@ -157,4 +157,7 @@ class InihTestConan(ConanFile):
         }
         print(f"\nHMBS_TEST_PACKAGE_RESULT={json.dumps(test_package_result)}")
 
+        if not passed:
+            raise ConanException(f"consumer test failed, rc={rc}")
+
         self._run_upstream_tests()
