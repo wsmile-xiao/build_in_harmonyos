@@ -2,7 +2,7 @@
 
 ## Summary
 
-WasmEdge 0.17.1 is adapted as a static CMake package with LLVM/AOT, plugins, examples, and tools disabled. This keeps the base runtime portable for OpenHarmony PC cross-build CI while preserving the public C API and VM execution path.
+WasmEdge 0.17.1 is adapted as a static CMake package with LLVM/AOT, plugins, examples, upstream tests, and tools disabled. This keeps the base runtime portable for OpenHarmony PC cross-build CI while preserving the public C API and VM execution path.
 
 ## Build and test
 
