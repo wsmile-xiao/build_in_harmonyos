@@ -3,26 +3,19 @@
 #include <aws/common/common.h>
 #include <aws/mqtt/mqtt.h>
 
-typedef void (*aws_library_init_fn)(struct aws_allocator *);
-
-static void init_aws_common_library(struct aws_allocator *allocator) {
-    aws_library_init_fn init = aws_common_library_init;
-    init(allocator);
-}
-
-static void init_aws_mqtt_library(struct aws_allocator *allocator) {
-    aws_library_init_fn init = aws_mqtt_library_init;
-    init(allocator);
-}
-
 int main(void) {
     struct aws_allocator *allocator = aws_default_allocator();
     if (allocator == NULL) {
         return 1;
     }
-    init_aws_common_library(allocator);
+    if (aws_common_library_init(allocator) != AWS_OP_SUCCESS) {
+        return 1;
+    }
     aws_common_fatal_assert_library_initialized();
-    init_aws_mqtt_library(allocator);
+    if (aws_mqtt_library_init(allocator) != AWS_OP_SUCCESS) {
+        aws_common_library_clean_up();
+        return 1;
+    }
 
     struct aws_byte_cursor topic = aws_byte_cursor_from_c_str("openharmony/pc/test");
     struct aws_byte_cursor wildcard_topic = aws_byte_cursor_from_c_str("openharmony/+/test");
