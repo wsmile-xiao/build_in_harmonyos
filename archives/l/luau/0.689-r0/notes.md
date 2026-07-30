@@ -42,10 +42,47 @@ CMake 输出警告 "System is unknown to cmake, create: Platform/HarmonyOS"，�
 ### 无 install 目标
 项目未提供标准 install 目标，需要手动复制文件到安装目录。
 
+## 上游测试
+
+上游使用 doctest，`luau-tests` 目标覆盖 `Luau.UnitTest` 和
+`Luau.Conformance`。测试用例数通过以下命令从 0.689 官方源码统计：
+
+```bash
+make -j4 luau-tests
+./luau-tests --list-test-cases
+./luau-tests
+```
+
+官方源码的本机基线验证结果为：
+
+```text
+test cases: 4426 | 4426 passed | 0 failed | 0 skipped
+assertions: 34266 | 34266 passed | 0 failed
+```
+
+- 上游测试用例数：4426
+- 上游测试用例通过率：4426/4426（100%）
+- 上游测试用例修改：无
+
+Conan 配方在 `can_run(self)` 为真时启用 `LUAU_BUILD_TESTS`，并依次执行
+`Luau.UnitTest`、`Luau.Conformance` 和 `Luau.CLI.Test`。交叉编译且目标
+程序不能在构建机运行时，配方关闭上游测试目标，`test_package` 也跳过
+运行时测试，避免直接执行不兼容架构的二进制文件。HarmonyOS 消费者验证
+实质调用 Luau C API，并检查 `luau --help`。
+
 ## 测试结果
-- ✅ 编译成功
-- ✅ 可执行文件可运行
-- ⚠️ 无标准版本输出（luau --help 可用）
+
+- 编译成功
+- 上游测试：4426/4426（100%）
+- 上游断言：34266/34266（100%）
+- 消费者测试：2/2（100%），包括 C++ API CTest 和 `luau --help`
+- 无标准版本输出（`luau --help` 可用）
+
+本地 CI 模拟使用仓库 `ci/conan/build_and_test.sh` 和本机原生 Conan
+profile 完成。L0、L1、L2、L4、L5 均通过；`luau-reduce` 不支持标准
+`--help`/`--version` 探测，CI 将其记录为非阻塞提示，其他 5 个正式 CLI
+探测均通过。HarmonyOS 专用 profile 依赖 CI 环境中的 `/data/service/hnp`
+工具链，因此本机预审不冒充 HarmonyOS 目标机执行结果。
 
 ## 产物清单
 
