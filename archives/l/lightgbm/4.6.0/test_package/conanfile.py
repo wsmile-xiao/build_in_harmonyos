@@ -34,8 +34,6 @@ class LightGBMTestConan(ConanFile):
         ]
         for candidate in candidates:
             if os.path.exists(candidate):
-                retcode = self.run(f'"{candidate}" --help', env="conanrun", ignore_errors=True)
-                if retcode not in (0, 255):
-                    raise Exception(f"lightgbm --help returned unexpected exit code: {retcode}")
+                self.run(f'"{candidate}" --help', env="conanrun")
                 return
         raise Exception(f"lightgbm binary not found in package: {', '.join(candidates)}")
