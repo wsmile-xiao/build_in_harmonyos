@@ -2,20 +2,11 @@
 #include <aws/common/common.h>
 #include <aws/auth/auth.h>
 
-static int init_void_library(void (*init)(struct aws_allocator *), struct aws_allocator *allocator) {
-    init(allocator);
-    return AWS_OP_SUCCESS;
-}
-
-static int init_int_library(int (*init)(struct aws_allocator *), struct aws_allocator *allocator) {
-    return init(allocator);
-}
-
 #define INIT_LIBRARY(func, allocator) \
     _Generic((func), \
-        void (*)(struct aws_allocator *): init_void_library, \
-        int (*)(struct aws_allocator *): init_int_library \
-    )((func), (allocator))
+        void (*)(struct aws_allocator *): ((func)(allocator), AWS_OP_SUCCESS), \
+        int (*)(struct aws_allocator *): (func)(allocator) \
+    )
 
 static int init_libraries(struct aws_allocator *allocator) {
     if (INIT_LIBRARY(aws_common_library_init, allocator) != AWS_OP_SUCCESS) {
