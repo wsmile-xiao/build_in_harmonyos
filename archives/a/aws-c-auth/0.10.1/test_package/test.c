@@ -2,21 +2,10 @@
 #include <aws/common/common.h>
 #include <aws/auth/auth.h>
 
-#define INIT_LIBRARY(func, allocator) \
-    _Generic((func), \
-        void (*)(struct aws_allocator *): ((func)(allocator), AWS_OP_SUCCESS), \
-        int (*)(struct aws_allocator *): (func)(allocator) \
-    )
-
 static int init_libraries(struct aws_allocator *allocator) {
-    if (INIT_LIBRARY(aws_common_library_init, allocator) != AWS_OP_SUCCESS) {
-        return 1;
-    }
+    aws_common_library_init(allocator);
     aws_common_fatal_assert_library_initialized();
-    if (INIT_LIBRARY(aws_auth_library_init, allocator) != AWS_OP_SUCCESS) {
-        aws_common_library_clean_up();
-        return 1;
-    }
+    aws_auth_library_init(allocator);
     return 0;
 }
 
