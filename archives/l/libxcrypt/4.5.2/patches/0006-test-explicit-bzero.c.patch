@@ -1,0 +1,302 @@
+--- a/test/explicit-bzero.c
++++ b/test/explicit-bzero.c
+@@ -33,50 +33,61 @@
+    returning to the normal stack, there's no way to be sure that other
+    processes running on the same system will not interfere, and the
+    signal stack is very small so it's not safe to call printf there.
+    This implementation instead uses the <ucontext.h> coroutine
+    interface.  The coroutine stack is still too small to safely use
+    printf, but we know the OS won't erase it, so we can do all the
+    checks and printing from the normal stack.  */
+ 
+ #include "crypt-port.h"
+ 
+-#if !defined USE_SWAPCONTEXT || defined XCRYPT_USE_ASAN
++#if defined __OHOS__ && !defined USE_SWAPCONTEXT && !defined XCRYPT_USE_ASAN
++/* Keep the upstream stack-observation test when ucontext is unavailable.  */
++# define USE_PTHREAD_STACK 1
++#endif
++
++#if (!defined USE_SWAPCONTEXT && !defined USE_PTHREAD_STACK) \
++    || defined XCRYPT_USE_ASAN
+ /* We can't do this test if we don't have the ucontext API.
+    Also ASAN may have some problems with using swapcontext().  */
+ int main(void)
+ {
+   return 77;
+ }
+ #else
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++#ifdef USE_PTHREAD_STACK
++# include <pthread.h>
++# include <signal.h>
++#else
+ #include <ucontext.h>
++#endif
+ 
+ #ifdef HAVE_VALGRIND_VALGRIND_H
+ # include <valgrind/valgrind.h>
+ # include <valgrind/memcheck.h>
+ #else
+ # define VALGRIND_STACK_REGISTER(start, end) do {} while (0)
+ # define VALGRIND_MAKE_MEM_DEFINED(addr, len) do {} while (0)
+ #endif
+ 
+ /* A byte pattern that is unlikely to occur by chance: the first 16
+    prime numbers (OEIS A000040).  */
+ static const unsigned char test_pattern[16] =
+ {
+   2, 3, 5, 7,  11, 13, 17, 19,  23, 29, 31, 37,  41, 43, 47, 53
+ };
+ 
+-/* Immediately after each subtest returns, we call swapcontext to get
+-   back onto the main stack.  That call might itself overwrite the
++/* Immediately after each subtest returns, we switch back to the main
++   stack.  That switch might itself overwrite the
+    test pattern, so we fill a modest-sized buffer with copies of it
+    and check whether any of them survived.  */
+ 
+ #define PATTERN_SIZE (sizeof test_pattern)
+ #define PATTERN_REPS 32
+ #define TEST_BUFFER_SIZE (PATTERN_SIZE * PATTERN_REPS)
+ 
+ /* There are three subtests, two of which are sanity checks.
+    Each test follows this sequence:
+ 
+@@ -101,21 +112,72 @@
+    between preparing it and letting it go out of scope, and we expect
+    to find it.  This confirms that the test buffer does get filled in
+    and we can find it from the stack buffer.  In the "ordinary_clear"
+    case, we clear it using memset.  Depending on the target, the
+    compiler may not be able to apply dead store elimination to the
+    memset call, so the test does not fail if the memset is not
+    eliminated.  Finally, the "explicit_clear" case uses explicit_bzero
+    and expects _not_ to find the test buffer, which is the real
+    test.  */
+ 
++#ifdef USE_PTHREAD_STACK
++static pthread_barrier_t co_pause, co_resume;
++static pthread_t co_thread;
++
++static void
++pthread_require (int err, const char *operation)
++{
++  if (err)
++    {
++      fprintf (stderr, "ERROR: %s: %s\n", operation, strerror (err));
++      abort ();
++    }
++}
++
++static void
++barrier_wait (pthread_barrier_t *barrier)
++{
++  int err = pthread_barrier_wait (barrier);
++  if (err != 0 && err != PTHREAD_BARRIER_SERIAL_THREAD)
++    pthread_require (err, "pthread_barrier_wait");
++}
++
++static void
++coroutine_pause (void)
++{
++  barrier_wait (&co_pause);
++  barrier_wait (&co_resume);
++}
++
++static void
++main_resume_coroutine (void)
++{
++  barrier_wait (&co_resume);
++  barrier_wait (&co_pause);
++}
++#else
+ static ucontext_t uc_main, uc_co;
++
++static void
++coroutine_pause (void)
++{
++  if (swapcontext (&uc_co, &uc_main))
++    abort ();
++}
++
++static void
++main_resume_coroutine (void)
++{
++  if (swapcontext (&uc_main, &uc_co))
++    abort ();
++}
++#endif
+ 
+ static NO_INLINE int
+ use_test_buffer (unsigned char *buf)
+ {
+   unsigned int sum = 0;
+ 
+   for (unsigned int i = 0; i < PATTERN_REPS; i++)
+     sum += buf[i * PATTERN_SIZE];
+ 
+   return (sum == 2 * PATTERN_REPS) ? 0 : 1;
+@@ -123,22 +185,21 @@
+ 
+ /* Always check the test buffer immediately after filling it; this
+    makes externally visible side effects depend on the buffer existing
+    and having been filled in.  */
+ static inline void
+ prepare_test_buffer (unsigned char *buf)
+ {
+   for (unsigned int i = 0; i < PATTERN_REPS; i++)
+     memcpy (buf + i*PATTERN_SIZE, test_pattern, PATTERN_SIZE);
+ 
+-  if (swapcontext (&uc_co, &uc_main))
+-    abort ();
++  coroutine_pause ();
+ 
+   /* Force the compiler to really copy the pattern to buf.  */
+   if (use_test_buffer (buf))
+     abort ();
+ }
+ 
+ static void
+ setup_no_clear (void)
+ {
+   unsigned char buf[TEST_BUFFER_SIZE];
+@@ -180,29 +241,39 @@
+ static const struct subtest subtests[] =
+ {
+   { setup_no_clear,       "no clear",       EXPECT_SOME     },
+   /* The memset may happen or not, depending on compiler
+      optimizations.  */
+   { setup_ordinary_clear, "ordinary clear", NO_EXPECTATIONS },
+   { setup_explicit_clear, "explicit clear", EXPECT_NONE     },
+   { 0,                    0,                ARRAY_END       }
+ };
+ 
++#ifdef USE_PTHREAD_STACK
++static void *
++test_coroutine (void *ARG_UNUSED(opaque))
++#else
+ static void
+ test_coroutine (void)
+-{
++#endif
++{
++#ifdef USE_PTHREAD_STACK
++  barrier_wait (&co_resume);
++#endif
+   while (cur_subtest->setup_subtest)
+     {
+       cur_subtest->setup_subtest ();
+-      if (swapcontext (&uc_co, &uc_main))
+-        abort ();
+-    }
++      coroutine_pause ();
++    }
++#ifdef USE_PTHREAD_STACK
++  return 0;
++#endif
+ }
+ 
+ /* All the code above this point runs on the coroutine stack.
+    All the code below this point runs on the main stack.  */
+ 
+ static int test_status;
+ static unsigned char *co_stack_buffer;
+ static size_t co_stack_size;
+ 
+ static unsigned int
+@@ -274,61 +345,88 @@
+       test_status = 1;
+     }
+ }
+ 
+ static void
+ test_loop (void)
+ {
+   cur_subtest = subtests;
+   while (cur_subtest->setup_subtest)
+     {
+-      if (swapcontext (&uc_main, &uc_co))
+-        abort ();
++      main_resume_coroutine ();
+       check_test_buffer (EXPECT_ALL, cur_subtest->label, "prepare");
+-      if (swapcontext (&uc_main, &uc_co))
+-        abort ();
++      main_resume_coroutine ();
+       check_test_buffer (cur_subtest->expected, cur_subtest->label, "test");
+       cur_subtest++;
+     }
+   /* Terminate the coroutine.  */
++#ifdef USE_PTHREAD_STACK
++  barrier_wait (&co_resume);
++  pthread_require (pthread_join (co_thread, 0), "pthread_join");
++#else
+   if (swapcontext (&uc_main, &uc_co))
+     abort ();
++#endif
+ }
+ 
+ int
+ main (void)
+ {
+   size_t page_alignment = sizeof (void *);
+   long page_alignment_l = sysconf (_SC_PAGESIZE);
+   if (page_alignment_l > (long) sizeof (void *))
+     page_alignment = (size_t) page_alignment_l;
+ 
+   co_stack_size = (size_t) SIGSTKSZ + (size_t) TEST_BUFFER_SIZE;
+   if (co_stack_size < page_alignment * 4)
+     co_stack_size = page_alignment * 4;
++#ifdef USE_PTHREAD_STACK
++  if (co_stack_size < 64 * 1024)
++    co_stack_size = 64 * 1024;
++#endif
+ 
+   void *p;
+   int err = posix_memalign (&p, page_alignment, co_stack_size);
+   if (err || !p)
+     {
+       printf ("ERROR: allocating alt stack: %s\n", strerror (err));
+       return 2;
+     }
+   co_stack_buffer = p;
+   memset (co_stack_buffer, 0, co_stack_size);
+   VALGRIND_STACK_REGISTER (co_stack_buffer, co_stack_buffer + co_stack_size);
+ 
++#ifdef USE_PTHREAD_STACK
++  pthread_attr_t attr;
++  pthread_require (pthread_barrier_init (&co_pause, 0, 2),
++                   "pthread_barrier_init");
++  pthread_require (pthread_barrier_init (&co_resume, 0, 2),
++                   "pthread_barrier_init");
++  pthread_require (pthread_attr_init (&attr), "pthread_attr_init");
++  pthread_require (pthread_attr_setstack (&attr, co_stack_buffer, co_stack_size),
++                   "pthread_attr_setstack");
++  pthread_require (pthread_create (&co_thread, &attr, test_coroutine, 0),
++                   "pthread_create");
++  pthread_require (pthread_attr_destroy (&attr), "pthread_attr_destroy");
++#else
+   if (getcontext (&uc_co))
+     {
+       printf ("ERROR: allocating coroutine context: %s\n", strerror (err));
+       return 2;
+     }
+   uc_co.uc_stack.ss_sp   = co_stack_buffer;
+   uc_co.uc_stack.ss_size = co_stack_size;
+   uc_co.uc_link          = &uc_main;
+   makecontext (&uc_co, test_coroutine, 0);
++#endif
+ 
+   test_loop ();
++#ifdef USE_PTHREAD_STACK
++  pthread_require (pthread_barrier_destroy (&co_resume),
++                   "pthread_barrier_destroy");
++  pthread_require (pthread_barrier_destroy (&co_pause),
++                   "pthread_barrier_destroy");
++#endif
+   return test_status;
+ }
+ 
+-#endif /* have ucontext.h || defined XCRYPT_USE_ASAN */
++#endif /* context backend */
