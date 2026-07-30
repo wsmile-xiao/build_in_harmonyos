@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Test package for gsan 5.0.0."""
 import sys
 from conan import ConanFile
 from conan.tools.build import can_run
