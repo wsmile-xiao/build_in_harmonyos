@@ -3,24 +3,26 @@
 #include <aws/common/common.h>
 #include <aws/mqtt/mqtt.h>
 
-#define AWS_COMMON_INIT_RETURNS_VOID(func) _Generic((func), void (*)(struct aws_allocator *): 1, default: 0)
-#define AWS_MQTT_INIT_RETURNS_VOID(func) _Generic((func), void (*)(struct aws_allocator *): 1, default: 0)
-_Static_assert(
-    AWS_COMMON_INIT_RETURNS_VOID(aws_common_library_init),
-    "aws_common_library_init returns void in aws-c-common 0.12.6");
-_Static_assert(
-    AWS_MQTT_INIT_RETURNS_VOID(aws_mqtt_library_init),
-    "aws_mqtt_library_init returns void in aws-c-mqtt 0.15.2");
+typedef void (*aws_library_init_fn)(struct aws_allocator *);
+
+static void init_aws_common_library(struct aws_allocator *allocator) {
+    aws_library_init_fn init = aws_common_library_init;
+    init(allocator);
+}
+
+static void init_aws_mqtt_library(struct aws_allocator *allocator) {
+    aws_library_init_fn init = aws_mqtt_library_init;
+    init(allocator);
+}
 
 int main(void) {
     struct aws_allocator *allocator = aws_default_allocator();
     if (allocator == NULL) {
         return 1;
     }
-    aws_common_library_init(allocator);
+    init_aws_common_library(allocator);
     aws_common_fatal_assert_library_initialized();
-    /* aws_mqtt_library_init returns void in aws-c-mqtt 0.15.2. */
-    aws_mqtt_library_init(allocator);
+    init_aws_mqtt_library(allocator);
 
     struct aws_byte_cursor topic = aws_byte_cursor_from_c_str("openharmony/pc/test");
     struct aws_byte_cursor wildcard_topic = aws_byte_cursor_from_c_str("openharmony/+/test");
