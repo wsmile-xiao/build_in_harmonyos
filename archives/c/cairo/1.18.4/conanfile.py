@@ -38,7 +38,12 @@ class CairoConan(ConanFile):
         self.requires("pixman/0.46.4")
         self.requires("libpng/1.6.58")
         self.requires("freetype/2.14.3")
-        self.requires("fontconfig/2.18.1")
+        # 2.18.1 的 libfontconfig.so 的 DT_NEEDED 烤着构建机的 conan cache 绝对路径
+        # （指向 expat/2.8.2 —— 那版 expat 的 .so 无 SONAME），换机器必然加载失败。
+        # 2.18.1.1 是同一份配方只改了 expat 的 pin 后重建的干净版本。
+        # 注：requires 是 minor_mode（fontconfig/2.18.Z），故本次改动**不改变 cairo 的 package_id**，
+        # 已发布的 cairo 二进制无需重建，只需新 recipe revision 让消费方解析到干净的 fontconfig。
+        self.requires("fontconfig/2.18.1.1")
         self.requires("zlib/1.3.1.1")
 
     def layout(self):
