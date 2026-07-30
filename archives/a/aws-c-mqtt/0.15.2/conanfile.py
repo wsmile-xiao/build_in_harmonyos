@@ -3,11 +3,11 @@
 
 import os
 import re
-import subprocess
+import shlex
 
 from conan import ConanFile
 from conan.tools.cmake import cmake_layout
-from conan.tools.files import copy, get, load, replace_in_file
+from conan.tools.files import copy, get, load, replace_in_file, save
 
 
 class AwsCMqttConan(ConanFile):
@@ -94,9 +94,9 @@ class AwsCMqttConan(ConanFile):
             "-DCMAKE_MODULE_PATH={}".format(self._module_path(prefix)),
         ]
         args.extend("-D{}={}".format(key, value) for key, value in definitions.items())
-        self.run(subprocess.list2cmdline(args), env=["conanbuild"], ignore_errors=False)
-        self.run(subprocess.list2cmdline(["cmake", "--build", build_dir, "--", "-j2"]), env=["conanbuild"], ignore_errors=False)
-        self.run(subprocess.list2cmdline(["cmake", "--install", build_dir]), env=["conanbuild"], ignore_errors=False)
+        self.run(shlex.join(args), env=["conanbuild"], ignore_errors=False)
+        self.run(shlex.join(["cmake", "--build", build_dir, "--", "-j2"]), env=["conanbuild"], ignore_errors=False)
+        self.run(shlex.join(["cmake", "--install", build_dir]), env=["conanbuild"], ignore_errors=False)
 
     def _module_path(self, prefix):
         return ";".join([
@@ -221,5 +221,4 @@ endif()
         content = load(self, path)
         new_content, count = pattern.subn("", content, count=1)
         if count:
-            with open(path, "w", encoding="utf-8") as file:
-                file.write(new_content)
+            save(self, path, new_content)
