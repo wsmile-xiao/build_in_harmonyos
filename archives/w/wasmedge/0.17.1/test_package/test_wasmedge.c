@@ -53,11 +53,40 @@ static int check_vm_lifecycle_and_execution(void) {
     return failed;
 }
 
+static int check_invalid_module_is_rejected(void) {
+    static const uint8_t invalid_wasm_module[] = {
+        0x00, 0x61, 0x73, 0x6d, 0x00, 0x00, 0x00, 0x00,
+    };
+
+    WasmEdge_ConfigureContext *conf = WasmEdge_ConfigureCreate();
+    if (conf == NULL) {
+        return 1;
+    }
+    WasmEdge_VMContext *vm = WasmEdge_VMCreate(conf, NULL);
+    if (vm == NULL) {
+        WasmEdge_ConfigureDelete(conf);
+        return 1;
+    }
+
+    WasmEdge_String func = WasmEdge_StringCreateByCString("missing");
+    WasmEdge_Result result = WasmEdge_VMRunWasmFromBuffer(
+        vm, invalid_wasm_module, sizeof(invalid_wasm_module), func, NULL, 0, NULL, 0);
+    WasmEdge_StringDelete(func);
+
+    int failed = WasmEdge_ResultOK(result) ? 1 : 0;
+    WasmEdge_VMDelete(vm);
+    WasmEdge_ConfigureDelete(conf);
+    return failed;
+}
+
 int main(void) {
     if (check_version_api() != 0) {
         return 1;
     }
     if (check_vm_lifecycle_and_execution() != 0) {
+        return 1;
+    }
+    if (check_invalid_module_is_rejected() != 0) {
         return 1;
     }
     return 0;
