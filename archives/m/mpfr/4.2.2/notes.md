@@ -75,7 +75,7 @@ Results:
 - Runner checks: `L0=pass`, `L1=pass`, `L2=skip` (no `bin/` directory), `L4=pass`, `L5=pass`
 - Build summary: `Total=1`, `Success=1`, `Failed=0`
 
-## Next Commands
+## Next Commands.
 
 Shadow/PR CI command to run after the issue/PR is ready:
 
