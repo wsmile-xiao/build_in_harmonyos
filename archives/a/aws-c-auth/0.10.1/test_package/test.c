@@ -2,22 +2,16 @@
 #include <aws/common/common.h>
 #include <aws/auth/auth.h>
 
-typedef void (*aws_library_init_fn)(struct aws_allocator *);
-
-static void init_aws_common_library(struct aws_allocator *allocator) {
-    aws_library_init_fn init = aws_common_library_init;
-    init(allocator);
-}
-
-static void init_aws_auth_library(struct aws_allocator *allocator) {
-    aws_library_init_fn init = aws_auth_library_init;
-    init(allocator);
-}
-
-static void init_libraries(struct aws_allocator *allocator) {
-    init_aws_common_library(allocator);
+static int init_libraries(struct aws_allocator *allocator) {
+    if (aws_common_library_init(allocator) != AWS_OP_SUCCESS) {
+        return 1;
+    }
     aws_common_fatal_assert_library_initialized();
-    init_aws_auth_library(allocator);
+    if (aws_auth_library_init(allocator) != AWS_OP_SUCCESS) {
+        aws_common_library_clean_up();
+        return 1;
+    }
+    return 0;
 }
 
 static void clean_up_libraries(void) {
@@ -30,7 +24,9 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    init_libraries(allocator);
+    if (init_libraries(allocator) != 0) {
+        return 1;
+    }
     clean_up_libraries();
     printf("aws-c-auth smoke test OK\n");
     return 0;
