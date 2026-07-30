@@ -2,7 +2,6 @@
 """Conan recipe for aws-c-mqtt 0.15.2 built with private AWS CRT deps."""
 
 import os
-import re
 import shlex
 
 from conan import ConanFile
@@ -66,9 +65,13 @@ class AwsCMqttConan(ConanFile):
             "aws-c-cal",
             "aws-c-common",
         ]
-        self.cpp_info.system_libs = ["m", "pthread"]
-        if str(self.settings.os) in ("Linux", "OHOS", "HarmonyOS"):
-            self.cpp_info.system_libs.extend(["rt", "dl"])
+        os_name = str(self.settings.os)
+        system_libs = []
+        if os_name in ("Linux", "OHOS", "HarmonyOS"):
+            system_libs.extend(["m", "pthread", "rt", "dl"])
+        elif os_name in ("Macos", "iOS", "watchOS", "tvOS"):
+            system_libs.extend(["m", "pthread"])
+        self.cpp_info.system_libs = system_libs
         self.cpp_info.set_property("cmake_file_name", "aws-c-mqtt")
         self.cpp_info.set_property("cmake_target_name", "AWS::aws-c-mqtt")
 
@@ -194,33 +197,49 @@ endif()
 
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
-        pattern = re.compile(
-            r"^\s*if \(\(NOT WIN32 AND NOT APPLE\) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE\)\s*"
-            r"^\s*if \(USE_OPENSSL\)\s*"
-            r"^\s*find_dependency\(OpenSSL REQUIRED\)\s*"
-            r"^\s*find_dependency\(Threads REQUIRED\)\s*"
-            r"^\s*else\(\)\s*"
-            r"^\s*find_dependency\(crypto\)\s*"
-            r"^\s*endif\(\)\s*"
-            r"^\s*endif\(\)\s*",
-            re.MULTILINE,
+        self._remove_cmake_if_block(
+            config,
+            "if ((NOT WIN32 AND NOT APPLE) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE)",
+            ("find_dependency(OpenSSL REQUIRED)", "find_dependency(crypto)"),
         )
-        self._remove_config_block(config, pattern)
 
     def _strip_io_s2n_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-io", "aws-c-io-config.cmake")
-        pattern = re.compile(
-            r"^\s*if \(UNIX AND NOT APPLE AND NOT BYO_CRYPTO\)\s*"
-            r"^\s*find_dependency\(s2n\)\s*"
-            r"^\s*endif\(\)\s*",
-            re.MULTILINE,
+        self._remove_cmake_if_block(
+            config,
+            "if (UNIX AND NOT APPLE AND NOT BYO_CRYPTO)",
+            ("find_dependency(s2n)",),
         )
-        self._remove_config_block(config, pattern)
 
-    def _remove_config_block(self, path, pattern):
+    def _remove_cmake_if_block(self, path, start_line, required_lines):
         if not os.path.exists(path):
             return
         content = load(self, path)
-        new_content, count = pattern.subn("", content, count=1)
-        if count:
-            save(self, path, new_content)
+        lines = content.splitlines(keepends=True)
+        start = None
+        for index, line in enumerate(lines):
+            if line.strip() == start_line:
+                start = index
+                break
+        if start is None:
+            return
+
+        depth = 0
+        end = None
+        for index in range(start, len(lines)):
+            stripped = lines[index].strip()
+            is_if = stripped.startswith("if(") or stripped.startswith("if (")
+            is_endif = stripped.startswith("endif(") or stripped.startswith("endif (") or stripped == "endif()"
+            if is_if:
+                depth += 1
+            elif is_endif:
+                depth -= 1
+                if depth == 0:
+                    end = index + 1
+                    break
+        if end is None:
+            return
+
+        block = "".join(lines[start:end])
+        if all(required in block for required in required_lines):
+            save(self, path, "".join(lines[:start] + lines[end:]))
