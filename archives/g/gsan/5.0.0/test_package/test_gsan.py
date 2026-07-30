@@ -18,11 +18,20 @@ def run_cli(*args):
     return subprocess.run([*command, *args], capture_output=True, text=True, check=False)
 
 
-fixture = os.path.join(os.path.dirname(__file__), "fixture-cert.pem")
-certificate = open(fixture, "rb").read()
-subdomains = extract_subdomains(__import__("ssl").PEM_cert_to_DER_cert(certificate.decode()))
-check("*.example.com" in subdomains, "extracts DNS SAN from certificate fixture")
-check("127.0.0.1" in subdomains, "extracts IP SAN from certificate fixture")
+# Mock getpeercert() dict — no offline certificate parsing needed
+mock_cert = {
+    "subject": (((("commonName", "example.com"),),),),
+    "subjectAltName": (
+        ("DNS", "*.example.com"),
+        ("DNS", "www.example.com"),
+        ("DNS", "api.example.com"),
+        ("IP Address", "127.0.0.1"),
+    ),
+}
+
+subdomains = extract_subdomains(mock_cert)
+check("*.example.com" in subdomains, "extracts DNS SAN from certificate dict")
+check("127.0.0.1" in subdomains, "extracts IP SAN from certificate dict")
 check(clean_domains(["*.www.example.com", "www.example.com", "api.example.com"]) == ["api.example.com", "example.com"], "cleans prefixes and deduplicates SAN values")
 check(parse_domain("example.com:8443") == ("example.com", 8443), "parses hostname and explicit port")
 check(parse_domain("example.com") == ("example.com", 443), "uses default TLS port")

@@ -51,8 +51,8 @@ gsan 5.0.0 是一个用于扫描 TLS 证书 Subject Alternative Name（SAN）的
 - **做法**：
   - 使用 `argparse` 替代 Typer。
   - 使用标准输出替代 Rich 输出和进度显示。
-  - 使用 `ssl.SSLSocket.getpeercert(binary_form=True)` 获取 DER 证书。
-  - 使用 `ssl.DER_cert_to_PEM_cert` 和标准库证书解码能力解析 SAN。
+  - 使用 `ssl.SSLSocket.getpeercert()` 获取证书 SAN 字典。
+  - 从证书字典的 `subjectAltName` 字段直接解析 DNS 和 IP 地址。
   - 使用 `ipaddress` 标准化 IP 地址。
   - 将运行时依赖列表置为空，并保留原有扫描、清洗和 JSON 输出逻辑。
 - **结果**：适配后的程序不再依赖上述五个第三方运行时库，可以通过 Conan 配方自包含打包。
