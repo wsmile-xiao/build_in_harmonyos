@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import json
-import os
 import subprocess
 import sys
 
@@ -14,8 +13,16 @@ def check(condition, message):
 
 
 def run_cli(*args):
-    command = [sys.executable, "-m", "gsan.main"] if os.name == "nt" else ["gsan"]
-    return subprocess.run([*command, *args], capture_output=True, text=True, check=False)
+    # Run the gsan module directly via the current interpreter. The package is
+    # pure Python, so this works on any host (including the OHOS cross-compile
+    # CI runner) as long as PYTHONPATH exposes the installed `gsan` package —
+    # no dependency on a `gsan` launcher script or `python3` being on PATH.
+    return subprocess.run(
+        [sys.executable, "-m", "gsan.main", *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 # Mock getpeercert() dict — no offline certificate parsing needed
