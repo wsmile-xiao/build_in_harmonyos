@@ -7,10 +7,11 @@
 int main(void) {
     const uint8_t text[] = "HarmonyOS";
     size_t length = u8_strlen(text);
-    if (length != strlen((const char *)text)) {
+    size_t byte_length = strlen((const char *)text);
+    if (length != byte_length) {
         return 1;
     }
-    if (u8_check(text, length) != NULL) {
+    if (u8_check(text, byte_length) != NULL) {
         return 2;
     }
     printf("libunistring smoke test passed: %zu\n", length);
