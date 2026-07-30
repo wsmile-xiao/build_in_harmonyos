@@ -6,8 +6,8 @@ import re
 import shlex
 
 from conan import ConanFile
-from conan.tools.cmake import cmake_layout
-from conan.tools.files import copy, get, load, replace_in_file
+from conan.tools.cmake import CMakeToolchain, cmake_layout
+from conan.tools.files import copy, get, load, replace_in_file, save
 
 
 class AwsCAuthConan(ConanFile):
@@ -29,6 +29,10 @@ class AwsCAuthConan(ConanFile):
 
     def layout(self):
         cmake_layout(self)
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.generate()
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
@@ -88,6 +92,7 @@ class AwsCAuthConan(ConanFile):
             "cmake",
             "-S", shlex.quote(source_dir),
             "-B", shlex.quote(build_dir),
+            "-DCMAKE_TOOLCHAIN_FILE={}".format(shlex.quote(self._toolchain_file())),
             f"-DCMAKE_SYSTEM_NAME={self._cmake_system_name()}",
             f"-DCMAKE_SYSTEM_PROCESSOR={self._cmake_system_processor()}",
             f"-DCMAKE_BUILD_TYPE={self.settings.build_type}",
@@ -102,6 +107,9 @@ class AwsCAuthConan(ConanFile):
         self.run(" ".join(args), env=["conanbuild"], ignore_errors=False)
         self.run("cmake --build {} -- -j2".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
         self.run("cmake --install {}".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
+
+    def _toolchain_file(self):
+        return os.path.join(self.generators_folder, "conan_toolchain.cmake")
 
     def _cmake_system_name(self):
         os_name = str(self.settings.os)
@@ -244,5 +252,6 @@ endif()
         content = load(self, path)
         updated, count = re.subn(pattern, "", content, count=1)
         if count:
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(updated)
+            save(self, path, updated)
+        else:
+            self.output.warning("Expected CMake config block was not present in {}".format(path))
