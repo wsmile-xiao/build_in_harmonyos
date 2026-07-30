@@ -51,7 +51,7 @@ class LightGBMConan(ConanFile):
         tc.variables["BUILD_CLI"] = "ON"
         tc.variables["BUILD_CPP_TEST"] = "ON"
         tc.variables["BUILD_STATIC_LIB"] = "ON"
-        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = self.options.get_safe("fPIC", "True")
+        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = self.options.get_safe("fPIC", True)
         tc.generate()
 
     def build(self):
