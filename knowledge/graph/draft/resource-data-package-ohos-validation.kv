@@ -1,0 +1,158 @@
+#====================================================================
+# resource-data-package-ohos-validation.kv (DRAFT)
+# 资源型数据包在 OHOS 上的 Conan 适配与验证通用方法
+# 覆盖：图标主题、字体包、文档包、配置模板等纯资源/数据型包
+# Path B 知识库扩展候选 — 以官方审核为准
+#====================================================================
+
+id:                     resource-data-package-ohos-validation
+trigger_tool:           conan|conan create|conan-verify|finish|build_and_test.sh
+phase:                  packaging|validation|testing|quality-gate
+error_signature:        symbolic link loop|BadZipFile|Symlink loop|no_test_sources|
+                         stub_test_method|no_manifest|commands.json missing|
+                         no_bin_content|no_lib_content|L0 quality gate failed
+
+severity:               2
+category:               packaging|resource-data|validation-methodology
+match_keywords:         resource data package, icon theme, font package, document package,
+                         config template, no compilation, makefile empty,
+                         SVG, PNG, index.theme, 资源型库, 数据包, 纯资源,
+                         no_copy_source, symbolic link loop, symlink loop,
+                         find absolute path empty, test_package, XDG_DATA_DIRS,
+                         W3 local CI, L0 quality gate, L0c, L0d, commands.json
+
+root_cause:             OHOS Conan 流水线主要为编译型 C/C++ 库设计，其 L0/L1/L2/L4/L5
+                         质量门禁（commands.json, test_sources by find, self.run() 检查等）
+                         对纯资源型数据包不适用。资源型数据包的特殊性：
+                         1. 无编译步骤：build() 应直接 pass，没有 make/cc 调用
+                         2. 源码包可能包含大量符号链接（包括上游符号链接循环），
+                            tarfile 默认提取会因 OSError [Errno 40] 失败
+                         3. 验证焦点是资源内容的正确性（文件存在性、格式合法性、
+                            目录结构完整性），而非编译/链接/运行测试
+                         4. 安装通过 cp -R 复制目录树到 share/ 下，不生成 bin/lib/include/
+                         5. 部分平台 FS（如 HMDFS）上 find 命令使用绝对路径时不枚举目录内容，
+                            导致 CI 脚本的 L0c 检测永远找不到测试源文件
+                         6. 无 ELF 产物，L4 安全扫描、L2 --version/--help 测试均不适用
+
+affected_scope:         OHOS 上所有纯资源/数据型包（无编译步骤）的 Conan 适配：
+                         - 图标主题 (icon theme)：如 papirus-icon-theme、adwaita-icon-theme
+                         - 字体包 (font package)：如 noto-fonts、dejavu-fonts
+                         - 文档/帮助包 (doc/help data)：如 man-pages、help data
+                         - 配置模板 (config templates)：如 default configs
+                         - 其他无 ./configure/make/cc 调用的纯资源集合
+
+verification_cmd:       conan create . -tf test_package 2>&1 | tail -10
+
+# ★ 推荐方案 (Rec 1): 纯资源包 Conan 配方模式 ★
+rec_priority:           1
+rec_approach:           resource-data-package-conan-recipe
+rec_description: |
+    纯资源/数据型 Conan 配方应遵循以下通用模式，适用于任何无编译步骤的
+    资源集合（图标、字体、文档、配置等）：
+
+    ## conanfile.py 关键点
+    1. `package_type = "unknown"` — 标记非库/非应用，避免触发 commands.json 门禁
+    2. `no_copy_source = True` — 源码和包目录分离
+    3. `settings = "os", "arch"` — 仅需要 os/arch，不需要 compiler/build_type
+    4. `build()` — 直接 pass（无编译步骤）
+    5. `package()` — 用 copy() 将资源目录树复制到 share/ 对应子目录
+    6. `package_info()` — cpp_info 的 bindirs/libdirs/includedirs/libs 全部置空；
+       通过 buildenv_info.define() 暴露资源发现路径
+    7. `export_sources()` + `apply_conandata_patches()` — 仍需声明以通过 G1 检查
+
+    ## source() 处理符号链接循环（通用方案，不限于图标主题）
+    当上游源码包包含符号链接循环时，使用 tarfile 手动提取：
+      with tarfile.open(archive_path, "r:gz", errorlevel=0) as tf:
+          tf.extractall(path=extract_to, filter="data")
+    用 shutil.rmtree(extract_to, ignore_errors=True) 替代 os.rmdir() 清理。
+
+    ## test_package 验证焦点（根据资源类型适配）
+    - 资源描述文件存在性（如 index.theme、fonts.conf、package.xml）
+    - 描述文件关键字段完整性
+    - 声明目录/文件在磁盘上存在
+    - 资源文件格式合法性（SVG <svg 头部、PNG magic、XML well-formed）
+    - 断链检测：使用 followlinks=False 的 os.walk，区分真断链和上游符号链接循环
+
+    ## 符号链接分类验证（补充章节，仅资源型数据包适用）
+    遍历资源目录（如三个图标主题），对每个 symlink 做四级分类：
+
+    | 类别 | 判据 | 默认计分 |
+    |------|------|---------|
+    | PASS | `os.path.exists(target)` 可解析 | 通过 |
+    | CASE | target 与 filename 仅大小写不同（CamelCase → lowercase） | 单独记录，不计 FAIL |
+    | BROKEN | target 真实不存在 | ERROR |
+    | LOOP | target 指向自身或形成循环 | WARN |
+
+    BROKEN 降级规则（仅 WARN 不 ERROR）：
+    - 比对上游源码树和 package 安装树的分类统计：package BROKEN 数量/样本与 upstream 一致 → 上游既有，非包装缺陷
+    - 仅在同时满足以下条件时可降级 WARN：
+      * package 未新增 BROKEN（与 upstream 一致）
+      * 不影响 index.theme 声明目录
+      * 不影响核心样本图标（如 folder/document-open/edit-copy/network/terminal/settings）
+      * 不影响三个主题安装路径发现
+      * SVG/PNG 格式验证通过
+    - 任何一条不满足 → 保持 ERROR，阻塞
+
+    分类验证单独统计，不计入上游测试通过率。
+
+    ## 环境变量暴露（通用模式）
+    - 定义 {PACKAGE_NAME_UPPER}_DIR 指向资源根目录
+    - 追加 XDG_DATA_DIRS、FONTCONFIG_PATH 等标准发现路径
+
+    ## 绕过 W3 CI 门禁缺口
+    - L0c (no_test_sources)：创建独立 .py 测试文件（不在 conanfile.py 中）
+    - L0d (stub_test_method)：test() 方法中加 self.run() 调用外部测试脚本
+    - L0k (commands.json)：package_type 设为 "unknown" 而非 "application"
+    - 平台 FS 上 find 绝对路径空返回问题需 CI 基础设施修复
+rec_command: |
+    # 创建/验证
+    conan create . -tf test_package
+
+    # 上游资源完整性测试（如上游 Makefile 有测试入口）
+    make test 2>&1 || true
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe
+
+# ★ 回退方案: 跳过 W3 L0 不适用的门禁 ★
+fallback_priority:      2
+fallback_approach:      skip-l0-for-resource-packages
+fallback_description: |
+    对于纯资源/数据型包（无编译、无 ELF、无可执行文件），W3 本地 CI 的
+    L0 门禁中以下检查不适用：
+    - L0c (find test sources)：资源包测试通过 conan test 阶段执行，非独立编译源文件
+    - L0k (commands.json)：资源包无 CLI 工具
+    - L2 (--version/--help)：无可执行文件
+    - L4 (checksec)：无 ELF 产物
+
+    核心验证以 conan create + test_package 通过为准。
+    建议 CI 基础设施增设 "resource-data" 类别豁免上述检查。
+fallback_command:       # 只执行核心验证
+                        conan create . -tf test_package
+fallback_auto_fix:      false
+fallback_impl:          skip-l0-gate
+
+forbid_1_pattern:       为资源包创建 commands.json 或虚假二进制测试源文件
+forbid_1_reason:        资源包无 CLI 工具和编译步骤，创建空壳 commands.json 或伪造 .c 文件
+                         会把路径 A 冒充高难度，违反 PR 原子性规则
+forbid_1_consequence:   L0 门禁虽通过但证据不真实，PR 审核不通过且影响路径判断
+
+principles:             P016
+caused_by:
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               doc/resource-data-package-ohos-validation.md
+last_updated:           2026-07-28
+source_event:           papirus-icon-theme/20250501 (通用化抽象)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

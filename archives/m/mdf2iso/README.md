@@ -3,7 +3,7 @@
 **版本**: 0.3.1
 **描述**: Tool to convert MDF (Alcohol 120% images) images to ISO images
 **官网**: https://www.nongnu.org/mdf2iso/
-**源码**: https://download.savannah.nongnu.org/releases/mdf2iso/
+**源码**: https://salsa.debian.org/debian/mdf2iso
 
 ## 功能
 
@@ -45,7 +45,7 @@ make install DESTDIR=$TEST_PREFIX
 mdf2iso image.mdf output.iso
 
 # 查看版本
-mdf2iso --version
+mdf2iso --help
 ```
 
 ## 已编译版本

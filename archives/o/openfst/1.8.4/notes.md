@@ -11,19 +11,20 @@
 1. `ohc-run.py init-build openfst 1.8.4` — 下载、解压、骨架创建
 2. 修复 config.guess/config.sub 平台识别问题（添加 aarch64-ohos 三元组）
 3. 修复 configure 中的 shell 引号兼容性问题
-4. `./configure --prefix=$DEFAULT_PREFIX` — 配置成功
-5. `make -j1` — 编译成功（37个二进制 + libfst.so + libfstscript.so + 107个头文件）
-6. `make check` — **7个测试全部通过**（fst_test + 6个 algo_test）
-7. `make install DESTDIR=$TEST_PREFIX` — DESTDIR 模式安装成功
-8. `ohc-run.py sign-elf --batch $TEST_PREFIX/.../usr/local` — ELF 签名 43 个文件全部成功
-9. `ohc-run.py sign-elf --batch ~/usr/local` — 本地安装 ELF 签名 365 个全部成功
-10. R7 安全弹窗验证: 扫描所有 bin/ 确认 fstcompile --help 正常运行
-11. Staging 验证: 37bin + 2lib + 109header，签名和 RPATH 正确
-12. `ohc-run.py package openfst 1.8.4` — 预编译包制作完成（49277KB）
-13. `make install` — 本地安装（不带 DESTDIR，安装到 ~/usr/local）
-14. 用户验证: `fstcompile --help` 正常输出
-15. `ohc-run.py finish openfst 1.8.4 published` — 收尾完成
-16. `ohc-run.py verify-build openfst 1.8.4` — G1-G4 全 PASS
+4. 修复 --help / --helpshort 打印用法后返回 1 的问题，使显式帮助请求按 CLI 约定返回 0
+5. `./configure --prefix=$DEFAULT_PREFIX` — 配置成功
+6. `make -j1` — 编译成功（37个二进制 + libfst.so + libfstscript.so + 107个头文件）
+7. `make check` — **7个测试全部通过**（fst_test + 6个 algo_test）
+8. `make install DESTDIR=$TEST_PREFIX` — DESTDIR 模式安装成功
+9. `ohc-run.py sign-elf --batch $TEST_PREFIX/.../usr/local` — ELF 签名 43 个文件全部成功
+10. `ohc-run.py sign-elf --batch ~/usr/local` — 本地安装 ELF 签名 365 个全部成功
+11. R7 安全弹窗验证: 扫描所有 bin/ 确认 fstcompile --help 正常运行
+12. Staging 验证: 37bin + 2lib + 109header，签名和 RPATH 正确
+13. `ohc-run.py package openfst 1.8.4` — 预编译包制作完成（49277KB）
+14. `make install` — 本地安装（不带 DESTDIR，安装到 ~/usr/local）
+15. 用户验证: `fstcompile --help` 正常输出
+16. `ohc-run.py finish openfst 1.8.4 published` — 收尾完成
+17. `ohc-run.py verify-build openfst 1.8.4` — G1-G4 全 PASS
 
 ## 遇到的问题与解决方案
 
@@ -37,12 +38,14 @@
 | 6 | G4 FAIL: manifest 缺少 build_system | verify_build 检查顶层 build_system 字段 | 添加 `build_system: autotools` 到 manifest.yaml |
 | 7 | manifest patches_applied 为空 | finish close-archive 未自动填充 | 手动补充 3 个补丁条目 |
 | 8 | fstcompile 不支持 --version | openfst 使用自定义 flag 系统 | 使用 --help 验证功能可用性 |
+| 9 | CI 通用 smoke check 将 --help 退出码 1 视为失败 | OpenFst flag 处理将帮助输出作为错误退出 | 补丁 0004 将 --help / --helpshort 成功退出码改为 0 |
 
 ## 源码修改
 
 - `config.guess`: 添加 aarch64-ohos 识别规则（补丁 0001，+100/-29）
 - `config.sub`: 添加 ohos 操作系统支持条目（补丁 0002，+729/-254）
 - `configure`: 修复 shell 引号兼容性问题（补丁 0003，+2/-2）
+- `src/lib/flags.cc`: 显式帮助请求返回成功状态（补丁 0004，+2/-2）
 
 ## 测试结果
 
@@ -101,7 +104,7 @@ $ llvm-readelf -S ~/usr/local/bin/fstcompile | grep codesign
 
 ## 注意事项
 
-- fstcompile 不支持 --version flag，使用 --help 验证
+- fstcompile 不支持 --version flag，使用 --help 验证；--help / --helpshort 返回 0
 - make check 需在 DESTDIR 安装前执行（Makefile 清理后无法重新运行）
 - G0 clean-verify 因 Python subprocess 平台限制会 FAIL，不影响实际编译质量
 - libc++_shared.so 为运行时依赖，用户需确保该库可被动态链接器找到

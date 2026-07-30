@@ -1,100 +1,38 @@
-# openjpeg 2.5.0 for HarmonyOS
+# OpenJPEG for HarmonyOS
 
 ## 概述
 
-openjpeg 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+OpenJPEG 是 JPEG 2000 标准的开源实现，包含编解码库和命令行工具。
 
 ## 软件信息
 
 | 项目 | 值 |
 |------|-----|
 | 名称 | openjpeg |
-| 版本 | 2.5.0 |
-| 下载地址 | file:///storage/Users/currentUser/tmp/downloads/openjpeg-2.5.0.tar.gz |
-| 官方文档 | {文档链接} |
+| 版本 | 2.5.4 |
+| 官方仓库 | https://github.com/uclouvain/openjpeg |
+| 许可证 | BSD-2-Clause |
+| 构建系统 | CMake |
 
 ## 鸿蒙环境
 
 | 项目 | 值 |
 |------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
+| 系统版本 | HarmonyOS HongMeng Kernel |
 | 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
+| 编译器 | clang (LLVM 15.0.4) |
 
-## 编译步骤
+## 构建产物
 
-```bash
-# 1. 下载源码
-wget file:///storage/Users/currentUser/tmp/downloads/openjpeg-2.5.0.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
+- `libopenjp2.so` — 共享库
+- `libopenjp2.a` — 静态库
+- `opj_compress` — JPEG 2000 编码器
+- `opj_decompress` — JPEG 2000 解码器
+- `opj_dump` — JPEG 2000 信息查看工具
 
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
+## 适配要点
 
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
-```
-
-## 补丁说明
-
-### 0001-xxx.patch
-
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
-
-## 参考资料
-
-- {参考链接1}
-- {参考链接2}
+1. CMake 构建系统，无需补丁即可在 OHOS 上编译
+2. 需要设置 `CMAKE_SHARED_LIBRARY_SONAME_C_FLAG="-Wl,-soname,"` 以修复 OHOS 上的 SONAME 缺失问题
+3. 默认构建共享库 (`BUILD_SHARED_LIBS=ON`)
+4. 无外部依赖（zlib/tiff/lcms2 可选，缺失时跳过相关功能）

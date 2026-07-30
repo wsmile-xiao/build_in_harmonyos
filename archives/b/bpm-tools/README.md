@@ -56,5 +56,5 @@ python3 -c "...合成音频..." | bpm -e energy.dat -m 60 -x 200
 
 ## 参考
 
-- [官方网站](http://www.pogo.org.uk/~mark/bpm-tools/)
+- [官方网站](https://www.pogo.org.uk/~mark/bpm-tools/)
 - [源码下载](https://www.pogo.org.uk/~mark/bpm-tools/releases/bpm-tools-0.3.tar.gz)

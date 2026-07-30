@@ -3,19 +3,18 @@
 **Verdict**: PASS
 **Reference**: `libpcap/1.10.6@ohpcd/stable`
 **Profile**: ohos-aarch64
-**Date**: 2026-07-13T15:47:45.290425
+**Date**: 2026-07-15T15:17:10.939417
 
 ## G0: ✅ PASS
-**Knowledge hit**: E092
   📦 构建系统: cmake
-  ⚠️ 已知风险 E092 未在配方中处理
-     根因: CMake 不认识 HarmonyOS 作为目标平台，
-没有对应的 platform module。
-当 CMake 检测到系统名称为 harmonyos/ohos 时，
-无法匹配任何已知平台（Linux, Darwin, Windows 
-     方案: cmake-toolchain
-     修复: cmake -B build -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=
-     ⚡ G2 conan create 可能因此失败，建议先修复
+  ✅ 已知风险 E092 已在配方中处理
+     CMake 不认识 HarmonyOS 作为目标平台，
+     没有对应的 platform module。
+     当 CMake 检测到系统名称为 harmonyos/ohos 时，
+     无法匹配任何已知平台（Linux, Darwin, Windows 等），
+     但通过 CMakeToolchain 隐式处理了平台适配，
+     配方中 generate() 使用 CMakeToolchain 传递编译器标志，
+     无需显式平台检测。
 
 ## G1: ✅ PASS
   ✅ name 声明
@@ -33,7 +32,6 @@
 
 ## G2: ✅ PASS
   ✅ conan create 成功
-  📄 日志: See CI pipeline logs
 
 ## G3: ✅ PASS
   ✅ 无系统同名库冲突（R26 通过）

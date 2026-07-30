@@ -4,13 +4,13 @@
 - 构建系统: autotools (configure + make)
 - 编译日期: 2026-05-21
 - 编译器: clang 15.0.4
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
 ### 1. 初始化
 ```bash
-python3 $SKILL_ROOT/scripts/ohc-run.py init-build lzo2 2.10 --url=file://$HOME/tmp/downloads/lzo-2.10.tar.gz
+python3 $SKILL_ROOT/scripts/ohc-run.py init-build lzo2 2.10 --url=https://www.oberhumer.com/opensource/lzo/download/lzo-2.10.tar.gz
 ```
 
 ### 2. 平台适配（关键步骤）
@@ -104,12 +104,12 @@ make check
 ### 关键知识
 - E007: config.guess 无法识别 HarmonyOS 系统（已应用）
 - HMDFS umask 限制（新发现，需要记录）
-
----
-
-**编译结束**: 2026-05-21 13:15
-**最终状态**: published
 ---
 
 **编译结束**: 2026-05-21 13:27
 **最终状态**: published
+---
+
+**编译结束**: 2026-07-15 14:41
+**最终状态**: built
+

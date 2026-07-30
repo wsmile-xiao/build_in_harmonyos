@@ -11,8 +11,8 @@
 1. 初始化编译环境：`ohc-run.py init-build utftex 1.31 --url=file:///storage/Users/currentUser/tmp/downloads/utftex-1.31.tar.gz`
 2. 下载源码：使用本地 tarball
 3. 运行 autogen.sh：生成 configure 脚本和辅助文件（install-sh, compile, config.guess, config.sub, ltmain.sh）
-4. 修改 configure 脚本：`sed -i 's/umask 077/umask 022/g' configure`（解决 E011 HMDFS 权限问题）
-5. 修改测试脚本：将 `/bin/bash` 改为 `/data/service/hnp/bin/bash`（5个文件）
+4. 清理 configure 补丁：当前 Conan 配方直接编译源码，不再保留生成产物 configure 的补丁
+5. 清理未使用的上游测试脚本 shebang 补丁，test_package 使用独立 smoke test 验证安装产物
 6. 运行 configure：`./configure --prefix=$DEFAULT_PREFIX --host=aarch64-linux-ohos --disable-shared --enable-static LDFLAGS="-fuse-ld=bfd"`（使用 --host 绕过 conftest 执行问题）
 7. 编译：`make -j2`
 8. 安装到 staging：`make install DESTDIR=$TEST_PREFIX`
@@ -27,18 +27,13 @@
 |---|------|------|----------|----------|
 | 1 | lld 链接器找不到 libxml2.so.16 | OHOS SDK 的 lld 依赖 libxml2，但系统中未安装 | 使用 `-fuse-ld=bfd` 强制使用 GNU ld | 待创建 |
 | 2 | configure 的 conftest 无法执行 | conftest 需要签名才能执行（E064） | 使用 --host 参数绕过（简单软件可用） | E064 |
-| 3 | config.status 无法创建临时文件 | HMDFS umask 077 导致权限问题（E011） | 修改 configure 的 umask 为 022 | E011 |
-| 4 | 测试脚本无法执行 | 测试脚本使用 `/bin/bash`，但系统中没有 | 修改测试脚本的 bash 路径为 `/data/service/hnp/bin/bash` | 待创建 |
+| 3 | config.status 无法创建临时文件 | HMDFS umask 077 导致权限问题（E011） | 当前 Conan 配方不运行 configure，避免该路径 | E011 |
+| 4 | 测试脚本无法执行 | 上游 make check 测试脚本依赖特定 shell 路径 | test_package 使用独立 smoke test，不再携带 CI 特定 shebang 补丁 | 待创建 |
 | 5 | 干净构建缺少辅助文件 | tarball 不含 configure 及辅助文件 | 需运行 autogen.sh（G0 平台限制） | 平台限制 |
 
 ## 源码修改与补丁
 
-- `configure`: 修改 umask 077 → umask 022（2处）→ 补丁 0001-configure.patch
-- `testeqs.sh`: 修改 bash 路径 → 补丁 0002-testeqs.sh.patch
-- `testerrors.sh`: 修改 bash 路径 → 补丁 0003-testerrors.sh.patch
-- `testfonts.sh`: 修改 bash 路径 → 补丁 0004-testfonts.sh.patch
-- `testsuite.sh`: 修改 bash 路径 → 补丁 0005-testsuite.sh.patch
-- `testtexsymbols.sh`: 修改 bash 路径 → 补丁 0006-testtexsymbols.sh.patch
+- 当前 Conan 配方直接编译源码并通过 test_package smoke test 验证安装产物，不再保留生成产物或 CI 特定路径补丁。
 
 ## 测试结果
 
@@ -70,7 +65,11 @@
 
 - 预编译包: utftex-1.31-ohos-aarch64.tar.gz (812KB)
 - 调试包: utftex-1.31-ohos-aarch64-debug.tar.gz (58KB)
-- 补丁: 6 个
+- 补丁: 0 个
+
+## CI 复验
+
+- 2026-07-18: 清理未使用补丁后，CI #7201 通过，Conan test_package 已执行。
 
 ## 平台限制（G0 干净构建验证）
 

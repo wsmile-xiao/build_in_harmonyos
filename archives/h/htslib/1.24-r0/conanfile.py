@@ -4,8 +4,10 @@
 Build system: Autotools (configure + make)
 """
 import os
+import shutil
 
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.files import (
     apply_conandata_patches,
     collect_libs,
@@ -75,6 +77,7 @@ class HtslibConan(ConanFile):
     def build(self):
         apply_conandata_patches(self)
         self._patch_configure_for_ohos()
+        self._wrap_configure_with_ohos_shell()
         self._prepend_uname_shim()
 
         autotools = Autotools(self)
@@ -114,7 +117,33 @@ class HtslibConan(ConanFile):
         with open(configure, "w", encoding="utf-8") as f:
             f.write(content)
 
+    def _wrap_configure_with_ohos_shell(self):
+        if str(self.settings.os) != "OHOS":
+            return
+
+        configure = os.path.join(self.build_folder, "configure")
+        original = configure + ".real"
+        if not os.path.isfile(configure) or os.path.exists(original):
+            return
+
+        shell = os.environ.get("HNP_BASH") or shutil.which("bash")
+        if not shell:
+            raise ConanInvalidConfiguration("OHOS HTSlib build requires a bash executable")
+
+        os.replace(configure, original)
+        with open(configure, "w", encoding="utf-8") as f:
+            f.write(
+                f"#!{shell}\n"
+                f"export CONFIG_SHELL={shell}\n"
+                f"export SHELL={shell}\n"
+                'exec "$(dirname "$0")/configure.real" "$@"\n'
+            )
+        os.chmod(configure, 0o755)
+
     def _prepend_uname_shim(self):
+        if str(self.settings.os) != "OHOS":
+            return
+
         shim_dir = os.path.join(self.build_folder, "_ohos_uname")
         os.makedirs(shim_dir, exist_ok=True)
         shim = os.path.join(shim_dir, "uname")
@@ -129,6 +158,45 @@ class HtslibConan(ConanFile):
                 'esac\n'
             )
         os.chmod(shim, 0o755)
+
+        # The OHOS worker image has no coreutils install command. HTSlib's
+        # install target only needs file copies, directory creation, and mode.
+        install = os.path.join(shim_dir, "install")
+        with open(install, "w", encoding="utf-8") as f:
+            f.write(
+                "#!/bin/sh\n"
+                "set -eu\n"
+                "mode=\n"
+                "while [ $# -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    -p|-c) shift ;;\n"
+                "    -m) [ $# -ge 2 ] || exit 2; mode=$2; shift 2 ;;\n"
+                "    -d) shift; [ $# -gt 0 ] || exit 2; mkdir -p \"$@\"; exit 0 ;;\n"
+                "    --) shift; break ;;\n"
+                "    -*) shift ;;\n"
+                "    *) break ;;\n"
+                "  esac\n"
+                "done\n"
+                "[ $# -ge 2 ] || exit 2\n"
+                "dest=\n"
+                "for arg in \"$@\"; do dest=$arg; done\n"
+                "count=$(($# - 1))\n"
+                "mkdir -p \"$(dirname \"$dest\")\"\n"
+                "i=1\n"
+                "for src in \"$@\"; do\n"
+                "  [ $i -gt $count ] && break\n"
+                "  cp -f \"$src\" \"$dest\"\n"
+                "  if [ -n \"$mode\" ]; then\n"
+                "    if [ -d \"$dest\" ]; then\n"
+                "      chmod \"$mode\" \"$dest/${src##*/}\"\n"
+                "    else\n"
+                "      chmod \"$mode\" \"$dest\"\n"
+                "    fi\n"
+                "  fi\n"
+                "  i=$((i + 1))\n"
+                "done\n"
+            )
+        os.chmod(install, 0o755)
         os.environ["PATH"] = shim_dir + os.pathsep + os.environ.get("PATH", "")
 
     def _patch_makefile_for_ohos(self):

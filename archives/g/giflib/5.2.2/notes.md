@@ -1,28 +1,38 @@
-# giflib 5.2.2 适配笔记
+# giflib 5.2.2 adaptation notes
 
-## 编译环境
-- 构建系统: Makefile（无 autoconf）
-- 编译日期: 2026-04-25
-- 编译器: clang (LLVM)
-- 状态: partial
+## Build
 
-## 编译步骤
-1. 下载源码 giflib-5.2.2.tar.gz 并解压
-2. 使用 make 直接编译（无 configure 脚本）
-3. 手动安装文件到 TEST_PREFIX（DESTDIR 模式）
+- Build system: upstream Makefile without configure
+- Conan package type: library
+- Options: `shared=True/False`
+- Dependencies: none
+- Patches: `0001-tests-makefile.patch` (portable byte truncation in the upstream regression suite)
+- Status: built locally, not published
 
-## 遇到的问题与解决方案
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | 无 configure 脚本 | giflib 使用简单 Makefile | 直接 make |
-| 2 | 系统缺少 install 命令 | HM 环境限制 | 手动 cp 安装 |
-| 3 | 文档编译需要 ImageMagick | convert 命令不可用 | 跳过文档，不影响库和工具 |
+The recipe obtains clang and llvm-ar from `tools.build:compiler_executables` and passes all flags on the make command line. It does not modify the upstream build Makefile. The official SourceForge URL ends in `/download`, so `source()` supplies the filename `giflib-5.2.2.tar.gz` explicitly before extraction.
 
-## 依赖版本
-- 无依赖
+The initial HarmonyOS CI Build #7520 reached the upstream regression suite but failed because the OHOS `head` implementation rejects GNU's negative `--bytes=-20` extension. The portability patch changes only `tests/makefile`: it computes the source size with POSIX `wc -c` and feeds exactly `size - 20` bytes through `dd bs=1 count=...`. Both `giffix-rebuild` and `giffix-regress` retain the upstream intent of testing recovery from a GIF truncated by 20 bytes.
 
-## 验证结果
-编译成功，生成 libgif.a、libgif.so.7.2.0 和工具（gif2rgb, gifbuild, giffix, giftext, giftool, gifclrmp）
+The upstream regression suite needs the GIF command-line utilities, so `build()` creates those tools for testing. `package()` deliberately publishes only libgif, `gif_lib.h`, and the license; no CLI is included and no `commands.json` is required.
 
-## 注意事项
-- 需要验证可执行文件功能
+## Validation
+
+- WSL Ubuntu, Clang 15, Conan 2.29.1; Linux/x86_64 approximation only
+- shared: `conan create` passed
+- static: `conan create` passed
+- upstream suite: 49/49 logged behavioral checks passed
+- consumer test: 1/1 GIF encode/decode round trip passed
+- portability patch: clean `patch --fuzz=0` dry-run passed; the `dd` stream was byte-for-byte equal to GNU `head -c -20` (387/387 bytes)
+- AI Review follow-up: encoder and decoder failure paths now close every successfully opened `GifFileType` before cleanup; redundant Conan conf fallback removed
+- Second AI Review follow-up: operation failures report `GifFileType::Error` before close; the open/close out-parameter is reserved for those APIs and no longer produces misleading encoding/decoding diagnostics
+
+Logs:
+
+- `E:/HarmonyPC/validation/batch-20260717-deps/giflib-conan-create-shared.log`
+- `E:/HarmonyPC/validation/batch-20260717-deps/giflib-conan-create-static.log`
+
+These WSL and targeted results do not replace HarmonyOS/aarch64 CI evidence. The portability fix passed formal Build #7543 on HEAD `a0eeb5a2de63e9a531def3542702c97eee9a5023`; the later diagnostic correction still requires CI on its updated HEAD.
+---
+
+**编译结束**: 2026-07-18 02:21
+**最终状态**: built

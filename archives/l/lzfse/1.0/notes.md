@@ -3,36 +3,43 @@
 ## Build Process
 
 ### Build System
-- Build system: makefile
-- Compiler: clang
-- No configure step needed
+- Build system: CMake (CMakeLists.txt)
+- The lzfse repo also has a Makefile, but CMake provides better Conan integration
+- No configure step needed (CMake-based)
+
+### CMake Compatibility Fix
+- lzfse's CMakeLists.txt declares `cmake_minimum_required(VERSION 2.8.6)`
+- CMake 4.x removed compatibility with versions < 3.5
+- Fix: Set `CMAKE_POLICY_VERSION_MINIMUM=3.5` in CMakeToolchain (no source patch needed)
 
 ### Build Commands
 ```bash
-cd /storage/Users/currentUser/builds/lzfse-1.0.work
-export CC=clang
-make -j2
-make install INSTALL_PREFIX=$TEST_PREFIX
+cd build_dir
+cmake -B build -DCMAKE_TOOLCHAIN_FILE=generators/conan_toolchain.cmake \
+      -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+      -DLZFSE_DISABLE_TESTS=ON
+cmake --build build
+cmake --install build
 ```
 
-### Issues Encountered
-1. **Missing `install` command**: The system doesn't have the `install` command used in the Makefile. Manually created directories and copied files.
-2. **Missing `cc` symlink**: System has `clang` but not `cc`. Set `CC=clang` environment variable.
+### Products
+- Static library: `liblzfse.a`
+- Command line tool: `lzfse`
+- Header: `lzfse.h`
 
 ### Dependencies
 - None
 
-### Verification
-- Binary built successfully
-- Command line tool works
-- Library and header installed
+### Platform Notes
+- HarmonyOS not recognized by CMake as a platform (E092 warning), but compilation works fine
+- CMake detects Clang 15.0.4 correctly
+- Binary signing handled by CI pipeline (sign.sh)
 
-## Notes
-- lzfse is a compression library developed by Apple
-- Simple makefile-based build system
-- No configure script needed
-- Produces static library `liblzfse.a` and command line tool `lzfse`
+## Verification
+- conan create passed (G2)
+- Round-trip encode/decode test via lzfse_encode_buffer/lzfse_decode_buffer
+- Static library isolation verified (G3, R26)
 ---
 
-**编译结束**: 2026-06-05 16:45
+**编译结束**: 2026-07-15 16:30
 **最终状态**: built

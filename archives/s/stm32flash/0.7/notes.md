@@ -1,45 +1,24 @@
-# stm32flash 0.7 适配笔记
+# stm32flash 0.7 adaptation notes
 
-## 编译环境
-- 构建系统: {cmake|autotools|makefile|meson|custom}
-- 编译日期: {2026-06-03}
-- 编译器: clang/clang++
-- 状态: {published|built|failed}
+## Result
 
-## 编译步骤
+- Target: OHOS 6.0, armv8, clang 15 profile
+- Date: 2026-07-16
+- Status: `built`
+- Source changes: none
 
-{用文字描述实际编译步骤，包括关键的 configure/cmake 命令}
+## Implementation
 
-## 遇到的问题与解决方案
+The official release Makefile already supports externally supplied `CC`, `AR`,
+`CFLAGS`, and `LDFLAGS`. The recipe therefore builds the original sources
+directly with the OHOS profile and packages the executable and manual page.
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-{按需添加行}
+Five previously archived patches were removed because they were generated
+configure/Makefile output rather than reviewable source changes.
 
-## 源码修改
+## Validation
 
-{如有补丁，列出文件名和修改内容；无则删除此节}
-
-## 依赖版本
-
-{列出本次编译依赖的具体软件版本}
-
-## 验证结果
-
-```bash
-{验证命令和结果}
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-{有打包产物时添加；无则删除此节}
-
-## 注意事项
-
-{需要特别注意的点；无则删除此节}
----
-
-**编译结束**: 2026-06-03 15:37
-**最终状态**: built
+`conan create` completed successfully. The installed executable printed its
+real command-line help, then exercised the serial-port path against a
+nonexistent device and returned the expected `Failed to open port` diagnostic.
+The package integrity and security gates also passed.

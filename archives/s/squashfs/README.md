@@ -29,6 +29,6 @@ squashfs 是一个压缩的只读文件系统，用于 Linux。
 
 ### 补丁文件
 
-- `0001-Makefile.patch` - 禁用额外压缩支持
-- `0002-mksquashfs.c.patch` - pthread_cancel stub
-- `0003-restore.c.patch` - pthread_cancel stub
+- `0001-mksquashfs-pthread-cancel-stub.patch` - mksquashfs.c 中添加 pthread_cancel stub 头文件引用
+- `0002-restore-pthread-cancel-stub.patch` - restore.c 中添加 pthread_cancel stub 头文件引用
+- `0003-pthread-cancel-stub-header.patch` - 创建 pthread_cancel_stub.h 头文件，提供空实现

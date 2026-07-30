@@ -2,34 +2,33 @@
 
 ## 编译环境
 - 构建系统: autotools
-- 编译日期: 2026-06-17
+- 编译日期: 2026-07-17
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
 1. init-build: `python3 ohc-run.py init-build fpart 1.7.0 --url=https://github.com/martymac/fpart/archive/refs/tags/fpart-1.7.0.tar.gz`
-2. GitHub 源码包缺少 configure/Makefile.in，需先 `autoreconf -fi` 生成构建文件
-3. configure: `bash ./configure --prefix=$DEFAULT_PREFIX --enable-embfts`（注意: E011 修复需先 sed umask 077→022）
+2. GitHub 源码包缺少 configure/Makefile.in，conanfile.py build() 中 `autoreconf -fi` 生成构建文件
+3. configure: `--enable-embfts`（注意: E011 修复在 build() 中自动替换 umask 077→022）
 4. make: `make -j1`
-5. make install DESTDIR: `make install DESTDIR=$TEST_PREFIX`
-6. verify-build: `python3 ohc-run.py verify-build fpart 1.7.0 --install-prefix=$TEST_PREFIX/$DEFAULT_PREFIX`
-7. package: `python3 ohc-run.py package fpart 1.7.0`
-8. make install: `make install`（模拟用户部署到 $DEFAULT_PREFIX）
-9. 用户验证: `fpart --version` → fpart v1.7.0 (fts=embedded)
+5. make install: 由 `conan create` 自动执行
+6. conan-verify: `python3 ohc-run.py conan-verify fpart 1.7.0`
+7. 用户验证: `fpart --version` → fpart v1.7.0 (fts=embedded)
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | config.status: can't create ./confXXX/subs1.awk: Permission denied | E011: HMDFS UID 映射导致 umask 077 创建的目录不可写 | `sed -i 's/umask 077/umask 022/g' configure` |
-| 2 | 'fts.h' file not found with <angled> include | E105: musl libc 不提供 fts.h，且 OHOS host_os 不被识别为 linux-musl | `./configure --enable-embfts` 手动启用嵌入式 fts |
-| 3 | GitHub tarball 缺少 configure 和 Makefile.in | 非 release tarball，autotools 生成文件未包含 | `autoreconf -fi` 生成 |
+| 1 | config.status: can't create ./confXXX/subs1.awk: Permission denied | E011: HMDFS UID 映射导致 umask 077 创建的目录不可写 | conanfile.py build() 中运行时替换 `umask 077` → `umask 022` |
+| 2 | 'fts.h' file not found with <angled> include | E105: musl libc 不提供 fts.h，且 OHOS host_os 不被识别为 linux-musl | `--enable-embfts` 手动启用嵌入式 fts |
+| 3 | GitHub tarball 缺少 configure 和 Makefile.in | 非 release tarball，autotools 生成文件未包含 | conanfile.py build() 中 `autoreconf -fi` 生成 |
 
 ## 源码修改
 
-1. configure: umask 077 → umask 022 (E011 修复)
-   - track-edit 已记录
+无补丁。所有适配修复在 conanfile.py build() 方法中运行时处理：
+1. `autoreconf -fi` 生成缺失的 configure/Makefile.in
+2. 运行时替换 configure 中 `umask 077` → `umask 022`（E011 修复）
 
 ## 依赖版本
 
@@ -132,34 +131,12 @@ fpart 上游没有正式的自动化测试套件。`make check` 返回 "Nothing 
 源码 `tests/` 目录仅含 `fake_readdir.c` 和 `test-parent_path.c`，未集成到 Makefile。
 通过上述手动功能测试充分验证编译产物可用性。
 
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| fpart-1.7.0-ohos-aarch64.tar.gz | 182KB | 预编译包(ELF签名，含bin/fpart + bin/fpsync + man pages) |
-| fpart-1.7.0-ohos-aarch64-debug.tar.gz | 31KB | debug symbols |
-
-打包产物内容清单:
-```
-bin/
-bin/fpart
-bin/fpsync
-lib/
-lib/external/
-share/
-share/man/
-share/man/man1/
-share/man/man1/fpart.1
-share/man/man1/fpsync.1
-```
-
 ## 注意事项
 
 - 必须使用 --enable-embfts 编译选项，否则 fts.h 编译失败
-- 需先 autoreconf -fi 生成构建文件（GitHub 源码包不包含 autotools 生成文件）
-- verify-build 需指定 --install-prefix=$TEST_PREFIX/$DEFAULT_PREFIX（DESTDIR 模式）
+- 需在 conanfile.py build() 中 autoreconf -fi 生成构建文件（GitHub 源码包不包含 autotools 生成文件）
 - 知识图谱草稿: E105 (OHOS host_os fts 检测遗漏)
 ---
 
-**编译结束**: 2026-06-17 02:17
-**最终状态**: published
+**编译结束**: 2026-07-17 11:28
+**最终状态**: built

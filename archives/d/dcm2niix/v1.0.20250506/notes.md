@@ -20,7 +20,7 @@
    ```
 3. make -j2 编译
 4. make install DESTDIR=$TEST_PREFIX（staging 安装）
-5. 无 ctest 测试套件（项目未定义 enable_testing）
+5. 项目未注册 ctest（未定义 enable_testing），但通过 Git submodule 引用 3 个独立数据驱动回归测试套件（dcm_qa、dcm_qa_nih、dcm_qa_uih），各含 batch.sh 对真实多厂商 DICOM 数据执行转换并与 Ref 参考输出比对
 6. staging 验证通过
 7. package 制作预编译包
 8. make install（不带 DESTDIR，本地安装验证）
@@ -97,7 +97,7 @@ v1.0.20250505
 
 - dcm2niix 使用 SuperBuild CMake 结构（ExternalProject_Add），构建时先配置顶层再自动配置 console 子项目
 - 源码版本号 v1.0.20250505 与 release tag v1.0.20250506 不一致，这是项目本身的行为
-- 项目没有 ctest 测试套件
+- 项目未注册 ctest，但通过 dcm_qa、dcm_qa_nih、dcm_qa_uih 三个 Git 子模块提供数据驱动回归测试
 - USE_STATIC_RUNTIME=OFF 是因为 Clang 在 HarmonyOS 平台上静态链接 stdc++ 可能有问题
 - G0 干净构建验证：脚本 clean_verify 不支持 cmake 构建系统，已手动从干净源码+补丁验证编译自包含性通过
 

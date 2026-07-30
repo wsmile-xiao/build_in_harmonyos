@@ -1,31 +1,12 @@
-# gflags — HarmonyOS aarch64 预编译包
+# gflags HarmonyOS PC release note
 
-## 快速安装
+## 2.2.2
 
-```bash
-tar xzf gflags-2.2.2-ohos-aarch64.tar.gz -C ~/usr/local
-
-cd gflags-2.2.2-ohos-aarch64 && sh install-gflags-2.2.2.sh
-```
-
-## 可用版本
-
-| 版本 | 状态 | 补丁数 |
-|------|------|--------|
-| 2.2.2 | partial | 0 |
-
-## 当前版本 (2.2.2) 详情
-
-### 包内容
-- 二进制: N/A
-- 包大小: 530.1KB
-
-### 编译信息
-- 构建系统: autotools
-- 目标: ohos-aarch64
-- 质量门禁: PASS
-- 补丁数: 0
-
-## 环境要求
-- HarmonyOS/OpenHarmony aarch64
-- `openharmony-compile-agent/usr/local/bin` in PATH
+- Migrated the legacy partial archive to a Conan 2 CMake recipe.
+- Builds the threaded shared library for OHOS AArch64; an OHOS/HarmonyOS-only
+  CMake patch links upstream tests to a non-installed static test target.
+- Compiles all five upstream test executables; CTest discovers 51 tests.
+- Adds a consumer test that calls `SetCommandLineOption` and verifies the flag
+  value through the packaged API.
+- Publication remains pending until the dependency PR is reviewed, merged and
+  the release pipeline uploads `gflags/2.2.2`.

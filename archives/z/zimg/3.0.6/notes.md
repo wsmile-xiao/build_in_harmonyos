@@ -1,60 +1,119 @@
-# zimg 3.0.6 编译笔记
+# zimg 3.0.6 adaptation notes
 
-## 编译环境
-- 构建系统：autotools
-- 编译器：clang 15
-- 平台：aarch64-unknown-linux-ohos
-- 日期：2026-05-26
+## Scope
 
-## 遇到的问题
+- Target library: zimg
+- Version: 3.0.6
+- Branch: feat/zimg-3.0.6
+- Issue: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/1459
+- Downstream blocker: vapoursynth/74 requires zimg >= 3.0.5 and failed W0/Conan dependency resolution because zimg/3.0.6 was not available in remotes.
 
-### HMDFS 文件系统权限问题
+## W0 dependency check
 
-**问题描述**：
-configure 脚本在 HMDFS 文件系统上运行时，config.status 无法创建临时文件：
+zimg has no external Conan requirements.
+
+Local command attempted:
+
+```sh
+conan download "zimg/3.0.6" -r=ohpcd --only-recipe
 ```
-./config.status[1048]: can't create ./confIMKjMm/subs1.awk: Permission denied
+
+This environment returned `ERROR: error:system acceleration policy not enabled. [Remote: ohpcd]`, so this workstation could not conclusively query the remote. The upstream vapoursynth/74 precheck already observed the package-not-resolved failure for zimg/3.0.6.
+
+## Source verification
+
+- Source URL: https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.6.tar.gz
+- SHA256: be89390f13a5c9b2388ce0f44a5e89364a20c1c57ce46d382b1fcc3967057577
+- Upstream build system: Autotools (`configure.ac`, `Makefile.am`, `autogen.sh`)
+- Recipe build strategy: direct clang++ build of `src/zimg`
+- License: WTFPL (`COPYING`)
+
+The release archive does not contain generated `configure` files. `autogen.sh` runs `autoreconf --verbose --install --force`, but the OHOS CI image used for validation does not provide `autoreconf`. The recipe therefore compiles the zimg library sources directly with the Conan-provided compiler.
+
+## Build choices
+
+- No external dependencies are declared.
+- The recipe builds `src/zimg/**/*.cpp` directly and includes only the target architecture backend (`ZIMG_ARM` on OHOS/aarch64).
+- The default package is shared and self-signs `libzimg.so*` on OHOS before `test_package` execution.
+- `zimg.pc` is generated during packaging with `Libs.private: -lc++` on OHOS.
+- Upstream `make check` is not integrated in this recipe because it depends on the missing Autotools generation step and the gtest unit-test subtree is not shipped in the GitHub release archive.
+
+## Consumer test
+
+`test_package/test.cpp` links against `zimg::zimg` and calls real C API entry points:
+
+- `zimg_get_version_info`
+- `zimg_get_api_version`
+- `zimg_image_format_default`
+- `zimg_graph_builder_params_default`
+- `zimg_filter_graph_build`
+- `zimg_filter_graph_get_tmp_size`
+- `zimg_filter_graph_free`
+
+## Next validation commands
+
+Local CI/shadow CI should be run as a single-package job when a HarmonyOS device window is available:
+
+```sh
+CI_PACKAGES="archives/z/zimg/3.0.6" zsh ci/conan/build_and_test.sh
 ```
 
-**原因分析**：
-config.status 使用 `mktemp -d "./confXXXXXX"` 在当前目录创建临时目录，
-但 HMDFS 文件系统不支持这种操作。
+If using the shadow CI wrapper:
 
-**解决方案**：
-使用 VPATH 构建 + 修改 config.status：
-1. 在本地文件系统（~/tmp/）创建构建目录
-2. 修改 config.status，使用固定临时目录代替动态创建
-3. 命令：`sed 's|tmp=.*mktemp.*|tmp="./conf_work"|' config.status > config.status.fixed`
+```sh
+/path/to/run-ohos-shadow-ci.sh archives/z/zimg/3.0.6
+```
 
-## 编译步骤
+Expected checks before PR:
 
-1. 下载源码：https://github.com/sekrit-twc/zimg/archive/refs/tags/release-3.0.6.tar.gz
-2. 创建 .orig 和 .work 目录
-3. 运行 autogen.sh 生成 configure
-4. VPATH 构建：`mkdir -p ~/tmp/build-zimg-3.0.6`
-5. 运行 configure：`$BUILD_SRC_DIR/configure --prefix=$DEFAULT_PREFIX`
-6. 修改 config.status 并运行
-7. 编译：`make -j2`
-8. 安装：`make install DESTDIR=$TEST_PREFIX`
-9. 测试：`make check`（无测试用例）
+- Build summary shows Total: 1.
+- L0/L1 pass.
+- L2 may skip because zimg is a pure library with no installed command.
+- L4 warnings, if any, are reviewed.
+- L5 confirms `lib/libzimg.*`, `include/zimg.h`, `include/zimg++.hpp`, and `lib/pkgconfig/zimg.pc` are present.
 
-## 编译产物
+## True-device validation
 
-- libzimg.a（静态库）
-- libzimg.so.2.0.0（动态库）
-- zimg.h（C 头文件）
-- zimg++.hpp（C++ 头文件）
-- zimg.pc（pkgconfig 文件）
+Device check on 2026-07-25 showed the global test lock free and no active
+`conan`, `cmake`, `ninja`, `make`, or `clang` build processes, so a single
+package zimg run was started.
 
-## 依赖
+Run directory:
 
-无外部依赖。
+```sh
+/storage/Users/currentUser/ohos-test-runs/codex-zimg-3.0.6-zimg-3.0.6-20260725-213132-conan-20260725-220345-26058
+```
 
-## 知识提取
+Command:
 
-这是一个典型的 HMDFS 文件系统限制导致的构建失败案例。
-建议在 knowledge/graph 中记录为新的错误模式。
----
+```sh
+zsh ci/conan/build_and_test.sh archives/z/zimg/3.0.6
+```
 
-**编译结束**: 2026-05-26 16:59
-**最终状态**: built
+Result:
+
+- Exit code: 0
+- L0_RESULT=pass: all checks passed
+- L1_RESULT=pass: test_package executed
+- L2_RESULT=skip: no bin/ dir
+- L4_RESULT=pass: no patches
+- L5_RESULT=pass: lib/ has content
+- Build summary: Total 1, Success 1, Failed 0
+
+The test package compiled and ran the consumer API smoke test:
+
+```text
+zimg 3.0.6 API 2.4 smoke test passed
+```
+
+Notes from device setup:
+
+- Isolated `CONAN_HOME` initially needed `settings.yml` copied from the device
+  default Conan home so that the OHOS setting exists.
+- The recipe used the staged source archive at
+  `/storage/Users/currentUser/Download/zimg-release-3.0.6.tar.gz` because direct
+  GitHub download timed out on the device; the staged archive matched the
+  recorded SHA256.
+- The OHOS profile configured `/data/service/hnp/bin/clang++`, which was absent
+  on this device. The recipe and test_package resolve the available
+  `$HOME/usr/local/bin/clang++` wrapper and invoke script wrappers via `sh`.

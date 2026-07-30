@@ -139,12 +139,5 @@ G0 clean-verify 无法自动通过，原因：
 - 未包含firmware文件(bcm70012fw.bin, bcm70015fw.bin)
 ---
 
-**编译结束**: 2026-06-01 20:15
-**最终状态**: published
-径(gSSE2=false)
-- 源码版本为Debian的0.0~git20110715，而非请求的20130708（因网络限制）
-- 未包含firmware文件(bcm70012fw.bin, bcm70015fw.bin)
----
-
-**编译结束**: 2026-06-01 20:15
-**最终状态**: published
+**编译结束**: 2026-07-15 17:09
+**最终状态**: built

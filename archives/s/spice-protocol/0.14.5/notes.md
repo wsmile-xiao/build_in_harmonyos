@@ -72,6 +72,19 @@ ls $HOME/usr/local/include/spice-1/spice/
 2. meson 需要正确设置 CC 和 AR 环境变量，确保编译器和链接器在 PATH 中
 3. G0 干净构建验证可能因 tar 解压 xz 格式问题失败，但实际编译已通过
 
+## Conan 适配验证
+
+- 源码 SHA256: `baf58449f6e89d19f475899ad5fb9196fdc46c03cc53233f4e39cf2978f9cff7`
+- 包类型: `header-library`
+- 包 ID: 清除编译器、构建类型和架构差异
+- 打包内容: 13 个协议头文件、BSD 许可证、可重定位 `spice-protocol.pc`
+- 消费者测试: 编译并运行 `test_spice_protocol.c`，验证 5 项协议结构和常量
+- Linux x86_64 / GCC 11 / Conan 2.29.1: `conan create` 通过
+- 破坏性负向测试: 移除 `include/` 后消费者编译失败，确认测试真实依赖包产物
+- HarmonyOS PC aarch64 / Clang 15.0.4 / Conan 2.29.1: `conan create` 通过
+- CI 门禁: L0、L1、L4 通过，L2 因无可执行文件跳过，L5 因纯头文件包无 `bin/` 或 `lib/` 给出非阻断警告
+- 真机 pkg-config: `--modversion` 返回 `0.14.5`，`--cflags` 返回可重定位的 `include/spice-1` 路径
+
 ## 知识提取
 
 本次编译无新的错误模式需要沉淀到知识图谱。

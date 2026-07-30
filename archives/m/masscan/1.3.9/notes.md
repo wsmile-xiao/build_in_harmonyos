@@ -1,5 +1,7 @@
 # masscan 1.3.9 适配笔记
 
+<!-- Adapted for HarmonyOS PC platform (arm64) -->
+
 ## 编译环境
 - 构建系统: makefile
 - 编译日期: 2026-05-13
@@ -25,12 +27,13 @@ masscan 使用简单的 Makefile 构建，无需 configure：
 
 ## 源码修改
 
-修改了 5 个文件，生成 5 个补丁：
-1. `src/out-tcp-services.c.patch` - 修复 getservbyport_r 条件编译
-2. `src/pixie-threads.c.patch` - 修复 pthread_setaffinity_np 条件编译  
-3. `src/rawsock-getif.c.patch` - 修复 sockaddr_storage 重定义
-4. `src/rawsock-getip6.c.patch` - 修复 sockaddr_storage 重定义
-5. `src/rawsock-getroute.c.patch` - 修复 sockaddr_storage 重定义
+修改了 6 个文件，生成 6 个补丁：
+1. `0001-Makefile.patch` - 修复 install 命令在 OHOS 上不可用（用 mkdir+cp 替代）
+2. `0002-src-out-tcp-services.c.patch` - 修复 getservbyport_r 条件编译
+3. `0003-src-pixie-threads.c.patch` - 修复 pthread_setaffinity_np 条件编译
+4. `0004-src-rawsock-getif.c.patch` - 修复 sockaddr_storage 重定义
+5. `0005-src-rawsock-getip6.c.patch` - 修复 sockaddr_storage 重定义
+6. `0006-src-rawsock-getroute.c.patch` - 修复 sockaddr_storage 重定义
 
 ## 依赖版本
 
@@ -58,13 +61,9 @@ GIT version: unknown
 
 1. masscan 使用自定义 TCP/IP 栈，可能需要特殊权限
 2. 首次运行需要 ELF 签名才能执行
-3. 源码来自 GitHub 克隆，不是官方发布版本
+3. 源码来自官方 GitHub 仓库 (https://github.com/robertdavidgraham/masscan)
 
 ---
 
-**编译结束**: 2026-05-13 17:13
-**最终状态**: built
----
-
-**编译结束**: 2026-05-13 17:25
+**编译结束**: 2026-07-16 00:04
 **最终状态**: built

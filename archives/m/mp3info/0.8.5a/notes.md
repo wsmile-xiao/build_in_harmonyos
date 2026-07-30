@@ -70,5 +70,5 @@ verify-build: PASS (G1 ✅1, G2 ⚠️1 (--version unsupported), G3 ⚠️2 (no 
 - 编译依赖 ncurses 静态库（libncurses.a）和 libtinfow 动态库
 ---
 
-**编译结束**: 2026-06-12 17:56
-**最终状态**: published
+**编译结束**: 2026-07-16 00:03
+**最终状态**: built

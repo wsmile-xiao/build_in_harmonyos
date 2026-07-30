@@ -2,10 +2,10 @@
 
 ## 编译环境
 - 构建系统: makefile（简单 Makefile，非 autotools）
-- 编译日期: 2026-06-13
+- 编译日期: 2026-07-15
 - 编译器: clang 15.0.4 / clang++
 - 平台: OpenHarmony aarch64 (musl libc)
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -105,8 +105,7 @@ $ grep -i "test\|check" makefile
 - 仓库实际名为 **AngelJumbo/lavat**（不是任务描述中的 angel-pazos/lavat）
 - DESTDIR 不应写入 manifest.yaml 的 configure_options，否则会导致 G0 clean-verify 传入两个冲突的 DESTDIR 参数
 - lavat 源码仅包含 3 个核心文件: `lavat.c`（18KB）、`makefile`（244B）、`termbox.h`（117KB）
-
 ---
 
-**编译结束**: 2026-06-13 15:25
-**最终状态**: published
+**编译结束**: 2026-07-15 16:19
+**最终状态**: built

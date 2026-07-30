@@ -11,7 +11,7 @@ XXHash is an Extremely fast Hash algorithm, running at RAM speed limits. It succ
 
 ## Build System
 
-Makefile-based build system. Simple to compile with minimal configuration.
+CMake-based build system (cmake_unofficial/). Simple to compile with minimal configuration.
 
 ## Dependencies
 
@@ -21,3 +21,5 @@ None. Zero dependencies.
 
 - Small library with simple build process
 - Supports both static and shared library builds
+- CMake build works on HarmonyOS without patches
+- xxhsum CLI tool available in upstream but disabled in this recipe

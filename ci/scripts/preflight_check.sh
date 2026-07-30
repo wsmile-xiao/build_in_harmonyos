@@ -80,7 +80,7 @@ elif [ -d "${ARCHIVES_ROOT}" ]; then
 
     if [ ! -f "$CONANFILE" ]; then
         # 尝试在 staging 或其他位置查找
-        CONANFILE=$(find "${ARCHIVES_ROOT}" -path "*/${PKG_NAME}/*/conanfile.py" 2>/dev/null | head -1)
+        CONANFILE=$(find "${ARCHIVES_ROOT}" -path "*/${PKG_NAME}/*/conanfile.py" -print -quit 2>/dev/null)
     fi
 
     if [ -f "$CONANFILE" ] && command -v python3 >/dev/null 2>&1; then

@@ -1,66 +1,51 @@
-# sparsehash 2.0.4 编译进度
+# sparsehash 2.0.4 OHOS Conan migration
 
-**日期**: 2026-05-21
-**状态**: ✅ 编译完成（手动安装模式）
+## Scope
 
-## 步骤记录
+This change migrates the existing header-only Sparsehash archive to the Conan
+pipeline. It is a prerequisite for the graph-tool 2.98 adaptation.
+The package has no third-party Conan dependencies.
 
-| 步骤 | 状态 | 备注 |
-|------|------|------|
-| Step 1 init | ✅ | 成功下载并解压源码（GitHub tarball） |
-| Step 2 patches | ✅ | 应用 E072 config.sub 补丁 |
-| Step 3 configure | ⚠️ | configure 成功，config.status 失败（HMDFS权限问题） |
-| Step 4 make | ❌ | 标准 make 无法执行（无 Makefile） |
-| Step 5 manual install | ✅ | 手动安装头文件 + 创建配置文件 |
-| Step 6 test | ✅ | 编译测试程序验证安装成功 |
-| Step 7 package | ✅ | 创建预编译包 sparsehash-2.0.4-ohos-aarch64.tar.gz |
+## Source and compatibility
 
-## 发现与知识
+The recipe downloads the official `sparsehash-2.0.4` tag from GitHub codeload
+and verifies SHA256
+`8cd1a95827dfd8270927894eb77f62b4087735cbede953884647f16c521c7e58`.
+An explicit `filename` is required because the codeload URL does not end in an
+archive extension; without it, Conan attempts ZIP extraction and raises
+`BadZipFile`.
 
-### 问题1：HMDFS config.status 临时文件创建失败
-**错误**：`./config.status[769]: can't create ./confXXXXXX/subs1.awk: Permission denied`
-**原因**：HMDFS 文件系统限制，config.status 无法创建临时子目录
-**影响**：无法使用标准的 autotools 构建流程
-**解决方案**：手动创建配置文件并安装头文件（header-only library 特性）
+Upstream normally generates `sparsehash/internal/sparseconfig.h` and
+`src/config.h` through Autotools. The recipe writes equivalent target headers
+for Linux/OHOS using only verified standard C/C++ and POSIX features. The sole
+source patch replaces `u_int16_t` with standard `uint16_t` in
+`sparsehashtable.h`; the remaining legacy uses in `sparsetable` are covered by
+upstream's `HAVE_UINT16_T` compatibility typedef.
 
-### 问题2：u_int16_t 类型缺失
-**错误**：`error: unknown type name 'u_int16_t'`
-**原因**：HarmonyOS 使用 musl libc，不支持 BSD 风格的 u_int16_t
-**解决方案**：修改头文件，将 u_int16_t 替换为 uint16_t
+## Validation
 
-### sparsehash 特性
-- Header-only 库，无需编译二进制文件
-- 主要内容：C++ hash map 实现（dense_hash_map, sparse_hash_map 等）
-- 依赖：仅需要 C++ 标准库（<unordered_map>, <functional>）
-- 安装：只需安装头文件到 $PREFIX/include/
+- `conan create` completed for OHOS 6.0, armv8, Clang 15, libc++, C++17.
+- Seven upstream programs compiled and linked as AArch64 ELF executables:
+  `template_util_unittest`, `type_traits_unittest`,
+  `libc_allocator_with_realloc_test`, `sparsetable_unittest`,
+  `hashtable_test`, `simple_test`, and `simple_compat_test`.
+- The package contains both `sparsehash/` and legacy `google/` include trees,
+  the generated target `sparseconfig.h`, and the BSD license.
+- A real consumer using `sparse_hash_map` and `dense_hash_map` compiled and
+  linked against the generated `sparsehash::sparsehash` CMake target.
 
-## 手动操作记录
+All eight AArch64 executables were then transferred to a HarmonyOS PC with
+per-file SHA256 verification, signed in place at their final HMDFS paths, and
+executed with a writable `TMPDIR`. The seven upstream programs and the Conan
+consumer all returned zero (8/8). The consumer printed
+`sparsehash consumer test passed`; its unsigned and signed SHA256 values were
+`507b7a2bca25c8e6286fd4290d94d61565841a8688ae586383f403fbf40dd1ac` and
+`9003ab7fdfb1795b2b8cd668f06deb02fbbe29e4b0d128dd23c3e79ceeaa9718`.
 
-1. 创建配置文件：
-   - sparsehash/internal/config.h（定义 HASH_NAMESPACE, HASH_MAP_H 等）
-   - sparsehash/internal/sparseconfig.h
+## Knowledge reference
 
-2. 安装头文件：
-   - 复制 src/sparsehash/* 到 $PREFIX/include/sparsehash/
-   - 复制 src/google/* 到 $PREFIX/include/google/
-   - 复制 doc/* 到 $PREFIX/share/doc/sparsehash/
-
-3. 修复类型兼容性：
-   - sed 替换 u_int16_t -> uint16_t
-
-4. 创建预编译包：
-   - tar czf sparsehash-2.0.4-ohos-aarch64.tar.gz
-
-## 验证结果
-```cpp
-#include <sparsehash/sparse_hash_map>
-google::sparse_hash_map<int, std::string> map;
-map[1] = "hello";
-map[2] = "world";
-// 输出: sparsehash test: hello world
-```
-
----
-
-**编译结束**: 2026-05-21 19:53
-**最终状态**: built
+This adaptation adds the verified E216 draft
+(`knowledge/graph/draft/E216-draft-CX17.kv` and `.md`). It documents the
+reusable cross-compilation rule that generated configuration headers must
+describe the OHOS target rather than the Windows build host, including
+generation, target-compiler verification, and device-runtime verification.

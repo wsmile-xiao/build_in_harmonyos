@@ -54,3 +54,7 @@ $ make test  # 44 个测试全部通过
 - when 是 Perl 应用，不是 C/C++ 编译项目
 - 安装前需要确保 ~/.when/preferences 存在才能正常运行
 - manpage 使用 pod2man 从源码 POD 文档生成
+---
+
+**编译结束**: 2026-07-16 01:09
+**最终状态**: built

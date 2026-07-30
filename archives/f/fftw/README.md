@@ -4,9 +4,9 @@
 FFTW (Fastest Fourier Transform in the West) 是一个高性能的离散傅里叶变换 (DFT) 库，支持一维和多维变换，自动适应硬件以达到最佳性能。
 
 ## OHOS 适配
-- **Autotools 构建失败**：config.guess/config.sub 无法识别 OHOS，即使更新后仍有问题
-- **推荐 CMake 构建**：设置 `-DCMAKE_POLICY_VERSION_MINIMUM=3.5` 即可编译成功
-- 预编译包包含：libfftw3.so、头文件、pkg-config 文件、cmake 配置文件
+- **构建系统**：当前配方直接使用上游 CMake，不修改 `config.guess`/`config.sub`
+- **CMake 兼容**：设置 `CMAKE_POLICY_VERSION_MINIMUM=3.5`
+- **产物**：默认 `shared=False` 安装 `libfftw3.a`；`shared=True` 安装共享库，两种模式均包含头文件、pkg-config 与 CMake 配置文件
 
 ## 依赖
 - 编译工具: clang, cmake
@@ -20,5 +20,5 @@ pkg-config --modversion fftw3
 ```
 
 ## 参考
-- 官网: http://www.fftw.org/
-- 源码: http://www.fftw.org/fftw-3.3.10.tar.gz
+- 官网: https://www.fftw.org/
+- 源码: https://www.fftw.org/fftw-3.3.10.tar.gz

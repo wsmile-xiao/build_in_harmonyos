@@ -1,3 +1,23 @@
+# assimp 6.0.5 编译笔记（HarmonyOS PC · 标准 Conan cmake）
+
+## 定位
+- 产出动态 libassimp.so，供 dlopen 及作依赖。
+
+## 关键适配
+- （填：系统识别 / umask / 子包 / zipfs / 签名等）
+
+## 状态
+built（CI conan create + test 通过）
+
+## conan 化要点
+
+conan 化（该目录原有一份别人手工编译的存档笔记，已保留并并入附录）。zlib 走制品仓现有的纯静态包（只有 libz.a），故静态嵌入 libassimp.so —— 与上游 wheel 链 libz.so.1 不同但功能等价。test_package 11 条断言：内存喂 OBJ 解析、网格/面/顶点数、逐点坐标与包围盒对账、错误路径。
+
+---
+
+<details>
+<summary>本目录原有的手工编译笔记（保留，未改动）</summary>
+
 # assimp 6.0.5 适配笔记
 
 ## 编译环境
@@ -90,3 +110,5 @@ OHOS (dev) clang version 15.0.4
 
 **编译结束**: 2026-05-29 19:12
 **最终状态**: built
+
+</details>

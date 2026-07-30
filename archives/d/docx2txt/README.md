@@ -11,13 +11,13 @@ docx2txt 是一个从 Microsoft Office DOCX 文件提取纯文本的 Perl 脚本
 
 ## OHOS 适配
 - 纯 Perl 脚本项目，无需编译步骤
-- OpenHarmony 缺少 GNU install 命令，需手动创建 staging 目录安装文件
-- Makefile 不支持标准 DESTDIR 模式，需手动复制文件
-- HTTPS 证书验证问题可通过 HTTP 协议下载解决
+- Conan 配方直接安装脚本与配置，避免上游 Makefile 缺少 DESTDIR 支持
+- 运行时从 PATH 查找 unzip，避免依赖 `/usr/bin/unzip`
+- 临时文件优先写入 TMPDIR，避免使用 OpenHarmony 上不可写的 `/tmp`
 
 ## 依赖关系
 - **运行依赖**: perl, unzip
 
 ## 参考资料
 - 官网: https://sourceforge.net/projects/docx2txt/
-- 源码: http://downloads.sourceforge.net/project/docx2txt/docx2txt/v1.4/docx2txt-1.4.tgz
+- 源码: https://sourceforge.net/projects/docx2txt/files/docx2txt/v1.4/
