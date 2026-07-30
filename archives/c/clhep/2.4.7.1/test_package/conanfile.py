@@ -34,6 +34,11 @@ class ClhepTestConan(ConanFile):
             # CTest must expose CLHEP's component libraries to its child process.
             lib_dir = os.path.join(self.dependencies["clhep"].package_folder, "lib")
             self.run(
-                f"LD_LIBRARY_PATH={lib_dir} ctest --output-on-failure",
+                f"LD_LIBRARY_PATH={lib_dir}:$LD_LIBRARY_PATH ctest --output-on-failure",
                 cwd=self.build_folder,
+            )
+        else:
+            self.output.info(
+                "Skipping CLHEP test package: the target binaries cannot run "
+                "on this build machine"
             )
