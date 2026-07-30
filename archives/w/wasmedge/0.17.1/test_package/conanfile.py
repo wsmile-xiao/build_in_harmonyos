@@ -34,4 +34,5 @@ class WasmEdgeTestConan(ConanFile):
                 test_bin += ".exe"
             if not os.path.exists(test_bin):
                 raise RuntimeError(f"test_package binary not found: {test_bin}")
-            self.run(test_bin, env="conanrun")
+            cmake = CMake(self)
+            cmake.test(env="conanrun", cli_args=["--output-on-failure"])
