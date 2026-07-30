@@ -40,3 +40,35 @@
 
 **编译结束**: 2026-04-30 02:47
 **最终状态**: built
+
+---
+
+# Conan 配方补充（2026-07-30）
+
+> 以上为 2026-04 手工编译路径的原始记录，**原样保留**。以下为本次新增的 Conan 配方说明。
+
+# argp-standalone 1.5.0 —— Conan 配方补充说明
+
+## 与上面 2026-04 手工路径的关系
+前人的手工编译记录（含 4 条 knowledge_gained）**完整保留在上方**，本次是补 Conan 配方。
+两条路径在"缺 intl 符号"上的解法不同，见下。
+
+## 关键适配
+
+### intl 符号：本配方用 `ac_cv_header_libintl_h=no`
+OHOS musl 的 `libintl.h` 是空壳——**头在、符号不在**（无 `__dcgettext`）。
+configure 探测到头就认为 gettext 可用，编译期报 int-conversion，链接期必然找不到符号。
+
+- 前人手工路径的解法：`LIBS=-lintl`（依赖一个 gettext 移植）。
+- 本配方的解法：`ac_cv_header_libintl_h=no`，直接告诉 configure 没这个头，
+  从而**不引入 gettext 依赖**。
+
+> 注意：这里**不能**用 `-Wno-int-conversion` 糊过去——那只压住编译警告，
+> 链接期照样缺符号。
+
+### noinst 静态库要手工安装
+上游全是 `noinst_*` 目标，`make install` 什么都不装。
+package() 里手工装 `argp.h` 与 `libargp.a`，`package_type = "static-library"`。
+
+## 状态
+built —— 真机 `conan create` 通过；test_package 真实调用 `argp_parse` 解析一组参数并断言结果。
