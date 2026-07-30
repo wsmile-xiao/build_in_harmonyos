@@ -12,6 +12,15 @@ def check(condition, message):
     print(f"PASS: {message}")
 
 
+def check_raises_value_error(func, value, message):
+    try:
+        func(value)
+    except ValueError as error:
+        check(True, f"{message} (raised ValueError: {error})")
+        return
+    check(False, f"{message} (expected ValueError, got none)")
+
+
 def run_cli(*args):
     # Run the gsan module directly via the current interpreter. The package is
     # pure Python, so this works on any host (including the OHOS cross-compile
@@ -43,6 +52,17 @@ check(clean_domains(["*.www.example.com", "www.example.com", "api.example.com"])
 check(parse_domain("example.com:8443") == ("example.com", 8443), "parses hostname and explicit port")
 check(parse_domain("example.com") == ("example.com", 443), "uses default TLS port")
 check(parse_domain("[::1]:9443") == ("::1", 9443), "parses bracketed IPv6 endpoint")
+# Invalid / empty ports must raise a clear ValueError instead of crashing (review P1)
+check_raises_value_error(parse_domain, "example.com:abc", "rejects non-numeric port")
+check_raises_value_error(parse_domain, "example.com:", "rejects empty port")
+check_raises_value_error(parse_domain, "[::1]:xyz", "rejects IPv6 with non-numeric port")
+check_raises_value_error(parse_domain, "[::1]:", "rejects IPv6 with empty port")
+# End-to-end: invalid port exits non-zero with a friendly stderr message (review P2)
+invalid = run_cli("example.com:abc")
+check(
+    invalid.returncode != 0 and "error" in invalid.stderr.lower(),
+    "exits non-zero with friendly error on invalid port",
+)
 version = run_cli("--version")
 check(version.returncode == 0 and version.stdout.strip() == "gsan 5.0.0", "reports package version")
 help_result = run_cli("--help")
@@ -51,4 +71,4 @@ failure = run_cli("127.0.0.1:1", "--timeout", "0.1", "--format", "json")
 check(failure.returncode == 0, "reports connection failure without crashing")
 payload = json.loads(failure.stdout)
 check(payload["failed_domains"] == ["127.0.0.1"], "reports failed domain in JSON output")
-print("10 assertions passed")
+print("15 assertions passed")
