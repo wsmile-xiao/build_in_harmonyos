@@ -51,8 +51,13 @@ if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
     # Use python3 -m pip to bypass potentially broken pip3 shebang.
     python3 -m pip install --user --force-reinstall \
         --index-url "$PIP_PUBLIC_INDEX" "$CONAN_WHEEL" || {
-        echo "[error] Failed to install conan"
-        exit 1
+        echo "[warn] conan install failed, trying to fix dependencies (requests)..."
+        python3 -m pip install --user --upgrade "requests>=2.25,<3.0" && \
+        python3 -m pip install --user --force-reinstall \
+            --index-url "$PIP_PUBLIC_INDEX" "$CONAN_WHEEL" || {
+            echo "[error] Failed to install conan"
+            exit 1
+        }
     }
     rm -rf "$PIP_TMP_DIR" 2>/dev/null || true
     # Ensure user-installed binaries are found before any broken HNP version
