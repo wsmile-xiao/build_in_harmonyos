@@ -2,7 +2,6 @@
 """Test package for gsan 5.0.0."""
 import sys
 from conan import ConanFile
-from conan.tools.build import can_run
 
 
 class GsanTestConan(ConanFile):
@@ -14,5 +13,9 @@ class GsanTestConan(ConanFile):
         self.requires(self.tested_reference_str)
 
     def test(self):
-        if can_run(self):
-            self.run(f'"{sys.executable}" test_gsan.py', env="conanrun")
+        # gsan is a pure-Python application; its logic test runs on the build
+        # host (the CI runner), not on the OHOS target device. We run it
+        # unconditionally — guarding with can_run() would skip the test during
+        # OHOS cross-compilation (host != OHOS/aarch64) and trip the CI's
+        # destructive negative test (L1e), which would flag it as a fake test.
+        self.run(f'"{sys.executable}" test_gsan.py', env="conanrun")
