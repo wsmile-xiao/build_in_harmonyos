@@ -10,6 +10,7 @@ int main(void) {
     }
     aws_common_library_init(allocator);
     aws_common_fatal_assert_library_initialized();
+    /* aws_mqtt_library_init returns void in aws-c-mqtt 0.15.2. */
     aws_mqtt_library_init(allocator);
 
     struct aws_byte_cursor topic = aws_byte_cursor_from_c_str("openharmony/pc/test");
