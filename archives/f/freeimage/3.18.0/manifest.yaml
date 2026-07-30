@@ -66,6 +66,17 @@ knowledge_gained:
   - "Makefile 安装目标使用 -o root -g root 在鸿蒙系统上失败，需移除用户和组归属参数"
   - "HMDFS 文件系统不支持 ln -sf 覆盖式创建符号链接，需改用 rm -f && ln -s 模式"
   - "FreeImage 静态库包含构建工具 b44ExpLogTable 的 main 函数，静态链接时会产生 main 符号冲突，建议使用 -Wl,--allow-multiple-definition 或优先使用动态库"
+  - "conan 配方：CFLAGS/CXXFLAGS 必须走环境变量——make 命令行赋值会压掉 makefile 的 `CFLAGS += $(INCLUDE)`，导致 531 个源文件全报 FreeImage.h not found"
+  - "conan 配方：profile 声明 cppstd=17 但直接驱动 make 时无人注入 -std=（clang 默认 gnu++14），显式补 -std=c++17 后需三个逃生旗标：-Wno-register / -Wno-dynamic-exception-spec / -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR，零源码补丁"
+  - "conan 配方：tools.gnu:ar 不是 Conan 注册过的 conf（2.29.1），conf.get 对未注册键直接抛异常、连 default 都不返回，AR 须直接给 hnp llvm-ar"
+  - "SONAME 是 libfreeimage.so.3 而产物名为 libfreeimage-3.18.0.so，两者都不是 -lfreeimage 找的 libfreeimage.so，须补齐两级软链"
+  - "共享库链接行带 -s（链接期 strip）会剥掉链接器自签的 .codesign 段，故 package() 必须显式重签"
+  - "PNG_ARM_NEON_OPT=0 的缺陷在消费侧才暴露：.so 自身能链出（容忍未定义符号），直接链接时才报 png_init_filter_functions_neon 未定义——纯 dlopen 探针会漏"
+  - "已知限制：JPEG-XR(LibJXR) 编码在 aarch64 上全参数组合下均失败（WMP_errFail），插件却自报 SupportsWriting=1；解码面未受影响"
+  - "入参约束：JPEG2000 最小边须 >= 64（OpenJPEG 默认 6 层分辨率），小于此报 Number of resolutions is too high"
+  - "settings.build_type=Release 必须自己补 -DNDEBUG：上游 Makefile 不带，且直接驱动 make 时无 toolchain generator 代劳；不补则上游 TestAPI 读 exif.jxr 触发 PluginJXR.cpp:493 的 assert(FALSE) 而 abort"
+  - "上游自带 TestAPI 套件（13 个 .cpp / 38 次断言）已接入 build()：g++→clang++、补 C++17 逃生旗标、加 -Wl,--allow-multiple-definition 绕 b44ExpLogTable 的 main 冲突；未改上游测试代码"
+  - "JXR 限定：只有编码不可用，解码是好的——上游 testMemIO(exif.jxr) 在本包上通过"
 
 # 功能测试结果
 functional_test:
@@ -102,3 +113,48 @@ patch_classification:
     type: auto
     platform_only: True
     guard: 'pending'
+
+# ============================================================
+# Conan 配方（2026-07-30 新增，与上方预编译包并存）
+# ============================================================
+
+conan:
+  recipe: conanfile.py
+  build_system: makefile        # 手写 Makefile.gnu，生成器不支持 → 手写 recipe
+  applies_patches: false        # patches/0001-Makefile.gnu.patch 属预编译包那条线；
+                                # conan 配方不调用上游 make install，故未应用它
+  cflags:
+    - "-O3"
+    - "-fPIC"
+    - "-fexceptions"
+    - "-fvisibility=hidden"
+    - "-DPNG_ARM_NEON_OPT=0"
+  cxxflags_extra:
+    - "-std=c++17"
+    - "-Wno-register"
+    - "-Wno-dynamic-exception-spec"
+    - "-D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR"
+  make_vars: 'CC / CXX / AR(hnp llvm-ar) / LIBRARIES="-lc++" 走命令行；CFLAGS/CXXFLAGS 走环境变量'
+  sign_so: true                 # -s 剥掉了链接器自签，须显式重签
+  ndebug: true                  # Release 语义，上游 Makefile 不带，必须自己补
+  upstream_tests_in_build: "TestAPI/（13 个 .cpp / 38 次断言调用），退出码 0，未改上游测试代码"
+  known_limitations:
+    - "JPEG-XR(LibJXR) 编码不可用（aarch64，全参数组合实测）；解码可用（上游 testMemIO(exif.jxr) 通过坐实）"
+
+libs:
+  - freeimage                   # libfreeimage.so（SONAME libfreeimage.so.3）+ libfreeimage.a
+
+requires: []                    # 九个编解码器全部内嵌，无外部依赖
+
+verified:
+  device: "HarmonyOS PC 2in1"
+  date: "2026-07-30"
+  conan: "2.29.1"
+  profiles: "-pr:h ohos -pr:b ohos_build（settings 与 CI ohos-aarch64 逐项一致 → package_id 相同）"
+  evidence: >-
+    裸 conan create rc=0（约 4 分钟）；上游 TestAPI 套件在 build() 内运行退出码 0（38 次断言）；
+    test_package 13 条断言全过（8 个自带 codec 逐个
+    encode→decode 往返：BMP/PNG/TIFF/WebP 无损逐像素全等，JPEG/JP2/J2K 带容差，OpenEXR
+    走 FIT_RGBF 浮点无损，LibJXR/LibRawLite 断言插件注册与读取）；SONAME=libfreeimage.so.3；
+    DT_NEEDED 仅 libc++_shared.so + libc.so；.codesign 段在且 display-sign 报 self-sign；
+    导出 598 个 FUNC
