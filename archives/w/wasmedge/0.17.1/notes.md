@@ -12,6 +12,7 @@ WasmEdge 0.17.1 is adapted as a static CMake package with LLVM/AOT, plugins, exa
 - Disabled options: LLVM/AOT, plugins, examples, upstream tests, tools, LTO, shared library build
 - Packaging: static aggregate library is exposed as `wasmedge::wasmedge` so downstream consumers link a closed runtime library set directly.
 - Test package: registers 6 CTest entries covering version APIs, configuration creation, VM lifecycle, in-memory wasm execution, repeated execution, invalid module rejection, and missing exported function rejection through the packaged C API.
+- Declared package test coverage: 6/6 CTest package cases are registered for target execution; cross profiles compile and register all six core runtime tests and defer runtime pass counting to a runnable target profile.
 
 ## Upstream test decision
 
