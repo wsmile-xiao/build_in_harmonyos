@@ -27,25 +27,77 @@ export PATH="$HOME/.local/bin:$PATH"
 # If conan binary exists but is broken, force-reinstall to fix
 if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
     echo "[step] Conan not found or broken, (re)installing..."
-    # 安装 OHOS 适配版 conan（私有 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）
-    # 不要钉死官方旧版本号，应从配置的 PyPI 源安装最新适配版
-    # Use python3 -m pip to bypass potentially broken pip3 shebang
-    # (HNP pip3/conan binaries may have shebangs pointing to non-existent
-    #  build-machine paths with ^M line endings)
-    python3 -m pip install --user --force-reinstall conan || {
-        echo "[warn] Direct conan install failed, trying to fix dependencies..."
+    # 安装 OHOS 适配版 conan（社区 PyPI 提供，基线 2.29.1，已适配 OHOS 平台）。
+    # 社区 PyPI 只托管适配版 conan wheel，不保证包含 requests/idna 等通用依赖；
+    # 因此分两步：先从社区源下载 conan wheel，再安装本地 wheel 并从公开 PyPI 解析依赖。
+    # 这样既避免误装官方 conan，又避免社区源缺依赖导致 CI setup 失败。
+    PIP_COMMUNITY_INDEX="${PIP_COMMUNITY_INDEX:-https://pypi.cnb.cool/OpenHarmonyPCDeveloper/pypi/-/packages/simple}"
+    PIP_PUBLIC_INDEX="${PIP_PUBLIC_INDEX:-https://pypi.org/simple}"
+    PIP_TMP_DIR="${TMPDIR:-$HOME/tmp}/conan-wheel-$$"
+    mkdir -p "$PIP_TMP_DIR"
+
+    python3 -m pip download --no-deps --dest "$PIP_TMP_DIR" \
+        --index-url "$PIP_COMMUNITY_INDEX" --trusted-host pypi.cnb.cool conan || {
+        echo "[error] Failed to download OHOS-adapted conan wheel"
+        exit 1
+    }
+
+    CONAN_WHEEL="$(find "$PIP_TMP_DIR" -name 'conan-*.whl' -type f | head -n 1)"
+    if [ -z "$CONAN_WHEEL" ]; then
+        echo "[error] OHOS-adapted conan wheel not found in $PIP_TMP_DIR"
+        exit 1
+    fi
+
+    # Use python3 -m pip to bypass potentially broken pip3 shebang.
+    python3 -m pip install --user --force-reinstall \
+        --index-url "$PIP_PUBLIC_INDEX" "$CONAN_WHEEL" || {
+        echo "[warn] conan install failed, trying to fix dependencies (requests)..."
         python3 -m pip install --user --upgrade "requests>=2.25,<3.0" && \
-        python3 -m pip install --user --force-reinstall conan || {
+        python3 -m pip install --user --force-reinstall \
+            --index-url "$PIP_PUBLIC_INDEX" "$CONAN_WHEEL" || {
             echo "[error] Failed to install conan"
             exit 1
         }
     }
+    rm -rf "$PIP_TMP_DIR" 2>/dev/null || true
     # Ensure user-installed binaries are found before any broken HNP version
     export PATH="$HOME/.local/bin:$PATH"
 fi
 
 CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
 echo "[step] Conan version: $CONAN_VERSION"
+
+# If conan still can't run after install/reinstall, diagnose the root cause
+if [ "$CONAN_VERSION" = "unknown" ]; then
+    echo "[error] conan 仍然无法运行, 诊断系统环境..."
+    # Check for common system-level issues
+    python3 -c "import sqlite3" 2>&1 || {
+        echo "[error] Python sqlite3 模块损坏 — libsqlite3.so.0 缺失"
+        echo "[error] 这不是 conan 问题, 需要在 Worker 上安装/链接 libsqlite3.so.0"
+        echo "[error] 修复: 找到 HNP 目录下的 libsqlite3.so.0 或从 OHOS 系统链接"
+        # Try to find and link it
+        SQLITE_LIB=$(find /data/service/hnp /system/lib* /usr/lib* -name 'libsqlite3.so*' -print -quit 2>/dev/null)
+        if [ -n "$SQLITE_LIB" ]; then
+            echo "[step] 尝试设置 LD_LIBRARY_PATH: $(dirname "$SQLITE_LIB")"
+            export LD_LIBRARY_PATH="$(dirname "$SQLITE_LIB"):${LD_LIBRARY_PATH:-}"
+            CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
+            echo "[step] Retry conan version: $CONAN_VERSION"
+        fi
+    }
+    python3 -c "import ssl" 2>&1 || echo "[error] Python ssl 模块损坏 — libssl.so 缺失"
+    # Check for other missing shared libraries
+    PYTHON3_BIN=$(which python3 2>/dev/null)
+    if [ -n "$PYTHON3_BIN" ]; then
+        ldd "$PYTHON3_BIN" 2>/dev/null | grep "not found" | while read -r line; do
+            echo "[error] 缺失动态库: $line"
+        done
+    fi
+    # Final check — if still broken, exit with clear message
+    if [ "$CONAN_VERSION" = "unknown" ]; then
+        echo "[error] Conan 无法启动, Worker 环境需要修复 (非 CI 脚本问题)"
+        exit 1
+    fi
+fi
 
 # ── 1b. Refresh stale settings.yml ──
 # conan caches settings.yml on first run; if conan was upgraded (e.g. OHOS
