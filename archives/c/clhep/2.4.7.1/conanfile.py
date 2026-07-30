@@ -6,7 +6,7 @@ import os
 from conan import ConanFile
 from conan.tools.build import can_run, check_min_cppstd
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import collect_libs, get
+from conan.tools.files import collect_libs, get, rm
 
 
 class ClhepConan(ConanFile):
@@ -43,6 +43,7 @@ class ClhepConan(ConanFile):
     def generate(self):
         tc = CMakeToolchain(self)
         tc.variables["BUILD_TESTING"] = True
+        # CLHEP builds both variants unconditionally; package() keeps the selected one.
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
         tc.generate()
 
@@ -70,6 +71,11 @@ class ClhepConan(ConanFile):
     def package(self):
         cmake = CMake(self)
         cmake.install()
+        lib_dir = os.path.join(self.package_folder, "lib")
+        if self.options.shared:
+            rm(self, "*.a", lib_dir)
+        else:
+            rm(self, "*.so*", lib_dir)
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "CLHEP")
