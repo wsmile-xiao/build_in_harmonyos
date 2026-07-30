@@ -34,6 +34,12 @@ libxcrypt 是一个现代的扩展 crypt 库，支持多种密码哈希算法，
 - 需要显式设置 umask 才能正常编译
 - clang 编译器对 GNU 扩展的警告更严格
 
+### 配套知识草稿
+
+- `knowledge/drafts/E232-draft-2301.{kv,md}`：仅在存在同名 `.libs` ELF 时通过 shell 启动无扩展名 Libtool wrapper。
+- `knowledge/drafts/E233-draft-2301.{kv,md}`：目标 libc 缺 API 时，独立测试须链接库内准确的 fallback 对象。
+- 两组草稿随 libxcrypt 4.5.2 软件 PR 提交，不修改正式 `knowledge/graph/index.tsv`；适配路径保持 A+B。
+
 ## 依赖关系
 
 ### 编译依赖
