@@ -4,6 +4,7 @@
 import os
 
 from conan import ConanFile
+from conan.errors import ConanException
 from conan.tools.build import can_run
 from conan.tools.cmake import CMake, cmake_layout
 
@@ -26,5 +27,8 @@ class AwsCMqttTestConan(ConanFile):
 
     def test(self):
         if can_run(self):
-            test_bin = os.path.join(self.cpp.build.bindirs[0], "test_aws_c_mqtt")
+            bindirs = self.cpp.build.bindirs
+            if not bindirs:
+                raise ConanException("test_package build bindirs is empty")
+            test_bin = os.path.join(bindirs[0], "test_aws_c_mqtt")
             self.run(test_bin, env="conanrun")

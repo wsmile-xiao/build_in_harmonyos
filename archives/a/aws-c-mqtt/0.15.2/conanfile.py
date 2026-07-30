@@ -6,6 +6,7 @@ import re
 import shlex
 
 from conan import ConanFile
+from conan.tools.build import build_jobs
 from conan.tools.cmake import cmake_layout
 from conan.tools.files import copy, get, load, replace_in_file, save
 
@@ -95,7 +96,8 @@ class AwsCMqttConan(ConanFile):
         ]
         args.extend("-D{}={}".format(key, value) for key, value in definitions.items())
         self.run(shlex.join(args), env=["conanbuild"], ignore_errors=False)
-        self.run(shlex.join(["cmake", "--build", build_dir, "--", "-j2"]), env=["conanbuild"], ignore_errors=False)
+        jobs = str(build_jobs(self))
+        self.run(shlex.join(["cmake", "--build", build_dir, "--parallel", jobs]), env=["conanbuild"], ignore_errors=False)
         self.run(shlex.join(["cmake", "--install", build_dir]), env=["conanbuild"], ignore_errors=False)
 
     def _module_path(self, prefix):
@@ -193,14 +195,14 @@ endif()
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
         pattern = re.compile(
-            r"if \(\(NOT WIN32 AND NOT APPLE\) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE\)\s*"
-            r"if \(USE_OPENSSL\)\s*"
-            r"find_dependency\(OpenSSL REQUIRED\)\s*"
-            r"find_dependency\(Threads REQUIRED\)\s*"
-            r"else\(\)\s*"
-            r"find_dependency\(crypto\)\s*"
-            r"endif\(\)\s*"
-            r"endif\(\)\s*",
+            r"^\s*if \(\(NOT WIN32 AND NOT APPLE\) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE\)\s*"
+            r"^\s*if \(USE_OPENSSL\)\s*"
+            r"^\s*find_dependency\(OpenSSL REQUIRED\)\s*"
+            r"^\s*find_dependency\(Threads REQUIRED\)\s*"
+            r"^\s*else\(\)\s*"
+            r"^\s*find_dependency\(crypto\)\s*"
+            r"^\s*endif\(\)\s*"
+            r"^\s*endif\(\)\s*",
             re.MULTILINE,
         )
         self._remove_config_block(config, pattern)
@@ -208,9 +210,9 @@ endif()
     def _strip_io_s2n_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-io", "aws-c-io-config.cmake")
         pattern = re.compile(
-            r"if \(UNIX AND NOT APPLE AND NOT BYO_CRYPTO\)\s*"
-            r"find_dependency\(s2n\)\s*"
-            r"endif\(\)\s*",
+            r"^\s*if \(UNIX AND NOT APPLE AND NOT BYO_CRYPTO\)\s*"
+            r"^\s*find_dependency\(s2n\)\s*"
+            r"^\s*endif\(\)\s*",
             re.MULTILINE,
         )
         self._remove_config_block(config, pattern)

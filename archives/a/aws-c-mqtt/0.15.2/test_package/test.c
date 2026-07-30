@@ -3,6 +3,11 @@
 #include <aws/common/common.h>
 #include <aws/mqtt/mqtt.h>
 
+#define AWS_MQTT_INIT_RETURNS_VOID(func) _Generic((func), void (*)(struct aws_allocator *): 1, default: 0)
+_Static_assert(
+    AWS_MQTT_INIT_RETURNS_VOID(aws_mqtt_library_init),
+    "aws_mqtt_library_init returns void in aws-c-mqtt 0.15.2");
+
 int main(void) {
     struct aws_allocator *allocator = aws_default_allocator();
     if (allocator == NULL) {
