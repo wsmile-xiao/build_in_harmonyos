@@ -1,0 +1,205 @@
+--- a/tests/pidwraptest.c
++++ b/tests/pidwraptest.c
+@@ -1,85 +1,135 @@
+ /*
+- * Checks if LibreSSL's PRNG is fork-safe.
+- * From https://www.agwa.name/blog/post/libressls_prng_is_unsafe_on_linux
+- * This code is in the public domain.
+- *
+- * Original source: https://gist.github.com/AGWA/eb84e55ca25a7da1deb0
++ * Checks if LibreSSL's PRNG is fork-safe when a process ID is reused.
++ * This deterministic form models PID wraparound through the linker's getpid
++ * wrapper instead of creating processes until the host kernel wraps its PID
++ * counter.
+  */
+ 
+ #undef LIBRESSL_INTERNAL
+ #include <openssl/rand.h>
++#include <errno.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <unistd.h>
+ #include <sys/wait.h>
+ 
+-static void random_bytes (unsigned char* p, size_t len)
++#define BUFFER_SIZE 32
++#define REUSED_PID 4242
++
++pid_t
++__wrap_getpid(void)
+ {
+-	if (RAND_bytes(p, len) != 1) {
++	return REUSED_PID;
++}
++
++static void
++random_bytes(unsigned char *buffer, size_t length)
++{
++	if (RAND_bytes(buffer, length) != 1) {
+ 		fprintf(stderr, "RAND_bytes failed\n");
+ 		abort();
+ 	}
+ }
+ 
+-static void random_stir (void)
++static int
++read_all(int fd, unsigned char *buffer, size_t length)
+ {
+-	if (RAND_poll() != 1) {
+-		fprintf(stderr, "RAND_poll failed\n");
+-		abort();
++	size_t offset = 0;
++
++	while (offset < length) {
++		ssize_t result = read(fd, buffer + offset, length - offset);
++
++		if (result > 0) {
++			offset += (size_t)result;
++			continue;
++		}
++		if (result < 0 && errno == EINTR)
++			continue;
++		return -1;
+ 	}
+-}
+-
+-static void print_buffer (unsigned char* p, size_t len)
+-{
+-	while (len--) {
+-		printf("%02x", (unsigned int)*p++);
+-	}
+-}
+-
+-int main ()
+-{
+-	char c = 0;
+-	int	pipefd[2];
+-	pipe(pipefd);
+-	setbuf(stdout, NULL);
+-
+-	if (fork() == 0) {
+-		unsigned char buffer[32];
+-		pid_t grandparent_pid = getpid();
+-
+-		random_bytes(buffer, sizeof(buffer));
+-
+-		if (fork() == 0) {
+-			random_stir();
+-			setsid();
+-			while (1) {
+-				pid_t	grandchild_pid = fork();
+-				if (grandchild_pid == 0) {
+-					random_stir();
+-					if (getpid() == grandparent_pid) {
+-						random_bytes(buffer, sizeof(buffer));
+-						print_buffer(buffer, sizeof(buffer));
+-						printf("\n");
+-					}
+-					_exit(0);
+-				}
+-				wait(NULL);
+-				if (grandchild_pid == grandparent_pid) {
+-					break;
+-				}
+-			}
+-			write(pipefd[1], &c, 1);
+-			_exit(0);
+-		}
+-
+-		random_bytes(buffer, sizeof(buffer));
+-		print_buffer(buffer, sizeof(buffer));
+-		printf(" ");
+-		_exit(0);
+-	}
+-	wait(NULL);
+-	close(pipefd[1]);
+-	read(pipefd[0], &c, 1);
+-	return 0;
+-}
+-
++	return 0;
++}
++
++static int
++write_all(int fd, const unsigned char *buffer, size_t length)
++{
++	size_t offset = 0;
++
++	while (offset < length) {
++		ssize_t result = write(fd, buffer + offset, length - offset);
++
++		if (result > 0) {
++			offset += (size_t)result;
++			continue;
++		}
++		if (result < 0 && errno == EINTR)
++			continue;
++		return -1;
++	}
++	return 0;
++}
++
++static void
++print_buffer(const unsigned char *buffer, size_t length)
++{
++	while (length-- > 0)
++		printf("%02x", (unsigned int)*buffer++);
++}
++
++int
++main(void)
++{
++	unsigned char warmup[BUFFER_SIZE];
++	unsigned char parent[BUFFER_SIZE];
++	unsigned char child[BUFFER_SIZE];
++	int pipefd[2];
++	int status;
++	pid_t child_pid;
++
++	random_bytes(warmup, sizeof(warmup));
++	if (pipe(pipefd) == -1) {
++		perror("pipe");
++		return 1;
++	}
++
++	child_pid = fork();
++	if (child_pid == -1) {
++		perror("fork");
++		return 1;
++	}
++	if (child_pid == 0) {
++		close(pipefd[0]);
++		random_bytes(child, sizeof(child));
++		if (write_all(pipefd[1], child, sizeof(child)) == -1)
++			_exit(2);
++		close(pipefd[1]);
++		_exit(0);
++	}
++
++	close(pipefd[1]);
++	random_bytes(parent, sizeof(parent));
++	if (read_all(pipefd[0], child, sizeof(child)) == -1) {
++		fprintf(stderr, "failed to read child PRNG output\n");
++		return 1;
++	}
++	close(pipefd[0]);
++
++	if (waitpid(child_pid, &status, 0) != child_pid ||
++	    !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
++		fprintf(stderr, "child PRNG process failed\n");
++		return 1;
++	}
++
++	print_buffer(parent, sizeof(parent));
++	printf(" ");
++	print_buffer(child, sizeof(child));
++	printf("\n");
++
++	if (memcmp(parent, child, sizeof(parent)) == 0) {
++		fprintf(stderr,
++		    "forked PRNG streams matched with simulated PID reuse\n");
++		return 1;
++	}
++	return 0;
++}
