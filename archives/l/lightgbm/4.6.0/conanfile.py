@@ -49,7 +49,7 @@ class LightGBMConan(ConanFile):
         tc.variables["USE_MPI"] = "OFF"
         tc.variables["USE_GPU"] = "OFF"
         tc.variables["BUILD_CLI"] = "ON"
-        tc.variables["BUILD_CPP_TEST"] = "OFF"
+        tc.variables["BUILD_CPP_TEST"] = "ON"
         tc.variables["BUILD_STATIC_LIB"] = "ON"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = self.options.get_safe("fPIC", "True")
         tc.generate()
