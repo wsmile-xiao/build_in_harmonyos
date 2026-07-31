@@ -37,7 +37,7 @@ class BmakeConan(ConanFile):
         apply_conandata_patches(self)
         prefix = os.path.join(self.build_folder, "stage")
         self.run(
-            'HOST_TARGET=ohos-aarch64 CC="{}" sh "{}" --prefix="{}" --install-host-target '
+            'SKIP_TESTS=1 HOST_TARGET=ohos-aarch64 CC="{}" sh "{}" --prefix="{}" --install-host-target '
             "--with-machine=ohos -DWITH_PROG_VERSION".format(
                 compiler, os.path.join(self.source_folder, "boot-strap"), prefix
             ),
