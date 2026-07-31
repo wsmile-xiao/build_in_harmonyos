@@ -25,24 +25,24 @@ class BmakeConan(ConanFile):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
     def build(self):
-        # boot-strap performs the configure, build and install stages itself.
-        # Invoke it from Conan's writable build directory, matching upstream's
-        # out-of-source build instructions and keeping config.status scratch
-        # files out of the shared Conan source cache.
+        # Use upstream's normal configure -> make -> install path from Conan's
+        # writable build directory. boot-strap unconditionally changes back
+        # into the source cache, where OHOS rejects config.status temp files.
         compiler = self.conf.get(
             "tools.build:compiler_executables", default={}, check_type=dict
         ).get("c", "clang")
         prefix = os.path.join(self.build_folder, "stage")
-        bootstrap_dir = os.path.join(self.build_folder, "bootstrap")
-        tmpdir = os.path.join(bootstrap_dir, "tmp")
+        configure_dir = os.path.join(self.build_folder, "configure")
+        tmpdir = os.path.join(configure_dir, "tmp")
         os.makedirs(tmpdir, exist_ok=True)
         self.run(
-            'TMPDIR="{}" CC="{}" sh "{}" --prefix="{}" '
-            "--install-host-target -DWITH_PROG_VERSION".format(
-                tmpdir, compiler, os.path.join(self.source_folder, "boot-strap"), prefix
+            'TMPDIR="{}" CC="{}" "{}" --prefix="{}"'.format(
+                tmpdir, compiler, os.path.join(self.source_folder, "configure"), prefix
             ),
-            cwd=bootstrap_dir,
+            cwd=configure_dir,
         )
+        self.run("make", cwd=configure_dir)
+        self.run("make install", cwd=configure_dir)
 
     def package(self):
         destination = os.path.join(self.package_folder, "bin")
