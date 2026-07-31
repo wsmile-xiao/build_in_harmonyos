@@ -43,3 +43,20 @@
 
 **编译结束**: 2026-05-28 15:20
 **最终状态**: built
+
+---
+
+# Conan 配方补充（2026-07-30）
+
+> 以上为 2026-04 手工编译路径的原始记录，**原样保留**。以下为本次新增的 Conan 配方说明。
+
+# dav1d 1.5.0 编译笔记（HarmonyOS PC · 标准 Conan meson）
+
+## 定位
+- 产出动态 libdav1d.so，供 dlopen 及作依赖。
+
+## 关键适配
+- （填：系统识别 / umask / 子包 / zipfs / 签名等）
+
+## 状态
+built（CI conan create + test 通过）
