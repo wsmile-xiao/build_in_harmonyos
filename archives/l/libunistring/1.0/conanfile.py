@@ -50,7 +50,7 @@ class LibunistringConan(ConanFile):
         build_environment.define("STRIP", self._tool("strip", ":"))
         return shell, build_environment
 
-    def _configure_args(self):
+    def _configure_args(self, config_cache):
         configure_args = []
         if self.options.shared:
             configure_args.extend(["--enable-shared", "--disable-static"])
@@ -59,21 +59,21 @@ class LibunistringConan(ConanFile):
         configure_args.extend([
             "--disable-rpath",
             "--disable-dependency-tracking",
-            "--cache-file=config.cache",
+            f"--cache-file={config_cache}",
         ])
         return configure_args
 
     def build(self):
         apply_conandata_patches(self)
-        tmpdir = os.environ.get("TMPDIR", os.path.join(self.build_folder, "tmp"))
+        tmpdir = os.path.join(self.build_folder, "tmp")
         os.makedirs(tmpdir, exist_ok=True)
-        config_cache = os.path.join(self.source_folder, "config.cache")
+        config_cache = os.path.join(self.build_folder, "config.cache")
         with open(config_cache, "w", encoding="utf-8") as cache:
             cache.write("gl_cv_socklen_t_equiv=int\n")
             cache.write("gl_cv_socket_ipv4=yes\n")
             cache.write("gl_cv_socket_ipv6=no\n")
             cache.write("gl_cv_socket_unix=yes\n")
-        configure_args = self._configure_args()
+        configure_args = self._configure_args(config_cache)
         configure_args.extend([
             "--prefix=/",
             "--bindir=${prefix}/bin",

@@ -27,7 +27,7 @@ class TestPackageConan(ConanFile):
         dependency = self.dependencies["libunistring"]
         include_args = " ".join(f"-I{directory}" for directory in dependency.cpp_info.includedirs)
         libdir_args = " ".join(f"-L{directory}" for directory in dependency.cpp_info.libdirs)
-        lib_args = " ".join(f"-l{library}" for library in dependency.cpp_info.libs)
+        lib_args = " ".join(f"-l{lib}" for lib in dependency.cpp_info.libs)
         os.makedirs(self.build_folder, exist_ok=True)
         source = os.path.join(self.source_folder, "test.c")
         binary = os.path.join(self.build_folder, "test_libunistring")
