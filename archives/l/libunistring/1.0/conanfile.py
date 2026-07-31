@@ -36,9 +36,11 @@ class LibunistringConan(ConanFile):
         tools = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
         return tools.get(name, default)
 
-    def _build_environment(self):
+    def _build_environment(self, tmpdir=None):
         shell = "/system/bin/sh"
         build_environment = Environment()
+        if tmpdir:
+            build_environment.define("TMPDIR", tmpdir)
         build_environment.define("SHELL", shell)
         build_environment.define("CONFIG_SHELL", shell)
         build_environment.define("CC", self._compiler())
@@ -71,15 +73,6 @@ class LibunistringConan(ConanFile):
             cache.write("gl_cv_socket_ipv4=yes\n")
             cache.write("gl_cv_socket_ipv6=no\n")
             cache.write("gl_cv_socket_unix=yes\n")
-        for filename in ("configure", "build-aux/config.guess", "build-aux/config.sub"):
-            path = os.path.join(self.source_folder, filename)
-            if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-                    content = handle.read()
-                content = content.replace("umask 077", "umask 022")
-                content = content.replace("/tmp", tmpdir)
-                with open(path, "w", encoding="utf-8") as handle:
-                    handle.write(content)
         configure_args = self._configure_args()
         configure_args.extend([
             "--prefix=/",
@@ -89,7 +82,7 @@ class LibunistringConan(ConanFile):
             "--includedir=${prefix}/include",
             "--oldincludedir=${prefix}/include",
         ])
-        shell, build_environment = self._build_environment()
+        shell, build_environment = self._build_environment(tmpdir)
         with build_environment.vars(self).apply():
             self.run(f"{shell} ./configure {' '.join(configure_args)}", cwd=self.source_folder)
             self.run("make -j1", cwd=self.source_folder)
