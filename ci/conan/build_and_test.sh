@@ -3,7 +3,7 @@
 #
 # Contract: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos_ci/blob/main/docs/CI_SCRIPT_SPEC.md
 # Exit code: 0=all passed, non-0=any failed
-# Timeout: 60 minutes
+# Timeout: 45 minutes by default; reviewed package overrides are capped at 180 minutes
 #
 # ⚠️ This script runs on CI execution machines. NO AI tools, NO ohc-run.py,
 #    NO knowledge graph, NO Python SKILL environment. Pure zsh + conan only.
@@ -35,11 +35,60 @@ PROFILE_FILE="$REPO_ROOT/ci/conan/profiles/$PROFILE"
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"
 SCAN_ROOT="${PKG_SCAN_ROOT:-archives}"
 NO_TEST_FILE="$REPO_ROOT/ci/config/no_official_test.txt"
+BUILD_TIMEOUT_CONFIG="$REPO_ROOT/ci/config/build_timeouts.txt"
+DEFAULT_BUILD_TIMEOUT=2700
+MAX_BUILD_TIMEOUT=10800
+TIMEOUT_CLOCK_TOLERANCE=1
+
+validate_build_timeout_config() {
+    awk -v min="$DEFAULT_BUILD_TIMEOUT" -v max="$MAX_BUILD_TIMEOUT" '
+        function fail(message) {
+            print "[fail] Invalid build timeout config at line " NR ": " message > "/dev/stderr"
+            invalid = 1
+            exit 1
+        }
+
+        /^[[:space:]]*(#.*)?$/ { next }
+        NF != 2 { fail("expected: name/version seconds") }
+        $1 !~ /^[A-Za-z0-9_.+-]+\/[A-Za-z0-9_.+-]+$/ { fail("invalid package reference: " $1) }
+        $2 !~ /^[0-9]+$/ { fail("timeout must be an integer: " $2) }
+        seen[$1]++ { fail("duplicate package reference: " $1) }
+        ($2 + 0) < min || ($2 + 0) > max {
+            fail("timeout for " $1 " must be between " min " and " max " seconds")
+        }
+
+        END { exit invalid ? 1 : 0 }
+    ' "$BUILD_TIMEOUT_CONFIG"
+}
+
+build_timeout_for() {
+    local package_ref="$1"
+    local configured
+
+    configured=$(awk -v ref="$package_ref" '$1 == ref { print $2; exit }' "$BUILD_TIMEOUT_CONFIG")
+    echo "${configured:-$DEFAULT_BUILD_TIMEOUT}"
+}
+
+is_build_timeout_result() {
+    local result="$1"
+    local elapsed="$2"
+    local limit="$3"
+
+    { [ "$result" -eq 124 ] || [ "$result" -eq 137 ]; } && \
+        [ $((elapsed + TIMEOUT_CLOCK_TOLERANCE)) -ge "$limit" ]
+}
 
 echo "[step] Conan build + test pipeline (CI, no AI)"
 echo "[step]   scan_root: $SCAN_ROOT"
 echo "[step]   profile: $PROFILE"
 echo "[step]   channel: (no channel — plain name/version)"
+
+if [ ! -f "$BUILD_TIMEOUT_CONFIG" ]; then
+    echo "[fail] Missing build timeout config: $BUILD_TIMEOUT_CONFIG"
+    exit 1
+fi
+echo "[step] Validating package build timeout overrides..."
+validate_build_timeout_config
 
 # ── 1. Discover packages (BUG-9: respect CI_PACKAGES) ──
 # CI_PACKAGES 可通过环境变量或位置参数传入（位置参数在部分鸿蒙 worker
@@ -49,6 +98,29 @@ if [ -z "${CI_PACKAGES:-}" ] && [ $# -gt 0 ]; then
 fi
 PACKAGES=()
 MISSING_CONANFILE=()
+
+# The PR orchestrator always defines CI_PACKAGES. An explicitly empty value
+# means that the PR changed no Conan archive package. Keep the unset,
+# release, and explicit CI_BUILD_ALL cases for full-repository validation.
+if (( ${+CI_PACKAGES} )) \
+    && [ -z "$CI_PACKAGES" ] \
+    && [ "${CI_TASK_TYPE:-}" != "release" ] \
+    && [ "${CI_BUILD_ALL:-0}" != "1" ]; then
+    echo "[step] CI_PACKAGES is explicitly empty; no Conan packages changed"
+    echo "L0_RESULT=pass: no applicable Conan packages"
+    echo "L1_RESULT=pass: no applicable Conan packages"
+    echo "L2_RESULT=skip: no applicable Conan packages"
+    echo "L4_RESULT=skip: no applicable Conan packages"
+    echo "L5_RESULT=skip: no applicable Conan packages"
+    echo ""
+    echo "━━━ Build Summary ━━━"
+    echo "  Total:   0"
+    echo "  Success: 0"
+    echo "  Failed:  0"
+    echo "[step] No Conan packages to build"
+    exit 0
+fi
+
 if [ -n "${CI_PACKAGES:-}" ]; then
     # CI 传入了定向包列表（空格分隔的相对路径，如 "archives/b/bash/5.3"）
     echo "[step] CI_PACKAGES received: $CI_PACKAGES"
@@ -671,17 +743,38 @@ PYEOF
     # CI 必须始终重新构建目标包, 确保运行 make check + test_package
     # --build=missing: 依赖包用缓存
     # --build="${pkg_name}/*": 目标包强制重建
-    # timeout: 45 分钟硬超时, 防止交互式测试 (如 bash run-execscript) 卡住 worker
-    #   exit code 124 = timeout triggered
-    BUILD_TIMEOUT=2700
+    # Default to 45 minutes. Centrally reviewed high-cost packages may use a
+    # bounded override from ci/config/build_timeouts.txt.
+    BUILD_TIMEOUT=$(build_timeout_for "${pkg_name}/${pkg_ver}")
+    if [ "$BUILD_TIMEOUT" -ne "$DEFAULT_BUILD_TIMEOUT" ]; then
+        echo "[step] Extended build timeout for ${pkg_name}/${pkg_ver}: ${BUILD_TIMEOUT}s"
+    fi
+    BUILD_STARTED_AT=$(date +%s)
     # Disable set -e around conan create — we need to capture the exit code
     # and continue to the next package on failure (BUG: set -e caused premature exit)
     set +e
-    timeout --signal=KILL $BUILD_TIMEOUT conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" --build="${pkg_name}/*" 2>&1 | tee "$BUILD_LOG"
-    CONAN_RC=${PIPESTATUS[0]:-$?}
+    timeout --signal=KILL "$BUILD_TIMEOUT" conan create "$pkg_dir" "${CONAN_CREATE_ARGS[@]}" --build="${pkg_name}/*" 2>&1 | tee "$BUILD_LOG"
+    PIPE_STATUSES=("${pipestatus[@]}")
+    CONAN_RC=${PIPE_STATUSES[1]:-1}
+    TEE_RC=${PIPE_STATUSES[2]:-1}
+    BUILD_ELAPSED=$(( $(date +%s) - BUILD_STARTED_AT ))
     set -e
 
-    if [ $CONAN_RC -eq 124 ]; then
+    if [ "$TEE_RC" -ne 0 ]; then
+        echo "[fail] ${pkg_name}/${pkg_ver} — unable to write complete conan build log (tee rc=${TEE_RC})"
+        echo "L0_RESULT=${L0_RESULT}: ${L0_DETAIL}"
+        echo "L1_RESULT=fail: conan build log is incomplete"
+        echo "L2_RESULT=skip: not run"
+        echo "L4_RESULT=skip: not run"
+        echo "L5_RESULT=skip: not run"
+        FAILED=$((FAILED + 1))
+        FAILED_PKGS+=("${pkg_name}/${pkg_ver} (build log)")
+        continue
+    fi
+
+    # GNU timeout may return 124 or 137. Either code is a timeout only when
+    # the configured bound was actually reached; a child may return it early.
+    if is_build_timeout_result "$CONAN_RC" "$BUILD_ELAPSED" "$BUILD_TIMEOUT"; then
         echo "[fail] ${pkg_name}/${pkg_ver} — conan create TIMED OUT after ${BUILD_TIMEOUT}s"
         echo "[hint] 构建超时 (${BUILD_TIMEOUT} 秒限制)"
         echo "       常见原因: 1) 源码包过大 2) 交互式测试卡住 3) 编译死循环"
