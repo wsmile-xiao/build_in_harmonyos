@@ -25,24 +25,20 @@ class BmakeConan(ConanFile):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
     def build(self):
-        # Use upstream's normal configure -> make -> install path from Conan's
-        # writable build directory. boot-strap unconditionally changes back
-        # into the source cache, where OHOS rejects config.status temp files.
+        # Upstream requires boot-strap to run from the directory containing
+        # the unpacked bmake source. It then creates and builds in its own
+        # object directory, leaving the source tree untouched.
         compiler = self.conf.get(
             "tools.build:compiler_executables", default={}, check_type=dict
         ).get("c", "clang")
         prefix = os.path.join(self.build_folder, "stage")
-        configure_dir = os.path.join(self.build_folder, "configure")
-        tmpdir = os.path.join(configure_dir, "tmp")
-        os.makedirs(tmpdir, exist_ok=True)
         self.run(
-            'TMPDIR="{}" CC="{}" "{}" --prefix="{}"'.format(
-                tmpdir, compiler, os.path.join(self.source_folder, "configure"), prefix
+            'CC="{}" sh "{}" --prefix="{}" --install-host-target '
+            "-DWITH_PROG_VERSION".format(
+                compiler, os.path.join(self.source_folder, "boot-strap"), prefix
             ),
-            cwd=configure_dir,
+            cwd=os.path.dirname(self.source_folder),
         )
-        self.run("make", cwd=configure_dir)
-        self.run("make install", cwd=configure_dir)
 
     def package(self):
         destination = os.path.join(self.package_folder, "bin")
