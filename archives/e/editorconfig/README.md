@@ -1,30 +1,26 @@
-# editorconfig-core-c
+# EditorConfig Core C
 
-## 简介
-EditorConfig Core C 是 EditorConfig 文件规范的 C 语言实现，提供命令行工具和共享库，帮助开发者在不同编辑器和 IDE 间保持一致的编码风格。
+EditorConfig Core C provides the reference C parser library and the
+`editorconfig` command-line tool used to resolve coding-style properties for a
+file.
 
-## OHOS 适配要点
+## HarmonyOS PC adaptation
 
-### 平台识别
-- **问题**：源码缺少 HarmonyOS 平台检测（misc.c 报错 "Either UNIX or WIN32 must be defined"）
-- **解决**：添加 `#ifdef __OHOS__` 宏，将 OHOS 视为 UNIX 系统
-- **补丁**：0001-src-lib-misc.c.patch
+- Builds `libeditorconfig.so.0` and the `editorconfig` CLI with upstream CMake.
+- Uses the published `pcre2/10.45` Conan dependency.
+- Fetches the exact test repository commit pinned by the upstream v0.12.9 tag.
+- Packages relocatable pkg-config metadata and an origin-relative CLI RUNPATH.
+- Removes the unneeded static archive from the final package.
 
-### 构建系统
-- **问题**：CMake 构建产生的动态库使用相对路径 RPATH（../../lib/libeditorconfig.so）
-- **解决**：使用静态链接 `-DBUILD_STATICALLY_LINKED_EXE=ON`
-- **G0 验证**：clean_verify.py 只支持 autotools，创建 configure wrapper 桥接
-- **补丁**：0002-cmake-configure-wrapper.patch
+## Verification
 
-### 依赖
-- **pcre2/10.40**：正则表达式库，需显式指定路径参数
+The Conan consumer reads the library version, creates and parses a real
+`.editorconfig` file, and validates the returned `indent_style` and
+`indent_size` properties. Cross builds compile and link the consumer but do
+not claim runtime execution without a compatible HarmonyOS target.
 
-## 功能验证
-```bash
-editorconfig --version
-# 输出: EditorConfig C Core Version 0.12.9
-```
+## References
 
-## 参考
-- 官网: https://editorconfig.org/
-- 源码: https://github.com/editorconfig/editorconfig-core-c
+- https://editorconfig.org/
+- https://github.com/editorconfig/editorconfig-core-c
+- https://github.com/editorconfig/editorconfig-core-test
