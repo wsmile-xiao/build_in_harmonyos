@@ -38,7 +38,7 @@ class BmakeConan(ConanFile):
         prefix = os.path.join(self.build_folder, "stage")
         self.run(
             'CC="{}" sh "{}" --prefix="{}" --install-host-target '
-            "-DWITH_PROG_VERSION".format(
+            "--with-machine=ohos -DWITH_PROG_VERSION".format(
                 compiler, os.path.join(self.source_folder, "boot-strap"), prefix
             ),
             cwd=os.path.dirname(self.source_folder),
