@@ -25,17 +25,25 @@ class BmakeConan(ConanFile):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
     def build(self):
-        # bmake bootstraps itself, then uses the generated make executable to
-        # compile and install the final tool. This verifies each stage on OHOS.
+        # boot-strap performs the configure, build and install stages itself.
+        # --install-host-target keeps its generated binaries below the prefix.
+        compiler = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict
+        ).get("c", "clang")
         prefix = os.path.join(self.build_folder, "stage")
-        self.run('sh boot-strap --prefix="{}"'.format(prefix), cwd=self.source_folder)
-        self.run("./make", cwd=self.source_folder)
-        self.run("./make install", cwd=self.source_folder)
+        self.run(
+            'CC="{}" sh boot-strap --prefix="{}" --install-host-target '
+            "-DWITH_PROG_VERSION".format(compiler, prefix),
+            cwd=self.source_folder,
+        )
 
     def package(self):
-        stage_bin = os.path.join(self.build_folder, "stage", "bin")
-        copy(self, "bmake", src=stage_bin, dst=os.path.join(self.package_folder, "bin"),
-             keep_path=False)
+        destination = os.path.join(self.package_folder, "bin")
+        for root, _, files in os.walk(os.path.join(self.build_folder, "stage")):
+            if os.path.basename(root) == "bin":
+                for filename in files:
+                    if filename.startswith("bmake"):
+                        copy(self, filename, src=root, dst=destination, keep_path=False)
 
     def package_info(self):
         self.cpp_info.includedirs = []
