@@ -4,7 +4,7 @@
 import os
 
 from conan import ConanFile
-from conan.tools.files import copy, get
+from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get
 from conan.tools.layout import basic_layout
 
 
@@ -17,6 +17,9 @@ class BmakeConan(ConanFile):
     package_type = "application"
 
     settings = "os", "arch", "compiler", "build_type"
+
+    def export_sources(self):
+        export_conandata_patches(self)
 
     def layout(self):
         basic_layout(self, src_folder=".")
@@ -31,6 +34,7 @@ class BmakeConan(ConanFile):
         compiler = self.conf.get(
             "tools.build:compiler_executables", default={}, check_type=dict
         ).get("c", "clang")
+        apply_conandata_patches(self)
         prefix = os.path.join(self.build_folder, "stage")
         self.run(
             'CC="{}" sh "{}" --prefix="{}" --install-host-target '
