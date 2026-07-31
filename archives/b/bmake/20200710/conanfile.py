@@ -26,15 +26,22 @@ class BmakeConan(ConanFile):
 
     def build(self):
         # boot-strap performs the configure, build and install stages itself.
-        # --install-host-target keeps its generated binaries below the prefix.
+        # Invoke it from Conan's writable build directory, matching upstream's
+        # out-of-source build instructions and keeping config.status scratch
+        # files out of the shared Conan source cache.
         compiler = self.conf.get(
             "tools.build:compiler_executables", default={}, check_type=dict
         ).get("c", "clang")
         prefix = os.path.join(self.build_folder, "stage")
+        bootstrap_dir = os.path.join(self.build_folder, "bootstrap")
+        tmpdir = os.path.join(bootstrap_dir, "tmp")
+        os.makedirs(tmpdir, exist_ok=True)
         self.run(
-            'CC="{}" sh boot-strap --prefix="{}" --install-host-target '
-            "-DWITH_PROG_VERSION".format(compiler, prefix),
-            cwd=self.source_folder,
+            'TMPDIR="{}" CC="{}" sh "{}" --prefix="{}" '
+            "--install-host-target -DWITH_PROG_VERSION".format(
+                tmpdir, compiler, os.path.join(self.source_folder, "boot-strap"), prefix
+            ),
+            cwd=bootstrap_dir,
         )
 
     def package(self):
