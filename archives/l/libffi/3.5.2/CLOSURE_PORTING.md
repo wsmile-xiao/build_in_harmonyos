@@ -1,7 +1,7 @@
 # libffi 3.5.2 ffi_closure 闭包功能 — 鸿蒙移植方案
 
-> **状态**：方案已设计，待实现验证
-> **日期**：2026-03-28
+> **状态**：四补丁与 CFI 配方修复已固化；目标端 r10 的上游测试通过率为 363/363（100%），O0/O2 共 726/726 条执行记录 PASS，安装包 consumer 1/1 PASS。r7 的 722 PASS、4 FAIL 作为根因定位历史保留。
+> **日期**：2026-07-24（由 2026-03-28 探索记录收敛）
 > **适用版本**：libffi 3.5.2
 > **目标平台**：OpenHarmony / HarmonyOS (aarch64, musl libc, HongMeng Kernel 1.11.0)
 
@@ -124,8 +124,8 @@ ffi_closure_alloc(size, &code)
 ### 3.5 依赖条件
 
 - **编译时**：`FFI_EXEC_STATIC_TRAMP=1` 需要在 `fficonfig.h` 中定义
-- **内核头文件**：`<tramp.h>` 来自 Linux 5.18+ 内核头，但 `tramp.c` 实际未使用其中任何符号，空 stub 即可通过编译
-- **运行时**：需要一个指向 `libffi.so`（或其他包含 trampoline code table 的文件）的有效文件描述符 `fd`
+- **项目头文件**：官方 3.5.2 已提供 `include/tramp.h`，不需要内核头或空 stub
+- **运行时**：需要一个指向包含 trampoline code table 的已映射 ELF（共享库或静态链接后的可执行文件）的有效文件描述符 `fd`
 
 ---
 
@@ -189,7 +189,6 @@ maps 路径:   /data/service/el2/100/hmdfs/account/files/Docs/usr/local/lib/libf
 | 方案 | 结果 | 失败原因 |
 |------|------|---------|
 | `open(maps_path)` | ❌ ENOENT | HMDFS 内部路径不可直接访问 |
-| 扫描 `/proc/self/fd/` | ❌ 空列表 | 动态加载器加载 .so 后关闭了 fd |
 | `open("/proc/self/map_files/...")` | ❌ ENOENT | 鸿蒙未实现此 procfs 接口 |
 | `readlink("/proc/self/map_files/...")` | ❌ ENOENT | 同上 |
 
@@ -214,11 +213,17 @@ memcmp(orig, copy, 32) → 0 (内容一致)
 
 ### 5.1 修改位置
 
-仅修改 `src/tramp.c` 中的 `ffi_tramp_get_libffi()` 函数。
+修改 `src/tramp.c`：增加候选路径打开与映射内容校验辅助函数，并在
+`ffi_tramp_get_libffi()` 的官方路径打开失败后调用该辅助流程。
 
 ### 5.2 修改逻辑
 
-在原有 `open(file, open_flags)` 失败后，解析 `/proc/self/mounts` 找到 HMDFS 挂载关系，将 maps 路径转换为可访问路径后重试 open：
+在原有 `open(file, open_flags)` 失败后，读取 `/proc/self/mounts` 中的 HMDFS
+挂载关系，将 maps 路径转换为可访问路径后重试。下面的代码只展示控制流；
+提交中的 `0003-tramp-hmdfs-path.patch` 还强制执行挂载类型精确匹配、路径前缀边界、
+`snprintf` 截断检查、普通文件类型检查，以及从
+`tramp_globals.offset` 开始逐段读取并与当前映射字节比较。任一检查不满足都会
+关闭候选文件并继续下一个候选，不会接受仅凭路径推导得到的文件。
 
 ```c
 static int
@@ -335,8 +340,8 @@ ffi_tramp_get_libffi (void)
 ### 5.3 方案优点
 
 1. **最小侵入性**：仅修改 `ffi_tramp_get_libffi()` 一个函数，在原有 `open()` 失败后才触发回退，不影响非鸿蒙平台
-2. **通用性**：不仅适用于 HMDFS，任何 FUSE/虚拟文件系统的路径问题都能通过 mount 表解决
-3. **安全性**：只是路径转换，不创建临时文件，不降低安全等级，不破坏 W^X 策略
+2. **边界清晰**：只处理 mount 类型为 `hmdfs` 且前缀边界完整匹配的记录
+3. **内容绑定**：候选必须是普通文件，并与当前 trampoline 映射的全部字节一致
 4. **无额外依赖**：只用标准 POSIX API（fopen、fgets、sscanf、open）
 5. **向后兼容**：如果路径转换失败，仍会 fallback 到 `ffi_tramp_get_temp_file()`
 
@@ -349,31 +354,15 @@ ffi_tramp_get_libffi (void)
 #define FFI_EXEC_STATIC_TRAMP 1
 ```
 
-通常通过 `configure --enable-static-tramp` 启用（但鸿蒙的 configure 可能不支持此选项）。如果 configure 不支持，可在 `make` 前手动修改 `fficonfig.h`。
+官方 3.5.2 `configure` 使用 `--enable-exec-static-tramp` 命名，且 aarch64 `linux-*` 主机规则会自动定义该宏。当前 SDK12 构建通过 `grep '^#define FFI_EXEC_STATIC_TRAMP 1' fficonfig.h` 验证；不手改生成的 `fficonfig.h`。
 
-#### 5.4.2 提供 tramp.h 空 stub
+#### 5.4.2 使用官方 tramp.h
 
-`tramp.c` 包含 `#include <tramp.h>`（来自 Linux 5.18+ 内核头），但实际未使用其中任何符号。鸿蒙没有此头文件，需要提供空 stub：
+官方 3.5.2 压缩包已包含 `include/tramp.h`，构建直接使用该头文件。不创建空 stub，也不向 CFLAGS 注入额外 stub 路径。
 
-```bash
-mkdir -p $TMPDIR/libffi-build/tramp_stub/include
-touch $TMPDIR/libffi-build/tramp_stub/include/tramp.h
-```
+#### 5.4.3 closures.c 保持官方内容
 
-编译时通过 CFLAGS 引入：
-```bash
-CFLAGS="-fPIC -O2 -I$TMPDIR/libffi-build/tramp_stub/include" ./configure --prefix=...
-```
-
-#### 5.4.3 清理 closures.c 中的调试代码
-
-当前 `closures.c` 中的 `dlmmap()` 函数包含调试 fprintf，正式补丁需要移除：
-
-```c
-// 删除这两行调试输出：
-fprintf(stderr, "DEBUG dlmmap: ffi_tramp_is_supported()=%d, execfd=%d\n", ...);
-fprintf(stderr, "DEBUG dlmmap: mmap RW=%p\n", ptr);
-```
+官方 3.5.2 `src/closures.c` 不含探索阶段的调试 `fprintf`，当前四补丁也不修改该文件。官方与补丁 replay 后 SHA256 均为 `bf5d74f3fd1fc9060f71598c4ca25a84b6d5ea38313fa86e41e3ab743c2abc5f`。
 
 ### 5.5 完整的编译流程
 
@@ -382,37 +371,113 @@ fprintf(stderr, "DEBUG dlmmap: mmap RW=%p\n", ptr);
 tar xzf libffi-3.5.2.tar.gz
 cd libffi-3.5.2
 
-# 2. 应用 ohos 基础补丁
-patch -p1 < 0001-port-for-ohos.patch
+# 2. 按 conandata.yml 顺序应用四补丁
+patch -p1 < patches/0001-config-guess-sub-ohos.patch
+patch -p1 < patches/0002-configure-hmdfs-umask.patch
+patch -p1 < patches/0003-tramp-hmdfs-path.patch
+patch -p1 < patches/0004-tramp-posix-capability.patch
 
-# 3. 应用闭包移植补丁（包含 tramp.c 修改和 closures.c 调试清理）
-patch -p1 < 0002-closure-port-for-ohos.patch
+# 3. 配置静态 PIC 制品
+CFLAGS="-fPIC -O2 -funwind-tables" ./configure \
+  --disable-shared --enable-static --disable-multi-os-directory \
+  --disable-dependency-tracking \
+  --host=aarch64-linux-ohos --prefix=$HOME/usr/local
+grep '^#define FFI_EXEC_STATIC_TRAMP 1' fficonfig.h
+grep '^#define HAVE_MMAP_STATIC_TRAMP 1' fficonfig.h
 
-# 4. 准备 tramp.h 空 stub
-mkdir -p $TMPDIR/libffi-build/tramp_stub/include
-touch $TMPDIR/libffi-build/tramp_stub/include/tramp.h
-
-# 5. 配置（确保 FFI_EXEC_STATIC_TRAMP 被启用）
-CFLAGS="-fPIC -O2 -I$TMPDIR/libffi-build/tramp_stub/include" \
-  ./configure --prefix=$HOME/usr/local
-
-# 如果 configure 没有自动启用 FFI_EXEC_STATIC_TRAMP，
-# 手动修改 fficonfig.h 添加：#define FFI_EXEC_STATIC_TRAMP 1
-
-# 6. 编译和安装
+# 4. 编译和安装
 make -j$(nproc)
 make install
-
-# 7. 修复 .so 截断问题（鸿蒙已知问题）
-cp .libs/libffi.so.8.2.0 $HOME/usr/local/lib/libffi.so.8.2.0
-cp .libs/libffi.so.8.2.0 $HOME/usr/local/lib/libffi.so.8
 ```
 
 ---
 
-## 六、验证计划
+## 六、AArch64 异常展开链与 CFI 修复
 
-### 6.1 编译验证
+### 6.1 目标端 r7 的失败闭集
+
+r7 在目标端完整执行 363 个官方独立入口的 O0/O2 配置，共 726 次。结果为
+`722 PASS / 4 FAIL`，即 361/363 个独立入口通过。失败闭集只有：
+
+| 官方入口 | O0 | O2 |
+|---|---|---|
+| `libffi.closures/unwindtest.cc` | FAIL | FAIL |
+| `libffi.closures/unwindtest_ffi_call.cc` | FAIL | FAIL |
+
+普通 C++ `throw/catch` 基线和其余 722 次配置均通过，因此问题被限定在异常需要跨越
+libffi AArch64 汇编调用帧时。r7 不是成功结果，四项失败也不会计入通过数。
+
+### 6.2 配置探针为何得到错误结论
+
+上游 `m4/asmcfi.m4` 使用一个 C 函数内的 inline assembly 编译检查
+`.cfi_remember_state` 与 `.cfi_restore_state`。目标 clang 在普通 C 编译且没有请求
+unwind table 时，不一定为该函数建立 `.cfi_startproc`/`.cfi_endproc` 区间；汇编器
+因此拒绝位于活动帧区间之外的 state 指令。配置日志随即记录：
+
+```text
+checking assembler .cfi pseudo-op support... no
+```
+
+这不是汇编器缺少 CFI 指令，而是探针所在的 C 函数没有建立帧区间。后续影响沿以下
+链路传播：
+
+```text
+configure probe = no
+  -> fficonfig.h 不定义 HAVE_AS_CFI_PSEUDO_OP
+  -> include/ffi_cfi.h 将 cfi_startproc/cfi_endproc 等宏展开为空
+  -> src/aarch64/sysv.S 生成的 sysv.o 没有 .eh_frame
+  -> 异常无法可靠跨越 ffi_call_SYSV / ffi_closure_SYSV
+  -> 两个官方 unwind 入口在 O0/O2 均失败
+```
+
+### 6.3 配方修复及其约束
+
+OHOS 分支在 `AutotoolsToolchain` 生成配置环境前追加 `-funwind-tables`。该选项使
+配置探针的 C 函数建立 unwind frame，探针由实际编译得到 `yes`，并使上游发布版
+`configure` 正常生成：
+
+```c
+#define HAVE_AS_CFI_PSEUDO_OP 1
+```
+
+配方随后读取 `fficonfig.h`，要求该定义恰好出现一次，否则立即终止构建。修复不写
+Autoconf cache 结论，不修改生成的 `configure` 或 `fficonfig.h`，也不改变官方测试
+源码与成功判定。非 OHOS 构建不增加该标志。
+
+### 6.4 聚焦诊断与全量验收
+
+`device-cfi-diagnostic-r2.sh` 只允许在全新目录启动一次，并按以下顺序验收：
+
+1. fresh configure 必须输出 CFI 探针 `yes`，`fficonfig.h` 必须有唯一宏定义；
+2. `sysv.o` 必须同时包含 `.eh_frame` 和 `.rela.eh_frame`；
+3. `llvm-nm -S` 的函数起点与长度必须和 `llvm-objdump --dwarf=frames` 的 FDE
+   区间精确对应，至少覆盖 `ffi_call_SYSV` 与 `ffi_closure_SYSV`；
+4. 链接后的 O0/O2 上游程序必须继续保留对应 FDE 区间；
+5. 普通 C++ 基线 1 项及四个原失败配置必须全部按官方输出通过。
+
+runner 会保留源码、四补丁、生成头文件、静态库、目标对象、链接产物、原始日志和
+SHA256 清单。独立回读校验器会重新计算所有哈希，并重新解析 symbol/FDE 对应关系。
+任何缺失、重复、未知终态或区间不一致均为失败。
+
+### 6.5 r10 最终全量结果
+
+r10 从同一官方归档重新发现 363 个独立入口，按 O0/O2 生成 726 条唯一执行记录。
+上游测试通过率为 `363/363 (100%)`，O0 为 `363/363 PASS`，O2 为
+`363/363 PASS`，合计 `726/726 PASS`。安装包 consumer 为 `1/1 PASS`。
+FAIL、XPASS、XFAIL、UNSUPPORTED、UNRESOLVED、TIMEOUT、ERROR 和未知终态均为 0。
+
+独立校验器重新派生发现清单，逐项核对 726 条 manifest、每项原始编译/签名/运行
+日志、消费者输出和 3661 个证据文件，并验证 3662 条 SHA256 记录。证据归档 SHA256
+为 `a8b2a328ccb5f59d7fcc547ab59a811cbf86ffe5ff138fe73d2fd29ad383873c`，
+summary SHA256 为
+`b7d9cf4c4fcaa83203d717d13fc1b7ce6aaa8a08372fce6d11ff655565d5f8c9`。
+这完成了 r7 四项失败到 r10 全量通过的闭环；O0/O2 不重复计入独立测试数。
+
+---
+
+## 七、验证计划
+
+### 7.1 编译验证
 
 ```bash
 # 检查 fficonfig.h
@@ -423,12 +488,11 @@ grep FFI_EXEC_STATIC_TRAMP fficonfig.h
 ls -la src/.libs/tramp.o
 ls -la src/.libs/libffi_la-tramp.o
 
-# 检查符号表
-llvm-nm -D $HOME/usr/local/lib/libffi.so.8.2.0 | grep tramp
-# 预期: trampoline_code_table 在 .text 段
+# 检查静态 archive 符号表
+llvm-nm $HOME/usr/local/lib/libffi.a | grep tramp
 ```
 
-### 6.2 功能验证
+### 7.2 功能验证
 
 ```c
 #include <stdio.h>
@@ -480,8 +544,7 @@ int main(void) {
 ```bash
 clang -o test_closure test_closure.c \
     -I$HOME/usr/local/include \
-    -L$HOME/usr/local/lib -lffi -lc \
-    -Wl,-rpath,$HOME/usr/local/lib
+    $HOME/usr/local/lib/libffi.a -lpthread
 ./test_closure
 ```
 
@@ -493,11 +556,12 @@ func(21) = 42 (expected 42)
 SUCCESS!
 ```
 
-### 6.3 Python ctypes 验证
+### 7.3 Python ctypes 验证边界
 
 ```python
 import ctypes
 
+# 仅适用于另行构建的共享 libffi，不属于当前静态 Conan 包门禁
 # 加载 libffi
 libffi = ctypes.CDLL("libffi.so.8")
 
@@ -516,9 +580,9 @@ print(f"Result: {result}")  # 预期: 30
 
 ---
 
-## 七、风险与注意事项
+## 八、风险与注意事项
 
-### 7.1 HMDFS 中间路径可能变化
+### 8.1 HMDFS 中间路径可能变化
 
 当前观察到的 HMDFS 中间层是 `/files/Docs/`，但这个路径可能在以下情况变化：
 - 不同鸿蒙版本
@@ -531,39 +595,35 @@ print(f"Result: {result}")  # 预期: 30
 const char *hmdfs_prefixes[] = { "/files/Docs/", "/files/", NULL };
 ```
 
-### 7.2 闭包性能
+### 8.2 闭包性能
 
 `FFI_EXEC_STATIC_TRAMP` 方案下：
 - 每次分配闭包需要一次 `mmap(MAP_FIXED)` 系统调用
 - trampoline table 以 `map_size`（通常是 `ntramp * tramp_size`，对齐到页）为单位分配
 - 每个 table 包含多个 trampoline slot，后续分配可直接复用已有 table 的空闲 slot
 
-### 7.3 线程安全
+### 8.3 线程安全
 
 `tramp.c` 使用 `pthread_mutex_t` 保护全局状态，多线程调用是安全的。
 
-### 7.4 静态链接
+### 8.4 静态链接
 
 静态链接 libffi 时，`trampoline_code_table` 会被链接到最终可执行文件中。此时 `/proc/self/maps` 找到的是可执行文件本身而非 .so，mount 表回退逻辑同样适用（如果可执行文件在 HMDFS 挂载点下）。
 
 ---
 
-## 八、补丁清单
+## 九、补丁清单
 
 | 补丁文件 | 修改内容 |
 |---------|---------|
-| `0001-port-for-ohos.patch` | config.guess / config.sub 添加鸿蒙识别（已有） |
-| `0002-closure-port-for-ohos.patch` | **待创建**：tramp.c mount 表回退 + closures.c 调试清理 |
-
-`0002-closure-port-for-ohos.patch` 应包含的修改：
-
-1. **`src/tramp.c`**：`ffi_tramp_get_libffi()` 中添加 mount 表路径回退逻辑
-2. **`src/closures.c`**：移除 `dlmmap()` 中的调试 `fprintf`（当前构建中已添加）
-3. （可选）**`configure.ac` 或 `configure`**：在鸿蒙平台自动启用 `FFI_EXEC_STATIC_TRAMP`
+| `0001-config-guess-sub-ohos.patch` | config.guess/config.sub 识别 HarmonyOS 和 `linux-ohos` triplet |
+| `0002-configure-hmdfs-umask.patch` | 仅对 `linux-ohos*` 的 configure 临时目录使用 HMDFS 可用的 022，其他 host 保持 077 |
+| `0003-tramp-hmdfs-path.patch` | 解析 hmdfs mount，并以普通文件类型和映射字节全量一致性校验候选路径 |
+| `0004-tramp-posix-capability.patch` | 由 configure 编译探针检查 mmap、文件和 pthread 接口，并通过 `HAVE_MMAP_STATIC_TRAMP` 门禁实现 |
 
 ---
 
-## 九、关键知识总结
+## 十、关键知识总结
 
 ### 鸿蒙 W^X 策略
 
@@ -578,16 +638,16 @@ const char *hmdfs_prefixes[] = { "/files/Docs/", "/files/", NULL };
 - 路径转换依赖 `/proc/self/mounts` 中的映射关系
 - HMDFS 在挂载点下插入 `/files/Docs/` 作为文件访问根目录
 
-### 鸿蒙软链接限制
+### 鸿蒙软链接限制（历史探索路径）
 
 - `ln -sf` 受 SELinux 限制，创建带随机后缀的文件而非真正软链接
 - musl 动态加载器不认这种伪软链接
 - 解决方案：使用 `cp` 创建实际文件副本
 
-### make install .so 截断
+### make install .so 截断（历史共享库路径）
 
 - `make install` 安装的 `.so` 文件可能被截断（10K vs 实际 109K）
-- 解决方案：从构建目录 `.libs/` 手动 `cp` 覆盖
+- 当前配方固定 `--disable-shared --enable-static`，不生成或安装 `.so`；该现象不属于当前制品路径
 
 ---
 
@@ -602,8 +662,10 @@ const char *hmdfs_prefixes[] = { "/files/Docs/", "/files/", NULL };
 | 03-28 | closures.c 添加 dlmmap 调试 | 确认 ffi_tramp_is_supported()=0, execfd=-1 |
 | 03-28 | 分析 ffi_tramp_init 调用链 | ffi_tramp_get_libffi 中 open() 失败 |
 | 03-28 | 诊断 maps 路径类型 | 确认为 HMDFS 内部路径，open 返回 ENOENT |
-| 03-28 | 测试 /proc/self/fd/ 扫描 | 动态加载器已关闭 fd，列表为空 |
 | 03-28 | 测试 /proc/self/map_files | 鸿蒙未实现此接口 |
 | 03-28 | 分析 /proc/self/mounts | 找到 HMDFS 挂载映射关系 |
 | 03-28 | 验证 mount 表路径转换 | open(转换后路径) 成功，fd=3 |
 | 03-28 | 设计 mount 表回退方案 | 记录为本文档 |
+| 07-23 | r7 全量执行 | 363 个入口的 O0/O2 共 722 PASS、4 FAIL，失败限定到两个 unwind 入口 |
+| 07-23 | CFI 配方修复 | `-funwind-tables` 使官方探针通过，`sysv.o` 恢复帧信息 |
+| 07-23 | r10 全量执行 | 上游 363/363（100%），O0/O2 共 726/726 PASS，consumer 1/1 PASS |
