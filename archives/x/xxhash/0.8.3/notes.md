@@ -680,3 +680,20 @@ export LD_LIBRARY_PATH=$PREFIX/lib:$LD_LIBRARY_PATH
 
 **编译结束**: 2026-04-24 00:18
 **最终状态**: partial
+
+---
+
+# Conan 配方补充（2026-07-30）
+
+> 以上为 2026-04 手工编译路径的原始记录，**原样保留**。以下为本次新增的 Conan 配方说明。
+
+# xxhash 0.8.3 编译笔记（HarmonyOS PC · 标准 Conan cmake）
+
+## 定位
+- 产出动态 libxxhash.so，供 dlopen 及作依赖。
+
+## 关键适配
+- （填：系统识别 / umask / 子包 / zipfs / 签名等）
+
+## 状态
+built（CI conan create + test 通过）
