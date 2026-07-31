@@ -22,7 +22,16 @@ class BmakeConan(ConanFile):
         basic_layout(self, src_folder=".")
 
     def source(self):
-        get(self, **self.conan_data["sources"][self.version], strip_root=True)
+        source_data = self.conan_data["sources"][self.version]
+        last_error = None
+        for url in source_data["urls"]:
+            try:
+                get(self, url=url, strip_root=True)
+                return
+            except Exception as error:
+                last_error = error
+                self.output.warning("Unable to download {}: {}".format(url, error))
+        raise RuntimeError("Unable to download bmake source from configured mirrors") from last_error
 
     def build(self):
         # boot-strap compiles the tool without requiring a pre-existing make.
