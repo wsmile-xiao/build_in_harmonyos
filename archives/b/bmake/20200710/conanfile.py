@@ -45,14 +45,25 @@ class BmakeConan(ConanFile):
         )
 
     def package(self):
+        stage = os.path.join(self.build_folder, "stage")
         destination = os.path.join(self.package_folder, "bin")
-        for root, _, files in os.walk(os.path.join(self.build_folder, "stage")):
+        for root, _, files in os.walk(stage):
             if os.path.basename(root) == "bin":
                 for filename in files:
                     if filename.startswith("bmake"):
                         copy(self, filename, src=root, dst=destination, keep_path=False)
+        copy(
+            self,
+            "*",
+            src=os.path.join(stage, "share"),
+            dst=os.path.join(self.package_folder, "share"),
+            keep_path=True,
+        )
 
     def package_info(self):
         self.cpp_info.includedirs = []
         self.cpp_info.libdirs = []
         self.cpp_info.bindirs = ["bin"]
+        self.runenv_info.define_path(
+            "MAKESYSPATH", os.path.join(self.package_folder, "share", "mk")
+        )
