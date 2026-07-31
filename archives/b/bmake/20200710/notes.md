@@ -9,7 +9,9 @@ under `umask 077`, so the generated configure script uses `umask 022`. The
 platform identifier contains spaces; `MACHINE` and `HOST_TARGET` are therefore
 set to `ohos` and `ohos-aarch64` respectively.
 
-The upstream bootstrap unit-tests require NetBSD mk behavior and fail when run
-with the OHOS system mk search path. The recipe still builds, installs, and
-packages bmake, while the consumer test executes the packaged bmake against a
-generated Makefile.
+The upstream bootstrap unit-tests run through the freshly built bmake binary.
+The explicit `ohos-aarch64` host target prevents the HarmonyOS system name from
+being used as a build directory. `MK_AUTO_OBJ=no` supplies the otherwise
+undefined make variable used by the upstream `mk/obj.mk` conditional. The
+consumer test additionally executes the packaged bmake against a generated
+Makefile.
