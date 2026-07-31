@@ -3,6 +3,7 @@
 import os
 
 from conan import ConanFile
+from conan.tools.env import Environment
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.tools.layout import basic_layout
 
@@ -29,8 +30,23 @@ class LibunistringConan(ConanFile):
         get(self, **self.conan_data["sources"], strip_root=True)
 
     def _compiler(self):
-        compilers = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
-        return compilers.get("c", "clang")
+        return self._tool("c", "clang")
+
+    def _tool(self, name, default):
+        tools = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
+        return tools.get(name, default)
+
+    def _build_environment(self):
+        shell = "/system/bin/sh"
+        build_environment = Environment()
+        build_environment.define("SHELL", shell)
+        build_environment.define("CONFIG_SHELL", shell)
+        build_environment.define("CC", self._compiler())
+        build_environment.define("LD", self._tool("ld", "ld.lld"))
+        build_environment.define("AR", self._tool("ar", "llvm-ar"))
+        build_environment.define("RANLIB", self._tool("ranlib", "llvm-ranlib"))
+        build_environment.define("STRIP", self._tool("strip", ":"))
+        return shell, build_environment
 
     def _configure_args(self):
         configure_args = []
@@ -64,9 +80,6 @@ class LibunistringConan(ConanFile):
                 content = content.replace("/tmp", tmpdir)
                 with open(path, "w", encoding="utf-8") as handle:
                     handle.write(content)
-        shell = "/system/bin/sh"
-        os.environ["SHELL"] = shell
-        os.environ["CONFIG_SHELL"] = shell
         configure_args = self._configure_args()
         configure_args.extend([
             "--prefix=/",
@@ -76,13 +89,15 @@ class LibunistringConan(ConanFile):
             "--includedir=${prefix}/include",
             "--oldincludedir=${prefix}/include",
         ])
-        cc = self._compiler()
-        build_env = f"SHELL={shell} CONFIG_SHELL={shell} CC={cc} LD=ld.lld AR=llvm-ar RANLIB=llvm-ranlib STRIP=:"
-        self.run(f"{build_env} {shell} ./configure {' '.join(configure_args)}", cwd=self.source_folder)
-        self.run("make -j1", cwd=self.source_folder)
+        shell, build_environment = self._build_environment()
+        with build_environment.vars(self).apply():
+            self.run(f"{shell} ./configure {' '.join(configure_args)}", cwd=self.source_folder)
+            self.run("make -j1", cwd=self.source_folder)
 
     def package(self):
-        self.run(f"make DESTDIR={self.package_folder} install", cwd=self.source_folder)
+        _, build_environment = self._build_environment()
+        with build_environment.vars(self).apply():
+            self.run(f"make DESTDIR={self.package_folder} install", cwd=self.source_folder)
 
     def package_info(self):
         self.cpp_info.libs = ["unistring"]
