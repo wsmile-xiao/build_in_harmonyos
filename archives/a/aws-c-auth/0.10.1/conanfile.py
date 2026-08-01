@@ -105,7 +105,7 @@ class AwsCAuthConan(ConanFile):
         ]
         args.extend(f"-D{key}={shlex.quote(str(value))}" for key, value in definitions.items())
         self.run(" ".join(args), env=["conanbuild"], ignore_errors=False)
-        self.run("cmake --build {} -- -j2".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
+        self.run("cmake --build {}".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
         self.run("cmake --install {}".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
 
     def _toolchain_file(self):
