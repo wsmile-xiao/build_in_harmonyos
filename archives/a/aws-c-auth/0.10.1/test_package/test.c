@@ -2,11 +2,10 @@
 #include <aws/common/common.h>
 #include <aws/auth/auth.h>
 
-static int init_libraries(struct aws_allocator *allocator) {
+static void init_libraries(struct aws_allocator *allocator) {
     aws_common_library_init(allocator);
     aws_common_fatal_assert_library_initialized();
     aws_auth_library_init(allocator);
-    return 0;
 }
 
 static void clean_up_libraries(void) {
@@ -19,9 +18,7 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    if (init_libraries(allocator) != 0) {
-        return 1;
-    }
+    init_libraries(allocator);
     clean_up_libraries();
     printf("aws-c-auth smoke test OK\n");
     return 0;
