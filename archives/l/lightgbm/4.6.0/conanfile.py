@@ -62,9 +62,15 @@ class LightGBMConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        test_exe = os.path.join(self.build_folder, "testlightgbm")
-        if not os.path.exists(test_exe):
-            raise FileNotFoundError(f"Upstream LightGBM C++ test executable was not built: {test_exe}")
+        test_candidates = [
+            os.path.join(self.source_folder, "testlightgbm"),
+            os.path.join(self.build_folder, "testlightgbm"),
+        ]
+        if not any(os.path.exists(test_exe) for test_exe in test_candidates):
+            raise FileNotFoundError(
+                "Upstream LightGBM C++ test executable was not built in expected locations: "
+                + ", ".join(test_candidates)
+            )
         self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure', env=["conanbuild"])
 
     def package(self):
@@ -79,7 +85,7 @@ class LightGBMConan(ConanFile):
     def _register_upstream_cpp_test_with_ctest(self):
         cmakelists = os.path.join(self.source_folder, "CMakeLists.txt")
         content = load(self, cmakelists)
-        marker = "add_test(NAME testlightgbm COMMAND testlightgbm)"
+        marker = "add_test(NAME testlightgbm COMMAND $<TARGET_FILE:testlightgbm>)"
         if marker in content:
             return
         old = "  add_executable(testlightgbm ${CPP_TEST_SOURCES})\n  target_link_libraries(testlightgbm PRIVATE lightgbm_objs lightgbm_capi_objs GTest::GTest)"
