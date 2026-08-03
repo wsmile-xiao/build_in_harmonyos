@@ -77,16 +77,28 @@ class SippConan(ConanFile):
         config_shell = os.environ.get("CONFIG_SHELL") or shutil.which("bash")
         if not config_shell:
             raise RuntimeError("bash is required to build private ncurses")
+        tool_bin = os.path.dirname(config_shell)
+        cc = os.environ.get("CC") or self._tool_from_bin(tool_bin, "clang")
+        cxx = os.environ.get("CXX") or self._tool_from_bin(tool_bin, "clang++")
+        ar = os.environ.get("AR") or self._tool_from_bin(tool_bin, "llvm-ar")
+        ranlib = os.environ.get("RANLIB") or self._tool_from_bin(tool_bin, "llvm-ranlib")
+        strip = os.environ.get("STRIP") or self._tool_from_bin(tool_bin, "llvm-strip")
         tmpdir = os.path.join(self.build_folder, "_private_ncurses_tmp")
         os.makedirs(tmpdir, exist_ok=True)
         os.chmod(tmpdir, 0o700)
         os.makedirs(prefix, exist_ok=True)
 
-        saved_env = {name: os.environ.get(name) for name in ("CONFIG_SHELL", "SHELL", "TMPDIR")}
+        saved_env = {name: os.environ.get(name) for name in ("CONFIG_SHELL", "SHELL", "TMPDIR", "PATH", "CC", "CXX", "AR", "RANLIB", "STRIP")}
         try:
             os.environ["CONFIG_SHELL"] = config_shell
             os.environ["SHELL"] = config_shell
             os.environ["TMPDIR"] = tmpdir
+            os.environ["PATH"] = os.pathsep.join([tool_bin, os.environ.get("PATH", "")])
+            os.environ["CC"] = cc
+            os.environ["CXX"] = cxx
+            os.environ["AR"] = ar
+            os.environ["RANLIB"] = ranlib
+            os.environ["STRIP"] = strip
 
             self._patch_ncurses_configure(source_dir, config_shell, tmpdir)
             configure_args = [
@@ -123,6 +135,10 @@ class SippConan(ConanFile):
                     os.environ.pop(name, None)
                 else:
                     os.environ[name] = value
+
+    def _tool_from_bin(self, tool_bin, name):
+        path = os.path.join(tool_bin, name)
+        return path if os.path.exists(path) else name
 
     def _patch_ncurses_configure(self, source_dir, config_shell, tmpdir):
         replace_in_file(
