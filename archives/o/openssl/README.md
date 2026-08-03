@@ -5,7 +5,8 @@
 OpenSSL 在 HarmonyOS/OpenHarmony (aarch64) 上的编译和测试记录。
 
 **可用版本**:
-- **3.5.6** (LTS, 推荐): 内置 linux-aarch64 target，无需自定义平台配置
+- **3.5.6.1** (OHOS Conan revision, 推荐): explicit getrandom entropy, static PIC package, and 10/10 HarmonyOS PC target assertions
+- **3.5.6** (LTS, 已发布但已取代): RAND consumer may expose the unresolved OHOS `__fd_chk` dependency
 - **1.1.1w**: 需自定义平台配置和 `no-asm` 选项
 
 ## 软件信息
@@ -15,16 +16,31 @@ OpenSSL 在 HarmonyOS/OpenHarmony (aarch64) 上的编译和测试记录。
 | 名称 | OpenSSL |
 | 官网 | https://www.openssl.org/ |
 | 下载 | GitHub Releases 或 Gitee 镜像 |
-| 许可证 | OpenSSL License |
+| 许可证 | Apache-2.0 (3.x); OpenSSL/SSLeay (1.1.1w) |
 
 ## 版本对比
 
 | 版本 | 状态 | 构建系统 | 平台配置 | 汇编优化 | 备注 |
 |------|------|----------|----------|----------|------|
-| 3.5.6 | partial | openssl-perl | 内置 linux-aarch64 | 可用 | 推荐，无需自定义配置 |
+| 3.5.6.1 | built | custom-perl | Conan-derived OHOS target/sysroot | disabled | Forced OHOS `conan create` passed; C/CLI target tests 10/10 on HarmonyOS PC |
+| 3.5.6 | published | openssl-perl | 内置 linux-aarch64 | 可用 | Superseded on OHOS because a real RAND consumer exposes `__fd_chk` |
 | 1.1.1w | published | custom-perl | 需自定义 openharmony-aarch64 | 禁用 (no-asm) | 需补丁支持 |
 
-## OpenSSL 3.5.6 编译
+## OpenSSL 3.5.6.1 OHOS Conan revision
+
+This revision retains the official 3.5.6 source and changes only the OHOS
+recipe. It selects `--with-rand-seed=getrandom` so OpenSSL does not compile the
+`DEVRANDOM_WAIT`/`FD_SET` path that references the unavailable SDK helper
+`__fd_chk`. It also binds the configured SDK target/sysroot, builds upstream
+test programs, and uses a real `RAND_bytes` Conan consumer. See E220.
+The final CLI reports `/ssl`, `/lib/engines-3`, and `/lib/ossl-modules`
+without double-root paths and passes version, SHA-256, and random generation
+checks on a HarmonyOS PC target.
+
+## OpenSSL 3.5.6 历史编译记录（已取代）
+
+> 该配置未覆盖真实 RAND consumer 暴露的 OHOS `__fd_chk` 链接问题。
+> 新适配和下游依赖应使用 3.5.6.1 配方；以下内容仅保留为历史记录。
 
 ### 编译步骤
 
@@ -134,10 +150,10 @@ error:1417B07B:SSL routines:tls_process_cert_verify:bad signature
 
 ## 经验总结
 
-1. **版本选择**: OpenSSL 3.5.6 内置平台支持，推荐使用
+1. **版本选择**: OHOS 下使用 3.5.6.1 配方；3.5.6 已因 RAND consumer 的 `__fd_chk` 链接缺陷被取代
 2. **汇编优化**: 1.1.1w 需禁用汇编优化 (`no-asm`)
 3. **Python 链接**: 确保 _ssl.so 正确链接 libssl 和 libcrypto
-4. **测试限制**: 官方测试套件因签名机制/超时问题，建议手动测试验证核心功能
+4. **测试边界**: 交叉构建只证明上游测试程序和真实 consumer 可编译/链接；目标端执行必须在 `can_run=true` 时另行取证
 5. **Gitee 镜像**: 国内下载推荐使用 Gitee 镜像
 
 ## 参考资料
