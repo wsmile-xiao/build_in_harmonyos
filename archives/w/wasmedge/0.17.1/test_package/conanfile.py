@@ -43,5 +43,4 @@ class WasmEdgeTestConan(ConanFile):
                 "--reject-missing-function",
             ):
                 self.run(f'"{test_bin}" {mode}', env="conanrun")
-            cmake = CMake(self)
-            cmake.test(env="conanrun", cli_args=["--output-on-failure"])
+            self.run("ctest --output-on-failure", cwd=self.build_folder, env="conanrun")
