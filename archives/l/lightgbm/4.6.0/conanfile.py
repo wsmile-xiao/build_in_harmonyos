@@ -85,11 +85,16 @@ class LightGBMConan(ConanFile):
     def _register_upstream_cpp_test_with_ctest(self):
         cmakelists = os.path.join(self.source_folder, "CMakeLists.txt")
         content = load(self, cmakelists)
-        marker = "add_test(NAME testlightgbm COMMAND $<TARGET_FILE:testlightgbm>)"
+        marker = "set_tests_properties(testlightgbm PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})"
         if marker in content:
             return
         old = "  add_executable(testlightgbm ${CPP_TEST_SOURCES})\n  target_link_libraries(testlightgbm PRIVATE lightgbm_objs lightgbm_capi_objs GTest::GTest)"
-        new = old + "\n  enable_testing()\n  " + marker
+        new = (
+            old
+            + "\n  enable_testing()"
+            + "\n  add_test(NAME testlightgbm COMMAND $<TARGET_FILE:testlightgbm>)"
+            + "\n  " + marker
+        )
         replace_in_file(self, cmakelists, old, new)
         fetchcontent = """FetchContent_Declare(
       googletest
