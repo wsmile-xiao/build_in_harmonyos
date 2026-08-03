@@ -28,13 +28,12 @@
 - 部分用例依赖网络/事件循环/crypto provider 配置，不适合当前隔离的 OHOS 交叉构建门禁；
 - 本 recipe 私有构建依赖只用于产出单一 `aws-c-auth` Conan 包，未发布完整 AWS CRT 多包测试环境。
 
-当前 `test_package` 覆盖可稳定验证的基础路径：下游工程可链接 aws-c-auth 及其私有打包依赖，初始化/清理 aws-common 与 aws-auth 库。
-`aws_common_library_init` 与 `aws_auth_library_init` 通过 C11 `_Generic` 做类型兼容的初始化选择：当前锁定版本的 void init API 统一视为 `AWS_OP_SUCCESS`，若后续头文件改为 int 返回则检查真实返回码。`aws_common_fatal_assert_library_initialized()` 继续用于验证 common 初始化状态，并按 auth -> common 顺序清理。
+当前 `test_package` 覆盖可稳定验证的基础路径：下游工程可链接 aws-c-auth 及其私有打包依赖，初始化/清理 aws-common 与 aws-auth 库，并创建静态 credentials 对象，验证 access key、secret key、session token 和过期时间 getter。该测试对齐上游 credentials 基础行为，但不依赖网络、外部凭证服务或完整 SigV4 corpus。
+`aws_common_library_init` 与 `aws_auth_library_init` 按当前锁定版本的真实头文件签名调用，`aws_common_fatal_assert_library_initialized()` 继续用于验证 common 初始化状态，并按 auth -> common 顺序清理。
 
 ## 验证结果
 - 产物为纯静态库。
-- `test_package` 编译并链接 `aws-c-auth`，覆盖基础初始化与依赖链接场景。
-- 初始化 API 已按真实头文件签名做类型兼容处理，避免在 void API 上进行非法返回值比较，同时保留 int 返回 API 的错误码检查路径。
+- `test_package` 编译并链接 `aws-c-auth`，执行 `--init` 与 `--credentials` 两个离线模式，覆盖基础初始化、依赖链接和静态 credentials 功能。
 - 上游认证/签名 CTest 套件已在 MANIFEST 中登记，未纳入当前 CI 的原因已说明；后续若建立完整 AWS CRT 测试环境，可优先迁移 SigV4 signing corpus 与 credentials 基础测试。
 
 ## 依赖版本
