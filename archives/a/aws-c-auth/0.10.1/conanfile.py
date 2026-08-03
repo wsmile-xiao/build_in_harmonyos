@@ -232,16 +232,18 @@ endif()
 
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
-        pattern = (
-            r"(?ms)^if\s*\(\s*\(NOT\s+WIN32\s+AND\s+NOT\s+APPLE\)\s+OR\s+"
-            r"AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE\s*\)\s*\n"
-            r"\s*if\s*\(USE_OPENSSL\)\s*\n"
-            r"\s*find_dependency\(OpenSSL\s+REQUIRED\)\s*\n"
-            r"\s*find_dependency\(Threads\s+REQUIRED\)\s*\n"
-            r"\s*else\(\)\s*\n"
-            r"\s*find_dependency\(crypto\)\s*\n"
-            r"\s*endif\(\)\s*\n"
-            r"\s*endif\(\)\s*\n+"
+        pattern = re.compile(
+            r"if \([^\n]*\)\s*"
+            r"if \([^\n]*\)\s*"
+            r"(?:#[^\n]*\n\s*)*"
+            r"find_dependency\(OpenSSL REQUIRED\)\s*"
+            r"find_dependency\(Threads REQUIRED\)\s*"
+            r"else\(\)\s*"
+            r"(?:list\(APPEND CMAKE_MODULE_PATH \"\$\{CMAKE_CURRENT_LIST_DIR\}/modules\"\)\s*)?"
+            r"find_dependency\(crypto\)\s*"
+            r"endif\(\)\s*"
+            r"endif\(\)\s*",
+            re.MULTILINE,
         )
         self._remove_config_block(config, pattern, "aws-c-cal crypto dependency")
 
@@ -260,7 +262,7 @@ endif()
             return
         content = load(self, path)
         if hasattr(pattern, "subn"):
-            updated, count = pattern.subn("", content, count=1)
+            updated, count = pattern.subn("", content)
         else:
             updated, count = re.subn(pattern, "", content, count=1)
         if count == 0:
