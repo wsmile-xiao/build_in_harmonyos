@@ -44,7 +44,7 @@ class AwsCHttpConan(ConanFile):
         self._build_private_cmake("aws-c-compression")
         self._build_private_cmake("aws-c-io", {"BYO_CRYPTO": "ON"})
         self._strip_io_s2n_dependency(prefix)
-        self._build_private_cmake("aws-c-http", {"BUILD_TESTING": "ON"}, run_tests=True)
+        self._build_private_cmake("aws-c-http", {"BUILD_TESTING": "ON", "ENABLE_NET_TESTS": "OFF"}, run_tests=True)
 
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
@@ -130,6 +130,7 @@ include(CTest)""",
         )
         for name in ("aws-c-cal", "aws-c-compression", "aws-c-io", "aws-c-http"):
             self._ensure_threads_before_common(os.path.join(self.source_folder, "_deps", name, "CMakeLists.txt") if name != "aws-c-http" else os.path.join(self.source_folder, "CMakeLists.txt"))
+        self._patch_http_upstream_tests_for_no_tls_build()
         io = os.path.join(self.source_folder, "_deps", "aws-c-io", "CMakeLists.txt")
         self._replace_if_present(
             io,
@@ -165,6 +166,39 @@ endif()
                 replace_in_file(self, path, marker, prelude + marker)
                 return
         self.output.warning(f"Unable to inject Threads fallback before aws-c-common in {path}")
+
+    def _patch_http_upstream_tests_for_no_tls_build(self):
+        root = os.path.join(self.source_folder, "CMakeLists.txt")
+        self._replace_if_present(
+            root,
+            "    if(UNIX)\n        add_subdirectory(bin/elasticurl)\n        add_subdirectory(bin/h2benchmark)\n    endif()\n",
+            "    # The OHOS base recipe builds the library without a TLS provider; skip TLS-dependent tools.\n",
+        )
+        tests = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
+        content = load(self, tests)
+        if "OHOS no-TLS base recipe: keep core upstream unit tests" not in content:
+            replace_in_file(
+                self,
+                tests,
+                "file(GLOB TESTS ${TEST_HDRS} ${TEST_SRC})\n",
+                "file(GLOB TESTS ${TEST_HDRS} ${TEST_SRC})\n"
+                "# OHOS no-TLS base recipe: keep core upstream unit tests and omit TLS/proxy-only sources.\n"
+                "list(REMOVE_ITEM TESTS\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_tls.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_proxy.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/proxy_test_helper.c\n"
+                ")\n",
+            )
+        proxy_block_start = "add_test_case(http_forwarding_proxy_connection_proxy_target)"
+        proxy_block_end = "add_test_case(https_tunnel_proxy_connection_failure_tls)"
+        content = load(self, tests)
+        if proxy_block_start in content and proxy_block_end in content:
+            start = content.index(proxy_block_start)
+            end = content.index(proxy_block_end, start) + len(proxy_block_end)
+            proxy_block = content[start:end]
+            disabled_block = "# Proxy tests require TLS/proxy helpers that are not built in the no-TLS base recipe.\n" + proxy_block.replace("add_test_case(", "add_net_test_case(")
+            with open(tests, "w", encoding="utf-8") as file:
+                file.write(content[:start] + disabled_block + content[end:])
 
     def _ensure_common_threads_config(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-common", "aws-c-common-config.cmake")
