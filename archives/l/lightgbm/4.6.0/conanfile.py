@@ -58,6 +58,7 @@ class LightGBMConan(ConanFile):
     def build(self):
         apply_conandata_patches(self)
         self._register_upstream_cpp_test_with_ctest()
+        self.run("git config --global --add safe.directory '*'", ignore_errors=True)
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
