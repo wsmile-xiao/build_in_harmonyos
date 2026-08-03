@@ -1,8 +1,8 @@
-# Adaptation Notes — dovi_convert 8.2.0
+# Adaptation Notes — dovi_convert 8.2.0.1
 
 ## Software
 - **Name**: dovi_convert
-- **Version**: 8.2.0 (upstream tag v8.2.0)
+- **Version**: 8.2.0.1 (upstream tag v8.2.0)
 - **Description**: Dolby Vision Profile 7 -> 8.1 converter (single-file Python CLI)
 - **License**: GPL-3.0-or-later
 - **Source**: https://github.com/cryptochrome/dovi_convert/archive/refs/tags/v8.2.0.tar.gz

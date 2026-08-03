@@ -25,7 +25,7 @@ from conan.tools.layout import basic_layout
 
 class DoviConvertConan(ConanFile):
     name = "dovi_convert"
-    version = "8.2.0"
+    version = "8.2.0.1"
     description = "Dolby Vision Profile 7 -> 8.1 converter (single-file Python CLI)"
     license = "GPL-3.0-or-later"
     homepage = "https://github.com/cryptochrome/dovi_convert"
