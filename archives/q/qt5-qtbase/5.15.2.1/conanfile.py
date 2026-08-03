@@ -120,7 +120,7 @@ class Qt5QtbaseConan(ConanFile):
         build_env.prepend_path("PATH", symlink_shim_dir)
         if has_pthread_cancel:
             build_env.append("CXXFLAGS", "-DHAVE_PTHREAD_CANCEL")
-        # R8 合规：不再向源码注入任何平台条件编译宏（如 -DQ_OS_OHOS）。
+        # R8 合规：不再向源码注入任何平台条件编译宏。
         # 抽象套接字命名空间改由 0001/0002 补丁无条件启用（Linux/OHOS 内核
         # 均支持 AF_UNIX 抽象套接字），因此无需按目标平台切换编译期分支。
         # Configure Qt5 with Conan-managed compilers and zlib paths.
