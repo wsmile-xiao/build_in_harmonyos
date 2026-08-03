@@ -15,3 +15,7 @@ being used as a build directory. `MK_AUTO_OBJ=no` supplies the otherwise
 undefined make variable used by the upstream `mk/obj.mk` conditional. The
 consumer test additionally executes the packaged bmake against a generated
 Makefile.
+
+On OHOS, `diff` may be an alias and the upstream `which()` helper then returns
+an empty path. The bootstrap patch searches `PATH` for an executable `diff`
+before the unit-test output comparison step.
