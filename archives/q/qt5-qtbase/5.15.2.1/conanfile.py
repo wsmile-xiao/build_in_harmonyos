@@ -1,5 +1,4 @@
 import os
-import re
 import shlex
 import shutil
 import subprocess
@@ -8,20 +7,6 @@ from conan.errors import ConanException, ConanInvalidConfiguration
 from conan.tools.env import Environment
 from conan.tools.files import get, copy, apply_conandata_patches, export_conandata_patches
 from conan.tools.layout import basic_layout
-
-_OHOS_SKIPPED_CORELIB_TESTS = {
-    # OHOS SELinux sandbox does not implement POSIX permission semantics used
-    # by these filesystem, temporary-file, plugin, and model test suites.
-    "itemmodels", "plugin", "io/qdir", "io/qfile", "io/qfileselector",
-    "io/qlockfile", "io/qsavefile", "io/qsettings", "io/qstandardpaths",
-    "io/qtemporarydir", "io/qtemporaryfile",
-    # OHOS ships different timezone data for these QDate expectations.
-    "time",
-    # musl's POSIX collation lacks the locale features exercised by QCollator.
-    "text/qcollator",
-    # musl does not implement pthread_cancel, required by QThread::terminate.
-    "thread/qthread",
-}
 
 
 class Qt5QtbaseConan(ConanFile):
