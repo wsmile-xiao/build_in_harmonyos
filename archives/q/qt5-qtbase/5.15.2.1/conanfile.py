@@ -151,16 +151,6 @@ class Qt5QtbaseConan(ConanFile):
             # 运行期验证交给 test_package；跑全量测试会在 CI 45 分钟硬超时内无法完成
             # （PR #3804 CI #12438 超时根因）。Qt5Test 等模块库由主 make 正常产出，不受影响。
 
-    @staticmethod
-    def _has_make_check_target(directory):
-        for makefile_name in ("Makefile", "makefile"):
-            makefile = os.path.join(directory, makefile_name)
-            if not os.path.isfile(makefile):
-                continue
-            with open(makefile, encoding="utf-8", errors="ignore") as file:
-                return re.search(r"^check\s*:", file.read(), re.MULTILINE) is not None
-        return False
-
     def _create_symlink_shim(self):
         """Copy Qt ABI aliases when the OHOS workspace rejects symlinks."""
         shim_dir = os.path.join(self.build_folder, "conan_tools")
