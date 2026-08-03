@@ -46,9 +46,11 @@ class AwsCAuthConan(ConanFile):
         self._ensure_common_threads_config(prefix)
         self._build_private_cmake("aws-c-cal", {"BYO_CRYPTO": "ON"})
         self._strip_cal_crypto_dependency(prefix)
+        self._strip_cal_crypto_dependency(self.package_folder)
         self._build_private_cmake("aws-c-compression")
         self._build_private_cmake("aws-c-io", {"BYO_CRYPTO": "ON"})
         self._strip_io_s2n_dependency(prefix)
+        self._strip_io_s2n_dependency(self.package_folder)
         self._build_private_cmake("aws-c-http")
         self._build_private_cmake("aws-c-sdkutils")
         self._build_private_cmake("aws-c-auth")
@@ -81,6 +83,9 @@ class AwsCAuthConan(ConanFile):
     def _private_prefix(self):
         return os.path.join(self.build_folder, "_aws_crt")
 
+    def _prefix_path(self, prefix):
+        return ";".join([prefix, self.package_folder])
+
     def _build_private_cmake(self, name, definitions=None):
         source_dir = self.source_folder if name == "aws-c-auth" else os.path.join(self.source_folder, "_deps", name)
         build_dir = os.path.join(self.build_folder, "_build", name)
@@ -100,7 +105,7 @@ class AwsCAuthConan(ConanFile):
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
             "-DBUILD_TESTING=OFF",
             f"-DCMAKE_POSITION_INDEPENDENT_CODE={'ON' if self.options.get_safe('fPIC', True) else 'OFF'}",
-            "-DCMAKE_PREFIX_PATH={}".format(shlex.quote(prefix)),
+            "-DCMAKE_PREFIX_PATH={}".format(shlex.quote(self._prefix_path(prefix))),
             "-DCMAKE_MODULE_PATH={}".format(shlex.quote(self._module_path(prefix))),
         ]
         args.extend(f"-D{key}={shlex.quote(str(value))}" for key, value in definitions.items())
@@ -135,6 +140,9 @@ class AwsCAuthConan(ConanFile):
             os.path.join(prefix, "lib", "cmake"),
             os.path.join(prefix, "lib", "cmake", "aws-c-common"),
             os.path.join(prefix, "lib", "cmake", "aws-c-common", "modules"),
+            os.path.join(self.package_folder, "lib", "cmake"),
+            os.path.join(self.package_folder, "lib", "cmake", "aws-c-common"),
+            os.path.join(self.package_folder, "lib", "cmake", "aws-c-common", "modules"),
         ])
 
     def _patch_private_sources(self):
