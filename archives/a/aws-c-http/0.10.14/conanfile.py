@@ -325,7 +325,10 @@ endif()
         content = load(self, path)
         new_content, count = pattern.subn("", content)
         if count == 0:
-            self.output.warning(f"{description} was already absent from {path}")
+            forbidden = ("find_dependency(OpenSSL", "find_dependency(crypto", "find_dependency(s2n")
+            if any(token in content for token in forbidden):
+                raise RuntimeError(f"Unable to remove {description} from {path}; dependency block format changed")
+            self.output.info(f"{description} was already absent from {path}")
             return
         if count > 1:
             raise RuntimeError(f"Refusing to remove {count} {description} blocks from {path}")
