@@ -44,7 +44,7 @@ class AwsCHttpConan(ConanFile):
         self._build_private_cmake("aws-c-compression")
         self._build_private_cmake("aws-c-io", {"BYO_CRYPTO": "ON"})
         self._strip_io_s2n_dependency(prefix)
-        self._build_private_cmake("aws-c-http")
+        self._build_private_cmake("aws-c-http", {"BUILD_TESTING": "ON"}, run_tests=True)
 
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
@@ -65,7 +65,7 @@ class AwsCHttpConan(ConanFile):
     def _private_prefix(self):
         return os.path.join(self.build_folder, "_aws_crt")
 
-    def _build_private_cmake(self, name, definitions=None):
+    def _build_private_cmake(self, name, definitions=None, run_tests=False):
         source_dir = self.source_folder if name == "aws-c-http" else os.path.join(self.source_folder, "_deps", name)
         build_dir = os.path.join(self.build_folder, "_build", name)
         prefix = self._private_prefix()
@@ -79,7 +79,7 @@ class AwsCHttpConan(ConanFile):
             f"-DCMAKE_BUILD_TYPE={self.settings.build_type}",
             f'-DCMAKE_INSTALL_PREFIX="{prefix}"',
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
-            "-DBUILD_TESTING=OFF",
+            f"-DBUILD_TESTING={definitions.pop('BUILD_TESTING', 'OFF')}",
             f"-DCMAKE_POSITION_INDEPENDENT_CODE={'ON' if self.options.get_safe('fPIC', True) else 'OFF'}",
             f'-DCMAKE_PREFIX_PATH="{prefix}"',
             f'-DCMAKE_MODULE_PATH="{self._module_path(prefix)}"',
@@ -88,6 +88,8 @@ class AwsCHttpConan(ConanFile):
         self.run(" ".join(args), env=["conanbuild"], ignore_errors=False)
         build_jobs = self.conf.get("tools.build:jobs", default=2)
         self.run(f'cmake --build "{build_dir}" -- -j{build_jobs}', env=["conanbuild"], ignore_errors=False)
+        if run_tests:
+            self.run(f'ctest --test-dir "{build_dir}" --output-on-failure', env=["conanbuild"], ignore_errors=False)
         self.run(f'cmake --install "{build_dir}"', env=["conanbuild"], ignore_errors=False)
 
     def _module_path(self, prefix):

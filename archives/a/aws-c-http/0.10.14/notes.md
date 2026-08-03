@@ -8,6 +8,7 @@
 
 ## 编译步骤
 使用 Conan 2.x recipe 下载 aws-c-http 官方源码，并在同一个 recipe 内私有下载、构建和安装 AWS CRT 依赖源码。对外只暴露 `aws-c-http/0.10.14` 一个 Conan 包，避免 PR 级别新增多个 recipe。
+当前配方对 `aws-c-http` 主库开启 `BUILD_TESTING=ON`，在私有 CRT 依赖安装完成后执行上游 `ctest --output-on-failure`，再安装打包产物；`test_package` 继续验证下游消费者初始化和 HTTP status 文本查询。
 
 ## 遇到的问题与解决方案
 | # | 问题 | 根因 | 解决方案 |
