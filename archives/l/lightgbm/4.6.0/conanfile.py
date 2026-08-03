@@ -85,3 +85,18 @@ class LightGBMConan(ConanFile):
         old = "  add_executable(testlightgbm ${CPP_TEST_SOURCES})\n  target_link_libraries(testlightgbm PRIVATE lightgbm_objs lightgbm_capi_objs GTest::GTest)"
         new = old + "\n  enable_testing()\n  " + marker
         replace_in_file(self, cmakelists, old, new)
+        fetchcontent = """FetchContent_Declare(
+      googletest
+      GIT_REPOSITORY https://github.com/google/googletest.git
+      GIT_TAG        v1.14.0
+    )"""
+        local_source = os.path.join(self.source_folder, "external_libs", "googletest").replace("\\", "/")
+        replace_in_file(
+            self,
+            cmakelists,
+            fetchcontent,
+            f"""FetchContent_Declare(
+      googletest
+      SOURCE_DIR {local_source}
+    )"""
+        )
