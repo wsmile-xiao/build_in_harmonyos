@@ -2,7 +2,7 @@
 
 ## Summary
 
-LightGBM 4.6.0 is adapted as a CMake package in CPU-only mode. Optional OpenMP, MPI, and GPU features are disabled, while the upstream C++ test suite is kept enabled so CI at least cross-compiles those test targets for the OpenHarmony PC toolchain.
+LightGBM 4.6.0 is adapted as a CMake package in CPU-only mode. Optional OpenMP, MPI, and GPU features are disabled, while the upstream C++ test suite is enabled and executed during the Conan build on OpenHarmony PC.
 
 ## Build and test
 
@@ -11,9 +11,10 @@ LightGBM 4.6.0 is adapted as a CMake package in CPU-only mode. Optional OpenMP, 
 - SHA256: `71d2c25855f10e82da8cb8b0c42bdf0da56e5556ff50a93b31c0592b8932eda3`
 - Disabled options: OpenMP, MPI, GPU
 - Enabled validation build: upstream C++ tests via `BUILD_CPP_TEST=ON`
+- Upstream runtime validation: recipe registers `testlightgbm` with CTest and runs `ctest --test-dir <build> --output-on-failure`
 - Bundled submodules: compute, eigen, fmt, fast_double_parser fetched at LightGBM v4.6.0 pinned commits
 - Consumer API smoke test: compiles and links a downstream CMake project against `lightgbm::lightgbm`, includes `LightGBM/c_api.h`, creates a tiny in-memory dataset with `LGBM_DatasetCreateFromMat`, and frees it with `LGBM_DatasetFree` when host execution is available.
 - CLI smoke test: runs the packaged `lightgbm --help` command when host execution is available.
-- Declared package test pass rate: 13/13 package API and CLI smoke assertions pass when the target binary can execute; upstream C++ tests are counted as 11-file cross-compile validation rather than runtime CTest passes.
+- Declared package test pass rate: final upstream CTest and test_package pass counts are taken from OpenDesk/CI logs for the current head.
 
-The upstream `tests/cpp_tests/` CTest suite is included in the package build with `BUILD_CPP_TEST=ON`, so those C++ test sources are validated by the cross compiler. Runtime execution of the full CTest suite is still not claimed in this base PR because it depends on the OpenHarmony CI runtime and upstream test data availability; the executable consumer API smoke test remains the runtime check when `can_run(self)` allows execution.
+The upstream `tests/cpp_tests/` suite is included with `BUILD_CPP_TEST=ON`. LightGBM v4.6.0 creates a `testlightgbm` executable but does not register it with CTest by default, so the recipe patches the upstream CMakeLists to add `add_test(NAME testlightgbm COMMAND testlightgbm)` before running CTest. This prevents the misleading `No tests were found` result and records the real upstream runtime outcome.

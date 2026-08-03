@@ -4,7 +4,7 @@ import os
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get
+from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get, load, replace_in_file
 
 
 class LightGBMConan(ConanFile):
@@ -44,22 +44,26 @@ class LightGBMConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
-        tc.variables["BUILD_SHARED_LIBS"] = self.options.shared
-        tc.variables["USE_OPENMP"] = "OFF"
-        tc.variables["USE_MPI"] = "OFF"
-        tc.variables["USE_GPU"] = "OFF"
-        tc.variables["BUILD_CLI"] = "ON"
-        tc.variables["BUILD_CPP_TEST"] = "ON"
-        tc.variables["BUILD_STATIC_LIB"] = "ON"
+        tc.cache_variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
+        tc.cache_variables["USE_OPENMP"] = "OFF"
+        tc.cache_variables["USE_MPI"] = "OFF"
+        tc.cache_variables["USE_GPU"] = "OFF"
+        tc.cache_variables["BUILD_CLI"] = "ON"
+        tc.cache_variables["BUILD_CPP_TEST"] = "ON"
+        tc.cache_variables["BUILD_STATIC_LIB"] = "ON"
         fpic = self.options.get_safe("fPIC")
-        tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = True if fpic is None else bool(fpic)
+        tc.cache_variables["CMAKE_POSITION_INDEPENDENT_CODE"] = "ON" if fpic is None or bool(fpic) else "OFF"
         tc.generate()
 
     def build(self):
         apply_conandata_patches(self)
+        self._register_upstream_cpp_test_with_ctest()
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
+        test_exe = os.path.join(self.build_folder, "testlightgbm")
+        if not os.path.exists(test_exe):
+            raise FileNotFoundError(f"Upstream LightGBM C++ test executable was not built: {test_exe}")
         self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure', env=["conanbuild"])
 
     def package(self):
@@ -68,5 +72,15 @@ class LightGBMConan(ConanFile):
         cmake.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["lightgbm"]
+        self.cpp_info.libs = ["_lightgbm"]
         self.cpp_info.bindirs = ["bin"]
+
+    def _register_upstream_cpp_test_with_ctest(self):
+        cmakelists = os.path.join(self.source_folder, "CMakeLists.txt")
+        content = load(self, cmakelists)
+        marker = "add_test(NAME testlightgbm COMMAND testlightgbm)"
+        if marker in content:
+            return
+        old = "  add_executable(testlightgbm ${CPP_TEST_SOURCES})\n  target_link_libraries(testlightgbm PRIVATE lightgbm_objs lightgbm_capi_objs GTest::GTest)"
+        new = old + "\n  enable_testing()\n  " + marker
+        replace_in_file(self, cmakelists, old, new)
