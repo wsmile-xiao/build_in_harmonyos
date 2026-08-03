@@ -169,11 +169,8 @@ endif()
 
     def _patch_http_upstream_tests_for_no_tls_build(self):
         root = os.path.join(self.source_folder, "CMakeLists.txt")
-        self._replace_if_present(
-            root,
-            "    if(UNIX)\n        add_subdirectory(bin/elasticurl)\n        add_subdirectory(bin/h2benchmark)\n    endif()\n",
-            "    # The OHOS base recipe builds the library without a TLS provider; skip TLS-dependent tools.\n",
-        )
+        self._replace_if_present(root, "        add_subdirectory(bin/elasticurl)\n", "")
+        self._replace_if_present(root, "        add_subdirectory(bin/h2benchmark)\n", "")
         tests = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
         content = load(self, tests)
         if "OHOS no-TLS base recipe: keep core upstream unit tests" not in content:
@@ -181,12 +178,26 @@ endif()
                 self,
                 tests,
                 "file(GLOB TESTS ${TEST_HDRS} ${TEST_SRC})\n",
-                "file(GLOB TESTS ${TEST_HDRS} ${TEST_SRC})\n"
-                "# OHOS no-TLS base recipe: keep core upstream unit tests and omit TLS/proxy-only sources.\n"
-                "list(REMOVE_ITEM TESTS\n"
-                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_tls.c\n"
-                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_proxy.c\n"
-                "    ${CMAKE_CURRENT_SOURCE_DIR}/proxy_test_helper.c\n"
+                "# OHOS no-TLS base recipe: keep core upstream unit tests and omit TLS/proxy/integration sources.\n"
+                "set(TESTS\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/h2_test_helper.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/stream_test_helper.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h1_client.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h1_decoder.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h1_encoder.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_client.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_decoder.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_encoder.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_headers.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_hpack.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_http.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_message.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_no_proxy.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_random_access_set.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_strutil.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_websocket_decoder.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_websocket_encoder.c\n"
+                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_websocket_handler.c\n"
                 ")\n",
             )
         proxy_block_start = "add_test_case(http_forwarding_proxy_connection_proxy_target)"
@@ -199,6 +210,17 @@ endif()
             disabled_block = "# Proxy tests require TLS/proxy helpers that are not built in the no-TLS base recipe.\n" + proxy_block.replace("add_test_case(", "add_net_test_case(")
             with open(tests, "w", encoding="utf-8") as file:
                 file.write(content[:start] + disabled_block + content[end:])
+        content = load(self, tests)
+        filter_marker = "OHOS_CORE_TEST_REGEX"
+        if filter_marker not in content:
+            replace_in_file(
+                self,
+                tests,
+                "generate_test_driver(${TEST_BINARY_NAME})\n",
+                "set(OHOS_CORE_TEST_REGEX \"^(test_http_error_code_is_retryable|headers_.*|h2_headers_.*|message_.*|h1_decoder_.*|h1_encoder_.*|h1_client_.*|strutil_.*|websocket_decoder_.*|websocket_encoder_.*|websocket_handler_.*|websocket_midchannel_.*|hpack_.*|h2_header_.*|h2_encoder_.*|h2_decoder_.*|h2_client_.*|http_stats_.*|random_access_set_.*|test_no_proxy_.*)$\")\n"
+                "list(FILTER TEST_CASES INCLUDE REGEX ${OHOS_CORE_TEST_REGEX})\n"
+                "generate_test_driver(${TEST_BINARY_NAME})\n",
+            )
 
     def _ensure_common_threads_config(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-common", "aws-c-common-config.cmake")
