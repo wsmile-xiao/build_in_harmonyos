@@ -7,25 +7,31 @@
 #include <aws/http/http.h>
 #include <aws/io/io.h>
 
+#define INIT_LIBRARY(func, allocator) \
+    _Generic((func), \
+        void (*)(struct aws_allocator *): ((func)(allocator), AWS_OP_SUCCESS), \
+        int (*)(struct aws_allocator *): (func)(allocator) \
+    )
+
 int main(void) {
     struct aws_allocator *allocator = aws_default_allocator();
     const char *status_text = NULL;
     if (allocator == NULL) {
         return 1;
     }
-    if (aws_common_library_init(allocator) != AWS_OP_SUCCESS) {
+    if (INIT_LIBRARY(aws_common_library_init, allocator) != AWS_OP_SUCCESS) {
         return 1;
     }
-    if (aws_cal_library_init(allocator) != AWS_OP_SUCCESS) {
+    if (INIT_LIBRARY(aws_cal_library_init, allocator) != AWS_OP_SUCCESS) {
         goto cleanup_common;
     }
-    if (aws_io_library_init(allocator) != AWS_OP_SUCCESS) {
+    if (INIT_LIBRARY(aws_io_library_init, allocator) != AWS_OP_SUCCESS) {
         goto cleanup_cal;
     }
-    if (aws_compression_library_init(allocator) != AWS_OP_SUCCESS) {
+    if (INIT_LIBRARY(aws_compression_library_init, allocator) != AWS_OP_SUCCESS) {
         goto cleanup_io;
     }
-    if (aws_http_library_init(allocator) != AWS_OP_SUCCESS) {
+    if (INIT_LIBRARY(aws_http_library_init, allocator) != AWS_OP_SUCCESS) {
         goto cleanup_compression;
     }
     status_text = aws_http_status_text(200);
