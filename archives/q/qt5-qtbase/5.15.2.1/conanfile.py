@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+"""Conan recipe for qt5-qtbase 5.15.2.1 on OpenHarmony PC (enables Core/Gui/Network/Widgets/PrintSupport/Xml)."""
 import os
 import shlex
 import shutil
