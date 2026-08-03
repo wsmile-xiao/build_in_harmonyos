@@ -1,5 +1,9 @@
 # libp11 0.4.16-r0 适配笔记
 
+## Conan 配方说明
+
+当前 Conan 配方不使用版本目录根部早期手工归档流程生成的 `0001` 至 `0005` 补丁。这些历史补丁包含 CI、文档等非构建改动，且不属于本次配方。配方只应用 `patches/0001-configure-hmdfs-umask.patch`，用于解决 HMDFS 临时目录权限问题。官方 0.4.16 release 的 `config.sub` 已接受 `aarch64-unknown-linux-ohos`，因此配方只指定目标 `--host`，不会伪造构建机 `--build`。
+
 ## 编译环境
 - 构建系统: autotools
 - 编译日期: 2026-05-20
@@ -106,3 +110,11 @@ ELF shared object, 64-bit LSB arm64, not stripped
 
 **编译结束**: 2026-05-20 14:56
 **最终状态**: built
+
+## 积分赛上游测试接入
+
+- 上游 `tests/Makefile.am` 注册 33 个 SoftHSM 集成测试脚本。
+- 上游脚本依赖 `pkcs11.la`、`pkcs11prov.la` 这类 libtool shared module，并配合 SoftHSM/OpenSC 执行集成测试。
+- 本适配包的交付目标是静态 `libp11.a`，OHOS 官方 CI 使用 `--disable-shared --enable-static`，继续构建 shared module 会触发 libtool `cannot build a shared library`。
+- 因此 OHOS 官方 CI 只构建静态库并执行新增 `test_package` 消费测试；33 个上游 SoftHSM 集成脚本记录为 OHOS shared-module 场景不适用。
+- 若后续赛事要求交付 engine/provider shared module，可另开独立适配路径补齐该集成测试环境。
