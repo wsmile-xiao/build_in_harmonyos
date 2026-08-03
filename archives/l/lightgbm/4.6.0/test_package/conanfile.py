@@ -26,7 +26,7 @@ class LightGBMTestConan(ConanFile):
     def test(self):
         if not can_run(self):
             return
-        self.run(os.path.join(self.cpp.build.bindir, "test_lightgbm_api"), env="conanrun")
+        self.run(os.path.join(self.cpp.build.bindirs[0], "test_lightgbm_api"), env="conanrun")
         dep = self.dependencies["lightgbm"]
         candidates = [
             os.path.join(dep.package_folder, "bin", "lightgbm"),

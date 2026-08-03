@@ -3,6 +3,7 @@
 import os
 
 from conan import ConanFile
+from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get, load, replace_in_file
 
@@ -52,7 +53,7 @@ class LightGBMConan(ConanFile):
         tc.cache_variables["BUILD_CPP_TEST"] = "ON"
         tc.cache_variables["BUILD_STATIC_LIB"] = "ON"
         fpic = self.options.get_safe("fPIC")
-        tc.cache_variables["CMAKE_POSITION_INDEPENDENT_CODE"] = "ON" if fpic is None or bool(fpic) else "OFF"
+        tc.cache_variables["CMAKE_POSITION_INDEPENDENT_CODE"] = "ON" if fpic is None or fpic else "OFF"
         tc.generate()
 
     def build(self):
@@ -71,7 +72,10 @@ class LightGBMConan(ConanFile):
                 "Upstream LightGBM C++ test executable was not built in expected locations: "
                 + ", ".join(test_candidates)
             )
-        self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure', env=["conanbuild"])
+        if can_run(self):
+            self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure', env=["conanbuild"])
+        else:
+            self.output.info("Skipping upstream LightGBM CTest because the current Conan context cannot run target binaries")
 
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
@@ -79,7 +83,7 @@ class LightGBMConan(ConanFile):
         cmake.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["_lightgbm"]
+        self.cpp_info.libs = ["lightgbm"] if self.options.shared else ["_lightgbm"]
         self.cpp_info.bindirs = ["bin"]
 
     def _register_upstream_cpp_test_with_ctest(self):
