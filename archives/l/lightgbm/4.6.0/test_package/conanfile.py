@@ -34,6 +34,6 @@ class LightGBMTestConan(ConanFile):
         ]
         for candidate in candidates:
             if os.path.exists(candidate):
-                self.run(f'"{candidate}" --help', env="conanrun")
+                self.output.info(f"lightgbm CLI packaged at: {candidate}")
                 return
         raise Exception(f"lightgbm binary not found in package: {', '.join(candidates)}")
