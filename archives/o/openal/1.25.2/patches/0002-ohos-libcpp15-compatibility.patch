@@ -1,0 +1,166 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1921,6 +1921,11 @@
+ target_compile_definitions(${IMPL_TARGET}
+     PRIVATE AL_BUILD_LIBRARY AL_ALEXT_PROTOTYPES "ALC_API=${EXPORT_DECL}" "AL_API=${EXPORT_DECL}"
+     ${CPP_DEFS})
+ target_compile_options(${IMPL_TARGET} PRIVATE ${C_FLAGS})
++if(CMAKE_SYSTEM_NAME MATCHES "^(OHOS|HarmonyOS)$")
++    target_compile_definitions(${IMPL_TARGET} PRIVATE
++        _LIBCPP_ENABLE_EXPERIMENTAL
++        ALSOFT_USE_BUNDLED_FMT)
++endif()
+ 
+ if(TARGET alsoft.build_version)
+--- /dev/null
++++ b/common/ohos_libcpp_compat.h
+@@ -0,0 +1,40 @@
++#pragma once
++
++/*
++ * OHOS libc++15 exposes std::views::elements poorly. Provide the small
++ * projection adapter OpenAL needs without relying on that view directly.
++ */
++#include <cstddef>
++#include <ranges>
++#include <string_view>
++#include <tuple>
++#include <utility>
++
++namespace openal_compat::views
++{
++template<std::size_t Index>
++inline constexpr auto elements = std::views::transform([](auto&& value) -> decltype(auto)
++{
++    return std::get<Index>(std::forward<decltype(value)>(value));
++});
++}
++
++namespace openal_compat
++{
++template<typename Char, typename Traits, typename Function>
++constexpr void for_each_delimited(std::basic_string_view<Char, Traits> value,
++    const Char delimiter, Function&& function)
++{
++    if(value.empty())
++        return;
++
++    while(true)
++    {
++        const auto position = value.find(delimiter);
++        function(value.substr(0, position));
++        if(position == value.npos)
++            break;
++        value.remove_prefix(position + 1);
++    }
++}
++}
+--- a/common/alformat.hpp
++++ b/common/alformat.hpp
+@@ -9,7 +9,8 @@
+  * to macOS 13.3. Older versions of libstdc++ also lack the <format> header.
+  */
+ #if (defined(MAC_OS_X_VERSION_MIN_REQUIRED) && MAC_OS_X_VERSION_MIN_REQUIRED < 130300) \
+-    || !__has_include(<format>)
++    || !__has_include(<format>) \
++    || defined(ALSOFT_USE_BUNDLED_FMT)
+ #include "fmt/format.h"
+ 
+ namespace al {
+--- a/common/alstring.cpp
++++ b/common/alstring.cpp
+@@ -16,11 +16,15 @@
+     -> std::weak_ordering
+ {
+-    return std::lexicographical_compare_three_way(str0.cbegin(), str0.cend(),
+-        str1.cbegin(), str1.cend(), [](const char ch0, const char ch1) -> std::weak_ordering
++    const auto less = [](const char ch0, const char ch1)
+     {
+         using Traits = std::string_view::traits_type;
+-        return std::toupper(Traits::to_int_type(ch0)) <=> std::toupper(Traits::to_int_type(ch1));
+-    });
++        return std::toupper(Traits::to_int_type(ch0)) < std::toupper(Traits::to_int_type(ch1));
++    };
++    if(std::lexicographical_compare(str0.cbegin(), str0.cend(), str1.cbegin(), str1.cend(), less))
++        return std::weak_ordering::less;
++    if(std::lexicographical_compare(str1.cbegin(), str1.cend(), str0.cbegin(), str0.cend(), less))
++        return std::weak_ordering::greater;
++    return std::weak_ordering::equivalent;
+ }
+ 
+ auto case_compare(const std::wstring_view str0, const std::wstring_view str1) noexcept
+@@ -27,11 +31,15 @@
+     -> std::weak_ordering
+ {
+-    return std::lexicographical_compare_three_way(str0.cbegin(), str0.cend(),
+-        str1.cbegin(), str1.cend(), [](const wchar_t ch0, const wchar_t ch1) -> std::weak_ordering
++    const auto less = [](const wchar_t ch0, const wchar_t ch1)
+     {
+         using Traits = std::wstring_view::traits_type;
+-        return std::towupper(Traits::to_int_type(ch0)) <=> std::towupper(Traits::to_int_type(ch1));
+-    });
++        return std::towupper(Traits::to_int_type(ch0)) < std::towupper(Traits::to_int_type(ch1));
++    };
++    if(std::lexicographical_compare(str0.cbegin(), str0.cend(), str1.cbegin(), str1.cend(), less))
++        return std::weak_ordering::less;
++    if(std::lexicographical_compare(str1.cbegin(), str1.cend(), str0.cbegin(), str0.cend(), less))
++        return std::weak_ordering::greater;
++    return std::weak_ordering::equivalent;
+ }
+ 
+ } // namespace al
+--- a/alc/alc.cpp
++++ b/alc/alc.cpp
+@@ -52,7 +52,6 @@
+ #include <numbers>
+ #include <optional>
+ #include <ranges>
+-#include <source_location>
+ #include <span>
+ #include <stdexcept>
+ #include <string>
+@@ -2873,7 +2872,7 @@
+     return nullptr;
+ }
+ catch(std::exception &e) {
+-    ERR("Caught exception in {}: {}", std::source_location::current().function_name(), e.what());
++    ERR("Caught exception in {}: {}", __func__, e.what());
+     return nullptr;
+ }
+ DefineAlcAlias(alcCreateContext)
+@@ -3099,7 +3098,7 @@
+     return nullptr;
+ }
+ catch(std::exception &e) {
+-    ERR("Caught exception in {}: {}", std::source_location::current().function_name(), e.what());
++    ERR("Caught exception in {}: {}", __func__, e.what());
+     return nullptr;
+ }
+ DefineAlcAlias(alcOpenDevice)
+@@ -3254,7 +3253,7 @@
+     return nullptr;
+ }
+ catch(std::exception &e) {
+-    ERR("Caught exception in {}: {}", std::source_location::current().function_name(), e.what());
++    ERR("Caught exception in {}: {}", __func__, e.what());
+     return nullptr;
+ }
+ DefineAlcAlias(alcCaptureOpenDevice)
+@@ -3448,7 +3447,7 @@
+     return nullptr;
+ }
+ catch(std::exception &e) {
+-    ERR("Caught exception in {}: {}", std::source_location::current().function_name(), e.what());
++    ERR("Caught exception in {}: {}", __func__, e.what());
+     return nullptr;
+ }
+ DefineAlcAlias(alcLoopbackOpenDeviceSOFT)
+@@ -3761,7 +3760,7 @@
+     return ALC_FALSE;
+ }
+ catch(std::exception &e) {
+-    ERR("Caught exception in {}: {}", std::source_location::current().function_name(), e.what());
++    ERR("Caught exception in {}: {}", __func__, e.what());
+     return ALC_FALSE;
+ }
+ DefineAlcAlias(alcReopenDeviceSOFT)
