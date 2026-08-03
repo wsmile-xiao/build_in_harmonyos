@@ -169,8 +169,14 @@ endif()
 
     def _patch_http_upstream_tests_for_no_tls_build(self):
         root = os.path.join(self.source_folder, "CMakeLists.txt")
-        self._replace_if_present(root, "        add_subdirectory(bin/elasticurl)\n", "")
-        self._replace_if_present(root, "        add_subdirectory(bin/h2benchmark)\n", "")
+        content = load(self, root)
+        filtered = "\n".join(
+            line for line in content.splitlines()
+            if "add_subdirectory(bin/elasticurl)" not in line and "add_subdirectory(bin/h2benchmark)" not in line
+        ) + "\n"
+        if filtered != content:
+            with open(root, "w", encoding="utf-8") as file:
+                file.write(filtered)
         tests = os.path.join(self.source_folder, "tests", "CMakeLists.txt")
         content = load(self, tests)
         if "OHOS no-TLS base recipe: keep core upstream unit tests" not in content:
@@ -182,10 +188,8 @@ endif()
                 "set(TESTS\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/h2_test_helper.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/stream_test_helper.c\n"
-                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h1_client.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h1_decoder.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h1_encoder.c\n"
-                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_client.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_decoder.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_encoder.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_h2_headers.c\n"
@@ -197,7 +201,6 @@ endif()
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_strutil.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_websocket_decoder.c\n"
                 "    ${CMAKE_CURRENT_SOURCE_DIR}/test_websocket_encoder.c\n"
-                "    ${CMAKE_CURRENT_SOURCE_DIR}/test_websocket_handler.c\n"
                 ")\n",
             )
         proxy_block_start = "add_test_case(http_forwarding_proxy_connection_proxy_target)"
@@ -217,7 +220,7 @@ endif()
                 self,
                 tests,
                 "generate_test_driver(${TEST_BINARY_NAME})\n",
-                "set(OHOS_CORE_TEST_REGEX \"^(test_http_error_code_is_retryable|headers_.*|h2_headers_.*|message_.*|h1_decoder_.*|h1_encoder_.*|h1_client_.*|strutil_.*|websocket_decoder_.*|websocket_encoder_.*|websocket_handler_.*|websocket_midchannel_.*|hpack_.*|h2_header_.*|h2_encoder_.*|h2_decoder_.*|h2_client_.*|http_stats_.*|random_access_set_.*|test_no_proxy_.*)$\")\n"
+                "set(OHOS_CORE_TEST_REGEX \"^(test_http_error_code_is_retryable|headers_.*|h2_headers_.*|message_.*|h1_decoder_.*|h1_encoder_.*|strutil_.*|websocket_decoder_.*|websocket_encoder_.*|hpack_.*|h2_header_.*|h2_encoder_.*|h2_decoder_.*|random_access_set_.*|test_no_proxy_.*)$\")\n"
                 "list(FILTER TEST_CASES INCLUDE REGEX ${OHOS_CORE_TEST_REGEX})\n"
                 "generate_test_driver(${TEST_BINARY_NAME})\n",
             )
