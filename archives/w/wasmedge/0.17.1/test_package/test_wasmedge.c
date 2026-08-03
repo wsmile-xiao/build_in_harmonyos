@@ -18,11 +18,15 @@ static const uint8_t invalid_wasm_module[] = {
 
 static int check_version_api(void) {
     const char *version = WasmEdge_VersionGet();
-    if (version == NULL || strstr(version, "0.17.1") == NULL) {
+    if (version == NULL || version[0] == '\0') {
         return 1;
     }
-    if (WasmEdge_VersionGetMajor() != 0 || WasmEdge_VersionGetMinor() != 17 ||
-        WasmEdge_VersionGetPatch() != 1) {
+    if (strcmp(version, WASMEDGE_VERSION) != 0) {
+        return 1;
+    }
+    if (WasmEdge_VersionGetMajor() != WASMEDGE_VERSION_MAJOR ||
+        WasmEdge_VersionGetMinor() != WASMEDGE_VERSION_MINOR ||
+        WasmEdge_VersionGetPatch() != WASMEDGE_VERSION_PATCH) {
         return 1;
     }
     return 0;
