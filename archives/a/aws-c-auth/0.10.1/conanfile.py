@@ -251,7 +251,10 @@ endif()
         if not os.path.exists(path):
             return
         content = load(self, path)
-        updated, count = re.subn(pattern, "", content, count=1)
+        if hasattr(pattern, "subn"):
+            updated, count = pattern.subn("", content, count=1)
+        else:
+            updated, count = re.subn(pattern, "", content, count=1)
         if count == 0:
             forbidden = ("find_dependency(OpenSSL", "find_dependency(crypto", "find_dependency(s2n")
             if any(token in content for token in forbidden):
