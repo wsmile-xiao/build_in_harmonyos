@@ -254,17 +254,22 @@ endif()
             if marker in content:
                 replace_in_file(self, root, marker, marker + f"list(APPEND {variable} {stub_source})\n")
                 return
-        pattern = re.compile(r"(file\(GLOB\s+(AWS_HTTP_SRC|AWS_HTTP_SOURCE)\s*\n(?:[^)]*\n)*?\)\n)", re.MULTILINE)
-        match = pattern.search(content)
-        if match:
-            variable = match.group(2)
-            new_content = pattern.sub(match.group(1) + f"list(APPEND {variable} {stub_source})\n", content, count=1)
-            with open(root, "w", encoding="utf-8") as file:
-                file.write(new_content)
-            return
-        if "add_library(aws-c-http" in content:
+        lines = content.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            match = re.search(r"file\(GLOB\s+(AWS_HTTP_SRC|AWS_HTTP_SOURCE)\b", line)
+            if not match:
+                continue
+            variable = match.group(1)
+            for end_index in range(index + 1, len(lines)):
+                if ")" in lines[end_index]:
+                    newline = "\r\n" if lines[end_index].endswith("\r\n") else "\n"
+                    lines.insert(end_index + 1, f"list(APPEND {variable} {stub_source}){newline}")
+                    with open(root, "w", encoding="utf-8") as file:
+                        file.write("".join(lines))
+                    return
+        if "add_library(${PROJECT_NAME}" in content:
             with open(root, "a", encoding="utf-8") as file:
-                file.write(f"\ntarget_sources(aws-c-http PRIVATE {stub_source})\n")
+                file.write(f"\ntarget_sources(${{PROJECT_NAME}} PRIVATE {stub_source})\n")
             return
         raise RuntimeError("Unable to add OHOS no-TLS protocol stub to aws-c-http CMake sources")
 
