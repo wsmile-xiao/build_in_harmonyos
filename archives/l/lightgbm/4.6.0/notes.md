@@ -14,7 +14,7 @@ LightGBM 4.6.0 is adapted as a CMake package in CPU-only mode. Optional OpenMP, 
 - Upstream runtime validation: recipe registers `testlightgbm` with CTest and runs `ctest --test-dir <build> --output-on-failure`
 - Bundled submodules: compute, eigen, fmt, fast_double_parser fetched at LightGBM v4.6.0 pinned commits
 - Consumer API smoke test: compiles and links a downstream CMake project against `lightgbm::lightgbm`, includes `LightGBM/c_api.h`, creates a tiny in-memory dataset with `LGBM_DatasetCreateFromMat`, and frees it with `LGBM_DatasetFree` when host execution is available.
-- CLI smoke test: runs the packaged `lightgbm --help` command when host execution is available.
+- CLI package check: verifies the packaged `lightgbm` executable is installed when host execution is available.
 - Declared package test pass rate: final upstream CTest and test_package pass counts are taken from OpenDesk/CI logs for the current head.
 
-The upstream `tests/cpp_tests/` suite is included with `BUILD_CPP_TEST=ON`. LightGBM v4.6.0 creates a `testlightgbm` executable but does not register it with CTest by default, so the recipe patches the upstream CMakeLists to add `add_test(NAME testlightgbm COMMAND testlightgbm)` before running CTest. This prevents the misleading `No tests were found` result and records the real upstream runtime outcome.
+The upstream `tests/cpp_tests/` suite is included with `BUILD_CPP_TEST=ON`. LightGBM v4.6.0 creates a `testlightgbm` executable but does not register it with CTest by default, so the recipe patches the upstream CMakeLists to add `add_test(NAME testlightgbm COMMAND $<TARGET_FILE:testlightgbm>)` and runs it from the upstream source root before running CTest. This prevents the misleading `No tests were found` result, keeps upstream example data discoverable, and records the real upstream runtime outcome.
