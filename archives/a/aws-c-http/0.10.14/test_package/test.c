@@ -13,19 +13,25 @@ int main(void) {
     if (allocator == NULL) {
         return 1;
     }
-    aws_common_library_init(allocator);
-    aws_cal_library_init(allocator);
-    aws_io_library_init(allocator);
-    aws_compression_library_init(allocator);
-    aws_http_library_init(allocator);
+    if (aws_common_library_init(allocator) != AWS_OP_SUCCESS) {
+        return 1;
+    }
+    if (aws_cal_library_init(allocator) != AWS_OP_SUCCESS) {
+        goto cleanup_common;
+    }
+    if (aws_io_library_init(allocator) != AWS_OP_SUCCESS) {
+        goto cleanup_cal;
+    }
+    if (aws_compression_library_init(allocator) != AWS_OP_SUCCESS) {
+        goto cleanup_io;
+    }
+    if (aws_http_library_init(allocator) != AWS_OP_SUCCESS) {
+        goto cleanup_compression;
+    }
     status_text = aws_http_status_text(200);
     if (status_text == NULL || strcmp(status_text, "OK") != 0) {
         aws_http_library_clean_up();
-        aws_compression_library_clean_up();
-        aws_io_library_clean_up();
-        aws_cal_library_clean_up();
-        aws_common_library_clean_up();
-        return 1;
+        goto cleanup_compression_with_error;
     }
     aws_http_library_clean_up();
     aws_compression_library_clean_up();
@@ -34,4 +40,18 @@ int main(void) {
     aws_common_library_clean_up();
     printf("aws-c-http smoke test OK\n");
     return 0;
+
+cleanup_compression_with_error:
+    aws_compression_library_clean_up();
+cleanup_io:
+    aws_io_library_clean_up();
+cleanup_cal:
+    aws_cal_library_clean_up();
+cleanup_common:
+    aws_common_library_clean_up();
+    return 1;
+
+cleanup_compression:
+    aws_compression_library_clean_up();
+    goto cleanup_io;
 }
