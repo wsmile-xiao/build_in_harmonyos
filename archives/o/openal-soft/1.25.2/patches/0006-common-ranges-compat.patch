@@ -1,0 +1,175 @@
+--- /dev/null	2026-08-01 09:25:57.431511094 +0800
++++ b/common/atomcode_ranges_compat.h
+@@ -0,0 +1,172 @@
++/* Formal compat header for OHOS SDK libc++ 15.0.4 (libcxx-ohos):
++ * std::views::elements<N> (elements_view) and std::views::split (split_view)
++ * are absent — no <__ranges/elements_view.h> / <__ranges/split_view.h> are
++ * shipped. openal-soft 1.25.2 uses them in the mixer / config parsing.
++ *
++ * This file is formal archive content (introduced by patch 0006) and is
++ * self-contained: no absolute paths, no host-private shims, no dependency on
++ * anything outside the source tree. It must be included by the affected
++ * translation units (see patches 0007+). Self-disables nothing — it simply
++ * provides the two missing range adaptors with semantics equivalent to the
++ * C++20 standard for the tuple-like / char-delimiter usages in this project.
++ */
++#ifndef ATOMCODE_COMPAT_RANGES_H
++#define ATOMCODE_COMPAT_RANGES_H
++
++#if defined(__cplusplus) && __cplusplus >= 202002L
++
++#include <ranges>
++#include <tuple>
++#include <cstddef>
++
++namespace std::ranges::views {
++
++/* ---- views::elements<N>: element extraction view ---- */
++template<std::size_t N>
++struct __atomcode_elements_closure {
++    template<std::ranges::viewable_range R>
++    constexpr auto operator()(R&& __r) const
++    {
++        return std::views::transform(std::forward<R>(__r), [](auto&& __e) -> decltype(auto)
++        {
++            return std::get<N>(std::forward<decltype(__e)>(__e));
++        });
++    }
++};
++
++template<std::size_t N>
++inline constexpr __atomcode_elements_closure<N> elements{};
++
++template<class R, std::size_t N>
++constexpr auto operator|(R&& __r, __atomcode_elements_closure<N> const& __c)
++{
++    return __c(std::forward<R>(__r));
++}
++
++/* ---- views::split: single-value-pattern split view ---- */
++template<std::ranges::view V>
++class __atomcode_split_view : public std::ranges::view_interface<__atomcode_split_view<V>>
++{
++    V m_base{};
++    std::ranges::range_value_t<V> m_delim{};
++
++    class iterator {
++        std::ranges::iterator_t<V> m_cur{};
++        std::ranges::sentinel_t<V> m_end{};
++        std::ranges::range_value_t<V> m_delim{};
++        bool m_done{false};
++
++        static constexpr auto find_piece_end(std::ranges::iterator_t<V> it,
++            std::ranges::sentinel_t<V> end, std::ranges::range_value_t<V> d)
++        {
++            while(it != end && *it != d)
++                ++it;
++            return it;
++        }
++    public:
++        using iterator_concept = std::forward_iterator_tag;
++        using iterator_category = std::forward_iterator_tag;
++        using value_type = std::ranges::subrange<std::ranges::iterator_t<V>>;
++        using difference_type = std::ptrdiff_t;
++
++        constexpr iterator() = default;
++        constexpr iterator(std::ranges::iterator_t<V> cur, std::ranges::sentinel_t<V> end,
++            std::ranges::range_value_t<V> delim, bool done = false)
++            : m_cur(cur), m_end(end), m_delim(delim), m_done(done)
++        {
++        }
++
++        constexpr value_type operator*() const
++        {
++            auto const piece_end = find_piece_end(m_cur, m_end, m_delim);
++            return value_type{m_cur, piece_end};
++        }
++        constexpr iterator& operator++()
++        {
++            auto it = find_piece_end(m_cur, m_end, m_delim);
++            if(it != m_end)
++            {
++                ++it; /* skip the delimiter */
++                while(it != m_end && *it == m_delim)
++                    ++it; /* skip consecutive delimiters */
++                m_cur = it;
++            }
++            else
++            {
++                m_done = true;
++            }
++            return *this;
++        }
++        constexpr iterator operator++(int) { auto tmp = *this; ++*this; return tmp; }
++
++        friend constexpr bool operator==(iterator const& a, iterator const& b)
++        {
++            if(a.m_done || b.m_done)
++                return a.m_done == b.m_done;
++            return a.m_cur == b.m_cur && a.m_end == b.m_end && a.m_delim == b.m_delim;
++        }
++        friend constexpr bool operator!=(iterator const& a, iterator const& b) { return !(a == b); }
++    };
++
++public:
++    __atomcode_split_view() = default;
++    constexpr __atomcode_split_view(V base, std::ranges::range_value_t<V> delim)
++        : m_base(std::move(base)), m_delim(delim)
++    {
++    }
++
++    constexpr iterator begin()
++    {
++        return iterator{std::ranges::begin(m_base), std::ranges::end(m_base), m_delim};
++    }
++    constexpr iterator end()
++    {
++        /* end() must carry the done flag so a fully-advanced iterator compares
++         * equal to it (otherwise ranges::transform loops past the end). */
++        return iterator{std::ranges::end(m_base), std::ranges::end(m_base), m_delim, true};
++    }
++};
++
++template<class R>
++__atomcode_split_view(R&&, std::ranges::range_value_t<R>)
++    -> __atomcode_split_view<std::ranges::views::all_t<R>>;
++
++namespace __atomcode_split_detail {
++
++template<class Pat>
++struct __split_closure {
++    Pat m_pat;
++    template<std::ranges::viewable_range R>
++    constexpr auto operator()(R&& r) const
++    {
++        return __atomcode_split_view{std::ranges::views::all(std::forward<R>(r)), m_pat};
++    }
++};
++
++struct __split_cpo {
++    template<std::ranges::viewable_range R, class Pat>
++    constexpr auto operator()(R&& r, Pat&& p) const
++    {
++        return __atomcode_split_view{std::ranges::views::all(std::forward<R>(r)),
++            static_cast<Pat&&>(p)};
++    }
++    template<class Pat>
++    constexpr auto operator()(Pat&& p) const
++    {
++        return __split_closure<std::decay_t<Pat>>{std::forward<Pat>(p)};
++    }
++};
++
++template<class R, class Pat>
++constexpr auto operator|(R&& r, __split_closure<Pat> const& c)
++{
++    return c(std::forward<R>(r));
++}
++
++} // namespace __atomcode_split_detail
++
++inline constexpr auto split = __atomcode_split_detail::__split_cpo{};
++
++} // namespace std::ranges::views
++#endif // C++20
++#endif // ATOMCODE_COMPAT_RANGES_H
