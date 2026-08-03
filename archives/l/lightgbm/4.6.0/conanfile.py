@@ -60,7 +60,7 @@ class LightGBMConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        cmake.test(cli_args=["--output-on-failure"])
+        self.run(f'ctest --test-dir "{self.build_folder}" --output-on-failure', env=["conanbuild"])
 
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
