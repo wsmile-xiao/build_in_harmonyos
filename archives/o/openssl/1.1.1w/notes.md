@@ -1,29 +1,33 @@
-# openssl 1.1.1w 编译进度
+# OpenSSL 1.1.1w notes
 
-**日期**: 2026-04-12
-**状态**: 🔄 编译中
+## Build
 
-## 步骤记录
+The recipe uses OpenSSL's Perl-based `Configure` flow with the custom
+`openharmony-aarch64` target added by patch.
 
-| 步骤 | 状态 | 备注 |
-|------|------|------|
-| Step 1 init | ⏳ | |
-| Step 2 patches | ⏳ | |
-| Step 3 configure | ⏳ | |
-| Step 4 make | ⏳ | |
-| Step 5 install | ⏳ | |
-| Step 6 safety | ⏳ | |
-| Step 7 check | ⏳ | |
-| Step 8 staging | ⏳ | |
-| Step 9 package | ⏳ | |
-| Step 10 deploy | ⏳ | |
-| Step 11 finish | ⏳ | |
+Important OHOS settings:
 
-## 发现与知识
+- `no-asm` for portable OHOS builds.
+- `CC=clang` is passed to `Configure`; otherwise OpenSSL 1.1.1w generates a
+  Makefile that falls back to `gcc`, which is unavailable on OHOS CI workers.
+- Static libraries are built by default.
 
-<!-- 编译过程中发现的问题和解决方案 -->
+## Upstream tests
 
----
+`build()` runs the real upstream test harness:
 
-**编译结束**: 2026-04-12 20:08
-**最终状态**: partial
+```bash
+make test
+```
+
+OpenSSL 1.1.1w has 159 upstream test recipe entries under `test/recipes/`.
+These are counted as upstream tests for PR reporting, instead of reporting only
+a hand-picked smoke-test subset.
+
+## Consumer test
+
+`test_package` builds and runs `test_openssl.c` with 3 runtime assertions:
+
+1. OpenSSL version query.
+2. SHA256 digest calculation.
+3. SSL context creation.
