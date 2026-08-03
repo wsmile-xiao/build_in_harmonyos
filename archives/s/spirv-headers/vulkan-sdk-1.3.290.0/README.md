@@ -1,19 +1,18 @@
 # SPIRV-Headers vulkan-sdk-1.3.290.0
 
-This Conan recipe packages the official Khronos SPIR-V headers and
-machine-readable grammar files.
+Conan package for the Khronos SPIR-V headers and machine-readable grammar files.
+
+## Build
+
+```bash
+conan create . -pr ohos-native
+```
+
+The package is header-only. The source archive is downloaded from the official
+KhronosGroup repository and verified with the SHA-256 value in `conandata.yml`.
 
 ## Validation
 
-The build executes all three upstream integration scenarios:
-
-1. the in-tree CMake target from `tests/example.cpp`;
-2. the installed CMake `find_package` consumer;
-3. the installed pkg-config consumer.
-
-The separate Conan `test_package` compiles against the packaged
-`SPIRV-Headers::SPIRV-Headers` target and validates four public constants.
-
-Native Linux validation passes all three upstream integration scenarios and
-all four consumer assertions. OHOS AArch64 validation is delegated to the
-official competition CI.
+`test_package` compiles C and C++ consumers against the public headers. The
+tests check the SPIR-V magic number, version, `SpvOpNop`, and matching C/C++
+opcode values.

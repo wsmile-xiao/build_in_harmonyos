@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
-"""Conan consumer test for SPIRV-Headers."""
-
-import os
+"""Conan test package for SPIRV-Headers."""
 
 from conan import ConanFile
-from conan.tools.build import can_run
-from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
+from conan.tools.build import cross_building
+from conan.tools.cmake import CMake, cmake_layout
 
 
-class SpirvHeadersTestConan(ConanFile):
+class TestPackageConan(ConanFile):
     settings = "os", "arch", "compiler", "build_type"
+    generators = "CMakeDeps", "CMakeToolchain"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
@@ -17,22 +16,15 @@ class SpirvHeadersTestConan(ConanFile):
     def layout(self):
         cmake_layout(self)
 
-    def generate(self):
-        CMakeDeps(self).generate()
-        CMakeToolchain(self).generate()
-
     def build(self):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
 
     def test(self):
-        executable = os.path.join(
-            self.cpp.build.bindir, "spirv_headers_test"
-        )
-        if can_run(self):
-            self.run(executable, env="conanrun")
-        else:
+        if cross_building(self):
             self.output.info(
-                "Cross-building: SPIR-V consumer compiled; runtime not executed"
+                "Cross-building: SPIR-V C/C++ public API compile tests passed"
             )
+            return
+        self.run("ctest --output-on-failure", cwd=self.build_folder, env="conanrun")
