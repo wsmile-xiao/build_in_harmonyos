@@ -235,23 +235,29 @@ endif()
             r"\s*endif\(\)\s*\n"
             r"\s*endif\(\)\s*\n+"
         )
-        self._remove_config_block(config, pattern)
+        self._remove_config_block(config, pattern, "aws-c-cal crypto dependency")
 
     def _strip_io_s2n_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-io", "aws-c-io-config.cmake")
-        pattern = (
-            r"(?ms)^if\s*\(UNIX\s+AND\s+NOT\s+APPLE\s+AND\s+NOT\s+BYO_CRYPTO\)\s*\n"
-            r"\s*find_dependency\(s2n\)\s*\n"
-            r"\s*endif\(\)\s*\n+"
+        pattern = re.compile(
+            r"if \(UNIX AND NOT APPLE AND NOT BYO_CRYPTO\)\s*"
+            r"find_dependency\(s2n\)\s*"
+            r"endif\(\)\s*",
+            re.MULTILINE,
         )
-        self._remove_config_block(config, pattern)
+        self._remove_config_block(config, pattern, "aws-c-io s2n dependency")
 
-    def _remove_config_block(self, path, pattern):
+    def _remove_config_block(self, path, pattern, description):
         if not os.path.exists(path):
             return
         content = load(self, path)
         updated, count = re.subn(pattern, "", content, count=1)
-        if count:
-            save(self, path, updated)
-        else:
-            self.output.warning("Expected CMake config block was not present in {}".format(path))
+        if count == 0:
+            forbidden = ("find_dependency(OpenSSL", "find_dependency(crypto", "find_dependency(s2n")
+            if any(token in content for token in forbidden):
+                raise RuntimeError(f"Unable to remove {description} from {path}; dependency block format changed")
+            self.output.info(f"{description} was already absent from {path}")
+            return
+        if count > 1:
+            raise RuntimeError(f"Refusing to remove {count} {description} blocks from {path}")
+        save(self, path, updated)
