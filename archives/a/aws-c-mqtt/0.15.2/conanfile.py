@@ -83,6 +83,28 @@ class AwsCMqttConan(ConanFile):
     def _prefix_path(self, prefix):
         return ";".join([prefix, self.package_folder])
 
+    def _toolchain_file(self):
+        return os.path.join(self.generators_folder, "conan_toolchain.cmake")
+
+    def _cmake_system_name(self):
+        os_name = str(self.settings.os)
+        if os_name in ("OHOS", "HarmonyOS"):
+            return "OHOS"
+        return os_name
+
+    def _cmake_system_processor(self):
+        arch = str(self.settings.arch)
+        return {
+            "armv8": "aarch64",
+            "armv8.3": "aarch64",
+            "armv8.4": "aarch64",
+            "armv8.5": "aarch64",
+            "armv8.6": "aarch64",
+            "armv8.7": "aarch64",
+            "armv8.8": "aarch64",
+            "x86_64": "x86_64",
+        }.get(arch, arch)
+
     def _build_private_cmake(self, name, definitions=None):
         source_dir = self.source_folder if name == "aws-c-mqtt" else os.path.join(self.source_folder, "_deps", name)
         build_dir = os.path.join(self.build_folder, "_build", name)
@@ -94,6 +116,9 @@ class AwsCMqttConan(ConanFile):
             "cmake",
             "-S", source_dir,
             "-B", build_dir,
+            "-DCMAKE_TOOLCHAIN_FILE={}".format(self._toolchain_file()),
+            "-DCMAKE_SYSTEM_NAME={}".format(self._cmake_system_name()),
+            "-DCMAKE_SYSTEM_PROCESSOR={}".format(self._cmake_system_processor()),
             "-DCMAKE_BUILD_TYPE={}".format(self.settings.build_type),
             "-DCMAKE_INSTALL_PREFIX={}".format(prefix),
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
