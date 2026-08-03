@@ -169,6 +169,7 @@ endif()
 
     def _patch_http_upstream_tests_for_no_tls_build(self):
         root = os.path.join(self.source_folder, "CMakeLists.txt")
+        self._add_no_tls_protocol_stub()
         content = load(self, root)
         filtered = "\n".join(
             line for line in content.splitlines()
@@ -224,6 +225,36 @@ endif()
                 "list(FILTER TEST_CASES INCLUDE REGEX ${OHOS_CORE_TEST_REGEX})\n"
                 "generate_test_driver(${TEST_BINARY_NAME})\n",
             )
+
+    def _add_no_tls_protocol_stub(self):
+        stub = os.path.join(self.source_folder, "source", "ohos_no_tls_protocol_stub.c")
+        if not os.path.exists(stub):
+            with open(stub, "w", encoding="utf-8") as file:
+                file.write(
+                    "#include <aws/common/byte_buf.h>\n"
+                    "#include <aws/io/channel.h>\n\n"
+                    "struct aws_byte_buf aws_tls_handler_protocol(struct aws_channel_handler *handler) {\n"
+                    "    (void)handler;\n"
+                    "    struct aws_byte_buf protocol = {0};\n"
+                    "    return protocol;\n"
+                    "}\n"
+                )
+        root = os.path.join(self.source_folder, "CMakeLists.txt")
+        content = load(self, root)
+        stub_source = "source/ohos_no_tls_protocol_stub.c"
+        if stub_source in content:
+            return
+        markers = (
+            ("file(GLOB AWS_HTTP_SRC source/*.c)\n", "AWS_HTTP_SRC"),
+            ("file(GLOB AWS_HTTP_SRC \"source/*.c\")\n", "AWS_HTTP_SRC"),
+            ("file(GLOB AWS_HTTP_SOURCE source/*.c)\n", "AWS_HTTP_SOURCE"),
+            ("file(GLOB AWS_HTTP_SOURCE \"source/*.c\")\n", "AWS_HTTP_SOURCE"),
+        )
+        for marker, variable in markers:
+            if marker in content:
+                replace_in_file(self, root, marker, marker + f"list(APPEND {variable} {stub_source})\n")
+                return
+        raise RuntimeError("Unable to add OHOS no-TLS protocol stub to aws-c-http CMake sources")
 
     def _ensure_common_threads_config(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-common", "aws-c-common-config.cmake")
