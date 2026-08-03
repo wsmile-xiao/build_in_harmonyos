@@ -6,7 +6,7 @@ import shlex
 
 from conan import ConanFile
 from conan.tools.build import build_jobs
-from conan.tools.cmake import cmake_layout
+from conan.tools.cmake import CMakeToolchain, cmake_layout
 from conan.tools.files import copy, get, load, replace_in_file, save
 
 
@@ -29,6 +29,10 @@ class AwsCMqttConan(ConanFile):
 
     def layout(self):
         cmake_layout(self)
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.generate()
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
