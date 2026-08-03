@@ -297,11 +297,13 @@ endif()
     def _strip_cal_crypto_dependency(self, prefix):
         config = os.path.join(prefix, "lib", "cmake", "aws-c-cal", "aws-c-cal-config.cmake")
         pattern = re.compile(
-            r"if \(\(NOT WIN32 AND NOT APPLE\) OR AWS_USE_LIBCRYPTO_TO_SUPPORT_ED25519_EVERYWHERE\)\s*"
-            r"if \(USE_OPENSSL\)\s*"
+            r"if \([^\n]*\)\s*"
+            r"if \([^\n]*\)\s*"
+            r"(?:#[^\n]*\n\s*)*"
             r"find_dependency\(OpenSSL REQUIRED\)\s*"
             r"find_dependency\(Threads REQUIRED\)\s*"
             r"else\(\)\s*"
+            r"(?:list\(APPEND CMAKE_MODULE_PATH \"\$\{CMAKE_CURRENT_LIST_DIR\}/modules\"\)\s*)?"
             r"find_dependency\(crypto\)\s*"
             r"endif\(\)\s*"
             r"endif\(\)\s*",
