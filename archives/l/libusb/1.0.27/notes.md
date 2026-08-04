@@ -14,6 +14,16 @@
 | 源码来源 | gitee.com/mirrors/libusb (git archive, v1.0.27) |
 | 编译器 | clang 15.0.4 |
 
+## Conan 配方补充（2026-07-29）
+
+- 新增 `conandata.yml` 和 `conanfile.py`，使用官方 release tarball `libusb-1.0.27.tar.bz2`。
+- 通过 recipe-side `replace_in_file` 复用既有适配点：`configure` umask、`linux_netlink.c`、`linux_usbfs.c`。
+- 默认 `--disable-udev`，避免 HarmonyOS 缺少 udev 守护进程。
+- 新增非设备依赖的 `test_package/test_libusb.c`，验证版本元数据和错误字符串 API。
+- OHOS 可运行环境执行上游 `make check`，实际运行 `stress`、`stress_mt`、
+  `set_option`、`init_context` 四个上游测试程序；Windows 交叉预审使用
+  `make check TESTS=` 编译同一组测试目标，消费测试继续作为独立下游验证。
+
 ## 二、编译阶段
 
 ### Phase 1: 环境准备
