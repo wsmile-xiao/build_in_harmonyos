@@ -12,7 +12,9 @@ cmocka 是一个优雅的 C 语言单元测试框架，支持 mock 对象。
 
 ## OHOS 适配
 
-- 标准 autotools 项目，无需特殊补丁
+- 上游 2.0.2 为 CMake/Meson 项目，当前使用 CMake recipe 适配
+- 默认启用 examples 和 upstream unit tests，并在构建阶段执行全量 CTest
+- `test_package` 编译并运行一个最小 cmocka 测试程序，验证 CMake target 和运行时
 
 ## 依赖关系
 
