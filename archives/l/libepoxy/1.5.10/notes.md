@@ -2,97 +2,52 @@
 
 ## 编译环境
 - 构建系统: meson
-- 编译日期: 2026-04-30
+- 编译日期: 2026-08-02
 - 编译器: clang/clang++
 - 状态: published
 
-## 编译步骤
+## 适配方案（Conan 配方）
 
-### 1. 初始化
+### 1. 构建选项
+OHOS 无窗口系统（无 X11/Wayland/GLX/EGL），禁用相关支持：
 ```bash
-python3 $SKILL_ROOT/scripts/ohc-run.py init-build libepoxy 1.5.10 --url=https://github.com/anholt/libepoxy/archive/refs/tags/1.5.10.tar.gz
+meson setup builddir -Dglx=no -Degl=no -Dx11=false -Dtests=false
 ```
+- glx/egl 为 combo 选项（传 `no`），x11/tests 为 boolean（传 `false`）——注意选项类型，与 atk introspection 的教训一致。
 
-### 2. Meson 配置
-由于 OpenHarmony 上没有 OpenGL/EGL 库，需要禁用这些功能：
-```bash
-CC=/data/service/hnp/bin/clang CXX=/data/service/hnp/bin/clang++ \
-AR=/data/service/hnp/bin/llvm-ar NM=/data/service/hnp/bin/llvm-nm \
-STRIP=/data/service/hnp/bin/llvm-strip \
-meson setup builddir --prefix=$DEFAULT_PREFIX \
-  -Dglx=no -Degl=no -Dx11=false -Dtests=false
-```
+### 2. R26 静态构建
+配方默认 `shared=False`，通过 `tc.project_options["default_library"] = "static"` 设置
+（**不是** `tc.configure_args`——MesonToolchain 无该属性，gdk-pixbuf 曾踩坑）。
 
-### 3. 修复脚本执行问题
-HMDFS 文件系统不支持直接执行 Python 脚本，需要修改 build.ninja：
-```bash
-sed -i 's|COMMAND = <src>/src/gen_dispatch.py|COMMAND = python3 <src>/src/gen_dispatch.py|g' builddir/build.ninja
-```
+### 3. llvm-ar/llvm-ranlib 注入
+conan MesonToolchain 不把 ar/ranlib 写进 native file，meson 按裸名 `llvm-ar` 探测失败
+（clang 工具链在 /data/service/hnp/bin）。与 cairo/pango/atk 一致：从 c 编译器同目录
+推导 llvm-ar/llvm-ranlib 全路径注入 `conan_meson_native.ini` 的 `[binaries]` 段。
 
-### 4. 编译
-```bash
-ninja -C builddir
-```
+### 4. gen_dispatch.py 显式 python3 调用（补丁 0001）
+上游 src/meson.build 的 custom_target 直接执行 gen_dispatch.py，设备文件系统
+无法 shebang 直接执行 Python 脚本（E081 同类）。补丁在 command 前加 `'python3'`。
 
-### 5. 安装
-```bash
-meson install -C builddir --destdir=$TEST_PREFIX
-```
+### 5. 源码镜像
+conandata.yml 仅保留官方 GitHub URL；CI Mirror fallback 在构建时自动改写为
+gh-proxy.com（与 pcalc 同型，无需在配方中手动声明镜像）。
 
-### 6. 创建符号链接
-```bash
-cd $TEST_PREFIX/$DEFAULT_PREFIX/lib
-rm -f libepoxy.so.0 libepoxy.so
-ln -s libepoxy.so.0.0.0 libepoxy.so.0
-ln -s libepoxy.so.0.0.0 libepoxy.so
-```
+## 测试
+- test_package 编译 `#include <epoxy/gl.h>` 并真实调用 `epoxy_extension_in_string()`（纯字符串解析，
+  验证 libepoxy 可链接、核心分发表字符串路径可用；`epoxy_gl_version()` 会 dlopen GL 库 abort，不能调用）
+- `test()` 用 `self.run` 直接执行二进制（L0d），MANIFEST.yml 已声明（L0e）
 
-## 遇到的问题与解决方案
+## R40 图形库适配完整性标注（需人工确认）
+libepoxy 属于 R40 点名的「图形/渲染」领域（OpenGL/EGL 函数指针分发库）。
+本 PR 的适配边界如下，**GL 分发表在 OHOS 上的真实可用性未经真机验证**：
+- OHOS 无窗口系统，配方整体禁用 `glx/egl/x11`（无鸿蒙图形栈适配补丁）
+- test_package 仅覆盖「头文件可编译 + 链接可行 + 字符串工具可运行」最小子集
+  （`epoxy_extension_in_string()` 纯字符串解析；`epoxy_gl_version()` 会 dlopen GL 库
+  abort，不能调用），未创建 EGL/GL 上下文、未验证真实 GL dispatch 分发表行为
+- 「编译通过 + 接口测试」不构成 GL 分发表可用性证明；如有真实 GL/EGL
+  消费方（如 gtk+）在 OHOS 上落地，需另行真机验证后更新本标注
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | meson 找不到 clang | CC 环境变量未正确传递 | 手动指定 CC/CXX/AR 等环境变量 |
-| 2 | gen_dispatch.py Permission denied | HMDFS 不支持脚本直接执行 | 修改 build.ninja 使用 python3 执行 |
-| 3 | 缺少 OpenGL/EGL 库 | OpenHarmony 无桌面 GL 库 | 禁用 GLX/EGL/X11 选项 |
-| 4 | ln -sf 不生效 | HMDFS 软链接覆盖限制 | 使用 rm -f && ln -s 模式 |
-
-## 源码修改
-
-无源码补丁。所有修改都是构建配置级别的（build.ninja）。
-
-## 依赖版本
-
-- meson: 1.11.1
-- ninja: 1.13.0
-- clang: 15.0.4
-
-## 验证结果
-
-```bash
-pkg-config --modversion epoxy
-# Output: 1.5.10
-
-ls -la ~/usr/local/lib/libepoxy*
-# libepoxy.so -> libepoxy.so.0.0.0
-# libepoxy.so.0 -> libepoxy.so.0.0.0
-# libepoxy.so.0.0.0
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libepoxy-1.5.10-ohos-aarch64.tar.gz | 2.6MB | 预编译包（含库、头文件、pkg-config） |
-| libepoxy-1.5.10-ohos-aarch64-debug.tar.gz | 185KB | 调试符号包 |
-| install.sh | 564B | 安装脚本 |
-
-## 注意事项
-
-1. 此版本禁用了 GLX/EGL/X11 支持，仅提供基础 GL 函数指针管理功能
-2. 运行时需要 OpenGL 实现库（用户需自行配置）
-3. HMDFS 上符号链接需要特殊处理（rm -f && ln -s）
-
----
-
-**编译结束**: 2026-04-30 01:43
-**最终状态**: published
+## 知识沉淀
+- OHOS 无 OpenGL/EGL 库，GLX/EGL/X11 必须禁用
+- HMDFS 不支持 Python 脚本 shebang 直接执行，需 python3 显式调用
+- HMDFS 不支持 ln -sf 覆盖，需 rm -f && ln -s 模式（package() 中补齐 .so 符号链接）
