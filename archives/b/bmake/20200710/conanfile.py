@@ -4,6 +4,7 @@
 import os
 
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get
 from conan.tools.layout import basic_layout
 
@@ -27,6 +28,12 @@ class BmakeConan(ConanFile):
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
+    def validate(self):
+        if str(self.settings.arch) not in ("armv8", "aarch64"):
+            raise ConanInvalidConfiguration(
+                "bmake/20200710 currently supports only OHOS aarch64"
+            )
+
     def build(self):
         # Upstream requires boot-strap to run from the directory containing
         # the unpacked bmake source. It then creates and builds in its own
@@ -34,12 +41,19 @@ class BmakeConan(ConanFile):
         compiler = self.conf.get(
             "tools.build:compiler_executables", default={}, check_type=dict
         ).get("c", "clang")
+        arch = {"armv8": "aarch64", "aarch64": "aarch64"}[
+            str(self.settings.arch)
+        ]
+        host_target = f"ohos-{arch}"
         apply_conandata_patches(self)
         prefix = os.path.join(self.build_folder, "stage")
         self.run(
-            'HOST_TARGET=ohos-aarch64 MK_AUTO_OBJ=no CC="{}" sh "{}" --prefix="{}" --install-host-target '
+            'HOST_TARGET="{}" MK_AUTO_OBJ=no CC="{}" sh "{}" --prefix="{}" --install-host-target '
             "--with-machine=ohos -DWITH_PROG_VERSION".format(
-                compiler, os.path.join(self.source_folder, "boot-strap"), prefix
+                host_target,
+                compiler,
+                os.path.join(self.source_folder, "boot-strap"),
+                prefix,
             ),
             cwd=os.path.dirname(self.source_folder),
         )

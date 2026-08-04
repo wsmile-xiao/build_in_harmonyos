@@ -6,8 +6,10 @@ packaged mk directory.
 
 The OHOS build filesystem rejects writes to Autoconf temporary directories made
 under `umask 077`, so the generated configure script uses `umask 022`. The
-platform identifier contains spaces; `MACHINE` and `HOST_TARGET` are therefore
-set to `ohos` and `ohos-aarch64` respectively.
+platform identifier contains spaces; `MACHINE` is therefore set to `ohos`, and
+`HOST_TARGET` is derived from the Conan architecture. Conan's `armv8` setting is
+mapped to the upstream `aarch64` name. Other architectures are rejected because
+this recipe currently targets OHOS aarch64 only.
 
 The upstream bootstrap unit-tests run through the freshly built bmake binary.
 The explicit `ohos-aarch64` host target prevents the HarmonyOS system name from
