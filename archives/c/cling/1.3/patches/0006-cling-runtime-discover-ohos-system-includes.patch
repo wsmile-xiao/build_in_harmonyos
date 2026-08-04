@@ -1,0 +1,133 @@
+From: OpenHarmony PC Adaptation <noreply@openharmony.io>
+Date: Mon, 20 Jul 2026 06:32:00 +0800
+Subject: [PATCH 6/6] cling: complete configured runtime include discovery
+
+An adjacent Clang can report a usable libc++ directory while omitting the
+target sysroot. Because that partial result is non-empty, Cling suppresses its
+configured CLING_CXX_INCL fallback and interpreted code then misses libc
+headers.
+
+When CLING_OHOS_SYSROOT_MERGE is selected by CMake, preserve discovered path
+order and append only missing absolute sysroot entries from CLING_CXX_INCL.
+Normalize trailing slashes for duplicate detection, retain the upstream
+empty-result fallback, and leave the Linux runtime query unchanged.
+
+Origin: https://github.com/root-project/cling/tree/v1.3
+Upstream-Status: Not-Submitted [contest adaptation]
+Source-Commit: af630d98a4aff3868de049d528402a628da0830a
+Modification-Layer: 1 (C++ source)
+Knowledge-Ref: E238
+---
+ lib/Interpreter/CIFactory.cpp | 60 ++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 59 insertions(+), 1 deletion(-)
+
+diff --git a/lib/Interpreter/CIFactory.cpp b/lib/Interpreter/CIFactory.cpp
+--- a/lib/Interpreter/CIFactory.cpp
++++ b/lib/Interpreter/CIFactory.cpp
+@@ -128,47 +128,105 @@
+         P = P.trim();
+         Args.addArgument("-cxx-isystem", P.str());
+       }
+       return;
+     }
+ 
+     std::string CppInclQuery("LC_ALL=C ");
+     CppInclQuery.append(Compiler);
+ 
+     CppInclQuery.append(" -xc++ -E -v /dev/null 2>&1 |"
++#if defined(CLING_OHOS_SYSROOT_MERGE)
++                        " sed -n -e '/^.include/,${' -e '/^ \\/.*[+][+]/p'"
++                        " -e '/^ \\/.*\\/sysroot\\/usr\\/include/p' -e '}'");
++#else
+                         " sed -n -e '/^.include/,${' -e '/^ \\/.*++/p' -e '}'");
++#endif
+ 
+     if (Verbose)
+       cling::log() << "Looking for C++ headers with:\n  " << CppInclQuery << "\n";
++
++#if defined(CLING_OHOS_SYSROOT_MERGE)
++    llvm::SmallVector<std::string, 6> OHOSPaths;
++    auto IsSameOHOSPath = [](llvm::StringRef Left, llvm::StringRef Right) {
++      return Left.rtrim('/') == Right.rtrim('/');
++    };
++    auto HasOHOSPath = [&OHOSPaths, &IsSameOHOSPath](llvm::StringRef Candidate) {
++      for (const std::string& Existing : OHOSPaths) {
++        if (IsSameOHOSPath(Existing, Candidate))
++          return true;
++      }
++      return false;
++    };
++    auto AddOHOSPath = [&OHOSPaths, &HasOHOSPath](llvm::StringRef Path) {
++      if (!HasOHOSPath(Path))
++        OHOSPaths.push_back(Path.str());
++    };
++#endif
+ 
+     if (FILE *PF = ::popen(CppInclQuery.c_str(), "r")) {
+       Buf.resize(Buf.capacity_in_bytes());
+       while (fgets(&Buf[0], Buf.capacity_in_bytes(), PF) && Buf[0]) {
+         llvm::StringRef Path(&Buf[0]);
+         // Skip leading and trailing whitespace
+         Path = Path.trim();
+         if (!Path.empty()) {
+           if (!llvm::sys::fs::is_directory(Path)) {
+             if (Verbose)
+               cling::utils::LogNonExistantDirectory(Path);
+           }
+-          else
++          else {
++#if defined(CLING_OHOS_SYSROOT_MERGE)
++            AddOHOSPath(Path);
++#else
+             Args.addArgument("-cxx-isystem", Path.str());
++#endif
++          }
+         }
+       }
+       ::pclose(PF);
+     } else {
+       ::perror("popen failure");
+       // Don't be overly verbose, we already printed the command
+       if (!Verbose)
+         cling::errs() << " for '" << CppInclQuery << "'\n";
+     }
++
++#if defined(CLING_OHOS_SYSROOT_MERGE)
++#ifdef CLING_CXX_INCL
++    // An adjacent Clang can find libc++ while missing the target sysroot. In
++    // that case Args would be non-empty and suppress the configured fallback.
++    // Preserve the compiler's order, then append only missing OHOS sysroot
++    // paths from the build-time probe.
++    if (!OHOSPaths.empty()) {
++      llvm::SmallVector<llvm::StringRef, 6> ConfiguredPaths;
++      if (utils::SplitPaths(CLING_CXX_INCL, ConfiguredPaths,
++                            utils::kFailNonExistant, platform::kEnvDelim,
++                            Verbose)) {
++        const llvm::StringRef Marker("/sysroot/usr/include");
++        for (llvm::StringRef Path : ConfiguredPaths) {
++          llvm::StringRef Normalized = Path.rtrim('/');
++          const size_t MarkerPos = Normalized.find(Marker);
++          if (!Normalized.starts_with("/") ||
++              MarkerPos == llvm::StringRef::npos)
++            continue;
++          llvm::StringRef Suffix =
++              Normalized.drop_front(MarkerPos + Marker.size());
++          if (Suffix.empty() || Suffix.starts_with("/"))
++            AddOHOSPath(Path);
++        }
++      }
++    }
++#endif
++    for (const std::string& Path : OHOSPaths)
++      Args.addArgument("-cxx-isystem", Path);
++#endif
+ 
+     // Return the query in Buf on failure
+     if (Args.empty()) {
+       Buf.resize(0);
+       Buf.insert(Buf.begin(), CppInclQuery.begin(), CppInclQuery.end());
+     } else if (Verbose) {
+       cling::log() << "Found:\n";
+       for (const auto& Arg : Args)
+         cling::log() << "  " << Arg.second << "\n";
+     }
