@@ -1,45 +1,26 @@
 # timewarrior 1.9.1 适配笔记
 
-## 编译环境
-- 构建系统: {cmake|autotools|makefile|meson|custom}
-- 编译日期: {2026-06-04}
-- 编译器: clang/clang++
-- 状态: {published|built|failed}
+## 构建配置
 
-## 编译步骤
+- 构建系统：CMake
+- 编译器：OHOS Clang/Clang++
+- 测试选项：`BUILD_TESTING=ON`
+- 外部 Conan 依赖：无
 
-{用文字描述实际编译步骤，包括关键的 configure/cmake 命令}
+## 适配处理
 
-## 遇到的问题与解决方案
-
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-{按需添加行}
-
-## 源码修改
-
-{如有补丁，列出文件名和修改内容；无则删除此节}
-
-## 依赖版本
-
-{列出本次编译依赖的具体软件版本}
+- 将 CMake 平台判断扩展到 OHOS/HarmonyOS。
+- 部署上游 TAP 测试脚本、测试数据目录及辅助程序。
+- 上游 `test/problems` 是由 `run_all` 调用的可执行 Python 文件；配方显式检查其文件类型、复制结果并设置执行权限。
+- 为测试环境提供 `man` 查询 shim，并将上游 `doc/man1`、`doc/man7` 手册页复制到构建目录，通过 `MANPATH` 指向该目录，使 `help.t` 在 OHOS 上能执行真实帮助页对比；单独运行 `AtomicFileTest`。
 
 ## 验证结果
 
-```bash
-{验证命令和结果}
-```
+- 上游 TAP 测试：1505/1505（100%），另有 7 项由上游条件判断跳过。
+- 上游 C++ `AtomicFileTest`：1/1（100%）。
+- 新增安装制品消费测试：1/1（100%）。
 
-## 交付物
+## 源码信息
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-{有打包产物时添加；无则删除此节}
-
-## 注意事项
-
-{需要特别注意的点；无则删除此节}
----
-
-**编译结束**: 2026-06-04 18:01
-**最终状态**: built
+- URL：`https://github.com/GothenburgBitFactory/timewarrior/releases/download/v1.9.1/timew-1.9.1.tar.gz`
+- SHA-256：`7ad34f95c0d61d356df55149f9479f8d9aaec417e5f57f2a1cc76ae2f8a3171b`
