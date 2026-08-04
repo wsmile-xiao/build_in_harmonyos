@@ -372,7 +372,7 @@ PYEOF
                     echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
                     echo "       These packages must be published FIRST (via release pipeline)."
                     echo "[hint] 依赖未发布到制品仓 (R36)。请先发布以下依赖包:"
-                    for d in $UNPUBLISHED_DEPS; do
+                    for d in ${=UNPUBLISHED_DEPS}; do  # zsh: ${=} forces word-splitting
                         echo "         - $d"
                     done
                     L0_FAILED=true
@@ -392,7 +392,7 @@ PYEOF
     # recipes from the local archives/ directory so --build=missing can compile
     # them from source during conan create.
     if [ -n "${UNPUBLISHED_DEPS:-}" ]; then
-        for dep_ref in $UNPUBLISHED_DEPS; do
+        for dep_ref in ${=UNPUBLISHED_DEPS}; do  # zsh: ${=} forces word-splitting (BUG-9 style)
             dep_name=$(echo "$dep_ref" | cut -d'/' -f1)
             dep_ver=$(echo "$dep_ref" | cut -d'/' -f2)
             local_recipe=$(find "$REPO_ROOT/archives" -path "*/${dep_name}/${dep_ver}/conanfile.py" -not -path "*/test_package/*" -print -quit 2>/dev/null)
