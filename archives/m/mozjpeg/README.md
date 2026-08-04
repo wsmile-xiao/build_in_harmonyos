@@ -29,4 +29,4 @@ https://github.com/mozilla/mozjpeg
 
 | Version | Status | Date |
 |---------|--------|------|
-| 4.1.1 | built | 2026-05-26 |
+| 4.1.1 | built | 2026-07-30 |
