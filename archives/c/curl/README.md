@@ -1,35 +1,29 @@
 # curl
 
-curl 是一个命令行工具和库，用于传输数据，支持多种协议。
+curl provides both the `curl` command-line transfer tool and the libcurl C API.
 
-## 描述
-curl 是一个开源的命令行工具和库，用于使用 URL 语法传输数据。支持 HTTP、HTTPS、FTP、FTPS 等多种协议。
+## HarmonyOS PC adaptation
 
-## 已编译版本
-- 8.15.0 (2025-07-16)
+- Builds shared libcurl and the curl executable from the official 8.15.0 source.
+- Requires `openssl/3.5.6.1` and PIC static `zlib/1.3.1.1`; optional
+  undeclared protocol dependencies are disabled. Both recipes passed a fresh
+  Conan-home download check on HarmonyOS PC on 2026-08-04.
+- Avoids the conflicting OHOS Linux UAPI socket header through the upstream
+  `HAVE_LINUX_TCP_H` CMake cache variable, without a source patch.
+- Builds curl's `testdeps` target. Cross builds compile and link the target
+  test programs without claiming that HarmonyOS binaries ran on Windows.
+- A native HarmonyOS PC build considered all 1,849 upstream tests: 1,556
+  runnable tests passed, 293 were skipped by upstream capability checks, and
+  none failed. The Conan consumer and packaged CLI also executed successfully.
 
-## 依赖
-- OpenSSL 1.1.1w
-- zlib 1.3.1
+## Consumer verification
 
-## 特性
-- 支持多种协议：HTTP, HTTPS, FTP, FTPS, GOPHER, GOPHERS, DICT, FILE, IMAP, IMAPS, POP3, POP3S, RTSP, SMB, SMBS, SMTP, SMTPS, TELNET, TFTP, WS, WSS, IPFS, IPNS, MQTT
-- SSL/TLS 支持（OpenSSL）
-- 压缩支持（zlib）
-- IPv6 支持
-- 大文件支持
+The Conan consumer links `CURL::libcurl` and checks initialization, easy-handle
+options, the exact libcurl version, the OpenSSL backend, and zlib support. When
+the target is runnable, the consumer executes without making a network request.
+The HarmonyOS PC run completed this consumer test successfully.
 
-## 使用方法
-```bash
-# 基本用法
-curl https://example.com
+## Reference
 
-# 下载文件
-curl -O https://example.com/file.txt
-
-# POST 请求
-curl -X POST -d "data" https://example.com/api
-```
-
-## 注意事项
-- HTTPS 请求需要配置 CA 证书路径（使用 --cacert 或 CURLOPT_CAINFO）
+- https://curl.se/
+- https://github.com/curl/curl
