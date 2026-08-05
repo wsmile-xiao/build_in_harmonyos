@@ -10,6 +10,7 @@ import shutil
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
+from conan.tools.build import cross_building
 from conan.tools.meson import Meson, MesonToolchain
 from conan.tools.layout import basic_layout
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
@@ -100,8 +101,8 @@ class Glib2Conan(ConanFile):
         tc.project_options["man-pages"] = "disabled"
         tc.project_options["gtk_doc"] = "false"
         tc.project_options["oss_fuzz"] = "disabled"
-        # Upstream tests are run locally only (see MANIFEST.yml); do not ship them.
-        tc.project_options["tests"] = "false"
+        # Build upstream tests; native OHOS/HarmonyOS runs them in build().
+        tc.project_options["tests"] = "true"
         tc.project_options["installed_tests"] = "false"
         tc.generate()
 
@@ -110,6 +111,23 @@ class Glib2Conan(ConanFile):
         meson = Meson(self)
         meson.configure()
         meson.build()
+        if cross_building(self):
+            self.output.info(
+                "cross-building: skip meson.test() (OHOS binaries are not runnable on the build host)"
+            )
+        else:
+            if hasattr(os, "uname") and os.uname().sysname in ("OHOS", "HarmonyOS"):
+                build_folder = self.build_folder
+
+                def _ohos_meson_test():
+                    self.run(
+                        'meson test -v -C "{}" --timeout-multiplier=16 '
+                        "--no-rebuild --no-suite=failing".format(build_folder)
+                    )
+
+                meson.test = _ohos_meson_test
+
+            meson.test()
 
     def package(self):
         meson = Meson(self)
