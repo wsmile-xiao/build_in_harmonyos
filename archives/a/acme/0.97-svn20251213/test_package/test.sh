@@ -7,7 +7,6 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 cat > hello.a <<'EOF'
-!to "hello.bin", plain
 * = $c000
     lda #$01
     sta $d020
