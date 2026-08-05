@@ -163,24 +163,6 @@ fi
 # Enable revisions (Conan 2.x default, but be explicit)
 conan config set general.revisions_enabled=1 2>/dev/null || true
 
-# ── 5. GitHub mirror / proxy ──
-# Worker 可能无法直连 github.com，通过 git url.insteadOf 重写到镜像。
-# 镜像地址由环境变量 CI_GITHUB_MIRROR 指定，留空则跳过。
-CI_GITHUB_MIRROR="${CI_GITHUB_MIRROR:-}"
-if [ -n "$CI_GITHUB_MIRROR" ]; then
-    echo "[step] Configuring GitHub mirror: $CI_GITHUB_MIRROR"
-    git config --global "url.${CI_GITHUB_MIRROR}.insteadOf" "https://github.com/"
-    # 同时为 curl/wget 设置代理（部分 conan recipe 用 HTTP 下载 tarball）
-    if [ -z "${http_proxy:-}" ]; then
-        # CI_HTTPS_PROXY 可选用于 https 代理
-        export http_proxy="${CI_HTTP_PROXY:-}"
-        export https_proxy="${CI_HTTPS_PROXY:-$CI_HTTP_PROXY}"
-    fi
-    echo "[step]   git insteadOf: https://github.com/ → ${CI_GITHUB_MIRROR}"
-else
-    echo "[step] No GitHub mirror configured (CI_GITHUB_MIRROR unset)"
-fi
-
 echo "[step] Conan environment ready ✅"
 echo "[step]   remote: ${CONAN_REMOTE_NAME}"
 echo "[step]   profile: ${PROFILE_NAME}"
