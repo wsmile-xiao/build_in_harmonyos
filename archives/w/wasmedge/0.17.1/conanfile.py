@@ -4,6 +4,7 @@
 import os
 
 from conan import ConanFile
+from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get
 
@@ -45,7 +46,7 @@ class WasmEdgeConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
-        tc.variables["WASMEDGE_BUILD_TESTS"] = "OFF"
+        tc.variables["WASMEDGE_BUILD_TESTS"] = "ON"
         tc.variables["WASMEDGE_BUILD_COVERAGE"] = "OFF"
         tc.variables["WASMEDGE_BUILD_SHARED_LIB"] = "ON" if self.options.shared else "OFF"
         tc.variables["WASMEDGE_BUILD_STATIC_LIB"] = "OFF" if self.options.shared else "ON"
@@ -56,13 +57,16 @@ class WasmEdgeConan(ConanFile):
         tc.variables["WASMEDGE_USE_LLVM"] = "OFF"
         tc.variables["WASMEDGE_FORCE_DISABLE_LTO"] = "ON"
         tc.variables["CMAKE_POSITION_INDEPENDENT_CODE"] = bool(self.options.get_safe("fPIC", True))
+        if str(self.settings.compiler) == "gcc":
+            tc.extra_cxxflags.append("-Wno-error=maybe-uninitialized")
         if str(self.settings.compiler) in ("gcc", "clang", "apple-clang"):
-            tc.extra_cxxflags.extend(["-Wno-error=maybe-uninitialized", "-Wno-error=array-bounds"])
+            tc.extra_cxxflags.append("-Wno-error=array-bounds")
         third_party = os.path.join(self.source_folder, "third_party")
         tc.variables["FETCHCONTENT_SOURCE_DIR_FMT"] = os.path.join(third_party, "fmt")
         tc.variables["FETCHCONTENT_SOURCE_DIR_SPDLOG"] = os.path.join(third_party, "spdlog")
         tc.variables["FETCHCONTENT_SOURCE_DIR_SIMDJSON"] = os.path.join(third_party, "simdjson")
         tc.variables["FETCHCONTENT_SOURCE_DIR_STB"] = os.path.join(third_party, "stb")
+        tc.variables["FETCHCONTENT_SOURCE_DIR_GTEST"] = os.path.join(third_party, "gtest")
         tc.generate()
 
     def build(self):
@@ -73,6 +77,25 @@ class WasmEdgeConan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
+        if can_run(self):
+            upstream_tests = "|".join(
+                [
+                    "expectedTests",
+                    "poTests",
+                    "spanTests",
+                    "wasmedgeCommonTests",
+                    "wasmedgeLoaderFileMgrTests",
+                    "wasmedgeValidatorRegressionTests",
+                    "wasmedgeExecutorRegressionTests",
+                    "wasmedgeThreadTests",
+                    "wasmedgeMemInstanceTests",
+                    "wasmedgeHostMockTests",
+                ]
+            )
+            self.run(
+                f'ctest --test-dir "{self.build_folder}" --output-on-failure --timeout 60 -R "{upstream_tests}"',
+                env="conanbuild",
+            )
 
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
@@ -95,4 +118,3 @@ class WasmEdgeConan(ConanFile):
             self.cpp_info.system_libs.extend(["dl", "pthread", "m"])
         if str(self.settings.os) == "Linux":
             self.cpp_info.system_libs.append("rt")
-        self.cpp_info.bindirs = []
