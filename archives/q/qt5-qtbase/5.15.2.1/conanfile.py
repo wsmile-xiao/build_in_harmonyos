@@ -281,3 +281,8 @@ class Qt5QtbaseConan(ConanFile):
         qt5xml.requires = ["Qt5Core"]
         qt5xml.set_property("cmake_file_name", "Qt5Xml")
         qt5xml.set_property("cmake_target_name", "Qt5::Xml")
+
+        # Aggregate package-level cmake_file_name so CMakeDeps generates
+        # Qt5Config.cmake, enabling `find_package(Qt5 COMPONENTS ...)` used by
+        # consumers such as poppler (PR #3805).
+        self.cpp_info.set_property("cmake_file_name", "Qt5")
