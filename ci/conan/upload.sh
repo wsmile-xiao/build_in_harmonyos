@@ -56,13 +56,21 @@ FAILED=0
 for ref in "${PACKAGES[@]}"; do
     echo ""
     echo "[step] Uploading: ${ref}"
-    if conan upload "$ref" -r="${CONAN_REMOTE_NAME}" -c 2>&1; then
+    # 409 Conflict = 包已存在（之前 upload 成功过），视为幂等成功
+    upload_output=$(conan upload "$ref" -r="${CONAN_REMOTE_NAME}" -c 2>&1) || {
+        exit_code=$?
+        if echo "$upload_output" | grep -qiE "409|already exist|conflict"; then
+            echo "[ok] ${ref} already exists in registry (409 idempotent)"
+            SUCCESS=$((SUCCESS + 1))
+        else
+            echo "[fail] ${ref} upload failed (exit=$exit_code)"
+            echo "$upload_output"
+            FAILED=$((FAILED + 1))
+        fi
+    } && {
         echo "[ok] ${ref} uploaded"
         SUCCESS=$((SUCCESS + 1))
-    else
-        echo "[fail] ${ref} upload failed"
-        FAILED=$((FAILED + 1))
-    fi
+    }
 done
 
 # ── 4. Summary ──
