@@ -8,10 +8,17 @@
 [邀请链接](https://gitcode.com/invite/link/afd045a86cd9425aa888)
 
 快速部署引导：
+- Agent：AtomCode
 ```bash
-wget https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/download/init/setup_wizard.sh \
-  && chmod 777 ./setup_wizard.sh && ./setup_wizard.sh
+wget https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/download/init/setup_wizard_atomcode.sh \
+  && chmod 777 ./setup_wizard_atomcode.sh && ./setup_wizard_atomcode.sh
 ```
+- Agent：OpenDesk
+```bash
+wget https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/releases/download/init/setup_wizard_opendesk.sh \
+  && chmod 777 ./setup_wizard_opendesk.sh && ./setup_wizard_opendesk.sh
+```
+- 
 
 ## 项目概述
 
