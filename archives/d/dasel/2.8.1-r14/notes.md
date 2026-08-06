@@ -4,14 +4,14 @@
 - 构建系统: Go (custom)
 - 编译日期: 2026-06-02
 - 编译器: ~/usr/local/go1263/bin/go (Go 1.26.3)
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
 1. 源码下载: https://github.com/TomWright/dasel/archive/refs/tags/v2.8.1.tar.gz
 2. Go 编译命令:
 ```bash
-CGO_ENABLED=1 GOOS=linux GOARCH=arm64 GOPROXY=https://goproxy.cn,direct ~/usr/local/go1263/bin/go build \
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 GOPROXY=https://goproxy.cn,direct ~/usr/local/go1263/bin/go build \
   -ldflags="-s -w -X github.com/tomwright/dasel/v2/internal.Version=v2.8.1" \
   -o dasel ./cmd/dasel/
 ```
@@ -59,5 +59,5 @@ $ echo '{"name":"test"}' | dasel -r json '.name'
 - Go 模块路径: github.com/tomwright/dasel/v2（注意 v2 后缀）
 ---
 
-**编译结束**: 2026-06-02 02:39
-**最终状态**: published
+**编译结束**: 2026-08-06 06:05
+**最终状态**: built
