@@ -49,28 +49,47 @@ fi
 
 echo "[step] Found ${#PACKAGES[@]} package(s) to upload"
 
-# ── 3. Upload each package ──
+# ── 3. Upload each package (with retry) ──
 SUCCESS=0
 FAILED=0
+MAX_RETRIES=3
+RETRY_DELAY=10
 
 for ref in "${PACKAGES[@]}"; do
     echo ""
     echo "[step] Uploading: ${ref}"
-    # 409 Conflict = 包已存在（之前 upload 成功过），视为幂等成功
-    upload_output=$(conan upload "$ref" -r="${CONAN_REMOTE_NAME}" -c 2>&1) || {
+
+    for attempt in $(seq 1 $MAX_RETRIES); do
+        # 409 Conflict = 包已存在（之前 upload 成功过），视为幂等成功
+        upload_output=$(conan upload "$ref" -r="${CONAN_REMOTE_NAME}" -c 2>&1)
         exit_code=$?
+
+        if [ $exit_code -eq 0 ]; then
+            if [ $attempt -gt 1 ]; then
+                echo "[ok] ${ref} uploaded (attempt ${attempt}/${MAX_RETRIES})"
+            else
+                echo "[ok] ${ref} uploaded"
+            fi
+            SUCCESS=$((SUCCESS + 1))
+            break
+        fi
+
         if echo "$upload_output" | grep -qiE "409|already exist|conflict"; then
             echo "[ok] ${ref} already exists in registry (409 idempotent)"
             SUCCESS=$((SUCCESS + 1))
+            break
+        fi
+
+        if [ $attempt -lt $MAX_RETRIES ]; then
+            echo "[warn] ${ref} upload attempt ${attempt}/${MAX_RETRIES} failed (exit=$exit_code), retrying in ${RETRY_DELAY}s..."
+            echo "$upload_output" | tail -5
+            sleep $RETRY_DELAY
         else
-            echo "[fail] ${ref} upload failed (exit=$exit_code)"
+            echo "[fail] ${ref} upload failed after ${MAX_RETRIES} attempts (exit=$exit_code)"
             echo "$upload_output"
             FAILED=$((FAILED + 1))
         fi
-    } && {
-        echo "[ok] ${ref} uploaded"
-        SUCCESS=$((SUCCESS + 1))
-    }
+    done
 done
 
 # ── 4. Summary ──
