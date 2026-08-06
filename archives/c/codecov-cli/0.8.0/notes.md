@@ -30,7 +30,7 @@
 
 ## 源码修改
 
-无源码补丁。通过shell wrapper脚本方式安装，不修改原始源码。
+- 0001-npm-shrinkwrap.json.patch: 修复 npm-shrinkwrap.json 中的 peer dependency 声明，移除 ts-node 等 optional peer 依赖项，确保 npm install 在 HarmonyOS 上正常工作
 
 ## 依赖版本
 
@@ -61,5 +61,5 @@
 - NODE_PATH环境变量需要包含codecov-cli的node_modules路径
 ---
 
-**编译结束**: 2026-05-27 20:44
+**编译结束**: 2026-08-06 04:18
 **最终状态**: built
