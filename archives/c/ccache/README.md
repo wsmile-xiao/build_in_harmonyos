@@ -11,14 +11,15 @@ ccache 是一个 C/C++ 编译器缓存工具，通过缓存编译结果来加速
 
 ## OHOS 适配
 
-- 构建系统为 cmake，需要 2 个平台适配补丁
-- 补丁 0001: Makefile 适配
-- 补丁 0002: configure 脚本适配
+- 构建系统为 cmake，直接使用 CMake 构建，无需源码补丁
+- 依赖通过 CMake FetchContent (DEPS=DOWNLOAD) 自动管理
+- 存储后端: file, http, redis 全部启用（无裁剪）
 
 ## 依赖关系
 
-- C++ 编译器
-- CMake（构建工具）
+- C++ 编译器 (clang 15+)
+- CMake 3.18+
+- 第三方依赖由 FetchContent 自动下载: blake3, fmt, hiredis, xxhash, zstd, cpphttplib 等
 
 ## 参考资料
 
