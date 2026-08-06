@@ -607,9 +607,11 @@ PYEOF
     # 将 conandata.yml 中已知域名的 url 从单值改为列表, 自动加上镜像源 fallback
     # Conan 2.x 的 get() 支持 url 列表, 会逐个尝试直到成功
     # 支持: github.com, ftpmirror.gnu.org, ftp.gnu.org, download.savannah.gnu.org
-    # 支持: archives.boost.io, github.com, ftpmirror.gnu.org, ftp.gnu.org, download.savannah.gnu.org
+    # 支持: archives.boost.io, download.gnome.org, gitlab.gnome.org, cdn.kernel.org
+    # 支持: files.pythonhosted.org, release-assets.githubusercontent.com
+    # 支持: sourceforge.net, bbuseruploads.s3.amazonaws.com, curl.se
     if [ -f "$CONANDATA" ]; then
-        if grep -qE 'url:.*https://(archives\.boost\.io|github\.com|ftpmirror\.gnu\.org|ftp\.gnu\.org|download\.savannah\.gnu\.org)/' "$CONANDATA" 2>/dev/null; then
+        if grep -qE 'url:.*https://(archives\.boost\.io|github\.com|ftpmirror\.gnu\.org|ftp\.gnu\.org|download\.savannah\.gnu\.org|download\.gnome\.org|gitlab\.gnome\.org|cdn\.kernel\.org|files\.pythonhosted\.org|release-assets\.githubusercontent\.com|[a-z0-9.-]+\.dl\.sourceforge\.net|sourceforge\.net|bbuseruploads\.s3\.amazonaws\.com|curl\.se|ftp\.jaist\.ac\.jp)/' "$CONANDATA" 2>/dev/null; then
             echo "[step] Mirror fallback: rewriting source URLs in conandata.yml..."
             cp "$CONANDATA" "${CONANDATA}.orig" 2>/dev/null
 
@@ -664,6 +666,53 @@ def get_mirrors(url):
         p = re.sub(r'^https?://download\.savannah\.gnu\.org/', '', url)
         return [
             'https://mirrors.tuna.tsinghua.edu.cn/savannah/' + p,
+            url,
+        ]
+    # ── GNOME (download.gnome.org) ──
+    if re.match(r'^https?://download\.gnome\.org/', url):
+        p = re.sub(r'^https?://download\.gnome\.org/', '', url)
+        return [
+            'https://mirrors.ustc.edu.cn/gnome/' + p,
+            'https://mirrors.tuna.tsinghua.edu.cn/gnome/' + p,
+            'https://mirror.nju.edu.cn/gnome/' + p,
+            url,
+        ]
+    # ── GNOME GitLab (gitlab.gnome.org) — GitHub proxy 兼容 ──
+    if re.match(r'^https?://gitlab\.gnome\.org/', url):
+        return [
+            url,
+        ]
+    # ── kernel.org CDN (cdn.kernel.org / cdn.kernel.org/pub/linux/kernel/) ──
+    if re.match(r'^https?://cdn\.kernel\.org/', url):
+        p = re.sub(r'^https?://cdn\.kernel\.org/', '', url)
+        return [
+            'https://mirrors.ustc.edu.cn/kernel.org/' + p,
+            'https://mirrors.tuna.tsinghua.edu.cn/' + p,
+            'https://mirror.nju.edu.cn/' + p,
+            url,
+        ]
+    # ── Python packages (files.pythonhosted.org) ──
+    # conandata.yml 不太可能引用这里, 但以防万一
+    if re.match(r'^https?://files\.pythonhosted\.org/', url):
+        return [
+            url,
+        ]
+    # ── GitHub release assets (release-assets.githubusercontent.com) ──
+    if re.match(r'^https?://[^/]*release-assets\.githubusercontent\.com/', url):
+        return [
+            'https://gh-proxy.com/' + url,
+            'https://mirror.ghproxy.com/' + url,
+            url,
+        ]
+    # ── SourceForge ──
+    if re.match(r'^https?://(downloads\.|[^/]*\.dl\.)?sourceforge\.net/', url):
+        # SourceForge 国内有镜像但 URL 结构不同, 保留原始 URL + 加一个 downloads URL
+        return [
+            url,
+        ]
+    # ── curl.se (原 haxx.se) ──
+    if re.match(r'^https?://curl\.se/', url):
+        return [
             url,
         ]
     # ── 无匹配镜像 ──
