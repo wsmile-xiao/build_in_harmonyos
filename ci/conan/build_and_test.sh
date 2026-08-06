@@ -632,14 +632,11 @@ def get_mirrors(url):
         sf = f'https://downloads.sourceforge.net/project/boost/boost/{ver}/{fn}'
         return [sf, url]
     # ── GitHub ──
+    # 实测（2026-08-06）：仅 gh-proxy.com 可用（412KB/s），其余全部失效
+    # github.com 直连可用但极慢（19KB/s），作为最后兜底
     if re.match(r'^https?://github\.com/', url):
         return [
             'https://gh-proxy.com/' + url,
-            'https://mirror.ghproxy.com/' + url,
-            'https://ghproxy.com/' + url,
-            'https://gitclone.com/' + url[len('https://'):],
-            'https://moeyy.cn/gh-proxy/' + url,
-            url.replace('https://github.com', 'https://kkgithub.com'),
             url,
         ]
     # ── GNU (ftpmirror.gnu.org) ──
@@ -739,6 +736,124 @@ PYEOF
 
             echo "        [ok] Source URLs rewritten with mirror fallback"
         fi
+    fi
+
+    # ── Pre-download source archives with retry ──
+    # Conan get() 对每个 URL 只试一次。如果 gh-proxy.com 和 github.com 同时不可达,
+    # 构建直接失败。这里在 conan build 之前先提取所有源码 URL,
+    # 用 curl --retry 下载到本地, 然后把 conandata.yml 改为 file:// 路径。
+    if [ -f "$CONANDATA" ]; then
+        echo "[step] Pre-download: extracting source URLs from conandata.yml..."
+
+        # 创建预下载缓存目录
+        PREDL_DIR="${BUILD_DIR}/predl_cache"
+        mkdir -p "$PREDL_DIR"
+
+        python3 - "$CONANDATA" "$PREDL_DIR" <<'PYEOF'
+import re, sys, os, hashlib, subprocess
+
+conandata_path = sys.argv[1]
+predl_dir = sys.argv[2]
+
+with open(conandata_path, 'r') as f:
+    raw = f.read()
+
+# 解析所有 URL（包括已改写为列表的）
+# 匹配: url: https://... 或 - https://...
+url_pattern = r'(?:^|\s)(?:url:?\s*)?["\']?-?\s*(https?://[^\s"\'-]+)'
+urls = re.findall(url_pattern, raw, re.MULTILINE)
+# 去重
+urls = list(dict.fromkeys(urls))
+
+if not urls:
+    print("  no URLs found in conandata.yml")
+    sys.exit(0)
+
+print(f"  found {len(urls)} source URL(s)")
+
+def get_mirror_list(url):
+    """返回镜像列表（和 build_and_test.sh get_mirrors 一致）。"""
+    mirrors = []
+    if re.match(r'^https?://github\.com/', url):
+        mirrors = ['https://gh-proxy.com/' + url, url]
+    elif re.match(r'^https?://[^/]*release-assets\.githubusercontent\.com/', url):
+        mirrors = ['https://gh-proxy.com/' + url, url]
+    elif re.match(r'^https?://ftpmirror\.gnu\.org/', url):
+        p = re.sub(r'^https?://ftpmirror\.gnu\.org/', '', url)
+        mirrors = [f'https://mirrors.tuna.tsinghua.edu.cn/{p}',
+                   f'https://mirrors.ustc.edu.cn/{p}',
+                   f'https://mirrors.aliyun.com/{p}', url]
+    elif re.match(r'^https?://download\.gnome\.org/', url):
+        p = re.sub(r'^https?://download\.gnome\.org/', '', url)
+        mirrors = [f'https://mirrors.ustc.edu.cn/gnome/{p}',
+                   f'https://mirrors.tuna.tsinghua.edu.cn/gnome/{p}',
+                   f'https://mirror.nju.edu.cn/gnome/{p}', url]
+    elif re.match(r'^https?://cdn\.kernel\.org/', url):
+        p = re.sub(r'^https?://cdn\.kernel\.org/', '', url)
+        mirrors = [f'https://mirrors.ustc.edu.cn/kernel.org/{p}',
+                   f'https://mirrors.tuna.tsinghua.edu.cn/{p}', url]
+    else:
+        mirrors = [url]
+    return mirrors
+
+downloaded = {}
+for url in urls:
+    # 文件名用 URL 的 hash 防冲突
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+    filename = url.split('/')[-1] or f'source_{url_hash}'
+    if '?' in filename:
+        filename = filename.split('?')[0]
+    dest = os.path.join(predl_dir, f'{url_hash}_{filename}')
+
+    if os.path.exists(dest) and os.path.getsize(dest) > 100:
+        print(f"  [cached] {filename} ({os.path.getsize(dest)//1024}KB)")
+        downloaded[url] = dest
+        continue
+
+    mirrors = get_mirror_list(url)
+    success = False
+    for i, mirror_url in enumerate(mirrors):
+        # 每个镜像试 3 次
+        for attempt in range(1, 4):
+            print(f"  [try {i+1}/{len(mirrors)}.{attempt}/3] {filename} ← {mirror_url[:80]}...")
+            try:
+                result = subprocess.run(
+                    ['curl', '-sL', '--retry', '3', '--retry-delay', '10',
+                     '--connect-timeout', '30', '--max-time', '300',
+                     '-o', dest, '-w', '%{http_code}:%{size_download}',
+                     mirror_url],
+                    capture_output=True, text=True, timeout=360
+                )
+                size = os.path.getsize(dest) if os.path.exists(dest) else 0
+                if size > 100:
+                    print(f"  [ok] {filename} ({size//1024}KB) via mirror {i+1}")
+                    downloaded[url] = dest
+                    success = True
+                    break
+                else:
+                    print(f"  [fail] size={size}, http={result.stdout[-3:]}")
+            except Exception as e:
+                print(f"  [fail] {str(e)[:60]}")
+        if success:
+            break
+
+    if not success:
+        print(f"  [WARN] Failed to pre-download {filename}, will rely on conan's download")
+
+if downloaded:
+    # 把 conandata.yml 里的远程 URL 替换为 file:// 本地路径
+    with open(conandata_path, 'r') as f:
+        content = f.read()
+
+    for url, local_path in downloaded.items():
+        content = content.replace(url, f'file://{local_path}')
+
+    with open(conandata_path, 'w') as f:
+        f.write(content)
+    print(f"  [done] Pre-downloaded {len(downloaded)} files, conandata.yml updated to file:// URLs")
+else:
+    print("  [done] No files pre-downloaded")
+PYEOF
     fi
 
     # ── Conf compatibility patch (conan 2.29.1 兼容层) ──
