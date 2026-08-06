@@ -6,7 +6,7 @@ Google Cloud SQL Auth Proxy — 代理工具，用于安全连接 Google Cloud S
 
 | 版本 | 状态 | 日期 |
 |------|------|------|
-| 1.38.0 | published | 2026-06-01 |
+| 1.38.0 | built | 2026-08-06 |
 
 ## 说明
 
@@ -18,3 +18,5 @@ Cloud SQL Auth Proxy 是 Google Cloud 提供的工具，用于建立到 Cloud SQ
 - 需要 Go >= 1.25.7（go.mod 要求），使用 Go 1.26.3 编译
 - 主包路径: cmd/cloud_sql_proxy
 - 版本注入 ldflag: `-X github.com/GoogleCloudPlatform/cloudsql-proxy/proxy/util.versionString=VERSION`
+- Conan 配方自动下载 Go 1.26.3 SDK（golang.google.cn + dl.google.com fallback）
+- OHOS 平台 ELF 签名（binary-sign-tool）

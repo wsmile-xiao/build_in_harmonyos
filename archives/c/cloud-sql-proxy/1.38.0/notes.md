@@ -1,10 +1,10 @@
 # cloud-sql-proxy 1.38.0 适配笔记
 
 ## 编译环境
-- 构建系统: custom (Go build)
-- 编译日期: 2026-06-01
-- 编译器: Go 1.26.3 (~/usr/local/go1263)
-- 状态: published
+- 构建系统: go
+- 编译日期: 2026-08-06
+- 编译器: Go 1.26.3 (auto-downloaded SDK)
+- 状态: built
 
 ## 编译步骤
 
@@ -67,5 +67,5 @@ Cloud SQL Auth proxy: 1.38.0
 - Go 1.26.0有corrupted runtime source问题，必须用1.26.3
 ---
 
-**编译结束**: 2026-06-01 19:09
-**最终状态**: published
+**编译结束**: 2026-08-06 03:43
+**最终状态**: built
