@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Conan recipe for tektoncd-cli 0.45.0."""
+"""Conan recipe for tektoncd-cli 0.45.0.1."""
 
 import os
+import shutil
 import stat
 
 from conan import ConanFile
@@ -12,7 +13,7 @@ from conan.tools.layout import basic_layout
 
 class TektoncdCliConan(ConanFile):
     name = "tektoncd-cli"
-    version = "0.45.0"
+    version = "0.45.0.1"
     description = "Command-line interface for interacting with Tekton"
     license = "Apache-2.0"
     homepage = "https://github.com/tektoncd/cli"
@@ -61,34 +62,60 @@ class TektoncdCliConan(ConanFile):
              dst=os.path.join(self.package_folder, "share", "doc", "tektoncd-cli"),
              keep_path=False)
 
+    def _resolve_tool(self, configured, fallback):
+        """Locate llvm-objcopy / binary-sign-tool (aesfix/1.0.1 pattern)."""
+        if configured and os.path.exists(configured):
+            return configured
+        found = shutil.which(fallback)
+        if found:
+            return found
+        if configured:
+            bindir = os.path.dirname(configured) if os.path.isabs(configured) else ""
+            candidate = os.path.join(bindir, fallback) if bindir else ""
+            if candidate and os.path.exists(candidate):
+                return candidate
+        home_candidate = os.path.join(os.path.expanduser("~"), "usr", "local", "bin", fallback)
+        if os.path.exists(home_candidate):
+            return home_candidate
+        return fallback
+
     def _sign_ohos_binary(self, binary_path):
-        if str(self.settings.os) != "OHOS":
+        """OHOS ELF 签名（E077 四步流程，原子替换并保留原权限）。
+
+        顺序约束（不可颠倒）：
+          1. llvm-objcopy --remove-section .codesign  ← 必须第一步
+          2. binary-sign-tool sign -selfSign 1       ← 修改后签名
+          3. chmod 恢复权限                          ← 签名后权限归零
+        """
+        if str(self.settings.os) != "OHOS" or not os.path.isfile(binary_path):
             return
 
-        signer = "/data/service/hnp/bin/binary-sign-tool"
-        objcopy = "/data/service/hnp/bin/llvm-objcopy"
-        if not os.path.isfile(signer):
+        objcopy = self._resolve_tool("/data/service/hnp/bin/llvm-objcopy", "llvm-objcopy")
+        signer = self._resolve_tool("/data/service/hnp/bin/binary-sign-tool", "binary-sign-tool")
+        if not (os.path.exists(objcopy) and os.path.exists(signer)):
             self.output.warning(
-                "binary-sign-tool is unavailable; the OHOS release worker must sign tkn"
+                "llvm-objcopy/binary-sign-tool unavailable; the OHOS release "
+                "worker must sign tkn (prebuilt tkn may already carry a valid signature)"
             )
             return
 
-        signed_path = binary_path + ".signed"
-        if os.path.isfile(objcopy):
+        original_mode = os.stat(binary_path).st_mode
+        temporary = binary_path + ".signing"
+        try:
+            shutil.copy2(binary_path, temporary)
+            # 首次签名时无 .codesign 段，llvm-objcopy 会非零退出；
+            # || true 容错保证 package() 在无旧签名场景下不失败（P2 修复）
+            self.run(f'"{objcopy}" --remove-section .codesign "{temporary}" || true', quiet=True)
             self.run(
-                f'"{objcopy}" --remove-section .codesign "{binary_path}" || true',
+                f'"{signer}" sign -inFile "{temporary}" '
+                f'-outFile "{temporary}" -selfSign 1',
                 quiet=True,
             )
-        self.run(
-            f'"{signer}" sign -inFile "{binary_path}" '
-            f'-outFile "{signed_path}" -selfSign 1',
-            quiet=True,
-        )
-        os.replace(signed_path, binary_path)
-        os.chmod(binary_path,
-                 stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR |
-                 stat.S_IRGRP | stat.S_IXGRP |
-                 stat.S_IROTH | stat.S_IXOTH)
+            os.chmod(temporary, original_mode)
+            os.replace(temporary, binary_path)
+        finally:
+            if os.path.exists(temporary):
+                os.remove(temporary)
 
     def package_info(self):
         self.cpp_info.includedirs = []

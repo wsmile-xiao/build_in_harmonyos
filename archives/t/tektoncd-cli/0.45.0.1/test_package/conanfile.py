@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan consumer test for tektoncd-cli 0.45.0."""
+"""Conan consumer test for tektoncd-cli 0.45.0.1."""
 
 import os
 import sys

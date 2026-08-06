@@ -4,7 +4,7 @@ Command-line interface for interacting with Tekton.
 
 ## Version
 
-- 0.45.0
+- 0.45.0.1
 
 ## Build notes
 
