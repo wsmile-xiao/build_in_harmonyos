@@ -50,5 +50,5 @@ frei0r-plugins 是插件库，无可执行二进制。编译产出 157 个 .so �
 - PKG_CONFIG_PATH 需包含 ~/usr/local/lib/pkgconfig 才能找到 cairo
 ---
 
-**编译结束**: 2026-05-30 17:31
-**最终状态**: built
+**编译结束**: 2026-08-06 12:11
+**最终状态**: published
