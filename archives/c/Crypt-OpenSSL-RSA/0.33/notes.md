@@ -6,7 +6,7 @@
 ## 编译环境
 - 平台: OpenHarmony (aarch64-unknown-linux-ohos)
 - Perl 版本: 5.42.0
-- 编译器: clang 18.1.8
+- 编译器: clang 15.0.4
 - OpenSSL: 1.1.1w
 
 ## 模块信息
@@ -227,3 +227,7 @@ perl -MCrypt::OpenSSL::RSA -e 'print Crypt::OpenSSL::RSA->VERSION, "\n"'
 
 **打包结束**: 2026-06-16 20:08
 **打包状态**: ✅ 预编译包已完成，待HNP管理员安装验证
+---
+
+**编译结束**: 2026-08-06 05:09
+**最终状态**: built
