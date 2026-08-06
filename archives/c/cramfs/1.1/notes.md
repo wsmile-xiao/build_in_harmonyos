@@ -39,3 +39,7 @@
 |------|------|------|
 | cramfs-1.1-ohos-aarch64.tar.gz | 159KB | 主包 |
 | cramfs-1.1-ohos-aarch64-debug.tar.gz | 92KB | Debug 包 |
+---
+
+**编译结束**: 2026-08-06 04:59
+**最终状态**: built
