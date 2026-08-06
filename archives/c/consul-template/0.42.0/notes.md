@@ -4,7 +4,7 @@
 - 构建系统: custom (Go程序)
 - 编译日期: 2026-05-25
 - 编译器: Go 1.25.10 (linux/arm64)
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -63,5 +63,5 @@ consul-template v0.42.0 (c1ad4f9)
 4. **Go代理配置**：GOPROXY=https://goproxy.cn,direct 是中国区推荐配置
 ---
 
-**编译结束**: 2026-05-25 23:03
-**最终状态**: published
+**编译结束**: 2026-08-06 04:30
+**最终状态**: built
