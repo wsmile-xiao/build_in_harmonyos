@@ -1,0 +1,102 @@
+#====================================================================
+# DRAFT-agetty-vhangup.kv — OHOS 上 libc 未导出 vhangup 的声明/链接/syscall 分层诊断与 shim 边界
+# 库: agetty 2.42.2（util-linux 2.42.2 term-utils/agetty.c 组件）
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     DRAFT (proposed E-VHANGUP-NOT-EXPORTED)
+trigger_tool:           clang|ld
+phase:                  compilation|linking
+error_signature:        call to undeclared function 'vhangup'|
+                         ld.lld: error: undefined symbol: vhangup|
+                         undefined symbol: vhangup
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               api-missing|platform-limitation|system-interface
+match_keywords:         vhangup, SYS_vhangup, __NR_vhangup, tty hangup, undefined symbol,
+                         undeclared function, OHOS, HarmonyOS, syscall shim, 未导出, 无声明,
+                         链接失败, libc.so, aarch64-linux-ohos
+
+# ═══ Layer 2: 根因层（分层） ═══
+root_cause: >
+  OHOS SDK ohos-sdk_26.0.0.18（clang 15.0.4，aarch64-unknown-linux-ohos）上，
+  vhangup(2) 出现三层问题：
+  1) 声明缺失：sysroot 头文件（unistd.h / sys/vt.h / sys/*.h）均无 vhangup 声明，
+     编译产生 implicit-function-declaration 警告；
+  2) libc 符号缺失：libc.so（nm -D 核验）未导出 vhangup 符号，链接报
+     ld.lld: error: undefined symbol: vhangup；
+  3) 内核 syscall 仍存在：aarch64 bits/syscall.h 定义 __NR_vhangup=58 / SYS_vhangup=58，
+     即内核能力存在但 libc 未封装，可通过 syscall(SYS_vhangup) 直调。
+  agetty.c 在 F_HANGUP 路径（--hangup 选项）调用 vhangup()，触发上述问题。
+  （注：knowledge/musl-glibc-full-comparison-iso-posix.md 记录 vhangup 三 libc 均可用，
+  与 OHOS 26.0.0.18 实测不一致，以实测为准。）
+
+# ═══ Layer 3: 方案层 ═══
+rec_approach: >
+  仅 OHOS 条件下使用 AArch64 SYS_vhangup syscall 封装（shim），不伪造 libc API：
+    int vhangup(void) { return (int)syscall(SYS_vhangup); }
+  实现位于 archives/a/agetty/2.42.2/src/ohos-utmpx-shim.c（连同 utmpx no-op 降级一起，
+  utmpx 部分归 E121 已覆盖，非本 draft 新贡献）。非 OHOS 平台不启用 shim，保持上游语义。
+
+rec_command: >
+  诊断流程：
+  1) 最小复现：编译调用 vhangup() 的最小 C 程序，观察声明警告与链接失败；
+  2) 核验 syscall 编号：grep SYS_vhangup $SYSROOT/usr/include/aarch64-linux-ohos/bits/syscall.h；
+  3) 核验 libc 导出：nm -D $SYSROOT/usr/lib/aarch64-linux-ohos/libc.so | grep vhangup；
+  4) 仅当"无声明 + 无导出 + 内核 syscall 存在"时，才在 OHOS 条件启用 syscall shim。
+
+rec_auto_fix:           false
+
+# ═══ 未解决边界与恢复条件 ═══
+unresolved_boundaries: >
+  - libc 恢复导出且头文件声明可用时：移除 shim，恢复正式 API；
+  - syscall 编号不存在 / 调用返回不支持 / 权限不足时：不得伪造 vhangup 成功，
+    应保留失败并按上游/平台能力记录真实 errno/退出码；
+  - SDK/内核 ABI 变化时：重新探测 syscall 编号与导出状态；
+  - shim 仅 OHOS 条件启用，非 OHOS 保持上游语义；
+  - 真实 TTY/init/登录会话下的运行时行为未验证，取决于内核与权限。
+
+# ═══ 查重（与已有条目对照） ═══
+dedup:
+  - entry: E121
+    relation: similar-but-partial
+    reason: E121 覆盖 utmpx API 缺失（setutxent/pututxline/endutxent + OMIT_UTMP），
+            同库组合问题的一部分；不含 vhangup，且 E121 未覆盖"libc 未导出但 syscall 存在"模式。
+  - entry: E014
+    relation: similar-but-different-root-cause
+    reason: E014 是"鸿蒙内核未实现 POSIX 系统调用"（syslog/getrandom，-D 宏禁用），
+            vhangup 是 libc 未封装而内核 syscall 存在，根因与修复均不同。
+  - entry: E003/E004/E015/E027/E050/E078/E085/E090/E092/E093
+    relation: unrelated
+    reason: 链接失败类条目均针对库缺失/BIND_NOW/libintl/工具链识别等，与 vhangup 无关。
+
+# ═══ 适用范围 ═══
+applicability: >
+  适用于在同一 SDK（ohos-sdk_26.0.0.18 / clang 15.0.4 / aarch64-unknown-linux-ohos）
+  上调用 vhangup 或类似"libc 未导出但内核 syscall 存在"接口的库/工具（tty 挂断类、
+  登录管理类）。先复现（无声明+无导出+链接失败）再 syscall shim；不适用于仅因
+  头文件宏配置（如缺 _GNU_SOURCE）导致的普通声明遗漏。
+
+# ═══ 验证 ═══
+verification:
+  upstream_agetty_tests: "0/0 (N/A，无 agetty 适用的上游测试；367 为 util-linux 全库脚本背景，非 agetty 测试数)"
+  consumer_smoke: "2/2 PASS（agetty --version 版本字符串断言 + agetty --help 退出码断言，conan create test_package 真实执行）"
+  shim_after: "agetty 构建、链接、--version、消费者 smoke 2/2 通过"
+
+# ═══ 证据链接 ═══
+evidence:
+  wiki: "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/wikis/OHOS-SDK-26.0.0.18-vhangup-未导出：检测与-syscall-shim"
+  notes: "archives/a/agetty/2.42.2/notes.md（第 5 节 vhangup 无声明/无导出）"
+  manifest: "archives/a/agetty/2.42.2/manifest.yaml（adaptation.vhangup）"
+  shim_src: "archives/a/agetty/2.42.2/src/ohos-utmpx-shim.c"
+  compat_hdr: "archives/a/agetty/2.42.2/src/ohos-utmpx-compat.h"
+  repro_log: "$HOME/tmp/probe-agetty/vhangup-original-diagnosis.txt（执行端本地，未入库）"
+
+# ═══ 元数据 ═══
+contributor:            junshi_liu
+team:                   兰州大学DSLab
+time:                   2026-08-05
+source_event:           agetty 2.42.2 适配第 2-8 轮真实回报（analysis_approved 任务服务回报）
+pr_ref:                 PR pending（未伪造；PR 创建后回填真实编号）
+status:                 draft（用于路径 B 证据审计，非 PR 文件，不代表官方已认定）
