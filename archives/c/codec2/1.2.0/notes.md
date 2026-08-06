@@ -60,5 +60,5 @@ pkg-config --modversion codec2 → 1.2.0
 - CMake 在鸿蒙平台上报告 "Platform/HarmonyOS unknown" 但不影响编译
 ---
 
-**编译结束**: 2026-05-28 11:16
+**编译结束**: 2026-08-06 04:16
 **最终状态**: built
