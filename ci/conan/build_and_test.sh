@@ -746,7 +746,8 @@ PYEOF
         echo "[step] Pre-download: extracting source URLs from conandata.yml..."
 
         # 创建预下载缓存目录
-        PREDL_DIR="${pkg_dir}/predl_cache"
+        BUILD_DIR="${BUILD_DIR:-${REPO_ROOT}/.build-cache}"
+        PREDL_DIR="${BUILD_DIR}/predl_cache"
         mkdir -p "$PREDL_DIR"
 
         python3 - "$CONANDATA" "$PREDL_DIR" <<'PYEOF'
