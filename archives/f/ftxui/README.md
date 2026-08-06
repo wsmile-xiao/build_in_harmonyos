@@ -13,6 +13,12 @@ FTXUI 是一个 C++ 功能式终端用户界面库，用于构建终端应用程
 - 编译工具: clang, cmake
 - pthread（系统提供）
 
+## 构建产物
+- libftxui-screen.a (屏幕渲染)
+- libftxui-dom.a (DOM 元素)
+- libftxui-component.a (交互组件)
+- 链接顺序: ftxui-component → ftxui-dom → ftxui-screen
+
 ## 功能验证
 ```bash
 # 检查库文件
@@ -21,5 +27,5 @@ pkg-config --modversion ftxui
 ```
 
 ## 参考
-- GitHub: https://github.com/ArthurSonzogni/ftxui
-- 源码: https://github.com/ArthurSonzogni/ftxui/archive/refs/tags/v6.1.9.tar.gz
+- GitHub: https://github.com/ArthurSonzogni/FTXUI
+- 源码: https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v6.1.9.tar.gz
