@@ -4,7 +4,7 @@
 - 构建系统: custom (Python/pip)
 - 编译日期: 2026-06-04
 - 编译器: N/A (Python项目)
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -82,5 +82,5 @@ check-jsonschema, version 0.28.4
   3. pip3 --prefix安装后Python不会自动搜索usr/local site-packages
 ---
 
-**编译结束**: 2026-06-04 16:13
-**最终状态**: published
+**编译结束**: 2026-08-06 03:31
+**最终状态**: built
