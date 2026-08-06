@@ -90,3 +90,7 @@ nm ~/usr/local/lib/libgc.so | grep -E "(pthread_cancel|pthread_setcancel)"
 1. **必须使用CMake构建**：autotools在HarmonyOS HMDFS上因权限问题无法正常工作。
 2. **GC_INIT()显式调用**：configure提示需要显式调用GC_INIT()，应用代码需注意。
 3. **线程取消功能缺失**：HarmonyOS不支持pthread_cancel，应用代码不应依赖线程取消机制。
+---
+
+**编译结束**: 2026-07-20 11:38
+**最终状态**: built
