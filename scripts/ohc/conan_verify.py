@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -504,7 +505,7 @@ authors: {git_author}
 
         profile_file = self.pdir / "ci" / "conan" / "profiles" / self.profile
         if profile_file.exists():
-            pr_args = f"-pr:h={profile_file} -pr:b={profile_file}"
+            pr_args = f"-pr:h={shlex.quote(str(profile_file))} -pr:b={shlex.quote(str(profile_file))}"
         else:
             pr_args = f"-pr:h={self.profile} -pr:b={self.profile}"
 
@@ -522,7 +523,7 @@ authors: {git_author}
 
         try:
             cmd = (
-                f"{self._conan_path} create {self.archive_dir} "
+                f"{self._conan_path} create {shlex.quote(str(self.archive_dir))} "
                 f"{pr_args} "
                 f"--build=missing "
                 f"--user={self.user} --channel={self.channel}"
