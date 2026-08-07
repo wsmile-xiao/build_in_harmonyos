@@ -31,6 +31,10 @@ class AdmsConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
+        # ADMS declares cmake_minimum_required(VERSION 2.8), whereas CMake
+        # 4.x requires a policy compatibility version of at least 3.5.  This
+        # must be a cache variable so CMake reads it before the project file.
+        tc.cache_variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
         tc.generate()
 
     def build(self):
