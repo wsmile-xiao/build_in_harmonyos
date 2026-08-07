@@ -1,0 +1,247 @@
+--- a/src/libs6/s6_svc_write.c
++++ b/src/libs6/s6_svc_write.c
+@@ -1,25 +1,44 @@
+ /* ISC license. */
+ 
+ #include <errno.h>
+-#include <skalibs/allreadwrite.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <sys/stat.h>
++#include <stdio.h>
++#include <string.h>
+ #include <skalibs/djbunix.h>
+ #include <s6/supervise.h>
+ 
+-int s6_svc_write (char const *fifo, char const *data, size_t datalen)
++/* Send control commands via abstract namespace DGRAM socket.
++   dirpath is the supervise/ directory (e.g. "service/supervise").
++   Returns: 1 on success, 0 if supervisor not listening, -1 on error, -2 on bad dir. */
++int s6_svc_write (char const *dirpath, char const *data, size_t datalen)
+ {
+-  int fd = open_write(fifo) ;
+-  if (fd < 0) switch (errno)
++  int fd ;
++  struct sockaddr_un addr ;
++  struct stat st ;
++
++  if (stat(dirpath, &st) < 0)
+   {
+-    case ENXIO : return 0 ;
+-    case ENOENT :
+-    case ENOTDIR :
+-    case EISDIR : return -2 ;
+-    default : return -1 ;
++    if (errno == ENOENT || errno == ENOTDIR) return -2 ;
++    return -1 ;
+   }
+-  if (ndelay_off(fd) == -1) return -1 ;
+-  if (datalen && fd_write(fd, data, datalen) == -1)
++
++  memset(&addr, 0, sizeof(addr)) ;
++  addr.sun_family = AF_UNIX ;
++  addr.sun_path[0] = '\0' ;
++  snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1,
++           "s6-ctrl-%lx-%lx", (unsigned long)st.st_dev, (unsigned long)st.st_ino) ;
++
++  fd = socket(AF_UNIX, SOCK_DGRAM, 0) ;
++  if (fd < 0) return -1 ;
++
++  if (sendto(fd, data, datalen, 0, (struct sockaddr *)&addr, sizeof(addr)) < 0)
+   {
++    int e = errno ;
+     fd_close(fd) ;
++    errno = e ;
++    if (errno == ECONNREFUSED) return 0 ;  /* supervisor not listening */
+     return -1 ;
+   }
+   fd_close(fd) ;
+--- a/src/libs6/s6_svc_writectl.c
++++ b/src/libs6/s6_svc_writectl.c
+@@ -14,11 +14,11 @@
+   size_t svlen = strlen(service) ;
+   size_t sublen = strlen(subdir) ;
+   int r ;
+-  char fn[svlen + sublen + 10] ;
++  char fn[svlen + sublen + 2] ;
+   memcpy(fn, service, svlen) ;
+   fn[svlen] = '/' ;
+   memcpy(fn + svlen + 1, subdir, sublen) ;
+-  memcpy(fn + svlen + 1 + sublen, "/control", 9) ;
++  fn[svlen + 1 + sublen] = 0 ;
+   r = s6_svc_write(fn, s, len) ;
+   if (r != -2) return r ;
+ 
+--- a/src/supervision/s6-supervise.c
++++ b/src/supervision/s6-supervise.c
+@@ -30,6 +30,9 @@
+ 
+ #include <s6/config.h>
+ #include <s6/ftrigw.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <stdio.h>
+ #include <s6/supervise.h>
+ 
+ #define USAGE "s6-supervise dir"
+@@ -710,14 +713,18 @@
+ {
+   for (;;)
+   {
+-    char c ;
+-    ssize_t r = sanitize_read(fd_read(fd, &c, 1)) ;
+-    if (r < 0) strerr_diefu1sys(111, "read " S6_SUPERVISE_CTLDIR "/control") ;
++    char buf[64] ;
++    ssize_t r = sanitize_read(fd_read(fd, buf, sizeof buf)) ;
++    if (r < 0) strerr_diefu1sys(111, "read control socket") ;
+     else if (!r) break ;
+     else
+     {
+-      size_t pos = byte_chr("abqhkti12pcyrlPCKoduDUxOQ", 25, c) ;
+-      if (pos < 24) (*actions[state][V_a + pos])() ;
++      size_t i ;
++      for (i = 0 ; i < (size_t)r ; i++)
++      {
++        size_t pos = byte_chr("abqhkti12pcyrlPCKoduDUxOQ", 25, buf[i]) ;
++        if (pos < 24) (*actions[state][V_a + pos])() ;
++      }
+     }
+   }
+ }
+@@ -777,23 +784,22 @@
+   if (!r) strerr_dief1x(100, "another instance of s6-supervise is already running") ;
+  /* fdlck leaks but it's coe */
+ 
+-  if (mkfifo(CTL, 0600) < 0)
+   {
++    struct sockaddr_un addr ;
+     struct stat st ;
+-    if (errno != EEXIST)
+-      strerr_diefu1sys(111, "mkfifo " CTL) ;
+-    if (stat(CTL, &st) < 0)
+-      strerr_diefu1sys(111, "stat " CTL) ;
+-    if (!S_ISFIFO(st.st_mode))
+-      strerr_dief1x(100, CTL " is not a FIFO") ;
+-  }
+-  fdctl = openc_read(CTL) ;
+-  if (fdctl < 0)
+-    strerr_diefu1sys(111, "open " CTL " for reading") ;
+-  r = openc_write(CTL) ;
+-  if (r < 0)
+-    strerr_diefu1sys(111, "open " CTL " for writing") ;
+- /* r leaks but it's coe */
++    if (stat(S6_SUPERVISE_CTLDIR, &st) < 0)
++      strerr_diefu1sys(111, "stat " S6_SUPERVISE_CTLDIR) ;
++    fdctl = socket(AF_UNIX, SOCK_DGRAM, 0) ;
++    if (fdctl < 0) strerr_diefu1sys(111, "create control socket") ;
++    memset(&addr, 0, sizeof(addr)) ;
++    addr.sun_family = AF_UNIX ;
++    addr.sun_path[0] = '\0' ;
++    snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1,
++             "s6-ctrl-%lx-%lx", (unsigned long)st.st_dev, (unsigned long)st.st_ino) ;
++    if (bind(fdctl, (struct sockaddr *)&addr, sizeof(addr)) < 0)
++      strerr_diefu1sys(111, "bind control socket") ;
++    ndelay_on(fdctl) ;
++  }
+ 
+   umask(m) ;
+   return fdctl ;
+--- a/src/supervision/s6-svscan.c
++++ b/src/supervision/s6-svscan.c
+@@ -6,6 +6,9 @@
+ #include <unistd.h>
+ #include <errno.h>
+ #include <fcntl.h>
++#include <sys/socket.h>
++#include <sys/un.h>
++#include <stdio.h>
+ #include <signal.h>
+ 
+ #include <skalibs/posixplz.h>
+@@ -283,25 +286,32 @@
+ {
+   for (;;)
+   {
+-    char c ;
+-    ssize_t r = sanitize_read(fd_read(fd, &c, 1)) ;
+-    if (r < 0) panic("read control pipe") ;
++    char buf[64] ;
++    ssize_t r = sanitize_read(fd_read(fd, buf, sizeof buf)) ;
++    if (r < 0) panic("read control socket") ;
+     else if (!r) break ;
+-    switch (c)
+     {
+-      case 'z' : chld(what) ; break ;
+-      case 'a' : alrm(what) ; break ;
+-      case 'b' : abrt() ; break ;
+-      case 'h' : hup(what) ; break ;
+-      case 'i' :
+-      case 't' : term(what) ; break ;
+-      case 'q' : quit(what) ; break ;
+-      case 'n' : *what |= 2 ; break ;
+-      case 'N' : *what |= 6 ; break ;
+-      default :
++      size_t i ;
++      for (i = 0 ; i < (size_t)r ; i++)
+       {
+-        char s[2] = { c, 0 } ;
+-        strerr_warnw2x("received unknown control command: ", s) ;
++        char c = buf[i] ;
++        switch (c)
++        {
++          case 'z' : chld(what) ; break ;
++          case 'a' : alrm(what) ; break ;
++          case 'b' : abrt() ; break ;
++          case 'h' : hup(what) ; break ;
++          case 'i' :
++          case 't' : term(what) ; break ;
++          case 'q' : quit(what) ; break ;
++          case 'n' : *what |= 2 ; break ;
++          case 'N' : *what |= 6 ; break ;
++          default :
++          {
++            char s[2] = { c, 0 } ;
++            strerr_warnw2x("received unknown control command: ", s) ;
++          }
++        }
+       }
+     }
+   }
+@@ -634,23 +644,22 @@
+   if (!r) strerr_dief1x(100, "another instance of s6-svscan is already running on the same directory") ;
+  /* fdlck leaks but it's coe */
+ 
+-  if (mkfifo(CTL, 0600) < 0)
+   {
++    struct sockaddr_un addr ;
+     struct stat st ;
+-    if (errno != EEXIST)
+-      strerr_diefu1sys(111, "mkfifo " CTL) ;
+-    if (stat(CTL, &st) < 0)
+-      strerr_diefu1sys(111, "stat " CTL) ;
+-    if (!S_ISFIFO(st.st_mode))
+-      strerr_dief1x(100, CTL " is not a FIFO") ;
+-  }
+-  fdctl = openc_read(CTL) ;
+-  if (fdctl < 0)
+-    strerr_diefu1sys(111, "open " CTL " for reading") ;
+-  r = openc_write(CTL) ;
+-  if (r < 0)
+-    strerr_diefu1sys(111, "open " CTL " for writing") ;
+- /* r leaks but it's coe */
++    if (stat(S6_SVSCAN_CTLDIR, &st) < 0)
++      strerr_diefu1sys(111, "stat " S6_SVSCAN_CTLDIR) ;
++    fdctl = socket(AF_UNIX, SOCK_DGRAM, 0) ;
++    if (fdctl < 0) strerr_diefu1sys(111, "create control socket") ;
++    memset(&addr, 0, sizeof(addr)) ;
++    addr.sun_family = AF_UNIX ;
++    addr.sun_path[0] = '\0' ;
++    snprintf(addr.sun_path + 1, sizeof(addr.sun_path) - 1,
++             "s6-ctrl-%lx-%lx", (unsigned long)st.st_dev, (unsigned long)st.st_ino) ;
++    if (bind(fdctl, (struct sockaddr *)&addr, sizeof(addr)) < 0)
++      strerr_diefu1sys(111, "bind control socket") ;
++    ndelay_on(fdctl) ;
++  }
+ 
+   umask(m) ;
+   return fdctl ;
