@@ -1,9 +1,16 @@
 # autoconf
 
-GNU Autoconf 自动配置工具，生成可适应多种类 UNIX 系统的 configure 脚本。
+GNU Autoconf generates portable `configure` scripts from `configure.ac` templates.
 
-## 版本列表
+## OHOS adaptation
 
-| 版本 | 状态 | 编译日期 |
-|------|------|----------|
-| [2.72](./2.72/) | built | 2026-04-25 |
+- Package type: command-line build tool.
+- Installed commands: `autoconf`, `autoheader`, `autom4te`, `autoreconf`, `autoscan`, `autoupdate`, `ifnames`.
+- Runtime/build dependencies: `perl/5.42.2` and `m4/1.4.19`; both have OHOS armv8 packages in `ohpcd`.
+- The 2.72 release tarball already ships `configure` and `Makefile.in`; the recipe does not run `autoreconf` while building Autoconf itself.
+
+## Versions
+
+| Version | Status | Notes |
+|---------|--------|-------|
+| [2.72](./2.72/) | built | OHOS isolated runner passed L0/L1/L5; upstream `make check` executed separately with 297/539 expected outcomes excluding 70 skipped |
