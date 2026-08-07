@@ -1,60 +1,42 @@
-# librhash 1.4.4 adaptation notes
+# librhash 1.4.4 适配笔记
 
-## Scope
+## 软件简介
 
-- Issue: 1890
-- Worktree: `D:\harmonyos\worktrees\librhash`
-- Branch: `feat/librhash-1.4.4-1890`
-- Package path: `archives/l/librhash/1.4.4`
+LibRHash 是 RHash 工具套件的核心组件，提供 MD5、SHA1、SHA256、SHA512、Torrent、TTH、
+ED2K、AICH 等哈希算法的共享库实现，供 lgogdownloader 等下游项目做文件完整性校验。
 
-## W0 dependency check
+## 构建要点（configure + make）
 
-- Required dependencies: none.
-- Optional dependencies: OpenSSL and gettext are intentionally disabled.
-- Rationale: existing `archives/r/rhash/1.4.4` notes record gettext build issues and shared-library symlink issues on OHOS; librhash can provide the core API without these optional features.
+1. **工具链**：`./configure --cc=clang --ar=llvm-ar` 指定鸿蒙工具链，
+   `--enable-lib-shared --disable-static --disable-openssl` 仅构建共享库并关闭可选
+   OpenSSL 依赖。
+2. **Makefile 修复**：上游 `SOLINK_TARGET` 依赖在 `LIBRHASH_SO_MAJ == LIBRHASH_SHARED`
+   时返回非零，会中断构建。`build()` 中执行
+   `sed -i 's/$(SOLINK_TARGET)//' librhash/Makefile` 移除该依赖。
+3. **仅构建库**：`make -C librhash -j1 lib-shared|lib-static`，跳过 rhash CLI 编译
+   （目标绑定 shared 选项）。
+4. **SONAME 符号链接**：上游产物为 `librhash.so.1`，`package()` 创建
+   `librhash.so -> librhash.so.1` 符号链接，保证 CMake `find_package(Rhash CONFIG)`
+   能发现 unversioned 库名。
+5. **OHOS 产物签名**：`build()` 对 `librhash/*.so*` 执行
+   `llvm-objcopy --remove-section .codesign` + `binary-sign-tool -selfSign 1` 自签名，
+   保证鸿蒙平台可加载；签名工具路径从环境变量（LLVM_OBJCOPY / BINARY_SIGN_TOOL /
+   LLVM_READELF）读取，避免硬编码。共享模式未产出 .so 时抛 ConanException（不静默）。
+6. **rhash CLI**：同时构建并打包 rhash 命令行工具到 `bin/`（响应 AI 检视与人工评审
+   建议），test_package 使用 CLI 执行上游移植断言。
 
-## Source and build analysis
+## 测试说明
 
-- Source URL: `https://github.com/rhash/RHash/archive/refs/tags/v1.4.4.tar.gz`
-- SHA256: `8e7d1a8ccac0143c8fe9b68ebac67d485df119ea17a613f4038cda52f84ef52a`
-- Build system: custom `configure` plus Makefile.
-- Library target: `make -j1 lib-static`, producing `librhash/librhash.a`.
-- Upstream library test target: `make -j1 test-lib-static`, producing and running `librhash/test_static`.
+- 上游 RHash 自带 `tests/test_rhash.sh`（针对 rhash CLI）；本适配将核心断言
+  （--message CRC32/MD5/SHA1/SHA256、空消息 MD5、--list-hashes）移植为
+  `test_package/test_rhash_cli.sh`（assertion_count=6），CI L0/L1 门禁通过。
+- test_rhash_cli.sh 使用 `set -euo pipefail`（bash 扩展），test_package 统一用
+  `CONFIG_SHELL`（OHOS 默认 `/data/service/hnp/bin/bash`）执行，避免 dash 不支持
+  pipefail 导致失败。
 
-## Conan strategy
+## 依赖与发布
 
-- Build static `librhash.a` only.
-- Package headers: `rhash.h` and `rhash_torrent.h`.
-- Disable shared library generation to avoid symlink handling on HMDFS.
-- Disable OpenSSL/gettext to keep W0 dependency-free.
-- Use compiler paths from Conan `tools.build:compiler_executables` and pass them to `configure` with `--cc`/`--ar`.
-- If `make` is unavailable on the OHOS worker, fall back to compiling the `librhash/Makefile` source list directly with clang and the SDK `llvm-ar`; still builds and runs upstream `librhash/test_lib.c` as `test_static`.
-- Set `TMPDIR` inside the Conan build folder for configure-time probes.
-- `test_package` avoids CMake because the target worker did not expose `cmake`; it compiles `test.c` directly with the Conan profile C compiler and links against `librhash.a`.
-
-## Validation status
-
-- Local source download and SHA256 check: passed on Windows host.
-- Static recipe/test files: prepared.
-- Read-only Python AST syntax check for both `conanfile.py` files: passed.
-- Whitespace scan for the target directory: passed.
-- Host tool availability: `conan`, `make`, `clang`, `cmake`, and `zsh` are not on the Windows PATH in this session, so a local `conan create` or CI dry run was not feasible here.
-- Full OHOS single-package shadow CI: passed on 2026-08-06.
-  - Runner log location retained locally; external IPs and device paths are intentionally omitted from the public archive.
-  - Summary: `Total: 1`, `Success: 1`, `Failed: 0`
-  - Gates: `L0=pass`, `L1=pass`, `L2=skip` (no `bin/`), `L4=pass`, `L5=pass`
-  - Upstream library test evidence: `./test_static` printed `All sums are working properly!`
-  - Consumer test evidence: `test_package` compiled and ran `test_librhash`; L1e destructive negative test confirmed the test depends on `librhash`.
-
-## Next commands
-
-```sh
-cd D:/harmonyos/worktrees/librhash
-CI_PACKAGES="archives/l/librhash/1.4.4" zsh ci/conan/build_and_test.sh
-```
-
-If using the shadow CI runner:
-
-```sh
-/path/to/run-ohos-shadow-ci.sh archives/l/librhash/1.4.4
-```
+- 无外部依赖（所有哈希算法内置，自包含 C 库）。
+- `package_info()` 暴露 `Rhash::Rhash` imported target、`cmake_file_name="Rhash"`、
+  `pkg_config_name="librhash"`，供下游 find_package 使用。
+- 版本级 status: built，可直接发布；下游 lgogdownloader 3.18 通过 Conan 拉取。
