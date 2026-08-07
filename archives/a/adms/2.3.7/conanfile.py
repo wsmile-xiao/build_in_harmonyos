@@ -1,5 +1,5 @@
 from conan import ConanFile
-from conan.tools.cmake import CMake, cmake_layout
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import copy, get
 from conan.errors import ConanInvalidConfiguration
 import os
@@ -28,6 +28,10 @@ class AdmsConan(ConanFile):
     def source(self):
         data = self.conan_data["sources"][self.version]
         get(self, **data, strip_root=True)
+
+    def generate(self):
+        tc = CMakeToolchain(self)
+        tc.generate()
 
     def build(self):
         cmake = CMake(self)
