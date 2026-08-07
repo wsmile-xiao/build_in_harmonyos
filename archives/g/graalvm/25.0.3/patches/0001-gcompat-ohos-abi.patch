@@ -1,0 +1,653 @@
+diff --git a/Makefile b/Makefile
+index cbb7634..0e852c8 100644
+--- a/Makefile
++++ b/Makefile
+@@ -15,6 +15,7 @@ LIBGCOMPAT_SRC = \
+ 	libgcompat/math.c		\
+ 	libgcompat/misc.c		\
+ 	libgcompat/netdb.c		\
++	libgcompat/ohos.c		\
+ 	libgcompat/pthread.c		\
+ 	libgcompat/pwd.c		\
+ 	libgcompat/random_r.c		\
+diff --git a/libgcompat/dlfcn.c b/libgcompat/dlfcn.c
+index f2eaa45..f538348 100644
+--- a/libgcompat/dlfcn.c
++++ b/libgcompat/dlfcn.c
+@@ -14,7 +14,7 @@ void *dlmopen(long lmid, const char *pathname, int mode)
+ 	return dlopen(pathname, mode);
+ }
+ 
+-void *dlvsym(void *handle, char *symbol, char *version)
++void *dlvsym(void *handle, const char *symbol, const char *version)
+ {
+ 	if (getenv("GLIBC_FAKE_DEBUG") != NULL) {
+ 		fprintf(stderr, "symbol %s with version %s is being redirected",
+diff --git a/libgcompat/error.c b/libgcompat/error.c
+index 92ce224..466fac3 100644
+--- a/libgcompat/error.c
++++ b/libgcompat/error.c
+@@ -4,6 +4,8 @@
+ #include <stdio.h>  /* fflush, fputc, fputs, stderr, stdout, vfprintf */
+ #include <string.h> /* strerror */
+ 
++extern char *program_invocation_name;
++
+ /**
+  * Print an error message.
+  *
+diff --git a/libgcompat/grp.c b/libgcompat/grp.c
+index 5674fda..327425d 100644
+--- a/libgcompat/grp.c
++++ b/libgcompat/grp.c
+@@ -9,6 +9,7 @@
+ #include <stdio.h>   /* FILE */
+ #include <string.h>  /* memcpy, stpcpy, strlcpy, strlen */
+ 
++struct group *fgetgrent(FILE *stream);
+ #define ALIGN_PTR_TO_SIZE_OF(ptr, type)                                        \
+ 	((type *) ((((uintptr_t)(ptr)) + sizeof(type) - 1)                     \
+ 	           & ~(sizeof(type) - 1)))
+@@ -25,8 +26,9 @@ static int __fgetgrent_r(FILE *stream, struct group *grp, char *buf, size_t len,
+ 	pthread_mutex_lock(&grent_mutex);
+ 	grtmp = stream != NULL ? fgetgrent(stream) : getgrent();
+ 	if (grtmp == NULL) {
++		int error = errno;
+ 		pthread_mutex_unlock(&grent_mutex);
+-		return ENOENT;
++		return error != 0 ? error : ENOENT;
+ 	}
+ 	memcpy(grp, grtmp, sizeof(*grp));
+ 	if (grtmp->gr_name != NULL) {
+@@ -56,15 +58,15 @@ static int __fgetgrent_r(FILE *stream, struct group *grp, char *buf, size_t len,
+ 		if (nameslen > end - ((char *) members)) {
+ 			goto err_unlock;
+ 		}
+-		/* Copy the pointers, including the NULL sentinel. */
+-		for (size_t i = 0; i < nmem; ++i) {
+-			members[i] = grtmp->gr_mem[i];
+-		}
++		/* Point the result at the caller-owned pointer and string storage. */
++		grp->gr_mem = members;
+ 		/* Copy the strings (the NULL sentinel doesn't point to one). */
+ 		cursor = (char *) &members[nmem];
+ 		for (size_t i = 0; i < nmem - 1; ++i) {
+-			cursor = stpcpy(cursor, members[i]) + 1;
++			members[i] = cursor;
++			cursor = stpcpy(cursor, grtmp->gr_mem[i]) + 1;
+ 		}
++		members[nmem - 1] = NULL;
+ 	}
+ 	pthread_mutex_unlock(&grent_mutex);
+ 	*result = grp;
+diff --git a/libgcompat/locale.c b/libgcompat/locale.c
+index 9c4ee28..793c143 100644
+--- a/libgcompat/locale.c
++++ b/libgcompat/locale.c
+@@ -32,7 +32,11 @@ struct glibc_locale *__newlocale(int mask, const char *name, locale_t base) {
+ 	}
+ 
+ 	/* relies on sizeof(*locale_t) <= sizeof(ret.__locales) */
+-	newlocale_t real_newlocale = (newlocale_t)dlsym(RTLD_NEXT, "__newlocale");
++	newlocale_t real_newlocale = (newlocale_t)dlsym(RTLD_NEXT, "newlocale");
++	if (real_newlocale == NULL) {
++		if (base == NULL) free(ret);
++		return NULL;
++	}
+ 	real_newlocale(mask, name, (void*)ret);
+ 
+ 	ret->__ctype_b = *__ctype_b_loc();
+diff --git a/libgcompat/malloc.c b/libgcompat/malloc.c
+index 5a82bc4..d6e752b 100644
+--- a/libgcompat/malloc.c
++++ b/libgcompat/malloc.c
+@@ -32,17 +32,4 @@
+ #include "alias.h" /* alias */
+ 
+-struct mallinfo {
+-	int arena;    /* Non-mmapped space allocated (bytes) */
+-	int ordblks;  /* Number of free chunks */
+-	int smblks;   /* Number of free fastbin blocks */
+-	int hblks;    /* Number of mmapped regions */
+-	int hblkhd;   /* Space allocated in mmapped regions (bytes) */
+-	int usmblks;  /* Maximum total allocated space (bytes) */
+-	int fsmblks;  /* Space in freed fastbin blocks (bytes) */
+-	int uordblks; /* Total allocated space (bytes) */
+-	int fordblks; /* Total free space (bytes) */
+-	int keepcost; /* Top-most, releasable space (bytes) */
+-};
+-
+ void *__libc_calloc(size_t nmemb, size_t size)
+ {
+@@ -83,11 +70,4 @@
+ }
+ 
+-struct mallinfo mallinfo(void)
+-{
+-	struct mallinfo info;
+-	memset(&info, 0, sizeof(info));
+-	return info;
+-}
+-
+ int malloc_trim(size_t pad)
+ {
+diff --git a/libgcompat/math.c b/libgcompat/math.c
+index ce567ef..a0c9b5d 100644
+--- a/libgcompat/math.c
++++ b/libgcompat/math.c
+@@ -4,6 +4,9 @@
+ #include "alias.h"    /* weak_alias */
+ #include "internal.h" /* GCOMPAT__assert_with_reason */
+ 
++double exp10(double x);
++float exp10f(float x);
++long double exp10l(long double x);
+ /**
+  * Multiplies the first argument x by FLT_RADIX (probably 2) to the power of y.
+  */
+diff --git a/libgcompat/ohos.c b/libgcompat/ohos.c
+new file mode 100644
+index 0000000000000000000000000000000000000000..ff1fc50aacb4c97b5dcb02b654062ba989008a9d
+--- /dev/null
++++ b/libgcompat/ohos.c
+@@ -0,0 +1,364 @@
++#define _GNU_SOURCE
++
++#include <dlfcn.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <grp.h>
++#include <link.h>
++#include <math.h>
++#include <pwd.h>
++#include <resolv.h>
++#include <stddef.h>
++#include <stdint.h>
++#include <stdarg.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++#include <utmp.h>
++#include <utmpx.h>
++
++static __thread struct __res_state compat_res_state;
++
++struct __res_state *__res_state(void)
++{
++	return &compat_res_state;
++}
++
++static unsigned short ctype_b_table[384];
++static int32_t ctype_tolower_table[384];
++static int32_t ctype_toupper_table[384];
++static const unsigned short *ctype_b_ptr = ctype_b_table + 128;
++static const int32_t *ctype_tolower_ptr = ctype_tolower_table + 128;
++static const int32_t *ctype_toupper_ptr = ctype_toupper_table + 128;
++
++const unsigned short **__ctype_b_loc(void)
++{
++	return &ctype_b_ptr;
++}
++
++const int32_t **__ctype_tolower_loc(void)
++{
++	return &ctype_tolower_ptr;
++}
++
++const int32_t **__ctype_toupper_loc(void)
++{
++	return &ctype_toupper_ptr;
++}
++
++extern char *__progname;
++
++char *__progname_full;
++char *program_invocation_name;
++
++static unsigned short ctype_bits(int c)
++{
++	unsigned short bits = 0;
++	int upper = c >= 'A' && c <= 'Z';
++	int lower = c >= 'a' && c <= 'z';
++	int alpha = upper || lower;
++	int digit = c >= '0' && c <= '9';
++	int xdigit = digit || (c >= 'A' && c <= 'F') ||
++	             (c >= 'a' && c <= 'f');
++	int space = c == ' ' || (c >= '\t' && c <= '\r');
++	int print = c >= 0x20 && c <= 0x7e;
++	int graph = c >= 0x21 && c <= 0x7e;
++	int blank = c == ' ' || c == '\t';
++	int cntrl = c < 0x20 || c == 0x7f;
++	int alnum = alpha || digit;
++	int punct = graph && !alnum;
++
++	if (upper) bits |= 0x0100;
++	if (lower) bits |= 0x0200;
++	if (alpha) bits |= 0x0400;
++	if (digit) bits |= 0x0800;
++	if (xdigit) bits |= 0x1000;
++	if (space) bits |= 0x2000;
++	if (print) bits |= 0x4000;
++	if (graph) bits |= 0x8000;
++	if (blank) bits |= 0x0001;
++	if (cntrl) bits |= 0x0002;
++	if (punct) bits |= 0x0004;
++	if (alnum) bits |= 0x0008;
++	return bits;
++}
++
++__attribute__((constructor))
++static void init_gcompat_ohos(void)
++{
++	int c;
++	int mapped;
++
++	__progname_full = __progname != NULL ? __progname : (char *)"";
++	program_invocation_name = __progname_full;
++
++	for (c = -128; c < 256; ++c) {
++		mapped = c < -1 ? c + 256 : c;
++		ctype_b_table[c + 128] = c >= 0 && c < 128 ? ctype_bits(c) : 0;
++		ctype_tolower_table[c + 128] =
++		    mapped >= 'A' && mapped <= 'Z' ? mapped + ('a' - 'A') : mapped;
++		ctype_toupper_table[c + 128] =
++		    mapped >= 'a' && mapped <= 'z' ? mapped - ('a' - 'A') : mapped;
++	}
++}
++
++double exp10(double x) { return pow(10.0, x); }
++float exp10f(float x) { return powf(10.0f, x); }
++long double exp10l(long double x) { return powl(10.0L, x); }
++
++void explicit_bzero(void *buf, size_t len)
++{
++	volatile unsigned char *p = buf;
++	while (len-- != 0) *p++ = 0;
++}
++
++int mkdir(const char *path, mode_t mode)
++{
++	return (int)syscall(SYS_mkdirat, AT_FDCWD, path, mode);
++}
++
++static int read_database_line(FILE *stream, char **line, size_t *capacity)
++{
++	ssize_t length;
++
++	for (;;) {
++		errno = 0;
++		length = getline(line, capacity, stream);
++		if (length < 0) return -1;
++		while (length > 0 &&
++		       ((*line)[length - 1] == '\n' || (*line)[length - 1] == '\r')) {
++			(*line)[--length] = '\0';
++		}
++		if (length > 0 && (*line)[0] != '#') return 0;
++	}
++}
++
++static int split_database_fields(char *line, char **fields, size_t count)
++{
++	char *cursor = line;
++
++	for (size_t i = 0; i + 1 < count; ++i) {
++		char *separator = strchr(cursor, ':');
++		if (separator == NULL) return -1;
++		fields[i] = cursor;
++		*separator = '\0';
++		cursor = separator + 1;
++	}
++	fields[count - 1] = cursor;
++	return strchr(cursor, ':') == NULL ? 0 : -1;
++}
++
++static int parse_database_id(const char *text, unsigned long *result)
++{
++	char *end;
++	unsigned long value;
++
++	if (text[0] == '\0' || text[0] == '+' || text[0] == '-') return -1;
++	errno = 0;
++	value = strtoul(text, &end, 10);
++	if (errno != 0 || end[0] != '\0') return -1;
++	*result = value;
++	return 0;
++}
++
++static __thread char *passwd_line;
++static __thread size_t passwd_capacity;
++static __thread struct passwd passwd_entry;
++
++struct passwd *fgetpwent(FILE *stream)
++{
++	char *fields[7];
++	unsigned long uid_value, gid_value;
++	uid_t uid;
++	gid_t gid;
++
++	if (stream == NULL) {
++		errno = EINVAL;
++		return NULL;
++	}
++	while (read_database_line(stream, &passwd_line, &passwd_capacity) == 0) {
++		if (split_database_fields(passwd_line, fields, 7) != 0 ||
++		    parse_database_id(fields[2], &uid_value) != 0 ||
++		    parse_database_id(fields[3], &gid_value) != 0) {
++			continue;
++		}
++		uid = (uid_t)uid_value;
++		gid = (gid_t)gid_value;
++		if ((unsigned long)uid != uid_value ||
++		    (unsigned long)gid != gid_value) {
++			continue;
++		}
++		passwd_entry.pw_name = fields[0];
++		passwd_entry.pw_passwd = fields[1];
++		passwd_entry.pw_uid = uid;
++		passwd_entry.pw_gid = gid;
++		passwd_entry.pw_gecos = fields[4];
++		passwd_entry.pw_dir = fields[5];
++		passwd_entry.pw_shell = fields[6];
++		return &passwd_entry;
++	}
++	return NULL;
++}
++
++static __thread char *group_line;
++static __thread size_t group_capacity;
++static __thread struct group group_entry;
++static __thread char **group_members;
++static __thread size_t group_members_capacity;
++
++struct group *fgetgrent(FILE *stream)
++{
++	char *fields[4];
++	unsigned long gid_value;
++	gid_t gid;
++	size_t member_count, member_index;
++	char *member, *separator;
++	char **resized;
++
++	if (stream == NULL) {
++		errno = EINVAL;
++		return NULL;
++	}
++	while (read_database_line(stream, &group_line, &group_capacity) == 0) {
++		if (split_database_fields(group_line, fields, 4) != 0 ||
++		    parse_database_id(fields[2], &gid_value) != 0) {
++			continue;
++		}
++		gid = (gid_t)gid_value;
++		if ((unsigned long)gid != gid_value) continue;
++
++		member_count = fields[3][0] == '\0' ? 0 : 1;
++		for (member = fields[3]; *member != '\0'; ++member) {
++			if (*member == ',') ++member_count;
++		}
++		if (member_count + 1 > group_members_capacity) {
++			resized = realloc(group_members,
++			                  (member_count + 1) * sizeof(*group_members));
++			if (resized == NULL) return NULL;
++			group_members = resized;
++			group_members_capacity = member_count + 1;
++		}
++
++		member_index = 0;
++		member = fields[3];
++		while (member[0] != '\0') {
++			separator = strchr(member, ',');
++			if (separator != NULL) *separator = '\0';
++			if (member[0] == '\0') break;
++			group_members[member_index++] = member;
++			if (separator == NULL) break;
++			member = separator + 1;
++		}
++		if (member_index != member_count) continue;
++		group_members[member_index] = NULL;
++
++		group_entry.gr_name = fields[0];
++		group_entry.gr_passwd = fields[1];
++		group_entry.gr_gid = gid;
++		group_entry.gr_mem = group_members;
++		return &group_entry;
++	}
++	return NULL;
++}
++
++int __xstat64(int version, const char *path, struct stat64 *buf)
++{
++	(void)version;
++	return stat64(path, buf);
++}
++
++int __fxstat64(int version, int fd, struct stat64 *buf)
++{
++	(void)version;
++	return fstat64(fd, buf);
++}
++
++int __lxstat64(int version, const char *path, struct stat64 *buf)
++{
++	(void)version;
++	return lstat64(path, buf);
++}
++
++int __xstat(int version, const char *path, struct stat *buf)
++{
++	(void)version;
++	return stat(path, buf);
++}
++
++int __fxstat(int version, int fd, struct stat *buf)
++{
++	(void)version;
++	return fstat(fd, buf);
++}
++
++int __lxstat(int version, const char *path, struct stat *buf)
++{
++	(void)version;
++	return lstat(path, buf);
++}
++
++int __xmknod(int version, const char *path, mode_t mode, dev_t *dev)
++{
++	(void)version;
++	return mknod(path, mode, *dev);
++}
++
++int __isoc99_sscanf(const char *restrict str, const char *restrict format, ...)
++{
++	int result;
++	va_list ap;
++
++	va_start(ap, format);
++	result = vsscanf(str, format, ap);
++	va_end(ap);
++	return result;
++}
++
++ssize_t __getdelim(char **restrict lineptr, size_t *restrict n, int delim,
++	           FILE *restrict stream)
++{
++	return getdelim(lineptr, n, delim, stream);
++}
++
++int __xpg_strerror_r(int errnum, char *buf, size_t buflen)
++{
++	return strerror_r(errnum, buf, buflen);
++}
++
++int _IO_getc(FILE *stream) { return getc(stream); }
++
++#ifndef RTLD_DI_LMID
++#define RTLD_DI_LMID 1
++#endif
++
++int dlinfo(void *handle, int request, void *result)
++{
++	if (handle == NULL || result == NULL) {
++		errno = EINVAL;
++		return -1;
++	}
++	if (request == RTLD_DI_LMID) {
++		*(long *)result = 0;
++		return 0;
++	}
++	if (request == RTLD_DI_LINKMAP) {
++		errno = ENOTSUP;
++		return -1;
++	}
++	errno = EINVAL;
++	return -1;
++}
++
++struct utmpx *getutxent(void) { return (struct utmpx *)getutent(); }
++void setutxent(void) { setutent(); }
++void endutxent(void) { endutent(); }
++
++__asm__(".text\n"
++	".global __sigsetjmp\n"
++	".type __sigsetjmp,%function\n"
++	"__sigsetjmp:\n"
++	"b sigsetjmp\n"
++	".size __sigsetjmp, .-__sigsetjmp\n");
+diff --git a/libgcompat/pwd.c b/libgcompat/pwd.c
+index 7b925ca..7d6afb5 100644
+--- a/libgcompat/pwd.c
++++ b/libgcompat/pwd.c
+@@ -8,6 +8,7 @@
+ #include <stdio.h>   /* FILE */
+ #include <string.h>  /* memcpy, stpcpy, strlcpy, strlen */
+ 
++struct passwd *fgetpwent(FILE *stream);
+ static pthread_mutex_t pwent_mutex = PTHREAD_MUTEX_INITIALIZER;
+ 
+ static int __fgetpwent_r(FILE *stream, struct passwd *pwd, char *buf,
+@@ -20,8 +21,9 @@ static int __fgetpwent_r(FILE *stream, struct passwd *pwd, char *buf,
+ 	pthread_mutex_lock(&pwent_mutex);
+ 	pwtmp = stream != NULL ? fgetpwent(stream) : getpwent();
+ 	if (pwtmp == NULL) {
++		int error = errno;
+ 		pthread_mutex_unlock(&pwent_mutex);
+-		return ENOENT;
++		return error != 0 ? error : ENOENT;
+ 	}
+ 	memcpy(pwd, pwtmp, sizeof(*pwd));
+ 	if (pwtmp->pw_name != NULL) {
+diff --git a/libgcompat/readlink.c b/libgcompat/readlink.c
+index 42501fe..5254538 100644
+--- a/libgcompat/readlink.c
++++ b/libgcompat/readlink.c
+@@ -8,7 +8,7 @@
+ #include <unistd.h>
+ 
+ #ifndef LINKER
+-#error LINKER must be defined
++#define LINKER "/lib/ld-musl-aarch64.so.1"
+ #endif
+ 
+ static char exe[PATH_MAX], *linker;
+@@ -24,7 +24,7 @@ ssize_t readlink(const char *path, char *buf, size_t len)
+ 		}
+ 	}
+ 
+-	if (!strcmp(path, "/proc/self/exe")) {
++	if (0) {
+ 		int fd;
+ 
+ 		if (exe[0] == '\0') {
+diff --git a/libgcompat/realpath.c b/libgcompat/realpath.c
+index ab68cc4..dbfd3ee 100644
+--- a/libgcompat/realpath.c
++++ b/libgcompat/realpath.c
+@@ -8,7 +8,7 @@
+ #include <unistd.h>
+ 
+ #ifndef LINKER
+-#error LINKER must be defined
++#define LINKER "/lib/ld-musl-aarch64.so.1"
+ #endif
+ 
+ static char *(*real_realpath)(const char *restrict, char *restrict);
+diff --git a/libgcompat/resolv.c b/libgcompat/resolv.c
+index 0b81d0c..a8f76c0 100644
+--- a/libgcompat/resolv.c
++++ b/libgcompat/resolv.c
+@@ -12,6 +12,8 @@
+ 
+ #include "alias.h" /* weak_alias */
+ 
++struct __res_state *__res_state(void);
++#define _res (*__res_state())
+ int __res_ninit(res_state statp)
+ {
+ 	int rc;
+diff --git a/libgcompat/socket.c b/libgcompat/socket.c
+index 7536039..06f50d9 100644
+--- a/libgcompat/socket.c
++++ b/libgcompat/socket.c
+@@ -10,7 +10,14 @@
+  */
+ struct cmsghdr *__cmsg_nxthdr(struct msghdr *msg, struct cmsghdr *cmsg)
+ {
++#ifdef __clang__
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wsign-compare"
++#endif
+ 	return CMSG_NXTHDR(msg, cmsg);
++#ifdef __clang__
++#pragma clang diagnostic pop
++#endif
+ }
+ 
+ /**
+diff --git a/libgcompat/string.c b/libgcompat/string.c
+index a164ab2..d88b8c0 100644
+--- a/libgcompat/string.c
++++ b/libgcompat/string.c
+@@ -12,6 +12,7 @@
+ 
+ #include "alias.h" /* weak_alias */
+ 
++void explicit_bzero(void *s, size_t n);
+ /**
+  * Copy bytes in memory, with buffer overflow checking.
+  *
+diff --git a/libgcompat/unistd.c b/libgcompat/unistd.c
+index 011fba2..a8e276b 100644
+--- a/libgcompat/unistd.c
++++ b/libgcompat/unistd.c
+@@ -185,7 +185,8 @@ int group_member(gid_t gid)
+ }
+ 
+ #ifndef LOADER
+-#error LOADER must be defined
++#define LOADER "ld-linux-aarch64.so.1"
++#define LINKER "/lib/ld-musl-aarch64.so.1"
+ #endif
+ 
+ static int (*real_execve)(const char *pathname, char *const argv[], char *const envp[]);
+@@ -198,7 +199,7 @@ int execve(const char *pathname, char *const argv[], char *const envp[]) {
+ 		}
+ 	}
+ 
+-	if(!strcmp(pathname, "/proc/self/exe")) {
++	if(0) {
+ 		char **new_argv;
+ 		char target[PATH_MAX] = "";
+ 		int argc = 0, i = 0;
+diff --git a/libgcompat/utmp.c b/libgcompat/utmp.c
+index d044fd2..d10fedc 100644
+--- a/libgcompat/utmp.c
++++ b/libgcompat/utmp.c
+@@ -1,5 +1,5 @@
+ #include <stddef.h> /* NULL */
+-#include <utmpx.h>   /* struct utmp */
++#include <utmp.h>    /* struct utmp */
+ 
+ /**
+  * Get user accounting database entries.
