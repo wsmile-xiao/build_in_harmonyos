@@ -2,7 +2,7 @@
 
 ## 编译环境
 - 构建系统: makefile
-- 编译日期: 2026-05-29
+- 编译日期: 2026-08-07
 - 编译器: clang/clang++
 - 状态: published
 
@@ -25,6 +25,17 @@ mp3val 没有 configure 脚本，使用 Makefile 直接编译：
 
 1. `0001-fix-hardcoded-tmp-path-for-R10.patch` — crossapi.cpp: 替换硬编码 `/tmp` 为 `getenv("TMPDIR")` (R10)
 2. `0002-add-makefile-with-install-target.patch` — 新增 Makefile: 包含 install 目标、DESTDIR/PREFIX 支持、编译规则
+
+## Conan 适配 (2026-08-07)
+
+- 生成 conanfile.py: application 类型 (CLI 工具, 非库)
+- 生成 conandata.yml: 含正确 sha256 和 SourceForge URL (含 %20 编码)
+- 生成 test_package/: VirtualRunEnv 方式运行 `mp3val -v` 验证二进制
+- 创建 commands.json: 声明命令行工具 (R38)
+- 修复 SourceForge 下载: SourceForge 阻止 Python urllib, 使用 curl 下载
+- 修复补丁 CRLF: 补丁文件转为 LF 格式, build() 中先 sed 转换源码 CRLF→LF
+- 修复补丁格式: 补充缺失的尾部上下文行 (7 行匹配 hunk header)
+- conan-verify 全部通过: G1✅ G2✅ G3✅ G4✅ L2✅ L4✅ L5✅
 
 ## 依赖版本
 
@@ -54,9 +65,5 @@ $ mp3val -v
 
 ---
 
-**编译结束**: 2026-05-29
+**编译结束**: 2026-08-07
 **最终状态**: published
----
-
-**编译结束**: 2026-05-29 11:09
-**最终状态**: built
