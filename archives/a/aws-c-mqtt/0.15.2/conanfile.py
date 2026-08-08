@@ -5,7 +5,7 @@ import os
 import shlex
 
 from conan import ConanFile
-from conan.tools.build import build_jobs
+from conan.tools.build import build_jobs, can_run
 from conan.tools.cmake import CMakeToolchain, cmake_layout
 from conan.tools.files import copy, get, load, replace_in_file, save
 
@@ -52,7 +52,8 @@ class AwsCMqttConan(ConanFile):
         self._strip_io_s2n_dependency(prefix)
         self._strip_io_s2n_dependency(self.package_folder)
         self._build_private_cmake("aws-c-http")
-        self._build_private_cmake("aws-c-mqtt")
+        self._build_private_cmake("aws-c-mqtt", build_testing=True)
+        self._run_mqtt_upstream_tests()
 
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
@@ -109,7 +110,7 @@ class AwsCMqttConan(ConanFile):
             "x86_64": "x86_64",
         }.get(arch, arch)
 
-    def _build_private_cmake(self, name, definitions=None):
+    def _build_private_cmake(self, name, definitions=None, build_testing=False):
         source_dir = self.source_folder if name == "aws-c-mqtt" else os.path.join(self.source_folder, "_deps", name)
         build_dir = os.path.join(self.build_folder, "_build", name)
         prefix = self._private_prefix()
@@ -126,7 +127,7 @@ class AwsCMqttConan(ConanFile):
             "-DCMAKE_BUILD_TYPE={}".format(self.settings.build_type),
             "-DCMAKE_INSTALL_PREFIX={}".format(prefix),
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
-            "-DBUILD_TESTING=OFF",
+            "-DBUILD_TESTING={}".format("ON" if build_testing else "OFF"),
             "-DCMAKE_POSITION_INDEPENDENT_CODE={}".format("ON" if self.options.get_safe("fPIC", True) else "OFF"),
             "-DCMAKE_PREFIX_PATH={}".format(self._prefix_path(prefix)),
             "-DCMAKE_MODULE_PATH={}".format(self._module_path(prefix)),
@@ -137,11 +138,29 @@ class AwsCMqttConan(ConanFile):
         self.run(shlex.join(["cmake", "--build", build_dir, "--parallel", jobs]), env=["conanbuild"], ignore_errors=False)
         self.run(shlex.join(["cmake", "--install", build_dir]), env=["conanbuild"], ignore_errors=False)
 
+    def _run_mqtt_upstream_tests(self):
+        build_dir = os.path.join(self.build_folder, "_build", "aws-c-mqtt")
+        lib_dir = os.path.join(self._private_prefix(), "lib")
+        old_ld = os.environ.get("LD_LIBRARY_PATH")
+        os.environ["LD_LIBRARY_PATH"] = lib_dir + (os.pathsep + old_ld if old_ld else "")
+        try:
+            self.run(
+                shlex.join(["ctest", "--output-on-failure", "--timeout", "300"]),
+                cwd=build_dir,
+                env="conanrun",
+            )
+        finally:
+            if old_ld is None:
+                os.environ.pop("LD_LIBRARY_PATH", None)
+            else:
+                os.environ["LD_LIBRARY_PATH"] = old_ld
+
     def _module_path(self, prefix):
         return ";".join([
             os.path.join(prefix, "lib", "cmake"),
             os.path.join(prefix, "lib", "cmake", "aws-c-common"),
             os.path.join(prefix, "lib", "cmake", "aws-c-common", "modules"),
+            os.path.join(self.source_folder, "_deps", "aws-c-common", "cmake"),
             os.path.join(self.package_folder, "lib", "cmake"),
             os.path.join(self.package_folder, "lib", "cmake", "aws-c-common"),
             os.path.join(self.package_folder, "lib", "cmake", "aws-c-common", "modules"),
