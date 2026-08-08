@@ -39,7 +39,9 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish lua-penlight 1.15.0 built
 
 ## 源码修改
 
-无补丁。纯 Lua 库直接使用原版源码。
+- `lua/pl/app.lua`: `app.platform()` 在 OHOS 上如果 `uname` 输出为空、
+  `OHOS`、`OpenHarmony` 或 `HarmonyOS`，映射到 Penlight 已有的 Unix-like
+  `Linux` 平台桶，避免返回 nil。
 
 ## 依赖版本
 
@@ -47,6 +49,16 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish lua-penlight 1.15.0 built
 - luafilesystem（可选依赖，pl.path 和 pl.dir 模块需要）
 
 ## 验证结果
+
+### OHOS new-port validation
+
+- Build/test_package run: `/storage/Users/currentUser/ohos-users/codex-a/neovim-vusted-pathb-integration-20260806/runs/codex-a-busted-luacov-chain-r9-20260807-055111-49066`
+- Full ref: `lua-penlight/1.15.0#ac2ef26a36feb362badbba8dbd7d6af5:da39a3ee5e6b4b0d3255bfef95601890afd80709#ec4370c9e1acb921e10ccd519e434818`
+- Upstream Busted run: `/storage/Users/currentUser/ohos-users/codex-a/neovim-vusted-pathb-integration-20260806/runs/codex-a-lua-pathb-leaf-upstream-r5-20260807-055323-50715`
+- Upstream result: `234 successes / 0 failures / 0 errors / 11 pending`
+- Consumer result: `1/1` smoke passed.
+
+### Legacy staging note
 
 ```bash
 # 在 staging 目录验证
