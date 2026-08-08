@@ -31,8 +31,8 @@ SFML 广泛应用于游戏开发、多媒体应用和教育领域。
 ### 已解决的问题
 
 - CMake 平台检测：添加 HarmonyOS 支持
-- pthread 线程取消：使用 `pthread_detach` 替代 `pthread_cancel`
-- OpenGL ES 支持：配置 EGL/GLES 库
+- pthread 线程取消：HarmonyOS 缺少 `pthread_cancel`，`sf::Thread::terminate()` 为 no-op（保持 joinable，等待线程自然结束）
+- OpenGL ES 支持：Window/Graphics 模块已禁用（`SFML_BUILD_WINDOW=OFF`/`SFML_BUILD_GRAPHICS=OFF`），无需 EGL/GLES 适配
 
 ## 编译信息
 
@@ -47,7 +47,7 @@ SFML 广泛应用于游戏开发、多媒体应用和教育领域。
 
 | 版本 | 状态 | 日期 |
 |------|------|------|
-| 2.6.1 | partial | 2026-05-30 |
+| 2.6.1 | built（System/Network） | 2026-07-19 |
 
 ## 使用方法
 
