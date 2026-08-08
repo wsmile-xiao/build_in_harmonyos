@@ -1,67 +1,73 @@
-# chafa 1.18.2 适配笔记
+# chafa 1.18.2 HarmonyOS adaptation notes
 
-## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-05-25
-- 编译器: clang/clang++
-- 状态: published
-- 平台: aarch64-unknown-linux-ohos
+## Scope
 
-## 编译步骤
+- Issue: 1924
+- Worktree: `D:\harmonyos\worktrees\chafa`
+- Branch: `feat/chafa-1.18.2-1924`
+- Package path: `archives/c/chafa/1.18.2`
 
-1. 下载源码：从 hpjansson.org/chafa/releases 下载官方tarball（包含configure脚本）
-2. 应用补丁：使用 patch-autotools-ohos.pl 添加 HarmonyOS 平台识别
-3. 配置：`./configure --prefix=$DEFAULT_PREFIX --without-tools`
-   - `--without-tools`: 跳过命令行工具构建，避免 freetype2 依赖
-4. 编译：`make -j2`
-5. 安装：`make install DESTDIR=$TEST_PREFIX`
-6. 打包：生成预编译包 chafa-1.18.2-ohos-aarch64.tar.gz
+## W0 dependency check
 
-## 遇到的问题与解决方案
+- Required upstream dependency: `glib-2.0 >= 2.58`.
+- Conan dependency selected: `glib/2.84.0.1`.
+- `glib/2.84.0.1` is present in the current `origin/main` worktree and is sufficient for the upstream version requirement.
+- GLib pulls its own `pcre2` dependency; chafa does not need a direct pcre2 requirement.
+- Direct `conan download ... -r=ohpcd --only-recipe` could not be executed on this Windows host because `conan` is not installed on PATH or in the bundled Python runtime.
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | config.guess 无法识别 HarmonyOS | GNU config.guess 不包含 __OHOS__ 检测 | 使用 patch-autotools-ohos.pl 添加 HarmonyOS 支持 |
-| 2 | config.status 临时文件创建失败 | HMDFS 文件系统权限限制，mktemp 创建的目录无法写入 | 修改 config.status 使用固定临时目录 $TMPDIR/chafa-config-workdir |
-| 3 | 缺少 freetype2 依赖 | 命令行工具需要 freetype2 | 使用 --without-tools 跳过工具构建 |
+## Source and build-system analysis
 
-## 源码修改
+- Final source URL: `https://hpjansson.org/chafa/releases/chafa-1.18.2.tar.xz`
+- sha256: `0b8d9ba9f347e8b6c0c71878217c9b0e478b4a42aa4babea0bf20840567239c2`
+- Build system: Autotools release tarball with generated `configure`.
+- Upstream `configure` supports `--without-tools`; command-line tools require `freetype2`.
+- Optional external image loaders are tied to tools and are disabled to keep this PR limited to libchafa.
 
-| 补丁文件 | 修改内容 |
-|----------|----------|
-| 0001-config.guess.patch | 添加 __OHOS__ LIBC 检测和 HarmonyOS 系统识别分支 |
-| 0002-config.sub.patch | 添加 ohos-linux 三元组支持 |
+## Conan recipe decisions
 
-## 依赖版本
+- Build libchafa only with:
+  - `--without-tools`
+  - `--without-avif --without-heif --without-jpeg --without-svg`
+  - `--without-tiff --without-webp --without-jxl`
+  - `--disable-gtk-doc --disable-man`
+- Use `PkgConfigDeps` so upstream `PKG_CHECK_MODULES(GLIB, glib-2.0 >= 2.58)` resolves through Conan.
+- Run upstream `make -j1 check` only when not cross-building; skip it for cross builds where target binaries cannot run on the build host.
+- Add `test_package` that calls libchafa APIs directly: creates a canvas, draws RGB pixels, prints terminal text, and verifies non-empty output.
 
-| 软件 | 版本 |
-|------|------|
-| glib | 2.88.0 |
-| pcre2 | 10.40 |
+## HarmonyOS notes
 
-## 验证结果
+- `config.guess` and `config.sub` are patched for `aarch64-unknown-linux-ohos`.
+- `configure` is patched so generated `config.status` temporary directories use `${TMPDIR:-.}` and `umask 022`, matching the known HMDFS temp-directory workaround.
+- The Automake test driver and libtool-generated test wrappers are patched to run through `$(SHELL)` because direct shebang execution is denied on the target runner.
+- Native `make check` extends `LD_LIBRARY_PATH` with Conan dependency lib directories so test binaries can resolve `libglib-2.0.so.0`.
+- Shared libraries are re-signed on native OHOS when `/data/service/hnp/bin/binary-sign-tool` is present; SDK/cross environments skip signing with a warning.
 
-```bash
-# 制品文件检查
-ls -lh archives/c/chafa/1.18.2/packaging/
-# chafa-1.18.2-ohos-aarch64.tar.gz      3.4M
-# chafa-1.18.2-ohos-aarch64-debug.tar.gz 225K
+## Local validation completed
 
-# 制品内容验证
-tar -tzf chafa-1.18.2-ohos-aarch64.tar.gz
-# include/chafa/*.h (13个头文件)
-# lib/libchafa.so.0.11.2
-# lib/libchafa.a
+- Created isolated worktree from `origin/main` at commit `39cc707bbb72c47df1725ac99451a38a0539a074`.
+- Downloaded official tarball and verified sha256.
+- Confirmed official tarball contains generated `configure`.
+- Confirmed upstream dependency and optional feature switches by inspecting `configure` / `configure.ac`.
+- Conan build/test was not run locally because Conan is unavailable in this Windows environment.
+
+## Device/shadow CI validation completed
+
+- Device: `currentUser@10.62.189.79:2222`
+- Isolated job: `/storage/Users/currentUser/ohos-users/currentUser/chafa-1.18.2-1924-20260807`
+- Passing run: `currentUser-chafa-chafa-1.18.2-1924-20260807-conan-r11-20260807-174835-53993`
+- Result: pass
+
+- L0: pass, dependency availability and version collision checks passed.
+- L1: pass, upstream `make check` and `test_package` executed; destructive negative test confirmed the test depends on chafa.
+- L2: skip, no `bin/` directory because this package intentionally builds libchafa without command-line tools.
+- L4: warning, `0001-config.guess.patch` is flagged by the generic dangerous-function scan due bundled upstream shell code in `config.guess`.
+- L5: pass, library artifacts were packaged.
+
+Re-run command used inside the isolated job:
+
+```sh
+JOB=$HOME/ohos-users/currentUser/chafa-1.18.2-1924-20260807
+. $JOB/env.sh
+cd $CI_REPO_ROOT
+sh $HOME/bin/ohos-test-runner.sh --user "$OHOS_ISOLATED_USER" --lib chafa --task "$OHOS_ISOLATED_JOB-conan-r11" --mode heavy --try-lock --workdir "$CI_REPO_ROOT" -- zsh ci/conan/build_and_test.sh "$CI_PACKAGES"
 ```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| chafa-1.18.2-ohos-aarch64.tar.gz | 3.4M | 主包（头文件+库文件） |
-| chafa-1.18.2-ohos-aarch64-debug.tar.gz | 225K | 调试符号包 |
-
-## 注意事项
-
-1. **HMDFS 权限限制**：config.status 脚本在 HMDFS 文件系统上无法在 mktemp 创建的临时目录中写入文件，需要手动修改使用固定目录
-2. **--without-tools**：如果需要构建命令行工具，需要先安装 freetype2
