@@ -117,6 +117,7 @@ if (( ${+CI_PACKAGES} )) \
     echo "  Total:   0"
     echo "  Success: 0"
     echo "  Failed:  0"
+    echo "  Pass rate: N/A (0 packages)"
     echo "[step] No Conan packages to build"
     exit 0
 fi
@@ -1299,6 +1300,13 @@ echo "━━━ Build Summary ━━━"
 echo "  Total:   ${#PACKAGES[@]}"
 echo "  Success: ${SUCCESS}"
 echo "  Failed:  ${FAILED}"
+# 通过率：Success / Total，明确标注（Total=0 时显示 N/A，避免除零）
+if [ "${#PACKAGES[@]}" -gt 0 ]; then
+    pass_rate=$(awk -v s="$SUCCESS" -v t="${#PACKAGES[@]}" 'BEGIN { printf "%.1f%%", s * 100 / t }')
+    echo "  Pass rate: ${pass_rate} (${SUCCESS}/${#PACKAGES[@]})"
+else
+    echo "  Pass rate: N/A (0 packages)"
+fi
 
 if [ $FAILED -gt 0 ]; then
     echo "  Failed packages:"
