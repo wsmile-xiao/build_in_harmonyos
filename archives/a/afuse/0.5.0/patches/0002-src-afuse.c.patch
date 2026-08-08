@@ -1,0 +1,472 @@
+--- a/src/afuse.c
++++ b/src/afuse.c
+@@ -11,22 +11,22 @@
+ 
+ #include <config.h>
+ 
+ #ifdef linux
+ // For pread()/pwrite()
+ #define _XOPEN_SOURCE 500
+ // For getline()
+ #define _GNU_SOURCE
+ #endif
+ 
+-#include <fuse.h>
+-#include <fuse_opt.h>
++#include <fuse3/fuse.h>
++#include <fuse3/fuse_opt.h>
+ #ifndef __USE_BSD
+ // for mkdtemp
+ #define __USE_BSD
+ #endif
+ #include <stdlib.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <stddef.h>
+ #include <unistd.h>
+ #include <alloca.h>
+@@ -624,22 +624,26 @@
+ 	*out_mount = mount;
+ 
+ 	if (is_child)
+ 		return PROC_PATH_PROXY_DIR;
+ 	else if (strlen(root_name))
+ 		return PROC_PATH_ROOT_SUBDIR;
+ 	else
+ 		return PROC_PATH_ROOT_DIR;
+ }
+ 
+-static int afuse_getattr(const char *path, struct stat *stbuf)
+-{
++static int afuse_getattr(const char *path, struct stat *stbuf,
++			      struct fuse_file_info *fi)
++{
++	if (fi && fi->fh != 0)
++		return get_retval(fstat(fi->fh, stbuf));
++
+ 	char *root_name = alloca(strlen(path));
+ 	char *real_path = alloca(max_path_out_len(path));
+ 	int retval;
+ 	mount_list_t *mount;
+ 	BLOCK_SIGALRM;
+ 
+ 	fprintf(stderr, "> GetAttr\n");
+ 
+ 	switch (process_path(path, real_path, root_name, 0, &mount)) {
+ 	case PROC_PATH_FAILED:
+@@ -815,69 +819,71 @@
+ 		    insert_sorted_if_unique(dir_entry_listptr, dir_entry);
+ 		if (insert_err == 1)	// already in list
+ 			continue;
+ 		else if (insert_err) {
+ 			fprintf(stderr,
+ 				"populate_root_command: failed on inserting new entry into sorted list.\n");
+ 			loop_error = 1;
+ 		}
+ 
+ 		if (strlen(dir_entry) != 0)
+-			filler(buf, dir_entry, NULL, 0);
++			filler(buf, dir_entry, NULL, 0, 0);
+ 	}
+ 
+ 	free(dir_entry);
+ 
+ 	int pclose_err = pclose(browser);
+ 	if (pclose_err) {
+ 		int pclose_errno = errno;
+ 		fprintf(stderr,
+ 			"populate_root_command: pclose failed, ret %d, status %d, errno %d (%s)\n",
+ 			pclose_errno, WEXITSTATUS(pclose_errno), pclose_errno,
+ 			strerror(pclose_errno));
+ 	}
+ 
+ 	return loop_error || pclose_err;
+ }
+ 
+ static int afuse_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
+-			 off_t offset, struct fuse_file_info *fi)
+-{
++			 off_t offset, struct fuse_file_info *fi,
++			 enum fuse_readdir_flags flags)
++{
++	(void)flags;
+ 	DIR *dp = get_dirp(fi);
+ 	struct dirent *de;
+ 	char *root_name = alloca(strlen(path));
+ 	char *real_path = alloca(max_path_out_len(path));
+ 	struct list_t *dir_entry_list = NULL;
+ 	mount_list_t *mount, *next;
+ 	int retval;
+ 	BLOCK_SIGALRM;
+ 
+ 	switch (process_path(path, real_path, root_name, 1, &mount)) {
+ 	case PROC_PATH_FAILED:
+ 		retval = -ENXIO;
+ 		break;
+ 
+ 	case PROC_PATH_ROOT_DIR:
+-		filler(buf, ".", NULL, 0);
+-		filler(buf, "..", NULL, 0);
++		filler(buf, ".", NULL, 0, 0);
++		filler(buf, "..", NULL, 0, 0);
+ 		insert_sorted_if_unique(&dir_entry_list, ".");
+ 		insert_sorted_if_unique(&dir_entry_list, "..");
+ 		for (mount = mount_list; mount; mount = next) {
+ 			next = mount->next;
+ 			/* Check for dead mounts. */
+ 			if (!check_mount(mount)) {
+ 				do_umount(mount);
+ 			} else {
+ 				if (insert_sorted_if_unique
+ 				    (&dir_entry_list, mount->root_name))
+ 					retval = -1;
+-				filler(buf, mount->root_name, NULL, 0);
++				filler(buf, mount->root_name, NULL, 0, 0);
+ 			}
+ 		}
+ 		populate_root_dir(user_options.populate_root_command,
+ 				  &dir_entry_list, filler, buf);
+ 		destroy_list(&dir_entry_list);
+ 		mount = NULL;
+ 		retval = 0;
+ 		break;
+ 
+ 	case PROC_PATH_ROOT_SUBDIR:
+@@ -885,21 +891,21 @@
+ 			retval = (!dp) ? -EBADF : -EACCES;
+ 			break;
+ 		}
+ 	case PROC_PATH_PROXY_DIR:
+ 		seekdir(dp, offset);
+ 		while ((de = readdir(dp)) != NULL) {
+ 			struct stat st;
+ 			memset(&st, 0, sizeof(st));
+ 			st.st_ino = de->d_ino;
+ 			st.st_mode = de->d_type << 12;
+-			if (filler(buf, de->d_name, &st, telldir(dp)))
++			if (filler(buf, de->d_name, &st, telldir(dp), 0))
+ 				break;
+ 		}
+ 		retval = 0;
+ 		break;
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+@@ -1100,22 +1106,24 @@
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+ 
+-static int afuse_rename(const char *from, const char *to)
+-{
++static int afuse_rename(const char *from, const char *to,
++			  unsigned int flags)
++{
++	(void)flags;
+ 	char *root_name_from = alloca(strlen(from));
+ 	char *root_name_to = alloca(strlen(to));
+ 	char *real_from_path = alloca(max_path_out_len(from));
+ 	char *real_to_path = alloca(max_path_out_len(to));
+ 	mount_list_t *mount_from, *mount_to = NULL;
+ 	int retval;
+ 	BLOCK_SIGALRM;
+ 
+ 	switch (process_path
+ 		(from, real_from_path, root_name_from, 0, &mount_from)) {
+@@ -1207,22 +1215,24 @@
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount_to)
+ 		update_auto_unmount(mount_to);
+ 	if (mount_from && mount_from != mount_to)
+ 		update_auto_unmount(mount_from);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+ 
+-static int afuse_chmod(const char *path, mode_t mode)
+-{
++static int afuse_chmod(const char *path, mode_t mode,
++		       struct fuse_file_info *fi)
++{
++	(void)fi;
+ 	char *root_name = alloca(strlen(path));
+ 	char *real_path = alloca(max_path_out_len(path));
+ 	mount_list_t *mount;
+ 	int retval;
+ 	BLOCK_SIGALRM;
+ 
+ 	switch (process_path(path, real_path, root_name, 0, &mount)) {
+ 	case PROC_PATH_FAILED:
+ 		retval = -ENXIO;
+ 		break;
+@@ -1236,22 +1246,24 @@
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+ 
+-static int afuse_chown(const char *path, uid_t uid, gid_t gid)
+-{
++static int afuse_chown(const char *path, uid_t uid, gid_t gid,
++		       struct fuse_file_info *fi)
++{
++	(void)fi;
+ 	char *root_name = alloca(strlen(path));
+ 	char *real_path = alloca(max_path_out_len(path));
+ 	mount_list_t *mount;
+ 	int retval;
+ 	BLOCK_SIGALRM;
+ 
+ 	switch (process_path(path, real_path, root_name, 0, &mount)) {
+ 	case PROC_PATH_FAILED:
+ 		retval = -ENXIO;
+ 		break;
+@@ -1265,22 +1277,26 @@
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+ 
+-static int afuse_truncate(const char *path, off_t size)
+-{
++static int afuse_truncate(const char *path, off_t size,
++			 struct fuse_file_info *fi)
++{
++	if (fi && fi->fh != 0)
++		return get_retval(ftruncate(fi->fh, size));
++
+ 	char *root_name = alloca(strlen(path));
+ 	char *real_path = alloca(max_path_out_len(path));
+ 	mount_list_t *mount;
+ 	int retval;
+ 	BLOCK_SIGALRM;
+ 
+ 	switch (process_path(path, real_path, root_name, 0, &mount)) {
+ 	case PROC_PATH_FAILED:
+ 		retval = -ENXIO;
+ 		break;
+@@ -1294,42 +1310,45 @@
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+ 
+-static int afuse_utime(const char *path, struct utimbuf *buf)
+-{
+-	char *root_name = alloca(strlen(path));
+-	char *real_path = alloca(max_path_out_len(path));
+-	mount_list_t *mount;
+-	int retval;
+-	BLOCK_SIGALRM;
++static int afuse_utimens(const char *path, const struct timespec tv[2],
++		     struct fuse_file_info *fi)
++{
++	char *root_name = alloca(strlen(path));
++	char *real_path = alloca(max_path_out_len(path));
++	mount_list_t *mount;
++	int retval;
++	BLOCK_SIGALRM;
++
++	(void)fi;
+ 
+ 	switch (process_path(path, real_path, root_name, 0, &mount)) {
+ 	case PROC_PATH_FAILED:
+ 		retval = -ENXIO;
+ 		break;
+ 	case PROC_PATH_ROOT_DIR:
+ 		retval = -ENOTSUP;
+ 		break;
+ 	case PROC_PATH_ROOT_SUBDIR:
+ 		if (!mount) {
+ 			retval = -ENOTSUP;
+ 			break;
+ 		}
+ 	case PROC_PATH_PROXY_DIR:
+-		retval = get_retval(utime(real_path, buf));
++		retval = get_retval(utimensat(AT_FDCWD, real_path, tv, 0));
+ 		break;
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+@@ -1465,27 +1484,20 @@
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+ 
+-static int afuse_ftruncate(const char *path, off_t size,
+-			   struct fuse_file_info *fi)
+-{
+-	(void)path;
+-	return get_retval(ftruncate(fi->fh, size));
+-}
+-
+ static int afuse_create(const char *path, mode_t mode,
+ 			struct fuse_file_info *fi)
+ {
+ 	int fd;
+ 	char *root_name = alloca(strlen(path));
+ 	char *real_path = alloca(max_path_out_len(path));
+ 	mount_list_t *mount;
+ 	int retval;
+ 	BLOCK_SIGALRM;
+ 
+@@ -1509,27 +1521,20 @@
+ 
+ 	default:
+ 		DEFAULT_CASE_INVALID_ENUM;
+ 	}
+ 	if (mount)
+ 		update_auto_unmount(mount);
+ 	UNBLOCK_SIGALRM;
+ 	return retval;
+ }
+ 
+-static int afuse_fgetattr(const char *path, struct stat *stbuf,
+-			  struct fuse_file_info *fi)
+-{
+-	(void)path;
+-
+-	return get_retval(fstat(fi->fh, stbuf));
+-}
+ #endif
+ 
+ #if FUSE_VERSION >= 25
+ static int afuse_statfs(const char *path, struct statvfs *stbuf)
+ #else
+ static int afuse_statfs(const char *path, struct statfs *stbuf)
+ #endif
+ {
+ 	char *root_name = alloca(strlen(path));
+ 	char *real_path = alloca(max_path_out_len(path));
+@@ -1729,32 +1734,30 @@
+ 	.mknod = afuse_mknod,
+ 	.mkdir = afuse_mkdir,
+ 	.symlink = afuse_symlink,
+ 	.unlink = afuse_unlink,
+ 	.rmdir = afuse_rmdir,
+ 	.rename = afuse_rename,
+ 	.link = afuse_link,
+ 	.chmod = afuse_chmod,
+ 	.chown = afuse_chown,
+ 	.truncate = afuse_truncate,
+-	.utime = afuse_utime,
++	.utimens = afuse_utimens,
+ 	.open = afuse_open,
+ 	.read = afuse_read,
+ 	.write = afuse_write,
+ 	.release = afuse_release,
+ 	.fsync = afuse_fsync,
+ 	.statfs = afuse_statfs,
+ #if FUSE_VERSION >= 25
+ 	.access = afuse_access,
+ 	.create = afuse_create,
+-	.ftruncate = afuse_ftruncate,
+-	.fgetattr = afuse_fgetattr,
+ #endif
+ 	.destroy = afuse_destroy,
+ #ifdef HAVE_SETXATTR
+ 	.setxattr = afuse_setxattr,
+ 	.getxattr = afuse_getxattr,
+ 	.listxattr = afuse_listxattr,
+ 	.removexattr = afuse_removexattr,
+ #endif
+ };
+ 
+@@ -1831,21 +1834,21 @@
+ 			  struct fuse_args *outargs)
+ {
+ 	/* Unused */
+ 	(void)arg;
+ 	(void)data;
+ 
+ 	switch (key) {
+ 	case KEY_HELP:
+ 		usage(outargs->argv[0]);
+ 		fuse_opt_add_arg(outargs, "-ho");
+-		fuse_main(outargs->argc, outargs->argv, &afuse_oper);
++		fuse_main(outargs->argc, outargs->argv, &afuse_oper, NULL);
+ 		exit(1);
+ 
+ 	case KEY_FLUSHWRITES:
+ 		user_options.flush_writes = true;
+ 		return 0;
+ 
+ 	case KEY_EXACT_GETATTR:
+ 		user_options.exact_getattr = true;
+ 		return 0;
+ 
+@@ -1895,21 +1898,21 @@
+ 		strcpy(temp_dir_name + strlen(user_options.mount_dir),
+ 		       TMP_DIR_TEMPLATE2);
+ 	}
+ 
+ 	// Check for required parameters
+ 	if (!user_options.mount_command_template
+ 	    || !user_options.unmount_command_template) {
+ 		fprintf(stderr, "(Un)Mount command templates missing.\n\n");
+ 		usage(argv[0]);
+ 		fuse_opt_add_arg(&args, "-ho");
+-		fuse_main(args.argc, args.argv, &afuse_oper);
++		fuse_main(args.argc, args.argv, &afuse_oper, NULL);
+ 
+ 		return 1;
+ 	}
+ 
+ 	if (user_options.filter_file)
+ 		load_mount_filter_file(user_options.filter_file);
+ 
+ 	if (!(mount_point_directory = mkdtemp(temp_dir_name))) {
+ 		fprintf(stderr,
+ 			"Failed to create temporary mount point dir.\n");
+@@ -1922,12 +1925,12 @@
+ 			fprintf(stderr,
+ 				"Failed to stat temporary mount point dir.\n");
+ 			return 1;
+ 		}
+ 		mount_point_dev = buf.st_dev;
+ 	}
+ 
+ 	umask(0);
+ 
+ 	// !!FIXME!! death by signal doesn't unmount fs
+-	return fuse_main(args.argc, args.argv, &afuse_oper);
+-}
++	return fuse_main(args.argc, args.argv, &afuse_oper, NULL);
++}
