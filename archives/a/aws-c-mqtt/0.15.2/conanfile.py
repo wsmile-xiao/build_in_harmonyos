@@ -148,8 +148,15 @@ class AwsCMqttConan(ConanFile):
         old_ld = os.environ.get("LD_LIBRARY_PATH")
         os.environ["LD_LIBRARY_PATH"] = lib_dir + (os.pathsep + old_ld if old_ld else "")
         try:
+            ctest_cmd = ["ctest", "--output-on-failure", "--timeout", "300"]
+            try:
+                jobs = int(build_jobs(self))
+            except Exception:
+                jobs = 1
+            if jobs > 1:
+                ctest_cmd.extend(["--parallel", str(min(jobs, 8))])
             self.run(
-                shlex.join(["ctest", "--output-on-failure", "--timeout", "300"]),
+                shlex.join(ctest_cmd),
                 cwd=build_dir,
                 env="conanrun",
             )
