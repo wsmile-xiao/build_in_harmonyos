@@ -333,23 +333,34 @@ for pkg_dir in "${PACKAGES[@]}"; do
     # 从 conanfile.py 中提取 requires/requirements 声明的依赖, 验证是否已发布
     # R36: 依赖必须先发布到制品仓
     if [ -f "$CONANFILE" ]; then
-        # 提取所有依赖引用
-        DEP_REFS=$(python3 - "$CONANFILE" 2>/dev/null <<'PYEOF'
-import re, sys
+        # 提取所有依赖引用（使用 AST 解析，避免误匹配 docstring 中的文本）
+        DEP_REFS=$(python3 - "$CONANFILE" "${pkg_name:-}" "${pkg_ver:-}" 2>/dev/null <<'PYEOF'
+import ast, sys
 src = open(sys.argv[1]).read()
+self_name = sys.argv[2] if len(sys.argv) > 2 else ""
+self_ver = sys.argv[3] if len(sys.argv) > 3 else ""
+self_ref = f"{self_name}/{self_ver}" if self_name and self_ver else ""
 refs = set()
-for m in re.finditer(r'(?:self\.)?requires?\s*\(\s*["\']([^"\']+)["\']', src):
-    ref = m.group(1).strip()
-    if '/' not in ref:
-        continue
-    ref = ref.split('@')[0]  # 兼容性: 去掉可能的 @user/channel 后缀
-    refs.add(ref)
-for m in re.finditer(r'tool_requires?\s*\(\s*["\']([^"\']+)["\']', src):
-    ref = m.group(1).strip()
-    if '/' not in ref:
-        continue
-    ref = ref.split('@')[0]
-    refs.add(ref)
+tree = ast.parse(src)
+for node in ast.walk(tree):
+    # 匹配 requires("dep/version") 和 tool_requires("dep/version") 调用
+    if isinstance(node, ast.Call):
+        func_name = ""
+        if isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            func_name = node.func.id
+        if func_name in ("requires", "tool_requires", "build_requires"):
+            for arg in node.args:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+                    ref = arg.value.strip()
+                    if "/" not in ref:
+                        continue
+                    ref = ref.split("@")[0]
+                    # 排除包自身引用
+                    if self_ref and ref == self_ref:
+                        continue
+                    refs.add(ref)
 for r in sorted(refs):
     print(r)
 PYEOF
