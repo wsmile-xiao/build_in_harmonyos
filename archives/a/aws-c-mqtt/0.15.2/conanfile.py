@@ -52,7 +52,7 @@ class AwsCMqttConan(ConanFile):
         self._strip_io_s2n_dependency(prefix)
         self._strip_io_s2n_dependency(self.package_folder)
         self._build_private_cmake("aws-c-http")
-        self._build_private_cmake("aws-c-mqtt", build_testing=True)
+        self._build_private_cmake("aws-c-mqtt", build_testing=True, targets=["aws-c-mqtt-tests"])
         self._run_mqtt_upstream_tests()
 
     def package(self):
@@ -110,7 +110,7 @@ class AwsCMqttConan(ConanFile):
             "x86_64": "x86_64",
         }.get(arch, arch)
 
-    def _build_private_cmake(self, name, definitions=None, build_testing=False):
+    def _build_private_cmake(self, name, definitions=None, build_testing=False, targets=None):
         source_dir = self.source_folder if name == "aws-c-mqtt" else os.path.join(self.source_folder, "_deps", name)
         build_dir = os.path.join(self.build_folder, "_build", name)
         prefix = self._private_prefix()
@@ -135,7 +135,11 @@ class AwsCMqttConan(ConanFile):
         args.extend("-D{}={}".format(key, value) for key, value in definitions.items())
         self.run(shlex.join(args), env=["conanbuild"], ignore_errors=False)
         jobs = str(build_jobs(self))
-        self.run(shlex.join(["cmake", "--build", build_dir, "--parallel", jobs]), env=["conanbuild"], ignore_errors=False)
+        build_args = ["cmake", "--build", build_dir, "--parallel", jobs]
+        if targets:
+            build_args.extend(["--target"])
+            build_args.extend(targets)
+        self.run(shlex.join(build_args), env=["conanbuild"], ignore_errors=False)
         self.run(shlex.join(["cmake", "--install", build_dir]), env=["conanbuild"], ignore_errors=False)
 
     def _run_mqtt_upstream_tests(self):
@@ -202,6 +206,30 @@ include(CTest)""",
             io,
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")',
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")',
+        )
+        save(
+            self,
+            os.path.join(self.source_folder, "_deps", "aws-c-io", "source", "tls_handler_protocol_stub.c"),
+            """#include <aws/common/byte_buf.h>
+#include <aws/io/tls_channel_handler.h>
+
+#ifdef BYO_CRYPTO
+struct aws_byte_buf aws_tls_handler_protocol(struct aws_channel_handler *handler) {
+    (void)handler;
+    return aws_byte_buf_from_array(NULL, 0);
+}
+#endif
+""",
+        )
+        self._replace_if_present(
+            io,
+            'file(GLOB AWS_IO_SRC\n        "source/*.c"\n        )',
+            '''file(GLOB AWS_IO_SRC
+        "source/*.c"
+        )
+if (BYO_CRYPTO)
+    list(APPEND AWS_IO_SRC "source/tls_handler_protocol_stub.c")
+endif()''',
         )
 
     def _replace_if_present(self, path, old, new):
