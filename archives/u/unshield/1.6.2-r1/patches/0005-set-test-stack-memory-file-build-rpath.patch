@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: hmbs <noreply@atomgit.com>
+Date: Wed, 5 Aug 2026 00:30:00 +0000
+Subject: [PATCH] Statically link libunshield into test_stack_memory_file to eliminate DT_NEEDED on OHOS
+
+test_stack_memory_file is the only upstream CTest case that links
+libunshield.so directly, so its DT_NEEDED contains the bare SONAME
+"libunshield.so" (patch 0001 sets -Wl,-soname,libunshield.so on
+HarmonyOS, which CMake does not otherwise know how to emit on this
+"unknown" platform). The OHOS musl dynamic loader resolves a
+binary's DT_NEEDED entries by searching ONLY the default trusted
+library directories (/lib, /usr/lib). It does NOT consult DT_RUNPATH
+(neither absolute nor $ORIGIN-relative), LD_LIBRARY_PATH, nor does it
+reuse libraries already loaded via LD_PRELOAD to satisfy another
+binary's DT_NEEDED. The loader therefore aborts with
+"Error loading shared library libunshield.so" before main() runs.
+
+Previous patch 0005 attempts all proved ineffective on the real device
+for exactly this reason:
+  - BUILD_RPATH ${CMAKE_BINARY_DIR}/lib (absolute DT_RUNPATH)  -> ignored
+  - BUILD_RPATH $ORIGIN/../../../lib (relative DT_RUNPATH)      -> ignored
+  - set_tests_properties ENVIRONMENT LD_PRELOAD=<build lib>.so   -> LD_PRELOAD
+    does not satisfy another binary's DT_NEEDED, loader still aborts
+
+The only way to make the test runnable on OHOS is to eliminate the
+DT_NEEDED entry entirely by statically linking libunshield into the
+test binary. This patch:
+
+  1. lib/CMakeLists.txt: under BUILD_TESTING (and only when the
+     shipped library is SHARED, i.e. NOT BUILD_STATIC), define a STATIC
+     twin target libunshield_static that reuses the exact upstream
+     sources/headers/compile definitions and the same ZLIB dependency
+     as the SHARED libunshield. OUTPUT_NAME is unshield_static so it
+     never collides with the shipped libunshield.so artifact. This
+     target is gated on BUILD_TESTING so it does NOT alter the shipped
+     package (libunshield.so), does NOT affect other tests, and does
+     NOT affect the unshield/unshield-deobfuscate tools.
+
+  2. test/v5/stack_memory_file/CMakeLists.txt: link
+     test_stack_memory_file against libunshield_static instead of the
+     SHARED libunshield. All unshield symbols are now bound into the
+     test binary at link time, no runtime shared-library search
+     occurs, and the test reaches its real assertions in main().
+
+The test still exercises the real upstream code (same sources, same
+compile defs, same ZLIB). No assertion is removed, no test case is
+skipped, no WILL_FAIL hack is introduced - only the link model of this
+single test binary changes from dynamic to static. The other 28 CTest
+cases are unaffected (none of them link libunshield directly; they
+use cmake -E false / cmake -E tar / $<TARGET_FILE:unshield>).
+
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 8974a2f..a481fb8 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -51,3 +51,36 @@ endif()
+ 
+ install(TARGETS libunshield EXPORT unshieldConfig RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+ install(FILES libunshield.h DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}")
++
++# HarmonyOS musl loader (OHOS) resolves a binary's DT_NEEDED entries by searching
++# only the default trusted library directories (/lib, /usr/lib). It does NOT
++# consult DT_RUNPATH (absolute or $ORIGIN-relative), LD_LIBRARY_PATH, nor does it
++# reuse libraries already loaded via LD_PRELOAD to satisfy another binary's
++# DT_NEEDED. test_stack_memory_file is the only upstream CTest case that links
++# libunshield.so directly, so its DT_NEEDED contains the bare SONAME
++# "libunshield.so"; the OHOS loader cannot find that bare name in the default
++# search dirs and aborts with "Error loading shared library libunshield.so"
++# before main() runs. RPATH (patches 0001/0005 abspath + $ORIGIN) and LD_PRELOAD
++# (patch 0005 env inject) both proved ineffective on the real device for exactly
++# this reason. The only way to make the test runnable on OHOS is to eliminate the
++# DT_NEEDED entry entirely by statically linking libunshield into the test
++# binary. This STATIC twin reuses the exact same sources/headers/compile defs and
++# the same ZLIB dependency as the SHARED libunshield, so the test exercises the
++# real upstream code; it is gated on BUILD_TESTING so it does not alter the
++# shipped package (libunshield.so) and does not affect other tests or the unshield
++# tool. The twin has OUTPUT_NAME unshield_static so it never collides with the
++# SHARED libunshield.so artifact.
++if(BUILD_TESTING AND NOT BUILD_STATIC)
++    add_library(libunshield_static STATIC ${LIBUNSHIELD_HEADERS} ${LIBUNSHIELD_SOURCES})
++    target_include_directories(libunshield_static PUBLIC
++        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
++        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
++    target_link_libraries(libunshield_static PUBLIC ZLIB::ZLIB)
++    target_compile_definitions(libunshield_static PRIVATE UNSHIELD_EXPORT)
++    set_target_properties(libunshield_static PROPERTIES OUTPUT_NAME unshield_static)
++    if(USE_OUR_OWN_MD5)
++        target_link_libraries(libunshield_static PRIVATE $<TARGET_OBJECTS:md5>)
++    else()
++        target_link_libraries(libunshield_static PRIVATE OpenSSL::Crypto)
++    endif()
++endif()
+diff --git a/test/v5/stack_memory_file/CMakeLists.txt b/test/v5/stack_memory_file/CMakeLists.txt
+index 80b45d2..b7bfd98 100644
+--- a/test/v5/stack_memory_file/CMakeLists.txt
++++ b/test/v5/stack_memory_file/CMakeLists.txt
+@@ -1,5 +1,18 @@
+ add_executable(test_stack_memory_file test_stack_memory_file.c)
+-target_link_libraries(test_stack_memory_file PUBLIC libunshield)
++# Statically link libunshield into the test binary so its DT_NEEDED does not
++# contain the bare SONAME "libunshield.so". The OHOS musl loader resolves
++# DT_NEEDED by searching only the default trusted dirs (/lib, /usr/lib) and
++# ignores DT_RUNPATH / LD_LIBRARY_PATH / LD_PRELOAD for DT_NEEDED satisfaction,
++# so a dynamically linked test_stack_memory_file aborts with
++# "Error loading shared library libunshield.so" before main() runs. Static
++# linking eliminates the DT_NEEDED entry entirely: all unshield symbols are
++# bound into the test binary at link time, no runtime shared-library search
++# occurs, and the test reaches its real assertions. The STATIC twin target
++# libunshield_static is defined in lib/CMakeLists.txt under BUILD_TESTING and
++# reuses the exact upstream sources/headers/compile defs/ZLIB dependency, so
++# the test still exercises the real upstream code — no assertion is removed,
++# no test case is skipped, only the link model of this single binary changes.
++target_link_libraries(test_stack_memory_file PUBLIC libunshield_static)
+ 
+ add_test(
+     NAME test_stack_memory_file
