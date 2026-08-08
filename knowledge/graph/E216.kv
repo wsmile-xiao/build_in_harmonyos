@@ -1,0 +1,81 @@
+#====================================================================
+# E216 — glib/libxml2 CMakeDeps 组件头文件传播失效 (GLOB 兜底)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E216
+trigger_tool:           cmake|conan|conan_test
+phase:                  configure|link
+error_signature:        glib.h: No such file or directory|libxml/xmlversion.h: No such file|list sub-command LENGTH requires two arguments|Unknown arguments specified
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               L2|cmake|conan|cross-compile
+match_keywords:         cmake, conan, CMakeDeps, INTERFACE_INCLUDE_DIRECTORIES, glib, libxml2, components, cross_compile, GLOB, semicolon-separator
+affected_versions:      glib/2.84.0, libxml2/2.15.3, conan/2.29
+title:                  glib/libxml2 CMakeDeps 组件头文件传播失效
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: Conan 2.29 + glib 2.84.0/libxml2 2.15.3 的 CMakeDeps 生成文件不传播 components 的 INTERFACE_INCLUDE_DIRECTORIES。team ohpcd glib recipe 不使用 components 子目标而是 flat cpp_info.libs,生成的 CMake target 是 aggregate glib::glib。libxml2 recipe 设置 cmake_file_name="LibXml2" 大小写敏感。
+affected_scope: 任何使用 glib/libxml2 作为 conan 依赖且交叉编译到 aarch64 (OHOS) 的 test_package/consumer
+verification_cmd: cmake -B build -DCMAKE_TOOLCHAIN_FILE=conan_toolchain.cmake && cmake --build build
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           glob-fallback-with-empty-guard
+rec_description:        test_package/CMakeLists.txt 中显式 file(GLOB) 找 conan cache 中的 glib.h / glibconfig.h / libxml2 xmlversion.h,匹配 p/b/<pkg>/b/... 和 p/<pkg>/p/... 双布局。foreach 循环体内通过 `set(_VAL "${${_var}}")` 将变量值捕获到临时普通变量,后续操作 `_VAL` 避免 semicolon 在 list() / get_filename_component() 参数中被误解析为分隔符。空 GLOB 守卫: if(_VAL STREQUAL "") continue(),多匹配检测:string(FIND) + FATAL_ERROR。
+rec_command:            foreach(_var IN ITEMS _GLIB_H_FILES ...) set(_VAL "${${_var}}") if(_VAL STREQUAL "") continue() endif() string(FIND "${_VAL}" ";" _SEMI_POS) if(_SEMI_POS GREATER_EQUAL 0) message(FATAL_ERROR ...) endif() get_filename_component(_DIR "${_VAL}" DIRECTORY)
+rec_auto_fix:           false
+rec_impl:               manual-edit-test-package-cmakelists
+
+fallback_priority:      2
+fallback_approach:      explicit-link-aggregate-target
+fallback_description:   显式 target_link_libraries(test_pidgin pidgin::pidgin glib::glib LibXml2::LibXml2) 一次性 link aggregate target,依赖 cmake_file_name / cmake_target_name 正确传递
+fallback_command:        target_link_libraries(test_pidgin pidgin::pidgin glib::glib LibXml2::LibXml2)
+fallback_auto_fix:      false
+fallback_impl:
+
+fallback2_priority:     3
+fallback2_approach:     hardcode-sysroot-paths
+fallback2_description:  直接硬编码 sysroot include 路径,在 cross_building() 块内 set CONAN_INCLUDE_GLIB 等环境变量
+fallback2_command:       target_include_directories(test_pidgin PRIVATE /opt/sysroot/include/glib-2.0)
+fallback2_auto_fix:      false
+fallback2_impl:
+
+forbid_1_pattern:       list\(\s*(LENGTH|GET|JOIN)\s+\$\{\{\$?\$?_\w+\}?\}\s
+forbid_1_reason:        CMake list(LENGTH/GET/JOIN) 的 <list> 参数是变量名,CMake 内部自动解引用。正确写法:foreach 循环体内用 `set(_VAL "${${_var}}")` 将变量值捕获到临时普通变量后再操作。错误写法:直接在 list() 参数里写 `${${_var}}` —— 双解引用展开后变量值为含分号的路径字符串(如 "/path1;/path2"),分号被 CMake 解析为参数分隔符,导致 `Unknown arguments specified` 错误
+forbid_1_consequence:   CMake configure 失败,报错 "list sub-command LENGTH requires exactly two arguments" 或 "Unknown arguments specified";GLOB 兜底完全无法运行,链接阶段报 glib.h 找不到
+
+forbid_2_pattern:       file\(GLOB.*libxml2\*
+forbid_2_reason:        conan on-disk 用前 5 字符 prefix,libxml2 的 prefix 是 libxm 不是 libxml2
+forbid_2_consequence:   GLOB 永远返回 0 匹配,空 GLOB 崩溃 configure
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-CMAKE-001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+software: glib-2.84.0, libxml2-2.15.3, pidgin-2.14.14, conan-2.29
+symptom: 交叉编译 cmake configure 阶段找不到 glib.h / libxml2/libxml/xmlversion.h
+solution: file(GLOB) 兜底 + 双布局 + set(_VAL "${${_var}}") 临时变量捕获 + 空 GLOB 守卫 + string(FIND) 多匹配检测
+pattern: conan-components-missing-interface-include → file(GLOB) + 临时变量捕获 + 边界守卫
+doc_file:               doc/E216.md
+last_updated: 2026-08-07
+source_event:           pidgin 2.14.14 OHOS PC 适配
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                Libres <liud1@mails.neu.edu.cn>
+source_pr:              3274
+source_commit:          TBD
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-07
