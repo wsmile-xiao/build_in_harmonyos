@@ -6,6 +6,7 @@ import re
 import shlex
 
 from conan import ConanFile
+from conan.tools.build import build_jobs
 from conan.tools.cmake import CMakeToolchain, cmake_layout
 from conan.tools.files import copy, get, load, replace_in_file, save
 
@@ -53,7 +54,8 @@ class AwsCAuthConan(ConanFile):
         self._strip_io_s2n_dependency(self.package_folder)
         self._build_private_cmake("aws-c-http")
         self._build_private_cmake("aws-c-sdkutils")
-        self._build_private_cmake("aws-c-auth")
+        self._build_private_cmake("aws-c-auth", {"ENABLE_NET_TESTS": "OFF"}, build_testing=True, targets=["aws-c-auth-tests"])
+        self._run_auth_upstream_tests()
 
     def package(self):
         copy(self, "LICENSE", self.source_folder, os.path.join(self.package_folder, "licenses"))
@@ -86,7 +88,7 @@ class AwsCAuthConan(ConanFile):
     def _prefix_path(self, prefix):
         return ";".join([prefix, self.package_folder])
 
-    def _build_private_cmake(self, name, definitions=None):
+    def _build_private_cmake(self, name, definitions=None, build_testing=False, targets=None):
         source_dir = self.source_folder if name == "aws-c-auth" else os.path.join(self.source_folder, "_deps", name)
         build_dir = os.path.join(self.build_folder, "_build", name)
         prefix = self._private_prefix()
@@ -103,14 +105,18 @@ class AwsCAuthConan(ConanFile):
             f"-DCMAKE_BUILD_TYPE={self.settings.build_type}",
             "-DCMAKE_INSTALL_PREFIX={}".format(shlex.quote(prefix)),
             "-DBUILD_SHARED_LIBS=OFF" if not self.options.shared else "-DBUILD_SHARED_LIBS=ON",
-            "-DBUILD_TESTING=OFF",
+            "-DBUILD_TESTING={}".format("ON" if build_testing else "OFF"),
             f"-DCMAKE_POSITION_INDEPENDENT_CODE={'ON' if self.options.get_safe('fPIC', True) else 'OFF'}",
             "-DCMAKE_PREFIX_PATH={}".format(shlex.quote(self._prefix_path(prefix))),
             "-DCMAKE_MODULE_PATH={}".format(shlex.quote(self._module_path(prefix))),
         ]
         args.extend(f"-D{key}={shlex.quote(str(value))}" for key, value in definitions.items())
         self.run(" ".join(args), env=["conanbuild"], ignore_errors=False)
-        self.run("cmake --build {}".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
+        build_cmd = ["cmake", "--build", shlex.quote(build_dir)]
+        if targets:
+            build_cmd.append("--target")
+            build_cmd.extend(shlex.quote(target) for target in targets)
+        self.run(" ".join(build_cmd), env=["conanbuild"], ignore_errors=False)
         self.run("cmake --install {}".format(shlex.quote(build_dir)), env=["conanbuild"], ignore_errors=False)
 
     def _toolchain_file(self):
@@ -134,6 +140,30 @@ class AwsCAuthConan(ConanFile):
             "armv8.8": "aarch64",
             "x86_64": "x86_64",
         }.get(arch, arch)
+
+    def _run_auth_upstream_tests(self):
+        build_dir = os.path.join(self.build_folder, "_build", "aws-c-auth")
+        lib_dir = os.path.join(self._private_prefix(), "lib")
+        old_ld = os.environ.get("LD_LIBRARY_PATH")
+        os.environ["LD_LIBRARY_PATH"] = lib_dir + (os.pathsep + old_ld if old_ld else "")
+        try:
+            ctest_cmd = ["ctest", "--output-on-failure", "--timeout", "300"]
+            try:
+                jobs = int(build_jobs(self))
+            except Exception:
+                jobs = 1
+            if jobs > 1:
+                ctest_cmd.extend(["--parallel", str(min(jobs, 8))])
+            self.run(
+                " ".join(shlex.quote(part) for part in ctest_cmd),
+                cwd=build_dir,
+                env="conanrun",
+            )
+        finally:
+            if old_ld is None:
+                os.environ.pop("LD_LIBRARY_PATH", None)
+            else:
+                os.environ["LD_LIBRARY_PATH"] = old_ld
 
     def _module_path(self, prefix):
         return ";".join([
