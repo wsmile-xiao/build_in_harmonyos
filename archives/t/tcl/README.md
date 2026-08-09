@@ -12,10 +12,10 @@ TCL 是一种动态编程语言，由 John Ousterhout 创建。它被设计为�
 
 ## 编译版本
 - **9.0.3.1** (2026-07-02) — Tcl 9.0，**动态库**形态（`libtcl9.0.so` 供 dlopen；及作 tk 等的依赖）
-- **8.6.14** (2026-05-26) — Tcl 8.6，静态形态（`libtcl8.6.a` + `tclsh8.6` 终端工具）
+- **8.6.16** (2026-07-29) — Tcl 8.6，动态形态（`libtcl8.6.so` + `tclsh8.6` 终端工具）
 
 ## 编译信息
-- 构建系统: 9.0.3.1 = Autotools（标准 conan，CI 原生 clang）；8.6.14 = Autotools
+- 构建系统: 9.0.3.1 = Autotools（标准 conan，CI 原生 clang）；8.6.16 = Autotools
 - 编译器: Clang（OHOS NDK）
 - 平台: HarmonyOS PC / HongMeng Kernel
 
@@ -27,7 +27,7 @@ TCL 是一种动态编程语言，由 John Ousterhout 创建。它被设计为�
 
 ## 安装产物
 - **9.0.3.1**：`libtcl9.0.so`（动态库）、`bin/tclsh`、`tclConfig.sh`、`libtclstub.a`、公共头、`lib/tcl9.0/`（散脚本库）
-- **8.6.14**：`tclsh8.6`、`libtcl8.6.a`、`libtclstub8.6.a`
+- **8.6.16**：`libtcl8.6.so`（动态库）、`tclsh8.6`、`libtclstub8.6.a`、公共头、`tclConfig.sh`
 
 ## 使用示例
 ```tcl
