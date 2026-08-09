@@ -194,7 +194,7 @@ class AwsCMqttConan(ConanFile):
         self.run(shlex.join(["cmake", "--install", build_dir]), env=["conanbuild"], ignore_errors=False)
 
     def _mqtt_upstream_exclude_regex(self):
-        return "^(?:" + "|".join(re.escape(p) for p in _MQTT_UPSTREAM_EXCLUDE_PREFIXES) + ")"
+        return "^(" + "|".join(re.escape(p) for p in _MQTT_UPSTREAM_EXCLUDE_PREFIXES) + ")"
 
     def _run_mqtt_upstream_tests(self):
         build_dir = os.path.join(self.build_folder, "_build", "aws-c-mqtt")
