@@ -77,6 +77,10 @@ class AwsCMqttConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
+        if str(self.settings.os) in ("OHOS", "HarmonyOS"):
+            # E106: OHOS SDK lld depends on libxml2.so.16 which is not in the
+            # device library path; use GNU ld to keep linking stable on CI.
+            tc.extra_ldflags.append("-fuse-ld=/data/service/hnp/bin/ld")
         tc.generate()
 
     def source(self):

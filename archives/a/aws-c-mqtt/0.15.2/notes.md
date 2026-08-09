@@ -16,6 +16,7 @@
 | 2 | 部分依赖配置会继续查找 OpenSSL/s2n | 本次基础适配不引入外部 TLS 依赖 | 使用 BYO_CRYPTO，并在私有安装 prefix 中移除不需要的 CMake dependency 查找块 |
 | 3 | CI Worker 访问 GitHub 源码偶发超时 | Worker 网络对 github.com 不稳定 | 保留官方 URL 作为来源，并补充 SHA256 校验一致的镜像 URL 作为下载兜底 |
 | 4 | 全量 555 个上游 ctest 在 OHOS 真机执行超时 | 199 个 event-loop/网络用例每个等待 300 秒超时，60 个 TLS/request-response 用例失败 | 真机实测后按 36 个前缀排除 259 个不稳定用例，CI 门禁运行 296 个确定性用例 |
+| 5 | OHOS SDK lld 依赖 libxml2.so.16 加载失败 | lld 是动态链接 ELF，运行期找不到匹配的 libxml2，链接阶段崩溃 | CMakeToolchain 注入 `-fuse-ld=/data/service/hnp/bin/ld`，使用 GNU ld 绕过 lld |
 
 ## 验证
 - 源码镜像均通过 SHA256 校验。
