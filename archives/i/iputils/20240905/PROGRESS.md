@@ -21,8 +21,8 @@
 ## Phase 2: 配置编译 (2026-05-06 15:34-15:35)
 
 ### Step 2.1: 第一次配置尝试
-- ❌ 失败: test/ping/meson.build 缺少 'id' 命令
-- 解决: 添加 -DSKIP_TESTS=true 跳过测试
+- ❌ 失败: test/ping/meson.build 的 run_command('id', '-u') 在 'id' 命令不可用时导致配置失败
+- 解决: 0002 patch 改为 find_program('id', required: false) 安全探测；保留 -DSKIP_TESTS=false，使上游 meson 测试在设备上执行（19 项：14 OK + 5 EXPECTEDFAIL）
 
 ### Step 2.2: 第二次配置（禁用 NLS）
 - ❌ 失败: ENABLE_NLS 启用但 libintl 未找到
@@ -37,7 +37,7 @@
   - BUILD_CLOCKDIFF=true
   - NO_SETCAP_OR_SUID=true
   - USE_CAP=false, USE_IDN=false, USE_GETTEXT=false
-  - SKIP_TESTS=true
+  - SKIP_TESTS=false
 
 ## Phase 3: 编译与修复 (2026-05-06 15:35-15:38)
 
