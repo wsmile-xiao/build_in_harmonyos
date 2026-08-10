@@ -1,0 +1,79 @@
+#====================================================================
+# E245 — OHOS 上 libc 未导出 vhangup 的声明/链接/syscall 分层诊断与 shim 边界
+# 库: agetty 2.42.2（util-linux 2.42.2 term-utils/agetty.c 组件）
+#====================================================================
+
+id:                     E245
+trigger_tool:           clang|ld
+phase:                  compilation|linking
+error_signature:        call to undeclared function 'vhangup'|
+                        ld.lld: error: undefined symbol: vhangup|
+                        undefined symbol: vhangup
+
+severity:               3
+category:               api-missing|platform-limitation|system-interface
+match_keywords:         vhangup, SYS_vhangup, __NR_vhangup, tty hangup, undefined symbol,
+                        undeclared function, OHOS, HarmonyOS, syscall shim, 未导出, 无声明,
+                        链接失败, libc.so, aarch64-linux-ohos
+title:                  OHOS libc 未导出 vhangup（声明缺失+符号缺失），但内核 syscall 存在
+
+root_cause:             OHOS SDK ohos-sdk_26.0.0.18（clang 15.0.4，aarch64-unknown-linux-ohos）上，
+                        vhangup(2) 出现三层问题：
+                        1) 声明缺失：sysroot 头文件（unistd.h / sys/vt.h / sys/*.h）均无 vhangup 声明，
+                           编译产生 implicit-function-declaration 警告；
+                        2) libc 符号缺失：libc.so（nm -D 核验）未导出 vhangup 符号，链接报
+                           ld.lld: error: undefined symbol: vhangup；
+                        3) 内核 syscall 仍存在：aarch64 bits/syscall.h 定义 __NR_vhangup=58 / SYS_vhangup=58，
+                           即内核能力存在但 libc 未封装，可通过 syscall(SYS_vhangup) 直调。
+                        agetty.c 在 F_HANGUP 路径（--hangup 选项）调用 vhangup()，触发上述问题。
+affected_scope:         在同一 SDK（ohos-sdk_26.0.0.18 / clang 15.0.4 / aarch64-unknown-linux-ohos）
+                        上调用 vhangup 或类似"libc 未导出但内核 syscall 存在"接口的库/工具（tty 挂断类、
+                        登录管理类）。
+verification_cmd:       grep SYS_vhangup $SYSROOT/usr/include/aarch64-linux-ohos/bits/syscall.h
+                        nm -D $SYSROOT/usr/lib/aarch64-linux-ohos/libc.so | grep vhangup
+
+rec_priority:           1
+rec_approach:           ohos-syscall-shim
+rec_description:        仅 OHOS 条件下使用 AArch64 SYS_vhangup syscall 封装（shim），不伪造 libc API：
+                          int vhangup(void) { return (int)syscall(SYS_vhangup); }
+                        实现位于 archives/a/agetty/2.42.2/src/ohos-utmpx-shim.c（连同 utmpx no-op 降级一起，
+                        utmpx 部分归 E121 已覆盖，非本条目新贡献）。非 OHOS 平台不启用 shim，保持上游语义。
+rec_command:            # 诊断流程：
+                        # 1) 最小复现：编译调用 vhangup() 的最小 C 程序，观察声明警告与链接失败；
+                        # 2) 核验 syscall 编号：grep SYS_vhangup $SYSROOT/.../bits/syscall.h
+                        # 3) 核验 libc 导出：nm -D $SYSROOT/.../libc.so | grep vhangup
+                        # 4) 仅当"无声明 + 无导出 + 内核 syscall 存在"时，才在 OHOS 条件启用 syscall shim。
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      disable-vhangup-feature
+fallback_description:   若 syscall 编号不存在或调用返回不支持/权限不足，移除或条件编译 vhangup 调用路径，
+                        保留失败并按上游/平台能力记录真实 errno/退出码。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       return\s+0.*vhangup|伪造.*vhangup.*成功
+forbid_1_reason:        不得伪造 vhangup 成功，应保留失败并按上游/平台能力记录真实 errno/退出码。
+forbid_1_consequence:   真实 TTY/init/登录会话下的行为异常，难以排查。
+
+principles:             P004, P015
+causes:                 []
+caused_by:              []
+similar_to:             [E121, E014]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E245.md
+last_updated:           2026-08-05
+source_event:           agetty 2.42.2 适配第 2-8 轮真实回报（analysis_approved 任务服务回报）
+
+authors:                junshi_liu <liujsh2023@lzu.edu.cn>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-08-05

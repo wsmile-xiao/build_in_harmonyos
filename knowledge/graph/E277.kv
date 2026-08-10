@@ -1,0 +1,75 @@
+# E215 — vendored/bundled 依赖的构建模式
+# 当三方库自带 vendored 依赖源码（libmodbus/popt/apr/libssh 等）且 registry 无对应配方时，
+# 在 recipe build() 里先把子项目编译为静态库到 staging，主库再引用 staging 链接。
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E277
+trigger_tool:           configure|make|cmake|conan
+phase:                  configuration|installation
+error_signature:        Required library .* not found|could not find .* \(the .* package\)|Package type is 'library', but no 'shared' option declared|undefined reference to .*(libmodbus|popt|apr|libssh|msgpack)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system|vendored-deps|autotools|dependency-management
+match_keywords:         vendored, bundled, 内嵌, 内联构建, staging, libmodbus, popt, apr, libssh, msgpack, ncurses, Required library not found, 未发布, 无配方
+title:                  库自带 vendored 依赖且 registry 无配方时，在 build() 内编译子项目到 staging
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             三方库依赖一个未发布到 OHOS 制品仓（ohpcd）且仓库内无 Conan 配方的库；但上游源码包内已自带该依赖的源码（vendored）。无法用 self.requires() 拉取，也不能假设 CI worker 有系统库。
+affected_scope:         所有带 vendored 依赖源码的三方库（典型：mbpoll/libmodbus、logrotate/popt、log4cxx/apr+expat、tmate/libssh+msgpack+ncurses、afflib 等）
+verification_cmd:        grep -rE "destination=.*libmodbus|destination=.*popt|vendored_deps|内嵌|内联构建" archives/<lib>/<ver>/conanfile.py
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           build-vendored-to-staging
+rec_description:        在 build() 里把 vendored 子项目单独 configure(autotools)/cmake 编译为静态库，install 到 build_folder 下的 staging 目录，主库通过 -I/-L 指向 staging 编译链接；PKG_CONFIG_PATH 指向 staging/lib/pkgconfig 让主库 pkg_check_modules 找到。
+rec_command:            # 伪代码（autotools 子项目）：
+                        prefix=$(realpath $BUILD_FOLDER/staging_<dep>)
+                        self.run("./configure --prefix=$prefix --disable-shared --enable-static --build=<triplet>", cwd=<dep_src>)
+                        self.run("make install", cwd=<dep_src>)
+                        # 主库引用：
+                        tc.extra_cflags.append("-I$prefix/include")
+                        tc.extra_ldflags.append("-L$prefix/lib")
+rec_auto_fix:           false
+rec_impl:               manual-hint
+
+fallback_priority:      2
+fallback_approach:      publish-dep-to-registry
+fallback_description:   若 vendored 依赖体量大或被多个库共用，单独写它的 Conan 配方并 conan upload 到 ohpcd，再 self.requires() 引用（更规范但工作量大）。
+fallback_command:       conan create archives/<dep>/<ver> -pr:h=... -pr:b=... && conan upload <dep>/<ver> -r=ohpcd
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       system.*库|系统.*静态库|/root/sysnc|/usr/lib
+forbid_1_reason:        禁止假设 CI worker 有系统提供的该依赖（不同 worker 环境差异大，/root/sysnc 等路径非标准）。必须从 vendored 源码编译，产物完全由 Conan 管理。
+forbid_1_consequence:   部署到无该系统库的 worker 时链接失败或运行时缺库。
+forbid_2_pattern:       动态链接.*vendored|shared.*vendored
+forbid_2_reason:        vendored 依赖应静态链接进主库（-disable-shared --enable-static），避免运行时 .so 依赖链复杂化和 HMDFS 代码签名负担。
+forbid_2_consequence:   动态链接的 vendored .so 需单独代码签名 + 运行时 LD_LIBRARY_PATH，部署易出错。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E277.md
+last_updated: 2026-07-19
+source_event:           mbpoll 1.5.4 适配（vendored libmodbus 3.1.7，registry 无配方）；logrotate/popt、log4cxx/apr+expat 同模式
+
+# ═══ 知识协作 ═══
+authors:                nebulamao <xmccln@outlook.com>
+source_pr:              2310
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  4
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-07-19
