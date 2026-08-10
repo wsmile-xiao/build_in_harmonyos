@@ -1,0 +1,2 @@
+echo Restoring environment
+export PATH='/system/bin:/usr/bin:/bin:/storage/Users/currentUser/.opendesk/interpreters/npm-global/bin:/storage/Users/currentUser/.opendesk/interpreters/pip-global/bin:/storage/Users/currentUser/.opendesk/interpreters/uv/tools/bin:/data/service/hnp/bin:/storage/Users/currentUser/npm/bin:/storage/Users/currentUser/usr/local/bin:/data/service/hnp/bin:/bin:/usr/bin:/sbin:/usr/sbin:/data/service/hnp/openssh.org/openssh_10.0p1/bin'
