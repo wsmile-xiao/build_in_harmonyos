@@ -203,6 +203,12 @@ endif()''',
             'if ((UNIX OR ${CMAKE_SYSTEM_NAME} STREQUAL "OHOS") AND NOT APPLE AND NOT ${CMAKE_SYSTEM_NAME} MATCHES FreeBSD|OpenBSD)',
         )
         cal = os.path.join(self.source_folder, "_deps", "aws-c-cal", "CMakeLists.txt")
+        harness = os.path.join(self.source_folder, "_deps", "aws-c-common", "cmake", "AwsTestHarness.cmake")
+        self._replace_if_present(
+            harness,
+            '        add_test(${name} ${driver_exe_name} "${name}")\n',
+            '        add_test(${name} ${driver_exe_name} "${name}")\n        set_tests_properties("${name}" PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})\n',
+        )
         self._replace_if_present(
             cal,
             "project(aws-c-cal LANGUAGES C VERSION 0.1.0)",
