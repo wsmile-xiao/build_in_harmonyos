@@ -4,6 +4,7 @@
 import os
 import re
 import shlex
+import shutil
 
 from conan import ConanFile
 from conan.tools.build import build_jobs
@@ -145,6 +146,10 @@ class AwsCAuthConan(ConanFile):
     def _run_auth_upstream_tests(self):
         build_dir = os.path.join(self.build_folder, "_build", "aws-c-auth")
         lib_dir = os.path.join(self._private_prefix(), "lib")
+        test_run_dir = os.path.join(build_dir, 'tests')
+        suite_dir = os.path.join(self.source_folder, 'tests', 'aws-signing-test-suite')
+        if os.path.isdir(suite_dir):
+            shutil.copytree(suite_dir, test_run_dir, dirs_exist_ok=True)
         old_ld = os.environ.get("LD_LIBRARY_PATH")
         os.environ["LD_LIBRARY_PATH"] = lib_dir + (os.pathsep + old_ld if old_ld else "")
         try:
@@ -157,7 +162,7 @@ class AwsCAuthConan(ConanFile):
                 ctest_cmd.extend(["--parallel", str(min(jobs, 8))])
             self.run(
                 " ".join(shlex.quote(part) for part in ctest_cmd),
-                cwd=os.path.join(build_dir, 'tests'),
+                cwd=test_run_dir,
                 env="conanrun",
             )
         finally:
