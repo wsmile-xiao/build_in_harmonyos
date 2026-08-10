@@ -65,5 +65,5 @@
 **最终状态**: published知识图谱草稿: E105 (musl pthread_setaffinity_np compat)
 ---
 
-**编译结束**: 2026-05-26 18:11
-**最终状态**: published
+**编译结束**: 2026-08-08 01:05
+**最终状态**: built
