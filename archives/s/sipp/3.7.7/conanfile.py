@@ -96,9 +96,9 @@ endif()""",
     SOURCES "${PROJECT_SOURCE_DIR}/src/sipp_unittest.cpp"
     COMPILE_DEFINITIONS "-DGTEST"
   )
-  target_link_libraries(sipp_unittest PRIVATE gtest::gtest)
+  target_link_libraries(sipp_unittest gtest::gtest)
   if(GTEST_GMOCK_LIBRARY)
-    target_link_libraries(sipp_unittest PRIVATE "${GTEST_GMOCK_LIBRARY}")
+    target_link_libraries(sipp_unittest "${GTEST_GMOCK_LIBRARY}")
   endif()
 elseif(EXISTS ${PROJECT_SOURCE_DIR}/gtest/googletest)
   add_sipp_target(sipp_unittest
