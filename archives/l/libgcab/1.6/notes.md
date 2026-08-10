@@ -2,112 +2,62 @@
 
 ## 编译环境
 - 构建系统: meson
-- 编译日期: 2026-06-05
+- 编译日期: 2026-08-10
 - 编译器: clang/clang++
-- 状态: built
+- 状态: published (conan create + test_package passed)
 
-## 编译步骤
+## 源码
+- URL: https://gitlab.gnome.org/GNOME/gcab/-/archive/v1.6/gcab-v1.6.tar.gz
+- SHA256: cda7b2cbf3967ff9c48e75afb86ee683d98ad8fb2d9a4a966a9e10cfdb349886
 
-1. 初始化编译环境（init-build）
-2. 配置 meson 构建：
-   ```bash
-   meson setup builddir --prefix=$DEFAULT_PREFIX -Dintrospection=false -Dvapi=false -Ddocs=false -Dtests=true
-   ```
-3. 编译：`ninja -C builddir -j2`
-4. 安装到 staging：`meson install -C builddir --destdir $TEST_PREFIX`
-5. 本地安装：`meson install -C builddir`
-6. ELF 签名：二进制和库文件都需要签名才能执行
+## 依赖
+- glib/2.84.0 (gio-2.0, glib-2.0, gobject-2.0 等)
+- zlib/1.3.1
+- libffi/3.4.4 (glib 间接依赖)
+- pcre2/10.40 (glib 间接依赖)
+
+## 配置选项
+- -Dintrospection=false: 禁用 GObject Introspection
+- -Dvapi=false: 禁用 Vala 绑定
+- -Ddocs=false: 禁用文档
+- -Dnls=false: 禁用 Native Language Support (HarmonyOS 无 gettext/libintl)
+
+## 补丁
+1. 0001-static-library-for-gio-type-system.patch:
+   - 将 shared_library 改为 static_library
+   - 原因: HarmonyOS 平台 glib 为静态库，共享库内嵌 gio 静态库会导致 GObject 类型系统冲突
+   - 移除 version, darwin_versions, link_args, link_depends (仅适用于共享库)
+
+2. 0002-add-gettext-stubs-for-ohos.patch:
+   - 在 src/gcab.c 中添加 gettext/textdomain/bindtextdomain 等 stub 宏定义
+   - 原因: HarmonyOS 无 libintl/gettext，_() 宏需要这些函数
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | meson 配置失败：缺少 gobject-introspection-1.0 | 默认启用 introspection 功能 | 配置时添加 `-Dintrospection=false` 禁用该功能 |
-| 2 | 测试失败：gcab_file_new_with_file 断言失败 | 测试代码中的 GFile 对象创建问题 | 记录失败，不影响库功能，跳过测试 |
-| 3 | 二进制无法执行：Operation not permitted | ELF 未签名 | 使用 `ohc-run.py sign-elf` 签名二进制和库文件 |
-| 4 | 库加载失败：libgcab-1.0.so.0 未找到 | 库文件未签名 | 签名库文件 libgcab-1.0.so.0.3.0 |
-
-## 源码修改
-
-无补丁文件，仅使用 meson 配置选项禁用 introspection。
-
-## 依赖版本
-
-- gio-2.0: 2.88.0
-- zlib: 1.3.1
-- glib-2.0: 2.88.0
-- meson: 1.11.1
-- ninja: 1.13.1
+| 1 | meson 配置失败: 缺少 gobject-introspection-1.0 | 默认启用 introspection | -Dintrospection=false |
+| 2 | 编译失败: gettext 未声明 | HarmonyOS 无 libintl | 添加 gettext stub 宏定义 |
+| 3 | 链接失败: 缺少 libffi, libpcre2-8 | glib pkg-config 引用但路径未包含 | conan PkgConfigDeps 生成 .pc 文件 |
+| 4 | meson 找不到 gio-2.0 | glib 包只有一个 glib-2.0.pc | 生成 gio-2.0.pc wrapper (Requires: glib-2.0) |
+| 5 | meson 找不到 glib-mkenums | glib-2.0.pc 缺少 glib_mkenums 变量 | 向 .pc 文件追加 glib_mkenums 变量 |
+| 6 | 测试链接失败: gettext/dgettext 等未定义 | musl libc 无 gettext | 链接 -l:ld-musl-aarch64.so.1 |
 
 ## 验证结果
 
-```bash
-$ gcab --version
-gcab v1.6
+### conan create
 ```
-
-## 问题分析与修复（2026-06-05 修复成功）
-
-### 根因分析
-
-**原始问题**:
-- libgcab 使用共享库编译时，内嵌了 gio 静态库
-- gio 类型系统在共享库和可执行文件中重复定义
-- 导致 G_IS_FILE 检查失败，GFile 对象创建失败
-- gcab 创建 cab 文件时断言失败并段错误
-
-**修复方案**:
-- 将 libgcab 编译为静态库（修改 libgcab/meson.build）
-- gcab 可执行文件静态链接所有库
-- 避免 gio 类型系统冲突
-
-### meson.build 修改
-
-```python
-# 修改前
-libgcab = shared_library('gcab-1.0', ...)
-
-# 修改后
-# 编译为静态库以避免 gio 类型系统冲突（鸿蒙平台 glib 为静态库）
-libgcab = static_library('gcab-1.0', ...)
+libgcab/1.6@ohpcd/stable: All tests passed
+PASS: gcab_cabinet_new() succeeded
+PASS: GCAB_IS_CABINET check passed
 ```
-
-### 验证结果
-
-✅ **所有核心功能测试通过**:
-- 创建 cab 文件：成功
-- 列出 cab 文件内容：成功
-- 提取 cab 文件：成功
-- 文件一致性验证：成功
-
-详细测试报告：reports/test-report.md
 
 ## 交付物
-
-✅ 预编译包已发布：
-- libgcab-1.6-ohos-aarch64.tar.gz (11M) - 静态编译版本
-  - bin/gcab (11M) - 命令行工具
-  - lib/libgcab-1.0.a (391K) - 静态库
-  - include/libgcab-1.0/ - 头文件
-  - share/man/man1/gcab.1 - 手册页
-  - share/locale/ - 国际化文件
-  - README.md - 安装说明
-
-补丁文件：
-- patches/0001-static-library-for-gio-type-system.patch
-
+- conanfile.py: Conan 配方
+- conandata.yml: 源码和补丁数据
+- test_package/: 测试包
+- patches/: 2 个补丁文件
 ---
 
-**编译结束**: 2026-06-05 11:51
-**最终状态**: published
-**发布说明**: 静态编译版本，避免 gio 类型系统冲突，适用于 OpenHarmony aarch64 平台
-
-## 注意事项
-
-- 必须禁用 introspection 功能，否则需要 gobject-introspection 依赖（cmd-pkgs 中无预编译包）
-- 所有 ELF 文件（二进制和库）都需要签名才能在鸿蒙系统上执行
-- 测试失败不影响库的编译和使用
----
-
-**编译结束**: 2026-06-05 10:40
+**编译结束**: 2026-08-10 06:17
 **最终状态**: built
