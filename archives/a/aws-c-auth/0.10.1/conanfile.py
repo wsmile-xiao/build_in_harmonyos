@@ -213,6 +213,11 @@ include(CTest)""",
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")',
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")',
         )
+        self._replace_if_present(
+            os.path.join(self.source_folder, "_deps", "aws-c-io", "source", "tls_channel_handler.c"),
+            '#include <aws/common/string.h>\n\nvoid aws_tls_ctx_options_init_default_client(',
+            '#include <aws/common/string.h>\n\n#ifdef BYO_CRYPTO\nstruct aws_byte_buf aws_tls_handler_protocol(struct aws_channel_handler *handler) {\n    (void)handler;\n    return (struct aws_byte_buf){0};\n}\n#endif\n\nvoid aws_tls_ctx_options_init_default_client(',
+        )
 
     def _patch_auth_upstream_tests(self):
         tests_dir = os.path.join(self.source_folder, "tests")
