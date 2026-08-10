@@ -50,3 +50,7 @@ cmake .. -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX \
 3. 测试依赖Boost，默认禁用 (MSGPACK_BUILD_TESTS=OFF)
 
 编译状态: built
+---
+
+**编译结束**: 2026-08-07 00:53
+**最终状态**: published
