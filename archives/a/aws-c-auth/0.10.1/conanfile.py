@@ -157,7 +157,7 @@ class AwsCAuthConan(ConanFile):
                 ctest_cmd.extend(["--parallel", str(min(jobs, 8))])
             self.run(
                 " ".join(shlex.quote(part) for part in ctest_cmd),
-                cwd=build_dir,
+                cwd=os.path.join(build_dir, 'tests'),
                 env="conanrun",
             )
         finally:
