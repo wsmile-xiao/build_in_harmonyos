@@ -10,6 +10,5 @@ PostGIS liblwgeom.
 
 ## Versions
 
-- 1.1.0.1 - official 1.1.0 source with the first OpenHarmony recipe and
-  floating-point correctness revision.
-- 1.1.0 - initial CMake-based adaptation retained for history.
+- 1.1.0 - official 1.1.0 source with the corrected OpenHarmony recipe,
+  floating-point split fix, PIC support and complete GEOS propagation.

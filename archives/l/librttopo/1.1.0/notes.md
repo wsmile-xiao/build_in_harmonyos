@@ -1,48 +1,76 @@
-# librttopo 1.1.0 编译笔记
+# librttopo 1.1.0 adaptation notes
 
-## 编译信息
-- 编译日期: 2026-07-29
-- 构建系统: CMake（原 autotools，因 OHOS 缺 aclocal 改用 CMake）
-- 编译类型: 静态库
+## Validation boundary
 
-## 编译过程
-1. 下载源码: https://sources.voidlinux.org/librttopo-1.1.0/librttopo-1.1.0.tar.gz
-   - sha256: 2e2fcabb48193a712a6c76ac9a9be2a53f82e32f91a2bc834d9f1b4fa9cd879f
-   - 上游 gitlab.com/rttopo/librttopo 返回 403，改用 voidlinux 镜像
-2. 依赖: GEOS 3.13.0（通过 Conan CMakeDeps 注入 GEOS::geos_c）
-3. CMake 配置:
-   - `-DCMAKE_BUILD_TYPE=Release`
-   - `-DBUILD_SHARED_LIBS=OFF`（静态库，避免动态库加载问题）
-4. 适配关键:
-   - 注入 CMakeLists.txt 替换不可用的 autotools
-   - 生成 rttopo_config.h（HAVE_ISFINITE、RTGEOM_GEOS_VERSION=31300、RTGEOM_DEBUG_LEVEL=0）
-   - 从 librttopo_geom.h.in 生成 librttopo_geom.h（@SRID_MAX@=999999、@SRID_USR_MAX@=918999）
-5. 编译: cmake --build 成功，生成 librttopo.a (757KB)
+- Latest stable upstream release: `librttopo-1.1.0`.
+- Package version `1.1.0` contains the corrected OpenHarmony recipe for that
+  upstream release and replaces the initial defective package of the same
+  version.
+- Official source SHA-256:
+  `5b4002b2b6be1fe59a487cff6edbc81db773dd1e437beb966fac6ac68e849f19`.
+- Dependency: published `geos/3.13.1`.
+- The release archive ships no upstream test suite: no test directory,
+  `TESTS`, or `check_PROGRAMS` registration. Upstream count is therefore 0/0.
 
-## 验证测试
-- conan create 成功（OHOS aarch64）
-- test_package 通过（实质单元测试，增强版）:
-  - librttopo version: 1.1.0
-  - RTCTX initialized
-  - Empty POINT constructed, type=1
-  - POINT SRID after set: 3857
-  - Empty LINESTRING constructed
-  - is_collection(POINT)=0, is_collection(LINESTRING)=0
-  - POINT(3 4) area=0.000000
-  - POINT WKT: POINT(3 4)
-  - LINESTRING(0 0, 0 2) length=2.000000
-  - LINESTRING WKT: LINESTRING(0 0,0 2)
-  - PASS: librttopo API unit tests - context, geometry construction, SRID, area/length, WKT
+## Blocking downstream evidence
 
-## 产物
-- lib/librttopo.a (757 KB)
-- include/librttopo.h
-- include/librttopo_geom.h
+The previous `librttopo/1.1.0` package resolved in a fresh HarmonyOS arm64
+Conan graph, but `libspatialite/5.1.0.1` then ran its complete upstream suite
+at 107/108. The only failure was `check_toponoface2d`:
 
-## 上游测试通过率
-- librttopo 上游无测试套件（已查证：无 test 目录、3 个 Makefile.am 均无 TESTS/check_PROGRAMS、configure.ac 无 make check 配置、docker/build-test 仅为 Docker 构建环境）
-- 适配后 test_package 为实质单元测试，覆盖：context 初始化（rtgeom_init）、带坐标几何构造（rtpoint_construct/rtline_construct/ptarray_construct/ptarray_set_point4d）、SRID 往返（rtgeom_set_srid/rtgeom_get_srid）、面积/长度计算（rtgeom_area/rtgeom_length）、WKT 输出（rtgeom_to_wkt）、几何类型判断（rtgeom_is_collection）、bbox 操作（rtgeom_needs_bbox/rtgeom_add_bbox/rtgeom_get_bbox），全部通过
+```text
+RTTOPO error: SQL/MM Spatial exception - point not on edge
+RTTOPO error: rtt_ModEdgeSplit failed
+TopoGeo_AddLineStringNoFace() #6 error: rtt_ModEdgeSplit failed
+```
 
+The old recipe also used a Void Linux source mirror, required
+`geos/3.13.0`, lacked explicit PIC, and did not carry the split correction.
+
+## Correctness change
+
+`rtline_split_by_point_to()` computes the closest point-to-segment distance.
+The surrounding library defines `FP_TOLERANCE` as `1e-12` and consistently
+uses `FP_IS_ZERO()` for floating-point predicates, but this function used the
+exact predicate `mindist > 0`. The narrow patch applies that existing contract:
+
+```c
+if ( ! FP_IS_ZERO(mindist) ) return 0;
+```
+
+The consumer test covers an exact point, a point `5e-13` from the line, and a
+point `2e-12` from the line. The middle case must split and the last must not,
+so the test proves both sides of the tolerance boundary without weakening it.
+
+## Public dependency contract
+
+`librttopo_geom.h` includes `geos_c.h`, and the static `librttopo.a` retains
+GEOS symbols. The GEOS requirement therefore explicitly propagates both
+headers and libraries. Without `transitive_headers=True`, Conan 2 strips the
+GEOS include directory when a downstream project consumes librttopo through
+`rttopo::rttopo`, even though the GEOS libraries still reach the final link.
+The consumer test intentionally finds only `rttopo` so this package metadata
+contract cannot be bypassed by a direct GEOS declaration in the test project.
+
+## Formal validation
+
+The following results validate the corrected implementation content from the
+superseded suffixed candidate. They do not replace a fresh build and release of
+the canonical `librttopo/1.1.0` package after the defective artifact is removed.
+
+- Upstream: 0/0 (the official release archive ships no registered suite).
+- Candidate consumer assertions: 17/17 on HarmonyOS arm64.
+- Previous defective `librttopo/1.1.0` artifact negative control: failed as
+  expected before the corrected candidate was introduced.
+- PIC whole-archive probe: passed for AArch64 with no TEXTREL and with the
+  expected `libgeos_c.so` closure.
+- Downstream regression: `check_toponoface2d` passed and the complete
+  libspatialite upstream suite passed 108/108.
+- Downstream libspatialite consumer assertions: 16/16.
+- The superseded candidate's formal `finish` completed with exit code 0 and
+  generated `.ci-result.json`; the historical result bundle SHA-256 is
+  `fc3bb68e2e10c526e2e146ed89637f8011cadad1b26d8c4cddad3edd1d0ad6b9`.
 ---
-**编译结束**: 2026-07-29
-**最终状态**: built（本地验证通过，待 CI upload 后更新为 published）
+
+**编译结束**: 2026-08-06 07:02
+**最终状态**: failed (canonical 1.1.0 rebuild required)
