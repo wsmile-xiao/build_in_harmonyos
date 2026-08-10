@@ -40,6 +40,7 @@ class AwsCAuthConan(ConanFile):
         for name, metadata in self.conan_data["private_sources"].items():
             get(self, **metadata, destination=os.path.join(self.source_folder, "_deps", name), strip_root=True)
         self._patch_private_sources()
+        self._patch_auth_upstream_tests()
 
     def build(self):
         prefix = self._private_prefix()
@@ -54,7 +55,7 @@ class AwsCAuthConan(ConanFile):
         self._strip_io_s2n_dependency(self.package_folder)
         self._build_private_cmake("aws-c-http")
         self._build_private_cmake("aws-c-sdkutils")
-        self._build_private_cmake("aws-c-auth", {"ENABLE_NET_TESTS": "OFF"}, build_testing=True, targets=["aws-c-auth-tests"])
+        self._build_private_cmake("aws-c-auth", {"ENABLE_NET_TESTS": "OFF", "BYO_CRYPTO": "ON"}, build_testing=True, targets=["aws-c-auth-tests"])
         self._run_auth_upstream_tests()
 
     def package(self):
@@ -211,6 +212,44 @@ include(CTest)""",
             io,
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android")',
             'elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")',
+        )
+
+    def _patch_auth_upstream_tests(self):
+        tests_dir = os.path.join(self.source_folder, "tests")
+        self._replace_if_present(
+            os.path.join(tests_dir, "CMakeLists.txt"),
+            'file(GLOB TEST_SRC "*.c")\nfile(GLOB TEST_HDRS "*.h")\nfile(GLOB TESTS ${TEST_HDRS} ${TEST_SRC})',
+            'file(GLOB TEST_SRC "*.c")\nfile(GLOB TEST_HDRS "*.h")\nif (BYO_CRYPTO)\n    list(REMOVE_ITEM TEST_SRC\n        "${CMAKE_CURRENT_SOURCE_DIR}/credentials_provider_cognito_tests.c"\n        "${CMAKE_CURRENT_SOURCE_DIR}/credentials_provider_ecs_tests.c"\n        "${CMAKE_CURRENT_SOURCE_DIR}/credentials_provider_login_tests.c"\n        "${CMAKE_CURRENT_SOURCE_DIR}/credentials_provider_sso_tests.c"\n        "${CMAKE_CURRENT_SOURCE_DIR}/credentials_provider_sts_tests.c"\n        "${CMAKE_CURRENT_SOURCE_DIR}/credentials_provider_sts_web_identity_tests.c"\n    )\nendif()\nfile(GLOB TESTS ${TEST_HDRS} ${TEST_SRC})',
+        )
+        self._replace_if_present(
+            os.path.join(tests_dir, "credentials_provider_utils.c"),
+            '    AWS_ZERO_STRUCT(credentials_provider_http_mock_tester);\n\n    struct aws_tls_ctx_options tls_ctx_options;\n    aws_tls_ctx_options_init_default_client(&tls_ctx_options, allocator);\n    credentials_provider_http_mock_tester.tls_ctx = aws_tls_client_ctx_new(allocator, &tls_ctx_options);\n    ASSERT_NOT_NULL(credentials_provider_http_mock_tester.tls_ctx);\n\n    credentials_provider_http_mock_tester.el_group = aws_event_loop_group_new_default(allocator, 0, NULL);',
+            '    AWS_ZERO_STRUCT(credentials_provider_http_mock_tester);\n\n#ifndef BYO_CRYPTO\n    struct aws_tls_ctx_options tls_ctx_options;\n    aws_tls_ctx_options_init_default_client(&tls_ctx_options, allocator);\n    credentials_provider_http_mock_tester.tls_ctx = aws_tls_client_ctx_new(allocator, &tls_ctx_options);\n    ASSERT_NOT_NULL(credentials_provider_http_mock_tester.tls_ctx);\n#endif\n\n    credentials_provider_http_mock_tester.el_group = aws_event_loop_group_new_default(allocator, 0, NULL);',
+        )
+        self._replace_if_present(
+            os.path.join(tests_dir, "credentials_provider_utils.c"),
+            '    /* cleanup */\n    aws_tls_ctx_options_clean_up(&tls_ctx_options);',
+            '#ifndef BYO_CRYPTO\n    /* cleanup */\n    aws_tls_ctx_options_clean_up(&tls_ctx_options);\n#endif',
+        )
+        self._replace_if_present(
+            os.path.join(tests_dir, "credentials_provider_x509_tests.c"),
+            '    AWS_ZERO_STRUCT(s_tester.tls_connection_options);\n    struct aws_tls_ctx_options tls_options;\n    aws_tls_ctx_options_init_default_client(&tls_options, allocator);\n    s_tester.ctx = aws_tls_client_ctx_new(allocator, &tls_options);\n    aws_tls_ctx_options_clean_up(&tls_options);\n    aws_tls_connection_options_init_from_ctx(&s_tester.tls_connection_options, s_tester.ctx);',
+            '    AWS_ZERO_STRUCT(s_tester.tls_connection_options);\n#ifndef BYO_CRYPTO\n    struct aws_tls_ctx_options tls_options;\n    aws_tls_ctx_options_init_default_client(&tls_options, allocator);\n    s_tester.ctx = aws_tls_client_ctx_new(allocator, &tls_options);\n    aws_tls_ctx_options_clean_up(&tls_options);\n    aws_tls_connection_options_init_from_ctx(&s_tester.tls_connection_options, s_tester.ctx);\n#endif',
+        )
+        self._replace_if_present(
+            os.path.join(tests_dir, "token_provider_sso_tests.c"),
+            '    AWS_ZERO_STRUCT(s_tester);\n\n    struct aws_tls_ctx_options tls_ctx_options;\n    aws_tls_ctx_options_init_default_client(&tls_ctx_options, allocator);\n    s_tester.tls_ctx = aws_tls_client_ctx_new(allocator, &tls_ctx_options);\n    ASSERT_NOT_NULL(s_tester.tls_ctx);\n\n    s_tester.el_group = aws_event_loop_group_new_default(allocator, 0, NULL);',
+            '    AWS_ZERO_STRUCT(s_tester);\n\n#ifndef BYO_CRYPTO\n    struct aws_tls_ctx_options tls_ctx_options;\n    aws_tls_ctx_options_init_default_client(&tls_ctx_options, allocator);\n    s_tester.tls_ctx = aws_tls_client_ctx_new(allocator, &tls_ctx_options);\n    ASSERT_NOT_NULL(s_tester.tls_ctx);\n#endif\n\n    s_tester.el_group = aws_event_loop_group_new_default(allocator, 0, NULL);',
+        )
+        self._replace_if_present(
+            os.path.join(tests_dir, "token_provider_sso_tests.c"),
+            '    /* cleanup */\n    aws_tls_ctx_options_clean_up(&tls_ctx_options);',
+            '#ifndef BYO_CRYPTO\n    /* cleanup */\n    aws_tls_ctx_options_clean_up(&tls_ctx_options);\n#endif',
+        )
+        self._replace_if_present(
+            os.path.join(tests_dir, "credentials_tests.c"),
+            '    struct aws_tls_ctx *tls_ctx = NULL;\n    if (manual_tls) {\n        struct aws_tls_ctx_options tls_options;\n        aws_tls_ctx_options_init_default_client(&tls_options, allocator);\n        tls_ctx = aws_tls_client_ctx_new(allocator, &tls_options);\n        ASSERT_NOT_NULL(tls_ctx);\n        aws_tls_ctx_options_clean_up(&tls_options);\n    }',
+            '    struct aws_tls_ctx *tls_ctx = NULL;\n#ifndef BYO_CRYPTO\n    if (manual_tls) {\n        struct aws_tls_ctx_options tls_options;\n        aws_tls_ctx_options_init_default_client(&tls_options, allocator);\n        tls_ctx = aws_tls_client_ctx_new(allocator, &tls_options);\n        ASSERT_NOT_NULL(tls_ctx);\n        aws_tls_ctx_options_clean_up(&tls_options);\n    }\n#else\n    (void)manual_tls;\n#endif',
         )
 
     def _replace_if_present(self, path, old, new):
