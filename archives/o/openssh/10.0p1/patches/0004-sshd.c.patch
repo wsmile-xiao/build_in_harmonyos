@@ -1,0 +1,160 @@
+--- a/sshd.c
++++ b/sshd.c
+@@ -1280,29 +1280,54 @@
+ 
+ static void
+ print_config(struct connection_info *connection_info)
+ {
+ 	connection_info->test = 1;
+ 	parse_server_match_config(&options, &includes, connection_info);
+ 	dump_config(&options);
+ 	exit(0);
+ }
+ 
++#ifdef ENABLE_OPENSSH_HOME
++/*
++ * Resolve a compiled-in path using OPENSSH_HOME env var.
++ * If OPENSSH_HOME is set, returns "$OPENSSH_HOME/lib/sshd-session" etc.
++ * Otherwise returns the original compiled-in path.
++ * Uses a static buffer — caller must copy if persistence needed.
++ */
++static char ohos_path_buf[PATH_MAX];
++
++static const char *
++ohos_resolve_path(const char *compiled_path)
++{
++	const char *home = getenv("OPENSSH_HOME");
++	if (home == NULL || home[0] == '\0')
++		return compiled_path;
++	/* strip leading slashes from compiled path */
++	while (*compiled_path == '/')
++		compiled_path++;
++	snprintf(ohos_path_buf, sizeof(ohos_path_buf), "%s/%s",
++	    home, compiled_path);
++	return ohos_path_buf;
++}
++#endif /* ENABLE_OPENSSH_HOME */
++
+ /*
+  * Main program for the daemon.
+  */
+ int
+ main(int ac, char **av)
+ {
+ 	extern char *optarg;
+ 	extern int optind;
+ 	int log_stderr = 0, inetd_flag = 0, test_flag = 0, no_daemon_flag = 0;
++	int config_file_user_specified = 0;
+ 	char *config_file_name = _PATH_SERVER_CONFIG_FILE;
+ 	int r, opt, do_dump_cfg = 0, keytype, already_daemon, have_agent = 0;
+ 	int sock_in = -1, sock_out = -1, newsock = -1, rexec_argc = 0;
+ 	int devnull, config_s[2] = { -1 , -1 }, have_connection_info = 0;
+ 	int need_chroot = 1;
+ 	char *args, *fp, *line, *logfile = NULL, **rexec_argv = NULL;
+ 	struct stat sb;
+ 	u_int i, j;
+ 	mode_t new_umask;
+ 	struct sshkey *key;
+@@ -1336,33 +1361,40 @@
+ 
+ 	if (geteuid() == 0 && setgroups(0, NULL) == -1)
+ 		debug("setgroups(): %.200s", strerror(errno));
+ 
+ 	/* Ensure that fds 0, 1 and 2 are open or directed to /dev/null */
+ 	sanitise_stdfd();
+ 
+ 	/* Initialize configuration options to their default values. */
+ 	initialize_server_options(&options);
+ 
++#ifdef ENABLE_OPENSSH_HOME
++	/* Override config file path with OPENSSH_HOME if set and not user-specified */
++	if (!config_file_user_specified && getenv("OPENSSH_HOME") != NULL)
++		config_file_name = ohos_resolve_path(_PATH_SERVER_CONFIG_FILE);
++#endif
++
+ 	/* Parse command-line arguments. */
+ 	args = argv_assemble(ac, av); /* logged later */
+ 	while ((opt = getopt(ac, av,
+ 	    "C:E:b:c:f:g:h:k:o:p:u:46DGQRTdeiqrtV")) != -1) {
+ 		switch (opt) {
+ 		case '4':
+ 			options.address_family = AF_INET;
+ 			break;
+ 		case '6':
+ 			options.address_family = AF_INET6;
+ 			break;
+ 		case 'f':
+ 			config_file_name = optarg;
++			config_file_user_specified = 1;
+ 			break;
+ 		case 'c':
+ 			servconf_add_hostcert("[command-line]", 0,
+ 			    &options, optarg);
+ 			break;
+ 		case 'd':
+ 			if (debug_flag == 0) {
+ 				debug_flag = 1;
+ 				options.log_level = SYSLOG_LEVEL_DEBUG1;
+ 			} else if (options.log_level < SYSLOG_LEVEL_DEBUG3)
+@@ -1451,22 +1483,24 @@
+ 			break;
+ 		case 'V':
+ 			fprintf(stderr, "%s, %s\n",
+ 			    SSH_RELEASE, SSH_OPENSSL_VERSION);
+ 			exit(0);
+ 		default:
+ 			usage();
+ 			break;
+ 		}
+ 	}
++#ifndef ENABLE_OPENSSH_HOME
+ 	if (!test_flag && !inetd_flag && !do_dump_cfg && !path_absolute(av[0]))
+ 		fatal("sshd requires execution with an absolute path");
++#endif /* ENABLE_OPENSSH_HOME */
+ 
+ 	closefrom(STDERR_FILENO + 1);
+ 
+ 	/* Reserve fds we'll need later for reexec things */
+ 	if ((devnull = open(_PATH_DEVNULL, O_RDWR)) == -1)
+ 		fatal("open %s: %s", _PATH_DEVNULL, strerror(errno));
+ 	while (devnull < REEXEC_MIN_FREE_FD) {
+ 		if ((devnull = dup(devnull)) == -1)
+ 			fatal("dup %s: %s", _PATH_DEVNULL, strerror(errno));
+ 	}
+@@ -1528,20 +1562,35 @@
+ 	if ((cfg = sshbuf_new()) == NULL)
+ 		fatal("sshbuf_new config failed");
+ 	if (strcasecmp(config_file_name, "none") != 0)
+ 		load_server_config(config_file_name, cfg);
+ 
+ 	parse_server_config(&options, config_file_name, cfg,
+ 	    &includes, NULL, 0);
+ 
+ 	/* Fill in default values for those options not explicitly set. */
+ 	fill_default_server_options(&options);
++
++#ifdef ENABLE_OPENSSH_HOME
++	/* Override hardcoded helper paths with OPENSSH_HOME if set */
++	if (getenv("OPENSSH_HOME") != NULL) {
++		free(options.sshd_session_path);
++		options.sshd_session_path = xstrdup(
++		    ohos_resolve_path(_PATH_SSHD_SESSION));
++		free(options.sshd_auth_path);
++		options.sshd_auth_path = xstrdup(
++		    ohos_resolve_path(_PATH_SSHD_AUTH));
++		debug3("OPENSSH_HOME=%s -> session=%s auth=%s",
++		    getenv("OPENSSH_HOME"),
++		    options.sshd_session_path, options.sshd_auth_path);
++	}
++#endif /* ENABLE_OPENSSH_HOME */
+ 
+ 	/* Check that options are sensible */
+ 	if (options.authorized_keys_command_user == NULL &&
+ 	    (options.authorized_keys_command != NULL &&
+ 	    strcasecmp(options.authorized_keys_command, "none") != 0))
+ 		fatal("AuthorizedKeysCommand set without "
+ 		    "AuthorizedKeysCommandUser");
+ 	if (options.authorized_principals_command_user == NULL &&
+ 	    (options.authorized_principals_command != NULL &&
+ 	    strcasecmp(options.authorized_principals_command, "none") != 0))
+ne") != 0))
