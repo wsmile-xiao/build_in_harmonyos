@@ -1,0 +1,570 @@
+diff --git a/libdisomaster/disomaster_cli.cpp b/libdisomaster/disomaster_cli.cpp
+new file mode 100644
+--- /dev/null
++++ b/libdisomaster/disomaster_cli.cpp
+@@ -0,0 +1,565 @@
++/*
++ * Copyright (C) 2019 Deepin Technology Co., Ltd.
++ *
++ * Author:     Chris Xiong <chirs241097@gmail.com>
++ *
++ * Maintainer: Chris Xiong <chirs241097@gmail.com>
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++// 鸿蒙适配：使用 QProcess 调用 xorriso CLI 替代 libisoburn C API
++
++#include "disomaster.h"
++
++#include <QProcess>
++#include <QFileInfo>
++#include <QRegularExpression>
++#include <QStandardPaths>
++#include <QUrl>
++
++namespace DISOMasterNS {
++
++// 单位转换：将带后缀的大小字符串转换为字节数
++static quint64 parseSize(const QString &num, const QString &unit)
++{
++    quint64 val = num.toULongLong();
++    if (unit == "k") return val * 1024ULL;
++    if (unit == "m") return val * 1024ULL * 1024ULL;
++    if (unit == "g") return val * 1024ULL * 1024ULL * 1024ULL;
++    return val;
++}
++
++class DISOMasterPrivate
++{
++    Q_DECLARE_PUBLIC(DISOMaster)
++public:
++    DISOMasterPrivate(DISOMaster *q);
++    ~DISOMasterPrivate();
++
++    DISOMaster *q_ptr;
++
++    QString xorrisoPath;                              // xorriso 可执行文件路径
++    QString currentDev;                               // 当前设备路径
++    QHash<QUrl, QUrl> files;                          // 暂存文件映射
++    mutable QHash<QString, DeviceProperty> devCache;  // 设备属性缓存
++    QStringList messages;                             // 信息消息列表
++    QString currentSpeed;                             // 当前写入速度
++
++    // 查找 xorriso 可执行文件路径
++    QString findXorriso() const;
++    // 执行 xorriso 命令并解析输出
++    bool runXorriso(const QStringList &args, QString &output);
++    // 解析设备属性
++    DeviceProperty parseDeviceProperty(const QString &output, const QString &dev);
++    // 解析介质类型字符串
++    MediaType parseMediaType(const QString &text) const;
++    // 解析输出中的进度并发射 Running 状态（仅在进程运行期间调用）
++    void parseProgress(const QString &output);
++    // 仅解析输出中的速度信息，不发射任何状态信号
++    void parseSpeed(const QString &output);
++};
++
++DISOMasterPrivate::DISOMasterPrivate(DISOMaster *q)
++    : q_ptr(q)
++{
++    xorrisoPath = findXorriso();
++}
++
++DISOMasterPrivate::~DISOMasterPrivate()
++{
++}
++
++QString DISOMasterPrivate::findXorriso() const
++{
++    // 优先从环境变量获取 xorriso 路径
++    QByteArray env = qgetenv("DISOMASTER_XORRISO");
++    if (!env.isEmpty()) {
++        QString path = QString::fromLocal8Bit(env);
++        if (QFileInfo::exists(path))
++            return path;
++    }
++    // 从 PATH 查找 xorriso
++    return QStandardPaths::findExecutable("xorriso");
++}
++
++bool DISOMasterPrivate::runXorriso(const QStringList &args, QString &output)
++{
++    Q_Q(DISOMaster);
++
++    if (xorrisoPath.isEmpty()) {
++        emit q->jobStatusChanged(DISOMaster::Failed, 0);
++        return false;
++    }
++
++    emit q->jobStatusChanged(DISOMaster::Running, 0);
++
++    QProcess proc;
++    // 合并 stderr 到 stdout，避免 stderr 管道缓冲区写满导致子进程阻塞（死锁）
++    proc.setProcessChannelMode(QProcess::MergedChannels);
++    // 启动前连接 finished 信号，保证状态回调与发射时机一致
++    // 使用 QOverload 消除 QProcess::finished 在 Qt 5.15 中的重载歧义
++    QObject::connect(&proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
++                     q, [q](int exitCode, QProcess::ExitStatus) {
++                         emit q->jobStatusChanged(
++                             exitCode == 0 ? DISOMaster::Finished : DISOMaster::Failed,
++                             exitCode == 0 ? 100 : 0);
++                     });
++
++    // 检查进程是否成功启动，避免 TOCTOU 场景下误报成功
++    proc.start(xorrisoPath, args);
++    if (!proc.waitForStarted(30000)) {
++        emit q->jobStatusChanged(DISOMaster::Failed, 0);
++        return false;
++    }
++
++    // 循环等待并读取输出，实时解析进度（只解析新增片段，避免 O(n²) 冗余扫描）
++    QByteArray accumulated;
++    while (proc.waitForReadyRead(30000)) {
++        QByteArray chunk = proc.readAllStandardOutput();
++        accumulated += chunk;
++        parseProgress(QString::fromLocal8Bit(chunk));
++    }
++    proc.waitForFinished(-1);
++    accumulated += proc.readAllStandardOutput();
++
++    output = QString::fromLocal8Bit(accumulated);
++
++    // 最终仅解析速度，不再发射进度信号（finished 信号已发射 Finished/Failed）
++    parseSpeed(output);
++
++    // 将输出行添加到消息列表
++    messages.append(output.split('\n', Qt::SkipEmptyParts));
++
++    return proc.exitCode() == 0;
++}
++
++MediaType DISOMasterPrivate::parseMediaType(const QString &text) const
++{
++    QString t = text.trimmed().toUpper();
++    if (t == "CD-ROM" || t == "CDROM") return CD_ROM;
++    if (t == "CD-R") return CD_R;
++    if (t == "CD-RW") return CD_RW;
++    if (t == "DVD-ROM" || t == "DVDROM") return DVD_ROM;
++    if (t == "DVD-R") return DVD_R;
++    if (t == "DVD-RW") return DVD_RW;
++    if (t == "DVD+R") return DVD_PLUS_R;
++    if (t == "DVD+R/DL" || t == "DVD+R DL") return DVD_PLUS_R_DL;
++    if (t == "DVD-RAM") return DVD_RAM;
++    if (t == "DVD+RW") return DVD_PLUS_RW;
++    if (t == "BD-ROM" || t == "BDROM") return BD_ROM;
++    if (t == "BD-R") return BD_R;
++    if (t == "BD-RE") return BD_RE;
++    return NoMedia;
++}
++
++DeviceProperty DISOMasterPrivate::parseDeviceProperty(const QString &output, const QString &dev)
++{
++    DeviceProperty dp;
++    dp.formatted = false;
++    dp.media = NoMedia;
++    dp.data = 0;
++    dp.avail = 0;
++    dp.datablocks = 0;
++    dp.devid = dev;
++
++    const QStringList lines = output.split('\n');
++    for (const QString &line : lines) {
++        QString trimmed = line.trimmed();
++
++        // 解析介质类型: "Media current: CD-RW"
++        if (trimmed.startsWith("Media current:", Qt::CaseInsensitive)) {
++            QString typeStr = trimmed.mid(trimmed.indexOf(':') + 1).trimmed();
++            dp.media = parseMediaType(typeStr);
++        }
++        // 解析介质状态: "Media status : is blank"
++        else if (trimmed.startsWith("Media status", Qt::CaseInsensitive)) {
++            if (trimmed.contains("blank", Qt::CaseInsensitive))
++                dp.formatted = true;
++        }
++        // 解析介质摘要: "Media summary: 0 sessions, 0 data blocks, 0k data, 653m free"
++        else if (trimmed.startsWith("Media summary:", Qt::CaseInsensitive)) {
++            static QRegularExpression re(
++                "(\\d+)\\s*sessions?,\\s*(\\d+)\\s*data\\s*blocks?,\\s*"
++                "(\\d+)\\s*(\\w)\\s*data,\\s*(\\d+)\\s*(\\w)\\s*free",
++                QRegularExpression::CaseInsensitiveOption);
++            auto m = re.match(trimmed);
++            if (m.hasMatch()) {
++                dp.datablocks = m.captured(2).toULongLong();
++                dp.data = parseSize(m.captured(3), m.captured(4).toLower());
++                dp.avail = parseSize(m.captured(5), m.captured(6).toLower());
++            }
++        }
++        // 解析卷标: "Volume id : 'ISOIMAGE'"
++        else if (trimmed.startsWith("Volume id", Qt::CaseInsensitive)) {
++            int start = trimmed.indexOf('\'');
++            int end = trimmed.lastIndexOf('\'');
++            if (start >= 0 && end > start)
++                dp.volid = trimmed.mid(start + 1, end - start - 1);
++        }
++        // 解析写入速度: "Write speed : 1411k 70x"
++        else if (trimmed.startsWith("Write speed", Qt::CaseInsensitive)) {
++            static QRegularExpression re("(\\d+(?:\\.\\d+)?)x\\b");
++            auto m = re.match(trimmed);
++            if (m.hasMatch())
++                dp.writespeed.append(m.captured(1) + "x");
++        }
++    }
++
++    return dp;
++}
++
++void DISOMasterPrivate::parseProgress(const QString &output)
++{
++    Q_Q(DISOMaster);
++
++    int maxProgress = -1;
++
++    const QStringList lines = output.split('\n');
++    for (const QString &line : lines) {
++        QString trimmed = line.trimmed();
++
++        // 解析进度: "N% fifo" 或 "N% done"
++        static QRegularExpression progressRe("(\\d+)%\\s*(?:fifo|done)");
++        auto pm = progressRe.match(trimmed);
++        if (pm.hasMatch()) {
++            int percent = pm.captured(1).toInt();
++            if (percent > maxProgress)
++                maxProgress = percent;
++        }
++
++        // 解析 "N of M MB written" 格式的进度
++        static QRegularExpression mbRe("(\\d+)\\s*of\\s*(\\d+)\\s*MB\\s*written");
++        auto mm = mbRe.match(trimmed);
++        if (mm.hasMatch()) {
++            int written = mm.captured(1).toInt();
++            int total = mm.captured(2).toInt();
++            if (total > 0) {
++                int percent = written * 100 / total;
++                if (percent > maxProgress)
++                    maxProgress = percent;
++            }
++        }
++
++        // 解析当前速度: "Nx."
++        static QRegularExpression speedRe("(\\d+(?:\\.\\d+)?)x\\.");
++        auto sm = speedRe.match(trimmed);
++        if (sm.hasMatch()) {
++            currentSpeed = sm.captured(1) + "x";
++        }
++    }
++
++    if (maxProgress >= 0)
++        emit q->jobStatusChanged(DISOMaster::Running, maxProgress);
++}
++
++void DISOMasterPrivate::parseSpeed(const QString &output)
++{
++    const QStringList lines = output.split('\n');
++    for (const QString &line : lines) {
++        QString trimmed = line.trimmed();
++
++        // 解析当前速度: "Nx."
++        static QRegularExpression speedRe("(\\d+(?:\\.\\d+)?)x\\.");
++        auto sm = speedRe.match(trimmed);
++        if (sm.hasMatch()) {
++            currentSpeed = sm.captured(1) + "x";
++        }
++    }
++}
++
++// ========== DISOMaster 公共方法实现 ==========
++
++DISOMaster::DISOMaster(QObject *parent)
++    : QObject(parent)
++    , d_ptr(new DISOMasterPrivate(this))
++{
++}
++
++DISOMaster::~DISOMaster() = default;
++
++bool DISOMaster::acquireDevice(QString dev)
++{
++    Q_D(DISOMaster);
++
++    d->messages.clear();
++    d->currentSpeed.clear();
++
++    QStringList args;
++    args << "-dev" << dev << "-end";
++
++    QString output;
++    if (!d->runXorriso(args, output))
++        return false;
++
++    d->currentDev = dev;
++    return true;
++}
++
++void DISOMaster::releaseDevice()
++{
++    Q_D(DISOMaster);
++    d->currentDev.clear();
++}
++
++QString DISOMaster::currentDevice() const
++{
++    Q_D(const DISOMaster);
++    return d->currentDev;
++}
++
++DeviceProperty DISOMaster::getDeviceProperty()
++{
++    Q_D(DISOMaster);
++
++    DeviceProperty dp;
++    dp.formatted = false;
++    dp.media = NoMedia;
++    dp.data = 0;
++    dp.avail = 0;
++    dp.datablocks = 0;
++
++    if (d->currentDev.isEmpty())
++        return dp;
++
++    QStringList args;
++    args << "-dev" << d->currentDev << "-toc" << "-list_speeds" << "-end";
++
++    QString output;
++    if (!d->runXorriso(args, output))
++        return dp;
++
++    dp = d->parseDeviceProperty(output, d->currentDev);
++    d->devCache[d->currentDev] = dp;
++    return dp;
++}
++
++DeviceProperty DISOMaster::getDevicePropertyCached(QString dev) const
++{
++    Q_D(const DISOMaster);
++
++    auto it = d->devCache.find(dev);
++    if (it != d->devCache.end())
++        return it.value();
++
++    DeviceProperty dp;
++    dp.formatted = false;
++    dp.media = NoMedia;
++    dp.data = 0;
++    dp.avail = 0;
++    dp.datablocks = 0;
++    return dp;
++}
++
++void DISOMaster::nullifyDevicePropertyCache(QString dev)
++{
++    Q_D(DISOMaster);
++    d->devCache.remove(dev);
++}
++
++QStringList DISOMaster::getInfoMessages()
++{
++    Q_D(DISOMaster);
++    return d->messages;
++}
++
++QString DISOMaster::getCurrentSpeed() const
++{
++    Q_D(const DISOMaster);
++    return d->currentSpeed;
++}
++
++void DISOMaster::stageFiles(const QHash<QUrl, QUrl> filelist)
++{
++    Q_D(DISOMaster);
++    for (auto it = filelist.begin(); it != filelist.end(); ++it)
++        d->files[it.key()] = it.value();
++}
++
++const QHash<QUrl, QUrl> &DISOMaster::stagingFiles() const
++{
++    Q_D(const DISOMaster);
++    return d->files;
++}
++
++void DISOMaster::removeStagingFiles(const QList<QUrl> filelist)
++{
++    Q_D(DISOMaster);
++    for (const QUrl &url : filelist)
++        d->files.remove(url);
++}
++
++bool DISOMaster::commit(const BurnOptions &opts, int speed, QString volId)
++{
++    Q_D(DISOMaster);
++
++    if (d->currentDev.isEmpty())
++        return false;
++
++    d->messages.clear();
++
++    QStringList args;
++    args << "-dev" << d->currentDev;
++
++    if (speed > 0)
++        args << "-speed" << QString::number(speed) + "k";
++
++    args << "-volid" << volId;
++    args << "-overwrite" << "off";
++
++    // 设置 Joliet 扩展
++    if (opts & JolietSupport || opts & JolietAndRockRidge)
++        args << "-joliet" << "on";
++    else
++        args << "-joliet" << "off";
++
++    // 设置 Rock Ridge 扩展
++    if (opts & RockRidgeSupport || opts & JolietAndRockRidge)
++        args << "-rockridge" << "on";
++    else
++        args << "-rockridge" << "off";
++
++    // 添加暂存文件映射
++    for (auto it = d->files.begin(); it != d->files.end(); ++it) {
++        args << "-map" << it.value().toLocalFile() << it.key().toLocalFile();
++    }
++
++    // 设置是否关闭会话
++    if (opts & KeepAppendable)
++        args << "-close" << "off";
++    else
++        args << "-close" << "on";
++
++    args << "-commit" << "-end";
++
++    QString output;
++    return d->runXorriso(args, output);
++}
++
++bool DISOMaster::commit(int speed, bool closeSession, QString volId)
++{
++    BurnOptions opts;
++    if (!closeSession)
++        opts |= KeepAppendable;
++    opts |= ISO9660Only;
++    return commit(opts, speed, volId);
++}
++
++bool DISOMaster::erase()
++{
++    Q_D(DISOMaster);
++
++    if (d->currentDev.isEmpty())
++        return false;
++
++    d->messages.clear();
++
++    QStringList args;
++    args << "-outdev" << d->currentDev << "-blank" << "as_needed" << "-end";
++
++    QString output;
++    return d->runXorriso(args, output);
++}
++
++bool DISOMaster::checkmedia(double *qgood, double *qslow, double *qbad)
++{
++    Q_D(DISOMaster);
++
++    if (d->currentDev.isEmpty())
++        return false;
++
++    d->messages.clear();
++
++    QStringList args;
++    args << "-dev" << d->currentDev << "-check_media" << "-end";
++
++    QString output;
++    bool ok = d->runXorriso(args, output);
++
++    // 解析 Media region 行计算质量比例
++    int goodBlocks = 0, slowBlocks = 0, badBlocks = 0, totalBlocks = 0;
++
++    static QRegularExpression re(
++        "Media\\s*region\\s*:\\s*(\\d+)\\s+(\\d+)\\s+(\\S+)",
++        QRegularExpression::CaseInsensitiveOption);
++    auto it = re.globalMatch(output);
++    while (it.hasNext()) {
++        auto m = it.next();
++        int start = m.captured(1).toInt();
++        int end = m.captured(2).toInt();
++        QString status = m.captured(3).trimmed();
++        int blocks = end - start;
++        if (blocks <= 0) blocks = 1;
++        totalBlocks += blocks;
++        if (status == "<-")
++            goodBlocks += blocks;
++        else if (status == "slow")
++            slowBlocks += blocks;
++        else
++            badBlocks += blocks;
++    }
++
++    if (totalBlocks > 0) {
++        if (qgood) *qgood = (double)goodBlocks / totalBlocks;
++        if (qslow) *qslow = (double)slowBlocks / totalBlocks;
++        if (qbad) *qbad = (double)badBlocks / totalBlocks;
++    }
++
++    return ok;
++}
++
++bool DISOMaster::dumpISO(const QUrl isopath)
++{
++    Q_D(DISOMaster);
++
++    if (d->currentDev.isEmpty())
++        return false;
++
++    d->messages.clear();
++
++    QStringList args;
++    args << "-outdev" << d->currentDev
++         << "-check_media" << "use=outdev"
++         << "data_to=" + isopath.toLocalFile()
++         << "-end";
++
++    QString output;
++    return d->runXorriso(args, output);
++}
++
++bool DISOMaster::writeISO(const QUrl isopath, int speed)
++{
++    Q_D(DISOMaster);
++
++    if (d->currentDev.isEmpty())
++        return false;
++
++    d->messages.clear();
++
++    QStringList args;
++    args << "-as" << "cdrecord" << "-v"
++         << "dev=" + d->currentDev
++         << "blank=as_needed";
++
++    if (speed > 0)
++        args << "speed=" + QString::number(speed) + "k";
++
++    args << isopath.toLocalFile();
++
++    QString output;
++    return d->runXorriso(args, output);
++}
++
++}
++// vim: set tabstop=4 shiftwidth=4 softtabstop expandtab
