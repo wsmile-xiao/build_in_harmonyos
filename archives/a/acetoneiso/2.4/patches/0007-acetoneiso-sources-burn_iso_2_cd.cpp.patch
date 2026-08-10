@@ -1,0 +1,502 @@
+--- a/acetoneiso/sources/burn_iso_2_cd.cpp
++++ b/acetoneiso/sources/burn_iso_2_cd.cpp
+@@ -7,45 +7,45 @@
+ //    (at your option) any later version.
+ //
+ //    AcetoneISO is distributed in the hope that it will be useful,
+ //    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ //    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ //    GNU General Public License for more details.
+ //
+ //    You should have received a copy of the GNU General Public License
+ //    along with AcetoneISO.  If not, see <http://www.gnu.org/licenses/>.
+ #include <QtGui>
++#include <QtWidgets>
+ #include <QFileDialog>
+ #include <QCoreApplication>
+ #include <QByteArray>
+ #include <QUrl>
+ #include <QProcess>
+-#include <QDBusConnection>
+-#include <QDBusInterface>
+-#include <QDBusMessage>
+ #include <QList>
+ #include <QVariant>
++#include <QDir>
++#include <QRegularExpression>
+ #include <fcntl.h>
+ #include <iostream>
+ #include <QDebug>
+ #include "burn_iso_2_cd.h"
+ #include "acetoneiso.h"
+ 
+ 
+ /*
+ cancellare cd completo: wodim -verbose dev=/dev/sr0  blank=all
+ cancellare cd rapido: wodim -verbose dev=/dev/sr0  blank=fast
+ dice il tipo di media inserito: hal-get-property "--key volume.disc.type --udi $udi
+ */
+ 
+ //
+-burniso2cd::burniso2cd( QWidget * parent, Qt::WFlags f) 
++burniso2cd::burniso2cd( QWidget * parent, Qt::WindowFlags f) 
+ 	: QDialog(parent, f)
+ {
+ 
+     setupUi(this);
+     is_erasing = false;
+     loaded_success = false;
+     QCoreApplication::setApplicationName("AcetoneISO");
+     connect( start, SIGNAL( clicked() ), this, SLOT( start_erase() ) );
+     connect( push_select_image, SIGNAL( clicked() ), this, SLOT( select_image() ) );
+ 
+@@ -66,112 +66,63 @@
+     
+     device_scan();
+ 
+ }
+ 
+ 
+ 
+ 
+ void burniso2cd::device_scan() {
+ 
+-
+-/*creo la connessione dbus a hal*/
+-QDBusConnection conn = QDBusConnection::systemBus();
+-QDBusInterface hal("org.freedesktop.Hal", "/org/freedesktop/Hal/Manager", "org.freedesktop.Hal.Manager", conn);
+-/*cerco tutti i dispositivi storage.cdrom con hal via dbus*/
+-QDBusMessage msg = hal.call( "FindDeviceByCapability", "storage.cdrom");
+-
+-QList<QVariant> devices = msg.arguments(); 
+-/*per ogni udi (dispositivo cdrom) che trovo, ricavo vendor, model, velocità e path*/
+-
+-//disabilita tutto se non viene trovato almeno 1 periferica
+-int count = devices.count();
+-if (count < 1) {
+- QMessageBox::warning(this, "AcetoneISO::warning", tr("No CD/DVD device found.\nIf you think this is a bug please report it."));
+- disable_buttons();
+- devices_combo->addItem( tr("No CD/DVD device found") );
+- return;
+-}
+-
+-
+-QIcon icon_optical_drive( ":/images/drive-optical.png" );
+-
+-//scannerizzo tutte le periferiche e le aggiungo nella combobox. questa funzione viene chiamato una sola volta.
+-QVariant name(devices);
+-int cc = 0;
+-int success = -1;
+-while (cc < count) {
+-		  QString cdrom = name.toStringList()[0]; 
+-		  if (cdrom.isEmpty()) {
+-		    QMessageBox::warning(this, "AcetoneISO::warning", tr("No CD/DVD device found.\nIf you think this is a bug please report it."));
+-		    disable_buttons();
+-		    devices_combo->addItem( tr("No CD/DVD device found") );
+-		    return; 
+-		  }
+-		//  qDebug() << "Found device: " << cdrom; 
+-		  QDBusInterface device("org.freedesktop.Hal", cdrom, "org.freedesktop.Hal.Device", conn);
+-		  
+-		  //vedo se effittivamente il device puo scrivere su dischi cd-rw
+-		  msg = device.call("GetProperty", "storage.cdrom.cdr");
+-		  QVariant vcan_write_cdrw = msg.arguments()[0];
+-		  bool can_write_cdrw = vcan_write_cdrw.toBool();
+-		  if (!can_write_cdrw) {
+-		    cc = cc + 1;
+-		    continue;
+-		  }
+-		  //success si ricorda sempre la posizione in cui aggiungere all'array indipendentemente dal cc del ciclo while
+-		  success = success + 1;
+-		  //aggiungo id nell'array
+-		  id_device.insert(success, cdrom);		  
+-		  /*ottengo il nome del vendor del cdrom*/
+-		  msg = device.call("GetProperty", "storage.vendor");
+-		  QVariant var = msg.arguments()[0]; 
+-		  QString vendor = var.toStringList()[0];
+-		  //qDebug() << "VENDOR" << vendor;
+-		  /*ottengo il nome del modello del cdrom*/
+-		  msg = device.call("GetProperty", "storage.model");
+-		  QVariant var2 = msg.arguments()[0]; 
+-		  QString model = var2.toStringList()[0];
+-		  //qDebug() << "MODEL" << model;
+-
+-		  /*ottengo il path del dispositivo cdrom*/
+-		  msg = device.call("GetProperty", "block.device");
+-		  QVariant var3 = msg.arguments()[0]; 
+-		  device_path.insert(success, var3.toStringList()[0]);
+-		  //qDebug() << "PATH" << device_path;
+-		  
+-		  msg = device.call("GetProperty", "storage.firmware_version");
+-		  QVariant firmwarev = msg.arguments()[0];
+-		  QString firmware = firmwarev.toString();
+-		   /*aggiungo il nome del device nella combobox*/
+-		  QString final_device = vendor.append( "\t" + model + " " + firmware );
+-		  devices_combo->insertItem(success,icon_optical_drive, " " + final_device );
+-		  
+-		  cc = cc + 1;
+-		  }
+-
+-media_available();
+-//if < 1 significa che sebbene ci sono 1 o piu periferiche cdrom, nessuna e' capace di scrivere su cd-rw
+-if (devices_combo->count() < 1) {
+-disable_buttons();
+-QMessageBox::warning(this, "AcetoneISO::warning", tr("No CD/DVD device found capable of writing to CD-R/RW discs.\nIf you think this is a bug please report it."));
+-return; 
+-}
+-else { //c'e' almeno 1 periferica cdrom in grado di scrivere su dischi cd-rw
+-loaded_success = true;
+-//crea un timer cosi aggiorna automaticamente la label_info
+-timer = new QTimer(this);
+-connect(timer, SIGNAL(timeout()), this, SLOT(media_available()));
+-timer->start(1500);
+-connect( devices_combo, SIGNAL(currentIndexChanged(int) ), this , SLOT( combo_changed(int) ) ); 
+-}
+-
++    /* 运行时检测：扫描 /dev 下的光驱设备节点（HAL/dbus 在目标平台不可用） */
++    QDir devDir("/dev");
++    QStringList filters;
++    filters << "sr*" << "cdrom*" << "cd*";
++    QStringList devs = devDir.entryList(filters, QDir::System | QDir::Files);
++    QIcon icon_optical_drive( ":/images/drive-optical.png" );
++    int success = -1;
++    if (devs.isEmpty()) {
++        QMessageBox::warning(this, "AcetoneISO::warning", tr("No CD/DVD device found.\nIf you think this is a bug please report it."));
++        disable_buttons();
++        devices_combo->addItem( tr("No CD/DVD device found") );
++        media_available();
++        return;
++    }
++    for (int cc = 0; cc < devs.count(); ++cc) {
++        QString devPath = "/dev/" + devs.at(cc);
++        /* 写入能力过滤：xorriso 查询设备支持的 profile（替代 HAL storage.cdrom.cdr 属性）。
++           注意：不能用裸 contains("cd-r")（会命中 "CD-ROM"），须用词边界正则 */
++        QProcess cap_probe;
++        cap_probe.start("xorriso", QStringList() << "-outdev" << devPath << "-list_profiles");
++        bool cap_ok = cap_probe.waitForFinished(5000);
++        QString cap_out = QString::fromUtf8(cap_probe.readAllStandardOutput());
++        QRegularExpression re_cdrw("\\bcd-rw\\b", QRegularExpression::CaseInsensitiveOption);
++        QRegularExpression re_cdr("\\bcd-r\\b", QRegularExpression::CaseInsensitiveOption);
++        if (!cap_ok || (!re_cdrw.match(cap_out).hasMatch() && !re_cdr.match(cap_out).hasMatch())) {
++            continue; /* 只读光驱或无法确认写入能力，过滤 */
++        }
++        success = success + 1;
++        id_device.insert(success, devPath);
++        device_path.insert(success, devPath);
++        devices_combo->insertItem(success, icon_optical_drive, " " + devPath);
++    }
++    media_available();
++    if (devices_combo->count() < 1) {
++        disable_buttons();
++        QMessageBox::warning(this, "AcetoneISO::warning", tr("No CD/DVD device found capable of writing to CD-R/RW discs.\nIf you think this is a bug please report it."));
++        return;
++    }
++    loaded_success = true;
++    timer = new QTimer(this);
++    connect(timer, SIGNAL(timeout()), this, SLOT(media_available()));
++    timer->start(2000);
++    connect( devices_combo, SIGNAL(currentIndexChanged(int) ), this , SLOT( combo_changed(int) ) );
+ }
+ 
+ 
+ void burniso2cd::media_available() {
+ //qDebug() << "media_available()";
+ //se sto masterizzando deve uscire da qui
+ if (is_erasing) {
+ start->setEnabled(false);
+ label_info->setText(tr("AcetoneISO is burning your image to the") + " " + disc_real_type + "..." );
+ return;
+@@ -189,135 +140,131 @@
+     disconnect(devices_combo, 0, 0, 0);
+     disconnect(timer, 0, 0, 0);
+     loaded_success = false;
+   }
+ }
+ 
+ 
+ estimated_time() ;
+ 
+ //scopro se ho un cd dentro il device
+-/*creo la connessione dbus a hal*/
+-QDBusConnection conn = QDBusConnection::systemBus();
+-QDBusMessage msg;
+-//prendo indice corrente della combobox cosi so chi l'id della periferica selezionata
+-int current_index = devices_combo->currentIndex();
+-QString id = id_device[current_index];
+-
+-//mi connetto alla periferica corrente selezionata in combobox
+-QDBusInterface device("org.freedesktop.Hal", id, "org.freedesktop.Hal.Device", conn);
+-//vedo se e' inserito un cd 
+-msg = device.call("GetProperty", "storage.removable.media_available");
+-QVariant var5 = msg.arguments()[0];
+-bool opticDev = var5.toBool();
+-if (!opticDev) {
+-  label_info->setText(tr("Insert a CD-R/RW disc."));
+-  start->setEnabled(false);
+-  clean_combobox_speed();
+-  //devices_combo->setItemText(cc,tr("No Media Inserted, insert a media and click on refresh button."));
+-  return;
+-}
+-
+-//vedo il tipo di cd inserito
+-QDBusMessage fbp;
+-QDBusInterface newh("org.freedesktop.Hal", "/org/freedesktop/Hal/Manager", "org.freedesktop.Hal.Manager", conn);
+-fbp = newh.call("FindDeviceStringMatch", "info.parent", id);
+-QList<QVariant> var6 = fbp.arguments();
+-QString disc_type = var6.at(0).toString();
+-QDBusInterface device_type("org.freedesktop.Hal", disc_type, "org.freedesktop.Hal.Device", conn);
+-
+-//ferma in caso che il disco inserito non sia un disco CD-R/RW
+-msg = device_type.call("GetProperty", "volume.disc.type");
+-QString var7 = msg.arguments()[0].toString();
+-QString disc_is = var7;
+-if ( (disc_is != "cd_rw") and (disc_is != "cd_r" ) ) {
+-  label_info->setText(tr("The disc isn't a CD-R/RW. Please insert a CD-R/RW disc."));
+-  start->setEnabled(false); 
+-  clean_combobox_speed();
+-  return;
+-}
+-
+-if ( disc_is == "cd_r") {
+-  disc_real_type = "CD-R";
+-}
+-else {
+-   disc_real_type = "CD-RW";
+-   msg = device.call("GetProperty", "storage.cdrom.cdrw");
+-   QVariant vcan_write_cdrw = msg.arguments()[0];
+-  bool discobool = vcan_write_cdrw.toBool();
+-    if (!discobool) {
+-      label_info->setText( tr("You inserted a CD-RW disc, however your CD/DVD device is uncapable of writing to CD-RW discs.") ); 
+-      start->setEnabled(false); 
+-      clean_combobox_speed();
+-      return;
+-    }
+-}
+-
+-//vedo se il disco e' vuoto
+-msg = device_type.call("GetProperty", "volume.disc.is_blank");
+-bool disc_blank = msg.arguments()[0].toBool();
+-if (!disc_blank) {
+-  if ( disc_is == "cd_r") {
+-    disc_real_type = "CD-R";
+-    label_info->setText(tr("The CD-R isn't empty. Please insert an empty CD-R/RW disc."));
+-    start->setEnabled(false); 
+-    clean_combobox_speed();
+-    return;
+-  }
+-  else {
+-    label_info->setText(tr("The CD-RW isn't empty.\nPlease insert an empty CD-R/RW disc or blank the CD-RW with the appropriate AcetoneISO's blanking tool."));
+-    start->setEnabled(false); 
+-    clean_combobox_speed();
+-    return; 
+-  }
+-}
+-
+-
+-
+-//check and set combobox speed
+-  msg = device.call("GetProperty", "storage.cdrom.write_speeds");
+-  QVariant vspeed = msg.arguments()[0];
+-  QStringList slist = vspeed.toStringList();
+-  int count_speed = slist.count();
+-  int count_combobox = (combo_speed->count() ) + itemRemovedSpeed;
+-  //put in combobox only if first time
+-  if ( count_speed != count_combobox ) {
+-    clean_combobox_speed();
+-    int count_cycle = 0;
+-    while (count_cycle < count_speed) {
+-      QString string_speed = slist[count_cycle];
+-      qreal q_speed = string_speed.toFloat() / 1024 ;
+-      int int_speed = qRound(q_speed);
+-      if (int_speed > 8) {
+-	int_speed = 8;
+-      }
+-      string_speed =  hash_speed[int_speed] + "x";
+-      //qDebug() <<  string_speed;
+-      arraySpeed << string_speed; //put speed in array
+-      count_cycle++;
+-    }
+-    //remove duplicate speeds from array and fill combobox speed
+-    itemRemovedSpeed = arraySpeed.removeDuplicates();
+-    int countArraySpeed = arraySpeed.count();
+-    int abc = 0;
+-    while (abc < countArraySpeed) {
+-      combo_speed->insertItem(abc, arraySpeed[abc] );
+-      abc = abc + 1;
+-    }
+-  }
+-  
+-
+-  label_info->setText(disc_real_type + " " +  tr("succesfully found in device."));
+-  push_select_image->setEnabled(true);
+-  label_4->setEnabled(true);
+-  iso_to_burn_label->setEnabled(true);
+-
++    /* 运行时检测：校验当前光驱设备节点是否存在 */
++    int current_index = devices_combo->currentIndex();
++    if (current_index < 0 || current_index >= id_device.size()) {
++        label_info->setText(tr("Insert a CD-R/RW disc."));
++        start->setEnabled(false);
++        clean_combobox_speed();
++        return;
++    }
++    QString id = id_device[current_index];
++    if (!QFile::exists(id)) {
++        label_info->setText(tr("Insert a CD-R/RW disc."));
++        start->setEnabled(false);
++        clean_combobox_speed();
++        return;
++    }
++    /* 运行时介质检测：通过 xorriso 查询介质类型（替代 HAL/dbus，非静默假设）。
++       注意：不能用裸 contains("cd-r")（会命中 "CD-ROM"），须用词边界正则 */
++    QProcess probe;
++    probe.start("xorriso", QStringList() << "-indev" << id << "-list_profiles");
++    bool probe_ok = probe.waitForFinished(5000);
++    QString probe_out = QString::fromUtf8(probe.readAllStandardOutput());
++    QRegularExpression re_cdrw("\\bcd-rw\\b", QRegularExpression::CaseInsensitiveOption);
++    QRegularExpression re_cdr("\\bcd-r\\b", QRegularExpression::CaseInsensitiveOption);
++    if (!probe_ok || (!re_cdrw.match(probe_out).hasMatch() && !re_cdr.match(probe_out).hasMatch())) {
++        if (!probe_ok) {
++            label_info->setText(tr("Media detection unavailable (xorriso missing). Burning disabled."));
++        } else {
++            label_info->setText(tr("The inserted disc isn't a CD-R/RW. Burning disabled."));
++        }
++        start->setEnabled(false);
++        clean_combobox_speed();
++        return;
++    }
++    /* 介质检测通过：根据实际介质类型设置烧录状态标签 */
++    if (probe_out.contains("cd-rw", Qt::CaseInsensitive)) {
++        disc_real_type = "CD-RW";
++    } else {
++        disc_real_type = "CD-R";
++    }
++    /* 设备子类型写入能力校验：xorriso -outdev 查询设备支持的 profile，
++       确保设备支持该介质子类型写入（混合设备：仅 CD-R 写入能力的设备
++       插入 CD-RW 介质时禁止烧录，避免静默失败） */
++    QProcess cap_probe;
++    cap_probe.start("xorriso", QStringList() << "-outdev" << id << "-list_profiles");
++    bool cap_ok = cap_probe.waitForFinished(5000);
++    QString cap_out = QString::fromUtf8(cap_probe.readAllStandardOutput());
++    bool cap_ok_type = false;
++    if (disc_real_type == "CD-RW") {
++        cap_ok_type = re_cdrw.match(cap_out).hasMatch();
++    } else { /* CD-R：须词边界匹配，避免命中 "CD-ROM" */
++        cap_ok_type = re_cdr.match(cap_out).hasMatch();
++    }
++    if (!cap_ok || !cap_ok_type) {
++        label_info->setText(tr("The drive doesn't support writing to this disc type. Burning disabled."));
++        start->setEnabled(false);
++        clean_combobox_speed();
++        return;
++    }
++    /* 空白检测：通过 xorriso -toc 查询光盘是否非空（恢复上游空盘检查行为） */
++    QProcess toc_probe;
++    toc_probe.start("xorriso", QStringList() << "-indev" << id << "-toc");
++    bool toc_ok = toc_probe.waitForFinished(5000);
++    if (!toc_ok) {
++        /* toc 检测失败：保守处理，禁用烧录并提示，避免静默覆盖非空光盘 */
++        label_info->setText(tr("Media status detection failed (xorriso -toc). Burning disabled for safety."));
++        start->setEnabled(false);
++        clean_combobox_speed();
++        return;
++    }
++    QString toc_out = QString::fromUtf8(toc_probe.readAllStandardOutput());
++    /* xorriso -toc 对空白光盘输出 "Media summary: 0 sessions, 0 tracks"，
++       不能匹配 "Track"（会被 "tracks" 子串误判为非空），应匹配 "is blank" */
++    bool disc_not_empty = !toc_out.contains("is blank", Qt::CaseInsensitive);
++    if (disc_not_empty) {
++        if (disc_real_type == "CD-R") {
++            label_info->setText(tr("The CD-R isn't empty. Please insert an empty CD-R/RW disc."));
++        } else {
++            label_info->setText(tr("The CD-RW isn't empty.\nPlease insert an empty CD-R/RW disc or blank the CD-RW with the appropriate AcetoneISO's blanking tool."));
++        }
++        start->setEnabled(false);
++        clean_combobox_speed();
++        return;
++    }
++    label_info->setText(tr("CD-R/RW media available."));
++    /* 速度组合框填充：xorriso -list_speeds 查询设备写入速度（替代 HAL write_speeds 属性） */
++    QProcess speed_probe;
++    speed_probe.start("xorriso", QStringList() << "-outdev" << id << "-list_speeds");
++    bool speed_ok = speed_probe.waitForFinished(5000);
++    if (speed_ok) {
++        QString speed_out = QString::fromUtf8(speed_probe.readAllStandardOutput());
++        QRegularExpression re("(\\d+(?:\\.\\d+)?)x");
++        QRegularExpressionMatchIterator it = re.globalMatch(speed_out);
++        QStringList speeds;
++        while (it.hasNext()) {
++            speeds << it.next().captured(1) + "x";
++        }
++        if (!speeds.isEmpty() && (combo_speed->count() == 0)) {
++            clean_combobox_speed();
++            arraySpeed = speeds;
++            itemRemovedSpeed = arraySpeed.removeDuplicates();
++            int abc = 0;
++            while (abc < arraySpeed.count()) {
++                combo_speed->insertItem(abc, arraySpeed[abc]);
++                abc = abc + 1;
++            }
++        }
++    }
++    start->setEnabled(true);
++    push_select_image->setEnabled(true);
++    label_4->setEnabled(true);
++    iso_to_burn_label->setEnabled(true);
+ }
+ 
+ //cleans combobox speed when something changed, example: user put new cd, changes drive, removes cd
+ void burniso2cd::clean_combobox_speed() {
+   combo_speed->setEnabled(false);
+   int count_combobox = combo_speed->count();
+   int count_cycle = 0;
+   while (count_cycle < count_combobox) {
+     combo_speed->removeItem(count_cycle);
+     count_cycle++;
+@@ -327,22 +274,21 @@
+   //reset array speed
+   arraySpeed.clear();
+   //reset number items removed if duplicates speeds found
+   itemRemovedSpeed= 0;
+   
+ }
+ 
+ 
+ //gestisce quando l'utente cambia periferica nella combobox
+ void burniso2cd::combo_changed(int n) {
+-  int a;
+-  a = n;
++  Q_UNUSED(n);
+   clean_combobox_speed();
+   media_available();
+ }
+ 
+ 
+ //user wants to choose which image to burn
+ void burniso2cd::select_image() {
+   QDir Home = QDir::home();// entro nella home dell'utente
+   QString isoToBurnDialog;
+   isoToBurnDialog = QFileDialog::getOpenFileName(this,tr("Select Image to Burn"), Home.path() , tr("Image Files ISO/CUE/TOC (*.iso *.cue *.toc)"));
+@@ -532,21 +478,21 @@
+   
+     wodim = wodim.append("  \"" + imageToBurn + "\"" ); 
+   }
+   
+  // qDebug() << wodim;
+   
+   erase = new QProcess();
+   erase->setReadChannel(QProcess::StandardOutput);
+   erase->setProcessChannelMode(QProcess::MergedChannels);	
+   //connection to update the display
+-  connect(erase, SIGNAL(readyReadStandardOutput()), SLOT(updateEraseDisplay() )); 
++  connect(erase, SIGNAL(readyReadStandardOutput()), SLOT(updateEraseDisplay())); 
+   connect(erase, SIGNAL(finished(int, QProcess::ExitStatus)), this, SLOT(printOutErase(int, QProcess::ExitStatus)));
+   QDir bin("/usr/bin");
+   QDir::setCurrent( bin.absolutePath() );
+   is_erasing = true;
+ 
+   erase->start(wodim );
+ 
+ 
+ }
+ 
