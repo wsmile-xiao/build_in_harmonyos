@@ -55,7 +55,7 @@ make install
 
 | 软件 | 版本 | 来源 |
 |------|------|------|
-| OpenSSL | 1.1.1w | 本地编译 |
+| OpenSSL | 3.5.6 | Conan 包 (静态链接) |
 | zlib | 系统 | musl |
 
 ## 验证结果
@@ -67,7 +67,6 @@ file ~/usr/local/bin/ssh
 
 # 依赖检查
 readelf -d ~/usr/local/bin/ssh | grep NEEDED
-# Shared library: [libcrypto.so.1.1]
 # Shared library: [libc.so]
 ```
 
@@ -86,3 +85,7 @@ readelf -d ~/usr/local/bin/ssh | grep NEEDED
 1. 运行时需设置 `LD_LIBRARY_PATH` 或将 OpenSSL 库复制到系统库目录
 2. `/var/empty` 目录需手动创建或修改 sshd 配置
 3. 鸿蒙系统执行二进制可能需要特殊权限配置
+---
+
+**编译结束**: 2026-07-22 21:55
+**最终状态**: built
