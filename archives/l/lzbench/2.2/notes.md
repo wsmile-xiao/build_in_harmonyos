@@ -1,7 +1,7 @@
 # lzbench 2.2 — 编译进度
 
 > 档案创建时间: 2026-04-24 00:00:00
-> 最后更新: 2026-04-24 (当前状态)
+> 最后更新: 2026-08-07 (Conan 适配)
 > 当前会话 ID: (可选，用于多轮对话追踪)
 
 ## 一、基本信息
@@ -9,58 +9,50 @@
 |------|-----|
 | 软件 | lzbench |
 | 版本 | 2.2 |
-| 状态 | ⚠️ partial |
+| 状态 | ✅ built |
 | 构建系统 | makefile |
-| 源码路径 | file:///storage/Users/currentUser/tmp/lzbench-2.2.tar.gz |
+| 源码 URL | https://github.com/inikep/lzbench/archive/refs/tags/v2.2.tar.gz |
+| SHA256 | c6b8043d7e0c228c2e8fe18af1ea682a84f1019b8115111861738a0313487201 |
 
 ## 二、编译阶段（checkbox 实时更新）
 
 ### Phase 1: 环境准备
 - [x] ohc-run.py init-build 完成 / 源码下载解压
+- [x] W0 依赖检查: 无外部依赖 (所有压缩库内置)
 
-### Phase 2: 编译（configure + make + make install）
-- [x] configure 完成（记录参数和耗时）
-- [x] make 编译完成（记录错误和修复）
-- [x] make install 完成
+### Phase 2: 编译（make）
+- [x] make CC=clang CXX=clang++ -j1 编译完成
+- [x] 修复 qsort_r 链接错误 (zstd_deps.h + cover.c 排除 __OHOS__)
+- [x] lzbench 二进制生成成功
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [x] 干净源码 + 补丁应用
-- [x] 独立 TEST_PREFIX configure + make install
-- [x] 功能回归测试结果
+### Phase 2.5: 独立目录安装验证
+- [x] 手动复制 lzbench 到 test prefix bin/
 
 ### Phase 3: 测试验证
-- [x] make check / make test 结果
+- [x] lzbench -V 输出版本: lzbench 2.2
+- [x] lzbench -ezstd 压缩/解压功能测试通过
 - [x] 安全弹窗触发确认
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [x] Step 1-10 打包流程（见 packaging.md）
+### Phase 4: Conan 配方
+- [x] conanfile.py 生成 (Makefile 模板, application 类型)
+- [x] conandata.yml (SHA256 + patch 声明)
+- [x] test_package/ (conanfile.py + MANIFEST.yml)
+- [x] commands.json (软件级, tool 类型)
 
 ### Phase 5: 归档收尾
-- [x] 补丁生成（ohc-run.py refresh-patch --auto）
-- [x] manifest.yaml / README.md / PROGRESS.md 更新
-- [x] ohc-run.py verify-build 质量门禁
+- [x] manifest.yaml 更新
+- [x] notes.md / README.md 更新
 
-## 三、对话记录（⭐ 断点续传核心）
-
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #1 — 2026-04-24
-**操作**: 执行 #03 压缩库 B 批量编译任务
-**结果**: ✅ 编译成功，预编译包已生成
-**发现的问题**: 待补充具体问题记录
-**当前状态**: 已完成
-**遗留问题**: 无
-
-## 四、源码修改清单
+## 三、源码修改清单
 | 文件 | 原因 | 方式 | 补丁状态 |
 |------|------|------|---------|
-| 待补充 | - | - | - |
+| lz/zstd/lib/common/zstd_deps.h | qsort_r 链接错误 | 排除 __OHOS__ 从 _GNU_SOURCE 定义 | ✅ 0001-lz-zstd-lib-common-zstd_deps.h.patch |
+| lz/zstd/lib/dictBuilder/cover.c | qsort_r 链接错误 | 排除 __OHOS__ 从 _GNU_SOURCE 定义 | ✅ 0002-lz-zstd-lib-dictBuilder-cover.c.patch |
 
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| lzbench-2.2-ohos-aarch64.tar.gz | 待补充 | 主包 |
+## 四、结束记录
+- **最终状态**: built (Conan 适配完成)
+- **结束时间**: 2026-08-07
+---
 
-## 六、结束记录
-- **最终状态**: partial
-- **结束时间**: 2026-04-24
+**编译结束**: 2026-08-07 03:05
+**最终状态**: built
