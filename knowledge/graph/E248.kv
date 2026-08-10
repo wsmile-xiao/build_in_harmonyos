@@ -1,0 +1,59 @@
+#====================================================================
+# E248 — patch 致 Makefile.in mtime 早于 Makefile.am，触发 automake 重生成
+#====================================================================
+
+id:                     E248
+trigger_tool:           make|automake
+phase:                  compilation
+error_signature:        automake-1\.[0-9]+: command not found|WARNING.*automake.*is missing on your system|Makefile:.*Makefile\.in\].*Error 127|cd.*&&.*missing automake
+
+severity:               2
+category:               autotools|build-system|patch|timestamp
+match_keywords:         automake, command not found, Makefile.in, Makefile.am, missing automake, Error 127, regenerate, timestamp, mtime, patch order
+title:                  patch 致 Makefile.in mtime 早于 Makefile.am，无 automake 时触发重生成崩溃
+
+root_cause:             当 Conan 的 apply_conandata_patches 按 patch 文件内 hunk 顺序应用时，若 Makefile.am 的 hunk 排在 Makefile.in 之后，应用后 Makefile.am 的 mtime 会晚于 Makefile.in。GNU make 的标准依赖规则 Makefile.in: Makefile.am $(am__configure_deps) 据此判定 Makefile.in 过期，调用 build-aux/missing automake-1.16 重生成；而鸿蒙 PC 的 /data/service/hnp/bin 仅有 autoconf 系列而无 automake/aclocal，重生成以 exit 127 失败，连带 make all / make check 崩溃。这与"automake 版本不匹配"(E041/E071)或"编译 automake 自身的循环依赖"(E069)不同：本条是普通 autotools 库在 patch 触及 Makefile.am/Makefile.in 时的 mtime 倒挂问题，设备根本不提供 automake。
+affected_scope:         任何 autotools 库的 conan recipe 用 conandata patch 修改 tests/Makefile.am（或 src/Makefile.am）及其对应已发布 Makefile.in，且目标设备无 automake 的场景。仓内 discount/2.2.7、libmemcached/1.0.18 等已有"patch 已发布 Makefile.in"的先例，但未沉淀该 mtime 副作用。
+verification_cmd:       ls /data/service/hnp/bin/ | grep -E "automake|aclocal"; 确认无输出；在 recipe build() apply_conandata_patches 后 stat -c "%Y %n" 源码 tests/Makefile.am tests/Makefile.in，确认 .in 的 mtime < .am
+
+rec_priority:           1
+rec_approach:           fix-mtime-after-patch
+rec_description:        在 conanfile.py 的 build() 方法中，apply_conandata_patches(self) 之后立即用 os.utime 把 Makefile.in 的 mtime 对齐到 Makefile.am（atime=mtime=Makefile.am 的 mtime_ns），掐断 make 的重生成触发条件。零新增依赖、不碰源码逻辑、不跑 autoreconf，符合"发行包构建不应要求完整 autotool 链"的成熟做法。
+rec_command:            os.utime(makefile_in, ns=(os.stat(makefile_am).st_mtime_ns,)*2)
+rec_auto_fix:           false
+rec_impl:               recipe-build-hook
+
+fallback_priority:      2
+fallback_approach:      reorder-patch-hunks
+fallback_description:   调整 patch 文件内 hunk 顺序，让 Makefile.am 在前、Makefile.in 在后，使 apply 时 .in 晚写。但这依赖 patch_ng 严格按文件内顺序应用，且后续任何 patch 编辑都可能再次倒挂，较脆弱，不推荐单独使用。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       brew install automake|apt.*automake|yum.*automake
+forbid_1_reason:        为单个库安装 automake 扩大了配方对构建工具的依赖面，违反"发行包构建不应要求完整 autotool 链"；且主办方 CI 环境不一定有 automake，会让 PR 在官方 CI 失败。
+forbid_1_consequence:   依赖面扩散，CI 可移植性下降。
+forbid_2_pattern:       autoreconf|--force
+forbid_2_reason:        在无 automake 的设备上跑 autoreconf 同样会 exit 127；且对发布 tarball 跑 autoreconf 会破坏上游冻结的生成物一致性。
+forbid_2_consequence:   构建不可复现，生成物漂移。
+
+principles:             P010,P014
+
+causes:                 []
+caused_by:              []
+similar_to:             E069
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E248.md
+last_updated:           2026-08-06
+source_event:           enchant 2.8.2 round-18 automake-1.16 command not found Error 127；apply_conandata_patches 后 os.utime 修复，round-20 起无复现
+
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:          e81b42ab7c26c1e6207f7b4099d5739ff7c2a6bf
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-08-06

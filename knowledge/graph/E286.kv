@@ -1,0 +1,81 @@
+#====================================================================
+# E216-draft — enzyme LLVM AutoDiff pass/plugin on OHOS SDK LLVM 15
+# 对应的人类文档: graph/draft/E216-draft-enzyme-llvm-sdk-lit-ohos.md (draft)
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR !2786 enzyme 0.0.284 适配 HarmonyOS PC
+# 路径支撑: 路径 A（基础适配申请）+ 路径 B（贡献创新，适配困难库分析报告，10 分候选）+ 路径 C（高难度挑战候选，申请纳入高难库清单，需评审委员会专项终审，最终以官方审核为准）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E286
+trigger_tool:           cmake|clang|ld|lit|ninja
+phase:                  configuration|compilation|linking|testing|runtime
+error_signature:        Library.*LLVMExports.*not found|LLVMDemangle.*not found|symbol not found.*_ZN4llvm|Error relocating.*libLLVMEnzyme|handleBLAS.*undeclared|attributeTablegen.*undeclared|tablegen stub failed|llvm-tblgen.*not found|FileCheck.*not found|lit.*not found|LLVMConfig.cmake.*FATAL_ERROR|add_llvm_library|configure_lit_site_cfg|llvmGetPassPluginInfo
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category: toolchain-llvm-plugin|ohos-sdk-gap|tablegen|lit-testsuite|cmake-exports
+match_keywords: enzyme, LLVMExports, LLVMDemangle, TableGen, tblgen, lit.cfg.py, lit.site.cfg.py, FileCheck, llvm-lit, llvmGetPassPluginInfo, add_llvm_library, add_public_tablegen_target, configure_lit_site_cfg, get_llvm_lit_path, check-enzyme, OHOS SDK LLVM, libLLVM-15.so, plugin, AutoDiff, LLVMConfig.cmake, AddLLVM.cmake, .inc, BlasDerivatives, CallDerivatives, BlasAttributor, BlasTA, BlasDiffUse, InstructionDerivatives, IntrinsicDerivatives, BinopDerivatives
+title: OHOS SDK LLVM 15 缺失完整 LLVM 插件/lit/TableGen 组件，导致 enzyme 等 LLVM pass/plugin 类库无法完整构建与运行上游测试
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: OHOS SDK LLVM 15 (/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/) 仅提供单体共享库 libLLVM-15.so 与基本 clang/lld，但缺失 LLVM AutoDiff 插件类库所需的完整组件：(1) LLVMExports.cmake 引用不存在的 .a stub 文件（LLVMDemangle.a/LLVMSupport.a/LLVMCore.a 等），CMake 在 find_package(LLVM) 时触发 FATAL_ERROR；(2) 无 llvm-tblgen 二进制，导致 Enzyme 的 TableGen 描述（BlasDerivatives.td/CallDerivatives.td 等）无法生成 .inc 文件，编译时 handleBLAS/attributeTablegen 等 undeclared；(3) 无 lit/FileCheck/llvm-lit，上游 1523 个 lit 测试用例无法执行；(4) 单体 libLLVM-15.so 未导出部分 LLVM C++ API 符号（如 llvm::cl::Option::setArgStr），导致 dlopen 加载 Enzyme 插件库时 symbol not found。现有知识库 E120/E132 仅覆盖 lld/libxml2/LD_LIBRARY_PATH 类运行时路径问题，未覆盖 LLVMExports .a stub/LLVMDemangle/TableGen/tblgen/lit/FileCheck/符号导出 的组合问题。
+affected_scope: 所有依赖完整 LLVM 15 CMake 导出（LLVMExports/LLVMConfig）、TableGen/tblgen 代码生成、lit/FileCheck 测试体系、或 LLVM C++ 插件 API 的 LLVM pass/plugin 类库（enzyme、Polly、MLIR plugins 等），在 OHOS SDK LLVM 上构建与测试
+verification_cmd: ls /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib/cmake/llvm/LLVMExports.cmake && ls /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/bin/llvm-tblgen 2>&1; which lit FileCheck llvm-lit 2>&1; nm -D /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib/libLLVM-15.so | grep -c "llvm::cl::Option::setArgStr"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: cmake-overlay-with-stub-tblgen-and-skip-lit
+rec_description: 1) 提供 cmake-overlay/LLVMConfig.cmake 覆盖 OHOS SDK 的 LLVMConfig.cmake，跳过引用不存在 .a stub 的 LLVMExports.cmake，改为创建指向单体 libLLVM-15.so 的 IMPORTED target（LLVM/LLVMDemangle/LLVMSupport/LLVMCore/LLVMTransformUtils/LLVMAnalysis）；2) 提供 cmake-overlay/AddLLVM.cmake stub 实现 tablegen()/add_llvm_library()/add_public_tablegen_target()/configure_lit_site_cfg()/get_llvm_lit_path() 等 Enzyme 构建所需的 LLVM CMake 函数；3) 提供 cmake-overlay/stub-tblgen.sh（需 chmod +x）生成最小 .inc 桩文件，为 BlasDerivatives.inc 提供 return false 的 handleBLAS、为 BlasAttributor.inc 提供 return false 的 attributeTablegen 等，使源码编译通过；4) build() 中跳过 enzyme/test 子目录（lit 测试体系无法在 OHOS 上运行）；5) conanfile.py export_sources/source() 复制 overlay 到源码树，generate() 设 LLVM_DIR 指向 overlay；6) test_package 用 dlopen(libLLVM-15.so, RTLD_GLOBAL) 预加载 LLVM 符号 + dlopen(libLLVMEnzyme-15.so) + dlsym(llvmGetPassPluginInfo) + 实际调用验证插件入口可执行；7) runtime 加载仍可能因单体 .so 未导出部分 C++ 符号而 symbol not found——此为 OHOS SDK LLVM 工具链缺口，记录为路径 C 候选需官方确认。
+rec_command: conan create archives/e/enzyme/0.0.284 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing --user=ohpcd --channel=stable
+rec_auto_fix: false
+rec_impl: documentation
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: provide-pre-generated-inc-files
+fallback_description: 在完整 LLVM 15 环境上用 enzyme-tblgen 预生成 8 个 .inc 文件（BlasDerivatives/CallDerivatives/BinopDerivatives/IntrinsicDerivatives/InstructionDerivatives/BlasAttributor/BlasTA/BlasDiffUse），作为 patches/ 打入源码树，绕过 stub-tblgen.sh 的空桩问题。需外部完整 LLVM 15 工具链，非本仓库可独立完成。
+fallback_command: enzyme-tblgen -o BlasDerivatives.inc BlasDerivatives.td -gen-enzyme-blas-derivatives
+fallback_auto_fix: false
+fallback_impl: patches
+
+# ★ 禁止策略 ★
+forbid_1_pattern: 直接修改 OHOS SDK 目录下只读的 LLVMExports.cmake|强制 ln -sf 覆盖 SDK 文件
+forbid_1_reason: OHOS SDK 安装目录为只读，且直接修改 SDK 文件会污染其他软件的构建环境
+forbid_1_consequence: 写入失败或破坏其他软件构建
+forbid_2_pattern: stub-tblgen.sh 无执行权限|chmod -x stub-tblgen.sh
+forbid_2_reason: stub-tblgen.sh 由 execute_process 调用，无执行权限会触发 "permission denied" 并生成空文件，导致 handleBLAS/attributeTablegen undeclared 编译错误
+forbid_2_consequence: BlasDerivatives.inc/BlasAttributor.inc 为空，编译失败于 CallDerivatives.cpp:2254 与 Utils.cpp:410
+forbid_3_pattern: 把上游 lit 测试写成 100% 通过|勾选"上游无测试"|把 stub .inc 桩写成完整功能
+forbid_3_reason: 上游 enzyme/test 下有 1523 个 lit 测试文件，OHOS SDK 缺 lit/FileCheck/llvm-lit 无法执行；stub .inc 仅返回 false 非真实 BLAS 规则
+forbid_3_consequence: 误判测试通过率，AI Review/CI 审核拒绝
+forbid_4_pattern: test_package dlopen 失败返回 0|只打印 OK 不实际调用 llvmGetPassPluginInfo
+forbid_4_reason: R34 要求 test 必实质依赖被测包；dlopen 失败返回 0 为 false pass
+forbid_4_consequence: R34 违规，CI L1e 破性反向验证兜底失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             
+
+# ═══ 关系图 (Relations) ═══
+causes: []
+caused_by: [E120, E132]
+similar_to: []
+conflicts_with: []
+prerequisite_of: []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E286.md
+last_updated: 2026-07-23
+source_event: PR !2786 enzyme 0.0.284 适配 HarmonyOS PC
+
+# ═══ 知识协作 ═══
+authors: junshi_liu <liujsh2023@lzu.edu.cn>
+source_pr: 2786
+source_commit: c7035c27
+
+# ═══ 质量度量 ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

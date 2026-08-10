@@ -1,0 +1,118 @@
+#====================================================================
+#
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E265
+trigger_tool:           configure|make|test|runtime
+phase:                  testing|runtime
+error_signature: upstream_test_fs_image_compatibility|valgrind_not_available|OHOS_no_valgrind
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos-upstream-test-compatibility
+match_keywords: fatsort,upstream tests,make tests,fsck.vfat,valgrind,grep -oP,locale,LC_ALL,/tmp,erofs,read-only filesystem,testconfig.mk,ASan,UBSan,sanitize,address,undefined,memory check,替代内存检查
+title: OHOS 上运行 Linux 文件系统镜像类上游测试的可写目录、shell、locale 和工具链差异处理方法
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: OHOS 的 /tmp 是 erofs 只读文件系统，上游测试硬编码 /tmp 路径导致 mkdir 失败；缺少 dosfstools/valgrind；grep 不支持 -oP；locale 排序规则与 Linux 不同；无 valgrind 时不能伪造 valgrind 测试通过
+affected_scope: 所有使用 testconfig.mk 且依赖 /tmp 可写、bash、valgrind、dosfstools、grep -oP 和 en_US.UTF-8 locale 的 Linux 文件系统镜像类上游测试
+verification_cmd: make -C <test_dir> SHELL=/data/service/hnp/bin/bash TMPDIR=<writable_dir> FS_IMG=<writable_dir>/fs.img FATSORT=<path_to_fatsort> LC_ALL=C
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach: 1) 覆盖 SHELL/TMPDIR/FS_IMG 绕过 /tmp 只读限制；2) 用 sed -nE 替代 grep -oP；3) 无 valgrind 时用 clang ASan/UBSan（-fsanitize=address,undefined）替代内存检查，单独统计通过率，不能伪造 valgrind 通过；4) 设置 LC_ALL=C 匹配 OHOS locale；5) 在 OHOS 上重新生成 expected 输出文件
+rec_description: |
+  OHOS 的 /tmp 是 erofs 只读文件系统，所有硬编码 /tmp 路径的上游测试需通过 TMPDIR/FS_IMG 覆盖到可写目录；
+  SHELL 需覆盖为 OHOS 上存在的 bash 路径；grep -oP 需替换为 sed -nE；
+  valgrind 专用测试（如 tc_pos_valgrind_*）在 OHOS 无可用 valgrind 时必须标记为 skip，禁止伪造通过；
+  替代内存检查使用 clang 的 -fsanitize=address,undefined（ASan+UBSan），需按以下步骤验证：
+  a) 确认 sanitizer runtime 存在：libclang_rt.asan.so / libclang_rt.asan.a、libclang_rt.ubsan_standalone.so / libclang_rt.ubsan_standalone.a
+  b) 最小 ASan/UBSan 程序编译+运行通过
+  c) fatsort 以 -fsanitize=address,undefined 构建成功
+  d) 确认二进制包含 ASan/UBSan 符号（readelf -s | grep -i asan 等）
+  e) fatsort -v / -h 运行通过
+  f) 注意：该验证为编译+smoke 验证，未覆盖真实数据流；需单独统计，不能与上游测试通过率合并
+  locale 需设置为 C 并重新生成 expected 输出
+rec_command: |
+  # 1. 验证 sanitizer runtime
+  ls /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib/clang/15.0.4/libclang_rt.asan.*
+  ls /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib/clang/15.0.4/libclang_rt.ubsan_standalone.*
+  # 2. 最小 ASan/UBSan 程序
+  echo 'int main() { int a[10]; a[20] = 42; return 0; }' | /data/service/hnp/bin/clang -x c - -fsanitize=address,undefined -o /storage/Users/currentUser/tmp/test_asan
+  /storage/Users/currentUser/tmp/test_asan 2>&1 | grep -q 'heap-buffer-overflow' && echo 'ASan OK'
+  # 3. 构建 fatsort with ASan/UBSan
+  make -C src CC=/data/service/hnp/bin/clang LD=/data/service/hnp/bin/clang CFLAGS="-fPIC -O2 -D__LINUX__ -fsanitize=address,undefined" LDFLAGS="-fsanitize=address,undefined"
+  # 4. 确认符号
+  readelf -s src/fatsort | grep -i asan
+  # 5. 运行验证
+  src/fatsort -v
+  src/fatsort -h
+  # 6. 运行上游测试（除 valgrind 外）
+  make tests SHELL=/data/service/hnp/bin/bash TMPDIR=/storage/Users/currentUser/tmp FS_IMG=/storage/Users/currentUser/tmp/fs.img FATSORT=../src/fatsort LC_ALL=C
+rec_auto_fix:           true|false                  # 引擎能否自动执行
+rec_impl:               impl-name                   # 内置实现名 (见 DESIGN §5)
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern: valgrind.*通过|valgrind.*pass|valgrind.*PASS|tc_pos_valgrind.*PASS
+forbid_1_reason: OHOS 当前无可用 valgrind，禁止将 valgrind 专用测试（tc_pos_valgrind_*）标记为通过；必须标记为 skip 并如实记录
+forbid_1_consequence: 欺骗审核，导致 CI 审计失败；PR 被拒绝并可能影响参赛资格
+forbid_2_pattern: 125/125|100%通过.*(上游|upstream)|上游.*无测试
+forbid_2_reason: 上游有 125 个测试，4 个 valgrind 专用测试因 OHOS 无 valgrind 跳过，实际通过率应为 121/125（96.8%），不能写 125/125 或 100%
+forbid_2_consequence: 测试统计口径不真实，违反积分赛 PR 模板规则
+forbid_3_pattern: ASan.*取代.*valgrind|ASan.*替代.*valgrind.*通过|替代内存检查.*100%.*上游|替代内存检查.*1/1
+forbid_3_reason: ASan/UBSan 替代验证是单独的编译+镜像验证，需覆盖 4 个 FAT 文件系统镜像（exFAT/FAT12/FAT16/FAT32）并分别统计为 4/4，不能与上游测试通过率合并；旧统计口径 1/1 仅覆盖 -v/-h smoke，需升级为 4/4 覆盖真实数据流
+forbid_3_consequence: 统计口径不完整，审核不通过
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E265.md
+last_updated: 2026-07-20
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: junshi_liu <liujsh2023@lzu.edu.cn>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:

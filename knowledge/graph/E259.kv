@@ -1,0 +1,59 @@
+#====================================================================
+# E259 — Conan Release 的 -DNDEBUG 让 assert(副作用表达式) 不求值
+#====================================================================
+
+id:                     E259
+trigger_tool:           make|test|cc|cxx
+phase:                  testing
+error_signature:        assertion.*self != NULL.*failed|assertion.*[a-z_]+ != NULL.*failed|Critical.*assertion.*failed|FAIL:.*[0-9]+ out of [0-9]+ tests failed
+
+severity:               2
+category:               build-system|testing|ndebug|assert|conan-release|upstream-latent-bug
+match_keywords:         NDEBUG, assert, side effect, g_module_symbol, Conan Release, build_type Release, assertion failed, self NULL, latent bug, unchecked return, conditional compilation
+title:                  Conan Release 的 -DNDEBUG 让 assert(含副作用的表达式) 整体不求值，触发上游 latent bug
+
+root_cause:             上游代码用 assert(EXPR) 包裹了一个有副作用的表达式（如 assert(g_module_symbol(h, "sym", (gpointer*)&p)))），本意是"断言成功的同时完成取符号赋值"。但 Conan 的 AutotoolsToolchain 在 build_type=Release 时注入 -DNDEBUG，C/C++ 标准下 assert(EXPR) 展开为 ((void)0)，EXPR 根本不求值——于是赋值/调用从未发生，p 保持未初始化，后续逻辑静默走错分支或读到垃圾值。这类 bug 在上游裸 make check（无 NDEBUG）下永远不会触发，故属 latent bug；只有 Conan Release 或其它显式 -DNDEBUG 构建才会暴露。调试特征：测试大面积失败（数百个）、但编译/链接全过、失败模式集中在某个初始化路径返回 NULL 或空，且 set_configure / hook 注册类调用"看似没执行"。
+affected_scope:         任何用 Conan Release（-DNDEBUG）构建、且上游存在 assert(含赋值/函数调用等副作用的表达式) 的 C/C++ 项目。常见于用 assert 同时做"检查+初始化"的测试夹具、注册回调、dlsym/g_module_symbol 取符号等场景。上游在普通 Linux 发行版（不带 NDEBUG 跑测试）下永远不会暴露。
+verification_cmd:       在 recipe build() 或测试编译命令里确认含 -DNDEBUG（grep -n DNDEBUG build-release/tests/Makefile）；对可疑 assert 行写最小 C 程序验证：assert((side_effect())) 编译加 -DNDEBUG 后 side_effect 是否执行。
+
+rec_priority:           1
+rec_approach:           hoist-side-effect-out-of-assert
+rec_description:        把 assert(含副作用的表达式) 拆成两步：先把表达式求值存入局部变量，再 assert 该变量的结果。这样 NDEBUG 下断言虽被去除，但副作用（赋值/调用）仍执行。修改落在测试夹具或上游源码的对应行，用最小 source patch 实现，不改变测试 oracle、不跳过测试、不预置答案。
+rec_command:            gboolean ok = g_module_symbol(h, "set_configure", (gpointer*)&sc); assert(ok);
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      disable-ndebug-for-tests
+fallback_description:   仅当上游 assert 副作用遍布、无法逐处拆分时，在 recipe 的测试编译阶段去掉 -DNDEBUG（如 AutotoolsToolchain 的 CXXFLAGS 移除 NDEBUG，或给 make check 单独传 -UNDEBUG）。但这改变了 Release 构建的测试语义，偏离上游真实 Release 行为，仅作退路。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       skip.*test|disable.*test|return 0.*OHOS
+forbid_1_reason:        测试失败暴露的是上游 latent bug 的真实触发，删除或空壳化测试会伪造通过，掩盖 Release 构建下的真实风险。
+forbid_1_consequence:   Release 制品在断言路径上的初始化缺陷完全未验证。
+forbid_2_pattern:       #define NDEBUG 0|#undef NDEBUG.*production
+forbid_2_reason:        在生产源码里全局取消 NDEBUG 会改变 Release 构建语义、带来性能与行为差异，且掩盖上游设计缺陷而非修复它。
+forbid_2_consequence:   Release/Debug 行为分叉，性能回退，缺陷被长期掩盖。
+
+principles:             P010,P014
+
+causes:                 []
+caused_by:              []
+similar_to:
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E259.md
+last_updated:           2026-08-06
+source_event:           enchant 2.8.2 round-22/23 main.test 256/474 失败（enchant_dict_add assertion self != NULL）；根因为 -DNDEBUG 让 assert(g_module_symbol(...)) 副作用消失；拆分为 gboolean ok=EXPR; assert(ok) 后 round-24 起 474/474 全 PASS
+
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:          e81b42ab7c26c1e6207f7b4099d5739ff7c2a6bf
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-08-06
