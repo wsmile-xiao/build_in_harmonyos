@@ -120,13 +120,11 @@ cat $TEST_PREFIX/$DEFAULT_PREFIX/lib/pkgconfig/OpenCL.pc
 
 1. **Headers 版本适配**: 使用替换的 Headers 时，必须将 `CL_TARGET_OPENCL_VERSION` 设置为至少 200（OpenCL 2.0）或更高版本，否则会出现类型定义冲突。
 2. **平台限制**: 鸿蒙平台缺少 `secure_getenv` 函数，ICD Loader 已使用回退方案（non-secure getenv），不影响核心功能，但可能在多用户环境下存在安全风险。
-3. **CMake 平台配置**: 平台未知警告（Platform/HarmonyOS），建议长期改进：创建 Platform/HarmonyOS 配置文件。
+3. **CMake 平台配置**: 平台未知警告（Platform/HarmonyOS），建议长期改进：创建 Platform/HarmonyOS 配置文件。---
 
+**编译结束**: 2026-08-07 06:45
+**最终状态**: built
 ---
 
-**编译结束**: 2026-06-16 11:35:00
-**最终状态**: published
----
-
-**编译结束**: 2026-06-16 11:37
+**编译结束**: 2026-08-07 06:49
 **最终状态**: built
