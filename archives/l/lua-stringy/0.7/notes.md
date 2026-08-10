@@ -1,60 +1,46 @@
 # lua-stringy 0.7 适配笔记
 
 ## 编译环境
-- 构建系统: makefile
-- 编译日期: 2026-06-10
+- 构建系统: custom (direct compiler invocation)
+- 编译日期: 2026-08-07
 - 编译器: clang/clang++
 - 状态: built
 
 ## 编译步骤
 
-1. 从 GitHub 下载源码: https://github.com/mdeneen/lua-stringy/archive/master.tar.gz
-2. 解压源码到 ~/builds/lua-stringy-0.7.work
-3. 手动编译:
-   - 设置 Lua 头文件路径: -I~/usr/local/include
-   - 编译: clang -c -O3 -Wall -Werror -fPIC -I~/usr/local/include stringy.c
-   - 链接: clang -shared stringy.o -L~/usr/local/lib -llua -o stringy.so
-4. 安装到 staging: ~/test-install-lua-stringy-0.7/usr/local/lib/lua/5.4/stringy.so
-5. 安装到本地: ~/usr/local/lib/lua/5.4/stringy.so
-6. 创建预编译包: lua-stringy-0.7-ohos-aarch64.tar.gz
+1. 从 GitHub 下载 v0.7-0 tag 源码: https://github.com/mdeneen/lua-stringy/archive/v0.7-0.tar.gz
+2. 源码结构: 解压后源码在 stringy/ 子目录
+3. 使用 conan 依赖 lua/5.4.8 (提供 liblua.a 带 -fPIC 和头文件)
+4. 下载 lua 5.4.8 源码, 编译 lua 解释器 (lua.c 链接 conan liblua.a)
+5. 编译 stringy.c: clang -c -O3 -Wall -Werror -fPIC -I<lua_inc> -o stringy.o stringy/stringy.c
+6. 链接 stringy.so: clang -shared stringy.o -L<lua_lib> -llua -lm -ldl -o stringy.so
+7. ELF 签名 (OHOS)
+8. 打包: lib/lua/5.4/stringy.so + bin/lua (测试用)
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | pkg-config 找不到 lua | Lua 5.4.7 安装时没有生成 lua.pc 文件 | 手动设置 LUA_CFLAGS |
-| 2 | 链接时缺少 luaL_checkversion_ 符号 | 链接时没有指定 Lua 库 | 在链接命令中添加 -llua |
-| 3 | 测试代码有错误 | 测试代码本身的问题 | 不影响编译，记录即可 |
+| 1 | lua/5.4.8 conan 包没有解释器二进制 | conan 配方只打包 liblua.a 和头文件 | 从源码编译 lua 解释器 (lua.c) |
+| 2 | lua/5.5.0 liblua.a 没有 -fPIC | lua/5.5.0 conan 配方未添加 -fPIC | 改用 lua/5.4.8 (有 -fPIC) |
+| 3 | stringy.so 链接需要 liblua.a | lld 不允许未定义符号 | 链接 conan liblua.a |
+| 4 | join() 在 Lua 5.4 下失败 | luaL_buffinit 压入 userdata, lua_gettop 多算 1 | 补丁: 将 lua_gettop 移到 luaL_buffinit 之前 |
 
-## 源码修改
+## 补丁
 
-无补丁文件，直接编译。
+- 0001-fix-join-lua54-buffinit-stack.patch: 修复 join() 在 Lua 5.4 下的兼容性问题
 
 ## 依赖版本
 
-- lua: 5.4.7 (已预编译)
+- lua: 5.4.8 (conan 制品仓)
 - clang: 15.0.4
 
 ## 验证结果
 
-```bash
-# 测试预编译包
-lua -e "local stringy = require 'stringy'; print(stringy.strip('  test  '))"
-# 输出: test
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| lua-stringy-0.7-ohos-aarch64.tar.gz | 30KB | 预编译包 |
-
-## 注意事项
-
-1. lua-stringy 使用 Makefile 构建，不是 autotools
-2. 需要手动设置 Lua 头文件和库路径
-3. Lua 5.4.7 需要预先安装
+- conan create: ✅ 通过
+- test_package: ✅ 全部测试通过 (37 个断言, 7 个函数)
+- W3 本地 CI 模拟: ✅ 通过
 
 ---
-**编译结束**: 2026-06-10 10:38
+**编译结束**: 2026-08-07
 **最终状态**: built
