@@ -39,5 +39,5 @@
 - HMDFS umask 077 限制: 需要将 autotools configure 中的 umask 077 改为 umask 022
 ---
 
-**编译结束**: 2026-05-28 11:30
+**编译结束**: 2026-08-06 22:13
 **最终状态**: built
