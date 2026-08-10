@@ -5,7 +5,7 @@
 - 编译日期: 2026-05-21
 - 编译器: clang 15.0.4 / clang++
 - 平台: aarch64-unknown-linux-ohos
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -67,5 +67,5 @@ libjemalloc_pic.a   5,307,064 bytes
 3. **make check 跳过**: 测试套件可能超时，建议在 notes.md 记录跳过原因
 ---
 
-**编译结束**: 2026-05-21 00:14
+**编译结束**: 2026-08-06 22:00
 **最终状态**: built
