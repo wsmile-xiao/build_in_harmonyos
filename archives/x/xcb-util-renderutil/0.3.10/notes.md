@@ -93,5 +93,5 @@ pkg-config --modversion xcb-renderutil
 3. 路径中包含`/storage/Users/currentUser`，RUNPATH需要与此路径一致
 ---
 
-**编译结束**: 2026-06-05 17:11
+**编译结束**: 2026-08-09 03:22
 **最终状态**: built
