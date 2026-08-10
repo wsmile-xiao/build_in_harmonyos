@@ -35,7 +35,7 @@ lua-tableshape 是一个纯 Lua 模块，无需编译步骤：
 
 ## 依赖版本
 
-- Lua: 5.4.7
+- Lua: 5.4.8
 - 无其他依赖
 
 ## 验证结果
@@ -69,9 +69,5 @@ shape{name="Jane", age="twenty"} → ✅ 正确拒绝
 - 安装路径：$PREFIX/share/lua/5.4/tableshape/
 
 ---
-**编译结束**: 2026-06-09 15:58
-**最终状态**: built
----
-
-**编译结束**: 2026-06-09 15:58
-**最终状态**: built
+**编译结束**: 2026-08-07 02:28
+**最终状态**: built (conan recipe added)
