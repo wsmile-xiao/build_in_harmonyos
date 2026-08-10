@@ -207,7 +207,7 @@ endif()''',
         self._replace_if_present(
             harness,
             '        add_test(${name} ${driver_exe_name} "${name}")\n',
-            '        add_test(${name} ${driver_exe_name} "${name}")\n        set_tests_properties("${name}" PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})\n',
+            '        add_test(${name} ${driver_exe_name} "${name}")\n        set_tests_properties("${name}" PROPERTIES WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR})\n',
         )
         self._replace_if_present(
             cal,
