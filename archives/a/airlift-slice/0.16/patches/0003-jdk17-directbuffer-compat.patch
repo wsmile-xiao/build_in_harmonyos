@@ -1,0 +1,74 @@
+--- a/src/main/java/io/airlift/slice/JvmUtils.java
++++ b/src/main/java/io/airlift/slice/JvmUtils.java
+@@ -54,12 +54,30 @@
+             assertArrayIndexScale("Float", ARRAY_FLOAT_INDEX_SCALE, 4);
+             assertArrayIndexScale("Double", ARRAY_DOUBLE_INDEX_SCALE, 8);
+ 
+-            // fetch a method handle for the hidden constructor for DirectByteBuffer
++            // fetch a method handle for the hidden constructor for DirectByteBuffer.
++            // JDK 8 exposes DirectByteBuffer(long, int, Object); JDK 9+ removed that
++            // ctor, so on newer JDKs we fall back to the 2-arg private JNI ctor
++            // DirectByteBuffer(long, int) and drop the Object attachment argument via
++            // MethodHandles.dropArguments. Direct memory reclamation on JDK 9+ is
++            // handled by DirectByteBuffer internal Cleaner, so dropping the explicit
++            // attachment is safe.
+             Class<?> directByteBufferClass = ClassLoader.getSystemClassLoader().loadClass("java.nio.DirectByteBuffer");
+-            Constructor<?> constructor = directByteBufferClass.getDeclaredConstructor(long.class, int.class, Object.class);
++            Constructor<?> constructor;
++            try {
++                constructor = directByteBufferClass.getDeclaredConstructor(long.class, int.class, Object.class);
++            }
++            catch (NoSuchMethodException e) {
++                constructor = directByteBufferClass.getDeclaredConstructor(long.class, int.class);
++            }
+             constructor.setAccessible(true);
+-            newByteBuffer = MethodHandles.lookup().unreflectConstructor(constructor)
+-                    .asType(MethodType.methodType(ByteBuffer.class, long.class, int.class, Object.class));
++            MethodHandle raw = MethodHandles.lookup().unreflectConstructor(constructor);
++            if (constructor.getParameterCount() == 3) {
++                newByteBuffer = raw.asType(MethodType.methodType(ByteBuffer.class, long.class, int.class, Object.class));
++            }
++            else {
++                MethodHandle typed = raw.asType(MethodType.methodType(ByteBuffer.class, long.class, int.class));
++                newByteBuffer = MethodHandles.dropArguments(typed, 2, Object.class);
++            }
+         }
+         catch (Exception e) {
+             throw new RuntimeException(e);
+--- a/pom.xml
++++ b/pom.xml
+@@ -70,6 +70,34 @@
+     <build>
+         <plugins>
+             <plugin>
++                <groupId>org.apache.maven.plugins</groupId>
++                <artifactId>maven-surefire-plugin</artifactId>
++                <configuration>
++                    <argLine>--add-opens java.base/java.nio=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED</argLine>
++                </configuration>
++            </plugin>
++            <plugin>
++                <groupId>org.apache.maven.plugins</groupId>
++                <artifactId>maven-compiler-plugin</artifactId>
++                <configuration>
++                    <compilerArgs>
++                        <arg>--add-exports</arg>
++                        <arg>java.base/jdk.internal.misc=ALL-UNNAMED</arg>
++                    </compilerArgs>
++                </configuration>
++            </plugin>
++            <plugin>
++                <groupId>org.apache.maven.plugins</groupId>
++                <artifactId>maven-jar-plugin</artifactId>
++                <configuration>
++                    <archive>
++                        <manifestEntries>
++                            <Add-Opens>java.base/java.nio java.base/java.lang java.base/jdk.internal.misc java.base/sun.nio.ch</Add-Opens>
++                        </manifestEntries>
++                    </archive>
++                </configuration>
++            </plugin>
++            <plugin>
+                 <groupId>com.mycila</groupId>
+                 <artifactId>license-maven-plugin</artifactId>
+                 <configuration>
