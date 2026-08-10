@@ -1,19 +1,9 @@
-# spdlog 1.17.0 — OpenHarmony 编译记录
+# spdlog
 
-## 基本信息
-- 软件: spdlog
-- 版本: 1.17.0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+高性能 C++ 日志库：多种 sink、可定制 pattern、异步模式。
 
-## 编译指导
-<!-- 编译注意事项 -->
+格式化交给 fmt。本配方以**外部 fmt** 构建（非自带副本）。
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+- 上游：https://github.com/gabime/spdlog
+- 许可证：MIT
+- 鸿蒙 PC 适配版本：见各版本目录
