@@ -2,7 +2,7 @@
 
 ## 编译环境
 - 构建系统: autotools
-- 编译日期: 2026-06-02
+- 编译日期: 2026-08-05
 - 编译器: clang/clang++
 - 状态: built
 
@@ -10,44 +10,30 @@
 
 1. 初始化编译环境
 ```bash
-python3 $SKILL_ROOT/scripts/ohc-run.py init-build apcupsd 3.14.14 --url=https://mirrors.tuna.tsinghua.edu.cn/debian/pool/main/a/apcupsd/apcupsd_3.14.14.orig.tar.gz
+python3 $SKILL_ROOT/scripts/ohc-run.py init-build apcupsd 3.14.14 --url=https://downloads.sourceforge.net/project/apcupsd/apcupsd%20-%20Stable/3.14.14/apcupsd-3.14.14.tar.gz
 ```
 
-2. 平台适配（替换旧的 config.guess/config.sub）
-```bash
-cp ~/builds/xinit-1.4.4.work/config.guess autoconf/
-cp ~/builds/xinit-1.4.4.work/config.sub autoconf/
-```
+2. 应用补丁（config.guess/config.sub, configure, apcexec.c）
 
-3. 解决 HMDFS 临时文件问题
+3. 解决 HMDFS 临时文件问题（补丁 0003-configure.patch）
 ```bash
-# 创建临时目录
 mkdir -p .tmp && chmod 1777 .tmp
-
-# 修改 configure 使用 .tmp 目录
-sed -i 's|mktemp -d "./confXXXXXX"|mktemp -d ".tmp/confXXXXXX"|' configure
-sed -i '14063s|tmp=./conf$$-$RANDOM|tmp=.tmp/conf$$-$RANDOM|' configure
-
-# 关键：去掉 umask 077（HMDFS 限制）
-sed -i 's|(umask 077 && mktemp -d ".tmp/confXXXXXX")|mktemp -d ".tmp/confXXXXXX"|' configure
-sed -i 's|(umask 077 && mkdir "\$tmp")|mkdir "$tmp"|' configure
+# configure 补丁已处理 mktemp 路径和 umask 077
 ```
 
 4. 配置和编译
 ```bash
 export CC=clang CXX=clang++
-./configure --prefix=$DEFAULT_PREFIX
+export SHUTDOWN=/bin/poweroff
+export PATH=$DEFAULT_PREFIX/bin:$PATH  # wall/mail/man/col wrappers
+./configure --prefix=$DEFAULT_PREFIX --sbindir=${exec_prefix}/sbin --sysconfdir=${prefix}/etc/apcupsd
+# 修复 variables.mak（configure 会覆盖补丁）
 make -j1
 ```
 
 5. 安装
 ```bash
-# DESTDIR 模式
-make install DESTDIR=$TEST_PREFIX
-
-# 本地安装（验证）
-make install
-$DEFAULT_PREFIX/sbin/apcupsd --version
+make install DESTDIR=$TEST_PREFIX STRIP=
 ```
 
 ## 遇到的问题与解决方案
@@ -55,46 +41,48 @@ $DEFAULT_PREFIX/sbin/apcupsd --version
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | HMDFS 临时文件权限问题 | autotools 使用 `./confXXXXXX`，HMDFS SELinux 限制 | 使用 `.tmp` 目录 + 去掉 umask 077 |
-| 2 | config.guess 无法识别 HarmonyOS | 2014 版本过旧，补丁脚本失败 | 替换为已工作的 config.guess |
-| 3 | pthread_cancel 未声明 | HarmonyOS 不支持 pthread_cancel | 添加 `#ifndef __OHOS__` 条件编译 |
-| 4 | sbindir 硬编码为 /sbin | apcupsd 特殊配置 | 修改 variables.mak 使用 ${exec_prefix}/sbin |
-| 5 | HALPOLICYDIR 硬编码为 /usr/share/hal | 系统目录权限问题 | 修改为 ${datadir}/hal/fdi/policy/20thirdparty |
-| 6 | man/col 命令不存在 | 文档生成依赖缺失 | 创建空的 man 文档文件 |
+| 2 | config.guess 无法识别 HarmonyOS | 2014 版本过旧 | 替换为支持 HarmonyOS 的版本 |
+| 3 | pthread_cancel 未声明 | HarmonyOS 不支持 pthread_cancel | 添加 `#ifdef HAVE_PTHREAD_CANCEL` 功能检测宏（R8 合规） |
+| 4 | sbindir 硬编码为 /sbin | apcupsd configure 特殊逻辑 | 传 `--sbindir` 参数 + configure 后修改 variables.mak |
+| 5 | HALPOLICYDIR 硬编码 | 系统目录权限问题 | 修改为 ${datadir}/hal/fdi/policy/20thirdparty |
+| 6 | man/col 命令不存在 | 文档生成依赖缺失 | 创建 man/col wrapper 脚本 |
+| 7 | configure 需要 shutdown 命令 | HarmonyOS 无 shutdown | 设 `SHUTDOWN=/bin/poweroff` 环境变量 |
+| 8 | configure 需要 wall/mail 命令 | HarmonyOS 无 wall/mail | 创建 wrapper 脚本 |
+| 9 | STRIP=llvm-strip 导致 install 失败 | install 命令将 strip 程序名当参数 | make install STRIP= 覆盖 |
+| 10 | configure 覆盖 variables.mak | configure 从模板重新生成 | configure 后重新修改 sbindir/HALPOLICYDIR |
 
 ## 源码修改
 
-**5 个补丁文件**：
+**4 个补丁文件**：
 1. `0001-autoconf-config.guess.patch` - 替换为支持 HarmonyOS 的版本
 2. `0002-autoconf-config.sub.patch` - 替换为支持 linux-ohos 的版本
-3. `0003-autoconf-variables.mak.patch` - 修正 sbindir/sysconfdir/HALPOLICYDIR 路径
-4. `0004-configure.patch` - HMDFS 临时文件修复（使用 .tmp 目录）
-5. `0005-src-lib-apcexec.c.patch` - pthread_cancel 条件编译
+3. `0003-configure.patch` - HMDFS 临时文件修复（使用 .tmp 目录）
+4. `0004-src-lib-apcexec.c.patch` - pthread_cancel 功能检测宏（`#ifdef HAVE_PTHREAD_CANCEL`，R8 合规）
+
+> 注：variables.mak 的 sbindir/sysconfdir 修复在 conanfile.py 的 `_fix_variables_mak()` 方法中处理，
+> 因为 configure 会从 variables.mak.in 重新生成 variables.mak，覆盖任何补丁。
 
 ## 依赖版本
 
 - clang 15.0.4
 - make 4.4.1
 - autoconf 2.72
-- automake 1.17
 
 ## 验证结果
 
 ```bash
-$ ~/usr/local/sbin/apcupsd --version
+$ apcupsd --version
 apcupsd 3.14.14 (31 May 2016) unknown
-
-$ file ~/usr/local/sbin/apcupsd
-ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1), not stripped
 ```
 
 ## 交付物
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| apcupsd | 783KB | UPS 电源管理守护进程 |
-| apcaccess | 115KB | UPS 状态访问工具 |
-| apctest | 839KB | UPS 测试工具 |
-| smtp | 58KB | SMTP 邮件发送工具 |
+| 文件 | 说明 |
+|------|------|
+| apcupsd | UPS 电源管理守护进程 |
+| apcaccess | UPS 状态访问工具 |
+| apctest | UPS 测试工具 |
+| smtp | SMTP 邮件发送工具 |
 
 ## 注意事项
 
@@ -108,18 +96,22 @@ ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1), not st
 1. 使用源码目录内的 `.tmp` 目录（与源码同 SELinux 上下文）
 2. **去掉 `umask 077`**，使用默认权限（`drwxrws--x`）
 
-**补丁位置**：configure 脚本第 14059-14063 行
+### pthread_cancel 功能检测（R8 合规）
 
-### pthread_cancel 平台限制
-
-HarmonyOS 不支持 `pthread_cancel`，需要条件编译绕过：
+HarmonyOS/musl 不支持 `pthread_cancel`，通过功能检测宏 `HAVE_PTHREAD_CANCEL` 条件编译：
 ```c
-#ifndef __OHOS__
-pthread_cancel(thread_id[i]);
+#ifdef HAVE_PTHREAD_CANCEL
+         pthread_cancel(thread_id[i]);
 #endif
 ```
+conanfile.py 在 build() 中通过编译测试检测 `pthread_cancel` 是否可用，可用时定义 `HAVE_PTHREAD_CANCEL`。
+
+### configure 覆盖 variables.mak
+
+apcupsd 的 configure 从 `variables.mak.in` 模板重新生成 `variables.mak`，会覆盖任何预先应用的补丁。
+需要在 conanfile.py 的 `build()` 方法中，在 configure 之后修改生成的 `variables.mak`。
 
 ---
 
-**编译结束**: 2026-06-02 18:09
+**编译结束**: 2026-08-05
 **最终状态**: built
