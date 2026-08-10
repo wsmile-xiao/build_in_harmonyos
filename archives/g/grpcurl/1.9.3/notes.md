@@ -87,12 +87,11 @@ cp grpcurl ~/usr/local/bin/grpcurl
 ~/usr/local/bin/grpcurl --version → grpcurl 1.9.3 ✅
 ~/usr/local/bin/grpcurl --help → 正常输出 ✅
 file ~/usr/local/bin/grpcurl → ELF executable, 64-bit LSB arm64, static, stripped ✅
-```
----
-
-**编译结束**: 2026-06-01 18:39
-**最终状态**: built
----
+```---
 
 **编译结束**: 2026-06-01 18:41
+**最终状态**: published
+---
+
+**编译结束**: 2026-08-10 01:45
 **最终状态**: published
