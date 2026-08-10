@@ -94,5 +94,5 @@ make install DESTDIR=$TEST_PREFIX
 - **二进制验证**: OptiPNG version 7.9.1，使用 libpng 1.6.48 和 zlib 1.3.1-optipng
 ---
 
-**编译结束**: 2026-04-25 23:41
-**最终状态**: partial
+**编译结束**: 2026-08-07 07:21
+**最终状态**: built
