@@ -4,13 +4,13 @@
 - Software: qt5-qtimageformats
 - Version: 5.15.2
 - Build System: qmake
-- Qt5 Prefix: /storage/Users/currentUser/usr/local/Qt5
+- Qt5 Dependency: qt5-qtbase/5.15.2.1
 
 ## Build Steps
-1. Set Qt5 environment (PATH, QTDIR)
-2. qmake qtimageformats.pro (in source directory)
-3. make -j2
-4. make install (installs to Qt5 prefix)
+1. Source: qtimageformats-everywhere-src-5.15.2.tar.xz from Qt mirror
+2. qmake qtimageformats.pro (using qmake from qt5-qtbase)
+3. make -j4 QMAKE_STRIP="" (prevent stripping, OHOS rejects stripped ELF)
+4. Package: copy plugins and cmake configs
 
 ## Installed Files
 - plugins/imageformats/libqtga.so
@@ -25,16 +25,21 @@
 - lib/cmake/Qt5Gui/Qt5Gui_QICNSPlugin.cmake
 
 ## Configure Summary
-- TIFF: yes (built-in)
-- WEBP: yes (built-in)
+- TIFF: yes (bundled libtiff)
+- WEBP: yes (bundled libwebp)
+- TGA: yes (built-in)
+- WBMP: yes (built-in)
+- ICNS: yes (requires regularexpression, provided by Qt5Core)
 - JasPer: no
 - MNG: no
 
 ## Notes
 - Qt5 addon module using qmake build system
+- Depends on qt5-qtbase/5.15.2.1 for qmake tool, Qt5Core, Qt5Gui
 - No patches needed for HarmonyOS/OHOS build
-- Source obtained via git clone
+- Bundled 3rdparty libtiff and libwebp are used (no external system dependencies)
+- QMAKE_STRIP="" to prevent stripping (OHOS loader rejects stripped ELF files)
 ---
 
-**编译结束**: 2026-05-31 01:42
+**编译结束**: 2026-08-08 03:57
 **最终状态**: built
