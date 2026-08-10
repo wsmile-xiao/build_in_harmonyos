@@ -12,6 +12,7 @@ SIPp is a traffic generator and test tool for the SIP protocol. The recipe build
 - Disabled options: SSL, PCAP, SCTP, GSL, static linking, ASAN
 - Private build dependency: ncurses 6.5 is downloaded and built inside the SIPp build folder to satisfy SIPp's required curses UI linkage without submitting a second Conan recipe in this PR.
 - Conan smoke test: runs `sipp -v` from the packaged binary, accepts SIPp's documented informational exit code `99` (`EXIT_OTHER`), and verifies that the emitted banner still contains SIPp help/version text rather than assuming a single exact output line.
+- Upstream unit tests: the recipe depends on `gtest/1.17.0`, builds the upstream `sipp_unittest` target, registers it as a CTest case, and runs `ctest --output-on-failure` so the 53 upstream TEST cases are verified in the OHOS build.
 
 ## OpenHarmony notes
 

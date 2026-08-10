@@ -21,9 +21,13 @@ class SippConan(ConanFile):
     package_type = "application"
 
     settings = "os", "compiler", "build_type", "arch"
+    generators = "CMakeDeps"
 
     def layout(self):
         cmake_layout(self)
+
+    def requirements(self):
+        self.requires("gtest/1.17.0")
 
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
@@ -42,6 +46,11 @@ class SippConan(ConanFile):
         tc.variables["USE_GSL"] = "OFF"
         tc.variables["BUILD_STATIC"] = False
         tc.variables["USE_ASAN"] = False
+        tc.variables["SIPP_USE_CONAN_GTEST"] = "ON"
+        if "gtest" in self.dependencies:
+            tc.variables["GTEST_GMOCK_LIBRARY"] = os.path.join(
+                self.dependencies["gtest"].cpp_info.libdirs[0], "libgmock.a"
+            )
 
         ncurses_prefix = self._ncurses_prefix()
         include_dir = os.path.join(ncurses_prefix, "include")
@@ -59,10 +68,71 @@ class SippConan(ConanFile):
             'if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS") AND TINFO_LIBRARY)',
             strict=False,
         )
+        replace_in_file(
+            self,
+            cmake_lists,
+            """if(EXISTS ${PROJECT_SOURCE_DIR}/gtest/googletest)
+  add_sipp_target(sipp_unittest
+    EXCLUDE_FROM_ALL
+    SOURCES "${PROJECT_SOURCE_DIR}/src/sipp_unittest.cpp"
+            "${PROJECT_SOURCE_DIR}/gtest/googletest/src/gtest-all.cc"
+            "${PROJECT_SOURCE_DIR}/gtest/googlemock/src/gmock-all.cc"
+    COMPILE_DEFINITIONS "-DGTEST"
+    EXTRA_INCLUDES ${PROJECT_SOURCE_DIR}/gtest/googletest
+                   ${PROJECT_SOURCE_DIR}/gtest/googlemock
+                   ${PROJECT_SOURCE_DIR}/gtest/googletest/include
+                   ${PROJECT_SOURCE_DIR}/gtest/googlemock/include
+  )
+else()
+  add_sipp_target(sipp_unittest
+    EXCLUDE_FROM_ALL
+    SOURCES "${PROJECT_SOURCE_DIR}/src/sipp_unittest.cpp"
+  )
+endif()""",
+            """if(SIPP_USE_CONAN_GTEST)
+  find_package(gtest REQUIRED)
+  add_sipp_target(sipp_unittest
+    EXCLUDE_FROM_ALL
+    SOURCES "${PROJECT_SOURCE_DIR}/src/sipp_unittest.cpp"
+    COMPILE_DEFINITIONS "-DGTEST"
+  )
+  target_link_libraries(sipp_unittest PRIVATE gtest::gtest)
+  if(GTEST_GMOCK_LIBRARY)
+    target_link_libraries(sipp_unittest PRIVATE "${GTEST_GMOCK_LIBRARY}")
+  endif()
+elseif(EXISTS ${PROJECT_SOURCE_DIR}/gtest/googletest)
+  add_sipp_target(sipp_unittest
+    EXCLUDE_FROM_ALL
+    SOURCES "${PROJECT_SOURCE_DIR}/src/sipp_unittest.cpp"
+            "${PROJECT_SOURCE_DIR}/gtest/googletest/src/gtest-all.cc"
+            "${PROJECT_SOURCE_DIR}/gtest/googlemock/src/gmock-all.cc"
+    COMPILE_DEFINITIONS "-DGTEST"
+    EXTRA_INCLUDES ${PROJECT_SOURCE_DIR}/gtest/googletest
+                   ${PROJECT_SOURCE_DIR}/gtest/googlemock
+                   ${PROJECT_SOURCE_DIR}/gtest/googletest/include
+                   ${PROJECT_SOURCE_DIR}/gtest/googlemock/include
+  )
+else()
+  add_sipp_target(sipp_unittest
+    EXCLUDE_FROM_ALL
+    SOURCES "${PROJECT_SOURCE_DIR}/src/sipp_unittest.cpp"
+  )
+endif()
+
+if(TARGET sipp_unittest)
+  enable_testing()
+  add_test(NAME sipp_unittest COMMAND sipp_unittest)
+endif()""",
+            strict=False,
+        )
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        self.run("ctest -N", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
+        if "gtest" in self.dependencies:
+            cmake.build(target="sipp_unittest")
+            self.run("ctest --output-on-failure", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
+        else:
+            self.run("ctest -N", cwd=self.build_folder, env=["conanbuild"], ignore_errors=False)
 
     def _ncurses_prefix(self):
         return os.path.join(self.build_folder, "_private_ncurses")
