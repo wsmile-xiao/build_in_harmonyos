@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(polyml_static_consumer LANGUAGES CXX)
+find_package(polyml CONFIG REQUIRED)
+add_executable(polyml_static_consumer test_static.cpp)
+target_compile_features(polyml_static_consumer PRIVATE cxx_std_17)
+target_link_libraries(polyml_static_consumer PRIVATE polyml::polyml)
