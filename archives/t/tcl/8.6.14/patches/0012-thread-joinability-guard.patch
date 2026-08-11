@@ -1,0 +1,107 @@
+--- pkgs/thread2.8.9/generic/threadCmd.c	2026-07-31 15:28:04.818349220 +0800
++++ pkgs/thread2.8.9/generic/threadCmd.c	2026-07-31 16:04:50.550349376 +0800
+@@ -126,6 +126,7 @@
+ #define THREAD_FLAGS_STOPPED       1      /* Thread is being stopped */
+ #define THREAD_FLAGS_INERROR       2      /* Thread is in error */
+ #define THREAD_FLAGS_UNWINDONERROR 4      /* Thread unwinds on script error */
++#define THREAD_FLAGS_JOINABLE      8      /* Thread was created with -joinable */
+
+ #define THREAD_RESERVE             1      /* Reserves the thread */
+ #define THREAD_RELEASE             2      /* Releases the thread */
+@@ -143,6 +144,17 @@
+
+ static struct ThreadSpecificData *threadList = NULL;
+
++/* Registry of thread IDs created with -joinable.  Entries persist after the
++ * thread exits (the pthread remains joinable until joined), so ThreadJoin
++ * can tell a valid joinable thread from an invalid/non-joinable handle
++ * without calling Tcl_JoinThread on garbage.
++ */
++typedef struct JoinableThread {
++    Tcl_ThreadId id;
++    struct JoinableThread *nextPtr;
++} JoinableThread;
++static JoinableThread *joinableThreads = NULL;
++
+ /*
+  * Used to represent the empty result.
+  */
+@@ -1802,7 +1814,8 @@
+     ctrl.cd = Tcl_GetAssocData(interp, "thread:nsd", NULL);
+     ctrl.script   = (char *)script;
+     ctrl.condWait = NULL;
+-    ctrl.flags    = 0;
++    ctrl.flags    = (flags & TCL_THREAD_JOINABLE)
++                   ? THREAD_FLAGS_JOINABLE : 0;
+
+     Tcl_MutexLock(&threadMutex);
+     if (Tcl_CreateThread(&thrId, NewThread, &ctrl,
+@@ -1831,6 +1844,13 @@
+         tsdPtr->refCount++;
+     }
+
++    if (flags & TCL_THREAD_JOINABLE) {
++        JoinableThread *jtPtr = (JoinableThread*)ckalloc(sizeof(JoinableThread));
++        jtPtr->id = thrId;
++        jtPtr->nextPtr = joinableThreads;
++        joinableThreads = jtPtr;
++    }
++
+     Tcl_MutexUnlock(&threadMutex);
+     Tcl_ConditionFinalize(&ctrl.condWait);
+
+@@ -1902,6 +1922,7 @@
+ #endif
+
+     tsdPtr->interp = interp;
++    tsdPtr->flags  = ctrlPtr->flags;
+
+     Tcl_MutexLock(&threadMutex);
+
+@@ -2367,13 +2388,45 @@
+     Tcl_ThreadId thrId         /* Thread ID of other interpreter. */
+ ) {
+     int ret, state;
++    JoinableThread *jtPtr, **jtPrevPtr;
++    char thrHandle[THREAD_HNDLMAXLEN];
++
++    /*
++     * Guard against joining invalid, already-released, or non-joinable
++     * threads.  Calling Tcl_JoinThread() on such threads is undefined
++     * behaviour and crashes on some platforms (e.g. OHOS pthread).
++     */
++
++    /*
++     * A live thread that is in the list but was not created with
++     * -joinable must not be joined (Tcl_JoinThread on a detached/
++     * non-joinable thread is undefined behaviour and crashes on
++     * some platforms).  Threads that already exited are removed
++     * from the list; for them we defer to Tcl_JoinThread, which
++     * is safe for joinable threads.
++     */
++    Tcl_MutexLock(&threadMutex);
++    jtPtr = joinableThreads;
++    jtPrevPtr = &joinableThreads;
++    while (jtPtr != NULL && jtPtr->id != thrId) {
++        jtPrevPtr = &jtPtr->nextPtr;
++        jtPtr = jtPtr->nextPtr;
++    }
++    if (jtPtr == NULL) {
++        Tcl_MutexUnlock(&threadMutex);
++        ThreadGetHandle(thrId, thrHandle);
++        Tcl_AppendResult(interp, "cannot join thread ", thrHandle, NULL);
++        return TCL_ERROR;
++    }
++    *jtPrevPtr = jtPtr->nextPtr;
++    Tcl_MutexUnlock(&threadMutex);
++    ckfree((char*)jtPtr);
+
+     ret = Tcl_JoinThread(thrId, &state);
+
+     if (ret == TCL_OK) {
+         Tcl_SetIntObj(Tcl_GetObjResult (interp), state);
+     } else {
+-        char thrHandle[THREAD_HNDLMAXLEN];
+         ThreadGetHandle(thrId, thrHandle);
+         Tcl_AppendResult(interp, "cannot join thread ", thrHandle, NULL);
+     }
