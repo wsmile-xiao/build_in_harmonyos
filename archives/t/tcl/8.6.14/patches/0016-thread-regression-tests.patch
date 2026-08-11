@@ -1,0 +1,71 @@
+--- tests/thread.test	2024-01-25 03:26:26.000000000 +0800
++++ tests/thread.test	2026-08-01 17:33:38.001062500 +0800
+@@ -1444,6 +1444,40 @@
+     unset -nocomplain ::threadCount ::execCount ::threads ::thread
+ } -result {}
+ 
++# Regression test for patches 0013-0015: child interp static Thread load.
++# A worker thread creates a child interp which must resolve
++# "package require -exact Thread 2.8.9" through the static bridge
++# (Tcl_StaticPackage + package ifneeded load {} Thread). The worker
++# reports completion back; the primary thread waits with a bounded
++# loop (no bare vwait) so a regression fails naturally instead of
++# hanging the whole test suite.
++test thread-7.38 {static child interp Thread load: worker + interp create + require -exact} \
++	-constraints {thread} -setup {
++    unset -nocomplain ::childThreadResult
++} -body {
++    set mainid [thread::id]
++    set worker [thread::create -joinable [string map [list %MAIN% $mainid] {
++	set i [interp create]
++	set code [catch {$i eval {package require -exact Thread 2.8.9}} msg]
++	set present [$i eval {package present Thread}]
++	thread::send -async %MAIN% [list set ::childThreadResult [list $code $present $msg]]
++	thread::release
++    }]]
++    # bounded wait: never a bare vwait
++    set deadline [expr {[clock milliseconds] + 10000}]
++    while {![info exists ::childThreadResult] && [expr {[clock milliseconds] < $deadline}]} {
++	update
++	after 20
++    }
++    thread::join $worker
++    if {![info exists ::childThreadResult]} {
++	return -code error "worker did not report completion (child interp static Thread load regression)"
++    }
++    set ::childThreadResult
++} -cleanup {
++    unset -nocomplain ::childThreadResult
++} -result {0 2.8.9 2.8.9}
++
+ # cleanup
+ ::tcltest::cleanupTests
+-return
++return
+\ No newline at end of file
+
+--- pkgs/thread2.8.9/tests/thread.test	2026-08-01 17:31:55.037063594 +0800
++++ pkgs/thread2.8.9/tests/thread.test	2026-08-01 17:33:58.001063125 +0800
+@@ -1221,5 +1221,20 @@
+     list $c1 $c2 $r1 $r2
+ } {1 0 {condition variable is in use} {}}
+ 
++
++# Regression test for patch 0012: ThreadJoin protection for invalid
++# handles and double join. Must return safe errors, never SIGSEGV.
++test thread-4.6 {thread::join - invalid handle and double join (0012 regression)} {
++    ThreadReap
++    # invalid thread handle: safe error
++    set r1 [catch {thread::join 123456789} m1]
++    # -joinable normal join
++    set tid [thread::create -joinable {set x 5}]
++    set c1 [thread::join $tid]
++    # double join: second join fails safely
++    set r2 [catch {thread::join $tid} m2]
++    ThreadReap
++    list $r1 [lrange $m1 0 2] $c1 $r2 [lrange $m2 0 2]
++} {1 {invalid thread handle} 0 1 {cannot join thread}}
+ removeFile dummyForTransfer
+-::tcltest::cleanupTests
++::tcltest::cleanupTests
+\ No newline at end of file
