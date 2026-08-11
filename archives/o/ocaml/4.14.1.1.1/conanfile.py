@@ -17,7 +17,7 @@ from conan.tools.files import get, copy, apply_conandata_patches, export_conanda
 
 class OcamlConan(ConanFile):
     name = "ocaml"
-    version = "4.14.1.1"
+    version = "4.14.1.1.1"
     description = "OCaml is a functional, statically-typed language from the ML family"
     license = "LGPL-2.1"
     homepage = "https://ocaml.org"
@@ -125,3 +125,12 @@ class OcamlConan(ConanFile):
         self.cpp_info.libs = ["camlrun", "asmrun"]
         self.cpp_info.libdirs = ["lib/ocaml"]
         self.cpp_info.includedirs = ["lib/ocaml"]
+        # 声明 bindirs：下游通过 env="conanbuild" 即可自动获得 ocaml bin 路径
+        # （ocamlc/ocamlrun/ocamlopt 等），无需手动注入
+        self.cpp_info.bindirs = ["bin"]
+        # 显式将 ocaml bin 追加到下游构建环境 PATH（Conan 2 兼容）
+        self.env_info.PATH.append(os.path.join(self.package_folder, "bin"))
+        # 声明 stublibs：下游运行字节码程序（ocamlrun）需加载 C stubs 动态库
+        # （dllunix.so/dllthreads.so/dllcamlstr.so），CAML_LD_LIBRARY_PATH 指向 stublibs
+        self.env_info.CAML_LD_LIBRARY_PATH.append(
+            os.path.join(self.package_folder, "lib", "ocaml", "stublibs"))
