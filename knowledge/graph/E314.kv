@@ -1,0 +1,69 @@
+# E314 - HarmonyOS setitimer(ITIMER_PROF) 初始延迟异常导致 Rprof 空事件，回退 RPE_ELAPSED
+
+id:                     E314
+trigger_tool:           R|runtime|test
+phase:                  runtime
+error_signature:        no events were recorded|Rprof_memory_summary|Error in Rprof_memory_summary
+
+severity:               2
+category:               runtime-capability|harmonyos|setitimer|ITIMER_PROF|sigprof|rprof
+match_keywords:         no events were recorded, Rprof_memory_summary, setitimer, ITIMER_PROF, SIGPROF, RPE_CPU, RPE_ELAPSED, ProfileThread, initial delay, empty profile, ITIMER_PROF, profiling, R_InitProfiling
+
+root_cause:             R 默认使用 RPE_CPU 采样事件，通过 setitimer(ITIMER_PROF) 周期触发 SIGPROF 进行 CPU 性能采样。在 HarmonyOS 上，该定时器存在初始延迟异常：请求 0.02s 的 it_value 实际被内核置为约 1.4s，首个 SIGPROF 远晚于典型 profiling 工作负载的结束时刻，导致采样事件数为 0。属于平台运行时能力差异，不是测试本身或数值功能损坏。
+
+affected_scope:         所有在 HarmonyOS 上运行 Rprof memory profiling 的场景；上游测试 tests/reg-tests-2.R 中的 Rprof 回归测试块。
+
+verification_cmd:       R -e 'Rprof(tf=tempfile(), interval=0.02, memory.profiling=TRUE); replicate(20, {x<-rnorm(1e4); y<-lm(x~rnorm(1e4))}); Rprof(NULL); p<-summaryRprof(tf); cat("events:", length(p$by.self$sample.interval), "\n")'
+
+rec_priority:           1
+rec_approach:           probe-detect-fallback
+rec_description:        在 R_InitProfiling 中、signal(SIGPROF, doprof) 之后增加能力探测：以请求 interval 设置 ITIMER_PROF 后立即 getitimer 回读；若回读 it_value 大于请求值 10 倍（p_got > p_set * 10），判定定时器异常，将 R_Profiling_Event 改为 RPE_ELAPSED 走既有 ProfileThread（pthread_kill(SIGPROF)）路径；探测完成后清零定时器，不残留状态。补丁 0008。
+rec_command:            cd $R_HOME && patch -p1 < archives/r/r-base/4.5.1/patches/0008-rprof-memory-profiling-cpu-fallback.patch && make -j4 && make install DESTDIR=$TEST_PREFIX
+rec_auto_fix:           true
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      skip-rprof-test-block
+fallback_description:   仅当能力探测补丁无法应用时，将 Rprof memory profiling 测试块标记为 expected failure 或条件跳过，但必须记录跳过原因并保留其余 reg-tests-2.R 测试块完整执行。
+fallback_command:       conditional_skip="Rprof memory profiling block skipped: ITIMER_PROF initial delay anomaly on OHOS"
+fallback_auto_fix:      false
+fallback_impl:          test-gate
+
+forbid_1_pattern:       skip entire reg-tests-2.R
+forbid_1_reason:        reg-tests-2.R 包含数百个独立测试块，跳过整文件会丢失绝大多数上游回归覆盖。
+forbid_1_consequence:   PR 审查会拒绝因单个 Rprof 块失败而跳过全文件的证据。
+
+forbid_2_pattern:       prewrite Rprof output file
+forbid_2_reason:        预写输出使测试虚假通过，不反映实际采样能力。
+forbid_2_consequence:   掩盖平台能力差异，后续真实 profiling 场景仍会失败。
+
+forbid_3_pattern:       accept empty events as pass
+forbid_3_reason:        Rprof_memory_summary 抛出 "no events were recorded" 是显式失败信号，不能视为 OK。
+forbid_3_consequence:   测试框架返回非零退出码，CI 判定 FAIL。
+
+# Layer 4: 原则引用
+principles:
+
+# 关系图
+causes:
+caused_by:
+similar_to:             E176
+conflicts_with:
+prerequisite_of:
+
+# 元数据
+doc_file:               doc/E314.md
+last_updated:           2026-08-09
+source_event:           r-base 4.5.1 Round 16 Rprof memory profiling 空事件
+
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-09
+
+
+
