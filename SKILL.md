@@ -698,7 +698,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-commit
 ```
 
-提交前自动检查 L0a-L0i（conanfile 语法/sha256/test源码/test()方法/MANIFEST/patch格式/环境变量依赖/Go-Rust检测）。
+提交前自动检查 L0a-L0q（conanfile 语法/sha256/test源码/test()方法/MANIFEST/patch格式/环境变量依赖/Go-Rust检测/外部curl下载/settings完整性/exports_sources完整性）。
 
 ### CI 脚本（ci/ 目录，由 Buildbot Worker 执行，纯 shell，无 AI）
 

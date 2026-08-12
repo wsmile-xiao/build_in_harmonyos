@@ -1218,6 +1218,69 @@ PYEOF
             done
         fi
 
+        # ── L5: SONAME 质量门禁 (防 IMPORTED_NO_SONAME + DT_SONAME 缺失) ──
+        # 三条规则（基于 SONAME 存量扫描报告，覆盖 23 个已知缺陷）：
+        # L5a: 可链接共享库必须有 DT_SONAME 且为相对路径
+        # L5b: DT_NEEDED 条目禁止绝对路径或 ../ 开头
+        # L5c: 包内 *.cmake 禁止 IMPORTED_NO_SONAME.*TRUE
+        if [ -n "$PKG_CACHE" ] && [ -d "$PKG_CACHE" ]; then
+            L5_SONAME_ERRS=0
+
+            # L5a+L5b: ELF 扫描（仅 lib/ 一级目录，排除插件子目录）
+            if [ -n "$LIBS" ] && [ -d "$LIBS" ]; then
+                for so_file in "$LIBS"/lib*.so(N); do
+                    [ -f "$so_file" ] || continue
+                    # 排除插件：在 lib/ 子目录中（lib/plugins/, lib/modules/ 等）的不检查
+                    so_dir="${so_file:h}"
+                    if [ "$so_dir" != "$LIBS" ]; then
+                        continue
+                    fi
+
+                    so_basename="${so_file:t}"
+                    # 跳过 INTERFACE 库的空 stub .so（极少数情况）
+                    [ ! -s "$so_file" ] && continue
+
+                    # readelf -d 提取 SONAME 和 NEEDED
+                    ELF_INFO=$(readelf -d "$so_file" 2>/dev/null || true)
+
+                    # L5a: 检查 DT_SONAME
+                    SONAME_VAL=$(echo "$ELF_INFO" | grep '(SONAME)' | sed 's/.*\[\(.*\)\].*/\1/' || true)
+                    if [ -z "$SONAME_VAL" ]; then
+                        echo "[fail] L5a: ${so_basename} 缺少 DT_SONAME — 下游链接器无法按 SONAME 寻址"
+                        echo "       文件: ${so_file#${PKG_CACHE}}"
+                        echo "[hint]  在 CMakeLists.txt 中设置 set_target_properties(... PROPERTIES SOVERSION x.y)"
+                        L5_SONAME_ERRS=$((L5_SONAME_ERRS + 1))
+                    elif echo "$SONAME_VAL" | grep -q '^/' 2>/dev/null; then
+                        echo "[fail] L5a: ${so_basename} 的 DT_SONAME 是绝对路径: ${SONAME_VAL}"
+                        L5_SONAME_ERRS=$((L5_SONAME_ERRS + 1))
+                    fi
+
+                    # L5b: 检查 DT_NEEDED 禁止绝对路径或 ../
+                    BAD_NEEDED=$(echo "$ELF_INFO" | grep '(NEEDED)' | sed 's/.*\[\(.*\)\].*/\1/' | grep -E '^/|^\.\./' || true)
+                    if [ -n "$BAD_NEEDED" ]; then
+                        echo "[fail] L5b: ${so_basename} 的 DT_NEEDED 含绝对/相对路径: ${BAD_NEEDED}"
+                        echo "       文件: ${so_file#${PKG_CACHE}}"
+                        L5_SONAME_ERRS=$((L5_SONAME_ERRS + 1))
+                    fi
+                done
+            fi
+
+            # L5c: cmake 文件禁止 IMPORTED_NO_SONAME TRUE
+            CMAKE_BAD=$(grep -rl 'IMPORTED_NO_SONAME.*TRUE\|IMPORTED_NO_SONAME.*True\|IMPORTED_NO_SONAME.*true' "${PKG_CACHE}" --include='*.cmake' 2>/dev/null || true)
+            if [ -n "$CMAKE_BAD" ]; then
+                CMAKE_COUNT=$(echo "$CMAKE_BAD" | wc -l)
+                echo "[fail] L5c: ${CMAKE_COUNT} 个 .cmake 文件含 IMPORTED_NO_SONAME TRUE — 下游必须按完整路径链接"
+                echo "$CMAKE_BAD" | head -5 | sed "s|^|       |"
+                L5_SONAME_ERRS=$((L5_SONAME_ERRS + 1))
+            fi
+
+            if [ "$L5_SONAME_ERRS" -gt 0 ]; then
+                echo "[fail] L5: SONAME quality gate failed (${L5_SONAME_ERRS} errors)"
+                L5_RESULT="fail"
+                L5_DETAIL="soname_gate_failed"
+            fi
+        fi
+
         # ── L1e: 破坏性反向验证 (R34: test 必须实质依赖被测包) ──
         # 原理: 将被测包产物替换为损坏版本，重新 conan test (重新编译+链接+运行)
         #   仍 PASS = 假测试 (test 不依赖被测包)
