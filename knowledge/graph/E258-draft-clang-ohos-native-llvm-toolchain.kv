@@ -1,0 +1,120 @@
+#====================================================================
+# E258-draft — OHOS 真机原生构建 llvm-project/clang 工具链组合适配
+# 对应人类文档: 见 PR !3868 / Issue Path B（不随仓库根目录提交 Issue 文稿）
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR !3868 clang 22.1.8 适配 HarmonyOS PC
+#====================================================================
+
+id:                     E258
+trigger_tool:           cmake|ninja|clang|ld|conan|package|test
+phase:                  configuration|compilation|linking|installation|testing|runtime
+error_signature:        Unable to determine platform|
+                         config.guess: unable to guess system type|
+                         get_host_triple|
+                         undefined reference to .*crtbegin|
+                         clang_rt\.(crtbegin|crtend)|
+                         libclang_rt\.builtins|
+                         error: unable to find library -lc\+\+|
+                         Permission denied.*\.so|
+                         Operation not permitted.*exec|
+                         file too large|408MB|
+                         OHOS_SDK_LLVM_ROOT.*not a directory|
+                         No SDK clang resource dir
+
+severity:               3
+category:               toolchain|cmake|llvm|clang|packaging|sdk-runtime|signing
+match_keywords:         clang, llvm-project, LLVM_ENABLE_PROJECTS, config.guess,
+                         Platform/HarmonyOS.cmake, CMAKE_SYSTEM_NAME, tblgen,
+                         LLVM_BUILD_LLVM_DYLIB, clang_rt.crtbegin, libclang_rt.builtins,
+                         libc++_shared.so, OHOS_SDK_LLVM_ROOT, binary-sign-tool,
+                         aarch64-unknown-linux-ohos, resource-dir, LLVM_INCLUDE_TESTS
+title:                  OHOS 真机原生构建 clang/llvm 工具链需组合处理平台识别、SDK 运行时捆绑与签名
+
+root_cause: >
+  在 HarmonyOS PC 真机上从 llvm-project 原生构建可分发的 clang 工具链时，失败不是
+  单一补丁能覆盖的孤立 bug，而是一组相互耦合的平台约束：
+  (1) 设备 uname=HarmonyOS，LLVM 自带 config.guess / get_host_triple 失败；仅设
+  -DLLVM_HOST_TRIPLE 挡不住 config-ix.cmake 的无条件调用。
+  (2) CMake 无 Platform/HarmonyOS 模块会 FATAL；若为“修平台”而设置
+  CMAKE_SYSTEM_NAME=HarmonyOS，则会把构建变成交叉编译，tblgen 主机工具链崩溃。
+  (3) 仅 -DLLVM_ENABLE_PROJECTS=clang 且不编 runtimes 时，安装树缺 crtbegin/crtend/
+  builtins；自编 clang 无法完整链接 C/C++，必须从 OHOS SDK 动态发现并捆绑
+  clang_rt 与 libc++_shared.so 到包内 resource-dir/lib。
+  (4) 静态链接的 clang 可执行体积可达数百 MB，触发制品仓单文件上限，需
+  LLVM_BUILD_LLVM_DYLIB + LLVM_LINK_LLVM_DYLIB。
+  (5) OHOS XPM 要求对 bin/ ELF 与 lib/*.so 做 binary-sign-tool 自签，否则
+  dlopen/exec 报 Permission denied。
+  既有条目分别覆盖 autotools config.guess（E007/E160）或一般 CMake 平台识别，
+  未把「LLVM 真机原生 + 不设 SYSTEM_NAME + SDK clang_rt 动态捆绑 + dylib 瘦身 +
+  ELF 签名」写成可复用的组合方案。
+
+affected_scope: >
+  在 OHOS 真机上从源码构建/打包 clang、llvm、flang、lld 等 llvm-project 工具链，
+  以及任何“自编 Clang 驱动但依赖 SDK compiler-rt/libcxx 才能完整链接”的配方。
+
+verification_cmd: >
+  conan create archives/c/clang/22.1.8 --build=missing;
+  test_package: clang --version && clang test.c -o t && ./t &&
+  clang++ test.cpp -o tpp && ./tpp
+
+rec_priority:           1
+rec_approach:           composite-ohos-native-llvm-clang-toolchain
+rec_description: >
+  按组合方案处理，而不是逐个打孤立补丁：stub 覆盖 LLVM config.guess 输出
+  aarch64-unknown-linux-ohos；注入 Platform/HarmonyOS.cmake（include Platform/Linux）
+  但保持 native（不设 CMAKE_SYSTEM_NAME）；开启 LLVM dylib 以满足体积上限；
+  package 阶段用 OHOS_SDK_LLVM_ROOT 或 glob 发现 SDK，动态选择 lib/clang/<ver>/
+  下含 aarch64-linux-ohos 的资源目录，捆绑 crt/builtins + libc++_shared.so，缺失则
+  ConanException；对 bin/ 与 lib/ ELF 统一 binary-sign-tool 自签；上游 lit 因
+  runtime 版本错配/musl/超时等技术原因豁免，以 test_package 真实编译链接运行为
+  R34 验证。
+rec_command: >
+  # build: stub config.guess + CMAKE_MODULE_PATH=.../Platform/HarmonyOS.cmake
+  #        -DLLVM_ENABLE_PROJECTS=clang -DLLVM_BUILD_LLVM_DYLIB=ON
+  #        -DLLVM_LINK_LLVM_DYLIB=ON -DLLVM_INCLUDE_TESTS=OFF
+  #        -DLLVM_PARALLEL_LINK_JOBS=4  (and ninja -j6)
+  # package: discover SDK llvm + clang_rt dir; copy crt/builtins/libc++_shared.so;
+  #          binary-sign-tool sign -selfSign 1 for bin ELF and lib/*.so
+  # test: test_package 3/3 (version + C + C++)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-composite
+
+fallback_priority:      2
+fallback_approach:      require-OHOS_SDK_LLVM_ROOT-only
+fallback_description: >
+  若 Worker 上 ohos-sdk* 目录布局不可 glob，则强制要求 OHOS_SDK_LLVM_ROOT，
+  未设置或非目录时立即 ConanException，禁止静默产出缺 runtime 的工具链包。
+fallback_command:       export OHOS_SDK_LLVM_ROOT=/path/to/ohos/native/llvm
+fallback_auto_fix:      false
+fallback_impl:          env-gate
+
+forbid_1_pattern:       Set CMAKE_SYSTEM_NAME=HarmonyOS to \"fix\" Platform detection for llvm-project native build
+forbid_1_reason:        Triggers CMAKE_CROSSCOMPILING and breaks native tblgen build/run on device
+forbid_1_consequence:   Configure/build FATAL or host tblgen cannot execute generated files
+
+forbid_2_pattern:       Hardcode ohos-sdk_X.Y.Z.W or lib/clang/15.0.4 without discovery|Silently skip missing clang_rt when packaging clang
+forbid_2_reason:        SDK upgrades break fixed paths; silent skip yields unlinkable toolchain that still \"builds\"
+forbid_2_consequence:   CI green but consumers cannot link C/C++ with packaged clang
+
+forbid_3_pattern:       Enable full check-clang/check-llvm on OHOS CI without same-tree compiler-rt and glibc assumptions
+forbid_3_reason:        Toolchain-slim recipe bundles SDK clang_rt (often 15.x) under clang 22 + musl; lit assumes monorepo + glibc
+forbid_3_consequence:   Systemic lit failures unrelated to OHOS packaging, and CI wall-clock beyond 10800s
+
+principles:             P014, P016, P020
+similar_to:             E007, E160, E100, E214
+conflicts_with:
+prerequisite_of:        castxml, cling, enzyme, flang-ohos
+
+doc_file:
+last_updated:           2026-08-04
+source_event:           archives/c/clang/22.1.8
+
+authors:                yanjiaxin
+source_pr:              OpenHarmonyPCDeveloper/build_in_harmonyos!3868
+source_commit:          985b2b0c
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-08-04
