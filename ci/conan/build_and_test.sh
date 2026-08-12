@@ -587,13 +587,13 @@ PYEOF
         if echo "${CI_BRANCH}" | grep -q -- "${EXPECTED_TAG}"; then
             echo "        [ok] L0n: branch '${CI_BRANCH}' contains '${EXPECTED_TAG}'"
         else
-            echo "[warn] L0n: branch name mismatch (R40) — 当前仅提示，不阻断构建"
+            echo "[error] L0n: branch name mismatch (R40) — 分支名不包含 包名-版本号"
             echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
             echo "[hint] 分支名应包含 包名-版本号，例如："
             echo "         feat/${pkg_name}-${pkg_ver}"
             echo "         fix/${pkg_name}-${pkg_ver}"
             echo "         ${pkg_name}-${pkg_ver}"
-            echo "[hint] ⚠️ 2026-07-29 起此检查将升级为强制失败，请尽快修改分支名"
+            L0_FAILED=true
         fi
     fi
 
@@ -614,6 +614,51 @@ PYEOF
     echo "[ok] L0: All quality gate checks passed"
     L0_RESULT="pass"
     L0_DETAIL="all checks passed"
+
+    # ── Knowledge graph quality check (KC) ──
+    # 运行知识库质量门禁（纯 shell，CI-safe）
+    # 检查草稿泄漏、模板占位符、auto_fix 格式、非标准字段、index 一致性
+    if [ -f "${REPO_ROOT}/ci/scripts/knowledge_check.sh" ]; then
+        echo ""
+        echo "[step] KC: Knowledge graph quality check..."
+        if bash "${REPO_ROOT}/ci/scripts/knowledge_check.sh" "${REPO_ROOT}" 2>&1; then
+            echo "        [ok] KC: knowledge check passed"
+        else
+            echo "[fail] KC: knowledge check failed — blocking build"
+            L0_RESULT="fail"
+            L0_DETAIL="knowledge_check failed"
+            echo "L0_RESULT=${L0_RESULT}: ${L0_DETAIL}"
+            echo "L1_RESULT=skip: blocked_by_KC"
+            echo "L2_RESULT=skip: blocked_by_KC"
+            echo "L4_RESULT=skip: blocked_by_KC"
+            echo "L5_RESULT=skip: blocked_by_KC"
+            FAILED=$((FAILED + 1))
+            FAILED_PKGS+=("${pkg_name}/${pkg_ver} (KC gate)")
+            continue
+        fi
+    fi
+
+    # ── Junk file check (JC) ──
+    # 拦截运行时状态文件、二进制产物、源码 tarball、临时构建产物
+    if [ -f "${REPO_ROOT}/ci/scripts/junk_check.sh" ]; then
+        echo ""
+        echo "[step] JC: Junk file check..."
+        if bash "${REPO_ROOT}/ci/scripts/junk_check.sh" "${REPO_ROOT}" 2>&1; then
+            echo "        [ok] JC: no junk files detected"
+        else
+            echo "[fail] JC: junk files detected — blocking build"
+            L0_RESULT="fail"
+            L0_DETAIL="junk_check failed"
+            echo "L0_RESULT=${L0_RESULT}: ${L0_DETAIL}"
+            echo "L1_RESULT=skip: blocked_by_JC"
+            echo "L2_RESULT=skip: blocked_by_JC"
+            echo "L4_RESULT=skip: blocked_by_JC"
+            echo "L5_RESULT=skip: blocked_by_JC"
+            FAILED=$((FAILED + 1))
+            FAILED_PKGS+=("${pkg_name}/${pkg_ver} (JC gate)")
+            continue
+        fi
+    fi
 
     # ── Mirror fallback (通用镜像映射) ──
     # 将 conandata.yml 中已知域名的 url 从单值改为列表, 自动加上镜像源 fallback

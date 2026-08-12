@@ -286,7 +286,7 @@ def cmd_add(
 
     if draft:
         # In draft mode, write to draft/ directory
-        draft_dir = gdir / "draft"
+        draft_dir = _gdir(pdir).parent / "drafts"
         draft_dir.mkdir(exist_ok=True)
         kv_path = draft_dir / f"{eid}-draft-{agent_id}.kv"
         md_path = draft_dir / f"{eid}-draft-{agent_id}.md"
@@ -906,6 +906,63 @@ def cmd_validate(
     print(f"     auto_fix=true:      {autofix_true}, auto_fix=false: {autofix_false}")
 
     print()
+
+    # Check 10: template placeholder residue
+    _TEMPLATE_PLACEHOLDERS = {
+        "keyword1", "keyword2", "keyword3",
+        "category-name", "approach-identifier",
+    }
+    for kvf in kv_files:
+        data = parse_kv_file(str(kvf))
+        # Check match_keywords for template default
+        mk = data.get("match_keywords", "").strip()
+        if mk.lower() == "keyword1, keyword2, keyword3":
+            log_fail(f"[C10] {kvf.stem}.match_keywords: unchanged template default keywords")
+            errors += 1
+        # Check category for template placeholder
+        cat = data.get("category", "").strip()
+        if cat.lower() == "category-name":
+            log_fail(f"[C10] {kvf.stem}.category: unchanged template placeholder")
+            errors += 1
+    if verbose:
+        log_ok("[C10] Template placeholder check")
+
+    # Check 11: rec_auto_fix must be exactly true or false (no pipe values)
+    for kvf in kv_files:
+        af_raw = _kv_get(kvf, "rec_auto_fix")
+        af = af_raw.strip()
+        # Strip inline comments
+        if " #" in af:
+            af = af[:af.index(" #")].strip()
+        if "|" in af:
+            log_fail(f"[C11] {kvf.stem}.rec_auto_fix: invalid pipe-separated value '{af}' (must be 'true' or 'false')")
+            errors += 1
+        elif af not in ("true", "false"):
+            log_fail(f"[C11] {kvf.stem}.rec_auto_fix: must be 'true' or 'false', got '{af}'")
+            errors += 1
+    if verbose:
+        log_ok("[C11] rec_auto_fix format checked")
+
+    # Check 12: draft leakage detection
+    # No .kv file in knowledge/graph/ should contain draft:true
+    for kvf in kv_files:
+        data = parse_kv_file(str(kvf))
+        if data.get("draft", "").strip().lower() == "true":
+            log_fail(f"[C12] {kvf.stem}: contains 'draft: true' — draft file leaked into formal graph directory")
+            errors += 1
+        if data.get("contributor_id", "").strip():
+            log_fail(f"[C12] {kvf.stem}: contains 'contributor_id' — draft field leaked into formal graph directory")
+            errors += 1
+    # Also check that knowledge/graph/draft/ directory does not exist
+    draft_subdir = gdir / "draft"
+    if draft_subdir.is_dir():
+        leaked = list(draft_subdir.glob("*.kv"))
+        if leaked:
+            log_fail(f"[C12] knowledge/graph/draft/ directory exists with {len(leaked)} .kv files — use knowledge/drafts/ instead")
+            errors += 1
+    if verbose:
+        log_ok("[C12] Draft leakage check")
+
     if errors:
         log_fail(f"❌ {errors} errors, {warnings} warnings")
     else:
