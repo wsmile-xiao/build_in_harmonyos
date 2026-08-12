@@ -62,6 +62,15 @@ Conan cppstd 兼容规则复用仓库中的 C++17 二进制，libtorrent 自身�
 同一测试程序内其余 27 个用例仍执行并通过。该限制不影响打包的共享库，因为 libtool
 安装阶段使用文件副本生成 `libtorrent.so` 和 `libtorrent.so.47` 兼容名称。
 
+## 知识库使用与草稿
+
+- `E011`：用于识别 HMDFS 临时目录权限和 Autotools 生成阶段限制。
+- `E274`：用于检查共享库开发名称、SONAME 名称与真实版本化 ELF 的打包闭包。
+- `E316`：用于选择普通文件副本补齐 SONAME 实体，避免依赖 HMDFS 不支持的 symlink。
+- `knowledge/drafts/DRAFT-2045.{kv,md}`：记录 `E274` 的
+  symlink-first 建议在 HMDFS 上的适用边界，并以 libtorrent 真机结果补充能力感知的
+  SONAME 兼容名实体化方案。该草稿与本库直接相关，不修改正式图谱或 `index.tsv`。
+
 ## Runner 基础设施处理
 
 首次 shadow 执行虽然构建和门禁通过，但 runner 返回 125。根因位于真机共享脚本
