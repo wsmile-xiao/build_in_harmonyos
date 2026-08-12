@@ -61,8 +61,9 @@ for ref in "${PACKAGES[@]}"; do
 
     for attempt in $(seq 1 $MAX_RETRIES); do
         # 409 Conflict = 包已存在（之前 upload 成功过），视为幂等成功
-        upload_output=$(conan upload "$ref" -r="${CONAN_REMOTE_NAME}" -c 2>&1)
-        exit_code=$?
+        # 注意: set -e 下 var=$(failing_cmd) 会直接退出脚本, 必须用 || 捕获退出码
+        exit_code=0
+        upload_output=$(conan upload "$ref" -r="${CONAN_REMOTE_NAME}" -c 2>&1) || exit_code=$?
 
         if [ $exit_code -eq 0 ]; then
             if [ $attempt -gt 1 ]; then
