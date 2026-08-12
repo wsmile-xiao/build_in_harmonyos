@@ -1,0 +1,5 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID. CONAN-GNUCOBOL-TEST.
+       PROCEDURE DIVISION.
+           DISPLAY "GnuCOBOL compiler: OK".
+           STOP RUN.
