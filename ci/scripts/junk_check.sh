@@ -66,7 +66,11 @@ HITS=$(echo "$TRACKED" | grep -E '^archives/.*/ci-metadata\.json$' || true)
 JC1_HITS="${JC1_HITS}${HITS:+\n$HITS}"
 
 # .staging-* / .build-closed / .conan-verified 等
-HITS=$(echo "$TRACKED" | grep -E '^archives/.*/\.(staging-|build-closed|conan-verified|built|configured|installed|packaged|patched|tested|unpack|verify-passed)' || true)
+# 注意：排除 packaging/ 目录下的 .packaged（那是打包目录路径不是状态文件）
+HITS=$(echo "$TRACKED" | grep -E '^archives/.*/\.(staging-|build-closed|conan-verified|built|configured|installed|patched|tested|unpack|verify-passed)' || true)
+JC1_HITS="${JC1_HITS}${HITS:+\n$HITS}"
+# .packaged 状态文件（排除 packaging/ 目录下的同名路径）
+HITS=$(echo "$TRACKED" | grep -E '^archives/.*/\.packaged$' | grep -v '/packaging/\.packaged$' || true)
 JC1_HITS="${JC1_HITS}${HITS:+\n$HITS}"
 
 if [ -n "$(echo "$JC1_HITS" | tr -d '[:space:]')" ]; then
