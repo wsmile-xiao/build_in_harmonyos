@@ -1,0 +1,113 @@
+# E314 (draft): Python noarch 包 OHOS 适配——import 时资源下载惰性化 + pip wheel 打包
+
+> **状态**: draft（草稿，待主编审核合入）
+> **结构化数据**: graph/E314-draft-python-noarch-nltk-lazy-ohos.kv
+> **触发事件**: PR !4638 acronym 2.0.0 适配 HarmonyOS PC
+> **路径支撑**: 路径 A（基础适配申请）+ 路径 B（贡献创新，新增可复用知识，10 分候选，最终以官方审核为准）
+> **严重度**: 🟡 medium | **分类**: python|noarch|nltk|network-restricted|pip-wheel|site-packages
+> **自动修复**: ❌ 无（需源码惰性化改造 + Conan noarch 配方）
+
+---
+
+## 问题现象
+
+### 阶段 1：import 阻塞/失败（模块顶层联网下载资源）
+
+上游 `bacook17/acronym` 2.0.0 在 `acronym/acronym.py` **模块顶层**执行：
+
+```python
+try:
+    nltk.corpus.words.ensure_loaded()
+    nltk.corpus.brown.ensure_loaded()
+    nltk.corpus.gutenberg.ensure_loaded()
+except LookupError:
+    print('Initial downloading of word corpus')
+    ...
+    for d in ['words', 'brown', 'gutenberg']:
+        nltk.download(d)
+```
+
+语料缺失时自动 `nltk.download()` 联网下载。OHOS 构建/worker 容器网络受限时：
+- `import acronym` 挂起（等待连接超时）或直接失败；
+- 所有仅 import 该包的使用方（test_package、下游消费者）都被阻塞。
+
+### 阶段 2：纯 Python noarch 包 Conan 打包无编译产物
+
+acronym 是纯 Python 包（wheel 名 `acronym-2.0.0-py3-none-any.whl`），无 C/C++ 编译。Conan 适配必须：
+
+1. `pip wheel --no-deps` 构建 wheel；
+2. 以 `lib/pythonX.Y/site-packages` 布局放入 package；
+3. `runenv_info/buildenv_info` 追加 `PYTHONPATH`；
+4. console_scripts 放 `bin/`。
+
+### 阶段 3：上游无任何测试文件
+
+上游 sdist 仅 18 个文件（acronym.py / scoring.py / setup.py / egg-info 等），**无 test/ 目录、0 个 pytest/unittest 用例**——需按路径 B 补全测试（本 PR 补 13 个，覆盖 Acronym Scoring System）。
+
+## 根因分析
+
+| 维度 | 根因 | 影响 |
+|------|------|------|
+| import 阻塞 | 上游在模块顶层 ensure_loaded()+download()，不受控联网 | OHOS 受限网络 import 挂起/失败 |
+| noarch 打包 | 纯 Python 无编译产物，需 site-packages 布局 + PYTHONPATH | 放错位置则 ModuleNotFoundError |
+| 无测试 | 上游 sdist 无任何测试用例 | 无法执行上游测试，需路径 B 补全 |
+
+关联知识：**E215**（LuaRocks/OHOS worker Lua `os.tmpname()` 受限环境问题）——同类"受限环境下运行时依赖"问题；本条目聚焦 Python 侧。
+
+## 推荐方案：lazy-resource-loading-and-pip-wheel-noarch-package
+
+1. **惰性化资源加载**（补丁 0001）：
+   - 移除模块顶层 `ensure_loaded()`/`download()` 调用；
+   - 新增显式 `ensure_corpus(corpus)` helper，仅在 `find_acronyms()` / `main()` 真正执行时调用；
+   - 语料缺失抛清晰 `RuntimeError`（提示先 `nltk.download()`），**import 模块绝不触网**。
+
+2. **Conan noarch 配方**（settings 仅 `("os","arch")`）：
+   - `build()`: `python3 -m pip install --break-system-packages --no-deps --prefix=staging <src>`；
+   - `package()`: 定位 staging 下 `lib/pythonX.Y/site-packages` → 复制到 package 同构目录；`bin/` 复制 console_scripts；
+   - `package_info()`: `runenv_info/buildenv_info.append_path("PYTHONPATH", site_packages)`，`bindirs=["bin"]`。
+
+3. **test_package 路径 B 补全测试**：
+   - 用 `FakeCorpus`（实现 `words()`/`ensure_loaded()`）驱动 `find_acronyms`，避免真实语料下载；
+   - 覆盖 `score_word`/`score_acronym`/`_set_caps`/`_get_acronym`/`_index_in`/`ensure_corpus` 错误路径等。
+
+### 验证命令
+
+```bash
+# import 不触网（无 NLTK_DATA 也能秒级完成）
+timeout 30 python3 -c "import acronym; print('import OK')"
+
+# conan 完整验证
+conan create archives/a/acronym/2.0.0 \
+  -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 \
+  --build=missing --user=ohpcd --channel=stable
+
+# 补全测试
+python3 test_package/test_acronym.py   # 13/13 OK
+```
+
+## 已知限制
+
+- 惰性化后，**无语料时功能级调用**（`find_acronyms` 真实执行）需要先手动 `nltk.download()`；本 PR 的 test_package 用 FakeCorpus 规避，功能语义未变。
+- numpy/pandas 为 C 扩展依赖，鸿蒙 aarch64 无预编译 wheel 时需源码编译——运行时环境问题，不影响本 noarch 包安装。
+
+## 回退方案：preinstall-nltk-data
+
+若功能必须真实语料：test_package/构建环境预置 `NLTK_DATA` 目录并离线 `nltk.download()` 完整语料（words/brown/gutenberg，约数十 MB），再运行功能测试。受限网络下需离线源。
+
+## 禁止做法
+
+- ❌ 保留模块顶层 `nltk.download()` / import 时 `ensure_loaded()` 不捕获——OHOS 受限网络 import 阻塞
+- ❌ 把补写测试计入"上游测试通过率" / 勾选"上游无测试"却将新增用例计入上游——误报，评审拒绝
+- ❌ 纯 Python 包声明 `settings=("os","compiler","build_type","arch")` 并要求编译——noarch 无需工具链
+- ❌ `package()` 把 site-packages 复制到 `include/` 或忽略 PYTHONPATH——import 失败
+
+## 涉及软件
+
+- acronym 2.0.0（bacook17/acronym，Python）——本 draft 触发源
+- 其他模块顶层下载语料/模型/字典的 Python 包（NLTK 系、模型缓存系等）
+- 其他纯 Python noarch 包（py3-* 系列）在 OHOS 的 Conan 适配
+
+---
+
+*doc draft/knowledge/graph/E314-draft-python-noarch-nltk-lazy-ohos.md · E314 draft · 2026-08-07 · PR !4638*
