@@ -49,11 +49,12 @@ Conan cppstd 兼容规则复用仓库中的 C++17 二进制，libtorrent 自身�
 最终验证环境：HarmonyOS aarch64、clang 15.0.4、Python 3.12.9、Conan 2.29.1。
 正式任务通过 `device1-shadow-runner.zsh` 的单包设备锁排队执行。
 
-- 验证提交: `1fb6ec1f92bc81972c404913e947bf8bf271958c`
-- shadow run: `/storage/Users/currentUser/ohpc-ci-shadow/runs/1fb6ec1f92bc-20260812T060210Z-run-34932`
-- 输入归档 SHA-256: `5cf6074cf5b0f6684e422ee7525c4986174c4366b126d5887664a8362a1f46c3`
+- 验证提交: `75dd31c780e00f2e48e7245c031ea75fa8d7c30b`
+- shadow run: `/storage/Users/currentUser/ohpc-ci-shadow/runs/75dd31c780e0-20260812T092655Z-run-38715`
+- 输入归档 SHA-256: `795774e0259a1fd6c502e80617d8f118a55a1f62284340cd16f01fe0f3cdf98d`
 - 完成状态: `status=pass`、`setup_rc=0`、`build_rc=0`
-- 构建日志 SHA-256: `1e4182cef241fc2fcfa31ced530554ea5247861d70333392b06c482464c66dda`
+- 构建日志 SHA-256: `9d3042ba2769d8b2a08f06105829a51a281a49272dadf6ab4c02e0a1f5f5587f`
+- configure 探测: 24 个 `conftest` ELF 在最终链接后完成 RPATH 注入、自签和执行权限恢复
 - `make check`: 7/7 测试程序通过；151 个 CppUnit 用例实际通过，1 个用例按平台能力豁免
 - 消费者测试: 构建并执行，验证 bencode map/list 往返、值读取和 SHA-1
 - 负向测试: 移走 `lib/` 和 `include/` 后消费者测试按预期失败
