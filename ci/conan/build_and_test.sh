@@ -90,6 +90,68 @@ fi
 echo "[step] Validating package build timeout overrides..."
 validate_build_timeout_config
 
+# ── 0. Knowledge graph integrity gate (G0) ──
+# 全局前置检查：知识库文件路径规范，在任何包构建之前执行
+# 贡献者只能提交草稿到 knowledge/drafts/，正式条目由主编审核后入库
+G0_ERRORS=0
+GRAPH_DIR_G0="${REPO_ROOT}/knowledge/graph"
+
+if [ -d "${GRAPH_DIR_G0}" ]; then
+    echo "[step] G0: Knowledge graph integrity check..."
+
+    # G0a: knowledge/graph/draft/ 目录不应存在
+    if [ -d "${GRAPH_DIR_G0}/draft" ]; then
+        G0_DRAFT_COUNT=$(ls -1 "${GRAPH_DIR_G0}/draft"/*.kv 2>/dev/null | wc -l)
+        if [ "${G0_DRAFT_COUNT}" -gt 0 ]; then
+            echo "[fail] G0a: knowledge/graph/draft/ 目录存在 ${G0_DRAFT_COUNT} 个草稿 — 草稿只能放在 knowledge/drafts/"
+            G0_ERRORS=$((G0_ERRORS + 1))
+        fi
+    fi
+
+    # G0b: knowledge/graph/ 下不应有非标准命名的 .kv 文件（只允许 E###.kv）
+    G0_BAD_KV=$(ls -1 "${GRAPH_DIR_G0}"/*.kv 2>/dev/null | grep -vE '/E[0-9][0-9][0-9]\.kv$' || true)
+    if [ -n "$G0_BAD_KV" ]; then
+        G0_BAD_COUNT=$(echo "$G0_BAD_KV" | wc -l)
+        echo "[fail] G0b: knowledge/graph/ 下有 ${G0_BAD_COUNT} 个非标准命名的 .kv 文件（仅允许 E###.kv）:"
+        echo "$G0_BAD_KV" | head -5 | sed "s|^|       |"
+        G0_ERRORS=$((G0_ERRORS + 1))
+    fi
+
+    # G0c: knowledge/graph/ 下的 .kv 文件不应含 draft:true 或 contributor_id 字段
+    G0_FIELD_LEAK=$(grep -rl '^draft:[[:space:]]*true\|^contributor_id:' "${GRAPH_DIR_G0}"/E*.kv 2>/dev/null || true)
+    if [ -n "$G0_FIELD_LEAK" ]; then
+        echo "[fail] G0c: 正式条目含草稿字段 (draft:true / contributor_id):"
+        echo "$G0_FIELD_LEAK" | head -5 | sed "s|^|       |"
+        G0_ERRORS=$((G0_ERRORS + 1))
+    fi
+
+    # G0d: index.tsv 行数必须与标准 .kv 文件数一致
+    G0_KV_COUNT=$(ls -1 "${GRAPH_DIR_G0}"/E[0-9][0-9][0-9].kv 2>/dev/null | wc -l)
+    if [ -f "${GRAPH_DIR_G0}/index.tsv" ]; then
+        G0_IDX_COUNT=$(grep -c '^E[0-9]' "${GRAPH_DIR_G0}/index.tsv" 2>/dev/null || echo 0)
+        if [ "${G0_IDX_COUNT}" -ne "${G0_KV_COUNT}" ]; then
+            echo "[fail] G0d: index.tsv 行数(${G0_IDX_COUNT}) vs .kv 文件数(${G0_KV_COUNT}) 不匹配"
+            G0_ERRORS=$((G0_ERRORS + 1))
+        fi
+    fi
+
+    if [ "$G0_ERRORS" -gt 0 ]; then
+        echo ""
+        echo "[fail] G0: Knowledge graph integrity check failed (${G0_ERRORS} errors)"
+        echo "       知识库草稿只能提交到 knowledge/drafts/，正式条目由主编审核入库"
+        echo "G0_RESULT=fail: ${G0_ERRORS} errors"
+        echo "L0_RESULT=skip: blocked_by_G0"
+        echo "L1_RESULT=skip: blocked_by_G0"
+        echo "L2_RESULT=skip: blocked_by_G0"
+        echo "L4_RESULT=skip: blocked_by_G0"
+        echo "L5_RESULT=skip: blocked_by_G0"
+        exit 1
+    else
+        echo "        [ok] G0: Knowledge graph integrity check passed (${G0_KV_COUNT} entries)"
+        echo "G0_RESULT=pass"
+    fi
+fi
+
 # ── 1. Discover packages (BUG-9: respect CI_PACKAGES) ──
 # CI_PACKAGES 可通过环境变量或位置参数传入（位置参数在部分鸿蒙 worker
 # 上比 env 更可靠，buildbot command= 也用位置参数传递）
