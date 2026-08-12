@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for apcupsd 3.14.14 — APC UPS power management daemon.
+"""Conan recipe for apcupsd 3.14.14.1 — APC UPS power management daemon.
 
 apcupsd is a command-line application for monitoring UPSes and performing
 graceful shutdown during power failure.
@@ -21,7 +21,7 @@ from conan.tools.files import get, apply_conandata_patches, export_conandata_pat
 
 class ApcupsdConan(ConanFile):
     name = "apcupsd"
-    version = "3.14.14"
+    version = "3.14.14.1"
     description = "APC UPS power management daemon"
     license = "GPL-2.0-only"
     homepage = "https://apcupsd.org/"
@@ -38,6 +38,19 @@ class ApcupsdConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+
+    def _get_compilers(self):
+        """Get CC/CXX from Conan conf (R33 compliant).
+
+        Following the zlib pattern: read tools.build:compiler_executables
+        from the Conan profile rather than hardcoding or relying on env.
+        """
+        compilers = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict
+        )
+        cc = compilers.get("c", "clang") if compilers else "clang"
+        cxx = compilers.get("cpp", "clang++") if compilers else "clang++"
+        return cc, cxx
 
     def _create_wrappers(self):
         """Create wrapper scripts for tools missing on HarmonyOS."""
@@ -84,12 +97,11 @@ class ApcupsdConan(ConanFile):
         with open(vmak, "w") as f:
             f.write(content)
 
-    def _detect_pthread_cancel(self):
+    def _detect_pthread_cancel(self, cc):
         """Detect if pthread_cancel is available and define HAVE_PTHREAD_CANCEL.
 
         Proper feature detection (R8 compliant): checks by compiling a test
         program rather than relying on platform macros like __OHOS__.
-        Uses $CC from the Conan build environment (R33 compliant).
         """
         test_dir = os.path.join(self.source_folder, ".tmp")
         os.makedirs(test_dir, exist_ok=True)
@@ -101,14 +113,13 @@ class ApcupsdConan(ConanFile):
                     "int main(){pthread_cancel((pthread_t)0);return 0;}\n")
 
         try:
-            self.run(f'$CC {test_src} -lpthread -o {test_bin} 2>/dev/null')
-            # pthread_cancel is available - define the macro
+            self.run(f'{cc} {test_src} -lpthread -o {test_bin} 2>/dev/null')
             apcconfig = os.path.join(self.source_folder, "include", "apcconfig.h")
             with open(apcconfig, "a") as f:
                 f.write("\n/* Detected by feature detection in conanfile.py */\n")
                 f.write("#define HAVE_PTHREAD_CANCEL 1\n")
         except Exception:
-            pass  # pthread_cancel not available, macro stays undefined
+            pass
         finally:
             for path in (test_src, test_bin):
                 if os.path.exists(path):
@@ -123,29 +134,34 @@ class ApcupsdConan(ConanFile):
         # Create wrapper scripts for missing tools
         bin_dir = self._create_wrappers()
 
-        # Set environment variables directly (conan 2.x self.run env expects list)
+        # Get compilers from Conan conf (R33: zlib pattern)
+        cc, cxx = self._get_compilers()
+
+        # Set environment for configure
         os.environ["PATH"] = bin_dir + os.pathsep + os.environ.get("PATH", "")
         os.environ["SHUTDOWN"] = "/bin/poweroff"
         os.environ["STRIP"] = ""
+        os.environ["CC"] = cc
+        os.environ["CXX"] = cxx
 
         # Configure (in-source build - apcupsd's configure expects it)
         prefix = self.package_folder
+        config_shell = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
         self.run(
-            f'./configure --prefix="{prefix}" '
+            f'{config_shell} ./configure --prefix="{prefix}" '
             f'--sbindir="${{exec_prefix}}/sbin" '
-            f'--sysconfdir="${{prefix}}/etc/apcupsd"'
+            f'--sysconfdir="${{prefix}}/etc/apcupsd" '
+            f'--host=aarch64-unknown-linux-ohos '
+            f'--build=aarch64-unknown-linux-ohos'
         )
 
         # Fix variables.mak after configure (configure regenerates it)
         self._fix_variables_mak()
 
-        # Feature detection: check if pthread_cancel is available (R8 compliant)
-        # This is proper feature detection, not platform detection.
-        # On HarmonyOS/musl, pthread_cancel is not available, so HAVE_PTHREAD_CANCEL
-        # will not be defined, and the #ifdef guard in apcexec.c will skip the call.
-        self._detect_pthread_cancel()
+        # Feature detection: pthread_cancel (R8 compliant)
+        self._detect_pthread_cancel(cc)
 
-        # Build
+        # Build (R9: -j1 for OHOS parallel constraint)
         self.run("make -j1")
 
     def package(self):

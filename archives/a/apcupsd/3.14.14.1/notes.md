@@ -1,4 +1,4 @@
-# apcupsd 3.14.14 适配笔记
+# apcupsd 3.14.14.1 适配笔记
 
 ## 编译环境
 - 构建系统: autotools
