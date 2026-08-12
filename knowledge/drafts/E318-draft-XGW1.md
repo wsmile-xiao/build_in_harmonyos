@@ -1,0 +1,105 @@
+# E318 — HarmonyOS 上 `go test` 临时 ELF 未签名导致测试无法执行
+
+> **状态**：DRAFT | **来源**：tinyice 2.6.3 PR #3797，证据提交 `99ddfcd2d`
+
+## 错误特征
+
+上游测试在普通 Linux 环境可以直接运行：
+
+```text
+go test ./...
+```
+
+同一命令在 HarmonyOS 真机可能在测试代码启动前失败：
+
+```text
+fork/exec .../pkg.test: permission denied
+```
+
+如果 Go linker 的最终输出仍落在 HMDFS，流程还可能更早出现：
+
+```text
+link: mapping output file failed: permission denied
+```
+
+## 触发条件
+
+- 构建系统：Go modules。
+- 阶段：上游测试编译与目标端执行。
+- 平台：HarmonyOS PC / OHOS / AArch64。
+- 测试由 `go test` 生成临时 `.test` ELF 并立即执行。
+
+## 根因分析
+
+`go test` 把“编译测试 ELF”和“执行测试 ELF”合并成一个临时流程。HarmonyOS 要求用户生成的 ELF 具有可接受的 `.codesign`；Go 新生成的测试 ELF 未签名，系统会在进入测试代码前拒绝加载。
+
+这个问题与 HMDFS 链接输出限制相互独立：
+
+1. 最终测试 ELF 必须先输出到允许 Go linker 使用 `mmap(MAP_SHARED)` 的目录。
+2. 成功生成后仍须移除旧签名节、自签、恢复执行权限。
+3. 测试 ELF 应从原 package 源码目录执行，否则相对路径资源可能产生假失败。
+
+## 解决方案
+
+### 推荐方案
+
+把 `go test ./...` 等价拆为“按 package 编译、签名、在原源码目录执行”。不要修改 `_test.go`、断言、跳过条件或通过标准。
+
+```bash
+export TEST_ROOT=/data/storage/el2/base/cache/project-go-tests
+mkdir -p "$TEST_ROOT"
+
+go test -c -o "$TEST_ROOT/relay.test" ./relay
+llvm-objcopy --remove-section .codesign "$TEST_ROOT/relay.test" 2>/dev/null || true
+binary-sign-tool sign \
+  -inFile "$TEST_ROOT/relay.test" \
+  -outFile "$TEST_ROOT/relay.test.signed" \
+  -selfSign 1
+mv "$TEST_ROOT/relay.test.signed" "$TEST_ROOT/relay.test"
+chmod +x "$TEST_ROOT/relay.test"
+
+(cd relay && "$TEST_ROOT/relay.test" \
+  -test.v -test.count=1 -test.timeout=20m)
+```
+
+多个 package 逐个重复。原 `go test` 参数应映射为测试二进制参数，例如 `-v` 对应 `-test.v`，`-count=1` 对应 `-test.count=1`。
+
+### 回退方案
+
+若 HarmonyOS worker 暂无可执行 Go 工具链，可在受支持的 Linux/arm64 构建机运行 `go test -c`，再将同一提交生成的测试 ELF 传到目标机签名和执行。必须绑定源码、测试资源与构建提交，不能用另一棵源码树替代。
+
+### 禁止做法
+
+- 不要使用 `go test ./... || true`、删除 `_test.go` 或放宽断言伪造通过。
+- 不要只统计容易通过的 package；应对照官方源码枚举全部测试文件与顶层 `Test...`。
+- 不要在缓存输出目录直接执行全部测试 ELF；这会改变 package 工作目录。
+- 不要把 RUN/subtest 记录数当作顶层测试数。
+- 不要用 Conan `test_package` 替代上游测试；二者验证不同契约。
+
+## 验证
+
+tinyice v2.6.3 的官方源码包含 19 个 `_test.go` 文件、84 个顶层测试。适配流程分别生成并签名 `relay.test`、`server.test`，再从各自源码目录执行：
+
+| 范围 | 结果 |
+|---|---:|
+| 上游顶层测试 | 84/84 PASS |
+| 失败 / 跳过 | 0 / 0 |
+| RUN/subtest 记录 | 94 条，全部通过 |
+| Conan package smoke | 4/4 PASS |
+| Conan 质量门禁 | L0/L1/L2/L4/L5 PASS |
+
+```bash
+go test -c -o "$TEST_ROOT/relay.test" ./relay
+(cd relay && "$TEST_ROOT/relay.test" -test.v -test.count=1 -test.timeout=20m)
+```
+
+官方 PR CI #14804 曾因 worker 未提供已签名、可执行的 Go >= 1.25.1
+而失败。后续配方已增加按构建机架构下载、校验并在 HarmonyOS 上签名 Go
+工具链的自举路径，仍需由新一轮 CI 验证；在新 CI 通过前不把该项写成已通过，
+也不改变上述真机测试迁移结论。
+
+## 关联条目
+
+- E077：ELF 修改后的移除旧签名、自签与恢复权限。
+- E124 / E134 / E166：Go linker 最终输出位于 HMDFS 时的映射失败。
+- E128：Go 工具链自身的签名与 CI 供给。
