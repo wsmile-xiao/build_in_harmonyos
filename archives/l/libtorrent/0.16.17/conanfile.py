@@ -116,6 +116,143 @@ class LibtorrentConan(ConanFile):
         tc.generate()
         if self.settings.os == "OHOS":
             self._generate_autoreconf_environment()
+            self._write_configure_compiler_wrapper()
+
+    @property
+    def _configure_compiler_wrapper_path(self):
+        return os.path.join(
+            self.generators_folder, "libtorrent-clang-conftest.sh"
+        )
+
+    @property
+    def _configure_sign_events_path(self):
+        return os.path.join(
+            self.generators_folder, "libtorrent-conftest-sign-events.txt"
+        )
+
+    def _write_configure_compiler_wrapper(self):
+        tools = {
+            "awk": "/system/bin/awk",
+            "chmod": "/system/bin/chmod",
+            "readelf": "/data/service/hnp/bin/llvm-readelf",
+            "signer": "/data/service/hnp/bin/binary-sign-tool",
+        }
+        missing = [path for path in tools.values() if not os.path.isfile(path)]
+        if missing:
+            raise ConanInvalidConfiguration(
+                "OHOS configure signing tools are missing: {}".format(missing)
+            )
+
+        runtime_libdirs = []
+        for dependency in self.dependencies.values():
+            runtime_libdirs.extend(
+                dependency.cpp_info.aggregated_components().libdirs
+            )
+        runtime_rpath = ":".join(dict.fromkeys(runtime_libdirs))
+        if not runtime_rpath:
+            raise ConanInvalidConfiguration(
+                "OHOS configure probes require dependency runtime directories"
+            )
+
+        os.makedirs(self.generators_folder, exist_ok=True)
+        with open(self._configure_sign_events_path, "w", encoding="utf-8"):
+            pass
+        script = """#!/system/bin/sh
+set -eu
+
+if [ "$#" -lt 1 ]; then
+  printf 'LIBTORRENT_CC_MISSING_COMPILER\n' >&2
+  exit 90
+fi
+real_compiler=$1
+shift
+readelf=@READELF@
+signer=@SIGNER@
+awk_tool=@AWK@
+chmod_tool=@CHMOD@
+runtime_rpath=@RUNTIME_RPATH@
+events=@EVENTS@
+probe_mode=${LIBTORRENT_CONFIGURE_PROBES:-0}
+
+output=a.out
+expect_output=0
+compile_only=0
+for argument in "$@"; do
+  if [ "$expect_output" -eq 1 ]; then
+    output="$argument"
+    expect_output=0
+    continue
+  fi
+  case "$argument" in
+    -o) expect_output=1 ;;
+    -o?*) output=${argument#-o} ;;
+    -c|-E|-S) compile_only=1 ;;
+  esac
+done
+if [ "$expect_output" -ne 0 ]; then
+  printf 'LIBTORRENT_CC_MISSING_OUTPUT\n' >&2
+  exit 91
+fi
+case "$output" in
+  /*) ;;
+  *) output="$(pwd)/$output" ;;
+esac
+name=${output##*/}
+is_conftest=0
+case "$name" in
+  conftest*) is_conftest=1 ;;
+esac
+
+if [ "$probe_mode" -eq 1 ] && [ "$is_conftest" -eq 1 ] && [ "$compile_only" -eq 0 ]; then
+  "$real_compiler" "$@" "-Wl,-rpath,$runtime_rpath"
+else
+  "$real_compiler" "$@"
+fi
+
+if [ "$probe_mode" -ne 1 ] || [ "$is_conftest" -ne 1 ] || [ "$compile_only" -ne 0 ] || [ ! -f "$output" ]; then
+  exit 0
+fi
+elf_type=$("$readelf" -h "$output" 2>/dev/null | "$awk_tool" '$1 == "Type:" {print $2; exit}')
+case "$elf_type" in
+  EXEC|DYN) ;;
+  *) exit 0 ;;
+esac
+"$signer" sign -inFile "$output" -outFile "$output" -selfSign 1
+"$chmod_tool" 755 "$output"
+printf '%s\n' "$output" >> "$events"
+"""
+        replacements = {
+            "@READELF@": tools["readelf"],
+            "@SIGNER@": tools["signer"],
+            "@AWK@": tools["awk"],
+            "@CHMOD@": tools["chmod"],
+            "@RUNTIME_RPATH@": runtime_rpath,
+            "@EVENTS@": self._configure_sign_events_path,
+        }
+        for marker, value in replacements.items():
+            script = script.replace(marker, shlex.quote(value))
+        with open(
+            self._configure_compiler_wrapper_path,
+            "w",
+            encoding="utf-8",
+            newline="\n",
+        ) as handle:
+            handle.write(script)
+
+    def _validate_configure_signing(self):
+        if self.settings.os != "OHOS":
+            return
+        try:
+            with open(self._configure_sign_events_path, encoding="utf-8") as handle:
+                events = [line.strip() for line in handle if line.strip()]
+        except OSError as error:
+            raise ConanInvalidConfiguration(
+                "configure conftest signing evidence is missing"
+            ) from error
+        if not any(os.path.basename(path).startswith("conftest") for path in events):
+            raise ConanInvalidConfiguration(
+                "configure produced no signed conftest executable"
+            )
 
     def _generate_autoreconf_environment(self):
         automake_root = self.dependencies.build["automake"].package_folder
@@ -217,6 +354,7 @@ class LibtorrentConan(ConanFile):
 
         autotools = Autotools(self)
         self._configure(autotools)
+        self._validate_configure_signing()
         autotools.make(args=["-j1"])
         if can_run(self):
             test_args = ["-j1"]
@@ -235,16 +373,47 @@ class LibtorrentConan(ConanFile):
             autotools.configure()
             return
 
-        shell = shutil.which("bash") or shutil.which("sh") or "sh"
+        configure_shell = shutil.which("bash") or shutil.which("sh") or "sh"
+        wrapper_shell = "/system/bin/sh"
         configure = os.path.join(self.source_folder, "configure")
+        if not os.path.isfile(self._configure_compiler_wrapper_path):
+            raise ConanInvalidConfiguration(
+                "OHOS configure compiler wrapper was not generated"
+            )
+        compiler_executables = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict
+        )
+        real_cc = (
+            compiler_executables.get("c", "clang")
+            if compiler_executables else "clang"
+        )
+        real_cxx = (
+            compiler_executables.get("cpp", "clang++")
+            if compiler_executables else "clang++"
+        )
+        configure_cc = shlex.join(
+            [wrapper_shell, self._configure_compiler_wrapper_path, real_cc]
+        )
+        configure_cxx = shlex.join(
+            [wrapper_shell, self._configure_compiler_wrapper_path, real_cxx]
+        )
         configure_args = load_toolchain_args(self.generators_folder).get(
             "configure_args", ""
         )
-        command = "{} {} {}".format(
-            shlex.quote(shell),
-            shlex.quote(configure),
-            configure_args,
-        ).strip()
+        command = shlex.join([configure_shell, configure])
+        if configure_args:
+            command = "{} {}".format(command, configure_args)
+        command = (
+            "CONFIG_SHELL={} SHELL={} PWD={} "
+            "LIBTORRENT_CONFIGURE_PROBES=1 CC={} CXX={} {}"
+        ).format(
+            shlex.quote(configure_shell),
+            shlex.quote(configure_shell),
+            shlex.quote(self.build_folder),
+            shlex.quote(configure_cc),
+            shlex.quote(configure_cxx),
+            command,
+        )
         self.run(command, cwd=self.build_folder, env="conanbuild")
 
     def _test_environment(self):

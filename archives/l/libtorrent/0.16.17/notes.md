@@ -31,6 +31,8 @@ Conan cppstd 兼容规则复用仓库中的 C++17 二进制，libtorrent 自身�
 - 在 OHOS 上显式传入 `aarch64-unknown-linux-ohos` build/host triplet。
 - 启用 pthread 8 MiB 栈，关闭不可稳定探测的可选 execinfo。
 - 为 HMDFS 上不能直接执行的 Automake/Libtool 脚本显式调用 bash。
+- configure 阶段通过 C/C++ 编译器 wrapper 为 `conftest` ELF 注入依赖 RPATH 并自签，
+  兼容要求目标可执行文件签名的 CI Worker；配置结束后校验签名事件，缺失时失败闭合。
 - 为上游测试注入 Conan 依赖的 `LD_LIBRARY_PATH`。
 - 使用 `-j1` 规避 HMDFS 不支持 GNU Make jobserver FIFO。
 
@@ -65,6 +67,8 @@ Conan cppstd 兼容规则复用仓库中的 C++17 二进制，libtorrent 自身�
 ## 知识库使用与草稿
 
 - `E011`：用于识别 HMDFS 临时目录权限和 Autotools 生成阶段限制。
+- `E064`：用于识别 Autotools `conftest` 在 HarmonyOS 上无法执行导致的配置误判。
+- `E077`：用于保证 `conftest` ELF 在最终链接/RPATH 修改后完成签名并恢复执行权限。
 - `E274`：用于检查共享库开发名称、SONAME 名称与真实版本化 ELF 的打包闭包。
 - `E316`：用于选择普通文件副本补齐 SONAME 实体，避免依赖 HMDFS 不支持的 symlink。
 - `knowledge/drafts/DRAFT-2045.{kv,md}`：记录 `E274` 的
