@@ -1,95 +1,117 @@
-# nasm 2.16.03 适配笔记
+# NASM 2.16.03 HarmonyOS 适配记录
 
-## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-05-25
-- 编译器: clang/clang++
-- 状态: published
+## 范围
 
-## 编译步骤
+- Conan 引用：nasm/2.16.03
+- Issue：#2050（https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/2050）
+- 分支：feat/nasm-2.16.03-2050
+- Worktree：D:\harmonyos\worktrees\nasm
+- 本轮只修改 archives/n/nasm/2.16.03/。
 
-1. 从官方源下载源码包（因SSL证书问题，使用 curl -k 手动下载）
-   - URL: https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.gz
+## W0 依赖与构建系统分析
 
-2. 初始化编译环境
-   - 使用 ohc-run.py init-build 创建工作目录
+- 官方源码：https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.gz
+- SHA-256：5bc940dd8a4245686976a8f7e96ba9340a0915f2d5b88356874890e207bdb581
+- 构建系统：Autoconf/Make；release tarball 已包含 configure、生成后的 C 源码和 Makefile 模板。
+- 编译 nasm、ndisasm 不依赖其他三方库。
+- 上游 make test 运行 249 个汇编用例，测试驱动 test/performtest.pl 需要 Perl。Perl 不参与 release tarball 的正常编译，因此不把它设置成 NASM 的硬依赖。
+- 2026-08-11 查询 OHPCD Conan 远端时，本机 DNS 无法解析 ohpcd.cn，所以本轮无法确认可选的 perl/5.42.2 是否已经发布。
 
-3. 修复平台识别问题（E007/E072）
-   - 更新 autoconf/helpers/config.guess 和 config.sub（从 automake 1.16 复制支持 ohos 的版本）
+## 既有档案审计
 
-4. 修复 HMDFS 权限问题（E011）
-   - 修改 configure 脚本中的 umask 077 为 umask 022
+原档案记录了 2026-05-25 的一次 OHOS aarch64 手工构建成功，但缺少 Conan 配方、可信源码哈希和 test_package。原有前两个补丁分别大范围替换了 GNU config.guess 与 config.sub，超出了 NASM 适配所需范围。
 
-5. 执行标准编译流程
-   - configure --prefix=/storage/Users/currentUser/usr/local
-   - make -j4
-   - make install DESTDIR=/storage/Users/currentUser/test-install-nasm-2.16.03
-   - make install（本地安装）
+本轮将它们缩减为：
 
-6. 验证和归档
-   - 质量门禁验证通过（G0-G4）
-   - 创建预编译包 nasm-2.16.03-ohos-aarch64.tar.gz
-   - finish 收尾归档
+1. 0001-autoconf-helpers-config.guess.patch
+   - 编译器定义 __OHOS__ 时将 libc 标识为 ohos。
+   - 兼容 uname -s 返回 HarmonyOS。
+2. 0002-autoconf-helpers-config.sub.patch
+   - 只增加 ohos OS 和 linux-ohos kernel/OS 组合。
+3. 0003-configure.patch
+   - 保留既有真机验证过的 HMDFS 修复，把 config.status 临时目录的 umask 077 改为 022。
 
-## 遇到的问题与解决方案
+三个补丁均以官方 2.16.03 tarball 为基线。
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | SSL证书验证失败 | 鸿蒙系统CA证书问题 | 使用 curl -k 绕过验证，手动下载源码 |
-| 2 | config.guess无法识别系统 | 旧版本不支持 ohos | 更新 config.guess 和 config.sub（从已安装的 automake 1.16 复制） |
-| 3 | config.status临时目录权限失败 | HMDFS文件系统 umask 077 限制 | 修改 configure 中 umask 077 为 umask 022（E011） |
+## Conan 配方
 
-## 源码修改
+- package_type = "application"，安装 bin/nasm 和 bin/ndisasm。
+- 支持 Linux 与 OHOS 原生构建。
+- OHOS 使用 <arch>-unknown-linux-ohos 作为 build/host triplet。
+- package_info() 将 bin 加入 build/run 环境的 PATH，供 smallerc 等下游通过 tool_requires("nasm/2.16.03") 使用。
+- 构建阶段先用 NASM 生成 16-bit flat binary，并核对精确机器码 b8341283c001c3。
 
-应用了 3 个补丁文件：
-- 0001-autoconf-helpers-config.guess.patch：更新 config.guess 支持 ohos
-- 0002-autoconf-helpers-config.sub.patch：更新 config.sub 支持 ohos
-- 0003-configure.patch：修改 umask 077 为 umask 022
+## test_package
 
-## 依赖版本
+测试包按构建工具消费者方式使用 tool_requires(self.tested_reference_str)，并通过打包目录中的绝对路径执行：
 
-- automake 1.16（提供支持 ohos 的 config.guess/config.sub）
-- clang 15.0.4
-- GNU Make 4.4.1
+- nasm --version
+- ndisasm --version
+- 生成 16-bit flat binary 并核对精确机器码
+- 反汇编 flat binary 并核对 mov、add、ret
+- 生成 ELF64 object 并核对 ELF magic
 
-## 验证结果
+测试只生成 x86/x86_64 目标文件，不在 aarch64 HarmonyOS 上执行所生成的 x86 代码。
 
-```bash
-# 版本验证
-/storage/Users/currentUser/usr/local/bin/nasm --version
-NASM version 2.16.03 compiled on May 25 2026
+## 历史真机证据
 
-# 二进制文件检查
-ls -lh /storage/Users/currentUser/usr/local/bin/nasm
--rwxr-x--- 1 20001006 file_manager 3.2M 2026-05-25 17:07 nasm
+原档案记录 2026-05-25 在 OHOS aarch64 上完成：
 
-ls -lh /storage/Users/currentUser/usr/local/bin/ndisasm
--rwxr-x--- 1 20001006 file_manager 1.7M 2026-05-25 17:07 ndisasm
+- configure
+- make -j4
+- make install
+- nasm --version 返回 NASM version 2.16.03
+- 生成 nasm（约 3.2 MiB）和 ndisasm（约 1.7 MiB）
 
-# 质量门禁
-质量报告: PASS
-G1 Binary Integrity: PASS
-G2 Functional: PASS (⚠️ 1)
-G3 Portability: PASS
-G4 Archive: PASS
-```
+该证据说明三项平台补丁方向可行，但不等同于本轮新增 Conan 配方已经完成真机验证。
 
-## 交付物
+## 本机验证
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| nasm-2.16.03-ohos-aarch64.tar.gz | 5.0M | 预编译包（包含 nasm/ndisasm 二进制和 man 文档） |
-| 0001-autoconf-helpers-config.guess.patch | 11K | 平台识别补丁 |
-| 0002-autoconf-helpers-config.sub.patch | 18K | 三元组验证补丁 |
-| 0003-configure.patch | 889B | umask 修改补丁 |
-| quality-report.md | - | 质量门禁报告 |
+本轮计划/执行的本机门槛：
 
-## 注意事项
+    python -m py_compile archives\n\nasm\2.16.03\conanfile.py archives\n\nasm\2.16.03\test_package\conanfile.py
+    conan inspect archives\n\nasm\2.16.03
+    conan export archives\n\nasm\2.16.03
+    git -C <official-source> apply --check archives\n\nasm\2.16.03\patches\0001-autoconf-helpers-config.guess.patch
+    git -C <official-source> apply --check archives\n\nasm\2.16.03\patches\0002-autoconf-helpers-config.sub.patch
+    git -C <official-source> apply --check archives\n\nasm\2.16.03\patches\0003-configure.patch
 
-1. HMDFS 文件系统的 umask 077 限制会导致 autotools 的 configure 失败，需要修改为 umask 022（E011）
-2. 鸿蒙系统需要使用支持 ohos 的 config.guess 和 config.sub 文件
-3. SSL 证书问题可能导致无法直接从 HTTPS 源下载，需要使用 curl -k 或 HTTP 协议
+结果：
 
----
-**编译结束**: 2026-05-25 17:11
-**最终状态**: published
+- Python 配方编译与三个 YAML 文件解析通过。
+- 官方源码 SHA-256 复核通过。
+- 三个补丁联合 git apply --check 通过；实际应用后 config.guess、config.sub、configure 的 shell 语法检查通过。
+- 补丁后的 config.sub 将 aarch64-linux-ohos 规范化为 aarch64-unknown-linux-ohos，也接受 x86_64-unknown-linux-ohos。
+- Conan inspect、export 和无远端 Linux graph info 通过；最终 recipe revision 为 f17435020cdb047fa928b1d8a67d10d2，依赖图为空。
+- 使用官方 NASM 2.16.03 Windows 二进制执行同一组测试向量通过：flat binary 为 b8341283c001c3，反汇编包含预期三条指令，ELF magic 为 7f454c46。
+- ndisasm 2.16.03 的版本参数是 -v，不是 --version；本机功能测试已据此修正 test_package。
+- 文件均为 LF、无 UTF-8 BOM；worktree 改动只位于 archives/n/nasm/2.16.03/。
+- git diff --check 对 0002 patch 的一行上游 tab 缩进上下文给出 space-before-tab 提示；该行只是 unified diff 上下文，不修改目标源码，且三补丁联合应用已通过。
+
+本机没有 WSL、C 编译器、Make 或 Perl，因此未执行完整的本机 Autotools 编译和上游 make test。该限制不影响已完成的配方静态验证，新的 Conan create 仍需在真机或 Shadow CI 单包执行。
+
+## 下一步真机 / Shadow CI
+
+保持单包排队，在获得真机空闲窗口后运行：
+
+    sh "$HOME/bin/ohos-prepare-isolated-conan-job.sh" \
+      --user codex-nasm \
+      --job nasm-2.16.03 \
+      --package archives/n/nasm/2.16.03 \
+      --repo-source "$HOME/validation/build_in_harmonyos"
+
+    . "$HOME/ohos-users/codex-nasm/nasm-2.16.03/env.sh"
+    cd "$CI_REPO_ROOT"
+    git fetch origin feat/nasm-2.16.03-2050
+    git checkout feat/nasm-2.16.03-2050
+    sh "$OHOS_JOB_BASE/run-conan-heavy.sh"
+
+单包 CI：
+
+    CI_PACKAGES="archives/n/nasm/2.16.03" zsh ci/conan/build_and_test.sh
+
+Shadow CI：
+
+    sh "$HOME/bin/run-ohos-shadow-ci.sh" archives/n/nasm/2.16.03
+
+真机通过并发布 nasm/2.16.03 后，回到 smallerc #2049，移除其 W0 阻塞并执行 conan create。
