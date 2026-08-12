@@ -579,7 +579,7 @@ PYEOF
     # PR 分支名必须包含 {pkg_name}-{pkg_ver}（如 feat/jsmn-1.1.0 包含 jsmn-1.1.0）
     # 不做分支名分割，直接拼接已知值做包含检查，避免包名含 '-' 导致歧义
     # REL 构建或 main/master/server 分支自动跳过
-    # ⚠️ 当前为提示模式（warn-only），2026-07-29 后改为强制失败
+    # PR > 5200: 强制失败（报错）; PR <= 5200: 仅告警（历史 PR 宽容）
     if [ -n "${CI_BRANCH:-}" ] && [ "${CI_BRANCH}" != "main" ] \
        && [ "${CI_BRANCH}" != "master" ] && [ "${CI_BRANCH}" != "server" ]; then
         echo "[step] L0n: Checking branch name matches package (R40)..."
@@ -587,13 +587,23 @@ PYEOF
         if echo "${CI_BRANCH}" | grep -q -- "${EXPECTED_TAG}"; then
             echo "        [ok] L0n: branch '${CI_BRANCH}' contains '${EXPECTED_TAG}'"
         else
-            echo "[error] L0n: branch name mismatch (R40) — 分支名不包含 包名-版本号"
-            echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
-            echo "[hint] 分支名应包含 包名-版本号，例如："
-            echo "         feat/${pkg_name}-${pkg_ver}"
-            echo "         fix/${pkg_name}-${pkg_ver}"
-            echo "         ${pkg_name}-${pkg_ver}"
-            L0_FAILED=true
+            # PR > 5200 强制失败, PR <= 5200 仅告警
+            _pr_num="${CI_PR_NUMBER:-0}"
+            if [ "${_pr_num}" -gt 5200 ] 2>/dev/null; then
+                echo "[error] L0n: branch name mismatch (R40) — 分支名不包含 包名-版本号"
+                echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
+                echo "[hint] 分支名应包含 包名-版本号，例如："
+                echo "         feat/${pkg_name}-${pkg_ver}"
+                echo "         fix/${pkg_name}-${pkg_ver}"
+                echo "         ${pkg_name}-${pkg_ver}"
+                L0_FAILED=true
+                L0_ERRORS="${L0_ERRORS} branch_name_r40"
+            else
+                echo "[warn] L0n: branch name mismatch (R40) — PR #${_pr_num} <= 5200, 仅告警不拦截"
+                echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
+                echo "[hint] 分支名应包含 包名-版本号，例如："
+                echo "         feat/${pkg_name}-${pkg_ver}"
+            fi
         fi
     fi
 
