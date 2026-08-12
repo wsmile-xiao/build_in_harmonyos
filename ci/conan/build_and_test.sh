@@ -584,7 +584,10 @@ PYEOF
        && [ "${CI_BRANCH}" != "master" ] && [ "${CI_BRANCH}" != "server" ]; then
         echo "[step] L0n: Checking branch name matches package (R40)..."
         EXPECTED_TAG="${pkg_name}-${pkg_ver}"
-        if echo "${CI_BRANCH}" | grep -q -- "${EXPECTED_TAG}"; then
+        # 归一化：将 + 替换为 - 后比较（Debian 风格版本后缀如 1.4+dfsg.1 → 1.4-dfsg.1）
+        EXPECTED_TAG_NORM=$(echo "${EXPECTED_TAG}" | tr '+' '-')
+        BRANCH_NORM=$(echo "${CI_BRANCH}" | tr '+' '-')
+        if echo "${BRANCH_NORM}" | grep -q -- "${EXPECTED_TAG_NORM}"; then
             echo "        [ok] L0n: branch '${CI_BRANCH}' contains '${EXPECTED_TAG}'"
         else
             # PR > 5200 强制失败, PR <= 5200 仅告警
