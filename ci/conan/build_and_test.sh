@@ -607,6 +607,58 @@ PYEOF
         fi
     fi
 
+    # L0o: 禁止使用外部网络命令下载源码 (防 uses_external_curl)
+    # conanfile.py 的 build() 方法禁止调用 curl/wget 下载
+    if [ -f "$CONANFILE" ]; then
+        EXT_CURL=$(grep -nE '(subprocess|os\.system).*?(curl|wget)|"curl"|"wget"|'"'"'curl'"'"'|'"'"'wget'"'"'' "$CONANFILE" 2>/dev/null | grep -v '^\s*#' | grep -v 'tools\.\|conan_data\|self\.run\|#.*curl\|#.*wget' || true)
+        if [ -n "$EXT_CURL" ]; then
+            echo "[fail] L0o: conanfile.py 使用外部命令 (curl/wget) 下载源码 — CI 环境可能无 curl"
+            echo "       ${EXT_CURL%%$'\n'*}"
+            echo "[hint] 必须用 self.conan_data 或 tools.files.get() 下载源码"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} uses_external_curl"
+        fi
+    fi
+
+    # L0p: settings 必须包含 os/compiler/build_type/arch 四项 (防 profile 不兼容)
+    if [ -f "$CONANFILE" ]; then
+        SETTINGS_LINE=$(grep -E '^\s*settings\s*=' "$CONANFILE" 2>/dev/null | head -1 || true)
+        if [ -n "$SETTINGS_LINE" ]; then
+            for req in "os" "compiler" "build_type" "arch"; do
+                if ! echo "$SETTINGS_LINE" | grep -q "\"$req\"\|'$req'\|\b${req}\b"; then
+                    echo "[fail] L0p: settings 缺少 '$req' — OHOS profile 需要全部四项"
+                    echo "       当前: ${SETTINGS_LINE}"
+                    echo "[hint] settings = \"os\", \"compiler\", \"build_type\", \"arch\""
+                    L0_FAILED=true
+                    L0_ERRORS="${L0_ERRORS} missing_setting_${req}"
+                fi
+            done
+        fi
+    fi
+
+    # L0q: exports_sources 必须包含 conanfile.py 和 patches/ (防 recipe_not_exported)
+    if [ -f "$CONANFILE" ]; then
+        # 只在 conanfile.py 引用了 patches 时检查
+        if grep -q 'patches/' "$CONANFILE" 2>/dev/null || [ -d "$pkg_dir/patches" ]; then
+            ES_LINE=$(grep -E '^\s*exports_sources\s*=' "$CONANFILE" 2>/dev/null | head -1 || true)
+            if [ -n "$ES_LINE" ]; then
+                # 检查是否包含通配符 *（涵盖 patches/）
+                if ! echo "$ES_LINE" | grep -q '\*' 2>/dev/null; then
+                    # 没有通配符，检查是否显式包含 patches
+                    if [ -d "$pkg_dir/patches" ]; then
+                        PATCH_COUNT=$(find "$pkg_dir/patches" -name '*.patch' -o -name '*.diff' 2>/dev/null | wc -l)
+                        if [ "$PATCH_COUNT" -gt 0 ] && ! echo "$ES_LINE" | grep -qi 'patch' 2>/dev/null; then
+                            echo "[warn] L0q: exports_sources 可能未包含 patches/ — conan create 导出时可能丢失补丁"
+                            echo "       exports_sources: ${ES_LINE}"
+                            echo "       patches/ 目录有 ${PATCH_COUNT} 个补丁文件"
+                            echo "[hint] exports_sources 应包含补丁文件，或使用通配符"
+                        fi
+                    fi
+                fi
+            fi
+        fi
+    fi
+
     if [ "$L0_FAILED" = true ]; then
         echo "[fail] ${pkg_name}/${pkg_ver} — L0 quality gate failed:${L0_ERRORS}"
         L0_RESULT="fail"
