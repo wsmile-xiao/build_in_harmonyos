@@ -108,8 +108,9 @@ if [ -d "${GRAPH_DIR_G0}" ]; then
         fi
     fi
 
-    # G0b: knowledge/graph/ 下不应有非标准命名的 .kv 文件（只允许 E###.kv）
-    G0_BAD_KV=$(ls -1 "${GRAPH_DIR_G0}"/*.kv 2>/dev/null | grep -vE '/E[0-9][0-9][0-9]\.kv$' || true)
+    # G0b: knowledge/graph/ 下不应有非标准命名的 .kv 文件
+    #     （只允许 E###.kv + _template.kv + principles.kv）
+    G0_BAD_KV=$(ls -1 "${GRAPH_DIR_G0}"/*.kv 2>/dev/null | grep -vE '/E[0-9][0-9][0-9]\.kv$|/_template\.kv$|/principles\.kv$' || true)
     if [ -n "$G0_BAD_KV" ]; then
         G0_BAD_COUNT=$(echo "$G0_BAD_KV" | wc -l)
         echo "[fail] G0b: knowledge/graph/ 下有 ${G0_BAD_COUNT} 个非标准命名的 .kv 文件（仅允许 E###.kv）:"
@@ -150,6 +151,39 @@ if [ -d "${GRAPH_DIR_G0}" ]; then
         echo "        [ok] G0: Knowledge graph integrity check passed (${G0_KV_COUNT} entries)"
         echo "G0_RESULT=pass"
     fi
+fi
+
+# G0e: 仓库根目录文件白名单检查
+# 贡献者不应在根目录放置临时文件（ISSUE/PR草稿/笔记等）
+G0_ROOT_ALLOWED=".gitignore|CONTRIBUTING.md|KNOW_YOUR_WHY.md|LICENSE|README.md|SKILL.md|SUMMARY.md"
+echo "[step] G0e: Root directory whitelist check..."
+G0_ROOT_VIOLATIONS=""
+for f in $(git ls-files --full-name | grep -v '/'); do
+    if ! echo "$G0_ROOT_ALLOWED" | grep -qFx "$f" 2>/dev/null; then
+        case "$f" in
+            .gitignore|CONTRIBUTING.md|KNOW_YOUR_WHY.md|LICENSE|README.md|SKILL.md|SUMMARY.md)
+                ;;
+            *)
+                G0_ROOT_VIOLATIONS="${G0_ROOT_VIOLATIONS} ${f}"
+                ;;
+        esac
+    fi
+done
+if [ -n "$G0_ROOT_VIOLATIONS" ]; then
+    echo "[fail] G0e: 根目录存在非白名单文件（仅允许 ${G0_ROOT_ALLOWED}）:"
+    for f in $G0_ROOT_VIOLATIONS; do
+        echo "       ${f}"
+    done
+    echo "[hint]  PR 草稿/笔记/Issue 描述请放在对应包的 archives/ 目录或 PR 描述中"
+    echo "G0_RESULT=fail: root whitelist violation"
+    echo "L0_RESULT=skip: blocked_by_G0"
+    echo "L1_RESULT=skip: blocked_by_G0"
+    echo "L2_RESULT=skip: blocked_by_G0"
+    echo "L4_RESULT=skip: blocked_by_G0"
+    echo "L5_RESULT=skip: blocked_by_G0"
+    exit 1
+else
+    echo "        [ok] G0e: Root directory whitelist passed"
 fi
 
 # ── 1. Discover packages (BUG-9: respect CI_PACKAGES) ──
