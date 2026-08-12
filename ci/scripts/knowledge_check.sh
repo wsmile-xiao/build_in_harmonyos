@@ -37,7 +37,8 @@ if [ ! -d "${GRAPH_DIR}" ]; then
     echo "KC_RESULT=pass: no_graph"; exit 0
 fi
 
-KV_COUNT=$(ls -1 "${GRAPH_DIR}"/E[0-9]*.kv 2>/dev/null | wc -l)
+# 只统计标准正式条目 E###.kv（纯数字编号），排除 draft/非标准命名的文件
+KV_COUNT=$(ls -1 "${GRAPH_DIR}"/E[0-9][0-9][0-9].kv 2>/dev/null | wc -l)
 echo "  .kv 文件数: ${KV_COUNT}"
 
 # ═══════════════════════════════════════════════════════════════
@@ -57,6 +58,13 @@ fi
 
 # KC1b+1c: 用一次 grep 批量检测 draft:true 和 contributor_id
 KC1_ERRS=$(grep -rl '^draft:[[:space:]]*true\|^contributor_id:' "${GRAPH_DIR}"/E[0-9]*.kv 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')
+
+# KC1d: 文件名含 draft 的文件不应出现在正式目录
+KC1_NAME_ERRS=$(ls -1 "${GRAPH_DIR}"/E[0-9]*draft*.kv 2>/dev/null | xargs -r -n1 basename 2>/dev/null | tr '\n' ' ' || true)
+if [ -n "$KC1_NAME_ERRS" ]; then
+    KC1_ERRS="${KC1_ERRS} filename_draft(${KC1_NAME_ERRS})"
+fi
+
 if [ -n "$KC1_ERRS" ]; then
     fail "KC1: 草稿字段泄漏:${KC1_ERRS}"
 else
@@ -146,4 +154,8 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "KC_RESULT=$([ $ERRORS -eq 0 ] && echo 'pass' || echo 'fail')"
 echo "KC_ERRORS=${ERRORS}"
 
-exit $([ $ERRORS -eq 0 ] && echo 0 || echo 1)
+if [ "${ERRORS}" -eq 0 ]; then
+    exit 0
+else
+    exit 1
+fi
