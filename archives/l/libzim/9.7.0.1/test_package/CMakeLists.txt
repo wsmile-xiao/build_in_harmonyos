@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.5)
+project(test_libzim CXX)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(libzim REQUIRED IMPORTED_TARGET libzim)
+add_executable(test_libzim test.cpp)
+target_link_libraries(test_libzim PkgConfig::libzim)
+set_target_properties(test_libzim PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
