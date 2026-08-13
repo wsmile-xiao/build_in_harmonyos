@@ -1,0 +1,104 @@
+#====================================================================
+# E258 — harmonybrew 动态二进制依赖 OpenSSL 3.x，系统旧版缺符号
+# 发现于: aiken/1.1.23 (CI build failure)
+# 日期: 2026-08-12
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id: E318
+trigger_tool: cargo|rustc|ld
+phase: runtime
+error_signature: Error relocating.*symbol not found|OBJ_nid2sn.*symbol not found|SSL_CTX_new.*symbol not found|OSSL_PROVIDER_try_load.*symbol not found|CRYPTO_malloc.*symbol not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: dynamic-linking|openssl|musl
+match_keywords: cargo.real, symbol not found, relocating, OpenSSL, libssl.so, libcrypto.so, LD_LIBRARY_PATH, harmonybrew, dynamic binary, RUNPATH, OBJ_nid2sn, SSL_CTX_new, OSSL_PROVIDER_try_load
+title: harmonybrew 动态二进制依赖 OpenSSL 3.x 符号，系统旧版 libssl 缺符号
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: harmonybrew 提供的 cargo/rustc 等工具链二进制是动态链接 ELF，
+            NEEDED 列表含 libssl.so/libcrypto.so。其 RUNPATH 指向
+            harmonybrew openssl@3/lib（OpenSSL 3.6.3），但鸿蒙系统动态
+            加载器在解析 RUNPATH 前可能已从 /usr/lib 或 /system/lib 加载
+            了旧版 libssl.so.3（缺少 OBJ_nid2sn、SSL_CTX_new、
+            OSSL_PROVIDER_try_load 等 OpenSSL 3.x 符号），导致
+            "Error relocating cargo.real: symbol not found"。
+            
+            与 E078 不同：E078 是解释型语言扩展模块通过 dlopen 加载时
+            BIND_NOW 导致 Python API 符号缺失；本条是原生动态二进制
+            （cargo）的 RUNPATH 解析顺序问题，加载器优先用了系统旧版
+            OpenSSL。
+affected_scope: 所有依赖 OpenSSL 3.x 动态符号的 harmonybrew 工具链二进制
+                （cargo、rustc、curl-openssl 等），以及任何 RUNPATH 指向
+                harmonybrew 但加载器优先用系统旧版库的场景
+verification_cmd: |
+  # 检查 cargo.real 的 NEEDED 与 RUNPATH
+  readelf -d ~/.harmonybrew/Cellar/rust/1.97.1/bin/cargo.real | grep -E "NEEDED|RUNPATH"
+  # 检查系统是否有旧版 libssl
+  find /usr/lib /system/lib -name "libssl.so*" 2>/dev/null
+  # 诊断：直接运行 cargo，若报 "Error relocating... symbol not found" 则命中 E258
+  cargo --version 2>&1 | head -5
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: set-LD_LIBRARY_PATH-to-harmonybrew-openssl
+rec_description: 在 conanfile.py build() 开头显式设置 LD_LIBRARY_PATH 指向
+                 harmonybrew 的 OpenSSL 3.6.3 库目录
+                 （~/.harmonybrew/opt/openssl@3/lib），强制动态加载器
+                 优先用 harmonybrew 的匹配版本，而非系统旧版 libssl.so.3。
+                 关键：RUNPATH 不可靠（加载器可能优先系统路径），必须用
+                 LD_LIBRARY_PATH 覆盖。
+rec_command: |
+  import os
+  brew_lib = os.path.expanduser("~/.harmonybrew/opt/openssl@3/lib")
+  if os.path.isdir(brew_lib):
+      existing = os.environ.get("LD_LIBRARY_PATH", "")
+      os.environ["LD_LIBRARY_PATH"] = brew_lib + (":" + existing if existing else "")
+      os.environ["DYLD_LIBRARY_PATH"] = os.environ["LD_LIBRARY_PATH"]
+rec_auto_fix: false
+rec_impl: conanfile-env-override
+
+fallback_priority: 2
+fallback_approach: static-link-cargo
+fallback_description: 若 LD_LIBRARY_PATH 仍无法解决（如 harmonybrew OpenSSL
+                      版本也不匹配），考虑用 RUSTFLAGS 重新编译 cargo 为
+                      静态链接，消除对 libssl.so 的运行时依赖。
+fallback_command: RUSTFLAGS="-C target-feature=+crt-static" cargo build --release
+fallback_auto_fix: false
+fallback_impl: static-rebuild
+
+# ★ 禁止策略 ★
+forbid_1_pattern: 删除.*RUNPATH|patchelf.*--remove-rpath
+forbid_1_reason: 删除 RUNPATH 会让加载器完全依赖系统搜索路径，更容易命中旧版 libssl
+forbid_1_consequence: cargo 启动失败，报更多 symbol not found
+
+forbid_2_pattern: ln.*-sf.*system.*libssl.*harmonybrew
+forbid_2_reason: 用系统旧版 libssl 软链接覆盖 harmonybrew 会让所有依赖 OpenSSL 3.x 的程序都缺符号
+forbid_2_consequence: harmonybrew 全局工具链失效
+
+# ═══ Layer 4: 原则引用 ═══
+principles: R26,R33
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to: E078,E019
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file: drafts/E318-draft-OPENSSL-DYNLINK.md
+last_updated: 2026-08-12
+source_event: aiken/1.1.23 CI build failure: cargo.real relocating OBJ_nid2sn/SSL_CTX_new symbol not found
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: AtomCode
+source_pr: 4753
+source_commit: b76edaa60
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:
