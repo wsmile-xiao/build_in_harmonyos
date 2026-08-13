@@ -1,33 +1,33 @@
-# libxcb - X C Bindings Library
+# libxcb
 
-## 简介
+X11 C Binding (XCB) — replaces Xlib for low-level X Window System protocol access.
 
-libxcb 是 X11 协议的 C 语言绑定库，提供对 X Window System 的底层访问接口；libX11 内部也依赖它。
+## Upstream
 
-## 功能概述
+- Homepage: https://gitlab.freedesktop.org/xorg/lib/libxcb
+- Releases: https://xorg.freedesktop.org/archive/individual/lib/
 
-- X 协议 C 绑定（连接、事件、请求）
-- 按扩展生成协议头文件与实现（依赖 xcb-proto + c_client.py）
-- 通过 libXau / libXdmcp 处理认证与 XDMCP 路径
+## Dependencies
 
-## OHOS 适配
+| Dependency | Purpose |
+|-----------|---------|
+| xcb-proto | XML protocol descriptions + xcbgen Python generator (build-time) |
+| xorgproto | X11 protocol headers (X11/X.h, Xfuncproto.h, etc.) |
+| libxau | X authority library (runtime) |
+| libxdmcp | X Display Manager Control Protocol (optional runtime, for XDM auth) |
+| check | unit testing framework (build-time, enables upstream HAVE_CHECK test suite) |
 
-- configure：HMDFS 下 umask 调整、bash shebang 替换
-- 旧版 config.guess 不识别 HarmonyOS：仅在 OHOS 下补充 `--build/--host`
-- Conan 的 `xcb-proto.pc` 需补回 `xcbincludedir` / `pythondir`，并设置 `PYTHONPATH`
+## Build
 
-## 依赖关系
+Autotools (`configure` + `make`). The X.Org release tarball ships pre-generated
+configure + Makefile.in, so no autoreconf is needed.
 
-| 依赖 | 版本 | 用途 |
-|------|------|------|
-| xcb-proto | 1.17.0 | 协议 XML 与代码生成 |
-| libxau | 1.0.11 | Xauthority |
-| libxdmcp | 1.1.5 | XDMCP |
-| xorgproto | 2025.1 | 公共头（如 Xfuncproto.h） |
-| xtrans | 1.4.0 | X 传输层源（向 libX11/libXt/libXmu 透传） |
+## OHOS adaptation
 
-## 参考资料
+Patches (in `patches/`):
+- E205: config.guess/config.sub HarmonyOS triplet
+- E002: configure umask 077 -> 022 for HMDFS temp-dir exec
+- shebang: /bin/sh -> /data/service/hnp/bin/bash
 
-- 官网：https://xcb.freedesktop.org/
-- 源码：https://gitlab.freedesktop.org/xorg/lib/libxcb
-- 许可证：MIT
+The recipe supplies `--build=aarch64-unknown-linux-gnu --host=...` because OHOS
+file systems are noexec and configure conftest programs cannot execute on target.
