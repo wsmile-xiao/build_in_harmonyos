@@ -1,12 +1,54 @@
 # proj 9.3.1 适配笔记
 
-## 编译环境
+## 本地 CI 预审与测试闭环（2026-07-31）
+
+- 在 Ubuntu WSL2（x86_64、GCC 15.2.0、CMake/CTest 4.2.3、Conan 2.29.0）完成
+  `conan create archives/p/proj/9.3.1 --build=missing`。构建使用本地 Conan
+  缓存的 `sqlite3/3.49.1` 作为 host library 和 build tool。该本地预审曾启用
+  PROJ 上游 GoogleTest 1.11.0；当前 CI 配方关闭 `BUILD_TESTING`，因为 PROJ 会在
+  configure 阶段从 GitHub 下载 GoogleTest，CI 网络不可用时会导致生产库无法配置。
+- 本地预审中 `ctest -N` 注册 56 个上游测试；`ctest --output-on-failure --parallel 2`
+  实际执行 **56/56 通过（100%）**。该记录仅作为 Linux 预审证据，当前 OHOS CI
+  不执行上游测试树，改由下述消费者测试覆盖已安装包的关键 API。
+- `conan create` 已完成打包和本仓库 `test_package/CMakeLists.txt` 对安装树的
+  `PROJ::proj` 独立消费者验证：`ctest --output-on-failure` 实际执行
+  **1/1 通过（100%，0.07 秒）**；`test_proj.cpp` 内 6 个 API/地理计算断言均通过。
+  安装后的 `projinfo EPSG:4326` 也成功输出 WGS 84。
+- GCC 15 暴露上游两个 CLI 源文件缺少 `<cstdint>` 的问题；
+  `patches/0001-add-cstdint-to-cli-sources.patch` 只补充这两个 include，
+  补丁后的全量构建和全部 CTest 均通过。
+- 上述是本地 Linux x86_64 结果，不等同于 OpenHarmony 目标运行结果。PR 仍须由
+  远端 CI 在目标配置中重新构建和执行，不能将此记录表述为 OHOS 通过。
+
+## Conan 固化记录（2026-07-20）
+
+- 新增 `conanfile.py`、`conandata.yml` 和 `test_package/`，使用官方 OSGeo
+  源码包 `https://download.osgeo.org/proj/proj-9.3.1.tar.gz`。
+- 源码 SHA256：
+  `b0f919cb9e1f42f803a3e616c2b63a78e4d81ecfaed80978d570d3a5e29d10bc`。
+- PROJ 构建期必须运行 sqlite3 生成 `proj.db`，recipe 同时声明
+  `self.requires("sqlite3/3.49.1")` 和 `self.tool_requires("sqlite3/3.49.1")`。
+- 首版 Conan 包关闭 `ENABLE_TIFF`、`ENABLE_CURL` 和 `BUILD_PROJSYNC`，避免在
+  MapServer 依赖前置阶段引入未固化的 CURL/TIFF 全链；保留核心库和
+  `proj`、`cs2cs`、`cct`、`geod`、`gie`、`projinfo` 等常用命令。
+- `test_package/test_proj.cpp` 覆盖版本查询、context 生命周期、pipeline 坐标变换、
+  非法 projection 拒绝和 geodesic inverse 计算。
+- 早期 Windows 原生验证仅覆盖 configure/build/install 和消费者检查；完整的
+  上游 CTest 统计以本文件 2026-07-31 的 WSL 预审记录为准。
+- 本机未安装 OpenHarmony Conan，因此 `conan create proj/9.3.1` 需等待远端 OHOS CI。
+
+## 归档：2026-05 历史原生尝试（非当前 Conan 证据）
+
+以下记录仅保留旧的 OpenHarmony 原生构建排障背景；不表示当前 Conan recipe
+已在 OHOS 目标上验证，也不覆盖上文 2026-07-31 的本地测试结果。
+
+### 编译环境
 - 构建系统: cmake
 - 编译日期: 2026-05-29
 - 编译器: clang/clang++
 - 状态: built
 
-## 编译步骤
+### 编译步骤
 
 ```bash
 cd /storage/Users/currentUser/tmp/builds/proj-9.3.1.work
@@ -16,7 +58,7 @@ cmake .. \
   -DCMAKE_INSTALL_PREFIX=/storage/Users/currentUser/usr/local \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_SHARED_LIBS=OFF \
-  -DBUILD_TESTING=OFF \
+  -DBUILD_TESTING=ON \
   -DCMAKE_C_FLAGS="-fPIC -O2 -fuse-ld=bfd" \
   -DCMAKE_CXX_FLAGS="-fPIC -O2 -fuse-ld=bfd" \
   -DCMAKE_EXE_LINKER_FLAGS="-fuse-ld=bfd" \
@@ -28,7 +70,7 @@ make install DESTDIR=/storage/Users/currentUser/tmp/test-install-proj-9.3.1
 make install
 ```
 
-## 遇到的问题与解决方案
+### 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
@@ -36,11 +78,12 @@ make install
 | 2 | CMake configure 失败：lld 链接器缺少 libxml2.so.16 | OpenHarmony SDK 的 lld 依赖 libxml2，但库路径不正确 | 添加 -fuse-ld=bfd 标志使用 GNU ld 链接器 |
 | 3 | CMake 策略版本警告 | proj cmake/Ccache.cmake 使用 cmake_minimum_required(VERSION 3.5) | 添加 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 |
 
-## 源码修改
+### 源码修改
 
-无补丁。静态链接方案不需要修改源码。
+该历史尝试未记录补丁。当前 Conan recipe 使用
+`patches/0001-add-cstdint-to-cli-sources.patch`，详见上文当前验证记录。
 
-## 依赖版本
+### 依赖版本
 
 | 依赖 | 版本 | 说明 |
 |------|------|------|
@@ -48,7 +91,7 @@ make install
 | tiff | 4.7.1 | 动态库依赖 |
 | curl | 8.19.0 | 动态库依赖 |
 
-## 验证结果
+### 验证结果
 
 ```bash
 # 验证静态链接（无 libproj.so NEEDED）
@@ -62,14 +105,14 @@ ls -la archives/p/proj/9.3.1/packaging/
 # proj-9.3.1-ohos-aarch64-debug.tar.gz: 11.1 MB
 ```
 
-## 交付物
+### 交付物
 
 | 文件 | 大小 | 说明 |
 |------|------|------|
 | proj-9.3.1-ohos-aarch64.tar.gz | 65.7 MB | 预编译包 |
 | proj-9.3.1-ohos-aarch64-debug.tar.gz | 11.1 MB | 调试符号包 |
 
-## 注意事项
+### 注意事项
 
 1. **静态链接是关键**：BUILD_SHARED_LIBS=OFF 确保可执行文件不依赖 libproj.so，解决 RPATH 问题
 2. **链接器选择**：使用 -fuse-ld=bfd 避免 lld 的 libxml2 依赖问题
@@ -82,7 +125,7 @@ ls -la archives/p/proj/9.3.1/packaging/
 
 ---
 
-## 依赖修复记录（2026-05-29）
+### 依赖修复记录（2026-05-29）
 
 ### 问题描述
 1. 缺少 libsqlite3.so.0、libtiff.so.6、liblzma.so.5 依赖库
