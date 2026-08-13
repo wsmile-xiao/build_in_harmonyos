@@ -124,9 +124,8 @@ $ find $TEST_PREFIX/$DEFAULT_PREFIX -type f | wc -l
    - ruby-build 用于编译安装 Ruby 版本
    - 需要系统已安装编译工具链
    - Ruby 编译可能需要 30分钟-2小时
-
+**建议状态**: published（完成打包后）
 ---
 
-**编译结束**: 2026-05-19 19:55
+**编译结束**: 2026-08-08 04:59
 **最终状态**: built
-**建议状态**: published（完成打包后）
