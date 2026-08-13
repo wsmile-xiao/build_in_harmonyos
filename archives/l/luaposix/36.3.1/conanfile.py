@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — luaposix 36.3 (luke)"""
+"""Conan recipe — luaposix 36.3.1 (luke)"""
 
 import os
 
@@ -14,7 +14,7 @@ from conan.tools.files import (
 
 class LuaposixConan(ConanFile):
     name = "luaposix"
-    version = "36.3"
+    version = "36.3.1"
     description = "Lua bindings for POSIX APIs"
     license = "MIT"
     homepage = "https://github.com/luaposix/luaposix"
