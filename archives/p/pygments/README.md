@@ -1,14 +1,33 @@
 # Pygments
 
-Pygments is a syntax highlighting package written in Python.
+Pygments is a mature syntax-highlighting library and command-line tool written
+in Python.
 
-## Versions
+## Package contents
 
-- 2.20.0: adapted for HarmonyOS PC as a pure-Python package.
+- Public Python package: `pygments`
+- Command-line tool: `pygmentize`
+- License: BSD-2-Clause
 
-## Notes
+## OpenHarmony adaptation
 
-- The package installs the upstream pure-Python `pygments` package tree
-  under `lib/python/site-packages`.
-- No C extension is built; the package runs unmodified on OHOS aarch64.
-- Upstream core API test suite: 2469 passed / 8 skipped on OHOS.
+- Packages the architecture-independent Python sources directly.
+- Runs the complete 5224-case upstream pytest suite.
+- Runs a separate 20-assertion consumer test against the packaged API and CLI.
+- Requires no source patch and no Conan runtime dependency.
+
+## Usage
+
+```python
+from pygments import highlight
+from pygments.formatters import HtmlFormatter
+from pygments.lexers import PythonLexer
+
+html = highlight("print('hello')", PythonLexer(), HtmlFormatter())
+```
+
+```sh
+pygmentize -l python -f html example.py
+```
+
+Upstream: https://github.com/pygments/pygments
