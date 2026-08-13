@@ -1,0 +1,103 @@
+#====================================================================
+# E259 — toybox patch 无法处理带路径层级/fuzz 的上游补丁
+# 发现于: aiken/1.1.23 (libquickjs-sys bundled patches)
+# 日期: 2026-08-12
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id: E319
+trigger_tool: patch|cargo|make
+phase: compilation
+error_signature: Hunk.*FAILED|patch.*succeeded.*with fuzz|can't find file to patch|does not exist in index
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: build-tools|patch|toybox
+match_keywords: toybox patch, GNU patch, gpatch, libquickjs-sys, bundled patches, fuzz, Hunk FAILED, path strip, strip-components, patch -p1
+title: toybox patch 无法处理带路径层级/fuzz 的上游补丁，需前置 harmonybrew GNU patch
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: 鸿蒙系统 /usr/bin/patch 或 /system/bin/patch 是 toybox 实现，
+            缺少 GNU patch 的 fuzz tolerance（上下文偏移容差）和路径
+            层级自动剥离能力。带 bundled C 补丁的 Rust crate（如
+            libquickjs-sys 的 stack-overflow-signed.patch）的 hunks 上下文
+            与 vendored 源码有偏移，toybox patch 直接报 "Hunk #1 FAILED"，
+            而 GNU patch 能用 fuzz 2 容差成功应用（"Hunk #1 succeeded
+            at 1587 with fuzz 2 (offset -145)"）。
+affected_scope: 所有带 bundled C 补丁的 Rust crate（libquickjs-sys 等），
+                以及任何需要 fuzz tolerance 或路径层级剥离的补丁应用场景
+verification_cmd: |
+  # 检查系统 patch 是否为 toybox
+  ls -la /usr/bin/patch /system/bin/patch 2>/dev/null
+  /usr/bin/patch --version 2>&1 | head -2
+  # 检查 harmonybrew GNU patch
+  ls -la ~/.harmonybrew/bin/patch 2>/dev/null
+  ~/.harmonybrew/bin/patch --version 2>&1 | head -2
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: prepend-harmonybrew-gnu-patch
+rec_description: 在 conanfile.py build() 开头将 harmonybrew 的 GNU patch
+                 （~/.harmonybrew/bin/patch）前置到 PATH，确保 cargo build
+                 调用 build script 中的 patch 命令时用 GNU patch 而非 toybox。
+                 若 harmonybrew 未安装 gpatch，先通过 brew install gpatch。
+rec_command: |
+  import os, shutil
+  brew_bin = os.path.expanduser("~/.harmonybrew/bin")
+  gpatch = os.path.join(brew_bin, "patch")
+  if not (os.path.isfile(gpatch) and os.access(gpatch, os.X_OK)):
+      brew = os.path.join(brew_bin, "brew")
+      if os.path.isfile(brew):
+          self.run(f"{brew} install gpatch", env="conanbuild")
+  if os.path.isfile(gpatch) and os.access(gpatch, os.X_OK):
+      os.environ["PATH"] = brew_bin + ":" + os.environ.get("PATH", "")
+rec_auto_fix: false
+rec_impl: conanfile-env-override
+
+fallback_priority: 2
+fallback_approach: pre-apply-patches-manually
+fallback_description: 若 GNU patch 不可用，在 build() 前手动用 patch -p1
+                      应用 bundled 补丁，绕过 cargo build script 的自动
+                      补丁应用。
+fallback_command: |
+  cd $BUILD_SRC_DIR
+  for p in vendor/libquickjs-sys/patches/*.patch; do
+      /usr/bin/patch -p1 < "$p" || true
+  done
+fallback_auto_fix: false
+fallback_impl: manual-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern: patch.*--no-fuzz|patch.*--fuzz=0
+forbid_1_reason: 禁用 fuzz tolerance 会让带偏移上下文的补丁全部失败
+forbid_1_consequence: bundled C 补丁无法应用，cargo build 中断
+
+forbid_2_pattern: rm.*-f.*/usr/bin/patch|ln.*-sf.*gpatch.*/usr/bin/patch
+forbid_2_reason: 替换系统 patch 会影响所有依赖 /usr/bin/patch 的程序
+forbid_2_consequence: 系统级补丁工具失效，其他构建受影响
+
+# ═══ Layer 4: 原则引用 ═══
+principles: R1,R5
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to: E043
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file: drafts/E319-draft-TOYBOX-PATCH.kv
+last_updated: 2026-08-12
+source_event: aiken/1.1.23 CI build: libquickjs-sys bundled patches fail with toybox patch, need harmonybrew GNU patch
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: AtomCode
+source_pr: 4753
+source_commit: a0826ee94
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:
