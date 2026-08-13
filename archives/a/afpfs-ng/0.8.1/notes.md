@@ -70,3 +70,22 @@
 
 **编译结束**: 2026-07-17 12:46
 **最终状态**: published
+
+## 段错误修复（2026-08-07）
+
+### 问题
+afpcmd 和 afpgetstatus（带参数）运行时段错误（exit 139），原因：
+1. HarmonyOS 用户 UID（如 20001006）不在 /etc/passwd 中，getpwuid() 返回 NULL
+2. 代码未判空直接解引用 passwd->pw_name / memcpy from NULL
+3. afpgetstatus 调用 libafpclient_register(NULL)，循环线程访问 libafpclient->loop_started 时空指针解引用
+
+### 修复
+- 0013: lib/afp.c — afp_server_init() 中 getpwuid 返回 NULL 时跳过 memcpy（s 已 memset 清零）
+- 0014: cmdline/cmdline_afp.c — cmdline_afp_setup() 中 getpwuid 返回 NULL 时跳过 strncpy（url.username 默认空）
+- 0015: cmdline/getstatus.c — libafpclient_register(NULL) 替换为注册最小 struct（函数指针全 NULL，log_for_client 指向 stdout_log_for_client）
+
+### 验证
+- conan create 构建成功（15 个 patch 全部应用）
+- afpcmd: exit 0（修复前 exit 139）
+- afpgetstatus 127.0.0.1: exit 255 连接拒绝（修复前 exit 139）
+- CI build_and_test.sh 全流程通过（L0/L1/L1e/L2/L5）
