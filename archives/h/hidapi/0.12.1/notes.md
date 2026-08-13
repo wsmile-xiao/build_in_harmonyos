@@ -1,4 +1,4 @@
-# hidapi 0.12 适配笔记
+# hidapi 0.12.1 适配笔记
 
 ## 编译环境
 - 构建系统: cmake
@@ -9,7 +9,7 @@
 ## 编译步骤
 
 1. 下载上游源码 hidapi-0.12.0.tar.gz（GitHub 直连失败，经 ghproxy 镜像下载）
-2. 使用 CMake 构建（hidapi 0.12 同时支持 autotools 与 CMake，CMake 更适配 OHOS 交叉编译）
+2. 使用 CMake 构建（hidapi 0.12.1 同时支持 autotools 与 CMake，CMake 更适配 OHOS 交叉编译）
 3. 关键配置参数：
    ```bash
    cmake -DCMAKE_INSTALL_PREFIX=$DEFAULT_PREFIX \
@@ -20,7 +20,7 @@
          -DHIDAPI_WITH_HIDRAW=ON \
          ..
    ```
-4. conan create 构建 hidapi/0.12@ohpcd/stable，生成 test_package 并验证通过
+4. conan create 构建 hidapi/0.12.1@ohpcd/stable，生成 test_package 并验证通过
 
 ## 遇到的问题与解决方案
 
@@ -44,7 +44,7 @@
 ## 验证结果
 
 ```bash
-conan create archives/h/hidapi/0.12 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+conan create archives/h/hidapi/0.12.1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
 # 结果: PASS（G0-G4 + L2/L4/L5 全部通过）
 # 产物: libhidapi-hidraw.a + hidapi.h
 ```
@@ -62,3 +62,7 @@ conan create archives/h/hidapi/0.12 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=c
 
 - hidapi 在鸿蒙平台仅构建 hidraw 后端（直接访问 /dev/hidraw* 设备节点），不依赖 libusb
 - 静态库产物：libhidapi-hidraw.a
+---
+
+**编译结束**: 2026-08-11 11:56
+**最终状态**: built
