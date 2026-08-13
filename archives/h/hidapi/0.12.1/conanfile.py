@@ -9,7 +9,7 @@ from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 
 class HidapiConan(ConanFile):
     name = "hidapi"
-    version = "0.12"
+    version = "0.12.1"
     description = "A simple library for communicating with USB and Bluetooth HID devices"
     license = "MIT"
     homepage = "https://github.com/libusb/hidapi"
@@ -75,6 +75,10 @@ class HidapiConan(ConanFile):
         tc.variables["HIDAPI_NO_ICONV"] = "ON"
         tc.variables["HIDAPI_WITH_LIBUSB"] = "OFF"
         tc.variables["HIDAPI_WITH_HIDRAW"] = "ON"
+        # E266: OHOS SDK lld depends on libxml2.so.16 which may not be
+        # found by the dynamic linker. Use GNU ld instead.
+        tc.extra_exelinkflags.append("-fuse-ld=/data/service/hnp/bin/ld")
+        tc.extra_sharedlinkflags.append("-fuse-ld=/data/service/hnp/bin/ld")
         tc.generate()
 
     def build(self):
