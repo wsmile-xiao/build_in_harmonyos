@@ -17,7 +17,7 @@ from conan.tools.files import get, copy, apply_conandata_patches, export_conanda
 
 class OcamlConan(ConanFile):
     name = "ocaml"
-    version = "4.14.1.1.1"
+    version = "4.14.1.1.2"
     description = "OCaml is a functional, statically-typed language from the ML family"
     license = "LGPL-2.1"
     homepage = "https://ocaml.org"
@@ -50,11 +50,14 @@ class OcamlConan(ConanFile):
         # OHOS 下 as/ar 为 binutils 工具（GNU 汇编器/归档器），OCaml runtime 编译必需，显式注入
         asm = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict).get("asm", "as")
         ar = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict).get("ar", "ar")
-        # config.guess/configure 需要可写的临时目录（真机 HOME 受限），TMPDIR 指向构建目录
-        build_dir = self.build_folder
+        # config.guess/configure 需要可写的临时目录（可建子目录）：
+        # 构建目录在 CI 上不可建子目录（Permission denied），TMPDIR 用系统可写目录
+        tmp_dir = os.environ.get("TMPDIR", "/storage/Users/currentUser")
+        if not os.path.isdir(tmp_dir) or not os.access(tmp_dir, os.W_OK):
+            tmp_dir = "/storage/Users/currentUser"
         # shlex.quote 防御 conf 注入（R33 值可能含特殊字符）
         tool_env = (f"CC={shlex.quote(cc)} AS={shlex.quote(asm)} "
-                    f"AR={shlex.quote(ar)} TMPDIR={shlex.quote(build_dir)}")
+                    f"AR={shlex.quote(ar)} TMPDIR={shlex.quote(tmp_dir)}")
         # Step 1: Run configure with --no-create to generate config.status without executing it
         # OHOS hmmac 策略拒绝直接执行带 shebang 的脚本 (EACCES/126)，须用显式解释器调用
         # autoconf 只探测 gcc/cc，须显式注入 CC 指向 OHOS Clang
@@ -70,7 +73,7 @@ class OcamlConan(ConanFile):
             'tmp=${TMPDIR:-.}/conf$$-$RANDOM\n  (umask 077 && mkdir "$tmp")',
             'tmp="${TMPDIR:-.}/cs.$$"\n  rm -rf "$tmp" && mkdir -p "$tmp"')
         # Step 3: Run config.status manually
-        self.run(f"CC={shlex.quote(cc)} TMPDIR={shlex.quote(build_dir)} /bin/sh ./config.status",
+        self.run(f"CC={shlex.quote(cc)} TMPDIR={shlex.quote(tmp_dir)} /bin/sh ./config.status",
                  env="conanrun")
         # Step 4: Fix ASM: llvm-as expects LLVM IR, but OCaml generates GAS assembly.
         # 注入 AS=GNU as 时 configure 已生成正确 ASM，此替换仅在检测到 llvm-as 时生效（strict=False）
