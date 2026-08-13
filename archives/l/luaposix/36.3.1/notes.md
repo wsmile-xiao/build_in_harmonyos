@@ -1,7 +1,7 @@
-# 编译笔记 — luaposix 36.3
+# 编译笔记 — luaposix 36.3.1
 
 **软件名称**: luaposix (Lua POSIX Bindings)  
-**版本**: 36.3  
+**版本**: 36.3.1（适配修复后缀，R37/L0j：制品仓已存在 36.3，本次修复补丁管线故递增）
 **编译日期**: 2026-07-28  
 **编译状态**: built
 
@@ -26,7 +26,7 @@ luaposix 是 Lua 语言的 POSIX 接口绑定库，提供对操作系统 POSIX A
 ## 适配说明
 
 - luaposix 在独立 PR #3442 中适配
-- lmod PR #3282 将声明 `self.requires("luaposix/36.3")`（待 luaposix 合入后生效）
+- lmod PR #3282 将声明 `self.requires("luaposix/36.3.1")`（待 luaposix 合入后生效）
 - 需先合并 luaposix PR #3442，再合并 lmod PR #3282
 
 ## 质量门禁
@@ -43,7 +43,7 @@ luaposix 是 Lua 语言的 POSIX 接口绑定库，提供对操作系统 POSIX A
 
 ## 本地 CI 模拟结果（2026-08-01）
 
-在副本2 工作目录执行 `ci/conan/build_and_test.sh`（CI_PACKAGES=archives/l/luaposix/36.3，ohos-aarch64 profile）本地模拟 CI：
+在副本2 工作目录执行 `ci/conan/build_and_test.sh`（CI_PACKAGES=archives/l/luaposix/36.3.1，ohos-aarch64 profile）本地模拟 CI：
 
 - **conan create**：✅ 真实通过（exit 0），test_package 功能测试通过
 - **功能测试**：2/2 通过（posix 模块加载、posix.signal C 制品加载）
