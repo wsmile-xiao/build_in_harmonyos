@@ -12,11 +12,12 @@ json-glib是一个用于GLib的JSON解析库，使用Meson构建系统。
 
 ## 下载源码
 
-从华为镜像成功下载：
-- URL: https://repo.huaweicloud.com/gnome/sources/json-glib/1.6/json-glib-1.6.6.tar.xz
+使用 GNOME 官方发布包：
+- URL: https://download.gnome.org/sources/json-glib/1.6/json-glib-1.6.6.tar.xz
+- SHA256: 96ec98be7a91f6dde33636720e3da2ff6ecbb90e76ccaa49497f31a6855a490e
 - 大小：1.3MB
 
-其他镜像尝试失败（GNOME官方源、清华镜像均返回404）。
+华为云和 USTC 镜像可作为备用下载源。
 
 ## 编译过程
 
@@ -86,9 +87,18 @@ json-glib-validate和json-glib-format链接失败，缺少多个依赖：
 ## 质量验证结果
 
 - G1（二进制完整性）：✅ 通过
-- G2（功能可用性）：⚠️ 跳过（无工具程序）
+- G2（功能可用性）：✅ 本地消费者验证通过
 - G3（可移植性）：✅ 通过（静态库）
-- G4（档案完整性）：❌ 失败
+- G4（档案完整性）：等待修复提交的远端 OHOS CI/评审确认
+
+## 本地复验（2026-08-01）
+
+- 官方 `json-glib-1.6.6.tar.xz` 的 SHA256 为
+  `96ec98be7a91f6dde33636720e3da2ff6ecbb90e76ccaa49497f31a6855a490e`，与 `conandata.yml` 一致。
+- 在 Ubuntu x86_64 上以 `-Dtests=true -Dintrospection=disabled -Dgtk_doc=disabled -Dman=false` 配置官方源码，Meson 上游测试通过 **14/14**。
+- 将本配方补丁应用到干净源码、使用预生成枚举源并以静态库配置重新构建后，同一 Meson 上游测试通过 **14/14**。
+- 对 staged 安装树的 `libjson-glib-1.0.a` 和安装头文件编译、链接并运行 `test_package/test_json_glib.c`，消费者验证通过 **1/1**；该程序覆盖 JSON 解析、对象成员读取和数组元素计数。
+- 上述结果是原生 Linux 验证，不替代本提交推送后的 OHOS 交叉编译 CI。
 
 ## 补丁说明
 
@@ -107,12 +117,24 @@ json-glib-validate和json-glib-format链接失败，缺少多个依赖：
 - # Keep a reference to the generated header, for internal dependencies
 - json_enum_types_h = json_glib_enums.get(1)
 + # Use pre-generated enum files instead of gnome.mkenums (to avoid subprocess permission issues)
++ json_enum_types_h = configure_file(
++   input: 'json-enum-types.h',
++   output: 'json-enum-types.h',
++   copy: true,
++   install: true,
++   install_dir: install_header_dir,
++ )
 + json_glib_enums = [
 +   'json-enum-types.c',
-+   'json-enum-types.h',
++   json_enum_types_h,
 + ]
 + # Keep a reference to the generated header, for internal dependencies
-+ json_enum_types_h = files('json-enum-types.h')
++ json_glib_dep = declare_dependency(
++   link_with: json_lib,
++   include_directories: [ root_dir, include_directories('.') ],
++   dependencies: [gio_dep],
++   sources: [ json_enum_types_h, json_glib_gir ],
++ )
 ```
 
 ## 后续改进建议
@@ -121,6 +143,16 @@ json-glib-validate和json-glib-format链接失败，缺少多个依赖：
 2. 需要将enum文件生成规则固化为补丁
 3. 建议在知识图谱中添加"meson构建系统在OpenHarmony上的权限问题"
 
+## 2026-08-08 真机测试入口
+
+- `with_upstream_tests=False` 保持默认包构建不执行 Meson 上游测试。
+- 真机原生执行可显式设置 `with_upstream_tests=True`，配方随后调用
+  `meson.test()` 执行上游测试集；该选项不应被用于交叉构建或 CI 结果冒充
+  真机证据。
+- 消费者 `test_package` 现在以 Conan `can_run()` 决定是否运行。它不再仅因
+  `os=OHOS` 跳过，因此同一 OHOS 真机上的原生 Conan 事务会真正执行
+  `test_json_glib`。
+
 ---
 **编译结束**
-**最终状态**: built（静态库成功，工具程序待完善）
+**最终状态**: built（静态库与原生消费者验证通过；工具程序待后续依赖链完善；修复提交的远端 OHOS CI 待确认）
