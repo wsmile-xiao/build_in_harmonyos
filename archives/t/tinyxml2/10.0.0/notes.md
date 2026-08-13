@@ -74,3 +74,11 @@ $ ls ~/usr/local/include/tinyxml2.h
 
 **编译结束**: 2026-05-21 16:11
 **最终状态**: published
+
+## 上游测试实测（规则 4 补充，2026-08-12）
+
+- tinyxml2 10.0.0 上游测试为**自包含单文件测试框架**（xmltest.cpp，内部自带断言与统计，**不依赖 Google Test**）。
+- 实测环境：OHOS aarch64，clang 15.0.4（/data/service/hnp/bin/clang++），`-std=c++17 -O0` 编译 xmltest.cpp + tinyxml2.cpp。
+- 实测结果：**Pass 508 / Fail 0，通过率 100%**。
+- 已集成到 conanfile.py build()：OHOS 下编译并运行上游 xmltest，校验汇总行 "Fail 0"，失败即抛 ConanException 使 conan create 失败。
+- 同步更新 test_package/MANIFEST.yml：`upstream_test_in_build: true`、`assertion_count: 508`。
