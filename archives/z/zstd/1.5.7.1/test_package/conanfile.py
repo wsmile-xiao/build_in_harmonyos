@@ -10,7 +10,7 @@ class TestPkg(ConanFile):
 
     def build(self):
         dep = self.dependencies["zstd"].cpp_info
-        # 头闭包自检要用「所有依赖」的 include（如 tk.h #include <tcl.h>，须带上 tcl 的 include）。
+        # Include all dependency headers (for consumers that may need transitive includes)
         incs = []
         for _ref, _d in self.dependencies.items():
             incs += ["-I" + p for p in _d.cpp_info.includedirs]
@@ -22,10 +22,7 @@ class TestPkg(ConanFile):
 
     def test(self):
         if cross_building(self):
-            self.output.info("cross-building：只验编译+链接")
-            return
-        if False:
-            self.output.info("skip_test_run：GUI/app 库只验编译+链接")
+            self.output.info("cross-building: compile + link only")
             return
         bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
         self.run(f"{bash} -c './test_probe'", env="conanrun")

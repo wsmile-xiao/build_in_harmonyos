@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Conan recipe — zstd 1.5.7 (cmake)"""
+"""Conan recipe - zstd 1.5.7.1 (cmake)
+
+Zstandard (zstd) is a fast real-time compression algorithm by Facebook.
+Provides libzstd shared library and command-line tools (zstd, unzstd, zstdcat, etc.).
+
+Build: cmake (build/cmake subdirectory) with OHOS NDK ohos.toolchain.cmake,
+self-discovered (no conan_toolchain dependency). R32: os in ("Linux", "OHOS").
+"""
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.files import collect_libs, get
@@ -9,7 +16,7 @@ from conan.tools.files import apply_conandata_patches
 
 class ZstdConan(ConanFile):
     name = "zstd"
-    version = "1.5.7"
+    version = "1.5.7.1"
     description = "Zstandard - fast real-time compression algorithm"
     license = "BSD-3-Clause AND GPL-2.0-or-later"
     homepage = "https://github.com/facebook/zstd"
@@ -23,6 +30,7 @@ class ZstdConan(ConanFile):
             self.options.rm_safe("fPIC")
 
     def configure(self):
+        # R32: platform detection must use in ("Linux", "OHOS")
         if self.options.shared:
             self.options.rm_safe("fPIC")
 
@@ -40,8 +48,8 @@ class ZstdConan(ConanFile):
         CMakeToolchain(self).generate()
 
     def _ohos_toolchain(self):
-        # 自发现 OHOS NDK 的 ohos.toolchain.cmake（不依赖 profile host 段有没有 user_toolchain）：
-        # ① profile [conf] 已配就用；② 环境 OHOS_NDK_HOME；③ glob 设备/CI 的 SDK 布局。
+        # Self-discover OHOS NDK ohos.toolchain.cmake (no profile host user_toolchain
+        # dependency). Same approach as glfw/3.4.6, libjpeg-turbo/3.2.0.
         import os
         import glob
         ut = self.conf.get("tools.cmake.cmaketoolchain:user_toolchain", default=[], check_type=list)
@@ -54,38 +62,50 @@ class ZstdConan(ConanFile):
         if globbed:
             return globbed[-1]
         raise ConanInvalidConfiguration(
-            "找不到 ohos.toolchain.cmake：设 OHOS_NDK_HOME，或在 profile [conf] 配 "
-            "tools.cmake.cmaketoolchain:user_toolchain=[<sdk>/ohos/native/build/cmake/ohos.toolchain.cmake]")
+            "Cannot find ohos.toolchain.cmake: set OHOS_NDK_HOME, or configure "
+            "tools.cmake.cmaketoolchain:user_toolchain=[<sdk>/ohos/native/build/cmake/ohos.toolchain.cmake] in profile [conf]")
 
     def build(self):
-        # 直接用 OHOS NDK 的 ohos.toolchain.cmake（CMAKE_SYSTEM_NAME=OHOS + 平台模块 → cmake 认识系统、
-        # 正常出 SONAME/版本软链、GNUInstallDirs 不崩），而非 conan_toolchain（os=OHOS 退化成未知平台
-        # HarmonyOS → cmake 报 "System is unknown"，ML-0035）。自发现 toolchain 使 recipe 自包含、不依赖
-        # CI profile 的 host 段（与 glfw/3.4.6、libjpeg-turbo/3.2.0 同法）。
+        # Use OHOS NDK ohos.toolchain.cmake directly (CMAKE_SYSTEM_NAME=OHOS →
+        # cmake recognises the system, produces correct SONAME/version symlinks,
+        # GNUInstallDirs works). Avoids conan_toolchain which degenerates to
+        # "System is unknown HarmonyOS" (ML-0035).
         import os
         apply_conandata_patches(self)
         self._patch_gnu_qsort_r()
         toolchain = self._ohos_toolchain()
-        # zstd 的 CMakeLists 在 build/cmake 子目录
+        # Derive llvm-ar path from toolchain directory
+        llvm_bin = os.path.dirname(toolchain)  # .../build/cmake -> .../build
+        llvm_bin = os.path.join(os.path.dirname(os.path.dirname(llvm_bin)), "llvm", "bin")
+        cmake_ar = os.path.join(llvm_bin, "llvm-ar")
+        # OHOS SDK doesn't ship llvm-ranlib; create a wrapper that uses llvm-ar s
+        ranlib_wrapper = os.path.join(self.build_folder, "llvm-ranlib-shim")
+        with open(ranlib_wrapper, "w") as f:
+            f.write("#!/data/service/hnp/bin/bash\nexec {ar} s \"$@\"\n".format(ar=cmake_ar))
+        os.chmod(ranlib_wrapper, 0o755)
+        # zstd CMakeLists.txt is in build/cmake subdirectory
         cml_dir = os.path.join(self.source_folder, "build", "cmake")
         bdir = os.path.join(self.build_folder, "build-ohos")
         defs = " ".join([
-            '-DCMAKE_TOOLCHAIN_FILE="{}"'.format(toolchain),
+            '-DCMAKE_TOOLCHAIN_FILE={}'.format(toolchain),
+            '-DCMAKE_AR={}'.format(cmake_ar),
+            '-DCMAKE_RANLIB={}'.format(ranlib_wrapper),
             "-DOHOS_ARCH=arm64-v8a",
             "-DCMAKE_BUILD_TYPE={}".format(self.settings.build_type),
-            "-DCMAKE_INSTALL_LIBDIR=lib",  # ohos.toolchain 64 位默认装 lib64/，须强制 lib/ 与 conan cpp_info 一致
+            "-DCMAKE_INSTALL_LIBDIR=lib",
             "-DZSTD_BUILD_SHARED=ON",
-            "-DZSTD_BUILD_STATIC=OFF",     # 只出共享库
-            "-DZSTD_BUILD_PROGRAMS=OFF",   # 不编 zstd/unzstd/zstdcat 命令行
-            "-DZSTD_BUILD_TESTS=OFF",      # 跳过上游测试构建
+            "-DZSTD_BUILD_STATIC=ON",
+            "-DZSTD_BUILD_PROGRAMS=ON",
+            "-DZSTD_BUILD_TESTS=OFF",
         ])
-        self.run('cmake -B "{}" -S "{}" {}'.format(bdir, cml_dir, defs))
-        self.run('cmake --build "{}"'.format(bdir))
+        self.run('cmake -G Ninja -B {bdir} -S {cml_dir} {defs}'.format(bdir=bdir, cml_dir=cml_dir, defs=defs))
+        self.run('cmake --build {bdir} -- -j$(nproc)'.format(bdir=bdir))
 
     def _patch_gnu_qsort_r(self):
-        # OHOS 用 musl，无 GNU qsort_r。zstd 的 cover.c / zstd_deps.h 在 __linux__ 下自动 #define _GNU_SOURCE
-        # → 走 glibc qsort_r → 链接期 undefined symbol: qsort_r。加 __OHOS__ 例外（同上游对 __ANDROID__ 的处理，
-        # 注释即 "NDK doesn't ship qsort_r()"），令其走 C90 fallback（全局 ctx + 普通 qsort）。
+        # OHOS uses musl, which lacks GNU qsort_r. zstd's cover.c and zstd_deps.h
+        # #define _GNU_SOURCE under __linux__ → tries glibc qsort_r → undefined symbol.
+        # Add __OHOS__ exception (same as upstream's __ANDROID__ handling:
+        # "NDK doesn't ship qsort_r()"), falling back to C90 qsort (global ctx).
         import os
         old = "#if !defined(_GNU_SOURCE) && !defined(__ANDROID__)"
         new = "#if !defined(_GNU_SOURCE) && !defined(__ANDROID__) && !defined(__OHOS__)"
@@ -104,8 +124,9 @@ class ZstdConan(ConanFile):
         self._sign_shared_libs()
 
     def _sign_shared_libs(self):
-        # 鸿蒙 PC 对 dlopen 的 .so 校验代码签名。真机实测：经 SDK toolchain 构建的 .so 自签可能无效
-        # （dlopen 报 Permission denied）→ 剥旧 .codesign + binary-sign-tool -selfSign 1 重签（ML-0043）。
+        # HarmonyOS PC requires code signing for .so files loaded via dlopen.
+        # SDK toolchain-built .so may have invalid self-sign → strip old .codesign
+        # and re-sign with binary-sign-tool -selfSign 1 (ML-0043).
         import glob
         import os
         libdir = os.path.join(self.package_folder, "lib")
@@ -117,7 +138,7 @@ class ZstdConan(ConanFile):
         signer = "/data/service/hnp/bin/binary-sign-tool"
         for so in sos:
             if os.path.islink(so):
-                continue  # 只签真实 ELF，跳过软链
+                continue  # skip symlinks, sign real ELF only
             self.run('{oc} --remove-section .codesign "{f}" 2>/dev/null || true'.format(oc=objcopy, f=so))
             self.run('{sg} sign -inFile "{f}" -outFile "{f}" -selfSign 1'.format(sg=signer, f=so))
 
@@ -126,12 +147,14 @@ class ZstdConan(ConanFile):
         self.cpp_info.libs = explicit_libs or collect_libs(self)
         self.cpp_info.set_property("cmake_file_name", "zstd")
         self.cpp_info.set_property("cmake_target_name", "zstd::libzstd")
+        # R38: declare bindirs so CI recognizes CLI tools (zstd/unzstd/zstdcat)
+        self.cpp_info.bindirs = ["bin"]
         pkg = self._detect_pkg_config_name()
         if pkg:
             self.cpp_info.set_property("pkg_config_name", pkg)
 
     def _detect_pkg_config_name(self):
-        # 从 install 出的 lib/pkgconfig/*.pc 取第一个文件名 stem。
+        # Detect pkg-config name from installed .pc files.
         import glob
         import os
         pcs = sorted(glob.glob(os.path.join(self.package_folder, "lib", "pkgconfig", "*.pc")))

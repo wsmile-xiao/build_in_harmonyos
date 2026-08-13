@@ -1,6 +1,6 @@
-# zstd 1.5.7 — 鸿蒙 PC conan 制品
+# zstd 1.5.7.1 — 鸿蒙 PC conan 制品
 
-`os=OHOS, arch=armv8`(= aarch64)的 conan 包，支持两种消费形态。
+`os=OHOS, arch=armv8`(= aarch64)的 conan 包，提供共享库和命令行工具。
 
 ## 出包（鸿蒙 PC CI）
 
@@ -25,7 +25,7 @@ conan create . -pr ohos-native
 
 ```bash
 # 鸿蒙 PC：显式给 profile
-conan install --requires=zstd/1.5.7 -pr ohos-native
+conan install --requires=zstd/1.5.7.1 -pr ohos-native
 ```
 
 生成 `zstd-config.cmake` / `zstd.pc`（指向 cache）；`find_package(zstd)` 消费，运行期 `source conanrun.sh`。
@@ -33,15 +33,19 @@ conan install --requires=zstd/1.5.7 -pr ohos-native
 ## 消费 B：裸程序（设备 ~/usr/local + dlopen）
 
 ```bash
-conan install --requires=zstd/1.5.7 -pr ohos-native \
+conan install --requires=zstd/1.5.7.1 -pr ohos-native \
     --deployer=usr_local --deployer-folder=$HOME/usr/local
 ```
 
 头文件/库/.pc 展开到 `~/usr/local/{include,lib,bin}`；裸 `dlopen` 全路径即可命中。
 
+## 命令行工具
+
+构建产物包含 `zstd`、`unzstd`、`zstdcat` 等命令行工具，安装到 `bin/` 目录。可通过 `zstd --version` 验证。
+
 ## 点对点搬运预编译包（免 remote）
 
 ```bash
-conan cache save "zstd/1.5.7:*" --file zstd.tgz   # 出包机导出（recipe + 二进制）
+conan cache save "zstd/1.5.7.1:*" --file zstd.tgz   # 出包机导出（recipe + 二进制）
 conan cache restore zstd.tgz                               # 目标机导入
 ```
