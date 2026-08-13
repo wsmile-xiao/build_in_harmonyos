@@ -8,6 +8,7 @@ log4cpp 是一个 C++ 日志库，提供日志分类、优先级、Appender、La
 | 版本 | 状态 | 构建系统 | 本地验证 |
 |------|------|----------|----------|
 | 1.1.6 | built | CMake | 上游 CTest 17/17，消费者断言 17/17 |
+| 1.1.4 | pending | CMake | Autotools 上游测试 12/12，Conan 消费者 smoke 4/4，OHOS CI #11624 通过 |
 
 ## OHOS 适配
 
@@ -18,6 +19,8 @@ log4cpp 是一个 C++ 日志库，提供日志分类、优先级、Appender、La
 - 无源码补丁和第三方 Conan 依赖
 - OpenHarmony API 20 SDK 下库、17 个上游测试目标和消费者目标均可编译链接
 - 消费者交叉编译产物为 ELF64 AArch64
+- 1.1.4 版本作为 FastNetMon 适配依赖保留，构建时生成 Autotools 风格
+  `log4cpp/config.h` 供上游 CMake 使用
 
 本地交叉编译不等同于鸿蒙 PC 真机运行。运行验证仍以赛事官方 CI
 和真机结果为准。
