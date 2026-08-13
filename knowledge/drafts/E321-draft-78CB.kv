@@ -1,0 +1,60 @@
+# E321 draft: repairing the OHOS SDK lld host runtime without changing target linking
+
+id:                     E321
+trigger_tool:           conan|cmake|clang|lld|ctest
+phase:                  configuration|linking|testing|runtime
+error_signature:        Process not started.*\[permission denied\]|[0-9]+% tests failed.*BAD_COMMAND|The active OHOS SDK linker failed its GNU-flavor probe
+
+severity:               3
+category:               ohos-sdk|linking|testing|elf-execution
+match_keywords:         lld -flavor gnu, GNU ld fallback, BAD_COMMAND, permission denied, libxml2.so.16, LD_LIBRARY_PATH, CTest
+title:                  OHOS SDK lld host-runtime repair must preserve target linker semantics
+
+root_cause:             Repairing the OHOS SDK lld host runtime has two independent scope hazards. A bare invocation of the generic lld driver can return nonzero because no linker flavor was selected, falsely activating a GNU ld fallback. That fallback bypasses the configured SDK clang/lld path and can produce target test executables rejected by HarmonyOS execution policy. Separately, keeping the SDK host LD_LIBRARY_PATH active during CTest leaks host-only libraries into target process startup and makes otherwise valid tests report BAD_COMMAND.
+affected_scope:         OHOS Conan/CMake builds that repair the SDK lld libxml2.so.16 dependency and then execute generated target binaries on a HarmonyOS worker or device.
+verification_cmd:       LD_LIBRARY_PATH="${SDK_LLVM_LIB}:${LD_LIBRARY_PATH:-}" "${SDK_LLVM_LIB%/lib}/bin/lld" -flavor gnu --version && ctest --output-on-failure --no-tests=error
+
+rec_priority:           1
+rec_approach:           preserve-sdk-lld-with-scoped-host-runtime
+rec_description:        Derive llvm/lib from the active Conan compiler, require its ABI-matched libxml2.so.16, probe the generic driver with -flavor gnu, and prepend that directory only while CMake configures, builds, or installs. Restore the environment before CTest and fail fast if the SDK linker remains unusable.
+rec_command:            SDK_LLVM_LIB="$(dirname "$(dirname "$("$CXX" -print-resource-dir)")")"; LD_LIBRARY_PATH="${SDK_LLVM_LIB}:${LD_LIBRARY_PATH:-}" "${SDK_LLVM_LIB%/lib}/bin/lld" -flavor gnu --version
+rec_auto_fix:           false
+rec_impl:               conan-recipe-environment
+
+fallback_priority:      2
+fallback_approach:      fail-fast-with-linker-stderr
+fallback_description:   If the active SDK has no matching libxml2.so.16 or its flavor-aware lld probe fails, stop recipe generation with the probe stderr instead of silently changing linkers.
+fallback_command:       conan create . --build=missing
+fallback_auto_fix:      false
+fallback_impl:          conan-exception
+
+forbid_1_pattern:       -fuse-ld=/data/service/hnp/bin/ld|CMAKE_(EXE|SHARED|MODULE)_LINKER_FLAGS.*fuse-ld
+forbid_1_reason:        A system GNU ld fallback changes the target linker path after the SDK lld probe and bypasses the toolchain behavior expected by HarmonyOS CI.
+forbid_1_consequence:   Compilation and linking may finish, but every generated test executable can fail to start with permission denied.
+forbid_2_pattern:       LD_LIBRARY_PATH=.*llvm/lib.*(ctest|cmake\.test)|with.*build_environment.*cmake\.test
+forbid_2_reason:        The SDK llvm/lib directory contains host linker runtime libraries and must not remain active while target executables run.
+forbid_2_consequence:   CTest reports the complete suite as BAD_COMMAND even though configure and compilation succeeded.
+
+principles:             P010, P014, P017
+
+causes:                 []
+caused_by:              [E120, E132]
+similar_to:             []
+conflicts_with:         [E266]
+prerequisite_of:        []
+
+doc_file:               doc/E321.md
+last_updated:           2026-08-13
+source_event:           abseil 20260526 PR #5118 official CI #22036/#22158/#22206/#22584/#22968
+
+authors:                wxjshr <wxjshr@noreply.gitcode.com>
+source_pr:              OpenHarmonyPCDeveloper/build_in_harmonyos#5118
+source_commit:          b6273b313d
+
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-13
+
+draft:                  true
+contributor_id:         78CB
