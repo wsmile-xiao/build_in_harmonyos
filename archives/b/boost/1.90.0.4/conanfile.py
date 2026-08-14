@@ -1,218 +1,281 @@
 #!/usr/bin/env python3
-"""Conan recipe for Boost 1.90.0.4 Morpheus compiled components."""
+"""Conan recipe for Boost 1.90.0.4 compiled components.
+
+The existing boost/1.90.0 archive is intentionally header-only. This revision
+adds the compiled Boost libraries needed by downstream packages such as
+FastNetMon while keeping the upstream source version at 1.90.0.
+"""
 
 import glob
 import os
-import shutil
+import stat
+import sys
 
 from conan import ConanFile
-from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import (
-    apply_conandata_patches,
-    collect_libs,
-    copy,
-    export_conandata_patches,
-    get,
-)
+from conan.errors import ConanInvalidConfiguration
+from conan.tools.build import can_run
+from conan.tools.files import copy, get, replace_in_file
 
 
-class BoostConan(ConanFile):
+class BoostCompiledConan(ConanFile):
     name = "boost"
     version = "1.90.0.4"
-    description = "Boost C++ libraries with Morpheus-required compiled components"
+    description = "Boost C++ Libraries 1.90.0 compiled components and headers"
     license = "BSL-1.0"
     homepage = "https://www.boost.org/"
-    url = "https://github.com/boostorg/boost"
+    url = ""
+    topics = ("boost", "cpp", "thread", "serialization", "regex")
     package_type = "library"
+    settings = "os", "arch", "compiler", "build_type"
+    options = {
+        "shared": [True, False],
+        "fPIC": [True, False],
+        "with_upstream_tests": [True, False],
+    }
+    default_options = {"shared": False, "fPIC": True, "with_upstream_tests": False}
 
-    settings = "os", "compiler", "build_type", "arch"
-    options = {"shared": [True, False], "fPIC": [True, False]}
-    default_options = {"shared": True, "fPIC": True}
-
-    def export_sources(self):
-        export_conandata_patches(self)
-
-    def config_options(self):
-        if str(self.settings.os) == "Windows":
-            self.options.rm_safe("fPIC")
-
-    def configure(self):
-        if self.options.shared:
-            self.options.rm_safe("fPIC")
+    _components = (
+        "atomic",
+        "chrono",
+        "filesystem",
+        "program_options",
+        "regex",
+        "serialization",
+        "system",
+        "thread",
+        "timer",
+    )
+    _upstream_test_targets = tuple(f"libs/{component}/test" for component in _components)
 
     def layout(self):
-        cmake_layout(self)
+        self.folders.source = "src"
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
 
-    def generate(self):
-        tc = CMakeToolchain(self)
-        tc.variables["BUILD_SHARED_LIBS"] = bool(self.options.shared)
-        tc.variables["BUILD_TESTING"] = False
-        # 1.90.0.1 的组件集不含 serialization / asio / graph，
-        # pinocchio 4.1.0 要 `Boost COMPONENTS filesystem serialization`，
-        # 且其 serialization/serializable.hpp 直接 #include <boost/asio/streambuf.hpp>，
-        # 实测报 "fatal error: 'boost/asio/streambuf.hpp' file not found"。
-        # 本版（1.90.0.2）在原集合上**只增不减**，老版本原样保留不受影响。
-        tc.variables["BOOST_INCLUDE_LIBRARIES"] = (
-            # 组件集 = 原 1.90.0.1 的集合（只增不减）+ pinocchio 4.1.0 实际需要的。
-            #
-            # ⚠️ **`#include <boost/X>` 里的 X 不等于 boost 的库名**，不能直接拿来当组件：
-            #     boost/next_prior.hpp → utility        boost/shared_ptr.hpp → smart_ptr
-            #     boost/version.hpp    → config         boost/none.hpp       → optional
-            #     boost/archive/*      → serialization  boost/blank.hpp      → utility
-            # 上一轮把 include 目录名直接当库名，漏了 utility，撞 next_prior.hpp not found。
-            #
-            # 头文件库加进来成本近乎为零（只多装头、不增编译时间），故宁可给足。
-            "algorithm;array;asio;assert;atomic;bind;circular_buffer;concept_check;"
-            "config;container;container_hash;conversion;core;detail;dynamic_bitset;"
-            "filesystem;foreach;function;functional;fusion;graph;integer;io;iostreams;"
-            "iterator;lexical_cast;logic;math;move;mpl;multiprecision;numeric/conversion;"
-            "optional;predef;preprocessor;program_options;property_tree;range;ratio;"
-            "serialization;smart_ptr;static_assert;system;throw_exception;tokenizer;"
-            "tuple;type_index;type_traits;typeof;utility;variant;winapi;"
-            # ── 1.90.0.3 新增：ecell4-base 2.1.2 需要 ──────────────────────
-            # ⚠️ 嵌套库要用**斜杠**：numeric/interval，不是 numeric_interval。
-            # 依据 tools/cmake/include/BoostRoot.cmake:308 —
-            #   file(GLOB __boost_libraries RELATIVE .../libs "libs/*/CMakeLists.txt"
-            #                                                 "libs/numeric/*/CMakeLists.txt")
-            # 校验是 "${lib}/CMakeLists.txt" IN_LIST __boost_libraries，
-            # 列表项形如 numeric/interval/CMakeLists.txt。
-            # （第 258 行那个 ^numeric_ → numeric/ 的替换只作用于**依赖名**，不是这里。）
-            # 写错不会报错、只 WARNING「has not been found」，然后**静默不装那些头**——
-            # 实证：1.90.0.2 起 numeric_conversion 就是错的，一直没人发现，
-            # 因为它被别的库当依赖捎带进来了；而 interval/odeint/ublas 没人捎带，头就真缺了。
-            # 前三个 + interval/odeint/ublas 都是 header-only（INTERFACE 库），
-            # 加进来零编译开销；**regex 和 date_time 是编译型**，有实际构建成本。
-            "format;multi_array;ptr_container;date_time;regex;"
-            "numeric/interval;numeric/odeint;numeric/ublas"
-        )
-        tc.variables["BOOST_EXCLUDE_LIBRARIES"] = "context;coroutine;fiber"
-        tc.variables["CMAKE_DISABLE_FIND_PACKAGE_ICU"] = True
-        tc.variables["CMAKE_TRY_COMPILE_TARGET_TYPE"] = "STATIC_LIBRARY"
+    def _b2_executable(self):
+        return "b2.exe" if self.settings.os == "Windows" else "./b2"
 
+    def _b2_variant(self):
+        build_type = str(self.settings.build_type)
+        variants = {
+            "Debug": "debug",
+            "Release": "release",
+            "RelWithDebInfo": "release",
+            "MinSizeRel": "release",
+        }
+        return variants.get(build_type, "release")
+
+    def _bootstrap_command(self):
+        if self.settings.os == "Windows":
+            compiler = str(self.settings.compiler)
+            toolset = "gcc" if compiler == "gcc" else "clang" if compiler == "clang" else ""
+            return "bootstrap.bat" + (f" {toolset}" if toolset else "")
+        libraries = ",".join(self._components)
+        if self.settings.os == "OHOS":
+            return f"sh bootstrap.sh --with-toolset=clang --with-libraries={libraries}"
+        return f"sh bootstrap.sh --with-libraries={libraries}"
+
+    def _b2_common_args(self):
+        build_type = str(self.settings.build_type)
+        link = "shared" if self.options.shared else "static"
+        jobs = min(os.cpu_count() or 2, 8)
+        arch = str(self.settings.arch)
+        address_model = "64" if arch in ("x86_64", "aarch64", "arm64") or arch.startswith(("armv8", "armv9")) else "32"
+        args = [
+            f"-j{jobs}",
+            "--layout=system",
+            f"variant={self._b2_variant()}",
+            f"link={link}",
+            f"address-model={address_model}",
+            "threading=multi",
+            "runtime-link=shared",
+            "cxxstd=14",
+        ]
         if str(self.settings.os) == "OHOS":
-            tc.variables["BOOST_INSTALL_NO_VERSIONED_LIBS"] = True
-            tc.variables["BOOST_FILESYSTEM_DISABLE_STATX"] = True
-            tc.variables["BOOST_FILESYSTEM_DISABLE_COPY_FILE_RANGE"] = True
-            for language in ("C", "CXX"):
-                tc.variables[
-                    f"CMAKE_SHARED_LIBRARY_SONAME_{language}_FLAG"
-                ] = "-Wl,-soname,"
-                tc.variables[
-                    f"CMAKE_SHARED_LIBRARY_RUNTIME_{language}_FLAG"
-                ] = "-Wl,-rpath,"
-                tc.variables[
-                    f"CMAKE_SHARED_LIBRARY_RUNTIME_{language}_FLAG_SEP"
-                ] = ":"
-                tc.variables[
-                    f"CMAKE_SHARED_LIBRARY_RPATH_LINK_{language}_FLAG"
-                ] = "-Wl,-rpath-link,"
-            tc.variables["CMAKE_BUILD_RPATH_USE_ORIGIN"] = True
+            args.extend([
+                "toolset=clang",
+                "target-os=linux",
+                f"--user-config={self._ohos_user_config_path()}",
+            ])
+        if build_type == "RelWithDebInfo":
+            args.append("debug-symbols=on")
+        elif build_type == "MinSizeRel":
+            args.append("optimization=space")
+        if self.settings.os != "Windows" and not self.options.shared and self.options.fPIC:
+            args.append("cxxflags=-fPIC")
+        for component in self._components:
+            args.append(f"--with-{component}")
+        return args
 
-        tc.generate()
+    def _ohos_user_config_path(self):
+        return os.path.join(self.source_folder, "user-config-ohos.jam").replace("\\", "/")
+
+    def _ohos_compiler_wrapper_path(self):
+        return os.path.join(self.source_folder, "ohos-clangxx-wrapper.py").replace("\\", "/")
+
+    def _write_ohos_user_config(self):
+        if str(self.settings.os) != "OHOS":
+            return
+        compilers = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict) or {}
+        cxx = compilers.get("cpp") or compilers.get("cxx")
+        if not cxx:
+            raise ConanInvalidConfiguration(
+                "OHOS cross-compilation requires tools.build:compiler_executables "
+                "to define cpp or cxx in [conf]"
+            )
+        cxx = str(cxx).replace("\\", "/")
+        target = self._ohos_target_triple()
+        wrapper = self._ohos_compiler_wrapper_path()
+        self._write_ohos_compiler_wrapper(wrapper, cxx, target)
+        cxxflags = "-fPIC"
+        linkflags = "-fPIC"
+        with open(self._ohos_user_config_path(), "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                "# Generated by the Conan recipe for OHOS Boost.Build.\n"
+                f"using clang : : {wrapper} : <cxxflags>\"{cxxflags}\" <linkflags>\"{linkflags}\" ;\n"
+            )
+
+    def _write_ohos_compiler_wrapper(self, wrapper, cxx, target):
+        python = sys.executable.replace("\\", "/")
+        with open(wrapper, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                f"#!{python}\n"
+                "import os\n"
+                "import sys\n\n"
+                f"real_cxx = {cxx!r}\n"
+                f"target = {target!r}\n"
+                "filtered = []\n"
+                "skip_next = False\n"
+                "for arg in sys.argv[1:]:\n"
+                "    if skip_next:\n"
+                "        skip_next = False\n"
+                "        continue\n"
+                "    if arg.startswith('--target='):\n"
+                "        continue\n"
+                "    if arg == '-target':\n"
+                "        skip_next = True\n"
+                "        continue\n"
+                "    if arg in ('-m32', '-m64'):\n"
+                "        continue\n"
+                "    filtered.append(arg)\n"
+                "os.execvp(real_cxx, [real_cxx, f'--target={target}', *filtered])\n"
+            )
+        current_mode = os.stat(wrapper).st_mode
+        os.chmod(wrapper, current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+    def _ohos_target_triple(self):
+        arch = str(self.settings.arch)
+        if arch in ("armv8", "aarch64", "arm64") or arch.startswith(("armv8", "armv9")):
+            return "aarch64-linux-ohos"
+        return "arm-linux-ohos"
+
+    def _with_ohos_tempdir(self, command):
+        if self.settings.os != "OHOS":
+            return command
+        tmp_dir = os.path.join(self.build_folder, "tmp").replace("\\", "/")
+        os.makedirs(tmp_dir, exist_ok=True)
+        return f'TMPDIR="{tmp_dir}" TMP="{tmp_dir}" TEMP="{tmp_dir}" {command}'
 
     def build(self):
-        apply_conandata_patches(self)
-        cmake = CMake(self)
-        cmake.configure()
-        cmake.build()
+        if self.settings.os == "OHOS":
+            replace_in_file(
+                self,
+                os.path.join(self.source_folder, "bootstrap.sh"),
+                '"$my_dir/tools/build/src/engine/build.sh" ${TOOLSET}',
+                'sh "$my_dir/tools/build/src/engine/build.sh" ${TOOLSET}',
+                strict=True,
+            )
+        self.run(self._with_ohos_tempdir(self._bootstrap_command()), cwd=self.source_folder)
+        self._write_ohos_user_config()
+        b2_args = " ".join(self._b2_common_args())
+        self.run(self._with_ohos_tempdir(f"{self._b2_executable()} {b2_args} stage"), cwd=self.source_folder)
+        if self.options.with_upstream_tests and can_run(self):
+            self.run(
+                self._with_ohos_tempdir(
+                    f"{self._b2_executable()} {b2_args} {' '.join(self._upstream_test_targets)}"
+                ),
+                cwd=self.source_folder,
+            )
+        elif self.options.with_upstream_tests:
+            self.output.info(
+                "Skipping requested upstream Boost runtime tests while cross-building; "
+                "run them on the target before interpreting their result"
+            )
+        else:
+            self.output.info(
+                "Skipping the optional full Boost upstream test matrix; "
+                "test_package remains the required package acceptance test"
+            )
 
     def package(self):
-        cmake = CMake(self)
-        cmake.install()
+        copy(self, "LICENSE_1_0.txt", src=self.source_folder, dst=os.path.join(self.package_folder, "licenses"))
+        prefix = self.package_folder.replace("\\", "/")
+        self._write_ohos_user_config()
+        b2_args = " ".join(self._b2_common_args())
+        self.run(
+            self._with_ohos_tempdir(
+                f"{self._b2_executable()} {b2_args} --prefix=\"{prefix}\" install"
+            ),
+            cwd=self.source_folder,
+        )
+
+        # b2 installs only selected component headers. Downstreams also rely on
+        # header-only Boost libraries, so preserve the entire upstream tree.
+        include_root = os.path.join(self.package_folder, "include", "boost")
         copy(
             self,
-            "LICENSE_1_0.txt",
-            src=self.source_folder,
-            dst=os.path.join(self.package_folder, "licenses"),
+            "*",
+            src=os.path.join(self.source_folder, "boost"),
+            dst=include_root,
+            keep_path=True,
         )
-        self._sign_shared_libraries()
+        for component_include in glob.glob(os.path.join(self.source_folder, "libs", "*", "include", "boost")):
+            copy(self, "*", src=component_include, dst=include_root, keep_path=True)
 
-    def _sign_shared_libraries(self):
-        if str(self.settings.os) != "OHOS" or not self.options.shared:
-            return
-
-        objcopy = self._find_ohos_tool("llvm-objcopy")
-        signer = self._find_ohos_tool("binary-sign-tool")
-        if not objcopy or not signer:
-            self.output.warning(
-                "OHOS signing tools are unavailable; native validation must sign shared libraries."
-            )
-            return
-
-        libraries = glob.glob(
-            os.path.join(self.package_folder, "lib", "**", "*.so*"), recursive=True
+        required_headers = (
+            "format.hpp",
+            os.path.join("beast", "core", "static_string.hpp"),
         )
-        for library in libraries:
-            if os.path.islink(library):
-                continue
-            self._sign_elf_atomically(library, objcopy, signer)
-
-    def _sign_elf_atomically(self, path, objcopy, signer):
-        original_mode = os.stat(path).st_mode
-        temporary = f"{path}.signing"
-        try:
-            shutil.copy2(path, temporary)
-            self.run(f'"{objcopy}" --remove-section .codesign "{temporary}"')
-            self.run(
-                f'"{signer}" sign -inFile "{temporary}" '
-                f'-outFile "{temporary}" -selfSign 1'
+        missing = [header for header in required_headers if not os.path.isfile(os.path.join(include_root, header))]
+        if missing:
+            raise ConanInvalidConfiguration(
+                "Boost package header export is incomplete: " + ", ".join(missing)
             )
-            os.chmod(temporary, original_mode)
-            os.replace(temporary, path)
-        finally:
-            if os.path.exists(temporary):
-                os.remove(temporary)
-
-    def _find_ohos_tool(self, name):
-        compilers = self.conf.get(
-            "tools.build:compiler_executables", default={}, check_type=dict
-        ) or {}
-        compiler_dir = os.path.dirname(compilers.get("cpp", ""))
-        candidates = [
-            os.path.join(compiler_dir, name) if compiler_dir else "",
-            os.path.join("/data/service/hnp/bin", name),
-            shutil.which(name) or "",
-        ]
-        return next((path for path in candidates if os.path.isfile(path)), "")
-
-    def _component_library(self, available_libraries, component):
-        exact = f"boost_{component}"
-        if exact in available_libraries:
-            return exact
-        matches = sorted(
-            library
-            for library in available_libraries
-            if library.startswith(f"boost_{component}")
-        )
-        if not matches:
-            self.output.warning(
-                f"Component '{component}': no library matching 'boost_{component}' found"
-            )
-        return matches[0] if matches else ""
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "Boost")
+        self.cpp_info.set_property("cmake_find_mode", "both")
         self.cpp_info.includedirs = ["include"]
-        available_libraries = set(collect_libs(self))
+        self.cpp_info.libdirs = ["lib"]
 
-        for name in ("headers",):
-            component = self.cpp_info.components[name]
-            component.includedirs = ["include"]
-            component.set_property("cmake_target_name", f"Boost::{name}")
+        header_info = self.cpp_info.components["boost"]
+        header_info.set_property("cmake_target_name", "Boost::boost")
+        header_info.set_property("cmake_file_name", "Boost")
+        header_info.includedirs = ["include"]
+        header_info.libdirs = []
+        header_info.libs = []
 
-        for name in ("atomic", "container", "date_time", "filesystem", "program_options", "regex", "system"):
-            component = self.cpp_info.components[name]
-            component.includedirs = ["include"]
-            library = self._component_library(available_libraries, name)
-            if library:
-                component.libs = [library]
-            component.set_property("cmake_target_name", f"Boost::{name}")
+        for component in self._components:
+            info = self.cpp_info.components[component]
+            info.set_property("cmake_target_name", f"Boost::{component}")
+            info.set_property("cmake_file_name", "Boost")
+            info.includedirs = ["include"]
+            info.libdirs = ["lib"]
+            info.libs = [f"boost_{component}"]
 
+        # Boost.System is header-only in this upstream release; keeping a
+        # Boost::system component lets downstream component dependencies resolve
+        # without making CMakeDeps search for a non-existent libboost_system.
+        self.cpp_info.components["system"].libdirs = []
+        self.cpp_info.components["system"].libs = []
+
+        self.cpp_info.components["chrono"].requires = ["atomic", "system"]
         self.cpp_info.components["filesystem"].requires = ["atomic", "system"]
-        self.cpp_info.components["program_options"].requires = [
-            "container",
-            "headers",
-        ]
+        self.cpp_info.components["program_options"].requires = ["regex"]
+        self.cpp_info.components["serialization"].requires = ["system"]
+        self.cpp_info.components["thread"].requires = ["chrono", "atomic", "system"]
+        self.cpp_info.components["timer"].requires = ["chrono"]
+
+        if str(self.settings.os) in ("Linux", "OHOS", "FreeBSD"):
+            self.cpp_info.components["thread"].system_libs.append("pthread")
