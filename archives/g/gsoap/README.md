@@ -34,8 +34,8 @@ gSOAP is a toolkit for developing SOAP/XML web services and clients in C and C++
 
 ### Known Issues
 
-- SSL functionality is disabled in this build (--disable-ssl) to simplify dependencies
-- Full SSL support requires OpenSSL to be properly installed and configured
+- SSL functionality is **enabled** in this build using OpenSSL 1.1.1w from Conan artifact repo
+- poll() is used exclusively instead of select() to avoid __fd_chk dependency
 
 ### Differences from Linux
 
@@ -73,11 +73,12 @@ cd gsoap-2.8.142
 # Regenerate configure (recommended for OHOS)
 autoreconf -fvi
 
-# Configure
+# Configure (SSL enabled, no trimming)
 ./configure --prefix=/usr/local \
-    --disable-ssl \
-    CPPFLAGS="-I/usr/local/include" \
-    LDFLAGS="-L/usr/local/lib"
+    CPPFLAGS="-I/usr/local/include -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0" \
+    LDFLAGS="-L/usr/local/lib" \
+    CFLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0" \
+    CXXFLAGS="-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0"
 
 # Build
 make -j$(nproc)
