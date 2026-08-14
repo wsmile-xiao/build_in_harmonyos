@@ -1,0 +1,37 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_gtkdatabox C)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GTKDATABOX REQUIRED gtkdatabox)
+
+set(GTKDATABOX_CLEAN_INCLUDE_DIRS)
+foreach(inc_dir IN LISTS GTKDATABOX_INCLUDE_DIRS)
+    if(EXISTS "${inc_dir}")
+        list(APPEND GTKDATABOX_CLEAN_INCLUDE_DIRS "${inc_dir}")
+    endif()
+endforeach()
+
+set(GTKDATABOX_CLEAN_CFLAGS)
+foreach(flag IN LISTS GTKDATABOX_CFLAGS_OTHER)
+    if(NOT flag MATCHES "^[A-Za-z]+:$")
+        list(APPEND GTKDATABOX_CLEAN_CFLAGS "${flag}")
+    endif()
+endforeach()
+
+set(GTKDATABOX_CLEAN_LDFLAGS)
+foreach(flag IN LISTS GTKDATABOX_LDFLAGS_OTHER)
+    if(NOT flag MATCHES "^[A-Za-z]+:$")
+        list(APPEND GTKDATABOX_CLEAN_LDFLAGS "${flag}")
+    endif()
+endforeach()
+
+add_executable(test_gtkdatabox test_gtkdatabox.c)
+target_include_directories(test_gtkdatabox PRIVATE ${GTKDATABOX_CLEAN_INCLUDE_DIRS})
+target_link_directories(test_gtkdatabox PRIVATE ${GTKDATABOX_LIBRARY_DIRS})
+target_link_libraries(test_gtkdatabox PRIVATE ${GTKDATABOX_LIBRARIES} ${GTKDATABOX_CLEAN_LDFLAGS})
+target_compile_options(test_gtkdatabox PRIVATE ${GTKDATABOX_CLEAN_CFLAGS})
+
+if(NOT CMAKE_CROSSCOMPILING)
+    enable_testing()
+    add_test(NAME gtkdatabox_smoke COMMAND test_gtkdatabox)
+endif()
