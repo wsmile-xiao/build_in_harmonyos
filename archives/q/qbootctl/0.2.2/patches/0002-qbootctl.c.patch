@@ -1,0 +1,161 @@
+--- a/qbootctl.c
++++ b/qbootctl.c
+@@ -17,20 +17,125 @@
+ 
+ #include <errno.h>
+ #include <stdio.h>
+ #include <string.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <stdbool.h>
+ #include <stdint.h>
+ 
+ #include "bootctrl.h"
++
++#ifdef QBOOTCTL_TESTING
++/*
++ * Test-only in-memory backend, compiled only when QBOOTCTL_TESTING is
++ * defined (separate test target qbootctl-test). The production binary
++ * never contains this code and has no runtime switch to it.
++ * This backend performs NO device access: no /dev/disk/by-partlabel,
++ * no /proc/cmdline, no UFS BSG ioctl, no GPT writes. State is kept in
++ * memory and, to allow cross-process state-transition tests, mirrored
++ * to a plain file ".qbootctl-mock.state" in the current directory
++ * (a temp workdir in test_package). No real storage is ever touched.
++ */
++#define MOCK_STATE_FILE ".qbootctl-mock.state"
++
++static const char *mock_suffix_arr[] = { "_a", "_b" };
++static bool mock_slot_active[2] = { true, false };
++static bool mock_slot_successful[2] = { true, true };
++static bool mock_slot_bootable[2] = { true, true };
++
++static void mock_state_load(void)
++{
++	FILE *f = fopen(MOCK_STATE_FILE, "r");
++	if (!f)
++		return;
++	if (fscanf(f, "%d %d %d %d %d %d",
++		   &mock_slot_active[0], &mock_slot_active[1],
++		   &mock_slot_successful[0], &mock_slot_successful[1],
++		   &mock_slot_bootable[0], &mock_slot_bootable[1]) != 6) {
++		/* Corrupt/absent state: keep defaults. */
++	}
++	fclose(f);
++}
++
++static void mock_state_save(void)
++{
++	FILE *f = fopen(MOCK_STATE_FILE, "w");
++	if (!f)
++		return;
++	fprintf(f, "%d %d %d %d %d %d\n",
++		mock_slot_active[0], mock_slot_active[1],
++		mock_slot_successful[0], mock_slot_successful[1],
++		mock_slot_bootable[0], mock_slot_bootable[1]);
++	fclose(f);
++}
++
++static int mock_get_current_slot(void) { return 0; }
++static int mock_mark_boot_successful(unsigned slot)
++{
++	if (slot > 1)
++		return -1;
++	mock_slot_successful[slot] = true;
++	mock_state_save();
++	return 0;
++}
++static int mock_set_active_boot_slot(unsigned slot, bool ignore_missing_bsg)
++{
++	(void)ignore_missing_bsg;
++	if (slot > 1)
++		return -1;
++	mock_slot_active[0] = (slot == 0);
++	mock_slot_active[1] = (slot == 1);
++	mock_state_save();
++	return 0;
++}
++static int mock_set_slot_as_unbootable(unsigned slot)
++{
++	if (slot > 1)
++		return -1;
++	mock_slot_bootable[slot] = false;
++	mock_state_save();
++	return 0;
++}
++static int mock_is_slot_bootable(unsigned slot)
++{
++	if (slot > 1)
++		return -1;
++	return mock_slot_bootable[slot] ? 1 : 0;
++}
++static const char *mock_get_suffix(unsigned slot)
++{
++	if (slot > 1)
++		return "";
++	return mock_suffix_arr[slot];
++}
++static int mock_is_slot_marked_successful(unsigned slot)
++{
++	if (slot > 1)
++		return -1;
++	return mock_slot_successful[slot] ? 1 : 0;
++}
++static unsigned mock_get_active_boot_slot(void)
++{
++	return mock_slot_active[0] ? 0 : 1;
++}
++static const struct boot_control_module mock_bootctl = {
++	.getCurrentSlot = mock_get_current_slot,
++	.markBootSuccessful = mock_mark_boot_successful,
++	.setActiveBootSlot = mock_set_active_boot_slot,
++	.setSlotAsUnbootable = mock_set_slot_as_unbootable,
++	.isSlotBootable = mock_is_slot_bootable,
++	.getSuffix = mock_get_suffix,
++	.isSlotMarkedSuccessful = mock_is_slot_marked_successful,
++	.getActiveBootSlot = mock_get_active_boot_slot,
++};
++#endif /* QBOOTCTL_TESTING */
+ 
+ const struct boot_control_module *impl = &bootctl;
+ 
+ bool isslot(const char* str)
+ {
+ 	return strspn(str, "01abAB") == strlen(str);
+ }
+ 
+ bool isslotnum(const char* str)
+ {
+@@ -131,24 +236,32 @@
+ 	}
+ }
+ 
+ int main(int argc, char **argv)
+ {
+ 	int optflag;
+ 	int slot = -1, current_slot;
+ 	int rc;
+ 	bool ignore_missing_bsg = false;
+ 
++#ifdef QBOOTCTL_TESTING
++	/* Test-only build: use the in-memory backend. No device access is
++	 * performed, so root is not required and -h/--help works without
++	 * touching real hardware. */
++	impl = &mock_bootctl;
++	mock_state_load();
++#else
+ 	if(geteuid() != 0) {
+ 		fprintf(stderr, "This program must be run as root!\n");
+ 		return 1;
+ 	}
++#endif
+ 
+ 	current_slot = impl->getCurrentSlot();
+ 	if (current_slot < 0) {
+ 		fprintf(stderr, "No slots found, is this an A/B device?\n");
+ 		return 1;
+ 	}
+ 
+ 	switch (argc) {
+ 	case 1:
+ 		dump_info(current_slot);
