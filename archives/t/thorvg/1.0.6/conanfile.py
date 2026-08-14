@@ -1,4 +1,4 @@
-from conan import ConanFile
+﻿from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.build import can_run
 from conan.tools.files import get
@@ -25,7 +25,7 @@ class ThorvgConan(ConanFile):
         tc = MesonToolchain(self)
         tc.project_options.update({
             "default_library": "shared",
-            "engines": "sw",
+            "engines": "cpu",
             "loaders": "",
             "savers": "",
             "bindings": "",
@@ -49,6 +49,7 @@ class ThorvgConan(ConanFile):
         Meson(self).install()
 
     def package_info(self):
-        self.cpp_info.libs = ["thorvg"]
+        self.cpp_info.libs = ["thorvg-1"]
+        self.cpp_info.includedirs = ["include/thorvg-1"]
         self.cpp_info.set_property("cmake_file_name", "thorvg")
         self.cpp_info.set_property("cmake_target_name", "thorvg::thorvg")

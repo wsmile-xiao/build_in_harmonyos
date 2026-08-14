@@ -1,4 +1,4 @@
-#include <thorvg.h>
+﻿#include <thorvg.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -21,7 +21,7 @@ int main()
     shape->fill(255, 0, 0, 255);
     if (canvas->target(buffer, width, width, height,
                        tvg::ColorSpace::ARGB8888) != tvg::Result::Success) return 3;
-    if (canvas->push(std::move(shape)) != tvg::Result::Success) return 4;
+    if (canvas->add(std::move(shape)) != tvg::Result::Success) return 4;
     if (canvas->draw() != tvg::Result::Success) return 5;
     if (canvas->sync() != tvg::Result::Success) return 6;
 
