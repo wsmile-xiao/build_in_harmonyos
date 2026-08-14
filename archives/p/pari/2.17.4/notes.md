@@ -84,7 +84,32 @@ libpari.so            → 实体   **未加版本号的链接名只有这一个*
 **链接用 `-lpari`，运行期由 SONAME 加载 `libpari-gmp-tls.so.9`**——两者是不同的东西。
 上游 cypari2 同样是 `-lpari`。
 
-### 5. `package()` 不用 `make install`
+### 5. 【CI 实撞】`LD` 被设成裸链接器 → 找不到 `-lm`
+
+```
+ld.lld: error: unable to find library -lm
+make: *** [Makefile:1147: gp-dyn] Error 1
+```
+
+PARI **用 `$LD` 直接链可执行文件**（`config/get_ld`：只有 `LD` 为空时才回落到 `$CC`）。
+CI 环境里 `LD=ld.lld`，链接命令就绕过了编译器驱动 —— 裸链接器没有 sysroot、
+没有默认库搜索路径，于是找不到 `libm.a`（它明明就在 SDK sysroot 里）。
+
+对照两边的链接命令，一眼可辨：
+
+```
+本机   /data/service/hnp/bin/clang  -o gp-dyn ... -lm      ← 走驱动，OK
+CI     ld.lld  -o gp-dyn ... -lm                            ← 裸链接器，失败
+```
+
+> ⚠️ **本机通过不代表可移植**：本机只是恰好没设 `LD`。
+> 这类「同一份 recipe 本机过、CI 挂」的差异，要去比**实际执行的命令**，
+> 而不是猜平台缺什么库——我最初以为是 musl 没有独立 libm，方向就错了。
+
+修法：configure 参数里显式 `LD=<C 编译器>`，不受环境影响；
+这也正是 PARI 自己的默认意图。
+
+### 6. `package()` 不用 `make install`
 
 `config/Makefile.SH:370` 的 `install:` 含 `install-doc`，那步要 TeX 生成 dvi；
 conan 包也不需要文档。改用 `make install-nodata` + `make install-data`。

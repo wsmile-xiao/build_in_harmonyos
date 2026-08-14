@@ -70,6 +70,14 @@ class PariConan(ConanFile):
         # **不用 uname 垫片**——垫片靠 PATH 前缀生效，而 self.run(env="conanbuild")
         # 会用 conan 的环境脚本重设 PATH 把它盖掉（实撞：垫了也仍是 O*-none）。
         # 改源码是确定性的，不依赖环境变量怎么传。
+        # PARI 用 **$LD 直接链可执行文件**（config/get_ld：LD 为空时才回落到 $CC）。
+        # 环境里若把 LD 设成裸链接器（CI 上是 ld.lld），链接命令就绕过了编译器驱动，
+        # 没有 sysroot、没有默认库搜索路径，于是
+        #   ld.lld: error: unable to find library -lm
+        # 而 libm.a 明明就在 SDK sysroot 里 —— 本机能过只是因为本机环境没设 LD。
+        # 显式钉成编译器驱动，不受环境影响；这也正是 PARI 自己的默认意图。
+        _cc = self.conf.get("tools.build:compiler_executables",
+                            default={}, check_type=dict).get("c", "clang")
         gmp = self.dependencies["gmp"].package_folder
         args = [
             f"--prefix={shlex.quote(self.package_folder)}",
@@ -89,8 +97,11 @@ class PariConan(ConanFile):
             "--graphic=none",        # 不引 X11/FLTK
             "--without-readline",    # gp 的交互补全，库本身不需要；少一层依赖
         ]
-        self.run("./Configure " + " ".join(args), cwd=self.source_folder,
-                 env="conanbuild")
+        # ⚠️ LD 是**环境变量**、不是 Configure 参数——当参数传只会打印用法并退出
+        # （实撞：`./Configure LD=clang …` 直接失败）。依据是 Configure --help 的
+        # 「Environment variables affecting the build: CC CFLAGS LD LDFLAGS …」。
+        self.run("LD=%s ./Configure %s" % (shlex.quote(str(_cc)), " ".join(args)),
+                 cwd=self.source_folder, env="conanbuild")
         # Configure 把 Makefile 生成到 O<os>-<arch>/，make 必须在那儿跑
         objs = sorted(_glob.glob(_os.path.join(self.source_folder, "O*-*")))
         if not objs:
