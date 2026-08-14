@@ -1,83 +1,90 @@
-#include <fstream>
-#include <iterator>
-#include <string>
-#include <vector>
-
-#include <boost/algorithm/string/replace.hpp>
-#include <boost/algorithm/string/split.hpp>
-#include <boost/algorithm/string/trim.hpp>
-#include <boost/circular_buffer.hpp>
-#include <boost/date_time/gregorian/gregorian.hpp>
+#include <boost/atomic.hpp>
+#include <boost/archive/text_oarchive.hpp>
+#include <boost/chrono.hpp>
+#include <boost/beast/core/static_string.hpp>
 #include <boost/filesystem.hpp>
-#include <boost/math/special_functions/factorials.hpp>
+#include <boost/format.hpp>
 #include <boost/program_options.hpp>
-#include <boost/property_tree/ptree.hpp>
 #include <boost/regex.hpp>
+#include <boost/serialization/string.hpp>
+#include <boost/timer/timer.hpp>
+#include <boost/thread.hpp>
 #include <boost/system/error_code.hpp>
-#include <boost/tokenizer.hpp>
 
-int main() {
-    int failures = 0;
+#include <sstream>
+#include <stdexcept>
+#include <string>
 
+int main(int argc, char** argv) {
     namespace po = boost::program_options;
-    po::options_description options("morpheus boost options");
-    int steps = 0;
-    options.add_options()("steps", po::value<int>(&steps));
-    const char* arguments[] = {"morpheus-smoke", "--steps", "190"};
-    po::variables_map values;
-    po::store(po::parse_command_line(3, arguments, options), values);
-    po::notify(values);
-    failures += steps != 190;
 
-    namespace fs = boost::filesystem;
-    const fs::path root("boost-morpheus-component-test");
-    const fs::path file = root / "input.txt";
-    boost::system::error_code ec;
-    fs::remove_all(root, ec);
-    failures += !fs::create_directories(root, ec) || ec;
-    {
-        std::ofstream output(file.string(), std::ios::binary);
-        output << "boost-morpheus";
+    po::options_description options("options");
+    options.add_options()
+        ("name", po::value<std::string>()->required(), "name to validate")
+        ("count", po::value<int>()->default_value(1), "thread increment count");
+
+    po::variables_map vm;
+    po::store(po::parse_command_line(argc, argv, options), vm);
+    po::notify(vm);
+
+    const std::string name = vm["name"].as<std::string>();
+    const int count = vm["count"].as<int>();
+
+    boost::timer::cpu_timer timer;
+
+    if (!boost::regex_match(name, boost::regex("[A-Za-z0-9_]+"))) {
+        throw std::runtime_error("regex validation failed");
     }
-    failures += !fs::exists(file, ec) || ec;
-    failures += fs::file_size(file, ec) != 14 || ec;
-    fs::remove_all(root, ec);
+    const boost::filesystem::path composed = boost::filesystem::path("boost") / name;
+    if (composed.generic_string() != "boost/" + name) {
+        throw std::runtime_error("filesystem path composition failed");
+    }
+    const std::string formatted = (boost::format("%1%:%2%") % name % count).str();
+    if (formatted != name + ":" + std::to_string(count)) {
+        throw std::runtime_error("format interpolation failed");
+    }
+    boost::beast::static_string<8> beast_name;
+    beast_name = name;
+    if (beast_name != name) {
+        throw std::runtime_error("beast static_string assignment failed");
+    }
+    const boost::system::error_code ok;
+    if (ok) {
+        throw std::runtime_error("default system error code is not clear");
+    }
 
-    std::string csv = " alpha, beta, gamma ";
-    boost::algorithm::trim(csv);
-    boost::algorithm::replace_all(csv, " ", "");
-    std::vector<std::string> split_values;
-    boost::algorithm::split(split_values, csv, boost::is_any_of(","));
-    failures += split_values.size() != 3 || split_values[1] != "beta";
+    std::ostringstream buffer;
+    boost::archive::text_oarchive archive(buffer);
+    archive << name;
+    archive << count;
+    if (buffer.str().empty()) {
+        throw std::runtime_error("serialization produced no output");
+    }
 
-    boost::circular_buffer<int> window(2);
-    window.push_back(1);
-    window.push_back(2);
-    window.push_back(3);
-    failures += window.front() != 2 || window.back() != 3;
+    boost::atomic<int> value(0);
+    const boost::chrono::steady_clock::time_point start =
+        boost::chrono::steady_clock::now();
 
-    failures += boost::math::factorial<double>(5) != 120.0;
+    boost::thread worker([&value, count]() {
+        for (int i = 0; i < count; ++i) {
+            ++value;
+        }
+    });
+    worker.join();
 
-    boost::property_tree::ptree tree;
-    tree.put("steps", steps);
-    failures += tree.get<int>("steps") != 190;
+    const boost::chrono::steady_clock::time_point finish =
+        boost::chrono::steady_clock::now();
+    const boost::chrono::steady_clock::duration elapsed = finish - start;
 
-    boost::tokenizer<boost::escaped_list_separator<char>> tokens(csv);
-    failures += std::distance(tokens.begin(), tokens.end()) != 3;
+    if (value.load() != count) {
+        throw std::runtime_error("thread did not update value");
+    }
+    if (elapsed < boost::chrono::steady_clock::duration::zero()) {
+        throw std::runtime_error("chrono steady clock moved backwards");
+    }
+    if (timer.elapsed().wall < 0) {
+        throw std::runtime_error("timer wall clock moved backwards");
+    }
 
-    // date_time component verification (compiled library)
-    boost::gregorian::date epoch(1970, 1, 1);
-    boost::gregorian::date today(2026, 8, 5);
-    failures += epoch.year() != 1970 || today.year() != 2026;
-    boost::gregorian::date_duration duration = today - epoch;
-    failures += duration.days() <= 0;
-
-    // regex component verification (header-only, validates CMakeDeps target)
-    boost::regex email_pattern(R"((\w+)@(\w+)\.(\w+))");
-    std::string email("user@example.com");
-    boost::smatch email_matches;
-    failures += !boost::regex_match(email, email_matches, email_pattern);
-    failures += email_matches[1] != "user" || email_matches[2] != "example" || email_matches[3] != "com";
-
-    return failures;
+    return 0;
 }
