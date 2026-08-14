@@ -1,0 +1,112 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E326.kv，填写各字段
+# 对应的人类文档: doc/E326.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E326
+trigger_tool: make|cmake
+phase: configuration|compilation
+error_signature: /bin/sh: Permission denied|Error 127|make.*Error 127|make.*Permission denied|SHELL.*/bin/sh|Check for working C compiler.*broken|checking for working C compiler.*broken
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签 (自由文本, 用于分组过滤)
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: ohos|environment|make|shell|ninja
+match_keywords: /bin/sh Permission denied, Error 127, make Error 127, SHELL=/bin/sh, conan create, cmake build, hmmac, try-compile, working C compiler broken, Ninja, CMAKE_MAKE_PROGRAM
+title: OHOS hmmac 沙盒拒绝 make 默认 SHELL=/bin/sh（/bin/sh: Permission denied → Error 127；配置阶段 try-compile 与编译阶段均受影响，改用 Ninja generator 解决）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: CMake 生成的 Makefile 硬编码 SHELL = /bin/sh（第 48 行附近），make 子进程执行每条编译规则时调用 /bin/sh 启动 shell；OHOS OpenDesk 沙盒的 hmmac 策略拒绝执行 /bin/sh（报 /bin/sh: Permission denied），导致所有编译目标静默失败并返回 Error 127/Error 1，日志中 clang 编译器命令零输出。该问题同时影响两个阶段：(1) 编译阶段 make 执行 .o 编译规则；(2) CMake 配置阶段（cmake -B）的 try_compile（如 Check for working C compiler）内部也调用 make + /bin/sh → try-compile 失败 → "Check for working C compiler ... broken" → 干净构建在配置阶段即中止。这是 make 默认 shell 被沙盒拒绝的问题，不是 clang 前端初始化失败，也不是 LD_LIBRARY_PATH 问题。补充：hmmac 还拒绝 symlink() 系统调用（ln -s / cmake -E create_symlink / cmake_symlink_library 均 Permission denied），共享库版本化 symlink 规则需改写为 cp 复制
+affected_scope: 任何在 OHOS 本机 conan create / make 编译的 CMake 工程（Unix Makefiles generator 硬编码 SHELL=/bin/sh 的场景）；配置阶段与编译阶段均受影响
+verification_cmd: cd <build-ohos> && grep -n '^SHELL' Makefile 看到 SHELL = /bin/sh；或复现：cmake -B（默认 Makefiles）配置报 "Check for working C compiler ... broken" + make[1]: /bin/sh: Permission denied + Error 127；改用 -G Ninja -DCMAKE_MAKE_PROGRAM=/data/service/hnp/bin/ninja 后配置与编译均通过
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: cmake-generator-ninja
+rec_description: 推荐首选改用 Ninja generator（主编验证 + 实测通过）：cmake -B 配置命令追加 -G Ninja -DCMAKE_MAKE_PROGRAM=/data/service/hnp/bin/ninja。Ninja 直接 exec 编译器，不经 /bin/sh，配置阶段 try-compile 与编译阶段均通过。配套：(1) 共享库版本化 symlink 规则在 Ninja 下位于 build-ohos/CMakeFiles/rules.ninja（rule CMAKE_SYMLINK_LIBRARY），需改写 command 为 cp 循环（for f in $out; do cp -f $in $$f; done）规避 hmmac 拒绝 symlink()；(2) cmake --build 不可再追加 -- SHELL=...（Ninja 会把 SHELL=... 当作 target 报 unknown target）。R33 合规：ninja 路径为显式探测常量
+rec_command:            # 配置阶段（关键）:\n  self.run('{cm} -B "{bd}" -S "{src}" -G Ninja -DCMAKE_MAKE_PROGRAM=/data/service/hnp/bin/ninja {defs}')\n  # 编译阶段: ninja 直接 exec 编译器，无需 SHELL 覆盖\n  self.run('{cm} --build "{bd}" -j{nj}')  # ⚠️ 勿加 -- SHELL=...（Ninja 报 unknown target）\n  # symlink 补丁（hmmac 拒绝 symlink()）: 改写 CMakeFiles/rules.ninja 中\n  #   rule CMAKE_SYMLINK_LIBRARY 的 command 为\n  #   for f in $out; do cp -f $in $$f; done
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach: cmake-build-with-SHELL-override
+fallback_description: 若无法切换到 Ninja（如必须保留 Makefiles generator），则仅在编译阶段用 cmake --build ... -- SHELL=/data/service/hnp/bin/bash 覆盖 make 的硬编码 SHELL（make 命令行变量优先级最高）；但注意该方案不能修复 CMake 配置阶段 try-compile（其内部 make 不受命令行覆盖），干净构建仍可能在配置阶段失败，故仅作 make-only 场景的降级兜底
+fallback_command:       self.run('{cm} --build "{bd}" -j{nj} -- SHELL=/data/service/hnp/bin/bash')  # 仅 Makefiles generator 有效；Ninja 下会报 unknown target
+fallback_auto_fix:      false
+fallback_impl: manual
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E326.md
+last_updated: 2026-08-14
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 4801
