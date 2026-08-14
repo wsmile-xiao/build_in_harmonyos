@@ -994,6 +994,7 @@ def main():
     p = sub.add_parser("monitor-review", help="监控 atomgit-bot AI 检视状态")
     p.add_argument("--repo", required=True)
     p.add_argument("--number", type=int, required=True)
+    p.add_argument("--json", action="store_true", help="输出结构化 JSON")
     p.set_defaults(func=cmd_monitor_review)
 
     args = parser.parse_args()
