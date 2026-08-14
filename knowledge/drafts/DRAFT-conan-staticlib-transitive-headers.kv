@@ -1,0 +1,108 @@
+#====================================================================
+# DRAFT-conan-staticlib-transitive-headers.kv
+# Conan 2 静态库包不向消费者传播传递依赖 headers → CMakeDeps INCLUDE_DIRS 为空
+#====================================================================
+
+id:                     DRAFT (proposed E321)
+trigger_tool:           conan|cmake|conan_test
+phase:                  package|testing|configuration
+error_signature:        'glib.h' file not found|
+                         INCLUDE_DIRS.*empty|
+                         fatal error: .* file not found|
+                         CMakeDeps.*INCLUDE_DIRS.*=.*\)
+
+severity:               3
+category:               conan|cmake|cross-compile|static-linking
+match_keywords:         conan, CMakeDeps, INCLUDE_DIRS, transitive_headers,
+                         static-library, static library, cpp_info, components,
+                         requires, glib2, dbus, headers=False, test_package,
+                         INTERFACE_INCLUDE_DIRECTORIES
+title:                  Conan 2 静态库包不传播传递依赖 headers，消费者 CMakeDeps 的 INCLUDE_DIRS 为空
+
+root_cause: >
+  Conan 2 对 static-library 包（package_type=static-library）做 traits 优化：
+  中间包（如 at-spi2-core，static）依赖另一静态库（glib2）时，向下一层消费者
+  传播的 require 会变成 headers=False（只传 libs，不传 headers）。因此消费者
+  test_package 用 CMakeDeps 时，glib2/dbus/pcre2/zlib/expat 等所有传递依赖
+  的 <pkg>_INCLUDE_DIRS_RELEASE 均为空，但 <pkg>_LIBS_RELEASE 正常；直接
+  require glib2 的消费者则 include dirs 正常。症状是 test_package 编译报
+  'glib.h' file not found。根因不在 CMakeDeps 本身，而在中间静态库配方
+  requirements() 的 traits 声明。glib 相关误导性匹配：E216（components
+  INTERFACE_INCLUDE_DIRECTORIES 不传播 + GLOB 兜底）、E298（运行时 env）、
+  E221（CLI+library 契约），本条目是更前置、更干净的配方级修法。
+
+affected_scope: >
+  任何 Conan 2 静态库配方，其 public 头文件（或组件的公共头）传递 include 了
+  直接依赖的头文件（如 atk.h→glib.h/gobject、atspi.h→glib.h/dbus.h），且依赖
+  链上存在 static-library 的配方。
+
+verification_cmd: >
+  conan create archives/a/at-spi2-core/2.60.5 -pr:h=ci/conan/profiles/ohos-aarch64
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing;
+  检查 test_package build 目录生成的 glib2-release-armv8-data.cmake 中
+  glib2_INCLUDE_DIRS_RELEASE 非空；test_atk 编译通过。
+
+rec_priority:           1
+rec_approach:           transitive-headers-trait-on-requires
+rec_description: >
+  在中间静态库配方的 requirements() 中，对"公共头会被下游 include 的"直接依赖
+  显式声明 transitive_headers=True，例如
+  self.requires("glib2/2.88.0", transitive_headers=True)。这使该 require 的
+  headers trait 在 transform_downstream 传播时保持 True，消费者 CMakeDeps 生成
+  glib2_INCLUDE_DIRS_RELEASE 非空。同时把 required_conan_version = ">=2.28"
+  放在模块级（loader 用 getattr(module, ...) 读取，放类内无效），让该 traits
+  参与 package_id 计算并消除 "Transitive dependencies with 'headers=False'..."
+  WARN。若依赖只有构建期使用（如 libxml2 visible=False），无需设置。
+rec_command: >
+  # conanfile.py 模块级：
+  required_conan_version = ">=2.28"
+  # requirements()：
+  self.requires("glib2/2.88.0", transitive_headers=True)
+  self.requires("dbus/1.14.10", transitive_headers=True)
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe
+
+fallback_priority:      2
+fallback_approach:      runenv-info-bindirs-for-daemons
+fallback_description: >
+  同一包若还交付 CLI/守护进程（如 at-spi2-registryd、at-spi-bus-launcher），
+  静态库包 require.run=False 时 VirtualRunEnv 不会把 cpp_info.bindirs 加入
+  PATH，消费方 conanrun 里 command not found。在 package_info 里用
+  self.runenv_info.prepend_path("PATH", os.path.join(self.package_folder, "bin"))
+  显式暴露（runenv_info 不受 run trait 限制）。
+fallback_command: >
+  self.cpp_info.bindirs = ["bin", "libexec"]
+  self.runenv_info.prepend_path("PATH", os.path.join(self.package_folder, "bin"))
+fallback_auto_fix:      false
+fallback_impl:          manual-conan-recipe
+
+forbid_1_pattern:       target_include_directories\(.*\$\{CONAN_INCLUDE|file\(GLOB.*conan.*glib
+forbid_1_reason:         优先用配方级 transitive_headers=True 修复，不要在消费者 CMakeLists 里
+                         硬编码/GLOB conan cache 路径兜底（E216 属不同根因的后备手段）
+forbid_1_consequence:   缓存路径机器相关，不可复现；掩盖配方契约缺陷
+
+# ═══ 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E216,E221,E298,E307]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E321.md
+last_updated:           2026-08-13
+source_event:           at-spi2-core 2.60.5 OHOS PC 适配（conan-verify G2）
+
+# ═══ 知识协作 ═══
+authors:                implementation-agent
+source_pr:              TBD
+source_commit:          TBD
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-13
