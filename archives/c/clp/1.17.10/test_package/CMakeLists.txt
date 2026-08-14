@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_clp CXX)
+find_package(clp REQUIRED CONFIG)
+add_executable(test_clp test_clp.cpp)
+target_link_libraries(test_clp PRIVATE clp::clp)
+enable_testing()
+add_test(NAME test_clp COMMAND test_clp)
