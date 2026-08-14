@@ -418,7 +418,9 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 | [9/9] gen_summary + PR 原子性 | 重新生成 SUMMARY.md (W2 检查) | 非致命 |
 
 > **W4 Pre-PR 独立审计不在 finish 内部**，在 `submit` 内部作为前置检查执行。
-> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**AI Review 监控**(5阶段)→**CI 监控**→**SKILL_FEEDBACK 自动生成**）。
+> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**AI Review 监控**(5阶段)→**检视意见闭环校验**→**CI 监控**→**SKILL_FEEDBACK 自动生成**）。
+>
+> ⚠️ **完成标准（硬性）**：所有检视意见必须在讨论串内回复完毕（accept=修复+标记已解决 / reject=回复原因），闭环校验不通过不会进入 CI 监控；CI 必须 PASSED 才算流程完成。
 > AI 操作路径：`finish` → `submit`，两条命令，不可跳过。
 >
 > **⭐ AI Review 监控（5 阶段，嵌入 submit，HANDOFF 强制）**：

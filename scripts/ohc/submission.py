@@ -738,7 +738,29 @@ def cmd_submit(software: str, version: str,
             elif review_result == "timeout":
                 return 1
             elif review_result == "review_complete":
-                pass  # Proceed to CI
+                pass  # Proceed to closure verification & CI
+
+        # 闭环校验：所有检视意见必须有回复
+        unreplied = _verify_review_closure(gitcode_pr, repo, pr_number)
+        if unreplied:
+            log_fail(f"❌ 检视意见闭环校验未通过: {len(unreplied)} 条意见未回复")
+            closure_text = ""
+            for op in unreplied:
+                closure_text += f"  - comment_id: {op.get('comment_id', '')}: {op.get('body', '')[:150]}\n"
+            _emit_submit_handoff(software, version, ver_dir, project_dir,
+                "review_closure_incomplete",
+                [
+                    f"PR #{pr_number} 有 {len(unreplied)} 条检视意见未回复（闭环未完成）：",
+                    "",
+                    closure_text,
+                    "检视意见必须全部在讨论串内回复（accept 或 reject），",
+                    "处理命令: python3 scripts/gitcode_pr.py handle-review-opinion \\",
+                    f"    --repo {repo} --number {pr_number} --comment-id <id> --action accept|reject --reason '...'",
+                    "",
+                    f"全部处理完后: python3 scripts/ohc-run.py submit {software} {version} --resume",
+                ],
+                resume_with_flag=True)
+            return 1
 
         # Phase 5: CI monitoring
         log_info(f"监控 CI 状态 (PR #{pr_number})...")
@@ -1106,7 +1128,29 @@ def cmd_submit(software: str, version: str,
     elif review_result == "timeout":
         return 1
     elif review_result == "review_complete":
-        pass  # Proceed to CI monitoring
+        pass  # Proceed to closure verification & CI monitoring
+
+    # ── 闭环校验：所有检视意见必须有回复（accept/reject 均可）──
+    unreplied = _verify_review_closure(gitcode_pr, repo, pr_number)
+    if unreplied:
+        log_fail(f"❌ 检视意见闭环校验未通过: {len(unreplied)} 条意见未回复")
+        closure_text = ""
+        for op in unreplied:
+            closure_text += f"  - comment_id: {op.get('comment_id', '')}: {op.get('body', '')[:150]}\n"
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "review_closure_incomplete",
+            [
+                f"PR #{pr_number} 有 {len(unreplied)} 条检视意见未回复（闭环未完成）：",
+                "",
+                closure_text,
+                "检视意见必须全部在讨论串内回复（accept 或 reject），",
+                "处理命令: python3 scripts/gitcode_pr.py handle-review-opinion \\",
+                f"    --repo {repo} --number {pr_number} --comment-id <id> --action accept|reject --reason '...'",
+                "",
+                f"全部处理完后: python3 scripts/ohc-run.py submit {software} {version} --resume",
+            ],
+            resume_with_flag=True)
+        return 1
 
     # ── Monitor CI (poll every 30s, timeout 40min) ──
     log_info(f"监控 CI 状态 (PR #{pr_number})...")
@@ -1167,6 +1211,25 @@ def _parse_pr_number(output: str) -> int | None:
         except json.JSONDecodeError:
             pass
     return None
+
+
+def _verify_review_closure(gitcode_pr: str, repo: str, pr_number: int) -> list:
+    """校验检视意见闭环：每条意见后是否有非 bot 回复。
+
+    返回未回复意见列表；空列表 = 闭环通过。
+    """
+    result = subprocess.run(
+        [sys.executable, gitcode_pr, "monitor-review", "--json",
+         "--repo", repo, "--number", str(pr_number)],
+        capture_output=True, text=True, timeout=30)
+    out = result.stdout
+    if "--- JSON ---" not in out:
+        return []  # 解析失败不阻断，保守放行
+    try:
+        data = json.loads(out.split("--- JSON ---")[-1].strip())
+        return data.get("unreplied_opinions", [])
+    except json.JSONDecodeError:
+        return []
 
 
 def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
@@ -1470,15 +1533,11 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
             })
             return "review_complete"
         else:
-            # Build HANDOFF with review opinions
             opinions_text = ""
             for i, op in enumerate(opinions):
                 opinions_text += f"\n{'='*60}\n"
                 opinions_text += f"### 检视意见 [{i+1}/{len(opinions)}]\n"
-                opinions_text += f"comment_id: {op.get('comment_id', '')}\n"
-                did = op.get("discussion_id", "")
-                if did:
-                    opinions_text += f"discussion_id: {did}\n"
+                opinions_text += f"comment_id: {op.get('comment_id', '')}  ← 处理时用 --comment-id\n"
                 opinions_text += f"内容:\n{op.get('body', '')[:1000]}\n"
             opinions_text += f"\n{'='*60}\n"
 
@@ -1491,7 +1550,7 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
                     "",
                     opinions_text,
                     "━━━ 处理方式 ━━━",
-                    "每条检视意见用 handle-review-opinion 命令处理：",
+                    "每条检视意见用 handle-review-opinion 命令处理（回复会挂在意见讨论串内）：",
                     "  · accept（接纳）：修改代码 + 回复 + 脚本自动标记已解决",
                     "  · reject（拒绝）：仅回复说明原因 + 请审核人员评估，不标记已解决",
                     "",
@@ -1501,20 +1560,20 @@ def _monitor_ai_review(gitcode_pr: str, repo: str, pr_number: int,
                     f"  1. 修改代码并: git push origin {branch_name}",
                     f"  2. 处理: python3 scripts/gitcode_pr.py handle-review-opinion \\",
                     f"       --repo {repo} --number {pr_number} \\",
-                    f"       --discussion-id <id> --action accept \\",
+                    f"       --comment-id <comment_id> --action accept \\",
                     f"       --reason '修改了xxx，添加了yyy'",
                     "",
                     "【拒绝意见（不修改）】",
                     f"  python3 scripts/gitcode_pr.py handle-review-opinion \\",
                     f"       --repo {repo} --number {pr_number} \\",
-                    f"       --discussion-id <id> --action reject \\",
+                    f"       --comment-id <comment_id> --action reject \\",
                     f"       --reason '该意见不适用，因为...'",
                     "",
-                    "━━━ 完成条件 ━━━",
-                    f"  所有 {len(opinions)} 条检视意见都已处理后，继续:",
-                    f"  python3 scripts/ohc-run.py submit {software} {version} --resume",
+                    "━━━ 完成条件（闭环校验）━━━",
+                    f"  所有 {len(opinions)} 条检视意见必须全部在讨论串内回复（accept 或 reject），",
+                    "  未回复的意见会在 --resume 时被检测到并重新拦截。",
+                    f"  处理完后继续: python3 scripts/ohc-run.py submit {software} {version} --resume",
                     "",
-                    "  其中：接纳的意见已由脚本标记已解决；拒绝的意见已请审核人员评估。",
                     "  ⚠️ 非 CI 状态通知（如 ohpcd-robot 的 CI 排队/构建/失败）不需要回复。",
                 ],
                 resume_with_flag=True)

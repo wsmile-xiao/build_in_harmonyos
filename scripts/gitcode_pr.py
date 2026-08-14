@@ -474,7 +474,15 @@ def cmd_handle_review_opinion(args):
     - reject: 回复"不接纳: {reason}。请审核人员评估..."（不标记已解决）
 
     AI 只需传入 action 和 reason，脚本保证流程正确。
+    ID 优先级: --comment-id（评论 ID，始终存在，in_reply_to 首选）
+              > --discussion-id（讨论 ID，旧参数，可能为空导致回复变成独立评论）
     """
+    reply_to = getattr(args, "comment_id", None) or args.discussion_id
+    if not reply_to:
+        print("❌ 错误: 需要 --comment-id 或 --discussion-id（可从 monitor-review 获取）")
+        import sys
+        sys.exit(2)
+
     if args.action == "accept":
         reply_body = f"✅ 已修复: {args.reason}"
     else:
@@ -482,21 +490,32 @@ def cmd_handle_review_opinion(args):
                        "请审核人员评估是否无需解决，"
                        "如无需解决，由审核人员标记已解决。")
 
-    # Step 1: 回复评论
-    reply_data = {"body": reply_body, "in_reply_to": args.discussion_id}
+    # Step 1: 在检视意见讨论串内回复
+    reply_data = {"body": reply_body, "in_reply_to": reply_to}
     reply_path = f"/repos/{args.repo}/pulls/{args.number}/comments"
-    reply_result = api_request("POST", reply_path, body=reply_data)
+    reply_result = api_request("POST", reply_path, body=reply_data) or {}
+
+    # 校验回复是否真正挂到讨论串（响应未回显 in_reply_to 则可能变成独立评论）
+    echo_id = str(reply_result.get("in_reply_to", ""))
+    if echo_id and echo_id != str(reply_to):
+        print(f"⚠️  回复未挂到原讨论串 (echo={echo_id}, expect={reply_to})，"
+              f"请在 PR 页面确认回复位置")
 
     print(f"✅ 已回复检视意见 ({args.action})")
-    print(f"   discussion_id: {args.discussion_id}")
+    print(f"   reply_to: {reply_to}")
     print(f"   回复内容: {reply_body[:100]}")
 
-    # Step 2: 标记已解决（仅接纳时）
+    # Step 2: 标记已解决（仅接纳时），校验结果
     if args.action == "accept":
+        resolve_target = args.discussion_id or reply_to
         resolve_data = {"resolved": True}
-        resolve_path = f"/repos/{args.repo}/pulls/{args.number}/comments/{args.discussion_id}"
+        resolve_path = f"/repos/{args.repo}/pulls/{args.number}/comments/{resolve_target}"
         resolve_result = api_request("PUT", resolve_path, body=resolve_data)
-        print(f"✅ 已标记为已解决")
+
+        if resolve_result is None:
+            print(f"⚠️  标记已解决失败（API 无响应），请到 PR 页面手动标记: {resolve_target}")
+        else:
+            print(f"✅ 已标记为已解决")
     else:
         print(f"⏸️  未标记已解决（拒绝意见，留待审核人员评估）")
 
@@ -815,6 +834,7 @@ def cmd_monitor_review(args):
         "phase": phase,
         "summary_content": summary_content,
         "review_opinions": review_opinions,
+        "unreplied_opinions": unreplied_opinions,
         "bot_comment_count": len(bot_comments),
         "all_comments_count": len(all_comments),
         "classified_comments": classified,
@@ -842,6 +862,10 @@ def cmd_monitor_review(args):
             if op.get("discussion_id"):
                 print(f"    discussion_id: {op['discussion_id']}")
             print(f"    {truncate(op['body'], 800)}")
+    if unreplied_opinions:
+        print(f"\n--- ⚠️ 未回复检视意见 ({len(unreplied_opinions)} 条，闭环未完成) ---")
+        for op in unreplied_opinions:
+            print(f"  comment_id: {op['comment_id']}: {truncate(op['body'], 100)}")
 
     if args.json:
         print("\n--- JSON ---")
@@ -920,10 +944,11 @@ def main():
     p.set_defaults(func=cmd_resolve_comment)
 
     # handle-review-opinion
-    p = sub.add_parser("handle-review-opinion", help="处理单条检视意见 (回复+标记已解决)")
+    p = sub.add_parser("handle-review-opinion", help="处理单条检视意见 (在讨论串内回复+标记已解决)")
     p.add_argument("--repo", required=True)
     p.add_argument("--number", type=int, required=True)
-    p.add_argument("--discussion-id", required=True, help="检视意见讨论 ID")
+    p.add_argument("--comment-id", required=False, help="检视意见评论 ID (首选, monitor-review 的 comment_id)")
+    p.add_argument("--discussion-id", required=False, help="检视意见讨论 ID (旧参数, 可能为空)")
     p.add_argument("--action", required=True, choices=["accept", "reject"],
                    help="accept=接纳并修复(回复+标记已解决), reject=拒绝(仅回复)")
     p.add_argument("--reason", required=True, help="修复说明或拒绝原因")
