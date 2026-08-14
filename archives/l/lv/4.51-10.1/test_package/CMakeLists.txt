@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.8)
+project(test_lv C)
+enable_testing()
+add_executable(test_lv test.c)
+add_test(NAME test_lv COMMAND test_lv)
