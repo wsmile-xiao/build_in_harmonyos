@@ -404,6 +404,26 @@ def cmd_ci_status(args):
     return ci_comments
 
 
+def cmd_trigger_ci(args):
+    """主动评论 /rebuild 触发 CI 构建。
+
+    平台变更后 CI 不再自动触发，需要主动评论才能启动构建。
+    API: POST /repos/{repo}/pulls/{number}/comments (body=/rebuild)
+    """
+    body = {"body": "/rebuild"}
+    path = f"/repos/{args.repo}/pulls/{args.number}/comments"
+    result = api_request("POST", path, body=body)
+
+    print("✅ 已评论 /rebuild 触发 CI 构建")
+    print(f"   PR: {args.repo}#{args.number}")
+    print(f"   note_id: {result.get('note_id', 'N/A')}")
+
+    if args.json:
+        print("\n--- JSON ---")
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result
+
+
 def cmd_reply_comment(args):
     """回复 PR 评论。
 
@@ -875,6 +895,13 @@ def main():
     p.add_argument("--repo", required=True)
     p.add_argument("--number", type=int, required=True)
     p.set_defaults(func=cmd_ci_status)
+
+    # trigger-ci
+    p = sub.add_parser("trigger-ci", help="评论 /rebuild 主动触发 CI 构建")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--number", type=int, required=True)
+    p.add_argument("--json", action="store_true", help="输出原始 JSON")
+    p.set_defaults(func=cmd_trigger_ci)
 
     # reply-comment
     p = sub.add_parser("reply-comment", help="回复 PR 评论")

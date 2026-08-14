@@ -1170,13 +1170,32 @@ def _parse_pr_number(output: str) -> int | None:
 
 
 def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
-                timeout: int = 600, interval: int = 30) -> str:
+                timeout: int = 600, interval: int = 30,
+                trigger: bool = True) -> str:
     """Poll CI status until completion or timeout.
+
+    平台变更后 CI 需主动评论 /rebuild 触发。trigger=True 时先触发一次构建
+    再轮询（避免干等导致超时）。若 CI 已在排队/运行则跳过触发。
 
     Returns: 'PASSED', 'FAILED', 'TIMEOUT', or 'UNKNOWN'
     """
     import time as _time
     elapsed = 0
+
+    if trigger:
+        # 先查当前状态，CI 已在跑则不重复触发
+        pre = subprocess.run(
+            [sys.executable, gitcode_pr, "ci-status",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=15)
+        pre_out = pre.stdout
+        if not any(s in pre_out for s in ("RUNNING", "QUEUED", "PASSED", "FAILED")):
+            log_info(f"  平台 CI 需主动触发，评论 /rebuild (PR #{pr_number})...")
+            subprocess.run(
+                [sys.executable, gitcode_pr, "trigger-ci",
+                 "--repo", repo, "--number", str(pr_number)],
+                capture_output=True, text=True, timeout=30)
+            _time.sleep(10)  # 等平台响应启动构建
 
     while elapsed < timeout:
         result = subprocess.run(

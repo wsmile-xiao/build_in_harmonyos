@@ -435,7 +435,7 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 >   - ⚠️ **检视意见不一定正确，需严格判断是否合理才能修改**
 >   - 合理的修改并 push，不合理的回复说明原因
 >   - 所有意见处理完毕后 `--resume` 继续
-> - Phase 5: AI Review 完成 → 进入 CI 监控
+> - Phase 5: AI Review 完成 → 进入 CI 监控（平台 CI 需主动评论 /rebuild 触发，_monitor_ci 自动处理；手动触发用 `python3 scripts/gitcode_pr.py trigger-ci --repo <owner>/<repo> --number <PR号>`）
 >
 > 状态文件 `.submit-state.json` 记录 review_phase（1/3/5），`--resume` 从正确阶段恢复。
 
