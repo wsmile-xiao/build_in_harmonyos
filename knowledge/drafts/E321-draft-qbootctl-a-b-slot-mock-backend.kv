@@ -1,0 +1,120 @@
+#====================================================================
+# E321-draft — Linux A/B 启动槽/GPT 管理工具在 OHOS 上的平台接口边界
+#             与无损消费者测试方法（可注入 backend + 纯内存 mock）
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。禁止 promote。
+# 触发事件: qbootctl 0.2.2 适配 HarmonyOS PC（Issue #2095，路径 B）
+# 对应人类文档: knowledge/drafts/E321-draft-qbootctl-a-b-slot-mock-backend.md
+#====================================================================
+
+id:                     E321
+trigger_tool:           runtime|test|conan|meson|clang|install
+phase:                  runtime|testing|compilation|installation
+error_signature:        This program must be run as root!|
+                         No slots found, is this an A/B device|
+                         Failed to open bootdev dir|
+                         Unable to open '/dev/bsg/ufs-bsg0'|
+                         linux/bsg.h.*not found|linux-headers not found|
+                         Expected slot not .*|
+                         /dev/disk/by-partlabel.*(No such file|Permission denied)|
+                         /proc/cmdline.*(No such file|Permission denied)
+
+severity:               2
+category:               platform-interface|hardware-dependent|storage|testing|cli|OHOS
+match_keywords:         qbootctl, bootctrl, A/B slot, boot slot, GPT partition,
+                         partition attributes, UFS BSG, linux/bsg.h, scsi_bsg_ufs.h,
+                         SG_IO, /dev/disk/by-partlabel, /proc/cmdline, slot_suffix,
+                         geteuid, root check, mock backend, QBOOTCTL_BACKEND,
+                         destructive storage test, virtual disk testing,
+                         hardware-dependent CLI test isolation, block device mock
+title:                  Linux A/B 启动槽与 GPT 管理工具在 OpenHarmony 上的平台接口边界，及通过可注入 backend/纯内存 mock 进行无损消费者测试的方法
+
+root_cause: >
+  qbootctl 这类 A/B 启动槽/GPT 管理 CLI 是硬件强依赖工具：源码硬编码
+  /dev/disk/by-partlabel、/dev/bsg/ufs-bsg0（UFS BSG SG_IO ioctl）、/proc/cmdline
+  等真实设备路径，且在 main() 入口用 geteuid() != 0 拒绝非 root 运行。
+  在 OpenHarmony PC 适配与赛事真机上：(1) 交叉/普通编译本身可行（OHOS sysroot
+  已提供 linux/bsg.h、scsi/scsi_bsg_ufs.h），但运行期任何命令都会被 root 检查
+  或设备路径失败拦截；(2) 上游无自动化测试（无 tests/、无 meson test()），
+  无法在无设备环境验证 CLI 纯逻辑；(3) 赛事安全边界禁止执行槽位切换/GPT 写入/
+  UFS BSG 操作，导致 test_package 无法运行真实命令。
+  根因是「生产 backend 与设备访问强耦合、且无注入点」，而非编译错误。
+
+affected_scope: >
+  OHOS PC 上适配的 Linux A/B 启动槽管理、GPT 分区工具、UFS boot LUN 工具
+  （qbootctl、abootimg 类、bootctrl HAL 消费者、flash 工具），以及任何
+  “非 root/无真机环境下需要做真实消费者测试”的硬件依赖 CLI。
+
+verification_cmd: >
+  qbootctl-test -c && qbootctl-test -a && qbootctl-test -b a &&
+  qbootctl-test -n a && qbootctl-test -x && qbootctl-test -h
+  # 修复前: 生产 qbootctl 非 root 下任何命令(含 -h)均报 "This program must be run as root!" exit 1
+  # 修复后: 测试专用构建 qbootctl-test(QBOOTCTL_TESTING 宏) 全部 exit 0 并输出槽位信息；
+  #         生产 qbootctl 无 mock 代码/无运行时开关，strings 无 QBOOTCTL_BACKEND/mock 符号
+
+rec_priority:           1
+rec_approach:           test-only-target-compile-macro
+rec_description: >
+  mock backend 整体包入 #ifdef QBOOTCTL_TESTING，仅 meson 独立测试目标 qbootctl-test
+  （-DQBOOTCTL_TESTING）编译；生产目标 qbootctl 不定义宏，不含任何 mock 代码、无
+  运行时开关（无 getenv），main() 与上游完全一致。测试专用构建在 main() 编译期绑定
+  impl=&mock_bootctl（无环境变量），跳过 root 检查；mock 状态跨进程镜像到当前目录
+  普通文件 .qbootctl-mock.state（仅测试构建），test_package 用临时目录运行。
+rec_command: >
+  # 补丁要点 (archives/q/qbootctl/0.2.2/patches/0001-meson.build.patch + 0002-qbootctl.c.patch):
+  #   qbootctl.c:  #ifdef QBOOTCTL_TESTING ... mock_bootctl 定义 ... #endif
+  #               main(): #ifdef QBOOTCTL_TESTING impl=&mock_bootctl; mock_state_load();
+  #                       #else if(geteuid()!=0) {...root拒绝...} #endif
+  #   meson.build: executable('qbootctl-test', src, c_args: ['-DQBOOTCTL_TESTING'])
+  # 测试:
+  #   qbootctl-test -c   -> "Current slot: _a"  exit 0
+  #   qbootctl-test -s b -> 内存写状态转换 exit 0；随后 -a 显示 _b
+  #   qbootctl-test -n c -> "Expected slot not 'c'" exit 1 (非法槽位拒绝)
+  #   生产 qbootctl（非root, 无宏） -> "This program must be run as root!" exit 1
+rec_auto_fix:           false
+rec_impl:               test-target-macro-guard
+
+fallback_priority:      2
+fallback_approach:      env-gate-compile-time-switch
+fallback_description: >
+  若独立测试目标不被评审接受，可退化为编译期宏选择（-DQBOOTCTL_TESTING 时
+  impl=&mock_bootctl），test_package 单独编译 mock 变体验证；同样保证生产构建
+  不定义宏、无运行时开关。
+fallback_command:       CFLAGS=-DQBOOTCTL_TESTING make qbootctl-test
+fallback_auto_fix:      false
+fallback_impl:          build-flag-switch
+
+forbid_1_pattern:       qbootctl -s |qbootctl -m |qbootctl -u |qbootctl -i
+forbid_1_reason:        赛事安全边界禁止执行真实槽位切换、GPT 写入、UFS boot LUN 切换、
+                         修改 A/B 槽位属性（即使 mock 也禁止调用等价命令）
+forbid_1_consequence:   违反安全边界；可能修改真实设备启动配置导致真机不可启动
+
+forbid_2_pattern:       sudo.*qbootctl|run.*qbootctl.*as root|seteuid\(0\)
+forbid_2_reason:        禁止以 root 身份运行 qbootctl；禁止提权操作
+forbid_2_consequence:   触发真实 GPT/UFS 写路径，破坏赛事真机
+
+forbid_3_pattern:       open\("/dev/|open\("/sys/|open\("/proc/.*, O_WRONLY|loop device|losetup|mount
+forbid_3_reason:        测试 backend 只允许操作内存或仓库外临时普通文件；禁止触碰
+                         /dev、/sys、/proc、真实块设备、loop/mount
+forbid_3_consequence:   污染系统设备状态；安全边界违规
+
+principles:             P004, P014, P016
+similar_to:             E051, E171, E220, E244
+conflicts_with:         []
+prerequisite_of:        abootimg, qbootctl, gpt-fdisk, ufs-tools
+
+doc_file:               knowledge/drafts/E321-draft-qbootctl-a-b-slot-mock-backend.md
+last_updated:           2026-08-13
+source_event:           archives/q/qbootctl/0.2.2
+
+authors:                atomcode
+source_pr:              OpenHarmonyPCDeveloper/build_in_harmonyos (Issue #2095)
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-08-13
+
+draft: true
+contributor_id: 43CC
