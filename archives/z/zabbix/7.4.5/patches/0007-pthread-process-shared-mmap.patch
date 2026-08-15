@@ -1,0 +1,94 @@
+--- a/configure.ac
++++ b/configure.ac
+@@ -1722,12 +1722,14 @@
+ 	PROXY_LIBS="$PROXY_LIBS $ARES_LIBS"
+ 
+ 	AC_SUBST(ARES_CFLAGS)
+-
+-	dnl Check for 'libpthread' library that supports PTHREAD_PROCESS_SHARED flag
+-	LIBPTHREAD_CHECK_CONFIG([no])
+-	if test "x$found_libpthread" != "xyes"; then
+-		AC_MSG_ERROR([Unable to use libpthread (libpthread check failed)])
+-	fi
++fi
++
++dnl Check for 'libpthread' library that supports PTHREAD_PROCESS_SHARED flag.
++dnl Moved out of the server/proxy-only block: the agent also needs the shared
++dnl locks in zbx_locks_create(), and must not fall back to SysV semaphores.
++LIBPTHREAD_CHECK_CONFIG([no])
++if test "x$found_libpthread" != "xyes"; then
++	AC_MSG_ERROR([Unable to use libpthread (libpthread check failed)])
+ fi
+ 
+ SERVER_LDFLAGS="$SERVER_LDFLAGS $ZLIB_LDFLAGS $LIBPTHREAD_LDFLAGS"
+--- a/m4/pthread.m4
++++ b/m4/pthread.m4
+@@ -62,7 +62,7 @@
+ 	,
+ 	found_libpthread_process_shared="yes",
+ 	found_libpthread_process_shared="no",
+-	found_libpthread_process_shared="no" dnl action-if-cross-compiling
++	found_libpthread_process_shared="yes" dnl action-if-cross-compiling: OHOS supports PTHREAD_PROCESS_SHARED
+ 	)
+ ])
+ 
+--- a/src/libs/zbxmutexs/mutexs.c
++++ b/src/libs/zbxmutexs/mutexs.c
+@@ -14,6 +14,10 @@
+ 
+ #include "zbxmutexs.h"
+ 
++#ifdef HAVE_PTHREAD_PROCESS_SHARED
++#	include <sys/mman.h>
++#endif
++
+ #ifdef _WINDOWS
+ #	include "zbxsysinfo.h"
+ #	include "zbxlog.h"
+@@ -67,26 +71,15 @@
+ 	pthread_mutexattr_t	mta;
+ 	pthread_rwlockattr_t	rwa;
+ 
+-	if (-1 == (shm_id = shmget(IPC_PRIVATE, ZBX_SIZE_T_ALIGN8(sizeof(zbx_shared_lock_t)),
+-			IPC_CREAT | IPC_EXCL | 0600)))
+-	{
+-		*error = zbx_dsprintf(*error, "cannot allocate shared memory for locks");
+-		return FAIL;
+-	}
+-
+-	if ((void *)(-1) == (shared_lock = (zbx_shared_lock_t *)shmat(shm_id, NULL, 0)))
+-	{
+-		*error = zbx_dsprintf(*error, "cannot attach shared memory for locks: %s", zbx_strerror(errno));
+-		return FAIL;
+-	}
+-
+-	memset(shared_lock, 0, sizeof(zbx_shared_lock_t));
+-
+-	/* immediately mark the new shared memory for destruction after attaching to it */
+-	if (-1 == shmctl(shm_id, IPC_RMID, 0))
+-	{
+-		*error = zbx_dsprintf(*error, "cannot mark the new shared memory for destruction: %s",
+-				zbx_strerror(errno));
++	/* OHOS: SysV shmget() is unavailable (EACCES). Use a MAP_SHARED anonymous
++	 * mapping instead; it is inherited by forked child processes, and the
++	 * pthread mutexes are made PTHREAD_PROCESS_SHARED below. */
++	shared_lock = (zbx_shared_lock_t *)mmap(NULL, ZBX_SIZE_T_ALIGN8(sizeof(zbx_shared_lock_t)),
++			PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
++
++	if (MAP_FAILED == shared_lock)
++	{
++		*error = zbx_dsprintf(*error, "cannot allocate shared memory for locks: %s", zbx_strerror(errno));
+ 		return FAIL;
+ 	}
+ 
+@@ -181,8 +174,8 @@
+ 	for (i = 0; i < ZBX_RWLOCK_COUNT; i++)
+ 		(void)pthread_rwlock_destroy(&shared_lock->rwlocks[i]);
+ 
+-	if (-1 == shmdt(shared_lock))
+-		zabbix_log(LOG_LEVEL_TRACE, "cannot detach shared lock memory: %s", zbx_strerror(errno));
++	if (-1 == munmap(shared_lock, ZBX_SIZE_T_ALIGN8(sizeof(zbx_shared_lock_t))))
++		zabbix_log(LOG_LEVEL_TRACE, "cannot unmap shared lock memory: %s", zbx_strerror(errno));
+ 
+ 	shared_lock = NULL;
+ 	shm_id = 0;

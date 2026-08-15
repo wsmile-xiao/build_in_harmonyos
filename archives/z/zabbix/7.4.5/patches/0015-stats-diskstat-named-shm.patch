@@ -1,0 +1,131 @@
+--- a/src/libs/zbxsysinfo/common/stats.h
++++ b/src/libs/zbxsysinfo/common/stats.h
+@@ -63,7 +63,7 @@
+ {
+ 	ZBX_CPUS_STAT_DATA	cpus;
+ #ifndef _WINDOWS
+-	void			*diskstat_shm;
++	char			diskstat_name[ZBX_SHM_NAME_LEN];
+ #endif
+ #ifdef ZBX_PROCSTAT_COLLECTOR
+ 	zbx_dshm_t		procstat;
+--- a/src/libs/zbxsysinfo/common/stats.c
++++ b/src/libs/zbxsysinfo/common/stats.c
+@@ -52,10 +52,10 @@
+ #ifndef _WINDOWS
+ int	diskdevice_collector_started(void)
+ {
+-	return ((NULL != collector) && (NULL != collector->diskstat_shm));
+-}
+-
+-static void			*my_diskstat = NULL;
++	return ((NULL != collector) && ('\0' != collector->diskstat_name[0]));
++}
++
++static char			my_diskstat_name[ZBX_SHM_NAME_LEN] = "";
+ static zbx_diskdevices_data	*diskdevices = NULL;
+ zbx_diskdevices_data	*get_diskdevices(void)
+ {
+@@ -186,7 +186,7 @@
+ 
+ 	collector->cpus.cpu = (ZBX_SINGLE_CPU_STAT_DATA *)((char *)collector + sz);
+ 	collector->cpus.count = cpu_count;
+-	collector->diskstat_shm = NULL;
++	collector->diskstat_name[0] = '\0';
+ #ifdef _AIX
+ 	collector->cpus_phys_util.counters = (ZBX_CPU_UTIL_PCT_AIX *)((char *)collector + sz + sz_cpu);
+ 	collector->cpus_phys_util.row_num = ZBX_MAX_COLLECTOR_HISTORY;
+@@ -240,11 +240,11 @@
+ 	zbx_procstat_destroy();
+ #endif
+ 
+-	if (NULL != collector->diskstat_shm)
+-	{
+-		zbx_shm_destroy(collector->diskstat_shm);
++	if ('\0' != collector->diskstat_name[0])
++	{
++		zbx_shm_destroy_named(diskdevices, collector->diskstat_name);
+ 		diskdevices = NULL;
+-		collector->diskstat_shm = NULL;
++		collector->diskstat_name[0] = '\0';
+ 	}
+ 
+ 	zbx_mutex_destroy(&diskstats_lock);
+@@ -270,17 +270,16 @@
+ 	/* initially allocate memory for collecting statistics for only 1 disk */
+ 	shm_size = sizeof(zbx_diskdevices_data);
+ 
+-	if (NULL == (collector->diskstat_shm = zbx_shm_create(shm_size)))
++	if (NULL == (diskdevices = (zbx_diskdevices_data *)zbx_shm_create_named(shm_size,
++			collector->diskstat_name, sizeof(collector->diskstat_name))))
+ 	{
+ 		zabbix_log(LOG_LEVEL_CRIT, "cannot allocate shared memory for disk statistics collector");
+ 		exit(EXIT_FAILURE);
+ 	}
+ 
+-	diskdevices = (zbx_diskdevices_data *)collector->diskstat_shm;
+-
+ 	diskdevices->count = 0;
+ 	diskdevices->max_diskdev = 1;
+-	my_diskstat = collector->diskstat_shm;
++	zbx_strlcpy(my_diskstat_name, collector->diskstat_name, sizeof(my_diskstat_name));
+ 
+ 	zabbix_log(LOG_LEVEL_DEBUG, "diskstat_shm_init() allocated initial shm segment for disk statistics collector");
+ #endif
+@@ -294,10 +293,19 @@
+ void	diskstat_shm_reattach(void)
+ {
+ #ifndef _WINDOWS
+-	if (my_diskstat != collector->diskstat_shm)
+-	{
+-		diskdevices = collector->diskstat_shm;
+-		my_diskstat = collector->diskstat_shm;
++	if (0 != strcmp(my_diskstat_name, collector->diskstat_name))
++	{
++		if (NULL != diskdevices)
++			zbx_shm_destroy(diskdevices);
++
++		if (NULL == (diskdevices = (zbx_diskdevices_data *)zbx_shm_attach_named(collector->diskstat_name,
++				NULL)))
++		{
++			zabbix_log(LOG_LEVEL_CRIT, "cannot reattach disk statistics shared memory");
++			exit(EXIT_FAILURE);
++		}
++
++		zbx_strlcpy(my_diskstat_name, collector->diskstat_name, sizeof(my_diskstat_name));
+ 
+ 		zabbix_log(LOG_LEVEL_DEBUG, "diskstat_shm_reattach() switched shm segment");
+ 	}
+@@ -316,6 +324,7 @@
+ 	size_t			old_shm_size, new_shm_size;
+ 	int			old_max, new_max;
+ 	zbx_diskdevices_data	*new_diskdevices;
++	char			new_name[ZBX_SHM_NAME_LEN];
+ 
+ 	zabbix_log(LOG_LEVEL_DEBUG, "In %s()", __func__);
+ 
+@@ -332,7 +341,8 @@
+ 	old_shm_size = sizeof(zbx_diskdevices_data) + sizeof(zbx_single_diskdevice_data) * (old_max - 1);
+ 	new_shm_size = sizeof(zbx_diskdevices_data) + sizeof(zbx_single_diskdevice_data) * (new_max - 1);
+ 
+-	if (NULL == (new_diskdevices = (zbx_diskdevices_data *)zbx_shm_create(new_shm_size)))
++	if (NULL == (new_diskdevices = (zbx_diskdevices_data *)zbx_shm_create_named(new_shm_size, new_name,
++			sizeof(new_name))))
+ 	{
+ 		zabbix_log(LOG_LEVEL_CRIT, "cannot allocate shared memory for extending disk statistics collector");
+ 		exit(EXIT_FAILURE);
+@@ -343,11 +353,11 @@
+ 	new_diskdevices->max_diskdev = new_max;
+ 
+ 	/* delete the old segment */
+-	zbx_shm_destroy(collector->diskstat_shm);
++	zbx_shm_destroy_named(diskdevices, collector->diskstat_name);
+ 
+ 	/* switch to the new segment */
+-	collector->diskstat_shm = new_diskdevices;
+-	my_diskstat = collector->diskstat_shm;
++	zbx_strlcpy(collector->diskstat_name, new_name, sizeof(collector->diskstat_name));
++	zbx_strlcpy(my_diskstat_name, collector->diskstat_name, sizeof(my_diskstat_name));
+ 	diskdevices = new_diskdevices;
+ 
+ 	zabbix_log(LOG_LEVEL_DEBUG, "End of %s() extended diskstat shared memory: old_max:%d new_max:%d old_size:"
