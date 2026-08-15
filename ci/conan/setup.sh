@@ -75,11 +75,40 @@ if [ "$CONAN_VERSION" = "unknown" ]; then
         echo "[error] Python sqlite3 模块损坏 — libsqlite3.so.0 缺失"
         echo "[error] 这不是 conan 问题, 需要在 Worker 上安装/链接 libsqlite3.so.0"
         echo "[error] 修复: 找到 HNP 目录下的 libsqlite3.so.0 或从 OHOS 系统链接"
-        # Try to find and link it
-        SQLITE_LIB=$(find /data/service/hnp /system/lib* /usr/lib* -name 'libsqlite3.so*' -print -quit 2>/dev/null)
+        # Try to find and link it. Build the search list explicitly: zsh with
+        # nomatch aborts before find runs when globs such as /system/lib* are
+        # absent on some workers.
+        SQLITE_SEARCH_DIRS=()
+        for dir in \
+            /data/service/hnp \
+            /system/lib /system/lib64 /system/lib32 \
+            /vendor/lib /vendor/lib64 \
+            /usr/lib /usr/lib64; do
+            if [ -d "$dir" ]; then
+                SQLITE_SEARCH_DIRS+=("$dir")
+            fi
+        done
+        SQLITE_LIB=""
+        if [ ${#SQLITE_SEARCH_DIRS[@]} -gt 0 ]; then
+            SQLITE_LIB=$(find "${SQLITE_SEARCH_DIRS[@]}" \
+                \( -name 'libsqlite3.so*' -o -name 'libsqlite.z.so*' \) \
+                -print -quit 2>/dev/null || true)
+        fi
         if [ -n "$SQLITE_LIB" ]; then
-            echo "[step] 尝试设置 LD_LIBRARY_PATH: $(dirname "$SQLITE_LIB")"
-            export LD_LIBRARY_PATH="$(dirname "$SQLITE_LIB"):${LD_LIBRARY_PATH:-}"
+            SQLITE_LIB_DIR="$(dirname "$SQLITE_LIB")"
+            if [[ "$(basename "$SQLITE_LIB")" != libsqlite3.so* ]]; then
+                SQLITE_SHIM_ROOT="${TMPDIR:-$HOME/tmp}"
+                mkdir -p "$SQLITE_SHIM_ROOT"
+                SQLITE_SHIM_DIR="$(mktemp -d "$SQLITE_SHIM_ROOT/ci-sqlite-shim.XXXXXX" 2>/dev/null || true)"
+                if [ -n "$SQLITE_SHIM_DIR" ]; then
+                    ln -sf "$SQLITE_LIB" "$SQLITE_SHIM_DIR/libsqlite3.so.0" 2>/dev/null || true
+                fi
+                if [ -n "$SQLITE_SHIM_DIR" ] && [ -e "$SQLITE_SHIM_DIR/libsqlite3.so.0" ]; then
+                    SQLITE_LIB_DIR="$SQLITE_SHIM_DIR"
+                fi
+            fi
+            echo "[step] 尝试设置 LD_LIBRARY_PATH: $SQLITE_LIB_DIR"
+            export LD_LIBRARY_PATH="$SQLITE_LIB_DIR:${LD_LIBRARY_PATH:-}"
             CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
             echo "[step] Retry conan version: $CONAN_VERSION"
         fi
