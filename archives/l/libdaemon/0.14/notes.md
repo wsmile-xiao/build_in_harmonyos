@@ -10,7 +10,7 @@
 | 版本 | 0.14 |
 | 状态 | ✅ success |
 | 构建系统 | autotools |
-| 源码路径 | http://0pointer.de/lennart/projects/libdaemon/libdaemon-0.14.tar.gz |
+| 源码路径 | https://0pointer.de/lennart/projects/libdaemon/libdaemon-0.14.tar.gz |
 
 ## 二、编译过程
 
@@ -110,9 +110,11 @@
 - daemon_exec: 可正常 fork+exec 子进程
 - SELinux/umask: 移除 umask 077 后 mkdir/mktemp 正常
 
-- `sys/unistd.h` 不存在于 OHOS，需替换为 `unistd.h`
+- `sys/unistd.h` 不存在于 OHOS，需替换为 `unistd.h`---
 
+**编译结束**: 2026-08-11 09:07
+**最终状态**: built
 ---
 
-**编译结束**: 2026-06-02
-**最终状态**: success
+**编译结束**: 2026-08-11 09:30
+**最终状态**: published
