@@ -15,6 +15,7 @@ class IniFileConan(ConanFile):
     license = "BSD-2-Clause"
     homepage = "https://github.com/bartbes/inifile"
     url = "https://github.com/bartbes/inifile"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
