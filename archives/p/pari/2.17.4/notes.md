@@ -139,8 +139,15 @@ nextprime(1000) = 1009
 
 ## 已知取舍
 
-- **不开 readline**：`--without-readline`，故不引 ncurses。
-  库本身不需要它；受影响的只有 `gp` 交互式补全。
-  上游 wheel 打包了 `libncursesw` 是因为他们开了 readline——下游 Python 绑定用不到。
+- **开 readline**（`readline/8.3`）：下游 passagemath-pari 的 **PARIKernel**
+  需要它的头文件，缺了直接
+  `PARIKernel/kernel.c:1166:10: fatal error: 'readline/readline.h' file not found`。
+
+  > 此处**曾判断错一次**：最初按「库本身不需要 readline」关掉它，理由是
+  > gp 的交互补全与 Python 绑定无关。但上游 wheel 打包了 `libreadline` /
+  > `libncursesw`，说明上游就是开着编的；判断该以**下游实际需要**为准，
+  > 而不是「这个库自己用不用得上」。同一类误判在本包出现过三次
+  > （gp 不在 PATH、gp 未签名跑不了、gphelp 被 install-doc 一起砍掉），
+  > 根子都是把它当纯 C 库打包，而下游要的是**一套能运行的 PARI 安装**。
 - **不开 `--mt=pthread`**：见坑 1，平台 libc 缺必需符号。
   PARI 的并行计算引擎不可用；cypari2 / passagemath-pari 不使用它。

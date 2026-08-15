@@ -42,6 +42,18 @@ class PariConan(ConanFile):
 
     def requirements(self):
         self.requires("gmp/6.3.0.1")
+        # readline：**下游 passagemath-pari 的 PARIKernel 要它的头文件**
+        #   PARIKernel/kernel.c:1166:10: fatal error: 'readline/readline.h' file not found
+        # 上游 passagemath-pari wheel 也打包了 libreadline / libncursesw，
+        # 即上游就是开 readline 编的 pari。此前本 recipe 按「库本身不需要」关掉它，
+        # 对这个下游是错的取舍。
+        self.requires("readline/8.3")
+        # ncurses：readline 只带 libreadline.a/libhistory.a，**不带终端库**。
+        # 缺它时 Configure 的 readline 探测会逐一试
+        #   -ltinfow / -ltinfo / -lncursesw / -lncurses / -ltermcap
+        # 全部链不上（undefined: _rl_init_terminal_io），然后**静默退回不启用 readline**
+        # ——库照样建成、只是 DT_NEEDED 里没有 readline，下游编 PARIKernel 才炸。
+        self.requires("ncurses/6.6")
 
     def layout(self):
         basic_layout(self, src_folder=".")
@@ -79,6 +91,8 @@ class PariConan(ConanFile):
         _cc = self.conf.get("tools.build:compiler_executables",
                             default={}, check_type=dict).get("c", "clang")
         gmp = self.dependencies["gmp"].package_folder
+        rl = self.dependencies["readline"].package_folder
+        nc = self.dependencies["ncurses"].package_folder
         args = [
             f"--prefix={shlex.quote(self.package_folder)}",
             f"--libdir={shlex.quote(_os.path.join(self.package_folder, 'lib'))}",
@@ -95,7 +109,12 @@ class PariConan(ConanFile):
             # （库名只由 gmp + tls 决定，见 Configure:104/108），
             # 下游 cypari2 / passagemath-pari 也不使用该引擎。
             "--graphic=none",        # 不引 X11/FLTK
-            "--without-readline",    # gp 的交互补全，库本身不需要；少一层依赖
+            # 开 readline（理由见 requirements）。显式给头/库路径，
+            # 不靠 Configure 去系统路径瞎猜——conan 包不在系统路径上。
+            "--with-readline=" + shlex.quote(rl),
+            "--with-readline-include=" + shlex.quote(_os.path.join(rl, "include")),
+            "--with-readline-lib=" + shlex.quote(_os.path.join(rl, "lib")),
+            "--with-ncurses-lib=" + shlex.quote(_os.path.join(nc, "lib")),
         ]
         # ⚠️ LD 是**环境变量**、不是 Configure 参数——当参数传只会打印用法并退出
         # （实撞：`./Configure LD=clang …` 直接失败）。依据是 Configure --help 的
@@ -115,13 +134,58 @@ class PariConan(ConanFile):
         if can_run(self):
             self.run("make bench", cwd=self._objdir, env="conanbuild")
 
+    def _is_elf(self, path):
+        try:
+            with open(path, "rb") as f:
+                return f.read(4) == b"\x7fELF"
+        except OSError:
+            return False
+
+    def _sign_binaries(self):
+        """鸿蒙 XPM 要求被 exec 的可执行文件与被 dlopen 的 .so 都有代码签名，
+        否则 `Operation not permitted` / `Permission denied`。
+
+        本包**必须签 bin/**：下游 cypari2 的构建要真的去跑 `gp`
+        （报错原文 `cannot find an installation of PARI/GP: make sure that the
+        'gp' program is in your $PATH`），跑不起来 wheel 就建不出来。
+        签名是内容哈希（存 .codesign 节），**链接之后再改字节就失效** ——
+        PARI 的 install 会重链/剥符号，所以链接期自签到这一步已经不作数了。
+
+        与生成器 render_recipe.py 的 `_sign_binaries` 同源，手写 recipe 需自带。
+        """
+        if self.settings.os != "OHOS":     # 工具只在鸿蒙设备上有
+            return
+        import glob as _g, os as _o
+        targets = _g.glob(_o.path.join(self.package_folder, "lib", "**", "*.so"), recursive=True)
+        targets += _g.glob(_o.path.join(self.package_folder, "lib", "**", "*.so.*"), recursive=True)
+        bindir = _o.path.join(self.package_folder, "bin")
+        if _o.path.isdir(bindir):
+            for name in _o.listdir(bindir):
+                q = _o.path.join(bindir, name)
+                if _o.path.isfile(q) and not _o.path.islink(q) and self._is_elf(q):
+                    targets.append(q)
+        objcopy = "/data/service/hnp/bin/llvm-objcopy"
+        signer = "/data/service/hnp/bin/binary-sign-tool"
+        for f in targets:
+            if _o.path.islink(f):          # 只签真实 ELF，跳软链
+                continue
+            self.run('%s --remove-section .codesign "%s" 2>/dev/null || true' % (objcopy, f))
+            self.run('%s sign -inFile "%s" -outFile "%s" -selfSign 1' % (signer, f, f))
+
     def package(self):
         # 用 install-nodata + install-data，**不用 `make install`**：后者含 install-doc，
         # 那一步要 TeX 生成 dvi；conan 包也不需要文档。
         self.run("make install-nodata", cwd=self._objdir, env="conanbuild")
         self.run("make install-data", cwd=self._objdir, env="conanbuild")
+        # 还要 gphelp：下游 cypari2 的构建会找它，缺了报
+        #   FileNotFoundError: [Errno 2] No such file or directory: 'gphelp'
+        # 它由 install-doctex 装（拷 gphelp + translations）。
+        # ⚠️ 别图省事换成 `make install-doc`——那个 = install-docdvi + install-doctex，
+        # 前者要 TeX 生成 dvi。只取 doctex 这一半：要的是脚本，不是文档。
+        self.run("make install-doctex", cwd=self._objdir, env="conanbuild")
         copy(self, "COPYING", src=self.source_folder,
              dst=os.path.join(self.package_folder, "licenses"))
+        self._sign_binaries()
 
     def package_info(self):
         # ⚠️ **链接名是 pari，不是 pari-gmp-tls**：PARI 装出来的是
