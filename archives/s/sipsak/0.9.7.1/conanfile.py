@@ -1,16 +1,30 @@
 #!/usr/bin/env python3
-"""Conan recipe for sipsak 0.9.7 on HarmonyOS."""
+"""Conan recipe for sipsak 0.9.7 on HarmonyOS.
 
+Builds the upstream C sources directly with the Conan build-environment
+compiler (no autotools host detection), and runs the upstream Check-based
+unit tests (tests/check_helper.c, tests/check_md5.c) via the bundled
+minimal Check-compatible shim. The real test run is parsed into
+upstream_test_summary.json, carried into the package as res/, and the
+test_package stage re-emits it as HMBS_UPSTREAM_TEST_RESULT so the hmbs
+preflight sees the actual executed/passed counts even when a later build
+is served from the Conan cache.
+"""
+
+import json
 import os
+import re
+import subprocess
 
 from conan import ConanFile
+from conan.errors import ConanException
 from conan.tools.env import VirtualBuildEnv
 from conan.tools.files import copy, get
 
 
 class SipsakConan(ConanFile):
     name = "sipsak"
-    version = "0.9.7"
+    version = "0.9.7.1"
     description = "SIP stress and diagnostics command-line utility"
     license = "GPL-2.0-or-later"
     homepage = "https://sipsak.org"
@@ -93,7 +107,14 @@ class SipsakConan(ConanFile):
     def _run_upstream_tests(self, cc, flags):
         """Compile and run the upstream Check-based unit tests using the
         bundled minimal Check-compatible shim, so the upstream test sources
-        are exercised even when the Check framework is not installed."""
+        are exercised even when the Check framework is not installed.
+
+        The shim's runner prints one summary line per program in the form
+        "N tests run, M failed" (see check_shim.c); the real counts are
+        parsed from that output and written to upstream_test_summary.json,
+        which the test_package stage re-emits as HMBS_UPSTREAM_TEST_RESULT.
+        Any failed test raises, so conan create fails honestly.
+        """
         source_folder = self.source_folder
         shim_dir = os.path.join(source_folder, "files")
         # The upstream tests include "../config.h", which autoconf normally
@@ -137,6 +158,10 @@ class SipsakConan(ConanFile):
                 ],
             ),
         )
+        discovered = 0
+        executed = 0
+        passed = 0
+        failed = 0
         for name, test_sources in tests:
             source_args = " ".join('"{}"'.format(item) for item in test_sources)
             binary = os.path.join(self.build_folder, name)
@@ -144,7 +169,57 @@ class SipsakConan(ConanFile):
                 '"{}" {} {} -o "{}"'.format(cc, test_flags, source_args, binary),
                 env="conanbuild",
             )
-            self.run('"{}"'.format(binary), env="conanbuild")
+            # NOTE: Conan's self.run() returns the exit code, not the command
+            # output, so the test output must be captured via subprocess
+            # instead of relying on the return value.
+            proc = subprocess.run(
+                [binary],
+                env=os.environ.copy(),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                errors="replace",
+                timeout=1800,
+            )
+            output = proc.stdout or ""
+            self.output.info("upstream test {} output:\n{}".format(name, output))
+            if proc.returncode != 0:
+                raise ConanException(
+                    "upstream test {} exited with code {}:\n{}".format(
+                        name, proc.returncode, output[-4000:]
+                    )
+                )
+            match = re.search(r"(\d+) tests run, (\d+) failed", output)
+            if not match:
+                raise ConanException(
+                    "cannot parse upstream {} test summary from output:\n{}".format(
+                        name, output[-4000:]
+                    )
+                )
+            run_count = int(match.group(1))
+            failed_count = int(match.group(2))
+            discovered += run_count
+            executed += run_count
+            passed += run_count - failed_count
+            failed += failed_count
+        summary = {
+            "status": "passed" if (executed > 0 and failed == 0) else "failed",
+            "framework": "check-shim",
+            "command": "check_helper; check_md5",
+            "discovered": discovered,
+            "executed": executed,
+            "passed": passed,
+            "failed": failed,
+            "skipped": 0,
+        }
+        summary_path = os.path.join(self.build_folder, "upstream_test_summary.json")
+        with open(summary_path, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, ensure_ascii=False)
+        self.output.info("upstream test summary written: " + summary_path)
+        if failed != 0 or executed == 0:
+            raise ConanException(
+                "upstream tests failed: " + json.dumps(summary, ensure_ascii=False)
+            )
 
     def package(self):
         copy(
@@ -165,6 +240,18 @@ class SipsakConan(ConanFile):
             src=self.source_folder,
             dst=os.path.join(self.package_folder, "licenses"),
         )
+        # Carry the upstream test summary into the package so the
+        # test_package stage can emit HMBS_UPSTREAM_TEST_RESULT even when a
+        # later preflight reuses the cached binary (build() skipped).
+        summary_src = os.path.join(self.build_folder, "upstream_test_summary.json")
+        if os.path.isfile(summary_src):
+            copy(
+                self,
+                "upstream_test_summary.json",
+                src=self.build_folder,
+                dst=os.path.join(self.package_folder, "res"),
+                keep_path=False,
+            )
 
     def package_info(self):
         self.cpp_info.libs = []
