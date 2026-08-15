@@ -27,11 +27,13 @@ int main(void) {
         printf("Tcl version: (unknown)\n");
     }
     const char *patch_level = Tcl_GetVar(interp, "tcl_patchLevel", TCL_GLOBAL_ONLY);
-    if (patch_level != NULL) {
-        printf("Tcl patch level: %s\n", patch_level);
-    } else {
-        printf("Tcl patch level: (unknown)\n");
+    if (patch_level == NULL || strcmp(patch_level, "8.6.16") != 0) {
+        fprintf(stderr, "FAIL: Tcl patch level \"%s\" != \"8.6.16\"\n",
+                patch_level ? patch_level : "(NULL)");
+        Tcl_DeleteInterp(interp);
+        return 1;
     }
+    printf("Tcl patch level: %s\n", patch_level);
 
     /* Evaluate a simple Tcl script */
     int rc = Tcl_Eval(interp, "expr 2 + 3");
@@ -40,7 +42,14 @@ int main(void) {
         Tcl_DeleteInterp(interp);
         return 1;
     }
-    printf("expr 2 + 3 = %s\n", Tcl_GetStringResult(interp));
+    const char *expr_result = Tcl_GetStringResult(interp);
+    printf("expr 2 + 3 = %s\n", expr_result);
+    if (expr_result == NULL || strcmp(expr_result, "5") != 0) {
+        fprintf(stderr, "FAIL: expr result \"%s\" != \"5\"\n",
+                expr_result ? expr_result : "(NULL)");
+        Tcl_DeleteInterp(interp);
+        return 1;
+    }
 
     /* Run another script — verify both rc and result content */
     rc = Tcl_Eval(interp, "concat hello world");
