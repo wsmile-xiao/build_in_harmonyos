@@ -12,7 +12,7 @@ sipsak is a SIP Swiss army knife that can be used for:
 
 ## Version
 
-- **0.9.7**: Current stable version
+- **0.9.7.1**: Current stable version (Conan package revision of upstream 0.9.7)
 
 ## Dependencies
 
