@@ -1,0 +1,80 @@
+--- a/src/libs/zbxnix/ipc.c
++++ b/src/libs/zbxnix/ipc.c
+@@ -16,6 +16,8 @@
+ 
+ #include "zbxcommon.h"
+ 
++#include <sys/mman.h>
++
+ /******************************************************************************
+  *                                                                            *
+  * Purpose: Create block of shared memory                                     *
+@@ -26,18 +28,27 @@
+  *               -1 on an error                                               *
+  *                                                                            *
+  ******************************************************************************/
+-int	zbx_shm_create(size_t size)
++void	*zbx_shm_create(size_t size)
+ {
+-	int	shm_id;
++	size_t	header_size, total;
++	void	*base;
+ 
+-	if (-1 == (shm_id = shmget(IPC_PRIVATE, size, IPC_CREAT | IPC_EXCL | 0600)))
++	/* OHOS blocks SysV shmget() (EACCES). Use a MAP_SHARED anonymous mapping,
++	 * inherited by forked child processes. The mapping size is stored right
++	 * before the returned pointer so zbx_shm_destroy() can munmap it. */
++	header_size = ZBX_SIZE_T_ALIGN8(sizeof(size_t));
++	total = header_size + size;
++
++	if (MAP_FAILED == (base = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0)))
+ 	{
+ 		zabbix_log(LOG_LEVEL_CRIT, "cannot allocate shared memory of size " ZBX_FS_SIZE_T ": %s",
+ 				(zbx_fs_size_t)size, zbx_strerror(errno));
+-		return -1;
++		return NULL;
+ 	}
+ 
+-	return shm_id;
++	*(size_t *)base = total;
++
++	return (char *)base + header_size;
+ }
+ 
+ /******************************************************************************
+@@ -50,13 +61,15 @@
+  *               -1 on an error                                               *
+  *                                                                            *
+  ******************************************************************************/
+-int	zbx_shm_destroy(int shmid)
++void	zbx_shm_destroy(void *base)
+ {
+-	if (-1 == shmctl(shmid, IPC_RMID, 0))
+-	{
++	size_t	header_size, total;
++	void	*real_base;
++
++	header_size = ZBX_SIZE_T_ALIGN8(sizeof(size_t));
++	real_base = (char *)base - header_size;
++	total = *(size_t *)real_base;
++
++	if (-1 == munmap(real_base, total))
+ 		zbx_error("cannot remove existing shared memory: %s", zbx_strerror(errno));
+-		return -1;
+-	}
+-
+-	return 0;
+ }
+--- a/include/zbxnix.h
++++ b/include/zbxnix.h
+@@ -66,8 +66,8 @@
+ /* IPC start */
+ #define ZBX_NONEXISTENT_SHMID		(-1)
+ 
+-int	zbx_shm_create(size_t size);
+-int	zbx_shm_destroy(int shmid);
++void	*zbx_shm_create(size_t size);
++void	zbx_shm_destroy(void *base);
+ 
+ /* data copying callback function prototype */
+ typedef void	(*zbx_shm_copy_func_t)(void *dst, size_t size_dst, const void *src);
