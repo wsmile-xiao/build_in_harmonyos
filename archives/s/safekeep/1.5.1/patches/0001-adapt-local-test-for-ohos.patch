@@ -1,0 +1,163 @@
+diff --git a/safekeep-test b/safekeep-test
+index 04a14bc..09bd55a 100644
+--- a/safekeep-test
++++ b/safekeep-test
+@@ -11,6 +11,76 @@ test_reps=2
+ class TestFailure(Exception):
+     pass
+ 
++def ohosLocalMode():
++    return os.environ.get('SAFEKEEP_TEST_OHOS_LOCAL') in ('1', 'true', 'yes')
++
++def findExe(exe):
++    override = os.environ.get('SAFEKEEP_TEST_' + exe.upper().replace('-', '_'))
++    if override:
++        return override
++    found = shutil.which(exe)
++    if found:
++        return found
++    return exe
++
++def prepareOhosLocalTest(tmproot):
++    bindir = os.path.join(tmproot, 'ohos-bin')
++    os.mkdir(bindir)
++
++    client = os.path.join(bindir, 'safekeep-client-emulator.py')
++    writefile(client, """#!/usr/bin/env python3
++import os
++import sys
++
++bdir = os.environ.get("SAFEKEEP_TEST_CLIENT_ROOT")
++if not bdir:
++    print("TRACEBACK missing SAFEKEEP_TEST_CLIENT_ROOT>>>", flush=True)
++    sys.exit(1)
++
++def send(line):
++    print(line, flush=True)
++
++while True:
++    line = sys.stdin.readline()
++    if not line:
++        break
++    if line.startswith("ALOHA"):
++        send("OK 1.4, 1.5.1")
++    elif line.startswith("DEFAULT"):
++        send("OK 0")
++    elif line.startswith("CONFIG"):
++        try:
++            count = int(line.split(":", 2)[1].strip())
++        except Exception:
++            send("ERROR bad CONFIG")
++            continue
++        for _ in range(count):
++            sys.stdin.readline()
++        send("OK 0")
++    elif line.startswith("SETUP"):
++        send("OK 0 " + bdir)
++    elif line.startswith("CLEANUP") or line.startswith("SCRUB"):
++        send("OK 0")
++    else:
++        send("ERROR unsupported " + line.strip())
++""")
++    os.chmod(client, 0o755)
++
++    wrapper = os.path.join(bindir, 'safekeep')
++    writefile(wrapper, """#!/bin/sh
++if [ "$1" = "--client" ]; then
++  exec %s %s
++fi
++exec %s "$@"
++""" % (shlex.quote(sys.executable), shlex.quote(client), shlex.quote(findExe('safekeep'))))
++    os.chmod(wrapper, 0o755)
++
++    return {
++        'bin': bindir,
++        'client_root': os.path.join(tmproot, 'client'),
++        'rdiff_backup': findExe('rdiff-backup'),
++    }
++
+ def mkssh(cmd='ssh'):
+     args = [cmd]
+     ssh_id_file = ssh_id_file_keys[0]
+@@ -116,23 +186,58 @@ def augmentfile(file, user=None, host=None):
+     writefile(file, content, mode='a', user=user, host=host)
+ 
+ def localTest(tmproot):
+-    params = {'tmproot': tmproot, 'args': safekeep_args}
++    ohos = ohosLocalMode()
++    ohos_paths = None
++    if ohos:
++        ohos_paths = prepareOhosLocalTest(tmproot)
++    params = {
++        'tmproot': tmproot,
++        'args': safekeep_args,
++        'backup_id': tmproot,
++        'repo_path': tmproot + '/server',
++        'rdiff_options': '',
++        'include': '<include path="' + tmproot + '/client" />',
++        'server_env': '',
++        'rdiff_backup': 'rdiff-backup -r now',
++        'restore_md5_cmd': "cd %(tmproot)s/restore%(tmproot)s/client; find -type f | sort | xargs md5sum > %(tmproot)s/md5sums.restore",
++    }
++    if ohos:
++        params.update({
++            'backup_id': 'local-ohos',
++            'repo_path': 'server',
++            'rdiff_options': '<options><rdiff-backup exec_local="%s" /></options>' % (ohos_paths['rdiff_backup']),
++            'include': '<include glob="**" />',
++            'server_env': 'cd %s; PATH=.:$PATH SAFEKEEP_TEST_CLIENT_ROOT=%s SAFEKEEP_TEST_OHOS_LOCAL=1 ' % (
++                shlex.quote(ohos_paths['bin']),
++                shlex.quote(ohos_paths['client_root']),
++            ),
++            'rdiff_backup': shlex.quote(ohos_paths['rdiff_backup']) + ' restore --at now',
++            'restore_md5_cmd': r"cd %(tmproot)s/restore; find -type f -a \! -name '*.nobackup' | sort | xargs md5sum > %(tmproot)s/md5sums.restore",
++        })
+     os.mkdir(os.path.join(tmproot, 'backup.d'))
+     os.mkdir(os.path.join(tmproot, 'client'))
+     os.mkdir(os.path.join(tmproot, 'client', 'data'))
+     os.mkdir(os.path.join(tmproot, 'client', 'home'))
+     os.mkdir(os.path.join(tmproot, 'client', 'misc'))
+     os.mkdir(os.path.join(tmproot, 'server'))
+-    CONFIG = """
++    if ohos:
++        CONFIG = """
++        nice.adjustment=0
++        ionice.adjustment=
++        base.dir=%(tmproot)s
++    """
++    else:
++        CONFIG = """
+         # Default values should do for now
+     """
+     writefile(os.path.join(tmproot, 'safekeep.conf'), CONFIG % params)
+     BACKUP = """
+-       <backup id="%(tmproot)s">
+-          <repo path="%(tmproot)s/server" />
++       <backup id="%(backup_id)s">
++          <repo path="%(repo_path)s" />
++          %(rdiff_options)s
+           <data>
+              <exclude glob="**/*.nobackup" />
+-             <include path="%(tmproot)s/client" />
++             %(include)s
+           </data>
+         </backup>
+     """
+@@ -152,14 +257,14 @@ def localTest(tmproot):
+         cmd = r"cd %(tmproot)s/client; find -type f -a \! -name '*.nobackup' | sort | xargs md5sum > %(tmproot)s/md5sums.client"
+         if os.system(cmd % params):
+             raise TestFailure("Can't compute the source MD5 sums")
+-        cmd = "safekeep --server %(args)s --conf '%(tmproot)s/safekeep.conf'"
++        cmd = "%(server_env)ssafekeep --server %(args)s --conf '%(tmproot)s/safekeep.conf'"
+         if os.system(cmd % params):
+             raise TestFailure("Can't backup files")
+         os.mkdir(os.path.join(tmproot, 'restore'))
+-        cmd = "rdiff-backup -r now %(tmproot)s/server %(tmproot)s/restore"
++        cmd = "cd %(tmproot)s; %(rdiff_backup)s %(repo_path)s restore"
+         if os.system(cmd % params):
+             raise TestFailure("Can't restore files")
+-        cmd = "cd %(tmproot)s/restore%(tmproot)s/client; find -type f | sort | xargs md5sum > %(tmproot)s/md5sums.restore"
++        cmd = params['restore_md5_cmd']
+         if os.system(cmd % params):
+             raise TestFailure("Can't compute the source MD5 sums")
+         cmd = "diff -u %(tmproot)s/md5sums.client %(tmproot)s/md5sums.restore"
