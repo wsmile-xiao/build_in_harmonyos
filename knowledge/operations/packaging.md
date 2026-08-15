@@ -218,6 +218,42 @@ cp real_library.so.1.0 library.so  # 多占磁盘但可靠
 
 > **Conan 方式**：Conan 配方中可通过 `package_info()` 的 `cpp_info.libs` 和 `build_dirs` 自动管理库路径，减少手动处理软链接的需求。
 
+### Meson 版本化共享库：构建树和包树都要实体化别名
+
+Meson 常在构建输出中生成 `libfoo.so.X.Y.Z`，并以
+`libfoo.so.X`、`libfoo.so` 软链接提供 ABI 和链接器入口。HarmonyOS
+目标文件系统不保证这些软链接可创建或可读取，因此只在包安装后复制一次
+并不够：上游 Meson 测试和后续链接可能先在构建树中失败。
+
+Conan 配方应仅在 `settings.os == "OHOS"` 时，在 `meson.build()` 之后、
+`meson.test()` 之前扫描实际产物目录，并在 `meson.install()` 后再次扫描
+`package_folder/lib`。对每个真实 `libfoo.so.X.Y.Z` 文件，缺少时复制为：
+
+```text
+libfoo.so.X
+libfoo.so
+```
+
+实现要求：
+
+- 只处理实际存在的版本化共享库；不要猜测文件名或覆盖已有文件。
+- 扫描 Meson 的真实输出目录和包内 `lib/`，不要递归进入
+  `*.so.*.p` 对象目录。
+- 保持 `package_info()` 的库名声明不变，别名复制只补齐文件系统语义。
+- 该做法只解决链接器和加载器的库名解析，不能让依赖 usbfs、显示设备等
+  硬件后端的运行时测试自动可用。
+- 对 Autotools 依赖还要单独确认目标的脚本执行与工作目录语义：即使 HNP Bash
+  可解释 `configure`，FRP/SSH 会话所在的 HMDFS 目录也可能在脚本内 `getcwd`
+  失败，而可执行临时目录未必对当前账户可写。遇到此情况应记录具体目录和错误，
+  不得把下游库的上游测试标作失败或通过。
+
+USBredir 0.15.0 的 current-head HarmonyOS PC 原生事务已验证该顺序中的
+已安装 parser consumer 为 1/1。启用上游 Meson `filter`、`serializer` 的
+事务在依赖 libffi 3.4.4 的 `configure` 被目标拒绝执行（error 126）前停止，
+因此两项上游测试未执行，不能引用旧候选的 2/2 作为 current-head 结果。详见
+`knowledge/drafts/E319-draft-usbredir-ohos-meson-shared-library-aliases.md`；
+该草稿尚未提升为正式图谱条目。
+
 ---
 
 ## 7. 静态库打包注意事项

@@ -20,7 +20,7 @@ usbredir is a protocol for redirection USB traffic from a single USB device to a
 
 | Version | Status | Date |
 |---------|--------|------|
-| 0.15.0 | built | 2026-06-12 |
+| 0.15.0 | built | 2026-07-19 |
 
 ## Build System
 
