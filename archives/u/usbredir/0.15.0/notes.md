@@ -1,5 +1,37 @@
 # usbredir 0.15.0 适配笔记
 
+## Conan recipe update (2026-07-19)
+
+- Added Conan package inputs for the Meson build: `conanfile.py`, `conandata.yml`, and `test_package/`.
+- The recipe builds the two library targets, `libusbredirparser` and `libusbredirhost`.
+- `tools`, `tests`, and `fuzzing` are disabled for the first OHOS package because `usbredirect` pulls in `glib-2.0`/`gio-unix-2.0`, while `spice-gtk` currently needs the library dependency closure first.
+- The consumer test includes parser and host public headers, initializes/destroys `usbredirparser`, writes a queued protocol packet through callbacks, and opens/closes a host instance with dummy callbacks.
+- `with_upstream_tests=True` is default-off and enables the two upstream Meson
+  checks, `filter` and `serializer`. They require `glib-2.0`, so the recipe
+  adds the cached `glib/2.84.0` dependency only for this test-enabled build.
+
+## Current validation state
+
+- HarmonyOS PC r1 for candidate `583b1f2ef` verified the official source SHA-256,
+  built both libraries, and then exposed an OHOS filesystem/runtime gap: Meson
+  could not create the versioned shared-library aliases. The two native upstream
+  checks therefore failed `0/2` at runtime and the consumer could not link
+  `-lusbredirhost`/`-lusbredirparser`. This is a diagnosis only, not a passing
+  result.
+- HarmonyOS PC r5 for local-only candidate `9ac97c8fb` reran the exact source
+  and profile after adding OHOS-only copies of `.so` and `.so.<major>` beside
+  the versioned libraries. Both upstream Meson checks passed `2/2` (`filter`,
+  `serializer`) and the installed consumer command passed `1/1`. The consumer
+  intentionally reported its host-context smoke as skipped after
+  `LIBUSB_ERROR_OTHER` because this device lacks a usable usbfs backend; its
+  parser packet path executed and passed.
+- Both r5 `conan create` commands exited `0`. The runner verified candidate,
+  source, and payload SHA-256 values before execution. Raw copied reports are
+  retained under `reports/pr-3016-9ac97c8fb-device-r5/`.
+- `9ac97c8fb` is not the public PR head. Do not put these rates in PR #3016's
+  public body or request CI/review until its public tree is reconciled and the
+  matching candidate is rerun when necessary.
+
 ## 编译环境
 - 构建系统: meson
 - 编译日期: 2026-06-12
