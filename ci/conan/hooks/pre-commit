@@ -244,10 +244,11 @@ def check_directory_structure(ver_dir: Path, project_root: Path) -> None:
 
 
 def check_branch_name(ver_dir: Path, project_root: Path) -> None:
-    """L0n: branch name contains pkg_name-pkg_ver (R40).
+    """L0n: branch name matches pkg_name-pkg_ver exactly (R40).
 
-    Checks that the current git branch name contains the expected
-    '{pkg_name}-{pkg_ver}' tag (e.g. feat/jsmn-1.1.0 contains jsmn-1.1.0).
+    The branch name, after stripping an optional prefix (the part before
+    the last '/'), must equal '{pkg_name}-{pkg_ver}' exactly.
+    Pass: abc-1.0.0 / feat/abc-1.0.0; Fail: abc-1.0.0-ASDH (suffix).
     Skipped on main/master/server branches.
     """
     import subprocess
@@ -277,15 +278,101 @@ def check_branch_name(ver_dir: Path, project_root: Path) -> None:
     if not branch or branch in ("main", "master", "server"):
         return
 
+    # Normalize '+' → '-' on both sides (Debian-style versions like 1.4+dfsg.1)
     expected_tag = f"{pkg_name}-{pkg_ver}"
-    if expected_tag not in branch:
+    expected_norm = expected_tag.replace("+", "-")
+    branch_norm = branch.replace("+", "-")
+    # Strip optional prefix (anything before the last '/')
+    branch_base = branch_norm.rsplit("/", 1)[-1]
+
+    if branch_base != expected_norm:
         errors.append(
             f"  L0n ❌ {pkg_name}/{pkg_ver}: 分支名 '{branch}'"
-            f" 不包含 '{expected_tag}'"
+            f"（去前缀后 '{branch_base}'）≠ '{expected_tag}'"
         )
         warnings.append(
-            f"  💡 分支名应包含 包名-版本号，例如："
-            f" feat/{expected_tag} 或 fix/{expected_tag}"
+            f"  💡 分支名去掉前缀后必须精确等于 包名-版本号（禁止任何后缀），例如："
+            f" feat/{expected_tag} 或 {expected_tag}；"
+            f" 平台按 分支名完全一致+作者 匹配任务，带后缀会导致任务无法关联"
+        )
+
+
+def check_commands_json(ver_dir: Path, project_root: Path) -> None:
+    """L0k: CLI tool packages must declare commands.json (R38).
+
+    If the recipe looks like a CLI tool (bindirs / bin install target /
+    package_type="application"), the software-level commands.json must
+    exist with type=tool, matching name and current version.
+    Only enforced under archives/ layout.
+    """
+    import json
+    import re
+
+    try:
+        rel = ver_dir.relative_to(project_root)
+    except ValueError:
+        return
+    parts = rel.parts
+    if "archives" not in parts:
+        return
+    idx = parts.index("archives")
+    sub = parts[idx + 1:]
+    if len(sub) < 3:
+        return
+    pkg_name, pkg_ver = sub[1], sub[2]
+    commands_json = ver_dir.parent / "commands.json"
+
+    conanfile = ver_dir / "conanfile.py"
+    if not conanfile.exists():
+        return
+    try:
+        src = conanfile.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return
+
+    bin_install_re = re.compile(
+        r'RUNTIME\s+DESTINATION\s+bin\b|dst\s*=\s*["\']bin["\']'
+    )
+    is_cli = (
+        "bindirs" in src
+        or bin_install_re.search(src) is not None
+        or re.search(r'package_type\s*=\s*["\']application', src) is not None
+    )
+    if not is_cli:
+        return
+
+    if not commands_json.exists():
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: CLI 工具缺少 commands.json"
+        )
+        warnings.append(
+            f"  💡 参考 templates/commands.json.template 在"
+            f" {commands_json.parent.name}/ 下创建 commands.json"
+        )
+        return
+
+    try:
+        data = json.loads(commands_json.read_text(encoding="utf-8"))
+    except Exception:
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json 不是合法 JSON"
+        )
+        return
+    if data.get("type") != "tool":
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json type 应为 \"tool\""
+        )
+    elif pkg_name not in str(data.get("name", "")):
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json name 不匹配"
+            f"（期望含 {pkg_name}）"
+        )
+    elif pkg_ver not in (data.get("versions") or {}):
+        errors.append(
+            f"  L0k ❌ {pkg_name}/{pkg_ver}: commands.json 缺少版本 {pkg_ver}"
+        )
+        warnings.append(
+            f"  💡 递增版本号时须同步在 commands.json 的 versions 中补 {pkg_ver}"
         )
 
 
@@ -302,6 +389,7 @@ def run_all_checks(ver_dir: Path, project_root: Path) -> None:
     check_go_rust(ver_dir)
     check_directory_structure(ver_dir, project_root)
     check_branch_name(ver_dir, project_root)
+    check_commands_json(ver_dir, project_root)
 
 
 def main() -> int:

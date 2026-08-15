@@ -556,14 +556,25 @@ PYEOF
 
     # ── L0k: 命令行工具声明检查 (R38) ──
     # 如果 conanfile.py 构建产物包含可执行文件 (bin/), 必须有 commands.json (软件级)
+    # 仅当 conanfile 位于 archives/<字母>/<包名>/<版本>/ 标准路径下时强制检查
+    # （非 archives 路径的构建场景跳过，避免误伤）
     echo "[step] L0k: Checking commands.json for CLI tools (R38)..."
     CONANFILE_DIR="$(dirname "$CONANFILE")"
     # commands.json 在软件级别目录 (上两级: {version}/ → {name}/)
     PKG_SOFTWARE_DIR="$(dirname "$CONANFILE_DIR")"
     COMMANDS_JSON="${PKG_SOFTWARE_DIR}/commands.json"
+    case "$CONANFILE" in
+        */archives/*) L0K_APPLICABLE=true ;;
+        *)            L0K_APPLICABLE=false ;;
+    esac
+    if [ "$L0K_APPLICABLE" = "false" ]; then
+        echo "        [info] L0k: skipped (conanfile not under archives/, path: $CONANFILE)"
+    else
     # 检查 conanfile.py 是否构建可执行文件 (package_info 中有 bindirs 或 build install bin/)
     HAS_BINDIRS=$(grep -c 'bindirs\|cpp_info\.bindirs\|bindirs\s*=' "$CONANFILE" 2>/dev/null || true)
-    HAS_BIN_INSTALL=$(grep -c 'RUNTIME DESTINATION bin\|install.*bin\|install.*TARGETS.*bin' "$CONANFILE" 2>/dev/null || true)
+    # 收紧安装目标检测: 只认 CMake RUNTIME DESTINATION bin 与 self.copy(dst="bin")
+    # （旧正则 install.*bin 会误匹配 set(INSTALL_BINDIR)/注释等，提升 fail 后必须防误伤）
+    HAS_BIN_INSTALL=$(grep -cE 'RUNTIME[[:space:]]+DESTINATION[[:space:]]+bin\b|dst\s*=\s*["'"'"']bin["'"'"']' "$CONANFILE" 2>/dev/null || true)
     HAS_EXECUTABLE=$(grep -c 'package_type.*=.*"application"\|package_type.*=.*'\''application' "$CONANFILE" 2>/dev/null || true)
     HAS_BINDIRS=${HAS_BINDIRS:-0}
     HAS_BIN_INSTALL=${HAS_BIN_INSTALL:-0}
@@ -594,25 +605,36 @@ except Exception:
                         echo "        [ok] commands.json valid (type=tool)"
                         ;;
                     INVALID_JSON)
-                        echo "        [warn] L0k: commands.json exists but is invalid JSON"
+                        echo "[fail] L0k: commands.json exists but is invalid JSON (R38)"
                         echo "[hint] 参考 templates/commands.json.template 格式"
+                        L0_FAILED=true
+                        L0_ERRORS="${L0_ERRORS} commands_json_r38"
                         ;;
                     BAD_TYPE)
-                        echo "        [warn] L0k: commands.json type should be \"tool\""
+                        echo "[fail] L0k: commands.json type should be \"tool\" (R38)"
+                        L0_FAILED=true
+                        L0_ERRORS="${L0_ERRORS} commands_json_r38"
                         ;;
                     BAD_NAME)
-                        echo "        [warn] L0k: commands.json name mismatch (expected: $pkg_name)"
+                        echo "[fail] L0k: commands.json name mismatch (expected: $pkg_name) (R38)"
+                        L0_FAILED=true
+                        L0_ERRORS="${L0_ERRORS} commands_json_r38"
                         ;;
                     BAD_VERSION)
-                        echo "        [warn] L0k: commands.json missing version $pkg_ver"
+                        echo "[fail] L0k: commands.json missing version $pkg_ver (R38)"
+                        echo "[hint] 递增版本号时须同步在 commands.json 的 versions 中补 $pkg_ver"
+                        L0_FAILED=true
+                        L0_ERRORS="${L0_ERRORS} commands_json_r38"
                         ;;
                 esac
             fi
         else
-            echo "        [warn] L0k: CLI tool detected but commands.json missing (R38)"
+            echo "[fail] L0k: CLI tool detected but commands.json missing (R38)"
             echo "[hint] 此软件构建可执行文件, 应在软件级别目录下创建 commands.json:"
             echo "         cp templates/commands.json.template ${COMMANDS_JSON}"
             echo "       参考 archives/s/strace/commands.json 示例"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} commands_json_r38"
         fi
     else
         # 库类型, 不需要 commands.json
@@ -621,6 +643,7 @@ except Exception:
         else
             echo "        [ok] library package, commands.json not required"
         fi
+    fi
     fi
 
     # ── L0m: 目录结构校验 (R39) ──
@@ -672,36 +695,40 @@ PYEOF
     fi
 
     # ── L0n: 分支名与包名-版本匹配校验 (R40) ──
-    # PR 分支名必须包含 {pkg_name}-{pkg_ver}（如 feat/jsmn-1.1.0 包含 jsmn-1.1.0）
-    # 不做分支名分割，直接拼接已知值做包含检查，避免包名含 '-' 导致歧义
+    # 分支名剥掉可选前缀（如 feat/）后必须精确等于 {pkg_name}-{pkg_ver}
+    #   通过: abc-1.0.0 / feat/abc-1.0.0 / fix/abc-1.0.0
+    #   拦截: abc-1.0.0-ASDH（带后缀，平台任务按分支名完全一致匹配会关联失败）
+    # 归一化：+ → -（Debian 风格版本后缀如 1.4+dfsg.1 → 1.4-dfsg.1）
     # REL 构建或 main/master/server 分支自动跳过
     # PR > 5200: 强制失败（报错）; PR <= 5200: 仅告警（历史 PR 宽容）
     if [ -n "${CI_BRANCH:-}" ] && [ "${CI_BRANCH}" != "main" ] \
        && [ "${CI_BRANCH}" != "master" ] && [ "${CI_BRANCH}" != "server" ]; then
         echo "[step] L0n: Checking branch name matches package (R40)..."
         EXPECTED_TAG="${pkg_name}-${pkg_ver}"
-        # 归一化：将 + 替换为 - 后比较（Debian 风格版本后缀如 1.4+dfsg.1 → 1.4-dfsg.1）
         EXPECTED_TAG_NORM=$(echo "${EXPECTED_TAG}" | tr '+' '-')
         BRANCH_NORM=$(echo "${CI_BRANCH}" | tr '+' '-')
-        if echo "${BRANCH_NORM}" | grep -q -- "${EXPECTED_TAG_NORM}"; then
-            echo "        [ok] L0n: branch '${CI_BRANCH}' contains '${EXPECTED_TAG}'"
+        # 剥掉最后一段 '/' 前缀（允许 feat/ fix/ adapt/ 等任意前缀，禁止任何后缀）
+        BRANCH_BASE="${BRANCH_NORM##*/}"
+        if [ "${BRANCH_BASE}" = "${EXPECTED_TAG_NORM}" ]; then
+            echo "        [ok] L0n: branch '${CI_BRANCH}' matches '${EXPECTED_TAG}' exactly (prefix allowed)"
         else
             # PR > 5200 强制失败, PR <= 5200 仅告警
             _pr_num="${CI_PR_NUMBER:-0}"
             if [ "${_pr_num}" -gt 5200 ] 2>/dev/null; then
-                echo "[error] L0n: branch name mismatch (R40) — 分支名不包含 包名-版本号"
-                echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
-                echo "[hint] 分支名应包含 包名-版本号，例如："
+                echo "[error] L0n: branch name mismatch (R40) — 分支名（去掉前缀后）不等于 包名-版本号"
+                echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）≠ '${EXPECTED_TAG}'"
+                echo "[hint] 分支名必须以 包名-版本号 结尾，不允许加任何后缀，例如："
+                echo "         ${pkg_name}-${pkg_ver}"
                 echo "         feat/${pkg_name}-${pkg_ver}"
                 echo "         fix/${pkg_name}-${pkg_ver}"
-                echo "         ${pkg_name}-${pkg_ver}"
+                echo "       ❌ 错误示例: ${pkg_name}-${pkg_ver}-ASDH / ${pkg_name}-${pkg_ver}_2"
+                echo "       平台按 分支名完全一致 + 作者 匹配任务，分支名有后缀会导致任务无法关联"
                 L0_FAILED=true
                 L0_ERRORS="${L0_ERRORS} branch_name_r40"
             else
                 echo "[warn] L0n: branch name mismatch (R40) — PR #${_pr_num} <= 5200, 仅告警不拦截"
-                echo "       分支 '${CI_BRANCH}' 不包含 '${EXPECTED_TAG}'"
-                echo "[hint] 分支名应包含 包名-版本号，例如："
-                echo "         feat/${pkg_name}-${pkg_ver}"
+                echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）≠ '${EXPECTED_TAG}'"
+                echo "[hint] 分支名必须以 包名-版本号 结尾（允许 feat/ 等前缀，禁止后缀）"
             fi
         fi
     fi
