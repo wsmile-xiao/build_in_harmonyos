@@ -1,0 +1,336 @@
+--- a/activityfirefox
++++ b/activityfirefox
+@@ -6,62 +6,94 @@
+ # SPDX-FileCopyrightText: © 2021 Matija Šuklje <matija@suklje.email>, 2022 Cristian Le <git@lecris.me>, 2022 Jarosław Czarniak <jaroslaw@czarniak.org>
+ #
+ # Required: kdialog
+ # Required: xdpyinfo
+ # Required: gawk
+ # Recomended: gio
+ 
+ ## Needed for aliases to be expanded in non-interative Bash (and therefore work in script)
+ shopt -s expand_aliases
+ 
++## Wrapper-only options.  These make the activity provider explicit on
++## desktops that do not implement KDE Activities (for example OpenHarmony).
++ACTIVITY_ID_OVERRIDE="${ACTIVITY_AWARE_ID:-}"
++ACTIVITY_NAME_OVERRIDE="${ACTIVITY_AWARE_NAME:-}"
++COPY_TYPE_OVERRIDE="${ACTIVITY_AWARE_COPY_TYPE:-}"
++PROBE_CONTEXT=0
++FOREGROUND=0
++FIREFOX_ARGS=()
++while [ "$#" -gt 0 ]; do
++	case "$1" in
++		--activity-id)
++			[ "$#" -ge 2 ] || { echo ">>> Error! --activity-id requires a value" >&2; exit 2; }
++			ACTIVITY_ID_OVERRIDE="$2"; shift 2 ;;
++		--activity-name)
++			[ "$#" -ge 2 ] || { echo ">>> Error! --activity-name requires a value" >&2; exit 2; }
++			ACTIVITY_NAME_OVERRIDE="$2"; shift 2 ;;
++		--copy-type)
++			[ "$#" -ge 2 ] || { echo ">>> Error! --copy-type requires a value" >&2; exit 2; }
++			COPY_TYPE_OVERRIDE="$2"; shift 2 ;;
++		--probe-context)
++			PROBE_CONTEXT=1; shift ;;
++		--foreground)
++			FOREGROUND=1; shift ;;
++		-x)
++			set -x; shift ;;
++		--)
++			shift; FIREFOX_ARGS+=("$@"); break ;;
++		*)
++			FIREFOX_ARGS+=("$1"); shift ;;
++	esac
++done
++set -- "${FIREFOX_ARGS[@]}"
++
+ ## Edit to where the profiles are to be stored and used
+ FF_FOLDER="${HOME}/.mozilla/firefox"
+-W=$(xdpyinfo | awk '/dimensions/{print $2}' | cut --fields 1 --delimiter 'x')
+-H=$(xdpyinfo | awk '/dimensions/{print $2}' | cut --fields 2 --delimiter 'x')
++W=1024
++H=768
++if command -v xdpyinfo >/dev/null 2>&1; then
++	DISPLAY_SIZE=$(xdpyinfo 2>/dev/null | awk '/dimensions/{print $2; exit}')
++	case "${DISPLAY_SIZE}" in
++		*x*) W=${DISPLAY_SIZE%x*}; H=${DISPLAY_SIZE#*x} ;;
++	esac
++fi
+ set +f	# enable wildcard expansion if disabled
+-
+-## Enable verbose debug mode when using flag `-x`
+-if [ "$1" == "-x" ];then
+-	set -x
+-fi
+ 
+ ## Default settings for dialog
+ function f_Dialog()
+ {
+-kdialog --icon firefox "$@"
++	if command -v kdialog >/dev/null 2>&1; then
++		kdialog --icon firefox "$@"
++	else
++		echo ">>> Dialog unavailable: $*" >&2
++		return 1
++	fi
+ }
+ 
+ ## Default settings for passive popups
+ function f_Popup()
+ {
+-notify-send --icon firefox --app-name 'Activity-aware Firefox' "$@"
++	if command -v notify-send >/dev/null 2>&1; then
++		notify-send --icon firefox --app-name 'Activity-aware Firefox' "$@"
++	else
++		echo ">>> $*" >&2
++	fi
+ }
+ 
+ ## Use the correct plasma-activities CLI command
+-if command -v plasma-activities-cli6 &> /dev/null
+-	then
+-		alias plasma-activities-cli="plasma-activities-cli6"
+-
+-elif command -v plasma-activities &> /dev/null
+-	then
+-		alias plasma-activities-cli="plasma-activities"
+-
+-elif command -v kactivities-cli &> /dev/null
+-	then
+-		alias plasma-activities-cli="kactivities-cli"
+-
+-elif ! command -v plasma-activities-cli &> /dev/null
+-	then
+-		echo ">>> Error! Requirement plasma-activities-cli missing. Exiting."
+-		f_Dialog --error 'Error !!' 'Requirement plasma-activities-cli missing. Exiting.'
+-		exit 1
+-fi
++ACTIVITY_CLI=""
++for candidate in plasma-activities-cli6 plasma-activities kactivities-cli plasma-activities-cli; do
++	if command -v "${candidate}" >/dev/null 2>&1; then
++		ACTIVITY_CLI="${candidate}"
++		break
++	fi
++done
+ 
+ 
+ function f_GenHelp()
+ {
+ HELP="
+ New profile
+ -----------
+ This option will create a fresh new Firefox Profile without copying anything. This is the fastest method, but you will end up with Firefox default settings, so you might need to manually modify settings yourself.
+ 
+ Minimal copy
+@@ -102,25 +134,27 @@
+ This option will try to identify the Firefox Profile associated with the KDE Plasma Activity you ran the script in and rename the Profile to fit the new schema.
+ 
+ 
+ THIS SCRIPT WILL EXIT NOW."
+ 
+ 	echo -ne "${HELP}" > ${FF_FOLDER}/activityfirefox.help
+ }
+ 
+ function f_DeleteUnusedProfile()
+ {
++	# Explicit activity contexts cannot enumerate all desktop activities.
++	[ -n "${ACTIVITY_CLI}" ] || return 0
+ 	cd "${FF_FOLDER}" || exit
+ 	for PROFILE_DIR in $(set +f; ls --directory ????????.*_????????-????-????-????-????????????); do
+ 		PROFILE_ID=$(cut --fields 2 --delimiter '_' <<< "${PROFILE_DIR}")
+ 		PROFILE_NAME=$(cut --fields 1 --delimiter '_' <<< "${PROFILE_DIR}" | cut --fields 2 --delimiter '.')
+-		ACTIVITY_STATE=$(plasma-activities-cli --activity-property name "${PROFILE_ID}")
++		ACTIVITY_STATE=$("${ACTIVITY_CLI}" --activity-property name "${PROFILE_ID}")
+ 		if [ "${ACTIVITY_STATE}" = "" ];then
+ 			f_Dialog --title "Missing Activity" --warningyesno "Activity ${PROFILE_NAME} doesn't exists anymore.\nRemove unused FF profile directory?\n(${PROFILE_DIR})"
+ 			if [ $? -eq 0 ]; then	# yes
+ 				if [ $GIO_EXISTS -eq 1 ]; then
+ 					# move profile dir to trash
+ 					gio trash "${PROFILE_DIR}" || true
+ 				else
+ 					# more direct approach. move profile dir to trash manually
+ 					mv --force "${FF_FOLDER}/${PROFILE_DIR}" "${HOME}/.local/share/Trash/files"
+ 				fi
+@@ -135,82 +169,118 @@
+ 	done
+ }
+ 
+ function f_CheckAndPrepare()
+ {
+ 	## Template profile path can be used for profile copying.
+ 	TPL_PROF_DIRNAME=$(f_GetDirName "${FF_FOLDER}/????????.template-profile")
+ 	TPL_PROF_PATH="${FF_FOLDER}/${TPL_PROF_DIRNAME}"
+ 	if [ ! -d ${TPL_PROF_PATH} ]; then
+ 		$FF_BIN -CreateProfile "template-profile"
++		TPL_PROF_DIRNAME=$(f_GetDirName "${FF_FOLDER}/????????.template-profile")
++		TPL_PROF_PATH="${FF_FOLDER}/${TPL_PROF_DIRNAME}"
+ 	fi
+ 	TPL_PROF_SIZE="$(du --human --summarize ${TPL_PROF_PATH} | cut --fields 1)B"
+ }
+ 
+ function f_FSyncPrepare()
+ {
+ 
+ 	# new instance reqs a new token otherwise it will be visible as the old one. re-login is required.
+ 	if [ -f ${NEW_PROF_PATH}/signedInUser.json ]; then
+ 		mv ${NEW_PROF_PATH}/signedInUser.json "$(ls --directory ${NEW_PROF_PATH}/signedInUser.json)".old
+ 	fi
+ 	# set new FF sync instance name
+ 	if [ -f ${NEW_PROF_PATH}/prefs.js ]; then
+ 		sed --in-place "s/user_pref(\"identity.fxaccounts.account.device.name\",.*);/user_pref(\"identity.fxaccounts.account.device.name\", \"${FF_SYNC_NAME}\");/" ${NEW_PROF_PATH}/prefs.js
+ 	fi
+ }
+ 
+ function f_CheckDeps()
+ {
+-	FF_BIN=$(which firefox)
++	FF_BIN="${ACTIVITY_AWARE_FIREFOX_BIN:-$(command -v firefox)}"
+ 	## Not the most secure way to check for firefox existence but it does its job
+-	if [ $? -ne 0 ]; then
++	if [ -z "${FF_BIN}" ] || [ ! -x "${FF_BIN}" ]; then
+ 		echo ">>> Could not locate firefox executable"
+ 		f_Dialog --error "Could not locate firefox executable"
+ 		exit 1
+ 	fi
+ 
+ 	#check if gio cmd exists on a system
+ 	GIO_EXISTS=0
+ 	command -v gio > /dev/null 2>&1
+ 	if (( $? == 0 )) ; then
+ 		GIO_EXISTS=1
+ 	fi
+-
+-	#check if kdialog exists on a system
+-	command -v kdialog > /dev/null 2>&1
+-	if (( $? != 0 )) ; then
+-		echo ">>> Error! Requirement kdialog missing. Exiting."
+-		f_Dialog --error 'Error !!' 'Requirement kdialog missing. Exiting.'
+-		exit 1
+-	fi
+ }
+ 
+ function f_GetDirName()
+ {
+-	if [ -d $1 ]; then 
+-		basename "$(ls --directory $1)"
+-	else
+-		echo "DirectoryNotFound"
+-	fi
++	for PROFILE_PATH in $1; do
++		if [ -d "${PROFILE_PATH}" ]; then
++			printf '%s\n' "${PROFILE_PATH##*/}"
++			return 0
++		fi
++	done
++	echo "DirectoryNotFound"
+ }
++
++function f_ResolveActivity()
++{
++	if [ -n "${ACTIVITY_ID_OVERRIDE}" ] || [ -n "${ACTIVITY_NAME_OVERRIDE}" ]; then
++		if [ -z "${ACTIVITY_ID_OVERRIDE}" ] || [ -z "${ACTIVITY_NAME_OVERRIDE}" ]; then
++			echo ">>> Error! Explicit activity context requires both ID and name." >&2
++			exit 2
++		fi
++		ACTIVITY_PROVIDER="explicit"
++		ACTIVITY_UUID="${ACTIVITY_ID_OVERRIDE}"
++		ACTIVITY_NAME="${ACTIVITY_NAME_OVERRIDE}"
++	elif [ -n "${ACTIVITY_CLI}" ]; then
++		ACTIVITY_PROVIDER="kde"
++		ACTIVITY_UUID=$("${ACTIVITY_CLI}" --current-activity | cut --fields 2 --delimiter ' ')
++		ACTIVITY_NAME=$("${ACTIVITY_CLI}" --activity-property name "${ACTIVITY_UUID}")
++	else
++		echo ">>> Error! No activity context provider. Set ACTIVITY_AWARE_ID and ACTIVITY_AWARE_NAME, or pass --activity-id and --activity-name." >&2
++		exit 1
++	fi
++
++	if [ -z "${ACTIVITY_UUID}" ] || [ -z "${ACTIVITY_NAME}" ]; then
++		echo ">>> Error! Activity provider returned an empty ID or name." >&2
++		exit 1
++	fi
++	case "${ACTIVITY_UUID}" in
++		[!A-Za-z0-9]*|*[!A-Za-z0-9._-]*)
++			echo ">>> Error! Activity ID must start with an alphanumeric character and contain only A-Z, a-z, 0-9, dot, underscore, or hyphen." >&2
++			exit 2 ;;
++	esac
++	if [ "${#ACTIVITY_UUID}" -gt 128 ]; then
++		echo ">>> Error! Activity ID must not exceed 128 characters." >&2
++		exit 2
++	fi
++	ACTIVITY_NAME_CURATED=$(printf '%s' "${ACTIVITY_NAME}" | LC_ALL=C tr -cd '[:alnum:]-')
++	[ -n "${ACTIVITY_NAME_CURATED}" ] || ACTIVITY_NAME_CURATED="activity"
++}
++
++
++f_ResolveActivity
++if [ "${PROBE_CONTEXT}" -eq 1 ]; then
++	printf 'provider=%s\nid=%s\nname=%s\nprofile_key=%s_%s\n' \
++		"${ACTIVITY_PROVIDER}" "${ACTIVITY_UUID}" "${ACTIVITY_NAME}" \
++		"${ACTIVITY_NAME_CURATED}" "${ACTIVITY_UUID}"
++	exit 0
++fi
+ 
+ 
+ f_GenHelp
+ f_CheckDeps
+ f_CheckAndPrepare
+ f_DeleteUnusedProfile
+-
+-ACTIVITY_UUID=$(plasma-activities-cli --current-activity | cut --fields 2 --delimiter ' ')
+-## Remove all (but '-') non alphanumeric characters from the activity name
+-ACTIVITY_NAME=$(plasma-activities-cli --activity-property name "${ACTIVITY_UUID}")
+-ACTIVITY_NAME_CURATED=$(gawk --assign RS='( |[^[:alnum:]-])+' '{printf "%s", sep $0; sep=""}'<<<"${ACTIVITY_NAME}")
+ 
+ FF_SYNC_NAME="${ACTIVITY_NAME} @ ${HOSTNAME}"
+ ACTIVITY_PROFILENAME="${ACTIVITY_NAME_CURATED}_${ACTIVITY_UUID}"
+ echo ">>> ${ACTIVITY_NAME_CURATED}"
+ 
+ ## Default profile
+ DEF_PROF_DIRNAME=$(f_GetDirName "${FF_FOLDER}/????????.default-release")
+ DEF_PROF_PATH="${FF_FOLDER}/${DEF_PROF_DIRNAME}"
+ 
+ if [ ! -d ${DEF_PROF_PATH} ]; then
+@@ -229,21 +299,29 @@
+ NEW_PROF_PATH="${FF_FOLDER}/${NEW_PROF_DIRNAME}"									# ex: /home/XYZ/.mozilla/firefox/ky10cbmo.test_9936a864-799e-4393-a93c-12c3b980272c
+ 
+ if [ -d ${NEW_PROF_PATH} ]; then													## A profile already exist
+-	exec ${FF_BIN} --profile ${NEW_PROF_PATH} "$@" &								# Start with the profile with the given path. 
++	if [ "${FOREGROUND}" -eq 1 ]; then
++		exec "${FF_BIN}" --profile "${NEW_PROF_PATH}" "$@"
++	else
++		"${FF_BIN}" --profile "${NEW_PROF_PATH}" "$@" &						# Start with the profile with the given path.
++	fi
+ 	echo ">>> Started an existing profile: ${ACTIVITY_PROFILENAME}"
+ else
+ 	# noop option is used only as a visual separator
+ 	WINW=320
+ 	WINH=320
+ 	GEO="${WINW}x${WINH}+$((${W}/2-${WINW}/2))+$((${H}/2-${WINH}/2))"
+-	COPY_TYPE=$(f_Dialog --geometry "${GEO}" --menu "Select new profile type:" new "New profile (0MB)" minimal "Minimal copy (< 3MB)" templ "Template profile copy (${TPL_PROF_SIZE})" full "Full copy (${DEF_PROF_SIZE})" old "Migrate from pre-0.3 profile" noop "__________________________________" help "[Help me decide]")
++	if [ -n "${COPY_TYPE_OVERRIDE}" ]; then
++		COPY_TYPE="${COPY_TYPE_OVERRIDE}"
++	else
++		COPY_TYPE=$(f_Dialog --geometry "${GEO}" --menu "Select new profile type:" new "New profile (0MB)" minimal "Minimal copy (< 3MB)" templ "Template profile copy (${TPL_PROF_SIZE})" full "Full copy (${DEF_PROF_SIZE})" old "Migrate from pre-0.3 profile" noop "__________________________________" help "[Help me decide]")
++	fi
+ 
+ 	# cancel. do nothing and exit.
+ 	if [ $? -eq 1 ]; then
+ 		exit 1
+ 	fi
+ 
+ 	# create a new profile only if valid copy option was choosen
+ 	if [ "${COPY_TYPE}" != "help" ] && [ "${COPY_TYPE}" != "noop" ] && [ "${COPY_TYPE}" != "old" ]; then
+ 		#https://wiki.mozilla.org/Firefox/CommandLineOptions#-CreateProfile_profile_name
+ 		$FF_BIN -CreateProfile ${ACTIVITY_PROFILENAME}
+@@ -315,6 +393,10 @@
+ 	fi
+ 
+-	exec ${FF_BIN} --profile ${NEW_PROF_PATH} "$@" &								# Start with the profile with the given path. 
++	if [ "${FOREGROUND}" -eq 1 ]; then
++		exec "${FF_BIN}" --profile "${NEW_PROF_PATH}" "$@"
++	else
++		"${FF_BIN}" --profile "${NEW_PROF_PATH}" "$@" &						# Start with the profile with the given path.
++	fi
+ 	echo ">>> Started the new profile: ${ACTIVITY_PROFILENAME}"
+ 	f_Popup --expire-time 10000 "Please re-login to Firefox Sync, if you use it."
+ fi
