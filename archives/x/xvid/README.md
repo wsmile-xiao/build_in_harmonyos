@@ -1,6 +1,6 @@
-# xvidcore
+# xvid
 
-xvidcore 是 MPEG-4 视频编解码库，提供 ISO 兼容的高质量视频压缩和解压缩功能。
+xvid 是 MPEG-4 视频编解码库，提供 ISO 兼容的高质量视频压缩和解压缩功能。
 
 ## 功能概述
 

@@ -1,4 +1,4 @@
-# xvidcore 1.3.7 适配笔记
+# xvid 1.3.7 适配笔记
 
 ## 编译环境
 - 构建系统: autotools
