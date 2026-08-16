@@ -97,3 +97,37 @@ config.status 内部使用 `umask 077 && mktemp -d` 创建临时目录，但 HMD
 
 **编译结束**
 **最终状态**: published
+
+---
+
+## 补充：鸿蒙 PC conan 配方（2026-08-17）
+
+# nauty 2.9.3 编译笔记（HarmonyOS PC · conan / autotools）
+## 定位
+图同构与图生成工具集 — geng/genbg 枚举图、labelg 规范标号、shortg 去重等 50 余个命令
+产出库：`libnauty.so`。
+产出命令行工具：`geng`、`genbg`、`labelg`、`shortg`、`dreadnaut`、`amtog`、`complg`、`converseg`。
+
+## 源码
+- URL：https://users.cecs.anu.edu.au/~bdm/nauty/nauty2_9_3.tar.gz
+- sha256：`9fc4edae04f88a0f5883985be3b39cf7f898fd6cc96e96b9ee25452743cc1b5b`
+
+## 关键适配
+
+- **上游站点 `pallini.di.uniroma1.it` 的 TLS 证书已过期**，mac 与设备两侧都下不动 （CERTIFICATE_VERIFY_FAILED）→ 改用作者本人在 ANU 的镜像，sha256 与 sage 的 checksums.ini 逐位一致，是同一份文件
+- Makefile **不支持 VPATH**（异地构建产物找不到源）→ `self.folders.build = self.folders.source` 改成源码内构建
+- 删除 `lib/*.la`：里面烤死 libdir 绝对路径（conan 按 prefix=/ 构建 → 写的是 `/lib`），下游 libtool 会去找 `//lib/libxxx.la` 而失败
+- 修 configure 的 `umask 077` → `022`（HMDFS 上 077 会让后续步骤读不到自己刚建的临时文件）
+
+## 真机验证（2026-08-17）
+
+设备：HUAWEI MateBook（HAD-W32 / 2in1），OHOS aarch64。
+`conan create . -pr ohos-native` 通过，test_package 断言：
+
+1. K4 的自同构群阶 |Aut| = 24 ✅
+2. P3（路径图）的 |Aut| = 2 ✅
+
+## 状态
+
+built —— 真机已验证；制品**尚未上传**（上传须单独过闸）。
+
