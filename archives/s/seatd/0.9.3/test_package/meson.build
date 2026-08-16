@@ -1,0 +1,27 @@
+project(
+  'test-seatd',
+  'c',
+  version: '0.9.3',
+  default_options: ['c_std=c11', 'warning_level=2'],
+)
+
+cc = meson.get_compiler('c')
+libseat = cc.find_library(
+  'seat',
+  dirs: [get_option('seatd_lib_dir')],
+  static: true,
+  required: true,
+)
+libseat_dep = declare_dependency(
+  compile_args: ['-I' + get_option('seatd_include_dir')],
+  dependencies: [libseat],
+)
+
+test_seatd = executable(
+  'test_seatd',
+  'test_package.c',
+  dependencies: [libseat_dep],
+  install: false,
+)
+
+test('test_seatd', test_seatd)
