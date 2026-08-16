@@ -84,3 +84,37 @@ This program is released under the GNU General Public License.
 ---
 **编译结束**: 2026-06-09 10:55
 **最终状态**: built
+
+---
+
+## 补充：鸿蒙 PC conan 配方（2026-08-17）
+
+# gengetopt 2.23 编译笔记（HarmonyOS PC · conan / autotools）
+## 定位
+命令行选项解析器生成器 — 读 .ggo 描述文件，生成 cmdline.c/cmdline.h
+产出命令行工具：`gengetopt`。
+
+## 源码
+- URL：https://ftp.gnu.org/gnu/gengetopt/gengetopt-2.23.tar.xz
+- sha256：`b941aec9011864978dd7fdeb052b1943535824169d2aa2b0e7eae9ab807584ac`
+
+## 关键适配
+
+- **设备上没有 texinfo**：只要 automake 项目去建 .info，`missing` 脚本报 `makeinfo: command not found` → Error 127。统一 `MAKEINFO=true` 跳过
+- 只建 src/ 这件事换了三种写法才对：`make -C src` 会崩 libtool（HMDFS 上 `getcwd: cannot access parent directories`，接着报 `ignoring unknown tag CXX`）；`make SUBDIRS=src` 命令行变量会**递归传进子 make**，src/Makefile 拿着它再去 cd src；最终改 configure 生成的**顶层 Makefile 的 SUBDIRS 行**为 `gl src` —— gl 是 gnulib，`src/libgengetopt.la` 依赖 `../gl/libgnu.la`，丢不得
+- 删除 `lib/*.la`：里面烤死 libdir 绝对路径（conan 按 prefix=/ 构建 → 写的是 `/lib`），下游 libtool 会去找 `//lib/libxxx.la` 而失败
+- 修 configure 的 `umask 077` → `022`（HMDFS 上 077 会让后续步骤读不到自己刚建的临时文件）
+
+## 真机验证（2026-08-17）
+
+设备：HUAWEI MateBook（HAD-W32 / 2in1），OHOS aarch64。
+`conan create . -pr ohos-native` 通过，test_package 断言：
+
+1. 喂一份最小 .ggo 真跑一遍生成，断言 cmdline.h 有 struct gengetopt_args_info、cmdline.c 有 cmdline_parser 实现、声明的选项字段确实出现在生成物里 ✅
+
+> 这个包一共重跑了 5 轮才通过，每轮换一个不同的真因（详见上面「关键适配」）。
+
+## 状态
+
+built —— 真机已验证；制品**尚未上传**（上传须单独过闸）。
+

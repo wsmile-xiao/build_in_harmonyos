@@ -100,3 +100,32 @@ int main(int argc, char **argv) {
 ---
 
 *Last updated: 2026-06-09*
+
+---
+
+## 补充：鸿蒙 PC conan 配方（2026-08-17）
+
+# gengetopt
+
+**GNU gengetopt — 命令行选项解析器生成器 — 读 .ggo 描述文件，生成 cmdline.c/cmdline.h**
+
+## 命令行工具
+
+- `gengetopt`
+
+## 构建
+
+- 构建系统：autotools
+- 许可证：GPL-3.0-or-later
+- 上游：https://www.gnu.org/software/gengetopt/
+
+## 版本
+
+| 版本 | 状态 | 说明 |
+|---|---|---|
+| 2.23 | built | 首个鸿蒙 PC conan 配方 |
+
+## 为什么做这个包
+
+passagemath（SageMath 的模块化重打包）在鸿蒙 PC 上的 wheel 需要它作为原生底座。
+
