@@ -2,83 +2,128 @@
 
 ## Status
 
-- Branch: `feat/chibicc-1.0.24.1-1894`
+- Branch: `docs/chibicc-1.0.24.1-knowledge-1894`
 - Issue: `1894`
-- Current state: preflight complete; R39 source URL switched to Debian primary sourcefiles authority mirror; OHOS shadow CI r7 passed.
+- PR: `https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/4710`
+- Adaptation path: Path A basic adaptation, Path B knowledge-base extension, and Path C high-difficulty validation.
+- Parent recipe and `conandata.yml`: unchanged from the PR base to satisfy R37.
+- OHOS result: Shadow CI #24519 passed package build, Conan `test_package`, L0, L1, and every pipeline step.
+- Native result: all 1962 upstream logical entries were accounted in an Ubuntu/glibc x86-64 guest; `1914/1962` passed (`97.55%`).
 
 ## W0 Dependency Check
 
-- Direct Conan dependency: `openssl/3.5.6.1`.
-- Reason: upstream Makefile links `-lcrypto`; source uses libcrypto symbols through the build/link surface.
-- Local remote verification: not run because `conan` is not installed in this Windows environment.
-- Repository evidence: `archives/o/openssl/3.5.6.1` exists in this worktree; `curl/8.15.0` also uses `openssl/3.5.6.1` for OHOS compatibility.
-- Dependency split requirement: no new dependency adaptation is included in this PR; if `openssl/3.5.6.1` is missing from the target remote, chibicc should pause until that dependency is published.
+- Published package dependency: `openssl/3.5.6.1`, already available in the registry.
+- The Makefile adds `-lcrypto`, but no chibicc or test symbol uses libcrypto. Native validation clears this unused link flag and changes no source.
+- The pinned archive contains `csmith_102.c`, `csmith_275.c`, and `csmith_4204.c`, but omits `csmith.h`.
+- Those exact three inputs remain dependency-blocked in each stage. Csmith adaptation requires a separate issue, branch, and PR.
+- No dependency adaptation is mixed into this PR.
 
-## Source and Build Analysis
+## Source And Build Analysis
 
-- Source: Debian primary sourcefiles authority mirror for `chibicc_1.0.24.1.orig.tar.gz`.
+- Source: Debian primary sourcefiles authority mirror:
+  `https://launchpad.net/debian/+archive/primary/+sourcefiles/chibicc/1.0.24.1-1/chibicc_1.0.24.1.orig.tar.gz`.
 - SHA256: `cbcdaccce25508566b77f26e2ffab41a379e05b6a0be73a5b6806796db62fecc`.
-- Source URL: `https://launchpad.net/debian/+archive/primary/+sourcefiles/chibicc/1.0.24.1-1/chibicc_1.0.24.1.orig.tar.gz`.
-- R39 source check: `rui314/chibicc` has no `v1.0.24.1` GitHub tag, so the final recipe uses the Debian primary sourcefiles authority mirror, whose tarball SHA256 matches the expected source integrity value.
-- Build system: plain Makefile; recipe compiles directly with the Conan C compiler because the current OHOS runner has no `make` binary.
-- CMake status: not used. The bundled `CMakeLists.txt` requires Boost and appears inconsistent with the C-only Makefile build.
-- Main binary: `chibicc`.
-- External link dependency: `libcrypto`.
-- Architecture limitation: generated code is x86-64 assembly/object code. On OHOS/armv8, tests should verify the compiler binary and generated assembly instead of running generated executables.
+- The exact Debian version has no corresponding official `rui314/chibicc` tag. The authority mirror is therefore retained for R39 provenance.
+- The plain Makefile is the usable upstream build. The bundled CMake path introduces unrelated Boost requirements.
+- The OHOS package is an armv8 host executable, but this chibicc version always emits x86-64 code and follows the x86-64 ABI.
 
-## Recipe Notes
+## ABI Boundary
 
-- Uses `tools.build:compiler_executables` to obtain the C compiler and passes it as `CC=...`.
-- Reconstructs upstream `CFLAGS` so OpenSSL include paths from Conan are included.
-- Passes `GCC_VERSION=0` to avoid running host `gcc -dumpversion` from the Makefile during cross builds.
-- Builds the top-level `*.c` source set directly with the Conan C compiler, matching the upstream Makefile source list without requiring `make` on the target runner.
-- Packages `bin/chibicc`, bundled headers under both `bin/include` and `include/x86_64-linux-gnu/chibicc`, and the MIT license.
-- On OHOS, attempts to self-sign `bin/chibicc` when `/data/service/hnp/bin/binary-sign-tool` is available.
+OHOS CI and upstream executable validation prove different properties:
 
-## Upstream Test Inventory
+- OHOS/armv8 CI proves that the package builds, signs, runs, and emits non-empty x86-64 assembly through the public driver.
+- Generated x86-64 programs cannot run natively on the OHOS/armv8 worker.
+- Feeding OHOS/armv8 libc headers to x86-64 code generation mixes target ABIs and is invalid evidence.
+- Native upstream execution therefore uses a separate glibc/x86-64 environment while retaining the exact pinned source.
 
-- `make test` builds many `test/*.c` files with the just-built `chibicc`, links them with the host compiler, and executes the generated programs.
-- `make test-stage2` bootstraps a stage2 compiler and repeats executable tests.
-- These upstream tests are valuable on Linux/x86-64 but not suitable as-is for OHOS/armv8 because generated x86-64 executables cannot run on the target.
-- This recipe does not run upstream tests during `build()`.
+CI #24065 demonstrated the invalid mixed-header path: package fixtures passed, but corpus failures moved into OHOS musl headers. The current OHOS gate instead uses a source-owned closure, exact target-header blocker map, and version-locked XFAIL/XPASS policy.
 
-## Local Preflight Results
+## OHOS Test Package
 
-- Downloaded the Debian primary sourcefiles tarball and verified its SHA256 locally.
-- Inspected source archive contents: `Makefile`, `CMakeLists.txt`, `include/`, `test/`, `issues/`, and compiler source files.
-- Identified `openssl/3.5.6.1` as the only Conan dependency.
-- First OHOS shadow CI attempt reached `conan create` but failed because the isolated `CONAN_HOME` lacked the `ohpcd` remote; adding `ohpcd` resolved dependency lookup.
-- Second OHOS shadow CI attempt downloaded `openssl/3.5.6.1` from `ohpcd` and then failed because `make` is not available in the runner PATH; recipe was updated to compile directly with clang.
-- Third OHOS shadow CI attempt initially could not start because the device reported `/bin/sh: Out of memory`, `can't fork`, and then SSH port `2222` refused connections.
-- After device recovery at `2026-08-06 22:14:49 +08:00`, the direct-clang recipe was rerun. It built, packaged, and signed chibicc successfully, then failed in `test_package` because shell here-doc creation used read-only `/tmp`. The smoke script now uses package-local `TMPDIR`/`TMPPREFIX` and `printf` fixture generation.
-- Fourth OHOS shadow CI attempt built, packaged, and signed chibicc successfully, then failed only because the smoke test expected a direct `call add`; generated assembly uses an indirect `call *%r10`. The assertion now checks for a call instruction without binding to that backend detail.
-- Fifth OHOS shadow CI attempt passed on `2026-08-06`: `conan create` passed, `test_package` executed, `chibicc --version` passed, and the summary reported `Success: 1`, `Failed: 0`.
-- Sixth OHOS shadow CI attempt passed after the R39 source fix: Conan downloaded sources from the official GitHub tag URL, `conan create` passed, `test_package` executed, `chibicc --version` passed, and the summary reported `Success: 1`, `Failed: 0`.
-- The R39 source URL was revised again after review: the source now uses the Debian primary sourcefiles authority mirror.
-- Seventh OHOS shadow CI attempt passed after the authority-mirror source fix: Conan downloaded sources from Launchpad Debian primary sourcefiles, `conan create` passed, `test_package` executed, `chibicc --version` passed, and the summary reported `Success: 1`, `Failed: 0`.
-- Local `conan create` was not run because `conan` is not installed in this Windows environment.
+The test package reuses the parent recipe's SHA256-verified source cache and makes no second source download. It validates:
+
+- exactly 980 upstream `test/*.c` inputs;
+- the exact 13 top-level compiler sources used by stage2;
+- exactly 607 source-owned stage1 inputs;
+- exactly 1037 `<suite>/<case> <target-header>` blocker pairs;
+- exactly three Csmith dependency blockers;
+- exactly 62 version-locked expected compiler failures.
+
+The package invokes the public driver. XFAIL requires an exact test name and exact diagnostic category, receives no PASS credit, and remains visible. XPASS, diagnostic drift, unknown missing headers, empty output, and unknown failures block CI.
+
+Shadow CI #24519 on head `ce913c9c2c` passed the complete package pipeline. Its invariants prove `62/62 XFAIL`, `0 XPASS`, and `0 unexpected failures`; this is compile-boundary evidence, not executable-level PASS credit.
+
+## Native X86-64 Validation
+
+The latest review rejected the previous `0/1962` executable result. A separate reproducible runner, `test_package/test_native_x86_64.sh`, now executes the upstream boundary on a matching target environment.
+
+Measured environment:
+
+- QEMU 11.1.0, TCG software virtualization;
+- Linux `6.12.94-0-virt`, machine `x86_64`;
+- Ubuntu 24.04.4 LTS, glibc userspace;
+- GCC 13.3.0, GNU Make 4.3, GNU grep 3.11;
+- exact source archive and SHA256 listed above;
+- zero source or `test/*.c` changes.
+
+Method:
+
+1. Build stage1 with host GCC from the exact upstream 13-source set.
+2. Attempt all 980 stage1 programs; classify the three missing-Csmith inputs separately.
+3. Run every built stage1 executable and the complete upstream driver suite.
+4. Bootstrap stage2 from all `13/13` objects generated by stage1; no host-object fallback is used.
+5. Attempt all 980 stage2 programs and run every built executable plus the complete driver suite.
+6. Emit one TSV row for every logical entry with `PASS`, `RUNTIME_FAIL`, `COMPILE_FAIL`, or `DEPENDENCY_BLOCKED`.
+
+Results:
+
+| Stage | Logical entries | Built programs | PASS | Runtime fail | Compile fail | Dependency blocked |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| stage1 | 981 | 970/977 | 962 | 9 | 7 | 3 |
+| stage2 | 981 | 961/977 | 952 | 10 | 16 | 3 |
+| **Total** | **1962** | **1931/1954** | **1914** | **19** | **23** | **6** |
+
+- Upstream pass rate: `1914/1962` (`97.55%`).
+- Actually executed logical entries, including two drivers: `1933/1962` (`98.52%`).
+- Pass rate among executed entries: `1914/1933` (`99.02%`).
+- Both driver suites ended with `OK` and are counted as PASS.
+- Full per-case evidence: `reports/native-x86_64-results.tsv`, SHA256 `d27ac9551fdc05100efe55311a53111bd299776023bfc878bccf57c8906ee432`.
+
+The 19 runtime failures, 23 compile failures, and 6 dependency blockers are explicit non-PASS outcomes. They are not converted to XFAIL in the native report.
 
 ## Verification Commands
 
+OHOS Shadow CI:
+
 ```sh
-cd /path/to/build_in_harmonyos
-
-conan create archives/c/chibicc/1.0.24.1 --user=ohpcd --channel=stable \
-  -pr:h=$HOME/.conan2/profiles/ohos \
-  -pr:b=$HOME/.conan2/profiles/ohos \
-  --build=missing
-
-CI_PACKAGES="archives/c/chibicc/1.0.24.1" zsh ci/conan/build_and_test.sh
-
-# If using the shadow CI runner:
-/path/to/run-ohos-shadow-ci.sh archives/c/chibicc/1.0.24.1
+CI_PACKAGES="archives/c/chibicc/1.0.24.1" \
+  zsh ci/conan/build_and_test.sh
 ```
 
-## Blocking Points
+Native glibc/x86-64:
 
-- `conan` is missing from the Windows PATH, so local Windows `conan create` could not be executed here.
+```sh
+CHIBICC_SOURCE_DIR=<sha256-verified-source> \
+CHIBICC_RESULTS_DIR=<results-dir> \
+  bash archives/c/chibicc/1.0.24.1/test_package/test_native_x86_64.sh
+```
 
-## Final Status
+Queued device command:
 
-- Preflight adaptation is complete: W0 dependency analysis, source/build-system analysis, Conan recipe, and non-empty test_package are prepared.
-- OHOS shadow CI r7 passed in `/storage/Users/currentUser/ohos-test-runs/currentUser-chibicc-chibicc-1.0.24.1-1894-conan-r7-r39-authority-mirror-20260807-003457-40949`.
+```sh
+CONAN_HOME=<job>/conan-home sh "$HOME/bin/ohos-test-runner.sh" \
+  --user currentUser \
+  --lib chibicc \
+  --task chibicc-1.0.24.1-1894-exact-xfail-gate \
+  --mode heavy \
+  --try-lock \
+  --workdir "$CI_REPO_ROOT" \
+  -- zsh ci/conan/build_and_test.sh archives/c/chibicc/1.0.24.1
+```
+
+## Remaining Blockers
+
+- Six logical Csmith entries, three per stage, require absent `csmith.h` and remain a separate dependency adaptation.
+- The fixed upstream compiler still has 23 native compile failures and 19 native runtime failures; the exact names and exit codes are retained in the TSV manifest.
+- Direct SSH to `currentUser@10.62.189.79:2222` still times out before authentication. This does not block the completed QEMU x86-64 evidence or Shadow CI.
+- No active project infrastructure blocker was observed. Earlier unrelated issues #2141 and #2142 were repaired in `main` before CI #24519 passed.
