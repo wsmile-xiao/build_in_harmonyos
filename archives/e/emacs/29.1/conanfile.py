@@ -70,7 +70,7 @@ class EmacsConan(ConanFile):
             "A usable configure shell is required; install bash or set CONFIG_SHELL"
         )
 
-    def _shell_env(self):
+    def _shell_env(self, extra=None):
         bash = self._bash()
         env = {
             "CC": self._compiler("c", "clang"),
@@ -85,7 +85,29 @@ class EmacsConan(ConanFile):
         cppflags = self._cppflags()
         if cppflags:
             env["CPPFLAGS"] = cppflags
+        if extra:
+            env.update(extra)
         return " ".join(f"{key}={shlex.quote(str(value))}" for key, value in env.items())
+
+    def _check_env(self):
+        if self.settings.os != "OHOS":
+            return self._shell_env()
+        return self._shell_env(
+            {
+                # ERT runs Git-based tests with HOME=/nonexistent.  OHOS CI can
+                # expose temp dirs with a different owner id, so Git 2.35+
+                # rejects those throwaway repositories unless tests provide an
+                # explicit safe.directory override.  The ediff patch test also
+                # creates a commit and therefore needs a local identity.
+                "GIT_CONFIG_COUNT": 3,
+                "GIT_CONFIG_KEY_0": "safe.directory",
+                "GIT_CONFIG_VALUE_0": "*",
+                "GIT_CONFIG_KEY_1": "user.email",
+                "GIT_CONFIG_VALUE_1": "emacs-ci@example.invalid",
+                "GIT_CONFIG_KEY_2": "user.name",
+                "GIT_CONFIG_VALUE_2": "Emacs CI",
+            }
+        )
 
     def _make_vars(self):
         if self.settings.os == "OHOS":
@@ -386,7 +408,7 @@ chmod 755 "$target" 2>/dev/null || true
         make_vars = self._make_vars()
         self.run(f'{shell_env} "{self._bash()}" ./configure {configure_args}', cwd=self.source_folder, env="conanbuild")
         self.run(f"{shell_env} make -j1 {make_vars}", cwd=self.source_folder, env="conanbuild")
-        self.run(f"{shell_env} make -j1 check {make_vars} {self._check_vars()}", cwd=self.source_folder, env="conanbuild")
+        self.run(f"{self._check_env()} make -j1 check {make_vars} {self._check_vars()}", cwd=self.source_folder, env="conanbuild")
 
     def package(self):
         make_vars = self._make_vars()
