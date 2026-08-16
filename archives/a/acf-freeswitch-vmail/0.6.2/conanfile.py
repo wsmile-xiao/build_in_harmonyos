@@ -1,0 +1,97 @@
+#!/usr/bin/env python3
+"""Conan recipe for acf-freeswitch-vmail 0.6.2.
+
+acf-freeswitch-vmail is an Alpine Configuration Framework application module.
+It is a pure Lua/LSP resource package, so packaging mirrors the upstream
+Makefile install rule: copy vmail*/template* into appdir/freeswitch-vmail and
+authenticator-freeswitch-vmail.lua into share/acf/lib.
+"""
+import os
+import shutil
+
+from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
+from conan.tools.files import copy, get
+from conan.tools.layout import basic_layout
+
+
+class AcfFreeswitchVmailConan(ConanFile):
+    name = "acf-freeswitch-vmail"
+    version = "0.6.2"
+    description = "Alpine ACF voicemail module for FreeSWITCH"
+    license = "GPL-2.0-only"
+    homepage = "https://gitlab.alpinelinux.org/acf/acf-freeswitch-vmail"
+    url = ""
+    package_type = "application"
+
+    settings = "os", "compiler", "build_type", "arch"
+
+    def validate(self):
+        if str(self.settings.os) not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration(f"Unsupported OS: {self.settings.os}")
+
+    def layout(self):
+        basic_layout(self)
+
+    def source(self):
+        get(self, **self.conan_data["sources"], strip_root=True)
+
+    def build(self):
+        pass
+
+    def package(self):
+        appdir = os.path.join(
+            self.package_folder, "share", "acf", "app", "freeswitch-vmail"
+        )
+        libdir = os.path.join(self.package_folder, "share", "acf", "lib")
+        os.makedirs(appdir, exist_ok=True)
+        os.makedirs(libdir, exist_ok=True)
+
+        for name in sorted(os.listdir(self.source_folder)):
+            src = os.path.join(self.source_folder, name)
+            if name.startswith(("vmail", "template")):
+                _copy_or_link(src, os.path.join(appdir, name))
+            elif name == "authenticator-freeswitch-vmail.lua":
+                shutil.copy2(src, os.path.join(libdir, name))
+
+        _ensure_link(
+            os.path.join(appdir, "vmail-editusers-html.lsp"),
+            "vmail-listusers-html.lsp",
+        )
+        _ensure_link(
+            os.path.join(appdir, "vmail-listmymessages-html.lsp"),
+            "vmail-listmessages-html.lsp",
+        )
+
+        copy(
+            self,
+            "README",
+            src=self.source_folder,
+            dst=os.path.join(self.package_folder, "licenses"),
+            keep_path=False,
+        )
+
+    def package_info(self):
+        self.cpp_info.libs = []
+        self.cpp_info.includedirs = []
+        self.cpp_info.libdirs = []
+        self.cpp_info.bindirs = []
+        self.cpp_info.resdirs = ["share/acf"]
+
+
+def _copy_or_link(src, dst):
+    if os.path.islink(src):
+        target = os.readlink(src)
+        _ensure_link(dst, target)
+    elif os.path.isfile(src):
+        shutil.copy2(src, dst)
+
+
+def _ensure_link(path, target):
+    if os.path.lexists(path):
+        return
+    try:
+        os.symlink(target, path)
+    except OSError:
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(target + "\n")
