@@ -21,7 +21,7 @@ libexif 是一个用于处理 EXIF（Exchangeable Image File Format）元数据�
 ```bash
 # 验证安装
 pkg-config --modversion libexif
-# 输出: 0.6.26
+# 输出: 0.6.26.1
 
 # 验证静态库
 ls -lh $HOME/usr/local/lib/libexif.a

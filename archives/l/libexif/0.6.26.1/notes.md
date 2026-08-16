@@ -1,4 +1,4 @@
-# libexif 0.6.26 适配笔记
+# libexif 0.6.26.1 适配笔记
 
 ## 编译环境
 - 构建系统: autotools
@@ -60,7 +60,7 @@ make check
 
 | 文件 | 大小 | 说明 |
 |------|------|------|
-| libexif-0.6.26-ohos-aarch64.tar.gz | 1250KB | 预编译包（静态库 + 头文件） |
+| libexif-0.6.26.1-ohos-aarch64.tar.gz | 1250KB | 预编译包（静态库 + 头文件） |
 | 0001-config.guess.patch | 769B | HarmonyOS 平台识别补丁 |
 | 0002-config.sub.patch | 1930B | config.sub 适配补丁 |
 | 0003-configure.patch | 872B | 临时目录路径修改补丁 |
@@ -72,5 +72,22 @@ make check
 - 需要应用 3 个补丁才能在 HarmonyOS 上编译
 
 ---
-**编译结束**: 2026-05-22 12:04
-**最终状态**: built
+**编译结束**: 2026-08-15 18:28
+**最终状态**: published
+
+## OOM 鲁棒性补全验证（2026-08-15）
+
+上游 check-failmalloc.sh 因平台无 libfailmalloc（LD_PRELOAD malloc 故障注入库）而 SKIP（脚本自身 exit 77），
+为补足 OOM 场景覆盖，新增 `test_package/oom-test.c` 进行替代验证：
+
+- **模式1 — ExifMem 失败分配器注入**（指定第 N 次分配返回 NULL）：
+  - 第 1 次失败 → `exif_mem_new` 返回 NULL，优雅失败
+  - 第 2/4/8 次失败 → `exif_data_new_mem` 返回 NULL，优雅失败
+  - 第 16/32 次失败 → 解析中途分配失败后仍完成解析（共 364/365 次分配），进程存活
+- **模式2 — RLIMIT_AS 限制**（地址空间 64MB→1MB，真实内存耗尽）：全部解析成功，进程存活
+
+**结论**：libexif 分配失败路径安全，OOM 时不崩溃。入口构造函数对分配失败有 NULL 检查，
+解析中途分配失败不导致段错误（与 test-fuzzer/test-null 等鲁棒性用例 PASS 一致）。
+
+**经验**：自定义 ExifMem 分配器必须保持 calloc 清零语义（libexif 默认分配器用 calloc），
+若用 malloc 则 ExifData 内部 ifd[] 数组为垃圾指针，释放时误报崩溃。
