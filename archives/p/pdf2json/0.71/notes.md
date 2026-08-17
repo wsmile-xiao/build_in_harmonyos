@@ -9,7 +9,7 @@
 - 许可证: GPL-2.0-only
 - 编译日期: 2026-06-12
 - 编译器: clang/clang++ 15.0.4
-- 状态: published
+- 状态: built
 - 主页: https://github.com/flexpaper/pdf2json
 
 ## 编译步骤
@@ -37,17 +37,16 @@
 | 3 | make install: /usr/bin/install No such file or directory | Makefile 稺编码了 /usr/bin/install | `sed -i 's|/usr/bin/install -c|$DEFAULT_PREFIX/bin/install -c|g' Makefile` | 平台特有 |
 | 4 | 下载超时: GitHub URL 无法直接访问 | 网络限制 | 使用 codeload.github.com 镜像下载 | 网络问题 |
 
-## 源码修改 (3 处)
+## 源码修改 (2 处补丁 + 1 处 conanfile.py)
 
-- `configure`: umask 077 → 022 (E011 HMDFS 权限修复)
-  - `src/XmlLinks.h`: `#include <sys/unistd.h>` → `#include <unistd.h>` (平台头文件适配)
-- `Makefile`: `/usr/bin/install -c` → `$DEFAULT_PREFIX/bin/install -c` (INSTALL 命令路径修复)
+- `configure`: umask 077 → 022 (E011 HMDFS 权限修复) → 0002-configure.patch
+- `src/XmlLinks.h`: `#include <sys/unistd.h>` → `#include <unistd.h>` (平台头文件适配) → 0003-src-XmlLinks.h.patch
+- `Makefile`: 原 0001-Makefile.patch 已移除, INSTALL 路径问题改由 conanfile.py package() 手动拷贝产物解决
 
-## 补丁列表 (3 个)
+## 补丁列表 (2 个)
 
 | 补丁 | 修改文件 | 类型 | 说明 |
 |------|----------|------|------|
-| 0001-Makefile.patch | Makefile | platform | INSTALL 路径修复 |
 | 0002-configure.patch | configure | platform | E011: umask 077→022 |
 | 0003-src-XmlLinks.h.patch | src/XmlLinks.h | platform | sys/unistd.h→unistd.h |
 
@@ -108,10 +107,8 @@ lib/external/    (空目录)
 - 无 make check 测试套件, 通过手动功能验证确认正确性
 - 预编译包包含6个二进制: pdf2json(核心) + pdftops/pdftotext/pdfinfo/pdffonts/pdfimages(XPDF工具集)
 - JSON 输出编码为 latin-1, UTF-8 解析可能失败, 需指定 encoding='latin-1'
-- Makefile 补丁为完整生成文件, 包含平台特定路径, 不可移植到其他环境
+- Makefile INSTALL 路径问题原通过 0001-Makefile.patch 修复, 现已移除该补丁, 改由 conanfile.py package() 手动拷贝产物解决
 - configure.ac 中 AC_CHECK_LIB 检查的 Goo/Xpdf/fofi/splash 为内部库, 不需预安装
 
----
-
-**编译结束**: 2026-06-12 04:45
-**最终状态**: published
+**编译结束**: 2026-07-24 11:40
+**最终状态**: built
