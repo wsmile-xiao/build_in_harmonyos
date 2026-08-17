@@ -40,7 +40,7 @@ SCAN_ROOT="${PKG_SCAN_ROOT:-archives}"
 NO_TEST_FILE="$REPO_ROOT/ci/config/no_official_test.txt"
 BUILD_TIMEOUT_CONFIG="$REPO_ROOT/ci/config/build_timeouts.txt"
 DEFAULT_BUILD_TIMEOUT=3600
-MAX_BUILD_TIMEOUT=43200
+MAX_BUILD_TIMEOUT=57600
 TIMEOUT_CLOCK_TOLERANCE=1
 
 validate_build_timeout_config() {
