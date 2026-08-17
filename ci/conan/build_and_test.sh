@@ -570,8 +570,8 @@ PYEOF
     if [ "$L0K_APPLICABLE" = "false" ]; then
         echo "        [info] L0k: skipped (conanfile not under archives/, path: $CONANFILE)"
     else
-    # 检查 conanfile.py 是否构建可执行文件 (package_info 中有 bindirs 或 build install bin/)
-    HAS_BINDIRS=$(grep -c 'bindirs\|cpp_info\.bindirs\|bindirs\s*=' "$CONANFILE" 2>/dev/null || true)
+    # 检查 conanfile.py 是否构建可执行文件 (package_info 中有非空 bindirs 或 build install bin/)
+    HAS_BINDIRS=$(python3 "$SCRIPT_DIR/detect_bindirs.py" "$CONANFILE")
     # 收紧安装目标检测: 只认 CMake RUNTIME DESTINATION bin 与 self.copy(dst="bin")
     # （旧正则 install.*bin 会误匹配 set(INSTALL_BINDIR)/注释等，提升 fail 后必须防误伤）
     HAS_BIN_INSTALL=$(grep -cE 'RUNTIME[[:space:]]+DESTINATION[[:space:]]+bin\b|dst\s*=\s*["'"'"']bin["'"'"']' "$CONANFILE" 2>/dev/null || true)
