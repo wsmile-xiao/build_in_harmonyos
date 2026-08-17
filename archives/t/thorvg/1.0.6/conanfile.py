@@ -13,7 +13,7 @@ class ThorvgConan(ConanFile):
     license = "MIT"
     homepage = "https://www.thorvg.org/"
     settings = "os", "compiler", "build_type", "arch"
-    package_type = "shared-library"
+    package_type = "static-library"
 
     def layout(self):
         basic_layout(self)
@@ -24,7 +24,7 @@ class ThorvgConan(ConanFile):
     def generate(self):
         tc = MesonToolchain(self)
         tc.project_options.update({
-            "default_library": "shared",
+            "default_library": "static",
             "engines": "cpu",
             "loaders": "",
             "savers": "",
