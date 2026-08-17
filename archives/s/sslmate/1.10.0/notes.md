@@ -4,7 +4,7 @@
 - 构建系统: makefile（纯 Makefile，无 configure 脚本）
 - 编译日期: 2026-06-17
 - 编译器: clang/clang++（sslmate 为 Perl 脚本，无原生编译步骤）
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -32,7 +32,7 @@
 |------|------|----------|
 | Perl | 5.42.2 | 预装 |
 | Term::ReadKey | 2.38 | 从 CPAN 手动编译安装 |
-| URI::Escape | （核心模块） | Perl 预装 |
+| URI::Escape | （CPAN 模块） | 需手动安装 |
 | JSON::PP | （核心模块，5.13.9+） | Perl 预装 |
 | Digest::SHA | （核心模块，5.9.3+） | Perl 预装 |
 
@@ -76,4 +76,4 @@ OK
 ---
 
 **编译结束**: 2026-06-17 16:26
-**最终状态**: published
+**最终状态**: built
