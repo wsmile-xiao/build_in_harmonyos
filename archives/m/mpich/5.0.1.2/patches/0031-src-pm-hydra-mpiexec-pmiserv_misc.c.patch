@@ -1,0 +1,157 @@
+diff --git a/src/pm/hydra/mpiexec/pmiserv_cb.c b/src/pm/hydra/mpiexec/pmiserv_cb.c
+index 563c8b6..fcfbc9a 100644
+--- a/src/pm/hydra/mpiexec/pmiserv_cb.c
++++ b/src/pm/hydra/mpiexec/pmiserv_cb.c
+@@ -41,6 +41,19 @@ static HYD_status send_hdr_downstream(struct HYD_proxy *proxy, struct HYD_pmcd_h
+     goto fn_exit;
+ }
+
++static bool is_malformed_abort_pmi1(char *buf, int buflen)
++{
++    static const char prefix[] = "cmd=abort";
++
++    if (buflen < (int) (sizeof(prefix) - 1))
++        return false;
++    if (strncmp(buf, prefix, sizeof(prefix) - 1) != 0)
++        return false;
++    if (buflen == (int) (sizeof(prefix) - 1))
++        return true;
++    return (unsigned char) buf[sizeof(prefix) - 1] <= 0x20;
++}
++
+
+ static HYD_status handle_pmi_cmd(struct HYD_proxy *proxy, int pgid, int process_fd, char *buf,
+                                  int buflen, int pmi_version)
+@@ -54,6 +67,12 @@ static HYD_status handle_pmi_cmd(struct HYD_proxy *proxy, int pgid, int process_
+
+     struct PMIU_cmd pmi;
+     status = PMIU_cmd_parse(buf, buflen, pmi_version, &pmi);
++    if (status != HYD_SUCCESS && pmi_version == PMIU_WIRE_V1 &&
++        is_malformed_abort_pmi1(buf, buflen)) {
++        int exitcode = EXIT_FAILURE;
++        status = HYD_pmiserv_abort_cleanup(&exitcode);
++        exit(exitcode);
++    }
+     HYDU_ERR_POP(status, "unable to parse PMI command\n");
+
+ #if defined ENABLE_PROFILING
+diff --git a/src/pm/hydra/mpiexec/pmiserv_misc.c b/src/pm/hydra/mpiexec/pmiserv_misc.c
+index 23bda75..6f43b9f 100644
+--- a/src/pm/hydra/mpiexec/pmiserv_misc.c
++++ b/src/pm/hydra/mpiexec/pmiserv_misc.c
+@@ -3,6 +3,8 @@
+  *     See COPYRIGHT in top-level directory
+  */
+
++#include <limits.h>
++
+ #include "hydra_server.h"
+ #include "hydra.h"
+ #include "pmiserv.h"
+@@ -101,22 +103,85 @@ HYD_status HYD_pmiserv_barrier(struct HYD_proxy *proxy, int process_fd, int pgid
+     goto fn_exit;
+ }
+
++static int is_ascii_digit(char ch)
++{
++    return ch >= '0' && ch <= '9';
++}
++
++HYD_status HYD_pmiserv_abort_cleanup(int *exitcode)
++{
++    HYD_status status = HYD_SUCCESS;
++    HYD_status overall_status = HYD_SUCCESS;
++
++    /* hydra_server.h declares these process-group accessors; pg.c implements them. */
++    for (int i = 0; i < PMISERV_pg_max_id(); i++) {
++        struct HYD_pg *pg = PMISERV_pg_by_id(i);
++        if (pg == NULL || !pg->is_active)
++            continue;
++        for (int j = 0; j < pg->proxy_count; j++) {
++            struct HYD_proxy *proxy = &pg->proxy_list[j];
++            if (proxy->control_fd == HYD_FD_UNSET || proxy->control_fd == HYD_FD_CLOSED)
++                continue;
++            status = HYD_pmcd_pmiserv_send_signal(proxy, SIGKILL);
++            if (status != HYD_SUCCESS) {
++                overall_status = status;
++                *exitcode = EXIT_FAILURE;
++            }
++        }
++    }
++
++    status = HYDT_bsci_wait_for_completion(0);
++    if (status != HYD_SUCCESS) {
++        overall_status = status;
++        *exitcode = EXIT_FAILURE;
++    }
++    return overall_status;
++}
++
+ HYD_status HYD_pmiserv_abort(struct HYD_proxy *proxy, int process_fd, int pgid,
+                              struct PMIU_cmd *pmi)
+ {
+     HYD_status status = HYD_SUCCESS;
+     int pmi_errno;
++    int exitcode = EXIT_FAILURE;
++    long parsed_exitcode;
++    char *endptr;
++    const char *exitcode_text;
++    const char *digits;
+
+     HYDU_FUNC_ENTER();
+
+-    int exitcode;
++    exitcode_text = PMIU_cmd_find_keyval(pmi, "exitcode");
++    if (exitcode_text == NULL) {
++        if (pmi->version == PMIU_WIRE_V1)
++            goto fn_cleanup;
++    } else {
++        digits = exitcode_text;
++        if (*digits == '+' || *digits == '-')
++            digits++;
++        if (!is_ascii_digit(*digits))
++            goto fn_cleanup;
++        while (*digits != '\0') {
++            if (!is_ascii_digit(*digits))
++                goto fn_cleanup;
++            digits++;
++        }
++        errno = 0;
++        parsed_exitcode = strtol(exitcode_text, &endptr, 10);
++        if (errno == ERANGE || endptr == exitcode_text || *endptr != '\0' ||
++            parsed_exitcode < INT_MIN || parsed_exitcode > INT_MAX)
++            goto fn_cleanup;
++    }
++
+     const char *error_msg;
+     pmi_errno = PMIU_msg_get_query_abort(pmi, &exitcode, &error_msg);
+     HYDU_ASSERT(!pmi_errno, status);
+
++  fn_cleanup:
++    status = HYD_pmiserv_abort_cleanup(&exitcode);
++
+   fn_exit:
+     /* clean everything up and exit */
+-    status = HYDT_bsci_wait_for_completion(0);
+     exit(exitcode);
+
+     /* never get here */
+@@ -124,5 +189,5 @@ HYD_status HYD_pmiserv_abort(struct HYD_proxy *proxy, int process_fd, int pgid,
+     return status;
+
+   fn_fail:
+-    goto fn_exit;
++    goto fn_cleanup;
+ }
+diff --git a/src/pm/hydra/mpiexec/pmiserv_pmi.h b/src/pm/hydra/mpiexec/pmiserv_pmi.h
+index 37ffa25..64e2610 100644
+--- a/src/pm/hydra/mpiexec/pmiserv_pmi.h
++++ b/src/pm/hydra/mpiexec/pmiserv_pmi.h
+@@ -63,6 +63,7 @@ HYD_status HYD_pmiserv_barrier(struct HYD_proxy *proxy, int process_fd, int pgid
+                                struct PMIU_cmd *pmi);
+ HYD_status HYD_pmiserv_abort(struct HYD_proxy *proxy, int process_fd, int pgid,
+                              struct PMIU_cmd *pmi);
++HYD_status HYD_pmiserv_abort_cleanup(int *exitcode);
+
+ HYD_status HYD_pmiserv_spawn(struct HYD_proxy *proxy, int process_fd, int pgid,
+                              struct PMIU_cmd *pmi);
