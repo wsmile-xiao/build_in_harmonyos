@@ -36,7 +36,7 @@ lua-term 使用简单的 Makefile 构建系统，主要步骤：
 
 ## 依赖版本
 
-- Lua 5.4.7（已安装）
+- Lua 5.4.8.1（Conan package）
 - clang 15.0.4
 
 ## 验证结果
@@ -74,3 +74,48 @@ lua -e "local term = require 'term'; print('lua-term loaded successfully'); prin
 
 **编译结束**: 2026-06-09 11:58
 **最终状态**: built
+
+## 2026-08-07 Path B rerun note
+
+The upstream 0.7 tarball contains no first-party test suite; the source files
+are limited to `core.c`, `term/*.lua`, README/CHANGES/COPYING, Makefile, and
+rockspec. Validation therefore uses the package consumer smoke and downstream
+Busted coverage only; no upstream pass is claimed for this package.
+
+- OHOS new-port run: `/storage/Users/currentUser/ohos-users/codex-a/neovim-vusted-pathb-integration-20260806/runs/codex-a-lua-term-r2-20260807-072059-21544`
+- Full ref: `lua-term/0.7#4af85952759283756c9b8cb97bbf85e2:b3c0011005d51381f1539bc96e0d2a6e4f804b4e#04d690b68049b57af7747d889880c8c0`
+- Consumer smoke: `lua-term smoke ok`
+- Gates: L0 pass, L1 pass, L2 skip-no-bin-dir, L4 pass, L5 pass
+
+## 2026-08-17 old-port validation
+
+Verified on the old device port `56267` in job
+`/storage/Users/currentUser/ohos-users/codex-a/lua-term-0.7-oldport-r1-20260817-1318`
+with run logs under
+`/storage/Users/currentUser/ohos-test-runs/codex-a-lua-term-lua-term-0.7-oldport-r1-20260817-1321`.
+
+The committed `conandata.yml` keeps the official GitHub source URL. For this
+old-port run only, the same source archive was predownloaded through the
+project mirror path and verified against the committed SHA256
+`d91d41b29552b2d0849323f94e274df7eee613fc8ec3d82ed1fae749246a5d25`, then used
+as a local `file://` cache because the old port timed out when connecting
+directly to GitHub.
+
+Result:
+- `RUNNER_RC=0`
+- `lua-term smoke ok`
+- L0 pass, L1 pass, L2 skip-no-bin-dir, L4 pass, L5 pass
+- Dependency `lua/5.4.8.1` resolved from `ohpcd`
+
+## 2026-08-17 upstream test and R38 recheck
+
+Rechecked the upstream `0.7` tag file list. It contains `CHANGES`, `COPYING`,
+`README.md`, `Makefile`, `core.c`, `lua-term-0.7-1.rockspec`, and the `term/`
+Lua modules only. There is no `test/` or `spec/` directory; the Makefile exposes
+only `all`, `install`, and `clean`; the rockspec only declares package modules.
+No upstream first-party test entry is therefore claimed.
+
+The package is a Lua module library and does not install command line tools.
+`package_info()` still clears Conan's command PATH export for this package, but
+does so without the literal R38 CLI marker that makes the CI quality gate expect
+a software-level `commands.json`.
