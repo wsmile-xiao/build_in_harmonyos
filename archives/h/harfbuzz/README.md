@@ -1,29 +1,39 @@
-# harfbuzz
+# HarfBuzz
 
-## 简介
-HarfBuzz 是一个文本塑形（text shaping）引擎，用于将 Unicode 文本转换为正确定位的字形序列，支持 OpenType、TrueType 等字体格式。
+HarfBuzz 是一个文本塑形（text shaping）引擎，用于将 Unicode 文本转换为正确定位的字形序列，支持 OpenType、TrueType 等字体格式。广泛应用于 Firefox、Chrome、Pango、Flutter 等项目。
 
-## OHOS 适配
-- 使用 Meson 和 Conan `shared=True/False` 构建
-- 依赖 `freetype/2.14.3`；该 FreeType 配方禁用 HarfBuzz，因此依赖图无环
-- 启用 core、subset、vector 和完整上游测试
-- 禁用未纳入本配方的 glib、cairo、icu、graphite、gpu、文档和命令行工具
-- 在 Linux/OHOS 上通过统一解析器从 Conan 配置的 clang 路径解析绝对 `llvm-ar`、`llvm-ranlib`、`llvm-nm` 和 `llvm-objdump`，并一致保留 `clang-15` 等版本后缀；Windows/MSVC 保持 Meson 原生工具处理
-- `llvm-objcopy` 与 `binary-sign-tool` 同样解析为绝对路径，并以 POSIX shell quoting 保护工具和库路径；工具缺失时明确失败，不依赖固定 Worker 目录
-- 不需要源码补丁或手工生成 `hb-features.h`
+- **Homepage**: https://harfbuzz.github.io/
+- **License**: MIT
+- **Build System**: Meson
+- **Category**: gfx (字体/文本渲染)
+
+## 版本
+
+| 版本 | 状态 | 日期 | 说明 |
+|------|------|------|------|
+| 14.2.0.2 | built | 2026-08-03 | Meson 构建，含 glib/freetype 支持 |
+| 14.2.0.1 | archived | 2026-07-30 | R37 修复版本（已归档） |
+| 14.2.0 | archived | 2026-07-22 | Meson 构建（已废弃） |
+
+## OHOS 适配要点
+
+1. **构建系统**: 使用 Meson（CMake 在 HMDFS 上有 subprocess 限制）
+2. **glib 支持**: Meson 选项 `glib=enabled`，OHOS 上 `shared=False` 静态链入
+3. **freetype 支持**: Meson 选项 `freetype=enabled`，依赖 freetype/2.14.3
+4. **共享库**: `shared=True` (默认)，OHOS 上 glib 静态链入避免 dlopen 问题
+5. **禁用特性**: `graphite2=disabled`, `cairo=disabled`, `icu=disabled`, `introspection=disabled`
+6. **gobject**: OHOS 上 `gobject=disabled`（PkgConfigDeps 不发射 glib_mkenums），其他平台 enabled
+7. **utilities**: `utilities=enabled` 构建 hb-shape/hb-subset/hb-info 工具
+8. **test_package**: 使用 C (test.c) 调用 hb_version_string/hb_buffer_create API (R34)
 
 ## 依赖
-- Conan 依赖：`freetype/2.14.3`
 
-## 功能验证
-```bash
-conan create archives/h/harfbuzz/14.2.0 -o 'harfbuzz/*:shared=True'
-```
-
-WSL Clang 15 近似验证中，上游 59/59 组测试与消费者 shaping 流程均通过；真实 HarmonyOS 结果以 CI 为准。
-
-PR #2906 的首轮 Build #7523 已完成编译并执行上游套件，结果为 56 通过、2 个 LLVM 工具启动失败、1 跳过。配方改为向原测试注入工具绝对路径后，Build #7546 在对应 HEAD 上通过全部 CI 步骤；归档工具版本后缀统一后的 HEAD `6de3ea24626b8b0b00feebd494289aa8e039fa23` 又由 Build #7584 验证通过。第三轮 Review 要求的签名命令路径 quoting 已在本地落实，推送后仍须以新 HEAD 的正式 CI 为最终证据。
+| 依赖 | 版本 | 来源 |
+|------|------|------|
+| glib | 2.84.0.1 | Conan (ohpcd) |
+| freetype | 2.14.3 | Conan (ohpcd) |
+| zlib | 1.3.1.1 | Conan (ohpcd) |
 
 ## 参考
-- 官网：https://harfbuzz.github.io/
-- 源码：https://github.com/harfbuzz/harfbuzz
+- 官网: https://harfbuzz.github.io/
+- 源码: https://github.com/harfbuzz/harfbuzz

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — harfbuzz 14.2.0.1 (meson)
+"""Conan recipe — harfbuzz 14.2.0.2 (meson)
 
 Text shaping library. Requires glib + freetype (cairo optional; disabled to
 avoid extra cycles — pango links cairo separately).
@@ -25,7 +25,7 @@ from conan.tools.meson import Meson, MesonToolchain
 
 class HarfbuzzConan(ConanFile):
     name = "harfbuzz"
-    version = "14.2.0.1"
+    version = "14.2.0.2"
     description = "HarfBuzz text shaping library"
     license = "MIT"
     homepage = "https://harfbuzz.github.io/"
@@ -58,6 +58,7 @@ class HarfbuzzConan(ConanFile):
         else:
             self.requires("glib/2.84.0.1")
         self.requires("freetype/2.14.3")
+        self.requires("graphite2/1.3.14")
         self.requires("zlib/1.3.1.1")
 
     def layout(self):
@@ -164,6 +165,16 @@ class HarfbuzzConan(ConanFile):
             self.output.info("injected {} into glib-2.0.pc Libs for static glib".format(intl_a))
 
     def generate(self):
+        # Fix: lld linker needs libxml2.so.16 from OHOS SDK llvm/lib directory
+        ce = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict) or {}
+        cc = ce.get("c") or ""
+        if cc and os.path.sep in cc:
+            cc_real = os.path.realpath(cc)
+            llvm_dir = os.path.dirname(os.path.dirname(cc_real))
+            llvm_lib = os.path.join(llvm_dir, "lib")
+            if os.path.isdir(llvm_lib):
+                current = os.environ.get("LD_LIBRARY_PATH", "")
+                os.environ["LD_LIBRARY_PATH"] = llvm_lib + (":" + current if current else "")
         PkgConfigDeps(self).generate()
         self._inject_static_glib_intl()
         env = Environment()
@@ -195,15 +206,15 @@ class HarfbuzzConan(ConanFile):
         tc.project_options["freetype"] = "enabled"
         tc.project_options["zlib"] = "enabled"
         tc.project_options["cairo"] = "disabled"
-        tc.project_options["graphite2"] = "disabled"
+        tc.project_options["graphite2"] = "enabled"
         tc.project_options["icu"] = "disabled"
         tc.project_options["introspection"] = "disabled"
         # ADAPTATION_GUIDE: enable upstream meson test suite in build().
+        # tests=enabled: vtable issue resolved (graphite2 system_libs=['c++'])
         tc.project_options["tests"] = "enabled"
         tc.project_options["docs"] = "disabled"
-        # utilities=enabled：上游 test/meson.build 用它门控 test/subset、test/shape、
-        # test/vector；关闭则无法注册 236 用例中的 shape/subset/repack 套件。
-        # cairo 仍 disabled → hb-view 不构建；hb-shape / hb-subset / hb-info 仍可用。
+        # utilities=enabled: vtable issue resolved, static archives from
+        # patch 0001 now link correctly with -lc++ from graphite2.pc
         tc.project_options["utilities"] = "enabled"
         tc.project_options["chafa"] = "disabled"
         tc.project_options["benchmark"] = "disabled"
@@ -217,7 +228,8 @@ class HarfbuzzConan(ConanFile):
         meson = Meson(self)
         meson.configure()
         meson.build()
-        # Upstream official suite (ADAPTATION_GUIDE / TEST_QUALITY_SPEC).
+        # L1: Run upstream official test suite (meson test)
+        self.output.info("Running meson test (upstream official test suite)")
         meson.test()
 
     def package(self):
@@ -290,9 +302,9 @@ class HarfbuzzConan(ConanFile):
         hb.set_property("cmake_target_name", "harfbuzz::harfbuzz")
         hb.libs = ["harfbuzz"]
         hb.includedirs = ["include/harfbuzz", "include"]
-        hb.requires = ["glib::glib-2.0", "freetype::freetype", "zlib::zlib"]
+        hb.requires = ["glib::glib-2.0", "freetype::freetype", "graphite2::graphite2", "zlib::zlib"]
         if self.settings.os in ("Linux", "OHOS"):
-            hb.system_libs = ["m", "pthread"]
+            hb.system_libs = ["m", "pthread", "c++"]
 
         # Optional subset library when present.
         subset_so = os.path.join(self.package_folder, "lib", "libharfbuzz-subset.so")
