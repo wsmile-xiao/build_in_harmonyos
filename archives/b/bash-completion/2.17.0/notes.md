@@ -1,45 +1,77 @@
 # bash-completion 2.17.0 适配笔记
 
 ## 编译环境
-- 构建系统: {cmake|autotools|makefile|meson|custom}
-- 编译日期: {2026-04-30}
+- 构建系统: autotools
+- 编译日期: 2026-08-05
 - 编译器: clang/clang++
-- 状态: {published|built|failed}
+- 状态: published
 
 ## 编译步骤
 
-{用文字描述实际编译步骤，包括关键的 configure/cmake 命令}
+```bash
+# 1. Source build context
+source .build-context-bash-completion-2.17.0
+
+# 2. Apply patches (config.guess + config.sub for HarmonyOS)
+cd $BUILD_SRC_DIR
+patch -p1 < patches/0001-config.guess.patch
+patch -p1 < patches/0002-config.sub.patch
+
+# 3. Fix umask 077 issue in config.status template
+# HarmonyOS HMDFS rejects file creation in dirs created with
+# `umask 077 && mktemp -d` (setgid + no group execute = Permission denied)
+sed -i 's|umask 077 && mktemp -d|mktemp -d|g' configure
+sed -i 's|umask 077 && mkdir|mkdir|g' configure
+
+# 4. Configure
+./configure --prefix=$DEFAULT_PREFIX
+
+# 5. Build (use -j1 due to HMDFS mkfifo limitation)
+make -j1
+
+# 6. Install to staging
+make install DESTDIR=$TEST_PREFIX
+
+# 7. Run tests
+make check
+```
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-{按需添加行}
+| 1 | config.status: could not setup config files machinery | HarmonyOS HMDFS: `umask 077 && mktemp -d` creates dirs with 2700 perms (setgid + no group execute), file creation denied | Patch configure to remove `umask 077` from mktemp/mkdir commands |
+| 2 | make: jobserver mkfifo: Operation not permitted | HMDFS doesn't support mkfifo | Use `make -j1` instead of `make -j2` |
+| 3 | automake-1.17: inaccessible or not found | Makefile.am timestamp triggered regeneration rule | Touch generated files to prevent regeneration |
 
 ## 源码修改
 
-{如有补丁，列出文件名和修改内容；无则删除此节}
+- `patches/0001-config.guess.patch`: Add HarmonyOS detection to config.guess
+- `patches/0002-config.sub.patch`: Add harmonyos* to config.sub recognized OS list
+- `conanfile.py`: Fix `umask 077` issue in configure template for HarmonyOS HMDFS compatibility
 
 ## 依赖版本
 
-{列出本次编译依赖的具体软件版本}
+No build dependencies required. bash-completion is a pure shell script collection.
 
 ## 验证结果
 
 ```bash
-{验证命令和结果}
+conan create ... → SUCCESS
+conan-verify G1-G4 + L2/L4/L5 → ALL PASS
+test_package: 5 assertions verifying installed scripts exist
 ```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-{有打包产物时添加；无则删除此节}
 
 ## 注意事项
 
-{需要特别注意的点；无则删除此节}
+- bash-completion is a shell script package, not a compiled library
+- package_type = "application" (no .so/.a files)
+- The `umask 077` fix in conanfile.py is HarmonyOS-specific and handled via `replace_in_file`
+- GitHub direct download is blocked; use ghproxy.net mirror or conan-verify's ghfast.top injection
+
+**编译结束**: 2026-08-05 06:55
+**最终状态**: published
 ---
 
-**编译结束**: 2026-04-30 01:42
+**编译结束**: 2026-08-05 07:05
 **最终状态**: built
