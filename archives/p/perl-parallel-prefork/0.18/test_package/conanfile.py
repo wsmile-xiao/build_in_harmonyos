@@ -29,17 +29,5 @@ class PerlparallelpreforkTestConan(ConanFile):
     def test(self):
         dep = self.dependencies["perl-parallel-prefork"]
         pkg_folder = dep.package_folder
-
-        # Verify that the Perl module files are installed in the package
-        prefork_pm = os.path.join(pkg_folder, "usr", "local", "lib", "site_perl", "5.42.0", "Parallel", "Prefork.pm")
-        spareworkers_pm = os.path.join(pkg_folder, "usr", "local", "lib", "site_perl", "5.42.0", "Parallel", "Prefork", "SpareWorkers.pm")
-        scoreboard_pm = os.path.join(pkg_folder, "usr", "local", "lib", "site_perl", "5.42.0", "Parallel", "Prefork", "SpareWorkers", "Scoreboard.pm")
-
-        assert os.path.isfile(prefork_pm), f"Parallel/Prefork.pm not found in package: {prefork_pm}"
-        assert os.path.isfile(spareworkers_pm), f"Parallel/Prefork/SpareWorkers.pm not found in package: {spareworkers_pm}"
-        assert os.path.isfile(scoreboard_pm), f"Parallel/Prefork/SpareWorkers/Scoreboard.pm not found in package: {scoreboard_pm}"
-
-        # Verify the module version matches
-        self.run(f"perl -e 'open(F,\"{prefork_pm}\"); $c=join(\"\",<F>); "
-                 f"die \"version mismatch\" unless $c =~ /\\$VERSION\\s*=\\s*[\\x27\\\"]0\\.18[\\x27\\\"]/; "
-                 f"print \"Parallel::Prefork v0.18 verified OK\\n\";'")
+        test_script = os.path.join(self.source_folder, "test_prefork.sh")
+        self.run(f'sh "{test_script}" "{pkg_folder}"')
