@@ -655,9 +655,10 @@ except Exception:
     # 规则 2: <首字母> 必须等于 <包名> 首字母（小写）
     # 规则 3: <版本> 目录名必须与 conanfile.py 中 version = "..." 一致
     # 规则 4 (R41): conanfile.py 中 name = "..." 必须等于 <包名> 目录名
-    # 规则 5 (R42): <包名>/<版本> 必须是 conan slug（全小写 + 仅 [a-z0-9._-]），
+    # 规则 5 (R42): <包名>/<版本> 必须是 conan slug（全小写 + 仅 [a-z0-9._+-]），
     #           conan 引用强制全小写（如 mawk/1.3.4-…-A273-v2 会报
-    #           "must be all lowercase"），在 L0 提前拦截
+    #           "must be all lowercase"），在 L0 提前拦截；
+    #           + 允许（对齐 conan 官方 ConanName 字符集，C++ 库命名如 vera++）
     echo "[step] L0m: Checking directory structure (R39/R41/R42)..."
     STRUCTURE_CHECK=$(python3 - "$pkg_dir" "$REPO_ROOT" "$CONANFILE" <<'PYEOF'
 import os, re, sys
@@ -678,11 +679,12 @@ if len(letter) != 1 or not letter.isalnum():
 if letter.lower() != pkg_name[0].lower():
     print(f"ERR|首字母目录 '{letter}' 与包名 '{pkg_name}' 首字母 '{pkg_name[0].lower()}' 不一致")
     sys.exit(0)
-# R42: conan slug 字符集（全小写 + [a-z0-9._-]，首字符字母数字）
-if not re.fullmatch(r"[a-z0-9][a-z0-9._-]*", pkg_name):
+# R42: conan slug 字符集（全小写 + [a-z0-9._+-]，首字符字母数字；
+# 与 conan 官方 ConanName pattern 对齐，+ 用于 C++ 库命名如 vera++/libsigc++）
+if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*", pkg_name):
     print(
         f"ERR|包名目录 '{pkg_name}' 不是 conan slug（R42）：必须全小写且仅含 "
-        f"[a-z0-9._-]。例如 libsigc++ → libsigc；含大写/+/空格的目录名会导致"
+        f"[a-z0-9._+-]（+ 可用，如 vera++）。含大写/空格的目录名会导致"
         f"conan create 报 must be all lowercase、CI 分支门禁与平台任务关联失败"
     )
     sys.exit(0)
@@ -720,7 +722,7 @@ PYEOF
         echo "[hint] 正确格式: archives/<首字母>/<包名>/<版本号>/conanfile.py"
         echo "       例如: archives/f/fnt/1.9.1/conanfile.py"
         echo "       不要用 'homebrew' 等非版本号字符串作为版本目录名"
-        echo "       包名/版本目录必须是 conan slug：全小写、仅 [a-z0-9._-]（版本可含 +）"
+        echo "       包名/版本目录必须是 conan slug：全小写、仅 [a-z0-9._+-]（+ 可用，如 vera++）"
         L0_FAILED=true
         L0_ERRORS="${L0_ERRORS} dir_structure_r39"
     else
