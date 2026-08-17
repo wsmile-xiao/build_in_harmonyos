@@ -3,10 +3,14 @@
 
 import os
 import shlex
+import shutil
+import subprocess
+import tarfile
 
 from conan import ConanFile
+from conan.errors import ConanException
 from conan.tools.env import VirtualBuildEnv, VirtualRunEnv
-from conan.tools.files import copy, get
+from conan.tools.files import copy, download
 from conan.tools.layout import basic_layout
 
 
@@ -31,7 +35,72 @@ class OrgConan(ConanFile):
         self.requires("emacs/29.1")
 
     def source(self):
-        get(self, **self.conan_data["sources"])
+        source = self.conan_data["sources"]
+        archive = os.path.join(self.source_folder, f"org-{self.version}.tar.lz")
+        download(self, source["url"], archive, sha256=source["sha256"])
+
+        tar = self._find_tar()
+        try:
+            self._extract_tar(tar, archive)
+        except subprocess.CalledProcessError:
+            self.output.info("system tar could not unpack .tar.lz directly; using lzip fallback")
+            lzip = self._find_or_build_lzip()
+            tar_path = archive[:-3]
+            subprocess.run([lzip, "-d", "-k", "-f", archive], check=True)
+            self._extract_tar(tar, tar_path)
+            os.unlink(tar_path)
+        os.unlink(archive)
+
+    def _find_tar(self):
+        tar = shutil.which("tar")
+        if not tar:
+            raise ConanException("system tar is required to unpack GNU ELPA .tar.lz sources")
+        return tar
+
+    def _extract_tar(self, tar, archive):
+        subprocess.run(
+            [tar, "-xf", archive, "--strip-components=1", "-C", self.source_folder],
+            check=True,
+        )
+
+    def _find_or_build_lzip(self):
+        lzip = shutil.which("lzip")
+        if lzip:
+            return lzip
+
+        lzip_url = "https://download-mirror.savannah.gnu.org/releases/lzip/lzip-1.25.tar.gz"
+        lzip_sha256 = "09418a6d8fb83f5113f5bd856e09703df5d37bae0308c668d0f346e3d3f0a56f"
+        lzip_archive = os.path.join(self.source_folder, "lzip-1.25.tar.gz")
+        lzip_prefix = os.path.join(self.source_folder, ".lzip")
+        download(self, lzip_url, lzip_archive, sha256=lzip_sha256)
+        with tarfile.open(lzip_archive, "r:gz") as tf:
+            tf.extractall(self.source_folder, filter="data")
+        os.unlink(lzip_archive)
+
+        lzip_src = os.path.join(self.source_folder, "lzip-1.25")
+        compilers = self.conf.get(
+            "tools.build:compiler_executables",
+            default={},
+            check_type=dict,
+        )
+        cc = os.environ.get("CC") or compilers.get("c") or "clang"
+        cxx = os.environ.get("CXX") or compilers.get("cpp") or "clang++"
+        tmp_dir = os.path.join(self.source_folder, ".tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        env = os.environ.copy()
+        env.setdefault("TMPDIR", tmp_dir)
+        env.setdefault("TMP", tmp_dir)
+        env.setdefault("TEMP", tmp_dir)
+        subprocess.run(
+            ["./configure", f"--prefix={lzip_prefix}", f"CC={cc}", f"CXX={cxx}"],
+            cwd=lzip_src,
+            check=True,
+            env=env,
+        )
+        subprocess.run(["make", "-j1"], cwd=lzip_src, check=True, env=env)
+        subprocess.run(["make", "install"], cwd=lzip_src, check=True, env=env)
+        shutil.rmtree(lzip_src, ignore_errors=True)
+        return os.path.join(lzip_prefix, "bin", "lzip")
 
     def generate(self):
         VirtualBuildEnv(self).generate()
