@@ -1,9 +1,9 @@
-# harfbuzz 14.2.0.1 — Conan 配方笔记
+# harfbuzz 14.2.0.2 — Conan 配方笔记
 
 ## 软件信息
 
 - **名称**: harfbuzz — OpenType 文本整形库
-- **版本**: **14.2.0.1**（R37：在已归档 `14.2.0` 上补齐 Conan 配方）
+- **版本**: **14.2.0.2**（R37：在已归档 `14.2.0` 上补齐 Conan 配方）
 - **许可证**: MIT
 - **构建系统**: meson
 - **目标平台**: OHOS aarch64
@@ -46,10 +46,10 @@
 ## 构建
 
 ```bash
-bash ci/conan/build_and_test.sh harfbuzz/14.2.0.1
+bash ci/conan/build_and_test.sh harfbuzz/14.2.0.2
 
 # 交叉 Docker
-conan create archives/h/harfbuzz/14.2.0.1 \
+conan create archives/h/harfbuzz/14.2.0.2 \
   -pr:h=ohos-aarch64-6.1 -pr:b=default --build=missing
 ```
 
@@ -64,7 +64,7 @@ conan create archives/h/harfbuzz/14.2.0.1 \
 ## W3 / 上游测试（2026-07-19，Docker `oh_compile`）
 
 ```text
-CI_PACKAGES=archives/h/harfbuzz/14.2.0.1 zsh build_and_test.sh
+CI_PACKAGES=archives/h/harfbuzz/14.2.0.2 zsh build_and_test.sh
 # -pr:h=ohos-aarch64 (SDK 6.1)  -pr:b=default
 W3_EXIT=0
 L0=pass  L1=pass (upstream meson test + test_package)  L4=pass  L5=pass
@@ -119,7 +119,7 @@ ELF 的 `readelf -d | grep NEEDED` 仍包含 `libharfbuzz.so.0` / `libglib-2.0.s
    在静态时追加 `intl` 到 `glib.libs`，让 pkg-config 注入 `-lintl`。这样 GLib 同时产出
    `libglib-2.0.a` / `libgobject-2.0.a` / `libintl.a`。
 
-2. **`archives/h/harfbuzz/14.2.0.1/conanfile.py`** — `requirements()` 在 OHOS 时
+2. **`archives/h/harfbuzz/14.2.0.2/conanfile.py`** — `requirements()` 在 OHOS 时
    `self.requires("glib/2.84.0.1", options={"shared": False})`。其他平台保留 shared
    （不破坏 cairo/pango 未来消费者）。
 
@@ -143,7 +143,7 @@ ELF 的 `readelf -d | grep NEEDED` 仍包含 `libharfbuzz.so.0` / `libglib-2.0.s
 ```text
 fresh run (after rebuild):
 - libglib-2.0.a / libintl.a produced by glib conanfile with default_library=static
-- conan create archives/h/harfbuzz/14.2.0.1 ...  --build='harfbuzz/*'
+- conan create archives/h/harfbuzz/14.2.0.2 ...  --build='harfbuzz/*'
 - meson test -C /path/build --no-rebuild --print-errorlogs
   Ok=238  Fail=0  Skipped=1   (check-libstdc++ 自跳过, 依赖 ldd)
   Total=239   Pass=238/238 = 100%
@@ -158,8 +158,8 @@ skip 与 check-symbols OHOS 排除; 总 239 用例)**。
 
 - patches 涉及 6 个文件变更: `meson.build`, `src/meson.build`, `test/api/meson.build`,
   `util/meson.build`, `test/fuzzing/meson.build`, `test/threads/meson.build`
-- patch 文件位置: `archives/h/harfbuzz/14.2.0.1/patches/0001-static-tests.patch`
-  (380 行，全文重生成) 和 `archives/h/harfbuzz/14.2.0.1/patches/0002-subset-repack-no-fonttools.patch`
+- patch 文件位置: `archives/h/harfbuzz/14.2.0.2/patches/0001-static-tests.patch`
+  (380 行，全文重生成) 和 `archives/h/harfbuzz/14.2.0.2/patches/0002-subset-repack-no-fonttools.patch`
 - conandata.yml 加载: 单条 0001 patch_description 改写为完整描述
 - test_package/MANIFEST.yml: `exemptions: []` (ohos-namespace-dlopen 完全消除, 无豁免)；
   `upstream_tests` 重写为 `total_run=236 / ok=236 / fail=0 / skipped=0 / pass_rate=1.0000`
