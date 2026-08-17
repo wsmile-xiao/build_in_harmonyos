@@ -28,5 +28,5 @@ class ThorvgTestConan(ConanFile):
     def test(self):
         if can_run(self):
             bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-lib_dir = os.path.join(self.dependencies["thorvg"].package_folder, "lib")
+            lib_dir = os.path.join(self.dependencies["thorvg"].package_folder, "lib")
             self.run(f"LD_LIBRARY_PATH={lib_dir} {bash} -c './test_thorvg'", env="conanrun")
