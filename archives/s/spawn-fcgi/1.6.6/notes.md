@@ -3,10 +3,10 @@
 ## 编译环境
 
 - 构建系统: meson 1.11.1
-- 编译日期: 2026-06-13
+- 编译日期: 2026-07-24
 - 编译器: clang 15.0.4 / clang++ 15.0.4
 - 平台: OpenHarmony aarch64 (native编译)
-- 状态: published
+- 状态: built
 - 特殊环境变量: PYTHONHOME=/data/service/hnp/python.org/python_3.12
 
 ## 编译步骤
@@ -79,5 +79,5 @@ spawn-fcgi v1.6.6 (ipv6) - spawns FastCGI processes
 - G0 clean-verify 对 meson 项目有已知限制
 ---
 
-**编译结束**: 2026-06-13 16:05
-**最终状态**: published
+**编译结束**: 2026-07-24 11:22
+**最终状态**: built
