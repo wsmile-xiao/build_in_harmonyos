@@ -19,7 +19,7 @@ class NotmuchEmacsConan(ConanFile):
     url = "https://notmuchmail.org"
     package_type = "unknown"
 
-    settings = "os", "arch"
+    settings = "os", "compiler", "build_type", "arch"
 
     _emacs_sources = (
         "notmuch-lib.el",

@@ -8,7 +8,7 @@ from conan import ConanFile
 
 
 class NotmuchEmacsTestConan(ConanFile):
-    settings = "os", "arch"
+    settings = "os", "compiler", "build_type", "arch"
     generators = "VirtualRunEnv"
     test_type = "explicit"
 
