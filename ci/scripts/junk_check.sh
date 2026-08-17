@@ -151,6 +151,26 @@ if [ -n "$(echo "$JC4_HITS" | tr -d '[:space:]')" ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
+# JC5: archives 隐藏文件白名单（防 .build-closed 类运行时标记混入）
+# ═══════════════════════════════════════════════════════════════
+echo ""
+echo "[step] JC5: archives 隐藏文件白名单检测..."
+
+# 白名单：git 常规 / lint 配置 / SKILL 工作流状态标记（含 main 存量全部形态）
+# 新增工作流标记时须先在此登记，否则 CI 拦截（新增未登记 dotfile 一律 fail）
+JC5_ALLOWED='/\.(gitignore|gitkeep|gitattributes|flake8|pylintrc|audit-result\.json|knowledge-done(-[a-z0-9._-]+)?|packaged|g0-verified(-cmake)?|g0-manual(ly)?-verif(y|ied)|no-patches-needed|patch-index|knowledge_gap_filled)$'
+
+JC5_HITS=$(echo "$CHECK_FILES" | grep -E '^archives/.*/\.[^/]+$' | grep -Ev "$JC5_ALLOWED" || true)
+
+if [ -n "$(echo "$JC5_HITS" | tr -d '[:space:]' )" ]; then
+    JC5_COUNT=$(echo "$JC5_HITS" | grep -c . || true)
+    fail "JC5: ${JC5_COUNT} 个 archives 下未登记的隐藏文件:"
+    echo "$JC5_HITS" | grep . | head -10 | sed 's/^/       /'
+    [ "$JC5_COUNT" -gt 10 ] && echo "       ... (共 ${JC5_COUNT} 个)"
+    echo "       白名单: ci/scripts/junk_check.sh JC5_ALLOWED（新工作流标记请先登记再使用）"
+fi
+
+# ═══════════════════════════════════════════════════════════════
 # 汇总
 # ═══════════════════════════════════════════════════════════════
 echo ""
