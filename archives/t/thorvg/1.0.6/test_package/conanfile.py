@@ -28,4 +28,4 @@ class ThorvgTestConan(ConanFile):
     def test(self):
         if can_run(self):
             bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-                        self.run(f"{bash} -c './test_thorvg'", env="conanrun")
+            self.run(f"{bash} -c './test_thorvg'", env="conanrun")
