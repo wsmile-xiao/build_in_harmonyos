@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""Conan recipe for avr-libc 2.2.1.
+
+The package is built on Linux/OHOS, but its headers, startup objects and
+archives target AVR microcontrollers.  They must never be exposed as native
+OHOS link libraries.
+"""
+
+import glob
+import os
+import sys
+
+from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
+from conan.tools.env import VirtualBuildEnv
+from conan.tools.files import (
+    apply_conandata_patches,
+    copy,
+    export_conandata_patches,
+    get,
+)
+from conan.tools.gnu import Autotools, AutotoolsToolchain, get_gnu_triplet
+from conan.tools.layout import basic_layout
+
+
+class AvrLibcConan(ConanFile):
+    name = "avr-libc"
+    version = "2.2.1"
+    description = "C runtime library for AVR microcontrollers"
+    license = "BSD-3-Clause"
+    homepage = "https://github.com/avrdudes/avr-libc"
+    # AVR target sysroot resources, neither an OHOS library nor a CLI tool.
+    package_type = "unknown"
+
+    settings = "os", "arch", "compiler", "build_type"
+
+    def export_sources(self):
+        export_conandata_patches(self)
+
+    def layout(self):
+        basic_layout(self)
+
+    def validate(self):
+        if self.settings.os not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration(
+                "avr-libc can only be built with the AVR cross-toolchain on Linux/OHOS"
+            )
+
+    def build_requirements(self):
+        # W0: the two AVR packages are intentionally separate adaptations.
+        # Neither recipe is published on ohpcd as of 2026-08-17.
+        self.tool_requires("avr-binutils/2.43.1")
+        self.tool_requires("avr-gcc-bootstrap/14.2.0")
+        self.tool_requires("autoconf/2.72")
+        self.tool_requires("automake/1.18")
+
+    def source(self):
+        get(self, **self.conan_data["sources"], strip_root=True)
+
+    def generate(self):
+        tools = {
+            "CC": self._required_build_tool("avr-gcc"),
+            "AS": self._required_build_tool("avr-as"),
+            "AR": self._required_build_tool("avr-ar"),
+            "LD": self._required_build_tool("avr-ld"),
+            "NM": self._required_build_tool("avr-nm"),
+            "OBJCOPY": self._required_build_tool("avr-objcopy"),
+            "OBJDUMP": self._required_build_tool("avr-objdump"),
+            "RANLIB": self._required_build_tool("avr-ranlib"),
+            "STRIP": self._required_build_tool("avr-strip"),
+        }
+
+        build_env = VirtualBuildEnv(self)
+        env = build_env.environment()
+        for variable, executable in tools.items():
+            env.define(variable, executable)
+        env.define("CCAS", tools["CC"])
+        env.define("AVR_GCC", tools["CC"])
+        env.define("AVR_NM", tools["NM"])
+        env.define("AVR_OBJCOPY", tools["OBJCOPY"])
+        env.define("PYTHON", sys.executable)
+        build_env.generate()
+
+        tc = AutotoolsToolchain(self)
+        tc.configure_args.extend(
+            [
+                "--build={}".format(get_gnu_triplet(self)),
+                "--host=avr",
+                "--disable-doc",
+                "--disable-html-doc",
+                "--disable-pdf-doc",
+                "--disable-man-doc",
+            ]
+        )
+        # AutotoolsToolchain normally rewrites CC/CXX from the OHOS profile.
+        # Override that generator environment as well as VirtualBuildEnv so
+        # its later activation cannot replace avr-gcc with native clang.
+        tc_env = tc.environment()
+        for variable, executable in tools.items():
+            tc_env.define(variable, executable)
+        tc_env.define("CCAS", tools["CC"])
+        tc.generate(env=tc_env)
+
+    def build(self):
+        apply_conandata_patches(self)
+
+        # The authoritative tag snapshot does not contain generated top-level
+        # configure/Makefile.in files.  bootstrap also generates the AVR
+        # device and multilib source trees before running Autoconf/Automake.
+        self.run("sh bootstrap", cwd=self.source_folder, env="conanbuild")
+
+        autotools = Autotools(self)
+        autotools.configure(build_script_folder=self.source_folder)
+        autotools.make(args=["-j1"])
+
+        # The complete upstream suite requires avrtest or simulavr.  Keep a
+        # representative compile/link subset in the build so the generated
+        # libc, libm, CRT and device archive are all exercised without running
+        # AVR machine code on the OHOS host.
+        tests = os.path.join(self.source_folder, "tests", "simulate")
+        command = (
+            'sh runtest.sh -c -a "{}" '
+            "string/strcmp.c stdlib/atoi-1.c math/cos-01.c"
+        ).format(self.build_folder)
+        self.run(command, cwd=tests, env="conanbuild")
+
+    def package(self):
+        autotools = Autotools(self)
+        autotools.install()
+        copy(
+            self,
+            "LICENSE",
+            src=self.source_folder,
+            dst=os.path.join(self.package_folder, "licenses"),
+            keep_path=False,
+        )
+        self._validate_packaged_artifacts()
+
+    def package_info(self):
+        # These are AVR target artifacts, not native OHOS libraries.  Consumers
+        # must use AVR tools and explicit paths (or AVR_LIBC_ROOT).
+        # The package contains no native executable payload.
+        self.cpp_info.includedirs = []
+        self.cpp_info.libdirs = []
+        self.cpp_info.libs = []
+        self.cpp_info.resdirs = ["avr"]
+        self.buildenv_info.define_path(
+            "AVR_LIBC_ROOT", os.path.join(self.package_folder, "avr")
+        )
+
+    def _required_build_tool(self, executable):
+        for dependency in self.dependencies.build.values():
+            package_folder = dependency.package_folder
+            if not package_folder:
+                continue
+            candidate = os.path.join(package_folder, "bin", executable)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+        raise ConanInvalidConfiguration(
+            "Required AVR tool '{}' was not provided by tool_requires".format(executable)
+        )
+
+    def _validate_packaged_artifacts(self):
+        avr_root = os.path.join(self.package_folder, "avr")
+        required_header = os.path.join(avr_root, "include", "avr", "version.h")
+        if not os.path.isfile(required_header):
+            raise ConanInvalidConfiguration(
+                "Packaged avr-libc version header is missing: {}".format(required_header)
+            )
+        for archive in ("libc.a", "libm.a"):
+            if not glob.glob(os.path.join(avr_root, "lib", "**", archive), recursive=True):
+                raise ConanInvalidConfiguration(
+                    "Packaged AVR archive is missing: {}".format(archive)
+                )
+        if not glob.glob(os.path.join(avr_root, "lib", "**", "crt*.o"), recursive=True):
+            raise ConanInvalidConfiguration("Packaged AVR startup objects are missing")
