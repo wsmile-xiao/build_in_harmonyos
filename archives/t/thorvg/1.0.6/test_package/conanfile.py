@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from conan import ConanFile
 from conan.tools.build import can_run
@@ -28,4 +28,5 @@ class ThorvgTestConan(ConanFile):
     def test(self):
         if can_run(self):
             bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-            self.run(f"{bash} -c './test_thorvg'", env="conanrun")
+lib_dir = os.path.join(self.dependencies["thorvg"].package_folder, "lib")
+            self.run(f"LD_LIBRARY_PATH={lib_dir} {bash} -c './test_thorvg'", env="conanrun")
