@@ -1,19 +1,15 @@
-# meson 1.11.0 — OpenHarmony 编译记录
+# Meson
 
-## 基本信息
-- 软件: meson
-- 版本: 1.11.0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+The Meson Build System
 
-## 编译指导
-<!-- 编译注意事项 -->
+## OpenHarmony 适配状态
 
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
+- 支持版本: 1.11.0.1
+- 构建系统: custom
+- 依赖: ninja
 
-## 已知限制
-<!-- 平台相关限制 -->
+## 编译方法
 
-## 功能验证
-<!-- 验证命令和结果 -->
+```bash
+python3 scripts/ohc-run.py build meson 1.11.0.1
+```
