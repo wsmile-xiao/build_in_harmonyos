@@ -25,6 +25,25 @@ export PATH="$HOME/.local/bin:$PATH"
 source "$SCRIPT_DIR/sqlite_runtime.sh"
 ensure_python_sqlite_runtime || exit 1
 
+# Ensure Python's sqlite3 module works (conan requires it for cache DB)
+# Some CI workers' HNP Python has _sqlite3.so dynamically linking
+# libsqlite3.so.0 which may not be installed.
+if ! python3 -c "import sqlite3" &>/dev/null; then
+    echo "[step] Python sqlite3 broken, installing libsqlite3..."
+    DST="${DEFAULT_PREFIX:-$HOME/usr/local}"
+    python3 - "$DST" <<'PYEOF' || { echo "[error] Failed to install sqlite3"; exit 1; }
+import urllib.request, os, tarfile, tempfile, sys
+dst = sys.argv[1]
+url = "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/sqlite3-3.49.1-ohos-aarch64.tar.gz"
+tmp = tempfile.mkdtemp()
+tarball = os.path.join(tmp, "sqlite3.tar.gz")
+urllib.request.urlretrieve(url, tarball)
+with tarfile.open(tarball, "r:gz") as tar:
+    tar.extractall(dst)
+print(f"sqlite3 installed to {dst}")
+PYEOF
+fi
+
 # Check both that conan exists AND is functional (conan --version succeeds)
 # If conan binary exists but is broken, force-reinstall to fix
 if ! command -v conan &>/dev/null || ! conan --version &>/dev/null; then
