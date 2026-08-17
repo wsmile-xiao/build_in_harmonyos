@@ -7,13 +7,20 @@
 
 The selected source is the official GNU ELPA package:
 
-- URL: `https://elpa.gnu.org/packages/org-9.8.8.tar`
-- SHA256: `a05f201f73bd9a3f927a21750c94a5ade82ca7310394d3bdf5fda1d9d870b766`
+- URL: `https://elpa.gnu.org/packages/org-9.8.8.tar.lz`
+- SHA256: `6a8c38a96476f9dbe8594f9e8209098840bc6ead099bebc4fb62ed20b6fff6c7`
 - ELPA metadata: `org 9.8.8`, dependency `emacs >= 28.2`
+
+The earlier `https://elpa.gnu.org/packages/org-9.8.8.tar` URL is no longer
+served by GNU ELPA and caused release CI source-stage 404 failures. GNU ELPA
+still lists and serves the official historical `org-9.8.8.tar.lz` package, so
+the recipe downloads that archive explicitly. It first tries system `tar`; on
+OHOS toybox `tar` cannot read lzip-compressed tarballs, so the recipe falls
+back to a private `lzip` helper and then extracts the plain `.tar`.
 
 ## Upstream Tests
 
-The GNU ELPA `org-9.8.8.tar` package does not include the upstream Org test
+The GNU ELPA `org-9.8.8.tar.lz` package does not include the upstream Org test
 suite. It does include generated `org-loaddefs.el` and `org-version.el`.
 
 For this package, upstream tests are recorded as `not_run` rather than passed.
