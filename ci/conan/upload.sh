@@ -22,6 +22,9 @@ fi
 # ── Configuration ──
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="${CI_REPO_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+source "$SCRIPT_DIR/sqlite_runtime.sh"
+ensure_python_sqlite_runtime || exit 1
+
 PROFILE="${CONAN_PROFILE:-ohos-aarch64}"
 PROFILE_FILE="$REPO_ROOT/ci/conan/profiles/$PROFILE"
 CONAN_REMOTE_NAME="${CONAN_REMOTE_NAME:-ohpcd}"

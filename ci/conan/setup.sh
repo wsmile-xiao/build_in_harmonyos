@@ -22,6 +22,8 @@ echo "[step] Conan environment setup..."
 # ── 1. Detect/install Conan ──
 # pip3 可能装到 ~/.local/bin, 确保在 PATH 上
 export PATH="$HOME/.local/bin:$PATH"
+source "$SCRIPT_DIR/sqlite_runtime.sh"
+ensure_python_sqlite_runtime || exit 1
 
 # Check both that conan exists AND is functional (conan --version succeeds)
 # If conan binary exists but is broken, force-reinstall to fix
@@ -70,49 +72,8 @@ echo "[step] Conan version: $CONAN_VERSION"
 # If conan still can't run after install/reinstall, diagnose the root cause
 if [ "$CONAN_VERSION" = "unknown" ]; then
     echo "[error] conan 仍然无法运行, 诊断系统环境..."
-    # Check for common system-level issues
-    python3 -c "import sqlite3" 2>&1 || {
-        echo "[error] Python sqlite3 模块损坏 — libsqlite3.so.0 缺失"
-        echo "[error] 这不是 conan 问题, 需要在 Worker 上安装/链接 libsqlite3.so.0"
-        echo "[error] 修复: 找到 HNP 目录下的 libsqlite3.so.0 或从 OHOS 系统链接"
-        # Try to find and link it. Build the search list explicitly: zsh with
-        # nomatch aborts before find runs when globs such as /system/lib* are
-        # absent on some workers.
-        SQLITE_SEARCH_DIRS=()
-        for dir in \
-            /data/service/hnp \
-            /system/lib /system/lib64 /system/lib32 \
-            /vendor/lib /vendor/lib64 \
-            /usr/lib /usr/lib64; do
-            if [ -d "$dir" ]; then
-                SQLITE_SEARCH_DIRS+=("$dir")
-            fi
-        done
-        SQLITE_LIB=""
-        if [ ${#SQLITE_SEARCH_DIRS[@]} -gt 0 ]; then
-            SQLITE_LIB=$(find "${SQLITE_SEARCH_DIRS[@]}" \
-                \( -name 'libsqlite3.so*' -o -name 'libsqlite.z.so*' \) \
-                -print -quit 2>/dev/null || true)
-        fi
-        if [ -n "$SQLITE_LIB" ]; then
-            SQLITE_LIB_DIR="$(dirname "$SQLITE_LIB")"
-            if [[ "$(basename "$SQLITE_LIB")" != libsqlite3.so* ]]; then
-                SQLITE_SHIM_ROOT="${TMPDIR:-$HOME/tmp}"
-                mkdir -p "$SQLITE_SHIM_ROOT"
-                SQLITE_SHIM_DIR="$(mktemp -d "$SQLITE_SHIM_ROOT/ci-sqlite-shim.XXXXXX" 2>/dev/null || true)"
-                if [ -n "$SQLITE_SHIM_DIR" ]; then
-                    ln -sf "$SQLITE_LIB" "$SQLITE_SHIM_DIR/libsqlite3.so.0" 2>/dev/null || true
-                fi
-                if [ -n "$SQLITE_SHIM_DIR" ] && [ -e "$SQLITE_SHIM_DIR/libsqlite3.so.0" ]; then
-                    SQLITE_LIB_DIR="$SQLITE_SHIM_DIR"
-                fi
-            fi
-            echo "[step] 尝试设置 LD_LIBRARY_PATH: $SQLITE_LIB_DIR"
-            export LD_LIBRARY_PATH="$SQLITE_LIB_DIR:${LD_LIBRARY_PATH:-}"
-            CONAN_VERSION=$(conan --version 2>/dev/null || echo "unknown")
-            echo "[step] Retry conan version: $CONAN_VERSION"
-        fi
-    }
+    python3 -c "import sqlite3" 2>&1 || \
+        echo "[error] Python sqlite3 became unavailable after environment setup"
     python3 -c "import ssl" 2>&1 || echo "[error] Python ssl 模块损坏 — libssl.so 缺失"
     # Check for other missing shared libraries
     PYTHON3_BIN=$(which python3 2>/dev/null)
