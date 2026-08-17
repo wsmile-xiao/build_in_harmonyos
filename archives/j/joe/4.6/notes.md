@@ -7,7 +7,7 @@
 - 编译器: clang 15.0.4 / clang++ 15.0.4
 - 链接器: GNU ld.bfd 2.45 (不使用 ld.lld，因 libxml2 依赖问题)
 - 依赖: ncurses 6.5 (静态链接 libncurses.a)
-- 状态: published
+- 状态: built
 
 ---
 
@@ -33,19 +33,17 @@ python3 $SKILL_ROOT/scripts/ohc-run.py init-build joe 4.6 --url=... --no-downloa
   2. `ohos-linux` case block (~行129，在 android-linux 之后)
   3. `kernel-os` 白名单添加 `-linux-ohos*` (~行1372)
 
-**补丁 3: configure (E064 + HMDFS)**
-- 两处修改:
-  1. `ac_fn_c_try_run` 函数中，`$ac_link` 之后添加 `sign-elf` 钩子（conftest 需 ELF 签名才能执行）
-  2. cross-compile 检查部分(~行3655) 同样添加 `sign-elf`
-  3. mktemp 路径从 `./confXXXXXX` 改为 `${TMPDIR:-$HOME/tmp}/confXXXXXX`
+**补丁 3: configure (E064 + E011)**
+- 修改:
+  1. mktemp 路径从 `./confXXXXXX` 改为 `${TMPDIR:-$HOME/tmp}/confXXXXXX`
+  2. umask 从 `077` 改为 `022`（HMDFS setgid + umask 077 导致临时目录不可写）
+- 注: 原方案在 configure 中添加 sign-elf 钩子，已改为交叉编译模式跳过 conftest 执行
 
 **补丁 4: joe/path.c (PSCAN-FS-001)**
 - `/tmp/` 硬编码 → OHOS 上 /tmp 只读
 - 添加 `#ifdef __OHOS__` 守卫: `_PATH_TMP` 设为 `/data/local/tmp/`
 
-**补丁 5: config.status (E011, 非源码补丁)**
-- 修改 `umask 077` → `umask 022`
-- HMDFS setgid + umask 077 导致 mktemp 目录对当前进程不可写
+> 注: umask 077→022 修复已合并到补丁 0003 (configure) 中，不再单独处理 config.status
 
 ### 3. Configure
 ```bash
@@ -58,7 +56,7 @@ LDFLAGS="-L$DEFAULT_PREFIX/lib -fuse-ld=bfd" ./configure --prefix=$DEFAULT_PREFI
 ```bash
 make -j1
 ```
-成功编译 joe 二进制 (846208 bytes)
+成功编译 joe 二进制 (2164672 bytes)
 
 ### 5. DESTDIR 安装
 ```bash
@@ -81,7 +79,6 @@ python3 $SKILL_ROOT/scripts/ohc-run.py package joe 4.6
 ### 8. 本地安装
 ```bash
 make install  # 不带 DESTDIR
-sign-elf $DEFAULT_PREFIX/bin/joe
 $DEFAULT_PREFIX/bin/joe --help  # → "Joe's Own Editor v4.6"
 ```
 
@@ -99,7 +96,7 @@ G1-G4 全 PASS
 |---|------|------|----------|----------|
 | 1 | config.guess 不识别 OHOS | 2013年旧版不支持 | E072 | 替换为简化版脚本（直接输出三元组） |
 | 2 | config.sub 不验证 linux-ohos | 缺少 OS 白名单 | E072 | 添加 3 处 ohos 模式 |
-| 3 | configure conftest 无法执行 | OHOS 需 ELF 签名 | E064 | 在 configure 中添加 sign-elf 钩子 |
+| 3 | configure conftest 无法执行 | OHOS 安全策略限制未签名 ELF 执行 | E064 | 使用跨编译模式（--build != --host）跳过 conftest |
 | 4 | config.status 临时目录不可写 | HMDFS umask 077 + setgid | E011 | 修改 umask 为 022 |
 | 5 | ld.lld 加载 libxml2.so.16 失败 | OHOS ld.lld wrapper 依赖 libxml2 | 无现存条目 | 使用 `-fuse-ld=bfd` |
 | 6 | joe/path.c 硬编码 /tmp/ | OHOS /tmp 只读 | PSCAN-FS-001 | __OHOS__ 守卫改用 /data/local/tmp/ |
@@ -113,10 +110,10 @@ G1-G4 全 PASS
 |------|------|------|--------|
 | config.guess | 0001 | E072: OHOS 平台识别 | +29/-1554 |
 | config.sub | 0002 | E072: OHOS OS 白名单 | +7/-3 |
-| configure | 0003 | E064+HMDFS: sign-elf + tmp路径 | +7/-3 |
+| configure | 0003 | E064+E011: mktemp路径 + umask 022 | +3/-3 |
 | joe/path.c | 0004 | PSCAN-FS-001: /tmp 只读 | +4/-2 |
 
-> config.status 的 umask 修改不属于源码补丁（修改的是生成文件）
+> config.status 的 umask 修改已合并到补丁 0003 (configure 源码补丁)
 
 ---
 
@@ -132,10 +129,10 @@ G1-G4 全 PASS
 #   而 libxml2 未预装，导致链接失败。
 #   GNU ld.bfd 不依赖 libxml2，可正常工作。
 
-# 为什么需要 sign-elf 钩子:
-#   OHOS 安全策略要求所有非系统 ELF 二进制必须先签名才能执行。
-#   configure 的 conftest 编译后直接执行会因未签名而失败。
-#   通过在 configure 中插入 sign-elf 步骤解决。
+# 为什么需要跨编译模式:
+#   OHOS 安全策略限制未签名 ELF 二进制执行，
+#   configure 的 conftest 编译后无法执行。
+#   通过 --build != --host 强制跨编译模式，跳过 conftest 运行测试。
 ```
 
 ---
@@ -144,9 +141,9 @@ G1-G4 全 PASS
 
 ### 二进制信息
 ```
-类型:   ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1)
-大小:   846208 bytes (848KB)
-依赖:   libc.so (ncurses 静态链接)
+类型:   ELF executable, 64-bit LSB arm64, static
+大小:   2164672 bytes (2116KB)
+依赖:   无动态依赖 (ncurses 和 libc 均静态链接)
 版本:   Joe's Own Editor v4.6
 别名:   jmacs → joe, jstar → joe, jpico → joe, rjoe → joe
 ```
@@ -187,8 +184,9 @@ share/man/ru/man1/joe.1 — 俄语 man 页面
 5. **config.guess 简化版**: 原版 config.guess 内部 mktemp 在 OHOS 上有权限问题，简化版脚本避免了此问题
 6. **ncurses 静态链接**: OHOS 上 ncurses 以静态库 (.a) 安装，joe 链接后已编入二进制，无额外动态依赖
 
+**知识整理**: pending（42 条草稿待 editor 审核）
+
 ---
 
-**编译结束**: 2026-06-03
-**最终状态**: published
-**知识整理**: pending（42 条草稿待 editor 审核）
+**编译结束**: 2026-08-05 10:06
+**最终状态**: built
