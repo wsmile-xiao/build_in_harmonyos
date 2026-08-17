@@ -12,7 +12,7 @@ int main()
     constexpr uint32_t height = 32;
     uint32_t buffer[width * height] = {};
 
-    if (tvg::Initializer::init(0) != tvg::Result::Success) return 1;
+    if (tvg::Initializer::init(tvg::CanvasEngine::Sw) != tvg::Result::Success) return 1;
     auto canvas = tvg::SwCanvas::gen();
     auto shape = tvg::Shape::gen();
     if (!canvas || !shape) return 2;
@@ -27,7 +27,7 @@ int main()
 
     const bool rendered = std::any_of(std::begin(buffer), std::end(buffer),
                                       [](uint32_t pixel) { return pixel != 0; });
-    tvg::Initializer::term();
+    tvg::Initializer::term(tvg::CanvasEngine::Sw);
     if (!rendered) return 7;
     std::cout << "ThorVG software rendering test passed\n";
     return 0;
