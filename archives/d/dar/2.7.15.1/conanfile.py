@@ -13,7 +13,7 @@ from conan.tools.env import Environment
 
 class DarConan(ConanFile):
     name = "dar"
-    version = "2.7.15"
+    version = "2.7.15.1"
     description = "Disk ARchive - full featured backup and archiving tool"
     license = "GPL-2.0-or-later"
     homepage = "https://dar.sourceforge.net/"
@@ -84,9 +84,12 @@ class DarConan(ConanFile):
         autotools = Autotools(self)
         autotools.configure()
         autotools.make(args=["-j1"])
-        # L1c: Upstream tests (make check) skipped — dar's test suite runs
-        # aarch64 test binaries that cannot execute on x86_64 CI workers.
-        # Package added to ci/config/no_official_test.txt whitelist.
+        # L1c: Upstream tests (make check) — 本机为 OHOS/aarch64 原生环境，
+        # 测试程序可执行；但 make check 前置 my_env 需 `id` 命令与 GPG 密钥
+        # 环境（DAR_KEY），OHOS 无 id 命令且无 GPG 密钥环，崩溃点已定位
+        # （详见 reports/test-report.md，环境类原因已实测）。
+        # all_features 因 bzip2 依赖未发布 ohpcd 而 --disable-libbz2-linking，
+        # 集成测试无法执行（配置类，已实测）。
 
     def package(self):
         autotools = Autotools(self)
