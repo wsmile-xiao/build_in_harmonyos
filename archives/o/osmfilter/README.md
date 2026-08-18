@@ -22,7 +22,7 @@ AGPL-3.0
 
 ## 构建系统
 
-autotools（从 git 源码构建时需先运行 `autoreconf -fi`）
+makefile（git 源码不含 configure，conanfile.py generate() 生成 Makefile）
 
 ## 已知注意事项
 
