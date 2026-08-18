@@ -15,6 +15,7 @@ class DatafileConan(ConanFile):
     license = "MIT/X11"
     homepage = "https://github.com/hishamhm/datafile"
     url = "https://github.com/hishamhm/datafile"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
