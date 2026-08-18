@@ -157,3 +157,11 @@ pmix_info           → PMIx 5.0.10, Standard 5.1
 **CI 干净构建**: 2026-08-05
 **功能测试**: 2026-08-05
 **最终状态**: published
+
+## 本地验证补充 (2026-08-18)
+
+- conan-verify 通过（使用 `--user= --channel=` 匹配制品仓缓存二进制，跳过源码重建）
+- conan create 验证: `open-mpi/5.0.10: Already installed!` (24.2MB 二进制包命中缓存)
+- test_package 执行: `Open MPI consumer test: rank=0 size=1` (MPI_Init/Comm_rank/Comm_size/Finalize 全通过)
+- W3 本地 CI 模拟因 600s 超时限制无法完成（open-mpi 完整构建需 70+ 分钟，CI 服务器配额 10800s）
+- 制品仓状态: recipe + binary 均已发布 (revision cf602dc13a524bac7b69e1addf7c62a7, package 0726937e17000c634ad5fc029642008575bda6b0)
