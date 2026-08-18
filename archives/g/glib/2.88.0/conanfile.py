@@ -134,19 +134,41 @@ class GlibConan(ConanFile):
         meson.install()
 
     def package_info(self):
-        self.cpp_info.libs = [
-            "glib-2.0",
-            "gobject-2.0",
-            "gio-2.0",
-            "gmodule-2.0",
-            "gthread-2.0",
-            "ffi",
-            # libglib-2.0.a references the g_libintl_* gettext stubs built by the
-            # proxy-libintl subproject (installed as libintl.a); static consumers
-            # must link it.
-            "intl",
-        ]
-        # glib public headers live under include/glib-2.0; glibconfig.h under lib/glib-2.0/include.
-        self.cpp_info.includedirs = ["include/glib-2.0", "lib/glib-2.0/include"]
-        self.cpp_info.system_libs = ["m", "pthread", "dl", "rt"]
-        self.cpp_info.set_property("pkg_config_name", "glib-2.0")
+        # GLib installs libglib-2.0/libgobject-2.0/libgio-2.0/libgmodule-2.0/
+        # libgthread-2.0 plus libffi.a (vendored subproject) and libintl.a
+        # (proxy-libintl subproject). Component metadata makes Conan's
+        # PkgConfigDeps emit glib-2.0.pc / gobject-2.0.pc / gio-2.0.pc /
+        # gmodule-2.0.pc / gthread-2.0.pc with the real Libs/Requires.
+        glib_includedirs = ["include/glib-2.0", "lib/glib-2.0/include"]
+        self.cpp_info.includedirs = glib_includedirs
+
+        glib = self.cpp_info.components["glib-2.0"]
+        glib.set_property("pkg_config_name", "glib-2.0")
+        glib.libs = ["glib-2.0", "intl"]
+        glib.system_libs = ["m", "pthread", "dl", "rt"]
+        glib.includedirs = glib_includedirs
+        glib.requires = ["pcre2::pcre2"]
+
+        gobject = self.cpp_info.components["gobject-2.0"]
+        gobject.set_property("pkg_config_name", "gobject-2.0")
+        gobject.libs = ["gobject-2.0", "ffi"]
+        gobject.includedirs = glib_includedirs
+        gobject.requires = ["glib-2.0"]
+
+        gio = self.cpp_info.components["gio-2.0"]
+        gio.set_property("pkg_config_name", "gio-2.0")
+        gio.libs = ["gio-2.0", "intl"]
+        gio.includedirs = glib_includedirs
+        gio.requires = ["glib-2.0", "gobject-2.0", "gmodule-2.0", "zlib::zlib"]
+
+        gmodule = self.cpp_info.components["gmodule-2.0"]
+        gmodule.set_property("pkg_config_name", "gmodule-2.0")
+        gmodule.libs = ["gmodule-2.0"]
+        gmodule.includedirs = glib_includedirs
+        gmodule.requires = ["glib-2.0"]
+
+        gthread = self.cpp_info.components["gthread-2.0"]
+        gthread.set_property("pkg_config_name", "gthread-2.0")
+        gthread.libs = ["gthread-2.0"]
+        gthread.includedirs = glib_includedirs
+        gthread.requires = ["glib-2.0"]
