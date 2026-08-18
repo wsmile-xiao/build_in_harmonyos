@@ -15,6 +15,7 @@ class LuaCovConan(ConanFile):
     license = "MIT"
     homepage = "https://lunarmodules.github.io/luacov/"
     url = "https://github.com/lunarmodules/luacov"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
