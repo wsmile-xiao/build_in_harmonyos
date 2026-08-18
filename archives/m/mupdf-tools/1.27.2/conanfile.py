@@ -85,23 +85,18 @@ class MupdfToolsConan(ConanFile):
         cxx = "clang++"
         ar = "llvm-ar"
         ranlib = "llvm-ranlib"
-        # Ensure bash and python3 are in PATH for font generation rules
-        env_path = os.environ.get("PATH", "")
-        if "/data/service/hnp/bin" not in env_path:
-            env_path = f"/data/service/hnp/bin:{env_path}"
-        env = dict(os.environ, PATH=env_path)
         make_cmd = (
             f"make CC={cc} CXX={cxx} AR={ar} RANLIB={ranlib} "
             f"HAVE_X11=no HAVE_GLUT=no shared=no build=release "
             f"HAVE_OBJCOPY=no -j1"
         )
-        self.run(make_cmd, cwd=self.source_folder, env=env)
+        self.run(make_cmd, cwd=self.source_folder, env=["conanbuild"])
         make_extra = (
             f"make CC={cc} CXX={cxx} AR={ar} RANLIB={ranlib} "
             f"HAVE_X11=no HAVE_GLUT=no shared=no build=release "
             f"HAVE_OBJCOPY=no extra-apps -j1"
         )
-        self.run(make_extra, cwd=self.source_folder, env=env)
+        self.run(make_extra, cwd=self.source_folder, env=["conanbuild"])
 
     def package(self):
         copy(self, "mutool", os.path.join(self.source_folder, "build/release"),
