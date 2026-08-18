@@ -467,16 +467,48 @@ PYEOF
         if [ -n "$DEP_REFS" ]; then
             echo "[step] L0i: Checking dependency availability in registry (R36)..."
             UNPUBLISHED_DEPS=""
+            REGISTRY_ERRORS=""
             while IFS= read -r dep_ref; do
                 [ -z "$dep_ref" ] && continue
                 # R35: 用 conan download 验证 (禁止用 conan list 判断)
-                if conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
+                # 健壮化: 保留 stderr 区分"真未发布"与"网络/认证错误"; 瞬时错误重试 3 次
+                dep_status="fail"
+                DL_ERR=""
+                for attempt in 1 2 3; do
+                    if DL_ERR=$(conan download "$dep_ref" -r="${CONAN_REMOTE_NAME}" --only-recipe 2>&1 >/dev/null); then
+                        dep_status="ok"
+                    else
+                        dep_status="fail"
+                    fi
+                    [ "$dep_status" = "ok" ] && break
+                    # conan1: "Unable to find 'x' in remotes" / conan2: "does not exist"/404 = 真未发布, 不重试
+                    if echo "$DL_ERR" | grep -qiE "unable to find|does not exist|not found|404"; then
+                        break
+                    fi
+                    if [ "$attempt" -lt 3 ]; then
+                        echo "        [retry] registry probe ${attempt}/3 failed for ${dep_ref} (transient?), retrying..."
+                        sleep 2
+                    fi
+                done
+                if [ "$dep_status" = "ok" ]; then
                     echo "        [ok] dependency in registry: ${dep_ref}"
-                else
+                elif echo "$DL_ERR" | grep -qiE "unable to find|does not exist|not found|404"; then
                     UNPUBLISHED_DEPS="${UNPUBLISHED_DEPS} ${dep_ref}"
                     echo "        [warn] dependency NOT in registry: ${dep_ref}"
+                else
+                    REGISTRY_ERRORS="${REGISTRY_ERRORS} ${dep_ref}"
+                    echo "        [error] registry unreachable for: ${dep_ref}"
+                    echo "        conan stderr: $(echo "$DL_ERR" | head -2 | tr '\n' ' ' | cut -c1-200)"
                 fi
             done <<< "$DEP_REFS"
+
+            if [ -n "$REGISTRY_ERRORS" ]; then
+                echo "[fail] L0i: Registry unreachable (infra error, not R36 violation):${REGISTRY_ERRORS}"
+                echo "       conan could not reach/query the remote (network/auth)."
+                echo "[hint] 制品仓网络/认证异常，非依赖未发布。请修复 worker 网络后重试构建。"
+                L0_FAILED=true
+                L0_ERRORS="${L0_ERRORS} registry_unreachable"
+            fi
 
             if [ -n "$UNPUBLISHED_DEPS" ]; then
                 if [ "${CI_TASK_TYPE:-}" = "release" ]; then
