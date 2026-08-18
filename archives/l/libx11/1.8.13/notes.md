@@ -4,7 +4,6 @@
 - 构建系统: autotools
 - 编译日期: 2026-08-08
 - 编译器: clang/clang++ (15.0.4 OHOS toolchain)
-- 状态: built
 
 ## 编译步骤
 
