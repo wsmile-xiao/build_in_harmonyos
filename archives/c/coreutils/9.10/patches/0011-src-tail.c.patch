@@ -1,0 +1,241 @@
+--- a/src/tail.c
++++ b/src/tail.c
+@@ -1021,20 +1021,31 @@
+                  be seen to be the same file (dev/ino).  Otherwise, tail prints
+                  the entire contents of the file when it becomes readable.  */
+               error (0, f->errnum, _("%s has become inaccessible"),
+                      quoteaf (f->prettyname));
+             }
+           else
+             {
+               /* say nothing... it's still not tailable */
+             }
+         }
++      else if (errno == EACCES || errno == EPERM)
++        {
++          /* HarmonyOS returns EACCES for pipes/terminals/sockets.
++             Use sensible defaults and continue. */
++          memset (&new_stats, 0, sizeof new_stats);
++          new_stats.st_blksize = 4096;
++          new_stats.st_mode = S_IFIFO;
++          f->errnum = 0;
++          /* Fall through to the success path below. */
++          goto ohos_tail_success_1;
++        }
+       else if (prev_errnum != f->errnum)
+         error (0, f->errnum, "%s", quotef (f->prettyname));
+     }
+   else if (!IS_TAILABLE_FILE_TYPE (new_stats.st_mode))
+     {
+       f->errnum = -1;
+       f->ignore = ! (reopen_inaccessible_files && follow_mode == Follow_name);
+       if (f->tailable || ! (prev_errnum < 0 || prev_errnum == EISDIR))
+         error (0, 0, _("%s has been replaced with an untailable file%s"),
+                quoteaf (f->prettyname),
+@@ -1042,20 +1053,21 @@
+     }
+   else if ((f->remote = fremote (fd, f)) && ! disable_inotify)
+     {
+       f->errnum = -1;
+       error (0, 0, _("%s has been replaced with an untailable remote file"),
+              quoteaf (f->prettyname));
+       f->ignore = true;
+     }
+   else
+     {
++    ohos_tail_success_1:
+       ok = true;
+       f->errnum = 0;
+     }
+ 
+   f->tailable = ok;
+ 
+   new_file = false;
+   if (!ok)
+     {
+       close_fd (fd, f);
+@@ -1231,25 +1243,35 @@
+                 }
+               else
+                 f[i].blocking = blocking;
+             }
+ 
+           bool read_unchanged = false;
+           if (!f[i].blocking)
+             {
+               if (fstat (fd, &stats) < 0)
+                 {
+-                  f[i].fd = -1;
+-                  f[i].errnum = errno;
+-                  error (0, errno, "%s", quotef (prettyname));
+-                  close (fd); /* ignore failure */
+-                  continue;
++                  /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++                  if (errno == EACCES || errno == EPERM)
++                    {
++                      memset (&stats, 0, sizeof stats);
++                      stats.st_blksize = 4096;
++                      stats.st_mode = S_IFIFO;
++                    }
++                  else
++                    {
++                      f[i].fd = -1;
++                      f[i].errnum = errno;
++                      error (0, errno, "%s", quotef (prettyname));
++                      close (fd); /* ignore failure */
++                      continue;
++                    }
+                 }
+ 
+               if (f[i].mode == stats.st_mode
+                   && (! S_ISREG (stats.st_mode)
+                       || f[i].read_pos == stats.st_size)
+                   && timespec_cmp (f[i].mtime, get_stat_mtime (&stats)) == 0)
+                 {
+                   if ((max_n_unchanged_stats_between_opens
+                        <= f[i].n_unchanged_stats++)
+                       && follow_mode == Follow_name)
+@@ -1432,24 +1454,34 @@
+    PREV_FSPEC records the last File_spec for which we output.  */
+ static void
+ check_fspec (struct File_spec *fspec, struct File_spec **prev_fspec)
+ {
+   if (fspec->fd < 0)
+     return;
+ 
+   struct stat stats;
+   if (fstat (fspec->fd, &stats) < 0)
+     {
+-      fspec->errnum = errno;
+-      close_fd (fspec->fd, fspec);
+-      fspec->fd = -1;
+-      return;
++      /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++      if (errno == EACCES || errno == EPERM)
++        {
++          memset (&stats, 0, sizeof stats);
++          stats.st_blksize = 4096;
++          stats.st_mode = S_IFIFO;
++        }
++      else
++        {
++          fspec->errnum = errno;
++          close_fd (fspec->fd, fspec);
++          fspec->fd = -1;
++          return;
++        }
+     }
+ 
+   char const *prettyname = fspec->prettyname;
+ 
+   /* XXX: This is only a heuristic, as the file may have also
+      been truncated and written to if st_size >= size
+      (in which case we ignore new data <= size).
+      Though in the inotify case it's more likely we'll get
+      separate events for truncate() and write().  */
+   if (S_ISREG (fspec->mode) && stats.st_size < fspec->read_pos)
+@@ -2030,24 +2062,35 @@
+   else
+     {
+       if (print_headers)
+         write_header (f->prettyname);
+ 
+       off_t read_pos;
+       struct stat stats;
+       ok = 0 <= fstat (fd, &stats);
+       if (!ok)
+         {
+-          f->errnum = errno;
+-          error (0, f->errnum, _("cannot fstat %s"), quoteaf (f->prettyname));
++          /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++          if (errno == EACCES || errno == EPERM)
++            {
++              memset (&stats, 0, sizeof stats);
++              stats.st_blksize = 4096;
++              stats.st_mode = S_IFIFO;
++              ok = true;
++            }
++          else
++            {
++              f->errnum = errno;
++              error (0, f->errnum, _("cannot fstat %s"), quoteaf (f->prettyname));
++            }
+         }
+-      else
++      if (ok)
+         {
+           read_pos = tail (f->prettyname, fd, &stats, n_units);
+           ok = -1 <= read_pos;
+           f->errnum = ok ? 0 : -1 - read_pos;
+ 
+           if (IS_TAILABLE_FILE_TYPE (stats.st_mode))
+             f->tailable = true;
+           else if (forever)
+             {
+               ok = false;
+@@ -2415,22 +2458,31 @@
+       error (EXIT_FAILURE, 0, _("cannot follow %s by name"), quoteaf ("-"));
+ 
+     /* When following forever, and not using simple blocking, warn if
+        any file is '-' as the stats() used to check for input are ineffective.
+        This is only a warning, since tail's output (before a failing seek,
+        and that from any non-stdin files) might still be useful.  */
+     if (forever && found_hyphen)
+       {
+         struct stat in_stat;
+         bool blocking_stdin;
++        /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++        int stdin_fstat_ret = fstat (STDIN_FILENO, &in_stat);
++        if (stdin_fstat_ret < 0 && (errno == EACCES || errno == EPERM))
++          {
++            memset (&in_stat, 0, sizeof in_stat);
++            in_stat.st_blksize = 4096;
++            in_stat.st_mode = S_IFIFO;
++            stdin_fstat_ret = 0;
++          }
+         blocking_stdin = (!nbpids && follow_mode == Follow_descriptor
+-                          && n_files == 1 && ! fstat (STDIN_FILENO, &in_stat)
++                          && n_files == 1 && stdin_fstat_ret == 0
+                           && ! S_ISREG (in_stat.st_mode));
+ 
+         if (! blocking_stdin && isatty (STDIN_FILENO))
+           error (0, 0, _("warning: following standard input"
+                          " indefinitely is ineffective"));
+       }
+   }
+ 
+   /* Don't read anything if we'll never output anything.  */
+   if (! forever && n_units == (from_start ? COUNT_MAX : 0))
+@@ -2453,21 +2505,31 @@
+ 
+   for (int i = 0; i < n_files; i++)
+     ok &= tail_file (&F[i], n_files, n_units);
+ 
+   if (forever && ignore_fifo_and_pipe (F, n_files))
+     {
+       /* If stdout is a fifo or pipe, then monitor it
+          so that we exit if the reader goes away.  */
+       struct stat out_stat;
+       if (fstat (STDOUT_FILENO, &out_stat) < 0)
+-        error (EXIT_FAILURE, errno, _("standard output"));
++        {
++          /* HarmonyOS returns EACCES for pipes/terminals/sockets. */
++          if (errno == EACCES || errno == EPERM)
++            {
++              memset (&out_stat, 0, sizeof out_stat);
++              out_stat.st_blksize = 4096;
++              out_stat.st_mode = S_IFIFO;
++            }
++          else
++            error (EXIT_FAILURE, errno, _("standard output"));
++        }
+       monitor_output = (S_ISFIFO (out_stat.st_mode)
+                         || (HAVE_FIFO_PIPES != 1 && isapipe (STDOUT_FILENO)));
+ 
+ #if HAVE_INOTIFY
+       /* tailable_stdin() checks if the user specifies stdin via  "-",
+          or implicitly by providing no arguments. If so, we won't use inotify.
+          Technically, on systems with a working /dev/stdin, we *could*,
+          but would it be worth it?  Verifying that it's a real device
+          and hooked up to stdin is not trivial, while reverting to
+          non-inotify-based tail_forever is easy and portable.
