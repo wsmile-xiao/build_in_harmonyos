@@ -511,43 +511,17 @@ PYEOF
             fi
 
             if [ -n "$UNPUBLISHED_DEPS" ]; then
-                if [ "${CI_TASK_TYPE:-}" = "release" ]; then
-                    echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
-                    echo "       These packages must be published FIRST (via release pipeline)."
-                    echo "[hint] 依赖未发布到制品仓 (R36)。请先发布以下依赖包:"
-                    for d in ${=UNPUBLISHED_DEPS}; do  # zsh: ${=} forces word-splitting
-                        echo "         - $d"
-                    done
-                    L0_FAILED=true
-                    L0_ERRORS="${L0_ERRORS} unpublished_deps"
-                else
-                    echo "[warn] L0i: Dependencies not yet published (R36):${UNPUBLISHED_DEPS}"
-                    echo "       Release 时将被拦截。请先适配并发布以上依赖包。"
-                    echo "       当前 PR 构建将使用 --build=missing 从源码编译依赖（可能较慢）"
-                    echo "[hint] 运行 'bash ci/scripts/preflight_check.sh ${pkg_name}/${pkg_ver}' 检查依赖状态"
-                fi
+                echo "[fail] L0i: Dependencies not published to registry (R36):${UNPUBLISHED_DEPS}"
+                echo "       These packages must be published FIRST (via release pipeline)."
+                echo "[hint] 依赖未发布到制品仓 (R36)。请先适配并发布以下依赖包:"
+                for d in ${=UNPUBLISHED_DEPS}; do  # zsh: ${=} forces word-splitting
+                    echo "         - $d"
+                done
+                echo "[hint] 运行 'bash ci/scripts/preflight_check.sh ${pkg_name}/${pkg_ver}' 检查依赖状态"
+                L0_FAILED=true
+                L0_ERRORS="${L0_ERRORS} unpublished_deps"
             fi
         fi
-    fi
-
-    # ── L0i-1: Export local recipes for unpublished dependencies (R36 fallback) ──
-    # When dependencies are not yet published to the registry, export their
-    # recipes from the local archives/ directory so --build=missing can compile
-    # them from source during conan create.
-    if [ -n "${UNPUBLISHED_DEPS:-}" ]; then
-        for dep_ref in ${=UNPUBLISHED_DEPS}; do  # zsh: ${=} forces word-splitting (BUG-9 style)
-            dep_name=$(echo "$dep_ref" | cut -d'/' -f1)
-            dep_ver=$(echo "$dep_ref" | cut -d'/' -f2)
-            local_recipe=$(find "$REPO_ROOT/archives" -path "*/${dep_name}/${dep_ver}/conanfile.py" -not -path "*/test_package/*" -print -quit 2>/dev/null)
-            if [ -n "$local_recipe" ]; then
-                echo "[step] Exporting local recipe for missing dependency: $dep_ref"
-                conan export "$(dirname "$local_recipe")" 2>/dev/null && \
-                    echo "        [ok] local recipe exported: $dep_ref" || \
-                    echo "        [warn] failed to export local recipe: $dep_ref"
-            else
-                echo "        [warn] no local recipe found for: $dep_ref"
-            fi
-        done
     fi
 
     # ── L0j: 版本号占用检查 (R37) ──

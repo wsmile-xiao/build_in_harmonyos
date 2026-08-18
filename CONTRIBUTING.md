@@ -78,11 +78,11 @@ python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> <版本>
 ### 分支命名
 
 ```
-{type}/{软件名}-{版本}-{AgentID}
+{type}/{软件名}-{版本}
 ```
 
 - **type**：`feat`（新增）/ `fix`（修复）/ `update`（更新）
-- **AgentID**：自动生成的 4 位随机标识（如 `A7F3`）
+- 分支名**不加**任何随机 ID / AgentID 后缀（AgentID 仅用于知识图谱草稿归属，见 `graph add --draft`）
 
 ### 协作者 Git 铁律
 

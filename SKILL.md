@@ -80,7 +80,7 @@ SKILL_ROOT="$(dirname "$(find "${ATOMCODE_HOME:-$HOME/.atomcode}" -name "SKILL.m
 - ❌ 不碰他人归档目录
 - ✅ 新增知识用 `ohc-run.py graph add E{N} --draft`
 
-**Agent ID**：自动获取 4 位随机标识（如 `A7F3`），用于分支后缀和草稿归属，可通过 `OHC_AGENT_ID` 预设。
+**Agent ID**：自动获取 4 位随机标识（如 `A7F3`），用于知识图谱草稿归属（不用于分支命名，分支名不带后缀），可通过 `OHC_AGENT_ID` 预设。
 
 ### §0.2 适配工作流规程（⭐ 强制执行）
 
