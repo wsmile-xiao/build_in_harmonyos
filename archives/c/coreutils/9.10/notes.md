@@ -60,3 +60,7 @@
 - 首次运行二进制会触发安全弹窗确认
 - 推荐使用 `scripts/install-selected.sh` 选择性安装
 - debug symbols 包为空（HarmonyOS NDK clang 不生成 DWARF 调试信息）
+
+## 编译结束
+status: closed
+COMPLETED — coreutils 9.10 conan recipe adaptation finished.
