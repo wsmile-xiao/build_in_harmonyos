@@ -171,6 +171,28 @@ if [ -n "$(echo "$JC5_HITS" | tr -d '[:space:]' )" ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
+# JC6: PR 单软件原子性（W2：每个 PR 只允许提交一个软件）
+# ═══════════════════════════════════════════════════════════════
+echo ""
+echo "[step] JC6: PR 单软件原子性检测..."
+
+if [ "$JUNK_CHECK_MODE" = "incremental" ]; then
+    # 统计变更文件涉及的 archives/<首字母>/<软件名> 目录（同软件多版本算一个软件）
+    JC6_PKGS=$(echo "$CHECK_FILES" | grep -E '^archives/[^/]+/[^/]+/' | cut -d'/' -f1-3 | sort -u || true)
+    JC6_COUNT=$(echo "$JC6_PKGS" | grep -c . || true)
+    if [ "$JC6_COUNT" -gt 1 ]; then
+        fail "JC6: 本 PR 涉及 ${JC6_COUNT} 个软件包，违反 W2 单软件原子性（每个 PR 只允许一个软件）:"
+        echo "$JC6_PKGS" | head -10 | sed 's/^/       /'
+        [ "$JC6_COUNT" -gt 10 ] && echo "       ... (共 ${JC6_COUNT} 个)"
+        echo "       修复: 每个软件单独开分支 feat/<软件名>-<版本>，只 add 对应目录后分别提 PR"
+    else
+        echo "  涉及软件数: ${JC6_COUNT}（合规）"
+    fi
+else
+    echo "  full 模式（整仓扫描），跳过单软件检查"
+fi
+
+# ═══════════════════════════════════════════════════════════════
 # 汇总
 # ═══════════════════════════════════════════════════════════════
 echo ""

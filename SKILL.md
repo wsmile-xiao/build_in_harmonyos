@@ -113,9 +113,10 @@ git pull origin main
 ```
 > 不同步=用过期知识库+旧框架要求工作，可能重复踩已修复的坑。
 
-**W2 — PR 原子性 + 结构完整性（嵌入 finish）**
-每个 PR **只允许包含一个配方软件及其知识图谱草稿**。如果对 SKILL 框架本身有修改（`scripts/`/`templates/`/`ci/`/`SKILL.md`/`references/` 等），**必须单独提交 PR**。
+**W2 — PR 原子性 + 结构完整性（嵌入 finish，CI JC6 硬拦截）**
+每个 PR **只允许提交一个软件**：只包含一个 `archives/<首字母>/<软件名>/<版本>/` 配方目录及其知识图谱草稿。一个 PR 中出现两个及以上软件目录 = **CI JC6 直接拦截（Hard Fail）**。如果对 SKILL 框架本身有修改（`scripts/`/`templates/`/`ci/`/`SKILL.md`/`references/` 等），**必须单独提交 PR**。
 > 混合提交=审核困难+回滚困难。配方 PR 和框架 PR 的审核标准不同。
+> 多软件适配任务=按软件逐个开分支 `feat/<软件名>-<版本>`、逐个提 PR，每次从最新 main 切出（W1）。
 >
 > **结构完整性由 `finish` step [5/9] 强制执行**（L0a-L0e 等效检查）：test_package/ 目录
 > 存在、conanfile.py 存在、测试源文件存在、MANIFEST.yml 存在。不通过 → HANDOFF + exit 1。
