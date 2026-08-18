@@ -64,8 +64,7 @@ ls -la ~/usr/local/share/bvi/bmore.help
 - bvi/bmore 需要终端环境运行
 - /tmp 在 HarmonyOS 上为只读，使用 $TMPDIR 替代
 - 禁用 umask 077 是平台特有的临时修复，可能需要在知识图谱中记录
-
 ---
 
-**编译结束**: 2026-06-08 20:54
+**编译结束**: 2026-07-13 21:17
 **最终状态**: built
