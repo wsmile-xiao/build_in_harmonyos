@@ -2,22 +2,23 @@
 """Conan recipe for Bitcoin Core 31.1 — OHOS PC aarch64 adaptation.
 
 Build system: CMake (Bitcoin Core 31.1 uses CMake, not autotools)
-Dependencies: sqlite3, libevent, boost
+Dependencies: sqlite3/3.49.1, libevent/2.1.13, boost/1.84.0
 """
 import os
+import shutil
 
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import copy, get, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 
 
 class BitcoinConan(ConanFile):
     name = "bitcoin"
-    version = "31.1"
-    description = "Bitcoin Core client software"
+    version = "31.1.1"
+    description = "Bitcoin Core client software (consensus/node/wallet)"
     license = "MIT"
     homepage = "https://bitcoincore.org/"
-    url = ""  # CI fills this
+    url = "https://github.com/bitcoin/bitcoin"
 
     package_type = "library"
 
@@ -78,33 +79,55 @@ class BitcoinConan(ConanFile):
         cmake.build()
 
     def package(self):
-        cmake = CMake(self)
-        cmake.install()
-        # OHOS: bitcoin 的 CMake install 只装 bin/share,静态库与头文件需手动复制
-        lib_dir = os.path.join(self.build_folder, "lib")
-        if os.path.isdir(lib_dir):
-            copy(self, "libbitcoin_*.a", src=lib_dir,
-                 dst=os.path.join(self.package_folder, "lib"))
+        # OHOS 内核按 ELF .codesign fs-verity 哈希校验 exec，
+        # cmake --install 会重写 RPATH 使签名失效 → EPERM(126)。
+        # 故 package() 用 shutil.copy2 字节级复制构建产物，不走 cmake install。
+        pkg = self.package_folder
+        os.makedirs(os.path.join(pkg, "lib"), exist_ok=True)
+        os.makedirs(os.path.join(pkg, "bin"), exist_ok=True)
+        os.makedirs(os.path.join(pkg, "include"), exist_ok=True)
+
+        # 1) 复制静态库 (libbitcoin_*.a)
+        build_lib = os.path.join(self.build_folder, "lib")
+        if os.path.isdir(build_lib):
+            for fn in os.listdir(build_lib):
+                if fn.startswith("libbitcoin_") and fn.endswith(".a"):
+                    src = os.path.join(build_lib, fn)
+                    dst = os.path.join(pkg, "lib", fn)
+                    shutil.copy2(src, dst)
+                    self.output.info(f"copied {fn} → lib/")
+
+        # 2) 复制可执行二进制 (bitcoind, bitcoin-cli, bitcoin-util, test_bitcoin 等)
+        build_bin = os.path.join(self.build_folder, "bin")
+        if os.path.isdir(build_bin):
+            for fn in os.listdir(build_bin):
+                src = os.path.join(build_bin, fn)
+                if not os.path.isfile(src):
+                    continue
+                if os.access(src, os.X_OK):
+                    dst = os.path.join(pkg, "bin", fn)
+                    shutil.copy2(src, dst)
+                    self.output.info(f"copied {fn} → bin/")
+
+        # 3) 复制头文件 (保留子目录结构 crypto/、util/、script/ 等)
         src_dir = os.path.join(self.source_folder, "src")
         if os.path.isdir(src_dir):
-            # 复制全部头文件并保留子目录结构（crypto/、util/、script/ 等）。
-            # 注意：conan copy 的 `*.h` 只匹配 src 顶层文件（如 clientversion.h、
-            # uint256.h），`**/*.h` 只匹配子目录文件——两者都必须复制，否则下游
-            # include <uint256.h>（依赖 crypto/common.h、util/strencodings.h 等）
-            # 会因缺失头文件而编译失败。
-            copy(self, "*.h", src=src_dir,
-                 dst=os.path.join(self.package_folder, "include"))
-            copy(self, "*.hpp", src=src_dir,
-                 dst=os.path.join(self.package_folder, "include"))
-            copy(self, "**/*.h", src=src_dir,
-                 dst=os.path.join(self.package_folder, "include"))
-            copy(self, "**/*.hpp", src=src_dir,
-                 dst=os.path.join(self.package_folder, "include"))
-        # 构建生成的配置头
+            for root, _dirs, files in os.walk(src_dir):
+                for fn in files:
+                    if fn.endswith((".h", ".hpp")):
+                        src = os.path.join(root, fn)
+                        rel = os.path.relpath(src, src_dir)
+                        dst = os.path.join(pkg, "include", rel)
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        shutil.copy2(src, dst)
+
+        # 4) 复制构建生成的配置头
         gen_src = os.path.join(self.build_folder, "src")
         if os.path.isdir(gen_src):
-            copy(self, "bitcoin-build-config.h", src=gen_src,
-                 dst=os.path.join(self.package_folder, "include"))
+            for fn in ("bitcoin-build-config.h", "bitcoin-config.h"):
+                src = os.path.join(gen_src, fn)
+                if os.path.isfile(src):
+                    shutil.copy2(src, os.path.join(pkg, "include", fn))
 
     def package_info(self):
         self.cpp_info.libs = [
