@@ -15,6 +15,7 @@ class LuaPenlightConan(ConanFile):
     license = "MIT/X11"
     homepage = "https://lunarmodules.github.io/Penlight/"
     url = "https://github.com/lunarmodules/Penlight"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
