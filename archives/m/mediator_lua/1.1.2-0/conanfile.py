@@ -15,6 +15,7 @@ class MediatorLuaConan(ConanFile):
     license = "MIT"
     homepage = "http://olivinelabs.com/mediator_lua/"
     url = "https://github.com/Olivine-Labs/mediator_lua"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
