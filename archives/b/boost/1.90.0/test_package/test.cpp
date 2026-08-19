@@ -1,36 +1,40 @@
-#include <stdio.h>
-#include <stdlib.h>
+// test_package/test.cpp — real Boost.Test consumer executable.
+// Links the compiled Boost.Test static library (boost::unit_test_framework
+// / Boost::unit_test_framework). The static library provides the main() entry
+// (from unit_test_main.cpp); this translation unit supplies the user init
+// function `init_unit_test` (alternative init API) and registers test cases.
 
-/* Verify that key Boost headers are includable */
-#include <boost/version.hpp>
-#include <boost/config.hpp>
-#include <boost/smart_ptr.hpp>
-#include <boost/algorithm/string.hpp>
-#include <boost/lexical_cast.hpp>
-#include <boost/optional.hpp>
-#include <boost/variant.hpp>
-#include <boost/tuple/tuple.hpp>
-#include <boost/function.hpp>
-#include <boost/bind/bind.hpp>
+#include <boost/test/unit_test.hpp>
+#include <boost/test/unit_test_suite.hpp>
+#include <boost/test/test_tools.hpp>
 
-int main(void) {
-    printf("Boost version: %d\n", BOOST_VERSION);
-    printf("Boost header-only test: PASSED\n");
+#include <string>
 
-    /* Simple boost::optional test */
-    boost::optional<int> opt_val = 42;
-    if (opt_val) {
-        printf("boost::optional test: PASSED (value=%d)\n", *opt_val);
-    }
+// User init function called by the Boost.Test library-provided main
+// (compiled with BOOST_TEST_ALTERNATIVE_INIT_API).
+bool init_unit_test()
+{
+    boost::unit_test::test_suite* probe_suite =
+        BOOST_TEST_SUITE("probe_suite");
 
-    /* Simple boost::lexical_cast test */
-    try {
-        int val = boost::lexical_cast<int>("123");
-        printf("boost::lexical_cast test: PASSED (value=%d)\n", val);
-    } catch (...) {
-        printf("boost::lexical_cast test: FAILED\n");
-        return 1;
-    }
+    probe_suite->add(BOOST_TEST_CASE(
+        [] { BOOST_CHECK_EQUAL(1 + 1, 2); }));
 
-    return 0;
+    probe_suite->add(BOOST_TEST_CASE(
+        [] {
+            std::string a = "heart";
+            std::string b = "beat";
+            BOOST_REQUIRE_EQUAL(a + b, "heartbeat");
+            BOOST_CHECK(a.size() == 5);
+        }));
+
+    probe_suite->add(BOOST_TEST_CASE(
+        [] {
+            // Ensure the compiled framework really runs a fresh test case.
+            BOOST_TEST(true);
+            BOOST_TEST(2 * 3 == 6);
+        }));
+
+    boost::unit_test::framework::master_test_suite().add(probe_suite);
+    return true;
 }
