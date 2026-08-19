@@ -37,16 +37,28 @@ class ThorvgConan(ConanFile):
         })
         tc.generate()
 
+        compiler_executables = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict
+        ) or {}
+        archiver = compiler_executables.get("ar")
+        if not archiver:
+            compiler = compiler_executables.get("c", "")
+            compiler_directory = os.path.dirname(compiler)
+            archiver = (
+                os.path.join(compiler_directory, "llvm-ar")
+                if compiler_directory else "llvm-ar"
+            )
+
         native_file = os.path.join(self.generators_folder, "conan_meson_native.ini")
         with open(native_file, encoding="utf-8") as handle:
             lines = handle.read().splitlines()
         for index, line in enumerate(lines):
             if line.startswith("ar ="):
-                lines[index] = "ar = 'ar'"
+                lines[index] = "ar = '{}'".format(archiver)
                 break
         else:
             binaries_index = lines.index("[binaries]")
-            lines.insert(binaries_index + 1, "ar = 'ar'")
+            lines.insert(binaries_index + 1, "ar = '{}'".format(archiver))
         with open(native_file, "w", encoding="utf-8", newline="\n") as handle:
             handle.write("\n".join(lines) + "\n")
 
