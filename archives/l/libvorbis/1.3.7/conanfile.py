@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Conan recipe for libvorbis 1.3.7."""
+import os
+
 from conan import ConanFile
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
-from conan.tools.files import get, replace_in_file
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
 
 
 class LibvorbisConan(ConanFile):
@@ -35,14 +37,17 @@ class LibvorbisConan(ConanFile):
     def layout(self):
         cmake_layout(self)
 
+    def export_sources(self):
+        export_conandata_patches(self)
+
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
-        replace_in_file(
-            self,
-            "CMakeLists.txt",
-            "cmake_minimum_required(VERSION 2.8.12)",
-            "cmake_minimum_required(VERSION 3.5)",
-        )
+        # R04: apply the versioned patches declared in conandata.yml:
+        #  0001-cmake-minimum-version.patch   cmake_minimum_required 2.8.12 -> 3.5
+        #  0002-link-libogg-by-soname.patch   link libogg by library name (controlled
+        #  -L plus -Wl,-l:libogg.so) instead of the absolute CMakeDeps
+        #  IMPORTED_LOCATION, keeping DT_NEEDED free of cache absolute paths.
+        apply_conandata_patches(self)
 
     def generate(self):
         CMakeDeps(self).generate()
@@ -50,6 +55,12 @@ class LibvorbisConan(ConanFile):
         tc.variables["BUILD_SHARED_LIBS"] = bool(self.options.shared)
         tc.variables["INSTALL_CMAKE_PACKAGE_MODULE"] = True
         tc.variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.5"
+        ogg = self.dependencies["libogg"]
+        ogg_libdir = os.path.join(ogg.package_folder, ogg.cpp_info.libdirs[0])
+        ogg_includedir = os.path.join(ogg.package_folder, ogg.cpp_info.includedirs[0])
+        tc.variables["VORBIS_OGG_LIBDIR"] = ogg_libdir
+        tc.variables["VORBIS_OGG_INCLUDEDIR"] = ogg_includedir
+        tc.variables["VORBIS_OGG_LINK"] = f"-L{ogg_libdir} -Wl,-l:libogg.so"
         tc.generate()
 
     def build(self):
