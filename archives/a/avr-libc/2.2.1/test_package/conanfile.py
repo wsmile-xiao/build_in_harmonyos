@@ -5,6 +5,7 @@ import os
 import re
 import shlex
 import shutil
+import tempfile
 from pathlib import Path
 
 from conan import ConanFile
@@ -29,9 +30,14 @@ class AvrLibcTestConan(ConanFile):
         avr_root = os.path.join(package_folder, "avr")
         include_dir = os.path.join(avr_root, "include")
         compiler = self._required_build_tool("avr-gcc")
-        dispatcher_bin = self._materialize_target_tool_root()
+        temp_root = Path(os.environ.get("TMPDIR", self.build_folder))
+        temp_root.mkdir(parents=True, exist_ok=True)
+        work_dir = Path(
+            tempfile.mkdtemp(prefix="avr-libc-test-", dir=str(temp_root))
+        )
+        dispatcher_bin = self._materialize_target_tool_root(work_dir)
         lib_dir = self._atmega328p_libdir(
-            avr_root, compiler, dispatcher_bin
+            avr_root, compiler, dispatcher_bin, work_dir
         )
         objdump = self._required_build_tool("avr-objdump")
         nm = self._required_build_tool("avr-nm")
@@ -47,8 +53,8 @@ class AvrLibcTestConan(ConanFile):
                 )
 
         source = os.path.join(self.source_folder, "test_avr_libc.c")
-        elf = os.path.join(self.build_folder, "test_avr_libc.elf")
-        map_file = os.path.join(self.build_folder, "test_avr_libc.map")
+        elf = str(work_dir / "test_avr_libc.elf")
+        map_file = str(work_dir / "test_avr_libc.map")
         command = [
             compiler,
             "-B{}{}".format(dispatcher_bin, os.sep),
@@ -71,8 +77,8 @@ class AvrLibcTestConan(ConanFile):
         ]
         self.run(" ".join(shlex.quote(item) for item in command), env="conanbuild")
 
-        objdump_report = os.path.join(self.build_folder, "objdump.txt")
-        nm_report = os.path.join(self.build_folder, "nm.txt")
+        objdump_report = str(work_dir / "objdump.txt")
+        nm_report = str(work_dir / "nm.txt")
         self.run(
             '{} -f {} > {}'.format(
                 shlex.quote(objdump), shlex.quote(elf), shlex.quote(objdump_report)
@@ -102,9 +108,9 @@ class AvrLibcTestConan(ConanFile):
         self.output.info("avr-libc consumer compile/link test passed for ATmega328P")
 
     def _atmega328p_libdir(
-        self, avr_root, compiler, dispatcher_bin
+        self, avr_root, compiler, dispatcher_bin, work_dir
     ):
-        report = os.path.join(self.build_folder, "multidir.txt")
+        report = str(work_dir / "multidir.txt")
         self.run(
             '{} {} -mmcu=atmega328p -print-multi-directory > {}'.format(
                 shlex.quote(compiler),
@@ -130,11 +136,11 @@ class AvrLibcTestConan(ConanFile):
             )
         return lib_dir
 
-    def _materialize_target_tool_root(self):
+    def _materialize_target_tool_root(self, work_dir):
         binutils_root = self.dependencies.build[
             "avr-binutils"
         ].package_folder
-        root = Path(self.build_folder) / ".avr-binutils-dispatch"
+        root = work_dir / ".avr-binutils-dispatch"
         bin_dir = root / "bin"
         bin_dir.mkdir(parents=True, exist_ok=True)
         for name in ("as", "ld", "nm"):
