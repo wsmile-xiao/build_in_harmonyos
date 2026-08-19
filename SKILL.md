@@ -513,18 +513,31 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <sta
 
 | status | 判定条件 | 必填附加字段 |
 |--------|---------|-------------|
-| `success` | PR 已合并或已经过 CI 验证，软件包完整 | `pr_url` / `pr_number` / `commit_hash` / `branch`（自动从 .submit-state.json/git 补齐） |
-| `failed_build` | conan create 编译失败 | `failed_reason`（≤500 字符） |
-| `failed_test` | 编译成功但测试失败 | `failed_reason` |
-| `dependency_missing` | 依赖未发布（can_resolve=False） | `missing`（裸包名数组）+ `evidence`（二次验证证据） |
-| `env_unsupported` | 编译器/平台不支持 | `failed_reason` |
-| `upstream_issue` | 上游代码缺陷 | `failed_reason` |
-| `user_cancelled` | 用户主动取消 | `failed_reason` |
-| `partial` | 部分目标达成 | `failed_reason` |
+| `success` | PR 已合并或已经过 CI 验证，软件包完整 | `pr_url` / `pr_number` / `commit_hash` / `branch`（自动从 .submit-state.json/gh/git 补齐） |
+| `failed_build` | conan create 编译失败 | `--failed-reason`（≤500 字符） |
+| `failed_test` | 编译成功但测试失败 | `--failed-reason` |
+| `dependency_missing` | 依赖未发布（can_resolve=False） | `--missing`（裸包名）+ `--missing-evidence`（二次验证证据） |
+| `env_unsupported` | 编译器/平台不支持 | `--failed-reason` |
+| `upstream_issue` | 上游代码缺陷 | `--failed-reason` |
+| `user_cancelled` | 用户主动取消 | `--failed-reason` |
+| `partial` | 部分目标达成 | `--failed-reason` |
+
+**CLI 参数 → JSON 字段映射**（字段名与 ECS 消费端严格对齐，改名=ECS 读不到）：
+
+| CLI 参数 | JSON 字段 | ECS 用途 |
+|----------|-----------|---------|
+| `--pr-number` / `--pr-url` / `--commit-hash` / `--branch` | `pr_number` / `pr_url` / `commit_hash` / `branch` | 成功任务 PR 归档 |
+| `--failed-reason` | **`error_detail`** | ECS 失败分支 error_msg 优先取此字段 |
+| `--missing` | **`missing_dependencies`**（数组） | ECS 从此读依赖缺口 |
+| `--missing-evidence` | `missing_evidence` | 依赖缺失证据留档 |
+| `--summary`（强烈建议） | `summary` | 一句话结果摘要 |
+| （非 success 自动生成） | `error_type` = status | 失败分类 |
+
+**success 的 PR 字段来源链**（S3）：`--pr-number` 显式指定 > `.submit-state.json`（submit step 落盘）> `gh pr view`（需 worker 环境 gh 已认证）> git 推断 branch/commit。全部缺失时 success 校验失败 exit 2（fail-fast），**由生成器拦截而非流入 ECS 触发 SUCCESS_NO_PR 降级**——此时按 HANDOFF 补 `--pr-number` 即可。
 
 **生成器红线**（违反=流程缺陷）：
 - **必须用 `ohc-run.py result` 产出**，禁止手写 JSON、禁止事后改字段绕过校验
-- `dependency_missing` 声明前**必须二次验证**：提供实际日志行或命令输出作为 evidence（生成器会自动在 `.ci_logs/` 搜索佐证行）
+- `dependency_missing` 声明前**必须二次验证**：提供实际日志行或命令输出作为证据（生成器会自动在 `.ci_logs/` 搜索佐证行）
 - 校验失败 exit 2 且**不落盘**；成功 exit 0 且自动 `cat result.json`
 - checkpoints 最后一条固定为 `message: "result.json"`（`_ohpcd_result` 条目）
 - 重报需 `--force`（覆盖前必须确认终态变化）
@@ -533,6 +546,11 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <sta
 - 校验失败（exit 2）时自动输出 **HANDOFF 块**：`EXIT_REASON: result_invalid`、`EXIT_CODE: 2 (resumable)`、`STEP_FAILED: Step7`、RESUME_CMD（修正后参数模板）、AI NEXT ACTIONS（逐条校验错误+修复指引）
 - **resumable 语义**：仅在 Step7 内修正参数重跑即可，无需回退更早 step（result.json 未落盘、无残留状态）
 - 修复闭环：AI 读 HANDOFF 块 → 修正参数（补 evidence/reason/PR 四元组）→ 重跑 RESUME_CMD → exit 0 + `cat result.json` 采集
+
+**⭐ exit 2 = 参数错误，不是任务失败**（S4 红线）：
+- exit 2 只说明 result.json 参数不合法（缺 reason / 缺证据 / success 缺 PR 字段），**任务本身的终态判断不受影响**
+- **严禁**因收到 exit 2 就改报 `failed_build` / `user_cancelled` 等失败状态"烧任务"——正确动作永远是：读 HANDOFF 块 → 补参数 → 重跑同一命令
+- status 是任务级决策（编译真失败才报 failed_build）；工具 exit code 是参数级反馈，两者无关
 
 **示例**：
 
@@ -786,3 +804,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v11.6 — 2026-07-14 — SKILL_FEEDBACK 阶段：新增 feedback 子命令和 ohc/feedback.py 模块，submit 成功后自动生成 feedback/SKILL_FEEDBACK_{random}.md（项目根，与knowledge同级）；HANDOFF强制（残留(请填写)则emit，step_failed=feedback），--resume验证完整性，.feedback-state.json状态文件；git config获取作者，secrets.token_hex生成随机ID；新增templates/skill-feedback.md模板；v11.5→v11.6*
 
 *SKILL.md v11.7 — 2026-08-18 — RESULT 阶段：新增 Step 7 result.json 终态上报（SKILL_RESULT_PROTOCOL_SPEC），ohc/result_report.py 生成器（status 八值枚举、success 必填 PR 四元组、dependency_missing 必带 missing+evidence 二次验证、checkpoints 尾条固定 result.json、校验失败 exit 2 不落盘、成功自动 cat）；结果文件定位为跨设备/AI 交换产物（非 PR 内容），输出位置优先级 --out > OHC_RESULT_OUT 环境变量 > 不落盘仅 stdout，不依赖 archives 目录存在；校验失败自动输出 HANDOFF 块（result_invalid / resumable / Step7，含 RESUME_CMD 与修复指引）；v11.6→v11.7*
+
+*SKILL.md v11.8 — 2026-08-19 — RESULT 字段对齐 ECS 消费端：JSON 字段名改为 missing_dependencies/error_detail/error_type/missing_evidence/summary（--missing → missing_dependencies 数组、--failed-reason → error_detail，ECS main.py/dispatcher 严格按此读取）；新增 --summary 参数；success PR 字段来源链 --pr-number > .submit-state.json > gh pr view > git（全部缺失 fail-fast exit 2，防 SUCCESS_NO_PR 降级）；明确 exit 2 = 参数错误非任务失败（禁止据此改报 failed_build 烧任务）；v11.7→v11.8*
