@@ -15,6 +15,7 @@ class LuaCliargsConan(ConanFile):
     license = "MIT"
     homepage = "https://github.com/lunarmodules/lua_cliargs"
     url = "https://github.com/lunarmodules/lua_cliargs"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
