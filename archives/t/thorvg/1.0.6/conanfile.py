@@ -1,3 +1,5 @@
+import os
+
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.build import can_run
@@ -34,6 +36,19 @@ class ThorvgConan(ConanFile):
             "tests": True,
         })
         tc.generate()
+
+        native_file = os.path.join(self.generators_folder, "conan_meson_native.ini")
+        with open(native_file, encoding="utf-8") as handle:
+            lines = handle.read().splitlines()
+        for index, line in enumerate(lines):
+            if line.startswith("ar ="):
+                lines[index] = "ar = 'ar'"
+                break
+        else:
+            binaries_index = lines.index("[binaries]")
+            lines.insert(binaries_index + 1, "ar = 'ar'")
+        with open(native_file, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write("\n".join(lines) + "\n")
 
     def build(self):
         meson = Meson(self)
