@@ -15,6 +15,7 @@ class DkjsonConan(ConanFile):
     license = "MIT/X11"
     homepage = "http://dkolf.de/dkjson-lua/"
     url = "http://dkolf.de/dkjson-lua/"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
