@@ -15,6 +15,7 @@ class LuaSayConan(ConanFile):
     license = "MIT"
     homepage = "https://github.com/lunarmodules/say"
     url = "https://github.com/lunarmodules/say"
+    settings = "os", "compiler", "build_type", "arch"
     no_copy_source = True
 
     def layout(self):
