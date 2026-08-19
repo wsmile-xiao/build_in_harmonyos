@@ -1,0 +1,379 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 2f545f5..fa3fb10 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,16 @@
+ cmake_minimum_required(VERSION 3.12)
+ project(fluent-bit C)
+ 
++# HarmonyOS adaptation: ensure generated monkey headers are resolvable via
++# angle-bracket includes used throughout lib/monkey (e.g. <monkey/mk_info.h>
++# in mk_scheduler.h and <mk_core/mk_core_info.h> in mk_getopt.h).
++include_directories(BEFORE "${CMAKE_BINARY_DIR}/include/")
++include_directories(BEFORE "${CMAKE_BINARY_DIR}/include/monkey/")
++
++if(FTS_INCLUDE_DIR)
++  include_directories(BEFORE "${FTS_INCLUDE_DIR}")
++endif()
++
+ include(CheckCCompilerFlag)
+ 
+ # CMP0069 ensures that LTO is enabled for all compilers
+@@ -873,6 +883,17 @@ if(FLB_TLS)
+ 
+   # find OpenSSL (our preferred choice now)
+   find_package(OpenSSL)
++  if(OpenSSL_FOUND AND NOT OPENSSL_FOUND)
++    set(OPENSSL_FOUND ${OpenSSL_FOUND})
++  endif()
++  if(OpenSSL_INCLUDE_DIRS)
++    include_directories(${OpenSSL_INCLUDE_DIRS})
++  elseif(OPENSSL_INCLUDE_DIRS)
++    include_directories(${OPENSSL_INCLUDE_DIRS})
++  elseif(OPENSSL_INCLUDE_DIR)
++    include_directories(${OPENSSL_INCLUDE_DIR})
++  endif()
++
+   if(OPENSSL_FOUND)
+     FLB_DEFINITION(FLB_HAVE_OPENSSL)
+   endif()
+diff --git a/lib/chunkio/src/CMakeLists.txt b/lib/chunkio/src/CMakeLists.txt
+index 3590143..6ac8e30 100644
+--- a/lib/chunkio/src/CMakeLists.txt
++++ b/lib/chunkio/src/CMakeLists.txt
+@@ -34,6 +34,12 @@ endif()
+ if(CIO_LIB_STATIC)
+   add_library(chunkio-static STATIC ${src})
+   target_link_libraries(chunkio-static ${libs})
++  if(FTS_LIBRARY_DIR)
++    target_link_directories(chunkio-static PRIVATE "${FTS_LIBRARY_DIR}")
++  endif()
++  if(FTS_LIBRARY)
++    target_link_libraries(chunkio-static "${FTS_LIBRARY}")
++  endif()
+   if(CIO_SANITIZE_ADDRESS)
+     add_sanitizers(chunkio-static)
+   endif()
+diff --git a/lib/monkey/mk_core/CMakeLists.txt b/lib/monkey/mk_core/CMakeLists.txt
+index a1a3210..d8a74a7 100644
+--- a/lib/monkey/mk_core/CMakeLists.txt
++++ b/lib/monkey/mk_core/CMakeLists.txt
+@@ -10,6 +10,7 @@ set(src
+ 
+ # Headers
+ include_directories(../include/monkey/)
++include_directories(${PROJECT_BINARY_DIR}/include/monkey/)
+ 
+ # It set's a definition and register into the mk_core_info.h file */
+ macro(MK_DEFINITION var)
+diff --git a/plugins/CMakeLists.txt b/plugins/CMakeLists.txt
+index 36fcc94..b587849 100644
+--- a/plugins/CMakeLists.txt
++++ b/plugins/CMakeLists.txt
+@@ -439,9 +439,15 @@ if(FLB_REGEX)
+   REGISTER_FILTER_PLUGIN("filter_parser")
+ endif()
+ 
+-if(FLB_RECORD_ACCESSOR)
++if(FLB_RECORD_ACCESSOR OR FLB_FILTER_EXPECT)
+   REGISTER_FILTER_PLUGIN("filter_expect")
++endif()
++
++if(FLB_RECORD_ACCESSOR OR FLB_FILTER_GREP)
+   REGISTER_FILTER_PLUGIN("filter_grep")
++endif()
++
++if(FLB_RECORD_ACCESSOR)
+   REGISTER_FILTER_PLUGIN("filter_rewrite_tag")
+ endif()
+ 
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index a47a5d9..1c10433 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -249,6 +249,9 @@ if(FLB_REGEX)
+   set(src
+     ${src}
+     "flb_regex.c"
++    "flb_record_accessor.c"
++    "flb_ra_key.c"
++    "record_accessor/flb_ra_parser.c"
+     )
+ endif()
+ 
+@@ -442,6 +445,14 @@ if(OPENSSL_FOUND)
+     )
+ endif()
+ 
++if(OPENSSL_SSL_LIBRARY AND OPENSSL_CRYPTO_LIBRARY)
++  set(FLB_DEPS
++    ${FLB_DEPS}
++    "${OPENSSL_SSL_LIBRARY}"
++    "${OPENSSL_CRYPTO_LIBRARY}"
++    )
++endif()
++
+ # libyaml
+ if(FLB_HAVE_LIBYAML)
+ set(FLB_DEPS
+@@ -601,6 +612,10 @@ if(FLB_BINARY)
+ 
+   target_link_libraries(fluent-bit-bin fluent-bit-static ${CMAKE_THREAD_LIBS_INIT})
+ 
++  if(FTS_LIBRARY)
++    target_link_libraries(fluent-bit-bin "${FTS_LIBRARY}")
++  endif()
++
+   # KAFKA SPECIFIC
+   if(FLB_SASL_ENABLED)
+     target_link_libraries(fluent-bit-bin sasl2)
+diff --git a/src/flb_blob_db.c b/src/flb_blob_db.c
+index 15b9fbb..0df568e 100644
+--- a/src/flb_blob_db.c
++++ b/src/flb_blob_db.c
+@@ -1399,6 +1399,13 @@ int flb_blob_db_file_fetch_part_count(struct flb_blob_db *context,
+ 
+ #else
+ 
++#include <stdint.h>
++#include <stddef.h>
++#include <sys/types.h>
++#include <cfl/cfl_sds.h>
++#include <fluent-bit/flb_config.h>
++#include <fluent-bit/flb_blob_db.h>
++
+ int flb_blob_db_open(struct flb_blob_db *context,
+                      struct flb_config *config,
+                      char *path)
+@@ -1512,7 +1519,8 @@ int flb_blob_db_file_part_get_next(struct flb_blob_db *context,
+                                    cfl_sds_t *file_path,
+                                    cfl_sds_t *destination,
+                                    cfl_sds_t *remote_file_id,
+-                                   cfl_sds_t *tag)
++                                   cfl_sds_t *tag,
++                                   int *part_count)
+ {
+     return FLB_BLOB_DB_ERROR_NO_BACKEND_AVAILABLE;
+ }
+diff --git a/src/flb_http_client.c b/src/flb_http_client.c
+index 3b55b86..d82fc84 100644
+--- a/src/flb_http_client.c
++++ b/src/flb_http_client.c
+@@ -55,6 +55,8 @@
+ #include <fluent-bit/tls/flb_tls.h>
+ #include <time.h>
+ #include <fluent-bit/flb_signv4_ng.h>
++#include <fluent-bit/flb_upstream_ha.h>
++#include <fluent-bit/flb_upstream_node.h>
+ 
+ void flb_http_client_debug(struct flb_http_client *c,
+                            struct flb_callback *cb_ctx)
+diff --git a/src/record_accessor/flb_ra_parser.c b/src/record_accessor/flb_ra_parser.c
+index 6800223..60074e3 100644
+--- a/src/record_accessor/flb_ra_parser.c
++++ b/src/record_accessor/flb_ra_parser.c
+@@ -24,9 +24,6 @@
+ #include <fluent-bit/flb_log.h>
+ #include <fluent-bit/record_accessor/flb_ra_parser.h>
+ 
+-#include "ra_parser.h"
+-#include "ra_lex.h"
+-
+ int flb_ra_parser_subkey_count(struct flb_ra_parser *rp)
+ {
+     if (rp == NULL || rp->key == NULL) {
+@@ -293,14 +290,126 @@ struct flb_ra_parser *flb_ra_parser_tag_part_create(int id)
+     return rp;
+ }
+ 
++static int ra_is_identifier_start(char c)
++{
++    if (c == '_' || (c >= 'A' && c <= 'Z') ||
++        (c >= 'a' && c <= 'z')) {
++        return FLB_TRUE;
++    }
++
++    return FLB_FALSE;
++}
++
++static int ra_is_identifier_char(char c)
++{
++    if (ra_is_identifier_start(c) || (c >= '0' && c <= '9') ||
++        c == '.' || c == '-' || c == '/') {
++        return FLB_TRUE;
++    }
++
++    return FLB_FALSE;
++}
++
++static int ra_add_string_subkey(struct flb_ra_parser *rp, char *str,
++                                int *pos, int len)
++{
++    int i;
++    int ret;
++    flb_sds_t tmp;
++    flb_sds_t subkey;
++
++    i = *pos + 2;
++    subkey = flb_sds_create_size(len - i + 1);
++    if (!subkey) {
++        flb_errno();
++        return -1;
++    }
++
++    while (i < len) {
++        if (str[i] == '\'') {
++            if (i + 1 < len && str[i + 1] == '\'') {
++                tmp = flb_sds_cat(subkey, "'", 1);
++                if (!tmp) {
++                    flb_sds_destroy(subkey);
++                    return -1;
++                }
++                subkey = tmp;
++                i += 2;
++                continue;
++            }
++
++            if (i + 1 >= len || str[i + 1] != ']') {
++                flb_sds_destroy(subkey);
++                return -1;
++            }
++
++            ret = flb_ra_parser_subentry_add_string(rp, subkey);
++            flb_sds_destroy(subkey);
++            if (ret == -1) {
++                return -1;
++            }
++            *pos = i + 2;
++            return 0;
++        }
++
++        tmp = flb_sds_cat(subkey, str + i, 1);
++        if (!tmp) {
++            flb_sds_destroy(subkey);
++            return -1;
++        }
++        subkey = tmp;
++        i++;
++    }
++
++    flb_sds_destroy(subkey);
++    return -1;
++}
++
++static int ra_add_array_subkey(struct flb_ra_parser *rp, char *str,
++                               int *pos, int len)
++{
++    int i;
++    int id = 0;
++
++    i = *pos + 1;
++    if (i >= len || str[i] < '0' || str[i] > '9') {
++        return -1;
++    }
++
++    if (str[i] == '0' && i + 1 < len && str[i + 1] >= '0' && str[i + 1] <= '9') {
++        return -1;
++    }
++
++    while (i < len && str[i] >= '0' && str[i] <= '9') {
++        if (id > (2147483647 - (str[i] - '0')) / 10) {
++            return -1;
++        }
++        id = (id * 10) + (str[i] - '0');
++        i++;
++    }
++
++    if (i >= len || str[i] != ']') {
++        return -1;
++    }
++
++    if (flb_ra_parser_subentry_add_array_id(rp, id) == -1) {
++        return -1;
++    }
++
++    *pos = i + 1;
++    return 0;
++}
++
+ struct flb_ra_parser *flb_ra_parser_meta_create(char *str, int len)
+ {
++    int i;
+     int ret;
+-    yyscan_t scanner;
+-    YY_BUFFER_STATE buf;
+-    flb_sds_t s;
+     struct flb_ra_parser *rp;
+-    struct flb_ra_key *key;
++
++    if (len < 2 || str[0] != '$' || !ra_is_identifier_start(str[1])) {
++        flb_error("[record accessor] invalid record accessor");
++        return NULL;
++    }
+ 
+     rp = flb_ra_parser_create();
+     if (!rp) {
+@@ -308,38 +417,40 @@ struct flb_ra_parser *flb_ra_parser_meta_create(char *str, int len)
+         return NULL;
+     }
+ 
+-    /* Temporal buffer of string with fixed length */
+-    s = flb_sds_create_len(str, len);
+-    if (!s) {
+-        flb_errno();
++    for (i = 2; i < len; i++) {
++        if (!ra_is_identifier_char(str[i])) {
++            break;
++        }
++    }
++
++    rp->type = FLB_RA_PARSER_KEYMAP;
++    rp->key = flb_ra_parser_string_add(rp, str + 1, i - 1);
++    if (!rp->key) {
+         flb_ra_parser_destroy(rp);
+         return NULL;
+     }
+ 
+-    /* Flex/Bison work */
+-    flb_ra_lex_init(&scanner);
+-    buf = flb_ra__scan_string(s, scanner);
+-
+-    ret = flb_ra_parse(rp, s, scanner);
++    while (i < len) {
++        if (str[i] != '[' || i + 1 >= len) {
++            flb_ra_parser_destroy(rp);
++            return NULL;
++        }
+ 
+-    /* release resources */
+-    flb_sds_destroy(s);
+-    flb_ra__delete_buffer(buf, scanner);
+-    flb_ra_lex_destroy(scanner);
++        if (str[i + 1] == '\'') {
++            ret = ra_add_string_subkey(rp, str, &i, len);
++        }
++        else {
++            ret = ra_add_array_subkey(rp, str, &i, len);
++        }
+ 
+-    /* Finish structure mapping */
+-    if (rp->type == FLB_RA_PARSER_KEYMAP) {
+-        if (rp->key) {
+-            key = rp->key;
+-            key->subkeys = rp->slist;
+-            rp->slist = NULL;
++        if (ret == -1) {
++            flb_ra_parser_destroy(rp);
++            return NULL;
+         }
+     }
+ 
+-    if (ret != 0) {
+-        flb_ra_parser_destroy(rp);
+-        return NULL;
+-    }
++    rp->key->subkeys = rp->slist;
++    rp->slist = NULL;
+ 
+     return rp;
+ }
