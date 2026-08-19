@@ -68,7 +68,7 @@ class GnuPrologConan(ConanFile):
             handle.write(content)
 
         args = [
-            f"--build=aarch64-unknown-linux-ohos",
+            f"--build=aarch64-unknown-linux-gnu",
             f"--with-install-dir={stage}",
             "--without-links-dir",
             "--without-doc-dir",
