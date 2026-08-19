@@ -4,6 +4,8 @@
 import os
 import re
 import shlex
+import shutil
+from pathlib import Path
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
@@ -27,7 +29,10 @@ class AvrLibcTestConan(ConanFile):
         avr_root = os.path.join(package_folder, "avr")
         include_dir = os.path.join(avr_root, "include")
         compiler = self._required_build_tool("avr-gcc")
-        lib_dir = self._atmega328p_libdir(avr_root, compiler)
+        dispatcher_bin = self._materialize_target_tool_root()
+        lib_dir = self._atmega328p_libdir(
+            avr_root, compiler, dispatcher_bin
+        )
         objdump = self._required_build_tool("avr-objdump")
         nm = self._required_build_tool("avr-nm")
 
@@ -46,6 +51,7 @@ class AvrLibcTestConan(ConanFile):
         map_file = os.path.join(self.build_folder, "test_avr_libc.map")
         command = [
             compiler,
+            "-B{}{}".format(dispatcher_bin, os.sep),
             "-mmcu=atmega328p",
             "-Os",
             "-fno-builtin",
@@ -95,11 +101,15 @@ class AvrLibcTestConan(ConanFile):
 
         self.output.info("avr-libc consumer compile/link test passed for ATmega328P")
 
-    def _atmega328p_libdir(self, avr_root, compiler):
+    def _atmega328p_libdir(
+        self, avr_root, compiler, dispatcher_bin
+    ):
         report = os.path.join(self.build_folder, "multidir.txt")
         self.run(
-            '{} -mmcu=atmega328p -print-multi-directory > {}'.format(
-                shlex.quote(compiler), shlex.quote(report)
+            '{} {} -mmcu=atmega328p -print-multi-directory > {}'.format(
+                shlex.quote(compiler),
+                shlex.quote("-B{}{}".format(dispatcher_bin, os.sep)),
+                shlex.quote(report),
             ),
             env="conanbuild",
         )
@@ -119,6 +129,35 @@ class AvrLibcTestConan(ConanFile):
                 "avr-gcc multilib path escapes the tested package: {}".format(multidir)
             )
         return lib_dir
+
+    def _materialize_target_tool_root(self):
+        binutils_root = self.dependencies.build[
+            "avr-binutils"
+        ].package_folder
+        root = Path(self.build_folder) / ".avr-binutils-dispatch"
+        bin_dir = root / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("as", "ld", "nm"):
+            shutil.copy2(
+                Path(binutils_root) / "bin" / "avr-{}".format(name),
+                bin_dir / name,
+            )
+
+        source_scripts = (
+            Path(binutils_root) / "avr" / "lib" / "ldscripts"
+        )
+        if not source_scripts.is_dir():
+            raise ConanInvalidConfiguration(
+                "AVR linker scripts were not found: {}".format(
+                    source_scripts
+                )
+            )
+        shutil.copytree(
+            source_scripts,
+            root / "avr" / "lib" / "ldscripts",
+            dirs_exist_ok=True,
+        )
+        return bin_dir
 
     def _required_build_tool(self, executable):
         for dependency in self.dependencies.build.values():

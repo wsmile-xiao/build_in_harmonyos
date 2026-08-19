@@ -8,6 +8,8 @@ OHOS link libraries.
 
 import glob
 import os
+import shlex
+import shutil
 import sys
 
 from conan import ConanFile
@@ -58,6 +60,7 @@ class AvrLibcConan(ConanFile):
         get(self, **self.conan_data["sources"], strip_root=True)
 
     def generate(self):
+        dispatcher_bin = self._materialize_target_tool_root()
         tools = {
             "CC": self._required_build_tool("avr-gcc"),
             "AS": self._required_build_tool("avr-as"),
@@ -69,13 +72,18 @@ class AvrLibcConan(ConanFile):
             "RANLIB": self._required_build_tool("avr-ranlib"),
             "STRIP": self._required_build_tool("avr-strip"),
         }
+        compiler = shlex.join(
+            [tools["CC"], "-B{}{}".format(dispatcher_bin, os.sep)]
+        )
 
         build_env = VirtualBuildEnv(self)
         env = build_env.environment()
         for variable, executable in tools.items():
-            env.define(variable, executable)
-        env.define("CCAS", tools["CC"])
-        env.define("AVR_GCC", tools["CC"])
+            env.define(
+                variable, compiler if variable == "CC" else executable
+            )
+        env.define("CCAS", compiler)
+        env.define("AVR_GCC", compiler)
         env.define("AVR_NM", tools["NM"])
         env.define("AVR_OBJCOPY", tools["OBJCOPY"])
         env.define("PYTHON", sys.executable)
@@ -97,8 +105,10 @@ class AvrLibcConan(ConanFile):
         # its later activation cannot replace avr-gcc with native clang.
         tc_env = tc.environment()
         for variable, executable in tools.items():
-            tc_env.define(variable, executable)
-        tc_env.define("CCAS", tools["CC"])
+            tc_env.define(
+                variable, compiler if variable == "CC" else executable
+            )
+        tc_env.define("CCAS", compiler)
         tc.generate(env=tc_env)
 
     def build(self):
@@ -147,6 +157,37 @@ class AvrLibcConan(ConanFile):
         self.buildenv_info.define_path(
             "AVR_LIBC_ROOT", os.path.join(self.package_folder, "avr")
         )
+
+    def _materialize_target_tool_root(self):
+        binutils_root = self.dependencies.build[
+            "avr-binutils"
+        ].package_folder
+        root = os.path.join(
+            self.build_folder, ".avr-binutils-dispatch"
+        )
+        bin_dir = os.path.join(root, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        for name in ("as", "ld", "nm"):
+            shutil.copy2(
+                os.path.join(binutils_root, "bin", "avr-{}".format(name)),
+                os.path.join(bin_dir, name),
+            )
+
+        source_scripts = os.path.join(
+            binutils_root, "avr", "lib", "ldscripts"
+        )
+        if not os.path.isdir(source_scripts):
+            raise ConanInvalidConfiguration(
+                "AVR linker scripts were not found: {}".format(
+                    source_scripts
+                )
+            )
+        shutil.copytree(
+            source_scripts,
+            os.path.join(root, "avr", "lib", "ldscripts"),
+            dirs_exist_ok=True,
+        )
+        return bin_dir
 
     def _required_build_tool(self, executable):
         for dependency in self.dependencies.build.values():
