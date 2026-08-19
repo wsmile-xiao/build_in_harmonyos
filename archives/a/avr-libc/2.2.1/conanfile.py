@@ -21,7 +21,8 @@ from conan.tools.files import (
     export_conandata_patches,
     get,
 )
-from conan.tools.gnu import Autotools, AutotoolsToolchain, get_gnu_triplet
+from conan.tools.gnu import Autotools, AutotoolsToolchain
+from conan.tools.gnu.get_gnu_triplet import _get_gnu_triplet
 from conan.tools.layout import basic_layout
 
 
@@ -90,9 +91,14 @@ class AvrLibcConan(ConanFile):
         build_env.generate()
 
         tc = AutotoolsToolchain(self)
+        build_triplet = _get_gnu_triplet(
+            str(self.settings.os),
+            str(self.settings.arch),
+            str(self.settings.compiler),
+        )["triplet"]
         tc.configure_args.extend(
             [
-                "--build={}".format(get_gnu_triplet(self)),
+                "--build={}".format(build_triplet),
                 "--host=avr",
                 "--disable-doc",
                 "--disable-html-doc",
