@@ -1,4 +1,4 @@
-﻿import os
+import os
 
 from conan import ConanFile
 from conan.tools.build import can_run

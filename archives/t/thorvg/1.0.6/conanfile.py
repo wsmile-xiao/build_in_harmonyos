@@ -1,4 +1,4 @@
-﻿from conan import ConanFile
+from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
 from conan.tools.build import can_run
 from conan.tools.files import get
