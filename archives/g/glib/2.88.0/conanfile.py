@@ -146,7 +146,7 @@ class GlibConan(ConanFile):
         glib.set_property("pkg_config_name", "glib-2.0")
         glib.libs = ["glib-2.0", "intl"]
         glib.system_libs = ["m", "pthread", "dl", "rt"]
-        glib.includedirs = glib_includedirs
+        glib.includedirs = ["include", "include/glib-2.0", "lib/glib-2.0/include"]
         glib.requires = ["pcre2::pcre2"]
 
         gobject = self.cpp_info.components["gobject-2.0"]
