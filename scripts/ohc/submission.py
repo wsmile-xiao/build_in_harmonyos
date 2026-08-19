@@ -867,7 +867,15 @@ def cmd_submit(software: str, version: str,
     # ── Gate 3/4: W4 Pre-PR audit ──
     audit_result_path = ver_dir / "reports" / "audit-result.json"
     if not audit_result_path.exists():
+        misplaced = ver_dir / ".audit-result.json"
+        misplaced_note = ""
+        if misplaced.exists():
+            misplaced_note = (f"检测到错误位置的 {misplaced}（带点前缀、不在 reports/ 下）——"
+                              "这就是它不被读取的原因。正确位置（唯一权威）: "
+                              f"{audit_result_path}")
         log_fail("❌ Gate 3/4: W4 Pre-PR 审计未执行 (audit-result.json 不存在)")
+        if misplaced_note:
+            log_fail(f"⚠️ {misplaced_note}")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "w4_audit_not_done",
             ["W4 Pre-PR 审计未执行，请先完成审计",

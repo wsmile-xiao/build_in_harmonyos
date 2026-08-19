@@ -145,7 +145,7 @@ W3/finish/submit 卡在**环境外部因素**时，禁止无限重试 workaround
 - conan registry / git remote / 下载源**连续 3 次不可达，且重试跨度超过 30 分钟**
 - 失败原因明确属于：registry_unreachable / 上游包未发布 / DNS·TLS 网络故障
 
-**止损动作**：立即写 result.json 终止本包（见 Step 7），`--status dependency_missing`，`--failed-reason` 写清"缺什么 + 为什么环境内无法解决"，`--missing` 列裸包名，`--missing-evidence` 贴实际报错输出。
+**止损动作**：立即写 result.json 终止本包（见 Step 7），`--status dependency_missing`，`--failed-reason` 写清"缺什么 + 为什么环境内无法解决"，`--missing` 列裸包名，`--missing-evidence` 贴实际报错输出。**工具已强制**：result 命令对每个 missing 包自动实测 `conan list <pkg>/* -r=ohpcd`，实测结果追加进 `missing_evidence`——凭推断谎报会被 `[probe] ... EXISTS (探测到配方，请复核是否真缺)` 当场戳穿。
 
 **止损后严禁**（为绕过依赖）：伪造 `.ci-result.json`、dummy 包顶替、跳过 W3、伪造 result.json。
 
@@ -212,7 +212,7 @@ W3/finish/submit 卡在**环境外部因素**时，禁止无限重试 workaround
 | 最终任务结果 | `$HOME/ohpcd-ai-worker-result.json`（或 result 命令 `--out`/`OHC_RESULT_OUT` 指定位置） | Step 7 result.json 格式 |
 
 > 归档根目录的 `.audit-result.json`（带点前缀 + 错误层级）是**错误路径**，submit 不会读。
-> 上述路径由 `submission.py` Gate 校验逻辑唯一决定，改路径 = Gate 永远不过。
+> **工具已强制**：submit 在找不到 `reports/audit-result.json` 但发现根目录 `.audit-result.json` 时，报错会直接指出错误位置和唯一正确路径（不再需要试错）。
 
 **W5 — 知识图谱完整性检查**
 适配结束时**必须**检查知识图谱内容的完整性和合规性：
@@ -642,6 +642,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result foo 1.0 --status user_cancelled \
 - **剩余 < 40 分钟且当前包卡死**：按 W3 止损规则立即止损，写 result 终止
 - 反例：18:04 补充节点启动时任务仅剩 27 分钟，Agent 却按完整流程安排工作，收尾时间被吃光
 - result.json 如实上报不扣分；耗尽预算一无所有才是最差结局
+- **工具已支持**：环境变量 `OHC_TASK_DEADLINE`（ISO8601 或 epoch 秒）设置后，`result`/`dispatch` 入口自动报剩余预算；<40 分钟输出"只收尾"强警告。ECS/调度方下发任务时建议注入此变量
 
 ---
 
@@ -801,6 +802,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 
 > 反例：apr 已成功（15:41 完成），apr-util 卡死拖掉全任务 4h 预算，最终整体 failed——apr 白干。
 > 正确行为：apr-util 按 W3 止损规则 30 分钟内止损 → 写 result → 继续后续包。
+> **工具已强制**：`dispatch script` 对 failed 包**不再生成 createSubTask**（改为生成 result.json 补报指令）；`dispatch status` 对 failed 汇总输出止损提示。
 
 ---
 
@@ -863,3 +865,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v11.8 — 2026-08-19 — RESULT 字段对齐 ECS 消费端：JSON 字段名改为 missing_dependencies/error_detail/error_type/missing_evidence/summary（--missing → missing_dependencies 数组、--failed-reason → error_detail，ECS main.py/dispatcher 严格按此读取）；新增 --summary 参数；success PR 字段来源链 --pr-number > .submit-state.json > gh pr view > git（全部缺失 fail-fast exit 2，防 SUCCESS_NO_PR 降级）；明确 exit 2 = 参数错误非任务失败（禁止据此改报 failed_build 烧任务）；v11.7→v11.8*
 
 *SKILL.md v11.9 — 2026-08-19 — task 3659 实测失败路径复盘五项（R41）：W3 外部依赖阻塞止损硬性规则（registry 连续 3 次不可达/超 30 分钟 → 立即写 result.json 止损，禁止无限重试/伪造产物）；现象→status 判定对照表（dependency_missing vs env_unsupported 口径："换网络正常机器能否解决"）；产物路径唯一权威表（.ci-result.json 带点前缀在版本目录、reports/audit-result.json 无点前缀、$HOME/ohpcd-ai-worker-result.json，submission.py Gate 唯一决定）；8.3 多包任务单包止损不连坐（成功包不白干，最终聚合如实写明）；4.2 时间预算感知（剩余 <40min 只收尾不启大步骤）；v11.8→v11.9*
+
+*SKILL.md v12.0 — 2026-08-19 — R41 五项工具化落地（文档约束 → 工具强制）：A) result 对 dependency_missing 自动实测 registry（conan list -r=ohpcd 逐包试探，实测输出追加 missing_evidence，谎报当场戳穿）；B) dispatch script 对 failed 包不再生成 createSubTask（改 result.json 补报指令），dispatch status 汇总输出止损提示；C) OHC_TASK_DEADLINE 环境变量预算感知（result/dispatch 入口报剩余，<40min 只收尾强警告）；D) submit 发现根目录 .audit-result.json 时报错直接指出唯一正确路径（消灭 11 分钟试错）；修复 dispatch 在 GBK 控制台 emoji 崩溃；v11.9→v12.0*

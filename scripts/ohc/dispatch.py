@@ -374,6 +374,13 @@ def dispatch_status(software_list: list[str]) -> dict[str, str]:
     print(f"  总计: {len(software_list)} | ✅ 完成: {finished_count} | ❌ 失败: {failed_count} | ⏳ 进行中/待开始: {pending_count}")
     print()
 
+    # 8.3 单包止损不连坐（R41）
+    if failed_count:
+        print("  ⚠️ 止损规则(R41): failed 包已终态，不重试、不阻塞后续包。")
+        print("     - 每包补写 result.json（status=真实终态 + failed-reason + 证据）")
+        print("     - 立即继续下一包，禁止在失败包上耗尽剩余预算")
+        print()
+
     return results
 
 
@@ -485,7 +492,7 @@ def _print_plan(phases: list[dict]) -> None:
             icon = _STATUS_ICONS.get(status, "?")
             skip_note = " (跳过 — 已完成)" if status == "finished" else ""
             if status == "failed":
-                skip_note = " (⚠️ 之前失败，需重试)"
+                skip_note = " (已终态 failed — 止损不重试, R41)"
             print(f"    {icon} {sw} {ver}{skip_note}")
 
     print(f"\n  {'═' * 60}")
@@ -543,7 +550,18 @@ def generate_batch_script(software_list: list[str]) -> str:
             obj = task["objective"]
 
             if task["status"] == "failed":
-                lines.append(f"# ⚠️ {sw} {ver} 之前失败，建议重试")
+                # 8.3 单包止损不连坐：failed 包默认不重试，只补 result 上报
+                lines.append(f"# ❌ {sw} {ver} 已终态(failed)。")
+                lines.append(f"#    止损规则(R41): 不重试、不阻塞后续包；")
+                lines.append(f"#    确认 result.json 已如实上报（缺则补写）:")
+                lines.append(
+                    f"#    python3 $SKILL_ROOT/scripts/ohc-run.py result {sw} {ver} "
+                    "--status <终态> --failed-reason \"<真实原因>\""
+                )
+                lines.append(f"#    （确需重试: 人工评估后重跑 dispatch script，")
+                lines.append(f"#     并先清除 manifest.yaml status=failed 标记）")
+                lines.append("")
+                continue
 
             lines.append(f'createSubTask(')
             lines.append(f'    title="编译 {sw} {ver}",')
@@ -578,6 +596,14 @@ def generate_batch_script(software_list: list[str]) -> str:
 def dispatch_cli(argv: list[str] | None = None) -> int:
     """CLI entry point: ohc dispatch"""
     import argparse
+    import sys as _sys
+
+    # GBK 等非 UTF-8 控制台下 emoji 图标会 UnicodeEncodeError，降级为替换符
+    try:
+        if _sys.stdout.encoding and _sys.stdout.encoding.lower() not in ("utf-8", "utf8"):
+            _sys.stdout.reconfigure(errors="replace")  # type: ignore[attr-defined]
+    except Exception:
+        pass
 
     parser = argparse.ArgumentParser(
         prog="ohc dispatch",
@@ -607,6 +633,16 @@ def dispatch_cli(argv: list[str] | None = None) -> int:
     if not args.subcmd:
         parser.print_help()
         return 0
+
+    # C项(预算感知): 所有 dispatch 子命令入口报剩余预算
+    try:
+        from .result_report import budget_status
+        _, budget_note = budget_status()
+        if budget_note:
+            print(f"  {budget_note}")
+            print()
+    except ImportError:
+        pass
 
     if args.subcmd == "plan":
         phases = plan_batch(args.software)

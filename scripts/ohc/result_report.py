@@ -35,7 +35,40 @@ from .utils import find_project_dir, get_agent_id, log_fail, log_info, log_ok
 RESULT_FILENAME = "result.json"
 # result.json 输出位置环境变量（--out 未指定时生效；两者都未设置则不落盘仅 stdout）
 RESULT_OUT_ENV = "OHC_RESULT_OUT"
+# 任务截止时间环境变量（ISO8601；4.2 时间预算感知：<40min 只收尾）
+TASK_DEADLINE_ENV = "OHC_TASK_DEADLINE"
+BUDGET_WRAPUP_MIN = 40
 REPO_NAME = "OpenHarmonyPCDeveloper/build_in_harmonyos"
+
+
+def budget_status() -> tuple[int | None, str]:
+    """C项(预算感知): 读 OHC_TASK_DEADLINE 算剩余分钟。
+
+    返回 (剩余分钟或 None, 提示文本)。未设置环境变量时静默跳过。
+    """
+    raw = os.environ.get(TASK_DEADLINE_ENV, "").strip()
+    if not raw:
+        return None, ""
+    try:
+        # 支持 "2026-08-19T18:00:00" / 带时区 / epoch 秒
+        if raw.isdigit():
+            dl = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+        else:
+            dl = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if dl.tzinfo is None:
+                dl = dl.replace(tzinfo=timezone.utc)
+        remain = (dl - datetime.now(timezone.utc)).total_seconds() / 60.0
+    except ValueError:
+        return None, f"[warn] {TASK_DEADLINE_ENV} 格式非法(需ISO8601或epoch秒): {raw}"
+    if remain < 0:
+        return 0, ("⚠️ 任务预算已耗尽(OHC_TASK_DEADLINE 已过)——"
+                   "立即写 result.json 如实收尾，禁止任何新大步骤")
+    m = int(remain)
+    if remain < BUDGET_WRAPUP_MIN:
+        return m, (f"⚠️ 剩余预算 {m} 分钟（<{BUDGET_WRAPUP_MIN}min）——"
+                   "4.2 规则：只收尾（写 result.json 如实上报），"
+                   "不启动新大步骤（重跑 W3/重试 submit/新 conan create）")
+    return m, f"剩余预算 {m} 分钟"
 
 STATUS_ENUM = (
     "success", "failed_build", "failed_test", "dependency_missing",
@@ -67,6 +100,44 @@ def _git_output(args: list[str], cwd: Path | None = None) -> str:
         return r.stdout.strip() if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def _probe_registry(pkg_names: list[str]) -> list[str]:
+    """A项(工具化止损): 对每个 missing 包实测 registry 可达性。
+
+    用 conan list 试探远程仓库（只查 recipe，不下载），把实测输出追加进
+    missing_evidence——agent 无法凭推断谎报 dependency_missing。
+    conan 不可用/超时(10s)时记录探测失败原因，不阻塞上报。
+    """
+    probes: list[str] = []
+    for pkg in pkg_names:
+        try:
+            r = subprocess.run(
+                ["conan", "list", f"{pkg}/*", "-r=ohpcd", "-f=json"],
+                capture_output=True, text=True, timeout=30)
+            out = (r.stdout or r.stderr or "").strip().splitlines()
+            if r.returncode == 0 and out and out[0].strip().startswith("{"):
+                # json 输出：无版本 → 结果为空对象或无该包键
+                import json as _json
+                try:
+                    data = _json.loads("\n".join(out))
+                    found = bool(data.get("ohpcd") or data)
+                except _json.JSONDecodeError:
+                    found = False
+                probes.append(
+                    f"[probe] conan list {pkg}/* -r=ohpcd -> "
+                    + ("EXISTS (探测到配方，请复核是否真缺)" if found
+                       else "NOT FOUND (registry 实测确认缺失)"))
+            else:
+                first = out[0][:MAX_MSG] if out else "(no output)"
+                probes.append(f"[probe] conan list {pkg}/* -r=ohpcd -> "
+                              f"rc={r.returncode}: {first}")
+        except FileNotFoundError:
+            probes.append(f"[probe] conan CLI 不可用，跳过 {pkg} 实测")
+        except subprocess.TimeoutExpired:
+            probes.append(f"[probe] conan list {pkg} 超时(30s)——"
+                          "registry 不可达佐证（registry_unreachable）")
+    return probes
 
 
 def _gh_pr(cwd: Path | None = None) -> tuple[int | None, str | None]:
@@ -256,6 +327,11 @@ def result_cli(argv: list[str]) -> int:
                         help="允许覆盖已存在的 result.json")
     args = parser.parse_args(argv)
 
+    # C项(预算感知): 入口即报剩余预算，<40min 提醒只收尾
+    remain_min, budget_note = budget_status()
+    if budget_note:
+        log_info(budget_note)
+
     project_dir = Path(find_project_dir())
 
     # ── 输出位置：--out 参数 > 环境变量 OHC_RESULT_OUT > 不落盘（仅 stdout） ──
@@ -322,6 +398,8 @@ def result_cli(argv: list[str]) -> int:
     if args.missing_evidence:
         evidence_parts.append(args.missing_evidence)
     if missing_list:
+        # 工具化止损(A项)：registry 实测，agent 无法凭推断谎报
+        evidence_parts.extend(_probe_registry(missing_list))
         evidence_parts.extend(
             _search_evidence_in_logs(project_dir, missing_list))
     evidence = "\n".join(evidence_parts) if evidence_parts else None
