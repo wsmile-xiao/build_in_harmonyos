@@ -41,11 +41,15 @@ class BitcoinTestConan(ConanFile):
         libcxx_dir = os.path.join(self.dependencies["bitcoin"].package_folder, "lib")
         if os.path.isdir(libcxx_dir):
             env.append_path("LD_LIBRARY_PATH", libcxx_dir)
-        # 沙箱 uid 映射会导致临时目录权限检查失败,用可写 TMPDIR/testdatadir 绕过。
-        # 实测 TMPDIR 须指向用户主目录(属主正确),build_folder 下目录会权限失败。
-        tmpdir = os.path.expanduser("~")
+        # 沙箱 uid 映射会导致临时目录权限检查失败。
+        # 实测(2026-08-18): TMPDIR 指向 CI 同款路径 /data/storage/el2/base/cache
+        # (可写且属主正确)后,上游 734 用例全量实跑 *** No errors detected;
+        # 用户主目录亦可用, build_folder 下目录会权限失败。
+        tmpdir = "/data/storage/el2/base/cache"
+        if not os.path.isdir(tmpdir) or not os.access(tmpdir, os.W_OK):
+            tmpdir = os.path.expanduser("~")
         env.define("TMPDIR", tmpdir)
-        testdatadir = os.path.join(self.build_folder, "btc-testdatadir")
+        testdatadir = os.path.join(tmpdir, "btc-testdatadir")
         os.makedirs(testdatadir, exist_ok=True)
         os.chmod(testdatadir, 0o777)
 
@@ -55,8 +59,7 @@ class BitcoinTestConan(ConanFile):
         with env.vars(self).apply():
             self.run(consumer_bin, env="conanrun")
 
-        # 2) 运行主包安装的 test_bitcoin 子集(与 MANIFEST.yml 声明的上游测试一致),
-        #    避免上游 bitcoin 31.1 无 bitcoinconsensus_version C API 的问题。
+        # 2) 运行主包安装的 test_bitcoin 全量 734 用例(与 MANIFEST.yml 声明的上游测试一致)。
         package_folder = self.dependencies["bitcoin"].package_folder
         # bitcoin >=31 的 CMake 将内部二进制安装到 libexec/,部分构建在 bin/,取存在的路径
         test_bin = None
@@ -67,10 +70,6 @@ class BitcoinTestConan(ConanFile):
                 break
         if test_bin is None:
             raise RuntimeError(f"test_bitcoin not found under {package_folder}/{{libexec,bin}}")
-        # 沙箱内 util_tests 全量会因 uid 映射的临时目录权限检查失败
-        # (util_criticalsection 等 fixture ctor 报 Permission denied,属环境限制),
-        # 故运行已验证通过的 parse_hex 子集作为消费者冒烟验证。
-        self.output.info(f"Running {test_bin} --run_test=util_tests/parse_hex (TMPDIR={tmpdir})")
+        self.output.info(f"Running {test_bin} (full 734 upstream cases, TMPDIR={tmpdir})")
         with env.vars(self).apply():
-            self.run(f"{test_bin} --run_test=util_tests/parse_hex -- -testdatadir={testdatadir}",
-                     env="conanrun")
+            self.run(f"{test_bin} -- -testdatadir={testdatadir}", env="conanrun")

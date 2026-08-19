@@ -39,6 +39,6 @@ int main()
         return 1;
     }
 
-    std::printf("test bitcoin 31.1: OK\n");
+    std::printf("test bitcoin 31.1.1: OK\n");
     return 0;
 }
