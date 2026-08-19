@@ -27,6 +27,8 @@ _MODULES = {
     # v8.6: Pre-analysis + Requirements graph
     "pre-analysis": "pre_analysis",
     "req": "requirements",
+    # RESULT Step: 任务终态 result.json 上报（SKILL_RESULT_PROTOCOL_SPEC）
+    "result": "result_report",
 }
 
 

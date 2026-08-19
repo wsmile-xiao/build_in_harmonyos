@@ -230,8 +230,13 @@ python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本> --resume
 python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本>
 # 如 HANDOFF 后填写建议并验证:
 python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本> --resume
-# 如 HANDOFF 后填写建议并验证:
-python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本> --resume
+
+# Step 7: RESULT — 任务终态上报（⭐ 强制：任何终态都必须输出 result.json）
+# result.json 是跨设备/跨 AI 交换文件（非 PR 内容）；输出位置: --out > $OHC_RESULT_OUT > 仅 stdout
+python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status success --out <输出位置>
+python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status dependency_missing \
+    --missing "zlib,libpng" --missing-evidence "conan download zlib -r=ohpcd -> 404" \
+    --failed-reason "依赖未发布" --out <输出位置>
 ```
 
 **如何选择**：已有 conanfile.py / 简单编译 → 模式 A；首次编译 / 复杂依赖 / 需深度调试 → 模式 B。
@@ -493,6 +498,69 @@ $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本>
 
 ---
 
+### Step 7: RESULT — 任务终态 result.json 上报（⭐ 强制）
+
+**每个任务到达终态（无论成功、失败还是取消）都必须产出 `result.json`**，它是全链路唯一可信的结果来源（协议: SKILL_RESULT_PROTOCOL_SPEC）。
+
+**定位**：result.json 是**跨设备/跨 AI 的结果交换文件，不属于 PR 提交内容**。输出位置优先级：`--out` 参数 > 环境变量 `OHC_RESULT_OUT` > **不落盘（仅 stdout 输出 JSON，由调用方自行采集）**。`--out`/环境变量接受目录或完整文件路径。典型用法：写到任务工作区/共享目录供调度方或其他 AI 采集。
+
+```bash
+python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <status> \
+    --out <目录或文件路径> [options]
+```
+
+**status 八值枚举（不可扩展）+ 分类决策树**：
+
+| status | 判定条件 | 必填附加字段 |
+|--------|---------|-------------|
+| `success` | PR 已合并或已经过 CI 验证，软件包完整 | `pr_url` / `pr_number` / `commit_hash` / `branch`（自动从 .submit-state.json/git 补齐） |
+| `failed_build` | conan create 编译失败 | `failed_reason`（≤500 字符） |
+| `failed_test` | 编译成功但测试失败 | `failed_reason` |
+| `dependency_missing` | 依赖未发布（can_resolve=False） | `missing`（裸包名数组）+ `evidence`（二次验证证据） |
+| `env_unsupported` | 编译器/平台不支持 | `failed_reason` |
+| `upstream_issue` | 上游代码缺陷 | `failed_reason` |
+| `user_cancelled` | 用户主动取消 | `failed_reason` |
+| `partial` | 部分目标达成 | `failed_reason` |
+
+**生成器红线**（违反=流程缺陷）：
+- **必须用 `ohc-run.py result` 产出**，禁止手写 JSON、禁止事后改字段绕过校验
+- `dependency_missing` 声明前**必须二次验证**：提供实际日志行或命令输出作为 evidence（生成器会自动在 `.ci_logs/` 搜索佐证行）
+- 校验失败 exit 2 且**不落盘**；成功 exit 0 且自动 `cat result.json`
+- checkpoints 最后一条固定为 `message: "result.json"`（`_ohpcd_result` 条目）
+- 重报需 `--force`（覆盖前必须确认终态变化）
+
+**HANDOFF 交接**（references/handoff-protocol.md）：
+- 校验失败（exit 2）时自动输出 **HANDOFF 块**：`EXIT_REASON: result_invalid`、`EXIT_CODE: 2 (resumable)`、`STEP_FAILED: Step7`、RESUME_CMD（修正后参数模板）、AI NEXT ACTIONS（逐条校验错误+修复指引）
+- **resumable 语义**：仅在 Step7 内修正参数重跑即可，无需回退更早 step（result.json 未落盘、无残留状态）
+- 修复闭环：AI 读 HANDOFF 块 → 修正参数（补 evidence/reason/PR 四元组）→ 重跑 RESUME_CMD → exit 0 + `cat result.json` 采集
+
+**示例**：
+
+```bash
+# 成功（PR 字段自动从 .submit-state.json + git 补齐）
+python3 $SKILL_ROOT/scripts/ohc-run.py result zlib 1.3.1 --status success --out /tmp/task-results/
+
+# 编译失败
+python3 $SKILL_ROOT/scripts/ohc-run.py result foo 1.0 --status failed_build \
+    --failed-reason "conan create: aarch64-linux-ohos clang 报错 undefined reference to 'bar'" \
+    --out ./results/foo-1.0-result.json
+
+# 依赖缺失（必须给二次验证证据）
+python3 $SKILL_ROOT/scripts/ohc-run.py result foo 1.0 --status dependency_missing \
+    --missing "libbar" \
+    --missing-evidence "conan download libbar/2.0 -r=ohpcd --only-recipe -> ERROR: Recipe not found" \
+    --failed-reason "上游依赖 libbar 未适配发布" \
+    --out /shared/results/
+
+# 用户取消（不带 --out：使用 $OHC_RESULT_OUT；也未设置则仅 stdout 输出，不落盘）
+python3 $SKILL_ROOT/scripts/ohc-run.py result foo 1.0 --status user_cancelled \
+    --failed-reason "用户要求停止，转向其他任务"
+```
+
+> 采集方（CI Worker/调度 AI/其他设备）按 `--out` 或 `OHC_RESULT_OUT` 约定位置读取 result.json；两者都未设置时从 stdout 采集 JSON 全文。
+
+---
+
 ## §4 失败处理（R11+R12）
 
 > **详解 + 反面案例**: references/failure-handling.md
@@ -680,7 +748,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
-| `search-url` / `submit` / `review` / `post-merge` / `feedback` | URL搜索 / **PR提交(W4→AI Review→CI→SKILL_FEEDBACK,HANDOFF,--resume)** / 主编审核 / 合并后索引 / **流程终态反馈(HANDOFF,--resume)** |
+| `search-url` / `submit` / `review` / `post-merge` / `feedback` / `result` | URL搜索 / **PR提交(W4→AI Review→CI→SKILL_FEEDBACK,HANDOFF,--resume)** / 主编审核 / 合并后索引 / **流程终态反馈(HANDOFF,--resume)** / **任务终态 result.json 上报(8状态枚举,生成器强制,exit 0/2)** |
 | `init-archive` / `close-archive` / `finalize-archive` | 归档初始化 / 关闭 / 清理校验 |
 | `check-env` / `clean-verify` / `check-knowledge-gap` | 环境检查 / 干净构建验证 / 知识缺口检查 |
 | `dispatch` / `summary` / `conan-migrate` | 多任务调度 / 统计摘要 / Conan 迁移辅助 |
@@ -716,3 +784,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 ---
 
 *SKILL.md v11.6 — 2026-07-14 — SKILL_FEEDBACK 阶段：新增 feedback 子命令和 ohc/feedback.py 模块，submit 成功后自动生成 feedback/SKILL_FEEDBACK_{random}.md（项目根，与knowledge同级）；HANDOFF强制（残留(请填写)则emit，step_failed=feedback），--resume验证完整性，.feedback-state.json状态文件；git config获取作者，secrets.token_hex生成随机ID；新增templates/skill-feedback.md模板；v11.5→v11.6*
+
+*SKILL.md v11.7 — 2026-08-18 — RESULT 阶段：新增 Step 7 result.json 终态上报（SKILL_RESULT_PROTOCOL_SPEC），ohc/result_report.py 生成器（status 八值枚举、success 必填 PR 四元组、dependency_missing 必带 missing+evidence 二次验证、checkpoints 尾条固定 result.json、校验失败 exit 2 不落盘、成功自动 cat）；结果文件定位为跨设备/AI 交换产物（非 PR 内容），输出位置优先级 --out > OHC_RESULT_OUT 环境变量 > 不落盘仅 stdout，不依赖 archives 目录存在；校验失败自动输出 HANDOFF 块（result_invalid / resumable / Step7，含 RESUME_CMD 与修复指引）；v11.6→v11.7*
