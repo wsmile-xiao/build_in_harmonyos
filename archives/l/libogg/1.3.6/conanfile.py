@@ -9,7 +9,7 @@ from conan import ConanFile
 from conan.errors import ConanException
 from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
-from conan.tools.files import get
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
 
 
 class LiboggConan(ConanFile):
@@ -36,8 +36,12 @@ class LiboggConan(ConanFile):
     def layout(self):
         cmake_layout(self)
 
+    def export_sources(self):
+        export_conandata_patches(self)
+
     def source(self):
         get(self, **self.conan_data["sources"][self.version], strip_root=True)
+        apply_conandata_patches(self)
 
     def _sign_ohos_elf(self, path):
         tools = {}
@@ -84,6 +88,34 @@ class LiboggConan(ConanFile):
         CMake(self).install()
         if str(self.settings.os) == "OHOS" and self.options.shared and can_run(self):
             self._sign_ohos_elf(os.path.join(self.package_folder, "lib", "libogg.so"))
+
+        self._set_soname_and_resign(['libogg.so'])
+
+    def _set_soname_and_resign(self, sonames):
+        """给缺 SONAME 的 .so 补上 SONAME 并重新签名。
+
+        根因：本包产物无 DT_SONAME。后果不在本包，而在下游 —— CMake 默认
+        按完整路径链接无 SONAME 的库，会把构建机的 conan cache 绝对路径写进
+        下游的 DT_NEEDED，换机器无法加载（制品仓已实测 fontconfig/poppler/tbb）。
+        本包 .so 为无版本名（libogg.so，无 .so.X 实体），SONAME 设为文件名本身
+        与上游本意一致，故用 patchelf 而非改构建方式。
+        必须重签：改动 ELF 破坏链接器自签，鸿蒙 PC XPM 会拒绝 dlopen。
+        顺序：patchelf --set-soname → 剥 .codesign 旧签名段 → 自签。
+        """
+        patchelf = "/data/service/hnp/bin/patchelf"
+        objcopy = "/data/service/hnp/bin/llvm-objcopy"
+        signer = "/data/service/hnp/bin/binary-sign-tool"
+        for name in sonames:
+            f = os.path.join(self.package_folder, "lib", name)
+            if not os.path.isfile(f) or os.path.islink(f):
+                self.output.warning("补 SONAME：找不到 %s，跳过" % f)
+                continue
+            self.run('{pe} --set-soname "{n}" "{f}"'.format(pe=patchelf, n=name, f=f))
+            self.run('{oc} --remove-section .codesign "{f}" 2>/dev/null || true'.format(
+                oc=objcopy, f=f))
+            self.run('{sg} sign -inFile "{f}" -outFile "{f}" -selfSign 1'.format(
+                sg=signer, f=f))
+            self.output.info("已设 SONAME=%s 并重签" % name)
 
     def package_info(self):
         self.cpp_info.libs = ["ogg"]
