@@ -20,6 +20,7 @@ from conan.tools.files import (
     copy,
     export_conandata_patches,
     get,
+    replace_in_file,
 )
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.gnu.get_gnu_triplet import _get_gnu_triplet
@@ -123,6 +124,19 @@ class AvrLibcConan(ConanFile):
         # The authoritative tag snapshot does not contain generated top-level
         # configure/Makefile.in files.  bootstrap also generates the AVR
         # device and multilib source trees before running Autoconf/Automake.
+        bootstrap = os.path.join(self.source_folder, "bootstrap")
+        replace_in_file(
+            self,
+            bootstrap,
+            "(cd devtools; ./configure)",
+            "(cd devtools; sh ./configure)",
+        )
+        replace_in_file(
+            self,
+            bootstrap,
+            "./devtools/gen-avr-lib-tree.sh || exit 1",
+            "sh ./devtools/gen-avr-lib-tree.sh || exit 1",
+        )
         self.run("sh bootstrap", cwd=self.source_folder, env="conanbuild")
 
         autotools = Autotools(self)
