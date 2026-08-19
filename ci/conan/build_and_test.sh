@@ -433,9 +433,12 @@ for pkg_dir in "${PACKAGES[@]}"; do
     # R36: 依赖必须先发布到制品仓
     if [ -f "$CONANFILE" ]; then
         # 提取所有依赖引用（使用 AST 解析，避免误匹配 docstring 中的文本）
-        DEP_REFS=$(python3 - "$CONANFILE" "${pkg_name:-}" "${pkg_ver:-}" 2>/dev/null <<'PYEOF'
+        # encoding=utf-8-sig: 剥掉 UTF-8 BOM（PR #5568 thorvg conanfile.py 带 BOM，
+        # ast.parse 抛 SyntaxError: invalid non-printable character U+FEFF 且被静默吞掉）
+        _L0I_ERR=$(mktemp)
+        DEP_REFS=$(python3 - "$CONANFILE" "${pkg_name:-}" "${pkg_ver:-}" 2>"$_L0I_ERR" <<'PYEOF'
 import ast, sys
-src = open(sys.argv[1]).read()
+src = open(sys.argv[1], encoding="utf-8-sig").read()
 self_name = sys.argv[2] if len(sys.argv) > 2 else ""
 self_ver = sys.argv[3] if len(sys.argv) > 3 else ""
 self_ref = f"{self_name}/{self_ver}" if self_name and self_ver else ""
@@ -463,7 +466,17 @@ for node in ast.walk(tree):
 for r in sorted(refs):
     print(r)
 PYEOF
-)
+) || {
+            # 解析失败（语法错误等）: 透出原因, 不再静默退出（set -e 会杀死整个脚本,
+            # 日志只停在 "[step] L0: Quality gate checks..." 无任何失败线索）
+            echo "[fail] L0i: conanfile.py AST 解析失败, 无法提取依赖:"
+            sed 's/^/       /' "$_L0I_ERR" | head -6
+            echo "[hint] 常见原因: conanfile.py 带 UTF-8 BOM 或语法错误。请以 UTF-8（无 BOM）重新保存"
+            L0_FAILED=true
+            L0_ERRORS="${L0_ERRORS} conanfile_parse_error"
+            DEP_REFS=""
+        }
+        rm -f "$_L0I_ERR"
         if [ -n "$DEP_REFS" ]; then
             echo "[step] L0i: Checking dependency availability in registry (R36)..."
             UNPUBLISHED_DEPS=""
@@ -702,7 +715,7 @@ if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*", pkg_ver):
     )
     sys.exit(0)
 try:
-    text = open(conanfile, encoding="utf-8", errors="replace").read()
+    text = open(conanfile, encoding="utf-8-sig", errors="replace").read()
     m = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
     if m and pkg_ver != m.group(1):
         print(f"ERR|版本目录 '{pkg_ver}' 与 conanfile.py version='{m.group(1)}' 不一致")
