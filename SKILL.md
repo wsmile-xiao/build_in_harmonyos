@@ -138,6 +138,29 @@ git pull origin main
 > 历史教训：CI 审计发现 431 个编译失败流入 CI（55%），根因是 AI 跳过 conan create
 > 验证或手动伪造 `.ci-result.json`。嵌入式 HANDOFF 从结构上消除此可能。
 
+**W3 外部依赖阻塞止损（⭐ 硬性规则，task 3659 教训）**
+
+W3/finish/submit 卡在**环境外部因素**时，禁止无限重试 workaround。满足任一条件**立即止损**：
+
+- conan registry / git remote / 下载源**连续 3 次不可达，且重试跨度超过 30 分钟**
+- 失败原因明确属于：registry_unreachable / 上游包未发布 / DNS·TLS 网络故障
+
+**止损动作**：立即写 result.json 终止本包（见 Step 7），`--status dependency_missing`，`--failed-reason` 写清"缺什么 + 为什么环境内无法解决"，`--missing` 列裸包名，`--missing-evidence` 贴实际报错输出。
+
+**止损后严禁**（为绕过依赖）：伪造 `.ci-result.json`、dummy 包顶替、跳过 W3、伪造 result.json。
+
+**现象 → status 判定对照表**：
+
+| 现象 | result status |
+|---|---|
+| conan remote 上游包不存在/未发布，本地无法构建 | `dependency_missing` |
+| registry 网络不可达且非本机问题 | `dependency_missing` |
+| 编译期缺系统头文件 / 工具链版本不符 | `env_unsupported` |
+| conan create 编译报错（源码/配方问题） | `failed_build` |
+| 换包版本/打 patch 可能修复 | 继续修复，不构成止损条件 |
+
+判定口径：**"换个网络正常的机器能否解决"**——能 → `dependency_missing`；不能 → `env_unsupported`。
+
 **W4 — Pre-PR 独立审计（⭐ 嵌入 submit，HANDOFF 强制）**
 
 > **不是独立脚本，而是 submit 流程内部的前置检查。** AI 跑 submit 时自动检查 W4 是否完成，
@@ -179,6 +202,17 @@ git pull origin main
 
 > **为什么 W4 不能跳过？** submit 是唯一的 PR 创建入口，W4 是 submit 的前置条件。
 > AI 无法绕过 submit 直接 `git push`（无 finish 标记 = submit 拒绝 = 无法创建 PR）。
+
+**产物路径（唯一权威，不要试探）**（task 3659 教训：审计结果存错位置来回打转 11 分钟）
+
+| 产物 | 权威路径 | 关键格式 |
+|---|---|---|
+| W3 本地 CI 结果 | `<archives/首字母/软件/版本>/.ci-result.json` | `exit_code=0`，**带点前缀**，finish 自动写入，禁止手改 |
+| W4 审计结果 | `<archives/首字母/软件/版本>/reports/audit-result.json` | `verdict=pass`（P0/P1=0），**无点前缀**，必须在 `reports/` 下 |
+| 最终任务结果 | `$HOME/ohpcd-ai-worker-result.json`（或 result 命令 `--out`/`OHC_RESULT_OUT` 指定位置） | Step 7 result.json 格式 |
+
+> 归档根目录的 `.audit-result.json`（带点前缀 + 错误层级）是**错误路径**，submit 不会读。
+> 上述路径由 `submission.py` Gate 校验逻辑唯一决定，改路径 = Gate 永远不过。
 
 **W5 — 知识图谱完整性检查**
 适配结束时**必须**检查知识图谱内容的完整性和合规性：
@@ -271,7 +305,7 @@ self.requires("zlib/1.3.1")      # 精确引用首次版本
 self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 ```
 
-### 1.3 铁律摘要（40 条，违反=bug）
+### 1.3 铁律摘要（41 条，违反=bug）
 
 | # | 规则 |
 |---|------|
@@ -290,6 +324,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R38 | **命令行工具必须声明 commands.json**：如果构建产物包含可执行文件，必须在**软件级别**目录下创建 `commands.json`（hicmd 格式）。库类型不需要。CI 门禁 L0k 自动校验 |
 | R39 | **源码 URL 必须为官方源**：conandata.yml 中 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源，禁止个人 fork/网盘/不明 CDN。CI 自动添加镜像 fallback |
 | R40 | **深度适配库需验证适配完整性**：图形渲染/UI框架/多媒体/外设/系统底层类库，编译通过≠适配完成，需检查实质性平台适配代码（非 stub/return 0） |
+| R41 | **外部依赖阻塞止损**：registry/git remote 连续 3 次不可达且超 30 分钟，或失败明确属于环境外部因素（上游未发布/网络故障）→ 立即写 result.json 止损，禁止无限重试；多包任务单包止损不连坐（成功包不白干）；剩余预算 <40 分钟只收尾不启大步骤 |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -599,6 +634,15 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result foo 1.0 --status user_cancelled \
 
 **禁用参数**（native 编译，`--build=`/`--host=`/`--target=` → 一律改 config.guess/config.sub）。
 
+### 4.2 时间预算感知（⭐ 硬性规则，task 3659 教训）
+
+任务开始/恢复时**先算剩余预算**（dispatch 任务带 deadline；本地任务按 4h 惯例预算）。
+
+- **剩余 < 40 分钟**：只做收尾——写 result.json（如实标 status + `--summary` 写明已完成的部分），**不做新的大步骤**（重跑 W3 / 重试 submit / 新一轮 conan create）
+- **剩余 < 40 分钟且当前包卡死**：按 W3 止损规则立即止损，写 result 终止
+- 反例：18:04 补充节点启动时任务仅剩 27 分钟，Agent 却按完整流程安排工作，收尾时间被吃光
+- result.json 如实上报不扣分；耗尽预算一无所有才是最差结局
+
 ---
 
 ## §5 知识图谱
@@ -747,6 +791,17 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch objective zlib 1.3.1
 python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 ```
 
+### 8.3 单包止损，不连坐（⭐ 硬性规则，task 3659 教训）
+
+多包任务中**每包独立走完生命周期**（提取→编译→finish→submit→result）。某包止损/失败后：
+
+1. 该包 result 照常写（status + failed-reason + 证据），**已成功提交的 PR 不撤**
+2. **立即继续下一包**，禁止在失败包上耗尽剩余预算（成功包被连坐 = 全部白干）
+3. 最终 result.json 按各包结果聚合；部分成功时必须写明哪些包成功、哪些失败
+
+> 反例：apr 已成功（15:41 完成），apr-util 卡死拖掉全任务 4h 预算，最终整体 failed——apr 白干。
+> 正确行为：apr-util 按 W3 止损规则 30 分钟内止损 → 写 result → 继续后续包。
+
 ---
 
 ## §9 工具一览
@@ -806,3 +861,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v11.7 — 2026-08-18 — RESULT 阶段：新增 Step 7 result.json 终态上报（SKILL_RESULT_PROTOCOL_SPEC），ohc/result_report.py 生成器（status 八值枚举、success 必填 PR 四元组、dependency_missing 必带 missing+evidence 二次验证、checkpoints 尾条固定 result.json、校验失败 exit 2 不落盘、成功自动 cat）；结果文件定位为跨设备/AI 交换产物（非 PR 内容），输出位置优先级 --out > OHC_RESULT_OUT 环境变量 > 不落盘仅 stdout，不依赖 archives 目录存在；校验失败自动输出 HANDOFF 块（result_invalid / resumable / Step7，含 RESUME_CMD 与修复指引）；v11.6→v11.7*
 
 *SKILL.md v11.8 — 2026-08-19 — RESULT 字段对齐 ECS 消费端：JSON 字段名改为 missing_dependencies/error_detail/error_type/missing_evidence/summary（--missing → missing_dependencies 数组、--failed-reason → error_detail，ECS main.py/dispatcher 严格按此读取）；新增 --summary 参数；success PR 字段来源链 --pr-number > .submit-state.json > gh pr view > git（全部缺失 fail-fast exit 2，防 SUCCESS_NO_PR 降级）；明确 exit 2 = 参数错误非任务失败（禁止据此改报 failed_build 烧任务）；v11.7→v11.8*
+
+*SKILL.md v11.9 — 2026-08-19 — task 3659 实测失败路径复盘五项（R41）：W3 外部依赖阻塞止损硬性规则（registry 连续 3 次不可达/超 30 分钟 → 立即写 result.json 止损，禁止无限重试/伪造产物）；现象→status 判定对照表（dependency_missing vs env_unsupported 口径："换网络正常机器能否解决"）；产物路径唯一权威表（.ci-result.json 带点前缀在版本目录、reports/audit-result.json 无点前缀、$HOME/ohpcd-ai-worker-result.json，submission.py Gate 唯一决定）；8.3 多包任务单包止损不连坐（成功包不白干，最终聚合如实写明）；4.2 时间预算感知（剩余 <40min 只收尾不启大步骤）；v11.8→v11.9*
