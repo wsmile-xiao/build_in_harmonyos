@@ -106,10 +106,11 @@ class AvrLibcConan(ConanFile):
             perl_runtime = perl
         autoconf_bin = os.path.dirname(autotools_scripts["autoconf"])
         automake_bin = os.path.dirname(autotools_scripts["aclocal"])
+        autom4te_script = os.path.join(self.build_folder, ".autom4te-script")
         autom4te_launcher = os.path.join(self.build_folder, ".autom4te")
         save(
             self,
-            autom4te_launcher,
+            autom4te_script,
             "#!/bin/sh\nexec {} \"$@\"\n".format(
                 shlex.join(
                     [
@@ -121,6 +122,7 @@ class AvrLibcConan(ConanFile):
                 )
             ),
         )
+        shutil.copy2(autom4te_script, autom4te_launcher)
         os.chmod(autom4te_launcher, 0o755)
         env.define("AUTOM4TE", autom4te_launcher)
         autotools_commands = {
