@@ -107,6 +107,18 @@ class AvrLibcConan(ConanFile):
             perl_runtime = perl
         autoconf_bin = os.path.dirname(autotools_scripts["autoconf"])
         automake_bin = os.path.dirname(autotools_scripts["aclocal"])
+        autoheader_real = os.path.join(autoconf_bin, ".autoheader-real")
+        if self.settings.os == "OHOS":
+            autoheader_real = os.path.join(self.build_folder, ".autoheader-real")
+            shutil.copy2(
+                os.path.join(autoconf_bin, ".autoheader-real"), autoheader_real
+            )
+            replace_in_file(
+                self,
+                autoheader_real,
+                'my $autoconf = "\'$autom4te\' --language=autoconf ";',
+                'my $autoconf = "$autom4te --language=autoconf ";',
+            )
         autom4te_command = shlex.join(
             [
                 perl_runtime,
@@ -131,7 +143,7 @@ class AvrLibcConan(ConanFile):
                 ]
             ),
             "AUTOHEADER": shlex.join(
-                [perl_runtime, os.path.join(autoconf_bin, ".autoheader-real")]
+                [perl_runtime, autoheader_real]
             ),
             "AUTOCONF": shlex.join(
                 [perl_runtime, os.path.join(autoconf_bin, ".autoconf-real")]
