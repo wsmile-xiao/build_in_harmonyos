@@ -30,19 +30,35 @@ echo "  杂项文件拦截 (junk_check)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 # ── 确定检查范围 ──
-# CI PR 模式：只检查当前 PR 新增/修改的文件（git diff origin/main...HEAD）
-# Full/Release 模式：检查整个仓库（无 origin/main 或 diff 为空时回退）
+# 优先级 1: PR diff 模式（buildbot checkout-pr: shallow clone main + git apply pr.diff）
+#   pr.diff 是 PR 文件清单的唯一权威来源：git apply 不产生 commit（diff 为空）、
+#   新增文件不进 index（ls-files 看不见）、.build-closed 等被 .gitignore 忽略
+#   （status --porcelain 也看不见），常规 git 命令三路全盲。
+#   （2026-08-20 PR #3145 的 archives/p/pacvim/1.1.1/.build-closed 漏拦即此盲区）
+# 优先级 2: incremental 模式：git diff origin/main...HEAD（本地开发分支）
+# 优先级 3: full 模式：git ls-files（Release / 非 git 环境，无 origin/main 时回退）
 JUNK_CHECK_MODE="incremental"
 
-if git -C "${REPO_ROOT}" rev-parse --verify origin/main >/dev/null 2>&1; then
-    CHECK_FILES=$(git -C "${REPO_ROOT}" diff --name-only --diff-filter=ACMR origin/main...HEAD 2>/dev/null || true)
-    if [ -z "$CHECK_FILES" ]; then
+PR_DIFF="${JUNK_PR_DIFF:-${REPO_ROOT}/pr.diff}"
+if [ -s "$PR_DIFF" ]; then
+    # 提取 PR 涉及的新增/修改文件（重命名取新路径；纯删除 hunk 头是 +++ /dev/null，天然排除）
+    CHECK_FILES=$(grep -E '^\+\+\+ b/' "$PR_DIFF" | sed -e 's|^+++ b/||' | grep -v '^/dev/null$' || true)
+    if [ -n "$CHECK_FILES" ]; then
+        JUNK_CHECK_MODE="prdiff"
+    fi
+fi
+
+if [ "$JUNK_CHECK_MODE" != "prdiff" ]; then
+    if git -C "${REPO_ROOT}" rev-parse --verify origin/main >/dev/null 2>&1; then
+        CHECK_FILES=$(git -C "${REPO_ROOT}" diff --name-only --diff-filter=ACMR origin/main...HEAD 2>/dev/null || true)
+        if [ -z "$CHECK_FILES" ]; then
+            JUNK_CHECK_MODE="full"
+            CHECK_FILES=$(git -C "${REPO_ROOT}" ls-files 2>/dev/null || true)
+        fi
+    else
         JUNK_CHECK_MODE="full"
         CHECK_FILES=$(git -C "${REPO_ROOT}" ls-files 2>/dev/null || true)
     fi
-else
-    JUNK_CHECK_MODE="full"
-    CHECK_FILES=$(git -C "${REPO_ROOT}" ls-files 2>/dev/null || true)
 fi
 
 if [ -z "$CHECK_FILES" ]; then
@@ -176,7 +192,7 @@ fi
 echo ""
 echo "[step] JC6: PR 单软件原子性检测..."
 
-if [ "$JUNK_CHECK_MODE" = "incremental" ]; then
+if [ "$JUNK_CHECK_MODE" = "incremental" ] || [ "$JUNK_CHECK_MODE" = "prdiff" ]; then
     # 统计变更文件涉及的 archives/<首字母>/<软件名> 目录（同软件多版本算一个软件）
     JC6_PKGS=$(echo "$CHECK_FILES" | grep -E '^archives/[^/]+/[^/]+/' | cut -d'/' -f1-3 | sort -u || true)
     JC6_COUNT=$(echo "$JC6_PKGS" | grep -c . || true)
