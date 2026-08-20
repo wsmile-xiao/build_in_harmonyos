@@ -104,7 +104,7 @@ if [ -d "${GRAPH_DIR_G0}" ]; then
 
     # G0a: knowledge/graph/draft/ 目录不应存在
     if [ -d "${GRAPH_DIR_G0}/draft" ]; then
-        G0_DRAFT_COUNT=$(ls -1 "${GRAPH_DIR_G0}/draft"/*.kv 2>/dev/null | wc -l)
+        G0_DRAFT_COUNT=$(ls -1 "${GRAPH_DIR_G0}/draft"/*.kv(N) 2>/dev/null | wc -l)
         if [ "${G0_DRAFT_COUNT}" -gt 0 ]; then
             echo "[fail] G0a: knowledge/graph/draft/ 目录存在 ${G0_DRAFT_COUNT} 个草稿 — 草稿只能放在 knowledge/drafts/"
             G0_ERRORS=$((G0_ERRORS + 1))
@@ -113,7 +113,7 @@ if [ -d "${GRAPH_DIR_G0}" ]; then
 
     # G0b: knowledge/graph/ 下不应有非标准命名的 .kv 文件
     #     （只允许 E###.kv + _template.kv + principles.kv）
-    G0_BAD_KV=$(ls -1 "${GRAPH_DIR_G0}"/*.kv 2>/dev/null | grep -vE '/E[0-9][0-9][0-9]\.kv$|/_template\.kv$|/principles\.kv$' || true)
+    G0_BAD_KV=$(ls -1 "${GRAPH_DIR_G0}"/*.kv(N) 2>/dev/null | grep -vE '/E[0-9][0-9][0-9]\.kv$|/_template\.kv$|/principles\.kv$' || true)
     if [ -n "$G0_BAD_KV" ]; then
         G0_BAD_COUNT=$(echo "$G0_BAD_KV" | wc -l)
         echo "[fail] G0b: knowledge/graph/ 下有 ${G0_BAD_COUNT} 个非标准命名的 .kv 文件（仅允许 E###.kv）:"
@@ -122,7 +122,7 @@ if [ -d "${GRAPH_DIR_G0}" ]; then
     fi
 
     # G0c: knowledge/graph/ 下的 .kv 文件不应含 draft:true 或 contributor_id 字段
-    G0_FIELD_LEAK=$(grep -rl '^draft:[[:space:]]*true\|^contributor_id:' "${GRAPH_DIR_G0}"/E*.kv 2>/dev/null || true)
+    G0_FIELD_LEAK=$(grep -rl '^draft:[[:space:]]*true\|^contributor_id:' "${GRAPH_DIR_G0}"/E*.kv(N) 2>/dev/null || true)
     if [ -n "$G0_FIELD_LEAK" ]; then
         echo "[fail] G0c: 正式条目含草稿字段 (draft:true / contributor_id):"
         echo "$G0_FIELD_LEAK" | head -5 | sed "s|^|       |"
