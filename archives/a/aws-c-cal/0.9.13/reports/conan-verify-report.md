@@ -3,7 +3,7 @@
 **Verdict**: PASS
 **Reference**: `aws-c-cal/0.9.13@ohpcd/stable`
 **Profile**: ohos-aarch64
-**Date**: 2026-08-05T05:07:35.157055
+**Date**: 2026-08-06T00:08:55.060071
 
 ## G0: ✅ PASS
   📦 构建系统: cmake
