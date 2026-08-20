@@ -353,6 +353,9 @@ def check_knowledge_completeness(pdir: str | None = None) -> int:
 def _run(cmd: list[str], *, cwd: str | None = None,
          env_extra: dict | None = None, timeout: int = 60) -> tuple[int, str]:
     env = os.environ.copy()
+    # v12.6: W3 为验证门禁，无条件禁用 ccache（结果必须可在干净 CI 复现）
+    from .utils import ccache_disable_env
+    env.update(ccache_disable_env())
     if env_extra:
         env.update(env_extra)
     try:

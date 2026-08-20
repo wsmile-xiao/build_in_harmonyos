@@ -132,3 +132,40 @@ def get_agent_id(project_dir: str | None = None) -> str:
     ts = str(time.time())
     hash_val = hashlib.md5(ts.encode()).hexdigest()[:4].upper()
     return hash_val
+
+
+# ═══════════════════════════════════════════════════════
+# Local build cache (v12.6) — 社区安全设计:
+#   1. 显式 opt-in: OHC_CCACHE=1 才启用，默认关闭（不污染任何人的环境）
+#   2. 隔离: CCACHE_DIR=~/.ohc-ccache + max_size=5G 限额，绝不碰项目目录/CI
+#   3. 可复现红线: 一切验证(G0/W3/conan-verify)无条件 CCACHE_DISABLE=1，
+#      确保提交的代码在干净 CI 上可复现构建
+# ═══════════════════════════════════════════════════════
+
+CCACHE_DIR_DEFAULT = "~/.ohc-ccache"
+
+
+def ccache_build_env() -> dict:
+    """构建期（configure/make 迭代）环境注入。OHC_CCACHE=1 且 ccache 可用时生效。"""
+    import shutil
+    if os.environ.get("OHC_CCACHE") != "1":
+        return {}
+    if not shutil.which("ccache"):
+        return {}
+    d = Path(os.path.expanduser(CCACHE_DIR_DEFAULT))
+    d.mkdir(parents=True, exist_ok=True)
+    conf = d / "ccache.conf"
+    if not conf.exists():
+        conf.write_text("max_size = 5G\n", encoding="utf-8")
+    env = {"CCACHE_DIR": str(d)}
+    # 包装用户已显式指定的编译器（未指定则交给构建系统默认值，不猜）
+    for var in ("CC", "CXX"):
+        cur = os.environ.get(var, "")
+        if cur and not cur.startswith("ccache "):
+            env[var] = f"ccache {cur}"
+    return env
+
+
+def ccache_disable_env() -> dict:
+    """验证期环境注入：无条件禁用 ccache（社区红线——本地缓存不得影响验证结果）。"""
+    return {"CCACHE_DISABLE": "1"}

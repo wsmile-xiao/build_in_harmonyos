@@ -35,6 +35,12 @@ _MODULES = {
     "draft-review": "draft_review",
     # v12.5: 预编译源码风险扫描独立命令（规则集 + 知识库动态派生规则）
     "prescan": "pre_scan",
+    # v12.6: 配方首稿检索（成长型语料：主仓配方 + 社区成功配方经 git 汇聚）
+    "recipe-search": "recipe_search",
+    # v12.6: 知识库质量月报（本地聚合，git 同步社区汇聚）
+    "kb-report": "kb_report",
+    # v12.6: 核心模块一键冒烟测试
+    "selftest": "selftest",
 }
 
 

@@ -19,6 +19,7 @@ from typing import Optional
 from .utils import find_project_dir, log_info, log_ok, log_warn, log_fail
 from .models import parse_kv_file, parse_build_context
 from .engine import engine_cli, run_engine
+from .utils import ccache_build_env
 from .handoff import handoff_cli, emit_handoff, HandoffData
 from .init_build import init_build
 
@@ -321,7 +322,29 @@ class BuildDriver:
         self.ep_fix_cmd = result.entry.rec_command or ""
         self.ep_auto_retry = result.entry.rec_auto_fix
 
+        # v12.6 L4: 完整处方注入（命中知识不用尽=浪费）
+        self.ep_prescription = self._build_prescription(result.entry)
+
         return bool(self.ep_match_id)
+
+    def _build_prescription(self, entry) -> list[str]:
+        """把命中条目的完整处方转成 HANDOFF action 行（v12.6 L4）。"""
+        lines = [f"🎯 知识命中 {entry.id}，完整处方（按顺序尝试，auto 标记项可自动重试）:"]
+        if entry.rec_approach:
+            lines.append(f"  方案: {entry.rec_approach[:200]}")
+        if entry.rec_description:
+            lines.append(f"  说明: {entry.rec_description[:200]}")
+        if entry.rec_command:
+            auto_mark = " [auto]" if entry.rec_auto_fix else ""
+            lines.append(f"  命令{auto_mark}: {entry.rec_command}")
+        if entry.verification_cmd:
+            lines.append(f"  验证: {entry.verification_cmd}")
+        if getattr(entry, "fallback", None) and entry.fallback:
+            fb_desc = getattr(entry.fallback, "description", "") or ""
+            if fb_desc:
+                lines.append(f"  兜底: {fb_desc[:150]}")
+        lines.append(f"  详见: knowledge/graph/{entry.id}.kv / {entry.id}.md")
+        return lines
 
     def _emit_handoff(self, reason: str, exit_code: int, step: str,
                       ep_id: str = "none", gap: bool = False,
@@ -343,6 +366,10 @@ class BuildDriver:
             f"python3 {self.script_dir}/ohc-run.py track-edit add {self.software} {self.version} <修改的文件路径>"
         )
         final_actions.insert(0, track_reminder)
+
+        # v12.6 L4: 知识处方注入（若有命中）
+        if getattr(self, "ep_prescription", None) and ep_id not in ("none", ""):
+            final_actions[1:1] = self.ep_prescription
 
         # ⭐ 新增：依赖缺失时的专用 actions
         if reason in ("dependency_missing", "build_tool_missing", "command_mismatch"):
@@ -800,6 +827,8 @@ class BuildDriver:
                 "PKG_CONFIG_PATH": f"{self.default_prefix}/lib/pkgconfig",
                 "TMPDIR": str(Path(self.tmpdir)),
             }
+            # v12.6 L2: OHC_CCACHE=1 时本地迭代加速（隔离目录，验证期自动禁用）
+            _env_extra.update(ccache_build_env())
 
             def do_configure():
                 return self._run(_configure_cmd, cwd=str(vpath_dir), env_extra=_env_extra)
@@ -812,7 +841,12 @@ class BuildDriver:
             self._error_recovery("configure", 3, do_configure, do_retry)
 
         elif self.build_system == "cmake":
-            _configure_cmd = f"cmake -DCMAKE_INSTALL_PREFIX={self.default_prefix} -DCMAKE_BUILD_TYPE=Release {extra_str} ..".strip()
+            _cc = ccache_build_env()
+            _launcher = ""
+            if _cc:
+                _launcher = "-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+                _log(f"  ⚡ ccache 已启用（隔离目录 {_cc.get('CCACHE_DIR')}，验证阶段自动禁用）")
+            _configure_cmd = f"cmake -DCMAKE_INSTALL_PREFIX={self.default_prefix} -DCMAKE_BUILD_TYPE=Release {_launcher} {extra_str} ..".strip()
             self._actual_configure_cmd = _configure_cmd
             self._run("mkdir -p build")
             rc = self._run(_configure_cmd,

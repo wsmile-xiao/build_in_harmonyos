@@ -152,6 +152,13 @@ class FinishPipeline:
         if rc in (0, 4):
             self.steps["step2"] = True
             self._task_card("11b", "✅完成", "close-archive OK"); log_ok("  close-archive 完成")
+            # v12.6 L1: 成功配方并入检索语料（社区 git pull/merge 即共享成长）
+            try:
+                from .recipe_search import upsert_catalog
+                upsert_catalog(self.software, self.version, pdir=str(self.pdir))
+                log_ok("  配方已并入检索语料 (recipe-search 可见)")
+            except Exception as e:
+                log_warn(f"  配方语料 upsert 失败（非阻塞）: {e}")
         else:
             self.steps["step2"] = False
             self._task_card("11b", "❌失败", f"exit {rc}"); log_fail(f"  close-archive 失败 (RC={rc})")

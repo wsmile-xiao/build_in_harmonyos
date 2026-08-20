@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.5
+version: 12.6
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -857,6 +857,10 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `timeout get\|set\|list\|validate` | ⭐ CI/W3 构建超时配置管理（build_timeouts.txt 单一事实源） |
 | `draft-review [DRAFT-xxx] [--json]` | ⭐ 草稿预审辅助：相似度证据 + 三态建议（merge-into/review-similar/create）；**纳入决策权在人工审核**，promote 命令不变 |
 | `prescan <src_dir> [--json] [--no-writeback]` | ⭐ 预编译源码风险扫描独立命令（评估/选型阶段可单独扫描，不必跑 build 管线）：规则集 24 条 + **知识库动态派生规则**；命中自动回填 hit_count |
+| `recipe-search <name> [-b 构建系统] [-d 依赖]` | ⭐ 配方首稿检索：从 2280+ 历史成功配方找最相似骨架（含补丁智慧）作底稿；语料经 finish 自动增长 + 社区 git 汇聚 |
+| `kb-report [--scan-logs <glob>]` | ⭐ 知识库质量月报（纯本地）：活跃度/陈旧度 + 预扫描价值 + **未命中错误采购清单**（知识投资定向信号） |
+| `selftest` | 核心模块冒烟测试（9 用例：engine 回归/prescan/锁并发/P0 防回归等） |
+| `resolve-deps --batch <file>` | 包级拓扑分层输出（同层可并行，配合多机/多进程；状态文件已事务锁） |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
 | `search-url` / `submit` / `review` / `post-merge` / `feedback` / `result` | URL搜索 / **PR提交(W4→AI Review→CI→SKILL_FEEDBACK,HANDOFF,--resume)** / 主编审核 / 合并后索引 / **流程终态反馈(HANDOFF,--resume)** / **任务终态 result.json 上报(8状态枚举,生成器强制,exit 0/2)** |
@@ -913,3 +917,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.4 — 2026-08-20 — 知识库治理工具化（借鉴 OpenViking 设计思想，纯规则零 LLM 实现）：①category 受控词表（scripts/ohc/kb_taxonomy.py，核心词 ~55 + 别名 ~200，组合词自动拆分，长尾保留渐进收敛）——存量 319 条已归一（278 种写法→229 种组合），graph add/promote 写入关口自动归一化，validate 新增 C13 词表 lint；②validate 新增 C14 编号连续性检查（id/文件名一致性 error 级，空洞如 E257 warning 级提示复用）；③新增 draft-review 预审辅助工具（FTS5 粗筛 + signature 字面量重叠/keyword Jaccard 精排，三态建议+空壳草稿标记）——**草稿仍按原有方式产生，纳入正式库决策权保留在人工审核**（用户约束），工具仅输出相似度证据加速判断；④engine 新增 --trace 检索轨迹（Phase A 候选分/B 命中明细输出到 stderr，调试误匹配）；⑤模板 _template.kv category 注释列出受控词表；v12.3→v12.4*
 
 *SKILL.md v12.5 — 2026-08-20 — 预扫描全量补齐 + 知识库动态利用闭环：①`prescan` 独立命令（评估/选型阶段可单独扫描源码，规则文件自动发现，--json 供 AI 消费）；②hit_count 闭环回填（命中自动累计写回规则文件，行级更新保留注释；--no-writeback 只读模式）——原"纸面闭环"变真；③规则集 16→24 条，补 linking/build-system/shell/libc 域（dlopen 硬编码路径、构建机 rpath、CMake 绝对路径 DESTINATION、config.guess 过期提示、gettext 宏、bash 专用语法、#!/bin/bash shebang、__GLIBC__ glibc 专用宏），全部挂 kb_ref；④**知识库动态派生规则**：E 条目 .kv 含 prescan_pattern 字段即在 PreScanner 运行时自动派生 PSCAN-KB-{id} 规则（示范：E013 dlopen API / E019 dlopen 绝对路径 / E037 bash shebang）——知识库增长即扫描能力增长，无需改规则文件；修 shebang 误判为注释的漏报、规则 ID 撞名；⑤engine 命中回写 metrics_last_used（激活沉睡度量字段，知识使用反馈）；⑥字段白名单/模板同步（prescan_* 可选字段）；v12.4→v12.5*
+
+*SKILL.md v12.6 — 2026-08-20 — 「又快又好」六杠杆 + 社区本地优先架构：**架构原则：所有能力本地可跑（贡献者单机完成全流程）、git 是唯一同步协议（语料/度量/知识随 PR 汇聚）、CI 仅作干净复现门禁**。L1 配方首稿检索（recipe-search：catalog 索引 2280 配方，相似度=名称0.45+构建系统0.30+依赖0.25+补丁加成；finish 成功自动 upsert → 社区配方库成长即生效）；L2 本地 ccache（OHC_CCACHE=1 显式开启，CCACHE_DIR=~/.ohc-ccache 隔离+5G 限额；autotools 环境注入/cmake launcher；**G0/W3/conan-verify 验证期无条件 CCACHE_DISABLE=1——本地缓存绝不影响验证结果，保证 CI 干净可复现**，红线）；L3 handoff 状态文件改事务式 fcntl 锁（读-改-写全程锁内，修 P1 并发丢失更新，自测验证 60/60）+ resolve-deps --batch 拓扑分层并行排程；L4 engine 命中处方完整注入 HANDOFF（方案/说明/命令[auto]/验证/兜底/关联文档，不再只用单字段）；L5 tests/test_smoke.py 冒烟层 + selftest 命令（9 用例含 P0 路径防回归、锁并发、taxonomy 幂等、engine 已知签名回归）；L6 kb-report 本地质量月报（活跃/陈旧/未命中采购清单，--scan-logs 对本地构建日志逐条跑 engine 找知识盲区）；v12.5→v12.6*
