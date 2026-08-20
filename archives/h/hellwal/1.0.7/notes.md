@@ -4,7 +4,7 @@
 - 构建系统: makefile（原始 Makefile，非 autotools）
 - 编译日期: 2026-06-12
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built
 - 源码URL: https://github.com/danihek/hellwal/archive/refs/tags/v1.0.7.tar.gz
 
 ## 对话记录
@@ -92,12 +92,11 @@ $ hellwal -i /不存在 → 正确报错 ✅
 - hellwal.c 有 2 个编译警告（未初始化变量 pal），不影响功能
 - 项目仅有单一二进制产物，无库文件
 - hellwal 首次运行会尝试写入 ~/.cache/hellwal/ 和 ~/.config/hellwal/templates/，目录不存在时输出 WARN 但不影响核心功能
-- 二进制大小 186KB，仅依赖 libc.so，适合轻量部署
----
-
-**编译结束**: 2026-06-12 09:48
-**最终状态**: published
----
+- 二进制大小 186KB，仅依赖 libc.so，适合轻量部署---
 
 **编译结束**: 2026-06-12 14:50
-**最终状态**: published
+**最终状态**: built
+---
+
+**编译结束**: 2026-07-22 18:20
+**最终状态**: built
