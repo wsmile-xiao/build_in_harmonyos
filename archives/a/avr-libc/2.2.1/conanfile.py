@@ -21,6 +21,7 @@ from conan.tools.files import (
     export_conandata_patches,
     get,
     replace_in_file,
+    save,
 )
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.gnu.get_gnu_triplet import _get_gnu_triplet
@@ -105,6 +106,23 @@ class AvrLibcConan(ConanFile):
             perl_runtime = perl
         autoconf_bin = os.path.dirname(autotools_scripts["autoconf"])
         automake_bin = os.path.dirname(autotools_scripts["aclocal"])
+        autom4te_launcher = os.path.join(self.build_folder, ".autom4te")
+        save(
+            self,
+            autom4te_launcher,
+            "#!/bin/sh\nexec {} \"$@\"\n".format(
+                shlex.join(
+                    [
+                        perl_runtime,
+                        os.path.join(autoconf_bin, ".autom4te-real"),
+                        "--prepend-include",
+                        os.path.join(os.path.dirname(autoconf_bin), "share", "autoconf"),
+                    ]
+                )
+            ),
+        )
+        os.chmod(autom4te_launcher, 0o755)
+        env.define("AUTOM4TE", autom4te_launcher)
         autotools_commands = {
             "ACLOCAL": shlex.join(
                 [
