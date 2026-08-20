@@ -176,3 +176,53 @@ Making check in doc: Nothing to be done for 'check'.
 
 **编译结束**: 2026-06-04 23:30
 **最终状态**: published
+
+---
+
+## Conan 配方创建与 CI 验证 (2026-08-13)
+
+### 背景
+
+原归档包标记为 `status: published` 但实际缺失 6 个关键文件：conanfile.py, conandata.yml, test_package/(conanfile.py + test.sh + MANIFEST.yml), commands.json。属于伪造发布状态。
+
+### 创建文件
+
+基于 `templates/conanfile-autotools.py.tmpl` 和 `archives/a/ascii/3.32/` 参考示例创建：
+
+1. **conanfile.py** — Autotools 配方，含 mktemp wrapper 处理 HMDFS 权限问题
+2. **conandata.yml** — 源码 URL + sha256
+3. **test_package/conanfile.py** — 测试配方，调用 `gpp --version` 和预处理功能
+4. **test_package/test.sh** — zsh 测试脚本
+5. **test_package/MANIFEST.yml** — 上游测试声明（CI L0e 要求）
+6. **commands.json** — CLI 工具声明
+
+### 构建调试过程
+
+| 尝试 | 问题 | 根因 | 修复 |
+|------|------|------|------|
+| 1 | configure: cannot run C compiled programs | CC wrapper 被 profile 完整路径绕过 | 改用 patch configure 方式 |
+| 2 | configure: cannot run C compiled programs | patch 已生效但签名仍未解决 | 手动测试发现 GNU ld 产出的 ELF 不可执行 |
+| 3 | config.status: Permission denied (subs1.awk) | mktemp -d 在 HMDFS 上创建权限异常的目录 | 添加 mktemp wrapper (参考 acct/6.6.4) |
+| 4 | ✅ 构建成功 | — | 移除不必要的 -fuse-ld=bfd 和 conftest 签名 hook |
+
+### 关键发现
+
+**原手动构建笔记中的三个问题在 conan 配方中只需解决一个：**
+
+1. ~~lld libxml2 缺失~~ → 当前环境 lld 正常工作，无需切换 bfd
+2. ~~conftest 需 ELF 签名~~ → 使用 lld 的 conftest 可直接执行，无需签名
+3. ✅ HMDFS mktemp 权限 → 需 mktemp wrapper 强制 mkdir 回退
+
+**重要修正**: 原笔记认为 conftest 的问题是 ELF 未签名 (E064)，实际根因是 **GNU ld (bfd) 链接的二进制在当前环境不可执行**。使用默认 lld 链接器后，conftest 正常执行，无需任何签名 hook。
+
+### 最终 conan create 结果
+
+```
+gpp/2.28: Package built
+gpp/2.28: Created package revision
+gpp/2.28 (test package): Running test()
+  gpp --version → GPP 2.28 ✅
+  echo "#define FOO bar\nFOO" | gpp → bar ✅
+```
+
+**Conan 配方验证完成**: 2026-08-13
