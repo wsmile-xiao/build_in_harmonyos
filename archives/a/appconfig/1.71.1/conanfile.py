@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for AppConfig 1.71."""
+"""Conan repair recipe 1.71.1 for upstream AppConfig 1.71."""
 
 import glob
 import os
@@ -11,13 +11,13 @@ from conan.tools.layout import basic_layout
 
 class AppConfigConan(ConanFile):
     name = "appconfig"
-    version = "1.71"
+    version = "1.71.1"
     description = "Perl modules for reading configuration files and parsing command line arguments"
     license = "Artistic-1.0-Perl OR GPL-1.0-or-later"
     homepage = "https://metacpan.org/pod/AppConfig"
-    url = ""
+    url = "https://metacpan.org/pod/AppConfig"
     package_type = "header-library"
-    settings = "os", "arch"
+    settings = "os", "compiler", "build_type", "arch"
     generators = "VirtualBuildEnv", "VirtualRunEnv"
 
     def export_sources(self):

@@ -1,4 +1,4 @@
-# AppConfig 1.71 Upstream Tests
+# AppConfig 1.71 Upstream Tests for Conan Repair 1.71.1
 
 Source: `E:/HarmonyPC/source-audit/appconfig-1.71/AppConfig-1.71`
 
@@ -18,3 +18,6 @@ Result:
 The counted upstream denominator is the 14 functional test files. The two
 author POD tests are documented separately because upstream does not require
 them for ordinary installation.
+
+INVENTORY_COUNT=14
+14/14 PASS

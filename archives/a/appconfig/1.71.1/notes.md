@@ -1,9 +1,10 @@
-# AppConfig 1.71 Adaptation Notes
+# AppConfig 1.71.1 Repair Notes
 
 ## Source
 
 - Upstream: CPAN `AppConfig`
-- Version: 1.71
+- Upstream version: 1.71
+- Conan repair version: 1.71.1
 - URL: https://cpan.metacpan.org/modules/by-module/AppConfig/AppConfig-1.71.tar.gz
 - SHA256: `1177027025ecb09ee64d9f9f255615c04db5e14f7536c344af632032eb887b0f`
 - License: Perl license, equivalent to Artistic-1.0-Perl or GPL-1.0-or-later.
@@ -84,3 +85,24 @@ make install DESTDIR=<package_folder>
 It also copies the pure Perl modules into package `lib/` so consumers have a
 stable Conan-side module root. `package_info()` prepends that directory to
 `PERL5LIB`.
+
+## Release Gate Repair
+
+- The archive path is canonicalized to archives/a/appconfig/1.71.1.
+- The package and consumer recipes both bind os, compiler, build_type, and
+  arch.
+- The contributor task, live Git branch, and replacement PR source branch are
+  all required to be exactly `fix/appconfig-1.71.1`.
+- Historical W3/W4 for `appconfig/1.71` remains evidence for the old candidate
+  only. The 1.71.1 r2 W3 passed on `10.62.215.229:2222`; its result SHA-256 is
+  `e9f4aa03659b881b88ac316fd18c1bc38ea3b3c75937e7cbcb3c0a06d5203c2d`.
+  A new independent W4 must bind the final metadata-updated candidate tree.
+- Every tracked recipe, test, metadata, report, and empty `patches/.gitkeep`
+  file is moved to `archives/a/appconfig/1.71.1`; no
+  `archives/a/AppConfig/` path remains in the final tree. The numeric repair
+  version changes the version segment as well as the package-directory case,
+  so the destination does not alias the old `AppConfig/1.71` path on a
+  case-insensitive checkout. This is a repair-version strategy, not permission
+  to retain uppercase package paths or invent versions for non-repair work.
+- /release remains a post-merge action; a merged PR alone does not prove
+  publication in ohpcd.

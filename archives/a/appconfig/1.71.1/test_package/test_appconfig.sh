@@ -1,4 +1,5 @@
 #!/bin/sh
+# Package consumer for the canonical appconfig/1.71.1 repair reference.
 set -eu
 
 conf_file="${PWD}/sample-appconfig.conf"

@@ -26,3 +26,5 @@ print $config->name;
 - Pure Perl module; no XS code and no native library output.
 - Runtime is provided through the `perl/5.42.2` Conan package.
 - Consumers receive `PERL5LIB` from the package runtime environment.
+
+- Canonical Conan repair reference: appconfig/1.71.1 (upstream AppConfig 1.71).
