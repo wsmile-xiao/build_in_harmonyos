@@ -668,17 +668,17 @@ except Exception:
     fi
     fi
 
-    # ── L0m: 目录结构校验 (R39 + R41 + R42) ──
+    # ── L0m: 目录结构校验 (R39 + L0m 规则4/5；编号专属 L0m，避免与铁律 R41/R42 碰撞) ──
     # archives/ 目录必须遵循 archives/<首字母>/<包名>/<版本>/ 结构
     # 规则 1: 路径层级必须是 4 段 archives/<单字符>/<包名>/<版本>
     # 规则 2: <首字母> 必须等于 <包名> 首字母（小写）
     # 规则 3: <版本> 目录名必须与 conanfile.py 中 version = "..." 一致
-    # 规则 4 (R41): conanfile.py 中 name = "..." 必须等于 <包名> 目录名
-    # 规则 5 (R42): <包名>/<版本> 必须是 conan slug（全小写 + 仅 [a-z0-9._+-]），
+    # 规则 4 (L0m-4): conanfile.py 中 name = "..." 必须等于 <包名> 目录名
+    # 规则 5 (L0m-5): <包名>/<版本> 必须是 conan slug（全小写 + 仅 [a-z0-9._+-]），
     #           conan 引用强制全小写（如 mawk/1.3.4-…-A273-v2 会报
     #           "must be all lowercase"），在 L0 提前拦截；
     #           + 允许（对齐 conan 官方 ConanName 字符集，C++ 库命名如 vera++）
-    echo "[step] L0m: Checking directory structure (R39/R41/R42)..."
+    echo "[step] L0m: Checking directory structure (R39/L0m-4/L0m-5)..."
     STRUCTURE_CHECK=$(python3 - "$pkg_dir" "$REPO_ROOT" "$CONANFILE" <<'PYEOF'
 import os, re, sys
 pkg_dir, repo_root, conanfile = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -698,18 +698,18 @@ if len(letter) != 1 or not letter.isalnum():
 if letter.lower() != pkg_name[0].lower():
     print(f"ERR|首字母目录 '{letter}' 与包名 '{pkg_name}' 首字母 '{pkg_name[0].lower()}' 不一致")
     sys.exit(0)
-# R42: conan slug 字符集（全小写 + [a-z0-9._+-]，首字符字母数字；
+# L0m-5: conan slug 字符集（全小写 + [a-z0-9._+-]，首字符字母数字；
 # 与 conan 官方 ConanName pattern 对齐，+ 用于 C++ 库命名如 vera++/libsigc++）
 if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*", pkg_name):
     print(
-        f"ERR|包名目录 '{pkg_name}' 不是 conan slug（R42）：必须全小写且仅含 "
+        f"ERR|包名目录 '{pkg_name}' 不是 conan slug（L0m-5）：必须全小写且仅含 "
         f"[a-z0-9._+-]（+ 可用，如 vera++）。含大写/空格的目录名会导致"
         f"conan create 报 must be all lowercase、CI 分支门禁与平台任务关联失败"
     )
     sys.exit(0)
 if not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*", pkg_ver):
     print(
-        f"ERR|版本目录 '{pkg_ver}' 不是 conan slug（R42）：必须全小写且仅含 "
+        f"ERR|版本目录 '{pkg_ver}' 不是 conan slug（L0m-5）：必须全小写且仅含 "
         f"[a-z0-9._+-]（版本允许 +，如 1.4+dfsg）。大写字母（如 A273）会让 "
         f"conan create 直接失败"
     )
@@ -720,12 +720,12 @@ try:
     if m and pkg_ver != m.group(1):
         print(f"ERR|版本目录 '{pkg_ver}' 与 conanfile.py version='{m.group(1)}' 不一致")
         sys.exit(0)
-    # R41: conanfile.name 必须与包名目录一致（conan create 用 conanfile.name 命名
+    # L0m-4: conanfile.name 必须与包名目录一致（conan create 用 conanfile.name 命名
     # 制品，而 CI L0n 门禁用目录名推期望分支——不一致会造成两者分裂）
     mn = re.search(r'^\s*name\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
     if mn and mn.group(1) != pkg_name:
         print(
-            f"ERR|conanfile.py name='{mn.group(1)}' 与包名目录 '{pkg_name}' 不一致 (R41)："
+            f"ERR|conanfile.py name='{mn.group(1)}' 与包名目录 '{pkg_name}' 不一致 (L0m-4)："
             f"conan 制品名以 conanfile.name 为准，CI 分支门禁以目录名为准，"
             f"两者必须相同"
         )
@@ -737,7 +737,7 @@ PYEOF
 )
     if [ "${STRUCTURE_CHECK%%|*}" = "ERR" ]; then
         ERR_MSG="${STRUCTURE_CHECK#*|}"
-        echo "[fail] L0m: 目录结构不合规 (R39/R41/R42): ${ERR_MSG}"
+        echo "[fail] L0m: 目录结构不合规 (R39/L0m-4/L0m-5): ${ERR_MSG}"
         echo "[hint] 正确格式: archives/<首字母>/<包名>/<版本号>/conanfile.py"
         echo "       例如: archives/f/fnt/1.9.1/conanfile.py"
         echo "       不要用 'homebrew' 等非版本号字符串作为版本目录名"

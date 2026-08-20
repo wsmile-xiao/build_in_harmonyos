@@ -153,7 +153,7 @@ conan create . --user=ohpcd --channel=stable -pr:h=$HOME/.conan2/profiles/ohos -
 
 ### Step 7: 提交 PR
 
-> ⚠️ **禁止直接 `git push`**。必须按 **SKILL.md §0.2 适配工作流规程**（W0-W5）执行：
+> ⚠️ **禁止直接 `git push`**。必须按 **SKILL.md §0.3 适配工作流规程**（W0-W5）执行：
 
 | 规程 | 内容 |
 |------|------|
@@ -161,8 +161,8 @@ conan create . --user=ohpcd --channel=stable -pr:h=$HOME/.conan2/profiles/ohos -
 | **W1** | 同步主仓库 — `git checkout main && git pull origin main` |
 | **W2** | PR 原子性 — 一个配方一个 PR，框架修改单独 PR |
 | **W3** | 本地 CI 模拟 — `bash ci/conan/build_and_test.sh <软件名>/<版本>` 通过后再提 PR |
-| **W4** | 知识图谱完整性 — 确认 `E###.kv` 与 `doc/E###.md` 配套 |
-| **W5** | Pre-PR 独立审计 — `python3 $SKILL_ROOT/scripts/pre_pr_audit.py` 审计通过后方可 push |
+| **W4** | Pre-PR 独立审计 — `python3 $SKILL_ROOT/scripts/pre_pr_audit.py` 审计通过后方可 push |
+| **W5** | 知识图谱完整性 — `graph validate` 检查 + 确认 `E###.kv` 与 `doc/E###.md` 配套 |
 
 **R16**: 协作不越权 — 创建功能分支 `git checkout -b feat/{软件名}-{版本}`，走 GitCode PR 流程。
 
@@ -432,7 +432,7 @@ patches:
 [ ] 系统同名库已配置静态链接（R26）
 [ ] 命令行工具已创建 commands.json（R38: 软件级别目录）
 [ ] 版本号正确（R37: 首次 X.Y.Z / 修复 X.Y.Z.N）
-[ ] 已通过 W3 本地 CI 模拟 + W5 Pre-PR 审计
+[ ] 已通过 W3 本地 CI 模拟 + W4 Pre-PR 审计
 ```
 
 ## 10. 参考实现

@@ -1,7 +1,7 @@
 # 贡献指南
 
 > 如何为鸿蒙编译知识库添加新软件或改进现有内容。
-> 对齐 SKILL.md v8.7 · Conan 配方体系
+> 对齐 SKILL.md v12.2 · Conan 配方体系
 
 ## 角色与权限
 
@@ -58,13 +58,13 @@ python3 $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|bui
 
 ```bash
 python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> <版本>
-# → 13 步全自动（含 Conan 配方生成+验证+收尾）
+# → 多阶段编译驱动（详见 SKILL.md §1.1 模式 A），含 Conan 配方生成+验证+收尾
 ```
 
 ### Conan 配方检查清单
 
 `conan-init` 后 AI 必须检查：
-- `requirements()`：依赖引用必须 ``（R27）
+- `requirements()`：依赖引用使用 `name/version` 格式
 - `generate()`：系统同名库必须 `BUILD_SHARED_LIBS=OFF`（R26）
 - `package_info()`：`cpp_info.libs` 正确声明
 - `conandata.yml`：包含 sha256 校验
@@ -99,14 +99,14 @@ python3 $SKILL_ROOT/scripts/ohc-run.py build <软件名> <版本>
 
 ```bash
 # 1. 本地自检
-python3 $SKILL_ROOT/scripts/ohc-run.py submit --check <软件名> <版本>
+python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本>
 
 # 2. 创建分支
 git checkout -b feat/<软件名>-<版本>
 
 # 3. 暂存文件
 git add archives/<首字母>/<软件名>/<版本>/
-git add knowledge/graph/drafts/    # 知识图谱草稿（如有）
+git add knowledge/drafts/    # 知识图谱草稿（如有）
 
 # 4. 提交
 git commit -m "feat(<软件名>): <版本> 编译完成"
@@ -248,7 +248,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py graph add E{NNN} --draft
 python3 $SKILL_ROOT/scripts/ohc-run.py engine "错误日志"
 ```
 
-草稿写入 `knowledge/graph/drafts/`，随 PR 一起提交，主编合并 PR 时自动移入正式目录并重建索引。
+草稿写入 `knowledge/drafts/`，随 PR 一起提交，主编合并 PR 时自动移入正式目录并重建索引。
 
 ### 依赖管理
 
@@ -268,12 +268,12 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --install <软件名>
 
 | 文档 | 说明 |
 |------|------|
-| [SKILL.md](SKILL.md) | 主操作手册（v8.7） |
+| [SKILL.md](SKILL.md) | 主操作手册（v12.2） |
 | [KNOW_YOUR_WHY.md](KNOW_YOUR_WHY.md) | 核心设计理念与约束 |
 | [docs/ADAPTATION_GUIDE.md](docs/ADAPTATION_GUIDE.md) | AI 适配操作手册 |
 | [docs/TEST_QUALITY_SPEC.md](docs/TEST_QUALITY_SPEC.md) | 测试质量规范 |
-| [references/iron-rules.md](references/iron-rules.md) | 32 条铁律详解 |
+| [references/iron-rules.md](references/iron-rules.md) | 43 条铁律详解（R1-R43） |
 
 ---
 
-*对齐 SKILL.md v8.7 · 2026-07-01*
+*对齐 SKILL.md v12.2 · 2026-08-20*

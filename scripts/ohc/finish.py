@@ -130,7 +130,7 @@ class FinishPipeline:
 
     # Step 1: refresh-patch
     def step1_refresh_patch(self):
-        log_info("Step 1/6: 补丁生成...")
+        log_info("Step 1/10: 补丁生成...")
         try:
             rc = refresh_patch_auto(self.software, self.version, pdir=str(self.pdir))
         except Exception as e:
@@ -143,7 +143,7 @@ class FinishPipeline:
 
     # Step 2: close-archive
     def step2_close_archive(self):
-        log_info("Step 2/6: 归档收尾...")
+        log_info("Step 2/10: 归档收尾...")
         try:
             skip = os.environ.get("_SKIP_PATCH_GENERATION") == "true"
             rc = close_archive(self.software, self.version, self.status, skip_patch=skip, pdir=str(self.pdir))
@@ -158,7 +158,7 @@ class FinishPipeline:
 
     # Step 2.5: G0 clean build verification
     def step25_g0_clean_verify(self):
-        log_info("Step 2.5/8: G0 干净构建验证...")
+        log_info("Step 3/10: G0 干净构建验证...")
         from .clean_verify import clean_verify
         rc = clean_verify(self.software, self.version, pdir=str(self.pdir))
         if rc != 0:
@@ -170,7 +170,7 @@ class FinishPipeline:
 
     # Step 3: verify (conan_verify for v3.0, or legacy verify_build)
     def step3_verify_build(self):
-        log_info("Step 3/6: 质量验证...")
+        log_info("Step 4/10: 质量验证...")
 
         # v3.0: Use ConanVerifier if conanfile.py exists
         conanfile = self.archive_dir / "conanfile.py"
@@ -220,7 +220,7 @@ class FinishPipeline:
 
     # Step 3.5: Local CI simulation (W3) — BLOCKING with HANDOFF
     def step35_local_ci(self):
-        log_info("Step 3.5/8: 本地 CI 模拟 (W3) [阻塞门禁]...")
+        log_info("Step 5/10: 本地 CI 模拟 (W3) [阻塞门禁]...")
         from .workflow_checks import run_local_ci
         rc = run_local_ci(self.software, self.version, pdir=str(self.pdir))
         if rc == 0:
@@ -252,6 +252,14 @@ class FinishPipeline:
             "archive_dir": str(self.archive_dir),
             "integrity_hash": integrity_hash,
         }
+        # 日志 SHA256（W3 完整输出，供审计比对）
+        w3_log = self.archive_dir / "reports" / "w3-local-ci.log"
+        if w3_log.exists():
+            try:
+                ci_result["log_sha256"] = hashlib.sha256(
+                    w3_log.read_bytes()).hexdigest()
+            except OSError:
+                pass
         ci_path = self.archive_dir / ".ci-result.json"
         ci_path.write_text(
             json.dumps(ci_result, ensure_ascii=False, indent=2),
@@ -264,7 +272,7 @@ class FinishPipeline:
         data = HandoffData(
             exit_reason="w3_local_ci_failed",
             exit_code=2,
-            step_failed="Step3.5",
+            step_failed="Step5",
             resume_cmd=f"python3 scripts/ohc-run.py finish {self.software} {self.version} {self.status}",
             knowledge_hit="none",
             knowledge_gap=False,
@@ -276,7 +284,9 @@ class FinishPipeline:
             archive_dir=str(self.archive_dir),
             ai_next_actions=[
                 "W3 本地 CI 模拟失败，必须修复后重新 finish",
-                "查看上方错误输出，定位 setup.sh 或 build_and_test.sh 失败原因",
+                "查看上方错误输出与 reports/w3-local-ci.log，定位 setup.sh 或 build_and_test.sh 失败原因",
+                "若为构建超时（预算耗尽而非真实失败）: python3 scripts/ohc-run.py timeout set "
+                f"{self.software} {self.version} <3600-57600秒>（CI 与 W3 同源配置）",
                 f"修复后重新运行: python3 scripts/ohc-run.py finish {self.software} {self.version} {self.status}",
             ],
         )
@@ -284,7 +294,7 @@ class FinishPipeline:
 
     # Step 4: finalize-archive
     def step4_finalize_archive(self):
-        log_info("Step 4/8: 归档校验...")
+        log_info("Step 6/10: 归档校验...")
         try:
             rc = finalize_archive(self.software, self.version, pdir=str(self.pdir))
         except Exception as e:
@@ -297,7 +307,7 @@ class FinishPipeline:
 
     # Step 5: knowledge completeness (W4)
     def step5_check_knowledge_gap(self):
-        log_info("Step 5/8: 知识图谱完整性检查 (W4)...")
+        log_info("Step 7/10: 知识图谱完整性检查 (W5)...")
         # W4: Enhanced knowledge graph completeness check
         from .workflow_checks import check_knowledge_completeness
         rc = check_knowledge_completeness(pdir=str(self.pdir))
@@ -318,7 +328,7 @@ class FinishPipeline:
 
     # Step 6: gen_summary
     def step6_gen_summary(self):
-        log_info("Step 6/8: 生成 SUMMARY.md...")
+        log_info("Step 8/10: 生成 SUMMARY.md...")
         try:
             generate_summary(pdir=str(self.pdir))
             self.steps["step6"] = True
@@ -329,7 +339,7 @@ class FinishPipeline:
 
     # Step 7: PR atomicity check (W2)
     def step7_pr_atomicity(self):
-        log_info("Step 7/8: PR 原子性检查 (W2)...")
+        log_info("Step 9/10: PR 原子性检查 (W2)...")
         from .workflow_checks import check_pr_atomicity
         rc = check_pr_atomicity(pdir=str(self.pdir))
         if rc == 0:
@@ -341,8 +351,8 @@ class FinishPipeline:
             log_warn("  ⚠️ 发现框架文件变更，请拆分到独立 PR")
 
     def step8_submit_readiness(self):
-        """Step 8/8: Submit readiness pre-check."""
-        log_info("Step 8/8: submit 就绪预检...")
+        """Step 10/10: Submit readiness pre-check."""
+        log_info("Step 10/10: submit 就绪预检...")
         checks = []
 
         # Check test-report.md
@@ -433,9 +443,12 @@ class FinishPipeline:
                     "manifest.yaml 的 knowledge_gained 为空，回顾编译过程提取经验写入"
                 )
 
-        # 3. Check draft knowledge
-        draft_dir = self.pdir / "knowledge" / "graph" / "draft"
-        draft_count = len(list(draft_dir.glob("E*-draft-*.kv"))) if draft_dir.is_dir() else 0
+        # 3. Check draft knowledge (实际草稿目录: knowledge/drafts/, 两种命名)
+        draft_dir = self.pdir / "knowledge" / "drafts"
+        draft_count = 0
+        if draft_dir.is_dir():
+            draft_count = len(list(draft_dir.glob("E*-draft-*.kv"))) + \
+                          len(list(draft_dir.glob("DRAFT-*.kv")))
         if draft_count > 0:
             actions.append(
                 f"已有 {draft_count} 条知识草稿（draft/），检查内容完整性后准备提交 PR"
@@ -473,10 +486,10 @@ class FinishPipeline:
 
         # 7. Always: self-check + git instructions
         actions.append(
-            f"完成知识整理后执行自检: python3 scripts/ohc-run.py submit --check {self.software} {self.version}"
+            f"完成知识整理后执行自检: python3 scripts/ohc-run.py submit {self.software} {self.version}"
         )
         actions.append(
-            f"自检通过后提交: git add archives/ knowledge/graph/draft/ && "
+            f"自检通过后提交: git add archives/ knowledge/drafts/ && "
             f'git commit -m "feat: 编译 {self.software} {self.version}" && '
             f"git push origin feat/{self.software}-{self.version}"
         )
@@ -554,7 +567,7 @@ class FinishPipeline:
 def finish_cli(argv=None):
     import argparse
     parser = argparse.ArgumentParser(prog="ohc finish",
-        description="编译收尾 6 步管线")
+        description="编译收尾 10 步管线")
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", help="版本号")
     parser.add_argument("status", nargs="?", default="published",
@@ -564,3 +577,4 @@ def finish_cli(argv=None):
     pipeline = FinishPipeline(args.software, args.version, args.status,
                                pdir=getattr(args, "project_dir", None))
     return pipeline.run()
+

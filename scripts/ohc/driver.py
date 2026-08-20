@@ -1,4 +1,4 @@
-"""Build driver — 13-step compilation pipeline.
+"""Build driver — 14-step compilation pipeline (Step0-13).
 
 Usage:
     python3 ohc-run.py build <software> [<version>] [--skip-check] [--force] [--resume-from=StepN]
@@ -32,8 +32,7 @@ from .dependency_resolver import (
 
 # ── Constants ──
 MAKE_JOBS = 2  # HarmonyOS sandbox limit
-CHECK_TIMEOUT = 600  # 10 min total
-CHECK_STUCK_THRESHOLD = 120  # 2 min no output
+CHECK_TIMEOUT = int(os.environ.get("OHC_CHECK_TIMEOUT", "600"))  # make check 超时（可用环境变量扩展）
 
 # Shell for subprocess — HarmonyOS restricts fork+exec to signed binaries
 _SHELL = shutil.which("zsh") or shutil.which("sh") or "/system/bin/sh"
@@ -45,7 +44,7 @@ _STEP_MAP = {
 
 
 class BuildDriver:
-    """13-step compilation driver."""
+    """14-step compilation driver (Step0-13, 含半步 1.5/2.5/11.5)."""
 
     def __init__(self, software: str, version: str = "",
                  skip_check: bool = False, force: bool = False,
@@ -988,6 +987,7 @@ class BuildDriver:
 
         # Run with timeout (simplified from bash's complex monitoring)
         start_time = time.time()
+        timed_out = False
         proc = subprocess.Popen(
             [_SHELL, "-c", check_cmd],
             cwd=str(self.build_src_dir),
@@ -1000,16 +1000,25 @@ class BuildDriver:
             elapsed = time.time() - start_time
             if elapsed > CHECK_TIMEOUT:
                 proc.terminate()
+                timed_out = True
                 self._log(f"⚠️ make check 超时 ({CHECK_TIMEOUT}s)")
+                try:
+                    proc.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
                 break
             time.sleep(15)
 
-        rc = proc.returncode or 0
+        rc = proc.returncode
+        # None/negative = 被信号杀死（超时终止），不能当 PASS
+        if rc is None or rc < 0:
+            rc = 124
 
         # Generate report
         report = self.archive_dir / "reports" / "test-report.md"
         report.parent.mkdir(parents=True, exist_ok=True)
-        status = "PASS" if rc == 0 else "FAIL"
+        status = "TIMEOUT" if (timed_out and rc == 124) else ("PASS" if rc == 0 else "FAIL")
         report.write_text(
             f"# Test Report\n\nStatus: {status}\nRC: {rc}\n"
             f"Duration: {int(time.time() - start_time)}s\n"
@@ -1302,7 +1311,7 @@ def build_cli(argv: list[str] | None = None) -> int:
     import argparse
     parser = argparse.ArgumentParser(
         prog="ohc build",
-        description="13步编译驱动管线",
+        description="14 步编译驱动管线（Step0-13）",
     )
     parser.add_argument("software", help="软件名称")
     parser.add_argument("version", nargs="?", default="", help="版本号")
@@ -1324,6 +1333,3 @@ def build_cli(argv: list[str] | None = None) -> int:
     except RuntimeError as e:
         log_fail(str(e))
         return 1
-
-1
-

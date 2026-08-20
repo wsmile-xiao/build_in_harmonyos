@@ -29,6 +29,8 @@ _MODULES = {
     "req": "requirements",
     # RESULT Step: 任务终态 result.json 上报（SKILL_RESULT_PROTOCOL_SPEC）
     "result": "result_report",
+    # v12.3: CI/W3 构建超时配置管理（ci/config/build_timeouts.txt）
+    "timeout": "build_timeout",
 }
 
 

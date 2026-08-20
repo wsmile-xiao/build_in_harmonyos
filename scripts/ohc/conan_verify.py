@@ -510,12 +510,19 @@ authors: {git_author}
             pr_args = f"-pr:h={self.profile} -pr:b={self.profile}"
 
         # ── E017 prevention: inject ghfast.top mirror for GitHub URLs ──
+        # 崩溃恢复：上次进程被杀时 finally 未执行，残留的 .bak 先恢复
         conandata_path = self.archive_dir / "conandata.yml"
+        bak_path = conandata_path.with_name("conandata.yml.ghfast-bak")
+        if bak_path.exists() and conandata_path.exists():
+            conandata_path.write_text(bak_path.read_text(encoding="utf-8"), encoding="utf-8")
+            bak_path.unlink()
+            log_warn("  🔄 已恢复上次崩溃残留的 conandata.yml（镜像注入回滚）")
         _url_injected = False
         _original_conandata = None
         if conandata_path.exists():
             _original_conandata = conandata_path.read_text(encoding="utf-8")
             if "github.com" in _original_conandata and "ghfast.top" not in _original_conandata:
+                bak_path.write_text(_original_conandata, encoding="utf-8")
                 modified = _original_conandata.replace("https://github.com", "https://ghfast.top/https://github.com")
                 conandata_path.write_text(modified, encoding="utf-8")
                 _url_injected = True

@@ -2,9 +2,9 @@
 
 # 铁律与 AI 执行风格规范
 
-来源: SKILL.md §1.2
+来源: SKILL.md §1.3
 
-## 铁律总表（40 条，含 2 条已废弃，38 条活跃，违反=bug）
+## 铁律总表（43 条，R1-R43，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -48,6 +48,9 @@
 | **R38** | **命令行工具必须声明 commands.json** | 构建产物包含可执行文件的包，必须在**软件级别**目录下创建 `commands.json` | 命令行工具缺少 commands.json，或库类型误加 commands.json |
 | **R39** | **源码 URL 必须为官方源** | conandata.yml 中的 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源，CI 自动添加镜像 fallback | 使用个人 fork、网盘、不明 CDN 作为源码下载地址 |
 | **R40** | **深度适配库需验证适配完整性** | 图形渲染/UI框架/多媒体/外设/系统底层类库，编译通过不等于适配完成，需检查实质性平台适配代码（非 stub） | 仅编译通过但无平台适配补丁，或 test_package 只调用 version() 无实际功能验证 |
+| **R41** | **外部依赖阻塞止损** | registry/git remote 连续 3 次不可达且超 30 分钟 → 立即写 result.json 止损；多包任务单包止损不连坐；剩余预算 <40min 只收尾 | 无限重试外部阻塞；多包任务因单包阻塞全部放弃 |
+| **R42** | **PR 创建即上报** | PR 创建成功即写 result.json partial 草稿，工具化监控 CI（红→修复→push→`submit --resume`；绿→自动升级 success）；`--no-wait` / `OHC_SUBMIT_NO_WAIT=1` 可跳过等待 | 自己写 sleep 盲等 CI / AI Review |
+| **R43** | **调参螺旋止损** | 同一错误类别连续 5 次调参失败 → 停止调参，写 result.json（failed_build + 5 次尝试证据）退出 | 无证据盲试调参死循环 |
 
 ---
 
@@ -174,7 +177,7 @@ ls /lib*/**/lib<name>.so* /lib/**/lib<name>.so* 2>/dev/null
 ```
 探索性编译成功 → 生成 conanfile.py → conan_verify
                                     ├─ PASS → status=published
-                                    └─ FAIL → status=built (需修复)
+                                    └─ FAIL → status=failed
 ```
 
 `conan_verify` 执行：
@@ -448,13 +451,13 @@ CI 在 conan create 成功后执行 L1e：
 conan install --requires="zlib/1.3.1" -pr="ohos-aarch64" --build=missing
 
 # ✅ 验证某个包是否有预编译 binary — 方法二：直接 download
-conan download "zlib/1.3.1" -r=cnb-conan
+conan download "zlib/1.3.1" -r=ohpcd
 
 # ✅ 查看制品仓有哪些 recipe（仅 recipe 列表，不含 binary 状态）
-conan list "*/*" -r=cnb-conan
+conan list "*/*" -r=ohpcd
 
 # ❌ 错误 — 用 list 查 binary，会得到 "No packages found" 的误判
-conan list "*/*:*/*" -r=cnb-conan
+conan list "*/*:*/*" -r=ohpcd
 ```
 
 #### 判断规则
@@ -475,7 +478,7 @@ conan list "*/*:*/*" -r=cnb-conan
 适配包 B（依赖 A）
   │
   ├─ Step 1: 检查 A 是否已发布到制品仓
-  │   conan install --requires="A/x.x" -r=cnb-conan
+  │   conan install --requires="A/x.x" -r=ohpcd
   │
   │   ├─ 已发布 → 继续 Step 2（正常流程）
   │   │
@@ -759,3 +762,66 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$DEFAULT_PREFIX 2>&1 | tail -3
       → 归档和知识库都没有 → 记录为新问题
       → 修复后更新 notes.md + conanfile.py + 继续
 ```
+
+---
+
+### R41 详细说明：外部依赖阻塞止损
+
+> **核心原因**：外部依赖（制品仓 registry / git remote）不可达属于环境外部因素，重试不会改变结果，只会烧掉预算。禁止无限重试，触发条件满足即止损。
+
+#### 触发条件（任一满足即止损）
+
+- registry / git remote **连续 3 次不可达**且总耗时**超 30 分钟**
+- 失败明确属于环境外部因素（上游未发布 / 网络故障）
+
+#### 止损动作
+
+- **立即写 result.json 止损**（status 按现象判定），禁止无限重试
+- **多包任务单包止损不连坐**：成功包照常上报不白干，失败包单独止损，最终聚合如实写明
+- **剩余预算 <40 分钟只收尾**：不启动新的编译/验证大步骤，只完成已有产物的归档与上报
+
+#### 禁止事项
+
+- 为绕过依赖伪造 `.ci-result.json`、dummy 包顶替、跳过 W3、伪造 result.json——一律禁止
+
+> 实战教训：task 3659 因 registry 不可达反复重试未及时止损，预算耗尽。
+
+---
+
+### R42 详细说明：PR 创建即上报（partial 草稿 + CI 闭环到绿）
+
+> **核心原因**：PR 创建成功是可交付的里程碑。agent 此后若 sleep 盲等 CI / AI Review，被节点超时杀死时 result 未写，已建 PR 的工作量会直接丢失。
+
+#### 标准动作（v12.2：draft-then-close-loop）
+
+1. **PR 创建成功那一刻**：立即写 result.json partial 草稿（`--status partial` + PR 链接）——这是防猝死保底，不是终点
+2. **默认继续工具化监控 CI**（`submit` 内置 2400s 轮询），**禁止 agent 自己写 sleep 轮询 CI / AI Review**
+3. **CI 红了 ≠ 放弃**：失败详情自动提取进 HANDOFF → 按报错修复 → 本地 W3 复验 → `git push`（CI 自动重跑）→ `submit --resume` 继续监控
+4. **CI 绿了**：partial 自动升级为 success（终态）
+
+#### 跳过等待的合法通道
+
+- 工具支持 `submit --no-wait` 或环境变量 `OHC_SUBMIT_NO_WAIT=1`：PR 建后立即返回（partial 草稿已落盘），CI 结果交由 follow-up 任务处理（`submit --resume` 从断点续，不重跑 W1-W4）
+- 仅当剩余预算 <40min（R41）或显式 `--no-wait` 时，才允许停在 partial 退出
+
+> 实战教训：task 3681 建 PR #4629 后自己写 sleep 盲等 CI，等待中被节点超时杀死，result 未写被判 failed，丢失 90% 工作量。教训不是"不等 CI"，而是"不裸等"：先落草稿，再用工具轮询，红了修到绿。
+
+---
+
+### R43 详细说明：调参螺旋止损
+
+> **核心原因**：与 R41 互补——R41 管外部阻塞，R43 管内部死循环。同一错误类别连续多次调参失败，基本可断定是方法性错误，继续盲试不会收敛。
+
+#### 触发条件
+
+- **同一错误类别**（如 cmake 组件名 `components`/`cmake_file_name`、目标名、include/lib 路径等 conanfile 调参）**连续 5 次修改仍失败**
+
+#### 止损动作
+
+- 停止调参，写 result.json（`--status failed_build`，`--failed-reason` 附 5 次尝试的错误摘要与已排除的方向）退出
+
+#### 触发前自查
+
+- 错误信息与上次是否同类？若同类，第 5 次尝试前就该收手——5 次同方向失败基本可断定方法性错误（查归档或上游 conanfile 参考）
+
+> 实战教训：task 3681 对 `Qt5::3DCore` 的 component/cmake_file_name/includedirs 反复推演调参 3.5 小时无一次阶段性上报，直到预算耗尽。

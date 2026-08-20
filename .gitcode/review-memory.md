@@ -185,7 +185,7 @@ archives/{letter}/{name}/
 ### 26. PR body 禁止残留占位符
 PR 描述中禁止出现 `(请填写)` 占位符。submit 命令从 conandata.yml/conanfile.py/test-report.md/notes.md/patches/ 自动填充。残留占位符 = 未完成，要求补充。
 
-### 27. AI 检视意见必须闭环 (R41)
+### 27. AI 检视意见必须闭环 (RV-27)
 PR 创建后 atomgit-bot 自动进行 AI 代码检视。检视意见**不一定正确**，但**必须逐条响应**：
 - 合理的意见 → 修改代码并 push
 - 不合理的意见 → 在 PR 上回复说明原因

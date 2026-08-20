@@ -238,7 +238,7 @@ def generate_subtask_objective(
 
 ## 完成标准
 - finish 返回 0（manifest status=success, .packaged + .knowledge-done 标记存在）
-- 如有新错误模式 → knowledge/graph/draft/ 中有对应草稿
+- 如有新错误模式 → knowledge/drafts/ 中有对应草稿
 
 ## 输出要求
 编译结果摘要：

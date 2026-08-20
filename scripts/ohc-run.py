@@ -2,9 +2,9 @@
 """ohc CLI wrapper — delegates to scripts/ohc package.
 
 Usage:
-    python3 scripts/ohc.py engine [options] <error_text>
-    python3 scripts/ohc.py status [options]
-    python3 scripts/ohc.py handoff [options] <json_data>
+    python3 scripts/ohc-run.py engine [options] <error_text>
+    python3 scripts/ohc-run.py status [options]
+    python3 scripts/ohc-run.py handoff [options] <json_data>
 """
 import sys
 import os

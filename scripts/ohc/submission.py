@@ -229,14 +229,15 @@ def _check_test_report(ver_dir: Path) -> bool:
 # ═══════════════════════════════════════════════════════
 
 def _scan_draft_entries(software: str, pdir: str | None = None) -> list[str]:
-    """Scan knowledge/graph/draft/ for .kv files belonging to this software.
+    """Scan knowledge/drafts/ for .kv files belonging to this software.
 
     We match by looking at the contributor_id field or by scanning all draft
     .kv files (since drafts don't have explicit software tagging).
 
     Returns list of draft .kv file paths.
     """
-    draft_dir = Path(graph_dir(pdir)) / "draft"
+    project = Path(pdir) if pdir else Path(find_project_dir())
+    draft_dir = project / "knowledge" / "drafts"
     if not draft_dir.is_dir():
         return []
     return sorted([str(f) for f in draft_dir.glob("E*-draft-*.kv")])
@@ -982,7 +983,7 @@ def cmd_submit(software: str, version: str,
     archive_path = f"archives/{letter}/{software}/{version}/"
     software_archive_root = f"archives/{letter}/{software}/"
     result = subprocess.run(
-        [_GIT, "add", archive_path, "knowledge/graph/draft/"],
+        [_GIT, "add", archive_path, "knowledge/drafts/"],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
         log_fail(f"❌ git add 失败: {result.stderr.strip()}")
@@ -1002,7 +1003,7 @@ def cmd_submit(software: str, version: str,
             # Allow: current package archive, software-level files (commands.json etc), knowledge drafts
             if not f.startswith(archive_path) \
                and not (f.startswith(software_archive_root) and f.count("/") <= 3) \
-               and not f.startswith("knowledge/graph/draft/"):
+               and not f.startswith("knowledge/drafts/"):
                 unexpected.append(f)
         if unexpected:
             log_fail(f"❌ 暂存了不属于当前包的文件 (违反 W2 原子性):")
@@ -1103,25 +1104,36 @@ def cmd_submit(software: str, version: str,
     repo = "OpenHarmonyPCDeveloper/build_in_harmonyos"
 
     log_info("创建 GitCode PR...")
-    pr_result = subprocess.run(
-        [sys.executable, gitcode_pr, "create-pr",
-         "--repo", repo,
-         "--source", branch_name,
-         "--target", "main",
-         "--title", pr_title,
-         "--description", pr_body_text],
-        capture_output=True, text=True, timeout=30)
+    try:
+        pr_result = subprocess.run(
+            [sys.executable, gitcode_pr, "create-pr",
+             "--repo", repo,
+             "--source", branch_name,
+             "--target", "main",
+             "--title", pr_title,
+             "--description", pr_body_text],
+            capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        log_fail("❌ 创建 PR 命令超时（30s），网络可能不稳定")
+        _emit_submit_handoff(software, version, ver_dir, project_dir,
+            "pr_creation_timeout",
+            [f"gitcode_pr.py create-pr 超时，请手动重试或检查网络",
+             f"手动创建: python3 scripts/gitcode_pr.py create-pr --repo {repo} --source {branch_name} --target main --title '{pr_title}'"])
+        return 1
 
     pr_number = None
     if pr_result.returncode == 0:
         pr_number = _parse_pr_number(pr_result.stdout)
     elif "already exists" in pr_result.stderr.lower() or "409" in pr_result.stderr:
         log_warn("  PR 已存在，查找现有 PR 编号...")
-        list_result = subprocess.run(
-            [sys.executable, gitcode_pr, "list-prs",
-             "--repo", repo, "--source-branch", branch_name],
-            capture_output=True, text=True, timeout=15)
-        pr_number = _parse_pr_number(list_result.stdout)
+        try:
+            list_result = subprocess.run(
+                [sys.executable, gitcode_pr, "list-prs",
+                 "--repo", repo, "--source-branch", branch_name],
+                capture_output=True, text=True, timeout=15)
+            pr_number = _parse_pr_number(list_result.stdout)
+        except subprocess.TimeoutExpired:
+            log_warn("  list-prs 查询超时，稍后可用 --resume 恢复")
 
     if not pr_number:
         log_fail(f"❌ PR 创建/查找失败")
@@ -1326,17 +1338,25 @@ def _verify_review_closure(gitcode_pr: str, repo: str, pr_number: int) -> list:
 
     返回未回复意见列表；空列表 = 闭环通过。
     """
-    result = subprocess.run(
-        [sys.executable, gitcode_pr, "monitor-review", "--json",
-         "--repo", repo, "--number", str(pr_number)],
-        capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(
+            [sys.executable, gitcode_pr, "monitor-review", "--json",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        log_warn("  ⚠️ 闭环校验查询超时（已放行）——请手动确认检视意见已全部回复:")
+        log_warn(f"     python3 scripts/gitcode_pr.py monitor-review --repo {repo} --number {pr_number}")
+        return []
     out = result.stdout
     if "--- JSON ---" not in out:
-        return []  # 解析失败不阻断，保守放行
+        log_warn("  ⚠️ 闭环校验输出无法解析（已放行）——请手动确认检视意见已全部回复:")
+        log_warn(f"     python3 scripts/gitcode_pr.py monitor-review --repo {repo} --number {pr_number}")
+        return []
     try:
         data = json.loads(out.split("--- JSON ---")[-1].strip())
         return data.get("unreplied_opinions", [])
     except json.JSONDecodeError:
+        log_warn("  ⚠️ 闭环校验 JSON 解析失败（已放行）——请手动确认检视意见已全部回复")
         return []
 
 
@@ -1355,24 +1375,36 @@ def _monitor_ci(gitcode_pr: str, repo: str, pr_number: int,
 
     if trigger:
         # 先查当前状态，CI 已在跑则不重复触发
-        pre = subprocess.run(
-            [sys.executable, gitcode_pr, "ci-status",
-             "--repo", repo, "--number", str(pr_number)],
-            capture_output=True, text=True, timeout=15)
-        pre_out = pre.stdout
+        try:
+            pre = subprocess.run(
+                [sys.executable, gitcode_pr, "ci-status",
+                 "--repo", repo, "--number", str(pr_number)],
+                capture_output=True, text=True, timeout=15)
+            pre_out = pre.stdout
+        except subprocess.TimeoutExpired:
+            pre_out = ""
         if not any(s in pre_out for s in ("RUNNING", "QUEUED", "PASSED", "FAILED")):
             log_info(f"  平台 CI 需主动触发，评论 /rebuild (PR #{pr_number})...")
-            subprocess.run(
-                [sys.executable, gitcode_pr, "trigger-ci",
-                 "--repo", repo, "--number", str(pr_number)],
-                capture_output=True, text=True, timeout=30)
+            try:
+                subprocess.run(
+                    [sys.executable, gitcode_pr, "trigger-ci",
+                     "--repo", repo, "--number", str(pr_number)],
+                    capture_output=True, text=True, timeout=30)
+            except subprocess.TimeoutExpired:
+                log_warn("  trigger-ci 超时（继续轮询，CI 可能已触发）")
             _time.sleep(10)  # 等平台响应启动构建
 
     while elapsed < timeout:
-        result = subprocess.run(
-            [sys.executable, gitcode_pr, "ci-status",
-             "--repo", repo, "--number", str(pr_number)],
-            capture_output=True, text=True, timeout=15)
+        try:
+            result = subprocess.run(
+                [sys.executable, gitcode_pr, "ci-status",
+                 "--repo", repo, "--number", str(pr_number)],
+                capture_output=True, text=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            log_warn("  ci-status 查询超时，继续等待...")
+            _time.sleep(interval)
+            elapsed += interval
+            continue
 
         output = result.stdout
         if "PASSED" in output:
@@ -1436,10 +1468,13 @@ def _save_submit_state(ver_dir: Path, state: dict) -> None:
 
 def _call_monitor_review(gitcode_pr: str, repo: str, pr_number: int) -> dict | None:
     """Call gitcode_pr.py --json monitor-review and parse result."""
-    result = subprocess.run(
-        [sys.executable, gitcode_pr, "--json", "monitor-review",
-         "--repo", repo, "--number", str(pr_number)],
-        capture_output=True, text=True, timeout=30)
+    try:
+        result = subprocess.run(
+            [sys.executable, gitcode_pr, "--json", "monitor-review",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return None
     if result.returncode != 0:
         return None
     # Parse JSON from stdout (after "--- JSON ---" marker)
@@ -1770,7 +1805,7 @@ def _review_single(software: str, version: str,
         _record("1. 补丁完整性", "PASS", "无补丁目录")
 
     # ── Check 2: E编号冲突检测 ──
-    draft_dir = Path(graph_dir(project_dir)) / "draft"
+    draft_dir = Path(project_dir) / "knowledge" / "drafts"
     index_path = Path(graph_dir(project_dir)) / "index.tsv"
     existing_ids: set[str] = set()
     if index_path.exists():

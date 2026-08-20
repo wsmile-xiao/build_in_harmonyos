@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 11.4
+version: 12.3
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -82,7 +82,7 @@ SKILL_ROOT="$(dirname "$(find "${ATOMCODE_HOME:-$HOME/.atomcode}" -name "SKILL.m
 
 **Agent ID**：自动获取 4 位随机标识（如 `A7F3`），用于知识图谱草稿归属（不用于分支命名，分支名不带后缀），可通过 `OHC_AGENT_ID` 预设。
 
-### §0.2 适配工作流规程（⭐ 强制执行）
+### §0.3 适配工作流规程（⭐ 强制执行）
 
 以下 6 条规程在每次软件适配中**强制执行**，违反=流程缺陷：
 
@@ -118,16 +118,16 @@ git pull origin main
 > 混合提交=审核困难+回滚困难。配方 PR 和框架 PR 的审核标准不同。
 > 多软件适配任务=按软件逐个开分支 `feat/<软件名>-<版本>`、逐个提 PR，每次从最新 main 切出（W1）。
 >
-> **结构完整性由 `finish` step [5/9] 强制执行**（L0a-L0e 等效检查）：test_package/ 目录
+> **结构完整性由 `finish` step [5/10] 强制执行**（L0a-L0e 等效检查）：test_package/ 目录
 > 存在、conanfile.py 存在、测试源文件存在、MANIFEST.yml 存在。不通过 → HANDOFF + exit 1。
 > 历史教训：CI 审计发现 181 个结构缺失失败（115 缺测试源 + 66 缺 MANIFEST）。
 
-**W3 — 本地编译验证（⭐ 嵌入 finish step [5/9]，HANDOFF 强制）**
+**W3 — 本地编译验证（⭐ 嵌入 finish step [5/10]，HANDOFF 强制）**
 
 > **不是散乱脚本，而是 finish 流程内部的阻塞步骤。** AI 跑 finish 时自动执行，
 > 无法跳过。失败输出 HANDOFF 块（含根因+修复命令+resume 指令），AI 修复后 `--resume` 继续。
 
-`finish` step [5/9] 内部执行：
+`finish` step [5/10] 内部执行：
 1. **W2 结构检查**（L0a-L0e）：test_package/ 完整性 → 不通过 HANDOFF
 2. **R36 依赖检查**：`conan download --only-recipe` 验证依赖已发布 → 未发布 HANDOFF
 3. **conan create 编译验证**：实际运行 `conan create` → 失败 HANDOFF（含知识图谱匹配的根因）
@@ -137,6 +137,13 @@ git pull origin main
 > 含日志哈希。`submit` 会验证此哈希与实际日志匹配。
 > 历史教训：CI 审计发现 431 个编译失败流入 CI（55%），根因是 AI 跳过 conan create
 > 验证或手动伪造 `.ci-result.json`。嵌入式 HANDOFF 从结构上消除此可能。
+>
+> **⭐ 构建超时预算（W3 与 CI 同源）**：`conan create` 默认 3600s，可按包覆盖（3600~57600s）。
+> 配置文件：`ci/config/build_timeouts.txt`（精确 `name/version 秒数`）。工具化管理：
+> `ohc-run.py timeout get <name> <ver>` 查询 / `timeout set <name> <ver> <秒> [--force]` 新增覆盖 /
+> `timeout list` / `timeout validate`（与 CI AWK 校验同构）。本地 W3 自动读取同一配置
+> （环境变量 `OHC_W3_TIMEOUT=<秒>` 可临时只调本地）。实战案例：ScaLAPACK 2.2.3 上游 100 项
+> 测试实测 4451s 超默认预算，测试全过却被 conan create 超时判负 → `timeout set scalapack 2.2.3 10800`。
 
 **W3 外部依赖阻塞止损（⭐ 硬性规则，task 3659 教训）**
 
@@ -149,7 +156,7 @@ W3/finish/submit 卡在**环境外部因素**时，禁止无限重试 workaround
 
 **止损后严禁**（为绕过依赖）：伪造 `.ci-result.json`、dummy 包顶替、跳过 W3、伪造 result.json。
 
-**R43 调参螺旋止损（内部死循环，2026-08-20 新增）**：R41 管外部阻塞，本条管内部死循环——自研 conanfile.py 反复调参（cmake 组件名 `components`/`cmake_file_name`、目标名、include/lib 路径等）**同一错误类别连续 5 次修改仍失败** → 停止调参，写 result.json（`--status failed_build`，`--failed-reason` 附 5 次尝试的错误摘要与已排除的方向）退出。实测教训：task 3681 对 `Qt5::3DCore` 的 component/cmake_file_name/includedirs 反复推演 3.5 小时无一次阶段性上报，直到预算耗尽。触发前自查：错误信息与上次是否同类？若同类，第 5 次尝试前就该收手——5 次同方向失败基本可断定方法性错误（查 references/porting-troubleshooting.md 或上游 conanfile 参考），继续盲试不会收敛。
+**R43 调参螺旋止损（内部死循环，2026-08-20 新增）**：R41 管外部阻塞，本条管内部死循环——自研 conanfile.py 反复调参（cmake 组件名 `components`/`cmake_file_name`、目标名、include/lib 路径等）**同一错误类别连续 5 次修改仍失败** → 停止调参，写 result.json（`--status failed_build`，`--failed-reason` 附 5 次尝试的错误摘要与已排除的方向）退出。实测教训：task 3681 对 `Qt5::3DCore` 的 component/cmake_file_name/includedirs 反复推演 3.5 小时无一次阶段性上报，直到预算耗尽。触发前自查：错误信息与上次是否同类？若同类，第 5 次尝试前就该收手——5 次同方向失败基本可断定方法性错误（查 references/iron-rules.md（R41-R43 详解）或上游 conanfile 参考），继续盲试不会收敛。
 
 **现象 → status 判定对照表**：
 
@@ -222,7 +229,7 @@ W3/finish/submit 卡在**环境外部因素**时，禁止无限重试 workaround
 # 检查草稿/正式条目字段完整性
 python3 $SKILL_ROOT/scripts/ohc-run.py graph validate
 # 确认草稿已生成（如本次编译有新错误模式）
-ls knowledge/drafts/DRAFT-*.kv 2>/dev/null
+ls knowledge/drafts/*.kv 2>/dev/null  # 两种命名: DRAFT-*.kv 与 E###-draft-<AgentID>.kv
 # 确认 doc/ 与 graph/ 配套（E###.md ↔ E###.kv）
 ```
 > 每个 E###.kv 必须有配套的 doc/E###.md，关键字段（error_signature、root_cause、rec_approach）不得为空。
@@ -262,7 +269,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本>
 # 如 AI Review HANDOFF 后修复并继续:
 python3 $SKILL_ROOT/scripts/ohc-run.py submit <软件名> <版本> --resume
 
-# Step 5: SKILL_FEEDBACK (submit 成功后自动调用，也可手动运行)
+# Step 6: SKILL_FEEDBACK (submit 成功后自动调用，也可手动运行)
 python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本>
 # 如 HANDOFF 后填写建议并验证:
 python3 $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本> --resume
@@ -321,7 +328,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R33 | **build() 禁止依赖未定义的 shell 环境变量**：编译器/标志必须从 Conan Toolchain 或 `self.conf_info` 获取，不能裸用 `${CC}`/`${CFLAGS}` 等 shell 变量（release worker 上为空→编译静默失败） |
 | R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
 | R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
-| R36 | **依赖必须先发布再构建下游**（机械门禁）：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C。`finish` step [5/9] 和 CI L0i 均 Hard Fail（不止警告） |
+| R36 | **依赖必须先发布再构建下游**（机械门禁）：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C。`finish` step [5/10] 和 CI L0i 均 Hard Fail（不止警告） |
 | R37 | **版本号 = 上游版本 + 适配修复后缀**：首次适配用上游版本 `X.Y.Z`，修复适配问题后加后缀 `X.Y.Z.N`（N 从 1 递增）。原因：cnb.cool 制品仓不支持同版本多 revision 并存，必须用版本号区分 |
 | R38 | **命令行工具必须声明 commands.json**：如果构建产物包含可执行文件，必须在**软件级别**目录下创建 `commands.json`（hicmd 格式）。库类型不需要。CI 门禁 L0k 自动校验 |
 | R39 | **源码 URL 必须为官方源**：conandata.yml 中 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源，禁止个人 fork/网盘/不明 CDN。CI 自动添加镜像 fallback |
@@ -378,6 +385,7 @@ configure 失败？
 | 生成 Conan 配方 | templates/conanfile-*.py.tmpl + docs/ADAPTATION_GUIDE.md | conan-init 时 |
 | 验证 Conan 配方 | ci/conan/profiles/ohos-aarch64 | conan-verify 时 |
 | 预编译风险扫描 | knowledge/graph/pre-scan-rules.yaml | build Step 2.5（自动） |
+| **W3/CI 构建超时** | ci/config/build_timeouts.txt + `ohc-run.py timeout` | W3/CI 超时发生时 |
 | 编译出错 | knowledge/graph/index.tsv → graph/E*.kv | 错误发生时 |
 | 缺少依赖 | ohc-run.py resolve-deps --list-available | init-build Step 7 |
 | 失败处理 | references/failure-handling.md | R11+R12 流程 |
@@ -438,7 +446,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify <软件名> <版本>
 | **G0** | 预构建风险评估 | 知识图谱预查询，非阻塞 |
 | **G1** | 配方完整性 | conanfile.py + conandata.yml + test_package/ 存在且字段完整 |
 | **G2** | conan create | 从干净源码构建，验证配方自包含性 |
-| **G3** | 系统同名库隔离 (R26) | readelf -d 检查系统同名库未输出 .so 到系统路径 |
+| **G3** | 系统同名库隔离 (R26) | 对比系统库目录（/lib、/lib64）基名，检查包内 .so 是否与系统同名冲突 |
 | **G4** | 产物完整性 | bin/lib/include 产物检查 |
 | **L2/L4/L5** | smoke test / 安全扫描 / 产物基线 | `--version`可执行 / NX·PIE·RELRO / SHA256 基线对比 |
 
@@ -452,15 +460,16 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 
 | 步骤 | 内容 | 失败处理 |
 |------|------|---------|
-| [1/9] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
-| [2/9] close-archive | 归档关闭 | exit 2 |
-| [3/9] clean-verify 重建 | 干净构建验证（非阻塞，平台限制可跳过） | 非阻塞 |
-| [4/9] conan-verify | Conan 配方验证（如 Step 2.6 已通过且配方未修改则跳过） | ❌ 阻塞 |
-| [5/9] W2结构+R36依赖+W3编译 | 结构检查(L0a-L0e)+依赖发布(conan download)+conan create，写入.ci-result.json(含日志哈希) | ❌ 阻塞 (HANDOFF) |
-| [6/9] commands.json 检查 (R38) | 命令行工具声明验证 | 非阻塞（警告） |
-| [7/9] finalize-archive | 清理+校验+版本索引 | 非致命 |
-| [8/9] check-knowledge-gap | 知识完整性检查 (W5) | 非阻塞 |
-| [9/9] gen_summary + PR 原子性 | 重新生成 SUMMARY.md (W2 检查) | 非致命 |
+| [1/10] refresh-patch --auto | 补丁生成 | 跳过，继续归档 |
+| [2/10] close-archive | 归档关闭 | exit 2 |
+| [3/10] clean-verify 重建 (G0) | 干净构建验证（非阻塞，平台限制可跳过） | 非阻塞 |
+| [4/10] conan-verify | Conan 配方验证（如 Step 2.6 已通过且配方未修改则跳过） | 失败降级 status 并记录 |
+| [5/10] W2结构+R36依赖+W3本地CI | 结构检查(L0a-L0e)+依赖发布(conan download)+conan create（超时预算读 build_timeouts.txt），写入 .ci-result.json（integrity_hash + 日志 SHA256） | ❌ 阻塞 (HANDOFF) |
+| [6/10] finalize-archive | 清理+校验+版本索引（commands.json 声明由 CI L0k 门禁校验） | 非致命 |
+| [7/10] check-knowledge-gap | 知识完整性检查 (W5) | 非阻塞 |
+| [8/10] gen_summary | 重新生成 SUMMARY.md | 非致命 |
+| [9/10] PR 原子性检查 (W2) | 框架文件混入检测 | 警告 |
+| [10/10] submit 就绪预检 | test-report/packaging/staging/build-closed 标记检查 | 警告 |
 
 > **W4 Pre-PR 独立审计不在 finish 内部**，在 `submit` 内部作为前置检查执行。
 > 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**AI Review 监控**(5阶段)→**检视意见闭环校验**→**CI 监控**→**SKILL_FEEDBACK 自动生成**）。
@@ -674,10 +683,10 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result foo 1.0 --status user_cancelled \
 
 ```
 knowledge/graph/           # 结构化数据
-├── index.tsv              # 主索引（211 条目）
+├── index.tsv              # 主索引（以 index.tsv 实时为准，当前 319 条）
 ├── principles.kv          # 编译原则（20 条）
 ├── pre-scan-rules.yaml    # 预编译风险扫描规则集
-├── E001.kv ~ E211.kv      # 错误模式条目
+├── E001.kv ~ E320.kv      # 错误模式条目（E257 为空洞，复用请用 graph add 自动分配）
 knowledge/drafts/          # 草稿目录（conan-verify 自动生成，R31）
 ├── DRAFT-001.kv ~         # 待审查的草稿条目
 knowledge/doc/             # 人类可读文档（E001.md ~ E211.md）
@@ -723,7 +732,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps <软件名> [--install] # �
 **命令**：
 ```bash
 # 查看草稿
-ls knowledge/drafts/DRAFT-*.kv
+ls knowledge/drafts/*.kv  # 两种命名均需检查
 
 # 提升草稿为正式条目（自动分配E编号+生成doc+更新index）
 python3 $SKILL_ROOT/scripts/ohc-run.py graph promote DRAFT-001
@@ -783,6 +792,7 @@ archives/{letter}/{name}/
 | 安全弹窗 | 首次执行二进制弹确认框 | make install 后扫一遍 bin/ |
 | chmod 不生效 | E046，SELinux 限制 | 记录为平台限制，不阻塞 |
 | 未实现 syscall | E051，setreuid/chroot 等 | 加入 EXCLUDE_LIST 排除 |
+| CI/W3 构建超时 | conan create 默认 3600s，重型包实测可超（ScaLAPACK 测试 4451s） | `ohc-run.py timeout set <名> <版本> <3600-57600>`，W3 与 CI 同源生效 |
 | ELF 签名 | 必须签名否则不可执行 | CI 流水线 `ci/artifacts/sign.sh` |
 | ncurses 共享库 | 编译为 .so 会导致系统崩溃 | conanfile.py `generate()` `--without-shared`（R4） |
 | 静态链接 | 系统同名库构建 .so 会污染 `/lib`、`/lib64` | conanfile.py `generate()` `BUILD_SHARED_LIBS=OFF`（R26），仅限系统同名库 |
@@ -843,6 +853,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `engine` / `graph add\|update\|validate\|promote` | 知识图谱查询/管理/草稿提升 |
 | `req add\|list\|close\|validate` | ⭐ 需求图谱管理（系统能力缺口跟踪） |
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
+| `timeout get\|set\|list\|validate` | ⭐ CI/W3 构建超时配置管理（build_timeouts.txt 单一事实源） |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
 | `search-url` / `submit` / `review` / `post-merge` / `feedback` / `result` | URL搜索 / **PR提交(W4→AI Review→CI→SKILL_FEEDBACK,HANDOFF,--resume)** / 主编审核 / 合并后索引 / **流程终态反馈(HANDOFF,--resume)** / **任务终态 result.json 上报(8状态枚举,生成器强制,exit 0/2)** |
@@ -893,3 +904,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.1 — 2026-08-20 — worker 集群实测复盘（task 3677/3680/3681/3659/3664-3666）三项规则：R42 PR 创建即上报（禁止 sleep 等 CI/AI Review——平台异步事件不占预算；工具支持 submit --no-wait / OHC_SUBMIT_NO_WAIT=1，PR 建后自动写 partial 草稿；3681 实测建 PR #4629 后等 CI 被杀被判 failed，90% 工作量丢失）；里程碑草稿机制（W3 过/W4 过/PR 建每步重写 result.json，猝死时最后一份草稿即上报内容）；R43 调参螺旋止损（同错误类别连续 5 次调参失败→带证据退出，3681 实测 Qt5::3DCore 反复调参 3.5h 无上报；与 R41 互补：R41 管外部阻塞，R43 管内部死循环）；铁律 41→43 条；v12.0→v12.1*
 
 *SKILL.md v12.2 — 2026-08-20 — R42 语义升级为"草稿保底 + CI 闭环到绿"（质量要求：确保 CI 通过，红了必修）：submit CI FAILED 时自动提取最新失败评论报错摘要进输出与 HANDOFF（agent 免二次查询）；修复回路写死——按失败详情修复→本地 W3 复验→git push（CI 自动重跑）→submit --resume 续监控；CI PASSED 时 OHC_RESULT_OUT 已设置则自动升级 result 为 success（partial→success 闭环）；agent 禁止自己写 sleep 轮询 CI（工具内置 2400s 轮询）；--no-wait 降级为预算不足（R41 <40min）时的退出通道，红 CI 由 follow-up submit --resume 续；v12.1→v12.2*
+
+*SKILL.md v12.3 — 2026-08-20 — 全量诊断驱动升级（一致性修复 + 超时配置工具化）：①P0 修复 submit git add 草稿路径 knowledge/graph/draft/→knowledge/drafts/（submission/finish/feedback/post-merge/review/dispatch/kb_collab 全链路 8 处，主路径自动化恢复）；②CI 构建超时配置工具化：新增 ohc/build_timeout.py + `timeout get|set|list|validate` 子命令（与 CI AWK 校验同构，3600-57600s），本地 W3（workflow_checks）改读同一配置（原硬编码 600s 误杀中大型包），OHC_W3_TIMEOUT 可临时覆盖，W3 超时 HANDOFF 附 timeout set 指引，.ci-result.json 新增 log_sha256（W3 完整日志哈希）；③规则编号去碰撞：CI L0m 内部 R41/R42 改为 L0m-4/L0m-5（与铁律 R41/R42 冲突），W4/W5 以本文档为唯一权威（W4=Pre-PR审计、W5=知识图谱完整性，代码标签已对齐），KNOW_HOW_WHY→KNOW_YOUR_WHY 拼写修复；④finish 步骤表对齐代码实际 10 步（W3=[5/10]），driver 13步→14步，make check 超时不再误记 PASS（returncode None/负值→TIMEOUT）；⑤submission 7 处 subprocess 超时兜底（create-pr/list-prs/monitor-review/ci-status/trigger-ci），闭环校验 fail-open 改为显式告警；⑥conan_verify G2 镜像注入增加 .bak 备份+崩溃恢复；⑦R43 死链修复（→iron-rules.md），W5 草稿检查命令支持双命名（DRAFT-*.kv 与 E###-draft-*.kv），知识图谱规模声明改为以 index.tsv 为准；⑧文档层同步修复由配套 PR 完成（iron-rules 补 R41-R43 详解、CONTRIBUTING/KNOW_YOUR_WHY 对齐 v12.2、ADAPTATION_GUIDE W4/W5 互换修正等 13 项）；铁律 43 条不变；v12.2→v12.3*

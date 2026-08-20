@@ -1,7 +1,7 @@
 # SKILL 执行流程反馈报告
 
 > 本报告由 SKILL 自动生成，记录本次编译适配全流程中的失败、效率和改进发现。
-> 文件位置: `knowledge/feedback/SKILL_FEEDBACK_{ID}.md`
+> 文件位置: `feedback/SKILL_FEEDBACK_{ID}.md`（项目根，与 `knowledge/` 同级）
 
 ---
 

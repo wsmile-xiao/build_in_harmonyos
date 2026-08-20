@@ -281,8 +281,8 @@ def _collect_situation(ver_dir: Path, project_dir: str) -> dict:
     else:
         result["knowledge_drafts"] = "无"
 
-    # Draft count in knowledge/graph/draft/
-    draft_dir = Path(graph_dir(project_dir)) / "draft"
+    # Draft count in knowledge/drafts/
+    draft_dir = Path(project_dir) / "knowledge" / "drafts"
     draft_count = 0
     if draft_dir.is_dir():
         draft_count = len(list(draft_dir.glob("*.kv")))

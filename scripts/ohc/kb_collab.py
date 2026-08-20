@@ -10,11 +10,11 @@ Usage:
     from .kb_collab import promote_draft, merge_draft_to_entry
 
     # Promote a new draft to official entry
-    promote_draft("knowledge/graph/draft/E081-draft-42FF.kv",
+    promote_draft("knowledge/drafts/E081-draft-42FF.kv",
                   "knowledge/graph/E059.kv")
 
     # Merge a draft into an existing entry (adds 2nd author)
-    merge_draft_to_entry("knowledge/graph/draft/E080-draft-0BE3.kv",
+    merge_draft_to_entry("knowledge/drafts/E080-draft-0BE3.kv",
                          "E035", "knowledge/graph/")
 """
 from __future__ import annotations
