@@ -125,6 +125,26 @@ class AvrLibcConan(ConanFile):
         # configure/Makefile.in files.  bootstrap also generates the AVR
         # device and multilib source trees before running Autoconf/Automake.
         bootstrap = os.path.join(self.source_folder, "bootstrap")
+        if self.settings.os == "OHOS":
+            devtools_configure = os.path.join(
+                self.source_folder, "devtools", "configure"
+            )
+            # E114: HMDFS turns Autoconf's umask-077 temp directory into
+            # an unwritable setgid directory, so config.status cannot create
+            # subs1.awk.  Preserve the random directory but use the runner's
+            # normal umask instead.
+            replace_in_file(
+                self,
+                devtools_configure,
+                'tmp=`(umask 077 && mktemp -d "./confXXXXXX") 2>/dev/null`',
+                'tmp=`mktemp -d "./confXXXXXX" 2>/dev/null`',
+            )
+            replace_in_file(
+                self,
+                devtools_configure,
+                '(umask 077 && mkdir "$tmp")',
+                'mkdir "$tmp"',
+            )
         replace_in_file(
             self,
             bootstrap,
