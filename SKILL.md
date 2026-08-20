@@ -149,6 +149,8 @@ W3/finish/submit 卡在**环境外部因素**时，禁止无限重试 workaround
 
 **止损后严禁**（为绕过依赖）：伪造 `.ci-result.json`、dummy 包顶替、跳过 W3、伪造 result.json。
 
+**R43 调参螺旋止损（内部死循环，2026-08-20 新增）**：R41 管外部阻塞，本条管内部死循环——自研 conanfile.py 反复调参（cmake 组件名 `components`/`cmake_file_name`、目标名、include/lib 路径等）**同一错误类别连续 5 次修改仍失败** → 停止调参，写 result.json（`--status failed_build`，`--failed-reason` 附 5 次尝试的错误摘要与已排除的方向）退出。实测教训：task 3681 对 `Qt5::3DCore` 的 component/cmake_file_name/includedirs 反复推演 3.5 小时无一次阶段性上报，直到预算耗尽。触发前自查：错误信息与上次是否同类？若同类，第 5 次尝试前就该收手——5 次同方向失败基本可断定方法性错误（查 references/porting-troubleshooting.md 或上游 conanfile 参考），继续盲试不会收敛。
+
 **现象 → status 判定对照表**：
 
 | 现象 | result status |
@@ -305,7 +307,7 @@ self.requires("zlib/1.3.1")      # 精确引用首次版本
 self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 ```
 
-### 1.3 铁律摘要（41 条，违反=bug）
+### 1.3 铁律摘要（43 条，违反=bug）
 
 | # | 规则 |
 |---|------|
@@ -325,6 +327,8 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R39 | **源码 URL 必须为官方源**：conandata.yml 中 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源，禁止个人 fork/网盘/不明 CDN。CI 自动添加镜像 fallback |
 | R40 | **深度适配库需验证适配完整性**：图形渲染/UI框架/多媒体/外设/系统底层类库，编译通过≠适配完成，需检查实质性平台适配代码（非 stub/return 0） |
 | R41 | **外部依赖阻塞止损**：registry/git remote 连续 3 次不可达且超 30 分钟，或失败明确属于环境外部因素（上游未发布/网络故障）→ 立即写 result.json 止损，禁止无限重试；多包任务单包止损不连坐（成功包不白干）；剩余预算 <40 分钟只收尾不启大步骤 |
+| R42 | **PR 创建即上报**：PR 创建成功的那一刻就写 result.json（`--status partial` + PR 链接），禁止 sleep 等 AI Review/CI 结果——它们是平台异步事件，不占本任务预算；工具支持 `submit --no-wait` / `OHC_SUBMIT_NO_WAIT=1`（PR 建后立即返回并自动写 partial 草稿） |
+| R43 | **调参螺旋止损**：同一错误类别（cmake 组件/目标/include 路径等 conanfile 调参）连续 5 次修改仍失败 → 停止调参，写 result.json（`failed_build` + 5 次尝试的证据）退出；与 R41 互补：R41 管外部阻塞，R43 管内部死循环 |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -481,6 +485,13 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 > - Phase 5: AI Review 完成 → 进入 CI 监控（平台 CI 需主动评论 /rebuild 触发，_monitor_ci 自动处理；手动触发用 `python3 scripts/gitcode_pr.py trigger-ci --repo <owner>/<repo> --number <PR号>`）
 >
 > 状态文件 `.submit-state.json` 记录 review_phase（1/3/5），`--resume` 从正确阶段恢复。
+>
+> **⭐ R42 批量任务模式（PR 创建即上报，2026-08-20 新增）**：
+> 批量/无人值守任务（有 deadline、ECS 派发、result.json 上报场景）用：
+> `python3 scripts/ohc-run.py submit <软件> <版本> --no-wait`（或设 `OHC_SUBMIT_NO_WAIT=1`）
+> - PR 创建成功后**立即返回**：跳过 Phase 1-5 和 CI 监控，自动写 partial 草稿 result.json（OHC_RESULT_OUT 已设置时）
+> - 依据：AI Review/CI 是**平台异步事件**，由 ECS verifier 或人工在 PR 页面跟进即可；agent 等待它们只消耗自身预算（task 3681 实测：PR #4629 已建、CI 在跑，agent 等待中被节点超时杀死，任务被判 failed）
+> - 交互式/单机场景（用户在场、要求完整闭环）仍用默认完整监控模式
 
 **前置条件**：test-report 存在 + Staging 验证完成 + conanfile.py 存在。
 **状态值**：`published`(verify通过+CI upload) | `built`(verify通过未upload) | `failed`(编译或验证失败) | `archived`(旧版本归档)。
@@ -576,6 +587,12 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <sta
 - 校验失败 exit 2 且**不落盘**；成功 exit 0 且自动 `cat result.json`
 - checkpoints 最后一条固定为 `message: "result.json"`（`_ohpcd_result` 条目）
 - 重报需 `--force`（覆盖前必须确认终态变化）
+
+**⭐ 上报时机（R42，2026-08-20 新增）——PR 创建那一刻就是可上报时刻**：
+- **禁止**：拿到 PR 后 `sleep` 等 CI/AI Review 结果再上报——它们是平台异步事件（ECS verifier/人工在 PR 页跟进），agent 等待只消耗自身预算。实测教训：task 3681 建 PR #4629 后等 CI，等待中被节点超时杀死，result 未写，任务被判 failed，90% 工作量丢失
+- **正确**：PR 创建成功 → 立即 `--status partial`（summary 带 PR 链接）或 `success`（若 CI 已绿）；后续若继续跟进且状态变化，`--force` 更新
+- **里程碑草稿（防猝死）**：每个里程碑都重写一次 result.json——W3 本地验证通过（partial）、W4 审计通过（partial）、PR 创建（partial）、CI 绿（success）。result 命令幂等，重写无副作用；任务任何时刻被杀，**最后一份草稿就是上报内容**，不依赖临终一口气
+- 批量任务配合 `submit --no-wait`（见 Step 4 R42 块）：PR 建后自动写 partial 草稿
 
 **HANDOFF 交接**（references/handoff-protocol.md）：
 - 校验失败（exit 2）时自动输出 **HANDOFF 块**：`EXIT_REASON: result_invalid`、`EXIT_CODE: 2 (resumable)`、`STEP_FAILED: Step7`、RESUME_CMD（修正后参数模板）、AI NEXT ACTIONS（逐条校验错误+修复指引）
@@ -867,3 +884,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v11.9 — 2026-08-19 — task 3659 实测失败路径复盘五项（R41）：W3 外部依赖阻塞止损硬性规则（registry 连续 3 次不可达/超 30 分钟 → 立即写 result.json 止损，禁止无限重试/伪造产物）；现象→status 判定对照表（dependency_missing vs env_unsupported 口径："换网络正常机器能否解决"）；产物路径唯一权威表（.ci-result.json 带点前缀在版本目录、reports/audit-result.json 无点前缀、$HOME/ohpcd-ai-worker-result.json，submission.py Gate 唯一决定）；8.3 多包任务单包止损不连坐（成功包不白干，最终聚合如实写明）；4.2 时间预算感知（剩余 <40min 只收尾不启大步骤）；v11.8→v11.9*
 
 *SKILL.md v12.0 — 2026-08-19 — R41 五项工具化落地（文档约束 → 工具强制）：A) result 对 dependency_missing 自动实测 registry（conan list -r=ohpcd 逐包试探，实测输出追加 missing_evidence，谎报当场戳穿）；B) dispatch script 对 failed 包不再生成 createSubTask（改 result.json 补报指令），dispatch status 汇总输出止损提示；C) OHC_TASK_DEADLINE 环境变量预算感知（result/dispatch 入口报剩余，<40min 只收尾强警告）；D) submit 发现根目录 .audit-result.json 时报错直接指出唯一正确路径（消灭 11 分钟试错）；修复 dispatch 在 GBK 控制台 emoji 崩溃；v11.9→v12.0*
+
+*SKILL.md v12.1 — 2026-08-20 — worker 集群实测复盘（task 3677/3680/3681/3659/3664-3666）三项规则：R42 PR 创建即上报（禁止 sleep 等 CI/AI Review——平台异步事件不占预算；工具支持 submit --no-wait / OHC_SUBMIT_NO_WAIT=1，PR 建后自动写 partial 草稿；3681 实测建 PR #4629 后等 CI 被杀被判 failed，90% 工作量丢失）；里程碑草稿机制（W3 过/W4 过/PR 建每步重写 result.json，猝死时最后一份草稿即上报内容）；R43 调参螺旋止损（同错误类别连续 5 次调参失败→带证据退出，3681 实测 Qt5::3DCore 反复调参 3.5h 无上报；与 R41 互补：R41 管外部阻塞，R43 管内部死循环）；铁律 41→43 条；v12.0→v12.1*

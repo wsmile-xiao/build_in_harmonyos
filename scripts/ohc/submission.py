@@ -669,7 +669,8 @@ def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
 
 
 def cmd_submit(software: str, version: str,
-               pdir: str | None = None, resume: bool = False) -> int:
+               pdir: str | None = None, resume: bool = False,
+               no_wait: bool = False) -> int:
     """Submit PR: gates → self-check → git push → create PR → AI Review → CI.
 
     Gates (all blocking with HANDOFF):
@@ -686,6 +687,8 @@ def cmd_submit(software: str, version: str,
        Phase 3: Wait for review opinions (poll 5min, 30min timeout)
        Phase 4: AI evaluates opinions → HANDOFF (accept: fix+resolve, reject: reply only)
        Phase 5: Review complete → proceed to CI
+       (--no-wait / OHC_SUBMIT_NO_WAIT=1: 跳过 5/6，PR 创建即返回，
+        R42: PR 创建即上报，AI Review/CI 由平台异步进行)
     6. Monitor CI via gitcode_pr.py ci-status (poll 30s, 40min timeout)
     """
     project_dir = pdir or find_project_dir()
@@ -723,6 +726,14 @@ def cmd_submit(software: str, version: str,
         pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
 
         log_ok(f"  📂 恢复提交: PR #{pr_number}, Phase {review_phase}, 分支 {branch_name}")
+
+        # ── R42: PR 创建即上报（--no-wait，对 resume 同样生效）──
+        if no_wait:
+            log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: PR 创建即上报）")
+            log_info("   AI Review 意见与 CI 结果由平台异步产生，不占本任务预算")
+            from .result_report import write_pr_draft
+            write_pr_draft(software, version, pr_number, pr_url)
+            return 0
 
         if review_phase < 5:
             # Still in AI Review phases
@@ -1121,6 +1132,18 @@ def cmd_submit(software: str, version: str,
             "review_phase": 1,
             "branch_name": branch_name,
         })
+
+    # ── R42: PR 创建即上报（--no-wait）──
+    # 3681 教训: agent 建完 PR 后继续等 AI Review/CI，预算耗尽被杀，
+    # result.json 未写 → 真实成果被记为 failed。
+    if no_wait:
+        log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: PR 创建即上报）")
+        log_info("   AI Review 意见与 CI 结果由平台异步产生，不占本任务预算")
+        from .result_report import write_pr_draft
+        write_pr_draft(software, version, pr_number, pr_url)
+        log_info(f"   若需完整闭环（预算充裕时）: "
+                 f"python3 scripts/ohc-run.py submit {software} {version} --resume")
+        return 0
 
     # ── Monitor AI Review (atomgit-bot): 5-phase flow ──
     log_info(f"监控 AI Review (PR #{pr_number})...")
@@ -2029,10 +2052,15 @@ def submit_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-dir", "-p", default=None)
     parser.add_argument("--resume", action="store_true",
                          help="从上次 HANDOFF 处恢复（跳过已完成阶段，从状态文件继续）")
+    parser.add_argument("--no-wait", action="store_true",
+                         help="R42: PR 创建即上报，跳过 AI Review/CI 监控"
+                              "（等价环境变量 OHC_SUBMIT_NO_WAIT=1）")
     args = parser.parse_args(argv)
     return cmd_submit(args.software, args.version,
                       pdir=getattr(args, "project_dir", None),
-                      resume=getattr(args, "resume", False))
+                      resume=getattr(args, "resume", False),
+                      no_wait=args.no_wait
+                      or os.environ.get("OHC_SUBMIT_NO_WAIT", "").strip() == "1")
 
 
 def review_cli(argv: list[str] | None = None) -> int:

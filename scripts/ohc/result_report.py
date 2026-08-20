@@ -465,3 +465,29 @@ def result_cli(argv: list[str]) -> int:
                  "仅输出到 stdout，不落盘")
     print(result_text)
     return 0
+
+
+def write_pr_draft(software: str, version: str,
+                   pr_number: int, pr_url: str) -> bool:
+    """R42 工具化: PR 创建后立即写 partial 草稿（submit 调用）。
+
+    3681 教训: agent 建完 PR 后等 CI/AI Review 耗尽预算被杀，
+    result.json 未写 → 任务被判 failed，90% 工作量丢失。
+    本函数在 PR 创建时刻即落一份 partial 草稿（仅当 OHC_RESULT_OUT
+    已设置时落盘）；后续任何时刻被杀，最后一份草稿就是上报内容。
+    失败不阻塞 submit 主流程。
+    """
+    if not os.environ.get(RESULT_OUT_ENV, "").strip():
+        log_info(f"OHC_RESULT_OUT 未设置，跳过自动草稿；"
+                 f"请手动执行: ohc-run.py result {software} {version} "
+                 "--status partial --summary 'PR 已创建，等待平台异步验证'")
+        return False
+    rc = result_cli([
+        software, version,
+        "--status", "partial",
+        "--failed-reason",
+        "PR 已创建，AI Review/CI 由平台异步进行（R42: PR 创建即上报）",
+        "--summary", f"PR #{pr_number} 已创建: {pr_url}",
+        "--pr-number", str(pr_number),
+    ])
+    return rc == 0
