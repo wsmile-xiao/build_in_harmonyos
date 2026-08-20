@@ -11,7 +11,7 @@ import shutil
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import get, replace_in_file, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import get, replace_in_file
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.layout import basic_layout
 
@@ -31,9 +31,6 @@ class Mpg123Conan(ConanFile):
     def validate(self):
         if str(self.settings.os) not in ("Linux", "OHOS"):
             raise ConanInvalidConfiguration("mpg123 is adapted for Linux and OHOS only")
-
-    def export_sources(self):
-        export_conandata_patches(self)
 
     def layout(self):
         basic_layout(self)
@@ -62,7 +59,6 @@ class Mpg123Conan(ConanFile):
             tc.generate()
 
     def build(self):
-        apply_conandata_patches(self)
         if str(self.settings.os) == "OHOS":
             self._patch_ohos()
         autotools = Autotools(self)
@@ -75,6 +71,7 @@ class Mpg123Conan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["mpg123", "out123", "syn123"]
+        self.cpp_info.system_libs = ["m"]
         self.cpp_info.bindirs = ["bin"]
         self.cpp_info.includedirs = ["include"]
 
