@@ -233,6 +233,19 @@ class AvrLibcConan(ConanFile):
 
         autotools = Autotools(self)
         configure_script = os.path.join(self.source_folder, "configure")
+        if self.settings.os == "OHOS":
+            replace_in_file(
+                self,
+                configure_script,
+                'tmp=`(umask 077 && mktemp -d "./confXXXXXX") 2>/dev/null`',
+                'tmp=`mktemp -d "./confXXXXXX" 2>/dev/null`',
+            )
+            replace_in_file(
+                self,
+                configure_script,
+                '(umask 077 && mkdir "$tmp")',
+                'mkdir "$tmp"',
+            )
         self.run(
             "sh {} {}".format(
                 shlex.quote(configure_script), autotools._configure_args
