@@ -32,7 +32,7 @@ class AwsccalConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        self.requires("aws-c-common/0.12.6")
+        self.requires("aws-c-common/0.14.3")
         self.requires("aws-lc/5.4.0")
 
     def layout(self):
@@ -83,5 +83,6 @@ class AwsccalConan(ConanFile):
 
     def package_info(self):
         self.cpp_info.libs = ["aws-c-cal"]
+        self.cpp_info.requires = ["aws-c-common::aws-c-common", "aws-lc::aws-lc"]
         if self.settings.os in ("Linux", "OHOS"):
             self.cpp_info.system_libs = ["pthread", "dl", "rt"]

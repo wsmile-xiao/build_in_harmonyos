@@ -30,5 +30,5 @@ class AwsccalTestConan(ConanFile):
     def test(self):
         cmake = CMake(self)
         cmake.test()
-        # Alternatively, run the binary directly:
-        # self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_aws-c-cal')}", env="conanrun")
+        # Also run the binary directly for additional verification (R34)
+        self.run(os.path.join(self.cpp.build.bindirs[0], "test_aws-c-cal"), env="conanrun")
