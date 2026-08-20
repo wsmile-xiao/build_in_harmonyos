@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.6
+version: 12.7
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -919,3 +919,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.5 — 2026-08-20 — 预扫描全量补齐 + 知识库动态利用闭环：①`prescan` 独立命令（评估/选型阶段可单独扫描源码，规则文件自动发现，--json 供 AI 消费）；②hit_count 闭环回填（命中自动累计写回规则文件，行级更新保留注释；--no-writeback 只读模式）——原"纸面闭环"变真；③规则集 16→24 条，补 linking/build-system/shell/libc 域（dlopen 硬编码路径、构建机 rpath、CMake 绝对路径 DESTINATION、config.guess 过期提示、gettext 宏、bash 专用语法、#!/bin/bash shebang、__GLIBC__ glibc 专用宏），全部挂 kb_ref；④**知识库动态派生规则**：E 条目 .kv 含 prescan_pattern 字段即在 PreScanner 运行时自动派生 PSCAN-KB-{id} 规则（示范：E013 dlopen API / E019 dlopen 绝对路径 / E037 bash shebang）——知识库增长即扫描能力增长，无需改规则文件；修 shebang 误判为注释的漏报、规则 ID 撞名；⑤engine 命中回写 metrics_last_used（激活沉睡度量字段，知识使用反馈）；⑥字段白名单/模板同步（prescan_* 可选字段）；v12.4→v12.5*
 
 *SKILL.md v12.6 — 2026-08-20 — 「又快又好」六杠杆 + 社区本地优先架构：**架构原则：所有能力本地可跑（贡献者单机完成全流程）、git 是唯一同步协议（语料/度量/知识随 PR 汇聚）、CI 仅作干净复现门禁**。L1 配方首稿检索（recipe-search：catalog 索引 2280 配方，相似度=名称0.45+构建系统0.30+依赖0.25+补丁加成；finish 成功自动 upsert → 社区配方库成长即生效）；L2 本地 ccache（OHC_CCACHE=1 显式开启，CCACHE_DIR=~/.ohc-ccache 隔离+5G 限额；autotools 环境注入/cmake launcher；**G0/W3/conan-verify 验证期无条件 CCACHE_DISABLE=1——本地缓存绝不影响验证结果，保证 CI 干净可复现**，红线）；L3 handoff 状态文件改事务式 fcntl 锁（读-改-写全程锁内，修 P1 并发丢失更新，自测验证 60/60）+ resolve-deps --batch 拓扑分层并行排程；L4 engine 命中处方完整注入 HANDOFF（方案/说明/命令[auto]/验证/兜底/关联文档，不再只用单字段）；L5 tests/test_smoke.py 冒烟层 + selftest 命令（9 用例含 P0 路径防回归、锁并发、taxonomy 幂等、engine 已知签名回归）；L6 kb-report 本地质量月报（活跃/陈旧/未命中采购清单，--scan-logs 对本地构建日志逐条跑 engine 找知识盲区）；v12.5→v12.6*
+
+*SKILL.md v12.7 — 2026-08-20 — 垃圾拦截误伤审计与修复（CI 误拦截防护）：审计 JC（junk_check：JC1 状态文件/JC2 二进制/JC3 tarball/JC4 临时产物/JC5 archives 隐藏文件白名单/JC6 W2 原子性）与 KC（knowledge_check：草稿泄漏/占位符/非标准字段/index 一致性）对 v12.5-v12.6 新特性的交互，修复三处误伤链：①build Step 2.5 自动预扫描此前默认回写 hit_count → pre-scan-rules.yaml 属框架文件（_FRAMEWORK_PATHS）→ 每次本地构建后 W2 报"框架文件混入"误拦；改为管线内 writeback=False，回填仅限显式 `prescan` 命令；②engine 命中度量直写共享 E*.kv → 并发包 PR 在同一条目合并冲突 + PR 噪音；改为 gitignored 本地 sidecar knowledge/.metrics-local.json（kb-report 兼读 sidecar 与遗留字段）；③knowledge/recipes/catalog.tsv 取消 git 跟踪（语料事实源=archives/ 随 PR 天然共享，catalog 为本地可重建缓存，--rebuild 即得），杜绝每包 PR 携带追加 diff。.gitignore 增列三项本地文件。审计确认：KC4 字段黑名单为行首锚定（prescan_pattern 安全）、JC5 对 .pre-scan-report.yaml 无风险（落在 $TMPDIR/builds 仓库外）、KC2 占位符 grep 不受新字段影响。v12.6→v12.7*

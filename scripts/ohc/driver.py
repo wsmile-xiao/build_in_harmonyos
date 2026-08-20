@@ -668,7 +668,8 @@ class BuildDriver:
         try:
             from .pre_scan import PreScanner
             scanner = PreScanner(str(self.build_src_dir),
-                                 rules_path=str(rules_path) if rules_path.exists() else None)
+                                 rules_path=str(rules_path) if rules_path.exists() else None,
+                                 writeback=False)  # 管线内只读：hit_count 回填仅限显式 prescan 命令（防框架文件污染包 PR）
             report = scanner.save_report(str(report_path))
         except Exception as e:
             self._log(f"⚠️ pre-scan 异常（非阻塞）: {e}")

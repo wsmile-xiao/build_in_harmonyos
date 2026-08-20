@@ -585,30 +585,25 @@ def format_inline(result: MatchResult) -> str:
 
 
 def _touch_metrics(eid: str, gdir: str) -> None:
-    """v12.5: 命中即回写 metrics_last_used（best-effort，激活知识使用度量）。"""
+    """v12.6.1: 命中记录写入本地 sidecar（gitignored），不写共享 .kv。
+
+    设计修正：直接改 .kv 会让每个包 PR 携带知识文件 diff，与并发 PR
+    在同一 E 条目上产生合并冲突（社区规模必现）。sidecar 本地聚合、
+    零污染；kb-report 同时读 sidecar 与 .kv 遗留字段。
+    """
     try:
-        kv_path = os.path.join(gdir, f"{eid}.kv")
-        if not os.path.isfile(kv_path):
-            return
+        import json
         from datetime import date
-        with open(kv_path, encoding="utf-8") as f:
-            lines = f.read().split("\n")
-        today = date.today().isoformat()
-        for i, line in enumerate(lines):
-            if line.startswith("metrics_last_used:"):
-                indent = line[:len(line) - len(line.lstrip())]
-                lines[i] = f"{indent}metrics_last_used: {today}"
-                break
-        else:
-            # 缺字段则插到 metrics_confidence 之后（或文件尾）
-            for i, line in enumerate(lines):
-                if line.startswith("metrics_confidence:"):
-                    lines.insert(i + 1, f"metrics_last_used: {today}")
-                    break
-            else:
-                lines.append(f"metrics_last_used: {today}")
-        with open(kv_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
+        sidecar = os.path.join(os.path.dirname(gdir.rstrip("/")), ".metrics-local.json")
+        data = {}
+        if os.path.isfile(sidecar):
+            with open(sidecar, encoding="utf-8") as f:
+                data = json.load(f)
+        data[eid] = date.today().isoformat()
+        tmp = sidecar + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, sidecar)
     except Exception:
         pass  # 度量回写永不阻塞匹配
 

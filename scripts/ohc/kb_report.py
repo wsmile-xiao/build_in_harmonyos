@@ -31,7 +31,19 @@ _ERROR_LINE_RE = re.compile(
 )
 
 
-def _parse_kv_metrics(gdir: Path) -> list[dict]:
+def _load_sidecar_metrics(pdir: Path) -> dict:
+    """v12.6.1: 本地 sidecar 命中记录（engine 写入，gitignored）。"""
+    import json
+    sc = pdir / "knowledge" / ".metrics-local.json"
+    if not sc.exists():
+        return {}
+    try:
+        return json.loads(sc.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _parse_kv_metrics(gdir: Path, sidecar: dict | None = None) -> list[dict]:
     rows = []
     for kvf in sorted(gdir.glob("E*.kv")):
         fields = {}
@@ -39,9 +51,11 @@ def _parse_kv_metrics(gdir: Path) -> list[dict]:
             m = re.match(r"^(\w+):\s*(.*)$", line)
             if m and m.group(1) not in fields:
                 fields[m.group(1)] = m.group(2).strip()
+        eid = fields.get("id", kvf.stem)
+        # sidecar（当前机制）优先，.kv 遗留字段兜底
         rows.append({
-            "id": fields.get("id", kvf.stem),
-            "last_used": fields.get("metrics_last_used", ""),
+            "id": eid,
+            "last_used": (sidecar or {}).get(eid) or fields.get("metrics_last_used", ""),
             "confidence": fields.get("metrics_confidence", ""),
         })
     return rows
@@ -98,7 +112,7 @@ def kb_report_cli(argv: list[str] | None = None) -> int:
     today = date.today()
 
     # ── 1. 知识活跃度 ──
-    rows = _parse_kv_metrics(gdir)
+    rows = _parse_kv_metrics(gdir, _load_sidecar_metrics(pdir))
     total = len(rows)
     active = stale = never = 0
     stale_ids = []
