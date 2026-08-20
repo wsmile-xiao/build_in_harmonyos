@@ -256,7 +256,10 @@ class AvrLibcConan(ConanFile):
             cwd=self.build_folder,
             env="conanbuild",
         )
-        autotools.make(args=["-j1"])
+        # A full device-lib build covers hundreds of AVR MCU variants.  Four
+        # jobs keeps the OHOS runner within its package timeout without
+        # overcommitting the shared true-device host.
+        autotools.make(args=["-j4"])
 
         # The complete upstream suite requires avrtest or simulavr.  Keep a
         # representative compile/link subset in the build so the generated
