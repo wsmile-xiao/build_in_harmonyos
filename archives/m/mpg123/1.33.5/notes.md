@@ -1,7 +1,7 @@
 # mpg123 1.33.5 编译笔记
 
 ## 编译日期
-2026-05-19
+2026-08-07
 
 ## 构建系统
 autotools
@@ -38,3 +38,10 @@ libmpg123.a 未正确合并 libcompat.a、libmodule.a 等嵌套库。
 ## 产物
 - mpg123, mpg123-id3dump, mpg123-strip, out123
 - libmpg123.a, libout123.a, libsyn123.a
+---
+
+**编译结束**: 2026-08-07 00:54
+**最终状态**: built
+# mpg123 1.33.5 - Conan recipe for HarmonyOS PC (aarch64)
+
+<!-- trigger -->
