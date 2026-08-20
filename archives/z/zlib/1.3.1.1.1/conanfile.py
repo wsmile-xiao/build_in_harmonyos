@@ -15,7 +15,7 @@ class ZlibConan(ConanFile):
     default_options = {"shared": False}
 
     def source(self):
-        get(self, **self.conan_data["sources"], strip_root=True)
+        get(self, **self.conan_data["sources"][self.version], strip_root=True)
 
     def build(self):
         prefix = os.path.join(self.build_folder, "stage")
