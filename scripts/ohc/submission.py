@@ -727,12 +727,14 @@ def cmd_submit(software: str, version: str,
 
         log_ok(f"  📂 恢复提交: PR #{pr_number}, Phase {review_phase}, 分支 {branch_name}")
 
+        # ── R42 防猝死草稿：进入监控前先落 partial 保底（resume 同样生效）──
+        from .result_report import write_pr_draft
+        write_pr_draft(software, version, pr_number, pr_url)
+
         # ── R42: PR 创建即上报（--no-wait，对 resume 同样生效）──
         if no_wait:
             log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: PR 创建即上报）")
             log_info("   AI Review 意见与 CI 结果由平台异步产生，不占本任务预算")
-            from .result_report import write_pr_draft
-            write_pr_draft(software, version, pr_number, pr_url)
             return 0
 
         if review_phase < 5:
@@ -1142,15 +1144,17 @@ def cmd_submit(software: str, version: str,
             "branch_name": branch_name,
         })
 
-    # ── R42: PR 创建即上报（--no-wait）──
-    # 3681 教训: agent 建完 PR 后继续等 AI Review/CI，预算耗尽被杀，
-    # result.json 未写 → 真实成果被记为 failed。
+    # ── R42 防猝死草稿：PR 创建瞬间即落 partial 保底（默认路径同样生效）──
+    # 3681 教训: agent 建完 PR 后继续等 AI Review/CI（最长 1h+2400s），
+    # 期间被杀则 result.json 未写 → 真实成果被记为 failed。
+    from .result_report import write_pr_draft
+    write_pr_draft(software, version, pr_number, pr_url)
+
+    # ── R42: 预算不足时的退出通道（--no-wait）──
     if no_wait:
-        log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: PR 创建即上报）")
+        log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: 草稿已落，闭环交 follow-up）")
         log_info("   AI Review 意见与 CI 结果由平台异步产生，不占本任务预算")
-        from .result_report import write_pr_draft
-        write_pr_draft(software, version, pr_number, pr_url)
-        log_info(f"   若需完整闭环（预算充裕时）: "
+        log_info(f"   follow-up 续闭环: "
                  f"python3 scripts/ohc-run.py submit {software} {version} --resume")
         return 0
 
