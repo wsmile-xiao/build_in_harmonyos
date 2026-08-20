@@ -89,15 +89,52 @@ class AvrLibcConan(ConanFile):
         env.define("AVR_NM", tools["NM"])
         env.define("AVR_OBJCOPY", tools["OBJCOPY"])
         env.define("PYTHON", sys.executable)
-        for variable, executable in {
-            "ACLOCAL": "aclocal",
-            "AUTOHEADER": "autoheader",
-            "AUTOCONF": "autoconf",
-            "AUTOMAKE": "automake",
-        }.items():
-            env.define(variable, "sh {}".format(
-                shlex.quote(self._required_build_script(executable))
-            ))
+        autotools_scripts = {
+            name: self._required_build_script(name)
+            for name in ("aclocal", "autoheader", "autoconf", "automake")
+        }
+        # Conan's Autotools packages install wrapper and real Perl scripts with
+        # mode 0640 on HMDFS.  Invoke the real scripts through an executable
+        # HNP Perl runtime instead of relying on either file's execute bit.
+        perl = self._required_build_script("perl")
+        perl_runtime = (
+            "/data/service/hnp/bin/perl"
+            if self.settings.os == "OHOS"
+            else perl
+        )
+        autoconf_bin = os.path.dirname(autotools_scripts["autoconf"])
+        automake_bin = os.path.dirname(autotools_scripts["aclocal"])
+        autotools_commands = {
+            "ACLOCAL": shlex.join(
+                [
+                    perl_runtime,
+                    os.path.join(automake_bin, ".aclocal-real"),
+                    "--automake-acdir={}".format(
+                        os.path.join(os.path.dirname(automake_bin), "share", "aclocal-1.18")
+                    ),
+                    "--system-acdir={}".format(
+                        os.path.join(os.path.dirname(automake_bin), "share", "aclocal")
+                    ),
+                ]
+            ),
+            "AUTOHEADER": shlex.join(
+                [perl_runtime, os.path.join(autoconf_bin, ".autoheader-real")]
+            ),
+            "AUTOCONF": shlex.join(
+                [perl_runtime, os.path.join(autoconf_bin, ".autoconf-real")]
+            ),
+            "AUTOMAKE": shlex.join(
+                [
+                    perl_runtime,
+                    os.path.join(automake_bin, ".automake-real"),
+                    "--libdir={}".format(
+                        os.path.join(os.path.dirname(automake_bin), "share", "automake-1.18")
+                    ),
+                ]
+            ),
+        }
+        for variable, command in autotools_commands.items():
+            env.define(variable, command)
         build_env.generate()
 
         tc = AutotoolsToolchain(self)
