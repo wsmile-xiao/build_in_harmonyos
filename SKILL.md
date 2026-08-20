@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.4
+version: 12.5
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -386,6 +386,7 @@ configure 失败？
 | 验证 Conan 配方 | ci/conan/profiles/ohos-aarch64 | conan-verify 时 |
 | 预编译风险扫描 | knowledge/graph/pre-scan-rules.yaml | build Step 2.5（自动） |
 | **W3/CI 构建超时** | ci/config/build_timeouts.txt + `ohc-run.py timeout` | W3/CI 超时发生时 |
+| **源码风险预扫** | pre-scan-rules.yaml + 知识条目 prescan_pattern 字段（运行时动态派生） | 下载源码后 / build Step 2.5 / `prescan` 独立命令 |
 | 编译出错 | knowledge/graph/index.tsv → graph/E*.kv | 错误发生时 |
 | 缺少依赖 | ohc-run.py resolve-deps --list-available | init-build Step 7 |
 | 失败处理 | references/failure-handling.md | R11+R12 流程 |
@@ -855,6 +856,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `resolve-deps [--install]` | 查询/安装预编译依赖 |
 | `timeout get\|set\|list\|validate` | ⭐ CI/W3 构建超时配置管理（build_timeouts.txt 单一事实源） |
 | `draft-review [DRAFT-xxx] [--json]` | ⭐ 草稿预审辅助：相似度证据 + 三态建议（merge-into/review-similar/create）；**纳入决策权在人工审核**，promote 命令不变 |
+| `prescan <src_dir> [--json] [--no-writeback]` | ⭐ 预编译源码风险扫描独立命令（评估/选型阶段可单独扫描，不必跑 build 管线）：规则集 24 条 + **知识库动态派生规则**；命中自动回填 hit_count |
 | `verify-build` / `refresh-patch` | 门禁复查 / 补丁管线 |
 | `status` / `handoff` / `track-edit` | 状态恢复 / 源码追踪 |
 | `search-url` / `submit` / `review` / `post-merge` / `feedback` / `result` | URL搜索 / **PR提交(W4→AI Review→CI→SKILL_FEEDBACK,HANDOFF,--resume)** / 主编审核 / 合并后索引 / **流程终态反馈(HANDOFF,--resume)** / **任务终态 result.json 上报(8状态枚举,生成器强制,exit 0/2)** |
@@ -909,3 +911,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.3 — 2026-08-20 — 全量诊断驱动升级（一致性修复 + 超时配置工具化）：①P0 修复 submit git add 草稿路径 knowledge/graph/draft/→knowledge/drafts/（submission/finish/feedback/post-merge/review/dispatch/kb_collab 全链路 8 处，主路径自动化恢复）；②CI 构建超时配置工具化：新增 ohc/build_timeout.py + `timeout get|set|list|validate` 子命令（与 CI AWK 校验同构，3600-57600s），本地 W3（workflow_checks）改读同一配置（原硬编码 600s 误杀中大型包），OHC_W3_TIMEOUT 可临时覆盖，W3 超时 HANDOFF 附 timeout set 指引，.ci-result.json 新增 log_sha256（W3 完整日志哈希）；③规则编号去碰撞：CI L0m 内部 R41/R42 改为 L0m-4/L0m-5（与铁律 R41/R42 冲突），W4/W5 以本文档为唯一权威（W4=Pre-PR审计、W5=知识图谱完整性，代码标签已对齐），KNOW_HOW_WHY→KNOW_YOUR_WHY 拼写修复；④finish 步骤表对齐代码实际 10 步（W3=[5/10]），driver 13步→14步，make check 超时不再误记 PASS（returncode None/负值→TIMEOUT）；⑤submission 7 处 subprocess 超时兜底（create-pr/list-prs/monitor-review/ci-status/trigger-ci），闭环校验 fail-open 改为显式告警；⑥conan_verify G2 镜像注入增加 .bak 备份+崩溃恢复；⑦R43 死链修复（→iron-rules.md），W5 草稿检查命令支持双命名（DRAFT-*.kv 与 E###-draft-*.kv），知识图谱规模声明改为以 index.tsv 为准；⑧文档层同步修复由配套 PR 完成（iron-rules 补 R41-R43 详解、CONTRIBUTING/KNOW_YOUR_WHY 对齐 v12.2、ADAPTATION_GUIDE W4/W5 互换修正等 13 项）；铁律 43 条不变；v12.2→v12.3*
 
 *SKILL.md v12.4 — 2026-08-20 — 知识库治理工具化（借鉴 OpenViking 设计思想，纯规则零 LLM 实现）：①category 受控词表（scripts/ohc/kb_taxonomy.py，核心词 ~55 + 别名 ~200，组合词自动拆分，长尾保留渐进收敛）——存量 319 条已归一（278 种写法→229 种组合），graph add/promote 写入关口自动归一化，validate 新增 C13 词表 lint；②validate 新增 C14 编号连续性检查（id/文件名一致性 error 级，空洞如 E257 warning 级提示复用）；③新增 draft-review 预审辅助工具（FTS5 粗筛 + signature 字面量重叠/keyword Jaccard 精排，三态建议+空壳草稿标记）——**草稿仍按原有方式产生，纳入正式库决策权保留在人工审核**（用户约束），工具仅输出相似度证据加速判断；④engine 新增 --trace 检索轨迹（Phase A 候选分/B 命中明细输出到 stderr，调试误匹配）；⑤模板 _template.kv category 注释列出受控词表；v12.3→v12.4*
+
+*SKILL.md v12.5 — 2026-08-20 — 预扫描全量补齐 + 知识库动态利用闭环：①`prescan` 独立命令（评估/选型阶段可单独扫描源码，规则文件自动发现，--json 供 AI 消费）；②hit_count 闭环回填（命中自动累计写回规则文件，行级更新保留注释；--no-writeback 只读模式）——原"纸面闭环"变真；③规则集 16→24 条，补 linking/build-system/shell/libc 域（dlopen 硬编码路径、构建机 rpath、CMake 绝对路径 DESTINATION、config.guess 过期提示、gettext 宏、bash 专用语法、#!/bin/bash shebang、__GLIBC__ glibc 专用宏），全部挂 kb_ref；④**知识库动态派生规则**：E 条目 .kv 含 prescan_pattern 字段即在 PreScanner 运行时自动派生 PSCAN-KB-{id} 规则（示范：E013 dlopen API / E019 dlopen 绝对路径 / E037 bash shebang）——知识库增长即扫描能力增长，无需改规则文件；修 shebang 误判为注释的漏报、规则 ID 撞名；⑤engine 命中回写 metrics_last_used（激活沉睡度量字段，知识使用反馈）；⑥字段白名单/模板同步（prescan_* 可选字段）；v12.4→v12.5*

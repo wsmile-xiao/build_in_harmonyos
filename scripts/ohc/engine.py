@@ -584,6 +584,35 @@ def format_inline(result: MatchResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _touch_metrics(eid: str, gdir: str) -> None:
+    """v12.5: 命中即回写 metrics_last_used（best-effort，激活知识使用度量）。"""
+    try:
+        kv_path = os.path.join(gdir, f"{eid}.kv")
+        if not os.path.isfile(kv_path):
+            return
+        from datetime import date
+        with open(kv_path, encoding="utf-8") as f:
+            lines = f.read().split("\n")
+        today = date.today().isoformat()
+        for i, line in enumerate(lines):
+            if line.startswith("metrics_last_used:"):
+                indent = line[:len(line) - len(line.lstrip())]
+                lines[i] = f"{indent}metrics_last_used: {today}"
+                break
+        else:
+            # 缺字段则插到 metrics_confidence 之后（或文件尾）
+            for i, line in enumerate(lines):
+                if line.startswith("metrics_confidence:"):
+                    lines.insert(i + 1, f"metrics_last_used: {today}")
+                    break
+            else:
+                lines.append(f"metrics_last_used: {today}")
+        with open(kv_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception:
+        pass  # 度量回写永不阻塞匹配
+
+
 # ═══════════════════════════════════════════════════════
 # Public API: run engine
 # ═══════════════════════════════════════════════════════
@@ -640,6 +669,9 @@ def run_engine(
     entry = _phase_c(match_id, gdir)
     if not entry:
         return MatchResult()
+
+    # v12.5: 命中度量回写（知识库使用反馈闭环）
+    _touch_metrics(match_id, gdir)
 
     # Phase D: principle lookup
     p_names = _phase_d(entry, principles)

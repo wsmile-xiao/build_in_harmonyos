@@ -42,12 +42,15 @@ MUSL_MISSING = {
 }
 
 
+_LOG_STDERR = False  # --json 模式下日志走 stderr，保持 stdout 纯 JSON
+
+
 def _log(msg: str) -> None:
-    print(f"  [pre-scan] {msg}", flush=True)
+    print(f"  [pre-scan] {msg}", file=sys.stderr if _LOG_STDERR else sys.stdout, flush=True)
 
 
 def _log_warn(msg: str) -> None:
-    print(f"  [pre-scan] ⚠️ {msg}", flush=True)
+    print(f"  [pre-scan] ⚠️ {msg}", file=sys.stderr if _LOG_STDERR else sys.stdout, flush=True)
 
 
 # ═══════════════════════════════════════════════════════
@@ -57,11 +60,19 @@ def _log_warn(msg: str) -> None:
 class PreScanner:
     """Scan source tree for OHOS build risks."""
 
-    def __init__(self, src_dir: str, rules_path: str | None = None):
+    def __init__(self, src_dir: str, rules_path: str | None = None,
+                 kb_dir: str | None = None, writeback: bool = True):
         self.src_dir = Path(src_dir)
         if not self.src_dir.is_dir():
             raise FileNotFoundError(f"源码目录不存在: {src_dir}")
-        self.rules = self._load_rules(rules_path)
+        self.rules_path = Path(rules_path) if rules_path else None
+        self.writeback = writeback
+        self.yaml_rules = self._load_rules(rules_path)
+        # KB 动态派生规则：知识库增长 → 扫描能力自动增长（v12.5）
+        if kb_dir is None and self.rules_path is not None:
+            kb_dir = str(self.rules_path.parent)  # 规则文件与 graph/*.kv 同目录
+        self.kb_rules = self._load_kb_rules(kb_dir)
+        self.rules = self.yaml_rules + self.kb_rules
 
     # ── Rules loading ──
 
@@ -109,6 +120,59 @@ class PreScanner:
             rules.append(current)
         return rules
 
+    # ── KB dynamic rule derivation (v12.5) ──
+
+    _SEV_MAP = {"1": "low", "2": "medium", "3": "critical"}
+
+    @staticmethod
+    def _load_kb_rules(kb_dir: str | None) -> list[dict]:
+        """从知识图谱 E*.kv 动态派生扫描规则（条目含 prescan_pattern 字段即生效）。
+
+        新增知识条目无需改规则文件——在 .kv 中写 prescan_pattern 即可被扫描。
+        不回写知识文件（保持知识库只读消费）。
+        """
+        if not kb_dir:
+            return []
+        gdir = Path(kb_dir)
+        if not gdir.is_dir():
+            return []
+        rules = []
+        for kvf in sorted(gdir.glob("E*.kv")):
+            try:
+                text = kvf.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            fields = {}
+            for line in text.splitlines():
+                if not line or line[:1] in (" ", "\t", "#"):
+                    continue
+                m = re.match(r"^(\w+):\s*(.*)$", line)
+                if m and m.group(1) not in fields:
+                    fields[m.group(1)] = m.group(2).strip()
+            pat = fields.get("prescan_pattern", "").strip().strip("'\"")
+            if not pat:
+                continue
+            sev_raw = fields.get("prescan_severity", "").strip()
+            severity = sev_raw if sev_raw in ("critical", "high", "medium", "low", "info") \
+                else PreScanner._SEV_MAP.get(fields.get("severity", "2").strip(), "medium")
+            globs = [g.strip().strip("'\"") for g in
+                     fields.get("prescan_globs", "*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk").split(",")
+                     if g.strip()]
+            title = fields.get("title", "") or text.splitlines()[1] if len(text.splitlines()) > 1 else kvf.stem
+            rules.append({
+                "id": f"PSCAN-KB-{kvf.stem}",
+                "category": "kb_derived",
+                "severity": severity,
+                "pattern": pat,
+                "scope_globs": globs,
+                "description": f"[KB] {str(title)[:70]}",
+                "kb_ref": kvf.stem,
+                "source": "knowledge_graph",
+            })
+        if rules:
+            _log(f"知识库动态派生规则: {len(rules)} 条")
+        return rules
+
     # ── Main scan ──
 
     def scan(self) -> dict:
@@ -149,12 +213,44 @@ class PreScanner:
 
         metadata = self._collect_metadata()
 
+        # v12.5: hit_count 闭环回填（只回写 yaml 手工规则；KB/auto 派生规则不写）
+        if self.writeback and self.rules_path is not None:
+            hit_rule_ids = {f["rule_id"] for f in findings if f.get("rule_id", "").startswith("PSCAN-")}
+            try:
+                self._writeback_hits(hit_rule_ids)
+            except Exception as e:
+                _log_warn(f"hit_count 回填失败（非阻塞）: {e}")
+
         return {
             "src_dir": str(self.src_dir),
             "findings": findings,
             "metadata": metadata,
             "summary": self._summarize(findings),
+            "kb_rule_count": len(self.kb_rules),
         }
+
+    def _writeback_hits(self, hit_rule_ids: set[str]) -> None:
+        """命中规则的 hit_count +1，行级更新保留注释/格式（v12.5 闭环）。"""
+        path = self.rules_path
+        if not path or not path.exists():
+            return
+        lines = path.read_text(encoding="utf-8").split("\n")
+        cur_id = None
+        updated = 0
+        for i, line in enumerate(lines):
+            s = line.strip()
+            if s.startswith("- id:"):
+                cur_id = s.split(":", 1)[1].strip().strip("'\"")
+            elif cur_id in hit_rule_ids and s.startswith("hit_count:"):
+                m = re.match(r"hit_count:\s*(\d+)", s)
+                if m:
+                    n = int(m.group(1)) + 1
+                    indent = line[:len(line) - len(line.lstrip())]
+                    lines[i] = f"{indent}hit_count: {n}"
+                    updated += 1
+        if updated:
+            path.write_text("\n".join(lines), encoding="utf-8")
+            _log(f"hit_count 回填: {updated} 条规则")
 
     # ── Rule application ──
 
@@ -345,7 +441,7 @@ class PreScanner:
         if name.endswith(('.c', '.h', '.cc', '.cpp', '.java', '.js')):
             return stripped.startswith(('//', '/*', '*'))
         if name.startswith('makefile') or name.endswith('.mk') or name.endswith('.py') or name.endswith('.sh'):
-            return stripped.startswith('#')
+            return stripped.startswith('#') and not stripped.startswith('#!')  # shebang 不是注释
         return False
 
     def _summarize(self, findings: list[dict]) -> dict:
@@ -451,17 +547,39 @@ class PreScanner:
 # CLI
 # ═══════════════════════════════════════════════════════
 
-def main() -> int:
+def pre_scan_cli(argv: list[str] | None = None) -> int:
+    """ohc-run.py prescan 入口（独立命令，v12.5）。"""
+    return main(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="pre-scan",
-        description="预编译源码风险扫描",
+        prog="ohc prescan",
+        description="预编译源码风险扫描（规则集 + 知识库动态派生规则）",
     )
     parser.add_argument("src_dir", help="源码目录")
-    parser.add_argument("--rules", help="规则集 yaml 文件路径")
+    parser.add_argument("--rules", help="规则集 yaml 文件路径 (默认: <项目>/knowledge/graph/pre-scan-rules.yaml)")
+    parser.add_argument("--kb-dir", help="知识图谱目录（默认: 规则文件同目录，自动派生 PSCAN-KB-* 规则）")
+    parser.add_argument("--no-writeback", action="store_true", help="不回填 hit_count（只读扫描）")
+    parser.add_argument("--json", action="store_true", help="JSON 输出（供 AI 消费）")
     parser.add_argument("--output", help="输出报告路径 (默认: <src_dir>/.pre-scan-report.yaml)")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
-    scanner = PreScanner(args.src_dir, args.rules)
+    if args.json:
+        global _LOG_STDERR
+        _LOG_STDERR = True
+
+    rules = args.rules
+    if not rules:
+        # 自动发现：cwd 或其上级含 knowledge/graph/pre-scan-rules.yaml
+        for cand in [Path.cwd(), *Path.cwd().parents]:
+            f = cand / "knowledge" / "graph" / "pre-scan-rules.yaml"
+            if f.exists():
+                rules = str(f)
+                break
+
+    scanner = PreScanner(args.src_dir, rules, kb_dir=args.kb_dir,
+                         writeback=not args.no_writeback)
     output = args.output or str(Path(args.src_dir) / ".pre-scan-report.yaml")
     report = scanner.save_report(output)
 
@@ -472,6 +590,11 @@ def main() -> int:
         "low": "🟢", "info": "ℹ️", "auto": "🔧",
     }
 
+    if args.json:
+        import json as _json
+        print(_json.dumps(report, ensure_ascii=False, indent=2))
+        return 0
+
     print(f"\n━━━ 预编译风险扫描完成 ━━━")
     for level in ("critical", "high", "medium", "low", "info", "auto"):
         count = summary.get(level, 0)
@@ -481,6 +604,8 @@ def main() -> int:
     meta = report.get("metadata", {})
     print(f"  构建系统: {meta.get('build_systems', [])}")
     print(f"  有测试: {meta.get('has_tests', False)}")
+    if report.get("kb_rule_count"):
+        print(f"  KB 动态规则: {report['kb_rule_count']} 条（知识库增长自动生效）")
     print(f"\n报告: {output}")
     return 0
 

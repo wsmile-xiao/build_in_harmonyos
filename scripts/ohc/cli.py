@@ -33,6 +33,8 @@ _MODULES = {
     "timeout": "build_timeout",
     # v12.4: 草稿预审辅助（相似度证据 + 三态建议；纳入决策权在人工审核）
     "draft-review": "draft_review",
+    # v12.5: 预编译源码风险扫描独立命令（规则集 + 知识库动态派生规则）
+    "prescan": "pre_scan",
 }
 
 

@@ -71,6 +71,8 @@ _TEMPLATE_FIELDS = {
     # Quality metrics (方案 D)
     "metrics_success_count", "metrics_fail_count",
     "metrics_confidence", "metrics_last_used",
+    # v12.5: 预扫描动态派生字段（PreScanner 运行时读取，知识条目即规则源）
+    "prescan_pattern", "prescan_globs", "prescan_severity",
 }
 
 # Regex pattern for dynamic forbid_N_xxx fields
