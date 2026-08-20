@@ -963,6 +963,41 @@ def cmd_validate(
     if verbose:
         log_ok("[C12] Draft leakage check")
 
+    # Check 13: category 受控词表 lint（warning 级，长尾词渐进收敛）
+    from .kb_taxonomy import lint_category
+    longtail_files = 0
+    for kvf in kv_files:
+        unknown = lint_category(_kv_get(kvf, "category"))
+        if unknown:
+            longtail_files += 1
+            log_warn(f"[C13] {kvf.stem}.category: 长尾词 {unknown}（建议改用受控词表词，见 ohc/kb_taxonomy.py）")
+            warnings += 1
+    if verbose and not longtail_files:
+        log_ok("[C13] Category vocabulary lint")
+
+    # Check 14: 编号连续性 + id 字段与文件名一致性
+    id_mismatch = 0
+    holes: list[int] = []
+    nums = set()
+    for kvf in kv_files:
+        m = re.match(r"^E(\d+)\.kv$", kvf.name)
+        if not m:
+            continue
+        nums.add(int(m.group(1)))
+        inner = _kv_get(kvf, "id").strip()
+        if inner and inner != kvf.stem:
+            log_fail(f"[C14] {kvf.stem}: id 字段 '{inner}' 与文件名不一致")
+            id_mismatch += 1
+            errors += 1
+    if nums:
+        holes = [n for n in range(1, max(nums) + 1) if n not in nums]
+        if holes:
+            log_warn(f"[C14] 编号空洞: {['E%03d' % h for h in holes]}"
+                     f"（graph add 将优先复用空洞；若为有意留空请忽略）")
+            warnings += 1
+    if verbose:
+        log_ok(f"[C14] ID continuity: E001-E{max(nums):03d}, {len(nums)} entries, {len(holes)} holes")
+
     if errors:
         log_fail(f"❌ {errors} errors, {warnings} warnings")
     else:
@@ -1049,6 +1084,19 @@ def cmd_promote(
 
     content = draft_path.read_text(encoding="utf-8")
     fields = _parse_fields(content)
+
+    # ── Category 归一化（受控词表，仅统一表达形式，不改知识内容）──
+    from .kb_taxonomy import normalize_category
+    raw_cat = fields.get("category", "").strip()
+    if raw_cat:
+        norm_cat, unknown_toks = normalize_category(raw_cat)
+        if norm_cat and norm_cat != raw_cat:
+            content = re.sub(r"^category:\s*.+$", f"category:               {norm_cat}",
+                             content, count=1, flags=re.M)
+            fields["category"] = norm_cat
+            log_info(f"  🏷️ category 已归一化: {raw_cat!r} → {norm_cat!r}")
+            if unknown_toks:
+                log_warn(f"  ⚠️ 长尾词保留: {unknown_toks}（审核时可考虑改用受控词表词）")
 
     # ── Quality gate ──
     quality_fields = ['error_signature', 'root_cause', 'rec_approach']

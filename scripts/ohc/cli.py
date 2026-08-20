@@ -31,6 +31,8 @@ _MODULES = {
     "result": "result_report",
     # v12.3: CI/W3 构建超时配置管理（ci/config/build_timeouts.txt）
     "timeout": "build_timeout",
+    # v12.4: 草稿预审辅助（相似度证据 + 三态建议；纳入决策权在人工审核）
+    "draft-review": "draft_review",
 }
 
 

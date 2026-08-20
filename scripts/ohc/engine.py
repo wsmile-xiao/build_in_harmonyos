@@ -143,6 +143,8 @@ def _phase_a_dual(
     """
     raw_cands = _phase_a(error_text, index_entries, min_score, top_n, gdir)
     norm_cands = _phase_a(normalized, index_entries, min_score, top_n, gdir)
+    _tr(f"[A] raw   top: {[(c.entry.id, c.score) for c in raw_cands]}")
+    _tr(f"[A] norm  top: {[(c.entry.id, c.score) for c in norm_cands]}")
 
     if not raw_cands and not norm_cands:
         return []
@@ -209,6 +211,18 @@ def _phase_a_legacy(
 
 
 # ═══════════════════════════════════════════════════════
+# Retrieval trace (v12.4: --trace 检索轨迹，借鉴 OpenViking 可观测检索)
+# ═══════════════════════════════════════════════════════
+
+_trace_buf: list[str] | None = None
+
+
+def _tr(msg: str) -> None:
+    if _trace_buf is not None:
+        _trace_buf.append(msg)
+
+
+# ═══════════════════════════════════════════════════════
 # Phase context markers (for phase-aware score dampening)
 # ═══════════════════════════════════════════════════════
 
@@ -269,6 +283,7 @@ def _phase_b(
                 pattern = pattern.strip().lower()
                 if pattern and pattern in error_lower:
                     match_score += sig_bonus
+                    _tr(f"[B] {cand.entry.id}: signature 命中 {pattern!r} (+{sig_bonus})")
                     break  # Same as build-driver inline: first match only
 
         # match_keywords bonus (+1 each)
@@ -288,6 +303,7 @@ def _phase_b(
             if entry_phases and error_phase_context and not (entry_phases & error_phase_context):
                 match_score = max(0, match_score - 2)  # dampen mismatched phase
 
+        _tr(f"[B] {cand.entry.id}: match={match_score} (phaseA={cand.score})")
         if match_score > best_b:
             best_b = match_score
             best_id = cand.entry.id
@@ -341,6 +357,7 @@ def _phase_b_plus(
 
     # Add related entries as candidates (low score, Phase B regex can boost)
     existing_ids = {c.entry.id for c in candidates}
+    _tr(f"[B+] {best_id} 关联扩展: {sorted(related_ids)}")
     for rid in sorted(related_ids):
         if rid not in existing_ids:
             entry = _find_entry_by_id(index_entries, rid)
@@ -592,6 +609,8 @@ def run_engine(
     if not os.path.isdir(gdir):
         return MatchResult()
 
+    _tr(f"[engine] 输入 {len(error_text)} 字符, 索引 {len(parse_index_tsv(os.path.join(gdir, 'index.tsv'))) if os.path.isfile(os.path.join(gdir, 'index.tsv')) else 0} 条")
+
     # Load data
     index_file = os.path.join(gdir, "index.tsv")
     principles_file = os.path.join(gdir, "principles.kv")
@@ -626,6 +645,7 @@ def run_engine(
     p_names = _phase_d(entry, principles)
 
     total = a_score + b_score
+    _tr(f"[result] 选中 {match_id}: phaseA={a_score} phaseB={b_score} total={total}")
     return MatchResult(
         matched=True,
         match_id=match_id,
@@ -657,6 +677,8 @@ def engine_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-dir", help="Project root directory")
     parser.add_argument("--file", metavar="PATH", help="Read error text from file")
     parser.add_argument("--top-n", type=int, default=5, help="Phase A top-N candidates (default 5)")
+    parser.add_argument("--trace", action="store_true",
+                        help="输出检索轨迹（Phase A/B 打分明细）到 stderr，调试误匹配用")
 
     args = parser.parse_args(argv)
 
@@ -701,7 +723,14 @@ def engine_cli(argv: list[str] | None = None) -> int:
         with open(args.file, "r", encoding="utf-8") as f:
             error_text = f.read()
 
+    global _trace_buf
+    if args.trace:
+        _trace_buf = []
     result = run_engine(error_text, project_dir=args.project_dir, top_n=args.top_n)
+    if args.trace:
+        for line in _trace_buf:
+            print(line, file=sys.stderr)
+        _trace_buf = None
 
     if args.json:
         print(format_json(result), end="")
