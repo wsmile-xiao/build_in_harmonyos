@@ -1,0 +1,208 @@
+--- a/server/main.cpp	2020-04-07 12:15:11.000000000 +0800
++++ b/server/main.cpp	2026-08-19 11:07:00.163181875 +0800
+@@ -16,8 +16,8 @@
+ 
+ #include "commonincludes.hpp"
+ 
+-#include <boost/property_tree/ptree.hpp>
+-#include <boost/property_tree/json_parser.hpp>
++#include <fstream>
++#include <sstream>
+ 
+ #include "stuncore.h"
+ #include "server.h"
+@@ -38,7 +38,6 @@
+ #include "resolvehostname.h"
+ 
+ 
+-using namespace boost::property_tree;
+ 
+ 
+ void PrintUsage(bool fSummaryUsage)
+@@ -549,77 +548,123 @@
+ }
+ 
+ 
+-HRESULT LoadConfigsFromFile(const std::string& filename, std::vector<StartupArgs>& configurations)
++// Minimal JSON config parser (replaces boost::property_tree, not available on OHOS)
++// Supports the stuntman configuration file format:
++// { "configurations": [ { "mode": "full", "family": "4", ... }, ... ] }
++static std::string JsonExtractValue(const std::string& json, const std::string& key)
++{
++    std::string needle = "\"" + key + "\"";
++    size_t pos = json.find(needle);
++    if (pos == std::string::npos) return "";
++    pos += needle.size();
++    pos = json.find(':', pos);
++    if (pos == std::string::npos) return "";
++    pos++;
++    pos = json.find_first_not_of(" \t\r\n", pos);
++    if (pos == std::string::npos) return "";
++    if (json[pos] == '"') {
++        size_t start = pos + 1;
++        size_t end = json.find('"', start);
++        if (end == std::string::npos) return "";
++        return json.substr(start, end - start);
++    }
++    size_t start = pos;
++    while (pos < json.size() && json[pos] != ',' && json[pos] != '}' && json[pos] != ']' && !isspace((unsigned char)json[pos]))
++        pos++;
++    return json.substr(start, pos - start);
++}
++
++static bool JsonParseConfigArray(const std::string& content, std::vector<StartupArgs>& configurations)
+ {
+-    ptree tree;
+-    bool error = false;
+-    std::string errorMessage;
+-    
+-    /* EXAMPLE configuration file
+-     {
+-      "configurations": [
+-        {
+-          "description" : "UDP Full Mode listening on default ports",
+-          "mode": "full",
+-          "family": "4",
+-          "protocol": "udp",
+-          "ddp": "1"
+-        },
+-        {
+-          "description" : "TCP Full Mode listening on default port",
+-          "mode": "full",
+-          "family": "6",
+-          "protocol": "tcp",
+-          "ddp": "1"
++    size_t configPos = content.find("\"configurations\"");
++    if (configPos == std::string::npos) {
++        Logging::LogMsg(LL_ALWAYS, "Config file: 'configurations' key not found");
++        return false;
++    }
++    size_t arrayStart = content.find('[', configPos);
++    if (arrayStart == std::string::npos) {
++        Logging::LogMsg(LL_ALWAYS, "Config file: configurations is not an array");
++        return false;
++    }
++    // find matching close bracket
++    int depth = 1;
++    size_t pos = arrayStart + 1;
++    bool inStr = false;
++    while (pos < content.size() && depth > 0) {
++        char c = content[pos];
++        if (c == '"' && (pos == 0 || content[pos-1] != '\\')) inStr = !inStr;
++        else if (!inStr) {
++            if (c == '[') depth++;
++            else if (c == ']') depth--;
++        }
++        pos++;
++    }
++    if (depth > 0) {
++        Logging::LogMsg(LL_ALWAYS, "Config file: unterminated configurations array");
++        return false;
++    }
++    std::string arrayContent = content.substr(arrayStart + 1, pos - arrayStart - 2);
++    // iterate over JSON objects in the array
++    size_t search = 0;
++    while (true) {
++        size_t objStart = arrayContent.find('{', search);
++        if (objStart == std::string::npos) break;
++        int odepth = 1;
++        size_t objEnd = objStart + 1;
++        bool ostr = false;
++        while (objEnd < arrayContent.size() && odepth > 0) {
++            char c = arrayContent[objEnd];
++            if (c == '"' && (objEnd == 0 || arrayContent[objEnd-1] != '\\')) ostr = !ostr;
++            else if (!ostr) {
++                if (c == '{') odepth++;
++                else if (c == '}') odepth--;
++            }
++            objEnd++;
+         }
+-      ]
++        if (odepth > 0) {
++            Logging::LogMsg(LL_ALWAYS, "Config file: unterminated configuration object");
++            return false;
++        }
++        std::string objJson = arrayContent.substr(objStart, objEnd - objStart + 1);
++        StartupArgs args;
++        args.strMode = JsonExtractValue(objJson, "mode");
++        args.strPrimaryInterface = JsonExtractValue(objJson, "primaryinterface");
++        args.strAltInterface = JsonExtractValue(objJson, "altinterface");
++        args.strPrimaryAdvertised = JsonExtractValue(objJson, "primaryadvertised");
++        args.strAlternateAdvertised = JsonExtractValue(objJson, "altadvertised");
++        args.strPrimaryPort = JsonExtractValue(objJson, "primaryport");
++        args.strAltPort = JsonExtractValue(objJson, "altport");
++        args.strFamily = JsonExtractValue(objJson, "family");
++        args.strProtocol = JsonExtractValue(objJson, "protocol");
++        args.strMaxConnections = JsonExtractValue(objJson, "maxconn");
++        args.strDosProtect = JsonExtractValue(objJson, "ddp");
++        args.strReuseAddr = JsonExtractValue(objJson, "reuseaddr");
++        configurations.push_back(args);
++        search = objEnd + 1;
+     }
+-    */
+-    
+-    try
+-    {
+-        read_json(filename, tree);
+-        ptree root = tree.get_child("configurations");
+-        
+-        for (ptree::iterator itor = root.begin(); itor != root.end(); itor++)
+-        {
+-            const ptree& child = itor->second;
+-            StartupArgs args;
++    return true;
++}
+ 
+-            args.strMode = child.get("mode", "");
+-            args.strPrimaryInterface = child.get("primaryinterface", "");
+-            args.strAltInterface = child.get("altinterface", "");
+-            args.strPrimaryAdvertised = child.get("primaryadvertised", "");
+-            args.strAlternateAdvertised = child.get("altadvertised", "");
+-            args.strPrimaryPort = child.get("primaryport", "");
+-            args.strAltPort = child.get("altport", "");
+-            args.strFamily = child.get("family", "");
+-            args.strProtocol = child.get("protocol", "");
+-            args.strMaxConnections = child.get("maxconn", "");
+-            args.strDosProtect = child.get("ddp", "");
+-            args.strReuseAddr = child.get("reuseaddr", "");
+-            
+-            configurations.push_back(args);
+-        }
+-    }
+-    catch(ptree_error& ex1)
+-    {
+-        Logging::LogMsg(LL_ALWAYS, "Error processing configuration file: %s", ex1.what());
+-        error = true;
+-    }
+-    
+-    if (!error && configurations.size() == 0)
+-    {
+-        Logging::LogMsg(LL_ALWAYS, "File is valid json, but no configurations found");
+-        error = true;
++HRESULT LoadConfigsFromFile(const std::string& filename, std::vector<StartupArgs>& configurations)
++{
++    std::ifstream file(filename.c_str());
++    if (!file.is_open()) {
++        Logging::LogMsg(LL_ALWAYS, "Cannot open config file: %s", filename.c_str());
++        return E_FAIL;
+     }
+-    
+-    if (error)
+-    {
++    std::stringstream ss;
++    ss << file.rdbuf();
++    file.close();
++    std::string content = ss.str();
++
++    if (!JsonParseConfigArray(content, configurations)) {
+         configurations.clear();
+         return E_FAIL;
+     }
+-    
++    if (configurations.empty()) {
++        Logging::LogMsg(LL_ALWAYS, "File is valid, but no configurations found");
++        return E_FAIL;
++    }
+     return S_OK;
+ }
+     
