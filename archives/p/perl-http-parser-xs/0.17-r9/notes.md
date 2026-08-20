@@ -148,3 +148,7 @@ perl -I /storage/Users/currentUser/usr/local/lib/site_perl/5.42.0/aarch64-linux 
 **最终状态**: built
 **功能测试**: PASS (2026-06-11)
 **参考**: perl-dbd-pg/3.18.0 成功经验
+---
+
+**编译结束**: 2026-08-07 09:24
+**最终状态**: built
