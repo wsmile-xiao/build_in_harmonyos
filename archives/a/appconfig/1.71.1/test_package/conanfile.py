@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Consumer test for appconfig/1.71."""
+"""Consumer test for appconfig/1.71.1."""
 
 import os
 
@@ -7,7 +7,7 @@ from conan import ConanFile
 
 
 class AppConfigTestConan(ConanFile):
-    settings = "os", "arch"
+    settings = "os", "compiler", "build_type", "arch"
     generators = "VirtualRunEnv"
     test_type = "explicit"
 
