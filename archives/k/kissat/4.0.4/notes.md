@@ -2,10 +2,10 @@
 
 ## 编译环境
 - 构建系统: custom（自定义configure脚本，不支持--prefix）
-- 编译日期: 2026-06-15
+- 编译日期: 2026-07-20
 - 编译器: clang 15.0.4
 - 平台: HarmonyOS, HongMeng Kernel 1.12.0 aarch64
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -99,6 +99,6 @@ All 864 test jobs succeeded in 2.65 seconds.
 - configure选项: CC=clang -fPIC（使用clang而非默认gcc，添加-fPIC支持位置无关代码）
 
 ---
-**编译结束**: 2026-06-16 14:43
-**最终状态**: published
----
+
+**编译结束**: 2026-07-20 21:39
+**最终状态**: built
