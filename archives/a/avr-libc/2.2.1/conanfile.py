@@ -97,6 +97,8 @@ class AvrLibcConan(ConanFile):
         # mode 0640 on HMDFS.  Invoke the real scripts through an executable
         # HNP Perl runtime instead of relying on either file's execute bit.
         perl = self._required_build_script("perl")
+        m4 = self._required_build_script("m4")
+        m4_runtime = ("/data/service/hnp/bin/m4" if self.settings.os == "OHOS" else m4)
         if self.settings.os == "OHOS":
             perl_runtime = os.path.join(self.build_folder, ".conan-perl")
             shutil.copy2(perl, perl_runtime)
@@ -114,6 +116,7 @@ class AvrLibcConan(ConanFile):
             ]
         )
         env.define("AUTOM4TE", autom4te_command)
+        env.define("M4", m4_runtime)
         autotools_commands = {
             "ACLOCAL": shlex.join(
                 [
@@ -172,6 +175,7 @@ class AvrLibcConan(ConanFile):
                 variable, compiler if variable == "CC" else executable
             )
         tc_env.define("CCAS", compiler)
+        tc_env.define("M4", m4_runtime)
         tc.generate(env=tc_env)
 
     def build(self):
