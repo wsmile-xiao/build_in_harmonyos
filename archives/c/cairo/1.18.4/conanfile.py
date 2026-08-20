@@ -9,6 +9,7 @@ from conan.tools.layout import basic_layout
 class CairoConan(ConanFile):
     name = "cairo"
     version = "1.18.4"
+    exports_sources = "patches/*"
     settings = "os", "arch", "compiler", "build_type"
     options = {"shared": [True, False], "fPIC": [True, False]}
     default_options = {"shared": True, "fPIC": True}
@@ -70,7 +71,7 @@ class CairoConan(ConanFile):
         tc.project_options["spectre"] = "disabled"     # libspectre
         tc.project_options["symbol-lookup"] = "disabled"  # binutils/libbfd
         tc.project_options["glib"] = "disabled"        # 不建 cairo-gobject，避免 glib 依赖
-        tc.project_options["tests"] = "disabled"
+        tc.project_options["tests"] = "auto"
         tc.generate()
         # conan MesonToolchain 不把 tools.build:compiler_executables 的 ar/ranlib 写进 native file，
         # meson 便按裸名 llvm-ar 探归档器，而 clang 工具链在 /data/service/hnp/bin，PATH 上无 llvm-ar
