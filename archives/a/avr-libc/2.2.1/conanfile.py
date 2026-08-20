@@ -89,6 +89,15 @@ class AvrLibcConan(ConanFile):
         env.define("AVR_NM", tools["NM"])
         env.define("AVR_OBJCOPY", tools["OBJCOPY"])
         env.define("PYTHON", sys.executable)
+        for variable, executable in {
+            "ACLOCAL": "aclocal",
+            "AUTOHEADER": "autoheader",
+            "AUTOCONF": "autoconf",
+            "AUTOMAKE": "automake",
+        }.items():
+            env.define(variable, "sh {}".format(
+                shlex.quote(self._required_build_script(executable))
+            ))
         build_env.generate()
 
         tc = AutotoolsToolchain(self)
@@ -239,6 +248,18 @@ class AvrLibcConan(ConanFile):
                 return candidate
         raise ConanInvalidConfiguration(
             "Required AVR tool '{}' was not provided by tool_requires".format(executable)
+        )
+
+    def _required_build_script(self, executable):
+        for dependency in self.dependencies.build.values():
+            package_folder = dependency.package_folder
+            if not package_folder:
+                continue
+            candidate = os.path.join(package_folder, "bin", executable)
+            if os.path.isfile(candidate):
+                return candidate
+        raise ConanInvalidConfiguration(
+            "Required build script '{}' was not provided by tool_requires".format(executable)
         )
 
     def _validate_packaged_artifacts(self):
