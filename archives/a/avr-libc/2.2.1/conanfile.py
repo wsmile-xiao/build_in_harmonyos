@@ -232,7 +232,7 @@ class AvrLibcConan(ConanFile):
         self.run("sh bootstrap", cwd=self.source_folder, env="conanbuild")
 
         autotools = Autotools(self)
-        configure_script = os.path.join(self.build_folder, "configure")
+        configure_script = os.path.join(self.source_folder, "configure")
         self.run(
             "sh {} {}".format(
                 shlex.quote(configure_script), autotools._configure_args
