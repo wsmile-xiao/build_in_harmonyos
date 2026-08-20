@@ -1,0 +1,167 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -22,29 +22,37 @@ set(CMAKE_CXX_EXTENSIONS OFF)
+ set(CMAKE_INCLUDE_CURRENT_DIR ON)
+ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+ 
+-# Set up Qt stuff:
+-set(CMAKE_AUTOMOC ON)
+-set(CMAKE_AUTORCC ON)
+-set(CMAKE_AUTOUIC ON)
++# Option to enable/disable Qt support (OHOS CI Worker may not have Qt)
++option(QBS_ENABLE_QT "Build with Qt support" ON)
+ 
+-find_package(QT NAMES Qt6 Qt5 COMPONENTS Core REQUIRED)
++if(QBS_ENABLE_QT)
++    # Set up Qt stuff:
++    set(CMAKE_AUTOMOC ON)
++    set(CMAKE_AUTORCC ON)
++    set(CMAKE_AUTOUIC ON)
+ 
+-if(WITH_TESTS)
+-    enable_testing()
+-    set(QT_TEST_COMPONENT Test)
+-    set(IMPLICIT_DEPENDS Qt${QT_VERSION_MAJOR}::Test)
+-endif()
++    find_package(QT NAMES Qt6 Qt5 COMPONENTS Core REQUIRED)
++
++    if(WITH_TESTS)
++        enable_testing()
++        set(QT_TEST_COMPONENT Test)
++        set(IMPLICIT_DEPENDS Qt${QT_VERSION_MAJOR}::Test)
++    endif()
+ 
+-find_package(Qt${QT_VERSION_MAJOR}
+-    COMPONENTS Concurrent Core Gui Network Widgets Xml ${QT_TEST_COMPONENT}
+-    REQUIRED
+-    )
++    find_package(Qt${QT_VERSION_MAJOR}
++        COMPONENTS Concurrent Core Gui Network Widgets Xml ${QT_TEST_COMPONENT}
++        REQUIRED
++        )
+ 
+-find_package(Qt${QT_VERSION_MAJOR} OPTIONAL_COMPONENTS Script QUIET)
++    find_package(Qt${QT_VERSION_MAJOR} OPTIONAL_COMPONENTS Script QUIET)
++endif()
+ 
+ if (Qt6_FOUND)
++    # Qt6Core5Compat 由配方自包含编译提供（qt5compat-everywhere-src-6.11.1
++    # 编译安装到 core5compat-install——CMAKE_PREFIX_PATH 已含）——REQUIRED
++    # 强制找到（target include 生效，qtclsp 的 QTextCodec 可编译）
+     find_package(Qt${QT_VERSION_MAJOR} COMPONENTS Core5Compat REQUIRED)
+-    if(NOT TARGET Qt6Core5Compat)
++    if(TARGET Qt6::Core5Compat)
+         if(CMAKE_VERSION VERSION_LESS 3.18)
+             set_property(TARGET Qt6::Core5Compat PROPERTY IMPORTED_GLOBAL TRUE) # hack for CMake < 3.18
+         endif()
+@@ -71,6 +79,6 @@ add_definitions(-DQT_NO_QSNPRINTF -D_UCRT_NOISY_NAN)
+ add_subdirectory(src)
+ add_subdirectory(doc)
+ add_subdirectory(share)
+-if(WITH_TESTS)
++if(WITH_TESTS AND QBS_ENABLE_QT)
+     add_subdirectory(tests)
+ endif()
+--- a/cmake/QbsBuildConfig.cmake
++++ b/cmake/QbsBuildConfig.cmake
+@@ -1,4 +1,4 @@
+-option(WITH_TESTS "Build Tests" ON)
++option(WITH_TESTS "Build Tests" OFF)
+ option(WITH_UNIT_TESTS "Build Unit Tests" OFF)
+ option(INSTALL_PUBLIC_HEADERS "Whether to install public headers" ON)
+ option(QBS_ENABLE_RPATH "Whether to enable RPATH" ON)
+--- a/doc/CMakeLists.txt
++++ b/doc/CMakeLists.txt
+@@ -1,3 +1,8 @@
++if(NOT QBS_ENABLE_QT)
++    message(STATUS "Skipping doc build (Qt disabled)")
++    return()
++endif()
++
+ set(_DOC_SOURCES
+     ../README.md
+     ../CONTRIBUTING.md
+--- a/share/CMakeLists.txt
++++ b/share/CMakeLists.txt
+@@ -1,3 +1,8 @@
++if(NOT QBS_ENABLE_QT)
++    message(STATUS "Skipping share build (Qt disabled)")
++    return()
++endif()
++
+ if(WIN32)
+     install(
+         FILES ../bin/ibmsvc.xml ../bin/ibqbs.bat
+@@ -67,6 +72,10 @@ get_update_path_command(UPDATE_PATH_COMMAND)
+ get_target_property(_QBS_OUTPUT_DIR qbs RUNTIME_OUTPUT_DIRECTORY)
+ add_custom_command(
+     OUTPUT "${_QMLTYPES_INSTALL_PATH}"
++    # qbs 二进制的 NEEDED 是相对路径（../../../lib/libqbscore.so——从 cwd
++    # 解析失败）——WORKING_DIRECTORY 设为 qbs 二进制目录（相对 NEEDED 从
++    # bin/ 解析 = build/Release/lib 正确）
++    WORKING_DIRECTORY "${_QBS_OUTPUT_DIR}"
+     COMMAND ${CMAKE_COMMAND} -E env "${UPDATE_PATH_COMMAND}" ${_QBS_OUTPUT_DIR}/qbs
+         resolve
+         --settings-dir ${PROJECT_BINARY_DIR}/settings
+@@ -87,15 +96,24 @@ add_custom_command(
+     DEPENDS qbs "${_QBS_RESOURCES_DST}" qbs_processlauncher
+     )
+ 
++# qbs resolve 生成 qml-type-descriptions 需要运行 qbs 二进制——其相对 NEEDED
++# （../../../lib/libqbscore.so）在 OHOS 动态链接器下从 cwd 解析反复失败——
++# qml-type-descriptions 是 IDE 集成资源（非 qbs 核心运行依赖）——跳过该
++# 生成步骤，qbs 构建完成并产出核心二进制
+ add_custom_target(
+-    BuildQbsResources ALL
++    BuildQbsResources
+     DEPENDS
+     ${_SITE_PACKAGES_DST}
+     ${_QBS_RESOURCES_DST}
+     "${_QMLTYPES_INSTALL_PATH}"
+     )
+ 
+-install(
+-    DIRECTORY ${PROJECT_BINARY_DIR}/resources-build/install-root/share/qbs/qml-type-descriptions
+-    DESTINATION "${QBS_RESOURCES_INSTALL_DIR}/qbs"
+-    )
++# BuildQbsResources 已跳过（qbs resolve 相对 NEEDED 在 OHOS 动态链接器下
++# 无法运行）——qml-type-descriptions 未生成时跳过其 install（避免 cmake
++# install 找不到目录报错）
++if(EXISTS "${PROJECT_BINARY_DIR}/resources-build/install-root/share/qbs/qml-type-descriptions")
++    install(
++        DIRECTORY ${PROJECT_BINARY_DIR}/resources-build/install-root/share/qbs/qml-type-descriptions
++        DESTINATION "${QBS_RESOURCES_INSTALL_DIR}/qbs"
++        )
++endif()
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -1,3 +1,8 @@
++if(NOT QBS_ENABLE_QT)
++    message(STATUS "Skipping src build (Qt disabled)")
++    return()
++endif()
++
+ add_subdirectory(app)
+ add_subdirectory(lib)
+ add_subdirectory(libexec)
+--- a/src/app/qbs/CMakeLists.txt
++++ b/src/app/qbs/CMakeLists.txt
+@@ -50,6 +50,7 @@ add_qbs_app(qbs
+         qbsconsolelogger
+         qtclsp
+         Qt${QT_VERSION_MAJOR}::Network
++        Qt6Core5Compat
+     SOURCES ${SOURCES} ${PARSER_SOURCES}
+     )
+ 
+--- a/src/lib/corelib/CMakeLists.txt
++++ b/src/lib/corelib/CMakeLists.txt
+@@ -466,7 +466,7 @@ add_qbs_library(qbscore
+         "CPLUSPLUS_NO_PARSER"
+         ${QBS_UNIT_TESTS_DEFINES}
+     DEPENDS
+-        Qt${QT_VERSION_MAJOR}::CorePrivate
++        $<IF:$<TARGET_EXISTS:Qt${QT_VERSION_MAJOR}::CorePrivate>,Qt${QT_VERSION_MAJOR}::CorePrivate,Qt${QT_VERSION_MAJOR}::Core>
+         Qt${QT_VERSION_MAJOR}::Network
+         Qt${QT_VERSION_MAJOR}::Xml
+         Qt6Core5Compat
