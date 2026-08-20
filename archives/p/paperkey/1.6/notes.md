@@ -28,7 +28,7 @@
 | 3 | refresh-patch 自动生成含生成文件的补丁(config.h/config.log/config.status/papertest-*) | edit-tracker 追踪了所有变更文件包括生成文件 | 手动精选，仅保留 configure umask 源码补丁 |
 | 4 | G0 clean-verify 失败 | toybox `patch` 不支持 `--input` 选项 | 平台限制，非代码问题；手动验证通过 |
 
-**关键发现**: paperkey 1.6 使用 Autoconf 2.66，configure 正确检测 `aarch64-unknown-linux-gnu-ohos`，无需修改 config.guess/config.sub。
+**关键发现**: paperkey 1.6 使用 Autoconf 2.66。在 HarmonyOS 设备本地构建时，configure 可正确检测 `aarch64-unknown-linux-gnu-ohos`。但 config.guess/config.sub 原始版本缺少 HarmonyOS 检测分支，在 CI 跨编译环境中可能无法正确识别平台，因此添加 0002/0003 补丁确保 config.guess 和 config.sub 支持 HarmonyOS 平台检测。
 
 ## 源码修改
 
