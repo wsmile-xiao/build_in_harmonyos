@@ -15,6 +15,7 @@ class LuassertConan(ConanFile):
     license = "MIT"
     homepage = "https://lunarmodules.github.io/busted/"
     url = "https://github.com/lunarmodules/luassert"
+    settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True
 
