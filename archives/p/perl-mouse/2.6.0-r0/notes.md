@@ -112,3 +112,24 @@ perl -MMouse::Util -e 'print "XS: ", Mouse::Util::MOUSE_XS() ? "enabled" : "disa
 **编译结束**: 2026-06-24 20:15
 **最终状态**: built
 **测试状态**: 97.6% (40/41, 1 expected XS failure)
+
+## Conan 适配 (2026-08-07)
+
+### 构建系统变更
+- 原始构建系统: Module::Build + Module::Build::XSUtil (Build.PL)
+- Conan 适配: ExtUtils::MakeMaker (Makefile.PL)
+- 原因: Module::Build 和 Module::Build::XSUtil 在 OHOS CI 环境不可用
+
+### 关键适配步骤
+1. 在 build() 中预生成 ppport.h (使用 Devel::PPPort 核心模块)
+2. 在 build() 中预生成 xshelper.h (Module::Build::XSUtil 生成的辅助头文件)
+3. 在 build() 中预生成 xs_version.h
+4. 生成 Mouse::Tiny (tool/generate-mouse-tiny.pl)
+5. 将 XS 源文件复制到 lib/ 目录 (MakeMaker 需要 .xs 与 .pm 同目录)
+6. 创建 Makefile.PL 替代 Build.PL
+7. 使用 MY::postamble 添加跨目录 .c→.o 编译规则
+
+### 验证结果
+- conan create: 通过
+- Mouse API 测试: 通过 (has/new/accessor/setter/type constraint/inheritance)
+- XS state: PurePerl (HMDFS SELinux 限制, 预期)
