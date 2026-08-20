@@ -158,6 +158,5 @@ perl -e 'use Encode::JIS2K; use Encode qw(encode decode); \
 4. **Perl XS 扩展特殊性**：Perl XS 扩展使用 Makefile.PL 而不是标准的 autotools，需要特殊的编译配置。
 ---
 
-**编译结束**: 2026-06-11 11:43
-**功能测试**: 2026-06-11 14:05
-**最终状态**: built (需管理员安装 XS 模块到系统目录)
+**编译结束**: 2026-08-07 09:16
+**最终状态**: built
