@@ -62,7 +62,14 @@ class GnuPrologConan(ConanFile):
         check_boot = os.path.join(src, "Pl2Wam", "check_boot")
         with open(check_boot, encoding="utf-8") as handle:
             content = handle.read()
-        content = content.replace("diff --ignore-space-change -I '^%' -I '^file_name[(]'", "diff -b")
+        content = content.replace(
+            "diff --ignore-space-change -I '^%' -I '^file_name[(]' $1 $2 || \\\n\t( echo \"difference encountered: $1 <> $2\"; exit 1 )",
+            "t1=\"${TMPDIR:-.}/gprolog-diff-$$.a\"; t2=\"${TMPDIR:-.}/gprolog-diff-$$.b\"; "
+            "sed -e '/^%/d' -e '/^file_name[(]/d' \"$1\" > \"$t1\" && "
+            "sed -e '/^%/d' -e '/^file_name[(]/d' \"$2\" > \"$t2\" && "
+            "diff -b \"$t1\" \"$t2\"; r=$?; rm -f \"$t1\" \"$t2\"; "
+            "test $r -eq 0 || ( echo \"difference encountered: $1 <> $2\"; exit 1 )",
+        )
         content = content.replace("/tmp/make.log", "make.log")
         with open(check_boot, "w", encoding="utf-8") as handle:
             handle.write(content)
