@@ -9,7 +9,7 @@
 ## 编译流程概要
 
 ### Phase 1: 初始化 (已完成)
-- ✅ 源码下载: `http://cpan.metacpan.org/authors/id/T/TO/TODDR/Digest-MD5-2.59.tar.gz`
+- ✅ 源码下载: `https://cpan.metacpan.org/authors/id/T/TO/TODDR/Digest-MD5-2.59.tar.gz`
 - ✅ 解压完成
 - ✅ 骨架目录创建
 
@@ -243,9 +243,8 @@ $ctx->add(encode("UTF-8", "中文测试"));
 ## 最终结论
 
 **Digest::MD5 2.59 在 OpenHarmony 平台上功能完整，性能优良，可正常使用。**
-
+**功能测试**: ✅ PASS (17/17)
 ---
 
-**编译结束**: 2026-06-10 19:57
-**最终状态**: published
-**功能测试**: ✅ PASS (17/17)
+**编译结束**: 2026-08-07 09:02
+**最终状态**: built
