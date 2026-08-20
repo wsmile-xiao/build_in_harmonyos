@@ -1,0 +1,11 @@
+use strict;
+use warnings;
+use Socket qw( SOCK_STREAM );
+use Socket::GetAddrInfo qw( getaddrinfo );
+my $version = $Socket::GetAddrInfo::VERSION;
+print "Socket::GetAddrInfo version: $version\n";
+my ($err, @res) = getaddrinfo("127.0.0.1", "80", { socktype => SOCK_STREAM });
+die "getaddrinfo failed (err=$err)" unless $err == 0 && @res > 0;
+print "getaddrinfo available: yes\n";
+print "results: " . scalar(@res) . ", family: $res[0]->{family}\n";
+print "All smoke tests passed.\n";
