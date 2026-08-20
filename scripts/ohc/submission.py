@@ -779,11 +779,19 @@ def cmd_submit(software: str, version: str,
 
         if ci_status == "FAILED":
             log_fail(f"❌ CI 构建失败")
+            detail = _fetch_ci_failure_detail(gitcode_pr, repo, pr_number)
+            if detail:
+                log_fail("── CI 失败详情（最新失败评论摘要）──")
+                for ln in detail.splitlines():
+                    log_fail(f"  {ln}")
+            acts = [f"按上方失败详情定位原因并修复（本地 W3 复验后再推）",
+                    f"修复后 push: git push origin {branch_name}（CI 自动重跑）",
+                    f"继续监控: python3 scripts/ohc-run.py submit {software} {version} --resume",
+                    f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
+            if detail:
+                acts.insert(0, "── CI 失败详情见上方摘要 ──")
             _emit_submit_handoff(software, version, ver_dir, project_dir,
-                "ci_build_failed",
-                [f"CI 构建失败，请查看 PR #{pr_number} 的 CI 评论",
-                 f"修复后 push 新 commit: git push origin {branch_name}",
-                 f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
+                "ci_build_failed", acts)
             return 1
         elif ci_status == "TIMEOUT":
             log_fail(f"❌ CI 监控超时")
@@ -795,6 +803,7 @@ def cmd_submit(software: str, version: str,
             return 1
         elif ci_status == "PASSED":
             log_ok(f"  ✅ CI 构建通过")
+            _maybe_upgrade_result(software, version, pr_number, pr_url)
 
         # ── SKILL_FEEDBACK (final phase) ──
         log_info("生成 SKILL_FEEDBACK 报告...")
@@ -1189,11 +1198,19 @@ def cmd_submit(software: str, version: str,
 
     if ci_status == "FAILED":
         log_fail(f"❌ CI 构建失败")
+        detail = _fetch_ci_failure_detail(gitcode_pr, repo, pr_number)
+        if detail:
+            log_fail("── CI 失败详情（最新失败评论摘要）──")
+            for ln in detail.splitlines():
+                log_fail(f"  {ln}")
+        acts = [f"按上方失败详情定位原因并修复（本地 W3 复验后再推）",
+                f"修复后 push: git push origin {branch_name}（CI 自动重跑）",
+                f"继续监控: python3 scripts/ohc-run.py submit {software} {version} --resume",
+                f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
+        if detail:
+            acts.insert(0, "── CI 失败详情见上方摘要 ──")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
-            "ci_build_failed",
-            [f"CI 构建失败，请查看 PR #{pr_number} 的 CI 评论",
-             f"修复后 push 新 commit: git push origin {branch_name}",
-             f"查看 CI: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"])
+            "ci_build_failed", acts)
         return 1
     elif ci_status == "TIMEOUT":
         log_fail(f"❌ CI 监控超时")
@@ -1205,6 +1222,7 @@ def cmd_submit(software: str, version: str,
         return 1
     elif ci_status == "PASSED":
         log_ok(f"  ✅ CI 构建通过")
+        _maybe_upgrade_result(software, version, pr_number, pr_url)
 
     # ── SKILL_FEEDBACK (final phase) ──
     log_info("生成 SKILL_FEEDBACK 报告...")
@@ -1222,6 +1240,61 @@ def cmd_submit(software: str, version: str,
     print(f"     分支: {branch_name}")
     print(f"     标题: {pr_title}")
     return feedback_ret
+
+
+def _maybe_upgrade_result(software: str, version: str,
+                          pr_number: int, pr_url: str) -> None:
+    """CI 绿即终态：OHC_RESULT_OUT 已设置时自动升级 result 草稿为 success。
+
+    R42 闭环：partial 草稿（PR 创建时）→ success（CI 绿时）。
+    未设置环境变量时打印提示，不落盘（交互场景 agent 自行上报）。
+    """
+    if not os.environ.get("OHC_RESULT_OUT", "").strip():
+        log_info("   CI 已绿（终态）。上报: ohc-run.py result "
+                 f"{software} {version} --status success "
+                 f"--summary 'CI 校验通过 PR #{pr_number}'")
+        return
+    try:
+        from .result_report import result_cli
+        rc = result_cli([software, version, "--status", "success",
+                         "--summary", f"CI 校验通过 PR #{pr_number}: {pr_url}",
+                         "--pr-number", str(pr_number), "--force"])
+        if rc == 0:
+            log_ok("   result.json 已升级为 success（CI 绿终态）")
+    except Exception as e:
+        log_info(f"   result 升级跳过: {e}")
+
+
+def _fetch_ci_failure_detail(gitcode_pr: str, repo: str,
+                             pr_number: int) -> str | None:
+    """CI 失败后自动提取最新失败评论的报错摘要（免 agent 二次查询）。
+
+    调 gitcode_pr.py ci-status --json 拿全部 CI 评论，取最后一条
+    "校验失败"，从 body 提取错误关键行（error/失败/❌/gate）。
+    任何异常返回 None，不阻塞主流程。
+    """
+    try:
+        r = subprocess.run(
+            [sys.executable, gitcode_pr, "ci-status", "--json",
+             "--repo", repo, "--number", str(pr_number)],
+            capture_output=True, text=True, timeout=60)
+        out = r.stdout or ""
+        if "--- JSON ---" not in out:
+            return None
+        data = json.loads(out.split("--- JSON ---")[-1].strip())
+        failed = [c for c in data if "校验失败" in c.get("body", "")]
+        if not failed:
+            return None
+        body = failed[-1].get("body", "")
+        # 优先错误关键行；无关键行则取正文前 1200 字
+        keys = ("error", "Error", "ERROR", "失败", "❌", "gate", "Gate",
+                "exit", "missing", "No such")
+        lines = [ln.strip() for ln in body.splitlines()
+                 if ln.strip() and any(k in ln for k in keys)]
+        detail = "\n".join(lines[:25]) if lines else body[:1200]
+        return detail[:1500] or None
+    except Exception:
+        return None
 
 
 def _parse_pr_number(output: str) -> int | None:
