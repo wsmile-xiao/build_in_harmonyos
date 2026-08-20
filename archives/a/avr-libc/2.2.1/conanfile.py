@@ -232,7 +232,14 @@ class AvrLibcConan(ConanFile):
         self.run("sh bootstrap", cwd=self.source_folder, env="conanbuild")
 
         autotools = Autotools(self)
-        autotools.configure(build_script_folder=self.source_folder)
+        configure_script = os.path.join(self.build_folder, "configure")
+        self.run(
+            "sh {} {}".format(
+                shlex.quote(configure_script), autotools._configure_args
+            ),
+            cwd=self.build_folder,
+            env="conanbuild",
+        )
         autotools.make(args=["-j1"])
 
         # The complete upstream suite requires avrtest or simulavr.  Keep a
