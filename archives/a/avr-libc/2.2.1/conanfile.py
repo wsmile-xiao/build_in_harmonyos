@@ -246,9 +246,12 @@ class AvrLibcConan(ConanFile):
                 '(umask 077 && mkdir "$tmp")',
                 'mkdir "$tmp"',
             )
+        configure_args = autotools._configure_args
+        if self.settings.os == "OHOS":
+            configure_args += " --disable-dependency-tracking"
         self.run(
             "sh {} {}".format(
-                shlex.quote(configure_script), autotools._configure_args
+                shlex.quote(configure_script), configure_args
             ),
             cwd=self.build_folder,
             env="conanbuild",
