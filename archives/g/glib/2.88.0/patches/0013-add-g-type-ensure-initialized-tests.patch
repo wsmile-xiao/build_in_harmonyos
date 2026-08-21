@@ -1,0 +1,169 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+Subject: [PATCH] Add tests for g_type_ensure_initialized()
+
+Add gobject/tests/ensure-initialized.c covering: explicit
+initialization before any other type-system use, repeated idempotent
+calls, concurrent calls from many threads, and plain GType/GObject
+regression, and register it in the gobject test suite.
+
+---
+ gobject/tests/ensure-initialized.c | 143 +++++++++++++++++++++++++++++++++++++
+ gobject/tests/meson.build         |   1 +
+ 2 files changed, 144 insertions(+)
+--- /dev/null	2026-07-20 07:48:39.439517500 +0800
++++ b/gobject/tests/ensure-initialized.c
+@@ -0,0 +1,144 @@
++/* GObject - GLib Type, Object, Parameter and Signal Library
++ * Copyright (C) 2026 The GLib team
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include <glib-object.h>
++
++/* Test the explicit GObject type-system initialization API
++ * g_type_ensure_initialized().
++ *
++ * On platforms that do not run ELF .init_array constructors (such as
++ * HarmonyOS), the GObject type system is *not* initialized when the
++ * process starts; this test verifies that an explicit call to
++ * g_type_ensure_initialized() initializes the type system on demand,
++ * that repeated and concurrent calls are safe and idempotent, and
++ * that regular GType/GObject operations work as usual afterwards.
++ */
++
++typedef struct _TestWidget TestWidget;
++
++G_DECLARE_FINAL_TYPE (TestWidget, test_widget, TEST, WIDGET, GObject)
++
++struct _TestWidget
++{
++  GObject parent_instance;
++};
++
++G_DEFINE_TYPE (TestWidget, test_widget, G_TYPE_OBJECT)
++
++static void
++test_widget_init (TestWidget *self)
++{
++}
++
++static void
++test_widget_class_init (TestWidgetClass *klass)
++{
++}
++
++#define TEST_TYPE_WIDGET (test_widget_get_type ())
++
++/* 1. explicit initialization before any other type-system use */
++static void
++test_explicit_init_before_use (void)
++{
++  /* Must be the very first GObject operation in the process; on
++   * platforms without .init_array execution the type system has not
++   * been initialized yet, and this call must do it on demand. */
++  g_type_ensure_initialized ();
++
++  g_assert_cmpstr (g_type_name (G_TYPE_OBJECT), ==, "GObject");
++
++  g_assert_cmpuint (g_type_name (TEST_TYPE_WIDGET) != NULL, ==, TRUE);
++  TestWidget *widget = g_object_new (TEST_TYPE_WIDGET, NULL);
++  g_assert_nonnull (widget);
++  g_assert_true (G_IS_OBJECT (widget));
++  g_object_unref (widget);
++}
++
++/* 2. repeated calls are safe and idempotent */
++static void
++test_repeated_init (void)
++{
++  gint i;
++
++  for (i = 0; i < 10000; i++)
++    g_type_ensure_initialized ();
++
++  g_assert_cmpstr (g_type_name (G_TYPE_OBJECT), ==, "GObject");
++  g_assert_cmpstr (g_type_name (TEST_TYPE_WIDGET), ==, "TestWidget");
++}
++
++/* 3. concurrent calls from many threads never re-initialize */
++#define N_INIT_THREADS 16
++#define N_INIT_CALLS_PER_THREAD 1000
++
++static gpointer
++init_thread_func (gpointer user_data)
++{
++  gint i;
++
++  for (i = 0; i < N_INIT_CALLS_PER_THREAD; i++)
++    g_type_ensure_initialized ();
++
++  return NULL;
++}
++
++static void
++test_concurrent_init (void)
++{
++  GThread *threads[N_INIT_THREADS];
++  gint i;
++
++  for (i = 0; i < N_INIT_THREADS; i++)
++    threads[i] = g_thread_new ("gtype-ensure-init", init_thread_func, NULL);
++
++  for (i = 0; i < N_INIT_THREADS; i++)
++    g_thread_join (threads[i]);
++
++  /* The type system must remain fully functional */
++  g_assert_cmpstr (g_type_name (G_TYPE_OBJECT), ==, "GObject");
++  g_assert_cmpstr (g_type_name (TEST_TYPE_WIDGET), ==, "TestWidget");
++}
++
++/* 4. GType regression: regular type operations keep working */
++static void
++test_gtype_regression (void)
++{
++  GType widget_type = TEST_TYPE_WIDGET;
++
++  g_assert_cmpstr (g_type_name (widget_type), ==, "TestWidget");
++  g_assert_cmpuint (g_type_parent (widget_type), ==, G_TYPE_OBJECT);
++  g_assert_true (g_type_is_a (widget_type, G_TYPE_OBJECT));
++
++  TestWidget *widget = g_object_new (TEST_TYPE_WIDGET, NULL);
++  g_assert_true (G_TYPE_CHECK_INSTANCE_TYPE (widget, widget_type));
++  g_assert_cmpuint (G_OBJECT_TYPE (widget), ==, widget_type);
++  g_object_unref (widget);
++}
++
++int
++main (int argc, char *argv[])
++{
++  g_test_init (&argc, &argv, NULL);
++
++  g_test_add_func ("/gtype-ensure-init/explicit-before-use", test_explicit_init_before_use);
++  g_test_add_func ("/gtype-ensure-init/repeated", test_repeated_init);
++  g_test_add_func ("/gtype-ensure-init/concurrent", test_concurrent_init);
++  g_test_add_func ("/gtype-ensure-init/regression", test_gtype_regression);
++
++  return g_test_run ();
++}
+--- a/gobject/tests/meson.build
++++ b/gobject/tests/meson.build
+@@ -29,6 +29,7 @@
+ )
+ 
+ gobject_tests = {
++  'ensure-initialized' : {},
+   'notify-init' : {},
+   'notify-init2' : {},
+   'custom-dispatch' : {},
