@@ -10,7 +10,8 @@
 - Official tag metadata and authoritative source mirror checked.
 - Source archive downloaded, SHA256 verified and extracted successfully.
 - Autotools/bootstrap, AVR GCC/Binutils dependency and multilib layout analyzed.
-- Upstream test inventory counted: 462 sources in 17 categories.
+- Upstream test inventory counted: 462 sources in 17 categories (406 C, 53 C++,
+  and 3 assembly sources).
 - Python AST parsing passed for both Conan recipe files.
 - YAML parsing passed for conandata, manifest and test manifest.
 - `conan inspect`, `conan source` and `conan export` passed with the OHOS-adapted
@@ -21,7 +22,8 @@
 ## True-device Shadow CI
 
 - Full recursive AVR device/multilib build: 470/470 directories completed.
-- Upstream compile/link subset: 3/3 passed for ATmega328P.
+- Supplemental true-device compile/link run r23: all 409 C/assembly sources
+  passed for AT90S8515 (409/409, 100%; stderr was empty).
 - Conan consumer compile/link test: 1/1 passed.
 - Package and gate result: 1 package succeeded, 0 failed.
 - Gates: G0 pass, L0 pass, L1 pass, L2 skip, L4 pass, L5 pass.
@@ -34,9 +36,12 @@ The AVR sysroot was validated through upstream sources and the consuming package
 
 ## Coverage boundary
 
-The upstream simulator suite contains 462 sources. Only three representative
-compile/link cases were selected in this adaptation. Full execution was not run
-because neither `avrtest` nor `simulavr` is currently packaged; no 462/462 claim is
-made. The generated AVR ELF cannot execute natively on the OHOS/aarch64 host.
+The compile/link coverage is 409/462 sources (88.53%) and 409/409 eligible
+C/assembly sources passed (100%). The remaining 53 C++ sources are blocked because
+the independently adapted stage-1 `avr-gcc-bootstrap` package contains neither
+`avr-g++` nor `cc1plus`; adding a full C++ compiler belongs in a separate dependency
+adaptation. AVR runtime execution was not run because neither `avrtest` nor
+`simulavr` is currently packaged. The generated AVR ELF cannot execute natively on
+the OHOS/aarch64 host.
 
 See `shadow-ci.md` for the run history and detailed evidence.

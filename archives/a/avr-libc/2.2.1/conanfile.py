@@ -261,16 +261,34 @@ class AvrLibcConan(ConanFile):
         # overcommitting the shared true-device host.
         autotools.make(args=["-j4"])
 
-        # The complete upstream suite requires avrtest or simulavr.  Keep a
-        # representative compile/link subset in the build so the generated
-        # libc, libm, CRT and device archive are all exercised without running
-        # AVR machine code on the OHOS host.
+        # The complete upstream suite requires avrtest or simulavr.  Compile
+        # and link every C/assembly source supported by the stage-1 C-only GCC
+        # so libc, libm, CRT and device archives are covered without trying to
+        # execute AVR machine code on the OHOS host.
         tests = os.path.join(self.source_folder, "tests", "simulate")
+        source_globs = " ".join(
+            [
+                "time/*.c",
+                "regression/*.c",
+                "stdlib/*.c",
+                "string/*.c",
+                "pmstring/*.c",
+                "printf/*.c",
+                "scanf/*.c",
+                "fplib/*.c",
+                "math/*.c",
+                "other/*.c",
+                "avr/*.[cS]",
+                "util/*.c",
+                "pgmread/*.c",
+                "pgmread-near/*.c",
+                "pgmread-far/*.c",
+            ]
+        )
         command = (
-            "MCU_LIST=atmega328p MCU_LIST_FULL=atmega328p "
-            'sh runtest.sh -c -a "{}" '
-            "string/strcmp.c stdlib/atoi-1.c math/cos-01.c"
-        ).format(self.build_folder)
+            "MCU_LIST=at90s8515 MCU_LIST_FULL=at90s8515 "
+            "sh runtest.sh -c -a {} {}"
+        ).format(shlex.quote(self.build_folder), source_globs)
         self.run(command, cwd=tests, env="conanbuild")
 
     def package(self):

@@ -55,16 +55,17 @@ Autoconf/Automake。配方显式使用 `--host=avr`，并从 Conan `tool_require
 
 ## 测试策略与结果
 
-上游 `tests/simulate` 共包含 462 个 C/C++/汇编测试源。完整执行依赖
-`avrtest` 或 `simulavr`，该可选依赖不混入本 PR。本轮使用上游
-`runtest.sh` 的官方 compile/link 路径抽测三个代表性用例：
+上游 `tests/simulate` 共包含 462 个测试源：406 个 C、53 个 C++ 和 3 个汇编。
+完整执行依赖 `avrtest` 或 `simulavr`，该独立可选依赖不混入本 PR。现有
+`avr-gcc-bootstrap` 是 C-only stage-1 工具链，不提供 `avr-g++` 或 `cc1plus`，
+因此 53 个 C++ 源码不能在本轮编译。
 
-- `string/strcmp.c`
-- `stdlib/atoi-1.c`
-- `math/cos-01.c`
-
-bootstrap GCC 只提供基础 AVR multilib，测试 MCU 固定为 `atmega328p`（avr5），
-而不是脚本默认的 `atmega128`（avr51）。三个用例均通过。
+本轮使用上游 `runtest.sh -c` 编译、链接其余全部 409 个 C/汇编源码，包括
+官方默认的 338 个用例，以及 `util`、`pgmread`、`pgmread-near`、
+`pgmread-far` 中的 71 个补充用例。测试 MCU 固定为 `at90s8515`：它使用
+bootstrap GCC 已提供的基础 multilib，同时满足 4 个 malloc/realloc 用例的
+上游 MCU 条件。结果为 409/409 通过，编译链接通过率 100%；按 462 个源码总量
+计算，当前编译链接覆盖率为 88.53%。
 
 `test_package` 使用包内 ATmega328P CRT、`libc.a`、`libm.a` 和设备库编译、链接
 实际消费者，再由 `avr-objdump` 和 `avr-nm` 验证 AVR 架构及符号类型：
@@ -82,7 +83,7 @@ Build Summary: Total 1, Success 1, Failed 0
 ```
 
 L2 的非阻断 `skip` 来自文档辅助程序 `avr-man` 不支持 `--version/--help`；
-配方关闭文档构建，核心交付物是 AVR sysroot，功能由上游抽测和
+配方关闭文档构建，核心交付物是 AVR sysroot，功能由完整 C/汇编编译链接测试和
 `test_package` 覆盖。完整日志和迭代记录见 `reports/shadow-ci.md`。
 
 复现单包 CI：
