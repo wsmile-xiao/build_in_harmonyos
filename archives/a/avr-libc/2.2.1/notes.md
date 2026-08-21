@@ -97,3 +97,11 @@ L2 的非阻断 `skip` 来自文档辅助程序 `avr-man` 不支持 `--version/-
 ```sh
 CI_PACKAGES="archives/a/avr-libc/2.2.1" zsh ci/conan/build_and_test.sh
 ```
+
+## 知识草稿
+
+本次适配形成了仅与 `avr-libc` 直接相关的可复用知识草稿：
+`knowledge/avr-libc-harmonyos-cross-toolchain-draft.md`。草稿归纳了交叉 sysroot
+包边界、三层 AVR 工具链拓扑、HMDFS Autotools 启动、`avr-gcc -B` 工具派发、
+MCU/multilib 选择、测试覆盖口径及常见故障定位，可作为后续同类交叉工具链
+适配的候选知识材料。
