@@ -99,10 +99,14 @@ class AvrLibcTestConan(ConanFile):
 
         with open(nm_report, encoding="utf-8", errors="replace") as handle:
             symbols = handle.read()
-        for symbol in ("memcpy", "strlen", "sin"):
-            if not re.search(r"\bT\s+{}$".format(symbol), symbols, re.MULTILINE):
+        expected_symbols = {"memcpy": "T", "strlen": "T", "sin": "W"}
+        for symbol, symbol_type in expected_symbols.items():
+            pattern = r"\b{}\s+{}$".format(symbol_type, symbol)
+            if not re.search(pattern, symbols, re.MULTILINE):
                 raise ConanInvalidConfiguration(
-                    "Linked AVR ELF does not contain tested avr-libc symbol: {}".format(symbol)
+                    "Linked AVR ELF does not contain {} as symbol type {}".format(
+                        symbol, symbol_type
+                    )
                 )
 
         self.output.info("avr-libc consumer compile/link test passed for ATmega328P")
