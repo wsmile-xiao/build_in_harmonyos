@@ -73,11 +73,17 @@ bootstrap GCC 已提供的基础 multilib，同时满足 4 个 malloc/realloc �
 
 ## 真机 Shadow CI
 
-2026-08-21 在 HarmonyOS/aarch64 真机完成单包 Shadow CI：
+2026-08-21 在 HarmonyOS/aarch64 真机完成单包 Shadow CI。冷缓存 r24 已完成
+470/470 构建目录和 409/409 测试，但 12 分钟源码下载占用窗口，最终在
+`make install` 阶段触发 3600 秒超时。r25 仅复用 r24 已校验的源码缓存，仍重新
+执行完整构建、409 个测试、安装、打包和 consumer，最终退出码为 0：
 
 ```text
-run: codex-avr-libc-shadow-ci-r20-2240-requeued-20260821-160012-62802
-commit: 55eacfea2a4f0f547f6778b093cfba469024858e
+outer run: codex-avr-libc-shadow-ci-r25-2240-resume-cache-20260821-200845-55576
+shadow workspace: codex-avr-libc-shadow-ci-r24-2240-full-409-20260821-190344-19933
+commit: 6b817115bf6e48d28dc980437357bdf034aff66b
+upstream compile/link: 409/409 (100%)
+consumer: 1/1 (100%)
 G0=pass L0=pass L1=pass L2=skip L4=pass L5=pass
 Build Summary: Total 1, Success 1, Failed 0
 ```

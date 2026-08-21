@@ -22,13 +22,21 @@
 ## True-device Shadow CI
 
 - Full recursive AVR device/multilib build: 470/470 directories completed.
-- Supplemental true-device compile/link run r23: all 409 C/assembly sources
-  passed for AT90S8515 (409/409, 100%; stderr was empty).
-- Conan consumer compile/link test: 1/1 passed.
+- Supplemental true-device run r23: all 409 C/assembly sources passed for
+  AT90S8515 (409/409, 100%; stderr was empty).
+- Final standard CI run r25: 409/409 upstream compile/link sources passed and the
+  Conan consumer passed (1/1).
+- Executed checks: 410/410 passed (100%).
 - Package and gate result: 1 package succeeded, 0 failed.
 - Gates: G0 pass, L0 pass, L1 pass, L2 skip, L4 pass, L5 pass.
-- Shadow run: `codex-avr-libc-shadow-ci-r20-2240-requeued-20260821-160012-62802`.
-- Shadow commit: `55eacfea2a4f0f547f6778b093cfba469024858e`.
+- Outer run: `codex-avr-libc-shadow-ci-r25-2240-resume-cache-20260821-200845-55576`.
+- Shadow workspace: `codex-avr-libc-shadow-ci-r24-2240-full-409-20260821-190344-19933`.
+- Shadow commit: `6b817115bf6e48d28dc980437357bdf034aff66b`.
+
+The cold-cache r24 run completed the full build and 409/409 tests, then reached the
+3600-second CI limit during `make install` because the source download consumed
+about 12 minutes. Run r25 reused only the verified source cache and repeated the
+full build, tests, install, package and consumer workflow; it ended with exit code 0.
 
 L2 is non-blocking because the packaged documentation helper `avr-man` does not
 accept `--version` or `--help`. It is not the package's primary executable surface.
