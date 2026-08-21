@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — pixman 0.46.4.2 (Meson)"""
+"""Conan recipe — pixman 0.46.4.3 (Meson)"""
 
 import os
 
@@ -12,7 +12,7 @@ from conan.tools.meson import Meson, MesonToolchain
 
 class PixmanConan(ConanFile):
     name = "pixman"
-    version = "0.46.4.2"
+    version = "0.46.4.3"
     description = "Low-level pixel manipulation library used by Cairo and Xorg"
     license = "MIT"
     homepage = "https://cairographics.org/"
