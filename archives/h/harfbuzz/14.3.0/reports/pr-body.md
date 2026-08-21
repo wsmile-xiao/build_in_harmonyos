@@ -1,7 +1,7 @@
 ## PR 信息
 
 - **三方库名称**：harfbuzz
-- **上游版本**：14.3.1
+- **上游版本**：14.3.0
 - **上游仓库地址**：https://github.com/harfbuzz/harfbuzz
 - **适配路径**：路径 A（基础适配）+ 路径 B（贡献创新）
 - **使用知识库**：openharmony-compile-agent；E2153-draft-2301-conan-package-folder-materialization（随本 PR 提交）
@@ -49,7 +49,7 @@
 - [x] **否**，上游已有测试用例覆盖
 - [ ] **是**，上游无测试用例，适配后补全了测试（请在下方说明）
 
-新增的 Conan 消费者属于安装包集成验证，不是用来替代上游测试。它通过 `harfbuzz::harfbuzz` 链接 shared 包，验证 14.3.1 版本、`Harmony` 塑形结果和 14.3.x `hb_ot_fetch_number` API。
+新增的 Conan 消费者属于安装包集成验证，不是用来替代上游测试。它通过 `harfbuzz::harfbuzz` 链接 shared 包，验证 14.3.0 版本、`Harmony` 塑形结果和 14.3.x `hb_ot_fetch_number` API。
 
 ---
 
@@ -62,7 +62,7 @@
 - OHOS/arm64 W3：`20260819T010115Z`，设备 `currentUser@10.62.215.229:2222`
 - W0：`freetype/2.14.3` 完整 RREV/PID/PREV，`binary_remote=ohpcd`，`info_invalid=0`，missing=0
 - shared 包：HarfBuzz RREV `d95aa2283a886e19705accd5a38c7aa9`，PID `02e364f2d646dda8acabc40d95696553e6e53235`，PREV `1ac65b51d4fb18288f6913c88114e961`
-- 消费者终态：`harfbuzz 14.3.1 shaping and fetch APIs: PASS (7 glyphs)`
+- 消费者终态：`harfbuzz 14.3.0 shaping and fetch APIs: PASS (7 glyphs)`
 - 上游原始结果：75 个唯一 Meson JSONL 终态全部 `OK`/RC0，失败 0，跳过 0
 - r4、r5、r6 的配置、共享库加载和验证器失败均保留在 `notes.md`，未改写为通过
 
@@ -73,7 +73,7 @@
 - 关联 Issue：#2278
 - 队伍名称：天天开心
 - 申请人显示标识：2301_80739235
-- 源分支：2301_80739235:feat/harfbuzz-14.3.1
+- 源分支：2301_80739235:feat/harfbuzz-14.3.0
 - 目标分支：OpenHarmonyPCDeveloper/build_in_harmonyos:main
 - contrib 任务：3712；精确任务行是所有权权威，#1866 仅作关联追踪
 - 知识查重：最新 main 的四个规定范围未发现与“graph 身份解析和 install 包目录物化按 RREV/PID/PREV 连接”语义等价的条目

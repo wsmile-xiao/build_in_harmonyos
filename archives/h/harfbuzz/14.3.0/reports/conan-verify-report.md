@@ -1,9 +1,9 @@
-# Conan Verify Report — harfbuzz 14.3.1
+# Conan Verify Report — harfbuzz 14.3.0
 
 **Verdict**: PARTIAL — G1-G3 and the G2 `conan create` passed; G0 was a
 build-system detector false positive, while G4/L2/L4/L5 were not executed by
 this report. The separate W3 and local finish evidence remain authoritative.
-**Reference**: `harfbuzz/14.3.1@ohpcd/stable`
+**Reference**: `harfbuzz/14.3.0@ohpcd/stable`
 **Profile**: ohos-aarch64
 **Date**: 2026-08-19T11:56:56.202852
 
@@ -28,7 +28,7 @@ warning does not apply to this candidate and is not counted as a PASS gate.
 
 ## G2: ✅ PASS
   ✅ conan create 成功
-  📄 日志: archives/h/harfbuzz/14.3.1/reports/conan-create.log
+  📄 日志: archives/h/harfbuzz/14.3.0/reports/conan-create.log
 
 ## G3: ✅ PASS
   ℹ️ 无 bin/ 目录（可能是纯库包）

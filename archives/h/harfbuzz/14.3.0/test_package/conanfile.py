@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Consumer test for HarfBuzz 14.3.1."""
+"""Consumer test for HarfBuzz 14.3.0."""
 
 import os
 

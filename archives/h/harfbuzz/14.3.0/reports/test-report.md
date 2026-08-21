@@ -1,4 +1,4 @@
-# HarfBuzz 14.3.1 Test Report
+# HarfBuzz 14.3.0 Test Report
 
 Status: PASS for the accepted W3 snapshot; finish/Pre-PR remain pending.
 
@@ -32,13 +32,13 @@ The one C consumer links `harfbuzz::harfbuzz` from the shared package and
 checks:
 
 1. buffer allocation;
-2. runtime version at least 14.3.1;
+2. runtime version at least 14.3.0;
 3. UTF-8 shaping of `Harmony`;
 4. seven glyph records and matching info/position arrays;
 5. the 14.3.x `hb_ot_fetch_number` symbol and empty-face result.
 
 Its terminal marker was
-`harfbuzz 14.3.1 shaping and fetch APIs: PASS (7 glyphs)`.
+`harfbuzz 14.3.0 shaping and fetch APIs: PASS (7 glyphs)`.
 
 ## Exact-snapshot evidence
 
