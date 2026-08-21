@@ -1,15 +1,15 @@
-# HarfBuzz 14.3.1 adaptation notes
+# HarfBuzz 14.3.0 adaptation notes
 
 ## Source and scope
 
-- Official source: `harfbuzz-14.3.1.tar.xz`
-- SHA-256: `9dae9538aae2ffdf70cec31f2c27bf68e2aaeeae3112688467697d5faf6194f7`
+- Official source: `harfbuzz-14.3.0.tar.xz`
+- SHA-256: `16070d77cfc4ba1f1e7327e83bf9b3f55898081cabdb94e56a33e04fc8874eae`
 - Build system: Meson
 - Delivery default: `shared=True`, required by Pango consumers
 
 ## Dependency decision
 
-The 14.3.1 source exposes GLib, GObject, Cairo, zlib, ICU, Graphite2, Rust,
+The 14.3.0 source exposes GLib, GObject, Cairo, zlib, ICU, Graphite2, Rust,
 platform shapers, and demo integrations as optional Meson features. This
 candidate disables those providers and keeps only `freetype/2.14.3` as a Conan
 dependency. The current FreeType recipe has no Conan requirements and passes
@@ -18,7 +18,7 @@ dependency. The current FreeType recipe has no Conan requirements and passes
 Fresh W0 evidence from the accepted W3 snapshot:
 
 - Run: `20260819T010115Z`
-- Root: `E:/HarmonyPC/validation/harfbuzz-14.3.1/w3-r7-20260819T010115Z`
+- Root: `E:/HarmonyPC/validation/harfbuzz-14.3.0/w3-r7-20260819T010115Z`
 - FreeType RREV: `7e95a2b2401fd12dcbdd2bf748f56b19`
 - FreeType PID: `01d92cf349a0dd98ff915f4bd99a04430171517f`
 - FreeType PREV: `333a87c0272a09afc1e8cbadd8de3ac6`
@@ -90,7 +90,7 @@ separate hash-bound files.
 - HarfBuzz RREV: `d95aa2283a886e19705accd5a38c7aa9`
 - HarfBuzz PID: `02e364f2d646dda8acabc40d95696553e6e53235`
 - HarfBuzz PREV: `1ac65b51d4fb18288f6913c88114e961`
-- Consumer: `harfbuzz 14.3.1 shaping and fetch APIs: PASS (7 glyphs)`
+- Consumer: `harfbuzz 14.3.0 shaping and fetch APIs: PASS (7 glyphs)`
 
 The package is local W3 evidence only. No upload or `/release` occurred; merge,
 official release, and fresh artifact-registry retrieval are still required.

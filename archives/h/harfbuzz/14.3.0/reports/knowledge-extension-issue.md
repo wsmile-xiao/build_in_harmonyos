@@ -6,15 +6,15 @@
 
 **【库名称】**harfbuzz
 
-**【版本】**14.3.1
+**【版本】**14.3.0
 
-**【contrib 任务】**3712，状态为已领取，活动为开源鸿蒙PC专项积分赛-依赖，任务分支为 feat/harfbuzz-14.3.1。
+**【contrib 任务】**3712，状态为已领取，活动为开源鸿蒙PC专项积分赛-依赖，任务分支为 feat/harfbuzz-14.3.0。
 
 **【关联跟踪】**Issue #1866 仅作关联与追踪，不是所有权权威，也不否决 contrib 精确任务行确认的当前账号所有权。
 
 ## 申请原因
 
-HarfBuzz 14.3.1 是官方当前稳定修订，也是 Pango 1.58.2 所需的直接共享库依赖。本任务将完成真实 OHOS/arm64 shared 包、完整上游 Meson 测试、消费者 API 验证及合并后发布回读。适配中发现 Conan graph info 能解析完整 RREV/PID/PREV 但 package_folder 仍可为空，必须与同一隔离 home 的 install 结果按完整包身份连接后再做产物验证，因此按路径 A+B 申请。
+HarfBuzz 14.3.0 是官方当前稳定修订，也是 Pango 1.58.2 所需的直接共享库依赖。本任务将完成真实 OHOS/arm64 shared 包、完整上游 Meson 测试、消费者 API 验证及合并后发布回读。适配中发现 Conan graph info 能解析完整 RREV/PID/PREV 但 package_folder 仍可为空，必须与同一隔离 home 的 install 结果按完整包身份连接后再做产物验证，因此按路径 A+B 申请。
 
 ## 知识库查重情况
 

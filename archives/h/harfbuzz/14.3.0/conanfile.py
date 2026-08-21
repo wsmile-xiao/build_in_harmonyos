@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for HarfBuzz 14.3.1 (Meson)."""
+"""Conan recipe for HarfBuzz 14.3.0 (Meson)."""
 
 import glob
 import os
@@ -19,7 +19,7 @@ from conan.tools.meson import Meson, MesonToolchain
 
 class HarfbuzzConan(ConanFile):
     name = "harfbuzz"
-    version = "14.3.1"
+    version = "14.3.0"
     description = "OpenType text shaping engine"
     license = "MIT"
     homepage = "https://harfbuzz.github.io/"

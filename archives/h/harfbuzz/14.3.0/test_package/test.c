@@ -13,7 +13,7 @@ int main(void) {
         }
         return 1;
     }
-    if (!hb_version_atleast(14, 3, 1)) {
+    if (!hb_version_atleast(14, 3, 0)) {
         fprintf(stderr, "Unexpected HarfBuzz version: %s\n", hb_version_string());
         hb_buffer_destroy(buffer);
         return 1;
@@ -46,6 +46,6 @@ int main(void) {
     }
 
     hb_buffer_destroy(buffer);
-    printf("harfbuzz 14.3.1 shaping and fetch APIs: PASS (%u glyphs)\n", glyph_count);
+    printf("harfbuzz 14.3.0 shaping and fetch APIs: PASS (%u glyphs)\n", glyph_count);
     return 0;
 }
