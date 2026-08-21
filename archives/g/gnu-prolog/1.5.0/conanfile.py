@@ -84,7 +84,13 @@ class GnuPrologConan(ConanFile):
             "--disable-linedit",
             "--disable-sockets",
         ]
-        command = "./configure " + " ".join(f'"{arg}"' for arg in args)
+        compiler_executables = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict
+        )
+        assembler = compiler_executables.get("c", "cc")
+        command = f'AS="{assembler}" ./configure ' + " ".join(
+            f'"{arg}"' for arg in args
+        )
         self.run(command, cwd=src)
         self.run("make -j1", cwd=src)
         self.run("make check", cwd=src)
