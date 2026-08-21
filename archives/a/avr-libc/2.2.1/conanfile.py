@@ -267,6 +267,7 @@ class AvrLibcConan(ConanFile):
         # AVR machine code on the OHOS host.
         tests = os.path.join(self.source_folder, "tests", "simulate")
         command = (
+            "MCU_LIST=atmega328p MCU_LIST_FULL=atmega328p "
             'sh runtest.sh -c -a "{}" '
             "string/strcmp.c stdlib/atoi-1.c math/cos-01.c"
         ).format(self.build_folder)
