@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Conan recipe for zix 0.8.1-git — Meson build system.
+"""Conan recipe for zix 0.8.1-git.1 — Meson build system.
 
 Zix is a lightweight C library providing common data structures and utilities
 (B-tree, ring buffer, semaphores, filesystem operations, etc.) used by the
 LV2 audio plugin ecosystem.
 """
+import os
 import shutil
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
@@ -15,7 +16,7 @@ from conan.tools.meson import Meson, MesonToolchain
 
 class ZixConan(ConanFile):
     name = "zix"
-    version = "0.8.1-git"
+    version = "0.8.1-git.1"
     description = "Lightweight C library of portability wrappers and data structures"
     license = "ISC"
     homepage = "https://drobilla.net/software/zix"
@@ -74,6 +75,20 @@ class ZixConan(ConanFile):
     def package(self):
         meson = Meson(self)
         meson.install()
+        # 修正 zix-0.pc 的 prefix：meson install 生成 prefix=/（根目录），
+        # 导致下游（sord/sratom）用 pkg-config 拿到 /include/zix-0 等不存在
+        # 路径，头文件找不到。改写为包真实路径。
+        pc_path = os.path.join(self.package_folder, "lib", "pkgconfig", "zix-0.pc")
+        if os.path.isfile(pc_path):
+            with open(pc_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            content = content.replace(
+                "prefix=/",
+                f"prefix={self.package_folder}",
+            )
+            with open(pc_path, "w", encoding="utf-8", newline="\n") as f:
+                f.write(content)
+            self.output.info("Patched zix-0.pc prefix to package folder")
 
     def package_info(self):
         self.cpp_info.libs = ["zix-0"]
