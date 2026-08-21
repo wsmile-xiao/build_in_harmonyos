@@ -12,19 +12,5 @@ class GnuPrologTestConan(ConanFile):
         self.requires(self.tested_reference_str)
 
     def test(self):
-        self.run("gprolog --version", env="conanrun")
-        test_file = os.path.join(self.build_folder, "test.pl")
-        executable = os.path.join(self.build_folder, "test_program")
-        with open(test_file, "w", encoding="utf-8") as handle:
-            handle.write(
-                ":- initialization(main).\n"
-                "main :- 2 + 3 =:= 5, write('PASS'), nl, halt.\n"
-            )
-        self.run(
-            f'gplc -o "{executable}" "{test_file}"',
-            env="conanrun",
-        )
-        self.run(
-            f'"{executable}"',
-            env="conanrun",
-        )
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run(f'{bash} test.sh', env="conanrun")
