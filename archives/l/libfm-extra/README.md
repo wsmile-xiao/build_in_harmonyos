@@ -16,6 +16,7 @@ libfm-extra 提供了以下功能：
 | 版本 | 状态 | 日期 |
 |------|------|------|
 | 1.3.2 | built | 2026-06-05 |
+| 1.3.2.1 | built | 2026-08-20 |
 
 ## 编译配置
 
@@ -36,4 +37,4 @@ pkg-config --libs libfm-extra
 
 ## 参考
 
-- 源码: http://deb.debian.org/debian/pool/main/libf/libfm/
+- 源码: https://deb.debian.org/debian/pool/main/libf/libfm/
