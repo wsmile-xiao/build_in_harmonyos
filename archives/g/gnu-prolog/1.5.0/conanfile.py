@@ -1,4 +1,5 @@
 import os
+import shutil
 
 from conan import ConanFile
 from conan.tools.files import copy, get
@@ -87,7 +88,7 @@ class GnuPrologConan(ConanFile):
         compiler_executables = self.conf.get(
             "tools.build:compiler_executables", default={}, check_type=dict
         )
-        assembler = compiler_executables.get("c", "cc")
+        assembler = compiler_executables.get("as") or shutil.which("as") or "as"
         command = f'AS="{assembler}" ./configure ' + " ".join(
             f'"{arg}"' for arg in args
         )
