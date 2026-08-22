@@ -140,6 +140,39 @@ def _probe_registry(pkg_names: list[str]) -> list[str]:
     return probes
 
 
+def _verify_ci_green(pr_number: int, script: str | None = None) -> str:
+    """上报硬闸: 核验 PR 最新 CI 评论状态（PR6096 教训: CI 红却上报 success）。
+
+    调 gitcode_pr.py ci-status（复用其 token/翻页/机器人过滤逻辑），
+    解析首个状态行。返回:
+    PASSED / FAILED / RUNNING / QUEUED / UNKNOWN / ERROR(无法核验)
+    """
+    if script is None:
+        script = str(Path(__file__).resolve().parent.parent / "gitcode_pr.py")
+    try:
+        # 子进程强制 UTF-8（GBK 控制台下 gitcode_pr.py 打印 emoji 会崩）
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+        r = subprocess.run(
+            [sys.executable, script, "ci-status",
+             "--repo", REPO_NAME, "--number", str(pr_number)],
+            capture_output=True, text=True,
+            encoding="utf-8", errors="replace",
+            timeout=90, env=env)
+        out = (r.stdout or "") + (r.stderr or "")
+        if r.returncode != 0 or "未找到 CI 评论" in out:
+            # 无评论=CI 还没跑或没触发，不能证明绿
+            return "UNKNOWN" if r.returncode == 0 else "ERROR"
+        for ln in out.splitlines():
+            if "CI 最新状态" in ln:
+                seg = ln.split(":", 1)[-1]
+                for code in ("PASSED", "FAILED", "RUNNING", "QUEUED", "UNKNOWN"):
+                    if code in seg:
+                        return code
+        return "UNKNOWN"
+    except Exception:
+        return "ERROR"
+
+
 def _gh_pr(cwd: Path | None = None) -> tuple[int | None, str | None]:
     """S3: 从 gh CLI 取当前分支的 PR number/url（未认证/未安装时返回 None）。"""
     try:
@@ -325,6 +358,9 @@ def result_cli(argv: list[str]) -> int:
                              "优先级: --out > 环境变量 OHC_RESULT_OUT > 不落盘（仅 stdout 输出）")
     parser.add_argument("--force", action="store_true",
                         help="允许覆盖已存在的 result.json")
+    parser.add_argument("--no-ci-verify", action="store_true",
+                        help="跳过 success 的 CI 绿核验（仅限离线等极端场景；"
+                             "默认 success 必须实测 PR 评论含'校验通过'）")
     args = parser.parse_args(argv)
 
     # C项(预算感知): 入口即报剩余预算，<40min 提醒只收尾
@@ -413,11 +449,26 @@ def result_cli(argv: list[str]) -> int:
                       out=out_target)
         return 2
 
+    # ── 上报硬闸: success 必须实测 CI 绿（PR6096 教训: CI 红却上报 success）──
+    final_status = args.status
+    if args.status == "success" and not args.no_ci_verify:
+        ci_state = _verify_ci_green(pr_number)
+        if ci_state != "PASSED":
+            log_fail(f"⛔ 上报硬闸: status=success 但 PR #{pr_number} 最新 CI 状态为 "
+                     f"{ci_state}——拒绝写 success，降级为 partial")
+            log_info("  修复路径: 查看 PR 失败评论 → 修复 → git push → "
+                     "submit --resume 监控 CI 到绿 → --force 重报 success")
+            final_status = "partial"
+            failed_reason = (f"CI 未通过（上报时核验状态 {ci_state}），"
+                             "success 降级 partial；CI 校验通过后重报")
+            if checkpoints and not args.checkpoint:
+                checkpoints[0]["message"] = f"status={final_status}"
+
     result = {
         "schema": "1.0",
         "pkg": args.software,
         "ver": args.version,
-        "status": args.status,
+        "status": final_status,
         "agent": agent,
         "ts": datetime.now(timezone.utc).isoformat(),
     }
@@ -432,8 +483,8 @@ def result_cli(argv: list[str]) -> int:
     if branch:
         result["branch"] = branch
     # 非 success: --failed-reason 落 error_detail（ECS 失败分支优先取此字段）
-    if args.status != "success":
-        result["error_type"] = args.status
+    if final_status != "success":
+        result["error_type"] = final_status
         result["error_detail"] = failed_reason
     if missing_list:
         # --missing 展开为 missing_dependencies 数组（ECS main.py 从此字段读取）

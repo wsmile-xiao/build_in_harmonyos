@@ -102,6 +102,22 @@ conan download "依赖包名/版本" -r=ohpcd --only-recipe
 
 > 跳过此步=可能花数小时编译后发现依赖链断裂，浪费大量时间。先查依赖，再动手。
 
+**W0b — 历史经验核验 + CI 能力矩阵（选型/立项阶段，PR6096 教训）**
+适配对象在本仓库有历史归档（含 notes.md）时，**必须先读历史 notes.md**，并做两项核验：
+
+1. **环境语义可迁移性**：历史成功是在什么环境取得的？设备原生工具链的成功**不可迁移**到 CI（远端 clean 环境）。实测案例：mcfly 0.9.4 历史 notes 记录"设备 rustc 1.96 原生构建成功"，但 CI 无 Rust 工具链——照搬历史结论产出必然红 CI 的 PR。核验口径：**历史命令在 CI 环境里逐字可执行吗？** 工具链不存在的，先看能否 `tool_requires` 补齐（pdfsandwich 正例：历史设备编译 OCaml → 新配方 `tool_requires ocaml/4.14.1.1.4`，CI 可绿）；补不齐 → 选型即止，`--status env_unsupported` 上报，禁止动手。
+2. **历史踩坑必须比对**：历史 notes 记录的绕坑命令（如 mcfly 的 `cargo build --release --no-default-features`）是**验证过的结论**，新配方必须逐项比对遵循；偏离时 notes.md 里写明原因与验证证据。
+
+**CI 能力矩阵（远端 clean 环境硬约束，立项前对照）**：
+
+| 工具链 | CI 现状 | 对策 |
+|---|---|---|
+| Rust（cargo/rustc） | ❌ 无 | Rust 包直接 `env_unsupported`（除非先立项 rust 工具链包） |
+| OCaml | ❌ 无系统级 | `tool_requires ocaml/4.14.1.1.4`（registry 已有，PR6097 正例） |
+| gcc/clang/make/cmake/ninja | ✅ | 正常 |
+| bash 脚本类 | ✅ | 正常 |
+| 其他冷门工具链 | 先在 CI 侧实证 | 未知=先小包试跑，勿假设 |
+
 **W1 — 同步主仓库**
 每次适配新软件前，**必须**拉取主仓库 main 最新变更，以匹配最新框架要求与知识库：
 ```bash
@@ -599,6 +615,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <sta
 **生成器红线**（违反=流程缺陷）：
 - **必须用 `ohc-run.py result` 产出**，禁止手写 JSON、禁止事后改字段绕过校验
 - `dependency_missing` 声明前**必须二次验证**：提供实际日志行或命令输出作为证据（生成器会自动在 `.ci_logs/` 搜索佐证行）
+- **success 上报硬闸（工具强制，PR6096 教训：CI 红却报成功）**：`--status success` 时生成器自动拉取 PR 最新 CI 评论核验，非"校验通过"→ **拒绝写 success，自动降级 partial**（error_detail 注明核验状态与重报路径）。离线等极端场景可用 `--no-ci-verify` 显式跳过（自担风险）
 - 校验失败 exit 2 且**不落盘**；成功 exit 0 且自动 `cat result.json`
 - checkpoints 最后一条固定为 `message: "result.json"`（`_ohpcd_result` 条目）
 - 重报需 `--force`（覆盖前必须确认终态变化）
@@ -921,3 +938,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.6 — 2026-08-20 — 「又快又好」六杠杆 + 社区本地优先架构：**架构原则：所有能力本地可跑（贡献者单机完成全流程）、git 是唯一同步协议（语料/度量/知识随 PR 汇聚）、CI 仅作干净复现门禁**。L1 配方首稿检索（recipe-search：catalog 索引 2280 配方，相似度=名称0.45+构建系统0.30+依赖0.25+补丁加成；finish 成功自动 upsert → 社区配方库成长即生效）；L2 本地 ccache（OHC_CCACHE=1 显式开启，CCACHE_DIR=~/.ohc-ccache 隔离+5G 限额；autotools 环境注入/cmake launcher；**G0/W3/conan-verify 验证期无条件 CCACHE_DISABLE=1——本地缓存绝不影响验证结果，保证 CI 干净可复现**，红线）；L3 handoff 状态文件改事务式 fcntl 锁（读-改-写全程锁内，修 P1 并发丢失更新，自测验证 60/60）+ resolve-deps --batch 拓扑分层并行排程；L4 engine 命中处方完整注入 HANDOFF（方案/说明/命令[auto]/验证/兜底/关联文档，不再只用单字段）；L5 tests/test_smoke.py 冒烟层 + selftest 命令（9 用例含 P0 路径防回归、锁并发、taxonomy 幂等、engine 已知签名回归）；L6 kb-report 本地质量月报（活跃/陈旧/未命中采购清单，--scan-logs 对本地构建日志逐条跑 engine 找知识盲区）；v12.5→v12.6*
 
 *SKILL.md v12.7 — 2026-08-20 — 垃圾拦截误伤审计与修复（CI 误拦截防护）：审计 JC（junk_check：JC1 状态文件/JC2 二进制/JC3 tarball/JC4 临时产物/JC5 archives 隐藏文件白名单/JC6 W2 原子性）与 KC（knowledge_check：草稿泄漏/占位符/非标准字段/index 一致性）对 v12.5-v12.6 新特性的交互，修复三处误伤链：①build Step 2.5 自动预扫描此前默认回写 hit_count → pre-scan-rules.yaml 属框架文件（_FRAMEWORK_PATHS）→ 每次本地构建后 W2 报"框架文件混入"误拦；改为管线内 writeback=False，回填仅限显式 `prescan` 命令；②engine 命中度量直写共享 E*.kv → 并发包 PR 在同一条目合并冲突 + PR 噪音；改为 gitignored 本地 sidecar knowledge/.metrics-local.json（kb-report 兼读 sidecar 与遗留字段）；③knowledge/recipes/catalog.tsv 取消 git 跟踪（语料事实源=archives/ 随 PR 天然共享，catalog 为本地可重建缓存，--rebuild 即得），杜绝每包 PR 携带追加 diff。.gitignore 增列三项本地文件。审计确认：KC4 字段黑名单为行首锚定（prescan_pattern 安全）、JC5 对 .pre-scan-report.yaml 无风险（落在 $TMPDIR/builds 仓库外）、KC2 占位符 grep 不受新字段影响。v12.6→v12.7*
+
+*SKILL.md v12.8 — 2026-08-20 — 5 PR 审计（6089/6091/6093/6096/6097）三项落地：①success 上报硬闸（result --status success 自动拉 PR 最新 CI 评论核验，非"校验通过"→拒绝写 success 降级 partial 并注明核验状态与重报路径；--no-ci-verify 显式逃生口；PR6096 教训：mcfly CI 红 cargo 不可用却报成功）；②W0b 历史经验核验（历史 notes.md 必读 + 环境语义可迁移性——"历史命令在 CI 环境逐字可执行吗"；mcfly 反例：设备 rustc 1.96 成功≠CI 无 Rust 可行；pdfsandwich 正例：设备 OCaml→tool_requires ocaml 4.14.1.1.4；历史踩坑命令必须逐项比对遵循）；③CI 能力矩阵（Rust ❌→env_unsupported；OCaml ❌系统级→tool_requires 可补；gcc/cmake ✅；冷门先实证）；④JC1 补 .bak/.orig/.rej/.ghfast-bak 备份残留模式（PR6091 教训：conandata.yml.ghfast-bak 混入，全仓库 0 先例）。v12.7→v12.8*

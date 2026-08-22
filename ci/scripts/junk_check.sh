@@ -86,6 +86,9 @@ HITS=$(echo "$CHECK_FILES" | grep -E '\.build-status\.json$' || true)
 JC1_HITS="${JC1_HITS}${HITS:+\n$HITS}"
 HITS=$(echo "$CHECK_FILES" | grep -E '/ci-metadata\.json$' || true)
 JC1_HITS="${JC1_HITS}${HITS:+\n$HITS}"
+# 备份/补丁残留（PR6091 教训: conandata.yml.ghfast-bak 混入提交）
+HITS=$(echo "$CHECK_FILES" | grep -E '\.(bak|orig|rej|ghfast-bak)$' || true)
+JC1_HITS="${JC1_HITS}${HITS:+\n$HITS}"
 HITS=$(echo "$CHECK_FILES" | grep -E '/\.(staging-|build-closed|conan-verified|built|configured|installed|patched|tested|unpack|verify-passed)' || true)
 JC1_HITS="${JC1_HITS}${HITS:+\n$HITS}"
 # .packaged 状态文件（排除 packaging/ 目录下的同名路径）
