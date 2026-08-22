@@ -1,0 +1,360 @@
+diff --git a/src/utility/readline.h b/src/utility/readline.h
+index 1506bef..1f06af5 100644
+--- a/src/utility/readline.h
++++ b/src/utility/readline.h
+@@ -21,18 +21,63 @@
+ #ifndef NCMPCPP_UTILITY_READLINE_H
+ #define NCMPCPP_UTILITY_READLINE_H
+ 
+-#include "config.h"
+-
+-#if defined(HAVE_READLINE_HISTORY_H)
+-# include <readline/history.h>
+-#endif // HAVE_READLINE_HISTORY
+-
+-#if defined(HAVE_READLINE_H)
+-# include <readline.h>
+-#elif defined(HAVE_READLINE_READLINE_H)
+-# include <readline/readline.h>
+-#else
+-# error "readline is not available"
++/*
++ * Minimal GNU readline compatibility layer for HarmonyOS PC.
++ *
++ * The OHOS package repository has no readline and ncmpcpp only uses a small
++ * subset of the readline API (see src/curses/window.cpp). This header
++ * declares that subset; the implementation lives in
++ * src/curses/readline_compat.cpp and drives line editing through the
++ * rl_getc_function / rl_redisplay_function callbacks installed by ncmpcpp.
++ *
++ * NOTE: editing is intentionally simple (printable characters, Enter,
++ * Backspace, Ctrl-D on an empty line, Ctrl-C/Ctrl-G abort). There is no
++ * history recall; add_history() is accepted for compatibility.
++ */
++
++#include <cstdio>
++
++#define HAVE_READLINE_HISTORY_H 1
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++typedef int rl_command_func_t(int, int);
++typedef int rl_getc_func_t(FILE *);
++typedef void rl_voidfunc_t(void);
++typedef int rl_vintfunc_t(void);
++typedef char **rl_completion_func_t(const char *, int, int);
++
++extern char *rl_line_buffer;
++extern int rl_point;
++extern int rl_end;
++extern int rl_done;
++
++extern int rl_catch_signals;
++extern int rl_catch_sigwinch;
++extern int rl_attempted_completion_over;
++extern rl_getc_func_t *rl_getc_function;
++extern rl_voidfunc_t *rl_redisplay_function;
++extern rl_vintfunc_t *rl_startup_hook;
++extern rl_voidfunc_t *rl_prep_term_function;
++extern rl_voidfunc_t *rl_deprep_term_function;
++extern rl_completion_func_t *rl_attempted_completion_function;
++
++enum { RL_STATE_DISPATCHING = 0x800 };
++extern int rl_readline_state;
++#define RL_ISSTATE(x) ((rl_readline_state) & (x))
++
++void rl_initialize(void);
++void rl_resize_terminal(void);
++void rl_bind_key(int key, rl_command_func_t *function);
++int rl_insert_text(const char *text);
++char *readline(const char *prompt);
++void add_history(const char *line);
++void clear_history(void);
++
++#ifdef __cplusplus
++}
+ #endif
+ 
+-#endif // NCMPCPP_READLINE_UTILITY_H
++#endif // NCMPCPP_UTILITY_READLINE_H
+diff --git a/src/curses/readline_compat.cpp b/src/curses/readline_compat.cpp
+new file mode 100644
+index 0000000..5732796
+--- /dev/null
++++ b/src/curses/readline_compat.cpp
+@@ -0,0 +1,243 @@
++/***************************************************************************
++ *   Copyright (C) 2008-2021 by Andrzej Rybczak                            *
++ *   andrzej@rybczak.net                                                   *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
++ ***************************************************************************/
++
++#include "utility/readline.h"
++
++#include <algorithm>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <vector>
++
++namespace {
++
++struct Binding
++{
++	int key;
++	rl_command_func_t *function;
++};
++
++std::vector<Binding> bindings;
++char *line_buffer = nullptr;
++size_t line_buffer_capacity = 0;
++bool active = false;
++bool ended_with_eof = false;
++
++bool ensureCapacity(size_t needed)
++{
++	if (needed + 1 <= line_buffer_capacity)
++		return true;
++	size_t new_capacity = line_buffer_capacity == 0 ? 16 : line_buffer_capacity;
++	while (new_capacity < needed + 1)
++		new_capacity *= 2;
++	char *new_buffer = static_cast<char *>(std::realloc(line_buffer, new_capacity));
++	if (new_buffer == nullptr)
++		return false;
++	line_buffer = new_buffer;
++	line_buffer_capacity = new_capacity;
++	rl_line_buffer = line_buffer;
++	return true;
++}
++
++void redisplay()
++{
++	if (rl_redisplay_function != nullptr)
++		rl_redisplay_function();
++}
++
++} // namespace
++
++char *rl_line_buffer = nullptr;
++int rl_point = 0;
++int rl_end = 0;
++int rl_done = 0;
++int rl_catch_signals = 0;
++int rl_catch_sigwinch = 0;
++int rl_attempted_completion_over = 0;
++int rl_readline_state = 0;
++rl_getc_func_t *rl_getc_function = nullptr;
++rl_voidfunc_t *rl_redisplay_function = nullptr;
++rl_vintfunc_t *rl_startup_hook = nullptr;
++rl_voidfunc_t *rl_prep_term_function = nullptr;
++rl_voidfunc_t *rl_deprep_term_function = nullptr;
++rl_completion_func_t *rl_attempted_completion_function = nullptr;
++
++void rl_initialize()
++{
++	// nothing to do; ncmpcpp installs the callbacks right afterwards
++}
++
++void rl_resize_terminal()
++{
++	// ncurses owns the terminal dimensions on OHOS; ncmpcpp calls this
++	// before endwin()/refresh() on SIGWINCH, so just repaint the active
++	// prompt through the redisplay callback.
++	redisplay();
++}
++
++void rl_bind_key(int key, rl_command_func_t *function)
++{
++	for (auto &b : bindings)
++	{
++		if (b.key == key)
++		{
++			b.function = function;
++			return;
++		}
++	}
++	bindings.push_back({key, function});
++}
++
++int rl_insert_text(const char *text)
++{
++	if (text == nullptr || !active)
++		return 0;
++	const size_t len = std::strlen(text);
++	if (!ensureCapacity(rl_end + len))
++		return 0;
++	std::memmove(line_buffer + rl_point + len, line_buffer + rl_point,
++	             rl_end - rl_point + 1);
++	std::memcpy(line_buffer + rl_point, text, len);
++	rl_point += static_cast<int>(len);
++	rl_end += static_cast<int>(len);
++	redisplay();
++	return static_cast<int>(len);
++}
++
++char *readline(const char *prompt)
++{
++	(void)prompt;
++	if (active)
++		return nullptr;
++	active = true;
++	ended_with_eof = false;
++	if (!ensureCapacity(0))
++	{
++		active = false;
++		return nullptr;
++	}
++	rl_point = 0;
++	rl_end = 0;
++	rl_done = 0;
++	rl_readline_state = 0;
++	line_buffer[0] = 0;
++	rl_line_buffer = line_buffer;
++
++	if (rl_startup_hook != nullptr)
++		rl_startup_hook();
++
++	redisplay();
++
++	while (!rl_done)
++	{
++		const int key = rl_getc_function != nullptr
++			? rl_getc_function(stdin)
++			: std::getchar();
++
++		if (key == EOF)
++		{
++			// The prompt hook may have requested termination (it sets
++			// rl_done and returns EOF). GNU readline returns NULL when EOF
++			// is received on an empty line.
++			if (rl_done || rl_end == 0)
++			{
++				ended_with_eof = true;
++				break;
++			}
++			continue;
++		}
++
++		bool handled = false;
++		for (const auto &b : bindings)
++		{
++			if (b.key == key && b.function != nullptr)
++			{
++				b.function(key, 0);
++				handled = true;
++				break;
++			}
++		}
++		if (rl_done)
++			break;
++		if (handled)
++			continue;
++
++		switch (key)
++		{
++			case '\r':
++			case '\n':
++				rl_done = 1;
++				break;
++			case 0x04: // Ctrl-D
++				if (rl_end == 0)
++				{
++					ended_with_eof = true;
++					rl_done = 1;
++				}
++				break;
++			case 0x7f:
++			case 0x08: // backspace
++				if (rl_point > 0)
++				{
++					std::memmove(line_buffer + rl_point - 1, line_buffer + rl_point,
++					             rl_end - rl_point + 1);
++					--rl_point;
++					--rl_end;
++					redisplay();
++				}
++				break;
++			default:
++				if (key >= 0x20 && key <= 0x7e)
++				{
++					if (!ensureCapacity(rl_end + 1))
++						break;
++					std::memmove(line_buffer + rl_point + 1, line_buffer + rl_point,
++					             rl_end - rl_point + 1);
++					line_buffer[rl_point] = static_cast<char>(key);
++					++rl_point;
++					++rl_end;
++					redisplay();
++				}
++				break;
++		}
++	}
++
++	if (ended_with_eof && rl_end == 0)
++	{
++		active = false;
++		rl_done = 0;
++		return nullptr;
++	}
++
++	line_buffer[rl_end] = 0;
++	rl_point = std::min(rl_point, rl_end);
++	active = false;
++	rl_done = 0;
++	return line_buffer;
++}
++
++void add_history(const char *line)
++{
++	(void)line; // history recall is not used by ncmpcpp's prompts
++}
++
++void clear_history()
++{
++}
+diff --git a/src/Makefile.am b/src/Makefile.am
+index 0267522..a553cf7 100644
+--- a/src/Makefile.am
++++ b/src/Makefile.am
+@@ -2,6 +2,7 @@ bin_PROGRAMS = ncmpcpp
+ ncmpcpp_SOURCES = \
+ 	curses/formatted_color.cpp \
+ 	curses/scrollpad.cpp \
++	curses/readline_compat.cpp \
+ 	curses/window.cpp \
+ 	screens/browser.cpp \
+ 	screens/clock.cpp \
+@@ -23,6 +24,7 @@ ncmpcpp_SOURCES = \
+ 	screens/tiny_tag_editor.cpp \
+ 	screens/visualizer.cpp \
+ 	utility/comparators.cpp \
++	utility/encoding.cpp \
+ 	utility/html.cpp \
+ 	utility/option_parser.cpp \
+ 	utility/sample_buffer.cpp \
+@@ -87,7 +89,9 @@ noinst_HEADERS = \
+ 	utility/comparators.h \
+ 	utility/const.h \
+ 	utility/conversion.h \
++	utility/encoding.h \
+ 	utility/functional.h \
++	utility/regex_flags.h \
+ 	utility/html.h \
+ 	utility/option_parser.h \
+ 	utility/readline.h \

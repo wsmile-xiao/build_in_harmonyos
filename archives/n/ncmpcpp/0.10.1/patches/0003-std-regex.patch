@@ -1,0 +1,621 @@
+diff --git a/src/utility/regex_flags.h b/src/utility/regex_flags.h
+new file mode 100644
+index 0000000..94d6aef
+--- /dev/null
++++ b/src/utility/regex_flags.h
+@@ -0,0 +1,69 @@
++/***************************************************************************
++ *   Copyright (C) 2008-2021 by Andrzej Rybczak                            *
++ *   andrzej@rybczak.net                                                   *
++ *                                                                         *
++ *   This program is free software; you can redistribute it and/or modify  *
++ *   it under the terms of the GNU General Public License as published by  *
++ *   the Free Software Foundation; either version 2 of the License, or     *
++ *   (at your option) any later version.                                   *
++ *                                                                         *
++ *   This program is distributed in the hope that it will be useful,       *
++ *   but WITHOUT ANY WARRANTY; without even the implied warranty of        *
++ *   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the         *
++ *   GNU General Public License for more details.                          *
++ *                                                                         *
++ *   You should have received a copy of the GNU General Public License     *
++ *   along with this program; if not, write to the                         *
++ *   Free Software Foundation, Inc.,                                       *
++ *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
++ ***************************************************************************/
++
++#ifndef NCMPCPP_UTILITY_REGEX_FLAGS_H
++#define NCMPCPP_UTILITY_REGEX_FLAGS_H
++
++#include <regex>
++#include <string>
++
++// ncmpcpp's "regular_expressions = none" mode treats the pattern as a literal
++// string. std::regex has no "literal" flag, so we add our own bit and escape
++// the pattern before constructing the regex.
++namespace RegexFlags {
++
++constexpr std::regex_constants::syntax_option_type literal =
++	std::regex_constants::syntax_option_type(1u << 20);
++
++inline std::string escape(const std::string &s)
++{
++	std::string out;
++	out.reserve(s.size());
++	for (char c : s)
++	{
++		switch (c)
++		{
++			case '.':
++			case '^':
++			case '$':
++			case '|':
++			case '(':
++			case ')':
++			case '[':
++			case ']':
++			case '{':
++			case '}':
++			case '*':
++			case '+':
++			case '?':
++			case '\\':
++				out += '\\';
++				break;
++			default:
++				break;
++		}
++		out += c;
++	}
++	return out;
++}
++
++} // namespace RegexFlags
++
++#endif // NCMPCPP_UTILITY_REGEX_FLAGS_H
+diff --git a/src/regex_filter.h b/src/regex_filter.h
+index 31cd9e4..55c7a40 100644
+--- a/src/regex_filter.h
++++ b/src/regex_filter.h
+@@ -21,73 +21,27 @@
+ #ifndef NCMPCPP_REGEX_FILTER_H
+ #define NCMPCPP_REGEX_FILTER_H
+ 
+-#include "config.h"
+-
+-#ifdef BOOST_REGEX_ICU
+-# include <boost/regex/icu.hpp>
+-# include <unicode/errorcode.h>
+-# include <unicode/translit.h>
+-#else
+-# include <boost/regex.hpp>
+-#endif // BOOST_REGEX_ICU
+-
+ #include <cassert>
++#include <functional>
+ #include <iostream>
++#include <regex>
++#include <string>
++#include <utility>
+ 
+ #include "utility/functional.h"
+-
+-namespace {
+-
+-#ifdef BOOST_REGEX_ICU
+-
+-struct StripDiacritics
+-{
+-	static void convert(icu::UnicodeString &s)
+-	{
+-		if (m_converter == nullptr)
+-		{
+-			icu::ErrorCode result;
+-			m_converter = icu::Transliterator::createInstance(
+-				"NFD; [:M:] Remove; NFC", UTRANS_FORWARD, result);
+-			if (result.isFailure())
+-				throw std::runtime_error(
+-					"instantiation of transliterator instance failed with "
+-					+ std::string(result.errorName()));
+-		}
+-		m_converter->transliterate(s);
+-	}
+-
+-private:
+-	static icu::Transliterator *m_converter;
+-};
+-
+-icu::Transliterator *StripDiacritics::m_converter;
+-
+-#endif // BOOST_REGEX_ICU
+-
+-}
++#include "utility/regex_flags.h"
+ 
+ namespace Regex {
+ 
+-typedef
+-#ifdef BOOST_REGEX_ICU
+-	boost::u32regex
+-#else
+-	boost::regex
+-#endif // BOOST_REGEX_ICU
+-Regex;
++typedef std::regex Regex;
+ 
+ template <typename StringT>
+-inline Regex make(StringT &&s,
+-                  boost::regex_constants::syntax_option_type flags)
++inline Regex make(StringT &&s, std::regex::flag_type flags)
+ {
+-	return
+-#ifdef BOOST_REGEX_ICU
+-	boost::make_u32regex
+-#else
+-	boost::regex
+-#endif // BOOST_REGEX_ICU
+-	(std::forward<StringT>(s), flags);
++	std::string pattern = std::forward<StringT>(s);
++	if (flags & RegexFlags::literal)
++		pattern = RegexFlags::escape(pattern);
++	return std::regex(pattern, flags & ~RegexFlags::literal);
+ }
+ 
+ template <typename CharT>
+@@ -95,20 +49,11 @@ inline bool search(const std::basic_string<CharT> &s,
+                    const Regex &rx,
+                    bool ignore_diacritics)
+ {
++	// Stripping diacritics requires ICU, which is unavailable on HarmonyOS
++	// PC; the option is accepted but has no effect there.
++	(void)ignore_diacritics;
+ 	try {
+-#ifdef BOOST_REGEX_ICU
+-		if (ignore_diacritics)
+-		{
+-			auto us = icu::UnicodeString::fromUTF8(
+-				icu::StringPiece(convertString<char, CharT>::apply(s)));
+-			StripDiacritics::convert(us);
+-			return boost::u32regex_search(us, rx);
+-		}
+-		else
+-			return boost::u32regex_search(s, rx);
+-#else
+-		return boost::regex_search(s, rx);
+-#endif // BOOST_REGEX_ICU
++		return std::regex_search(s, rx);
+ 	} catch (std::out_of_range &e) {
+ 		// Invalid UTF-8 sequence, ignore the string.
+ 		std::cerr << "Regex::search: error while processing \""
+@@ -131,7 +76,7 @@ struct Filter
+ 
+ 	template <typename FilterT>
+ 	Filter(const std::string &constraint_,
+-	       boost::regex_constants::syntax_option_type flags,
++	       std::regex::flag_type flags,
+ 	       FilterT &&filter)
+ 		: m_rx(make(constraint_, flags))
+ 		, m_constraint(constraint_)
+@@ -173,7 +118,7 @@ template <typename T> struct ItemFilter
+ 
+ 	template <typename FilterT>
+ 	ItemFilter(const std::string &constraint_,
+-	           boost::regex_constants::syntax_option_type flags,
++	           std::regex::flag_type flags,
+ 	           FilterT &&filter)
+ 		: m_rx(make(constraint_, flags))
+ 		, m_constraint(constraint_)
+@@ -204,6 +149,6 @@ private:
+ 	FilterFunction m_filter;
+ };
+ 
+-}
++} // namespace Regex
+ 
+ #endif // NCMPCPP_REGEX_FILTER_H
+diff --git a/src/settings.h b/src/settings.h
+index e9a8af0..af3e84e 100644
+--- a/src/settings.h
++++ b/src/settings.h
+@@ -23,7 +23,8 @@
+ 
+ #include <boost/date_time/posix_time/posix_time_types.hpp>
+ #include <boost/optional.hpp>
+-#include <boost/regex.hpp>
++#include <regex>
++#include "utility/regex_flags.h"
+ #include <cassert>
+ #include <vector>
+ #include <mpd/client.h>
+@@ -202,7 +203,7 @@ struct Configuration
+ 	unsigned lines_scrolled;
+ 	unsigned search_engine_default_search_mode;
+ 
+-	boost::regex::flag_type regex_type;
++	std::regex::flag_type regex_type;
+ 
+ 	boost::posix_time::seconds playlist_disable_highlight_delay;
+ 
+diff --git a/src/settings.cpp b/src/settings.cpp
+index ddde73e..9c989b8 100644
+--- a/src/settings.cpp
++++ b/src/settings.cpp
+@@ -551,14 +551,13 @@ bool Configuration::read(const std::vector<std::string> &config_paths, bool igno
+ 	p.add("display_remaining_time", &display_remaining_time, "no", yes_no);
+ 	p.add("regular_expressions", &regex_type, "perl", [](std::string v) {
+ 			if (v == "none")
+-				return boost::regex::icase | boost::regex::literal;
++				return std::regex::icase | RegexFlags::literal;
+ 			else if (v == "basic")
+-				return boost::regex::icase | boost::regex::basic;
+-
++				return std::regex::icase | std::regex::basic;
+ 			else if (v == "extended")
+-				return boost::regex::icase |  boost::regex::extended;
++				return std::regex::icase | std::regex::extended;
+ 			else if (v == "perl")
+-				return boost::regex::icase | boost::regex::perl;
++				return std::regex::icase | std::regex::ECMAScript;
+ 			else
+ 				invalid_value(v);
+ 	});
+diff --git a/src/utility/option_parser.cpp b/src/utility/option_parser.cpp
+index 316d91a..9ffff16 100644
+--- a/src/utility/option_parser.cpp
++++ b/src/utility/option_parser.cpp
+@@ -30,7 +30,7 @@
+  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+-#include <boost/regex.hpp>
++#include <regex>
+ #include <iostream>
+ 
+ #include "utility/option_parser.h"
+@@ -64,15 +64,15 @@ std::vector<size_t> parse_ratio(const std::string &v, const std::vector<size_t>:
+ bool option_parser::run(std::istream &is, bool ignore_errors)
+ {
+ 	// quoted value. leftmost and rightmost quotation marks are the delimiters.
+-	boost::regex quoted("(\\w+)\\h*=\\h*\"(.*)\"[^\"]*");
++	std::regex quoted("(\\w+)[ \\t]*=[ \\t]*\"(.*)\"[^\"]*");
+ 	// unquoted value. whitespaces get trimmed.
+-	boost::regex unquoted("(\\w+)\\h*=\\h*(.*?)\\h*");
+-	boost::smatch match;
++	std::regex unquoted("(\\w+)[ \\t]*=[ \\t]*(.*?)[ \\t]*");
++	std::smatch match;
+ 	std::string line;
+ 	while (std::getline(is, line))
+ 	{
+-		if (boost::regex_match(line, match, quoted)
+-		||  boost::regex_match(line, match, unquoted))
++		if (std::regex_match(line, match, quoted)
++		||  std::regex_match(line, match, unquoted))
+ 		{
+ 			std::string option = match[1];
+ 			auto it = m_parsers.find(option);
+diff --git a/src/curses/scrollpad.cpp b/src/curses/scrollpad.cpp
+index eea75c0..fbd49f7 100644
+--- a/src/curses/scrollpad.cpp
++++ b/src/curses/scrollpad.cpp
+@@ -19,9 +19,10 @@
+  ***************************************************************************/
+ 
+ #include <cassert>
+-#include <boost/regex.hpp>
++#include <regex>
+ #include <iostream>
+ 
++#include "utility/regex_flags.h"
+ #include "curses/scrollpad.h"
+ #include "utility/storage_kind.h"
+ 
+@@ -29,12 +30,15 @@ namespace {
+ 
+ template <typename BeginT, typename EndT>
+ bool regexSearch(NC::Buffer &buf, const BeginT &begin, const std::string &ws,
+-                 const EndT &end, boost::regex::flag_type flags, size_t id)
++                 const EndT &end, std::regex::flag_type flags, size_t id)
+ {
+ 	try {
+-		boost::regex rx(ws, flags);
+-		auto first = boost::sregex_iterator(buf.str().begin(), buf.str().end(), rx);
+-		auto last = boost::sregex_iterator();
++		std::string pattern = ws;
++		if (flags & RegexFlags::literal)
++			pattern = RegexFlags::escape(pattern);
++		std::regex rx(pattern, flags & ~RegexFlags::literal);
++		auto first = std::sregex_iterator(buf.str().begin(), buf.str().end(), rx);
++		auto last = std::sregex_iterator();
+ 		bool success = first != last;
+ 		for (; first != last; ++first)
+ 		{
+@@ -42,7 +46,7 @@ bool regexSearch(NC::Buffer &buf, const BeginT &begin, const std::string &ws,
+ 			buf.addProperty(first->position() + first->length(), end, id);
+ 		}
+ 		return success;
+-	} catch (boost::bad_expression &e) {
++	} catch (std::regex_error &e) {
+ 		std::cerr << "regexSearch: bad_expression: " << e.what() << "\n";
+ 		return false;
+ 	}
+@@ -274,13 +278,13 @@ void Scrollpad::reset()
+ bool Scrollpad::setProperties(const Color &begin, const std::string &s,
+                               const Color &end, size_t flags, size_t id)
+ {
+-	return regexSearch(m_buffer, std::move(begin), s, std::move(end), id, flags);
++	return regexSearch(m_buffer, std::move(begin), s, std::move(end), static_cast<std::regex::flag_type>(flags), id);
+ }
+ 
+ bool Scrollpad::setProperties(const Format &begin, const std::string &s,
+                               const Format &end, size_t flags, size_t id)
+ {
+-	return regexSearch(m_buffer, begin, s, end, flags, id);
++	return regexSearch(m_buffer, begin, s, end, static_cast<std::regex::flag_type>(flags), id);
+ }
+ 
+ bool Scrollpad::setProperties(const FormattedColor &fc, const std::string &s,
+@@ -290,7 +294,7 @@ bool Scrollpad::setProperties(const FormattedColor &fc, const std::string &s,
+ 	                   fc,
+ 	                   s,
+ 	                   FormattedColor::End<StorageKind::Value>(fc),
+-	                   flags,
++	                   static_cast<std::regex::flag_type>(flags),
+ 	                   id);
+ }
+ 
+diff --git a/src/lastfm_service.cpp b/src/lastfm_service.cpp
+index ace3cb8..008aff1 100644
+--- a/src/lastfm_service.cpp
++++ b/src/lastfm_service.cpp
+@@ -18,11 +18,13 @@
+  *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
+  ***************************************************************************/
+ 
++#include <regex>
++#include "utility/regex_flags.h"
+ #include "lastfm_service.h"
+ 
+ #include <boost/algorithm/string/replace.hpp>
+ #include <boost/algorithm/string/trim.hpp>
+-#include <boost/locale/conversion.hpp>
++
+ #include <fstream>
+ #include "charset.h"
+ #include "curl_handle.h"
+@@ -94,7 +95,7 @@ void ArtistInfo::beautifyOutput(NC::Scrollpad &w)
+ {
+ 	w.setProperties(NC::Format::Bold, "\n\nSimilar artists:\n", NC::Format::NoBold, 0);
+ 	w.setProperties(NC::Format::Bold, "\n\nSimilar tags:\n", NC::Format::NoBold, 0);
+-	w.setProperties(Config.color2, "\n * ", boost::regex::literal);
++	w.setProperties(Config.color2, "\n * ", RegexFlags::literal);
+ }
+ 
+ Service::Result ArtistInfo::processData(const std::string &data)
+@@ -103,9 +104,9 @@ Service::Result ArtistInfo::processData(const std::string &data)
+ 	Service::Result result;
+ 	result.first = false;
+ 	
+-	boost::regex rx("<content>(.*?)</content>");
+-	boost::smatch what;
+-	if (boost::regex_search(data, what, rx))
++	std::regex rx("<content>(.*?)</content>");
++	std::smatch what;
++	if (std::regex_search(data, what, rx))
+ 	{
+ 		std::string desc = what[1];
+ 		// if there is a description...
+@@ -113,7 +114,7 @@ Service::Result ArtistInfo::processData(const std::string &data)
+ 		{
+ 			// ...locate the link to wiki on last.fm...
+ 			rx.assign("<link rel=\"original\" href=\"(.*?)\"");
+-			if (boost::regex_search(data, what, rx))
++			if (std::regex_search(data, what, rx))
+ 			{
+ 				std::string url = what[1], wiki;
+ 				// unescape &amp;s
+@@ -134,7 +135,7 @@ Service::Result ArtistInfo::processData(const std::string &data)
+ 				{
+ 					// ...and filter it to get the whole description.
+ 					rx.assign("<div class=\"wiki\">(.*?)</div>");
+-					if (boost::regex_search(wiki, what, rx))
++					if (std::regex_search(wiki, what, rx))
+ 						desc = unescapeHtmlUtf8(what[1]);
+ 				}
+ 			}
+@@ -156,7 +157,7 @@ Service::Result ArtistInfo::processData(const std::string &data)
+ 		return result;
+ 	}
+ 	
+-	auto add_similars = [&result](boost::sregex_iterator &it, const boost::sregex_iterator &last) {
++	auto add_similars = [&result](std::sregex_iterator &it, const std::sregex_iterator &last) {
+ 		for (; it != last; ++it)
+ 		{
+ 			std::string value = it->str(1);
+@@ -176,8 +177,8 @@ Service::Result ArtistInfo::processData(const std::string &data)
+ 	if (a != std::string::npos && b != std::string::npos)
+ 	{
+ 		rx.assign("<artist>.*?<name>(.*?)</name>.*?<url>(.*?)</url>.*?</artist>");
+-		auto it = boost::sregex_iterator(data.begin()+a, data.begin()+b, rx);
+-		auto last = boost::sregex_iterator();
++		auto it = std::sregex_iterator(data.begin()+a, data.begin()+b, rx);
++		auto last = std::sregex_iterator();
+ 		if (it != last)
+ 			result.second += "\n\nSimilar artists:\n";
+ 		add_similars(it, last);
+@@ -188,8 +189,8 @@ Service::Result ArtistInfo::processData(const std::string &data)
+ 	if (a != std::string::npos && b != std::string::npos)
+ 	{
+ 		rx.assign("<tag>.*?<name>(.*?)</name>.*?<url>(.*?)</url>.*?</tag>");
+-		auto it = boost::sregex_iterator(data.begin()+a, data.begin()+b, rx);
+-		auto last = boost::sregex_iterator();
++		auto it = std::sregex_iterator(data.begin()+a, data.begin()+b, rx);
++		auto last = std::sregex_iterator();
+ 		if (it != last)
+ 			result.second += "\n\nSimilar tags:\n";
+ 		add_similars(it, last);
+@@ -198,7 +199,7 @@ Service::Result ArtistInfo::processData(const std::string &data)
+ 	// get artist we look for, it's the one before similar artists
+ 	rx.assign("<name>.*?</name>.*?<url>(.*?)</url>.*?<similar>");
+ 	
+-	if (boost::regex_search(data, what, rx))
++	if (std::regex_search(data, what, rx))
+ 	{
+ 		std::string url = what[1];
+ 		stripHtmlTags(url);
+diff --git a/src/lyrics_fetcher.cpp b/src/lyrics_fetcher.cpp
+index c27e670..15a2a1a 100644
+--- a/src/lyrics_fetcher.cpp
++++ b/src/lyrics_fetcher.cpp
+@@ -26,7 +26,7 @@
+ #include <boost/algorithm/string/replace.hpp>
+ #include <boost/algorithm/string/split.hpp>
+ #include <boost/algorithm/string/trim.hpp>
+-#include <boost/regex.hpp>
++#include <regex>
+ 
+ #ifdef HAVE_TAGLIB_H
+ #include <fileref.h>
+@@ -123,9 +123,9 @@ std::vector<std::string> LyricsFetcher::getContent(const char *regex_,
+                                                    const std::string &data)
+ {
+ 	std::vector<std::string> result;
+-	boost::regex rx(regex_);
+-	auto first = boost::sregex_iterator(data.begin(), data.end(), rx);
+-	auto last = boost::sregex_iterator();
++	std::regex rx(regex_);
++	auto first = std::sregex_iterator(data.begin(), data.end(), rx);
++	auto last = std::sregex_iterator();
+ 	for (; first != last; ++first)
+ 	{
+ 		std::string content;
+diff --git a/src/mpdpp.cpp b/src/mpdpp.cpp
+index 9a92e5d..385a223 100644
+--- a/src/mpdpp.cpp
++++ b/src/mpdpp.cpp
+@@ -22,7 +22,7 @@
+ #include <cstdlib>
+ #include <algorithm>
+ #include <map>
+-#include <boost/regex.hpp>
++#include <regex>
+ 
+ #include "charset.h"
+ #include "mpdpp.h"
+@@ -632,9 +632,9 @@ bool Connection::AddRandomSongs(size_t number, const std::string &random_exclude
+ 		std::shuffle(files.begin(), files.end(), rng);
+ 		StartCommandsList();
+ 		auto it = files.begin();
+-		boost::regex re(random_exclude_pattern);
++		std::regex re(random_exclude_pattern);
+ 		for (size_t i = 0; i < number && it != files.end(); ++it) {
+-			if (random_exclude_pattern.empty() || !boost::regex_match((*it), re)) {
++			if (random_exclude_pattern.empty() || !std::regex_match((*it), re)) {
+ 				AddSong(*it);
+ 				i++;
+ 			}
+diff --git a/src/statusbar.cpp b/src/statusbar.cpp
+index 8421bc8..f5225cf 100644
+--- a/src/statusbar.cpp
++++ b/src/statusbar.cpp
+@@ -18,6 +18,7 @@
+  *   51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA.              *
+  ***************************************************************************/
+ 
++#include <regex>
+ #include "global.h"
+ #include "settings.h"
+ #include "status.h"
+@@ -232,7 +233,7 @@ bool Statusbar::Helpers::ApplyFilterImmediately::operator()(const char *s)
+ 				myPlaylist->enableHighlighting();
+ 			myScreen->refreshWindow();
+ 		}
+-	} catch (boost::bad_expression &) { }
++	} catch (std::regex_error &) { }
+ 	return true;
+ }
+ 
+@@ -249,7 +250,7 @@ bool Statusbar::Helpers::FindImmediately::operator()(const char *s)
+ 				myPlaylist->enableHighlighting();
+ 			myScreen->refreshWindow();
+ 		}
+-	} catch (boost::bad_expression &) { }
++	} catch (std::regex_error &) { }
+ 	return true;
+ }
+ 
+diff --git a/src/screens/search_engine.cpp b/src/screens/search_engine.cpp
+index f0e20e0..1f6e74d 100644
+--- a/src/screens/search_engine.cpp
++++ b/src/screens/search_engine.cpp
+@@ -19,6 +19,7 @@
+  ***************************************************************************/
+ 
+ #include <array>
++#include <boost/type_traits/add_const.hpp>
+ #include <boost/range/detail/any_iterator.hpp>
+ #include <iomanip>
+ 
+@@ -476,6 +477,7 @@ void SearchEngine::Search()
+ 	}
+ 
+ 	Regex::Regex rx[ConstraintsNumber];
++	bool rx_ok[ConstraintsNumber] = {};
+ 	if (SearchMode != &SearchModes[2]) // match to pattern
+ 	{
+ 		for (size_t i = 0; i < ConstraintsNumber; ++i)
+@@ -485,8 +487,9 @@ void SearchEngine::Search()
+ 				try
+ 				{
+ 					rx[i] = Regex::make(itsConstraints[i], Config.regex_type);
++					rx_ok[i] = true;
+ 				}
+-				catch (boost::bad_expression &) { }
++				catch (std::regex_error &) { }
+ 			}
+ 		}
+ 	}
+@@ -516,7 +519,7 @@ void SearchEngine::Search()
+ 
+ 		if (SearchMode != &SearchModes[2]) // match to pattern
+ 		{
+-			if (!rx[0].empty())
++			if (rx_ok[0])
+ 				any_found =
+ 					   Regex::search(s->getArtist(), rx[0], Config.ignore_diacritics)
+ 					|| Regex::search(s->getAlbumArtist(), rx[0], Config.ignore_diacritics)
+@@ -528,25 +531,25 @@ void SearchEngine::Search()
+ 					|| Regex::search(s->getGenre(), rx[0], Config.ignore_diacritics)
+ 					|| Regex::search(s->getDate(), rx[0], Config.ignore_diacritics)
+ 					|| Regex::search(s->getComment(), rx[0], Config.ignore_diacritics);
+-			if (found && !rx[1].empty())
++			if (found && rx_ok[1])
+ 				found = Regex::search(s->getArtist(), rx[1], Config.ignore_diacritics);
+-			if (found && !rx[2].empty())
++			if (found && rx_ok[2])
+ 				found = Regex::search(s->getAlbumArtist(), rx[2], Config.ignore_diacritics);
+-			if (found && !rx[3].empty())
++			if (found && rx_ok[3])
+ 				found = Regex::search(s->getTitle(), rx[3], Config.ignore_diacritics);
+-			if (found && !rx[4].empty())
++			if (found && rx_ok[4])
+ 				found = Regex::search(s->getAlbum(), rx[4], Config.ignore_diacritics);
+-			if (found && !rx[5].empty())
++			if (found && rx_ok[5])
+ 				found = Regex::search(s->getName(), rx[5], Config.ignore_diacritics);
+-			if (found && !rx[6].empty())
++			if (found && rx_ok[6])
+ 				found = Regex::search(s->getComposer(), rx[6], Config.ignore_diacritics);
+-			if (found && !rx[7].empty())
++			if (found && rx_ok[7])
+ 				found = Regex::search(s->getPerformer(), rx[7], Config.ignore_diacritics);
+-			if (found && !rx[8].empty())
++			if (found && rx_ok[8])
+ 				found = Regex::search(s->getGenre(), rx[8], Config.ignore_diacritics);
+-			if (found && !rx[9].empty())
++			if (found && rx_ok[9])
+ 				found = Regex::search(s->getDate(), rx[9], Config.ignore_diacritics);
+-			if (found && !rx[10].empty())
++			if (found && rx_ok[10])
+ 				found = Regex::search(s->getComment(), rx[10], Config.ignore_diacritics);
+ 		}
+ 		else // match only if values are equal
