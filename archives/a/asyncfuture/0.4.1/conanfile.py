@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from conan import ConanFile
 from conan.tools.files import get, copy, export_conandata_patches
@@ -7,7 +7,7 @@ from conan.tools.layout import basic_layout
 
 class AsyncFutureConan(ConanFile):
     name = "asyncfuture"
-    version = "1"
+    version = "0.4.1"
     description = "Qt-based futures and promises library"
     homepage = "https://github.com/benlau/asyncfuture"
     license = "Apache-2.0"

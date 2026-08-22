@@ -1,4 +1,4 @@
-#include <QCoreApplication>
+﻿#include <QCoreApplication>
 #include "asyncfuture.h"
 
 int main(int argc, char **argv) {
