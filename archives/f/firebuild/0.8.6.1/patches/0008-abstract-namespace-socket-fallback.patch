@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OHOS Porting <ohos-porting@example.com>
+Date: Thu, 1 Jan 2026 00:00:00 +0000
+Subject: [PATCH] Fallback to abstract namespace AF_UNIX socket on EPERM
+
+On sandboxes that deny filesystem AF_UNIX socket bind (EPERM, as on
+OHOS), fall back to Linux abstract namespace sockets.  The connection
+string is encoded with an "abstract:" prefix so it can be safely passed
+via the FB_SOCKET environment variable (which is a C string and cannot
+contain embedded NULs).
+
+This is a runtime probe -- no platform macro hardcoding.  On standard
+Linux the filesystem socket bind succeeds and behavior is unchanged.
+errno is saved immediately after the probe bind to avoid being
+clobbered by subsequent close()/unlink() calls.
+
+--- a/src/firebuild/firebuild.cc
++++ b/src/firebuild/firebuild.cc
+@@ -29,6 +29,7 @@
+ #include <sys/socket.h>
+ #include <sys/time.h>
+ #include <sys/un.h>
++#include <errno.h>
+ #include <time.h>
+ #include <fcntl.h>
+ 
+@@ -107,8 +108,15 @@
+   }
+ 
+   struct sockaddr_un local;
++  memset(&local, 0, sizeof(local));
+   local.sun_family = AF_UNIX;
+-  strncpy(local.sun_path, fb_conn_string, sizeof(local.sun_path) - 1);
++  if (strncmp(fb_conn_string, "abstract:", 9) == 0) {
++    /* Linux abstract namespace: sun_path[0] = '\0' followed by name */
++    local.sun_path[0] = '\0';
++    strncpy(local.sun_path + 1, fb_conn_string + 9, sizeof(local.sun_path) - 2);
++  } else {
++    strncpy(local.sun_path, fb_conn_string, sizeof(local.sun_path) - 1);
++  }
+ 
+   if (bind(listener, (struct sockaddr *)&local, sizeof(local)) == -1) {
+     firebuild::fb_perror("bind");
+@@ -230,6 +238,33 @@
+       exit(EXIT_FAILURE);
+     }
+     fb_conn_string = strdup((std::string(fb_tmp_dir) + "/socket").c_str());
++  }
++
++  /* Detect whether the sandbox permits filesystem AF_UNIX socket
++   * bind. If not (EPERM, as on OHOS), switch to Linux abstract
++   * namespace sockets using an "abstract:" prefix encoding that
++   * is safe to pass via the FB_SOCKET environment variable (a C
++   * string cannot contain embedded NULs). This is a runtime
++   * probe -- no platform macro hardcoding. On standard Linux the
++   * filesystem socket bind succeeds and behavior is unchanged. */
++  {
++    int probe_fd = socket(AF_UNIX, SOCK_STREAM, 0);
++    if (probe_fd != -1) {
++      struct sockaddr_un probe_addr;
++      memset(&probe_addr, 0, sizeof(probe_addr));
++      probe_addr.sun_family = AF_UNIX;
++      strncpy(probe_addr.sun_path, fb_conn_string, sizeof(probe_addr.sun_path) - 1);
++      int probe_bind_ret = bind(probe_fd, (struct sockaddr *)&probe_addr, sizeof(probe_addr));
++      int saved_errno = errno;
++      close(probe_fd);
++      unlink(fb_conn_string);
++      if (probe_bind_ret == -1 && saved_errno == EPERM) {
++        char abs_buf[128];
++        snprintf(abs_buf, sizeof(abs_buf), "abstract:firebuild-%d", getpid());
++        free(fb_conn_string);
++        fb_conn_string = strdup(abs_buf);
++      }
++    }
+   }
+ 
+   firebuild::FileName::default_tmpdir = firebuild::FileName::Get("/tmp", strlen("/tmp"));
+--- a/src/interceptor/intercept.c
++++ b/src/interceptor/intercept.c
+@@ -834,7 +834,13 @@
+ #ifdef FB_EXTRA_DEBUG
+   assert(strlen(fb_conn_string) < sizeof(remote.sun_path));
+ #endif
+-  strncpy(remote.sun_path, fb_conn_string, sizeof(remote.sun_path));
++  if (strncmp(fb_conn_string, "abstract:", 9) == 0) {
++    /* Linux abstract namespace: sun_path[0] = '\0' followed by name */
++    remote.sun_path[0] = '\0';
++    strncpy(remote.sun_path + 1, fb_conn_string + 9, sizeof(remote.sun_path) - 2);
++  } else {
++    strncpy(remote.sun_path, fb_conn_string, sizeof(remote.sun_path));
++  }
+ 
+   int conn_ret = TEMP_FAILURE_RETRY(
+       get_ic_orig_connect()(conn, (struct sockaddr *)&remote, sizeof(remote)));

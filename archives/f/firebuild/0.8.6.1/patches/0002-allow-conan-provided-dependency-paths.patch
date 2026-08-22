@@ -1,0 +1,116 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HarmonyOS PC Porting <porting@example.com>
+Date: Mon, 18 Aug 2026 00:00:00 +0800
+Subject: [PATCH] Allow Conan-provided dependency paths in CMakeLists.txt
+
+firebuild upstream uses find_package(LibConfig) and pkg_check_modules()
+to locate libconfig, xxhash, zstd, libelf, and tsl-hopscotch-map.
+On HarmonyOS PC with Conan, these packages are in Conan package_folder
+directories and not discoverable via system paths or pkg-config.
+
+Add conditional logic: when the Conan recipe provides -D variables
+(LIBCONFIGPP_INCLUDE_DIR, XXHASH_INCLUDE_DIRS, etc.), skip the
+upstream find_package/pkg_check_modules calls and use the provided
+paths directly. This preserves upstream compatibility while enabling
+Conan-based builds.
+
+Key consistency fixes:
+- find_package(PkgConfig REQUIRED) is unconditional (before all
+  if/else branches) so mixed Conan/pkg-config configurations work.
+- pkg_check_modules(libelf ...) output is mapped to uppercase
+  LIBELF_LIBRARIES/LIBELF_INCLUDE_DIRS/LIBELF_LDFLAGS so the link
+  and include_directories lines use consistent variable names.
+- find_package(tsl-hopscotch-map) output is mapped to uppercase
+  TSL_HOPSCOTCH_MAP_INCLUDE_DIRS so the CMAKE_CXX_FLAGS -I line
+  references the correct variable in both Conan and fallback paths.
+- include_directories uses LIBCONFIGPP_INCLUDE_DIR (consistent with
+  config.cc INCLUDE_DIRECTORIES and conanfile.py).
+
+--- a/src/firebuild/CMakeLists.txt
++++ b/src/firebuild/CMakeLists.txt
+@@ -6,21 +6,60 @@ set_source_files_properties(debug.cc execed_process.cc file_name.cc obj_cache.cc
+ set_source_files_properties(execed_process_cacher.cc PROPERTIES COMPILE_FLAGS "-Wno-cast-align -Wno-strict-overflow")
+ set_source_files_properties(message_processor.cc PROPERTIES COMPILE_FLAGS "-Wno-cast-align")
+
+-find_package(LibConfig REQUIRED)
++# Dependency resolution: prefer Conan-provided -D variables; fall back to
++# upstream find_package/pkg_check_modules when they are not set.
+ find_package(PkgConfig REQUIRED)
+-# xxh128's algorithm changed and became officially supported in 0.8.0
+-pkg_check_modules(XXHASH REQUIRED libxxhash>=0.8.0)
+-pkg_check_modules(ZSTD REQUIRED libzstd)
++if(DEFINED LIBCONFIGPP_INCLUDE_DIR AND DEFINED LIBCONFIGPP_LIBRARY)
++  set(LIBCONFIG_FOUND TRUE)
++  set(LIBCONFIGPP_FOUND TRUE)
++else()
++  find_package(LibConfig REQUIRED)
++endif()
++if(DEFINED XXHASH_INCLUDE_DIRS AND DEFINED XXHASH_LDFLAGS)
++  set(XXHASH_FOUND TRUE)
++else()
++  pkg_check_modules(XXHASH REQUIRED libxxhash>=0.8.0)
++endif()
++if(DEFINED ZSTD_INCLUDE_DIRS AND DEFINED ZSTD_LDFLAGS)
++  set(ZSTD_FOUND TRUE)
++else()
++  pkg_check_modules(ZSTD REQUIRED libzstd)
++endif()
+ if (WITH_JEMALLOC)
+-  pkg_check_modules(JEMALLOC jemalloc)
++  if(DEFINED JEMALLOC_INCLUDE_DIRS AND DEFINED JEMALLOC_LDFLAGS)
++    set(JEMALLOC_FOUND TRUE)
++  else()
++    pkg_check_modules(JEMALLOC jemalloc)
++  endif()
++endif()
++if(DEFINED TSL_HOPSCOTCH_MAP_INCLUDE_DIRS)
++  # tsl-hopscotch-map path provided by Conan recipe
++else()
++  find_package(tsl-hopscotch-map REQUIRED)
++  set(TSL_HOPSCOTCH_MAP_INCLUDE_DIRS ${tsl-hopscotch-map_INCLUDE_DIRS})
+ endif()
+-find_package(tsl-hopscotch-map REQUIRED)
+ if (APPLE)
+   pkg_check_modules(PLIST REQUIRED libplist-2.0>=2.3.0)
+   find_library(IOKit IOKit)
+   find_library(CoreFoundation CoreFoundation)
+-else()
++elseif(NOT DEFINED LIBELF_INCLUDE_DIRS OR NOT DEFINED LIBELF_LIBRARIES)
+   pkg_check_modules(libelf REQUIRED libelf)
++  set(LIBELF_LIBRARIES ${libelf_LIBRARIES})
++  set(LIBELF_INCLUDE_DIRS ${libelf_INCLUDE_DIRS})
++  set(LIBELF_LDFLAGS ${libelf_LDFLAGS})
++endif()
++# Add dependency include directories for Conan-based builds
++if(DEFINED XXHASH_INCLUDE_DIRS)
++  include_directories(${XXHASH_INCLUDE_DIRS})
++endif()
++if(DEFINED ZSTD_INCLUDE_DIRS)
++  include_directories(${ZSTD_INCLUDE_DIRS})
++endif()
++if(DEFINED LIBELF_INCLUDE_DIRS)
++  include_directories(${LIBELF_INCLUDE_DIRS})
++endif()
++if(DEFINED LIBCONFIGPP_INCLUDE_DIR)
++  include_directories(${LIBCONFIGPP_INCLUDE_DIR})
+ endif()
+ if (SANITIZE)
+   if (CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+@@ -31,7 +70,7 @@ if (SANITIZE)
+   endif()
+ endif()
+
+-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${tsl-hopscotch-map_INCLUDE_DIRS}")
++set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -I${TSL_HOPSCOTCH_MAP_INCLUDE_DIRS}")
+ set_source_files_properties(config.cc PROPERTIES INCLUDE_DIRECTORIES "${LIBCONFIGPP_INCLUDE_DIR}")
+
+ add_custom_command(
+@@ -93,7 +132,7 @@ add_executable(firebuild-bin
+   fbbstore.cc
+   $<TARGET_OBJECTS:common_objs>
+   $<TARGET_OBJECTS:fbbcomm_cc>)
+-target_link_libraries(firebuild-bin ${LIBCONFIGPP_LIBRARY} ${JEMALLOC_LDFLAGS} ${XXHASH_LDFLAGS} ${ZSTD_LDFLAGS} ${libelf_LIBRARIES} ${PLIST_LINK_LIBRARIES} ${IOKit} ${CoreFoundation})
++target_link_libraries(firebuild-bin ${LIBCONFIGPP_LIBRARY} ${JEMALLOC_LDFLAGS} ${XXHASH_LDFLAGS} ${ZSTD_LDFLAGS} ${LIBELF_LIBRARIES} ${PLIST_LINK_LIBRARIES} ${IOKit} ${CoreFoundation})
+ target_link_options(firebuild-bin PUBLIC -Wno-array-bounds -Wno-strict-overflow ${SANITIZE_SUPERVISOR_LINK_OPTIONS})
+ set_target_properties(firebuild-bin PROPERTIES OUTPUT_NAME firebuild)
+ # GCC 9's LTO implementation seem to have a bug we hit, but did not fully triage yet
