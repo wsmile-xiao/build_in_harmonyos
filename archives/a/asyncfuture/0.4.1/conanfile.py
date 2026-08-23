@@ -18,7 +18,7 @@ class AsyncFutureConan(ConanFile):
 
     def requirements(self):
         self.requires("qt5-qtbase/5.15.2.2")
-        self.requires("qt5-qtdeclarative/5.15.2.2")
+        self.requires("qt5-qtdeclarative/5.15.2")
 
     def layout(self):
         basic_layout(self)
