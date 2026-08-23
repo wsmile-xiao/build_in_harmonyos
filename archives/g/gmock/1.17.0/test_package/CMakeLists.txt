@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_gmock LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 17)
+find_package(gmock REQUIRED)
+add_executable(test_gmock test_gmock.cpp)
+target_link_libraries(test_gmock gmock::gmock gtest::gtest)
