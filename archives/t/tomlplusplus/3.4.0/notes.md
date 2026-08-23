@@ -1,81 +1,47 @@
-# tomlplusplus 3.4.0 — 编译进度
+# tomlplusplus 3.4.0 — 适配笔记
 
-> 档案创建时间: 2026-04-27 00:00:00
-> 最后更新: 2026-04-27 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> 适配时间: 2026-08-22
 
-## 一、基本信息
+## 基本信息
 | 项目 | 值 |
 |------|-----|
 | 软件 | tomlplusplus |
 | 版本 | 3.4.0 |
-| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
-| 构建系统 | autotools/cmake/meson/... |
-| 源码路径 | URL |
+| 状态 | built (conan-verify G2 passed) |
+| 构建系统 | CMake (header-only INTERFACE library) |
+| 源码 | https://github.com/marzer/tomlplusplus/archive/refs/tags/v3.4.0.tar.gz |
 
-## 二、编译阶段（checkbox 实时更新）
+## 适配过程
 
-### Phase 1: 环境准备
-- [ ] ohc-run.py init-build 完成 / 源码下载解压
+### Phase 1: 源码获取
+- 下载并解压 v3.4.0 tag tarball
+- SHA256: 8517f65938a4faae9ccf8ebb36631a38c1cadfb5efa85d9a72e15b9e97d25155
 
-### Phase 2: 编译（configure + make + make install）
-- [ ] configure 完成（记录参数和耗时）
-- [ ] make 编译完成（记录错误和修复）
-- [ ] make install 完成
+### Phase 2: 编译
+- cmake configure: PASS
+- cmake build: PASS (header-only, no actual compilation needed)
+- cmake install: PASS (headers installed to include/toml++/)
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [ ] 干净源码 + 补丁应用
-- [ ] 独立 TEST_PREFIX configure + make install
-- [ ] 功能回归测试结果
+### Phase 3: 功能测试
+- 编写 C++17 测试程序，解析 TOML 数据、验证值、序列化输出
+- 运行结果: PASS
 
-### Phase 3: 测试验证
-- [ ] make check / make test 结果
-- [ ] 安全弹窗触发确认
+### Phase 4: Conan 配方
+- conan-init 生成初始配方（Autotools 模板）
+- 手动改为 CMake 配方（tomlplusplus 使用 CMake）
+- conan-verify G2 (conan create + test_package): PASS
+- W3 本地 CI 模拟: PASS
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [ ] Step 1-10 打包流程（见 packaging.md）
+### Phase 5: W4 审计
+- 独立审计通过 (verdict=pass, 0 P0/P1)
+- 修复 P2 警告 (url 占位符, notes 模板, manifest name)
+- 修复 P3 建议 (sstream include, unused import, assertion count)
 
-### Phase 5: 归档收尾
-- [ ] 补丁生成（ohc-run.py refresh-patch --auto）
-- [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] ohc-run.py verify-build 质量门禁
+## 源码修改
+无源码修改，纯 header-only 库直接适配。
 
-## 三、对话记录（⭐ 断点续传核心）
+## 结论
+tomlplusplus 3.4.0 作为 header-only C++ 库，在 OpenHarmony aarch64 平台上直接可用，无需补丁或源码修改。
 
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
-
-### 对话 #N — 2026-04-27 HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
-
----
-
-### 对话 #1 — 2026-04-27 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
-
-（后续每轮对话追加...）
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| ... | ... | ... | ... |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ... | ... | ... |
-
-## 六、结束记录
-- **最终状态**: ...
-- **结束时间**: ...
----
-
-**编译结束**: 2026-04-27 11:23
-**最终状态**: partial
+## COMPLETED
+编译结束
