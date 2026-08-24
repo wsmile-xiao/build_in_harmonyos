@@ -1,4 +1,4 @@
-import os
+﻿import os
 
 from conan import ConanFile
 from conan.tools.layout import basic_layout
@@ -19,7 +19,7 @@ class AsyncFutureTestConan(ConanFile):
         package_dir = self.dependencies["asyncfuture"].package_folder
         include_path = os.path.join(package_dir, include_dir)
         self.run(f"qmake asyncfuture_test.pro INCLUDEPATH={include_path}", cwd=self.source_folder)
-        self.run("make -j$(nproc)", cwd=self.source_folder)
+        self.run("make -j1", cwd=self.source_folder)
 
     def test(self):
         self.run("./asyncfuture_test", env="conanrun")
