@@ -1033,6 +1033,16 @@ def get_mirrors(url):
         return [
             url,
         ]
+    # ── X.Org 官方站 (xorg.freedesktop.org 国内长期不可达, 2026-08 起全球间歇宕机) ──
+    # 镜像同步滞后, 新版本可能 404 (此时回退原站); conan 2 对 url 列表原生多源 fallback
+    if re.match(r'^https?://xorg\.freedesktop\.org/(archive|releases)/', url):
+        p = re.sub(r'^https?://xorg\.freedesktop\.org/(archive|releases)/', '', url)
+        return [
+            'https://mirror.csclub.uwaterloo.ca/x.org/' + p,
+            'https://www.mirrorservice.org/sites/ftp.x.org/pub/' + p,
+            'https://mirrors.ircam.fr/pub/x.org/' + p,
+            url,
+        ]
     # ── 无匹配镜像 ──
     return [url]
 
@@ -1114,6 +1124,11 @@ def get_mirror_list(url):
         p = re.sub(r'^https?://cdn\.kernel\.org/', '', url)
         mirrors = [f'https://mirrors.ustc.edu.cn/kernel.org/{p}',
                    f'https://mirrors.tuna.tsinghua.edu.cn/{p}', url]
+    elif re.match(r'^https?://xorg\.freedesktop\.org/(archive|releases)/', url):
+        p = re.sub(r'^https?://xorg\.freedesktop\.org/(archive|releases)/', '', url)
+        mirrors = [f'https://mirror.csclub.uwaterloo.ca/x.org/{p}',
+                   f'https://www.mirrorservice.org/sites/ftp.x.org/pub/{p}',
+                   f'https://mirrors.ircam.fr/pub/x.org/{p}', url]
     else:
         mirrors = [url]
     return mirrors
