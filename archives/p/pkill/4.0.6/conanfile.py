@@ -113,7 +113,7 @@ extern char *program_invocation_short_name;
 """)
 
         # Compiler settings — all include paths relative to source folder
-        cflags = "-O2 -fPIC -I{} -I{}/local -I{}/library/include -I{}".format(
+        cflags = '-O2 -fPIC -I"{}" -I"{}/local" -I"{}/library/include" -I"{}"'.format(
             src, src, src, bld)
 
         # Compile local source files (needed by pkill)
@@ -139,12 +139,12 @@ extern char *program_invocation_short_name;
             basename = os.path.basename(srcfile).replace(".c", ".o")
             objpath = os.path.join(bld, basename)
             all_objs.append(objpath)
-            self.run("{} {} -c {} -o {}".format(cc, cflags, srcfile, objpath))
+            self.run('{} {} -c "{}" -o "{}"'.format(cc, cflags, srcfile, objpath))
 
         # Link pkill as static binary
         pkill_bin = os.path.join(bld, "pkill")
-        self.run("{} -static -o {} {} -lpthread -lm".format(
-            cc, pkill_bin, " ".join(all_objs)))
+        obj_args = " ".join('"{}"'.format(o) for o in all_objs)
+        self.run('{} -static -o "{}" {} -lpthread -lm'.format(cc, pkill_bin, obj_args))
 
     def package(self):
         copy(self, "pkill", src=self.build_folder,
