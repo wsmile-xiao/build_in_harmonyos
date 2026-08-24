@@ -61,7 +61,12 @@ class NimConan(ConanFile):
         # 2. Build koch (Nim build tool)
         self.run(f'{ld_prefix}bin/nim c --noNimblePath --skipUserCfg --skipParentCfg --hints:off --cc:clang koch')
 
-        # 3. Build full Nim compiler (self-hosted bootstrap via koch boot)
+        # 3. Build full Nim compiler via koch boot (official multi-pass self-hosted build).
+        # koch boot calls bundleChecksums()/bundleNimble() which run git fetch on
+        # dist/checksums and dist/nimble. CI workers run as USER=100 but repo dirs
+        # are owned by another user, triggering git's dubious-ownership check.
+        # safe.directory '*' is standard CI practice to resolve this.
+        self.run("git config --global --add safe.directory '*'")
         self.run(f'{ld_prefix}./koch boot -d:release --skipUserCfg --skipParentCfg --hints:off --cc:clang')
 
     def package(self):
