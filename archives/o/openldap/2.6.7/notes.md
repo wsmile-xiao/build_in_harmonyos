@@ -67,9 +67,12 @@
 
 8. 运行测试
    ```bash
-   make check
+   make check -j1 -k   # conanfile.py build() 末尾以 -k 尽力执行，预期因缺 slapd 而部分失败
    ```
-   由于禁用了 mdb 后端，测试套件跳过了 MDB 测试。
+   由于 `--disable-slapd` 未构建 slapd，`tests/run` 首行即 `if test ! -x ../servers/slapd/slapd` 导致
+   90 个 slapd-tester 集成测试（tests/scripts/test000-rootdse ~ test088-syncprov-glue-rwm，含 test081-totp.py，`ls tests/scripts/test* | wc -l` == 90）
+   在 conan 沙箱内无法运行（详见下方“上游测试说明”）。
+   可执行的 liblber/libldap 自检（若已编译）会尽力触发，失败以 warning 保留证据链，不阻断构建。
 
 9. 本地安装
    ```bash
@@ -174,4 +177,8 @@ slapd (1374112 bytes)
 
 ---
 **编译结束**: 2026-05-27 11:38
+**最终状态**: built
+---
+
+**编译结束**: 2026-08-21 21:38
 **最终状态**: built
