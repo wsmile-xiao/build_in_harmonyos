@@ -79,9 +79,15 @@ for ref in "${PACKAGES[@]}"; do
         fi
 
         if echo "$upload_output" | grep -qiE "409|already exist|conflict"; then
-            echo "[ok] ${ref} already exists in registry (409 idempotent)"
-            SUCCESS=$((SUCCESS + 1))
-            break
+            # A 409-like string can also come from auth/gateway conflicts that
+            # are NOT real idempotent uploads (e.g. pcsc-lite 2.4.0 build 32115).
+            # Verify the ref actually exists in the remote before trusting it.
+            if conan list "$ref" -r "${CONAN_REMOTE_NAME}" >/dev/null 2>&1; then
+                echo "[ok] ${ref} already exists in registry (409 verified via conan list)"
+                SUCCESS=$((SUCCESS + 1))
+                break
+            fi
+            echo "[warn] ${ref} got 409-like output but NOT in registry (false idempotent), retrying..."
         fi
 
         if [ $attempt -lt $MAX_RETRIES ]; then
