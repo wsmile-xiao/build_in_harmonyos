@@ -1,0 +1,37 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_goocanvas C)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GOOCANVAS REQUIRED goocanvas-3.0)
+
+set(GOOCANVAS_CLEAN_INCLUDE_DIRS)
+foreach(inc_dir IN LISTS GOOCANVAS_INCLUDE_DIRS)
+    if(EXISTS "${inc_dir}")
+        list(APPEND GOOCANVAS_CLEAN_INCLUDE_DIRS "${inc_dir}")
+    endif()
+endforeach()
+
+set(GOOCANVAS_CLEAN_CFLAGS)
+foreach(flag IN LISTS GOOCANVAS_CFLAGS_OTHER)
+    if(NOT flag MATCHES "^[A-Za-z]+:$")
+        list(APPEND GOOCANVAS_CLEAN_CFLAGS "${flag}")
+    endif()
+endforeach()
+
+set(GOOCANVAS_CLEAN_LDFLAGS)
+foreach(flag IN LISTS GOOCANVAS_LDFLAGS_OTHER)
+    if(NOT flag MATCHES "^[A-Za-z]+:$")
+        list(APPEND GOOCANVAS_CLEAN_LDFLAGS "${flag}")
+    endif()
+endforeach()
+
+add_executable(test_goocanvas test_goocanvas.c)
+target_include_directories(test_goocanvas PRIVATE ${GOOCANVAS_CLEAN_INCLUDE_DIRS})
+target_link_directories(test_goocanvas PRIVATE ${GOOCANVAS_LIBRARY_DIRS})
+target_link_libraries(test_goocanvas PRIVATE ${GOOCANVAS_LIBRARIES} ${GOOCANVAS_CLEAN_LDFLAGS})
+target_compile_options(test_goocanvas PRIVATE ${GOOCANVAS_CLEAN_CFLAGS})
+
+if(NOT CMAKE_CROSSCOMPILING)
+    enable_testing()
+    add_test(NAME goocanvas_smoke COMMAND test_goocanvas)
+endif()
