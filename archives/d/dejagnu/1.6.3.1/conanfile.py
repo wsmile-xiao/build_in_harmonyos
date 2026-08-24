@@ -26,6 +26,7 @@ from conan.errors import ConanInvalidConfiguration, ConanException
 from conan.tools.build import can_run
 from conan.tools.files import (
     apply_conandata_patches,
+    chdir,
     copy,
     export_conandata_patches,
     get,
@@ -37,7 +38,7 @@ from conan.tools.layout import basic_layout
 
 class DejagnuConan(ConanFile):
     name = "dejagnu"
-    version = "1.6.3"
+    version = "1.6.3.1"
     description = "GNU DejaGnu -- a framework for running test suites on software tools"
     license = "GPL-3.0-or-later"
     homepage = "https://www.gnu.org/software/dejagnu/"
@@ -102,8 +103,14 @@ class DejagnuConan(ConanFile):
     def build(self):
         apply_conandata_patches(self)
         autotools = Autotools(self)
+        # #29546 根因：basic_layout 下 configure 在 build folder 根（source_folder）
+        # 跑，但 config.status 在 build_folder（build-release/）跑生成 Makefile。
+        # Autotools.make()/install() 不切换 cwd，默认在 conan 启动目录跑 →
+        # 那里无 Makefile → "No targets specified and no makefile found"。
+        # 修复：所有 make 调用都 chdir 到 self.build_folder（Makefile 所在）。
         autotools.configure()
-        autotools.make(args=["-j1"])
+        with chdir(self, self.build_folder):
+            autotools.make(args=["-j1"])
 
         # Upstream official test (TEST_QUALITY_SPEC 3.1).
         #
@@ -138,7 +145,9 @@ class DejagnuConan(ConanFile):
         make_check_cmd = 'make check RUNTESTFLAGS=' + chr(34) + runtestflags + chr(34)
 
         try:
-            self.run(make_check_cmd, env=["conanbuild", "dejagnu_check_env"])
+            # #29546: make check 必须在 build_folder（Makefile 所在）跑
+            with chdir(self, self.build_folder):
+                self.run(make_check_cmd, env=["conanbuild", "dejagnu_check_env"])
             self.output.info("make check: completed (exit 0)")
         except ConanException as exc:
             self.output.warning(
@@ -148,7 +157,10 @@ class DejagnuConan(ConanFile):
 
     def package(self):
         autotools = Autotools(self)
-        autotools.install()
+        # #29546: install 必须在 build_folder（Makefile 所在）跑，
+        # 否则 "No rule to make target 'install'"
+        with chdir(self, self.build_folder):
+            autotools.install()
 
         # Copy licence file
         copy(
