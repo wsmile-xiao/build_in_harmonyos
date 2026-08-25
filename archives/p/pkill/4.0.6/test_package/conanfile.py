@@ -23,6 +23,8 @@ class PkillTestConan(ConanFile):
 
     def build(self):
         cmake = CMake(self)
+        cmake.definitions["PKILL_BIN"] = os.path.join(
+            self.dependencies["pkill"].package_folder, "bin", "pkill")
         cmake.configure()
         cmake.build()
 

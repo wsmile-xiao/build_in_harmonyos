@@ -1,10 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#ifndef PKILL_BIN
+#define PKILL_BIN "pkill"
+#endif
+
 int main(void) {
     /* R34: test must depend on the tested package.
-     * pkill is a CLI tool — execute pkill -V and verify exit code. */
-    int rc = system("pkill -V");
+     * Execute pkill -V via full path (passed from CMake definition)
+     * and verify exit code. */
+    int rc = system(PKILL_BIN " -V");
     if (rc != 0) {
         fprintf(stderr, "pkill -V failed with exit code %d\n", rc);
         return 1;
