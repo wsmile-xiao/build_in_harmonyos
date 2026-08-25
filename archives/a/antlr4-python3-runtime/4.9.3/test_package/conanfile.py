@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Conan test_package for antlr4-python3-runtime 4.9.3 — import + real API test."""
+import os
+import sys
+
+from conan import ConanFile
+from conan.tools.build import can_run
+
+
+class Antlr4TestConan(ConanFile):
+    settings = "os", "arch"
+    test_type = "explicit"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def test(self):
+        if can_run(self):
+            python_exe = sys.executable
+            # 显式注入 package 的 site-packages 到 PYTHONPATH
+            # （conanrun env 的 PYTHONPATH 注入实测不生效——soupsieve 先例）
+            pkg = self.dependencies["antlr4-python3-runtime"].package_folder
+            py_ver = f"python{sys.version_info.major}.{sys.version_info.minor}"
+            site = os.path.join(pkg, "lib", py_ver, "site-packages")
+            test_script = os.path.join(os.path.dirname(__file__), "test_antlr4.py")
+            self.run(f'PYTHONPATH="{site}" {python_exe} "{test_script}"',
+                     env="conanrun")
