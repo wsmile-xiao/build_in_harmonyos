@@ -4,7 +4,7 @@ AFL++ (American Fuzzy Lop Plus Plus) is a fast instrumented fuzzer with
 many enhancements over the original AFL: better instrumentation, faster
 mutations, additional sanitizers, custom mutator API, and more.
 
-- **Version**: 4.33c
+- **Versions**: 4.33c, 4.34c-r0
 - **Homepage**: https://github.com/AFLplusplus/AFLplusplus
 - **License**: Apache-2.0
 - **Build System**: Makefile (GNUmakefile)
@@ -12,13 +12,13 @@ mutations, additional sanitizers, custom mutator API, and more.
 
 ## OHOS Build Notes
 
-Only the core fuzzing tools are built:
+Core fuzzing tools are built:
 - `afl-fuzz` — main fuzzer
 - `afl-showmap` — coverage map tool
 - `afl-tmin` — test case minimizer
 - `afl-gotcpu` — CPU affinity checker
 - `afl-analyze` — input analysis
 
-LLVM-based instrumentation (`afl-cc`, `afl-clang`, `SanitizerCoverage*.so`)
-and GCC plugin are **not built** — they require LLVM/GCC development packages
-which are not available in the OHOS CI environment.
+LLVM-based instrumentation (`afl-cc`, `afl-clang-fast`, 10 LLVM pass plugins,
+`afl-compiler-rt.o`) is **built** using the LLVM 15.0.4 shipped in the OHOS
+SDK. GCC plugin / LTO / IJON modes are not built (no gcc-plugin-dev / LLD).
