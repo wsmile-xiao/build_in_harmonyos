@@ -4,7 +4,7 @@
 #include <zlib.h>
 
 int main(void) {
-    const char *input = "Hello, zlib 1.3.1.1.1!";
+    const char *input = "Hello, zlib 1.3.1.1.1.1.1!";
     uLong src_len = strlen(input);
     uLong compressed_len = compressBound(src_len);
     unsigned char *compressed = malloc(compressed_len);

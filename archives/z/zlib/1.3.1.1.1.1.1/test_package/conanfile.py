@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Conan test_package for zlib 1.3.1.1.1."""
-
-import os
+"""Conan test_package for zlib 1.3.1.1.1.1.1."""
 
 from conan import ConanFile
+from conan.tools.build import can_run
 from conan.tools.cmake import CMake, cmake_layout
 
 
@@ -23,5 +22,5 @@ class ZlibTestConan(ConanFile):
         cmake.build()
 
     def test(self):
-        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-        self.run(f"{bash} -c './test_zlib'", env="conanrun")
+        if can_run(self):
+            self.run("./test_zlib", env="conanrun")
