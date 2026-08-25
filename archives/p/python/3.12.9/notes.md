@@ -44,3 +44,10 @@ export PKG_CONFIG_PATH=$HOME/usr/local/lib/pkgconfig
 - _uuid: 缺 libuuid
 - _curses_panel: 缺 libpanelw
 - test_sqlite3: fts4 未启用（SQLite 编译需加 -DSQLITE_ENABLE_FTS5）
+---
+
+**编译结束**: 2026-08-21 12:52
+**最终状态**: built
+
+## 关闭
+编译完成，W3 conan create 通过。
