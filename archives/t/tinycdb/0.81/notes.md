@@ -178,12 +178,11 @@ $ $DEFAULT_PREFIX/bin/cdb -l $TMPDIR/func-test.cdb
 - ⭐ 必须使用 GNU ld（`-fuse-ld=/data/service/hnp/bin/ld.bfd`），不能使用 lld
 - Makefile 默认目标是 `static`（libcdb.a + cdb），不构建共享库
 - 测试中的 `ulimit -f` 在 OpenHarmony 上不生效（平台限制），不影响软件功能
-- 新编译的二进制需要 ELF 签名（`sign-elf`）才能在鸿蒙系统上执行
----
-
-**编译结束**: 2026-06-09 16:07
-**最终状态**: published
----
+- 新编译的二进制需要 ELF 签名（`sign-elf`）才能在鸿蒙系统上执行---
 
 **编译结束**: 2026-06-09 16:09
 **最终状态**: published
+---
+
+**编译结束**: 2026-07-15 17:57
+**最终状态**: built
