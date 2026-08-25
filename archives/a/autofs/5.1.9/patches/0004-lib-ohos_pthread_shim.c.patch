@@ -1,0 +1,187 @@
+--- /dev/null	2026-08-21 18:01:28.439238125 +0800
++++ b/lib/ohos_pthread_shim.c
+@@ -0,0 +1,184 @@
++/*
++ * OHOS pthread cancellation compatibility shim.
++ *
++ * OpenHarmony SDK sysroot libc does not export the POSIX thread
++ * cancellation API (pthread_cancel / pthread_setcancelstate /
++ * pthread_setcanceltype / pthread_testcancel), while autofs relies
++ * heavily on it (136 call sites of pthread_setcancelstate etc.).
++ *
++ * This shim provides the API surface with deferred-cancellation
++ * semantics backed by per-thread state/type flags and a small,
++ * mutex-protected registry so pthread_testcancel() can observe a
++ * cancellation request issued by another thread via pthread_cancel().
++ *
++ * Only compiled on OHOS.  On Linux/glibc the native libc symbols are
++ * used instead.
++ *
++ * NOTE: like standard deferred cancellation, the cancel flag is only
++ * honored at explicit pthread_testcancel() call sites (autofs places
++ * those around its blocking operations), not at arbitrary blocking
++ * syscalls, which OHOS does not support interrupting.
++ */
++#include <pthread.h>
++#include <errno.h>
++#include <stdlib.h>
++
++typedef struct cancel_entry {
++	pthread_t tid;
++	unsigned long magic;
++	int cancel_requested;
++	struct cancel_entry *next;
++} cancel_entry;
++
++static pthread_mutex_t cancel_reg_lock = PTHREAD_MUTEX_INITIALIZER;
++static cancel_entry *cancel_reg_head;
++static pthread_once_t cancel_reg_once = PTHREAD_ONCE_INIT;
++
++#define CANCEL_MAGIC 0x4f484f5343ull	/* "OHOSC" */
++
++static __thread struct { int state; int type; unsigned long magic; } tls_cancel;
++
++#if defined(__OHOS__)
++
++static void
++cancel_reg_init(void)
++{
++	pthread_mutex_init(&cancel_reg_lock, NULL);
++}
++
++static void
++cancel_reg_insert(pthread_t tid)
++{
++	cancel_entry *e;
++
++	pthread_once(&cancel_reg_once, cancel_reg_init);
++	pthread_mutex_lock(&cancel_reg_lock);
++	for (e = cancel_reg_head; e; e = e->next) {
++		if (e->tid == tid) {
++			e->magic = CANCEL_MAGIC;
++			pthread_mutex_unlock(&cancel_reg_lock);
++			return;
++		}
++	}
++	e = calloc(1, sizeof(*e));
++	if (e) {
++		e->tid = tid;
++		e->magic = CANCEL_MAGIC;
++		e->next = cancel_reg_head;
++		cancel_reg_head = e;
++	}
++	pthread_mutex_unlock(&cancel_reg_lock);
++}
++
++static void
++cancel_reg_remove(pthread_t tid)
++{
++	cancel_entry *e, **pp;
++
++	pthread_mutex_lock(&cancel_reg_lock);
++	for (pp = &cancel_reg_head; (e = *pp); pp = &e->next) {
++		if (e->tid == tid) {
++			*pp = e->next;
++			free(e);
++			break;
++		}
++	}
++	pthread_mutex_unlock(&cancel_reg_lock);
++}
++
++int
++pthread_setcancelstate(int state, int *oldstate)
++{
++	if (tls_cancel.magic != CANCEL_MAGIC) {
++		tls_cancel.magic = CANCEL_MAGIC;
++		tls_cancel.state = PTHREAD_CANCEL_ENABLE;
++		tls_cancel.type = PTHREAD_CANCEL_DEFERRED;
++	}
++	if (state != PTHREAD_CANCEL_ENABLE && state != PTHREAD_CANCEL_DISABLE)
++		return EINVAL;
++	if (oldstate)
++		*oldstate = tls_cancel.state;
++	tls_cancel.state = state;
++	return 0;
++}
++
++int
++pthread_setcanceltype(int type, int *oldtype)
++{
++	if (tls_cancel.magic != CANCEL_MAGIC) {
++		tls_cancel.magic = CANCEL_MAGIC;
++		tls_cancel.state = PTHREAD_CANCEL_ENABLE;
++		tls_cancel.type = PTHREAD_CANCEL_DEFERRED;
++	}
++	if (type != PTHREAD_CANCEL_DEFERRED &&
++	    type != PTHREAD_CANCEL_ASYNCHRONOUS)
++		return EINVAL;
++	if (oldtype)
++		*oldtype = tls_cancel.type;
++	tls_cancel.type = type;
++	return 0;
++}
++
++void
++pthread_testcancel(void)
++{
++	cancel_entry *e;
++	int pending;
++
++	if (tls_cancel.magic != CANCEL_MAGIC)
++		return;
++	/* If cancellation is disabled, defer the request.  The pending
++	 * cancellation entry stays in the registry so it will be picked
++	 * up once the thread re-enables cancellation. */
++	pthread_once(&cancel_reg_once, cancel_reg_init);
++	pthread_mutex_lock(&cancel_reg_lock);
++	pending = 0;
++	for (e = cancel_reg_head; e; e = e->next) {
++		if (e->tid == pthread_self() && e->cancel_requested) {
++			/* Consume the request if currently enabled */
++			if (tls_cancel.state == PTHREAD_CANCEL_ENABLE) {
++				e->cancel_requested = 0;
++				pending = 1;
++				break;
++			}
++			/* DISABLE: leave request pending for later */
++			break;
++		}
++	}
++	pthread_mutex_unlock(&cancel_reg_lock);
++	if (pending) {
++		cancel_reg_remove(pthread_self());
++		pthread_exit(PTHREAD_CANCELED);
++	}
++}
++
++int
++pthread_cancel(pthread_t thread)
++{
++	cancel_entry *e;
++
++	pthread_once(&cancel_reg_once, cancel_reg_init);
++	pthread_mutex_lock(&cancel_reg_lock);
++	for (e = cancel_reg_head; e; e = e->next) {
++		if (e->tid == thread && e->magic == CANCEL_MAGIC) {
++			e->cancel_requested = 1;
++			pthread_mutex_unlock(&cancel_reg_lock);
++			return 0;
++		}
++	}
++	pthread_mutex_unlock(&cancel_reg_lock);
++	/* Target thread not yet in registry; insert it with flag set */
++	cancel_reg_insert(thread);
++	/* Re-find the entry and set the flag */
++	pthread_mutex_lock(&cancel_reg_lock);
++	for (e = cancel_reg_head; e; e = e->next) {
++		if (e->tid == thread && e->magic == CANCEL_MAGIC) {
++			e->cancel_requested = 1;
++			break;
++		}
++	}
++	pthread_mutex_unlock(&cancel_reg_lock);
++	return 0;
++}
++
++#endif /* __OHOS__ */
