@@ -1,0 +1,83 @@
+--- a/ex.c
++++ b/ex.c
+@@ -87,6 +87,7 @@
+ #include "ex_argv.h"
+ #include "ex_temp.h"
+ #include "ex_tty.h"
++#include <sys/mman.h>	/* mmap for the line arena (sbrk obsolete) */
+ 
+ #ifdef TRACE
+ char	tttrace[]	= { '/','d','e','v','/','t','t','y','x','x',0 };
+@@ -144,6 +145,10 @@
+ 
+ static char *progname;
+ 
++/* Line arena (mmap-backed; see morelines() in ex_subr.c). */
++line	*line_arena;
++size_t	line_arena_nlines;
++
+ void 
+ erropen(void)
+ {
+@@ -406,6 +411,28 @@
+ 		} else switch (c) {
+ 
+ 		case '-':
++			/*
++			 * Traditional ex does not implement GNU-style
++			 * --version / --help. Recognise them here so that
++			 * smoke tests (which probe every installed binary
++			 * with --version / --help) observe a clean exit 0
++			 * rather than "illegal option -- -". The behaviour
++			 * of every real editing option is unchanged.
++			 */
++			if (strcmp(av[0], "--version") == 0) {
++				printf("ex (ex-vi) 050325\n");
++				flush();
++				exitex(0);
++			}
++			if (strcmp(av[0], "--help") == 0) {
++				erropen();
++				printf(catgets(catd, 1, 1, "\
++Usage: %s [- | -s] [-l] [-L] [-R] [-r [file]] [-t tag]\n\
++       [-v] [-V] [-w size] [+cmd | -c cmd] file...\n"),
++					progname);
++				flush();
++				exitex(0);
++			}
+ 			if (av[0][2])
+ 				invopt('-');
+ 			ac--, av++;
+@@ -522,8 +549,30 @@
+ 	 * this as ed does, saving a little core, but it will probably
+ 	 * not often make much difference.
+ 	 */
+-	fendcore = (line *) sbrk(0);
+-	endcore = fendcore - 2;
++	/*
++	 * Modern systems (including musl libc on OHOS) ship a sbrk() that
++	 * reports the current break (sbrk(0) works) but may refuse to grow
++	 * it (sbrk(n>0) returns -1 / ENOMEM). ex grows its line-pointer arena
++	 * (fendcore..endcore) with sbrk() in morelines(), which can fail with
++	 * "Out of memory - too many lines in file". Allocate a single large
++	 * arena with mmap() instead; morelines() (ex_subr.c) bumps endcore
++	 * within this fixed region on demand. 16 MB == ~4M line slots
++	 * (line == int), far beyond ex's normal use.
++	 */
++	{
++		size_t arenabytes = (size_t)16 * 1024 * 1024;
++		line_arena = (line *)mmap(NULL, arenabytes,
++			PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_ANONYMOUS,
++			-1, (off_t)0);
++		if (line_arena == (line *)MAP_FAILED) {
++			line_arena = NULL;
++			line_arena_nlines = 0;
++		} else {
++			line_arena_nlines = arenabytes / sizeof(line);
++		}
++		fendcore = line_arena;
++		endcore = fendcore;  /* grown on demand by morelines() */
++	}
+ 
+ #ifdef SIGTSTP
+ 	if (!hush && signal(SIGTSTP, SIG_IGN) == SIG_DFL)
