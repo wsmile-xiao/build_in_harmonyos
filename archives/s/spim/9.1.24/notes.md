@@ -88,12 +88,11 @@ $ spim -bare -noexception -file Tests/tt.alu.bare.s
 
 - spim是MIPS32模拟器，交互式运行（需要终端输入）
 - 必须使用GNU ld(ld.bfd)替代lld进行链接，这是已知平台workaround
-- tarball包含嵌套目录结构，不能只提取spim子目录（需要CPU等上级目录）
----
+- tarball包含嵌套目录结构，不能只提取spim子目录（需要CPU等上级目录）---
 
 **编译结束**: 2026-06-09 15:45
 **最终状态**: published
 ---
 
-**编译结束**: 2026-06-09 15:45
-**最终状态**: published
+**编译结束**: 2026-07-15 21:06
+**最终状态**: built
