@@ -152,3 +152,4 @@ extern char *program_invocation_short_name;
 
     def package_info(self):
         self.cpp_info.libs = []
+        self.cpp_info.bindirs = ["bin"]
