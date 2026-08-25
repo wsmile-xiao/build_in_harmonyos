@@ -34,7 +34,7 @@ class LibselinuxConan(ConanFile):
 
     def requirements(self):
         self.requires("libsepol/3.10")
-        self.requires("pcre2/10.45")
+        self.requires("pcre2/10.47")
         # OHOS musl libc does not include fts.h; use musl-fts standalone
         self.requires("musl-fts/1.2.7")
 
@@ -114,15 +114,16 @@ class LibselinuxConan(ConanFile):
         # with PREFIX=/usr so the copied .pc hard-codes prefix=/usr. Consumers
         # resolving the raw package .pc (PKG_CONFIG_PATH into the installed
         # package) then get -I/usr/include and cannot find selinux/selinux.h.
-        # Rewrite the packaged .pc so prefix resolves to the real package folder
-        # inside the Conan cache (absolute path — never /usr, no env workaround).
+# Rewrite the packaged .pc so prefix is relocatable via ${pcfiledir}.
+        # The .pc lives at <prefix>/lib/pkgconfig/libselinux.pc, so
+        # ${pcfiledir}/../.. resolves to the installation prefix regardless
+        # of where the package is installed — no build-machine absolute path.
         pc_path = os.path.join(self.package_folder, "lib", "pkgconfig", "libselinux.pc")
         if os.path.isfile(pc_path):
             pc_text = load(self, pc_path)
-            prefix = self.package_folder
-            pc_text = pc_text.replace("prefix=/usr", f"prefix={prefix}")
-            pc_text = pc_text.replace("/usr/lib", f"{prefix}/lib")
-            pc_text = pc_text.replace("/usr/include", f"{prefix}/include")
+            pc_text = pc_text.replace("prefix=/usr", "prefix=${pcfiledir}/../..")
+            pc_text = pc_text.replace("/usr/lib", "${prefix}/lib")
+            pc_text = pc_text.replace("/usr/include", "${prefix}/include")
             save(self, pc_path, pc_text)
 
         # Install utils as smoke tools
