@@ -2,10 +2,10 @@
 
 ## 编译环境
 - 构建系统: makefile（plain Makefile，非 autotools）
-- 编译日期: 2026-06-12
+- 编译日期: 2026-07-24
 - 编译器: clang 15.0.4 / clang++ 15.0.4
 - 目标平台: OpenHarmony aarch64 (HongMeng Kernel 1.12.0, musl libc)
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -19,7 +19,7 @@
 8. 执行 `ohc-run.py package ttyplot 1.7.1` 预编译包制作（322KB）
 9. 执行 `make PREFIX=$DEFAULT_PREFIX install` 本地安装验证
 10. 手动功能测试（7项），全部通过
-11. 执行 `ohc-run.py finish ttyplot 1.7.1 published` 收尾
+11. 执行 `ohc-run.py finish ttyplot 1.7.1 built` 收尾
 
 ## 遇到的问题与解决方案
 
@@ -86,9 +86,6 @@ ttyplot.c:362: mvvline_set(height - 2, 5, &plotchar, 1);
 - stresstest 不随预编译包发布，仅在源码目录中编译
 
 ---
-**编译结束**: 2026-06-12 02:00
-**最终状态**: published
+**编译结束**: 2026-07-24
+**最终状态**: built
 ---
-
-**编译结束**: 2026-06-12 14:31
-**最终状态**: published
