@@ -15,6 +15,7 @@ class VustedConan(ConanFile):
     license = "MIT"
     homepage = "https://github.com/notomo/vusted"
     url = "https://github.com/notomo/vusted"
+    settings = "os", "compiler", "build_type", "arch"
 
     exports_sources = "compat/*", "compat/system/*", "compat/term/*"
     no_copy_source = True
