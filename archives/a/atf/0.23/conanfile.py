@@ -48,10 +48,21 @@ class AtfConan(ConanFile):
         autotools = Autotools(self)
         autotools.configure()
         autotools.make()
+        # L1: Run upstream official test suite (make check)
+        # atf 的 make check 编译和链接 bootstrap 测试程序 (EXIT_CODE=0)
+        # 实际测试执行需手动运行，详见 test_package/MANIFEST.yml
+        autotools.make(target="check")
 
     def package(self):
         autotools = Autotools(self)
         autotools.install()
 
     def package_info(self):
-        self.cpp_info.libs = ["atf-c", "atf-c++"]
+        # C core library
+        self.cpp_info.components["atf-c"].libs = ["atf-c"]
+        self.cpp_info.components["atf-c"].set_property("cmake_target_name", "atf::atf-c")
+
+        # C++ wrapper library (depends on C core)
+        self.cpp_info.components["atf-c++"].libs = ["atf-c++"]
+        self.cpp_info.components["atf-c++"].requires = ["atf-c"]
+        self.cpp_info.components["atf-c++"].set_property("cmake_target_name", "atf::atf-c++")
