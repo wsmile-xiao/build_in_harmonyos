@@ -1,0 +1,134 @@
+--- a/src/lib/arch/unix/ArchMultithreadPosix.cpp
++++ b/src/lib/arch/unix/ArchMultithreadPosix.cpp
+@@ -1,42 +1,44 @@
+ /*
+  * Deskflow -- mouse and keyboard sharing utility
+  * Copyright (C) 2012-2016 Symless Ltd.
+  * Copyright (C) 2002 Chris Schoeneman
+  *
+  * This package is free software; you can redistribute it and/or
+  * modify it under the terms of the GNU General Public License
+  * found in the file LICENSE that should have accompanied this file.
+  *
+  * This package is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  * GNU General Public License for more details.
+  *
+  * You should have received a copy of the GNU General Public License
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+
+ #include "arch/unix/ArchMultithreadPosix.h"
++#include "arch/unix/PthreadCancelControl.h"
+
+ #include "arch/Arch.h"
+ #include "arch/XArch.h"
++#include "base/Log.h"
+
+ #include <signal.h>
+ #if TIME_WITH_SYS_TIME
+ #include <sys/time.h>
+ #include <time.h>
+ #else
+ #if HAVE_SYS_TIME_H
+ #include <sys/time.h>
+ #else
+ #include <time.h>
+ #endif
+ #endif
+ #include <cerrno>
+
+ #define SIGWAKEUP SIGUSR1
+
+ #if !HAVE_PTHREAD_SIGNAL
+ // boy, is this platform broken.  forget about pthread signal
+ // handling and let signals through to every process.  deskflow
+ // will not terminate cleanly when it gets SIGTERM or SIGINT.
+@@ -636,42 +638,51 @@ void ArchMultithreadPosix::testCancelThreadImpl(ArchThreadImpl *thread)
+   bool cancel = false;
+   if (thread->m_cancel && !thread->m_cancelling) {
+     thread->m_cancelling = true;
+     thread->m_cancel = false;
+     cancel = true;
+   }
+   unlockMutex(m_threadMutex);
+
+   // unwind thread's stack if cancelling
+   if (cancel) {
+     throw XThreadCancel();
+   }
+ }
+
+ void *ArchMultithreadPosix::threadFunc(void *vrep)
+ {
+   // get the thread
+   ArchThreadImpl *thread = static_cast<ArchThreadImpl *>(vrep);
+
+   // setup pthreads
+-  pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+-  pthread_setcanceltype(PTHREAD_CANCEL_DEFERRED, NULL);
++#if HAVE_PTHREAD_CANCEL_CONTROL
++  const auto cancelControl = configurePthreadCancelControl(
++      PTHREAD_CANCEL_DISABLE, PTHREAD_CANCEL_DEFERRED, &pthread_setcancelstate, &pthread_setcanceltype
++  );
++  if (!cancelControl.ok()) {
++    LOG((
++        CLOG_WARN, "unable to configure pthread cancellation: setcancelstate=%d, setcanceltype=%d",
++        cancelControl.m_setState, cancelControl.m_setType
++    ));
++  }
++#endif
+
+   // run thread
+   s_instance->doThreadFunc(thread);
+
+   // terminate the thread
+   return NULL;
+ }
+
+ void ArchMultithreadPosix::doThreadFunc(ArchThread thread)
+ {
+   // default priority is slightly below normal
+   setPriorityOfThread(thread, 1);
+
+   // wait for parent to initialize this object
+   lockMutex(m_threadMutex);
+   unlockMutex(m_threadMutex);
+
+   void *result = nullptr;
+   try {
+     // go
+--- /dev/null
++++ b/src/lib/arch/unix/PthreadCancelControl.h
+@@ -0,0 +1,30 @@
++/*
++ * Deskflow -- mouse and keyboard sharing utility
++ * Copyright (C) 2026 Symless Ltd.
++ *
++ * This package is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * found in the file LICENSE that should have accompanied this file.
++ */
++
++#pragma once
++
++struct PthreadCancelControlResult
++{
++  int m_setState;
++  int m_setType;
++
++  bool ok() const noexcept
++  {
++    return m_setState == 0 && m_setType == 0;
++  }
++};
++
++using PthreadCancelSetter = int (*)(int, int *);
++
++inline PthreadCancelControlResult configurePthreadCancelControl(
++    int disabledState, int deferredType, PthreadCancelSetter setState, PthreadCancelSetter setType
++) noexcept
++{
++  return {setState(disabledState, nullptr), setType(deferredType, nullptr)};
++}

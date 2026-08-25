@@ -1,0 +1,3390 @@
+--- /dev/null
++++ b/src/lib/platform/OHOSScreen.cpp
+@@ -0,0 +1,2621 @@
++/*
++ * Deskflow -- mouse and keyboard sharing utility
++ * Copyright (C) 2026 Symless Ltd.
++ *
++ * This package is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * found in the file LICENSE that should have accompanied this file.
++ */
++
++#include "platform/OHOSScreen.h"
++
++#include "base/EventQueue.h"
++#include "base/Log.h"
++#include "base/TMethodEventJob.h"
++#include "deskflow/AppUtil.h"
++#include "deskflow/Clipboard.h"
++#include "deskflow/IClipboard.h"
++#include "platform/OHOSKeyState.h"
++
++#include <database/udmf/udmf.h>
++#include <database/udmf/uds.h>
++#include <window_manager/oh_display_manager.h>
++
++#include <openssl/sha.h>
++
++#include <algorithm>
++#include <chrono>
++#include <cmath>
++#include <cstdlib>
++#include <exception>
++#include <limits>
++#include <new>
++#include <stdexcept>
++#include <thread>
++#include <vector>
++
++namespace {
++
++constexpr const char *kDeskflowBitmapType = "com.symless.deskflow.bitmap";
++constexpr SInt32 kWheelDelta = 120;
++constexpr SInt32 kRecenterDistance = 32;
++constexpr std::size_t kMaxPendingInjectionTokens = 512;
++constexpr std::int64_t kInjectionTokenLifetimeMicroseconds = 2'000'000;
++constexpr int kInputCleanupAttempts = 3;
++constexpr auto kInputCleanupRetryDelay = std::chrono::milliseconds(25);
++constexpr auto kAuthorizationPollInterval = std::chrono::milliseconds(50);
++constexpr std::int64_t kAuthorizationTimeoutMicroseconds = 5'000'000;
++constexpr std::int64_t kClipboardWriteTimeoutMicroseconds = 2'000'000;
++
++static_assert(kMaxPendingInjectionTokens > 0);
++
++std::int64_t monotonicMicroseconds()
++{
++  return std::chrono::duration_cast<std::chrono::microseconds>(
++             std::chrono::steady_clock::now().time_since_epoch()
++  )
++      .count();
++}
++
++std::int64_t deadlineAfter(std::int64_t now, std::int64_t delay)
++{
++  if (now > std::numeric_limits<std::int64_t>::max() - delay) {
++    return std::numeric_limits<std::int64_t>::max();
++  }
++  return now + delay;
++}
++
++bool axisFingerprintValue(double value, std::int64_t &fingerprint)
++{
++  return deskflow::platform::checkedAxisConversion(value, 1'000'000.0L, fingerprint);
++}
++
++InputEvent_AxisAction axisActionForMouseAction(std::int32_t action)
++{
++  switch (action) {
++  case MOUSE_ACTION_AXIS_BEGIN:
++    return AXIS_ACTION_BEGIN;
++  case MOUSE_ACTION_AXIS_UPDATE:
++    return AXIS_ACTION_UPDATE;
++  case MOUSE_ACTION_AXIS_END:
++    return AXIS_ACTION_END;
++  default:
++    return AXIS_ACTION_CANCEL;
++  }
++}
++
++struct AuthorizationBroker
++{
++  std::mutex m_mutex;
++  std::condition_variable m_condition;
++  deskflow::platform::AuthorizationCoordinator m_coordinator;
++  bool m_requestIssued{false};
++};
++
++AuthorizationBroker &authorizationBroker()
++{
++  static AuthorizationBroker broker;
++  return broker;
++}
++
++bool readUdmfPayload(
++    OH_UdmfData *data, bool &hasText, String &text, bool &hasHtml, String &html,
++    bool &hasBitmap, String &bitmap
++)
++{
++  if (data == nullptr) {
++    return false;
++  }
++
++  hasText = false;
++  hasHtml = false;
++  hasBitmap = false;
++
++  OH_UdsPlainText *plainText = OH_UdsPlainText_Create();
++  if (plainText == nullptr) {
++    return false;
++  }
++  if (OH_UdmfData_GetPrimaryPlainText(data, plainText) == 0) {
++    const char *content = OH_UdsPlainText_GetContent(plainText);
++    if (content == nullptr) {
++      OH_UdsPlainText_Destroy(plainText);
++      return false;
++    }
++    hasText = true;
++    text = content;
++  }
++  OH_UdsPlainText_Destroy(plainText);
++
++  OH_UdsHtml *htmlData = OH_UdsHtml_Create();
++  if (htmlData == nullptr) {
++    return false;
++  }
++  if (OH_UdmfData_GetPrimaryHtml(data, htmlData) == 0) {
++    const char *content = OH_UdsHtml_GetContent(htmlData);
++    if (content == nullptr) {
++      OH_UdsHtml_Destroy(htmlData);
++      return false;
++    }
++    hasHtml = true;
++    html = content;
++  }
++  OH_UdsHtml_Destroy(htmlData);
++
++  const int recordCount = OH_UdmfData_GetRecordCount(data);
++  if (recordCount < 0) {
++    return false;
++  }
++  for (int i = 0; i < recordCount; ++i) {
++    OH_UdmfRecord *record = OH_UdmfData_GetRecord(data, static_cast<unsigned int>(i));
++    OH_UdsArrayBuffer *buffer = OH_UdsArrayBuffer_Create();
++    if (buffer == nullptr) {
++      return false;
++    }
++    if (record != nullptr && OH_UdmfRecord_GetArrayBuffer(record, kDeskflowBitmapType, buffer) == 0) {
++      unsigned char *bytes = nullptr;
++      unsigned int length = 0;
++      if (OH_UdsArrayBuffer_GetData(buffer, &bytes, &length) != 0 ||
++          (bytes == nullptr && length != 0)) {
++        OH_UdsArrayBuffer_Destroy(buffer);
++        return false;
++      }
++      hasBitmap = true;
++      bitmap.assign(reinterpret_cast<const char *>(bytes), length);
++      OH_UdsArrayBuffer_Destroy(buffer);
++      break;
++    }
++    OH_UdsArrayBuffer_Destroy(buffer);
++  }
++  return true;
++}
++
++IClipboard::Time clipboardTime()
++{
++  const auto now = std::chrono::steady_clock::now().time_since_epoch();
++  return static_cast<IClipboard::Time>(
++      std::chrono::duration_cast<std::chrono::milliseconds>(now).count()
++  );
++}
++
++void finalizePasteboardContext(void *)
++{
++  // The observer borrows OHOSScreen; destruction must not release the context.
++}
++
++ButtonID mapMouseButtonFromOHOS(int32_t button)
++{
++  switch (button) {
++  case MOUSE_BUTTON_LEFT:
++    return kButtonLeft;
++  case MOUSE_BUTTON_MIDDLE:
++    return kButtonMiddle;
++  case MOUSE_BUTTON_RIGHT:
++    return kButtonRight;
++  case MOUSE_BUTTON_FORWARD:
++    return kButtonExtra0;
++  case MOUSE_BUTTON_BACK:
++    return kButtonExtra1;
++  default:
++    return kButtonNone;
++  }
++}
++
++int32_t mapMouseButtonToOHOS(ButtonID button)
++{
++  switch (button) {
++  case kButtonLeft:
++    return MOUSE_BUTTON_LEFT;
++  case kButtonMiddle:
++    return MOUSE_BUTTON_MIDDLE;
++  case kButtonRight:
++    return MOUSE_BUTTON_RIGHT;
++  case kButtonExtra0:
++    return MOUSE_BUTTON_FORWARD;
++  case kButtonExtra1:
++    return MOUSE_BUTTON_BACK;
++  default:
++    return MOUSE_BUTTON_NONE;
++  }
++}
++
++std::vector<int32_t> hotkeyModifiers(KeyModifierMask mask)
++{
++  std::vector<int32_t> modifiers;
++  if ((mask & KeyModifierShift) != 0) {
++    modifiers.push_back(KEYCODE_SHIFT_LEFT);
++  }
++  if ((mask & KeyModifierControl) != 0) {
++    modifiers.push_back(KEYCODE_CTRL_LEFT);
++  }
++  if ((mask & KeyModifierAlt) != 0) {
++    modifiers.push_back(KEYCODE_ALT_LEFT);
++  }
++  if ((mask & KeyModifierSuper) != 0) {
++    modifiers.push_back(KEYCODE_META_LEFT);
++  }
++  return modifiers;
++}
++
++} // namespace
++
++std::mutex OHOSScreen::s_instanceMutex;
++OHOSScreen *OHOSScreen::s_instance = nullptr;
++Input_InterceptorEventCallback OHOSScreen::s_interceptorCallbacks{};
++bool OHOSScreen::s_constructionInProgress = false;
++bool OHOSScreen::s_restartBlocked = false;
++
++const OHOSScreen::OHOSNativeDependencies &OHOSScreen::systemDependencies()
++{
++  static const OHOSNativeDependencies dependencies{
++      OH_Input_QueryAuthorizedStatus,
++      OH_Input_RequestInjection,
++      OH_Pasteboard_HasData,
++      OH_Pasteboard_GetData,
++      OH_Pasteboard_SetData,
++      OH_Pasteboard_ClearData,
++      OH_Pasteboard_GetChangeCount,
++      OH_Input_RemoveHotkeyMonitor,
++      OH_Input_DestroyHotkey,
++      monotonicMicroseconds,
++  };
++  return dependencies;
++}
++
++OHOSScreen::OHOSScreen(
++    bool isPrimary, IEventQueue *events, bool enableLangSync, deskflow::ClientScrollDirection scrollDirection
++)
++    : OHOSScreen(isPrimary, events, enableLangSync, scrollDirection, systemDependencies())
++{
++}
++
++OHOSScreen::OHOSScreen(
++    bool isPrimary, IEventQueue *events, bool enableLangSync,
++    deskflow::ClientScrollDirection scrollDirection, const OHOSNativeDependencies &native
++)
++    : PlatformScreen(events, scrollDirection),
++      m_isPrimary(isPrimary),
++      m_events(events),
++      m_keyState(nullptr),
++      m_native(native),
++      m_isOnScreen(isPrimary)
++{
++  {
++    std::lock_guard<std::mutex> lock(s_instanceMutex);
++    if (s_instance != nullptr || s_constructionInProgress) {
++      throw std::runtime_error("only one OpenHarmony screen can be active in a process");
++    }
++    if (s_restartBlocked) {
++      throw std::runtime_error(
++          "cannot create another OpenHarmony screen after incomplete native callback cleanup"
++      );
++    }
++    s_interceptorCallbacks.mouseCallback = mouseEventCallback;
++    s_interceptorCallbacks.touchCallback = nullptr;
++    s_interceptorCallbacks.axisCallback = axisEventCallback;
++    s_constructionInProgress = true;
++  }
++
++  try {
++    m_keyState = new OHOSKeyState(
++        events, m_keyMap, AppUtil::instance().getKeyboardLayoutList(), enableLangSync, this
++    );
++
++    m_pasteboard = OH_Pasteboard_Create();
++    m_localPasteboardObserver = OH_PasteboardObserver_Create();
++    m_remotePasteboardObserver = OH_PasteboardObserver_Create();
++    if (m_pasteboard == nullptr || m_localPasteboardObserver == nullptr ||
++        m_remotePasteboardObserver == nullptr) {
++      throw std::runtime_error("failed to create OpenHarmony pasteboard objects");
++    }
++    const int localObserverResult = OH_PasteboardObserver_SetData(
++        m_localPasteboardObserver, this, pasteboardCallback, finalizePasteboardContext
++    );
++    if (localObserverResult != 0) {
++      throw std::runtime_error(
++          "failed to configure local OpenHarmony pasteboard observer, result=" +
++          std::to_string(localObserverResult)
++      );
++    }
++    const int remoteObserverResult = OH_PasteboardObserver_SetData(
++        m_remotePasteboardObserver, this, pasteboardCallback, finalizePasteboardContext
++    );
++    if (remoteObserverResult != 0) {
++      throw std::runtime_error(
++          "failed to configure remote OpenHarmony pasteboard observer, result=" +
++          std::to_string(remoteObserverResult)
++      );
++    }
++
++    if (!refreshShape(false)) {
++      throw std::runtime_error("failed to query OpenHarmony display layout");
++    }
++    getCursorPos(m_cursorX, m_cursorY);
++
++    m_nativeEventType = m_events->registerTypeOnce(m_nativeEventType, "OHOSScreen::nativeEvent");
++    m_events->adoptHandler(
++        m_nativeEventType, getEventTarget(),
++        new TMethodEventJob<OHOSScreen>(this, &OHOSScreen::handleNativeEvent)
++    );
++    m_nativeEventHandlerRegistered = true;
++    m_events->adoptHandler(
++        Event::kSystem, m_events->getSystemTarget(),
++        new TMethodEventJob<OHOSScreen>(this, &OHOSScreen::handleSystemEvent)
++    );
++    m_systemEventHandlerRegistered = true;
++
++    std::lock_guard<std::mutex> lock(s_instanceMutex);
++    s_instance = this;
++    s_constructionInProgress = false;
++  } catch (...) {
++    if (m_systemEventHandlerRegistered) {
++      m_events->removeHandler(Event::kSystem, m_events->getSystemTarget());
++      m_systemEventHandlerRegistered = false;
++    }
++    if (m_nativeEventHandlerRegistered) {
++      m_events->removeHandler(m_nativeEventType, getEventTarget());
++      m_nativeEventHandlerRegistered = false;
++    }
++    if (m_remotePasteboardObserver != nullptr) {
++      OH_PasteboardObserver_Destroy(m_remotePasteboardObserver);
++      m_remotePasteboardObserver = nullptr;
++    }
++    if (m_localPasteboardObserver != nullptr) {
++      OH_PasteboardObserver_Destroy(m_localPasteboardObserver);
++      m_localPasteboardObserver = nullptr;
++    }
++    if (m_pasteboard != nullptr) {
++      OH_Pasteboard_Destroy(m_pasteboard);
++      m_pasteboard = nullptr;
++    }
++    delete m_keyState;
++    m_keyState = nullptr;
++    std::lock_guard<std::mutex> lock(s_instanceMutex);
++    s_constructionInProgress = false;
++    throw;
++  }
++}
++
++OHOSScreen::~OHOSScreen()
++{
++  disable();
++
++  bool restartBlocked = false;
++  {
++    std::lock_guard<std::mutex> lock(s_instanceMutex);
++    if (m_cleanupFailed) {
++      s_restartBlocked = true;
++      restartBlocked = true;
++    }
++    if (s_instance == this) {
++      s_instance = nullptr;
++    }
++  }
++  if (restartBlocked) {
++    LOG((CLOG_CRIT "blocking OpenHarmony screen restart after incomplete native cleanup"));
++  }
++  {
++    std::unique_lock<std::mutex> lock(m_callbackMutex);
++    m_callbackCondition.wait(lock, [this] { return m_callbackCount.load() == 0; });
++  }
++  drainHotkeyCleanup();
++
++  if (m_systemEventHandlerRegistered) {
++    m_events->removeHandler(Event::kSystem, m_events->getSystemTarget());
++    m_systemEventHandlerRegistered = false;
++  }
++  if (m_nativeEventHandlerRegistered) {
++    m_events->removeHandler(m_nativeEventType, getEventTarget());
++    m_nativeEventHandlerRegistered = false;
++  }
++  if (!m_hotkeys.empty()) {
++    LOG((CLOG_CRIT "retaining OpenHarmony hotkey objects after monitor removal failure"));
++  }
++  if (m_localPasteboardSubscribed || m_remotePasteboardSubscribed) {
++    LOG((CLOG_CRIT "retaining OpenHarmony pasteboard objects after unsubscribe failure"));
++  } else {
++    if (m_remotePasteboardObserver != nullptr) {
++      const int result = OH_PasteboardObserver_Destroy(m_remotePasteboardObserver);
++      if (result != 0) {
++        LOG((CLOG_WARN "failed to destroy remote OpenHarmony pasteboard observer, result=%d", result));
++      }
++      m_remotePasteboardObserver = nullptr;
++    }
++    if (m_localPasteboardObserver != nullptr) {
++      const int result = OH_PasteboardObserver_Destroy(m_localPasteboardObserver);
++      if (result != 0) {
++        LOG((CLOG_WARN "failed to destroy local OpenHarmony pasteboard observer, result=%d", result));
++      }
++      m_localPasteboardObserver = nullptr;
++    }
++    if (m_pasteboard != nullptr) {
++      OH_Pasteboard_Destroy(m_pasteboard);
++      m_pasteboard = nullptr;
++    }
++  }
++  delete m_keyState;
++}
++
++OHOSScreen *OHOSScreen::acquireInstance()
++{
++  std::lock_guard<std::mutex> lock(s_instanceMutex);
++  if (s_instance != nullptr) {
++    ++s_instance->m_callbackCount;
++  }
++  return s_instance;
++}
++
++void OHOSScreen::releaseInstance(OHOSScreen *instance)
++{
++  if (instance != nullptr) {
++    std::lock_guard<std::mutex> lock(instance->m_callbackMutex);
++    if (--instance->m_callbackCount == 0) {
++      instance->m_callbackCondition.notify_all();
++    }
++  }
++}
++
++bool OHOSScreen::snapshotNativeEventGeneration(std::uint64_t &generation) const noexcept
++{
++  generation = m_nativeEventGeneration.load(std::memory_order_acquire);
++  return m_acceptNativeEvents.load(std::memory_order_acquire);
++}
++
++void OHOSScreen::enqueueNativeEvent(NativeEventData *data) noexcept
++{
++  if (data == nullptr) {
++    return;
++  }
++  if (!m_acceptNativeEvents.load(std::memory_order_acquire) ||
++      data->m_generation != m_nativeEventGeneration.load(std::memory_order_acquire) ||
++      !m_nativeEventHandlerRegistered || m_nativeEventType == Event::kUnknown) {
++    delete data;
++    return;
++  }
++
++  try {
++    m_events->addEvent(Event(m_nativeEventType, getEventTarget(), data));
++  } catch (...) {
++    delete data;
++    LOG((CLOG_ERR "failed to queue OpenHarmony native event"));
++  }
++}
++
++void OHOSScreen::queueHotkeyCleanup(UInt32 id, std::uint64_t epoch) noexcept
++{
++  if (!m_nativeEventHandlerRegistered || m_nativeEventType == Event::kUnknown) {
++    m_hotkeyCleanupPending.store(true, std::memory_order_release);
++    return;
++  }
++  auto *data = new (std::nothrow) NativeEventData;
++  if (data == nullptr) {
++    m_hotkeyCleanupPending.store(true, std::memory_order_release);
++    return;
++  }
++  data->m_kind = NativeEventKind::kHotkeyCleanup;
++  data->m_generation = m_nativeEventGeneration.load(std::memory_order_acquire);
++  data->m_id = id;
++  data->m_epoch = epoch;
++  try {
++    m_events->addEvent(Event(m_nativeEventType, getEventTarget(), data));
++  } catch (...) {
++    delete data;
++    m_hotkeyCleanupPending.store(true, std::memory_order_release);
++  }
++}
++
++void OHOSScreen::handleNativeEvent(const Event &event, void *)
++{
++  if (m_hotkeyCleanupPending.exchange(false, std::memory_order_acq_rel)) {
++    drainHotkeyCleanup();
++  }
++  auto *data = static_cast<NativeEventData *>(event.getDataObject());
++  if (data == nullptr) {
++    return;
++  }
++  if (data->m_kind == NativeEventKind::kHotkeyCleanup) {
++    cleanupHotkey(static_cast<UInt32>(data->m_id), data->m_epoch);
++    return;
++  }
++  if (!m_acceptNativeEvents.load(std::memory_order_acquire) ||
++      data->m_generation != m_nativeEventGeneration.load(std::memory_order_acquire)) {
++    return;
++  }
++
++  switch (data->m_kind) {
++  case NativeEventKind::kKey:
++    if (!data->m_injectedEcho) {
++      onKeyEvent(data->m_code, data->m_action);
++    }
++    break;
++  case NativeEventKind::kMouse:
++    if (data->m_injectedEcho) {
++      if (data->m_action == MOUSE_ACTION_MOVE) {
++        std::lock_guard<std::mutex> lock(m_stateMutex);
++        if (m_warpPending && data->m_x == m_cursorX && data->m_y == m_cursorY) {
++          m_warpPending = false;
++          m_warpPendingExpiresAt = 0;
++        }
++      }
++    } else {
++      onMouseEvent(data->m_action, data->m_code, data->m_x, data->m_y);
++    }
++    break;
++  case NativeEventKind::kAxis:
++    if (!data->m_injectedEcho) {
++      onAxisEvent(
++          static_cast<InputEvent_AxisAction>(data->m_action), data->m_horizontal, data->m_vertical
++      );
++    }
++    break;
++  case NativeEventKind::kHotkey:
++    onHotkey(static_cast<UInt32>(data->m_id), data->m_epoch);
++    break;
++  case NativeEventKind::kHotkeyCleanup:
++    break;
++  case NativeEventKind::kPasteboard:
++    onClipboardChanged(static_cast<Pasteboard_NotifyType>(data->m_code));
++    break;
++  case NativeEventKind::kDisplay:
++    onDisplayChanged(data->m_id);
++    break;
++  }
++}
++
++bool OHOSScreen::injectionEchoTrackingActive(InjectionTokenClass tokenClass) const
++{
++  static_cast<void>(tokenClass);
++  // InputKit monitoring does not expose a trusted injected-source marker. An
++  // actionTime and payload match can therefore collide with physical input.
++  // Keep correlation fail-open until the platform provides source identity.
++  return false;
++}
++
++bool OHOSScreen::inputRoleAllowsInjection(
++    InjectionTokenClass tokenClass, bool recenterWarp
++) const
++{
++  const auto role = m_isPrimary ? deskflow::platform::NativeInputRole::kCaptureServer
++                                : deskflow::platform::NativeInputRole::kInjectClient;
++  return deskflow::platform::NativeInputRolePolicy::allowsInjection(
++      role, tokenClass, recenterWarp
++  );
++}
++
++std::int64_t OHOSScreen::beginInjectionToken(InjectionFingerprint fingerprint) const
++{
++  const bool trackEcho = injectionEchoTrackingActive(fingerprint.m_class);
++  const std::int64_t now = m_native.m_monotonicMicroseconds();
++  fingerprint.m_epoch = m_nativeEventGeneration.load(std::memory_order_acquire);
++  std::lock_guard<std::mutex> lock(m_injectionTokenMutex);
++  std::int64_t actionTime = 0;
++  try {
++    actionTime = m_injectionEchoTracker.begin(now, fingerprint, trackEcho);
++  } catch (const std::bad_alloc &) {
++    actionTime = 0;
++  }
++  if (actionTime == 0 && !m_injectionTokenOverflowLogged) {
++    LOG((CLOG_ERR "OpenHarmony injected-input token allocation or sequence failed; refusing injection"));
++    m_injectionTokenOverflowLogged = true;
++  } else if (actionTime != 0 && m_injectionEchoTracker.pending() < kMaxPendingInjectionTokens / 2) {
++    m_injectionTokenOverflowLogged = false;
++  }
++  return actionTime;
++}
++
++void OHOSScreen::finishInjectionToken(std::int64_t actionTime, bool success) const
++{
++  std::lock_guard<std::mutex> lock(m_injectionTokenMutex);
++  m_injectionEchoTracker.finish(actionTime, success);
++  if (m_injectionEchoTracker.pending() < kMaxPendingInjectionTokens / 2) {
++    m_injectionTokenOverflowLogged = false;
++  }
++}
++
++bool OHOSScreen::consumeInjectionToken(const InjectionFingerprint &fingerprint) const
++{
++  const std::int64_t now = m_native.m_monotonicMicroseconds();
++  std::lock_guard<std::mutex> lock(m_injectionTokenMutex);
++  const bool consumed = m_injectionEchoTracker.consume(now, fingerprint);
++  if (m_injectionEchoTracker.pending() < kMaxPendingInjectionTokens / 2) {
++    m_injectionTokenOverflowLogged = false;
++  }
++  return consumed;
++}
++
++void OHOSScreen::keyEventCallback(const Input_KeyEvent *event)
++{
++  if (event == nullptr) {
++    return;
++  }
++  auto *instance = acquireInstance();
++  std::uint64_t generation = 0;
++  if (instance != nullptr && instance->snapshotNativeEventGeneration(generation)) {
++    const std::int32_t action = OH_Input_GetKeyEventAction(event);
++    const std::int32_t code = OH_Input_GetKeyEventKeyCode(event);
++    const std::int64_t actionTime = OH_Input_GetKeyEventActionTime(event);
++    InjectionFingerprint fingerprint;
++    fingerprint.m_epoch = generation;
++    fingerprint.m_class = InjectionTokenClass::kKey;
++    fingerprint.m_actionTime = actionTime;
++    fingerprint.m_action = action;
++    fingerprint.m_code = code;
++    const bool injectedEcho = instance->consumeInjectionToken(fingerprint);
++    auto *data = new (std::nothrow) NativeEventData;
++    if (data != nullptr) {
++      data->m_kind = NativeEventKind::kKey;
++      data->m_generation = generation;
++      data->m_action = action;
++      data->m_code = code;
++      data->m_actionTime = actionTime;
++      data->m_injectedEcho = injectedEcho;
++      instance->enqueueNativeEvent(data);
++    }
++  }
++  releaseInstance(instance);
++}
++
++void OHOSScreen::mouseEventCallback(const Input_MouseEvent *event)
++{
++  if (event == nullptr) {
++    return;
++  }
++  auto *instance = acquireInstance();
++  std::uint64_t generation = 0;
++  if (instance != nullptr && instance->snapshotNativeEventGeneration(generation)) {
++    const std::int32_t action = OH_Input_GetMouseEventAction(event);
++    const std::int32_t code = OH_Input_GetMouseEventButton(event);
++    const std::int32_t x = OH_Input_GetMouseEventGlobalX(event);
++    const std::int32_t y = OH_Input_GetMouseEventGlobalY(event);
++    const std::int64_t actionTime = OH_Input_GetMouseEventActionTime(event);
++    InjectionFingerprint fingerprint;
++    fingerprint.m_epoch = generation;
++    fingerprint.m_class = InjectionTokenClass::kMouse;
++    fingerprint.m_actionTime = actionTime;
++    fingerprint.m_action = action;
++    fingerprint.m_code = code;
++    fingerprint.m_x = x;
++    fingerprint.m_y = y;
++    const bool injectedEcho = instance->consumeInjectionToken(fingerprint);
++    auto *data = new (std::nothrow) NativeEventData;
++    if (data != nullptr) {
++      data->m_kind = NativeEventKind::kMouse;
++      data->m_generation = generation;
++      data->m_action = action;
++      data->m_code = code;
++      data->m_x = x;
++      data->m_y = y;
++      data->m_actionTime = actionTime;
++      data->m_injectedEcho = injectedEcho;
++      instance->enqueueNativeEvent(data);
++    }
++  }
++  releaseInstance(instance);
++}
++
++void OHOSScreen::axisEventCallback(const Input_AxisEvent *event)
++{
++  if (event == nullptr) {
++    return;
++  }
++  auto *instance = acquireInstance();
++  std::uint64_t generation = 0;
++  if (instance != nullptr && instance->snapshotNativeEventGeneration(generation)) {
++    InputEvent_AxisAction action = AXIS_ACTION_CANCEL;
++    std::int64_t actionTime = 0;
++    if (OH_Input_GetAxisEventAction(event, &action) == INPUT_SUCCESS &&
++        OH_Input_GetAxisEventActionTime(event, &actionTime) == INPUT_SUCCESS) {
++      double horizontal = 0.0;
++      double vertical = 0.0;
++      const Input_Result horizontalResult = OH_Input_GetAxisEventAxisValue(
++          event, AXIS_TYPE_SCROLL_HORIZONTAL, &horizontal
++      );
++      const Input_Result verticalResult =
++          OH_Input_GetAxisEventAxisValue(event, AXIS_TYPE_SCROLL_VERTICAL, &vertical);
++      std::int64_t horizontalFingerprint = 0;
++      std::int64_t verticalFingerprint = 0;
++      if (horizontalResult == INPUT_SUCCESS && verticalResult == INPUT_SUCCESS &&
++          axisFingerprintValue(horizontal, horizontalFingerprint) &&
++          axisFingerprintValue(vertical, verticalFingerprint)) {
++        InjectionFingerprint fingerprint;
++        fingerprint.m_epoch = generation;
++        fingerprint.m_class = InjectionTokenClass::kAxis;
++        fingerprint.m_actionTime = actionTime;
++        fingerprint.m_action = static_cast<std::int32_t>(action);
++        fingerprint.m_horizontal = horizontalFingerprint;
++        fingerprint.m_vertical = verticalFingerprint;
++        const bool injectedEcho = instance->consumeInjectionToken(fingerprint);
++        auto *data = new (std::nothrow) NativeEventData;
++        if (data != nullptr) {
++          data->m_kind = NativeEventKind::kAxis;
++          data->m_generation = generation;
++          data->m_action = static_cast<std::int32_t>(action);
++          data->m_actionTime = actionTime;
++          data->m_injectedEcho = injectedEcho;
++          data->m_horizontal = horizontal;
++          data->m_vertical = vertical;
++          instance->enqueueNativeEvent(data);
++        }
++      }
++    }
++  }
++  releaseInstance(instance);
++}
++
++void OHOSScreen::hotkeyCallback(Input_Hotkey *hotkey)
++{
++  auto *instance = acquireInstance();
++  std::uint64_t generation = 0;
++  if (instance != nullptr && instance->snapshotNativeEventGeneration(generation)) {
++    std::int32_t *preKeys = nullptr;
++    std::int32_t preKeyCount = 0;
++    std::int32_t finalKey = 0;
++    if (OH_Input_GetPreKeys(hotkey, &preKeys, &preKeyCount) == INPUT_SUCCESS &&
++        OH_Input_GetFinalKey(hotkey, &finalKey) == INPUT_SUCCESS && preKeys != nullptr &&
++        preKeyCount > 0 && preKeyCount <= 2) {
++      std::array<std::int32_t, 2> normalizedPreKeys{};
++      std::copy_n(preKeys, preKeyCount, normalizedPreKeys.begin());
++      std::sort(normalizedPreKeys.begin(), normalizedPreKeys.begin() + preKeyCount);
++      deskflow::platform::HotKeyTicket ticket;
++      bool callbackStarted = false;
++      {
++        std::lock_guard<std::mutex> lock(instance->m_stateMutex);
++        for (const auto &[id, registration] : instance->m_hotkeys) {
++          if (registration.m_hotkey == hotkey && registration.m_finalKey == finalKey &&
++              registration.m_preKeyCount == preKeyCount &&
++              std::equal(
++                  registration.m_preKeys.begin(),
++                  registration.m_preKeys.begin() + preKeyCount,
++                  normalizedPreKeys.begin()
++              )) {
++            ticket = deskflow::platform::HotKeyTicket{id, registration.m_epoch};
++            callbackStarted = instance->m_hotkeyRegistry.beginCallback(ticket);
++            break;
++          }
++        }
++      }
++      if (callbackStarted) {
++        auto *data = new (std::nothrow) NativeEventData;
++        if (data != nullptr) {
++          data->m_kind = NativeEventKind::kHotkey;
++          data->m_generation = generation;
++          data->m_code = finalKey;
++          data->m_hotkeyPreKeyCount = preKeyCount;
++          data->m_id = ticket.m_id;
++          data->m_epoch = ticket.m_epoch;
++          std::copy_n(
++              normalizedPreKeys.begin(), preKeyCount, data->m_hotkeyPreKeys.begin()
++          );
++          instance->enqueueNativeEvent(data);
++        }
++        bool cleanupReady = false;
++        {
++          std::lock_guard<std::mutex> lock(instance->m_stateMutex);
++          cleanupReady = instance->m_hotkeyRegistry.endCallback(ticket);
++        }
++        if (cleanupReady) {
++          instance->queueHotkeyCleanup(ticket.m_id, ticket.m_epoch);
++        }
++      }
++    }
++  }
++  releaseInstance(instance);
++}
++
++void OHOSScreen::injectionAuthorizationCallback(Input_InjectionStatus status)
++{
++  auto &broker = authorizationBroker();
++  {
++    std::lock_guard<std::mutex> lock(broker.m_mutex);
++    broker.m_coordinator.hint(static_cast<int>(status));
++  }
++  broker.m_condition.notify_all();
++}
++
++void OHOSScreen::displayChangeCallback(uint64_t displayId)
++{
++  auto *instance = acquireInstance();
++  std::uint64_t generation = 0;
++  if (instance != nullptr && instance->snapshotNativeEventGeneration(generation)) {
++    auto *data = new (std::nothrow) NativeEventData;
++    if (data != nullptr) {
++      data->m_kind = NativeEventKind::kDisplay;
++      data->m_generation = generation;
++      data->m_id = displayId;
++      instance->enqueueNativeEvent(data);
++    }
++  }
++  releaseInstance(instance);
++}
++
++void OHOSScreen::pasteboardCallback(void *context, Pasteboard_NotifyType type)
++{
++  auto *instance = acquireInstance();
++  std::uint64_t generation = 0;
++  if (instance != nullptr && instance == context &&
++      instance->snapshotNativeEventGeneration(generation)) {
++    if (type == NOTIFY_LOCAL_DATA_CHANGE) {
++      {
++        std::lock_guard<std::mutex> lock(instance->m_clipboardCallbackMutex);
++        const std::uint64_t clipboardGeneration = instance->m_activeClipboardGeneration;
++        if (clipboardGeneration != 0) {
++          if (instance->m_observedClipboardGeneration != clipboardGeneration) {
++            instance->m_observedClipboardGeneration = clipboardGeneration;
++            instance->m_observedClipboardCallbackCount = 0;
++          }
++          if (instance->m_observedClipboardCallbackCount !=
++              std::numeric_limits<std::uint32_t>::max()) {
++            ++instance->m_observedClipboardCallbackCount;
++          }
++        }
++      }
++      instance->m_clipboardCondition.notify_all();
++    }
++    auto *data = new (std::nothrow) NativeEventData;
++    if (data != nullptr) {
++      data->m_kind = NativeEventKind::kPasteboard;
++      data->m_generation = generation;
++      data->m_code = static_cast<std::int32_t>(type);
++      instance->enqueueNativeEvent(data);
++    }
++  }
++  releaseInstance(instance);
++}
++
++bool OHOSScreen::refreshShape(bool notify)
++{
++  uint64_t defaultDisplayId = 0;
++  if (OH_NativeDisplayManager_GetDefaultDisplayId(&defaultDisplayId) != DISPLAY_MANAGER_OK) {
++    LOG((CLOG_ERR "failed to obtain OpenHarmony default display ID"));
++    return false;
++  }
++
++  NativeDisplayManager_DisplaysInfo *displays = nullptr;
++  const auto createResult = OH_NativeDisplayManager_CreateAllDisplays(&displays);
++  deskflow::platform::NativeResourceOwner<
++      NativeDisplayManager_DisplaysInfo,
++      decltype(&OH_NativeDisplayManager_DestroyAllDisplays)>
++      displaysOwner(displays, &OH_NativeDisplayManager_DestroyAllDisplays);
++  if (createResult != DISPLAY_MANAGER_OK || displaysOwner.get() == nullptr) {
++    LOG((CLOG_ERR "failed to enumerate OpenHarmony displays"));
++    return false;
++  }
++
++  int64_t left = std::numeric_limits<int64_t>::max();
++  int64_t top = std::numeric_limits<int64_t>::max();
++  int64_t right = std::numeric_limits<int64_t>::min();
++  int64_t bottom = std::numeric_limits<int64_t>::min();
++  bool found = false;
++  bool foundDefault = false;
++  int32_t defaultX = 0;
++  int32_t defaultY = 0;
++  int32_t defaultWidth = 0;
++  int32_t defaultHeight = 0;
++  for (uint32_t i = 0; i < displays->displaysLength; ++i) {
++    const auto &display = displays->displaysInfo[i];
++    if (!display.isAlive || display.width <= 0 || display.height <= 0) {
++      continue;
++    }
++    int32_t x = 0;
++    int32_t y = 0;
++    if (OH_NativeDisplayManager_GetDisplayPosition(display.id, &x, &y) != DISPLAY_MANAGER_OK) {
++      LOG((CLOG_ERR "failed to obtain position for OpenHarmony display %u", display.id));
++      return false;
++    }
++    left = std::min(left, static_cast<int64_t>(x));
++    top = std::min(top, static_cast<int64_t>(y));
++    right = std::max(right, static_cast<int64_t>(x) + display.width);
++    bottom = std::max(bottom, static_cast<int64_t>(y) + display.height);
++    found = true;
++    if (display.id == defaultDisplayId) {
++      defaultX = x;
++      defaultY = y;
++      defaultWidth = display.width;
++      defaultHeight = display.height;
++      foundDefault = true;
++    }
++  }
++  const int64_t defaultRight = static_cast<int64_t>(defaultX) + defaultWidth;
++  const int64_t defaultBottom = static_cast<int64_t>(defaultY) + defaultHeight;
++  if (!found || !foundDefault || right <= left || bottom <= top ||
++      right - left > std::numeric_limits<SInt32>::max() ||
++      bottom - top > std::numeric_limits<SInt32>::max() ||
++      defaultRight > std::numeric_limits<SInt32>::max() ||
++      defaultBottom > std::numeric_limits<SInt32>::max()) {
++    LOG((CLOG_ERR "OpenHarmony returned an invalid display layout"));
++    return false;
++  }
++
++  bool changed = false;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    const SInt32 newX = static_cast<SInt32>(left);
++    const SInt32 newY = static_cast<SInt32>(top);
++    const SInt32 newWidth = static_cast<SInt32>(right - left);
++    const SInt32 newHeight = static_cast<SInt32>(bottom - top);
++    changed = newX != m_x || newY != m_y || newWidth != m_width || newHeight != m_height ||
++              defaultDisplayId != m_defaultDisplayId || defaultX != m_defaultDisplayX ||
++              defaultY != m_defaultDisplayY || defaultWidth != m_defaultDisplayWidth ||
++              defaultHeight != m_defaultDisplayHeight;
++    m_x = newX;
++    m_y = newY;
++    m_width = newWidth;
++    m_height = newHeight;
++    m_defaultDisplayId = defaultDisplayId;
++    m_defaultDisplayX = defaultX;
++    m_defaultDisplayY = defaultY;
++    m_defaultDisplayWidth = defaultWidth;
++    m_defaultDisplayHeight = defaultHeight;
++  }
++
++  if (notify && changed) {
++    sendEvent(m_events->forIScreen().shapeChanged());
++  }
++  return true;
++}
++
++bool OHOSScreen::requestInjectionAuthorization()
++{
++  if (m_injectionAuthorizationReady.load(std::memory_order_acquire)) {
++    return true;
++  }
++
++  auto &broker = authorizationBroker();
++  std::uint64_t epoch = 0;
++  {
++    std::lock_guard<std::mutex> lock(broker.m_mutex);
++    epoch = m_authorizationEpoch.load(std::memory_order_acquire);
++    if (epoch == 0 || !broker.m_coordinator.waiting(epoch)) {
++      epoch = broker.m_coordinator.begin();
++      broker.m_requestIssued = false;
++      m_authorizationEpoch.store(epoch, std::memory_order_release);
++    }
++  }
++
++  const std::int64_t deadline = deadlineAfter(
++      m_native.m_monotonicMicroseconds(), kAuthorizationTimeoutMicroseconds
++  );
++  for (;;) {
++    if (m_authorizationEpoch.load(std::memory_order_acquire) != epoch) {
++      return false;
++    }
++
++    Input_InjectionStatus status = UNAUTHORIZED;
++    const Input_Result queryResult = m_native.m_queryAuthorization(&status);
++    if (queryResult != INPUT_SUCCESS) {
++      std::lock_guard<std::mutex> lock(broker.m_mutex);
++      broker.m_coordinator.fail(epoch);
++      LOG((CLOG_ERR "failed to query OpenHarmony input injection authorization, result=%d", queryResult));
++      return false;
++    }
++    if (status == AUTHORIZED) {
++      bool published = false;
++      {
++        std::lock_guard<std::mutex> lock(broker.m_mutex);
++        published = broker.m_coordinator.publishReady(epoch);
++      }
++      if (!published) {
++        return false;
++      }
++      m_injectionAuthorizationReady.store(true, std::memory_order_release);
++      return true;
++    }
++    if (status != UNAUTHORIZED && status != AUTHORIZING) {
++      std::lock_guard<std::mutex> lock(broker.m_mutex);
++      broker.m_coordinator.fail(epoch);
++      LOG((CLOG_ERR "unsupported OpenHarmony injection authorization status=%d", status));
++      return false;
++    }
++
++    bool issueRequest = false;
++    {
++      std::lock_guard<std::mutex> lock(broker.m_mutex);
++      if (!broker.m_coordinator.waiting(epoch)) {
++        return false;
++      }
++      if (status == AUTHORIZING) {
++        broker.m_requestIssued = true;
++      } else if (!broker.m_requestIssued) {
++        broker.m_requestIssued = true;
++        issueRequest = true;
++      }
++    }
++    if (issueRequest) {
++      const Input_Result requestResult = m_native.m_requestAuthorization(
++          injectionAuthorizationCallback
++      );
++      if (requestResult != INPUT_SUCCESS && requestResult != INPUT_INJECTION_AUTHORIZING &&
++          requestResult != INPUT_INJECTION_AUTHORIZED) {
++        std::lock_guard<std::mutex> lock(broker.m_mutex);
++        broker.m_coordinator.fail(epoch);
++        LOG((CLOG_ERR "failed to request OpenHarmony input injection authorization, result=%d", requestResult));
++        return false;
++      }
++    }
++
++    const std::int64_t now = m_native.m_monotonicMicroseconds();
++    if (now >= deadline) {
++      std::lock_guard<std::mutex> lock(broker.m_mutex);
++      broker.m_coordinator.fail(epoch);
++      LOG((CLOG_ERR "timed out waiting for OpenHarmony input injection authorization"));
++      return false;
++    }
++    std::unique_lock<std::mutex> lock(broker.m_mutex);
++    const std::uint64_t sequence = broker.m_coordinator.sequence();
++    broker.m_condition.wait_for(lock, kAuthorizationPollInterval, [&broker, sequence, epoch] {
++      return !broker.m_coordinator.waiting(epoch) ||
++             broker.m_coordinator.sequence() != sequence;
++    });
++  }
++}
++
++bool OHOSScreen::injectionAuthorized() const
++{
++  return m_injectionAuthorizationReady.load(std::memory_order_acquire);
++}
++
++bool OHOSScreen::removeInputRegistrations()
++{
++  bool success = true;
++  bool registered = false;
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    registered = m_axisMonitorRegistered;
++  }
++  if (registered) {
++    const Input_Result result = OH_Input_RemoveAxisEventMonitor(AXIS_EVENT_TYPE_SCROLL, axisEventCallback);
++    if (result == INPUT_SUCCESS) {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_axisMonitorRegistered = false;
++    } else {
++      LOG((CLOG_ERR "failed to remove OpenHarmony scroll monitor, result=%d", result));
++      success = false;
++    }
++  }
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    registered = m_mouseMonitorRegistered;
++  }
++  if (registered) {
++    const Input_Result result = OH_Input_RemoveMouseEventMonitor(mouseEventCallback);
++    if (result == INPUT_SUCCESS) {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_mouseMonitorRegistered = false;
++    } else {
++      LOG((CLOG_ERR "failed to remove OpenHarmony mouse monitor, result=%d", result));
++      success = false;
++    }
++  }
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    registered = m_keyMonitorRegistered;
++  }
++  if (registered) {
++    const Input_Result result = OH_Input_RemoveKeyEventMonitor(keyEventCallback);
++    if (result == INPUT_SUCCESS) {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_keyMonitorRegistered = false;
++    } else {
++      LOG((CLOG_ERR "failed to remove OpenHarmony key monitor, result=%d", result));
++      success = false;
++    }
++  }
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    registered = m_pointerInterceptorRegistered;
++  }
++  if (registered) {
++    const Input_Result result = OH_Input_RemoveInputEventInterceptor();
++    if (result == INPUT_SUCCESS) {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_pointerInterceptorRegistered = false;
++    } else {
++      LOG((CLOG_ERR "failed to remove OpenHarmony pointer interceptor, result=%d", result));
++      success = false;
++    }
++  }
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    registered = m_keyInterceptorRegistered;
++  }
++  if (registered) {
++    const Input_Result result = OH_Input_RemoveKeyEventInterceptor();
++    if (result == INPUT_SUCCESS) {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_keyInterceptorRegistered = false;
++    } else {
++      LOG((CLOG_ERR "failed to remove OpenHarmony key interceptor, result=%d", result));
++      success = false;
++    }
++  }
++
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    if (!m_axisMonitorRegistered && !m_mouseMonitorRegistered && !m_keyMonitorRegistered &&
++        !m_pointerInterceptorRegistered && !m_keyInterceptorRegistered) {
++      m_inputMode = InputMode::kNone;
++    }
++  }
++  return success;
++}
++
++bool OHOSScreen::removeInputRegistrationsWithRetry()
++{
++  for (int attempt = 0; attempt < kInputCleanupAttempts; ++attempt) {
++    if (removeInputRegistrations()) {
++      return true;
++    }
++    if (attempt + 1 < kInputCleanupAttempts) {
++      std::this_thread::sleep_for(kInputCleanupRetryDelay);
++    }
++  }
++
++  bool interceptorRegistered = false;
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    interceptorRegistered = m_keyInterceptorRegistered || m_pointerInterceptorRegistered;
++  }
++  if (interceptorRegistered) {
++    LOG((CLOG_CRIT "OpenHarmony input interceptor cleanup failed; terminating to restore local input"));
++    std::terminate();
++  }
++  return false;
++}
++
++void OHOSScreen::finishInputModeOperation()
++{
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    m_inputModeOperationActive = false;
++  }
++  m_inputModeCondition.notify_all();
++}
++
++bool OHOSScreen::setInputMode(InputMode mode)
++{
++  {
++    std::unique_lock<std::mutex> lock(m_inputModeMutex);
++    m_inputModeCondition.wait(lock, [this] { return !m_inputModeOperationActive; });
++    const bool monitorsReady = m_keyMonitorRegistered && m_mouseMonitorRegistered &&
++                               m_axisMonitorRegistered && !m_keyInterceptorRegistered &&
++                               !m_pointerInterceptorRegistered;
++    const bool interceptorsReady = m_keyInterceptorRegistered && m_pointerInterceptorRegistered &&
++                                   !m_keyMonitorRegistered && !m_mouseMonitorRegistered &&
++                                   !m_axisMonitorRegistered;
++    const bool registrationsEmpty = !m_keyMonitorRegistered && !m_mouseMonitorRegistered &&
++                                    !m_axisMonitorRegistered && !m_keyInterceptorRegistered &&
++                                    !m_pointerInterceptorRegistered;
++    if ((mode == InputMode::kMonitor && m_inputMode == mode && monitorsReady) ||
++        (mode == InputMode::kIntercept && m_inputMode == mode && interceptorsReady) ||
++        (mode == InputMode::kNone && registrationsEmpty)) {
++      return true;
++    }
++    m_inputModeOperationActive = true;
++  }
++  struct OperationGuard
++  {
++    OHOSScreen *m_screen;
++    ~OperationGuard() { m_screen->finishInputModeOperation(); }
++  } operationGuard{this};
++
++  if (!removeInputRegistrationsWithRetry()) {
++    return false;
++  }
++  if (mode == InputMode::kNone) {
++    return true;
++  }
++
++  if (mode == InputMode::kMonitor) {
++    Input_Result result = OH_Input_AddKeyEventMonitor(keyEventCallback);
++    if (result != INPUT_SUCCESS) {
++      LOG((CLOG_ERR "failed to add OpenHarmony key monitor, result=%d", result));
++      return false;
++    }
++    {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_keyMonitorRegistered = true;
++    }
++    result = OH_Input_AddMouseEventMonitor(mouseEventCallback);
++    if (result != INPUT_SUCCESS) {
++      LOG((CLOG_ERR "failed to add OpenHarmony mouse monitor, result=%d", result));
++      removeInputRegistrationsWithRetry();
++      return false;
++    }
++    {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_mouseMonitorRegistered = true;
++    }
++    result = OH_Input_AddAxisEventMonitor(AXIS_EVENT_TYPE_SCROLL, axisEventCallback);
++    if (result != INPUT_SUCCESS) {
++      LOG((CLOG_ERR "failed to add OpenHarmony scroll monitor, result=%d", result));
++      removeInputRegistrationsWithRetry();
++      return false;
++    }
++    {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_axisMonitorRegistered = true;
++    }
++  } else {
++    Input_Result result = OH_Input_AddKeyEventInterceptor(keyEventCallback, nullptr);
++    if (result != INPUT_SUCCESS) {
++      LOG((CLOG_ERR "failed to add OpenHarmony key interceptor, result=%d", result));
++      return false;
++    }
++    {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_keyInterceptorRegistered = true;
++    }
++    result = OH_Input_AddInputEventInterceptor(&s_interceptorCallbacks, nullptr);
++    if (result != INPUT_SUCCESS) {
++      LOG((CLOG_ERR "failed to add OpenHarmony pointer interceptor, result=%d", result));
++      removeInputRegistrationsWithRetry();
++      return false;
++    }
++    {
++      std::lock_guard<std::mutex> lock(m_inputModeMutex);
++      m_pointerInterceptorRegistered = true;
++    }
++  }
++
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    m_inputMode = mode;
++  }
++  return true;
++}
++
++bool OHOSScreen::removeInputMode()
++{
++  return setInputMode(InputMode::kNone);
++}
++
++bool OHOSScreen::nativeCleanupIncomplete() const
++{
++  bool incomplete = m_displayListenerRegistered;
++  {
++    std::lock_guard<std::mutex> lock(m_inputModeMutex);
++    incomplete = incomplete || m_inputMode != InputMode::kNone || m_keyMonitorRegistered ||
++                 m_mouseMonitorRegistered || m_axisMonitorRegistered ||
++                 m_keyInterceptorRegistered || m_pointerInterceptorRegistered;
++  }
++  {
++    std::lock_guard<std::mutex> lock(m_clipboardWriteMutex);
++    incomplete = incomplete || m_localPasteboardSubscribed || m_remotePasteboardSubscribed;
++  }
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    incomplete = incomplete || !m_hotkeys.empty();
++  }
++  return incomplete;
++}
++
++void OHOSScreen::enable()
++{
++  if (m_enabled) {
++    return;
++  }
++
++  if (m_cleanupFailed) {
++    disable();
++    if (m_cleanupFailed) {
++      throw std::runtime_error(
++          "cannot enable OpenHarmony screen while native callback cleanup is incomplete"
++      );
++    }
++  }
++
++  m_acceptNativeEvents.store(false, std::memory_order_release);
++  m_nativeEventGeneration.fetch_add(1, std::memory_order_acq_rel);
++
++  updateKeyMap();
++  updateKeyState();
++
++  if (!refreshShape(false)) {
++    throw std::runtime_error("failed to refresh OpenHarmony display layout");
++  }
++
++  if (!m_displayListenerRegistered) {
++    const NativeDisplayManager_ErrorCode displayResult =
++        OH_NativeDisplayManager_RegisterDisplayChangeListener(
++            displayChangeCallback, &m_displayListenerIndex
++        );
++    if (displayResult != DISPLAY_MANAGER_OK) {
++      disable();
++      throw std::runtime_error(
++          "failed to register OpenHarmony display listener, result=" + std::to_string(displayResult)
++      );
++    }
++    m_displayListenerRegistered = true;
++  }
++
++  if (!m_localPasteboardSubscribed) {
++    const int pasteboardResult = OH_Pasteboard_Subscribe(
++        m_pasteboard, NOTIFY_LOCAL_DATA_CHANGE, m_localPasteboardObserver
++    );
++    if (pasteboardResult != 0) {
++      disable();
++      throw std::runtime_error(
++          "failed to subscribe to local OpenHarmony pasteboard changes, result=" +
++          std::to_string(pasteboardResult)
++      );
++    }
++    m_localPasteboardSubscribed = true;
++  }
++  if (!m_remotePasteboardSubscribed) {
++    const int pasteboardResult = OH_Pasteboard_Subscribe(
++        m_pasteboard, NOTIFY_REMOTE_DATA_CHANGE, m_remotePasteboardObserver
++    );
++    if (pasteboardResult != 0) {
++      disable();
++      throw std::runtime_error(
++          "failed to subscribe to remote OpenHarmony pasteboard changes, result=" +
++          std::to_string(pasteboardResult)
++      );
++    }
++    m_remotePasteboardSubscribed = true;
++  }
++  const ClipboardSnapshot clipboardSnapshot = readClipboardSnapshot();
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_clipboardWriteTracker.reset(clipboardSnapshot);
++  }
++
++  if (!m_isPrimary && !requestInjectionAuthorization()) {
++    disable();
++    throw std::runtime_error("OpenHarmony input injection authorization was not granted");
++  }
++
++  if (m_isPrimary && !setInputMode(InputMode::kMonitor)) {
++    disable();
++    throw std::runtime_error(
++        "OpenHarmony global input monitoring is unavailable; check INPUT_MONITORING permission"
++    );
++  }
++
++  m_enabled = true;
++  m_acceptNativeEvents.store(true, std::memory_order_release);
++}
++
++void OHOSScreen::disable()
++{
++  m_acceptNativeEvents.store(false, std::memory_order_release);
++  m_nativeEventGeneration.fetch_add(1, std::memory_order_acq_rel);
++  m_enabled = false;
++  m_injectionAuthorizationReady.store(false, std::memory_order_release);
++  const std::uint64_t authorizationEpoch = m_authorizationEpoch.exchange(
++      0, std::memory_order_acq_rel
++  );
++  if (authorizationEpoch != 0) {
++    auto &broker = authorizationBroker();
++    {
++      std::lock_guard<std::mutex> lock(broker.m_mutex);
++      broker.m_coordinator.disable(authorizationEpoch);
++    }
++    broker.m_condition.notify_all();
++  }
++  removeInputMode();
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_warpPending = false;
++    m_warpPendingExpiresAt = 0;
++    m_buttons.fill(false);
++  }
++
++  std::vector<UInt32> hotkeyIds;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    hotkeyIds.reserve(m_hotkeys.size());
++    for (const auto &entry : m_hotkeys) {
++      hotkeyIds.push_back(entry.first);
++    }
++  }
++  for (const UInt32 hotkeyId : hotkeyIds) {
++    unregisterHotKey(hotkeyId);
++  }
++  drainHotkeyCleanup();
++
++  beginClipboardOperation();
++  struct ClipboardOperationGuard
++  {
++    OHOSScreen *m_screen;
++    ~ClipboardOperationGuard() { m_screen->finishClipboardOperation(); }
++  } clipboardOperationGuard{this};
++  bool localSubscribed = false;
++  bool remoteSubscribed = false;
++  {
++    std::lock_guard<std::mutex> lock(m_clipboardWriteMutex);
++    localSubscribed = m_localPasteboardSubscribed;
++    remoteSubscribed = m_remotePasteboardSubscribed;
++  }
++  if (localSubscribed) {
++      const int result = OH_Pasteboard_Unsubscribe(
++          m_pasteboard, NOTIFY_LOCAL_DATA_CHANGE, m_localPasteboardObserver
++      );
++      if (result == 0) {
++        std::lock_guard<std::mutex> lock(m_clipboardWriteMutex);
++        m_localPasteboardSubscribed = false;
++      } else {
++        LOG((CLOG_WARN "failed to unsubscribe from local OpenHarmony pasteboard changes, result=%d", result));
++      }
++  }
++  if (remoteSubscribed) {
++      const int result = OH_Pasteboard_Unsubscribe(
++          m_pasteboard, NOTIFY_REMOTE_DATA_CHANGE, m_remotePasteboardObserver
++      );
++      if (result == 0) {
++        std::lock_guard<std::mutex> lock(m_clipboardWriteMutex);
++        m_remotePasteboardSubscribed = false;
++      } else {
++        LOG((CLOG_WARN "failed to unsubscribe from remote OpenHarmony pasteboard changes, result=%d", result));
++      }
++  }
++  clearPendingClipboardWrite();
++
++  if (m_displayListenerRegistered) {
++    const auto result = OH_NativeDisplayManager_UnregisterDisplayChangeListener(m_displayListenerIndex);
++    if (result == DISPLAY_MANAGER_OK) {
++      m_displayListenerRegistered = false;
++    } else {
++      LOG((CLOG_WARN "failed to unregister OpenHarmony display listener, result=%d", result));
++    }
++  }
++
++  const Input_Result pointerResult = OH_Input_SetPointerVisible(true);
++  if (pointerResult != INPUT_SUCCESS) {
++    LOG((CLOG_WARN "failed to show OpenHarmony pointer while disabling, result=%d", pointerResult));
++  }
++
++  m_cleanupFailed = nativeCleanupIncomplete();
++  if (m_cleanupFailed) {
++    LOG((CLOG_ERR "OpenHarmony native cleanup is incomplete; re-enable will retry and fail closed"));
++  }
++}
++
++void OHOSScreen::enter()
++{
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_isOnScreen = true;
++  }
++  const Input_Result result = OH_Input_SetPointerVisible(true);
++  if (result != INPUT_SUCCESS) {
++    LOG((CLOG_WARN "failed to show OpenHarmony pointer, result=%d", result));
++  }
++  if (m_isPrimary && m_enabled && !setInputMode(InputMode::kMonitor)) {
++    LOG((CLOG_CRIT "failed to restore OpenHarmony input monitors while entering screen"));
++    sendEvent(m_events->forIScreen().error());
++  }
++}
++
++bool OHOSScreen::canLeave()
++{
++  if (!m_isPrimary) {
++    return true;
++  }
++  if (!injectionAuthorized() && !requestInjectionAuthorization()) {
++    return false;
++  }
++  if (!setInputMode(InputMode::kIntercept)) {
++    if (!setInputMode(InputMode::kMonitor)) {
++      sendEvent(m_events->forIScreen().error());
++    }
++    return false;
++  }
++  return true;
++}
++
++void OHOSScreen::leave()
++{
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_isOnScreen = false;
++  }
++  const Input_Result result = OH_Input_SetPointerVisible(false);
++  if (result != INPUT_SUCCESS) {
++    LOG((CLOG_WARN "failed to hide OpenHarmony pointer, result=%d", result));
++  }
++  SInt32 centerX = 0;
++  SInt32 centerY = 0;
++  getCursorCenter(centerX, centerY);
++  warpCursor(centerX, centerY);
++}
++
++void *OHOSScreen::getEventTarget() const
++{
++  return const_cast<OHOSScreen *>(this);
++}
++
++void OHOSScreen::getShape(SInt32 &x, SInt32 &y, SInt32 &width, SInt32 &height) const
++{
++  std::lock_guard<std::mutex> lock(m_stateMutex);
++  x = m_x;
++  y = m_y;
++  width = m_width;
++  height = m_height;
++}
++
++void OHOSScreen::getCursorPos(SInt32 &x, SInt32 &y) const
++{
++  int32_t displayId = 0;
++  double displayX = 0.0;
++  double displayY = 0.0;
++  const Input_Result result = OH_Input_GetPointerLocation(&displayId, &displayX, &displayY);
++  if (result == INPUT_SUCCESS) {
++    int32_t originX = 0;
++    int32_t originY = 0;
++    if (OH_NativeDisplayManager_GetDisplayPosition(displayId, &originX, &originY) == DISPLAY_MANAGER_OK) {
++      std::int32_t globalX = 0;
++      std::int32_t globalY = 0;
++      if (deskflow::platform::checkedPointerCoordinate(originX, displayX, globalX) &&
++          deskflow::platform::checkedPointerCoordinate(originY, displayY, globalY)) {
++        x = static_cast<SInt32>(globalX);
++        y = static_cast<SInt32>(globalY);
++        std::lock_guard<std::mutex> lock(m_stateMutex);
++        m_cursorX = x;
++        m_cursorY = y;
++        return;
++      }
++      LOG((
++          CLOG_WARN "ignoring out-of-range OpenHarmony pointer position, display=%d x=%g y=%g origin=%d,%d",
++          displayId, displayX, displayY, originX, originY
++      ));
++    }
++  }
++
++  std::lock_guard<std::mutex> lock(m_stateMutex);
++  x = m_cursorX;
++  y = m_cursorY;
++  LOG((CLOG_DEBUG1 "using cached OpenHarmony pointer position, query result=%d", result));
++}
++
++void OHOSScreen::reconfigure(UInt32)
++{
++  if (!refreshShape(true)) {
++    sendEvent(m_events->forIScreen().error());
++  }
++}
++
++bool OHOSScreen::injectMouseEvent(Input_MouseEvent *event, bool global, bool recenterWarp) const
++{
++  if (event == nullptr || !injectionAuthorized()) {
++    return false;
++  }
++  const std::int32_t action = OH_Input_GetMouseEventAction(event);
++  const InjectionTokenClass tokenClass =
++      action == MOUSE_ACTION_AXIS_BEGIN || action == MOUSE_ACTION_AXIS_UPDATE || action == MOUSE_ACTION_AXIS_END
++          ? InjectionTokenClass::kAxis
++          : InjectionTokenClass::kMouse;
++  if (!inputRoleAllowsInjection(tokenClass, recenterWarp)) {
++    return false;
++  }
++  InjectionFingerprint fingerprint;
++  fingerprint.m_class = tokenClass;
++  if (tokenClass == InjectionTokenClass::kAxis) {
++    fingerprint.m_action = static_cast<std::int32_t>(axisActionForMouseAction(action));
++    const std::int32_t axisType = OH_Input_GetMouseEventAxisType(event);
++    const double axisValue = OH_Input_GetMouseEventAxisValue(event);
++    if (axisType == MOUSE_AXIS_SCROLL_HORIZONTAL) {
++      if (!axisFingerprintValue(axisValue, fingerprint.m_horizontal)) {
++        return false;
++      }
++    } else if (axisType == MOUSE_AXIS_SCROLL_VERTICAL) {
++      if (!axisFingerprintValue(axisValue, fingerprint.m_vertical)) {
++        return false;
++      }
++    }
++  } else {
++    fingerprint.m_action = action;
++    fingerprint.m_code = OH_Input_GetMouseEventButton(event);
++    fingerprint.m_x = OH_Input_GetMouseEventGlobalX(event);
++    fingerprint.m_y = OH_Input_GetMouseEventGlobalY(event);
++  }
++  const std::int64_t actionTime = beginInjectionToken(fingerprint);
++  if (actionTime == 0) {
++    return false;
++  }
++  OH_Input_SetMouseEventActionTime(event, actionTime);
++  const int32_t result = global ? OH_Input_InjectMouseEventGlobal(event) : OH_Input_InjectMouseEvent(event);
++  finishInjectionToken(actionTime, result == INPUT_SUCCESS);
++  if (result != INPUT_SUCCESS) {
++    LOG((CLOG_ERR "failed to inject OpenHarmony mouse event, result=%d", result));
++    return false;
++  }
++  return true;
++}
++
++bool OHOSScreen::injectAbsoluteMouse(SInt32 x, SInt32 y, bool recenterWarp) const
++{
++  Input_MouseEvent *event = OH_Input_CreateMouseEvent();
++  if (event == nullptr) {
++    LOG((CLOG_ERR "failed to allocate OpenHarmony mouse event"));
++    return false;
++  }
++  OH_Input_SetMouseEventAction(event, MOUSE_ACTION_MOVE);
++  OH_Input_SetMouseEventGlobalX(event, x);
++  OH_Input_SetMouseEventGlobalY(event, y);
++  const bool success = injectMouseEvent(event, true, recenterWarp);
++  OH_Input_DestroyMouseEvent(&event);
++  if (success) {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_cursorX = x;
++    m_cursorY = y;
++  }
++  return success;
++}
++
++void OHOSScreen::warpCursor(SInt32 x, SInt32 y)
++{
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_warpPending = true;
++    m_warpPendingExpiresAt = deadlineAfter(
++        monotonicMicroseconds(), kInjectionTokenLifetimeMicroseconds
++    );
++  }
++  if (!injectAbsoluteMouse(x, y, true)) {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_warpPending = false;
++    m_warpPendingExpiresAt = 0;
++    sendEvent(m_events->forIScreen().error());
++  }
++}
++
++void OHOSScreen::fakeMouseMove(SInt32 x, SInt32 y)
++{
++  injectAbsoluteMouse(x, y);
++}
++
++void OHOSScreen::fakeMouseRelativeMove(SInt32 dx, SInt32 dy) const
++{
++  SInt32 x = 0;
++  SInt32 y = 0;
++  getCursorPos(x, y);
++  std::int32_t targetX = 0;
++  std::int32_t targetY = 0;
++  if (!deskflow::platform::checkedPointerDelta(x, dx, targetX) ||
++      !deskflow::platform::checkedPointerDelta(y, dy, targetY)) {
++    LOG((
++        CLOG_WARN "ignoring out-of-range relative mouse move, current=%d,%d delta=%d,%d",
++        x, y, dx, dy
++    ));
++    return;
++  }
++  injectAbsoluteMouse(static_cast<SInt32>(targetX), static_cast<SInt32>(targetY));
++}
++
++void OHOSScreen::fakeMouseButton(ButtonID id, bool press)
++{
++  const int32_t button = mapMouseButtonToOHOS(id);
++  if (button == MOUSE_BUTTON_NONE) {
++    LOG((CLOG_ERR "cannot map Deskflow mouse button %u to OpenHarmony", id));
++    return;
++  }
++
++  Input_MouseEvent *event = OH_Input_CreateMouseEvent();
++  if (event == nullptr) {
++    LOG((CLOG_ERR "failed to allocate OpenHarmony mouse button event"));
++    return;
++  }
++  OH_Input_SetMouseEventButton(event, button);
++  OH_Input_SetMouseEventAction(event, press ? MOUSE_ACTION_BUTTON_DOWN : MOUSE_ACTION_BUTTON_UP);
++  injectMouseEvent(event, false);
++  OH_Input_DestroyMouseEvent(&event);
++}
++
++void OHOSScreen::fakeMouseWheel(SInt32 xDelta, SInt32 yDelta) const
++{
++  xDelta = mapClientScrollDirection(xDelta);
++  yDelta = mapClientScrollDirection(yDelta);
++
++  const auto injectAxis = [this](int32_t axis, SInt32 delta) {
++    if (delta == 0) {
++      return;
++    }
++    Input_MouseEvent *event = OH_Input_CreateMouseEvent();
++    if (event == nullptr) {
++      LOG((CLOG_ERR "failed to allocate OpenHarmony wheel event"));
++      return;
++    }
++    OH_Input_SetMouseEventAxisType(event, axis);
++    OH_Input_SetMouseEventAction(event, MOUSE_ACTION_AXIS_BEGIN);
++    bool success = injectMouseEvent(event, false);
++    OH_Input_SetMouseEventAxisValue(event, static_cast<float>(delta) / kWheelDelta);
++    OH_Input_SetMouseEventAction(event, MOUSE_ACTION_AXIS_UPDATE);
++    success = injectMouseEvent(event, false) && success;
++    OH_Input_SetMouseEventAction(event, MOUSE_ACTION_AXIS_END);
++    success = injectMouseEvent(event, false) && success;
++    OH_Input_DestroyMouseEvent(&event);
++    if (!success) {
++      LOG((CLOG_ERR "failed to inject complete OpenHarmony wheel sequence"));
++    }
++  };
++
++  injectAxis(MOUSE_AXIS_SCROLL_HORIZONTAL, xDelta);
++  injectAxis(MOUSE_AXIS_SCROLL_VERTICAL, yDelta);
++}
++
++void OHOSScreen::fakeKeyDown(KeyID id, KeyModifierMask mask, KeyButton button, const String &lang)
++{
++  if (inputRoleAllowsInjection(InjectionTokenClass::kKey, false) && injectionAuthorized()) {
++    PlatformScreen::fakeKeyDown(id, mask, button, lang);
++  }
++}
++
++bool OHOSScreen::fakeKeyRepeat(
++    KeyID id, KeyModifierMask mask, SInt32 count, KeyButton button, const String &lang
++)
++{
++  return inputRoleAllowsInjection(InjectionTokenClass::kKey, false) && injectionAuthorized() &&
++         PlatformScreen::fakeKeyRepeat(id, mask, count, button, lang);
++}
++
++bool OHOSScreen::fakeKeyUp(KeyButton button)
++{
++  return inputRoleAllowsInjection(InjectionTokenClass::kKey, false) && injectionAuthorized() &&
++         PlatformScreen::fakeKeyUp(button);
++}
++
++void OHOSScreen::fakeAllKeysUp()
++{
++  if (inputRoleAllowsInjection(InjectionTokenClass::kKey, false) && injectionAuthorized()) {
++    PlatformScreen::fakeAllKeysUp();
++  }
++}
++
++bool OHOSScreen::fakeCtrlAltDel()
++{
++  return inputRoleAllowsInjection(InjectionTokenClass::kKey, false) && injectionAuthorized() &&
++         PlatformScreen::fakeCtrlAltDel();
++}
++
++bool OHOSScreen::fakeMediaKey(KeyID id)
++{
++  return inputRoleAllowsInjection(InjectionTokenClass::kKey, false) && injectionAuthorized() &&
++         m_keyState->fakeMediaKey(id);
++}
++
++UInt32 OHOSScreen::registerHotKey(KeyID key, KeyModifierMask mask)
++{
++  constexpr KeyModifierMask supported =
++      KeyModifierShift | KeyModifierControl | KeyModifierAlt | KeyModifierSuper;
++  if ((mask & ~supported) != 0) {
++    LOG((CLOG_ERR "OpenHarmony hotkey contains unsupported modifiers, mask=0x%04x", mask));
++    return 0;
++  }
++
++  std::vector<int32_t> modifiers = hotkeyModifiers(mask);
++  if (modifiers.empty() || modifiers.size() > 2) {
++    LOG((CLOG_ERR "OpenHarmony hotkeys require one or two modifiers, mask=0x%04x", mask));
++    return 0;
++  }
++  std::sort(modifiers.begin(), modifiers.end());
++
++  int32_t finalKey = 0;
++  if (!m_keyState->mapKeyToOHOS(key, finalKey)) {
++    LOG((CLOG_ERR "cannot map Deskflow hotkey 0x%04x to OpenHarmony", key));
++    return 0;
++  }
++
++  Input_Hotkey *hotkey = OH_Input_CreateHotkey();
++  if (hotkey == nullptr) {
++    return 0;
++  }
++  OH_Input_SetPreKeys(hotkey, modifiers.data(), static_cast<int32_t>(modifiers.size()));
++  OH_Input_SetFinalKey(hotkey, finalKey);
++  OH_Input_SetRepeat(hotkey, false);
++
++  UInt32 id = 0;
++  std::uint64_t registrationEpoch = 0;
++  bool registrationInserted = false;
++  bool registrationAllocationFailed = false;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    do {
++      id = m_nextHotkeyId++;
++    } while (id == 0 || m_hotkeys.find(id) != m_hotkeys.end());
++    HotKeyRegistration registration;
++    registration.m_hotkey = hotkey;
++    registration.m_preKeyCount = static_cast<std::int32_t>(modifiers.size());
++    registration.m_finalKey = finalKey;
++    std::copy(modifiers.begin(), modifiers.end(), registration.m_preKeys.begin());
++    try {
++      registration.m_epoch = m_hotkeyRegistry.add(id);
++      registrationEpoch = registration.m_epoch;
++      registrationInserted = m_hotkeys.emplace(id, registration).second;
++    } catch (const std::bad_alloc &) {
++      registrationAllocationFailed = true;
++    }
++    if (!registrationInserted && registrationEpoch != 0) {
++      const deskflow::platform::HotKeyTicket ticket{id, registrationEpoch};
++      m_hotkeyRegistry.beginRemove(ticket);
++      m_hotkeyRegistry.removeSucceeded(ticket);
++      m_hotkeyRegistry.erase(ticket);
++    }
++  }
++  if (!registrationInserted) {
++    if (registrationAllocationFailed) {
++      LOG((CLOG_ERR "failed to allocate OpenHarmony hotkey registration"));
++    } else {
++      LOG((CLOG_ERR "OpenHarmony hotkey ID collision for %u", id));
++    }
++    m_native.m_destroyHotkey(&hotkey);
++    return 0;
++  }
++
++  const Input_Result result = OH_Input_AddHotkeyMonitor(hotkey, hotkeyCallback);
++  if (result != INPUT_SUCCESS) {
++    {
++      std::lock_guard<std::mutex> lock(m_stateMutex);
++      const auto registration = m_hotkeys.find(id);
++      if (registration != m_hotkeys.end()) {
++        const deskflow::platform::HotKeyTicket ticket{id, registration->second.m_epoch};
++        m_hotkeyRegistry.beginRemove(ticket);
++        m_hotkeyRegistry.removeSucceeded(ticket);
++        registrationEpoch = ticket.m_epoch;
++      }
++    }
++    LOG((CLOG_ERR "failed to register OpenHarmony hotkey, result=%d", result));
++    cleanupHotkey(id, registrationEpoch);
++    return 0;
++  }
++  return id;
++}
++
++void OHOSScreen::unregisterHotKey(UInt32 id)
++{
++  Input_Hotkey *hotkey = nullptr;
++  deskflow::platform::HotKeyTicket ticket;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    const auto found = m_hotkeys.find(id);
++    if (found == m_hotkeys.end()) {
++      return;
++    }
++    hotkey = found->second.m_hotkey;
++    ticket = deskflow::platform::HotKeyTicket{id, found->second.m_epoch};
++    if (!m_hotkeyRegistry.beginRemove(ticket)) {
++      return;
++    }
++  }
++  const Input_Result result = m_native.m_removeHotkey(hotkey, hotkeyCallback);
++  if (result != INPUT_SUCCESS) {
++    {
++      std::lock_guard<std::mutex> lock(m_stateMutex);
++      const auto found = m_hotkeys.find(id);
++      if (found != m_hotkeys.end() && found->second.m_hotkey == hotkey &&
++          found->second.m_epoch == ticket.m_epoch) {
++        m_hotkeyRegistry.removeFailed(ticket);
++      }
++      m_cleanupFailed = true;
++    }
++    LOG((CLOG_WARN "failed to unregister OpenHarmony hotkey %u, result=%d", id, result));
++    return;
++  }
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    const auto found = m_hotkeys.find(id);
++    if (found == m_hotkeys.end() || found->second.m_hotkey != hotkey ||
++        found->second.m_epoch != ticket.m_epoch ||
++        !m_hotkeyRegistry.removeSucceeded(ticket)) {
++      m_cleanupFailed = true;
++      return;
++    }
++  }
++  queueHotkeyCleanup(ticket.m_id, ticket.m_epoch);
++}
++
++void OHOSScreen::cleanupHotkey(UInt32 id, std::uint64_t epoch)
++{
++  Input_Hotkey *hotkey = nullptr;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    const auto found = m_hotkeys.find(id);
++    const deskflow::platform::HotKeyTicket ticket{id, epoch};
++    if (found == m_hotkeys.end() || found->second.m_epoch != epoch ||
++        !m_hotkeyRegistry.erase(ticket)) {
++      return;
++    }
++    hotkey = found->second.m_hotkey;
++    m_hotkeys.erase(found);
++  }
++  if (hotkey != nullptr) {
++    m_native.m_destroyHotkey(&hotkey);
++  }
++}
++
++void OHOSScreen::drainHotkeyCleanup()
++{
++  for (;;) {
++    deskflow::platform::HotKeyTicket ticket;
++    {
++      std::lock_guard<std::mutex> lock(m_stateMutex);
++      const auto ready = std::find_if(
++          m_hotkeys.begin(), m_hotkeys.end(), [this](const auto &entry) {
++            return m_hotkeyRegistry.canErase(
++                deskflow::platform::HotKeyTicket{entry.first, entry.second.m_epoch}
++            );
++          }
++      );
++      if (ready == m_hotkeys.end()) {
++        return;
++      }
++      ticket = deskflow::platform::HotKeyTicket{ready->first, ready->second.m_epoch};
++    }
++    cleanupHotkey(ticket.m_id, ticket.m_epoch);
++  }
++}
++
++void OHOSScreen::fakeInputBegin()
++{
++}
++
++void OHOSScreen::fakeInputEnd()
++{
++}
++
++SInt32 OHOSScreen::getJumpZoneSize() const
++{
++  return 1;
++}
++
++bool OHOSScreen::isAnyMouseButtonDown(UInt32 &buttonID) const
++{
++  std::lock_guard<std::mutex> lock(m_stateMutex);
++  for (std::size_t i = 0; i < m_buttons.size(); ++i) {
++    if (m_buttons[i]) {
++      buttonID = mapMouseButtonFromOHOS(static_cast<int32_t>(i));
++      return true;
++    }
++  }
++  buttonID = kButtonNone;
++  return false;
++}
++
++void OHOSScreen::getCursorCenter(SInt32 &x, SInt32 &y) const
++{
++  std::lock_guard<std::mutex> lock(m_stateMutex);
++  x = m_defaultDisplayX + m_defaultDisplayWidth / 2;
++  y = m_defaultDisplayY + m_defaultDisplayHeight / 2;
++}
++
++void OHOSScreen::onKeyEvent(std::int32_t keyCode, std::int32_t action)
++{
++  m_keyState->handleKeyEvent(keyCode, action, getEventTarget());
++}
++
++void OHOSScreen::onMouseEvent(std::int32_t action, std::int32_t nativeButton, SInt32 x, SInt32 y)
++{
++  if (action == MOUSE_ACTION_BUTTON_DOWN || action == MOUSE_ACTION_BUTTON_UP) {
++    const ButtonID button = mapMouseButtonFromOHOS(nativeButton);
++    if (button == kButtonNone) {
++      return;
++    }
++    if (nativeButton >= 0 && static_cast<std::size_t>(nativeButton) < m_buttons.size()) {
++      std::lock_guard<std::mutex> lock(m_stateMutex);
++      m_buttons[static_cast<std::size_t>(nativeButton)] = action == MOUSE_ACTION_BUTTON_DOWN;
++    }
++    const Event::Type type = action == MOUSE_ACTION_BUTTON_DOWN
++                                 ? m_events->forIPrimaryScreen().buttonDown()
++                                 : m_events->forIPrimaryScreen().buttonUp();
++    sendEvent(type, ButtonInfo::alloc(button, m_keyState->getActiveModifiers()));
++    return;
++  }
++
++  if (action != MOUSE_ACTION_MOVE) {
++    return;
++  }
++
++  SInt32 deltaX = 0;
++  SInt32 deltaY = 0;
++  bool onScreen = false;
++  bool discardWarp = false;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    onScreen = m_isOnScreen;
++    if (!onScreen &&
++        (!deskflow::platform::checkedPointerDifference(x, m_cursorX, deltaX) ||
++         !deskflow::platform::checkedPointerDifference(y, m_cursorY, deltaY))) {
++      return;
++    }
++    if (m_warpPending && monotonicMicroseconds() >= m_warpPendingExpiresAt) {
++      m_warpPending = false;
++      m_warpPendingExpiresAt = 0;
++    }
++    discardWarp = m_warpPending && x == m_cursorX && y == m_cursorY;
++    if (discardWarp) {
++      m_warpPending = false;
++      m_warpPendingExpiresAt = 0;
++    }
++    m_cursorX = x;
++    m_cursorY = y;
++  }
++  if (discardWarp) {
++    return;
++  }
++
++  if (onScreen) {
++    sendEvent(m_events->forIPrimaryScreen().motionOnPrimary(), MotionInfo::alloc(x, y));
++    return;
++  }
++
++  if (deltaX != 0 || deltaY != 0) {
++    sendEvent(m_events->forIPrimaryScreen().motionOnSecondary(), MotionInfo::alloc(deltaX, deltaY));
++  }
++  SInt32 centerX = 0;
++  SInt32 centerY = 0;
++  getCursorCenter(centerX, centerY);
++  if (deskflow::platform::pointerDistanceExceeds(x, centerX, kRecenterDistance) ||
++      deskflow::platform::pointerDistanceExceeds(y, centerY, kRecenterDistance)) {
++    warpCursor(centerX, centerY);
++  }
++}
++
++void OHOSScreen::onAxisEvent(InputEvent_AxisAction action, double horizontal, double vertical)
++{
++  if (action != AXIS_ACTION_UPDATE) {
++    return;
++  }
++  SInt32 xDelta = 0;
++  SInt32 yDelta = 0;
++  if (!deskflow::platform::checkedAxisConversion(horizontal, kWheelDelta, xDelta) ||
++      !deskflow::platform::checkedAxisConversion(vertical, kWheelDelta, yDelta)) {
++    return;
++  }
++  if (xDelta != 0 || yDelta != 0) {
++    sendEvent(m_events->forIPrimaryScreen().wheel(), WheelInfo::alloc(xDelta, yDelta));
++  }
++}
++
++void OHOSScreen::onHotkey(UInt32 id, std::uint64_t epoch)
++{
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    const auto found = m_hotkeys.find(id);
++    if (found == m_hotkeys.end() || found->second.m_epoch != epoch ||
++        !m_hotkeyRegistry.registered(deskflow::platform::HotKeyTicket{id, epoch})) {
++      return;
++    }
++  }
++
++  sendEvent(m_events->forIPrimaryScreen().hotKeyDown(), HotKeyInfo::alloc(id));
++  sendEvent(m_events->forIPrimaryScreen().hotKeyUp(), HotKeyInfo::alloc(id));
++}
++
++void OHOSScreen::onDisplayChanged(uint64_t)
++{
++  if (!refreshShape(true)) {
++    sendEvent(m_events->forIScreen().error());
++  }
++}
++
++void OHOSScreen::sendEvent(Event::Type type, void *data) const
++{
++  m_events->addEvent(Event(type, getEventTarget(), data));
++}
++
++void OHOSScreen::sendClipboardEvent(ClipboardID id) const
++{
++  auto *info = static_cast<ClipboardInfo *>(std::malloc(sizeof(ClipboardInfo)));
++  if (info == nullptr) {
++    sendEvent(m_events->forIScreen().error());
++    return;
++  }
++  info->m_id = id;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    info->m_sequenceNumber = m_sequenceNumber;
++  }
++  sendEvent(m_events->forClipboard().clipboardGrabbed(), info);
++}
++
++void OHOSScreen::beginClipboardOperation()
++{
++  std::unique_lock<std::mutex> lock(m_clipboardWriteMutex);
++  m_clipboardWriteCondition.wait(lock, [this] { return !m_clipboardOperationActive; });
++  m_clipboardOperationActive = true;
++}
++
++void OHOSScreen::finishClipboardOperation()
++{
++  {
++    std::lock_guard<std::mutex> lock(m_clipboardWriteMutex);
++    m_clipboardOperationActive = false;
++  }
++  m_clipboardWriteCondition.notify_all();
++}
++
++bool OHOSScreen::clipboardFingerprint(
++    bool hasText, const String &text, bool hasHtml, const String &html,
++    bool hasBitmap, const String &bitmap, ClipboardFingerprint &fingerprint
++) const
++{
++  const std::array<const std::uint8_t *, 3> data{
++      hasText ? reinterpret_cast<const std::uint8_t *>(text.data()) : nullptr,
++      hasHtml ? reinterpret_cast<const std::uint8_t *>(html.data()) : nullptr,
++      hasBitmap ? reinterpret_cast<const std::uint8_t *>(bitmap.data()) : nullptr,
++  };
++  const std::array<std::size_t, 3> lengths{
++      hasText ? text.size() : 0,
++      hasHtml ? html.size() : 0,
++      hasBitmap ? bitmap.size() : 0,
++  };
++  const std::array<bool, 3> present{hasText, hasHtml, hasBitmap};
++  std::vector<std::uint8_t> bytes;
++  try {
++    if (!deskflow::platform::canonicalClipboardBytes(data, lengths, present, bytes)) {
++      return false;
++    }
++  } catch (const std::bad_alloc &) {
++    return false;
++  }
++  return SHA256(bytes.data(), bytes.size(), fingerprint.data()) != nullptr;
++}
++
++OHOSScreen::ClipboardSnapshot OHOSScreen::readClipboardSnapshot() const
++{
++  ClipboardSnapshot snapshot;
++  const std::uint32_t beforeCount = m_native.m_pasteboardChangeCount(m_pasteboard);
++  const bool hasData = m_native.m_pasteboardHasData(m_pasteboard);
++  int status = 0;
++  OH_UdmfData *data = m_native.m_pasteboardGetData(m_pasteboard, &status);
++  const std::uint32_t afterCount = m_native.m_pasteboardChangeCount(m_pasteboard);
++  snapshot.m_changeCount = afterCount;
++  snapshot.m_hasData = hasData;
++  snapshot.m_getDataWasNull = data == nullptr;
++
++  if (beforeCount != afterCount) {
++    if (data != nullptr) {
++      OH_UdmfData_Destroy(data);
++    }
++    return snapshot;
++  }
++  if (!hasData) {
++    if (data != nullptr) {
++      OH_UdmfData_Destroy(data);
++      return snapshot;
++    }
++    String empty;
++    snapshot.m_readable = clipboardFingerprint(
++        false, empty, false, empty, false, empty, snapshot.m_fingerprint
++    );
++    return snapshot;
++  }
++  if (status != 0 || data == nullptr) {
++    if (data != nullptr) {
++      OH_UdmfData_Destroy(data);
++    }
++    return snapshot;
++  }
++
++  bool hasText = false;
++  bool hasHtml = false;
++  bool hasBitmap = false;
++  String text;
++  String html;
++  String bitmap;
++  const bool payloadReadable = readUdmfPayload(
++      data, hasText, text, hasHtml, html, hasBitmap, bitmap
++  );
++  OH_UdmfData_Destroy(data);
++  if (!payloadReadable) {
++    return snapshot;
++  }
++  snapshot.m_readable = clipboardFingerprint(
++      hasText, text, hasHtml, html, hasBitmap, bitmap, snapshot.m_fingerprint
++  );
++  return snapshot;
++}
++
++void OHOSScreen::processClipboardChange(bool localChange)
++{
++  const ClipboardSnapshot snapshot = readClipboardSnapshot();
++  deskflow::platform::ClipboardObservation observation;
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    observation = m_clipboardWriteTracker.observe(
++        snapshot, localChange, m_native.m_monotonicMicroseconds()
++    );
++  }
++  if (observation == deskflow::platform::ClipboardObservation::kNotifyExternal) {
++    sendClipboardEvent(kClipboardClipboard);
++    sendClipboardEvent(kClipboardSelection);
++  }
++}
++
++bool OHOSScreen::waitForClipboardCallback(std::uint64_t generation, std::int64_t deadline)
++{
++  std::unique_lock<std::mutex> lock(m_clipboardCallbackMutex);
++  for (;;) {
++    if (m_observedClipboardGeneration == generation &&
++        m_observedClipboardCallbackCount != 0) {
++      return true;
++    }
++    if (m_activeClipboardGeneration != generation) {
++      return false;
++    }
++    const std::int64_t now = m_native.m_monotonicMicroseconds();
++    if (now >= deadline) {
++      return false;
++    }
++    m_clipboardCondition.wait_for(
++        lock, std::chrono::microseconds(std::min<std::int64_t>(deadline - now, 50'000))
++    );
++  }
++}
++
++void OHOSScreen::setClipboardCallbackGeneration(std::uint64_t generation)
++{
++  {
++    std::lock_guard<std::mutex> lock(m_clipboardCallbackMutex);
++    m_activeClipboardGeneration = generation;
++    m_observedClipboardGeneration = generation;
++    m_observedClipboardCallbackCount = 0;
++  }
++  m_clipboardCondition.notify_all();
++}
++
++std::uint32_t OHOSScreen::takeClipboardCallbackCount(std::uint64_t generation)
++{
++  std::lock_guard<std::mutex> lock(m_clipboardCallbackMutex);
++  if (m_observedClipboardGeneration != generation) {
++    return 0;
++  }
++  const std::uint32_t count = m_observedClipboardCallbackCount;
++  m_observedClipboardCallbackCount = 0;
++  return count;
++}
++
++void OHOSScreen::clearPendingClipboardWrite()
++{
++  {
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    m_clipboardWriteTracker.clear();
++  }
++  setClipboardCallbackGeneration(0);
++}
++
++void OHOSScreen::onClipboardChanged(Pasteboard_NotifyType type)
++{
++  processClipboardChange(type == NOTIFY_LOCAL_DATA_CHANGE);
++}
++
++bool OHOSScreen::getClipboard(ClipboardID id, IClipboard *clipboard) const
++{
++  if (id >= kClipboardEnd || clipboard == nullptr) {
++    return false;
++  }
++
++  int status = 0;
++  OH_UdmfData *data = OH_Pasteboard_GetData(m_pasteboard, &status);
++  if (status != 0 || data == nullptr) {
++    if (data != nullptr) {
++      OH_UdmfData_Destroy(data);
++    }
++    LOG((CLOG_ERR "failed to read OpenHarmony pasteboard, result=%d", status));
++    return false;
++  }
++
++  Clipboard local;
++  bool success = local.open(clipboardTime()) && local.empty();
++  if (success) {
++    OH_UdsPlainText *plainText = OH_UdsPlainText_Create();
++    if (plainText != nullptr && OH_UdmfData_GetPrimaryPlainText(data, plainText) == 0) {
++      const char *content = OH_UdsPlainText_GetContent(plainText);
++      if (content != nullptr) {
++        local.add(IClipboard::kText, content);
++      }
++    }
++    if (plainText != nullptr) {
++      OH_UdsPlainText_Destroy(plainText);
++    }
++
++    OH_UdsHtml *html = OH_UdsHtml_Create();
++    if (html != nullptr && OH_UdmfData_GetPrimaryHtml(data, html) == 0) {
++      const char *content = OH_UdsHtml_GetContent(html);
++      if (content != nullptr) {
++        local.add(IClipboard::kHTML, content);
++      }
++    }
++    if (html != nullptr) {
++      OH_UdsHtml_Destroy(html);
++    }
++
++    const int recordCount = OH_UdmfData_GetRecordCount(data);
++    for (int i = 0; i < recordCount; ++i) {
++      OH_UdmfRecord *record = OH_UdmfData_GetRecord(data, static_cast<unsigned int>(i));
++      OH_UdsArrayBuffer *buffer = OH_UdsArrayBuffer_Create();
++      if (record != nullptr && buffer != nullptr &&
++          OH_UdmfRecord_GetArrayBuffer(record, kDeskflowBitmapType, buffer) == 0) {
++        unsigned char *bytes = nullptr;
++        unsigned int length = 0;
++        if (OH_UdsArrayBuffer_GetData(buffer, &bytes, &length) == 0 && bytes != nullptr) {
++          local.add(IClipboard::kBitmap, String(reinterpret_cast<const char *>(bytes), length));
++          OH_UdsArrayBuffer_Destroy(buffer);
++          break;
++        }
++      }
++      if (buffer != nullptr) {
++        OH_UdsArrayBuffer_Destroy(buffer);
++      }
++    }
++    local.close();
++  }
++
++  OH_UdmfData_Destroy(data);
++  return success && Clipboard::copy(clipboard, &local);
++}
++
++bool OHOSScreen::setClipboard(ClipboardID id, const IClipboard *clipboard)
++{
++  if (id >= kClipboardEnd || clipboard == nullptr) {
++    return false;
++  }
++
++  if (!clipboard->open(clipboardTime())) {
++    return false;
++  }
++
++  const bool hasText = clipboard->has(IClipboard::kText);
++  const bool hasHtml = clipboard->has(IClipboard::kHTML);
++  const bool hasBitmap = clipboard->has(IClipboard::kBitmap);
++  const String text = hasText ? clipboard->get(IClipboard::kText) : String();
++  const String htmlText = hasHtml ? clipboard->get(IClipboard::kHTML) : String();
++  const String bitmap = hasBitmap ? clipboard->get(IClipboard::kBitmap) : String();
++  clipboard->close();
++
++  beginClipboardOperation();
++  struct OperationGuard
++  {
++    OHOSScreen *m_screen;
++    ~OperationGuard() { m_screen->finishClipboardOperation(); }
++  } operationGuard{this};
++
++  const ClipboardSnapshot before = readClipboardSnapshot();
++  const std::int64_t deadline = deadlineAfter(
++      m_native.m_monotonicMicroseconds(), kClipboardWriteTimeoutMicroseconds
++  );
++
++  const auto observeLocalCallbacks = [this](
++                                           std::uint64_t generation,
++                                           const ClipboardSnapshot &snapshot) {
++    bool notifyExternal = false;
++    const std::uint32_t callbackCount = takeClipboardCallbackCount(generation);
++    if (callbackCount == 0) {
++      return false;
++    }
++    std::lock_guard<std::mutex> lock(m_stateMutex);
++    for (std::uint32_t index = 0; index < callbackCount; ++index) {
++      const auto observation = m_clipboardWriteTracker.observe(
++          snapshot, true, m_native.m_monotonicMicroseconds()
++      );
++      notifyExternal = notifyExternal ||
++                       observation == deskflow::platform::ClipboardObservation::kNotifyExternal;
++    }
++    return notifyExternal;
++  };
++
++  const auto notifyClipboardExternal = [this](bool notify) {
++    if (notify) {
++      sendClipboardEvent(kClipboardClipboard);
++      sendClipboardEvent(kClipboardSelection);
++    }
++  };
++
++  if (!hasText && !hasHtml && !hasBitmap) {
++    ClipboardFingerprint intended;
++    String empty;
++    if (!clipboardFingerprint(false, empty, false, empty, false, empty, intended)) {
++      return false;
++    }
++    std::uint64_t generation = 0;
++    {
++      std::lock_guard<std::mutex> lock(m_stateMutex);
++      generation = m_clipboardWriteTracker.begin(
++          deskflow::platform::ClipboardWriteKind::kClear, before, intended, deadline
++      );
++    }
++    if (generation == 0) {
++      return false;
++    }
++    setClipboardCallbackGeneration(generation);
++    const int result = m_native.m_pasteboardClearData(m_pasteboard);
++    if (result == 0) {
++      waitForClipboardCallback(generation, deadline);
++    }
++    const ClipboardSnapshot firstEmpty = readClipboardSnapshot();
++    const bool observedExternal = observeLocalCallbacks(generation, firstEmpty);
++    std::this_thread::yield();
++    const ClipboardSnapshot secondEmpty = readClipboardSnapshot();
++    deskflow::platform::ClipboardFinish finish;
++    {
++      std::lock_guard<std::mutex> lock(m_stateMutex);
++      if (m_clipboardWriteTracker.generation() == generation) {
++        finish = m_clipboardWriteTracker.finishClear(
++            generation, result == 0, firstEmpty, secondEmpty,
++            m_native.m_monotonicMicroseconds()
++        );
++      }
++    }
++    setClipboardCallbackGeneration(0);
++    notifyClipboardExternal(observedExternal || finish.m_notifyExternal);
++    if (result != 0) {
++      LOG((CLOG_ERR "failed to clear OpenHarmony pasteboard, result=%d", result));
++    }
++    return finish.m_succeeded;
++  }
++
++  ClipboardFingerprint intended;
++  if (!clipboardFingerprint(
++          hasText, text, hasHtml, htmlText, hasBitmap, bitmap, intended
++      )) {
++    return false;
++  }
++
++  OH_UdmfData *data = OH_UdmfData_Create();
++  OH_UdmfRecord *record = OH_UdmfRecord_Create();
++  OH_UdsPlainText *plainText = nullptr;
++  OH_UdsHtml *html = nullptr;
++  OH_UdsArrayBuffer *buffer = nullptr;
++  bool valid = data != nullptr && record != nullptr;
++
++  if (valid && hasText) {
++    plainText = OH_UdsPlainText_Create();
++    valid = plainText != nullptr && OH_UdsPlainText_SetContent(plainText, text.c_str()) == 0 &&
++            OH_UdmfRecord_AddPlainText(record, plainText) == 0;
++  }
++  if (valid && hasHtml) {
++    html = OH_UdsHtml_Create();
++    valid = html != nullptr && OH_UdsHtml_SetContent(html, htmlText.c_str()) == 0;
++    if (valid && hasText) {
++      valid = OH_UdsHtml_SetPlainContent(html, text.c_str()) == 0;
++    }
++    if (valid) {
++      valid = OH_UdmfRecord_AddHtml(record, html) == 0;
++    }
++  }
++  if (valid && hasBitmap) {
++    buffer = OH_UdsArrayBuffer_Create();
++    auto *bytes = reinterpret_cast<unsigned char *>(const_cast<char *>(bitmap.data()));
++    valid = buffer != nullptr && OH_UdsArrayBuffer_SetData(buffer, bytes, bitmap.size()) == 0 &&
++            OH_UdmfRecord_AddArrayBuffer(record, kDeskflowBitmapType, buffer) == 0;
++  }
++  if (valid) {
++    valid = OH_UdmfData_AddRecord(data, record) == 0;
++  }
++
++  int result = -1;
++  deskflow::platform::ClipboardFinish finish;
++  bool observedExternal = false;
++  std::uint64_t generation = 0;
++  if (valid) {
++    {
++      std::lock_guard<std::mutex> lock(m_stateMutex);
++      generation = m_clipboardWriteTracker.begin(
++          deskflow::platform::ClipboardWriteKind::kSet, before, intended, deadline
++      );
++    }
++    if (generation != 0) {
++      setClipboardCallbackGeneration(generation);
++      result = m_native.m_pasteboardSetData(m_pasteboard, data);
++      const ClipboardSnapshot after = readClipboardSnapshot();
++      observedExternal = observeLocalCallbacks(generation, after);
++      {
++        std::lock_guard<std::mutex> lock(m_stateMutex);
++        if (m_clipboardWriteTracker.generation() == generation) {
++          finish = m_clipboardWriteTracker.finishSet(
++              generation, result == 0, after, m_native.m_monotonicMicroseconds()
++          );
++        }
++        if (m_clipboardWriteTracker.generation() != generation) {
++          setClipboardCallbackGeneration(0);
++        }
++      }
++    }
++  }
++
++  if (buffer != nullptr) {
++    OH_UdsArrayBuffer_Destroy(buffer);
++  }
++  if (html != nullptr) {
++    OH_UdsHtml_Destroy(html);
++  }
++  if (plainText != nullptr) {
++    OH_UdsPlainText_Destroy(plainText);
++  }
++  if (record != nullptr) {
++    OH_UdmfRecord_Destroy(record);
++  }
++  if (data != nullptr) {
++    OH_UdmfData_Destroy(data);
++  }
++
++  notifyClipboardExternal(observedExternal || finish.m_notifyExternal);
++  if (!valid || result != 0 || !finish.m_succeeded) {
++    LOG((CLOG_ERR "failed to publish Deskflow clipboard through OpenHarmony UDMF, result=%d", result));
++    return false;
++  }
++  return true;
++}
++
++void OHOSScreen::checkClipboards()
++{
++  processClipboardChange(false);
++}
++
++void OHOSScreen::openScreensaver(bool notify)
++{
++  m_screensaverOpen = true;
++  m_screensaverNotify = notify;
++  LOG((CLOG_WARN "OpenHarmony Native SDK has no system screensaver control or notification API"));
++}
++
++void OHOSScreen::closeScreensaver()
++{
++  m_screensaverOpen = false;
++  m_screensaverNotify = false;
++}
++
++void OHOSScreen::screensaver(bool activate)
++{
++  LOG((CLOG_WARN "cannot %s OpenHarmony screensaver: no equivalent Native SDK API",
++       activate ? "activate" : "deactivate"));
++}
++
++void OHOSScreen::resetOptions()
++{
++  setHalfDuplexMask(0);
++}
++
++void OHOSScreen::setOptions(const OptionsList &options)
++{
++  KeyModifierMask halfDuplex = 0;
++  for (std::size_t i = 0; i + 1 < options.size(); i += 2) {
++    if (options[i] == kOptionHalfDuplexCapsLock && options[i + 1] != 0) {
++      halfDuplex |= KeyModifierCapsLock;
++    } else if (options[i] == kOptionHalfDuplexNumLock && options[i + 1] != 0) {
++      halfDuplex |= KeyModifierNumLock;
++    } else if (options[i] == kOptionHalfDuplexScrollLock && options[i + 1] != 0) {
++      halfDuplex |= KeyModifierScrollLock;
++    }
++  }
++  setHalfDuplexMask(halfDuplex);
++}
++
++void OHOSScreen::setSequenceNumber(UInt32 sequenceNumber)
++{
++  std::lock_guard<std::mutex> lock(m_stateMutex);
++  m_sequenceNumber = sequenceNumber;
++}
++
++bool OHOSScreen::isPrimary() const
++{
++  return m_isPrimary;
++}
++
++String OHOSScreen::getSecureInputApp() const
++{
++  return {};
++}
++
++void OHOSScreen::clearDraggingFilename()
++{
++  m_draggingFilename.clear();
++}
++
++void OHOSScreen::handleSystemEvent(const Event &, void *)
++{
++  if (!refreshShape(true)) {
++    sendEvent(m_events->forIScreen().error());
++  }
++  checkClipboards();
++}
++
++void OHOSScreen::updateButtons()
++{
++  std::lock_guard<std::mutex> lock(m_stateMutex);
++  m_buttons.fill(false);
++}
++
++IKeyState *OHOSScreen::getKeyState() const
++{
++  return m_keyState;
++}
+--- /dev/null
++++ b/src/lib/platform/OHOSScreenState.h
+@@ -0,0 +1,763 @@
++/*
++ * Deskflow -- mouse and keyboard sharing utility
++ * Copyright (C) 2026 Symless Ltd.
++ *
++ * This package is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU General Public License
++ * found in the file LICENSE that should have accompanied this file.
++ */
++
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <cstddef>
++#include <cstdint>
++#include <cmath>
++#include <deque>
++#include <limits>
++#include <map>
++#include <vector>
++
++namespace deskflow::platform {
++
++template <typename Integer>
++inline bool checkedAxisConversion(double value, long double scale, Integer &result)
++{
++  static_assert(std::numeric_limits<Integer>::is_integer);
++  static_assert(std::numeric_limits<Integer>::is_signed);
++  if (!std::isfinite(value) || !std::isfinite(scale) || scale <= 0.0L) {
++    return false;
++  }
++  const long double scaled = static_cast<long double>(value) * scale;
++  if (!std::isfinite(scaled)) {
++    return false;
++  }
++  const long double rounded = std::round(scaled);
++  const long double exclusiveLimit =
++      std::ldexp(1.0L, std::numeric_limits<Integer>::digits);
++  if (rounded < -exclusiveLimit || rounded >= exclusiveLimit) {
++    return false;
++  }
++  result = static_cast<Integer>(rounded);
++  return true;
++}
++
++inline bool checkedPointerCoordinate(std::int32_t origin, double offset, std::int32_t &coordinate)
++{
++  if (!std::isfinite(offset)) {
++    return false;
++  }
++  const double rounded = std::round(offset);
++  const double minimumOffset = static_cast<double>(std::numeric_limits<std::int32_t>::min()) -
++                               static_cast<double>(origin);
++  const double maximumOffset = static_cast<double>(std::numeric_limits<std::int32_t>::max()) -
++                               static_cast<double>(origin);
++  if (rounded < minimumOffset || rounded > maximumOffset) {
++    return false;
++  }
++  const std::int64_t combined = static_cast<std::int64_t>(origin) +
++                                static_cast<std::int64_t>(rounded);
++  coordinate = static_cast<std::int32_t>(combined);
++  return true;
++}
++
++inline bool checkedPointerDelta(
++    std::int32_t coordinate, std::int32_t delta, std::int32_t &result
++)
++{
++  const std::int64_t combined = static_cast<std::int64_t>(coordinate) +
++                                static_cast<std::int64_t>(delta);
++  if (combined < std::numeric_limits<std::int32_t>::min() ||
++      combined > std::numeric_limits<std::int32_t>::max()) {
++    return false;
++  }
++  result = static_cast<std::int32_t>(combined);
++  return true;
++}
++
++inline bool checkedPointerDifference(
++    std::int32_t coordinate, std::int32_t previous, std::int32_t &difference
++)
++{
++  const std::int64_t wideDifference = static_cast<std::int64_t>(coordinate) -
++                                      static_cast<std::int64_t>(previous);
++  if (wideDifference < std::numeric_limits<std::int32_t>::min() ||
++      wideDifference > std::numeric_limits<std::int32_t>::max()) {
++    return false;
++  }
++  difference = static_cast<std::int32_t>(wideDifference);
++  return true;
++}
++
++inline bool pointerDistanceExceeds(
++    std::int32_t coordinate, std::int32_t center, std::int32_t threshold
++)
++{
++  const std::int64_t difference = static_cast<std::int64_t>(coordinate) -
++                                  static_cast<std::int64_t>(center);
++  const std::int64_t wideThreshold = static_cast<std::int64_t>(threshold);
++  return threshold < 0 || difference < -wideThreshold || difference > wideThreshold;
++}
++
++template <typename Resource, typename Deleter>
++class NativeResourceOwner
++{
++public:
++  NativeResourceOwner(Resource *resource, Deleter deleter)
++      : m_resource(resource), m_deleter(deleter)
++  {
++  }
++
++  ~NativeResourceOwner()
++  {
++    if (m_resource != nullptr) {
++      static_cast<void>(m_deleter(m_resource));
++    }
++  }
++
++  NativeResourceOwner(const NativeResourceOwner &) = delete;
++  NativeResourceOwner &operator=(const NativeResourceOwner &) = delete;
++
++  Resource *get() const { return m_resource; }
++
++private:
++  Resource *m_resource;
++  Deleter m_deleter;
++};
++
++enum class AuthorizationPhase
++{
++  kDisabled,
++  kWaiting,
++  kReady,
++  kFailed
++};
++
++class AuthorizationCoordinator
++{
++public:
++  std::uint64_t begin()
++  {
++    ++m_epoch;
++    if (m_epoch == 0) {
++      ++m_epoch;
++    }
++    m_phase = AuthorizationPhase::kWaiting;
++    ++m_sequence;
++    return m_epoch;
++  }
++
++  void hint(int status)
++  {
++    m_hint = status;
++    ++m_sequence;
++  }
++
++  bool publishReady(std::uint64_t epoch)
++  {
++    if (!waiting(epoch)) {
++      return false;
++    }
++    m_phase = AuthorizationPhase::kReady;
++    ++m_sequence;
++    return true;
++  }
++
++  void fail(std::uint64_t epoch)
++  {
++    if (epoch == m_epoch && m_phase == AuthorizationPhase::kWaiting) {
++      m_phase = AuthorizationPhase::kFailed;
++      ++m_sequence;
++    }
++  }
++
++  void disable(std::uint64_t epoch)
++  {
++    if (epoch == m_epoch) {
++      m_phase = AuthorizationPhase::kDisabled;
++      ++m_sequence;
++    }
++  }
++
++  bool waiting(std::uint64_t epoch) const
++  {
++    return epoch == m_epoch && m_phase == AuthorizationPhase::kWaiting;
++  }
++
++  bool ready(std::uint64_t epoch) const
++  {
++    return epoch == m_epoch && m_phase == AuthorizationPhase::kReady;
++  }
++
++  int hint() const { return m_hint; }
++  std::uint64_t sequence() const { return m_sequence; }
++
++private:
++  std::uint64_t m_epoch{};
++  std::uint64_t m_sequence{};
++  int m_hint{};
++  AuthorizationPhase m_phase{AuthorizationPhase::kDisabled};
++};
++
++enum class InjectionTokenClass : std::uint8_t
++{
++  kKey,
++  kMouse,
++  kAxis
++};
++
++enum class NativeInputRole : std::uint8_t
++{
++  kCaptureServer,
++  kInjectClient
++};
++
++class NativeInputRolePolicy
++{
++public:
++  static bool capturesRawInput(NativeInputRole role)
++  {
++    return role == NativeInputRole::kCaptureServer;
++  }
++
++  static bool allowsInjection(
++      NativeInputRole role, InjectionTokenClass tokenClass, bool recenterWarp
++  )
++  {
++    if (role == NativeInputRole::kInjectClient) {
++      return true;
++    }
++    return recenterWarp && tokenClass == InjectionTokenClass::kMouse;
++  }
++};
++
++struct InjectionFingerprint
++{
++  std::uint64_t m_epoch{};
++  InjectionTokenClass m_class{InjectionTokenClass::kKey};
++  std::int64_t m_actionTime{};
++  std::int32_t m_action{};
++  std::int32_t m_code{};
++  std::int32_t m_x{};
++  std::int32_t m_y{};
++  std::int64_t m_horizontal{};
++  std::int64_t m_vertical{};
++};
++
++inline bool operator==(const InjectionFingerprint &left, const InjectionFingerprint &right)
++{
++  return left.m_epoch == right.m_epoch && left.m_class == right.m_class &&
++         left.m_actionTime == right.m_actionTime && left.m_action == right.m_action &&
++         left.m_code == right.m_code && left.m_x == right.m_x && left.m_y == right.m_y &&
++         left.m_horizontal == right.m_horizontal && left.m_vertical == right.m_vertical;
++}
++
++class InjectionEchoTracker
++{
++public:
++  InjectionEchoTracker(std::size_t limit = 512, std::int64_t lifetime = 2'000'000)
++      : m_limit(limit), m_lifetime(lifetime)
++  {
++  }
++
++  std::int64_t begin(std::int64_t now, InjectionFingerprint fingerprint, bool track)
++  {
++    prune(now);
++    if (track && (m_limit == 0 || m_pending.size() >= m_limit)) {
++      return 0;
++    }
++    if (m_lastActionTime == std::numeric_limits<std::int64_t>::max()) {
++      if (!m_pending.empty()) {
++        return 0;
++      }
++      m_lastActionTime = std::max<std::int64_t>(now, 1);
++    } else {
++      m_lastActionTime = std::max<std::int64_t>(
++          std::max<std::int64_t>(now, 1), m_lastActionTime + 1
++      );
++    }
++    if (track) {
++      fingerprint.m_actionTime = m_lastActionTime;
++      m_pending.push_back(Token{fingerprint, deadlineAfter(now, m_lifetime)});
++    }
++    return m_lastActionTime;
++  }
++
++  void finish(std::int64_t actionTime, bool success)
++  {
++    if (success) {
++      return;
++    }
++    const auto token = std::find_if(
++        m_pending.begin(), m_pending.end(), [actionTime](const Token &candidate) {
++          return candidate.m_fingerprint.m_actionTime == actionTime;
++        }
++    );
++    if (token != m_pending.end()) {
++      m_pending.erase(token);
++    }
++  }
++
++  bool consume(std::int64_t now, const InjectionFingerprint &fingerprint)
++  {
++    if (fingerprint.m_actionTime <= 0) {
++      return false;
++    }
++    prune(now);
++    const auto token = std::find_if(
++        m_pending.begin(), m_pending.end(), [&fingerprint](const Token &candidate) {
++          return candidate.m_fingerprint == fingerprint;
++        }
++    );
++    if (token == m_pending.end()) {
++      return false;
++    }
++    m_pending.erase(token);
++    return true;
++  }
++
++  void clear() { m_pending.clear(); }
++  std::size_t pending() const { return m_pending.size(); }
++
++private:
++  struct Token
++  {
++    InjectionFingerprint m_fingerprint;
++    std::int64_t m_expiresAt{};
++  };
++
++  static std::int64_t deadlineAfter(std::int64_t now, std::int64_t delay)
++  {
++    if (delay > 0 && now > std::numeric_limits<std::int64_t>::max() - delay) {
++      return std::numeric_limits<std::int64_t>::max();
++    }
++    return now + std::max<std::int64_t>(delay, 0);
++  }
++
++  void prune(std::int64_t now)
++  {
++    m_pending.erase(
++        std::remove_if(
++            m_pending.begin(), m_pending.end(),
++            [now](const Token &token) { return token.m_expiresAt <= now; }
++        ),
++        m_pending.end()
++    );
++  }
++
++  std::size_t m_limit{};
++  std::int64_t m_lifetime{};
++  std::int64_t m_lastActionTime{};
++  std::deque<Token> m_pending;
++};
++
++using ClipboardFingerprint = std::array<std::uint8_t, 32>;
++
++struct ClipboardSnapshot
++{
++  bool m_readable{false};
++  bool m_hasData{false};
++  bool m_getDataWasNull{false};
++  ClipboardFingerprint m_fingerprint{};
++  std::uint32_t m_changeCount{};
++};
++
++enum class ClipboardWriteKind
++{
++  kSet,
++  kClear
++};
++
++enum class ClipboardWritePhase
++{
++  kIdle,
++  kCalling,
++  kReadbackConfirmed
++};
++
++enum class ClipboardObservation
++{
++  kIgnore,
++  kSuppressSelfWrite,
++  kNotifyExternal
++};
++
++struct ClipboardFinish
++{
++  bool m_succeeded{false};
++  bool m_notifyExternal{false};
++};
++
++class ClipboardWriteTracker
++{
++public:
++  void reset(const ClipboardSnapshot &snapshot)
++  {
++    m_current = snapshot;
++    m_pending = {};
++  }
++
++  std::uint64_t begin(
++      ClipboardWriteKind kind, const ClipboardSnapshot &before,
++      const ClipboardFingerprint &intended, std::int64_t deadline
++  )
++  {
++    if (!before.m_readable || (kind == ClipboardWriteKind::kClear && !before.m_hasData)) {
++      return 0;
++    }
++    ++m_generation;
++    if (m_generation == 0) {
++      ++m_generation;
++    }
++    m_current = before;
++    m_pending = {};
++    m_pending.m_generation = m_generation;
++    m_pending.m_kind = kind;
++    m_pending.m_phase = ClipboardWritePhase::kCalling;
++    m_pending.m_before = before;
++    m_pending.m_intended = intended;
++    m_pending.m_deadline = deadline;
++    return m_generation;
++  }
++
++  ClipboardObservation observe(
++      const ClipboardSnapshot &snapshot, bool localChange, std::int64_t now
++  )
++  {
++    if (m_pending.m_generation == 0) {
++      return observeWithoutPending(snapshot);
++    }
++    if (!localChange || now >= m_pending.m_deadline || !snapshot.m_readable ||
++        !matchesIntended(snapshot) || !countRelationExact(snapshot) ||
++        m_pending.m_callbackSeen) {
++      m_pending = {};
++      if (snapshot.m_readable) {
++        m_current = snapshot;
++      }
++      return ClipboardObservation::kNotifyExternal;
++    }
++
++    m_pending.m_callbackSeen = true;
++    m_pending.m_after = snapshot;
++    m_current = snapshot;
++    if (m_pending.m_phase == ClipboardWritePhase::kReadbackConfirmed &&
++        m_pending.m_kind == ClipboardWriteKind::kSet) {
++      m_pending = {};
++    }
++    return ClipboardObservation::kSuppressSelfWrite;
++  }
++
++  ClipboardFinish finishSet(
++      std::uint64_t generation, bool callSucceeded, const ClipboardSnapshot &after,
++      std::int64_t now
++  )
++  {
++    ClipboardFinish result;
++    if (!pendingMatches(generation, ClipboardWriteKind::kSet) || now >= m_pending.m_deadline) {
++      result.m_notifyExternal = true;
++      m_pending = {};
++      return result;
++    }
++    const Pending pending = m_pending;
++    if (!callSucceeded || !after.m_readable || !matchesIntended(after)) {
++      result.m_notifyExternal = !after.m_readable || changed(pending.m_before, after);
++      if (after.m_readable) {
++        m_current = after;
++      }
++      m_pending = {};
++      return result;
++    }
++
++    const bool zeroEvent = sameContent(pending.m_before, after) &&
++                           pending.m_before.m_changeCount == after.m_changeCount;
++    if (!zeroEvent && !countRelationExact(after)) {
++      result.m_notifyExternal = true;
++      m_current = after;
++      m_pending = {};
++      return result;
++    }
++    if (zeroEvent && pending.m_callbackSeen) {
++      result.m_notifyExternal = true;
++      m_current = after;
++      m_pending = {};
++      return result;
++    }
++
++    result.m_succeeded = true;
++    m_current = after;
++    if (zeroEvent || pending.m_callbackSeen) {
++      m_pending = {};
++    } else {
++      m_pending.m_phase = ClipboardWritePhase::kReadbackConfirmed;
++      m_pending.m_after = after;
++    }
++    return result;
++  }
++
++  ClipboardFinish finishClear(
++      std::uint64_t generation, bool callSucceeded, const ClipboardSnapshot &firstEmpty,
++      const ClipboardSnapshot &secondEmpty, std::int64_t now
++  )
++  {
++    ClipboardFinish result;
++    if (!pendingMatches(generation, ClipboardWriteKind::kClear) || now >= m_pending.m_deadline) {
++      result.m_notifyExternal = true;
++      m_pending = {};
++      return result;
++    }
++    const Pending pending = m_pending;
++    const bool stableEmpty = callSucceeded && pending.m_callbackSeen && emptyRead(firstEmpty) &&
++                             emptyRead(secondEmpty) &&
++                             firstEmpty.m_changeCount == secondEmpty.m_changeCount &&
++                             firstEmpty.m_fingerprint == secondEmpty.m_fingerprint &&
++                             countRelationExact(firstEmpty) && countRelationExact(secondEmpty);
++    if (!stableEmpty) {
++      result.m_notifyExternal = true;
++      if (secondEmpty.m_readable) {
++        m_current = secondEmpty;
++      }
++      m_pending = {};
++      return result;
++    }
++
++    result.m_succeeded = true;
++    m_current = secondEmpty;
++    m_pending = {};
++    return result;
++  }
++
++  void clear() { m_pending = {}; }
++  bool callbackSeen(std::uint64_t generation) const
++  {
++    return m_pending.m_generation == generation && m_pending.m_callbackSeen;
++  }
++  std::uint64_t generation() const { return m_pending.m_generation; }
++
++private:
++  struct Pending
++  {
++    std::uint64_t m_generation{};
++    ClipboardWriteKind m_kind{ClipboardWriteKind::kSet};
++    ClipboardWritePhase m_phase{ClipboardWritePhase::kIdle};
++    ClipboardSnapshot m_before;
++    ClipboardSnapshot m_after;
++    ClipboardFingerprint m_intended{};
++    std::int64_t m_deadline{};
++    bool m_callbackSeen{false};
++  };
++
++  static bool emptyRead(const ClipboardSnapshot &snapshot)
++  {
++    return snapshot.m_readable && !snapshot.m_hasData && snapshot.m_getDataWasNull;
++  }
++
++  static bool sameContent(const ClipboardSnapshot &left, const ClipboardSnapshot &right)
++  {
++    return left.m_readable && right.m_readable && left.m_hasData == right.m_hasData &&
++           left.m_fingerprint == right.m_fingerprint;
++  }
++
++  static bool changed(const ClipboardSnapshot &left, const ClipboardSnapshot &right)
++  {
++    return !sameContent(left, right) || left.m_changeCount != right.m_changeCount;
++  }
++
++  bool pendingMatches(std::uint64_t generation, ClipboardWriteKind kind) const
++  {
++    return generation != 0 && m_pending.m_generation == generation && m_pending.m_kind == kind;
++  }
++
++  bool matchesIntended(const ClipboardSnapshot &snapshot) const
++  {
++    const bool expectedData = m_pending.m_kind == ClipboardWriteKind::kSet;
++    return snapshot.m_readable && snapshot.m_hasData == expectedData &&
++           snapshot.m_fingerprint == m_pending.m_intended;
++  }
++
++  bool countRelationExact(const ClipboardSnapshot &snapshot) const
++  {
++    if (m_pending.m_kind == ClipboardWriteKind::kClear) {
++      return snapshot.m_changeCount == m_pending.m_before.m_changeCount;
++    }
++    if (snapshot.m_changeCount == 0) {
++      return false;
++    }
++    return static_cast<std::uint32_t>(
++               snapshot.m_changeCount - m_pending.m_before.m_changeCount
++           ) == 1;
++  }
++
++  ClipboardObservation observeWithoutPending(const ClipboardSnapshot &snapshot)
++  {
++    if (!snapshot.m_readable) {
++      return ClipboardObservation::kNotifyExternal;
++    }
++    if (!changed(m_current, snapshot)) {
++      return ClipboardObservation::kIgnore;
++    }
++    m_current = snapshot;
++    return ClipboardObservation::kNotifyExternal;
++  }
++
++  std::uint64_t m_generation{};
++  ClipboardSnapshot m_current;
++  Pending m_pending;
++};
++
++enum class HotKeyLifecycle
++{
++  kRegistered,
++  kRemoving,
++  kRemoved
++};
++
++struct HotKeyTicket
++{
++  std::uint32_t m_id{};
++  std::uint64_t m_epoch{};
++};
++
++class HotKeyRegistry
++{
++public:
++  std::uint64_t add(std::uint32_t id)
++  {
++    ++m_epoch;
++    if (m_epoch == 0) {
++      ++m_epoch;
++    }
++    m_entries[id] = Entry{m_epoch, HotKeyLifecycle::kRegistered, 0};
++    return m_epoch;
++  }
++
++  bool beginCallback(const HotKeyTicket &ticket)
++  {
++    auto entry = m_entries.find(ticket.m_id);
++    if (entry == m_entries.end() || entry->second.m_epoch != ticket.m_epoch ||
++        entry->second.m_lifecycle != HotKeyLifecycle::kRegistered) {
++      return false;
++    }
++    ++entry->second.m_callbacksInFlight;
++    return true;
++  }
++
++  bool endCallback(const HotKeyTicket &ticket)
++  {
++    auto entry = m_entries.find(ticket.m_id);
++    if (entry != m_entries.end() && entry->second.m_epoch == ticket.m_epoch &&
++        entry->second.m_callbacksInFlight != 0) {
++      --entry->second.m_callbacksInFlight;
++      return entry->second.m_lifecycle == HotKeyLifecycle::kRemoved &&
++             entry->second.m_callbacksInFlight == 0;
++    }
++    return false;
++  }
++
++  bool beginRemove(const HotKeyTicket &ticket)
++  {
++    auto entry = m_entries.find(ticket.m_id);
++    if (entry == m_entries.end() || entry->second.m_epoch != ticket.m_epoch ||
++        entry->second.m_lifecycle != HotKeyLifecycle::kRegistered) {
++      return false;
++    }
++    entry->second.m_lifecycle = HotKeyLifecycle::kRemoving;
++    return true;
++  }
++
++  bool removeFailed(const HotKeyTicket &ticket)
++  {
++    auto entry = m_entries.find(ticket.m_id);
++    if (entry == m_entries.end() || entry->second.m_epoch != ticket.m_epoch ||
++        entry->second.m_lifecycle != HotKeyLifecycle::kRemoving) {
++      return false;
++    }
++    entry->second.m_lifecycle = HotKeyLifecycle::kRegistered;
++    return true;
++  }
++
++  bool removeSucceeded(const HotKeyTicket &ticket)
++  {
++    auto entry = m_entries.find(ticket.m_id);
++    if (entry == m_entries.end() || entry->second.m_epoch != ticket.m_epoch ||
++        entry->second.m_lifecycle != HotKeyLifecycle::kRemoving) {
++      return false;
++    }
++    entry->second.m_lifecycle = HotKeyLifecycle::kRemoved;
++    return true;
++  }
++
++  bool canErase(const HotKeyTicket &ticket) const
++  {
++    const auto entry = m_entries.find(ticket.m_id);
++    return entry != m_entries.end() && entry->second.m_epoch == ticket.m_epoch &&
++           entry->second.m_lifecycle == HotKeyLifecycle::kRemoved &&
++           entry->second.m_callbacksInFlight == 0;
++  }
++
++  bool erase(const HotKeyTicket &ticket)
++  {
++    if (!canErase(ticket)) {
++      return false;
++    }
++    m_entries.erase(ticket.m_id);
++    return true;
++  }
++
++  bool registered(const HotKeyTicket &ticket) const
++  {
++    const auto entry = m_entries.find(ticket.m_id);
++    return entry != m_entries.end() && entry->second.m_epoch == ticket.m_epoch &&
++           entry->second.m_lifecycle == HotKeyLifecycle::kRegistered;
++  }
++
++private:
++  struct Entry
++  {
++    std::uint64_t m_epoch{};
++    HotKeyLifecycle m_lifecycle{HotKeyLifecycle::kRegistered};
++    std::size_t m_callbacksInFlight{};
++  };
++
++  std::uint64_t m_epoch{};
++  std::map<std::uint32_t, Entry> m_entries;
++};
++
++inline bool canonicalClipboardBytes(
++    const std::array<const std::uint8_t *, 3> &data,
++    const std::array<std::size_t, 3> &lengths,
++    const std::array<bool, 3> &present, std::vector<std::uint8_t> &bytes
++)
++{
++  for (std::size_t index = 0; index < present.size(); ++index) {
++    if ((!present[index] && lengths[index] != 0) ||
++        (present[index] && lengths[index] != 0 && data[index] == nullptr)) {
++      bytes.clear();
++      return false;
++    }
++  }
++
++  std::uint8_t formatBitmap = 0;
++  for (std::size_t index = 0; index < present.size(); ++index) {
++    if (present[index]) {
++      formatBitmap = static_cast<std::uint8_t>(formatBitmap | (1u << index));
++    }
++  }
++  bytes = {1, formatBitmap};
++  for (std::size_t index = 0; index < present.size(); ++index) {
++    if (!present[index]) {
++      continue;
++    }
++    bytes.push_back(static_cast<std::uint8_t>(index + 1));
++    const std::uint64_t length = lengths[index];
++    for (int shift = 56; shift >= 0; shift -= 8) {
++      bytes.push_back(static_cast<std::uint8_t>((length >> shift) & 0xffu));
++    }
++    if (lengths[index] != 0) {
++      bytes.insert(bytes.end(), data[index], data[index] + lengths[index]);
++    }
++  }
++  return true;
++}
++
++} // namespace deskflow::platform
