@@ -1092,7 +1092,8 @@ with open(conandata_path, 'r') as f:
 
 # 解析所有 URL（包括已改写为列表的）
 # 匹配: url: https://... 或 - https://...
-url_pattern = r'(?:^|\s)(?:url:?\s*)?["\']?-?\s*(https?://[^\s"\'-]+)'
+# 注意: URL 路径可含连字符（如 github 仓库名 cd-discid），字符类不能排除 '-'
+url_pattern = r'(?:^|\s)(?:url:?\s*)?["\']?-?\s*(https?://[^\s"\']+)'
 urls = re.findall(url_pattern, raw, re.MULTILINE)
 # 去重
 urls = list(dict.fromkeys(urls))
