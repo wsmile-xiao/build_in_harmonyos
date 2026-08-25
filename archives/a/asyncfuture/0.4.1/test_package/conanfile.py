@@ -22,4 +22,4 @@ class AsyncFutureTestConan(ConanFile):
         self.run("make -j1", cwd=self.source_folder)
 
     def test(self):
-        self.run("./asyncfuture_test", cwd=self.build_folder, env="conanrun")
+        self.run("./asyncfuture_test", cwd=self.source_folder, env="conanrun")
