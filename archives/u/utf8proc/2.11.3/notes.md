@@ -10,7 +10,7 @@
 | 软件 | utf8proc |
 | 版本 | 2.11.3 |
 | 状态 | ✅ success |
-| 构建系统 | Makefile (非 autotools) |
+| 构建系统 | CMake (also supports Makefile) |
 | 源码路径 | https://github.com/JuliaStrings/utf8proc/releases/download/v2.11.3/utf8proc-2.11.3.tar.gz |
 
 ## 二、编译阶段（checkbox 实时更新）
@@ -50,7 +50,7 @@
 **遗留问题**: 无
 
 ### 对话 #2 — 2026-04-25 21:24
-**操作**: 
+**操作**:
 1. 检查构建系统（发现是 Makefile，非 autotools）
 2. 执行 make -j$(nproc) prefix=$DEFAULT_PREFIX
 3. 执行 make install prefix=$DEFAULT_PREFIX DESTDIR=$TEST_PREFIX
@@ -67,7 +67,7 @@
 **遗留问题**: 测试套件无法运行，但不影响库的编译和安装
 
 ### 对话 #4 — 2026-04-25 21:25
-**操作**: 
+**操作**:
 1. 执行 ohc-run.py verify-build（通过）
 2. 执行 ohc-run.py package（成功）
 3. 执行 make install（本地安装）
@@ -91,5 +91,5 @@
 - **结束时间**: 2026-04-25 21:25
 ---
 
-**编译结束**: 2026-04-25 21:25
-**最终状态**: partial
+**编译结束**: 2026-08-26 00:25
+**最终状态**: built
