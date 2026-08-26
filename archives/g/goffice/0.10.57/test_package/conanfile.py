@@ -77,20 +77,30 @@ class GofficeTestConan(ConanFile):
         # （cmd-pkgs 前缀里也有 2.88.0 的 gobject/gio .pc，但必须用 conan 2.88.0.1
         # 的版本，保证与 goffice 本体链接的是同一份 glib。）
         cflags = "-I${includedir} -I${includedir1}"
+        prefix_glib = "${pcfiledir}/../.."
         if os.path.exists(glib_pc):
             with open(glib_pc, "r", encoding="utf-8", errors="ignore") as f:
                 m = re.search(r"^Cflags:\s*(.+)$", f.read(), re.M)
             if m:
                 cflags = m.group(1).strip()
+            with open(glib_pc, "r", encoding="utf-8", errors="ignore") as f:
+                m = re.search(r"^prefix=(.+)$", f.read(), re.M)
+            if m:
+                prefix_glib = m.group(1).strip()
+        # gmodule-no-export-2.0：gdk-pixbuf-2.0.pc 的 Requires.private 引用它，
+        # 而 PkgConfigDeps 不生成（glib 配方未声明该组件）。与本体配方一致，
+        # prefix 取 glib-2.0.pc 的真实值（指向 conan glib package），不猜路径。
         for name, libname in (("gobject-2.0", "gobject-2.0"),
-                              ("gio-2.0", "gio-2.0")):
+                              ("gio-2.0", "gio-2.0"),
+                              ("gmodule-no-export-2.0", "gmodule-2.0")):
             pf = os.path.join(self.generators_folder, name + ".pc")
             if not os.path.exists(pf):
                 text = (
-                    "prefix=${pcfiledir}/../..\n"
-                    "libdir=${prefix}/lib\n"
-                    "includedir=${prefix}/include/glib-2.0\n"
-                    "includedir1=${prefix}/lib/glib-2.0/include\n"
+                    "prefix={prefix}\n"
+                    "libdir=${{prefix}}/lib\n"
+                    "includedir=${{prefix}}/include/glib-2.0\n"
+                    "includedir1=${{prefix}}/lib/glib-2.0/include\n"
+                    "includedir2=${{prefix}}/lib/glib-2.0/include\n"
                     "\n"
                     "Name: {name}\n"
                     "Description: Conan package: {name}\n"
@@ -98,9 +108,30 @@ class GofficeTestConan(ConanFile):
                     "Libs: -L${{libdir}} -l{libname}\n"
                     "Cflags: {cflags}\n"
                     "Requires: glib-2.0\n"
-                ).format(name=name, libname=libname, cflags=cflags)
+                ).format(prefix=prefix_glib, name=name, libname=libname, cflags=cflags)
                 with open(pf, "w", encoding="utf-8") as f:
                     f.write(text)
+
+        # gio-unix-2.0：gdk-3.0.pc / gtk+-3.0.pc 的 Requires.private 引用它，
+        # 只含头文件（include/gio-unix-2.0），无独立库。prefix 从 gio-2.0.pc 读取。
+        gio_unix_pc = os.path.join(self.generators_folder, "gio-unix-2.0.pc")
+        gio_pc = os.path.join(self.generators_folder, "gio-2.0.pc")
+        if not os.path.exists(gio_unix_pc) and os.path.exists(gio_pc):
+            with open(gio_pc, "r", encoding="utf-8", errors="ignore") as f:
+                m = re.search(r"^prefix=(.+)$", f.read(), re.M)
+            gio_prefix = m.group(1).strip() if m else "${pcfiledir}/../.."
+            text = (
+                "prefix={prefix}\n"
+                "includedir=${{prefix}}/include\n"
+                "\n"
+                "Name: gio-unix-2.0\n"
+                "Description: Conan package: gio-unix-2.0\n"
+                "Version: 2.88.0.1\n"
+                "Requires: gobject-2.0 gio-2.0\n"
+                "Cflags: -I${{includedir}}/gio-unix-2.0\n"
+            ).format(prefix=gio_prefix)
+            with open(gio_unix_pc, "w", encoding="utf-8") as f:
+                f.write(text)
 
         # cairo.pc 派生：cairo-gobject 配方只声明 pkg_config_name=cairo-gobject，
         # PkgConfigDeps 只生成 cairo-gobject.pc；而 gtk+-3.0.pc / pango.pc 的
