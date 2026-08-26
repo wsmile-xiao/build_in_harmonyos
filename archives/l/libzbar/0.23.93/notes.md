@@ -76,5 +76,5 @@ libzbar.a libzbar.la libzbar.so libzbar.so.0 libzbar.so.0.3.0
 4. 禁用了 GTK/Qt/Java/Python 绑定，只编译核心 C 库
 ---
 
-**编译结束**: 2026-06-15 15:06
+**编译结束**: 2026-08-25 01:02
 **最终状态**: built
