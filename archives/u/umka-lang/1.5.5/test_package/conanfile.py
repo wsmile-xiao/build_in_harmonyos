@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Conan test_package template — Conan L1 official test.
+"""Conan test_package for umka-lang 1.5.5.
 
-This is the L1 test in the five-level test system.
-CI runs this automatically via `conan create` (which invokes test_package).
-
-File location: archives/{letter}/umka-lang/{version}/test_package/conanfile.py
+This test calls the Umka C embedding API:
+- umkaGetVersion() to verify the library is loaded
+- umkaAlloc/umkaInit/umkaCompile/umkaRun to run a simple Umka script
 """
 import os
 
@@ -12,7 +11,7 @@ from conan import ConanFile
 from conan.tools.cmake import CMake, cmake_layout
 
 
-class UmkalangTestConan(ConanFile):
+class UmkaLangTestConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     generators = "CMakeDeps", "CMakeToolchain"
 
@@ -30,5 +29,6 @@ class UmkalangTestConan(ConanFile):
     def test(self):
         cmake = CMake(self)
         cmake.test()
-        # Alternatively, run the binary directly:
-        # self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_umka-lang')}", env="conanrun")
+        # Also run the test binary directly to satisfy CI L0d self.run() check
+        test_bin = os.path.join(self.cpp.build.bindirs[0], "test_umka")
+        self.run(test_bin, env="conanrun")
