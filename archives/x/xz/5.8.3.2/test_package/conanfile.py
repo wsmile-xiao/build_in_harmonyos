@@ -18,9 +18,11 @@ class XzTestConan(ConanFile):
 
     def test(self):
         pkg = self.dependencies["xz"].package_folder
-        bindir = os.path.join(pkg, "src", "xz")
-        if not os.path.isfile(os.path.join(bindir, "xz")):
-            raise ConanException(f"xz binary missing under {bindir}")
+        # Autotools.install() places binaries in bin/
+        bindir = os.path.join(pkg, "bin")
+        xz_bin = os.path.join(bindir, "xz")
+        if not os.path.isfile(xz_bin):
+            raise ConanException(f"xz binary missing: {xz_bin}")
         test_script = os.path.join(os.path.dirname(__file__), "test_xz.py")
         if not os.path.isfile(test_script):
             raise ConanException(f"test_xz.py missing: {test_script}")
