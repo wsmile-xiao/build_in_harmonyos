@@ -30,7 +30,7 @@ print(colors('%{bright red underlined}hello'))
 
 | Version | Status | Date |
 |---------|--------|------|
-| 1.0.2 | published | 2026-06-17 |
+| 1.0.2 | built | 2026-08-25 |
 
 ## License
 

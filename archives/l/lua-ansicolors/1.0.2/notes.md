@@ -3,64 +3,47 @@
 ## 基本信息
 - 软件名称: lua-ansicolors
 - 版本: 1.0.2
-- 构建系统: lua (纯 Lua 库)
-- 编译日期: 2026-06-17
+- 构建系统: custom (纯 Lua 库)
+- 编译日期: 2026-08-25
 
 ## 源码信息
 - 下载 URL: https://github.com/kikito/ansicolors.lua/archive/v1.0.2.tar.gz
 - 压缩格式: tar.gz
 - 源码目录: ansicolors.lua-1.0.2
+- SHA256: fa76a465c2e0d342f6d5a1d44c63bd398053f206f41c7b5356b551694f899d64
 
-## 编译过程
+## Conan 适配 (2026-08-25)
 
-### Step 1: 下载源码
-- 使用 curl -k -L 下载（SSL 证书问题）
-- 源码成功下载并解压
+### 背景
+- 历史已适配 (2026-06-17, status=published) 但未进行 Conan 适配
+- 本次进行 Conan 配方适配
 
-### Step 2: 分析构建系统
-- 这是一个纯 Lua 库，只有一个 ansicolors.lua 文件
-- 无 configure/make 流程
-- 安装方法: 将 ansicolors.lua 复制到 Lua 库路径
+### 构建系统
+- 纯 Lua 库，只有一个 ansicolors.lua 文件
+- 无 configure/make/CMake 流程
+- Conan 配方: package() 直接复制 ansicolors.lua 到 share/lua/5.4/
 
-### Step 3: 创建 Makefile
-- 手动创建 Makefile 以支持 DESTDIR 模式
-- 安装路径: ~/usr/local/share/lua/5.4/
+### 依赖
+- lua/5.4.8 (制品仓已发布)
 
-### Step 4: 安装到 staging 目录
-- 执行: make install DESTDIR=$TEST_PREFIX
-- 验证成功: Lua 能正确加载模块
+### 测试
+- test_package: C 程序嵌入 Lua 解释器，require('ansicolors') 并验证颜色输出
+- 验证用例: colors('foo'), colors('%{red}foo'), colors.noReset('foo'), colors.noReset('%{red}foo')
 
-### Step 5: 本地安装验证
-- 执行: make install (不带 DESTDIR)
-- ANSI 颜色代码正常输出
-
-### Step 6: 打包
-- 创建预编译包: lua-ansicolors-1.0.2-ohos-aarch64.tar.gz
-- 内容: share/lua/5.4/ansicolors.lua
-
-## 依赖
-- lua >= 5.1 (已安装 lua 5.4.7)
+### 质量门禁结果
+- G1 配方完整性: ✅ PASS
+- G2 conan create: ✅ PASS
+- G3 系统同名库隔离: ✅ PASS
+- G4 产物完整性: ✅ PASS
+- W3 本地 CI 模拟: ✅ PASS
 
 ## 知识提取
 - 纯 Lua 库无编译过程，只需安装到正确路径
-- Lua 库路径: ~/usr/local/share/lua/5.4/
+- Lua 库路径: share/lua/5.4/
 - 无需 ELF 签名（纯 Lua 文件）
-
-## 质量门禁结果
-- G0 干净构建验证: ✅ PASS (无补丁，无编译)
-- G1 二进制完整性: ✅ PASS (纯 Lua 文件)
-- G2 功能可用性: ✅ PASS (ANSI 颜色输出正常)
-- G3 可移植性: ✅ PASS (无 RPATH/签名需求)
-- G4 档案完整性: ✅ PASS (tar.gz 正常)
-
-## 最终状态
-- 状态: published
-- 产物: lua-ansicolors-1.0.2-ohos-aarch64.tar.gz
+- package_id 清除（无编译器/架构依赖）
 
 ---
-**编译结束**: 2026-06-17 10:09
-**最终状态**: published
----
-
-**编译结束**: 2026-06-17 10:10
+**编译结束**: 2026-08-25 00:35
 **最终状态**: built
+**Conan 适配完成**: conanfile.py + conandata.yml + test_package/ 已就绪，W3/W4 通过
