@@ -199,6 +199,12 @@ class GofficeConan(ConanFile):
         self._derive_glib_sub_pc("gobject-2.0", "gobject-2.0")
         self._derive_glib_sub_pc("gmodule-2.0", "gmodule-2.0")
         self._derive_glib_sub_pc("gio-2.0", "gio-2.0")
+        # cmd-pkgs GTK 栈的 gdk-pixbuf-2.0.pc（Requires.private: gmodule-no-export-2.0）
+        # 与 gdk-3.0.pc/gtk+-3.0.pc（Requires.private: gio-unix-2.0）引用 glib 子包。
+        # 二者只随 cmd-pkgs glib 分发；glib 改走 conan glib/2.88.0.1 后 PKG_CONFIG_PATH
+        # 中缺失 → pkg-config 检查 gtk+-3.0 失败（release CI 真实报错）。此处派生补全。
+        self._derive_glib_sub_pc("gmodule-no-export-2.0", "gmodule-2.0")
+        self._derive_gio_unix_pc()
         # configure.ac checks cairo (goffice_reqs) + cairo-ps/pdf/svg (surfaces_reqs).
         # cairo-gobject 配方只声明 pkg_config_name=cairo-gobject，PkgConfigDeps 只
         # 生成 cairo-gobject.pc；其 package 内 meson 安装的 cairo.pc 前缀是 "/"（未
@@ -250,15 +256,23 @@ class GofficeConan(ConanFile):
             return
         src = os.path.join(gen, "glib-2.0.pc")
         cflags = "-I${includedir} -I${includedir1}"
+        # prefix 必须取 PkgConfigDeps 已生成 glib-2.0.pc 中的真实值（指向 conan
+        # glib package）；${pcfiledir}/../.. 在 Conan 2 布局下会解析到 build 目录。
+        prefix = "${pcfiledir}/../.."
         if os.path.exists(src):
-            m = re.search(r"^Cflags:\s*(.+)$", load(self, src), re.M)
+            content = load(self, src)
+            m = re.search(r"^Cflags:\s*(.+)$", content, re.M)
             if m:
                 cflags = m.group(1).strip()
+            m = re.search(r"^prefix=(.+)$", content, re.M)
+            if m:
+                prefix = m.group(1).strip()
         text = (
-            "prefix=${pcfiledir}/../..\n"
-            "libdir=${prefix}/lib\n"
-            "includedir=${prefix}/include/glib-2.0\n"
-            "includedir1=${prefix}/lib/glib-2.0/include\n"
+            "prefix={prefix}\n"
+            "libdir=${{prefix}}/lib\n"
+            "includedir=${{prefix}}/include/glib-2.0\n"
+            "includedir1=${{prefix}}/lib/glib-2.0/include\n"
+            "includedir2=${{prefix}}/lib/glib-2.0/include\n"
             "\n"
             "Name: {name}\n"
             "Description: Conan package: {name}\n"
@@ -266,8 +280,38 @@ class GofficeConan(ConanFile):
             "Libs: -L${{libdir}} -l{libname}\n"
             "Cflags: {cflags}\n"
             "Requires: glib-2.0\n"
-        ).format(name=name, libname=libname, cflags=cflags)
+        ).format(prefix=prefix, name=name, libname=libname, cflags=cflags)
         save(self, dst, text)
+
+    def _derive_gio_unix_pc(self):
+        """派生 gio-unix-2.0.pc（gdk-3.0/gtk+-3.0 的 Requires.private 需要）。
+
+        gio-unix 只提供头文件（include/gio-unix-2.0），无独立库；prefix 从
+        PkgConfigDeps 已生成的 gio-2.0.pc 读取，确保指向 conan glib package。
+        """
+        gen = self.generators_folder
+        dst = os.path.join(gen, "gio-unix-2.0.pc")
+        if os.path.exists(dst):
+            return
+        src = os.path.join(gen, "gio-2.0.pc")
+        if not os.path.exists(src):
+            return
+        prefix = "${pcfiledir}/../.."
+        m = re.search(r"^prefix=(.+)$", load(self, src), re.M)
+        if m:
+            prefix = m.group(1).strip()
+        text = (
+            "prefix={prefix}\n"
+            "includedir=${{prefix}}/include\n"
+            "\n"
+            "Name: gio-unix-2.0\n"
+            "Description: Conan package: gio-unix-2.0\n"
+            "Version: 2.88.0.1\n"
+            "Requires: gobject-2.0 gio-2.0\n"
+            "Cflags: -I${{includedir}}/gio-unix-2.0\n"
+        ).format(prefix=prefix)
+        save(self, dst, text)
+        self.output.info("Derived gio-unix-2.0.pc from glib package")
 
     # ------------------------------------------------------------------ #
     #  cmd-pkgs GTK stack installation (gtkdatabox recipe precedent)       #
