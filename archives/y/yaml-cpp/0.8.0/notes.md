@@ -1,81 +1,62 @@
-# yaml-cpp 0.8.0 — 编译进度
+# yaml-cpp 0.8.0 — Adaptation Notes
 
-> 档案创建时间: 2026-04-26 00:00:00
-> 最后更新: 2026-04-26 (当前状态)
-> 当前会话 ID: (可选，用于多轮对话追踪)
+> Archive created: 2026-04-26
+> Last updated: 2026-08-25
+> Status: Conan recipe adapted
 
-## 一、基本信息
-| 项目 | 值 |
-|------|-----|
-| 软件 | yaml-cpp |
-| 版本 | 0.8.0 |
-| 状态 | 🔵 进行中 / ✅ success / ⚠️ partial / ❌ failed |
-| 构建系统 | autotools/cmake/meson/... |
-| 源码路径 | URL |
+## Basic Info
+| Item | Value |
+|------|-------|
+| Software | yaml-cpp |
+| Version | 0.8.0 |
+| Build System | CMake |
+| Source | https://github.com/jbeder/yaml-cpp/archive/refs/tags/0.8.0.tar.gz |
+| sha256 | fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16 |
 
-## 二、编译阶段（checkbox 实时更新）
+## Build Steps
 
-### Phase 1: 环境准备
-- [ ] ohc-run.py init-build 完成 / 源码下载解压
+### Phase 1: Environment
+- [x] init-build completed, source downloaded and extracted
+- [x] Dependencies checked (none required)
 
-### Phase 2: 编译（configure + make + make install）
-- [ ] configure 完成（记录参数和耗时）
-- [ ] make 编译完成（记录错误和修复）
-- [ ] make install 完成
+### Phase 2: Compilation
+- [x] cmake configure (with CMAKE_POLICY_VERSION_MINIMUM=3.5)
+- [x] make build — 100% success, libyaml-cpp.a produced
+- [x] make install — headers, cmake config, pkgconfig, library installed
 
-### Phase 2.5: 独立目录安装验证（⭐ 必须做）
-- [ ] 干净源码 + 补丁应用
-- [ ] 独立 TEST_PREFIX configure + make install
-- [ ] 功能回归测试结果
+### Phase 3: Conan Recipe
+- [x] conanfile.py adapted from 0.9.0 recipe
+- [x] conandata.yml with correct sha256
+- [x] test_package/ with functional test (parse/sequence/map/round-trip/emitter)
+- [x] conan-verify passed
 
-### Phase 3: 测试验证
-- [ ] make check / make test 结果
-- [ ] 安全弹窗触发确认
+## Key Adaptation Points
 
-### Phase 4: 预编译包制作（⭐ verify PASS 后必须）
-- [ ] Step 1-10 打包流程（见 packaging.md）
+1. **CMake 4.x compatibility**: yaml-cpp 0.8.0 has `cmake_minimum_required(VERSION 3.4)`,
+   which CMake 4.x rejects. Fixed by setting `CMAKE_POLICY_VERSION_MINIMUM=3.5` in the
+   CMakeToolchain.
 
-### Phase 5: 归档收尾
-- [ ] 补丁生成（ohc-run.py refresh-patch --auto）
-- [ ] manifest.yaml / README.md / PROGRESS.md 更新
-- [ ] ohc-run.py verify-build 质量门禁
+2. **OHOS platform support**: Same pattern as 0.9.0 — set `cmake_system_name=OHOS`,
+   `cmake_system_processor=aarch64`, `CMAKE_INSTALL_LIBDIR=lib`.
 
-## 三、对话记录（⭐ 断点续传核心）
+3. **Code signing**: Shared library option supported with OHOS code-signing helpers
+   (llvm-objcopy + binary-sign-tool). Default build is static.
 
-> **每轮对话结束时必须更新此节。新 AI 会从这里恢复上下文。**
+4. **No YAML_CPP_MAIN_INCLUDE**: Unlike 0.9.0, 0.8.0 does not have this CMake option.
 
-### 对话 #N — 2026-04-26 HH:MM
-**操作**: （做了什么，如"执行 configure"、"修复 xxx bug"、"制作预编译包"）
-**结果**: （成功/失败/部分成功，附关键输出摘要）
-**发现的问题**: （遇到的坑、错误信息、根因分析）
-**当前状态**: （精确到哪个步骤，下一步该做什么）
-**遗留问题**: （未解决的、需要下轮继续的）
+## Source Modifications
+None — yaml-cpp 0.8.0 builds cleanly on OHOS without patches.
+
+## Deliverables
+- conanfile.py
+- conandata.yml
+- test_package/conanfile.py
+- test_package/CMakeLists.txt
+- test_package/test.cpp
+- test_package/MANIFEST.yml
 
 ---
 
-### 对话 #1 — 2026-04-26 00:00
-**操作**: 执行 ./configure --prefix=$DEFAULT_PREFIX
-**结果**: （待填写）
-**发现的问题**: （待填写）
-**当前状态**: Phase 2 configure 进行中
-**遗留问题**: 无
+**编译结束**: 2026-08-25
+**最终状态**: built (Conan recipe adapted, conan-verify PASS, W3 local CI PASS)
 
-（后续每轮对话追加...）
-
-## 四、源码修改清单
-| 文件 | 原因 | 方式 | 补丁状态 |
-|------|------|------|---------|
-| ... | ... | ... | ... |
-
-## 五、预编译包交付物
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| ... | ... | ... |
-
-## 六、结束记录
-- **最终状态**: ...
-- **结束时间**: ...
----
-
-**编译结束**: 2026-04-26 03:28
-**最终状态**: partial
