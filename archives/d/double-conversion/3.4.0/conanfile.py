@@ -6,13 +6,11 @@ routines for IEEE doubles. It is NOT a system same-name library, so it defaults
 to shared linking (R26: only system same-name libraries must be static).
 
 R32: settings.os judgment uses `in ("Linux", "OHOS")` not `== "Linux"`.
+R33: compiler paths come from Conan profile (tools.build:compiler_executables),
+     no shell env vars or manual toolchain rewriting.
 """
-import os
-import shutil
-import re
-
 from conan import ConanFile
-from conan.tools.files import get, copy, apply_conandata_patches, export_conandata_patches
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 
 
@@ -22,15 +20,18 @@ class DoubleConversionConan(ConanFile):
     description = "Binary-decimal and decimal-binary conversion routines for IEEE doubles"
     license = "BSD-3-Clause"
     homepage = "https://github.com/google/double-conversion"
-    url = ""  # CI fills this
+    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
 
     settings = "os", "compiler", "build_type", "arch"
+    package_type = "library"
+    options = {"shared": [True, False]}
+    default_options = {"shared": True}
 
     def export_sources(self):
         export_conandata_patches(self)
 
     def requirements(self):
-        # No external dependencies (R27: use  for any deps)
+        # No external dependencies
         pass
 
     def layout(self):
@@ -44,30 +45,9 @@ class DoubleConversionConan(ConanFile):
     def generate(self):
         # double-conversion is NOT a system same-name library -> default shared (R26)
         tc = CMakeToolchain(self)
-        tc.variables["BUILD_SHARED_LIBS"] = "ON"
-        tc.variables["BUILD_TESTING"] = "OFF"
+        tc.variables["BUILD_SHARED_LIBS"] = self.options.shared
+        tc.variables["BUILD_TESTING"] = False
         tc.generate()
-
-        # Fix compiler paths in generated toolchain: conan profile may point to
-        # /data/service/hnp/bin/clang which doesn't exist in dev environment.
-        cc = shutil.which(os.environ.get("CC", "clang")) or "clang"
-        cxx = shutil.which(os.environ.get("CXX", "clang++")) or "clang++"
-        toolchain_file = os.path.join(self.generators_folder, "conan_toolchain.cmake")
-        if os.path.isfile(toolchain_file):
-            with open(toolchain_file, "r") as f:
-                content = f.read()
-            content = re.sub(
-                r'set\(CMAKE_C_COMPILER "[^"]*"\)',
-                f'set(CMAKE_C_COMPILER "{cc}")',
-                content
-            )
-            content = re.sub(
-                r'set\(CMAKE_CXX_COMPILER "[^"]*"\)',
-                f'set(CMAKE_CXX_COMPILER "{cxx}")',
-                content
-            )
-            with open(toolchain_file, "w") as f:
-                f.write(content)
 
     def build(self):
         apply_conandata_patches(self)

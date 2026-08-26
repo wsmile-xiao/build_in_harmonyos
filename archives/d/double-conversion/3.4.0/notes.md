@@ -27,7 +27,7 @@
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | CMake 不认识 HarmonyOS 平台 | CMake 无 HarmonyOS platform module (E092) | 配方自动处理，CMake 仍可正常编译，不影响结果 |
-| 2 | 编译器路径不存在 | Conan profile 指向 `/data/service/hnp/bin/clang`，开发环境无此路径 | `generate()` 中用 `shutil.which()` 检测实际 clang 路径并重写 `conan_toolchain.cmake` |
+| 2 | 编译器路径配置 | Conan profile 通过 `tools.build:compiler_executables` 指定 clang 路径 | 配方 `generate()` 仅使用 `CMakeToolchain`，编译器路径由 Conan profile 自动注入，无需手动重写 toolchain (R33) |
 | 3 | HMDFS build 文件夹冲突 | Bazel BUILD 文件与 CMake build 文件夹大小写冲突 (R21) | `cmake_layout(self, build_folder="_build")` 使用 `_build` 替代默认 `build` |
 | 4 | make jobserver mkfifo 失败 | `/tmp` 只读，`mkfifo` 操作不允许 (E002) | 非致命，make 仍正常完成编译，不影响结果 |
 
@@ -80,8 +80,7 @@ Total Test time (real) =   0.84 sec
 1/1 Test #1: test_double-conversion ...........   Passed    0.07 sec
 100% tests passed, 0 tests failed out of 1
 ```
-
 ---
 
-**编译结束**: 2026-07-02 11:20
+**编译结束**: 2026-08-14 18:50
 **最终状态**: published
