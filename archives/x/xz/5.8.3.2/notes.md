@@ -1,7 +1,7 @@
 # xz 5.8.3 — 编译进度
 
 > 档案创建时间: 2026-07-27 11:10:00
-> 最后更新: 2026-07-27 (当前状态)
+> 最后更新: 2026-08-23 (配方现代化重写)
 > 构建系统: autotools (configure + make)
 
 ## 一、基本信息
@@ -96,3 +96,46 @@
 - **错误**: `Path in CI_PACKAGES has no conanfile.py: archives/x/xz/5.8.3`
 - **根因**: CI worker git checkout 异常 — conanfile.py 在 git tree 中存在（`git ls-tree` + `git cat-file` 验证），但 CI worker 构建目录中未检出
 - **本地验证**: conan create + 完整 CI 脚本均通过，配方无问题
+
+## 七、配方现代化重写 (2026-08-23)
+
+原有配方 (5.8.3.1) 存在以下问题，参照 5.6.2 成熟配方重写：
+
+| 问题 | 原配方 | 重写后 |
+|------|--------|--------|
+| CC 硬编码 | `CC=/data/service/hnp/bin/clang` 写死在 build() | 使用 AutotoolsToolchain，CC 来自 Conan profile |
+| 无 generate() | 没有 AutotoolsToolchain 集成 | generate() 中配置 AutotoolsToolchain + mktemp wrapper |
+| 手动调用 configure/make | 直接 self.run("./configure ...") | 使用 Autotools helper (autotools.configure/make/install) |
+| 手动 package() | shutil.copytree 逐目录复制 | Autotools.install() 标准安装 |
+| package_info 不完整 | 只打印 PATH | self.cpp_info.libs = ["lzma"] |
+| 版本号 | 5.8.3.1 | 5.8.3 |
+| options/package_type | 显式 shared option + package_type | 移除冗余（Autotools 默认处理） |
+
+### 关键保留
+- umask 077→022 替换（E011，CI #29098）— 在 build() 中 apply_conandata_patches 后执行
+- --disable-scripts（OHOS 无 /bin/sh）
+- -static ldflags（L2 smoke test 不需要 LD_LIBRARY_PATH）
+- mktemp wrapper（OHOS hmmac MAC 权限问题）
+- config.guess 补丁（1 个，HarmonyOS 检测）
+
+## 八、真机验证 (2026-08-23)
+
+### conan create 完整流程
+
+| 步骤 | 结果 | 详情 |
+|------|------|------|
+| source() | ✅ | 本地 file:// URL 加载 tar.xz |
+| generate() | ✅ | AutotoolsToolchain + mktemp wrapper + 环境修复 |
+| configure | ✅ | config.guess OHOS 检测通过，SKIP_WERROR_CHECK=yes |
+| make | ✅ | 编译成功 |
+| package | ✅ | Autotools.install() 到 bin/ lib/ include/ |
+| test_package | ✅ | xz 压缩/解压 round-trip OK |
+
+### 真机环境修复（配方内置，非 profile 修改）
+
+| 问题 | 修复方式 |
+|------|----------|
+| CONFIG_SHELL=/data/service/hnp/bin/bash 不存在 | _fix_conanbuild_shell() 批量替换生成脚本 |
+| CC/CXX=/data/service/hnp/bin/clang 不存在 | 同上，替换为 shutil.which("clang") |
+| SKIP_WERROR_CHECK | configure_args 添加 |
+| test_package bin 路径 | src/xz/ → bin/（Autotools.install 布局） |
