@@ -2,19 +2,15 @@
 """Conan recipe for vmdktool 1.4 — BSD-style Makefile (no configure script).
 
 vmdktool converts raw filesystems to VMDK files and vice versa.
-Build system: simple BSD Makefile (CC, CFLAGS, PREFIX, DESTDIR).
+Build system: simple BSD Makefile (CC, CFLAGS, LDLIBS, PREFIX, DESTDIR).
 License: BSD-2-Clause.
-
-R26: Terminal tool — statically linked.
 """
 import os
-import subprocess
-import hashlib
-import tarfile
-import shutil
 
 from conan import ConanFile
-from conan.tools.files import apply_conandata_patches, export_conandata_patches
+from conan.errors import ConanInvalidConfiguration
+from conan.tools.files import get, copy, apply_conandata_patches, export_conandata_patches
+from conan.tools.gnu import GnuToolchain
 from conan.tools.layout import basic_layout
 
 
@@ -26,93 +22,62 @@ class VmdktoolConan(ConanFile):
     homepage = "https://people.freebsd.org/~brian/vmdktool/"
     url = ""  # CI fills this
 
+    package_type = "application"
+
     settings = "os", "compiler", "build_type", "arch"
 
     def export_sources(self):
         export_conandata_patches(self)
 
     def requirements(self):
-        # No external Conan dependencies; zlib is a system library
-        pass
+        self.requires("zlib/1.3.1")
 
     def layout(self):
         basic_layout(self)
 
+    # R32: OHOS platform compatibility
+    def validate(self):
+        if self.settings.os not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration(f"Unsupported OS: {self.settings.os}")
+
     def source(self):
-        # Use curl -kL to download due to SSL certificate issues on this platform
-        url = self.conan_data["sources"]["url"]
-        expected_sha256 = self.conan_data["sources"]["sha256"]
-
-        tmpfile = os.path.join(self.source_folder, "vmdktool-1.4.tar.gz")
-        subprocess.run(["curl", "-kL", "-o", tmpfile, url], check=True)
-
-        # Verify sha256
-        actual_sha256 = hashlib.sha256(open(tmpfile, "rb").read()).hexdigest()
-        if actual_sha256 != expected_sha256:
-            raise Exception(f"sha256 mismatch: expected {expected_sha256}, got {actual_sha256}")
-
-        # Extract with strip_root (move contents of vmdktool-1.4/ to source_folder)
-        import tempfile
-        tmp_extract = tempfile.mkdtemp(dir=self.source_folder)
-        with tarfile.open(tmpfile, "r:gz") as tf:
-            tf.extractall(tmp_extract)
-
-        # Move contents of the wrapper directory to source_folder
-        wrapper = os.path.join(tmp_extract, "vmdktool-1.4")
-        if os.path.isdir(wrapper):
-            for item in os.listdir(wrapper):
-                src = os.path.join(wrapper, item)
-                dst = os.path.join(self.source_folder, item)
-                shutil.move(src, dst)
-            os.rmdir(wrapper)
-        else:
-            # If no wrapper, move all contents
-            for item in os.listdir(tmp_extract):
-                src = os.path.join(tmp_extract, item)
-                dst = os.path.join(self.source_folder, item)
-                shutil.move(src, dst)
-        os.rmdir(tmp_extract)
-
-        # Remove tarball
-        os.unlink(tmpfile)
+        get(self, **self.conan_data["sources"], strip_root=True)
 
     def generate(self):
-        # R26: Terminal tools must be statically linked
-        pass  # Handled in build() via LDLIBS
+        tc = GnuToolchain(self)
+        tc.generate()
 
     def build(self):
         apply_conandata_patches(self)
-        src_dir = self.source_folder
+        # R33: get compiler from Conan conf (never bare shell env vars)
+        comp_execs = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
+        cc = comp_execs.get("c") or "clang"
 
-        cc = "clang"
-        cflags = "-fPIC -O2 -pipe -g"
-        ldlibs = "-static -L/storage/Users/currentUser/usr/local/lib -lz"
+        # Get zlib static library from Conan dependency (R26: static link)
+        zlib = self.dependencies["zlib"]
+        zlib_lib_dir = os.path.join(zlib.package_folder, "lib")
+        if not os.path.isdir(zlib_lib_dir):
+            zlib_lib_dir = zlib.package_folder
+        zlib_static = os.path.join(zlib_lib_dir, "libz.a")
+        if not os.path.isfile(zlib_static):
+            zlib_static = f"-L{zlib_lib_dir} -lz"
+
+        cflags = "-fPIC -O2 -pipe"
+        ldlibs = zlib_static
 
         self.run(
-            f'make -j1 CC={cc} CFLAGS="{cflags}" '
-            f'LDLIBS="{ldlibs}" '
-            f'-C "{src_dir}"'
+            f'make -j1 CC="{cc}" CFLAGS="{cflags}" LDLIBS="{ldlibs}"',
+            cwd=self.source_folder
         )
 
     def package(self):
-        src_dir = self.source_folder
-
-        # Install binary
-        bin_dir = os.path.join(self.package_folder, "bin")
-        os.makedirs(bin_dir, exist_ok=True)
-        shutil.copy2(
-            os.path.join(src_dir, "vmdktool"),
-            os.path.join(bin_dir, "vmdktool"),
-        )
-
-        # Install man page
-        man_dir = os.path.join(self.package_folder, "share", "man", "man8")
-        os.makedirs(man_dir, exist_ok=True)
-        man_src = os.path.join(src_dir, "vmdktool.8")
-        if os.path.exists(man_src):
-            shutil.copy2(man_src, os.path.join(man_dir, "vmdktool.8"))
+        # vmdktool is a command-line tool: install the binary to bin/
+        copy(self, "vmdktool", src=self.source_folder, dst=os.path.join(self.package_folder, "bin"))
+        # Install man page if present
+        copy(self, "vmdktool.8", src=self.source_folder, dst=os.path.join(self.package_folder, "share", "man", "man8"))
 
     def package_info(self):
+        # Command-line tool, not a library
         self.cpp_info.libs = []
         self.cpp_info.includedirs = []
         self.cpp_info.libdirs = []
