@@ -28,7 +28,7 @@ class AwesfxConan(ConanFile):
 
     def build(self):
         apply_conandata_patches(self)
-        chmod(self, "configure", mode="+x")
+        chmod(self, "configure", permission=0o755)
         build_configure = os.path.join(self.build_folder, "configure")
         if os.path.isfile(build_configure):
             os.chmod(build_configure, os.stat(build_configure).st_mode | 0o111)
