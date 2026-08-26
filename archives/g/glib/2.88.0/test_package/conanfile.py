@@ -9,6 +9,7 @@ import os
 import shutil
 
 from conan import ConanFile
+from conan.tools.build import can_run
 from conan.tools.cmake import CMake, cmake_layout
 
 
@@ -28,6 +29,9 @@ class GlibTestConan(ConanFile):
         cmake.build()
 
     def test(self):
+        if not can_run(self):
+            self.output.info("Skipping test_glib execution: target binaries are not runnable")
+            return
         # OHOS: /system/bin/sh (mksh) cannot exec ELF binaries; wrap with bash.
         bash = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "/data/service/hnp/bin/bash"
         self.run(f"{bash} -c './test_glib'", env="conanrun")
