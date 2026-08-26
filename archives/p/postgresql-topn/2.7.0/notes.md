@@ -204,5 +204,5 @@ make install DESTDIR=/storage/Users/currentUser/test-install-postgresql-topn-2.7
 **最终状态**: built
 ---
 
-**编译结束**: 2026-06-03 14:48
+**编译结束**: 2026-08-26 01:14
 **最终状态**: built
