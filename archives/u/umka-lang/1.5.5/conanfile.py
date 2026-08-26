@@ -5,12 +5,18 @@ umka-lang uses a plain Makefile (not autotools). The Makefile detects
 the platform via `uname -s`, which returns "HarmonyOS" on OpenHarmony.
 We override PLATFORM=Linux to select the correct build flags.
 
-R26: The umka binary is statically linked with libumka.a (-DUMKA_STATIC).
-"""
-import os
+Build products:
+  - bin/umka        (command-line interpreter)
+  - lib/libumka.a   (static library)
+  - lib/libumka.so  (shared library)
+  - include/umka_api.h (C embedding API header)
 
+R33: Compiler path is injected via VirtualBuildEnv from the Conan profile,
+not from undefined shell env vars.
+"""
 from conan import ConanFile
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
+from conan.tools.env import VirtualBuildEnv
 from conan.tools.layout import basic_layout
 
 
@@ -20,7 +26,7 @@ class UmkaLangConan(ConanFile):
     description = "Umka: a statically typed embeddable scripting language"
     license = "BSD-2-Clause"
     homepage = "https://github.com/vtereshkov/umka-lang"
-    url = ""  # CI fills this
+    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
 
     settings = "os", "compiler", "build_type", "arch"
 
@@ -37,21 +43,26 @@ class UmkaLangConan(ConanFile):
         get(self, **self.conan_data["sources"], strip_root=True)
 
     def generate(self):
-        # R26: Terminal tools must be statically linked
-        # The umka binary is built with -DUMKA_STATIC and links libumka.a
-        pass
+        # R33: Generate build env from Conan profile (CC, CXX, etc.)
+        env = VirtualBuildEnv(self)
+        env.generate()
 
     def build(self):
         apply_conandata_patches(self)
         # umka-lang uses a plain Makefile (not autotools)
-        # Run make in the source folder where the Makefile is located
         # PLATFORM=Linux for HarmonyOS compatibility (uname -s returns "HarmonyOS")
-        self.run("make -j1 PLATFORM=Linux", cwd=self.source_folder)
+        # VirtualBuildEnv injects CC from the Conan profile
+        # LDFLAGS override: -fuse-ld=ld avoids OHOS SDK's lld which has a
+        # broken libxml2.so.16 dependency in CI environment
+        self.run('make -j1 PLATFORM=Linux LDFLAGS="-lm -ldl -fuse-ld=ld"',
+                 cwd=self.source_folder)
 
     def package(self):
         # Install to Conan package folder
-        self.run(f"make install PLATFORM=Linux PREFIX={self.package_folder}",
+        self.run(f'make install PLATFORM=Linux LDFLAGS="-lm -ldl -fuse-ld=ld" PREFIX={self.package_folder}',
                  cwd=self.source_folder)
 
     def package_info(self):
         self.cpp_info.libs = ["umka"]
+        self.cpp_info.bindirs = ["bin"]
+        self.cpp_info.includedirs = ["include"]

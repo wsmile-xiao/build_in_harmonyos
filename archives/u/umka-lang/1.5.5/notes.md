@@ -76,5 +76,5 @@ $ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify umka-lang 1.5.5
 4. 测试库 (tests/lib/lib.umi) 需在运行测试前手动构建，否则 all.um 中 extlib 测试会报 "Unresolved prototype"。
 ---
 
-**编译结束**: 2026-06-29 17:28
-**最终状态**: published
+**编译结束**: 2026-08-25 00:39
+**最终状态**: built
