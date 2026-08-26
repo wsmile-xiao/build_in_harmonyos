@@ -22,6 +22,29 @@ OHOS adaptation (0 patches — same strategy as lame/3.100):
   * The upstream tarball is a .zip, which does not preserve the executable
     bit on `configure`/`config.guess`/`config.sub`/`install-sh`/`missing`/
     `mkinstalldirs`. We restore those bits at build time.
+  * The 2007 release tarball ships a fully pre-generated autotools tree
+    (configure, aclocal.m4, Makefile.in, config.h.in) BUT the shipped
+    Makefile.in carries automake-1.4-era UNCONDITIONAL rebuild rules
+    (no --enable-maintainer-mode gate): `$(srcdir)/Makefile.in: ... &&
+    $(AUTOMAKE)`, `configure: && $(AUTOCONF)`, `aclocal.m4: &&
+    $(ACLOCAL)`, `config.h.in: && $(AUTOHEADER)`. Any time the inputs
+    (configure.in / Makefile.am / aclocal.m4) are mtime-NEWER than the
+    generated outputs, `make` re-runs aclocal→autoconf→automake. Two of
+    our in-memory edits above (the umask rewrite of `configure` and the
+    chunktable $(srcdir) fix on `lib3ds/Makefile.{am,in}`) give those
+    files a "now" mtime, which inverts the tarball's original ordering
+    and makes the inputs newer than the outputs → the unconditional rules
+    fire. That regen then fails hard because the tarball does NOT ship
+    `compile` or `mkinstalldirs` (automake aborts: "required file
+    './compile' not found") and the automake/1.18 build-requirement's
+    aclocal regenerates aclocal.m4 without the 2006 inline libtool.m4,
+    so autoconf reports "possibly undefined macro: AC_PROG_LIBTOOL"
+    and make reports "LIBTOOL is undefined". Fix: after every recipe edit,
+    normalize mtime so the generated autotools files are at least as new
+    as their inputs — `touch` configure/aclocal.m4/config.h.in and every
+    Makefile.in last. The unconditional rebuild rules then see no out-of-
+    date target and `make` uses the upstream-supplied configure/Makefile.in
+    verbatim. No autoreconf, no libtool tool_require added.
 
 Upstream test situation:
   * lib3ds 1.3.0 registers NO formal test suite (no `TESTS`/
@@ -37,6 +60,7 @@ import os
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
+from conan.tools.env import Environment
 from conan.tools.files import copy, get, replace_in_file
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.layout import basic_layout
@@ -100,6 +124,77 @@ class Lib3dsConan(ConanFile):
         # static/shared is driven by libtool via --enable-shared/--disable-shared,
         # which AutotoolsToolchain derives from `options.shared` automatically.
         tc.generate()
+
+    # ── OHOS SDK linker runtime path (lld/libxml2.so.16) ──────────────
+    # The OHOS clang driver spawns `lld` (ld.lld) for linking. lld is a
+    # dynamically linked ELF whose NEEDED list includes libxml2.so.16,
+    # resolved via its RUNPATH ($ORIGIN/../lib → the SDK llvm/lib). On some
+    # CI workers that directory is not on the ambient LD_LIBRARY_PATH, so
+    # lld fails to start with
+    #   "Error loading shared library libxml2.so.16 ... xmlFreeDoc: symbol
+    #    not found"
+    # and clang aborts with "linker command failed". In autotools this
+    # surfaces at configure time as
+    #   configure: error: C compiler cannot create executables
+    # because configure's conftest link step invokes clang → lld.
+    #
+    # This is NOT a lib3ds source bug (same class as libscrypt/1.22, sord,
+    # perl-dbd-pg, clipper2, kio). Fix: prepend the SDK's own llvm/lib so
+    # the lld that configure/make/clang invoke loads the SDK's matched
+    # libxml2 first. The environment must cover autotools.configure() AND
+    # make (and install) — every clang/lld invocation in build()+package().
+    # No new Conan dependency is added (libxml2 is the SDK's own runtime,
+    # not a lib3ds build input).
+    def _cc(self):
+        # Resolve the real C compiler from the Conan profile conf; fall
+        # back to `clang` on the Conan buildenv PATH if the configured
+        # absolute path does not exist on this host. Never hardcodes a user
+        # name, an SDK version, or an absolute path.
+        import shutil
+
+        comp_execs = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict
+        ) or {}
+        cc = comp_execs.get("c", "clang")
+        if os.path.isabs(cc):
+            return cc if os.path.exists(cc) else "clang"
+        return cc if shutil.which(cc) else "clang"
+
+    def _sdk_llvm_libdir(self):
+        """Resolve the active OHOS SDK llvm/lib containing libxml2.so.16.
+
+        Derives the dir from the real clang path (tools.build:compiler_executables
+        → resolved by _cc()), never hardcoding a user name, an SDK version,
+        or an absolute path. On non-OHOS hosts returns "".
+        """
+        if str(self.settings.os) != "OHOS":
+            return ""
+        cc_real = os.path.realpath(self._cc())
+        llvm_lib = os.path.join(
+            os.path.dirname(os.path.dirname(cc_real)), "lib"
+        )
+        # Only trust the dir if it actually carries libxml2.so.16 — guards
+        # against a bare `clang` on PATH whose parent is not the SDK, or a
+        # stale profile path.
+        if os.path.isfile(os.path.join(llvm_lib, "libxml2.so.16")):
+            return llvm_lib
+        return ""
+
+    def _build_environment(self):
+        """Conan Environment that prepends the SDK llvm/lib to LD_LIBRARY_PATH.
+
+        Applied around every autotools.configure()/make()/install() so
+        configure → clang → lld and make → clang → lld all inherit it. On
+        non-OHOS hosts this is a no-op (empty Environment).
+        """
+        env = Environment()
+        sdk_lib = self._sdk_llvm_libdir()
+        if sdk_lib:
+            self.output.info(
+                f"Prepending OHOS SDK linker runtime path for lld: {sdk_lib}"
+            )
+            env.prepend_path("LD_LIBRARY_PATH", sdk_lib)
+        return env
 
     def build(self):
         # 1. The upstream .zip does not preserve exec bits on autotools
@@ -203,13 +298,71 @@ class Lib3dsConan(ConanFile):
         os.chmod(_u, 0o755)
         os.environ["PATH"] = _shim + os.pathsep + os.environ.get("PATH", "")
 
-        autotools = Autotools(self)
-        autotools.configure()
-        autotools.make()
+        # 6. Normalize autotools file timestamps so `make` never re-runs
+        #    aclocal/autoconf/automake/autoheader. The shipped Makefile.in
+        #    has automake-1.4-era UNCONDITIONAL rebuild rules (no
+        #    --enable-maintainer-mode gate): if configure.in / Makefile.am
+        #    / aclocal.m4 are mtime-NEWER than configure / Makefile.in /
+        #    config.h.in, those rules fire and `make` regenerates the
+        #    autotools tree — which fails hard here because the release
+        #    tarball does NOT ship `compile`/`mkinstalldirs`, and the
+        #    automake/1.18 build-requirement's aclocal rebuilds aclocal.m4
+        #    without the 2006 inline libtool.m4 (→ "AC_PROG_LIBTOOL
+        #    possibly undefined", "LIBTOOL is undefined",
+        #    "required file './compile' not found"). The tarball's original
+        #    mtime ordering was correct (inputs older than outputs), but
+        #    our in-memory edits above (umask rewrite of `configure`, the
+        #    chunktable $(srcdir) fix on lib3ds/Makefile.{am,in}, and the
+        #    config.guess/config.sub copy from automake) gave some files a
+        #    "now" mtime that can invert the ordering. Re-stamp the
+        #    generated files so they are at least as new as every input;
+        #    touch the generated outputs LAST so they strictly postdate the
+        #    Makefile.am edits. `make` then sees no out-of-date target and
+        #    uses the upstream-supplied configure/Makefile.in verbatim —
+        #    no autoreconf, no libtool tool_require added. Verified: no
+        #    aclocal/autoconf/automake invocation during `make`.
+        import time
+        _now = time.time()
+        # Inputs (must be older or equal): configure.in, all Makefile.am,
+        # aclocal.m4, config.h.in candidates that are inputs to autoheader.
+        _inputs = [
+            os.path.join(self.source_folder, "configure.in"),
+            os.path.join(self.source_folder, "Makefile.am"),
+            os.path.join(self.source_folder, "lib3ds", "Makefile.am"),
+            os.path.join(self.source_folder, "tools", "Makefile.am"),
+        ]
+        for _p in _inputs:
+            if os.path.isfile(_p):
+                os.utime(_p, (_now, _now))
+        # Generated outputs (touch AFTER inputs so outputs strictly postdate):
+        #   configure, aclocal.m4, config.h.in (top), and every Makefile.in.
+        _outputs = [
+            os.path.join(self.source_folder, "configure"),
+            os.path.join(self.source_folder, "aclocal.m4"),
+            os.path.join(self.source_folder, "config.h.in"),
+            os.path.join(self.source_folder, "Makefile.in"),
+            os.path.join(self.source_folder, "lib3ds", "Makefile.in"),
+            os.path.join(self.source_folder, "tools", "Makefile.in"),
+        ]
+        for _p in _outputs:
+            if os.path.isfile(_p):
+                os.utime(_p, (_now, _now))
+
+        # All configure/make/clang/lld invocations run inside the SDK
+        # linker-runtime environment so lld finds the SDK's libxml2.so.16
+        # (see _build_environment / _sdk_llvm_libdir). On non-OHOS hosts
+        # this is a no-op (empty Environment).
+        with self._build_environment().vars(self).apply():
+            autotools = Autotools(self)
+            autotools.configure()
+            autotools.make()
 
     def package(self):
-        autotools = Autotools(self)
-        autotools.install()
+        # install() also invokes clang→lld (libtool final link of the
+        # shared library), so it needs the same SDK linker-runtime env.
+        with self._build_environment().vars(self).apply():
+            autotools = Autotools(self)
+            autotools.install()
 
         # Tidy up libtool archives (not needed by conan consumers).
         libdir = os.path.join(self.package_folder, "lib")
