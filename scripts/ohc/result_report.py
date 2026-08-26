@@ -496,6 +496,17 @@ def result_cli(argv: list[str]) -> int:
                         "message": RESULT_FILENAME})
     result["checkpoints"] = checkpoints
 
+    # ── v12.10: feedback_pending + 终态兜底骨架（防丢失协议）──
+    # 无论终态成败：feedback 缺失即补骨架（消除幸存者偏差——失败任务同样
+    # 产出经验）；pending 标志供 ECS 在回收工作区前判断是否收割 feedback/。
+    try:
+        from .feedback import feedback_pending_flag
+        result["feedback_pending"] = feedback_pending_flag(
+            args.software, args.version,
+            skeleton_reason=f"result_{final_status}")
+    except Exception:
+        result["feedback_pending"] = True
+
     # ── 校验（红线：不过不落盘） ──
     errors = _validate(result)
     if errors:

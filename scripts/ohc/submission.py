@@ -647,6 +647,13 @@ def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
         resume_with_flag: If True, resume_cmd includes --resume (for AI Review
             HANDOFFs where gates already passed and PR already created).
     """
+    # v12.10: 经验事件累积——单一咽喉，失败/中断分支的经验不随工作区回收丢失
+    try:
+        from .feedback import record_event
+        record_event(ver_dir, f"handoff:{reason}",
+                     " | ".join(a.replace("\n", " ") for a in actions[:3]))
+    except Exception:
+        pass
     from .handoff import HandoffData, emit_handoff
     resume_cmd = f"python3 scripts/ohc-run.py submit {software} {version}"
     if resume_with_flag:
@@ -732,6 +739,14 @@ def cmd_submit(software: str, version: str,
         from .result_report import write_pr_draft
         write_pr_draft(software, version, pr_number, pr_url)
 
+        # ── v12.10: feedback 骨架前置（幂等：旧任务恢复时补齐骨架）──
+        try:
+            from .feedback import ensure_feedback_skeleton
+            ensure_feedback_skeleton(software, version, pdir=project_dir,
+                                     reason="resume_pr_exists")
+        except Exception:
+            pass
+
         # ── R42: PR 创建即上报（--no-wait，对 resume 同样生效）──
         if no_wait:
             log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: PR 创建即上报）")
@@ -809,6 +824,11 @@ def cmd_submit(software: str, version: str,
             return 1
         elif ci_status == "PASSED":
             log_ok(f"  ✅ CI 构建通过")
+            try:
+                from .feedback import record_event
+                record_event(ver_dir, "ci_passed", f"PR #{pr_number}")
+            except Exception:
+                pass
             _maybe_upgrade_result(software, version, pr_number, pr_url)
 
         # ── SKILL_FEEDBACK (final phase) ──
@@ -819,6 +839,10 @@ def cmd_submit(software: str, version: str,
             feedback_ret = cmd_feedback(software, version, pdir=project_dir)
         except Exception as e:
             log_warn(f"  ⚠️ SKILL_FEEDBACK 生成失败: {e}")
+
+        # ── v12.10: 反馈完整即自动入仓（commit+push 任务分支，随 PR 进 main）──
+        if feedback_ret == 0:
+            _push_feedback_to_branch(project_dir, branch_name)
 
         # ── Success ──
         print(f"\n  ✅ PR 提交完成: {software} {version}")
@@ -1165,6 +1189,17 @@ def cmd_submit(software: str, version: str,
     from .result_report import write_pr_draft
     write_pr_draft(software, version, pr_number, pr_url)
 
+    # ── v12.10: feedback 骨架前置（R42 同款先落盘，与 result 草稿同步）──
+    # 旧流程 feedback 在 CI 绿后才生成且只写本地——期间被杀即永久丢失。
+    try:
+        from .feedback import ensure_feedback_skeleton, record_event
+        if ensure_feedback_skeleton(software, version, pdir=project_dir,
+                                    reason="pr_created"):
+            record_event(ver_dir, "pr_created", f"PR #{pr_number} {pr_url}")
+            log_ok("  ✅ SKILL_FEEDBACK 骨架已前置落盘（v12.10）")
+    except Exception as e:
+        log_warn(f"  ⚠️ feedback 骨架前置失败(不阻塞): {e}")
+
     # ── R42: 预算不足时的退出通道（--no-wait）──
     if no_wait:
         log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: 草稿已落，闭环交 follow-up）")
@@ -1222,7 +1257,9 @@ def cmd_submit(software: str, version: str,
             log_fail("── CI 失败详情（最新失败评论摘要）──")
             for ln in detail.splitlines():
                 log_fail(f"  {ln}")
-        acts = [f"按上方失败详情定位原因并修复（本地 W3 复验后再推）",
+        acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
+                "（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
+                f"按诊断定位原因并修复（本地 W3 复验后再推）",
                 f"修复后 push: git push origin {branch_name}（CI 自动重跑）",
                 f"继续监控: python3 scripts/ohc-run.py submit {software} {version} --resume",
                 f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
@@ -1241,6 +1278,11 @@ def cmd_submit(software: str, version: str,
         return 1
     elif ci_status == "PASSED":
         log_ok(f"  ✅ CI 构建通过")
+        try:
+            from .feedback import record_event
+            record_event(ver_dir, "ci_passed", f"PR #{pr_number}")
+        except Exception:
+            pass
         _maybe_upgrade_result(software, version, pr_number, pr_url)
 
     # ── SKILL_FEEDBACK (final phase) ──
@@ -1252,6 +1294,10 @@ def cmd_submit(software: str, version: str,
     except Exception as e:
         log_warn(f"  ⚠️ SKILL_FEEDBACK 生成失败: {e}")
 
+    # ── v12.10: 反馈完整即自动入仓（commit+push 任务分支，随 PR 进 main）──
+    if feedback_ret == 0:
+        _push_feedback_to_branch(project_dir, branch_name)
+
     # ── Success ──
     print(f"\n  ✅ PR 提交完成: {software} {version}")
     print(f"     PR: #{pr_number}")
@@ -1259,6 +1305,59 @@ def cmd_submit(software: str, version: str,
     print(f"     分支: {branch_name}")
     print(f"     标题: {pr_title}")
     return feedback_ret
+
+
+def _push_feedback_to_branch(project_dir: str, branch_name: str) -> None:
+    """v12.10: feedback 终稿自动入仓（best-effort，失败仅告警不阻塞）。
+
+    只提交 feedback/SKILL_FEEDBACK_*.md——.feedback-state.json 是 JC5 未白名单
+    的本地运行时文件，绝不入仓。仅推送完整终稿（骨架/占位稿不推：
+    避免 PR 转绿后再触发一次 CI 重跑）。OHC_FEEDBACK_PUSH=0 可关闭。
+    """
+    if os.environ.get("OHC_FEEDBACK_PUSH", "1") == "0":
+        log_info("  ⏭️ OHC_FEEDBACK_PUSH=0，跳过 feedback 自动入仓")
+        return
+    try:
+        feedback_dir = Path(project_dir) / "feedback"
+        if not feedback_dir.exists():
+            return
+        files = sorted(feedback_dir.glob("SKILL_FEEDBACK_*.md"))
+        if not files:
+            return
+
+        def _git(*args, timeout=30):
+            return subprocess.run(["git", *args], cwd=project_dir,
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace",
+                                  timeout=timeout)
+        if not branch_name:
+            cur = _git("rev-parse", "--abbrev-ref", "HEAD")
+            branch_name = cur.stdout.strip() if cur.returncode == 0 else ""
+        if not branch_name or branch_name in ("main", "master"):
+            log_warn(f"  ⚠️ 当前分支 {branch_name or '?'} 非任务分支，"
+                     f"跳过 feedback 入仓（防误推主干）")
+            return
+        rel = [str(f.relative_to(project_dir)).replace("\\", "/")
+               for f in files]
+        _git("add", "--", *rel)
+        staged = _git("diff", "--cached", "--name-only")
+        if not staged.stdout.strip():
+            log_info("  ℹ️ feedback 无新变更可提交")
+            return
+        c = _git("commit", "-m",
+                 "docs: add SKILL_FEEDBACK report (auto, v12.10)")
+        if c.returncode != 0:
+            log_warn(f"  ⚠️ feedback commit 失败: "
+                     f"{(c.stderr or c.stdout).strip()[:120]}")
+            return
+        p = _git("push", "origin", branch_name, timeout=120)
+        if p.returncode != 0:
+            log_warn(f"  ⚠️ feedback push 失败(已本地提交，可随下次提交入仓): "
+                     f"{(p.stderr or p.stdout).strip()[:120]}")
+            return
+        log_ok(f"  ✅ SKILL_FEEDBACK 已入仓并推送（{branch_name}，随 PR 进 main）")
+    except Exception as e:
+        log_warn(f"  ⚠️ feedback 入仓异常(不阻塞): {e}")
 
 
 def _maybe_upgrade_result(software: str, version: str,
@@ -2136,6 +2235,23 @@ def cmd_post_merge(software: str, version: str,
         with open(root_feedback, "a", encoding="utf-8") as f:
             f.write(separator + feedback_content)
         log_ok("  收割 skill-feedback.md")
+
+    # v12.10: 兼容新协议——同时收割 feedback/SKILL_FEEDBACK_<id>.md
+    # （cmd_feedback 实际写入路径；旧链路只认 archives/.../reports/，基本空转）
+    try:
+        from .feedback import feedback_status
+        st = feedback_status(software, version, pdir=project_dir)
+        if st["exists"]:
+            fid_content = Path(st["path"]).read_text(encoding="utf-8")
+            root_feedback.parent.mkdir(parents=True, exist_ok=True)
+            sep = (f"\n\n---\n## {software} {version} "
+                   f"SKILL_FEEDBACK_{st['feedback_id']} (post-merge)\n\n")
+            with open(root_feedback, "a", encoding="utf-8") as f:
+                f.write(sep + fid_content)
+            log_ok(f"  收割 feedback/SKILL_FEEDBACK_{st['feedback_id']}.md"
+                   f"（状态: {'complete' if st['complete'] else 'pending'}）")
+    except Exception as e:
+        log_warn(f"  收割 SKILL_FEEDBACK 失败(不阻塞): {e}")
 
     # ── Step 6: Output summary ──
     print(f"\n  ✅ Post-merge Summary:")
