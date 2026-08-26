@@ -12,6 +12,7 @@ int main(void) {
     GVariant *v = NULL;
     GObject *o = NULL;
     GFile *f = NULL;
+    gchar *path = NULL;
 
     /* glib core: string + hash table */
     gchar *s = g_strdup("hello glib");
@@ -36,7 +37,11 @@ int main(void) {
         goto cleanup;
     }
 
-    /* gobject: type system — instantiate GInitiallyUnowned (GObject) */
+    /* gobject: explicit type-system initialization for HarmonyOS */
+    g_type_ensure_initialized();
+    g_type_ensure_initialized();
+
+    /* gobject: type system — instantiate GObject */
     o = g_object_new(G_TYPE_OBJECT, NULL);
     if (!G_IS_OBJECT(o)) {
         fprintf(stderr, "FAIL: g_object_new / G_IS_OBJECT\n");
@@ -46,7 +51,8 @@ int main(void) {
 
     /* gio: GFile from path */
     f = g_file_new_for_path("/tmp/glib-test-file");
-    if (!G_IS_FILE(f) || g_file_get_path(f) == NULL) {
+    path = g_file_get_path(f);
+    if (!G_IS_FILE(f) || path == NULL) {
         fprintf(stderr, "FAIL: g_file_new_for_path\n");
         status = 5;
         goto cleanup;
@@ -56,6 +62,7 @@ int main(void) {
     status = 0;
 
 cleanup:
+    g_free(path);
     if (f) g_object_unref(f);
     if (o) g_object_unref(o);
     if (v) g_variant_unref(v);
