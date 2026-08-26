@@ -787,9 +787,12 @@ def cmd_submit(software: str, version: str,
                 log_fail("── CI 失败详情（最新失败评论摘要）──")
                 for ln in detail.splitlines():
                     log_fail(f"  {ln}")
-            acts = [f"按上方失败详情定位原因并修复（本地 W3 复验后再推）",
+            acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
+                    f"（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
+                    f"按诊断定位原因并修复（本地 W3 复验后再推）",
                     f"修复后 push: git push origin {branch_name}（CI 自动重跑）",
                     f"继续监控: python3 scripts/ohc-run.py submit {software} {version} --resume",
+                    f"连续 2 轮仍红 → 按停损规则上报，勿无限重试",
                     f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
             if detail:
                 acts.insert(0, "── CI 失败详情见上方摘要 ──")

@@ -168,7 +168,7 @@ W3/finish/submit 卡在**环境外部因素**时，禁止无限重试 workaround
 - conan registry / git remote / 下载源**连续 3 次不可达，且重试跨度超过 30 分钟**
 - 失败原因明确属于：registry_unreachable / 上游包未发布 / DNS·TLS 网络故障
 
-**止损动作**：立即写 result.json 终止本包（见 Step 7），`--status dependency_missing`，`--failed-reason` 写清"缺什么 + 为什么环境内无法解决"，`--missing` 列裸包名，`--missing-evidence` 贴实际报错输出。**工具已强制**：result 命令对每个 missing 包自动实测 `conan list <pkg>/* -r=ohpcd`，实测结果追加进 `missing_evidence`——凭推断谎报会被 `[probe] ... EXISTS (探测到配方，请复核是否真缺)` 当场戳穿。
+**止损动作**：立即写 result.json 终止本包（见 Step 7），`--status dependency_missing`，`--failed-reason` 写清"缺什么 + 为什么环境内无法解决"，`--missing` 列裸包名，`--missing-evidence` 贴实际报错输出。**工具已强制（双层）**：①result 命令对每个 missing 包自动实测 `conan list <pkg>/* -r=ohpcd`，实测结果追加进 `missing_evidence`——凭推断谎报会被 `[probe] ... EXISTS (探测到配方，请复核是否真缺)` 当场戳穿；②create-pr 前置硬闸 **PF4 依赖闸**逐个探测制品仓，requires 缺失时建 PR 都建不出来——捎带适配依赖在工具层封死（goblinrs #6642 四包捎带教训）。
 
 **止损后严禁**（为绕过依赖）：伪造 `.ci-result.json`、dummy 包顶替、跳过 W3、伪造 result.json。
 
@@ -342,7 +342,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R26-R31 | **Conan 配方**：系统同名库禁止动态链接(避免污染`/lib`/`/lib64`)，默认动态由Conan管理依赖链；conanfile.py必须有`test_package/`；conan_verify通过才标published；conan-verify失败必须查询知识图谱；知识图谱未命中必须生成草稿 |
 | R32 | **OHOS 平台兼容**：recipe 内 `settings.os` 判断必须 `in ("Linux", "OHOS")`，不能 `== "Linux"` |
 | R33 | **build() 禁止依赖未定义的 shell 环境变量**：编译器/标志必须从 Conan Toolchain 或 `self.conf_info` 获取，不能裸用 `${CC}`/`${CFLAGS}` 等 shell 变量（release worker 上为空→编译静默失败） |
-| R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（CI L1e 破坏性反向验证兜底） |
+| R34 | **test 必须实质依赖被测包**：test_package 源文件必须调用被测包的 API / 执行被测包的二进制，禁止只打印字符串的空壳测试（create-pr 前置硬闸 PF3 先拦，CI L1e 破坏性反向验证兜底） |
 | R35 | **禁止用 conan list/search 判断 binary 是否存在**：cnb.cool 搜索 API 对 binary 返回不完整（显示 "No packages found" 但实际已上传），必须用 `conan install --requires=...` 或 `conan download` 验证预编译包 |
 | R36 | **依赖必须先发布再构建下游**（机械门禁）：依赖包必须先通过 release 流水线发布到制品仓，再构建下游包。未发布的依赖会导致 `--build=missing` 从源码编译，耗时且易失败。依赖链 `C→B→A` 的发布顺序必须是 A→B→C。`finish` step [5/10] 和 CI L0i 均 Hard Fail（不止警告） |
 | R37 | **版本号 = 上游版本 + 适配修复后缀**：首次适配用上游版本 `X.Y.Z`，修复适配问题后加后缀 `X.Y.Z.N`（N 从 1 递增）。原因：cnb.cool 制品仓不支持同版本多 revision 并存，必须用版本号区分 |
@@ -352,6 +352,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R41 | **外部依赖阻塞止损**：registry/git remote 连续 3 次不可达且超 30 分钟，或失败明确属于环境外部因素（上游未发布/网络故障）→ 立即写 result.json 止损，禁止无限重试；多包任务单包止损不连坐（成功包不白干）；剩余预算 <40 分钟只收尾不启大步骤 |
 | R42 | **PR 创建即写 partial 草稿 + 预算内闭环 CI 到绿**：PR 创建成功那一刻先写 result.json 草稿（`--status partial` + PR 链接，防猝死丢工作）；然后默认继续工具化监控 CI（`submit` 内置 2400s 轮询）——**CI 红 ≠ 放弃**：失败详情自动提取进 HANDOFF，按报错修复 → `git push`（CI 自动重跑）→ `submit --resume` 继续监控，直到 CI 绿自动升级 result 为 success。禁止 agent 自己写 sleep 轮询 CI（工具已有轮询）；仅当剩余预算 <40min（R41）或显式 `--no-wait` 时停在 partial 退出，红 CI 交由 follow-up 任务（`submit --resume` 从断点续） |
 | R43 | **调参螺旋止损**：同一错误类别（cmake 组件/目标/include 路径等 conanfile 调参）连续 5 次修改仍失败 → 停止调参，写 result.json（`failed_build` + 5 次尝试的证据）退出；与 R41 互补：R41 管外部阻塞，R43 管内部死循环 |
+| R44 | **CI 失败必须先自诊断再修（submit --resume 失败时）**：CI 红后的第一步是 `gitcode_pr.py diagnose --repo ... --number N`——CI 侧分类 ~60% 落"未知"，diagnose 对评论内嵌的失败日志做本地二次归类（链接/编译/cmake/依赖/配方/补丁/权限/网络/文件缺失/测试空壳），输出证据行+修复要点；禁止对"未知"失败盲改重推（采样：同一 PR 反复重推同类失败=纯浪费 CI 额度）。修复循环: diagnose → 修复 → W3 复验 → push → `submit --resume`；连续 2 轮同错误仍红 → 停损上报（衔接 R43） |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -489,7 +490,17 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 | [10/10] submit 就绪预检 | test-report/packaging/staging/build-closed 标记检查 | 警告 |
 
 > **W4 Pre-PR 独立审计不在 finish 内部**，在 `submit` 内部作为前置检查执行。
-> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**AI Review 监控**(5阶段)→**检视意见闭环校验**→**CI 监控**→**SKILL_FEEDBACK 自动生成**）。
+> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**preflight 硬闸 PF1-PF4**→**AI Review 监控**(5阶段)→**检视意见闭环校验**→**CI 监控（红→R44 diagnose 修复循环）**→**SKILL_FEEDBACK 自动生成**）。
+>
+> **⭐ PR 创建前置硬闸 PF1-PF4（v12.9，工具强制，不可绕过）**：
+> `create-pr` 是所有建 PR 路径（ohc submit / 手工 / harness 机器人）的唯一咽喉点，创建前自动执行：
+> - **PF1 单包闸**：一个 PR 只允许动一个 `archives/<字母>/<包>` 目录（JC6 同口径前置，多包捎带直接拦）
+> - **PF2 制品闸**：禁止提交压缩包/归档（JC3 同口径前置，源码仓只收源码与配方）
+> - **PF3 测试闸**：`test_package/conanfile.py` 的 `test()` 必须有 `self.run` 实际执行逻辑，空壳/print-only/pass-only 拦（L0c/R34 前置——建 PR 前拦截，省一轮 CI）
+> - **PF4 依赖闸**：conanfile 的 `requires/tool_requires` 逐个探测制品仓（conan.cnb.cool 公开 API），缺失 → 拦截并提示立即 `result --status dependency_missing` 上报终止，**禁止捎带适配依赖**（W1/R36 前置）
+>
+> 逃生口：`--no-preflight` / `OHC_PREFLIGHT=0`（自担风险，与 result 硬闸 `--no-ci-verify` 命名一致）。
+> 依据（goblinrs 744 PR 采样）：test() 空壳类 CI 失败 ~20%、多包捎带被 JC6 事后拦浪费整轮 CI——现在全部在建 PR 前拦。
 >
 > ⚠️ **完成标准（硬性）**：所有检视意见必须在讨论串内回复完毕（accept=修复+标记已解决 / reject=回复原因），闭环校验不通过不会进入 CI 监控；CI 必须 PASSED 才算流程完成。
 > AI 操作路径：`finish` → `submit`，两条命令，不可跳过。
@@ -523,6 +534,15 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 > **预算不足（R41 <40min）或显式跳过等待**：`--no-wait` / `OHC_SUBMIT_NO_WAIT=1`——PR 建后立即返回（partial 草稿已落），CI 结果交由平台/follow-up 任务处理（follow-up 只需 `submit --resume`，从断点续，不重跑 W1-W4）。
 >
 > 依据（task 3681 实测）：agent 建完 PR #4629 后**自己写 sleep 盲等** CI，等待中被节点超时杀死，result 未写被判 failed，90% 工作量丢失。教训不是"不等 CI"，而是"不裸等"：先落草稿，再用工具轮询，红了修到绿。
+>
+> **⭐ R44 CI 失败自诊断协议（R42 修复循环的失败分支细化，2026-08-26 新增，goblinrs 744 PR 采样教训）**：
+>
+> CI 红后的标准动作序列（submit --resume 的 HANDOFF 已内置此指引）：
+> 1. `python3 scripts/gitcode_pr.py diagnose --repo OpenHarmonyPCDeveloper/build_in_harmonyos --number <N>` —— 解析最新失败评论；CI 报 `类别: 未知` 时对评论内嵌的"失败步骤完整日志"做本地二次归类，输出 `本地归类 + 证据行 + 修复要点`（`--json` 供 harness 程序化消费）
+> 2. 按修复要点改代码 → 本地 W3 复验（不带着已知错误去撞 CI）→ `git push`
+> 3. `submit --resume <N>` 续监控；连续 2 轮同错误类别仍红 → 停损上报（R43 口径）
+>
+> 采样依据：open PR 中 CI 失败率 45%，其中 ~60% CI 报"未知"导致机器人无法自愈而反复盲推；test() 空壳类占 ~20%（现已被 preflight PF3 在建 PR 前拦截）。
 
 **前置条件**：test-report 存在 + Staging 验证完成 + conanfile.py 存在。
 **状态值**：`published`(verify通过+CI upload) | `built`(verify通过未upload) | `failed`(编译或验证失败) | `archived`(旧版本归档)。
@@ -940,3 +960,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.7 — 2026-08-20 — 垃圾拦截误伤审计与修复（CI 误拦截防护）：审计 JC（junk_check：JC1 状态文件/JC2 二进制/JC3 tarball/JC4 临时产物/JC5 archives 隐藏文件白名单/JC6 W2 原子性）与 KC（knowledge_check：草稿泄漏/占位符/非标准字段/index 一致性）对 v12.5-v12.6 新特性的交互，修复三处误伤链：①build Step 2.5 自动预扫描此前默认回写 hit_count → pre-scan-rules.yaml 属框架文件（_FRAMEWORK_PATHS）→ 每次本地构建后 W2 报"框架文件混入"误拦；改为管线内 writeback=False，回填仅限显式 `prescan` 命令；②engine 命中度量直写共享 E*.kv → 并发包 PR 在同一条目合并冲突 + PR 噪音；改为 gitignored 本地 sidecar knowledge/.metrics-local.json（kb-report 兼读 sidecar 与遗留字段）；③knowledge/recipes/catalog.tsv 取消 git 跟踪（语料事实源=archives/ 随 PR 天然共享，catalog 为本地可重建缓存，--rebuild 即得），杜绝每包 PR 携带追加 diff。.gitignore 增列三项本地文件。审计确认：KC4 字段黑名单为行首锚定（prescan_pattern 安全）、JC5 对 .pre-scan-report.yaml 无风险（落在 $TMPDIR/builds 仓库外）、KC2 占位符 grep 不受新字段影响。v12.6→v12.7*
 
 *SKILL.md v12.8 — 2026-08-20 — 5 PR 审计（6089/6091/6093/6096/6097）三项落地：①success 上报硬闸（result --status success 自动拉 PR 最新 CI 评论核验，非"校验通过"→拒绝写 success 降级 partial 并注明核验状态与重报路径；--no-ci-verify 显式逃生口；PR6096 教训：mcfly CI 红 cargo 不可用却报成功）；②W0b 历史经验核验（历史 notes.md 必读 + 环境语义可迁移性——"历史命令在 CI 环境逐字可执行吗"；mcfly 反例：设备 rustc 1.96 成功≠CI 无 Rust 可行；pdfsandwich 正例：设备 OCaml→tool_requires ocaml 4.14.1.1.4；历史踩坑命令必须逐项比对遵循）；③CI 能力矩阵（Rust ❌→env_unsupported；OCaml ❌系统级→tool_requires 可补；gcc/cmake ✅；冷门先实证）；④JC1 补 .bak/.orig/.rej/.ghfast-bak 备份残留模式（PR6091 教训：conandata.yml.ghfast-bak 混入，全仓库 0 先例）。v12.7→v12.8*
+
+*SKILL.md v12.9 — 2026-08-26 — goblinrs 744 PR 采样审计落地（harness 化三件套）：①PR 创建前置硬闸 PF1-PF4（scripts/ohc/preflight.py，挂在 gitcode_pr.py create-pr 咽喉点——所有建 PR 路径不可绕过）：PF1 单包闸（JC6 前置，多包捎带拦截，#6642 四包教训）/PF2 制品闸（JC3 前置，压缩包拦截）/PF3 测试闸（L0c/R34 前置，test() 空壳 AST 检测，省一轮 CI，采样占失败 20%）/PF4 依赖闸（W1/R36 前置，requires 逐个探测 conan.cnb.cool 制品仓，缺失即拦并引导 dependency_missing 上报）；逃生口 --no-preflight / OHC_PREFLIGHT=0（与 v12.8 --no-ci-verify 命名一致）。②R44 CI 失败自诊断协议：gitcode_pr.py diagnose 子命令——解析最新失败评论，CI 报"类别: 未知"（采样占 60%）时对评论内嵌失败日志本地二次归类（10 类错误表+证据行+修复要点，--json 供 harness 消费）；submit --resume 失败 HANDOFF 与 SKILL Step7 流程串联（diagnose→修复→W3 复验→push→resume，连续 2 轮同错停损衔接 R43）。③流程串联更新：R34 补 PF3 前置、R36 止损动作补 PF4 双层强制、提交流程图更新（finish→submit→push→preflight→AI Review→CI→R44 修复循环）。v12.8→v12.9*

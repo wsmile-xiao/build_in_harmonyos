@@ -51,6 +51,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.error
@@ -232,8 +233,37 @@ def cmd_setup(args):
             os.environ["GITCODE_TOKEN"] = old_token
 
 
+def _git_toplevel() -> str:
+    """当前工作目录所属 git 仓库根（preflight 用）。"""
+    import subprocess
+    r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                       capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise RuntimeError("当前目录不在 git 仓库内")
+    return (r.stdout or "").strip()
+
+
 def cmd_create_pr(args):
     """创建 Pull Request。"""
+    # ── PR 创建前置硬闸（v12.9）：所有建 PR 路径的唯一咽喉点 ──
+    # ohc submit / 手工 / harness 机器人最终都走到这里，PF1-PF4 不可绕过
+    if (not getattr(args, "no_preflight", False)
+            and os.environ.get("OHC_PREFLIGHT", "1") != "0"):
+        try:
+            sys.path.insert(0, str(os.path.dirname(os.path.abspath(__file__))))
+            from ohc.preflight import run_preflight
+            ok, probs = run_preflight(
+                _git_toplevel() or ".", args.target, args.source)
+        except Exception as e:  # fail-closed：预检本身挂了也拦
+            ok, probs = False, [f"PF0 环境闸: preflight 执行异常 ({e})"]
+        if not ok:
+            print("⛔ preflight 前置硬闸未通过，PR 创建被拦截：")
+            for p in probs:
+                print(f"  ✗ {p}")
+            print("  修复后重试；确认无误可 --no-preflight 显式跳过（自担风险）")
+            return None
+        print("✓ preflight PF1-PF4 通过（单包/无压缩包/test 实质/依赖在仓）")
+
     body = {
         "title": args.title,
         "head": args.source,
@@ -321,6 +351,148 @@ def cmd_get_comments(args):
         print("\n--- JSON ---")
         print(json.dumps(comments, ensure_ascii=False, indent=2))
     return comments
+
+
+# ── CI 失败本地分类器（R44 修复循环，v12.9）─────────────────────
+# CI 侧分类器大量落"未知"（采样 60 open PR 中 ~60%），机器人无法自愈。
+# 本表在 diagnose 时对评论内嵌的"失败步骤完整日志"做二次归类。
+_FAILURE_TABLE = [
+    (r"undefined reference|cannot find -l|ld returned \d+|multiple definition",
+     "链接失败",
+     "补齐链接库（conanfile 的 cpp_info.libs / Meson link_args），"
+     "检查 shared/static 选项与依赖版本匹配"),
+    (r"fatal error:|error: .*\.c|error: .*\.cpp|no member named|"
+     r"no matching function|invalid conversion|redeclared as",
+     "编译失败",
+     "对照上游源码修 include/宏/类型；补丁偏离上游时先在本地复现编译"),
+    (r"CMake Error|Could NOT find|CMake was unable to find",
+     "cmake 配置失败",
+     "检查 find_package 名称与 conan 生成目标的映射；"
+     "conanfile 里补 cmake_find_package 生成器/组件映射"),
+    (r"Missing prebuilt|Unable to find.*package|Dependency .* not found|"
+     r"not found in remotes|requirements .* not met",
+     "依赖缺失",
+     "核对 requires 版本是否在制品仓（preflight PF4 同口径）；"
+     "缺依赖 → result --status dependency_missing 上报，禁止捎带适配"),
+    (r"SyntaxError|AttributeError|ValidationError|"
+     r"ConanInvalidConfiguration|conanfile\.py.*error",
+     "配方错误",
+     "本地 conan create 干跑一遍配方；对照 L0-L9 结构检查与历史归档配方"),
+    (r"Hunk .* FAILED|patch .* (failed|does not apply)|marker not found",
+     "补丁失败",
+     "重新基于目标版本源码生成补丁（patch -p1 本地验证），"
+     "放弃直接复用旧版本补丁"),
+    (r"Permission denied|Operation not permitted|Read-only file system",
+     "权限问题",
+     "不要在源码目录写产物；产物路径走 build/，测试输出走 test_package"),
+    (r"timed out|timeout|Connection reset|Failed to download|"
+     r"curl.*([Ee]rror|[Ff]ailed)|Could not resolve host",
+     "网络问题",
+     "校验源码 URL 可达性（_probe 同款）；切换镜像/预下载后重试一次，"
+     "再失败按 external_dependency 停损"),
+    (r"No such file or directory",
+     "文件缺失",
+     "核对 conandata.yml 源码/补丁路径与实际文件名大小写一致"),
+    (r"L0c|L1e|test\(\).*self\.run|空壳|do_nothing",
+     "门禁拦截-测试空壳",
+     "test_package 的 test() 必须真实运行被测物（self.run 执行示例程序）"),
+]
+_TABLE_COMPILED = [(re.compile(p, re.I), cat, hint)
+                   for p, cat, hint in _FAILURE_TABLE]
+
+_FIELD = {
+    "类别": "category", "问题": "problem", "原因": "reason",
+    "修复指导": "guide", "构建包": "pkg",
+}
+
+
+def classify_failure_log(log_text: str):
+    """返回 (类别, 修复要点, 证据行 top5)。无命中 → (None, None, [])。"""
+    votes: dict[str, list[str]] = {}
+    lines = log_text.splitlines()
+    for rx, cat, hint in _TABLE_COMPILED:
+        for ln in lines:
+            if rx.search(ln):
+                votes.setdefault(cat, [])
+                if len(votes[cat]) < 5 and ln.strip() not in votes[cat]:
+                    votes[cat].append(ln.strip()[:200])
+                break  # 每规则取首个命中行即可
+    if not votes:
+        return None, None, []
+    # 命中规则数最多者优先（表序即优先级，稳定）
+    best = max(votes.items(), key=lambda kv: len(kv[1]))
+    hint = next(h for p, c, h in _FAILURE_TABLE if c == best[0])
+    return best[0], hint, best[1]
+
+
+def cmd_diagnose(args):
+    """CI 失败自诊断：解析最新失败评论，"未知"类别本地二次归类。"""
+    path = f"/repos/{args.repo}/pulls/{args.number}/comments"
+    params = {"per_page": 100, "page": 1}
+    all_comments = []
+    while True:
+        result = api_request("GET", path, params=params)
+        if not result:
+            break
+        all_comments.extend(result)
+        if len(result) < params["per_page"]:
+            break
+        params["page"] += 1
+
+    fails = [c for c in all_comments
+             if is_bot_user(c.get("user", {}).get("login", ""))
+             and "校验失败" in (c.get("body") or "")]
+    if not fails:
+        print(f"PR #{args.number}: 未找到 CI 校验失败评论（可能未跑/已通过）")
+        return
+    latest = fails[-1]
+    body = latest.get("body") or ""
+
+    fields = {}
+    for cn, en in _FIELD.items():
+        m = re.search(rf"\*\*{cn}\*\*[::]\s*(.+)", body)
+        if m:
+            v = m.group(1).strip()
+            v = re.sub(r"\s*<br\s*/?>\s*$", "", v).strip()
+            fields[en] = v
+    log_m = re.search(r"失败步骤完整日志\*?\*?\s*```\w*\n(.*?)```",
+                      body, re.S)
+    log_text = log_m.group(1) if log_m else ""
+
+    ci_cat = fields.get("category", "未知")
+    local_cat, hint, evidence = (None, None, [])
+    if ("未知" in ci_cat or not fields.get("category")) and log_text:
+        local_cat, hint, evidence = classify_failure_log(log_text)
+    elif fields.get("category"):
+        hint = next((h for p, c, h in _FAILURE_TABLE if c == ci_cat), None)
+
+    verdict = {
+        "pr": args.number, "time": format_time(latest.get("created_at")),
+        "pkg": fields.get("pkg", ""), "ci_category": ci_cat,
+        "local_category": local_cat or ci_cat,
+        "hint": hint or "", "evidence": evidence,
+        "next": "修复 → git push → ohc-run.py submit --resume "
+                f"#{args.number} 监控 CI → 绿后 ohc-run.py result --status success",
+    }
+    if args.json:
+        print(json.dumps(verdict, ensure_ascii=False, indent=1))
+        return
+    print("══════ CI 失败自诊断 ══════")
+    print(f"PR #{verdict['pr']} | {verdict['time']} | 包: {verdict['pkg'] or '?'}")
+    print(f"CI 侧分类: {ci_cat}")
+    if local_cat:
+        print(f"本地归类:   {local_cat}（CI 报未知，由日志二次判定）")
+    if verdict["hint"]:
+        print(f"修复要点:   {verdict['hint']}")
+    if evidence:
+        print("证据行:")
+        for e in evidence:
+            print(f"  · {e}")
+    if fields.get("problem"):
+        print(f"CI 问题:    {fields['problem'][:200]}")
+    if fields.get("reason"):
+        print(f"CI 原因:    {fields['reason'][:200]}")
+    print(f"下一步: {verdict['next']}")
 
 
 def cmd_ci_status(args):
@@ -898,7 +1070,17 @@ def main():
     p.add_argument("--title", required=True, help="PR 标题")
     p.add_argument("--description", help="PR 描述")
     p.add_argument("--milestone", type=int, help="里程碑编号")
+    p.add_argument("--no-preflight", action="store_true",
+                   help="跳过 PR 创建前置硬闸 PF1-PF4（自担风险；"
+                        "OHC_PREFLIGHT=0 等效）")
     p.set_defaults(func=cmd_create_pr)
+
+    # diagnose
+    p = sub.add_parser("diagnose", help="CI 失败自诊断（R44 修复循环入口）")
+    p.add_argument("--repo", required=True)
+    p.add_argument("--number", type=int, required=True, help="PR 编号")
+    p.add_argument("--json", action="store_true", help="输出 JSON 供 harness 解析")
+    p.set_defaults(func=cmd_diagnose)
 
     # get-pr
     p = sub.add_parser("get-pr", help="获取单个 PR 详情")
