@@ -2,98 +2,89 @@
 
 ## 编译环境
 - 构建系统: meson
-- 编译日期: 2026-05-29
+- 编译日期: 2026-08-25
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
-1. **依赖编译（特殊处理）**：
-   - libpcre2 10.42: 使用CMake替代autotools（因HMDFS临时文件限制E091）
-   - glib 2.88.0: 预编译包安装
-   - gio 2.88.0: 预编译包安装（依赖libpcre2、libffi）
-   - json-glib 1.6.6: 预编译包安装
+1. **依赖安装（conan）**：
+   - json-glib/1.6.6: 通过 conan install 安装（传递依赖 glib/2.84.0, pcre2/10.40, libffi/3.4.4）
 
 2. **主软件编译**：
    ```bash
    meson setup builddir --prefix=$HOME/usr/local \
+     --native-file=conan_meson_native.ini \
      -Dwith_introspection=false \
      -Dwith_vapi=false \
-     -Denable_tests=false
-   ninja
-   ninja install DESTDIR=$TEST_PREFIX
+     -Denable_tests=false \
+     -Denable_gtk_doc=false
+   ninja -C builddir
+   ninja -C builddir install
    ```
 
-3. **质量门禁验证**：
+3. **Conan 配方验证**：
    ```bash
-   python3 $SKILL_ROOT/scripts/ohc-run.py verify-build jsonrpc-glib 3.44.0
+   python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify jsonrpc-glib 3.44.0
    ```
 
 ## 遇到的问题与解决方案
 
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
-| 1 | libpcre2 autotools失败 | HMDFS临时文件创建限制（E091） | 使用CMake替代autotools编译libpcre2 10.42 |
-| 2 | gobject-introspection依赖缺失 | 可选依赖无预编译包 | 通过meson选项禁用：-Dwith_introspection=false |
-| 3 | meson make步骤失败 | meson使用ninja而非make | 手动执行ninja编译 |
+| 1 | meson找不到clang | conan_meson_native.ini未通过--native-file传入 | 使用--native-file=conan_meson_native.ini |
+| 2 | meson找不到llvm-ar | native file缺少ar/ranlib路径 | _inject_meson_archive_tools()注入 |
+| 3 | gnome.genmarshal失败 | glib-2.0.pc缺少glib_genmarshal变量 | _create_glib_pkg_config_aliases()注入变量 |
+| 4 | gio-2.0.pc缺失 | glib 2.84.0 flat cpp_info无独立组件 | 创建gio-2.0.pc别名(复制glib-2.0.pc并改名) |
+| 5 | CMakeDeps不传播glib头文件 | E216: Conan 2.29 CMakeDeps组件传播失效 | test_package改用PkgConfigDeps+Meson |
+| 6 | test.c include路径错误 | headers在include/jsonrpc-glib-1.0/下 | #include <jsonrpc-glib.h> |
+| 7 | CI L0d stub_test_method | test()方法缺少self.run() | 改用self.run()直接运行测试二进制 |
 
-## 特殊处理
+## 依赖链
 
-### libpcre2依赖编译
-- **问题**: HMDFS autotools临时文件创建限制
-- **方案**: 使用CMake替代autotools编译libpcre2 10.42
-- **原因**: config.status无法创建临时文件（E091）
-- **记录**: 主编批准的特殊方案（平台限制）
-
-### 依赖链
-1. libpcre2 10.42 (CMake手动编译，启用PIC)
-2. glib 2.88.0 (预编译包)
-3. gio 2.88.0 (预编译包)
-4. json-glib 1.6.6 (预编译包)
-5. jsonrpc-glib 3.44.0 (meson编译)
+1. libffi/3.4.4 (conan 预编译包)
+2. pcre2/10.40 (conan 预编译包)
+3. glib/2.84.0 (conan 预编译包, 含 gio/gobject/gmodule/gthread)
+4. json-glib/1.6.6 (conan 预编译包)
+5. jsonrpc-glib 3.44.0 (meson 编译)
 
 ## 源码修改
 
 无补丁文件（meson配置禁用可选功能，无源码修改）
 
-## 依赖版本
-
-| 依赖 | 版本 | 来源 |
-|------|------|------|
-| libpcre2-8 | 10.42 | CMake手动编译 |
-| glib-2.0 | 2.88.0 | 预编译包 |
-| gio-2.0 | 2.88.0 | 预编译包 |
-| json-glib-1.0 | 1.6.6 | 预编译包 |
-| libffi | 3.4.4 | 预编译包 |
-
 ## 验证结果
 
-```bash
-pkg-config --modversion jsonrpc-glib-1.0
-# 输出: 3.44.0
+- conan create: PASS (G1-G4 + L2/L4/L5 全通过)
+- test_package: meson + PkgConfigDeps, self.run() 直接运行测试二进制
+- 测试内容: jsonrpc_server_new() + jsonrpc_server_get_type() 验证
 
-ls -lh ~/usr/local/lib/libjsonrpc-glib-1.0.so.1.4400.0
-# 输出: -rwxr-x--- 1 ... 5.2M 2026-05-29 12:28
-```
+## 关键设计决策
+
+### 1. PkgConfigDeps 替代 CMakeDeps (test_package)
+- **问题**: glib 2.84.0 conan recipe 使用 flat cpp_info（无组件），CMakeDeps 不传播
+  INTERFACE_INCLUDE_DIRECTORIES 到下游消费者（E216）
+- **方案**: test_package 使用 PkgConfigDeps + Meson，通过 .pc 文件的 Requires 字段
+  正确传递传递依赖的头文件路径
+
+### 2. glib_genmarshal 变量注入
+- **问题**: glib 2.84.0 conan recipe 生成的 glib-2.0.pc 不含 glib_genmarshal 变量
+- **方案**: _create_glib_pkg_config_aliases() 方法从 prefix 解析 glib-genmarshal 路径
+  并注入到 .pc 文件
+
+### 3. gio-2.0.pc 别名创建
+- **问题**: glib 2.84.0 conan recipe 不使用组件，PkgConfigDeps 只生成 glib-2.0.pc
+- **方案**: 从 glib-2.0.pc 复制创建 gio-2.0.pc, gobject-2.0.pc 等别名文件
 
 ## 交付物
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libjsonrpc-glib-1.0.so.1.4400.0 | 5.2M | 共享库（动态链接） |
-| jsonrpc-glib-1.0.pc | 0.5K | pkg-config文件 |
-| include/jsonrpc-glib-1.0/*.h | 9个文件 | 头文件 |
-| jsonrpc-glib-3.44.0-release.tar.gz | 5.3M | 预编译包 |
+| 文件 | 说明 |
+|------|------|
+| conanfile.py | Conan 配方（meson + PkgConfigDeps） |
+| conandata.yml | 源码 URL + SHA256 |
+| test_package/ | meson + PkgConfigDeps 测试 |
+| manifest.yaml | 编译元数据 |
+| notes.md | 适配笔记 |
+---
 
-## 注意事项
-
-1. **HMDFS平台限制**：autotools构建系统无法创建临时文件，需使用CMake或手动指定系统类型
-2. **可选依赖处理**：gobject-introspection功能已禁用（-Dwith_introspection=false）
-3. **知识提取**：创建E091知识条目（HMDFS autotools临时文件限制）
-
-## 知识提取
-
-- E091: HMDFS autotools临时文件创建限制
-  - 影响：所有使用GNU autotools的软件
-  - 方案：使用CMake替代或手动修改config.guess
-  - 平台：HarmonyOS HMDFS
+**编译结束**: 2026-08-25 00:40
+**最终状态**: built
