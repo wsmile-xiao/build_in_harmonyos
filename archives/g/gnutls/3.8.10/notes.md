@@ -55,3 +55,7 @@ $ pkg-config --modversion gnutls
 ## 注意事项
 - psktool 未编译成功，但不影响 gnutls 主库使用
 - 需要链接 libintl 库
+---
+
+**编译结束**: 2026-08-25 02:55
+**最终状态**: built
