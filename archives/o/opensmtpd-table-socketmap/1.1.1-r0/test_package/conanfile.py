@@ -1,34 +1,22 @@
-#!/usr/bin/env python3
-"""Conan test_package template — Conan L1 official test.
-
-This is the L1 test in the five-level test system.
-CI runs this automatically via `conan create` (which invokes test_package).
-
-File location: archives/{letter}/opensmtpd-table-socketmap/{version}/test_package/conanfile.py
-"""
 import os
 
 from conan import ConanFile
-from conan.tools.cmake import CMake, cmake_layout
 
 
-class OpensmtpdtablesocketmapTestConan(ConanFile):
-    settings = "os", "compiler", "build_type", "arch"
-    generators = "CMakeDeps", "CMakeToolchain"
+class OpensmtpdTableSocketmapTestConan(ConanFile):
+    """test_package for executable packages — runs test.sh which invokes the binary."""
+    settings = "os", "arch", "compiler", "build_type"
+    generators = "VirtualRunEnv"
+    test_type = "explicit"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
 
-    def layout(self):
-        cmake_layout(self)
-
-    def build(self):
-        cmake = CMake(self)
-        cmake.configure()
-        cmake.build()
-
     def test(self):
-        cmake = CMake(self)
-        cmake.test()
-        # Alternatively, run the binary directly:
-        # self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_opensmtpd-table-socketmap')}", env="conanrun")
+        # Resolve the binary path from the installed package
+        dep = self.dependencies["opensmtpd-table-socketmap"]
+        bin_path = os.path.join(dep.package_folder, "bin", "table-socketmap")
+        # OHOS: /system/bin/sh (mksh) cannot execute ELF binaries.
+        # Use bash to wrap binary execution.
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run(f'{bash} test.sh "{bin_path}"', env="conanrun")
