@@ -20,7 +20,6 @@ class LxqtmenudataConan(ConanFile):
     homepage = "https://github.com/lxqt/lxqt-menu-data"
     url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
 
-    package_type = "build-scripts"
 
     # Pure data package: no settings, options, or build steps
 
