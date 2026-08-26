@@ -3,13 +3,14 @@
 
 L1 test: Verifies the package can be consumed and the library works correctly.
 CI runs this automatically via `conan create` (which invokes test_package).
+
+R33: compiler paths come from Conan profile, no shell env vars.
+R34: test() calls self.run() to execute the test binary (not a stub).
 """
 import os
-import shutil
-import re
 
 from conan import ConanFile
-from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
+from conan.tools.cmake import CMake, cmake_layout
 
 
 class DoubleConversionTestConan(ConanFile):
@@ -23,30 +24,12 @@ class DoubleConversionTestConan(ConanFile):
         cmake_layout(self)
 
     def build(self):
-        # Fix compiler paths in generated toolchain before building
-        toolchain_file = os.path.join(self.generators_folder, "conan_toolchain.cmake")
-        if os.path.isfile(toolchain_file):
-            cc = shutil.which(os.environ.get("CC", "clang")) or "clang"
-            cxx = shutil.which(os.environ.get("CXX", "clang++")) or "clang++"
-            with open(toolchain_file, "r") as f:
-                content = f.read()
-            content = re.sub(
-                r'set\(CMAKE_C_COMPILER "[^"]*"\)',
-                f'set(CMAKE_C_COMPILER "{cc}")',
-                content
-            )
-            content = re.sub(
-                r'set\(CMAKE_CXX_COMPILER "[^"]*"\)',
-                f'set(CMAKE_CXX_COMPILER "{cxx}")',
-                content
-            )
-            with open(toolchain_file, "w") as f:
-                f.write(content)
-
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
 
     def test(self):
-        cmake = CMake(self)
-        cmake.test()
+        # OHOS: /system/bin/sh (mksh) cannot execute ELF binaries.
+        # Use bash to wrap binary execution.
+        bash = os.environ.get("CONFIG_SHELL") or "/data/service/hnp/bin/bash"
+        self.run(f"{bash} -c './test_double-conversion'", env="conanrun")
