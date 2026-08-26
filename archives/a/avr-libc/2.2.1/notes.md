@@ -100,8 +100,8 @@ CI_PACKAGES="archives/a/avr-libc/2.2.1" zsh ci/conan/build_and_test.sh
 
 ## 知识草稿
 
-本次适配形成了仅与 `avr-libc` 直接相关的可复用知识草稿：
-`knowledge/avr-libc-harmonyos-cross-toolchain-draft.md`。草稿归纳了交叉 sysroot
-包边界、三层 AVR 工具链拓扑、HMDFS Autotools 启动、`avr-gcc -B` 工具派发、
-MCU/multilib 选择、测试覆盖口径及常见故障定位，可作为后续同类交叉工具链
-适配的候选知识材料。
+本次适配按仓库知识库贡献规范提交成对草稿：
+`knowledge/drafts/E338-draft-avr-libc-cross-sysroot.kv` 与
+`knowledge/drafts/E338-draft-avr-libc-cross-sysroot.md`。草稿归纳交叉 sysroot
+包边界、`avr-gcc -B` 工具派发、MCU/multilib 选择和测试覆盖口径；HMDFS 的
+通用权限问题仅关联既有 E011、E129、E206、E223，避免重复贡献。
