@@ -166,6 +166,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --list-available
 curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh" | sh -s -- <软件名> <版本>
 ```
 
+## 项目设计
+![SKILL整体运行流程图.png](https://raw.gitcode.com/user-images/assets/9320602/fe72d4e1-0a03-4672-9634-d0155180a6ea/SKILL整体运行流程图.png 'SKILL整体运行流程图.png')
 ## 相关文档
 
 | 文档 | 说明 |
@@ -177,6 +179,7 @@ curl -fsSL "https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/downloa
 | [docs/TEST_QUALITY_SPEC.md](docs/TEST_QUALITY_SPEC.md) | 测试质量规范（5 层防御门禁） |
 | [references/iron-rules.md](references/iron-rules.md) | 32 条铁律详解 |
 | [SUMMARY.md](SUMMARY.md) | 软件兼容性总览（自动生成） |
+
 
 ## 许可证
 
