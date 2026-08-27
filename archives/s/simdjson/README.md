@@ -1,100 +1,45 @@
-# simdjson 4.6.3 for HarmonyOS
+# simdjson for HarmonyOS
 
-## 概述
+## Overview
 
-simdjson 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+simdjson is a JSON parser that uses SIMD instructions to achieve extremely high parsing throughput. This package provides the simdjson library adapted for HarmonyOS/OpenHarmony (aarch64).
 
-## 软件信息
+## Software Info
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | simdjson |
-| 版本 | 4.6.3 |
-| 下载地址 | https://github.com/simdjson/simdjson/archive/refs/tags/v4.6.3.tar.gz |
-| 官方文档 | {文档链接} |
+| Field | Value |
+|-------|-------|
+| Name | simdjson |
+| Version | 4.6.3 |
+| Source | https://github.com/simdjson/simdjson/archive/refs/tags/v4.6.3.tar.gz |
+| License | Apache-2.0 |
+| Homepage | https://simdjson.org/ |
 
-## 鸿蒙环境
-
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
-
-## 编译步骤
+## Build
 
 ```bash
-# 1. 下载源码
-wget https://github.com/simdjson/simdjson/archive/refs/tags/v4.6.3.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
-
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
-
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
-
-# 4. 编译
-make -j$(nproc)
-
-# 5. 安装
-make install
+# Conan-based build (recommended)
+conan create . --user=ohpcd --channel=stable -pr:h=ci/conan/profiles/ohos-aarch64
 ```
 
-## 补丁说明
+## Dependencies
 
-### 0001-xxx.patch
+None. simdjson is self-contained, only requires system pthread.
 
-**目的**: {补丁用途说明}
-
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
-
-**关键修改详解**:
-
-```diff
-# 关键代码片段
-```
-
-## 遇到的问题
-
-### 问题1: {问题描述}
-
-**现象**: {错误信息}
-
-**原因**: {根因分析}
-
-**解决**: {解决方案}
-
-## 测试结果
-
-详见 [test-report.md](./reports/test-report.md)
-
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
+## Installation
 
 ```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
+# Install via Conan
+conan install --requires="simdjson/4.6.3@ohpcd/stable" -pr:h=ci/conan/profiles/ohos-aarch64
 ```
 
-## 经验总结
+## Usage
 
-1. {经验1}
-2. {经验2}
+```cpp
+#include <simdjson.h>
 
-## 参考资料
+simdjson::ondemand::parser parser;
+auto json = simdjson::padded_string::load("data.json");
+auto doc = parser.iterate(json);
+```
 
-- {参考链接1}
-- {参考链接2}
+Link with: `-lsimdjson -lpthread`
