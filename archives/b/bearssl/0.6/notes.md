@@ -26,3 +26,11 @@
 | 文件 | 大小 | 说明 |
 |------|------|------|
 | bearssl-0.6-ohos-aarch64.tar.gz | 1.5MB | 预编译包 |
+---
+
+**编译结束**: 2026-08-27 16:33
+**最终状态**: built
+
+## Conan 适配
+Conan recipe generated and verified via conan-verify (G1-G4 + L2/L4/L5 all PASS).
+W3 local CI simulation passed. W4 Pre-PR audit passed (verdict: PASS).
