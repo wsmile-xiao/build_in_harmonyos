@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.10.1
+version: 12.10.2
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -981,3 +981,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.10 — 2026-08-26 — SKILL_FEEDBACK 防丢失协议（修复"建 PR(12) 与建 FEEDBACK(13) 间隙丢失"bug，R45）：旧流程三条丢失路径（CI 绿后生成前死亡→回收即永久丢；失败分支从不生成→幸存者偏差；只写本地不 commit→main 13 个文件属零星漏网）。工具化五件套：①骨架前置——PR 创建瞬间与 R42 result 草稿同步生成 feedback 骨架（ensure_feedback_skeleton，幂等，resume 补齐旧任务）；②事件累积——HANDOFF/CI 红绿/pr_created 经 _emit_submit_handoff 单一咽喉自动进 .feedback-state.json 并刷入骨架"过程事件时间线"（EVENTS 标记块，自动统计 HANDOFF/重试次数）；③终态兜底——result 写盘自动 feedback_pending_flag：缺失补骨架 + result.json 落 feedback_pending 字段供 ECS 回收前判断收割（失败任务同样产出经验）；④完成入仓——feedback --resume 闭环 rc=0 时自动 commit+push 任务分支随 PR 进 main（只推终稿防 CI 重跑；.feedback-state.json 属 JC5 未白名单文件不入仓；OHC_FEEDBACK_PUSH=0 逃生口，命名对齐 v12.8 --no-ci-verify/v12.9 --no-preflight）；⑤收割对接——post-merge 同时收割旧路径 archives/.../reports/skill-feedback.md 与新路径 feedback/SKILL_FEEDBACK_<id>.md（旧链路基本空转）。cmd_feedback 重构：骨架存在时复用同 id 同文件（不产孤儿文件），两条路径均先刷事件再校验占位符；resume 完成分支补落 status=complete（供 feedback_status/ECS 判断）。AI 唯一动作不变：终局填 4 建议占位符+效率/检视小节。测试 25 项（骨架幂等/孤儿防护/事件刷新/pending 兜底/入仓分支保护/状态闭环）。v12.9→v12.10
 
 *SKILL.md v12.10.1 — 2026-08-27 — JC5 事故修复（lua-mimetypes 1.0 首个 v12.10 bot 任务踩中）：v12.10 把 .feedback-state.json 写进 archives/<l>/<sw>/<ver>/ 且 .gitignore 无此条目 → bot 提交进 PR → JC5 未登记隐藏文件拦截。修复三件：①状态文件迁出 archives 树至顶层 .ohc/feedback-state/<l>/<sw>/<ver>.json（_state_path 统一计算；JC5 只扫 archives/，顶层天然安全）；②_load_feedback_state 自动迁移——发现 archives 内遗留副本即读出→写入新位置→删除旧文件（worker 磁盘自清洁）；③.gitignore 加 .ohc/ 与 **/.feedback-state.json 双保险（任何位置的遗留副本永不再被 add）。FEEDBACK 报告位置不变：顶层 feedback/SKILL_FEEDBACK_<id>.md（与 knowledge 同级，随 PR 入仓）；运行时状态与报告分离——状态属 harness 私有（.ohc/，永不入 PR），报告属交付物（feedback/，闭环后入仓）。R45 文案同步修正。v12.10→v12.10.1
+
+*SKILL.md v12.10.2 — 2026-08-27 — L0n 分支名校验全量化（CI 侧）：废除按 PR 编号分档的宽容逻辑（5200/6000 两阈值系规则上线时给存量 PR 留的活口，当前 PR 编号已 6600+ 且存量 PR 已全部关闭/适配，宽容档只剩死代码）。变更：后缀型分支（含 包名-版本 但带额外后缀，如 abc-1.0.0-ASDH）与完全不包含 包名-版本 的分支一律硬失败（L0_FAILED/branch_name_r40），不再区分 PR 编号；CI_PR_NUMBER 变量从脚本中完全移除。保留：前缀剥离（feat/fix/upgrade/任意）、+→- 版本归一化、REL/main/master/server 跳过。Git bash 7 场景模拟验证（精确/前缀/后缀/不含/main/空分支）。v12.10.1→v12.10.2

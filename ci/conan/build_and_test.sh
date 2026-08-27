@@ -749,13 +749,11 @@ PYEOF
     fi
 
     # ── L0n: 分支名与包名-版本匹配校验 (R40) ──
-    # 两档策略（按 PR 编号划分，避免已提交 PR 无法适配新规则）：
-    #   PR > 6000   精确匹配：剥掉可选前缀（如 feat/）后必须精确等于 {pkg_name}-{pkg_ver}
-    #               通过: abc-1.0.0 / feat/abc-1.0.0 / fix/abc-1.0.0
-    #               拦截: abc-1.0.0-ASDH（带后缀，平台任务按分支名完全一致匹配会关联失败）
-    #   PR <= 6000  包含匹配：分支包含 {pkg_name}-{pkg_ver} 即可（历史 PR 宽容，
-    #               允许 feat/abc-1.0.0-ASDH 这类旧后缀分支）
-    #   完全不包含 包名-版本 的分支：PR > 5200 仍强制失败; PR <= 5200 仅告警
+    # 全量拦截（v12.10.2 起废除按 PR 编号分档——当前 PR 编号已 6600+，
+    # 5200/6000 宽容档只剩历史意义，存量 PR 已全部关闭/适配完毕）：
+    #   精确匹配：剥掉可选前缀（如 feat/）后必须精确等于 {pkg_name}-{pkg_ver}
+    #   通过: abc-1.0.0 / feat/abc-1.0.0 / fix/abc-1.0.0
+    #   拦截: abc-1.0.0-ASDH（带后缀）/ 完全不包含包名-版本 —— 一律硬失败
     # 归一化：+ → -（Debian 风格版本后缀如 1.4+dfsg.1 → 1.4-dfsg.1）
     # REL 构建或 main/master/server 分支自动跳过
     if [ -n "${CI_BRANCH:-}" ] && [ "${CI_BRANCH}" != "main" ] \
@@ -769,41 +767,30 @@ PYEOF
         if [ "${BRANCH_BASE}" = "${EXPECTED_TAG_NORM}" ]; then
             echo "        [ok] L0n: branch '${CI_BRANCH}' matches '${EXPECTED_TAG}' exactly (prefix allowed)"
         else
-            _pr_num="${CI_PR_NUMBER:-0}"
             case "${BRANCH_NORM}" in
                 *"${EXPECTED_TAG_NORM}"*)
-                    # 包含但不精确（历史后缀型分支，如 abc-1.0.0-ASDH）
-                    if [ "${_pr_num}" -gt 6000 ] 2>/dev/null; then
-                        echo "[error] L0n: branch name mismatch (R40) — PR #${_pr_num} > 6000 要求精确匹配"
-                        echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）≠ '${EXPECTED_TAG}'（不允许后缀）"
-                        echo "[hint] 分支名必须以 包名-版本号 结尾，不允许加任何后缀，例如："
-                        echo "         ${pkg_name}-${pkg_ver}"
-                        echo "         feat/${pkg_name}-${pkg_ver}"
-                        echo "         fix/${pkg_name}-${pkg_ver}"
-                        echo "         upgrade/${pkg_name}-${pkg_ver}"
-                        echo "       ❌ 错误示例: ${pkg_name}-${pkg_ver}-ASDH / ${pkg_name}-${pkg_ver}_2"
-                        echo "       平台按 分支名完全一致 + 作者 匹配任务；任务分支前缀=任务类型"
-                        echo "       （feat=新适配/fix=修复/upgrade=升级），请在平台任务详情复制分支名"
-                        L0_FAILED=true
-                        L0_ERRORS="${L0_ERRORS} branch_name_r40"
-                    else
-                        echo "[warn] L0n: branch contains '${EXPECTED_TAG}' but not exact — PR #${_pr_num} <= 6000, 仅告警不拦截"
-                        echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）带额外后缀，≠ '${EXPECTED_TAG}'"
-                    fi
+                    # 包含但不精确（后缀型分支，如 abc-1.0.0-ASDH）
+                    echo "[error] L0n: branch name mismatch (R40) — 分支名带额外后缀，要求精确匹配"
+                    echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）≠ '${EXPECTED_TAG}'（不允许后缀）"
+                    echo "[hint] 分支名必须以 包名-版本号 结尾，不允许加任何后缀，例如："
+                    echo "         ${pkg_name}-${pkg_ver}"
+                    echo "         feat/${pkg_name}-${pkg_ver}"
+                    echo "         fix/${pkg_name}-${pkg_ver}"
+                    echo "         upgrade/${pkg_name}-${pkg_ver}"
+                    echo "       ❌ 错误示例: ${pkg_name}-${pkg_ver}-ASDH / ${pkg_name}-${pkg_ver}_2"
+                    echo "       平台按 分支名完全一致 + 作者 匹配任务；任务分支前缀=任务类型"
+                    echo "       （feat=新适配/fix=修复/upgrade=升级），请在平台任务详情复制分支名"
+                    L0_FAILED=true
+                    L0_ERRORS="${L0_ERRORS} branch_name_r40"
                     ;;
                 *)
-                    # 完全不包含 包名-版本（PR > 5200 强制失败, PR <= 5200 仅告警）
-                    if [ "${_pr_num}" -gt 5200 ] 2>/dev/null; then
-                        echo "[error] L0n: branch name mismatch (R40) — 分支完全不包含 包名-版本号"
-                        echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）不包含 '${EXPECTED_TAG}'"
-                        echo "[hint] 分支名必须以 包名-版本号 结尾，例如："
-                        echo "         ${pkg_name}-${pkg_ver} / feat/${pkg_name}-${pkg_ver} / fix/${pkg_name}-${pkg_ver}"
-                        L0_FAILED=true
-                        L0_ERRORS="${L0_ERRORS} branch_name_r40"
-                    else
-                        echo "[warn] L0n: branch name mismatch (R40) — PR #${_pr_num} <= 5200, 仅告警不拦截"
-                        echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）≠ '${EXPECTED_TAG}'"
-                    fi
+                    # 完全不包含 包名-版本
+                    echo "[error] L0n: branch name mismatch (R40) — 分支完全不包含 包名-版本号"
+                    echo "       分支 '${CI_BRANCH}'（去前缀后 '${BRANCH_BASE}'）不包含 '${EXPECTED_TAG}'"
+                    echo "[hint] 分支名必须以 包名-版本号 结尾，例如："
+                    echo "         ${pkg_name}-${pkg_ver} / feat/${pkg_name}-${pkg_ver} / fix/${pkg_name}-${pkg_ver}"
+                    L0_FAILED=true
+                    L0_ERRORS="${L0_ERRORS} branch_name_r40"
                     ;;
             esac
         fi
