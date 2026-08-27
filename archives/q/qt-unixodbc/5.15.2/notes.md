@@ -1,83 +1,45 @@
 # qt-unixodbc 5.15.2 适配笔记
 
 ## 编译环境
-- 构建系统: custom (手动clang++编译)
-- 编译日期: 2026-06-12
-- 编译器: clang/clang++
+- 构建系统: custom (手动clang++编译 + vendored unixODBC)
+- 编译日期: 2026-08-26
+- 编译器: clang/clang++ (from Conan profile)
 - 状态: built
 
-## 编译步骤
+## Conan 适配
+### 依赖
+- qt5-qtbase/5.15.2.2 (conan): Qt5Core headers, libraries, moc tool
+- unixODBC 2.3.12 (vendored): built from source within recipe
 
-### 初始化
-- 下载qtbase 5.15.2源码 (qtbase-everywhere-src-5.15.2.tar.xz)
-- 本地已有qtbase 5.12.12源码 (qt-harmonyos-src-5.12.12-20260330)
+### 构建流程
+1. 下载 qtbase 5.15.2 源码
+2. 下载并编译 unixODBC 2.3.12 源码 (vendored, E011 umask fix via Python)
+3. 使用 qt5-qtbase conan 包的 moc 工具生成 moc 文件
+4. 从 qtbase 源码编译 Qt5Sql 库
+5. 从 qtbase 源码编译 ODBC 驱动插件
+6. 打包 libqsqlodbc.so, libQt5Sql.so, libodbc.so 等
 
-### 编译
-- 使用qtbase 5.12.12源码中的odbc驱动源代码（ABI兼容）
-- 手动使用clang++编译，指定Qt5 5.12.12 headers（排除Qt6 headers）
-- 使用Qt5 moc工具生成main.moc
-- 链接libodbc、Qt5Sql、Qt5Core、ohenvironment
-- 应用补丁：0001-src-plugins-sqldrivers-odbc-qsql_odbc.cpp.patch
-
-### 关键编译参数
-```bash
-clang++ -c -pipe -O2 -std=c++14 -Wall -Wextra -Wno-deprecated-declarations -D_REENTRANT -fPIC \
-  -DQT_NO_CAST_TO_ASCII -DQT_NO_CAST_FROM_ASCII -DQT_NO_DEBUG \
-  -DQT_PLUGIN -DQT_SQL_LIB -DQT_CORE_LIB \
-  -I[odbc-src] \
-  -I[qt5-release-include] \
-  -I[qt5-release-include/QtCore/5.12.12/QtCore/private] \
-  -I[qt5-release-include/QtSql/5.12.12/QtSql/private] \
-  -I[usr/local/include] \
-  qsql_odbc.cpp main.cpp
-
-clang++ -shared -o libqsqlodbc.so qsql_odbc.o main.o \
-  -L~/usr/local/lib -lQt5Sql -lQt5Core -lodbc -lohenvironment \
-  -Wl,-rpath,~/usr/local/lib -Wl,-soname,libqsqlodbc.so
-```
-
-## 源码修改
-- 0001-src-plugins-sqldrivers-odbc-qsql_odbc.cpp.patch: 修复ODBC驱动源码在OHOS环境的兼容性问题
-
-## 遇到的问题与解决方案
-
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | qtbase 5.15.2源码无法编译odbc插件 | 安装的headers是混合Qt5(5.12.12)/Qt6(6.11.1)，Qt6 headers API不兼容Qt5源码 | 使用qtbase 5.12.12源码（ABI兼容），指定Qt5 5.12.12 headers |
-| 2 | Qt6 moc生成Qt6风格的moc输出 | ~/usr/local/libexec/moc是Qt6版本 | 使用Qt5 moc工具(~/tmp/qt5-tools-cmake-build/build-moc/moc) |
-| 3 | ODBC驱动源码兼容性问题 | qsql_odbc.cpp中部分代码不兼容OHOS环境 | 应用补丁修复源码兼容性 |
-| 4 | 运行时dlopen加载失败 | OHOS平台要求所有动态库必须ELF签名 | 平台限制，编译产物本身正确，需在部署时完成ELF签名 |
-
-## 依赖版本
-- Qt5 Core/Sql: 5.12.12 (headers)
-- unixODBC: libodbc.so.2
-- ohenvironment: OHOS平台适配库
+### 关键决策
+- Qt5Sql 从源码编译: qt5-qtbase 使用 -no-feature-sql 禁用了 SQL 模块
+- unixODBC vendored: 未发布到 conan 制品仓
+- ohenvironment 不需要: OHOS 平台适配已通过补丁内置到 Qt5Core
+- 版本化文件: HMDFS 不支持 symlink, libQt5Sql.so 需创建版本副本
 
 ## 验证结果
+- conan create: 通过 (build + test_package)
+- W3 本地 CI: 通过
+- 产物: libqsqlodbc.so (162KB), libQt5Sql.so (236KB), libodbc.so 等
 
-```bash
-# 查看libqsqlodbc.so依赖
-readelf -d libqsqlodbc.so | grep NEEDED
-# libQt5Sql.so, libQt5Core.so, libodbc.so.2, libc++_shared.so, libc.so
-
-# 查看驱动键
-# QODBC3, QODBC
-
-# 查看导出符号
-nm -D libqsqlodbc.so | wc -l
-# 73 exported symbols including open, close, beginTransaction, commitTransaction, rollbackTransaction, cleanup, endTrans
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libqsqlodbc.so | ~138KB | Qt5 unixODBC SQL驱动插件 |
-
-## 注意事项
-- 运行时需要 ELF 签名才能通过 dlopen 加载（OHOS平台限制）
-- 编译需指定 Qt5 headers，排除混合环境中的 Qt6 headers
-- 需要安装 unixODBC 库和配置 ODBC 数据源才能实际使用
-
-**编译结束**: 2026-06-12
 **最终状态**: built
+
+## 2026-08-26 CI 修复
+
+### CI 失败原因分析
+1. 第一次 CI (2026-08-09 build #16485): 通过
+2. 重跑 CI (2026-08-22 build #29445): 源码下载超时 (unixodbc.org 不可达)
+3. 重跑 CI (2026-08-22 build #29451): Autotools configure 失败 (OHOS 平台识别问题)
+
+### 修复内容
+1. **unixODBC 源码 URL 镜像**: 添加 SourceForge 镜像作为首选, unixodbc.org 作为备选
+2. **config.guess/config.sub 更新**: 从 conan 缓存中查找支持 OHOS 的 config.guess, 复制到 unixODBC 源码目录
+3. **Shell 检测改进**: 添加 /bin/sh 作为最终回退, 尝试常见路径
