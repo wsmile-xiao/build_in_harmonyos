@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.10
+version: 12.10.1
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -353,7 +353,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R42 | **PR 创建即写 partial 草稿 + 预算内闭环 CI 到绿**：PR 创建成功那一刻先写 result.json 草稿（`--status partial` + PR 链接，防猝死丢工作）；然后默认继续工具化监控 CI（`submit` 内置 2400s 轮询）——**CI 红 ≠ 放弃**：失败详情自动提取进 HANDOFF，按报错修复 → `git push`（CI 自动重跑）→ `submit --resume` 继续监控，直到 CI 绿自动升级 result 为 success。禁止 agent 自己写 sleep 轮询 CI（工具已有轮询）；仅当剩余预算 <40min（R41）或显式 `--no-wait` 时停在 partial 退出，红 CI 交由 follow-up 任务（`submit --resume` 从断点续） |
 | R43 | **调参螺旋止损**：同一错误类别（cmake 组件/目标/include 路径等 conanfile 调参）连续 5 次修改仍失败 → 停止调参，写 result.json（`failed_build` + 5 次尝试的证据）退出；与 R41 互补：R41 管外部阻塞，R43 管内部死循环 |
 | R44 | **CI 失败必须先自诊断再修（submit --resume 失败时）**：CI 红后的第一步是 `gitcode_pr.py diagnose --repo ... --number N`——CI 侧分类 ~60% 落"未知"，diagnose 对评论内嵌的失败日志做本地二次归类（链接/编译/cmake/依赖/配方/补丁/权限/网络/文件缺失/测试空壳），输出证据行+修复要点；禁止对"未知"失败盲改重推（采样：同一 PR 反复重推同类失败=纯浪费 CI 额度）。修复循环: diagnose → 修复 → W3 复验 → push → `submit --resume`；连续 2 轮同错误仍红 → 停损上报（衔接 R43） |
-| R45 | **SKILL_FEEDBACK 防丢失协议（骨架前置+事件累积+终态兜底+完成入仓，工具强制）**：feedback 不再是"流程走完才生成"——①PR 创建瞬间与 R42 result 草稿同步前置生成骨架（submit 内置，幂等）；②全流程事件（HANDOFF/CI红绿/pr_created/闭环）经 `_emit_submit_handoff` 单一咽喉自动累积进骨架的"过程事件时间线"——失败任务的经验不再丢失（旧流程失败分支从不生成 feedback=幸存者偏差）；③result 终态无论成败自动兜底补骨架并落 `feedback_pending` 字段（ECS 回收工作区前据此收割）；④反馈填完闭环（`feedback --resume` rc=0）时自动 commit+push 到任务分支随 PR 进 main（只推终稿不推占位稿——防 PR 转绿后再触发 CI 重跑；`.feedback-state.json` 属 JC5 未白名单本地文件不入仓；OHC_FEEDBACK_PUSH=0 可关）。AI 仍需做的唯一动作：终局填 4 个建议占位符 + 效率/检视小节 |
+| R45 | **SKILL_FEEDBACK 防丢失协议（骨架前置+事件累积+终态兜底+完成入仓，工具强制）**：feedback 不再是"流程走完才生成"——①PR 创建瞬间与 R42 result 草稿同步前置生成骨架（submit 内置，幂等）；②全流程事件（HANDOFF/CI红绿/pr_created/闭环）经 `_emit_submit_handoff` 单一咽喉自动累积进骨架的"过程事件时间线"——失败任务的经验不再丢失（旧流程失败分支从不生成 feedback=幸存者偏差）；③result 终态无论成败自动兜底补骨架并落 `feedback_pending` 字段（ECS 回收工作区前据此收割）；④反馈填完闭环（`feedback --resume` rc=0）时自动 commit+push 到任务分支随 PR 进 main（只推终稿不推占位稿——防 PR 转绿后再触发 CI 重跑；运行时状态存顶层 `.ohc/feedback-state/`（v12.10.1 迁出 archives 树，已 gitignore，永不触发 JC5）；OHC_FEEDBACK_PUSH=0 可关）。AI 仍需做的唯一动作：终局填 4 个建议占位符 + 效率/检视小节 |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -551,7 +551,7 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 >
 > 工具化防线（AI 无需主动执行，全部内置）：
 > 1. **骨架前置**：PR 创建瞬间与 R42 result 草稿同步落骨架（`ensure_feedback_skeleton`，幂等；resume 路径补齐旧任务）
-> 2. **事件累积**：HANDOFF/CI 红绿/pr_created 经 `_emit_submit_handoff` 单一咽喉自动追加进 `.feedback-state.json`，并刷新进骨架的"过程事件时间线"（`<!-- EVENTS:BEGIN/END -->` 标记块，自动统计 HANDOFF/重试次数）
+> 2. **事件累积**：HANDOFF/CI 红绿/pr_created 经 `_emit_submit_handoff` 单一咽喉自动追加进 `.ohc/feedback-state/<l>/<sw>/<ver>.json`（v12.10.1 迁出 archives 树——曾因写进 `archives/.../` 且未 gitignore 被 JC5 拦截），并刷新进骨架的"过程事件时间线"（`<!-- EVENTS:BEGIN/END -->` 标记块，自动统计 HANDOFF/重试次数）
 > 3. **终态兜底**：`result` 写盘时自动调 `feedback_pending_flag`——缺失即补骨架 + result.json 落 `feedback_pending` 字段；ECS 回收工作区前据此判断收割
 > 4. **完成入仓**：`feedback --resume` 闭环（rc=0）时自动 commit+push 任务分支（只推终稿；OHC_FEEDBACK_PUSH=0 关）
 > 5. **收割对接**：post-merge 收割同时认旧路径 `archives/.../reports/skill-feedback.md` 和新路径 `feedback/SKILL_FEEDBACK_<id>.md`（旧链路只认前者，基本空转）
@@ -604,7 +604,7 @@ $SKILL_ROOT/scripts/ohc-run.py feedback <软件名> <版本>
 
 **文件命名**：`SKILL_FEEDBACK_{8位随机hex}.md`（`secrets.token_hex(4)` 生成，防碰撞）
 
-**HANDOFF 强制**：生成后检查 `(请填写)` 占位符，有残留则 emit HANDOFF（step_failed=feedback），AI 填充建议后 `--resume` 验证完整性。状态文件 `.feedback-state.json` 记录 feedback_id。
+**HANDOFF 强制**：生成后检查 `(请填写)` 占位符，有残留则 emit HANDOFF（step_failed=feedback），AI 填充建议后 `--resume` 验证完整性。状态文件 `.ohc/feedback-state/<l>/<sw>/<ver>.json`（顶层，gitignore）记录 feedback_id。
 
 > 模板: templates/skill-feedback.md
 
@@ -979,3 +979,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.9 — 2026-08-26 — goblinrs 744 PR 采样审计落地（harness 化三件套）：①PR 创建前置硬闸 PF1-PF4（scripts/ohc/preflight.py，挂在 gitcode_pr.py create-pr 咽喉点——所有建 PR 路径不可绕过）：PF1 单包闸（JC6 前置，多包捎带拦截，#6642 四包教训）/PF2 制品闸（JC3 前置，压缩包拦截）/PF3 测试闸（L0c/R34 前置，test() 空壳 AST 检测，省一轮 CI，采样占失败 20%）/PF4 依赖闸（W1/R36 前置，requires 逐个探测 conan.cnb.cool 制品仓，缺失即拦并引导 dependency_missing 上报）；逃生口 --no-preflight / OHC_PREFLIGHT=0（与 v12.8 --no-ci-verify 命名一致）。②R44 CI 失败自诊断协议：gitcode_pr.py diagnose 子命令——解析最新失败评论，CI 报"类别: 未知"（采样占 60%）时对评论内嵌失败日志本地二次归类（10 类错误表+证据行+修复要点，--json 供 harness 消费）；submit --resume 失败 HANDOFF 与 SKILL Step7 流程串联（diagnose→修复→W3 复验→push→resume，连续 2 轮同错停损衔接 R43）。③流程串联更新：R34 补 PF3 前置、R36 止损动作补 PF4 双层强制、提交流程图更新（finish→submit→push→preflight→AI Review→CI→R44 修复循环）。v12.8→v12.9*
 
 *SKILL.md v12.10 — 2026-08-26 — SKILL_FEEDBACK 防丢失协议（修复"建 PR(12) 与建 FEEDBACK(13) 间隙丢失"bug，R45）：旧流程三条丢失路径（CI 绿后生成前死亡→回收即永久丢；失败分支从不生成→幸存者偏差；只写本地不 commit→main 13 个文件属零星漏网）。工具化五件套：①骨架前置——PR 创建瞬间与 R42 result 草稿同步生成 feedback 骨架（ensure_feedback_skeleton，幂等，resume 补齐旧任务）；②事件累积——HANDOFF/CI 红绿/pr_created 经 _emit_submit_handoff 单一咽喉自动进 .feedback-state.json 并刷入骨架"过程事件时间线"（EVENTS 标记块，自动统计 HANDOFF/重试次数）；③终态兜底——result 写盘自动 feedback_pending_flag：缺失补骨架 + result.json 落 feedback_pending 字段供 ECS 回收前判断收割（失败任务同样产出经验）；④完成入仓——feedback --resume 闭环 rc=0 时自动 commit+push 任务分支随 PR 进 main（只推终稿防 CI 重跑；.feedback-state.json 属 JC5 未白名单文件不入仓；OHC_FEEDBACK_PUSH=0 逃生口，命名对齐 v12.8 --no-ci-verify/v12.9 --no-preflight）；⑤收割对接——post-merge 同时收割旧路径 archives/.../reports/skill-feedback.md 与新路径 feedback/SKILL_FEEDBACK_<id>.md（旧链路基本空转）。cmd_feedback 重构：骨架存在时复用同 id 同文件（不产孤儿文件），两条路径均先刷事件再校验占位符；resume 完成分支补落 status=complete（供 feedback_status/ECS 判断）。AI 唯一动作不变：终局填 4 建议占位符+效率/检视小节。测试 25 项（骨架幂等/孤儿防护/事件刷新/pending 兜底/入仓分支保护/状态闭环）。v12.9→v12.10
+
+*SKILL.md v12.10.1 — 2026-08-27 — JC5 事故修复（lua-mimetypes 1.0 首个 v12.10 bot 任务踩中）：v12.10 把 .feedback-state.json 写进 archives/<l>/<sw>/<ver>/ 且 .gitignore 无此条目 → bot 提交进 PR → JC5 未登记隐藏文件拦截。修复三件：①状态文件迁出 archives 树至顶层 .ohc/feedback-state/<l>/<sw>/<ver>.json（_state_path 统一计算；JC5 只扫 archives/，顶层天然安全）；②_load_feedback_state 自动迁移——发现 archives 内遗留副本即读出→写入新位置→删除旧文件（worker 磁盘自清洁）；③.gitignore 加 .ohc/ 与 **/.feedback-state.json 双保险（任何位置的遗留副本永不再被 add）。FEEDBACK 报告位置不变：顶层 feedback/SKILL_FEEDBACK_<id>.md（与 knowledge 同级，随 PR 入仓）；运行时状态与报告分离——状态属 harness 私有（.ohc/，永不入 PR），报告属交付物（feedback/，闭环后入仓）。R45 文案同步修正。v12.10→v12.10.1

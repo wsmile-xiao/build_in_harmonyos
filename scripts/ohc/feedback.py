@@ -81,9 +81,42 @@ def _parse_yaml_simple(path: Path) -> dict:
 # State management
 # ═══════════════════════════════════════════════════════
 
+def _state_path(ver_dir: Path) -> Path:
+    """v12.10.1: 状态文件路径——顶层 .ohc/，永不出现在 archives/ 树内。
+
+    事故：v12.10 把 .feedback-state.json 写进 archives/<l>/<sw>/<ver>/ 且
+    未 gitignore → bot 提交进 PR → JC5 未登记隐藏文件拦截（lua-mimetypes）。
+    修复：迁至 <root>/.ohc/feedback-state/<l>/<sw>/<ver>.json——JC5 只扫
+    archives/，且 .gitignore 已加 .ohc/ 双保险。
+    """
+    try:
+        root = ver_dir.parents[3]  # archives/<l>/<sw>/<ver> → 项目根
+        rel = ver_dir.relative_to(root)
+        if len(rel.parts) == 4 and rel.parts[0] == "archives":
+            p = (root / ".ohc" / "feedback-state" / rel.parts[1]
+                 / rel.parts[2] / (rel.parts[3] + ".json"))
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return p
+    except Exception:
+        pass
+    return ver_dir / ".feedback-state.json"  # 结构异常时兜底
+
+
 def _load_feedback_state(ver_dir: Path) -> dict:
-    """Load feedback state from .feedback-state.json."""
-    state_path = ver_dir / ".feedback-state.json"
+    """Load feedback state from .ohc/ (v12.10.1; 自动迁移 archives 内遗留副本)."""
+    state_path = _state_path(ver_dir)
+    legacy = ver_dir / ".feedback-state.json"
+    if not state_path.exists() and legacy.exists():
+        # v12.10 遗留位置迁移：读出→写入新位置→删旧文件（清出 archives 树）
+        try:
+            data = json.loads(legacy.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            data = {}
+        try:
+            _save_feedback_state(ver_dir, data)
+            legacy.unlink()
+        except OSError:
+            pass
     if not state_path.exists():
         return {}
     try:
@@ -93,10 +126,9 @@ def _load_feedback_state(ver_dir: Path) -> dict:
 
 
 def _save_feedback_state(ver_dir: Path, state: dict) -> None:
-    """Save feedback state to .feedback-state.json."""
-    state_path = ver_dir / ".feedback-state.json"
+    """Save feedback state to .ohc/ (永不写进 archives/ - JC5 安全)."""
     state["last_updated"] = datetime.now().isoformat()
-    state_path.write_text(
+    _state_path(ver_dir).write_text(
         json.dumps(state, ensure_ascii=False, indent=2),
         encoding="utf-8")
 
