@@ -11,8 +11,7 @@ class PortablelibyamlConan(ConanFile):
     description = "YAML parser library - portable version for OpenHarmony"
     license = "MIT"
     homepage = "https://github.com/yaml/libyaml"
-    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
-    topics = ("yaml", "parser", "serialization", "config")
+    url = "https://github.com/yaml/libyaml"
 
     package_type = "library"
 
@@ -22,6 +21,9 @@ class PortablelibyamlConan(ConanFile):
 
     def export_sources(self):
         export_conandata_patches(self)
+
+    def requirements(self):
+        pass
 
     def layout(self):
         cmake_layout(self)
