@@ -39,9 +39,11 @@ Quality 门禁全部 PASS (G1-G4)
 | 文件 | 说明 |
 |------|------|
 | opencore-amr-0.1.6-ohos-aarch64.tar.gz | 预编译包（含 ELF 签名） |
-| opencore-amr-0.1.6-ohos-aarch64-debug.tar.gz | debug 符号包 |
+| opencore-amr-0.1.6-ohos-aarch64-debug.tar.gz | debug 符号包 |---
 
+**编译结束**: 2026-08-27 01:18
+**最终状态**: built
 ---
 
-**编译结束**: 2026-05-26 12:41
+**编译结束**: 2026-08-27 01:36
 **最终状态**: built
