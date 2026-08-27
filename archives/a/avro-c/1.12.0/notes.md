@@ -40,3 +40,7 @@
 ## 注意事项
 - 使用完整 tarball（非 lang/c 子目录）以保留测试数据
 - 所有 Codec 已启用: deflate, snappy, lzma
+---
+
+**编译结束**: 2026-08-27 15:33
+**最终状态**: built
