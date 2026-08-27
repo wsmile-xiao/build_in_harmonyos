@@ -40,6 +40,17 @@ GNUstep environment while configuring, building, and installing.
 `Foundation/Foundation.h`, links against `gnustep-base::gnustep-base`, and runs
 the executable when the target can run.
 
+## Path B knowledge drafts
+
+This adaptation contributes two task-local knowledge drafts for later GNUstep
+ports such as `gnustep-gui` and `affiche`:
+
+- `knowledge/drafts/DRAFT-gnustep-base-1.31.1-gnumake-env.kv` and `.md`:
+  GNUstep Make domain/environment closure for OHOS Conan recipes.
+- `knowledge/drafts/DRAFT-gnustep-base-1.31.1-objc-runtime-consumer.kv` and
+  `.md`: Objective-C runtime flags, runtime library paths, and Foundation
+  consumer verification for GNUstep packages.
+
 ## Local validation
 
 Prepared on Windows host only. Conan is not installed in this local desktop
