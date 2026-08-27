@@ -4,7 +4,7 @@
 - 构建系统: cmake
 - 编译日期: 2026-05-29
 - 编译器: clang 15.0.4 / clang++ 15.0.4
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -127,5 +127,5 @@ $ readelf -d wasm-opt | grep NEEDED
 4. **googletest 缺失**：如果需要运行测试，需手动下载 googletest 源码到 `third_party/googletest/` 目录。
 ---
 
-**编译结束**: 2026-05-29 11:22
+**编译结束**: 2026-08-05 11:38
 **最终状态**: built
