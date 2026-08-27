@@ -77,13 +77,13 @@ ld.lld: error: duplicate symbol: meaningless_white_moves
 
 ## 补丁说明
 
-### 0001-fix-duplicate-symbol-liberty-h.patch
+### 0002-engine-liberty.h.patch
 
 修改 `engine/liberty.h`，将全局变量定义改为 extern 声明：
 - `int meaningless_black_moves[BOARDMAX]` → `extern int meaningless_black_moves[BOARDMAX]`
 - `int meaningless_white_moves[BOARDMAX]` → `extern int meaningless_white_moves[BOARDMAX]`
 
-### 0002-fix-duplicate-symbol-unconditional-c.patch
+### 0001-engine-unconditional.c.patch
 
 修改 `engine/unconditional.c`，在 `#include "liberty.h"` 后添加变量定义：
 ```c
@@ -125,3 +125,7 @@ int meaningless_white_moves[BOARDMAX];
 
 **编译结束时间**：2026-06-16 10:57
 **最终状态**：built（编译成功，已验证）
+---
+
+**编译结束**: 2026-08-27 12:12
+**最终状态**: built
