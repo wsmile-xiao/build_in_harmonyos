@@ -40,6 +40,15 @@ GNUstep environment while configuring, building, and installing.
 `Foundation/Foundation.h`, links against `gnustep-base::gnustep-base`, and runs
 the executable when the target can run.
 
+Upstream test inventory from the 1.31.1 source tarball:
+
+- `Tests/base`: 423 Objective-C/Objective-C++ test sources.
+- `Tests/base/*/TestInfo`: 92 metadata files.
+- `Tests/**/GNUmakefile*`: 25 GNUstep Make test makefiles.
+
+The upstream suite was discovered but not executed in this slice; the shadow CI
+gate executed the Conan consumer test instead.
+
 ## Path B knowledge drafts
 
 This adaptation contributes two task-local knowledge drafts for later GNUstep
