@@ -1,0 +1,100 @@
+--- CMakeLists.txt	2026-08-28 00:42:37.932872499 +0800
++++ CMakeLists.txt	2026-08-28 00:42:56.468871093 +0800
+@@ -57,6 +57,28 @@
+ find_package(KF6I18n ${KF_DEP_VERSION} REQUIRED)
+ find_package(KF6CoreAddons ${KF_DEP_VERSION} REQUIRED)
+ 
++# R05: relocatable linkage. The KF6 dependency libraries are published without a
++# DT_SONAME, so linking this project's libraries against their absolute Conan
++# cache paths makes the linker record the machine-private path in DT_NEEDED
++# (non-consumable on a different cache layout). Stamp an IMPORTED_SONAME on each
++# KF6 dependency and clear both the generic and per-config IMPORTED_NO_SONAME so
++# CMake links by `-L<dir> -l:libKF6CoreAddons.so` and ld records the basename.
++foreach(kf6dep KF6::CoreAddons KF6::Archive KF6::I18n)
++    if(TARGET ${kf6dep})
++        set_property(TARGET ${kf6dep} PROPERTY IMPORTED_NO_SONAME FALSE)
++        set_property(TARGET ${kf6dep} PROPERTY IMPORTED_NO_SONAME_RELEASE FALSE)
++    endif()
++endforeach()
++if(TARGET KF6::CoreAddons)
++    set_property(TARGET KF6::CoreAddons PROPERTY IMPORTED_SONAME "libKF6CoreAddons.so")
++endif()
++if(TARGET KF6::Archive)
++    set_property(TARGET KF6::Archive PROPERTY IMPORTED_SONAME "libKF6Archive.so")
++endif()
++if(TARGET KF6::I18n)
++    set_property(TARGET KF6::I18n PROPERTY IMPORTED_SONAME "libKF6I18n.so")
++endif()
++
+ find_package(KF6DocTools ${KF_DEP_VERSION})
+ set_package_properties(KF6DocTools PROPERTIES DESCRIPTION "Tools to generate documentation"
+                        TYPE OPTIONAL
+
+--- src/kpackage/CMakeLists.txt	2026-08-28 00:02:38.604871718 +0800
++++ src/kpackage/CMakeLists.txt	2026-08-28 08:29:12.760300938 +0800
+@@ -3,6 +3,21 @@
+ add_library(KF6Package)
+ add_library(KF6::Package ALIAS KF6Package)
+ 
++# R05/R07: relocatable linkage. The KF6 dependency libraries are published
++# without a DT_SONAME, so linking them by absolute Conan cache path makes the
++# linker record that machine-private path in DT_NEEDED (e.g.
++# /storage/Users/currentUser/.conan2/p/...), which is non-consumable on a
++# different cache layout.
++#
++# Link each dependency by its SONAME-style basename using a PRIVATE -L (only for
++# building this library, so ld records `libKF6CoreAddons.so` etc. in DT_NEEDED),
++# and propagate the dependency to consumers via the INTERFACE imported target
++# name KF6::CoreAddons (relocatable target metadata, resolved from the consumer's
++# own config). target_link_directories is PRIVATE so producer absolute paths
++# never reach the installed/exported KF6PackageTargets.cmake.
++target_link_directories(KF6Package PRIVATE ${KPACKAGE_DEP_LIB_DIRS})
++target_link_options(KF6Package PRIVATE "-Wl,-soname,libKF6Package.so")
++
+ set_target_properties(KF6Package PROPERTIES
+     VERSION     ${PACKAGE_VERSION}
+     SOVERSION   ${PACKAGE_SOVERSION}
+@@ -39,12 +54,39 @@
+ )
+ 
+ target_link_libraries(KF6Package
+-PUBLIC
++INTERFACE
+      KF6::CoreAddons
+ PRIVATE
+-     KF6::Archive
+-     KF6::I18n
+-)
++     -lKF6CoreAddons
++     -lKF6Archive
++     -lKF6I18n
++     Qt6::Core
++) 
++
++# Note: the actual linkage uses bare -l SONAME-style names so ld records
++# `libKF6CoreAddons.so` etc. in DT_NEEDED, while KF6::CoreAddons is propagated
++# through the INTERFACE (relocatable target metadata). Qt6::Core keeps its own
++# SONAME (libQt6Core.so.6), so it does not introduce a machine-private absolute
++# path into DT_NEEDED while preserving the Qt runtime link.
++
++# Keep the include directories needed to build this library. They are added as
++# PRIVATE so producer absolute cache paths are never exported to consumers;
++# consumers obtain KF6/Qt includes transitively through their own
++# KF6::CoreAddons/KF6::Archive/KF6::I18n/Qt6::Core imported targets.
++foreach(kf6dep KF6::CoreAddons KF6::Archive KF6::I18n)
++    if(TARGET ${kf6dep})
++        get_target_property(_inc ${kf6dep} INTERFACE_INCLUDE_DIRECTORIES)
++        if(_inc)
++            target_include_directories(KF6Package SYSTEM PRIVATE ${_inc})
++        endif()
++    endif()
++endforeach()
++if(TARGET Qt6::Core)
++    get_target_property(_qt6inc Qt6::Core INTERFACE_INCLUDE_DIRECTORIES)
++    if(_qt6inc)
++        target_include_directories(KF6Package SYSTEM PRIVATE ${_qt6inc})
++    endif()
++endif()
+ 
+ if (HAVE_DBUS)
+     target_link_libraries(KF6Package
