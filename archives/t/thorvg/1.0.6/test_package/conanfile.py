@@ -1,6 +1,7 @@
 import os
 
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.env import VirtualRunEnv
@@ -26,6 +27,9 @@ class ThorvgTestConan(ConanFile):
         cmake.build()
 
     def test(self):
-        if can_run(self):
-            bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-            self.run(f"{bash} -c './test_thorvg'", env="conanrun")
+        if not can_run(self):
+            raise ConanInvalidConfiguration(
+                "ThorVG test_package must run on the OHOS target"
+            )
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run(f"{bash} -c './test_thorvg'", env="conanrun")

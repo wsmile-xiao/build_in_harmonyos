@@ -17,6 +17,12 @@ class ThorvgConan(ConanFile):
     settings = "os", "compiler", "build_type", "arch"
     package_type = "static-library"
 
+    def validate(self):
+        if self.settings.os != "OHOS":
+            raise ConanInvalidConfiguration("ThorVG recipe targets OpenHarmony")
+        if self.settings.arch != "armv8":
+            raise ConanInvalidConfiguration("ThorVG recipe targets OpenHarmony armv8")
+
     def layout(self):
         basic_layout(self)
 
