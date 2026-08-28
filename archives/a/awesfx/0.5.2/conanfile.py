@@ -31,10 +31,14 @@ class AwesfxConan(ConanFile):
         executables = self.conf.get("tools.build:compiler_executables", default={})
         cc = os.environ.get("CC", executables.get("c", "cc"))
         cflags = os.environ.get("CFLAGS", "")
+        core = [os.path.join(self.source_folder, "awelib", name)
+                for name in os.listdir(os.path.join(self.source_folder, "awelib"))
+                if name.endswith(".c")]
         for tool in ("sf2text", "text2sf"):
             source = os.path.join(self.source_folder, tool + ".c")
             output = os.path.join(self.build_folder, "bin", tool)
-            self.run(f'{cc} {cflags} -I"{self.source_folder}/include" "{source}" -o "{output}"')
+            inputs = " ".join(f'"{path}"' for path in core + [source])
+            self.run(f'{cc} {cflags} -I"{self.source_folder}/include" {inputs} -o "{output}"')
 
     def package(self):
         copy(self, "*", src=os.path.join(self.build_folder, "bin"), dst=os.path.join(self.package_folder, "bin"))
