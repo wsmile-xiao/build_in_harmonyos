@@ -1,0 +1,445 @@
+--- a/bpc_sysCalls.c
++++ b/bpc_sysCalls.c
+@@ -46,6 +46,18 @@
+ 
+ static int LogLevel;
+ static int DoneInit = 0;
++/*
++ * Standalone passthrough mode: set by bpc_sysCall_init() when the process
++ * was started without complete BackupPC arguments (--bpc-top-dir /
++ * --bpc-host-name / --bpc-share-name / --bpc-bkup-num).  In that state every
++ * bpc_*() emulation below transparently forwards to the corresponding POSIX
++ * system call, giving ordinary local rsync behaviour.  Upstream instead
++ * exit_cleanup(RERR_SYNTAX)'ed such invocations ("BackupPC options are
++ * compulsory"); see patches/0005-bpc-standalone-passthrough.patch.  All
++ * invocations WITH complete BackupPC arguments take exactly the original
++ * virtual-filesystem paths byte-for-byte.
++ */
++static int BPC_Standalone = 0;
+ static int CompressLevel;
+ 
+ typedef struct _bpc_sysCall_stats {
+@@ -79,6 +91,18 @@
+             int logLevel                /* logging level */
+         )
+ {
++
++    if ( !topDir || !*topDir || !hostName || !*hostName
++            || !shareNameUM || !*shareNameUM || newBkupNum < 0 ) {
++        /*
++         * No (complete) BackupPC configuration: run in standalone
++         * POSIX-passthrough mode instead of dying with
++         * "BackupPC options are compulsory" (upstream behaviour).
++         */
++        BPC_Standalone = 1;
++        LogLevel = logLevel;
++        return;
++    }
+     bpc_strBuf *hostDir = bpc_strBuf_new();
+     extern int BPC_HardLinkMax;
+     extern int BPC_PoolV3Enabled;
+@@ -139,6 +163,7 @@
+ 
+ void bpc_am_generator(int generator, int pid)
+ {
++    if ( BPC_Standalone ) return;
+     if ( generator ) {
+         Stats.InodeCurr = 2 * (Stats.InodeCurr / 2) + 0;
+         bpc_logMsgf("xferPids %d,%d\n", getpid(), pid);
+@@ -152,6 +177,7 @@
+ 
+ int bpc_sysCall_cleanup(void)
+ {
++    if ( BPC_Standalone ) return 0;
+     fflush(stdout);
+     fflush(stderr);
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_sysCall_cleanup: doneInit = %d\n", DoneInit);
+@@ -192,6 +218,7 @@
+ 
+ void bpc_progress_fileDone(void)
+ {
++    if ( BPC_Standalone ) return;
+     static int fileCnt = 0, fileCntNext = 1;
+ 
+     fileCnt++;
+@@ -202,6 +229,7 @@
+ 
+ void bpc_sysCall_statusFileSize(unsigned long fileSize)
+ {
++    if ( BPC_Standalone ) return;
+     Stats.TotalFileCnt++;
+     Stats.TotalFileSize += fileSize;
+     bpc_progress_fileDone();
+@@ -645,6 +673,29 @@
+ 
+ char *bpc_mktemp(char *template)
+ {
++    if ( BPC_Standalone ) {
++        /*
++         * Real-filesystem emulation: fill in the X suffix digits and pick a
++         * name that does not exist yet; do NOT create anything (the caller
++         * opens it separately or takes the mkstemp route).
++         */
++        char *p = template + strlen(template);
++        int i, xCnt = 0;
++
++        while ( p > template && p[-1] == 'X' ) {
++            p--;
++            xCnt++;
++        }
++        if ( xCnt == 0 ) return NULL;
++        for ( i = 0 ; i < (1 << (4 * xCnt)) ; i++ ) {
++            sprintf(p, "%0*x", xCnt, i);
++            if ( access(template, F_OK) ) {
++                return template;
++            }
++        }
++        errno = EEXIST;
++        return NULL;
++    }
+     char *p = template + strlen(template);
+     int i, xCnt = 0;
+ 
+@@ -668,6 +719,10 @@
+ 
+ int bpc_mkstemp(char *template, char *origFileName)
+ {
++    if ( BPC_Standalone ) {
++        /* Real mkstemp(): exclusive create of a uniquely named 0600 file. */
++        return mkstemp(template);
++    }
+     char *p = template + strlen(template);
+     bpc_attrib_file *file, *fileOrig = NULL;
+     int i, xCnt = 0;
+@@ -750,6 +805,7 @@
+ int bpc_sysCall_checkFileMatch(char *fileName, char *tmpName, struct file_struct *rsyncFile,
+                                char *file_sum, off_t fileSize)
+ {
++    if ( BPC_Standalone ) return -1;
+     bpc_attrib_file *fileOrig, *file;
+     bpc_strBuf *poolPath;
+ 
+@@ -831,6 +887,7 @@
+  */
+ int bpc_sysCall_poolFileCheck(char *fileName, struct file_struct *rsyncFile)
+ {
++    if ( BPC_Standalone ) return -1;
+     bpc_digest digest;
+     bpc_strBuf *poolPath;
+     unsigned int ext;
+@@ -905,6 +962,15 @@
+  */
+ int bpc_lchmod(const char *fileName, mode_t mode)
+ {
++    if ( BPC_Standalone ) {
++#ifdef HAVE_LCHMOD
++        return lchmod(fileName, mode);
++#else
++        /* No platform lchmod(); behave like a failed attribute setting */
++        errno = ENOSYS;
++        return -1;
++#endif
++    }
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lchmod(%s, 0%o)\n", fileName, mode);
+@@ -933,6 +999,7 @@
+ 
+ int bpc_fchmod(int filedes, mode_t mode)
+ {
++    if ( BPC_Standalone ) return fchmod(filedes, mode);
+     if ( filedes < 0 || filedes >= MAX_FD || !Fd[filedes].used ) {
+         errno = EBADF;
+         return -1;
+@@ -944,6 +1011,7 @@
+ 
+ int bpc_unlink(const char *fileName)
+ {
++    if ( BPC_Standalone ) return unlink(fileName);
+     bpc_attrib_file *file;
+     int deleteInode = 0;
+ 
+@@ -1034,6 +1102,7 @@
+ 
+ int bpc_lstat(const char *fileName, struct stat *buf)
+ {
++    if ( BPC_Standalone ) return lstat(fileName, buf);
+     bpc_attrib_file *file;
+     dev_t rdev = 0;
+ 
+@@ -1112,6 +1181,7 @@
+ 
+ int bpc_fstat(int filedes, struct stat *buf)
+ {
++    if ( BPC_Standalone ) return fstat(filedes, buf);
+     int ret;
+ 
+     if ( filedes < 0 || filedes >= MAX_FD || !Fd[filedes].used ) {
+@@ -1129,6 +1199,7 @@
+ 
+ int bpc_stat(const char *fileName, struct stat *buf)
+ {
++    if ( BPC_Standalone ) return stat(fileName, buf);
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_stat(%s)\n", fileName);
+@@ -1152,6 +1223,14 @@
+ 
+ int bpc_file_checksum(char *fileName, char *sum, int checksum_len)
+ {
++    if ( BPC_Standalone ) {
++        /*
++         * Fail through: checksum.c file_checksum() then falls back to
++         * computing the digest over the real file contents via the ordinary
++         * open/map/md5 path, which is exactly what vanilla rsync does.
++         */
++        return -1;
++    }
+     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0); 
+     bpc_strBuf *poolPath;
+     STRUCT_STAT st;
+@@ -1189,6 +1268,7 @@
+  */
+ int bpc_symlink(const char *fileName, const char *symName)
+ {
++    if ( BPC_Standalone ) return symlink(fileName, symName);
+     bpc_attrib_file *file;
+     FdInfo *fd;
+     int ret = 0;
+@@ -1233,6 +1313,7 @@
+ 
+ int bpc_link(const char *targetName, const char *linkName)
+ {
++    if ( BPC_Standalone ) return link(targetName, linkName);
+     bpc_attrib_file *file;
+     bpc_strBuf *poolPath;
+     STRUCT_STAT st;
+@@ -1306,6 +1387,7 @@
+  */
+ int bpc_nlinkSet(const char *targetName, uint32 nlinks)
+ {
++    if ( BPC_Standalone ) return 0;
+     bpc_attrib_file *file;
+ 
+     /*
+@@ -1331,6 +1413,7 @@
+ 
+ int bpc_lutimes(const char *fileName, struct timeval *t)
+ {
++    if ( BPC_Standalone ) return lutimes(fileName, t);
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lutimes(%s)\n", fileName);
+@@ -1362,6 +1445,7 @@
+ 
+ int bpc_utimes(const char *fileName, struct timeval *t)
+ {
++    if ( BPC_Standalone ) return utimes(fileName, t);
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_utimes(%s)\n", fileName);
+@@ -1388,6 +1472,13 @@
+ 
+ int bpc_lutime(const char *fileName, time_t mtime)
+ {
++    if ( BPC_Standalone ) {
++        struct utimbuf tb;
++
++        tb.actime = time(NULL);
++        tb.modtime = mtime;
++        return utime(fileName, &tb);
++    }
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lutime(%s)\n", fileName);
+@@ -1416,6 +1507,13 @@
+ 
+ int bpc_utime(const char *fileName, time_t mtime)
+ {
++    if ( BPC_Standalone ) {
++        struct utimbuf tb;
++
++        tb.actime = time(NULL);
++        tb.modtime = mtime;
++        return utime(fileName, &tb);
++    }
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_utime(%s)\n", fileName);
+@@ -1440,6 +1538,7 @@
+ 
+ int bpc_lchown(const char *fileName, uid_t uid, gid_t gid)
+ {
++    if ( BPC_Standalone ) return lchown(fileName, uid, gid);
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_lchown(%s, %lu, %lu)\n",
+@@ -1470,6 +1569,7 @@
+ 
+ int bpc_rename(const char *oldName, const char *newName)
+ {
++    if ( BPC_Standalone ) return rename(oldName, newName);
+     bpc_attrib_file *file, *fileNew;
+     int oldIsTemp, fileAttrChanged = 0;
+ 
+@@ -1584,6 +1684,9 @@
+ 
+ int bpc_rename_request(char *oldName, char *newName, uint32 isTemp, char *bufP, char *bufEnd)
+ {
++    /* Defensive: never reached when both sides run standalone, since only the
++     * BackupPC-virtual receiver emits MSG_RENAME requests. */
++    if ( BPC_Standalone ) return rename(oldName, newName);
+     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)oldName, 1, 0);
+     if ( (bufP = (char*)bpc_attrib_buf2fileFull(file, (uchar*)bufP, (uchar*)bufEnd)) != bufEnd ) {
+         bpc_logErrf("bpc_rename_request(%s,%s) got to %p vs end = %p\n", oldName, newName, bufP, bufEnd);
+@@ -1595,6 +1698,7 @@
+ 
+ int bpc_mknod(const char *fileName, mode_t mode, dev_t dev)
+ {
++    if ( BPC_Standalone ) return mknod(fileName, mode, dev);
+     bpc_attrib_file *file;
+     int type;
+     int ret = 0;
+@@ -1656,6 +1760,7 @@
+ 
+ int bpc_open(const char *fileName, int flags, mode_t mode)
+ {
++    if ( BPC_Standalone ) return open(fileName, flags, mode);
+     bpc_attrib_file *file;
+     FdInfo *fd;
+ 
+@@ -1686,6 +1791,7 @@
+ 
+ int bpc_close(int fdNum)
+ {
++    if ( BPC_Standalone ) return close(fdNum);
+     if ( fdNum < 0 || fdNum >= MAX_FD || !Fd[fdNum].used ) {
+         errno = EBADF;
+         return -1;
+@@ -1698,6 +1804,7 @@
+ 
+ off_t bpc_lseek(int fdNum, off_t offset, int whence)
+ {
++    if ( BPC_Standalone ) return lseek(fdNum, offset, whence);
+     FdInfo *fd;
+ 
+     if ( fdNum < 0 || fdNum >= MAX_FD || !Fd[fdNum].used ) {
+@@ -1733,6 +1840,7 @@
+ 
+ off_t bpc_ftruncate(int fdNum, off_t length)
+ {
++    if ( BPC_Standalone ) return ftruncate(fdNum, length);
+     FdInfo *fd;
+ 
+     if ( fdNum < 0 || fdNum >= MAX_FD || !Fd[fdNum].used ) {
+@@ -1769,6 +1877,7 @@
+ 
+ ssize_t bpc_read(int fdNum, void *buf, size_t readSize)
+ {
++    if ( BPC_Standalone ) return read(fdNum, buf, readSize);
+     FdInfo *fd;
+ 
+     if ( fdNum < 0 || fdNum >= MAX_FD || !Fd[fdNum].used ) {
+@@ -1798,6 +1907,7 @@
+ 
+ ssize_t bpc_write(int fdNum, const void *buf, size_t writeSize)
+ {
++    if ( BPC_Standalone ) return write(fdNum, buf, writeSize);
+     FdInfo *fd;
+ 
+     if ( fdNum < 0 || fdNum >= MAX_FD || !Fd[fdNum].used ) {
+@@ -1815,6 +1925,7 @@
+ 
+ ssize_t bpc_readlink(const char *fileName, char *buffer, size_t bufferSize)
+ {
++    if ( BPC_Standalone ) return readlink(fileName, buffer, bufferSize);
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_readlink(%s, buf, %lu)\n",
+                                     fileName, bufferSize);
+ 
+@@ -1823,6 +1934,7 @@
+ 
+ int bpc_access(const char *fileName, int mode)
+ {
++    if ( BPC_Standalone ) return access(fileName, mode);
+     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)fileName, 0, 0);
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_access(%s, %d) -> %d\n",
+@@ -1837,6 +1949,7 @@
+ 
+ void bpc_tmpNameFlagSet(const char *tmpName)
+ {
++    if ( BPC_Standalone ) return;
+     bpc_attrib_file *file = bpc_attribCache_getFile(&acNew, (char*)tmpName, 0, 0);
+ 
+     if ( file && !file->isTemp ) {
+@@ -1849,6 +1962,7 @@
+ 
+ int bpc_chdir(const char *dirName)
+ {
++    if ( BPC_Standalone ) return chdir(dirName);
+     bpc_attrib_file *file;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_chdir(%s)\n", dirName);
+@@ -1864,6 +1978,7 @@
+ 
+ int bpc_mkdir(const char *dirName, mode_t mode)
+ {
++    if ( BPC_Standalone ) return mkdir(dirName, mode);
+     bpc_strBuf *path = bpc_strBuf_new();
+     bpc_attrib_file *file;
+     int ret;
+@@ -1910,6 +2025,7 @@
+ 
+ int bpc_rmdir(const char *dirName)
+ {
++    if ( BPC_Standalone ) return rmdir(dirName);
+     bpc_strBuf *path = bpc_strBuf_new();
+     bpc_attrib_file *file;
+     STRUCT_STAT st;
+@@ -1953,6 +2069,7 @@
+ 
+ DIR *bpc_opendir(const char *path)
+ {
++    if ( BPC_Standalone ) return opendir(path);
+     my_DIR *d;
+     ssize_t entrySize;
+ 
+@@ -1984,6 +2101,7 @@
+ 
+ struct dirent *bpc_readdir(DIR *dir)
+ {
++    if ( BPC_Standalone ) return readdir(dir);
+     my_DIR *d = (my_DIR*)dir;
+ 
+     if ( d->entryIdx >= d->entrySize ) {
+@@ -2002,6 +2120,7 @@
+ 
+ int bpc_closedir(DIR *dir)
+ {
++    if ( BPC_Standalone ) return closedir(dir);
+     my_DIR *d = (my_DIR*)dir;
+ 
+     if ( LogLevel >= 4 ) bpc_logMsgf("bpc_closedir()\n");
+--- a/options.c
++++ b/options.c
+@@ -1877,10 +1877,16 @@
+ #endif
+ 		}
+ 	}
+-        if ( !bpc_top_dir || !bpc_host_name || !bpc_share_name || bpc_backup_num < 0 ) {
+-            snprintf(err_buf, sizeof(err_buf), "BackupPC options are compulsory for running rsync_bpc\n");
+-            exit_cleanup(RERR_SYNTAX);
+-        }
++        /*
++         * NOTE (patches/0005-bpc-standalone-passthrough.patch):
++         * Upstream fatally rejected any invocation without complete BackupPC
++         * arguments here ("BackupPC options are compulsory").  We instead let
++         * such invocations continue: bpc_sysCall_init() detects the missing
++         * --bpc-* configuration and switches every bpc_*() emulation into a
++         * POSIX passthrough, making ordinary local transfers work like
++         * vanilla rsync.  Invocations WITH BackupPC arguments behave exactly
++         * as upstream.
++         */
+ 
+ 	if (checksum_choice && strcmp(checksum_choice, "auto") != 0 && strcmp(checksum_choice, "auto,auto") != 0) {
+ 		/* Call this early to verify the args and figure out if we need to force
