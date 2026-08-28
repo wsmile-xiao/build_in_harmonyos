@@ -30,7 +30,8 @@ class AwesfxConan(ConanFile):
         os.makedirs(os.path.join(self.build_folder, "bin"), exist_ok=True)
         config_h = os.path.join(self.source_folder, "awelib", "config.h")
         with open(config_h, "w") as f:
-            f.write("#define HAVE_STDINT_H 1\n#define SIZEOF_UNSIGNED_LONG 8\n")
+            f.write("#define HAVE_STDINT_H 1\n#define SIZEOF_UNSIGNED_LONG 8\n"
+                    "#define DEFAULT_SF_PATH \"/system/etc/sounds\"\n")
         executables = self.conf.get("tools.build:compiler_executables", default={})
         cc = os.environ.get("CC", executables.get("c", "cc"))
         cflags = os.environ.get("CFLAGS", "")
