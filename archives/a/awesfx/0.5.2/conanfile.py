@@ -28,7 +28,8 @@ class AwesfxConan(ConanFile):
     def build(self):
         apply_conandata_patches(self)
         os.makedirs(os.path.join(self.build_folder, "bin"), exist_ok=True)
-        cc = os.environ.get("CC", "cc")
+        executables = self.conf.get("tools.build:compiler_executables", default={})
+        cc = os.environ.get("CC", executables.get("c", "cc"))
         cflags = os.environ.get("CFLAGS", "")
         for tool in ("sf2text", "text2sf"):
             source = os.path.join(self.source_folder, tool + ".c")
