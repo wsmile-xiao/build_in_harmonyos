@@ -695,9 +695,11 @@ def cmd_submit(software: str, version: str,
        Phase 3: Wait for review opinions (poll 5min, 30min timeout)
        Phase 4: AI evaluates opinions → HANDOFF (accept: fix+resolve, reject: reply only)
        Phase 5: Review complete → proceed to CI
-       (--no-wait / OHC_SUBMIT_NO_WAIT=1: 跳过 5/6，PR 创建即返回，
-        R42: PR 创建即上报，AI Review/CI 由平台异步进行)
+       (--no-wait / OHC_SUBMIT_NO_WAIT=1: 跳过 5/6，PR 创建即返回——
+        ⚠️ 环未闭非成功：CI 是评论触发型（无人评论 /rebuild 不自动跑），
+        result 草稿会写 loop_pending 里程碑，需 follow-up --resume 续环)
     6. Monitor CI via gitcode_pr.py ci-status (poll 30s, 40min timeout)
+       （CI 由 _monitor_ci 自动评论 /rebuild 触发，非平台自动）
     """
     project_dir = pdir or find_project_dir()
     agent_id = get_agent_id(project_dir)
@@ -747,10 +749,32 @@ def cmd_submit(software: str, version: str,
         except Exception:
             pass
 
-        # ── R42: PR 创建即上报（--no-wait，对 resume 同样生效）──
+        # ── R42/v12.12: --no-wait 退出 = 环未闭，显式留 follow-up 信号 ──
+        # （0828 复盘证伪"平台异步"假设: CI 是评论触发型，无人评论 /rebuild
+        #   就永远不跑；AI Review 也需会话内监控闭环。此退出路径必须让
+        #   result 草稿带 loop_pending 里程碑，供 worker/平台扫描派发 follow-up）
         if no_wait:
-            log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: PR 创建即上报）")
-            log_info("   AI Review 意见与 CI 结果由平台异步产生，不占本任务预算")
+            log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（环未闭，非成功）")
+            log_warn("   ⚠️ PR 创建 ≠ 成功——CI 不会自动跑（评论触发型），"
+                     "AI Review 需闭环；本 PR 需 follow-up 续环")
+            try:
+                from .result_report import write_lifecycle_draft
+                write_lifecycle_draft(
+                    software, version, "loop_pending",
+                    pr_number=pr_number,
+                    summary=(f"PR #{pr_number} 已创建但 CI/AI 闭环未启动"
+                             f"（no-wait 退出）。follow-up 续环: "
+                             f"python3 scripts/ohc-run.py submit "
+                             f"{software} {version} --resume"))
+            except Exception:
+                pass
+            try:
+                from .feedback import record_event
+                record_event(ver_dir, "loop_pending",
+                             f"no-wait 退出，CI/AI 闭环未启动；follow-up: "
+                             f"submit --resume (PR #{pr_number})")
+            except Exception:
+                pass
             return 0
 
         if review_phase < 5:
@@ -1200,12 +1224,31 @@ def cmd_submit(software: str, version: str,
     except Exception as e:
         log_warn(f"  ⚠️ feedback 骨架前置失败(不阻塞): {e}")
 
-    # ── R42: 预算不足时的退出通道（--no-wait）──
+    # ── R42/v12.12: 预算不足时的退出通道（--no-wait）──
     if no_wait:
-        log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（R42: 草稿已落，闭环交 follow-up）")
-        log_info("   AI Review 意见与 CI 结果由平台异步产生，不占本任务预算")
+        log_ok("  ⏭️  no-wait: 跳过 AI Review/CI 监控（环未闭，非成功）")
+        log_warn("   ⚠️ PR 创建 ≠ 成功——CI 不会自动跑（评论触发型），"
+                 "AI Review 需闭环；本 PR 需 follow-up 续环")
         log_info(f"   follow-up 续闭环: "
                  f"python3 scripts/ohc-run.py submit {software} {version} --resume")
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(
+                software, version, "loop_pending",
+                pr_number=pr_number,
+                summary=(f"PR #{pr_number} 已创建但 CI/AI 闭环未启动"
+                         f"（no-wait 退出）。follow-up 续环: "
+                         f"python3 scripts/ohc-run.py submit "
+                         f"{software} {version} --resume"))
+        except Exception:
+            pass
+        try:
+            from .feedback import record_event
+            record_event(ver_dir, "loop_pending",
+                         f"no-wait 退出，CI/AI 闭环未启动；follow-up: "
+                         f"submit --resume (PR #{pr_number})")
+        except Exception:
+            pass
         return 0
 
     # ── Monitor AI Review (atomgit-bot): 5-phase flow ──

@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.11
+version: 12.12
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -350,7 +350,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R39 | **源码 URL 必须为官方源**：conandata.yml 中 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源，禁止个人 fork/网盘/不明 CDN。CI 自动添加镜像 fallback |
 | R40 | **深度适配库需验证适配完整性**：图形渲染/UI框架/多媒体/外设/系统底层类库，编译通过≠适配完成，需检查实质性平台适配代码（非 stub/return 0） |
 | R41 | **外部依赖阻塞止损**：registry/git remote 连续 3 次不可达且超 30 分钟，或失败明确属于环境外部因素（上游未发布/网络故障）→ 立即写 result.json 止损，禁止无限重试；多包任务单包止损不连坐（成功包不白干）；剩余预算 <40 分钟只收尾不启大步骤 |
-| R42 | **PR 创建即写 partial 草稿 + 预算内闭环 CI 到绿**：PR 创建成功那一刻先写 result.json 草稿（`--status partial` + PR 链接，防猝死丢工作）；然后默认继续工具化监控 CI（`submit` 内置 2400s 轮询）——**CI 红 ≠ 放弃**：失败详情自动提取进 HANDOFF，按报错修复 → `git push`（CI 自动重跑）→ `submit --resume` 继续监控，直到 CI 绿自动升级 result 为 success。禁止 agent 自己写 sleep 轮询 CI（工具已有轮询）；仅当剩余预算 <40min（R41）或显式 `--no-wait` 时停在 partial 退出，红 CI 交由 follow-up 任务（`submit --resume` 从断点续） |
+| R42 | **PR 创建即写 partial 草稿 + 预算内闭环 CI 到绿**：PR 创建成功那一刻先写 result.json 草稿（`--status partial` + PR 链接，防猝死丢工作）；然后默认继续工具化监控 CI（`submit` 内置 2400s 轮询）——**CI 红 ≠ 放弃**：失败详情自动提取进 HANDOFF，按报错修复 → `git push`（CI 自动重跑）→ `submit --resume` 继续监控，直到 CI 绿自动升级 result 为 success。禁止 agent 自己写 sleep 轮询 CI（工具已有轮询）；仅当剩余预算 <40min（R41）或显式 `--no-wait` 时停在 partial 退出，**v12.12 修正：CI 是评论触发型，无人评论 `/rebuild` 就不自动跑，AI Review 也需会话内闭环——『平台异步』假设已证伪；PR 创建 ≠ 成功，成功 = 检视意见闭环 + CI 绿（success 硬闸强制，双缺一不可）。--no-wait/预算不足退出时 result 草稿自动写 `milestone=loop_pending`（环未闭机器可读信号）+ feedback 事件，worker/平台据此扫描派发 follow-up（`submit --resume` 从断点续）** |
 | R43 | **调参螺旋止损**：同一错误类别（cmake 组件/目标/include 路径等 conanfile 调参）连续 5 次修改仍失败 → 停止调参，写 result.json（`failed_build` + 5 次尝试的证据）退出；与 R41 互补：R41 管外部阻塞，R43 管内部死循环 |
 | R44 | **CI 失败必须先自诊断再修（submit --resume 失败时）**：CI 红后的第一步是 `gitcode_pr.py diagnose --repo ... --number N`——CI 侧分类 ~60% 落"未知"，diagnose 对评论内嵌的失败日志做本地二次归类（链接/编译/cmake/依赖/配方/补丁/权限/网络/文件缺失/测试空壳），输出证据行+修复要点；禁止对"未知"失败盲改重推（采样：同一 PR 反复重推同类失败=纯浪费 CI 额度）。修复循环: diagnose → 修复 → W3 复验 → push → `submit --resume`；连续 2 轮同错误仍红 → 停损上报（衔接 R43） |
 | R45 | **SKILL_FEEDBACK 防丢失协议（骨架前置+事件累积+终态兜底+完成入仓，工具强制）**：feedback 不再是"流程走完才生成"——①PR 创建瞬间与 R42 result 草稿同步前置生成骨架（submit 内置，幂等）；②全流程事件（HANDOFF/CI红绿/pr_created/闭环）经 `_emit_submit_handoff` 单一咽喉自动累积进骨架的"过程事件时间线"——失败任务的经验不再丢失（旧流程失败分支从不生成 feedback=幸存者偏差）；③result 终态无论成败自动兜底补骨架并落 `feedback_pending` 字段（ECS 回收工作区前据此收割）；④反馈填完闭环（`feedback --resume` rc=0）时自动 commit+push 到任务分支随 PR 进 main（只推终稿不推占位稿——防 PR 转绿后再触发 CI 重跑；运行时状态存顶层 `.ohc/feedback-state/`（v12.10.1 迁出 archives 树，已 gitignore，永不触发 JC5）；OHC_FEEDBACK_PUSH=0 可关）。AI 仍需做的唯一动作：终局填 4 个建议占位符 + 效率/检视小节 |
@@ -532,8 +532,9 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 > 2. submit 继续内置监控 AI Review + CI（2400s 轮询，agent 无需自己写 sleep）
 > 3. **CI 红 = 修复循环**：HANDOFF 自动携带最新失败评论的报错摘要 → 定位原因 → 修复 → 本地 W3 复验 → `git push origin <branch>`（CI 自动重跑）→ `python3 scripts/ohc-run.py submit <软件> <版本> --resume` 继续监控
 > 4. CI 绿：工具自动升级 result 为 success（终态）
+> 5. **`--no-wait` 退出（环未闭，v12.12）**：result 草稿自动写 `milestone=loop_pending`（summary 含完整 resume 命令）+ feedback 事件 `loop_pending`——CI 是评论触发型（无人评论 `/rebuild` 不自动跑），`loop_pending` 即『需 follow-up 续环』的机器可读信号，S8 重置重跑/worker 扫描可据此派发
 >
-> **预算不足（R41 <40min）或显式跳过等待**：`--no-wait` / `OHC_SUBMIT_NO_WAIT=1`——PR 建后立即返回（partial 草稿已落），CI 结果交由平台/follow-up 任务处理（follow-up 只需 `submit --resume`，从断点续，不重跑 W1-W4）。
+> **预算不足（R41 <40min）或显式跳过等待**：`--no-wait` / `OHC_SUBMIT_NO_WAIT=1`——PR 建后立即返回（partial 草稿已落），CI/AI 闭环交由 follow-up 任务续环（工具已自动写 `loop_pending` 草稿信号；平台不会自动接手——CI 必须有人评论 `/rebuild` 才启动）（follow-up 只需 `submit --resume`，从断点续，不重跑 W1-W4）。
 >
 > 依据（task 3681 实测）：agent 建完 PR #4629 后**自己写 sleep 盲等** CI，等待中被节点超时杀死，result 未写被判 failed，90% 工作量丢失。教训不是"不等 CI"，而是"不裸等"：先落草稿，再用工具轮询，红了修到绿。
 >
@@ -999,3 +1000,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.10.2 — 2026-08-27 — L0n 分支名校验全量化（CI 侧）：废除按 PR 编号分档的宽容逻辑（5200/6000 两阈值系规则上线时给存量 PR 留的活口，当前 PR 编号已 6600+ 且存量 PR 已全部关闭/适配，宽容档只剩死代码）。变更：后缀型分支（含 包名-版本 但带额外后缀，如 abc-1.0.0-ASDH）与完全不包含 包名-版本 的分支一律硬失败（L0_FAILED/branch_name_r40），不再区分 PR 编号；CI_PR_NUMBER 变量从脚本中完全移除。保留：前缀剥离（feat/fix/upgrade/任意）、+→- 版本归一化、REL/main/master/server 跳过。Git bash 7 场景模拟验证（精确/前缀/后缀/不含/main/空分支）。v12.10.1→v12.10.2
 
 *SKILL.md v12.11 — 2026-08-29 — R46 result.json 全程生命周期草稿（0828 批量复盘 600 失败任务驱动，D 类 SUCCESS_NO_PR 140→163 唯一增长类别）：R42 草稿只在 PR 创建瞬间落盘，任务前 80% 时长（适配/构建）无保护；OHC_RESULT_OUT 未设置时草稿静默跳过（35 例 result_missing 可解释）；105 例 parse_error 疑似手写绕过校验或跨任务脏文件残留。落地四项：①生命周期草稿五挂点（init-archive=task_started / conan-init=recipe_generated / conan-verify=conan_verify_passed / finish=w3_finish_started / submit=pr_created 即原 R42），终态已写入（draft:false）不降级覆盖；②输出位置兜底 --out > OHC_RESULT_OUT > $HOME/ohpcd-ai-worker-result.json（环境变量缺失不再静默跳过）；③draft/milestone 显式标记（草稿 partial+draft:true，终态 draft:false，ECS 据此区分"中断"与"终态"，校验器强制 draft=true 仅允许 partial）；④手写/残留检测（checkpoints 末条非 result.json 即警告覆盖）。v12.10.2→v12.11
+
+*SKILL.md v12.12 — 2026-08-29 — R42 闭环续航修正（CI/AI 双缺失驱动：自动批量任务跑完 PR 后 CI 和 AI Review 都不执行，成品变半成品，无法合入无法发布）。根因：①CI 是评论触发型（需评论 /rebuild，_monitor_ci 在 submit 会话内自动戳）——会话在 PR 创建后退出（--no-wait/预算不足/死亡）则无人触发，CI 永远不跑；②旧文案"AI Review 意见与 CI 结果由平台异步产生"在批量场景证伪——平台不接手，AI Review 不 attach；③旧退出路径只在日志里提示 follow-up，result 草稿无机器可读信号。落地：两处 --no-wait 退出路径（PR 创建后/resume 后）自动写 `milestone=loop_pending` 生命周期草稿（summary 含完整 resume 命令）+ feedback 事件 `loop_pending`；文档修正：PR 创建 ≠ 成功，成功 = 检视意见闭环 + CI 绿（success 硬闸强制）；docstring/规则行废除"平台异步"假设。worker/平台侧需求：扫描 draft:true + milestone=loop_pending（或 pr_created 停滞）的 PR 派发 follow-up（submit --resume 已支持断点续环，S8 重置重跑机制可复用）。v12.11→v12.12
