@@ -1,5 +1,6 @@
 from conan import ConanFile
 from conan.tools.gnu import AutotoolsToolchain
+import os
 
 
 class AwesfxTestConan(ConanFile):
@@ -17,5 +18,6 @@ class AwesfxTestConan(ConanFile):
         self.run("true")
 
     def test(self):
+        bin_dir = os.path.join(self.dependencies["awesfx"].package_folder, "bin")
         for tool in ("sf2text", "text2sf"):
-            self.run(f"{tool} --help", env="conanrun", ignore_errors=False)
+            self.run(f'"{os.path.join(bin_dir, tool)}" --help', env="conanrun", ignore_errors=False)
