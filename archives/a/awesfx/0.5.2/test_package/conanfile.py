@@ -1,6 +1,7 @@
 from conan import ConanFile
 from conan.tools.gnu import AutotoolsToolchain
 import os
+import subprocess
 
 
 class AwesfxTestConan(ConanFile):
@@ -21,4 +22,6 @@ class AwesfxTestConan(ConanFile):
         bin_dir = os.path.join(self.dependencies["awesfx"].package_folder, "bin")
         for tool in ("sf2text", "text2sf"):
             path = os.path.join(bin_dir, tool)
-            self.run(f'"{path}" 2>&1 | grep -q "usage"', env="conanrun", ignore_errors=False)
+            result = subprocess.run([path], capture_output=True, text=True)
+            output = (result.stdout or "") + (result.stderr or "")
+            assert "usage" in output, f"{tool} did not print usage"
