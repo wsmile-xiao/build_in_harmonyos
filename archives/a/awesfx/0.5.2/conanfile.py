@@ -28,6 +28,9 @@ class AwesfxConan(ConanFile):
     def build(self):
         apply_conandata_patches(self)
         os.makedirs(os.path.join(self.build_folder, "bin"), exist_ok=True)
+        config_h = os.path.join(self.source_folder, "awelib", "config.h")
+        with open(config_h, "w") as f:
+            f.write("#define HAVE_STDINT_H 1\n#define SIZEOF_UNSIGNED_LONG 8\n")
         executables = self.conf.get("tools.build:compiler_executables", default={})
         cc = os.environ.get("CC", executables.get("c", "cc"))
         cflags = os.environ.get("CFLAGS", "")
@@ -38,7 +41,7 @@ class AwesfxConan(ConanFile):
             source = os.path.join(self.source_folder, tool + ".c")
             output = os.path.join(self.build_folder, "bin", tool)
             inputs = " ".join(f'"{path}"' for path in core + [source])
-            self.run(f'{cc} {cflags} -I"{self.source_folder}/include" {inputs} -o "{output}"')
+            self.run(f'{cc} {cflags} -I"{self.source_folder}/include" -I"{self.source_folder}/awelib" {inputs} -o "{output}"')
 
     def package(self):
         copy(self, "*", src=os.path.join(self.build_folder, "bin"), dst=os.path.join(self.package_folder, "bin"))
