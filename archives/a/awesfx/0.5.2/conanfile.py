@@ -32,6 +32,11 @@ class AwesfxConan(ConanFile):
         with open(config_h, "w") as f:
             f.write("#define HAVE_STDINT_H 1\n#define SIZEOF_UNSIGNED_LONG 8\n"
                     "#define DEFAULT_SF_PATH \"/system/etc/sounds\"\n")
+        version_h = os.path.join(self.source_folder, "include", "awe_version.h")
+        with open(version_h, "w") as f:
+            f.write('#define VERSION_STR "0.5.2"\n'
+                    '#define COPYRIGHT_STR "copyright (c) 1996-2003 by Takashi Iwai"\n'
+                    '#define VERSION_NOTE "   ver." VERSION_STR "  " COPYRIGHT_STR "\\n"\n')
         executables = self.conf.get("tools.build:compiler_executables", default={})
         cc = os.environ.get("CC", executables.get("c", "cc"))
         cflags = os.environ.get("CFLAGS", "")
