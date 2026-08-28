@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.10.2
+version: 12.11
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -354,6 +354,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R43 | **调参螺旋止损**：同一错误类别（cmake 组件/目标/include 路径等 conanfile 调参）连续 5 次修改仍失败 → 停止调参，写 result.json（`failed_build` + 5 次尝试的证据）退出；与 R41 互补：R41 管外部阻塞，R43 管内部死循环 |
 | R44 | **CI 失败必须先自诊断再修（submit --resume 失败时）**：CI 红后的第一步是 `gitcode_pr.py diagnose --repo ... --number N`——CI 侧分类 ~60% 落"未知"，diagnose 对评论内嵌的失败日志做本地二次归类（链接/编译/cmake/依赖/配方/补丁/权限/网络/文件缺失/测试空壳），输出证据行+修复要点；禁止对"未知"失败盲改重推（采样：同一 PR 反复重推同类失败=纯浪费 CI 额度）。修复循环: diagnose → 修复 → W3 复验 → push → `submit --resume`；连续 2 轮同错误仍红 → 停损上报（衔接 R43） |
 | R45 | **SKILL_FEEDBACK 防丢失协议（骨架前置+事件累积+终态兜底+完成入仓，工具强制）**：feedback 不再是"流程走完才生成"——①PR 创建瞬间与 R42 result 草稿同步前置生成骨架（submit 内置，幂等）；②全流程事件（HANDOFF/CI红绿/pr_created/闭环）经 `_emit_submit_handoff` 单一咽喉自动累积进骨架的"过程事件时间线"——失败任务的经验不再丢失（旧流程失败分支从不生成 feedback=幸存者偏差）；③result 终态无论成败自动兜底补骨架并落 `feedback_pending` 字段（ECS 回收工作区前据此收割）；④反馈填完闭环（`feedback --resume` rc=0）时自动 commit+push 到任务分支随 PR 进 main（只推终稿不推占位稿——防 PR 转绿后再触发 CI 重跑；运行时状态存顶层 `.ohc/feedback-state/`（v12.10.1 迁出 archives 树，已 gitignore，永不触发 JC5）；OHC_FEEDBACK_PUSH=0 可关）。AI 仍需做的唯一动作：终局填 4 个建议占位符 + 效率/检视小节 |
+| R46 | **result.json 全程生命周期草稿（工具强制，0828 批量复盘新增）**：五挂点自动写草稿 init-archive(task_started)/conan-init(recipe_generated)/conan-verify(conan_verify_passed)/finish(w3_finish_started)/submit(pr_created)——任务前 80% 时长不再裸奔；草稿 `draft:true`+`milestone`，终态 `draft:false`（ECS 区分中断/终态）；输出位置 `--out`>`OHC_RESULT_OUT`>`$HOME/ohpcd-ai-worker-result.json` 兜底；终态不降级覆盖；手写/残留检测后覆盖。AI 照常走流程即可，草稿全自动 |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -557,6 +558,19 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 > 5. **收割对接**：post-merge 收割同时认旧路径 `archives/.../reports/skill-feedback.md` 和新路径 `feedback/SKILL_FEEDBACK_<id>.md`（旧链路只认前者，基本空转）
 >
 > AI 仍需做的唯一动作：终局把骨架里 4 个建议占位符 + 效率分析/检视结果小节填实（cmd_feedback 校验，未填会再次 HANDOFF）。
+
+> **⭐ R46 result.json 全程生命周期草稿（2026-08-29 v12.11，0828 批量复盘驱动）**：
+>
+> 复盘证据：600 失败任务中 D 类 SUCCESS_NO_PR 140→163 是唯一还在增长的类别——R42 草稿只在 PR 创建瞬间落盘（write_pr_draft 仅 submit 两处调用），任务前 80% 时长（适配/构建阶段）agent 预算耗尽或会话正常终止但未到 PR 步 → result.json 完全缺失（35 例 result_missing + 105 例 parse_error 疑似手写/跨任务残留）；且 OHC_RESULT_OUT 未注入的机器上草稿机制整体静默失效。
+>
+> 工具化防线（AI 无需主动执行，全部内置）：
+> 1. **五挂点自动草稿**：init-archive(task_started) / conan-init(recipe_generated) / conan-verify 通过(conan_verify_passed) / finish 启动(w3_finish_started) / submit(pr_created，即原 R42)——任何时刻死亡，最后一份草稿就是上报内容
+> 2. **输出位置兜底**：`--out` > `OHC_RESULT_OUT` > `$HOME/ohpcd-ai-worker-result.json`（环境变量缺失不再静默跳过）
+> 3. **draft 显式标记**：草稿 `draft:true` + `milestone`（校验器强制 draft=true 仅允许 status=partial）；终态 `draft:false`——ECS 据 draft 字段区分"中断待续"与"终态上报"，不再误判 SUCCESS_NO_PR
+> 4. **防降级 + 手写检测**：终态已写入（draft:false）时跳过里程碑草稿（不把 success 改回 partial）；覆盖前检测 checkpoints 末条非 result.json 的手写/残留文件并警告
+>
+> AI 仍需遵守：终态必须走 `result` 命令（手写 JSON 是协议红线，会被检测覆盖）；草稿只是保险，不是终态的替代。
+
 
 
 **前置条件**：test-report 存在 + Staging 验证完成 + conanfile.py 存在。
@@ -983,3 +997,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.10.1 — 2026-08-27 — JC5 事故修复（lua-mimetypes 1.0 首个 v12.10 bot 任务踩中）：v12.10 把 .feedback-state.json 写进 archives/<l>/<sw>/<ver>/ 且 .gitignore 无此条目 → bot 提交进 PR → JC5 未登记隐藏文件拦截。修复三件：①状态文件迁出 archives 树至顶层 .ohc/feedback-state/<l>/<sw>/<ver>.json（_state_path 统一计算；JC5 只扫 archives/，顶层天然安全）；②_load_feedback_state 自动迁移——发现 archives 内遗留副本即读出→写入新位置→删除旧文件（worker 磁盘自清洁）；③.gitignore 加 .ohc/ 与 **/.feedback-state.json 双保险（任何位置的遗留副本永不再被 add）。FEEDBACK 报告位置不变：顶层 feedback/SKILL_FEEDBACK_<id>.md（与 knowledge 同级，随 PR 入仓）；运行时状态与报告分离——状态属 harness 私有（.ohc/，永不入 PR），报告属交付物（feedback/，闭环后入仓）。R45 文案同步修正。v12.10→v12.10.1
 
 *SKILL.md v12.10.2 — 2026-08-27 — L0n 分支名校验全量化（CI 侧）：废除按 PR 编号分档的宽容逻辑（5200/6000 两阈值系规则上线时给存量 PR 留的活口，当前 PR 编号已 6600+ 且存量 PR 已全部关闭/适配，宽容档只剩死代码）。变更：后缀型分支（含 包名-版本 但带额外后缀，如 abc-1.0.0-ASDH）与完全不包含 包名-版本 的分支一律硬失败（L0_FAILED/branch_name_r40），不再区分 PR 编号；CI_PR_NUMBER 变量从脚本中完全移除。保留：前缀剥离（feat/fix/upgrade/任意）、+→- 版本归一化、REL/main/master/server 跳过。Git bash 7 场景模拟验证（精确/前缀/后缀/不含/main/空分支）。v12.10.1→v12.10.2
+
+*SKILL.md v12.11 — 2026-08-29 — R46 result.json 全程生命周期草稿（0828 批量复盘 600 失败任务驱动，D 类 SUCCESS_NO_PR 140→163 唯一增长类别）：R42 草稿只在 PR 创建瞬间落盘，任务前 80% 时长（适配/构建）无保护；OHC_RESULT_OUT 未设置时草稿静默跳过（35 例 result_missing 可解释）；105 例 parse_error 疑似手写绕过校验或跨任务脏文件残留。落地四项：①生命周期草稿五挂点（init-archive=task_started / conan-init=recipe_generated / conan-verify=conan_verify_passed / finish=w3_finish_started / submit=pr_created 即原 R42），终态已写入（draft:false）不降级覆盖；②输出位置兜底 --out > OHC_RESULT_OUT > $HOME/ohpcd-ai-worker-result.json（环境变量缺失不再静默跳过）；③draft/milestone 显式标记（草稿 partial+draft:true，终态 draft:false，ECS 据此区分"中断"与"终态"，校验器强制 draft=true 仅允许 partial）；④手写/残留检测（checkpoints 末条非 result.json 即警告覆盖）。v12.10.2→v12.11

@@ -7,7 +7,7 @@ Usage:
     python3 ohc-run.py result <software> <version> --status <status> [options]
 
 输出位置（优先级）:
-    --out <path>  >  环境变量 OHC_RESULT_OUT  >  不落盘（仅 stdout 输出 JSON）
+    --out <path>  >  环境变量 OHC_RESULT_OUT  >  $HOME/ohpcd-ai-worker-result.json（R46 兜底）
 
 CLI 参数 → JSON 字段映射（字段名与 ECS 消费端严格对齐，改名=ECS 读不到）:
     --pr-number/--pr-url/--commit-hash/--branch → 同名字段（success 必填）
@@ -30,7 +30,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .utils import find_project_dir, get_agent_id, log_fail, log_info, log_ok
+from .utils import find_project_dir, get_agent_id, log_fail, log_info, log_ok, log_warn
 
 RESULT_FILENAME = "result.json"
 # result.json 输出位置环境变量（--out 未指定时生效；两者都未设置则不落盘仅 stdout）
@@ -256,6 +256,10 @@ def _validate(result: dict) -> list[str]:
             if not result.get(field):
                 errors.append(f"status=success 时 {field} 必填")
 
+    # R46: draft 草稿只能是中间态（ECS 据 draft 区分"中断"与"终态"）
+    if result.get("draft") and status != "partial":
+        errors.append("draft=true 仅允许 status=partial（草稿即中间态）")
+
     # dependency_missing 必填 missing_dependencies + missing_evidence
     if status == "dependency_missing":
         missing = result.get("missing_dependencies")
@@ -361,6 +365,10 @@ def result_cli(argv: list[str]) -> int:
     parser.add_argument("--no-ci-verify", action="store_true",
                         help="跳过 success 的 CI 绿核验（仅限离线等极端场景；"
                              "默认 success 必须实测 PR 评论含'校验通过'）")
+    parser.add_argument("--draft-milestone", default=None, metavar="NAME",
+                        help="R46: 写生命周期草稿（自动 partial+draft:true），"
+                             "标记里程碑 task_started/recipe_generated/"
+                             "conan_verify_passed/w3_finish_started/pr_created")
     args = parser.parse_args(argv)
 
     # C项(预算感知): 入口即报剩余预算，<40min 提醒只收尾
@@ -370,8 +378,11 @@ def result_cli(argv: list[str]) -> int:
 
     project_dir = Path(find_project_dir())
 
-    # ── 输出位置：--out 参数 > 环境变量 OHC_RESULT_OUT > 不落盘（仅 stdout） ──
+    # ── 输出位置：--out 参数 > 环境变量 OHC_RESULT_OUT > $HOME 兜底（R46）──
     # result.json 用于与其他设备/AI 交换任务结果，不写入 archives/（不是 PR 提交内容）
+    # R46: 环境变量缺失时不再静默跳过，而是写 $HOME/ohpcd-ai-worker-result.json
+    #      （SKILL_RESULT_PROTOCOL_SPEC 记载的 ECS 消费端默认路径；
+    #       0828 批量复盘——未注入变量导致 35 例 result_missing）
     out_target = args.out or os.environ.get(RESULT_OUT_ENV, "").strip() or None
     out_path: Path | None = None
     if out_target:
@@ -379,6 +390,11 @@ def result_cli(argv: list[str]) -> int:
         # 目录判定：已存在的目录，或无扩展名的路径（如 /shared/results/）→ 目录模式
         if out_path.is_dir() or not out_path.suffix:
             out_path = out_path / RESULT_FILENAME
+    else:
+        out_path = _home_fallback_path()
+        if out_path is not None:
+            log_info(f"R46 兜底: --out/{RESULT_OUT_ENV} 均未设置，"
+                     f"写入 ECS 消费端默认路径 {out_path}")
 
     if out_path is not None and out_path.exists() and not args.force:
         log_fail(f"{out_path} 已存在；如需重报请加 --force")
@@ -496,6 +512,13 @@ def result_cli(argv: list[str]) -> int:
                         "message": RESULT_FILENAME})
     result["checkpoints"] = checkpoints
 
+    # ── R46: draft 标记（ECS 据 draft:true 归类"中断"、draft:false 为终态）──
+    if args.draft_milestone:
+        result["draft"] = True
+        result["milestone"] = args.draft_milestone
+    else:
+        result["draft"] = False
+
     # ── v12.10: feedback_pending + 终态兜底骨架（防丢失协议）──
     # 无论终态成败：feedback 缺失即补骨架（消除幸存者偏差——失败任务同样
     # 产出经验）；pending 标志供 ECS 在回收工作区前判断是否收割 feedback/。
@@ -518,38 +541,127 @@ def result_cli(argv: list[str]) -> int:
 
     result_text = json.dumps(result, ensure_ascii=False, indent=2)
     if out_path is not None:
+        # R46: 覆盖前检测手写/外来文件（协议红线: 禁止绕过校验器手写 JSON）
+        if out_path.exists():
+            _warn_if_handwritten(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(result_text, encoding="utf-8")
         # 协议红线：退出前自动 cat result.json
         log_ok(f"result.json 已生成: {out_path}")
     else:
-        log_info("未指定输出位置（--out / OHC_RESULT_OUT 均未设置），"
+        log_info("无法解析输出位置（--out / OHC_RESULT_OUT / $HOME 均不可用），"
                  "仅输出到 stdout，不落盘")
     print(result_text)
     return 0
 
 
+def _home_fallback_path() -> Path | None:
+    """R46: --out/OHC_RESULT_OUT 均缺失时的 $HOME 兜底路径。
+
+    SKILL_RESULT_PROTOCOL_SPEC 记载消费端读 $HOME/ohpcd-ai-worker-result.json；
+    此前环境变量缺失即静默不落盘，草稿机制在未注入变量的机器上整体失效
+    （0828 批量复盘: 35 例 result_missing）。HOME 不可解析时返回 None。
+    """
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    if not home or home in ("~", "/"):
+        return None
+    return Path(home) / "ohpcd-ai-worker-result.json"
+
+
+def _resolve_draft_target() -> Path | None:
+    """草稿落盘目标（OHC_RESULT_OUT > $HOME 兜底；与 result 命令同解析规则）。"""
+    target = os.environ.get(RESULT_OUT_ENV, "").strip()
+    if target:
+        p = Path(target).expanduser()
+        return p / RESULT_FILENAME if (p.is_dir() or not p.suffix) else p
+    return _home_fallback_path()
+
+
+def _looks_tool_generated(data) -> bool:
+    """识别 result.json 是否本工具生成（checkpoints 末条 message==result.json）。"""
+    ck = data.get("checkpoints")
+    return (isinstance(ck, list) and bool(ck)
+            and isinstance(ck[-1], dict)
+            and ck[-1].get("message") == RESULT_FILENAME)
+
+
+def _warn_if_handwritten(path: Path) -> bool:
+    """检测手写/外来 result.json（协议禁止绕过校验器）。返回是否手写。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        log_warn(f"{path} 不是合法 JSON（疑似手写/上一任务残留），按规则覆盖")
+        return True
+    if not _looks_tool_generated(data):
+        log_warn(f"{path} 缺少工具特征（checkpoints 末条非 {RESULT_FILENAME}），"
+                 "疑似手写绕过校验（协议红线），已忽略其内容")
+        return True
+    return False
+
+
+def write_lifecycle_draft(software: str, version: str, milestone: str,
+                          pr_number: int | None = None,
+                          summary: str | None = None) -> bool:
+    """R46 工具化: 生命周期草稿（任务全程防猝死丢 result.json）。
+
+    0828 复盘（600 失败任务）: write_pr_draft 只在 PR 创建瞬间落盘，
+    任务前 80% 时长（适配/构建阶段）无任何保护——agent 预算耗尽或
+    会话正常终止但未到 PR 步 → result.json 缺失 → ECS 判 SUCCESS_NO_PR/
+    unknown（35 例 result_missing + 105 例 parse_error）。
+
+    行为:
+      - 覆盖任何已存在的 draft 草稿（里程碑推进）
+      - 终态已写入（draft=false）时不降级覆盖（防把 success 改回 partial）
+      - 手写/残留文件直接覆盖（跨任务脏文件污染防御）
+      - 失败不阻塞调用方主流程（best-effort）
+    挂点: init-archive(task_started) / conan-init(recipe_generated) /
+          conan-verify(conan_verify_passed) / finish(local_ci_passed) /
+          submit(pr_created, 即原 R42)。
+    """
+    out_path = _resolve_draft_target()
+    if out_path is None:
+        log_info("R46: 无可用输出位置（OHC_RESULT_OUT/$HOME 均不可用），跳过草稿")
+        return False
+    try:
+        if out_path.exists():
+            try:
+                prev = json.loads(out_path.read_text(encoding="utf-8"))
+            except Exception:
+                prev = None
+            if prev is not None and _looks_tool_generated(prev) \
+                    and prev.get("draft") is False:
+                log_info(f"R46: 终态 result.json 已上报（draft:false），"
+                         f"跳过里程碑草稿 {milestone}")
+                return False
+        argv = [
+            software, version,
+            "--status", "partial",
+            "--failed-reason",
+            f"R46 生命周期草稿: {milestone}（任务进行中，非终态）",
+            "--summary", summary or f"[draft:{milestone}] {software} {version}",
+            "--force", "--draft-milestone", milestone,
+        ]
+        if pr_number:
+            argv += ["--pr-number", str(pr_number)]
+        rc = result_cli(argv)
+        if rc == 0:
+            log_ok(f"R46 草稿已落盘: milestone={milestone} -> {out_path}")
+        return rc == 0
+    except Exception as e:  # best-effort: 草稿失败不阻塞主流程
+        log_info(f"R46 草稿写入失败（不阻塞主流程）: {e}")
+        return False
+
+
 def write_pr_draft(software: str, version: str,
                    pr_number: int, pr_url: str) -> bool:
-    """R42 工具化: PR 创建后立即写 partial 草稿（submit 调用）。
+    """R42 工具化: PR 创建后立即写 partial 草稿（submit 调用；R46 里程碑之一）。
 
     3681 教训: agent 建完 PR 后等 CI/AI Review 耗尽预算被杀，
     result.json 未写 → 任务被判 failed，90% 工作量丢失。
-    本函数在 PR 创建时刻即落一份 partial 草稿（仅当 OHC_RESULT_OUT
-    已设置时落盘）；后续任何时刻被杀，最后一份草稿就是上报内容。
-    失败不阻塞 submit 主流程。
+    本函数在 PR 创建时刻即落一份 partial 草稿；后续任何时刻被杀，
+    最后一份草稿就是上报内容。失败不阻塞 submit 主流程。
     """
-    if not os.environ.get(RESULT_OUT_ENV, "").strip():
-        log_info(f"OHC_RESULT_OUT 未设置，跳过自动草稿；"
-                 f"请手动执行: ohc-run.py result {software} {version} "
-                 "--status partial --summary 'PR 已创建，等待平台异步验证'")
-        return False
-    rc = result_cli([
-        software, version,
-        "--status", "partial",
-        "--failed-reason",
-        "PR 已创建，AI Review/CI 由平台异步进行（R42: PR 创建即上报）",
-        "--summary", f"PR #{pr_number} 已创建: {pr_url}",
-        "--pr-number", str(pr_number),
-    ])
-    return rc == 0
+    return write_lifecycle_draft(
+        software, version, "pr_created",
+        pr_number=pr_number,
+        summary=f"PR #{pr_number} 已创建: {pr_url}")

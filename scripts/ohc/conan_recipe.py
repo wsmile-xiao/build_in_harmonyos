@@ -547,7 +547,16 @@ def conan_init_cli(argv: list[str] | None = None) -> int:
     parser.add_argument("--force", action="store_true", help="覆盖已有的 conanfile.py")
     parser.add_argument("--project-dir")
     args = parser.parse_args(argv)
-    return conan_init(
+    rc = conan_init(
         args.software, args.version, force=args.force,
         pdir=getattr(args, "project_dir", None),
     )
+    if rc == 0:
+        # R46: 配方生成成功 → 里程碑草稿
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(args.software, args.version,
+                                  "recipe_generated")
+        except Exception:
+            pass
+    return rc

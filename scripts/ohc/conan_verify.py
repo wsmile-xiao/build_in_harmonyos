@@ -1064,4 +1064,13 @@ def conan_verify_cli(argv: list[str] | None = None) -> int:
         conan_channel=args.channel,
         pdir=getattr(args, "project_dir", None),
     )
-    return verifier.run()
+    rc = verifier.run()
+    if rc == 0:
+        # R46: conan-verify 全绿 → 里程碑草稿
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(args.software, args.version,
+                                  "conan_verify_passed")
+        except Exception:
+            pass
+    return rc

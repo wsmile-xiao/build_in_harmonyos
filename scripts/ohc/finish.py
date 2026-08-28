@@ -581,6 +581,12 @@ def finish_cli(argv=None):
         choices=["published", "built", "failed", "archived"], help="编译状态")
     parser.add_argument("--project-dir")
     args = parser.parse_args(argv)
+    # R46: W3 收尾管线启动前写生命周期草稿（管线中途中断也有 result.json）
+    try:
+        from .result_report import write_lifecycle_draft
+        write_lifecycle_draft(args.software, args.version, "w3_finish_started")
+    except Exception:
+        pass
     pipeline = FinishPipeline(args.software, args.version, args.status,
                                pdir=getattr(args, "project_dir", None))
     return pipeline.run()
