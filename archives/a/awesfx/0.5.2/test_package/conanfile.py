@@ -16,9 +16,10 @@ class AwesfxTestConan(ConanFile):
         AutotoolsToolchain(self).generate()
 
     def build(self):
-        self.run("true")
+        self.run("cc test_consumer.c -o test_consumer")
 
     def test(self):
+        self.run("./test_consumer")
         bin_dir = os.path.join(self.dependencies["awesfx"].package_folder, "bin")
         for tool in ("sf2text", "text2sf"):
             path = os.path.join(bin_dir, tool)
