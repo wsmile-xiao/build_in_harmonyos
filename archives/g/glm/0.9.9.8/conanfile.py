@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Conan recipe — glm 0.9.9.8
 
-GLM (OpenGL Mathematics — header-only C++ math library, API compatible with GLSL.
-Build system: CMake (header-only INTERFACE library, no build artifacts)."""
+GLM (OpenGL Mathematics) — header-only C++ math library, API compatible with GLSL.
+Build system: CMake (header-only INTERFACE library, no build artifacts).
+"""
 import os
 
 from conan import ConanFile
@@ -10,16 +11,15 @@ from conan.tools.files import get, copy, apply_conandata_patches, export_conanda
 from conan.tools.layout import basic_layout
 
 
-class GlmConaan(ConanFile):
+class GlmConan(ConanFile):
     name = "glm"
     version = "0.9.9.8"
     description = "OpenGL Mathematics — header-only C++ math library, API compatible with GLSL"
     license = "MIT"
     homepage = "https://github.com/g-truc/glm"
-    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
+    url = ""  # CI fills this
 
     package_type = "header-library"
-    no_copy_source = True
 
     # R32: settings.os check must include both Linux and OHOS
     settings = "os", "compiler", "build_type", "arch"
