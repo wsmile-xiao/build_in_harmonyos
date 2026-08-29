@@ -7,7 +7,7 @@ from conan.tools.layout import basic_layout
 
 class AsyncFutureConan(ConanFile):
     name = "asyncfuture"
-    version = "0.4.1"
+    version = "1"
     description = "Qt-based futures and promises library"
     homepage = "https://github.com/benlau/asyncfuture"
     license = "Apache-2.0"
