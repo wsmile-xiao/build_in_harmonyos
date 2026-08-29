@@ -21,8 +21,9 @@ class AwesfxTestConan(ConanFile):
         self.run(f'{cc} test_consumer.c -o test_consumer')
 
     def test(self):
-        self.run("./test_consumer")
         bin_dir = os.path.join(self.dependencies["awesfx"].package_folder, "bin")
+        paths = [os.path.join(bin_dir, tool) for tool in ("sf2text", "text2sf")]
+        self.run("./test_consumer " + " ".join(f'\"{path}\"' for path in paths))
         for tool in ("sf2text", "text2sf"):
             path = os.path.join(bin_dir, tool)
             result = subprocess.run([path, "--help"], capture_output=True, text=True)
