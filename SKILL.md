@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.12
+version: 12.13
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -355,6 +355,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R44 | **CI 失败必须先自诊断再修（submit --resume 失败时）**：CI 红后的第一步是 `gitcode_pr.py diagnose --repo ... --number N`——CI 侧分类 ~60% 落"未知"，diagnose 对评论内嵌的失败日志做本地二次归类（链接/编译/cmake/依赖/配方/补丁/权限/网络/文件缺失/测试空壳），输出证据行+修复要点；禁止对"未知"失败盲改重推（采样：同一 PR 反复重推同类失败=纯浪费 CI 额度）。修复循环: diagnose → 修复 → W3 复验 → push → `submit --resume`；连续 2 轮同错误仍红 → 停损上报（衔接 R43） |
 | R45 | **SKILL_FEEDBACK 防丢失协议（骨架前置+事件累积+终态兜底+完成入仓，工具强制）**：feedback 不再是"流程走完才生成"——①PR 创建瞬间与 R42 result 草稿同步前置生成骨架（submit 内置，幂等）；②全流程事件（HANDOFF/CI红绿/pr_created/闭环）经 `_emit_submit_handoff` 单一咽喉自动累积进骨架的"过程事件时间线"——失败任务的经验不再丢失（旧流程失败分支从不生成 feedback=幸存者偏差）；③result 终态无论成败自动兜底补骨架并落 `feedback_pending` 字段（ECS 回收工作区前据此收割）；④反馈填完闭环（`feedback --resume` rc=0）时自动 commit+push 到任务分支随 PR 进 main（只推终稿不推占位稿——防 PR 转绿后再触发 CI 重跑；运行时状态存顶层 `.ohc/feedback-state/`（v12.10.1 迁出 archives 树，已 gitignore，永不触发 JC5）；OHC_FEEDBACK_PUSH=0 可关）。AI 仍需做的唯一动作：终局填 4 个建议占位符 + 效率/检视小节 |
 | R46 | **result.json 全程生命周期草稿（工具强制，0828 批量复盘新增）**：五挂点自动写草稿 init-archive(task_started)/conan-init(recipe_generated)/conan-verify(conan_verify_passed)/finish(w3_finish_started)/submit(pr_created)——任务前 80% 时长不再裸奔；草稿 `draft:true`+`milestone`，终态 `draft:false`（ECS 区分中断/终态）；输出位置 `--out`>`OHC_RESULT_OUT`>`$HOME/ohpcd-ai-worker-result.json` 兜底；终态不降级覆盖；手写/残留检测后覆盖。AI 照常走流程即可，草稿全自动 |
+| R47 | **语言预检前置（AI Worker 协议 v0.8 附录 D，2026-08-29 冻结；缺字段=PROTOCOL_VIOLATION 拒收）**：checkout 源码后、进入适配主流程**前**必须跑 `lang-preflight`（scripts/ohc/lang_detect.py）——判定优先级 manifest>构建系统>源码统计(≥70%)，边界规则：C/C++ 混编按主体判不算 mixed、pybind11 绑定包判 cpp、辅助脚本不算主体、manifest 与统计矛盾判 mixed；任务语言取 `--lang`/`OHPCD_LANG`（默认 cpp），**c↔cpp 视为兼容族不迁移**（conan 流程通吃）；不匹配 → 立即终态 `env_unsupported` + `detected_language`（§4.6 枚举，禁自由文本）+ `language_evidence` 三项（各≤200 字符），**禁止硬着头皮适配**（0828 报告 ~20% 任务浪费在非 C/C++ 源码上）；匹配 → 草稿 milestone=lang_checked，正常进主流程 |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -430,6 +431,14 @@ configure 失败？
 $SKILL_ROOT/scripts/ohc-run.py init-build <软件名> [<版本>] [--url=URL] [--no-download] [--resume]
 ```
 内部 9 步：registry→URL→下载→解压→历史检索→骨架创建→依赖解析→环境检查→输出 `.build-context-<name>-<ver>`。
+
+### Step 1.5: lang-preflight — 语言预检（⭐R47，协议 v0.8 附录 D，强制）
+
+```bash
+python3 $SKILL_ROOT/scripts/ohc-run.py lang-preflight <软件名> <版本> \
+    --src $BUILD_SRC_DIR    # 任务语言自动取 OHPCD_LANG（默认 cpp）
+```
+源码 checkout 后、进入 Step 2 适配主流程**之前**必须执行（R47）：manifest>构建系统>源码统计(≥70%) 三级判定 + 边界规则（C/C++ 混编按主体判 / pybind11 绑定判 cpp / 辅助脚本不算 / 矛盾判 mixed）。**exit 2 = 语言不匹配**：已自动写终态 `env_unsupported` + `detected_language` + `language_evidence`（协议强制字段），**立即终止任务，禁止硬着头皮适配**；exit 0 = 匹配通过（c↔cpp 兼容族），写 milestone=lang_checked 草稿，继续 Step 2。
 
 ### Step 2: AI 编译 — 唯一智能步骤
 
@@ -636,18 +645,21 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <sta
     --out <目录或文件路径> [options]
 ```
 
-**status 八值枚举（不可扩展）+ 分类决策树**：
+**status 枚举（协议 v0.8 §4.5 对齐 + 自有扩展）+ 分类决策树**：
 
 | status | 判定条件 | 必填附加字段 |
 |--------|---------|-------------|
 | `success` | PR 已合并或已经过 CI 验证，软件包完整 | `pr_url` / `pr_number` / `commit_hash` / `branch`（自动从 .submit-state.json/gh/git 补齐） |
-| `failed_build` | conan create 编译失败 | `--failed-reason`（≤500 字符） |
+| `build_failed` | conan create 编译失败（协议枚举；旧写法 `failed_build` 仍接受，输出自动规范化为 `build_failed`） | `--failed-reason`（≤500 字符） |
+| `bootstrap_failed` | 环境引导失败（协议 v0.8 新增：bootstrap 阶段挂掉而非编译失败） | `--failed-reason` |
+| `timeout` | 预算/超时耗尽（协议 v0.8 新增） | `--failed-reason` |
+| `internal_error` | 工具/流程内部错误（协议 v0.8 新增） | `--failed-reason` |
 | `failed_test` | 编译成功但测试失败 | `--failed-reason` |
 | `dependency_missing` | 依赖未发布（can_resolve=False） | `--missing`（裸包名）+ `--missing-evidence`（二次验证证据） |
-| `env_unsupported` | 编译器/平台不支持 | `--failed-reason` |
+| `env_unsupported` | 编译器/平台不支持，或 **语言预检不匹配（R47）** | `--failed-reason` + **`--detected-language` + `--ev-build-system/--ev-manifest/--ev-source-stats`（协议 §2.4 规则 4/5 强制，缺失=拒收）** |
 | `upstream_issue` | 上游代码缺陷 | `--failed-reason` |
 | `user_cancelled` | 用户主动取消 | `--failed-reason` |
-| `partial` | 部分目标达成 | `--failed-reason` |
+| `partial` | 部分目标达成（仅 R46 生命周期草稿使用） | `--failed-reason` |
 
 **CLI 参数 → JSON 字段映射**（字段名与 ECS 消费端严格对齐，改名=ECS 读不到）：
 
@@ -657,6 +669,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <sta
 | `--failed-reason` | **`error_detail`** | ECS 失败分支 error_msg 优先取此字段 |
 | `--missing` | **`missing_dependencies`**（数组） | ECS 从此读依赖缺口 |
 | `--missing-evidence` | `missing_evidence` | 依赖缺失证据留档 |
+| `--detected-language` | **`detected_language`**（§4.6 枚举） | 协议 v0.8 语言迁移分支；仅 env_unsupported 允许，其余状态强制 null |
+| `--ev-build-system` / `--ev-manifest` / `--ev-source-stats` | **`language_evidence`**（三项，各 ≤200 字符） | 协议 v0.8 判定证据，缺失=PROTOCOL_VIOLATION 拒收 |
 | `--summary`（强烈建议） | `summary` | 一句话结果摘要 |
 | （非 success 自动生成） | `error_type` = status | 失败分类 |
 
@@ -914,6 +928,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 |--------|------|
 | `build` | 14 步编译驱动（含预分析+conan 配方生成+验证）★ 主入口 |
 | `init-build` | 下载/解压/骨架/环境/依赖解析 |
+| `lang-preflight` | ⭐R47 语言预检（协议 v0.8 附录 D）：三级判定+边界规则；不匹配自动写 env_unsupported+语言字段终态 |
 | `pre-analysis` | ⭐ 鸿蒙PC平台适配预分析（图形/音视频/系统集成/平台代码扫描） |
 | `conan-init` | 生成 conanfile.py + conandata.yml + test_package/ ⭐ |
 | `conan-verify` | conan create + G0-G4 + L2/L4/L5 + 知识图谱(R30) + 草稿(R31) ⭐ |
@@ -1002,3 +1017,5 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.11 — 2026-08-29 — R46 result.json 全程生命周期草稿（0828 批量复盘 600 失败任务驱动，D 类 SUCCESS_NO_PR 140→163 唯一增长类别）：R42 草稿只在 PR 创建瞬间落盘，任务前 80% 时长（适配/构建）无保护；OHC_RESULT_OUT 未设置时草稿静默跳过（35 例 result_missing 可解释）；105 例 parse_error 疑似手写绕过校验或跨任务脏文件残留。落地四项：①生命周期草稿五挂点（init-archive=task_started / conan-init=recipe_generated / conan-verify=conan_verify_passed / finish=w3_finish_started / submit=pr_created 即原 R42），终态已写入（draft:false）不降级覆盖；②输出位置兜底 --out > OHC_RESULT_OUT > $HOME/ohpcd-ai-worker-result.json（环境变量缺失不再静默跳过）；③draft/milestone 显式标记（草稿 partial+draft:true，终态 draft:false，ECS 据此区分"中断"与"终态"，校验器强制 draft=true 仅允许 partial）；④手写/残留检测（checkpoints 末条非 result.json 即警告覆盖）。v12.10.2→v12.11
 
 *SKILL.md v12.12 — 2026-08-29 — R42 闭环续航修正（CI/AI 双缺失驱动：自动批量任务跑完 PR 后 CI 和 AI Review 都不执行，成品变半成品，无法合入无法发布）。根因：①CI 是评论触发型（需评论 /rebuild，_monitor_ci 在 submit 会话内自动戳）——会话在 PR 创建后退出（--no-wait/预算不足/死亡）则无人触发，CI 永远不跑；②旧文案"AI Review 意见与 CI 结果由平台异步产生"在批量场景证伪——平台不接手，AI Review 不 attach；③旧退出路径只在日志里提示 follow-up，result 草稿无机器可读信号。落地：两处 --no-wait 退出路径（PR 创建后/resume 后）自动写 `milestone=loop_pending` 生命周期草稿（summary 含完整 resume 命令）+ feedback 事件 `loop_pending`；文档修正：PR 创建 ≠ 成功，成功 = 检视意见闭环 + CI 绿（success 硬闸强制）；docstring/规则行废除"平台异步"假设。worker/平台侧需求：扫描 draft:true + milestone=loop_pending（或 pr_created 停滞）的 PR 派发 follow-up（submit --resume 已支持断点续环，S8 重置重跑机制可复用）。v12.11→v12.12
+
+*SKILL.md v12.13 — 2026-08-29 — 协议 v0.8 附录 D 对齐（AI_WORKER_PROTOCOL_v0.8.md 2026-08-29 冻结，无兼容层，缺语言字段 = PROTOCOL_VIOLATION 拒收）。0828 报告 ~20% 任务浪费在非 C/C++ 源码上（E/F/J 类 123 例）。落地四项：①新工具 lang-preflight（scripts/ohc/lang_detect.py）：checkout 后、适配主流程前强制预检——三级判定 manifest>构建系统>源码统计(≥70%) + 边界规则（C/C++ 混编按主体判不算 mixed / pybind11 绑定包判 cpp / 辅助脚本不算主体 / manifest 与统计矛盾判 mixed），不匹配自动写终态 env_unsupported + detected_language + language_evidence，匹配写 lang_checked 草稿；c↔cpp 兼容族不迁移（conan 流程通吃）；②result 新增 --detected-language + --ev-build-system/--ev-manifest/--ev-source-stats（仅 env_unsupported 允许，其余状态 CLI 层早拒 + 校验器双闸）；③校验器协议规则 4/5：detected_language 必须 §4.6 枚举（禁自由文本），language_evidence 三项必填各 ≤200 字符；④status 枚举对齐协议 §4.5：新增 bootstrap_failed/timeout/internal_error，failed_build 旧写法自动规范化为 build_failed（输出协议枚举）。测试 25/25（判定 11 场景 + CLI 匹配/mismatch + 校验规则），回归 v12.10/v12.11/v12.12 全绿。

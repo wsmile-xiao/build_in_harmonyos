@@ -29,6 +29,8 @@ _MODULES = {
     "req": "requirements",
     # RESULT Step: 任务终态 result.json 上报（SKILL_RESULT_PROTOCOL_SPEC）
     "result": "result_report",
+    # v12.13: 协议 v0.8 附录 D 语言预检（checkout 后、适配主流程前）
+    "lang-preflight": "lang_detect",
     # v12.3: CI/W3 构建超时配置管理（ci/config/build_timeouts.txt）
     "timeout": "build_timeout",
     # v12.4: 草稿预审辅助（相似度证据 + 三态建议；纳入决策权在人工审核）

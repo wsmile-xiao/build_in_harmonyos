@@ -73,7 +73,17 @@ def budget_status() -> tuple[int | None, str]:
 STATUS_ENUM = (
     "success", "failed_build", "failed_test", "dependency_missing",
     "env_unsupported", "upstream_issue", "user_cancelled", "partial",
+    # 协议 v0.8 §4.5 枚举补齐（2026-08-29 冻结；failed_build 为旧写法，
+    # 输出时自动规范化为 build_failed——协议要求直接使用枚举）
+    "build_failed", "bootstrap_failed", "timeout", "internal_error",
 )
+
+# 协议枚举 → 我们的输出规范化（E11/E12: v0.8 起输出必须用协议枚举值）
+_PROTO_NORMALIZE = {"failed_build": "build_failed"}
+
+# 协议 v0.8 §4.6 语言枚举（E12: 禁止自由文本，必须小写枚举值）
+LANG_ENUM = ("c", "cpp", "rust", "python", "go", "perl", "lua",
+             "nodejs", "java", "bash", "mixed", "other")
 
 # 长度红线（协议 §2）
 MAX_PKG = 100
@@ -82,6 +92,8 @@ MAX_AGENT = 16
 MAX_REASON = 500
 MAX_MSG = 200
 MAX_MISSING_PER_DEP = 5
+# 协议 v0.8 §4.7: language_evidence 每项 ≤200 字符
+MAX_LANG_EVIDENCE = 200
 
 _GIT = "git"
 
@@ -227,6 +239,27 @@ def _search_evidence_in_logs(project_dir: Path, pkg_names: list[str]) -> list[st
     return hits
 
 
+def _check_language_evidence(evidence) -> list[str]:
+    """协议 v0.8 §4.7: language_evidence 必须含三项，每项非空字符串 ≤200 字符。
+
+    返回错误清单；空清单 = 结构合法。
+    """
+    if not isinstance(evidence, dict):
+        return []
+    errs: list[str] = []
+    keys = ("build_system", "manifest", "source_stats")
+    for k in keys:
+        v = evidence.get(k)
+        if not isinstance(v, str) or not v.strip():
+            errs.append(f"language_evidence.{k} 必填（非空字符串）")
+        elif len(v) > MAX_LANG_EVIDENCE:
+            errs.append(f"language_evidence.{k} 长度 > {MAX_LANG_EVIDENCE}")
+    extra = set(evidence) - set(keys)
+    if extra:
+        errs.append(f"language_evidence 仅允许 {keys}，多余: {sorted(extra)}")
+    return errs
+
+
 def _validate(result: dict) -> list[str]:
     """按协议逐条校验，返回错误清单（空 = 通过）。"""
     errors: list[str] = []
@@ -276,6 +309,23 @@ def _validate(result: dict) -> list[str]:
     else:
         if result.get("missing_dependencies"):
             errors.append("仅 status=dependency_missing 允许携带 missing_dependencies")
+
+    # 协议 v0.8 §2.4 规则 4/5: 语言判定字段（env_unsupported 必填，其余禁止）
+    lang = result.get("detected_language")
+    evidence = result.get("language_evidence")
+    if status == "env_unsupported":
+        if lang not in LANG_ENUM:
+            errors.append(f"env_unsupported 时 detected_language 必填且为枚举值"
+                          f"（{','.join(LANG_ENUM)}），当前: {lang!r}（禁止自由文本）")
+        if not isinstance(evidence, dict):
+            errors.append("env_unsupported 时 language_evidence"
+                          "（build_system/manifest/source_stats）必填")
+        else:
+            errors.extend(_check_language_evidence(evidence))
+    else:
+        if lang is not None or evidence is not None:
+            errors.append("仅 status=env_unsupported 允许携带语言判定字段"
+                          "（其余场景应为 null——协议 §4.2）")
 
     # 非 success：error_type 必填且与 status 一致；error_detail 必填（≤500）
     if status != "success":
@@ -369,6 +419,16 @@ def result_cli(argv: list[str]) -> int:
                         help="R46: 写生命周期草稿（自动 partial+draft:true），"
                              "标记里程碑 task_started/recipe_generated/"
                              "conan_verify_passed/w3_finish_started/pr_created")
+    # 协议 v0.8 §2.4 规则 4/5 + §4.6/§4.7: 语言判定字段（仅 env_unsupported）
+    parser.add_argument("--detected-language", default=None, metavar="LANG",
+                        help="实测语言（§4.6 枚举: c/cpp/rust/python/go/perl/"
+                             "lua/nodejs/java/bash/mixed/other；仅 env_unsupported）")
+    parser.add_argument("--ev-build-system", default=None, metavar="TEXT",
+                        help="language_evidence.build_system（≤200 字符）")
+    parser.add_argument("--ev-manifest", default=None, metavar="TEXT",
+                        help="language_evidence.manifest（≤200 字符）")
+    parser.add_argument("--ev-source-stats", default=None, metavar="TEXT",
+                        help="language_evidence.source_stats（≤200 字符）")
     args = parser.parse_args(argv)
 
     # C项(预算感知): 入口即报剩余预算，<40min 提醒只收尾
@@ -467,6 +527,15 @@ def result_cli(argv: list[str]) -> int:
 
     # ── 上报硬闸: success 必须实测 CI 绿（PR6096 教训: CI 红却上报 success）──
     final_status = args.status
+    # 协议 v0.8 §4.5: 输出规范化（failed_build 旧写法 → build_failed 枚举）
+    final_status = _PROTO_NORMALIZE.get(final_status, final_status)
+    # 协议 §2.4 规则 5: 语言字段仅 env_unsupported 允许（CLI 层早拒）
+    if final_status != "env_unsupported" and (
+            args.detected_language or args.ev_build_system
+            or args.ev_manifest or args.ev_source_stats):
+        log_fail(f"语言判定字段（--detected-language/--ev-*）仅 status=env_unsupported "
+                 f"允许携带，当前 status={final_status}（协议 §4.2 其余场景为 null）")
+        return 2
     if args.status == "success" and not args.no_ci_verify:
         ci_state = _verify_ci_green(pr_number)
         if ci_state != "PASSED":
@@ -507,6 +576,18 @@ def result_cli(argv: list[str]) -> int:
         result["missing_dependencies"] = missing_list
     if evidence:
         result["missing_evidence"] = evidence
+    # 协议 v0.8 §2.4 规则 4/5: 语言判定字段（仅 env_unsupported 携带，其余 null）
+    if final_status == "env_unsupported":
+        result["detected_language"] = args.detected_language
+        if any((args.ev_build_system, args.ev_manifest, args.ev_source_stats)):
+            result["language_evidence"] = {
+                "build_system": args.ev_build_system or "",
+                "manifest": args.ev_manifest or "",
+                "source_stats": args.ev_source_stats or "",
+            }
+    else:
+        result["detected_language"] = None
+        result["language_evidence"] = None
     # 协议 §5：最后一条 checkpoint 为 _ohpcd_result，message 固定为 result.json
     checkpoints.append({"ts": datetime.now(timezone.utc).isoformat(),
                         "message": RESULT_FILENAME})
