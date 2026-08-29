@@ -16,7 +16,7 @@ Source patches cover OHOS portability:
 - `NATIVE_ELF_ARCH`: `__WORDSIZE` is undefined on OHOS, so the word-size chain
   falls into `#error`; aarch64/LP64 now selects `Elf64`.
 
-The build depends on `openssl/3.5.6` (MD5 in quipper) and `elfutils/0.191`
+The build depends on `openssl/3.5.6` (MD5 in quipper) and `elfutils/0.195`
 (libelf for ELF parsing).
 
 ## Test Status

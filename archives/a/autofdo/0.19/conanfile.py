@@ -15,7 +15,7 @@ class AutofdoConan(ConanFile):
     homepage = "https://github.com/google/autofdo"
     url = "https://github.com/google/autofdo"
     settings = "os", "compiler", "build_type", "arch"
-    requires = "openssl/3.5.6", "elfutils/0.191"
+    requires = "openssl/3.5.6", "elfutils/0.195"
 
     def validate(self):
         if self.settings.os != "OHOS":
