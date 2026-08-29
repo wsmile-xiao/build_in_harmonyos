@@ -17,9 +17,10 @@ class GlmConan(ConanFile):
     description = "OpenGL Mathematics — header-only C++ math library, API compatible with GLSL"
     license = "MIT"
     homepage = "https://github.com/g-truc/glm"
-    url = ""  # CI fills this
+    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
 
     package_type = "header-library"
+    no_copy_source = True
 
     # R32: settings.os check must include both Linux and OHOS
     settings = "os", "compiler", "build_type", "arch"
