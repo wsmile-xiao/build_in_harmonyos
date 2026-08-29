@@ -16,7 +16,9 @@ class AwesfxTestConan(ConanFile):
         AutotoolsToolchain(self).generate()
 
     def build(self):
-        self.run("cc test_consumer.c -o test_consumer")
+        executables = self.conf.get("tools.build:compiler_executables", default={})
+        cc = os.environ.get("CC", executables.get("c", "cc"))
+        self.run(f'{cc} test_consumer.c -o test_consumer')
 
     def test(self):
         self.run("./test_consumer")
