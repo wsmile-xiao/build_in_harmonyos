@@ -1,0 +1,111 @@
+# ═══ Draft knowledge entry — OHOS：hnp `-fuse-ld` 产物被加载器拒绝(dlopen Permission denied) + registry boost 变体缺 libboost_filesystem ═══
+# Timestamp: 2026-08-28
+# Software: collada-dom 2.5.0
+# Gate: conan create / test_package runtime / W3 local CI
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the evidence below（r02 forensics + r03 full validation）
+#   2. Rename to E0XX.kv / E0XX.md and move to knowledge/graph/ + knowledge/doc/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. 与 collada-dom 2.5.0 归档进入同一 PR（路径 B 规则）
+
+id: DRAFT-collada-dom-fuse-ld-dlopen-boost-filesystem
+severity: 2
+category: ohos|toolchain|linker|conan|dependency|boost|cmake
+trigger_tool: clang|ld|conan|cmake|conan create|test_package|dlopen
+phase: linking|runtime
+
+error_signature: Error loading shared library .*\.so.*: Permission denied|dlopen.*\.so.*Permission denied|Error relocating .*\.so: _ZN5boost10filesystem6detail.*: symbol not found|libboost_filesystem.*not found|undefined symbol.*boost::filesystem
+
+match_keywords: fuse-ld, /data/service/hnp/bin/ld, hnp, GNU ld, liud2.45, dlopen, Permission denied, EACCES, musl loader, libboost_filesystem, boost filesystem, boost/1.90.0, boost/1.90.0.1, CMakeDeps, Boost::filesystem, undefined symbol, shared variant, operations.hpp
+
+root_cause: |
+  两段式可复用失败链（collada-dom 2.5.0，r01-r03 实证）：
+  1. dlopen Permission denied：配方注入 `-fuse-ld=/data/service/hnp/bin/ld`（GNU ld 2.45，本为 E266 规避 ohos-sdk lld 缺 libxml2 的修复方案）后，该链接器产出的 .so 被 OHOS musl 加载器以 EACCES 拒绝
+     （"Error loading shared library <lib>.so: Permission denied"）。对照实验：同源码、同用户路径，仅链接器不同——
+     `-fuse-ld=/data/service/hnp/bin/ld` 产物 dlopen 失败，默认链接器产物 dlopen 正常；`-z separate-code`/strip/版本脚本
+     /符号规模/段 W^X/文件大小均无法修复该链接器产物。区别于 E212 的 hmmac 路径安全标签（该机制无法解释同路径下
+     链接器差异导致的加载成败）。
+  2. boost::filesystem 未定义符号：OHOS registry 的 boost/1.90.0 为头文件版包——operations.hpp 中 detail 文件系统函数
+     （remove_all/create_directories/status/temp_directory_path 等）仅 BOOST_FILESYSTEM_DECL 外部声明、无内联实现，
+     包内亦无 libboost_filesystem（仅 libboost_unit_test_framework.a）；共享变体 boost/1.90.0.1 含 libboost_filesystem.so。
+     消费者 .so 在默认链接器下可映射加载，但 relocation 阶段报 boost::filesystem::detail::* symbol not found。
+affected_scope: |
+  1. 所有注入 `-fuse-ld=/data/service/hnp/bin/ld` 的 OHOS Conan 配方（仓库内已存在 17 个配方使用该标志，
+     E266 将其列为 lld 缺 libxml2 的推荐方案）——其产物在 OHOS PC musl 加载器下同样面临 dlopen 拒绝风险。
+  2. 所有依赖 boost::filesystem 的 OHOS 包（仓库内 33 个配方依赖 boost）——必须选用含 libboost_filesystem 的共享变体。
+
+rec_priority: 1
+rec_approach: drop-fuse-ld-and-shared-boost
+rec_description: 移除 -fuse-ld=/data/service/hnp/bin/ld 注入（优先默认链接器）；boost 改用共享变体 boost/1.90.0.1，经 CMakeDeps Boost::filesystem 目标链接
+rec_command: |
+  1) conanfile.py generate() 中删除:
+     tc.cache_variables["CMAKE_(EXE|SHARED|MODULE)_LINKER_FLAGS"] = "-fuse-ld=/data/service/hnp/bin/ld"
+  2) requirements(): self.requires("boost/1.90.0.1")
+  3) top-level CMakeLists.txt（补丁）:
+     find_package(Boost CONFIG REQUIRED COMPONENTS filesystem)
+     if(NOT TARGET Boost::filesystem) message(FATAL_ERROR "boost 无 filesystem 组件") endif()
+     set(Boost_FILESYSTEM_LIBRARY Boost::filesystem)
+     set(Boost_SYSTEM_LIBRARY "")
+rec_auto_fix: true
+rec_impl: recipe-edit
+
+fallback_priority: 2
+fallback_approach: verify-elf-only
+fallback_description: 无法更换链接器/变体时，仅做 ELF 技术验证并记录平台限制（file/readelf/nm + dlopen 探针），不阻塞编译流程
+fallback_command: file <so> && llvm-readelf -d <so> && llvm-nm -D <so> && dlopen 探针
+fallback_auto_fix: false
+
+forbid_1_pattern: chmod 777|chcon|setfattr.*security\.hmmac
+forbid_1_reason: dlopen Permission denied 不是 Unix 权限问题（E212 场景下为 hmmac 标签；本条目场景为链接器产物属性），权限/标签操作无效
+forbid_1_consequence: 操作无效且降低安全性
+
+forbid_2_pattern: ln -sf.*libxml2|手工替换 .so|git 缓存路径硬编码（-L/绝对路径）
+forbid_2_reason: 不得用软链接覆盖系统库（R5），不得用缓存路径/临时 -L/手工 .so 掩盖依赖
+forbid_2_consequence: 系统不稳定或交付含违禁路径
+
+verification: |
+  r02 forensics（同源码仅换链接器 A/B 对照；同路径对照库 40K/120K 符号与 15MB 库均可加载；同依赖对照库可加载；
+  系统/SDK 库 dlopen 正常）→ 归因 hnp-ld；
+  r03 全量本地验证通过：conan create PASS（Verdict PASS）、test_package 真实运行
+  'PASS: collada-dom 2.5.0 parsed COLLADA 1.5 doc (elements=11)'、W3 本地 CI Pass rate 100%、
+  .ci-result.json exit 0（证据保留在 archives/c/collada-dom/2.5.0/reports/ 与 worker 日志）。
+
+dedup_result: |
+  与现有条目查重差异：
+  - E212（hmmac 安全标签阻止用户路径 .so dlopen）：错误面同为 "dlopen Permission denied"，但根因为 hmmac 路径标签，
+    无法解释同路径下默认链接器产物可加载而 hnp-ld 产物被拒的 A/B 对照；本条目为链接器产物的加载器拒绝（可修复），差异显著。
+  - E266（lld 缺 libxml2 → 推荐 -fuse-ld）：本条目是其推荐方案的下游副作用警示（修复链接步骤后，产物在加载阶段被拒），
+    属对 E266 方案的重要扩展/边界，非重复。
+  - E099/E153（BOOST_INCLUDE_LIBRARIES 构建 boost 组件）：为 b2/构建配置路径，与 registry 变体选择（headers-only vs shared）
+    不同，非重复。
+  - 无任何条目覆盖 "registry boost 变体缺失 libboost_filesystem" 与 "hnp-ld 产物加载器拒绝"。
+
+applicability_limits: |
+  - 本环境：OHOS PC（HongMeng Kernel aarch64），hnp clang 15.0.4（aarch64-linux-ohos），OHOS musl 加载器。
+  - hnp-ld 被拒结论在本环境 A/B 实证；CI worker/其他 OHOS SDK 版本需复核（默认链接器可能在 CI 触发 E266 的 lld-libxml2
+    问题，需提供 libxml2 到链接器搜索路径或改用可用链接器）。
+  - boost 变体格局（1.90.0 头文件版 vs 1.90.0.1 共享版）为 registry 现状，若 boost recipe 更新可能变化，需重查。
+  - 本地官方 GitHub 直连超时属环境网络约束；交付配置应保留官方 URL，下载可经已验证镜像。
+
+principles: R5
+
+causes: []
+caused_by: [E266]
+similar_to: [E212, E266, E099, E153]
+conflicts_with: []
+prerequisite_of: []
+
+doc_file: knowledge/drafts/DRAFT-collada-dom-fuse-ld-dlopen-boost-filesystem.md
+last_updated: 2026-08-28
+source_event: collada-dom 2.5.0 r01-r03（dlopen 拒绝 + boost::filesystem 未定义符号）
+
+authors: pc1-44
+source_pr:
+source_commit:
+
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:
