@@ -1,0 +1,515 @@
+--- /dev/null
++++ b/SDL_ohaudio.c
+@@ -0,0 +1,512 @@
++/*
++ * Copyright (c) 2023 Huawei Device Co., Ltd.
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++#include "../../SDL_internal.h"
++
++#ifdef SDL_AUDIO_DRIVER_OHAUDIO
++
++#include "SDL_audio.h"
++#include "SDL_timer.h"
++#include "../SDL_audio_c.h"
++#include "SDL_ohaudio.h"
++
++#define OHAUDIO_WAIT_TIMEOUT_MS 5000
++
++static OH_AudioStream_SampleFormat OHAUDIO_ToNativeFormat(SDL_AudioFormat format)
++{
++    switch (format) {
++    case AUDIO_U8:
++        return AUDIOSTREAM_SAMPLE_U8;
++    case AUDIO_S16LSB:
++        return AUDIOSTREAM_SAMPLE_S16LE;
++    case AUDIO_S32LSB:
++        return AUDIOSTREAM_SAMPLE_S32LE;
++    case AUDIO_F32LSB:
++        return AUDIOSTREAM_SAMPLE_F32LE;
++    default:
++        return (OH_AudioStream_SampleFormat)-1;
++    }
++}
++
++static SDL_AudioFormat OHAUDIO_FromNativeFormat(OH_AudioStream_SampleFormat format)
++{
++    switch (format) {
++    case AUDIOSTREAM_SAMPLE_U8:
++        return AUDIO_U8;
++    case AUDIOSTREAM_SAMPLE_S16LE:
++        return AUDIO_S16LSB;
++    case AUDIOSTREAM_SAMPLE_S32LE:
++        return AUDIO_S32LSB;
++    case AUDIOSTREAM_SAMPLE_F32LE:
++        return AUDIO_F32LSB;
++    default:
++        return 0;
++    }
++}
++
++static OH_AudioData_Callback_Result OHAUDIO_OnWriteData(
++    OH_AudioRenderer *renderer, void *userdata, void *audio_data,
++    int32_t audio_data_size)
++{
++    struct SDL_PrivateAudioData *hidden =
++        (struct SDL_PrivateAudioData *)userdata;
++    OH_AudioData_Callback_Result callback_result =
++        AUDIO_DATA_CALLBACK_RESULT_VALID;
++    Uint32 i;
++
++    (void)renderer;
++
++    if (!hidden) {
++        return AUDIO_DATA_CALLBACK_RESULT_INVALID;
++    }
++
++    SDL_AtomicIncRef(&hidden->active_callbacks);
++    SDL_LockMutex(hidden->lock);
++    ++hidden->callback_count;
++    if (!audio_data || audio_data_size <= 0) {
++        hidden->callback_error = SDL_TRUE;
++        hidden->has_data = SDL_FALSE;
++        SDL_CondSignal(hidden->buffer_available);
++        callback_result = AUDIO_DATA_CALLBACK_RESULT_INVALID;
++    } else if (audio_data_size != (int32_t)hidden->mixbuf_size) {
++        SDL_memset(audio_data, hidden->silence, (size_t)audio_data_size);
++        hidden->callback_error = SDL_TRUE;
++        hidden->has_data = SDL_FALSE;
++        SDL_CondSignal(hidden->buffer_available);
++        callback_result = AUDIO_DATA_CALLBACK_RESULT_INVALID;
++    } else if (hidden->closing) {
++        SDL_memset(audio_data, hidden->silence, (size_t)audio_data_size);
++        hidden->has_data = SDL_FALSE;
++        SDL_CondSignal(hidden->buffer_available);
++    } else if (!hidden->has_data) {
++        SDL_memset(audio_data, hidden->silence, (size_t)audio_data_size);
++        ++hidden->underrun_count;
++    } else {
++        SDL_memcpy(audio_data, hidden->mixbuf, hidden->mixbuf_size);
++        hidden->has_data = SDL_FALSE;
++        ++hidden->data_callback_count;
++        for (i = 0; i < hidden->mixbuf_size; ++i) {
++            if (hidden->mixbuf[i] != hidden->silence) {
++                ++hidden->non_silence_bytes;
++            }
++        }
++        SDL_CondSignal(hidden->buffer_available);
++    }
++
++    if (SDL_AtomicDecRef(&hidden->active_callbacks)) {
++        SDL_CondBroadcast(hidden->callbacks_drained);
++    }
++    SDL_UnlockMutex(hidden->lock);
++    return callback_result;
++}
++
++static void OHAUDIO_FreeHidden(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *hidden = device->hidden;
++
++    if (!hidden) {
++        return;
++    }
++    SDL_assert(hidden->renderer == NULL);
++    SDL_assert(hidden->builder == NULL);
++    device->hidden = NULL;
++    if (hidden->buffer_available) {
++        SDL_DestroyCond(hidden->buffer_available);
++    }
++    if (hidden->state_changed) {
++        SDL_DestroyCond(hidden->state_changed);
++    }
++    if (hidden->callbacks_drained) {
++        SDL_DestroyCond(hidden->callbacks_drained);
++    }
++    if (hidden->lock) {
++        SDL_DestroyMutex(hidden->lock);
++    }
++    SDL_free(hidden->mixbuf);
++    SDL_free(hidden);
++}
++
++static int OHAUDIO_CloseNative(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *hidden = device->hidden;
++    OH_AudioStream_Result result;
++    const char *failure_operation = NULL;
++    int failure_result = 0;
++    SDL_bool should_stop;
++    SDL_bool callbacks_drained = SDL_FALSE;
++
++#define OHAUDIO_RECORD_FAILURE(operation, code)                                \
++    do {                                                                        \
++        if (!failure_operation) {                                               \
++            failure_operation = (operation);                                   \
++            failure_result = (int)(code);                                      \
++        }                                                                       \
++    } while (0)
++
++    if (!hidden) {
++        return 0;
++    }
++    if (!hidden->lock) {
++        OHAUDIO_FreeHidden(device);
++        return 0;
++    }
++
++    SDL_LockMutex(hidden->lock);
++    hidden->closing = SDL_TRUE;
++    hidden->has_data = SDL_FALSE;
++    SDL_CondBroadcast(hidden->buffer_available);
++    while (hidden->starting) {
++        SDL_CondWait(hidden->state_changed, hidden->lock);
++    }
++    should_stop = hidden->started;
++    SDL_UnlockMutex(hidden->lock);
++
++    if (should_stop) {
++        result = OH_AudioRenderer_Stop(hidden->renderer);
++        if (result != AUDIOSTREAM_SUCCESS) {
++            OHAUDIO_RECORD_FAILURE("OH_AudioRenderer_Stop", result);
++        } else {
++            SDL_LockMutex(hidden->lock);
++            hidden->started = SDL_FALSE;
++            SDL_UnlockMutex(hidden->lock);
++        }
++    }
++
++    if (hidden->renderer) {
++        result = OH_AudioRenderer_Release(hidden->renderer);
++        if (result != AUDIOSTREAM_SUCCESS) {
++            OHAUDIO_RECORD_FAILURE("OH_AudioRenderer_Release", result);
++        } else {
++            hidden->renderer = NULL;
++            SDL_LockMutex(hidden->lock);
++            hidden->started = SDL_FALSE;
++            SDL_UnlockMutex(hidden->lock);
++        }
++    }
++
++    if (!hidden->renderer) {
++        callbacks_drained = SDL_TRUE;
++        SDL_LockMutex(hidden->lock);
++        while (SDL_AtomicGet(&hidden->active_callbacks) != 0) {
++            const int wait_result = SDL_CondWaitTimeout(
++                hidden->callbacks_drained, hidden->lock,
++                OHAUDIO_WAIT_TIMEOUT_MS);
++            if (wait_result == SDL_MUTEX_TIMEDOUT) {
++                callbacks_drained = SDL_FALSE;
++                OHAUDIO_RECORD_FAILURE(
++                    "OHAudio callbacks did not drain after release",
++                    wait_result);
++                break;
++            }
++        }
++        SDL_UnlockMutex(hidden->lock);
++    }
++
++    if (hidden->builder) {
++        result = OH_AudioStreamBuilder_Destroy(hidden->builder);
++        if (result != AUDIOSTREAM_SUCCESS) {
++            OHAUDIO_RECORD_FAILURE("OH_AudioStreamBuilder_Destroy", result);
++        } else {
++            hidden->builder = NULL;
++        }
++    }
++
++    if (callbacks_drained && !hidden->renderer && !hidden->builder) {
++        OHAUDIO_FreeHidden(device);
++    }
++
++#undef OHAUDIO_RECORD_FAILURE
++
++    if (failure_operation) {
++        return SDL_SetError("%s failed: %d", failure_operation,
++                            failure_result);
++    }
++    return device->hidden ? SDL_SetError("OHAudio close did not release storage")
++                          : 0;
++}
++
++static int OHAUDIO_StartIfNeeded(SDL_AudioDevice *device)
++{
++    struct SDL_PrivateAudioData *hidden = device->hidden;
++    OH_AudioStream_Result result;
++    SDL_bool closing;
++
++    SDL_LockMutex(hidden->lock);
++    while (hidden->starting && !hidden->closing) {
++        SDL_CondWait(hidden->state_changed, hidden->lock);
++    }
++    if (hidden->closing) {
++        SDL_UnlockMutex(hidden->lock);
++        return SDL_SetError("OHAudio renderer is closing");
++    }
++    if (hidden->started) {
++        SDL_UnlockMutex(hidden->lock);
++        return 0;
++    }
++    hidden->starting = SDL_TRUE;
++    SDL_UnlockMutex(hidden->lock);
++
++    result = OH_AudioRenderer_Start(hidden->renderer);
++
++    SDL_LockMutex(hidden->lock);
++    hidden->starting = SDL_FALSE;
++    if (result == AUDIOSTREAM_SUCCESS) {
++        hidden->started = SDL_TRUE;
++    }
++    closing = hidden->closing;
++    SDL_CondBroadcast(hidden->state_changed);
++    SDL_UnlockMutex(hidden->lock);
++
++    if (result != AUDIOSTREAM_SUCCESS) {
++        return SDL_SetError("OH_AudioRenderer_Start failed: %d", result);
++    }
++    if (closing) {
++        return SDL_SetError("OHAudio renderer closed while starting");
++    }
++    return 0;
++}
++
++static int OHAUDIO_OpenDevice(_THIS, const char *devname)
++{
++    struct SDL_PrivateAudioData *hidden;
++    SDL_AudioFormat test_format;
++    OH_AudioStream_SampleFormat native_format;
++    OH_AudioStream_Result result;
++    int32_t native_rate = 0;
++    int32_t native_channels = 0;
++    int32_t callback_frames = 0;
++
++    (void)devname;
++
++    if (_this->iscapture) {
++        return SDL_SetError("OHAudio capture is not implemented");
++    }
++
++    test_format = SDL_FirstAudioFormat(_this->spec.format);
++    while (test_format != 0) {
++        if (OHAUDIO_ToNativeFormat(test_format) !=
++            (OH_AudioStream_SampleFormat)-1) {
++            _this->spec.format = test_format;
++            break;
++        }
++        test_format = SDL_NextAudioFormat();
++    }
++    if (test_format == 0) {
++        return SDL_SetError("OHAudio has no compatible sample format");
++    }
++    if (_this->spec.channels < 1 || _this->spec.channels > 2) {
++        _this->spec.channels = 2;
++    }
++    if (_this->spec.samples == 0) {
++        _this->spec.samples = 512;
++    }
++
++    hidden = (struct SDL_PrivateAudioData *)SDL_calloc(1, sizeof(*hidden));
++    if (!hidden) {
++        return SDL_OutOfMemory();
++    }
++    _this->hidden = hidden;
++    hidden->lock = SDL_CreateMutex();
++    hidden->buffer_available = SDL_CreateCond();
++    hidden->state_changed = SDL_CreateCond();
++    hidden->callbacks_drained = SDL_CreateCond();
++    if (!hidden->lock || !hidden->buffer_available || !hidden->state_changed ||
++        !hidden->callbacks_drained) {
++        OHAUDIO_FreeHidden(_this);
++        return SDL_OutOfMemory();
++    }
++
++    result = OH_AudioStreamBuilder_Create(&hidden->builder,
++                                          AUDIOSTREAM_TYPE_RENDERER);
++    if (result != AUDIOSTREAM_SUCCESS) {
++        hidden->builder = NULL;
++        OHAUDIO_FreeHidden(_this);
++        return SDL_SetError("OH_AudioStreamBuilder_Create failed: %d", result);
++    }
++
++    native_format = OHAUDIO_ToNativeFormat(_this->spec.format);
++#define OHAUDIO_SET(call, label)                                                \
++    do {                                                                         \
++        result = (call);                                                         \
++        if (result != AUDIOSTREAM_SUCCESS) {                                     \
++            return SDL_SetError(label " failed: %d", result);                  \
++        }                                                                        \
++    } while (0)
++
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetSamplingRate(hidden->builder,
++                                                       _this->spec.freq),
++                 "OH_AudioStreamBuilder_SetSamplingRate");
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetChannelCount(hidden->builder,
++                                                       _this->spec.channels),
++                 "OH_AudioStreamBuilder_SetChannelCount");
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetSampleFormat(hidden->builder,
++                                                       native_format),
++                 "OH_AudioStreamBuilder_SetSampleFormat");
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetEncodingType(
++                     hidden->builder, AUDIOSTREAM_ENCODING_TYPE_RAW),
++                 "OH_AudioStreamBuilder_SetEncodingType");
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetLatencyMode(
++                     hidden->builder, AUDIOSTREAM_LATENCY_MODE_NORMAL),
++                 "OH_AudioStreamBuilder_SetLatencyMode");
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetRendererInfo(
++                     hidden->builder, AUDIOSTREAM_USAGE_MUSIC),
++                 "OH_AudioStreamBuilder_SetRendererInfo");
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetFrameSizeInCallback(
++                     hidden->builder, _this->spec.samples),
++                 "OH_AudioStreamBuilder_SetFrameSizeInCallback");
++    OHAUDIO_SET(OH_AudioStreamBuilder_SetRendererWriteDataCallback(
++                     hidden->builder, OHAUDIO_OnWriteData, hidden),
++                 "OH_AudioStreamBuilder_SetRendererWriteDataCallback");
++    OHAUDIO_SET(OH_AudioStreamBuilder_GenerateRenderer(hidden->builder,
++                                                       &hidden->renderer),
++                 "OH_AudioStreamBuilder_GenerateRenderer");
++#undef OHAUDIO_SET
++
++    if (OH_AudioRenderer_GetSamplingRate(hidden->renderer, &native_rate) !=
++            AUDIOSTREAM_SUCCESS ||
++        OH_AudioRenderer_GetChannelCount(hidden->renderer, &native_channels) !=
++            AUDIOSTREAM_SUCCESS ||
++        OH_AudioRenderer_GetSampleFormat(hidden->renderer, &native_format) !=
++            AUDIOSTREAM_SUCCESS ||
++        OH_AudioRenderer_GetFrameSizeInCallback(hidden->renderer,
++                                                &callback_frames) !=
++            AUDIOSTREAM_SUCCESS) {
++        return SDL_SetError("OHAudio renderer properties are unavailable");
++    }
++    _this->spec.freq = native_rate;
++    _this->spec.channels = (Uint8)native_channels;
++    _this->spec.format = OHAUDIO_FromNativeFormat(native_format);
++    _this->spec.samples = (Uint16)callback_frames;
++    if (!_this->spec.format || native_rate <= 0 || native_channels <= 0 ||
++        callback_frames <= 0 || callback_frames > 65535) {
++        return SDL_SetError("OHAudio returned an invalid device specification");
++    }
++    SDL_CalculateAudioSpec(&_this->spec);
++
++    hidden->mixbuf = (Uint8 *)SDL_malloc(_this->spec.size);
++    if (!hidden->mixbuf) {
++        return SDL_OutOfMemory();
++    }
++    hidden->mixbuf_size = _this->spec.size;
++    hidden->silence = _this->spec.silence;
++    SDL_memset(hidden->mixbuf, _this->spec.silence, _this->spec.size);
++    return 0;
++}
++
++static Uint8 *OHAUDIO_GetDeviceBuf(_THIS)
++{
++    struct SDL_PrivateAudioData *hidden = _this->hidden;
++    SDL_bool callback_error;
++
++    if (OHAUDIO_StartIfNeeded(_this) < 0) {
++        SDL_OpenedAudioDeviceDisconnected(_this);
++        return NULL;
++    }
++
++    SDL_LockMutex(hidden->lock);
++    while (hidden->has_data && !hidden->closing) {
++        const int wait_result = SDL_CondWaitTimeout(
++            hidden->buffer_available, hidden->lock, OHAUDIO_WAIT_TIMEOUT_MS);
++        if (wait_result == SDL_MUTEX_TIMEDOUT) {
++            SDL_UnlockMutex(hidden->lock);
++            SDL_SetError("OHAudio output callback timed out");
++            SDL_OpenedAudioDeviceDisconnected(_this);
++            return NULL;
++        }
++    }
++    callback_error = hidden->callback_error;
++    SDL_UnlockMutex(hidden->lock);
++    if (callback_error) {
++        SDL_SetError("OHAudio output callback rejected its buffer");
++        SDL_OpenedAudioDeviceDisconnected(_this);
++        return NULL;
++    }
++    return hidden->mixbuf;
++}
++
++static void OHAUDIO_PlayDevice(_THIS)
++{
++    struct SDL_PrivateAudioData *hidden = _this->hidden;
++    SDL_LockMutex(hidden->lock);
++    if (!hidden->closing && !hidden->callback_error) {
++        hidden->has_data = SDL_TRUE;
++    }
++    SDL_UnlockMutex(hidden->lock);
++}
++
++static void OHAUDIO_WaitDevice(_THIS)
++{
++    struct SDL_PrivateAudioData *hidden = _this->hidden;
++    SDL_bool callback_error;
++    SDL_bool timed_out = SDL_FALSE;
++
++    SDL_LockMutex(hidden->lock);
++    while (hidden->has_data && !hidden->closing) {
++        const int wait_result = SDL_CondWaitTimeout(
++            hidden->buffer_available, hidden->lock, OHAUDIO_WAIT_TIMEOUT_MS);
++        if (wait_result == SDL_MUTEX_TIMEDOUT) {
++            timed_out = SDL_TRUE;
++            break;
++        }
++    }
++    callback_error = hidden->callback_error;
++    SDL_UnlockMutex(hidden->lock);
++
++    if (timed_out) {
++        SDL_SetError("OHAudio output callback timed out");
++        SDL_OpenedAudioDeviceDisconnected(_this);
++    } else if (callback_error) {
++        SDL_SetError("OHAudio output callback rejected its buffer");
++        SDL_OpenedAudioDeviceDisconnected(_this);
++    }
++}
++
++static void OHAUDIO_CloseDevice(_THIS)
++{
++    (void)OHAUDIO_CloseNative(_this);
++}
++
++static SDL_bool OHAUDIO_Init(SDL_AudioDriverImpl *impl)
++{
++    OH_AudioStreamBuilder *probe = NULL;
++    OH_AudioStream_Result result;
++
++    if (OH_AudioStreamBuilder_Create(&probe, AUDIOSTREAM_TYPE_RENDERER) !=
++        AUDIOSTREAM_SUCCESS) {
++        return SDL_FALSE;
++    }
++    result = OH_AudioStreamBuilder_Destroy(probe);
++    if (result != AUDIOSTREAM_SUCCESS) {
++        SDL_SetError("OH_AudioStreamBuilder_Destroy probe failed: %d", result);
++        return SDL_FALSE;
++    }
++
++    impl->OpenDevice = OHAUDIO_OpenDevice;
++    impl->GetDeviceBuf = OHAUDIO_GetDeviceBuf;
++    impl->PlayDevice = OHAUDIO_PlayDevice;
++    impl->WaitDevice = OHAUDIO_WaitDevice;
++    impl->CloseDevice = OHAUDIO_CloseDevice;
++    impl->OnlyHasDefaultOutputDevice = SDL_TRUE;
++    impl->OnlyHasDefaultCaptureDevice = SDL_TRUE;
++    impl->HasCaptureSupport = SDL_FALSE;
++    impl->SupportsNonPow2Samples = SDL_TRUE;
++    return SDL_TRUE;
++}
++
++AudioBootStrap OHAUDIO_bootstrap = {
++    "ohaudio", "OHAudio native output", OHAUDIO_Init, SDL_FALSE
++};
++
++#endif /* SDL_AUDIO_DRIVER_OHAUDIO */
