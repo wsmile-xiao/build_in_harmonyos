@@ -30,11 +30,8 @@ class AutofdoConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
-        # google/autofdo ships perf_data_converter and protobuf as git
-        # submodules, which are not part of the tag tarball.
-        for name, sub in self.conan_data["submodules"].items():
-            get(self, **sub, strip_root=True,
-                destination=os.path.join("third_party", name))
+        # The official release archive already contains both vendored
+        # submodules; avoid network-dependent duplicate downloads.
 
     def generate(self):
         tc = AutotoolsToolchain(self)
