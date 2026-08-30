@@ -16,7 +16,7 @@ class DracoConan(ConanFile):
     description = "Draco is a library for compressing and decompressing 3D geometric meshes and point clouds."
     license = "Apache-2.0"
     homepage = "https://google.github.io/draco/"
-    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
+    url = ""
 
     package_type = "library"
 
@@ -45,7 +45,7 @@ class DracoConan(ConanFile):
         import os
         toolchain = self._ohos_toolchain()
         # toolchain: <ndk_root>/build/cmake/ohos.toolchain.cmake
-        ndk_root = os.path.dirname(os.path.dirname(os.path.dirname(toolchain)))
+        ndk_root = os.path.dirname(os.path.dirname(os.path.dirname(toolchain))))
         llvm_bin = os.path.join(ndk_root, "llvm", "bin")
         if os.path.isdir(llvm_bin):
             return llvm_bin
