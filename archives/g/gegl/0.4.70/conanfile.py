@@ -231,6 +231,8 @@ class GeglConan(ConanFile):
     def build(self):
         if not shutil.which("meson"):
             self.run(f"{sys.executable} -m pip install --user meson")
+        if not shutil.which("ninja"):
+            self.run(f"{sys.executable} -m pip install --user ninja")
         apply_conandata_patches(self)
         meson = Meson(self)
         meson.configure()
