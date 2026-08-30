@@ -16,7 +16,7 @@ class DracoConan(ConanFile):
     description = "Draco is a library for compressing and decompressing 3D geometric meshes and point clouds."
     license = "Apache-2.0"
     homepage = "https://google.github.io/draco/"
-    url = ""
+    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
 
     package_type = "library"
 
@@ -130,7 +130,7 @@ class DracoConan(ConanFile):
         self.run('cmake --build "{}" -- -j$(nproc)'.format(bdir))
 
         # --- Build upstream test targets ---
-        self.run('cmake --build "{}" --target draco_tests -- -j$(nproc)'.format(bdir))
+        self.run('cmake --build "{}" --target draco_tests - --j$(nproc)'.format(bdir))
         has_factory = os.path.isfile(os.path.join(bdir, "CMakeFiles", "draco_factory_tests.dir", "build.make"))
         if has_factory:
             self.run('cmake --build "{}" --target draco_factory_tests -- -j$(nproc)'.format(bdir))
