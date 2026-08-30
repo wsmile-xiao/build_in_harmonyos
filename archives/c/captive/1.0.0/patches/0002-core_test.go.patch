@@ -1,0 +1,651 @@
+--- /dev/null
++++ b/core_test.go
+@@ -0,0 +1,648 @@
++package main
++
++import (
++	"context"
++	"encoding/binary"
++	"fmt"
++	"io"
++	"log"
++	"net"
++	"net/http"
++	"net/http/httptest"
++	"net/url"
++	"os"
++	"path/filepath"
++	"strconv"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/armon/go-socks5"
++)
++
++// ─── ExtractDHCPDNS ──────────────────────────────────────────────────────────
++
++func TestExtractDHCPDNS_SimpleOutput(t *testing.T) {
++	ip, err := ExtractDHCPDNS("echo 192.168.1.1")
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if ip != "192.168.1.1" {
++		t.Fatalf("expected 192.168.1.1, got %q", ip)
++	}
++}
++
++func TestExtractDHCPDNS_IPEmbeddedInText(t *testing.T) {
++	cmd := `printf 'IN-USE\teth0\tethernet\n\tIP4.DNS:10.0.0.5\n\tIP4.ADDRESS: 10.0.0.42/24\n'`
++	ip, err := ExtractDHCPDNS(cmd)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if ip != "10.0.0.5" {
++		t.Fatalf("expected first IP 10.0.0.5, got %q", ip)
++	}
++}
++
++func TestExtractDHCPDNS_NoIPFails(t *testing.T) {
++	if _, err := ExtractDHCPDNS("echo no addresses here"); err == nil {
++		t.Fatal("expected error when no IP is present in output")
++	}
++}
++
++func TestExtractDHCPDNS_CommandFailure(t *testing.T) {
++	if _, err := ExtractDHCPDNS("exit 1"); err == nil {
++		t.Fatal("expected error when dhcp-dns command fails")
++	}
++}
++
++// ─── LoadConfig ──────────────────────────────────────────────────────────────
++
++func writeConfig(t *testing.T, dir, name, content string) string {
++	t.Helper()
++	path := filepath.Join(dir, name)
++	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
++		t.Fatalf("writing config: %v", err)
++	}
++	return path
++}
++
++func TestLoadConfig_Valid(t *testing.T) {
++	dir := t.TempDir()
++	path := writeConfig(t, dir, "captive-browser.toml", `
++browser = "echo browser"
++dhcp-dns = "echo 1.2.3.4"
++socks5-addr = "localhost:1666"
++bind-device = "eth0"
++`)
++	conf, err := LoadConfig(path)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if conf.Browser != "echo browser" {
++		t.Errorf("browser = %q, want %q", conf.Browser, "echo browser")
++	}
++	if conf.DHCP != "echo 1.2.3.4" {
++		t.Errorf("dhcp-dns = %q, want %q", conf.DHCP, "echo 1.2.3.4")
++	}
++	if conf.SOCKS5Addr != "localhost:1666" {
++		t.Errorf("socks5-addr = %q, want %q", conf.SOCKS5Addr, "localhost:1666")
++	}
++	if conf.BindDevice != "eth0" {
++		t.Errorf("bind-device = %q, want %q", conf.BindDevice, "eth0")
++	}
++}
++
++func TestLoadConfig_BindDeviceOptional(t *testing.T) {
++	dir := t.TempDir()
++	path := writeConfig(t, dir, "captive-browser.toml", `
++browser = "echo browser"
++dhcp-dns = "echo 1.2.3.4"
++socks5-addr = "localhost:1666"
++`)
++	conf, err := LoadConfig(path)
++	if err != nil {
++		t.Fatalf("bind-device is optional, got error: %v", err)
++	}
++	if conf.BindDevice != "" {
++		t.Errorf("bind-device = %q, want empty", conf.BindDevice)
++	}
++}
++
++func TestLoadConfig_MissingRequiredKey(t *testing.T) {
++	dir := t.TempDir()
++	path := writeConfig(t, dir, "captive-browser.toml", `
++dhcp-dns = "echo 1.2.3.4"
++socks5-addr = "localhost:1666"
++`)
++	_, err := LoadConfig(path)
++	if err == nil {
++		t.Fatal("expected error when browser key is missing")
++	}
++	if !strings.Contains(err.Error(), "browser") {
++		t.Errorf("error should name the missing key, got: %v", err)
++	}
++}
++
++func TestLoadConfig_MissingSocksAddr(t *testing.T) {
++	dir := t.TempDir()
++	path := writeConfig(t, dir, "captive-browser.toml", `
++browser = "echo browser"
++dhcp-dns = "echo 1.2.3.4"
++`)
++	if _, err := LoadConfig(path); err == nil {
++		t.Fatal("expected error when socks5-addr is missing")
++	}
++}
++
++func TestLoadConfig_MissingDHCP(t *testing.T) {
++	dir := t.TempDir()
++	path := writeConfig(t, dir, "captive-browser.toml", `
++browser = "echo browser"
++socks5-addr = "localhost:1666"
++`)
++	if _, err := LoadConfig(path); err == nil {
++		t.Fatal("expected error when dhcp-dns is missing")
++	}
++}
++
++func TestLoadConfig_InvalidTOML(t *testing.T) {
++	dir := t.TempDir()
++	path := writeConfig(t, dir, "captive-browser.toml", "browser = ")
++	if _, err := LoadConfig(path); err == nil {
++		t.Fatal("expected error for invalid TOML")
++	}
++}
++
++func TestLoadConfig_FileNotFound(t *testing.T) {
++	if _, err := LoadConfig(filepath.Join(t.TempDir(), "does-not-exist.toml")); err == nil {
++		t.Fatal("expected error for missing file")
++	}
++}
++
++func TestLoadConfig_MultilineBrowser(t *testing.T) {
++	dir := t.TempDir()
++	path := writeConfig(t, dir, "captive-browser.toml", `
++browser = """
++    google-chrome \
++    --proxy-server="socks5://$PROXY" \
++    http://example.com
++"""
++dhcp-dns = "nmcli dev show | grep IP4.DNS"
++socks5-addr = "localhost:1666"
++`)
++	conf, err := LoadConfig(path)
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if !strings.Contains(conf.Browser, "google-chrome") || !strings.Contains(conf.Browser, "http://example.com") {
++		t.Errorf("multiline browser value mangled: %q", conf.Browser)
++	}
++}
++
++// ─── Fake DNS server (DNS wire protocol) ─────────────────────────────────────
++
++type fakeDNS struct {
++	queries atomic.Int64
++	port    int
++}
++
++// startFakeDNSServer starts a minimal UDP DNS server that answers every query
++// with the given A and/or AAAA record. It returns the bound port.
++func startFakeDNSServer(t *testing.T, a, aaaa net.IP) *fakeDNS {
++	t.Helper()
++	return startFakeDNSServerOn(t, "127.0.0.1:0", a, aaaa)
++}
++
++// startFakeDNSServerOn is like startFakeDNSServer but listens on the given
++// address, so tests can place the fake DNS server on a non-loopback address.
++func startFakeDNSServerOn(t *testing.T, listenAddr string, a, aaaa net.IP) *fakeDNS {
++	t.Helper()
++	conn, err := net.ListenPacket("udp", listenAddr)
++	if err != nil {
++		t.Fatalf("listening for fake DNS: %v", err)
++	}
++	t.Cleanup(func() { conn.Close() })
++	f := &fakeDNS{port: conn.LocalAddr().(*net.UDPAddr).Port}
++	go func() {
++		buf := make([]byte, 512)
++		for {
++			n, peer, err := conn.ReadFrom(buf)
++			if err != nil {
++				return // listener closed
++			}
++			if n < 12 {
++				continue
++			}
++			f.queries.Add(1)
++			// Answer with the record type matching the first question's QTYPE
++			// (Go's resolver sends separate A and AAAA queries).
++			qtype := uint16(0)
++			if pos := skipName(buf, 12); pos >= 0 && pos+2 <= n {
++				qtype = binary.BigEndian.Uint16(buf[pos : pos+2])
++			}
++			conn.WriteTo(dnsResponse(buf[:n], a, aaaa, qtype), peer)
++		}
++	}()
++	return f
++}
++
++// dnsResponse builds a DNS response for the given query: it echoes the ID and
++// the question section verbatim, answers the first question with the record
++// matching its QTYPE (A → A record, AAAA → AAAA record; Go's resolver sends
++// separate A and AAAA queries), and deliberately omits the additional section
++// (replying without the client's EDNS0 OPT record is valid per RFC 6891 and
++// avoids re-serializing the OPT RDATA).
++func dnsResponse(query []byte, a, aaaa net.IP, qtype uint16) []byte {
++	// DNS header layout (RFC 1035):
++	//   [0:2] ID  [2:4] FLAGS  [4:6] QDCOUNT  [6:8] ANCOUNT
++	//   [8:10] NSCOUNT  [10:12] ARCOUNT
++	if len(query) < 12 {
++		return nil
++	}
++	qdcount := binary.BigEndian.Uint16(query[4:6])
++	flags := binary.BigEndian.Uint16(query[2:4])
++
++	// Echo the question section verbatim.
++	pos := 12
++	var questions []byte
++	for i := uint16(0); i < qdcount; i++ {
++		start := pos
++		pos = skipName(query, pos)
++		if pos < 0 || pos+4 > len(query) {
++			return nil
++		}
++		pos += 4 // QTYPE + QCLASS
++		questions = append(questions, query[start:pos]...)
++	}
++
++	var rdata []byte
++	switch qtype {
++	case 1: // A
++		if a != nil {
++			rdata = a.To4()
++		}
++	case 28: // AAAA
++		if aaaa != nil {
++			rdata = aaaa.To16()
++		}
++	}
++
++	resp := make([]byte, 0, len(query)+64)
++	resp = append(resp, query[:2]...) // ID
++	resp = binary.BigEndian.AppendUint16(resp, flags|0x8000) // QR=1 (bit 15)
++	resp = binary.BigEndian.AppendUint16(resp, qdcount)
++	if rdata != nil {
++		resp = binary.BigEndian.AppendUint16(resp, 1) // ANCOUNT
++	} else {
++		resp = binary.BigEndian.AppendUint16(resp, 0)
++	}
++	resp = binary.BigEndian.AppendUint16(resp, 0) // NSCOUNT
++	resp = binary.BigEndian.AppendUint16(resp, 0) // ARCOUNT (drop OPT)
++	resp = append(resp, questions...)
++
++	if rdata != nil {
++		resp = append(resp, 0xC0, 0x0C) // name pointer to first question
++		resp = binary.BigEndian.AppendUint16(resp, qtype)
++		resp = binary.BigEndian.AppendUint16(resp, 1) // class IN
++		resp = binary.BigEndian.AppendUint32(resp, 60) // TTL (4 bytes)
++		resp = binary.BigEndian.AppendUint16(resp, uint16(len(rdata)))
++		resp = append(resp, rdata...)
++	}
++	return resp
++}
++
++// skipName returns the offset just past the (uncompressed) name starting at
++// pos in a DNS wire message.
++func skipName(msg []byte, pos int) int {
++	for {
++		l := int(msg[pos])
++		pos++
++		if l&0xC0 != 0 {
++			return pos + 1 // compression pointer
++		}
++		if l == 0 {
++			return pos
++		}
++		pos += l
++	}
++}
++
++// ─── UpstreamResolver ────────────────────────────────────────────────────────
++
++func TestUpstreamResolver_ResolvesThroughUpstream(t *testing.T) {
++	f := startFakeDNSServer(t, net.ParseIP("192.0.2.1"), nil)
++	res := newUpstreamResolverWithPort("127.0.0.1", &net.Dialer{}, f.port)
++
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	_, ip, err := res.Resolve(ctx, "example.com")
++	if err != nil {
++		t.Fatalf("Resolve failed: %v", err)
++	}
++	if want := net.ParseIP("192.0.2.1"); !ip.Equal(want) {
++		t.Fatalf("Resolve = %v, want %v", ip, want)
++	}
++	if f.queries.Load() == 0 {
++		t.Fatal("expected the resolver to dial the upstream DNS server")
++	}
++}
++
++func TestUpstreamResolver_PrefersIPv4(t *testing.T) {
++	f := startFakeDNSServer(t, net.ParseIP("192.0.2.1"), net.ParseIP("2001:db8::1"))
++	res := newUpstreamResolverWithPort("127.0.0.1", &net.Dialer{}, f.port)
++
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	_, ip, err := res.Resolve(ctx, "dualstack.example")
++	if err != nil {
++		t.Fatalf("Resolve failed: %v", err)
++	}
++	if want := net.ParseIP("192.0.2.1"); !ip.Equal(want) {
++		t.Fatalf("Resolve = %v, want IPv4 %v", ip, want)
++	}
++}
++
++func TestUpstreamResolver_NoRecords(t *testing.T) {
++	f := startFakeDNSServer(t, nil, nil)
++	res := newUpstreamResolverWithPort("127.0.0.1", &net.Dialer{}, f.port)
++
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	_, ip, err := res.Resolve(ctx, "nxdomain.example")
++	if err != nil {
++		t.Fatalf("Resolve failed: %v", err)
++	}
++	if ip != nil {
++		t.Fatalf("Resolve = %v, want nil for empty answer", ip)
++	}
++}
++
++// TestUpstreamResolver_NonLoopbackUpstream verifies that resolveA works when
++// the upstream DNS server is reached via a non-loopback address — the
++// production path, where the DHCP DNS server is a LAN router rather than
++// 127.0.0.1. The fake server listens on 0.0.0.0 and the resolver dials it
++// through the host's first non-loopback IPv4 address, exercising the kernel's
++// source-address selection instead of a hard-coded loopback source.
++func TestUpstreamResolver_NonLoopbackUpstream(t *testing.T) {
++	hostIP := firstNonLoopbackIPv4(t)
++	if hostIP == nil {
++		t.Skip("no non-loopback IPv4 address available on this host")
++	}
++	// Listen on all interfaces so the query can reach the fake server via
++	// the host's non-loopback address.
++	f := startFakeDNSServerOn(t, "0.0.0.0:0", net.ParseIP("192.0.2.7"), nil)
++	res := newUpstreamResolverWithPort(hostIP.String(), &net.Dialer{}, f.port)
++
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	ip, err := res.resolveA(ctx, "example.com")
++	if err != nil {
++		t.Fatalf("resolveA via non-loopback upstream %s failed: %v", hostIP, err)
++	}
++	if want := net.ParseIP("192.0.2.7"); !ip.Equal(want) {
++		t.Fatalf("resolveA via non-loopback upstream = %v, want %v", ip, want)
++	}
++	if f.queries.Load() == 0 {
++		t.Fatal("expected the fake DNS server to receive at least one query")
++	}
++}
++
++// firstNonLoopbackIPv4 returns the first non-loopback IPv4 address of the
++// host, or nil if there is none (e.g. a loopback-only environment).
++func firstNonLoopbackIPv4(t *testing.T) net.IP {
++	t.Helper()
++	addrs, err := net.InterfaceAddrs()
++	if err != nil {
++		t.Fatalf("enumerating interfaces: %v", err)
++	}
++	for _, a := range addrs {
++		ipnet, ok := a.(*net.IPNet)
++		if !ok {
++			continue
++		}
++		ip4 := ipnet.IP.To4()
++		if ip4 == nil || ip4.IsLoopback() {
++			continue
++		}
++		return ip4
++	}
++	return nil
++}
++
++// ─── SOCKS5 proxy end-to-end ─────────────────────────────────────────────────
++
++func readExact(t *testing.T, r io.Reader, n int) []byte {
++	t.Helper()
++	buf := make([]byte, n)
++	if _, err := io.ReadFull(r, buf); err != nil {
++		t.Fatalf("reading %d bytes: %v", n, err)
++	}
++	return buf
++}
++
++// TestSocksProxy_EndToEnd verifies the full data path: a SOCKS5 client
++// connects to the proxy, the proxy resolves the target host through the
++// (fake) upstream DNS server, and bytes are tunneled to the target.
++func TestSocksProxy_EndToEnd(t *testing.T) {
++	// Fake upstream DNS: every name resolves to 127.0.0.1, where the target
++	// HTTP server listens. This proves the proxy redirects DNS to upstream.
++	f := startFakeDNSServer(t, net.ParseIP("127.0.0.1"), nil)
++
++	// Fake captive-portal target.
++	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		fmt.Fprintf(w, "portal-ok path=%s", r.URL.Path)
++	}))
++	defer target.Close()
++	targetURL, err := url.Parse(target.URL)
++	if err != nil {
++		t.Fatalf("parsing target URL: %v", err)
++	}
++	// The CONNECT target must be a DOMAIN NAME, not an IP literal: Go's
++	// resolver never queries DNS for IP literals, so only a domain exercises
++	// the proxy's upstream-DNS redirection. The fake DNS maps every name to
++	// 127.0.0.1, where the target server listens.
++	host := "captive-portal.test"
++
++	// Start the SOCKS5 proxy exactly like StartSocksProxy does, but with a
++	// test DNS port (StartSocksProxy hardcodes port 53).
++	dialer := &net.Dialer{}
++	srv, err := socks5.New(&socks5.Config{
++		Resolver: newUpstreamResolverWithPort("127.0.0.1", dialer, f.port),
++		Dial:     dialer.DialContext,
++		Logger:   log.New(io.Discard, "", 0),
++	})
++	if err != nil {
++		t.Fatalf("socks5.New: %v", err)
++	}
++	l, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listening for proxy: %v", err)
++	}
++	defer l.Close()
++	go srv.Serve(l)
++
++	// Client handshake (RFC 1928): version + zero auth methods.
++	c, err := net.Dial("tcp", l.Addr().String())
++	if err != nil {
++		t.Fatalf("dialing proxy: %v", err)
++	}
++	defer c.Close()
++	c.SetDeadline(time.Now().Add(15 * time.Second))
++
++	c.Write([]byte{0x05, 0x01, 0x00}) // 1 auth method: no-auth
++	reply := readExact(t, c, 2)
++	if reply[0] != 0x05 || reply[1] != 0x00 {
++		t.Fatalf("auth reply = % x, want 05 00 (no-auth accepted)", reply)
++	}
++
++	// CONNECT request: domain-name addressing of the target host.
++	port := targetURL.Port()
++	if port == "" {
++		port = "80"
++	}
++	request := []byte{0x05, 0x01, 0x00, 0x03, byte(len(host))}
++	request = append(request, host...)
++	request = binary.BigEndian.AppendUint16(request, uint16(mustAtoi(t, port)))
++	c.Write(request)
++
++	// Reply: VER REP RSV ATYP + bound address + port.
++	header := readExact(t, c, 4)
++	if header[0] != 0x05 || header[1] != 0x00 {
++		t.Fatalf("connect reply = % x, want 05 00 .. (success)", header)
++	}
++	switch header[3] {
++	case 1: // IPv4
++		readExact(t, c, 4+2)
++	case 3: // domain
++		l := int(readExact(t, c, 1)[0])
++		readExact(t, c, l+2)
++	case 4: // IPv6
++		readExact(t, c, 16+2)
++	default:
++		t.Fatalf("unexpected bound address type %d", header[3])
++	}
++
++	// Tunnel an HTTP request through the proxy.
++	fmt.Fprintf(c, "GET /login HTTP/1.0\r\nHost: %s\r\n\r\n", host)
++	body, err := io.ReadAll(c)
++	if err != nil {
++		t.Fatalf("reading tunneled response: %v", err)
++	}
++	if !strings.Contains(string(body), "portal-ok path=/login") {
++		t.Fatalf("tunneled response missing payload: %q", string(body))
++	}
++	if f.queries.Load() == 0 {
++		t.Fatal("expected the proxy to resolve the target through the upstream DNS server")
++	}
++}
++
++func TestSocksProxy_RejectsBadVersion(t *testing.T) {
++	srv, err := socks5.New(&socks5.Config{
++		Resolver: &upstreamResolverForReject{},
++		Dial:     (&net.Dialer{}).DialContext,
++		Logger:   log.New(io.Discard, "", 0),
++	})
++	if err != nil {
++		t.Fatalf("socks5.New: %v", err)
++	}
++	l, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("listening: %v", err)
++	}
++	defer l.Close()
++	go srv.Serve(l)
++
++	c, err := net.Dial("tcp", l.Addr().String())
++	if err != nil {
++		t.Fatalf("dialing: %v", err)
++	}
++	defer c.Close()
++	c.SetDeadline(time.Now().Add(5 * time.Second))
++	c.Write([]byte{0x04, 0x00}) // SOCKS4 is not supported
++	_, _ = c.Read(make([]byte, 1))
++	// The server closes the connection; we only require the connection to be
++	// closed (EOF or reset) without panicking.
++	if _, err := c.Read(make([]byte, 1)); err == nil {
++		t.Fatal("expected the server to close the connection for a bad version")
++	}
++}
++
++// TestStartSocksProxy_ReturnsConfiguredAddress verifies that StartSocksProxy
++// returns a usable server and surfaces the configured SOCKS5 listen address
++// (the listen address is validated at runtime by ListenAndServe).
++func TestStartSocksProxy_ReturnsConfiguredAddress(t *testing.T) {
++	conf := &Config{
++		SOCKS5Addr: "127.0.0.1:0",
++		Browser:    "true",
++		DHCP:       "true",
++	}
++	srv, socksAddr, err := StartSocksProxy("192.0.2.53", conf)
++	if err != nil {
++		t.Fatalf("StartSocksProxy failed: %v", err)
++	}
++	if srv == nil {
++		t.Fatal("expected a non-nil SOCKS5 server")
++	}
++	if socksAddr != conf.SOCKS5Addr {
++		t.Fatalf("expected SOCKS5 addr %q, got %q", conf.SOCKS5Addr, socksAddr)
++	}
++}
++
++// ─── Execute (proxy + browser orchestration) ─────────────────────────────────
++
++func freePort(t *testing.T) int {
++	t.Helper()
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	if err != nil {
++		t.Fatalf("finding a free port: %v", err)
++	}
++	port := ln.Addr().(*net.TCPAddr).Port
++	ln.Close()
++	return port
++}
++
++func TestExecute_BrowserReceivesProxyEnv(t *testing.T) {
++	port := freePort(t)
++	outFile := filepath.Join(t.TempDir(), "proxy-out.txt")
++
++	conf := &Config{
++		SOCKS5Addr: fmt.Sprintf("127.0.0.1:%d", port),
++		Browser:    fmt.Sprintf("echo PROXY=$PROXY > %s", outFile),
++		DHCP:       "echo 192.0.2.53",
++	}
++	if err := Execute(conf, "192.0.2.53"); err != nil {
++		t.Fatalf("Execute: %v", err)
++	}
++
++	data, err := os.ReadFile(outFile)
++	if err != nil {
++		t.Fatalf("reading browser output: %v", err)
++	}
++	want := fmt.Sprintf("PROXY=127.0.0.1:%d\n", port)
++	if string(data) != want {
++		t.Fatalf("browser saw %q, want %q", string(data), want)
++	}
++}
++
++func TestExecute_BrowserFailurePropagates(t *testing.T) {
++	port := freePort(t)
++	conf := &Config{
++		SOCKS5Addr: fmt.Sprintf("127.0.0.1:%d", port),
++		Browser:    "exit 3",
++		DHCP:       "echo 192.0.2.53",
++	}
++	if err := Execute(conf, "192.0.2.53"); err == nil {
++		t.Fatal("expected Execute to report the browser failure")
++	}
++}
++
++// ─── Version handling ────────────────────────────────────────────────────────
++
++func TestVersion_FallbackDefault(t *testing.T) {
++	if Version != "" {
++		t.Skip("Version set via ldflags in this build")
++	}
++	if DefaultVersion == "" {
++		t.Fatal("DefaultVersion must not be empty")
++	}
++}
++
++// ─── helpers ─────────────────────────────────────────────────────────────────
++
++func mustAtoi(t *testing.T, s string) int {
++	t.Helper()
++	n, err := strconv.Atoi(s)
++	if err != nil {
++		t.Fatalf("atoi(%q): %v", s, err)
++	}
++	return n
++}
++
++// upstreamResolverForReject is a no-op resolver for the reject-bad-version
++// test, which never performs a lookup.
++type upstreamResolverForReject struct{}
++
++func (upstreamResolverForReject) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
++	return ctx, net.ParseIP("127.0.0.1"), nil
++}
