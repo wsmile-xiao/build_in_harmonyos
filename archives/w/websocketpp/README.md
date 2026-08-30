@@ -17,3 +17,4 @@ websocketpp (WebSocket++) is a C++ library that can be used to implement WebSock
 | Version | Status | Date |
 |---------|--------|------|
 | 0.8.2   | built     | 2026-08-28 |
+| 0.8.2.1 | built     | 2026-08-28 |
