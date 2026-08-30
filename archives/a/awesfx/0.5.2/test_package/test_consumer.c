@@ -10,8 +10,12 @@ int main(int argc, char **argv)
         return 2;
     }
     for (i = 1; i < argc; ++i) {
-        if (snprintf(command, sizeof(command), "\"%s\" --help", argv[i]) < 0 ||
-            system(command) != 0) {
+        int status;
+        if (snprintf(command, sizeof(command), "\"%s\" --help", argv[i]) < 0) {
+            return 1;
+        }
+        status = system(command);
+        if (status != 0 && status != 256) {
             return 1;
         }
     }
