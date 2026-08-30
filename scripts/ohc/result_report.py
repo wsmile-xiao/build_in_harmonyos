@@ -480,7 +480,7 @@ def result_cli(argv: list[str]) -> int:
     commit_hash = args.commit_hash \
         or _git_output(["rev-parse", "HEAD"], cwd=project_dir)
     pr_url = pr_url or (
-        f"https://gitcode.com/{REPO_NAME}/pull/{pr_number}"
+        f"https://gitcode.com/{REPO_NAME}/merge_requests/{pr_number}"
         if pr_number else None)
     agent = args.agent or get_agent_id()
 

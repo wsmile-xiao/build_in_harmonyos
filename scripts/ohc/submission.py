@@ -637,6 +637,41 @@ def _generate_pr_body(software: str, version: str, ver_dir: Path) -> Path:
     return pr_body_path
 
 
+CI_REPAIR_STATE = ".ci-repair-state.json"
+MAX_CI_REPAIR_ROUNDS = 2  # 停损阈值（SKILL 反馈 0829-1: 修复循环必须机器可数）
+
+
+def _ci_repair_round(ver_dir: Path, pr_number: int | None) -> int:
+    """CI 修复循环轮次计数：每次 CI 失败 HANDOFF 时 +1，返回当前轮次。
+
+    达到 MAX_CI_REPAIR_ROUNDS 后 HANDOFF 切换为停损指引（上报 build_failed，
+    不再盲目重试）。CI 转绿时 _ci_repair_reset 清零。
+    """
+    path = ver_dir / CI_REPAIR_STATE
+    data: dict = {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    data["rounds"] = int(data.get("rounds", 0)) + 1
+    data["last_pr_number"] = pr_number
+    data["last_ts"] = datetime.utcnow().isoformat() + "Z"
+    try:
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
+    except Exception:
+        pass
+    return data["rounds"]
+
+
+def _ci_repair_reset(ver_dir: Path) -> None:
+    """CI 转绿后清零修复轮次（新一轮失败重新计数）。"""
+    try:
+        (ver_dir / CI_REPAIR_STATE).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _emit_submit_handoff(software: str, version: str, ver_dir: Path,
                          project_dir: str, reason: str,
                          actions: list[str],
@@ -733,7 +768,7 @@ def cmd_submit(software: str, version: str,
         repo = "OpenHarmonyPCDeveloper/build_in_harmonyos"
         pr_number = saved_pr
         branch_name = saved_branch
-        pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
+        pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/{pr_number}"
 
         log_ok(f"  📂 恢复提交: PR #{pr_number}, Phase {review_phase}, 分支 {branch_name}")
 
@@ -800,6 +835,15 @@ def cmd_submit(software: str, version: str,
             closure_text = ""
             for op in unreplied:
                 closure_text += f"  - comment_id: {op.get('comment_id', '')}: {op.get('body', '')[:150]}\n"
+            try:
+                from .result_report import write_lifecycle_draft
+                write_lifecycle_draft(
+                    software, version, "loop_pending", pr_number=pr_number,
+                    summary=(f"PR #{pr_number} 检视意见 {len(unreplied)} 条未闭环"
+                             f"（反馈 0829-2: 完成前必须逐条处理）。续环: "
+                             f"python3 scripts/ohc-run.py submit {software} {version} --resume"))
+            except Exception:
+                pass
             _emit_submit_handoff(software, version, ver_dir, project_dir,
                 "review_closure_incomplete",
                 [
@@ -826,13 +870,31 @@ def cmd_submit(software: str, version: str,
                 log_fail("── CI 失败详情（最新失败评论摘要）──")
                 for ln in detail.splitlines():
                     log_fail(f"  {ln}")
-            acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
-                    f"（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
-                    f"按诊断定位原因并修复（本地 W3 复验后再推）",
-                    f"修复后 push: git push origin {branch_name}（CI 自动重跑）",
-                    f"继续监控: python3 scripts/ohc-run.py submit {software} {version} --resume",
-                    f"连续 2 轮仍红 → 按停损规则上报，勿无限重试",
-                    f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
+            rnd = _ci_repair_round(ver_dir, pr_number)
+            try:
+                from .result_report import write_lifecycle_draft
+                write_lifecycle_draft(
+                    software, version, "loop_pending", pr_number=pr_number,
+                    summary=(f"PR #{pr_number} CI 失败（修复第 {rnd}/"
+                             f"{MAX_CI_REPAIR_ROUNDS} 轮）。续环: python3 "
+                             f"scripts/ohc-run.py submit {software} {version} --resume"))
+            except Exception:
+                pass
+            if rnd >= MAX_CI_REPAIR_ROUNDS:
+                acts = [f"⚠️ 停损: CI 已连续 {rnd} 轮修复仍红，勿再盲目重试",
+                        f"上报: python3 scripts/ohc-run.py result {software} {version} "
+                        f"--status build_failed --failed-reason 'CI 连续 {rnd} 轮失败: <一句话根因>' --force",
+                        f"证据留档: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}",
+                        "人工介入排查（依赖缺失/环境差异/上游缺陷），排查后重开需 reset-rerun"]
+            else:
+                acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
+                        f"（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
+                        f"按诊断定位原因并修复（本地 W3 复验后再推）",
+                        f"修复后 push: git push origin {branch_name}",
+                        f"⚠️ push 本身不会触发 CI（评论触发型）——必须续环: python3 "
+                        f"scripts/ohc-run.py submit {software} {version} --resume（resume 自动评论 /rebuild 重跑 CI）",
+                        f"修复轮次: {rnd}/{MAX_CI_REPAIR_ROUNDS}（连续 {MAX_CI_REPAIR_ROUNDS} 轮仍红 → 停损上报）",
+                        f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
             if detail:
                 acts.insert(0, "── CI 失败详情见上方摘要 ──")
             _emit_submit_handoff(software, version, ver_dir, project_dir,
@@ -848,6 +910,7 @@ def cmd_submit(software: str, version: str,
             return 1
         elif ci_status == "PASSED":
             log_ok(f"  ✅ CI 构建通过")
+            _ci_repair_reset(ver_dir)
             try:
                 from .feedback import record_event
                 record_event(ver_dir, "ci_passed", f"PR #{pr_number}")
@@ -1197,7 +1260,7 @@ def cmd_submit(software: str, version: str,
         return 1
 
     log_ok(f"  PR #{pr_number} 已创建/找到")
-    pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/{pr_number}"
+    pr_url = f"https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/{pr_number}"
 
     # ── Save initial submit state ──
     if not resume:
@@ -1274,6 +1337,15 @@ def cmd_submit(software: str, version: str,
         closure_text = ""
         for op in unreplied:
             closure_text += f"  - comment_id: {op.get('comment_id', '')}: {op.get('body', '')[:150]}\n"
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(
+                software, version, "loop_pending", pr_number=pr_number,
+                summary=(f"PR #{pr_number} 检视意见 {len(unreplied)} 条未闭环"
+                         f"（反馈 0829-2: 完成前必须逐条处理）。续环: "
+                         f"python3 scripts/ohc-run.py submit {software} {version} --resume"))
+        except Exception:
+            pass
         _emit_submit_handoff(software, version, ver_dir, project_dir,
             "review_closure_incomplete",
             [
@@ -1300,12 +1372,31 @@ def cmd_submit(software: str, version: str,
             log_fail("── CI 失败详情（最新失败评论摘要）──")
             for ln in detail.splitlines():
                 log_fail(f"  {ln}")
-        acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
-                "（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
-                f"按诊断定位原因并修复（本地 W3 复验后再推）",
-                f"修复后 push: git push origin {branch_name}（CI 自动重跑）",
-                f"继续监控: python3 scripts/ohc-run.py submit {software} {version} --resume",
-                f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
+        rnd = _ci_repair_round(ver_dir, pr_number)
+        try:
+            from .result_report import write_lifecycle_draft
+            write_lifecycle_draft(
+                software, version, "loop_pending", pr_number=pr_number,
+                summary=(f"PR #{pr_number} CI 失败（修复第 {rnd}/"
+                         f"{MAX_CI_REPAIR_ROUNDS} 轮）。续环: python3 "
+                         f"scripts/ohc-run.py submit {software} {version} --resume"))
+        except Exception:
+            pass
+        if rnd >= MAX_CI_REPAIR_ROUNDS:
+            acts = [f"⚠️ 停损: CI 已连续 {rnd} 轮修复仍红，勿再盲目重试",
+                    f"上报: python3 scripts/ohc-run.py result {software} {version} "
+                    f"--status build_failed --failed-reason 'CI 连续 {rnd} 轮失败: <一句话根因>' --force",
+                    f"证据留档: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}",
+                    "人工介入排查（依赖缺失/环境差异/上游缺陷），排查后重开需 reset-rerun"]
+        else:
+            acts = [f"自诊断: python3 scripts/gitcode_pr.py diagnose --repo {repo} --number {pr_number}",
+                    "（diagnose 对'类别: 未知'做日志二次归类，输出证据行+修复要点）",
+                    f"按诊断定位原因并修复（本地 W3 复验后再推）",
+                    f"修复后 push: git push origin {branch_name}",
+                    f"⚠️ push 本身不会触发 CI（评论触发型）——必须续环: python3 "
+                    f"scripts/ohc-run.py submit {software} {version} --resume（resume 自动评论 /rebuild 重跑 CI）",
+                    f"修复轮次: {rnd}/{MAX_CI_REPAIR_ROUNDS}（连续 {MAX_CI_REPAIR_ROUNDS} 轮仍红 → 停损上报）",
+                    f"完整日志: python3 scripts/gitcode_pr.py ci-status --repo {repo} --number {pr_number}"]
         if detail:
             acts.insert(0, "── CI 失败详情见上方摘要 ──")
         _emit_submit_handoff(software, version, ver_dir, project_dir,
@@ -1321,6 +1412,7 @@ def cmd_submit(software: str, version: str,
         return 1
     elif ci_status == "PASSED":
         log_ok(f"  ✅ CI 构建通过")
+        _ci_repair_reset(ver_dir)
         try:
             from .feedback import record_event
             record_event(ver_dir, "ci_passed", f"PR #{pr_number}")
