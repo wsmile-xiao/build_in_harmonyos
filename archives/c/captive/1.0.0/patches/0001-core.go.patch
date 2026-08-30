@@ -1,0 +1,323 @@
+--- /dev/null
++++ b/core.go
+@@ -0,0 +1,320 @@
++package main
++
++import (
++	"context"
++	"encoding/binary"
++	"errors"
++	"fmt"
++	"log"
++	"net"
++	"os"
++	"os/exec"
++	"regexp"
++	"strings"
++	"time"
++
++	"github.com/BurntSushi/toml"
++	"github.com/armon/go-socks5"
++)
++
++var dhcpDNSRegex = regexp.MustCompile(`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`)
++
++// Config is the captive-browser TOML configuration.
++type Config struct {
++	SOCKS5Addr string `toml:"socks5-addr"`
++	Browser    string `toml:"browser"`
++	DHCP       string `toml:"dhcp-dns"`
++	BindDevice string `toml:"bind-device"`
++}
++
++// ExtractDHCPDNS runs the configured dhcp-dns shell command and extracts the
++// first IPv4 address found in its output.
++func ExtractDHCPDNS(dhcpCmd string) (string, error) {
++	out, err := exec.Command("/bin/sh", "-c", dhcpCmd).Output()
++	if err != nil {
++		if exitErr, ok := err.(*exec.ExitError); ok {
++			os.Stderr.Write(exitErr.Stderr)
++		}
++		return "", fmt.Errorf("failed to execute dhcp-dns: %w", err)
++	}
++	match := dhcpDNSRegex.Find(out)
++	if match == nil {
++		return "", fmt.Errorf("IPs not found in dhcp-dns output")
++	}
++	return string(match), nil
++}
++
++// LoadConfig reads and validates the TOML configuration file at path.
++func LoadConfig(path string) (*Config, error) {
++	tomlData, err := os.ReadFile(path)
++	if err != nil {
++		return nil, fmt.Errorf("failed to read config: %w", err)
++	}
++	var conf Config
++	if err := toml.Unmarshal(tomlData, &conf); err != nil {
++		return nil, fmt.Errorf("failed to parse config: %w", err)
++	}
++	for _, field := range []struct {
++		name  string
++		value string
++	}{
++		{"socks5-addr", conf.SOCKS5Addr},
++		{"browser", conf.Browser},
++		{"dhcp-dns", conf.DHCP},
++	} {
++		if field.value == "" {
++			return nil, fmt.Errorf("config missing required key %q", field.name)
++		}
++	}
++	return &conf, nil
++}
++
++// UpstreamResolver resolves host names by sending raw DNS A queries to the
++// upstream DNS server (the DHCP-provided one, in production). It is a
++// minimal pure-Go DNS client instead of net.Resolver because the point of
++// captive-browser is to bypass the device's default resolver entirely, and a
++// raw query gives full control over the wire format.
++type UpstreamResolver struct {
++	dialer   *net.Dialer
++	upstream string
++	port     int
++}
++
++// NewUpstreamResolver returns an UpstreamResolver that queries upstream on
++// the standard DNS port 53.
++func NewUpstreamResolver(upstream string, dialer *net.Dialer) *UpstreamResolver {
++	return &UpstreamResolver{dialer: dialer, upstream: upstream, port: 53}
++}
++
++// newUpstreamResolverWithPort is like NewUpstreamResolver but with an
++// explicit port; used by the tests, which run a local fake DNS server.
++func newUpstreamResolverWithPort(upstream string, dialer *net.Dialer, port int) *UpstreamResolver {
++	return &UpstreamResolver{dialer: dialer, upstream: upstream, port: port}
++}
++
++// Resolve implements the go-socks5 NameResolver interface: it looks up name
++// through the upstream DNS server and returns the first A record (nil IP if
++// the upstream has no A record for name).
++func (u *UpstreamResolver) Resolve(ctx context.Context, name string) (context.Context, net.IP, error) {
++	log.Println("Redirected DNS lookup:", name)
++	ip, err := u.resolveA(ctx, name)
++	if err != nil {
++		return ctx, nil, fmt.Errorf("dns lookup of %q through %s: %w", name, u.upstream, err)
++	}
++	return ctx, ip, nil
++}
++
++// resolveA performs one UDP DNS A query for name against the upstream server
++// and returns the first A record, or nil if the answer section is empty.
++func (u *UpstreamResolver) resolveA(ctx context.Context, name string) (net.IP, error) {
++	remote := &net.UDPAddr{IP: net.ParseIP(u.upstream), Port: u.port}
++	// A connected UDP socket: every Read() returns a packet from the
++	// upstream, so no peer matching is required (more robust on platforms
++	// where unconnected-socket peer info is unreliable).
++	//
++	// Use the configured dialer so the kernel picks the correct local
++	// source address for the route to the upstream DNS server (which is a
++	// LAN router, not loopback); hard-coding a loopback source address
++	// would fail with EINVAL/ENETUNREACH when sending to a non-loopback
++	// destination, and fall back to a default Dialer when none is set.
++	dialer := u.dialer
++	if dialer == nil {
++		dialer = &net.Dialer{}
++	}
++	conn, err := dialer.DialContext(ctx, "udp", remote.String())
++	if err != nil {
++		return nil, err
++	}
++	defer conn.Close()
++
++	id := uint16(0x4C42) // "LB"
++	buf := make([]byte, 1500)
++	// UDP is lossy: retry once with a fresh query id so a single dropped
++	// datagram does not fail a name lookup that would otherwise succeed.
++	for attempt := 0; attempt < 2; attempt++ {
++		// Refresh the read deadline for each attempt so the retry gets a
++		// fresh window instead of inheriting an already-expired deadline.
++		deadline, ok := ctx.Deadline()
++		if !ok {
++			deadline = time.Now().Add(5 * time.Second)
++		}
++		conn.SetDeadline(deadline)
++		if attempt > 0 {
++			// Use a new transaction id so an answer from the previous
++			// attempt can never be mistaken for a reply to the retry.
++			id = uint16(0x4C42) ^ uint16(attempt+1)
++		}
++		query := buildDNSQuery(id, name, 1)
++		if _, err := conn.Write(query); err != nil {
++			return nil, err
++		}
++		n, err := conn.Read(buf)
++		if err != nil {
++			if attempt == 0 && isNetTimeout(err) {
++				continue // retry once on timeout
++			}
++			return nil, err
++		}
++		return parseDNSAResponse(buf[:n], id)
++	}
++	return nil, fmt.Errorf("dns query for %q timed out", name)
++}
++
++// StartSocksProxy starts a SOCKS5 proxy that resolves all host names through
++// the given upstream DNS server address (IP only, port 53 is implied).
++// It returns the running server and the SOCKS5 address it listens on.
++func StartSocksProxy(upstream string, conf *Config) (*socks5.Server, string, error) {
++	dialer := &net.Dialer{}
++	if conf.BindDevice != "" {
++		dialer.Control = bindToDevice(conf.BindDevice)
++	}
++	srv, err := socks5.New(&socks5.Config{
++		Resolver: NewUpstreamResolver(upstream, dialer),
++		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
++			return dialer.DialContext(ctx, network, address)
++		},
++	})
++	if err != nil {
++		return nil, "", err
++	}
++	return srv, conf.SOCKS5Addr, nil
++}
++
++// Execute runs the full captive-browser flow: start the SOCKS5 proxy pointing
++// at the given upstream DNS server, launch the browser with PROXY set to the
++// SOCKS5 address, and wait for the browser to exit.
++func Execute(conf *Config, upstream string) error {
++	srv, socksAddr, err := StartSocksProxy(upstream, conf)
++	if err != nil {
++		return err
++	}
++	go func() {
++		log.Printf("SOCKS5 proxy pointing to DNS %s started at %s...", upstream, socksAddr)
++		if err := srv.ListenAndServe("tcp", socksAddr); err != nil {
++			log.Printf("SOCKS5 server stopped: %v", err)
++		}
++	}()
++
++	log.Printf("Starting browser...")
++	cmd := exec.Command("/bin/sh", "-c", conf.Browser)
++	cmd.Stdout = os.Stdout
++	cmd.Stderr = os.Stderr
++	cmd.Env = append(os.Environ(), "PROXY="+socksAddr)
++	if err := cmd.Run(); err != nil {
++		return err
++	}
++	log.Printf("Browser exited, shutting down...")
++	return nil
++}
++
++// ─── Minimal DNS wire codec (RFC 1035) ──────────────────────────────────────
++
++// isNetTimeout reports whether err is a network timeout (e.g. a deadline
++// exceeded on a UDP read), which the DNS client treats as retryable.
++func isNetTimeout(err error) bool {
++	var ne net.Error
++	if errors.As(err, &ne) {
++		return ne.Timeout()
++	}
++	return false
++}
++
++// buildDNSQuery builds a standard (non-EDNS) query for name of the given
++// type.
++func buildDNSQuery(id uint16, name string, qtype uint16) []byte {
++	pkt := make([]byte, 0, 64)
++	pkt = binary.BigEndian.AppendUint16(pkt, id)
++	pkt = binary.BigEndian.AppendUint16(pkt, 0x0100) // RD
++	pkt = binary.BigEndian.AppendUint16(pkt, 1)     // QDCOUNT
++	pkt = binary.BigEndian.AppendUint16(pkt, 0)     // ANCOUNT
++	pkt = binary.BigEndian.AppendUint16(pkt, 0)     // NSCOUNT
++	pkt = binary.BigEndian.AppendUint16(pkt, 0)     // ARCOUNT
++	pkt = appendDNSName(pkt, name)
++	pkt = binary.BigEndian.AppendUint16(pkt, qtype)
++	pkt = binary.BigEndian.AppendUint16(pkt, 1) // class IN
++	return pkt
++}
++
++// appendDNSName appends name in DNS wire format (labels of up to 63 bytes,
++// overlong labels are truncated rather than failing the query).
++func appendDNSName(pkt []byte, name string) []byte {
++	for _, label := range strings.Split(strings.Trim(name, "."), ".") {
++		if label == "" {
++			continue
++		}
++		if len(label) > 63 {
++			label = label[:63]
++		}
++		pkt = append(pkt, byte(len(label)))
++		pkt = append(pkt, label...)
++	}
++	return append(pkt, 0)
++}
++
++// skipDNSName returns the offset just past the DNS name at pos, or -1 if the
++// name is malformed or truncated.
++func skipDNSName(msg []byte, pos int) int {
++	jumps := 0
++	for {
++		if pos >= len(msg) {
++			return -1
++		}
++		l := int(msg[pos])
++		if l&0xC0 == 0xC0 {
++			if pos+1 >= len(msg) {
++				return -1
++			}
++			if jumps++; jumps > 20 {
++				return -1 // guard against compression-pointer loops
++			}
++			return pos + 2
++		}
++		pos++
++		if l == 0 {
++			return pos
++		}
++		if pos+l > len(msg) {
++			return -1
++		}
++		pos += l
++	}
++}
++
++// parseDNSAResponse validates the response header and ID and returns the
++// first A record in the answer section (nil if there is none).
++func parseDNSAResponse(resp []byte, id uint16) (net.IP, error) {
++	if len(resp) < 12 {
++		return nil, fmt.Errorf("response too short (%d bytes)", len(resp))
++	}
++	if got := binary.BigEndian.Uint16(resp[0:2]); got != id {
++		return nil, fmt.Errorf("ID mismatch (got %d, want %d)", got, id)
++	}
++	if resp[2]&0x80 == 0 {
++		return nil, fmt.Errorf("not a response (QR bit clear)")
++	}
++	qd := int(binary.BigEndian.Uint16(resp[4:6]))
++	an := int(binary.BigEndian.Uint16(resp[6:8]))
++	pos := 12
++	for i := 0; i < qd; i++ {
++		if pos = skipDNSName(resp, pos); pos < 0 || pos+4 > len(resp) {
++			return nil, fmt.Errorf("malformed question section")
++		}
++		pos += 4 // QTYPE + QCLASS
++	}
++	for i := 0; i < an; i++ {
++		if pos = skipDNSName(resp, pos); pos < 0 || pos+8 > len(resp) {
++			return nil, fmt.Errorf("malformed answer section")
++		}
++		// pos points at TYPE: TYPE[+0] CLASS[+2] TTL[+4] RDLENGTH[+8] RDATA[+10]
++		rtype := binary.BigEndian.Uint16(resp[pos : pos+2])
++		rdlen := int(binary.BigEndian.Uint16(resp[pos+8 : pos+10]))
++		if pos+10+rdlen > len(resp) {
++			return nil, fmt.Errorf("truncated answer section")
++		}
++		if rtype == 1 && rdlen == 4 {
++			return net.IP(append([]byte(nil), resp[pos+10:pos+14]...)), nil
++		}
++		pos += 10 + rdlen
++	}
++	return nil, nil
++}
