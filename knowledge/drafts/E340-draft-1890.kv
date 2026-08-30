@@ -1,0 +1,77 @@
+#====================================================================
+# E340-draft — CNB 制品仓对不存在的包返回 "system acceleration policy not enabled"，
+# CI L0i 门禁误判为基础设施故障（registry_unreachable），掩盖 R36 依赖未发布
+#====================================================================
+id:                     E340
+trigger_tool:           conan
+phase:                  configuration
+error_signature:        system acceleration policy not enabled|registry unreachable for:|error:route not matched|HTTP:404|Connecting to remote 'ohpcd' anonymously.*ERROR
+
+severity:               2
+category:               conan, dependency, network, environment
+match_keywords:         registry_unreachable, system acceleration policy, R36, 依赖未发布, 制品仓, conan download, ohpcd, cnb, local cache, 已发布
+title:                  CNB 制品仓对不存在的包返回 "system acceleration policy not enabled"，L0i 门禁误判为基础设施故障而非依赖未发布
+
+root_cause:             conan download 探测 CNB(cnb.cool) 制品仓中不存在的包时，返回
+                        "Connecting to remote 'ohpcd' anonymously ERROR: error:system acceleration policy not enabled"
+                        （HTTP 404 / route not matched），而非标准的 "not found/404" 文本；
+                        ci/conan/build_and_test.sh 的 L0i 只把 unable to find|does not exist|not found|404
+                        识别为"依赖未发布"，其余一律归类为 registry_unreachable（基础设施故障），
+                        从而掩盖了真实根因：R36 要求依赖必须先发布到制品仓。
+                        本地 conan cache 已有该依赖配方/二进制时，conan 直接从 cache 解析，
+                        不触发制品仓探测，造成"本地通过、PR CI 失败"的假象。
+affected_scope:         PR 构建中依赖尚未发布到制品仓的包（L0i 依赖发布检查），
+                        以及依赖已存在于本地 cache 的本地复现场景
+verification_cmd:       conan list "libparserutils/*" -r=ohpcd  # 空=未发布；
+                        conan download "libparserutils/0.2.5" -r=ohpcd --only-recipe  # 与 L0i 相同的探测
+
+rec_priority:           1
+rec_approach:           publish-dependency-first
+rec_description:        按 R36 先把依赖发布到制品仓（合并依赖的 PR / 触发发布流水线），
+                        再重跑本 PR 的 CI；L0i 报 registry_unreachable 时先 conan list -r=ohpcd
+                        确认依赖是否真的未发布，而不是当成 worker 网络故障盲目重试。
+rec_command:            conan list "<dep>/*" -r=ohpcd && python3 scripts/gitcode_pr.py trigger-ci --repo <owner>/build_in_harmonyos --number <PR>
+rec_auto_fix:           false
+rec_impl:               r36-dependency-publish-first
+
+fallback_priority:      2
+fallback_approach:      clean-cache-local-verify
+fallback_description:   本地验证依赖可用性时使用与 CI 相同的制品仓探测（conan download -r=ohpcd），
+                        并清理本地 cache 中该依赖后再跑 build_and_test.sh，避免 cache 掩盖未发布状态。
+fallback_command:       conan remove -c "libparserutils/0.2.5" && conan list "libparserutils/*" -r=ohpcd
+fallback_auto_fix:      false
+fallback_impl:          clean-cache-reproduce
+
+forbid_1_pattern:       system acceleration policy.*worker 网络|registry_unreachable.*fix worker network.*retry
+forbid_1_reason:        "system acceleration policy not enabled" 是 CNB 对"包不存在"的 404 响应，
+                        不是网络/认证故障；盲目重试或修 worker 网络永远无法通过。
+forbid_1_consequence:   反复 /rebuild 全部失败，真实根因（R36 依赖未发布）被掩盖，浪费构建配额。
+forbid_2_pattern:       local cache.*通过.*=>.*PR.*通过|本地通过.*制品仓.*已发布
+forbid_2_reason:        本地 conan cache 有配方不代表制品仓已发布；CI 是干净环境，
+                        必须走制品仓探测，cache 命中会掩盖未发布状态。
+forbid_2_consequence:   本地全绿推送后 PR CI 依然失败，重复"本地通过、CI 失败"的循环。
+
+principles:             P016
+
+causes:                 []
+caused_by:              []
+similar_to:             [E321]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E340.md
+last_updated:           2026-08-29
+source_event:           PR #6869 CI build #32692 — libhubbub/0.3.8 依赖 libparserutils/0.2.5
+                        未发布到 ohpcd 制品仓，L0i 误报 registry_unreachable
+
+authors:                yanjiaxin <yanjiaxin@noreply.gitcode.com>
+source_pr:              6869
+source_commit:          e5327eec
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-29
+
+draft:                  true
+contributor_id:         1890
