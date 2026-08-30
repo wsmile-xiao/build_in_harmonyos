@@ -1,0 +1,295 @@
+--- /dev/null
++++ b/SDL_nativewindowvideo.c
+@@ -0,0 +1,292 @@
++/*
++  Simple DirectMedia Layer
++  Copyright (C) 1997-2025 Sam Lantinga <slouken@libsdl.org>
++
++  This software is provided 'as-is', without any express or implied
++  warranty. In no event will the authors be held liable for any damages
++  arising from the use of this software.
++
++  Permission is granted to anyone to use this software for any purpose,
++  including commercial applications, and to alter it and redistribute it
++  freely, subject to the restrictions in SDL's LICENSE.txt.
++*/
++
++#include "../../SDL_internal.h"
++
++#ifdef SDL_VIDEO_DRIVER_NATIVEWINDOW
++
++#include "SDL_events.h"
++#include "SDL_hints.h"
++#include "SDL_pixels.h"
++#include "SDL_video.h"
++#include "../../events/SDL_keyboard_c.h"
++#include "../../events/SDL_mouse_c.h"
++#include "SDL_nativewindowopengles.h"
++#include "SDL_nativewindowvideo.h"
++
++static SDL_bool NATIVEWINDOW_ParsePositive(const char *value, Uint64 *parsed)
++{
++    const char *cursor;
++    Uint64 number = 0;
++
++    if (!value || !*value) {
++        return SDL_FALSE;
++    }
++    for (cursor = value; *cursor; ++cursor) {
++        const Uint64 digit = (Uint64)(*cursor - '0');
++        if (*cursor < '0' || *cursor > '9' ||
++            number > (SDL_MAX_UINT64 - digit) / 10) {
++            return SDL_FALSE;
++        }
++        number = (number * 10) + digit;
++    }
++    if (number == 0) {
++        return SDL_FALSE;
++    }
++    *parsed = number;
++    return SDL_TRUE;
++}
++
++static void NATIVEWINDOW_Destroy(SDL_VideoDevice *device)
++{
++    SDL_free(device->driverdata);
++    SDL_free(device);
++}
++
++static SDL_VideoDevice *NATIVEWINDOW_Create(void)
++{
++    const char *surface_hint = SDL_GetHint(SDL_HINT_NATIVEWINDOW_SURFACE_ID);
++    const char *width_hint = SDL_GetHint(SDL_HINT_NATIVEWINDOW_WIDTH);
++    const char *height_hint = SDL_GetHint(SDL_HINT_NATIVEWINDOW_HEIGHT);
++    Uint64 surface_id = 0;
++    Uint64 width = 0;
++    Uint64 height = 0;
++    SDL_VideoDevice *device;
++    SDL_VideoData *data;
++
++    if (!NATIVEWINDOW_ParsePositive(surface_hint, &surface_id)) {
++        SDL_SetError("NativeWindow surface ID must be an unsigned decimal integer");
++        return NULL;
++    }
++    if (!NATIVEWINDOW_ParsePositive(width_hint, &width) ||
++        width > SDL_MAX_SINT32) {
++        SDL_SetError("NativeWindow width must be in the range 1..2147483647");
++        return NULL;
++    }
++    if (!NATIVEWINDOW_ParsePositive(height_hint, &height) ||
++        height > SDL_MAX_SINT32) {
++        SDL_SetError("NativeWindow height must be in the range 1..2147483647");
++        return NULL;
++    }
++
++    device = (SDL_VideoDevice *)SDL_calloc(1, sizeof(*device));
++    data = (SDL_VideoData *)SDL_calloc(1, sizeof(*data));
++    if (!device || !data) {
++        SDL_free(data);
++        SDL_free(device);
++        SDL_OutOfMemory();
++        return NULL;
++    }
++
++    data->surface_id = surface_id;
++    data->width = (int)width;
++    data->height = (int)height;
++    device->driverdata = data;
++    device->free = NATIVEWINDOW_Destroy;
++    device->VideoInit = NATIVEWINDOW_VideoInit;
++    device->VideoQuit = NATIVEWINDOW_VideoQuit;
++    device->CreateSDLWindow = NATIVEWINDOW_CreateWindow;
++    device->DestroyWindow = NATIVEWINDOW_DestroyWindow;
++    device->SetWindowTitle = NATIVEWINDOW_SetWindowTitle;
++    device->SetWindowPosition = NATIVEWINDOW_SetWindowPosition;
++    device->SetWindowSize = NATIVEWINDOW_SetWindowSize;
++    device->ShowWindow = NATIVEWINDOW_ShowWindow;
++    device->HideWindow = NATIVEWINDOW_HideWindow;
++    device->PumpEvents = NATIVEWINDOW_PumpEvents;
++
++#ifdef SDL_VIDEO_OPENGL_EGL
++    device->GL_LoadLibrary = NATIVEWINDOW_GLES_LoadLibrary;
++    device->GL_GetProcAddress = NATIVEWINDOW_GLES_GetProcAddress;
++    device->GL_UnloadLibrary = NATIVEWINDOW_GLES_UnloadLibrary;
++    device->GL_CreateContext = NATIVEWINDOW_GLES_CreateContext;
++    device->GL_MakeCurrent = NATIVEWINDOW_GLES_MakeCurrent;
++    device->GL_SetSwapInterval = NATIVEWINDOW_GLES_SetSwapInterval;
++    device->GL_GetSwapInterval = NATIVEWINDOW_GLES_GetSwapInterval;
++    device->GL_SwapWindow = NATIVEWINDOW_GLES_SwapWindow;
++    device->GL_DeleteContext = NATIVEWINDOW_GLES_DeleteContext;
++#endif
++
++    return device;
++}
++
++VideoBootStrap NATIVEWINDOW_bootstrap = {
++    "nativewindow", "NativeWindow EGL video driver", NATIVEWINDOW_Create, NULL
++};
++
++int NATIVEWINDOW_VideoInit(_THIS)
++{
++    SDL_VideoData *data = (SDL_VideoData *)_this->driverdata;
++    SDL_DisplayMode mode;
++
++    SDL_zero(mode);
++    mode.format = SDL_PIXELFORMAT_RGBA8888;
++    mode.w = data->width;
++    mode.h = data->height;
++    mode.refresh_rate = 60;
++    if (SDL_AddBasicVideoDisplay(&mode) < 0) {
++        return -1;
++    }
++    return SDL_AddDisplayMode(&_this->displays[0], &mode) < 0 ? -1 : 0;
++}
++
++void NATIVEWINDOW_VideoQuit(_THIS)
++{
++    (void)_this;
++}
++
++int NATIVEWINDOW_CreateWindow(_THIS, SDL_Window *window)
++{
++    SDL_VideoData *video = (SDL_VideoData *)_this->driverdata;
++    SDL_WindowData *data;
++    int32_t width = 0;
++    int32_t height = 0;
++    int32_t result;
++
++    data = (SDL_WindowData *)SDL_calloc(1, sizeof(*data));
++    if (!data) {
++        return SDL_OutOfMemory();
++    }
++    data->egl_surface = EGL_NO_SURFACE;
++
++    result = OH_NativeWindow_CreateNativeWindowFromSurfaceId(
++        video->surface_id, &data->native_window);
++    if (result != 0 || !data->native_window) {
++        SDL_free(data);
++        return SDL_SetError("NativeWindow surface %" SDL_PRIu64
++                            " is unavailable: %d", video->surface_id, result);
++    }
++
++    result = OH_NativeWindow_NativeWindowHandleOpt(
++        data->native_window, SET_BUFFER_GEOMETRY, video->width, video->height);
++    if (result == 0) {
++        result = OH_NativeWindow_NativeWindowHandleOpt(
++            data->native_window, GET_BUFFER_GEOMETRY, &height, &width);
++    }
++    if (result != 0 || width != video->width || height != video->height) {
++        OH_NativeWindow_DestroyNativeWindow(data->native_window);
++        SDL_free(data);
++        return SDL_SetError("NativeWindow geometry mismatch: %dx%d expected %dx%d",
++                            width, height, video->width, video->height);
++    }
++
++    window->x = 0;
++    window->y = 0;
++    window->w = width;
++    window->h = height;
++    window->driverdata = data;
++
++#ifdef SDL_VIDEO_OPENGL_EGL
++    if (window->flags & SDL_WINDOW_OPENGL) {
++        EGLint format_wanted = 0;
++        int32_t format_got = 0;
++
++        if (SDL_EGL_ChooseConfig(_this) != 0) {
++            NATIVEWINDOW_DestroyWindow(_this, window);
++            return -1;
++        }
++        if (!_this->egl_data->eglGetConfigAttrib(
++                _this->egl_data->egl_display,
++                _this->egl_data->egl_config,
++                EGL_NATIVE_VISUAL_ID, &format_wanted)) {
++            SDL_EGL_SetError("Unable to query EGL native visual ID",
++                             "eglGetConfigAttrib");
++            NATIVEWINDOW_DestroyWindow(_this, window);
++            return -1;
++        }
++        result = OH_NativeWindow_NativeWindowHandleOpt(
++            data->native_window, SET_FORMAT, (int32_t)format_wanted);
++        if (result != 0) {
++            SDL_SetError("NativeWindow SET_FORMAT failed: %d", result);
++            NATIVEWINDOW_DestroyWindow(_this, window);
++            return -1;
++        }
++        result = OH_NativeWindow_NativeWindowHandleOpt(
++            data->native_window, GET_FORMAT, &format_got);
++        if (result != 0 || format_got != (int32_t)format_wanted) {
++            SDL_SetError("NativeWindow format mismatch: %d expected %d",
++                         format_got, (int32_t)format_wanted);
++            NATIVEWINDOW_DestroyWindow(_this, window);
++            return -1;
++        }
++        data->egl_surface = SDL_EGL_CreateSurface(
++            _this, (NativeWindowType)data->native_window);
++        if (data->egl_surface == EGL_NO_SURFACE) {
++            NATIVEWINDOW_DestroyWindow(_this, window);
++            return -1;
++        }
++    }
++#endif
++    return 0;
++}
++
++void NATIVEWINDOW_DestroyWindow(_THIS, SDL_Window *window)
++{
++    SDL_WindowData *data = (SDL_WindowData *)window->driverdata;
++    if (!data) {
++        return;
++    }
++#ifdef SDL_VIDEO_OPENGL_EGL
++    if (data->egl_surface != EGL_NO_SURFACE) {
++        SDL_EGL_DestroySurface(_this, data->egl_surface);
++    }
++#endif
++    if (data->native_window) {
++        OH_NativeWindow_DestroyNativeWindow(data->native_window);
++    }
++    SDL_free(data);
++    window->driverdata = NULL;
++}
++
++void NATIVEWINDOW_SetWindowTitle(_THIS, SDL_Window *window)
++{
++    (void)_this;
++    (void)window;
++}
++
++void NATIVEWINDOW_SetWindowPosition(_THIS, SDL_Window *window)
++{
++    SDL_VideoData *video = (SDL_VideoData *)_this->driverdata;
++    window->x = 0;
++    window->y = 0;
++    window->w = video->width;
++    window->h = video->height;
++}
++
++void NATIVEWINDOW_SetWindowSize(_THIS, SDL_Window *window)
++{
++    SDL_VideoData *video = (SDL_VideoData *)_this->driverdata;
++    window->w = video->width;
++    window->h = video->height;
++}
++
++void NATIVEWINDOW_ShowWindow(_THIS, SDL_Window *window)
++{
++    (void)_this;
++    SDL_SetMouseFocus(window);
++    SDL_SetKeyboardFocus(window);
++}
++
++void NATIVEWINDOW_HideWindow(_THIS, SDL_Window *window)
++{
++    (void)_this;
++    (void)window;
++    SDL_SetMouseFocus(NULL);
++    SDL_SetKeyboardFocus(NULL);
++}
++
++void NATIVEWINDOW_PumpEvents(_THIS)
++{
++    (void)_this;
++}
++
++#endif /* SDL_VIDEO_DRIVER_NATIVEWINDOW */

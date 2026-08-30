@@ -1,0 +1,141 @@
+--- a/cmake/sdlchecks.cmake
++++ b/cmake/sdlchecks.cmake
+@@ -849,20 +849,71 @@
+         #include <GL/glx.h>
+         int main(int argc, char** argv) { return 0; }" HAVE_OPENGL_GLX)
+     if(HAVE_OPENGL_GLX)
+       set(SDL_VIDEO_OPENGL_GLX 1)
+     endif()
+   endif()
+ endmacro()
+
+ # Requires:
+ # - PkgCheckModules
++macro(CheckOHAudio)
++  if(SDL_OHAUDIO)
++    cmake_push_check_state(RESET)
++    set(CMAKE_REQUIRED_LIBRARIES ohaudio)
++    check_c_source_compiles("
++        #include <stdint.h>
++        #include <time.h>
++        #include <ohaudio/native_audiostream_base.h>
++        #include <ohaudio/native_audiostreambuilder.h>
++        #include <ohaudio/native_audiorenderer.h>
++        static OH_AudioData_Callback_Result write_data(
++            OH_AudioRenderer *renderer, void *userdata, void *buffer,
++            int32_t size) {
++          (void)renderer; (void)userdata; (void)buffer; (void)size;
++          return AUDIO_DATA_CALLBACK_RESULT_VALID;
++        }
++        int main(void) {
++          OH_AudioStreamBuilder *builder = 0;
++          OH_AudioRenderer *renderer = 0;
++          int64_t frames = 0;
++          int64_t timestamp = 0;
++          OH_AudioStreamBuilder_Create(&builder, AUDIOSTREAM_TYPE_RENDERER);
++          OH_AudioStreamBuilder_SetSamplingRate(builder, 48000);
++          OH_AudioStreamBuilder_SetChannelCount(builder, 2);
++          OH_AudioStreamBuilder_SetSampleFormat(builder, AUDIOSTREAM_SAMPLE_S16LE);
++          OH_AudioStreamBuilder_SetEncodingType(builder, AUDIOSTREAM_ENCODING_TYPE_RAW);
++          OH_AudioStreamBuilder_SetLatencyMode(builder, AUDIOSTREAM_LATENCY_MODE_NORMAL);
++          OH_AudioStreamBuilder_SetRendererInfo(builder, AUDIOSTREAM_USAGE_MUSIC);
++          OH_AudioStreamBuilder_SetFrameSizeInCallback(builder, 512);
++          OH_AudioStreamBuilder_SetRendererWriteDataCallback(builder, write_data, 0);
++          OH_AudioStreamBuilder_GenerateRenderer(builder, &renderer);
++          OH_AudioRenderer_Start(renderer);
++          OH_AudioRenderer_GetFramesWritten(renderer, &frames);
++          OH_AudioRenderer_GetAudioTimestampInfo(renderer, &frames, &timestamp);
++          OH_AudioRenderer_Stop(renderer);
++          OH_AudioRenderer_Release(renderer);
++          return (int)OH_AudioStreamBuilder_Destroy(builder);
++        }" HAVE_OHAUDIO_NATIVE_OUTPUT)
++    cmake_pop_check_state()
++    if(NOT HAVE_OHAUDIO_NATIVE_OUTPUT)
++      message(FATAL_ERROR "SDL_OHAUDIO requires the complete OHAudio renderer API")
++    endif()
++    set(SDL_AUDIO_DRIVER_OHAUDIO 1)
++    file(GLOB OHAUDIO_SOURCES ${SDL2_SOURCE_DIR}/src/audio/ohaudio/*.c)
++    list(APPEND SOURCE_FILES ${OHAUDIO_SOURCES})
++    list(APPEND EXTRA_LIBS ohaudio)
++    set(HAVE_OHAUDIO TRUE)
++    set(HAVE_SDL_AUDIO TRUE)
++  endif()
++endmacro()
++
+ macro(CheckEGL)
+   if (SDL_OPENGL OR SDL_OPENGLES)
+     pkg_check_modules(EGL egl)
+     set(CMAKE_REQUIRED_DEFINITIONS "${CMAKE_REQUIRED_DEFINITIONS} ${EGL_CFLAGS}")
+     check_c_source_compiles("
+         #define EGL_API_FB
+         #define MESA_EGL_NO_X11_HEADERS
+         #define EGL_NO_X11
+         #include <EGL/egl.h>
+         #include <EGL/eglext.h>
+@@ -903,20 +954,66 @@
+     endif()
+     check_c_source_compiles("
+         #include <GLES2/gl2.h>
+         #include <GLES2/gl2ext.h>
+         int main (int argc, char** argv) { return 0; }" HAVE_OPENGLES_V2)
+     if(HAVE_OPENGLES_V2)
+         set(HAVE_OPENGLES TRUE)
+         set(SDL_VIDEO_OPENGL_ES2 1)
+         set(SDL_VIDEO_RENDER_OGL_ES2 1)
+     endif()
++  endif()
++endmacro()
++
++macro(CheckNativeWindow)
++  if(SDL_NATIVEWINDOW)
++    if(NOT SDL_OPENGLES OR NOT HAVE_OPENGL_EGL OR NOT HAVE_OPENGLES_V2)
++      message(FATAL_ERROR "SDL_NATIVEWINDOW requires EGL and OpenGL ES 2")
++    endif()
++    cmake_push_check_state(RESET)
++    set(CMAKE_REQUIRED_LIBRARIES native_window EGL GLESv2)
++    check_c_source_compiles("
++        #include <stdint.h>
++        #include <native_window/external_window.h>
++        #include <EGL/egl.h>
++        #include <GLES2/gl2.h>
++        int main(void) {
++          OHNativeWindow *window = 0;
++          EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
++          EGLSurface surface;
++          unsigned char pixel[4] = { 0, 0, 0, 0 };
++          int height = 0;
++          int width = 0;
++          OH_NativeWindow_CreateNativeWindowFromSurfaceId(1, &window);
++          OH_NativeWindow_NativeWindowHandleOpt(window, SET_BUFFER_GEOMETRY,
++                                                1, 1);
++          OH_NativeWindow_NativeWindowHandleOpt(window, GET_BUFFER_GEOMETRY,
++                                                &height, &width);
++          surface = eglCreateWindowSurface(display, (EGLConfig)0,
++                                           (EGLNativeWindowType)window, 0);
++          eglMakeCurrent(display, surface, surface, EGL_NO_CONTEXT);
++          glReadPixels(0, 0, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
++          eglSwapBuffers(display, surface);
++          OH_NativeWindow_DestroyNativeWindow(window);
++          return pixel[0] + width + height;
++        }" HAVE_NATIVEWINDOW_EGL_GLES2)
++    cmake_pop_check_state()
++    if(NOT HAVE_NATIVEWINDOW_EGL_GLES2)
++      message(FATAL_ERROR "SDL_NATIVEWINDOW requires NativeWindow, EGL, and GLES2")
++    endif()
++    set(SDL_VIDEO_DRIVER_NATIVEWINDOW 1)
++    file(GLOB NATIVEWINDOW_SOURCES
++         ${SDL2_SOURCE_DIR}/src/video/nativewindow/*.c)
++    list(APPEND SOURCE_FILES ${NATIVEWINDOW_SOURCES})
++    list(APPEND EXTRA_LIBS native_window EGL GLESv2)
++    set(HAVE_NATIVEWINDOW TRUE)
++    set(HAVE_SDL_VIDEO TRUE)
+   endif()
+ endmacro()
+
+ # Requires:
+ # - EGL
+ macro(CheckQNXScreen)
+   if(QNX AND HAVE_OPENGL_EGL)
+     check_c_source_compiles("
+         #include <screen/screen.h>
+         int main (int argc, char** argv) { return 0; }" HAVE_QNX_SCREEN)
