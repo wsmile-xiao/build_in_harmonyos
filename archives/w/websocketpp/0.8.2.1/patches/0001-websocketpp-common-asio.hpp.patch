@@ -1,0 +1,218 @@
+--- a/websocketpp/common/asio.hpp
++++ b/websocketpp/common/asio.hpp
+@@ -59,20 +59,45 @@
+     // boost > 1.48 pull in the steady timer and chrono library
+     #if (BOOST_VERSION/100000) == 1 && ((BOOST_VERSION/100)%1000) > 48
+         #include <boost/asio/steady_timer.hpp>
+         #include <websocketpp/common/chrono.hpp>
+     #endif
+     
+     #include <boost/asio.hpp>
+     #include <boost/system/error_code.hpp>
+ #endif
+ 
++#include <string>
++
++// Boost.Asio 1.31 (shipped by Boost 1.88) and standalone Asio 1.31 dropped the
++// classic executor API: the io_service / io_waiter names, io_service::work, the
++// io_service member wrappers post() and reset(), the
++// basic_waitable_timer::expires_from_now() getter and the classic resolver
++// (resolver::query / resolver::iterator). Everything referenced as the
++// replacement below has been available since Boost 1.73 / Asio 1.25, so the
++// shims at the bottom of this file keep both generations building from one
++// code path.
++#ifdef ASIO_STANDALONE
++    #if (ASIO_VERSION/100000) > 1 || ((ASIO_VERSION/100000) == 1 && \
++        ((ASIO_VERSION/100)%1000) >= 31)
++        #define WEBSOCKETPP_ASIO_MODERN 1
++    #else
++        #define WEBSOCKETPP_ASIO_MODERN 0
++    #endif
++#else
++    #if BOOST_ASIO_VERSION >= 103100
++        #define WEBSOCKETPP_ASIO_MODERN 1
++    #else
++        #define WEBSOCKETPP_ASIO_MODERN 0
++    #endif
++#endif
++
+ namespace websocketpp {
+ namespace lib {
+ 
+ #ifdef ASIO_STANDALONE
+     namespace asio {
+         using namespace ::asio;
+         // Here we assume that we will be using std::error_code with standalone
+         // Asio. This is probably a good assumption, but it is possible in rare
+         // cases that local Asio versions would be used.
+         using std::errc;
+@@ -86,21 +111,21 @@
+             return duration.count() < 0;
+         }
+         inline lib::chrono::milliseconds milliseconds(long duration) {
+             return lib::chrono::milliseconds(duration);
+         }
+     } // namespace asio
+     
+ #else
+     namespace asio {
+         using namespace boost::asio;
+-        
++
+         // See note above about boost <1.49 compatibility
+         #if (BOOST_VERSION/100000) == 1 && ((BOOST_VERSION/100)%1000) > 48
+             // Using boost::asio >=1.49 so we use chrono and steady_timer
+             template <typename T>
+             bool is_neg(T duration) {
+                 return duration.count() < 0;
+             }
+ 
+             // If boost believes it has std::chrono available it will use it
+             // so we should also use it for things that relate to boost, even
+@@ -128,14 +153,146 @@
+                 return boost::posix_time::milliseconds(duration);
+             }
+         #endif
+         
+         using boost::system::error_code;
+         namespace errc = boost::system::errc;
+     } // namespace asio
+ #endif
+ 
+ 
++// Names below are resolved through the `using namespace` directives of the
++// branch selected above, so they are valid for both Boost.Asio and standalone
++// Asio, and for both sides of WEBSOCKETPP_ASIO_MODERN.
++namespace asio {
++
++    #if WEBSOCKETPP_ASIO_MODERN
++        /// io_service was removed; io_context is its drop-in replacement.
++        typedef io_context io_service;
++
++        /// io_service::work was replaced by an explicit work guard.
++        typedef executor_work_guard<io_context::executor_type> work;
++
++        /// The classic resolver handed back an iterator, the modern one a
++        /// results range. Both are delivered to handle_resolve().
++        typedef ip::tcp::resolver::results_type resolve_results;
++
++        /// Synchronously resolve a host/service pair.
++        inline resolve_results resolve_endpoints(ip::tcp::resolver & resolver,
++            std::string const & host, std::string const & service)
++        {
++            return resolver.resolve(host, service);
++        }
++
++        /// Asynchronously resolve a host/service pair.
++        template <typename handler_type>
++        void async_resolve_endpoints(ip::tcp::resolver & resolver,
++            std::string const & host, std::string const & service,
++            handler_type handler)
++        {
++            resolver.async_resolve(host, service, handler);
++        }
++    #else
++        // io_service itself comes from the using namespace directive here.
++        typedef io_service::work work;
++        typedef ip::tcp::resolver::iterator resolve_results;
++
++        inline resolve_results resolve_endpoints(ip::tcp::resolver & resolver,
++            std::string const & host, std::string const & service)
++        {
++            return resolver.resolve(ip::tcp::resolver::query(host,service));
++        }
++
++        template <typename handler_type>
++        void async_resolve_endpoints(ip::tcp::resolver & resolver,
++            std::string const & host, std::string const & service,
++            handler_type handler)
++        {
++            resolver.async_resolve(
++                ip::tcp::resolver::query(host,service),handler);
++        }
++    #endif
++
++    /// Whether a resolution produced no usable endpoint.
++    inline bool resolve_empty(resolve_results const & results) {
++        #if WEBSOCKETPP_ASIO_MODERN
++            return results.empty();
++        #else
++            return results == resolve_results();
++        #endif
++    }
++
++    /// The first endpoint of a resolution result.
++    inline ip::tcp::endpoint resolve_first(resolve_results const & results) {
++        #if WEBSOCKETPP_ASIO_MODERN
++            return results.begin()->endpoint();
++        #else
++            return results->endpoint();
++        #endif
++    }
++
++    /// Append every resolved endpoint to a log stream.
++    template <typename stream_type>
++    void log_resolve_results(stream_type & s, resolve_results const & results)
++    {
++        #if WEBSOCKETPP_ASIO_MODERN
++            for (resolve_results::const_iterator it = results.begin();
++                it != results.end(); ++it)
++            {
++                s << it->endpoint() << " ";
++            }
++        #else
++            resolve_results it, end;
++            for (it = results; it != end; ++it) {
++                s << (*it).endpoint() << " ";
++            }
++        #endif
++    }
++
++    /// Whether a timer's deadline has already passed.
++    /**
++     * Replaces the removed expires_from_now() getter, which reported the time
++     * still left on the timer: a negative duration meant the timer had already
++     * expired or been cancelled.
++     */
++    template <typename timer_type>
++    bool is_expired(timer_type const & timer) {
++        #if WEBSOCKETPP_ASIO_MODERN
++            return timer.expiry() <= timer_type::clock_type::now();
++        #else
++            return is_neg(timer.expires_from_now());
++        #endif
++    }
++
++    /// Queue a handler to run on the io_service.
++    /**
++     * io_service::post() is gone from Asio >= 1.31; the free post() function is
++     * the replacement.
++     */
++    template <typename handler_type>
++    void post_handler(io_service & service, handler_type handler) {
++        #if WEBSOCKETPP_ASIO_MODERN
++            post(service, handler);
++        #else
++            service.post(handler);
++        #endif
++    }
++
++    /// Allow a stopped io_service to be run again.
++    /**
++     * io_service::reset() became restart() when io_context replaced io_service.
++     */
++    inline void reset_io_service(io_service & service) {
++        #if WEBSOCKETPP_ASIO_MODERN
++            service.restart();
++        #else
++            service.reset();
++        #endif
++    }
++
++} // namespace asio
++
++
+ } // namespace lib
+ } // namespace websocketpp
+ 
+ #endif // WEBSOCKETPP_COMMON_ASIO_HPP
