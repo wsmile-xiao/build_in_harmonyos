@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT-gtkmm-4.0-ohos-display-adaptation.kv — GUI 绑定库在无显示服务器
+#   环境（OHOS 无 X11/Wayland/EGL）的测试分类与验证边界：
+#   显示依赖测试 vs 无显示 API 测试的区分、failing suite 排除、
+#   fontconfig 注入、无显示 API 探针与统计口径
+#   实例：gtkmm 4.0.0（archives/g/gtkmm/4.0.0），r3/r4 真实证据
+#   stem/ID：DRAFT-gtkmm-4.0-ohos-display-adaptation（与配对 .md 相同）
+#====================================================================
+
+# --- frontmatter 检索字段 ---
+library:    gtkmm
+version:    4.0.0
+build:      meson
+error:      display-test-classification
+toolchain:  clang15
+platform:   ohos
+dependency: glibmm,giomm,gtk4,pangomm,cairomm,gdk-pixbuf,glib,libsigc
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                 DRAFT-gtkmm-4.0-ohos-display-adaptation
+trigger_tool:       meson-test|gtk_init|runtime|broadwayd
+phase:              testing,runtime
+error_signature:    Failed to open display|
+                    Gtk-WARNING.*Failed to open display|
+                    Fontconfig error: Cannot load default config file|
+                    gtk_init.*failed|
+                    gtk4-broadwayd.*Operation not permitted|
+                    exit status 1.*display
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:           3
+category:           platform|display|testing|binding|meson
+match_keywords:     gtkmm, gtk_init, gdk_rgba, Gdk::RGBA, Gdk::Rectangle,
+                    Failed to open display, FONTCONFIG_FILE, FONTCONFIG_PATH,
+                    fonts.conf, failing suite, --no-suite=failing,
+                    broadwayd, broadway, display server, GUI binding,
+                    test classification, headless, no display
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:         OHOS PC 无任何原生显示后端；gtkmm 4.0.0 tests/meson.build
+                    的「可执行测试」(execute=true) 与「GUI 测试」标志不等价——
+                    4 个 execute=true 测试中 3 个仍调用 gtk_init()（需显示服务
+                    器），无显示环境下 gtk_init() 失败、进程 exit 1；gtk_init()
+                    前置 fontconfig 在无 /etc/fonts/fonts.conf 的 OHOS 上也失败；
+                    提供显示服务的 gtk4-broadwayd 在 OHOS 因签名约束不可执行
+                    (EPERM)。这些是真实显示依赖而非库缺陷，需按显示依赖分类，
+                    不能写成库测试失败或强行 headless 假装通过。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:       1
+rec_approach:       display-test-classification-and-no-display-api-probes
+rec_description:    ① tests/meson.build 把真实调用 gtk_init()/建窗口的测试标记
+                    failing suite（suite:['failing']），CI/构建统一
+                    meson test --no-suite=failing 排除并记录真实原因（glibmm
+                    E215 同款）；② build() 运行 meson test 前注入 fontconfig
+                    包真实配置 FONTCONFIG_FILE/PATH（否则无显示 API 测试也因
+                    fonts.conf 缺失失败）；③ 新增不依赖显示器的公开 API 探针
+                    （Gdk::RGBA set_rgba_u/get_red_u、Gdk::Rectangle、sigc++-3.0
+                    连接）作为鸿蒙特有测试并单独统计；④ 显示依赖测试不可运行
+                    （broadwayd EPERM）时如实记录「需 Broadway 服务或真实显示
+                    环境」，禁止跳过填 100% 或将 EPERM 写成构建失败。
+rec_command:        |
+  # tests/meson.build（0003 补丁同款）
+  if ex[4]
+    if ex_name in ['bitset_iterator_test', 'object_move_test', 'tree_model_iterator_test']
+      test(ex_name, exe_file, suite: ['failing'])
+    else
+      test(ex_name, exe_file)
+    endif
+  endif
+  # conanfile.py build()（fontconfig 注入）
+  #   os.environ["FONTCONFIG_FILE"] = f"{fontconfig_pkg}/etc/fonts/fonts.conf"
+  #   os.environ["FONTCONFIG_PATH"] = f"{fontconfig_pkg}/etc/fonts"
+  # 测试运行：
+  #   meson test -v -C {build} --timeout-multiplier=16 --no-rebuild --no-suite=failing
+  #   测试统计口径：真实运行 / 显示依赖不可运行(failing 排除) / 构建但不执行
+rec_auto_fix:       true
+rec_impl:           recipe-options+patch(test/meson.build)
+
+# ═══ Layer 4: 验证层 (Verification) ═══
+verify_command:     |
+  # 上游 meson test（真实运行 1 / failing 排除 3 / 构建不执行 11）
+  meson test -v -C build-release --timeout-multiplier=16 --no-rebuild --no-suite=failing
+  # 输出：Ok: 1 / Fail: 0（gdk_rgba_test PASS；3 项 failing suite 已排除）
+  # 新增鸿蒙探针（test_package）
+  ./test_probe            # → gtkmm probe: checks=7 PASS (1/1)
+verify_evidence:    |
+  r3-evidence/build-and-test-results.log        exit=0  (Ok:1/Fail:0)
+  r3-evidence/conan-create-r21-transport.log    exit=0  (test_package PASS)
+  r4-evidence/w3-local-ci-r4-transport.log      exit=0  (JC_RESULT=pass, 100%)
+  # SHA-256（节选）：
+  # be53d7429595cb06fd5bcea72e22e628b0f14493885c10600b551ca7c6d48fd2  build-and-test-results.log
+  # 55eb907bba14367657a1a50d2f2363151e3d7717c908193f04905e6b1c8eeeed  conan-create-r21-transport.log
+  # dbea97e2d1808b5952fd8ad15086fa120840c7f9465ae3d72d9b1b268d633672  w3-local-ci-r4-transport.log
+# 适用边界 (Applicability Boundary)
+applies_to:         gtkmm/pangomm/cairomm 等 *mm 绑定层及类似 GUI 绑定库的
+                    测试分类与统计；上游已可用（Broadway-only）场景
+not_applies_to:     有真实显示服务器(X11/Wayland/DRM/XComponent+EGL)的环境；
+                    gtk_init() 可 headless 继续的上游；纯非 GUI 库；
+                    不得将 goaccess 基线文件(无关历史基线)归因于当前库
+display_server_prereq: 运行显示依赖测试需可执行且已签名的 gtk4-broadwayd（或等价
+                    显示服务）；OHOS 当前 broadwayd EPERM 不可执行 → 显示依赖
+                    测试只能分类排除并如实记录，待真实显示环境
+test_statistics_boundary: 真实运行(gdk_rgba PASS 1/4 可执行) / 显示依赖不可运行
+                    (3 项 failing 排除，附原因) / 构建不执行(11 项 execute=false)；
+                    探针测试单独记录 7 断言 PASS；禁止跳过填 100%、伪造通过率
+
+# --- 关联边界与查重说明 ---
+related_entries:    E336-draft-gtk-broadway-display-backend（构建层，无冲突：
+                    本稿管测试分类/验证边界，E336 管库构建配置）
+                    E077/E135（ELF 签名层，仅边界提及）
+dedup_diff:         既有条目覆盖「库构建配置层」与「二进制签名层」；本稿新增
+                    「GUI 绑定库在无显示服务器下的测试分类/验证/统计边界层」
+                    ——独立可复用，无查重冲突
+association:        gtkmm 4.0.0：patches/0003（tests/meson.build 分类）、
+                    conanfile.py::_inject_fontconfig_env + build() --no-suite=failing、
+                    test_package/test.cpp（7 断言无显示探针）
