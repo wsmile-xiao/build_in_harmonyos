@@ -63,3 +63,15 @@ conan-verify exif 0.6.22  # G0-G4 + L2/L4/L5 全部通过
 
 **编译结束**: 2026-08-17 04:14
 **最终状态**: published
+
+---
+
+## 2026-08-30 适配修复记录（PR #7215）
+
+| # | 修复项 | 说明 |
+|---|--------|------|
+| 1 | test_package/MANIFEST.yml upstream_tests 补全 9→12 | 原声明仅列 9/12 个上游测试脚本（漏 check-add-tags.sh、check-create-tags.sh、check-help.sh），按源码 test/Makefile.am 的 check_SCRIPTS 全量补全；2026-08-30 重新编译实测 make check **12/12 全部 PASS**（0 FAIL / 0 ERROR） |
+| 2 | conandata.yml 与制品仓已发布配方对齐 | 制品仓 exif/0.6.22 配方的 conandata.yml 为镜像 fallback 形态（gh-proxy.com 优先 + 官方 GitHub 源），git main 为官方单 URL 形态，两者不一致导致 CI L0j 版本占用检查（R37）拦截本 PR。按 L0j 判定口径（本地配方须与制品仓完全一致）将 conandata.yml 对齐为制品仓形态，sha256 不变 |
+
+> 说明：conandata.yml 对齐是**保持版本号 0.6.22 不递增**的必要条件（L0j：已发布版本配方有差异必须递增版本号；对齐后配方与制品仓一致，无需递增）。官方源仍在 URL 列表内（R39），镜像 fallback 为 CI 构建机制的一部分。
+
