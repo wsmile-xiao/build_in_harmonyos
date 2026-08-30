@@ -1,0 +1,94 @@
+# ═══ Draft knowledge entry — JC3 full-repo false positive from tracked unrelated tarball + reversible baseline-noise isolation ═══
+# Timestamp: 2026-08-29
+# Software: vtzero 1.2.0 (reusable for any library whose W3/finish local CI hits inherited junk)
+# Gate: finish Step5 W3 (build_and_test.sh -> ci/scripts/junk_check.sh, JC3)
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the fields below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Pair with doc/E0XX.md (same stem) — this file is the paired .md
+
+id: DRAFT-vtzero-1.2.0-baseline-noise-exemption
+severity: 2
+category: ci|jc|junk-check|baseline|isolation|atomicity
+trigger_tool: junk_check.sh|build_and_test.sh|ohc-run.py finish|conan
+phase: w3|finish|submit|pre-pr
+title: Reversibly isolate a tracked unrelated baseline tarball so local W3 JC3 passes without touching the baseline file
+
+error_signature: >
+  JC3.*tarball.*被跟踪|Junk Files: [1-9]|JC_RESULT=fail|junk_check failed|
+  archives/[^/]+/[^/]+/[^/]+\.tar\.gz|检查模式: full \([0-9]+ 个文件\)
+match_keywords: junk_check, JC3, tarball, full scan, git ls-files, baseline noise,
+  unrelated, w3 local ci, blocked by JC, Junk Files
+
+root_cause: >
+  junk_check.sh 在本地 W3（ci/conan/build_and_test.sh）中以三种模式选择检查范围：
+  prdiff（存在 pr.diff）> incremental（git diff origin/main...HEAD 非空）> full
+  （git ls-files 全量索引）。当当前库所有文件均为未跟踪新文件、HEAD 相对
+  origin/main 无提交差异时，回退到 full 整仓扫描，基于 git ls-files（索引）判断。
+  任何 main 历史已跟踪的无关 tarball（例如本案例 archives/g/goaccess/1.10.2/
+  ncurses-headers.tar.gz，提交 51eae6ae0e）都会被 JC3 命中，导致当前库的
+  finish/W3 被与自身无关的历史基线阻塞。仅把工作区文件 mv 走无法消除命中，
+  因为 full 模式读取的是索引而非工作区。
+affected_scope: >
+  所有在共享仓库工作树中做本地 finish/W3 验证、且分支尚未提交、main 上存在
+  已跟踪 tarball/二进制/状态文件基线的库适配任务；CI 远端 prdiff/incremental
+  模式不受影响（PR 只包含本库文件）。
+
+approach: reversible two-part baseline isolation (index + worktree)
+rec_priority: 1
+rec_approach: >
+  1) 隔离前记录基线文件四元组：绝对路径、权限/mode+size、Git 状态
+     （git ls-files --stage 的 blob/模式）、SHA-256（sha256sum）。
+  2) 可逆隔离两步：git rm --cached <基线文件>（从索引移除，使 full 模式
+     git ls-files 不再命中）+ mv <基线文件> <$HOME/tmp 备份>（工作区移走）。
+  3) 重跑完整 finish/W3（+ conan-verify + 测试），JC3 此时应通过
+     （文件数减一、Junk Files: 0）。
+  4) 恢复：mv <备份> <原路径> + git add -f <基线文件>（该文件若被
+     .gitignore 覆盖必须 -f 强制恢复索引），再核验路径/权限/大小/mtime/
+     Git 状态（git status --porcelain 为空、ls-files --stage blob 一致）/
+     SHA-256 均与隔离前一致。
+  5) 铁律：基线文件绝不进入当前库的 commit 或 PR 文件清单（git status、
+     git diff --cached、git diff origin/main...HEAD 三重核对）。
+rec_description: 用 git rm --cached + mv 可逆隔离无关历史基线 tarball，跑通本地 W3 JC3 后原样恢复并核验哈希/状态，基线文件不入库不入 PR
+rec_command: >
+  # 隔离前记录
+  readlink -f <F>; stat -c 'mode=%A (%a) size=%s (mtime=%y)' <F>;
+  git ls-files --stage -- <F>; sha256sum <F>
+  # 可逆隔离
+  git rm --cached -- <F> && mv <F> "$HOME/tmp/$(basename <F>).bak"
+  # 验证 JC 通过
+  bash ci/scripts/junk_check.sh "$PWD"        # 期望 Junk Files: 0 / JC_RESULT=pass
+  # 恢复 + 核验
+  mv "$HOME/tmp/$(basename <F>).bak" <F> && git add -f -- <F>
+  git status --porcelain -- <F>               # 期望空
+  git ls-files --stage -- <F>; sha256sum <F>  # 期望与隔离前一致
+rec_auto_fix: false
+rec_impl: manual
+
+solution: >
+  可逆两部隔离（索引+工作区）：git rm --cached 消除 full 模式索引命中，
+  mv 移走工作区实体；finish/W3（含 .ci-result.json 写入 exit_code=0）通过后
+  用 mv 还原并 git add -f 恢复索引，逐一核验路径/权限/size/mtime/Git 状态/
+  SHA-256 与隔离前完全一致。
+evidence: >
+  vtzero 1.2.0 r04（pc1-42）：隔离前 goaccess tarball 记录 path/mode 660/size
+  159275/git index 100644 b154073f94a4637ead69f8628bc1f2588acbe478/
+  sha256 bf58efee849debcfa56ce02f2a099aa25638de6bed90f356fc1018aac59d5e11；
+  隔离后 junk_check full 模式文件数 43770→43769，JC3 无命中，Junk Files: 0，
+  JC_RESULT=pass；finish W3 通过且 .ci-result.json exit_code=0；恢复后
+  path/mode/size/mtime/git status 0 变更/index blob/SHA-256 与隔离前逐项一致；
+  最终 commit b2733b3c50 与 PR #7141 文件清单仅含 archives/v/vtzero/1.2.0/
+  的 8 个文件，goaccess 基线未入库。
+recovery_condition: >
+  无需常规恢复条件（隔离完全可逆）；若恢复后 SHA-256/Git 状态与隔离前不一致，
+  用 git checkout origin/main -- <基线文件> 或 git add -f 重新对齐，并以
+  隔离前记录的四元组为准复核。
+verification_cmd: >
+  bash ci/scripts/junk_check.sh "$PWD" && git status --porcelain -- <F> &&
+  git ls-files --stage -- <F> && sha256sum <F>
+
+doc_file: DRAFT-vtzero-1.2.0-baseline-noise-exemption.md
+principles: P001 真实证据优先|基线噪音不可入库|可逆操作为先
