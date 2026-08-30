@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for lsof 4.99.0 — LiSt Open Files command-line tool.
+"""Conan recipe for lsof 4.99.0 -- LiSt Open Files command-line tool.
 
 lsof uses its own custom Configure script (not autotools) and a plain Makefile.
 The Configure script probes the system by compiling test programs to determine
@@ -13,7 +13,7 @@ Key adaptation for OHOS:
 - Configure script's Mksrc shebang patched to /data/service/hnp/bin/bash
 - dlsof.h patched to resolve sockaddr_storage redefinition (linux/socket.h
   vs sys/socket.h conflict)
-- LSOF_INCLUDE set to OHOS sysroot include path
+- LSOF_INCLUDE set to OHOS sysroot include path (discovered via clang -print-sysroot)
 - LINUX_CONF_CC set to Conan-provided clang
 """
 import os
@@ -53,7 +53,7 @@ class LsofConan(ConanFile):
     def build(self):
         # R32: Platform compatibility check
         if self.settings.os not in ("Linux", "OHOS"):
-            raise ConanInvalidConfiguration(
+            raise ConanDbalidConfiguration(
                 f"OS {self.settings.os} not supported, requires Linux or OHOS"
             )
 
@@ -64,28 +64,33 @@ class LsofConan(ConanFile):
 
         # Find OHOS sysroot include path from compiler
         # lsof's Configure script needs LSOF_INCLUDE to find system headers
+        lsof_include = "/usr/include"
         try:
-            sysroot = subprocess.check_output(
-                [cc, "-print-sysroot"], text=True, stderr=subprocess.DEVNULL
-            ).strip()
-            lsof_include = os.path.join(sysroot, "usr", "include") if sysroot else "/usr/include"
+            result = subprocess.run(
+                [cc, "-print-sysroot"],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                sysroot = result.stdout.strip()
+                candidate = os.path.join(sysroot, "usr", "include")
+                if os.path.isdir(candidate):
+                    lsof_include = candidate
         except Exception:
-            lsof_include = "/usr/include"
+            pass  # Fallback to /usr/include
 
         # R5: Use CONFIG_SHELL for Configure script (OHOS has no /bin/sh)
         config_shell = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
 
+        # Set env vars for lsof's Configure script
+        # LINUX_CONF_CC: compiler for probing system features
+        # LSOF_INCLUDE: include path for system headers
+        os.environ["LINUX_CONF_CC"] = cc
+        os.environ["LSOF_INCLUDE"] = lsof_include
+
         # Run lsof's custom Configure script
         # -n: skip AFS/customization/inventory checks (non-interactive)
         # linux: select Linux dialect
-        self.run(
-            f"{config_shell} ./Configure -n linux",
-            env={
-                "LINUX_CONF_CC": cc,
-                "LSOF_INCLUDE": lsof_include,
-                "CC": cc,
-            }
-        )
+        self.run(f"{config_shell} ./Configure -n linux")
 
         # R9: Always use -j1
         self.run(f"make CC={cc} -j1")
@@ -115,7 +120,7 @@ class LsofConan(ConanFile):
 
     def package_info(self):
         # lsof is a command-line tool, not a library
-        self.cpp_info.libs = []
+        self.cpp_info.lib = []
         self.cpp_info.includedirs = []
         self.cpp_info.libdirs = []
         self.cpp_info.bindirs = ["bin"]
