@@ -1,0 +1,92 @@
+#====================================================================
+# DRAFT-concurrentqueue-1.0.4-ohos-clang-only-upstream-makefile
+# 上游 Makefile recipe 硬编码 g++ + OHOS clang-only 环境透明 shim 验证
+# + header-only Conan 2.x 安装 include 布局与消费者 include 一致性
+#====================================================================
+
+id:                     DRAFT-concurrentqueue-1.0.4-ohos-clang-only-upstream-makefile
+trigger_tool:           make|clang++|conan create|conan create test_package|CMakeDeps|find_package
+phase:                  build|testing|configuration
+error_signature:        make: g\+\+: No such file or directory|Error 127|CXX.*ignored|recipe 硬编码 g\+\+|no rule to make target.*unittests|fatal error: 'moodycamel/concurrentqueue\.h' file not found|could not find.*concurrentqueue\.h
+
+severity:               2
+category:               ohos, toolchain, makefile, header-only, conan-recipe
+match_keywords:         g++, clang++, CXX, make, Makefile, recipe, shim, PATH, header-only,
+                        INTERFACE library, includedirs, CMakeDeps, moodycamel, concurrentqueue,
+                        clang-only, E095, E053
+title:                  OHOS clang-only 环境上游 Makefile recipe 硬编码 g++ 的诊断与作用域透明 shim 验证；header-only Conan 2.x 安装 include 布局与消费者 include 一致性
+
+root_cause:             |
+  1) 上游 Makefile 的 recipe 层直接写死 g++（g++ -c ... / g++ -std=c++11 ...），
+     未使用 $(CXX) 变量；make CXX=clang++ 覆盖与 export CXX 均不生效。
+  2) 环境仅有 OHOS LLVM/Clang 工具链（clang 15.0.4, aarch64-unknown-linux-ohos），
+     无 g++/gcc；make 报 "g++: No such file or directory" (Error 127)。
+  3) header-only 二次根因：上游 CMake INTERFACE library 安装头文件到
+     include/<pkg>/moodycamel/ 子目录，Conan 2.x 配方若沿用默认 includedirs=["include"]，
+     消费者 CMakeDeps target 的 include 路径与安装布局不一致，
+     #include "moodycamel/concurrentqueue.h" 无法解析。
+  与 E053/E095（configure/autotools 层编译器硬编码，方案 CXX=clang++/sed）不同：
+  本案例为纯 Makefile recipe 层且忽略 $(CXX)，传参路线不可用。
+
+affected_scope:         上游用纯 Makefile 构建、recipe 硬编码 g++ 且忽略 $(CXX) 的 C/C++ 库；
+                         以及安装时头文件带子目录的 header-only 库的 Conan 2.x 配方
+verification_cmd:       grep -nE "^\\s*g\\+\\+" <src>/build/makefile | head;
+                         grep -nE "\\$\\(CXX\\)|\\$\{CXX\}" <src>/build/makefile | head;
+                         which g++ clang++; clang++ --version;
+                         PATH=<shim>:$PATH make bin/unittests && ./bin/unittests
+                         # 期望: All tests passed. (45/45), exit 0
+
+rec_priority:           1
+rec_approach:           scoped-transparent-gpp-shim
+rec_description:        在专用临时 PATH 前缀目录建 g++->clang++、gcc->clang 符号链接，
+                         仅对该次 make 调用前置 PATH 使用（不写系统目录、不 export alias、
+                         不修改上游 Makefile）；同一 make 目标原样执行完成上游测试验证；
+                         报告如实声明以 clang++ 替代上游写死的 g++。
+                         header-only 配方 package_info 设 includedirs=["include/<pkg>"]，
+                         与上游安装目录对齐，保证消费者 #include "moodycamel/..." 可解析。
+rec_command:            mkdir -p $HOME/tmp/cq-verify/toolchain;
+                         ln -sf "$(command -v clang++)" $HOME/tmp/cq-verify/toolchain/g++;
+                         ln -sf "$(command -v clang)" $HOME/tmp/cq-verify/toolchain/gcc;
+                         cd <src>/build; PATH="$HOME/tmp/cq-verify/toolchain:$PATH" make bin/unittests; ./bin/unittests
+rec_auto_fix:           false
+rec_impl:               scoped-path-shim|conan-recipe-includedirs
+
+fallback_priority:      2
+fallback_approach:       set-cxx-var
+fallback_description:   若上游 makefile 的 recipe 使用 $(CXX)（可被变量覆盖），
+                         则直接 make CXX=clang++ 即可，无需 shim；先 grep recipe 确认引用方式再选路。
+fallback_command:       make CXX=clang++ CC=clang bin/unittests
+fallback_auto_fix:       true
+fallback_impl:           set-env-var
+
+forbid_1_pattern:       系统级 ln -s.*g\+\+.*clang\+\+|alias g\+\+=clang\+\+|export CXX 到全局 shell 配置
+forbid_1_reason:        E095 forbid_1 禁止创建污染构建环境的系统级编译器软链接/alias；
+                         本模式的 shim 必须显式限定在一次性验证的 PATH 前缀内，用完即弃
+forbid_1_consequence:   构建环境污染，影响其他软件编译器检测（E095 后果）
+forbid_2_pattern:       把 shim 下的 45/45 写成原生 g++ 结果|伪造日志/哈希|未声明替代编译器
+forbid_2_reason:        shim 验证语义与原生 g++ 不完全等价，报告必须如实声明编译器替代
+forbid_2_consequence:   测试证据失真，违反诚实边界
+forbid_3_pattern:       recipe 层问题误走 configure 层 sed|对 E053/E095 场景滥用本 shim
+forbid_3_reason:        三层边界（configure 硬编码 / makefile recipe 硬编码 / header-only 布局）
+                         各自适用不同方案，混用会掩盖真实根因
+forbid_3_consequence:   根因误判、知识条目污染
+
+principles:             P004, P006
+
+causes:                 []
+caused_by:              []
+similar_to:             [E053, E095, E035, E216-draft-lua51-runner-make-cmake-lld]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-concurrentqueue-1.0.4-ohos-clang-only-upstream-makefile.md
+last_updated:           2026-08-29
+source_event:           concurrentqueue/1.0.4 (pc3-36 R01): 上游 unittests 45/45 经 g++->clang++ 作用域 shim 验证通过；smoke test PASS；header-only Conan 2.x 配方 includedirs 对齐安装布局
+draft:                  true
+contributor_id:         36
+authors:                pc3-36
+source_pr:
+metrics_success_count:  45
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-08-29
