@@ -1,0 +1,81 @@
+#====================================================================
+# DRAFT-ohos-kf6-abs-dt-needed-relocatable-link -
+# KF6/KDE shared libraries published without DT_SONAME get machine-private
+# absolute Conan cache paths recorded in consumer DT_NEEDED via
+# imported-target-name linkage; fix at the CMake/recipe layer so the
+# produced artifacts stay relocatable (knewstuff 6.29.0 R03 / kpackage
+# 6.18.0.1 precedent)
+#====================================================================
+
+id:                     DRAFT-ohos-kf6-abs-dt-needed-relocatable-link
+trigger_tool:           conan|create|cmake|ld|readelf|patchelf|SONAME|DT_NEEDED|target_link_directories|IMPORTED_SONAME
+phase:                  build|link|packaging|runtime
+error_signature:        (readelf -d .*NEEDED.*(/storage/Users/currentUser/.conan2|\.cache/conan2|.*/p/.*/lib/libKF6|libKF6.*\.so)|Error loading shared library .*\.conan2|unable to find library -lKF6|undefined symbol.*KFormat|KFormat|KLocalizedString)
+
+severity:               3
+category:               ohos, packaging, linking, relocatable, conan
+match_keywords:         DT_NEEDED, absolute path, conan2, .cache/conan2, SONAME, no soname, target_link_directories, IMPORTED_SONAME, -l basename, relocatable, KF6, KDE Frameworks, shared library, static lib, INTERFACE, transitive, readelf, consumer, kpackage, knewstuff, Qt
+title:                  KF6/KDE 共享库无 DT_SONAME → 经目标名链接在 DT_NEEDED 嵌入机器私有绝对 Conan cache 路径；在 CMake/recipe 层修复并验证可重定位
+
+root_cause:             |
+  KDE Frameworks 6 (KF6) 依赖库（karchive/kconfig/kcoreaddons/ki18n/kpackage/
+  kwidgetsaddons/attica 等）发布时 ELF 无 DT_SONAME。当消费方 CMake 以“导入目标名”
+  （PUBLIC/INTERFACE 传播，或静态库 PUBLIC 链接）引用这些库时，CMake 向链接器传入
+  导入目标的绝对 IMPORTED_LOCATION（如 /storage/Users/currentUser/.conan2/p/<short>/p/lib/
+  libKF6CoreAddons.so）。因库无 SONAME，ld 把该机器私有绝对路径原样记入产物的
+  DT_NEEDED。该绝对路径只在构建机 conan home 布局下存在（.conan2 或发布机 .cache/conan2），
+  换机/换布局后动态加载器直接失败（Error loading shared library .../.conan2/...）。
+  现象同 kpackage/6.18.0 发布二进制缺陷：下游（knewstuff）运行时无法加载其任何消费者。
+  另：同项目内把“自有库”也按相对路径链接（如 ../../../bin/libKF6NewStuffCore.so）同样使
+  打包产物不可移植，需显式 SONAME。
+
+solution:               |
+  在 CMake/recipe 层修复，使产物 DT_NEEDED 全部为可重定位基名（SONAME）：
+  1) 给自有共享库设显式 SONAME：
+     target_link_options(<lib> PRIVATE "-Wl,-soname,libKF6NewStuffCore.so")
+  2) 对发布时无 SONAME 的 KF6 依赖改用“-l 裸名 + 私有 -L”链接，避免导入目标绝对路径：
+     target_link_directories(<target> PRIVATE ${KNEWSTUFF_DEP_LIB_DIRS})
+     target_link_libraries(<target> PRIVATE -lKF6CoreAddons -lKF6I18n ...)
+     其中 KNEWSTUFF_DEP_LIB_DIRS 由 conanfile.py generate() 注入各依赖包 lib 目录。
+  3) 静态库（如 knscore_jobs_static / knewstuff_qml_STATIC）同样把 KF6 依赖改 PRIVATE -l；
+     静态库的 PRIVATE 依赖会传播到最终链接，记录基名。
+  4) 不要在导出目标 INTERFACE 里放 KF6 依赖目标名（会把绝对路径传给消费方）；需要
+     include 时由消费方自身的依赖提供，或在 recipe 用
+     CMAKE_CXX_STANDARD_INCLUDE_DIRECTORIES 注入各依赖 include/KF6/<Module> 目录
+     （KF6 头位于 include/KF6/<Module>/，仅加 <pkg>/include 不够）。
+  5) 为消费方提供 -L（CMAKE_EXE/SHARED/MODULE_LINKER_FLAGS）使 -l 可解析；
+     MODULE（QtQuick 插件）需 CMAKE_MODULE_LINKER_FLAGS。
+  6) 全产物 readelf -d 扫描确认无绝对/相对路径 NEEDED；以真实消费方（test_package）
+     链接并运行验证可重定位消费。勿用 patchelf --replace-needed 后处理（旧版会破坏
+     .gnu.hash/.hash 符号解析，测试已实测失败）。
+
+verification:           |
+  knewstuff 6.29.0 R03：全产物 readelf -d 扫描 “NO absolute/relative NEEDED entries
+  in any artifact”；test_package 作为真实消费方完成 configure/compile/link/run
+  （ctest 1/1 + 直接运行 PASS）；打包 knewstuff-dialog6 --help 在 OHOS 运行时执行成功。
+  前后证据：archives/k/knewstuff/6.29.0/reports/absolute-path-r03-before.md 与
+  absolute-path-r03-after.md。补丁：patches/0004-ohos-relocatable-soname-link.patch
+  （4 文件：core/widgets/qtquick/dialog）。kpackage/6.18.0.1 同样以此手法修复并发布。
+
+scope:                  |
+  适用：KDE Frameworks 6 / KF6 / 其他发布时无 DT_SONAME 的共享库在 OHOS/Conan 环境的
+  打包；静态库 + INTERFACE 传递链接场景；QtQuick MODULE 插件。已知限制：
+  1) 不能修改已发布依赖库的 SONAME（只能从消费方链接层解决）；2) patchelf --replace-needed
+  在本环境（0.15.5）实测会破坏符号表解析，禁用；3) -l 裸名 INTERFACE 导出会让消费方
+  必须自带 -L（故推荐 INTERFACE 不导出 KF6 依赖，改为消费方按需 -l）。不适用于纯静态
+  链接或单二进制分发场景。
+
+evidence_paths:         |
+  /storage/Users/currentUser/junshi_liu/worktrees/pc1-32-knewstuff-6.29.0/archives/k/knewstuff/6.29.0/
+    reports/absolute-path-r03-before.md
+    reports/absolute-path-r03-after.md
+    reports/upstream-tests-ledger.md
+    patches/0004-ohos-relocatable-soname-link.patch
+  /storage/Users/currentUser/.conan2/p/b/knews0f0e33591aa70/p   (R03 打包产物)
+  kpackage/6.18.0.1 包内 libKF6Package.so（SONAME 修复先例）
+
+recovery:               |
+  出现绝对路径 DT_NEEDED 时：先 readelf -d 定位来源（静态库 PUBLIC / INTERFACE 目标名 /
+  直接目标名），按 solution 的 1)-5) 逐目标改 -l 裸名 + 私有 -L + 显式 SONAME；
+  再全产物 readelf 扫描 + 消费方运行验证。不要用 --build=missing 掩盖（禁止隐式重建
+  缺失依赖）。
