@@ -76,7 +76,14 @@ STATUS_ENUM = (
     # 协议 v0.8 §4.5 枚举补齐（2026-08-29 冻结；failed_build 为旧写法，
     # 输出时自动规范化为 build_failed——协议要求直接使用枚举）
     "build_failed", "bootstrap_failed", "timeout", "internal_error",
+    # 协议 §4.2 本源二值（budget_exhausted 等受控扩展 error_code 的 status 载体，
+    # v12.16: 平台动态预算 retry_context resume 已就绪，见 --error-code）
+    "failed",
 )
+
+# 受控扩展 error_code（协议 v0.8 §4.5 枚举之外，平台 0831 部署已识别的值；
+# 用于预算耗尽主动收尾——平台 retry_context resume 按此分流续跑不丢成果）
+EXT_ERROR_CODES = ("budget_exhausted",)
 
 # 协议枚举 → 我们的输出规范化（E11/E12: v0.8 起输出必须用协议枚举值）
 _PROTO_NORMALIZE = {"failed_build": "build_failed"}
@@ -328,11 +335,23 @@ def _validate(result: dict) -> list[str]:
                           "（其余场景应为 null——协议 §4.2）")
 
     # 非 success：error_type 必填且与 status 一致；error_detail 必填（≤500）
+    # 例外（v12.16）：带受控扩展 error_code 时 error_type=error_code
+    #（如 budget_exhausted，平台 retry_context 分流——协议 §4.5 枚举外受控值）
     if status != "success":
-        if result.get("error_type") != status:
+        ext_code = result.get("error_code")
+        if ext_code:
+            if result.get("error_type") != ext_code:
+                errors.append(f"error_code 扩展时 error_type 必须同值（当前: {result.get('error_type')}）")
+            if ext_code == "budget_exhausted" and not result.get("checkpoint_steps"):
+                errors.append("error_code=budget_exhausted 时 checkpoint_steps（已完成步骤数组）必填——平台 retry_context 以此续跑")
+        elif result.get("error_type") != status:
             errors.append(f"非 success 时 error_type 必填且等于 status（当前: {result.get('error_type')}）")
         if not result.get("error_detail"):
             errors.append(f"非 success 时 error_detail 必填")
+    if result.get("checkpoint_steps") is not None:
+        cps2 = result.get("checkpoint_steps")
+        if not isinstance(cps2, list) or not cps2:
+            errors.append("checkpoint_steps 必须是非空字符串数组")
     if len(result.get("error_detail", "") or "") > MAX_REASON:
         errors.append(f"error_detail 长度 > {MAX_REASON}")
 
@@ -405,6 +424,14 @@ def result_cli(argv: list[str]) -> int:
                         help="一句话结果摘要（强烈建议填写，≤500 字符；落到 JSON summary）")
     parser.add_argument("--checkpoint", action="append", default=None,
                         metavar="MSG", help="关键节点 message（可多次）")
+    parser.add_argument("--error-code", default=None, choices=EXT_ERROR_CODES,
+                        help="受控扩展 error_code（v12.16，协议 §4.5 枚举外、平台 0831 "
+                             "已识别）：设置时 error_type/error_code 均写该值。"
+                             "当前仅 budget_exhausted（预算耗尽主动收尾，"
+                             "平台 retry_context resume 按此续跑不丢成果）")
+    parser.add_argument("--checkpoint-steps", default=None, metavar="A,B,C",
+                        help="已完成步骤结构化数组（budget_exhausted 时必填——"
+                             "平台 retry_context resume 以此为续跑断点）")
     parser.add_argument("--agent", default=None)
     parser.add_argument("--out", "-o", default=None, metavar="PATH",
                         help="result.json 输出位置（目录或完整文件路径）。"
@@ -536,6 +563,11 @@ def result_cli(argv: list[str]) -> int:
         log_fail(f"语言判定字段（--detected-language/--ev-*）仅 status=env_unsupported "
                  f"允许携带，当前 status={final_status}（协议 §4.2 其余场景为 null）")
         return 2
+    # v12.16: 受控扩展 error_code 仅预算收尾（failed）场景允许
+    if args.error_code and final_status != "failed":
+        log_fail(f"--error-code 仅 status=failed（预算收尾）允许，"
+                 f"当前 status={final_status}")
+        return 2
     if args.status == "success" and not args.no_ci_verify:
         ci_state = _verify_ci_green(pr_number)
         if ci_state != "PASSED":
@@ -571,6 +603,15 @@ def result_cli(argv: list[str]) -> int:
     if final_status != "success":
         result["error_type"] = final_status
         result["error_detail"] = failed_reason
+    # v12.16: 受控扩展 error_code（如 budget_exhausted）——error_type/error_code
+    # 双写覆盖平台两代读法（$.error_type 归一化 / $.error_code retry_context 分流）
+    if args.error_code:
+        result["error_type"] = args.error_code
+        result["error_code"] = args.error_code
+    # v12.16: 结构化续跑断点（平台 retry_context resume 读取）
+    if args.checkpoint_steps:
+        result["checkpoint_steps"] = [s.strip() for s in
+                                      args.checkpoint_steps.split(",") if s.strip()]
     if missing_list:
         # --missing 展开为 missing_dependencies 数组（ECS main.py 从此字段读取）
         result["missing_dependencies"] = missing_list
@@ -706,13 +747,14 @@ def write_lifecycle_draft(software: str, version: str, milestone: str,
     if out_path is None:
         log_info("R46: 无可用输出位置（OHC_RESULT_OUT/$HOME 均不可用），跳过草稿")
         return False
-    # v12.15 预算兜底: 超预算 → 升级终态 timeout（不写草稿）
+    # v12.15/16 预算兜底: 超预算 → 升级终态 budget_exhausted（不写草稿）
     try:
-        from .budget import budget_status, write_timeout_result
+        from .budget import budget_status, write_budget_exhausted_result
         st = budget_status(software, version)
         if st.get("exhausted"):
-            log_warn("⏱ 预算已耗尽——草稿升级为终态 timeout（反馈 0831 P0-1）")
-            write_timeout_result(software, version, st)
+            log_warn("⏱ 预算已耗尽——草稿升级为终态 budget_exhausted"
+                     "（反馈 0831 修订版）")
+            write_budget_exhausted_result(software, version, st)
             return False
     except Exception:
         pass

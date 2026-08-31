@@ -1,7 +1,7 @@
 ---
 name: openharmony-compile-agent
 description: 鸿蒙PC原生应用/C/C++三方库适配编译Agent。当用户需要将开源C/C++库适配到HarmonyOS PC平台（arm64）、编写conanfile.py配方、执行conan构建发布流水线、排查CI构建失败时触发。覆盖源码获取、依赖解析、Conan配方编写、交叉编译、制品仓发布全流程。
-version: 12.15
+version: 12.16
 ---
 
 > **每次编译任务前先读本文档。** 骨架 + 要点，详解按需从 references/ 加载。
@@ -356,7 +356,7 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R45 | **SKILL_FEEDBACK 防丢失协议（骨架前置+事件累积+终态兜底+完成入仓，工具强制）**：feedback 不再是"流程走完才生成"——①PR 创建瞬间与 R42 result 草稿同步前置生成骨架（submit 内置，幂等）；②全流程事件（HANDOFF/CI红绿/pr_created/闭环）经 `_emit_submit_handoff` 单一咽喉自动累积进骨架的"过程事件时间线"——失败任务的经验不再丢失（旧流程失败分支从不生成 feedback=幸存者偏差）；③result 终态无论成败自动兜底补骨架并落 `feedback_pending` 字段（ECS 回收工作区前据此收割）；④反馈填完闭环（`feedback --resume` rc=0）时自动 commit+push 到任务分支随 PR 进 main（只推终稿不推占位稿——防 PR 转绿后再触发 CI 重跑；运行时状态存顶层 `.ohc/feedback-state/`（v12.10.1 迁出 archives 树，已 gitignore，永不触发 JC5）；OHC_FEEDBACK_PUSH=0 可关）。AI 仍需做的唯一动作：终局填 4 个建议占位符 + 效率/检视小节 |
 | R46 | **result.json 全程生命周期草稿（工具强制，0828 批量复盘新增）**：五挂点自动写草稿 init-archive(task_started)/conan-init(recipe_generated)/conan-verify(conan_verify_passed)/finish(w3_finish_started)/submit(pr_created)——任务前 80% 时长不再裸奔；草稿 `draft:true`+`milestone`，终态 `draft:false`（ECS 区分中断/终态）；输出位置 `--out`>`OHC_RESULT_OUT`>`$HOME/ohpcd-ai-worker-result.json` 兜底；终态不降级覆盖；手写/残留检测后覆盖。AI 照常走流程即可，草稿全自动 |
 | R47 | **语言预检前置（AI Worker 协议 v0.8 附录 D，2026-08-29 冻结；缺字段=PROTOCOL_VIOLATION 拒收）**：checkout 源码后、进入适配主流程**前**必须跑 `lang-preflight`（scripts/ohc/lang_detect.py）——判定优先级 manifest>构建系统>源码统计(≥70%)，边界规则：C/C++ 混编按主体判不算 mixed、pybind11 绑定包判 cpp、辅助脚本不算主体、manifest 与统计矛盾判 mixed；任务语言取 `--lang`/`OHPCD_LANG`（默认 cpp），**c↔cpp 视为兼容族不迁移**（conan 流程通吃）；不匹配 → 立即终态 `env_unsupported` + `detected_language`（§4.6 枚举，禁自由文本）+ `language_evidence` 三项（各≤200 字符），**禁止硬着头皮适配**（0828 报告 ~20% 任务浪费在非 C/C++ 源码上）；匹配 → 草稿 milestone=lang_checked，正常进主流程；**激励: 带 detected_language 上报 → 平台转 lang_hold 挂起等生态（非失败）——缺字段 = PROTOCOL_VIOLATION 记失败（反馈 0831 P1: 9 例违规源于旧版/手写绕过 CLI,终态上报必须走 result 命令）** |
-| R48 | **预算感知收尾（反馈 0831 P0-1：76 例 4h 耗尽被杀上报 unknown）**：预算上限/硬杀在平台侧（4h），SKILL 侧负责预算内主动收尾——三件套：①`budget-check` 命令（scripts/ohc/budget.py）：每个长阶段（W3 编译/CI 监控/重试循环）前调用，ok/near_limit(剩余<40min,即 R41 阈值,停止新编译收尾)/exhausted(exit 3,自动写终态 `timeout`——协议 §4.5 枚举,error_detail 含已完成里程碑摘要+续跑命令,平台按 retry_context 续跑非重头)三态；②R46 生命周期草稿内嵌兜底：每次写草稿前自动查预算,超限即升级终态 timeout（agent 忘调 budget-check 也有兜底,防被杀后停在 draft 被归一化 unknown）；③预算来源 `OHPCD_BUDGET_MINUTES` env（平台注入）>默认 240；任务起点=feedback 时间线首事件。registry 网络重试（反馈 0831 P0-2 附带）：依赖索引 git fetch 退避重试 3 次（10/30/60s）再判 unreachable——凹晨抖动 111 例误拒 |
+| R48 | **预算感知收尾（反馈 0831 修订版：边界双方已对齐）**：动态预算/硬杀在平台侧（attempt 递增 1.0/1.5/2.0×，上限 12h，随 dispatch 下发 `OHC_TASK_DEADLINE` ISO 绝对时刻 + `OHC_TASK_BUDGET_SEC` 秒数）；SKILL 唯一配合项 = 预算接近耗尽时主动收尾——三件套：①`budget-check` 命令（scripts/ohc/budget.py）每个长阶段（W3 编译/CI 监控/重试循环）前调用，三态：ok 继续作业 / near_limit（剩余<40min=R41 阈值：停止新编译新 PR，立即写 checkpoint 收尾）/ exhausted（exit 3，**自动写终态——status=failed + error_type/error_code 双写 `budget_exhausted`（受控扩展，协议 §4.5 枚举外、平台 0831 部署已识别，勿报 unknown）+ `checkpoint_steps` 结构化数组（已完成里程碑=续跑断点）+ error_detail 续跑命令**，平台 retry_context.resume 已就绪，续跑带已完成步骤不丢成果）；②R46 生命周期草稿写前自动查预算，超限直接升级上述终态（忘调 budget-check 也有兜底，防被杀后停在 draft:true 被平台归一化 unknown——76 例根因）；③预算判定源优先级 OHC_TASK_DEADLINE>OHC_TASK_BUDGET_SEC>OHPCD_BUDGET_MINUTES（旧自造）>240 兜底；起点=feedback 时间线**最后一条** task_started（reset-rerun 后新起点生效；`submit --resume` 入口自动刷新计时，续跑不被旧时间线误杀）。闭环：平台给足预算（12h 顶格）+ SKILL 主动收尾上报 → 大库任务要么预算内完成，要么断点续跑接力 |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -672,6 +672,8 @@ python3 $SKILL_ROOT/scripts/ohc-run.py result <软件名> <版本> --status <sta
 | `--missing-evidence` | `missing_evidence` | 依赖缺失证据留档 |
 | `--detected-language` | **`detected_language`**（§4.6 枚举） | 协议 v0.8 语言迁移分支；仅 env_unsupported 允许，其余状态强制 null |
 | `--ev-build-system` / `--ev-manifest` / `--ev-source-stats` | **`language_evidence`**（三项，各 ≤200 字符） | 协议 v0.8 判定证据，缺失=PROTOCOL_VIOLATION 拒收 |
+| `--error-code` | `budget_exhausted`（受控白名单） | v12.16 受控扩展：error_type/error_code 双写该值，仅 status=failed（预算收尾）允许 |
+| `--checkpoint-steps` | `A,B,C`（逗号分隔） | 已完成步骤结构化数组；budget_exhausted 时**必填**——平台 retry_context resume 断点 |
 | `--summary`（强烈建议） | `summary` | 一句话结果摘要 |
 | （非 success 自动生成） | `error_type` = status | 失败分类 |
 
@@ -930,7 +932,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py dispatch script zlib bzip2 openssl wget
 | `build` | 14 步编译驱动（含预分析+conan 配方生成+验证）★ 主入口 |
 | `init-build` | 下载/解压/骨架/环境/依赖解析 |
 | `lang-preflight` | ⭐R47 语言预检（协议 v0.8 附录 D）：三级判定+边界规则；不匹配自动写 env_unsupported+语言字段终态 |
-| `budget-check` | ⭐R48 预算检查：三态（ok/near_limit/exhausted），耗尽自动写 timeout 终态（里程碑+续跑命令） |
+| `budget-check` | ⭐R48 预算检查（读 OHC_TASK_DEADLINE/OHC_TASK_BUDGET_SEC）：三态，耗尽自动写 budget_exhausted 终态（checkpoint_steps 断点+续跑命令） |
 | `pre-analysis` | ⭐ 鸿蒙PC平台适配预分析（图形/音视频/系统集成/平台代码扫描） |
 | `conan-init` | 生成 conanfile.py + conandata.yml + test_package/ ⭐ |
 | `conan-verify` | conan create + G0-G4 + L2/L4/L5 + 知识图谱(R30) + 草稿(R31) ⭐ |
@@ -1023,3 +1025,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.13 — 2026-08-29 — 协议 v0.8 附录 D 对齐（AI_WORKER_PROTOCOL_v0.8.md 2026-08-29 冻结，无兼容层，缺语言字段 = PROTOCOL_VIOLATION 拒收）。0828 报告 ~20% 任务浪费在非 C/C++ 源码上（E/F/J 类 123 例）。落地四项：①新工具 lang-preflight（scripts/ohc/lang_detect.py）：checkout 后、适配主流程前强制预检——三级判定 manifest>构建系统>源码统计(≥70%) + 边界规则（C/C++ 混编按主体判不算 mixed / pybind11 绑定包判 cpp / 辅助脚本不算主体 / manifest 与统计矛盾判 mixed），不匹配自动写终态 env_unsupported + detected_language + language_evidence，匹配写 lang_checked 草稿；c↔cpp 兼容族不迁移（conan 流程通吃）；②result 新增 --detected-language + --ev-build-system/--ev-manifest/--ev-source-stats（仅 env_unsupported 允许，其余状态 CLI 层早拒 + 校验器双闸）；③校验器协议规则 4/5：detected_language 必须 §4.6 枚举（禁自由文本），language_evidence 三项必填各 ≤200 字符；④status 枚举对齐协议 §4.5：新增 bootstrap_failed/timeout/internal_error，failed_build 旧写法自动规范化为 build_failed（输出协议枚举）。测试 25/25（判定 11 场景 + CLI 匹配/mismatch + 校验规则），回归 v12.10/v12.11/v12.12 全绿。
 *SKILL.md v12.14 — 2026-08-29 — 平台反馈 0829（SKILL_FEEDBACK_0829.md）四条全落地。①反馈1 CI 修复循环闭环：两处 CI FAILED HANDOFF 的『push（CI 自动重跑）』错误指引修正（CI 是评论触发型，push 不触发重跑——21/41 pr_open 卡 CI failed、19 重试仍失败的直接机制）；新增 .ci-repair-state.json 轮次计数（第 N/2 轮机器可数），<2 轮给修复+resume 续环指引，≥2 轮切换停损（上报 build_failed + 人工介入）；CI 转绿自动清零；两处 CI 失败分支自动写 loop_pending 草稿（含轮次+续环命令，worker 可 sweep dispatch）。②反馈2 检视闭环：两处 review_closure_incomplete HANDOFF 同步写 loop_pending 草稿（反馈 0829-2: 完成前必须逐条处理，handle-review-opinion 逐条 accept/reject）。③反馈3 pr_url 统一 /merge_requests/N（submission.py 两处 + result_report.py fallback，共 3 处，新任务源头即规范）。④反馈4 push 后状态刷新：CI 由 resume 自动评论 /rebuild 重触发；AI 检视重跑机制待平台 webhook 联动（分工对接中，SKILL 侧不发明命令）。测试 16/16 + 回归 v12.12(5)/v12.13(25) 全绿。
 *SKILL.md v12.15 — 2026-08-31 — SKILL 优化反馈 0831 落地。P0-1 预算耗尽（76 例 unknown）三件套：①新命令 budget-check（scripts/ohc/budget.py）三态检查，exhausted 自动写终态 timeout（协议 §4.5 枚举；error_detail 含已完成里程碑摘要 + finish --resume/reset-rerun 续跑命令，平台按 retry_context 续跑）；②R46 生命周期草稿写前自动查预算，超限升级终态 timeout（防 4h 被杀后停在 draft:true 被平台归一化 unknown——76 例根因）；③预算 OHPCD_BUDGET_MINUTES env>默认 240，起点=feedback 时间线首事件。动态预算（小4h/中6h/大8h）上限在平台侧——SKILL 侧仅预算内主动收尾，无法延长硬杀。P0-2 registry 重试：依赖索引 git fetch 退避重试 3 次（10/30/60s）再判 unreachable（凹晨抖动 111 例误拒）；opendesk 模板步骤（n_96yik）在 agent 平台侧非 SKILL 管辖——瞬时错误 retry 上报建议转 worker/模板侧。P1 语言字段（9 例违规）：v12.13 校验硬闸已闭环，违规源于旧版部署/手写绕过 CLI——R47 补 lang_hold激励说明（带 detected_language → 挂起等生态非失败），终态上报必须走 result 命令。测试 17/17。
+*SKILL.md v12.16 — 2026-08-31 — SKILL 优化反馈 0831（修订版：P0-1 归因修正，边界双方对齐）。平台侧已实施动态预算（attempt 递增 1.0/1.5/2.0× 上限 12h，dispatch 下发 OHC_TASK_DEADLINE + OHC_TASK_BUDGET_SEC）；SKILL 唯一配合项 = 预算接近耗尽时主动收尾。①budget 判定源切换到平台真实 env（deadline 绝对时刻优先 > budget_sec > 旧 OHPCD_BUDGET_MINUTES > 240 兜底）；②耗尽上报格式对齐平台 retry_context.resume（已就绪）：status=failed + error_type/error_code 双写 budget_exhausted（勿报 unknown）+ checkpoint_steps 结构化数组（已完成里程碑= 续跑断点不丢成果）+ error_detail 续跑命令；③result 命令新参 --error-code（受控白名单 budget_exhausted，仅 failed 场景）/ --checkpoint-steps，校验器强制 budget_exhausted 必带 checkpoint_steps；④resume/reset-rerun 计时刷新（起点取最后一条 task_started + submit --resume 入口刷新事件，防旧时间线误杀续跑）。闭环：平台给足预算 + SKILL 主动收尾上报 → 大库任务要么预算内完成，要么断点续跑接力。测试 24/24。

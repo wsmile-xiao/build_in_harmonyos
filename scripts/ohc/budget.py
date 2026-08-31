@@ -4,21 +4,22 @@
 问题：agent 跑满平台 4h 硬顶被 SIGKILL——result.json 停在 draft:true 草稿
 （平台视为非终态）或根本没写 → 归一化为 unknown，成果不可见、不可续跑。
 
-三件套（分工边界：预算上限/硬杀在平台侧；SKILL 侧负责"预算内主动收尾"）：
+三件套（反馈 0831 修订版边界对齐：动态预算/硬杀在平台侧——attempt 递增
+1.0/1.5/2.0× 上限 12h，随 dispatch 下发 OHC_TASK_DEADLINE +
+OHC_TASK_BUDGET_SEC；SKILL 侧唯一配合项 = 预算接近耗尽时主动收尾）：
   1. budget-check 命令——agent 在每个长阶段（W3 编译/CI 监控/重试循环）前调用：
        ok          exit 0   继续当前工作
        near_limit  exit 0   剩余 < 40min（R41）：停止提交新编译，收尾写 checkpoint
-       exhausted   exit 3   预算已耗尽：本工具自动写终态 timeout result
-                            （含已完成里程碑摘要 + 续跑命令），agent 应立即停止
+       exhausted   exit 3   预算已耗尽：本工具自动写终态 result——
+                            status=failed + error_code=budget_exhausted
+                            （受控扩展，勿报 unknown）+ checkpoint_steps
+                            结构化数组 + 续跑命令，平台 retry_context.resume
+                            已就绪，续跑带已完成步骤不丢成果
   2. write_lifecycle_draft 内嵌兜底——每个 R46 里程碑写草稿前自动检查，
-     超预算即升级为终态 timeout（即使 agent 忘调 budget-check 也有兜底）
-  3. timeout 终态内容——status=timeout（协议 §4.5 枚举），error_detail 带
-     已完成 checkpoint_steps + 续跑命令（reset-rerun / submit --resume），
-     平台按 retry_context 续跑而非重新从头
-
-预算来源：OHPCD_BUDGET_MINUTES env（平台注入）> 默认 240（4h 硬顶）。
-任务起点：feedback 时间线首事件 ts（init-archive 即写入）；缺失时回退
-result.json 草稿 mtime。
+     超预算即升级为终态 budget_exhausted（即使 agent 忘调 budget-check 也有兜底）
+  3. 预算来源优先级: OHC_TASK_DEADLINE（绝对时刻，最准）>
+     OHC_TASK_BUDGET_SEC（秒）> OHPCD_BUDGET_MINUTES（旧自造）> 240 兜底。
+     任务起点：feedback 时间线最后一条 task_started（重跑/resume 刷新）。
 """
 from __future__ import annotations
 
@@ -29,14 +30,38 @@ from pathlib import Path
 
 from .utils import find_project_dir, log_fail, log_info, log_ok, log_warn
 
-DEFAULT_BUDGET_MINUTES = 240  # 平台 4h 硬顶（反馈 0831: 76 例跑满被杀）
+DEFAULT_BUDGET_MINUTES = 240  # 平台旧基准（动态预算下发前的兜底）
 SAFETY_MARGIN_MINUTES = 40    # R41: 剩余 < 40min 停止提交新编译
 
+# v12.16（反馈 0831 修订版）: 平台动态预算已实施（attempt 递增 1.0/1.5/2.0×，
+# 上限 12h），随 dispatch 下发 OHC_TASK_DEADLINE（ISO 绝对时刻）+
+# OHC_TASK_BUDGET_SEC（秒数）——优先于旧自造 OHPCD_BUDGET_MINUTES。
+ERROR_CODE = "budget_exhausted"  # 平台 retry_context resume 分流键（勿报 unknown）
+
 RESUME_HINT = ("续跑: python3 scripts/ohc-run.py finish {sw} {ver} --resume "
-               "（已登记的 checkpoints 不丢）或 reset-rerun 重开")
+               "（retry_context.resume 已就绪，已完成 checkpoint_steps 不丢）")
+
+
+def _deadline() -> datetime | None:
+    """OHC_TASK_DEADLINE（ISO 含时区）→ 绝对截止时刻（最准，不受起点影响）。"""
+    raw = os.environ.get("OHC_TASK_DEADLINE", "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        return None
 
 
 def get_budget_minutes() -> int:
+    # OHC_TASK_BUDGET_SEC（平台下发，秒）> OHPCD_BUDGET_MINUTES > 240
+    raw = os.environ.get("OHC_TASK_BUDGET_SEC", "").strip()
+    try:
+        v = int(raw)
+        if v > 0:
+            return v // 60
+    except ValueError:
+        pass
     raw = os.environ.get("OHPCD_BUDGET_MINUTES", "").strip()
     try:
         v = int(raw)
@@ -100,9 +125,21 @@ def _milestones(ver_dir: Path) -> list[str]:
 
 
 def budget_status(software: str, version: str, project_dir=None) -> dict:
-    st = {"started": None, "elapsed_min": 0.0, "budget_min": get_budget_minutes(),
+    st = {"started": None, "elapsed_min": None, "budget_min": get_budget_minutes(),
           "remaining_min": None, "exhausted": False, "near_limit": False,
-          "milestones": []}
+          "milestones": [], "budget_source": "fallback"}
+    # 优先级 1: OHC_TASK_DEADLINE 绝对时刻（平台动态预算下发，最准）
+    dl = _deadline()
+    if dl is not None:
+        st["budget_source"] = "deadline"
+        remaining = (dl - datetime.now(dl.tzinfo)).total_seconds() / 60.0
+        st["remaining_min"] = round(remaining, 1)
+        if st["budget_min"]:
+            st["elapsed_min"] = round(st["budget_min"] - remaining, 1)
+        st["exhausted"] = remaining <= 0
+        st["near_limit"] = 0 < remaining <= SAFETY_MARGIN_MINUTES
+        return st
+    # 优先级 2/3: 总量减已耗（起点 = 最后一条 task_started）
     ver_dir = _ver_dir(software, version, project_dir)
     if ver_dir is None:
         st["note"] = "ver_dir 不存在（任务未 init）——按 ok 处理"
@@ -112,6 +149,11 @@ def budget_status(software: str, version: str, project_dir=None) -> dict:
     if started is None:
         st["note"] = "无任务起点记录——按 ok 处理"
         return st
+    if os.environ.get("OHC_TASK_BUDGET_SEC", "").strip():
+        st["budget_source"] = "budget_sec"
+    else:
+        st["budget_source"] = "minutes_env" \
+            if os.environ.get("OHPCD_BUDGET_MINUTES", "").strip() else "fallback"
     st["started"] = started.isoformat(timespec="seconds")
     elapsed = (datetime.now() - started).total_seconds() / 60.0
     st["elapsed_min"] = round(elapsed, 1)
@@ -121,23 +163,32 @@ def budget_status(software: str, version: str, project_dir=None) -> dict:
     return st
 
 
-def write_timeout_result(software: str, version: str,
-                         status: dict | None = None,
-                         project_dir=None) -> int:
-    """写终态 timeout（协议 §4.5）：保成果 + 续跑命令，供平台 retry_context。"""
+def write_budget_exhausted_result(software: str, version: str,
+                                  status: dict | None = None,
+                                  project_dir=None) -> int:
+    """预算耗尽主动收尾（反馈 0831 修订版对齐，勿报 unknown）：
+    status=failed + error_type/error_code=budget_exhausted（受控扩展，
+    平台 retry_context resume 分流键）+ checkpoint_steps 结构化数组
+    （已完成里程碑 = 续跑断点，不丢成果）+ error_detail 人类可读摘要。
+    """
     st = status or budget_status(software, version, project_dir)
     ms = st.get("milestones") or []
     ms_text = "、".join(ms) if ms else "无（早期耗尽）"
-    reason = (f"预算耗尽（{st.get('budget_min')}min 上限，已用 "
-              f"{st.get('elapsed_min')}min）——非任务失败。已完成里程碑: {ms_text}。"
-              f"{RESUME_HINT.format(sw=software, ver=version)}")
+    used = st.get("elapsed_min")
+    used_text = f"{used}min" if used is not None else "未知（按 deadline 判定）"
+    reason = (f"预算耗尽（上限 {st.get('budget_min')}min，已用 {used_text}，"
+              f"判定源 {st.get('budget_source')}）——非任务失败，断点已存 "
+              f"checkpoint_steps。{RESUME_HINT.format(sw=software, ver=version)}")
     from .result_report import result_cli
-    rc = result_cli([software, version, "--status", "timeout",
+    rc = result_cli([software, version, "--status", "failed",
+                     "--error-code", ERROR_CODE,
+                     "--checkpoint-steps", ",".join(ms) if ms else "task_started",
                      "--failed-reason", reason, "--force"])
     if rc == 0:
-        log_ok("已写终态 timeout（含里程碑摘要 + 续跑命令）")
+        log_ok(f"已写终态 failed/error_code={ERROR_CODE}"
+               f"（checkpoint_steps={len(ms)} 项 + 续跑命令）")
     else:
-        log_fail(f"timeout 终态写入失败 rc={rc}")
+        log_fail(f"{ERROR_CODE} 终态写入失败 rc={rc}")
     return rc
 
 
@@ -157,13 +208,14 @@ def budget_check_cli(argv=None) -> int:
 
     if st.get("exhausted"):
         log_fail(f"⏱ 预算已耗尽（剩余 {st.get('remaining_min')}min）——立即收尾")
-        rc = write_timeout_result(args.software, args.version, st,
-                                  args.project_dir)
+        rc = write_budget_exhausted_result(args.software, args.version, st,
+                                           args.project_dir)
         return 3 if rc == 0 else rc
     if st.get("near_limit"):
         log_warn(f"⏱ 剩余 {st.get('remaining_min')}min ≤ {SAFETY_MARGIN_MINUTES}min"
-                 f"（R41）——停止提交新编译/新 PR，优先收尾: 写 checkpoint + 必要时"
-                 f" result --status partial（loop_pending 由 submit 处理）")
+                 f"（R41）——停止提交新编译/新 PR，立即收尾: 写 checkpoint；"
+                 f"预算耗尽时本命令自动写 budget_exhausted 终态"
+                 f"（checkpoint_steps + resume，勿报 unknown）")
         return 0
     log_ok(f"预算充足（剩余 {st.get('remaining_min')}min / {st.get('budget_min')}min）")
     return 0
