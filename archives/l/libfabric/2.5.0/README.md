@@ -108,7 +108,7 @@ make install
 
 2. **TMPDIR配置**: configure补丁硬编码了`/storage/Users/currentUser/tmp`作为TMPDIR回退值,因为HMDFS上/tmp不可写。根据目标部署环境可能需要调整此路径。
 
-3. **make check跳过**: 跨平台编译产物无法在x86_64宿主机上运行OHOS目标平台测试。建议在OHOS实际设备上验证。
+3. **make check通过**: 本机为 aarch64 Linux（musl libc），可直接运行交叉编译产物（ELF arm64, dynamic /lib/ld-musl-aarch64.so.1）。`make check` 1/1 PASS，fi_info 正常输出 16 个 provider 信息。fabtests 是独立仓库不在 tarball 中，不纳入。
 
 4. **monitor provider不可用**: 已禁用,OHOS平台文件系统监控功能不可用。
 
