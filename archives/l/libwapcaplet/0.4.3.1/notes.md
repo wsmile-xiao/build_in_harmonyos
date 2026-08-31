@@ -1,4 +1,4 @@
-# libwapcaplet 0.4.3 适配笔记
+# libwapcaplet 0.4.3.1 适配笔记
 
 ## 编译环境
 - 构建系统: custom（NetSurf Makefile → standalone Makefile 替换）
@@ -55,7 +55,7 @@ PASS: lwc_intern_substring('hello',1,3) = 'ell' (len=3)
 | 文件 | 说明 |
 |------|------|
 | libwapcaplet.a | 静态库 (6562 bytes, ELF64 aarch64) |
-| libwapcaplet.pc | pkg-config 文件 (version 0.4.3) |
+| libwapcaplet.pc | pkg-config 文件 (version 0.4.3.1) |
 | libwapcaplet/libwapcaplet.h | 头文件 |
 
 ## 注意事项
@@ -66,5 +66,5 @@ PASS: lwc_intern_substring('hello',1,3) = 'ell' (len=3)
 - 测试需使用 GNU ld 替代 OHOS SDK 的 lld（lld 有 libxml2 依赖问题）
 ---
 
-**编译结束**: 2026-06-06 17:16
-**最终状态**: published
+**编译结束**: 2026-08-27 00:26
+**最终状态**: built
