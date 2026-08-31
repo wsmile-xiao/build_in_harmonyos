@@ -1,0 +1,74 @@
+#====================================================================
+# DRAFT-hogweed-3.9.1-kv1 — OHOS autotools 平台识别+HMDFS umask 适配组合与 Conan 依赖缓存恢复
+# 触发事件: hogweed 3.9.1 HarmonyOS PC 适配（R02 本地适配闭环）
+#====================================================================
+
+id:                     DRAFT-hogweed-3.9.1-kv1
+trigger_tool:           configure|config.sub|config.guess|config.status|conan
+phase:                  configuration|dependency
+error_signature:        Invalid configuration .*ohos.* not recognized|unable to guess system type|can't create .*conf.*Permission denied|Running simple test program failed|GMP_NUMB_BITS|Cannot load recipe|conanfile.py not found
+
+severity:               2
+category:               toolchain|platform|autotools|conan|hmdfs
+match_keywords:         config.sub, config.guess, ohos, HarmonyOS, triplet, autotools,
+                         umask 077, umask 022, HMDFS, Permission denied, mktemp,
+                         GMP_NUMB_BITS, gmp, conan download, conan remove, local cache,
+                         conanfile.py not found, LD_LIBRARY_PATH, rpath, conftest
+title:                  OHOS autotools 四件套适配（config.sub/umask/GMP 探测/conan 缓存恢复）
+
+root_cause: >
+    (1) 随源码发布的 config.sub（2023-01-01 旧版）不识别 `ohos` 操作系统，
+    OHOS 适配版 conan 生成的 `aarch64-linux-ohos` triplet 被拒（OS `ohos` not recognized）；
+    (2) config.guess 在 HMDFS 上 mktemp 子目录（umask 077 + setgid）内无法创建 dummy.c
+    （Permission denied）→ unable to guess system type；
+    (3) config.status/configure 以 `(umask 077 && mktemp -d "./confXXXXXX")` 建临时目录，
+    HMDFS setgid+UID 映射使 0700 目录 owner 非当前进程，subs1.awk 写入失败；
+    (4) nettle 配置期 `ac_fn_c_compute_int` 求 GMP_NUMB_BITS 需编译并运行 conftest，
+    libgmp.so 不在运行期搜索路径 → "Running simple test program failed" → configure 中止；
+    (5) conan 本地缓存 recipe 目录结构损坏（缺 e/conanfile.py 但 metadata 声称已缓存）
+    → conan install 报 "Cannot load recipe ... conanfile.py not found"，
+    误判为依赖不可消费。
+
+fix_approach: |
+    (1) conandata patches 打 config.sub 补丁：接受 `aarch64-*-ohos*` 提前退出
+    （与 a52dec 0001-config-sub-aarch64.patch 同法）；
+    (2) 配方 generate() 对 OHOS 显式传 --build/--host=aarch64-unknown-linux-gnu
+    绕过 config.guess（HMDFS 探测必然失败，显式 triple 与 OHOS 版 conan triplet 映射一致）；
+    (3) 打 configure/config.status 补丁：`(umask 077 &&` → `(umask 022 &&`
+    （gnutls/a52dec 历史先例；HMDFS 下 022 保证组可写）；
+    (4) 配方 generate() 将 gmp cpp_info libdirs 前置到 LDFLAGS（-L + -Wl,-rpath）并
+    prepend LD_LIBRARY_PATH，使 configure 的 GMP_NUMB_BITS conftest 运行期可加载 libgmp.so；
+    (5) 依赖缓存损坏恢复流程：`conan remove <ref> -c`（清损坏项）→
+    `conan download <ref> -r=ohpcd --only-recipe`（重下配方）→ 验证 e/conanfile.py 存在 →
+    重新 `conan install --requires=<ref>` 确认 recipe+binary 可消费；不得用 --build=missing 掩盖。
+
+affected_software: |
+    hogweed (GNU Nettle),
+    任何在 OHOS/HarmonyOS 上构建的 autotools 项目（含旧 config.sub / 依赖 GMP 或其它
+    需运行期探测的 conan 包）
+platform:               OHOS 6.0 arm64 (HongMeng Kernel), clang 15.0.4, conan 2.29.1 (ohpcd)
+verification: |
+    R02 实测：打 config.sub+umask 补丁并传入 gmp 依赖路径后
+    conan create hogweed/3.9.1 EXIT=0（GMP 检测 yes，libhogweed.a+libnettle.a 构建，
+    test_package 'hogweed rsa API assertion: 1 passed'）；
+    make check EXIT=0（119 PASS/0 FAIL/1 预期 skip）；
+    harmonicos_specific_test（rsa keygen=1024/sign_tr/verify/tamper-reject）EXIT=0；
+    conan-verify G0-G4/L2/L4/L5 PASS；finish EXIT=0（status=built，.ci-result.json 写入）；
+    gmp 缓存移除后重下+conan install EXIT=0（Downloaded package revision 56b2547c...）。
+conan_package:          gmp/6.3.0.1
+applicable_to:          所有在 OHOS 上编译含旧 config.sub/依赖 GMP 或共享库的 autotools 项目；
+                        任何遇到 conan 本地缓存损坏的依赖消费场景
+not_applicable_to: |
+    真机 ext4/其他 POSIX 文件系统（umask 077 正常，不适用 umask 补丁）；
+    CI worker 无 HMDFS 时 config.guess 可正常工作（无需显式 triple 绕行）；
+    依赖本身未发布到制品仓的真实缺失（必须先发布依赖，不得用缓存恢复代替 R36 发布）
+dedup_keywords:         config.sub ohos; umask 077 HMDFS config.status; GMP_NUMB_BITS;
+                        conan cache corrupt; LD_LIBRARY_PATH conftest
+dedup_conclusion: |
+    查重范围 knowledge/{doc,graph,drafts,index.tsv}：
+    config.sub/ohos 要素已由 E007(config.guess/config.sub 补丁)、E072(config.sub ohos 不识别)、
+    E122(linux-ohos kernel validation)、E205/E268(OHOS triplet) 覆盖（本稿为组合复用+配方级
+    落地）；umask 077 已由 E011/E136/E206/E223 覆盖（本稿补充 conan 构建上下文与配方补丁形态）；
+    GMP_NUMB_BITS conftest 运行期加载与 conan 本地缓存损坏恢复（含 e/ 结构校验与
+    remove→download→install 恢复序列）在现有 doc/graph/drafts 中未见专条，为本稿新增价值核心。
+    drafts 中无同名/同 stem 草稿，不占用正式 E 编号。
