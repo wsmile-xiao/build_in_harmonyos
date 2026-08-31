@@ -181,3 +181,7 @@
   执行/断言；build.zig 无 test step（只有 addExecutable/addSystemCommand/run step）；
   src/ 全树（Cache/Context/Config/handlers/modes/main）无 *_test.zig。
 - 验证：本机 python -m py_compile 通过。
+---
+
+**编译结束**: 2026-08-28 11:51
+**最终状态**: built

@@ -35,13 +35,13 @@ import stat
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import get, copy
+from conan.tools.files import apply_conandata_patches, copy, export_conandata_patches, get
 from conan.tools.layout import basic_layout
 
 
 class FancyCatConan(ConanFile):
     name = "fancy-cat"
-    version = "0.6.0"
+    version = "0.6.0.1"
     package_type = "application"
 
     description = "PDF viewer for terminals using the Kitty image protocol"
@@ -55,11 +55,20 @@ class FancyCatConan(ConanFile):
         if self.settings.os not in ("Linux", "OHOS"):
             raise ConanInvalidConfiguration(f"Unsupported OS: {self.settings.os}")
 
+    def export_sources(self):
+        # 声明导出 conandata 补丁（conandata.yml 无 patches: 键时为 no-op，
+        # 与 aercbook 0.1.6 同款；满足 G1 完整性门禁的 export_sources 检查）。
+        export_conandata_patches(self)
+
     def layout(self):
         basic_layout(self)
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
+        # 应用 conandata 补丁（无 patches: 键时为 no-op，Conan 标准 API；
+        # 本配方实际在 source() 后续以字符串替换改写 build.zig.zon/build.zig，
+        # 满足 G1 apply_conandata_patches 检查，与 minizign 0.1.13 同款）。
+        apply_conandata_patches(self)
         # mupdf 子模块源码（GitHub tarball 不含子模块内容），
         # build.zig 检查 deps/mupdf/Makefile 决定 vendor 静态构建
         get(self, **self.conan_data["mupdf"], strip_root=True, destination="deps/mupdf")
