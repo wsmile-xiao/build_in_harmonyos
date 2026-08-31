@@ -1,0 +1,3 @@
+.code
+umonitor someSym
+end
