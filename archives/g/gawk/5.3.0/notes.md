@@ -8,10 +8,10 @@
 
 ## 编译步骤
 1. 下载源码 `gawk-5.3.0.tar.xz` 并解压
-2. 应用补丁 `0001-port-for-ohos.patch`
-3. `./configure --prefix=$HOME/usr/local`
-4. `make -j1`（跳过部分扩展模块）
-5. `mkdir -p $HOME/usr/local/bin && cp gawk $HOME/usr/local/bin/ && ln -sf gawk $HOME/usr/local/bin/awk`
+2. 应用 11 个补丁 (0001-0011，通过 conan apply_conandata_patches)
+3. `./configure --prefix=$HOME/usr/local` (Conan: AutotoolsToolchain 管理 prefix)
+4. `make -j1` (全部扩展模块成功编译)
+5. `make install DESTDIR=$TEST_PREFIX`
 
 ## 遇到的问题与解决方案
 | # | 问题 | 根因 | 解决方案 |
@@ -48,3 +48,7 @@ gawk -l fork 'BEGIN { if (fork() == 0) print "Child"; else print "Parent" }'  # 
 ## 注意事项
 - 13 个扩展模块中 readdir 部分受 fstat 限制，其余全部正常
 - 编译后务必进行管道输入测试，确保 fstat 兼容性修复有效
+---
+
+**编译结束**: 2026-08-27 12:36
+**最终状态**: published
