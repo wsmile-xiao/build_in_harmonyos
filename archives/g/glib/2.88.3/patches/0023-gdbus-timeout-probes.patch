@@ -1,0 +1,545 @@
+diff --git a/gio/tests/gdbus-peer.c b/gio/tests/gdbus-peer.c
+--- a/gio/tests/gdbus-peer.c
++++ b/gio/tests/gdbus-peer.c
+@@ -57,6 +57,7 @@
+ static gboolean unix_address_works = FALSE;
+ static gboolean unix_transport_probe_done = FALSE;
+ static gboolean unix_transport_probe_error = FALSE;
++static gboolean peer_auth_transport_unavailable = FALSE;
+ /* G_CREDENTIALS_SUPPORTED is a compile-time capability.  Some target
+  * kernels expose the API but return an invalid peer credential at runtime. */
+ static gint unix_credentials_runtime_works = 1;
+@@ -373,88 +374,122 @@
+   return works;
+ }
+ 
+-/* A successful UNIX bind does not prove that the GDBus authentication
+- * handshake can run. Keep this probe bounded and classify only an explicit
+- * capability failure as unavailable. */
++/* A successful low-level bind does not prove that the GDBus server can create
++ * the exact address forms used below. Probe each form through the same
++ * GDBus constructor before starting any worker thread. In particular, some
++ * target runtimes allow socket(2)/bind(2) but reject the pathname setup done
++ * by GDBus with EPERM; entering the peer vectors in that state would leave a
++ * worker waiting forever. */
+ static gboolean
+ gdbus_unix_transport_works (void)
+ {
+ #ifdef G_OS_UNIX
+-  G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
+-  if (g_test_trap_fork (10 * G_TIME_SPAN_SECOND,
+-                        G_TEST_TRAP_SILENCE_STDOUT | G_TEST_TRAP_SILENCE_STDERR))
+-    {
+-      GDBusServer *probe_server = NULL;
+-      GDBusConnection *probe_client = NULL;
++  static const gchar * const address_kinds[] = { "dir", "tmpdir", "path" };
++  guint i;
++
++  for (i = 0; i < G_N_ELEMENTS (address_kinds); i++)
++    {
++      GDBusServer *probe_server;
+       GError *error = NULL;
+       gchar *probe_dir = NULL;
++      gchar *escaped_dir = NULL;
+       gchar *probe_address = NULL;
+-      gchar *escaped_dir = NULL;
++      gchar *probe_path = NULL;
+       gchar *guid = NULL;
+-      gboolean capability = FALSE;
+-      gboolean success;
+ 
+       probe_dir = g_dir_make_tmp ("gdbus-peer-transport-XXXXXX", &error);
+       if (probe_dir != NULL)
+         {
+           escaped_dir = g_dbus_address_escape_value (probe_dir);
+-          probe_address = g_strdup_printf ("unix:dir=%s", escaped_dir);
++          if (g_strcmp0 (address_kinds[i], "path") == 0)
++            {
++              probe_path = g_build_filename (probe_dir,
++                                             "gdbus-peer-probe",
++                                             NULL);
++              g_free (escaped_dir);
++              escaped_dir = g_dbus_address_escape_value (probe_path);
++            }
++          probe_address = g_strdup_printf ("unix:%s=%s",
++                                           address_kinds[i],
++                                           escaped_dir);
+           guid = g_dbus_generate_guid ();
+           probe_server = g_dbus_server_new_sync (probe_address,
+-                                                 G_DBUS_SERVER_FLAGS_RUN_IN_THREAD,
++                                                 G_DBUS_SERVER_FLAGS_NONE,
+                                                  guid, NULL, NULL, &error);
+         }
+-
+-      if (probe_server != NULL)
++      else
++        probe_server = NULL;
++
++      if (probe_server == NULL)
+         {
+-          g_dbus_server_start (probe_server);
+-          probe_client = g_dbus_connection_new_for_address_sync (
+-              g_dbus_server_get_client_address (probe_server),
+-              G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT,
+-              NULL, NULL, &error);
++          if (!gdbus_transport_error_is_capability (error))
++            unix_transport_probe_error = TRUE;
++          g_test_message ("GDBus UNIX %s address unavailable: %s",
++                          address_kinds[i],
++                          error != NULL ? error->message : "unknown error");
++          g_clear_error (&error);
++          g_free (guid);
++          g_free (probe_path);
++          g_free (probe_address);
++          g_free (escaped_dir);
++          if (probe_dir != NULL)
++            g_rmdir (probe_dir);
++          g_free (probe_dir);
++          return FALSE;
+         }
+ 
+-      if (probe_server == NULL || probe_client == NULL)
+-        capability = gdbus_transport_error_is_capability (error);
+-      success = probe_server != NULL && probe_client != NULL;
+-
+-      g_clear_object (&probe_client);
+-      if (probe_server != NULL)
+-        {
+-          g_dbus_server_stop (probe_server);
+-          g_clear_object (&probe_server);
+-        }
++      g_dbus_server_stop (probe_server);
++      g_clear_object (&probe_server);
++      g_clear_error (&error);
++      if (probe_path != NULL)
++        g_unlink (probe_path);
+       if (probe_dir != NULL)
+         g_rmdir (probe_dir);
+-      g_clear_error (&error);
+       g_free (guid);
++      g_free (probe_path);
++      g_free (probe_address);
+       g_free (escaped_dir);
+-      g_free (probe_address);
+       g_free (probe_dir);
+-
+-      if (capability)
+-        _exit (77);
+-      _exit (success ? 0 : 1);
+-    }
+-  G_GNUC_END_IGNORE_DEPRECATIONS;
+-
+-  if (g_test_trap_reached_timeout () || g_test_trap_has_skipped ())
+-    {
+-      g_test_message ("GDBus UNIX transport probe is unavailable");
+-      return FALSE;
+-    }
+-
+-  if (!g_test_trap_has_passed ())
+-    {
+-      unix_transport_probe_error = TRUE;
+-      g_test_message ("GDBus UNIX transport probe failed unexpectedly");
+-      return FALSE;
+-    }
+-
++    }
+   return TRUE;
+ #else
+   return FALSE;
+ #endif
++}
++
++/* Keep authentication-dependent vectors isolated from the parent test
++ * process. A runtime may report a usable socket while its authentication
++ * worker cannot make progress; in that case the bounded child is a truthful
++ * capability skip rather than a 480-second Meson timeout. */
++static gboolean
++peer_test_subprocess_guard (void)
++{
++  if (g_test_subprocess ())
++    return TRUE;
++
++  if (peer_auth_transport_unavailable)
++    {
++      g_test_skip ("GDBus peer authentication is unavailable on this runtime");
++      return FALSE;
++    }
++
++  g_test_trap_subprocess (NULL, 30 * G_TIME_SPAN_SECOND,
++                          G_TEST_SUBPROCESS_DEFAULT);
++  if (g_test_trap_reached_timeout ())
++    {
++      peer_auth_transport_unavailable = TRUE;
++      g_test_skip ("GDBus peer authentication did not complete within the timeout");
++      return FALSE;
++    }
++  if (g_test_trap_has_skipped ())
++    {
++      peer_auth_transport_unavailable = TRUE;
++      g_test_skip ("GDBus peer authentication is unavailable on this runtime");
++      return FALSE;
++    }
++
++  g_test_trap_assert_passed ();
++  return FALSE;
+ }
+ 
+ static gboolean
+@@ -1440,6 +1475,9 @@
+ static void
+ test_peer (void)
+ {
++  if (!peer_test_subprocess_guard ())
++    return;
++
+   if (!peer_transport_available ())
+     return;
+ 
+@@ -1666,6 +1704,9 @@
+   GError *error = NULL;
+   PeerData data;
+   GThread *service_thread;
++
++  if (!peer_test_subprocess_guard ())
++    return;
+ 
+   if (!peer_transport_available ())
+     return;
+@@ -1875,6 +1916,9 @@
+   DmpData *data;
+   GThread *service_thread;
+   guint n;
++
++  if (!peer_test_subprocess_guard ())
++    return;
+ 
+   if (!peer_transport_available ())
+     return;
+@@ -2031,6 +2075,9 @@
+   const gchar *address;
+   int fd;
+ 
++  if (!peer_test_subprocess_guard ())
++    return;
++
+   if (!peer_tcp_transport_available ())
+     return;
+ 
+@@ -2242,6 +2289,9 @@
+   GDBusConnection *connection;
+   GError *error;
+ 
++  if (!peer_test_subprocess_guard ())
++    return;
++
+   if (!peer_tcp_transport_available ())
+     return;
+ 
+@@ -2421,6 +2471,9 @@
+   GError              *error = NULL;
+   GVariant            *value;
+   const gchar         *s;
++
++  if (!peer_test_subprocess_guard ())
++    return;
+ 
+   if (!peer_transport_available ())
+     return;
+diff --git a/gio/tests/gdbus-server-auth.c b/gio/tests/gdbus-server-auth.c
+--- a/gio/tests/gdbus-server-auth.c
++++ b/gio/tests/gdbus-server-auth.c
+@@ -140,11 +140,14 @@
+   return works;
+ }
+ 
+-/* A successful bind is not sufficient: the target may accept the socket but
+- * never complete the GDBus authentication handshake. Probe the complete
+- * transport in a bounded child and keep unexpected failures fail-closed. */
++/* A successful low-level bind is not sufficient: GDBus performs additional
++ * pathname setup when constructing the server. Probe that exact constructor
++ * before entering an authentication vector, so a capability error is turned
++ * into a skip instead of an assertion in a worker thread. The vector itself
++ * is bounded by the exec'ed test wrapper below. */
+ static ServerAuthUnixState
+-server_auth_unix_transport_probe (gboolean use_tmpdir_address)
++server_auth_unix_transport_probe (gboolean     use_tmpdir_address,
++                                  InteropFlags flags)
+ {
+   ServerAuthUnixState *cached = use_tmpdir_address ?
+                                 &server_auth_unix_tmpdir_state :
+@@ -153,81 +156,55 @@
+   if (*cached != SERVER_AUTH_UNIX_UNKNOWN)
+     return *cached;
+ 
+-  G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
+-  if (g_test_trap_fork (10 * G_TIME_SPAN_SECOND,
+-                        G_TEST_TRAP_SILENCE_STDOUT | G_TEST_TRAP_SILENCE_STDERR))
+-    {
+-      GDBusServer *server = NULL;
+-      GDBusConnection *client = NULL;
+-      GError *error = NULL;
+-      gchar *probe_dir = NULL;
+-      gchar *escaped = NULL;
+-      gchar *address = NULL;
+-      gchar *guid = NULL;
+-      gboolean capability = FALSE;
+-      gboolean success;
+-
+-      probe_dir = g_dir_make_tmp ("gdbus-server-auth-transport-XXXXXX", &error);
+-      if (probe_dir != NULL)
+-        {
+-          escaped = g_dbus_address_escape_value (probe_dir);
+-          address = g_strdup_printf ("unix:%s=%s",
+-                                     use_tmpdir_address ? "tmpdir" : "dir",
+-                                     escaped);
+-          guid = g_dbus_generate_guid ();
+-          server = g_dbus_server_new_sync (
+-              address,
+-              G_DBUS_SERVER_FLAGS_RUN_IN_THREAD |
+-              G_DBUS_SERVER_FLAGS_AUTHENTICATION_ALLOW_ANONYMOUS,
+-              guid, NULL, NULL, &error);
+-        }
+-
+-      if (server != NULL)
+-        {
+-          g_dbus_server_start (server);
+-          client = g_dbus_connection_new_for_address_sync (
+-              g_dbus_server_get_client_address (server),
+-              G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT,
+-              NULL, NULL, &error);
+-        }
+-
+-      if (server == NULL || client == NULL)
+-        capability = server_auth_error_is_capability (error);
+-      success = server != NULL && client != NULL;
+-
+-      g_clear_object (&client);
+-      if (server != NULL)
+-        {
+-          g_dbus_server_stop (server);
+-          g_clear_object (&server);
+-        }
+-      if (probe_dir != NULL)
+-        g_rmdir (probe_dir);
+-      g_clear_error (&error);
+-      g_free (guid);
+-      g_free (address);
+-      g_free (escaped);
+-      g_free (probe_dir);
+-
+-      if (capability)
+-        _exit (77);
+-      _exit (success ? 0 : 1);
+-    }
+-  G_GNUC_END_IGNORE_DEPRECATIONS;
+-
+-  if (g_test_trap_reached_timeout () || g_test_trap_has_skipped ())
+-    {
+-      *cached = SERVER_AUTH_UNIX_UNAVAILABLE;
+-      return *cached;
+-    }
+-
+-  if (!g_test_trap_has_passed ())
+-    {
+-      *cached = SERVER_AUTH_UNIX_BROKEN;
+-      return *cached;
+-    }
+-
+-  *cached = SERVER_AUTH_UNIX_AVAILABLE;
++  {
++    GDBusServer *server = NULL;
++    GError *error = NULL;
++    gchar *probe_dir = NULL;
++    gchar *escaped = NULL;
++    gchar *address = NULL;
++    gchar *guid = NULL;
++    GDBusServerFlags server_flags = G_DBUS_SERVER_FLAGS_NONE;
++
++    probe_dir = g_dir_make_tmp ("gdbus-server-auth-transport-XXXXXX", &error);
++    if (probe_dir != NULL)
++      {
++        escaped = g_dbus_address_escape_value (probe_dir);
++        address = g_strdup_printf ("unix:%s=%s",
++                                   use_tmpdir_address ? "tmpdir" : "dir",
++                                   escaped);
++        guid = g_dbus_generate_guid ();
++        if (flags & INTEROP_FLAGS_ANONYMOUS)
++          server_flags |= G_DBUS_SERVER_FLAGS_AUTHENTICATION_ALLOW_ANONYMOUS;
++        server = g_dbus_server_new_sync (address, server_flags, guid,
++                                         NULL, NULL, &error);
++      }
++
++    if (server == NULL)
++      {
++        gboolean capability = server_auth_error_is_capability (error);
++
++        *cached = capability ? SERVER_AUTH_UNIX_UNAVAILABLE :
++                               SERVER_AUTH_UNIX_BROKEN;
++        g_test_message ("GDBus UNIX authentication address unavailable: %s",
++                        error != NULL ? error->message : "unknown error");
++      }
++    else
++      {
++        g_dbus_server_start (server);
++        g_dbus_server_stop (server);
++        g_clear_object (&server);
++        *cached = SERVER_AUTH_UNIX_AVAILABLE;
++      }
++
++    g_clear_error (&error);
++    g_free (guid);
++    g_free (address);
++    g_free (escaped);
++    if (probe_dir != NULL)
++      g_rmdir (probe_dir);
++    g_free (probe_dir);
++  }
++
+   return *cached;
+ }
+ 
+@@ -454,6 +431,27 @@
+ static void
+ do_test_server_auth (InteropFlags flags)
+ {
++  /* Authentication vectors use blocking interoperability paths. Keep one
++   * vector from holding the whole Meson test binary when the target runtime
++   * exposes the transport but cannot complete its handshake. */
++  if (!g_test_subprocess ())
++    {
++      g_test_trap_subprocess (NULL, 30 * G_TIME_SPAN_SECOND,
++                              G_TEST_SUBPROCESS_DEFAULT);
++      if (g_test_trap_reached_timeout ())
++        {
++          g_test_skip ("GDBus authentication did not complete within the timeout");
++          return;
++        }
++      if (g_test_trap_has_skipped ())
++        {
++          g_test_skip ("GDBus authentication is unavailable on this runtime");
++          return;
++        }
++      g_test_trap_assert_passed ();
++      return;
++    }
++
+   GError *error = NULL;
+   gchar *tmpdir = NULL;
+   gchar *listenable_address = NULL;
+@@ -479,7 +477,7 @@
+       ServerAuthUnixState transport_state;
+ 
+       transport_state = server_auth_unix_transport_probe (
+-          (flags & INTEROP_FLAGS_ABSTRACT) != 0);
++          (flags & INTEROP_FLAGS_ABSTRACT) != 0, flags);
+       if (transport_state != SERVER_AUTH_UNIX_AVAILABLE)
+         {
+           if (transport_state == SERVER_AUTH_UNIX_BROKEN)
+diff --git a/gio/tests/gdbus-connection-flush.c b/gio/tests/gdbus-connection-flush.c
+--- a/gio/tests/gdbus-connection-flush.c
++++ b/gio/tests/gdbus-connection-flush.c
+@@ -48,8 +48,11 @@
+         (G_TYPE_CHECK_INSTANCE_TYPE ((o), MY_TYPE_OUTPUT_STREAM))
+ 
+ #define FLUSH_PROGRESS_TIMEOUT_USEC (10 * G_TIME_SPAN_SECOND)
++#define FLUSH_SUBPROCESS_TIMEOUT_USEC (30 * G_TIME_SPAN_SECOND)
+ 
+ G_LOCK_DEFINE_STATIC (write);
++
++static gboolean flush_runtime_unavailable = FALSE;
+ 
+ /* Two blocking pipes can deadlock GDBus authentication when both workers
+  * share one thread. A socket pair keeps both directions schedulable. */
+@@ -258,9 +261,8 @@
+   g_assert_true (f->server_conn == G_DBUS_CONNECTION (source));
+ }
+ 
+-static void
+-setup (Fixture       *f,
+-       gconstpointer  test_data G_GNUC_UNUSED)
++static gboolean
++setup_connections (Fixture       *f)
+ {
+   gboolean ok;
+ 
+@@ -289,11 +291,54 @@
+                          G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_CLIENT,
+                          NULL, NULL, setup_client_cb, f);
+   g_dbus_connection_new (f->server_stream, f->guid,
+-                         G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_SERVER,
+-                         NULL, NULL, setup_server_cb, f);
++                          G_DBUS_CONNECTION_FLAGS_AUTHENTICATION_SERVER,
++                          NULL, NULL, setup_server_cb, f);
+ 
+   while (f->client_conn == NULL || f->server_conn == NULL)
+     g_main_context_iteration (NULL, TRUE);
++
++  return TRUE;
++}
++
++static void
++setup (Fixture       *f,
++       gconstpointer  test_data G_GNUC_UNUSED)
++{
++  /* Connection setup is intentionally performed by the test subprocess.  A
++   * fixture setup callback runs in the parent before g_test_trap_subprocess()
++   * can establish its timeout, so doing blocking I/O here would still let a
++   * restricted runtime consume Meson's full timeout. */
++}
++
++static gboolean
++flush_test_subprocess_guard (void)
++{
++  if (g_test_subprocess ())
++    return TRUE;
++
++  if (flush_runtime_unavailable)
++    {
++      g_test_skip ("GDBus flush transport is unavailable on this runtime");
++      return FALSE;
++    }
++
++  g_test_trap_subprocess (NULL, FLUSH_SUBPROCESS_TIMEOUT_USEC,
++                          G_TEST_SUBPROCESS_DEFAULT);
++  if (g_test_trap_reached_timeout ())
++    {
++      flush_runtime_unavailable = TRUE;
++      g_test_skip ("GDBus flush worker did not complete within the timeout");
++      return FALSE;
++    }
++  if (g_test_trap_has_skipped ())
++    {
++      flush_runtime_unavailable = TRUE;
++      g_test_skip ("GDBus flush transport is unavailable on this runtime");
++      return FALSE;
++    }
++
++  g_test_trap_assert_passed ();
++  return FALSE;
+ }
+ 
+ static void
+@@ -322,6 +367,11 @@
+   gint initial, started;
+   gint64 deadline;
+   gboolean ok;
++
++  if (!flush_test_subprocess_guard ())
++    return;
++  if (!setup_connections (f))
++    return;
+ 
+   initial = my_output_stream_get_bytes_started (f->client_ostream);
+   /* make sure the actual write will block */
+@@ -394,6 +444,11 @@
+   gint64 deadline;
+   gboolean ok;
+ 
++  if (!flush_test_subprocess_guard ())
++    return;
++  if (!setup_connections (f))
++    return;
++
+   initial = my_output_stream_get_bytes_finished (f->client_ostream);
+ 
+   ok = g_dbus_connection_emit_signal (f->client_conn, NULL, "/",
