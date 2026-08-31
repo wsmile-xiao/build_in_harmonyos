@@ -34,7 +34,7 @@ SUBMODULES = {
     "lcms2": ("thirdparty-lcms2", "f75fad71d53efd58d7312bea21c2bedca0b9e6da"),
     "openjpeg": ("thirdparty-openjpeg", "5781f7478694c78e7a245dc21fe7fa6f65bf3b96"),
     "zlib": ("thirdparty-zlib", "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf"),
-    "curl": ("thirdparty-curl", "f43c6fbb2dbdf68dfdd0f0c3399e3711a621614a"),
+    "curl": ("thirdparty-curl", "f43c6fbb2dbdf68dfdd0f0c3399e3711a621614a"),  # curl submodule
     "freeglut": ("thirdparty-freeglut", "d5e2256d571b3ef66fb60716c99e35e9d3e570a2"),
     "extract": ("extract", "8750ac39c30a0d65119b426b5a491c5b8e8bf674"),
     "brotli": ("thirdparty-brotli", "6e092ab79683949f432d1c0cab88effa683c90d7"),
@@ -55,8 +55,6 @@ class MupdfToolsConan(ConanFile):
 
     package_type = "application"
     settings = "os", "compiler", "build_type", "arch"
-    options = {"shared": [True, False]}
-    default_options = {"shared": False}
 
     def export_sources(self):
         export_conandata_patches(self)
@@ -70,14 +68,12 @@ class MupdfToolsConan(ConanFile):
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
         for dir_name, (repo, commit) in SUBMODULES.items():
-            url = f"https://codeload.github.com/ArtifexSoftware/{repo}/tar.gz/{commit}"
             dest = os.path.join(self.source_folder, "thirdparty", dir_name)
             shutil.rmtree(dest, ignore_errors=True)
             os.makedirs(dest, exist_ok=True)
-            tmpfile = os.path.join(self.source_folder, f".{dir_name}.tar.gz")
-            self.run(f'curl -L -o "{tmpfile}" "{url}" --connect-timeout 30 --max-time 90 -k -s')
-            self.run(f'tar xzf "{tmpfile}" -C "{dest}" --strip-components=1')
-            os.remove(tmpfile)
+            mirror = f"https://gh-proxy.com/https://github.com/ArtifexSoftware/{repo}/archive/{commit}.tar.gz"
+            direct = f"https://codeload.github.com/ArtifexSoftware/{repo}/tar.gz/{commit}"
+            get(self, url=[mirror, direct], strip_root=True, destination=dest)
 
     def build(self):
         apply_conandata_patches(self)
@@ -85,16 +81,19 @@ class MupdfToolsConan(ConanFile):
         cxx = "clang++"
         ar = "llvm-ar"
         ranlib = "llvm-ranlib"
+        # Use GNU ld instead of lld: OHOS SDK's lld depends on libxml2.so.16
+        # which is not available on CI workers. GNU ld (binutils) has no such dependency.
+        ldflags = "-fuse-ld=ld"
         make_cmd = (
             f"make CC={cc} CXX={cxx} AR={ar} RANLIB={ranlib} "
             f"HAVE_X11=no HAVE_GLUT=no shared=no build=release "
-            f"HAVE_OBJCOPY=no -j1"
+            f"HAVE_OBJCOPY=no XLDFLAGS={ldflags} -j2"
         )
         self.run(make_cmd, cwd=self.source_folder, env=["conanbuild"])
         make_extra = (
             f"make CC={cc} CXX={cxx} AR={ar} RANLIB={ranlib} "
             f"HAVE_X11=no HAVE_GLUT=no shared=no build=release "
-            f"HAVE_OBJCOPY=no extra-apps -j1"
+            f"HAVE_OBJCOPY=no XLDFLAGS={ldflags} extra-apps -j1"
         )
         self.run(make_extra, cwd=self.source_folder, env=["conanbuild"])
 
