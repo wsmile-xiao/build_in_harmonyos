@@ -740,6 +740,15 @@ def cmd_submit(software: str, version: str,
     agent_id = get_agent_id(project_dir)
     letter = software[0].lower()
     ver_dir = _archive_dir(letter, software, version, project_dir)
+    if resume:
+        # v12.15: resume 刷新预算计时起点（平台重试重新分配预算；
+        # 防旧时间线把续跑任务立即误判为预算耗尽）
+        try:
+            from .feedback import record_event
+            record_event(ver_dir, "task_started",
+                         "submit --resume 重启预算计时（v12.15）")
+        except Exception:
+            pass
 
     if not ver_dir.exists():
         log_fail(f"❌ 版本目录不存在: {ver_dir}")

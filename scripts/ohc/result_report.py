@@ -695,6 +695,9 @@ def write_lifecycle_draft(software: str, version: str, milestone: str,
       - 终态已写入（draft=false）时不降级覆盖（防把 success 改回 partial）
       - 手写/残留文件直接覆盖（跨任务脏文件污染防御）
       - 失败不阻塞调用方主流程（best-effort）
+      - 预算兜底（v12.15，反馈 0831 P0-1）: 写草稿前检查预算，已耗尽则
+        升级写终态 timeout（保成果+续跑命令），防止 4h 被杀后停在 draft
+        被平台归一化为 unknown（76 例）
     挂点: init-archive(task_started) / conan-init(recipe_generated) /
           conan-verify(conan_verify_passed) / finish(local_ci_passed) /
           submit(pr_created, 即原 R42)。
@@ -703,6 +706,16 @@ def write_lifecycle_draft(software: str, version: str, milestone: str,
     if out_path is None:
         log_info("R46: 无可用输出位置（OHC_RESULT_OUT/$HOME 均不可用），跳过草稿")
         return False
+    # v12.15 预算兜底: 超预算 → 升级终态 timeout（不写草稿）
+    try:
+        from .budget import budget_status, write_timeout_result
+        st = budget_status(software, version)
+        if st.get("exhausted"):
+            log_warn("⏱ 预算已耗尽——草稿升级为终态 timeout（反馈 0831 P0-1）")
+            write_timeout_result(software, version, st)
+            return False
+    except Exception:
+        pass
     try:
         if out_path.exists():
             try:

@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -157,6 +158,22 @@ def _update_index_repo() -> int:
     return _fetch_update()
 
 
+def _run_git_retry(cmd_args, cwd=None, attempts=3, backoff=(10, 30, 60)):
+    """网络类 git 命令重试（反馈 0831 P0-2: 凹晨 registry 不可达多为瞬时抖动，
+    单次失败即判 unreachable 造成了 111 例误拒——退避重试后再判）。"""
+    result = None
+    for i in range(attempts):
+        result = _run_git(cmd_args, cwd=cwd)
+        if result.returncode == 0:
+            return result
+        if i < attempts - 1:
+            wait = backoff[i] if i < len(backoff) else backoff[-1]
+            log_warn(f"git {cmd_args[0]} 失败（第 {i + 1}/{attempts} 次，"
+                     f"{result.stderr[:80] if result.stderr else '无输出'}）——{wait}s 后重试")
+            time.sleep(wait)
+    return result
+
+
 def _init_sparse_clone() -> int:
     """初始化sparse clone仓库，只拉取README.md。"""
     repo_dir = Path(_INDEX_CACHE_DIR)
@@ -176,15 +193,20 @@ def _init_sparse_clone() -> int:
         ["remote", "add", "origin", _CMD_PKGS_REPO],
         ["sparse-checkout", "init", "--cone"],
         ["sparse-checkout", "set", "README.md"],
-        ["fetch", "--depth=1", "origin", "main"],
-        ["checkout", "origin/main"],
     ]
 
     for cmd_args in cmds:
         result = _run_git(cmd_args, cwd=repo_dir)
-        if result.returncode != 0 and "checkout" not in cmd_args[0]:
+        if result.returncode != 0:
             log_warn(f"git命令失败: git {' '.join(cmd_args)}")
             return 1
+
+    # fetch 是唯一网络命令——退避重试（反馈 0831 P0-2）
+    result = _run_git_retry(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
+    if result.returncode != 0:
+        log_warn(f"git fetch 失败（已重试 3 次）: {result.stderr[:100]}")
+        return 1
+    _run_git(["checkout", "origin/main"], cwd=repo_dir)
 
     log_ok("索引仓库初始化完成")
     return 0
@@ -203,11 +225,11 @@ def _fetch_update() -> int:
     # 设置safe.directory
     _run_git(["config", "--global", "--add", "safe.directory", str(repo_dir)])
 
-    # fetch检查更新
-    result = _run_git(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
+    # fetch检查更新（网络命令——退避重试，反馈 0831 P0-2）
+    result = _run_git_retry(["fetch", "--depth=1", "origin", "main"], cwd=repo_dir)
 
     if result.returncode != 0:
-        log_warn(f"fetch失败: {result.stderr[:100]}")
+        log_warn(f"fetch失败（已重试 3 次）: {result.stderr[:100]}")
         return 1
 
     # 检查是否有更新
