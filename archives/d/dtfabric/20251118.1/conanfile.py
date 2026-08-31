@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for dtfabric 20251118 — Pure Python setuptools package.
+"""Conan recipe for dtfabric 20251118.1 — Pure Python setuptools package.
 
 dtfabric is a tool for data type and structure management, using YAML-based
 data type definitions. Pure Python, no C/C++ compilation required.
@@ -16,7 +16,7 @@ from conan.tools.layout import basic_layout
 
 class DtFabricConan(ConanFile):
     name = "dtfabric"
-    version = "20251118"
+    version = "20251118.1"
     description = "Tooling for data type and structure management"
     license = "Apache-2.0"
     homepage = "https://github.com/libyal/dtfabric"
@@ -24,7 +24,7 @@ class DtFabricConan(ConanFile):
 
     package_type = "library"
 
-    settings = "os", "arch"
+    settings = "os", "compiler", "build_type", "arch"
     options = {"shared": [True, False]}
     default_options = {"shared": False}
 
