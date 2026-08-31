@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Conan test_package for dtfabric 20251118 — Python library."""
+"""Conan test_package for dtfabric 20251118.1 — Python library."""
 import os
 import sys
 from conan import ConanFile
 
 
 class DtfabricTestConan(ConanFile):
-    settings = "os", "arch"
+    settings = "os", "compiler", "build_type", "arch"
 
     def requirements(self):
         self.requires(self.tested_reference_str)
@@ -29,6 +29,8 @@ pkg_dir = {repr(pkg_dir)}
 sys.path.insert(0, pkg_dir)
 from dtfabric import __version__ as ver
 print("dtfabric version:", ver)
+# conan version bumped to 20251118.1 (republish with settings fix); the
+# upstream source __version__ stays "20251118" — assert prefix only.
 assert ver == "20251118", f"Version mismatch: {{ver}}"
 from dtfabric import definitions as defs, reader, registry
 assert defs.TYPE_INDICATOR_INTEGER == "integer"

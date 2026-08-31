@@ -19,7 +19,7 @@ import traceback
 
 # Add dtfabric source to path
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ARCHIVE_DIR = os.path.dirname(SCRIPT_DIR)  # archives/d/dtfabric/20251118/
+ARCHIVE_DIR = os.path.dirname(SCRIPT_DIR)  # archives/d/dtfabric/20251118.1/
 
 # Resolve dtfabric source from known build_in_harmonyos location
 _BUILD_ROOT = None
