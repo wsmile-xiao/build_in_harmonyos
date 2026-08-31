@@ -32,7 +32,7 @@ from conan.tools.files import (
 
 class Far2lConan(ConanFile):
     name = "far2l"
-    version = "2.8.0"
+    version = "2.8.0.1"
     license = "GPL-2.0"
     homepage = "https://github.com/elfmz/far2l"
     url = "https://github.com/elfmz/far2l"
