@@ -77,10 +77,36 @@ readelf -d libfabric.so.1.31.0 | grep -i rpath
 
 - monitor provider 被禁用（OHOS 无 fstab.h），不影响核心功能
 - ofi_set_thread_affinity 在 OHOS 上返回 -FI_ENOSYS（线程亲和性不可用）
-- make check 跨平台无法在宿主机运行（跳过）
 - HMDFS 上 /tmp 为只读文件系统，configure/config.status mktemp 必须使用 ${TMPDIR} 或用户目录绝对路径
 - configure 补丁硬编码了 /storage/Users/currentUser/tmp 作为 TMPDIR 回退值（因 HMDFS /tmp 不可写）
+
+## 上游测试用例执行结果（2026-08-28 实测）
+
+### 上游测试结构
+
+libfabric release tarball 中的上游测试只有一个：`make check` 运行 `util/fi_info` 二进制。
+fabtests 是独立仓库（https://github.com/ofiwg/fabtests），不在 release tarball 中，不纳入本次测试。
+
+### 执行结果
+
+| 测试命令 | 结果 | 说明 |
+|----------|------|------|
+| `make check` | ✅ PASS (1/1) | make check 唯一测试项 util/fi_info 通过 |
+| `./util/fi_info` | ✅ PASS | 正常输出 provider 列表（tcp/tcp;ofi_rxm 等），含 fabric/domain/version/type/protocol |
+| `./util/fi_info -l` | ✅ PASS | 列出 16 个 provider：ofi_rxm, ofi_rxd, shm, udp, tcp, sockets, ofi_hook_perf/trace/debug/noop/hmem/dmabuf_peer_mem, off_coll, sm2, ofi_mrail, lnx |
+| `./util/fi_info --version` | ✅ PASS | 输出 "libfabric: 2.5.0 / libfabric api: 2.5" |
+| `./util/fi_info -e` | ✅ PASS | 正常输出全部 libfabric 环境变量说明 |
+
+### 运行环境
+
+- 交叉编译产物 `util/.libs/fi_info` 架构：ELF 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1)
+- 本机为 aarch64 Linux（musl libc），可直接运行交叉编译产物
+- fi_info 通过 libtool wrapper 脚本运行，自动设置 LD_LIBRARY_PATH 加载 .libs/libfabric.so
+
+### 结论
+
+上游 `make check` 全部通过（1/1 PASS），交叉编译产物在目标架构上运行正常，16 个 provider 全部可加载。
 ---
 
-**编译结束**: 2026-05-28 00:34
+**编译结束**: 2026-08-28 14:02
 **最终状态**: built
