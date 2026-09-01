@@ -1,4 +1,4 @@
-# perl-package-stash-xs 0.30-r5 适配笔记
+# perl-package-stash-xs 0.30-r5.1 适配笔记
 
 ## 编译环境
 - 构建系统: Perl ExtUtils::MakeMaker (Makefile.PL)
@@ -105,7 +105,7 @@ t/zzz-check-breaks.t ..... ok  (通过)
 - remove_symbol: ✅ 删除后符号消失
 
 ### HNP 安装包
-- 包名: perl-package-stash-xs, 版本: 0.30-r5
+- 包名: perl-package-stash-xs, 版本: 0.30-r5.1
 - 文件: perl-package-stash-xs.hnp (19,242 bytes)
 - 包含: XS.so (已签名), XS.pm, Stash.pm
 - 安装目标: /data/service/hnp/perl.org/perl_5.42.0/
