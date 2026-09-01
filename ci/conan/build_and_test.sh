@@ -540,22 +540,127 @@ PYEOF
     # ── L0j: 版本号占用检查 (R37) ──
     # cnb.cool 制品仓不支持同版本多 revision 并存
     # 如果制品仓中已有该版本, 且 conanfile.py/conandata.yml 有修改 → 必须递增版本号
+    #
+    # 对比前先做归一化 (否则 CI 改写会导致 R37 误报, atk/2.38.0.1 实例):
+    #   1. mirror fallback 会把 conandata.yml 的单条 url 改写成镜像 url 列表,
+    #      制品仓里存的是列表版, 仓库里是单条版 → 直接 diff 必然"不同"
+    #   2. Pre-download 可能把 url 改写成 CI 机器本地的 file:// 路径
+    #   3. Conf compat patch 会把 conanfile.py 的 self.conf.get("tools.gnu:gcc:*")
+    #      改写成 os.environ.get(...) 后再构建/上传
+    # 归一化: conandata 提取原始 URL 集合 (剥掉镜像前缀, file:// 还原为 URL 路径);
+    #         conanfile 把 env 补丁还原回 conf.get 后逐字节对比
     echo "[step] L0j: Checking version collision with registry (R37)..."
     if conan download "${pkg_name}/${pkg_ver}" -r="${CONAN_REMOTE_NAME}" --only-recipe >/dev/null 2>&1; then
-        # 制品仓中已存在该版本, 比较 recipe 内容
+        # 制品仓中已存在该版本, 比较归一化后的 recipe 内容
         REMOTE_CACHE_DIR=$(conan cache path "${pkg_name}/${pkg_ver}" 2>/dev/null || echo "")
         if [ -n "$REMOTE_CACHE_DIR" ]; then
             RECIPE_CHANGED=false
-            # 比较 conanfile.py
+            # 比较 conanfile.py (conf compat 补丁逆向归一化)
             if [ -f "$REMOTE_CACHE_DIR/conanfile.py" ]; then
-                if ! diff -q "$CONANFILE" "$REMOTE_CACHE_DIR/conanfile.py" >/dev/null 2>&1; then
+                CONFFILE_CHANGED=$(python3 - "$CONANFILE" "$REMOTE_CACHE_DIR/conanfile.py" <<'PYEOF'
+import re, sys
+
+def conf_norm(content):
+    """把 conf compat patch 生成的 os.environ.get 还原回 self.conf.get (逆向归一化)."""
+    conf_map = {
+        'AR':     ('tools.gnu:gcc:ar',     'llvm-ar'),
+        'RANLIB': ('tools.gnu:gcc:ranlib', 'llvm-ranlib'),
+        'NM':     ('tools.gnu:gcc:nm',     'llvm-nm'),
+    }
+    for env, (conf, val) in conf_map.items():
+        content = re.sub(
+            r'os\.environ\.get\("' + env + r'"\s*,\s*"' + re.escape(val) + r'"\)',
+            f'self.conf.get("{conf}", default="{val}")',
+            content,
+        )
+    return content
+
+def read(path):
+    try:
+        with open(path, 'r', errors='replace') as f:
+            return f.read()
+    except (OSError, IOError):
+        return None
+
+a, b = sys.argv[1], sys.argv[2]
+ca, cb = read(a), read(b)
+if ca is None or cb is None:
+    print("missing")
+elif conf_norm(ca) != conf_norm(cb):
+    print("changed")
+else:
+    print("same")
+PYEOF
+)
+                if [ "$CONFFILE_CHANGED" != "same" ]; then
                     RECIPE_CHANGED=true
+                    echo "       [diff] conanfile.py differs from registry (after conf-patch normalization)"
                 fi
             fi
-            # 比较 conandata.yml (如果存在)
+            # 比较 conandata.yml (源码身份对比: 文件名集合 + sha256 集合 + patches 段)
+            # 不能直接 diff URL: CI 会把单条 url 改写成镜像列表, pre-download 可能再改成
+            # 本机 file:// 缓存路径 (含机器相关绝对路径) — 上传到制品仓的就是改写后版本。
+            # 源码身份 = (文件名, sha256): 镜像列表/file:// 不改变这两者; 真正的源码
+            # 变更必然改变 sha256 或文件名。已知取舍: "换 host 但文件名+sha 相同"
+            # 视为未变更 (源码位级相同, 语义等价)。
             if [ -f "$CONANDATA" ] || [ -f "$REMOTE_CACHE_DIR/conandata.yml" ]; then
-                if ! diff -q "$CONANDATA" "$REMOTE_CACHE_DIR/conandata.yml" >/dev/null 2>&1; then
+                CONANDATA_CHANGED=$(python3 - "$CONANDATA" "$REMOTE_CACHE_DIR/conandata.yml" <<'PYEOF'
+import re, sys
+
+def read(path):
+    try:
+        with open(path, 'r', errors='replace') as f:
+            return f.read()
+    except (OSError, IOError):
+        return None
+
+def source_keys(text):
+    """源码身份键集合: 各 url 的文件名 + 显式 filename: 字段值.
+    file:// 缓存文件名带 8 位 hash 前缀 ({hash8}_{原名}), 剥掉后再比。
+    url 单值与镜像列表项都收集, set 去重 (同一文件的多个镜像只算一个键)。"""
+    urls = re.findall(r'^[ \t]*url:[ \t]*(["\']?)((?:https?|file)://[^\s"\']+)\1[ \t]*$', text, re.MULTILINE)
+    urls += re.findall(r'^[ \t]*-[ \t]*(["\']?)((?:https?|file)://[^\s"\']+)\1[ \t]*$', text, re.MULTILINE)
+    keys = set()
+    for _, u in urls:
+        name = u.split('/')[-1]
+        name = re.sub(r'^[0-9a-f]{8}_', '', name)
+        keys.add(name)
+    for fn in re.findall(r'^[ \t]*filename:[ \t]*["\']?([^"\s\']+)["\']?', text, re.MULTILINE):
+        keys.add(fn)
+    return keys
+
+def sha_values(text):
+    """全部 sha256/sha 校验值 (sorted list, 多文件各自保留)."""
+    return sorted(re.findall(r'^[ \t]*sha2?56:[ \t]*["\']?([0-9a-fA-F]{8,})["\']?', text, re.MULTILINE))
+
+def patches_text(text):
+    """patches 段原文 (不经 CI 改写, 精确对比)."""
+    m = re.search(r'^patches:[ \t]*\n((?:^[ \t]+.*\n?)+)', text, re.MULTILINE)
+    return m.group(1) if m else ''
+
+local_text = read(sys.argv[1])
+remote_text = read(sys.argv[2])
+if local_text is None or remote_text is None:
+    print("missing")
+    sys.exit(0)
+lk, rk = source_keys(local_text), source_keys(remote_text)
+ls, rs = sha_values(local_text), sha_values(remote_text)
+lp, rp = patches_text(local_text), patches_text(remote_text)
+if lk != rk or ls != rs or lp != rp:
+    if lk != rk:
+        print("source files: local=%s remote=%s" % (sorted(lk), sorted(rk)))
+    if ls != rs:
+        print("checksums: local=%s remote=%s" % (ls, rs))
+    if lp != rp:
+        print("patches section differs")
+    print("changed")
+else:
+    print("same")
+PYEOF
+)
+                if [ "$CONANDATA_CHANGED" != "same" ]; then
                     RECIPE_CHANGED=true
+                    echo "$CONANDATA_CHANGED" | head -4 | sed "s/^/       [diff] /"
                 fi
             fi
 
