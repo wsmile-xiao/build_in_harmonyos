@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.16)
+project(test_qtquickeffectmaker CXX)
+find_package(Qt6 6.11.1 REQUIRED COMPONENTS Core Gui Qml Quick)
+add_executable(test_qtquickeffectmaker test_qtquickeffectmaker.cpp)
+target_link_libraries(test_qtquickeffectmaker PRIVATE Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick)
+set_property(TARGET test_qtquickeffectmaker PROPERTY CXX_STANDARD 17)
+set_property(TARGET test_qtquickeffectmaker PROPERTY CXX_STANDARD_REQUIRED ON)
+enable_testing()
