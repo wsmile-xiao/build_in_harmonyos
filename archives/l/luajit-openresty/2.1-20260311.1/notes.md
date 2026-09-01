@@ -2,10 +2,12 @@
 
 ## 编译环境
 - 构建系统: makefile (自定义 Makefile，非标准 autotools)
-- 编译日期: 2026-05-19
-- 编译器: clang 15.0.4
-- 目标平台: aarch64-linux (鸿蒙)
-- 状态: built
+- 编译日期: 2026-08-28
+- 编译器: clang 15.0.4 (OHOS /data/service/hnp/bin/)
+- 目标平台: aarch64-ohos (鸿蒙 PC)
+- conan create: ✅ 通过
+- test_package: ✅ 1/1 通过 (0.05 sec)
+- 状态: verified
 
 ## 编译步骤
 
@@ -45,7 +47,14 @@ make install PREFIX=$DEFAULT_PREFIX
 
 ## 源码修改
 
-无补丁。LuaJIT 在鸿蒙平台无需修改源码即可编译。
+需要 4 个 OHOS 平台补丁（参考上游 luajit/2.1.rolling 已验证补丁移植）：
+
+| 补丁 | 文件 | 说明 |
+|------|------|------|
+| 0001 | src/Makefile | DEFAULT_CC=gcc→clang，OHOS 工具链使用 clang |
+| 0002 | src/lib_os.c | os_tmpname 使用 TMPDIR 环境变量，避免写 /tmp（OHOS /tmp 只读） |
+| 0003 | src/lj_alloc.c | 禁用 mremap（OHOS bionic 不支持） |
+| 0004 | src/lj_trace.c | perf map 文件使用 TMPDIR 替代 /tmp |
 
 ## 依赖版本
 
