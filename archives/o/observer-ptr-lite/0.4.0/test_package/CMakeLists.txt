@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_observer_ptr_lite CXX)
+find_package(observer-ptr-lite REQUIRED)
+add_executable(test_observer_ptr_lite test.cpp)
+target_link_libraries(test_observer_ptr_lite PRIVATE nonstd::observer-ptr-lite)
+target_compile_features(test_observer_ptr_lite PRIVATE cxx_std_11)
+enable_testing()
+add_test(NAME test_observer_ptr_lite COMMAND test_observer_ptr_lite)
