@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for dkjson 2.8-1.1."""
+"""Conan recipe for dkjson 2.8-1.2."""
 
 import os
 
@@ -10,11 +10,11 @@ from conan.tools.layout import basic_layout
 
 class DkjsonConan(ConanFile):
     name = "dkjson"
-    version = "2.8-1.1"
+    version = "2.8-1.2"
     description = "David Kolf's pure Lua JSON encoder and decoder"
     license = "MIT/X11"
-    homepage = "http://dkolf.de/dkjson-lua/"
-    url = "http://dkolf.de/dkjson-lua/"
+    homepage = "https://dkolf.de/dkjson-lua/"
+    url = "https://dkolf.de/dkjson-lua/"
     settings = "os", "compiler", "build_type", "arch"
 
     no_copy_source = True

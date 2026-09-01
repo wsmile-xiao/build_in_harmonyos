@@ -1,15 +1,15 @@
-# dkjson 2.8-1.1 adaptation notes
+# dkjson 2.8-1.2 adaptation notes
 
 ## Scope
 
-This package adds David Kolf's dkjson 2.8-1.1 as a pure Lua dependency for the
+This package adds David Kolf's dkjson 2.8-1.2 as a pure Lua dependency for the
 Busted/Vusted chain used by nvim-lspconfig Path B validation.
 
 ## Source
 
-- Upstream homepage: http://dkolf.de/dkjson-lua/
-- LuaRocks release: 2.8-1.1
-- Source archive: http://dkolf.de/dkjson-lua/dkjson-2.8.tar.gz
+- Upstream homepage: https://dkolf.de/dkjson-lua/
+- LuaRocks release: 2.8-1.2
+- Source archive: https://dkolf.de/dkjson-lua/dkjson-2.8.tar.gz
 - SHA256: 24e8cd3beb91c1c861eb7bb3fbc9bd418bbff9ad4aa5d0471816258236a31532
 
 ## Package layout
@@ -47,9 +47,9 @@ Lua dependencies.
 ## Validation results
 
 - Local Windows/MinGW package-only `conan create -tf ''`: passed
-- Local package-only full ref: `dkjson/2.8-1.1#ecfd34b73aeeec2e8dcb8e9cdeaa749e:da39a3ee5e6b4b0d3255bfef95601890afd80709#2448d9d11d3753febc2ccc69b31221fb`
+- Local package-only full ref: `dkjson/2.8-1.2#b9aac00003af72a68da1cf345b7e086e:da39a3ee5e6b4b0d3255bfef95601890afd80709#2448d9d11d3753febc2ccc69b31221fb`
 - OHOS new-port run: `/storage/Users/currentUser/ohos-users/codex-a/neovim-vusted-pathb-integration-20260806/runs/codex-a-dkjson-r2-20260807-070935-16209`
-- Full ref: `dkjson/2.8-1.1#ecfd34b73aeeec2e8dcb8e9cdeaa749e:da39a3ee5e6b4b0d3255bfef95601890afd80709#2448d9d11d3753febc2ccc69b31221fb`
+- Full ref: `dkjson/2.8-1.2#b9aac00003af72a68da1cf345b7e086e:da39a3ee5e6b4b0d3255bfef95601890afd80709#2448d9d11d3753febc2ccc69b31221fb`
 - Consumer smoke: `dkjson smoke ok`
 - Gates: L0 pass, L1 pass, L2 skip-no-bin-dir, L4 pass, L5 warn-no-bin-or-lib for pure Lua package
 - OHOS upstream run: `/storage/Users/currentUser/ohos-users/codex-a/neovim-vusted-pathb-integration-20260806/runs/codex-a-dkjson-upstream-r1-20260807-070952-16395`
