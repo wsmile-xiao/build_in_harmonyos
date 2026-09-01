@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_tl_expected CXX)
+find_package(tl-expected REQUIRED)
+add_executable(test_tl_expected test.cpp)
+target_link_libraries(test_tl_expected PRIVATE tl::expected)
+target_compile_features(test_tl_expected PRIVATE cxx_std_14)
+enable_testing()
+add_test(NAME test_tl_expected COMMAND test_tl_expected)
