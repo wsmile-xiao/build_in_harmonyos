@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: OpenHarmony PC Developer <noreply@atomgit.com>
+Date: Mon, 31 Aug 2026 00:00:00 +0000
+Subject: [PATCH] configure: honor CXX env, skip gcc probe, drop install strip,
+ add DESTDIR, replace install(1) with portable mkdir/cp/chmod
+
+The upstream configure script hardcodes CC="g++" and unconditionally
+runs `gcc --version` to special-case the -O3/-O2 flag for ancient GCC
+3.0/3.1. On the OHOS toolchain there is no gcc (only clang/clang++),
+so the probe fails and the emitted Makefile cannot build under
+clang15/musl. The install target also calls the coreutils `install`
+binary, which the OHOS minimal userland does not ship.
+
+This patch:
+  1. Honors the CXX environment variable (falling back to g++) so the
+     Conan recipe can inject the OHOS clang++ via CXX=.
+  2. Skips the GCC-version probe cleanly (command -v gcc) when gcc is
+     absent, instead of erroring; the -O3->O2 override is irrelevant
+     to clang.
+  3. Adds DESTDIR support to the install/uninstall paths so Conan's
+     package() can stage into the package folder without touching the
+     host.
+  4. Drops `-s` (strip) and replaces the coreutils `install` program
+     with portable `mkdir -p`, `cp -f`, and `chmod` so the OHOS
+     minimal userland (which has cp/ln/rm/mkdir but no install) can
+     stage the binary and man pages; the OHOS lld self-signature on
+     the linked ELF is preserved.
+
+No functional change for real GCC builds with coreutils: CXX unset ->
+default g++; gcc present -> version probe still runs; DESTDIR defaults
+to empty; mkdir/cp/chmod produce the same staged tree as install.
+---
+ configure | 49 +++++++++++++++++++++++++++++++------------------
+ 1 file changed, 31 insertions(+), 18 deletions(-)
+
+diff --git a/configure b/configure
+index d5f5f90..ecdc178 100755
+--- a/configure
++++ b/configure
+@@ -12 +12,7 @@ manprefix='$(PREFIX)'
+-CC="g++"
++# Honor an externally-provided CXX (e.g. OHOS clang++ injected by
++# the Conan recipe); fall back to g++ for unmodified upstream builds.
++if [ -z "${CXX:-}" ]; then
++	CC="g++"
++else
++	CC="$CXX"
++fi
+@@ -149,7 +155,12 @@ done
+-gcc_major=`gcc --version 2>&1 | head -n1 | sed 's/^[^0-9]*//' | cut -d. -f1`
+-gcc_minor=`gcc --version 2>&1 | head -n1 | sed 's/^[^0-9]*//' | cut -d. -f2`
+-
+-if test "$gcc_major" = "3"; then
+-    if test "$gcc_minor" = "0" -o "$gcc_minor" = "1"; then
+-	optimization_cflags="-O2";
+-    fi
++# The -O3 -> -O2 override only matters for ancient GCC 3.0/3.1 and is
++# irrelevant to clang. Skip the probe when gcc is absent (as on the OHOS
++# toolchain, where only clang exists) so configure does not fail on a
++# missing gcc binary.
++if command -v gcc >/dev/null 2>&1; then
++	gcc_major=`gcc --version 2>&1 | head -n1 | sed 's/^[^0-9]*//' | cut -d. -f1`
++	gcc_minor=`gcc --version 2>&1 | head -n1 | sed 's/^[^0-9]*//' | cut -d. -f2`
++	if test "$gcc_major" = "3"; then
++	    if test "$gcc_minor" = "0" -o "$gcc_minor" = "1"; then
++		optimization_cflags="-O2";
++	    fi
++	fi
+@@ -242 +253,2 @@ echo "PREFIX=$prefix" >> $makefilename
+-echo "PREFIX=$prefix" >> $makefilename
++echo "PREFIX=$prefix" >> $makefilename
++echo "DESTDIR=" >> $makefilename
+@@ -248,3 +260,3 @@ cat << EOF >>$makefilename
+-INSTALLDIR=\$(PREFIX)/bin
+-MANDIR=\$(manprefix)/man/man1
+-MANDIRDE=\$(manprefix)/man/de/man1
++INSTALLDIR=\$(DESTDIR)\$(PREFIX)/bin
++MANDIR=\$(DESTDIR)\$(manprefix)/man/man1
++MANDIRDE=\$(DESTDIR)\$(manprefix)/man/de/man1
+@@ -321,4 +333,5 @@ install:
+-	install -d -m 755  \$(INSTALLDIR)
+-	install -d -m 755  \$(MANDIR)
+-	install -d -m 755  \$(MANDIRDE)
+-	install -s -m 755 mpgtx \$(INSTALLDIR)
++	mkdir -p \$(INSTALLDIR)
++	mkdir -p \$(MANDIR)
++	mkdir -p \$(MANDIRDE)
++	cp -f mpgtx \$(INSTALLDIR)/
++	chmod 755 \$(INSTALLDIR)/mpgtx
+@@ -326,2 +339,2 @@ install:
+-	install -m 644 man/mpgtx.1 man/tagmp3.1 \$(MANDIR)
+-	install -m 644 man/de/mpgtx.1 man/de/tagmp3.1 \$(MANDIRDE)
++	cp -f man/mpgtx.1 man/tagmp3.1 \$(MANDIR)/
++	cp -f man/de/mpgtx.1 man/de/tagmp3.1 \$(MANDIRDE)/
