@@ -4,7 +4,7 @@
 - 构建系统: cmake
 - 编译日期: 2026-06-15
 - 编译器: clang 15.0.4 / clang++ 15.0.4
-- 状态: published
+- 状态: built
 
 ## 编译步骤
 
@@ -106,5 +106,5 @@ Clipper2Config.cmake  Clipper2ConfigVersion.cmake  Clipper2Targets.cmake  Clippe
 - pkg-config 使用前需设置 PKG_CONFIG_PATH 包含 $DEFAULT_PREFIX/lib/pkgconfig
 ---
 
-**编译结束**: 2026-06-15 15:03
-**最终状态**: published
+**编译结束**: 2026-07-21 20:16
+**最终状态**: built
