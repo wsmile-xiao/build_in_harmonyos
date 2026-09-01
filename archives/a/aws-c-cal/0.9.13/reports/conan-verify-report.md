@@ -11,7 +11,9 @@
      CMake 不认识 HarmonyOS 作为目标平台，
 没有对应的 platform module。
 当 CMake 检测到系统名称为 harmonyos/ohos 时，
-无法匹配任何已知平台（Lin
+无法匹配任何已知平台（Linux/Darwin/Windows），
+导致 platform 检测失败。通过在 CMakeToolchain 中
+设置 CMAKE_SYSTEM_NAME 和相关变量绕过此限制。
 
 ## G1: ✅ PASS
   ✅ name 声明
