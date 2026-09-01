@@ -116,5 +116,5 @@ Moose 的 XS 组件提供 bootstrap 所需的简单 reader 方法和辅助函数
 - ✅ [L3] Moose::Exporter的_flag_as_reexport/_export_is_flagged可安全地空实现 (manifest.yaml knowledge_gained)
 ---
 
-**编译结束**: 2026-06-23 18:36
+**编译结束**: 2026-08-07 11:57
 **最终状态**: built
