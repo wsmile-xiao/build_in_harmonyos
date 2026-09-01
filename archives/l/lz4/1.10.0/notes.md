@@ -68,3 +68,18 @@
 
 **编译结束**: 2026-07-11 20:00
 **最终状态**: built
+
+---
+
+## 七、上游测试全量执行补录（2026-08-31）
+
+> 本节为 2026-08-31 补充：对上游 tests/Makefile 全部可执行测试目标在本机（HarmonyOS PC aarch64, POSIX_ENV=Yes）执行并归档报告。
+
+**关键环境发现**：
+- `uname -s` 返回 `HarmonyOS`，不在 Makefile.inc 的 POSIX 系统列表（Linux/Darwin/FreeBSD/NetBSD/OpenBSD/SunOS 等）→ `POSIX_ENV=No` → tests/Makefile 中 175 行后全部真实测试规则被隐藏。已有补丁 `0001-Makefile.inc.patch` 添加 OHOS 分支，但本机返回 `HarmonyOS` 仍不匹配 `OHOS`，需显式 `make <target> POSIX_ENV=Yes`。
+- 无此参数时 make 会用隐式规则 `cat xx.sh > xx` 生成同名可执行文件副本，目标显示 "up to date" 但**测试从未运行**（幻影通过）。执行上游测试必须清理这些幻影文件后带 `POSIX_ENV=Yes` 重跑。
+- `make usan` 残留的 UBSan 插桩 .o 会让后续目标（如 checkFrame）链接失败（undefined `__ubsan_handle_pointer_overflow`），需删除 lz4*.o/xxhash.o 后重建。
+
+**执行结果**：25 PASS / 4 SKIP（abiTests、versionsTest、mesonbuild、valgrind 系——环境无 ldd/32位 loader/meson/valgrind）/ 1 FAIL（test-install——缺 coreutils install(1)，配方 package() 已用 conan copy() 等价实现）。
+
+**详细数据与日志**：`reports/upstream-test-report.md` + reports/upstream-{frametest,fuzzer,hugefile,usan}.log(.gz)。
