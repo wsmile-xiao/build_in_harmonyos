@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Optional
 
 from .models import parse_kv_file, parse_index_tsv, parse_principles
-from .utils import graph_dir, log_info, log_ok, log_warn, log_fail
+from .utils import find_project_dir, graph_dir, log_info, log_ok, log_warn, log_fail
 
 # ── Constants ──
 
@@ -1180,17 +1180,25 @@ def cmd_promote(
 
     # ── Write doc ──
     doc_dir.mkdir(parents=True, exist_ok=True)
-    app = fields.get('rec_approach', fields.get('root_cause', ''))[:60]
+    title_text = fields.get('title', '').strip() or fields.get('rec_approach', fields.get('root_cause', ''))[:60]
     doc_path = doc_dir / f"{target_id}.md"
     contrib_line = ', '.join(unique_contributors[:3]) if unique_contributors else 'unknown'
+    rec_cmd = fields.get('rec_command', '').strip()
+    verif_cmd = fields.get('verification_cmd', '').strip()
     doc_path.write_text(
-        f"# {target_id}: {app or '未命名错误模式'}\n\n"
+        f"# {target_id}: {title_text or '未命名错误模式'}\n\n"
         f"## 基本信息\n- **严重度**: {fields.get('severity', '2')}\n"
-        f"- **类别**: {fields.get('category', '')}\n\n"
-        f"## 错误特征\n```\n{fields.get('error_signature', '(待补充)')}\n```\n\n"
+        f"- **类别**: {fields.get('category', '')}\n"
+        f"- **作者**: {contrib_line}\n"
+        + (f"- **来源 PR**: {fields.get('source_pr', '')}\n" if fields.get('source_pr', '').strip() else "")
+        + f"\n## 错误特征\n```\n{fields.get('error_signature', '(待补充)')}\n```\n\n"
         f"## 根因分析\n{fields.get('root_cause', '(待补充)')}\n\n"
-        f"## 来源\n- 草稿: {draft_id}\n- 合并: {', '.join(d.stem for _, _, d in [(d[0], d[1], d[0]) for d in merged_drafts]) or '无'}\n"
-        f"- 贡献者: {contrib_line}\n- 提升日期: {date.today()}\n",
+        f"## 推荐方案\n**方法**: {fields.get('rec_approach', '(待补充)')}\n\n"
+        f"**说明**: {fields.get('rec_description', '(待补充)')}\n"
+        + (f"\n**修复命令**:\n```\n{rec_cmd}\n```\n" if rec_cmd else "")
+        + (f"\n**验证**:\n```\n{verif_cmd}\n```\n" if verif_cmd else "")
+        + f"\n## 来源\n- 草稿: {draft_id}\n- 合并: {', '.join(d.stem for _, _, d in [(d[0], d[1], d[0]) for d in merged_drafts]) or '无'}\n"
+        f"- 提升日期: {date.today()}\n",
         encoding="utf-8")
     log_ok(f"✅ 配套文档: {doc_path.relative_to(project)}")
 
@@ -1202,8 +1210,15 @@ def cmd_promote(
 
     # ── Remove drafts ──
     draft_path.unlink()
+    draft_md = draft_path.with_suffix('.md')
+    if draft_md.exists():
+        draft_md.unlink()
+        log_info(f"  🗑️ 已移除草稿文档: {draft_md.stem}.md")
     for other_path, _, _ in merged_drafts:
         other_path.unlink()
+        other_md = other_path.with_suffix('.md')
+        if other_md.exists():
+            other_md.unlink()
         log_info(f"  🗑️ 已移除合并草稿: {other_path.stem}")
 
     log_info(f"🎉 {draft_id} → {target_id} 提升完成"

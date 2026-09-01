@@ -1,0 +1,83 @@
+#====================================================================
+# WebP::webpdemux target 缺失 → CMakeDeps build-module 注入（OHOS 交叉编译）
+# Conan 2.29.1 + OHOS aarch64 + clang 15 + SDL2_image 2.8.12
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E473
+trigger_tool: cmake
+phase: compilation
+error_signature: Target "SDL2_image" links to:.*WebP::webpdemux|but the target was not found|webp/decode.h not found|Findwebp.*module
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category:               cmake, cross-compile, conan, libwebp, sdl2
+match_keywords: SDL2_image, SDL_image, WebP::webp, WebP::webpdemux, libwebp, libwebpdemux.so, CMakeDeps, cmake_build_modules, Findwebp.cmake, webp_INCLUDE_PATH, webpdemux_INCLUDE_PATH, imported target, CMAKE_FIND_PACKAGE_PREFER_CONFIG
+title: Inject missing WebP::webpdemux imported target when libwebp CMakeDeps only exposes WebP::webp and upstream links both under OHOS cross-compile
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: libwebp 配方 package_info() 仅暴露 WebP::webp（cmake_target_name=WebP::webp），但上游 SDL2_image 2.8.12 在 SDL2IMAGE_WEBP 启用、SDL2IMAGE_DEPS_SHARED=OFF 时 `target_link_libraries(SDL2_image PRIVATE WebP::webp WebP::webpdemux)` 同时链接两个 target；libwebpdemux.so 实际随 libwebp 包分发（lib/libwebpdemux.so.2.0.17），却未作为组件/独立 target 暴露。Conan 2 的 CMakeToolchain 默认 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)，使 find_package(webp) 命中 CMakeDeps 生成的 WebPConfig.cmake（仅定义 WebP::webp），而非上游 cmake/Findwebp.cmake 模块（该模块本会同时定义 WebP::webp 与 WebP::webpdemux 两个 IMPORTED target）→ 配置期报 Target "SDL2_image" links to: WebP::webpdemux but the target was not found。另：Findwebp.cmake 的 find_path(webp_INCLUDE_PATH NAMES webp/decode.h) 需要 include 根（含 webp/ 子目录），错误指到 include/webp 会报 webp/decode.h not found。
+affected_scope: 消费 libwebp 且上游直接链接 WebP::webp 与 WebP::webpdemux 的 CMake 项目（SDL2_image 2.6.0+/2.8.x、SDL_image 系），在 OHOS/aarch64 交叉编译 + Conan 2 CMakeDeps（PREFER_CONFIG=ON）下构建的场景；libwebp 配方未暴露 webpdemux 组件时通用。
+verification_cmd: grep -nE 'WebP::webpdemux|webp_INCLUDE_PATH|cmake_build_modules' conanfile.py; grep -nE 'Target "SDL2_image" links to: WebP::webpdemux' reports/conan-create.log
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: conan-recipe build-module imported-target injection (cmake_build_modules)
+rec_description: 在 conanfile.py generate() 中为 libwebp 依赖注入一个 build module（cmake_build_modules），其中定义缺失的 WebP::webpdemux UNKNOWN IMPORTED target，IMPORTED_LOCATION 指向 libwebp 包内 lib/libwebpdemux.so；同时把 webp_INCLUDE_PATH / webpdemux_INCLUDE_PATH 缓存变量指向 libwebp include 根（含 webp/ 子目录）。这样 find_package(webp) 命中 CMakeDeps WebPConfig 时 WebP::webpdemux 已存在，无需改 libwebp 配方或改上游源码。
+rec_command: |
+  def generate(self):
+      deps = CMakeDeps(self)
+      webp = self.dependencies["libwebp"]
+      if webp.package_folder:
+          module = os.path.join(self.generators_folder, "WebP-webpdemux.cmake")
+          with open(module, "w", encoding="utf-8") as fh:
+              fh.write("if(NOT TARGET WebP::webpdemux)\n")
+              fh.write("  add_library(WebP::webpdemux UNKNOWN IMPORTED)\n")
+              fh.write("  set_target_properties(WebP::webpdemux PROPERTIES\n")
+              fh.write("      IMPORTED_LOCATION \"%s\")\n" % os.path.join(webp.package_folder, "lib", "libwebpdemux.so"))
+              fh.write("endif()\n")
+          deps.set_property("libwebp", "cmake_build_modules", [module])
+      deps.generate()
+      tc = CMakeToolchain(self)
+      tc.cache_variables["webp_INCLUDE_PATH"] = os.path.join(webp.package_folder, "include")
+      tc.cache_variables["webpdemux_INCLUDE_PATH"] = os.path.join(webp.package_folder, "include")
+      tc.generate()
+rec_auto_fix: false
+rec_impl: conan-recipe
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: disable WEBP backend
+fallback_description: 若 libwebp 包/配方无法暴露 webpdemux 且无法注入 target，可将 SDL2IMAGE_WEBP=OFF 并同步 SDL_IMAGE_TEST_REQUIRE_LOAD_WEBP=0，放弃 WEBP 格式支持（功能裁剪，非首选）。
+fallback_command: tc.variables["SDL2IMAGE_WEBP"] = "OFF"  # 且测试断言 REQUIRE_LOAD_WEBP=0
+fallback_auto_fix: false
+
+# ★ 禁止策略 ★
+forbid_1_pattern: SDL2IMAGE_WEBP.*OFF.*掩盖缺失
+forbid_1_reason: 若只是为过编译而关闭 WEBP，会丢掉本可用的格式支持，且无法说明 libwebpdemux 已随包存在。
+forbid_1_consequence: 功能缺失，非根因修复。
+forbid_2_pattern: 把 webp_INCLUDE_PATH 指向 include/webp
+forbid_2_reason: Findwebp.cmake 的 find_path 需含 webp/ 子目录的根，指到 include/webp 时 NAMES webp/decode.h 找不到。
+forbid_2_consequence: webp/decode.h not found（配置期失败）。
+forbid_3_pattern: 修改已发布 libwebp 配方或动其他库归档来补 target
+forbid_3_reason: 依赖已发布不可改；本方案在消费者侧注入，不改依赖/不动其他库。
+forbid_3_consequence: 破坏依赖链或跨库污染。
+
+# ═══ Layer 4: 原则引用 ═══
+
+# ═══ 关系图 (Relations) ═══
+# ═══ 元数据 ═══
+doc_file: doc/E473.md
+last_updated: 2026-08-29
+source_event: sdl2-image 2.8.12 OHOS CMake adaptation with Conan 2.29.1 CMakeDeps（R01/R06 实证）
+
+# ═══ 知识协作 ═══
+authors: junshi_liu <liujsh2023@lzu.edu.cn>
+source_pr: !7112
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count: 1
+metrics_fail_count: 1
+metrics_confidence: 0.5
+metrics_last_used: 2026-08-29
