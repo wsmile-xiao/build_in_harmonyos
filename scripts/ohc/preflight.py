@@ -222,9 +222,12 @@ def check_deps_in_registry(pkg_dir: Path,
 
 # ── 总入口 ───────────────────────────────────────────────────
 
-def run_preflight(repo_dir: Path, base: str, head: str,
+def run_preflight(repo_dir, base: str, head: str,
                   registry: str = DEFAULT_REGISTRY) -> tuple[bool, list[str]]:
     """执行 PF1-PF4。返回 (通过?, 全部问题清单)。任何异常 fail-closed。"""
+    # 调用方可能传 str（gitcode_pr._git_toplevel 返回 str），
+    # 统一包装为 Path，避免下方 repo_dir / d 抛 str/str TypeError（PF0 假故障）
+    repo_dir = Path(repo_dir)
     findings: list[str] = []
     try:
         files = changed_files(repo_dir, base, head)

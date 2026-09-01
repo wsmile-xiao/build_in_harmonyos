@@ -48,6 +48,27 @@ class VerifyResult:
         return self.passed
 
 
+def _recover_ghfast_bak(conandata_path: Path, bak_path: Path) -> None:
+    """G2 镜像注入的崩溃恢复（带陈旧守卫）。
+
+    仅当当前 conandata 仍含 ghfast.top（注入未回滚，即上次进程被杀
+    finally 未执行）才回滚；否则 .bak 是上一轮的陈旧残留，直接清理，
+    防止覆盖本轮内容（websocketpp PR #7052 教训：陈旧 .bak 无条件
+    覆盖 → 编译了旧配置的假失败）。
+    """
+    if not (bak_path.exists() and conandata_path.exists()):
+        return
+    current = conandata_path.read_text(encoding="utf-8")
+    if "ghfast.top" in current:
+        conandata_path.write_text(bak_path.read_text(encoding="utf-8"),
+                                  encoding="utf-8")
+        bak_path.unlink()
+        log_warn("  🔄 已恢复上次崩溃残留的 conandata.yml（镜像注入回滚）")
+    else:
+        log_warn("  🧹 已清理陈旧 conandata.yml.ghfast-bak（当前无镜像注入）")
+        bak_path.unlink()
+
+
 class ConanVerifier:
     """Verify a Conan recipe by running conan create + multi-level checks."""
 
@@ -511,12 +532,10 @@ authors: {git_author}
 
         # ── E017 prevention: inject ghfast.top mirror for GitHub URLs ──
         # 崩溃恢复：上次进程被杀时 finally 未执行，残留的 .bak 先恢复
+        # （守卫逻辑见 _recover_ghfast_bak：仅当前含 ghfast.top 才回滚）
         conandata_path = self.archive_dir / "conandata.yml"
         bak_path = conandata_path.with_name("conandata.yml.ghfast-bak")
-        if bak_path.exists() and conandata_path.exists():
-            conandata_path.write_text(bak_path.read_text(encoding="utf-8"), encoding="utf-8")
-            bak_path.unlink()
-            log_warn("  🔄 已恢复上次崩溃残留的 conandata.yml（镜像注入回滚）")
+        _recover_ghfast_bak(conandata_path, bak_path)
         _url_injected = False
         _original_conandata = None
         if conandata_path.exists():

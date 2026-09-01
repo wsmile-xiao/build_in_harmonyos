@@ -1146,7 +1146,15 @@ def cmd_submit(software: str, version: str,
         [_GIT, "commit", "-m", pr_title],
         cwd=project_dir, capture_output=True, text=True)
     if result.returncode != 0:
-        if "nothing to commit" in result.stdout.lower() or "nothing to commit" in result.stderr.lower():
+        # git 无变更的多种措辞（2.45 实测），全部按"无变更（可能已提交）"处理：
+        #   干净树: "nothing to commit, working tree clean"
+        #   仅未跟踪文件: "nothing added to commit but untracked files present"
+        #   有未暂存修改: "no changes added to commit"
+        _commit_out = (result.stdout + "\n" + result.stderr).lower()
+        if any(s in _commit_out for s in (
+                "nothing to commit",
+                "nothing added to commit",
+                "no changes added to commit")):
             log_warn("  ⚠️ git commit: 无变更（可能已提交）")
         else:
             log_fail(f"❌ git commit 失败: {result.stderr.strip()}")

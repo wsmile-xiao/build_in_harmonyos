@@ -52,11 +52,14 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
+import time
 import urllib.request
 import urllib.error
 import urllib.parse
 from datetime import datetime, timezone
+from pathlib import Path
 
 # ── 常量 ──────────────────────────────────────────────────────────
 
@@ -243,6 +246,46 @@ def _git_toplevel() -> str:
     return (r.stdout or "").strip()
 
 
+def _find_existing_pr(repo, source, target):
+    """按 head/base 分支复核 open PR 是否已存在（假超时防护）。"""
+    try:
+        result = api_request("GET", f"/repos/{repo}/pulls",
+                             params={"state": "open", "head": source, "per_page": 50})
+        for pr in (result or []):
+            if ((pr.get("head") or {}).get("ref") == source
+                    and (pr.get("base") or {}).get("ref") == target):
+                return pr
+    except Exception:
+        pass
+    return None
+
+
+def _writeback_submit_state(pr):
+    """create-pr 成功后回写 .submit-state.json（pr_number 等）。
+
+    手动 create-pr 路径此前不回写，导致 submit --resume / feedback 链路
+    找不到 PR 编号而断裂（ktextwidgets PR #7104 教训）。仅在状态文件
+    已存在时更新，不主动创建。
+    """
+    try:
+        r = subprocess.run(["git", "rev-parse", "--show-toplevel"],
+                           capture_output=True, text=True, timeout=30)
+        if r.returncode != 0:
+            return
+        state_file = Path(r.stdout.strip()) / ".submit-state.json"
+        if not state_file.exists():
+            return
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        state["pr_number"] = pr.get("number")
+        state["pr_url"] = pr.get("html_url")
+        state["branch"] = (pr.get("head") or {}).get("ref") or state.get("branch")
+        state_file.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"📝 已回写 .submit-state.json (pr_number={state['pr_number']})")
+    except Exception as e:
+        print(f"⚠️ 回写 .submit-state.json 失败（不影响 PR）: {e}", file=sys.stderr)
+
+
 def cmd_create_pr(args):
     """创建 Pull Request。"""
     # ── PR 创建前置硬闸（v12.9）：所有建 PR 路径的唯一咽喉点 ──
@@ -274,13 +317,27 @@ def cmd_create_pr(args):
         body["milestone_number"] = args.milestone
 
     path = f"/repos/{args.repo}/pulls"
-    result = api_request("POST", path, body=body)
+    try:
+        result = api_request("POST", path, body=body)
+    except SystemExit:
+        # GitCode 偶发 504/超时：PR 可能实际已创建（"假超时"，多次实测）。
+        # 延时后用 list 复核，命中则视为创建成功，避免重复建 PR。
+        print("⚠️ create-pr 请求失败（可能为假超时），15s 后 list 复核…", file=sys.stderr)
+        time.sleep(15)
+        pr = _find_existing_pr(args.repo, args.source, args.target)
+        if pr:
+            print("✅ 复核确认 PR 实际已创建（假超时）")
+            result = pr
+        else:
+            print("❌ 复核未发现已创建的 PR，确为创建失败", file=sys.stderr)
+            raise
 
     print("✅ PR 创建成功")
     print(f"   编号: #{result.get('number', 'N/A')}")
     print(f"   标题: {result.get('title', 'N/A')}")
     print(f"   分支: {args.source} → {args.target}")
     print(f"   URL:  {result.get('html_url', 'N/A')}")
+    _writeback_submit_state(result)
     # 输出 JSON 供 AI 解析
     print("\n--- JSON ---")
     print(json.dumps(result, ensure_ascii=False, indent=2))

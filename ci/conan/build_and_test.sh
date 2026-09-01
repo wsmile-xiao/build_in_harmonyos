@@ -1173,6 +1173,20 @@ PYEOF
         PREDL_DIR="${BUILD_DIR}/predl_cache"
         mkdir -p "$PREDL_DIR"
 
+        # 备份到缓存目录（不入归档树，避开 JC1 备份残留门禁），
+        # 脚本退出时恢复官方 URL —— 防止 file:// 残留被提交
+        # （gulkan PR #7121 被 W4 判 P0 打回、knewstuff/ki18n 双次教训）
+        PREDL_BACKUP="${PREDL_DIR}/conandata.yml.predl-orig"
+        cp "$CONANDATA" "$PREDL_BACKUP"
+        _restore_conandata() {
+            if [ -f "$PREDL_BACKUP" ] && [ -f "$CONANDATA" ]; then
+                cp "$PREDL_BACKUP" "$CONANDATA"
+                rm -f "$PREDL_BACKUP"
+                echo "[step] Pre-download: conandata.yml 已还原为官方 URL"
+            fi
+        }
+        trap _restore_conandata EXIT
+
         python3 - "$CONANDATA" "$PREDL_DIR" <<'PYEOF'
 import re, sys, os, hashlib, subprocess
 

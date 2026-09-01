@@ -4,7 +4,7 @@
 
 来源: SKILL.md §1.3
 
-## 铁律总表（43 条，R1-R43，违反=bug）
+## 铁律总表（49 条，R1-R49，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -51,6 +51,12 @@
 | **R41** | **外部依赖阻塞止损** | registry/git remote 连续 3 次不可达且超 30 分钟 → 立即写 result.json 止损；多包任务单包止损不连坐；剩余预算 <40min 只收尾 | 无限重试外部阻塞；多包任务因单包阻塞全部放弃 |
 | **R42** | **PR 创建即上报** | PR 创建成功即写 result.json partial 草稿，工具化监控 CI（红→修复→push→`submit --resume`；绿→自动升级 success）；`--no-wait` / `OHC_SUBMIT_NO_WAIT=1` 可跳过等待 | 自己写 sleep 盲等 CI / AI Review |
 | **R43** | **调参螺旋止损** | 同一错误类别连续 5 次调参失败 → 停止调参，写 result.json（failed_build + 5 次尝试证据）退出 | 无证据盲试调参死循环 |
+| **R44** | **CI 失败必须先自诊断再修** | CI 红后先 `gitcode_pr.py diagnose` 二次归类再定向修复；本地 W3 复验后才 push | 对"未知"失败盲改重推 |
+| **R45** | **SKILL_FEEDBACK 防丢失** | 骨架前置+事件累积+终态兜底+完成入仓四道工具化防线；AI 只填 4 个建议占位符 | 流程结束才手工补反馈（猝死即丢） |
+| **R46** | **result.json 全程生命周期草稿** | 五挂点自动写 draft 草稿；终态只走 `result` 命令 | 手写 JSON / 猝死无上报 |
+| **R47** | **语言预检前置** | 主流程前跑 `lang-preflight`；非 C/C++ 立即终态 env_unsupported | 非 C/C++ 源码硬走 conan 流程 |
+| **R48** | **预算感知收尾** | 长阶段前 `budget-check` 三态：ok / near_limit(立即收尾) / exhausted(断点终态) | sleep 盲等 CI 烧光预算 |
+| **R49** | **依赖注入必须用 build_folder 私有 prefix** | 注入目标=`build_folder/prefix`，CPPFLAGS/LDFLAGS/PKG_CONFIG_PATH 全指向私有 prefix | 注入共享 /usr/local（CI/本地互相污染，E524） |
 
 ---
 
@@ -825,3 +831,87 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$DEFAULT_PREFIX 2>&1 | tail -3
 - 错误信息与上次是否同类？若同类，第 5 次尝试前就该收手——5 次同方向失败基本可断定方法性错误（查归档或上游 conanfile 参考）
 
 > 实战教训：task 3681 对 `Qt5::3DCore` 的 component/cmake_file_name/includedirs 反复推演调参 3.5 小时无一次阶段性上报，直到预算耗尽。
+
+### R39 详细说明：源码 URL 必须为官方源
+
+- conandata.yml 中 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源
+- 禁止个人 fork、网盘、不明 CDN——来源不可信且随时可能失效
+- CI 自动添加镜像 fallback（ghfast.top 等），配方无需自己写镜像
+- 佐证：预下载与镜像注入均由 CI/W3 统一处理，配方保持官方 URL 是唯一事实源
+
+### R40 详细说明：深度适配库需验证适配完整性
+
+- 适用范围：图形渲染 / UI 框架 / 多媒体 / 外设 / 系统底层类库
+- **编译通过 ≠ 适配完成**：必须检查实质性平台适配代码（非 stub / 非 return 0 空壳）
+- 检查点：平台分支是否有真实实现、降级路径是否声明、运行时行为是否验证（test_package 实测）
+- 反例：`#ifdef __OHOS__ return 0;` 让所有调用"成功"——功能完全丢失但测试全绿
+
+### R44 详细说明：CI 失败必须先自诊断再修
+
+- CI 红后的第一步：`python3 scripts/gitcode_pr.py diagnose --repo ... --number N`
+- CI 侧分类约 60% 落"未知"，diagnose 对评论内嵌失败日志做本地二次归类（链接/编译/cmake/依赖/配方/补丁/权限/网络/文件缺失/测试空壳），输出证据行+修复要点
+- **禁止对"未知"失败盲改重推**（采样：同一 PR 反复重推同类失败=纯浪费 CI 额度）
+- 修复循环：diagnose → 修复 → 本地 W3 复验 → push → `submit --resume`；连续 2 轮同错误仍红 → 停损上报（衔接 R43）
+
+### R45 详细说明：SKILL_FEEDBACK 防丢失协议
+
+- 反馈不再是"流程走完才生成"，四道工具化防线（AI 无需主动执行）：
+  1. **骨架前置**：PR 创建瞬间与 R42 result 草稿同步生成 feedback 骨架（幂等）
+  2. **事件累积**：HANDOFF/CI 红绿/pr_created 经单一咽喉自动追加进 `.ohc/feedback-state/` 并刷入骨架时间线
+  3. **终态兜底**：result 写盘时自动补骨架并落 `feedback_pending` 字段（失败任务同样产出经验，消灭幸存者偏差）
+  4. **完成入仓**：`feedback --resume` 闭环（rc=0）自动 commit+push 任务分支随 PR 进 main
+- AI 唯一动作：终局填 4 个建议占位符 + 效率/检视小节
+- 运行时状态存顶层 `.ohc/feedback-state/`（gitignore，永不入 PR）；报告存 `feedback/SKILL_FEEDBACK_<id>.md`
+
+### R46 详细说明：result.json 全程生命周期草稿
+
+- 五挂点自动写草稿：init-archive(task_started) / conan-init(recipe_generated) / conan-verify 通过(conan_verify_passed) / finish 启动(w3_finish_started) / submit(pr_created)
+- 输出位置兜底：`--out` > `OHC_RESULT_OUT` > `$HOME/ohpcd-ai-worker-result.json`
+- 草稿 `draft:true` + `milestone`，终态 `draft:false`（ECS 据此区分"中断待续"与"终态上报"）
+- 防降级：终态已写入时不被里程碑草稿覆盖
+- AI 约束不变：终态必须走 `result` 命令，禁止手写 JSON
+
+### R47 详细说明：语言预检前置
+
+- checkout 后、进入适配主流程**前**必须跑 `lang-preflight`（scripts/ohc/lang_detect.py）
+- 三级判定：manifest > 构建系统 > 源码统计（≥70%）
+- 边界规则：C/C++ 混编按主体判（不算 mixed）；pybind11 绑定包判 cpp；辅助脚本不算主体；manifest 与统计矛盾判 mixed
+- c↔cpp 为兼容族不迁移（conan 流程通吃）；其余语言不匹配 → 立即终态 `env_unsupported` + `detected_language`（枚举值）+ `language_evidence` 三项（各 ≤200 字符）
+- 依据：0828 报告 ~20% 任务浪费在非 C/C++ 源码上
+
+### R48 详细说明：预算感知收尾
+
+- 动态预算/硬杀在平台侧；SKILL 唯一配合项 = 预算接近耗尽时主动收尾
+- `budget-check` 命令（scripts/ohc/budget.py）每个长阶段前调用，三态：ok / near_limit（剩余<40min：停止新编译新 PR，立即写 checkpoint 收尾）/ exhausted（exit 3，自动写 `budget_exhausted` 终态 + `checkpoint_steps` 断点数组）
+- 预算判定源优先级：OHC_TASK_DEADLINE > OHC_TASK_BUDGET_SEC > OHPCD_BUDGET_MINUTES > 240 分钟兜底
+- 详见 SKILL.md §1.3 R48 与 §4.2
+
+### R49 详细说明：依赖注入必须用 build_folder 私有 prefix
+
+> **来源**：asterisk-srtp 22.10.1（PR #6055）——19 轮 CI 全部 `C compiler cannot create executables`，本地却永远无法复现。知识条目 E524。
+
+#### 根因链
+
+1. `generate()` 向共享目录 `/usr/local`（SYS_PREFIX）注入依赖库
+2. CI worker 与本地**共享同一台机器的文件系统**
+3. CI 从制品仓下载的依赖 revision 与本地不同（共享库版 vs 静态库版、.pc 布局不同）
+4. 注入后污染共享目录 → clang 链接 configure 的 conftest 找到坏库 → 报编译器不可用
+5. 本地恰好有历史遗留的正确库 → 本地永远绿、CI 永远红
+
+#### 正确做法
+
+- 依赖注入目标 = `os.path.join(self.build_folder, "prefix")`（私有 prefix，不碰共享目录）
+- CPPFLAGS / LDFLAGS / PKG_CONFIG_PATH 全部指向私有 prefix
+- work 目录 = build_folder 子目录（conan 构建目录天然可执行，无需探测）
+
+#### 三个禁止
+
+| 禁止 | 原因 |
+|---|---|
+| 注入共享 `/usr/local`（SYS_PREFIX） | CI 与本地共享文件系统互相污染（本条根因） |
+| `os.access(path, os.X_OK)` 探测 work 目录 | HMDFS chmod 被忽略、权限固定 660，X_OK 恒 False → 永远回退到 noexec 路径 |
+| 只加 `ac_cv_prog_cc_works=yes` 不补 REQUIRED 依赖 | 跳过编译器检查后 configure 仍逐项报 uuid/jansson/sqlite3 等缺失，不是银弹 |
+
+#### 参考实现
+
+`archives/a/asterisk-srtp/22.10.1/conanfile.py`（`_prefix()` / `_ensure_uuid` / `_ensure_jansson` / `_ensure_sqlite3`）

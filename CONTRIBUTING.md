@@ -1,7 +1,7 @@
 # 贡献指南
 
 > 如何为鸿蒙编译知识库添加新软件或改进现有内容。
-> 对齐 SKILL.md v12.2 · Conan 配方体系
+> 对齐 SKILL.md v12.17 · Conan 配方体系
 
 ## 角色与权限
 
@@ -268,12 +268,12 @@ python3 $SKILL_ROOT/scripts/ohc-run.py resolve-deps --install <软件名>
 
 | 文档 | 说明 |
 |------|------|
-| [SKILL.md](SKILL.md) | 主操作手册（v12.2） |
+| [SKILL.md](SKILL.md) | 主操作手册（v12.17） |
 | [KNOW_YOUR_WHY.md](KNOW_YOUR_WHY.md) | 核心设计理念与约束 |
 | [docs/ADAPTATION_GUIDE.md](docs/ADAPTATION_GUIDE.md) | AI 适配操作手册 |
 | [docs/TEST_QUALITY_SPEC.md](docs/TEST_QUALITY_SPEC.md) | 测试质量规范 |
-| [references/iron-rules.md](references/iron-rules.md) | 43 条铁律详解（R1-R43） |
+| [references/iron-rules.md](references/iron-rules.md) | 49 条铁律详解（R1-R49） |
 
 ---
 
-*对齐 SKILL.md v12.2 · 2026-08-20*
+*对齐 SKILL.md v12.17 · 2026-09-01*

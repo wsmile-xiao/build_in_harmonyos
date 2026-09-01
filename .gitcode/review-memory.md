@@ -39,7 +39,7 @@ manifest.yaml 状态必须真实：`published`=CI upload 成功，`built`=验证
 conandata.yml 中 sha256 必须是源码包真实哈希。禁止全零、全 f、明显过短、删除字段。
 
 ### 5. `#ifdef __OHOS__` 必须有实质逻辑 (R8)
-源码和 patches/ 中可以使用 `#ifdef __OHOS__` 平台守卫（R8 允许），但必须有实质性适配逻辑，禁止空壳 stub：
+源码中可以使用 `#ifdef __OHOS__` 平台守卫（须有实质适配逻辑）；**patches/ 补丁文件中默认禁止引入平台宏**，应通过 POSIX 兼容方式修复（config.guess/config.sub、feature detection 等）。例外（如识别 libc 的探针程序、无 POSIX 等价物场景）须在 PR 中说明理由——口径以 `references/iron-rules.md` R8 为唯一权威（ding-libs PR #7133 教训：三方口径不一致导致检视与作者双标）：
 ```c
 // 禁止 — 空壳 stub, 绕过功能
 #ifdef __OHOS__

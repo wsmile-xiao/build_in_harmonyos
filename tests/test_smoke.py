@@ -152,5 +152,115 @@ class TestNoP0Regression(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)), "规则 ID 重复")
 
 
+class TestEditorAudit202609(unittest.TestCase):
+    """v12.17 主编反馈审计批次的防回归（SKILL_FEEDBACK 20 份核验后落地）。"""
+
+    def test_commit_nochange_wordings(self):
+        """git 无变更的三种实测措辞都必须被 submission 容错识别。
+
+        git 2.45 实测（2026-09-01）：
+          干净树: "nothing to commit, working tree clean"
+          仅未跟踪文件: "nothing added to commit but untracked files present"
+          有未暂存修改: "no changes added to commit"
+        反馈（websocketpp）引用的 "no changes added to commit" 并非
+        未跟踪文件场景的实际措辞——以实测为准。
+        """
+        src = (REPO / "scripts" / "ohc" / "submission.py").read_text(encoding="utf-8")
+        for wording in ("nothing to commit", "nothing added to commit",
+                        "no changes added to commit"):
+            self.assertIn(wording, src, f"commit 容错缺少措辞: {wording}")
+
+    def test_ghfast_bak_guard(self):
+        """陈旧 .bak 清理不覆盖；崩溃残留（当前含注入）才回滚。"""
+        from ohc.conan_verify import _recover_ghfast_bak
+        with tempfile.TemporaryDirectory() as d:
+            cd = Path(d) / "conandata.yml"
+            bak = Path(d) / "conandata.yml.ghfast-bak"
+            # 场景 A: 陈旧 .bak（当前无注入）→ 清理且不覆盖
+            cd.write_text("sources:\n  url: https://github.com/x/y.tar.gz\n")
+            bak.write_text("sources:\n  url: https://OLD-STALE/v0.tar.gz\n")
+            _recover_ghfast_bak(cd, bak)
+            self.assertFalse(bak.exists(), "陈旧 .bak 应被清理")
+            self.assertNotIn("OLD-STALE", cd.read_text(), "不应被陈旧 .bak 覆盖")
+            # 场景 B: 崩溃残留（当前含注入）→ 回滚
+            cd.write_text("sources:\n  url: https://ghfast.top/https://github.com/x/y.tar.gz\n")
+            bak.write_text("sources:\n  url: https://github.com/x/y.tar.gz\n")
+            _recover_ghfast_bak(cd, bak)
+            self.assertNotIn("ghfast.top", cd.read_text(), "注入应被回滚")
+            self.assertFalse(bak.exists())
+
+    def test_preflight_accepts_str_repo_dir(self):
+        """run_preflight 接受 str 输入（gitcode_pr._git_toplevel 返回 str）。
+
+        修复前 str/str TypeError 被外层 except 捕获为 PF0 环境闸故障，
+        迫使协作者 --no-preflight 绕行（3 份反馈）。
+        """
+        import shutil
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git 不可用")
+        import ohc.preflight as pf
+        real_run = subprocess.run
+
+        def git_abs_run(*a, **kw):
+            cmd = a[0] if a else kw.get("args")
+            if isinstance(cmd, list) and cmd and cmd[0] == "git":
+                new_cmd = [git] + cmd[1:]
+                if a:
+                    a = (new_cmd,) + a[1:]
+                else:
+                    kw["args"] = new_cmd
+            return real_run(*a, **kw)
+
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run([git, "init", "-q", d], check=True,
+                           capture_output=True)
+            # 直接调用：str 输入不得抛 TypeError
+            ok, probs = pf.run_preflight(d, "main", "HEAD")
+            self.assertIsInstance(ok, bool)
+            self.assertIsInstance(probs, list)
+
+    def test_writeback_submit_state(self):
+        """create-pr 成功后回写 .submit-state.json（保留既有字段）。"""
+        import shutil
+        git = shutil.which("git")
+        if not git:
+            self.skipTest("git 不可用")
+        from gitcode_pr import _writeback_submit_state
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run([git, "init", "-q", d], check=True,
+                           capture_output=True)
+            real_run = subprocess.run
+
+            def git_abs_run(*a, **kw):
+                cmd = a[0] if a else kw.get("args")
+                if isinstance(cmd, list) and cmd and cmd[0] == "git":
+                    new_cmd = [git, "-C", d] + cmd[1:]
+                    if a:
+                        a = (new_cmd,) + a[1:]
+                    else:
+                        kw["args"] = new_cmd
+                return real_run(*a, **kw)
+
+            state_file = Path(d) / ".submit-state.json"
+            state_file.write_text('{"software": "demo", "pr_number": null}',
+                                  encoding="utf-8")
+            import gitcode_pr as gp
+            orig = gp.subprocess.run
+            gp.subprocess.run = git_abs_run
+            try:
+                _writeback_submit_state({
+                    "number": 4242,
+                    "html_url": "https://gitcode.com/o/r/-/merge_requests/4242",
+                    "head": {"ref": "feat/demo-1.0"},
+                })
+            finally:
+                gp.subprocess.run = orig
+            import json
+            state = json.loads(state_file.read_text(encoding="utf-8"))
+            self.assertEqual(state["pr_number"], 4242)
+            self.assertEqual(state["software"], "demo", "既有字段必须保留")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
