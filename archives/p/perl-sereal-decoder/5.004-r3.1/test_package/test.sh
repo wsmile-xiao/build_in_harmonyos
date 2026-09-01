@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# test_package test for perl-sereal-decoder 5.004-r3
+# test_package test for perl-sereal-decoder 5.004-r3.1
 # Verifies Sereal::Decoder XS module package contains expected files.
 # Note: .so runtime loading is blocked on OHOS (E046 SELinux), so file-based
 # verification is used instead of runtime perl execution.
@@ -89,7 +89,7 @@ else
     echo "SKIP: llvm-readelf not available, skipping codesign check"
 fi
 
-echo "test perl-sereal-decoder 5.004-r3: $PASS/$TOTAL OK"
+echo "test perl-sereal-decoder 5.004-r3.1: $PASS/$TOTAL OK"
 if [ "$PASS" -ne "$TOTAL" ]; then
     echo "FAILED: $PASS/$TOTAL tests passed"
     exit 1

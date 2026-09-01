@@ -13,7 +13,7 @@
 
 | 版本 | 状态 | 编译日期 | 说明 |
 |------|------|---------|------|
-| 5.004-r3 | published | 2026-06-30 | XS 模块编译成功，ELF 已签名 |
+| 5.004-r3.1 | published | 2026-06-30 | XS 模块编译成功，ELF 已签名 |
 
 ## 构建系统
 
@@ -35,7 +35,7 @@ Perl ExtUtils::MakeMaker (Makefile.PL) — XS(C) 模块，需要 C 编译器。
 
 ```bash
 # Install via Conan
-conan install --requires=perl-sereal-decoder/5.004-r3@ohpcd/stable
+conan install --requires=perl-sereal-decoder/5.004-r3.1@ohpcd/stable
 
 # Use in Perl
 perl -e 'use Sereal::Decoder; my $dec = Sereal::Decoder->new(); my $data = $dec->decode($binary);'
@@ -55,7 +55,7 @@ perl -e 'use Sereal::Decoder; my $dec = Sereal::Decoder->new(); my $data = $dec-
 - .so runtime 加载在 HMDFS 上受 SELinux 限制 (E046)，需安装到系统 Perl 路径后使用
 - ELF 签名 (binary-sign-tool -selfSign) 已集成到 conanfile.py package() 方法
 - test_package 使用文件验证 + 语法检查模式，不做 runtime .so 加载
-- 详见 `5.004-r3/notes.md` for detailed adaptation notes
+- 详见 `5.004-r3.1/notes.md` for detailed adaptation notes
 
 ---
 *OpenHarmony 编译归档 · 初次编译: 2026-06-30, 更新: 2026-07-01*
