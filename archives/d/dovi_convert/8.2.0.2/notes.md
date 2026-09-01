@@ -1,8 +1,8 @@
-# Adaptation Notes — dovi_convert 8.2.0.1
+# Adaptation Notes — dovi_convert 8.2.0.2
 
 ## Software
 - **Name**: dovi_convert
-- **Version**: 8.2.0.1 (upstream tag v8.2.0)
+- **Version**: 8.2.0.2 (upstream tag v8.2.0)
 - **Description**: Dolby Vision Profile 7 -> 8.1 converter (single-file Python CLI)
 - **License**: GPL-3.0-or-later
 - **Source**: https://github.com/cryptochrome/dovi_convert/archive/refs/tags/v8.2.0.tar.gz
@@ -47,3 +47,7 @@
 - dovi_convert 是 CLI 应用程序 (application)，非库。package_info 中 libs=[]，bindirs=["bin"]。
 - 运行时外部工具 (ffmpeg/dovi_tool/mkvtoolnix/mediainfo) 不是 Conan 依赖，由用户在目标系统单独安装。
 - 上游 v8.2.0 changelog: 引入 Backup & Restore 功能 (backup/restore 子命令、--backup/--delete 标志)。
+---
+
+**编译结束**: 2026-08-24 10:13
+**最终状态**: built

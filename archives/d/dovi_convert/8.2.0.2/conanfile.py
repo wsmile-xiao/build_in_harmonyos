@@ -19,13 +19,13 @@ import stat
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
-from conan.tools.files import copy, get, replace_in_file
+from conan.tools.files import apply_conandata_patches, copy, get
 from conan.tools.layout import basic_layout
 
 
 class DoviConvertConan(ConanFile):
     name = "dovi_convert"
-    version = "8.2.0.1"
+    version = "8.2.0.2"
     description = "Dolby Vision Profile 7 -> 8.1 converter (single-file Python CLI)"
     license = "GPL-3.0-or-later"
     homepage = "https://github.com/cryptochrome/dovi_convert"
@@ -33,6 +33,9 @@ class DoviConvertConan(ConanFile):
     package_type = "application"
 
     settings = "os", "arch", "compiler", "build_type"
+
+    def export_sources(self):
+        return ["patches/*"]
 
     def validate(self):
         # R32: settings.os check must use in ("Linux", "OHOS")
