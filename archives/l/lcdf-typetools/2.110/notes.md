@@ -69,8 +69,11 @@ ttftotype42 --version → LCDF typetools 2.110
 1. 必须设置 TMPDIR=/data/storage/el2/base/cache 避免 HMDFS 权限问题
 2. 建议在 ~/tmp 目录编译，避免 HMDFS 文件系统限制
 3. otftotfm 功能受限（禁用了 kpathsea），其他工具正常工作
-
 ---
 
-**编译结束**: 2026-06-09 10:54
+**编译结束**: 2026-08-27 01:23
+**最终状态**: built
+---
+
+**编译结束**: 2026-08-27 01:25
 **最终状态**: built
