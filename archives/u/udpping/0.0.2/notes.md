@@ -60,13 +60,11 @@ Usage: udpping [-s] [-c server] [-p port] [args]
 
 ## 知识提取
 
-- E007 平台真理：OpenHarmony 需要 `<sys/time.h>` 才能使用 `struct timeval`（已作为补丁记录）
+- E007 平台真理：OpenHarmony 需要 `<sys/time.h>` 才能使用 `struct timeval`（已作为补丁记录）---
 
----
-
-**编译结束**: 2026-05-14 12:51
+**编译结束**: 2026-08-23 00:26
 **最终状态**: built
 ---
 
-**编译结束**: 2026-05-14 12:55
-**最终状态**: built
+**编译结束**: 2026-08-23 00:31
+**最终状态**: published
