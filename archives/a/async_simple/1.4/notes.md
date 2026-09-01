@@ -105,8 +105,7 @@ $ ls share/async_simple/ → async_simple-config.cmake + targets文件
 - 如需AIO支持需安装libaio并去掉ASYNC_SIMPLE_DISABLE_AIO
 - 不带v前缀的tag格式：下载URL为 `1.4.tar.gz` 而非 `v1.4.tar.gz`
 - 测试需安装GTest预编译包googletest 1.15.2，手动指定路径参数
-
 ---
 
-**编译结束**: 2026-06-17
-**最终状态**: published
+**编译结束**: 2026-07-15 09:46
+**最终状态**: built
