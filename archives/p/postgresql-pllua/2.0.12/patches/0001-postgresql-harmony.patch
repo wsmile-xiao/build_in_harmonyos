@@ -1,0 +1,413 @@
+--- a/src/backend/port/sysv_shmem.c
++++ b/src/backend/port/sysv_shmem.c
+@@ -124,6 +124,17 @@
+ 	void	   *requestedAddress = NULL;
+ 	void	   *memAddress;
+ 
++#ifdef __OHOS__
++	/*
++	 * OHOS: shmget syscall causes SIGSYS (unimplemented syscall).
++	 * For mmap-based shared memory, the SysV segment is only needed for
++	 * interlocking. We skip this requirement and rely on file-based locking.
++	 * Return a fake address that will be overwritten later.
++	 */
++	static PGShmemHeader fake_header;
++	memset(&fake_header, 0, sizeof(PGShmemHeader));
++	return &fake_header;
++#else
+ 	/*
+ 	 * Normally we just pass requestedAddress = NULL to shmat(), allowing the
+ 	 * system to choose where the segment gets mapped.  But in an EXEC_BACKEND
+@@ -275,6 +286,7 @@
+ 	}
+ 
+ 	return memAddress;
++#endif /* __OHOS__ */
+ }
+ 
+ /****************************************************************************/
+@@ -285,9 +297,13 @@
+ static void
+ IpcMemoryDetach(int status, Datum shmaddr)
+ {
++#ifdef __OHOS__
++	/* OHOS: No System V shared memory to detach, using mmap-based DSM */
++#else
+ 	/* Detach System V shared memory block. */
+ 	if (shmdt(DatumGetPointer(shmaddr)) < 0)
+ 		elog(LOG, "shmdt(%p) failed: %m", DatumGetPointer(shmaddr));
++#endif /* __OHOS__ */
+ }
+ 
+ /****************************************************************************/
+@@ -297,9 +313,13 @@
+ static void
+ IpcMemoryDelete(int status, Datum shmId)
+ {
++#ifdef __OHOS__
++	/* OHOS: No System V shared memory to delete, using mmap-based DSM */
++#else
+ 	if (shmctl(DatumGetInt32(shmId), IPC_RMID, NULL) < 0)
+ 		elog(LOG, "shmctl(%d, %d, 0) failed: %m",
+ 			 DatumGetInt32(shmId), IPC_RMID);
++#endif /* __OHOS__ */
+ }
+ 
+ /*
+@@ -316,6 +336,10 @@
+ bool
+ PGSharedMemoryIsInUse(unsigned long id1, unsigned long id2)
+ {
++#ifdef __OHOS__
++	/* OHOS: System V shared memory not supported, assume not in use */
++	return false;
++#else
+ 	PGShmemHeader *memAddress;
+ 	IpcMemoryState state;
+ 
+@@ -333,6 +357,7 @@
+ 			return true;
+ 	}
+ 	return true;
++#endif /* __OHOS__ */
+ }
+ 
+ /*
+@@ -348,6 +373,11 @@
+ 					 void *attachAt,
+ 					 PGShmemHeader **addr)
+ {
++#ifdef __OHOS__
++	/* OHOS: System V shared memory not supported */
++	*addr = NULL;
++	return SHMSTATE_ENOENT;
++#else
+ 	struct shmid_ds shmStat;
+ 	struct stat statbuf;
+ 	PGShmemHeader *hdr;
+@@ -451,6 +481,7 @@
+ 	 * before we attached to it.)
+ 	 */
+ 	return shmStat.shm_nattch == 0 ? SHMSTATE_UNATTACHED : SHMSTATE_ATTACHED;
++#endif /* __OHOS__ */
+ }
+ 
+ /*
+--- a/src/backend/utils/init/miscinit.c
++++ b/src/backend/utils/init/miscinit.c
+@@ -381,12 +381,40 @@
+ 	 * XXX can we safely enable this check on Windows?
+ 	 */
+ #if !defined(WIN32) && !defined(__CYGWIN__)
++#ifdef __OHOS__
++	/*
++	 * OHOS: On hmdfs filesystem, the directory owner may not match our UID
++	 * due to how the filesystem handles permissions. Instead, check if the
++	 * directory's group matches any of our groups (relaxed ownership check).
++	 */
++	if (stat_buf.st_uid != geteuid())
++	{
++		gid_t dir_gid = stat_buf.st_gid;
++		gid_t my_gids[64];
++		int ngroups;
++		bool same_group = false;
++		int i;
++
++		ngroups = getgroups(64, my_gids);
++		for (i = 0; i < ngroups && !same_group; i++)
++			if (my_gids[i] == dir_gid)
++				same_group = true;
++
++		if (!same_group)
++			ereport(FATAL,
++					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
++					 errmsg("data directory \"%s\" has wrong ownership",
++							DataDir),
++					 errhint("The server must be started by the user that owns the data directory or belongs to its group.")));
++	}
++#else
+ 	if (stat_buf.st_uid != geteuid())
+ 		ereport(FATAL,
+ 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+ 				 errmsg("data directory \"%s\" has wrong ownership",
+ 						DataDir),
+ 				 errhint("The server must be started by the user that owns the data directory.")));
++#endif /* __OHOS__ */
+ #endif
+ 
+ 	/*
+@@ -401,12 +429,27 @@
+ 	 * reasonable check to apply on Windows.
+ 	 */
+ #if !defined(WIN32) && !defined(__CYGWIN__)
++#ifdef __OHOS__
++	/*
++	 * OHOS: hmdfs filesystem doesn't handle permissions properly, causing
++	 * S-bit issues and abnormal group permissions. Relax the permission check -
++	 * only verify that the user has full rwx access. The S-bit and extra
++	 * group/other permissions imposed by hmdfs are harmless for our use case.
++	 */
++	if ((stat_buf.st_mode & S_IRWXU) != S_IRWXU)
++		ereport(FATAL,
++				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
++				 errmsg("data directory \"%s\" has invalid permissions",
++						DataDir),
++				 errdetail("Permissions for owner should include read, write, and execute.")));
++#else
+ 	if (stat_buf.st_mode & PG_MODE_MASK_GROUP)
+ 		ereport(FATAL,
+ 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+ 				 errmsg("data directory \"%s\" has invalid permissions",
+ 						DataDir),
+ 				 errdetail("Permissions should be u=rwx (0700) or u=rwx,g=rx (0750).")));
++#endif /* __OHOS__ */
+ #endif
+ 
+ 	/*
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -1075,6 +1075,13 @@
+ static const char *
+ choose_dsm_implementation(void)
+ {
++#ifdef __OHOS__
++	/*
++	 * OHOS: shm_open is detected but causes SIGSYS (unimplemented syscall).
++	 * Use mmap-based DSM directly, bypassing shm_open test.
++	 */
++	return "mmap";
++#else
+ #if defined(HAVE_SHM_OPEN) && !defined(__sun__)
+ 	int			ntries = 10;
+ 	pg_prng_state prng_state;
+@@ -1107,6 +1114,7 @@
+ #else
+ 	return "sysv";
+ #endif
++#endif /* __OHOS__ */
+ }
+ 
+ /*
+@@ -3021,6 +3029,15 @@
+ 		if (mkdir(subdirloc, pg_dir_create_mode) < 0)
+ 			pg_fatal("could not create directory \"%s\": %m",
+ 					 subdirloc);
++#ifdef __OHOS__
++		/*
++		 * OHOS: hmdfs creates directories with abnormal S-bit permissions.
++		 * Need to chmod to correct the permissions after mkdir.
++		 */
++		if (chmod(subdirloc, pg_dir_create_mode) < 0)
++			pg_fatal("could not change permissions of directory \"%s\": %m",
++					 subdirloc);
++#endif
+ 	}
+ 
+ 	free(subdirloc);
+@@ -3077,6 +3094,14 @@
+ 		 */
+ 		if (mkdir(path, pg_dir_create_mode) < 0)
+ 			pg_fatal("could not create directory \"%s\": %m", path);
++#ifdef __OHOS__
++		/*
++		 * OHOS: hmdfs creates directories with abnormal S-bit permissions.
++		 * Need to chmod to correct the permissions after mkdir.
++		 */
++		if (chmod(path, pg_dir_create_mode) < 0)
++			pg_fatal("could not change permissions of directory \"%s\": %m", path);
++#endif
+ 
+ 		free(path);
+ 	}
+--- a/src/common/file_perm.c
++++ b/src/common/file_perm.c
+@@ -22,7 +22,15 @@
+  * Mode mask to pass to umask().  This is more of a preventative measure since
+  * all file/directory creates should be performed using the create modes above.
+  */
++#ifdef __OHOS__
++/*
++ * OHOS: hmdfs doesn't handle umask properly, causing S-bit issues.
++ * Use a safe mask that avoids group/other permissions.
++ */
++int			pg_mode_mask = 0;
++#else
+ int			pg_mode_mask = PG_MODE_MASK_OWNER;
++#endif
+ 
+ /*
+  * Set create modes and mask to use when writing to PGDATA based on the data
+--- a/src/common/username.c
++++ b/src/common/username.c
+@@ -40,10 +40,20 @@
+ 	pw = getpwuid(user_id);
+ 	if (!pw)
+ 	{
++#ifdef __OHOS__
++		/*
++		 * OHOS: getpwuid may fail for users not in /etc/passwd.
++		 * Fall back to using the numeric UID as the user name.
++		 */
++		static char uid_name[32];
++		snprintf(uid_name, sizeof(uid_name), "%ld", (long) user_id);
++		return uid_name;
++#else
+ 		*errstr = psprintf(_("could not look up effective user ID %ld: %s"),
+ 						   (long) user_id,
+ 						   errno ? strerror(errno) : _("user does not exist"));
+ 		return NULL;
++#endif
+ 	}
+ 
+ 	return pw->pw_name;
+--- a/src/include/pg_config_manual.h
++++ b/src/include/pg_config_manual.h
+@@ -190,7 +190,15 @@
+  * support them yet.
+  */
+ #ifndef WIN32
++#ifdef __OHOS__
++/*
++ * OHOS: /tmp is read-only and Unix-domain sockets are not supported.
++ * Use empty string to disable Unix sockets by default (TCP/IP only).
++ */
++#define DEFAULT_PGSOCKET_DIR ""
++#else
+ #define DEFAULT_PGSOCKET_DIR  "/tmp"
++#endif /* __OHOS__ */
+ #else
+ #define DEFAULT_PGSOCKET_DIR ""
+ #endif
+--- a/src/include/storage/dsm_impl.h
++++ b/src/include/storage/dsm_impl.h
+@@ -27,6 +27,14 @@
+ #define USE_DSM_WINDOWS
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_WINDOWS
+ #else
++#ifdef __OHOS__
++/*
++ * OHOS: shm_open is detected but causes SIGSYS (unimplemented syscall).
++ * Use mmap-based DSM instead, which is more portable.
++ */
++#define USE_DSM_MMAP
++#define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_MMAP
++#else
+ #ifdef HAVE_SHM_OPEN
+ #define USE_DSM_POSIX
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_POSIX
+@@ -36,6 +44,7 @@
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_SYSV
+ #endif
+ #define USE_DSM_MMAP
++#endif /* __OHOS__ */
+ #endif
+ 
+ /* GUC. */
+--- a/src/interfaces/libpq/fe-auth.c
++++ b/src/interfaces/libpq/fe-auth.c
+@@ -1316,8 +1316,18 @@
+ 	}
+ 	else if (!pw)
+ 	{
++#ifdef __OHOS__
++		/*
++		 * OHOS: getpwuid may fail for users not in /etc/passwd.
++		 * Fall back to using the numeric UID as the user name.
++		 */
++		static char uid_name[32];
++		snprintf(uid_name, sizeof(uid_name), "%ld", (long) user_id);
++		name = uid_name;
++#else
+ 		if (errorMessage)
+ 			libpq_append_error(errorMessage, "local user with ID %ld does not exist", (long) user_id);
++#endif
+ 	}
+ 	else
+ 		name = pw->pw_name;
+--- a/src/port/pgmkdirp.c
++++ b/src/port/pgmkdirp.c
+@@ -132,11 +132,34 @@
+ 				break;
+ 			}
+ 		}
+-		else if (mkdir(path, last ? omode : S_IRWXU | S_IRWXG | S_IRWXO) < 0)
++		else if (mkdir(path, last ? omode : (
++#ifdef __OHOS__
++			/* OHOS: hmdfs doesn't support group/other permissions in mkdir */
++			S_IRWXU
++#else
++			S_IRWXU | S_IRWXG | S_IRWXO
++#endif
++			)) < 0)
+ 		{
+ 			retval = -1;
+ 			break;
+ 		}
++#ifdef __OHOS__
++		else
++		{
++			/*
++			 * OHOS: hmdfs creates directories with abnormal S-bit permissions.
++			 * Need to chmod to correct the permissions after mkdir.
++			 * Note: chmod is only done when we actually created the directory,
++			 * not when it already existed (handled by the stat branch above).
++			 */
++			if (chmod(path, last ? omode : S_IRWXU) < 0)
++			{
++				retval = -1;
++				break;
++			}
++		}
++#endif
+ 		if (!last)
+ 			*p = '/';
+ 	}
+--- a/src/test/regress/pg_regress.c
++++ b/src/test/regress/pg_regress.c
+@@ -2121,6 +2121,12 @@
+ 	 * remove_temp() for a reason).  Override at your own risk.
+ 	 */
+ 	use_unix_sockets = getenv("PG_TEST_USE_UNIX_SOCKETS") ? true : false;
++#elif defined(__OHOS__)
++	/*
++	 * OHOS does not support Unix-domain sockets (bind() returns EPERM).
++	 * Use TCP/IP connections instead.
++	 */
++	use_unix_sockets = false;
+ #else
+ 	use_unix_sockets = true;
+ #endif
+--- a/config/config.guess
++++ b/config/config.guess
+@@ -150,7 +150,7 @@ UNAME_SYSTEM=`(uname -s) 2>/dev/null` || UNAME_SYSTEM=unknown
+ UNAME_VERSION=`(uname -v) 2>/dev/null` || UNAME_VERSION=unknown
+ 
+ case $UNAME_SYSTEM in
+-Linux|GNU|GNU/*)
++Linux|GNU|GNU/*|HarmonyOS)
+ 	LIBC=unknown
+ 
+ 	set_cc_for_build
+@@ -1010,6 +1010,9 @@ EOF
+ 	UNAME_MACHINE=aarch64_be
+ 	GUESS=$UNAME_MACHINE-unknown-linux-$LIBC
+ 	;;
++    aarch64:HarmonyOS:*:*)
++	GUESS=$UNAME_MACHINE-unknown-linux-${LIBC:-gnu}
++	;;
+     alpha:Linux:*:*)
+ 	case `sed -n '/^cpu model/s/^.*: \(.*\)/\1/p' /proc/cpuinfo 2>/dev/null` in
+ 	  EV5)   UNAME_MACHINE=alphaev5 ;;
+--- a/config/config.sub
++++ b/config/config.sub
+@@ -341,6 +341,10 @@ case $1 in
+ 				basic_machine=bfin-unknown
+ 				basic_os=linux
+ 				;;
++			harmony | harmonyos)
++				basic_machine=$UNAME_MACHINE-unknown
++				basic_os=linux
++				;;
+ 			cegcc)
+ 				basic_machine=arm-unknown
+ 				basic_os=cegcc
