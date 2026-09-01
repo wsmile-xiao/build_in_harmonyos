@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan test_package for dovi_convert 8.2.0.
+"""Conan test_package for dovi_convert 8.2.0.2.
 
 Verifies the dovi_convert CLI is installed and executable, and that
 its help/usage path works without invoking external media tools
