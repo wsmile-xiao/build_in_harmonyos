@@ -1513,6 +1513,7 @@
 | **mdns-scan** | 0.5 | ✅ 已发布 |  |  | - | - | [📄](archives/m/mdns-scan/0.5/) |
 | **mecab** | 0.996 | partial |  | Autotools | 3 | libc++ (替换 libstdc++) | [📄](archives/m/mecab/0.996/) |
 | **mecab-ko** | 0.996-ko-0.9.2 | ✅ 已编译 |  |  | 8 | - | [📄](archives/m/mecab-ko/0.996-ko-0.9.2/) |
+| **mecab-ko-dic** | 2.1.1-20180720 | ✅ 已编译 |  | none | - | mecab-ko | [📄](archives/m/mecab-ko-dic/2.1.1-20180720/) |
 | **mediamtx** | 1.11.3 | ✅ 已发布 |  | go | - | - | [📄](archives/m/mediamtx/1.11.3/) |
 | **melange** | 0.23.4、0.53.2、v0.53.2 | ✅ 已编译 |  |  | - | - | [📄](archives/m/melange/v0.53.2/) |
 | **memcached** | 1.6.42 | partial |  |  | - | - | [📄](archives/m/memcached/1.6.42/) |
