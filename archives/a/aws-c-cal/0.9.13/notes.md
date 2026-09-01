@@ -30,6 +30,13 @@
 ## 注意事项
 - aws-c-common 和 aws-lc 的 conanfile.py 缺少 cpp_info.includedirs 声明，需要单独修复
 - 测试用例使用前向声明避免依赖 aws-c-common 头文件
+- 已添加 cpp_info.set_property (cmake_file_name, cmake_target_name) 以改善下游 CMake 消费体验
+- conan-verify-report.md G0 截断文本已修复
+
+## 适配改进 (PR 修正)
+- 在 package_info() 中添加 cmake_file_name 和 cmake_target_name 属性，使消费者可通过 find_package(aws-c-cal) 正确解析目标
+- 修复 conan-verify-report.md 中 G0 节被截断的文本
+
 ---
 
 **编译结束**: 2026-08-31 00:56
