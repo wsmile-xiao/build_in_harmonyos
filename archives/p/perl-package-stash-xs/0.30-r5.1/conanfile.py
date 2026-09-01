@@ -18,7 +18,7 @@ from conan.tools.layout import basic_layout
 
 class PerlPackageStashXsConan(ConanFile):
     name = "perl-package-stash-xs"
-    version = "0.30-r5"
+    version = "0.30-r5.1"
     description = "Faster and more correct implementation of the Package::Stash API (XS)"
     license = "perl_5"
     homepage = "https://metacpan.org/dist/Package-Stash-XS"
@@ -43,7 +43,7 @@ class PerlPackageStashXsConan(ConanFile):
         # Perl XS module build: perl Makefile.PL && make
         # Patch already modifies Makefile.PL with HarmonyOS-specific INC and dynamic_lib flags
         home = os.environ.get("HOME", "/")
-        perl_lib = f"{home}/usr/local/lib/site_perl/5.42.0:{home}/usr/local/lib/5.42.0"
+        perl_lib = f"{home}/usr/local/lib/site_perl/5.42.2:{home}/usr/local/lib/5.42.2"
         os.environ["PERL5LIB"] = perl_lib
         self.run(f"perl Makefile.PL PREFIX={home}/usr/local", cwd=self.source_folder)
         self.run("make -j1", cwd=self.source_folder)
