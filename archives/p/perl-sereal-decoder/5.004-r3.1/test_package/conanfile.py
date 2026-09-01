@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan test_package — perl-sereal-decoder 5.004-r3 (Sereal::Decoder)
+"""Conan test_package — perl-sereal-decoder 5.004-r3.1 (Sereal::Decoder)
 
 Tests that Sereal::Decoder package contains expected files and Perl syntax is valid.
 On OHOS/HMDFS, .so runtime loading in conan cache is blocked by file permission

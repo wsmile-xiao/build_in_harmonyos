@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for perl-sereal-decoder 5.004-r3 (Sereal::Decoder).
+"""Conan recipe for perl-sereal-decoder 5.004-r3.1 (Sereal::Decoder).
 
 XS module — Sereal binary deserialization format decoder.
 Build system: ExtUtils::MakeMaker (Makefile.PL) + xsubpp + clang.
@@ -23,7 +23,7 @@ from conan.tools.files import get, apply_conandata_patches, export_conandata_pat
 
 class PerlSerealDecoderConan(ConanFile):
     name = "perl-sereal-decoder"
-    version = "5.004-r3"
+    version = "5.004-r3.1"
     description = "Sereal::Decoder - Sereal binary deserialization format decoder (XS module)"
     license = "perl_5"
     homepage = "https://metacpan.org/dist/Sereal-Decoder"
@@ -157,7 +157,7 @@ class PerlSerealDecoderConan(ConanFile):
         # XS module: .so is loaded by Perl's XSLoader/DynaLoader
         self.cpp_info.libs = []
         perl_arch = "aarch64-linux" if str(self.settings.arch) in ("armv8", "aarch64") else "x86_64-linux"
-        perl_ver = "5.42.0"
+        perl_ver = "5.42.2"
         lib_base = os.path.join(
             "data", "service", "hnp", "perl.org", f"perl_{perl_ver}",
             "lib", "site_perl", perl_ver, perl_arch
