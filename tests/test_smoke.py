@@ -261,6 +261,51 @@ class TestEditorAudit202609(unittest.TestCase):
             self.assertEqual(state["pr_number"], 4242)
             self.assertEqual(state["software"], "demo", "既有字段必须保留")
 
+    def test_pf5_patch_platform_macro(self):
+        """PF5: patches/ 新增行 __OHOS__ 拦截；上下文行/其他宏豁免。"""
+        from ohc.preflight import check_patch_platform_macro
+        with tempfile.TemporaryDirectory() as d:
+            td = Path(d)
+            pkg = td / "patches"
+            pkg.mkdir()
+            (pkg / "0001.patch").write_text(
+                "--- a/x.c\n+++ b/x.c\n@@\n ctx\n+#ifdef __OHOS__\n-old\n",
+                encoding="utf-8")
+            (pkg / "0002.patch").write_text(
+                "--- a/y.c\n+++ b/y.c\n@@\n+#ifdef __linux__\n",
+                encoding="utf-8")
+            (pkg / "0003.patch").write_text(
+                "--- a/z.c\n+++ b/z.c\n@@\n  #ifdef __OHOS__\n+new\n",
+                encoding="utf-8")
+            hits = check_patch_platform_macro(
+                td, ["patches/0001.patch", "patches/0002.patch"])
+            self.assertEqual(len(hits), 1, "只拦 __OHOS__ 新增行")
+            self.assertIn("0001", hits[0])
+            self.assertIn("R8", hits[0])
+            # 上下文行（上游已有）豁免
+            self.assertEqual(
+                check_patch_platform_macro(td, ["patches/0003.patch"]), [])
+
+    def test_pf6_recipe_shared_prefix(self):
+        """PF6: 共享前缀注入拦截；参考配方（DEFAULT_PREFIX/用户级）豁免。"""
+        from ohc.preflight import check_recipe_shared_prefix
+        with tempfile.TemporaryDirectory() as d:
+            td = Path(d)
+            (td / "conanfile.py").write_text(
+                'import os\nP = os.environ.get("SYS_PREFIX") or "/usr/local"\n',
+                encoding="utf-8")
+            hits = check_recipe_shared_prefix(td, ["conanfile.py"])
+            self.assertEqual(len(hits), 1)
+            self.assertIn("R49/E524", hits[0])
+            # 仓库真实参考配方不得误伤
+            ref = (REPO / "archives" / "a" / "asterisk-srtp" / "22.10.1"
+                   / "conanfile.py")
+            if ref.exists():
+                self.assertEqual(
+                    check_recipe_shared_prefix(
+                        REPO, ["archives/a/asterisk-srtp/22.10.1/conanfile.py"]),
+                    [], "参考配方合法形态被误伤")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

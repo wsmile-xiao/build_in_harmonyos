@@ -222,9 +222,78 @@ def check_deps_in_registry(pkg_dir: Path,
 
 # ── 总入口 ───────────────────────────────────────────────────
 
+def check_patch_platform_macro(repo_dir: Path, files: list[str]) -> list[str]:
+    """PF5 补丁平台宏闸（R8，v12.17）：patches/ 中默认禁止引入平台宏。
+
+    只检查本次 PR 变更的补丁文件（历史存量不拦），只命中补丁新增行
+    （'+' 开头，排除 '+++' 文件头）——上下文行里的 __OHOS__ 属上游源码，
+    R8 不管辖。
+    """
+    findings: list[str] = []
+    for f in files:
+        if "patches/" not in f or not f.endswith((".patch", ".diff")):
+            continue
+        pf = repo_dir / f
+        if not pf.is_file():
+            continue
+        try:
+            text = pf.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if line.startswith("+") and not line.startswith("+++") \
+                    and "__OHOS__" in line:
+                findings.append(
+                    f"PF5 补丁平台宏闸(R8): {f}:{lineno} 新增 `__OHOS__`——"
+                    "patches/ 默认禁止平台宏（口径 iron-rules.md R8），"
+                    "优先 POSIX 兼容写法。确属例外（如识别 libc 的探针程序）"
+                    "须在 PR 说明理由，并 --no-preflight 显式跳过")
+                break
+    return findings
+
+
+_PF6_SHARED_PREFIX = re.compile(
+    r'environ\.get\(\s*["\']SYS_PREFIX|'
+    r'environ\[\s*["\']SYS_PREFIX["\']\s*\]|'
+    r'["\']/usr/local["\']')
+
+
+def check_recipe_shared_prefix(repo_dir: Path, files: list[str]) -> list[str]:
+    """PF6 依赖注入前缀闸（R49/E524，v12.17）：禁止注入共享系统前缀。
+
+    命中模式：环境变量读取 SYS_PREFIX、引号包裹的 /usr/local 字面量。
+    合法形态不拦：os.environ.get("DEFAULT_PREFIX")（可覆盖）、
+    os.path.join(expanduser("~"), "usr", "local")（用户级前缀）、
+    文档字符串中裸写的 /usr/local（无引号）。参考实现：
+    archives/a/asterisk-srtp/22.10.1/conanfile.py。
+    """
+    findings: list[str] = []
+    for f in files:
+        if not f.endswith("conanfile.py") or "/patches/" in f:
+            continue
+        pf = repo_dir / f
+        if not pf.is_file():
+            continue
+        try:
+            text = pf.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            if line.lstrip().startswith("#"):        # 注释行不拦
+                continue
+            if _PF6_SHARED_PREFIX.search(line):
+                findings.append(
+                    f"PF6 依赖注入前缀闸(R49/E524): {f}:{lineno} 注入共享系统前缀——"
+                    "CI worker 与本地共享文件系统会互相污染（E524: 19 轮 CI 全挂根因）。"
+                    "改用 build_folder 私有 prefix（CPPFLAGS/LDFLAGS/PKG_CONFIG_PATH "
+                    "三链指向），参考 archives/a/asterisk-srtp/22.10.1/conanfile.py")
+                break
+    return findings
+
+
 def run_preflight(repo_dir, base: str, head: str,
                   registry: str = DEFAULT_REGISTRY) -> tuple[bool, list[str]]:
-    """执行 PF1-PF4。返回 (通过?, 全部问题清单)。任何异常 fail-closed。"""
+    """执行 PF1-PF6。返回 (通过?, 全部问题清单)。任何异常 fail-closed。"""
     # 调用方可能传 str（gitcode_pr._git_toplevel 返回 str），
     # 统一包装为 Path，避免下方 repo_dir / d 抛 str/str TypeError（PF0 假故障）
     repo_dir = Path(repo_dir)
@@ -237,6 +306,8 @@ def run_preflight(repo_dir, base: str, head: str,
                        "或 --no-preflight 显式跳过"]
     findings += check_single_package(files)
     findings += check_no_binaries(files)
+    findings += check_patch_platform_macro(repo_dir, files)
+    findings += check_recipe_shared_prefix(repo_dir, files)
     dirs = sorted(_pkg_dirs(files))
     for d in dirs:                      # PF1 已保证最多 1 个
         pkg = repo_dir / d
@@ -257,5 +328,5 @@ if __name__ == "__main__":
     for p in probs:
         log_fail(p)
     if ok:
-        log_ok("preflight PF1-PF4 全部通过")
+        log_ok("preflight PF1-PF6 全部通过")
     sys.exit(0 if ok else 1)

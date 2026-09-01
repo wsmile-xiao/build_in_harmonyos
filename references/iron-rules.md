@@ -266,6 +266,8 @@ conan create 失败
 
 ### R8 详细说明：源码修改"四不"准则
 
+> **工具化（v12.17）：** preflight PF5 门禁机械拦截——PR 变更的 patches/*.patch 新增行（+ 开头）含 `__OHOS__` 即 fail-closed，上下文行与历史存量豁免；例外场景需 PR 说明理由后 `--no-preflight` 显式跳过（留痕可审计）。
+
 > **核心原则：你的修改对非鸿蒙平台必须是透明的。**
 >
 > **注意**：源码中可以使用 `#ifdef __OHOS__` 守卫（允许），但 patches/ 补丁文件中不应引入 `#ifdef __OHOS__`，应通过 POSIX 兼容方式修复（如修改 config.guess/config.sub、条件检查等）。
@@ -887,6 +889,8 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$DEFAULT_PREFIX 2>&1 | tail -3
 - 详见 SKILL.md §1.3 R48 与 §4.2
 
 ### R49 详细说明：依赖注入必须用 build_folder 私有 prefix
+
+> **工具化（v12.17）：** preflight PF6 门禁——PR 变更的 conanfile.py 命中 `environ.get("SYS_PREFIX")`/`environ["SYS_PREFIX"]`/引号包裹的 `/usr/local` 字面量即 fail-closed；参考配方的合法形态（`DEFAULT_PREFIX` 环境覆盖 + `~/usr/local` 用户级默认）豁免。
 
 > **来源**：asterisk-srtp 22.10.1（PR #6055）——19 轮 CI 全部 `C compiler cannot create executables`，本地却永远无法复现。知识条目 E524。
 
