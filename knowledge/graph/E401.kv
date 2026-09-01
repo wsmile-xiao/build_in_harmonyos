@@ -1,0 +1,69 @@
+#====================================================================
+# E332 — 上游 golden 由 glibc 生成，OHOS musl 正确舍入导致 real 回归 ±1ULP
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     E401
+trigger_tool:           mlton-test
+phase:                  testing
+error_signature:        real\.ok.*fail|expected.*got.*ULP|real.*difference with -type-check
+
+# Layer 1: Recognition
+severity:               2
+category:               compat, portability, libc, testing, golden-file
+match_keywords:         real.ok, golden, atan2f, ULP, musl, glibc, platform variant, {arch}-{os}.ok, arm64-ohos.ok, MLton, libm, correct rounding
+title:                  MLton real 回归 golden 由 amd64-linux/glibc 生成，OHOS musl 正确舍入的 atan2f x<0 值低 1ULP，需新增 {arch}-{os}.ok 平台 oracle 变体
+
+# Layer 2: Diagnosis
+root_cause:             MLton 回归框架 bin/regression 的 oracle 选择逻辑默认回退到通用 real.ok（等价于 real.amd64-linux.ok），该 golden 由上游在 amd64-linux（glibc）上生成：对 Real32.atan2/atan2f x<0 有限输入记录 0x3fc90fda（低 1 ULP 舍入）。OHOS 由 clang + musl libm 对相同输入返回正确舍入 0x3fc90fdb，与上游自带的 real.x86-linux.ok / real.amd64-darwin.ok 一致。两者 bit 级差恰好 1 ULP（expected 1.570796251 vs actual 1.570796371），make check 的 real 回归因此报 "real: difference"。C 探针与最小 SML（Basis Real32.Math.atan2 与 FFI atan2f）逐位一致，证明无包装/类型提升/格式化参与；差异 100% 来自上游默认 oracle 生成平台的 libm 舍入特性，属平台精度机制差异，非 MLton 缺陷、非格式化缺陷。
+affected_scope:         在 OHOS（musl 正确舍入）上运行 MLton make check real 回归、且上游 golden 由 glibc 平台生成的场景；同类问题可扩散到任何以 glibc 平台 golden 校验浮点输出的测试框架（atan2/atan2f x<0 有限输入等 ±1ULP 边界）。
+verification_cmd:       C 探针：atan2f(FLT_MAX, ±x/±0) 返回 0x3fc90fdb 且 errno=0、round=FE_TONEAREST；最小 SML 验证 Basis 与 FFI bits 逐位一致；放置变体后运行 bin/regression -test-reg real 并 grep "real: difference"
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           add-{arch}-{os}-ok-platform-oracle-variant
+rec_description:        新增 regression/real.{arch}-{os}.ok 平台 oracle 变体（OHOS 为 real.arm64-ohos.ok，25884 行，行数与 real.ok 一致，值取自 OHOS 实际输出且与上游 x86-linux/darwin 变体语义一致），并在 conandata.yml 注册该补丁。bin/regression 的 oracle 选择循环依次探测 $OBJPTR_REP/a$ALIGN/$TARGET_OS/$TARGET_ARCH/$TARGET_ARCH-$TARGET_OS，real.{arch}-{os}.ok 命中最后一项、优先级最高，其它平台不受影响。禁止修改通用 real.ok / real.amd64-linux.ok、禁止放宽容差、禁止跳过 real 测试。
+rec_command:            新增 regression/real.arm64-ohos.ok（diff --git a/regression/real.arm64-ohos.ok，new file）并在 conandata.yml 注册；校验：bin/regression -test-reg real rc=0 且无 "real: difference"，完整 CI real 差异计数=0；再 diff 对比 real.arm64-ohos.ok 与 real.ok，确认差异仅限 atan2f x<0 相关行的 ±1ULP。
+rec_auto_fix:           true
+rec_impl:               patch-add-oracle-variant
+
+fallback_priority:      2
+fallback_approach:      use-upstream-matching-variant-as-base
+fallback_description:   若 {arch}-{os} 变体需从零生成，可先以上游自带且与 OHOS 输出 bit 级一致的 real.x86-linux.ok 为语义参照交叉校验 OHOS 实际输出，再以 OHOS 输出生成变体，确保无遗漏平台行。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       patch.*real\.ok|sed.*real\.ok|放宽容差|.*tolerance|skip.*real|跳过.*real
+forbid_1_reason:        通用 real.ok 是上游 amd64-linux/glibc 生成的 golden，修改它或放宽容差会污染所有平台、掩盖真实平台差异；跳过 real 测试则彻底放弃该回归轴。
+forbid_1_consequence:   atan2f x<0 等边界输入在 OHOS 上永久失去回归保护，平台差异被掩盖。
+forbid_2_pattern:       伪造.*PASS|吞.*失败|把.*difference.*改成.*skipped
+forbid_2_reason:        把真实 difference 伪造成 PASS/skipped 违反测试真实性原则，掩盖平台 oracle 缺陷。
+forbid_2_consequence:   real 轴失去有效性，交付前无法确认平台 oracle 修复。
+
+# Layer 4: Principles
+principles:             P013
+
+# Relations
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               doc/E332.md
+last_updated:           2026-08-10
+source_event:           MLton 20241230 Round 13 real_difference_count=1（real: difference with -type-check true，期望 0x3fc90fda vs 实际 0x3fc90fdb，1ULP）；Round 14 新增 regression/real.arm64-ohos.ok + conandata.yml 注册后 real 差异清零；Round 17/18 完整 CI real 差异=0
+
+# Authorship and provenance
+authors: GoliWie <GoliWie@noreply.gitcode.com>
+source_pr: !5084
+source_commit: 合并后回填
+
+# Quality metrics
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-08-10
+

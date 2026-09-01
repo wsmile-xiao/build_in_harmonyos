@@ -1,0 +1,53 @@
+id:                     E385
+trigger_tool:           cargo|cmake|llvm-ranlib|llvm-ar
+phase:                  compilation|linking
+error_signature:        native/llvm/bin/llvm-ranlib.*not found|Error running link command.*crypto|CMAKE_RANLIB.*native/llvm/bin/llvm-ranlib
+severity:               2
+category:               ohos, cmake, toolchain, rust, archive
+match_keywords:         aws-lc-sys, Cargo build.rs, cmake crate, OHOS_NDK_HOME, ohos.toolchain.cmake, CMAKE_RANLIB, CMAKE_C_COMPILER_RANLIB, llvm-ar s, static archive index
+
+title:                  为 Cargo 原生 CMake 子构建补全 OHOS SDK 缺失的 llvm-ranlib
+root_cause:             含原生 C/CMake 子构建的 Rust crate 会通过 build.rs 独立调用 OHOS SDK 的 CMake toolchain。该 toolchain 将 CMAKE_RANLIB 固定为 native/llvm/bin/llvm-ranlib，但当前 SDK 仅提供同目录 llvm-ar，缺少 llvm-ranlib。仅设置 Cargo 的 AR_<target> 或通用 RANLIB 不会覆盖子 CMake cache，导致静态归档索引阶段失败。前置架构配置错误也可能表现为 AES/BN 未定义符号，但该签名必须结合 OHOS_ARCH、CMAKE_SYSTEM_PROCESSOR 和 archive 对象清单单独诊断，不能归因于 ranlib 缺失。
+affected_scope:         使用 Cargo build.rs/cmake crate 启动目标平台 CMake 子构建，并依赖 OHOS SDK ohos.toolchain.cmake 生成静态库的 Rust 软件；已在 aws-lc-sys 0.39.1 验证，也适用于其他需要 ranlib 的原生 crate
+verification_cmd:       test ! -x "$OHOS_NDK_HOME/native/llvm/bin/llvm-ranlib"; test -x "$OHOS_NDK_HOME/native/llvm/bin/llvm-ar"; rm -rf <fresh-cargo-target>; CARGO_TARGET_DIR=<fresh-cargo-target> cargo build --release --locked; grep -E '^CMAKE_(RANLIB|C_COMPILER_RANLIB|ASM_COMPILER_RANLIB):.*<build-local-wrapper>' <fresh-cargo-target>/release/build/aws-lc-sys-*/out/build/CMakeCache.txt; file <fresh-cargo-target>/release/stalwart-cli; readelf -h <fresh-cargo-target>/release/stalwart-cli
+
+rec_priority:           1
+rec_approach:           target-scoped-cmake-toolchain-overlay
+rec_description:        保留官方 OHOS CMake toolchain 以获得正确目标架构、sysroot 和汇编源选择；在 Conan/Cargo 构建目录生成只执行 llvm-ar s 的 ranlib 包装器，再生成薄 CMake toolchain overlay，先 include 官方 ohos.toolchain.cmake，随后强制覆盖 CMAKE_RANLIB、CMAKE_C_COMPILER_RANLIB 和 CMAKE_ASM_COMPILER_RANLIB。通过 crate 提供的 target-specific CMAKE_TOOLCHAIN_FILE 环境变量注入，且只作用于目标 crate 子构建。
+rec_command:            printf '#!/bin/sh\nexec "%s" s "$@"\n' "$LLVM_AR" > "$BUILD_DIR/llvm-ranlib"; chmod +x "$BUILD_DIR/llvm-ranlib"; write overlay including "$OHOS_NDK_HOME/native/build/cmake/ohos.toolchain.cmake" and force CMAKE_*_RANLIB to wrapper; export AWS_LC_SYS_CMAKE_TOOLCHAIN_FILE_aarch64_unknown_linux_ohos="$BUILD_DIR/aws-lc-ohos-toolchain.cmake"; cargo build --release --locked
+rec_auto_fix:           false
+rec_impl:               conan-recipe|cargo-build-env|cmake-toolchain-overlay
+
+fallback_priority:      2
+fallback_approach:      sdk-provided-ranlib
+fallback_description:   若后续官方 SDK 补齐 native/llvm/bin/llvm-ranlib，则直接使用 SDK 工具并移除包装器；必须重新执行干净 Cargo/Conan 构建确认 CMake cache 未保留旧路径。
+fallback_command:       test -x "$OHOS_NDK_HOME/native/llvm/bin/llvm-ranlib" && rm -rf <cargo-target-dir> && cargo build --release --locked
+fallback_auto_fix:      false
+fallback_impl:          sdk-update
+
+forbid_1_pattern:       AWS_LC_SYS_NO_ASM=1|AWS_LC_SYS_NO_ASM_aarch64_unknown_linux_ohos=1
+forbid_1_reason:        aws-lc-sys 将 NO_ASM 限制为 debug 构建，且禁用汇编会改变 release 交付的性能和实现路径
+forbid_1_consequence:   release 构建被上游拒绝，或测试结果无法代表正式产物
+forbid_2_pattern:       (cp|ln).*(llvm-ar|ar).*native/llvm/bin/llvm-ranlib
+forbid_2_reason:        直接修改 SDK 或伪造其工具文件污染共享工具链，无法由配方复现，也可能影响其他任务
+forbid_2_consequence:   本机通过但 CI 失败，且破坏 SDK 完整性
+forbid_3_pattern:       CMAKE_SYSTEM_NAME=Linux|AWS_LC_SYS_EFFECTIVE_TARGET.*linux-musl
+forbid_3_reason:        用 Linux 平台冒充 OHOS 会绕开官方 toolchain 的 sysroot和平台语义；effective target 会影响绑定及部分目标/架构路由，但不能提供完整 OHOS toolchain 配置
+forbid_3_consequence:   生成错误平台配置、遗漏 OHOS 约束或残留 AES/BN 未定义符号
+
+causes:                 []
+caused_by:              []
+similar_to:             [E012, E267, E296]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file: doc/E385.md
+principles: P010
+last_updated:            2026-08-17
+source_event:            stalwart/1.0.5 Issue #2237
+source_pr: !5534
+source_commit:
+authors: wingsluo <wingsluo@noreply.gitcode.com>
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.67
+metrics_last_used:      2026-08-17

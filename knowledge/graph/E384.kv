@@ -1,0 +1,73 @@
+#====================================================================
+# E327-draft-configure-raw-lib-probe.kv — 自写 configure 用裸 -l 探测
+#   第三方库（不读 LDFLAGS）且 pkg-config 模块名与 conan 生成的 .pc 名
+#   不一致 → configure 探测失败；用 configure 文档化覆盖变量绕过探测
+#   实例：coturn 4.7.0（archives/c/coturn/4.7.0）→ 依赖 openssl/3.5.6
+#====================================================================
+
+# --- frontmatter 检索字段 ---
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E384
+trigger_tool:       configure|sh
+phase:              configuration
+error_signature:    Library option -lcrypto cannot be used|
+                    OpenSSL Crypto development libraries are not installed properly in required location|
+                    Library option -lssl cannot be used|
+                    OpenSSL development libraries are not installed properly in required location
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:           2
+category:               build-system, configure, dependency, pkg-config, security
+match_keywords:     coturn, openssl, libcrypto, libssl, SSL_CFLAGS, SSL_LIBS, 自写 configure,
+                    hand-written configure, configure probe, pkg_config_name, openssl.pc,
+                    libcrypto.pc, 探测库, 覆盖变量, LDFLAGS, autotools
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:         自写（非 autoconf 生成）的 configure 脚本用
+                    `${CC} ${OSCFLAGS} ${OSLIBS} -lcrypto` 这类裸命令探测第三方库，
+                    只拼接脚本内部的 OSCFLAGS/OSLIBS，**不读** conan 的
+                    LDFLAGS/CPPFLAGS 环境变量；同时它用 pkg-config 按上游模块名
+                    （libcrypto/libssl）查询，而 conan 的 PkgConfigDeps 只按配方
+                    pkg_config_name（或包名，如 openssl.pc）生成 .pc，两路探测
+                    在 conan 缓存环境下都失败 → configure 中止。
+affected_scope:     所有用自写 configure 探测第三方库的软件（coturn、libp11 同类），
+                    且依赖配方未声明与上游一致的多 pkg_config_name 的场景。
+verification_cmd:   |
+  cd <build_dir> && ./configure ... 2>&1 | grep -E "cannot be used|not installed properly"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:       1
+rec_approach:       configure-documented-env-override
+rec_description:    使用 configure 脚本自身文档化的覆盖变量（coturn 为
+                    SSL_CFLAGS/SSL_LIBS；libp11 用 OPENSSL_CFLAGS/OPENSSL_LIBS），
+                    在 conanfile build() 的 Environment 中指向依赖包路径，configure
+                    命中 "Private SSL Library option" 分支直接采用并写入生成的 Makefile，
+                    无需改依赖配方，也不用补转发型 .pc。
+rec_command:        |
+  openssl = self.dependencies["openssl"].package_folder
+  build_env.define("SSL_CFLAGS", f"-I{os.path.join(openssl, 'include')}")
+  build_env.define("SSL_LIBS", f"-L{os.path.join(openssl, 'lib')} -lcrypto -lssl")
+rec_auto_fix:       false
+rec_impl:           env-override-in-conanfile
+
+# 回退方案
+fallback_priority:  2
+fallback_approach:  forward-pc-files
+fallback_description: 在 generate() 里为上游模块名补转发型 .pc（libcrypto.pc/libssl.pc
+                    指向 openssl.pc），使 configure 的 testpkg_common 命中（参考 E321 思路）；
+                    但自写 configure 的裸 -l 探测分支仍可能失败，故优先用覆盖变量。
+fallback_command:   |
+  # generate() 内手工写 libcrypto.pc/libssl.pc 到 generators 目录
+fallback_auto_fix:  false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:   sed -i.*configure.*LCrypto|修改 conan 缓存里的依赖配方
+forbid_1_reason:    不要改缓存内依赖包配方（会影响其他消费者）；不要 sed 篡改
+                    源码 configure 去绕过探测（应优先用文档化覆盖变量）
+doc_file: doc/E384.md
+
+source_pr: !5581
+last_updated:               2026-08-31
+authors: 2401_87095818 <zhaowenxiang06@outlook.com>
