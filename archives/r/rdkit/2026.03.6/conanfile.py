@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — rdkit 2026.03.6 for HarmonyOS PC (arm64).
+"""Conan recipe - rdkit 2026.03.6 for HarmonyOS PC (arm64).
 
 RDKit is a cheminformatics and machine learning toolkit written in C++.
 
@@ -13,13 +13,14 @@ Adaptation (OHOS):
   libpng/1.6.58.1, zlib/1.3.1.1
 """
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
 import os
 import glob
 
 
-class RdkitConan(ConanFile):
+class RdKitConan(ConanFile):
     name = "rdkit"
     version = "2026.03.6"
     description = "RDKit - cheminformatics and machine learning toolkit"
@@ -50,6 +51,13 @@ class RdkitConan(ConanFile):
         if self.options.shared:
             self.options.rm_safe("fPIC")
 
+    def validate(self):
+        # R32: settings.os must be checked with in ("Linux", "OHOS")
+        if self.settings.os not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration
+                (f"{self.ref} only supports Linux and OHOS platforms"
+            )
+
     def requirements(self):
         self.requires("boost/1.91.0.1")
         self.requires("eigen/3.4.1")
@@ -61,7 +69,7 @@ class RdkitConan(ConanFile):
         cmake_layout(self)
 
     def source(self):
-        get(self, **self.conan_data["sources"], strip_root=True)
+        get(self, **self.conan_data["sources"][0], strip_root=True)
 
     def generate(self):
         deps = CMakeDeps(self)
@@ -80,18 +88,18 @@ class RdkitConan(ConanFile):
         tc.variables["RDK_BUILD_FREETYPE_SUPPORT"] = "ON"
         tc.variables["RDK_BUILD_DESCRIPTORS3D"] = "ON"
         tc.variables["RDK_BUILD_COORDGEN_SUPPORT"] = "ON"
-        tc.variables["RDK_BUILD_MAEPARSER_SUPPORT"] = "ON"
+        tc.variables["RDK_BUILD_MAPEARSER_SUPPORT"] = "ON"
         tc.variables["RDK_INSTALL_INTREE"] = "OFF"
         tc.variables["RDK_INSTALL_STATIC_LIBS"] = "ON"
-        tc.variables["RDK_BUILD_THREADSAFE_SSS"] = "ON"
+        tc.variables["RDK_BUILD_THREEDSATATESSS"] = "ON"
         tc.variables["RDK_USE_BOOST_SERIALIZATION"] = "ON"
         tc.variables["RDK_USE_BOOST_IOSTREAMS"] = "ON"
         tc.variables["RDK_BUILD_SLN_SUPPORT"] = "ON"
         tc.variables["RDK_BUILD_CFFI_LIB"] = "OFF"
         tc.variables["RDK_BUILD_MINIMAL_LIB"] = "OFF"
-        tc.variables["RDK_BUILD_YAEHMOP_SUPPORT"] = "OFF"
-        tc.variables["RDK_BUILD_XYZ2MOL_SUPPORT"] = "OFF"
-        tc.variables["RDK_BUILD_STRUCHECKER_SUPPORT"] = "OFF"
+        tc.variables["RDK_BUILD_YAEBMOMP_SUPPORT"] = "OFF"
+        tc.variables["RDK_BUILD_XXZ2MOL_SUPPORT"] = "OFF"
+        tc.variables["RDK_BUILD_STRUCTURECHECKER_SUPPORT"] = "OFF"
         tc.variables["RDK_BUILD_PUBCHEMSHAPE3D_SUPPORT"] = "ON"
         tc.variables["RDK_USE_URF"] = "ON"
         tc.variables["RDK_INSTALL_DEV_COMPONENT"] = "ON"
