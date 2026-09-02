@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E321.kv，填写各字段
+# 对应的人类文档: doc/E321.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E321
+trigger_tool: conan|cmake|ctest|gtest
+phase: build|test
+error_signature: uniform_int_distribution.*byte.*sequence|cross-stdlib.*fingerprint|SecureUtilsTest.*FAILED|HMBS_UPSTREAM_TEST_RESULT.*status.*failed|failed: 135
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: cmake, compatibility, libc, testing, conan-test-execution
+match_keywords: uniform_int_distribution, mt19937_64, libc++, libstdc++, fingerprint randomart, GTest, gtest, HMBS_UPSTREAM_TEST_RESULT, add_test, ctest, cross-compile OHOS
+title: GTest 伪随机输入跨标准库差异 + 无 add_test 的测试集成（OHOS libc++）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: std::mt19937_64 engine output is fully specified by the C++ standard (constant across libstdc++/libc++), but std::uniform_int_distribution maps engine values to [0,255] in an implementation-defined way; so the byte sequence (and any hard-coded test expectation derived from it) differs between libstdc++ (GCC/Clang on Linux) and libc++ (OHOS toolchain) - a pseudo-random-input GTest case fails on exactly one of them. Separately (CMake-specific trap, NOT a universal mechanism): if a CMake project calls enable_testing() but never registers its test targets via add_test() (barrier's unittests/integtests are one example - only the GUI test guiunittests is registered), then ctest discovers 0 tests and exits 0 -> silent false-green: the pipeline believes upstream tests ran while none executed. This is a CMake/CTest discovery trap, not a general property of all build systems (Autotools uses make check, Meson uses test(), Rust/Go/Python auto-discover). The workaround is to run the test executable directly in conanfile build() (can_run guarded) and emit HMBS_UPSTREAM_TEST_RESULT; meanwhile parsing gtest output with regex [  FAILED  ]/[  PASSED  ] treats the brackets as a regex char class unless escaped to \[ \].
+affected_scope: 两类场景：(1) 任何在测试用例里用 std::uniform_int_distribution 生成伪随机输入并在测试里硬编码期望值的 C/C++ 软件，交叉编译到 OHOS(libc++) 时；(2) 【仅限 CMake 项目】上游调用 enable_testing() 但未 add_test 注册核心测试目标 → ctest 静默跑 0 测试的陷阱。非 CMake 项目（Autotools/Meson/Rust/Go/Python）不受此项影响。
+verification_cmd: 在 OHOS libc++ 下运行 unittests；对比 gtest 输出 [  PASSED  ] N tests / HMBS_UPSTREAM_TEST_RESULT status 应为 passed、failed=0
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: parameter_mapping
+rec_description: 1) 测试伪随机输入改为取引擎低字节 mt19937_64 & 0xFF（引擎输出标准规定、跨库一致），并同步更新硬编码期望值；不用 uniform_int_distribution。2) 【仅限 CMake 且上游测试目标未 add_test 注册】ctest 会静默跑 0 测试（false-green），不能依赖 cmake.test()；须在 conanfile build() 里 can_run() 守卫直接运行测试可执行文件并输出 HMBS_UPSTREAM_TEST_RESULT 标记；解析 gtest 输出时把 [  FAILED  ]/[  PASSED  ] 的方括号转义为 \[ \]。非 CMake 项目走各自机制（make check / test() / 自动发现），无需此绕过处理。
+rec_command: bytes.push_back(static_cast<std::uint8_t>(engine() & 0xFF));  (gen func); \[  FAILED  \] / \[  PASSED  \]  regex escape; print(f'HMBS_UPSTREAM_TEST_RESULT={json.dumps(marker)}', flush=True)
+rec_auto_fix: true
+rec_impl:               impl-name                   # 内置实现名 (见 DESIGN §5)
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: dist(engine)
+forbid_1_reason: std::uniform_int_distribution 的 [0,255] 映射是标准库实现定义，跨 libstdc++/libc++ 输出不同字节序列，硬编码期望值必在其中一个标准库下失败
+forbid_1_consequence: 切换标准库（如 OHOS 用 libc++）或交叉编译时测试失败；barrier 实测 SecureUtilsTest 在 libc++ 下 2 用例 FAILED
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: 
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes: 
+caused_by: 
+similar_to: 
+conflicts_with: 
+prerequisite_of: 
+
+# ═══ 元数据 ═══
+doc_file:               doc/E321.md
+last_updated: 2026-09-01
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr: 7486
+source_commit: 73271761b
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 5FC1
