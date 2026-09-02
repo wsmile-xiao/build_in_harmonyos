@@ -37,7 +37,7 @@ class EigenTestConan(ConanFile):
                 if "Operation not permitted" in str(e) or "Error 126" in str(e):
                     self.output.warning(
                         f"SKIP: CI sandbox forbids exec ({e}); "
-                        "compile verified, run verified on OHOS device"
+                        "compile verified, queue OHOS device runtime verification"
                     )
                 else:
                     raise
