@@ -28,6 +28,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -90,19 +91,46 @@ class ConanVerifier:
         self.report_dir = self.archive_dir / "reports"
         self._draft_count = 0
 
+    # v12.18 H2: conan 网络类失败特征——registry 抖动（111 例 unreachable 同源）
+    _NET_ERR_RE = re.compile(
+        r"(?:connection\s*(?:reset|refused|timed?\s*out)|ssl.*(?:handshake|error)"
+        r"|(?:408|502|503|504)\b|unreachable|network\s*(?:is\s*)?unreachable"
+        r"|temporar\w+ failure|name\s+or\s+service\s+not\s+known|broken\s+pipe)",
+        re.IGNORECASE)
+
     def _run(self, cmd: list[str] | str, **kw) -> tuple[int, str]:
-        """Run command, return (exit_code, combined_output)."""
+        """Run command, return (exit_code, combined_output).
+
+        v12.18 H2: conan 命令遇网络类失败特征时退避重试 2 次
+        （registry 抖动不应被误判为缺包/配方错误——依赖解析 git fetch
+        已有同类重试 v12.15，此处补齐 conan 侧）。
+        """
         if isinstance(cmd, str):
             cmd = ["/bin/sh", "-c", cmd]
-        try:
-            timeout = kw.pop("timeout", 1800)  # 30 min default
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               timeout=timeout, **kw)
-            return r.returncode, (r.stdout or "") + (r.stderr or "")
-        except subprocess.TimeoutExpired:
-            return 1, "TIMEOUT"
-        except FileNotFoundError as e:
-            return 1, str(e)
+        timeout = kw.pop("timeout", 1800)  # 30 min default
+        is_conan = bool(cmd) and "conan" in os.path.basename(str(cmd[0]))
+        attempts = 3 if is_conan else 1
+        backoff = (15, 30)
+        last_rc, last_out = 1, ""
+        for i in range(attempts):
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True,
+                                   timeout=timeout, **kw)
+                last_rc, last_out = r.returncode, (r.stdout or "") + (r.stderr or "")
+            except subprocess.TimeoutExpired:
+                return 1, "TIMEOUT"
+            except FileNotFoundError as e:
+                return 1, str(e)
+            if last_rc == 0:
+                return last_rc, last_out
+            if i < attempts - 1 and self._NET_ERR_RE.search(last_out or ""):
+                wait = backoff[i] if i < len(backoff) else backoff[-1]
+                log_warn(f"  conan 网络类失败（尝试 {i + 1}/{attempts}），"
+                         f"{wait}s 后重试: {(last_out or '')[:120]}")
+                time.sleep(wait)
+            else:
+                break
+        return last_rc, last_out
 
     def _check_conan_available(self) -> bool:
         """Check if conan CLI is available."""

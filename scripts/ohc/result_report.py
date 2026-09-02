@@ -667,7 +667,12 @@ def result_cli(argv: list[str]) -> int:
         if out_path.exists():
             _warn_if_handwritten(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(result_text, encoding="utf-8")
+        # v12.18 H1: 原子写（tmp + os.replace）——write_text 半写状态下平台
+        # 读到截断 JSON 即 parse_error（~124 例成分之一）；tmp 落盘完整后再
+        # 原子替换，任何时点读到的都是完整旧文件或完整新文件
+        tmp_path = out_path.with_suffix(out_path.suffix + ".tmp")
+        tmp_path.write_text(result_text, encoding="utf-8")
+        os.replace(tmp_path, out_path)
         # v12.17 S2: 写后回读自检（~124 例 parse_error 教训——平台解析失败
         # 多为半写/编码损坏；读回 json.loads 确认，坏则重写一次，仍坏报错）
         try:
