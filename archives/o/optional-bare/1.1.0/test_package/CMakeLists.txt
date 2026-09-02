@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_optional_bare CXX)
+find_package(optional-bare REQUIRED)
+add_executable(test_optional_bare test.cpp)
+target_link_libraries(test_optional_bare PRIVATE nonstd::optional-bare)
+target_compile_features(test_optional_bare PRIVATE cxx_std_14)
+enable_testing()
+add_test(NAME test_optional_bare COMMAND test_optional_bare)
