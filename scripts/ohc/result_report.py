@@ -668,6 +668,18 @@ def result_cli(argv: list[str]) -> int:
             _warn_if_handwritten(out_path)
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(result_text, encoding="utf-8")
+        # v12.17 S2: 写后回读自检（~124 例 parse_error 教训——平台解析失败
+        # 多为半写/编码损坏；读回 json.loads 确认，坏则重写一次，仍坏报错）
+        try:
+            json.loads(out_path.read_text(encoding="utf-8"))
+        except Exception as read_err:
+            log_warn(f"落盘回读异常（{read_err}），重写一次")
+            out_path.write_text(result_text, encoding="utf-8")
+            try:
+                json.loads(out_path.read_text(encoding="utf-8"))
+            except Exception:
+                log_fail("回读二次校验仍失败——上报 rc=1 阻止坏文件静默扩散")
+                return 1
         # 协议红线：退出前自动 cat result.json
         log_ok(f"result.json 已生成: {out_path}")
     else:
@@ -723,7 +735,8 @@ def _warn_if_handwritten(path: Path) -> bool:
 
 def write_lifecycle_draft(software: str, version: str, milestone: str,
                           pr_number: int | None = None,
-                          summary: str | None = None) -> bool:
+                          summary: str | None = None,
+                          pr_url: str | None = None) -> bool:
     """R46 工具化: 生命周期草稿（任务全程防猝死丢 result.json）。
 
     0828 复盘（600 失败任务）: write_pr_draft 只在 PR 创建瞬间落盘，
@@ -779,6 +792,10 @@ def write_lifecycle_draft(software: str, version: str, milestone: str,
         ]
         if pr_number:
             argv += ["--pr-number", str(pr_number)]
+        if pr_url:
+            # v12.17 S1: 草稿也显式带 pr_url（208 例空回执教训——
+            # agent 在此后被杀时，平台读到的最后回执必须含 pr_url）
+            argv += ["--pr-url", pr_url]
         rc = result_cli(argv)
         if rc == 0:
             log_ok(f"R46 草稿已落盘: milestone={milestone} -> {out_path}")

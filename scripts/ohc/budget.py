@@ -1,14 +1,14 @@
 # -*- coding: utf-8 -*-
-"""预算感知收尾（SKILL 优化反馈 0831 P0-1，76 例 4h 耗尽上报 unknown）。
+"""预算感知收尾（SKILL 优化反馈 0831 + 心愿单报告 0902 S3）。
 
-问题：agent 跑满平台 4h 硬顶被 SIGKILL——result.json 停在 draft:true 草稿
-（平台视为非终态）或根本没写 → 归一化为 unknown，成果不可见、不可续跑。
+边界（双方已对齐）：动态预算/硬杀在平台侧——attempt 递增 1.0/1.5/2.0×
+上限 12h，随 dispatch 下发 OHC_TASK_DEADLINE + OHC_TASK_BUDGET_SEC。
+v12.17 S3：**停止自行预算判定**——SKILL 侧不再有 240min 兜底与
+OHPCD_BUDGET_MINUTES 自造 env（R48 违约 6 例 budget 自裁教训：
+与平台 12h 动态预算冲突导致过早自裁）。仅在平台 env 存在时判定。
 
-三件套（反馈 0831 修订版边界对齐：动态预算/硬杀在平台侧——attempt 递增
-1.0/1.5/2.0× 上限 12h，随 dispatch 下发 OHC_TASK_DEADLINE +
-OHC_TASK_BUDGET_SEC；SKILL 侧唯一配合项 = 预算接近耗尽时主动收尾）：
   1. budget-check 命令——agent 在每个长阶段（W3 编译/CI 监控/重试循环）前调用：
-       ok          exit 0   继续当前工作
+       ok          exit 0   继续当前工作（平台 env 未下发时恒 ok）
        near_limit  exit 0   剩余 < 40min（R41）：停止提交新编译，收尾写 checkpoint
        exhausted   exit 3   预算已耗尽：本工具自动写终态 result——
                             status=failed + error_code=budget_exhausted
@@ -17,8 +17,8 @@ OHC_TASK_BUDGET_SEC；SKILL 侧唯一配合项 = 预算接近耗尽时主动收�
                             已就绪，续跑带已完成步骤不丢成果
   2. write_lifecycle_draft 内嵌兜底——每个 R46 里程碑写草稿前自动检查，
      超预算即升级为终态 budget_exhausted（即使 agent 忘调 budget-check 也有兜底）
-  3. 预算来源优先级: OHC_TASK_DEADLINE（绝对时刻，最准）>
-     OHC_TASK_BUDGET_SEC（秒）> OHPCD_BUDGET_MINUTES（旧自造）> 240 兜底。
+  3. 预算判定源优先级: OHC_TASK_DEADLINE（绝对时刻，最准）>
+     OHC_TASK_BUDGET_SEC（秒）> **不判定（恒 ok）**。
      任务起点：feedback 时间线最后一条 task_started（重跑/resume 刷新）。
 """
 from __future__ import annotations
@@ -30,12 +30,15 @@ from pathlib import Path
 
 from .utils import find_project_dir, log_fail, log_info, log_ok, log_warn
 
-DEFAULT_BUDGET_MINUTES = 240  # 平台旧基准（动态预算下发前的兜底）
 SAFETY_MARGIN_MINUTES = 40    # R41: 剩余 < 40min 停止提交新编译
 
 # v12.16（反馈 0831 修订版）: 平台动态预算已实施（attempt 递增 1.0/1.5/2.0×，
 # 上限 12h），随 dispatch 下发 OHC_TASK_DEADLINE（ISO 绝对时刻）+
-# OHC_TASK_BUDGET_SEC（秒数）——优先于旧自造 OHPCD_BUDGET_MINUTES。
+# OHC_TASK_BUDGET_SEC（秒数）。
+# v12.17（心愿单报告 S3）: 停止自行预算判定——R48 违约 6 例 budget 自裁
+# 的教训：SKILL 侧 240min 兜底/OHPCD_BUDGET_MINUTES 自造 env 会与平台
+# 12h 动态预算冲突导致过早自裁。**仅在平台 env（DEADLINE/BUDGET_SEC）
+# 存在时判定**；两者皆无 → 恒 ok（本地/手动场景不做预算判定）。
 ERROR_CODE = "budget_exhausted"  # 平台 retry_context resume 分流键（勿报 unknown）
 
 RESUME_HINT = ("续跑: python3 scripts/ohc-run.py finish {sw} {ver} --resume "
@@ -53,23 +56,21 @@ def _deadline() -> datetime | None:
         return None
 
 
-def get_budget_minutes() -> int:
-    # OHC_TASK_BUDGET_SEC（平台下发，秒）> OHPCD_BUDGET_MINUTES > 240
+def _budget_sec() -> int | None:
     raw = os.environ.get("OHC_TASK_BUDGET_SEC", "").strip()
-    try:
-        v = int(raw)
-        if v > 0:
-            return v // 60
-    except ValueError:
-        pass
-    raw = os.environ.get("OHPCD_BUDGET_MINUTES", "").strip()
     try:
         v = int(raw)
         if v > 0:
             return v
     except ValueError:
         pass
-    return DEFAULT_BUDGET_MINUTES
+    return None
+
+
+def get_budget_minutes() -> int | None:
+    """OHC_TASK_BUDGET_SEC（平台下发，秒）→ 分钟；无平台 env 返回 None（不判定）。"""
+    sec = _budget_sec()
+    return sec // 60 if sec else None
 
 
 def _ver_dir(software: str, version: str, project_dir=None) -> Path | None:
@@ -127,9 +128,15 @@ def _milestones(ver_dir: Path) -> list[str]:
 def budget_status(software: str, version: str, project_dir=None) -> dict:
     st = {"started": None, "elapsed_min": None, "budget_min": get_budget_minutes(),
           "remaining_min": None, "exhausted": False, "near_limit": False,
-          "milestones": [], "budget_source": "fallback"}
-    # 优先级 1: OHC_TASK_DEADLINE 绝对时刻（平台动态预算下发，最准）
+          "milestones": [], "budget_source": "none"}
+    # v12.17 S3: 仅平台 env 存在时判定——无 DEADLINE 且无 BUDGET_SEC → 恒 ok
     dl = _deadline()
+    sec = _budget_sec()
+    if dl is None and sec is None:
+        st["note"] = ("平台预算 env 未下发（OHC_TASK_DEADLINE/OHC_TASK_BUDGET_SEC "
+                      "均无）——S3 停止自行判定，按 ok 处理")
+        return st
+    # 优先级 1: OHC_TASK_DEADLINE 绝对时刻（最准，不受起点影响）
     if dl is not None:
         st["budget_source"] = "deadline"
         remaining = (dl - datetime.now(dl.tzinfo)).total_seconds() / 60.0
@@ -139,7 +146,8 @@ def budget_status(software: str, version: str, project_dir=None) -> dict:
         st["exhausted"] = remaining <= 0
         st["near_limit"] = 0 < remaining <= SAFETY_MARGIN_MINUTES
         return st
-    # 优先级 2/3: 总量减已耗（起点 = 最后一条 task_started）
+    # 优先级 2: BUDGET_SEC 总量减已耗（起点 = 最后一条 task_started）
+    st["budget_source"] = "budget_sec"
     ver_dir = _ver_dir(software, version, project_dir)
     if ver_dir is None:
         st["note"] = "ver_dir 不存在（任务未 init）——按 ok 处理"
@@ -149,11 +157,6 @@ def budget_status(software: str, version: str, project_dir=None) -> dict:
     if started is None:
         st["note"] = "无任务起点记录——按 ok 处理"
         return st
-    if os.environ.get("OHC_TASK_BUDGET_SEC", "").strip():
-        st["budget_source"] = "budget_sec"
-    else:
-        st["budget_source"] = "minutes_env" \
-            if os.environ.get("OHPCD_BUDGET_MINUTES", "").strip() else "fallback"
     st["started"] = started.isoformat(timespec="seconds")
     elapsed = (datetime.now() - started).total_seconds() / 60.0
     st["elapsed_min"] = round(elapsed, 1)
@@ -176,7 +179,9 @@ def write_budget_exhausted_result(software: str, version: str,
     ms_text = "、".join(ms) if ms else "无（早期耗尽）"
     used = st.get("elapsed_min")
     used_text = f"{used}min" if used is not None else "未知（按 deadline 判定）"
-    reason = (f"预算耗尽（上限 {st.get('budget_min')}min，已用 {used_text}，"
+    cap = st.get("budget_min")
+    cap_text = f"{cap}min" if cap else "未知（deadline 判定）"
+    reason = (f"预算耗尽（平台预算 {cap_text}，已用 {used_text}，"
               f"判定源 {st.get('budget_source')}）——非任务失败，断点已存 "
               f"checkpoint_steps。{RESUME_HINT.format(sw=software, ver=version)}")
     from .result_report import result_cli
@@ -217,7 +222,11 @@ def budget_check_cli(argv=None) -> int:
                  f"预算耗尽时本命令自动写 budget_exhausted 终态"
                  f"（checkpoint_steps + resume，勿报 unknown）")
         return 0
-    log_ok(f"预算充足（剩余 {st.get('remaining_min')}min / {st.get('budget_min')}min）")
+    if st.get("note"):
+        log_ok(f"budget-check: {st['note']}")
+        return 0
+    log_ok(f"预算充足（剩余 {st.get('remaining_min')}min / "
+           f"{st.get('budget_min')}min，源 {st.get('budget_source')}）")
     return 0
 
 

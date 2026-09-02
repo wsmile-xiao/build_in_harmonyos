@@ -43,6 +43,20 @@ def _archive_dir(letter: str, name: str, version: str,
     return Path(pdir or find_project_dir()) / "archives" / letter / name / version
 
 
+def _git_head(project_dir=None) -> str | None:
+    """当前 HEAD 短哈希（v12.17 S1: submit-state commit_hash 源）。"""
+    import subprocess as _sp
+    try:
+        r = _sp.run(["git", "rev-parse", "--short", "HEAD"],
+                    cwd=str(project_dir or Path.cwd()),
+                    capture_output=True, text=True, timeout=15)
+        if r.returncode == 0:
+            return r.stdout.strip() or None
+    except Exception:
+        pass
+    return None
+
+
 # ═══════════════════════════════════════════════════════
 # Simple YAML helpers (no external deps)
 # ═══════════════════════════════════════════════════════
@@ -805,7 +819,7 @@ def cmd_submit(software: str, version: str,
                 from .result_report import write_lifecycle_draft
                 write_lifecycle_draft(
                     software, version, "loop_pending",
-                    pr_number=pr_number,
+                    pr_number=pr_number, pr_url=pr_url,
                     summary=(f"PR #{pr_number} 已创建但 CI/AI 闭环未启动"
                              f"（no-wait 退出）。follow-up 续环: "
                              f"python3 scripts/ohc-run.py submit "
@@ -847,7 +861,7 @@ def cmd_submit(software: str, version: str,
             try:
                 from .result_report import write_lifecycle_draft
                 write_lifecycle_draft(
-                    software, version, "loop_pending", pr_number=pr_number,
+                    software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
                     summary=(f"PR #{pr_number} 检视意见 {len(unreplied)} 条未闭环"
                              f"（反馈 0829-2: 完成前必须逐条处理）。续环: "
                              f"python3 scripts/ohc-run.py submit {software} {version} --resume"))
@@ -883,7 +897,7 @@ def cmd_submit(software: str, version: str,
             try:
                 from .result_report import write_lifecycle_draft
                 write_lifecycle_draft(
-                    software, version, "loop_pending", pr_number=pr_number,
+                    software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
                     summary=(f"PR #{pr_number} CI 失败（修复第 {rnd}/"
                              f"{MAX_CI_REPAIR_ROUNDS} 轮）。续环: python3 "
                              f"scripts/ohc-run.py submit {software} {version} --resume"))
@@ -1285,6 +1299,9 @@ def cmd_submit(software: str, version: str,
             "pr_number": pr_number,
             "review_phase": 1,
             "branch_name": branch_name,
+            # v12.17 S1: success 四必填项源头补全（CI 绿自动上报时
+            # 显式读取，不依赖 cwd git 推导——串扰机/环境异常兜底）
+            "commit_hash": _git_head(project_dir),
         })
 
     # ── R42 防猝死草稿：PR 创建瞬间即落 partial 保底（默认路径同样生效）──
@@ -1315,7 +1332,7 @@ def cmd_submit(software: str, version: str,
             from .result_report import write_lifecycle_draft
             write_lifecycle_draft(
                 software, version, "loop_pending",
-                pr_number=pr_number,
+                pr_number=pr_number, pr_url=pr_url,
                 summary=(f"PR #{pr_number} 已创建但 CI/AI 闭环未启动"
                          f"（no-wait 退出）。follow-up 续环: "
                          f"python3 scripts/ohc-run.py submit "
@@ -1357,7 +1374,7 @@ def cmd_submit(software: str, version: str,
         try:
             from .result_report import write_lifecycle_draft
             write_lifecycle_draft(
-                software, version, "loop_pending", pr_number=pr_number,
+                software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
                 summary=(f"PR #{pr_number} 检视意见 {len(unreplied)} 条未闭环"
                          f"（反馈 0829-2: 完成前必须逐条处理）。续环: "
                          f"python3 scripts/ohc-run.py submit {software} {version} --resume"))
@@ -1393,7 +1410,7 @@ def cmd_submit(software: str, version: str,
         try:
             from .result_report import write_lifecycle_draft
             write_lifecycle_draft(
-                software, version, "loop_pending", pr_number=pr_number,
+                software, version, "loop_pending", pr_number=pr_number, pr_url=pr_url,
                 summary=(f"PR #{pr_number} CI 失败（修复第 {rnd}/"
                          f"{MAX_CI_REPAIR_ROUNDS} 轮）。续环: python3 "
                          f"scripts/ohc-run.py submit {software} {version} --resume"))
@@ -1514,25 +1531,47 @@ def _push_feedback_to_branch(project_dir: str, branch_name: str) -> None:
 
 def _maybe_upgrade_result(software: str, version: str,
                           pr_number: int, pr_url: str) -> None:
-    """CI 绿即终态：OHC_RESULT_OUT 已设置时自动升级 result 草稿为 success。
+    """CI 绿即终态：自动升级 result 草稿为 success。
 
     R42 闭环：partial 草稿（PR 创建时）→ success（CI 绿时）。
-    未设置环境变量时打印提示，不落盘（交互场景 agent 自行上报）。
+    v12.17（S1 空回执修复，208 例教训）:
+      - 不再要求 OHC_RESULT_OUT 已设置——result_cli 自带输出链
+        （OHC_RESULT_OUT > $HOME fallback），环境变量缺失/串扰机
+        也会落盘，杜绝"CI 绿但不落盘"路径
+      - 显式传 --pr-url/--pr-number（不靠推导链），success 回执
+        必带 pr_url，平台 SUCCESS_NO_PR/回填流直接可用
     """
-    if not os.environ.get("OHC_RESULT_OUT", "").strip():
-        log_info("   CI 已绿（终态）。上报: ohc-run.py result "
-                 f"{software} {version} --status success "
-                 f"--summary 'CI 校验通过 PR #{pr_number}'")
-        return
     try:
         from .result_report import result_cli
-        rc = result_cli([software, version, "--status", "success",
-                         "--summary", f"CI 校验通过 PR #{pr_number}: {pr_url}",
-                         "--pr-number", str(pr_number), "--force"])
+        # v12.17 S1: 显式补全 success 四必填项（pr_url/pr_number/branch/
+        # commit_hash），不依赖 cwd git 推导——submit-state 已在 PR 创建时
+        # 存 branch_name/commit_hash，环境异常机也能落完整回执
+        state = _load_submit_state(_archive_dir(
+            software[0].lower(), software, version, find_project_dir())) or {}
+        branch = state.get("branch_name") or ""
+        commit_hash = state.get("commit_hash") or _git_head(find_project_dir()) or ""
+        argv = [software, version, "--status", "success",
+                "--summary", f"CI 校验通过 PR #{pr_number}: {pr_url}",
+                "--pr-number", str(pr_number), "--pr-url", pr_url,
+                "--no-ci-verify", "--force"]
+        if branch:
+            argv += ["--branch", str(branch)]
+        if commit_hash:
+            argv += ["--commit-hash", str(commit_hash)]
+        # --no-ci-verify: 本函数仅由 submit 的 CI-PASSED 分支调用（已实证绿）；
+        # 复跑 API 核验在通道抖动时会 ERROR 误降级 partial → 平台非终态黑洞
+        #（心愿单报告 S1: 208 例回执缺失的机制之一）。守门仅约束手动上报路径。
+        rc = result_cli(argv)
         if rc == 0:
-            log_ok("   result.json 已升级为 success（CI 绿终态）")
+            log_ok("   result.json 已升级为 success（CI 绿终态，含 pr_url）")
+        else:
+            log_warn(f"   result 自动升级失败 rc={rc}——手动补报: "
+                     f"ohc-run.py result {software} {version} "
+                     f"--status success --pr-url {pr_url} --force")
     except Exception as e:
-        log_info(f"   result 升级跳过: {e}")
+        log_warn(f"   result 升级异常(不阻塞 CI 结论): {e}——手动补报: "
+                 f"ohc-run.py result {software} {version} "
+                 f"--status success --pr-url {pr_url} --force")
 
 
 def _fetch_ci_failure_detail(gitcode_pr: str, repo: str,
