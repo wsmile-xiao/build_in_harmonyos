@@ -14,8 +14,9 @@ class TestPackageConan(ConanFile):
             return
         pkg = self.dependencies["ruamel-yaml"].package_folder
         site = os.path.join(pkg, "lib", "python3.12", "site-packages")
-        # L0c + R34 合规：独立测试源文件（test_ruamel_yaml.py——真实
-        # 调用被测库 API）+ self.run 执行
-        test_script = os.path.join(os.path.dirname(__file__),
-                                   "test_ruamel_yaml.py")
-        self.run(f"python3 '{test_script}' '{site}'", env="conanrun")
+        # L0c + R34 合规：独立测试源文件（真实调用被测库 API）+ self.run
+        # 执行——冒烟测试 + 鸿蒙特有测试（平台导入/注释 roundtrip/
+        # Unicode+CRLF/真文件 IO）
+        for name in ("test_ruamel_yaml.py", "test_ohos_compat.py"):
+            test_script = os.path.join(os.path.dirname(__file__), name)
+            self.run(f"python3 '{test_script}' '{site}'", env="conanrun")
