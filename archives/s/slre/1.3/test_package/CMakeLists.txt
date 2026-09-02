@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_slre C)
+find_package(slre REQUIRED)
+add_executable(test_slre test.c)
+target_link_libraries(test_slre PRIVATE slre::slre)
+enable_testing()
+add_test(NAME test_slre COMMAND test_slre)
