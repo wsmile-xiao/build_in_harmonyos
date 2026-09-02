@@ -1,0 +1,274 @@
+diff --git a/aco.c b/aco.c
+index aed98a7..1162b6b 100644
+--- a/aco.c
++++ b/aco.c
+@@ -25,6 +25,9 @@ void aco_runtime_test(){
+ #elif  __x86_64__    
+     _Static_assert(sizeof(void*) == 8, "require 'sizeof(void*) == 8'");
+     _Static_assert(sizeof(__uint128_t) == 16, "require 'sizeof(__uint128_t) == 16'");
++#elif __aarch64__
++    _Static_assert(sizeof(void*) == 8, "require 'sizeof(void*) == 8'");
++    _Static_assert(sizeof(__uint128_t) == 16, "require 'sizeof(__uint128_t) == 16'");
+ #else
+     #error "platform no support yet"
+ #endif
+@@ -171,6 +174,8 @@ static __thread aco_cofuncp_t aco_gtls_last_word_fp = aco_default_protector_last
+     static __thread void* aco_gtls_fpucw_mxcsr[2];
+ #elif  __x86_64__    
+     static __thread void* aco_gtls_fpucw_mxcsr[1];
++#elif __aarch64__
++    static __thread void* aco_gtls_fpucw_mxcsr[1];
+ #else
+     #error "platform no support yet"
+ #endif
+@@ -271,7 +276,7 @@ aco_share_stack_t* aco_share_stack_new2(size_t sz, char guard_page_enabled){
+         p->ptr, (void*)((uintptr_t)p->ptr + p->sz)
+     );
+ #endif
+-#if defined(__i386__) || defined(__x86_64__)
++#if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
+     uintptr_t u_p = (uintptr_t)(p->sz - (sizeof(void*) << 1) + (uintptr_t)p->ptr);
+     u_p = (u_p >> 4) << 4;
+     p->align_highptr = (void*)u_p;
+@@ -329,6 +334,16 @@ aco_t* aco_create(
+         #ifndef ACO_CONFIG_SHARE_FPU_MXCSR_ENV
+             p->reg[ACO_REG_IDX_FPU] = aco_gtls_fpucw_mxcsr[0];
+         #endif
++#elif __aarch64__
++        // For a brand-new coroutine, jump to the entry trampoline with the
++        // body fp stashed in the x19 slot (reg[0]); acosw restores x19=fp and
++        // x30=entry_asm, and the trampoline jumps into fp with x30=protector.
++        p->reg[0] = (void*)fp;
++        p->reg[ACO_REG_IDX_RETADDR] = (void*)aco_funcp_entry_asm;
++        p->reg[ACO_REG_IDX_SP] = p->share_stack->align_retptr;
++        #ifndef ACO_CONFIG_SHARE_FPU_MXCSR_ENV
++            p->reg[ACO_REG_IDX_FPU] = aco_gtls_fpucw_mxcsr[0];
++        #endif
+ #else
+         #error "platform no support yet"
+ #endif
+@@ -341,7 +356,7 @@ aco_t* aco_create(
+         p->save_stack.ptr = malloc(save_stack_sz);
+         assertalloc_ptr(p->save_stack.ptr);
+         p->save_stack.sz = save_stack_sz;
+-#if defined(__i386__) || defined(__x86_64__)
++#if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
+         p->save_stack.valid_sz = 0;
+ #else
+         #error "platform no support yet"
+@@ -366,7 +381,7 @@ void aco_resume(aco_t* resume_co){
+         if(resume_co->share_stack->owner != NULL){
+             aco_t* owner_co = resume_co->share_stack->owner;
+             assert(owner_co->share_stack == resume_co->share_stack);
+-#if defined(__i386__) || defined(__x86_64__)
++#if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
+             assert(
+                 (
+                     (uintptr_t)(owner_co->share_stack->align_retptr)
+@@ -402,19 +417,19 @@ void aco_resume(aco_t* resume_co){
+             // TODO: optimize the performance penalty of memcpy function call
+             //   for very short memory span
+             if(owner_co->save_stack.valid_sz > 0) {
+-    #ifdef __x86_64__
++#ifdef __x86_64__
+                 aco_amd64_optimized_memcpy_drop_in(
+                     owner_co->save_stack.ptr,
+                     owner_co->reg[ACO_REG_IDX_SP], 
+                     owner_co->save_stack.valid_sz
+                 );
+-    #else
++#else
+                 memcpy(
+                     owner_co->save_stack.ptr,
+                     owner_co->reg[ACO_REG_IDX_SP], 
+                     owner_co->save_stack.valid_sz
+                 );
+-    #endif
++#endif
+                 owner_co->save_stack.ct_save++;
+             }
+             if(owner_co->save_stack.valid_sz > owner_co->save_stack.max_cpsz){
+@@ -427,7 +442,7 @@ void aco_resume(aco_t* resume_co){
+ #endif            
+         }
+         assert(resume_co->share_stack->owner == NULL);
+-#if defined(__i386__) || defined(__x86_64__)
++#if defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
+         assert(
+             resume_co->save_stack.valid_sz 
+             <= 
+diff --git a/aco.h b/aco.h
+index 5cf83fd..89dd001 100644
+--- a/aco.h
++++ b/aco.h
+@@ -44,6 +44,11 @@ extern "C" {
+     #define ACO_REG_IDX_RETADDR 4
+     #define ACO_REG_IDX_SP 5
+     #define ACO_REG_IDX_FPU 8
++#elif __aarch64__
++    // aarch64: reg[] = { x19, x20, ..., x28, x29(fp), x30(lr), sp, fpcr/fpsr, d8..d15 }
++    #define ACO_REG_IDX_RETADDR 11   // x30 (link register)
++    #define ACO_REG_IDX_SP 12        // sp
++    #define ACO_REG_IDX_FPU 13       // fpcr/fpsr (packed in one void* slot)
+ #else
+     #error "platform no support yet"
+ #endif
+@@ -97,6 +102,13 @@ struct aco_s{
+     #else
+         void*  reg[9];
+     #endif
++#elif __aarch64__
++    // x19..x28(10) + x29 + x30 + sp = 13;  + fpcr/fpsr(1) + d8..d15(8) = 22
++    #ifdef ACO_CONFIG_SHARE_FPU_MXCSR_ENV
++        void*  reg[21];
++    #else
++        void*  reg[22];
++    #endif
+ #else
+     #error "platform no support yet"
+ #endif
+@@ -146,6 +158,12 @@ extern void aco_save_fpucw_mxcsr(void* p);  // asm
+ 
+ extern void aco_funcp_protector_asm(); // asm
+ 
++#ifdef __aarch64__
++// aarch64: trampoline for a brand-new coroutine; jumps into fp with
++// x30=aco_funcp_protector_asm after aligning sp (see aco_create()).
++extern void aco_funcp_entry_asm(); // asm
++#endif
++
+ extern void aco_funcp_protector();
+ 
+ extern aco_share_stack_t* aco_share_stack_new(size_t sz);
+diff --git a/acosw.S b/acosw.S
+index 696dd49..fa2112f 100644
+--- a/acosw.S
++++ b/acosw.S
+@@ -1,6 +1,122 @@
+ .text
+ .globl acosw
+ .type  acosw, @function
++#ifdef __aarch64__
++/*
++    aarch64 (AArch64 AAPCS64):
++        extern void acosw(aco_t* from_co, aco_t* to_co);
++        x0 = from_co, x1 = to_co
++
++    callee-saved regs to persist across coroutine switch:
++        x19..x28, x29(fp), x30(lr), sp, d8..d15, fpcr/fpsr
++
++    reg[] layout (see aco.h ACO_REG_IDX_*):
++        0      x19
++        8      x20
++        16     x21
++        24     x22
++        32     x23
++        40     x24
++        48     x25
++        56     x26
++        64     x27
++        72     x28
++        80     x29 (fp)
++        88     x30 (lr)      ACO_REG_IDX_RETADDR=11
++        96     sp            ACO_REG_IDX_SP=12
++        104    fpcr/fpsr     ACO_REG_IDX_FPU=13  (packed, 8 bytes)
++        112    d8
++        ...    d9..d15 (8 regs * 8 bytes)
++        168    d15
++
++    For a brand-new coroutine, aco_create() stores aco_funcp_entry_asm in
++    reg[RETADDR] and the coroutine body fp in the x19 slot (reg[0]).
++    acosw restores x19=fp and x30=entry_asm, then br to the trampoline
++    which aligns sp, sets x30=aco_funcp_protector_asm and jumps to fp.
++    A normal `return` in fp then hits the protector (abort) exactly like
++    the x86-64 stack-slot mechanism.
++*/
++acosw:
++    // ── save from_co (x0) ──
++    stp     x19, x20, [x0, #0]
++    stp     x21, x22, [x0, #16]
++    stp     x23, x24, [x0, #32]
++    stp     x25, x26, [x0, #48]
++    stp     x27, x28, [x0, #64]
++    stp     x29, x30, [x0, #80]      // fp + lr
++    mov     x2, sp
++    str     x2, [x0, #96]            // sp
++#ifndef ACO_CONFIG_SHARE_FPU_MXCSR_ENV
++    mrs     x2, fpcr
++    mrs     x3, fpsr
++    orr     x2, x2, x3, lsl #32      // pack fpcr:fpsr into one slot
++    str     x2, [x0, #104]
++#endif
++    stp     d8,  d9,  [x0, #112]
++    stp     d10, d11, [x0, #128]
++    stp     d12, d13, [x0, #144]
++    stp     d14, d15, [x0, #160]
++
++    // ── restore to_co (x1) ──
++    ldp     x19, x20, [x1, #0]
++    ldp     x21, x22, [x1, #16]
++    ldp     x23, x24, [x1, #32]
++    ldp     x25, x26, [x1, #48]
++    ldp     x27, x28, [x1, #64]
++    ldp     x29, x30, [x1, #80]      // fp + lr (retaddr)
++    ldr     x2, [x1, #96]            // sp
++    mov     sp, x2
++#ifndef ACO_CONFIG_SHARE_FPU_MXCSR_ENV
++    ldr     x2, [x1, #104]
++    and     x3, x2, #0xffffffff
++    lsr     x4, x2, #32
++    msr     fpcr, x3
++    msr     fpsr, x4
++#endif
++    ldp     d8,  d9,  [x1, #112]
++    ldp     d10, d11, [x1, #128]
++    ldp     d12, d13, [x1, #144]
++    ldp     d14, d15, [x1, #160]
++
++    br      x30                      // jump to to_co's saved lr
++
++// Trampoline for a brand-new coroutine:
++//   x19 = coroutine body fp (stored by aco_create into reg[0], restored by acosw)
++//   sets x30 = aco_funcp_protector_asm then jumps to fp, so that a plain
++//   `return` from fp lands in the protector (abort) instead of looping.
++.globl aco_funcp_entry_asm
++.type  aco_funcp_entry_asm, @function
++aco_funcp_entry_asm:
++    mov     x9, sp
++    and     x9, x9, #-16
++    mov     sp, x9
++    adr     x30, aco_funcp_protector_asm
++    br      x19
++
++.globl aco_save_fpucw_mxcsr
++.type  aco_save_fpucw_mxcsr, @function
++aco_save_fpucw_mxcsr:
++    // void aco_save_fpucw_mxcsr(void* p);  p in x0
++    mrs     x1, fpcr
++    mrs     x2, fpsr
++    orr     x1, x1, x2, lsl #32
++    str     x1, [x0]
++    ret
++
++.globl abort
++.globl aco_funcp_protector
++
++.globl aco_funcp_protector_asm
++.type  aco_funcp_protector_asm, @function
++aco_funcp_protector_asm:
++    // Align sp to 16 bytes then call aco_funcp_protector(); unreachable.
++    mov     x9, sp
++    and     x9, x9, #-16
++    mov     sp, x9
++    bl      aco_funcp_protector
++    bl      abort
++    // unreachable
++#else
+ .intel_syntax noprefix
+ acosw:
+ /*
+@@ -156,3 +272,4 @@ aco_funcp_protector_asm:
+ #else
+     #error "platform not support"
+ #endif
++#endif
