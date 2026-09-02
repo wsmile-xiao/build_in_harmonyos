@@ -1,0 +1,97 @@
+# ═══ Draft knowledge entry — libmorton 2D 32-bit decode loop boundary (shift-by-width UB) ═══
+# Timestamp: 2026-09-01
+# Software: libmorton 0.2.12
+# Gate: G2 (conan create) / 上游正确性测试
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the defect evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+
+id:                     DRAFT-libmorton-0.2.12-m2d-32bit-decoding-boundary
+trigger_tool:           clang|c++|cmake|conan
+phase:                  build|test|decode
+error_signature:        m2D_d_for|shift.*32|decode.*wrong|Morton.*decode|correctness.*failed|
+                         round.trip.*failed|x_result|y_result
+
+severity:               2
+category:               portability|bit-manipulation|loop-bound|header-only|aarch64
+match_keywords:         m2D_d_for, morton, 32-bit decode, loop bound, shift-by-width,
+                         undefined behavior, libmorton, round-trip, coordinate corrupt
+title:                  libmorton m2D_d_for 32-bit 解码循环边界（移位到自身位宽）产生错误坐标
+
+root_cause: >
+  libmorton 0.2.12 的 2D 解码函数 m2D_d_for 使用含端点的循环上界：
+  unsigned int checkbits = sizeof(morton) * 4;
+  for (unsigned int i = 0; i <= checkbits; ++i) {
+      morton selector = 1;
+      unsigned int shift_selector = 2 * i;
+      x |= (m & (selector << shift_selector)) >> i;
+      y |= (m & (selector << (shift_selector + 1))) >> (i + 1);
+  }
+  当 morton 为 32 位类型（uint_fast32_t，aarch64 上为 unsigned int）时，checkbits=16，
+  末次迭代 i=16 令 shift_selector=32，对 32 位 selector 执行移位 32 位 —— 属
+  shift-by-width 未定义行为。实测该迭代污染解码结果，使 y 坐标损坏（例如
+  x=48584,y=42285 往返后 y 被解为 1 或 9517）。64 位变体未受影响；x86-64 上
+  uint_fast32_t 为 8 字节所以该缺陷不暴露。
+affected_scope: >
+  所有将 m2D_d_for 以 32 位 morton 类型（4 字节 fast 类型平台）实例化的消费者：
+  2D 32-bit Morton 解码在编码/解码往返后产生错误坐标，正确性测试失败。
+  库为 header-only，缺陷位于公开头文件 include/libmorton/morton2D.h。
+verification_cmd: >
+  /data/service/hnp/bin/clang++ -O2 -I include test/libmorton_test.cpp -o t && ./t 64
+  （或 conan create）；修复前上游正确性测试 "32-bit using methods encode For and decode For"
+  Failed；修复后 12/12 正确性检查 Passed。
+
+rec_priority:           1
+rec_approach:           fix-inclusive-loop-bound-to-exclusive
+rec_description: >
+  将 m2D_d_for 的循环上界从含端点改为不含端点：i <= checkbits → i < checkbits，
+  从而跳过会触发 shift-by-width UB 的末次迭代。该修复仅改变循环边界，不触及
+  任何坐标提取逻辑或测试断言。
+rec_command: >
+  patch: 在 morton2D.h 中把
+    for (unsigned int i = 0; i <= checkbits; ++i) {
+  改为
+    for (unsigned int i = 0; i < checkbits; ++i) {
+  再编译并运行上游 libmorton-test（12/12 Passed）。
+rec_auto_fix:           true
+rec_impl:               portability-patch
+
+fallback_priority:      2
+fallback_approach:      guard-by-morton-width
+fallback_description:   >
+  若无法修改公开头，可在调用侧仅使用 64 位解码路径，或为 32 位变体显式传入
+  更大的 morton 类型以避免 shift-by-width。
+fallback_command:       （使用 64 位编解码 API 替代 32 位）
+fallback_auto_fix:      false
+fallback_impl:          consumer-side-workaround
+
+forbid_1_pattern:       i\s*<=\s*checkbits
+forbid_1_reason:        Fixing 2D 而遗漏 3D 同构循环会使 m3D 32-bit 仍存在同类 UB。
+forbid_1_consequence:   Morton3D 32-bit 解码仍可能输出错误坐标。
+forbid_2_pattern:       skip.*correctness.*test|return\s+0.*without.*decode
+forbid_2_reason:        不得通过跳过上游正确性测试来规避该缺陷。
+forbid_2_consequence:   测试覆盖被削弱，缺陷回归无法被检测。
+forbid_3_pattern:       .*morton3D.*<=\s*checkbits.*unchanged
+forbid_3_reason:        修复应聚焦 m2D_d_for；对未证实的对称变体不擅自扩大改动。
+forbid_3_consequence:   无关变更进入补丁，违反最小可逆原则。
+
+principles:             P001
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-libmorton-0.2.12-m2d-32bit-decoding-boundary.md
+last_updated:           2026-09-01
+source_event:           archives/l/libmorton/0.2.12
+
+authors:                pc1-21
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-01
