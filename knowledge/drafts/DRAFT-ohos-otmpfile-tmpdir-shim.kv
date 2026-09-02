@@ -1,0 +1,106 @@
+#====================================================================
+# DRAFT-ohos-otmpfile-tmpdir-shim — 库硬编码 P_tmpdir/O_TMPFILE 无视
+#   TMPDIR 的 LD_PRELOAD 无名临时文件重定向
+# 对应人类文档: knowledge/drafts/DRAFT-ohos-otmpfile-tmpdir-shim.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR !7647 python3-cairo(pycairo) 1.29.1 适配 HarmonyOS PC
+#          既有实证: pycairo/1.29.0（main 已含同款 ohos_tmpdir_shim.c）
+#====================================================================
+
+id:                     DRAFT-ohos-otmpfile-tmpdir-shim
+trigger_tool:           test|python|pytest|runtime|conan
+phase:                  testing|runtime
+error_signature:        error creating or writing to a temporary file|
+                         CAIRO_STATUS_TEMP_FILE_ERROR|TEMP_FILE_ERROR|
+                         open.*/tmp/.*Read-only file system|
+                         tmpfile\(\).*EACCES|O_TMPFILE.*EACCES
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               testing, tmpdir, filesystem, ohos, ld-preload, portability
+match_keywords:         O_TMPFILE, P_tmpdir, tmpfile, LD_PRELOAD, TMPDIR, erofs,
+                         read-only /tmp, cairo, PSSurface, unnamed temp file, shim,
+                         E002, TEMP_FILE_ERROR
+title:                  库运行时硬编码 P_tmpdir/O_TMPFILE 无视 TMPDIR 时，用 LD_PRELOAD shim 重定向无名临时文件
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             上游 C 库创建临时文件时硬编码 P_tmpdir（"/tmp"）：open() 带
+                         O_TMPFILE 旗标、失败回退 tmpfile()，从不查询 $TMPDIR；
+                         HarmonyOS /tmp 为只读 erofs（E002），即使测试环境注入可写
+                         TMPDIR 也无法生效——每个受影响的运行时调用直接失败
+                         （cairo: _cairo_ps_surface_create_internal -> _cairo_tmpfile(),
+                         每个 cairo.PSSurface(...) 报 CAIRO_STATUS_TEMP_FILE_ERROR）
+affected_scope:         所有在 OHOS 上执行、且运行时经 O_TMPFILE/tmpfile()/P_tmpdir
+                         创建临时文件的 C 库上游测试与消费者测试（cairo PS surface
+                         首个实例；libc tmpfile() 忽略 TMPDIR 的 DejaGNU 场景为同族
+                         E272）。库本身行为正常，仅测试进程环境触发
+verification_cmd:       conan create archives/p/python3-cairo/1.29.1 --build=missing
+                         -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                         # 期望: 注入 shim 后 pytest 中 PSSurface 相关用例真实执行通过
+                         #（未注入时报 TEMP_FILE_ERROR），excluded_cases 不含本类用例
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           ld-preload-unnamed-tmpfile-redirect
+rec_description:        编译 LD_PRELOAD shim（-fPIC -shared，OHOS clang 工具链，产物经
+                         binary-sign-tool 签名）：仅拦截 open() 中带 O_TMPFILE 旗标的
+                         调用与 tmpfile()——把目录改写为 $TMPDIR→$TMP→$TEMP→$HOME/tmp
+                         中首个可写目录，旗标改写为 O_CREAT|O_EXCL 并在创建后立即
+                         unlink，保持 O_TMPFILE/tmpfile() 的无名临时文件语义；其余
+                         调用全部透传（OHOS musl 上 open64 是 open 的宏别名，无需
+                         单独拦截）。仅在测试/消费者进程设置 LD_PRELOAD，不影响
+                         生产 package 产物
+rec_command:            clang -fPIC -shared ohos_tmpdir_shim.c -o ohos_tmpdir_shim.so &&
+                         /data/service/hnp/bin/binary-sign-tool sign ohos_tmpdir_shim.so &&
+                         LD_PRELOAD=<abs>/ohos_tmpdir_shim.so pytest <tests>
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      capability-scoped-test-exemption
+fallback_description:   无法注入 LD_PRELOAD 的场景（AppSpawn/hmmac 拦截签名产物等，
+                         E212），对受影响用例按平台能力逐个豁免并在 excluded_cases
+                         如实声明（保留其余全量执行），不整体填 N/A
+fallback_command:       pytest --ignore=tests/test_surface_ps.py  # 仅示例：逐个豁免
+fallback_auto_fix:      false
+fallback_impl:          explicit-eligible-test-inventory
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       patch.*cairo-misc\.c|P_tmpdir.*getenv|改上游.*TMPDIR
+forbid_1_reason:        临时文件行为是上游设计（R6/R8 边界）——为过测试改上游源码
+                         需跟随每个上游版本维护补丁，且掩盖真实平台差异
+forbid_1_consequence:   上游每次升级补丁失效；测试通过与真实平台行为脱钩
+forbid_2_pattern:       skip.*PSSurface|N/A（未运行）|整体跳过受影响测试
+forbid_2_reason:        受影响用例可通过 shim 真实执行——整体跳过属于"有可运行子集
+                         未尝试"（rule 4 硬性不通过，#6926 先例）
+forbid_2_consequence:   测试覆盖率虚低，PR 被 rule 4 打回
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              E002
+similar_to:             E272
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-otmpfile-tmpdir-shim.md
+last_updated:           2026-09-02
+source_event:           python3-cairo(pycairo)/1.29.1 HarmonyOS PC 适配（PR !7647）；
+                         既有同款实证 pycairo/1.29.0（main ohos_tmpdir_shim.c）
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              7647
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-02
+
+draft:                  true
