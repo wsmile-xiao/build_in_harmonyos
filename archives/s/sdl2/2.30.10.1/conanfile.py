@@ -85,9 +85,12 @@ class Sdl2Conan(ConanFile):
         """
         _src = self.source_folder
         _bld = self.build_folder
-        # Find libSDL2.a (autotools puts it in build-release/.libs/)
+        # Find libSDL2.a (autotools puts it in build-release/.libs/).
+        # glob's '**' does not descend into dot-prefixed dirs (e.g. .libs),
+        # so include_hidden=True is required to locate the static archive.
         _sdl_libs = glob.glob(
-            os.path.join(_bld, "**", "libSDL2.a"), recursive=True
+            os.path.join(_bld, "**", "libSDL2.a"), recursive=True,
+            include_hidden=True,
         )
         _sdl_lib = os.path.dirname(_sdl_libs[0]) if _sdl_libs else _bld
         _inc = os.path.join(_src, "include")
