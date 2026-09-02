@@ -53,5 +53,5 @@ make install PREFIX=/usr/local DESTDIR=/path/to/staging
 
 ## 参考资料
 
-- 官方网站：http://www.leonerd.org.uk/code/libtermkey/
+- 官方网站：https://www.leonerd.org.uk/code/libtermkey/
 - GitHub：https://github.com/neovim/libtermkey（已归档）
