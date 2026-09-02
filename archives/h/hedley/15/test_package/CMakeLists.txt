@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_hedley C)
+find_package(hedley REQUIRED)
+add_executable(test_hedley test.c)
+target_link_libraries(test_hedley PRIVATE hedley::hedley)
+enable_testing()
+add_test(NAME test_hedley COMMAND test_hedley)
