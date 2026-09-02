@@ -16,6 +16,7 @@ class AutofdoConan(ConanFile):
     url = "https://github.com/google/autofdo"
     settings = "os", "compiler", "build_type", "arch"
     requires = "openssl/3.5.6", "elfutils/0.195"
+    tool_requires = "automake/1.18", "libtool/2.5.4"
     exports_sources = "patches/*"
 
     def validate(self):
