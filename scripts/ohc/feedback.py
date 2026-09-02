@@ -20,6 +20,8 @@ import re
 import secrets
 import subprocess
 import sys
+import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -119,18 +121,92 @@ def _load_feedback_state(ver_dir: Path) -> dict:
             pass
     if not state_path.exists():
         return {}
-    try:
-        return json.loads(state_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return {}
+    # v12.19a: 读侧瞬态重试——Windows 上写者 replace 窗口内读者可能拿到
+    # PermissionError；读空/坏 JSON 时短退避重读一次，避免把瞬态当空状态
+    # 返回（空状态会被上层回写 → 时间线全丢）
+    for attempt in range(2):
+        try:
+            return json.loads(state_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            if attempt == 0:
+                time.sleep(0.03)
+    return {}
 
 
 def _save_feedback_state(ver_dir: Path, state: dict) -> None:
-    """Save feedback state to .ohc/ (永不写进 archives/ - JC5 安全)."""
+    """Save feedback state to .ohc/ (永不写进 archives/ - JC5 安全).
+
+    v12.19: 原子写（tmp + os.replace）——半写状态被并发读者读到即
+    JSONDecodeError → 静默当作空状态重写 → 时间线全丢。
+    """
     state["last_updated"] = datetime.now().isoformat()
-    _state_path(ver_dir).write_text(
+    p = _state_path(ver_dir)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(
         json.dumps(state, ensure_ascii=False, indent=2),
         encoding="utf-8")
+    # v12.19a: Windows 上目标文件被并发读者打开时 os.replace 抛
+    # PermissionError（实测高频）——瞬时竞争，短退避重试必成；重试
+    # 尽仍失败则直写兜底（罕见竞态下接受非原子，好过丢整条时间线）
+    for i in range(4):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError:
+            if i < 3:
+                time.sleep(0.02 * (i + 1))
+    try:
+        p.write_text(
+            json.dumps(state, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+@contextmanager
+def _state_lock(ver_dir: Path, timeout_s: float = 10.0,
+                stale_s: float = 30.0):
+    """v12.19: feedback 状态跨进程互斥（O_EXCL 自旋 + stale 接管）。
+
+    竞态场景：budget-check 与 submit 两进程同时 record_event——
+    读-改-写交错后，后写者用旧快照覆盖前写者 → 丢事件（task_started
+    丢失会误判计时起点）。锁拿不到时降级（yield False），调用方走
+    CAS 合并写兜底。正常持锁毫秒级；stale_s 后视为崩溃遗留强制接管。
+    """
+    lock_path = _state_path(ver_dir).with_suffix(".lock")
+    acquired = False
+    deadline = time.monotonic() + timeout_s
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        while not acquired:
+            try:
+                fd = os.open(str(lock_path),
+                             os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                os.write(fd, str(os.getpid()).encode())
+                os.close(fd)
+                acquired = True
+            except FileExistsError:
+                try:
+                    if time.time() - lock_path.stat().st_mtime > stale_s:
+                        lock_path.unlink()
+                        continue
+                except OSError:
+                    pass
+                if time.monotonic() >= deadline:
+                    break  # 降级：调用方走 CAS 合并写
+                time.sleep(0.05)
+            except OSError:
+                break  # 文件系统异常（只读等）→ 降级
+        yield acquired
+    finally:
+        if acquired:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
 
 
 # ═══════════════════════════════════════════════════════
@@ -572,15 +648,28 @@ def record_event(ver_dir, event: str, detail: str = "") -> None:
     try:
         if ver_dir is None or not Path(ver_dir).exists():
             return
-        state = _load_feedback_state(Path(ver_dir))
-        events = state.get("events") or []
-        events.append({
-            "ts": datetime.now().isoformat(timespec="seconds"),
-            "event": str(event)[:60],
-            "detail": (detail or "")[:300],
-        })
-        state["events"] = events
-        _save_feedback_state(Path(ver_dir), state)
+        # v12.19: 读-改-写整体进锁（跨进程互斥）；锁超时降级时走 CAS
+        # 合并写——写前复查事件数，他者已写则重读合并，把覆盖窗口从
+        # 整个持锁周期缩到两条指令之间（丢事件概率再降数量级）
+        vd = Path(ver_dir)
+        with _state_lock(vd) as locked:
+            state = _load_feedback_state(vd)
+            events = state.get("events") or []
+            base = len(events)
+            entry = {
+                "ts": datetime.now().isoformat(timespec="seconds"),
+                "event": str(event)[:60],
+                "detail": (detail or "")[:300],
+            }
+            if not locked:
+                cur = _load_feedback_state(vd)
+                cur_events = cur.get("events") or []
+                if len(cur_events) != base:
+                    events = cur_events        # 他者已写 → 合并到最新
+                    base = len(events)
+            events = events + [entry]
+            state["events"] = events
+            _save_feedback_state(vd, state)
     except Exception:
         pass
 
