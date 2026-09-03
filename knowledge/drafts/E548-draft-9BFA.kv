@@ -1,0 +1,71 @@
+#====================================================================
+# E548 — 依赖版本低于上游最低要求时的选择性 API 回移
+# 版本探测、静态内联兼容层与依赖元数据同步
+#====================================================================
+
+id:                     E548
+trigger_tool:           configure|clang|ld|conan
+phase:                  compilation|linking|configuration
+error_signature:        implicit declaration of function .plist_dict_.*|no member named .PLIST_OPT_|undefined reference to .plist_dict_|Package .libplist. requires .plist_dict_get_bool|libplist >= [0-9.]+ but found [0-9.]+|checking for libplist >= .* no
+
+severity:               2
+category:               compat, dependency, version, api, autotools, conan
+match_keywords:         API backport, API 回移, 旧版依赖, 最低依赖版本, static inline compatibility, version gate, compatibility shim, dependency metadata, libplist, plist_dict_get_bool, plist_dict_copy_item, PLIST_OPT_NONE, pkg-config, Requires, 无版本宏
+title:                  依赖版本低于上游最低要求时的选择性 API 回移：版本探测、静态内联兼容层与依赖元数据同步
+
+root_cause:             上游项目按其声明的最低依赖版本使用 API（例如 libtatsu 1.0.5 的 configure.ac 要求 libplist >= 2.6.0 并在 tss.c 中使用 2.6.0 新增的 plist_dict_* 辅助函数），而本仓库制品仓只提供更旧的依赖版本（libplist/2.3.0）；被依赖库的公共头文件不导出任何版本宏，编译期无法 feature-test，导致旧版本下出现隐式函数声明、类型/枚举缺失与链接期 undefined reference。
+affected_scope:         所有"依赖库版本落后于上游最低要求"的 C/C++ 移植场景：上游代码使用新版本依赖才有的公开辅助 API，旧版依赖已具备全部底层原语但缺少这些包装函数，且依赖库不提供编译期版本宏；常见于 autotools/cmake + Conan 制品仓锁版本的交叉构建。
+verification_cmd:       pkg-config --modversion ${dep} 与上游 configure.ac 声明的最低版本比较；对每个缺失 API 在旧版依赖头文件中 grep 符号名确认缺失、在上游 changelog/tag 确认首次出现版本；在依赖 >= 新版本的环境编译确认原生路径不受兼容层影响
+
+rec_priority:           1
+rec_approach:           selective-static-inline-api-backport
+rec_description:        只回移实际缺失的 API：从依赖库可信上游源码逐字提取公开实现，放入独立的 static inline 兼容头，用构建期版本探测（pkg-config --atleast-version）定义版本门控宏，仅旧版本编译兼容层，新版依赖继续用原生实现；同步 configure 最低版本、pkg-config Requires 与 Conan requires 三处元数据。
+rec_command:            ${PKG_CONFIG} --atleast-version=${newver} ${dep} || CPPFLAGS="$CPPFLAGS -D${DEP}_LT_${NEWVER}=1"；受影响 .c 中 #ifdef ${DEP}_LT_${NEWVER} #include "compat.h" #endif；compat.h 内全部函数标记 static inline
+rec_auto_fix:           false
+rec_impl:               conan-recipe-patch
+
+fallback_priority:      2
+fallback_approach:      recipe-suffix-pinned-newer-dependency
+fallback_description:   若无法证明旧版依赖具备等价原语、无法核验上游实现的函数签名/语义/数据结构布局/许可证，或回移面过大，则在配方中改用满足上游最低要求的依赖版本；证明不了兼容时 fail closed，不做回移。
+fallback_command:       self.requires("${dep}/${newver}")
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       LIBPLIST_VERSION=2.3.0(?!.*plist_dict_compat)|requires\(.*/[0-9.]+\)(?!.*compat)
+forbid_1_reason:        只降低 configure/pkg-config/Conan 的版本约束而不补齐缺失 API，编译与链接必然失败，或迫使消费者依赖隐式函数声明。
+forbid_1_consequence:   元数据声称兼容而源码不兼容：消费者在旧版依赖上得到隐式声明、运行期未定义行为或链接错误。
+
+forbid_2_pattern:       -Wno-implicit-function-declaration|werror.*off.*plist|allow.*implicit
+forbid_2_reason:        依赖隐式函数声明或关闭编译/链接错误只是掩盖缺失符号，不改写调用语义。
+forbid_2_consequence:   int 截断、指针错位、崩溃或未定义行为在运行期才暴露；错误被系统性隐藏。
+
+forbid_3_pattern:       cp -r.*libplist.*src|#include.*plist\.c
+forbid_3_reason:        复制整个依赖源码、猜测私有 API 行为都无法保证与原生实现一致，且引入许可证与维护负担。
+forbid_3_consequence:   行为漂移、体积膨胀、许可证污染，升级依赖时产生冲突。
+
+forbid_4_pattern:       ^#define plist_dict_get_bool|plist_dict_compat\.h(?![\s\S]*#ifdef LIBPLIST_LT_2_6)
+forbid_4_reason:        无版本门控地宏覆盖新版原生 API 会在新版本环境下与库内同名符号冲突并改变语义。
+forbid_4_consequence:   新版依赖下符号重复定义或行为不一致，兼容层变成新的不兼容源。
+
+principles:             P003, P005, P011, P013
+causes:                 []
+caused_by:              []
+similar_to:             [E531, E235]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E548.md
+last_updated: 2026-09-03
+source_event:           libtatsu 1.0.5 OHOS 适配：libplist/2.3.0 低于上游最低要求 2.6.0，回移 7 个 plist_dict_* helper（192 处调用）
+
+authors:                余念儒 <3220476062@qq.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-03
+
+draft: true
+contributor_id: 9BFA
