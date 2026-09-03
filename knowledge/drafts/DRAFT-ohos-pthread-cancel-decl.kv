@@ -1,0 +1,106 @@
+#====================================================================
+# DRAFT-ohos-pthread-cancel-decl — OHOS GNU pthread cancel 声明型兼容：
+#   设备 libc 导出符号（T/W），仅 sysroot 头缺声明 → 声明型 compat header
+# 触发事件: nymphcast 0.2-alpha0（lcdapi 依赖 GNU pthread cancel API）
+# 知识修正类：修正 E085（musl 不实现 pthread_cancel 系列）与
+#   E127（HarmonyOS 不支持）的"不实现/不支持"假设
+#====================================================================
+
+id:                     DRAFT-ohos-pthread-cancel-decl
+trigger_tool:           clang|gcc|ld|runtime
+phase:                  compilation|linking
+error_signature:        pthread_cancel.*undeclared|
+                         pthread_setcancelstate.*undeclared|
+                         pthread_testcancel.*undeclared|
+                         pthread_setcanceltype.*undeclared|
+                         undefined reference to pthread_cancel
+
+severity:               3
+category:               libc-compat|threading|header|knowledge-correction
+match_keywords:         pthread_cancel, pthread_setcancelstate, pthread_testcancel,
+                         pthread_setcanceltype, nm -D, declaration-only, compat
+                         header, -include, sysroot, OHOS, musl, libc
+title:                  OHOS GNU pthread cancel 声明型兼容：先 nm 探测设备 libc，
+                         符号存在则仅需声明型 compat header（extern "C" + -include），
+                         勿直接套用 E085/E127 的"不实现"假设
+
+root_cause: >
+  OHOS 设备运行 libc（/system/lib64/libc.so）实际导出 GNU pthread 取消 API：
+  pthread_cancel T、pthread_setcancelstate W、pthread_testcancel W（nm -D 实测）。
+  但编译期 sysroot 头（<sdk>/sysroot/usr/include/pthread.h）不声明这些函数
+  （grep pthread_cancel = 0）。编译报 "undeclared identifier" 是**声明缺失**，
+  不是符号缺失。E085/E127 把"头缺声明"表述为"musl/HarmonyOS 不实现 pthread
+  cancel"，与设备运行时 libc 实证不符（可能源于设备运行 libc 与编译期 sysroot
+  libc 的差异）。正确做法：符号存在 → 声明型 compat header（extern "C" 声明 +
+  CFLAGS/CXXFLAGS -include 注入）即可编译/链接/运行，无需 stub 或行为回退。
+  B2-1 补证：pthread_setcanceltype **未**导出（nm 0 命中），0004 声明了它且
+  lcdapi 实际调用，但最终产物 dynsym 无此引用（0001 __OHOS__ 裁剪了 lcdapi 连接
+  块）——故取消系列必须**逐符号 nm 探测**，不能因 3 个符号存在而假定全集可用。
+
+affected_scope: >
+  直接调用 GNU pthread cancel API 的 C/C++ 软件：lcdapi 类；
+  E085 affected_scope（libgpg-error/squashfs-tools/redis/mosquitto/iperf3）；
+  E127（libomp）；E320-draft-ASP1（JACK）。
+
+verification_cmd: >
+  nm -D /system/lib64/libc.so | grep -e pthread_cancel -e pthread_setcancelstate
+  -e pthread_testcancel -e pthread_setcanceltype;
+  grep -c pthread_cancel <sdk>/sysroot/usr/include/pthread.h
+
+rec_priority:           1
+rec_approach:           declaration-only-compat-header
+rec_description: >
+  先对设备 libc 逐符号 nm -D 探测；符号存在、仅头缺声明 → 提供声明型 compat
+  header（extern "C" + 正确签名），经 CFLAGS/CXXFLAGS -include 注入每个 TU，
+  编译/链接/运行即可。探测不到的符号不得声明为可用。
+rec_command: >
+  # ohos_pthread_compat.h（nymphcast 0004 实际内容）
+  #ifdef __OHOS__
+  extern "C" int pthread_cancel(pthread_t);
+  extern "C" int pthread_setcanceltype(int, int *);
+  extern "C" int pthread_setcancelstate(int, int *);
+  extern "C" void pthread_testcancel(void);
+  #endif
+  # build: CXXFLAGS/CFLAGS 增加 -include ohos_pthread_compat.h
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      per-symbol-stub-or-fallback
+fallback_description: >
+  对 nm 探测确实不存在的符号，才选用 E085 stub（空实现满足链接）或
+  E320-draft-ASP1 行为回退（保持 joinable 线程生命周期）；不得声明未导出符号。
+fallback_command:       nm -D /system/lib64/libc.so | grep <symbol> || <stub-or-fallback>
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       assume.*pthread_cancel.*not supported|因为 OHOS 所以.*pthread.*不支持
+forbid_1_reason:        E085/E127 的"不实现/不支持"表述与设备运行时 libc 实证不符；
+                        符号存在时错误地用 stub/undef 会破坏真实语义或过度工程。
+forbid_1_consequence:   该链接的调用被 stub 空实现吞掉或编译期被 undef，运行期行为错误；
+                        JACK 场景下信号回退在符号存在时属过度设计。
+
+forbid_2_pattern:       declare.*pthread_setcanceltype.*without.*nm.*verify
+forbid_2_reason:        B2-1：pthread_setcanceltype 未在设备 libc 导出，声明它会在
+                        该路径被链接时产生 undefined reference。
+forbid_2_consequence:   link 失败；若被 0001 类裁剪掩盖则留下误导性声明，后续复用误判全集可用。
+
+principles:             P004, P015
+similar_to:             E085, E127, E320-draft-ASP1-pthread-cancel-lifecycle
+conflicts_with:         E085, E127
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-pthread-cancel-decl.md
+last_updated:           2026-08-27
+source_event:           archives/n/nymphcast/0.2-alpha0 patches/0004
+                        （ohos_pthread_compat.h）；round-9 CI PASS；
+                        Curation Auditor B2-1 补证
+
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-27
