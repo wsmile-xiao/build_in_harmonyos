@@ -1,0 +1,108 @@
+#====================================================================
+# DRAFT-ohos-la-libdir-hardcode — 依赖包自带的 .la（libtool archive）
+#   把 libdir 硬编码为 //lib、dependency_libs 引用 //lib/libxxx.la，
+#   libtool 链接报 "is not a valid libtool archive"——复制改写 .la 到
+#   staging 并把 -L staging 注入 configure 的 LDFLAGS（bake 进 Makefile）
+# 对应人类文档: knowledge/drafts/DRAFT-ohos-la-libdir-hardcode.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR speech-dispatcher/0.12.1 适配 HarmonyOS PC（libtool 链接
+#           libspeechd.la 报 //lib/libpcre2-8.la is not a valid libtool archive）
+#====================================================================
+
+id:                     DRAFT-ohos-la-libdir-hardcode
+trigger_tool:           make|libtool|ld|clang
+phase:                  linking
+error_signature:        .*\.la.*is not a valid libtool archive|
+                         cannot find the library '.*\.la'|
+                         libtool:.*was moved.*\.la|
+                         sed: //lib/.*\.la: No such file or directory|
+                         //lib/lib.*\.la
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               ohos, libtool, .la, libdir, hardcode, linking, portability
+match_keywords:         .la, libtool archive, libdir, dependency_libs, //lib,
+                         is not a valid libtool archive, was moved, staging,
+                         libtool archive, prefix, conan package
+title:                  依赖包自带的 .la（libtool archive）把 libdir 硬编码为 //lib、
+                         dependency_libs 引用 //lib/libxxx.la——复制改写 .la 到
+                         staging 并把 -L staging 注入 configure 的 LDFLAGS
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             libtool 链接 .la 时读其 libdir 与 dependency_libs：部分依赖包
+                         （如 pcre2/libffi 的 .la）在 OHOS 上构建时把 libdir 硬编码为
+                         //lib（prefix 为空）、dependency_libs 引用 //lib/libxxx.la
+                         ——libtool 按此绝对路径 sed 时找不到（OHOS 无该路径），报
+                         "'//lib/libxxx.la' is not a valid libtool archive"。这发生在
+                         链接 libspeechd.la 时（glib 的 Requires 链把 pcre2/libffi 的
+                         .la 拉进来），与 .pc 的 libdir 硬编码同根因但载体不同（.la）
+affected_scope:         所有在 OHOS 上用 autotools/libtool 构建、链接依赖 glib/pcre2
+                         等带 .la 的依赖包的库（speech-dispatcher 即此类）
+verification_cmd:       conan create archives/s/speech-dispatcher/0.12.1 --build=missing
+                         -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                         # 期望: 覆盖前 libtool 报 //lib/libpcre2-8.la is not a valid
+                         # libtool archive；覆盖后 libspeechd.la 链接成功
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           la-staging-rewrite
+rec_description:        在 generate()（configure 前）复制**所有依赖包** lib/*.la 到
+                         staging 目录，改写每个 .la 的 libdir 与 dependency_libs 中
+                         `/lib`、`//lib` 路径为 conan 包实际路径；把 `-L staging`
+                         **注入 configure 的 LDFLAGS**（bake 进 Makefile）——make 链接
+                         时 libtool 按 -L 顺序优先解析改写后的 .la。注意不能只改
+                         build() 的 os.environ LDFLAGS（对已生成的 Makefile 无效）
+rec_command:            (conanfile generate() 中)
+                         la_staging = self._fix_dep_la()   # 复制改写 .la 并返回 staging
+                         "LDFLAGS=-L%s -L/lib -L%s/ohos-shim -lohosshim"
+                         % (la_staging, self.build_folder)
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      source-patch-disable-libtool-deps
+fallback_description:   若 .la 改写不可行，patch 源码绕开带 .la 的依赖链（如只构建
+                         不依赖它们的子目录）——改动面大，不推荐
+fallback_command:       (逐文件补丁)
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       os\.environ\[.LDFLAGS.\].*-L.*staging|build\(\) 里改 LDFLAGS 环境变量
+forbid_1_reason:        make 用的 LDFLAGS 是 configure 时 bake 进 Makefile 的，build()
+                         里改 os.environ 对已生成的 Makefile 无效（CI #37458 实测）
+forbid_1_consequence:   CI 仍报 //lib/libxxx.la；修复看似生效本地过、CI 不过
+forbid_2_pattern:       sed.*\.la.*删除|patch.*去掉.*dependency_libs|skip.*libtool
+forbid_2_reason:        删 .la 依赖链破坏链接语义；改写路径才是正解
+forbid_2_consequence:   换依赖版本即失效
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-ohos-pc-libdir-hardcode
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-la-libdir-hardcode.md
+last_updated:           2026-09-03
+source_event:           speech-dispatcher/0.12.1 HarmonyOS PC 适配（libtool 链接
+                         libspeechd.la 报 //lib/libpcre2-8.la is not a valid
+                         libtool archive，CI #36976/#37284/#37446/#37458 反复）
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-03
+
+draft:                  true
