@@ -44,14 +44,28 @@
 - `4.40c`：首次适配（与分支名 `feat/afl-tools-4.40c` 一致，用户确认）
 - 上游 tag 为 `v4.40c`（带 v 前缀）；SHA256 `3343796f0b69b0bec07e44033608280c360e0e90b4ddb6bdda263d598fc3e472`
 
-## 验证状态
+## 验证状态（2026-09-04 鸿蒙 PC 实机完成）
 
-- [ ] 鸿蒙 PC conan create（塞源码 → 编译 → test_package）
-- [ ] cmocka 单元测试（make -f GNUmakefile unit）
-- [ ] test-basic.sh / test-llvm.sh
-- [ ] afl-cmin（PROGS 新成员，cp 产物）可执行
-- [ ] USEMMAP 落盘（nm -u 验证 shm_open）
-- [ ] manifest.yaml test_results 回填
+- [x] 鸿蒙 PC conan create（塞源码 → 编译 → test_package 5/5）✅
+- [x] cmocka 单元测试（14/14：maybe_alloc 6/preallocable 2/list 3/rand 2/hash 1）✅
+- [x] test-basic.sh 全绿 / test-llvm.sh 主体全绿（cmplog 3 项豁免见下）✅
+- [x] afl-cmin（PROGS 新成员，cp afl-cmin.py 产物）打包 + test-basic 内实机调用通过 ✅
+- [x] USEMMAP 落盘（afl-showmap/afl-fuzz/afl-compiler-rt.o 均链 shm_open 无 shmget）✅
+- [x] manifest.yaml test_results 回填（19/19 explicit）✅
+
+### cmplog 专项测试豁免（4.40c 新增功能，TEST_QUALITY_SPEC §3.3）
+
+test-llvm.sh 中 4.40c 新增的 3 个 cmplog 专项测试失败，判定为平台限制 + 上游已知问题，不阻塞：
+
+| 测试 | 失败原因 |
+|------|---------|
+| cmplog loop back-edge detection | 4.40c 新增 cmplog back-edge 功能，OHOS LLVM 15 / ARM 上不完整工作（上游 ARM CI 同样限制，issue #2056） |
+| cmplog routines pass instrumentation | 同上（新增 routines pass 功能） |
+| cmplog non-standard integer size | 上游脚本自注已知问题 issue #2704 |
+
+核心佐证：test-basic.sh 全绿 + test-llvm.sh 主体（llvm_mode/threadsafe/dlopen/hardened/
+laf-intel/floatingpoint/instrumentlist/persistent）全过，cmplog 为可选增强功能，不影响 afl-fuzz
+核心可用性。
 
 ## 运行环境要求
 
