@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(strict_variant_consumer LANGUAGES CXX)
+
+find_package(strict_variant CONFIG REQUIRED)
+
+add_executable(strict_variant_consumer test_package.cpp)
+target_link_libraries(strict_variant_consumer PRIVATE strict_variant::strict_variant)
+target_compile_features(strict_variant_consumer PRIVATE cxx_std_11)
