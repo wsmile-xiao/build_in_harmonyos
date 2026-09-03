@@ -6,6 +6,7 @@ It supports IPv4/IPv6 TCP sockets and Unix domain sockets.
 No external dependencies — only uses libc functions.
 """
 import os
+import glob
 
 from conan import ConanFile
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
@@ -93,8 +94,6 @@ class SpawnFcgiConan(ConanFile):
     def _sign_binaries(self):
         objcopy = "/data/service/hnp/bin/llvm-objcopy"
         signer = "/data/service/hnp/bin/binary-sign-tool"
-        if not (os.path.isfile(objcopy) and os.path.isfile(signer)):
-            return
         targets = []
         bindir = os.path.join(self.package_folder, "bin")
         if os.path.isdir(bindir):
