@@ -92,8 +92,12 @@ class SpawnFcgiConan(ConanFile):
             return False
 
     def _sign_binaries(self):
+        # OHOS PC XPM 要求可执行文件必须有代码签名，否则报 Permission denied。
+        # 仅当签名工具存在时才执行（OHOS 设备上有，CI 环境中无）。
         objcopy = "/data/service/hnp/bin/llvm-objcopy"
         signer = "/data/service/hnp/bin/binary-sign-tool"
+        if not (os.path.isfile(objcopy) and os.path.isfile(signer)):
+            return
         targets = []
         bindir = os.path.join(self.package_folder, "bin")
         if os.path.isdir(bindir):
