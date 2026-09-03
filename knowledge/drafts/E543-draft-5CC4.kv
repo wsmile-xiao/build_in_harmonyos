@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E543.kv，填写各字段
+# 对应的人类文档: doc/E543.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E543
+trigger_tool: clang|ld|cmake|test
+phase: compilation|runtime|testing
+error_signature: no member named 'sin6_family'|struct sockaddr.*sin6|sizeof.*mismatch|invalid application of 'sizeof'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: portability, compat, socket, headers
+match_keywords: cpp_info.defines, ABI 宏, 结构体布局, NS_ENABLE_IPV6, socket_address, 内存越界, 特性宏下发
+title: 改变结构体布局的特性宏必须经 cpp_info.defines 下发，否则消费者与已编译库 ABI 不一致
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 特性宏分两类：只决定符号存在与否的功能开关，两侧不一致会表现为链接错误；而改变公共头里结构体/联合体成员类型的布局（ABI）宏，两侧不一致不报编译错，静默变成运行期越界。真机实测 fossa 的 NS_ENABLE_IPV6 使 sizeof(union socket_address) 从 16 变 28（fossa.h:537），配方最常见的疏漏是只把 -D 传给库、忘了写进 cpp_info.defines
+affected_scope: 所有把特性宏写进公共头文件并据此改变结构体布局的 C/C++ 单头/合并产物库（fossa、mongoose 系及同类），以及它们的 Conan 下游消费者
+verification_cmd: clang -fsyntax-only -I<pkg>/include test.c        # 缺宏 ⇒ no member named 'sin6_family'
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: propagate-layout-macros-via-cpp-info-defines
+rec_description: 把编进库的特性宏与下发给消费者的特性宏定义为同一份常量，package_info 里原样赋给 cpp_info.defines，并在 test_package 用编译期布局断言把这条契约钉住（宏不下发就编译不过）
+rec_command: self.cpp_info.defines = list(FEATURE_DEFINES)
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: hide-layout-in-internal-header
+fallback_description: 若上游布局宏可被隐藏（不暴露在使用者可见头文件中），改为只导出稳定 API；本例不可行，故采用方案一
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: 消费者自行添加|只写进库不改 cpp_info|defines 留空
+forbid_1_reason: 只给库加 -D 而不下发给消费者，会让两边在同一头文件上看到不同布局，属静默内存错误
+forbid_1_consequence: 轻则字段读到垃圾值，重则栈/堆越界；这类故障无法通过测试用例数发现，只能在 ABI 断言里暴露
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: P012
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to: E530
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E543.md
+last_updated: 2026-09-02
+source_event: fossa/2.1 NS_ENABLE_IPV6 布局宏（fossa.h:537）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 5CC4

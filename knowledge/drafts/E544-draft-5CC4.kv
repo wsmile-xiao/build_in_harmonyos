@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E544.kv，填写各字段
+# 对应的人类文档: doc/E544.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E544
+trigger_tool: test|runtime
+phase: testing|runtime
+error_signature: 1\.000000 != 4\.000000|\[data == 4\]|\[data == 1\]|2\.000000 != 1\.000000|does\.not\.exist|198\.18\.[0-9]+\.[0-9]+|Can't locate CGI\.pm
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: network, testing, limitation, ohos
+match_keywords: 泛解析, wildcard DNS, 198.18, RFC 2544, 透明代理, NXDOMAIN, does.not.exist, 上游测试失败归因, 环境限制
+title: 运营商泛解析与透明代理使「带点域名解析失败/连接被拒」类断言必然失败，须逐条归因而非删用例
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 运营商 resolver（114.114.114.114）对带点的不存在域名不做 NXDOMAIN 而是合成 RFC 2544 段（198.18.0.0/15）地址，链路透明代理又 accept 任意端口，故期望连接失败的用例反而连上（回调置位 1 而非 4）；另一条独立机制是用例把 2015 年抓取的真实应答（52.16.170.74 / CNAME dev.cesanta.com）写死成成功条件。单标签名字仍返回真 NXDOMAIN，这解释了同类负向用例为何有的通过有的失败
+affected_scope: 所有单元测试涉及负向 DNS/期望连接被拒/比对固定历史应答的网络库用例（HTTP、DNS、MQTT、TLS 客户端）
+verification_cmd: nslookup does.not.exist && nslookup please_dont_name_a_host_like_ths && ./unit_test test_dns_resolve_hosts
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: attribute-and-keep-in-matrix
+rec_description: 不改上游断言也不静默跳过：逐条写明失败机制并保留在失败矩阵（failed 计数、status=partial），配方用白名单只放行已归因用例，白名单之外的任何 FAIL 一律 raise 让构建立即失败
+rec_command: 
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: local-dns-mock
+fallback_description: 需要真正验证负向路径时，改用可控本地 DNS（指向 127.0.0.1 上的测试 server 或 /etc/hosts）替代外部环境，但不得为此修改上游用例语义后仍称其为上游测试
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: 删除用例|注释掉断言|直接 skip 整组
+forbid_1_reason: 环境受限不等于代码正确；删用例或整组跳过会让真实回归与环境问题一起消失，评审无法区分
+forbid_1_consequence: PR 中用例数虚高、通过率造假，且上游回归在鸿蒙上无人发现
+forbid_2_pattern: 只在单一网络环境归因|一律写成环境限制|换机器不复核就沿用结论
+forbid_2_reason: 泛解析环境「总能给出应答」恰好掩盖了上游回调缺 msg==NULL 守卫的崩溃分支；只在一种网络上归因，会把上游 bug 误登记成环境限制（另一半真相见 E545）
+forbid_2_consequence: 归因表面自洽但覆盖不全，换到真 NXDOMAIN 环境（如 CI）时同一条用例以 Signal 11 复现，先前的归因被当成造假而不被信任
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: P013
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to: E046, E479, E265, E545, E429
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E544.md
+last_updated: 2026-09-02
+source_event: fossa/2.1 test_connection_errors 与 test_dns_resolve 真机失败归因
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 5CC4
