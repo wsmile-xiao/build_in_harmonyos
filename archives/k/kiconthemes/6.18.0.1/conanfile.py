@@ -14,7 +14,7 @@ OHOS-specific adaptations:
     initial Akonadi KF baseline
   - BUILD_TESTING=ON and ctest execution for upstream autotests available in
     the current headless feature set
-  - Dependencies: qtbase/6.11.1, qtsvg/6.11.1 (Qt6Svg), karchive/6.19.0,
+  - Dependencies: qtbase/6.11.1, qtsvg/6.11.1 (Qt6Svg), karchive/6.18.0,
     openssl/3.5.6.1 (for KF6ArchiveConfig find_dependency(OpenSSL)),
     zstd/1.5.7 (for KF6ArchiveTargets PkgConfig::LibZstd), ki18n/6.18.0,
     kwidgetsaddons/6.18.0, kcolorscheme/6.18.0, ecm/6.26.0
@@ -26,18 +26,20 @@ OHOS-specific adaptations:
 """
 import os
 import glob
+import re
 import shlex
 import shutil
 
 from conan import ConanFile
-from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
+from conan.errors import ConanException
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches, save
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.env import Environment
 
 
 class KiconthemesConan(ConanFile):
     name = "kiconthemes"
-    version = "6.18.0"
+    version = "6.18.0.1"
     description = "KDE Frameworks 6 - KDE Icon Themes"
     license = "LGPL-2.0-or-later"
     homepage = "https://invent.kde.org/frameworks/kiconthemes"
@@ -54,7 +56,7 @@ class KiconthemesConan(ConanFile):
     def requirements(self):
         self.requires("qtbase/6.11.1")
         self.requires("qtsvg/6.11.1")
-        self.requires("karchive/6.19.0")
+        self.requires("karchive/6.18.0")
         self.requires("openssl/3.5.6.1")
         self.requires("zstd/1.5.7")
         self.requires("ki18n/6.18.0")
@@ -86,6 +88,8 @@ class KiconthemesConan(ConanFile):
         # Qt Designer plugin requires Qt6UiPlugin, which is not published to
         # ohpcd; disable it explicitly.
         tc.variables["BUILD_DESIGNERPLUGIN"] = "OFF"
+        if str(self.settings.os) in ("OHOS", "HarmonyOS"):
+            self._configure_ohos_shared_library_rules(tc)
 
         # ECM's own installed ECMConfig.cmake sets ECM_MODULE_PATH, but the
         # CMakeDeps-generated ECMConfig.cmake does not. Set it manually so
@@ -184,13 +188,34 @@ class KiconthemesConan(ConanFile):
 
         tc.generate()
 
+    def _configure_ohos_shared_library_rules(self, toolchain):
+        rules = os.path.join(self.generators_folder, "ohos-shared-library-rules.cmake")
+        save(
+            self,
+            rules,
+            "\n".join((
+                'set(CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,")',
+                'set(CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG "-Wl,-soname,")',
+                'set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG "-Wl,-rpath,")',
+                'set(CMAKE_SHARED_LIBRARY_RUNTIME_CXX_FLAG "-Wl,-rpath,")',
+                'set(CMAKE_SHARED_LIBRARY_RUNTIME_C_FLAG_SEP ":")',
+                'set(CMAKE_SHARED_LIBRARY_RUNTIME_CXX_FLAG_SEP ":")',
+            )) + "\n",
+        )
+        toolchain.cache_variables["CMAKE_USER_MAKE_RULES_OVERRIDE_C"] = rules
+        toolchain.cache_variables["CMAKE_USER_MAKE_RULES_OVERRIDE_CXX"] = rules
+
     def build(self):
         # Platform guard: apply OHOS-specific patches only on OHOS so
         # non-OHOS platforms (e.g. BSD) are not affected.
         if self.settings.os == "OHOS":
             apply_conandata_patches(self)
         cmake = CMake(self)
-        cmake.configure()
+        cmake.configure(variables={
+            "KICONTHEMES_USE_QTQUICK": "OFF",
+            "USE_DBUS": "OFF",
+            "BUILD_DESIGNERPLUGIN": "OFF",
+        })
         with self._library_runtime_env().vars(self).apply():
             cmake.build()
         self._run_upstream_tests()
@@ -349,9 +374,79 @@ class KiconthemesConan(ConanFile):
                 except OSError:
                     shutil.copy2(src, dst)
 
+    @staticmethod
+    def _is_elf(path):
+        try:
+            with open(path, "rb") as handle:
+                return handle.read(4) == b"\x7fELF"
+        except OSError:
+            return False
+
+    def _find_ohos_tool(self, name):
+        candidates = []
+        compilers = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict
+        )
+        for compiler in (compilers.get("c"), compilers.get("cpp")):
+            if compiler:
+                candidates.append(os.path.join(os.path.dirname(compiler), name))
+        found = shutil.which(name)
+        if found:
+            candidates.append(found)
+        candidates.append(os.path.join("/data/service/hnp/bin", name))
+        return next((path for path in candidates if path and os.path.isfile(path)), "")
+
+    @staticmethod
+    def _quote(value):
+        return '"' + str(value).replace('"', '\"') + '"'
+
+    def _sign_ohos_elf_tree(self, root_folder):
+        if str(self.settings.os) not in ("OHOS", "HarmonyOS") or not os.path.isdir(root_folder):
+            return
+        objcopy = self._find_ohos_tool("llvm-objcopy")
+        signer = self._find_ohos_tool("binary-sign-tool")
+        if not objcopy or not signer:
+            raise ConanException("Cannot locate OHOS ELF signing tools")
+        signed = 0
+        for root, _, files in os.walk(root_folder):
+            for name in files:
+                path = os.path.join(root, name)
+                if os.path.islink(path) or not self._is_elf(path):
+                    continue
+                self.run(f"{self._quote(objcopy)} --remove-section .codesign {self._quote(path)}", ignore_errors=True)
+                self.run(f"{self._quote(signer)} sign -inFile {self._quote(path)} -outFile {self._quote(path)} -selfSign 1")
+                signed += 1
+        self.output.info(f"Signed {signed} OHOS package ELF file(s)")
+
+    def _normalize_ohos_needed_names(self):
+        if str(self.settings.os) not in ("OHOS", "HarmonyOS"):
+            return
+        pattern = re.compile(rb"(?:/[^/\x00]+)+/(lib[^/\x00]+)")
+        normalized_files = 0
+        for library in glob.glob(os.path.join(self.package_folder, "lib", "*.so*")):
+            if os.path.islink(library) or not self._is_elf(library):
+                continue
+            with open(library, "rb") as handle:
+                data = handle.read()
+
+            def replace(match):
+                name = match.group(1)
+                return name + b"\x00" * (len(match.group(0)) - len(name))
+
+            normalized, replacements = pattern.subn(replace, data)
+            if replacements:
+                with open(library, "wb") as handle:
+                    handle.write(normalized)
+                normalized_files += 1
+        self.output.info(
+            f"Normalized absolute DT_NEEDED paths in {normalized_files} OHOS library file(s)"
+        )
+
     def package(self):
         cmake = CMake(self)
         cmake.install()
+        self._normalize_ohos_needed_names()
+        self._sign_ohos_elf_tree(self.package_folder)
 
     def package_info(self):
         # The project installs its own KF6IconThemesConfig.cmake with proper
