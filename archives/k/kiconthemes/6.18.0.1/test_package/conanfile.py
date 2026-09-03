@@ -19,7 +19,7 @@ class KiconthemesTestConan(ConanFile):
         self.requires(self.tested_reference_str)
         self.requires("qtbase/6.11.1")
         self.requires("qtsvg/6.11.1")
-        self.requires("karchive/6.19.0")
+        self.requires("karchive/6.18.0")
         self.requires("ki18n/6.18.0")
         self.requires("kwidgetsaddons/6.18.0")
         self.requires("kcolorscheme/6.18.0")
@@ -29,6 +29,8 @@ class KiconthemesTestConan(ConanFile):
 
     def generate(self):
         tc = CMakeToolchain(self)
+        tc.variables["CMAKE_BUILD_RPATH"] = "$ORIGIN"
+        tc.variables["CMAKE_EXE_LINKER_FLAGS"] = "-Wl,--disable-new-dtags"
         tc.generate()
 
         qtbase = self.dependencies.get("qtbase")
@@ -90,19 +92,26 @@ class KiconthemesTestConan(ConanFile):
         cmake.build()
 
     def test(self):
-        # KF6 libraries record build-tree-relative DT_NEEDED entries; mirror
-        # the expected layout under test_package/bin by symlinking every KF6
-        # shared library there.
-        tp_bin = os.path.join(self.build_folder, "..", "..", "bin")
-        os.makedirs(tp_bin, exist_ok=True)
+        # On OHOS, standard DT_SONAME entries need a co-located runtime
+        # library directory. Preserve the legacy test_package/bin layout too.
+        runtime_dirs = {
+            os.path.join(self.build_folder, "..", "..", "bin"),
+            self.cpp.build.bindirs[0],
+        }
+        for runtime_dir in runtime_dirs:
+            os.makedirs(runtime_dir, exist_ok=True)
         for dep in self.dependencies.values():
             libdir = os.path.join(dep.package_folder, "lib") if dep.package_folder else None
-            if libdir and os.path.isdir(libdir):
-                for name in os.listdir(libdir):
-                    if name.startswith("libKF6") and name.endswith(".so"):
-                        link = os.path.join(tp_bin, name)
-                        if not os.path.lexists(link):
-                            os.symlink(os.path.join(libdir, name), link)
+            if not libdir or not os.path.isdir(libdir):
+                continue
+            for name in os.listdir(libdir):
+                if not (name.startswith("lib") and ".so" in name):
+                    continue
+                source = os.path.join(libdir, name)
+                for runtime_dir in runtime_dirs:
+                    link = os.path.join(runtime_dir, name)
+                    if not os.path.lexists(link):
+                        os.symlink(source, link)
 
         env = Environment()
         env.append("LD_LIBRARY_PATH", [
@@ -111,9 +120,9 @@ class KiconthemesTestConan(ConanFile):
             if p.package_folder
         ])
         with env.vars(self).apply():
+            executable = os.path.join(self.cpp.build.bindirs[0], "test_kiconthemes")
+            self.output.info("OHOS test executable dynamic section:")
+            self.run("llvm-readelf -d {}".format(executable), ignore_errors=True)
+            self.run(executable, env="conanrun")
             cmake = CMake(self)
             cmake.test()
-            self.run(
-                os.path.join(self.cpp.build.bindirs[0], "test_kiconthemes"),
-                env="conanrun",
-            )

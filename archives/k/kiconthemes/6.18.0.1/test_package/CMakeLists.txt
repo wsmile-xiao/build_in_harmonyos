@@ -10,5 +10,9 @@ find_package(KF6IconThemes REQUIRED)
 add_executable(test_kiconthemes test.cpp)
 target_link_libraries(test_kiconthemes KF6::IconThemes)
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    target_link_options(test_kiconthemes PRIVATE "-Wl,-rpath,$ORIGIN" "-Wl,--disable-new-dtags")
+endif()
+
 enable_testing()
 add_test(NAME test_kiconthemes COMMAND test_kiconthemes)
