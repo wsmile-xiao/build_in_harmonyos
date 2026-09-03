@@ -1,0 +1,113 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E322.kv，填写各字段
+# 对应的人类文档: doc/E322.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E322
+trigger_tool: conan
+phase: package
+error_signature: binary-sign-tool|Permission denied|Error loading shared library|invalid signature|codesign
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签 (自由文本, 用于分组过滤)
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: ohos|codesign|conan|meson
+match_keywords:         codesign, binary-sign-tool, selfSign, env=None, meson install, rpath, EPERM, permission denied, llvm-objcopy
+title: OHOS ELF 重签必须用 env=None，conanbuild env 破坏 binary-sign-tool
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: OHOS 工具链在链接时自动添加 .codesign 签名；meson install 重写 RPATH(dynstr) 使签名失效，loader 以 EPERM 拒绝加载 .so。需在 package() 中重新签名，但 conanfile 的 self.run() 默认应用 conanbuild env，其 LD_LIBRARY_PATH 会破坏 Java 版 binary-sign-tool，生成无效签名，加载仍 EPERM
+affected_scope: OHOS 平台上所有 meson/install 重写 rpath 的库与命令行工具
+verification_cmd: conan create gdk-pixbuf/2.44.6.1 -o gdk-pixbuf:shared=True && gdk-pixbuf-query-loaders --version && echo $?
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: package() 中 meson.install() 后用 llvm-objcopy --remove-section .codesign + binary-sign-tool sign -selfSign 1 重签 bin/ 与 lib/ 下所有 ELF；self.run(..., env=None) 避免 conanbuild env 干扰签名工具
+rec_description:        meson.install() 重写 RPATH 破坏链接期自动签名，package() 内必须重签：先 llvm-objcopy 移除失效 .codesign 段，再用 binary-sign-tool sign -selfSign 1 重签；关键点是 self.run 传 env=None，否则 conanbuild env 的 LD_LIBRARY_PATH 破坏 Java 版签名工具生成无效签名
+rec_command: self.run('binary-sign-tool sign -inFile f -outFile f -selfSign 1', env=None)
+rec_auto_fix:           true                  # 引擎能否自动执行
+rec_impl:               conan-recipe                   # 内置实现名 (见 DESIGN §5)
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      install 前禁用 RPATH 重写（meson -Db_rpath=false），或改用 patchelf 显式设置并保持签名后置
+fallback_description:   从源头避免 meson install 改写 dynstr：构建期用 -Db_rpath=false 让 install 不重写 RPATH；或安装后统一用 patchelf --set-rpath 显式设置，再统一重签，减少签名失效点
+fallback_command:       meson setup build -Db_rpath=false && conan create gdk-pixbuf/2.44.6.1 -o gdk-pixbuf:shared=True
+fallback_auto_fix:      false
+fallback_impl:          configure-disable-feature
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       self\.run\(.*binary-sign-tool(?!.*env=None)|binary-sign-tool.*LD_LIBRARY_PATH
+forbid_1_reason:        省略 env=None 时 conanbuild env 的 LD_LIBRARY_PATH 破坏 Java 版签名工具类加载，生成无效签名
+forbid_1_consequence:   .so 加载报 EPERM，运行期失败，冒烟测试不过
+forbid_2_pattern:       #ifdef __OHOS__.*codesign|skip.*sign
+forbid_2_reason:        R8 禁止源码平台条件编译；跳过签名则未签名 ELF 无法在 OHOS 上加载
+forbid_2_consequence:   PR 审查被拒（R8 违规），产物运行期 EPERM
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: P017, P019
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+keywords: codesign, binary-sign-tool, selfSign, env=None, meson install, rpath, EPERM, permission denied
+doc_file:               doc/E322.md
+last_updated: 2026-08-07
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 2F28
