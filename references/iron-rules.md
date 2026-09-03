@@ -4,7 +4,7 @@
 
 来源: SKILL.md §1.3
 
-## 铁律总表（49 条，R1-R49，违反=bug）
+## 铁律总表（52 条，R1-R52，违反=bug）
 
 | # | 规则 | 正确做法 | 禁止 |
 |---|------|---------|------|
@@ -57,6 +57,9 @@
 | **R47** | **语言预检前置** | 主流程前跑 `lang-preflight`；非 C/C++ 立即终态 env_unsupported | 非 C/C++ 源码硬走 conan 流程 |
 | **R48** | **预算感知收尾** | 长阶段前 `budget-check` 三态：ok / near_limit(立即收尾) / exhausted(断点终态) | sleep 盲等 CI 烧光预算 |
 | **R49** | **依赖注入必须用 build_folder 私有 prefix** | 注入目标=`build_folder/prefix`，CPPFLAGS/LDFLAGS/PKG_CONFIG_PATH 全指向私有 prefix | 注入共享 /usr/local（CI/本地互相污染，E524） |
+| **R50** | **回执完整性铁律**：①PR 创建后所有落盘（草稿+终态）必带 pr_url；②CI PASSED 后 submit 自动写终态 success（四必填项取自 submit-state+git HEAD，不依赖 agent 手跑 result）；③自动上报带 `--no-ci-verify` 仅限 submit 已实证 CI 绿的分支，手动上报路径守门保留（防 CI 红谎报 success，PR6096 教训）。（v12.17 S1 落地时曾以 R49 编号登记于 SKILL.md，v12.20 主编重编号归位消除冲突） |
+| **R51** | **上游测试三步法**：适配前必须清点上游测试（tests/ 目录数 + ctest/pytest 注册数，写入 notes.md 申报表）→ 可运行环境实际运行（真机/CI，逐项列"具体技术原因"，"没环境"不是理由，评审直接拒）→ PR 如实回填实测 N/N′/通过率（禁占位符）；"上游确无测试"须附清点证据。真人评审第一拒绝原因（"硬性不通过" 495 次），此前 SKILL 零覆盖 |
+| **R52** | **审计证据一致性**：.audit-result.json 等自审文件必须由 W4 工具生成、结论附被检文件 sha256；preflight 交叉校验——审计 pass 但硬闸命中 → "审计失真"一票否决档（#2204/#4237/#4321：审计文件可伪造或自审走样） |
 
 ---
 
@@ -373,6 +376,8 @@ def build(self):
 
 ### R34 详细说明：test 必须实质依赖被测包
 
+> **工具化（v12.20）：** preflight PF3 及扩面机械拦截——test() 空壳（AST 检测）+ test_package 无测试源文件 + MANIFEST 缺失（L0c/L0e 前置）。
+
 > **核心原因**：PR #1795 (bird/3.1.6) 的 test_package/test.c 只有一个 `printf("test bird 3.1.6: OK\n")`，不调用 bird 的任何 API，即使 bird 库完全损坏也能通过。这是"形式合规、实质空壳"的假测试——通过了 L0c（有源文件）、L0d（test() 调了 self.run()）、L1d（不是 echo/print/true）所有检查。
 
 #### 典型反面案例
@@ -637,6 +642,8 @@ git log --oneline -- "archives/z/zlib/"
 
 ### R38 详细说明：命令行工具必须声明 commands.json
 
+> **工具化（v12.20）：** preflight PF8 配方静态闸机械拦截——commands.json 存在性/schema（name/type=tool/versions.ref 对齐）、纯库误加、settings 四项、slug/version 一致（L0p/L0m 前置）。
+
 > **核心原因**：hicmd 项目通过 commands.json 自动发现和安装命令行工具。如果工具类型包缺少此文件，hicmd 无法感知该包提供的命令行能力，用户无法通过 hicmd 安装。
 
 #### 判断标准
@@ -836,6 +843,8 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$DEFAULT_PREFIX 2>&1 | tail -3
 
 ### R39 详细说明：源码 URL 必须为官方源
 
+> **工具化（v12.20）：** preflight PF7 源 URL 闸机械拦截——镜像域名黑名单（语料实证：gh-proxy.com/ghfast.top/cnb.cool 等 14 域）/明文 http/file:// 泄漏/绝对路径/Debian 重打包/gitcode·gitee 搬运源（官方托管例外须 PR 说明+显式跳过）。
+
 - conandata.yml 中 URL 必须指向官方正式源（GitHub releases、官方网站）或权威镜像源
 - 禁止个人 fork、网盘、不明 CDN——来源不可信且随时可能失效
 - CI 自动添加镜像 fallback（ghfast.top 等），配方无需自己写镜像
@@ -919,3 +928,36 @@ cd $BUILD_SRC_DIR && ./configure --prefix=$DEFAULT_PREFIX 2>&1 | tail -3
 #### 参考实现
 
 `archives/a/asterisk-srtp/22.10.1/conanfile.py`（`_prefix()` / `_ensure_uuid` / `_ensure_jansson` / `_ensure_sqlite3`）
+
+---
+
+### R50 详细说明：回执完整性铁律
+
+**背景**：心愿单报告 0902 S1——08-30 后 208 个空 pr_url 回执 → 平台误判 generic-failure → infra 重试三连恒同（无效重试浪费预算）。
+
+**三要点**：
+1. **PR 创建后所有落盘必带 pr_url**：write_lifecycle_draft 显式传参，submit 六个草稿挂点全部显式传 `pr_url=pr_url`，不靠推导链（推导链断点 = ktextwidgets PR#7104 手动路径断链教训）。
+2. **CI PASSED 后自动写终态 success**：`_maybe_upgrade_result` 显式传 pr_url/pr_number/branch/commit_hash 四必填项（值取自 .submit-state.json + git HEAD），不依赖 agent 手动跑 result 命令；OHC_RESULT_OUT 缺失/串扰机也有 HOME fallback 落盘。
+3. **`--no-ci-verify` 限自动路径**：仅在 submit 已实证 CI 绿的分支携带（防 API 复核通道抖动误降级 partial）；手动上报路径守门保留，防 CI 红谎报 success（PR6096 教训）。
+
+**编号说明**：本规则 v12.17 S1 落地时在 SKILL.md 铁律表以 "R49" 编号登记，与 iron-rules 已有的 R49（依赖注入私有 prefix，v12.17 主编批次）冲突；v12.20 主编重编号为 R50 并补入本文件，两处口径以本文件为权威。
+
+### R51 详细说明：上游测试三步法
+
+**背景**：7,870 PR 全量评论审计（2026-09-03）——真人评审第一硬性门槛是"上游测试实际运行 + 通过率如实回填"（"硬性不通过" 495 次、"无例外" 173 次）；评审人克隆源码反查揭穿测试数少报 50 次（pixman 实有 42 个测试文件被谎报为 0）。此前 SKILL 的 R34 只约束 test_package 自身非空壳，对上游测试套件的清点/运行/申报完全空白。
+
+**三步法**：
+1. **清点**：W2 阶段对源码包做 tests/ 目录计数 + ctest/pytest 注册数提取，结果写入 notes.md 申报表（"上游测试：N 个"）。清点工具（upstream-test-census）规划中，当前人工执行并在 notes.md 记录证据。
+2. **运行**：可运行的测试必须在真机/CI 实际跑（真机申请走群内小助手/指导老师认领）；不可运行的逐项列**具体技术原因**（缺哪类依赖/哪个系统能力），"没环境"四个字不是技术原因，评审直接拒。
+3. **回填**：PR 模板统计表填实测 N/N′/通过率（N=上游总数，N′=实际运行数），禁占位符（"待 CI 验证/待验证/N/A"直接被拒）；**"上游确无测试"的声明必须附清点证据**（tests/ 目录截图或源码树路径），防 pixman 式谎报。
+
+**评审口径**（路径 A 规则表，army16/Septest/weixin_46729010 共用）：上游测试数与清点不符 / 未运行且无具体技术原因 / 通过率造假 → 硬性不通过。
+
+### R52 详细说明：审计证据一致性
+
+**背景**：审计发现三类自审失真——①审计文件 verdict=pass 但代码实际违规（#2204 R8 漏报、#4237 R39 漏报、#4321 commands.json 幻觉存在）；②ci-metadata 把 CI 失败记 pass 并用 "OHOS platform limitation" 话术包装；③BUILD_TESTING=OFF 下空跑 cmake.test() 制造 ctest 日志痕迹骗 L1（#2831 注释自曝动机）。性质：欺骗类一票否决档。
+
+**规则**：
+1. .audit-result.json / ci-metadata.json 等自审文件**必须由 W4 工具生成**，不许手写；pass 结论附带被检文件 sha256（可验证审计时点的文件内容）。
+2. **preflight 交叉校验**（PF 体系内自动执行）：审计 verdict=pass 但 PF5/PF7/PF8 等硬闸命中 → 追加"审计失真"发现并 fail-closed——审计与门禁矛盾本身即证据。
+3. 审计模板（templates/audit-prompt.md）输出 JSON 的 issues 中每条须带 rule_id 与 file/line，便于交叉复核。

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""preflight — PR 创建前置硬闸（harness 咽喉点，v12.9）
+"""preflight — PR 创建前置硬闸（harness 咽喉点，v12.9；v12.20 扩至 PF1-PF9+R52）
 
 背景（goblinrs 744 PR 采样审计 2026-08-26）:
   open PR 中 CI 失败率 45%，其中 test() 空壳(L0c) ~20%、多包捎带 ~被 JC6 拦但
@@ -8,13 +8,33 @@
   本模块挂在 gitcode_pr.py create-pr（所有建 PR 路径的唯一咽喉），
   把失败拦截在 CI 之前。
 
-检查项（编号与 CI 侧 JC 门禁对齐，同名同义）:
+检查项（编号与 CI 侧 JC 门禁对齐，同名同义；v12.20 扩至 PF1-PF9+R52 交叉校验）:
   PF1 单包闸   —— 一个 PR 只允许动一个 archives/<字母>/<包> 目录（JC6 前置）
   PF2 制品闸   —— 禁止提交压缩包/二进制归档（JC3 前置）
   PF3 测试闸   —— test_package/conanfile.py 的 test() 必须有 self.run 等实际
-                  执行逻辑，空壳/print-only/do_nothing 直接拦（L0c 前置）
+                  执行逻辑，空壳/print-only/do_nothing 直接拦（L0c 前置）；
+                  v12.20 扩面：test_package 必须有测试源文件（.c/.cpp/.sh/.py，
+                  conanfile.py 除外）+ test_package/MANIFEST.yml 与包级
+                  manifest.yaml 存在且非空（L0c/L0e 前置）
   PF4 依赖闸   —— conanfile 的 requires/tool_requires 必须已在制品仓存在；
                   缺失 = dependency_missing 上报终止，禁止捎带适配（W1 前置）
+  PF5 平台宏闸 —— patches/*.patch 新增行禁 __OHOS__（R8）；v12.20 扩面堵
+                  绕道形态：conanfile.py 新增行的 -D__OHOS__ 注入与
+                  replace() 动态注入（64+27 例，R8 High 占比 61%）
+  PF6 前缀闸   —— 禁注入共享系统前缀 SYS_PREFIX//usr/local（R49/E524）
+  PF7 源URL闸  —— conandata.yml/manifest.yaml 的源 URL 必须 https 官方源：
+                  镜像域名黑名单/明文 http/file:///绝对路径/Debian 重打包
+                  一律拦；gitcode/gitee 搬运源拦（例外须 PR 说明，
+                  R39 1,061 条违规的 90%+ 静态可判）
+  PF8 配方闸   —— settings 四项齐全（L0p）；目录 slug 小写规范（L0m）；
+                  version 与版本目录一致；CLI 包（package_type=application
+                  或 bindirs 非空）必须有 commands.json 且 name/type=tool/
+                  versions.ref 全对齐，纯库包必须无（R38 705 条）
+  PF9 分支闸   —— 变更路径必须落在单一 archives/<字母>/<包>/<版本>/ 目录
+                  （防 "No packages to build" 490 条）；分支名须为
+                  pkg-version 或 feat|fix/pkg-version（L0n ~550 条）
+  R52 交叉校验 —— .audit-result.json verdict=pass 但上述硬闸命中 → 追加
+                  "审计失真"发现（一票否决档，#2204/#4237/#4321 教训）
 
 逃生口（与其他 OHC 闸门命名一致）: --no-preflight 或 OHC_PREFLIGHT=0
 """
@@ -291,9 +311,319 @@ def check_recipe_shared_prefix(repo_dir: Path, files: list[str]) -> list[str]:
     return findings
 
 
+
+# ── PF5 扩面：配方平台宏注入（v12.20，R8 绕道形态）────────────
+
+def _added_lines(repo_dir: Path, base: str, head: str, path: str) -> list[str]:
+    """取某文件在 base...head diff 中的新增行（'+' 且非 '+++'）。"""
+    r = subprocess.run(
+        ["git", "-C", str(repo_dir), "diff", f"{base}...{head}", "--", path],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=60)
+    return [ln[1:] for ln in (r.stdout or "").splitlines()
+            if ln.startswith("+") and not ln.startswith("+++")]
+
+
+def check_recipe_macro_injection(repo_dir: Path, base: str, head: str,
+                                 files: list[str]) -> list[str]:
+    """PF5 扩面：conanfile.py 新增行禁止 -D__OHOS__ 注入与 replace 注入。
+
+    绕道形态（语料实证 64+27 例）：不写进 patches/ 而在配方里用
+    cppflags/defines 注入 -D__OHOS__，或 replace_in_file 源码时动态塞
+    __OHOS__。存量行豁免（只看本 PR 新增行，与 PF5 补丁闸口径一致）。
+    """
+    findings: list[str] = []
+    for f in files:
+        if not f.endswith("conanfile.py") or not f.startswith("archives/"):
+            continue
+        for lineno, ln in enumerate(_added_lines(repo_dir, base, head, f), 1):
+            hit = None
+            if "-D__OHOS__" in ln:
+                hit = "-D__OHOS__ 注入"
+            elif "__OHOS__" in ln and "replace" in ln:
+                hit = "replace() 动态注入 __OHOS__"
+            if hit:
+                findings.append(
+                    f"PF5 平台宏闸(R8): {f} 新增行 {hit}——绕开 patches/ 禁令"
+                    "的等价违规（语料 64+27 例），改走 POSIX 兼容写法或规范"
+                    "patches/+PR 说明例外；确属例外 --no-preflight 显式跳过")
+                break
+    return findings
+
+
+# ── PF7 源 URL 闸（v12.20，R39 前置）─────────────────────────
+
+_PF7_MIRROR_HOSTS = (
+    "gh-proxy.com", "ghfast.top", "ghproxy.net", "ghproxy.com",
+    "mirror.ghproxy.com", "gitclone.com", "kkgithub.com", "gh-proxy.xyz",
+    "moeyy.cn", "moeyy.xyz", "fastgit.org", "hub.fastgit.org",
+    "gh.api.99988866.xyz", "cnb.cool")
+_PF7_DEBIAN_HOSTS = ("deb.debian.org", "snapshot.debian.org",
+                     "security.debian.org", "archive.debian.org")
+_PF7_VALUE = re.compile(r'["\']([^"\']+)["\']')
+_PF7_URL_ITEM = re.compile(r'^\s*-\s*["\']([^"\']+)["\']')
+
+
+def _pf7_classify(url: str) -> str | None:
+    low = url.lower()
+    if low.startswith("file://"):
+        return "file:// 本机缓存泄漏（CI 预下载改写未还原，71 例）"
+    if low.startswith("http://"):
+        return "明文 http 源（R39 要求 https）"
+    if url.startswith("/"):
+        return "绝对本地路径"
+    m = re.match(r"https?://([^/]+)", low)
+    host = m.group(1) if m else ""
+    if any(host == h or host.endswith("." + h) for h in _PF7_MIRROR_HOSTS):
+        return f"镜像前缀 {host}（CI 自动加镜像回退，手写即 R39 违规 579 例）"
+    if any(host == h or host.endswith("." + h) for h in _PF7_DEBIAN_HOSTS) \
+            or "+dfsg" in low:
+        return "Debian 下游重打包源"
+    return None
+
+
+def check_source_urls(repo_dir: Path, files: list[str]) -> list[str]:
+    """PF7 源 URL 闸（R39，v12.20）：只扫本 PR 变更的 conandata/manifest。
+
+    conandata.yml 额外拦 gitcode/gitee 搬运源（上游官方确在此二平台的
+    须 PR 说明登记后 --no-preflight 跳过）；manifest.yaml 不拦（可能含
+    本仓/配方仓库链接）。
+    """
+    findings: list[str] = []
+    for f in files:
+        if not f.startswith("archives/"):
+            continue
+        if not f.endswith(("conandata.yml", "manifest.yaml")):
+            continue
+        pf = repo_dir / f
+        if not pf.is_file():
+            continue
+        try:
+            text = pf.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), 1):
+            urls: list[str] = []
+            if re.search(r'url\s*:', line):
+                urls = [m.group(1) for m in _PF7_VALUE.finditer(line)]
+            else:
+                m = _PF7_URL_ITEM.match(line)
+                if m and ("//" in m.group(1) or m.group(1).startswith("/")):
+                    urls = [m.group(1)]
+            for u in urls:
+                why = _pf7_classify(u)
+                if not why and f.endswith("conandata.yml"):
+                    m2 = re.match(r"https?://([^/]+)", u.lower())
+                    if m2 and m2.group(1).endswith(
+                            ("gitcode.com", "gitee.com")):
+                        why = f"gitcode/gitee 搬运源 {m2.group(1)}"
+                if why:
+                    findings.append(
+                        f"PF7 源URL闸(R39): {f}:{lineno} {why}——"
+                        "conandata 只写上游官方源 URL，镜像回退由 CI 自动"
+                        "处理；确属官方托管例外须 PR 说明并 --no-preflight 跳过")
+                    break
+    return findings
+
+
+# ── PF3 扩面：test_package 结构闸（v12.20，L0c/L0e 前置）──────
+
+_PF3_SRC_EXT = (".c", ".cpp", ".cc", ".cxx", ".sh", ".py")
+
+
+def check_test_package_files(pkg_dir: Path) -> list[str]:
+    """PF3 扩面：test_package 必须有测试源文件 + MANIFEST 齐全非空。
+
+    口径与 CI L0c/L0e 对齐（语料：缺测试源 ~550、缺 MANIFEST 314 条）。
+    test_package 目录不存在时不报（结构性缺失由 W2/L0 闸管辖）。
+    """
+    tp = pkg_dir / "test_package"
+    if not tp.is_dir():
+        return []
+    findings: list[str] = []
+    srcs = [p.name for p in tp.iterdir()
+            if p.is_file() and p.suffix in _PF3_SRC_EXT
+            and p.name != "conanfile.py"]
+    if not srcs:
+        findings.append(
+            "PF3 测试闸: test_package/ 无测试源文件（.c/.cpp/.cc/.cxx/.sh/.py）"
+            "——CI L0c 必拦；测试程序必须真实编译执行被测物 API")
+    for man in (tp / "MANIFEST.yml", pkg_dir / "manifest.yaml"):
+        if not man.is_file() or man.stat().st_size == 0:
+            findings.append(
+                f"PF3 测试闸: {man.name} 缺失或为空——CI L0e 必拦"
+                "（六件套完整性）")
+    return findings
+
+
+# ── PF8 配方静态闸（v12.20，R38/L0p/L0m 前置）─────────────────
+
+_PF8_CLI_TYPE = re.compile(r'package_type\s*=\s*["\']application["\']')
+_PF8_BINDIRS = re.compile(r'bindirs\s*=\s*\[[^\]]*[^\s\]][^\]]*\]')
+_PF8_SLUG = re.compile(r'^[a-z0-9][a-z0-9._+-]*$')
+
+
+def _version_dirs(files: list[str]) -> set[str]:
+    out: set[str] = set()
+    for f in files:
+        m = re.match(r"^archives/([a-z0-9])/([^/]+)/([^/]+)/", f)
+        if m:
+            out.add(m.group(3))
+    return out
+
+
+def check_recipe_static(repo_dir: Path, files: list[str]) -> list[str]:
+    """PF8 配方静态闸（v12.20）：settings/slug/version/commands.json。
+
+    全部为机械可判项（R38 705 条 + L0p 193 + L0m 族），历史存量不拦
+    ——只查本 PR 变更的包目录。
+    """
+    dirs = sorted(_pkg_dirs(files))
+    if len(dirs) != 1:
+        return []                    # PF1 已拦多包；无包改动不适用
+    pkg_dir = repo_dir / dirs[0]
+    findings: list[str] = []
+    vdirs = sorted(_version_dirs(files))
+    texts: dict[str, str] = {}
+    for vd in vdirs:
+        cf = pkg_dir / vd / "conanfile.py"
+        if cf.is_file():
+            try:
+                texts[vd] = cf.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+    if not texts:
+        return []                 # 无 conanfile 变更（纯 manifest/notes 等）
+    for vd, text in texts.items():
+        m = re.search(r"^\s*settings\s*=\s*(.+)$", text, re.M)
+        if m:
+            missing = [s for s in ("os", "arch", "compiler", "build_type")
+                       if f'"{s}"' not in m.group(1) and f"'{s}'" not in m.group(1)]
+            if missing:
+                findings.append(
+                    f"PF8 配方闸[{vd}]: settings 缺 {','.join(missing)}——"
+                    "四项齐全是交叉编译矩阵前提（L0p 193 例）")
+        mv = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', text, re.M)
+        if mv and mv.group(1) != vd:
+            findings.append(
+                f"PF8 配方闸: conanfile version={mv.group(1)} 与版本目录 "
+                f"{vd} 不一致——CI 找不到包（L0m/No packages 族）")
+    if not _PF8_SLUG.match(pkg_dir.name):
+        findings.append(
+            f"PF8 配方闸: 包目录名 {pkg_dir.name} 不符 slug 规范"
+            "（小写 [a-z0-9._+-]，L0m 口径）")
+    is_cli = any(_PF8_CLI_TYPE.search(t) or _PF8_BINDIRS.search(t)
+                 for t in texts.values())
+    is_cli = bool(_PF8_CLI_TYPE.search(text) or _PF8_BINDIRS.search(text))
+    cj = pkg_dir / "commands.json"
+    if is_cli and not cj.is_file():
+        findings.append(
+            "PF8 配方闸: CLI 包（application/bindirs 非空）缺 commands.json"
+            "——R38 必拦；参照 archives/a/abx/commands.json 补齐")
+    if not is_cli and cj.is_file():
+        findings.append(
+            "PF8 配方闸: 纯库包不应有 commands.json（R38：库误加）")
+    if cj.is_file():
+        try:
+            data = json.loads(cj.read_text(encoding="utf-8", errors="replace"))
+        except (json.JSONDecodeError, OSError):
+            findings.append("PF8 配方闸: commands.json 不是合法 JSON")
+        else:
+            if data.get("name") != pkg_dir.name:
+                findings.append(
+                    f'PF8 配方闸: commands.json name={data.get("name")!r}'
+                    f" != 包名 {pkg_dir.name}")
+            if data.get("type") != "tool":
+                findings.append(
+                    f'PF8 配方闸: commands.json type={data.get("type")!r}'
+                    ' 必须为 "tool"')
+            vers = data.get("versions")
+            if not isinstance(vers, dict):
+                findings.append(
+                    "PF8 配方闸: commands.json versions 必须为对象"
+                    '（{"<ver>": {"ref": "<name>/<ver>", ...}}）')
+            else:
+                for vd in vdirs:
+                    if vd not in vers:
+                        findings.append(
+                            f"PF8 配方闸: commands.json 缺版本 {vd}")
+                    elif vers[vd].get("ref") != f"{pkg_dir.name}/{vd}":
+                        findings.append(
+                            f"PF8 配方闸: commands.json versions[{vd}].ref "
+                            f'须为 "{pkg_dir.name}/{vd}"')
+    return findings
+
+
+# ── PF9 分支/路径闸（v12.20，L0n/No-packages 前置）────────────
+
+def check_branch_and_paths(repo_dir: Path, files: list[str]) -> list[str]:
+    """PF9 分支/路径闸：变更须落在单一 包/版本 目录，分支名对齐包版本。
+
+    L0n（~550 条）与 "No packages to build"（490 条）的提交前形态。
+    仅当 PR 改动 archives/ 时生效；main/master/detached 豁免（编辑直推
+    路径不经 create-pr，不适用本闸）。
+    """
+    arch = [f for f in files if f.startswith("archives/")]
+    if not arch:
+        return []
+    findings: list[str] = []
+    bad = [f for f in arch if len(f.split("/")) < 5]
+    if bad:
+        findings.append(
+            "PF9 分支/路径闸: 变更路径缺版本目录层（须 "
+            "archives/<字母>/<包>/<版本>/<文件>）——CI 将报 No packages to "
+            f"build（490 例）: {', '.join(bad[:3])}")
+        return findings
+    r = subprocess.run(
+        ["git", "-C", str(repo_dir), "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=30)
+    branch = (r.stdout or "").strip()
+    if branch in ("main", "master", "HEAD", ""):
+        return findings
+    dirs = sorted(_pkg_dirs(files))
+    if len(dirs) != 1:
+        return findings            # PF1 处理多包
+    pkg = dirs[0].split("/")[2]
+    expected = set()
+    for vd in _version_dirs(files):
+        expected |= {f"{pkg}-{vd}", f"feat/{pkg}-{vd}", f"fix/{pkg}-{vd}"}
+    if expected and branch not in expected:
+        findings.append(
+            f"PF9 分支/路径闸: 分支名 {branch!r} 与包版本不匹配（L0n ~550 例）"
+            f"——应为 {' 或 '.join(sorted(expected))}")
+    return findings
+
+
+# ── R52 审计一致性交叉校验（v12.20）──────────────────────────
+
+def check_audit_consistency(pkg_dir: Path, hard_findings: list[str]) -> list[str]:
+    """R52 审计证据一致性：审计 pass 与硬闸命中矛盾 → 审计失真标记。
+
+    语义：.audit-result.json verdict=pass 允许携带 P2/P3 警告，但本闸
+    命中的都是 P0/P1 级问题——pass 结论与之矛盾即审计失真（#2204/#4237/
+    #4321：审计文件可被伪造或自审走样），一票否决档。
+    """
+    if not hard_findings:
+        return []
+    ar = pkg_dir / ".audit-result.json"
+    if not ar.is_file():
+        return []
+    try:
+        data = json.loads(ar.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    if data.get("verdict") == "pass":
+        return [
+            "R52 审计失真: .audit-result.json 判 pass 但 preflight 硬闸命中 "
+            f"{len(hard_findings)} 项——自审文件必须由 W4 工具生成且结论附"
+            "被检文件 sha256；本条为欺骗性一票否决档，修复后重跑 W4 审计"]
+    return []
+
+
 def run_preflight(repo_dir, base: str, head: str,
                   registry: str = DEFAULT_REGISTRY) -> tuple[bool, list[str]]:
-    """执行 PF1-PF6。返回 (通过?, 全部问题清单)。任何异常 fail-closed。"""
+    """执行 PF1-PF9 与 R52 交叉校验。返回 (通过?, 全部问题清单)。fail-closed。"""
     # 调用方可能传 str（gitcode_pr._git_toplevel 返回 str），
     # 统一包装为 Path，避免下方 repo_dir / d 抛 str/str TypeError（PF0 假故障）
     repo_dir = Path(repo_dir)
@@ -306,13 +636,21 @@ def run_preflight(repo_dir, base: str, head: str,
                        "或 --no-preflight 显式跳过"]
     findings += check_single_package(files)
     findings += check_no_binaries(files)
+    findings += check_branch_and_paths(repo_dir, files)
     findings += check_patch_platform_macro(repo_dir, files)
+    findings += check_recipe_macro_injection(repo_dir, base, head, files)
     findings += check_recipe_shared_prefix(repo_dir, files)
+    findings += check_source_urls(repo_dir, files)
+    findings += check_recipe_static(repo_dir, files)
     dirs = sorted(_pkg_dirs(files))
     for d in dirs:                      # PF1 已保证最多 1 个
         pkg = repo_dir / d
         findings += check_test_substance(pkg)
+        findings += check_test_package_files(pkg)
         findings += check_deps_in_registry(pkg, registry)
+    # R52 交叉校验放最后：审计 pass 与硬闸命中矛盾 → 审计失真
+    for d in dirs:
+        findings += check_audit_consistency(repo_dir / d, list(findings))
     return (not findings), findings
 
 
@@ -328,5 +666,5 @@ if __name__ == "__main__":
     for p in probs:
         log_fail(p)
     if ok:
-        log_ok("preflight PF1-PF6 全部通过")
+        log_ok("preflight PF1-PF9+R52 全部通过")
     sys.exit(0 if ok else 1)

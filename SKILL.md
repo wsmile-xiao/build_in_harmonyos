@@ -330,7 +330,7 @@ self.requires("zlib/1.3.1")      # 精确引用首次版本
 self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 ```
 
-### 1.3 铁律摘要（49 条，违反=bug）
+### 1.3 铁律摘要（52 条，违反=bug）
 
 | # | 规则 |
 |---|------|
@@ -358,7 +358,9 @@ self.requires("zlib/1.3.1.2")    # 精确引用第 2 次适配修复
 | R47 | **语言预检前置（AI Worker 协议 v0.8 附录 D，2026-08-29 冻结；缺字段=PROTOCOL_VIOLATION 拒收）**：checkout 源码后、进入适配主流程**前**必须跑 `lang-preflight`（scripts/ohc/lang_detect.py）——判定优先级 manifest>构建系统>源码统计(≥70%)，边界规则：C/C++ 混编按主体判不算 mixed、pybind11 绑定包判 cpp、辅助脚本不算主体、manifest 与统计矛盾判 mixed；任务语言取 `--lang`/`OHPCD_LANG`（默认 cpp），**c↔cpp 视为兼容族不迁移**（conan 流程通吃）；不匹配 → 立即终态 `env_unsupported` + `detected_language`（§4.6 枚举，禁自由文本）+ `language_evidence` 三项（各≤200 字符），**禁止硬着头皮适配**（0828 报告 ~20% 任务浪费在非 C/C++ 源码上）；匹配 → 草稿 milestone=lang_checked，正常进主流程；**激励: 带 detected_language 上报 → 平台转 lang_hold 挂起等生态（非失败）——缺字段 = PROTOCOL_VIOLATION 记失败（反馈 0831 P1: 9 例违规源于旧版/手写绕过 CLI,终态上报必须走 result 命令）** |
 | R48 | **预算感知收尾（反馈 0831 修订版：边界双方已对齐）**：动态预算/硬杀在平台侧（attempt 递增 1.0/1.5/2.0×，上限 12h，随 dispatch 下发 `OHC_TASK_DEADLINE` ISO 绝对时刻 + `OHC_TASK_BUDGET_SEC` 秒数）；SKILL 唯一配合项 = 预算接近耗尽时主动收尾——三件套：①`budget-check` 命令（scripts/ohc/budget.py）每个长阶段（W3 编译/CI 监控/重试循环）前调用，三态：ok 继续作业 / near_limit（剩余<40min=R41 阈值：停止新编译新 PR，立即写 checkpoint 收尾）/ exhausted（exit 3，**自动写终态——status=failed + error_type/error_code 双写 `budget_exhausted`（受控扩展，协议 §4.5 枚举外、平台 0831 部署已识别，勿报 unknown）+ `checkpoint_steps` 结构化数组（已完成里程碑=续跑断点）+ error_detail 续跑命令**，平台 retry_context.resume 已就绪，续跑带已完成步骤不丢成果）；②R46 生命周期草稿写前自动查预算，超限直接升级上述终态（忘调 budget-check 也有兜底，防被杀后停在 draft:true 被平台归一化 unknown——76 例根因）；③预算判定源优先级 OHC_TASK_DEADLINE>OHC_TASK_BUDGET_SEC>OHPCD_BUDGET_MINUTES（旧自造）>240 兜底；起点=feedback 时间线**最后一条** task_started（reset-rerun 后新起点生效；`submit --resume` 入口自动刷新计时，续跑不被旧时间线误杀）。闭环：平台给足预算（12h 顶格）+ SKILL 主动收尾上报 → 大库任务要么预算内完成，要么断点续跑接力 **v12.17 S3 修订（心愿单报告）**：停止自行预算判定——240min 兜底与 OHPCD_BUDGET_MINUTES 自造 env 已退役（R48 违约 6 例 budget 自裁教训：与平台 12h 动态预算冲突过早自裁）；**仅在平台 env（OHC_TASK_DEADLINE/OHC_TASK_BUDGET_SEC）存在时判定，两者皆无 → 恒 ok 不判定** |
 | R49 | **依赖注入必须用 build_folder 私有 prefix**（asterisk-srtp 反馈，知识 E524）：generate() 中依赖注入目标 = `os.path.join(self.build_folder, "prefix")`，CPPFLAGS/LDFLAGS/PKG_CONFIG_PATH 全指向私有 prefix，work 目录用 build_folder 子目录（conan 构建目录天然可执行）。三禁止：①注入共享 `/usr/local`（SYS_PREFIX）——CI worker 与本地共享文件系统互相污染（E524：19 轮 CI 全挂根因）；②`os.access(X_OK)` 探测 work 目录——HMDFS chmod 被忽略、权限固定 660，X_OK 恒 False 永远回退 noexec 路径；③只加 `ac_cv_prog_cc_works=yes` 不补 REQUIRED 依赖。参考：archives/a/asterisk-srtp/22.10.1/conanfile.py |
-| R49 | **回执完整性铁律（心愿单报告 0902 S1：08-30 后 208 个空 pr_url 回执→ 误判 generic-failure → infra 重试三连恒同）**：①PR 创建后**所有落盘**（草稿+终态）必带 pr_url——write_lifecycle_draft 新增 pr_url 参数，submit 六个草稿挂点全部显式传 `pr_url=pr_url`（不靠推导链）；②CI PASSED 后 submit **自动**写终态 success（_maybe_upgrade_result 显式传 pr_url/pr_number/branch/commit_hash 四必填项，值取自 .submit-state.json+git HEAD），**不再依赖 agent 手动跑 result 命令**，且不再要求 OHC_RESULT_OUT 已设置（result 自带 OHC_RESULT_OUT>$HOME fallback 链，环境变量缺失/串扰机也落盘）；③success 自动上报带 `--no-ci-verify`——该调用仅在 submit 已实证 CI 绿的分支发生，复跑 API 核验遇通道抖动会 ERROR 误降级 partial（黑洞机制之一）；守门仍约束手动上报路径（防 CI 红谎报 success，PR6096 教训）|
+| R50 | **回执完整性铁律（心愿单报告 0902 S1：08-30 后 208 个空 pr_url 回执→ 误判 generic-failure → infra 重试三连恒同）**：①PR 创建后**所有落盘**（草稿+终态）必带 pr_url——write_lifecycle_draft 新增 pr_url 参数，submit 六个草稿挂点全部显式传 `pr_url=pr_url`（不靠推导链）；②CI PASSED 后 submit **自动**写终态 success（_maybe_upgrade_result 显式传 pr_url/pr_number/branch/commit_hash 四必填项，值取自 .submit-state.json+git HEAD），**不再依赖 agent 手动跑 result 命令**，且不再要求 OHC_RESULT_OUT 已设置（result 自带 OHC_RESULT_OUT>$HOME fallback 链，环境变量缺失/串扰机也落盘）；③success 自动上报带 `--no-ci-verify`——该调用仅在 submit 已实证 CI 绿的分支发生，复跑 API 核验遇通道抖动会 ERROR 误降级 partial（黑洞机制之一）；守门仍约束手动上报路径（防 CI 红谎报 success，PR6096 教训）（v12.20 注：原以 R49 编号登记与 iron-rules R49 冲突，主编重编号为 R50，详解见 iron-rules.md） |
+| R51 | **上游测试三步法**：适配前清点上游测试（tests/ 目录数 + ctest/pytest 注册数，写入 notes.md 申报表）→ 可运行环境实际运行（真机/CI，逐项列"具体技术原因"，"没环境"不是理由）→ PR 如实回填实测 N/N′/通过率（禁占位符）；"上游确无测试"须附清点证据。真人评审第一拒绝原因（"硬性不通过" 495 次），v12.20 新增 |
+| R52 | **审计证据一致性**：.audit-result.json 等自审文件必须由 W4 工具生成、结论附被检文件 sha256；preflight 交叉校验——审计 pass 但硬闸命中 → "审计失真"一票否决档（#2204/#4237/#4321）。v12.20 新增 |
 | W0-W5 | **适配工作流**：适配前先查依赖(W0)；同步main(W1)；PR原子性+结构完整性(W2,嵌入finish)；本地编译验证(W3,嵌入finish,阻塞+HANDOFF)；提PR前独立审计(W4,嵌入submit,HANDOFF强制)；知识图谱完整性(W5) |
 
 > 详解见 references/iron-rules.md
@@ -504,14 +506,20 @@ $SKILL_ROOT/scripts/ohc-run.py finish <软件名> <版本> published|built|faile
 | [10/10] submit 就绪预检 | test-report/packaging/staging/build-closed 标记检查 | 警告 |
 
 > **W4 Pre-PR 独立审计不在 finish 内部**，在 `submit` 内部作为前置检查执行。
-> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**preflight 硬闸 PF1-PF6**→**result 草稿 + FEEDBACK 骨架前置（R42+R45）**→**AI Review 监控**(5阶段)→**检视意见闭环校验**→**CI 监控（红→R44 diagnose 修复循环）**→**SKILL_FEEDBACK 填充闭环→完整即自动入仓（R45）**）。全程事件自动累积进骨架（R45），agent 任何时点死亡经验都不丢。
+> 流程顺序：`finish`（含W2+W3）→ `submit`（前置检查W4→git push→创建PR→**preflight 硬闸 PF1-PF9+R52 交叉校验**→**result 草稿 + FEEDBACK 骨架前置（R42+R45）**→**AI Review 监控**(5阶段)→**检视意见闭环校验**→**CI 监控（红→R44 diagnose 修复循环）**→**SKILL_FEEDBACK 填充闭环→完整即自动入仓（R45）**）。全程事件自动累积进骨架（R45），agent 任何时点死亡经验都不丢。
 >
-> **⭐ PR 创建前置硬闸 PF1-PF6（工具强制，不可绕过；PF5/PF6 为 v12.17 新增）**：
+> **⭐ PR 创建前置硬闸 PF1-PF9+R52 交叉校验（工具强制，不可绕过；PF5/PF6 为 v12.17 新增，PF7-PF9/扩面/R52 为 v12.20 新增）**：
 > `create-pr` 是所有建 PR 路径（ohc submit / 手工 / harness 机器人）的唯一咽喉点，创建前自动执行：
 > - **PF1 单包闸**：一个 PR 只允许动一个 `archives/<字母>/<包>` 目录（JC6 同口径前置，多包捎带直接拦）
 > - **PF2 制品闸**：禁止提交压缩包/归档（JC3 同口径前置，源码仓只收源码与配方）
 > - **PF3 测试闸**：`test_package/conanfile.py` 的 `test()` 必须有 `self.run` 实际执行逻辑，空壳/print-only/pass-only 拦（L0c/R34 前置——建 PR 前拦截，省一轮 CI）
 > - **PF4 依赖闸**：conanfile 的 `requires/tool_requires` 逐个探测制品仓（conan.cnb.cool 公开 API），缺失 → 拦截并提示立即 `result --status dependency_missing` 上报终止，**禁止捎带适配依赖**（W1/R36 前置）
+- **PF5 平台宏闸**（R8 前置，v12.17+20 扩面）：patches/*.patch 新增行禁 `__OHOS__`（上下文行/存量豁免，例外须 PR 说明）；v12.20 扩面堵绕道——conanfile.py 新增行的 `-D__OHOS__` 注入与 `replace()` 动态注入同拦（语料 64+27 例）
+- **PF6 前缀闸**（R49/E524 前置，v12.17）：禁注入共享系统前缀——`environ` 读 SYS_PREFIX、引号包裹 `/usr/local` 字面量即拦；合法形态（DEFAULT_PREFIX 可覆盖 + `~/usr/local` 用户级）豁免
+- **PF7 源URL闸**（R39 前置，v12.20）：conandata.yml/manifest.yaml 源 URL 必须 https 官方源——镜像域名黑名单（gh-proxy.com/ghfast.top/cnb.cool 等语料实证 14 域）/明文 http/`file://` 泄漏/绝对路径/Debian 重打包/gitcode·gitee 搬运源一律拦（官方托管例外须 PR 说明+显式跳过）
+- **PF8 配方静态闸**（R38/L0p/L0m 前置，v12.20）：settings 四项齐全；包目录 slug 规范；version 与版本目录一致；CLI 包（application/bindirs 非空）必须有 commands.json 且 name/type=tool/versions.ref 对齐，纯库包必须无
+- **PF9 分支/路径闸**（L0n 前置，v12.20）：archives 变更须全落单一 `包/版本` 目录（防 "No packages to build"）；分支名须为 `pkg-version` 或 `feat|fix/pkg-version`
+- **R52 交叉校验**（v12.20）：`.audit-result.json` 判 pass 但硬闸命中 → "审计失真"发现（一票否决档）——审计文件必须 W4 工具生成+sha256 佐证
 >
 > 逃生口：`--no-preflight` / `OHC_PREFLIGHT=0`（自担风险，与 result 硬闸 `--no-ci-verify` 命名一致）。
 > 依据（goblinrs 744 PR 采样）：test() 空壳类 CI 失败 ~20%、多包捎带被 JC6 事后拦浪费整轮 CI——现在全部在建 PR 前拦。
@@ -1033,3 +1041,4 @@ cp ci/conan/hooks/pre-commit .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 *SKILL.md v12.17 — 2026-09-02 — 心愿单评估与改进报告 0902 SKILL 行动项（S1-S4）落地。S1 空回执修复（208 例最大黑洞）：submit 六草稿挂点显式传 pr_url；CI 绿自动 success 上报显式补全四必填项（pr_url/pr_number/branch/commit_hash，源=submit-state+git HEAD）；去掉 OHC_RESULT_OUT 硬依赖（result 自带 HOME fallback，串扰机也落盘）；--no-ci-verify 仅限 submit 实证绿分支（防通道抖动误降级 partial；手动上报守门保留防 CI 红谎报）。S2 回执防损（~124 例 parse_error）：result 写后回读 json.loads 自检，坏则重写一次，仍坏 rc=1 阻断（stdout 完整 JSON 透传 v12.11 已有）。S3 停止自行预算判定（6 例 budget 自裁）：240 兜底/OHPCD_BUDGET_MINUTES 退役，仅平台 env 存在时判定，皆无恒 ok。S4 修复轮聚焦：CI 失败诊断优先 conan 依赖类（60%）次编译链接类（32%），覆盖 92%。测试 27+13。
 *SKILL.md v12.18 — 2026-09-02 — v12.17 后系统性自审加固（H1-H3，工具层）。H1 回执原子写：result.json 改 tmp+os.replace 落盘——半写状态被平台读到即 parse_error（~124 例成分），原子替换保证任何时点读到完整文件；写后回读自检（v12.17 S2）保留作二道防线。H2 conan 网络特征重试：conan 命令 stderr 命中网络类特征（reset/timeout/SSL/5xx/unreachable/DNS）时退避 15/30s 重试至 3 次——与依赖解析 git fetch 重试（v12.15，111 例 registry 抖动）补齐对称面；非网络错误（缺包/配方错）不盲目重试。H3 串扰机入口自检：ohc-run 每命令入口比对 OHC_PROJECT_DIR 与脚本所在项目（独立向上找 SKILL.md，不依赖 find_project_dir 的 env 优先）——不一致时 stderr 警告（报告 8.4: 4 台机器 36% 回执缺失集中的会话残留场景）。核查确认安全面：result stdout JSON 透传为无条件分支（env 缺失场景生命线）；CI 监控轮询失败仅延长等待不误判红。测试 v12.18 新 10/10，回归 37+15+5+25+16+27+13 全绿。
 *SKILL.md v12.19 — 2026-09-02 — 自审遗留项收尾（feedback 并发修复 + 测试资产固化）。feedback 时间线跨进程安全三层：①record_event 读-改-写整体进 O_EXCL 自旋锁（stale 30s 接管，超时 10s 降级 CAS 合并写——写前复查事件数，他者已写则重读合并，覆盖窗口缩至两条指令间）；②状态文件原子写（tmp+os.replace，Windows 下 replace 遇并发读者 PermissionError 短退避重试 4 次后直写兜底）；③load 读侧瞬态重试（30ms 退避重读，防把瞬态当空状态返回导致回写清空时间线）。实测 4 进程×50 事件并发丢失率从26% 降至 <1%（Windows 杀软环境噪声；Linux worker 上 POSIX rename 语义完备零丢失，实验证明 bad_json=0）。测试资产固化：tests/ 目录 9 套 155 断言（v12.10-v12.19，相对路径 + run_all.py 一命令全回归）。工作区 libxext 残留已还原。
+*SKILL.md v12.20 — 2026-09-03 — 7,870 PR 全量评论/检视审计落地（25,616 CI 失败 + 21,151 行级检视 + 11,736 真人评论，语料与报告 ~/tmp/pr_crawl 留档）。preflight 扩至 PF1-PF9+R52：①PF5 扩面堵 R8 绕道（conanfile 新增行 -D__OHOS__/replace 注入，64+27 例）；②PF7 源URL闸（R39 前置：镜像黑名单 14 域/http/file://泄漏/绝对路径/Debian 重打包/gitcode·gitee 搬运，R39 1,061 条违规 90%+ 静态可拦）；③PF8 配方静态闸（R38 commands.json schema/存在性 + L0p settings 四项 + L0m slug/version 一致，705+193 条）；④PF9 分支/路径闸（L0n ~550 + No-packages 490 条）；⑤PF3 扩面（test_package 测试源文件 + MANIFEST 齐全非空，L0c/L0e ~860 条）；⑥R52 审计一致性交叉校验（审计 pass vs 硬闸命中 → 审计失真一票否决，#2204/#4237/#4321）。规则新增：R51 上游测试三步法（真人评审第一拒绝原因"硬性不通过"495 次，SKILL 此前零覆盖）；R52 审计证据一致性。主编重编号：R49 冲突修复——iron-rules R49（依赖注入 prefix）保留，SKILL.md 重复的"回执完整性"重编号 R50 并补入 iron-rules 详解；铁律 49→52（SKILL/iron-rules/CONTRIBUTING 三处对齐）。数据验证：门禁路线时间演进实证（preflight 前置门禁落地后 CI 门禁类失败 529→65 条/PR段）；预计新闸+扩面可在建 PR 前拦截 ~60% bot 检视意见量与 ~2,500 条/轮门禁失败。审计模板门禁分级表同步 PF7-PF9/R51。测试：test_v1220 新套件（新闸行为级 14 断言），run_all 全回归。v12.19→v12.20*
