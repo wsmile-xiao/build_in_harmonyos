@@ -10,7 +10,7 @@
 
 ## 前置依赖
 
-### krb5 1.22.2
+### krb5 1.22.1
 已从test-install目录部署到~/usr/local：
 - krb5-config可用
 - libgssapi_krb5.so已签名
@@ -29,7 +29,7 @@
 SSL证书验证失败，使用Python urllib忽略SSL手动下载。
 
 ### Step 2: 版本选择
-最初尝试0.6.4（PyPI最新），但与krb5 1.22.2不兼容（GSS_C_AF_INET6未定义）。
+最初尝试0.6.4（PyPI最新），但与krb5 1.22.1不兼容（GSS_C_AF_INET6未定义）。
 改用GitHub上的v1.8.3版本。
 
 ### Step 3: 编译尝试
@@ -98,12 +98,11 @@ SKIPPED：需要完整的krb5 KDC环境测试
 PASS：RPATH正确设置为/storage/Users/currentUser/usr/local/lib
 
 ### G4 档案完整性
-PASS：manifest.yaml、README.md、notes.md、产物完整
----
+PASS：manifest.yaml、README.md、notes.md、产物完整---
 
 **编译结束**: 2026-05-21 22:42
 **最终状态**: built
 ---
 
-**编译结束**: 2026-05-21 22:42
+**编译结束**: 2026-08-26 00:38
 **最终状态**: built
