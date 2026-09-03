@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Consumer validation for libspatialite 5.1.0.2."""
+"""Consumer validation for libspatialite 5.1.0.2.1."""
 
 import os
+import shutil
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
@@ -20,8 +21,12 @@ class LibspatialiteTestConan(ConanFile):
 
     def _validate_dependency_contract(self):
         expected_versions = {
+            "sqlite3": "3.49.1",
+            "zlib": "1.3.1.1",
+            "proj": "9.3.1.1",
             "librttopo": "1.1.0",
             "geos": "3.13.1",
+            "libxml2": "2.15.3",
         }
         for name, expected_version in expected_versions.items():
             try:
@@ -38,8 +43,25 @@ class LibspatialiteTestConan(ConanFile):
                     )
                 )
             if dependency.package_folder is None:
+                # zlib is a runtime-only transitive dependency of the shared
+                # libspatialite package and may be skipped by Conan's test
+                # graph; its exact version is still checked above.
+                if name == "zlib":
+                    continue
                 raise ConanInvalidConfiguration(
-                    "consumer dependency {} has no binary package".format(name)
+                    "consumer dependency {} has no binary package folder".format(name)
+                )
+            if not os.path.isdir(dependency.package_folder):
+                raise ConanInvalidConfiguration(
+                    "consumer dependency {} has no binary package folder".format(name)
+                )
+            if not dependency.cpp_info.includedirs:
+                raise ConanInvalidConfiguration(
+                    "consumer dependency {} has no include metadata".format(name)
+                )
+            if not dependency.cpp_info.libdirs:
+                raise ConanInvalidConfiguration(
+                    "consumer dependency {} has no library metadata".format(name)
                 )
 
     def build(self):
@@ -116,8 +138,8 @@ class LibspatialiteTestConan(ConanFile):
     def _sign_test_binary(self):
         if str(self.settings.os) != "OHOS":
             return
-        objcopy = "/data/service/hnp/bin/llvm-objcopy"
-        signer = "/data/service/hnp/bin/binary-sign-tool"
+        objcopy = shutil.which("llvm-objcopy") or "/data/service/hnp/bin/llvm-objcopy"
+        signer = shutil.which("binary-sign-tool") or "/data/service/hnp/bin/binary-sign-tool"
         if not os.path.isfile(objcopy) or not os.path.isfile(signer):
             raise ConanInvalidConfiguration("OHOS consumer execution requires signing tools")
         self.run('"{}" --remove-section .codesign "{}"'.format(objcopy, self._test_binary))

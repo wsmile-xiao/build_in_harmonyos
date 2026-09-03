@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Conan recipe for libspatialite 5.1.0.2.
+"""Conan recipe for libspatialite 5.1.0.2.1.
 
-The package version carries the second OpenHarmony recipe revision for upstream
-libspatialite 5.1.0. GEOS, RTTOPO, PROJ, libxml2 and GeoPackage support stay
-enabled because they are part of the spatialite-gui consumer contract.
+The package version carries a successor revision after the registry rejected
+the occupied 5.1.0.2 recipe. GEOS, RTTOPO, PROJ, libxml2 and GeoPackage
+support stay enabled because they are part of the spatialite-gui consumer
+contract.
 """
 
 import glob
 import os
 import shlex
+import shutil
 
 from conan import ConanFile
 from conan.errors import ConanInvalidConfiguration
@@ -31,7 +33,7 @@ from conan.tools.layout import basic_layout
 
 class LibspatialiteConan(ConanFile):
     name = "libspatialite"
-    version = "5.1.0.2"
+    version = "5.1.0.2.1"
     description = "SQLite spatial extension with OGC geometry support"
     license = "MPL-1.1 OR GPL-2.0-or-later OR LGPL-2.1-or-later"
     homepage = "https://www.gaia-gis.it/fossil/libspatialite"
@@ -126,10 +128,17 @@ class LibspatialiteConan(ConanFile):
         )
         real_cc = compiler_executables.get("c", "clang") if compiler_executables else "clang"
         tools = {
-            "awk": "/system/bin/awk",
-            "chmod": "/system/bin/chmod",
-            "readelf": "/data/service/hnp/bin/llvm-readelf",
-            "signer": "/data/service/hnp/bin/binary-sign-tool",
+            "awk": shutil.which("awk") or "/system/bin/awk",
+            "chmod": shutil.which("chmod") or "/system/bin/chmod",
+            "readelf": (
+                shutil.which("llvm-readelf")
+                or shutil.which("readelf")
+                or "/data/service/hnp/bin/llvm-readelf"
+            ),
+            "signer": (
+                shutil.which("binary-sign-tool")
+                or "/data/service/hnp/bin/binary-sign-tool"
+            ),
         }
         missing = [path for path in tools.values() if not os.path.isfile(path)]
         if missing:
@@ -297,6 +306,83 @@ printf '%s\n' "$output" >> "$events"
             env.define("SHELL", "/system/bin/sh")
             env.prepend_path("PATH", "/data/service/hnp/bin")
 
+            # The target tool bundle provides ld.lld/lld but may omit an
+            # unversioned ld alias. Autoconf/libtool consults LD directly, so
+            # bind the linker to the same compiler tool directory when needed.
+            compiler_executables = self.conf.get(
+                "tools.build:compiler_executables", default={}, check_type=dict
+            )
+            compiler = compiler_executables.get("c") if compiler_executables else None
+            compiler_dir = (
+                os.path.dirname(compiler) if compiler and os.path.isabs(compiler) else None
+            )
+            linker_candidates = [
+                shutil.which("ld"),
+                shutil.which("ld.lld"),
+                os.path.join(compiler_dir, "ld") if compiler_dir else None,
+                os.path.join(compiler_dir, "ld.lld") if compiler_dir else None,
+                "/data/service/hnp/bin/ld",
+                "/data/service/hnp/bin/ld.lld",
+            ]
+            linker = next(
+                (
+                    path
+                    for path in linker_candidates
+                    if path and os.path.isfile(path) and os.access(path, os.X_OK)
+                ),
+                None,
+            )
+            if not linker:
+                raise ConanInvalidConfiguration(
+                    "OHOS configure linker is missing (expected ld or ld.lld)"
+                )
+            env.define("LD", linker)
+            env.prepend_path("PATH", os.path.dirname(linker))
+
+            archiver_candidates = [
+                shutil.which("llvm-ar"),
+                shutil.which("ar"),
+                os.path.join(compiler_dir, "llvm-ar") if compiler_dir else None,
+                os.path.join(compiler_dir, "ar") if compiler_dir else None,
+                "/data/service/hnp/bin/llvm-ar",
+                "/data/service/hnp/bin/ar",
+            ]
+            archiver = next(
+                (
+                    path
+                    for path in archiver_candidates
+                    if path and os.path.isfile(path) and os.access(path, os.X_OK)
+                ),
+                None,
+            )
+            if not archiver:
+                raise ConanInvalidConfiguration(
+                    "OHOS configure archiver is missing (expected ar or llvm-ar)"
+                )
+            env.define("AR", archiver)
+
+            ranlib_candidates = [
+                shutil.which("llvm-ranlib"),
+                shutil.which("ranlib"),
+                os.path.join(compiler_dir, "llvm-ranlib") if compiler_dir else None,
+                os.path.join(compiler_dir, "ranlib") if compiler_dir else None,
+                "/data/service/hnp/bin/llvm-ranlib",
+                "/data/service/hnp/bin/ranlib",
+            ]
+            ranlib = next(
+                (
+                    path
+                    for path in ranlib_candidates
+                    if path and os.path.isfile(path) and os.access(path, os.X_OK)
+                ),
+                None,
+            )
+            if not ranlib:
+                raise ConanInvalidConfiguration(
+                    "OHOS configure ranlib is missing (expected ranlib or llvm-ranlib)"
+                )
+            env.define("RANLIB", ranlib)
+
         if include_dependency_runtime:
             for _ref, dependency in self.dependencies.items():
                 for bindir in dependency.cpp_info.bindirs:
@@ -456,8 +542,8 @@ printf '%s\n' "$output" >> "$events"
     def _sign_elf(self, path, required=False):
         if str(self.settings.os) != "OHOS":
             return
-        objcopy = "/data/service/hnp/bin/llvm-objcopy"
-        signer = "/data/service/hnp/bin/binary-sign-tool"
+        objcopy = shutil.which("llvm-objcopy") or "/data/service/hnp/bin/llvm-objcopy"
+        signer = shutil.which("binary-sign-tool") or "/data/service/hnp/bin/binary-sign-tool"
         if not os.path.isfile(objcopy) or not os.path.isfile(signer):
             if required:
                 raise ConanInvalidConfiguration(

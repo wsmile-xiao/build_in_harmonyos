@@ -1,8 +1,8 @@
-# libspatialite 5.1.0.2 adaptation notes
+# libspatialite 5.1.0.2.1 adaptation notes
 
 ## Scope
 
-- Package version `5.1.0.2` is the second Conan/OpenHarmony recipe revision of upstream `5.1.0`; it replaces the obsolete RTTOPO dependency in the already merged `5.1.0.1` recipe without overwriting that reference.
+- Package version `5.1.0.2.1` is a successor Conan/OpenHarmony recipe revision of upstream `5.1.0`. It preserves the `5.1.0.2` candidate after the registry reported that reference as occupied by a different recipe, and does not overwrite the already merged `5.1.0.1` recipe.
 - GEOS, RTTOPO, PROJ, libxml2, GeoPackage, iconv and full EPSG data are enabled for the spatialite-gui dependency contract.
 - FreeXL and MiniZIP are optional upstream features and remain disabled.
 
@@ -95,9 +95,26 @@ state, not a reason to keep the obsolete RTTOPO reference in this recipe.
 - `test_package/test.c` separately exercises 16 public SQLite/SpatiaLite lifecycle and feature assertions, including a GEOS buffer and a PROJ transformation, plus one cleanup regression that forces `sqlite3_close()` to return `SQLITE_BUSY` and verifies the shutdown path still runs exactly once.
 - Formal test results and hashes are written only after target execution completes.
 
+## Current Repair
+
+- The consumer recipe now validates all six exact dependency versions before compilation,
+  requiring each dependency to expose a real package folder plus include and library
+  metadata. A missing or partially materialized dependency fails closed instead of being
+  silently omitted from the manual link closure.
+- The graph contract keeps the root package's empty `binary`/`prev` fields valid during
+  `--build=never` resolution; only the consumer phase requires the root package folder.
+- OHOS signing and configure helpers resolve tools through the active task `PATH` first,
+  then fall back to `/data/service/hnp/bin`; this avoids treating a valid user-local
+  toolchain as missing while retaining compatibility with standard HNP workers.
+
 ## Knowledge References
 
 - `autotools-mkdir-p-hmdfs`
 - `openharmony-pc-libtool-avoid-version-hmdfs`
 - `E005` (static library linked into a shared object must be PIC)
 - `E264` draft (derive a signed native `*-config` adapter from the exact Conan dependency metadata)
+
+## Registry Collision Repair
+
+- Buildbot `#37212` stopped at the L0j version gate because `libspatialite/5.1.0.2` was already published with a different recipe. This is a registry identity collision, not a source or target-test failure.
+- The repair increments the package version to `5.1.0.2.1`, moves the archive directory and rebinds the branch, Issue body, PR body, manifest and consumer package identity. The previous PR and its CI evidence remain immutable.
