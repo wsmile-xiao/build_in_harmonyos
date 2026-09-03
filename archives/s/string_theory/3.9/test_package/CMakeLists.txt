@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.8)
+project(test_string_theory LANGUAGES CXX)
+enable_testing()
+find_package(string_theory REQUIRED CONFIG)
+add_executable(test_string_theory test.cpp)
+target_link_libraries(test_string_theory string_theory::string_theory)
+add_test(NAME test_string_theory COMMAND test_string_theory)
