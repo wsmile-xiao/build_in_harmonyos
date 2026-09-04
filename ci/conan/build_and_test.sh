@@ -158,13 +158,13 @@ fi
 
 # G0e: 仓库根目录文件白名单检查
 # 贡献者不应在根目录放置临时文件（ISSUE/PR草稿/笔记等）
-G0_ROOT_ALLOWED=".gitignore|.gitattributes|CONTRIBUTING.md|KNOW_YOUR_WHY.md|LICENSE|README.md|SKILL.md|SUMMARY.md"
+G0_ROOT_ALLOWED=".gitignore|.gitattributes|BUILD.gn|CONTRIBUTING.md|KNOW_YOUR_WHY.md|LICENSE|README.md|SKILL.md|SUMMARY.md|oh-package.json"
 echo "[step] G0e: Root directory whitelist check..."
 G0_ROOT_VIOLATIONS=""
 for f in $(git ls-files --full-name | grep -v '/'); do
     if ! echo "$G0_ROOT_ALLOWED" | grep -qFx "$f" 2>/dev/null; then
         case "$f" in
-            .gitignore|.gitattributes|CONTRIBUTING.md|KNOW_YOUR_WHY.md|LICENSE|README.md|SKILL.md|SUMMARY.md)
+            .gitignore|.gitattributes|BUILD.gn|CONTRIBUTING.md|KNOW_YOUR_WHY.md|LICENSE|README.md|SKILL.md|SUMMARY.md|oh-package.json)
                 ;;
             *)
                 G0_ROOT_VIOLATIONS="${G0_ROOT_VIOLATIONS} ${f}"
