@@ -56,6 +56,18 @@ $ svm-scale heart_scale > /tmp/heart_scale.scaled
 $ svm-train（无 --version 参数，通过用法输出确认版本 3.37）
 ```
 
+## 鸿蒙特有测试（2026-09-01 新增，积分赛 PR 补全）
+
+`test_package/test_libsvm_ohos.cpp` — 4 用例（真实调用被测库 API，非 mock）：
+1. `LIBSVM_VERSION == 337` 断言（HarmonyOS 工具链下头文件版本身份）
+2. C_SVC + LINEAR 训练 2D 线性可分合成数据集（40 样本）+ `svm_predict` 40/40 全对
+3. `svm_save_model` / `svm_load_model` 真文件往返 + 预测一致性 40/40
+4. C_SVC + RBF 训练 + `svm_predict_values` 决策函数有限且标签正确
+
+本地真机 4/4 全过（clang++ 15.0.4，链接 libsvm.so.4）。
+CMakeLists 与 test conanfile 同步注册第二个可执行文件与运行步骤，
+MANIFEST.yml 声明 `ohos_specific_test` 段（4 用例）。
+
 ## 交付物
 
 | 文件 | 大小 | 说明 |
