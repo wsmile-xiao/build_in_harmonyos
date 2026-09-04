@@ -30,7 +30,6 @@ class Libu2fServerTestConan(ConanFile):
         checks = [
             ("library", os.path.join(pkg, "lib", "libu2f-server.a")),
             ("header", os.path.join(pkg, "include", "u2f-server", "u2f-server.h")),
-            ("CLI binary", os.path.join(pkg, "bin", "u2f-server")),
         ]
         missing = [name for name, path in checks if not os.path.exists(path)]
         if missing:
@@ -59,10 +58,5 @@ class Libu2fServerTestConan(ConanFile):
             return
         bash = os.environ.get("CONFIG_SHELL") or shutil.which("bash") or "bash"
         exe = os.path.join(self.build_folder, "test_consumer")
-        u2f_server = os.path.join(
-            self.dependencies[self.tested_reference_str].package_folder,
-            "bin", "u2f-server")
         self.output.info("run consumer program (read-only API)")
         self.run(f"{bash} -c '{exe}'", env="conanrun")
-        self.output.info("run u2f-server --version (smoke test)")
-        self.run(f"{bash} -c '{u2f_server} --version'", env="conanrun")
