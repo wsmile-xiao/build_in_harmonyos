@@ -1,0 +1,42 @@
+#====================================================================
+# E543 draft - aarch64 协程上下文切换汇编：BL 不压栈返回地址，real sp 与
+#              resume 地址必须像 x86_64 原版那样显式存入 regs 槽位
+# 触发事件: libco 1.0 HarmonyOS PC 适配（archives/l/libco/1.0）
+# 主从明确：与 x86_64 原版 coctx_swap 语义互补；此坑只在从 x86 汇编移植
+#           协程库到 aarch64 时出现（ucontext/boost.context 无此问题，
+#           它们用栈式或独立实现）。
+#====================================================================
+
+id:                     E543
+trigger_tool:           make|clang|runtime
+phase:                  compilation|runtime
+error_signature:        Segmentation fault|invalid output constraint|bus error.*coroutine|coroutine.*crash
+
+severity:               3
+category:               platform, portability, aarch64, coroutine, assembly, ohos
+match_keywords:         coctx, coroutine, aarch64, swap, regs, BL, resume, segfault, context switch
+title:                  aarch64 协程切换汇编：返回地址与 real sp 必须存 regs 槽位而非依赖栈
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             ARM64 的 BL 指令不压栈返回地址（返回地址在 x30/LR），照搬 x86_64 协程库的 call/ret 栈式语义会导致恢复上下文时跳错地址或 sp 错乱，表现为所有协程切换后 Segmentation fault
+affected_scope:         所有从 x86 移植到 aarch64 的用户态协程库（自写 coctx_swap 类汇编、自定义 setjmp/longjmp 替代品）
+verification_cmd:       编译 example 后运行：全部协程 example 立即崩溃（或首切即崩）= 汇编槽位/返回地址语义错；按 x86_64 原版"存/取 regs 数组"语义重写后 10 万次切换压测通过
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           aarch64-regs-array-swap
+rec_description:        按 x86_64 原版语义把 callee-saved 寄存器、fp/lr、real sp、resume 地址、参数全部存入 ctx->regs 固定槽位，切换时 mov sp/br 恢复；与 C 侧 coctx_make 的槽位常量严格对齐（如 kA64SP=12/kA64RETAddr=13/kA64X0=22/kA64X1=23）
+rec_command:            参考 archives/l/libco/1.0/patches/0004-coctx_swap.S.patch（保存 x19-x28/x29-x30/sp+lr/d8-d15/参数 x0-x1 进 regs[0..23]，恢复后 mov sp, x9; br x8）
+rec_auto_fix:           false
+rec_impl:               manual-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       stp\s+x\d+,\s*x30,\s*\[sp,\s*#-16\]!
+forbid_1_reason:        aarch64 传递函数参数用寄存器（x0-x7），不能像 i386 那样通过压栈传参/存返回地址，BL 也不写栈
+forbid_1_consequence:   首次 co_yield 即 Segmentation fault（返回地址与参数槽位错乱）
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003
+
+# ═══ 关系图 ═══
+causes:                 E544
