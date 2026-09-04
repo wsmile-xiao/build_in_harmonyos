@@ -137,8 +137,13 @@ class NetmaskConan(ConanFile):
     def package(self):
         src = str(self.source_folder)
         pkg = str(self.package_folder)
+        # 与 build()/make check 保持一致：install 亦覆写 CHECK_LIBS 为包内静态归档，
+        # 防止任何触发重链接的时序回落 configure 默认 -lcheck（动态，NEEDED libcheck.so）。
+        check_lib = os.path.join(
+            self.dependencies["check"].package_folder, "lib", "libcheck.a")
         # DESTDIR + --prefix=/ → package/bin/netmask + package/share/man/man1/netmask.1
-        self.run(f'cd "{src}" && make install DESTDIR="{pkg}"', env="conanbuild")
+        self.run(f'cd "{src}" && make install DESTDIR="{pkg}" CHECK_LIBS="{check_lib}"',
+                 env="conanbuild")
 
     def package_info(self):
         # 命令行工具：无库文件，为下游 VirtualRunEnv 暴露 bin/

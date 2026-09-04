@@ -74,9 +74,11 @@
    遗留的 archives/l/libXext 脏改动（历史遗留）未触碰。
 
 ## 2.4.4 → 2.5.0 升级提交说明
-- 升级 manifest（chore 类型）: archives/n/netmask-2.5.0/manifest.json（分支 chore/netmask-2.5.0）
-- 本适配笔记/配方位于: archives/n/netmask/2.5.0/
-- 编译结束后在软件级 manifest versions 登记 2.5.0
+- 本适配配方/笔记位于: archives/n/netmask/2.5.0/（分支 feat/netmask-2.5.0）
+- 升级任务交付的独立升级 manifest 记录位于分支 chore/netmask-2.5.0 的归档外路径
+  （archives/n/netmask-2.5.0/manifest.json，按任务方指定放置；与本 conan 配方分属两分支，
+  避免仓库 JC6 单软件原子性冲突）
+- 软件级 manifest versions 已登记 2.5.0
 ---
 
 **编译结束**: 2026-09-04 18:23
