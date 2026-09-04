@@ -155,8 +155,32 @@ exit 1
         tc.extra_ldflags.append("-Wl,--allow-shlib-undefined")
         if not self.options.shared:
             tc.configure_args.extend(["--enable-static", "--disable-shared"])
+        # config.guess cannot recognize HarmonyOS; pass triplet explicitly.
+        if str(self.settings.os) == "OHOS":
+            tc.configure_args.extend([
+                "--build=aarch64-unknown-linux-gnu",
+                "--host=aarch64-unknown-linux-gnu",
+            ])
         env = tc.environment()
         env.prepend_path("PATH", self._create_mktemp_wrapper())
+        # configure.ac checks for libssl/libcrypto via pkg-config, but conan's
+        # openssl package provides openssl.pc.  Set the env vars to bypass.
+        openssl = self.dependencies["openssl"]
+        openssl_inc = os.path.join(openssl.package_folder, "include")
+        openssl_lib = os.path.join(openssl.package_folder, "lib")
+        env.define("LIBSSL_CFLAGS", f"-I{openssl_inc}")
+        env.define("LIBSSL_LIBS", f"-L{openssl_lib} -lssl -lcrypto -ldl -lpthread")
+        env.define("LIBCRYPTO_CFLAGS", f"-I{openssl_inc}")
+        env.define("LIBCRYPTO_LIBS", f"-L{openssl_lib} -lcrypto -ldl -lpthread")
+        # json-c 0.17 installs headers under include/json-c/ but the .pc file
+        # only exports -I${includedir}.  Provide the subdirectory so that
+        # #include <json.h> resolves correctly.
+        jsonc = self.dependencies["json-c"]
+        jsonc_inc = os.path.join(jsonc.package_folder, "include")
+        jsonc_inc_sub = os.path.join(jsonc_inc, "json-c")
+        jsonc_lib = os.path.join(jsonc.package_folder, "lib")
+        env.define("LIBJSON_CFLAGS", f"-I{jsonc_inc} -I{jsonc_inc_sub}")
+        env.define("LIBJSON_LIBS", f"-L{jsonc_lib} -ljson-c")
         tc.generate(env=env)
 
     def build(self):
