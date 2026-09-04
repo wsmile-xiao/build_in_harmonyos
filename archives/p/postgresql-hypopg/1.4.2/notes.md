@@ -79,5 +79,9 @@ hypopg--*.sql (版本迁移 SQL 文件)
 **最终状态**: published
 ---
 
-**编译结束**: 2026-06-02 12:49
+**编译结束**: 2026-08-22 08:31
 **最终状态**: built
+
+**Conan adaptation completed**: 2026-08-22
+**PR**: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/4667
+<!-- CI trigger -->
