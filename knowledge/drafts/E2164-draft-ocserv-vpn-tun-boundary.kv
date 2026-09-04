@@ -1,0 +1,65 @@
+E: 2164
+title: "鸿蒙 PC 竞赛非特权终端中 VPN/TUN 服务端的运行边界与可验证范围（ocserv 案例）"
+category: platform-boundary, vpn, tun, network-namespace, sandbox
+match_keywords: >
+  ocserv, openconnect, VPN, TUN, /dev/net/tun, CAP_NET_ADMIN, unshare,
+  CLONE_NEWNET, seccomp, SIGSYS, netns, nftables, iptables, EACCES,
+  GnuTLS, 知识库扩展, 路径B
+root_cause: >
+  当前官方鸿蒙 PC 竞赛非特权终端中，VPN/TUN 服务端所需平台能力不可用：
+  (1) open("/dev/net/tun", O_RDWR) 返回 EACCES（沙箱 DAC/权限，非 root、
+  CapEff 无 CAP_NET_ADMIN/CAP_NET_RAW/CAP_SYS_ADMIN）；
+  (2) unshare(CLONE_NEWNET) 被 seccomp filter 以 SIGSYS (31) 杀死；
+  (3) ip、nft、iptables、iptables-nft 工具不可用；
+  (4) 动态链接 musl 二进制在沙箱中 exec 报 EPERM。
+  ocserv（OpenConnect VPN 服务端，Meson 构建，GPLv2，依赖 gnutls/nettle/
+  libev/libedit/talloc/lz4/libtasn1）依赖上述能力建立隧道与防火墙规则，
+  故服务运行与集成测试不可执行。
+solution: |
+  知识库扩展（路径 B）适配 ocserv 1.5.0：Meson 交叉编译 + Conan 归档 +
+  非特权单元测试可完整验证；特权/TUN/netns/firewall 集成测试如实标记为
+  blocked，与平台边界一一对应。六个最小补丁修复 OHOS 编译/链接问题：
+  (1) sockdiag.c sockaddr_storage 重定义（OHOS sysroot linux/socket.h vs
+  sys/socket.h，libedit/readline 模式下 occtl.c 不使用该类型）；
+  (2) ocpasswd.c crypt()/getpass() 缺失原型（musl libc），并补 getpass 真实
+  实现（termios 关闭回显读 /dev/tty）；
+  (3) occtl 与 libedit 的 termcap 符号链接缺失（cc.find_library etermcap/
+  tinfo/ncurses 显式链接）；
+  (4) libcommon 缺 talloc_dep（common.h include <talloc.h>）；
+  (5) tests 的 test_base_deps 缺 gnutls_dep（测试文本包含 src 文件）；
+  (6) occtl.c 的 c_isspace() 缺失（libedit 不提供，本地 ASCII 宏）。
+  依赖版本均用本轮已验证可获取版本：nettle/3.10.2.1、libedit/20240817、
+  gnutls/3.8.10、libev/4.33、talloc/2.4.4、lz4/1.10.0、libtasn1/4.21.0、
+  ncurses/6.4（libedit 间接）；protobuf-c 使用上游内置（local-protobuf=true，
+  官方 tarball 自带预生成 *.pb-c 文件，非伪造远程 Conan 依赖）。
+reuse: >
+  适用于任何"沙箱无 TUN/CAP_NET_ADMIN/netns 能力"环境下 VPN/隧道/防火墙类
+  服务端三方库的适配：可验证范围为编译 + 非特权纯单元测试；特权集成测试
+  必须 blocked 且映射到具体 EACCES/SIGSYS/工具缺失证据，不得标为 passed。
+  通用能力探针方法（open /dev/net/tun errno、unshare SIGSYS、/proc/self/status
+  CapEff、ip/nft/iptables 存在性）可复用于同类库。已复用先例：知识库 E051/E246
+  （seccomp SIGSYS）、E215-draft-C263（沙箱无 CAP_NET_ADMIN → EPERM）、E091
+  （musl sockaddr_storage 修复模式）。
+note: >
+  本观察仅限"当前竞赛非特权终端"这一运行边界，不得泛化为整个 OpenHarmony
+  系统不能运行 VPN 服务。特权环境（root/CAP 注入/白名单放行）下仍需补测：
+  TUN 建立、netns 集成、nftables 规则注入、真实 VPN 隧道与客户端互联。
+source: >
+  ocserv 1.5.0 知识库扩展（路径 B）适配，archives/o/ocserv/1.5.0，
+  Issue #2402，分支 feat/ocserv-1.5.0
+resolved: true
+verification: >
+  local: conan create（OHOS profile）→ 217 目标编译链接全通过，包安装成功；
+  消费者 test_package 严格三段式分类：包布局/依赖验证 5 项通过、实际可执行
+  成功 0、平台阻塞 6 项（沙箱 exec EACCES/EPERM，非伪造通过）、FAILED 0；
+  纯单元测试 15 PASS/1 SKIP/0 timeout/0 failed/0 errors
+  （kkdcp-parsing rc=77 上游条件性 skip：tests/kkdcp-parsing.c:33-34
+  #ifndef HAVE_GSSAPI；ban-ips 需 >=120s 超时，ban_time=30 两次 sleep(31)
+  实测约 62s，已 PASS；config-inherit 经 TMPDIR 补丁 0007 后 PASS）。
+  blocked: root-tests/tun-tests/fw/服务监听/netns/消费者 exec——与平台边界一一映射。
+related_to:
+  - E051: seccomp SIGSYS 拦截未实现/受限 syscall
+  - E246: 沙箱 seccomp 拦截模式
+  - E215-draft-C263: OHOS 沙箱无 CAP_NET_ADMIN → setsockopt EPERM
+  - E091: musl sockaddr_storage 冲突修复
+  - DRAFT-pam-wrapper-*: pam_wrapper 运行期经验（ocserv PAM 相关）
