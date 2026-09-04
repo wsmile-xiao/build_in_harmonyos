@@ -30,3 +30,7 @@ class LibsvmTestConan(ConanFile):
         if libdir not in os.environ.get("LD_LIBRARY_PATH", ""):
             os.environ["LD_LIBRARY_PATH"] = libdir + os.pathsep + os.environ.get("LD_LIBRARY_PATH", "")
         self.run(os.path.join(self.build_folder, "test_libsvm"), env="conanrun")
+        # 鸿蒙特有测试：版本断言 + 线性核训练预测 + 模型保存/加载往返
+        # + RBF 决策函数（4 用例，真实调用被测库 API）
+        self.run(os.path.join(self.build_folder, "test_libsvm_ohos"),
+                 env="conanrun")
