@@ -14,5 +14,6 @@ class NaveTestConan(ConanFile):
         nave_bin = os.path.join(self.dependencies["nave"].package_folder, "bin", "nave.sh")
         assert os.path.isfile(nave_bin), f"nave.sh not found at {nave_bin}"
         assert os.access(nave_bin, os.X_OK), f"nave.sh not executable at {nave_bin}"
-        # Run nave --help to verify it works
-        self.run("bash {} --help".format(nave_bin), env="conanrun")
+        # Run the substantive consumer-side test script against the installed nave.sh
+        test_script = os.path.join(self.source_folder, "test_nave.sh")
+        self.run("bash {} '{}'".format(test_script, nave_bin), env="conanrun")
