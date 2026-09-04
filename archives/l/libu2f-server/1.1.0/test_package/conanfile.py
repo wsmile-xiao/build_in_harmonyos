@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """test_package for libu2f-server 1.1.0 — consumer test.
 
-Compiles and links a consumer program against libu2f-server, then runs
-the u2f-server CLI with --version as a smoke test. The consumer program
-calls u2fs_init/u2fs_done (read-only, no hardware required).
+Compiles and links a consumer program against libu2f-server,
+linking also json-c and openssl (transitive dependencies).
+Calls u2fs_init/u2fs_done (read-only, no hardware required).
 """
 import os
 import shutil
@@ -20,6 +20,8 @@ class Libu2fServerTestConan(ConanFile):
 
     def requirements(self):
         self.requires(self.tested_reference_str)
+        self.requires("json-c/0.17")
+        self.requires("openssl/1.1.1w")
 
     def layout(self):
         self.folders.build = "build"
@@ -42,12 +44,20 @@ class Libu2fServerTestConan(ConanFile):
         os.environ["TMPDIR"] = tmpdir
         cc = shutil.which(os.environ.get("CC", "clang")) or "clang"
         pkg = self.dependencies[self.tested_reference_str].package_folder
+        jsonc_pkg = self.dependencies["json-c"].package_folder
+        openssl_pkg = self.dependencies["openssl"].package_folder
         src = os.path.join(self.source_folder, "test_consumer.c")
         exe = os.path.join(self.build_folder, "test_consumer")
         flags = " ".join([
             f"-I{pkg}/include",
+            f"-I{jsonc_pkg}/include",
+            f"-I{jsonc_pkg}/include/json-c",
+            f"-I{openssl_pkg}/include",
             f"-L{pkg}/lib",
-            "-lu2f-server",
+            f"-L{jsonc_pkg}/lib",
+            f"-L{openssl_pkg}/lib",
+            "-Wl,--allow-shlib-undefined",
+            "-lu2f-server -ljson-c -lssl -lcrypto",
         ])
         self.run(f"{cc} -o {exe} {src} {flags}")
 
