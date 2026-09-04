@@ -1,98 +1,52 @@
-# libucontext 1.2 适配笔记
+# libucontext 1.2 HarmonyOS 适配笔记
 
-## 编译环境
-- 构建系统: makefile
-- 编译日期: 2026-06-12
-- 编译器: clang/clang++
-- 状态: built
+## 目标与状态
 
-## 编译步骤
+- 目标：OHOS 6.0、aarch64（Conan `arch=armv8`）、clang 15。
+- 构建系统：上游 Makefile；无第三方构建或运行依赖。
 
-1. **下载源码**：从 GitHub 下载 libucontext v1.2 tarball
-   ```bash
-   python3 $SKILL_ROOT/scripts/ohc-run.py init-build libucontext 1.2 --url=https://github.com/kaniini/libucontext/archive/refs/tags/v1.2.tar.gz
-   ```
+## 适配方案
 
-2. **编译**：使用 Makefile 构建，指定架构和安装路径
-   ```bash
-   make ARCH=aarch64 LIBDIR=$DEFAULT_PREFIX/lib INCLUDEDIR=$DEFAULT_PREFIX/include PKGCONFIGDIR=$DEFAULT_PREFIX/lib/pkgconfig -j2
-   ```
+配方从 Conan 的 `tools.build:compiler_executables` 读取 `clang`、`llvm-ar` 和 `llvm-ranlib`，将 `armv8` 映射为上游识别的 `ARCH=aarch64`。构建固定使用 `-j1`，并在打包前执行上游 `make check`。
 
-   libucontext 使用纯 Makefile 构建系统，不支持 configure 脚本。通过 Makefile 参数控制：
-   - ARCH: 目标架构（aarch64）
-   - LIBDIR: 库安装路径
-   - INCLUDEDIR: 头文件安装路径
-   - PKGCONFIGDIR: pkg-config 文件路径
+上游同时构建静态库和共享库。配方依据 `shared` 选项删除另一种类型，避免默认静态包被链接器误选为共享库。上游安装规则没有创建 `libucontext_posix.so` 链接名，因此共享包在打包阶段补齐指向 `libucontext_posix.so.1` 的符号链接。1.2 的安装接口使用：
 
-3. **Staging 安装**：使用 DESTDIR 模式
-   ```bash
-   make install DESTDIR=$TEST_PREFIX
-   ```
-
-4. **测试**：运行完整的测试套件
-   ```bash
-   make check
-   ```
-
-   测试结果：全部通过（check_libucontext_posix、check_libucontext_bare_posixabi、check_libucontext）
-
-5. **本地安装验证**：安装到 DEFAULT_PREFIX
-   ```bash
-   make install
-   ```
-
-6. **功能验证**：编译并运行测试程序
-   ```bash
-   pkg-config --modversion libucontext  # 输出: 1.2
-   pkg-config --libs libucontext         # 输出: -L$DEFAULT_PREFIX/lib -lucontext
-   pkg-config --cflags libucontext       # 输出: -I$DEFAULT_PREFIX/include
-   ```
-
-## 遇到的问题与解决方案
-
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | init-build 未找到 libucontext URL | software-registry.yaml 中无记录 | 手动指定 URL: --url=https://github.com/kaniini/libucontext/archive/refs/tags/v1.2.tar.gz |
-| 2 | verify-build G4 失败：缺少 build_system 字段 | manifest.yaml 模板问题 | 在版本级 manifest.yaml 中添加 build_system: makefile 字段；创建软件级 manifest.yaml 和 README.md |
-| 3 | 测试程序运行失败：找不到 libucontext.so.1 | 库文件未 ELF 签名 | 使用 ohc-run.py sign-elf 对库文件签名 |
-
-## 源码修改
-
-无补丁。libucontext aarch64 架构为 tier 1 支持，无需修改源码。
-
-## 依赖版本
-
-- 无外部依赖（纯汇编和 C 实现）
-
-## 验证结果
-
-```bash
-# Staging 验证
-BIN_COUNT=0 LIB_COUNT=5  # 库文件完整
-
-# 功能验证
-pkg-config --modversion libucontext
-1.2
-
-# 测试程序验证
-./test_ucontext
-Testing libucontext installation
-getcontext succeeded
+```text
+make ... install DESTDIR=<package>/ LIBDIR=lib INCLUDEDIR=include PKGCONFIGDIR=lib/pkgconfig
 ```
 
-## 交付物
+`DESTDIR` 末尾的 `/` 不能省略，因为上游 Makefile 直接拼接目录变量。
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libucontext-1.2-ohos-aarch64.tar.gz | 260KB | 预编译包（包含共享库、静态库、头文件） |
+## 测试与鸿蒙专项门禁
 
-## 注意事项
+- 上游 `make check` 运行 3 个程序：核心上下文切换、裸 POSIX ABI、带信号掩码的 POSIX ABI。
+- 通用 `test_package` 复用上游公开领域场景，验证两个上下文、10 个参数、`getcontext`/`makecontext`/`swapcontext`/`setcontext` 完整往返，并检查 API 返回值。
+- OHOS 专项程序仅在 `CMAKE_SYSTEM_NAME` 为 `HarmonyOS` 或 `OHOS` 时构建，并用 `#ifndef __OHOS__` 阻止误跑。OHOS 的 `<ucontext.h>` 提供 `ucontext_t` 但不声明传统函数，因此测试显式声明由本包提供的未加前缀 ABI，并验证：子上下文实际执行、切换前后信号掩码恢复、超过 aarch64 8 个参数寄存器的 10 参数传递，以及 aarch64 SP 的 16 字节对齐。
+- 两个消费者程序都由 Conan `self.run(..., env="conanrun")` 直接执行，不使用空测试或仅注册 CTest。
 
-1. **构建系统识别**：libucontext 使用纯 Makefile，不是 autotools。init-build 检测为 autotools，但实际应使用 build_system: makefile
-2. **ELF 签名必要性**：鸿蒙系统要求所有可执行的 ELF 文件（包括动态库）必须签名才能加载
-3. **库类型软件验证**：库类型软件无 bin 目录下的可执行文件，G2 功能验证使用 pkg-config 或编译测试程序
-4. **平台支持**：aarch64 为 tier 1 架构，支持完整，包括 hard-float、freestanding 模式、common trampoline
+## CI 回归记录
 
----
-**编译结束**: 2026-06-12 17:19
+- PR #7660 首轮 `conan-build-test` 在调用 SDK `lld` 时误加载系统
+  `libxml2.so.16`；配方现从实际 clang 推导 SDK `llvm/lib`，探测通过后仅在
+  构建和测试环境前置该目录。
+- 后续 OHOS 6 aarch64 CI 中，上游 3 个 `make check` 程序、打包及消费者
+  编译均通过；消费者运行到 `getcontext`/`setcontext` 往返时发现恢复后的
+  `libucontext_getcontext()` 返回 context 指针并触发 abort。该结果对应 1.2
+  aarch64 汇编缺陷，现由回移补丁修复。
+- 修复后已在 Windows 使用 OHOS 6 armv8 profile 完成一次干净
+  `conan create`：补丁导出与应用、静态库构建、安装、两个消费者程序的
+  aarch64 交叉编译和链接均通过。aarch64 运行态结论等待远程 CI 复验。
+
+## 源码修改与依赖
+
+- 源码补丁：`0001-arch-aarch64-getcontext.S.patch`。1.2 的
+  `getcontext.S` 先将保存的 `x0` 写为 0，随后又被传入的 context 指针覆盖；
+  `setcontext` 恢复后会让原 `getcontext()` 返回非零。补丁回移上游 1.5.2
+  的寄存器保存顺序，使初次返回和恢复后均返回 0。该问题由 OHOS 6
+  aarch64 静态 Conan 消费者测试的完整往返检查发现；上游 1.2 自带测试
+  未检查 API 返回值，因此未能捕获。
+- Conan 依赖：无。
+- 产物：`libucontext`、`libucontext_posix`、公开头文件及 pkg-config 元数据。
+
+**编译结束**: 2026-09-02 11：41
 **最终状态**: built
