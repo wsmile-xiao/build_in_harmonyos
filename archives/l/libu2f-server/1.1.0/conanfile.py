@@ -209,4 +209,3 @@ exit 1
         self.cpp_info.requires = ["json-c::json-c", "openssl::openssl"]
         self.cpp_info.includedirs = ["include"]
         self.cpp_info.libdirs = ["lib"]
-        self.cpp_info.bindirs = ["bin"]
