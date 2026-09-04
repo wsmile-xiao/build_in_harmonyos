@@ -134,6 +134,7 @@ def _generate_conanfile(name: str, version: str, build_system: str,
         "autotools": "conanfile-autotools.py",
         "makefile": "conanfile-makefile.py",
         "make": "conanfile-makefile.py",
+        "headeronly": "conanfile-headeronly.py",
     }
     template_name = template_map.get(build_system.lower(), "conanfile-cmake.py")
     template_path = TEMPLATES_DIR / template_name

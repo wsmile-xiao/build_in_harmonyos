@@ -23,6 +23,7 @@ _TEMPLATES = {
     "autotools": "conanfile-autotools.py.tmpl",
     "makefile": "conanfile-makefile.py.tmpl",
     "meson": "conanfile-meson.py.tmpl",
+    "headeronly": "conanfile-headeronly.py.tmpl",   # v12.21: 无构建/打包族（26% 配方）
 }
 
 

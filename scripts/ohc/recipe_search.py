@@ -43,6 +43,11 @@ def _features_from_conanfile(text: str) -> dict:
         bs = "make"
     elif re.search(r"from conan\.tools\.scm|MSBuild", text):
         bs = "msbuild"
+    elif "self.info.clear()" in text:
+        bs = "headeronly"          # v12.21: 无构建族 A（header-only 库）
+    elif "def build" not in text or not re.search(
+            r"self\.run\(|Toolchain|Autotools|CMake\(|Meson\(", text):
+        bs = "copy"                # v12.21: 无构建族 B/C（数据/脚本工具打包）
 
     deps = re.findall(r'self\.requires\(\s*["\']([^/"\']+)', text)
     if not deps:
@@ -185,7 +190,7 @@ def recipe_search_cli(argv: list[str] | None = None) -> int:
         description="配方首稿检索：从历史成功配方中找最相似骨架（语料随社区成长）",
     )
     parser.add_argument("name", nargs="?", help="目标软件名")
-    parser.add_argument("--build-system", "-b", help="构建系统（cmake/autotools/meson/make）")
+    parser.add_argument("--build-system", "-b", help="构建系统（cmake/autotools/meson/make/headeronly/copy）")
     parser.add_argument("--deps", "-d", help="已知依赖，逗号分隔")
     parser.add_argument("--top", type=int, default=3)
     parser.add_argument("--rebuild", action="store_true", help="全量重建 catalog.tsv")
