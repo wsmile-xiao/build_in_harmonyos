@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-ohos-configure-ac-cv-path-tool-override — autotools configure
+#   工具探测命中系统 curl-config 而非私有 prefix 时，用 ac_cv_path__*
+#   缓存变量覆盖强制指向注入的 shim
+# 对应人类文档: knowledge/drafts/DRAFT-ohos-configure-ac-cv-path-tool-override.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR asterisk-curl/22.10.1 适配 HarmonyOS PC（按 PR #7331
+#          asterisk-pgsql 变体模式）
+#====================================================================
+
+id:                     DRAFT-ohos-configure-ac-cv-path-tool-override
+trigger_tool:           configure|make|clang|cc|pkg-config
+phase:                  configuration|compilation
+error_signature:        curl/curl\.h.*file not found|
+                         Externally compiled modules must declare AST_MODULE_SELF_SYM|
+                         checking for curl-config.*/usr/local/bin/curl-config|
+                         CURL_INCLUDE.*-I/usr/local/include
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               configure, autotools, tool-probe, cache-variable, ohos, portability
+match_keywords:         ac_cv_path, ac_cv_path__libcurl_config, curl-config, CURL_INCLUDE,
+                         AST_MODULE_SELF_SYM, AST_EXT_LIB_CHECK, configure cache variable,
+                         system tool, /usr/local/bin, shim, DEPSFAILED, menuselect, HAVE_CURL
+title:                  configure 工具探测命中系统 curl-config 而非私有 prefix 时，用
+                         ac_cv_path__* 缓存变量覆盖强制指向注入的 curl-config shim
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             asterisk configure 的 AST_EXT_LIB_CHECK([CURL]) 经 AC_PATH_TOOL
+                         探测 curl-config，按 PATH 顺序命中系统 /usr/local/bin/curl-config；
+                         其 --cflags 报 -I/usr/local/include（该目录无 curl/curl.h），
+                         configure 缓存了系统路径 → 生成的 makeopts 里
+                         CURL_INCLUDE=-I/usr/local/include（无头文件）+ CURL_LIB 指向系统
+                         库，模块编译 res_curl.c 报 curl/curl.h file not found。若再用其他
+                         变体快照覆盖 menuselect.makeopts（快照对该模块标 DEPSFAILED），
+                         还会叠加 AST_MODULE_SELF_SYM 未定义报错
+affected_scope:         所有依赖 configure AST_EXT_LIB_CHECK 探测工具（curl-config/
+                         pg_config/xml2-config 等）的 autotools 库；构建环境 PATH 中同时
+                         存在系统工具与 conan 私有 prefix/bin 注入工具时（CI/本地均可能）
+verification_cmd:       conan create archives/a/asterisk-curl/22.10.1 --build=missing
+                         -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                         # 期望: makeopts 里 CURL_INCLUDE=-I<prefix>/include，
+                         # res_curl/func_curl/res_config_curl 编译链接成功并打包
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           configure-cache-var-tool-override
+rec_description:        在私有 prefix/bin 放 curl-config shim（--cflags/--libs 报 prefix
+                         路径），configure 命令行传 ac_cv_path__libcurl_config=<prefix>/bin/
+                         curl-config 强制覆盖探测结果——configure 缓存变量支持用户覆盖，
+                         使 AST_EXT_LIB_CHECK([CURL]) 命中注入工具，CURL_INCLUDE 指向
+                         私有 prefix/include
+rec_command:            ./configure ... --with-curl=<prefix> \
+                         ac_cv_path__libcurl_config=<prefix>/bin/curl-config \
+                         ac_cv_prog_cc_works=yes
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      menuselect-makedeps-only-inject
+fallback_description:   不覆盖 configure 生成的 menuselect.makeopts（其他变体快照会把目标
+                         模块标 DEPSFAILED → AST_MODULE_SELF_SYM 缺失），只注入
+                         menuselect.makedeps 声明模块依赖，让 configure 检测到依赖后自然
+                         启用模块
+fallback_command:       (conanfile build() 只复制 packaging/menuselect.makedeps，
+                         不复制 menuselect.makeopts)
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       patch.*curl.*CURL_INCLUDE|sed.*/usr/local/include|手改.*makeopts.*CURL_INCLUDE
+forbid_1_reason:        硬编码系统 include 路径或改动 configure 生成的 makeopts 属掩盖真实
+                         探测问题；覆盖 makeopts 会让模块自符号缺失（AST_MODULE_SELF_SYM）
+forbid_1_consequence:   模块编译仍失败，或 CI 环境（无系统 curl）行为与本地不一致
+forbid_2_pattern:       skip.*res_curl|N/A（未运行）|整体跳过受影响模块
+forbid_2_reason:        模块可编译——整体跳过属于"有可运行子集未尝试"（rule 4 硬性不通过）
+forbid_2_consequence:   构建验证不实，PR 被 rule 4 打回
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             E272
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-configure-ac-cv-path-tool-override.md
+last_updated:           2026-09-02
+source_event:           asterisk-curl/22.10.1 HarmonyOS PC 适配（按 PR #7331 asterisk-pgsql
+                         变体模式；首次实证 curl 模块）
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-02
+
+draft:                  true
