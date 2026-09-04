@@ -1,0 +1,71 @@
+#====================================================================
+# DRAFT-arduinojson-7.4.2-fuzzing-build-testing-off - header-only CMake 库
+# conan create 中 fuzzing 目标链接 libclang_rt.fuzzer.a 与 OHOS libc++ ABI
+# 不匹配（std::__h 符号缺失），需 BUILD_TESTING=OFF 规避
+#
+# 场景: arduinojson 7.4.2（bblanchon/ArduinoJson，header-only CMake INTERFACE
+#       库）在 OHOS armv8 Conan 2.x 适配。conan create 时 CMake 顶层
+#       `if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)`
+#       默认开启上游测试与 extras/fuzzing 构建，fuzzer 目标链接
+#       libclang_rt.fuzzer.a 失败：`undefined symbol: std::__h::ios_base::init`
+#       等 iostream/streambuf 符号缺失。
+# 适用: 所有带上游 libFuzzer/fuzz 子目录的 CMake C++ 库在 OHOS/CI clean
+#       环境下落地 Conan 配方（含 header-only 库）。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-arduinojson-7.4.2-fuzzing-build-testing-off
+source_lib:             arduinojson 7.4.2
+trigger_tool:           conan|conan create|cmake|ld.lld
+phase:                  build|link
+error_signature:        ld\.lld: error: undefined symbol: std::__h::(ios_base::init|basic_streambuf|basic_iostream|basic_ios|basic_istream).*|libclang_rt\.fuzzer\.a|too many errors emitted, stopping now
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, cmake, header-only, fuzzing, ohos-toolchain, build
+match_keywords:         fuzzer, libclang_rt.fuzzer.a, BUILD_TESTING, BUILD_TESTING=OFF, extras/fuzzing, undefined symbol, std::__h, libc++, iostream, CMake INTERFACE, header-only, conan create
+title:                  header-only CMake 库 conan create 需 BUILD_TESTING=OFF，避免 fuzzing 目标链接 libclang_rt.fuzzer.a 在 OHOS 上报 std::__h 符号缺失
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  CMake 顶层工程的 `if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME AND BUILD_TESTING)`
+  分支把上游测试套件和 extras/fuzzing 目录一起纳入默认构建。CTest 默认开启
+  BUILD_TESTING，于是 conan create 在构建 header-only 包时也编译 fuzzer 可执行文件，
+  其链接的 libclang_rt.fuzzer.a 引用 iostream/basic_ostream 等符号，而 OHOS
+  libc++ 使用 std::__h 内联命名空间，且链接行未正确带上 libc++ 运行时，
+  导致 ld.lld 报 `undefined symbol: std::__h::...` 系列错误。该失败与库本体
+  源码无关，属于 OHOS 工具链 + 上游 fuzz 目标的装配问题。
+affected_scope:         Conan 配方（尤其 header-only / INTERFACE 库）的 build() 阶段；上游 CMake 含
+                        fuzzing 子目录（extras/fuzzing、fuzz/ 等）且顶层用 BUILD_TESTING 门控的库。
+verification_cmd:       grep -nE 'BUILD_TESTING|add_subdirectory\(.*fuzz' <source>/CMakeLists.txt; conan create . 2>&1 | grep -E 'undefined symbol: std::__h|libclang_rt.fuzzer'
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           build-testing-off-in-conan-build
+rec_description:        conanfile.py 的 build() 中显式
+                        `cmake.configure(variables={"BUILD_TESTING": "OFF"})`，
+                        使 conan create 只构建/安装库本身，不触碰上游测试与 fuzzing
+                        目标。上游测试在适配阶段独立验证（ctest -E fuzzer 排除
+                        fuzzer 后全量运行），并在 test_package/MANIFEST.yml 记录
+                        命令与结果；不要在配方里伪造上游测试通过。
+rec_command:            conanfile.py build(): cmake.configure(variables={"BUILD_TESTING": "OFF"}); cmake.build()
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+fallback_priority:      2
+fallback_approach:      fuzzing-targets-excluded-ctest
+fallback_description:   如需在本地跑上游测试，cmake 配置后仅构建测试目标，运行
+                        `ctest -E fuzzer`（把 fuzzer 测试名排除），避免为验证
+                        链接 libclang_rt.fuzzer.a。
+fallback_command:       cmake --build build --target <Tests...> -j4 && ctest --output-on-failure -E fuzzer
+fallback_auto_fix:      false
+fallback_impl:          manual
+forbid_1_pattern:       test_package|BUILD_TESTING=ON.*conan create|fuzzer.*PASS.*without.*run
+
+# ═══ Layer 4: 验证层 (Validation) ═══
+verified_on:            arduinojson 7.4.2（OHOS armv8，clang 15.0.4，conan 2.29.1）
+verification_result:    conan-verify G0-G4+L2/L4/L5 全 PASS；test_package 100% tests passed (1/1)；
+                        上游 ctest -E fuzzer 27/27 通过
+# 反例/限制
+limitations: >
+  - 仅适用于构建阶段装配问题；若 fuzzer 链接失败伴随库自身源码错误，应先修源码。
+  - BUILD_TESTING=OFF 不替代上游测试验证；MANIFEST.yml 必须如实记录独立测试结果。
