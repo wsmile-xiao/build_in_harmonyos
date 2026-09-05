@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_lest LANGUAGES CXX)
+find_package(lest CONFIG REQUIRED)
+add_executable(test_lest test.cpp)
+target_compile_features(test_lest PRIVATE cxx_std_11)
+target_link_libraries(test_lest PRIVATE lest::lest)
+enable_testing()
+add_test(NAME lest_consumer COMMAND test_lest)
