@@ -1,0 +1,205 @@
+--- a/src/sandbox-posix.c
++++ b/src/sandbox-posix.c
+@@ -67,20 +67,77 @@
+ 
+ #ifndef HAVE_ENVIRON
+ # ifdef __APPLE__
+ #  include <crt_externs.h>
+ #  define environ (*_NSGetEnviron())
+ # else
+ extern char **environ;
+ # endif
+ #endif
+ 
++/* Some systems enforce code-page integrity (XPM): making an executable
++   page writable is rejected outright (mprotect R|W|X fails with EINVAL,
++   mprotect R|W on an executable page kills the process), writes through
++   /proc/self/mem fail with EPERM, and MAP_FIXED over an executable
++   mapping is fatal. The self-exec + main-text-patchup handshake
++   (patch_main) requires exactly such a write, so it cannot work there.
++
++   Probe writability once, in a disposable child (the failure mode on
++   enforcing systems kills the process, so the parent must not probe
++   directly): the child makes the page of this very function writable and
++   rewrites the first byte with its own value. If the probe child exits
++   normally the handshake can run; if it dies on the way, the sandbox
++   runs its function directly in the forked child instead. */
++static int bxfi_probe_text_writable(void)
++{
++    long page = sysconf(_SC_PAGESIZE);
++
++    pid_t pid = fork();
++    if (pid == 0) {
++        uintptr_t fn = (uintptr_t) &bxfi_probe_text_writable;
++        void *base = (void *) (fn & ~((uintptr_t) page - 1));
++
++        if (mprotect(base, (size_t) page,
++                PROT_READ | PROT_WRITE | PROT_EXEC) == 0)
++            goto write_ok;
++
++        if (mprotect(base, (size_t) page, PROT_READ | PROT_WRITE) == 0) {
++write_ok:
++            /* volatile so the write cannot be optimized away: the probe
++               must actually exercise a store to the code page */
++            *(volatile unsigned char *) fn = *(volatile unsigned char *) fn;
++            _exit(0);
++        }
++        _exit(1);
++    }
++
++    int status;
++    pid_t rc;
++    do {
++        rc = waitpid(pid, &status, 0);
++    } while (rc == -1 && errno == EINTR);
++
++    return rc == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0;
++}
++
++static int bxfi_check_direct_sandbox(void)
++{
++    /* Static so the probe runs only once per process; the result is
++       stable for the process lifetime. */
++    static int cached = -1;
++
++    if (cached < 0)
++        cached = !bxfi_probe_text_writable();
++
++    return cached;
++}
++
+ static struct {
+     struct bxfi_sandbox *alive;
+     struct bxfi_sandbox *dead;
+     pthread_mutex_t sync;
+     pthread_cond_t cond;
+ 
+     pthread_t child_pump;
+     int child_pump_active;
+ } self = {
+     .sync = PTHREAD_MUTEX_INITIALIZER,
+@@ -697,35 +754,85 @@
+         .mantled  = mantled,
+         .callback = callback,
+         .user = user,
+         .user_dtor = user_dtor,
+     };
+     if ((errnum = -pthread_mutex_init(&instance->sync, NULL)))
+         goto err;
+     if ((errnum = -pthread_cond_init(&instance->cond, NULL)))
+         goto err;
+ 
++    int direct = bxfi_check_direct_sandbox();
++    if (direct)
++        /* The sandbox function will run in the forked image; flush our
++           buffers first so the child's inherited copies are empty. */
++        fflush(NULL);
++
+     pid = fork();
+     if (pid == -1) {
+         errnum = -errno;
+         goto err;
+     } else if (pid) {
+         instance->start_monotonic = bxfi_timestamp_monotonic();
+         instance->wait_pid = pid;
+ 
+         instance->props = (struct bxf_instance_s) {
+             .sandbox = sandbox,
+             .pid = pid,
+             .status.alive = 1,
+             .time.start   = bxfi_timestamp(),
+             .user = instance->user,
+         };
++
++        if (direct) {
++        /* Direct-sandbox parent path (runtime-detected): there is no
++           stop/shm handshake to perform; track the child like the exec
++           flow does once the handshake succeeded. */
++        if (sandbox->quotas.runtime > 0)
++            if (bxfi_push_timeout(instance, sandbox->quotas.runtime) < 0)
++                goto err;
++
++        if (sandbox->iquotas.runtime > 0)
++            if (bxfi_push_timeout(instance, sandbox->iquotas.runtime) < 0)
++                goto err;
++
++        pthread_mutex_lock(&self.sync);
++        /* spawn a wait thread if no sandboxes are alive right now */
++        if (!self.alive) {
++            term_child_pump();
++            init_child_pump(pid);
++        }
++
++        instance->next = self.alive;
++        self.alive = instance;
++        pthread_cond_broadcast(&self.cond);
++        pthread_mutex_unlock(&self.sync);
++
++        if (sandbox->suspended) {
++            /* Synchronize like wait_stop: only report the sandbox as
++               stopped once the child really stopped, so an immediate
++               bxf_resume cannot lose its SIGCONT. */
++            int status;
++            pid_t rc;
++            do {
++                rc = waitpid(pid, &status, WUNTRACED);
++            } while (rc == -1 && errno == EINTR);
++            if (rc != pid || !WIFSTOPPED(status)) {
++                errnum = -EPROTO;
++                goto err;
++            }
++            instance->props.status.stopped = 1;
++        }
++
++        *out = &instance->props;
++        return 0;
++        }
+ 
+         if ((pid = wait_stop(pid)) <= 0) {
+             errnum = -errno;
+             goto err;
+         }
+ 
+         snprintf(map_name, sizeof (map_name), "/bxfi_%d", pid);
+ 
+         size_t len = strlen(addr.soname);
+ 
+@@ -811,20 +918,38 @@
+         abort();
+ 
+     if (setup_limits(sandbox) < 0)
+         abort();
+ 
+     if (setup_inheritance(sandbox) < 0)
+         abort();
+ 
+     setsid();
+ 
++    if (direct) {
++    /* Direct-sandbox child path (runtime-detected): run the sandbox
++       function in the forked image and exit with its return value. The
++       inherited context is already mapped at the same address, so
++       adopting it as the current context is enough for
++       bxf_context_current() to work. Flush our own output before the
++       explicit _exit so buffered writes are not lost. */
++    if (sandbox->inherit.context)
++        bxfi_context_adopt(sandbox->inherit.context);
++
++    if (sandbox->suspended)
++        raise(SIGSTOP);
++
++    int direct_exit = fn();
++    fflush(NULL);
++    _exit(direct_exit);
++    }
++
+     raise(SIGSTOP);
+ 
+     snprintf(map_name, sizeof (map_name), "/bxfi_%d", pid);
+ 
+     char env_map[sizeof ("BXFI_MAP=") + sizeof (map_name)];
+     snprintf(env_map, sizeof (env_map), "BXFI_MAP=%s", map_name);
+ 
+     char **env = dupenv((char *[]) { env_map, "GMON_OUT_PREFIX=sandbox-gmon", NULL });
+ 
+     char *fullpath = exe;

@@ -1,0 +1,43 @@
+# ═══ Draft knowledge entry — OHOS 用户态 VA 上限 39 位, MAP_FIXED 高地址 EINVAL ═══
+# Timestamp: 2026-09-05
+# Software: boxfort 0.1.2
+# Gate: 原生构建 / conan-verify G2
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+# Related: 无 (图谱中无 mmap 地址窗口类条目)
+
+id: DRAFT-boxfort-ohos-39bit-user-va-map-fixed-limit
+severity: 3
+category: platform|kernel|memory
+trigger_tool: clang|meson|任意使用高地址预留窗口的分配器
+phase: build
+approach: 平台行为, **运行时探测后回退**, 无需平台宏 (符合 R8): 分配器初始化时先对默认窗口
+  基址做一次匿名 MAP_FIXED 探测页 (用后 munmap), EINVAL 则整体切换到低位窗口 (建议
+  [4 GiB, 256 GiB) 区间), 并保证窗口宽度与随机化掩码自洽 (mask*stride 覆盖窗口, 避免随机值
+  越窗导致重试循环)。跨平台库采用探测回退后, 上游平台行为零变化。可靠边界探测: 对 shm fd 依次
+  mmap(MAP_SHARED|MAP_FIXED, base, len) 于 0x4000000000/0x8000000000 等档位,
+  观察 EINVAL 边界; 普通分配 (无 FIXED) 不受影响 (内核自选低地址)。适用前提: 探测页若与
+  同进程已有映射重叠会被覆盖, 探测应放在进程分配器首次初始化时、且窗口默认无其他占用者;
+  若进程可能在该地址已有映射, 应改用 mincore 先行检查。
+
+keywords: MAP_FIXED, EINVAL, mmap, 39-bit, VA, 虚拟地址, arena, 预留窗口, boxfort,
+  高地址, shm, 共享内存
+error_signature: mmap.*Invalid argument|MAP_FIXED.*EINVAL|bxf_arena_init.*-22|
+  arena_init.*EINVAL|Cannot map.*arena
+
+match_keywords: MAP_FIXED, mmap, EINVAL, VA, virtual address, arena, reservation,
+  high address, shm_open, bxf_arena_init
+
+root_cause: OHOS (HUAWEI MateBook Pro, OHOS 6.1.1, aarch64) 用户态虚拟地址空间上限为
+  39 位 (512 GiB)。实测 shm fd 映射: MAP_FIXED @0x4000000000 (256 GiB) 成功,
+  @0x8000000000 (512 GiB) 及更高 (0x10000000000/0x200000000000) 全部 EINVAL(22);
+  不带 MAP_FIXED 的提示地址会被内核忽略并返回常规低地址 (~0x5axxxxxxxx)。
+  上游 64 位库常用的 [32 TiB, 125 TiB) 预留窗口 (如 boxfort mmap_base=0x200000000000)
+  在 OHOS 上整体不可用, bxf_arena_init 因此 10 次重试全失败返回 -EINVAL (诊断表现为
+  bxf_context_init rc=-22)。
+affected_scope: 所有使用固定高地址窗口的内存分配器/arena/JIT/句柄表; boxfort 0.1.2 的
+  bxf_arena_init (已通过 0001-src-arena.c.patch 将 OHOS 窗口移至 [4 GiB, ~259 GiB) 修复)
+
+rec_priority: 1
+rec_approach: ohos-lower-mmap-window
+verification_cmd: "shm fd + MAP_FIXED 于 0x4000000000/0x8000000000 探测 EINVAL 边界;
+  boxfort 适配后 bxf_context_init rc=0, context sample PASS (feat/boxfort-0.1.2 设备日志)"
