@@ -1,0 +1,91 @@
+# ═══ Draft knowledge entry — 依赖包自带 .pc 的打包时绝对 prefix 失效 ═══
+# Timestamp: 2026-09-05
+# Software: ccfits 2.7（依赖 cfitsio 4.6.4）
+# Gate: feat/ccfits-2.7 设备单端验证（conan create G2 干净构建 + test_package 通过）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ccfits-2.7-stale-pc-prefix-regen
+trigger_tool:           cmake|pkg-config|conan|PkgConfigDeps|PKG_CHECK_MODULES
+phase:                  generate|build
+error_signature:        fatal error: .(fitsio|cfitsio)\.h. file not found|
+                        Found cfitsio, version [0-9.]+|
+                        No package '[a-z0-9.-]+' found
+
+severity:               2
+category:               cmake|pkg-config|conan|dependency|pkgconfig
+match_keywords:         cfitsio.pc, prefix=, PkgConfigDeps, PKG_CONFIG_PATH,
+                        generators_folder, save_script, PKG_CHECK_MODULES,
+                        pkg_config_name, stale prefix, include_dirs, dead path,
+                        transitive_headers, ccfits, fitsio.h not found
+title:                  依赖包自带 .pc 的打包时绝对 prefix 在消费端失效：必须用 PkgConfigDeps 重新生成而非沿用，PKG_CONFIG_PATH 注入是必要非充分条件
+
+root_cause: >
+  依赖包（实测 cfitsio/4.6.4）的 CMake install 会把上游生成的 <dep>.pc 装进
+  <pkg>/lib/pkgconfig/，其中 prefix/libdir/includedir 被写死为打包机当时的
+  绝对路径；Conan 包目录是内容寻址的，消费端实际目录哈希不同，这些路径在本机
+  必然失效。上游若用 pkg-config 探测依赖（PKG_CHECK_MODULES），把 PKG_CONFIG_PATH
+  指向依赖包的 lib/pkgconfig 会"找到"依赖（Name/Version 正确，configure 不报错），
+  但解析出的 -I/-L 全部指向死路径，错误被推迟到编译期表现为头文件/库找不到，
+  极具迷惑性："找到"不等于"路径正确"，依赖包自带的 pc 不可信。
+
+affected_scope:         上游用 pkg-config 探测依赖（CMake PKG_CHECK_MODULES、meson
+                        dependency()、autotools PKG_CHECK_MODULES 等）且依赖包自带
+                        .pc 的所有 Conan 适配；对任何经 CMake install 产生 .pc 的
+                        依赖（zlib/curl/libpng 等）同样成立。
+
+verification_cmd:       PKG_CONFIG_PATH="$(conan cache path 'cfitsio/4.6.4:<pkgid>')/lib/pkgconfig" pkg-config --variable=prefix cfitsio
+                        输出打包时死路径即复现；修复后用 PkgConfigDeps 生成目录下的
+                        <dep>.pc，prefix 应指向本机真实包目录。
+
+rec_priority:           1
+rec_approach:           regen-pc-via-pkgconfigdeps-plus-path-injection
+rec_description: >
+  消费方配方 generate() 中两步：1) PkgConfigDeps(self).generate() 重新生成
+  依赖及传递依赖的 .pc（prefix 指向本机真实包目录，静态链接 Libs.private 完整）；
+  2) 按 E468 注入路径——Conan 2.29 不会自动把 generators 目录加入
+  PKG_CONFIG_PATH，需 Environment 前置注入 build 作用域并 save_script。
+  只做第 2 步而不重新生成、或把 PKG_CONFIG_PATH 直接指到依赖包 lib/pkgconfig，
+  都会复现死路径问题。
+
+rec_command:            PkgConfigDeps(self).generate(); env.prepend_path("PKG_CONFIG_PATH", self.generators_folder); env.vars(self, scope="build").save_script(...)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-pkgconfig-consumer
+
+fallback_priority:      3
+fallback_approach:      patch-dependency-pc-in-place
+fallback_description:   在 generate() 中读取依赖包内自带 .pc、用
+                        self.dependencies[...]["cfitsio"].cpp_info.include_paths 等重写
+                        prefix 后写回 generators；能工作但复杂，仅在 PkgConfigDeps
+                        生成的 pc 名与上游探测名不一致（如 E348 转发场景）时才需要。
+fallback_command:       见 E348 forwarding-pc 方案
+fallback_auto_fix:      false
+fallback_impl:          forward-or-rewrite-pc
+
+forbid_1_pattern:       PKG_CONFIG_PATH.*lib/pkgconfig(?!.*generators)
+forbid_1_reason:        把 PKG_CONFIG_PATH 指向依赖包自带的 lib/pkgconfig 会解析到
+                        打包时固化的死 prefix（ccfits 2.7 实测 fitsio.h not found）
+forbid_1_consequence:   configure 通过但编译期头文件/库找不到，错误表象与 pkg-config 无关
+
+principles:             P003, P011
+similar_to:             E468, E348
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ccfits-2.7-stale-pc-prefix-regen.md
+last_updated:           2026-09-05
+source_event:           ccfits 2.7 适配：首次原生 configure 成功后编译期 fitsio.h not found；
+                        pkg-config Found cfitsio 但 -I 指向不存在路径
+authors:                Awstme
+source_pr:              (ccfits 2.7 适配 PR，创建后回填)
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-05
