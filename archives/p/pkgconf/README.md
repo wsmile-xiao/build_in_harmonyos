@@ -1,7 +1,7 @@
 # pkgconf
 
 pkgconf is a program and library for resolving pkg-config metadata. The
-`pkgconf/3.0.5` Conan package installs a static `libpkgconf` library together
+`pkgconf/3.0.6` Conan package installs a static `libpkgconf` library together
 with the `pkgconf`, `bomtool`, `spdxtool`, and `pccritic` command-line tools.
 
 ## Package contents
@@ -15,7 +15,7 @@ with the `pkgconf`, `bomtool`, `spdxtool`, and `pccritic` command-line tools.
 - `bin/spdxtool`
 - `bin/pccritic`
 
-Upstream 3.0.5 does not install a `pkg-config` alias. Consumers that need the
+Upstream 3.0.6 does not install a `pkg-config` alias. Consumers that need the
 traditional command name should select it explicitly in their own environment;
 this package does not create an unowned alias.
 
