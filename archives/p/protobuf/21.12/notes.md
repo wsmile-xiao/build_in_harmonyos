@@ -45,5 +45,5 @@ conan create . -pr:h=ci/conan/profiles/ohos-aarch64 ...
 - commands.json / 软件级 manifest 追加 21.12 条目。
 ---
 
-**编译结束**: 2026-09-05 13:57
+**编译结束**: 2026-09-05 13:58
 **最终状态**: built
