@@ -1,0 +1,350 @@
+--- a/fuzzer/solver-fuzzer.c
++++ b/fuzzer/solver-fuzzer.c
+@@ -43,144 +43,223 @@
+ }
+-
++
+-static int
++static bool
+ write_all(int fd, const uint8_t *data, size_t size)
+ {
+-	while (size > 0)
++	while (size > 0)
+-	{
++	{
+-		ssize_t n = write(fd, data, size);
++		ssize_t n = write(fd, data, size);
+-
++
+-		if (n < 0)
++		if (n < 0)
+-		{
++		{
+-			if (errno == EINTR)
++			if (errno == EINTR)
+-				continue;
++				continue;
+-			return -1;
++			return false;
++		}
++		if (n == 0)
++		{
++			errno = EIO;
++			return false;
+-		}
++		}
+-
++
+-		data += n;
++		data += n;
+-		size -= n;
++		size -= n;
+-	}
++	}
+-
++
+-	return 0;
++	return true;
+ }
+-
++
+-static void
++static bool
+ write_pkg(const char *dir, char name, const uint8_t *data, size_t size)
+ {
+-	char path[PKGCONF_ITEM_SIZE];
++	char path[PKGCONF_ITEM_SIZE];
+-	int fd;
++	int fd;
+-
++
+-	snprintf(path, sizeof path, "%s/%c.pc", dir, name);
++	int written = snprintf(path, sizeof path, "%s/%c.pc", dir, name);
++	if (written < 0 || (size_t) written >= sizeof path)
++	{
++		errno = ENAMETOOLONG;
++		return false;
++	}
+-
++
+-	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++	fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+-	if (fd < 0)
++	if (fd < 0)
+-		return;
++		return false;
+-
++
+-	write_all(fd, data, size);
+-	close(fd);
++	if (!write_all(fd, data, size))
++	{
++		int saved_errno = errno;
++		close(fd);
++		errno = saved_errno;
++		return false;
++	}
++
++	if (close(fd) != 0)
++		return false;
++
++	return true;
+ }
+-
++
+-static void
++static bool
+ write_universe(const char *dir, const uint8_t *data, size_t size)
+ {
+-	size_t start = 0, idx = 0;
++	size_t start = 0, idx = 0;
+-
++
+-	for (size_t i = 0; i < size && idx < UNIVERSE_MAX; i++)
++	for (size_t i = 0; i < size && idx < UNIVERSE_MAX; i++)
+-	{
++	{
+-		if (data[i] == 0x00)
++		if (data[i] == 0x00)
+-		{
++		{
+-			write_pkg(dir, universe_names[idx++], data + start, i - start);
++			if (!write_pkg(dir, universe_names[idx++], data + start, i - start))
++				return false;
+-			start = i + 1;
++			start = i + 1;
+-		}
++		}
+-	}
++	}
+-
++
+-	if (idx < UNIVERSE_MAX)
++	if (idx < UNIVERSE_MAX)
+-		write_pkg(dir, universe_names[idx], data + start, size - start);
++	{
++		if (!write_pkg(dir, universe_names[idx], data + start, size - start))
++			return false;
++	}
++
++	return true;
+ }
+-
++
+-static void
++static bool
+ cleanup_universe(const char *dir)
+ {
+-	char path[PKGCONF_ITEM_SIZE];
++	char path[PKGCONF_ITEM_SIZE];
++	bool ok = true;
+-
++
+-	for (size_t i = 0; i < UNIVERSE_MAX; i++)
++	for (size_t i = 0; i < UNIVERSE_MAX; i++)
+-	{
++	{
+-		snprintf(path, sizeof path, "%s/%c.pc", dir, universe_names[i]);
+-		unlink(path);
++		int written = snprintf(path, sizeof path, "%s/%c.pc", dir, universe_names[i]);
++		if (written < 0 || (size_t) written >= sizeof path)
++		{
++			errno = ENAMETOOLONG;
++			return false;
++		}
++		if (unlink(path) != 0 && errno != ENOENT)
++			ok = false;
+-	}
++	}
+-
++
+-	rmdir(dir);
++	if (rmdir(dir) != 0)
++		ok = false;
++
++	return ok;
+ }
+-
++
+-static void
++static bool
+ run_solve(const pkgconf_cross_personality_t *pers, const char *dir)
+ {
+-	pkgconf_client_t *client = pkgconf_client_new(NULL, NULL, pers, NULL, environ_lookup_handler);
++	pkgconf_client_t *client = pkgconf_client_new(NULL, NULL, pers, NULL, environ_lookup_handler);
+-	if (client == NULL)
++	if (client == NULL)
+-		return;
++		return false;
+-
++
+-	pkgconf_path_add(dir, &client->dir_list, false);
++	pkgconf_path_add(dir, &client->dir_list, false);
+-
++
+-	pkgconf_pkg_t world = {
++	pkgconf_pkg_t world = {
+-		.id = "virtual:world",
++		.id = "virtual:world",
+-		.realname = "virtual world package",
++		.realname = "virtual world package",
+-		.flags = PKGCONF_PKG_PROPF_STATIC | PKGCONF_PKG_PROPF_VIRTUAL,
++		.flags = PKGCONF_PKG_PROPF_STATIC | PKGCONF_PKG_PROPF_VIRTUAL,
+-	};
++	};
+-	pkgconf_list_t pkgq = PKGCONF_LIST_INITIALIZER;
++	pkgconf_list_t pkgq = PKGCONF_LIST_INITIALIZER;
+-
++
+-	pkgconf_queue_push(&pkgq, "a");
++	pkgconf_queue_push(&pkgq, "a");
+-
++
+-	if (pkgconf_queue_solve(client, &pkgq, &world, SOLVE_MAXDEPTH))
++	if (pkgconf_queue_solve(client, &pkgq, &world, SOLVE_MAXDEPTH))
+-	{
++	{
+-		pkgconf_list_t cflags = PKGCONF_LIST_INITIALIZER;
++		pkgconf_list_t cflags = PKGCONF_LIST_INITIALIZER;
+-		pkgconf_list_t libs = PKGCONF_LIST_INITIALIZER;
++		pkgconf_list_t libs = PKGCONF_LIST_INITIALIZER;
+-		pkgconf_buffer_t render = PKGCONF_BUFFER_INITIALIZER;
++		pkgconf_buffer_t render = PKGCONF_BUFFER_INITIALIZER;
+-
++
+-		pkgconf_pkg_cflags(client, &world, &cflags, SOLVE_MAXDEPTH);
++		pkgconf_pkg_cflags(client, &world, &cflags, SOLVE_MAXDEPTH);
+-		pkgconf_pkg_libs(client, &world, &libs, SOLVE_MAXDEPTH);
++		pkgconf_pkg_libs(client, &world, &libs, SOLVE_MAXDEPTH);
+-
++
+-		pkgconf_fragment_render_buf(&cflags, &render, true, NULL, ' ');
++		pkgconf_fragment_render_buf(&cflags, &render, true, NULL, ' ');
+-		pkgconf_fragment_render_buf(&libs, &render, true, NULL, ' ');
++		pkgconf_fragment_render_buf(&libs, &render, true, NULL, ' ');
+-
++
+-		pkgconf_buffer_finalize(&render);
++		pkgconf_buffer_finalize(&render);
+-		pkgconf_fragment_free(&cflags);
++		pkgconf_fragment_free(&cflags);
+-		pkgconf_fragment_free(&libs);
++		pkgconf_fragment_free(&libs);
+-	}
++	}
+-
++
+-	pkgconf_solution_free(client, &world);
++	pkgconf_solution_free(client, &world);
+-	pkgconf_queue_free(&pkgq);
++	pkgconf_queue_free(&pkgq);
+-	pkgconf_client_free(client);
++	pkgconf_client_free(client);
++	return true;
++}
++
++static void
++infrastructure_abort(const char *message, int saved_errno)
++{
++	if (saved_errno == 0)
++		saved_errno = EIO;
++
++	fprintf(stderr, "solver-fuzzer: %s: %s\n", message, strerror(saved_errno));
++	abort();
+ }
+-
++
+ int
+ LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
+ {
+-	if (size == 0)
++	if (size == 0)
+-		return 0;
++		return 0;
+-
++
+-	char dir[] = "/tmp/pkgconf-fuzz-univ-XXXXXX";
++	const char *tmpdir = getenv("TMPDIR");
++	if (tmpdir == NULL || tmpdir[0] == '\0')
++		tmpdir = "/tmp";
++
++	char dir[PKGCONF_ITEM_SIZE];
++	int written = snprintf(dir, sizeof dir, "%s/pkgconf-fuzz-univ-XXXXXX", tmpdir);
++	if (written < 0 || (size_t) written >= sizeof dir)
++		infrastructure_abort("temporary directory path is too long", ENAMETOOLONG);
++
+-	if (mkdtemp(dir) == NULL)
++	if (mkdtemp(dir) == NULL)
+-		return 0;
++		infrastructure_abort("mkdtemp failed", errno);
+-
++
+-	write_universe(dir, data, size);
++	if (!write_universe(dir, data, size))
++	{
++		int saved_errno = errno;
++		cleanup_universe(dir);
++		infrastructure_abort("failed to write temporary package universe", saved_errno);
++	}
+-
++
+-	pkgconf_cross_personality_t *pers = pkgconf_cross_personality_default();
++	pkgconf_cross_personality_t *pers = pkgconf_cross_personality_default();
++	if (pers == NULL)
++	{
++		cleanup_universe(dir);
++		infrastructure_abort("failed to initialize default personality", ENOMEM);
++	}
+-
++
+-	/* baseline run with all allocations succeeding */
++	/* baseline run with all allocations succeeding */
+-	run_solve(pers, dir);
++	if (!run_solve(pers, dir))
++	{
++		int saved_errno = errno;
++		pkgconf_cross_personality_deinit(pers);
++		cleanup_universe(dir);
++		infrastructure_abort("failed to initialize solver client", saved_errno);
++	}
+-
++
+-	/* then fail each allocation site reachable by this input, one at a time */
++	/* then fail each allocation site reachable by this input, one at a time */
+-	for (unsigned long i = 1; i <= ALLOC_FAIL_MAX; i++)
++	for (unsigned long i = 1; i <= ALLOC_FAIL_MAX; i++)
+-	{
++	{
+-		alloc_inject_arm(i);
++		alloc_inject_arm(i);
+-		run_solve(pers, dir);
++		bool solve_ok = run_solve(pers, dir);
+-		alloc_inject_disarm();
++		alloc_inject_disarm();
+-
++
+-		if (!alloc_inject_fired())
++		bool injected = alloc_inject_fired();
++		if (!solve_ok && !injected)
++		{
++			pkgconf_cross_personality_deinit(pers);
++			cleanup_universe(dir);
++			infrastructure_abort("solver client failed without injected allocation", errno);
++		}
++		if (!injected)
+-			break;
++			break;
+-	}
++	}
+-
++
+-	pkgconf_cross_personality_deinit(pers);
++	pkgconf_cross_personality_deinit(pers);
+-	cleanup_universe(dir);
++	if (!cleanup_universe(dir))
++		infrastructure_abort("failed to remove temporary package universe", errno);
+-
++
+-	return 0;
++	return 0;
+ }
