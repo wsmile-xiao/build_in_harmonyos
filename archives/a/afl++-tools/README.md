@@ -4,13 +4,13 @@ AFL++ (a fast instrumented coverage-guided fuzzer) 的鸿蒙 PC (arm64) 适配�
 
 - 上游：https://github.com/AFLplusplus/AFLplusplus
 - 许可证：Apache-2.0
-- 软件级 Conan 包名：`afl-tools`（上游目录名 afl++-tools 含 `++`，不符合 Conan 包名规范）
+- Conan 包名：`afl++-tools`（conan slug 允许 `+`，如 vera++；与目录名、分支名一致）
 
 ## 版本
 
 | 版本 | 状态 | 说明 |
 |------|------|------|
-| 4.40c | built | 首次适配；待鸿蒙 PC 实机验证后补 test_results |
+| 4.40c | built | 鸿蒙 PC 实机验证完成（2026-09-04，19/19 explicit） |
 
 ## 版本差异要点（4.40c vs 4.33c）
 

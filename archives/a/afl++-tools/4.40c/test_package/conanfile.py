@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan test recipe for afl-tools — tool-type package shell test."""
+"""Conan test recipe for afl++-tools — tool-type package shell test."""
 import os
 
 from conan import ConanFile
@@ -19,7 +19,7 @@ class TestAflToolsConan(ConanFile):
         )
         cc = compilers.get("c", "clang")
         include_dir = os.path.join(
-            self.dependencies["afl-tools"].package_folder, "include", "afl"
+            self.dependencies["afl++-tools"].package_folder, "include", "afl"
         )
         test_src = os.path.join(self.source_folder, "test_afl.c")
         test_bin = os.path.join(self.build_folder, "test_afl")

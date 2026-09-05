@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Conan recipe — AFL++ tools 4.40c (Makefile-based fuzzer suite)."""
+"""Conan recipe — AFL++ tools 4.40c (Makefile-based fuzzer suite).
+
+Package name 'afl++-tools' (conan slug allows '+', e.g. vera++) — must match
+the archives/a/afl++-tools/ directory name and branch name per CI L0m/L0n.
+"""
 import os
 import shutil
 
@@ -9,7 +13,7 @@ from conan.tools.layout import basic_layout
 
 
 class AflToolsConan(ConanFile):
-    name = "afl-tools"
+    name = "afl++-tools"
     version = "4.40c"
     description = (
         "AFL++ is a fast instrumented fuzzer with many enhancements "

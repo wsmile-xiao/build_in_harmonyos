@@ -1,6 +1,6 @@
-# afl-tools 4.40c 鸿蒙 PC 适配笔记
+# afl++-tools 4.40c 鸿蒙 PC 适配笔记
 
-> 软件级包名 `afl-tools`（目录 `afl++-tools`，Conan 包名禁止 `++`）。
+> Conan 包名 `afl++-tools`（conan slug 允许 `+`，如 vera++；与目录名、分支名一致，CI L0m/L0n 强制）。
 > 基于 aflplusplus 4.33c（PR !5711 已合入 main）/ 4.34c-r0 适配经验，跨 2 个 minor 升级。
 > 详细差异分析见 `md汇总/留痕工作/afl-tools/aflplusplus-4.40c差异分析.md`。
 
