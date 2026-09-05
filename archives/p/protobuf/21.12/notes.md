@@ -1,57 +1,49 @@
-# Protobuf 21.12 构建进度报告
+# protobuf 21.12 适配笔记（3.21 线，无 Abseil）
 
-## 当前构建状态
-✓ 构建完成，所有步骤成功
+## 编译环境
+- 构建系统: cmake
+- 编译日期: 2026-09-05
+- 编译器: clang 15 (aarch64 OHOS)
+- 状态: published
 
-## 已修复问题
-1. 编译器路径错误
-   - 问题: 环境变量CC/CXX指向错误的路径/storage/Users/currentUser/usr/local/bin/clang
-   - 解决: 在build.sh config()函数中显式设置export CC=/data/service/hnp/bin/clang
-   - 状态: ✓ 已修复
+## 背景（为何新增此版本）
+OLA 0.10.9 依赖 protobuf，但 OLA 代码仍是 C++11 世代（648 处
+`std::auto_ptr`，`std::auto_ptr` 在 C++17 已被删除）。制品仓中已有
+protobuf 33.6/33.6.1，其公开头文件经 Abseil 硬性要求 C++17，无法被
+OLA 编译。21.12 是最后一代不依赖 Abseil、公开头文件保持 C++11 兼容
+的版本（上游 protobuf >= 22 起引入 Abseil）。本 PR 发布该版本作为
+OLA 的依赖（R36 依赖先发布）。
 
-## 待解决问题
-无
+## 编译步骤
+1. conan create（cmake，protobuf_BUILD_TESTS=OFF/CONFORMANCE=OFF/
+   EXAMPLES=OFF、PROTOC_BINARIES=ON、LIBPROTOC=ON、WITH_ZLIB=OFF）
+2. package() 中把安装的 protobuf.pc / protobuf-lite.pc 的绝对 prefix
+   改写为 `prefix=${pcfiledir}/../..` 相对形式，保证 conan 缓存可迁移。
 
-## 修改清单
-- build.sh: 在config()函数中添加export CC/CXX设置编译器路径
+## 遇到的问题与解决方案
+| # | 问题 | 根因 | 解决方案 |
+|---|------|------|----------|
+| 1 | lang-preflight 误报 python | 检测器把 v21.12 全语言仓库（java/csharp/python/ruby/php 等子目录）统计为 python，忽略主构建系统 CMakeLists.txt | 记录证据后按 cpp 继续（cmake 主工程，上游即 C++ 项目） |
+| 2 | 上游单测未引入 | 21.12 gtest 单测需 configure 期从 GitHub 拉取 googletest 且体量巨大 | 由 test_package 程序化测试复现上游语义（见 MANIFEST.yml） |
 
-## 构建总结
+## 源码修改
+无（补丁为空；无需 __OHOS__ 平台宏）
 
-### 构建状态
-✓ 所有步骤成功完成：prepare → config → build → test_install → check → install
+## 依赖版本
+无（21.12 零外部依赖，zlib 默认关闭）
 
-### 核心成果
-- **protoc编译器**: 成功构建musl libc版本的protoc-3.21.12.0
-- **验证结果**: protoc可正常运行，输出版本号libprotoc 3.21.12
-- **二进制类型**: ELF shared object, 64-bit LSB arm64, dynamic (/lib/ld-musl-aarch64.so.1)
+## 验证结果
+```bash
+conan create . -pr:h=ci/conan/profiles/ohos-aarch64 ...
+# test_package: dynamic/pool/arena/parse_error 四场景 + protoc --version
+# ctest 全绿
+```
 
-### 构建配置
-- 编译器: /data/service/hnp/bin/clang (OHOS原生工具链)
-- 构建类型: Release
-- 静态库编译: libprotobuf.a, libprotobuf-lite.a, libprotoc.a
-- protoc编译器: protoc-3.21.12.0 (musl版本)
+## 注意事项
+- 此版本面向 C++11/C++14 时代消费者（OLA 0.10.9）；新项目应优先使用
+  protobuf 33.x。
+- commands.json / 软件级 manifest 追加 21.12 条目。
+---
 
-### 关键问题修复
-**问题**: 环境变量CC/CXX指向错误的路径/storage/Users/currentUser/usr/local/bin/clang
-**解决**: 在build.sh config()函数中显式设置正确的OHOS clang路径
-**根因**: 继承了错误的环境变量配置
-
-### 测试明细
-- test_install: PASS - 安装到测试目录成功
-- check: PASS - protoc --version输出正确版本号
-- musl验证: PASS - 二进制文件链接到/lib/ld-musl-aarch64.so.1
-
-### 安装产物
-- /storage/Users/currentUser/usr/local/bin/protoc (符号链接)
-- /storage/Users/currentUser/usr/local/bin/protoc-3.21.12.0 (musl二进制)
-- /storage/Users/currentUser/usr/local/lib/libprotobuf.a
-- /storage/Users/currentUser/usr/local/lib/libprotobuf-lite.a
-- /storage/Users/currentUser/usr/local/lib/libprotoc.a
-- /storage/Users/currentUser/usr/local/lib/pkgconfig/protobuf.pc
-- /storage/Users/currentUser/usr/local/include/google/protobuf/*.h
-
-### 任务状态
-- ✓ 构建成功
-- ✓ 验证成功
-- ✓ 安装成功
-- ✓ 任务完成，解除TASK-065-onnxruntime阻塞
+**编译结束**: 2026-09-05 13:57
+**最终状态**: built
