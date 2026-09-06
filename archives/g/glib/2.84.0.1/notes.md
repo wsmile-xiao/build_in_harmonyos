@@ -106,3 +106,17 @@ conan create archives/g/glib/2.84.0.1 \
 
 **日期**: 2026-07-26
 **状态**: 配方启用上游 meson 套件；验收目标 `Ok: 312 / Fail: 0 / Skipped: 5`
+
+## Q3 libintl 定性（2026-09-02，结论 A — 环境专属）
+
+产物 `libglib-2.0.so` `NEEDED libintl.so.8` + UND `g_libintl_*` 由**包内 vendored
+proxy-libintl** `lib/libintl.so.8`（导出 g_libintl_*）解析，干净 LD_LIBRARY_PATH 下
+test_probe/dlopen 全通过，产物自洽。仅当机器装有 gettext（2026-08-05，
+`/storage/Users/currentUser/usr/local/lib/libintl.so.8`，导出 libintl_* 而非 g_libintl_*）
+且其目录在 LD_LIBRARY_PATH 中位于包 lib 之前时，运行时被遮蔽 → `g_libintl_*: symbol not found`。
+配方不改、版本不升（2.84.0.1）。验证记录见草稿
+`DRAFT-glib-2.84.0.1-gettext-libintl-ld-library-path-shadow.kv`。
+---
+
+**编译结束**: 2026-09-02 23:33
+**最终状态**: built
