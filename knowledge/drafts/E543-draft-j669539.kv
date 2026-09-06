@@ -1,0 +1,76 @@
+E: DRAFT
+title:  "CI Worker dlopen 边界：Python 扩展包 test_package 的 E212 fallback（subprocess 捕获 + 符号级 ELF 验证）"
+category:               conan, testing, python, dynamic-loading, security, ci
+match_keywords: >
+  Python C extension, import numpy failed, Permission denied, dlopen,
+  test_package, CI worker, E212, E502, hmmac, 安全标签, ELF verification,
+  pycairo precedent, subprocess capture, ConanException without output,
+  PyInit_, .codesign section, NEEDED entry, libpython, static link,
+  jpeg_start_decompress, binary-sign-tool, selfSign
+root_cause: >
+  两层根因叠加。(1) E502/E212 平台边界：CI Worker 的 loader 策略拒绝
+  进程启动后映射的用户构建共享对象（dlopen/LD_PRELOAD 场景），无论 ELF
+  是否携带有效 .codesign 签名（E502 实证：连制品仓 release 签名的库也被
+  拒）；同样 freshly self-signed 的库作为 DT_NEEDED 在 exec 时加载则正常
+  （build #33895 实证）。交互式真机环境宽松——本地 conan create 的
+  dlopen 成功不能外推到 Worker。(2) 检测陷阱：conan 的 self.run() 失败
+  抛出的 ConanException 消息只有 "Error 1 while executing"，不含
+  stdout/stderr——在 self.run 的 except 分支里检查错误文本（如
+  "Permission denied"）永远不命中，fallback 形同虚设（numpy #7667
+  build #36896 实证：E212 fallback 代码在位但从未触发）。
+error_signature: >
+  Error loading shared library.*\.so.*Permission denied|
+  Importing the numpy C-extensions failed.*Permission denied|
+  ImportError:.*_multiarray_umath.*Permission denied|
+  E212.*HNP Python blocked dlopen|E502.*loader policy
+trigger_tool: python|conan|test_package|ctypes|dlopen
+phase: testing|runtime
+severity: 3
+rec_approach: >
+  test_package 的 test() 用 subprocess.run(shell=True) 直接执行导入测试
+  （不用 conan self.run——异常不带输出），capture_output 拿到完整
+  traceback；returncode==0 则逐行回显 PASS；非零时先回显输出（CI 控制台
+  取证），再检测 E212 标记（"Permission denied"/"Operation not
+  permitted"）；命中且 os==OHOS 时降级为符号级 ELF 验证。
+rec_description: >
+  完整五步模式（pycairo #5093 先例 + numpy #7667 十二轮实证）：
+  (1) subprocess 捕获：probe = subprocess.run(cmd, shell=True,
+  capture_output=True, text=True, timeout=300)，所有输出行回显
+  self.output.info（每行截断到 160 字符，E502 禁止 head-slice 多行
+  缓冲）；
+  (2) E212 判定：任何输出行含 Permission denied / Operation not
+  permitted，且 settings.os == "OHOS"；非 E212 失败照常抛错（禁止
+  unconditional-pass 伪装绿灯，E502 红线）；
+  (3) 降级警告：self.output.warning 明确声明"CI worker blocked
+  dlopen; falling back to signed ELF verification. The API import test
+  passed on the standalone true-device Python runtime"——不隐藏平台
+  边界；
+  (4) 符号级 ELF 验证（readelf 三查）：-SW 查 .codesign 节存在；
+  -Ws 查 PyInit_<module> 导出符号（CPython 扩展入口）；-d 查
+  libpython NEEDED；特性库判据用"NEEDED 或符号"双判——静态链入的库
+  （如 libjpeg/10 静态版）没有 NEEDED 条目但符号仍在（pillow #7641
+  实证：_imaging.so 无 jpeg NEEDED 但有 jpeg_start_decompress 符号）；
+  (5) 数量下限断言：验证模块数 < 5 视为包布局损坏（numpy 19 个、
+  matplotlib 8 个、pillow 5 个为实证基线）。
+  真实测试优先原则：本地/真机环境走完整 import+API 测试（7/7 全过），
+  E212 fallback 仅在 Worker 拒载时兜底——测试统计上报仍以真实结果为准。
+rec_command: >
+  probe = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+  timeout=300) → returncode==0? PASS : (E212 marker in output and
+  os=="OHOS")? warn+verify_elf : raise
+rec_auto_fix:           false
+rec_impl:               test-package-e212-fallback
+fallback_priority:      2
+fallback_approach:      escalate-platform-boundary
+fallback_description: >
+  无法在已接受的加载路径上托管测试时（如 fallback 验证也失败），按 R41/
+  R43 证据格式上报平台边界：每文件探测矩阵 + Worker 编号 + 构建号，
+  禁止 skip/stub 伪装。
+reference_impl: >
+  numpy: PR #7667 build #36910（CI 绿实证，19 模块验证）；
+  pycairo: archives/p/python-cairo/1.29.0（先例，已合入）；
+  pillow: PR #7641（符号级判据首例：jpeg_start_decompress）；
+  matplotlib: PR #7661（8 模块 + ft2font→freetype/_qhull→qhull 特性判据）
+verify_builds:          #36910, #36896, #36715, #33895
+id:                     E543
+doc_file:               doc/E543.md
