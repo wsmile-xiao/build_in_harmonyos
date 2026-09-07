@@ -1,0 +1,122 @@
+#====================================================================
+# E555 — CMake 定向 --target 构建绕过 ALL 生成目标导致安装清单引用的生成物缺失
+# 触发事件: libzzip 0.13.80 (zziplib) HarmonyOS PC 适配 CI conan create 失败
+#           (archives/l/libzzip/0.13.80, 2026-09-01/02 CI 实证)
+# 主从明确：通用 CMake 构建闭包问题（recipe 显式 --target 瘦身 + 平台门控默认值
+#           静默 OFF 双因素），libzzip 仅为首个实证案例。
+# 与 E532（configure 期 Unsupported platform）、E383（缺 SONAME flag）本质不同：
+#           本条目 configure/build 全绿，失败发生在 cmake --install 阶段。
+# 编号迁移：2026-09-04 由 E544 改号为 E555——upstream/main 已存在其他贡献者的
+#           E544 草稿（编号冲突）；知识内容不变，仅编号与 doc 引用更新。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E555
+trigger_tool:           cmake|install|conan
+phase:                  installation
+error_signature:        CMake Error.*file INSTALL cannot find|file INSTALL cannot find \"[^"]+\"|INSTALL.*cannot find.*\.pc|cmake --install.*failed|Installing:.*\.pc.*No such file|file INSTALL cannot find.*zziplib\.pc|file INSTALL cannot find.*\.so\.[0-9]+|cannot install.*file.*does not exist
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               cmake, build-system, packaging, ohos, detection
+match_keywords:         file INSTALL cannot find, cmake --install, install manifest, generated file missing, pkgconfig, .pc file, custom target, ALL, --target, build closure, option default OFF, UNIX OR MINGW, install(FILES), BYPRODUCTS, libzzip, zziplib.pc
+title:                  CMake 定向 --target 构建绕过 ALL 生成目标，cmake --install 因安装清单引用的生成物（.pc/compat 头/软链）缺失而失败
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             构建闭包未覆盖安装清单闭包（两因素叠加）：配方显式 --target 只编部分目标绕过上游 ALL 闭包中的元数据生成目标；平台门控 if(UNIX OR MINGW) 使 HarmonyOS 下元数据选项静默默认 OFF。
+                        ① 配方为规避 ALL 闭包中个别会失败的目标（如构建期 exec 交叉二进制的
+                        custom target），改用显式 `cmake --build --target <列表>` 只编库和 bins，
+                        绕过了上游挂在 ALL 上的元数据生成目标（add_custom_target(pkgconfig ALL) 等），
+                        这些目标的产物（*.pc、compat 头、libtool 版本化 .so 软链）只存在于构建树，
+                        从未被生成；
+                        ② 上游用 if(UNIX OR MINGW) 包住 option(<PKGCONFIG/COMPAT/LIBTOOL> ... ON)
+                        的默认值，HarmonyOS/OHOS 无 CMake 平台模块、UNIX 变量为假 → 落入 else()
+                        的 OFF 默认（configure 日志仅一行 "-- installing xx pkgconfig files: OFF"），
+                        且 install(FILES ...) 规则本身不受 OFF 保护时清单仍引用未生成文件。
+                        结果：configure/build 全绿，cmake --install 执行 install 清单时报
+                        file INSTALL cannot find "<build>/<file>.pc" 直接失败。
+affected_scope:         所有满足以下任一条件的 CMake 上游库的 OHOS 适配：
+                        (a) recipe 用显式 --target 列表瘦身构建，而上游 install() 规则引用
+                            ALL custom target 的生成物（.pc / 生成头 / 版本化软链 / .m4 / cmake config）；
+                        (b) 上游 option 默认值包在 if(UNIX OR MINGW) 等平台门控里，HarmonyOS
+                            不满足条件导致元数据类选项静默 OFF。
+                        典型形态：上游含 add_custom_target(<name> ALL DEPENDS <out>) +
+                        install(FILES ${outdir}/<out>)。libzzip 0.13.80 实证（zziplib.pc/
+                        zzipmmapped.pc/zzipfseeko.pc/zzipwrap.pc、compat 头、libtool 软链）。
+
+verification_cmd:       grep -R -nE 'add_custom_target\([a-zA-Z_]+ ALL|install\(FILES' <src> | head -30; grep -R -n 'if(UNIX OR MINGW)' <src>/*/CMakeLists.txt; cmake -B build -S <src> 2>&1 | grep -iE 'installing.*pkgconfig|installing.*compat|option.*OFF'
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           restore-default-all-install-generation-closure
+rec_description:        ① 删除显式 --target 列表，恢复默认 ALL 构建，让上游挂在 ALL 上的
+                        install 派生产物生成目标（pkgconfig/compat/libtool 软链等）全部执行；
+                        ALL 闭包中个别会失败的目标（构建期 exec 交叉二进制）用环境变量
+                        （如 LD_LIBRARY_PATH 指向构建树库目录）修复而非绕过；
+                        ② configure 期显式 -D 开启被平台门控静默关掉的元数据选项
+                        （PKGCONFIG/COMPAT/LIBTOOL 类，逐个对照上游 else() 分支的 OFF 默认）；
+                        ③ 安装前验证：构建树中枚举 install(FILES) 引用的生成文件全部存在；
+                        ④ 执行 cmake --install；
+                        ⑤ 用最终 Conan 安装包跑消费者测试（test_package 链接 + 运行）。
+rec_command:            cmake -B build -S src -D<XXX>_PKGCONFIG=ON -D<XXX>_COMPAT=ON -D<XXX>_LIBTOOL=ON && LD_LIBRARY_PATH=build/<libdir> cmake --build build -j$(nproc) && ls build/<subdir>/*.pc && cmake --install build --prefix <pkg> && conan create . -pr:h=ohos-aarch64 -pr:b=ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      explicit-targets-plus-manual-generation-steps
+fallback_description:   若 ALL 闭包中确有环境无法满足的目标（exec 交叉二进制且无法用环境变量
+                        修复），保留 --target 列表，但必须逐一显式追加被绕过的生成目标
+                        （如 pkgconfig、compat、libzzip_links 等 custom target 名），并在
+                        install 前校验生成物存在；禁止省略校验直接安装。
+fallback_command:       cmake --build build --target <libs> <bins> pkgconfig compat <xxx>_links && ls build/zzip/*.pc
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       echo.*prefix=.*>.*\.pc|printf.*Name:.*>.*\.pc|touch.*\.pc|cat.*>.*\.pc
+forbid_1_reason:        手工伪造 .pc 文件让 install 清单通过，但内容未经上游生成逻辑
+                        （libdir/includedir/Requires 依赖链）校准，下游 pkg-config 消费必错。
+forbid_1_consequence:   包表面完整，消费者 -l/-I 解析错误或传递依赖（Requires: zlib）丢失，
+                        问题延迟到下游暴露且难以溯源。
+forbid_2_pattern:       sed -i.*-z.*install\(FILES|删除.*install.*规则|remove.*install\(FILES
+forbid_2_reason:        删除/注释上游 install() 规则以规避缺文件报错，等于裁剪交付物，
+                        破坏上游安装契约（pkg-config 消费者、libtool 兼容软链全丢失）。
+forbid_2_consequence:   CI 绿但包残缺：下游按 .pc/cmake config 寻址失败，或按 libtool
+                        约定找 libfoo.so.N 链接失败，属掩盖性缺陷。
+forbid_3_pattern:       -DZZIP_PKGCONFIG=OFF|-DZZIP_COMPAT=OFF|-DZZIP_LIBTOOL=OFF|_PKGCONFIG=OFF.*规避
+forbid_3_reason:        把元数据选项显式关掉来让 install 清单不再引用生成物，是反向修复：
+                        用关闭交付功能换取构建通过。
+forbid_3_consequence:   包永远缺 .pc/compat 头/版本化软链，下游 Meson(pkg-config 依赖)、
+                        libtool 约定消费者直接不可用；交付完整性被静默降级。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P013, P014
+
+# ═══ 关系图 (Relations) ═══
+caused_by:              []
+causes:                 []
+similar_to:             E532, E383, E309, E278, E289
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E555.md
+last_updated:           2026-09-02
+source_event:           libzzip 0.13.80 (zziplib) HarmonyOS PC 适配，CI conan create 阶段
+                        cmake --install 失败：install 清单引用 build-ohos/zzip/zziplib.pc 等
+                        生成文件不存在；修复后 229 项上游测试 + test_package 全绿（2026-09-01/02）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                余念儒 <3220476062@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-02
+
+draft: true
+contributor_id: 9C21
