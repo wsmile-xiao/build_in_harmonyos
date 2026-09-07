@@ -1,0 +1,87 @@
+diff --git a/src/serial.c b/src/serial.c
+index bfa4a93..b3c1455 100644
+--- a/src/serial.c
++++ b/src/serial.c
+@@ -119,6 +119,24 @@ static int _serial_bits_to_baudrate(uint32_t bits) {
+     }
+ }
+ 
++static int _serial_set_termios_speed(struct termios *t, int baudrate_bits) {
++    if (baudrate_bits > 0) {
++        /* Standard rate: let cfset*() set both the CBAUD c_cflag bits and the
++         * ispeed/ospeed members portably - this avoids naming the baudrate
++         * members directly, which vary across libc implementations. */
++        if (cfsetispeed(t, (speed_t)baudrate_bits) < 0 ||
++            cfsetospeed(t, (speed_t)baudrate_bits) < 0)
++            return -1;
++        return 0;
++    }
++    /* Non-standard (custom) rate, e.g. 128000 / 135000: the portable POSIX
++     * termios API only accepts standard B* rates,
++     * so there is no platform-independent way to program an arbitrary rate.
++     * Fail explicitly instead of emitting a non-portable / non-POSIX write. */
++    (void)t;
++    return -2;
++}
++
+ int serial_open(serial_t *serial, const char *path, uint32_t baudrate) {
+     return serial_open_advanced(serial, path, baudrate, 8, PARITY_NONE, 1, false, false);
+ }
+@@ -188,14 +206,12 @@ int serial_open_advanced(serial_t *serial, const char *path, uint32_t baudrate,
+ 
+     /* Baudrate */
+     baudrate_bits = _serial_baudrate_to_bits(baudrate);
+-    if (baudrate_bits > 0) {
+-        termios_settings.c_cflag |= baudrate_bits;
+-        termios_settings.c_ispeed = baudrate;
+-        termios_settings.c_ospeed = baudrate;
+-    } else {
+-        termios_settings.c_cflag |= CBAUDEX; /* = BOTHER from asm-generic/termbits.h */
+-        termios_settings.c_ispeed = baudrate;
+-        termios_settings.c_ospeed = baudrate;
++    if (_serial_set_termios_speed(&termios_settings, baudrate_bits) != 0) {
++        close(serial->fd);
++        serial->fd = -1;
++        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, 0,
++                             "Baudrate %u is not a standard rate and cannot be set",
++                             baudrate);
+     }
+ 
+     /* Set termios attributes */
+@@ -312,7 +328,7 @@ int serial_get_baudrate(serial_t *serial, uint32_t *baudrate) {
+     baudrate_bits = termios_settings.c_cflag & CBAUD;
+ 
+     if (baudrate_bits == CBAUDEX)   /* = BOTHER from asm-generic/termbits.h */
+-        *baudrate = termios_settings.c_ospeed;
++        *baudrate = cfgetospeed(&termios_settings);
+     else
+         *baudrate = _serial_bits_to_baudrate(baudrate_bits);
+ 
+@@ -410,14 +426,10 @@ int serial_set_baudrate(serial_t *serial, uint32_t baudrate) {
+ 
+     termios_settings.c_cflag &= ~CBAUD;
+     baudrate_bits = _serial_baudrate_to_bits(baudrate);
+-    if (baudrate_bits > 0) {
+-        termios_settings.c_cflag |= baudrate_bits;
+-        termios_settings.c_ispeed = baudrate;
+-        termios_settings.c_ospeed = baudrate;
+-    } else {
+-        termios_settings.c_cflag |= CBAUDEX; /* = BOTHER from asm-generic/termbits.h */
+-        termios_settings.c_ispeed = baudrate;
+-        termios_settings.c_ospeed = baudrate;
++    if (_serial_set_termios_speed(&termios_settings, baudrate_bits) != 0) {
++        return _serial_error(serial, SERIAL_ERROR_CONFIGURE, 0,
++                             "Baudrate %u is not a standard rate and cannot be set",
++                             baudrate);
+     }
+ 
+     if (tcsetattr(serial->fd, TCSANOW, &termios_settings) < 0)
+@@ -535,7 +547,7 @@ int serial_tostring(serial_t *serial, char *str, size_t len) {
+         return snprintf(str, len, "Serial (baudrate=?, databits=?, parity=?, stopbits=?, xonxoff=?, rtscts=?)");
+ 
+     if ((termios_settings.c_cflag & CBAUD) == CBAUDEX)  /* = BOTHER from asm-generic/termbits.h */
+-        baudrate = termios_settings.c_ospeed;
++        baudrate = cfgetospeed(&termios_settings);
+     else
+         baudrate = _serial_bits_to_baudrate(termios_settings.c_cflag & CBAUD);
+ 
