@@ -1,0 +1,54 @@
+#====================================================================
+# DRAFT-cpp-can-parser-1.0.0-cmake-internal-header-dir-and-install.kv
+# 上游 CMakeLists 缺内部头文件 include 目录 + install(FILES <target>) 损坏，
+# 库自身无法编译、无法正确安装
+# 触发事件: cpp-can-parser 1.0.0 HarmonyOS PC 适配（R01，patch 0001-CMakeLists.txt.patch）
+#====================================================================
+
+id:                     DRAFT-cpp-can-parser-1.0.0-cmake-internal-header-dir-and-install
+trigger_tool:           cmake|conan|compile
+phase:                  compilation|packaging
+error_signature:        fatal error: '.+\.h' file not found.*(src/|include/)|
+                         install\(FILES .*(cpp-can-parser|lib.*)\.so.*DESTINATION.*build|
+                         CMake Error: cannot find source file
+
+severity:               2
+category:               cmake|build-system|include-dirs|install-rules|upstream-bug
+match_keywords:         target_include_directories, PRIVATE, include subdir, internal
+                         headers, install(FILES <target>), install DESTINATION build dir,
+                         generate_export_header, test include path, CANDatabase.h,
+                         file not found, 库自身无法编译
+title:                  上游 CMakeLists 公共头放 include/<subdir> 却未给内部源文件加 PRIVATE
+                        include 目录（库自身编译即失败），且 install(FILES <target名>) 引用
+                        不存在的文件装入 build 目录；修复 = 补 PRIVATE 目录 + 重写 install 规则
+
+root_cause: >
+  ①公共头位于 include/cpp-can-parser/，源码（src/*.cpp、tests/*.cpp）用短名
+  `#include "CANDatabase.h"`，上游 target_include_directories 只把 include/ 加入
+  PUBLIC、src/parsing 加入 PRIVATE，独缺 include/cpp-can-parser 这一级，
+  库自身任何目标（含测试）编译即 fatal error；
+  ②install(FILES cpp-can-parser ${BINARY_DIR}/xxx.h DESTINATION ${BINARY_DIR}/include)
+  把 target 名当文件引用（源目录不存在该文件）、并装入二进制 build 目录而非标准
+  prefix，产物无法被消费。generate_export_header 生成的 export 头也未安装到公共头目录。
+affected_scope: >
+  上游 CMake 工程把公共头放在 include/<subdir>、内部源却以短名 include 的场景；
+  install(FILES <target>) 误用或 install 目标写成 build 目录的场景；
+  generate_export_header 产物漏装的场景。E217（配方 includedirs 配置问题）触发面
+  部分重叠，但本条目是上游 CMakeLists 自身缺陷、修复位置在源码补丁。
+verification_cmd: >
+  conan create rc=0；test_package 经 find_package(cpp-can-parser) 链接并真实解析 DBC
+  输出 "consumer_check: ALL PASSED"；check 安装产物：ls $PREFIX/lib/libcpp-can-parser*
+  && ls $PREFIX/include/cpp-can-parser/*.h（含 cpp_can_parser_export.h）
+
+rec_priority:           1
+rec_approach:           fix-upstream-cmake-include-dir-and-install
+rec_description: >
+  ①target_include_directories 的 PRIVATE 列表追加 ${INCLUDE_DIR}/<subdir>（与内部
+  短名 include 对齐）；测试目标同样补 include 路径或改测试 include 为子目录限定名；
+  ②install(FILES <target>...) 改写为 install(TARGETS <lib> LIBRARY/ARCHIVE DESTINATION
+  lib) + install(FILES include/<subdir>/*.h DESTINATION include/<subdir>) +
+  install(FILES ${BINARY_DIR}/exports/<export>.h DESTINATION include/<subdir>)；
+  ③以补丁形式进配方（refresh-patch --auto），不改动生成文件。
+rec_command:            >
+  # 诊断: cmake --build . 2>&1 | grep "fatal error"; grep -n "install(FILES" CMakeLists.txt
+  # 修复: PRIVATE ${CMAKE_CURRENT_LIST_DIR}/include/<subdir>; install(TARGETS ...) 重写
