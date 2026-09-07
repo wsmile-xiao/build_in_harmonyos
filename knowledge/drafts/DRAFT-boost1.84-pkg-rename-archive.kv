@@ -1,0 +1,67 @@
+draft: DRAFT-boost1.84-pkg-rename-archive
+status: pending-editor-review
+title: "conan 包名复刻归档（同源码双包名并行）五处同步法 + 多会话并行 conan create 脏缓存三连报错修复"
+category: conan, packaging, build-system, multi-session
+match_keywords: >
+  special chars is discouraged, 包名复刻, 双包名, tested_reference_str, cmake_file_name,
+  L0m-4, Folder is already dirty, s.dirty, Directory not empty, Exiting with code: 5,
+  conan remove, boost1.84, 包名含点号, W0 预检
+error_signature: >
+  WARN: Name containing special chars is discouraged|
+  Unable to delete source folder. Will be marked as corrupted for deletion|
+  OSError: [Errno 39] Directory not empty.*\.conan2/p/|
+  AssertionError: Folder .* is already dirty|
+  ERROR: Exiting with code: 5
+root_cause:             场景A（包名复刻）：制品仓已有 boost/1.84.0 时以新包名 boost1.84 归档同源码配方，conan 对含点号包名仅 WARN 不阻断；复刻坑在元数据一致性——conanfile.name/归档目录(L0m-4)/test_package MANIFEST package 字段/docstring/测试输出串五处必须同步，另需 W0 预检新包名未发布（同版本 upload 409, R37）且 W3 必须真实重跑（log_sha256 绑定本次日志）。场景B（并行脏缓存）：多会话并行 conan create 同一大源码包时任一进程中断会在 ~/.conan2/p/<hash>/ 留下脏状态（s.dirty + 半解压源码树），后续 create 三连报错（Unable to delete source folder / Directory not empty / Folder is already dirty 或 exit 5），非配方错误而是缓存中毒，错误信息极易误导为 conanfile 问题。
+rec_approach:           pkg-rename-five-point-sync-and-cache-purge
+rec_description:        场景A 五处包名同步+W0 预检+W3 重跑；场景B conan remove -c 清缓存
+solution: |
+  场景A（五处同步 + 两条预检）：
+  1. 复刻前预检：conan download "新包名/版本" -r=ohpcd --only-recipe 确认 404（未发布）；
+  2. 五处包名同步改：
+     - conanfile.py: name = "boost1.84"（类名同步 Boost184Conan）
+     - 归档目录: archives/b/boost1.84/1.84.0/（L0m-4 与 name 一致）
+     - test_package/MANIFEST.yml: package: boost1.84/1.84.0
+     - conanfile.py docstring / test_package docstring
+     - 测试源文件输出串（std::cout 打印的包名）
+  3. 无需改的两处（易误改）：test_package 的 self.tested_reference_str（自动引用新包名）、
+     CMakeLists 的 find_package(Boost ...)（走 cmake_file_name 属性，与 conan 包名解耦）；
+  4. W3 真实重跑：finish boost1.84 1.84.0 built（生成新 .ci-result.json）。
+
+  场景B（缓存清理，可复制命令）：
+  ```bash
+  conan remove "包名/*" -c        # 清理该包全部缓存（含损坏条目）
+  rm -rf ~/.conan2/p/<hash>/s ~/.conan2/p/<hash>/s.dirty   # 残留兜底
+  # 之后重跑 conan create；源码 tarball 在 download cache，无需重新下载
+  ```
+fallback: >
+  场景A 若包名允许自选（非平台指定），可优先无点命名（如 boost184）消除 special chars
+  WARN；W0 预检发现新包名已被他人发布时，改用版本号后缀策略（X.Y.Z.N，R37）而非新包名。
+  场景B 若 conan remove 卡死（145MB 级副本删除 3-5 分钟），直接 rm -rf ~/.conan2/p/ 下
+  对应 hash 目录 + 该包在 p/ 的散列引用（conan 下次 export 重建）；remove 未完成期间
+  勿再启动新 create（会再撞损坏条目）。
+reuse: >
+  场景A 适用于任何"改名复刻已有归档"的任务（积分赛双包名场景、openssl-X 式版本线拆包、
+  组件包系列共用一个基座包名）；boost1.84 本体与其组件包（boost1.84-date_time/log_setup/
+  url/serialization/contract 等系列）即本模式的实例族——组件包 requires("boost1.84/1.84.0")
+  的引用方式是该方法论的下游组成。场景B 适用于所有多会话并行适配同一生态（共享 conan
+  cache 的设备），与具体软件无关；本次 boost1.84 系列并行适配中实际发生并被修复。
+note: >
+  "拟提升编号：由知识库主编确认" —— 本草稿为未提升草稿，等主编评审后 rename 为 E###.kv
+  并移入 knowledge/graph/ 且追加 index.tsv 行。
+source: >
+  boost1.84 1.84.0 OHOS PC 适配（build_in_harmonyos，archives/b/boost1.84/1.84.0，分支
+  feat/boost1.84-1.84.0）：复刻 boost/1.84.0（已合入 747cbc78ad）为新包名 boost1.84；
+  踩坑实录：并行会话 conan create 中断导致缓存中毒三连报错，conan remove -c 修复后
+  W3 本地 CI 模拟完整通过。
+resolved: true
+verification: >
+  W3 本地 CI 模拟通过（.ci-result.json exit_code=0，integrity_hash=351389224a169a1d）；
+  conan create 全链路：4 静态库编译 + 上游测试 15/16（parsers_test rc=-11 与底稿一致）
+  + test_package 1/1（100% tests passed）；G1/G2/G3 conan-verify PASS（W4 修复后复验）；
+  pr_lint exit 0；W4 audit verdict=pass（P0/P1 清零）。
+related_to:
+  - E068: Boost.Build (b2) SHELL 机制在 OHOS 不兼容——本配方绕过 b2 手动编译的上游原因
+  - E311: no_copy_source/source_folder 隔离语义——与场景B 同为 conan 缓存/源码隔离主题，但 E311 讲 build 期源复制映射，本条讲 cache 中毒清理，互补不重叠
+  - E478: 版本号含点号导致 conan-verify G4 无法提取 package ID——同为"点号"边界，但作用对象（版本号 vs 包名）与后果（验证跳过 vs WARN）不同
+  - E437: conandata URL 用 tarball 名而 conan 包名不同（qtcore5compat）——最近的"包名≠源码名"先例，但它是单包名场景，本条是双包名并行复刻
