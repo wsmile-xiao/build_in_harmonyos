@@ -1,0 +1,37 @@
+id:                     E550
+trigger_tool:           cmake|configure
+phase:                  configuration|linking
+error_signature:        Could NOT find (ZLIB|JPEG|ZSTD|WebP|LERC|JBIG|liblzma|Deflate)|
+                         (zlib|jpeg|zstd|webp|lerc|jbig|lzma|deflate) library not found|
+                         CHECK_INCLUDE_FILE.*zlib\.h.*not found|
+                         CMake Error.*Find(ZLIB|JPEG|ZSTD|WebP|LERC|JBIG|liblzma)|
+                         System is unknown to cmake|
+                         CMAKE_SYSTEM_NAME.*HarmonyOS.*unknown
+severity:               2
+category:               build-system, cmake, portability, ohos, linking
+match_keywords:         多后端图像库, libtiff, codec backends, 交叉编译, conan_toolchain, ohos.toolchain.cmake, FIND_ROOT_PATH_MODE_ONLY, find cache variable, ZLIB_INCLUDE_DIR, JPEG_INCLUDE_DIR, WebP_LIBRARY, LERC_LIBRARY, 裸 cmake, 多编解码后端, 依赖接线, cmake_file_name, TIFF::tiff
+title:                  多编解码后端图像库 OHOS 交叉适配组合方案：裸 cmake + ohos.toolchain + 逐后端 find 缓存变量预设接线
+root_cause:             多后端可选依赖的图像库（libtiff 一类：zlib/libdeflate/jpeg/zstd/webp/lerc/jbig/lzma 八个可选编解码后端）在 OHOS aarch64 交叉编译下有两层障碍：(1) os=OHOS 时 conan CMakeToolchain 把 CMAKE_SYSTEM_NAME 映射成 cmake 不认的值（ML-0035 "System is unknown to cmake"），conan_toolchain 整体不可用；(2) 绕开 conan_toolchain 改用 ohos.toolchain.cmake 后，其交叉链默认 FIND_ROOT_PATH_MODE=ONLY 会忽略命令行传入的 conan 依赖路径，上游自带 FindXxx 模块（FindWebP/FindLERC/FindJBIG/FindZSTD/Findliblzma/FindDeflate + 标准 FindZLIB/FindJPEG）的 find_path/find_library 在 sysroot 内找不到 conan 包 → 后端被静默禁用（option 默认取 *_FOUND）或 configure 直接失败。单后端修一个库路径不够——必须把全部后端一次性接线，且每个 Find 模块的缓存变量名各不相同（ZLIB_INCLUDE_DIR/JPEG_INCLUDE_DIR/WebP_INCLUDE_DIR/LERC_INCLUDE_DIR/JBIG_INCLUDE_DIR/LIBLZMA_INCLUDE_DIR/Deflate_INCLUDE_DIR/ZSTD_INCLUDE_DIR + 各自 LIBRARY 变量）。
+affected_scope:         多可选后端的 C/C++ 库交叉适配（libtiff 系列、libgeotiff、图像/文档格式库等消费多编解码器的库）
+verification_cmd:       conan create . -pr:h ci/conan/profiles/ohos-aarch64 -pr:b ci/conan/profiles/ohos-aarch64 --build=missing 2>&1 | grep -E "(zlib|jpeg|zstd|webp|lerc|jbig|lzma|deflate).*(ON|found|enabled)"; ls build-ohos/lib/ | grep -c "\.so"; nm -D package/lib/libtiff.so | grep -c "ZSTD_compress\|WebPEncode\|lerc_encode"
+rec_priority:           1
+rec_description:        绕开 conan_toolchain 用裸 cmake + 自发现 ohos.toolchain.cmake，并按"后端开关表 + find 缓存变量预设 + 链接期 rpath-link"三件套一次性接线全部后端
+rec_command:            # conanfile.py build() 内：# ① 自发现 toolchain（profile user_toolchain > OHOS_NDK_HOME > glob SDK）# ② 逐后端 -Dzlib=ON -Dlibdeflate=ON -Djpeg=ON -Dzstd=ON -Dwebp=ON -Dlerc=ON -Djbig=ON -Dlzma=ON# ③ 对每个依赖预设 -D{X}_INCLUDE_DIR={pkg}/include -D{X}_LIBRARY={pkg}/lib/lib{Y}.so（已设的 cache 变量 find_* 不再搜索）# ④ os.environ["LDFLAGS"] 注入各依赖 lib/ 的 -L + -Wl,-rpath-link 解传递 NEEDED# ⑤ cmake -B build-ohos -S . <defs> && cmake --build build-ohos
+rec_auto_fix:           false
+rec_impl:               manual
+fallback_priority:      2
+fallback_description:    后端全部关闭（-Dzlib=OFF 等），保核心编译通过——仅当某后端 conan 依赖确实缺失时退用
+fallback_command:        cmake -B build-ohos -S . -Dzlib=OFF -Djpeg=OFF -Dzstd=OFF -Dwebp=OFF -Dlerc=OFF -Djbig=OFF -Dlzma=OFF -Ddeflate=OFF
+fallback_auto_fix:      false
+fallback_impl:           manual
+forbid_1_pattern:       在 os=OHOS 下直接用 conan CMakeToolchain 生成 toolchain 文件
+forbid_1_reason:         CMAKE_SYSTEM_NAME 映射值 cmake 不认识，configure 直接挂（ML-0035）
+forbid_1_consequence:    "System is unknown to cmake" 前置失败，浪费整轮构建
+forbid_2_pattern:       只给部分后端传 -D 路径或依赖 package_folder 不做全后端映射表
+forbid_2_reason:         FIND_ROOT_PATH_MODE=ONLY 会吞掉命令行路径，漏接的后端被静默禁用
+forbid_2_consequence:    构建绿但功能残缺——运行期压缩格式不可用，且 package_info 与实际能力不符
+principles:             P005-isolate-env, P015-verify-each-version, P018-diff-upstream-versions
+causes:                 [conan-toolchain-ohos-system-name, cross-find-root-path-only, per-module-cache-var-names, optional-backend-silent-disable]
+caused_by:              []
+similar_to:             [E447, E300]
+similar_to_notes:       E447=SDL2 vendored Find 桥接（INTERFACE target 变量桥接，单库多 target）；E300=FFTW 自定义 Find 模块桥接（通用机制）；本条=多编解码后端图像库的"开关表+逐后端缓存变量预设+rpath-link"组合方案——同词（find cache variable 桥接）不同题（8 后端组合接线 + 静默禁用风险），非重复
