@@ -1,17 +1,9 @@
 # iniparser
 
-## 简介
+[iniparser](https://github.com/ndevilla/iniparser) 是一个用 ANSI C 编写的独立 INI 文件解析库，提供 ini 文件解析、键值读写、section 遍历等能力，零外部依赖，适合嵌入式与桌面环境。
 
-iniparser 是一个 C 语言编写的 INI 文件解析库，提供简洁的 API 来读取和写入 INI 格式的配置文件。
+## 版本索引
 
-- 官网: https://gitlab.com/iniparser/iniparser/
-- 许可证: MIT
-- 语言: C
-- 构建系统: cmake
-- 无外部依赖
-
-## 已编译版本
-
-| 版本 | 状态 | 编译日期 |
-|------|------|---------|
-| 4.2.6 | published | 2026-05-25 |
+| 版本 | 状态 | 说明 |
+|------|------|------|
+| 4.2.6 | published | 首次适配，CMake 构建，静态库（shared 可选） |
