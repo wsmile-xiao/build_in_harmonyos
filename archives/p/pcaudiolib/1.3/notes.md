@@ -1,71 +1,49 @@
-# pcaudiolib 1.3 编译记录
-
-## 基本信息
-- 软件：pcaudiolib (Portable C Audio Library)
-- 版本：1.3
-- 构建系统：autotools
-- 源码来源：GitHub clone (因网络问题无法下载官方 tarball)
-
-## 编译日期
-2026-05-19
+# pcaudiolib 1.3 适配笔记
 
 ## 编译环境
-- 平台：aarch64-unknown-linux-ohos (HarmonyOS)
-- 编译器：clang 15.0.4 (gcc wrapper)
-- 构建工具：手动 Makefile (autotools config.status 因 HMDFS 临时文件问题失败)
+- **构建系统**: autotools
+- **编译日期**: 2026-09-03
+- **平台**: arm64-ohos（OpenHarmony PC）
+- **状态**: built（Conan 配方验证通过）
+- **补丁数量**: 1
 
-## 编译过程
+## 编译步骤（conan create 全流程）
 
-### 遇到的问题
-
-1. **源码下载问题**
-   - GitHub 官方 tarball 无法下载（SSL 证书和网络问题）
-   - 解决：从 GitHub clone 源码仓库
-
-2. **autotools 初始化问题**
-   - 从 git clone 的源码缺少 configure 脚本
-   - 解决：手动运行 autogen.sh 生成 configure
-   - 需要创建 bash/sed 的软链接修复 libtoolize
-
-3. **平台识别问题**
-   - config.guess 无法识别 HarmonyOS 平台
-   - 解决：使用 patch-autotools-ohos.pl 补丁，并手动修改 config.sub 支持 linux-ohos
-
-4. **HMDFS 临时文件问题**
-   - config.status 在 HMDFS 文件系统上无法创建临时子目录
-   - 解决：手动创建 Makefile 和 config.h，手动编译
-
-### 编译配置
-- 支持的音频后端：OSS (sys/soundcard.h)
-- 不支持：PulseAudio、ALSA（缺少依赖库）
-
-### 手动编译命令
 ```bash
-gcc -Wall -fPIC -I./src/include -I./src -c src/audio.c -o audio.o
-gcc -Wall -fPIC -I./src/include -I./src -c src/oss.c -o oss.o
-gcc -Wall -fPIC -I./src/include -I./src -c src/alsa.c -o alsa.o
-gcc -Wall -fPIC -I./src/include -I./src -c src/pulseaudio.c -o pulseaudio.o
-gcc -Wall -fPIC -I./src/include -I./src -c src/qsa.c -o qsa.o
-gcc -shared -o libpcaudio.so audio.o oss.o alsa.o pulseaudio.o qsa.o
-ar rcs libpcaudio.a audio.o oss.o alsa.o pulseaudio.o qsa.o
+conan create archives/p/pcaudiolib/1.3 --build=missing -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
 ```
 
-## 编译产物
-- libpcaudio.so (22848 bytes)
-- libpcaudio.a (10240 bytes)
-- audio.h (头文件)
+### 1. 源码获取（source()）
+`get()` 从 conandata 声明的 GitHub gh-proxy tarball 下载（1.3 release）。
 
-## 测试
-- 无测试套件（make check 不适用）
+### 2. 依赖注入（generate()）
+- 无硬依赖（PulseAudio/ALSA/OSS/Cygwin 为可选 --with-* 后端）
+- autotools configure 传 `--host=aarch64-unknown-linux-ohos` + 关闭音频后端
 
-## 安装位置
-- 库文件：$DEFAULT_PREFIX/lib/
-- 头文件：$DEFAULT_PREFIX/include/pcaudiolib/
----
+### 3. 构建（build()）
+- 0001-config-ohos.patch：config.guess/config.sub 加 HarmonyOS 分支
+  （aarch64-unknown-linux-ohos），否则交叉编译报 unable to guess system type
+  （沿用 main 已收录版本）
+- E114：config.status/configure 的 umask 077 临时目录 HMDFS 拒绝 → 改写
+  umask 022（与 asterisk/speech-dispatcher 同款）
+- ac_cv_func_malloc_0_nonnull=yes / ac_cv_func_realloc_0_nonnull=yes
+  （交叉编译 rpl_malloc 误判）
+- autotools configure + make
 
-**编译结束**: 2026-05-19 13:07
-**最终状态**: built
----
+### 4. 打包（package()）
+- autotools install；产物：libpcaudiolib.so（便携 C 音频库）+ 头文件
 
-**编译结束**: 2026-05-19 14:49
-**最终状态**: built
+## 依赖
+- 无硬依赖（PulseAudio/ALSA/OSS/Cygwin 可选后端，OHOS 无音频设备关闭）
+
+## 上游测试（rule 4）
+- pcaudiolib 无独立测试套件（configure.ac 无 check_PROGRAMS/TESTS、顶层无
+  test/ 目录）——按 rule 1.2 如实声明（非跳过）；make check 尝试执行并
+  记录结果
+- 本地验证：conan create 通过，pcaudiolib 库与头文件编译链接成功
+- 适配后：test_package R34 真实产物校验——libpcaudiolib.so 存在 + ELF
+  shared object，1/1 = 100%
+
+## 已知限制
+- espeak-ng 的便携 C 音频库——OHOS 无音频设备，跨平台音频后端
+  （PulseAudio/ALSA/OSS）关闭；API 可编译打包
