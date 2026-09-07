@@ -1,0 +1,28 @@
+# ═══ Draft knowledge entry — conan Autotools.make 的 args 经 sh -c 拼接执行，单引号被剥离、$VAR 在子 shell 被展开（Makefile.global 改写规避） ═══
+# Timestamp: 2026-09-03
+# Software: postgresql 18.3 (feat/postgresql-18.3)
+# Gate: W3 L2 smoke / RUNPATH 验证
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-postgresql-18.3-make-args-shell-quote.md
+# 适用条件/反例/验证/限制/恢复条件见配对 .md；本 .kv 与 .md 字段相互对应
+
+id: DRAFT-postgresql-18.3-make-args-shell-quote
+severity: 2
+category: conan|autotools|rpath|shell-quoting
+trigger_tool: conan|make|clang
+phase: build
+error_signature: RUNPATH.*\[\$?\{?ORIGIN.*empty|RUNPATH.*\[/lib:/../lib\]|rpath.*\$ORIGIN.*expanded|LDFLAGS_EX.*ORIGIN|Library runpath: \[//lib[^]]*\]
+match_keywords: $ORIGIN, RUNPATH, rpath, LDFLAGS_EX, Autotools.make, args, 单引号剥离, shell 展开, sh -c, Makefile.global, replace_in_file, make 命令行变量, DESTDIR, LD_LIBRARY_PATH, libpq 加载失败
+
+title: conan Autotools.make(args=[...]) 传含引号/$VAR 的 make 变量会被 sh -c 剥引号并在子 shell 展开；需要字面量（如 $ORIGIN rpath）时应 configure 后直接改写 Makefile
+
+root_cause: conan 的 Autotools.make() 把 args 纯拼接进命令行，经 self.run()（shell=True / sh -c）执行。含单引号的参数（如 LDFLAGS_EX=-Wl,-rpath,'$$ORIGIN/../lib'）中，单引号被外层 shell 按词法剥离，$$ 经 make 转义为 $ 后在 recipe 子 shell 里无引号保护，$ORIGIN 作为未定义 shell 变量被展开为空串，链接器最终收到 /../lib 这类无效 rpath（readelf 显示 RUNPATH=[//lib:/../lib]）。结论：跨 conan→sh→make→recipe-shell→linker 四层传递时，凡需要"字面量进入最终产物"的 token（$ORIGIN、含空格/引号的 flag），都不能经 make 命令行变量传；应改为 configure 之后用 replace_in_file 直接改写 build 树的 Makefile 全局文件（Makefile.global 等），纯文本替换不经 shell 解析链，make 展开 $$→$、配方 shell 单引号保留字面量，链接器正确记录 $ORIGIN。
+
+affected_scope: 所有需要向 make 传递含 $、引号、空格等特殊字符变量的 conan autotools 配方；所有需要 $ORIGIN 相对 rpath 的可重定位打包场景（DESTDIR 安装使 configure 期绝对 prefix rpath 失效）；PostgreSQL（LDFLAGS_EX 无 configure 入口）及其他 Makefile 层变量。
+
+verification_cmd: 1) readelf -d <bin> | grep -i runpath 确认 $ORIGIN 字面保留；2) 把二进制+so 复制到任意 bin/lib 结构，清空 LD_LIBRARY_PATH 后运行成功；3) W3 L2 smoke 全绿（此前 21/35 失败）；4) grep '^LDFLAGS_EX' <build>/src/Makefile.global 确认改写生效
+
+rec_priority: 1
+rec_approach: rewrite-makefile-global-after-configure
+rec_command: ①configure 后用 conan.tools.files.replace_in_file 把 build 树 src/Makefile.global 的 "LDFLAGS_EX = \n" 替换为 "LDFLAGS_EX = -Wl,-rpath,'$$ORIGIN/../lib'\n"；②make 只传普通参数 autotools.make(args=["-j8"])；③（对比）不要用 args 传 LDFLAGS_EX=...——实测 $ORIGIN 被展开为空
+
+forbid_1: 通过 Autotools.make(args=[...]) 传递含单引号或 $VAR 的 make 变量并期待字面量进入链接产物；用 LD_LIBRARY_PATH 包装掩盖 rpath 缺失（下游无 conanrun 时依然坏）
