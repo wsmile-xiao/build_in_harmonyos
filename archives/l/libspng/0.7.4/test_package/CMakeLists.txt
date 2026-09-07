@@ -1,0 +1,15 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libspng C)
+
+find_package(spng REQUIRED)
+add_executable(test_libspng test.c)
+target_link_libraries(test_libspng PRIVATE spng::spng)
+
+enable_testing()
+add_test(NAME rgba8     COMMAND test_libspng rgba8)
+add_test(NAME gray8     COMMAND test_libspng gray8)
+add_test(NAME rgb       COMMAND test_libspng rgb)
+add_test(NAME palette   COMMAND test_libspng palette)
+add_test(NAME corrupt   COMMAND test_libspng corrupt)
+add_test(NAME truncated COMMAND test_libspng truncated)
+add_test(NAME api       COMMAND test_libspng api)
