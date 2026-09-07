@@ -1,0 +1,54 @@
+id: draft-multi-compression-backend-cmake-cross-wiring
+title: "CMake 多压缩/多后端库在 OHOS 交叉环境的依赖接线统一模式（预设 Find 缓存变量法）"
+category: cmake, cross-compilation, dependencies, ohos, toolchain
+severity: 3
+
+error_signature: CMake Error.*Could NOT find (ZLIB|BZip2|LibLZMA|ZSTD|JPEG|TIFF)( \(missing:.*)?\?
+
+match_keywords: Could NOT find ZLIB, Could NOT find ZSTD, FIND_ROOT_PATH_MODE, ONLY, find_package failed, 交叉编译 依赖找不到, CMAKE_FIND_ROOT_PATH, conan 依赖 CMake 不识别, package not found cross compile, find_path find_library cross
+
+root_cause: |
+  OHOS conan 工具链（ohos.toolchain.cmake）将 CMAKE_FIND_ROOT_PATH_MODE_* 设为 ONLY，
+  使所有 find_path/find_library 只在 NDK sysroot 内搜索，宿主与 conan 包的安装路径全部被过滤。
+  多后端库（libarchive/libtiff 这类带 zlib/bzip2/xz/zstd/jpeg 可选后端的）往往用自带 FindXxx
+  模块或标准 Find 模块，CONFIG 模式不可用时交叉环境必然报 "Could NOT find"。
+  两个失败变体同根因：(V1) 标准 FindZLIB 等：交叉模式 ONLY 下搜索不到 conan 依赖路径；
+  (V2) 自带 Find 模块（libtiff 的 FindZSTD 等）：同因，且常无 pkg-config 回退。
+
+verification_cmd: grep -E "FIND_ROOT_PATH_MODE" ~/build_in_harmonyos/ci/conan/profiles/ohos-aarch64  # 确认 ONLY 模式；交叉构建日志中出现 "Could NOT find" 即命中
+
+affected_scope: 所有在 OHOS 交叉环境用 CMake 且依赖多后端/多压缩库的项目（libarchive、libtiff、gdal、openexr、vips 等家族），以及任何 find_package 在交叉链下找不到 conan 依赖的场景
+
+rec_priority: 1
+rec_approach: |
+  在 conanfile.py 的 generate()/build() 中，为每个依赖**直接预设其 Find 模块的缓存变量**
+  （<PKG>_INCLUDE_DIR + <PKG>_LIBRARY，指向 conan 依赖的实际路径与 lib 文件），
+  绕过 find_path/find_library 搜索——CMake 对已设的 cache 变量不再搜索。
+  实现要点：
+  1. 用 self.dependencies["zlib"].cpp_info.aggregated_components().includedirs/libdirs 拿路径
+  2. lib 文件候选优先 .so 回退 .a（用 glob 探测，生成绝对路径）
+  3. 通过 CMakeDeps 的 cmake_prefix_path 之外，将变量经 cmake.configure(variables=...) 传入
+  4. 标准模块（ZLIB/BZip2/LibLZMA/ZSTD/JPEG）与自带模块（Deflate/ZSTD-tiff 变体）同法处理
+
+rec_command: |
+  # 配方内核心模式（libarchive 3.7.7 / libtiff 4.7.2 双验证）：
+  # _wire = [(dep, INC_VAR, [LIB_VARS], [lib_candidates])]
+  # for dep, inc_var, lib_vars, cands in _wire:
+  #     inc = next(iter(info.includedirs), "")
+  #     lib = first_existing(info.libdirs, cands)
+  #     defs[f"-D{inc_var}={inc}"]; defs[f"-D{lib_vars[0]}={lib}"]
+
+fallback_priority: 2
+fallback_approach: |
+  备选（各有坑，不作首选）：
+  F1: CMAKE_FIND_ROOT_PATH_MODE_BOTH + CMAKE_FIND_ROOT_PATH 追加 conan 路径——破坏 ONLY 隔离，
+      曾引入宿主 sysroot 污染（find 到宿主库导致链接错架构）
+  F2: 依赖方提供 CMake CONFIG（CMakeDeps 生成）——要求上游 find_package(... CONFIG) 支持，
+      老库（libarchive 3.7.7/libtiff）不满足
+  F3: pkg-config——上游模块不带 .pc 时不可用
+
+evidence_refs: |
+  PR libarchive #8329（2026-09-05）：四后端 zlib/bzip2/xz/zstd 全部预设缓存变量接线，
+  CI #40012 绿；上游 783/800 测试（17 失败为 hmfs 平台限制）。
+  归档 libtiff 4.7.2（main 已合入）：同法接线 zlib/libdeflate/libjpeg-turbo/zstd 四依赖，
+  注释详尽（"交叉链 FIND_ROOT_PATH_MODE=ONLY 覆盖命令行 → 直接预设各模块的 find 缓存变量"）。
