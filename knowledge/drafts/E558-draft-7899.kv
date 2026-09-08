@@ -1,0 +1,159 @@
+#====================================================================
+# E558 draft — 每核硬件周期计数器在跨核调度下的单调性验证方法
+# 来源事件: libcpucycles 20260625 OHOS aarch64 适配（backend=arm64-pmc,
+#           读 per-core PMCCNTR_EL0；test_package 首测负跳变后修正断言）
+# 对应文档: E558-draft-7899.md（草稿阶段，正式后为 doc/E558.md）
+# 查重说明: 全库查重（graph + doc + operations + error-patterns + drafts,
+#           含 upstream/main 专项关键词搜索）无同主题条目；最近邻 E270
+#           （CLOCK_SGI_CYCLE 运行时 EINVAL）为不同失效模式。
+#           原编号 E479 已被 upstream knowledge/drafts/E479-draft-5CC4.kv
+#           （HMDFS chmod 权限语义）占用，E549/E557 亦已被其他分支草稿
+#           占用（E549-draft-2301_80739235、E549-draft-BEBE、E557-draft-1742），
+#           故按规范以新编号 E558 由官方工具 graph add --draft 重建草稿。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E558
+trigger_tool:           test|runtime
+phase:                  testing
+error_signature:        \[FAIL\] persecond-consistency: dc=-[0-9]+ over ~50ms|\[FAIL\] tracesetup-noop-after-init: read after tracesetup\(\) still valid|dc=-[0-9]{6,}|cycles? went backwards|counter went backwards|cycle counter decreased|non-monotonic|test libcpucycles API: FAIL
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform, ohos, portability, runtime, testing
+match_keywords:         PMCCNTR_EL0, arm64-pmc, persecond-consistency, tracesetup, cpucycles, nanosleep, core swap, 迁核, 每核计数器, per-core counter, cycle counter, RDTSC, RDTSCP, monotonic, non-decreasing, 紧循环, OHOS
+title:                  每核硬件周期计数器在跨核调度下的单调性验证方法
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             硬件周期计数器（ARM PMCCNTR_EL0、x86 RDTSC/RDTSCP、
+                        RDPMC/perf counter）是每核资源：各 CPU 核心独立维护、
+                        计数起点/偏移互不相同。测试线程在 sleep/nanosleep、I/O、
+                        锁等待等调度点让出 CPU 后可能被迁移到其他核心，新核计数器
+                        的绝对值与旧核不可比较，跨调度点直接比较绝对周期值会出现
+                        巨大负跳变（libcpucycles 20260625 实测睡后 7.4e13 < 睡前
+                        1.4e14，约为睡前值的 51%）。若 API 只承诺 "an estimate
+                        since an unspecified epoch"（libcpucycles man page），
+                        则不保证跨核、跨调度点的全局单调；上游 wrapper.c 选择循环
+                        自身也注释 "!ok can be caused by overflow or by core swap"。
+                        因此这类失败是测试断言超出 API 契约（测试契约错误），
+                        不应直接判定为库实现缺陷。
+affected_scope:         读取每核硬件周期计数器并在多核调度环境下比较读数的代码：
+                        ARM PMCCNTR_EL0（MRS 指令读取）、x86 RDTSC/RDTSCP、
+                        RDPMC/perf counter 后端；CPU cycle counter 库（libcpucycles
+                        及同类）、profiler、benchmark timer，以及多核调度环境中
+                        做高精度计时的消费者测试（test_package/test.c 类断言）。
+verification_cmd:       CI_PACKAGES="archives/l/libcpucycles/20260625" CONAN_PROFILE="ohos-aarch64-local" zsh ci/conan/build_and_test.sh;
+                        grep -n "core swap\|7.4e13\|unspecified time in the past" archives/l/libcpucycles/20260625/notes.md;
+                        git show 44c7711bbf -- archives/l/libcpucycles/20260625/test_package/test.c
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           per-core-counter-migration-aware-validation
+rec_description:        迁移感知的单调性验证算法：1) 确认当前 backend 是每核计数器
+                        还是系统级单调时钟；2) 核对 API 是否承诺跨核全局单调
+                        （只承诺 unspecified epoch 则不承诺）；3) 识别两次读取之间
+                        有无 sleep/I/O/锁等待等调度点；4) 对每核计数器只在无阻塞
+                        紧循环内验证相邻读取局部非递减，判据与上游 backend
+                        selection/acceptance 标准一致（如 libcpucycles 选择循环
+                        的 1000 次读取非递减）；5) 必须跨调度点比较时优先固定
+                        CPU affinity；6) 无 affinity API 时读取 CPU ID 只比较同核
+                        样本；7) 无法确认核心身份时改用 CLOCK_MONOTONIC 等系统级
+                        时间源；8) 对真正同核、紧邻读取中的回退保持 fail-closed；
+                        9) 输出 backend、前后读数、差值、CPU ID、调度点与测试
+                        范围供诊断。
+rec_command:            CI_PACKAGES="${PKG_DIR}" CONAN_PROFILE="${PROFILE}" zsh ci/conan/build_and_test.sh  # 预期: test_package 10/10 PASS, exit=0
+rec_auto_fix:           false
+rec_impl:               none
+
+fallback_priority:      2
+fallback_approach:      pin-affinity-or-monotonic-clock
+fallback_description:   推荐方案不可用时按环境能力降级：1) 用 sched_setaffinity/
+                        pthread_setaffinity_np 把线程固定到单核后再跨调度点比较
+                        （OHOS/musl 上这些 API 的可用性见 E094/E147/E211，绑核
+                        结果须回读验证）；2) 无 affinity API 时读取 CPU ID
+                        （sched_getcpu）并只比较同核样本；3) 改用 CLOCK_MONOTONIC
+                        等系统级单调时间源承担跨调度点计时；4) 仍无法满足契约时
+                        对明确不适用的 backend 显式 Skip 并说明能力边界。Skip
+                        只能用于明确不适用的 backend，不能用于掩盖真实失败。
+fallback_command:       taskset -c 0 ${TEST_BIN}  # OHOS 无 taskset 时: 读 sched_getcpu() 只比较同核样本, 或改用 clock_gettime(CLOCK_MONOTONIC)
+fallback_auto_fix:      false
+fallback_impl:          none
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       within 100x|within 1000x|expected \* 100\b|expected \* 1000\b
+forbid_1_reason:        巨大负跳变（dc 约 -7e13）是迁核后新核计数器起点不同所致的
+                        系统性偏移，不是测量噪声；扩大数值容差只会把负值吞进 PASS 区间
+forbid_1_consequence:   断言失去检出能力，未来真正的计数器故障（溢出、后端错乱、
+                        寄存器配置错误）也不会被发现
+
+forbid_2_pattern:       删除全部.*单调|删除所有.*单调|删除.*全部单调性测试|remove all monotonic|delete all monotonic
+forbid_2_reason:        紧循环内相邻读取非递减是每核计数器真实提供、且上游选择循环
+                        自检的保证；正确做法是把断言收窄到紧循环，不是整体删除
+forbid_2_consequence:   测试失去对计数器基本正确性的防线，default-zero 等退化后端
+                        也可能通过
+
+forbid_3_pattern:       same counter.*all cores|counter synchronized across cores|counters are synchronized|所有核.*计数器.*同步|所有核心.*计数器.*同步|assume globally monotonic
+forbid_3_reason:        PMCCNTR_EL0 按 core 独立维护；x86 TSC 的跨核同步也只是
+                        厂商实现保证而非体系结构保证（constant_tsc/nonstop_tsc
+                        需单独探测），不能假设所有硬件周期计数器跨核同步
+forbid_3_consequence:   测试在允许迁核的系统上随机失败（flaky），或迫使维护者
+                        用放宽断言来"稳定"它
+
+forbid_4_pattern:       t0\s*=\s*cpucycles\(\);[\s\S]{0,200}nanosleep|CHECK\(after\s*>=\s*maxv|cpucycles\(\);[\s\S]{0,200}nanosleep\([\s\S]{0,200}cpucycles\(\);[\s\S]{0,200}>=
+forbid_4_reason:        sleep/I/O/锁等待期间线程可能迁核，前后绝对读数来自不同核心
+                        的计数器，不可直接比较（libcpucycles 实测 7.4e13 < 1.4e14）
+forbid_4_consequence:   断言把 API 未承诺的行为当契约检查，产生无法通过修库解决的
+                        伪失败
+
+forbid_5_pattern:       所有.*回退.*调度|所有.*回退.*迁核|归因于调度|归因于迁核|blame.*schedul|all backwards.*scheduler
+forbid_5_reason:        回退也可能来自计数器溢出、PMU 权限错误、后端初始化失败或
+                        库 bug；必须先输出 CPU ID/前后读数证明发生了迁核
+forbid_5_consequence:   真实的计数器/后端缺陷被误标为"调度噪声"而不修，fail-closed
+                        边界失效
+
+forbid_6_pattern:       XFAIL.*monotonic|xfail.*monotonic|skip.*counter-monotonic|EXPECT.*FAIL.*cycle
+forbid_6_reason:        紧循环相邻读取非递减是唯一可依赖的硬保证（上游选择循环
+                        自用它接受后端）；同核紧循环内的真实回退说明计数器或库实现有问题
+forbid_6_consequence:   把真实缺陷标记为预期失败，库的计数正确性再无测试防线
+
+forbid_7_pattern:       #define sched_setaffinity|#define sched_getaffinity|#define pthread_setaffinity_np|-Dpthread_setaffinity_np|affinity.*stub
+forbid_7_reason:        宏替换或空 stub 不会真正固定线程（musl 缺 affinity API，
+                        见 E094/E147/E211），绑核是否成功必须用 sched_getcpu/
+                        sched_getaffinity 回读验证，不能以"API 不可用"伪造绑核成功
+forbid_7_consequence:   未生效的"绑核"给出虚假的同核保证，迁核回退依旧发生且更难定位
+
+forbid_8_pattern:       CLOCK_MONOTONIC.*等价.*cycle|CLOCK_MONOTONIC.*equivalent.*cycle|cycle.*equivalent.*CLOCK_MONOTONIC|CLOCK_MONOTONIC.*same as.*cycle|把.*CLOCK_MONOTONIC.*当作.*cycle
+forbid_8_reason:        CLOCK_MONOTONIC 是系统级单调时钟（跨核全局单调、纳秒量纲），
+                        每核 cycle counter 是硬件周期计数（核心局部、周期量纲）；
+                        量纲、单调域、精度都不同，不能混为一类
+forbid_8_consequence:   断言语义错位：要么把系统级保证错误安到每核计数器上（伪失败），
+                        要么把周期数当时间比较（数量级错误）
+
+# ═══ Layer 4: 原则引用 (Principles) ═══
+principles:             P013, P007
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E270]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 (Metadata) ═══
+doc_file:               doc/E558.md
+last_updated:           2026-09-05
+source_event:           libcpucycles 20260625 适配
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                C5AD <3220476062@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft:                  true
+contributor_id:         7899
