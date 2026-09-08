@@ -1,0 +1,59 @@
+#====================================================================
+# Draft: OHOS musl long double 数学函数族为 double 精度别名
+# 适配实例: boost1.84-math/1.84.0 (PR !8441)
+# 验证: nm -D 实证 coshl/cosh 同地址 0x11d80；test_tr1.c TEST_LD 95 断言
+#       误差量级全部 ~1e-16（double 特征）vs 容差 ~1e-30（quad）
+#====================================================================
+
+draft:                 E999-ohos-musl-long-double-double-alias
+status:                pending-editor-review
+id:                    E999
+trigger_tool:          clang|test|runtime
+phase:                 testing
+error_signature:       check_close_l.*rc=-?[0-9]+|long double.*tolerance|LDBL_EPSILON.*fail|test_valuesl.*FAIL|with error [0-9.]+e-1[0-9].*max allowed [0-9.]+e-3[0-9]
+
+severity:              2
+category:              platform, libc, musl, limitation, compat
+match_keywords:        long double, LDBL_MANT_DIG, coshl, powl, sinhl, expl, quad precision, TEST_LD, boost math, tr1l, c99l, double alias, long double 精度
+title:                 OHOS musl 的 long double 数学函数族是 double 精度别名，quad 容差断言物理不可达
+
+root_cause:            OHOS musl libc 导出的 *l 后缀数学函数（coshl/powl/sinhl/expl/logl/atanhl 等）与对应 double 版本是同一地址的别名 stub（nm -D 验证 coshl 与 cosh 同为 0x11d80），只返回 double 精度；而 aarch64 clang 的 long double 类型是 IEEE quad（LDBL_MANT_DIG=113，LDBL_EPSILON=1.93e-34）。任何以 long double 精度容差（LDBL_EPSILON×N）校验 libc 数学函数返回值的测试都会失败——误差固定在 ~1e-16（double 精度特征），非适配缺陷而是平台实现限制。
+affected_scope:        所有调用 libc *l 函数族并做 quad 精度断言的库测试（boost.math TEST_LD 模式、numpy/scipy/gsl/mpfr 类数值库的 long double 测试段）
+error_excerpt:         Error at line 740, with error 3.330669e-16 (max allowed 9.629650e-33)
+rec_approach:          ① 诊断确认：打印 sizeof(long double)=16、LDBL_MANT_DIG=113（编译器侧是 quad）；nm -D $OHOS_SDK/sysroot/.../libc.so 对比 cosh/coshl 地址（libc 侧是别名）→ 两者不一致即为命中。② 处置：库照常编译交付（符号/ABI 完整，double/float 精度范围可用）；长双精度测试失败项如实记录为平台限制（notes.md + PR 豁免说明），不视为适配缺陷。③ 下游指引：需要真 quad 精度时绕开 libc *l 函数族，改用模板 header-only 实现直接实例化 long double（如 boost::math::special_functions，内部软件实现不经 libc）。④ 免重蹈：新库适配时若上游有 long double 测试段，提前用本方法判定并写好豁免说明。
+
+solution:              |
+  # 判定（两步，编译器侧 vs libc 侧对照）
+  # 1. 编译器侧：确认 long double 是 quad
+  printf '#include <float.h>\n#include <stdio.h>\nint main(){printf("%%d %%Le\\n",LDBL_MANT_DIG,LDBL_EPSILON);}' > /tmp/l.c && clang /tmp/l.c -o /tmp/l && /tmp/l
+  # 期望输出: 113 1.925930e-34 → 编译器按 IEEE quad 处理
+  # 2. libc 侧：对比 *l 函数与 double 版本符号地址
+  nm -D $OHOS_SDK/sysroot/usr/lib/aarch64-linux-ohos/libc.so | grep -wE "cosh|coshl|powl|pow"
+  # 期望输出: cosh 与 coshl 同一地址（如均 0000000000011d80 T）→ libc 是 double 别名 stub
+  # 两步同时成立 = 命中本模式：quad 容差断言（LDBL_EPSILON×N ≈ 1e-30）对 libc 返回值物理不可达
+  #
+  # 处置（boost1.84-math 实操，PR !8441）：
+  # - 库照常编译交付：libboost_math_{tr1l,c99l}.a 符号/ABI 完整（long double 入口存在，
+  #   精度等同 double——libc 精度范围内结果正确）
+  # - 失败断言豁免：notes.md 问题 4 记录根因 + PR 正文逐项误差量级证据
+  #   （95 项失败误差全部 ~1e-16 = double 特征，与 nm 证据互相印证）
+  # - 测试统计口径：普通模式 float+double 538/538 = 100%（真实通过率）
+  # - 下游指引写入 README/notes：需真 quad 精度改用 header-only 模板接口直接实例化
+
+fallback:              |
+  # 若库的功能正确性依赖真 quad 精度（不容降级）：
+  # a) 绕开 libc *l 函数族：改用库的模板 header-only 实现直接实例化 long double
+  #    （boost::math::special_functions 内部软件浮点，不经 libc）
+  # b) 上游测试无法豁免时（比赛硬性要求逐项全绿）：只跑 float/double 段并
+  #    显式跳过 *l 段（记录 skip 原因），不做假通过
+  # c) 检查 libc 是否有新增真实现（OHOS SDK 版本演进后重新 nm 验证一次即可判定）
+
+verify_builds:         #40551, #40565（CI 全绿：6 库构建 + test_package 10 断言；TEST_LD 95 项失败为平台限制，PR 正文豁免说明）
+verify_cmd:            nm -D /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot/usr/lib/aarch64-linux-ohos/libc.so | grep -wE "cosh|coshl|powl|pow" ; printf '#include <float.h>\n#include <stdio.h>\nint main(){printf("%%d %%Le\\n",LDBL_MANT_DIG,LDBL_EPSILON);}' > /tmp/l.c && clang /tmp/l.c -o /tmp/l && /tmp/l
+reference_impl:        archives/b/boost1.84-math/1.84.0/notes.md（问题 4 完整根因分析 + 95 项失败逐项归因）；conanfile.py _run_upstream_tests（TEST_LD 模式报告行）
+solution_ref:          boost1.84-math/1.84.0/notes.md 问题 4；PR #8441 验证结果豁免说明
+related_docs:          knowledge/operations/ohos-adaptation-patterns.md
+doc_file:              doc/E999.md
+pr_ref:                8441
+contributor_id:        j669539
+last_updated:          2026-09-05
