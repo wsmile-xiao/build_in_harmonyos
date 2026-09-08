@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_concurrentqueue CXX)
+
+find_package(concurrentqueue REQUIRED)
+
+add_executable(test_concurrentqueue test_concurrentqueue.cpp)
+target_link_libraries(test_concurrentqueue PRIVATE concurrentqueue::concurrentqueue)
+set_target_properties(test_concurrentqueue PROPERTIES CXX_STANDARD 17)
