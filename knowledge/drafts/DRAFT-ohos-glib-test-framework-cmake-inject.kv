@@ -1,0 +1,86 @@
+# ═══ Draft knowledge entry — GLib 测试框架在 conan PkgConfigDeps 下的 CMake 变量注入 ═══
+# Timestamp: 2026-09-05
+# Software: libayatana-common 0.9.11
+# Gate: PR #7915 / CI build（conan create 失败链：gschemas Error126 → gtest.h not found → undefined symbol → package_info gmock）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+#
+# 姊妹条目：DRAFT-ohos-intltool-toolchain-stub（dbustest，intltool 工具链 stub）——
+# 同属 GLib 测试框架适配链（intltool 检查 → gschemas 生成器 → gtest/gmock 注入），
+# 问题层不同、互补。
+
+id:                     DRAFT-ohos-glib-test-framework-cmake-inject
+trigger_tool:           cmake|pkg-config|linker|conan|tests
+phase:                  configure|build|link
+error_signature:        gschemas\.compiled.*Error 126|
+                         cannot find the library '//bin/glib-compile-schemas'|
+                         gtest/gtest\.h.*file not found|
+                         undefined symbol.*MakeAndRegisterTestInfo|
+                         direct dependency 'gmock' is not used by any.*cpp_info\.requires|
+                         GSettings.*compile.*schemas
+
+severity:               2
+category:               cmake|pkg-config|tests|conan|ohos|portability
+match_keywords:         COMPILE_SCHEMA_EXECUTABLE, glib-compile-schemas, gschemas.compiled,
+                         GSettings schema compile, GTEST_INCLUDE_DIR, find_package(GMock),
+                         GTEST_LIBRARIES empty, test_requires, ENABLE_TESTS,
+                         DEPS_INCLUDE_DIRS, CMakeDeps component target
+title:                  GLib 测试框架（gschemas.compiled 生成器 + gtest/gmock）在 conan PkgConfigDeps 下的 CMake 变量注入——COMPILE_SCHEMA_EXECUTABLE/GTEST_INCLUDE_DIR/GTEST_LIBRARIES 绝对路径注入 + gtest/gmock 改 test_requires
+
+root_cause: >
+  GLib 系库开启测试（ENABLE_TESTS=ON）时，tests/CMakeLists.txt 通常含两类
+  依赖：
+  (1) gschemas.compiled 目标：用 `pkg-config gio-2.0 --variable
+      glib_compile_schemas` 查 glib-compile-schemas 工具路径（编译 GSettings
+      schema）。OHOS conan 环境下该查询不可靠：build() 注入的 PKG_CONFIG_PATH
+      指向 glib 原始 .pc（prefix=/ 未改写 → 返回 //bin/glib-compile-schemas
+      错误路径），而 generators_folder 的 .pc 由 PkgConfigDeps 生成（不含
+      glib_compile_schemas 自定义变量 → 返回空）——CMake 命令退化为 `./.`
+      报 Error 126（cannot execute）。
+  (2) gtest/gmock：tests/CMakeLists.txt 用 find_package(GMock) + 变量
+      ${GTEST_LIBRARIES}/${GTEST_BOTH_LIBRARIES}/${GMOCK_LIBRARIES}，但 conan
+      PkgConfigDeps 下 find_package(GMock) 不设置这些变量（返回空）→
+      编译报 gtest/gtest.h not found（include 缺路径）、链接报 undefined
+      symbol: testing::internal::MakeAndRegisterTestInfo（库缺路径）。
+  (3) gtest/gmock 若声明在 requirements() 而库本身不引用它们（仅测试编译
+      用），conan 报 package_info(): direct dependency 'gmock' is not used
+      by any (cpp_info/components).requires。
+
+affected_scope:         GLib 系库（ENABLE_TESTS=ON + GSettings schema + gtest/gmock
+                        测试）在 conan PkgConfigDeps 环境（如 libayatana-common、
+                        其他 ayatana/gnome 组件）的适配
+
+solution: >
+  三组 CMake 变量由 conanfile.py generate() 注入绝对路径（tests/CMakeLists.txt
+  补丁优先使用已注入变量，仅当未注入时才回退 pkg-config/ find_package 查询）：
+  1. COMPILE_SCHEMA_EXECUTABLE：注入 glib 包 bin/glib-compile-schemas 绝对
+     路径（self.dependencies["glib"].package_folder）。同时补丁
+     tests/CMakeLists.txt 把 execute_process 包在 if(NOT DEFINED ...) 内，
+     仅当变量未注入时才执行 pkg-config 查询。
+  2. GTEST_INCLUDE_DIR/GMOCK_INCLUDE_DIR（include 目录绝对路径）+
+     GTEST_LIBRARIES/GTEST_BOTH_LIBRARIES/GMOCK_LIBRARIES（.a 绝对路径）：
+     find_package(GMock) 在 PkgConfigDeps 下不设这些变量，故直接注入。
+     补丁 target_include_directories 加 ${GTEST_INCLUDE_DIR}
+     ${GMOCK_INCLUDE_DIR}，target_link_libraries 加这些变量。
+  3. gtest/gmock 从 requirements() 移到 build_requirements() 的
+     test_requires()：仅测试编译运行用，非库运行时依赖——否则 package_info()
+     报 "direct dependency 'gmock' is not used by any cpp_info.requires"。
+  4. DEPS_INCLUDE_DIRS/DEPS_LIBRARY_DIRS 由 pkg_check_modules 提供（含 glib
+     头/库路径），tst_utils 链接需 target_link_directories(${DEPS_LIBRARY_DIRS})
+     否则 ld 找不到 -lglib-2.0 等。
+
+verification: >
+  libayatana-common 0.9.11：conan-verify 全门禁 PASS（G0-G5/L2/L4/L5），
+  gtest 实测 9/9=100%（tst_utils.cpp 手动编译运行 + SCHEMA_DIR 重编译）；
+  gschemas.compiled 正常生成、gtest 编译链接成功、package_info 无 gmock
+  依赖声明报错。
+
+related:                DRAFT-ohos-intltool-toolchain-stub (GLib 测试框架适配链，
+                        intltool 检查层)、
+                        E499 (conan shared-package 传递运行时 libdirs)、
+                        DRAFT-conan-shared-pkgconfig-requires-drop
