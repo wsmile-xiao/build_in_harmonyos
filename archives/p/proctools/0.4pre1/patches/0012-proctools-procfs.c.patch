@@ -1,0 +1,305 @@
+--- /dev/null
++++ b/proctools/procfs.c
+@@ -0,0 +1,302 @@
++/**
++ * procfs.c -- /proc-based process backend for proctools on Linux/OHOS.
++ *
++ * OpenBSD enumerates processes via kvm_getprocs()/sysctl(KERN_PROC) and
++ * reads per-process argv via kvm_getargv()/sysctl(KERN_PROCARGS2).  None
++ * of these exist on Linux.  This file provides the equivalent data by
++ * reading /proc:
++ *
++ *   enumeration : readdir("/proc"), numeric directory entries
++ *   stat        : /proc/<pid>/stat   (comm, ppid, pgrp, tty_nr, starttime)
++ *   ids         : /proc/<pid>/status (Uid:/Gid: lines: real eff saved fs)
++ *   argv        : /proc/<pid>/cmdline (NUL-separated argv)
++ *
++ * The results are poured into the OpenBSD-shaped kinfo_proc shim
++ * declared in proctools.h so that the existing matching logic in
++ * getProcList() and the pfind predicates work unchanged.
++ */
++
++#include <sys/types.h>
++
++#include "proctools.h"
++
++#if defined(USE_PROCFS)
++
++#include <ctype.h>
++#include <dirent.h>
++#include <fcntl.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++__BEGIN_DECLS
++int				 procfs_read_stat(pid_t, struct kinfo_proc *);
++int				 procfs_read_status_ids(pid_t, struct kinfo_proc *);
++struct kinfo_proc	*procfs_get_all_procs(size_t *);
++char				*procfs_read_cmdline(struct baton *, pid_t);
++__END_DECLS
++
++/*
++ * Read a (small) /proc file into buf (bufsz includes room for a
++ * terminating NUL).  Returns the number of bytes read, or -1 on error.
++ */
++static int
++procfs_read_file(path, buf, bufsz)
++	const char *path;
++	char *buf;
++	size_t bufsz;
++{
++	int fd;
++	ssize_t n;
++
++	if (bufsz == 0)
++		return (-1);
++
++	fd = open(path, O_RDONLY);
++	if (fd == -1)
++		return (-1);
++	n = read(fd, buf, bufsz - 1);
++	(void)close(fd);
++	if (n < 0)
++		return (-1);
++	buf[n] = '\0';
++	return ((int)n);
++}
++
++/*
++ * Parse /proc/<pid>/stat into the kinfo_proc shim.
++ *
++ * Format (proc(5)): pid (comm) state ppid pgrp session tty_nr ...
++ * The comm field is enclosed in parentheses and may itself contain
++ * parentheses, spaces etc., so locate the *last* ')' in the buffer.
++ * Fields after that point (1-based, starting at "state"):
++ *   1 state, 2 ppid, 3 pgrp, 4 session, 5 tty_nr, ..., 20 starttime
++ */
++int
++procfs_read_stat(pid, ki)
++	pid_t pid;
++	struct kinfo_proc *ki;
++{
++	char path[64];
++	char buf[4096];
++	char *p_beg, *p_end, *field;
++	size_t comm_len;
++	int n, i;
++	long long ticks = 0, hz;
++	struct timeval *start;
++
++	snprintf(path, sizeof(path), "/proc/%ld/stat", (long)pid);
++	n = procfs_read_file(path, buf, sizeof(buf));
++	if (n <= 0)
++		return (-1);
++
++	p_end = strrchr(buf, ')');
++	if (p_end == NULL)
++		return (-1);
++	p_beg = strchr(buf, '(');
++	if (p_beg == NULL || p_beg >= p_end)
++		return (-1);
++
++	memset(ki, 0, sizeof(*ki));
++
++	/* comm: strip the enclosing parentheses */
++	p_beg++;
++	comm_len = (size_t)(p_end - p_beg);
++	if (comm_len > sizeof(ki->kp_proc.p_comm) - 1)
++		comm_len = sizeof(ki->kp_proc.p_comm) - 1;
++	memcpy(ki->kp_proc.p_comm, p_beg, comm_len);
++	ki->kp_proc.p_comm[comm_len] = '\0';
++
++	ki->kp_proc.p_pid = pid;
++	ki->kp_proc.p_wmesg = NULL;
++
++	/* remaining fields: token 1 is "state" (a letter, not numeric),
++	 * tokens 2..20 follow: ppid pgrp session tty_nr ... starttime */
++	field = p_end + 2; /* skip ") " */
++	if (*field == '\0')
++		return (-1);
++	field += strcspn(field, " "); /* skip the state token */
++	if (*field != ' ')
++		return (-1);
++	field++; /* now pointing at token 2 (ppid) */
++
++	for (i = 2; i <= 20; i++) {
++		char *end;
++
++		if (i == 2)
++			ki->kp_eproc.e_ppid = (pid_t)strtoll(field, &end, 10);
++		else if (i == 3)
++			ki->kp_eproc.e_pgid = (pid_t)strtoll(field, &end, 10);
++		else if (i == 5)
++			ki->kp_eproc.e_tdev = (dev_t)strtoll(field, &end, 10);
++		else if (i == 20)
++			ticks = strtoll(field, &end, 10);
++		else
++			ticks = strtoll(field, &end, 10);
++
++		if (end == field)
++			return (-1); /* malformed/truncated */
++		field = end;
++	}
++
++	/* convert starttime (clock ticks since boot) to a timeval */
++	hz = sysconf(_SC_CLK_TCK);
++	if (hz <= 0)
++		hz = 100;
++	start = &ki->kp_proc.p_starttime;
++	start->tv_sec = (time_t)(ticks / hz);
++	start->tv_usec = (suseconds_t)((ticks % hz) * 1000000 / hz);
++
++	return (0);
++}
++
++/*
++ * Parse the Uid:/Gid: lines of /proc/<pid>/status and fill in the
++ * credential fields of the shim.
++ *
++ * Both lines carry four values: real, effective, saved, filesystem.
++ * Mapping (matching OpenBSD kinfo_proc semantics):
++ *   e_pcred.p_ruid <- real uid        (-U real)
++ *   e_pcred.p_svuid<- saved uid       (-u, upstream matches svuid)
++ *   e_ucred.cr_gid <- effective gid   (-G)
++ */
++int
++procfs_read_status_ids(pid, ki)
++	pid_t pid;
++	struct kinfo_proc *ki;
++{
++	char path[64];
++	char buf[4096];
++	int n;
++	char *p;
++
++	snprintf(path, sizeof(path), "/proc/%ld/status", (long)pid);
++	n = procfs_read_file(path, buf, sizeof(buf));
++	if (n <= 0)
++		return (-1);
++
++	if ((p = strstr(buf, "\nUid:")) == NULL &&
++	    (p = strncmp(buf, "Uid:", 4) == 0 ? buf : NULL) == NULL)
++		return (-1);
++	{
++		unsigned long ruid, euid, svuid, fsuid;
++		if (sscanf(p, "%*[^0123456789]%lu %lu %lu %lu",
++		    &ruid, &euid, &svuid, &fsuid) != 4)
++			return (-1);
++		ki->kp_eproc.e_pcred.p_ruid = (uid_t)ruid;
++		ki->kp_eproc.e_pcred.p_svuid = (uid_t)svuid;
++	}
++
++	if ((p = strstr(buf, "\nGid:")) == NULL &&
++	    (p = strncmp(buf, "Gid:", 4) == 0 ? buf : NULL) == NULL)
++		return (-1);
++	{
++		unsigned long rgid, egid, svgid, fsgid;
++		if (sscanf(p, "%*[^0123456789]%lu %lu %lu %lu",
++		    &rgid, &egid, &svgid, &fsgid) != 4)
++			return (-1);
++		ki->kp_eproc.e_ucred.cr_gid = (gid_t)egid;
++	}
++
++	return (0);
++}
++
++/*
++ * Enumerate all processes under /proc.  Returns a malloc'd array of
++ * kinfo_proc (owned by the caller, free via freeProcList()) and stores
++ * the number of entries in *countp.  Processes that vanish between the
++ * readdir() and the read of their stat/status are silently skipped,
++ * mirroring the raciness of kvm_getprocs().  Returns NULL on fatal
++ * error.
++ */
++struct kinfo_proc *
++procfs_get_all_procs(countp)
++	size_t *countp;
++{
++	DIR *dir;
++	struct dirent *dent;
++	struct kinfo_proc *kp = NULL;
++	size_t n = 0, cap = 0;
++
++	*countp = 0;
++
++	dir = opendir("/proc");
++	if (dir == NULL)
++		return (NULL);
++
++	while ((dent = readdir(dir)) != NULL) {
++		pid_t pid;
++		char *end;
++
++		if (!isdigit((unsigned char)dent->d_name[0]))
++			continue;
++		pid = (pid_t)strtol(dent->d_name, &end, 10);
++		if (*end != '\0' || pid <= 0)
++			continue;
++
++		if (n == cap) {
++			size_t ncap = cap ? cap * 2 : 128;
++			struct kinfo_proc *nk;
++
++			nk = realloc(kp, ncap * sizeof(*kp));
++			if (nk == NULL) {
++				free(kp);
++				(void)closedir(dir);
++				return (NULL);
++			}
++			kp = nk;
++			cap = ncap;
++		}
++
++		if (procfs_read_stat(pid, &kp[n]) == -1)
++			continue; /* process vanished mid-scan */
++		if (procfs_read_status_ids(pid, &kp[n]) == -1)
++			continue; /* process vanished mid-scan */
++		n++;
++	}
++
++	(void)closedir(dir);
++
++	*countp = n;
++	return (kp);
++}
++
++/*
++ * Read /proc/<pid>/cmdline and join the NUL-separated arguments with
++ * spaces into baton->args -- byte-for-byte the same normalisation that
++ * kvmArgs() applies to kvm_getargv() output on the BSDs.
++ *
++ * Returns baton->args, or NULL when the cmdline is unavailable/empty
++ * (kernel threads, zombies) so callers fall back to p_comm.
++ */
++char *
++procfs_read_cmdline(baton, pid)
++	struct baton *baton;
++	pid_t pid;
++{
++	char path[64];
++	int n, i;
++
++	if (baton == NULL || baton->args == NULL || baton->argmax <= 0)
++		return (NULL);
++
++	snprintf(path, sizeof(path), "/proc/%ld/cmdline", (long)pid);
++	n = procfs_read_file(path, baton->args, (size_t)baton->argmax);
++	if (n <= 1)
++		return (NULL); /* empty or single NUL: no userland argv */
++
++	/* join: every NUL except the final one becomes a space */
++	for (i = 0; i < n - 1; i++)
++		if (baton->args[i] == '\0')
++			baton->args[i] = ' ';
++	baton->args[n - 1] = '\0';
++
++	if (baton->args[0] == '\0')
++		return (NULL);
++
++	return (baton->args);
++}
++
++#endif /* USE_PROCFS */
