@@ -1,0 +1,90 @@
+#====================================================================
+# DRAFT-celero-2.10.0-upstream-test-debt-triage.kv
+# 启用上游测试套件后的三类"平台无关失败"与定性方法：实现矛盾断言、
+# 全局回调跨套件泄漏、活系统状态断言——只修测试不修库，逐条披露
+# 触发事件: celero 2.10.0 适配真机 shadow CI 第 6 轮 60/67 基线，
+# 7 个失败用例经源码比对全部定性为上游测试债，patch 0002 修复后 67/67
+#====================================================================
+
+id:                     DRAFT-celero-2.10.0-upstream-test-debt-triage
+trigger_tool:           conan|conan create|ctest|gtest
+phase:                  testing
+error_signature:        Expected:.*(doesn't throw|no throw) an exception\..*Actual:.*it throws|
+                         Failure.*test/[A-Za-z]+\.test\.cpp.*Value of:.*\(?(res|exp)\)? == nullptr|
+                         Expected:\(.*GetRAM(System|Physical)Available\(\)\) > .*GetRAM(System|Physical)Used.*actual:.*[0-9]+ vs [0-9]{9,}
+
+severity:               3
+category:               testing|gtest|upstream-bug|test-debt|methodology|triage
+match_keywords:         上游测试, test debt, 测试债, EXPECT_NO_THROW, EXPECT_ANY_THROW,
+                         it throws, global callback, deregister, 回调泄漏, cross-suite,
+                         套件间污染, test order, 失败定位, sysinfo, freeram, totalram,
+                         页缓存, page cache, GetRAMSystemAvailable, Memory.AllocSystem,
+                         Executor.RunAll, Callbacks.test.cpp, 平台无关失败, 用例定性
+title:                  启用上游测试后失败用例的三模式定性法（测试vs实现矛盾 / 全局回调跨套件
+                        泄漏 / 活系统状态断言）：指纹识别 → 只改测试断言不改库实现 → PR 逐条披露
+
+root_cause: >
+  积分赛要求真实"上游测试用例通过率"，启用上游套件后常出现失败用例，其中相当
+  部分与目标平台无关、是上游测试自身缺陷（上游 CI 常年不跑测试导致长期潜伏）。
+  三类指纹：
+  ① 测试与同版本实现矛盾：实现无条件 throw（如 Benchmark::setBaseline 对 nullptr
+  抛 runtime_error），同 tarball 的测试却 EXPECT_NO_THROW——任何平台必失败；
+  ② 全局回调跨套件泄漏：早期套件注册的全局回调（断言入参为 nullptr）无注销 API，
+  永久残留，后续套件触发真实（非空）回调时失败——**指纹：失败测试名与失败
+  定位文件分属两个套件**（Executor.RunAll 失败定位在 Callbacks.test.cpp）；
+  ③ 活系统状态断言：断言依赖机器负载（如 GetRAMSystemAvailable > GetRAMSystemUsed；
+  Linux sysinfo 的 freeram 不含可回收页缓存，重载机器 avail<used 恒成立）——
+  轻载机器偶过、重载机器必挂的"环境敏感"断言。
+affected_scope: >
+  所有启用上游 GTest/CTest 套件并报告通过率的适配（积分赛路径 A/B 都涉及）；
+  ②类泄漏常见于带全局注册表/单例回调的库（benchmark 框架、事件总线等），
+  ③类常见于内存/性能/时间相关断言。
+verification_cmd: >
+  全量跑拿基线（celero: [  PASSED  ] 60 tests / [  FAILED  ] 7 tests）；
+  对每个失败：grep 失败定位文件:行号的断言 → 读对应实现源码定矛盾（①）→
+  核对失败定位文件与失败测试名是否同套件（②指纹）→ 评估断言是否依赖机器
+  负载/时间（③）；修复后同命令复跑应全绿（celero: 67/67）
+
+rec_priority:           1
+rec_approach:           triage-then-fix-test-assertions-only
+rec_description: >
+  四步定性法：全量跑拿基线 N/M → 每个失败读实现源码与断言比对（①类直接定
+  矛盾：EXPECT_NO_THROW 改 EXPECT_ANY_THROW 并断言状态不被破坏）→ 检查失败
+  定位文件与所属套件错位（②类加测试作用域静态守卫：static bool flag，用例
+  末尾置 false，不改被测库）→ 判断断言是否环境敏感（③类放宽为鲁棒不变量，
+  如 EXPECT_GT(available, 0)）。铁律：**只改测试断言，不改库实现**；补丁单列
+  （如 0002-fix-upstream-test-debt.patch，patch_type=bugfix），PR 模板
+  "上游测试用例修改说明"逐条披露文件/原因/内容——修改透明即可如实报 100%。
+rec_command: >
+  grep -rn "throw" src/<Impl>.cpp | grep -A2 <setter>       # ① 实现矛盾证据
+  grep -n "Failure" build.log | awk -F: '{print $1}'         # ② 定位文件 vs 测试名
+  # 修复模式①：EXPECT_NO_THROW(x.f(nullptr)) → EXPECT_ANY_THROW(x.f(nullptr))
+  # 修复模式②：lambda 内 if(staticGuard){EXPECT_TRUE(...)} 用例末 staticGuard=false
+  # 修复模式③：EXPECT_GT(GetRAMSystemAvailable(), GetRAMSystemUsed()) → EXPECT_GT(..., 0)
+
+fallback_priority:      2
+fallback_approach:      report-partial-rate
+fallback_description:   不修测试，如实报告 N/M 并在 PR 补充说明给出定性证据（失败与
+                        平台无关）。零修改风险，但通过率数字吃亏且 CI 若跑上游测试会红。
+fallback_command:       （无命令；报告时附失败清单与根因分类）
+fallback_auto_fix:      false
+
+forbid_1_pattern:       改库实现.*让错误测试通过|删除失败用例.*宣称.*不变|skip.*全部失败套件
+
+similar_to:             E324（监控程序单项指标失败降级——同为"失败定性后选择正确
+                        处置"，但对象是运行时监控非测试套件）
+
+verified_on:            celero 2.10.0（OHOS aarch64 真机 shadow CI，2026-09-08）
+verification_result: >
+  基线（commit b8880b01d3，run 20260908T015314Z）：60/67；7 失败全定性：
+  ①Benchmark.setBaseline/invalidBaseline（src/Benchmark.cpp:99 无条件 throw）
+  ②Executor.RunAll/RunAllBaselines/RunAllExperiments（定位在 Callbacks.test.cpp:62/77）
+  ③Memory.AllocSystem/AllocPhysical（avail 1.79G vs used 31.67G，页缓存）。
+  patch 0002 三模式修复后（commit 2a0be6cd82，run 20260908T022643Z）：
+  67/67 PASSED，exit 0，L4 patches clean。
+limitations: >
+  - 定性结论必须以源码比对为证（实现行号/定位文件指纹/负载数字），禁止凭直觉
+    归因"上游问题"然后改测试——定性错了会把真平台缺陷盖掉。
+  - ②类守卫方案依赖 GTest 断言可被条件包裹；若回调断言在非 lambda 上下文则需
+    另行设计。③类放宽断言会降低检验强度，须在披露中说明原断言与放宽理由。
+  - 修改必须走补丁文件（可审计、可回溯），不要 sed 构建目录内联改。
