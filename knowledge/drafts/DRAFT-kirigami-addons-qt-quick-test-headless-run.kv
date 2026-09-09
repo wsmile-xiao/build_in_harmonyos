@@ -1,0 +1,83 @@
+draft: DRAFT-kirigami-addons-qt-quick-test-headless-run
+status: pending-editor-review
+title: "Qt Quick Test（QML 系）上游测试在 OHOS 无头跑通的环境组合：offscreen QPA + QML2_IMPORT_PATH 三级注入 + LD_LIBRARY_PATH 双布局；QML 绑定层与 C++ 库分离打包的判别"
+category: qt6-module-adapt, testing, qml
+match_keywords: >
+  Qt6QuickTest, qmltest, QUICK_TEST_MAIN_WITH_SETUP, QML2_IMPORT_PATH,
+  QT_QPA_PLATFORM, offscreen, qmltestrunner, module is not installed,
+  qtdeclarative, kirigami, BUILD_TESTING, QML 编译期, ecm_add_qml_module
+error_signature: >
+  module ".*" is not installed|Type .* unavailable|Could not resolve dynamic plugin with base name ".*plugin"|
+  QtQuickTest not found, autotests will not be built|qmltest.*not found
+root_cause: >
+  两类机制叠加：
+  (1) Qt Quick Test 系测试（QUICK_TEST_MAIN_WITH_SETUP 生成的 qmltest 可执行）
+  在运行期同时需要 QPA 平台插件（无头环境必须 offscreen）、QML 导入树
+  （qtdeclarative 的 qml/（QtTest/QtQuick 模块）+ 本包构建产物 bin/（ecm_add_qml_module
+  产物）+ 第三方 QML 库包的 lib/qml/）、以及全部依赖的共享库（Qt 包 lib/ 布局
+  与 KF6 包 bin/ 布局并存）。任一缺失分别表现为"not installed"/"Type unavailable"/
+  loader 符号缺失三类报错。
+  (2) Qt 模块的 QML 绑定层与 C++ 库是两个制品包：qtdeclarative/6.11.1 提供
+  Qt6Qml/Quick/QuickTest（含 qml/ 导入树），但 qtmultimedia/6.11.1 制品包只含
+  C++ 库（其配方 requires 无 qtdeclarative，构建天然不产 qml/ 树）——依赖
+  "C++ 库在仓"不等于"QML 绑定在仓"，需包内实测 ls qml/ 目录。
+solution: |
+  conanfile.py build() 尾部跑上游 QML 测试（BUILD_TESTING=ON 时上游 autotests
+  生成 qmltest 可执行并注册 CTest）：
+
+  ```python
+  def _test_env(self):
+      test_env = self._runtime_env(include_build=False)  # 已注入 QT_QPA_PLATFORM=offscreen + 各依赖 QT_PLUGIN_PATH/QML2_IMPORT_PATH
+      for dep in self.dependencies.values():
+          if dep and dep.package_folder:
+              # KF6 包（kirigami/ki18n 等）共享库在 bin/，Qt 包在 lib/ —— 双布局都要
+              test_env.prepend_path("LD_LIBRARY_PATH", os.path.join(dep.package_folder, "bin"))
+      for rel in ("bin", "lib"):
+          test_env.prepend_path("LD_LIBRARY_PATH", os.path.join(self.build_folder, rel))
+      # 三级 QML 导入：构建产物 bin/（本包 ecm_add_qml_module 产物）最前，
+      # 依赖包 qml/ 由 _runtime_env 注入（qtdeclarative 的 qml/、kirigami 的 lib/qml/）
+      test_env.prepend_path("QML2_IMPORT_PATH", os.path.join(self.build_folder, "bin"))
+      # 独立 XDG/HOME 沙箱（QML engine 需要可写缓存目录）
+      test_home = os.path.join(self.build_folder, "test-home")
+      xdg_runtime = os.path.join(self.build_folder, "xdg-runtime")
+      os.makedirs(test_home, exist_ok=True); os.makedirs(xdg_runtime, exist_ok=True)
+      os.chmod(xdg_runtime, 0o700)
+      test_env.define("HOME", test_home)
+      test_env.define("XDG_RUNTIME_DIR", xdg_runtime)
+      test_env.define("XDG_CACHE_HOME", os.path.join(test_home, ".cache"))
+      test_env.define("XDG_CONFIG_HOME", os.path.join(test_home, ".config"))
+      test_env.define("XDG_DATA_HOME", os.path.join(test_home, ".local", "share"))
+      test_env.define("CTEST_OUTPUT_ON_FAILURE", "1")
+      return test_env
+
+  def _run_upstream_tests(self):
+      with self._test_env().vars(self).apply():
+          self.run('ctest --test-dir "{}" --output-on-failure --no-tests=error'.format(self.build_folder))
+  ```
+
+  排查顺序（三类报错的定位映射）：
+  - `Error loading shared library libX.so` → LD_LIBRARY_PATH 漏了某依赖（KF6 包看 bin/）
+  - `Type XXX unavailable` / `module "Y" is not installed`（QML 编译期）→
+    开 QML_IMPORT_TRACE=1 看具体 import 解析；绑定层缺失时逐项定位文件:行号
+    （如 tst_sounds.qml:11 直接 import；或经 VideoMaximizeDelegate.qml:7 链式触发）
+  - `Could not resolve dynamic plugin` → QML2_IMPORT_PATH 缺导入树根目录
+fallback: >
+  QML 绑定层确实不在制品仓时（包内 ls qml/ 实证为空）：
+  (1) 逐项报错定位排除（ctest -E 排除清单 + PR 正文内联豁免，写明
+  文件:行号 + 实证根因"制品包无 qml/ 导入树"），禁止用"缺依赖"口径
+  （审核规则：依赖在仓时缺依赖不构成豁免）；
+  (2) 消费侧 test_package 用 C++ API 断言补覆盖（find_package + 链接受测库）；
+  (3) 本机（OHOS PC arm64 主机）可直接运行 aarch64 OHOS ELF——can_run 守卫
+  之下无需 qemu；交叉 CI Worker 需确认 worker 架构后再启用。
+verify_builds: #41915
+reference_impl: >
+  kirigami-addons 1.13.0 PR #8714（archives/k/kirigami-addons/1.13.0/
+  conanfile.py::_test_env/_run_upstream_tests，commit 17074908fd）：
+  tst_avatar 0.60s + tst_onboarding 1.42s 全绿（2/2 可跑子集），
+  tst_sounds + tst_album×3 经 QML_IMPORT_TRACE 定位为 qtmultimedia/6.11.1
+  制品包无 qml/ 树（C++ 库有、QML 绑定无），逐项排除。
+  对照：kcalendarcore 6.26.0 #8667（C++ Qt Test 的 CWD/lib 注入模式，505 测试）；
+  qtscxml DRAFT（C++ Qt Test 子集 QT_BUILD_TESTS 模式）——本条覆盖 QML Quick
+  Test 运行期环境组合，三者互补。
+id: E543
+doc_file: doc/E543.md
