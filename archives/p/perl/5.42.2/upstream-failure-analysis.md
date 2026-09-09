@@ -14,7 +14,11 @@ Files=2908, Tests=1348696, 2912 wallclock secs
 Result: FAIL
 ```
 
-The file-level result is `2864/2908`, or `98.49%`. A global subtest pass rate is not claimed because several programs aborted early, had TAP parse errors, or were manually terminated after a hang.
+The review inventory contains 2927 upstream test programs. The true-device harness run executed
+2908 of them: 2864 passed and 44 failed. The conservative PR-level rate is therefore
+`2864/2927`, or `97.85%`; the 19 inventory entries absent from this harness summary are not
+counted as passed. A global subtest pass rate is not claimed because several programs aborted
+early, had TAP parse errors, or were manually terminated after a hang.
 
 ## commands.json audit
 
