@@ -1,0 +1,102 @@
+#====================================================================
+# DRAFT-cdb-20251021-hmdfs-shebang-script-exec-refusal.kv
+# HarmonyOS hmdfs 用户分区拒绝 #! 脚本 exec（ELF 二进制不受限）
+# 触发事件: cdb 20251021 HarmonyOS PC 适配（PR #8907，真机 10.62.134.118）
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+#====================================================================
+
+id:                     DRAFT-cdb-20251021-hmdfs-shebang-script-exec-refusal
+trigger_tool:           make|sh|bash|exec
+phase:                  build|test
+error_signature:        make: (\./)?(compile|load|makelib|configure|[^ ]+\.(sh|pl|py)): Permission denied|
+                         sh: .*/[^ ]+: Permission denied|execve.*EACCES.*#!|
+                         (Permission denied|无法执行).*(rc=)?126
+
+severity:               2
+category:               ohos|hmdfs|shell|exec|security-label|build-system|djbware
+match_keywords:         hmdfs, #! 脚本, shebang, exec EACCES, rc 126, Permission denied,
+                         compile load makelib, ELF 可执行, hmmac 安全标签, ELF shim,
+                         sh ./ 前缀, /storage/Users/currentUser, 用户分区
+
+title:                  HarmonyOS hmdfs 用户分区对 #! 脚本 exec 一律 EACCES（rc=126，与
+                        shebang 内容、文件权限无关），同目录 ELF 二进制正常执行——构建期
+                        生成脚本必须经 `sh ./xxx` 调用或以 ELF shim 包装
+
+root_cause: >
+  真机（10.62.134.118，OHOS 6.0）用户可写路径 /storage/Users/currentUser 为 hmdfs
+  挂载并带 hmmac 安全标签（与 E212 中 dlopen 受限同源机制）。该标签路径上：
+  ① #! 脚本 exec 一律失败——即使 shebang 指向存在且可执行的解释器
+  （/system/bin/sh）、文件 mode 755，仍 EACCES（shell rc=126、make 报
+  "Permission denied"）；chmod 777、改写 shebang 均无效，说明限制与解释器
+  路径和权限位无关，按"文件类型 + 路径标签"拒绝；
+  ② 同一目录 clang 编译出的 ELF 二进制 exec 完全正常。
+  djbware 构建系统的 ./compile/./load/./makelib 全是 #! 脚本，make 直接
+  exec 它们即触发；上游 rts 套件经 PATH 调用的 cdbmake-12 等脚本工具同理。
+  /data/local/tmp 虽可 exec 但 root-only，普通用户无处可躲。
+affected_scope: >
+  任何在 hmdfs 用户分区直接 exec 脚本的构建/测试场景：djbware 生成脚本、
+  构建期自生成 wrapper、shell 测试套件的 PATH 工具、包内分发的 #! 命令。
+  注意与 DRAFT-gnustep-gui-0.31.1-shebang-bash-fix 的边界：那条目根因是
+  shebang 解释器路径不存在→改写解释器路径即可；本条目解释器路径有效仍被拒，
+  改 shebang 在本机型完全无效。CI worker（x86 容器）不受影响，仅真机用户分区。
+verification_cmd: >
+  真机复现两步对照：(1) printf '#!/system/bin/sh\nexit 42\n' > t.sh &&
+  chmod 755 t.sh && ./t.sh; echo $? → 126 且 stderr Permission denied；
+  同目录写等逻辑的 C 程序经 clang 编译后执行 → 42 正常。
+  (2) 应用补丁后 cd <build> && make prog → 14 个二进制全部产出 rc=0；
+  rts 套件经 ELF shim 包装后 47/55（8 失败均为错误注入平台限制，与本条目无关）。
+
+rec_priority:           1
+rec_approach:           invoke-scripts-via-sh-or-elf-shim
+rec_description: >
+  ①构建期：以补丁把调用方从直接 exec 改为经解释器调用（cdb 场景：Makefile 中
+  68 处 ./compile|./load|./makelib 前缀 sh，regex ^(\t)(\./(?:compile|load|
+  makelib) ) → \1sh \2，对 Linux 行为完全等价）；
+  ②测试期 PATH 工具：编译微型 ELF shim（main 里 execvp("sh", ["sh",
+  <脚本绝对路径>, argv...])），把 shim 目录放到 PATH 首位，上游测试文件可
+  字节级原样执行；
+  ③配方分发脚本命令（如 cdbmake-12）在文档注明以 `sh <script>` 调用。
+rec_command:            >
+  # 诊断: ./<script>; echo $?   # 126 = 本条目；127/not found = 解释器路径问题（gnustep 条目）
+  # 修复: sed -E 's@^(\t)(\./(?:compile|load|makelib) )@\1sh \2@' 补丁化进 patches/
+rec_auto_fix:           false
+rec_impl:               conan-recipe-build
+
+fallback_priority:      2
+fallback_approach:      elf-shim-wrapper
+fallback_description:   无法修改调用方（上游测试脚本经 PATH 查找工具）时，用 ELF shim
+                        包装脚本工具，保持 PATH 语义与测试内容零修改。
+fallback_command:       clang -o shim shim.c   # shim.c: execvp("sh", ["sh", "<abs script>", argv...])
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-build
+
+forbid_1_pattern:       chmod.*777.*script|chmod.*755.*script.*(fix|workaround)
+forbid_1_reason:        权限位与限制无关（755 时已被拒），改权限位无效。
+forbid_1_consequence:   假修复，构建依旧 EACCES。
+forbid_2_pattern:       sed.*1s.*#!/(system/)?bin/(ba)?sh.*hmdfs
+forbid_2_reason:        改写 shebang 指向存在解释器在本机型无效（gnustep 方案的适用边界之外）。
+forbid_2_consequence:   浪费一轮真机排障；误判为权限问题反复 chmod。
+
+principles:             P-HMDFS-001
+causes:                 []
+caused_by:              []
+similar_to:             E212
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-cdb-20251021-hmdfs-shebang-script-exec-refusal.md
+last_updated:           2026-09-08
+source_event:           cdb 20251021 HarmonyOS PC adaptation, real-device 10.62.134.118:2222
+
+authors:                gcw_6YxinkyD
+source_pr:              8907
+source_commit:          262ed0986d
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.88
+metrics_last_used:      2026-09-08
+
+draft:                  true
+contributor_id:         8907
