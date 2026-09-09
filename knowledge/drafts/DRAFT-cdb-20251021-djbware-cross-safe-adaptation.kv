@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-cdb-20251021-djbware-cross-safe-adaptation.kv
+# djbware（DJB 风格 Makefile）OHOS 适配四步法
+# 触发事件: cdb 20251021 HarmonyOS PC 适配（PR #8907，真机验证通过）
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+#====================================================================
+
+id:                     DRAFT-cdb-20251021-djbware-cross-safe-adaptation
+trigger_tool:           make|djbware
+phase:                  configuration|build|packaging
+error_signature:        (conf-cc|conf-ld|conf-home)|
+                         Makefile.*(it:|prog:|setup:|install:).*(instcopy|instcheck)|
+                         (\./)?(compile|load|makelib)(:|\s)|no configure|config\.guess.*not found
+
+severity:               2
+category:               build-system|djbware|packaging|conan|static-archive
+match_keywords:         djbware, DJB, conf-cc, conf-ld, conf-home, make prog, instcopy,
+                         instcheck, compile load makelib, 静态库合并, libcdb.a, cdb64,
+                         CDB64 宏, 符号重命名, cdb.cr.yp.to, pkgsrc djbware, tinycdb 对照
+
+title:                  djbware（DJB 风格 Makefile，无 configure/config.guess）OHOS 适配
+                        四步法：conf-* 首行注入 + make prog 交叉安全目标 + 生成脚本 sh 化 +
+                        多静态库合并（cdb 实证 14 工具全绿）
+
+root_cause: >
+  djbware（cdb/djbdns/ucspi-tcp/daemontools 系）构建系统约定与 autotools 完全
+  不同：①无 configure、无 config.guess，编译器/flags/安装前缀由 conf-cc、
+  conf-ld、conf-home 三个文件的首行指定；②构建期先生成 ./compile、./load、
+  ./makelib 三个 #! wrapper 脚本并直接 exec（真机 hmdfs 上被拒，见
+  DRAFT-cdb-20251021-hmdfs-shebang-script-exec-refusal）；③默认目标
+  it/setup/install 会运行 ./instcopy/./instcheck——把构建产物拷进 conf-home 并
+  校验，需要原生执行刚构建的二进制，交叉/受限环境不可行；④上游只安装命令、
+  不安装库（cdb 文档明说 "the library per se is not installed"），而链接命令
+  实际需要 4 个静态库（cdb.a buffer.a unix.a byte.a）。
+affected_scope: >
+  所有 djbware 风格包的首次适配。cdb64 变体（#define CDB64 宏把全部 cdb_* 符号
+  重命名为 cdb64_*，同源码双变体）的打包方案对其他"宏重命名同源双变体"库可复用。
+verification_cmd: >
+  conan create . --user=ohpcd --channel=stable（真机 OHOS aarch64，clang 15.0.4）
+  rc=0：14 个 bin、4 个头、lib/libcdb.a（五归档合并）；test_package API 回环
+  （32 位 + cdb64）与 cdbmake/cdbget CLI 断言全过；上游 rts 47/55（失败均为
+  平台错误注入限制）。
+
+rec_priority:           1
+rec_approach:           conf-inject-plus-make-prog
+rec_description: >
+  ①配方写 conf-cc/conf-ld 首行为 `exec <CC> <CFLAGS>`（CC 取 Conan conf
+  tools.build:compiler_executables；Linux/OHOS 加 -D_XOPEN_SOURCE=500 暴露
+  mmap/lseek 原型，pkgsrc 同款），conf-home 指向 package_folder（生成的
+  cdbmake-12 脚本内嵌 <conf-home>/bin 绝对路径，Conan 缓存目录稳定）；
+  ②构建用 `make prog -j1`（纯构建目标，不运行 instcopy/instcheck，交叉安全），
+  产物安装由 package() 承担；
+  ③补丁让 makelib 尊重 ${AR}/${RANLIB}（默认 ar cr/ranlib → llvm 交叉归档），
+  并把 Makefile 中 ./compile|./load|./makelib 调用改为 sh ./xxx（hmdfs 脚本
+  exec 限制，见专条草稿）；
+  ④package() 用 ar x 解开 cdb.a cdb64.a buffer.a unix.a byte.a 后 ar cr 合并
+  成单一自包含 libcdb.a 并 ranlib（cdb64 符号经 CDB64 宏重命名无冲突），
+  cpp_info.libs 只暴露 cdb。
+rec_command:            >
+  # conf 注入: sed -i '1s@.*@exec '"$CC"' -fPIC -O2 -D_XOPEN_SOURCE=500@' conf-cc
+  # 构建: env AR=llvm-ar RANLIB=llvm-ranlib TMPDIR=<build> make prog -j1
+  # 合并: for a in cdb cdb64 buffer unix byte; do (mkdir $a.x && cd $a.x && ar x ../$a.a); done
+  #       ar cr libcdb.a */[!l]*.o && llvm-ranlib libcdb.a
+rec_auto_fix:           false
+rec_impl:               conan-recipe-build
+
+fallback_priority:      2
+fallback_approach:      tinycdb-style-rewrite
+fallback_description:   若上游 Makefile 不可打补丁（结构差异大），参照 tinycdb/0.81
+                        已发布配方直接在配方里编源文件列表 + llvm-ar 打包。
+fallback_command:       clang -c <srcs> && llvm-ar cr lib<name>.a *.o
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-build
+
+forbid_1_pattern:       make.*(setup|install|it)(\s|$)
+forbid_1_reason:        这些目标运行 ./instcopy/./instcheck，需原生执行构建产物，
+                        真机/交叉环境必挂；安装由配方 package() 承担。
+forbid_1_consequence:   构建期 exec 新二进制失败或污染 conf-home 指向目录。
+forbid_2_pattern:       (conf-home|conf-cc).*=*(sed -i ).*(package_folder|profile)
+forbid_2_reason:        conf-* 是源内配置文件，运行时 sed 属于改生成文件不留痕，
+                        必须（对 Makefile 的改动）补丁化；conf-* 首行注入在配方
+                        build() 内做，不进补丁。
+forbid_2_consequence:   distclean 后配置丢失，CI 无法复现（P-PATCH-001）。
+
+principles:             P-PATCH-001,P-TOOLCHAIN-001
+causes:                 []
+caused_by:              []
+similar_to:
+conflicts_with:         []
+prerequisite_of:        DRAFT-cdb-20251021-hmdfs-shebang-script-exec-refusal
+
+doc_file:               drafts/DRAFT-cdb-20251021-djbware-cross-safe-adaptation.md
+last_updated:           2026-09-08
+source_event:           cdb 20251021 HarmonyOS PC adaptation, PR #8907
+
+authors:                gcw_6YxinkyD
+source_pr:              8907
+source_commit:          262ed0986d
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-08
+
+draft:                  true
+contributor_id:         8907
