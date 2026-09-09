@@ -1,0 +1,80 @@
+#====================================================================
+# DRAFT-gulrak-filesystem-1.5.8-headeronly-copy-nested-include -
+# header-only 库 conan package() 复制嵌套 include 子目录失败
+# （copy() 模式不跨子目录 + no_copy_source/layout 对 source_folder 的影响）
+# → 包内 include 为空 → G2 test_package Imported target 路径不存在
+#====================================================================
+
+id:                     DRAFT-gulrak-filesystem-1.5.8-headeronly-copy-nested-include
+trigger_tool:           conan|conan create|conan-verify|cmake|test_package
+phase:                  conan-verify|package|test_package
+error_signature:        Imported target .* includes\s+non-existent path.*\.conan2/p/.*/p/include|
+                         No files in this package!|
+                         package\(\): WARN: No files in this package!|
+                         CMake Generate step failed
+
+severity:               2
+category:               conan, packaging, header-only, conanfile
+match_keywords:         header-only, no_copy_source, basic_layout, layout, source_folder,
+                         package_folder, copy, includedirs, include/<subdir>, ghc,
+                         Imported target non-existent path, Copying, conan copy,
+                         keep_path, strip_root
+title:                  header-only 库 conan package() 复制嵌套 include 子目录失败（copy() 模式不跨子目录 + no_copy_source/layout 影响 source_folder）→ 包内 include 为空 → G2 test_package Imported target 路径不存在
+
+root_cause:             |
+  两因叠加导致 header-only 库包内 include 为空：
+  1) `conan.tools.files.copy()` 的 pattern 按源码树相对路径做 fnmatch（如 copy_pattern.py 对
+     files 用 os.path.relpath 后 fnmatch），`copy(self, "*.hpp", src=source_folder)`
+     只匹配源码根目录直属 .hpp，不匹配 `include/ghc/*.hpp` 等嵌套子目录文件 →
+     package() 实际复制 0 个文件（日志 "No files in this package!"）；
+  2) 配方若定义 `layout(): basic_layout(self)`（set folders.source="."）且设置
+     `no_copy_source = True`，package() 中 self.source_folder 的语义受布局影响，
+     与保留 no_copy_source 共享源码目录的预期不一致；且 dst 若写相对路径
+     `dst="include"`，实际落位依赖 package_folder 计算，肉眼难察。
+  结果：CMakeDeps 为目标声明的 INTERFACE_INCLUDE_DIRECTORIES 指向
+  `<package_folder>/include`，该目录在包内不存在 → test_package cmake.configure()
+  报 "Imported target ... includes non-existent path" → G2 FAIL。
+
+affected_scope:         所有头文件位于 include/<subdir>/ 布局（如 include/ghc/、include/<lib>-<ver>/）
+                        的 header-only C/C++ 库的 conanfile.py package() 编写
+verification_cmd:       conan create <dir> -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing --user=ohpcd --channel=stable; find <cache>/p/.../p -maxdepth 3 -type f
+
+rec_priority:           1
+rec_approach:           subdir-aware-copy-to-package-folder
+rec_description:        package() 中按子目录感知模式复制并显式落位到 package_folder：
+                         `copy(self, "ghc/*.hpp", src=<source>/include, dst=<package>/include)`，
+                         dst 必须用 os.path.join(self.package_folder, ...) 绝对路径；
+                         保持相对路径结构（keep_path 默认 True 保留 ghc/ 前缀）；
+                         无 build 的 header-only 配方无需 layout()（避免 basic_layout 改
+                         folders.source 干扰 no_copy_source 源码目录语义）；
+                         conandata.yml 填官方 URL + 实际 sha256，package_type=header-library。
+rec_command:            |
+  def package(self):
+      copy(self, "ghc/*.hpp",
+           src=os.path.join(self.source_folder, "include"),
+           dst=os.path.join(self.package_folder, "include"))
+      copy(self, "LICENSE*", src=self.source_folder,
+           dst=os.path.join(self.package_folder, "licenses"), keep_path=False)
+rec_auto_fix:           true
+rec_impl:               subdir-aware-copy
+
+fallback_priority:      2
+fallback_approach:      flat-copy-with-keep-path
+fallback_description:   若头文件就在 include/ 根（无子目录），`copy(self, "*.h", src=..., dst=...)`
+                        即可；有子目录时用 `**/*.hpp`/子目录前缀模式并核对复制计数
+                        （conanfile.output.debug 可见 "copy(pattern=...) copied N files"）。
+fallback_command:
+fallback_auto_fix:       true
+fallback_impl:
+
+forbid_1_pattern:        把空 include 目录提交进 PR|手工往包缓存塞头文件|pscp 到包内|伪造 conan manifest|把 copy 目标写到源目录
+forbid_1_reason:         空 include 是配方缺陷必须在配方内修复（copy 模式/dst），不得绕道缓存或伪造打包产物；
+                         包内容必须由 recipe 真实复制产生，CI 干净重建可复现。
+forbid_1_consequence:    缓存手工补文件在 CI clean worker 上不可复现 → G4/L0e 失败；伪造破坏制品完整性审计。
+
+principles:
+
+causes:                 [DRAFT-concurrencpp-0.1.7-cmake-header-install-subdir]
+caused_by:              []
+similar_to:             [DRAFT-concurrencpp-0.1.7-cmake-header-install-subdir]
+conflicts_with:         []
