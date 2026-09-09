@@ -1,0 +1,74 @@
+#====================================================================
+# DRAFT-bison-pure-parser-yylex-signature.kv
+# bison 3.8 接受已弃用的 %pure_parser 但生成的纯解析器不向 lexer 传
+# scanner 实参，与 %reentrant flex lexer 的三参 yylex 约定冲突，应迁移为
+# %define api.pure true 并补 %lex-param
+# 完整叙事与证据见同目录 .md
+#====================================================================
+
+id:                     DRAFT (最终编号由知识库主编确认)
+trigger_tool:           bison|flex|make|clang
+phase:                  compilation
+error_signature:        too few arguments to function call, expected 3, have 2|too many arguments to function call, expected 0, have 2|POSIX Yacc does not support %pure_parser|deprecated directive.*%pure_parser
+severity:               2
+category:               build-tools, bison, flex, parser, autotools, conan
+match_keywords:         bison 3.8, %pure_parser, api.pure, %lex-param, yylex, yyscanner, YYLEX_PARAM, flex, %reentrant, bison-bridge, bison-locations, yylval, yylloc, too few arguments to function call, too many arguments to function call, ylwrap, parser.y, lexer.l, implicit declaration, yyerror
+title:                  bison 3.8 接受已弃用的 %pure_parser 但生成的纯解析器不向 lexer 传 scanner 实参，与 %reentrant flex lexer 的三参 yylex 约定冲突，应迁移为 %define api.pure true 并补 %lex-param
+root_cause:             完整机理链（设备 bison 3.8.2 实测）：(1) 旧式指令 %pure_parser 仍被 bison 3.8 接受（仅 POSIX-Yacc 模式下警告），但 3.x 骨架已废弃 YYLEX_PARAM 桥接宏——生成 parser 对 yylex 的调用点签名由"纯度 + %lex-param"决定，而不再是 .y 序言里的 3 参原型声明或 #define YYLEX_PARAM；(2) .y 显式声明三参 yylex(yylval,yylloc,yyscanner) 且 .l 为 %reentrant bison-bridge bison-locations 时，纯骨架调用 yylex(&yylval,&yylloc) 缺第三参 → 编译错 too few arguments to function call, expected 3, have 2（image-ccd-parser.c:1546 实测）；(3) 反例组：非重入 flex 声明零参 extern int yylex (void) 时，保留纯解析器的两参调用在原型可见时硬报错 too many arguments to function call, expected 0, have 2（探针 pa.c:1129 实测），无原型时靠隐式声明侥幸编译且 yylval/yylloc 桥接被静默丢弃（语义损坏）→ 纯解析器与任何 flex 形态均不再默认兼容，必须成对迁移：.y 侧 %define api.pure true + %lex-param {void *scanner} ↔ .l 侧 %reentrant + bison-bridge + bison-locations
+affected_scope:         任何使用 bison >= 3.x（OHOS 设备钉死 bison 3.8.2）构建、.y 含 %pure_parser 或迁移中的 api.pure、且 lexer 为 %reentrant flex（或需降级讨论的非重入 flex）的项目；典型触发面：autotools 老项目（ylwrap + AC_PROG_YACC，YACC="bison -y"）在 OHOS conan 配方内首次全量编译
+verification_cmd:       D=$(mktemp -d) && cd $D
+                        printf '%s\n' '%pure_parser' '%locations' '%%' 'input : ;' '%%' > t1.y
+                        printf '%s\n' '%define api.pure true' '%lex-param {void *scanner}' '%locations' '%%' 'input : ;' '%%' > t2.y
+                        bison -o t1.c t1.y 2>/dev/null; grep -n "yylex (" t1.c
+                        bison -o t2.c t2.y 2>/dev/null; grep -n "yylex (" t2.c
+                        bison --version | head -1
+                        rm -rf $D
+                        预期（/bin/sh 与 zsh 均 rc=0）：t1 输出 1123:      yychar = yylex (&yylval, &yylloc);（两参，无 scanner）→ 与 %reentrant lexer 的三参原型冲突；t2 输出 1123:      yychar = yylex (&yylval, &yylloc, scanner);（三参，匹配）；bison (GNU Bison) 3.8.2
+rec_priority:           1
+rec_approach:           migrate-pure-parser-with-lex-param
+rec_description:        对每个含 %pure_parser 的 .y 成对迁移两处指令：替换为 %define api.pure true 并紧随追加 %lex-param {void *scanner}（scanner 名与 %parse-param 声明一致）；生成 parser 随即以 yylex (&yylval, &yylloc, scanner) 三参调用，与 %reentrant + bison-bridge + bison-locations 的 flex lexer 匹配。同型实例：libmirage 1.0.0 image-ccd/image-cue/image-toc 三解析器（补丁 0005，bison 3.8.2 编译通过）。若 .y 尚有 %error-verbose 一并替换为 %define parse.error verbose 消除弃用警告（可选）
+rec_command:            perl -pi -e 's{^%pure_parser$}{%define api.pure true\n%lex-param {void *scanner}}' <each *.y>   # 已实测：替换后 bison 3.8.2 生成 yylex (&yylval, &yylloc, scanner)；等价做法为对 .y 生成 per-file 补丁（conandata.yml 声明，build() 内 apply_conandata_patches）
+rec_auto_fix:           false
+rec_impl:               manual-patch
+fallback_priority:      2
+fallback_approach:      drop-pure-parser-degrade-to-globals
+fallback_description:   整体降级：同时删除 %pure_parser（或 api.pure true）并保持/降级 lexer 为非重入——非纯解析器以 yylex() 零参调用、经全局 yylval/yylloc 传递，与非重入 flex 生成的 extern int yylex (void) 匹配。诚实权衡：牺牲解析器可重入性与线程安全、偏离上游并发语义，仅作退路。"仅去 reentrant/bison-bridge/bison-locations 保留 %pure_parser 以匹配两参调用"不成立（探针实测反向硬报错，见 forbid 4）
+fallback_command:       D=$(mktemp -d) && cd $D
+                        printf '%s\n' '%{' 'extern int yylex (void);' '%}' '%pure_parser' '%locations' '%%' 'input : ;' '%%' > pa.y
+                        printf '%s\n' '%{' 'extern int yylex (void);' '%}' '%locations' '%%' 'input : ;' '%%' > pb.y
+                        printf '%s\n' '%option noyywrap' '%%' '. ;' '%%' > l.l
+                        bison -o pa.c pa.y 2>/dev/null && flex -o l.c l.l && clang -c pa.c -o pa.o 2>&1 | grep -m1 error
+                        bison -o pb.c pb.y 2>/dev/null && flex -o l.c l.l && clang -c pb.c -o pb.o && clang -c l.c -o l.o && echo FALLBACK_COMPILES
+                        grep -m1 "yylex (void)" l.c
+                        rm -rf $D
+                        预期（全量输出，clang 15.0.4；pa 行经 grep -m1 error 只留断言行）：pa.c:1129:23: error: too many arguments to function call, expected 0, have 2；pb.c 编译出现 2 处 call to undeclared function 'yyerror' 警告（pb.c:1262:7 与 pb.c:1377:3，隐式声明——pb.y 未声明 yyerror，非纯骨架按 %locations 直呼 yyerror；警告文本随 clang 版本而异）后成功；FALLBACK_COMPILES；extern int yylex (void);
+fallback_auto_fix:      false
+fallback_impl:          manual-patch
+forbid_1_pattern:       手改生成 parser 的 .c 文件或将生成物入仓
+forbid_1_reason:        autotools 经 ylwrap/AC_PROG_YACC 在构建期重新生成 .c，手改与入仓产物都会在 clean/rebuild 后丢失或过期，且掩盖真实的指令层修复
+forbid_1_consequence:   修复在干净重建后失效，问题在 CI/他人环境复现
+forbid_2_pattern:       tool_requires("bison/<旧版本>")
+forbid_2_reason:        以旧版 bison 钉死工具行为属工具链倒退：放弃 3.x 的纯解析器语义修复轨道，引入额外工具链构建面与许可/维护负担；OHOS 设备与 CI 均已钉死系统 bison 3.8.2，混入第二套 bison 还会产生 host/build 工具解析分叉
+forbid_2_consequence:   构建面扩大、双工具漂移，且旧 bison 自身对现代宿主的兼容问题重新入场
+forbid_3_pattern:       ^%define api.pure true$（未随附 %lex-param）
+forbid_3_reason:        只升 api.pure 不补 %lex-param 时，3.x 纯骨架仍按两参调用 yylex(&yylval,&yylloc)（YYLEX_PARAM 已废弃、无 scanner 可传），与 %reentrant lexer 的三参约定依旧冲突——libmirage-1.0.0 run 的 lm-create-4 构建实测复现同一 too few arguments 错误
+forbid_3_consequence:   与迁移前完全相同的编译错误，且指令已"现代化"，更具迷惑性
+forbid_4_pattern:       保留纯解析器（%pure_parser/api.pure true）仅把 lexer 降级为非重入
+forbid_4_reason:        非重入 flex 声明零参 extern int yylex (void)，纯骨架两参调用与其直接冲突：原型可见时硬报错 too many arguments to function call, expected 0, have 2；无原型时隐式声明侥幸编译但 yylval/yylloc 桥接被静默丢弃（语义损坏）——探针 pa/pb 双形态实测
+forbid_4_consequence:   编译失败或更隐蔽的静默解析语义损坏（token 值/位置错乱）
+principles:             [P-PATCH-001, P-TOOLCHAIN-001]
+causes:                 []
+caused_by:              []
+similar_to:             [E402, E546]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               DRAFT-bison-pure-parser-yylex-signature.md
+last_updated:           2026-09-04
+source_event:           libmirage 1.0.0 OHOS PC 适配（image-ccd/cue/toc 三解析器编译失败定位；设备 bison 3.8.2 / flex 2.6.4 / clang 15.0.4）
+authors:                GoliWie
+source_pr:              pending（feat/libmirage-1.0.0 交付 PR）
+source_commit:          pending（随 PR 交付后回填）
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-04
