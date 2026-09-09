@@ -1,12 +1,13 @@
 import os
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
 from conan.tools.files import get, copy, replace_in_file
 
 
 class Allegro44Conan(ConanFile):
     name = "allegro4.4"
-    version = "4.4.3.1"
+    version = "4.4.3.1.1"
     description = "Allegro 4 — A cross-platform game programming library"
     license = "BSD-3-Clause"
     url = "https://github.com/liballeg/allegro5"
@@ -30,6 +31,12 @@ class Allegro44Conan(ConanFile):
     def configure(self):
         if self.options.shared:
             self.options.rm_safe("fPIC")
+
+    def validate(self):
+        if str(self.settings.os) not in ("Linux", "OHOS", "Windows"):
+            raise ConanInvalidConfiguration(
+                f"allegro4.4 supports Linux, OHOS, and Windows, not {self.settings.os}"
+            )
 
     def source(self):
         get(
@@ -73,7 +80,10 @@ class Allegro44Conan(ConanFile):
         tc.variables["WANT_LOADPNG"] = False
         tc.variables["WANT_LOGG"] = False
         tc.variables["WANT_JPGALLEG"] = False
-        if self.settings.os == "OHOS":
+        tc.variables["WANT_TESTS"] = False
+        tc.variables["WANT_EXAMPLES"] = False
+        tc.variables["WANT_TOOLS"] = False
+        if str(self.settings.os) == "OHOS":
             # OHOS: CMake may not set UNIX automatically for HarmonyOS
             tc.variables["UNIX"] = "TRUE"
             # OHOS/musl: librt is built into libc, no separate -lrt needed
@@ -95,8 +105,13 @@ class Allegro44Conan(ConanFile):
         self.cpp_info.set_property("cmake_file_name", "allegro4.4")
         self.cpp_info.set_property("cmake_target_name", "allegro4.4::allegro")
         self.cpp_info.set_property("pkg_config_name", "allegro")
-        self.cpp_info.libs = ["alleg"]
-        if self.settings.os == "OHOS":
+        if str(self.settings.os) in ("Linux", "OHOS"):
+            self.cpp_info.libs = ["alleg"]
+        else:
+            self.cpp_info.libs = ["alleg44"]
+        if str(self.settings.os) == "OHOS":
+            self.cpp_info.system_libs = ["m"]
+        elif str(self.settings.os) == "Windows":
             self.cpp_info.system_libs = ["m"]
         else:
             self.cpp_info.system_libs = ["m", "pthread", "dl"]
