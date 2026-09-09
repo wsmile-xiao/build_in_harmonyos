@@ -1,0 +1,72 @@
+# ═══ Draft knowledge entry — collections-c 2.3.3 cc_dynamic_pool 非 packed 对齐缺陷 ═══
+# Timestamp: 2026-09-06
+# Software: collections-c 2.3.3
+# Gate: OHOS 专项测试 test_ohos_adapt.c (pool_alignment_test) — R01 pc4-6
+# Status: DRAFT — 需人工/AI 审核后 promote 为 E-entry
+#
+# To promote:
+#   1. 审核 error_excerpt 与实际验证
+#   2. 改名为 E0XX.kv 并移动到 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 添加一行
+#   4. 编写 knowledge/doc/E0XX.md
+
+id:                     DRAFT-collections-c-2.3.3-dynamic-pool-alignment
+trigger_tool:           conan|cmake|clang
+phase:                  testing|runtime|package
+error_signature:        cc_dynamic_pool_malloc.*misalign|
+                         alignment_boundary.*16.*fail|
+                         dynamic_pool.*(not aligned|misaligned)|
+                         assert.*is_aligned.*pool
+
+severity:               2
+category:               memory, alignment, pool, bugfix
+match_keywords:         cc_dynamic_pool, dynamic_pool, alignment_boundary, is_packed,
+                         free_ptr, padding, misaligned, 16-byte, aarch64, OHOS,
+                         max_align_t, SIMD, atomic
+title:                  Collections-C cc_dynamic_pool 非 packed 模式的 alignment 选项失效：
+                         上游 padding = size % boundary 无法保证块对齐，需将 free_ptr
+                         圆整到对齐边界（建池首块同步对齐）
+
+root_cause: >
+  上游 cc_dynamic_pool_malloc 的对齐实现只计算 padding = size % alignment_boundary，
+  在块尾追加 size%boundary 字节。该公式只在"上块大小恰好为 boundary 倍数"时碰巧对齐，
+  对任意 size 无法把 free_ptr 圆整到边界；且 cc_dynamic_pool_new_conf 建池时未对齐
+  首个块起点（free_ptr 直接取 page + sizeof(PageInfo)）。so 非 packed
+  (is_packed=false) 且 alignment_boundary>1 时，连续分配返回的块地址不保证对齐。
+  与平台无关：OHOS/musl libc malloc 本身满足 16 字节对齐（实测 mod16=0），
+  缺陷纯属库内算法问题。
+
+trigger_condition: >
+  以 cc_dynamic_pool_new_conf 配置 is_packed=false 且 alignment_boundary=16（或 >1）
+  使用 Collections-C 内存池；下游对分配块有对齐契约（SIMD 加载、atomic/max_align_t
+  类型、外部 ABI）或在测试断言对齐时触发。默认 packed 池（alignment_boundary=1）
+  不受影响。
+
+solution: >
+  源码补丁（补丁 0001-src-memory-cc_dynamic_pool.c.patch）：
+    1) cc_dynamic_pool_new_conf：建池时若 !is_packed && boundary>1，把 free_ptr
+       圆整到 alignment_boundary（首块起点对齐，后续块继承对齐）；
+    2) cc_dynamic_pool_malloc：padding 按
+       mis = (uintptr_t)(ptr + size) % alignment_boundary; mis ? boundary - mis : 0
+       计算，保证每块之后 free_ptr 仍落在边界上。
+  验证：鸿蒙专项测试 pool_alignment_test 以 boundary=16 分配 9 种尺寸全部对齐；
+  上游 16 个测试可执行 249/249 用例通过，无回归。
+
+verification_cmd: >
+  clang -O2 -I src/include test_ohos_adapt.c build/src/libcollectc.a &&
+  ./a.out   # 输出: OHOS pool alignment (16-byte boundary) OK;
+            #        OHOS stress test (20000 ops per container) OK; PASS
+
+rec_priority:               1
+rec_approach:               source-code-patch
+rec_auto_fix:               false
+rec_impl:                   manual-edit
+fallback_priority:          2
+fallback_approach:          recipe-level
+fallback_description:       若不允许改上游源码，可在配方 test/消费者侧要求 packed 池
+                            或自行包装对齐分配，但无法修复库内契约。
+forbid_1_pattern:           reinterpre_align|skip.*alignment|alignment_boundary.*=.*1.*借口
+forbid_1_reason:            跳过或放宽对齐断言会掩盖真实未对齐访问（SIMD/原子类型 UB）。
+forbid_1_consequence:       在真实 OHOS 设备上可能崩溃或产生未定义行为。
+causes: []
+caused_by: []
