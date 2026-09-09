@@ -1,0 +1,82 @@
+#====================================================================
+# DRAFT-chaiscript-6.1.0-cross-dso-typeinfo-identity.kv
+# OHOS 跨 dlopen 边界 std::type_info::operator== 不成立（类型名相同也
+# 返回 false）——chaiscript load_module 类测试失败的单一根因定性
+# 触发事件: chaiscript 6.1.0 真机上游套件执行，12/429 失败全部同根因
+#（11 个 load_module 型 .chai + multithreaded_test），PR #8935
+#====================================================================
+
+id:                     DRAFT-chaiscript-6.1.0-cross-dso-typeinfo-identity
+trigger_tool:           runtime|dlopen|上游测试套件
+phase:                  test|runtime
+error_signature:        Error with function dispatch for function 'to_string'|
+                         Error with function dispatch for function 'push_back_ref'.*\(List\)\.\(int\)|
+                         Can not find appropriate '==' operator.*const string.*basic_string|
+                         libc\+\+abi: terminating due to uncaught exception.*eval_error.*Can not find object
+
+severity:               2
+category:               ohos|platform|rtti|dlopen|plugin|libc++
+match_keywords:         type_info, operator==, dlopen, 跨 DSO, 跨模块, type dispatch,
+                         push_back_ref, to_string const int, load_module, chaiscript,
+                         RTTI, libc++abi, typeid, 弱符号, type_info.hpp, 模块加载
+title:                  OHOS 上 exe 与 dlopen 模块各持同名类型的 type_info（指针不同），
+                        std::type_info::operator== 无名字比较回退——即使类型名完全相同
+                        也返回 false，依赖跨 DSO RTTI 同一性的 C++ 插件机制（含
+                        chaiscript load_module）类型分派全部失效
+
+root_cause: >
+  Itanium ABI 下跨 DSO 的 type_info 同一性靠两条腿：弱符号合并（单 DSO 内）或
+  libc++abi/libstdc++ 在 operator== 里做名字字符串回退（跨 DSO）。OHOS 的
+  libc++_shared.so 两条都不满足：exe 与模块各实例化一份 type_info（探针实测
+  指针 0x55c0… vs 0x5acf… 不同），operator== 对类型名完全相同
+  （NSt4__n14listIiNS_9allocatorIiEEEE / NSt4__n112basic_string… 两端逐字符一致）
+  仍返回 false。注意：双方都已 NEEDED libc++_shared.so 也救不了——共享 libc++
+  只合并库自身导出的类型（std::string 也不行，实测 which=2 同样 false），
+  模板实例化的 type_info 本来就在各自 DSO 里。chaiscript 的
+  Type_Info::operator==（type_info.hpp）仅回退到 std::type_info::operator==，
+  故模块注册的函数签名与主程序字面量/对象分派必失败。
+affected_scope: >
+  所有"主程序内嵌引擎 + dlopen 模块注册 C++ 函数/类型"形态的库：chaiscript
+  load_module、任何用 typeid 做跨 so 插件接口匹配的框架。单 TU / 静态集成 /
+  模块功能不用时完全不受影响（chaiscript 363 个非模块用例 + 48 Catch +
+  6 独立程序 + test_package 8 断言全过）。
+verification_cmd: >
+  最小探针（约 40 行，无需框架）：exe 取 typeid(std::list<int>)/自定义模板/
+  std::string，dlopen 一个提供同类型 typeid 的 .so，两端对比指针与
+  operator==。构建：clang++ -std=c++14 -fPIC -shared probe_mod.cpp -o
+  libprobe_mod.so && clang++ rtti_probe.cpp -ldl。OHOS 失败指纹：
+  ptr_same=NO op_eq=NO 且 exe_name==mod_name；glibc/Linux 成功指纹：
+  op_eq=YES（名字回退生效）。
+rec_priority:           1
+rec_approach:           compile-in-stdlib
+rec_description: >
+  chaiscript 用伞形头 <chaiscript/chaiscript.hpp> 的 ChaiScript() 默认构造
+  （编译内置 Std_Lib::library()，零 dlopen）——这是上游推荐且受支持的形态，
+  也是 header-library 交付的自然用法；test_package 按此写。需要模块生态的
+  使用者只能接受限制或改上游按类型名字符串分派（超出适配范围，PR 注明已知
+  限制）。失败定性流程：先跑探针区分"平台限制"与"配方缺陷"，再决定是否
+  写进 PR 已知限制，不要盲目改配方。
+rec_command: >
+  ./rtti_probe   # OHOS 真机；输出三行 ptr_same/op_eq/名称对比即为定性证据
+fallback_priority:      2
+fallback_approach:      single-dso-registration
+fallback_description:   把模块功能（如 stl_extra）直接编进主程序 TU 注册，
+                        放弃 dlopen 形态；或模块内只用 POD/void* 接口避免
+                        typeid 匹配。可行但改变使用形态，仅特定场景适用。
+fallback_command:       N/A（形态调整，无固定命令）
+fallback_auto_fix:      false
+
+similar_to:             DRAFT-chaiscript-6.1.0-constructor-stdlib-vs-dynload（单参构造
+                        才走模块加载路径，两条配合定位；hmdfs exec 坑亦涉及 so 执行环境）
+
+verified_on:            chaiscript 6.1.0（OHOS 6.0 真机，clang-15/armv8/libc++）
+verification_result: >
+  上游套件真机实测 417/429：12 失败（11 个 load_module 型 .chai +
+  multithreaded_test）全部命中本签名；补建 chaiscript_stdlib-6.1.0 模块复测
+  multithreaded_test：dlopen 与注册成功、仍报 to_string(const int) 分派失败
+  （排除"缺模块"假因）。RTTI 探针三类类型（std::list<int> 模板实例、用户
+  模板、std::string）全部 ptr_same=NO op_eq=NO 且名字逐字符相同。
+limitations: >
+  - 未测 RTLD_GLOBAL、-fvisibility=global、dlmopen 等变体是否影响结果；
+    探针默认 RTLD_NOW 局部作用域。
+  - 只覆盖 OHOS libc++（musl）；不同 OHOS SDK 版本行为未对比。

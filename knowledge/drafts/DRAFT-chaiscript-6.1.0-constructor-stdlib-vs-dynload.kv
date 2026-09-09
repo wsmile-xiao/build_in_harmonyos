@@ -1,0 +1,75 @@
+#====================================================================
+# DRAFT-chaiscript-6.1.0-constructor-stdlib-vs-dynload.kv
+# ChaiScript 6.x 两种构造形态与 dlopen 的关系：伞形头默认构造编译内置
+# stdlib 零 dlopen；单参 ChaiScript_Basic 构造运行时找模块，缺模块即
+# abort（Signal 6），OHOS 上还叠加跨 DSO RTTI 限制
+# 触发事件: chaiscript 6.1.0 真机 multithreaded_test 两轮定位（PR #8935）
+#====================================================================
+
+id:                     DRAFT-chaiscript-6.1.0-constructor-stdlib-vs-dynload
+trigger_tool:           runtime|conan create test_package|上游测试套件
+phase:                  runtime|test
+error_signature:        Error loading shared library.*chaiscript_stdlib-6\.1\.0.*No such file or directory|
+                         An error occured while trying to load the chaiscript standard library|
+                         Signal 6 \(core dumped\)|
+                         std::bad_alloc|terminating due to uncaught exception
+severity:               3
+category:               chaiscript|api|dlopen|constructor|upstream-behavior
+match_keywords:         ChaiScript_Basic, 单参构造, chaiscript_stdlib 模块,
+                         load_module, Std_Lib::library, chaiscript.hpp 伞形头,
+                         编译内置, dlopen, Signal 6, multithreaded_test,
+                         chaiscript_stdlib_module.cpp, 模块加载型构造
+title:                  chaiscript 6.x 构造函数选错形态的两种失败：单参
+                        ChaiScript_Basic 构造运行时 load_module 找不到
+                        chaiscript_stdlib-<ver> 直接 abort；OHOS 上即使补齐模块
+                        仍因跨 DSO type_info 失配分派失败——必须用伞形头默认构造
+root_cause: >
+  chaiscript.hpp:830 的 chaiscript::ChaiScript 多参构造把
+  Std_Lib::library() 与解析器编译进消费者 TU，启动零 dlopen（推荐形态）；
+  chaiscript_engine.hpp:323 的单参 explicit ChaiScript_Basic(parser, ...) 委托
+  空模块构造后主动 load_module("chaiscript_stdlib-" + version)——环境里没有
+  该 .so 时打印长提示并 rethrow，测试进程典型表现 Signal 6 abort。上游 CMake
+  会构建该模块目标（src/chaiscript_stdlib_module.cpp →
+  chaiscript_stdlib-6.1.0.so，load_module 依次尝试裸名/lib 前缀/
+  .so/.dll/.bundle 变体），自建 harness 漏掉它即触发。OHOS 上补齐模块后
+  dlopen 与注册成功，但跨 DSO type_info 失配使类型分派仍失败（见
+  DRAFT-chaiscript-6.1.0-cross-dso-typeinfo-identity）。
+affected_scope: >
+  消费者写错构造形态（从 5.x 迁移或抄上游测试代码如 multithreaded_test.cpp
+  的 create_chaiscript_stdlib()+parser 写法）；自建 harness 复用上游测试的
+  场景。
+verification_cmd: >
+  nm/strings 找符号：消费代码含 ChaiScript_Basic(parser 单参形态即命中；
+  运行期特征：ldd 无 chaiscript 依赖但 stderr 出现
+  "Error loading shared library chaiscript_stdlib-x.y.z" 列表。
+rec_priority:           1
+rec_approach:           umbrella-header-ctor
+rec_description: >
+  test_package 与一切消费者用 #include <chaiscript/chaiscript.hpp> +
+  chaiscript::ChaiScript chai; 默认构造（可传 modulepaths/usepaths，不改变
+  stdlib 编译内置事实）。从 5.x 迁移的代码注意 5.x ChaiScript() 曾默认
+  动态加载 stdlib，6.x 伞形头默认已编译内置，不要照搬旧 load_module 逻辑。
+rec_command: >
+  grep -rn "ChaiScript_Basic(" <consumer-src>   # 命中单参形态即需改造
+fallback_priority:      2
+fallback_approach:      build-stdlib-module
+fallback_description:   确需模块形态：编译 src/chaiscript_stdlib_module.cpp 为
+                        libchaiscript_stdlib-<ver>.so 放 CHAI_MODULE_PATH；
+                        OHOS 上可过加载关但过不了跨 DSO 分派关（仅证明机制）。
+fallback_command:       clang++ -std=c++14 -fPIC -shared src/chaiscript_stdlib_module.cpp -I<pkg>/include -o build/libchaiscript_stdlib-6.1.0.so
+fallback_auto_fix:      false
+
+similar_to:             DRAFT-chaiscript-6.1.0-cross-dso-typeinfo-identity（本条管
+                        "为什么会去 dlopen 与缺模块即崩"，彼条管"补齐模块后
+                        仍失败"的平台层根因，两条合成完整链路）
+
+verified_on:            chaiscript 6.1.0（OHOS 6.0 真机 + 本机 MSVC/C++14）
+verification_result: >
+  真机两轮 multithreaded_test：① 未建模块 → 构造函数抛 load_module_error →
+  Signal 6；② 补建模块（CMake MODULE 目标 + set_target_properties 命名对齐）
+  → dlopen/注册成功，转报 to_string(const int) 分派失败（跨 DSO RTTI）。
+  test_package 用伞形头默认构造 8/8 断言过（本机+真机）。
+limitations: >
+  - 5.x 的历史行为未在本仓库实测，"5.x 默认动态加载"来自上游文档与 gist
+    链接提示，迁移代码请以编译器报错为准。
+  - 模块命名的版本号来自 Build_Info::version()，跨版本模块不通用。
