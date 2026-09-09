@@ -1,0 +1,78 @@
+#====================================================================
+# E549 — 无主构建系统上游的 shell configure 测试套件在 OHOS 的全量复现
+# 用法: 验证后由主编提升为正式 E549 条目
+# 对应的人类文档: knowledge/drafts/E549-draft-S34A.md
+#
+# 实例: stats 3.4.0 (feat/stats-3.4.0)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E549
+trigger_tool:           configure|make|clang|ld
+phase:                  linking|compilation|testing
+error_signature:        unable to find library -l(blas|lapack)|make.*\*\*\*.*(Error 127)|g\+\+.*not found|cannot find the GCEM library header|fatal error: '(stats|gcem)\.hpp' file not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, testing, headers, ohos, portability
+match_keywords:         shell configure, configure.in, test suite, standalone test programs, header-only, GCEM_INCLUDE_PATH, STATS_MATRIX_OPS, CXX override, blas, lapack, generated CMake driver, upstream test reproduction, no build system, kthohr, stats, gcem
+title:                   无主构建系统上游的 shell configure 测试套件：环境变量覆盖去掉硬编码工具链并用生成的 CMake driver 在 conan create 内全量复现
+prescan_pattern:        test_setup/configure\.in|tests/setup|\.test\b.*EXECUTABLES|add_executable.*\*\.cpp
+prescan_globs:          'tests/**, test_setup/**, Makefile*, configure*'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游仓库没有主构建系统（交付物为纯头文件或单目录源码），测试是"shell setup 脚本 + 每套件 configure.in/Makefile.in + 独立 .cpp 程序"结构；configure 脚本在非 darwin 平台硬编码 CXX=g++ 并默认链接 -lblas -llapack（darwin 给 -framework Accelerate），OHOS 环境既无 g++ 也无 blas/lapack，且头文件库本体根本不依赖这些库——链接失败完全来自测试套件的默认值而非库的适配问题。
+affected_scope:         kthohr 系仓库（stats、gcem、quickstats 等共用同一测试骨架）以及一切"无 CMake/Autotools 主构建、tests/ 下为 shell configure + 独立测试程序"结构的上游；在 OHOS/无 g++ 无 BLAS 的交叉环境复现上游测试时适用。
+verification_cmd:       grep -nE "CXX=g\+\+|lblas|llapack|STATS_MATRIX_OPS|GCEM_INCLUDE_PATH" tests/test_setup/configure.in；CXX=clang++ STATS_MATRIX_OPS="" bash ./configure -s 后 make 检查是否仍报 -lblas；conan create 日志中应出现全部 STATS_UPSTREAM_TEST[i/N]
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           env-override-shell-configure-plus-cmake-driver
+rec_description:        两步复现：设备探索阶段用 configure 自带的环境变量钩子覆盖默认值（CXX=clang++、STATS_MATRIX_OPS="" 置空 BLAS/LAPACK、GCEM_INCLUDE_PATH 指向 gcem 包 include、-s 开启 std::vector 包装器），不改上游源码跑通全量测试；配方固化阶段在 conanfile build() 里用 save() 生成 CMake driver（对每个测试程序 add_executable 绝对路径 + target_include_directories 指向 source include 与依赖包 include），cmake.build() 后逐个 self.run 断言退出码，使 conan create 在干净机器上自包含复现同一测试证据。
+rec_command:            CXX=clang++ STATS_MATRIX_OPS="" GCEM_INCLUDE_PATH=<gcem-include> bash ./configure -s -o "-O2 -DNDEBUG" && make -j1 && ./xxx.test
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      patch-configure-in-defaults
+fallback_description:   configure 不支持环境变量钩子时才改用 refresh-patch --auto 给 configure.in/Makefile.in 打补丁改默认值（补丁需带 a/ b/ 前缀并在 conandata.yml 配 strip: 1）；能用环境变量覆盖时禁止打补丁，减少补丁维护面。
+fallback_command:       python3 scripts/ohc-run.py refresh-patch --auto <name> <version>
+fallback_auto_fix:      false
+fallback_impl:          recipe|patch
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       conandata\.yml.*lblas|add.*blas.*dependency|requires.*blas
+forbid_1_reason:        头文件库本体不依赖 BLAS/LAPACK，为消测试套件链接错误而给包引入 blas 依赖是错误归因，还会拖入未发布的依赖链
+forbid_1_consequence:   R36 依赖闸拦截或 CI 编译无关依赖失败；包元数据携带虚假依赖语义
+forbid_2_pattern:       copy\(.*\*\.hpp.*\)(?!.*ipp)|package.*only.*hpp
+forbid_2_reason:        这类上游的 include 树同时含 .hpp 与 .ipp（模板实现内联文件），package() 只拷 *.hpp 会让消费者编译报 fatal error: 'xxx.ipp' file not found
+forbid_2_consequence:   test_package 或下游在链接期/编译期找不到内联实现文件，CI 失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             no-silent-skip, provenance-verifiable
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E257, E307, E321, E322]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E549.md
+last_updated: 2026-09-05
+source_event:           stats 3.4.0 OHOS AArch64 适配：dens/prob/quant/rand 四套件 84 个测试程序在 make 阶段报 "ld.lld: error: unable to find library -lblas"（g++ 缺失 Error 127 先行）；环境变量覆盖 + 生成 CMake driver 后 84/84 全部在 conan create 内复现通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-05
+
+draft: true
+contributor_id: S34A
