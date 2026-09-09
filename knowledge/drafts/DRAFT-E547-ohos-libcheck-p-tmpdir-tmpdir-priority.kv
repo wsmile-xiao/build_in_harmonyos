@@ -1,0 +1,71 @@
+# ═══ Draft knowledge entry — libcheck P_tmpdir 优先于 TMPDIR,/tmp 只读时测试无法启动 ═══
+# Timestamp: 2026-09-07
+# Software: cjose 0.6.2.7（任何以 check ≥ 0.9.4 为测试框架的 autotools 包）
+# Gate: 原生 make check（conan build() 内 autotools.make(target="check") 同理）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E547
+title: libcheck 0.15.x 的 open_tmp_file 优先用固化 /tmp（P_tmpdir），设备 /tmp 只读时 check 测试报 Unable to create temporary file
+trigger_tool: check / make
+phase: testing
+error_signature: Unable to create temporary file for communication; may not have permissions to do so|check_msg\.c:317
+severity: 3
+category: platform|hmdfs|test-framework
+match_keywords: check_msg.c,Unable to create temporary file,check,mkstemp,P_tmpdir,TMPDIR
+keywords: libcheck, check_msg.c, mkstemp, P_tmpdir, TMPDIR, TEMP, /tmp read-only,
+  check_cjose, exit status 2, 测试框架迁移, check 环境准备
+approach: make check 的 test 二进制编译链接成功但 exit status 2，check_msg.c:317 报
+  "Unable to create temporary file for communication" 时，先排除 E011（umask 077 目录不可写），
+  再核对 open_tmp_file 的目录优先级：libcheck 0.15.x 取值顺序为 TEMP → P_tmpdir（musl
+  stdio 固化 "/tmp"）→ TMPDIR → "."，TMPDIR 顺序在 P_tmpdir 之后，因此只 export TMPDIR
+  指向可写目录无效。修正方式是在测试框架（本例 libcheck 为仅测试使用的源码自建私有依赖）
+  源码中把 TMPDIR 探测提升到 P_tmpdir 之前，用目标编译器重建 libcheck.a 后重链测试二进制；
+  原理上亦可在运行 shell 预置可写的 TEMP= 达成（TEMP 优先级最高），但 TEMP 是更宽的
+  全局别名，优先改源码避免测试框架行为依赖环境别名
+root_cause: OHOS 设备 /tmp 为只读 root 目录（实测 drwxr-xr-x root root），而 musl/glibc 的
+  P_tmpdir 宏固定展开为 "/tmp"；libcheck 0.15.x 的 open_tmp_file（src/check_msg.c）把
+  P_tmpdir 的探测优先级放在环境变量 TMPDIR 之前，与"环境变量覆盖内建默认"的常规预期相反，
+  导致 TMPDIR 指向可写任务目录仍被忽略，mkstemp("/tmp/...") 以 EACCES/EROFS 失败，
+  check 框架父子进程通信文件无法创建
+affected_scope: 所有在 OHOS 设备上运行、以 libcheck（≥0.10 含 open_tmp_file 重写版）为测试
+  框架且设备 /tmp 不可写的 autotools 包；典型触发链为 check 自动探测成功
+  （PKG_CHECK_MODULES 命中 conan 侧自建 .pc）后 make check 阶段全军覆没；
+  ohpcd 已发布的 check/0.15.2 conan binary 同样命中（实测 cjose 任务
+  TMPDIR=<可写目录> make check 仍报 check_msg.c:317，构建路径
+  .conan2/p/b/check01f6875eb3aa2/b/src/check_msg.c），即发布版测试 binary
+  不可用于设备测试，必须私有自建修正版
+verification_cmd: TMPDIR=<可写目录> make check 2>&1 | grep -c "check_msg.c:317"  # 仍>0 即命中
+rec_priority: 1
+rec_approach: promote-tmpdir-before-p_tmpdir
+rec_description: 在测试框架私有副本 src/check_msg.c 的 open_tmp_file 中，将 getenv("TMPDIR")
+  探测移到 P_tmpdir 之前（TEMP 保持最高），以目标编译器重建 libcheck 并重链测试；
+  测试运行环境显式 export TMPDIR=<任务可写目录>（配合 workflow 沙箱 HOME 口径）
+rec_command: sed 顺序调整后 make -C <check-build> && make install MAKEINFO=true，再重跑 make check
+rec_auto_fix: false
+rec_impl: test-framework-side（私有探索/测试依赖内修改，不改被测软件源码，不进包补丁）
+fallback_priority: 2
+fallback_approach: preset-writable-TEMP-env
+fallback_description: 若不可修改测试框架源码（如复用发行版二进制 libcheck.a），在测试运行环境
+  预置 TEMP=<可写目录>——open_tmp_file 对 TEMP 的探测优先级最高，可整体跳过 P_tmpdir
+fallback_command: TEMP="$TASK_DIR/tmp" TMPDIR="$TASK_DIR/tmp" make check
+fallback_auto_fix: false
+fallback_impl: 运行环境注入
+principles: 设备上固化 "/tmp" 的 P_tmpdir 与只读 /tmp 组合是测试框架通用雷区；测试框架的
+  临时目录选择必须显式验证而非依赖宏默认值
+caused_by: 设备 /tmp 只读 + libcheck open_tmp_file 的 TEMP→P_tmpdir→TMPDIR→"." 探测顺序
+causes: make check 阶段全部测试 exit status 2（编译链接均正常，属运行环境故障而非用例失败）
+similar_to: E011（同为 autoconf/check 临时目录类故障；E011 是 umask 077 目录权限位问题，
+  本条是 P_tmpdir 优先级问题，二者可叠加出现，需按 evidence 区分）
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-E547-ohos-libcheck-p-tmpdir-tmpdir-priority.md
+last_updated: 2026-09-07
+source_event: cjose 0.6.2.7 设备 make check：85 用例全部 exit 2，TMPDIR 指向可写目录无效，
+  读 check_msg.c 定位探测顺序后重建 libcheck 解决
+authors: Awstme
+source_pr: (本 PR)
+source_commit: (待提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-07
