@@ -1,0 +1,52 @@
+--- a/lockfile.c
++++ b/lockfile.c
+@@ -311,22 +311,48 @@
+ 		dontsleep = 0;
+ 
+ 
+ 		/*
+ 		 *	Now lock by linking the tempfile to the lock.
+ 		 *
+ 		 *	KLUDGE: some people say the return code of
+ 		 *	link() over NFS can't be trusted.
+ 		 *	EXTRA FIX: the value of the nlink field
+ 		 *	can't be trusted (may be cached).
++		 *
++		 *	Filesystems without hard-link support (HMDFS on
++		 *	HarmonyOS, some NFS mounts) make link() fail with
++		 *	EPERM.  Fall back to atomically creating the
++		 *	lockfile with O_EXCL and writing the pid into it.
+ 		 */
+-		(void)!link(tmplock, lockfile);
++		if (link(tmplock, lockfile) < 0 &&
++		    (errno == EPERM || errno == EOPNOTSUPP || errno == ENOTSUP)) {
++			int lfd = open(lockfile, O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0644);
++			if (lfd >= 0) {
++				int w = write(lfd, pidbuf, pidlen);
++				int we = errno;
++				(void)close(lfd);
++				if (w == pidlen) {
++					(void)unlink(tmplock);
++					tmplock[0] = 0;
++					return L_SUCCESS;
++				}
++				(void)unlink(lockfile);
++				(void)unlink(tmplock);
++				tmplock[0] = 0;
++				errno = we;
++				return L_TMPWRITE;
++			}
++			/* EEXIST (already locked) or open failure: fall
++			 * through to the lstat verification and
++			 * stale-lock handling below. */
++		}
+ 
+ 		if (lstat(tmplock, &st1) < 0) {
+ 			tmplock[0] = 0;
+ 			return L_ERROR; /* Can't happen */
+ 		}
+ 
+ 		if (lstat(lockfile, &st) < 0) {
+ 			if (statfailed++ > 5) {
+ 				/*
+ 				 *	Normally, this can't happen; either
