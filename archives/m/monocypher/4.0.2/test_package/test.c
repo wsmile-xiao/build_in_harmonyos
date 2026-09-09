@@ -1,0 +1,39 @@
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <monocypher.h>
+
+/* BLAKE2b-512("abc") — standard official test vector. */
+static const uint8_t expected[64] = {
+    0xba, 0x80, 0xa5, 0x3f, 0x98, 0x1c, 0x4d, 0x0d,
+    0x6a, 0x27, 0x97, 0xb6, 0x9f, 0x12, 0xf6, 0xe9,
+    0x4c, 0x21, 0x2f, 0x14, 0x68, 0x5a, 0xc4, 0xb7,
+    0x4b, 0x12, 0xbb, 0x6f, 0xdb, 0xff, 0xa2, 0xd1,
+    0x7d, 0x87, 0xc5, 0x39, 0x2a, 0xab, 0x79, 0x2d,
+    0xc2, 0x52, 0xd5, 0xde, 0x45, 0x33, 0xcc, 0x95,
+    0x18, 0xd3, 0x8a, 0xa8, 0xdb, 0xf1, 0x92, 0x5a,
+    0xb9, 0x23, 0x86, 0xed, 0xd4, 0x00, 0x99, 0x23,
+};
+
+int main(void) {
+    const uint8_t msg[] = "abc";
+    uint8_t hash[64];
+    uint8_t secret[16];
+
+    crypto_blake2b(hash, sizeof(hash), msg, 3);
+    if (memcmp(hash, expected, sizeof(expected)) != 0) {
+        printf("monocypher test FAILED: blake2b(\"abc\") mismatch\n");
+        return 1;
+    }
+    memset(secret, 0x42, sizeof(secret));
+    crypto_wipe(secret, sizeof(secret));
+    for (size_t i = 0; i < sizeof(secret); i++) {
+        if (secret[i] != 0) {
+            printf("monocypher test FAILED: crypto_wipe did not zero memory\n");
+            return 1;
+        }
+    }
+    printf("monocypher test OK: blake2b vector + crypto_wipe verified\n");
+    return 0;
+}
