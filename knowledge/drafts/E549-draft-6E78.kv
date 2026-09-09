@@ -1,0 +1,72 @@
+draft: E549-draft-6E78
+status: pending-editor-review
+title: "上游测试依赖 freedesktop 共享数据库（mime/tzdata）缺失——tool_requires 测试期注入配方化"
+category: conan, testing, qt6, kf6, environment
+match_keywords: >
+  shared-mime-info, freedesktop.org.xml, QMimeDatabase, XDG_DATA_DIRS,
+  mimetypes contains returned false, mimetype is not registered,
+  mime database missing, tzdata, TZDIR, QT_ZONEINFO, zoneinfo,
+  tool_requires, upstream autotests, ctest, offscreen, conan copy no-op,
+  shutil copy, conan cache dual layout
+error_signature: >
+  plugin\.mimetypes\(\)\.contains\(mimeType\).+returned FALSE|
+  Expected mimetype is not registered|
+  QMimeXMLProvider: MimeType is ambiguous|
+  system time zone undeterminable|
+  Extracting.*Invalid Locale encoding
+root_cause: >
+  OHOS 系统不带 freedesktop 共享数据库：无 /usr/share/mime（QMimeDatabase
+  仅剩 Qt 编译内置的极小 mime 子集）、无 /usr/share/zoneinfo。上游测试夹具
+  按 mimetype 匹配提取器插件（MimeUtils::strictMimeType）或按命名时区解析时
+  识别退化（test.kra→application/zip、test.ape→audio/x-mod），失败语义指向
+  包缺陷，实际是测试环境缺数据资产——库二进制本身功能正常。伴生陷阱两个：
+  ①conan 缓存双布局：/p/<pkg前缀>*/p/lib（直装）与 /p/b/<pkg前缀>*/p/lib
+  （构建树）并存，手工收集测试 LD_LIBRARY_PATH 必须双扫并冒号分隔；
+  ②conan.tools.files.copy() 单文件改名复制是静默 no-op——pattern 在 src
+  目录里按文件名匹配，src 传具体文件路径时目录枚举不到该条目，不报错
+  也不产出目标文件（实测整轮 conan create 后暂存 XML 缺失、注入"生效"
+  但通过率纹丝不动）。
+solution: |
+  把共享数据库当测试期数据资产用 conan 包注入（不进消费者图/package_id）：
+  ```python
+  # build_requirements():
+  #   mime: shared-mime-info/2.4（制品仓在仓，含 data/freedesktop.org.xml.in）
+  #   tz:   tzdata/2026.3（kcalendarcore 6.26.0 先例）
+  self.tool_requires("shared-mime-info/2.4")
+
+  # _run_upstream_tests()（mime 变体）：
+  smi = self.dependencies.build.get("shared-mime-info")
+  if smi and smi.package_folder:
+      smi_xml = os.path.join(smi.package_folder, "data", "freedesktop.org.xml.in")
+      if os.path.isfile(smi_xml):
+          mime_pkgs = os.path.join(self.build_folder, "share", "mime", "packages")
+          os.makedirs(mime_pkgs, exist_ok=True)
+          staged = os.path.join(mime_pkgs, "freedesktop.org.xml")
+          if not os.path.isfile(staged):
+              shutil.copy(smi_xml, staged)   # ⚠ conan copy 此处静默 no-op
+          env.prepend_path("XDG_DATA_DIRS", os.path.join(self.build_folder, "share"))
+  # 时区变体（kcalendarcore 先例）：
+  #   test_env.define("TZDIR", zoneinfo_tree)
+  #   test_env.define("QT_ZONEINFO", zoneinfo_tree)
+  ```
+  原理：QMimeXMLProvider 扫 <XDG_DATA_DIRS>/mime/packages/*.xml；QTimeZone
+  读 TZDIR/QT_ZONEINFO。与同函数内既有注入（LD_LIBRARY_PATH 全依赖 lib 双扫
+  /system/lib64 前置/QT_PLUGIN_PATH/QT_QPA_PLATFORM=offscreen）共同构成
+  _run_upstream_tests 的测试环境固化。
+fallback: >
+  数据包不在制品仓时：mime 类可在配方内打包最小 XML 子集（仅含被测库注册的
+  mimetype + 其 glob/魔数定义，DRAFT 内附 krita/ape 两条最小示例），或推动
+  shared-mime-info 入仓后再切包注入；均不可行时在 PR 正文按"环境限制"逐项
+  豁免并保留失败明细（禁 stub/禁跳过断言）。
+verify_builds: "#41899 (PR #8700, CI 绿), conan create 本地 cf3a3334019959930b606987508405eee120183f"
+reference_impl: >
+  kfilemetadata 6.28.0 archives/k/kfilemetadata/6.28.0/conanfile.py
+  （#8700 修复轮 commit c32ced04b9，26 测试 15→23 过）；
+  kcalendarcore 6.26.0 tzdata 注入先例（#8667）
+similar_to: >
+  DRAFT-ohos-conan-copy-fnmatch-anchored（踩坑2 的底层机制同源：copy pattern
+  经 fnmatch 锚定匹配相对 src 的路径——该草稿讲"子目录产物 pattern 0 匹配"，
+  本文补充"src 传具体文件路径时同样枚举不到"的触发形态；mime/tzdata 注入
+  主题与其无重叠）
+id: E549
+doc_file: doc/E549.md
