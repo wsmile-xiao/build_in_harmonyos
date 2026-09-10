@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-ohos-ax-icuio-u-fopen-pipe-probe-kv1 — AX_ICUIO 管道探测 SIGPIPE（clang 下）
+# 触发事件: cif-api 0.4.2 HarmonyOS PC 适配（configure AX_ICUIO 阶段失败）
+#====================================================================
+
+id:                     DRAFT-ohos-ax-icuio-u-fopen-pipe-probe-kv1
+trigger_tool:           configure|AX_ICUIO|autoconf-archive
+phase:                  configuration
+error_signature:        write on a pipe with no reader|Failed to determine the true name of u_fopen|An error while determining the true name of u_fopen|checking the real name of u_fopen
+
+severity:               2
+category:               toolchain|autotools|autoconf-archive|icu
+match_keywords:         AX_ICUIO, u_fopen, icu-io, icuio, ICU I/O, autoconf-archive,
+                         m4/ax_icuio.m4, SIGPIPE, write on a pipe with no reader,
+                         sed -n, CONF_LINE, u_fopen_77, configure, clang, cpp,
+                         pipe probe, ICU_PKG
+title:                  AX_ICUIO 宏的 ${CPP} | sed -n ... q 管道探测在新 clang 下 SIGPIPE 失败
+
+root_cause: >
+    autoconf-archive 的 AX_ICUIO 宏（m4/ax_icuio.m4）为确定 ICU 的 u_fopen() 宏
+    展开后的真实符号名（如 u_fopen_77），使用管道：
+        _ax_icuio_UFOPEN=`${CPP} ${CPPFLAGS} conftest.c |
+            ${SED} -n -e '/^\s*#/d' -e '/^CONF_LINE/,/()/H' -e '/()/{x;s/.../\1/p;q}'`
+    sed 在第 3 个表达式命中 "CONF_LINE: u_fopen_77()" 后立即 `q` 退出，管道读端关闭；
+    而新版本 clang（15.x）的 `-E` 预处理继续向管道写输出，触发 SIGPIPE
+    （"write on a pipe with no reader"）。`_ax_icuio_UFOPEN` 取到空/错误值 → configure
+    报 "Failed to determine the true name of u_fopen" 中止。
+    这是 autoconf-archive 宏自身的缺陷（依赖 sed 先读完再退出的旧实现假设），
+    非 OHOS 特有——任何用 clang 编译且开启 AX_ICUIO 检查的 autotools 库都会踩中。
+
+fix_approach: |
+    在配方 build() 内对 configure 脚本做精确文本替换，把该管道探测段整体替换为
+    硬编码真实符号名（跳过探测）：
+        old = (
+            "_ax_icuio_UFOPEN=`${CPP} ${CPPFLAGS} conftest.c | ${SED} "
+            "-n -e '/^\\s*#/d' -e '/^CONF_LINE/,/()/H' "
+            "-e '/()/{x;s/\\s*\\S\\+\\s\\+\\(\\w\\+\\).*/\\1/p;q}'` \\\n"
+            "    || _ax_icuio_UFOPEN='error'"
+        )
+        configure = configure.replace(old, "_ax_icuio_UFOPEN='u_fopen_77'")
+    注意：
+    (1) 该段在 configure 中是**两行反斜杠续行**结构（`...` \\n  `    || ...`），
+        正则容易漏匹配，必须用精确多行字符串替换；
+    (2) 符号真名由 ICU 版本决定（ICU 77 → u_fopen_77），可用
+        `clang -E -I<icu-include> conftest.c` 实测确认（CONF_LINE 行输出即真名）；
+    (3) 替换后 configure 继续做 `checking for u_fopen_77...` 链接探测，
+        该步要求 ICU 库可链接——icu4c 静态 .a 是 C++ 库，需在 LDFLAGS 注入 -lc++
+        （__gxx_personality_v0/__cxa_begin_catch），否则链接检查仍失败。
+    通用替代方案（若库可改源码）：把 AX_ICUIO 的 sed 管道改为
+    `sed -n -e '/^CONF_LINE/{s/.*CONF_LINE: *//;s/(.*//;p;q;}'`（先取行再退出），
+    避免 SIGPIPE；或向 autoconf-archive 上游提交 m4 修复。
+    ICU I/O 依赖声明：ohpcd 的 icu4c 包 package_info 只声明 pkg_config_name=icu-uc，
+    PkgConfigDeps 不生成 icu-io.pc，而 AX_ICUIO 需要 `icu-io`/`icu` tag ——
+    需从 icu4c 包内复制 icu-io.pc 到 generators（pygobject girepository-2.0.pc、
+    libgudev libudev.pc 同款 .pc 复制模式）。
+
+affected_software: |
+    cif-api (COMCIFS),
+    任何在 clang ≥ 某版本下用 autoconf-archive AX_ICUIO 宏且开启 ICU I/O 检查的
+    autotools 项目（如依赖 libicuio 的库）
+platform:               OHOS 6.0 arm64 (HongMeng Kernel), clang 15.0.4, conan 2.29.1 (ohpcd)
+verification: |
+    cif-api 0.4.2 适配实测：配置期内
+    "checking the real name of u_fopen()... u_fopen_77"（patch 前报
+    "write on a pipe with no reader" + "Failed to determine the true name of u_fopen"）；
+    注入 -lc++ 后 "checking for u_fopen_77... yes"；
+    conan create cif-api/0.4.2 EXIT=0（Package created，libcif.so 构建，
+    test_package 运行时真实执行 'cif-api OK (container created)'）。
+conan_package:          icu4c/77, sqlite3/3.53.4
+applicable_to:          所有在 OHOS 上用 clang 构建、configure 含 AX_ICUIO 检查（ICU I/O）
+                        的 autotools 项目；任何遇到 "${CPP} | sed ... q" 管道探测 SIGPIPE
+                        的配置阶段失败场景
+not_applicable_to: |
+    GCC 或其他未触发 SIGPIPE 的编译器（管道写端不被提前关闭，探测可正常完成）；
+    ICU I/O 未被启用（--without-icuio 或库不调用 AX_ICUIO）的项目；
+    已修复该宏的上游 autoconf-archive 版本（需核对 m4 实现）
+dedup_keywords:         AX_ICUIO u_fopen; pipe probe SIGPIPE configure;
+                        write on a pipe with no reader; ICU I/O true name
+dedup_conclusion: |
+    查重范围 knowledge/{doc,graph,drafts,index.tsv}：
+    SIGPIPE 关键词的既有条目为 E106（GNU coreutils cat stdout 权限受限导致
+    configure SIGPIPE）——根因不同（E106=cat 写 stdout 权限/SELinux，本稿=sed q
+    提前关闭管道读端），为 similar_to 关系而非重复；
+    AX_ICUIO / u_fopen / ICU I/O / autoconf-archive 宏缺陷在现有 doc/graph/drafts
+    中未见专条，为本稿新增价值核心。
+    drafts 中无同名/同 stem 草稿，不占用正式 E 编号。
