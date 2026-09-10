@@ -1,0 +1,177 @@
+--- a/src/gui/text/freetype/qfreetypefontdatabase.cpp
++++ b/src/gui/text/freetype/qfreetypefontdatabase.cpp
+@@ -5,20 +5,21 @@
+
+ #include <QtGui/private/qguiapplication_p.h>
+ #include <qpa/qplatformscreen.h>
+
+ #include <QtCore/QFile>
+ #include <QtCore/QLibraryInfo>
+ #include <QtCore/QDir>
+ #include <QtCore/QtEndian>
+ #include <QtCore/QLoggingCategory>
+ #include <QtCore/QUuid>
++#include <array>
+
+ #undef QT_NO_FREETYPE
+ #include "qfontengine_ft_p.h"
+
+ #include <ft2build.h>
+ #include FT_TRUETYPE_TABLES_H
+ #include FT_ERRORS_H
+
+ #include FT_MULTIPLE_MASTERS_H
+ #include FT_SFNT_NAMES_H
+@@ -38,20 +39,21 @@
+                  "Note that Qt no longer ships fonts. Deploy some (from https://dejavu-fonts.github.io/ for example) or switch to fontconfig.",
+                  qPrintable(fontpath));
+         return;
+     }
+
+     static const QString nameFilters[] = {
+         u"*.ttf"_s,
+         u"*.pfa"_s,
+         u"*.pfb"_s,
+         u"*.otf"_s,
++        u"*.ttc"_s,
+     };
+
+     const auto fis = dir.entryInfoList(QStringList::fromReadOnlyData(nameFilters), QDir::Files);
+     for (const QFileInfo &fi : fis) {
+         const QByteArray file = QFile::encodeName(fi.absoluteFilePath());
+         QFreeTypeFontDatabase::addTTFile(QByteArray(), file);
+     }
+ }
+
+ QFontEngine *QFreeTypeFontDatabase::fontEngine(const QFontDef &fontDef, void *usrPtr)
+@@ -85,20 +87,51 @@
+     return QFreeTypeFontDatabase::addTTFile(fontData, fileName.toLocal8Bit(), applicationFont);
+ }
+
+ void QFreeTypeFontDatabase::releaseHandle(void *handle)
+ {
+     FontFile *file = static_cast<FontFile *>(handle);
+     delete file;
+ }
+
+ extern FT_Library qt_getFreetype();
++extern int qt_script_for_writing_system(QFontDatabase::WritingSystem writingSystem);
++
++QStringList QFreeTypeFontDatabase::fallbacksForFamily(const QString &family, QFont::Style style,
++        QFont::StyleHint styleHint, QFontDatabasePrivate::ExtendedScript script) const
++{
++    QStringList result = QPlatformFontDatabase::fallbacksForFamily(family, style, styleHint, script);
++    if (script != QFontDatabasePrivate::Script_Common
++            && script != QFontDatabasePrivate::Script_Latin)
++        return result;
++
++    QStringList preferred;
++    if (styleHint == QFont::Monospace || styleHint == QFont::TypeWriter
++            || family.compare("monospace"_L1, Qt::CaseInsensitive) == 0) {
++        for (const QString &candidate : result) {
++            if (QFontDatabase::isFixedPitch(candidate)
++                    && QFontDatabase::writingSystems(candidate).contains(QFontDatabase::Latin))
++                preferred.append(candidate);
++        }
++    } else if (styleHint == QFont::Serif) {
++        preferred = {"Noto Serif"_L1, "DejaVu Serif"_L1, "Liberation Serif"_L1};
++    } else {
++        preferred = {"HarmonyOS Sans"_L1, "Noto Sans"_L1, "DejaVu Sans"_L1,
++                     "Roboto"_L1, "Liberation Sans"_L1};
++    }
++    QStringList ordered;
++    for (const QString &candidate : preferred) {
++        if (result.removeAll(candidate))
++            ordered.append(candidate);
++    }
++    return ordered + result;
++}
+
+ void QFreeTypeFontDatabase::addNamedInstancesForFace(void *face_,
+                                                      int faceIndex,
+                                                      const QString &family,
+                                                      const QString &styleName,
+                                                      QFont::Weight weight,
+                                                      QFont::Stretch stretch,
+                                                      QFont::Style style,
+                                                      bool fixedPitch,
+                                                      bool isColor,
+@@ -259,20 +292,52 @@
+                 quint32(os2->ulUnicodeRange2),
+                 quint32(os2->ulUnicodeRange3),
+                 quint32(os2->ulUnicodeRange4)
+             };
+             quint32 codePageRange[2] = {
+                 quint32(os2->ulCodePageRange1),
+                 quint32(os2->ulCodePageRange2)
+             };
+
+             writingSystems = QPlatformFontDatabase::writingSystemsFromTrueTypeBits(unicodeRange, codePageRange);
++
++            // Variable monospaced fonts can omit the post-table fixed-pitch flag
++            // while retaining the Latin-text PANOSE monospaced classification.
++            fixedPitch |= os2->panose[0] == 2 && os2->panose[3] == 9;
++
++            // Some fonts advertise scripts for which their cmap has no glyphs.
++            // Keep partial coverage, but reject wholly absent scripts so that
++            // QRawFont and text layout choose the same usable fallback.
++            if (face->charmap && face->charmap->encoding == FT_ENCODING_UNICODE) {
++                std::array<bool, QChar::ScriptCount> scripts = {};
++                FT_UInt glyphIndex = 0;
++                for (FT_ULong cp = FT_Get_First_Char(face, &glyphIndex); glyphIndex;
++                     cp = FT_Get_Next_Char(face, cp, &glyphIndex)) {
++                    if (cp <= 0x10ffff)
++                        scripts[QChar::script(char32_t(cp))] = true;
++                }
++                for (int i = 1; i < QFontDatabase::WritingSystemsCount; ++i) {
++                    const auto ws = QFontDatabase::WritingSystem(i);
++                    const int script = qt_script_for_writing_system(ws);
++                    bool hasGlyphs = script >= 0 && script < QChar::ScriptCount && scripts[script];
++                    if (ws == QFontDatabase::Japanese)
++                        hasGlyphs |= scripts[QChar::Script_Hiragana] || scripts[QChar::Script_Katakana];
++                    else if (ws == QFontDatabase::TraditionalChinese)
++                        hasGlyphs |= scripts[QChar::Script_Bopomofo];
++                    // Inherited combining marks can contribute to several
++                    // scripts; retain advertised coverage in that case.
++                    hasGlyphs |= scripts[QChar::Script_Inherited];
++                    if (writingSystems.supported(ws) && script > QChar::Script_Common
++                            && script < QChar::ScriptCount && !hasGlyphs)
++                        writingSystems.setSupported(ws, false);
++                }
++            }
+
+             if (os2->usWeightClass) {
+                 weight = static_cast<QFont::Weight>(os2->usWeightClass);
+             } else if (os2->panose[2]) {
+                 int w = os2->panose[2];
+                 if (w <= 1)
+                     weight = QFont::Thin;
+                 else if (w <= 2)
+                     weight = QFont::ExtraLight;
+                 else if (w <= 3)
+--- a/src/gui/text/freetype/qfreetypefontdatabase_p.h
++++ b/src/gui/text/freetype/qfreetypefontdatabase_p.h
+@@ -31,20 +31,23 @@
+     // Note: The data may be implicitly shared throughout the
+     // font database and platform font database, so be careful
+     // to never detach when accessing this member!
+     const QByteArray data;
+ };
+
+ class Q_GUI_EXPORT QFreeTypeFontDatabase : public QPlatformFontDatabase
+ {
+ public:
+     void populateFontDatabase() override;
++    QStringList fallbacksForFamily(const QString &family, QFont::Style style,
++                                  QFont::StyleHint styleHint,
++                                  QFontDatabasePrivate::ExtendedScript script) const override;
+     QFontEngine *fontEngine(const QFontDef &fontDef, void *handle) override;
+     QFontEngine *fontEngine(const QByteArray &fontData, qreal pixelSize, QFont::HintingPreference hintingPreference) override;
+     QStringList addApplicationFont(const QByteArray &fontData, const QString &fileName, QFontDatabasePrivate::ApplicationFont *applicationFont = nullptr) override;
+     void releaseHandle(void *handle) override;
+     bool supportsVariableApplicationFonts() const override;
+     bool supportsColrv0Fonts() const override;
+
+     static void addNamedInstancesForFace(void *face, int faceIndex,
+                                          const QString &family, const QString &styleName,
+                                          QFont::Weight weight, QFont::Stretch stretch,
