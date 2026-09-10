@@ -1,0 +1,143 @@
+--- a/cowdancer.c
++++ b/cowdancer.c
+@@ -38,6 +38,7 @@
+ /* libc functions. */
+ static int (*origlibc_open)(const char *, int, ...) = NULL;
+ static int (*origlibc_open64)(const char *, int, ...) = NULL;
++static int (*origlibc_openat)(int, const char *, int, ...) = NULL;
+ static int (*origlibc_creat)(const char *, mode_t) = NULL;
+ static int (*origlibc_creat64)(const char *, mode_t) = NULL;
+ static FILE *(*origlibc_fopen)(const char *, const char *) = NULL;
+@@ -195,6 +196,7 @@
+ 		initialized = 1;
+ 		origlibc_open = dlsym(RTLD_NEXT, "open");
+ 		origlibc_open64 = dlsym(RTLD_NEXT, "open64");
++		origlibc_openat = dlsym(RTLD_NEXT, "openat");
+ 		origlibc_creat = dlsym(RTLD_NEXT, "creat");
+ 		origlibc_creat64 = dlsym(RTLD_NEXT, "creat64");
+ 		origlibc_fopen = dlsym(RTLD_NEXT, "fopen64");
+@@ -295,7 +297,7 @@
+ 	}
+ 	if (canonicalize && S_ISLNK(buf.st_mode)) {
+ 		/* for symbollic link, canonicalize and get the real filename */
+-		if (!(canonical = canonicalize_file_name(s))) {
++		if (!(canonical = realpath(s, NULL))) {
+ 			/* if canonicalize_file_name fails,
+ 			 * the file probably doesn't exist. */
+ 			return 0;
+@@ -448,9 +450,13 @@
+ 	int fd;
+ 	mode_t mode;
+ 	va_list args;
+-	va_start(args, flags);
+-	mode = (mode_t)va_arg(args, promoted_mode_t);
+-	va_end(args);
++	if (flags & O_CREAT) {
++		va_start(args, flags);
++		mode = (mode_t)va_arg(args, promoted_mode_t);
++		va_end(args);
++	} else {
++		mode = 0;
++	}
+ 	if (initialize_functions()) {
+ 		errno = ENOMEM;
+ 		return -1;
+@@ -476,9 +482,13 @@
+ 	int fd;
+ 	mode_t mode;
+ 	va_list args;
+-	va_start(args, flags);
+-	mode = (mode_t)va_arg(args, promoted_mode_t);
+-	va_end(args);
++	if (flags & O_CREAT) {
++		va_start(args, flags);
++		mode = (mode_t)va_arg(args, promoted_mode_t);
++		va_end(args);
++	} else {
++		mode = 0;
++	}
+ 	if (initialize_functions()) {
+ 		errno = ENOMEM;
+ 		return -1;
+@@ -499,6 +509,81 @@
+ 	return fd;
+ }
+ 
++
++COW_WRAPPER(int, openat, int dirfd, const char *a, int flags, ...) {
++	int fd;
++	mode_t mode;
++	va_list args;
++	if (flags & O_CREAT) {
++		va_start(args, flags);
++		mode = (mode_t)va_arg(args, promoted_mode_t);
++		va_end(args);
++	} else {
++		mode = 0;
++	}
++	if (initialize_functions()) {
++		errno = ENOMEM;
++		return -1;
++	}
++	if (!getenv("COWDANCER_IGNORE")) {
++		debug_cowdancer_2("openat", a);
++		switch (flags & O_ACCMODE) {
++			case O_WRONLY:
++			case O_RDWR:
++				/* openat: resolve relative path when dirfd != AT_FDCWD via /proc */
++				if (dirfd != AT_FDCWD) {
++					/* resolve relative path for inode protection check;
++					 * do NOT alias `a` to resolved: origlibc_openat below
++					 * still receives the original (dirfd, a) pair. */
++					char *dfdpath = NULL;
++					char *resolved = NULL;
++					if (a[0] != '/' &&
++					    asprintf(&dfdpath, "/proc/self/fd/%d", dirfd) >= 0) {
++						char *rd = realpath(dfdpath, NULL);
++						free(dfdpath);
++						if (rd) {
++							if (asprintf(&resolved, "%s/%s", rd, a) < 0)
++								resolved = NULL;
++							free(rd);
++						}
++					}
++					if (resolved) {
++						if (check_inode_and_copy(resolved, 1)) {
++							errno = ENOMEM;
++							free(resolved);
++							return -1;
++						}
++						free(resolved);
++					} else if (a[0] == '/') {
++						/* absolute path: dirfd is ignored by openat and the
++						 * path is already complete for the COW check */
++						if (check_inode_and_copy(a, 1)) {
++							errno = ENOMEM;
++							return -1;
++						}
++					} else {
++						/* relative path with dirfd != AT_FDCWD could not be
++						 * resolved (e.g. /proc unavailable in chroot): fail
++						 * closed rather than silently bypassing COW check */
++						log_printf(log_error,
++							"openat: cannot resolve dirfd=%d relative path '%s'",
++							dirfd, a);
++						errno = EACCES;
++						return -1;
++					}
++				} else {
++					if (check_inode_and_copy(a, 1)) {
++						errno = ENOMEM;
++						return -1;
++					}
++				}
++				break;
++		}
++	}
++	fd = origlibc_openat(dirfd, a, flags, mode);
++	return fd;
++}
++
+ COW_WRAPPER(int, creat, const char *a, mode_t mode) {
+ 	int fd;
+ 	if (initialize_functions()) {
