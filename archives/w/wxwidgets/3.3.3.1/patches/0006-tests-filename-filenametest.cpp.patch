@@ -1,0 +1,291 @@
+--- a/tests/filename/filenametest.cpp
++++ b/tests/filename/filenametest.cpp
+@@ -22,30 +22,53 @@
+ #include "wx/stdpaths.h"
+ #include "wx/scopeguard.h"
+ #include "wx/sckipc.h"
+-
++
+ #include "wx/private/localeset.h"
+-
++
+ #ifdef __WINDOWS__
+     #include "wx/msw/registry.h"
+     #include "wx/msw/wrapshl.h"
+     #include "wx/msw/ole/oleutils.h"
+     #include "wx/msw/private/comptr.h"
+ #endif // __WINDOWS__
+-
++
+ #ifdef __UNIX__
++    #include <errno.h>
+     #include <unistd.h>
+ #endif // __UNIX__
+-
++
+ #include "testfile.h"
+-
++
+ // Use a hack to keep using wxPATH_NORM_ALL in this test code without getting
+ // deprecation warnings for it.
+ #define wxPATH_NORM_ALL wxPATH_NORM_DEPR_OLD_DEFAULT
++
++#ifdef __UNIX__
++static bool IsExpectedCapabilityError(int error)
++{
++    if ( error == EACCES || error == EPERM || error == ENOSYS )
++        return true;
++#ifdef EOPNOTSUPP
++    if ( error == EOPNOTSUPP )
++        return true;
++#endif
++#ifdef EROFS
++    if ( error == EROFS )
++        return true;
++#endif
++    return false;
++}
++
++static bool IsUnsupportedSymlinkError()
++{
++    return IsExpectedCapabilityError(errno);
++}
++#endif // __UNIX__
+-
++
+ // ----------------------------------------------------------------------------
+ // test data
+ // ----------------------------------------------------------------------------
+-
++
+ static struct TestFileNameInfo
+ {
+     const char *fullname;
+@@ -639,27 +662,40 @@
+         { "/tmp/a/directory/which/does/not/exist", "", false },
+ #endif // __UNIX__
+     };
+-
++
+     for ( size_t n = 0; n < WXSIZEOF(testData); n++ )
+     {
+         wxString prefix = testData[n].prefix;
+         prefix.Replace("$USER_DOCS_DIR", wxStandardPaths::Get().GetDocumentsDir());
+-
++
+         INFO("Prefix: " << prefix);
+-
++
++#ifdef __UNIX__
++        if ( prefix.Left(5) == "/tmp/" && access("/tmp", W_OK | X_OK) != 0 )
++        {
++            const int error = errno;
++            if ( IsExpectedCapabilityError(error) )
++            {
++                WARN("WX_EXPECTED_SKIP:id=wxFileName::CreateTempFileName;path=tests/filename/filenametest.cpp;reason=system_tmp_unwritable");
++                return;
++            }
++            CHECK( false );
++        }
++#endif // __UNIX__
++
+         wxString path = wxFileName::CreateTempFileName(prefix);
+         CHECK( path.empty() == !testData[n].shouldSucceed );
+-
++
+         if (testData[n].shouldSucceed)
+         {
+             INFO("Path: " << path);
+-
++
+             // test the place where the temp file has been created
+             wxString expected = testData[n].expectedFolder;
+             expected.Replace("$SYSTEM_TEMP", wxStandardPaths::Get().GetTempDir());
+             expected.Replace("$USER_DOCS_DIR", wxStandardPaths::Get().GetDocumentsDir());
+             CHECK( wxFileName(path).GetPath() == expected );
+-
++
+             // the temporary file is created with full permissions for the current process
+             // so we should always be able to remove it:
+             CHECK( wxRemoveFile(path) );
+@@ -752,19 +788,53 @@
+     wxON_BLOCK_EXIT2(wxRmdir, socktempdir, 0);
+     wxString sockfile = socktempdir + "/socket";
+     wxTCPServer server;
+-    server.Create(sockfile);
+-    CHECK( wxFileName::Exists(sockfile, wxFILE_EXISTS_SOCKET) );
++    if ( server.Create(sockfile) )
++        CHECK( wxFileName::Exists(sockfile, wxFILE_EXISTS_SOCKET) );
++    else
++    {
++        const int error = errno;
++        if ( error == EACCES || error == EPERM || error == ENOSYS
++#ifdef EOPNOTSUPP
++             || error == EOPNOTSUPP
++#endif
++           )
++        {
++            WARN("WX_EXPECTED_SKIP:id=wxFileName::Exists/socket;path=tests/filename/filenametest.cpp;reason=unix_socket_unavailable");
++            return;
++        }
++        else
++        {
++            CHECK( false );
++        }
++    }
+     wxString fifo = dirTemp.GetPath() + "/fifo";
+    if (mkfifo(fifo.c_str(), 0600) == 0)
+     {
+         wxON_BLOCK_EXIT1(wxRemoveFile, fifo);
+-
++
+         CHECK( wxFileName::Exists(fifo, wxFILE_EXISTS_FIFO) );
++    }
++    else
++    {
++        const int error = errno;
++        if ( error == EACCES || error == EPERM || error == ENOSYS
++#ifdef EOPNOTSUPP
++             || error == EOPNOTSUPP
++#endif
++           )
++        {
++            WARN("WX_EXPECTED_SKIP:id=wxFileName::Exists/fifo;path=tests/filename/filenametest.cpp;reason=fifo_unavailable");
++            return;
++        }
++        else
++        {
++            CHECK( false );
++        }
+     }
+ #endif
+ #endif // __UNIX__
+ }
+-
++
+ TEST_CASE("wxFileName::Mkdir", "[filename]")
+ {
+     wxFileName fn;
+@@ -782,43 +852,55 @@
+     wxFileName fn1( wxFileName::CreateTempFileName( "filenametest1" ) );
+     REQUIRE( fn1.IsOk() );
+     wxON_BLOCK_EXIT1( wxRemoveFile, fn1.GetFullPath() );
+-
++
+     wxFileName fn2( wxFileName::CreateTempFileName( "filenametest2" ) );
+     REQUIRE( fn2.IsOk() );
+     wxON_BLOCK_EXIT1( wxRemoveFile, fn2.GetFullPath() );
+-
++
+     CHECK( fn1.SameAs( fn1 ) );
+     CHECK( !fn1.SameAs( fn2 ) );
+-
++
+ #if defined(__UNIX__)
+     // We need to create a temporary directory and a temporary link.
+     // Unfortunately we can't use wxFileName::CreateTempFileName() for either
+     // as it creates plain files, so use tempnam() explicitly instead.
+-    char* tn = tempnam(nullptr, "wxfn1");
+-    const wxString tempdir1 = wxString::From8BitData(tn);
+-    free(tn);
++    wxString tempdir1 = wxFileName::CreateTempFileName("wxfn1");
++    REQUIRE( !tempdir1.empty() );
++    REQUIRE( wxRemoveFile(tempdir1) );
+-
++
+     REQUIRE( wxFileName::Mkdir(tempdir1) );
+     // Unfortunately the casts are needed to select the overload we need here.
+     wxON_BLOCK_EXIT2( static_cast<bool (*)(const wxString&, int)>(wxFileName::Rmdir),
+                       tempdir1, static_cast<int>(wxPATH_RMDIR_RECURSIVE) );
+-
++
+-    tn = tempnam(nullptr, "wxfn2");
+-    const wxString tempdir2 = wxString::From8BitData(tn);
+-    free(tn);
+-    CHECK( symlink(tempdir1.c_str(), tempdir2.c_str()) == 0 );
++    wxString tempdir2 = wxFileName::CreateTempFileName("wxfn2");
++    REQUIRE( !tempdir2.empty() );
++    REQUIRE( wxRemoveFile(tempdir2) );
++    if ( symlink(tempdir1.c_str(), tempdir2.c_str()) != 0 )
++    {
++        if ( IsUnsupportedSymlinkError() )
++        {
++            WARN("WX_EXPECTED_SKIP:id=wxFileName::SameAs;path=tests/filename/filenametest.cpp;reason=symlink_unavailable");
++            return;
++        }
++        else
++        {
++            CHECK( false );
++        }
++        return;
++    }
+     wxON_BLOCK_EXIT1( wxRemoveFile, tempdir2 );
+-
++
+-
++
+     wxFileName fn3(tempdir1, "foo");
+     wxFileName fn4(tempdir2, "foo");
+-
++
+     // These files have different paths, hence are different.
+     CHECK( !fn3.SameAs(fn4) );
+-
++
+     // Create and close a file to trigger creating it.
+     wxFile(fn3.GetFullPath(), wxFile::write);
+-
++
+     // Now that both files do exist we should be able to detect that they are
+     // actually the same file.
+     CHECK( fn3.SameAs(fn4) );
+@@ -846,30 +928,42 @@
+ #endif
+     wxFileName tempdirfn(wxFileName::DirName(tempdir));
+     CHECK(tempdirfn.DirExists());
+-
++
+     // Create a regular file in that dir, to act as a symlink target
+     wxFileName targetfn(wxFileName::CreateTempFileName(tempdir));
+     CHECK(targetfn.FileExists());
+-
++
+     // Resolving a non-symlink will just return the same thing
+     INFO("Non-symlink didn't resolve to the same file");
+     CHECK( targetfn.ResolveLink() == targetfn );
+-
++
+     // Create a symlink to that file
+     wxFileName linktofile(tempdir, "linktofile");
+-    CHECK( symlink(targetfn.GetFullPath().c_str(), linktofile.GetFullPath().c_str()) == 0 );
++    if ( symlink(targetfn.GetFullPath().c_str(), linktofile.GetFullPath().c_str()) != 0 )
++    {
++        if ( IsUnsupportedSymlinkError() )
++        {
++            WARN("WX_EXPECTED_SKIP:id=wxFileName::Symlinks;path=tests/filename/filenametest.cpp;reason=symlink_unavailable");
++            return;
++        }
++        else
++        {
++            CHECK( false );
++        }
++        return;
++    }
+-
++
+     // Test resolving the filename to the symlink
+     INFO("Failed to resolve symlink to file");
+     CHECK( linktofile.ResolveLink() == targetfn );
+-
++
+     // Create a relative symlink to that file
+     wxFileName relativelinktofile(tempdir, "relativelinktofile");
+     wxString relativeFileName = "./" + targetfn.GetFullName();
+     CHECK( symlink(relativeFileName.c_str(), relativelinktofile.GetFullPath().c_str()) == 0 );
+     INFO("Failed to resolve relative symlink to absolute file path");
+     CHECK( relativelinktofile.ResolveLink() == targetfn );
+-
++
+     // ... and another to the temporary directory
+     const wxString linktodirName(tempdir + "/linktodir");
+     wxFileName linktodirfn(linktodirName);
