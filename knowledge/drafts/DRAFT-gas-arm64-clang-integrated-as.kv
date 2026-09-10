@@ -1,0 +1,44 @@
+#====================================================================
+# DRAFT: GAS 语法 ARM64 汇编（.S）经 clang 集成汇编器零补丁编译 + dynarec 可行性
+#（mupen64plus-core 2.6.0 new_dynarec ARM64 后端，任务 #6728）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-gas-arm64-clang-integrated-as
+trigger_tool:           clang|make
+phase:                  compilation
+error_signature:        Error: unknown mnemonic|unsupported relocation|file format not recognized|no such instruction|NEW_DYNAREC is not supported on this architecture|assembler command failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               compiler, asm, emulator, dynarec
+match_keywords:         dynarec, JIT, linkage_arm64.S, .S file, GAS, integrated assembler, asm_defines, NEW_DYNAREC, ARM64 assembly, aarch64 asm, mprotect, mmap PROT_EXEC, W^X, emulator core, no-asm alternative
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             模拟器核心的动态重编译器（dynarec/JIT）后端是裸 ARM64 汇编（.S 文件，GAS 语法，含宏/链接符号），交叉工具链常见三类障碍：① 独立 as 不支持目标格式；② clang 默认调外部 GNU as 而系统无之；③ 运行时 mmap PROT_EXEC 生成可执行代码页被沙箱禁止。OHOS clang 15 的集成汇编器（integrated-as，clang 默认开启）原生支持 GAS 语法 ARM64 + 由 $(COMPILE.c)（C 编译器驱动）直接编译 .S；OHOS musl/沙箱对匿名 mmap PROT_EXEC 无限制（dlsym/mprotect 符号在导出表实测可用）。且「C 结构体偏移→汇编头」的生成管线（编译 asm_defines.c 后 grep 二进制中 '@ASM_DEFINE' 字符串生成 asm_defines_gas.h）跨平台可用，LTO bitcode 产物同样可 grep -a。
+affected_scope:         一切含 ARM64 汇编后端的模拟器/动态重编译/JIT 项目（mupen64plus new_dynarec、ppsspp JIT ARM64、各种 retroarch 核心）；也适用任何 .S 文件用 cc 编译的项目
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           cc-compile-S-with-integrated-as
+solution: |
+  # 1) .S 文件不要走独立 as，用 C 编译器编译（Makefile 形如）：
+  $(OBJDIR)/%.o: $(SRCDIR)/%.S $(SRCDIR)/asm_defines/asm_defines_gas.h
+  	$(COMPILE.c) -o $@ $<        # clang -c foo.S，integrated-as 处理 GAS 语法
+  # 2) asm_defines 生成管线无需改动：bash tools/gen_asm_script.sh <dir> <asm_defines.o>
+  #    内部 grep -a '@ASM_DEFINE' <objfile>——LLVM bitcode（-flto）产物同样命中
+  # 3) 运行时：dynarec 用 mmap/mprotect 生成可执行页，OHOS 无沙箱限制
+  #    （验证：消费者测试真机跑 ROM_OPEN→CIC 检测路径全通）
+  # 4) -flto 与 .S 共存无冲突（bitcode + ELF 混合链接，lld 正常处理）
+fallback: |
+  若项目 Makefile 用独立 as/nasm 编 .S/.asm：
+  ① x86 .asm（nasm 专属）→ 交叉不可编，用 NO_ASM=1 走解释器路径（mupen64plus
+     上游支持，性能降但功能全）
+  ② 必须外部 GNU as → 工具链没有，考虑 llvm-as 包装或 patch 构建规则改 $(CC) -c
+verify_builds:          mupen64plus 2.6.0 本地 conan create 全绿 + test 8/8 真机通过（2026-09-09）；CI 构建号待 PR 合入后回填
+prescan_pattern:        NEW_DYNAREC|linkage_arm64\.S|\.S \\$|mprotect\(.*PROT_EXEC
+
+# ═══ Layer 4: 证据层 (Evidence) ═══
+evidence_url:
+source_commit:          mupen64plus-core tag 2.6.0 src/device/r4300/new_dynarec/arm64/linkage_arm64.S；projects/unix/Makefile L846-848
+notes:                  与 E016（汇编指令不支持→禁汇编）对偶：先验证「直接可编」再谈禁用；与 E045（mmap RWX 平台限制）互补：OHOS 上 PROT_EXEC 匿名映射实测无限制
