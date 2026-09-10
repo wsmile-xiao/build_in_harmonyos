@@ -1,0 +1,61 @@
+#====================================================================
+# E566 — 公共头文件与 ELF 动态库导出符号契约漂移：双向审计与最小别名修复
+# 触发事件: libdrawtext 0.6 HarmonyOS PC 适配（archives/l/libdrawtext/0.6）
+#           消费者级符号审计发现 drawtext.h 声明 dtx_get_glyphmap_image
+#           而库只导出 dtx_get_glyphmap_pixels（font.c:721）
+#====================================================================
+
+id:                     E566
+trigger_tool:           clang|ld|nm|readelf|conan test
+phase:                  linking|testing
+error_signature:        undefined reference to .dtx_get_glyphmap_image.|symbol (.*) has no symbol table entry|dlsym.*dtx_get_glyphmap_image.*not found
+
+severity:               2
+category:               abi, linking, shared-library, header, packaging, testing
+match_keywords:         public header, exported symbol, symbol contract, nm -D, readelf --dyn-syms, undefined reference, declared but not exported, exported but not declared, forwarding alias, symbol alias, 双向符号审计, 声明未导出, 导出未声明, dtx_get_glyphmap_image, dtx_get_glyphmap_pixels, drawtext.h
+title:                  公共头文件与 ELF 动态库导出符号契约漂移：双向审计与最小别名修复
+
+root_cause:             上游 C 库的公共头文件声明了某 API（drawtext.h:121 无条件声明 dtx_get_glyphmap_image 并注释其用途），但实现源码从未提供该符号——功能实现在另一名字下（font.c:721 的 dtx_get_glyphmap_pixels，返回 gmap->pixels 借用指针）。上游自身 examples/tools 恰好只用序列化/回调两条路径调用像素访问，从不直接调用该声明 API，故上游构建与演示全绿、缺陷不暴露；任何外部消费者按头文件编程即链接失败（undefined reference）。这是库自身头文件↔导出符号契约的单向漂移；反向漂移（库导出符号但头文件不声明，dtx_get_glyphmap_pixels 0.6 起未声明）同时存在，双向都不一致。
+affected_scope:         任何"公共头声明与 ELF 导出符号集不一致"的 C/C++ 共享库打包场景：上游无 CI 覆盖声明-导出一致性的库、老库演进中实现改名未同步头文件、version script/visibility 策略漂移；OHOS Conan 适配中 test_package 直接调用公开 API 时必然触发。
+verification_cmd:       nm -D --defined-only <pkg>/lib/libX.so | awk '{print $NF}' | sort > /tmp/exported.txt; grep -oE '^[a-zA-Z_][a-zA-Z0-9_]* [a-zA-Z_][a-zA-Z0-9_]*\(' <pkg>/include/X.h | awk '{print $2}' | tr -d '(' | sort > /tmp/declared.txt; comm -23 /tmp/declared.txt /tmp/exported.txt  # 声明未导出; comm -13 反向
+rec_priority:           1
+rec_approach:           dual-direction-symbol-audit-then-minimal-alias
+rec_description:        先做双向符号审计（头声明集 vs nm -D 导出集，两个方向的差集），对"声明未导出"的每个符号在源码级核实：(1) 是否存在功能等价的实现符号（同签名/同所有权语义/同返回值），存在则加最小转发别名并保留原符号；(2) 公共头补齐"导出未声明"的反向漂移声明；(3) 条件编译块内的符号（#ifndef NO_OPENGL）判为非真实缺失不处理。补丁以 apply_conandata_patches 接入，patch_type: bugfix。
+rec_command:            nm -D --defined-only lib/libX.so | sort -k3 → 与头文件声明集求差；diff 中每个符号先 grep 源码找实现名与签名；别名实现: unsigned char *sym_alias(args){return sym_impl(args);}；conandata.yml patches: - patch_file: patches/0001-*.patch, patch_type: "bugfix"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-patch
+
+fallback_priority:      2
+fallback_approach:      consumer-avoids-broken-api
+fallback_description:   若无法证明签名/所有权/语义等价（例如声明返回 int 而实现返回指针，见 libdrawtext 头注释错误案例），不得加别名（int↔指针截断是 ABI 错误）；消费者改用公共头中真实可用的替代路径（序列化 API dtx_save_glyphmap 或回调 API dtx_target_user），同时 fail-closed 报告上游缺陷。
+fallback_command:       （无命令——按 case-by-case 采用头文件中真实存在的替代 API，并在 notes.md 记录上游缺陷证据与规避路径）
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       rm.*declaration|delete.*dtx_get_glyphmap_image|#define dtx_get_glyphmap_image dtx_get_glyphmap_pixels
+forbid_1_reason:        删除头声明或用 #define 静默替换会破坏既有消费者（下游可能已按头文件编程），且把库的契约缺陷转嫁给每个消费者。
+forbid_1_consequence:   下游按旧头文件编译的程序在运行时行为漂移或构建失败；缺陷被掩埋而非修复。
+
+forbid_2_pattern:       EXPORT.*ALL.*SYMBOLS|visibility.*default.*all
+forbid_2_reason:        为修复单个符号漂移而全局放开符号可见性或导出全部符号会改变库 ABI 面，引入符号冲突风险。
+forbid_2_consequence:   意外导出内部符号（如 static 函数的同名冲突）、ABI 面膨胀、与其他库符号冲突。
+
+principles:             P003, P010, P013, P014
+causes:                 []
+caused_by:              []
+similar_to:             [E229, E104, E530]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E566.md
+last_updated: 2026-09-07
+source_event:           libdrawtext 0.6 OHOS 适配：drawtext.h:121 声明 dtx_get_glyphmap_image 无实现，font.c:721 实现为 dtx_get_glyphmap_pixels；补丁 0001 双向修复（别名 + 反向补声明）
+
+authors:                1catmint1 <goblinrs@yeah.net>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-07
