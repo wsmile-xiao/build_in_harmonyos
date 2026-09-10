@@ -1,0 +1,68 @@
+#====================================================================
+# DRAFT-prebuilt-bindir-tool-relocated-runpath.kv
+# 依赖包预编译构建期工具的 RUNPATH 指向已迁移的 Conan 构建树，消费方
+# make 执行该工具时必须把其 DT_NEEDED 的 .so 所在依赖包 libdir 注入构
+# 建环境 LD_LIBRARY_PATH（dbus-binding-tool/libexpat 实例），否则
+# rc=127 加载失败、构建中断。完整叙事与证据见同目录 .md
+#====================================================================
+
+id:                     DRAFT (最终编号由知识库主编确认)
+trigger_tool:           make|dbus-binding-tool|musl-ldso
+phase:                  build
+error_signature:        Error loading shared library lib<dep>.so.*needed by .*bin/<tool>（make/BUILT_SOURCES 阶段，工具进程 rc=127，紧跟 Error relocating .*: symbol not found 系列；实例：libexpat.so / dbus-binding-tool / XML_*）
+severity:               2
+category:               build-system, toolchain, conan, loader, ohos
+match_keywords:         dbus-binding-tool, libexpat.so, LD_LIBRARY_PATH, RUNPATH, relocated, 包迁移, bindir, 构建期工具, BUILT_SOURCES, glib-server, glue, Error loading shared library, rc=127, musl, XML_ParserCreate
+title:                  依赖包预编译构建期工具的 RUNPATH 指向已迁移的构建树时，消费方 make 执行该工具必须把其 DT_NEEDED 的 .so 所在依赖包 libdir 注入构建环境 LD_LIBRARY_PATH，否则加载失败构建中断（dbus-binding-tool/libexpat 实例）
+root_cause:             机理链（设备 dbus-glib/0.114 包实测，2026-09-09）：(1) OHOS 原生编译环境 host==target，dbus-glib 配方把 dbus-binding-tool 交付为 aarch64 OHOS ELF（llvm-readelf -h：dynamically tagged aarch64 /lib/ld-musl-aarch64.so.1），DT_NEEDED libexpat.so——expat 在 OHOS 只发布 .so（包 lib/ 内无 .a）；(2) 工具自带 RUNPATH=/storage/Users/currentUser/.cache/conan2/p/b/dbus-b2a06f5fb46b5/b/build-release/dependency-archives（llvm-readelf -d 实证），即生产该包时的临时构建目录，Conan 包落库/迁移后不存在——loader 无法再经 RUNPATH 解析 libexpat.so；(3) 消费方上游（如 cdemu-daemon 的 cdemud-service.xml）在 make/BUILT_SOURCES 经 PATH 裸名调用 dbus-binding-tool 生成 glue 头 → musl loader 报 "Error loading shared library libexpat.so: (needed by …/bin/dbus-binding-tool)" + XML_* symbol not found，进程 rc=127 → make 目标失败、构建中断。修复必须落在执行该工具的构建环境（把 expat 包 libdir 注入 build-scope LD_LIBRARY_PATH），工具制品与消费方链接面均无需改动
+affected_scope:         任何经 PATH 消费依赖包预编译 ELF 构建期工具（代码生成器类）且该工具 DT_NEEDED 指向第三个包 .so 的项目；OHOS 原生编译环境下 dbus-glib 系 D-Bus service/client 代码生成是典型族（同构威胁：任何"预编译工具 + 仅发布 .so 的依赖"组合，含 clang/lld 自身缺 libxml2.so.16 的 E266 同族现象）
+verification_cmd:       # 自包含：任意新 shell 可跑，仅依赖设备 conan2 cache 与 llvm-readelf，不依赖本 run 日志
+                        D=$(mktemp -d) && cd $D
+                        T=$(find /storage/Users/currentUser/.conan2/p -maxdepth 4 -name dbus-binding-tool 2>/dev/null | head -1)
+                        E=$(find /storage/Users/currentUser/.conan2/p -maxdepth 4 -path "*/p/lib/libexpat.so" 2>/dev/null | head -1)
+                        /data/service/hnp/bin/llvm-readelf -d "$T" | grep -E "RUNPATH|NEEDED"
+                        env -u LD_LIBRARY_PATH "$T" --help >/dev/null 2>err.txt; echo "neg_rc=$?"
+                        grep -m1 "Error loading shared library" err.txt
+                        LD_LIBRARY_PATH=$(dirname "$E") "$T" --help >/dev/null 2>&1; echo "pos_rc=$?"
+                        cd /; rm -rf $D
+                        预期（2026-09-09 curator 逐字实跑）：RUNPATH=…/p/b/dbus-b2a06f5fb46b5/b/build-release/dependency-archives + NEEDED libexpat.so；neg_rc=127 + "Error loading shared library libexpat.so: (needed by …/bin/dbus-binding-tool)"；pos_rc=0
+rec_priority:           1
+rec_approach:           dep-libdir-into-buildenv-ldlibrarypath
+rec_description:        消费方配方 generate() 把工具所需 .so 的包 libdir 注入 build-scope 构建环境：env.append_path("LD_LIBRARY_PATH", os.path.join(self.dependencies["expat"].package_folder, "lib"))（dbus-glib 消费方必经传递依赖持有 expat），随 Environment build script 落盘；只在构建会话生效，不污染 test_package 与产物运行环境（对齐 P-ENV-001 的作用域纪律）
+rec_command:            # conanfile.py generate() 内
+                        expat = self.dependencies["expat"].package_folder
+                        env.append_path("LD_LIBRARY_PATH", os.path.join(expat, "lib"))
+                        env.vars(self, scope="build").save_script("deps-env")
+rec_auto_fix:           true
+rec_impl:               build-env-var
+fallback_priority:      2
+fallback_approach:      pre-generate-glue-header-as-patch
+fallback_description:   在任一可运行 dbus-binding-tool 的环境一次性生成 glue 头（dbus-binding-tool --prefix=<P> --mode=glib-server <service>.xml > src/<name>-service-glue.h），以 conandata 注册补丁形式入源码树，使构建不再调用该工具。诚实权衡：掩盖而非修复加载问题；生成物随上游 xml/工具版本漂移，仅作退路；上游 xml 变更时必须重新生成并复核
+fallback_command:       dbus-binding-tool --prefix=cdemud_daemon --mode=glib-server src/cdemud-service.xml > src/cdemud-service-glue.h  # 一次性，产物注册为 conandata 补丁
+fallback_auto_fix:      false
+fallback_impl:          manual-patch
+forbid_1_pattern:       把 libexpat.so 拷贝进工具所在 conan cache 包目录或消费方包目录"就地修复"
+forbid_1_reason:        conan cache 是共享只读资产，禁止变更（E236 族铁律）；拷贝副本绕过包图，版本与来源失溯
+forbid_1_consequence:   其他消费者被静默改变行为；下次干净构建/缓存重建后问题再现
+forbid_2_pattern:       全局 export LD_LIBRARY_PATH=<conan cache 路径>（跨会话、写入 profile/conanrun 永久面）
+forbid_2_reason:        违反 P-ENV-001 作用域纪律：loader 路径泄漏进 test_package 与产物运行环境，按目录序静默改依赖版本
+forbid_2_consequence:   环境耦合难排查，构建与测试可复现性丧失
+forbid_3_pattern:       用 patchelf 等修写工具 DT_NEEDED/RUNPATH 指向消费方路径
+forbid_3_reason:        改写依赖包制品（DRAFT-patchelf-breaks-ohos-signing 先例：破坏 OHOS 签名/制品完整性），且实为 cache 突变
+forbid_3_consequence:   制品完整性门禁受损、签名失效、包校验和漂移
+principles:             [P-ENV-001, P-LINKAGE-001]
+causes:                 []
+caused_by:              []
+similar_to:             [E019, E236, E266]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               DRAFT-prebuilt-bindir-tool-relocated-runpath.md
+last_updated:           2026-09-09
+source_event:           cdemud 1.0.0（cdemu-daemon 1.0.0）OHOS PC 适配——make 期 dbus-binding-tool 加载 libexpat.so 失败的定位与构建环境修复（notes.md 问题表 #10）
+authors:                GoliWie
+source_pr:              pending（feat/cdemud-1.0.0 交付 PR）
+source_commit:          pending（随 PR 交付后回填）
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-09
