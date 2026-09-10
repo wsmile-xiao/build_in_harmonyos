@@ -1,0 +1,88 @@
+--- a/src/unix/core.c
++++ b/src/unix/core.c
+@@ -36,6 +36,9 @@
+ #include <sys/socket.h>
+ #include <sys/un.h>
+ #include <netinet/in.h>
++#ifdef __OHOS__
++#include <dlfcn.h>
++#endif
+ #include <arpa/inet.h>
+ #include <limits.h> /* INT_MAX, PATH_MAX, IOV_MAX */
+ #include <sys/uio.h> /* writev */
+@@ -1349,6 +1352,35 @@
+ }
+ 
+ 
++#ifdef __OHOS__
++/* On HarmonyOS, application UIDs (e.g. 200xxxxx) are not in /etc/passwd.
++ * Fall back to the OHOS OsAccount NDK API to retrieve the account name.
++ * Note: dlclose() is intentionally NOT called — the system library registers
++ * atexit handlers that cause SIGSEGV if the library is unloaded before exit. */
++static int uv__get_ohos_account_name(char* buffer, size_t buflen) {
++  typedef int (*getname_t)(char*, size_t);
++  void* handle;
++  getname_t fn;
++  int r;
++
++  handle = dlopen("/system/lib64/ndk/libos_account_ndk.so",
++                  RTLD_NOW | RTLD_LOCAL);
++  if (handle == NULL)
++    return UV_ENOENT;
++
++  fn = (getname_t)dlsym(handle, "OH_OsAccount_GetName");
++  if (fn == NULL)
++    return UV_ENOENT;
++
++  r = fn(buffer, buflen);
++
++  if (r != 0)
++    return UV_ENOENT;
++
++  return 0;
++}
++#endif /* __OHOS__ */
++
+ static int uv__getpwuid_r(uv_passwd_t *pwd, uid_t uid) {
+   struct passwd pw;
+   struct passwd* result;
+@@ -1385,8 +1417,38 @@
+   if (r != 0)
+     return UV__ERR(r);
+ 
+-  if (result == NULL)
++  if (result == NULL) {
++#ifdef __OHOS__
++    char ohos_name[256];
++    const char* home;
++    const char* shell;
++
++    if (uv__get_ohos_account_name(ohos_name, sizeof(ohos_name)) == 0) {
++      home = getenv("HOME");
++      if (home == NULL)
++        home = "";
++      shell = "/bin/sh";
++
++      name_size = strlen(ohos_name) + 1;
++      homedir_size = strlen(home) + 1;
++      shell_size = strlen(shell) + 1;
++      pwd->username = uv__malloc(name_size + homedir_size + shell_size);
++      if (pwd->username == NULL)
++        return UV_ENOMEM;
++
++      memcpy(pwd->username, ohos_name, name_size);
++      pwd->homedir = pwd->username + name_size;
++      memcpy(pwd->homedir, home, homedir_size);
++      pwd->shell = pwd->homedir + homedir_size;
++      memcpy(pwd->shell, shell, shell_size);
++      pwd->uid = uid;
++      pwd->gid = getegid();
++
++      return 0;
++    }
++#endif /* __OHOS__ */
+     return UV_ENOENT;
++  }
+ 
+   /* Allocate memory for the username, shell, and home directory */
+   name_size = strlen(pw.pw_name) + 1;
