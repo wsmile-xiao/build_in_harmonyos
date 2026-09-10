@@ -1,8 +1,8 @@
-# adwaita-icon-theme 50.0 适配笔记
+# adwaita-icon-theme 50.0.1 适配笔记
 
 ## 编译环境
 - 构建系统: meson（数据型图标主题包，无源码编译目标，Build targets = 0）
-- 编译日期: 2026-08-05
+- 编译日期: 2026-09-05
 - 编译器: clang 15.0.4（本包无语言目标，meson 不调用编译器）
 - 构建工具: meson 1.11.1 + ninja 1.13.1（取自 /data/service/hnp/bin/ninja）
 - 状态: built
@@ -34,6 +34,8 @@ meson install -C _build --destdir=$STAGING # 安装数据 + symlink + .pc
 | 4 | conan-init 误判构建系统为 autotools、sha256 占位符 | 模板默认值 | 手工重写 conanfile.py（Meson 模板）+ conandata.yml 填真实 sha256 |
 | 5 | dataonly .pc 默认装到 share/pkgconfig，Conan G4 门禁可能因 lib/ 为空误判 | 数据型包无 bin/lib/include | 补丁 0002: pkg.generate 增加 install_dir = libdir/pkgconfig，.pc 落入 lib/pkgconfig（同时供 pkg-config 消费方查找） |
 | 6 | ohc-run.py 归档定位到 skill 根而非仓库 | find_project_dir() 向上找 SKILL.md | 设置 OHC_PROJECT_DIR=<repo>，init-build/conan-init 即写入仓库 archives/ |
+| 7 | CI L0j/L0k/L0n 要求版本递增、分支名含包名-版本号、data-only 包避免 application 触发 CLI 规则 | 50.0 已发布且 recipe 改动，`feat/adwaita-50` 不含 `adwaita-icon-theme-50.0`，`package_type=application` 被 R38 误判 | 递增为 `50.0.1`，分支改为 `feat/adwaita-icon-theme-50.0.1`，`package_type` 改回 `unknown` |
+| 8 | 真机 `pkg-config --modversion` 仍显示 50.0 | `.pc` 版本仍继承上游资源版本 | 记录为上游源版本 50.0、Conan 包版本 50.0.1，属于同一数据包的 CI 修复版 |
 
 ## 源码修改
 
@@ -57,8 +59,35 @@ meson install -C _build_manual --destdir=...  # exit 0 (805 文件 + symlinks)
 find staging -name "*.pc"                     # lib/pkgconfig/adwaita-icon-theme.pc
 
 # conan-verify（见 reports/conan-verify-report.md）
-python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify adwaita-icon-theme 50.0   # exit 0
+python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify adwaita-icon-theme 50.0.1   # exit 0
 ```
+
+### 2026-09-05 HarmonyOS aarch64 真机验证（50.0.1 CI 复跑）
+
+- 设备: `currentUser@10.62.220.52:2222`
+- 测试目录: `/storage/Users/currentUser/ohos-test-runs/codex-adwaita-icon-theme-50.0.1-r1-20260905-171328`
+- Profile: `/storage/Users/currentUser/build_in_harmonyos/ci/conan/profiles/ohos-aarch64`
+- 命令:
+
+```bash
+export PATH=/data/service/hnp/pkg-config.org/pkg-config_0.29.2/bin:/data/service/hnp/bin:$HOME/usr/local/bin:$PATH
+export CONAN_HOME=$PWD/conan-home \
+conan create 50.0.1 \
+  -pr:h=$HOME/build_in_harmonyos/ci/conan/profiles/ohos-aarch64 \
+  -pr:b=$HOME/build_in_harmonyos/ci/conan/profiles/ohos-aarch64 \
+  --build=missing --user=ohpcd --channel=stable -vstatus
+```
+
+- 结果: `conan create` + `test_package` 通过，20/20 consumer checks passed
+- Full package reference: `adwaita-icon-theme/50.0.1@ohpcd/stable#108ec0576dfc63e57f70c335834861c6:6b129b068851896169fae42d399fa922d239ce8a#0ec9b31935d8e52d52677a16c8aa7d32`
+- 日志: `/storage/Users/currentUser/ohos-test-runs/codex-adwaita-icon-theme-50.0.1-r1-20260905-171328/device-conan-create.log`
+- 备注: 真机 Meson 仍提示 `Symlink creation does not work on this platform`，配方在 `package()` 阶段将缺失的 `folder-open.svg` 与 cursor public alias 回填为普通文件；`test_package` 接受有效 symlink 或字节一致的 regular fallback 文件。此次将 `package_type` 改回 `unknown`，CI 不再把该 data-only 包误判为 CLI。
+
+## 路径 B / B 类候选知识草稿
+
+- `knowledge/drafts/DRAFT-adwaita-icon-theme-50.0.1-meson-resource-alias-materialization.md`
+- `knowledge/drafts/DRAFT-adwaita-icon-theme-50.0.1-meson-resource-alias-materialization.kv`
+- 说明: 该草稿沉淀 Meson data-only 资源包在 OHOS/HMDFS 上 `install_symlink()` 跳过 public alias 时的实体化与消费者验证方法，仅作为路径 B / B 类候选材料，最终分类以评审为准。
 
 ## 交付物
 
@@ -66,7 +95,7 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify adwaita-icon-theme 50.0   # 
 |------|------|
 | conanfile.py | Meson data-only 配方（package_type=application，无 libs） |
 | conandata.yml | 源码 URL（NJU 镜像 + 官方）+ SHA256 + 1 个补丁声明 |
-| test_package/ | conanfile.py + test_package.py（15 项消费者断言）+ MANIFEST.yml |
+| test_package/ | conanfile.py + test_package.py（20 项消费者断言）+ MANIFEST.yml |
 | patches/0001-meson.build.patch | icon-cache 工具可选化 + dataonly .pc 安装到 lib/pkgconfig（合并补丁） |
 | manifest.yaml / notes.md / reports/ | AI 元数据 |
 
@@ -77,5 +106,5 @@ python3 $SKILL_ROOT/scripts/ohc-run.py conan-verify adwaita-icon-theme 50.0   # 
 - 构建期必须 PATH 前置 /data/service/hnp/bin（否则 ninja 不可执行）
 ---
 
-**编译结束**: 2026-08-05 21:42
+**编译结束**: 2026-09-05 17:13
 **最终状态**: built
