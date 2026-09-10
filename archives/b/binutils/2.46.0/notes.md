@@ -1,67 +1,141 @@
-# binutils 2.46.0 适配笔记
+# binutils 2.46.0 HarmonyOS PC adaptation notes
 
-## 编译环境
-- 构建系统: autotools
-- 编译日期: 2026-05-25
-- 编译器: clang/clang++
-- 状态: built
+## Scope and contest path
 
-## 编译步骤
+- Package: native GNU Binutils command-line suite for HarmonyOS PC aarch64.
+- Recommended contest path: C, pending the committee's high-difficulty review.
+- Definitive path-C criterion: complex assembly/toolchain architecture. The official
+  archive has 29,637 entries, 8,815 `.s` files and 7 `.asm` files, with BFD,
+  opcodes, gas, ld, libctf, libsframe and gprof components.
+- Runtime Conan requirements are empty, so a large dependency chain is not claimed.
+- The only Issue/PR title prefix for this candidate is `【高难度挑战】`.
 
-1. 下载源码（清华镜像）：https://mirrors.tuna.tsinghua.edu.cn/gnu/binutils/binutils-2.46.0.tar.gz
-2. 修改 config.guess/config.sub 支持 HarmonyOS（使用 patch-autotools-ohos.pl）
-3. 修改所有 configure 脚本中的 umask 077 为 umask 022（解决 HMDFS 权限问题）
-4. 执行 configure：`./configure --prefix=/storage/Users/currentUser/usr/local --disable-gprofng`
-5. 执行 make：`make -j2`
-6. 执行 staging 安装：`make install DESTDIR=/storage/Users/currentUser/test-install-binutils-2.46.0`
-7. 执行测试：`make check`（跳过部分测试，缺少 dejagnu）
-8. 制作预编译包：`python3 scripts/ohc-run.py package binutils 2.46.0`
-9. 本地安装：`make install`
-10. 验证工具：`ld --version`、`as --version`等
+## Upstream identity
 
-## 遇到的问题与解决方案
+- Project: `https://www.gnu.org/software/binutils/`
+- Repository: `https://sourceware.org/git/binutils-gdb.git`
+- Tag / peeled commit: `binutils-2_46` /
+  `49d4d3fafa4ec4ff5a3460d91d5b1ed5286487db`
+- Archive: `https://ftp.gnu.org/gnu/binutils/binutils-2.46.0.tar.gz`
+- Archive size: 53,967,419 bytes
+- SHA256: `8608fe44ab7de645f6ad0a898313b75338842490d609adb85c9fb2827c376af2`
+- License: GPL-3.0-or-later, with component notices retained.
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| E007 | config.guess 无法识别 HarmonyOS | GNU config.guess 缺少 HarmonyOS 检测分支 | 使用 patch-autotools-ohos.pl 补丁 |
-| E011 | config.status 创建临时文件失败（Permission denied） | HMDFS UID 映射导致 umask 077 目录不可写 | 修改所有 configure 脚本 umask 077 → 022 |
-| gprofng | gprofng 编译失败（SIGEV_THREAD_ID 未定义） | 使用 Linux 特定信号机制 | 禁用 gprofng（--disable-gprofng） |
+## W0 and W0b
 
-## 源码修改
+Runtime `required: []`. Target-native tests use build-context packages only:
 
-修改了 16 个文件，生成 16 个补丁：
-- 0003-config.guess.patch: 添加 HarmonyOS 系统识别
-- 0004-config.sub.patch: 添加 ohos-linux 三元组
-- 0001-bfd-configure.patch ~ 0016-zlib-configure.patch: umask 077 → 022
+| Reference | W0 result |
+|---|---|
+| `dejagnu/1.6.3.1` | recipe/package available; fresh final cache resolved it |
+| `expect/5.45.4` | rebuilt in final cache; upstream 28 PASS / 1 SKIP / 0 FAIL |
+| `tcl/8.6.14` | resolved in final cache |
+| `zlib/1.3.1` | Expect transitive dependency; rebuilt in final cache |
 
-## 依赖版本
+The 2026-05-25 historical binutils archive recorded a native device build but
+did not contain a Conan recipe, fixed source hash, consumer test or complete test
+inventory. Revalidated findings:
 
-无外部依赖（binutils 自包含）
+1. Release `config.sub` already accepts `linux-ohos`; no config.sub patch is used.
+2. `config.guess` needs a focused HarmonyOS/OpenHarmony uname branch.
+3. Fourteen generated configure scripts need `umask 022` for HMDFS config.status
+   temporary directories.
+4. gprofng's collector uses Linux-specific runtime facilities and is explicitly
+   disabled rather than silently omitted.
 
-## 验证结果
+## Portability implementation
 
-```bash
-ld --version    # GNU ld (GNU Binutils) 2.46.0.20260210
-as --version    # GNU assembler (GNU Binutils) 2.46.0.20260210
-ar --version    # GNU ar (GNU Binutils) 2.46.0.20260210
-nm --version    # GNU nm (GNU Binutils) 2.46.0.20260210
-objdump --version  # GNU objdump (GNU Binutils) 2.46.0.20260210
-```
+- Patches 0001-0015 cover config.guess and configure/HMDFS behavior.
+- Patches 0016-0020 route cached shell helpers through the configured HNP bash,
+  use DejaGNU's pipe/file channels, and preserve normal Makefile behavior elsewhere.
+- Patch 0021 copies the exact SFrame DATA fixtures where HMDFS symlinks are not
+  reliable.
+- Patch 0022 uses `send_log --` so a negative process result is logged as data and
+  does not abort the Tcl driver.
+- Patch 0023 uses `cp -f` when a versioned DSO replaces an already loaded fixture.
+- Patch 0024 makes Clang select the candidate GNU ld explicitly in libctf.
+- Patch 0025 copies test ld/as executables on OHOS and uses the candidate GNU as
+  only for `compress.exp`; it restores compiler flags before the next driver.
+- Clang build/test objects use `-fno-addrsig`, documented by draft E547.
+- Make/install are serial because HMDFS rejects the GNU make FIFO jobserver path.
+- A native launcher reads DejaGNU's script from HMDFS and invokes the interpreter.
+- A tmpfile preload is verified with write/read/seek/close before long tests.
 
-## 交付物
+No production C/C++ behavior and no expected output are rewritten.
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| binutils-2.46.0-ohos-aarch64.tar.gz | 87.8 MB | 预编译包（含调试符号） |
-| binutils-2.46.0-ohos-aarch64-debug.tar.gz | 85.8 MB | 调试符号包 |
+## Native test deployment
 
-## 注意事项
+GNU ld output requires normal platform signing before execution. The exported
+`ohos-test-sign.py/.exp` helper is intentionally narrow:
 
-- gprofng 在 HarmonyOS 上不可用，需禁用
-- 所有 configure 脚本都需要修改 umask（共 16 个）
-- 质量门禁 G0-G4 全部通过
+- accepts only ELF64 little-endian AArch64 ET_EXEC/ET_DYN under the current
+  suite's resolved `tmpdir`;
+- signs the requested program and local `DT_NEEDED` closure found in the suite,
+  program directory or tmpdir;
+- adds only explicit literal-dlopen fixtures, including `pr21964-2b.so` for
+  `pr21964-2`;
+- removes an old `.codesign` section before signing a relinked file;
+- never rewrites a verdict or scans unrelated directories.
 
----
+Custom RPATH/RUNPATH directories outside those local conventions remain outside
+the helper's lookup scope.
 
-**编译结束**: 2026-05-25 17:29
-**最终状态**: built
+## Test inventory and final result
+
+The release has 386 DejaGNU `.exp` files. Seven gprofng files belong to the
+disabled collector. Of 379 enabled files, 367 are executed drivers and 12 are
+support files.
+
+| Suite | Inventory / drivers | PASS | FAIL | XFAIL | UNRESOLVED | UNTESTED | UNSUPPORTED |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| binutils | 37 / 34 | 273 | 1 | 2 | 0 | 2 | 8 |
+| gas | 145 / 142 | 1239 | 0 | 0 | 0 | 0 | 10 |
+| ld | 187 / 184 | 1721 | 34 | 13 | 0 | 2 | 182 |
+| libctf | 6 / 4 | 18 | 0 | 0 | 0 | 0 | 3 |
+| libsframe | 4 / 3 | 168 | 0 | 0 | 0 | 0 | 0 |
+| **Total** | **379 / 367** | **3419** | **35** | **15** | **0** | **4** | **203** |
+
+Normal DejaGNU rate: `3419/(3419+35+0)=98.99%`.
+
+Libiberty separately passes 930/930 checks across seven Make targets. gprof has
+two source entries but `gprof_cv_sys_native=no` on this SDK, so its Automake
+summary is 0 discovered / 0 executed / 0 failed; this is an exclusion, not a pass.
+All 35 FAIL occurrences are retained and machine-mapped in
+`ohos-failure-analysis.md`; review of their log contexts and the recorded
+control runs found zero failures caused by the current adaptation.
+
+## Consumer contract
+
+The common test script performs an installed-package ELF workflow with `as`,
+`readelf`, `objdump`, `nm`, `ar`, `ld` and `strip`, then checks a missing-input
+negative control. It has 13 assertions. Native OHOS testing adds three real
+executions after GNU ld, objcopy and strip transformations. Final result: 16/16.
+
+## Final evidence identity
+
+- Device job: `j039`, 2684.96 seconds, exit 0.
+- Isolated paths: `device-bundle-r6`, `final-cache39`, `final-build39`.
+- Input bundle SHA256:
+  `61f2ab642e0405787a1af1fa34e47b9e12281eb9fd1d8a93d509348fc2beec79`.
+- Evidence archive SHA256:
+  `8efd26e9be91e44d4deb7eb53a4d85ebc9320dc54481f00d392936b183d7c6f3`.
+- Result manifest: 138 files verified.
+- Package reference:
+  `binutils/2.46.0#11a4a9b63a85bc14b6f4edc65fc4fdfe:6b129b068851896169fae42d399fa922d239ce8a#79f95fb4875a2b5b802d4eaec2ee7349`.
+- Package contents: 453 files, 65,975,560 bytes.
+
+Historical final20 and rejected final34 results remain available. final34 applied
+external GNU as to all LD drivers and introduced `mbind2a/b`; it was rejected by
+the failure classifier. A device-session interruption left final36 incomplete and
+explicitly marked rc=130; it is not acceptance evidence.
+
+## Remaining process gates
+
+Task `#3485` was claimed by `sawakage` at 2026-09-08 19:59:25 CST. The feature
+branch was rebased onto official `main=7285d0428`; the 40 recipe/test inputs are
+byte-identical to the final39 device bundle. The finish-generated W3 state records
+exit 0 with log SHA256
+`e8909b256f8190a1451d05a83527b4bd4d053c7d2b5c0fb84019eeb6ab068b24`.
+The remaining external steps are final W4, Issue/PR creation and association,
+official CI and AI review, and committee review. Engineering evidence supports
+path-C candidacy but does not grant the contest classification.
