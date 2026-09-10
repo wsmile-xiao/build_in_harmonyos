@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-ohos-sysv-shmget-sigsys — OHOS 沙箱拦截 SysV 共享内存（shmget 家族）
+#   运行时 syscall 拦截 → 需替换为 POSIX shm_open+mmap（而非排除功能）
+#====================================================================
+
+id:                     DRAFT-ohos-sysv-shmget-sigsys
+trigger_tool:           runtime|cc|python|test
+phase:                  runtime|testing
+error_signature:        Signal 31|SIGSYS|Bad system call|exit code 159|killed.*signal 31|shmget\(\) failed|shmat\(\) failed
+
+severity:               3
+category:               ohos|platform|limitation|syscall|ipc|runtime|portability
+match_keywords:         shmget, shmat, shmctl, SysV, IPC_PRIVATE, IPC_RMID,
+                         shared memory, shm_open, ftruncate, mmap, USEMMAP,
+                         SIGSYS, signal 31, exit 159, __AFL_SHM_ID
+title:                  OHOS 沙箱拦截 SysV 共享内存（shmget/shmat/shmctl → SIGSYS），需替换为 POSIX shm_open+mmap
+
+root_cause:             OHOS 沙箱运行时拦截 SysV IPC 共享内存 syscall
+                         （shmget/shmat/shmctl → SIGSYS/signal 31，编译通过运行即崩，
+                         shell 表现为 "Signal 31 (core dumped)" / "Bad system call"，
+                         exit = 128+31 = 159）。SysV 共享内存无内建替代，但 POSIX
+                         共享内存（shm_open + ftruncate + mmap(MAP_SHARED) +
+                         shm_unlink）功能等价且不受拦截——属"有等价通道应替换"而非
+                         "未实现只能排除"（与 E051 根因不同：E051 的 setreuid/chroot
+                         等无替代，只能 #ifdef __OHOS__ 跳过）。跨进程标识由
+                         "shm ID 整数"改为"shm 名称字符串"经环境变量传递；回退方案：
+                         启用上游编译期 mmap 开关（AFL++ TEST_MMAP=1 → USEMMAP）。
+affected_scope:         所有在 OHOS 上调用 SysV 共享内存（shmget/shmat/shmctl）
+                         的 C/C++ 工具与库（模糊测试器、IPC 库、数据库、
+                         共享内存监控工具等）
+verification_cmd:       # 根因探针：编译一个仅调用 shmget(IPC_PRIVATE,...)+shmctl(IPC_RMID)
+                         # 的 C 程序并运行，OHOS 上预期 Signal 31 / exit=159；
+                         # 改用 shm_open+mmap 后正常退出 0
+
+rec_priority:           1
+rec_approach:           replace-sysv-shm-with-posix-shm
+rec_description:        将 shmget+shmat+shmctl 替换为 POSIX 通道：
+                         shm_open(名称, O_RDWR|O_CREAT|O_EXCL, 0600) +
+                         ftruncate(fd, size) + mmap(NULL,size,PROT_READ|PROT_WRITE,
+                         MAP_SHARED,fd,0)，atexit 清理 close(fd)+shm_unlink(名称)；
+                         环境变量内容由 shm ID 整数改为 shm 名称字符串。
+rec_command:            # setup_shm() 替换模板（经典 afl 1.35b 实测）：
+                         #   shm_name = "/__afl_" + pid；
+                         #   fd = shm_open(shm_name, O_RDWR|O_CREAT|O_EXCL, 0600)；
+                         #   ftruncate(fd, MAP_SIZE)；
+                         #   trace_bits = mmap(NULL, MAP_SIZE, PROT_READ|PROT_WRITE,
+                         #                     MAP_SHARED, fd, 0)；
+                         #   setenv(SHM_ENV_VAR, shm_name, 1)；  # ID → 名称
+                         # remove_shm(): close(fd); shm_unlink(shm_name);
+rec_auto_fix:           false
+rec_impl:               manual-review
+
+fallback_priority:      2
+fallback_approach:      compile-time-mmap-switch
+fallback_description:   若上游自带 mmap 共享内存编译开关，优先启用编译期开关而非
+                         手工重写源码（AFL++ 的 TEST_MMAP=1 → -DUSEMMAP=1）
+fallback_command:       make TEST_MMAP=1        # AFL++ 4.33c/4.34c 实测方案
+fallback_auto_fix:      true
+fallback_impl:          build-flag
+
+forbid_1_pattern:       signal\(\s*SIGSYS|sigaction\s*\([^)]*SIGSYS|SA_SIGINFO[^\n]*31
+forbid_1_reason:        试图用 signal handler 捕获被拦 syscall 的 SIGSYS
+                         （同 E051 教训：OHOS 对部分被拦 syscall 的 SIGSYS 不可捕获，
+                         信号处理方案无效）
+forbid_1_consequence:   进程仍被 SIGSYS 终止，方案无效，浪费调试时间
+
+principles:             P004, P008, P015
+causes:
+caused_by:
+similar_to:             E051
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-sysv-shmget-sigsys.md
+last_updated:           2026-09-05
+source_event:           经典 afl 1.35b 鸿蒙 PC 适配：afl-fuzz/afl-showmap/afl-tmin
+                         三工具 setup_shm/remove_shm 由 shmget+shmat+shmctl 重写为
+                         shm_open+ftruncate+mmap+shm_unlink（补丁 0002-0004，
+                         feat/afl-1.35b，conan create 实机通过）；同根因交叉佐证：
+                         AFL++ 4.33c/4.34c（TEST_MMAP=1 → USEMMAP，真实 SIGSYS 日志）
+authors:                232
+source_pr:
+source_commit:          archives/a/afl/1.35b（patches/0002-0004-afl-*-shm-mmap.patch）
+
+draft:                  true
+contributor_id:         232
