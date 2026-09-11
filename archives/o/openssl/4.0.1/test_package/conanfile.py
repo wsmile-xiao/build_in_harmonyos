@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real OpenSSL 4 consumer used by conan create."""
+"""Real OpenSSL consumer used by conan create."""
 
 import os
 
@@ -9,7 +9,7 @@ from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 from conan.tools.env import VirtualRunEnv
 
 
-class Openssl4TestConan(ConanFile):
+class OpensslTestConan(ConanFile):
     settings = "os", "arch", "compiler", "build_type"
     test_type = "explicit"
 
