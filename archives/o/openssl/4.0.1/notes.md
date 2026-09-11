@@ -2,15 +2,11 @@
 
 ## Scope
 
-- Conan reference: `openssl-4/4.0.1`
+- Conan reference: `openssl/4.0.1`
 - Upstream source: OpenSSL 4.0.1 (official GitHub release tarball)
 - Target: OHOS armv8 (clang 15.0.4, musl)
 - Delivery: static PIC `libssl.a` and `libcrypto.a`, headers, and OpenSSL CLI
 - Third-party Conan dependencies: none (Perl is a build-time tool taken from PATH)
-
-`openssl-4` is a distinct Conan package name from `openssl` (the 1.1.1/3.x
-series). OpenSSL 4.x is a new upstream major release; packaging it under its
-own name lets the two series coexist in the registry without collisions.
 
 ## Upstream 4.0.1 vs 3.5.6 — what changed for the build
 
@@ -114,7 +110,7 @@ adding `-D__MUSL__` to the OHOS compiler command (see "Patch guard activation"
 below).
 
 - Full package reference:
-  `openssl-4/4.0.1@ohpcd/stable#d809a2a0f270e2e0af2388b6556faedb:f23d5a9b1d537641c03c7814478a2fadb727650a#09d752bc5aa4deedb47d07197f6947ba`
+  `openssl/4.0.1@ohpcd/stable#d809a2a0f270e2e0af2388b6556faedb:f23d5a9b1d537641c03c7814478a2fadb727650a#09d752bc5aa4deedb47d07197f6947ba`
 - Package contents: 150 files, two static archives (`libcrypto.a`,
   `libssl.a`), one CLI binary, no `.so`, no upstream `.cmake`, no `.pc`
 - `llvm-nm -u`: **zero `__fd_chk` references** in `libcrypto.a`,

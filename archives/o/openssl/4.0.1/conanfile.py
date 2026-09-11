@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for the OpenSSL 4.0.1 OHOS adaptation (openssl-4 package)."""
+"""Conan recipe for the OpenSSL 4.0.1 OHOS adaptation."""
 
 import os
 from io import StringIO
@@ -19,10 +19,10 @@ from conan.tools.files import (
 from conan.tools.layout import basic_layout
 
 
-class Openssl4Conan(ConanFile):
-    name = "openssl-4"
+class OpensslConan(ConanFile):
+    name = "openssl"
     version = "4.0.1"
-    description = "TLS/SSL and cryptographic library (OpenSSL 4.x series)"
+    description = "TLS/SSL and cryptographic library"
     license = "Apache-2.0"
     homepage = "https://www.openssl.org/"
     url = "https://github.com/openssl/openssl"
