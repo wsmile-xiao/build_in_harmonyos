@@ -31,6 +31,8 @@ class RpmConan(ConanFile):
 
     def requirements(self):
         self.requires("popt/1.16")
+        self.requires("zlib/1.3.1.1")
+        self.requires("bzip2/1.0.8")
         self.requires("sqlite3/3.49.1")
         self.requires("xz/5.6.2")
         self.requires("zstd/1.5.6")
@@ -64,7 +66,13 @@ class RpmConan(ConanFile):
         if self.settings.os in ("Linux", "OHOS"):
             tc.cache_variables["CMAKE_SYSTEM_NAME"] = "Linux"
             tc.cache_variables["CMAKE_SYSTEM_PROCESSOR"] = str(self.settings.arch)
-        tc.cache_variables["CMAKE_PREFIX_PATH"] = sys_prefix + ";" + home_prefix
+        # Include Conan-managed zlib/bzip2 package folders so find_package(ZLIB/BZip2) finds them
+        # Conan paths first so they take priority over system-installed versions
+        zlib_root = self.dependencies["zlib"].package_folder
+        bzip2_root = self.dependencies["bzip2"].package_folder
+        tc.cache_variables["CMAKE_PREFIX_PATH"] = (
+            zlib_root + ";" + bzip2_root + ";" + sys_prefix + ";" + home_prefix
+        )
         # Point OPENSSL_ROOT_DIR to Conan-managed OpenSSL so find_package(OpenSSL) finds it
         openssl_root = self.dependencies["openssl"].package_folder
         tc.cache_variables["OPENSSL_ROOT_DIR"] = openssl_root
