@@ -1,0 +1,93 @@
+# ═══ Draft knowledge entry — libcheck 在只读 /tmp 的 OHOS 上无需私有自建 ═══
+# Timestamp: 2026-09-11
+# Software: libtsm 4.3.0（任何以 check/libcheck 为测试框架的包）
+# Gate: 设备原生上游测试（meson test / make check 运行阶段）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt and the counter-evidence commands below
+#   2. Rename to E571.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E571.md
+
+id:                     DRAFT-E571
+trigger_tool:           meson test|make check|check|test
+phase:                  test|test_package
+error_signature:        Unable to create temporary file for communication; may not have permissions to do so|check_msg.c:317
+severity:               2
+category:               platform|test-framework|environment
+match_keywords:         libcheck, check, check_msg.c:317, Unable to create temporary file,
+                         open_tmp_file, mkstemp, TEMP, TMPDIR, P_tmpdir, /tmp read-only,
+                         exit status 2, exit code 2, meson test, CK_FORK, 测试框架
+title:                  libcheck 0.15.x 在 /tmp 只读的 OHOS 上无需私有自建：open_tmp_file 首选 TEMP，运行环境 export TEMP=<可写目录> 即可让发行版二进制跑通全部用例（TMPDIR 单独设置无效）
+
+root_cause: OHOS 设备 /tmp 是 root 属主只读目录（实测 drwxr-xr-x root root）。libcheck 0.15.x 的
+  open_tmp_file（src/check_msg.c，错误行号 317）为每个用例创建父子进程通信临时文件时，
+  按 TEMP → P_tmpdir → TMPDIR → "." 的顺序探测候选目录；musl 下 P_tmpdir 宏固定展开
+  为 "/tmp"，排在 TMPDIR 之前，因此只设 TMPDIR 仍会命中只读 /tmp 并失败，check 以
+  "Unable to create temporary file for communication" 中止，每个用例 exit status 2。
+  关键结论：TEMP 本来就是最高优先级候选，所以（a）不需要私有自建/打补丁的 libcheck，
+  （b）只要运行测试的环境显式 export TEMP=<任务可写目录>，ohpcd 发行包 check/0.15.2 的
+  原始二进制即可完整跑通全部用例。
+
+affected_scope:         所有以 check/libcheck 作为上游测试框架、且在设备（/tmp 只读）上运行
+                        测试的包；也适用于把 check 作为 conan 依赖使用的 test_package 场景。
+
+verification_cmd:       TEMP=<任务可写目录> <上游测试命令>
+                        例：TEMP=$TASK_DIR/tmpw meson test -C build-native --print-errorlogs
+                        预期：套件全部 OK；反例（不设 TEMP）每个用例 exit 2 并打印 check_msg.c:317。
+
+rec_priority:           1
+rec_approach:           export-temp-for-libcheck
+rec_description: 在运行上游 check 套件的命令前显式 export TEMP=<任务私有可写目录>（与沙箱 HOME 同级的
+  $TASK_DIR 下目录即可）。无需改动 libcheck 源码、无需私有重建、无需修改上游测试；使用
+  ohpcd 发行包 check/0.15.2（package_id 21b17f8b2bc0e9511e276e3d57a23893067cefe5）即可。
+  若测试由 conan test_package 驱动的场景，可在 test() 里通过 env 传入 TEMP。
+rec_command:            TEMP="$TASK_DIR/tmpw" meson test -C build-native --print-errorlogs
+rec_auto_fix:           true
+rec_impl:               set-env-var
+
+fallback_priority:      2
+fallback_approach:      private-rebuild-libcheck
+fallback_description: >
+  仅当包/环境无法控制测试运行环境变量（例如测试命令硬编码 env -i 或框架自建子环境）时，
+  才按 E547 草稿的私有自建路径：从源码构建 libcheck 到任务私有 prefix，并在
+  src/check_msg.c 的 open_tmp_file 中把 getenv("TMPDIR") 探测提前到 P_tmpdir 之前
+  （TEMP 保持最高优先）。
+fallback_command:       ./configure --prefix=<任务私有prefix> && make && make install；随后修改 check_msg.c 探测顺序重建
+fallback_auto_fix:      false
+fallback_impl:          patch-test-framework-source
+
+forbid_1_pattern:       export TMPDIR=<可写目录>   # 单独使用作为修复
+forbid_1_reason:        P_tmpdir（musl 固定 "/tmp"）在探测顺序中早于 TMPDIR，只设 TMPDIR 不改变
+                        命中结果（设备实测 rc 仍为 2）
+forbid_1_consequence:   误判为"已修复"却在运行阶段继续每个用例 exit 2；若据此写进 PR 会构成
+                        申报不实（跳过/失败被写成 PASS）
+
+forbid_2_pattern:       patch libcheck 源码 / 私有重建 test framework（在 TEMP 可用时的默认动作）
+forbid_2_reason:        发行版 check 二进制在 TEMP=<可写> 下已完整可用（实测 37/37 用例通过），
+                        自建+改框架源码属不必要引入的验证面偏离：修改过的测试框架会削弱"上游
+                        测试在标准框架下通过"的证据强度，并额外消耗构建预算
+forbid_2_consequence:   证据强度下降（测试跑在改过的框架上）；审方可能判定测试框架被改动
+
+principles:
+causes:                 设置 TMPDIR 无效的"修复无效"现象；把 check 包一律按私有自建处理的额外成本
+caused_by:              libcheck open_tmp_file 的候选目录顺序 TEMP → P_tmpdir → TMPDIR → "."
+                        （P_tmpdir 在 musl 下固定为只读 /tmp）
+similar_to:             草稿 DRAFT-E547（ohos-libcheck-p-tmpdir-tmpdir-priority，机理描述正确但其推荐
+                        方案"私有重建并调整探测顺序"在本条实测下不是必需）；E002（/tmp 只读时的
+                        TMPDIR 通用建议，对 check 场景不生效）
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-E571-ohos-libcheck-temp-env-first-probe.md
+last_updated:           2026-09-11
+source_event:           libtsm 4.3.0 适配：设备原生上游测试（meson test，7 套件 37 用例）
+source_pr:              (本 PR)
+source_commit:
+authors:                Awstme
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
