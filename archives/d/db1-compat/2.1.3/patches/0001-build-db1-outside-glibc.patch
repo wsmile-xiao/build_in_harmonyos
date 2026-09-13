@@ -1,0 +1,278 @@
+--- /dev/null
++++ b/db/CMakeLists.txt
+@@ -0,0 +1,72 @@
++cmake_minimum_required(VERSION 3.16)
++project(db1_compat VERSION 2.1.3 LANGUAGES C)
++
++set(DB1_SOURCES
++    btree/bt_close.c
++    btree/bt_conv.c
++    btree/bt_debug.c
++    btree/bt_delete.c
++    btree/bt_get.c
++    btree/bt_open.c
++    btree/bt_overflow.c
++    btree/bt_page.c
++    btree/bt_put.c
++    btree/bt_search.c
++    btree/bt_seq.c
++    btree/bt_split.c
++    btree/bt_utils.c
++    db/db.c
++    hash/hash.c
++    hash/hash_bigkey.c
++    hash/hash_buf.c
++    hash/hash_func.c
++    hash/hash_log2.c
++    hash/hash_page.c
++    hash/ndbm.c
++    mpool/mpool.c
++    recno/rec_close.c
++    recno/rec_delete.c
++    recno/rec_get.c
++    recno/rec_open.c
++    recno/rec_put.c
++    recno/rec_search.c
++    recno/rec_seq.c
++    recno/rec_utils.c)
++
++add_library(db1 ${DB1_SOURCES})
++target_include_directories(db1
++    PUBLIC
++        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
++        $<INSTALL_INTERFACE:include/db1>
++    PRIVATE
++        ${CMAKE_CURRENT_SOURCE_DIR}/btree
++        ${CMAKE_CURRENT_SOURCE_DIR}/hash
++        ${CMAKE_CURRENT_SOURCE_DIR}/recno)
++target_compile_definitions(db1 PRIVATE
++    __DBINTERFACE_PRIVATE
++    USE_LIBDB1
++    _GNU_SOURCE)
++target_compile_features(db1 PRIVATE c_std_90)
++if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
++    target_compile_options(db1 PRIVATE
++        -Wno-unused-function
++        -Wno-uninitialized
++        -Wno-implicit-int
++        -Wno-deprecated-non-prototype)
++endif()
++set_target_properties(db1 PROPERTIES
++    OUTPUT_NAME db
++    VERSION ${PROJECT_VERSION}
++    SOVERSION 2)
++if(BUILD_SHARED_LIBS AND UNIX)
++    target_link_options(db1 PRIVATE
++        "LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/Versions")
++endif()
++
++include(GNUInstallDirs)
++install(TARGETS db1
++    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++install(FILES db.h mpool.h ndbm.h
++    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/db1)
+diff --git a/db/Versions b/db/Versions
+index 479604e..55c2629 100644
+--- a/db/Versions
++++ b/db/Versions
+@@ -1,10 +1,15 @@
+-libdb1 {
+-  GLIBC_2.0 {
++GLIBC_2.0 {
++  global:
+     # the real DB entry point.
+     dbopen; __dbopen;
+
+     # The compatibility functions.
+     dbm_clearerr; dbm_close; dbm_delete; dbm_dirfno; dbm_error;
+     dbm_fetch; dbm_firstkey; dbm_nextkey; dbm_open; dbm_store;
+-  }
+-}
++
++    # the public memory pool compatibility functions.
++    mpool_open; mpool_filter; mpool_new; mpool_get; mpool_put;
++    mpool_sync; mpool_close;
++  local:
++    *;
++};
+diff --git a/db/btree/btree.h b/db/btree/btree.h
+index 45f7c94..4579cca 100644
+--- a/db/btree/btree.h
++++ b/db/btree/btree.h
+@@ -43,7 +43,7 @@
+
+ #include <mpool.h>
+
+-#ifdef _LIBC
++/* Keep the historical internal names when built outside glibc. */
+ /* In the GNU C library we must not pollute the namespace because libdb is
+    needed by libnss_db.  */
+ #define mpool_open __mpool_open
+@@ -53,7 +53,6 @@
+ #define mpool_put __mpool_put
+ #define mpool_sync __mpool_sync
+ #define mpool_close __mpool_close
+-#endif
+
+ #define	DEFMINKEYPAGE	(2)		/* Minimum keys per page */
+ #define	MINCACHE	(5)		/* Minimum cached pages */
+diff --git a/db/compat.h b/db/compat.h
+index 706e582..89295a8 100644
+--- a/db/compat.h
++++ b/db/compat.h
+@@ -45,5 +45,10 @@
+ #define	MIN(_a,_b)	((_a)<(_b)?(_a):(_b))
+ #endif
+
++/* Define ALIASNAME as a weak alias for NAME. */
++#define weak_alias(name, aliasname) _weak_alias (name, aliasname)
++#define _weak_alias(name, aliasname) \
++  extern __typeof (name) aliasname __attribute__ ((weak, alias (#name)));
++
+
+ #endif /* compat.h */
+diff --git a/db/db.h b/db/db.h
+index 8b7921f..3aad4ae 100644
+--- a/db/db.h
++++ b/db/db.h
+@@ -39,6 +39,11 @@
+ #include <sys/types.h>
+ #include <sys/cdefs.h>
+
++/* Some libc implementations do not provide glibc's __PMT extension. */
++#ifndef __PMT
++#define __PMT(p) __P(p)
++#endif
++
+ #include <limits.h>
+
+ #ifdef __DBINTERFACE_PRIVATE
+diff --git a/db/db/db.c b/db/db/db.c
+index 49f6124..0e916fe 100644
+--- a/db/db/db.c
++++ b/db/db/db.c
+@@ -44,11 +44,10 @@ static char sccsid[] = "@(#)db.c\t8.4 (Berkeley) 2/21/94";
+
+ #include <db.h>
+
+-#ifdef _LIBC
++/* Preserve both the internal glibc name and the public compatibility name. */
+ /* In the GNU C library we must not pollute the namespace, because libdb
+    is needed by libnss_db.  */
+ #define dbopen __dbopen
+-#endif
+
+ DB *
+ dbopen(fname, flags, mode, type, openinfo)
+@@ -78,10 +78,8 @@ dbopen(fname, flags, mode, type, openinfo)
+-	errno = EINVAL;
+-	return (NULL);
++	errno = EINVAL;
++	return (NULL);
+ }
+-#ifdef _LIBC
+ #undef dbopen
+ weak_alias (__dbopen, dbopen)
+-#endif
+
+ static int
+ __dberr __P((void))
+diff --git a/db/mpool.h b/db/mpool.h
+index 4502d94..2fb59ab 100644
+--- a/db/mpool.h
++++ b/db/mpool.h
+@@ -38,6 +38,46 @@
+
+ #include <sys/queue.h>
+
++/* musl's public sys/queue.h may omit the legacy BSD circular queue API. */
++#ifndef CIRCLEQ_HEAD
++#define CIRCLEQ_HEAD(name, type) \
++struct name { struct type *cqh_first; struct type *cqh_last; }
++#define CIRCLEQ_ENTRY(type) \
++struct { struct type *cqe_next; struct type *cqe_prev; }
++#define CIRCLEQ_INIT(head) do { \
++    (head)->cqh_first = (void *)(head); \
++    (head)->cqh_last = (void *)(head); \
++} while (0)
++#define CIRCLEQ_INSERT_HEAD(head, elm, field) do { \
++    (elm)->field.cqe_next = (head)->cqh_first; \
++    (elm)->field.cqe_prev = (void *)(head); \
++    if ((head)->cqh_last == (void *)(head)) \
++        (head)->cqh_last = (elm); \
++    else \
++        (head)->cqh_first->field.cqe_prev = (elm); \
++    (head)->cqh_first = (elm); \
++} while (0)
++#define CIRCLEQ_INSERT_TAIL(head, elm, field) do { \
++    (elm)->field.cqe_next = (void *)(head); \
++    (elm)->field.cqe_prev = (head)->cqh_last; \
++    if ((head)->cqh_first == (void *)(head)) \
++        (head)->cqh_first = (elm); \
++    else \
++        (head)->cqh_last->field.cqe_next = (elm); \
++    (head)->cqh_last = (elm); \
++} while (0)
++#define CIRCLEQ_REMOVE(head, elm, field) do { \
++    if ((elm)->field.cqe_next == (void *)(head)) \
++        (head)->cqh_last = (elm)->field.cqe_prev; \
++    else \
++        (elm)->field.cqe_next->field.cqe_prev = (elm)->field.cqe_prev; \
++    if ((elm)->field.cqe_prev == (void *)(head)) \
++        (head)->cqh_first = (elm)->field.cqe_next; \
++    else \
++        (elm)->field.cqe_prev->field.cqe_next = (elm)->field.cqe_next; \
++} while (0)
++#endif
++
+ /*
+  * The memory pool scheme is a simple one.  Each in-memory page is referenced
+  * by a bucket which is threaded in up to two of three ways.  All active pages
+diff --git a/db/mpool/mpool.c b/db/mpool/mpool.c
+index 7ced76f..478d77f 100644
+--- a/db/mpool/mpool.c
++++ b/db/mpool/mpool.c
+@@ -50,7 +50,7 @@ static char sccsid[] = "@(#)mpool.c\t8.5 (Berkeley) 7/26/94";
+ #define	__MPOOLINTERFACE_PRIVATE
+ #include <mpool.h>
+
+-#ifdef _LIBC
++/* Keep the historical internal names when built outside glibc. */
+ /* In the GNU C library we must not pollute the namespace because libdb is
+    needed by libnss_db.  */
+ #define mpool_open __mpool_open
+@@ -60,7 +60,6 @@ static char sccsid[] = "@(#)mpool.c\t8.5 (Berkeley) 7/26/94";
+ #define mpool_put __mpool_put
+ #define mpool_sync __mpool_sync
+ #define mpool_close __mpool_close
+-#endif
+
+ static BKT *mpool_bkt __P((MPOOL *));
+ static BKT *mpool_look __P((MPOOL *, pgno_t));
+@@ -313,22 +312,20 @@ mpool_sync(mp)
+-	return (fsync(mp->fd) ? RET_ERROR : RET_SUCCESS);
++	return (fsync(mp->fd) ? RET_ERROR : RET_SUCCESS);
+ }
+
+-#ifdef _LIBC
+ #undef mpool_open
+ #undef mpool_filter
+ #undef mpool_new
+ #undef mpool_get
+ #undef mpool_put
+ #undef mpool_close
+ #undef mpool_sync
+ weak_alias (__mpool_open, mpool_open)
+ weak_alias (__mpool_filter, mpool_filter)
+ weak_alias (__mpool_new, mpool_new)
+ weak_alias (__mpool_get, mpool_get)
+ weak_alias (__mpool_put, mpool_put)
+ weak_alias (__mpool_close, mpool_close)
+ weak_alias (__mpool_sync, mpool_sync)
+-#endif
+
+ /*
+  * mpool_bkt
+  *	Get a page from the cache (or create one).
