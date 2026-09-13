@@ -1,0 +1,86 @@
+# ═══ Draft knowledge entry — 上游 Makefile 反引号调用已被依赖库删除的 *-config 探测脚本（freetype-config）→ 迁移到 pkg-config，且必须用消费方 PkgConfigDeps 生成的 .pc ═══
+# Timestamp: 2026-09-11
+# Software: cube2font 1.5.1（Red Eclipse / Cube Engine 2 仓库的 src/shared/cube2font.c）
+# Gate: 原生 make 首错 / conan create build()
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E572
+title: 上游 Makefile 反引号调用已被依赖库删除的 freetype-config → ft2build.h 找不到；改用 pkg-config 时必须用消费方 PkgConfigDeps 生成的 .pc（依赖包自带 .pc 的 prefix=/ 输出死路径）
+trigger_tool: make / clang / pkg-config
+phase: build
+error_signature: freetype-config: inaccessible or not found|freetype-config: not found|freetype-config: command not found|ft2build.h' file not found
+severity: 2
+category: platform|conan|build-system
+match_keywords: freetype-config, ft2build.h, pkg-config, freetype2, PkgConfigDeps, PKG_CONFIG_PATH,
+  prefix=/, 反引号, backtick, Makefile, sdl-config, glib-config, libpng-config, xml2-config,
+  ncurses5-config, 老式构建脚本, 探测脚本移除
+keywords: freetype-config, ft2build.h, FreeType 2.9.1, pkg-config, freetype2, PkgConfigDeps,
+  PKG_CONFIG_PATH, prefix=/, relocatable conan 包, 反引号调用, Makefile 规则, 交叉编译,
+  shell 探测失败, gcc -dumpmachine, PLATFORM
+approach: |
+  症状是"探测脚本不存在"而不是"探测结果错"，所以先分流：
+  1) 确认脚本是否真的不存在：`find <依赖包目录> -name 'freetype-config*'` 为 0 命中
+     （conan freetype 包连 bin/ 目录都没有），排除"wrapper 修复"路线；
+  2) 确认上游提交历史/发行版补丁给出的替代口径：FreeType 自 2.9.1 起删除
+     freetype-config，官方推荐 pkg-config 的 freetype2 模块；Debian 源包
+     cube2font 1.5.1-1 正是用 use-pkg-config.patch 做同一处替换，可作方案依据；
+  3) 补丁只改真正失败的两条规则（编译与链接），把 `` `freetype-config --cflags` ``
+     换成 `` `$(PKG_CONFIG) --cflags freetype2` ``，并加 `PKG_CONFIG?= pkg-config`
+     以便配方用命令行变量注入绝对路径；
+  4) .pc 来源必须是消费方 PkgConfigDeps 的生成目录（`self.generators_folder`），
+     不能指向依赖包自带的 `<包>/lib/pkgconfig`；
+  5) 同一类"必然失败的 shell 探测"（`PLATFORM= $(shell gcc -dumpmachine)`）可在
+     make 命令行传值抑制——命令行变量优先于文件内赋值，无需改上游文件。
+root_cause: |
+  2000-2015 年代的手写 Makefile 普遍用 `xxx-config --cflags/--libs` 反引号探测依赖，
+  该约定已被上游逐个废弃：freetype-config 于 FreeType 2.9.1（2018）删除，sdl-config
+  随 SDL2 消失，glib-config 在 GLib 2.x 早期即被 pkg-config 取代。这些脚本在宿主
+  系统上往往因发行版兼容包而残留，所以问题在交叉编译/conan 环境才第一次暴露：
+  conan 的 freetype 包只装 include/lib/pkgconfig，不装任何 *-config 脚本，
+  `$(CXX) -c ... \`freetype-config --cflags\`` 得到空 flags，紧接着
+  `#include <ft2build.h>` 找不到头文件——真正报错点是头文件，探测失败只在上一行
+  留一句 shell 的 "not found"。
+  另一半根因是 .pc 的语义：依赖包内自带的 .pc 是打包时生成的，其 prefix 是安装
+  前缀（conan 包 relocatable 布局下为 `/`），直接把它加进 PKG_CONFIG_PATH 会得到
+  `-I//include/freetype2 -L//lib` 这类指向根目录的死路径，编译仍然失败；只有消费方
+  用 PkgConfigDeps 重新生成的 .pc（prefix=依赖包在缓存中的真实目录）才可用。
+affected_scope: 所有构建脚本用反引号/direct call 调用 *-config 探测脚本的老式包
+  （Makefile 手写项目、2010 年代 autotools、商业 SDK 样例），尤其在 conan 交叉编译
+  环境；不受影响的是已用 pkg-config/CMake find_package 的现代构建系统
+verification_cmd: python3 -c "import subprocess,glob;p=glob.glob('/storage/Users/currentUser/.conan2/p/freet*/p')[0];print('config-script:',len(glob.glob(p+'/**/freetype-config*',recursive=True)));print(open(p+'/lib/pkgconfig/freetype2.pc').read().splitlines()[0])"  # 期望输出 config-script: 0 与 prefix=/
+rec_priority: 1
+rec_approach: pkg-config-migration-with-consumer-pc
+rec_description: 用正式补丁把上游 Makefile 的 *-config 反引号替换为 pkg-config 模块调用
+  （freetype→freetype2，即依赖包 cpp_info 的 pkg_config_name 属性），配方
+  `generators = "PkgConfigDeps"` 并把 PKG_CONFIG_PATH 指向 self.generators_folder；
+  同时把配方侧仍需的依赖 flags（如静态 zlib 的 -I/-L）用同一 pkg-config 注入
+  CXXFLAGS/LDFLAGS；PKG_CONFIG 用绝对路径注入以提高可复现性
+rec_command: make -j1 cube2font PLATFORM=aarch64-unknown-linux-ohos CXX=<clang++> PKG_CONFIG=<pkg-config> CXXFLAGS="$(pkg-config --cflags zlib) -O3" LDFLAGS="$(pkg-config --libs zlib)"
+rec_auto_fix: false
+rec_impl: 以正式 patch 文件承载 Makefile 规则改写，conandata.yml 登记 patch_type=portability；
+  PKG_CONFIG_PATH=self.generators_folder 在 build() 内设置
+fallback_priority: 2
+fallback_approach: wrapper + PATH 前置
+fallback_description: 当依赖包内仍带 *-config 脚本（如 libpng-config、gpgme-config）或上游
+  构建脚本无法改（configure/Makefile.in 生成物、第三方 SDK 脚本）时，改为在配方内生成
+  指向依赖包的 POSIX sh wrapper 并前置 PATH，参见
+  DRAFT-pngnq-1.1-conan-libpng-config-wrapper 与 E433
+fallback_command:
+fallback_auto_fix: false
+fallback_impl:
+principles:
+caused_by: []
+causes: []
+similar_to: E433, E111
+conflicts_with: []
+prerequisite_of: []
+doc_file: knowledge/drafts/DRAFT-E572-removed-config-script-pkgconfig-migration.md
+last_updated: 2026-09-11
+source_event: cube2font 1.5.1 OHOS 适配（原生 make 第一条真实错误，2026-09-11）
+authors: Awstme
+source_pr:
+source_commit:
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:
