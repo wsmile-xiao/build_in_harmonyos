@@ -1,0 +1,149 @@
+#====================================================================
+# DRAFT-dejagnu-toolchain-assembly-ohos — OHOS 上装配 DejaGNU 上游测试
+#   套件的完整清单：tcl/expect 版本链、GNU readelf、工具源码硬编码
+#   /tmp、TEST_EXECS 补全
+# 对应人类文档: knowledge/drafts/DRAFT-dejagnu-toolchain-assembly-ohos.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9459 dwz 0.16 适配（DejaGNU testsuite 0/62 → 48/62）
+# 与 E272 的关系: E272 覆盖 spawn/-nottyinit 与 libc tmpfile() shim 两点；
+#   本条目是其同族增量（版本链/工具替换/源码 /tmp/TEST_EXECS 装配面）
+#====================================================================
+
+id:                     DRAFT-dejagnu-toolchain-assembly-ohos
+trigger_tool:           runtest|dejagnu|expect|tcl|make|autotools|testing
+phase:                  testing
+error_signature:        unable to find expect in the PATH|
+                         Tcl_Init failed: Can't find a usable init\.tcl|
+                         version conflict for package "Tcl": have 8\.6\.[0-9]+, need exactly 8\.6\.[0-9]+|
+                         ERROR: Running config\.guess produced bogus build triplet|
+                         Unknown DWARF debug section `i'|
+                         runtest: inaccessible or not found|
+                         ln: cannot create hard link.*Operation not permitted
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               testing, dejagnu, tcl, expect, toolchain, ohos, cross-compile
+match_keywords:         DejaGNU, runtest, expect 5.45.4, tclsh8.6, TCL_LIBRARY,
+                         init.tcl version conflict, eu-readelf, readelf -wi,
+                         config.guess HarmonyOS, lib/$*.exp, TEST_EXECS, DejaGNU site.exp,
+                         hardcoded /tmp, mkstemp, HMDFS hardlink, binary-sign-tool
+title:                  OHOS 上装配 DejaGNU 上游测试套件：tcl/expect 版本链对齐、GNU readelf 替换、被测工具源码 /tmp 改 TMPDIR、TEST_EXECS 补全
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             DejaGNU（runtest）在 OHOS 上跑上游测试套件时，需同时满足一
+                         组相互关联的环境前提，缺一即整体不可运行：① runtest 由
+                         dejagnu 提供，但其驱动依赖 expect；② expect 是 tcl 扩展，
+                         **运行时必须用与 expect 编译时同版本的 tcl init.tcl**
+                         （ohpcd 同时存在 tcl 8.6.14 与 8.6.16，选错即
+                         "version conflict for package Tcl"）；③ 测试脚本大量使用
+                         **GNU readelf 的 `-wi` 简写**，而 elfutils 的 eu-readelf
+                         不支持该简写（报 Unknown DWARF debug section `i'）；
+                         ④ 套件的 config.guess 是旧版，`uname -s` 返回 HarmonyOS
+                         时匹配不到任何系统（E007），且在 HMDFS 写 dummy.c 失败；
+                         ⑤ 被测工具自身若把临时目录硬编码为 /tmp（OHOS 只读），
+                         multifile 类用例全灭；⑥ 套件的测试输入（TEST_EXECS）需按
+                         平台的 uname 结果选择性构建，缺目标即 FAIL/UNSUPPORTED；
+                         ⑦ OHOS HMDFS 不支持硬链接，hardlink 类用例结构上不可通过
+affected_scope:         OHOS 上所有 DejaGNU/runtest 驱动的上游测试套件
+                         （第一个完整实证：dwz 0.16；同族：E272 arm-none-eabi-binutils、
+                         E354 Redis Tcl 套件）
+verification_cmd:       # 最小可运行验证（先跑单用例，再全量）
+                         runtest --tool=<tool> -srcdir <src>/testsuite/ version.exp
+                         # 期望：输出 PASS 且无 Tcl_Init / expect / config.guess 报错
+                         # 再全量：runtest --tool=<tool> -srcdir <src>/testsuite/
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           dejagnu-suite-assembly-checklist
+rec_description:        按依赖顺序装配（每步都可单独验证）：
+                         1) **runtest + expect**：装 dejagnu 与 expect，expect 需能
+                            执行（`expect -v` 输出 5.45.4）。
+                         2) **tcl 版本对齐**：expect 的运行库版本决定 TCL_LIBRARY——
+                            用 `readelf -d expect | grep tcl` 或试用不同 tcl 包的
+                            init.tcl 报错信息定位；本次实证 expect 5.45.4 编译自
+                            8.6.14，故 TCL_LIBRARY 必须指向**8.6.14** 的
+                            `lib/tcl8.6`（而非 ohpcd 里版本号更高的 8.6.16）。
+                         3) **GNU readelf**：把 PATH 中裸名 `readelf` 指向
+                            binutils 的 GNU readelf（支持 `-wi`），而不是
+                            elfutils 的 eu-readelf。
+                         4) **config.guess OHOS**：按 E007 在 uname 初判后、Linux
+                            编译检测（写 dummy.c）**之前**插入
+                            `aarch64:* / aarch64_be:* → echo <machine>-unknown-linux-ohos; exit`。
+                         5) **被测工具源码 /tmp**：若工具 C 源码硬编码 "/tmp/"
+                            （如 dwz 的 make_temp_file），改为
+                            `getenv("TMPDIR")` + "/tmp/" 回退（E002 的环境变量方案
+                            对源码硬编码无效——见 forbid）。
+                         6) **TEST_EXECS 补全**：先跑一次 `runtest`，从 FAIL/UNSUPPORTED
+                            列表反推缺哪些测试输入目标，逐个 `make <target>`；
+                            注意有些目标是经 `runtest lib/*.exp` 生成的（需 runtest 在 PATH）。
+                         7) **spawn 噪音**：按 E272 用 DEJAGNU 全局 site 配置包装 spawn
+                            注入 `-nottyinit`（消除 OHOS 无 /bin/stty）。
+                         **可选：二进制签名**——OHOS 上若目标二进制被拒执行，按 E354
+                         先 `binary-sign-tool sign`。
+rec_command:            # 环境装配（一次性）
+                         export PATH=<dejagnu>/bin:<expect>/bin:<tcl8.6>/bin:<gcc>/bin:$PATH
+                         export TCL_LIBRARY=<tcl8.6>/lib/tcl8.6    # 与 expect 同版本！
+                         export LD_LIBRARY_PATH=<elfutils>/lib:<zstd>/lib:<fts>/lib:<obstack>/lib:$LD_LIBRARY_PATH
+                         export DEJAGNU=<abs>/dejagnu-global.exp    # 加载 site-stty-fix.exp
+                         export TMPDIR=<writable-dir>
+                         # 跑测试
+                         cd <builddir> && runtest --tool=<tool> -srcdir <src>/testsuite/
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      environment-limit-inventory
+fallback_description:   确实无法解除的项（OHOS HMDFS 不支持硬链接 → hardlink 类用例
+                         结构上不可通过；objcopy 无 ZLIB 压缩支持 → 压缩类用例），
+                         逐条在 manifest test_note 如实声明根因并给出可复现命令，
+                         **不伪造通过率、不整体填 N/A**——其余用例继续全量执行
+fallback_command:       # 逐用例核实：ls -l 硬链接是否可建
+                         touch a && ln a b      # 期望失败：Operation not permitted
+fallback_auto_fix:      false
+fallback_impl:          explicit-eligible-test-inventory
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只 export TMPDIR 就认为解决.*工具 /tmp.*失败|TMPDIR=.*即修复
+forbid_1_reason:        E002（设置 TMPDIR）只对"遵守 TMPDIR 的脚本"有效；被测工具若在
+                         C 源码里硬编码 "/tmp/"，环境变量完全不起作用，必须改源码或
+                         注入 shim（DRAFT-ohos-otmpfile-tmpdir-shim 为运行库变体）
+forbid_1_consequence:   反复调 TMPDIR 而不查源码，浪费轮次且问题不消失
+forbid_2_pattern:       TCL_LIBRARY 指向最高版本.*tcl|tcl 版本越新越好
+forbid_2_reason:        expect 是编译期绑定 tcl 版本的扩展，init.tcl 会
+                         `package require -exact Tcl <ver>`——版本必须**等于** expect
+                         的编译版本，不是越新越好
+forbid_2_consequence:   Tcl_Init failed / version conflict 循环，runtest 完全起不来
+forbid_3_pattern:       readelf 指向 eu-readelf|用 eu-readelf 跑 DejaGNU 套件
+forbid_3_reason:        套件脚本使用 GNU readelf 专有简写（-wi），eu-readelf 不支持
+forbid_3_consequence:   大量用例因 readelf 语法错误误判失败（假失败淹没真问题）
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              E002, E007, E272
+similar_to:             E272, E354, DRAFT-ohos-otmpfile-tmpdir-shim,
+                         DRAFT-dwarf5-index-sections-toolchain-unsupported
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-dejagnu-toolchain-assembly-ohos.md
+last_updated:           2026-09-11
+source_event:           dwz/0.16 HarmonyOS PC 适配（PR #9459）；DejaGNU 上游 testsuite
+                         通过率 0/62 → 48/62
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9459
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true
