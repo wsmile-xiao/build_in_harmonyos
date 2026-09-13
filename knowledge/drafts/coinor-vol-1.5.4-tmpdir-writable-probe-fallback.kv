@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-coinor-vol-1.5.4-tmpdir-writable-probe-fallback
+# 配方设置 TMPDIR 时须真实写入探测并回退 build_folder（E002 建议的 $HOME/tmp 在 CI worker 上可能不可写/不存在）
+#====================================================================
+
+id:                     DRAFT-coinor-vol-1.5.4-tmpdir-writable-probe-fallback
+trigger_tool:           configure|conan|make
+phase:                  configuration|compilation
+error_signature:        C compiler cannot create executables|
+                         unable to make temporary file|
+                         cannot create temporary.*tmp
+
+severity:               3
+category:               environment, tmpdir, hmdFS, conan-recipe, ci-worker
+match_keywords:         TMPDIR, unable to make temporary file, C compiler cannot
+                         create executables, Error 77, $HOME/tmp, build_folder,
+                         HMDFS, CI worker sandbox, writable probe, autotools
+title:                  配方设置 TMPDIR 时须真实写入探测并回退 build_folder（E002 的 $HOME/tmp 直设不充分）
+
+root_cause:             E002 建议将 TMPDIR 直设 $HOME/tmp 以规避 /tmp erofs 只读，
+                        但 CI worker 沙箱下 $HOME/tmp 可能不存在或对构建用户不可写。
+                        clang 依赖 TMPDIR 创建编译临时文件，失败即令 configure 首个
+                        C 编译测试报 "C compiler cannot create executables"
+                        （conan build() Error 77），且 CI 输出不含 config.log 首错，
+                        归因容易误判为工具链/sysroot 问题。
+affected_scope:         所有在 HarmonyOS/HMDFS 或 CI worker 沙箱上构建、且配方内
+                        设置 TMPDIR 的 autotools/conan 工程。实测：coinor-vol 1.5.4
+                        （PR #8922 构建 #42277，Error 77）。
+verification_cmd:       在目标 TMPDIR 下用 clang 编译链接最小 C 程序：
+                        TMPDIR=<候选目录> /data/service/hnp/bin/clang -o /tmp/x /tmp/x.c
+                        —— Read-only file system / No such file or directory 即候选不可写；
+                        复现 configure 全流程见 notes.md R02 补记（RUN_B/RUN_C 日志）。
+
+rec_priority:           1
+rec_approach:           tmpdir-writable-probe-fallback
+rec_description:        build() 中改为从候选列表挑选 TMPDIR：$HOME/tmp → conan
+                        build_folder/.tmp。用真实文件写入探测（HMDFS 忽略 chmod 与
+                        os.access(X_OK)，见 E046/R49；必须 makedirs+open+write+unlink
+                        实测）验证候选可写，失败则回退下一候选；全部不可写才退回
+                        $HOME/tmp。探测与回退必须在设置 os.environ["TMPDIR"] 之前完成。
+rec_command:            python 实现（conanfile.py build()）：
+                        os.makedirs(cand, exist_ok=True); probe=cand/.tmp-write-probe;
+                        open(probe,"w").write("ok"); os.unlink(probe) → 成功即采用；
+                        候选 $HOME/tmp 失败时回退 os.path.join(self.build_folder, ".tmp")。
+rec_auto_fix:           false
+rec_impl:               conan-recipe-tmpdir-probe
+
+fallback_priority:      2
+fallback_approach:      environment-tmpdir-only
+fallback_description:   若配方无 build_folder 可写保证，可仅设置 TMPDIR 指向
+                        /data/storage/el2/base/cache 之类 worker 专属可写缓存，
+                        但不如 build_folder 通用（conan 已在其中落盘源码与补丁，
+                        可写性由工具链保证）。
+fallback_command:       os.environ["TMPDIR"] = "/data/storage/el2/base/cache"
+fallback_auto_fix:      true
+fallback_impl:          set-env-var
+
+forbid_1_pattern:       os\.access\(.*X_OK|chmod.*0o7|TMPDIR=.*\$HOME/tmp.*(不探测)
+forbid_1_reason:        HMDFS 忽略 chmod 且 os.access(X_OK) 恒 False（E046/R49），
+                        禁止用权限探测代替真实写入探测；禁止无条件直设 $HOME/tmp
+                        而不验证可写性。
+forbid_1_consequence:   CI worker 上 configure 首错复现（Error 77），且首错被
+                        configure 汇总行掩盖，归因循环。
+
+principles:
+
+causes:                 []
+caused_by:              []
+similar_to:             [E002, E046]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/coinor-vol-1.5.4-tmpdir-writable-probe-fallback.md
+last_updated:           2026-09-09
+source_event:           coinor-vol 1.5.4 CI configure failure diagnosis (PR #8922)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-09
