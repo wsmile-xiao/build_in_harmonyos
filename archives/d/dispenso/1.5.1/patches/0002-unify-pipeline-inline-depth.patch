@@ -1,0 +1,100 @@
+--- a/dispenso/detail/per_thread_info.h
++++ b/dispenso/detail/per_thread_info.h
+@@ -12,10 +12,13 @@
+ namespace dispenso {
+ namespace detail {
+
++constexpr int kMaxInlineDepth = 32;
++
+ struct alignas(kCacheLineSize) PerThreadInfo {
+   void* pool = nullptr;
+   void* producer = nullptr;
+   int parForRecursionLevel = 0;
++  int inlineDepth = 0;
+ };
+
+ class ParForRecursion {
+@@ -59,9 +62,29 @@ class PerPoolPerThreadInfo {
+     return ParForRecursion(info().parForRecursionLevel);
+   }
+
++  DISPENSO_DLL_ACCESS static int& inlineDepth();
++
++  static bool canInlineSchedule() {
++    return inlineDepth() < kMaxInlineDepth;
++  }
++
+  private:
+   DISPENSO_DLL_ACCESS static PerThreadInfo& info();
+ };
+
++struct InlineDepthGuard {
++  InlineDepthGuard() : depth_(PerPoolPerThreadInfo::inlineDepth()) {
++    ++depth_;
++  }
++  ~InlineDepthGuard() noexcept {
++    --depth_;
++  }
++  InlineDepthGuard(const InlineDepthGuard&) = delete;
++  InlineDepthGuard& operator=(const InlineDepthGuard&) = delete;
++
++ private:
++  int& depth_;
++};
++
+ } // namespace detail
+ } // namespace dispenso
+--- a/dispenso/detail/per_thread_info.cpp
++++ b/dispenso/detail/per_thread_info.cpp
+@@ -17,5 +17,9 @@ PerThreadInfo& PerPoolPerThreadInfo::info() {
+   return g_perThreadInfo;
+ }
+
++int& PerPoolPerThreadInfo::inlineDepth() {
++  return g_perThreadInfo.inlineDepth;
++}
++
+ } // namespace detail
+ } // namespace dispenso
+--- a/dispenso/detail/pipeline_impl.h
++++ b/dispenso/detail/pipeline_impl.h
+@@ -15,6 +15,7 @@
+
+ #include <dispenso/detail/completion_event_impl.h>
+ #include <dispenso/detail/op_result.h>
++#include <dispenso/detail/per_thread_info.h>
+ #include <dispenso/detail/result_of.h>
+ #include <dispenso/task_set.h>
+ #include <dispenso/tsan_annotations.h>
+@@ -22,10 +23,6 @@
+ namespace dispenso {
+ namespace detail {
+
+-// Maximum depth for inline pipeline continuation before forcing a schedule through
+-// the thread pool. Prevents unbounded stack growth when the pool inlines execution.
+-static constexpr int kMaxPipelineInlineDepth = 32;
+-
+ class LimitGatedScheduler {
+  public:
+   LimitGatedScheduler(ConcurrentTaskSet& tasks, ssize_t res)
+@@ -109,18 +106,8 @@ class LimitGatedScheduler {
+               // on a worker thread and only one item can be in the stage at a time.
+               // Depth-limit to prevent unbounded stack growth when the pool inlines.
+               if (serial_) {
+-                static DISPENSO_THREAD_LOCAL int depth = 0;
+-                if (depth < kMaxPipelineInlineDepth) {
+-                  struct DepthGuard {
+-                    DISPENSO_INLINE DepthGuard(int& d) : d_(d) {
+-                      ++d_;
+-                    }
+-                    DISPENSO_INLINE ~DepthGuard() {
+-                      --d_;
+-                    }
+-                    int& d_;
+-                  };
+-                  DepthGuard dGuard(depth);
++                if (PerPoolPerThreadInfo::canInlineSchedule()) {
++                  InlineDepthGuard dGuard;
+                   func();
+                 } else {
+                   tasks_.schedule(std::move(func), ForceQueuingTag());

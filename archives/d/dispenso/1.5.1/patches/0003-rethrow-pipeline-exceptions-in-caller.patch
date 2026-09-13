@@ -1,0 +1,160 @@
+--- a/dispenso/detail/task_set_impl.h
++++ b/dispenso/detail/task_set_impl.h
+@@ -214,7 +214,7 @@ class TaskSetBase {
+   // std::current_exception() in another module can otherwise return null for
+   // the active exception.
+   DISPENSO_DLL_ACCESS void trySetCurrentException(std::exception_ptr exception);
+-  bool testAndResetException();
++  bool testAndResetException(std::exception_ptr& exception);
+
+   void registerChild(TaskSetBase* child) {
+     std::lock_guard<std::mutex> lk(mtx_);
+--- a/dispenso/task_set.h
++++ b/dispenso/task_set.h
+@@ -292,6 +292,14 @@ class ConcurrentTaskSet : public TaskSetBase {
+    **/
+   DISPENSO_DLL_ACCESS bool wait();
+
++  /**
++   * Wait without rethrowing a captured exception.  The exception is moved into
++   * <code>exception</code> so header-only callers can rethrow it in their own module.
++   *
++   * @return true if the ConcurrentTaskSet was canceled, false otherwise
++   **/
++  DISPENSO_DLL_ACCESS bool wait(std::exception_ptr& exception);
++
+   /**
+    * See if the currently scheduled functors can be completed while stealing and executing at most
+    * <code>maxToExecute</code> of them from the pool. If not used in conjunction with wait, there
+--- a/dispenso/task_set.cpp
++++ b/dispenso/task_set.cpp
+@@ -64,20 +64,30 @@ void TaskSetBase::trySetCurrentException(std::exception_ptr exception) {
+ #endif // __cpp_exceptions
+ }
+
+-inline bool TaskSetBase::testAndResetException() {
++inline bool TaskSetBase::testAndResetException(std::exception_ptr& exception) {
+ #if defined(__cpp_exceptions)
+   if (guardException_.load(std::memory_order_acquire) == kSet) {
+-    auto exception = std::move(exception_);
++    exception = std::move(exception_);
+     guardException_.store(kUnset, std::memory_order_release);
+-    if (exception) {
+-      std::rethrow_exception(exception);
+-    }
+   }
++#else
++  (void)exception;
+ #endif // __cpp_exceptions
+   return canceled_.load(std::memory_order_acquire);
+ }
+
+ bool ConcurrentTaskSet::wait() {
++  std::exception_ptr exception;
++  bool canceled = wait(exception);
++#if defined(__cpp_exceptions)
++  if (exception) {
++    std::rethrow_exception(exception);
++  }
++#endif // __cpp_exceptions
++  return canceled;
++}
++
++bool ConcurrentTaskSet::wait(std::exception_ptr& exception) {
+   // Steal work until our set is unblocked.  Note that this is not the
+   // fastest possible way to unblock the current set, but it will alleviate
+   // deadlock, and should provide decent throughput for all waiters.
+@@ -91,7 +101,7 @@ bool ConcurrentTaskSet::wait() {
+     }
+   }
+
+-  return testAndResetException();
++  return testAndResetException(exception);
+ }
+
+ bool ConcurrentTaskSet::tryWait(size_t maxToExecute) {
+@@ -108,7 +118,14 @@ bool ConcurrentTaskSet::tryWait(size_t maxToExecute) {
+     return false;
+   }
+
+-  return !testAndResetException();
++  std::exception_ptr exception;
++  bool completed = !testAndResetException(exception);
++#if defined(__cpp_exceptions)
++  if (exception) {
++    std::rethrow_exception(exception);
++  }
++#endif // __cpp_exceptions
++  return completed;
+ }
+
+ moodycamel::ProducerToken TaskSet::makeToken(moodycamel::ConcurrentQueue<OnceFunction>& pool) {
+@@ -129,7 +146,14 @@ bool TaskSet::wait() {
+     }
+   }
+
+-  return testAndResetException();
++  std::exception_ptr exception;
++  bool canceled = testAndResetException(exception);
++#if defined(__cpp_exceptions)
++  if (exception) {
++    std::rethrow_exception(exception);
++  }
++#endif // __cpp_exceptions
++  return canceled;
+ }
+
+ bool TaskSet::tryWait(size_t maxToExecute) {
+@@ -156,7 +180,14 @@ bool TaskSet::tryWait(size_t maxToExecute) {
+     return false;
+   }
+
+-  return !testAndResetException();
++  std::exception_ptr exception;
++  bool completed = !testAndResetException(exception);
++#if defined(__cpp_exceptions)
++  if (exception) {
++    std::rethrow_exception(exception);
++  }
++#endif // __cpp_exceptions
++  return completed;
+ }
+
+ } // namespace dispenso
+--- a/dispenso/detail/pipeline_impl.h
++++ b/dispenso/detail/pipeline_impl.h
+@@ -23,6 +23,16 @@
+ namespace dispenso {
+ namespace detail {
+
++DISPENSO_INLINE void waitAndRethrow(ConcurrentTaskSet& tasks) {
++  std::exception_ptr exception;
++  tasks.wait(exception);
++#if defined(__cpp_exceptions)
++  if (exception) {
++    std::rethrow_exception(exception);
++  }
++#endif // __cpp_exceptions
++}
++
+ class LimitGatedScheduler {
+  public:
+   LimitGatedScheduler(ConcurrentTaskSet& tasks, ssize_t res)
+@@ -412,7 +422,7 @@ class Pipe<StageClass::kGenerator, CurStage, PipeNext> {
+   void wait() {
+     completion_->wait(0);
+     pipeNext_.wait();
+-    tasks_.wait();
++    waitAndRethrow(tasks_);
+   }
+
+  private:
+@@ -439,7 +449,7 @@ class Pipe<StageClass::kSingleStage, CurStage, SinkPipe> {
+   }
+
+   void wait() {
+-    tasks_.wait();
++    waitAndRethrow(tasks_);
+   }
+
+  private:
