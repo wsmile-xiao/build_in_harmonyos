@@ -1,0 +1,122 @@
+#====================================================================
+# DRAFT-uapi-copy-guard-name-collision-predefine-package-guard
+# — 依赖制品内嵌 UAPI 头拷贝与 sysroot 同名头守卫宏不同源
+#   （包内旧式守卫 vs sysroot _UAPI_ 前缀守卫）：include 防重失效，
+#   单 TU 交汇即定义重叠重定义；消费者 TU 预定义包内副本守卫宏，
+#   保留 sysroot 较新副本
+#====================================================================
+# Timestamp: 2026-09-09
+# Software: 已发布依赖制品 libnfnetlink 1.0.2 自带的 libnfnetlink/linux_nfnetlink.h 拷贝
+#           × OHOS sysroot uapi 头；触发案例为消费者 libnetfilter_queue 1.0.5（仅作案例，
+#           规则本身按问题类命名，不绑定库名/版本）
+# Gate: conan create build() / autotools make（编译期，L1 层）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-uapi-copy-guard-name-collision-predefine-package-guard
+title:                  依赖制品内嵌 UAPI 头拷贝与 sysroot 同名头守卫宏不同源时 include 防重失效，单 TU 交汇即定义重叠重定义；消费者 TU 应预定义包内副本守卫宏，保留 sysroot 较新副本
+trigger_tool:           clang|make|conan
+phase:                  compilation
+error_signature:        redefinition of .nfnetlink_groups|redefinition of .nfgenmsg|redefinition of enumerator|redefinition of .nfnetlink_subsys
+
+severity:               3
+category:               build-system|headers|kernel|conan|compat
+match_keywords:         _NFNETLINK_H, _UAPI_NFNETLINK_H, linux_nfnetlink.h, nfnetlink, redefinition, nfgenmsg, nfnetlink_groups, UAPI, sysroot, include guard
+
+root_cause:             include guard 是预处理期按宏名单副本去重的机制，只对同名守卫的重复包含生效。
+                        OHOS sysroot（bionic 风格 uapi 快照）对部分 UAPI 头保留 _UAPI_ 守卫前缀——设备实测三例：
+                        linux/socket.h=_UAPI_LINUX_SOCKET_H、linux/netlink.h=_UAPI__LINUX_NETLINK_H、
+                        linux/netfilter/nfnetlink.h=_UAPI_NFNETLINK_H；并非所有头都有前缀（同目录
+                        nfnetlink_queue.h 守卫仍为无前缀 _NFNETLINK_QUEUE_H），故复发面须按"逐头实测守卫名"
+                        判断而非按"所有 UAPI 头"推断。netfilter 家族依赖制品则习惯自带年代久远的内核头拷贝
+                        （已发布 libnfnetlink/1.0.2 的 libnfnetlink/linux_nfnetlink.h 守卫 _NFNETLINK_H）。
+                        两副本守卫宏不同源 → 同一 TU 双 include 时后到副本整体展开，enum/struct 定义重叠
+                        → 重定义编译失败。两副本并非逐字相同（如 NFNL_SUBSYS_COUNT 制品=7、sysroot=12），
+                        抑制哪一份是有语义的：预定义包内副本守卫宏即保留 sysroot 较新副本。
+affected_scope:         任何依赖制品内嵌内核 UAPI 头拷贝、且同一翻译单元还能看到 sysroot 同名头的项目
+                        （构建系统把依赖 include 目录注入消费者 TU 即满足，不限于特定库、构建系统或语言）。
+verification_cmd:       d=$(mktemp -d) && cd "$d" || exit 1; printf '#ifndef _G_A\nstruct s { int x; };\n#endif\n' > a.h;
+                        printf '#ifndef _G_B\nstruct s { int x; };\n#endif\n' > b.h;
+                        printf '#include "a.h"\n#include "b.h"\nint main(void){return 0;}\n' > t.c;
+                        /data/service/hnp/bin/clang -I. t.c -o t 2>a1.log && { echo 'FAIL-A: expected redefinition did not occur'; exit 1; };
+                        grep -m1 'redefinition of' a1.log || { echo 'FAIL-A: failure was not a redefinition'; exit 1; };
+                        /data/service/hnp/bin/clang -I. -D_G_B t.c -o t 2>/dev/null || { echo 'FAIL-A: guard predefine did not suppress copy'; exit 1; };
+                        ./t; rc=$?; echo "stageA_exit=$rc"; [ "$rc" -eq 0 ] || exit "$rc";
+                        H=$(ls "$HOME"/.conan2/p/*/p/include/libnfnetlink/linux_nfnetlink.h 2>/dev/null | head -n 1); INC=${H%/libnfnetlink/linux_nfnetlink.h};
+                        SYS=/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot/usr/include; cd "$(mktemp -d)" || exit 1;
+                        [ -f "$INC/libnfnetlink/linux_nfnetlink.h" ] && [ -f "$SYS/linux/netfilter/nfnetlink.h" ] || { echo 'FAIL-B0: probe inputs missing'; exit 1; };
+                        printf '#include <linux/netfilter/nfnetlink.h>\n#include <libnfnetlink/linux_nfnetlink.h>\nint main(void){struct nfgenmsg m; return 0;}\n' > r1.c;
+                        printf '#define _NFNETLINK_H 1\n#include <linux/netfilter/nfnetlink.h>\n#include <libnfnetlink/linux_nfnetlink.h>\nint main(void){struct nfgenmsg m; return 0;}\n' > r2.c;
+                        /data/service/hnp/bin/clang -I"$INC" r1.c -o r1 2>b1.log && { echo 'FAIL-B: expected redefinition did not occur'; exit 1; };
+                        grep -m1 'redefinition of' b1.log || { echo 'FAIL-B: failure was not a redefinition'; exit 1; };
+                        /data/service/hnp/bin/clang -I"$INC" r2.c -o r2 2>/dev/null || { echo 'FAIL-B: guard predefine did not suppress artifact copy'; exit 1; };
+                        ./r2; rc=$?; echo "stageB_exit=$rc"; exit "$rc"
+                        # 两段探针均应退出 0（stageA_exit=0、stageB_exit=0）：第一段证明"守卫宏不同源的双副本
+                        # 单 TU 交汇必重定义、预定义后到副本守卫即可抑制"这一普适机理；第二段用真头复现——
+                        # 制品 include 目录（conan 缓存内 libnfnetlink 包）+ sysroot 目录双路径，
+                        # r1.c 必须报 redefinition、r2.c 预定义 _NFNETLINK_H 后编译运行通过。
+                        # 每个失败分支都以 FAIL-A/FAIL-B 前缀显式 exit 1，不被管道或 && 链掩盖；
+                        # 设备全新 shell 实跑记录见同名 .md「验证证据」。
+
+rec_priority:           1
+rec_approach:           predefine-package-copy-guard-in-consumer-tu
+rec_description:        在交汇 TU 的 include 前守卫块预定义包内副本守卫宏（#ifndef _NFNETLINK_H / #define _NFNETLINK_H /
+                        #endif，幂等写法），抑制包内旧拷贝、保留先一步包含的 sysroot 较新副本；只对发生交汇的 TU
+                        逐个落位，其余 TU 中包内副本仍是唯一来源、不受影响。采用前须逐一核对 sysroot 副本为
+                        较新/超集（本例 NFNL_SUBSYS_COUNT sysroot=12 > 制品=7 即为依据）。
+rec_command:            |
+                        #include <linux/netfilter/nfnetlink.h>   ← sysroot 副本先进入
+                        #ifndef _NFNETLINK_H
+                        #define _NFNETLINK_H
+                        #endif
+                        #include <libnfnetlink/linux_nfnetlink.h> ← 包内副本被守卫抑制
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      sysroot-header-only-include
+fallback_description:   从包含链完全移除包内副本、只保留 sysroot 同名头。诚实权衡：单纯调整 include 顺序对守卫宏
+                        不同源的双副本无效（后到者仍重定义）；只有当包内副本仅经消费者直接 include 引入、无依赖头
+                        透传（如 libnfnetlink.h 自身包含 linux_nfnetlink.h）时，"改用 sysroot 头"才成立，
+                        适用面窄。根治方向是依赖配方侧统一守卫名，但跨消费者 run 边界，须由配方 owner 独立承接，
+                        不在本类问题的消费者修复路径内。
+fallback_command:       移除 #include <libnfnetlink/linux_nfnetlink.h>，改用 #include <linux/netfilter/nfnetlink.h>（仅限无透传引入场景）
+fallback_auto_fix:      false
+fallback_impl:          manual-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       sed.*linux_nfnetlink\.h|patch.*libnfnetlink.*(linux_nfnetlink|guard)|(sed|edit|patch).*(sysroot|安装头).*(nfnetlink|socket|netlink)
+forbid_1_reason:        已发布依赖制品的安装头与 sysroot 头不属于消费者 run 的写入边界；在制品/平台侧改守卫宏名
+                        会让同一制品在不同消费者之间行为分叉，根治须由配方 owner 独立承接。
+forbid_1_consequence:   污染共享 conan 缓存/制品仓与平台 sysroot，跨 run 不可复现；以未改制品为前提的后续构建全部失效。
+
+forbid_2_pattern:       CFLAGS.*_NFNETLINK_H|CPPFLAGS.*_NFNETLINK_H|CXXFLAGS.*_NFNETLINK_H|env\..*define.*_NFNETLINK_H
+forbid_2_reason:        经全局编译 flag 注入 -D_NFNETLINK_H 救单包会波及所有 TU：包内副本仍是唯一来源的 TU 一并被抑制；
+                        且全局环境改动污染共享构建配置。须先以双路径对照探针确认交汇 TU 后逐 TU 落位。
+forbid_2_consequence:   交汇 TU 的重定义错误被替换为其余 TU 的 undeclared identifier 编译失败，问题被移动而非修复；
+                        构建环境失去可复现性。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-PATCH-001,P-PATCH-002
+
+# ═══ 关系图 ═══
+causes:
+caused_by:              包内副本守卫宏与 sysroot 守卫宏不同源 + 同一 TU 双 include
+similar_to:             E091,E119,E163
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-uapi-copy-guard-name-collision-predefine-package-guard.md
+last_updated:           2026-09-09
+source_event:           libnetfilter_queue 1.0.5 conan create CI round-01：nlmsg.lo 报 enum nfnetlink_groups / struct nfgenmsg 重定义 ×20+，同轮 examples/nf-queue.c 同型交汇
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:              (本 PR)
+source_commit:          2d942e1641074dc67be3916d45c8814b4b6019d9
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-09
