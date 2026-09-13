@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan consumer test for the ncdu2 command-line application."""
+"""Conan consumer test for the ncdu command-line application."""
 
 import os
 import sys
@@ -8,7 +8,7 @@ from conan import ConanFile
 from conan.tools.build import can_run
 
 
-class Ncdu2TestConan(ConanFile):
+class NcduTestConan(ConanFile):
     settings = "os", "arch", "compiler", "build_type"
     generators = "VirtualRunEnv"
     test_type = "explicit"
@@ -19,14 +19,14 @@ class Ncdu2TestConan(ConanFile):
     def test(self):
         if not can_run(self):
             self.output.warning(
-                "Skipping ncdu2 runtime test in a non-runnable configuration"
+                "Skipping ncdu runtime test in a non-runnable configuration"
             )
             return
 
         executable = os.path.join(
-            self.dependencies["ncdu2"].package_folder, "bin", "ncdu"
+            self.dependencies["ncdu"].package_folder, "bin", "ncdu"
         )
-        script = os.path.join(self.source_folder, "test_ncdu2.py")
+        script = os.path.join(self.source_folder, "test_ncdu.py")
         self.run(
             f'"{sys.executable}" "{script}" "{executable}" '
             f'"{self.build_folder}"',

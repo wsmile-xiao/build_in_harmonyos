@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe for ncdu2 2.9.2."""
+"""Conan recipe for ncdu 2.9.2."""
 
 import glob
 import os
@@ -15,8 +15,8 @@ from conan.tools.files import copy, get
 from conan.tools.layout import basic_layout
 
 
-class Ncdu2Conan(ConanFile):
-    name = "ncdu2"
+class NcduConan(ConanFile):
+    name = "ncdu"
     version = "2.9.2"
     description = "NCurses Disk Usage analyzer, Zig implementation"
     license = "MIT"

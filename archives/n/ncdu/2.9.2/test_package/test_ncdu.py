@@ -39,7 +39,7 @@ def collect_entries(value, entries):
 
 def main():
     if len(sys.argv) != 3:
-        raise SystemExit("usage: test_ncdu2.py <ncdu> <workdir>")
+        raise SystemExit("usage: test_ncdu.py <ncdu> <workdir>")
 
     executable = pathlib.Path(sys.argv[1]).resolve()
     workdir = pathlib.Path(sys.argv[2]).resolve()
@@ -52,8 +52,8 @@ def main():
     assert "-o FILE" in help_text, help_text
     assert "Export scanned directory" in help_text, help_text
 
-    fixture = workdir / "ncdu2-fixture"
-    export_file = workdir / "ncdu2-export.json"
+    fixture = workdir / "ncdu-fixture"
+    export_file = workdir / "ncdu-export.json"
     if fixture.exists():
         shutil.rmtree(fixture)
     if export_file.exists():
@@ -84,7 +84,7 @@ def main():
     assert entries["alpha.txt"].get("asize") == 17, entries["alpha.txt"]
     assert entries["beta.bin"].get("asize") == 31, entries["beta.bin"]
 
-    print("ncdu2 consumer test passed: version, help, scan, and JSON export")
+    print("ncdu consumer test passed: version, help, scan, and JSON export")
 
 
 if __name__ == "__main__":
