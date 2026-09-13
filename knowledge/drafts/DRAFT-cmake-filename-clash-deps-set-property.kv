@@ -1,0 +1,46 @@
+#====================================================================
+# DRAFT — 同名 cmake_file_name 的 Conan 包在 CMakeDeps 同目录互相覆盖（deps.set_property 改名共存）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-cmake-filename-clash
+trigger_tool:           cmake|conan|conan_create|conan_test
+phase:                  configure|generate
+error_signature:        Could not find a package configuration file provided by "Boost"|but the target was not found. Possible reasons include|Boost::filesystem|CMakeDeps necessary find_package
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, cmake, packaging, dependency-resolve
+match_keywords:         cmake_file_name, CMakeDeps, BoostConfig.cmake, set_property, boost1.84, boost1.84-thread, 同名, 覆盖, deps.set_property, cmake_file_name 冲突, 组件 target 丢失
+title:                  同名 cmake_file_name 的两个 Conan 包在同一 CMakeDeps 生成目录互相覆盖（后装覆盖先装，组件 target 丢失）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: Conan 2.x CMakeDeps 按 recipe 的 cpp_info.set_property("cmake_file_name", X) 生成 <X>Config.cmake。当依赖图里两个包声明相同的 cmake_file_name（如 boost1.84 与 boost1.84-thread 都注册 "Boost"）且安装到同一 generator 目录时，后写入的 <X>Config.cmake/<X>Targets.cmake/<X>-Target-*.cmake 会整组覆盖先写入的——主包的组件 target（Boost::filesystem/Boost::headers 等）完全丢失，消费者 find_package(Boost COMPONENTS filesystem) 报 "Could not find a package configuration file provided by Boost" 或链接期报 "Target links to: Boost::filesystem but the target was not found"。典型触发：Debian 风格的拆分包系列（boost1.84 / boost1.84-thread / boost1.84-locale ...）都被上游配方写成 cmake_file_name="Boost"。
+affected_scope: 任何同时依赖两个共享 cmake_file_name 的 conan 包（boost 拆分系列最典型）的配方与 test_package
+verification_cmd: conan install --requires=boost1.84/1.84.0 --requires=boost1.84-thread/1.84.0 -g CMakeDeps && ls "<generators>/" | grep -c BoostConfig
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           deps-set-property-rename
+rec_description:        在消费方配方的 generate() 里用 CMakeDeps.set_property 给其中一个包改 cmake_file_name，使其生成独立命名的 config 文件组，两包共存：主包独占原名，改名包用自己的新名查找。改名只影响本配方的生成目录，不修改已发布依赖包。
+rec_command:            def generate(self):
+    deps = CMakeDeps(self)
+    deps.set_property("boost1.84-thread", "cmake_file_name", "hocon-boost-thread")
+    deps.generate()
+# CMakeLists.txt 侧对应查找：
+# find_package(Boost 1.84.0 CONFIG REQUIRED COMPONENTS headers filesystem program_options regex)
+# find_package(hocon-boost-thread 1.84.0 CONFIG REQUIRED)
+# 组件 target 名（Boost::thread）不变，仍由改名后的 config 创建
+rec_auto_fix:           false
+rec_impl:               manual-edit-conanfile-generate
+
+fallback_priority:      1
+fallback_approach:      package-level-target-link
+fallback_description:   不依赖组件 target：直接 target_link_libraries 到 CMakeDeps 必然生成的包级 target boost1.84::boost1.84 / boost1.84-thread::boost1.84-thread（携带全部组件依赖）。缺点：丢失组件粒度，链接整包。
+fallback_command:       target_link_libraries(x PRIVATE boost1.84::boost1.84 boost1.84-thread::boost1.84-thread)
+
+# ═══ Layer 4: 证据层 (Evidence) ═══
+verify_builds:          CI #43232（PR #9258 cpp-hocon 0.3.0，worker OpenHarmonyPCDeveloper-CI-039，L0/L1 全过）
+source_pr:              https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/9258
+verified_date:          2026-09-09
+notes:                  cpp-hocon 0.3.0 适配实测：boost1.84+boost1.84-thread 同装时 BoostConfig.cmake 被 thread 包整组覆盖，Boost::filesystem 等组件 target 丢失；generate() 改名后 conan create 全绿（114 上游 TEST_CASE + test_package 6 断言）。CMake 4.x 侧配套注意：find_package(Boost) 必须加 CONFIG（CMP0167 移除 FindBoost 模块）。

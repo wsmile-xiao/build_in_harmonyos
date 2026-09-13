@@ -1,0 +1,258 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,67 +1,36 @@
+-# Defines how cmake should behave, and the minimum version necessary to build.
+-cmake_minimum_required(VERSION 3.2.2)
++cmake_minimum_required(VERSION 3.13)
++project(cpp-hocon VERSION 0.3.0 LANGUAGES CXX)
+ 
+-# Project Setup - modify to match project naming
+-## Source code for a simple command-line executable for a dynamic library will be generated from the project name.
+-## The command-line and library names will be based off the project name.
+-project(cpp-hocon VERSION 0.3.0)
++set(CMAKE_CXX_STANDARD 11)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++set(CMAKE_CXX_EXTENSIONS OFF)
+ 
+-string(MAKE_C_IDENTIFIER ${PROJECT_NAME} PROJECT_C_NAME)
+-string(TOUPPER ${PROJECT_C_NAME} PROJECT_NAME_UPPER)
+-string(TOLOWER ${PROJECT_C_NAME} PROJECT_NAME_LOWER)
+-
+-# Common cmake setup
+-if (NOT CMAKE_BUILD_TYPE)
+-    message(STATUS "Defaulting to a release build.")
+-    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel." FORCE)
++if(NOT CMAKE_BUILD_TYPE)
++    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type" FORCE)
+ endif()
+ 
++include(GNUInstallDirs)
+ enable_testing()
+ 
+-# Leatherman setup
+-set(LEATHERMAN_COMPONENTS locale catch nowide util)
+-find_package(Leatherman REQUIRED COMPONENTS ${LEATHERMAN_COMPONENTS})
++# Dependency lookup: Conan CMakeDeps targets.
++#
++# boost1.84 (main package: full boost include tree + filesystem/
++# program_options/regex/iostreams static libs) and boost1.84-thread
++# (libboost_thread) both export cmake_file_name "Boost". The Conan recipe
++# renames the thread package config to "hocon-boost-thread"
++# (deps.set_property in generate()) so both coexist in one generator
++# folder:
++#   * find_package(Boost)              -> boost1.84 components
++#   * find_package(hocon-boost-thread) -> boost1.84-thread (Boost::thread)
++find_package(Boost 1.84.0 CONFIG REQUIRED COMPONENTS headers filesystem program_options regex)
++find_package(hocon-boost-thread 1.84.0 CONFIG REQUIRED)
++find_package(Threads REQUIRED)
+ 
+-## Before we find any packages, we want to pull in the common leatherman options, as they can affect commonly-used packages.
+-include(options)
+-## Pull in common cflags setting from leatherman. Don't override CMAKE_CXX_FLAGS at the project root to avoid impacting 3rd party code.
+-include(cflags)
+-set(${PROJECT_NAME_UPPER}_CXX_FLAGS "${LEATHERMAN_CXX_FLAGS}")
+-add_definitions(${LEATHERMAN_DEFINITIONS})
+-
+-if(LEATHERMAN_USE_LOCALES)
+-    add_definitions(-DLEATHERMAN_I18N)
+-endif()
+-
+-## Pull in helper macros for working with leatherman libraries
+-include(leatherman)
+-
+-if(LEATHERMAN_USE_LOCALES)
+-    set(BOOST_COMPONENTS locale regex)
+-else()
+-    set(BOOST_COMPONENTS regex)
+-endif()
+-
+-list(APPEND BOOST_COMPONENTS thread date_time chrono filesystem system program_options)
+-
+-# Add other dependencies
+-find_package(Boost 1.54 REQUIRED COMPONENTS ${BOOST_COMPONENTS})
+-
+-# pthreads if you require the Boost.Thread component.
+-find_package(Threads)
+-
+-# Display a summary of the features
+-include(FeatureSummary)
+-feature_summary(WHAT ALL)
+-
+-# Add cpplint and cppcheck targets
+-file(GLOB_RECURSE ALL_SOURCES lib/src/*.cc lib/inc/*.hpp exe/*.cc)
+-add_cpplint_files(${ALL_SOURCES})
+-enable_cpplint()
++# Static library by default (matches upstream BOOST_STATIC=ON release job).
++# Library type follows BUILD_SHARED_LIBS, which the Conan recipe drives via
++# tc.variables["BUILD_SHARED_LIBS"] in generate() — so the recipe's `shared`
++# option controls the artifact type (review note 2026-09-10; the previous
++# HOCON_BUILD_SHARED gate was a silent no-op for the recipe).
++option(HOCON_BUILD_TESTS "Build the upstream unit_tests target" ON)
+ 
+ add_subdirectory(lib)
+-add_subdirectory(locales)
+-
+-add_cppcheck_dirs("${PROJECT_SOURCE_DIR}/lib" "${PROJECT_SOURCE_DIR}/exe")
+-enable_cppcheck()
+-
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -1,21 +1,13 @@
+-include(leatherman)
+-get_commit_string(PROJECT_COMMIT)
+-
+-# Generate a file containing the above version numbers.
+-configure_file("version.h.in" "${CMAKE_CURRENT_LIST_DIR}/inc/hocon/version.h")
+-
+-# Generate files for Doxygen
+-configure_file("Doxyfile.in" "${CMAKE_CURRENT_LIST_DIR}/Doxyfile")
+-configure_file("namespaces.dox.in" "${CMAKE_CURRENT_LIST_DIR}/docs/namespaces.dox")
+-
+-# Set C++ compile flags based on project settings.
+-set(CMAKE_CXX_FLAGS ${${PROJECT_NAME_UPPER}_CXX_FLAGS})
+-
+-# Set prefix for logging messages.
+-leatherman_logging_namespace("puppetlabs.${PROJECT_NAME}")
+-
+-# Setup compiling the library.
+-include_directories(inc ${Boost_INCLUDE_DIRS} ${LEATHERMAN_INCLUDE_DIRS})
++# lib/CMakeLists.txt — cpp-hocon 0.3.0 OHOS port.
++#
++# The upstream file drives compilation through leatherman macros
++# (leatherman_install/symbol_exports/logging namespace). This port keeps
++# the same source list and layout, plus:
++#   * lib/compat/ ships minimal leatherman/locale + leatherman/util
++#     header shims (boost::format based) — see patches/0001.
++#   * export.h.in / version.h.in are configured here without leatherman.
++configure_file("export.h.in" "${CMAKE_CURRENT_LIST_DIR}/inc/hocon/export.h" @ONLY)
++configure_file("version.h.in" "${CMAKE_CURRENT_LIST_DIR}/inc/hocon/version.h" @ONLY)
+ 
+ set(PROJECT_SOURCES
+     src/values/config_object.cc
+@@ -70,25 +62,42 @@
+     src/values/config_concatenation.cc
+     src/config_value_factory.cc)
+ 
++# Object target so tests can link the unexported symbols too (upstream
++# libprojectsrc contract).
++add_library(libprojectsrc OBJECT ${PROJECT_SOURCES})
++set_target_properties(libprojectsrc PROPERTIES POSITION_INDEPENDENT_CODE TRUE)
++target_include_directories(libprojectsrc PUBLIC
++    ${CMAKE_CURRENT_LIST_DIR}/inc
++    ${CMAKE_CURRENT_LIST_DIR}/compat)
++target_link_libraries(libprojectsrc PUBLIC
++    Boost::headers Boost::filesystem Boost::program_options Boost::thread
++    Threads::Threads)
+ 
+-## An object target is generated that can be used by both the library and test executable targets.
+-## Without the intermediate target, unexported symbols can't be tested.
+-add_library(libprojectsrc OBJECT ${PROJECT_SOURCES})
+-set_target_properties(libprojectsrc PROPERTIES POSITION_INDEPENDENT_CODE true)
++if(BUILD_SHARED_LIBS)
++    add_library(libcpp-hocon SHARED $<TARGET_OBJECTS:libprojectsrc>)
++    set_target_properties(libcpp-hocon PROPERTIES VERSION 0.3.0 SOVERSION 0)
++else()
++    add_library(libcpp-hocon STATIC $<TARGET_OBJECTS:libprojectsrc>)
++endif()
++set_target_properties(libcpp-hocon PROPERTIES OUTPUT_NAME hocon)
++target_include_directories(libcpp-hocon PUBLIC
++    ${CMAKE_CURRENT_LIST_DIR}/inc
++    ${CMAKE_CURRENT_LIST_DIR}/compat)
++target_link_libraries(libcpp-hocon PUBLIC
++    Boost::headers Boost::filesystem Boost::program_options Boost::thread
++    Threads::Threads)
+ 
+-add_library(lib${PROJECT_NAME} $<TARGET_OBJECTS:libprojectsrc>)
+-set_target_properties(lib${PROJECT_NAME} PROPERTIES VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_VERSION_PATCH}")
+-target_link_libraries(lib${PROJECT_NAME}
+-    ${LEATHERMAN_LIBRARIES}
+-    ${Boost_LIBRARIES}
+-    )
++# Upstream installs via leatherman_install(); plain install() here.
++install(TARGETS libcpp-hocon libprojectsrc
++        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
++        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++# The leatherman compat shim headers are part of the public interface
++# (hocon/*.hpp include leatherman/locale/locale.hpp), so they ship with
++# the package alongside hocon/.
++install(DIRECTORY inc/hocon DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
++install(DIRECTORY compat/leatherman DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+ 
+-# Generate the export header for restricting symbols exported from the library.
+-# Restricting symbols has several advantages, noted at https://gcc.gnu.org/wiki/Visibility.
+-symbol_exports(lib${PROJECT_NAME} "${CMAKE_CURRENT_LIST_DIR}/inc/hocon/export.h")
+-
+-# This correctly handles DLL installation on Windows.
+-leatherman_install(lib${PROJECT_NAME})
+-install(DIRECTORY inc/hocon DESTINATION include)
+-
+-add_subdirectory(tests)
++if(HOCON_BUILD_TESTS)
++    add_subdirectory(tests)
++endif()
+--- a/lib/tests/CMakeLists.txt
++++ b/lib/tests/CMakeLists.txt
+@@ -1,5 +1,16 @@
+-# Setup compiling the test executable. C++ compile flags are inherited from the parent directory.
+-include_directories(${LEATHERMAN_CATCH_INCLUDE})
++# lib/tests/CMakeLists.txt — cpp-hocon 0.3.0 OHOS port.
++#
++# Upstream links Catch through leatherman's LEATHERMAN_CATCH_INCLUDE
++# variable. The port uses the Conan catch/1.12.2 package (Catch v1 line,
++# exactly what upstream pinned) via the catch/FindCatch module or the
++# CATCH_INCLUDE_DIR cache variable.
++if(NOT CATCH_INCLUDE_DIR)
++    find_path(CATCH_INCLUDE_DIR catch.hpp)
++endif()
++if(NOT CATCH_INCLUDE_DIR)
++    message(FATAL_ERROR "catch.hpp not found (set CATCH_INCLUDE_DIR)")
++endif()
++message(STATUS "Using Catch from: ${CATCH_INCLUDE_DIR}")
+ 
+ set(TEST_CASES
+     concatenation_test.cc
+@@ -18,25 +29,23 @@
+     program_options.cc
+ )
+ 
+-add_executable(lib${PROJECT_NAME}_test $<TARGET_OBJECTS:libprojectsrc> ${TEST_CASES} main.cc)
++add_executable(libcpp-hocon_test $<TARGET_OBJECTS:libprojectsrc> ${TEST_CASES} main.cc)
++# Upstream inherits include_directories(inc ...) from lib/CMakeLists.txt;
++# with an OBJECT library the usage requirements do not propagate through
++# $<TARGET_OBJECTS:...>, so list the library include dirs explicitly.
++target_include_directories(libcpp-hocon_test PRIVATE
++    ${CATCH_INCLUDE_DIR}
++    ${CMAKE_CURRENT_LIST_DIR}
++    ${CMAKE_CURRENT_LIST_DIR}/../inc
++    ${CMAKE_CURRENT_LIST_DIR}/../compat)
++target_link_libraries(libcpp-hocon_test
++    Boost::headers Boost::filesystem Boost::program_options Boost::thread
++    Threads::Threads)
+ 
+-if (${CMAKE_SYSTEM_NAME} MATCHES "Linux" OR ${CMAKE_SYSTEM_NAME} MATCHES "SunOS")
+-    target_link_libraries(lib${PROJECT_NAME}_test rt)
+-endif()
++# fixtures.hpp points the tests at the on-disk fixture files.
++configure_file(
++    "${CMAKE_CURRENT_LIST_DIR}/fixtures.hpp.in"
++    "${CMAKE_CURRENT_LIST_DIR}/fixtures.hpp")
+ 
+-target_link_libraries(lib${PROJECT_NAME}_test
+-    ${Boost_LIBRARIES}
+-    ${LEATHERMAN_LIBRARIES}
+-    ${CMAKE_THREAD_LIBS_INIT}
+-)
+-
+-if (${CMAKE_SYSTEM_NAME} MATCHES "Darwin" AND BOOST_STATIC AND LEATHERMAN_USE_LOCALES)
+-    target_link_libraries(lib${PROJECT_NAME}_test iconv)
+-endif()
+-
+-add_test(NAME "unit_tests" COMMAND lib${PROJECT_NAME}_test)
+-
+-configure_file (
+-    "${CMAKE_CURRENT_LIST_DIR}/fixtures.hpp.in"
+-    "${CMAKE_CURRENT_LIST_DIR}/fixtures.hpp"
+-)
++# Upstream registers exactly one ctest entry: unit_tests.
++add_test(NAME "unit_tests" COMMAND libcpp-hocon_test)
