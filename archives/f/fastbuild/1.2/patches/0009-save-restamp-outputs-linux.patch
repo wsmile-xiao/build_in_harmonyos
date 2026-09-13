@@ -1,0 +1,94 @@
+--- a/Code/Tools/FBuild/FBuildCore/Graph/NodeGraph.cpp
++++ b/Code/Tools/FBuild/FBuildCore/Graph/NodeGraph.cpp
+@@ -504,3 +504,91 @@ void NodeGraph::Save( IOStream & stream, const char* nodeGraphDBFile ) const
+ {
++#if defined( __LINUX__ )
++    // OHOS/HMDFS port: snapshot settled on-disk stamps for built files
++    // before serializing (other platforms: bit-identical, no-op).
++    // RecordStampFromBuiltFile() captures the stamp when a job completes,
++    // but on HMDFS a just-written file reported mtime keeps settling
++    // forward afterwards with no intervening write (generated Unity files
++    // drifted +208ms, linked exes +24-32ms, one Unity dep changed +2.75s
++    // between save and reload). Saving the pre-settle value makes the next
++    // reload see externally modified or dep changed and pointlessly rebuild.
++    // Unlike the earlier outputs-only snapshot, ALL UP_TO_DATE file nodes
++    // are re-recorded: generated Unity .cpps and tool exes are tracked as
++    // FILE_NODEs (UnityNode::IsAFile() is false; Unity nodes carry
++    // content-hash stamps, never mtimes), and the observed 2.75s Unity1.cpp
++    // drift sits on such a FILE_NODE. Source inputs are safe to include:
++    // tests only modify them after Save, so post-Save changes are still
++    // detected; re-recording is read-only and never touches disk mtimes
++    // (TestGenerate_NoRebuild mtime-equality asserts unaffected). Exact
++    // comparison is preserved (no quantization). A fixed window cannot
++    // cover build-duration-scale settling, so after the initial wait the
++    // stamps are re-verified and record+sync repeats until a 500ms window
++    // shows no movement (bounded, best effort).
++    Thread::Sleep( 2500 );
++    for ( size_t settleRound = 0; settleRound < 7; ++settleRound )
++    {
++        for ( size_t i = 0; i < GetNodeCount(); ++i )
++        {
++            Node * node = GetNodeByIndex( i );
++            if ( node && ( node->GetState() == Node::UP_TO_DATE ) &&
++                 node->IsAFile() )
++            {
++                node->RecordStampFromBuiltFile();
++            }
++        }
++        // Re-stamp depender views (mirror of Node::Finalize, which runs at
++        // build time): the loop above moves each file own stamp, but every
++        // depender still holds the older dep stamp, which would read as
++        // "dep changed" on reload even with a settled disk. Sync static +
++        // dynamic dep stamps to the current node stamps (zero stamps mean
++        // missing files and are left untouched, exactly like Finalize;
++        // prebuild deps never trigger rebuilds and are skipped).
++        for ( size_t i = 0; i < GetNodeCount(); ++i )
++        {
++            Node * node = GetNodeByIndex( i );
++            if ( node == nullptr )
++            {
++                continue;
++            }
++            Dependencies & staticDeps = const_cast< Dependencies & >( node->GetStaticDependencies() );
++            for ( size_t d = 0; d < staticDeps.GetSize(); ++d )
++            {
++                Node * depNode = staticDeps[ d ].GetNode();
++                if ( depNode && ( depNode->GetStamp() != 0 ) )
++                {
++                    staticDeps[ d ].Stamp( depNode->GetStamp() );
++                }
++            }
++            Dependencies & dynamicDeps = const_cast< Dependencies & >( node->GetDynamicDependencies() );
++            for ( size_t d = 0; d < dynamicDeps.GetSize(); ++d )
++            {
++                Node * depNode = dynamicDeps[ d ].GetNode();
++                if ( depNode && ( depNode->GetStamp() != 0 ) )
++                {
++                    dynamicDeps[ d ].Stamp( depNode->GetStamp() );
++                }
++            }
++        }
++        Thread::Sleep( 500 );
++        bool settled = true;
++        for ( size_t i = 0; i < GetNodeCount(); ++i )
++        {
++            Node * node = GetNodeByIndex( i );
++            if ( node && ( node->GetState() == Node::UP_TO_DATE ) &&
++                 node->IsAFile() )
++            {
++                const uint64_t diskTime = FileIO::GetFileLastWriteTime( node->GetName() );
++                if ( ( diskTime != 0 ) && ( diskTime != node->GetStamp() ) )
++                {
++                    settled = false;
++                    break;
++                }
++            }
++        }
++        if ( settled )
++        {
++            break;
++        }
++    }
++#endif
+     // write header and version
+     NodeGraphHeader header;
