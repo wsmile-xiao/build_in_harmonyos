@@ -1,0 +1,171 @@
+# ═══ Draft knowledge entry — ncdc 1.25 autotools 应用两路依赖发现适配 ═══
+# Timestamp: 2026-09-11
+# Software: ncdc 1.25
+# Gate: conan create（原生 OHOS，非交叉）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ncdc-1.25-glib-pc-name-autotools-ac-check-lib
+trigger_tool:           configure|pkg-config|conan|gnutls
+phase:                  configure|build
+error_signature:        No package 'glib-2.0' found|
+                         Package requirements .* were not met|
+                         checking for library containing deflate\.\.\. no|
+                         checking for library containing BZ2_bzlibVersion\.\.\. no|
+                         Error relocating .*libglib-2\.0\.so.*: g_libintl_.*symbol not found|
+                         Error loading shared library libgnutls\.so\.30: \(needed by \./makeheaders\)|
+                         mkhdr\.done.*Error 127|
+                         /system/bin/sh: .*/src/ncdc: inaccessible or not found|
+                         Error loading shared library libgnutls\.so\.30: \(needed by .*/p/bin/ncdc\)
+
+severity:               2
+category:               autotools|pkg-config|glib|pkg_config_name|ac-check-lib|
+                         static-link|transitive-libs|no-upstream-tests|runtime-self-proof|
+                         make-bootstrap-tool|non-recursive-automake|test-package-runenv
+
+match_keywords:         No package 'glib-2.0' found, glib-2.0-unofficial.pc, pkg_config_name
+                         multi-module pc, gthread-2.0 Requires glib-2.0, glibconfig.h libdir include,
+                         AutotoolsDeps CPPFLAGS LDFLAGS LIBS, AC_CHECK_LIB -L missing,
+                         AutotoolsToolchain no dep include libs, static gnutls transitive nettle gmp,
+                         gnutls.pc Requires chain, config.guess sandbox probe unreliable,
+                         --build --host aarch64-unknown-linux-gnu, no upstream test suite,
+                         build-time == runtime version assertion, LD_LIBRARY_PATH musl RUNPATH,
+                         makeheaders mkhdr.done bootstrap tool, conanbuild no host libdir,
+                         make runs built tool, bin_PROGRAMS non-recursive automake build root,
+                         test_package VirtualRunEnv transitive libdir missing,
+                         conanrun LD_LIBRARY_PATH, application package_type dynamic deps
+
+title:                  ncdc 1.25 适配：autotools 应用「PKG_CHECK_MODULES + AC_CHECK_LIB」两路依赖发现——glib 配方 pkg_config_name=glib-2.0-unofficial 致上游查名 miss（须手写 glib-2.0.pc/gthread-2.0.pc）+ AutotoolsToolchain 不注入依赖 -I/-L 致裸 -lz/-lbz2 探测失败（须叠加 AutotoolsDeps）；附 make 期引导工具/非递归产物路径/test_package runenv 三类实跑坑与「编译期==运行期版本」实跑自证范式
+
+root_cause: >
+  1) glib 配方把 pkg_config_name 设为 "glib-2.0-unofficial"（一包多模块 .pc 的
+     聚合产物名），PkgConfigDeps 因此只生成 glib-2.0-unofficial.pc；而 glib 包内
+     自带的上游 .pc 用 meson --prefix=/ 构建，prefix 字段是 "/"，路径在 conan
+     隔离目录下不可用。ncdc configure.ac 的
+     PKG_CHECK_MODULES([GLIB],[glib-2.0 gthread-2.0]) 按上游原名单查 → miss。
+     AutotoolsToolchain 已把 generators_folder prepend 进 PKG_CONFIG_PATH，故在该
+     目录手写 glib-2.0.pc / gthread-2.0.pc 即被优先命中（prefix=dep.package_folder，
+     includedir1=${prefix}/lib/glib-2.0/include 取 glibconfig.h，gthread Requires:
+     glib-2.0）。
+  2) AutotoolsToolchain 不把依赖 cpp_info 的 -I/-L 写进 CPPFLAGS/LDFLAGS；ncdc 的
+     AC_CHECK_LIB([z]/[bz2]/[sqlite3] 回退) 是裸 -l 探测，无 -L 找不到 conan 里的库。
+     AutotoolsDeps 聚合全部 host 依赖的 CPPFLAGS/LDFLAGS/LIBS（-l 拓扑序展开），
+     同时覆盖静态 gnutls 的传递库（gnutls.pc 只给 -lgnutls，静态还需 nettle/gmp/
+     libtasn1/libgcrypt/libunistring）。
+  3) OHOS 沙箱内 config.guess/config.sub 的写盘探针不可靠 → 显式钉
+     --build/--host=aarch64-unknown-linux-gnu（host==build 不触发 AC_RUN_IFELSE）。
+  4) 上游 Makefile.am 无 TESTS/check，发布 tarball 无测试用例 → 无可 vendored 的
+     上游测试；ncdc --version 打印的括号内外（运行期 glib_check_version 等 vs 编译期
+     宏）版本相等，可证明运行期解析的是打包制品而非设备同名系统库；子进程需显式
+     LD_LIBRARY_PATH，因 musl 解析 libglib 自身 NEEDED 时不继承其 RUNPATH。
+  5) make 期会**运行**自产引导工具：ncdc 的 mkhdr.done 规则先编 deps/makeheaders
+     （链 gnutls/glib/libgcrypt）再执行之；Autotools.make() 默认 env="conanbuild"
+     （VirtualBuildEnv 只含 tool_requires 构建依赖），host 依赖 libdir 不在其中 →
+     makeheaders 启动即 9 条 "Error loading shared library …(needed by ./makeheaders)"
+     → mkhdr.done Error 127。修法：_host_libdirs() 聚合 host 依赖 libdir，以
+     LD_LIBRARY_PATH="…:$LD_LIBRARY_PATH" 前缀运行 make（不用 tc.environment 以免
+     覆盖 profile [buildenv] 的 LD_LIBRARY_PATH）。
+  6) ncdc 为非递归 automake：顶层 Makefile.am 的 bin_PROGRAMS=ncdc，可执行文件落在
+     构建根 $(builddir)/ncdc（src/ 仅是 ncdc_SOURCES 源路径）；误取 build_folder/src/ncdc
+     报 "inaccessible or not found"。
+  7) test_package 以 env="conanrun"(VirtualRunEnv) 跑打包后的动态可执行文件时，
+     生成的 LD_LIBRARY_PATH 未覆盖**传递依赖**（gnutls/nettle/gmp…）libdir →
+     "Error loading shared library libgnutls.so.30: (needed by .../p/bin/ncdc)"，7 项断言
+     全 FAIL。修法：test_package 的 test() 同样显式汇总 self.dependencies.values() 的
+     全部 libdir 并入 LD_LIBRARY_PATH。因 build() 自证已注入 host libdir，该问题只在
+     test_package 侧暴露。
+
+affected_scope:         一切 autotools 项目：混用 PKG_CHECK_MODULES 与
+                        AC_CHECK_LIB/AC_SEARCH_LIBS；消费 glib 等「一包多 .pc」依赖；
+                        静态链接 gnutls/curl 等带长传递依赖链的库；上游无测试套件
+                        需以真实二进制实跑自证；OHOS 沙箱 config.guess 探测场景；
+                        make 期运行自产引导工具（codegen/header 生成器）的项目；
+                        非递归 automake 工程取产物路径；package_type=application 且
+                        动态链接 host 依赖的包的 test_package。
+
+verification_cmd:       conan create archives/n/ncdc/1.25 -pr:h ohos-aarch64
+                        -pr:b ohos-aarch64 --build=missing（原生 OHOS：build() 内
+                        ncdc --version / --help 实跑断言 + test_package 7 项）
+                        制品核验：conan list "glib/2.84.0.2:*" -r ohpcd 看实际 .pc 名
+
+rec_priority:           1
+rec_approach:           dual-generator-pkgconfigdeps-plus-autotoolsdeps
+rec_description: >
+  1) generate() 同时启用 PkgConfigDeps(self) 与 AutotoolsDeps(self)：
+     前者服务 PKG_CHECK_MODULES，后者服务 AC_CHECK_LIB 与静态传递库。
+  2) 若依赖配方用聚合 pkg_config_name（glib-2.0-unofficial 等），在
+     self.generators_folder 手写上游原名的 .pc（prefix 指向 dep.package_folder，
+     多 include 目录逐一列出，模块间用 Requires 串接）。
+  3) configure_args 显式钉 --build/--host=aarch64-unknown-linux-gnu 规避沙箱探测。
+  4) 无上游测试时，build() 里对真实二进制实跑 --version/--help；断言用
+     「编译期版本 == 运行期版本」证明加载的是本配方制品；子进程注入
+     LD_LIBRARY_PATH=全部 host 依赖 libdir。
+rec_command:            conan create archives/n/ncdc/1.25 -pr:h ohos-aarch64
+                          -pr:b ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               conan-recipe-autotools-dual-dep-discovery
+
+fallback_priority:      2
+fallback_approach:      patch-configure-ac-to-pkg-config-only
+fallback_description:   若手写 .pc 不可行，patch configure.ac 把 AC_CHECK_LIB 那路改成
+                        PKG_CHECK_MODULES（需依赖提供 .pc）；或在 recipe 里直接
+                        CPPFLAGS+="-I... "/LDFLAGS+="-L..." 手工拼路径。前者改动上游，
+                        后者脆弱且易漏传递依赖。
+fallback_command:       CPPFLAGS="-I<dep>/include" LDFLAGS="-L<dep>/lib" ./configure
+fallback_auto_fix:      false
+fallback_impl:          patch-configure-ac-or-manual-flags
+
+forbid_1_pattern:       PKG_CHECK_MODULES.*\b(glib-2\.0|gthread-2\.0)\b(?!.*(glib-2\.0-unofficial|_write_glib_pcs))
+forbid_1_reason:        glib 配方 pkg_config_name=glib-2.0-unofficial，PkgConfigDeps 不生成
+                        glib-2.0.pc/gthread-2.0.pc；直接依赖上游查名必 miss
+forbid_1_consequence:   configure 报 "No package 'glib-2.0' found"，配置中断
+
+forbid_2_pattern:       AutotoolsToolchain\(self\)(?![\s\S]{0,2000}AutotoolsDeps\(self\)\.generate\(\))[\s\S]{0,2000}AC_CHECK_LIB|AC_CHECK_LIB[\s\S]{0,2000}(?!AutotoolsDeps)
+forbid_2_reason:        上游 configure.ac 用 AC_CHECK_LIB/AC_SEARCH_LIBS 时，
+                        AutotoolsToolchain 不注入依赖的 -L，裸 -l 探测必然失败
+forbid_2_consequence:   "checking for library containing deflate... no" → zlib/bzip2 未找到，
+                        配置中断（或误探测到宿主系统库）
+
+forbid_3_pattern:       self\.run\(.*--version(?![\s\S]{0,300}LD_LIBRARY_PATH)
+forbid_3_reason:        musl 解析 libglib-2.0.so 自身 NEEDED 时不继承其 RUNPATH，
+                        conanbuild 环境不保证带 LD_LIBRARY_PATH
+forbid_3_consequence:   实跑探针报 "Error relocating libglib-2.0.so.0: g_libintl_*:
+                        symbol not found"，误判为配方/制品问题
+
+forbid_4_pattern:       autotools\.make\(|self\.run\(["']make (?![\s\S]{0,200}LD_LIBRARY_PATH)
+forbid_4_reason:        上游 Makefile 若在构建期**运行**自产引导工具（如 ncdc 的
+                        deps/makeheaders 生成 mkhdr.done），该工具动态链 host 依赖，
+                        而 conanbuild 只含构建依赖 libdir → 启动即 "Error loading
+                        shared library …(needed by ./makeheaders)" → Error 127
+forbid_4_consequence:   make 中断于 bootstrap 步骤，误判为源码编译不兼容
+
+forbid_5_pattern:       env="conanrun"[\s\S]{0,200}(?!LD_LIBRARY_PATH)
+forbid_5_reason:        package_type=application 的包 test_package 中，VirtualRunEnv 的
+                        LD_LIBRARY_PATH 未覆盖传递依赖（gnutls 等）libdir，打包后动态
+                        可执行文件在 test 期解析不到 NEEDED
+forbid_5_consequence:   test_package 报 "Error loading shared library libgnutls.so.30:
+                        (needed by …/p/bin/ncdc)"，全部断言 FAIL（而 build() 自证因已注入
+                        host libdir 反而通过，掩盖问题）
+
+principles:             P001, P004, P011
+similar_to:             DRAFT-nip4-9.1.5-dual-glib-graph-gnome-tools, E011, E114
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ncdc-1.25-glib-pc-name-autotools-ac-check-lib.md
+last_updated:           2026-09-11
+source_event:           archives/n/ncdc/1.25
+
+authors:                2301_76770579
+source_pr:              9553
+source_commit:          bc2827b34
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.7
+metrics_last_used:      2026-09-11
