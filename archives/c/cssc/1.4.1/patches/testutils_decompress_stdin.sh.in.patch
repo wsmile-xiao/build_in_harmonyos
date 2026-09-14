@@ -1,0 +1,126 @@
+--- a/testutils/decompress_stdin.sh.in
++++ b/testutils/decompress_stdin.sh.in
+@@ -9,4 +9,122 @@
+ # Shell script which decompresses its input.
+ #
+ #
+-exec @ZCAT_PROGRAM@
++# GNU gzip cannot decompress legacy compress(1) .Z (LZW) files and no
++# compress(1)/ncompress tool is available on this platform.  Read stdin
++# fully and decompress with gzip when possible, else with a small
++# pure-python LZW decompressor (standard library only, no external
++# dependencies).
++exec python3 -c '
++import sys, gzip
++
++def unlzw(data):
++    # Decompress compress(1) .Z (LZW) streams using only the standard
++    # library.  Algorithm follows the classic decompress semantics
++    # (Mark Adler-style bit-aligned code reading).
++    if len(data) < 5:
++        raise ValueError("input too short")
++    if data[0] != 0x1F or data[1] != 0x9D:
++        raise ValueError("not a .Z (LZW) stream")
++    flags = data[2]
++    if flags & 0x60:
++        raise ValueError("invalid flag bits")
++    maxbits = flags & 0x1F
++    if not 9 <= maxbits <= 16:
++        raise ValueError("max code bits out of range")
++    if maxbits == 9:
++        maxbits = 10
++    block = flags & 0x80
++
++    prefix = [0] * 65536
++    suffix = [0] * 65536
++
++    bits = 9
++    mask = 0x1FF
++    end = 256 if block else 255
++
++    # first code
++    buf = data[3] | (data[4] << 8)
++    final = prev = buf & mask
++    buf >>= bits
++    left = 16 - bits
++    if prev > 255:
++        raise ValueError("first code must be a literal")
++    out = bytearray([final])
++
++    mark = 3
++    nxt = 5
++    inlen = len(data)
++    while nxt < inlen:
++        if end >= mask and bits < maxbits:
++            # flush to bit boundary
++            rem = (nxt - mark) % bits
++            if rem:
++                rem = bits - rem
++                if rem >= inlen - nxt:
++                    break
++                nxt += rem
++            buf = 0
++            left = 0
++            mark = nxt
++            bits += 1
++            mask = (mask << 1) | 1
++
++        # read a code of `bits` bits
++        buf |= data[nxt] << left
++        nxt += 1
++        left += 8
++        if left < bits:
++            if nxt == inlen:
++                break
++            buf |= data[nxt] << left
++            nxt += 1
++            left += 8
++        code = buf & mask
++        buf >>= bits
++        left -= bits
++
++        if code == 256 and block:
++            # clear code: flush to boundary and reset
++            rem = (nxt - mark) % bits
++            if rem:
++                rem = bits - rem
++                if rem > inlen - nxt:
++                    break
++                nxt += rem
++            buf = 0
++            left = 0
++            mark = nxt
++            bits = 9
++            mask = 0x1FF
++            end = 255
++            continue
++
++        temp = code
++        stack = []
++        if code > end:
++            if code != end + 1 or prev > end:
++                raise ValueError("invalid code in stream")
++            stack.append(final)
++            code = prev
++        while code >= 256:
++            stack.append(suffix[code])
++            code = prefix[code]
++        stack.append(code)
++        final = code
++
++        if end < mask:
++            end += 1
++            prefix[end] = prev
++            suffix[end] = final
++
++        prev = temp
++        out.extend(stack[::-1])
++    return bytes(out)
++
++data = sys.stdin.buffer.read()
++try:
++    out = gzip.decompress(data)
++except Exception:
++    out = unlzw(data)
++sys.stdout.buffer.write(out)
++'

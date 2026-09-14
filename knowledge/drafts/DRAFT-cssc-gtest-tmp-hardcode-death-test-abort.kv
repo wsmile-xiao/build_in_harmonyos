@@ -1,0 +1,69 @@
+# ═══ Draft knowledge entry — 老版 googletest（≤1.6）CapturedStream 硬编码 /tmp，死亡测试在 OHOS 上整体 abort(134) ═══
+# Timestamp: 2026-09-11
+# Software: cssc 1.4.1（任何捆绑 googletest 1.x 老版本源码、含死亡测试 EXPECT_EXIT/ASSERT_DEATH 的 C/C++ 包）
+# Gate: make check / unit-tests 阶段
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E-cssc-gtest-tmp
+title: googletest 1.6 CapturedStream 硬编码 /tmp/captured_stream.XXXXXX，OHOS /tmp 只读导致死亡测试父进程 GTEST_CHECK abort（exit 134），整个测试二进制被判 FAIL
+trigger_tool: make / gtest
+phase: testing
+error_signature: Signal 6 \(core dumped\)|FAIL test_\w+ \(exit status: 134\)|Death tests use fork\(\), which is unsafe
+severity: 3
+category: platform|hmdfs|test-framework
+match_keywords: googletest, gtest, death test, EXPECT_EXIT, ASSERT_DEATH, KilledBySignal,
+  CapturedStream, captured_stream.XXXXXX, mkstemp /tmp, GTEST_CHECK, exit status 134,
+  Signal 6, Death tests use fork
+keywords: googletest, gtest, gtest-port.cc, gtest-death-test.cc, death test, fork,
+  CapturedStream, captured_stream, /tmp read-only, mkstemp, GTEST_OS_LINUX_ANDROID,
+  exit status 134, SIGABRT, test binary FAIL, unit-tests
+approach: 单元测试二进制中带 EXPECT_EXIT/ASSERT_DEATH 的用例运行时整个测试进程以
+  exit status 134（SIGABRT）挂掉，且日志只有 "Death tests use fork(), which is unsafe..."
+  警告 + "Signal 6 (core dumped)"，没有任何 gtest 失败详情（[ RUN ] 后无 [ OK ]/[ FAILED ]）。
+  根因不在 fork/pipe/abort 本身（可写目录下纯 C fork+abort 程序验证正常），而在老版
+  googletest（1.6，2011 年）的 gtest-port.cc CapturedStream 构造函数：
+  mkstemp("/tmp/captured_stream.XXXXXX") —— 仅对 GTEST_OS_LINUX_ANDROID 提供
+  /sdcard 替代，无 __OHOS__ 分支、不读 $TMPDIR。OHOS /tmp 只读（errno EACCES），
+  mkstemp 返回 -1 后 GTEST_CHECK_(captured_fd != -1) 直接 abort 父进程——注意是
+  "父进程"：CaptureStderr() 在 fork 之前由父进程调用，所以死亡测试连子进程都没
+  fork 出去，整个 test 二进制就死了。修复：在捆绑的 googletest/src/gtest-port.cc
+  的 name_template 处无条件改用 getenv("TMPDIR")（回退 /tmp）snprintf 拼模板；同类问题会连环出现在项目自身的测试助手（cssc 的
+  test_linebuf.cc 直接调 tmpfile() 同样踩 P_tmpdir=/tmp）——tmpfile() 调用点
+  也需 mkstemp($TMPDIR)+fdopen+unlink 回退。修复后 11/11 unit-tests 全绿（含
+  4 个死亡测试）
+root_cause: googletest 1.6 的 CapturedStream（src/gtest-port.cc）硬编码
+  char name_template[] = "/tmp/captured_stream.XXXXXX"，仅 GTEST_OS_LINUX_ANDROID
+  特判 /sdcard；OHOS 平台 /tmp 为只读 root 目录，mkstemp 失败（EACCES），随后
+  GTEST_CHECK_ 触发 abort()。由于 CaptureStderr() 在父进程 fork 之前执行，
+  表现为整个测试二进制 exit 134 而非单个用例失败，极易误判为 fork/线程安全问题
+  （"Death tests use fork(), which is unsafe" 警告是烟雾弹）
+affected_scope: 所有捆绑 googletest 1.x（≤1.7，无 __OHOS__/TMPDIR 处理）且测试含
+  EXPECT_EXIT/ASSERT_DEATH 死亡用例、或 CaptureStderr/CaptureStdout 被触发的
+  C/C++ 项目，在 /tmp 只读的 OHOS 设备上 make check。捆绑式（vendored googletest）
+  是 2010 年代老项目的普遍形态；新版 googletest（≥1.8）已用 testing::internal
+  的临时目录探测，不在此列
+verification_cmd: grep -n '"/tmp/captured_stream.XXXXXX"' <src>/googletest/src/gtest-port.cc;
+  ./test_binary 2>&1 | grep -c "Signal 6"; # >0 即父进程被 abort
+rec_priority: 1
+rec_approach: gtest-port-unconditional-tmpdir
+rec_description: 在捆绑 googletest/src/gtest-port.cc 的 CapturedStream name_template
+  处，把硬编码 "/tmp/captured_stream.XXXXXX" 改为无条件 POSIX 逻辑：4096 字节
+  buf + getenv("TMPDIR")（空回退 "/tmp"）snprintf 拼模板——不引入平台条件编译宏
+  （R8 合规；getenv 回退在所有平台与原行为等价，Linux 上 TMPDIR 通常未设时仍用
+  /tmp）。补丁只动测试框架副本，随包补丁集提交；同包内项目自有 tmpfile() 调用
+  点另配无条件 mkstemp($TMPDIR) 回退（tmpfile() 走 musl P_tmpdir=/tmp，同样失败），
+  fdopen 失败时 close(tfd) 防泄漏
+rec_command: patch 后 make -C unit-tests && ./test_sccsdate  # 死亡测试 [ OK ]
+rec_auto_fix: false
+rec_impl: patch-source（vendored test-framework 副本修改，随 conanfile patches 走）
+fallback_priority: 2
+fallback_approach: writable-tmp-bind-mount
+fallback_description: 无法改源码时（如二进制发行版测试），给测试进程提供可写 /tmp
+  （容器/bind-mount 场景）；OHOS 真机无 root 无法 mount，故对设备测试不可行，
+  仅限 CI 容器侧
+fallback_command: mount --bind <writable-dir> /tmp && ./test_binary
+fallback_auto_fix: false
+prescan_pattern: captured_stream\.XXXXXX|Death tests use fork|EXPECT_EXIT|ASSERT_DEATH
+verify_builds: cssc 1.4.1 本地 conan create + CI（PR 待填）
+related: E547（libcheck P_tmpdir 优先级——同类 /tmp 只读家族，但根因是优先级
+  顺序而非硬编码缺失；本条覆盖 gtest 家族 + 死亡测试 abort 判读）
