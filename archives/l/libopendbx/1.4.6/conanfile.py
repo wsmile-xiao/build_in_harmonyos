@@ -54,7 +54,30 @@ class LibopendbxConan(ConanFile):
         self.folders.build = "."
 
     def source(self):
-        get(self, **self.conan_data["sources"], strip_root=True)
+        # Primary source first; on failure fall back to the byte-identical
+        # mirror (same SHA-256, verified). Patches are applied exactly once
+        # after any successful fetch path (mirror fallback must not skip it).
+        sources = dict(self.conan_data["sources"])
+        mirror_urls = sources.pop("mirror_urls", [])
+        mirror_sha256 = sources.pop("mirror_sha256", None)
+        fetched = False
+        try:
+            get(self, **sources, strip_root=True)
+            fetched = True
+        except Exception as error:
+            if not mirror_urls or not mirror_sha256:
+                raise
+            self.output.warning(f"Primary source failed ({error}); trying verified mirrors")
+            for mirror_url in mirror_urls:
+                try:
+                    get(self, url=mirror_url, sha256=mirror_sha256, strip_root=True)
+                    fetched = True
+                    break
+                except Exception as mirror_error:
+                    self.output.warning(f"Mirror source failed ({mirror_error}): {mirror_url}")
+            if not fetched:
+                raise
+        apply_conandata_patches(self)
 
     def generate(self):
         tc = AutotoolsToolchain(self)
@@ -70,7 +93,7 @@ class LibopendbxConan(ConanFile):
         tc.generate()
 
     def build(self):
-        apply_conandata_patches(self)
+        # Patches are applied in source() after the fetch (see mirror fallback).
         autotools = Autotools(self)
         autotools.configure()
         autotools.make(args=["-j1"])
