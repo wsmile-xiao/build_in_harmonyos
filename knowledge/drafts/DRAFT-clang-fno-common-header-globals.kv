@@ -1,0 +1,64 @@
+#====================================================================
+# DRAFT-clang-fno-common-header-globals
+#====================================================================
+
+id:                     DRAFT-clang-fno-common-header-globals
+trigger_tool:           cc|ld.lld
+phase:                  build
+error_signature:        duplicate symbol|multiple definition
+severity:               2
+category:               toolchain|linking
+match_keywords:         fno-common, fcommon, extern, tentative definition, duplicate symbol, multiple definition, header, global variable, clang, lld, Makefile.in
+title:                  clang 默认 -fno-common 使头文件定义的全局变量在链接期 duplicate symbol，应 extern 声明加单一定义点
+
+root_cause:             因果链：老 C 代码惯例在头文件直接定义全局变量（依赖编译器默认 -fcommon 把各编译单元的 tentative definition 合并为同一 common symbol）→ 现代 clang（本机 /data/service/hnp/bin/clang 为 clang-15、lld 链接）默认 -fno-common → 每个包含该头的编译单元都生成强符号定义 → 链接器报 duplicate symbol（GNU ld 措辞为 multiple definition）→ 构建失败。被 N 个编译单元包含即 N 重定义（案例 dirb/2.22：src/variables.h 被 8 个 TU 包含，其中 FILE*/CURL*/struct 及 19 个 int/指针全局）。工具实现证据：clang -fno-common 为 LLVM 上游默认（GCC 10 起同默认）；触发命令：普通两文件链接即复现；失败点：ld.lld duplicate symbol；归类：工具链默认语义（非平台 syscall）。
+affected_scope:         任何以现代 clang/GCC（默认 -fno-common）构建、且在头文件中定义（而非仅声明）全局变量的 C 项目
+verification_cmd:       mkdir -p /tmp/probe-fnoc && cd /tmp/probe-fnoc && printf 'typedef struct { int x; } opts_t;\nopts_t g_opts;\nint g_counter;\n' > globals.h && printf '#include "globals.h"\nint main(void){ return g_counter + g_opts.x; }\n' > a.c && printf '#include "globals.h"\n' > b.c && clang a.c b.c -o prog_default
+                        # 预期失败：ld.lld: error: duplicate symbol: g_opts / g_counter（GNU ld 为 multiple definition）
+                        clang -fcommon a.c b.c -o prog_fcommon
+                        # 预期通过（仅证明机理，非推荐方案）
+                        printf 'typedef struct { int x; } opts_t;\nextern opts_t g_opts;\nextern int g_counter;\n' > globals_fixed.h && printf '#include "globals_fixed.h"\nopts_t g_opts;\nint g_counter;\n' > def.c && printf '#include "globals_fixed.h"\nint main(void){ return g_counter + g_opts.x; }\n' > a2.c && clang a2.c def.c -o prog_fixed
+                        # 预期通过（推荐修法）
+rec_priority:           1
+rec_approach:           extern-decls-plus-single-definition
+rec_description:        头文件中全局变量全部改 extern 声明；新增一个 .c 集中定义；同步注册进构建文件——注意 tarball 预生成 Makefile.in 时 make 实际读 .in，需同时改 Makefile.am（base 列表）与 Makefile.in（base 与 am__objects_1），缺一处则链接缺符号或定义不参与构建。案例（dirb/2.22）与 AUR 同源 patch 同思路。
+rec_command:            编辑头文件加 extern；新增 src/variables.c；注册 src/Makefile.am 的 base 与 src/Makefile.in 的 base 及 am__objects_1；重新 configure && make
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      compile-with-fcommon
+fallback_description:   为该包编译加 -fcommon 恢复 common symbol 合并。诚实权衡：掩盖头文件声明/定义缺陷、链接语义不清，仅作快速退路；不得作为默认长期方案，按 P-CFLAGS-001 记录为技术债务。
+fallback_command:       recipe 的 tools.build:cflags/cxxflags 追加 -fcommon，并在 notes.md 记录技术债务与退出条件
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-conf
+
+forbid_1_pattern:       (^|\s)-fcommon(\s|$)
+forbid_1_reason:        全局 common symbol 合并隐藏无效的声明/定义关系（与 DRAFT-swftools-autotools-hmdfs-2168 forbid_1 同款）。
+forbid_1_consequence:   重复/含混的全局状态保留，换编译器或链接模式后再次失败。
+
+forbid_2_pattern:       __attribute__\(\(weak\)\)
+forbid_2_reason:        用弱符号让重复定义静默合并，掩盖问题且初始化语义不可控。
+forbid_2_consequence:   哪份全局状态生效取决于链接顺序，问题更难诊断。
+
+principles:             P-TOOLCHAIN-001, P-PATCH-001, P-CFLAGS-001
+causes:
+caused_by:
+similar_to:             DRAFT-swftools-autotools-hmdfs-2168（其 rec_description 含同机理子项；本条为专门化条目 + 自包含探针 + Makefile.in 注册细节）
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-clang-fno-common-header-globals.md
+last_updated:           2026-09-11
+source_event:           dirb/2.22 HarmonyOS PC adaptation (run dirb-2.22)；AUR dirb 同源 patch 为外部佐证
+
+draft:                  true
+contributor_id:         dirb-2.22
+authors:                GoliWie
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-11
