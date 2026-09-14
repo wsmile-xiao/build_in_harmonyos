@@ -1,23 +1,28 @@
-# pipebench
+# pipebench — OpenHarmony 编译档案
 
-管道吞吐测速工具：坐在管道中间，把 stdin 数据转发到 stdout，同时在 stderr 显示传输速率与汇总（Thomas Habets，GPL-2.0-or-later）。
+## 软件简介
+pipebench（Thomas Habets 编写）是一个测量 **stdin→stdout 管道吞吐速率** 的命令行基准工具：
+从标准输入读数据、以近乎原速写回标准输出，并按时间输出速率统计
+（`... | pipebench | ...`，典型用法如 `cat file | pipebench > /dev/null`）。
+许可证 GPL-2.0-or-later。本次适配上游发布版 **0.40**。
 
-- 上游：https://github.com/ThomasHabets/pipebench
-- 版本：0.4（对应上游发布 0.40，tarball 名 pipebench-0.40.tar.gz）
-- 许可证：GPL-2.0-or-later
+## OHOS 适配要点
+- 上游 Makefile 硬编码 `CC=gcc`，且 `install` 目标写死到 `/usr/local/bin`、`/usr/local/man/man1`
+  —— conanfile 以 `make CC=<OHOS clang>` 覆盖编译器完成编译，产物由 `package()` 自行拷入
+  `bin/` 与 `share/man/man1/`，**不调用** `make install`。
+- 单文件 C 工具，无 configure/autotools，无编译期/运行期依赖。
+- 源码使用了 legacy BSD 类型 `u_int64_t` 等（仅在 `#ifdef sun` 下才定义）；glibc 由
+  `<sys/types.h>` 提供，但 **musl/OHOS 不提供**。适配：补 `#include <stdint.h>`，并把类型
+  定义块改为 `#if defined(sun) || !defined(__GLIBC__)` 宏映射到 `uint8_t/…/uint64_t`。
+- 源码缺少 `<stdlib.h>`/`<string.h>`（`malloc/strlen/strcpy` 等隐式声明）——一并补齐
+  （与 Debian gcc-14 FTBFS 报道 #1075387 同类）。
+- 上游 **无任何测试目标/测试目录**：Makefile 只有 `all/doc/install/clean`，无 `check/test`。
+  不做虚构；冒烟测试放在 test_package（`-h` 用法退出码、`-q` 直通字节一致性 + `Summary` 输出）。
 
-## 构建要点（OHOS aarch64）
+## 依赖关系
+- 无编译/运行依赖（仅 C 运行时）
+- 被依赖: 无（独立 CLI 基准工具）
 
-- 裸 Makefile 项目（无 configure）：配方执行
-  `make CC="<conan conf c 编译器>" CFLAGS="-Wall -pedantic -O2" -j1 pipebench`。
-- 不调用上游 `make install`（其 install 规则依赖 GNU `install -D`），
-  package() 手动 copy `pipebench` 到 `bin/`、`pipebench.1` 到 `share/man/man1/`。
-- 上游无测试套件（Makefile 无 check/test 目标，无 tests/ 目录），
-  已按 no_tests 审计处理；test_package 自建 3 个直通/冒烟用例覆盖核心行为。
-
-## 典型用法
-
-```sh
-tar cf - . | pipebench | (cd /mnt/backup && tar xf -)
-dd if=/dev/zero bs=80k count=60k 2>/dev/null | pipebench -q > /dev/null
-```
+## 参考资料
+- [pipebench 官方主页](https://www.habets.pp.se/synscan/programs.html#pipebench)
+- [pipebench-0.40.tar.gz](https://www.habets.pp.se/synscan/files/pipebench-0.40.tar.gz)
