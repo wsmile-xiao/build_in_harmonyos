@@ -90,6 +90,16 @@ class LibopendbxConan(ConanFile):
                 "--build=aarch64-unknown-linux-gnu",
                 "--host=aarch64-linux-ohos",
             ])
+        # Inject the sqlite3 dependency into the autotools build: configure
+        # checks for sqlite3.h and the sqlite3 backend links libsqlite3.
+        # AutotoolsToolchain does not aggregate dependency cpp_info, so add
+        # the include/lib paths explicitly (absolute, see gdal precedent).
+        dep = self.dependencies["sqlite3"]
+        inc = os.path.join(dep.package_folder, dep.cpp_info.includedirs[0])
+        lib = os.path.join(dep.package_folder, dep.cpp_info.libdirs[0])
+        tc.extra_cflags.append(f"-I{inc}")
+        tc.extra_cxxflags.append(f"-I{inc}")
+        tc.extra_ldflags.append(f"-L{lib}")
         tc.generate()
 
     def build(self):
