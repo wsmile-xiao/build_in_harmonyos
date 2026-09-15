@@ -1,0 +1,1185 @@
+diff --git a/ohos/Makefile b/ohos/Makefile
+new file mode 100644
+index 0000000..fd563cd
+--- /dev/null
++++ b/ohos/Makefile
+@@ -0,0 +1,23 @@
++# cliclick OHOS port build.
++# Cross builds are driven by the Conan recipe, which passes CC explicitly.
++# The OHOS clang defaults to the device SDK sysroot; libohinput.so comes
++# from the sysroot lib dir.
++
++CC ?= clang
++CFLAGS ?= -O2
++WARNINGS = -Wall -Wextra -Wno-unused-parameter
++DEFS = -D_POSIX_C_SOURCE=200809L
++LINKFLAGS = -pie -Wl,-z,relro -Wl,-z,now
++LIBS = -lohinput
++
++SOURCES = main.c backend.c
++
++all: cliclick
++
++cliclick: $(SOURCES) cliclick_backend.h
++	$(CC) $(DEFS) $(CFLAGS) $(WARNINGS) $(LINKFLAGS) -o $@ $(SOURCES) $(LIBS)
++
++clean:
++	rm -f cliclick
++
++.PHONY: all clean
+diff --git a/ohos/backend.c b/ohos/backend.c
+new file mode 100644
+index 0000000..8fc955a
+--- /dev/null
++++ b/ohos/backend.c
+@@ -0,0 +1,209 @@
++/* cliclick OHOS backend implementation.
++ *
++ * Maps the cliclick event primitives onto the OpenHarmony input injection
++ * C API (libohinput.so).
++ * Mouse and keyboard injection share one code path with synergy-core's
++ * adapted OHOS platform layer (archives/s/synergy-core/1.20.4).
++ *
++ * Facts established by the run probe (recorded in notes.md):
++ *  - Key injection is permitted without extra authorization.
++ *  - Mouse injection requires the input-injection authorization; in a
++ *    non-interactive session OH_Input_InjectMouseEvent returns
++ *    INPUT_PERMISSION_DENIED (201) and OH_Input_RequestInjection starts an
++ *    authorization flow that cannot complete (INPUT_INJECTION_AUTHORIZING).
++ *  - Pointer position read-back is not available (the mouse monitor API is
++ *    permission-gated), so "current position" is not observable.
++ */
++
++#include "cliclick_backend.h"
++
++#include <stdbool.h>
++#include <stddef.h>
++#include <string.h>
++
++#include <multimodalinput/oh_input_manager.h>
++#include <multimodalinput/oh_key_code.h>
++
++#include <time.h>
++
++static int64_t monotonic_millis(void)
++{
++    struct timespec ts;
++    ts.tv_sec = 0;
++    ts.tv_nsec = 0;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
++}
++
++int32_t ohos_mouse_move(int32_t x, int32_t y)
++{
++    struct Input_MouseEvent *event = OH_Input_CreateMouseEvent();
++    if (event == NULL) {
++        return OHOS_RESULT_PARAMETER_ERROR;
++    }
++    int64_t now = monotonic_millis();
++    OH_Input_SetMouseEventAction(event, MOUSE_ACTION_MOVE);
++    OH_Input_SetMouseEventDisplayX(event, x);
++    OH_Input_SetMouseEventDisplayY(event, y);
++    OH_Input_SetMouseEventGlobalX(event, x);
++    OH_Input_SetMouseEventGlobalY(event, y);
++    OH_Input_SetMouseEventButton(event, MOUSE_BUTTON_NONE);
++    OH_Input_SetMouseEventActionTime(event, now);
++    int32_t result = OH_Input_InjectMouseEvent(event);
++    OH_Input_DestroyMouseEvent(&event);
++    return result;
++}
++
++int32_t ohos_mouse_button(int32_t button, bool down)
++{
++    struct Input_MouseEvent *event = OH_Input_CreateMouseEvent();
++    if (event == NULL) {
++        return OHOS_RESULT_PARAMETER_ERROR;
++    }
++    int64_t now = monotonic_millis();
++    OH_Input_SetMouseEventAction(event, down ? MOUSE_ACTION_BUTTON_DOWN : MOUSE_ACTION_BUTTON_UP);
++    OH_Input_SetMouseEventButton(event, button);
++    OH_Input_SetMouseEventActionTime(event, now);
++    int32_t result = OH_Input_InjectMouseEvent(event);
++    OH_Input_DestroyMouseEvent(&event);
++    return result;
++}
++
++int32_t ohos_key_event(int32_t keycode, bool down)
++{
++    struct Input_KeyEvent *event = OH_Input_CreateKeyEvent();
++    if (event == NULL) {
++        return OHOS_RESULT_PARAMETER_ERROR;
++    }
++    OH_Input_SetKeyEventAction(event, down ? KEY_ACTION_DOWN : KEY_ACTION_UP);
++    OH_Input_SetKeyEventKeyCode(event, keycode);
++    OH_Input_SetKeyEventActionTime(event, monotonic_millis());
++    int32_t result = OH_Input_InjectKeyEvent(event);
++    OH_Input_DestroyKeyEvent(&event);
++    return result;
++}
++
++struct NamedKey {
++    const char *name;
++    int32_t keycode;
++};
++
++static const struct NamedKey named_keys[] = {
++    {"alt", KEYCODE_ALT_LEFT},
++    {"opt", KEYCODE_ALT_LEFT},
++    {"capslock", KEYCODE_CAPS_LOCK},
++    {"cmd", KEYCODE_META_LEFT},
++    {"command", KEYCODE_META_LEFT},
++    {"ctrl", KEYCODE_CTRL_LEFT},
++    {"control", KEYCODE_CTRL_LEFT},
++    {"delete", KEYCODE_DEL},
++    {"down", KEYCODE_DPAD_DOWN},
++    {"end", KEYCODE_MOVE_END},
++    {"enter", KEYCODE_ENTER},
++    {"esc", KEYCODE_ESCAPE},
++    {"escape", KEYCODE_ESCAPE},
++    {"fn", KEYCODE_FN},
++    {"home", KEYCODE_MOVE_HOME},
++    {"left", KEYCODE_DPAD_LEFT},
++    {"pagedown", KEYCODE_PAGE_DOWN},
++    {"pageup", KEYCODE_PAGE_UP},
++    {"return", KEYCODE_ENTER},
++    {"right", KEYCODE_DPAD_RIGHT},
++    {"shift", KEYCODE_SHIFT_LEFT},
++    {"space", KEYCODE_SPACE},
++    {"tab", KEYCODE_TAB},
++    {"up", KEYCODE_DPAD_UP},
++};
++
++int32_t ohos_keycode_for_name(const char *name)
++{
++    size_t count = sizeof(named_keys) / sizeof(named_keys[0]);
++    for (size_t i = 0; i < count; i++) {
++        if (strcmp(name, named_keys[i].name) == 0) {
++            return named_keys[i].keycode;
++        }
++    }
++    if (name[0] == 'f' && name[1] >= '1' && name[1] <= '9' && name[2] == '\0') {
++        int digit = name[1] - '1';
++        return KEYCODE_F1 + digit;
++    }
++    return -1;
++}
++
++int32_t ohos_keycode_for_char(char c, bool *shift)
++{
++    *shift = false;
++    if (c >= 'a' && c <= 'z') {
++        return KEYCODE_A + (c - 'a');
++    }
++    if (c >= 'A' && c <= 'Z') {
++        *shift = true;
++        return KEYCODE_A + (c - 'A');
++    }
++    if (c >= '0' && c <= '9') {
++        return KEYCODE_0 + (c - '0');
++    }
++    struct ShiftedSymbol {
++        char ch;
++        int32_t keycode;
++    };
++    static const struct ShiftedSymbol plain[] = {
++        {'`', KEYCODE_GRAVE},   {'-', KEYCODE_MINUS},   {'=', KEYCODE_EQUALS},
++        {'[', KEYCODE_LEFT_BRACKET}, {']', KEYCODE_RIGHT_BRACKET},
++        {'\\', KEYCODE_BACKSLASH}, {';', KEYCODE_SEMICOLON},
++        {'\'', KEYCODE_APOSTROPHE}, {',', KEYCODE_COMMA},
++        {'.', KEYCODE_PERIOD},  {'/', KEYCODE_SLASH},
++    };
++    static const struct ShiftedSymbol shifted[] = {
++        {'~', KEYCODE_GRAVE},   {'!', KEYCODE_1},       {'@', KEYCODE_2},
++        {'#', KEYCODE_3},       {'$', KEYCODE_4},       {'%', KEYCODE_5},
++        {'^', KEYCODE_6},       {'&', KEYCODE_7},       {'*', KEYCODE_8},
++        {'(', KEYCODE_9},       {')', KEYCODE_0},       {'_', KEYCODE_MINUS},
++        {'+', KEYCODE_EQUALS},  {'{', KEYCODE_LEFT_BRACKET}, {'}', KEYCODE_RIGHT_BRACKET},
++        {'|', KEYCODE_BACKSLASH}, {':', KEYCODE_SEMICOLON}, {'"', KEYCODE_APOSTROPHE},
++        {'<', KEYCODE_COMMA},   {'>', KEYCODE_PERIOD},  {'?', KEYCODE_SLASH},
++    };
++    size_t count = sizeof(plain) / sizeof(plain[0]);
++    for (size_t i = 0; i < count; i++) {
++        if (plain[i].ch == c) {
++            return plain[i].keycode;
++        }
++    }
++    count = sizeof(shifted) / sizeof(shifted[0]);
++    for (size_t i = 0; i < count; i++) {
++        if (shifted[i].ch == c) {
++            *shift = true;
++            return shifted[i].keycode;
++        }
++    }
++    if (c == ' ') {
++        return KEYCODE_SPACE;
++    }
++    if (c == '\n' || c == '\r') {
++        return KEYCODE_ENTER;
++    }
++    if (c == '\t') {
++        return KEYCODE_TAB;
++    }
++    return -1;
++}
++
++const char *ohos_supported_key_names(void)
++{
++    return "alt, capslock, cmd, ctrl, delete, down, end, enter, esc, f1-f9, fn, home, "
++           "left, opt, pagedown, pageup, return, right, shift, space, tab, up";
++}
++
++const char *ohos_result_name(int32_t result)
++{
++    switch (result) {
++    case OHOS_RESULT_SUCCESS:
++        return "success";
++    case OHOS_RESULT_PERMISSION_DENIED:
++        return "INPUT_PERMISSION_DENIED";
++    case OHOS_RESULT_PARAMETER_ERROR:
++        return "INPUT_PARAMETER_ERROR";
++    default:
++        return "unknown error";
++    }
++}
+diff --git a/ohos/cliclick_backend.h b/ohos/cliclick_backend.h
+new file mode 100644
+index 0000000..b8c9d1b
+--- /dev/null
++++ b/ohos/cliclick_backend.h
+@@ -0,0 +1,51 @@
++/* cliclick OHOS backend interface.
++ *
++ * Part of the OHOS port of cliclick 5.1 (BSD-3-Clause, Carsten Bluem).
++ * The original Objective-C/Cocoa backend only builds on macOS; this pure C
++ * backend re-implements the event primitives on the OpenHarmony input
++ * injection C API (multimodalinput/oh_input_manager.h, libohinput.so). */
++
++#ifndef CLICLICK_OHOS_BACKEND_H
++#define CLICLICK_OHOS_BACKEND_H
++
++#include <stdbool.h>
++#include <stdint.h>
++
++/* Mouse buttons: the SDK enum constants (Input_MouseEventButton:
++ * MOUSE_BUTTON_LEFT/MIDDLE/RIGHT, declared in multimodalinput/oh_input_manager.h)
++ * are used directly so button values are compile-time bound to the SDK header
++ * and cannot drift from it. Note: the SDK header uses bool in C without
++ * including <stdbool.h>; include <stdbool.h> before it. */
++#include <multimodalinput/oh_input_manager.h>
++
++/* OH_Input result codes the CLI diagnostics distinguish: aliases of the
++ * SDK Input_Result enum constants (INPUT_SUCCESS, INPUT_PERMISSION_DENIED,
++ * INPUT_PARAMETER_ERROR in oh_input_manager.h), compile-time bound. */
++#define OHOS_RESULT_SUCCESS INPUT_SUCCESS
++#define OHOS_RESULT_PERMISSION_DENIED INPUT_PERMISSION_DENIED
++#define OHOS_RESULT_PARAMETER_ERROR INPUT_PARAMETER_ERROR
++
++/* Inject a mouse move (pointer relocation) to absolute coordinates. */
++int32_t ohos_mouse_move(int32_t x, int32_t y);
++
++/* Press or release a mouse button (MOUSE_BUTTON_* from oh_input_manager.h). */
++int32_t ohos_mouse_button(int32_t button, bool down);
++
++/* Press or release a key by OHOS keycode (multimodalinput/oh_key_code.h). */
++int32_t ohos_key_event(int32_t keycode, bool down);
++
++/* Look up a named key ("shift", "ctrl", "kp:return" names, ...).
++ * Returns the keycode, or -1 when the name is unknown. */
++int32_t ohos_keycode_for_name(const char *name);
++
++/* US-layout mapping for one ASCII character.
++ * Returns the keycode and sets *shift, or -1 when unmappable. */
++int32_t ohos_keycode_for_char(char c, bool *shift);
++
++/* Comma-separated list of accepted key names for diagnostics. */
++const char *ohos_supported_key_names(void);
++
++/* Short human-readable name for an OH_Input result code. */
++const char *ohos_result_name(int32_t result);
++
++#endif
+diff --git a/ohos/main.c b/ohos/main.c
+new file mode 100644
+index 0000000..b20af6c
+--- /dev/null
++++ b/ohos/main.c
+@@ -0,0 +1,878 @@
++/* cliclick 5.1 — OHOS port of the command-line front end.
++ *
++ * The upstream front end is Objective-C against Cocoa/Carbon/CGEvent and
++ * only builds on macOS. This file re-implements the same CLI contract
++ * (options, command grammar, diagnostics, test mode) in portable C and
++ * drives the OHOS injection backend in cliclick_backend.h.
++ *
++ * Diagnostic wording intentionally reproduces the upstream Test.sh
++ * expectations so the platform-independent upstream assertions stay
++ * verifiable on OHOS.
++ */
++
++#include "cliclick_backend.h"
++
++#include <stdbool.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <time.h>
++
++#define CLICLICK_VERSION "5.1"
++
++typedef enum { DEST_STDOUT, DEST_STDERR, DEST_FILE, DEST_CLIPBOARD } DestKind;
++
++typedef enum { COORD_ABSOLUTE, COORD_RELATIVE, COORD_CURRENT, COORD_INVALID } CoordKind;
++
++typedef struct {
++    CoordKind kind;
++    long value;
++    const char *raw;
++} Coord;
++
++typedef struct {
++    FILE *stream;
++    DestKind kind;
++    char path[4096];
++} Dest;
++
++typedef struct {
++    bool test_mode;
++    bool verbose_mode;
++    Dest test_dest;
++    Dest print_dest;
++    long wait_ms;
++    bool restore;
++} Options;
++
++/* ------------------------------------------------------------------ */
++/* Destination routing                                                 */
++
++static FILE *dest_stream(Dest *dest, FILE *fallback)
++{
++    if (dest->kind == DEST_FILE && dest->stream != NULL) {
++        return dest->stream;
++    }
++    if (dest->kind == DEST_STDERR) {
++        return stderr;
++    }
++    return fallback;
++}
++
++static bool open_file_dest(Dest *dest)
++{
++    dest->stream = fopen(dest->path, "w");
++    if (dest->stream == NULL) {
++        fprintf(stderr, "Cannot create file \xe2\x80\x9c%s\xe2\x80\x9d specified as output destination\n",
++                dest->path);
++        return false;
++    }
++    return true;
++}
++
++static bool parse_dest(Dest *dest, const char *value)
++{
++    if (strcmp(value, "stdout") == 0) {
++        dest->kind = DEST_STDOUT;
++        dest->stream = NULL;
++        return true;
++    }
++    if (strcmp(value, "stderr") == 0) {
++        dest->kind = DEST_STDERR;
++        dest->stream = NULL;
++        return true;
++    }
++    if (strcmp(value, "clipboard") == 0) {
++        dest->kind = DEST_CLIPBOARD;
++        dest->stream = NULL;
++        return true;
++    }
++    dest->kind = DEST_FILE;
++    dest->stream = NULL;
++    snprintf(dest->path, sizeof(dest->path), "%s", value);
++    return true;
++}
++
++static bool check_dest_usable(Dest *dest)
++{
++    if (dest->kind == DEST_CLIPBOARD) {
++        fprintf(stderr,
++                "The clipboard output destination is not supported on OHOS (no pasteboard C API). "
++                "Use stdout, stderr or a file path instead.\n");
++        return false;
++    }
++    if (dest->kind == DEST_FILE && dest->stream == NULL) {
++        return open_file_dest(dest);
++    }
++    return true;
++}
++
++/* ------------------------------------------------------------------ */
++/* Diagnostics                                                         */
++
++static void print_missing_mouse_argument(const char *id)
++{
++    fprintf(stderr,
++            "Missing argument to command \xe2\x80\x9c%s\xe2\x80\x9d: Expected two coordinates "
++            "(separated by a comma) or \xe2\x80\x9c.\xe2\x80\x9d. Examples: \xe2\x80\x9c%s:123,456\xe2\x80\x9d "
++            "or \xe2\x80\x9c%s:.\xe2\x80\x9d\n",
++            id, id, id);
++}
++
++static void print_invalid_coordinate(char axis, const char *raw, const char *id)
++{
++    fprintf(stderr,
++            "Invalid %c axis coordinate \xe2\x80\x9c%s\xe2\x80\x9d given to command \xe2\x80\x9c%s\xe2\x80\x9d\n",
++            axis, raw, id);
++}
++
++static void print_invalid_argument(const char *raw, const char *id)
++{
++    fprintf(stderr,
++            "Invalid argument \xe2\x80\x9c%s\xe2\x80\x9d to command \xe2\x80\x9c%s\xe2\x80\x9d: Expected two coordinates "
++            "(separated by a comma) or \xe2\x80\x9c.\xe2\x80\x9d. Examples: \xe2\x80\x9c%s:123,456\xe2\x80\x9d or "
++            "\xe2\x80\x9c%s:.\xe2\x80\x9d\n",
++            raw, id, id, id);
++}
++
++/* Only the known authorization-denial code gets authorization guidance;
++ * every other result code is reported verbatim so unrelated failures are
++ * not misdiagnosed as authorization problems. */
++static void print_mouse_failure(int32_t result)
++{
++    if (result == OHOS_RESULT_PERMISSION_DENIED) {
++        fprintf(stderr,
++                "Mouse event injection was denied by the OpenHarmony input service "
++                "(OH_Input_InjectMouseEvent result=%d %s). On OHOS, mouse injection requires the "
++                "input-injection authorization (OH_Input_RequestInjection), which cannot be granted "
++                "in this non-interactive session.\n",
++                result, ohos_result_name(result));
++    } else {
++        fprintf(stderr,
++                "Mouse event injection failed (OH_Input_InjectMouseEvent result=%d %s)\n",
++                result, ohos_result_name(result));
++    }
++}
++
++static void print_key_denial(int32_t result)
++{
++    fprintf(stderr,
++            "Key event injection failed (OH_Input_InjectKeyEvent result=%d %s)\n",
++            result, ohos_result_name(result));
++}
++
++static void print_position_unavailable(void)
++{
++    fprintf(stderr,
++            "The current mouse position is not observable on OHOS: pointer position read-back is "
++            "not exposed to CLI processes.\n");
++}
++
++/* ------------------------------------------------------------------ */
++/* Action descriptions (verbose and test mode)                         */
++
++static const char *mouse_action_verb(const char *id)
++{
++    if (strcmp(id, "m") == 0) {
++        return "Move to";
++    }
++    if (strcmp(id, "dc") == 0) {
++        return "Double-click at";
++    }
++    if (strcmp(id, "tc") == 0) {
++        return "Triple-click at";
++    }
++    if (strcmp(id, "rc") == 0) {
++        return "Right-click at";
++    }
++    if (strcmp(id, "dd") == 0) {
++        return "Drag press down at";
++    }
++    if (strcmp(id, "du") == 0) {
++        return "Drag release at";
++    }
++    if (strcmp(id, "dm") == 0) {
++        return "Drag move to";
++    }
++    return "Click at";
++}
++
++static void describe_mouse(FILE *out, const char *id, const char *raw)
++{
++    const char *verb = mouse_action_verb(id);
++    if (raw == NULL || strcmp(raw, ".") == 0) {
++        fprintf(out, "%s current location\n", verb);
++    } else {
++        fprintf(out, "%s %s\n", verb, raw);
++    }
++}
++
++/* ------------------------------------------------------------------ */
++/* Coordinate parsing                                                  */
++
++static bool parse_number(const char *text, long *value)
++{
++    if (*text == '\0') {
++        return false;
++    }
++    char *end = NULL;
++    long parsed = strtol(text, &end, 10);
++    if (end == NULL || *end != '\0') {
++        return false;
++    }
++    *value = parsed;
++    return true;
++}
++
++static CoordKind classify_single(const char *token, long *value)
++{
++    if (strcmp(token, ".") == 0) {
++        return COORD_CURRENT;
++    }
++    const char *digits = token;
++    if (*digits == '=') {
++        digits++;
++        if (parse_number(digits, value)) {
++            return COORD_ABSOLUTE;
++        }
++        return COORD_INVALID;
++    }
++    if (*digits == '+' || *digits == '-') {
++        bool negative = (*digits == '-');
++        long magnitude = 0;
++        if (!parse_number(digits + 1, &magnitude)) {
++            return COORD_INVALID;
++        }
++        *value = negative ? -magnitude : magnitude;
++        return COORD_RELATIVE;
++    }
++    if (parse_number(digits, value)) {
++        return COORD_ABSOLUTE;
++    }
++    return COORD_INVALID;
++}
++
++/* Split "X,Y"; returns false with a diagnostic already printed. */
++static bool parse_mouse_argument(const char *id, const char *raw, Coord *x, Coord *y)
++{
++    const char *comma = strchr(raw, ',');
++    if (comma == NULL || comma == raw || comma[1] == '\0' || strchr(comma + 1, ',') != NULL) {
++        print_invalid_argument(raw, id);
++        return false;
++    }
++    char buffer[128];
++    size_t head = (size_t)(comma - raw);
++    if (head >= sizeof(buffer)) {
++        head = sizeof(buffer) - 1;
++    }
++    memcpy(buffer, raw, head);
++    buffer[head] = '\0';
++    x->raw = buffer;
++    x->kind = classify_single(buffer, &x->value);
++    if (x->kind == COORD_INVALID) {
++        print_invalid_coordinate('X', buffer, id);
++        return false;
++    }
++    y->raw = comma + 1;
++    y->kind = classify_single(y->raw, &y->value);
++    if (y->kind == COORD_INVALID) {
++        print_invalid_coordinate('Y', y->raw, id);
++        return false;
++    }
++    return true;
++}
++
++/* ------------------------------------------------------------------ */
++/* OHOS execution helpers                                              */
++
++static void nap_millis(long millis)
++{
++    struct timespec ts;
++    ts.tv_sec = millis / 1000;
++    ts.tv_nsec = (millis % 1000) * 1000000L;
++    nanosleep(&ts, NULL);
++}
++
++static bool exec_mouse_step(int32_t result)
++{
++    if (result == OHOS_RESULT_SUCCESS) {
++        return true;
++    }
++    print_mouse_failure(result);
++    return false;
++}
++
++/* Resolve one coordinate to pixels; false when it needs the position. */
++static bool resolve_coord(const Coord *coord, long *pixels)
++{
++    if (coord->kind == COORD_ABSOLUTE) {
++        *pixels = coord->value;
++        return true;
++    }
++    print_position_unavailable();
++    return false;
++}
++
++/* Execute a mouse command; returns false and prints the diagnostic. */
++static bool exec_mouse_command(const char *id, const Coord *x, const Coord *y, long wait_ms)
++{
++    long px = 0;
++    long py = 0;
++    if (!resolve_coord(x, &px) || !resolve_coord(y, &py)) {
++        return false;
++    }
++    if (!exec_mouse_step(ohos_mouse_move((int32_t)px, (int32_t)py))) {
++        return false;
++    }
++    nap_millis(wait_ms);
++    if (strcmp(id, "m") == 0 || strcmp(id, "dm") == 0) {
++        return true;
++    }
++    if (strcmp(id, "dd") == 0) {
++        return exec_mouse_step(ohos_mouse_button(MOUSE_BUTTON_LEFT, true));
++    }
++    if (strcmp(id, "du") == 0) {
++        return exec_mouse_step(ohos_mouse_button(MOUSE_BUTTON_LEFT, false));
++    }
++    int32_t button = MOUSE_BUTTON_LEFT;
++    int clicks = 1;
++    if (strcmp(id, "rc") == 0) {
++        button = MOUSE_BUTTON_RIGHT;
++    } else if (strcmp(id, "dc") == 0) {
++        clicks = 2;
++    } else if (strcmp(id, "tc") == 0) {
++        clicks = 3;
++    }
++    for (int i = 0; i < clicks; i++) {
++        if (!exec_mouse_step(ohos_mouse_button(button, true))) {
++            return false;
++        }
++        nap_millis(wait_ms);
++        if (!exec_mouse_step(ohos_mouse_button(button, false))) {
++            return false;
++        }
++        nap_millis(wait_ms);
++    }
++    return true;
++}
++
++/* Execute one key down/up step; returns false and prints the diagnostic. */
++static bool exec_key_step(int32_t keycode, bool down, int32_t *first_error)
++{
++    int32_t result = ohos_key_event(keycode, down);
++    if (result != OHOS_RESULT_SUCCESS) {
++        if (*first_error == OHOS_RESULT_SUCCESS) {
++            *first_error = result;
++        }
++        return false;
++    }
++    return true;
++}
++
++/* ------------------------------------------------------------------ */
++/* Command processing                                                  */
++
++static bool command_takes_mouse_coords(const char *id)
++{
++    return strcmp(id, "c") == 0 || strcmp(id, "dc") == 0 || strcmp(id, "tc") == 0 ||
++           strcmp(id, "rc") == 0 || strcmp(id, "dd") == 0 || strcmp(id, "du") == 0 ||
++           strcmp(id, "dm") == 0 || strcmp(id, "m") == 0;
++}
++
++/* Process one command token. Returns process exit code (0 success). */
++static int process_command(const char *token, Options *options)
++{
++    FILE *test_out = dest_stream(&options->test_dest, stdout);
++    const char *colon = strchr(token, ':');
++    size_t id_len = colon != NULL ? (size_t)(colon - token) : strlen(token);
++    char id[16];
++    if (id_len == 0 || id_len >= sizeof(id)) {
++        fprintf(stderr, "Unrecognized action shortcut \xe2\x80\x9c%s\xe2\x80\x9d\n", token);
++        return 1;
++    }
++    memcpy(id, token, id_len);
++    id[id_len] = '\0';
++    const char *arg = colon != NULL ? colon + 1 : NULL;
++
++    if (command_takes_mouse_coords(id)) {
++        if (arg == NULL || *arg == '\0') {
++            print_missing_mouse_argument(id);
++            return 1;
++        }
++        Coord x = {COORD_INVALID, 0, NULL};
++        Coord y = {COORD_INVALID, 0, NULL};
++        if (strcmp(arg, ".") == 0) {
++            x.kind = COORD_CURRENT;
++            x.raw = arg;
++            y.kind = COORD_CURRENT;
++            y.raw = arg;
++        } else if (!parse_mouse_argument(id, arg, &x, &y)) {
++            return 1;
++        }
++        if (options->test_mode) {
++            describe_mouse(test_out, id, arg);
++            return 0;
++        }
++        if (options->verbose_mode) {
++            describe_mouse(stdout, id, arg);
++            fflush(stdout);
++        }
++        if (x.kind == COORD_RELATIVE || y.kind == COORD_RELATIVE ||
++            x.kind == COORD_CURRENT || y.kind == COORD_CURRENT) {
++            print_position_unavailable();
++            return 1;
++        }
++        return exec_mouse_command(id, &x, &y, options->wait_ms) ? 0 : 1;
++    }
++
++    if (strcmp(id, "w") == 0) {
++        if (arg == NULL || *arg == '\0') {
++            fprintf(stderr,
++                    "Invalid or missing argument to command \xe2\x80\x9cw\xe2\x80\x9d: Expected number of "
++                    "milliseconds. Example: \xe2\x80\x9cw:50\xe2\x80\x9d\n");
++            return 1;
++        }
++        long millis = 0;
++        if (!parse_number(arg, &millis)) {
++            fprintf(stderr,
++                    "Invalid or missing argument to command \xe2\x80\x9cw\xe2\x80\x9d: Expected number of "
++                    "milliseconds. Example: \xe2\x80\x9cw:50\xe2\x80\x9d\n");
++            return 1;
++        }
++        if (options->test_mode) {
++            fprintf(test_out, "Wait %s milliseconds\n", arg);
++            return 0;
++        }
++        if (options->verbose_mode) {
++            printf("Wait %s milliseconds\n", arg);
++            fflush(stdout);
++        }
++        nap_millis(millis);
++        return 0;
++    }
++
++    if (strcmp(id, "kd") == 0 || strcmp(id, "ku") == 0 || strcmp(id, "kp") == 0) {
++        bool is_down = strcmp(id, "kd") == 0;
++        bool is_press = strcmp(id, "kp") == 0;
++        if (arg == NULL || *arg == '\0') {
++            if (strcmp(id, "kd") == 0) {
++                fprintf(stderr,
++                        "Missing argument to command \xe2\x80\x9ckd\xe2\x80\x9d: Expected one or more keys "
++                        "(separated by a comma). Examples: \xe2\x80\x9ckd:ctrl\xe2\x80\x9d or "
++                        "\xe2\x80\x9ckd:cmd,alt\xe2\x80\x9d\n");
++            } else if (strcmp(id, "ku") == 0) {
++                fprintf(stderr,
++                        "Missing argument to command \xe2\x80\x9cku\xe2\x80\x9d: Expected one or more keys "
++                        "(separated by a comma)\n");
++            } else {
++                fprintf(stderr,
++                        "Missing argument to command \xe2\x80\x9ckp\xe2\x80\x9d: Expected a key name\n");
++            }
++            return 1;
++        }
++        if (options->test_mode || options->verbose_mode) {
++            char names[512];
++            snprintf(names, sizeof(names), "%s", arg);
++            char *name = strtok(names, ",");
++            while (name != NULL) {
++                if (options->test_mode) {
++                    if (strcmp(id, "kd") == 0) {
++                        fprintf(test_out, "Hold %s key down\n", name);
++                    } else if (strcmp(id, "ku") == 0) {
++                        fprintf(test_out, "Release %s key\n", name);
++                    } else {
++                        fprintf(test_out, "Press + release %s key\n", name);
++                    }
++                } else {
++                    if (strcmp(id, "kd") == 0) {
++                        printf("Hold %s key down\n", name);
++                    } else if (strcmp(id, "ku") == 0) {
++                        printf("Release %s key\n", name);
++                    } else {
++                        printf("Press + release %s key\n", name);
++                    }
++                }
++                name = strtok(NULL, ",");
++            }
++            if (options->test_mode) {
++                return 0;
++            }
++            fflush(stdout);
++        }
++        int32_t first_error = OHOS_RESULT_SUCCESS;
++        char names[512];
++        snprintf(names, sizeof(names), "%s", arg);
++        char *name = strtok(names, ",");
++        while (name != NULL) {
++            int32_t keycode = ohos_keycode_for_name(name);
++            if (keycode < 0) {
++                if (strcmp(id, "kd") == 0) {
++                    fprintf(stderr,
++                            "Invalid key \xe2\x80\x9c%s\xe2\x80\x9d given as argument to command "
++                            "\xe2\x80\x9ckd\xe2\x80\x9d.\nThe key name may only be one of: %s\n",
++                            name, ohos_supported_key_names());
++                } else {
++                    fprintf(stderr,
++                            "Invalid key \xe2\x80\x9c%s\xe2\x80\x9d given as argument to command "
++                            "\xe2\x80\x9c%s\xe2\x80\x9d\n",
++                            name, id);
++                }
++                return 1;
++            }
++            if (is_press || is_down) {
++                if (!exec_key_step(keycode, true, &first_error)) {
++                    print_key_denial(first_error);
++                    return 1;
++                }
++                nap_millis(options->wait_ms);
++            }
++            if (is_press || !is_down) {
++                if (!exec_key_step(keycode, false, &first_error)) {
++                    print_key_denial(first_error);
++                    return 1;
++                }
++                nap_millis(options->wait_ms);
++            }
++            name = strtok(NULL, ",");
++        }
++        return 0;
++    }
++
++    if (strcmp(id, "t") == 0) {
++        if (arg == NULL || *arg == '\0') {
++            fprintf(stderr, "Missing argument to command \xe2\x80\x9ct\xe2\x80\x9d\n");
++            return 1;
++        }
++        if (options->test_mode) {
++            fprintf(test_out, "Type: \xe2\x80\x9c%s\xe2\x80\x9d\n", arg);
++            return 0;
++        }
++        if (options->verbose_mode) {
++            printf("Type: \xe2\x80\x9c%s\xe2\x80\x9d\n", arg);
++            fflush(stdout);
++        }
++        int32_t first_error = OHOS_RESULT_SUCCESS;
++        size_t length = strlen(arg);
++        for (size_t i = 0; i < length; i++) {
++            bool shift = false;
++            int32_t keycode = ohos_keycode_for_char(arg[i], &shift);
++            if (keycode < 0) {
++                fprintf(stderr,
++                        "Cannot type character \xe2\x80\x9c%c\xe2\x80\x9d (code %d): no OHOS keycode "
++                        "mapping for this character\n",
++                        arg[i], (int)(unsigned char)arg[i]);
++                return 1;
++            }
++            if (shift) {
++                if (!exec_key_step(ohos_keycode_for_name("shift"), true, &first_error)) {
++                    print_key_denial(first_error);
++                    return 1;
++                }
++            }
++            if (!exec_key_step(keycode, true, &first_error) ||
++                !exec_key_step(keycode, false, &first_error)) {
++                print_key_denial(first_error);
++                return 1;
++            }
++            if (shift) {
++                if (!exec_key_step(ohos_keycode_for_name("shift"), false, &first_error)) {
++                    print_key_denial(first_error);
++                    return 1;
++                }
++            }
++            nap_millis(options->wait_ms);
++        }
++        return 0;
++    }
++
++    if (strcmp(id, "p") == 0) {
++        bool print_position = arg == NULL || *arg == '\0' || strcmp(arg, ".") == 0;
++        if (options->test_mode) {
++            if (print_position) {
++                fprintf(test_out, "Print the current mouse position\n");
++            } else {
++                fprintf(test_out, "Print message \xe2\x80\x9c%s\xe2\x80\x9d\n", arg);
++            }
++            return 0;
++        }
++        if (print_position) {
++            print_position_unavailable();
++            return 1;
++        }
++        if (!check_dest_usable(&options->print_dest)) {
++            return 1;
++        }
++        FILE *out = dest_stream(&options->print_dest, stdout);
++        fprintf(out, "%s\n", arg);
++        fflush(out);
++        return 0;
++    }
++
++    if (strcmp(id, "cp") == 0) {
++        if (arg == NULL || *arg == '\0') {
++            fprintf(stderr, "Missing argument to command \xe2\x80\x9c" "cp\xe2\x80\x9d\n");
++            return 1;
++        }
++        if (strcmp(arg, ".") != 0 && strchr(arg, ',') == NULL) {
++            fprintf(stderr, "Invalid argument \xe2\x80\x9c%s\xe2\x80\x9d to command \xe2\x80\x9c" "cp\xe2\x80\x9d\n", arg);
++            return 1;
++        }
++        if (options->test_mode) {
++            if (strcmp(arg, ".") == 0) {
++                fprintf(test_out, "Print color at current mouse position\n");
++            } else {
++                fprintf(test_out, "Print color at location %s\n", arg);
++            }
++            return 0;
++        }
++        if (options->verbose_mode) {
++            printf("Print color at %s\n", strcmp(arg, ".") == 0 ? "current mouse position" : arg);
++            fflush(stdout);
++        }
++        fprintf(stderr,
++                "The cp command is not supported on OHOS: there is no screen-pixel read-back C API "
++                "(upstream uses the obsolete macOS CGWindowListCreateImage).\n");
++        return 1;
++    }
++
++    fprintf(stderr, "Unrecognized action shortcut \xe2\x80\x9c%s\xe2\x80\x9d\n", id);
++    return 1;
++}
++
++/* ------------------------------------------------------------------ */
++/* Options and entry point                                             */
++
++static void print_usage(FILE *out)
++{
++    fprintf(out,
++            "USAGE\n"
++            "  cliclick [-r] [-m <mode>] [-d <target>] [-e <num>] [-f <file>] [-w <num>] command1 [command2 ...]\n"
++            "\n"
++            "OPTIONS\n"
++            "  -r          Restore initial mouse location when finished\n"
++            "  -m <mode>   \xe2\x80\x9cverbose\xe2\x80\x9d prints each action before it is performed,\n"
++            "              \xe2\x80\x9ctest\xe2\x80\x9d only prints the actions without performing them\n"
++            "  -d <target> Output target for \xe2\x80\x9cp\xe2\x80\x9d output: stdout, stderr, clipboard\n"
++            "              or a file path (default: stdout)\n"
++            "  -e <num>    Accepted for CLI compatibility; the OHOS backend moves directly\n"
++            "  -f <file>   Read commands from file (\xe2\x80\x9c-\xe2\x80\x9d reads stdin)\n"
++            "  -w <num>    Milliseconds to wait after each event (default and minimum: 20)\n"
++            "  -V          Show version\n"
++            "\n"
++            "COMMANDS\n"
++            "  c:x,y  dc:x,y  tc:x,y  rc:x,y  m:x,y  dd:x,y  dm:x,y  du:x,y\n"
++            "  kd:key[,key...]  ku:key[,key...]  kp:key[,key...]\n"
++            "  t:text  w:ms  p  p:text  cp:x,y\n");
++}
++
++static void print_version(void)
++{
++    printf("cliclick %s\n", CLICLICK_VERSION);
++}
++
++static bool parse_options(int argc, char **argv, Options *options, int *first_command)
++{
++    options->test_mode = false;
++    options->verbose_mode = false;
++    options->test_dest.kind = DEST_STDOUT;
++    options->test_dest.stream = NULL;
++    options->print_dest.kind = DEST_STDOUT;
++    options->print_dest.stream = NULL;
++    options->wait_ms = 20;
++    options->restore = false;
++
++    int index = 1;
++    while (index < argc) {
++        const char *token = argv[index];
++        if (token[0] != '-' || token[1] == '\0') {
++            break;
++        }
++        if (strcmp(token, "--") == 0) {
++            index++;
++            break;
++        }
++        if (strcmp(token, "-r") == 0) {
++            options->restore = true;
++            index++;
++            continue;
++        }
++        if (strcmp(token, "-V") == 0 || strcmp(token, "--version") == 0) {
++            print_version();
++            exit(0);
++        }
++        if (strcmp(token, "-h") == 0 || strcmp(token, "--help") == 0) {
++            print_usage(stdout);
++            exit(0);
++        }
++        if (strcmp(token, "-m") == 0 || strcmp(token, "-d") == 0 ||
++            strcmp(token, "-e") == 0 || strcmp(token, "-f") == 0 ||
++            strcmp(token, "-w") == 0) {
++            if (index + 1 >= argc) {
++                fprintf(stderr, "Missing value for option %s\n", token);
++                return false;
++            }
++            const char *value = argv[index + 1];
++            if (strcmp(token, "-m") == 0) {
++                const char *mode_sep = strchr(value, ':');
++                size_t mode_len = mode_sep != NULL ? (size_t)(mode_sep - value) : strlen(value);
++                if (mode_len == 4 && strncmp(value, "test", 4) == 0) {
++                    options->test_mode = true;
++                    if (mode_sep != NULL && !parse_dest(&options->test_dest, mode_sep + 1)) {
++                        return false;
++                    }
++                } else if (mode_len == 7 && strncmp(value, "verbose", 7) == 0) {
++                    options->verbose_mode = true;
++                } else {
++                    fprintf(stderr, "Invalid mode \xe2\x80\x9c%s\xe2\x80\x9d: expected \xe2\x80\x9cverbose\xe2\x80\x9d "
++                                    "or \xe2\x80\x9ctest\xe2\x80\x9d\n",
++                            value);
++                    return false;
++                }
++            } else if (strcmp(token, "-d") == 0) {
++                if (!parse_dest(&options->print_dest, value)) {
++                    return false;
++                }
++            } else if (strcmp(token, "-e") == 0) {
++                fprintf(stderr,
++                        "Warning: -e easing is not supported by the OHOS backend; "
++                        "performing direct movement.\n");
++            } else if (strcmp(token, "-w") == 0) {
++                long millis = 0;
++                if (!parse_number(value, &millis) || millis < 20) {
++                    millis = 20;
++                }
++                options->wait_ms = millis;
++            } else if (strcmp(token, "-f") == 0) {
++                *first_command = -(index + 1); /* handled by caller */
++                return true;
++            }
++            index += 2;
++            continue;
++        }
++        fprintf(stderr, "Unrecognized option \xe2\x80\x9c%s\xe2\x80\x9d. Call cliclick with -h to see usage.\n",
++                token);
++        return false;
++    }
++    *first_command = index;
++    return true;
++}
++
++static int run_commands_from(int argc, char **argv, int first, const Options *options)
++{
++    if (first >= argc) {
++        fprintf(stderr,
++                "You did not pass any commands as argument to cliclick.\n"
++                "Call cliclick with option -h to see usage instructions.\n");
++        return 1;
++    }
++    if (options->restore) {
++        fprintf(stderr,
++                "The -r option cannot restore the initial mouse location on OHOS: pointer position "
++                "read-back is not exposed to CLI processes.\n");
++        return 1;
++    }
++    if (options->test_mode) {
++        if (!check_dest_usable((Dest *)&options->test_dest)) {
++            return 1;
++        }
++        FILE *out = dest_stream((Dest *)&options->test_dest, stdout);
++        fprintf(out, "Running in test mode. These command(s) would be executed:\n");
++        fflush(out);
++    }
++    if (!check_dest_usable((Dest *)&options->print_dest)) {
++        return 1;
++    }
++    int exit_code = 0;
++    for (int i = first; i < argc; i++) {
++        int code = process_command(argv[i], (Options *)options);
++        if (code != 0) {
++            exit_code = code;
++        }
++    }
++    return exit_code;
++}
++
++static int run_commands_file(const char *path, Options *options)
++{
++    FILE *file = strcmp(path, "-") == 0 ? stdin : fopen(path, "r");
++    if (file == NULL) {
++        fprintf(stderr, "Cannot open file \xe2\x80\x9c%s\xe2\x80\x9d\n", path);
++        return 1;
++    }
++    if (options->restore) {
++        fprintf(stderr,
++                "The -r option cannot restore the initial mouse location on OHOS: pointer position "
++                "read-back is not exposed to CLI processes.\n");
++        if (file != stdin) {
++            fclose(file);
++        }
++        return 1;
++    }
++    if (options->test_mode) {
++        if (!check_dest_usable(&options->test_dest)) {
++            if (file != stdin) {
++                fclose(file);
++            }
++            return 1;
++        }
++        FILE *out = dest_stream(&options->test_dest, stdout);
++        fprintf(out, "Running in test mode. These command(s) would be executed:\n");
++        fflush(out);
++    }
++    if (!check_dest_usable(&options->print_dest)) {
++        if (file != stdin) {
++            fclose(file);
++        }
++        return 1;
++    }
++    char line[4096];
++    int exit_code = 0;
++    while (fgets(line, sizeof(line), file) != NULL) {
++        size_t length = strlen(line);
++        while (length > 0 && (line[length - 1] == '\n' || line[length - 1] == '\r')) {
++            line[--length] = '\0';
++        }
++        char *trimmed = line;
++        while (*trimmed == ' ' || *trimmed == '\t') {
++            trimmed++;
++        }
++        if (*trimmed == '\0' || *trimmed == '#') {
++            continue;
++        }
++        int code = process_command(trimmed, options);
++        if (code != 0) {
++            exit_code = code;
++        }
++    }
++    if (file != stdin) {
++        fclose(file);
++    }
++    return exit_code;
++}
++
++int main(int argc, char **argv)
++{
++    Options options;
++    int first = 0;
++    if (!parse_options(argc, argv, &options, &first)) {
++        return 1;
++    }
++    if (first < 0) {
++        int file_index = -first;
++        if (file_index >= argc) {
++            fprintf(stderr, "Missing filename for option -f\n");
++            return 1;
++        }
++        const char *path = argv[file_index];
++        return run_commands_file(path, &options);
++    }
++    int exit_code = run_commands_from(argc, argv, first, &options);
++    if (options.test_dest.stream != NULL) {
++        fclose(options.test_dest.stream);
++    }
++    if (options.print_dest.stream != NULL) {
++        fclose(options.print_dest.stream);
++    }
++    return exit_code;
++}
