@@ -1,0 +1,67 @@
+draft: DRAFT-cpu-features-cross-arch-host-register-mutex
+status: pending-editor-review
+title: "CPU 探测类库 GTest 套件在交叉/异构平台的实例化边界论证范式——宿主寄存器互斥拆解 + 逐用例证据链采集方法"
+category: testing, cmake, conan, architecture
+match_keywords: >
+  gtest, 跨架构, 互斥, PROCESSOR_IS, 宿主寄存器, cpuid, hwcap, getauxval,
+  HWCAP, AT_HWCAP, cpuinfo, test not registered, add_executable 不执行,
+  测试未实例化, 实例化边界, 未执行用例, 交叉编译测试, 跨 OS 互斥,
+  CPU_FEATURES_OS, #error 硬守卫, 测试通过率申报口径
+error_signature: >
+  Including cpuinfo_[a-z0-9]+\.h from a non-[a-z0-9]+ target|PROCESSOR_IS_[A-Z0-9]+|test target not generated|No tests were found!!!|\[==========\] \d+ tests? from.*ran|未实例化
+root_cause: >
+  CPU/硬件探测类库（cpu_features 一类）的测试套件天然按宿主架构与宿主 OS
+  双维度互斥切分：①架构维度——test/CMakeLists.txt 用 PROCESSOR_IS_X86/ARM/
+  MIPS/POWER/S390X/RISCV/LOONGARCH 宏守卫 add_executable，非目标架构的测试
+  目标在 CMake 配置期即不注册；且上游头文件自身带 #error 平台硬守卫（如
+  "Including cpuinfo_x86.h from a non-x86 target"），即使绕过 CMake 强行
+  编译也被拦——因为用例断言的是宿主 CPU 特有寄存器/指令（x86 cpuid/xgetbv、
+  arm32 半字 HWCAP、MIPS/PPC/s390x/RIS-V/LoongArch 寄存器），arm64 目标上
+  连编译都不可能；②OS 维度——同架构套件内部按 OS 宏 #elif 剔除（如 aarch64
+  的 FromDarwinSysctlFromName/WINDOWS_AARCH64_RPI4/MrsMidrEl1_RPI4 分属
+  macOS sysctlbyname/Windows IsProcessorFeaturePresent/FreeBSD sysctl+MRS
+  接口，OHOS 映射 CPU_FEATURES_OS_LINUX 走 getauxval(AT_HWCAP/AT_HWCAP2)
+  hwcap 路径）。这决定"申报通过率"必须拆解为：实例化子集（架构∧OS 双匹配，
+  可真实执行）+ 未实例化子集（宿主硬件/OS 接口天然互斥，非适配排除），
+  后者需逐项分组给出机器可验证的报错证据，否则 rule4 审查必打回（实测
+  "2/133"误报口径被打回两轮）。
+solution: |
+  四步论证范式（cpu_features 0.11.0 实战，133 声明 → 27 实例化全过）：
+  1. **声明计数**：grep -c "TEST\|TEST_F" 上游 test/*.cc 得声明总数（133），
+     逐源文件分列（bit_utils 2 + string_view 17 + stack_line_reader 4 +
+     cpuinfo_aarch64 7 + x86 69 + arm 11 + mips 7 + ppc 5 + s390x 4 + riscv 5 + loongarch 2）。
+  2. **实例化拆解**：读上游 test/CMakeLists.txt 的架构宏守卫行（L62 X86/
+     L80 ARM/L109 MIPS/L117 POWER/L125 S390X/L133 RISCV/L141 LOONGARCH），
+     得出目标架构实例化集合（aarch64：bit_utils+string_view+stack_line_reader+
+     cpuinfo_aarch64 四可执行）；再读套件内部 #elif OS 宏得同架构内实例化
+     用例（aarch64 7 声明中 Linux hwcap 路径 4 个）。
+  3. **报错证据采集**（机器可验证，三条互补）：
+     a) CMake 配置期证据：日志无非目标架构 add_executable，测试目标不注册；
+     b) 编译器实测：clang --target=aarch64-linux-ohos -fsyntax-only 强行编译
+        7 个非 aarch64 测试源 → 全部被上游头文件 #error 硬拦（逐行记录），
+        证明"绕过 CMake 也不可能"；
+     c) 运行期证据：4 个实例化可执行逐一真实运行，记录每个的 GTest 原始
+        汇总行（[ PASSED ] N tests + exit=0），非 ctest 聚合抽样。
+  4. **真机闭环**（hwcap 路径专项）：test_package 交叉核对测试——库报出的
+     特性与 /proc/cpuinfo 实测双向词级断言（库报出⇄cpuinfo 必含），证明
+     getauxval/hwcap 宿主探测在 OHOS 运行时真实工作（implementer=72
+     part=3331 实测全过），而非 mock 之外的盲区。
+  口径公式：声明总数 = 实例化通过 + 未实例化豁免（三类分组：跨架构寄存器
+  互斥 103 + 非 Linux OS 接口互斥 3 + 框架可执行性 0），逐组带报错证据。
+  ```bash
+  # 证据采集命令（范式可复制）
+  grep -c "TEST\(_F\)\?(" test/*.cc                        # 声明计数
+  clang --target=aarch64-linux-ohos -fsyntax-only test/cpuinfo_x86_test.cc 2>&1 | head -2  # #error 证据
+  ctest -R "bit_utils_test" --output-on-failure             # 实例化逐可执行运行
+  ```
+fallback: >
+  若上游测试无架构宏互斥（全平台单套件），则退化为普通 GTest 适配问题
+  （参照 E292 分层 ctest 迁移）；若测试 mock 基建缺失导致实例化子集也
+  不可跑，如实申报 0 实例化 + 逐项技术原因，禁止虚报通过率。
+verify_builds: "#43816（CI 绿，2026-09-10 20:04，含 27 用例实跑）；Septest 两轮 rule4 打回后逐用例证据链补齐获认可"
+reference_impl: >
+  PR #9229 feat(cpu_features): 0.11.0——commits 23d8ec9acb/13d2197f82/
+  5483878328/b8b0f5c3f4 四轮 rule4 整改沉淀该范式；test_package/test_ohos.c
+  双向词级交叉核对为 hwcap 路径真机闭环样例。
+id: TBD（由主编分配）
+doc_file: doc/TBD.md
