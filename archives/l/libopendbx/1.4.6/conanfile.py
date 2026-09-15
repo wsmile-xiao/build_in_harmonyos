@@ -88,6 +88,14 @@ class LibopendbxConan(ConanFile):
         if os.path.isfile(configure):
             replace_in_file(self, configure, "umask 077 && mktemp", "umask 002 && mktemp")
             replace_in_file(self, configure, "umask 077 && mkdir", "umask 002 && mkdir")
+        # Upstream links the regression binaries with -static; on OHOS/bionic
+        # a fully static binary cannot dlopen the sqlite3 backend plugin
+        # (odbxtest exits with ODBX_ERR_NOTEXIST). Drop -static so the tests
+        # link dynamically and can load the .so backend (build() regression).
+        makefile_am = os.path.join(self.source_folder, "test", "Makefile.am")
+        if os.path.isfile(makefile_am):
+            replace_in_file(self, makefile_am, "odbxtest_LDFLAGS = -static", "odbxtest_LDFLAGS =")
+            replace_in_file(self, makefile_am, "odbxplustest_LDFLAGS = -static", "odbxplustest_LDFLAGS =")
 
     def generate(self):
         tc = AutotoolsToolchain(self)
@@ -163,10 +171,19 @@ class LibopendbxConan(ConanFile):
             out = os.path.join(testdir, app + ".out")
             err = os.path.join(testdir, app + ".err")
             # ConanFile.run(): failure raises by default; no `check` kwarg.
-            self.run(
-                f"'{app_path}' -b '{backend}' -h . -d odbx.sq3 > '{out}' 2> '{err}'",
-                cwd=testdir,
-            )
+            try:
+                self.run(
+                    f"'{app_path}' -b '{backend}' -h . -d odbx.sq3 > '{out}' 2> '{err}'",
+                    cwd=testdir,
+                )
+            except ConanException:
+                detail = ""
+                if os.path.isfile(err):
+                    with open(err, "r", encoding="utf-8", errors="replace") as f:
+                        detail = f.read().strip()
+                raise ConanException(
+                    f"upstream regression {app} failed; stderr:\n{detail or '(empty)'}"
+                )
             with open(out, "r", encoding="utf-8", errors="replace") as f:
                 got = [line.rstrip() for line in f.read().splitlines()]
             if got != want:
