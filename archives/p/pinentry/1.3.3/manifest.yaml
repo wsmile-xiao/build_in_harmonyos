@@ -1,0 +1,50 @@
+software: pinentry
+version: "1.3.3"
+status: built
+build_date: "2026-09-12"
+build_system: autotools
+
+source:
+  # 官方 URL（R39：单一官方 URL，无手写镜像前缀）
+  url: "https://gnupg.org/ftp/gcrypt/pinentry/pinentry-1.3.3.tar.bz2"
+  # 官方 620687 字节（与 gnupg.org 的 Content-Length 逐字节一致）
+  sha256: "c2970f16d6afb66ecddfca767d743936c86239bff936eed7fd7597a678414b63"
+  tar_format: tar.bz2
+
+build:
+  system: autotools
+  configure_options:
+    - "--enable-pinentry-curses"
+    - "--enable-pinentry-tty"
+    - "--disable-pinentry-efl"
+    - "--disable-pinentry-qt"
+    - "--disable-pinentry-qt4"
+    - "--disable-pinentry-qt5"
+    - "--disable-pinentry-tqt"
+    - "--disable-inside-emacs"
+    - "--disable-fallback-curses"
+  dependencies:
+    - "libgpg-error/1.55"
+    - "libassuan/3.0.2"
+    - "ncurses/6.6"
+  cc: clang
+  cxx: clang++
+
+patches_applied:
+  - "0001-build-aux-config.guess.patch"
+  - "0002-build-aux-config.sub.patch"
+
+test_status: passed
+
+test_note: "**上游没有可跑的自动化测试套件**：pinentry 1.3.3 官方 tarball 不含 tests/ 目录 —— 实测 tar 内 test 条目 0 条、顶层 SUBDIRS（Makefile.am:114）不含 tests、全树无任何 TESTS=/check_PROGRAMS 定义，故 `make check` 是 no-op。为此改为驱动**上游真实对外接口**（gpg-agent 与 pinentry 之间使用的 Assuan 协议）：test_package/run_upstream_tests.py 共 16 项断言（握手/GETINFO version+pid/未知命令 ERR/参数错误 ERR/GETPIN 返回所输入 PIN/CONFIRM/MESSAGE），覆盖 pinentry-tty 与 pinentry-curses 两个前端。实测本地 **16/16 通过**（TERM=xterm + 可读 terminfo）。另 test_pinentry.c（clang 现场编译）真实执行两个前端的 --version 并断言 1.3.3（R34 反空壳）。"
+
+knowledge_gained:
+  - "**pinentry 官方 tarball 不含 tests/ 目录**（1.3.3 与 1.3.2 均实测）：`tar tf | grep -i test` 命中 **0 条**、顶层 `SUBDIRS`（Makefile.am:114）不含 tests、全树无任何 `TESTS=` / `check_PROGRAMS` 定义 → **`make check` 是 no-op**。故\"上游测试未启用\"的表述本身会误导——上游**根本没有**可跑的自动化测试套件；替代方案是驱动其**真实对外接口**（Assuan 协议，见 test_package/run_upstream_tests.py，16 项断言、本地 16/16 通过）"
+  - "pinentry-curses **静态链接 ncurses**（`NEEDED` 仅有 libassuan/libgpg-error/libc，无 libncurses；`nm` 可见 initscr 等符号），因此必须能读到 **terminfo 数据库**才能初始化终端，否则打印 `ncurses: cannot initialize terminal type` 并退出。OHOS/HMDFS 上 conan 制品里的 terminfo 文件 owner 为构建用户且 other 位被剥离（实测 `-rw-rw----`），故\"目录存在\"不等于\"可读\"——须实测 `os.access(entry, R_OK)` 后再选定 TERMINFO"
+  - "驱动 pinentry 的 Assuan 接口做自动化测试有两个易踩的时序陷阱（都会造成**假失败**）：① curses 前端**必须等界面渲染完**再写入并**用 `\\r` 确认**（`\\n` 在 curses 下不生效）；② **不可**把 `BYE` 与 `GETPIN` 同批发出——连接会在用户输入前关闭，使 GETPIN 永远返回空（实测同批→False、不同批→True）"
+  - "断言加强经验：仅检查输出含 `OK` 会产生**假阳性**——Assuan 握手的首行本身就是 `OK Pleased to meet you`。须断言**数据行**（如 `D 1234`）或错误行（`ERR`），并显式检查 `cannot initialize terminal type` 是否出现"
+  - "pinentry 1.3.3 的依赖最低版本**未被抬升**：只要求 NEED_GPG_ERROR_VERSION=1.16（实测 configure.ac:239）与 NEED_LIBASSUAN_VERSION=2.1.0（:256）→ ohpcd 现存的 libgpg-error/1.55、libassuan/3.0.2 均满足。**gpg-error 系各库的最低要求差异极大**（gnupg 2.5.22 要 1.56、libksba 1.8.1 要 1.28、pinentry 1.3.3 要 1.16），必须逐库从 configure.ac 读取，不可按同族推断"
+  - "1.3.2 的 2 个 config.guess/config.sub HarmonyOS patch **可干净套用到 1.3.3**（实测 patch --dry-run 通过）——同族相邻版本的 portability patch 常可直接复用，先实测再决定是否重新生成"
+  - "pinentry 构建期会执行依赖包内的 config 脚本（gpgrt-config / libassuan-config），而 OHOS 上 /bin/sh 不可用 → 需把脚本 shebang 改为 /data/service/hnp/bin/bash，并设 CONFIG_SHELL/SHELL（否则脚本无法执行、configure 探测失败）"
+  - "libgpg-error 1.56+ 只剩 gpgrt-config：除把它加入 PATH 外，显式导出 GPGRT_CONFIG（与 LIBASSUAN_CONFIG）可让 configure 直接命中，避免 AC_PATH_PROG 搜索失败"
+  - "configure 内 umask 077 在 HMDFS 上导致临时文件权限问题（需改 022）；R6 要求用 Conan API replace_in_file 而非手写文件 IO"
