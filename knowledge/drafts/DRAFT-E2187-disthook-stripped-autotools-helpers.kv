@@ -1,0 +1,92 @@
+# ═══ Draft knowledge entry — 上游 dist-hook 删除 autotools 辅助文件后无法重建 ═══
+# Timestamp: 2026-09-11
+# Software: debfoster 2.8
+# Gate: G2 / conan create（configure 阶段，rc=1 / make 阶段 exit 127）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-E2187
+trigger_tool:           configure|autotools|automake|conan|make
+phase:                  source|configure|build
+error_signature:        cannot find required auxiliary files: missing install-sh config.guess config.sub|
+                         aclocal-1.16: inaccessible or not found|
+                         WARNING: 'aclocal-1.16' is missing on your system|
+                         make: *** [Makefile:375: aclocal.m4] Error 127|
+                         config.guess: unable to guess system type
+severity:               2
+category:               autotools|packaging|conan|build-system|hmdfs
+match_keywords:         dist-hook, distdir, make dist, orig.tar, aclocal.m4, AC_CONFIG_AUX_DIR,
+                         ACLOCAL_M4, am__aclocal_m4_deps, maintainer rules, missing script,
+                         dh_autoreconf, generated helpers, os.utime pin timestamps,
+                         no autotools toolchain on device, ax_cflags_warn_all, autoconf-archive
+
+title:                  上游发行 tarball 用 dist-hook 删掉 config.guess/config.sub/aclocal.m4/
+                        install-sh/missing/depcomp 却保留 configure：无 autotools 工具链时
+                        必须随配方交付这些文件并把整条依赖链时间戳钉平
+
+root_cause: >
+  部分 autotools 项目（debfoster 2.8 实测）在 Makefile.am 里用 dist-hook 主动删除生成物：
+
+    dist-hook:
+            rm -f $(distdir)/config.guess*
+            rm -f $(distdir)/config.sub*
+            rm -f $(distdir)/aclocal.m4
+            rm -f $(distdir)/missing
+            rm -f $(distdir)/install-sh
+            rm -f $(distdir)/depcomp
+
+  于是 `make dist` 产物里仍然带着生成好的 configure 与各目录 Makefile.in，却没有任何
+  辅助文件。发行版在 debian/rules 里用 dh_autoreconf 重建，而设备与 CI worker 都没有
+  autotools 工具链，重建往往还额外需要 autoconf-archive（configure.ac 用到
+  AX_CFLAGS_WARN_ALL）与 gettext 的 autopoint，于是形成两级失败：
+  第一级 configure 直接报 cannot find required auxiliary files: missing install-sh
+  config.guess config.sub（rc=1）；补齐这几个文件后 automake 的 maintainer 规则被触发，
+  因为 aclocal.m4 不存在而 configure.ac/m4/*.m4 比 Makefile.in 新，make 去跑
+  $(ACLOCAL) 即 missing aclocal-1.16，报 inaccessible or not found 并以 exit 127 中止。
+
+recommended_fix: >
+  1) 把这批辅助文件作为普通配方源码交付（例如 archives/<l>/<pkg>/<ver>/generated/），
+     export_sources() 逐个 copy 到 export_sources_folder，source() 再按**明确文件名**
+     复制回源码树——用 generated/* 通配会把同目录的说明文件（PROVENANCE.md）也复制进去。
+     除 config.guess 需要补 HarmonyOS 分支外，其余取自与本机版本匹配的 GNU automake
+     发行副本并在 PROVENANCE.md 记录来源与 sha256。
+  2) aclocal.m4 可以只放一个带完整说明的占位文件：它只是 autoconf 的输入，而 configure
+     是随包发布的现成产物、不会被重新生成，因此该文件不会被读取，存在的唯一目的是让
+     `$(ACLOCAL_M4): $(am__aclocal_m4_deps)` 这条前置条件成立。
+  3) build() 在 apply_conandata_patches() 之后，把所有 autotools 输入与产物
+     （*.m4 *.am *.in *.ac、configure、config.guess、config.sub、install-sh、missing、
+     depcomp、aclocal.m4、config.h.in，任意深度）os.utime 到同一个时间戳。
+     GNU make 认为 mtime 相等即"已是最新"，maintainer 规则不再触发，随包发布的
+     configure 及其补丁完整保留。仓库先例 archives/b/boolstuff/0.1.16/conanfile.py 的
+     _pin_autotools_timestamps()（同样的技巧，用于补丁改写 configure 后的场景）。
+  4) 必须留下"configure 未被重新生成"的旁证，否则该配方可能悄悄丢掉补丁：
+     构建日志中没有 aclocal/automake/autoconf 调用行；`checking build system type...`
+     只有补丁后的 config.guess 才可能给出的三元组；configure 内的补丁（例如
+     umask 077→022）在运行时生成的 config.status 中同样生效（E011 场景下这一点
+     尤其关键——configure 若被重生成，umask 补丁会丢失并立刻复现 Permission denied）。
+
+diagnosis_commands:
+  - "python3 -m tarfile -l <pkg>.orig.tar.xz | grep -E 'config\\.(guess|sub)|aclocal\\.m4|install-sh|missing|depcomp'"
+  - "grep -n -A8 'dist-hook' Makefile.am"
+  - "grep -n 'ACLOCAL_M4\\|am__aclocal_m4_deps' Makefile.in    # 触发 maintainer 规则的前置条件"
+  - "grep -n 'aclocal\\|automake\\|autoconf' reports/conan-create.log  # 期望：无调用行"
+
+distinct_from: |
+  E041（bypass-autotools）针对的是"autotools 版本不匹配"或用
+  ACLOCAL=/bin/true AUTOHEADER=/bin/true AUTOMAKE=/bin/true 绕过重生成；那种做法在
+  本模式下不成立/不完整——发行 tarball 里根本没有 config.guess/config.sub/install-sh，
+  仅把 ACLOCAL 指向 /bin/true 无法让 configure 通过第一级检查，且 configure 一旦被重新
+  生成就会丢掉补丁。DRAFT-6048（babeltrace）覆盖的是"configure 存在但被 maintainer
+  规则重生成"，本条覆盖的是"辅助文件被 dist-hook 删除导致连 configure 都跑不起来"的
+  上游发行缺陷面，两者的第一级错误与交付物都不同。
+
+affected_scope: 所有 tarball 由 `make dist` 生成、且 Makefile.am 用 dist-hook 删除
+  生成物的 autotools 项目；在无 autotools 工具链的目标环境（OHOS 设备与 CI worker）
+  必然命中，与包本身代码无关
+
+rec_priority: 1
