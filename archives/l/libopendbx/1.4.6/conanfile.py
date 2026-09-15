@@ -94,6 +94,13 @@ class LibopendbxConan(ConanFile):
         tc.configure_args.extend([
             "--with-backends=sqlite3",
             "--disable-utils",
+            # rpl_malloc: cross-compiling AC_FUNC_MALLOC cannot run its
+            # malloc(0) probe, defaults to no -> config.h #defines
+            # malloc rpl_malloc, breaking libc++ headers and std::realloc.
+            # Pin the cache vars to yes (gnu-chess/speech-dispatcher
+            # precedent; malloc(0) non-null holds on bionic/musl).
+            "ac_cv_func_malloc_0_nonnull=yes",
+            "ac_cv_func_realloc_0_nonnull=yes",
         ])
         if str(self.settings.os) == "OHOS":
             tc.configure_args.extend([
