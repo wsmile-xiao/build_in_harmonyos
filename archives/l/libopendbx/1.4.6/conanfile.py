@@ -12,7 +12,7 @@ import os
 
 from conan import ConanFile
 from conan.errors import ConanException, ConanInvalidConfiguration
-from conan.tools.files import apply_conandata_patches, export_conandata_patches, get
+from conan.tools.files import apply_conandata_patches, export_conandata_patches, get, replace_in_file
 from conan.tools.gnu import Autotools, AutotoolsToolchain
 from conan.tools.layout import basic_layout
 
@@ -78,6 +78,16 @@ class LibopendbxConan(ConanFile):
             if not fetched:
                 raise
         apply_conandata_patches(self)
+        # OHOS sandbox: autoconf's config.status creates its ./confXXXXXX
+        # temp dir with umask 077 (0700); the sandboxed subprocess then
+        # cannot read subs1.awk -> "Permission denied" -> "could not setup
+        # config files machinery". Patch the configure script (config.status
+        # is generated from it) to keep the temp dir accessible
+        # (remind/06.02.08 precedent, proven green on this CI).
+        configure = os.path.join(self.source_folder, "configure")
+        if os.path.isfile(configure):
+            replace_in_file(self, configure, "umask 077 && mktemp", "umask 002 && mktemp")
+            replace_in_file(self, configure, "umask 077 && mkdir", "umask 002 && mkdir")
 
     def generate(self):
         tc = AutotoolsToolchain(self)
