@@ -2,7 +2,7 @@
 """mailio 0.26.0 Conan 配方 — CMake 构建系统。
 
 mailio 是一个跨平台 C++ 库，用于 MIME 格式以及 SMTP、POP3、IMAP 协议。
-基于 C++17，依赖 Boost（date_time、regex）和 OpenSSL（SSL）。
+基于 C++17，依赖 Boost（date_time、regex、asio）和 OpenSSL（SSL）。
 
 构建方式：共享库（BUILD_SHARED_LIBS=ON），禁用测试/示例/文档。
 许可证：BSL-1.0（Boost 软件许可证）
@@ -54,8 +54,6 @@ class MailioConan(ConanFile):
 
     def generate(self):
         # R33：所有标志来自 Conan 工具链，不使用 shell 环境变量
-        # CMakeDeps 生成 FindBoost.cmake 和 FindOpenSSL.cmake，
-        # 使上游 CMakeLists.txt 的 find_package() 调用成功。
         deps = CMakeDeps(self)
         # 上游 CMakeLists.txt 使用 find_package("OpenSSL" COMPONENTS "SSL")
         # 和 target_link_libraries(... "OpenSSL::SSL")，但本地 OpenSSL
@@ -63,6 +61,11 @@ class MailioConan(ConanFile):
         # CMake 目标与 CMakeLists.txt 期望的名称匹配。
         deps.set_property("openssl", "cmake_file_name", "OpenSSL")
         deps.set_property("openssl", "cmake_target_name", "OpenSSL::SSL")
+        # boost/1.90.0.4 通过 b2 构建并安装全部头文件（含 asio），
+        # 但 package_info() 未声明 date_time 组件。补丁将
+        # find_package(Boost COMPONENTS date_time regex) 替换为
+        # find_package(Boost COMPONENTS regex) + 手动 find_library。
+        deps.set_property("boost", "cmake_file_name", "Boost")
         deps.generate()
         tc = CMakeToolchain(self)
         # 构建共享库（默认），但尊重用户选项
@@ -92,5 +95,7 @@ class MailioConan(ConanFile):
         self.cpp_info.set_property("pkg_config_name", "mailio")
         self.cpp_info.libs = ["mailio"]
         self.cpp_info.includedirs = ["include"]
-        # 声明传递依赖
-        self.cpp_info.requires = ["boost::date_time", "boost::regex", "openssl::openssl"]
+        # 声明传递依赖：boost::boost 携带全部头文件和 lib 目录，
+        # boost::regex 声明 regex 组件，openssl 提供 SSL 库。
+        # date_time 库通过补丁中的 find_library 手动链接。
+        self.cpp_info.requires = ["boost::boost", "boost::regex", "openssl::openssl"]
