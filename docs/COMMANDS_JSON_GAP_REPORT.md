@@ -1,8 +1,8 @@
-# commands.json 补标清单（2026-09 hicmd 真机验证）
+# commands.json 补标清单（2026-09 hicmd 真机验证）—— ✅ 已由 hicmd 团队批量补标
 
-> 由 hicmd 团队反向扫描 Conan 制品仓生成：以下包**制品仓有可用命令行制品、
-> 已在真机完成 install/运行/uninstall 验证并收入 hicmd 索引**，但本仓配方
-> 缺少 `commands.json` 标记。补标后 hicmd 生成索引将直接采用配方元数据。
+> 由 hicmd 团队反向扫描 Conan 制品仓生成。**本清单中的 188 个包已全部由
+> hicmd 团队批量补写 `commands.json`**（提交见 git 历史，description 采用
+> 真机验证通过的命令列表，homepage 取自 manifest.yaml）。清单保留供核对。
 
 配套的制品仓侧问题（51 个有标记无制品等）见 hicmd 仓
 `docs/09-registry-quality-report.md`。
@@ -346,16 +346,16 @@
 | zeitgeist/1.0.4 | zeitgeist-daemon |
 | zeromq/4.3.5 | inproc_lat, inproc_thr, local_lat, local_thr, proxy_thr, remote_lat |
 
-## 其他 commands.json 数据问题
+## 其他 commands.json 数据问题（✅ 均已随本次批量修复）
 
-1. **JSON 语法损坏**（手工编辑事故，hicmd 解析失败跳过）：
-   `archives/a/ansifilter/commands.json` —— 双引号嵌套/中段拼接错误
-
-2. **versions 为版本号数组**（非常规 schema，hicmd 解析时跳过）——
-   12 个包：
-   barcode, base91, chaos-marmosets, ldns, libicns, libwbxml, mawk, munge, openscap, potrace, qrencode, toml
-   正确写法见上方「补标方法」（versions 必须是对象，
-   key=版本号，value 含 ref/binary）。
+1. ~~JSON 语法损坏~~ `archives/a/ansifilter/commands.json` —— 已重写
+2. ~~versions 为版本号数组/缺失~~ 12 个包
+   （barcode, base91, chaos-marmosets, ldns, libicns, libwbxml, mawk,
+   munge, openscap, potrace, qrencode, toml）—— 已统一为标准对象 schema，
+   binary 标志取自 hicmd 0.2.0 真机验证结果
+3. **name 字段与制品包名不一致**（hicmd 无法关联，已修正）：
+   `basis_universal`（原 name=basisu）、`watcher`（原 name=wtr.watcher）
+   —— 请后续新配方保持 name 与制品仓包名一致
 
 ## 验证环境说明
 
