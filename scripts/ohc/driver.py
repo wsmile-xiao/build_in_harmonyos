@@ -415,6 +415,13 @@ class BuildDriver:
             precompiled_available=prebuilt,
         )
         emit_handoff(data)
+        # v12.20: 失败终局 —— pending 命中条目按失败结算（幂等）
+        try:
+            from .engine import settle_pending_outcomes
+            from .utils import graph_dir as _graph_dir
+            settle_pending_outcomes(_graph_dir(str(self.pdir)), success=False)
+        except Exception:
+            pass
         sys.exit(exit_code)
 
     def _error_recovery(self, step_name: str, step_num: float,
@@ -473,20 +480,22 @@ class BuildDriver:
             rc2 = retry_fn(self.ep_fix_cmd)
             if rc2 == 0:
                 self._log(f"✅ Auto-retry succeeded")
-                # 方案 D: 记录修复结果用于质量度量
+                # v12.20: 记录修复结果到 sidecar（不写共享 .kv，防 PR 污染）
                 try:
-                    from .kb_metrics import record_result
+                    from .engine import _record_outcome
                     from .utils import graph_dir as _graph_dir
-                    record_result(_graph_dir(str(self.pdir)), self.ep_match_id, success=True)
+                    _record_outcome(self.ep_match_id,
+                                    _graph_dir(str(self.pdir)), success=True)
                 except Exception:
                     pass  # 不阻塞主流程
                 return 0
             self._log(f"❌ Auto-retry also failed")
-            # 方案 D: 记录修复结果用于质量度量
+            # v12.20: 记录修复结果到 sidecar（不写共享 .kv，防 PR 污染）
             try:
-                from .kb_metrics import record_result
+                from .engine import _record_outcome
                 from .utils import graph_dir as _graph_dir
-                record_result(_graph_dir(str(self.pdir)), self.ep_match_id, success=False)
+                _record_outcome(self.ep_match_id,
+                                _graph_dir(str(self.pdir)), success=False)
             except Exception:
                 pass  # 不阻塞主流程
 
@@ -1334,6 +1343,14 @@ class BuildDriver:
         self._step12_calibrate()
         self._step13_cleanup()
 
+        # v12.20: 全绿终局 —— 本会话 pending 命中条目按成功结算
+        try:
+            from .engine import settle_pending_outcomes
+            from .utils import graph_dir as _graph_dir
+            settle_pending_outcomes(_graph_dir(str(self.pdir)), success=True)
+        except Exception:
+            pass
+
         self._log(f"🎉 编译完成: {self.software} {self.version}")
         return 0
 
@@ -1367,4 +1384,11 @@ def build_cli(argv: list[str] | None = None) -> int:
         return driver.run()
     except RuntimeError as e:
         log_fail(str(e))
+        # v12.20: 失败终局结算（_emit_handoff 已覆盖多数路径，此处兜底）
+        try:
+            from .engine import settle_pending_outcomes
+            from .utils import graph_dir as _graph_dir
+            settle_pending_outcomes(_graph_dir(str(Path.cwd())), success=False)
+        except Exception:
+            pass
         return 1
