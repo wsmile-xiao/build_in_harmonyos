@@ -122,6 +122,20 @@ class LibopendbxConan(ConanFile):
         # (freeimage/aiksaurus precedent; no source changes needed).
         tc.extra_cxxflags.append("-Wno-dynamic-exception-spec")
         tc.extra_ldflags.append(f"-L{lib}")
+        # OHOS: libtool's C++ shared-library probe (and the final .so links)
+        # need to resolve libc++ from the SDK llvm/lib — it is only on
+        # LD_LIBRARY_PATH (runtime), not in the linker search path, so the
+        # probe fails and libtool decides "no shared libraries" (static-only
+        # .a). Add -L so shared libs (libopendbx.so / backend plugin /
+        # libopendbxplus.so) are actually built (utf8proc precedent).
+        if str(self.settings.os) == "OHOS":
+            sdk_llvm_libs = sorted(
+                _glob.glob("/data/service/hnp/ohos-sdk.org/ohos-sdk_*/ohos/native/llvm/lib")
+            )
+            if sdk_llvm_libs:
+                tc.extra_ldflags.append(f"-L{sdk_llvm_libs[-1]}")
+            else:
+                self.output.warning("OHOS SDK llvm/lib not found; shared libs may not build")
         tc.generate()
 
     def build(self):
@@ -135,21 +149,23 @@ class LibopendbxConan(ConanFile):
         """Run the upstream regression binaries (odbxtest + odbxplustest)
         against the sqlite3 backend and require output identical to
         test/ref/sqlite3.ref (the upstream's own verification method)."""
-        root = self.source_folder
+        # Binaries and the backend plugin land in the BUILD folder
+        # (in-source copy); the reference output lives in the source tree.
+        root = self.build_folder
         backend = os.path.join(root, "backends", "sqlite3", ".libs", "libsqlite3backend.so")
         testdir = os.path.join(root, "regression-run")
         os.makedirs(testdir, exist_ok=True)
-        ref = os.path.join(root, "test", "ref", "sqlite3.ref")
+        ref = os.path.join(self.source_folder, "test", "ref", "sqlite3.ref")
         with open(ref, "r", encoding="utf-8", errors="replace") as f:
             want = [line.rstrip() for line in f.read().splitlines()]
         for app in ("odbxtest", "odbxplustest"):
             app_path = os.path.join(root, "test", app)
             out = os.path.join(testdir, app + ".out")
             err = os.path.join(testdir, app + ".err")
+            # ConanFile.run(): failure raises by default; no `check` kwarg.
             self.run(
                 f"'{app_path}' -b '{backend}' -h . -d odbx.sq3 > '{out}' 2> '{err}'",
                 cwd=testdir,
-                check=True,
             )
             with open(out, "r", encoding="utf-8", errors="replace") as f:
                 got = [line.rstrip() for line in f.read().splitlines()]
