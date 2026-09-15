@@ -1,0 +1,126 @@
+#====================================================================
+# DRAFT-conan-glob-packaging-loses-interpreter-library-scripts
+# — conan 依赖包按 *.so*/*.a 通配打包丢失解释器/子包库脚本 → 运行失败
+# 触发事件: combat 0.8.1 HarmonyOS PC 适配（archives/c/combat/0.8.1，
+#           依赖 tcl/8.6.16 已发布包）
+# 主从明确：配方打包层产物闭包不完整（构建/打包语义），非代码缺陷
+#====================================================================
+
+id:                     DRAFT-conan-glob-packaging-loses-interpreter-library-scripts
+trigger_tool:           conan|package|glob
+phase:                  package|runtime
+error_signature:        Can't find a usable \S+\.tcl|can't find package (Itcl|Thread|tdbc|sqlite3)|can't find package \S+
+
+severity:               3
+category:               conan|recipe|packaging
+match_keywords:         so* 通配, copytree, pkgIndex.tcl, itcl.tcl, init.tcl,
+                         Can't find a usable, can't find package, 子包, 库脚本,
+                         运行时脚本, TCL_LIBRARY, ITCL_LIBRARY, 自包含捆绑
+
+title:                  conan 配方按 *.so*/*.a 后缀通配打包脚本语言运行时会系统性丢失 .tcl/pkgIndex.tcl 运行期文件，表现为解释器报 "Can't find a usable <X>.tcl" 或 "can't find package <X>"
+
+root_cause: >
+  依赖配方的 package() 以二进制后缀通配（copy *.so* / *.a）收集 staging lib
+  内容，只会命中二进制与归档；脚本语言运行时的运行期载体（*.tcl 库脚本、
+  pkgIndex.tcl 索引）不匹配任何通配，被系统性剥离。运行期 first use 即失败：
+  Tcl 载荷器模板报 "Can't find a usable <X>.tcl"（子包初始化必需库脚本缺失），
+  package 管理器报 "can't find package <X>"（pkgIndex 缺失）。
+  实例 A（combat-0.8.1 run，设备实查）：tcl/8.6.16 已发布包 lib/ 下四个内嵌
+  子包目录全部被剥至纯二进制——itcl4.3.2/（仅 .so+stub.a）、sqlite3.47.2/
+  （仅 .so）、tdbc1.1.10/（仅 .so+stub.a）、thread2.8.11/（仅 .so）——
+  Itcl/Thread/tdbc/sqlite3 四个 package require 全部潜在失效。
+  实例 B（独立 tcl 适配 run，较早）：同一 tcl 配方 package() 曾漏拷
+  lib/tcl8.6 运行时目录，test_package 报 "Can't find a usable init.tcl"
+  （CI 实测后以 copytree 修复）。证据形态说明：实例 B 的载体是配方内注释
+  （archives/t/tcl/8.6.16/conanfile.py 注释，最早提交 fcc2b3b412 即含），
+  无独立 run 报告文件；签名同族（同一 "Can't find a usable <X>.tcl" 加载器
+  错误模板、同类根因）。复发面量化（设备 worktree 仓库根执行，scope 与
+  pattern 逐字固定）：宽口径——conanfile.py 含 "*.so*" 字面 glob 的文件
+  105 个（grep -rl --include=conanfile.py -e '"\*\.so\*"' archives/ | wc -l）；
+  窄口径——copy( 调用行匹配 *.so 的文件 63 个
+  （grep -rlE 'copy\(.*\*\.so' --include=conanfile.py archives/ | wc -l）。
+
+affected_scope: >
+  任何以 *.so*/*.a 通配打包脚本语言运行时/扩展的 conan 配方；尤其内嵌脚本
+  子包（itcl/tdbc/sqlite3/thread 类）的运行时。复发面量化见 root_cause
+  （设备 worktree archives/ 下：105 文件含 "*.so*" 字面 glob，63 文件
+  copy( 行匹配 *.so）。消费侧症状泛化：任何 "Can't find a usable <X>.tcl /
+  can't find package <X>" 应先定位打包通配剥离，而非代码/环境问题。
+
+verification_cmd: >
+  # 自包含，任何新 shell 可复现（设备已实跑验证，探针仅依赖已发布 conan 缓存包）。
+  # 注意：探针引用的 /storage/Users/currentUser/.conan2/p/tcla4d5206af411b 为
+  # 已发布 tcl/8.6.16 包的 conan 缓存路径，随设备 cache 状态变化；可用
+  # conan install --requires=tcl/8.6.16 -g VirtualRunEnv 重新物化后以实际
+  # 包路径替换。
+  export LD_LIBRARY_PATH=/storage/Users/currentUser/.conan2/p/tcla4d5206af411b/p/lib
+  /storage/Users/currentUser/.conan2/p/tcla4d5206af411b/p/bin/tclsh8.6 <<'EOF'
+  lappend auto_path /storage/Users/currentUser/.conan2/p/tcla4d5206af411b/p/lib
+  catch {package require Itcl} m1; puts $m1
+  # => can't find package Itcl（pkgIndex.tcl 被剥离）
+  catch {load /storage/Users/currentUser/.conan2/p/tcla4d5206af411b/p/lib/itcl4.3.2/libitcl4.3.2.so Itcl} m2; puts $m2
+  # => Can't find a usable itcl.tcl ...（库脚本被剥离；错误自带"可设 ITCL_LIBRARY"提示）
+  catch {package require Thread} m3; puts $m3
+  # => can't find package Thread
+  catch {package require tdbc} m4; puts $m4
+  # => can't find package tdbc
+  catch {package require sqlite3} m5; puts $m5
+  # => can't find package sqlite3
+  EOF
+
+rec_priority:           1
+rec_approach:           dependency-recipe-copytree-runtime-script-dirs
+rec_description: >
+  主案（init.tcl 先例）：依赖配方 package() 对运行时脚本目录整目录
+  shutil.copytree（保留 *.tcl/pkgIndex.tcl），并以"目录必须存在"守卫 +
+  output.info 留痕；逐子包核对运行期必需文件（.so 之外还有 .tcl/索引）。
+rec_command: >
+  shutil.copytree(os.path.join(staging, "lib", "tcl8.6"),
+                  os.path.join(pkg, "lib", "tcl8.6"))  # 依赖配方主案
+rec_auto_fix:           false
+rec_impl:               conan-runtime-script-dir-copytree
+
+fallback_priority:      2
+fallback_approach:      consumer-self-contained-library-script-bundle
+fallback_description: >
+  消费方自包含捆绑（依赖不可改时的退路）：从与依赖 .so 同源同版本的上游
+  源码（pinned sha256）提取缺失库脚本，随包放入自身 package 目录，并在
+  生成的 pkgIndex.tcl 内先 set ::env(<PKG>_LIBRARY) 指向该目录再 load
+  （Itcl_Init 等初始化按编译期前缀与环境变量查库脚本）。诚实权衡：不修
+  依赖包、体积重复、与依赖版本同源漂移需锁定版本；combat/0.8.1 即按此
+  退路落地并通过 CI（test_package "Itcl support (4.3.2)" PASS）。
+fallback_command: >
+  copy(self, "itcl*.tcl", itcl_library_src, itcl_dst, excludes="test_*")
+  ; shutil.copy2(libitcl4.3.2.so, itcl_dst)
+  ; 生成的 itcl/pkgIndex.tcl 内容:
+  package ifneeded Itcl 4.3.2 [list apply {{dir} {
+      set ::env(ITCL_LIBRARY) $dir
+      load [file join $dir libitcl4.3.2.so]
+  }} $dir]
+fallback_auto_fix:      false
+fallback_impl:          conan-consumer-bundle-itcl-library-scripts
+
+forbid_1_pattern:       catch \{\s*package require\s+\S+\s*\}\s*\w+\s*;?\s*(#.*)?$
+forbid_1_reason: >
+  禁止消费方在 catch{} 里静默回退而不补齐库脚本目录/不给出定位诊断——
+  这会把"打包剥离"问题转译成更隐晦的下游错误（如 combat.tcl 的 tcl++
+  回退分支把 Itcl 缺失表现为 can't find package tcl++），掩盖真实根因。
+forbid_1_consequence:   根因被掩蔽为不相关包缺失，排障方向被引偏；打包缺陷在更多消费方处重复复发
+
+principles:             P-RUNTIME-002
+similar_to:             E280,E309（E280 同处 pkgIndex 域但机理为静态注册缺失；E309 为漏拷构建生成物，本条为通配后缀剥离运行期脚本；v1 政策引用的 E415 族在当前 graph 无对应号段，按相邻族挂钩）
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-conan-glob-packaging-loses-interpreter-library-scripts.md
+last_updated:           2026-09-11
+source_event:           archives/c/combat/0.8.1
+
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
