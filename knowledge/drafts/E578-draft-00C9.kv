@@ -1,0 +1,100 @@
+#====================================================================
+# E578.kv — 知识图谱条目 (草稿)
+# HMDFS 大小写不敏感：上游 tarball 顶层 BUILD 文档与 build/ 目录冲突，
+# conan get()/unzip() 在 source 阶段解包失败
+# 实测软件: dinit-shutdown 0.21.0（上游 davmac314/dinit v0.21.0 release tarball）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E578
+trigger_tool:           conan
+phase:                  source-extraction
+# 字面子串（| 分隔），非正则：engine.py 只做 pattern in error_lower
+error_signature:        FileExistsError: [Errno 17] File exists:|Error in source() method, line
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity: 3=blocking 2=medium 1=minor 0=resolved
+severity:               2
+category:               filesystem, hmdfs, conan, build-system, portability
+match_keywords:         case-insensitive, 大小写不敏感, HMDFS, BUILD, build 目录, tarfile,
+                        FileExistsError, untargz, unzip, excludes, 解包冲突, get(),
+                        source 阶段, 同 inode
+title:                  HMDFS 大小写不敏感：tarball 顶层 BUILD 文档与 build/ 目录冲突导致 conan 解包在 source 阶段失败
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             鸿蒙设备工作区是 HMDFS，文件系统大小写不敏感（touch AAA 后 stat aaa 与 AAA 返回同一 inode）。
+                        上游 tarball 顶层同时含 BUILD（文档文件，先出现）与 build/（构建目录，后出现）时，
+                        Python tarfile 的 _extract_member 调 makedir 对 build 执行 os.mkdir，
+                        因 BUILD 已存在而 EEXIST；except FileExistsError 分支的 os.path.isdir(targetpath)
+                        对普通文件判为假故重新抛出，conan 的 untargz()/unzip()/get() 整体失败，
+                        构建在 source() 阶段终止（从未进入编译）。CI worker 是大小写敏感 Linux，
+                        同一 tarball 完全正常，属设备侧确定性差异而非随机故障。
+affected_scope:         ① 任何上游 tarball 在同一层目录里存在「大小写仅异名」的文件/目录对，且在 HarmonyOS PC 设备上解包的包
+                        （本例 BUILD + build/；同族 NEWS/news、LICENSE/license、MANIFEST/manifest）；
+                        ② 不限于 conan：任何走 Python tarfile 的解包路径（pip sdist、meson subprojects、自写脚本）同样命中；
+                        ③ 与 E470 的差异在阶段：E470 是 generate/build 阶段 cmake 建 build 目录失败，本条目是 source 解包阶段失败。
+verification_cmd:       python3 -c "import os;open('AAA','w').close();print(os.path.exists('aaa'))"   # True = 大小写不敏感
+                        python3 -c "import tarfile;tarfile.open('<tarball>').extractall('<dir>')"    # FileExistsError: [Errno 17] File exists: '<dir>/build'
+                        conan create .（最小探针配方：conanfile.py 只调 get(**conandata.sources)）
+                        # 实测输出：collide-probe/0.1: Uncompressing collide.tar.gz to .
+                        #           ERROR: collide-probe/0.1: Error in source() method, line 11
+                        #           \tFileExistsError: [Errno 17] File exists: './x/build'
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           exclude-collision-member-at-extraction
+rec_description:        在解包成员层排除冲突项：conan get(self, **sources, strip_root=True, excludes=['<根目录>/BUILD'])
+                        —— 仅当被排除成员不参与构建（文档/说明类）时成立；设备与 CI 因此解包出逐字节一致的源码树，
+                        排除动作对 CI 也无副作用（CI 本来也不读该文件）。冲突成员若属构建必需项，
+                        改用非默认构建目录名（E470 思路）或换用大小写敏感的工作区构建。
+rec_command:            get(self, **self.conan_data["sources"], strip_root=True, excludes=["dinit-0.21.0/BUILD"])
+rec_auto_fix:           false
+rec_impl:               get-excludes-collision-member
+
+fallback_priority:      2
+fallback_approach:      custom-extraction-loop
+fallback_description:   绕过 conan 的 unzip() 自己循环解包：tarfile.open(...).getmembers() 过滤掉冲突成员后再
+                        extractall(destination, members=...)；或先单独解出 build/ 再解其余成员。
+                        行为与推荐方案等价，但脱离 conan API（失去下载缓存与镜像兜底），仅在推荐方案不可用时使用。
+fallback_command:       python3 -c "import tarfile;tf=tarfile.open(t);tf.extractall(d,members=[m for m in tf.getmembers() if m.name!='x/BUILD'])"
+fallback_auto_fix:      false
+fallback_impl:          manual-tarfile-filtered-extract
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       os.remove.*BUILD|shutil.rmtree.*build|rm -f .*/BUILD
+forbid_1_reason:        删除/改名的清理动作发生在解包之后，而解包期同名项就不能共存，故对 EEXIST 完全无效；
+                        且未记录为补丁的源码树改动会让设备与 CI 输入不一致。
+forbid_1_consequence:   解包仍失败（构建从未开始，误判为源码或配方问题）；若在别处侥幸生效则源码树与上游漂移，
+                        属申报不实（审计 R51）且不可跨机复现。
+forbid_2_pattern:       ignorecase=false|core.ignorecase
+forbid_2_reason:        该开关只改 git 索引行为，不会让底层 HMDFS 变成大小写敏感。
+forbid_2_consequence:   掩盖真实冲突，checkout/解包时仍报同类错误。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P016
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E470
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E578.md
+last_updated:           2026-09-11
+source_event:           dinit-shutdown 0.21.0 适配：conan create 在 source() 阶段 FileExistsError（设备 HMDFS）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                Awstme <awstme@qq.com>
+source_pr:
+source_commit:          41b45c3362b678168edcd87304190954d7430634
+
+# ═══ 质量度量 ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 00C9
