@@ -113,7 +113,14 @@ class LibopendbxConan(ConanFile):
         if str(self.settings.os) == "OHOS":
             tc.configure_args.extend([
                 "--build=aarch64-unknown-linux-gnu",
-                "--host=aarch64-linux-ohos",
+                # NB: the vendor slot must be non-empty. Autoconf splits
+                # CPU-VENDOR-OS, so `aarch64-linux-ohos` yields host_os=ohos
+                # and libtool's `case $host_os in linux*)` misses it ->
+                # dynamic_linker=no -> static-only build (no .so backend
+                # plugin). `aarch64-unknown-linux-ohos` yields host_os=
+                # linux-ohos which matches the Linux-ELF branch and enables
+                # shared libraries.
+                "--host=aarch64-unknown-linux-ohos",
             ])
         # Inject the sqlite3 dependency into the autotools build: configure
         # checks for sqlite3.h and the sqlite3 backend links libsqlite3.
