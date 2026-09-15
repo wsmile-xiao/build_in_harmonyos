@@ -109,6 +109,11 @@ class LibopendbxConan(ConanFile):
         lib = os.path.join(dep.package_folder, dep.cpp_info.libdirs[0])
         tc.extra_cflags.append(f"-I{inc}")
         tc.extra_cxxflags.append(f"-I{inc}")
+        # OHOS clang defaults to C++17; upstream api header uses pre-C++17
+        # dynamic exception specs (throw(std::exception)) which are errors
+        # in C++17. Downgrade the diagnostic so the old code compiles
+        # (freeimage/aiksaurus precedent; no source changes needed).
+        tc.extra_cxxflags.append("-Wno-dynamic-exception-spec")
         tc.extra_ldflags.append(f"-L{lib}")
         tc.generate()
 
