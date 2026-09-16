@@ -19,6 +19,7 @@
     } while (0)
 
 using librevenge::RVNGInputStream;
+using librevenge::RVNG_SEEK_CUR;
 using librevenge::RVNG_SEEK_END;
 using librevenge::RVNG_SEEK_SET;
 using librevenge::RVNG_SEEK_TYPE;
@@ -52,14 +53,26 @@ public:
         size_t avail = m_size - m_pos;
         size_t n = numBytes < avail ? numBytes : static_cast<unsigned long>(avail);
         numBytesRead = static_cast<unsigned long>(n);
-        return m_data + m_pos;
+        m_pos += n;
+        return m_data + m_pos - n;
     }
 
     int seek(long offset, RVNG_SEEK_TYPE seekType) override
     {
-        long target = (seekType == RVNG_SEEK_SET)
-            ? offset
-            : static_cast<long>(m_pos) + offset;
+        long base = 0;
+        switch (seekType)
+        {
+            case RVNG_SEEK_SET:
+                base = 0;
+                break;
+            case RVNG_SEEK_CUR:
+                base = static_cast<long>(m_pos);
+                break;
+            case RVNG_SEEK_END:
+                base = static_cast<long>(m_size);
+                break;
+        }
+        long target = base + offset;
         if (target < 0 || target > static_cast<long>(m_size))
             return -1;
         m_pos = static_cast<size_t>(target);
