@@ -1,4 +1,4 @@
-# cyrus-sasl 2.1.28 编译笔记（HarmonyOS PC · 标准 Conan autotools）
+# cyrus-sasl 2.1.28.2 编译笔记（HarmonyOS PC · 标准 Conan autotools）
 
 ## 定位
 - 产出动态 `libsasl2.so.3`（SONAME `libsasl2.so.3`）+ 11 个机制/auxprop 插件（`lib/sasl2/*.so`），供 dlopen 及作依赖。

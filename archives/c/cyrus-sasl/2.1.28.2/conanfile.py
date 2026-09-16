@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — cyrus-sasl 2.1.28 (autotools)"""
+"""Conan recipe — cyrus-sasl 2.1.28.2 (autotools)"""
 from conan import ConanFile
 from conan.tools.files import collect_libs, get, copy
 from conan.tools.gnu import Autotools, AutotoolsToolchain, AutotoolsDeps
@@ -10,7 +10,7 @@ from conan.tools.layout import basic_layout
 
 class CyrusSaslConan(ConanFile):
     name = "cyrus-sasl"
-    version = "2.1.28"
+    version = "2.1.28.2"
     license = "BSD-4-Clause"  # CMU/Cyrus BSD 风格（见 COPYING）
     package_type = "library"
     settings = "os", "arch", "compiler", "build_type"
@@ -39,7 +39,7 @@ class CyrusSaslConan(ConanFile):
 
     def generate(self):
         tc = AutotoolsToolchain(self)
-        # cyrus-sasl 2.1.28 是老代码：sample/client.c 调 getpass() 等，musl 无原型，
+        # cyrus-sasl 2.1.28.2 是老代码：sample/client.c 调 getpass() 等，musl 无原型，
         # clang 15 默认把 implicit-function-declaration / int-conversion 升为 error。
         # 降回 warning（发行版编老代码通用做法），不影响库本体正确性。
         tc.extra_cflags.append("-Wno-error=implicit-function-declaration")
