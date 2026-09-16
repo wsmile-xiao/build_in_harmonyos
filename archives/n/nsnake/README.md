@@ -8,6 +8,7 @@ Classic snake game on the terminal; made with C++ and ncurses.
 
 ## Version
 - 3.0.1 (upstream v3.0.1)
+- 3.0.1.1 (适配修复版：补齐上游 FHS 资产打包，同上游 v3.0.1 源码)
 
 ## Build System
 - Makefile
