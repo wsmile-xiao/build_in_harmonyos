@@ -1,0 +1,67 @@
+#====================================================================
+# DRAFT-glib-networking-2.90.0-tls-backend-bridge — OHOS 上 GLib 仅有
+# GDummyTlsBackend（空实现）导致依赖 glib TLS 的库上游测试 0 执行，
+# 以 glib-networking GIO 模块（openssl 后端 + 共享 glib）桥接真实 TLS 后端
+# 触发事件: glib-networking 2.90.0 适配（libsoup3 http2 测试链恢复）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-glib-networking-2.90.0-tls-backend-bridge
+trigger_tool:           meson|conan|clang|g_tls_backend_get_default
+phase:                  conan_build|runtime|testing
+error_signature:        GDummyTlsBackend|tls_available|if\(!tls_available\).*return 0|0 执行|
+                          cannot register existing type|GIO_EXTRA_MODULES|giomoduledir|
+                          GTlsBackendOpenssl|wrong version number
+
+severity:               2
+category:               gio, tls, glib, meson, conan, ohos
+match_keywords:         glib-networking, GDummyTlsBackend, GTlsBackendOpenssl,
+                         g_tls_backend_get_default, GIO module, giomoduledir,
+                         shared glib, libsoup3, http2, tls_available,
+                         LD_LIBRARY_PATH, codesign, meson.install, RUNPATH
+title:                  On OHOS GLib only provides GDummyTlsBackend; install glib-networking's GIO TLS module (openssl backend) against a shared glib so g_tls_backend_get_default() returns a real backend and upstream TLS tests execute
+
+topic: >
+  OHOS 上 glib 自带 GDummyTlsBackend 是空实现，g_tls_backend_supports_tls()
+  返回 FALSE；依赖 glib TLS API 的库（libsoup3 http2 等）上游测试以
+  `if(!tls_available) return 0;` 短路，注册后 0 执行。glib-networking 是 GLib
+  官方 TLS 后端 GIO 模块（桥接 OpenSSL/GnuTLS），安装到 giomoduledir 后
+  g_tls_backend_get_default() 返回真实后端 GTlsBackendOpenssl。两个关键约束：
+  1) glib 必须以 shared 形式消费（ohpcd 发布 glib/2.88.3 shared；若用静态
+  glib2，GIO 模块 dlopen 进进程后与主程序各持一份 glib 类型系统 →
+  "cannot register existing type"）；2) meson.install() 清理 DT_RUNPATH 改写
+  .so 内容，OHOS loader 校验 .codesign 哈希失配 → dlopen Permission denied，
+  package() 须用 build 原始产物覆盖打包后的模块 .so。
+
+root_cause:             OHOS 缺 GLib 官方 TLS 后端模块；GDummyTlsBackend 空实现
+                        使 tls_available=FALSE，依赖库上游测试短路 0 执行
+  1) glib-networking 是 GIO TLS 后端模块，需与消费进程共享同一 glib 类型系统
+     （shared glib），静态 glib 会双份注册 GObject 类型；
+  2) 模块必须 dlopen 加载，OHOS loader 校验 .codesign 段内嵌哈希，任何
+     post-link 改写（meson.install 清理 RUNPATH）导致哈希失配即拒绝加载；
+  3) 测试运行时需 LD_LIBRARY_PATH 指向共享 glib 库目录。
+
+rec_approach:           install-gio-tls-module-against-shared-glib
+rec_description:        meson 构建 glib-networking（openssl=enabled 单后端），
+                        依赖 ohpcd 已发布的共享 glib/2.88.3 与 openssl/3.5.8.1；
+                        PkgConfigDeps 生成的 gio-2.0.pc 缺 giomoduledir，复制
+                        glib 包真实 .pc 修 prefix 并前置 PKG_CONFIG_PATH，剥离
+                        内嵌 proxy-libintl/zlib/pcre2 的 Requires；package() 用
+                        build 原始 libgioopenssl.so 覆盖 meson.install 改写产物；
+                        测试与消费者以 GIO_EXTRA_MODULES 指向模块目录。
+forbid_1:               glib2/2.88.0 静态依赖（GIO 模块与主程序双份静态 glib →
+                        cannot register existing type）
+forbid_1_reason:        静态 glib 下 GIO 模块与消费进程各持一份 GObject 类型系统，
+                        运行时类型注册冲突，上游测试无法执行
+forbid_2:               strip 或 meson.install 改写模块 .so（OHOS loader codesign
+                        哈希校验失败 → dlopen Permission denied）
+forbid_2_reason:        OHOS loader 校验 .codesign 段内嵌哈希与文件内容一致性
+verify_command:         conan create archives/g/glib-networking/2.90.0
+                        -pr:h=<profile> -pr:b=<profile> -o '&:shared=True'
+                        --build=missing;  conan test test_package glib-networking/2.90.0
+verify_result:          conan create 通过；上游 4 个 meson test 条目 122 项次
+                        ok/0 fail；test_package 10/10：backend type GTlsBackendOpenssl、
+                        GTlsClientConnectionOpenssl、进程级 TLS 握手返回真实后端
+                        错误 "Error reading data from TLS socket: wrong version number"
+reuse_cross_library:    libsoup3（http2 测试恢复）、curl、libxml2 等任何调用
+                        g_tls_backend_get_default()/GTlsConnection 且需真实 TLS 的库
