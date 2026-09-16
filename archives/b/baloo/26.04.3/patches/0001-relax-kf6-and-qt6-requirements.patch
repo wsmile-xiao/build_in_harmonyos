@@ -1,0 +1,137 @@
+diff -ruN a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2026-04-04 01:06:54.000000000 +0800
++++ b/CMakeLists.txt	2026-09-05 22:55:04.102272344 +0800
+@@ -2,7 +2,7 @@
+ cmake_minimum_required(VERSION 3.29)
+ set(REQUIRED_QT_VERSION 6.9.0)
+ set(KF_VERSION "6.25.0") # handled by release scripts
+-set(KF_DEP_VERSION "6.25.0") # handled by release scripts
++set(KF_DEP_VERSION "6.14.0") # OHOS patch 0001: floor lowered to published KF baseline
+ 
+ # set up project
+ project(Baloo VERSION ${KF_VERSION})
+@@ -61,9 +61,13 @@
+     "Build and install the session wide indexer service. The service is started with the session and running in the background.")
+ 
+ # set up build dependencies
+-find_package(Qt6 ${REQUIRED_QT_VERSION} REQUIRED NO_MODULE COMPONENTS Core DBus Widgets Qml Quick Test)
++find_package(Qt6 ${REQUIRED_QT_VERSION} REQUIRED NO_MODULE COMPONENTS Core DBus Test)
+ 
+-find_package(KF6 ${KF_DEP_VERSION} REQUIRED COMPONENTS CoreAddons Config DBusAddons I18n IdleTime Solid FileMetaData Crash KIO)
++# OHOS (patch 0001): DBusAddons (kioworkers/kded) and IdleTime
++# (file/extractor) consumers are not built in the minimal set; KIO is
++# optional because it is not published for OHOS.
++find_package(KF6 ${KF_DEP_VERSION} REQUIRED COMPONENTS CoreAddons Config I18n Solid FileMetaData Crash
++                          OPTIONAL_COMPONENTS KIO)
+ 
+ find_package(LMDB)
+ set_package_properties(LMDB
+@@ -116,9 +120,12 @@
+ endif()
+ 
+ # i18n
+-if (IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/po")
+-   ki18n_install(po)
+-endif()
++# ki18n_install(po) is disabled on OHOS (patch 0001): it requires the Qt6
++# LinguistTools component which is not part of the published qtbase;
++# translations are not part of the minimal-testable build.
++# if (IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/po")
++#    ki18n_install(po)
++# endif()
+ 
+ # config files
+ set(CMAKECONFIG_INSTALL_DIR "${KDE_INSTALL_CMAKEPACKAGEDIR}/KF6Baloo")
+diff -ruN a/src/CMakeLists.txt b/src/CMakeLists.txt
+--- a/src/CMakeLists.txt	2026-04-04 01:06:54.000000000 +0800
++++ b/src/CMakeLists.txt	2026-09-05 22:44:03.654272500 +0800
+@@ -1,14 +1,25 @@
+ add_subdirectory(lib)
+ add_subdirectory(engine)
+ add_subdirectory(codecs)
+-add_subdirectory(qml)
++
++# QML module needs Qt6::Qml/Quick (qtdeclarative); build only when the
++# component is available (not part of the OHOS minimal-testable build).
++if (TARGET Qt6::Qml)
++    add_subdirectory(qml)
++endif()
+ 
+ if (BUILD_KINOTIFY)
+     add_subdirectory(file)
+-    add_subdirectory(kioworkers)
+     add_subdirectory(tools)
+ endif()
+ 
++# kio_baloo* workers (timeline/tags/search/kded) are the only KIO users;
++# KIO is an OPTIONAL component (not published for OHOS), so skip the
++# directory when the KF6 KIO component was not found.
++if (BUILD_KINOTIFY AND KF6_KIO_FOUND)
++    add_subdirectory(kioworkers)
++endif()
++
+ add_subdirectory(dbus)
+ 
+ ecm_qt_install_logging_categories(
+diff -ruN a/src/engine/andpostingiterator.cpp b/src/engine/andpostingiterator.cpp
+--- a/src/engine/andpostingiterator.cpp	2026-04-04 01:06:54.000000000 +0800
++++ b/src/engine/andpostingiterator.cpp	2026-09-05 23:08:35.454272656 +0800
+@@ -16,9 +16,10 @@
+     : m_iterators(std::move(iterators))
+     , m_docId(0)
+ {
+-    if (std::ranges::any_of(m_iterators, [](const auto &e) {
+-            return e == nullptr;
+-        })) {
++    // OHOS: libc++15 disables std::ranges algorithms
++    // (_LIBCPP_HAS_NO_INCOMPLETE_RANGES); use C++11 std::any_of instead.
++    if (std::any_of(m_iterators.begin(), m_iterators.end(),
++                    [](const auto &e) { return e == nullptr; })) {
+         m_iterators.clear();
+     }
+ }
+diff -ruN a/src/engine/phraseanditerator.cpp b/src/engine/phraseanditerator.cpp
+--- a/src/engine/phraseanditerator.cpp	2026-04-04 01:06:54.000000000 +0800
++++ b/src/engine/phraseanditerator.cpp	2026-09-05 23:08:35.454272656 +0800
+@@ -8,7 +8,7 @@
+ #include "phraseanditerator.h"
+ #include "positioninfo.h"
+ 
+-#include <ranges>
++#include <algorithm>  // OHOS: std::ranges algorithms not available in libc++15
+ 
+ using namespace Baloo;
+ 
+@@ -16,9 +16,10 @@
+     : m_iterators(std::move(iterators))
+     , m_docId(0)
+ {
+-    if (std::ranges::any_of(m_iterators, [](const auto &e) {
+-            return e == nullptr;
+-        })) {
++    // OHOS: libc++15 disables std::ranges algorithms
++    // (_LIBCPP_HAS_NO_INCOMPLETE_RANGES); use C++11 std::any_of instead.
++    if (std::any_of(m_iterators.begin(), m_iterators.end(),
++                    [](const auto &e) { return e == nullptr; })) {
+         m_iterators.clear();
+     }
+ }
+diff -ruN a/src/file/priority.cpp b/src/file/priority.cpp
+--- a/src/file/priority.cpp	2026-04-04 01:06:54.000000000 +0800
++++ b/src/file/priority.cpp	2026-09-05 23:19:56.942271719 +0800
+@@ -17,13 +17,13 @@
+ #include <sys/syscall.h>
+ #include <unistd.h>
+ 
+-#ifdef SYS_ioprio_set
++#if defined(SYS_ioprio_set) && __has_include(<linux/ioprio.h>)  // compile out when sysroot lacks linux/ioprio.h
+ #include <linux/ioprio.h>
+ #endif
+ 
+ bool lowerIOPriority()
+ {
+-#ifdef SYS_ioprio_set
++#if defined(SYS_ioprio_set) && __has_include(<linux/ioprio.h>)  // compile out when sysroot lacks linux/ioprio.h
+     if (syscall(SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, ioprio_value(IOPRIO_CLASS_IDLE, 0, IOPRIO_HINT_NONE)) >= 0) {
+         return true;
+     }
