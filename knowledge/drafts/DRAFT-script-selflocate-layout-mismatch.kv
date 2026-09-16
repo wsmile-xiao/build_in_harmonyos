@@ -1,0 +1,130 @@
+#====================================================================
+# DRAFT-script-selflocate-layout-mismatch — 纯脚本包(自定位加载路径)
+#   安装布局不匹配：package() 装错目录致交付包不可用，且旧测试假成功
+# 对应人类文档: knowledge/drafts/DRAFT-script-selflocate-layout-mismatch.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #8710 bork 0.14.0（模块装到 share/bork/ 而 bork 只读 <pkg>/lib/）
+# 与既有条目的关系: E043 讲 toybox sh 不支持 ${BASH_SOURCE}（解释器能力问题）；
+#   本条目是"bash 下 BASH_SOURCE 正常工作，但安装布局与之不匹配"（打包问题），
+#   两者症状不同、修法不同，不重复。
+#====================================================================
+
+id:                     DRAFT-script-selflocate-layout-mismatch
+trigger_tool:           conan|bash|packaging|test
+phase:                  build|testing
+error_signature:        No such file or directory.*lib/(helpers|declarations|support)/
+                         \.\./lib/[a-z]+/.*not found|
+                         command not found.*script lib module
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               packaging, bash, conan, testing, false-success, layout
+match_keywords:         BASH_SOURCE, self-locating, script dir, lib module path,
+                         package_layout, share/<pkg>, conanfile package(), libdirs,
+                         BORK_HOME, fake success, vacuous pass, 假成功, install prefix,
+                         pure script package, no-compile package
+title:                  纯脚本包按 BASH_SOURCE 自定位加载模块时，安装布局必须与之一致；旧测试注入无效环境变量会掩盖该缺陷（假成功）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             两类互为因果的问题叠加：
+                         ① **交付包缺陷（主因）**：可执行脚本常按自身路径定位伴随模块，
+                            如 bork 的 `BORK_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.."
+                            && pwd -P)"` 推导出 `<pkg>`，再 `source $BORK_SOURCE_DIR/lib/
+                            {helpers,declarations,support}/*.sh`。**该推导结果由安装布局决定，
+                            且脚本通常不读任何环境变量来覆盖它**。若 conanfile 的 package()
+                            把模块装到 `share/<pkg>/`（很多配方的"惯例"做法），则布局与
+                            脚本预期（`<pkg>/lib/`）不符，交付包运行时直接报
+                            `.../lib/helpers/*.sh: No such file or directory`——**包是坏的**。
+                         ② **测试假成功（放大因素）**：test_package 若注入了脚本根本不读的
+                            变量（如臆造的 `BORK_HOME`）、且只做"文件存在性"断言，则测试会
+                            通过——**掩盖了①**。二者叠加使缺陷一路通过 CI 直到被消费者踩到。
+affected_scope:         OHOS 上所有"纯脚本包 / 无编译包"（bash/Python/sh 工具及其 lib
+                         模块）：凡主脚本按自身位置定位伴随文件者，安装布局即为正确性
+                         的一部分；同理适用于 test_package 采用"存在性断言 + 猜测的
+                         环境变量"的场景
+verification_cmd:       # 关键：验证必须走"真实执行"，而非存在性
+                         # 1) 读脚本自定位逻辑（确认推导基准与是否读环境变量）
+                         grep -nE 'BASH_SOURCE|dirname|\.\.' <pkg>/bin/<script>
+                         # 2) 按真实布局跑一次（这是唯一可信判据）
+                         <pkg>/bin/<script> --version    # 或 version / help 等可退 0 的子命令
+                         # 3) 反证：把模块故意放错目录，测试必须失败
+                         #    （若放错还能过 → 测试是假成功，必须先修测试）
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           align-layout-to-script-and-make-test-execute-for-real
+rec_description:        两步必须同时做，否则①会被②继续掩盖：
+                         **① 对齐安装布局到脚本预期**：先读主脚本的自定位表达式，确定它
+                         期望的基准目录（如 `bin/` 的上一级 = `<pkg>`），再把伴随模块
+                         装到该路径（bork 即 `<pkg>/lib/`）；同步 package_info() 的
+                         libdirs/resdirs，避免下游按错误目录取文件。
+                         **② 让 test_package 真实执行**：删掉臆造的环境变量（脚本不读的
+                         变量只会制造假成功），改为**真实运行**该脚本的一个能退 0 的子命令
+                         （如 `version`）并断言其输出；同时断言模块落在**脚本实际加载的
+                         路径**（而非"某处存在"）。
+                         **自检手法**：故意把模块放错目录重跑测试——**能抓出则测试有效**，
+                         仍通过则说明断言仍是存在性/环境变量型假成功。
+rec_command:            # 布局对齐（conanfile.py 片段）
+                         # 模块装到脚本预期基准：bin/ 的上一级即 package_folder
+                         copy(self, "*", src=<src>/lib/<d>,
+                              dst=os.path.join(self.package_folder, "lib", <d>))
+                         self.cpp_info.libdirs = ["lib"]; self.cpp_info.resdirs = ["lib"]
+                         # 测试改为真实执行 + 输出断言
+                         subprocess.run([bash, <pkg>/bin/<script>, "version"], ...)
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      install-both-layouts-plus-wrapper
+fallback_description:   若某些上游脚本对布局的假设不可靠（多个版本推导基准不一），
+                         可在保持脚本预期路径为主的同时，额外在兼容路径放**符号链接**
+                         （而非复制），并保持 package_info 指向真实路径；这是妥协方案，
+                         仍须以"真实执行通过"为验收标准
+fallback_command:       ln -s <pkg>/lib <pkg>/share/<pkg>/lib   # 仅在确有必要时
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只做存在性断言.*模块已打包|test_package.*仅断言文件存在
+forbid_1_reason:        "文件存在"不等于"脚本能找到它"——存在性断言 + 错误布局是假成功
+                         的标准配方；必须真实执行脚本并断言输出
+forbid_1_consequence:   坏包通过 CI，缺陷外溢到消费者；PR 被审查/复核打回
+forbid_2_pattern:       注入.*脚本不读的环境变量.*使测试通过|靠 BORK_HOME 之类兜底
+forbid_2_reason:        脚本不读的变量不改变任何行为，只是让测试"看起来通过"
+                         （必须先在脚本源码里确认该类变量确实被读取）
+forbid_2_consequence:   掩盖真实布局缺陷，且留下无用变量污染配方
+forbid_3_pattern:       未确认真实加载路径.*直接按惯例装 share/|照搬其他包布局
+forbid_3_reason:        布局正确性由脚本自身推导逻辑决定，不由惯例决定；照搬会把
+                         别的包的布局错误复刻过来
+forbid_3_consequence:   交付包不可用
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             E043, DRAFT-bats-suite-ohos-runtime-shims
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-script-selflocate-layout-mismatch.md
+last_updated:           2026-09-11
+source_event:           bork/0.14.0 HarmonyOS PC 适配（PR #8710）；模块误装
+                         share/bork/（脚本只读 <pkg>/lib/），旧测试靠无效 BORK_HOME
+                         假成功；修正后 test_package 真实执行通过
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              8710
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true
