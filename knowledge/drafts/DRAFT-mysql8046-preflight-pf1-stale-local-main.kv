@@ -1,0 +1,92 @@
+#====================================================================
+# DRAFT-mysql8046-preflight-pf1-stale-local-main — worktree 模式下本地 main 陈旧导致 create-pr PF1 单包闸误拦多包
+# 触发事件: mysql-client-8.0 8.0.46 适配（gitcode_pr.py create-pr 报 PF1 涉及 11 个包目录）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-mysql8046-preflight-pf1-stale-local-main
+trigger_tool:           gitcode_pr.py|create-pr|preflight
+phase:                  ci_gate|pr_creation
+error_signature:        PF1 单包闸: 本 PR 改动涉及 \d+ 个软件包目录|
+                         preflight 前置硬闸未通过.*PF1
+
+severity:               2
+category:               conan, ci, worktree, preflight, false-positive
+match_keywords:         PF1, 单包闸, preflight, create-pr, worktree, 本地 main, stale main, 三点 diff, merge-base, 多包误拦, git fetch origin main:main, libXext 污染
+title:                  Stale local main in shared-repo worktrees makes create-pr PF1 report N unrelated package dirs; fast-forward local main before retrying
+
+topic: >
+  scripts/ohc/preflight.py 的 run_preflight 以 args.target（默认 main）
+  为 base 做 main...HEAD 三点 diff 收集变更文件。git worktree 共享主仓
+  refs 但各 worktree 分支独立，多任务并行机器上本地 main 引用可能长期
+  停在旧提交（其他任务只 fetch origin/main 不动本地 main）。此时三点
+  diff = 陈旧 main...HEAD 会把 main 上后来合入的其他包变更（muscle、
+  rpm、openssl 等）全部计入本 PR 的"变更文件"，PF1 单包闸随即报
+  "涉及 N 个软件包目录"误拦——而 PR 实际只改一个包。
+
+root_cause: >
+  preflight 用本地分支名 main 作为 diff 基线（gitcode_pr.py cmd_create_pr
+  传 args.target），未解析到 origin/main；共享 refs 的 worktree 机器上
+  本地 main 不随 origin/main 自动前进，三点 diff 的合并基取的是陈旧
+  提交，main 侧新增的其他包目录全部落入 diff 文件清单。
+
+durable_solution: >
+  在任务 worktree 内执行一次非检出式快进：git fetch origin main:main
+  （本地 main 未偏离时直接 fast-forward 到 origin/main，无需 checkout）。
+  随后重跑 create-pr，PF1 即恢复单包判定。同理适用于所有以本地分支名
+  为 diff 基线的闸门误报场景。
+
+impact: >
+  只影响 PR 创建前的本地预检判定，不影响已 push 的远端分支与 PR 内容。
+  误拦时 create-pr 直接 return None，不产生任何远端副作用；修正基线后
+  重试即可，零返工成本。
+
+recovery: >
+  遇到 PF1 报多包但 git status/diff 显示本分支只改一个 archives 目录时：
+  1) git rev-parse main 与 git rev-parse origin/main 对比确认本地 main
+     落后；2) git fetch origin main:main 快进；3) 重新执行 create-pr。
+  若本地 main 已偏离（有本地提交），须先对齐或显式指定正确的 base。
+
+evidence_chain: >
+  task contrib-6734 mysql-client-8.0 8.0.46 适配（feat/mysql-client-8.0-8.0.46 分支）
+    - 首次 create-pr：PF1 报涉及 11 个包目录（ktx-software/libcifpp/
+      libmcfp/msfconsole/muscle/mysql-client-8.0/openssl/openssl-4/rpm/
+      sherpa-onnx/sysstat），其中 10 个与本分支无关；
+    - 核实：git rev-parse main = 9b49d7903（落后 origin/main a675263b9
+      33+ 提交）；本分支 git diff origin/main...HEAD 仅 mysql-client-8.0
+      一个包目录；
+    - 修复：git fetch origin main:main 后二次 create-pr，PF1 通过
+      （PF9 软件级文件问题另行修复后）PR #9640 创建成功；
+    - 首轮 CI #44720 与修复轮 #44739 均 PASSED。
+
+verification_cmd: >
+  git rev-parse main; git rev-parse origin/main; git fetch origin main:main; python3 scripts/gitcode_pr.py create-pr ... （重试）
+
+limitations: >
+  若本地 main 被人为偏离（非纯快进），git fetch origin main:main 会被
+  拒绝，需先理清本地 main 的去留；此为操作前提而非本方案缺陷。
+
+rec_priority:           1
+rec_approach:           fast-forward-local-main-before-create-pr（建 PR 前快进本地 main 修正三点 diff 基线）
+rec_description: >
+  多任务共享 worktree 机器上 create-pr 遇 PF1 单包闸报多个无关包目录时，
+  先比对本地 main 与 origin/main：git fetch origin main:main 快进本地
+  main 后重试 create-pr，三点 diff 基线即恢复正确，PF1 恢复单包判定。
+rec_command:            git rev-parse main origin/main && git fetch origin main:main && python3 scripts/gitcode_pr.py create-pr --repo ... （重试）
+rec_auto_fix:           false
+rec_impl:               fast-forward-stale-local-main
+
+doc_file:               knowledge/drafts/DRAFT-mysql8046-preflight-pf1-stale-local-main.md
+last_updated:           2026-09-12
+source_event:           mysql-client-8.0 8.0.46 适配，create-pr PF1 单包闸因本地 main 陈旧误拦 11 个包目录
+authors:                 calbee21
+source_pr:              https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/9640
+source_commit:          fca0396e3
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-12
+
+draft:                  true
+contributor_id:         calbee21
