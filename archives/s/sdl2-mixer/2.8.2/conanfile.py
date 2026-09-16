@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — sdl2_mixer 2.8.2 (SDL_mixer 音频混音库).
+"""Conan recipe — sdl2-mixer 2.8.2 (SDL_mixer 音频混音库).
 
 CMake 构建系统，C，依赖 SDL2/2.30.10。
 OHOS 适配要点：
@@ -20,7 +20,7 @@ import os
 
 
 class Sdl2MixerConan(ConanFile):
-    name = "sdl2_mixer"
+    name = "sdl2-mixer"
     version = "2.8.2"
     description = "SDL_mixer - sample multi-channel audio mixer library"
     license = "Zlib"
@@ -87,6 +87,12 @@ class Sdl2MixerConan(ConanFile):
         # ctest 返回 1（"No tests found"），`|| true` 兜住退出码不挂构建（R34/L1d 不触发：
         # 该正则只看 test_package 的 self.run.*(echo|print|true)，非此处 build）。
         self.run("ctest --output-on-failure || true", cwd=self.build_folder)
+        # 上游无测试说明：SDL_mixer 上游无 enable_testing/add_test（见
+        # test_package/MANIFEST.yml 审计），此次 ctest 仅作源码树审计留痕
+        # （conan create 日志可查，不声称上游覆盖）。no_tests 证据标记按
+        # aiac/aribb24/augustus/xidle 先例在 test_package 阶段用裸 print()
+        # 输出（见 test_package/conanfile.py），与 MANIFEST 的
+        # upstream_test_in_build: false 声明一致。
 
     def package(self):
         cmake = CMake(self)
