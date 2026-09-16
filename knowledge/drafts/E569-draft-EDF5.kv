@@ -1,0 +1,74 @@
+#====================================================================
+# E569 — 知识图谱草稿（路径 B）
+# 对应的人类文档: doc/E569.md（合入时生成）
+# 来源: crashmail/1.7（CrashMail II，内嵌 JAMLIB src/jamlib/mbase.c）设备实测 2026-09-10
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E569
+trigger_tool:           clang
+phase:                  compilation
+error_signature:        incomplete type 'struct flock'|use of undeclared identifier 'F_SETLK'|use of undeclared identifier 'F_WRLCK'|call to undeclared function 'fcntl'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               libc, musl, headers, portability, platform
+match_keywords:         sys/file.h, fcntl.h, struct flock, F_SETLK, F_WRLCK, incomplete type, 传递包含, 头文件可见性, glibc 能编 musl 不能, implicit function declaration, 文件锁
+title:                  musl 的 <sys/file.h> 不传递包含 <fcntl.h>，glibc 上隐式可见的 struct flock/F_SETLK/fcntl() 在 OHOS 上变成 incomplete type 与未声明标识符
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             glibc 的 <sys/file.h> 内部会 include <fcntl.h>，于是 struct flock 的定义、F_SETLK/F_WRLCK/F_UNLCK 常量与 fcntl() 原型全都间接可见；musl 的 <sys/file.h> 只声明 flock()/lockf() 相关接口，这些定义在 <fcntl.h> 里而不经 <sys/file.h> 暴露。源码只 include <sys/file.h> 时，glibc 上「碰巧能编」，musl/OHOS 上同一段文件锁代码同时报一个类型不完整、三个常量未声明与一个函数隐式声明
+affected_scope:         所有由 __linux__/__LINUX__ 等 Linux 宏开启、使用 struct flock 或 fcntl() 却只包含 <sys/file.h>/<unistd.h> 的旧 POSIX 代码（OHOS 上这些 Linux 宏常为真，因此该 glibc 专属假设在 OHOS 被激活）；同族还包括 <sys/socket.h> 不传递 <fcntl.h>/struct ucred 一类可见性假设
+verification_cmd:       printf '#include <sys/file.h>\nstruct flock fl;\nint x = F_SETLK;\n' > p1.c && clang -fsyntax-only p1.c; echo "sysfile-only rc=$?" ; printf '#include <sys/file.h>\n#include <fcntl.h>\nstruct flock fl;\nint x = F_SETLK;\n' > p2.c && clang -fsyntax-only p2.c; echo "with-fcntl rc=$?" ; printf '#include <fcntl.h>\n' > p3.c && clang -E p3.c 2>/dev/null | grep -m1 -oE '/[^\"]*fcntl\.h'
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           add-explicit-fcntl-include
+rec_description:        在原有平台条件块内（如 #if defined(__LINUX__)）<sys/file.h> 之后补一行 #include <fcntl.h>，不改逻辑、不加 __OHOS__ 条件编译；glibc 下重复 include 因头文件守卫而无害，因此该修复平台中立。先按 grep 枚举全部使用点（struct flock/F_SETLK/F_WRLCK/fcntl）再逐个条件块补齐
+rec_command:            grep -rn 'struct flock\|F_SETLK\|F_WRLCK\|F_UNLCK' src/ && printf '#include <sys/file.h>\n#include <fcntl.h>\nstruct flock fl;\nint x = F_SETLK;\n' > p.c && clang -fsyntax-only p.c; echo rc=$?
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      feature-probe-then-guard
+fallback_description:   确需支持「该头确实不提供 flock 语义」的极端平台时，用构建期特性探测（编译期 #error/探测编译片段）而不是平台宏判断；但 OHOS 本身提供 struct flock 与 F_SETLK，故本品不需要回退方案，仅作为「能力真的缺失」时的区分口径
+fallback_command:       printf '#include <fcntl.h>\nint main(void){struct flock f; f.l_type=F_WRLCK; return fcntl(0,F_SETLK,&f);}\n' > p.c && clang p.c -o p && ./p; echo rc=$?
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -D_GNU_SOURCE|_POSIX_C_SOURCE=.*-D|#define F_SETLK|#define F_WRLCK|手写 struct flock
+forbid_1_reason:        可见性取决于头文件是否被包含，不是特性测试宏；抬 _GNU_SOURCE/_POSIX_C_SOURCE 会连带改变其它 API 的可见性，把一处编译错误扩散成多处行为差异。而 OHOS 的 <fcntl.h> 已提供 struct flock 与 F_* 的正确 ABI 定义，手抄/自定义宏会引入结构体布局不一致，静默改变 fcntl() 语义
+forbid_1_consequence:   错误归因入库（把可见性问题当成平台缺能力），或产出 ABI 不一致的文件锁实现——编译通过但运行时锁语义错误，属最难发现的假绿
+forbid_2_pattern:       #ifdef __OHOS__.*fcntl|#if defined\(__OHOS__\).*#include <fcntl\.h>
+forbid_2_reason:        R8 默认禁止补丁内平台条件编译，而 glibc 与 musl 都接受显式 include <fcntl.h>，等价方案存在，无需申请豁免
+forbid_2_consequence:   平台条件编译在源码中沉积，后续换平台时成为新的维护负担，且掩盖了「上游缺少显式 include」这一可反馈给上游的真实缺陷
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P005
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E086, E115, E133
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E569.md
+last_updated:           2026-09-10
+source_event:           crashmail/1.7 make linux 在 src/jamlib/mbase.c 报 incomplete type 'struct flock' 与 F_SETLK/F_WRLCK/F_UNLCK 未声明
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: EDF5
