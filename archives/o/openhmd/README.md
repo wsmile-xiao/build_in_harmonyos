@@ -8,6 +8,7 @@ VR head-mounted display (HMD) driver library, pure C.
 | Version | Status | Build System | Dependencies |
 |---------|--------|-------------|--------------|
 | 0.3.0   | published | CMake     | hidapi/0.14.0 |
+| 0.3.0.1 | built     | CMake     | hidapi/0.14.0 |
 
 ## Homepage
 
