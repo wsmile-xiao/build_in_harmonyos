@@ -1,0 +1,144 @@
+#====================================================================
+# DRAFT-stdformat-to-fmt-substitution-downstream-effects
+#   —— 把 std::format 机械替换为 fmt::format 时引入的两处下游影响
+# 对应人类文档: knowledge/drafts/DRAFT-stdformat-to-fmt-substitution-downstream-effects.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9565 libcifpp 10.0.4 适配（94 处 std::format → fmt::format）
+# 与既有条目的关系:
+#   DRAFT-enchantum-0.4.0-libcxx-ohos-format-stub 讲「<format> 存在但功能未实现」
+#     （头存在 ≠ 可用，__has_include 误判）——本条目从该前提继续，讲**替换之后**
+#     会踩到的两处链接侧问题，不重复其探测与结论；
+#   DRAFT-cmake-test-framework-fetch-to-conan-find-package 讲测试框架来源，
+#     本条目与其无重叠。
+#====================================================================
+
+id:                     DRAFT-stdformat-to-fmt-substitution-downstream-effects
+trigger_tool:           cmake|clang|conan|ld
+phase:                  build
+error_signature:        undefined symbol: fmt::v[0-9]+::detail::vformat|
+                         undefined symbol: fmt::v[0-9]+::|
+                         no member named 'format' in namespace 'std'|
+                         ld.lld: error: undefined symbol: fmt::v
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               linking, cmake, libcxx, ohos, format, conan
+match_keywords:         std::format, fmt::format, libfmt, FMT_VERSION, inline namespace,
+                         fmt::v7, fmt::v8, undefined symbol vformat, PRIVATE link,
+                         target_link_libraries, transitive link, static archive symbols,
+                         libc++15 incomplete format, ohos format stub,
+                         standard library substitution, link propagation
+title:                  std::format → fmt::format 替换后必须同步处理两件事：补链 libfmt（上游常为 PRIVATE 链接）与对齐 fmt 主版本（inline namespace fmt::vN）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             OHOS libc++15 的 `<format>` 是占位实现（头存在但 std::format 未实现），
+                         因此常把上游的 `std::format` 机械替换为 `fmt::format`。该替换**看起来
+                         只是文本替换**，实际在链接侧引入两处独立问题：
+                         **① 上游 CMakeLists 里可能根本没有 fmt** —— libcifpp v10.0.4 实测
+                         `grep -c 'find_package(fmt|fmt::fmt' CMakeLists.txt` = **0**，即 fmt 是
+                         替换后**新引入**的依赖。而上游对第三方依赖普遍用 **PRIVATE** 链接
+                         （同文件里 pcre2、SQLite3、eigen 均为 PRIVATE），PRIVATE 不传播给
+                         下游 → `libcifpp.a` 里引用了 fmt 符号，但链接该库的每个目标
+                         （测试可执行文件、examples、消费者）**都必须自己补 `libfmt`**，否则
+                         `ld.lld: error: undefined symbol: fmt::v7::detail::vformat(...)`
+                         并标注 `referenced 20 more times ... in archive libcifpp.a`。
+                         **② fmt 的符号带 inline namespace（主版本号）** —— fmt 7.x 导出
+                         `fmt::v7::*`、8.x 导出 `fmt::v8::*`（由 `FMT_VERSION` 决定）。
+                         若链接了与**编译期不一致**的 fmt 主版本，即使"都叫 libfmt"也解析不到
+                         符号 —— 实测把 fmt/8.1.1（FMT_VERSION 80101）链给用 fmt/7.1.3
+                         （FMT_VERSION 70103）编译的 libcifpp.a，报错正是
+                         `undefined symbol: fmt::v7::detail::vformat`。
+affected_scope:         OHOS 上任何因缺 std::format 而改用 fmt 的 C++ 库：既包括把
+                         std::format 换 fmt::format 的适配（本类），也包括上游本来就用 fmt
+                         但以 PRIVATE 链接的场景；尤其影响**子目标集合多**的项目
+                         （tests / examples / 消费者 probe 各自链接），以及同仓并存多个
+                         fmt 主版本的环境
+verification_cmd:       # 1) 报错里的 fmt::vN 就是「编译期 fmt 主版本」的直接证据
+                         #    undefined symbol: fmt::v7::detail::vformat  → 编译用的是 7.x
+                         # 2) 读编译期 fmt 的版本宏
+                         grep -hoE "FMT_VERSION [0-9]+" <fmt-include>/fmt/core.h
+                         #    70103 → 7.1.3   80101 → 8.1.1
+                         # 3) 交叉核对目标库里的 fmt 符号命名空间
+                         llvm-nm -D <libfmt.so> | grep -oE "fmt::v[0-9]+" | head -1
+                         # 4) 确认上游是否 PRIVATE 链接（决定下游是否必须自行补链）
+                         grep -n "target_link_libraries" <src>/CMakeLists.txt
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           substitute-format-and-fix-both-link-sides
+rec_description:        替换 std::format → fmt::format 时，**同一步**必须做齐两件事：
+                         ① **把 fmt 作为依赖声明进配方并在每个链接点补链**。若上游 CMakeLists
+                            无 fmt（属"替换引入"），不要只加 include：给该库补
+                            `target_link_libraries(<lib> ${FMT_LIB})`，或对**下游目标**逐个补
+                            （测试/examples 常在另一份 CMakeLists 里，容易漏）。判别方法：
+                            若报错出现 `in archive <lib>.a` 且引用者是库内 .obj，就是"库需要、
+                            但没传播下来"。
+                         ② **锁定 fmt 主版本与编译期一致**。配方 `requires("fmt/<major>.<x>")`
+                            一旦确定，构建/复现环境就必须用同一主版本；跨主版本不可互换
+                            （inline namespace 不同）。
+                         ③ 收尾自检：全部链接点（库、tests、examples、test_package probe）都
+                            能过链接，再谈运行结果。
+                         记录口径：把「fmt 是替换引入的新依赖 + 主版本不可互换」写进
+                         配方注释与 PR 描述，便于复现者一次到位。
+rec_command:            # 判别编译期 fmt 主版本（从报错反推）
+                         #   undefined symbol: fmt::v7::... → 编译期是 fmt 7.x
+                         # 配方侧
+                         self.requires("fmt/7.1.3")          # 主版本与替换时的头文件一致
+                         # CMake 侧：库自身补链（上游无 fmt 时）
+                         #   target_link_libraries(cifpp PRIVATE fmt::fmt)   # 或导出给下游
+                         # 下游目标（tests / examples）补链示例
+                         #   target_link_libraries(<test-target> PRIVATE ... <path>/libfmt.so)
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      keep-format-substitution-out-of-default-targets
+fallback_description:   若某子目标集合（如 examples）不值得为 fmt 补链，可将其关闭
+                         （如 `BUILD_EXAMPLES=OFF`）而非强行链接；但**必须**保留库自身与
+                         test_package probe 的链接正确性，且如实说明关闭了哪些目标及其原因，
+                         不可把"关掉目标"写成"没有该目标"
+fallback_command:       cmake -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF ...
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只替换 include 与调用名.*不处理链接|std::format.*fmt::format.*替换.*即可
+forbid_1_reason:        替换会引入新依赖与新的符号需求，链接侧不处理必失败（本条目两处成因）
+forbid_1_consequence:   构建/测试链接失败，且报错误导（看着像 fmt 包坏了）
+forbid_2_pattern:       任意 libfmt.*随便用|链哪个版本的 fmt 都一样
+forbid_2_reason:        fmt 符号带 inline namespace（fmt::vN），跨主版本不可互换
+forbid_2_consequence:   undefined symbol: fmt::vN::...，且 vN 与预期不符时极易误判为上游缺陷
+forbid_3_pattern:       关闭 examples.*即视为.*没有该目标|把关闭的目标写成不存在
+forbid_3_reason:        关闭是取舍而非事实；声明失真会被审查方按口径不实打回
+forbid_3_consequence:   测试/功能覆盖声明失真
+
+principles:
+similar_to:             DRAFT-enchantum-0.4.0-libcxx-ohos-format-stub, E247, E473
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-11
+source_event:           libcifpp/10.0.4（PR #9565）——94 处 std::format → fmt::format；
+                         实测两处下游影响：① 上游 CMakeLists 无 fmt（计数 0）且对 pcre2/
+                         SQLite3/eigen 均 PRIVATE 链接 → libcifpp.a 引用 fmt 符号，测试
+                         可执行文件（test/CMakeLists.txt）需补链 libfmt 才通过；
+                         ② 误链 fmt/8.1.1（80101）给 fmt/7.1.3（70103）编译的库 →
+                         `undefined symbol: fmt::v7::detail::vformat`，改用 7.1.3 后
+                         10/10 上游测试全过（**112 个实际执行的 test case** / 5,209,054 断言）。
+                         口径说明（避免与源码声明数混淆）：`grep -rc TEST_CASE test/`
+                         合计 **120**（含条件编译/辅助宏下的声明），而 ctest 实跑
+                         各可执行文件报告的 test case 之和为 **112**
+                         （60+17+9+11+5+2+3+1 + rename-compound 1 + spinner 3 = 112）；
+                         两者差 8 —— 源码**声明数 ≠ 注册执行数**属正常，引用时可执行数更严谨。
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9565
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true
