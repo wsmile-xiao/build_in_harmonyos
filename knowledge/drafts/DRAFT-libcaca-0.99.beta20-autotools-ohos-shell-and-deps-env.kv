@@ -1,0 +1,102 @@
+# ═══ Draft knowledge entry — libcaca 0.99.beta20 autotools 在 OHOS 上的 shell 与依赖 env 双坑 ═══
+# Timestamp: 2026-09-14
+# Software: libcaca 0.99.beta20（cacalabs/libcaca，autotools + cppunit）
+# Gate: conan-verify G2（conan create）迭代链
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpts below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-libcaca-0.99.beta20-autotools-ohos-shell-and-deps-env
+trigger_tool:           conan|conan create|conan-verify|configure|make|autotools|automake
+phase:                  generate|build|configure|link
+error_signature:        zsh:cd:[0-9]+: no such file or directory: kernel caca src examples tools|
+                         configure: error: cannot find ncurses development files|
+                         Package requirements \(cppunit\) were not met|
+                         No package 'cppunit' found|
+                         Cannot load recipe.*conanfile\.py not found|
+                         FileNotFoundError.*\.tar\.gz|
+                         duplicate symbol|
+                         incompatible integer to pointer conversion
+
+severity:               3
+category:               conan|autotools|shell|ohos|build-system|dependency
+match_keywords:         zsh word splitting, IFS, automake, all-recursive, SUBDIRS, for subdir in,
+                         CONFIG_SHELL, exec 7<&0, toybox, hnp bash, conanautotoolsdeps.sh,
+                         AutotoolsDeps not applied, os.environ, CPPFLAGS, LDFLAGS, LIBS,
+                         PKG_CHECK_MODULES, CPPUNIT_CFLAGS, no pkg-config, PKG_CONFIG_LIBDIR,
+                         conan cache, two agent_worker, concurrent export, conan remove,
+                         implicit function declaration, -Wint-conversion, 64-bit pointer truncation,
+                         duplicate symbol lib_gen.o, lang-preflight false positive, setup.py binding
+title:                  OHOS autotools 配方两处高发坑：① 构建 shell 必须同时满足 exec 7<&0 与 IFS 词分割（zsh 缺后者，会把整个 SUBDIRS 当一个目录名）② conan 生成的依赖 env 脚本不会被裸 subprocess source，CPPFLAGS/LDFLAGS/LIBS 必须由配方显式重建
+
+root_cause: >
+  1) automake 生成的 all-recursive 目标用 `list='$(SUBDIRS)'; for subdir in $$list; do
+     $(am__cd) $$subdir && $(MAKE) ...` 遍历子目录。zsh **默认不对未加引号的参数展开做
+     IFS 词分割**（需 SH_WORD_SPLIT），于是整串 SUBDIRS 被当成一个单词传给 cd：
+     "zsh:cd:21: no such file or directory: kernel caca src examples tools cxx caca-sharp
+     python ruby java doc"。make 的 recipe shell 取 SHELL，配方若为绕开 autoconf 的
+     `exec 7<&0`（toybox /system/bin/sh 不支持多位数 fd 重定向）而把 SHELL/CONFIG_SHELL
+     全设成 zsh，就会同时把 make 也切到 zsh，踩中此坑。
+  2) conan 的 AutotoolsToolchain/AutotoolsDeps 把 CPPFLAGS/LDFLAGS/LIBS 写进生成目录下的
+     conanautotoolstoolchain.sh / conanautotoolsdeps.sh，聚合进 conanbuild.sh——但该脚本
+     是**由 conan 自己的 Autotools() 助手负责 source 的**。配方改用
+     subprocess.run(..., env=dict(os.environ)) 直接跑 configure 时，conan 不把 build env
+     写进 os.environ，configure 看到的 CPPFLAGS 只有设备环境自带的
+     `-I$HOME/usr/local/include`，四个 ncurses 头探测全部失败，报
+     "configure: error: cannot find ncurses development files"。
+  3) 设备无 pkg-config（which pkg-config/pkgconf 皆无）。PKG_CHECK_MODULES([CPPUNIT],
+     [cppunit]) 在 `$CPPUNIT_CFLAGS` 非空时**短路**，根本不调用 pkg-config；configure 自己
+     的报错文案即提示 "set the environment variables CPPUNIT_CFLAGS and CPPUNIT_LIBS to
+     avoid the need to call pkg-config"。但同一份 env 若只写在 generate() 的
+     save_script 里，同样因 (2) 送不到 configure。
+  4) 设备上若有两个 agent_worker.sh 同时轮询同一 mailbox，同一 job 会被并发执行两次；两个
+     conan create 并发导出同一 recipe 时后者会覆盖前者的缓存目录，留下"revision 已登记但
+     目录缺失"的残留，下次运行直接跳过 export 并报
+     "Cannot load recipe ... conanfile.py not found"；同类并发也会让 conan download() 在
+     下载成功后报 FileNotFoundError（伪装成文件不存在，URL/HTTP 状态全丢）。
+  5) clang 15 把 `-Wint-conversion` 升为错误：上游若调用返回指针的函数却没包含其声明
+     （C99 隐式声明按 int 返回），64 位目标上指针被截断——这不是"编译器太严"，是真实 UB。
+
+rec_approach: >
+  autotools-on-ohos-three-points：
+  ① 构建 shell 选**平台 profile 已声明的** /data/service/hnp/bin/bash（同时满足
+     `exec 7<&0` 与 IFS 词分割）；zsh 只可作 configure 的兜底，绝不能让 make 用 zsh；
+     /system/bin/sh（toybox）因 fd 重定向不可用。
+  ② 依赖标志在配方内显式重建：从 self.dependencies[<dep>].package_folder 拼
+     CPPFLAGS/LDFLAGS/LIBS，前置自己的路径、把设备原有值追加在后（压过设备 prefix 下的
+     同名头，避免"用设备头、连不到库"）；同一处导出 CPPUNIT_CFLAGS/CPPUNIT_LIBS 等
+     pkg-config 短路变量。
+  ③ 需要跑上游 check 的包用 tool_requires（不是 test_requires——它在本配方 generate()
+     里不可见，会 KeyError）。
+  ④ 任务脚本首行加 mkdir 互斥锁；缓存被并发污染时 `conan remove "<pkg>/*" -c` 清干净再跑。
+
+verification: >
+  libcaca 0.99.beta20 设备实机：G0/G1/G2/G3 全过、`✅ 配方验证通过`；上游 make check
+  5/5（simple / check-copyright / check-source / check-win32 / caca-test，含 cppunit
+  12 个用例）；test_package 18 项消费者断言全过。
+  关键日志：`downloaded 1099916 bytes (HTTP 200) from <URL>`（自实现 _fetch）；
+  `PASS: simple ... PASS: caca-test / # TOTAL: 5 / # PASS: 5 / # FAIL: 0`。
+  逐坑复现见 archives/l/libcaca/0.99.beta20/notes.md 的问题表（11 项）。
+
+apply_boundary: >
+  适用于 OHOS 设备上用 autotools 构建的 C/C++ 库配方（有预生成 configure、无 autoreconf）。
+  不适用于 cmake/meson/makefile 工程（无 all-recursive/词分割维度）。
+  ②③ 两条对任何"配方自跑构建命令而非用 conan 的 Autotools/CMake 助手"的写法都成立。
+
+counter_examples: >
+  若 Makefile 是手写（非 automake）则没有 `for subdir in $list`，zsh 不会踩词分割坑
+  （ncrack 0.7 的手写 Makefile.in 在 zsh 下正常，这正是该坑不易发现的原因）；
+  若依赖路径能从设备默认搜索路径命中（如依赖装在 /usr/local）则 (2) 不暴露；
+  若设备装了 pkg-config 且 .pc 可达则 (3) 不暴露（PKG_CONFIG_LIBDIR 在交叉模式下会被
+  configure 置为 /dev/null，故仍需显式 -I/-L/-l 或 CPPUNIT_* 变量）。
+
+limitations: >
+  与 E540（runner-path-prepend：OHOS profile 把 CC/CXX 指向 /data/service/hnp/bin 导致
+  环境路径问题）维度不同：E540 讲 PATH 注入，本条目讲构建 shell 语义与依赖 env 传递。
+  与 E490（autotools helper 脚本可执行位）互补：本配方另以 _restore_script_modes()
+  统一 chmod +x（configure/install-sh/missing/depcomp/ltmain.sh）。
+  ④ 的并发根因是设备侧运维问题（两个 worker），CI 上不存在。
