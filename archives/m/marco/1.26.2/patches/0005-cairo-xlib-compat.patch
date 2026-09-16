@@ -1,0 +1,197 @@
+--- /dev/null
++++ b/src/x11-compat/cairo-xlib.h
+@@ -0,0 +1,36 @@
++/* Standalone Cairo-Xlib compatibility declarations for non-Xlib Cairo builds.
++ *
++ * HarmonyOS 制品仓的 cairo/1.18.4 以 xlib=disabled 构建（无 cairo_xlib_* 符号
++ * 与 cairo-xlib.h）。marco 的窗口边框（src/ui/ui.c、src/ui/frames.c）与
++ * xrender 合成器（src/compositor/compositor-xrender.c）需要把 X pixmap 变成
++ * cairo surface，故这里提供同名的替代实现（XGetImage 取像素 + cairo image
++ * surface），窗口枚举与 X11 数据面仍走真实 libX11。
++ */
++#ifndef MARCO_CAIRO_XLIB_COMPAT_H
++#define MARCO_CAIRO_XLIB_COMPAT_H
++
++#include <cairo.h>
++#include <X11/Xlib.h>
++#include <X11/Xutil.h>
++
++CAIRO_BEGIN_DECLS
++
++cairo_surface_t *cairo_xlib_surface_create (Display *dpy,
++                                            Drawable drawable,
++                                            Visual *visual,
++                                            int width,
++                                            int height);
++
++cairo_surface_t *cairo_xlib_surface_create_for_bitmap (Display *dpy,
++                                                       Pixmap bitmap,
++                                                       Screen *screen,
++                                                       int width,
++                                                       int height);
++
++int cairo_xlib_surface_get_width (cairo_surface_t *surface);
++
++int cairo_xlib_surface_get_height (cairo_surface_t *surface);
++
++CAIRO_END_DECLS
++
++#endif
+--- /dev/null
++++ b/src/x11-compat/cairo/cairo-xlib.h
+@@ -0,0 +1,5 @@
++/* cairo/cairo-xlib.h — OHOS 兼容层入口（真实实现在 ../cairo-xlib.h）。 */
++#ifndef MARCO_CAIRO_XLIB_COMPAT_PREFIXED_H
++#define MARCO_CAIRO_XLIB_COMPAT_PREFIXED_H
++#include "../cairo-xlib.h"
++#endif
+--- /dev/null
++++ b/src/x11-compat/marco-cairo-xlib.c
+@@ -0,0 +1,147 @@
++/*
++ * Cairo-Xlib compatibility for Cairo builds without the xlib surface backend.
++ *
++ * 实现同名的 cairo_xlib_surface_* 入口：用 XGetImage 把 X drawable 的像素取到
++ * 进程内，再包成 cairo image surface 交给 marco 的边框渲染与合成器使用。
++ * 这样 marco 的 X11 数据面（窗口、pixmap、事件）保持真实 X11，而绘制走
++ * Cairo image surface（与 libwnck3/43.3 的 x11-compat 同一做法）。
++ */
++#include <gdk/gdk.h>
++#include <glib.h>
++#include <X11/Xlib.h>
++#include <X11/Xutil.h>
++#include <cairo.h>
++#include <stdint.h>
++
++#include "cairo-xlib.h"
++
++static guint8
++scale_component (unsigned long pixel,
++                 unsigned long mask)
++{
++  unsigned int shift = 0;
++  unsigned long value, maximum;
++
++  if (mask == 0)
++    return 0;
++  while ((mask & 1UL) == 0)
++    {
++      mask >>= 1;
++      shift++;
++    }
++  value = (pixel >> shift) & mask;
++  maximum = mask;
++  return (guint8) ((value * 255UL + maximum / 2UL) / maximum);
++}
++
++static cairo_surface_t *
++surface_from_drawable (Display *display,
++                       Drawable drawable,
++                       Visual *visual,
++                       int width,
++                       int height,
++                       gboolean bitmap)
++{
++  XImage *image;
++  cairo_surface_t *surface;
++  unsigned char *data;
++  int stride, x, y;
++
++  if (display == NULL || drawable == None || width <= 0 || height <= 0)
++    return cairo_image_surface_create (CAIRO_FORMAT_INVALID, 0, 0);
++
++  image = XGetImage (display, drawable, 0, 0, (unsigned int) width,
++                     (unsigned int) height, AllPlanes, ZPixmap);
++  if (image == NULL)
++    return cairo_image_surface_create (CAIRO_FORMAT_INVALID, 0, 0);
++
++  surface = bitmap
++    ? cairo_image_surface_create (CAIRO_FORMAT_A8, width, height)
++    : cairo_image_surface_create (CAIRO_FORMAT_RGB24, width, height);
++  if (cairo_surface_status (surface) != CAIRO_STATUS_SUCCESS)
++    {
++      XDestroyImage (image);
++      return surface;
++    }
++
++  data = cairo_image_surface_get_data (surface);
++  stride = cairo_image_surface_get_stride (surface);
++  for (y = 0; y < height; y++)
++    for (x = 0; x < width; x++)
++      {
++        unsigned long pixel = XGetPixel (image, x, y);
++
++        if (bitmap)
++          data[y * stride + x] = pixel != 0 ? 255 : 0;
++        else
++          {
++            guint8 red, green, blue;
++            uint32_t *row = (uint32_t *) (data + y * stride);
++
++            if (visual != NULL && visual->red_mask != 0 &&
++                visual->green_mask != 0 && visual->blue_mask != 0)
++              {
++                red = scale_component (pixel, visual->red_mask);
++                green = scale_component (pixel, visual->green_mask);
++                blue = scale_component (pixel, visual->blue_mask);
++              }
++            else
++              {
++                XColor color;
++
++                color.pixel = pixel;
++                XQueryColor (display,
++                             DefaultColormap (display,
++                                              DefaultScreen (display)),
++                             &color);
++                red = color.red >> 8;
++                green = color.green >> 8;
++                blue = color.blue >> 8;
++              }
++            row[x] = 0xff000000U | ((uint32_t) red << 16) |
++                     ((uint32_t) green << 8) | blue;
++          }
++      }
++  cairo_surface_mark_dirty (surface);
++  XDestroyImage (image);
++  return surface;
++}
++
++cairo_surface_t *
++cairo_xlib_surface_create (Display *dpy,
++                           Drawable drawable,
++                           Visual *visual,
++                           int width,
++                           int height)
++{
++  return surface_from_drawable (dpy, drawable, visual, width, height, FALSE);
++}
++
++cairo_surface_t *
++cairo_xlib_surface_create_for_bitmap (Display *dpy,
++                                      Pixmap bitmap,
++                                      Screen *screen,
++                                      int width,
++                                      int height)
++{
++  (void) screen;
++  return surface_from_drawable (dpy, bitmap, NULL, width, height, TRUE);
++}
++
++int
++cairo_xlib_surface_get_width (cairo_surface_t *surface)
++{
++  if (surface == NULL ||
++      cairo_surface_get_type (surface) != CAIRO_SURFACE_TYPE_IMAGE)
++    return 0;
++  return cairo_image_surface_get_width (surface);
++}
++
++int
++cairo_xlib_surface_get_height (cairo_surface_t *surface)
++{
++  if (surface == NULL ||
++      cairo_surface_get_type (surface) != CAIRO_SURFACE_TYPE_IMAGE)
++    return 0;
++  return cairo_image_surface_get_height (surface);
++}
