@@ -1,0 +1,188 @@
+#====================================================================
+# DRAFT-cmake-cpm-addpackage-local-package-offline
+#   —— CMake 项目经 CPMAddPackage 拉依赖时，用本地包离线满足（无需 patch 上游）
+# 对应人类文档: knowledge/drafts/DRAFT-cmake-cpm-addpackage-local-package-offline.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9566 mrc 1.3.17 适配 —— 让上游 9 个 TEST_CASE 在禁网 CI 中实跑
+#
+# 与既有条目的关系（互补，不重叠）:
+#   DRAFT-cmake-test-framework-fetch-to-conan-find-package —— 讲 **FetchContent**
+#     场景：必须 **patch 上游 CMakeLists** 把 FetchContent 改成 find_package，且
+#     还得 CMakeDeps 生成 config。查重：该条目 `CPMAddPackage`/`CPM_USE_LOCAL_PACKAGES`
+#     命中 **0** —— 它不涉及 CPM 路径。
+#   本条目 —— 讲 **CPM** 场景：当上游已设 `CPM_USE_LOCAL_PACKAGES ON` 时**无需任何
+#     patch**，只需喂 `<Pkg>_DIR` 指向包内上游 config 即可离线命中。两者针对不同的
+#     依赖获取机制，修法完全不同（patch vs 零 patch）。
+#   DRAFT-glob-0.0.1-cmake-offline-install —— 讲 **CPM.cmake / PackageProject.cmake
+#     助手模块本身**在 configure 期被下载（缺模块）；本条讲的是**依赖包**如何离线
+#     命中（`CPM_USE_LOCAL_PACKAGES` 命中 0）。角度不同。
+#   E301（Conan CMake.test cli_args 是 build 参数而非 ctest 参数）—— 同批适配中用到，
+#     本条**不重复**其结论，仅在 rec_description 里以一句指路。
+#====================================================================
+
+id:                     DRAFT-cmake-cpm-addpackage-local-package-offline
+trigger_tool:           cmake|conan
+phase:                  build
+error_signature:        CPM: .*(Downloading|downloading).*|
+                         CPM: error: Failed to download|
+                         Could not download.*CPMAddPackage|
+                         CPMAddPackage.*timed?\s*out|
+                         fatal: unable to access .*forge\..*|
+                         Failed to clone repository
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               cmake, cpm, conan, offline, test, dependency
+match_keywords:         CPMAddPackage, CPM.cmake, CPM_USE_LOCAL_PACKAGES,
+                         <Pkg>_DIR, find_package, configure-time download,
+                         offline CI, 禁网, test_requires, Catch2_DIR,
+                         包名与 CMake 名不一致, cmake_file_name
+title:                  CMake 项目经 CPMAddPackage 拉依赖时：上游若已设 CPM_USE_LOCAL_PACKAGES ON，用 <Pkg>_DIR 指向本地包即可离线满足——无需 patch 上游
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             上游 CMake 项目常用 **CPM.cmake** 获取依赖
+                         （`CPMAddPackage("gh:catchorg/Catch2@3.5.0")` 或
+                          `CPMAddPackage("https://<host>/x.git@1.0")`）。在禁网 CI 里
+                         这会**在 configure 阶段**直接失败（下载/克隆超时）。
+                         直觉上的修法是 **patch 上游 CMakeLists** 把 CPMAddPackage
+                         改写成 find_package —— 但那要维护补丁、还要处理 config 生成
+                         （这正是既有 FetchContent 条目的路线）。
+
+                         **但 CPM 本身提供了免改上游的开关**：一旦上游在
+                         `CPMAddPackage` **之前**设了
+                           `set(CPM_USE_LOCAL_PACKAGES ON)`
+                         那么 CPM 对每个依赖会**先尝试 `find_package(<name>)`**，
+                         **命中即不再联网下载**，直接使用本地包。
+                         （实测 mrc 的 CMakeLists.txt:65 即设了该开关。）
+
+                         于是离线满足只需两步，**零 patch**：
+                           ① 把该依赖作为**本地可用包**提供（conan 侧放到依赖图里，
+                              例如测试框架用 `test_requires` 以免污染交付包）；
+                           ② 告诉 CMake 去哪找它的 config —— 设 **`<Pkg>_DIR`**
+                              指向包内**上游自带**的 config 目录。
+                         实测效果（mrc，禁网环境）：
+                           `-- CPM: Using local package Catch2@3.8.1`
+                           → 随后 ctest 正常执行上游 9 个 TEST_CASE。
+                         ⚠️ 关键陷阱：**`<Pkg>_DIR` 里的包名是「CMake 包名」，而
+                         conan 包名往往与之不同**（含大小写差异）：
+                           · mcfp   ← conan 包名 `libmcfp`，CMake 包名 `mcfp`
+                           · Catch2 ← conan 包名 `catch2`（小写），CMake 包名 `Catch2`（大写）
+                         因此**不要用 conan 包名去拼目录名**（`libmcfp`/`catch2` 都拼不中）；
+                         应按 **marker 文件**定位，如 `Catch2Config.cmake`、`mcfpConfig.cmake`。
+                         注意 `find_package(X)` 对 X 的**大小写敏感**，故必须匹配上游
+                         源码里写的那个名字（照抄 CPMAddPackage 的首参）。
+affected_scope:         OHOS（及任何禁网/受限网络 CI）中，上游用 CPM.cmake 获取
+                         依赖的 CMake 项目 —— 尤其是「只为跑上游测试」而引入的测试
+                         框架依赖（Catch2/GoogleTest 等），这类依赖通常只出现在
+                         `BUILD_TESTING` 分支内。也适用于上游用 CPM 获取普通库依赖
+                         但已开启 `CPM_USE_LOCAL_PACKAGES` 的情况。
+verification_cmd:       # ① 判断上游是否给了免改上游的开关（决定性）
+                         grep -nE 'CPM_USE_LOCAL_PACKAGES' <src>/CMakeLists.txt
+                         #   → ON 时可直接走本条方案；无此设置则需另想办法
+                         # ② 找出依赖的 **CMake 包名**（照抄 CPMAddPackage 首参，勿用 conan 名）
+                         grep -nE 'CPMAddPackage' <src>/CMakeLists.txt
+                         # ③ 在包内按 marker 定位上游 config 目录
+                         find <dep_package_folder> -name '<Pkg>Config.cmake' \
+                              -o -name '<pkg>-config.cmake'
+                         # ④ 配置后确认真的命中本地包（而非联网）
+                         cmake ... 2>&1 | grep -E 'CPM: Using local package'
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           cpm-use-local-packages-via-pkg-dir-no-upstream-patch
+rec_description:        三步，全部在**配方侧**完成，不动上游源码：
+                         ① **确认开关**：grep 上游 CMakeLists 是否有
+                            `set(CPM_USE_LOCAL_PACKAGES ON)`。有 → 走本条（零 patch）；
+                            无 → 才考虑 patch 成 find_package（见既有 FetchContent 条目）。
+                         ② **提供本地包 + 设 `<Pkg>_DIR`**：把依赖放进依赖图
+                            （测试框架建议 `test_requires`，使交付包不带测试依赖），
+                            然后在 generate() 里按 **marker 文件**在依赖包内定位上游
+                            config 目录，写入 `<Pkg>_DIR`。
+                            **包名取上游源码里写的 CMake 名**（可能是 `Catch2` 而非
+                            `catch2`），**不要**用 conan 包名拼路径。
+                         ③ **验证命中**：配置输出应出现 `CPM: Using local package <名>@<版本>`
+                            —— 这是"没联网"的确证；若仍见 Downloading/fatal 则未命中。
+                         门控建议：把「跑上游测试」做成 option（默认关），开启时才加
+                         `test_requires` 与 `<Pkg>_DIR`。这样**交付包依赖不变**，
+                         而 CI/本地仍能实跑上游测试套件（R34 意义上的真验证）。
+                         附带（同批适配用到，此处不展开）：Conan 2 里 `CMake.test()` 的
+                         cli_args 会路由给 `cmake --build`，要传 ctest 选项得用
+                         **`CMake.ctest()`** —— 详见 E301。
+rec_command:            # 配方侧（conanfile.py generate()）
+                         #   # ① 门控：只在开启时注入测试依赖
+                         #   if self.options.run_upstream_tests:
+                         #       self.test_requires("catch2/3.8.1")   # requirements()
+                         #   # ② 按 marker 定位上游 config（注意 CMake 名大小写）
+                         #   for _n, dep in self.dependencies.items():
+                         #       pf = dep.package_folder
+                         #       for rel in (("lib","cmake","Catch2"),
+                         #                   ("share","cmake","Catch2")):
+                         #           cand = os.path.join(pf, *rel)
+                         #           if os.path.isfile(os.path.join(cand,
+                         #                                  "Catch2Config.cmake")):
+                         #               tc.variables["Catch2_DIR"] = os.path.abspath(cand)
+                         #   # ③ 构建后实跑
+                         #   cmake.ctest(cli_args=["--output-on-failure"])
+                         # 验证
+                         #   conan create . -o '<pkg>/*:run_upstream_tests=True'
+                         #   → 日志应含: -- CPM: Using local package Catch2@3.8.1
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      patch-cpm-call-into-find-package
+fallback_description:   若上游**没有**设 `CPM_USE_LOCAL_PACKAGES`（或该版本的 CPM 行为
+                         不支持），才退回**改上游**路线：用配方 patch 流水线把
+                         `CPMAddPackage(...)` 替换为 `find_package(<Pkg> REQUIRED)`，
+                         并确保有 CMakeDeps(config 生成)或在配方里显式给 `<Pkg>_DIR`。
+                         代价：多一份需随上游版本维护的补丁 —— 故**先查开关**再决定。
+                         （该路线细节见 DRAFT-cmake-test-framework-fetch-to-conan-find-package。）
+fallback_command:       # 生成补丁（仓库脚本）
+                         python3 scripts/ohc-run.py refresh-patch <name> <version> --auto
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       上游用 CPMAddPackage.*(直接|第一步).*patch|没查.*CPM_USE_LOCAL_PACKAGES.*就.*patch
+forbid_1_reason:         上游可能已设 CPM_USE_LOCAL_PACKAGES ON → CPM 会先 find_package，
+                         此时**零 patch** 即可离线满足（实测 mrc 即如此）
+forbid_1_consequence:    平白多维护一份补丁（还要随上游版本更新），且 patch 失败风险自找
+forbid_2_pattern:       用 conan 包名.*拼.*_DIR|_DIR.*=.*libmcfp|
+forbid_2_reason:         `<Pkg>_DIR` 里的 `<Pkg>` 是**CMake 包名**，与 conan 包名常不同
+                         （libmcfp↔mcfp、catch2↔Catch2 大小写差异），拼出来命不中
+forbid_2_consequence:   配置阶段仍去联网/直接报错，且报错信息指向网络而掩盖真实原因（名字不对）
+forbid_3_pattern:       测试依赖.*self\.requires|把测试框架.*放进.*requires\(
+forbid_3_reason:         测试框架应走 `test_requires`（并建议门控 option）——否则交付包
+                         会带上仅测试才需要的依赖，改变消费者的依赖图
+forbid_3_consequence:    交付包依赖被污染、package_id 变化，消费者被迫拉入测试框架
+
+principles:
+similar_to:             E301, DRAFT-cmake-test-framework-fetch-to-conan-find-package, DRAFT-glob-0.0.1-cmake-offline-install
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-12
+source_event:           mrc/1.3.17（PR #9566）：上游 CMakeLists.txt:65 设
+                         `set(CPM_USE_LOCAL_PACKAGES ON)`，并在 BUILD_TESTING 分支里
+                         `CPMAddPackage("gh:catchorg/Catch2@3.5.0")`（CI 禁网）。
+                         实测：不 patch 上游，仅加门控 option + `test_requires("catch2/3.8.1")`
+                         + 把 `Catch2_DIR` 指向包内 `lib/cmake/Catch2` →
+                         configure 输出 `-- CPM: Using local package Catch2@3.8.1`，
+                         上游 **9/9 TEST_CASE 全通过（32 assertions）**，
+                         ctest `100% tests passed, 0 tests failed out of 1`。
+                         同批另有 mcfp 依赖走同一机制（conan 名 libmcfp vs CMake 名 mcfp）。
+                         过程中还实测到两个 Conan API 误用（`CMake.build(args=…)` 不存在；
+                         `CMake.test(cli_args=[…])` 的 cli_args 路由给 cmake --build），
+                         后者**已被 E301 覆盖**，本条不重复。
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9566
+source_commit:          8e7d29da8
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-12
+
+draft:                  true
