@@ -1,0 +1,88 @@
+--- /dev/null
++++ b/source/ohos_pmr_compat.h
+@@ -0,0 +1,85 @@
++// OHOS libc++ 适配 shim — <memory_resource> / std::pmr 缺失补齐
++//
++// 背景（实测）：
++//   OHOS SDK 自带 libc++ 被裁剪，既无顶层 <memory_resource>，也无 std::pmr 容器别名，
++//   且 <experimental/memory_resource> 只提供 memory_resource 抽象基类与
++//   polymorphic_allocator（具体资源 monotonic/pool 未实现，libc++_shared.so 无任何 pmr 符号）。
++//   华为官方 FAQ 亦确认 HarmonyOS NDK 不支持 #include <memory_resource> 与 std::pmr::vector。
++//   上游 libc++ 的 <memory_resource> 本身只是 "include <experimental/memory_resource> +
++//   namespace std { namespace pmr = experimental::pmr; }"，此处按同样思路补齐，
++//   并补一个符合标准语义的 monotonic_buffer_resource（plutobook 的 Heap 基类）。
++//
++// 本头文件只依赖 <experimental/*> 容器别名与 header-only 的 memory_resource 基类；
++// 但 pmr 容器的默认构造会引用 get_default_resource()（实现在 libc++experimental.a），
++// 故消费方仍需链接 -lc++experimental（见配方 generate()）。
++#ifndef PLUTOBOOK_OHOS_PMR_COMPAT_H
++#define PLUTOBOOK_OHOS_PMR_COMPAT_H
++
++#include <cstddef>
++#include <new>
++#include <tuple>
++#include <utility>
++#include <vector>
++
++#include <experimental/memory_resource>
++#include <experimental/forward_list>
++#include <experimental/list>
++#include <experimental/map>
++#include <experimental/set>
++#include <experimental/unordered_map>
++#include <experimental/vector>
++
++// 与上游 libc++ <memory_resource> 等价：std::pmr 即 std::experimental::pmr 的别名
++namespace std { namespace pmr = experimental::pmr; }
++
++namespace std { namespace experimental { inline namespace fundamentals_v1 { namespace pmr {
++
++// 标准语义的最小 monotonic_buffer_resource：
++//   do_allocate 只增不减；do_deallocate 空实现；析构/release() 时统一归还全部块。
++class monotonic_buffer_resource : public memory_resource {
++public:
++    explicit monotonic_buffer_resource(memory_resource* upstream = nullptr) noexcept
++        : m_upstream(upstream) {}
++    explicit monotonic_buffer_resource(size_t initial_size, memory_resource* upstream = nullptr)
++        : m_upstream(upstream) { m_blocks.reserve(initial_size ? 16 : 0); }
++    monotonic_buffer_resource(void* buffer, size_t buffer_size, memory_resource* upstream = nullptr)
++        : m_upstream(upstream) { (void)buffer; (void)buffer_size; }
++    monotonic_buffer_resource(const monotonic_buffer_resource&) = delete;
++    monotonic_buffer_resource& operator=(const monotonic_buffer_resource&) = delete;
++    ~monotonic_buffer_resource() override { release(); }
++
++    void release() noexcept {
++        for (auto& block : m_blocks) {
++            if (m_upstream)
++                m_upstream->deallocate(std::get<0>(block), std::get<1>(block), std::get<2>(block));
++            else
++                ::operator delete(std::get<0>(block), std::align_val_t(std::get<2>(block)));
++        }
++        m_blocks.clear();
++    }
++
++protected:
++    void* do_allocate(size_t bytes, size_t alignment) override {
++        void* data = m_upstream ? m_upstream->allocate(bytes, alignment)
++                                : ::operator new(bytes, std::align_val_t(alignment));
++        try {
++            m_blocks.emplace_back(data, bytes, alignment);
++        } catch (...) {
++            if (m_upstream)
++                m_upstream->deallocate(data, bytes, alignment);
++            else
++                ::operator delete(data, std::align_val_t(alignment));
++            throw;
++        }
++        return data;
++    }
++    void do_deallocate(void*, size_t, size_t) noexcept override {}
++    bool do_is_equal(const memory_resource& other) const noexcept override { return this == &other; }
++
++private:
++    memory_resource* m_upstream;
++    std::vector<std::tuple<void*, size_t, size_t>> m_blocks;
++};
++
++}}}}
++#endif  // PLUTOBOOK_OHOS_PMR_COMPAT_H
