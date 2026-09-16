@@ -1,0 +1,124 @@
+#====================================================================
+# DRAFT-baloo-kf6-ohpcd-cmake-toolchain-cppstd.kv
+# conan CMakeToolchain cppstd 时序坑：profile compiler.cppstd=17 由 toolchain
+#   "cppstd" block 后置决定 -std 并覆盖 CMakeToolchain.variables /
+#   CMAKE_CXX_FLAGS=-std=c++20 → 需 configure() 提升 host settings.compiler.cppstd
+# 触发事件: baloo 26.04.3 (upstream frameworks 6.25.0) HarmonyOS PC 适配
+#   证据链: build3 (balooaaf06454ecc73, cppstd block=17 → 假 C++17 失败:
+#     ranges/erase_if 缺失) → build4 (baloo0038ce75353b5, configure() 提升后
+#     cppstd block=20 → 真 C++20 仍缺 libc++15 ranges any_of) →
+#     build9 (baloo20010c827875d, CI 21/21 通过; 日志 L145 "C++ Standard 20")
+#====================================================================
+
+id:                     DRAFT-baloo-kf6-ohpcd-cmake-toolchain-cppstd
+trigger_tool:           conan|cmake|clang|conanfile.py|conan_toolchain.cmake
+phase:                  configuration|compilation
+error_signature:        no member named 'ranges' in namespace 'std'|
+                         no member named 'erase_if' in namespace 'std'|
+                         no member named 'any_of' in namespace 'std::ranges'|
+                         C++ Standard 17 with extensions OFF|
+                         Conan toolchain: C\+\+ Standard
+
+severity:               2
+category:               conan|cmake|toolchain|cppstd|cxx20|kf6|ohos
+match_keywords:         compiler.cppstd, CMAKE_CXX_STANDARD, CMAKE_CXX_FLAGS,
+                         -std=c++17, -std=c++20, conan_toolchain.cmake,
+                         CMakeToolchain, variable_watch, cppstd block,
+                         settings.compiler.cppstd, C++20, C++17,
+                         conan_modify_std_watch, configure(), CMAKE_CXX_STANDARD_REQUIRED
+title:                  OHOS 上 conan CMakeToolchain 的 cppstd block 以 profile compiler.cppstd 为源后置决定 -std，覆盖 CMakeToolchain.variables/CMAKE_CXX_FLAGS=-std=c++20 —— 须在 configure() 提升 host settings.compiler.cppstd 才能真正用 C++20
+
+root_cause: >
+  conan 生成的 conan_toolchain.cmake 顶部 "cppstd" block 以 profile 的
+  compiler.cppstd 为唯一标准来源：执行 set(CMAKE_CXX_STANDARD <normal var>)、
+  set(CMAKE_CXX_STANDARD_REQUIRED ON) 并注册
+  variable_watch(CMAKE_CXX_STANDARD conan_modify_std_watch)，同时打印
+  "Conan toolchain: C++ Standard <N> with extensions OFF"。CMake 的标准编译
+  选项由该 normal var 决定，并在编译命令里后置于用户 CMAKE_CXX_FLAGS /
+  CMakeToolchain.variables 段写入的 cache 变量（CMAKE_CXX_FLAGS=-std=c++20、
+  CMAKE_CXX_STANDARD "20"）。实测 build3 树
+  (balooaaf06454ecc73) conan_toolchain.cmake L57=set(CMAKE_CXX_STANDARD 17)，
+  尽管 L206-208 已把 CMAKE_CXX_STANDARD "20" 与 CMAKE_CXX_FLAGS "-std=c++20"
+  写进 cache，实际编译仍是 C++17 → 报 "no member named 'ranges' in namespace
+  'std'"（and/phrasepostingiterator L1719/L1728）与 "no member named 'erase_if'
+  in namespace 'std'"（orpostingiterator L1710/L1713）。因此只改 CMAKE_CXX_FLAGS
+  或 tc.variables 无法把标准提到 20；必须把 profile setting 本身提升到 20，
+  让 cppstd block 直接以 20 为源生成。
+
+affected_scope: >
+  ohpcd 固定 compiler.cppstd=17 的 profile（ci/conan/profiles/ohos-aarch64）
+  下，所有需要真正 C++20 语义的 CMake/conan 库（KF6 家族 kfilemetadata/
+  kdnssd/kdbusaddons 及未来任何 C++20 目标库）。特征判断：编译命令行里
+  -std=c++20 与 -std=c++17 并存且 c++17 在后，或 toolchain 打印
+  "C++ Standard 17"；随后依赖 C++20 标准库能力（std::ranges、std::erase_if）
+  的源码报 "no member named ..."。注意与本 DRAFT-ohos-libcxx15-...-ranges 的
+  区别：本条目是"假 C++20（实际 C++17）"的 toolchain 时序坑；后者是"真到
+  C++20 后 OHOS libc++15 仍缺 ranges 算法"的库能力缺口，两者是同一适配链的
+  先后两环。
+
+verification_cmd: >
+  grep -n "CMAKE_CXX_STANDARD" <pkg>/build/Release/generators/conan_toolchain.cmake
+    # cppstd block 首个 set(CMAKE_CXX_STANDARD <N>) 应为 20（profile 被 configure() 提升后）
+  grep -n "Conan toolchain: C++ Standard" <build.log>
+    # build3 报告 17（失败）；configure() 提升后 build4/build9 报告 20
+  grep -n "C++ Standard" /storage/Users/currentUser/tmp/oh-device-porting/baloo-aci/build9-aci-round1.log
+    # L145 "C++ Standard 20 with extensions OFF"（主包构建）；L1055 "C++ Standard 17"（test_package 消费者，未提升，符合预期）
+
+rec_priority:           1
+rec_approach:           raise-host-settings-cppstd-in-configure
+rec_description: >
+  在 conanfile.py configure() 中提升 host 节点的 settings.compiler.cppstd 到
+  目标标准（baloo: 17→20），使 conan_toolchain.cmake cppstd block 直接以 20
+  为源生成 set(CMAKE_CXX_STANDARD 20)。仅在 settings.os=="OHOS" 且当前值=="17"
+  时执行，依赖节点保持各自 cppstd=17，不动依赖图、不触发依赖重算。
+  （conanfile.py 注释原文："the conan toolchain hardcodes CMAKE_CXX_STANDARD
+  from the profile setting (compiler.cppstd=17) AFTER any CMakeToolchain
+  variable, so the -std=c++17 it emits wins over -std=c++20"。）
+rec_command: >
+  def configure(self):
+      # OHOS: conan toolchain 以 profile cppstd 为准后置写 -std，覆盖
+      # CMakeToolchain.variables/CMAKE_CXX_FLAGS 的 -std=c++20；baloo
+      # engine 需要真 C++20（std::ranges / std::erase_if），提升该 setting
+      # （仅 host 节点；依赖保持 cppstd=17）。
+      if self.settings.os == "OHOS" and str(self.settings.compiler.cppstd) == "17":
+          self.settings.compiler.cppstd = "20"
+rec_auto_fix:           false
+rec_impl:               archives/b/baloo/26.04.3/conanfile.py configure()（settings = "os","compiler","build_type","arch"）
+
+fallback_priority:      2
+fallback_approach:      profile-or-cli-host-override
+fallback_description: >
+  单库/单跑可用 -s:h compiler.cppstd=20（或独立 profile）临时提升；但发布用统一
+  ohos-aarch64 profile 保持 17 时每次 conan create 都要显式加 -s，易漏且不固化
+  在 recipe，不作主方案（改 recipe 的 configure() 才可复现）。
+fallback_command:       conan create archives/b/baloo/26.04.3 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 -s:h compiler.cppstd=20 --build=missing
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       仅设 CMAKE_CXX_FLAGS=-std=c++20|仅 tc.variables["CMAKE_CXX_STANDARD"]|假定 -std=c++20 已生效不查 toolchain cppstd block
+forbid_1_reason:        cppstd block 的 normal var（源自 profile）决定 CMake 标准选项并后置覆盖 CXX_FLAGS；不改 profile setting 时实际编译仍是 C++17，构成"假 C++20"。
+forbid_1_consequence:   依赖 C++20 特性的代码以 C++17 语义报错或静默错误编译，诊断成本高且不可复现。
+
+based_on_library:       baloo
+based_on_version:       26.04.3
+upstream_version:       6.25.0
+source_url:             https://download.kde.org/stable/frameworks/6.25/baloo-6.25.0.tar.xz
+adapted_for:            HarmonyOS PC (OHOS aarch64, clang 15.0.4, ohpcd profile compiler.cppstd=17)
+evidence_files:
+  - /storage/Users/currentUser/tmp/oh-device-porting/baloo-impl/build3.log   # C++17 失败：ranges/erase_if 缺失（L1710-1728）
+  - /storage/Users/currentUser/tmp/oh-device-porting/baloo-impl/build4.log   # 提升后真 C++20：std::ranges::any_of 缺失（L451/L462）
+  - /storage/Users/currentUser/tmp/oh-device-porting/baloo-aci/build9-aci-round1.log  # CI：L145 C++ Standard 20；21/21 PASS
+  - <conan cache>/balooaaf06454ecc73/b/build/Release/generators/conan_toolchain.cmake  # cppstd block L57=17（L206-208 写 cache 20 无效）
+  - <conan cache>/baloo20010c827875d/b/build/Release/generators/conan_toolchain.cmake  # cppstd block L57=20（configure() 提升后）
+draft_created:          2026-09-06
+status:                 draft（未 promote；E*** 由知识库主编定）
+authors:                builder/path-update baloo-26.04.3（baloo 证据见 round-1-implement/authoritative-ci + curation/audit 报告）
+
+# —— 与现有知识的关系（查重证据，权威面 = worktree knowledge == origin/main）——
+#   DRAFT-ohos-libcxx15-missing-cpp20-ranges-algorithms: 真 C++20 后 libc++15 仍缺
+#     ranges 算法（baloo 2 处 std::ranges::any_of → C++11 std::any_of 改写），与本条
+#     "假 C++20（实 C++17）" toolchain 时序坑前后衔接、相互引用，不重复。
+#   E538: 同为 ohpcd cppstd=17 profile 语境，但主题是发布图 options/package-id 一致性；
+#   E096（CMake 编译器特性自动检测失败）、E130（libc++ 最低标准 ≥17）、E293（旧 C++2003
+#     语法）机制均不同。curation-report §5 检索 cppstd/CXX_STANDARD/CMakeToolchain 无
+#     以"profile cppstd block 后置决定 -std 覆盖 CMAKE_CXX_FLAGS"为主题的既有条目。
