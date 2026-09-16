@@ -1,0 +1,86 @@
+# ═══ Draft knowledge entry — libtool .la 跨包复用失败，与私有头文件依赖的声明方式 ═══
+# Timestamp: 2026-09-14
+# Software: libwpd 0.10.3（librevenge 家族，autotools + libtool）
+# Gate: conan-verify G2（conan create）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the excerpts below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-libtool-la-cross-package-and-private-header-deps
+trigger_tool:           conan|conan create|conan-verify|libtool|make|cmake|configure
+phase:                  link|package
+error_signature:        library '.*\.la' was moved\.|
+                         cannot find the library '/+lib/.*\.la'|
+                         archive member '.*\.a' is neither ET_REL nor LLVM bitcode|
+                         The direct dependency '.*' is not used by any '\(cpp_info/components\)\.requires'|
+                         Required boost headers not found\.|
+                         fatal error: 'boost/.*' file not found
+
+severity:               2
+category:               conan|autotools|libtool|dependency|build-system
+match_keywords:         .la was moved, libtool, libdir, prefix=/, DESTDIR, clean link dir,
+                         archive member neither ET_REL, absolute .a path, duplicate symbol,
+                         PKG_CHECK_MODULES, REVENGE_CFLAGS, private header dependency,
+                         tool_requires vs requires, cpp_info.requires validation, boost/spirit,
+                         BOOST_CFLAGS, librevenge family, libwpd, libwps, libabw
+title:                  libtool 依赖的 .la 不能跨包复用（改用只含 .a 的干净 -L 目录）；只在上游私有 TU 里用到的头文件依赖必须声明为 tool_requires 而非 requires
+
+root_cause: >
+  1) libtool 的 .la 文件里记录了该库**自己的安装前缀**（libdir）。依赖包若以
+     `--prefix=/` + DESTDIR 打包（本仓 librevenge 0.0.5 就是这样），其 .la 中
+     libdir='//lib'。下游配方 `-L<依赖包>/lib -lrevenge-0.0` 时，libtool 会优先在
+     -L 目录里找同名 .la 并按其中的 libdir 解析，于是：
+
+         libtool: warning: library '.../librevenge-0.0.la' was moved.
+         libtool:   error: cannot find the library '//lib/librevenge-0.0.la'
+
+  2) 改用**绝对 .a 路径**可以绕过 .la，但 libtool 会把命令行上的 .a 当作输入**成员**
+     归档进产物：
+
+         ld.lld: warning: ../../lib/.libs/libwpd-0.10.a: archive member
+                          'librevenge-0.0.a' is neither ET_REL nor LLVM bitcode
+
+     即依赖库被嵌进了本包静态库；消费者若同时链 librevenge，就会出现重复符号。
+  3) 另一类问题在声明层：上游某个**私有** TU 需要某依赖的头（libwpd 的
+     src/lib/libwpd_internal.cpp 用 boost/spirit），但该依赖不出现在公共头与链接
+     接口里。写成 `requires` 后 conan 的 package_info 校验直接拒绝：
+     "The direct dependency 'boost' is not used by any '(cpp_info/components).requires'"
+     —— 而把它塞进 cpp_info.requires 又等于向消费者谎报一个并不需要的依赖。
+
+rec_approach: >
+  libtool-family-three-points：
+  ① 依赖库一律通过**只放 .a、不放 .la 的干净目录**引用：在 build_folder 内建一个
+     目录，把依赖包的 lib*.a 复制进去，然后 `-L<干净目录> -l<name>`。libtool 找不到
+     .la 便走普通 -L/-l 路径，既不误读 libdir，也不把依赖当成员归档。
+  ② 头文件依赖分两类：出现在公共头/链接接口里的 → `requires` 并写进
+     cpp_info.requires；只被上游自己的 TU 使用（公共头不含它）→ `tool_requires`
+     （构建期上下文），版本与图中已有版本对齐以免出现两份。
+  ③ 无 pkg-config 的平台要把 PKG_CHECK_MODULES 的每个 <PREFIX>_CFLAGS/_LIBS 都导出
+     （该宏在 CFLAGS 非空时短路）；静态依赖自身的传递库（如 zlib 的 -lz）要一起带上。
+
+verification: >
+  libwpd 0.10.3 设备实机：改用干净 -L 目录后链接通过、包成功产出
+  （libwpd-0.10.a + 三个 CLI 工具 + .pc），G0/G1/G2/G3 全部 PASS，
+  `✅ 配方验证通过: libwpd 0.10.3`；消费者测试库级 9/9（含手工构造合法 WPX 头的
+  正向格式识别）、CLI 级 5/5。反例证据见 root_cause 里的两条原始报错文本。
+
+apply_boundary: >
+  适用于任何"依赖包由 libtool 构建、且它自己也是 libtool 工程"的 autotools 配方
+  （librevenge / libwpd / libwps / libabw 这一族最典型，libwpd 与 libabw 的坑完全相同）。
+  若依赖包是 cmake/meson 构建（不产出 .la），则 ① 无关；② ③ 仍然适用。
+
+counter_examples: >
+  若依赖包用 CMake 构建（如本仓 zlib、ncurses）则不产 .la，直接 -L/-l 即可；
+  若依赖的 .la 记录的前缀恰好与当前 -L 目录一致（同一次构建内、未跨包），也不会触发
+  "was moved"；若某依赖的头确实出现在公共头里（如 librevenge 之于 libwpd：消费者要
+  自己构造 RVNGInputStream），它就必须是 requires 而不是 tool_requires。
+
+limitations: >
+  与 DRAFT-libcaca-0.99.beta20-autotools-ohos-shell-and-deps-env 互补：那条讲构建
+  shell 语义与依赖 env 传递，本条讲 libtool 依赖的链接方式与依赖的声明类别。
+  另注：把依赖的 .a 嵌进本包（反例 2 的后果）有时会被误当成"静态打包更省事"，
+  但它与消费者另链同一库时必然冲突，属于必须避免的状态。
