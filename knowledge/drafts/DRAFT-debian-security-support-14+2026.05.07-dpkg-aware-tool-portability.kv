@@ -1,0 +1,126 @@
+#====================================================================
+# DRAFT-debian-security-support-14+2026.05.07-dpkg-aware-tool-portability
+# — Debian package-manager-aware Shell/Perl 工具迁移到 HarmonyOS 的通用兼容模式
+# 触发事件: debian-security-support 14+2026.05.07 (Debian canonical 1:14+2026.05.07)
+#           HarmonyOS PC (aarch64) 适配；PR #9223，commit 89d0a015cf
+# 查重: knowledge/ 中 dpkg-query / installed package list / blends / metapackage 均 0 命中；
+#       capability 邻居 E507；Debian 政策族 E071/E089/E157/E414/E425（禁 apt/yum）；
+#       data 包族 E241/E243/E255/E536（不同主题）。无等价条目 → 新立条目。
+#====================================================================
+
+id:                     DRAFT-debian-security-support-14+2026.05.07-dpkg-aware-tool-portability
+trigger_tool:           conan|sh|awk|grep|getopt|mktemp|test
+phase:                  packaging|runtime|validation
+error_signature:        dpkg-query: not found|
+                         dpkg-query unavailable|
+                         /etc/debian_version: No such file or directory|
+                         grep: Perl matching not supported in a --disable-perl-regexp build|
+                         Error loading shared library libintl.so.8|
+                         mktemp: need XXXXXX: Not supported|
+                         . gettext.sh: not found|
+                         exit 0 + empty stdout (silent fake pass)
+severity:               2
+category:               portability|package-manager-abstraction|platform-limitation|validation
+match_keywords:         dpkg-query, dpkg, installed package list, /var/lib/dpkg/status,
+                         /etc/debian_version, capability detection, optional backend,
+                         silent success, fake pass, exit 3, grep -P, PCRE, gettext,
+                         gettext.sh, libintl, mktemp --tmpdir, POSIX mktemp, DSS_MANIFEST,
+                         DSS_DPKG_STATUS, Debian, HarmonyOS, shell portability,
+                         package database, Perl runtime, DPKG_QUERY, tpage
+title:                  Debian package-manager-aware Shell/Perl 工具迁移到 HarmonyOS：包清单后端能力探测 + 反静默假通过（debian-security-support 实例）
+
+root_cause: >
+  Debian 运维/查询类工具把「操作系统包管理器」当作默认数据后端：核心业务逻辑
+  （读发行版数据文件、按规则判定/渲染）本身可移植，但把「枚举已装包」写死为
+  dpkg-query（读 /var/lib/dpkg/status），并用 /etc/debian_version 选发行版数据、
+  用 GNU-only CLI 参数（grep -P、gettext.sh、mktemp --tmpdir）与 Debian 专属路径。
+  在 HarmonyOS 上这些能力缺失或行为不同，产生四类真实故障：
+  (1) 后端缺失：dpkg-query 不存在 → 工具无法枚举包；
+  (2) 静默假通过：上游把 dpkg-query 放进管道（`dpkg-query ... | awk ... | awk ... >list`），
+      管道退出码取自末位 awk，dpkg-query 失败被吞 → 空输出 + exit 0 = 伪「一切正常」；
+  (3) GNU-only 参数不可移植：worker grep 编译为 --disable-perl-regexp（无 -P）、
+      gettext 二进制因 libintl.so.8 无法重定位而不可用、mktemp 不接受 --tmpdir；
+  (4) 平台/发行版标志不存在：无 /etc/debian_version（选数据文件失败）、无 Debian 文件系统。
+  上述导致「脚本能启动但语义错误」——不是简单 shell 不兼容，而是包管理器耦合 + 假成功语义。
+
+solution: >
+  可移植核心与 Debian 集成层切分（不删核心逻辑、不 mock、不固定成功）：
+  1. 包清单后端抽象 `pkglist-probe`（capability detection，按优先级）：
+     DSS_MANIFEST(真实 TSV 清单) → DSS_DPKG_STATUS(真实 dpkg status 文件，awk 解析)
+     → PATH 上的 dpkg-query（原样 exec，Debian/chroot/容器语义不变）
+     → 全无则写 marker 并 exit 3。
+  2. 反静默假通过（最小诚实补丁）：probe 无后端时写 `$TEMPDIR/backend-unavailable`，
+     调用方在主脚本管道之后检测 marker → stderr 诊断 + **exit 3**（禁止空输出 exit 0）。
+  3. GNU grep -P → 运行期探测 `grep -P -q` 是否可用，不可用回退 `-E`（数据模式 ERE 安全）。
+  4. gettext.sh/外部 gettext 不可用 → 内建最小 `gettext()/eval_gettext()`（保留英文消息；
+     i18n 非承重语义），不因翻译缺失跳过核心逻辑。
+  5. mktemp：GNU `--tmpdir --directory ...XXXXX` → POSIX `mktemp -d "$TMPBASE/...XXXXXX"`
+     加显式回退（$TMPDIR 或 /tmp；二次回退 mkdir $$）。
+  6. 数据目录 `DSS_DATA_DIR` 可覆盖（默认包内绝对路径），保持 relocatable。
+  7. 核心判定（数据文件解析 + 日期比较 + ended/limited/earlyend）**原样真实执行**，
+     数据文件（security-support.deb11..14）随包原样分发 = 真实知识库。
+  Conan 侧：render check-support-status.in（python 替换 VERSION/AWK/DPKG_QUERY/LIST 占位符，
+  无需 perl/tpage）；数据文件 verbatim；零 requires。
+
+affected_scope: >
+  以「OS 包管理器/包数据库」为默认数据后端、但领域核心可移植的 Debian 系 Shell/Perl/C 工具：
+  dpkg-query/apt 依赖脚本、包清单/支持状态/升级审计类 CLI、Debian 发行版数据消费者、
+  运维脚本；亦适用于任何「枚举系统状态 → 判定」型工具在系统能力缺失平台上的移植。
+  不适用于包管理器本体或必须真正执行安装/删除事务的软件（见 not applicable）。
+
+verification_cmd: >
+  本地主机 conan create（Linux/WSL）：test_package PASS——--version/--help；
+  供 DSS_MANIFEST 受控数据 + 过去/未来日期 → ended/earlyend 判定输出与上游 t/ 语义一致；
+  DSS_DISABLE_DPKG=1 且无 manifest/status → **exit 3** 且 stdout 空（反假通过）；4 份数据文件 lint。
+  HarmonyOS 真机 conan create PASS：test_package 同断言全部通过。
+  CI（AtomGit PR #9223）PASS；current==harmony==ci=89d0a015cf。
+
+
+rec_priority:           1
+rec_approach:           capability-detect-backend
+rec_description: >
+  为 OS 包管理器后端做能力探测与抽象：DSS_MANIFEST → DSS_DPKG_STATUS → dpkg-query → exit 3；
+  后端不可用必须在管道之后显式检测并 exit 3（反静默假通过）；GNU-only 参数
+  （grep -P / gettext.sh / mktemp --tmpdir）做运行期探测与可移植回退；
+  核心判定逻辑保持真实执行，数据文件随包分发。
+rec_command: >
+  DSS_MANIFEST=real-list.tsv check-support-status --type ended --no-heading  (真判定)
+  DSS_DISABLE_DPKG=1 check-support-status --type ended  (期望 exit 3 + 诊断)
+rec_auto_fix:          true
+rec_impl:              capability-probe + recipe-render
+
+forbid_1_pattern:      返回空列表并 exit 0|空输出.*exit 0|exit 0.*empty
+forbid_1_reason:        无后端时输出空结果并 exit 0 = 伪「无受影响包」的成功语义
+forbid_1_consequence:   使用者误信系统安全，问题被静默掩盖（上游实测陷阱）
+forbid_2_pattern:      删除.Debian.*逻辑|mock.*包清单|固定返回成功|改测试预期
+forbid_2_reason:        为 PASS 删核心逻辑/mock 后端/改断言 = 伪造适配
+forbid_2_consequence:   适配无真实语义，评审判欺骗；PR 不可复用
+
+fallback_priority:      2
+fallback_approach:      consult-knowledge
+fallback_description:   平台能力探测与降级的通用叙述参考 E507；Debian 工具宿主适配参考本仓已归档
+                        apt-dater-host / alien / debconf / debianutils（见 Potential Reuse）
+fallback_command:       grep -rn 'capability' knowledge/graph/E507.kv
+fallback_auto_fix:      false
+fallback_impl:          none
+
+principles:             P001, P003, P011
+caused_by:
+similar_to:             E507, E220, E071
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-debian-security-support-14+2026.05.07-dpkg-aware-tool-portability.md
+last_updated:           2026-09-10
+source_event:           archives/d/debian-security-support/14+2026.05.07 (PR #9223, commit 89d0a015cf)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                farm-4lib-batch
+source_pr:              9223
+source_commit:          89d0a015cf
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.6
+metrics_last_used:     2026-09-10
