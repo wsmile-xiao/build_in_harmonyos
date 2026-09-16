@@ -26,6 +26,12 @@ class PakchoisTestConan(ConanFile):
         return cc or os.environ.get("CC") or "clang"
 
     def build(self):
+        # 主配方的 os.environ["TMPDIR"] 经 conan create 同进程泄漏到 test_package，
+        # 指向主包打包后已被 conan 删除的 build/_tmp；设备 /tmp 又是只读文件系统。
+        # 显式指向本包可写 tmp（仓库惯例：celt / p11-kit-server）。
+        _tmp = os.path.join(self.build_folder, "tmp")
+        os.makedirs(_tmp, exist_ok=True)
+        os.environ["TMPDIR"] = _tmp
         incs = []
         for _ref, _d in self.dependencies.items():
             incs += ["-I" + p for p in _d.cpp_info.includedirs]
