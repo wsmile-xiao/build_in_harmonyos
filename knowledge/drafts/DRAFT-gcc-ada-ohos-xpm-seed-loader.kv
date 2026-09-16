@@ -1,0 +1,97 @@
+#====================================================================
+# DRAFT - GCC Ada build-only GNAT seed under the HarmonyOS XPM policy
+#====================================================================
+
+id:                     DRAFT-gcc-ada-ohos-xpm-seed-loader
+trigger_tool:           gcc|gnat|gnatmake|gnat1|musl|mmap|conan|binary-sign-tool
+phase:                  bootstrap|compilation|runtime|testing
+error_signature:        PermissionError: \[Errno 13\] Permission denied.*mmap|
+                         MAP_XPM.*EACCES|
+                         PROT_EXEC.*EACCES|
+                         Error loading shared library lib(isl|mpc|mpfr|gmp|z)\.so|
+                         /proc/self/fd/9|
+                         SHORT_NEEDED_DIAGNOSTIC
+
+severity:               3
+category:               harmonyos|gcc|ada|gnat|bootstrap|musl|xpm|signing
+match_keywords:         GCC Ada, GNAT seed, Alpine musl, MAP_XPM, XPM,
+                         binary-sign-tool, PT_INTERP, /proc/self/fd/9,
+                         short NEEDED, owner identity, signed loader
+title:                  Run XPM dependency checks inside the signed GNAT seed loader, not a Python preloader
+
+root_cause: >
+  GCC's Ada frontend is written in Ada, so a native GCC Ada build needs an
+  existing GNAT seed. A checksum-pinned Alpine AArch64/musl seed has compatible
+  code generation, but HarmonyOS XPM rejects its unsigned executable mappings
+  and shared dependencies. Signing the copied ELF files is necessary but not
+  sufficient when a Python launcher first performs MAP_XPM or PROT_EXEC mmap:
+  that mmap runs under the Python process signing identity, not the signed seed
+  process identity, and returns EACCES even from writable cache and HAP files
+  directories. The patched musl loader already performs check_xpm while loading
+  each dependency. Once the signed seed is exec'ed with PT_INTERP set to
+  /proc/self/fd/9, those checks run in the correct seed execution context.
+
+affected_scope: >
+  Native HarmonyOS builds of GCC Ada or other bootstrapped language frontends
+  that use a checksum-pinned AArch64/musl compiler seed with shared dependencies.
+
+verification_cmd: >
+  CI_PACKAGES="archives/g/gcc-ada/9.5.0" zsh ci/conan/build_and_test.sh;
+  require seed_probe.o, SHORT_NEEDED_DIAGNOSTIC=pass, and clean CI #31486.
+
+rec_priority:           1
+rec_approach:           signed-seed-fd-loader-xpm-context
+rec_description: >
+  Treat the seed as a build-only verified source input. Copy it to an executable
+  application files location; replace long dependency NEEDED names with short
+  names; build a package-owned musl loader that uses MAP_XPM for file-backed
+  segments; rewrite seed PT_INTERP to /proc/self/fd/9; sign the copied seed,
+  short-name libraries and loader. The launcher must only open the loader,
+  preserve it on fd 9, set the seed library path, and exec the signed seed.
+  Leave XPM dependency checks to the loader after exec. Discard the seed from
+  the final package.
+rec_command: >
+  loader_fd=open(signed_loader); dup2(loader_fd, 9); set_inheritable(9, true);
+  execv(signed_seed, argv); patched musl loader performs check_xpm(fd) while
+  resolving the signed short-name dependencies.
+rec_auto_fix:           false
+rec_impl:               conan-build-only-bootstrap-loader
+
+fallback_priority:      2
+fallback_approach:      native-signed-launcher
+fallback_description: >
+  If the platform Python cannot preserve the loader descriptor through exec,
+  use a small signed native launcher with the same fd 9 and exec contract. Do
+  not move dependency mapping back into the launcher process.
+fallback_command:       signed-launcher <signed-seed> <args>
+fallback_auto_fix:      false
+fallback_impl:          native-exec-wrapper
+
+forbid_1_pattern:       mmap\(.*MAP_XPM|mmap\(.*PROT_EXEC
+forbid_1_reason:        A Python-side pre-map uses the launcher signing identity and duplicates the loader's own XPM check.
+forbid_1_consequence:   Clean workers fail with EACCES before the signed seed or musl loader executes.
+
+forbid_2_pattern:       package.*(Alpine|seed|libisl|libmpc|libmpfr|libgmp)
+forbid_2_reason:        The Alpine GNAT closure is licensed and verified as a build-only bootstrap input, not a runtime package component.
+forbid_2_consequence:   The final Conan package leaks an undeclared foreign runtime and loses relocatability.
+
+principles:             P013, P016
+similar_to:             E260, DRAFT-patchelf-breaks-ohos-signing
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-gcc-ada-ohos-xpm-seed-loader.md
+last_updated:           2026-08-26
+source_event:           archives/g/gcc-ada/9.5.0 issue #2281
+
+authors:                wxjshr
+source_pr:              OpenHarmonyPCDeveloper/build_in_harmonyos!6116
+source_commit:          2da8d6c87193635bb5fdaa3927ec18f918fad815
+
+metrics_success_count:  2
+metrics_fail_count:     4
+metrics_confidence:     1.0
+metrics_last_used:      2026-08-26
+
+draft:                  true
+contributor_id:         wxjshr
