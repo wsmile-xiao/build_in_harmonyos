@@ -1,0 +1,118 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E6339.kv，填写各字段
+# 对应的人类文档: doc/E6339.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E6339
+trigger_tool:           configure|gcc|clang|make|ld|runtime
+phase:                  configuration|compilation|linking|runtime
+error_signature:        fuse_mount.*not declared|fuse_kern_chan_new.*not declared|too few arguments.*op_rename|incompatible function pointer.*fuse_lowlevel_ops|fuse_dirent_size.*not declared
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity:               3
+category:               compat, portability, build-system, headers
+match_keywords:         FUSE_USE_VERSION, FUSE 2, libfuse 3, fuse_mount, fuse_session_mount, fuse_add_direntry, fuse_lowlevel_ops
+title:                  旧版 FUSE 低层 API 迁移到 libfuse 3 时必须同时迁移生命周期和回调语义
+prescan_pattern:        FUSE_USE_VERSION[[:space:]]*[=][[:space:]]*2[0-9]|fuse_mount|fuse_kern_chan_new|fuse_dirent_size|fuse_add_dirent
+prescan_globs:          *.c, *.h
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause:             旧项目以 FUSE 2 的 channel、mount 和目录项接口为边界，升级到 libfuse 3 后不仅是头文件路径变化，还涉及 FUSE_USE_VERSION、低层回调签名、session 生命周期和目录项编码方式的整体契约变化。只替换 include 或库名会留下可编译但语义不完整的路径。
+affected_scope:         使用 fuse_mount/fuse_kern_chan_new、FUSE_USE_VERSION 25 等旧低层接口的 C/C++ FUSE 文件系统守护进程和命令行工具。
+verification_cmd:       git apply --check archives/e/ext2fuse/0.8.1/patches/0001-configure-fuse3.patch archives/e/ext2fuse/0.8.1/patches/0002-src-fuse3-api.patch archives/e/ext2fuse/0.8.1/patches/0006-fuse3-session-direntry.patch && rg -n "fuse_session_mount|fuse_session_loop|fuse_add_direntry" src
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           fuse3-lowlevel-session-port
+rec_description:        将 FUSE_USE_VERSION 升到 31，使用 session_new/session_mount/session_loop/session_unmount，按 libfuse 3 更新回调签名，并用 fuse_add_direntry 生成目录项。
+rec_command:            git apply patches/0001-configure-fuse3.patch patches/0002-src-fuse3-api.patch patches/0006-fuse3-session-direntry.patch
+rec_auto_fix:           false
+rec_impl:               manual-api-port
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      staged-api-port
+fallback_description:   先保留编译通过的最小 session 迁移，再逐个补齐 rename flags、init conn 参数和 readdir 目录项编码，并用消费者测试覆盖命令行入口。
+fallback_command:       rg -n "FUSE_USE_VERSION|fuse_lowlevel_ops|op_rename|op_init|op_readdir" src
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       fuse_mount|fuse_kern_chan_new|fuse_add_dirent
+forbid_1_reason:        只改依赖声明而保留 FUSE 2 channel/目录项接口，会让迁移停留在表面，可能在链接或首次挂载请求时失败。
+forbid_1_consequence:   编译结果不能证明运行时 session 生命周期和目录读取协议正确。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             R6, R16, R29
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E6339.md
+last_updated: 2026-09-12
+source_event:           ext2fuse 0.8.1：FUSE 2 代码迁移到 libfuse 3；Shadow CI 最终编译、打包和 test_package 通过。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                Codex
+source_pr:
+source_commit:          98febaf9ab
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: 11A1

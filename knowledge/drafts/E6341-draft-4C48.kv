@@ -1,0 +1,118 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E6341.kv，填写各字段
+# 对应的人类文档: doc/E6341.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E6341
+trigger_tool:           configure|make|install
+phase:                  configuration|compilation|installation
+error_signature:        subs1[.]awk:[[:space:]]*Permission denied|config[.]status.*could not setup config files|Read-only file system.*[/]tmp|Permission denied.*configure|mkfifo.*Permission denied
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity:               3
+category:               hmdfs, autotools, build-system, platform, limitation
+match_keywords:         HMDFS, umask 077, config.status, TMPDIR, CONFIG_SHELL, ACLOCAL, autoreconf, jobserver, make -j1
+title:                  HMDFS 上生成式 Autotools 构建需要固定 shell、临时目录和生成文件生命周期
+prescan_pattern:        umask[[:space:]]+077|mktemp|ACLOCAL|AUTOMAKE|AUTOCONF|Makefile[.]in
+prescan_globs:          configure, configure.ac, Makefile*, *.am, *.in
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause:             OHOS worker 的 Conan 缓存和构建目录可能位于 HMDFS，/tmp 可能只读，HMDFS 对 0700 临时目录、脚本直接执行和 jobserver FIFO 的支持也不同。Autotools 若在构建期重新生成 configure/Makefile，或让 configure 以受限 umask 创建临时目录，就会在真正编译前失败。
+affected_scope:         使用 Autoconf/Automake 生成文件的旧 C/C++ 项目，尤其是源码归档自带 configure、构建目录位于 HMDFS 的 Conan 配方。
+verification_cmd:       TMPDIR="$PWD/tmp" CONFIG_SHELL=/data/service/hnp/bin/bash sh ./configure --build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos && make -j1
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           hmdfs-safe-generated-autotools
+rec_description:        使用源码包自带生成文件，build-local TMPDIR 和 native OHOS shell，修正生成脚本的 umask 077→022，固定生成文件时间戳并禁用不可用的 Autotools 重生成器。
+rec_command:            TMPDIR="$BUILD_DIR/tmp" CONFIG_SHELL=/data/service/hnp/bin/bash sh "$SOURCE_DIR/configure" --build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos && make -j1
+rec_auto_fix:           false
+rec_impl:               autotools-hmdfs-adapter
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      native-build-tmpfs
+fallback_description:   若源码确实必须 autoreconf，将源码和构建输出迁移到可执行且可写的 native/tmpfs 路径，再使用目标环境 Autotools；不要用一个未验证的 host autoreconf 结果覆盖目标生成文件。
+fallback_command:       mkdir -p "$TMPDIR" && TMPDIR="$TMPDIR" autoreconf --install --verbose
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       TMPDIR=[/]tmp|umask[[:space:]]+077|make[[:space:]]+-j[[:digit:]]+
+forbid_1_reason:        /tmp 在目标环境可能只读，umask 077 会生成跨 UID 不可写的 HMDFS 临时目录，并行 make 还可能依赖不可创建的 jobserver FIFO。
+forbid_1_consequence:   configure 或 make 在编译前失败，且容易被误判为源码或依赖缺失。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             R6, R11, R16
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E011, E114, E129, E223]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E6341.md
+last_updated: 2026-09-12
+source_event:           ext2fuse 0.8.1：前置 Shadow CI 复现 HMDFS 脚本执行、临时目录和生成文件时间戳问题；使用 shipped configure、build-local TMPDIR、native bash、umask 022 和 make -j1 后通过。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                Codex
+source_pr:
+source_commit:          98febaf9ab
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: 4C48

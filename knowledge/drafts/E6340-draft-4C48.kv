@@ -1,0 +1,118 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E6340.kv，填写各字段
+# 对应的人类文档: doc/E6340.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E6340
+trigger_tool:           clang|ld|make
+phase:                  compilation|linking
+error_signature:        ld.lld:[[:space:]]*error:[[:space:]]*duplicate symbol.*ext2fs_|duplicate symbol:[[:space:]]*ext2fs_|multiple definition.*ext2fs_
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity:               3
+category:               compilation, linking, compat, portability
+match_keywords:         duplicate symbol, ld.lld, extern __inline__, NO_INLINE_FUNCS, inline.c, ext2fs
+title:                  旧式 extern inline 辅助函数在 OHOS Clang 下产生重复符号
+prescan_pattern:        extern[[:space:]]+(__inline__|inline)|NO_INLINE_FUNCS|inline[.]c
+prescan_globs:          *.c, *.h
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause:             旧版 ext2fs 头文件依赖 GNU89 风格的 extern inline 语义，并同时提供 inline.c 中的外部实现。OHOS Clang 的默认 C 语义会让多个包含头文件的翻译单元生成外部定义，最终与静态库中的 inline.c 对象重复。
+affected_scope:         带有旧式 extern inline 头文件、并将多个翻译单元与同一份 inline.c/静态库实现链接的 C 项目，尤其是内嵌 ext2fs、网络协议和老式工具链代码。
+verification_cmd:       nm libext2fs.a | rg "ext2fs_get_inode_bitmap_start|ext2fs_get_block_bitmap_start" && clang -Wl,--no-undefined <objects> libext2fs.a -o <program>
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           disable-header-inline-implementation
+rec_description:        在 OHOS 目标编译的 CPPFLAGS 中定义 NO_INLINE_FUNCS，让头文件只保留声明，使用库内 inline.c 提供唯一的外部实现。
+rec_command:            CPPFLAGS="$CPPFLAGS -DNO_INLINE_FUNCS" make -j1
+rec_auto_fix:           false
+rec_impl:               cflags-portability-define
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      gnu-inline-semantics
+fallback_description:   对确认依赖 GNU89 inline 语义的独立项目使用 -fgnu89-inline，并重新检查每个对象文件的符号；该方案不优先用于同时带 inline.c 的 ext2fs 结构。
+fallback_command:       CFLAGS="$CFLAGS -fgnu89-inline" make -j1
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       -fcommon|delete.*inline[.]c|remove.*inline
+forbid_1_reason:        -fcommon 只影响 C 暂定对象定义，不能可靠修复函数 inline 语义；删除 inline.c 会丢失库设计的唯一实现。
+forbid_1_consequence:   可能掩盖真正的 ODR/inline 契约问题，或产生新的 undefined reference。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             R6, R29
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E163]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E6340.md
+last_updated: 2026-09-12
+source_event:           ext2fuse 0.8.1 Shadow CI 第三轮链接失败：ext2fs_get_inode_bitmap_start 等符号同时来自 ext2fuse-ext2fs.o 与 libext2fs_a-valid_blk.o；加入 -DNO_INLINE_FUNCS 后最终 run 通过。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                Codex
+source_pr:
+source_commit:          98febaf9ab
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: 4C48
