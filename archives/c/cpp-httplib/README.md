@@ -18,7 +18,9 @@ cpp-httplib 是一个 C++11 单头文件 HTTP/HTTPS 客户端/服务端库，功
 - **无必需外部依赖**：OpenSSL/Zlib/Brotli 均为可选能力
 
 ### 已知问题
-- 无已知问题
+- 不可调试的 HarmonyOS production 虚拟机可能限制 HDC shell 进程执行
+  `bind()`；按平台权限模型，应用进程应在清单申请网络权限，但本次未在应用
+  身份下验证网络回环，使用方仍需在实际应用上下文确认。
 
 ### 与 Linux 的差异
 - 需设置 `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=str(self.settings.arch)` 规避 E092（CMake 不识别 OHOS 平台）
@@ -39,6 +41,7 @@ int main() {
 
 | 版本 | 状态 | 编译日期 |
 |------|------|----------|
+| [0.41.0](./0.41.0/) | built | 2026-09-11 |
 | [0.18.0](./0.18.0/) | built | 2026-08-29 |
 
 ## 参考资料
