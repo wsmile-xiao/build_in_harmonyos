@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Conan test_package — boost1.84-fiber 1.84.0 L1 functional test.
+
+双包依赖模式消费者（依赖 boost1.84-context 已发布包）：
+- CMakeDeps 生成 boost1.84-fiberConfig.cmake（独立 cmake_file_name），
+  目标 boost1.84-fiber::boost_fiber 传递携带 boost1.84-context::boost_context
+  （链接 libboost_context.a，fcontext 切换符号来自依赖包）；
+- OHOS 运行时：编译器自省定位 SDK libc++_shared.so 注入 LD_LIBRARY_PATH
+  （无硬编码 SDK 版本路径）；musl 加载器仅在经 shell 启动时遵守
+  LD_LIBRARY_PATH，故经 bash export 显式注入（context/container 先例）。
+"""
+import os
+import subprocess
+
+from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
+from conan.tools.build import can_run
+from conan.tools.cmake import CMake, cmake_layout
+
+
+class BoostFiberTestConan(ConanFile):
+    settings = "os", "compiler", "build_type", "arch"
+    generators = "CMakeDeps", "CMakeToolchain"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+        # 头文件需要：fiber 测试源 include boost/fiber/all.hpp，头树来自
+        # fiber 包自身（完整 boost 头树）；context 包为直接依赖时
+        # CMakeDeps 才为其生成完整组件变量（log #8609 先例注释）
+        self.requires("boost1.84-context/1.84.0")
+
+    def layout(self):
+        cmake_layout(self)
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+
+    def test(self):
+        if not can_run(self):
+            self.output.warning("Cross-built consumer cannot run on the build host.")
+            return
+
+        suffix = ".exe" if str(self.settings.os) == "Windows" else ""
+        executable = os.path.join(
+            self.cpp.build.bindirs[0], "test_boost_fiber" + suffix)
+
+        if self.settings.os == "OHOS":
+            libcxx_dir = self._find_libcxx_dir()
+            # OHOS musl 加载器仅在经 shell 启动时遵守 LD_LIBRARY_PATH
+            ld_path = libcxx_dir + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+            command = 'export LD_LIBRARY_PATH="%s"; "%s"' % (ld_path, executable)
+            self.run(command, cwd=self.build_folder)
+            return
+        self.run('"%s"' % executable, cwd=self.build_folder)
+
+    def _find_libcxx_dir(self):
+        """Locate the SDK libc++_shared.so directory via compiler introspection."""
+        compilers = self.conf.get(
+            "tools.build:compiler_executables", default={}, check_type=dict) or {}
+        cxx = compilers.get("cpp", "clang++")
+        try:
+            out = subprocess.check_output(
+                [cxx, "-print-file-name=libc++_shared.so"], text=True).strip()
+        except Exception as exc:
+            raise ConanInvalidConfiguration(
+                "failed to locate libc++_shared.so via %s: %s" % (cxx, exc))
+        if not out or out == "libc++_shared.so":
+            raise ConanInvalidConfiguration("clang could not locate libc++_shared.so")
+        return os.path.dirname(out)
