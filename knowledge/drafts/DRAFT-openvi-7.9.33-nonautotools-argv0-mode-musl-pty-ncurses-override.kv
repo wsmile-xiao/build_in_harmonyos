@@ -1,0 +1,228 @@
+# ═══ Draft knowledge entry — openvi 7.9.33 手写 GNUmakefile 适配六类坑（坑 0–5）═══
+# Timestamp: 2026-09-12
+# Software: openvi 7.9.33 (OpenBSD vi/ex, nvi 血统, 纯手写 GNUmakefile)
+# Gate: PR #9678 / task contrib-5587
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+#
+# 写法约定（为让本文件可被严格 YAML 解析器整份读入，同 PR #9598 评审要求）：
+#   - 以 `#` 开头的取值用单引号包裹，避免被当注释丢弃；
+#   - 普通标量内不写「冒号+空格」，正则里改用 `:\s*`；
+#   - 普通标量内不写「空白+#」，CI 编号一律写作 `CI 44841`（不写 `#44841`）。
+# 注释行与 root_cause 的块标量（>）不受上述限制。
+
+id:                     DRAFT-openvi-7.9.33
+trigger_tool:           make|clang|conan|ncurses|musl|vi|ex
+phase:                  build|link|test
+error_signature:        invalid option -- 's'|
+                        Usage:\s*ex|
+                        cannot find -lutil|
+                        unable to find library -lutil|
+                        ld:\s*error:\s*unable to find library -lutil|
+                        fatal error:\s*'curses\\.h' file not found|
+                        fatal error:\s*'ncurses\\.h' file not found|
+                        awk:\s*not found|
+                        getconf:\s*not found|
+                        No terminal database found|
+                        unknown terminal type|
+                        Unable to create temporary file|
+                        Read-only file system|
+                        -[IL]//(include|lib)|
+                        (\\./)?config\\.sub.*machine.*not recognized
+
+severity:               2
+category:               make|musl|conan|harmonyos
+match_keywords:         argv[0], pmode, optstr, MODE_EX, MODE_VI, MODE_VIEW, -e -s,
+                         ex batch, ex 批处理, silent mode, openbsd_getopt,
+                         PAWK, AWK, getconf, command -p, PATH probe,
+                         CURSESLIB, LINKLIBS, ifndef CURSESLIB, pkg-config ncurses,
+                         --cflags, cross-compile include leak,
+                         -lutil, libutil, openpty, forkpty, pty.h, musl libc,
+                         ncurses/6.6 static, ncursesw, wide-char,
+                         ln -s, ex 别名, view 别名, symlink in Conan package,
+                         TERM, terminfo, TERMINFO, TERMINFO_DIRS, setupterm,
+                         cl_main.c, term_init, cl_init, G_SCRIPTED, headless CI,
+                         tty, No terminal database found, runenv_info, conanbuild vs conanrun,
+                         TMPDIR, /tmp/vi.XXXXXX, hard-coded tmp path, mkstemp,
+                         _PATH_PRESERVE, /var/tmp/vi.recover, recdir, O_RECDIR,
+                         EROFS, read-only file system, HMFS read-only /tmp,
+                         exf.c, ex_filter.c, options.c, pathnames.h,
+                         apply_conandata_patches, honor TMPDIR patch
+
+title:                  openvi 7.9.33 手写 GNUmakefile 适配六类坑：argv[0] 决定模式且 vi 模式 getopt 串不含 -s（无头批处理必须调 bin/ex）、上游 PAWK 依赖 getconf+标准 PATH 探测需覆盖为 awk、传 CURSESLIB 会连带抑制上游 pkg-config 对 CFLAGS 的注入（ncurses 头目录必须自己补）、上游默认 LINKLIBS 的 -lutil 在 musl 上不存在（openpty 在 libc）、ex 批处理虽无 tty 但入口是 curses 的 main()（cl/cl_main.c）仍必须能找到 terminfo、HMFS 的 /tmp 只读而上游把备份临时文件与恢复目录写死（exf.c/ex_filter.c 的 /tmp/vi.XXXXXX 与 _PATH_PRESERVE）须打 $TMPDIR 补丁
+
+root_cause: >
+  0) openvi 按 argv[0] 选模式，三种模式的 getopt 串不同（common/main.c:68-78，
+     非 DEBUG 分支）：MODE_EX="c:C:FlRrSst:vw:"（含 s）、MODE_VI="c:C:eFlRrSt:w:"、
+     MODE_VIEW="c:C:eFlrSt:w:"。只有 ex 串含 s（silent/batch），vi/view 串不含，
+     所以 `vi -e -s` 会直接报 invalid option 并打印 Usage。上游 install 用
+     `ln -fs vi bin/ex`（GNUmakefile:235/578-582）生成 ex/view 别名，argv[0] 为 ex
+     时 pmode=MODE_EX → 进 ex 批处理。ex 批处理**不初始化屏幕**（不需要 tty /
+     TERM / terminfo），这是在本就无 tty 的 CI worker 上唯一可用的运行路径。
+  1) 上游生成两个 .h（ex/ex_def.h、common/options_def.h）的规则用
+     `PAWK = command -p env PATH="$(command -p getconf PATH)" awk`
+     （GNUmakefile:233/237）：依赖 getconf 返回「标准 PATH」再用 command -p 找 awk。
+     OHOS 上 getconf 不一定存在、返回的 PATH 也未必含可用 awk，探测链任一环失败即
+     make 直接失败。两个 .h 只是 `awk -f x.awk y.c > x.h` 的 POSIX awk 脚本，
+     覆盖 PAWK=awk 走 PATH 里的 awk 语义完全等价（AWK 变量本身默认就是 awk）。
+  2) CURSESLIB 这个变量的上游语义是「pkg-config 探测的产物」：GNUmakefile:108-115
+     的 `ifndef CURSESLIB` 一个判断同时门控 **CFLAGS += $(PKGCFG) ncurses --cflags**
+     与 **CURSESLIB += $(PKGCFG) ncurses --libs** 两行。于是「在命令行传 CURSESLIB
+     来自定义 curses 库」会**连带**关掉 CFLAGS 的 pkg-config 注入——若此时只传
+     -L/-l 而忘了 -I，交叉编译就没有 ncurses 头目录（`fatal error: 'ncurses.h' file
+     not found`）；反过来若不传 CURSESLIB，宿主 pkg-config 找到的系统 ncurses 会
+     把宿主 -I 注入到 OHOS 交叉编译里。两种错法都不报「配置错误」，只在编译/链接期
+     以缺头或 ABI 不符的形式暴露。
+  3) 上游默认 `LINKLIBS ?= -lutil $(CURSESLIB)`（GNUmakefile:173）。openvi 的
+     ex_script.c 用 openpty(3) 起 shell（ex/ex_script.c:59 在 Linux 上 include
+     <pty.h>，:187 调用 openpty）。glibc 把它放在 libutil，musl 则把 openpty/forkpty
+     直接放进 libc——OHOS musl 上既没有 libutil，也不需要它，保留 -lutil 会
+     `unable to find library -lutil` 链接失败。
+  4) 「ex 批处理不初始化屏幕」容易被推成「ex 不需要终端信息」，但 openvi 的程序
+     入口不是 common/main.c 的 editor()，而是 cl/cl_main.c 的 main()（cl_main.c:69）：
+     main() 在调 editor() 之前无条件 cl_init()→term_init()→setupterm()
+     （cl_main.c:82/93/228），term_init 在 err==-1 时 openbsd_errx(1,"No terminal
+     database found")。所以只要 invoke bin/vi（含 ex/view 别名）——不论哪种模式——
+     都必须能定位 terminfo 数据库。批处理省掉的是屏幕/isatty，省不掉 setupterm。
+     数据库不必自造：Conan ncurses/6.6 包自带 share/terminfo（该包 package() 把它
+     列为必备产物），并用 runenv_info 定义 TERMINFO/TERMINFO_DIRS；但 build() 的
+     conanbuild 环境不含依赖 runenv，故层 1 冒烟须自己按依赖 package_folder 指向
+     $pf/share/terminfo 并 export TERM=vt100（TERM 空会走 unknown 回退，含 sleep 5）。
+  5) openvi 沿用 4.4BSD 写死路径且**不读 $TMPDIR**：common/exf.c:141 与
+     ex/ex_filter.c:53 的 `char tname[] = "/tmp/vi.XXXXXX"`（mkstemp 备份/
+     过滤器临时文件），include/pathnames.h 的 `_PATH_PRESERVE "/var/tmp/vi.recover"`
+     （经 common/options.c:335 的 recdir 选项生效）。HarmonyOS 的 HMFS 把 /tmp
+     挂成**只读**（既非不存在也非无权限），运行期 mkstemp 返回 EROFS，报
+     `Error: Unable to create temporary file: Read-only file system`。此错只在
+     运行期暴露——编译/链接/--help 全正常，所以若不做运行期 smoke，会一直潜伏到
+     test_package 才第一次炸。最小解是打一枚补丁让三处跟随 $TMPDIR，无 $TMPDIR
+     时回退原值（默认行为不变）：`if ((tmpdir=getenv("TMPDIR"))==NULL||*tmpdir=='\0')
+     tmpdir="/tmp"; snprintf(tname,sizeof(tname),"%s/vi.XXXXXX",tmpdir);`。三文件都已
+     有 <limits.h>/<stdio.h>/bsd_stdlib.h（stdlib.h 的 BSD 别名，声明 getenv），
+     options.c 的 `char *s, b1[1024];` 也已在作用域内，**无需补 include**。
+     chmod / 重新挂载都改不了 HMFS 的只读属性，只能让程序改道。
+
+affected_scope:         所有「按 argv[0] 选模式」的多别名 CLI（vi 家族、busybox 式
+                        多合一程序）在无 tty 环境下的自动化验证；所有靠 pkg-config
+                        探测外部库、同时又允许命令行覆盖库变量的手写 Makefile 工程
+                        （覆盖会改变探测语义）；所有在 OHOS musl 上链接老 Unix 代码
+                        的包（openpty/forkpty/login_tty 在 libc，无 libutil）；
+                        所有入口 main() 走 curses 初始化（setupterm）的编辑器/终端
+                        程序——即使以批处理模式在无 tty 的 CI 上跑，也仍需 terminfo；
+                        所有在 HarmonyOS HMFS 上运行、且在运行期创建临时文件的老
+                        Unix 程序——凡把路径写死成 /tmp/...（或 /var/tmp/...）而不读
+                        $TMPDIR 的，/tmp 只读都会让它在运行期以 EROFS 失败，必须
+                        打 $TMPDIR 补丁（chmod/重挂载都改不了 HMFS 只读属性）。
+
+verification_cmd:       export TERM=vt100 TMPDIR=<可写目录> TERMINFO=<ncurses-pf>/share/terminfo;
+                        printf 'a\nOPENVI_BUILD_SMOKE_OK\n.\nwq\n' | bin/ex -s smoke.txt
+                        应写出 smoke.txt；随后 grep -qx OPENVI_BUILD_SMOKE_OK smoke.txt
+                        应成功（ex 批处理往返，无 tty；terminfo 见坑 4，TMPDIR 见坑 5）。
+
+rec_priority:           1
+rec_approach:           argv0-ex-别名批处理 + PAWK=awk + CURSESLIB/LINKLIBS 整串覆盖(含 -I/-L/-l) + 去掉 -lutil + 给 terminfo + $TMPDIR 补丁
+rec_description: >
+  0) 无头验证/冒烟一律调用 ex 别名（制品里 bin/ex 是 bin/vi 的同内容副本），
+     绝不用 `vi -e -s`：vi 模式串不含 s，`-s` 会被 openbsd_getopt 拒绝。要在
+     Conan 制品里保住别名语义，package() 用 shutil.copyfile 把 bin/vi 复制成
+     bin/{vi,ex,view}（上游 install 是 `ln -fs`，但 Conan 打包 symlink 的解析
+     在不同平台上不一致，副本最稳），并 chmod 0o755。
+  1) build() 传 PAWK=awk，绕过上游 `command -p $(GETCONF) PATH` 探测链；
+     两个 .h 生成规则只跑 POSIX awk 脚本，语义等价，不改源码。
+  2) CURSESLIB 命令行覆盖必须**给全整串**——同时含 -I（头）与 -L/-l（库）：
+     `-L<pf>/lib -lformw -lmenuw -lpanelw -lncursesw` 加上
+     `-I<pf>/include`（由依赖的 cpp_info 计算，不硬编码）。LINKLIBS 也传同一串，
+     以覆盖上游的 `-lutil $(CURSESLIB)`。终端库用 Conan ncurses/6.6 静态
+     wide-char（R26：系统同名库不产 .so）。INCLDS 覆盖时保留上游的 4 个 -I
+     （include/common/regex/openbsd）再追加 ncurses 头目录，否则源码相对 include
+     全断。
+  3) 验证分层：层 1 在 build() 内做 ex 批处理往返 smoke（写 OPENVI_BUILD_SMOKE_OK
+     再 grep -qx 回读）；功能断言（%s 替换、范围删除、$a 追加、-R 只读拒写、
+     xinstall -m 权限位、bin/vi -e 可运行）放 test_package，全部以 bin/ex 驱动，
+     只验「行编辑缓冲 / BSD regex / 文件读写 / BSD setmode」这些不碰屏幕的核心路径。
+  4) 跑 ex 前必须给 terminfo（坑 4 的落地）：层 1 在 build() 里
+     `export TERM=vt100 TERMINFO=<pf>/share/terminfo TERMINFO_DIRS=<同值>` 再管道
+     喂 ex（pf 取 ncurses 依赖 package_folder；build 的 conanbuild 环境不含依赖
+     runenv，必须自己指）；test_package 走 env=conanrun（runenv 已含 ncurses 的
+     TERMINFO），并在配方里按依赖包目录再显式注入一层兜底。
+  5) 打一枚最小补丁 patches/0001-honor-tmpdir.patch（common/exf.c、
+     ex/ex_filter.c、common/options.c 各 1 处），把写死的 /tmp/vi.XXXXXX 与
+     _PATH_PRESERVE 改成跟随 $TMPDIR、无值时回退原路径；配方里在 build() 开头
+     apply_conandata_patches(self)（同 repo zopfli 1.0.3 先例），并在 build() 的
+     层 1 smoke 与 test_package 里把 TMPDIR 指向可写目录。不要试图 chmod/重挂载
+     /tmp——HMFS 只读改不动。
+
+rec_command:            make -C <src> -j1 CC=<clang> PAWK=awk INCLDS="-Iinclude -Icommon -Iregex -Iopenbsd -I<pf>/include" CURSESLIB="-L<pf>/lib -lformw -lmenuw -lpanelw -lncursesw" LINKLIBS="-L<pf>/lib -lformw -lmenuw -lpanelw -lncursesw"
+                        （先 apply_conandata_patches 打 $TMPDIR 补丁，运行前 export TMPDIR=<可写目录>）
+rec_auto_fix:           false
+rec_impl:               conan-recipe-makefile-harmonyos
+
+fallback_priority:      2
+fallback_approach:      给上游源打 patch，把 optstr[1]/[2] 也加上 s，使 vi 模式可用 -s
+fallback_description:   若确实需要 `vi -e -s` 形式（例如下游脚本已固化该命令），可在
+                        common/main.c 的 optstr 表里给非 ex 串补 's'。但这改变了上游
+                        语义（vi 模式下 -s 本就不该出现），且要维护一枚补丁；对
+                        「验证/冒烟」这个目的而言，直接调 bin/ex 别名是零补丁的等价解。
+fallback_command:       printf 'a\nX\n.\nwq\n' | bin/ex -s out.txt
+fallback_auto_fix:      false
+fallback_impl:          source-patch-optstr
+
+forbid_0_pattern:       '["'']vi["''][^\n]*-e[^\n]*-s|vi\s+-e\s+-s'
+forbid_0_reason:        vi/view 模式的 getopt 串（common/main.c:74-76）不含 s，
+                        只有 ex 串含；-s 会被 openbsd_getopt 拒绝并打印 Usage
+forbid_0_consequence:   批处理脚本直接失败（invalid option / Usage），CI 无法在
+                        无 tty 环境下驱动 openvi —— 必须改调 bin/ex 别名
+
+forbid_1_pattern:       PAWK\s*=\s*command\s+-p
+forbid_1_reason:        上游 PAWK=command -p env PATH="$(command -p getconf PATH)" awk
+                        依赖 getconf + 标准 PATH 双重探测，OHOS 上不可靠
+forbid_1_consequence:   任一环失败即 make 报 awk/getconf not found，ex/ex_def.h 与
+                        common/options_def.h 生成不了，全部编译停摆
+
+forbid_2_pattern:       CURSESLIB\s*=\s*["']-l
+forbid_2_reason:        上游 `ifndef CURSESLIB` 同时门控 CFLAGS 与 CURSESLIB 两处
+                        pkg-config 探测（GNUmakefile:108-115）；只传 -l 会关掉 -I 注入
+forbid_2_consequence:   编译报 fatal error ncurses.h/curses.h file not found（缺头）；
+                        未覆盖时则把宿主 ncurses 头注入 OHOS 交叉编译（ABI 不符）
+
+forbid_3_pattern:       LINKLIBS\s*=\s*["'][^"']*-lutil
+forbid_3_reason:        musl 把 openpty(3)/forkpty 放进 libc，不提供 libutil
+                        （glibc 才把 openpty 放 libutil）
+forbid_3_consequence:   链接报 unable to find library -lutil（ld 报 cannot find -lutil），
+                        即使源码本身能编译
+
+forbid_4_pattern:       '"/tmp/vi\.XXXXXX"|_PATH_PRESERVE\s+"/var/tmp|chmod\s+[^\n]*/tmp|mount\s+[^\n]*-o\s+remount[^\n]*/tmp'
+forbid_4_reason:        HMFS 的 /tmp 是只读挂载（EROFS），openvi 把备份临时文件
+                        （/tmp/vi.XXXXXX）与恢复目录（/var/tmp/vi.recover）写死且不读
+                        $TMPDIR；chmod/remount 改不动 HMFS 的只读属性
+forbid_4_consequence:   运行期报 Unable to create temporary file（Read-only file
+                        system），编译链接全绿也照样炸；必须打 $TMPDIR 补丁让
+                        程序改道到可写目录（无 $TMPDIR 时回退原路径）
+
+principles:             P001, P003
+similar_to:             DRAFT-musl-posix-decl-conflict-rename-legacy, E007,
+                        E482, E223,
+                        DRAFT-ohos-otmpfile-tmpdir-shim,
+                        DRAFT-buildtorrent-0.9.1-autoconf-umask-tmpdir-readonly-fix,
+                        DRAFT-civetweb-001-check-tmpdir-and-feature-macros,
+                        DRAFT-boost1.84-coroutine-1.84.0-readonly-tmpdir-redirect-guard-page-fallback
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-openvi-7.9.33-nonautotools-argv0-mode-musl-pty-ncurses-override.md
+last_updated:           2026-09-12
+source_event:           PR 9678 feat(openvi) 7.9.33 适配 HarmonyOS PC；手写 GNUmakefile
+                        非 autotools，命令行变量覆盖即交叉编译；task contrib-5587
+authors:                yanjiaxin
+source_pr:              9678
+source_commit:          b77583b95
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-12
