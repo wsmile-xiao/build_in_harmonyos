@@ -1,0 +1,76 @@
+# ═══ Draft knowledge entry — autotools cross-compile on OHOS: stale config.sub,
+# forced dual triplet, and header export gap of a published dependency
+# Software: sdl-image 1.2.12
+# Gate: conan-verify G2 (conan create, ohos-aarch64) + test_package 8/8 + W3 (finish step 5)
+# Status: DRAFT
+
+id: sdl-image-1.2.12-autotools-cross-ohos
+severity: 3
+category: build-system|configure|ohos
+trigger_tool: configure|make|conan
+phase: configure
+
+keywords: config.sub, aarch64, ohos, cross-compiling, config.guess, mktemp, config.status, includedirs, CMakeDeps, autotools
+error_signature: Invalid configuration .*aarch64-unknown-none|config\.status: .*conf[A-Za-z0-9]+.*Permission denied|can't create \./conf.*: Permission denied|'SDL\.h' file not found
+match_keywords: config.sub, config.guess, aarch64-linux-ohos, cross compile, conftest, mktemp, config.status, includedirs, CMakeDeps
+
+root_cause: |
+  (1) 2012-era autotools releases ship a config.sub that predates aarch64/OHOS, so
+  `--host=aarch64-linux-ohos` normalises to aarch64-unknown-none.
+  (2) With a stale config.guess the build machine is probed as HarmonyOS; configure then
+  believes it is native and every conftest is run through config.status, which creates its
+  scratch directory with `mkdir`-less `mktemp -d ./confXXXXXX` (mode 0700). On HMDFS mounts
+  of this worker those 0700 dirs are unwritable, so config.status dies with
+  "./confXxx/out: Permission denied" and no Makefile is produced.
+  (3) A published dependency can carry a correct-looking cpp_info while exporting no include
+  directory at all: sdl12-compat/1.2.68 ships headers in include/SDL but its published
+  package metadata yields an empty INCLUDE_DIRS, so CMakeDeps consumers linking the target
+  still cannot find SDL.h.
+
+rec_approach: autotools-force-dual-triplet-ohos + consumer-side-dependency-include-lookup
+rec_description: |
+  (1) Patch ONLY config.sub (add aarch64 CPU段 + -linux-ohos OS段 in BOTH the maybe_os list
+  and the OS whitelist, plus an explicit `-linux-ohos)` guard branch right before the trailing
+  `-linux*)` branch that rewrites the OS via `sed -e 's|linux|linux-gnu|'`); keep config.guess
+  pristine to keep the patch minimal. Measured on this package: the OS whitelist entry alone
+  already prevents the rewrite because config.sub takes the FIRST matching branch and that
+  entry precedes `-linux*)` (removing the entry degrades the output to
+  aarch64-unknown-linux-gnu-ohos; with it, `config.status` records host_os='linux-ohos').
+  The extra guard branch is belt-and-braces on top of that, matching repo precedents
+  (at/3.2.5, acpitool/0.5.1 — patches/0002-config.sub.patch).
+  (2) Rather than patching config.guess or probing shell quirks, force autoconf into cross
+  mode with an explicit dual triplet in configure_args:
+      --build=x86_64-unknown-linux-gnu --host=aarch64-unknown-linux-ohos
+  This bypasses both the config.guess probe and the unrunnable conftest checks, and is
+  already the established convention in this repo (cf. aalib 1.4p5).
+  (3) When a dependency's headers are missing at test time although the package folder
+  contains them, do NOT declare the dependency's include dir inside the package under test.
+  Resolve it in test_package/generate() via
+  `self.dependencies["<dep>"].package_folder` and hand the directories to CMake
+  (SDL1_INCLUDE_DIRS). A dependency metadata fix belongs to that dependency's own PR
+  (PR atomicity).
+
+  (4) On this platform (HMDFS) the dual triplet alone is NOT sufficient: configure reports
+  success but the generated config.status then dies with
+  `./confXXXXXX/subs-1.sed: Permission denied`, because config.status creates its temp dir via
+  `(umask 077 && mktemp -d "./confXXXXXX")` and HMDFS maps the owning uid such that 0700 dirs are
+  unwritable for the build process (knowledge E011). Patch the same `umask 077` -> `umask 022`
+  inside `configure` (patches/0002-configure.patch); configure embeds that very text into the
+  generated config.status, so one source patch fixes both stages. Measured on this box:
+  umask 022 dirs come out drwxr-s--x and writable, umask 077 dirs come out drwx--S--- and
+  unwritable.
+
+rec_commands:
+  - "conan create archives/s/sdl-image/1.2.12 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing --build=\"sdl-image/*\""
+  - "sed 's/umask 077/umask 022/g' configure  # required before configure on HMDFS (E011), shipped as patches/0002-configure.patch"
+
+verification: |
+  conan create on ohos-aarch64 (clang 15) succeeds; configure detects SDL 1.2, JPEG, PNG,
+  TIFF and WebP; test_package links SDL_image::SDL_image and reports 8/8 checks with
+  IMG_Init() == 0x0f.
+
+related:
+  - archives/a/aalib/1.4p5/patches/0002-configure-lt-target.patch (explicit triplet precedent)
+  - archives/s/sdl-image/1.2.12/patches/0001-config.sub.patch
+  - knowledge/graph/E011.kv (HMDFS umask 077 -> 0700 temp dir unwritable, autotools config.status)
+last_updated: 2026-09-13
