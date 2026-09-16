@@ -1,0 +1,41 @@
+#====================================================================
+# Draft: OHOS sysroot libintl.h is an empty stub - HAVE_LIBINTL_H
+#        misdetection breaks gettext consumers (trueprint 5.3)
+#====================================================================
+
+id:                     DRAFT-13410-TRUEPRINT-LIBINTL-STUB-HEADER
+trigger_tool:           clang|autoconf|getopt.c|replace.h|libintl.h|gettext|musl
+phase:                  compile|link
+error_signature:        implicit declaration of function 'gettext'|incompatible integer to pointer conversion passing 'int' to parameter of type 'const char \*'|undefined symbol: gettext|undefined reference to `gettext'
+
+severity:               2
+category:               legacy-source-compat
+match_keywords:         gettext, libintl.h, HAVE_LIBINTL_H, HAVE_GETTEXT, AC_CHECK_FUNCS, AC_REPLACE_FUNCS, libreplace, LDADD, trueprint, musl, OHOS, empty stub header
+
+title:                  OHOS sysroot libintl.h exists but declares no functions - guarding gettext declarations on HAVE_LIBINTL_H alone yields implicit int declarations and undefined gettext at link
+
+root_cause:             The OHOS musl sysroot ships /usr/include/libintl.h as an empty stub that only defines macros (__USE_GNU_GETTEXT, __GNU_GETTEXT_SUPPORTED_REVISION) and declares no functions. autoconf AC_CHECK_HEADERS(libintl.h) therefore succeeds and config.h gets HAVE_LIBINTL_H=1, while AC_CHECK_FUNCS(gettext) correctly fails (HAVE_GETTEXT undefined). Legacy GNU sources (trueprint 5.3 replace/replace.h and src/getopt.c, and many contemporaries) guard their fallback `char *gettext(const char *);` declaration on #ifdef HAVE_LIBINTL_H alone, so the fallback declaration is skipped, gettext is called undeclared (implicit int, clang -Wimplicit-function-declaration then int-to-pointer -Wint-conversion errors), and after forcing declarations through the final link fails with undefined symbol: gettext because OHOS libc has no gettext at all. Existing knowledge entries E015/E027/E107/E123/E135 cover undefined libintl_*/g_libintl_* symbols when linking a real (conan or system) libintl - this entry covers the distinct no-libintl-anywhere case.
+
+affected_scope:         Any autotools package that (a) calls gettext through a header-guarded fallback declaration and (b) relies on AC_REPLACE_FUNCS(gettext) bundled replacements, built on OHOS where neither libc gettext nor libintl exists. Verified instance - trueprint-5.3 (replace/replace.h, src/getopt.c, src/main.c spool code independent).
+
+verification_cmd:       conan create archives/t/trueprint/5.3 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+rec_priority:           1
+rec_approach:           dual-macro-guard-plus-link-bundled-replacement
+rec_description:        Two-part fix. (1) Declarations - tighten every `#ifdef HAVE_LIBINTL_H` guard around gettext declarations/includes to `#if defined(HAVE_LIBINTL_H) && defined(HAVE_GETTEXT)` so an empty stub header falls through to the package's own `char *gettext(const char *);` declaration; valid on glibc too because both macros are defined there. (2) Linkage - AC_REPLACE_FUNCS(gettext) builds the replacement into a noinst archive (replace/libreplace.a) that upstream never links on glibc (gettext is in libc); link it explicitly via make LDADD override (`make LDADD=../replace/libreplace.a`), avoiding patches to generated Makefile.in. Never satisfy gettext with dummy symbols or by pulling a full gettext tool_requires unless the package truly needs runtime i18n.
+rec_command:            apply the guard patches and rebuild with conan create archives/t/trueprint/5.3 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               patches/0001-replace-replace.h.patch and patches/0002-src-getopt.c.patch plus build() LDADD override in archives/t/trueprint/5.3/
+
+fallback_priority:      2
+fallback_approach:      conan-gettext-tool-requires
+fallback_description:   Add a real libintl provider (conan gettext package) as tool dependency so HAVE_GETTEXT is genuinely detected; heavier and pulls runtime i18n machinery the package does not need, so the bundled replacement is preferred for gettext-light legacy tools.
+fallback_command:       conan download gettext/0.22.5.1 -r ohpcd --only-recipe
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       declare gettext unconditionally as static inline|define gettext(msgid) (msgid) macro in patches|stub gettext with dummy symbols|force HAVE_GETTEXT=1 in config.h
+forbid_1_reason:        R34/R51 forbid fake behavior; macro-stubbing gettext silently disables translations and dummy symbols break at link on any real consumer; hand-editing config.h masks the configure detection instead of fixing the guard logic.
+forbid_1_consequence:   Deceptive green builds whose i18n is silently dead, or link failures surfacing later in consumer builds; review rejection under dummy-symbol and platform-macro rules.
+
+principles:             minimal-patch, platform-agnostic-fix, real-evidence-over-assumption, declared-dependency-metadata
