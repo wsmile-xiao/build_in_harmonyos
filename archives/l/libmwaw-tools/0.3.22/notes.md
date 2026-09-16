@@ -21,16 +21,16 @@
 
 ## 遇到的问题与解决方案
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | configure 报 aarch64-unknown-linux-ohos 未知 | config.guess 2014 年版本不认识 HarmonyOS | 补丁 0001 加 OHOS 识别分支 |
-| 2 | config.sub 拒绝 linux-ohos 三元组 | 内核-OS 白名单无 ohos | 补丁 0002 加白名单 |
-| 3 | config.status 写 subs1.awk "Permission denied" | umask 077 临时目录在 HMDFS 上不可写 | 补丁 0003 改 umask 022 |
-| 4 | pkg-config 找不到依赖 / prefix 错误 | librevenge 包 .pc 文件 prefix 硬编码为 / | 配方内 staging .a + 本地生成正确 prefix 的 .pc |
-| 5 | libtool: //lib/librevenge-0.0.la is not a valid libtool archive | .la 内嵌 prefix=//lib 已失效，libtool 优先读 .la | staging 目录只放 .a，libtool 直接链静态库 |
-| 6 | 头文件 librevenge/RVNGInputStream.h 找不到 | staging .pc 的 Cflags 少了 /librevenge-0.0 子目录 | Cflags 改 -I includedir/librevenge-0.0（与上游一致） |
-| 7 | test C++: 无 RVNGMemoryStream.h | librevenge 0.0.5 包不发布该头文件 | 测试内自实现 RVNGInputStream 内存流 |
-| 8 | CMakeDeps 生成空 LIBS/INCLUDE_DIRS | application 包默认 require traits headers/libs=False | test recipe 显式 requires(ref, headers=True, libs=True) |
+| 问题 | 根因 | 解决方案 |
+|------|------|----------|
+| configure 报 aarch64-unknown-linux-ohos 未知 | config.guess 2014 年版本不认识 HarmonyOS | 补丁 0001 加 OHOS 识别分支 |
+| config.sub 拒绝 linux-ohos 三元组 | 内核-OS 白名单无 ohos | 补丁 0002 加白名单 |
+| config.status 写 subs1.awk "Permission denied" | umask 077 临时目录在 HMDFS 上不可写 | 补丁 0003 改 umask 022 |
+| pkg-config 找不到依赖 / prefix 错误 | librevenge 包 .pc 文件 prefix 硬编码为 / | 配方内 staging .a + 本地生成正确 prefix 的 .pc |
+| libtool 报 //lib/librevenge-0.0.la is not a valid libtool archive | .la 内嵌 prefix=//lib 已失效，libtool 优先读 .la | staging 目录只放 .a，libtool 直接链静态库 |
+| 头文件 librevenge/RVNGInputStream.h 找不到 | staging .pc 的 Cflags 少了 /librevenge-0.0 子目录 | Cflags 改 -I includedir/librevenge-0.0（与上游一致） |
+| test C++ 无 RVNGMemoryStream.h | librevenge 0.0.5 包不发布该头文件 | 测试内自实现 RVNGInputStream 内存流 |
+| CMakeDeps 生成空 LIBS/INCLUDE_DIRS | application 包默认 require traits headers/libs=False | test recipe 显式 requires(ref, headers=True, libs=True) |
 
 ## 源码修改
 
