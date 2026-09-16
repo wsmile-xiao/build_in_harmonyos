@@ -1,0 +1,94 @@
+#====================================================================
+# E6340 — DJB 风格发行包在 OHOS 上的构建/安装陷阱与 supervise 测试缺口
+# 来源: daemontools-encore 1.11 适配 (HarmonyOS PC / HMDFS / HongMeng Kernel 1.12.0)
+#
+# 格式: key: value，续行以空格开头（parser 按 \n 拼接，不解析 YAML 块标记）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6340
+trigger_tool: make|conan|installer|test|mkfifo
+phase: compilation|packaging|testing
+
+# engine.py 只做字面子串包含(不区分大小写)，用 | 分隔；每个片段都必须能唯一定位本模式。
+# 刻意不含裸 `Operation not permitted`：它出现在本条目全部四类信号的尾部，但同样出现在任何
+# 无关的 EPERM 报错上（chmod/rename/bind...），收录它会让知识引擎在大范围报错上误命中本条。
+# FIFO 面的可检索信号用下面前两条（mkfifo CLI 的 `cannot create fifo '` 与 supervise 的控制
+# 通道报错）；python `os.mkfifo`/`os.mknod`/AF_UNIX bind 三种探针形态只作为能力探测手段记录在
+# verification_cmd 与 .md 的复现段，其输出形态（`[Errno 1] Operation not permitted`）无区分度。
+error_signature: No rule to make target 'MAN', needed by 'install'|installer: fatal: unable to write |installer: fatal: unable to read setuser.8|supervise: fatal: unable to read supervise/control|cannot create fifo '
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               hmdfs, filesystem, install, testing, selinux
+match_keywords:         DJB, daemontools, supervise, svscan, make clean, TARGETS, case-insensitive, HMDFS, chmod, mkdir 0700, installer, setuser.8, mkfifo, FIFO, EPERM, control channel
+title:                  DJB 风格发行包在 OHOS 上的构建安装三类平台陷阱与 supervise 测试缺口
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             DJB 风格发行包（自写 Makefile + conf-* 配置 + 自带 installer 的 mkdir/chmod）把 GNU/Linux 的文件系统语义写死在构建与安装脚本里，在 OHOS 上叠加四类差异：
+  (1) HMDFS 大小写不敏感：上游 TARGETS 清单同时含 man 与 targets，而发行版自带 MAN 与 TARGETS 两个文件，`make clean` = `rm -f $(cat TARGETS)` 于是删掉了 MAN 安装清单与 TARGETS 自身，随后 make install 报 No rule to make target 'MAN'（实测 os.path.samefile('MAN','man') 为 True）；
+  (2) HMDFS 保留目录创建模式且 chmod 不再生效：installer.c 用 mkdir(target,0700) + chmod(target,0755) 建 man8 目录，实测落盘停在 drwx--S--- 2700，且属主映射为共享属主(20001006)而非进程 euid(20020084)，同进程随后的 open(O_CREAT) 直接 EACCES（`mkdir -m 700 d && touch d/x` 复现同样错误）；
+  (3) 发行版打包不一致：1.11 的 MAN 清单要求安装 setuser.8，但该版本既不随包提供、Makefile 的 man 目标也只生成 setuidgid.8，任何平台上未修补的 make install 都必然 111 退出；
+  (4) 特殊文件节点被拒：HarmonyOS 拒绝用户进程创建 FIFO（mkfifo(2) 与 mknod(2) S_IFIFO 均 EPERM，AF_UNIX bind 同样 EPERM），supervise 无法建立 supervise/control 控制通道并以 111 退出，上游 rts 套件里 9 个 supervise/svscan 用例随之无法执行；套件自身的 waitok 轮询在 supervise 退出后无限等待，聚合入口 make rts 因此永不返回（实测 1200s 超时、rts 输出为空）。
+affected_scope:         DJB 风格发行包（daemontools / daemontools-encore / qmail / djbdns / ucspi-tcp / runit / s6 及其分支）、任何自带「mkdir + chmod 安装脚本」的上游安装器、任何依赖 mkfifo/命名管道做控制通道或测试夹具的进程监管型测试框架，以及所有在 HMDFS 上按大小写不敏感语义执行 clean 与安装清单的软件包。
+verification_cmd:       四步最小探针（均可直接复制执行；本设备 /tmp 是只读 erofs，统一用 ${TMPDIR:-$HOME/tmp} 作为可写目录）：
+  (1) D="${TMPDIR:-$HOME/tmp}/caseprobe"; mkdir -p "$D" && cd "$D" && printf 'x\n' > MAN
+      python3 -c "import os;print(os.path.samefile('MAN','man'))"   # HMDFS 上为 True
+      rm -f man && ls MAN                                            # MAN 已被删除
+  (2) (umask 077; mkdir -m 700 d) && stat -c '%A %a' d && touch d/x   # 2700 / Permission denied
+  (3) grep -n 'setuser.8' MAN && ls setuser.8                         # 清单要求但发行版无此文件（在源码树内执行）
+  (4) mkfifo probe.fifo; python3 -c "import os;os.mkfifo('p2')"       # 四类创建路径均 Operation not permitted
+      python3 -c "import os,stat;os.mknod('p3',stat.S_IFIFO|0o600)"   # （CLI mkfifo / os.mkfifo / os.mknod / AF_UNIX bind）
+      python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.bind('p4')"
+      # 四类路径的原始输出（含 rc 与设备版本）见 reports/fifo-probe-raw.log.md
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           recipe-side-djb-conf-interface
+rec_description:        用上游文档化的 conf-* 接口配置构建（写 conf-cc/conf-ld 与 conf-bin/conf-man），用 make -B 代替 make clean 做全量重建，安装前按 MAN 清单预建安装目录（走 installer 已实现的 EEXIST 分支），对发行版 MAN 清单里不存在的 setuser.8 用 installer 自带的可选前缀 '?' 打补丁。
+rec_command:            见 daemontools-encore/1.11/conanfile.py build()/package()：save(conf-cc/conf-ld) → make -j1 -B programs man → 预建 MAN 的 d 行目录 → make -j1 install
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      manual-install-copy
+fallback_description:   安装阶段不使用上游 make install，改为按 BIN/MAN 清单在配方内用 conan.tools.files.copy 逐条复制产物；适用于上游 installer 的 mkdir/chmod 语义在本平台无法满足且不接受预建目录的场景。
+fallback_command:       copy(self, "<prog>", src=self.source_folder, dst=os.path.join(self.package_folder, "bin"))  # 按 BIN 清单逐条
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       make clean; make programs
+forbid_1_reason:        TARGETS 清单在大小写不敏感文件系统上会误删发行版自带的内容文件(MAN/TARGETS)，安装阶段必然失败
+forbid_1_consequence:   make install 报 No rule to make target 'MAN'，且必须重新解包源码才能恢复被删的清单
+forbid_2_pattern:       chmod (0?755|0755) .*(share/man|package_folder)
+forbid_2_reason:        HMDFS 上 chmod 不改变已创建目录的可访问性，用 chmod 补救 installer 的 0700 目录无效
+forbid_2_consequence:   安装仍以 access denied 失败，且失败点远离真实根因
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P013, P020
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              HMDFS 大小写不敏感与目录模式语义、特殊文件节点(FIFO)策略不同于普通 Linux
+similar_to:             E074
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E6340.md
+last_updated:           2026-09-11
+source_event:           daemontools-encore 1.11 conan create / make install / make rts
+
+# ═══ 知识协作 ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: 8BEF
