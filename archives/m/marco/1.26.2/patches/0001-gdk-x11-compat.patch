@@ -1,0 +1,484 @@
+--- /dev/null
++++ b/src/x11-compat/gdk/gdkx.h
+@@ -0,0 +1,78 @@
++/* Standalone GDK-X11 compatibility declarations for GDK builds that lack the
++ * X11 backend (for example the Broadway-only GTK+ 3 shipped on HarmonyOS PC,
++ * which provides neither <gdk/gdkx.h> nor the gdk_x11_* API).
++ *
++ * marco is an X11 window manager: it drives a real X server through Xlib and
++ * only needs the small GDK-X11 glue surface declared below.  GTK+ can
++ * therefore run on top of another GDK backend while marco keeps talking X11
++ * directly.  The implementation lives in marco-x11-compat.c and degrades
++ * safely (NULL / None / 0 / GDK_FILTER_CONTINUE / Success) when no X server
++ * can be opened at runtime.
++ */
++#ifndef MARCO_GDKX_COMPAT_H
++#define MARCO_GDKX_COMPAT_H
++
++#include <gdk/gdk.h>
++#include <X11/Xlib.h>
++#include <X11/Xutil.h>
++
++G_BEGIN_DECLS
++
++Display *gdk_x11_display_get_xdisplay (GdkDisplay *display);
++GdkDisplay *gdk_x11_lookup_xdisplay (Display *xdisplay);
++Screen *gdk_x11_screen_get_xscreen (GdkScreen *screen);
++Window gdk_x11_get_default_root_xwindow (void);
++GdkWindow *gdk_x11_window_lookup_for_display (GdkDisplay *display,
++                                              Window window);
++Window gdk_x11_window_get_xid (GdkWindow *window);
++Visual *gdk_x11_screen_lookup_visual (GdkScreen *screen,
++                                      VisualID xvisualid);
++gint gdk_x11_screen_get_screen_number (GdkScreen *screen);
++void gdk_x11_display_error_trap_push (GdkDisplay *display);
++gint gdk_x11_display_error_trap_pop (GdkDisplay *display);
++void gdk_x11_display_error_trap_pop_ignored (GdkDisplay *display);
++
++/* Replaces gdk_window_add_filter()/gdk_window_remove_filter(): marco installs
++ * an X event filter (src/ui/ui.c:242) that must be fed real X events, which
++ * the Broadway GDK never delivers. */
++void marco_x11_compat_add_filter (GdkWindow *window,
++                                  GdkFilterFunc function,
++                                  gpointer data);
++void marco_x11_compat_remove_filter (GdkWindow *window,
++                                     GdkFilterFunc function,
++                                     gpointer data);
++
++#ifndef GDK_DISPLAY_XDISPLAY
++#define GDK_DISPLAY_XDISPLAY(display) (gdk_x11_display_get_xdisplay (display))
++#endif
++
++#ifndef GDK_WINDOW_XID
++#define GDK_WINDOW_XID(window) (gdk_x11_window_get_xid (window))
++#endif
++
++#ifndef GDK_WINDOW_XDISPLAY
++#define GDK_WINDOW_XDISPLAY(window) (gdk_x11_display_get_xdisplay (NULL))
++#endif
++
++#ifndef GDK_SCREEN_XSCREEN
++#define GDK_SCREEN_XSCREEN(screen) (gdk_x11_screen_get_xscreen (screen))
++#endif
++
++#ifndef GDK_IS_X11_DISPLAY
++#define GDK_IS_X11_DISPLAY(display) \
++  (gdk_x11_display_get_xdisplay (display) != NULL)
++#endif
++
++#ifndef gdk_window_add_filter
++#define gdk_window_add_filter(window, function, data) \
++  marco_x11_compat_add_filter ((window), (function), (data))
++#endif
++
++#ifndef gdk_window_remove_filter
++#define gdk_window_remove_filter(window, function, data) \
++  marco_x11_compat_remove_filter ((window), (function), (data))
++#endif
++
++G_END_DECLS
++
++#endif /* MARCO_GDKX_COMPAT_H */
+--- /dev/null
++++ b/src/x11-compat/marco-x11-compat.c
+@@ -0,0 +1,400 @@
++/*
++ * X11 compatibility layer for GDK builds without the X11 backend.
++ *
++ * marco is an X11 window manager: it drives a real X server through Xlib
++ * (EWMH atoms, grabs, reparenting, XRender compositing) and only relies on the
++ * small GDK-X11 glue surface re-implemented here.  GTK+ can therefore run on
++ * top of another GDK backend -- the Broadway-only GTK+ 3 shipped on HarmonyOS
++ * PC -- while marco keeps talking X11 directly.
++ *
++ * A single private Xlib connection is opened lazily with XOpenDisplay(NULL) and
++ * reused for every call.  Non-NULL GdkDisplay arguments are accepted for API
++ * compatibility but always denote gdk_display_get_default(), matching the
++ * g_assert() checks in marco's src/ui/ui.c.  GdkWindow objects and X window ids
++ * are bridged through a bidirectional hash table, and the X event filters marco
++ * installs with gdk_window_add_filter() are fed from the private connection's
++ * queue by a 16ms GSource (the Broadway GDK never delivers X events).
++ *
++ * Runtime constraint: a HarmonyOS device may have no X server at all.  Every
++ * entry point therefore degrades safely -- NULL / None / 0 /
++ * GDK_FILTER_CONTINUE / Success -- instead of aborting, and no X request is
++ * issued before a connection exists.
++ *
++ * The ca_gtk_context_get() stub required by canberra-gtk.h also lives here, so
++ * that shim does not have to pull in any GTK+ header.
++ */
++#include <gdk/gdk.h>
++#include <glib.h>
++#include <X11/Xlib.h>
++#include <X11/Xutil.h>
++
++#include "gdk/gdkx.h"
++#include "canberra-gtk.h"
++
++static Display *compat_display;
++static GMutex display_lock;
++
++static GHashTable *window_to_xid;
++static GHashTable *xid_to_window;
++
++static int trap_depth;
++static int trapped_error;
++static XErrorHandler previous_error_handler;
++
++static GList *event_filters;
++static guint event_source_id;
++
++typedef struct
++{
++  GdkWindow *window;
++  GdkFilterFunc function;
++  gpointer data;
++} CompatEventFilter;
++
++static Display *
++get_xdisplay (void)
++{
++  g_mutex_lock (&display_lock);
++  if (compat_display == NULL)
++    {
++      XInitThreads ();
++      compat_display = XOpenDisplay (NULL);
++    }
++  g_mutex_unlock (&display_lock);
++
++  return compat_display;
++}
++
++Display *
++gdk_x11_display_get_xdisplay (GdkDisplay *display)
++{
++  (void) display;
++
++  return get_xdisplay ();
++}
++
++GdkDisplay *
++gdk_x11_lookup_xdisplay (Display *xdisplay)
++{
++  if (xdisplay == NULL || xdisplay != get_xdisplay ())
++    return NULL;
++
++  return gdk_display_get_default ();
++}
++
++static int
++compat_error_handler (Display *display,
++                      XErrorEvent *event)
++{
++  (void) display;
++
++  if (event != NULL)
++    trapped_error = event->error_code;
++
++  return 0;
++}
++
++void
++gdk_x11_display_error_trap_push (GdkDisplay *display)
++{
++  Display *xdisplay = get_xdisplay ();
++  (void) display;
++
++  if (xdisplay == NULL)
++    return;
++
++  if (trap_depth++ == 0)
++    {
++      XSync (xdisplay, False);
++      trapped_error = Success;
++      previous_error_handler = XSetErrorHandler (compat_error_handler);
++    }
++}
++
++gint
++gdk_x11_display_error_trap_pop (GdkDisplay *display)
++{
++  Display *xdisplay = get_xdisplay ();
++  gint result;
++  (void) display;
++
++  if (xdisplay == NULL || trap_depth == 0)
++    return Success;
++
++  XSync (xdisplay, False);
++  result = trapped_error;
++  if (--trap_depth == 0)
++    XSetErrorHandler (previous_error_handler);
++
++  return result;
++}
++
++void
++gdk_x11_display_error_trap_pop_ignored (GdkDisplay *display)
++{
++  (void) gdk_x11_display_error_trap_pop (display);
++}
++
++Screen *
++gdk_x11_screen_get_xscreen (GdkScreen *screen)
++{
++  Display *display = get_xdisplay ();
++  (void) screen;
++
++  if (display == NULL)
++    return NULL;
++
++  return ScreenOfDisplay (display, DefaultScreen (display));
++}
++
++Window
++gdk_x11_get_default_root_xwindow (void)
++{
++  Display *display = get_xdisplay ();
++
++  if (display == NULL)
++    return None;
++
++  return DefaultRootWindow (display);
++}
++
++gint
++gdk_x11_screen_get_screen_number (GdkScreen *screen)
++{
++  Display *display = get_xdisplay ();
++  (void) screen;
++
++  return display != NULL ? DefaultScreen (display) : 0;
++}
++
++Visual *
++gdk_x11_screen_lookup_visual (GdkScreen *screen,
++                              VisualID xvisualid)
++{
++  Display *display = get_xdisplay ();
++  XVisualInfo template;
++  XVisualInfo *visuals;
++  Visual *result = NULL;
++  int count = 0;
++  int i;
++  (void) screen;
++
++  if (display == NULL)
++    return NULL;
++
++  template.visualid = xvisualid;
++  visuals = XGetVisualInfo (display, VisualIDMask, &template, &count);
++  if (visuals != NULL)
++    {
++      for (i = 0; i < count; i++)
++        {
++          if (visuals[i].visual != NULL && visuals[i].visualid == xvisualid)
++            {
++              result = visuals[i].visual;
++              break;
++            }
++        }
++      XFree (visuals);
++    }
++
++  return result;
++}
++
++static void
++ensure_window_maps (void)
++{
++  if (window_to_xid == NULL)
++    {
++      window_to_xid = g_hash_table_new (g_direct_hash, g_direct_equal);
++      xid_to_window = g_hash_table_new (g_direct_hash, g_direct_equal);
++    }
++}
++
++Window
++gdk_x11_window_get_xid (GdkWindow *window)
++{
++  Display *display = get_xdisplay ();
++  gpointer value;
++  Window xid;
++
++  if (display == NULL || window == NULL)
++    return None;
++
++  ensure_window_maps ();
++
++  value = g_hash_table_lookup (window_to_xid, window);
++  if (value != NULL)
++    return (Window) GPOINTER_TO_SIZE (value);
++
++  /* GDK owns the real window; Xlib only needs a handle it can name in
++   * requests.  Keep an offscreen 1x1 window per GdkWindow and select the event
++   * mask marco's filter expects, so that events marco turns into GDK events
++   * can be routed back through gdk_x11_window_lookup_for_display(). */
++  xid = XCreateSimpleWindow (display, DefaultRootWindow (display),
++                             0, 0, 1, 1, 0, 0, 0);
++  if (xid == None)
++    return None;
++
++  XSelectInput (display, xid,
++                StructureNotifyMask | PropertyChangeMask |
++                ButtonPressMask | ButtonReleaseMask | PointerMotionMask |
++                EnterWindowMask | LeaveWindowMask);
++  XFlush (display);
++
++  g_hash_table_insert (window_to_xid, window, GSIZE_TO_POINTER ((gsize) xid));
++  g_hash_table_insert (xid_to_window, GSIZE_TO_POINTER ((gsize) xid), window);
++
++  return xid;
++}
++
++GdkWindow *
++gdk_x11_window_lookup_for_display (GdkDisplay *display,
++                                   Window window)
++{
++  (void) display;
++
++  if (window == None)
++    return NULL;
++
++  ensure_window_maps ();
++
++  return g_hash_table_lookup (xid_to_window,
++                              GSIZE_TO_POINTER ((gsize) window));
++}
++
++static gboolean
++dispatch_x11_events (gpointer user_data)
++{
++  Display *display = get_xdisplay ();
++  GArray *snapshot;
++  GList *item;
++  guint i;
++  (void) user_data;
++
++  if (display == NULL)
++    return G_SOURCE_CONTINUE;
++
++  /* Snapshot the filter list so a filter may safely add or remove filters. */
++  snapshot = g_array_new (FALSE, FALSE, sizeof (CompatEventFilter));
++  for (item = event_filters; item != NULL; item = item->next)
++    g_array_append_val (snapshot, *((CompatEventFilter *) item->data));
++
++  while (XPending (display) != 0)
++    {
++      XEvent event;
++
++      XNextEvent (display, &event);
++
++      for (i = 0; i < snapshot->len; i++)
++        {
++          CompatEventFilter *filter =
++            &g_array_index (snapshot, CompatEventFilter, i);
++          GdkFilterReturn result =
++            filter->function ((GdkXEvent *) &event, NULL, filter->data);
++
++          /* XNextEvent() already removed the event from the queue and Xlib
++           * cannot put it back, so it is consumed whatever the filter returns.
++           * GDK_FILTER_CONTINUE merely lets the remaining filters see it;
++           * GDK_FILTER_REMOVE (and GDK_FILTER_TRANSLATE, unused by marco)
++           * stops the chain. */
++          if (result != GDK_FILTER_CONTINUE)
++            break;
++        }
++    }
++
++  g_array_free (snapshot, TRUE);
++
++  return G_SOURCE_CONTINUE;
++}
++
++void
++marco_x11_compat_add_filter (GdkWindow *window,
++                             GdkFilterFunc function,
++                             gpointer data)
++{
++  CompatEventFilter *filter;
++
++  g_return_if_fail (function != NULL);
++
++  filter = g_new (CompatEventFilter, 1);
++  filter->window = window;
++  filter->function = function;
++  filter->data = data;
++  event_filters = g_list_append (event_filters, filter);
++
++  if (event_source_id == 0)
++    event_source_id = g_timeout_add (16, dispatch_x11_events, NULL);
++}
++
++void
++marco_x11_compat_remove_filter (GdkWindow *window,
++                                GdkFilterFunc function,
++                                gpointer data)
++{
++  GList *item;
++
++  for (item = event_filters; item != NULL; item = item->next)
++    {
++      CompatEventFilter *filter = item->data;
++
++      if (filter->window == window && filter->function == function &&
++          filter->data == data)
++        {
++          event_filters = g_list_delete_link (event_filters, item);
++          g_free (filter);
++          break;
++        }
++    }
++
++  if (event_filters == NULL && event_source_id != 0)
++    {
++      g_source_remove (event_source_id);
++      event_source_id = 0;
++    }
++}
++
++static gpointer
++create_ca_gtk_context (gpointer data)
++{
++  ca_context *context = NULL;
++  Display *display;
++  const gchar *application_name;
++  const gchar *application_id;
++  (void) data;
++
++  if (ca_context_create (&context) != CA_SUCCESS)
++    return NULL;
++
++  /* Mirror the properties libcanberra-gtk would set, then attach the X
++   * connection so the sound server can locate the display. */
++  application_name = g_get_application_name ();
++  application_id = g_get_prgname ();
++
++  if (application_name != NULL && application_name[0] != '\0')
++    ca_context_change_props (context,
++                             CA_PROP_APPLICATION_NAME, application_name,
++                             NULL);
++
++  if (application_id != NULL && application_id[0] != '\0')
++    ca_context_change_props (context,
++                             CA_PROP_APPLICATION_ID, application_id,
++                             NULL);
++
++  display = get_xdisplay ();
++  if (display != NULL)
++    ca_context_change_props (context,
++                             CA_PROP_WINDOW_X11_DISPLAY, DisplayString (display),
++                             NULL);
++
++  return context;
++}
++
++ca_context *
++ca_gtk_context_get (void)
++{
++  static GOnce once = G_ONCE_INIT;
++
++  g_once (&once, create_ca_gtk_context, NULL);
++
++  return once.retval;
++}
