@@ -11,6 +11,6 @@ int main(void) {
     }
     /* 无音频设备环境只验证 API 可达与库可链接 */
     Mix_Quit();
-    printf("test sdl2_mixer 2.8.2: OK\n");
+    printf("test sdl2-mixer 2.8.2: OK\n");
     return 0;
 }
