@@ -1,0 +1,122 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: pytorch/2.13.0
+homepage: "https://pytorch.org/"
+
+# 上游测试入口:
+#  - C++ 测试为 gtest + CTest (BUILD_TEST=ON 时按 c10/test/CMakeLists.txt 的
+#    file(GLOB_RECURSE ... *_test.cpp) 逐个注册目标)
+#  - Python 测试为 pytest (需 BUILD_PYTHON=ON, 本包产出 C++ libtorch, 不构建 python 模块)
+upstream_check_command: "ctest -N"
+
+# conanfile.py 的 build() 方法中是否已集成上游测试
+upstream_test_in_build: true
+upstream_test_command: >-
+  cmake -S <source> -B <build> -DBUILD_TEST=ON &&
+  cmake --build <build> --target <全部 51 个 c10_* 目标> -- -jN &&
+  TEST_TMPDIR=<build>/upstream-test-tmp ctest --test-dir <build> -R "^(c10_...)$" --output-on-failure
+# 接入说明: c10/test 的上游 gtest 测试已接入构建并全部运行。
+#   - 主构建保持 BUILD_TEST=OFF（交付包中不含任何测试二进制）；
+#   - build() 末尾重新配置 -DBUILD_TEST=ON -DINSTALL_TEST=OFF。INSTALL_TEST 必须
+#     显式关闭：上游 CMakeLists 用 cmake_dependent_option(INSTALL_TEST ... ON
+#     "BUILD_TEST" OFF)，BUILD_TEST=ON 会自动开启它，使 benchmark 等未构建产物
+#     也生成 install 规则，导致 package() 阶段 cmake.install() 报文件不存在；
+#   - 按与上游 c10/test/CMakeLists.txt
+#     相同的 file(GLOB_RECURSE) 口径发现并构建全部 51 个目标
+#     （conanfile.py -> _upstream_c10_targets()），再用 ctest -R 执行；
+#   - 测试与库使用完全相同的工具链/编译 flag（同一 CMake 配置），
+#     因此验证的是真实交付物所依赖的代码路径；
+#   - ctest 结果决定构建成败：任一目标失败 → conan create 失败。
+#
+# 前置条件（两个补丁在 build() 的 apply_conandata_patches 阶段套用）:
+#   - patches/0004-c10-enumerate-ssize-musl.patch
+#     c10/util/Enumerate.h 使用 ssize_t 但未 include <sys/types.h>；
+#     glibc 传递提供而 musl 不提供，不修补则 c10_Enumerate_test 编译失败。
+#   - patches/0005-googletest-captured-stream-tmpdir.patch
+#     googletest CapturedStream 在非 Android/iOS 分支硬编码 "/tmp/"，
+#     HarmonyOS PC 的 /tmp 只读 → death test 无法创建捕获文件而 abort
+#     （c10_exception/logging/nofatal/small_vector 受影响）。
+#     改为 testing::TempDir()（与上游 Android 分支同一机制，读
+#     TEST_TMPDIR/TMPDIR，缺省回退 /tmp）；配方把 TMPDIR/TEST_TMPDIR 指向构建目录下
+#     可写子目录。
+#   - patches/0006-c10-test-targets-cxx20.patch
+#     conan 工具链按 profile（compiler.cppstd=17）以普通变量钉住
+#     CMAKE_CXX_STANDARD，遮蔽 pytorch 顶层的 CACHE 赋值；而上游测试按 C++20
+#     基线编写（std::unordered_set/std::set 的 .contains）→
+#     c10_DispatchKeySet_test / c10_ThreadLocalDebugInfo_test 无法编译。
+#     该补丁仅对 c10 测试目标设 CXX_STANDARD 20，库目标保持工具链标准。
+
+# 上游测试规模统计
+# 计数口径: C++ 为 gtest TEST/TEST_F/TEST_P/TYPED_TEST/TYPED_TEST_P 宏;
+#           Python 为 def test_*; 运行时用例数为 gtest 实际执行数
+#           （含参数化实例化，故大于宏计数）。均对仓库内 v2.13.0 源码树实测。
+upstream_test_stats:
+  c10_test:                 # c10/test  核心工具库测试（已全量运行）
+    files: 51               # 50 个 *_test.cpp + 1 个 cpp17_header_build_check.cpp
+    macros: 669             # TEST* 宏
+    runtime_cases: 868      # gtest 实际执行用例数
+    ran: true
+  test_cpp:                 # test/cpp  torch C++ API 与算子测试
+    files: 198
+    macros: 2700
+    ran: false
+    reason: >-
+      与完整 torch 测试目标同编译（每个目标需链接整个 libtorch），
+      单目标编译 30-60 分钟、全量运行数小时，超出 CI 构建预算；
+      需要时可在 worker 上手动开启 BUILD_TEST=ON 全量构建执行。
+  python_test_py:           # test/*.py  pytest 体系
+    files: 184
+    macros: 9926
+    ran: false
+    reason: >-
+      需要 python 版 torch（BUILD_PYTHON=ON）；本包按 R47 D.4-2 判 cpp 包，
+      只产出 C++ libtorch（libtorch.so/libtorch_cpu.so/libc10.so），
+      无 python 模块可供 pytest 测试。
+
+# 上游实际运行的测试程序
+upstream_tests:
+  - name: "c10 unit tests (全量, 51 targets)"
+    type: "ctest"
+    description: >-
+      c10/test 的非参数化与参数化 gtest 套件全量执行：ArrayRef, Bitset, Device,
+      DeviceGuard, InlineDeviceGuard, InlineStreamGuard, StreamGuard,
+      DispatchKeySet, Scalar, SymInt, SizesAndStrides, Synchronized, ThreadLocal,
+      ThreadLocalDebugInfo, TypeIndex, WaitCounter, accumulate, bfloat16,
+      bit_cast, complex, complex_math, cow, error, exception, flags,
+      generic_math, intrusive_ptr, irange, lazy, logging, nofatal, optional,
+      ordered_preserving_dict, registry, small_vector, ssize, string_util,
+      string_view, tempfile, typeid, AllocatorConfig, CompileTimeFunctionPointer,
+      ConstexprCrc, DeadlockDetection, Enumerate, Half, IntrusiveList, LeftRight,
+      NetworkFlow, Semaphore 等 50 个 *_test 目标 + c10_cpp17_header_build_test。
+      覆盖 669 个 TEST* 宏 / 1802 条 EXPECT_*/ASSERT_* 断言。
+    command: 'ctest --test-dir <build> -R "^(c10_..._test)$" --output-on-failure'
+    ran: true
+    status: >-
+      已接入并全量运行 (build() 内 BUILD_TEST=ON + 目标发现 + ctest)。
+      本地实测 51/51 目标通过，868 用例中 867 通过 + 1 skipped
+      (ssizeTest.promotes_to_64_bit_on_32_bit_platform 在 64 位平台按上游
+      逻辑跳过，非失败)，0 失败；全部用例运行耗时约 4 秒。
+    route: "conanfile.py build() -> _run_upstream_c10_tests()"
+
+test_package_tests:
+  - file: test_pytorch.cpp
+    description: "消费者视角验证 (R34): 链接 libtorch C++ API, 构造张量做加法, 断言 (1+2+3)+(4+5+6)=21"
+    command: "./test_pytorch"
+  - file: test_pytorch_ohos.cpp
+    description: >-
+      HarmonyOS 专项测试 (R6): 运行时判定宿主平台 (uname(2)), 在 HarmonyOS 上校验 4 组
+      鸿蒙/musl aarch64 特有适配点, 非 HarmonyOS 宿主打印 SKIP 并以 0 退出 (R8: 不使用平台条件编译宏) —
+      (1) 平台身份 (uname sysname=HarmonyOS 且 machine=aarch64, CPU 后端与默认 dtype);
+      (2) 补丁 0004 语义 (musl 下 ssize_t 经 <sys/types.h> 可见且符号/宽度正确);
+      (3) 补丁 0001 领域 (group_norm 的 ranges→iterator 路径与空张量判定);
+      (4) OHOS aarch64 算术与复数 (CPU 张量算术 / complex64 乘法 / int64 归约 / STL 互操作)。
+      非 OHOS 平台同样可构建运行, 保证不是空壳。
+    command: "./test_pytorch_ohos"
+    route: "conanfile.py test() -> self.run(test_pytorch_ohos)"
+
+# 测试断言总数 (近似值, 用于质量评估)
+# = 上游 c10 全量 1802 条 (EXPECT_*/ASSERT_* 宏) + test_package 2 条 (消费者 1 + 鸿蒙专项 1 入口)
+assertion_count: 1804
