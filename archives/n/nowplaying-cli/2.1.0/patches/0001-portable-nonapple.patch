@@ -1,0 +1,274 @@
+--- a/src/nowplaying.mm
++++ b/src/nowplaying.mm
+@@ -1,3 +1,4 @@
++#if defined(__APPLE__)
+ #import <Foundation/Foundation.h>
+ #import <AppKit/AppKit.h>
+ #import <objc/runtime.h>
+@@ -592,3 +593,266 @@
+ 
+     } // @autoreleasepool
+ }
++
++#else /* !__APPLE__ : portable OpenHarmony implementation */
++
++/* ===========================================================================
++ * Portable (non-Apple) implementation — OpenHarmony (OHOS) / aarch64.
++ *
++ * Upstream nowplaying-cli is macOS-only: it reads the system "now playing"
++ * item through the private MediaRemote framework on top of
++ * Foundation/AppKit/Cocoa. The OpenHarmony native SDK ships neither an
++ * Objective-C runtime / Foundation nor any MediaRemote equivalent, and the
++ * native AVSessionKit (libohavsession.so) exposes only the *provider* role
++ * plus the AVCast (screen-cast) controller — there is no native
++ * manager/controller query API (OH_AVSessionManager / getAllSessionDescriptors
++ * exist only in the ETS/JS AVSessionKit, not in the native C API).
++ *
++ * This branch reproduces the upstream CLI surface (subcommand set, `get` field
++ * behaviour, output framing, exit codes) and maps the control verbs onto the
++ * AVSession role the native platform actually provides.
++ *
++ * Documented differences from upstream (see README.md "Differences from
++ * upstream" table — they are NOT byte-identical in these respects):
++ *   - `get --json`: pretty-printed with two-space indent and " : " separators
++ *     (upstream uses NSJSONWritingPrettyPrinted); exact whitespace and key
++ *     order of Cocoa's serializer are not reproduced character-for-character.
++ *   - `get-raw` with no now-playing record prints "{}" (upstream serializes an
++ *     empty NSDictionary through the same pretty printer).
++ *   - `next` / `previous` / `togglePlayPause`: the native provider API has no
++ *     distinct queue-control commands, so all three apply a "playing" playback
++ *     state to the CLI's own AVSession; upstream sends three different private
++ *     MediaRemote commands and they are not distinguishable here.
++ *   - `--version` is an addition (upstream has no version subcommand and falls
++ *     back to the help text for unknown arguments).
++ * No fabricated now-playing data is ever produced.
++ * =========================================================================== */
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++#include <multimedia/av_session/native_avsession.h>
++#include <multimedia/av_session/native_avmetadata.h>
++#include <multimedia/av_session/native_avplaybackstate.h>
++
++namespace {
++
++const char* const kPortVersion = "2.1.0";
++const char* const kBundleName  = "org.opendesk.nowplayingcli";
++const char* const kAbilityName = "MainAbility";
++// Upper bound for seek seconds so that (secs * 1000) cannot overflow int64.
++const double kMaxSeekSeconds = 9.0e15;
++
++// Upstream help text, reproduced verbatim (fixed literal program name, exactly
++// the four blocks nowplaying.mm::printHelp() emits).
++void PrintHelp() {
++    std::printf("Example Usage: \n");
++    std::printf("\tnowplaying-cli get-raw\n");
++    std::printf("\tnowplaying-cli get title album artist\n");
++    std::printf("\tnowplaying-cli get --json title album artist\n");
++    std::printf("\tnowplaying-cli pause\n");
++    std::printf("\tnowplaying-cli seek 60\n");
++    std::printf("\n");
++    std::printf("Available commands: \n");
++    std::printf("\tget, get-raw, play, pause, togglePlayPause, next, previous, seek <secs>\n");
++    std::printf("\n");
++    std::printf("Options: \n");
++    std::printf("\t--json\tOutput as JSON (use with 'get')\n");
++}
++
++// `--version` is a port addition; it also carries the platform disclosure so
++// that `--help` can stay byte-identical to upstream.
++void PrintVersion() {
++    std::printf("nowplaying-cli %s (OpenHarmony port)\n", kPortVersion);
++    std::printf("upstream: kirtan-shah/nowplaying-cli 2.1.0 (macOS, private MediaRemote)\n");
++    std::printf("OpenHarmony note: the native AVSessionKit exposes the provider role only\n");
++    std::printf("  and has no system-wide now-playing query, so get/get-raw report the same\n");
++    std::printf("  empty result upstream reports with no now-playing item, and the control\n");
++    std::printf("  verbs apply to the CLI's own native AVSession provider session.\n");
++}
++
++std::string JsonEscape(const std::string& s) {
++    std::string out;
++    out.reserve(s.size() + 2);
++    for (char c : s) {
++        switch (c) {
++            case '"':  out += "\\\""; break;
++            case '\\': out += "\\\\"; break;
++            case '\n': out += "\\n";  break;
++            case '\r': out += "\\r";  break;
++            case '\t': out += "\\t";  break;
++            default:   out += c;      break;
++        }
++    }
++    return out;
++}
++
++// `get`: one line per requested key (upstream prints the literal null for a key
++// that has no value), or a pretty-printed JSON object with --json. The native
++// platform has no system-wide now-playing query, so every requested key
++// resolves to null — the same output upstream produces when MediaRemote
++// returns no now-playing information.
++int PrintQuery(const std::vector<std::string>& keys, bool json_output) {
++    if (json_output) {
++        if (keys.empty()) {
++            std::printf("{}\n");
++            return 0;
++        }
++        std::printf("{\n");
++        for (size_t i = 0; i < keys.size(); ++i) {
++            std::printf("  \"%s\" : null%s\n", JsonEscape(keys[i]).c_str(),
++                        (i + 1 < keys.size()) ? "," : "");
++        }
++        std::printf("}\n");
++    } else {
++        for (size_t i = 0; i < keys.size(); ++i) {
++            std::printf("null\n");
++        }
++    }
++    return 0;
++}
++
++// `get-raw`: upstream prints the full sanitized now-playing record. With no
++// native query API available the record is empty.
++int PrintRaw() {
++    std::printf("{}\n");
++    return 0;
++}
++
++int PublishPlaybackState(OH_AVSession* session, AVSession_PlaybackState state,
++                         const AVSession_PlaybackPosition* position) {
++    AVSession_ErrCode rc = OH_AVSession_SetPlaybackState(session, state);
++    if (rc != AV_SESSION_ERR_SUCCESS) {
++        std::fprintf(stderr,
++                     "nowplaying-cli: playback command failed: "
++                     "OH_AVSession_SetPlaybackState rc=%d\n", static_cast<int>(rc));
++        return 1;
++    }
++    if (position != nullptr) {
++        AVSession_PlaybackPosition pos = *position;
++        rc = OH_AVSession_SetPlaybackPosition(session, &pos);
++        if (rc != AV_SESSION_ERR_SUCCESS) {
++            std::fprintf(stderr,
++                         "nowplaying-cli: seek command failed: "
++                         "OH_AVSession_SetPlaybackPosition rc=%d\n",
++                         static_cast<int>(rc));
++            return 1;
++        }
++    }
++    return 0;
++}
++
++// Control verbs are applied to a native AVSession provider session — the only
++// AVSession role the OpenHarmony native SDK exposes. Returns 0 on success and
++// 1 with a diagnostic when the AVSession service is unavailable.
++int ApplyControl(const char* verb, const AVSession_PlaybackPosition* position) {
++    OH_AVSession* session = nullptr;
++    AVSession_ErrCode rc = OH_AVSession_Create(SESSION_TYPE_AUDIO, "nowplaying-cli",
++                                               kBundleName, kAbilityName, &session);
++    if (rc != AV_SESSION_ERR_SUCCESS || session == nullptr) {
++        std::fprintf(stderr,
++                     "nowplaying-cli: cannot apply '%s': the native AVSession "
++                     "provider session is unavailable (OH_AVSession_Create rc=%d); "
++                     "the OpenHarmony native AVSessionKit has no cross-application "
++                     "controller\n", verb, static_cast<int>(rc));
++        return 1;
++    }
++    rc = OH_AVSession_Activate(session);
++    if (rc != AV_SESSION_ERR_SUCCESS) {
++        std::fprintf(stderr,
++                     "nowplaying-cli: OH_AVSession_Activate failed rc=%d\n",
++                     static_cast<int>(rc));
++        OH_AVSession_Destroy(session);
++        return 1;
++    }
++
++    // Documented difference: the native provider API offers no distinct
++    // next/previous/toggle commands, so those verbs all publish a "playing"
++    // state (upstream sends three different private MediaRemote commands).
++    AVSession_PlaybackState state = PLAYBACK_STATE_INITIAL;
++    if (std::strcmp(verb, "pause") == 0) {
++        state = PLAYBACK_STATE_PAUSED;
++    } else if (std::strcmp(verb, "play") == 0 ||
++               std::strcmp(verb, "togglePlayPause") == 0 ||
++               std::strcmp(verb, "next") == 0 ||
++               std::strcmp(verb, "previous") == 0 ||
++               std::strcmp(verb, "seek") == 0) {
++        state = PLAYBACK_STATE_PLAYING;
++    }
++
++    int rc_out = PublishPlaybackState(session, state, position);
++    OH_AVSession_Deactivate(session);
++    OH_AVSession_Destroy(session);
++    return rc_out;
++}
++
++}  // namespace
++
++int main(int argc, char** argv) {
++    if (argc == 1) {
++        PrintHelp();
++        return 0;
++    }
++
++    const char* cmd = argv[1];
++
++    if (std::strcmp(cmd, "get") == 0) {
++        std::vector<std::string> keys;
++        bool json_output = false;
++        for (int i = 2; i < argc; ++i) {
++            if (std::strcmp(argv[i], "--json") == 0) {
++                json_output = true;
++            } else {
++                keys.push_back(argv[i]);
++            }
++        }
++        return PrintQuery(keys, json_output);
++    }
++    if (std::strcmp(cmd, "get-raw") == 0) {
++        return PrintRaw();
++    }
++    if (std::strcmp(cmd, "play") == 0 ||
++        std::strcmp(cmd, "pause") == 0 ||
++        std::strcmp(cmd, "togglePlayPause") == 0 ||
++        std::strcmp(cmd, "next") == 0 ||
++        std::strcmp(cmd, "previous") == 0) {
++        return ApplyControl(cmd, nullptr);
++    }
++    // Upstream only treats "seek" as a seek when exactly one argument follows
++    // (`argc == 3`); otherwise it falls through to the help text and exits 0.
++    if (std::strcmp(cmd, "seek") == 0 && argc == 3) {
++        char* end = nullptr;
++        double secs = std::strtod(argv[2], &end);
++        // Reject trailing garbage, NaN/Inf (strtod accepts "nan"/"inf"/"1e999")
++        // and values whose millisecond form would overflow int64. Converting a
++        // non-finite or out-of-range double to int64 is UB, so the bound is
++        // checked before the cast.
++        if (end == argv[2] || *end != '\0' || !std::isfinite(secs) ||
++            secs < 0 || secs > kMaxSeekSeconds) {
++            std::fprintf(stderr, "Invalid seek time: %s\n", argv[2]);
++            std::fprintf(stderr, "Usage: nowplaying-cli seek <secs>\n");
++            return 1;
++        }
++        AVSession_PlaybackPosition pos;
++        pos.elapsedTime = static_cast<int64_t>(secs * 1000.0);  // ms, bounded
++        pos.updateTime = 0;
++        return ApplyControl("seek", &pos);
++    }
++    if (std::strcmp(cmd, "--version") == 0 ||
++        std::strcmp(cmd, "-v") == 0 ||
++        std::strcmp(cmd, "version") == 0) {
++        PrintVersion();
++        return 0;
++    }
++
++    // --help / -h / help / unknown command / malformed "seek": upstream prints
++    // the help text and exits 0.
++    PrintHelp();
++    return 0;
++}
++
++#endif /* __APPLE__ */
