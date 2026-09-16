@@ -1,0 +1,175 @@
+#====================================================================
+# DRAFT-buildtime-tool-dep-blocks-adaptation-scan-ac-path-tool
+#   —— 上游库的「构建期外部程序」硬依赖会成为适配隐形阻塞，须开工前扫描
+# 对应人类文档: knowledge/drafts/DRAFT-buildtime-tool-dep-blocks-adaptation-scan-ac-path-tool.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9620 gperf 3.3 适配（为解开 PR #9614 eudev 的构建阻塞）
+# 与既有条目的关系（互补，非重复）:
+#   DRAFT-postgresql-18.3-config-sub-ohos-native-build —— 覆盖「config.sub 已原生
+#     支持 linux-ohos → 显式传 --build 即可，无需外置文件」。本条目**不再重复**
+#     该结论（gperf 实测确认同一现象，仅作为"动手前先实测"的例证一句带过）。
+#   既有「构建期工具」类条目（DRAFT-prebuilt-bindir-tool-relocated-runpath 等）——
+#     讲的是**构建期工具的 RUNPATH/加载**问题；本条讲的是**该工具根本不存在于仓库**
+#     （未适配）时的**依赖链阻塞**与**开工前扫描方法**，角度不同。
+#   DRAFT-ohos-configure-ac-cv-path-tool-override —— 同样围绕 `AC_PATH_TOOL` 展开，
+#     但**失败模式不同**：那条讲「探测**找到了**工具、但找错了（命中系统
+#     curl-config 而非私有 prefix）」→ 解法是**用 configure cache 变量覆盖**；
+#     本条讲「工具**根本不存在**（既无包也未适配）」→ `AC_PATH_TOOL` + `AC_MSG_ERROR`
+#     直接硬失败，cache 覆盖无用，只能**先把工具适配出来**。二者互补。
+#   查重（2026-09-12）: `构建期依赖.*工具` / `依赖链.*工具` / `必须先适配.*工具` 各 0 命中。
+#====================================================================
+
+id:                     DRAFT-buildtime-tool-dep-blocks-adaptation-scan-ac-path-tool
+trigger_tool:           configure|make|cmake|conan
+phase:                  dependency-scan
+error_signature:        .*: (command )?not found|
+                         configure: error: .*(not found|no acceptable .* found)|
+                         Could not find [A-Za-z0-9_-]+ (executable|program)|
+                         \*\*\* [a-z0-9_-]+ not found|
+                         BUILD FAILED.*missing.*tool
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               dependency, build, autotools, cmake, conan, toolchain
+match_keywords:         构建期工具, build-time tool, AC_PATH_TOOL, AC_PATH_PROG,
+                         find_program, FATAL_ERROR, 硬依赖, hard dependency,
+                         BUILT_SOURCES, 构建期生成, generator, 前置工具,
+                         dependency chain, 隐形阻塞, prerequisite tool,
+                         gperf, triehash, bison, flex, xsltproc, help2man
+title:                  适配上游库前的隐形阻塞：其「构建期外部程序」硬依赖未适配时该库根本无法构建——须先扫描再动手
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             一个库的依赖链有**两层**，而通常只检查了第一层：
+                           ① 链接期依赖（库/头）—— 显式写在 conanfile/bundler 里，
+                              缺了会立刻在依赖解析阶段暴露；
+                           ② **构建期外部程序**（代码生成器/文档器/解析器生成器）——
+                              只在 configure/make 运行时以 `AC_PATH_TOOL` / `find_program`
+                              的形式出现，**且往往是硬失败**（`AC_MSG_ERROR`）。
+                         第②层依赖最容易成为**隐形阻塞**，因为它不在依赖清单里、也不
+                         产出为"包"，且可能**无法从 tarball 绕过**：
+                         实测 eudev 3.2.14（作为 apt 的前置）：
+                           · `configure.ac` 里 `AC_PATH_TOOL(GPERF, gperf)`，缺失即
+                             `AC_MSG_ERROR` —— **硬失败，非可选**；
+                           · 其输入 `keyboard-keys-from-name.gperf` **不在官方 tarball 中**，
+                             而是由 Makefile 规则在**构建期**用 AWK 从 `keyboard-keys.txt`
+                             生成，再由 gperf 生成 `keyboard-keys-from-name.h`
+                             （列入 `BUILT_SOURCES`）；
+                           · 实测官方 tarball 内**既无 `.gperf` 也无 `.h`**（全树搜索 0 命中）
+                             → **无法通过"预先放好产物"绕过**。
+                         而 ohpcd **没有 gperf 包**（main 上仅有 3.1 的 manifest/notes，
+                         无 conanfile）→ 想适配 eudev（进而 apt），**必须先把 gperf 适配掉**。
+                         同类实例（本条通用性的佐证）：triehash 之于 apt —— apt 的
+                         `CMakeLists.txt` 对 triehash 是 `find_program` + `FATAL_ERROR`，
+                         同样无法用 CMake 选项关闭。
+                         ⚠️ 判据：这类依赖**不会**在"依赖分析"阶段报错，而是在构建中途
+                         才炸；若等到 CI 才发现，会白跑一轮构建。
+affected_scope:         OHOS（及任何从源码构建）的 autotools/CMake 工程中，凡是
+                         configure 阶段 `AC_PATH_TOOL` / `find_program` 硬要求外部
+                         代码生成器的库。典型组合：
+                           · eudev ← gperf（BUILT_SOURCES 键表生成）
+                           · apt   ← triehash（架构 trie 生成）
+                           · 各类 ← bison/flex（解析器）、xsltproc/docbook（文档）、
+                             help2man（man）、awk/sed 特定版本
+                         尤其影响**依赖链深处的库**（apt→eudev→gperf、apt→gnupg→libgpg-error），
+                         因为前置未适配时**目标库连构建都无法开始**。
+verification_cmd:       # ① 开工前扫描目标库的构建期外部程序硬依赖（autotools）
+                         grep -nE 'AC_PATH_(TOOL|PROG)|AC_CHECK_PROG' <src>/configure.ac
+                         #   → 逐个核对该程序是否可得的"包"（如 conan search <tool>/* -r=ohpcd）
+                         # ② CMake 工程
+                         grep -rnE 'find_program\(|find_package\([^)]*REQUIRED' <src>/CMakeLists.txt
+                         #   → 特别注意随后带 FATAL_ERROR 的（无法用选项关闭）
+                         # ③ 该工具是否"能从 tarball 绕过"（关键判据）
+                         tar tf <src>.tar.* | grep -iE '<tool 的输入/产物>'
+                         #   → 若输入与产物都不在 tarball 内 → 构建期生成，无法预置绕过
+                         # ④ 确认仓库是否已有该工具的包
+                         conan search '<tool>/*' -r=ohpcd
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           scan-then-adapt-prerequisite-tool-first
+rec_description:        把「构建期外部程序」纳入**开工前的依赖扫描**，并按顺序推进：
+                         ① **扫描**：读 `configure.ac` 的 `AC_PATH_TOOL/AC_PATH_PROG` 与
+                            CMake 的 `find_program`（尤其紧跟 `FATAL_ERROR` 的），列出
+                            目标库构建期需要的**全部外部程序**。
+                         ② **判定可绕性**：对每个工具，确认其输入/产物是否随 tarball 发布。
+                            若输入与产物**都不在** tarball 中 → 属构建期生成，**无法预置绕过**，
+                            只能真的把工具做出来。
+                         ③ **核对仓库**：查 ohpcd 与 main 是否已有该工具的**可用配方**
+                            （注意区分「有 manifest/notes 笔记」与「有 conanfile 的真包」——
+                            实测 gperf 在 main 上只有笔记，无 conanfile，属未适配）。
+                         ④ **先适配前置工具**：工具通常比目标库**小得多**（gperf 是纯 C +
+                            autotools；triehash 是纯 Perl 脚本），先出工具包并发布 ohpcd，
+                            再适配目标库。
+                         ⑤ **如实记录依赖关系**：在目标库的 PR/manifest 中写明它依赖哪个
+                            工具包、以及为何**构建期就必需**（避免后续维护者以为是可选）。
+                         记录口径：把扫描结果（工具清单 + 可绕性判定）写进适配方案，
+                         不要等到构建失败才发现。
+rec_command:            # 扫描（autotools）
+                         grep -nE 'AC_PATH_(TOOL|PROG)|AC_CHECK_PROG' <src>/configure.ac
+                         # 扫描（CMake）——重点看 REQUIRED 与 FATAL_ERROR
+                         grep -rnE 'find_program\(|FATAL_ERROR' <src>/CMakeLists.txt
+                         # 可绕性判定
+                         tar tf <src>.tar.* | grep -iE '<input>|<output>'
+                         # 仓库核对（注意 main 上"只有笔记无 conanfile"不等于已适配）
+                         conan search '<tool>/*' -r=ohpcd
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      skip-the-dependent-feature-if-optional
+fallback_description:   若该工具对应的功能可以被**完全关闭**（即 configure 提供
+                         `--disable-<feature>` 且不是 `FATAL_ERROR`），则可先关掉该功能
+                         完成主体适配。**前提是必须确认它是真可选**：实测 apt 对 triehash
+                         是 `FATAL_ERROR`（不可关），而 eudev 对 gperf 同样是硬失败
+                         ——这类就不能走本备选。若走了本备选，须在 manifest/PR 中
+                         **如实声明哪些功能被关闭**，不可暗示功能完整。
+fallback_command:       # 仅当 configure 提供该开关且非 FATAL_ERROR 时可用
+                         grep -nE 'AC_ARG_ENABLE\(\[?<feature>' <src>/configure.ac
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       没找到.*工具.*就跳过|工具缺.*不测|tool.*missing.*skip
+forbid_1_reason:          构建期工具是**硬失败**（AC_MSG_ERROR / FATAL_ERROR），不是可选项；
+                          缺了连构建都无法开始，跳过等于放弃适配
+forbid_1_consequence:     浪费一轮 CI 构建，且把"未适配"误报为"失败"
+forbid_2_pattern:       main 上有.*(笔记|manifest|README).*视为.*已适配|有 manifest.*即可用
+forbid_2_reason:         仓库里可能存在"只有 manifest/notes/README、没有 conanfile"的
+                         占位目录（实测 gperf 3.1、triehash 0.3 均如此），它们**不是可用包**
+forbid_2_consequence:     误判依赖已就绪，开工后才发现要连前置一起做
+forbid_3_pattern:       预置.*生成物.*绕过|手动放.*\.(h|gperf|trie).*跳过工具
+forbid_3_reason:          这类输入/产物通常是**构建期由脚本生成**的（不在 tarball 内），
+                          手工预置的来源不明、易与源码版本漂移不一致
+forbid_3_consequence:     产物与源码版本错配，缺陷被推迟到运行期；且不可复现于 CI
+
+principles:
+similar_to:             DRAFT-postgresql-18.3-config-sub-ohos-native-build, DRAFT-ohos-configure-ac-cv-path-tool-override, E305
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-12
+source_event:           gperf/3.3（PR #9620）—— 为解开 eudev 3.2.14（PR #9614）的构建
+                         阻塞而适配。实测：eudev 的 `configure.ac` 用
+                         `AC_PATH_TOOL(GPERF, gperf)` 且缺失即 AC_MSG_ERROR；其输入
+                         `keyboard-keys-from-name.gperf` 由 Makefile 规则在构建期用 AWK
+                         从 `keyboard-keys.txt` 生成、再生成 `keyboard-keys-from-name.h`
+                         （BUILT_SOURCES）——官方 tarball 既不含 .gperf 也不含 .h
+                         （全树搜索 0 命中）→ 无法从 tarball 绕过。ohpcd 无 gperf 包
+                         （main 仅 3.1 笔记、无 conanfile）。
+                         同源实例：apt 的 CMakeLists 对 triehash 为 find_program +
+                         FATAL_ERROR（无法用选项关闭）。
+                         附：gperf 3.3 实测 config.sub 已原生支持 linux-ohos*（该现象
+                         已由 DRAFT-postgresql-18.3-config-sub-ohos-native-build 覆盖，
+                         本条不重复，仅作为"动手前先实测"的例证）。
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9620
+source_commit:          e22c51c8c
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-12
+
+draft:                  true
