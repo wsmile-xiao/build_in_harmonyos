@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.15)
+project(sdl_mixer_consumer C)
+
+find_package(SDL CONFIG REQUIRED)
+find_package(SDL_mixer CONFIG REQUIRED)
+get_target_property(SDL_INCLUDE_DIRS SDL::SDL INTERFACE_INCLUDE_DIRECTORIES)
+add_executable(test_sdl_mixer_api test_sdl_mixer_api.c)
+target_include_directories(test_sdl_mixer_api PRIVATE ${SDL_INCLUDE_DIRS})
+target_link_libraries(test_sdl_mixer_api PRIVATE SDL_mixer::SDL_mixer SDL::SDL)
+add_executable(test_sdl_mixer_ohos test_sdl_mixer_ohos.c)
+target_include_directories(test_sdl_mixer_ohos PRIVATE ${SDL_INCLUDE_DIRS})
+target_link_libraries(test_sdl_mixer_ohos PRIVATE SDL_mixer::SDL_mixer SDL::SDL)
