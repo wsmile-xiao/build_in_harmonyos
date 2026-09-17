@@ -1,0 +1,67 @@
+--- a/runtime/druntime/src/core/thread/osthread.d
++++ b/runtime/druntime/src/core/thread/osthread.d
+@@ -2556,17 +2556,26 @@
+         }
+         else
+         {
+-            import core.sys.posix.signal : SIGRTMAX, SIGRTMIN;
++            import core.sys.posix.signal : SIGRTMAX, SIGRTMIN, SIGUSR1, SIGUSR2;
+         }
+ 
+         if ( suspendSignalNumber == 0 )
+         {
+-            suspendSignalNumber = SIGRTMIN;
++            // OHOS 适配：OHOS 无法把 SIGRTMIN 送达信号处理函数。
++            // 实测（自投递与跨线程投递结果一致）：
++            //   SIGUSR1(10) 触发 ✅   SIGRTMIN(35)   不触发 ❌
++            //   SIGUSR2(12) 触发 ✅   SIGRTMIN+1(36) 触发 ✅
++            //   信号 32/33/34 的 sigaction 直接返回 EINVAL(22)。
++            // druntime 的 GC 用 pthread_kill(t, suspendSignalNumber) 停止其它线程
++            // 供 thread_scanAll 扫描；SIGRTMIN 永不触发 → thread_suspendAll()
++            // 永久阻塞 → 运行时死锁（多线程程序挂死 / unittest 超时）。
++            // 改用 SIGUSR1/SIGUSR2，与上游为 OpenBSD 提供的既有做法同构。
++            suspendSignalNumber = SIGUSR1;
+         }
+ 
+         if ( resumeSignalNumber == 0 )
+         {
+-            resumeSignalNumber = SIGRTMIN + 1;
++            resumeSignalNumber = SIGUSR2;
+             assert(resumeSignalNumber <= SIGRTMAX);
+         }
+         int         status;
+@@ -2751,26 +2760,18 @@
+ 
+     extern (C) int thread_cancelDisable() nothrow
+     {
+-        static if (__traits(compiles, core.sys.posix.pthread.PTHREAD_CANCEL_DISABLE))
+-        {
+-            import core.sys.posix.pthread : pthread_setcancelstate, PTHREAD_CANCEL_DISABLE;
+-            int oldstate;
+-            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &oldstate);
+-            return oldstate;
+-        }
+-        else
+-        {
+-            return 0;   // No thread cancellation on platform
+-        }
++        // OHOS 适配：OHOS 的 musl 变体不导出 pthread cancellation 家族
++        // (pthread_setcancelstate/setcanceltype/testcancel/cancel 在 libc 中
++        // 均不存在，实测 libc.so 的 1595 个导出符号里一个都没有)，而 D 侧
++        // PTHREAD_CANCEL_DISABLE 是普通声明、__traits(compiles) 恒真，
++        // 因此会走 POSIX 分支并在链接期失败。
++        // 直接采用上游同函数 else 分支的语义（"No thread cancellation on platform"）。
++        return 0;
+     }
+ 
+     extern (C) void thread_cancelRestore(int oldstate) nothrow
+     {
+-        static if (__traits(compiles, core.sys.posix.pthread.PTHREAD_CANCEL_DISABLE))
+-        {
+-            import core.sys.posix.pthread : pthread_setcancelstate;
+-            pthread_setcancelstate(oldstate, null);
+-        }
++        // 同上：OHOS 无线程取消支持，保持与 thread_cancelDisable 的 no-op 对称。
+     }
+ 
+     private
