@@ -61,6 +61,18 @@ class LibgeeConan(ConanFile):
             for libdir in dep.cpp_info.libdirs:
                 tc.extra_ldflags.append(f"-L{libdir}")
                 tc.extra_ldflags.append(f"-Wl,-rpath,{libdir}")
+                # linkfix: rpath-link 让 ld.lld 在 DT_NEEDED 闭包查找时可定位
+                tc.extra_ldflags.append(f"-Wl,-rpath-link,{libdir}")
+            # linkfix: g_libintl_* 仅由 glib 包 lib/libintl.so 定义且不在 conan
+            # 依赖闭包内，作为显式链接输入注入（granite _augment_glib_intl_
+            # pkg_config 同因同款，显式输入在任意 lld 语义下都满足
+            # --no-allow-shlib-undefined）。注意必须在 env = tc.environment()
+            # 快照之前追加，否则不落 LDFLAGS（fixA2 实测）
+            intl = os.path.join(dep.package_folder, "lib", "libintl.so")
+            if os.path.isfile(intl):
+                tc.extra_ldflags.append(intl.replace(os.sep, "/"))
+            else:
+                self.output.info(f"linkfix: {dep.ref} has no lib/libintl.so, skip intl input")
         env = tc.environment()
         for dep in self.dependencies.values():
             # glib/2.84.0.1 起静态内嵌 pcre2/libffi（vendor），这些 Skipped
