@@ -1,0 +1,216 @@
+--- a/sem.c
++++ b/sem.c
+@@ -17,143 +17,150 @@
+     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ 
+     Lee McLoughlin.
+     Dept of Computing, Imperial College,
+     180 Queens Gate, London, SW7 2BZ, UK.
+ 
+     Email: L.McLoughlin@doc.ic.ac.uk
+ */
+ 
+ /* This is a simple module to provide an easier to understand interface to
+- * semaphores */
++ * semaphores.
++ *
++ * 原先基于 System V 信号量（semget/semop/semctl）。OHOS 沙箱拦截 SysV IPC，
++ * 内核直接以 SIGSYS 终止调用进程（同 afl 1.35b 的处置），改用 POSIX 进程间
++ * 信号量：sem_t 数组放在 fork 之前建立的 MAP_SHARED|MAP_ANONYMOUS 映射中，
++ * 父子进程共享同一段物理内存，与原来的 SysV 信号量组一一对应。
++ * 该实现不含任何平台宏，凡提供 POSIX 信号量的系统均可编译运行。
++ */
+ 
+ #include <stdio.h>
++#include <unistd.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+-#include <sys/ipc.h>
+-#include <sys/sem.h>
++#include <sys/mman.h>
++#include <semaphore.h>
+ #include <errno.h>
+ #include "sem.h"
+-
+-#if defined(SYS5) || defined(ultrix) || defined(_AIX)
+-union semun {
+-	int val;
+-	struct semid_ds *buf;
+-	ushort *array;
+-};
+-#endif
+ 
+ /* IMPORTS */
+ 
+ /* Used to print error messages */
+ extern void report_proc();
+ 
+ /* Used to end the program - on error */
+ extern void byee();
+ 
++/* 共享的信号量数组；交给调用方的 id 只是句柄，数组本身必须在进程间共享。 */
++static sem_t *sem_table = NULL;
++static int sem_table_size = 0;
+ 
++static sem_t *
++sem_lookup( sem_id, semn )
++	int sem_id;
++	int semn;
++{
++	if( sem_table == NULL || semn < 0 || semn >= sem_table_size ){
++		report_proc();
++		fprintf( stderr, "internal error, bad semaphore number %d\n", semn );
++		byee( -1 );
++	}
++	return &sem_table[ semn ];
++}
+ 
+ /* Set a semaphore to a particular value - meant to be used before
+  * first lock/unlock */
+ void
+ sem_set( sem_id, semn, val )
+ 	int sem_id;
+ 	int semn;
+ 	int val;
+ {
+-	union semun arg;
+-	extern int errno;
++	sem_t *sem = sem_lookup( sem_id, semn );
+ 
+-	arg.val = val;
+-
+-	errno = 0;
+-	semctl( sem_id, semn, SETVAL, arg );
+-	if( errno != 0 ){
++	/* POSIX 信号量没有“设为 n”的接口：此处只在上锁/解锁之前调用一次，
++	 * 重新初始化即得到指定值。 */
++	sem_destroy( sem );
++	if( sem_init( sem, 1, (unsigned)val ) != 0 ){
+ 		report_proc();
+ 		perror( "internal error, sem_set" );
+ 		byee( -1 );
+ 	}
+ }
+-	
++
+ int
+ new_sems( nsems )
+ 	int nsems;
+ {
+-	int sem;
+ 	int i;
+ 
+-	sem = semget( IPC_PRIVATE, nsems, IPC_CREAT|S_IREAD|S_IWRITE );
+-	if( sem < 0 ){
++	sem_table = mmap( NULL, nsems * sizeof( sem_t ),
++			  PROT_READ|PROT_WRITE, MAP_SHARED|MAP_ANONYMOUS, -1, 0 );
++	if( sem_table == MAP_FAILED ){
++		sem_table = NULL;
+ 		report_proc();
+-		perror( "internal error, couldn't create semaphore" );
++		perror( "internal error, couldn't create semaphores" );
+ 		byee( -1 );
+ 	}
+-	
++	sem_table_size = nsems;
++
+ 	for( i = 0; i < nsems; i++ ){
+-		sem_set( sem, i, 1 );
++		sem_set( 0, i, 1 );
+ 	}
+ 
+-	return sem;
++	return 0;
+ }
+ 
+-static
+-do_sem( sem_id, pbuf, err )
+-	int sem_id;
+-	struct sembuf *pbuf;
+-	char *err;
+-{
+-	/* This just keeps us going in case of EINTR */
+-	while( 1 ){
+-		if( semop( sem_id, pbuf, 1 ) == -1 ){
+-			if( errno == EINTR ){
+-				continue;
+-			}
+-			report_proc();
+-			fprintf( stderr, "internal error pid %d, lock id %d\n",
+-				getpid(), sem_id );
+-			perror( err );
+-			byee( -1 );
+-		}
+-		return;
+-	}
+-}
+ 
++/* Wait on a semaphore (the original SysV "lock") */
+ void
+ lock( sem_id, semn )
+ 	int sem_id;
+ 	int semn;
+ {
+-	struct sembuf sembuf;
++	sem_t *sem = sem_lookup( sem_id, semn );
+ 
+-	sembuf.sem_num = semn;
+-	sembuf.sem_op = -1;
+-	sembuf.sem_flg = 0;
+-
+-	do_sem( sem_id, &sembuf, "lock error" );
++	/* This just keeps us going in case of EINTR */
++	while( sem_wait( sem ) == -1 ){
++		if( errno == EINTR ){
++			continue;
++		}
++		report_proc();
++		fprintf( stderr, "internal error pid %d, lock id %d\n",
++			getpid(), semn );
++		perror( "lock error" );
++		byee( -1 );
++	}
+ }
+ 
+ void
+ unlock( sem_id, semn )
+ 	int sem_id;
+ 	int semn;
+ {
+-	struct sembuf sembuf;
++	sem_t *sem = sem_lookup( sem_id, semn );
+ 
+-	sembuf.sem_num = semn;
+-	sembuf.sem_op = 1;
+-	sembuf.sem_flg = 0;
+-
+-	do_sem( sem_id, &sembuf, "unlock error" );
++	if( sem_post( sem ) == -1 ){
++		report_proc();
++		fprintf( stderr, "internal error pid %d, lock id %d\n",
++			getpid(), semn );
++		perror( "unlock error" );
++		byee( -1 );
++	}
+ }
+ 
+ void
+ remove_sems( sem_id )
+ 	int sem_id;
+ {
+-	if( sem_id == -1 )
++	int i;
++
++	if( sem_table == NULL )
+ 		return;
+ 
+-	if( semctl( sem_id, 0, IPC_RMID, NULL ) == -1 ){
+-		report_proc();
+-		perror( "internal error, failed to remove semaphore" );
++	for( i = 0; i < sem_table_size; i++ ){
++		sem_destroy( &sem_table[ i ] );
+ 	}
++	munmap( sem_table, sem_table_size * sizeof( sem_t ) );
++	sem_table = NULL;
++	sem_table_size = 0;
+ }
