@@ -1,0 +1,212 @@
+#====================================================================
+# DRAFT-ohos-sigrtmin-not-deliverable-gc-suspend-deadlock —
+#   OHOS 无法把 SIGRTMIN(35) 送达信号处理函数：SIGRTMIN+1/37..40 与
+#   SIGUSR1/2 均正常，只有 35 号不可达；druntime 的 GC 线程挂起恰用它
+#   → thread_suspendAll() 永久阻塞 → 运行时死锁
+# 触发事件: ldc 1.42.0 适配，druntime unittest 中 3 个线程相关模块超时
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-ohos-sigrtmin-not-deliverable-gc-suspend-deadlock
+trigger_tool:           gcc|clang|make|cmake|other
+phase:                  runtime
+
+error_signature:        suspended thread never resumes|
+                        thread_suspendAll.*hang|
+                        unittest.*timeout.*thread|
+                        (多线程程序挂死，无输出，CPU 占用低)
+
+severity:               3
+category:               runtime, libc, signal, ohos, threading, deadlock
+
+match_keywords:         SIGRTMIN, SIGRTMAX, SIGUSR1, SIGUSR2, 实时信号, RT 信号,
+                        pthread_kill, thread_suspendAll, thread_resumeAll,
+                        suspendSignalNumber, resumeSignalNumber, sigaction EINVAL,
+                        信号不可达, 信号不投递, 信号不送达, GC 死锁, GC hang,
+                        druntime, thread_scanAll, 信号处理函数未触发,
+                        35 号信号, Signal 10, 信号编号
+
+title:                  OHOS 无法把 SIGRTMIN(35) 送达信号处理函数——而 SIGRTMIN+1(36)/37..40/SIGUSR1(10)/SIGUSR2(12) 全部正常；druntime 的 GC 线程挂起恰用 SIGRTMIN，导致 thread_suspendAll() 永久阻塞、运行时死锁
+
+topic: >
+  在 OHOS 上，druntime（D 语言运行时）的多线程程序与 unittest 会**挂死**：
+  core.thread.osthread、core.thread.fiber.base、core.internal.elf.dl 三个模块
+  逐个运行时 60s 无任何输出，表现为死锁而非崩溃。
+
+  根因不在 druntime，而在 OHOS 的信号层：**只有 35 号信号（SIGRTMIN）
+  无法送达**，其余实时信号与普通信号都正常。
+
+root_cause:             OHOS 的 libc 定义了 SIGRTMIN = 35（与 glibc 一致），
+                        但该编号的信号**投递后不会调用已注册的处理函数**：
+                        pthread_kill() 返回 0（看似成功），处理函数却永不执行。
+                        实测对照矩阵（自投递与跨线程投递结果一致，且用
+                        /proc/self/status 的 SigCgt/SigBlk 排除了掩码因素）：
+
+                            SIGUSR1  = 10   触发 ✅
+                            SIGUSR2  = 12   触发 ✅
+                            sig 32/33/34    sigaction 直接返回 EINVAL(22)
+                            SIGRTMIN = 35   不触发 ❌   ← 只有它
+                            SIGRTMIN+1 = 36 触发 ✅
+                            sig 37..40      触发 ✅
+
+                        即不是"不支持实时信号"（36 及 37..40 都好用），而是
+                        35 这**一个**编号不可达——像是内核占用该编号但未向
+                        用户态暴露语义。
+
+                        而 druntime 的 GC 恰用它做线程挂起：
+
+                            // runtime/druntime/src/core/thread/osthread.d:2564
+                            suspendSignalNumber = SIGRTMIN;        // ← 35，不可达
+                            resumeSignalNumber  = SIGRTMIN + 1;    // ← 36，可达
+
+                        thread_suspendAll() 通过
+                        pthread_kill(目标线程, suspendSignalNumber) 停住其它线程，
+                        供 thread_scanAll 做 GC 扫描；信号永不触发 → 目标线程
+                        永远停不下来 → 调用者永久等待 → 整个运行时死锁。
+
+durable_solution: >
+  把线程挂起/恢复信号从 SIGRTMIN/SIGRTMIN+1 改为 SIGUSR1/SIGUSR2。
+
+  上游 LDC 自己已为 OpenBSD 提供了完全同构的分支（osthread.d:2551-2555，
+  原文注释 "OpenBSD does not support SIGRTMIN or SIGRTMAX. Use SIGUSR1 for
+  SIGRTMIN, SIGUSR2 for SIGRTMIN + 1"），OHOS 可直接沿用该思路：
+
+      if ( suspendSignalNumber == 0 )
+          suspendSignalNumber = SIGUSR1;      // 原为 SIGRTMIN
+      if ( resumeSignalNumber == 0 )
+          resumeSignalNumber = SIGUSR2;       // 原为 SIGRTMIN + 1
+
+  实测（druntime unittest，唯一变量即此改动，三个 runner 二进制 sha256 各异）：
+
+      未打补丁: 50 PASS / 7 FAIL / 3 TIMEOUT   (50/60 = 83.3%)
+      打补丁后: 52 PASS / 2 FAIL / 1 TIMEOUT   (52/55 = 94.5%)
+
+  原 3 个超时模块中 2 个转为 PASS：
+      core.thread.osthread     60s 卡死 → rc=0  0.113s  PASS
+      core.thread.fiber.base   60s 卡死 → rc=0  0.014s  PASS
+      core.internal.elf.dl     仍超时（另因，未定性）
+
+impact: >
+  ldc 1.42.0：不仅 druntime 自身 unittest 有 3 个模块超时，任何用到 GC 的多线程
+  D 程序都会挂死——这会让"编译器可运行"这一层验证通过（ldc2 --version 正常，
+  单线程程序正常），却在稍复杂的使用场景下必然死锁。若不做此修复，适配会被
+  误判为"基本可用"，实际问题只在用户那里爆发。
+
+recovery:               任何「用 SIGRTMIN/SIGRTMIN+1 做线程间停/启同步」的运行时或库
+                        （语言运行时 GC、采样 profiler、线程暂停器、信号驱动的
+                        checkpoint 等），在 OHOS 上都会死锁。判别方法见
+                        verification_cmd 的前两步（先确认处理函数是否被调用，
+                        再确认用的是不是 35 号）。
+
+evidence_chain: >
+  task ldc 1.42.0 适配（feat/ldc-1.42.0）
+    - druntime unittest 逐个模块运行时，3 个模块各 60s 无输出（不是崩溃，是挂死）：
+        core.thread.osthread / core.thread.fiber.base / core.internal.elf.dl
+    - 排查 druntime 的线程挂起路径，定位到 suspendSignalNumber = SIGRTMIN
+    - **解耦实验**：先排除"实时信号整体不受支持"——
+        自投递 SIGRTMIN 到本线程：pthread_kill 返回 0，处理函数未执行（fired=0）
+        自投递 SIGRTMIN+1：正常触发
+        自投递 SIGUSR1 / SIGUSR2：正常触发
+        信号 32/33/34：sigaction 返回 EINVAL(22)
+      再扫描 32..40 整体行为，确认**只有 35 号**不可达
+    - **跨线程复现**（忠实复刻 thread_suspendAll 的机制：向另一线程投递）：
+        结果与自投递一致 —— SIGUSR1/SIGUSR2/SIGRTMIN+1 触发，SIGRTMIN 不触发
+    - **源码级验证**：打补丁把挂起/恢复信号换成 SIGUSR1/SIGUSR2 后重建 runner
+        core.thread.osthread    rc=124(60s 卡死) → rc=0 0.113s PASS
+        core.thread.fiber.base  rc=124(60s 卡死) → rc=0 0.014s PASS
+    - **对照实验排除统计噪声**：未打补丁/打补丁的两个 runner 二进制
+      sha256 各不相同，且改动是唯一变量
+    - 附带发现（同一排查过程中的证据）：信号 32/33/34 的 sigaction 返回
+      EINVAL(22)，说明 32..34 被内核占用但不可用；35 则更隐蔽——sigaction
+      成功、pthread_kill 成功，唯独处理函数不执行
+
+verification_cmd: >
+  # ① 判别 OHOS 信号可达性（最小 C 复现，不依赖 D 运行时）
+  #    扫描 32..40 与 SIGUSR1/2，逐个 sigaction + 自投递，看处理函数是否执行：
+  cat > sigprobe.c <<'EOF'
+  #include <stdio.h>
+  #include <pthread.h>
+  #include <signal.h>
+  #include <string.h>
+  #include <errno.h>
+  #include <unistd.h>
+  static volatile sig_atomic_t got = 0;
+  static void h(int s){ (void)s; got++; }
+  int main(void){
+      for (int sig = 32; sig <= 40; sig++) {
+          got = 0;
+          struct sigaction sa; memset(&sa,0,sizeof sa);
+          sa.sa_handler = h; sa.sa_flags = SA_RESTART; sigfillset(&sa.sa_mask);
+          if (sigaction(sig, &sa, NULL) != 0) {
+              printf("sig=%-3d sigaction EINVAL(%d)\n", sig, errno); continue;
+          }
+          pthread_kill(pthread_self(), sig);
+          usleep(150000);
+          printf("sig=%-3d fired=%d %s\n", sig, got, got ? "OK" : "<-- 不可达");
+      }
+      return 0;
+  }
+  EOF
+  clang sigprobe.c -o sigprobe && ./sigprobe
+  # 期望输出（OHOS 实测）：sig=35 fired=0 <-- 不可达；其余（36..40）均 OK
+
+  # ② 若某运行时/库出现"多线程挂死且无输出"，检查它是否用了 35 号
+  grep -rn "SIGRTMIN" <该库源码>
+
+  # ③ 改用的替代信号（OHOS 上实测可达）
+  #    线程挂起/恢复：SIGUSR1(10) / SIGUSR2(12)
+
+limitations: >
+  ① 本条的"35 号不可达"是**实测现象**，我没有拿到内核侧的解释（为何恰好是 35）。
+     结论以行为为准：sigaction 成功、pthread_kill 返回 0、处理函数不执行。
+  ② 修法把信号换成 SIGUSR1/SIGUSR2：这两个是通用用途信号，**可能与其它组件
+     冲突**（例如 OpenSSL、或应用自己用它们）。落地时须评估目标进程/库是否
+     已占用；如需更稳妥，可考虑 37..40 中未被占用的编号（实测均可达）。
+  ③ 与既有条目 DRAFT-libkqueue 的关系见下节"相关"——两者现象不同、机制不同，
+     但都属"OHOS 的信号投递与 POSIX/glibc 预期不符"这一类。
+  ④ 未验证 Android/其它 musl 平台是否同样如此；不能假定这是"musl 通病"。
+
+rec_priority:           1
+rec_approach:           replace-sigrtmin-with-sigusr1-2
+rec_description: >
+  在 OHOS 上，把「用 SIGRTMIN/SIGRTMIN+1 做线程停启同步」的代码改为使用
+  SIGUSR1(10)/SIGUSR2(12)（或实测可达的 37..40 中未被占用的编号）。
+  对 druntime：改 core/thread/osthread.d 的 suspendSignalNumber/resumeSignalNumber。
+rec_command:            # osthread.d
+                        suspendSignalNumber = SIGUSR1;      // 原 SIGRTMIN
+                        resumeSignalNumber  = SIGUSR2;      // 原 SIGRTMIN + 1
+rec_auto_fix:           false
+rec_impl:               patch-runtime-signal-numbers
+
+forbid_1_pattern:       因为在 OHOS 上超时/挂死，就把多线程相关的测试标记为 skip 或忽略
+forbid_1_reason:        这不是测试问题而是运行时缺陷：任何用到 GC 的多线程程序都会死锁，
+                        跳过测试只是掩盖问题；且失败模式是"挂死"（无输出、无崩溃），
+                        极易被误判为"测试环境慢"而放过
+forbid_1_consequence:   适配被误判为"基本可用"，问题在用户侧爆发
+forbid_2_pattern:       认为"OHOS 不支持实时信号"而放弃实时信号相关的一切用法
+forbid_2_reason:        实测 SIGRTMIN+1(36) 与 37..40 **都正常**，只有 35 一个编号不可达，
+                        属特例而非能力缺失；据此放弃实时信号会做过头
+forbid_2_consequence:   错误的适用范围判断，可能否决本可用实时信号实现的方案
+
+affected_scope:         任何在 OHOS 上用 SIGRTMIN（尤其 SIGRTMIN/SIGRTMIN+1 配对）做
+                        线程同步的运行时与库：D 语言的 druntime、各类采样 profiler
+                        （信号驱动栈采样）、线程暂停器、GC 的 stop-the-world 阶段、
+                        信号驱动的 checkpoint/快照机制。表现为多线程程序挂死、
+                        无输出、低 CPU，而非崩溃——排查时容易误判为"环境慢"。
+
+doc_file:               knowledge/drafts/DRAFT-ohos-sigrtmin-not-deliverable-gc-suspend-deadlock.md
+last_updated:           2026-09-14
+source_event:           ldc 1.42.0 适配：druntime unittest 中 3 个线程相关模块超时 60s，根因为 OHOS 不投递 SIGRTMIN 导致 GC 线程挂起阻塞
+authors:                atomcode-executor
+source_pr:              0
+source_commit:          7b366dcb1
+
+similar_to:             DRAFT-libkqueue-2.6.1-ohos-sigwaitinfo-si-fd-monitor
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-14
+
+draft:                  true
+contributor_id:         ffieldd22_-
