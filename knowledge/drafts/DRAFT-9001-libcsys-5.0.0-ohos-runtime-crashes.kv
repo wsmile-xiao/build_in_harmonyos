@@ -1,0 +1,134 @@
+# ═══ Draft knowledge entry — libcsys 5.0.0 HarmonyOS 运行时崩溃群 ═══
+# Timestamp: 2026-09-14
+# Software: libcsys 5.0.0 (Qt6 CMake library, CuboCore)
+# Gate: conan create → test_package（运行时 SIGSEGV，编译期无报错）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-9001
+trigger_tool:           runtime|test
+phase:                  runtime|testing
+error_signature:        Segmentation fault \(signal 11\)|
+                         Signal 11 \(core dumped\)|
+                         EXIT=139|
+                         Error 139 while executing|
+                         libcsys test summary: assertions=.*(?!failures=0)|
+                         ASSERT: "!isEmpty\(\)" in file .*qlist\.h|
+                         ASSERT failure in QList::at: "index out of range"|
+                         Process finished with exit code 139
+
+severity:               3
+category:               qt, runtime, syscall, platform, ohos, portability, procfs
+match_keywords:         libcsys, InfoManager update, getCPUFrequencies empty, cpu MHz,
+                         /proc/cpuinfo, Power destructor, providers.empty, takeFirst,
+                         gethostname return value, QString::fromLatin1 size, EXIT=139,
+                         SIGSEGV, Qt6, UPower absent, logind absent,
+                         NetworkInfo getIOBytes, removeFirst empty list, QList at index
+                         out of range, /proc/net/dev unreadable, worker-dependent crash
+title:                  Qt6 库在 OHOS 上编过但运行时 SIGSEGV：/proc 字段缺失导致的空表越界、容器析构条件写反、API 返回值语义误用、procfs 行数/字段无边界检查四类缺陷
+
+root_cause: >
+  1) 依赖 /proc 字段存在性的代码在 OHOS 上越界：libcsys 的 CpuInfo::updateInfo() 只在
+     /proc/cpuinfo 出现 "cpu MHz" 行时才填充频率列表；OHOS /proc/cpuinfo 无该字段，
+     getCPUFrequencies() 返回空 QList，InfoManager::update() 却按核数下标读取
+     xFrequencies[i]（Qt6 release 构建 Q_ASSERT 被编译掉）→ 读越界 → SIGSEGV。
+  2) 容器析构循环条件写反：Power::~Power() 写成 `while (providers.empty())`，
+     正确应为 `!providers.empty()`。无 systemd-logind/ConsoleKit D-Bus 提供者时
+     providers 为空 → 条件为真进入循环 → 空表上 takeFirst() 越界 → 析构阶段 SIGSEGV
+     （现象是 main 正常跑完、退出瞬间 EXIT=139）。
+  3) API 返回值语义误用：gethostname() 成功时返回 0（不是长度），
+     SystemInfo::getHostname() 把返回值当长度传给 QString::fromLatin1(buf, size)
+     → 常量返回空串（且缓冲区未初始化）。
+  4) procfs 行数/字段数无边界检查（**CI 实测踩中**）：NetworkInfo::getIOBytes()
+     先对 /proc/net/dev 的读取结果连续调用 3 次 data.removeFirst()，再对每行
+     bytes.at(1)/at(9) 直接取字节计数。当 /proc/net/dev 不可读时
+     FileUtil::readListFromFile() 返回空 QStringList → 空表 removeFirst() 越界；
+     行数 < 3（例如仅两行表头，netns 内无网卡）同样崩；行字段 < 10 时 at() 越界。
+     危害最大的一点是**环境相关性**：Worker 之间 /proc/net/dev 可见性不同，
+     同一份代码在 CI-026 上绿、在 CI-003 上 Signal 11 —— 「本地 41/41 通过」
+     完全不能证明远端会过，必须做防御式解析。
+
+affected_scope:         Qt6/Qt C++ 项目在 HarmonyOS/OHOS 上"编译通过但运行期崩溃"；
+                        尤其读取 /proc/cpuinfo、/proc/net/dev 等 procfs 字段、
+                        依赖 D-Bus 桌面服务（UPower/UDisks2/logind）的库。
+                        另适用于任何"按固定行数/字段索引解析 /proc//sys 文本"的代码。
+
+verification_cmd:       重建后直接跑最小消费者程序（A）并观察退出码：
+                        ./probe_cpufreq_update ; echo EXIT=$?   # 期望 0
+                        ./probe_power_scope     ; echo EXIT=$?   # 期望 0（构造+析构 Power）
+                        以及在 OHOS 上：grep -c "cpu MHz" /proc/cpuinfo  # 期望 0
+                        # procfs 边界（逐字复刻老/新解析逻辑，喂构造输入）：
+                        ./probe <empty-file> old   # 老逻辑 rc=134 ASSERT !isEmpty()
+                        ./probe <empty-file> new   # 新逻辑 rc=0
+
+rec_priority:           1
+rec_approach:           procfs-capability-guard + container-dtor-fix + return-value-fix + procfs-bounds-guard
+rec_description: >
+  1) 凡按 /proc 字段填充的列表，读取端用越界安全访问或先判空：
+     xFrequencies.value(i, 0.0) 或 if (i < xFrequencies.size())。
+  2) 容器析构循环条件统一为 `while (!c.empty())`；涉及 D-Bus 提供者的析构器在
+     无服务环境下必须能安全遍历空容器。
+  3) 不要用系统调用返回值当长度/大小；gethostname 之类成功返回 0，
+     读取需 strlen（缓冲区先零初始化）。
+  4) 解析 procfs/sysfs 文本时**永不按固定行数删除、永不无保护下标**：
+     用"跳过不匹配的行"代替 removeFirst()，取字段前先判 size()
+     （如 if (bytes.size() < 10) continue;）。这类文件在容器/网络命名空间下
+     可能只剩表头甚至不可读，且**不同 CI worker 之间也会不同**。
+  5) 凡"环境相关"的崩溃，本地通过不足以判定远端通过——同一 PR 在 CI-026 绿、
+     CI-003 红即是实例；测试应覆盖"输入缺失/畸形"分支，而不只覆盖正常主机。
+rec_command:            ctest --output-on-failure ; ./test_<pkg>   # 断言退出码 0
+rec_auto_fix:           false
+rec_impl:               procfs-runtime-robustness
+
+fallback_priority:      2
+fallback_approach:      ohos-only-runtime-skip
+fallback_description:   若上游拒绝改源码，则在 OHOS 上跳过调用会崩溃的 API（仅在确有
+                        记录且无法修复时），并在 test_package 中断言"不调用/降级"——
+                        但这只是规避，推荐仍走 rec_approach 修根因。
+fallback_command:       （测试侧）不构造/不调用崩溃 API
+fallback_auto_fix:      false
+fallback_impl:          runtime-api-skip
+
+forbid_1_pattern:       while\s*\(\s*\w+\.empty\(\)\s*\)\s*\{?\s*delete\s+\w+\.takeFirst
+forbid_1_reason:        析构循环条件写反，空容器上 takeFirst() 越界
+forbid_1_consequence:   进程在析构阶段 SIGSEGV（EXIT=139），库无法被安全使用
+
+forbid_2_pattern:       for\s*\(.*i\s*<\s*nCPU.*\)\s*\{[^}]*\[\s*i\s*\]
+forbid_2_reason:        按核数下标读取可能为空 /proc 派生列表时未判空
+forbid_2_consequence:   OHOS 上运行期越界崩溃
+
+forbid_3_pattern:       gethostname\([^)]*\)\s*;?\s*\n\s*.*QString::from\w+\([^,]*,\s*\w+\s*\)
+forbid_3_reason:        gethostname 成功返回 0，不是长度；当长度用必得空串
+forbid_3_consequence:   主机名等字段恒为空，功能不可用
+
+forbid_4_pattern:       (removeFirst\(\)\s*;?\s*){2,}
+forbid_4_reason:        按固定行数连续 removeFirst() 删除 procfs 表头，空表/短表即越界
+forbid_4_consequence:   /proc 文件不可读或行数不足时 SIGSEGV（且随 worker/命名空间变化，
+                        本地不复现、远端随机红）
+
+forbid_5_pattern:       \bat\(\s*[1-9]\d?\s*\)\.toULongLong\(\)
+forbid_5_reason:        文本行 split 后无 size() 保护直接下标取字段
+forbid_5_consequence:   短行/畸形行越界，QList::at 断言或读越界崩溃
+
+principles:             P001, P003
+similar_to:             E013, E019
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-9001-libcsys-5.0.0-ohos-runtime-crashes.md
+last_updated:           2026-09-14
+source_event:           libcsys 5.0.0 首次适配 HarmonyOS PC：conan create 编译通过，
+                        test_package 运行期 SIGSEGV；patch 0001 修复三处后 41/41 断言通过
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-14
