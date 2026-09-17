@@ -1,0 +1,203 @@
+--- a/buffer.c
++++ b/buffer.c
+@@ -104,38 +104,34 @@
+  * blocks number of blocks to be changed.
+  * Don't need a hole in the circular queue since the semaphores prevent block
+  * clash.
+  * 
+  * Revision 1.1  90/01/17  11:30:23  lmjm
+  * Initial revision
+  * 
+  */
+ #include <unistd.h>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <signal.h>
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <sys/ipc.h>
+-#include <sys/shm.h>
+-#include <sys/sem.h>
++#include <sys/mman.h>
+ #include <sys/wait.h>
+ #include "sem.h"
+ 
+ #ifndef lint
+ static char *rcsid = "$Header: /a/swan/home/swan/staff/csg/lmjm/src/buffer/RCS/buffer.c,v 1.19 1995/08/24 17:46:28 lmjm Exp lmjm $";
+ #endif
+-
+-#ifndef __alpha
+-extern char *shmat();
+-#endif /* __alpha */
+ 
+ /* General macros */
+ #define TRUE 1
+ #define FALSE 0
+ #define K *1024
+ #define M *1024*1024
+ 
+ /* Some forward declarations */
+ void byee();
+ void start_reader_and_writer();
+@@ -201,20 +197,25 @@
+ #ifndef DEF_SHMEM
+ #define DEF_SHMEM (1 K K)
+ #endif
+ int max_shmem = DEF_SHMEM;
+ 
+ /* Just a flag to show unfilled */
+ #define NONE (-1)
+ 
+ /* the shared memory id of the buffer */
+ int buffer_id = NONE;
++
++/* POSIX 共享内存的句柄与名字（替代 SysV 的 shm id）。名字里带 pid，
++ * 保证并发运行的不同 buffer 实例互不冲突。 */
++static int shm_fd = -1;
++static char *shm_name = NULL;
+ struct block {
+ 	int bytes;
+ 	char *data;
+ } *curr_block;
+ 
+ #define NO_BUFFER ((struct buffer *)-1)
+ struct buffer {
+ 	/* Id of the semaphore group */
+ 	int semid;
+ 
+@@ -487,29 +488,42 @@
+ #endif
+ }
+ 
+ void
+ buffer_allocate()
+ {
+ 	/* Allow for the data space */
+ 	buffer_size = sizeof( struct buffer ) +
+ 		((blocks * blocksize) - sizeof( char ));
+ 
+-	/* Create the space for the buffer */
+-	buffer_id = shmget( IPC_PRIVATE,
+-			   buffer_size,
+-			   IPC_CREAT|S_IREAD|S_IWRITE );
+-	if( buffer_id < 0 ){
++	/* Create the space for the buffer.
++	 * 原先用 SysV shmget/shmat；OHOS 沙箱拦截 SysV IPC（SIGSYS 直接终止
++	 * 进程），改用 POSIX 共享内存 shm_open + ftruncate + mmap（同 afl 1.35b）。 */
++	if( (shm_name = malloc( 32 )) == NULL ){
++		report_proc();
++		perror( "couldn't allocate shared memory name" );
++		byee( -1 );
++	}
++	sprintf( shm_name, "/buffer_%d", (int)getpid() );
++
++	shm_fd = shm_open( shm_name, O_RDWR|O_CREAT|O_EXCL, 0600 );
++	if( shm_fd < 0 ){
+ 		report_proc();
+ 		perror( "couldn't create shared memory segment" );
+ 		byee( -1 );
+ 	}
++	if( ftruncate( shm_fd, buffer_size ) == -1 ){
++		report_proc();
++		perror( "couldn't size shared memory segment" );
++		byee( -1 );
++	}
++	buffer_id = shm_fd;
+ 
+ 	get_buffer();
+ 
+ 	if( debug )
+ 		fprintf( stderr, "%s pbuffer is 0x%08x, buffer_size is %d [%d x %d]\n",
+ 			proc_string,
+ 			(char *)pbuffer, buffer_size, blocks, blocksize );
+ 
+ #ifdef SYS5
+ 	memset( (char *)pbuffer, '\0', buffer_size );
+@@ -523,22 +537,22 @@
+ 	pbuffer->semid = new_sems( 2 );	/* Get a read and a write sem */
+ 	pbuffer->blocks_used_lock = 0;
+ 	/* Start it off locked - it is unlocked when a buffer gets filled in */
+ 	lock( pbuffer->semid, pbuffer->blocks_used_lock );
+ 
+ 	pbuffer->blocks_free_lock = 1;
+ 	/* start this off so lock() can be called on it for each block
+ 	 * till all the blocks are used up */
+ 	sem_set( pbuffer->semid, pbuffer->blocks_free_lock, blocks - 1 );
+ 
+-	/* Detattach the shared memory so the fork doesnt do anything odd */
+-	shmdt( (char *)pbuffer );
++	/* Detach the shared memory so the fork doesnt do anything odd */
++	munmap( (char *)pbuffer, buffer_size );
+ 	pbuffer = NO_BUFFER;
+ }
+ 
+ void
+ buffer_remove()
+ {
+ 	static char removing = FALSE;
+ 
+ 	/* Avoid accidental recursion */
+ 	if( removing )
+@@ -550,34 +564,54 @@
+ 		return;
+ 
+ 	/* There should be a buffer so this must be after its detached it
+ 	 * but before the fork picks it up */
+ 	if( pbuffer == NO_BUFFER )
+ 		get_buffer();
+ 
+ 	if( debug )
+ 		fprintf( stderr, "%s: removing semaphores and buffer\n", proc_string );
+ 	remove_sems( pbuffer->semid );
+-	
+-	if( shmctl( buffer_id, IPC_RMID, (struct shmid_ds *)0 ) == -1 ){
+-		report_proc();
+-		perror( "failed to remove shared memory buffer" );
++
++	munmap( (char *)pbuffer, buffer_size );
++	pbuffer = NO_BUFFER;
++	if( shm_name != NULL ){
++		if( shm_unlink( shm_name ) == -1 ){
++			report_proc();
++			perror( "failed to remove shared memory buffer" );
++		}
++		free( shm_name );
++		shm_name = NULL;
++	}
++	if( shm_fd >= 0 ){
++		close( shm_fd );
++		shm_fd = -1;
+ 	}
+ }
+ 
+ void
+ get_buffer()
+ {
+ 	int b;
+ 
+-	/* Grab the buffer space */
+-	pbuffer = (struct buffer *)shmat( buffer_id, (char *)0, 0 );
++	/* Grab the buffer space. 每个进程各自 mmap 同一段 POSIX 共享内存
++	 * （buffer_allocate() 里 detach 过，所以这里需要重新打开并映射）。 */
++	if( shm_fd < 0 ){
++		shm_fd = shm_open( shm_name, O_RDWR, 0600 );
++		if( shm_fd < 0 ){
++			report_proc();
++			perror( "failed to open shared memory" );
++			byee( -1 );
++		}
++	}
++	pbuffer = (struct buffer *)mmap( NULL, buffer_size,
++					 PROT_READ|PROT_WRITE, MAP_SHARED, shm_fd, 0 );
+ 	if( pbuffer == NO_BUFFER ){
+ 		report_proc();
+ 		perror( "failed to attach shared memory" );
+ 		byee( -1 );
+ 	}
+ 
+ 	/* Setup the data space pointers */
+ 	for( b = 0; b < blocks; b++ )
+ 		pbuffer->block[ b ].data =
+ 			&pbuffer->data_space[ b * blocksize ];

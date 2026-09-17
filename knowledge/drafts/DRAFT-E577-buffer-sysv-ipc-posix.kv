@@ -1,0 +1,100 @@
+# ═══ Draft knowledge entry — OHOS 沙箱拦截 SysV IPC（shmget/semget/msgget 直接 SIGSYS），须改用 POSIX 共享内存与进程间信号量 ═══
+# Timestamp: 2026-09-14
+# Software: buffer 1.19（任何以 SysV 共享内存/信号量/消息队列为进程间通信的 C/C++ 包）
+# Gate: 设备实机运行（conan create 的 test_package / 直接执行构建产物）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+# 换号记录：2026-09-14 由 DRAFT-E568 改为 DRAFT-E577 —— W4 独立审计指出 E568 已被
+#   主线 knowledge/drafts/DRAFT-E568-mdp-ohos-musl-terminfo-path.kv 占用（工具 --check --fresh rc=1）
+
+id: DRAFT-E577
+title: OHOS 沙箱对 System V IPC（shmget/semget/msgget）返回 SIGSYS 直接杀进程；双进程共享内存程序须改用 POSIX shm_open+mmap 与 MAP_SHARED 匿名映射中的 sem_t
+trigger_tool: runtime / shmget / semget / msgget / conan
+phase: runtime / test_package
+error_signature: 'Bad system call|core dumped.*signal 31|killed.*signal 31|exit code 159|SIGSYS|shmget.*(SIGSYS|Bad system call)|semget.*(SIGSYS|Bad system call)|couldn''t create shared memory segment|internal error, couldn''t create semaphore'
+severity: 3
+category: compat|kernel|ipc|syscall|security
+match_keywords: 'shmget, semget, msgget, shmat, shmdt, shmctl, semop, semctl, IPC_PRIVATE,
+  IPC_CREAT, IPC_RMID, SysV IPC, System V, SIGSYS, signal 31, Bad system call, exit 159,
+  core dumped, seccomp, /dev/shm, shm_open, shm_unlink, ftruncate, mmap, MAP_SHARED,
+  MAP_ANONYMOUS, sem_t, sem_init, sem_wait, sem_post, pshared, process-shared semaphore'
+approach: |
+  设备上程序一启动就 "Bad system call (core dumped)"（SIGSYS / signal 31 / exit 159），
+  且崩溃点恰好是 shmget/semget/msgget 时，不要按普通 errno 错误排查（这些 syscall 不返回错误码，
+  内核直接终止进程），也不要用 `#ifdef __OHOS__` 之类平台宏守卫（R8/PF5 禁止平台宏补丁）。
+  正确做法是把 IPC 层整体换成 POSIX 原语，且不引入任何平台宏：共享内存用
+  shm_open(O_CREAT|O_EXCL) + ftruncate + mmap(MAP_SHARED)（释放 munmap + shm_unlink），
+  或直接用 mmap(MAP_SHARED|MAP_ANONYMOUS)（fork 继承，无需命名对象）；信号量用 sem_t 数组
+  放在 fork 之前建立的共享映射里 sem_init(pshared=1)，lock/unlock 对应 sem_wait/sem_post。
+  语义一一对应，在 Linux 上同样可编译运行，因此补丁对上游是纯可移植性改进。
+root_cause: |
+  OHOS（HarmonyOS/OpenHarmony）对应用/沙箱进程的 seccomp 策略是白名单式的
+  （/proc/self/status 实测 Seccomp=2、Seccomp_filters=1），System V IPC 的三个入口
+  shmget/semget/msgget 不在允许列表内，命中即由内核以 SIGSYS 终止；它不返回 -1/errno，
+  所以错误信息里既没有 "Permission denied" 也没有 "Function not implemented"，只有
+  "Bad system call"。本机旁证：/proc/sys/kernel/shmall、shmmax 可读而 sem、msgmax 不存在；
+  最小复现为 10 行调用 shmget 的 C 程序，python3 ctypes 调 libc 的 shmget 同样被杀；
+  fork、pipe、shm_open+mmap、MAP_SHARED 匿名映射均正常。公开同型问题：OpenHarmony
+  third_party_musl issue I5MQ9A「shmget 接口报错 signal 31, 程序退出」（RK3568 必现）。
+affected_scope: |
+  一切把 SysV IPC 当进程间通信主干的包（双进程/多进程共享内存环形缓冲、信号量互斥、
+  消息队列）。经典例子：buffer（shmget+semget 双进程过滤器）、afl 1.x 经典版（shmget
+  覆盖率位图，已由 archives/a/afl/1.35b 的 0002-0004 补丁改为 shm_open+mmap）。
+  注意与 E051（未实现 syscall：setreuid/setregid 的 SIGSYS 不可捕获）区分：E051 的推荐
+  方案是 __OHOS__ 宏守卫，已因 R8/PF5 失效；本条目给出的是无平台宏的等价替换路线。
+verification_cmd: |
+  设备上 printf x | ./<被测程序> 若报 Bad system call 即为命中；最小复现：
+  clang -o probe probe.c（内含 shmget(IPC_PRIVATE,4096,IPC_CREAT|0600)）后执行；
+  替换后应能跑完真实数据通路（本次 buffer 以 30 MiB 随机数据 cmp 逐字节一致 +
+  12 个分块边界尺寸 + 并发 3 实例 + 连续 30 轮验证）。
+rec_priority: 1
+rec_approach: sysv-ipc-to-posix-shm-sem
+rec_description: |
+  共享内存：shmget/shmat/shmdt/shmctl(IPC_RMID) → shm_open + ftruncate +
+  mmap(MAP_SHARED) + munmap + shm_unlink（段名带 pid，如 /buffer_<pid>，避免并发实例冲突）；
+  若不需要跨 exec 共享，可直接用 mmap(MAP_SHARED|MAP_ANONYMOUS)。信号量：
+  semget/semop/semctl(SETVAL) → sem_t 置于 fork 前建立的共享映射中，创建时用
+  sem_init(&sem, 1, val)，wait/post 用 sem_wait/sem_post（信号量为 0 时 sem_wait 阻塞，
+  与 semop(-1) 语义一致）；释放用 sem_destroy + munmap。原有"先创建后 detach、各进程再
+  attach"的流程可原样保留（用 shm_open 重开 + mmap 重映射），也可简化为 fork 继承同一映射。
+rec_command: 见 patches/0001-buffer.c.patch 与 patches/0002-sem.c.patch（buffer 1.19）
+rec_auto_fix: false
+rec_impl: conan-recipe-source-patch（源码层可移植替换，无平台宏）
+
+fallback_priority: 2
+fallback_approach: fork-probe-degrade
+fallback_description: |
+  无法改源码或必须保留 SysV 路径时，先 fork 一个子进程做能力探测（子进程调 shmget，
+  父进程 waitpid 判 WIFSIGNALED/SIGSYS），据此在运行期选择 POSIX 回退实现——但仍需实现
+  POSIX 后端，代码量更大；仅当必须同时支持 SysV 系统与 OHOS 时采用。
+fallback_command: pid=fork(); 子进程 shmget(); 父进程 waitpid 判 SIGSYS
+fallback_auto_fix: false
+fallback_impl: runtime-capability-probe
+
+forbid_1_pattern: '#if(n?def)?\s*__OHOS__|defined\s*\(\s*__OHOS__\s*\)'
+forbid_1_reason: R8/PF5 禁止在补丁与配方里注入 __OHOS__ 平台宏（E051 的旧方案已失效）
+forbid_1_consequence: pre_push_check PF5 直接拦下补丁，PR 无法创建
+
+forbid_2_pattern: '(if\s*\(\s*shmget|shmget\s*\([^)]*\)\s*<\s*0)[^}]*errno'
+forbid_2_reason: shmget/semget 被 seccomp 拦截时不返回 -1，errno 分支永远走不到，进程直接死于 SIGSYS
+forbid_2_consequence: 按 errno 写的回退逻辑永不生效，表现为"回退无效、仍然 Bad system call"
+
+forbid_3_pattern: 'shm_open\s*\([^)]*\)[^;]*;.*shm_unlink.*(立刻|立即|right after)'
+forbid_3_reason: 若沿用上游"各进程按名字重新 attach"的流程，就不能在首次 mmap 后立刻 shm_unlink（子进程 shm_open 会 ENOENT）；只有改为 fork 继承同一映射时才可立即 unlink
+forbid_3_consequence: 子进程 get_buffer/attach 失败，报 failed to open shared memory
+
+principles: P001, P003, P011
+similar_to: E051, E220, E246, E011
+conflicts_with:
+prerequisite_of:
+
+doc_file: knowledge/drafts/DRAFT-E577-buffer-sysv-ipc-posix.md
+last_updated: 2026-09-14
+source_event: 任务卡 buffer 1.19（开源鸿蒙 PC 专项积分赛，分支 feat/buffer-1.19）；设备实测 SIGSYS + conan create/test_package 5/5 PASS
+authors: buffer-1.19 适配任务
+source_pr:
+source_commit:
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.85
+metrics_last_used: 2026-09-14
