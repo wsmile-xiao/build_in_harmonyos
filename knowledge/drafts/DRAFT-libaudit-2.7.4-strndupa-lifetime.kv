@@ -1,0 +1,66 @@
+id: DRAFT-E-libaudit-strndupa-lifetime
+title: "strndupa 宏实现陷阱：clang 内联函数中 alloca 的 llvm.lifetime 标记使返回的栈缓冲立即失效"
+category: toolchain
+severity: 2
+error_signature: "musl-bionic 无 strndupa；自实现 static inline strndupa(alloca) 后字符串被后续解析函数读取时内容损坏（乱码/空串），但编译运行零报错"
+keywords:
+  - strndupa
+  - alloca
+  - llvm.lifetime
+  - static inline
+  - musl
+  - clang inliner
+  - stack buffer invalidation
+  - audit_strsplit
+  - token corruption
+affected_build_systems:
+  - autotools
+  - make
+  - cmake
+affected_compilers:
+  - clang
+affected_platforms:
+  - OHOS
+  - aarch64-linux-ohos
+first_seen:
+  package: libaudit
+  version: "2.7.4"
+  date: "2026-09-15"
+last_updated: "2026-09-15"
+hit_count: 0
+verified: false
+verify_builds: []
+prescan_pattern: "strndupa"
+root_cause: |-
+  glibc 的 strndupa 是基于语句表达式 + alloca 的宏，返回的缓冲存活于**调用者的栈帧**。
+  迁移到 OHOS musl-bionic（无 strndupa）时，直观的 static inline 函数实现
+  `static inline char *strndupa(const char *s, size_t n) { ...alloca...; return p; }`
+  在 clang 下会经过内联：内联后 alloca 分配的内存被插入 llvm.lifetime.start/end
+  标记，函数返回点即 lifetime.end——后续任何对该缓冲的读写（上游 audit_strsplit
+  会原地写 '\0' 分词）踩在标记失效的内存上，产生静默数据损坏（实测 token 乱码），
+  无任何编译期/运行期诊断。
+rec_approach: |-
+  用宏（语句表达式）而非 static inline 函数实现 strndupa，使 alloca 展开在调用点、
+  缓冲归属调用者栈帧（与 glibc 语义一致）：
+
+      #define strndupa(s, n) \
+          (char *)({ const char *_s = (s); size_t _n = (n); \
+             size_t _l = strnlen(_s, _n); \
+             char *_p = __builtin_alloca(_l + 1); \
+             memcpy(_p, _s, _l); _p[_l] = '\0'; _p; })
+
+  验证方法：损坏场景的最小复现是「strndupa → strtok/strsplit 族原地写」，
+  修复后 token 输出与 glibc 一致（libaudit auparse_test 的 diff 参考输出全对齐）。
+solution: |-
+  补丁位置：对每个使用 strndupa 的 .c 文件在 #include <string.h> 之后插入宏实现。
+  守卫方式说明（R8 口径）：上游仓库规则允许源码中 #ifdef __OHOS__（须有实质
+  逻辑），patches/ 中默认禁止但留有"无 POSIX 等价物"豁免通道——strndupa 是
+  glibc 私有扩展，POSIX 无等价物，configure 特性探测（AC_CHECK_FUNCS 无法
+  探测宏）也不适用于"宏缺失"场景，故采用 __OHOS__ 守卫并在 PR 正文申报
+  理由；若审核要求更严格，可改为 #if !defined(__GLIBC__) 的 libc 判断式。
+  libaudit 2.7.4 实例：auparse/auparse.c、src/ausearch-lol.c、src/auditd.c 三处。
+fallback: |-
+  若目标 API 语义允许，也可改为 malloc+free 的堆实现（性能略降但无栈帧归属问题）；
+  或改造上游代码把 strndupa 调用替换为显式 len+malloc。
+reference_builds: []
+related_docs: []
