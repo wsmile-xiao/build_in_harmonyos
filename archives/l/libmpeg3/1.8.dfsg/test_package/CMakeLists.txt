@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libmpeg3 C)
+find_package(libmpeg3 REQUIRED)
+add_executable(test_libmpeg3 test.c)
+target_link_libraries(test_libmpeg3 PRIVATE libmpeg3::libmpeg3)
+enable_testing()
+add_test(NAME test_libmpeg3_ohos_consumer COMMAND test_libmpeg3)
