@@ -1,0 +1,100 @@
+--- a/src/runner.c
++++ b/src/runner.c
+@@ -348,8 +348,6 @@
+ 	micron_log(LOG_ERR, "fork: %s", strerror(errno));
+ 	env_free(env);
+ 	close(fd);
+-	if (in != -1)
+-	    pthread_cancel(input_tid);
+ 	pthread_mutex_unlock(&proctab_mutex);
+ 	return;
+     }
+@@ -502,9 +500,11 @@
+ 	struct cronjob *job;
+ 	while ((job = runner_dequeue()) != NULL)
+ 	    runner_start(job);
++	if (cron_shutdown)
++	    break;
+ 	pthread_cond_wait(&runner_cond, &runner_mutex);
+     }
+-    pthread_cleanup_pop(0);
++    pthread_cleanup_pop(1);
+     pthread_mutex_unlock(&runner_mutex);
+     return NULL;
+ }
+@@ -531,8 +531,12 @@
+ 	int status;
+ 
+ 	pthread_mutex_lock(&proctab_mutex);
+-	while (list_head_is_empty(&proctab_head))
++	while (list_head_is_empty(&proctab_head) && !cron_shutdown)
+ 	    pthread_cond_wait(&proctab_cond, &proctab_mutex);
++	if (cron_shutdown) {
++	    pthread_mutex_unlock(&proctab_mutex);
++	    break;
++	}
+ 	pthread_mutex_unlock(&proctab_mutex);
+ 
+ 	pid = wait(&status);
+@@ -820,6 +824,7 @@
+ static pthread_mutex_t outfile_mutex = PTHREAD_MUTEX_INITIALIZER;
+ static struct list_head outfile_head = LIST_HEAD_INITIALIZER(outfile_head);
+ static pthread_t cronjob_output_tid;
++static volatile sig_atomic_t cronjob_output_stop;
+ static void *cron_thr_output(void *arg);
+ 
+ FILE *
+@@ -859,6 +864,7 @@
+ 	    pthread_attr_t attr;
+ 	    pthread_attr_init(&attr);
+ 	    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++	    cronjob_output_stop = 0;
+ 	    pthread_create(&cronjob_output_tid, &attr, cron_thr_output, NULL);
+ 	    pthread_attr_destroy(&attr);
+ 	}
+@@ -881,7 +887,7 @@
+ 	    free(ofile);
+ 
+ 	    if (list_head_is_empty(&outfile_head)) {
+-		pthread_cancel(cronjob_output_tid);
++		cronjob_output_stop = 1;
+ 		cronjob_output_tid = 0;
+ 	    }
+ 	}
+@@ -895,6 +901,20 @@
+ static pthread_cond_t cronjob_output_cond = PTHREAD_COND_INITIALIZER;
+ 
+ void
++cron_threads_wakeup(void)
++{
++    pthread_mutex_lock(&runner_mutex);
++    pthread_cond_broadcast(&runner_cond);
++    pthread_mutex_unlock(&runner_mutex);
++    pthread_mutex_lock(&proctab_mutex);
++    pthread_cond_broadcast(&proctab_cond);
++    pthread_mutex_unlock(&proctab_mutex);
++    pthread_mutex_lock(&cronjob_output_mutex);
++    pthread_cond_broadcast(&cronjob_output_cond);
++    pthread_mutex_unlock(&cronjob_output_mutex);
++}
++
++void
+ outfiles_close(void)
+ {
+     struct outfile *ofp;
+@@ -991,9 +1011,13 @@
+ {
+     pthread_mutex_lock(&cronjob_output_mutex);
+     pthread_cleanup_push(thr_output_cleanup, NULL);
+-    while (1) {
++    while (!cronjob_output_stop) {
+ 	struct proctab *pt;
+-	pthread_cond_wait(&cronjob_output_cond, &cronjob_output_mutex);
++	struct timespec ts;
++	clock_gettime(CLOCK_REALTIME, &ts);
++	ts.tv_sec += 1;
++	pthread_cond_timedwait(&cronjob_output_cond, &cronjob_output_mutex,
++			       &ts);
+ 	while ((pt = cronjob_output_dequeue()) != NULL) {
+ 	    cronjob_output_transfer(pt);
+ 	    proctab_remove_safe(pt);
