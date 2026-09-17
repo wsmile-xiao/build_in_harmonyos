@@ -31,6 +31,7 @@
 | 头文件 librevenge/RVNGInputStream.h 找不到 | staging .pc 的 Cflags 少了 /librevenge-0.0 子目录 | Cflags 改 -I includedir/librevenge-0.0（与上游一致） |
 | test C++ 无 RVNGMemoryStream.h | librevenge 0.0.5 包不发布该头文件 | 测试内自实现 RVNGInputStream 内存流 |
 | CMakeDeps 生成空 LIBS/INCLUDE_DIRS | application 包默认 require traits headers/libs=False | test recipe 显式 requires(ref, headers=True, libs=True) |
+| CXXLD libmwaw-0.3.la 报 R_AARCH64 relocation (z_errmsg, recompile with -fPIC) | zlib/1.3.1 发布二进制为 --static 非 PIC，libz.a 被静态链入共享库 libmwaw-0.3.so (CI 实测) | override 到同源 -fPIC 变体 zlib/1.3.1.1（先例: abiword-plugin-docbook） |
 
 ## 源码修改
 
@@ -44,7 +45,7 @@
 ## 依赖版本
 
 - librevenge/0.0.5 (conan, 已先行构建)
-- zlib/1.3.1 (conan)
+- zlib/1.3.1.1 (conan, override；同源 -fPIC 静态变体，见下"zlib PIC"问题)
 - 运行时仅 libc++_shared.so / libc.so（依赖库静态链入 libmwaw-0.3.so）
 
 ## 验证结果

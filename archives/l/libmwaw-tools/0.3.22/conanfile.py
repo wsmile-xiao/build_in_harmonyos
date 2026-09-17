@@ -57,7 +57,16 @@ class LibMwawToolsConan(ConanFile):
         # configure.ac: PKG_CHECK_MODULES REVENGE / REVENGE_GENERATORS /
         # REVENGE_STREAM (librevenge package) and ZLIB (zlib package).
         self.requires("librevenge/0.0.5")
-        self.requires("zlib/1.3.1")
+        # zlib override: libmwaw-0.3.so is shared and statically absorbs
+        # libz.a via the staging dir. The published zlib/1.3.1 binary is
+        # non-PIC (configure --static without -fPIC), which fails on aarch64
+        # with "relocation R_AARCH64 ... against symbol 'z_errmsg'; recompile
+        # with -fPIC" at the CXXLD libmwaw-0.3.la step. zlib/1.3.1.1 is the
+        # same-source (-fPIC) static variant; override=True also unifies
+        # librevenge's transitive zlib/1.3.1 requirement, avoiding the
+        # "Version conflict between zlib/1.3.1.1 and zlib/1.3.1" error
+        # (repo precedent: abiword-plugin-docbook).
+        self.requires("zlib/1.3.1.1", override=True)
 
     def layout(self):
         basic_layout(self)
@@ -118,7 +127,7 @@ class LibMwawToolsConan(ConanFile):
         for h in ("zlib.h", "zconf.h"):
             shutil.copy(os.path.join(zlib.package_folder, "include", h), inc)
         # .pc files with the real staging prefix
-        self._write_pc("zlib", root, "-lz", "zlib compression library", "1.3.1")
+        self._write_pc("zlib", root, "-lz", "zlib compression library", zlib.ref.version)
         # The librevenge headers live in include/librevenge-0.0/{librevenge,
         # librevenge-generators,librevenge-stream} — mirror the published
         # .pc Cflags (-I${includedir}/librevenge-0.0).
