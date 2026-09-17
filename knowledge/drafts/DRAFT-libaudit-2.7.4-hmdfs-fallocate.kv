@@ -1,0 +1,70 @@
+id: DRAFT-E-hmdfs-posix-fallocate-return-code
+title: "posix_fallocate 在 HMDFS 上返回 EACCES 且不设 errno——上游 errno 判断读到残留值误判真失败（POSIX 返回码语义）"
+category: hmdfs
+severity: 2
+error_signature: "posix_fallocate(...) != 0 判断失败路径触发，errno 为残留值（ERANGE/34 等），实际返回码是 EACCES/13（HMDFS 不支持分配且不动 errno）"
+keywords:
+  - posix_fallocate
+  - fallocate
+  - HMDFS
+  - errno not set
+  - return code semantics
+  - EACCES
+  - ERANGE
+  - test-queue
+  - queue.c
+  - audisp-remote
+  - ftruncate fallback
+affected_build_systems:
+  - autotools
+  - make
+  - cmake
+affected_compilers:
+  - clang
+affected_platforms:
+  - OHOS
+  - aarch64-linux-ohos
+first_seen:
+  package: libaudit
+  version: "2.7.4"
+  date: "2026-09-15"
+last_updated: "2026-09-15"
+hit_count: 0
+verified: false
+verify_builds: []
+prescan_pattern: "posix_fallocate"
+root_cause: |-
+  POSIX 规定 posix_fallocate() 失败时**返回错误编号本身**，且**不保证设置
+  errno**（glibc 恰好双设，掩盖了差异）。OHOS HMDFS 不实现文件预分配：
+  返回 EACCES(13) 而 errno 完全未动。上游代码常见的
+  `if (posix_fallocate(...) != 0) return -1;` 模式本身依赖“失败必设
+  errno”的错误假设没问题（返回非 0 就是失败），但**带白名单降级逻辑的
+  移植代码**若检查 errno（如 `errno != EOPNOTSUPP`）会读到调用链上
+  残留的 errno（实测为之前 strtoul 留下的 ERANGE=34），把“文件系统
+  不支持”误判成“真实分配失败”，导致本可降级的功能性失败。
+rec_approach: |-
+  1. 判断 posix_fallocate 的失败要用**返回码**（POSIX 语义），不要用 errno；
+  2. 返回码属于“不支持”类（EINVAL/ENOSYS/EOPNOTSUPP/EACCES/EPERM）时
+     降级到 ftruncate——文件大小保证等价，预分配只是优化；
+  3. 其他返回码（如 ENOSPC 真满）才透传失败：errno = 返回码; return -1。
+solution: |-
+  libaudit 2.7.4 实例（audisp/plugins/remote/queue.c q_open_file）：
+
+      int fa_rc = posix_fallocate(q->fd, 0,
+          (q->num_entries + 1) * q->entry_size);
+      if (fa_rc != 0 && fa_rc != EINVAL && fa_rc != ENOSYS
+          && fa_rc != EOPNOTSUPP && fa_rc != EACCES
+          && fa_rc != EPERM) {
+          errno = fa_rc;
+          return -1;
+      }
+      if (ftruncate(q->fd,
+          (q->num_entries + 1) * q->entry_size) != 0)
+          return -1;
+
+  修复后上游 test-queue（EEXIST/EBUSY 锁、回绕、resize 全流程）通过。
+fallback: |-
+  编译期直接用 ftruncate 替代 posix_fallocate（损失预分配的碎片优化）；
+  或运行时探测（首次调用探测返回码，后续走缓存策略）。
+reference_builds: []
+related_docs: []
