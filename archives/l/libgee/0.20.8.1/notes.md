@@ -91,6 +91,47 @@ upstream_test 预期 **PASS**（真实执行，非任何豁免）。权威 CI �
 3. 头文件目录为 include/gee-0.8（非 include/），pkg-config 名 gee-0.8
 4. 发布 0.20.8.1 后，下游须显式提升 requires 才能吃到守卫修复（Conan 版本 pin 不自动前滚）
 
+## 同版本修复（2026-09-10）：tests 链接闭包显式化（版本号保持 0.20.8.1）
+
+### 问题
+官方 CI 中 0.20.8.1 的 tests 链接在 worker 间不确定，两台 worker 两种症状：
+一类报 `undefined reference due to --no-allow-shlib-undefined`
+（g_libintl_* 等符号族），另一类链接成功但在后续 gtester 阶段失败。
+机制结论（reports/builder/builder-report-linkfix.md，探针实证）：lld 15.0.4
+（SDK 26.0.0.18）对输入 DSO 的 `--no-allow-shlib-undefined`（exe 默认）检查，
+仅当该 DSO 的 DT_NEEDED 闭包可经默认搜索路径解析时执行；凡依赖用户路径
+（-L/-rpath/-rpath-link）定位或定位不到时**静默跳过整个文件的检查**。
+`g_libintl_*` 七符号的唯一供给者是 glib 包内 `lib/libintl.so.8`
+（OHOS musl 无 libintl，glib 以代理库提供；granite
+`_augment_glib_intl_pkg_config`、vala CI #26164 同因同款）——它不在 conan
+依赖闭包内、也不在 tests 链接行上，符号解析被寄托在"DT_NEEDED 闭包查找"
+这一**工具链语义相关 + 存储状态相关**的隐式机制上，跨 worker 语义/存储
+差异即失败根源；闭包残缺时产出"链成功但运行不可启动"的产物。
+
+### 修法（generate() 期显式闭包注入，同版本重发）
+generate() **第一依赖循环内、`env = tc.environment()` 快照之前**：
+1. 每 libdir 追加 `-Wl,-rpath-link,{libdir}`（使 lld 的 DT_NEEDED 闭包
+   查找可定位）；
+2. 受 `os.path.isfile` 守卫地追加 `{glib}/lib/libintl.so` 绝对路径为
+   显式链接输入（probe4 实证：显式输入在任意 lld 语义/搜索路径下均满足
+   严格检查；缺文件时走 output.info 观察分支，不劣化于现状）。
+
+关键陷阱（fixA2/fixA2b 实证复现）：`tc.environment()` 快照**之后**追加
+extra_ldflags 会被静默丢弃、不落 LDFLAGS——注入必须发生在快照之前。
+
+### 验证证据
+- 官方 CI：两台 worker 两种症状（见"问题"），机制由 linkfix 探针矩阵
+  （probe1/3/4、r1-r6、e7-e11）实证。
+- 6 组隔离 conan create（linkfix-audit：ctrl/fixA/fixB/fixA2/fixA2b/
+  fixA2c）全部 rc=0 且 `make check` PASS；fixA2c（granite force 同款
+  glib/2.84.0.1 共享图）tests/Makefile LDFLAGS 同时含
+  `{glib}/lib/libintl.so` 绝对路径与 `-Wl,-rpath-link`，产物
+  libgee-0.8.so 的 DT_NEEDED（gio/gobject/gmodule/glib/libc）与现网成功
+  产物逐项一致，零回归。
+- conandata.yml / patches / test_package 零改动；glib/2.84.0 pin 不变；
+  版本号保持 0.20.8.1（同版本修复，ohpcd 侧旧制品删除后重发，重发需
+  权威 CI 完整复验）。
+
 ---
-**适配完成**: 2026-09-02
+**适配完成**: 2026-09-02（0.20.8.1 同版本链接修复：2026-09-10）
 **状态**: 候选提交（权威 CI 通过后标 built；conan_verify 通过后标 published）
