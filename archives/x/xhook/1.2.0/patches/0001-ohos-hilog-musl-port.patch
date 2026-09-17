@@ -1,0 +1,153 @@
+--- a/libxhook/jni/xh_core.c
++++ b/libxhook/jni/xh_core.c
+@@ -30,6 +30,7 @@
+ #include <pthread.h>
+ #include <regex.h>
+ #include <setjmp.h>
++#include <signal.h>
+ #include <errno.h>
+ #include "queue.h"
+ #include "tree.h"
+--- a/libxhook/jni/xh_elf.c
++++ b/libxhook/jni/xh_elf.c
+@@ -36,6 +36,22 @@
+ #include "xh_log.h"
+ #include "xh_util.h"
+ #include "xh_elf.h"
++// bionic-only dynamic tags (used by Android's packed relocations, produced by
++// the "android" relocation packing tool). musl's elf.h does not define them;
++// keep the original handling logic intact for objects that carry these tags.
++#ifndef DT_ANDROID_REL
++#define DT_ANDROID_REL  0x6ffffee0
++#endif
++#ifndef DT_ANDROID_RELA
++#define DT_ANDROID_RELA 0x6ffffee1
++#endif
++#ifndef DT_ANDROID_RELSZ
++#define DT_ANDROID_RELSZ 0x6ffffee2
++#endif
++#ifndef DT_ANDROID_RELASZ
++#define DT_ANDROID_RELASZ 0x6ffffee3
++#endif
++
+ 
+ #define XH_ELF_DEBUG 0
+ 
+--- a/libxhook/jni/xh_jni.c
++++ b/libxhook/jni/xh_jni.c
+@@ -21,9 +21,17 @@
+ 
+ // Created by caikelun on 2018-04-11.
+ 
++#if defined(__OHOS__)
++// HarmonyOS (OHOS) port: the JNI bridge below targets the Android Java
++// runtime (art/libnativehelper). OHOS native consumers call the plain C API
++// (xhook.h) directly, so the JNI wrappers are compiled out on OHOS only.
++#else
++
+ #include <jni.h>
+ #include "xhook.h"
+ 
++
++
+ #define JNI_API_DEF(f) Java_com_qiyi_xhook_NativeHandler_##f
+ 
+ JNIEXPORT jint JNI_API_DEF(refresh)(JNIEnv *env, jobject obj, jboolean async)
+@@ -57,3 +65,5 @@ JNIEXPORT void JNI_API_DEF(enableSigSegvProtection)(JNIEnv *env, jobject obj, jb
+ 
+     xhook_enable_sigsegv_protection(flag ? 1 : 0);
+ }
++
++#endif // __OHOS__
+--- a/libxhook/jni/xh_log.c
++++ b/libxhook/jni/xh_log.c
+@@ -20,8 +20,23 @@
+ //
+ 
+ // Created by caikelun on 2018-04-11.
++// HarmonyOS (OHOS) port: forward __android_log_print() to HiLog's
++// OH_LOG_Print(). HiLog LogLevel values (3..7) are numerically identical to
++// android_LogPriority, so the mapping is a direct cast.
+ 
+-#include <android/log.h>
+ #include "xh_log.h"
+ 
++#if defined(__OHOS__)
++#include <stdarg.h>
++
++int __android_log_print(int prio, const char *tag, const char *fmt, ...)
++{
++    va_list ap;
++    va_start(ap, fmt);
++    int r = OH_LOG_Print(LOG_APP, (LogLevel)prio, 0, tag, fmt, ap);
++    va_end(ap);
++    return r;
++}
++#endif
++
+ android_LogPriority xh_log_priority = ANDROID_LOG_WARN;
+--- a/libxhook/jni/xh_log.h
++++ b/libxhook/jni/xh_log.h
+@@ -20,11 +20,32 @@
+ //
+ 
+ // Created by caikelun on 2018-04-11.
++// HarmonyOS (OHOS) port: use HiLog (hilog/log.h + libhilog_ndk.z.so) instead of
++// Android liblog. HiLog's LogLevel enum (LOG_DEBUG=3, LOG_INFO=4, LOG_WARN=5,
++// LOG_ERROR=6) matches android_LogPriority numerically, so the priority
++// comparison logic in this header is preserved unchanged.
+ 
+ #ifndef XH_LOG_H
+ #define XH_LOG_H 1
+ 
++#if defined(__OHOS__)
++#include <hilog/log.h>
++typedef enum {
++    ANDROID_LOG_UNKNOWN = 0,
++    ANDROID_LOG_DEFAULT,
++    ANDROID_LOG_VERBOSE,
++    ANDROID_LOG_DEBUG,
++    ANDROID_LOG_INFO,
++    ANDROID_LOG_WARN,
++    ANDROID_LOG_ERROR,
++    ANDROID_LOG_FATAL,
++    ANDROID_LOG_SILENT,
++} android_LogPriorityCompat;
++typedef android_LogPriorityCompat android_LogPriority;
++int __android_log_print(int prio, const char *tag, const char *fmt, ...);
++#else
+ #include <android/log.h>
++#endif
+ 
+ #ifdef __cplusplus
+ extern "C" {
+--- a/libxhook/jni/xh_util.c
++++ b/libxhook/jni/xh_util.c
+@@ -37,10 +37,24 @@
+ #include "xh_errno.h"
+ #include "xh_log.h"
+ 
++// bionic's <sys/user.h> exposes PAGE_MASK in userspace; musl does not.
++// Derive it from sysconf(_SC_PAGESIZE) instead of hardcoding 4096.
++#ifndef PAGE_MASK
++extern long xh_util_page_size(void);
++#define PAGE_SIZE   ((size_t)xh_util_page_size())
++#define PAGE_MASK   (~(PAGE_SIZE - 1))
++#endif
+ #define PAGE_START(addr) ((addr) & PAGE_MASK)
+ #define PAGE_END(addr)   (PAGE_START(addr + sizeof(uintptr_t) - 1) + PAGE_SIZE)
+ #define PAGE_COVER(addr) (PAGE_END(addr) - PAGE_START(addr))
+ 
++long xh_util_page_size(void)
++{
++    static long cached = 0;
++    if(0 == cached) cached = sysconf(_SC_PAGESIZE);
++    return cached;
++}
++
+ int xh_util_get_mem_protect(uintptr_t addr, size_t len, const char *pathname, unsigned int *prot)
+ {
+     uintptr_t  start_addr = addr;
+-- 
+2.45.2
+
