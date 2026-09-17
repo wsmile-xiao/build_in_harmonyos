@@ -1,0 +1,72 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_ciftilib CXX)
+
+# CiftiLib and its deps (libxml++ 2.42.3 / glibmm 2.66) are C++11 era (std::auto_ptr). Profile cppstd 17 would remove auto_ptr -> fatal.
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+find_package(ciftilib REQUIRED)
+
+add_executable(test_ciftilib test_ciftilib.cpp)
+target_link_libraries(test_ciftilib PRIVATE ciftilib::ciftilib)
+# CiftiLib headers require CIFTILIB_USE_XMLPP (or QT) to select AString/XmlAdapter impl; avoid consumer missing define
+target_compile_definitions(test_ciftilib PRIVATE CIFTILIB_USE_XMLPP)
+
+# Also verify headers are accessible as CiftiLib/ prefix
+target_include_directories(test_ciftilib PRIVATE ${ciftilib_INCLUDE_DIRS})
+
+# Fallback: ensure transitive deps headers (glibmm, glib, sigc++, libxml++) are on include path
+# ciftilib's public header AString.h includes glibmm/convert.h when CIFTILIB_USE_XMLPP is set.
+# Conan's CMakeDeps propagation may be incomplete on OHOS, so use pkg-config as fallback
+find_package(PkgConfig QUIET)
+if(PKG_CONFIG_FOUND)
+  pkg_check_modules(PC_GLIBMM QUIET glibmm-2.4)
+  if(PC_GLIBMM_FOUND)
+    target_include_directories(test_ciftilib PRIVATE ${PC_GLIBMM_INCLUDE_DIRS})
+    target_compile_options(test_ciftilib PRIVATE ${PC_GLIBMM_CFLAGS_OTHER})
+    target_link_directories(test_ciftilib PRIVATE ${PC_GLIBMM_LIBRARY_DIRS})
+    target_link_libraries(test_ciftilib PRIVATE ${PC_GLIBMM_LIBRARIES} ${PC_GLIBMM_LDFLAGS_OTHER})
+  endif()
+  pkg_check_modules(PC_GLIB QUIET glib-2.0)
+  if(PC_GLIB_FOUND)
+    target_include_directories(test_ciftilib PRIVATE ${PC_GLIB_INCLUDE_DIRS})
+    target_compile_options(test_ciftilib PRIVATE ${PC_GLIB_CFLAGS_OTHER})
+    target_link_directories(test_ciftilib PRIVATE ${PC_GLIB_LIBRARY_DIRS})
+    target_link_libraries(test_ciftilib PRIVATE ${PC_GLIB_LIBRARIES} ${PC_GLIB_LDFLAGS_OTHER})
+  endif()
+  pkg_check_modules(PC_SIGCPP QUIET sigc++-2.0)
+  if(PC_SIGCPP_FOUND)
+    target_include_directories(test_ciftilib PRIVATE ${PC_SIGCPP_INCLUDE_DIRS})
+    target_compile_options(test_ciftilib PRIVATE ${PC_SIGCPP_CFLAGS_OTHER})
+    target_link_directories(test_ciftilib PRIVATE ${PC_SIGCPP_LIBRARY_DIRS})
+    target_link_libraries(test_ciftilib PRIVATE ${PC_SIGCPP_LIBRARIES} ${PC_SIGCPP_LDFLAGS_OTHER})
+  endif()
+  pkg_check_modules(PC_LIBXMLPP QUIET libxml++-2.6)
+  if(PC_LIBXMLPP_FOUND)
+    target_include_directories(test_ciftilib PRIVATE ${PC_LIBXMLPP_INCLUDE_DIRS})
+    target_compile_options(test_ciftilib PRIVATE ${PC_LIBXMLPP_CFLAGS_OTHER})
+    target_link_directories(test_ciftilib PRIVATE ${PC_LIBXMLPP_LIBRARY_DIRS})
+    target_link_libraries(test_ciftilib PRIVATE ${PC_LIBXMLPP_LIBRARIES} ${PC_LIBXMLPP_LDFLAGS_OTHER})
+  endif()
+  pkg_check_modules(PC_LIBXML2 QUIET libxml-2.0)
+  if(PC_LIBXML2_FOUND)
+    target_include_directories(test_ciftilib PRIVATE ${PC_LIBXML2_INCLUDE_DIRS})
+    target_compile_options(test_ciftilib PRIVATE ${PC_LIBXML2_CFLAGS_OTHER})
+    target_link_directories(test_ciftilib PRIVATE ${PC_LIBXML2_LIBRARY_DIRS})
+    target_link_libraries(test_ciftilib PRIVATE ${PC_LIBXML2_LIBRARIES} ${PC_LIBXML2_LDFLAGS_OTHER})
+  endif()
+  # HMBS fix E107/E123: glib's proxy-libintl provides g_libintl_* but glib-2.0.pc lacks -lintl
+  foreach(_intl_mod intl proxy-libintl libintl)
+    pkg_check_modules(PC_INTL_${_intl_mod} QUIET ${_intl_mod})
+    if(PC_INTL_${_intl_mod}_FOUND)
+      target_include_directories(test_ciftilib PRIVATE ${PC_INTL_${_intl_mod}_INCLUDE_DIRS})
+      target_compile_options(test_ciftilib PRIVATE ${PC_INTL_${_intl_mod}_CFLAGS_OTHER})
+      target_link_directories(test_ciftilib PRIVATE ${PC_INTL_${_intl_mod}_LIBRARY_DIRS})
+      target_link_libraries(test_ciftilib PRIVATE ${PC_INTL_${_intl_mod}_LIBRARIES} ${PC_INTL_${_intl_mod}_LDFLAGS_OTHER})
+    endif()
+  endforeach()
+endif()
+
+enable_testing()
+add_test(NAME test_ciftilib COMMAND test_ciftilib)
