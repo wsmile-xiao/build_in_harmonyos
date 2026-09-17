@@ -1,0 +1,184 @@
+# ═══ Draft knowledge entry — 上游 meson `gnu_symbol_visibility: 'hidden'` 致动态符号表导出 0 ═══
+# Timestamp: 2026-09-15
+# Software: glu 9.0.3（Mesa GLU）；机制适用于任何 meson/CMake 构建且设了默认符号隐藏的库
+# Gate: PR #10090 / 真机 conan create 实测（含 dynsym 对照 + 产物尺寸对照）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-hidden-symbol-visibility-exports-zero
+trigger_tool:           meson|cmake|clang|ld.lld|conan
+phase:                  build|package|link|test_package
+error_signature:        undefined reference to `glu[A-Za-z0-9_]*'|
+                           undefined reference to .*gluOrtho2D|
+                           cannot find -lGLU|
+                           readelf --dyn-syms .* \| grep -c glu.*=.*0
+
+severity:               3
+category:               linkage, elf, symbol-visibility, meson, build-system, ohos
+match_keywords:         gnu_symbol_visibility, symbol visibility hidden, 符号隐藏,
+                           visibility default, 导出 0 个符号, dynsym, LOCAL HIDDEN,
+                           GLOBAL DEFAULT, -fvisibility=hidden, 符号未导出,
+                           libGLU.so.1.3.1, gluOrtho2D, strip 符号, 动态符号表
+title:                  上游 meson 无条件设 gnu_symbol_visibility:'hidden' 且源码无 visibility default 标注时，编译成功、产物尺寸正常，但动态符号表导出 0 个符号（全部 LOCAL HIDDEN），消费者链接必失败
+
+root_cause: >
+  个别上游项目在构建脚本里**无条件**开启默认符号隐藏，却**没有**在源码里为需要导出的
+  API 标注 `visibility("default")`（或忘记加导出宏）。此时构建完全成功，产物大小、
+  `.so` 也存在，唯独**动态符号表（.dynsym）里一个目标 API 符号都没有** ——
+  它们全部是 `LOCAL HIDDEN`，只存在于 `.symtab`（且被 strip 后也没了）。
+
+  以 glu 9.0.3 为例，`src/meson.build` 无条件写：
+
+      gnu_symbol_visibility : 'hidden',
+
+  而 glu 源码（`src/*.c`）里**没有任何** `visibility default` 标注，结果：
+
+    $ readelf --dyn-syms libGLU.so.1.3.1 | grep -c 'FUNC.*GLOBAL.*DEFAULT.*glu'
+    0
+
+  实测对照（同一份源码，唯一变量是那行是否去掉）：
+
+    | 配置               | dynsym 导出 glu* 数 | 产物大小     |
+    |--------------------|--------------------|-------------|
+    | 上游原样（带 hidden）| 0（全 LOCAL HIDDEN）| 1,575,424 B |
+    | 删除该行           | 64（gluOrtho2D 为 GLOBAL DEFAULT）| 1,714,688 B |
+
+  为什么极易误判：`conan create` 自身构建**成功**（rc=0），产物 `.so` 尺寸正常
+  （1.5 MB 看着很健康），打包、签名全部通过。错误直到**消费者侧链接**才出现
+  （`undefined reference to 'gluOrtho2D'`），很容易被误归因成「消费者的
+  CMakeDeps/链接参数有问题」而不是「库本身没导出符号」。
+
+  注意这与「依赖库没链接进来」（DT_NEEDED 缺失）是**两个不同的问题层**：
+  后者查 `readelf -d` 的 NEEDED；本问题是 `readelf --dyn-syms` 的导出面。
+
+affected_scope: >
+  任何 meson / CMake 构建、且构建脚本设置默认符号隐藏（`gnu_symbol_visibility:
+  'hidden'` 或 `-fvisibility=hidden`）而上游未给导出 API 加 visibility 标注的库。
+  典型是「库本体用 meson 的 library() 且误设隐藏」的 C 库；
+  也适用于 CMake 项目在 `CMAKE_C_FLAGS` 里塞了 `-fvisibility=hidden` 但源码无
+  导出宏的情形。
+  纯静态库不受影响（静态库无 .dynsym 概念）；可执行文件不受影响。
+
+verification_cmd:       # ① 决定性：数动态符号表里的导出 API（不看 .symtab！）
+                           readelf --dyn-syms lib<pkg>.so | grep -cE 'FUNC +GLOBAL +DEFAULT'
+                           readelf --dyn-syms lib<pkg>.so | grep -cE 'FUNC +GLOBAL +DEFAULT.*<目标前缀>'
+                           # 期望：与源码公开 API 数量相当，绝不是 0
+                           # ② 对照证据：确认符号是否被藏成 LOCAL
+                           readelf --dyn-syms lib<pkg>.so | grep -E '<某目标符号>'   # 期望能查到且为 GLOBAL DEFAULT
+                           readelf -s      lib<pkg>.so | grep -E '<某目标符号>'   # .symtab 里可能是 LOCAL HIDDEN
+                           # ③ 定位构建脚本里的隐藏开关
+                           grep -rn "gnu_symbol_visibility\|fvisibility=hidden\|VISIBILITY_HIDDEN" .
+                           # ④ 消费者侧复现
+                           echo 'int main(void){ <目标API>(); return 0; }' > t.c && <cc> t.c -L. -l<pkg>
+                           # 期望：上游原样时 undefined reference；去掉 hidden 后链接通过
+
+rec_priority:           1
+rec_approach:           remove-or-scope-the-default-visibility-hidden-and-recheck-dynsym
+rec_description: >
+  在配方里用补丁去掉（或收窄）上游的默认符号隐藏设置，使公开 API 回到
+  `GLOBAL DEFAULT`，然后**用 readelf --dyn-syms 复验**导出面（不能只看编译是否通过）。
+
+  三种处理方式，按侵入性递增：
+    ① **直接删除该行** —— 最省事，适用于源码无任何 visibility 标注的情况
+       （glu 即此：删掉后 0 → 64 个导出符号）。副作用是同时导出了内部符号，
+       对有 ABI 洁癖的上游不够优雅，但对 OHOS 适配完全够用；
+    ② **改为按需导出** —— 给公开 API 补 `__attribute__((visibility("default")))`
+       或项目的导出宏，保留内部符号隐藏。更正确但改动面大；
+    ③ **改用版本脚本 / 导出列表** —— meson 可传 `link_args` 加 `--export-dynamic-symbol`
+       或 version script。适合上游已有符号白名单的情况。
+
+  OHOS 适配实务推荐 ①（一个补丁行搞定），并在 notes/README 里如实写明
+  「删除了默认隐藏，故内部符号亦被导出」。
+  本条的**关键纪律**是：修完必须用 `readelf --dyn-syms` 数导出符号，不能以
+  「编译通过」作为修复完成的判据。
+rec_command:            # 补丁（对 meson 项目，删除该行）
+                           #   --- a/src/meson.build
+                           #   +++ b/src/meson.build
+                           #   @@ -103,7 +103,6 @@
+                           #    library(..., install : true,
+                           #   -  gnu_symbol_visibility : 'hidden',
+                           #      ...)
+                           # 验证（必须做，不能只看 rc=0）
+                           readelf --dyn-syms <pkg>/lib/lib<pkg>.so | grep -cE 'FUNC +GLOBAL +DEFAULT.*<api前缀>'
+                           # 期望从 0 变为与公开 API 数量相当的正数
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      add-visibility-default-attributes-to-public-api-only
+fallback_description: >
+  若不便删除整体隐藏（例如上游明确要求隐藏内部符号、或库很大导出面需要控制），
+  退路是**只给公开 API 补 visibility default 标注**（改源码或加补丁），保留内部符号隐藏。
+  代价：改动点数量等于公开 API 数量（glu 需标 64 个），补丁体积大且上游升级易冲突。
+  仅在「必须保持 ABI 洁净」或「评审方明确要求」时采用。
+fallback_command:       # 给每个公开 API 加标注（可用脚本批量处理头文件）
+                           #   #define GLU_API __attribute__((visibility("default")))
+                           #   GLU_API void gluOrtho2D(GLdouble l, GLdouble r, GLdouble b, GLdouble t);
+                           # 验证同 rec_command
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       conan create.*成功.*即认为.*适配完成|rc=0.*符号.*正常|编译通过.*签名.*打包.*都过.*就行了
+forbid_1_reason:        本坑的产物是「构建成功 + 尺寸正常 + 打包签名全过」，四个绿灯
+                          却导出 0 个符号。只有 `readelf --dyn-syms` 数导出符号才能暴露。
+                          「编译通过」不构成「库可用」的证明。
+forbid_1_consequence:   把库发布出去，下游全部链接失败，而因为构建日志全绿，
+                          排查会从下游往上找，浪费大量时间且找不到真因。
+
+forbid_2_pattern:       用 readelf -s.*数符号|用 nm.*判断.*导出|\.symtab.*看导出
+forbid_2_reason:        `.symtab`（readelf -s / nm 默认）里的符号**不等于**可被链接的
+                          导出符号。被 hidden 的符号在 `.symtab` 里标记为 `LOCAL`，
+                          仍能查到名字，但它**不在** `.dynsym` 里 → 消费者链接时
+                          依然 undefined reference。必须用 `readelf --dyn-syms`。
+forbid_2_consequence:   看到 nm 能列出 gluOrtho2D 就以为符号没问题，
+                          而链接器实际找不到，误判为消费者侧配置问题。
+
+forbid_3_pattern:       链接失败.*就改消费者.*CMakeDeps|undefined reference.*一定是.*消费者.*链接参数
+forbid_3_reason:        本问题层下 `undefined reference` 的根因在**库自身没导出**，
+                          不在消费者。先查库的 `readelf --dyn-syms`（10 秒），
+                          再考虑消费者侧。反过来先改消费者会南辕北辙。
+forbid_3_consequence:   在消费者侧反复调整 link flags / CMakeDeps 而不见效，
+                          且改坏本已正确的消费者配置。
+
+forbid_4_pattern:       把.*符号隐藏.*和.*DT_NEEDED.*混为一谈|导出.*=.*依赖.*链接
+forbid_4_reason:        「依赖库没链接进来」（查 `readelf -d` 的 NEEDED）与
+                          「自身 API 没导出」（查 `readelf --dyn-syms` 的导出面）是
+                          两个不同问题层，诊断命令与修法完全不同。
+forbid_4_consequence:   用 NEEDED 的检查手段去查导出问题，永远查不出结果。
+
+forbid_5_pattern:       删掉.*hidden.*就.*不需要.*验证|改完.*patch.*直接提交
+forbid_5_reason:        删除隐藏行后的效果**必须用 dynsym 复验**：一是确认真的恢复导出
+                          （对照 expected 数量级），二是确认没有引入构建失败。
+                          仅凭「补丁套用成功」不构成已验证。
+forbid_5_consequence:   若该行删除后触发了别的构建问题（或该库另有 CMake 侧隐藏设置
+                          叠加），不做复验会漏掉，问题在 CI 上重现。
+
+principles:             判定「库是否可用」要看消费者视角的可链接性证据（dynsym 导出面 +
+                        消费者链接实测），而不是构建流程的绿灯；
+                        诊断先后顺序遵循「从产物往上看」（本库 dynsym → 消费者链接参数），
+                        避免在正确的下游反复改动。
+similar_to:             E465, DRAFT-ohos-r34-static-lib-symbol-check, DRAFT-ohos-desktop-gl-via-mesa-osmesa
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-hidden-symbol-visibility-exports-zero.md
+last_updated:           2026-09-15
+source_event:           glu 9.0.3 适配（PR #10090）：test_package 链接期报
+                        "undefined reference to 'gluOrtho2D'"；查库内 dynsym 发现导出 0 个
+                        glu* 符号（全 LOCAL HIDDEN），定位到 src/meson.build:106 无条件
+                        gnu_symbol_visibility:'hidden' 且源码无 visibility 标注；
+                        补丁 0001 删除该行后导出 64 个符号（实测产物 1,575,424 B →
+                        1,714,688 B），消费者链接通过、test_package 真机 PASS。
+authors:                jumping_ggjjkk
+source_pr:              10090
+source_commit:          7b626d0fe
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15
