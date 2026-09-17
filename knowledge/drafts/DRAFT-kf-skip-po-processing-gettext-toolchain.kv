@@ -1,0 +1,101 @@
+#====================================================================
+# DRAFT - KF6 ki18n_install(po) 生成强制 ALL 目录标硬依赖 PATH 上 msgfmt+python3，OHOS 无 gettext 工具链时构建 FATAL
+# contributor: why6666666
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-kf-skip-po-processing-gettext-toolchain
+trigger_tool:           cmake|make|msgfmt
+phase:                  build
+error_signature:        failed generating|pofiles-.*Error|Generating mo|GETTEXT_MSGFMT_EXECUTABLE|KI18N_PYTHON_EXECUTABLE
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               构建系统语义, kf6-ecm, i18n, ohos
+match_keywords:         KF_SKIP_PO_PROCESSING, ki18n_install, pofiles, tsfiles, msgfmt, GETTEXT_MSGFMT_EXECUTABLE, failed generating, build-pofiles.cmake
+title:                  KF6 ki18n_install(po) 生成强制 ALL 目录标硬依赖 PATH 上 msgfmt+python3，OHOS 无 gettext 工具链时构建 FATAL，须设 KF_SKIP_PO_PROCESSING=ON 或保障工具链
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             >
+  完整因果链（设备探针三 case 实证，见 verification_cmd）：
+  ① KF6 生态项目 CMakeLists 调 ki18n_install(po)；KF6I18nConfig.cmake:38 自动
+  include KF6I18nMacros.cmake，宏头 :78 option(KF_SKIP_PO_PROCESSING ... OFF)；
+  ② :113-116 未设开关时宏继续执行，:140/:148 创建 pofiles-<md5> 与
+  tsfiles-<md5> 两个 add_custom_target(... ALL) 目标——make all 必然执行，
+  configure 期不报错，失败被推迟到构建期（延迟暴露面）；
+  ③ 构建期 cmake -P build-pofiles.cmake 逐语言调用 GETTEXT_MSGFMT_EXECUTABLE
+  （宏头 :7 find_package(Gettext QUIET) 从 PATH 获取，OHOS 最小开发环境无
+  gettext 工具链——ki18n 配方宏头自带注释 "msgmerge not available in OHOS
+  dev env"；为 NOTFOUND/不可用时）→ build-pofiles.cmake:24
+  message(FATAL_ERROR "failed generating ${PO_DIR}")，make all 失败（探针
+  case2 BUILD_EXIT=2，真实失败日志见 evidence 归档路径）；tsfiles 目标另需
+  python3（:9-11 find_program，ki18n 配方内置设备回退路径 /data/service/hnp/
+  bin/python3.12）；
+  ④ po 目录承重量化：本 run tarball 实有 72 语言 .po（真实承重），即使工具
+  齐备（case1，hnp msgfmt 0.26）也要为 72 个 .po 逐个生成 .mo——工具链依赖
+  +构建时间随语言数线性放大；归类为构建系统对可选 i18n 工具链的硬依赖
+  语义（L2：54 个 conanfile.py 同模式实践），非库内 quirk。
+affected_scope:         任何调用 ki18n_install(po) 的 KF6/ECM 生态项目在无 gettext 工具链（msgfmt/msgmerge 缺失）平台上构建的项目
+verification_cmd:       |
+  # 自包含探针：真实 KF6I18nMacros.cmake（ki18n 6.18.0 conan cache）+ 真实 tarball po/ 目录
+  KI18N=/storage/Users/currentUser/.conan2/p/ki18nbcd1c85432f40/p/lib/cmake/KF6I18n   # 路径按设备实际调整
+  mkdir -p probeB/po && cp -r <tarball 解压目录>/po/* probeB/po/   # libkomparediff2-26.04.0：72 语言
+  cd probeB
+  printf 'cmake_minimum_required(VERSION 3.16)\nproject(p NONE)\ninclude("${KI18N_MACROS_DIR}/KF6I18nMacros.cmake")\nki18n_install(po)\n' > CMakeLists.txt
+  PRIV=/tmp/probe-bin; mkdir -p $PRIV; ln -sf $(which cmake) $PRIV/cmake; ln -sf $(which make) $PRIV/make
+  # case1 msgfmt 在 PATH（本设备 hnp gettext 0.26）：no-flag 通过，72 mo 生成
+  cmake -S . -B b1 -DKI18N_MACROS_DIR=$KI18N && cmake --build b1 ; echo "exit=$?"   # → 0
+  # case2 无 msgfmt 环境（约束 PATH 只含 make/cmake，模拟 OHOS 最小开发环境）：no-flag 构建期 FATAL
+  env PATH=$PRIV:/usr/bin:/bin cmake -S . -B b2 -DKI18N_MACROS_DIR=$KI18N
+  env PATH=$PRIV:/usr/bin:/bin cmake --build b2 ; echo "exit=$?"    # → 2；build-pofiles.cmake:24 "failed generating ${PO_DIR}"
+  # case3 同 case2 环境 + 开关：通过
+  env PATH=$PRIV:/usr/bin:/bin cmake -S . -B b3 -DKI18N_MACROS_DIR=$KI18N -DKF_SKIP_PO_PROCESSING=ON
+  env PATH=$PRIV:/usr/bin:/bin cmake --build b3 ; echo "exit=$?"    # → 0
+  # 设备实证归档（三 case 全退出码）：/storage/Users/currentUser/tmp/oh-device-porting-v2/libkomparediff2-26.04.0/probe-kf-skip-po-processing.log
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           kf-skip-po-processing-flag
+rec_description:        移植基线不做本地化交付时，配方显式 tc.variables["KF_SKIP_PO_PROCESSING"]="ON"（或 cmake -D），ki18n_install 在宏头守卫处直接 return，零目录标零工具依赖。诚实权衡：牺牲 .mo 翻译目录（运行时 i18n API 回退源文/英文），只适用于以"库能力可用"为目标的移植阶段。配方树 54 个 conanfile.py 同模式实践（grep archives --include=conanfile.py 实测），L2 第二实例成立。
+rec_command:            conanfile.py generate(): tc.variables["KF_SKIP_PO_PROCESSING"]="ON"；或 cmake -DKF_SKIP_PO_PROCESSING=ON
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      provide-gettext-toolchain
+fallback_description:   需要 i18n 能力时不开开关，转而保障工具链：PATH 上提供可用 msgfmt（本设备 hnp gettext 0.26 探针 case1 实测可生成全部 72 mo）与 python3（宏有内置回退路径，仍建议显式暴露）。诚实权衡：引入 gettext 工具链依赖 + 72 语言量级的构建时间/体积成本，随上游 po 数量线性增长。
+fallback_command:       确保 find_package(Gettext) 可在 PATH 命中 msgfmt 后，正常 cmake --build（探针 case1 全流程）
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       删除 po/ 目录|patch 掉上游 CMakeLists 的 ki18n_install\(po\) 调用
+forbid_1_reason:        污染上游构建声明，永久丢失 i18n 能力，上游升级必然冲突；官方开关就是为跳过该处理提供的正解。
+forbid_1_consequence:   后续恢复 i18n 需要回滚上游补丁，且 PR 审查面出现无理由的上游结构改动。
+
+forbid_2_pattern:       只设 KF_SKIP_PO_PROCESSING=ON 却宣称完整 i18n 适配
+forbid_2_reason:        .mo 目录未生成，运行时翻译回退非本地语言；能力声明必须与实际交付一致。
+forbid_2_consequence:   下游按"支持本地化"集成后翻译全空，属于态度审计"诚实划定已验证边界"的违反。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             [P-BUILD-001]
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E402]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-kf-skip-po-processing-gettext-toolchain.md
+last_updated:           2026-09-14
+source_event:           libkomparediff2/26.04.0 适配（权威 CI PASS；tarball po/ 实有 72 语言，真实承重）；配方树 54 个 conanfile.py 同模式实践（2026-09-14 设备 grep 实测）；探针三 case 2026-09-14 设备实测，归档于 run tmp probe-kf-skip-po-processing.log
+authors:                why6666666 <why6666666@noreply.atomgit.com>
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-14
+draft:                  true
+contributor_id:         why6666666
