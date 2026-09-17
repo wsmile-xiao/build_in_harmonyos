@@ -1,4 +1,4 @@
-# dbus 1.14.10 for HarmonyOS
+# dbus 1.14.10.2 for HarmonyOS
 
 ## 概述
 
@@ -9,7 +9,7 @@ dbus 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
 | 项目 | 值 |
 |------|-----|
 | 名称 | dbus |
-| 版本 | 1.14.10 |
+| 版本 | 1.14.10.2 |
 | 下载地址 | https://dbus.freedesktop.org/releases/dbus/dbus-1.14.10.tar.xz |
 | 官方文档 | {文档链接} |
 

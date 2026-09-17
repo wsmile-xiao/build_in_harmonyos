@@ -1,0 +1,75 @@
+# ═══ Draft knowledge entry — OHOS 上 dbus-daemon 会话总线运行能力补齐 ═══
+# 来源：dbus 1.14.10.1 适配 fix 轮次（r01/r02 真实日志，任务 pc1-13）
+# Status: DRAFT — 随 dbus PR #9419 交付，待主编/AI 审核提升为 E 条目
+#
+# 四范围多轴查重（2026-09-10）：
+#   knowledge/doc: E461（OHOS AF_UNIX bind EPERM 能力矩阵/abstract+tmpdir 回退）根因重叠；
+#     E086（musl 无 struct ucred/SO_PEERCRED）、E338（getpwuid 为 NULL 回退）局部覆盖
+#   knowledge/graph: 无本组合方案条目
+#   knowledge/drafts: DRAFT-ohos-dbus1-pc-alias（.pc 别名）不同主题；无本组合
+#   index.tsv: 无
+# 七轴：
+#   exact_duplicate: false
+#   causal_duplicate: partial（E461 同根因：OHOS 拒绝 AF_UNIX 文件 socket bind）
+#   trigger_overlap: true（Failed to bind socket /tmp/dbus-*: Read-only file system / Operation not permitted）
+#   solution_overlap: partial（E461 推荐 abstract socket；本条目为固定会话总线场景的 TCP 等价 + 认证降级）
+#   combination_novelty: true（dbus-daemon 固定监听场景 TCP+allow_anonymous+passwd shim 组合无既有条目）
+#   boundary_novelty: true（仅无 AF_UNIX 权限/无 passwd 记录的运行验证环境适用；生产设备直接 unix:tmpdir+EXTERNAL）
+#   test_migration_novelty: true（test_package 自启动 dbus-daemon 完成真实 Peer.Ping 往返模式可迁移至其他 D-Bus 消费者库）
+
+id:                     DRAFT-dbus-1.14.10.1-ohos-session-bus-runtime
+trigger_tool:           runtime|conan create|test_package
+phase:                  runtime
+error_signature:        Could not get password database information for UID|
+                         Failed to bind socket "/tmp/dbus-.*": Read-only file system|
+                         Failed to bind socket .*: Operation not permitted|
+                         Client authorized as UID .* but our UID is .*, disconnecting|
+                         Client tried to send a message other than Hello without being registered
+
+severity:               2
+category:               runtime|ohos|dbus|socket|credentials
+match_keywords:         dbus-daemon, session bus, AF_UNIX bind EPERM, getpwuid_r, passwd shim,
+                         SO_PEERCRED, allow_anonymous, ANONYMOUS, DBUS_COOKIE_SHA1, TCP 等价路径,
+                         dbus-run-session, test_package 自启动 daemon, Peer.Ping 往返
+title:                  OHOS 沙箱下 dbus-daemon 会话总线运行能力补齐（AF_UNIX 禁止 → TCP 等价 + passwd shim + allow_anonymous；test_package 自启动完成真实往返）
+
+root_cause: |
+  OHOS PC 用户沙箱对 AF_UNIX 文件 socket bind() 返回 EPERM（能力矩阵：/tmp erofs 只读、HMDFS
+  bind EACCES/EPERM），musl libc 的 getpwuid_r/getpwnam_r 直接解析只读 /etc/passwd 且运行 UID
+  （如 20020101）无记录 → dbus-daemon init_system_db() 失败 "Could not get password database
+  information for UID"；TCP 传输下服务端拿不到对端 UID（SO_PEERCRED 仅 AF_UNIX 有效）→ 默认
+  auth 规则按 UID 校验断开连接。
+
+solution: |
+  1. 运行验证以 TCP 会话总线等价完成：<listen>tcp:host=127.0.0.1,port=0</listen> +
+     <auth>ANONYMOUS</auth> + <allow_anonymous/>，dbus-daemon --print-address --nofork 输出地址。
+  2. 环境恢复：为运行 UID 提供 getpwuid_r/getpwnam_r 兼容条目（passwd shim，仅环境恢复，
+     不改被测代码/配置；生产恢复条件=设备具备 AF_UNIX 权限且用户有 passwd 记录）。
+  3. 消费方用 dbus_bus_register 自动 Hello 后完成 Peer.Ping 往返（method return 即 PASS）。
+  4. test_package 自启动包内 dbus-daemon（TCP 配置），解析 --print-address 注入
+     DBUS_SESSION_BUS_ADDRESS 后运行消费方测试并清理 daemon —— 可迁移至其他 D-Bus 消费者库。
+
+validation: |
+  - dbus-daemon --config-file=session-tcp.conf --print-address --nofork
+      → 输出 tcp:host=127.0.0.1,port=... ，exit 0（daemon 持续运行）
+  - DBUS_SESSION_BUS_ADDRESS=$ADDR dbus-send --session --print-reply \
+      --dest=org.freedesktop.DBus / org.freedesktop.DBus.Peer.Ping
+      → "method return ... reply_serial=2"，exit 0
+  - dbus-run-session --config-file=session-tcp.conf -- sh -c 'dbus-send --session ... Peer.Ping'
+      → "IN_SESSION ADDR=..." + method return，exit 0
+  - conan create test_package：自启动 daemon 后 "dbus consumer roundtrip PASSED (method return)"，EXIT=0
+
+boundary: |
+  适用：无 AF_UNIX 权限、无 passwd 记录的 OHOS 沙箱运行验证；D-Bus 会话总线消费者往返验证。
+  反例：真实 OHOS 桌面设备（具备 AF_UNIX 与用户记录）直接 unix:tmpdir + EXTERNAL，无需 TCP/allow_anonymous；
+  abstract namespace（E461 推荐）适合临时工具，不适合需稳定寻址的 dbus-daemon 会话监听。
+
+recovery_conditions: |
+  - 目标设备具备 AF_UNIX bind 权限时，session.conf 恢复 <listen>unix:tmpdir=${DBUS_SESSION_SOCKET_DIR}</listen>
+    + EXTERNAL 认证，原样运行。
+  - 为运行用户建立 /etc/passwd 记录（或 NSS 用户数据库条目）后可去除 passwd shim。
+
+similar_to:            E461, E086, E338
+caused_by:             OHOS 沙箱能力矩阵（与 E461 同根因链）
+prerequisite_of:       libdex test-dbus 消费者验证（后续 follow-up）
+conflicts_with:        无
