@@ -1,0 +1,111 @@
+#====================================================================
+# DRAFT-util-linux-ts-runsh-ohos-bash-xargs-driver
+# — util-linux tests/run.sh 测试驱动器在 OHOS 上的 bash/xargs 适配闭环
+# 触发事件: liblastlog2 2.42.2 首次适配 (2026-09-14)
+# 查重: E010(toybox 兼容性), E098(toybox 缺失命令), E265(OHOS 上游测试差异),
+#       DRAFT-cdb-20251021-hmdfs-shebang-script-exec-refusal(解释器+脚本调用族);
+#       E534/E467 为官方 KB HEAD 候选关联, 本地 base graph 无此编号, 合并时由主编终判
+#====================================================================
+
+id:                     DRAFT-util-linux-ts-runsh-ohos-bash-xargs-driver
+trigger_tool:           make|bash|xargs|conan
+phase:                  testing
+error_signature:        bad interpreter.*No such file or directory|
+                         xargs.*Unknown option 'I'|
+                         xargs error|
+                         Tests not compiled! Run 'make check-programs'|
+                         redefinition of 'sockaddr_storage'
+
+severity:               2
+category:               autotools|testing|portability
+match_keywords:         util-linux, tests/run.sh, tests/ts, make check,
+                         check_PROGRAMS, /bin/bash, bad interpreter,
+                         toybox xargs, xargs -I, busybox xargs,
+                         TESTS_COMPONENTS, component filter, OHOS
+title:                  OHOS 用户空间 toybox xargs 不支持 GNU xargs 的 -I 替换符且 /bin/bash 路径不存在，util-linux tests/run.sh 测试驱动器必以 "xargs error" 与 "bad interpreter" 失败——需按名构建本组件 check_PROGRAMS、以 bash 显式解释测试脚本（run.sh 驱动器一行适配）、前置构建目录内 xargs→busybox shim，并用官方 harness 的 [<component>] 过滤执行
+
+root_cause: >
+  util-linux 的官方测试入口 `make check` 有三层与 OHOS 用户空间不兼容：
+  1) 全量 `make check` 会构建所有组件的 check_PROGRAMS，其中
+  lib/test_netlink.c 在 musl/OHOS sysroot 下编译失败（linux/socket.h 与
+  sys/socket.h 重复定义 struct sockaddr_storage），该文件与被移植库无关；
+  2) 驱动器 tests/run.sh 以 `bash -c "'<script>' ..."` 直接 exec 测试脚本，
+  内核按脚本 `#!/bin/bash` shebang 解释，而 OHOS 无 /bin/bash，全部脚本报
+  "bad interpreter"；3) run.sh 用 `xargs -I '{}' -P N -n 1` 分发脚本，PATH
+  首位的 toybox xargs 不支持 -I，报 "xargs: Unknown option 'I'" →
+  "xargs error"。此外组件过滤场景（[<component> ...]）不触发
+  test_ttyutils 存在性检查，是聚焦包可用的官方 TESTS_COMPONENTS 机制。
+affected_scope: >
+  一切基于 util-linux tests/ts + tests/run.sh harness 的聚焦包适配（如
+  liblastlog2、login、agetty 等同源 tarball 子项目）。驱动器适配不改变任何
+  测试脚本与断言；不适合作为绕过失败测试的理由。
+verification_cmd: |
+  CI_PACKAGES="<archives/<letter>/<name>/<version>>" zsh ci/conan/build_and_test.sh;
+  在构建日志核对 "All N tests PASSED"、逐项 "<component>: <name> ... OK" 行、
+  L1a/L1e 门禁与 test_package 输出。
+  自包含微探针（任意 OHOS 设备独立复跑验证机理, 无需本仓）:
+  [P1] toybox xargs 不支持 -I（run.sh 驱动器失败根因）:
+      printf 'a\nb\n' | xargs -I '{}' -n 1 echo '{}'; echo rc=$?
+      → 预期 "xargs: Unknown option 'I'" 且 rc!=0;
+  [P2] busybox xargs 支持 -I/-P（shim 可行性）:
+      printf 'a\nb\n' | busybox xargs -I '{}' -P 2 -n 1 bash -c "echo got {}"; echo rc=$?
+      → 预期输出 got a / got b 且 rc=0;
+  [P3] 无 /bin/bash 时内核按 shebang exec 失败、bash 显式解释绕过（patch 0003 机理）:
+      test ! -e /bin/bash && command -v bash >/dev/null && command -v busybox >/dev/null \
+      && d=$(mktemp -d) && printf '#!/bin/bash\necho shebang-bypassed\n' > "$d/t.sh" \
+      && chmod +x "$d/t.sh" && { "$d/t.sh"; echo direct_rc=$?; } 2>&1 | tail -1 \
+      && bash "$d/t.sh"; echo bash_rc=$?; rm -rf "$d"
+      → 预期 direct_rc=126（bad interpreter）、bash 路径输出 shebang-bypassed 且 bash_rc=0。
+
+rec_priority:            1
+rec_approach:            official-harness-component-run-with-driver-shims
+rec_description: >
+  按名构建本组件 check_PROGRAMS（make test_xxx ...），再用官方 harness 以
+  组件过滤执行：bash tests/run.sh --srcdir=<src> --builddir=<build>
+  --nonroot --show-diff --parallel <component>。配套两个不改测试的驱动器
+  适配：补丁把 run.sh 分发行从 bash -c "'<script>'" 改为
+  bash -c "bash '<script>'"（脚本由 bash 解释，shebang 退化为注释）；构建
+  目录内建 xargs->busybox 符号链接 shim 并前置 PATH（busybox xargs 支持
+  -I/-P），保持 run.sh 的计数与汇总逻辑原样。
+rec_command: >
+  conan create archives/<letter>/<name>/<version>
+  --profile:build=ohos-aarch64 --profile:host=ohos-aarch64
+rec_auto_fix:            true
+rec_impl:                patch-files
+
+fallback_priority:       2
+fallback_approach:       consult-existing-knowledge
+fallback_description: >
+  若设备没有 busybox 或其 xargs 缺 -I，可按 run.sh 同语义（收集
+  tests/ts/<component> 下可执行脚本、逐个以相同 OPTS 调用、统计失败数）
+  写最小驱动循环；不得据此把上游测试记为 NOT_RUN 或伪造 PASS 统计。
+fallback_command:        command -v busybox && busybox xargs --help
+fallback_auto_fix:       false
+fallback_impl:           none
+
+forbid_1_pattern:        NOT_RUN.*tests/run.sh|run.sh.*xargs.*放弃
+forbid_1_reason:         run.sh 的 /bin/bash 与 xargs -I 均为驱动器层问题，bash 解释 + busybox shim 即可恢复官方入口。
+forbid_1_consequence:    把可真实执行的上游测试记为 NOT_RUN 会夸大测试缺口。
+
+forbid_2_pattern:        bash.*tests/run\.sh$
+forbid_2_reason:         不带组件参数的全量 run.sh 需要 all 组件 check_PROGRAMS 已构建，聚焦包下必然失败。
+forbid_2_consequence:    无关组件的编译错误（如 test_netlink 的 sockaddr_storage 重定义）掩盖被测库结果。
+
+principles:              P001, P003, P011
+caused_by:
+similar_to:              E010, E098, E265, DRAFT-cdb-20251021-hmdfs-shebang-script-exec-refusal
+conflicts_with:
+prerequisite_of:
+
+doc_file:                knowledge/drafts/DRAFT-util-linux-ts-runsh-ohos-bash-xargs-driver.md
+last_updated:            2026-09-14
+source_event:            archives/l/liblastlog2/2.42.2 首次适配（2026-09-14）
+
+authors:                 GoliWie
+source_pr:
+source_commit:
+
+metrics_success_count:   1
+metrics_fail_count:      0
+metrics_confidence:      1.0
+metrics_last_used:       2026-09-14
