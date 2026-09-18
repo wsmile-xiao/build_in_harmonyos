@@ -1,0 +1,123 @@
+From 2f7044116456c5ead27263b59fe48aed2fa38996 Mon Sep 17 00:00:00 2001
+From: j669539 <j669539@noreply.gitcode.com>
+Date: Wed, 16 Sep 2026 02:48:38 +0800
+Subject: [PATCH] OHOS portability
+
+---
+ CMakeLists.txt   | 32 ++++++++++++++++++++++++++++----
+ test/yder_test.c | 25 ++++++++++++++++++++++++-
+ 2 files changed, 52 insertions(+), 5 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b8c4b4d..48d5ffd 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -166,6 +166,13 @@ if (BUILD_SHARED)
+ endif()
+ 
+ find_package(Orcania ${ORCANIA_VERSION_REQUIRED} REQUIRED)
++if (NOT ORCANIA_VERSION_STRING AND Orcania_VERSION_STRING)
++    # OHOS portability: Conan CMakeDeps generates OrcaniaConfig.cmake which
++    # exports the version as Orcania_VERSION_STRING (camel case). Accept both
++    # spellings; the version gate is still enforced by find_package(Orcania
++    # x.y.z REQUIRED) through OrcaniaConfigVersion.cmake.
++    set(ORCANIA_VERSION_STRING "${Orcania_VERSION_STRING}")
++endif ()
+ if ("${ORCANIA_VERSION_STRING}" VERSION_GREATER_EQUAL "${ORCANIA_VERSION_REQUIRED}")
+     message(STATUS "Orcania found: ${ORCANIA_VERSION_STRING}")
+ else ()
+@@ -221,10 +228,20 @@ include_directories(${PROJECT_BINARY_DIR})
+ option(BUILD_YDER_TESTING "Build the testing tree." OFF) # because we don not use include(CTest)
+ 
+ if (BUILD_YDER_TESTING)
+-    find_package(Check)
++    # OHOS portability: force MODULE mode so yder's bundled
++    # cmake-modules/FindCheck.cmake runs (CHECK_FOUND / Check::Check). The
++    # Conan toolchain sets CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON which would
++    # otherwise resolve find_package(Check) in CONFIG mode to the CMakeDeps
++    # check-config.cmake (Check_FOUND / Check::check) and silently drop this
++    # whole CTest tree.
++    find_package(Check MODULE)
+     if (CHECK_FOUND)
+         if (NOT WIN32 AND NOT APPLE)
+-            find_package(Subunit REQUIRED)
++            # OHOS portability: the ohpcd libcheck (check/0.15.2) is
++            # self-contained and yder_test uses only check.h, so Subunit is
++            # not needed at link time (same relaxation as orcania 2.3.3 in
++            # this repo).
++            find_package(Subunit)
+         endif ()
+ 
+         enable_testing()
+@@ -232,7 +249,14 @@ if (BUILD_YDER_TESTING)
+         set(CMAKE_CTEST_COMMAND ctest -V)
+ 
+         set(TST_DIR ${CMAKE_CURRENT_SOURCE_DIR}/test)
+-        set(TEST_LIBS ${yder_lib} Check::Check Orcania::Orcania)
++        if (TARGET Orcania::Orcania-static)
++            # OHOS portability: Conan CMakeDeps exports Orcania::Orcania-static
++            # for the static build; the library link block above already
++            # handles both spellings, mirror it for the test link list.
++            set(TEST_LIBS ${yder_lib} Check::Check Orcania::Orcania-static)
++        else ()
++            set(TEST_LIBS ${yder_lib} Check::Check Orcania::Orcania)
++        endif ()
+         if (NOT WIN32)
+             find_package(Threads REQUIRED)
+             list(APPEND TEST_LIBS ${CMAKE_THREAD_LIBS_INIT} m)
+@@ -240,7 +264,7 @@ if (BUILD_YDER_TESTING)
+         if (NOT APPLE)
+             list(APPEND TEST_LIBS rt)
+         endif ()
+-        if (NOT WIN32 AND NOT APPLE)
++        if (NOT WIN32 AND NOT APPLE AND SUBUNIT_FOUND)
+             list(APPEND TEST_LIBS Subunit::Subunit)
+         endif ()
+ 
+diff --git a/test/yder_test.c b/test/yder_test.c
+index ea57a5b..738348d 100644
+--- a/test/yder_test.c
++++ b/test/yder_test.c
+@@ -10,6 +10,21 @@
+ #include <orcania.h>
+ #include "yder.h"
+ 
++/* Portability: on filesystems where /tmp is read-only (e.g. OHOS), resolve
++ * the log file fixture through $TMPDIR when set, falling back to
++ * /tmp/test.log unchanged otherwise (regular POSIX behaviour; the
++ * Y_LOG_MODE_FILE semantics under test are untouched). */
++static const char * y_test_log_file(const char * fallback) {
++  const char * tmpdir = getenv("TMPDIR");
++  static char path[512];
++  if (tmpdir != NULL && tmpdir[0] != '\0' && o_strlen(tmpdir) + sizeof("/test.log") < sizeof(path)) {
++    strcat(strcpy(path, tmpdir), "/test.log");
++    return path;
++  }
++  return fallback;
++}
++#define Y_TEST_LOG_FILE y_test_log_file("/tmp/test.log")
++
+ char message[1024];
+ char app_name[128];
+ int level;
+@@ -35,8 +50,16 @@ END_TEST
+ 
+ START_TEST(test_yder_init_file)
+ {
+-  ck_assert_int_eq(y_init_logs("test_yder_file", Y_LOG_MODE_FILE, Y_LOG_LEVEL_DEBUG, "/tmp/test.log", "second test"), 1);
++  char line[1024];
++  FILE * f;
++  ck_assert_int_eq(y_init_logs("test_yder_file", Y_LOG_MODE_FILE, Y_LOG_LEVEL_DEBUG, Y_TEST_LOG_FILE, "second test"), 1);
+   y_close_logs();
++  f = fopen(Y_TEST_LOG_FILE, "r");
++  ck_assert(f != NULL);
++  ck_assert(fgets(line, sizeof(line), f) != NULL);
++  ck_assert(strstr(line, "test_yder_file") != NULL);
++  ck_assert(strstr(line, "second test") != NULL);
++  fclose(f);
+ }
+ END_TEST
+ 
+-- 
+2.45.2
+
