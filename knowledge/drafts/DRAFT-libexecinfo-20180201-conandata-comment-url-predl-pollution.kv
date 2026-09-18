@@ -1,0 +1,106 @@
+#====================================================================
+# DRAFT-libexecinfo-20180201-conandata-comment-url-predl-pollution —
+# conandata.yml 注释中的裸 GitHub 仓库 URL 被 W3 pre-download 正则捕获，
+# 下载成仓库主页 HTML 并前缀污染官方 tarball URL → NotADirectoryError
+# 触发事件: libexecinfo 20180201 适配，finish W3 本地 CI 首次执行失败
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-libexecinfo-20180201-conandata-comment-url-predl-pollution
+trigger_tool:           build_and_test.sh|conan create
+phase:                  download|source|conan_build
+error_signature:        NotADirectoryError.*predl_cache.*archive/refs/tags|conan create failed.*pre-download
+
+severity:               2
+category:               ci, conan, source-download, packaging, yaml
+match_keywords:         conandata.yml, pre-download, predl_cache, comment URL,
+                        裸 URL, 仓库主页 HTML, file://, 前缀污染, NotADirectoryError,
+                        url_pattern, build_and_test.sh
+title:                  Do not put a bare repo URL in conandata.yml comments — the W3 pre-download regex captures it, downloads the repo HTML page, and prefix-pollutes the official tarball URL
+
+topic: >
+  build_and_test.sh 的 pre-download 阶段用正则
+  (?:^|\s)(?:url:?\s*)?["\']?-?\s*(https?://[^\s"\']+) 从 conandata.yml
+  提取源码 URL。该正则不区分 url: 字段与注释行：若注释中出现裸仓库 URL
+  （如 `# Source: https://github.com/owner/repo`），它会被当作第 N 个
+  源码 URL，下载结果不是 tarball 而是 30KB 的 GitHub 仓库主页 HTML。
+  随后脚本用 content.replace(url, "file://<local>") 做前缀替换，而裸
+  仓库 URL 恰好是官方 tarball URL（.../archive/refs/tags/<tag>.tar.gz）
+  的字符串前缀，替换后得到
+  file://.../predl_cache/{hash}_repo/archive/refs/tags/<tag>.tar.gz，
+  即把 HTML 文件当目录展开 → NotADirectoryError，conan create 失败。
+
+root_cause: >
+  1) pre-download 的 url_pattern 正则对注释行放开匹配（只要行内出现
+     https?:// 即捕获，不看是否 url: 字段）；
+  2) 下载器对任意 >100 字节响应（含 HTML 页面）都视为"下载成功"并
+     记录 downloaded[url]=dest，无 tarball 格式校验；
+  3) 改写用 content.replace(url, file://local) 做纯字符串前缀替换，
+     裸 URL 是 tarball URL 的前缀时必然污染官方 URL。
+
+durable_solution: >
+  1) conandata.yml 注释中不要写裸仓库 URL——需要写来源时写完整 tarball
+     URL（或纯文本描述不带 https:// 字样）；
+  2) 若已被污染：删除 .build-cache/predl_cache/ 中误下载的 HTML 文件
+     （file 命令显示 "UTF-8 text" 而非 gzip），恢复 conandata.yml 官方
+     URL 后重跑 finish/W3；
+  3) 排查口诀：W3 pre-download 显示 "found N source URL(s)" 且 N 大于
+     conandata 实际 url: 字段数，或 [try] 行的文件名是仓库名而非
+     <tag>.tar.gz，即命中本条。
+
+impact: >
+  只影响本地 W3/finish 的 pre-download 改写；若未清除误下载 HTML，
+  conandata.yml 会被改成畸形 file:// 路径且还原逻辑只还原到备份，
+  反复失败。对已发布产物无影响（CI 侧 pre-download 同样逻辑，同样风险）。
+
+recovery: >
+  任何 conan create 报 NotADirectoryError 且路径含 predl_cache/<hash>_<repo>/archive/refs/tags/
+  时：先清 .build-cache/predl_cache/ 对应 HTML 文件，把 conandata.yml
+  url 还原为官方完整 tarball URL，确认注释无裸 URL，重跑。
+
+evidence_chain: >
+  task libexecinfo-20180201-r01（feat/libexecinfo-20180201 分支）
+    - conandata.yml 原注释 `# Source: https://github.com/resslinux/libexecinfo (official upstream)`
+    - W3 首次：found 3 source URL(s)（实际只有 1 个 url: 字段）；
+      [try] libexecinfo ← https://gh-proxy.com/https://github.com/resslinux/libexecinfo
+      → 下载 30KB HTML（.build-cache/predl_cache/c1cff791_libexecinfo，UTF-8 text）
+    - conan create: NotADirectoryError: predl_cache/c1cff791_libexecinfo/archive/refs/tags/v20180201.tar.gz
+    - md5 前缀核对：c1cff791 == md5("https://github.com/resslinux/libexecinfo")[:8]
+    - 修复（注释去裸 URL + 删 HTML 缓存）后 finish W3 100% 通过
+      （.ci-result.json exit_code=0, log_sha256=295e03eb6f2cdfe5b1f7e10495975c47661e41717d3820fc59275ab4b467faad）
+
+verification_cmd: >
+  grep -nE 'https?://' archives/l/libexecinfo/20180201/conandata.yml
+  # 期望：注释中无裸 URL；url: 仅一条官方 tarball URL
+  file .build-cache/predl_cache/*  # 期望：全部为 gzip compressed data
+
+limitations: >
+  仅当裸 URL 是官方 tarball URL 的字符串前缀时才必然触发 NotADirectoryError；
+  若裸 URL 与 tarball URL 无关，则只是多下载一个 HTML 文件、改写出错但
+  不影响 conan create（仍建议避免）。full 模式（git ls-files）与 incremental
+  模式对 pre-download 行为一致，本坑与 JC 模式无关。
+
+rec_priority:           1
+rec_approach:           no-bare-repo-url-in-conandata-comments（注释不写裸仓库 URL）
+rec_description: >
+  conandata.yml 注释中避免出现裸 https:// 仓库 URL；改写官方 tarball
+  URL 时用完整 URL；W3 报 NotADirectoryError 且路径含 predl_cache/<hash>_<repo>
+  时按 recovery 处置。
+rec_command:            grep -nE '^\s*#.*https?://' archives/l/libexecinfo/20180201/conandata.yml
+rec_auto_fix:           false
+rec_impl:               conandata-comment-no-bare-url
+
+doc_file:               knowledge/drafts/DRAFT-libexecinfo-20180201-conandata-comment-url-predl-pollution.md
+last_updated:           2026-09-17
+source_event:           libexecinfo 20180201 适配，finish W3 pre-download 污染
+authors:                atomcode-executor (pc1-42)
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-17
+
+draft:                  true
+contributor_id:         pc1-42
