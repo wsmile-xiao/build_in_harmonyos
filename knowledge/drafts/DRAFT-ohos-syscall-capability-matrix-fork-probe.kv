@@ -1,0 +1,117 @@
+﻿#====================================================================
+# DRAFT-ohos-syscall-capability-matrix-fork-probe.kv
+# OHOS syscall 能力矩阵与「必须 fork 逐项探测」：未实现即 SIGSYS 直接终止探测进程
+# 来源: procenv 0.51 适配（contrib-9733）期间的平台能力实测
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-syscall-capability-matrix-fork-probe
+trigger_tool:           clang|ld|test|runtime
+phase:                  runtime|testing
+error_signature:        Signal 31|SIGSYS|exit 159|Bad system call|
+                         Function not implemented|ENOSYS
+severity:               2
+category:               ohos, syscall, kernel, detection, testing, runtime, portability
+match_keywords:         SIGSYS, signal 31, exit 159, syscall probe, capability matrix, fanotify,
+                         keyctl, add_key, clone3, openat2, rseq, unshare, setns, bpf, swapon, kexec,
+                         memfd_create, pidfd_open, io_uring_setup, seccomp, statx, getrandom,
+                         process_vm_readv, fork probe, ENOSYS, E051
+title:                  OHOS 的 syscall 能力矩阵与探测方法：**必须 fork 子进程逐项探测**
+                        （未实现的 syscall 会以 SIGSYS 直接杀掉探测进程，而非返回 ENOSYS）
+prescan_pattern:        syscall\s*\(\s*SYS_[A-Za-z0-9_]+
+prescan_globs:          *.c, *.h, *.cc, *.cpp
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, syscall, kernel, detection, testing, runtime
+match_keywords:         SIGSYS, signal 31, exit 159, syscall, SYS_, capability probe, ENOSYS,
+                         fanotify_init, keyctl, add_key, clone3, openat2, rseq, unshare, setns,
+                         bpf, io_uring_setup, memfd_create, pidfd_open, seccomp, statx, pty
+title:                  OHOS 上做能力探测/移植侦察时：未实现 syscall 以 SIGSYS 终止进程，
+                        必须每项 fork 子进程探测；附实测能力矩阵（缺/有/ENOSYS 三态）
+prescan_pattern:        syscall\s*\(\s*SYS_[A-Za-z0-9_]+
+prescan_globs:          *.c, *.h, *.cc, *.cpp
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             OHOS 内核（HongMeng Kernel）对**未实现的 syscall 不是返回 ENOSYS，而是以 SIGSYS
+                        (signal 31) 终止进程**（exit code 159）。因此：
+                        (1) 任何"一次性探测多个 syscall"的探针程序会在第一个未实现项上**被内核杀掉**，
+                        后面全部测不到（本任务第一版探针就死在 `memfd_create` 之后）；
+                        (2) 依赖这些 syscall 的程序不能靠"返回值判断"，必须在调用前做能力探测并降级（禁止用平台宏 `#ifdef __OHOS__`，见 forbid_3）
+                        （与仓库 E051/P008 的原则一致：未实现 syscall 必须调用前拦截）；
+                        (3) 探测方法论上必须**每项 fork 一个子进程**，用 `WIFSIGNALED && WTERMSIG==31`
+                        区分"未实现(SIGSYS)"与"参数错误(有 errno)"与"ENOSYS"。
+affected_scope:         所有在 OHOS 上做平台能力探测、或使用 Linux 专有 syscall 的移植工作；
+                        实证：procenv 0.51 适配期间的能力矩阵（下表）。
+verification_cmd:       # 关键：每项 fork 子进程，否则 SIGSYS 会杀掉整个探针
+                        # （探针伪代码）
+                        for t in tests: pid=fork(); if child: t(); _exit(0); waitpid();
+                          if WIFSIGNALED(st) && WTERMSIG(st)==31: print("SIGSYS 未实现")
+                          else: print(errno)
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           fork-per-probe-capability-matrix
+rec_description:        能力探测统一按"**每项 fork 子进程**"实现，并按三态分类：
+                        SIGSYS=内核未实现（不可捕获、必须调用前守卫）；ENOSYS=返回未实现（可捕获、可降级）；
+                        其他 errno=参数/权限问题（说明 syscall 存在）。
+                        **守卫首选运行时/配置期能力探测**（先 try、失败即降级；或 configure 期 `AC_CHECK_*`），
+                        避免用平台宏 `#ifdef __OHOS__`（R8）；确需编译期守卫时才用 libc 特性宏
+                        （如 `!defined(__GLIBC__)`）并说明 R8 例外判据——syscall 可用性属**内核/平台**属性，
+                        libc 宏只是近似，故运行时探测优先。
+rec_command:            # 实测矩阵（OHOS aarch64，2026-09-16；fork 探针）
+                        #  SIGSYS（未实现，调用即杀进程）：
+                        #    fanotify_init, keyctl, add_key, clone3, openat2, rseq,
+                        #    unshare, setns, bpf, mount(2), swapon, kexec_load, reboot
+                        #  ENOSYS（可捕获）：
+                        #    userfaultfd, pidfd_getfd
+                        #  可用：
+                        #    memfd_create, pidfd_open, io_uring_setup, seccomp, statx,
+                        #    copy_file_range, splice, tee, sendfile, vmsplice, getrandom,
+                        #    process_vm_readv, perf_event_open, ioprio_set, quotactl, mknodat,
+                        #    posix_openpt/grantpt/unlockpt/ptsname + /dev/pts/N（pty 完整可用）
+rec_auto_fix:           false
+rec_impl:               fork-probe（C 探针）+ 运行时/配置期能力探测
+
+fallback_priority:      2
+fallback_approach:      avoid-probing-by-static-knowledge
+fallback_description:   不便运行探针时，按已知矩阵直接对 SIGSYS 项做能力探测/降级（不得用平台宏）；但**矩阵会随系统版本变化**，
+                        交付前仍应实跑一次 fork 探针。
+fallback_auto_fix:      false
+fallback_impl:          static-guard-table
+
+forbid_1_pattern:       单进程连续探测多个 syscall 后据返回值判断可用性
+forbid_1_reason:        第一个未实现项会以 SIGSYS 杀掉探测进程，后续结果全部缺失（假阴性）
+forbid_1_consequence:   把"整片 syscall 不可用"误判成"程序崩溃"，结论完全错误
+forbid_2_pattern:       signal\(SIGSYS|signal handler.*SIGSYS.*catch
+forbid_2_reason:        SIGSYS 由内核直接终止，用户态 handler 捕获不到（仓库 P008 已列为 critical）
+forbid_2_consequence:   误以为可以"捕获后降级"，实际进程仍然死亡
+forbid_3_pattern:       编译期用平台宏 #ifdef __OHOS__ 守卫 syscall 可用性
+forbid_3_reason:        R8 红线（平台条件编译）；且 syscall 可用性是内核/平台属性，平台宏会随平台膨胀、
+                        且对同平台不同版本失效
+forbid_3_consequence:   评审直接 request close/request changes，需改为运行时/配置期探测
+
+principles:             R34, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 探测程序被 SIGSYS 杀死、能力矩阵缺失项被误判
+caused_by:              OHOS 内核未实现这些 syscall 且以 SIGSYS 终止；ENOSYS 与 SIGSYS 语义不同
+similar_to:             E051
+conflicts_with:         []
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-syscall-capability-matrix-fork-probe.md
+last_updated:           2026-09-16
+source_event:           procenv 0.51 适配期间的能力矩阵实测（第一版单进程探针死于 memfd_create 之后的 SIGSYS）
+
+authors:                frj__
+source_pr:              (本分支 feat/procenv-0.51)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+draft:                  true
+contributor_id:         frj__
