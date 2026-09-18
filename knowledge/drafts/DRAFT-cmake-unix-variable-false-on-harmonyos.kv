@@ -1,0 +1,63 @@
+#====================================================================
+# DRAFT-cmake-unix-variable-false-on-harmonyos.kv
+# CMAKE_SYSTEM_NAME=HarmonyOS 时 CMake 的 UNIX 变量为 FALSE——
+#   上游 if(NOT UNIX) 平台判定误入 MinGW/Windows 分支
+# 触发事件: jinja2cpp 0.9 HarmonyOS PC 适配
+#   （archives/j/jinja2cpp/0.9，patches/0001 第 2 项）
+#   实测: OHOS SDK 26.0.0.18 + CMake 4.1.2，全部 TU 报
+#   clang-15: error: unsupported argument '-mbig-obj' to option '-Wa,'
+#====================================================================
+
+id:                     DRAFT-cmake-unix-variable-false-on-harmonyos
+trigger_tool:           cmake
+phase:                  configuration|compilation
+error_signature:        unsupported argument '-mbig-obj' to option '-Wa,'|
+                         -Wa,-mbig-obj.*clang|
+                         if \(NOT UNIX\).*harmonyos
+
+severity:               3
+category:               cmake|platform|detection|cross-compile|harmonyos
+match_keywords:         UNIX, CMAKE_SYSTEM_NAME, HarmonyOS, mbig-obj, Wa,
+                         MinGW, WIN32, platform detection, clang, assemble,
+                         CMakeLists.txt, Threads::Threads
+title:                  CMAKE_SYSTEM_NAME=HarmonyOS 时 UNIX 变量为 FALSE：上游 if(NOT UNIX) 平台判定误入 MinGW 分支注入 -Wa,-mbig-obj（clang 全 TU 编译失败）
+
+root_cause: >-
+    CMake 内部平台变量 UNIX（与 APPLE/WIN32 并列）按 CMAKE_SYSTEM_NAME
+    归属判定。HarmonyOS 不在 CMake 已知平台清单（Linux/Darwin/Windows/
+    CYGWIN/MSYS/Android…），CMAKE_SYSTEM_NAME=HarmonyOS 时 UNIX 为 FALSE。
+    上游 CMake 工程惯用 `if (NOT UNIX)` 或 `if (NOT UNIX AND NOT APPLE)`
+    表达"非 POSIX 桌面平台"（实指 Windows/MinGW），在鸿蒙交叉构建下
+    误判为 Windows 类平台：注入 `-Wa,-mbig-obj`（MinGW 大对象汇编参数，
+    clang 不支持）、链接 stdc++（应为 Threads::Threads）、启用 MSVC 分支
+    等，导致配置期或全量编译期失败。相邻条目 E092 覆盖"CMake 不识别
+    HarmonyOS 平台名"（platform module 缺失），本条目覆盖"平台变量语义
+    误判导致的分支走错"——错误签名与修复动作均不同。
+
+solution: >-
+    识别上游 CMakeLists 的平台分支语义后改判定条件，不依赖 UNIX 变量：
+    1) 原本意是"仅 Windows/MinGW"的分支：`if (NOT UNIX)` → `if (WIN32)`（或
+       `if (WIN32 OR MSYS)`）——OHOS/Linux/macOS 走 POSIX 分支（Threads）。
+    2) 原本意是"非 Apple 桌面"：`if (NOT UNIX AND NOT APPLE)` →
+       `if (WIN32)` 同理。
+    3) 若上游还需区分交叉编译，用 CMAKE_CROSSCOMPILING 或
+       CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS" 显式判定。
+    补丁示例（jinja2cpp 0.9 CMakeLists.txt）：
+    ```cmake
+    if (${CMAKE_CXX_COMPILER_ID} MATCHES "Clang" OR ${CMAKE_CXX_COMPILER_ID} MATCHES "GNU")
+        if (WIN32)  # 原: if (NOT UNIX)
+            set (EXTRA_TEST_LIBS "stdc++")
+            set (CMAKE_CXX_FLAGS ${CMAKE_CXX_FLAGS} "-Wa,-mbig-obj")
+        else ()
+            include(CMakeFindDependencyMacro)
+            find_dependency(Threads)
+            set (EXTRA_TEST_LIBS Threads::Threads)
+        endif ()
+    ```
+
+fallback: >-
+    若不便改上游源码，可在配方 generate() 里通过 CMakeToolchain 注入
+    DUNIX=1 / DCMAKE_UNIX=1 缓存变量预处理（对简单 `if(NOT UNIX)` 有效，
+    但对 `if(WIN32)` 反向判定无效——治本仍需补丁改条件）。
+
+verify_builds:         CI #48916（PR #10439，2026-09-17 校验通过）
