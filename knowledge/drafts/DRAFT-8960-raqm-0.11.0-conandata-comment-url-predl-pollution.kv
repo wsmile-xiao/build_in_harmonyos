@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-8960-raqm-0.11.0-conandata-comment-url-predl-pollution — conandata.yml 注释里的 https URL 被 CI predownload 提取并污染源码 URL 替换
+# 触发事件: raqm 0.11.0 适配（W3/CI 的 Pre-download 步骤把注释 URL 当源码下载并 file:// 替换进 conandata）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-8960-raqm-0.11.0-conandata-comment-url-predl-pollution
+trigger_tool:           build_and_test.sh|pre-download|predl_cache|conan create
+phase:                  ci_gate|conan_build
+error_signature:        NotADirectoryError: \[Errno 20\] Not a directory: '.*predl_cache.*'|Could not download from the URL .*file:///.*predl_cache.*
+
+severity:               2
+category:               ci|conan|conandata|predownload|url-extraction
+match_keywords:         predl_cache, NotADirectoryError, conandata.yml, 注释, comment, URL, pre-download, file://, mirror fallback, gh-proxy, 污染, Not found
+title:                  Never put https URLs in conandata.yml comments — the CI pre-download greps all https URLs (comments included) and its replace pollutes the real source URL
+
+topic: >
+  ci/conan/build_and_test.sh 的 Pre-download 步骤用正则
+  (?:^|\s)(?:url:?\s*)?["']?-?\s*(https?://[^\s"']+) 从 conandata.yml
+  全文提取 URL——**注释行也在提取范围**。若注释里写了仓库主页 URL（如
+  "# Upstream: https://github.com/HOST-Oman/libraqm (tag v0.11.0)"），
+  它与真正的源码 URL 形成"前缀子串"关系。predl 下载注释 URL 拿到 HTML
+  仓库页（>100 字节即判成功），随后 content.replace(注释URL, file://...)
+  会把 conandata 里所有 URL 的中段污染（真源码 URL 的
+  "https://github.com/HOST-Oman/libraqm" 子串被替换成
+  "file:///.../predl_cache/{hash}_libraqm"），conan 端拿到
+  "file:///.../b4739ed2_libraqm/archive/refs/tags/v0.11.0.tar.gz" 这种
+  畸形路径 → source() 报 NotADirectoryError [Errno 20]。
+
+root_cause: >
+  1) predl 的 URL 提取正则不区分 YAML 注释与数据行——注释里的
+     https URL 一律提取；
+  2) 提取到"真源码 URL 的前缀"（主页 URL 无 /archive/... 尾段）时，
+     GitHub 返回仓库 HTML 页（31KB > 100 字节），predl 误判下载成功；
+  3) downloaded 字典按插入序 replace，前缀 URL 的 file:// 替换破坏了
+     包含它的完整 URL；
+  4) 与 E333（PyPI 连字符截断）同族但根因不同：E333 是正则字符类排
+     除连字符截断了 URL 尾段；本条是注释 URL 作为前缀子串污染——
+     修复方式也不同（E333 改 URL 形态；本条删注释 URL）。
+
+durable_solution: >
+  conandata.yml 的注释里**不写任何 https:// URL**（包括主页、release
+  页、镜像提示）。上游信息用无协议写法：
+    # Upstream: HOST-Oman/libraqm tag v0.11.0 (commit 08ee153)
+  仓库主页已由 conanfile.py 的 homepage 字段承载，无需在 conandata
+  注释重复。自查命令：
+    grep -E '^#.*https?://' conandata.yml   # 期望无输出
+
+impact: >
+  对所有带注释 URL 的 conandata.yml 在 CI 上都适用——这不是 raqm 特有
+  问题：任何人在注释里写上游主页 URL 都会触发。本地 W3 与远端 CI
+  同源（同一 build_and_test.sh），CI 会同样红。
+
+recovery: >
+  W3/CI 报 NotADirectoryError [Errno 20] '.../predl_cache/{hash}_{name}'
+  且报错 URL 是 file:// + 残余路径拼接（如 file://...libraqm/archive/
+  refs/tags/v0.11.0.tar.gz）时：
+  1) grep -E '^#.*https?://' conandata.yml 找注释 URL；
+  2) 删除或改写为无协议形式；
+  3) rm -rf .build-cache/predl_cache（坏 HTML 缓存会以 [cached] 复活）；
+  4) 重跑 W3/CI。
+
+evidence_chain: >
+  task raqm-0.11.0 适配（feat/raqm-0.11.0 分支）
+    - 首版 conandata.yml 注释含 "# Upstream: https://github.com/HOST-Oman/libraqm (tag v0.11.0)"；
+    - W3 日志：[try 1/2.1/3] libraqm ← gh-proxy... → [ok] libraqm (30KB)
+      （31KB HTML 仓库页被当 tarball）；
+    - conan 报错 URL：https://gh-proxy.com/file:///storage/.../
+      predl_cache/b4739ed2_libraqm/archive/refs/tags/v0.11.0.tar.gz
+      （前缀替换污染的直接证据）；
+    - 提取验证：python3 re.findall 同款正则对含注释 conandata 提取出
+      3 个 URL（含注释里的无尾段主页 URL）；删除注释 URL 后只提取
+      1 个正确源码 URL；
+    - 修复后 W3 全绿（L0/L1/L4/L5 pass，meson test 51/51）。
+
+verification_cmd: >
+  cd archives/r/raqm/0.11.0 && grep -nE '^#.*https?://' conandata.yml; echo "期望无输出"
+
+limitations: >
+  治本是 CI 侧（predl 只解析 YAML 数据段 / replace 用精确整行匹配），
+  本条是配方侧自防御规范。若 CI 未来修复提取逻辑，此规范仍无害。
+
+rec_priority:           1
+rec_approach:           no-https-url-in-conandata-comments
+rec_description: >
+  conandata.yml 注释禁写 https URL（主页/镜像/release 页都不行）；
+  上游信息用无协议形式（HOST-Oman/libraqm tag vX.Y.Z），主页由
+  conanfile.py homepage 字段承载。改后必须清 .build-cache/predl_cache
+  再跑 W3/CI（坏 HTML 缓存会以 [cached] 复活）。
+rec_command:            grep -nE '^#.*https?://' archives/*/*/*/conandata.yml | head; echo "期望无输出"
+rec_auto_fix:           false
+rec_impl:               conandata-comment-hygiene
+
+doc_file:               knowledge/drafts/DRAFT-8960-raqm-0.11.0-conandata-comment-url-predl-pollution.md
+last_updated:           2026-09-16
+source_event:           raqm 0.11.0 适配，W3 Pre-download 把 conandata 注释里的主页 URL 当源码下载（HTML 仓库页）并 file:// 替换污染真源码 URL
+authors:                j669539
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:         j669539
