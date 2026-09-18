@@ -1,0 +1,84 @@
+# test_package/ngs_smoke.ngs — R34 实质调用被测包
+# 每条 assert 失败都会抛异常 -> ngs 以非 0 退出码结束。
+# 这里刻意覆盖 ngs 的四条链接期依赖：
+#   json-c  -> encode_json / decode_json / JsonDecodeFail
+#   pcre    -> ~ 单匹配、~~ 全匹配、位置捕获、命名捕获
+#   bdw-gc  -> 4 万余对象分配（2 万长持 + 2 万 map + 200 churn）后的一致性
+#   libffi  -> 多方法分派（VM 每次方法调用都经 libffi）
+#
+# 表达式一律采用上游已验证写法（doc/ngslang.1.md、lib/lang-tests.ngs、
+# lib/stdlib.ngs 中的 TEST / %EX 原式），不使用 ngs 中不存在的语法。
+
+# --- json-c ---
+o = {"a": 1, "b": [null, false, true, 3.14], "nothing": null}
+assert(decode_json(encode_json(o)) == o)
+assert(decode_json("[1, 2, 3]") == [1, 2, 3])
+bad = try decode_json("1xx") catch(e: JsonDecodeFail) "caught"
+assert(bad == "caught")
+nums = (1...200).map(X*3)
+assert(decode_json(encode_json(nums)) == nums)
+
+# --- pcre ---
+assert("abc123xyz" ~ /[0-9]+/)
+assert(not("abc" ~ /[0-9]/))
+# MatchSuccess 支持下标（stdlib.ngs: F '[]'(ms:MatchSuccess, idx:Int) ms.matches[idx]）
+assert(("a1 b1c" ~ /^a(\d+) b\1c$/)[1] == '1')
+# ~~ 返回 Arr of MatchSuccess，先取第 0 个匹配再按捕获组取 matches[n]
+dates = ("2026-09-16" ~~ /(\d+)-(\d+)-(\d+)/)
+assert(dates[0].matches[2] == '09')
+assert(dates[0].matches[3] == '16')
+md = "1a2b" ~~ /([0-9])(.)/
+assert(md.map(F(x) x.matches[1]).join("") == "12")
+assert(md.map(F(x) x.matches[2]).join("") == "ab")
+m = "2026-09-16" ~ /(?<y>\d+)-(?<mo>\d+)-(?<d>\d+)/
+assert(m.named.y == "2026")
+assert(("x10ab20c30y" ~~ /[0-9]+/).whole.map(Int).sum() == 60)
+
+# --- 外部进程与字符串插值（依赖 fork/exec 路径正确） ---
+# 反引号内 line: 前缀 = 取输出首行且去掉换行（doc/ngslang.1.md "line:"）
+x = 1
+assert(`line: echo a$x b${x}c` == "a1 b1c")
+assert("hi ${1+2}" == "hi 3")
+assert(not(`false`))
+
+# --- 语言核心：隐式 map / 区间 / 命名空间 / flatten ---
+props = [{"x": 7}, {"x": 8}]
+assert((props .= x) == [7, 8])
+# .. 是半开区间，... 是闭区间（stdlib.ngs F ..(start, end) NumRange(..., true, false)）
+r10 = (1..10)
+assert(r10.sum() == 45)
+r10c = (1...10)
+assert(r10c.sum() == 55)
+# 命名空间导出规则：下划线前缀为私有（lang-tests.ngs:97 原式）
+ns1 = ns { section "x" { a = 1; _c = 10 }; b = 2; _d = 20 }
+assert(ns1 == %{a 1 b 2})
+ns2 = ns { F f(x) x+1; }
+assert(ns2::f(1) == 2)
+# flatten() 无参数，元素必须是 Eachable1 且非 Int（stdlib.ngs:3145/3154）
+flat = [[1], [2, 3]]
+assert(flat.flatten() == [1, 2, 3])
+
+# --- libffi：多方法分派 ---
+F twice(v: Int) v * 2
+F twice(v: Str) v + v
+assert(twice(3) == 6)
+assert(twice("a") == "aa")
+
+# --- bdw-gc 压力：制造大量垃圾后仍保持语义正确 ---
+acc = []
+big = (1...20000)
+big.each(F(i) { acc.push({"i": i, "sq": i * i}) })
+assert(acc.len() == 20000)
+assert(acc[19999]["sq"] == 400000000)
+tmp = big.map(F(i) { {"pad": "x" * 16, "v": i} })
+assert(tmp[9999]["v"] == 10000)
+assert(acc.len() == 20000)
+# churn：再分配 200 个带 32 字节 padding 的短命对象后，先前持有的对象不受影响
+churn = (1...200).map(F(j) { {"k": "z" * 32, "j": j} })
+assert(churn.map(X["j"]).sum() == 20100)
+assert(acc[0]["sq"] == 1)
+assert(tmp.len() == 20000)
+
+assert(VERSION == "0.2.17")
+
+echo("NGS_SMOKE_OK")
