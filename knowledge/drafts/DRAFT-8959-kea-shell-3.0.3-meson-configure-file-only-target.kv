@@ -1,0 +1,128 @@
+#====================================================================
+# DRAFT-8959-kea-shell-3.0.3-meson-configure-file-only-target
+# — Meson 工程中「只做 configure_file 的解释型脚本目标」在 Conan 侧的打包口径
+#   与生成脚本内嵌构建机路径的处理（OHOS/kea-shell 3.0.3 实测）
+# 触发事件: kea-shell 3.0.3 适配（conan create 首跑 meson test 参数误用即败）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-8959-kea-shell-3.0.3-meson-configure-file-only-target
+trigger_tool:           meson|conan|python|test
+phase:                  conan_build|configuration|testing|runtime
+error_signature:        test name does not match any test|Invalid test name|
+                         No module named 'kea_conn|ImportError.*kea_connector|
+                         bad interpreter.*python3|can't open file.*kea-shell|
+                         Unsupported system .harmonyos.
+
+severity:               2
+category:               conan, meson, python, portability, ohos
+match_keywords:         configure_file, meson setup, meson test, suite, test name,
+                         PKGPYTHONDIR, shebang, /usr/bin/env, script tool,
+                         package_type application, no compilation target,
+                         kea-shell, required without fallback, add_project_dependencies,
+                         sys.path, script directory, relocatable
+title:                  Meson 工程里只有 configure_file() 的解释型脚本目标：配方在 configure 后停止、生成脚本的构建机绝对路径需按包布局消解
+
+topic: >
+  Kea 3.0.3 的 kea-shell（src/bin/shell）是一个纯 Python 3 脚本工具：其
+  meson.build 全文只有 3 个 configure_file() + subdir('tests')，没有
+  executable()/library()/dependencies:/link_with:，目录内 0 个 .cc/.h。
+  但它是 Kea 单一 Meson 工程的一部分，meson setup 会评估顶层 meson.build 的
+  工程级门禁（boost required 无 fallback、openssl 默认 crypto 后端、log4cplus
+  wrap fallback），因此"打包一个 Python 脚本"也要引入 boost/log4cplus/openssl
+  三个工程级依赖，并需要 harmonyos→linux 平台名归一化补丁才能配置成功。
+
+root_cause: >
+  三类问题叠加，全部来自"目标是脚本、但构建系统是整工程 Meson"这一形态：
+  1) 交付物在 configure 阶段就已产出（configure_file 在 meson setup 时执行），
+     再调用 meson.build() 只会去编译与本包无关的 C++ 目标 —— 配方的正确形态是
+     configure 后即 package，而不是照搬 compile+install 流程；
+  2) configure 是全工程的：工程级 dependency() 门禁（required 且无 fallback）
+     使本包"零第三方依赖"的假象不成立，必须声明 boost/openssl/log4cplus（它们
+     只服务配置期探针，不进入交付物，也不应经 package_info 传播给消费者）；
+  3) 生成的脚本内嵌构建机绝对路径：@PYTHON@ → 构建者家目录下的解释器路径
+     （shebang），@PKGPYTHONDIR@ → 构建机 Python 的 site-packages/kea
+     （sys.path.append 目标）。Conan 包无法占用 build-host 的 purelib 路径，
+     脚本执行时也拿不到构建者家目录（可重定位性破坏）。
+
+durable_solution: >
+  kea-shell/3.0.3 实测配方形态（可直接复用于同类"Meson 里的脚本目标"）：
+  1) build() 只做 configure：
+       meson = Meson(self); meson.configure()
+     configure_file 的输出（脚本 + 被 copy 的模块）此时已落在 build tree 的
+     src/bin/shell/ 下；不调用 meson.build()，不产生任何编译产物；
+  2) requirements 照实声明工程级门禁依赖（boost/1.85.0 + log4cplus/2.2.0.1 +
+     openssl/3.5.8.1），tool_requires meson/1.11.0（boost 包无 libboost_system，
+     需 meson ≥1.10 的 header-only 模块回退）；package_info() 不透传它们；
+  3) shebang 在源码层改掉：补丁把 kea-shell.in 的 `#!@PYTHON@` 换成
+     `#!/usr/bin/env python3`（OHOS 的 /usr/bin/env 由 toybox 提供，知识 E037
+     条件 1 成立）；
+  4) sys.path.append('@PKGPYTHONDIR@') 不改脚本：把两个模块与脚本装到同一目录
+     （bin/），由 CPython 的"脚本所在目录 = sys.path[0]"解析 import；该 append
+     指向不存在的目录，无副作用（本地从任意 cwd 运行 + HTTP 往返实测通过）；
+  5) build() 内只跑覆盖交付物的上游 suite：meson test -v -C <build> <test-name>
+     —— 注意 meson CLI 接受的是 test **name**，suite 名要用 --suite，否则报
+     "test name does not match any test"。
+
+impact: >
+  适用任何"上游工程是 C/C++ 构建系统、但某个目标是解释型脚本/资源"的包
+  （Meson/Autotools/CMake 皆有 configure_file/configure 等价物）。配方从
+  "编译整工程再挑产物"改为"只跑配置阶段 + 按包布局放置"，CI 时间从全量编译
+  降到配置量级；代价是仍需声明工程级配置门禁依赖。
+
+recovery: >
+  若某工程的 configure_file 目标在市场外还需要编译产物（如脚本调用本工程的
+  .so），则不能停在 configure，需恢复 meson.build() 并补齐平台补丁；
+  若目标镜像缺 /usr/bin/env，shebang 方案需退回解释器绝对路径（安装期 sed）。
+
+evidence_chain: >
+  task kea-shell-3.0.3 适配（feat/kea-shell-3.0.3 分支）
+    - 未打补丁 meson setup：`meson.build:186:4: ERROR: Problem encountered:
+      Unsupported system "harmonyos".`（reports/meson-setup-first-error.log）；
+    - 打 0001（harmonyos→linux）+ 0002（shebang env python3）后 meson setup
+      rc=0，configure 输出 Boost 1_85 / OpenSSL 3.5.8 / Log4cplus 2.2.0，
+      build targets 242（reports/meson-setup-patched.log）；
+    - configure 后即产出 <build>/src/bin/shell/{kea-shell(0755),kea_conn.py,
+      kea_connector3.py}，零编译；
+    - 首版配方误把 suite 名当 test 名：`meson test ... python-tests` →
+      `ERROR: *:python-tests test name does not match any test`；改为
+      `meson test ... shell_unittest.py` 后 1/1 OK（Ran 11 tests ... OK）；
+    - 包内运行：从任意 cwd 执行 <pkg>/bin/kea-shell -v/-V 正常，stub HTTP
+      往返 12 项断言全通过（conan create test_package）。
+
+verification_cmd: >
+  conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  && meson test -v -C <build> shell_unittest.py
+
+limitations: >
+  1) 仍需要工程级依赖可消费（本例 boost/log4cplus/openssl 均已发布）；
+  2) 该形态下 12 个 .sh 进程测试依赖同工程的其他 C++ 目标（Kea 服务端），
+     配方 build() 内不跑，只能作为本地/跨组件验证；
+  3) meson setup 的 compile-and-run 探针需要 LD_LIBRARY_PATH 指向 host 依赖
+     （否则 127 加载失败），CI 侧需 generate() 显式注入。
+
+rec_priority:           1
+rec_approach:           configure-only-packaging-for-script-target
+rec_description: >
+  Meson 工程中的解释型脚本目标（只有 configure_file）在 Conan 配方里只执行
+  meson.configure()，直接从 build tree 打包 configure_file 产物；shebang 在
+  源码层补丁为 /usr/bin/env <interp>；模块与脚本同目录安装由 sys.path[0] 解析；
+  工程级配置门禁依赖照实声明但不透传。
+rec_command:            meson.configure() 后直接 package build tree 的 src/.../目标文件（不调用 meson.build()）
+rec_auto_fix:           false
+rec_impl:               conan-recipe-configure-file-only-target
+
+doc_file:               knowledge/drafts/DRAFT-8959-kea-shell-3.0.3-meson-configure-file-only-target.md
+last_updated:           2026-09-16
+source_event:           kea-shell 3.0.3 适配，meson setup 与 meson test 参数两处首次失败
+authors:                atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:         96EF
