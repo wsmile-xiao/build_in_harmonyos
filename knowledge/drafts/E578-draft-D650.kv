@@ -1,0 +1,118 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E578.kv，填写各字段
+# 对应的人类文档: doc/E578.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E578
+trigger_tool:           clang|gcc|ld|cmake|make
+phase:                  linking
+error_signature: undefined reference.*pthread_cancel|undefined reference.*pthread_setcancelstate|undefined reference.*pthread_testcancel|implicit declaration of function 'pthread_(cancel|testcancel|setcancelstate)'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: musl, posix, threading, portability, compat
+match_keywords: pthread_cancel, pthread_setcancelstate, pthread_testcancel, undefined reference, musl, OHOS, 协作式退出, 线程取消, no-allow-shlib-undefined
+title: musl(OHOS) 无 pthread 取消 API，线程需改协作式退出
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: OHOS 用 musl libc，未提供 pthread_cancel/pthread_setcancelstate/pthread_testcancel（头文件不声明、libc 不导出符号）；glibc 下依赖取消点终止线程的代码在链接可执行文件时（--no-allow-shlib-undefined）报未解析符号。
+affected_scope: 所有在 glibc 下依赖 pthread 取消点终止/中断线程的上游库与程序；典型形态是定时器线程、守护线程、异步日志刷新线程被 detach 后靠 pthread_cancel 收尾，以及销毁路径用 pthread_setcancelstate 屏蔽取消窗口。与「线程是否 detach」无关，只要出现取消 API 即命中。
+verification_cmd: printf '#include <pthread.h>\nint main(void){pthread_t t = 0; return pthread_cancel(t);}\n' > /tmp/pcancel_probe.c && ${OHOS_CLANG} /tmp/pcancel_probe.c -o /tmp/pcancel_probe -lpthread   # 期望 undefined reference to 'pthread_cancel'；亦可 grep -c 'pthread_cancel\|pthread_setcancelstate\|pthread_testcancel' ${OHOS_SYSROOT}/usr/include/pthread.h，结果为 0 即 musl 未声明
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach: 改为协作式退出：①加 volatile 退出标志；②线程循环条件改 !stop_flag，阻塞等待（epoll_wait/poll/sleep）改有限超时以周期性观察标志；③销毁路径置标志 + pthread_join（原 detach 需去掉）；④删除 setcancelstate/testcancel 调用。
+rec_description:        用「volatile 退出标志 + 有限超时等待 + pthread_join」替代 pthread_cancel，并删除 setcancelstate/testcancel；线程模型与对外语义不变，退出延迟以等待超时值为上界，glibc 与 musl 行为一致
+rec_command:            grep -rn 'pthread_cancel\|pthread_setcancelstate\|pthread_testcancel\|PTHREAD_CANCEL' ${SRC_DIR} | cut -d: -f1 | sort -u   # 定位全部调用点；逐文件改为协作式退出并存为 patches/NNNN-<file>.patch（勿直接改工作副本）
+rec_auto_fix:           false
+rec_impl:
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach: 若线程卡在无法设超时的第三方阻塞调用上（例如库外部不可改的阻塞 socket 读），把该阻塞点换成可超时观测标志的等待：self-pipe + poll/ppoll，或对 fd 用 epoll_wait 加有限超时，由写端触发退出；仍不引入 pthread_cancel，也不用 signal 强杀线程（signal 强杀会绕过清理路径，留下锁/内存未释放）。
+fallback_description: 把不可中断的阻塞点改成可超时观测退出标志的等待点（self-pipe + poll / epoll_wait 超时）
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: pthread_cancel\s*\(|pthread_setcancelstate\s*\(|pthread_testcancel\s*\(
+forbid_1_reason: OHOS musl 的 pthread.h 不声明、libc 不导出这三个符号；glibc 下能编过的代码在 OHOS 上必然失败
+forbid_1_consequence: 链接期 undefined reference（rc≠0），构建整体失败；且报错点在最终可执行文件链接（非本库内部），容易误判成链接配置问题而反复空转
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: P013, P005
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E085, E513]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+keywords: pthread_cancel, pthread_setcancelstate, pthread_testcancel, 协作式退出, volatile 退出标志, pthread_join, musl, OHOS, undefined reference
+software: libkysdk-base/3.0.1.3
+doc_file:               doc/E578.md
+last_updated: 2026-09-15
+source_event: libkysdk-base/3.0.1.3 适配（2026-09-15）：kytimer 定时器线程与 klog 异步刷新线程原用 pthread_cancel/pthread_setcancelstate，OHOS musl 下链接报 undefined reference；改为 volatile 退出标志 + 有限超时等待 + pthread_join 的协作式退出
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: D650
