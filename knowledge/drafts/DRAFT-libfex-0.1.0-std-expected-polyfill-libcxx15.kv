@@ -1,0 +1,102 @@
+#====================================================================
+# DRAFT-libfex-0.1.0-std-expected-polyfill-libcxx15 -
+#   OHOS libc++15 缺 C++23 <expected>：公共头暴露 std::expected 的库
+#   须注入 namespace std polyfill（glaze 的 glz 改名策略不适用）
+#
+# 场景: libfex 0.1.0 (hbirth/libfex) 在 OHOS aarch64 + clang-15/libc++15
+#       下适配。公共 API（filesystem.hpp/session.hpp/types.hpp）大量使用
+#       std::expected<T, Errc> 与 std::unexpected，而 libc++15 无 <expected>
+#       （libc++ 17 起才提供）。同为 C++23 库的 glaze 用"恢复上游
+#       glz::expected + 全库改命名空间"绕开，但 libfex 公共头直接暴露
+#       std::expected，改名会破坏公共 API，只能注入 std 命名空间 polyfill。
+# 适用: 公共头直接使用 std::expected 的 C++23 库，在 OHOS clang-15/libc++15
+#       （或任何 <expected> 缺失工具链）下的适配；同时覆盖 C++23 标准名
+#      （c++2b vs c++23）与 CMake CMAKE_CXX_STANDARD 写法边界。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-libfex-0.1.0-std-expected-polyfill-libcxx15
+source_lib:             libfex 0.1.0
+trigger_tool:           clang++|cmake|conan create|conan-verify
+phase:                  compilation|configuration|build|testing
+error_signature:        fatal error: 'expected' file not found|
+                         no template named 'expected' in namespace 'std'|
+                         invalid value 'c++23' in '-std=c++23'|
+                         requires the language dialect "CXX2b"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cxx, toolchain, compat, libcxx, ohos, polyfill
+match_keywords:         expected, unexpected, std::expected, libc++, libcxx-ohos,
+                         clang-15, C++23, c++2b, CMAKE_CXX_STANDARD, polyfill,
+                         compat header, missing header, <expected>, OHOS SDK
+title:                  OHOS libc++15 缺 C++23 <expected>：公共头暴露 std::expected 的库须注入 namespace std polyfill（glaze/8.3.0 的 glz 改名策略不适用）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  OHOS SDK 工具链 (ohos-sdk_26.0.0.18) 的 libc++ 版本为 15.004
+  (_LIBCPP_VERSION 15004)，C++23 的 <expected> 头自 libc++ 17 才有。
+  clang-15 前端本身只认 -std=c++2b（不认 c++23 字面量）。对公共 API
+  直接暴露 std::expected 的库：
+  (1) 不能像 glaze 那样把 std::expected 全库改名 glz::expected（公共 API
+      ABI/源码兼容被破坏，消费者也无法使用）；
+  (2) 也不能依赖 CMake 写 CMAKE_CXX_STANDARD=2b（CMake 只接受数值标准，
+      字符串 "2b" 会在 project() 的 ABI try_compile 报
+      'requires the language dialect "CXX2b"'）。
+
+rec_approach: vendored-std-expected-polyfill
+rec_description: >
+  新增 include/fex/expected_compat.hpp（MIT 单头 std::expected 实现，
+  Rishabh Dwivedi），结构为：
+    #if defined(__cpp_lib_expected) && __has_include(<expected>)
+    #  include <expected>
+    #else
+    #  include <concepts> <deque> <exception> <functional> <memory>
+    #  include <type_traits> <variant>
+    namespace std { ...完整 expected/unexpected 实现... }
+    #endif
+  再把源码中 5 处 #include <expected> 统一改为
+  #include <fex/expected_compat.hpp>。标准名：CMake 交回上游
+  set(CMAKE_CXX_STANDARD 23)，由 CMake 对 clang-15 自动映射 -std=c++2b；
+  配方 generate() 不写 CMAKE_CXX_STANDARD=2b；下游经
+  cpp_info.cxxflags = ["-std=c++2b"] 传播。依赖 liburing 时把
+  pkg_check_modules 改为 find_package(liburing CONFIG) + liburing::liburing
+  （Conan CMakeDeps 生成目标，pkg-config 在 Conan 环境不可靠）。
+
+# ═══ Layer 3: 验证层 (Verification) ═══
+verification: >
+  libfex/0.1.0 实证：
+  ① polyfill 单头独立编译（c++2b + 模拟 std::expected 用法）exit 0；
+  ② conan-verify G2 conan create 干净构建全绿（G1-G4 PASS），
+     test_package 消费者测试 ctest 1/1 Passed；
+  ③ 鸿蒙专项测试 harmonyos_libfex_test 实跑 ALL PASSED exit 0
+     （二进制 SHA-256 e539e10d8b954a89972d18ff66f522ac4e6f5350c1cbf7dc5a34d869ce9ab2a7）。
+  R02 返工（PR #10426 代码审查）修复并复验：
+  ④ expected<T,E>::operator=（复制/移动）has_val 赋值移到状态分支之后，
+     混合状态赋值（值→错/错→值）reinit 分支不再死代码（P1，回归断言实测）；
+  ⑤ 移动构造 noexcept 第二操作数 T→E（P2，static_assert 实测）；
+  ⑥ or_else(F&&) const&& void 版条件取反修复（P2，值/错误态断言实测）；
+  ⑦ 转换移动构造 const U&/G& → U&&/G&& 右值转发（P3，move-only 类型实测）；
+  ⑧ 消费者与鸿蒙专项测试均新增混合状态赋值与 or_else 断言并实跑通过；
+     harmonyos-test 加 -UNDEBUG 确保 Release 下断言真实执行（W4 审计修复）。
+  教训/注意: vendored 第三方单头（MIT）内部可能带上游 TODO 注释与实现缺陷，
+  合入前应做独立代码审查并补回归测试；new-file 补丁头必须为 --- /dev/null，
+  且 CI 预下载步骤（predl）就地把 conandata 改写为 file:// 时不得提交污染版本。
+
+# ═══ Layer 4: 边界层 (Boundary) ═══
+boundary: >
+  适用: 公共头直接暴露 std::expected（或其它缺失 C++23 头）的 C++23 库，
+  在 OHOS clang-15/libc++15 工具链下适配；也适用任意 <expected> 缺失的
+  clang 15/libc++ 15 系列工具链。
+  反例/边界: 仅内部实现使用 std::expected、公共头不暴露的库，可采用
+  glaze/8.3.0 的 glz 命名空间改名方案（更安全，无需注入 std 命名空间）；
+  若库的公共头用 std::expected 但允许 ABI 破坏（header-only 且内部引用少），
+  也可考虑改名方案，但公共 API 语义会变，不推荐。
+  注意: 注入 namespace std 属务实兼容手段（polyfill），应仅在
+  __cpp_lib_expected 未定义时生效，且 polyfill 头须随库一起安装（公共头
+  引用了它），否则消费者编译会再次失败。
+
+related: E130 (libcxx-ohos 头能力缺口/c++11), E455 (-stdlib=libstdc++ 误配),
+  DRAFT-libfex-0.1.0-std-expected-polyfill-libcxx15.md,
+  archives/g/glaze/8.3.0/notes.md (glz::expected 改名先例)
+keywords: expected, unexpected, libcxx-ohos, c++2b, polyfill, OHOS
