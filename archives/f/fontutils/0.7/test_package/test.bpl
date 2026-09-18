@@ -1,0 +1,15 @@
+(fontfile "test.bzr")
+(fontcomment "fontutils 0.7 OHOS consumer test")
+(designsize 10.0)
+(char 65
+  (width "10.0")
+  (bb "0.0" "0.0" "10.0" "10.0")
+  (outline "0.0" "0.0"
+    (line "10.0" "0.0")
+    (line "10.0" "10.0")
+    (line "0.0" "10.0")
+    (line "0.0" "0.0")
+  )
+)
+(fontbb "0.0" "0.0" "10.0" "10.0")
+(nchars 1)
