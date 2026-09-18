@@ -1,0 +1,42 @@
+#====================================================================
+# Draft: automake 测试脚本 #!/bin/bash shebang 在无 /bin/bash 的
+#        HarmonyOS 上全灭（exit 126）——LOG_COMPILER 兜底
+#        （libgctp 2.0.0 实证）
+#====================================================================
+
+id:                     DRAFT-8207-LIBGCTP-AUTOMAKE-LOG-COMPILER-NO-BIN-BASH
+trigger_tool:           automake|test-driver|make check|test-suite.log
+phase:                  test
+error_signature:        test-driver.*No such file or directory|exit status: 126|# FAIL: 30|# PASS:  0
+
+severity:               2
+category:               test-harness-interpreter
+match_keywords:         automake, test-driver, parallel-tests, LOG_COMPILER, TEST_LOG_COMPILER, shebang, /bin/bash, /bin/sh, mksh, exit 126, ENOENT, make check, TESTS, HarmonyOS, 无 /bin/bash
+
+title:                  automake 并行测试脚本带 #!/bin/bash shebang 时在无 /bin/bash 的 HarmonyOS 上 30 个测试全部 exit 126，用 LOG_COMPILER/TEST_LOG_COMPILER=/bin/sh 兜底
+
+root_cause:             automake 并行测试框架（test-driver）对 TESTS 注册的 shell 脚本是"直接 exec"：execvp 只看脚本的 shebang，不经过 LOG 之外的任何解释器。HarmonyOS 的 /bin 下只有 /bin/sh（mksh），没有 /bin/bash；凡是脚本首行为 #!/bin/bash 的测试，exec 返回 ENOENT，test-driver 报 "<script>: No such file or directory"、退出码 126（不是 127，也不是脚本自身的 exit 1），表现为全部 N 个测试同因失败、PASS=0——即使脚本内容全是 POSIX 构造（export/test/grep/exit）也会被误判为"测试全挂"。与之区分：脚本真正执行后失败是 exit 1 并带脚本自己的输出；段错误是 "Signal 11 (core dumped)"。
+
+affected_scope:         任何 automake 项目（新旧版本皆有 TESTS 注册的 shell 测试脚本带 #!/bin/bash shebang）在 HarmonyOS PC 上的 make check。脚本是否真的需要 bash 与失败无关——只要 shebang 指向不存在的解释器就全军覆没。已验证实例：libgctp 2.0.0（30 个测试脚本全带 #!/bin/bash）。
+
+verification_cmd:       conan create archives/l/libgctp/2.0.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+rec_priority:           1
+rec_approach:           automake-log-compiler-sh-fallback
+rec_description:        在定义 TESTS 的 Makefile.am 头部加两行 `LOG_COMPILER = /bin/sh` 与 `TEST_LOG_COMPILER = /bin/sh`，随 autoreconf 进入生成的 Makefile 的 $(LOG_COMPILE)/$(TEST_LOG_COMPILE)，test-driver 会改以 /bin/sh 解释脚本，shebang 被绕开。只对"脚本内容实为 POSIX shell"的项目安全（本例 30 个脚本只用 export/test/grep/exit）；若脚本确实使用 bash 特性（数组、[[、process substitution），仍可先用 /bin/sh 暴露真实差异再逐个评估。补丁同时用 automake 原生 XFAIL_TESTS 声明确知失败的上游用例（本例 som_test 上游自身段错误），使 make check 退出码归零而账本透明呈现 XFAIL:1。选择该方案而非逐个改 30 个脚本的 shebang：一处声明 vs 30 文件 diff，且不碰上游测试语义。
+rec_command:            make check -j1（应用补丁后 PASS 29 / XFAIL 1 / FAIL 0，对照修复前 # PASS: 0 / # FAIL: 30 / exit 126）
+rec_auto_fix:           false
+rec_impl:               patches/0002-source-Makefile.am.patch in archives/l/libgctp/2.0.0/
+
+fallback_priority:      2
+fallback_approach:      rewrite-script-shebangs
+fallback_description:   逐个把测试脚本 shebang 改为 #!/bin/sh——效果等价但产生 N 个文件的纯机械 diff，污染补丁审查且上游更新时需重做；仅当单文件脚本确需 bash 特性时才对个别文件使用。
+fallback_command:       grep -rl "#!/bin/bash" test/ 列出受影响脚本后逐个评估
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       ln -s /bin/sh /bin/bash|sed -i 全部脚本|用 busybox bash 假装|在 conanbuild env 里造一个 bash shim
+forbid_1_reason:        伪造 /bin/bash 属于掩盖平台事实的假环境（且 /bin 只读、不可写）；批量改 shebang 产生大面积机械 diff 且使上游测试语义失真；解释器 shim 违反禁止 dummy/假工具红线。
+forbid_1_consequence:   PR 门禁拦截（假环境/不可复现）、审查退回、上游同步成本激增。
+
+principles:             minimal-patch, real-evidence-over-assumption, honest-test-accounting, harness-over-content
