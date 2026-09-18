@@ -1,0 +1,90 @@
+#====================================================================
+# E429-draft — Meson 配置期 compile-and-run 探针缺 LD_LIBRARY_PATH
+# 来源: kea-hook-lease-cmds/3.0.3 适配（OHOS aarch64, meson + Conan MesonToolchain）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E429
+trigger_tool:           meson
+phase:                  configuration
+error_signature:        runs: NO \(127\)|with dependency .* runs: NO|Unknown variable "[a-z0-9]+"|Error loading shared library .*\(needed by
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               meson, conan, build-system, linking
+match_keywords:         meson, configure probe, run probe, NoRun, meson.build, Unknown variable, LD_LIBRARY_PATH, mesonlib, cpp.run, feature probe, conan cache, shared dependency, log4cplus, meson log
+title:                  Meson 配置期 compile-and-run 探针在 Conan 共享依赖下返回 NO (127)，导致 meson.build 报 Unknown variable
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  因果链：Meson 的 feature 探针（dependency().found() 之外的 cc.run()/cpp.run()/"Checking if ...
+  runs"）是「编译并运行」两步——编译期 -I/-L 由 Conan 工具链（MesonToolchain + PkgConfigDeps）
+  提供，因此链接成功；运行期平台加载器只按 LD_LIBRARY_PATH/RPATH/系统路径搜索，而 Conan
+  依赖的共享库只存在于 conan 缓存包目录（.conan2/p/<pkg>/p/lib），不在任何默认搜索路径内 →
+  探针程序启动即失败（meson-log 原始输出 "Error loading shared library liblog4cplus.so.9"，
+  meson 侧显示 "runs: NO (127)"，127 = shell 的 command not found/加载失败码）→ 依赖对象
+  未被赋值 → 后续 meson.build 使用该变量时以 "Unknown variable \"<dep>\"" 中止配置。
+  与 Autotools 的 AC_RUN_IFELSE/conftest 同源（见 DRAFT-conan-dep-shared-libs-break-configure-conftest），
+  本条为 Meson 对应面；注意 127 不是「探针编译失败」，也不代表依赖缺失（conan download rc=0）。
+affected_scope:         以 Meson 构建、host 依赖图中含共享库（Conan default shared=True，如 log4cplus）
+                        的项目；Kea 3.0.3 全系 hook（perfmon/stat-cmds/lease-cmds/legal-log/limits/lease-query/host-cmds）实测同型
+verification_cmd: >
+  meson setup <builddir> <srcdir> --native-file=<out>/conan_meson_native.ini 后执行
+  grep -n "runs: NO" <builddir>/meson-logs/meson-log.txt  # 预期：出现 "LOG4CPLUS_INITIALIZER_H ... runs: NO (127)"
+  修复后同一命令预期 0 命中且 meson build 配置成功（OS Family 正常输出）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           inject-dep-libdirs-ld-library-path
+rec_description:        conanfile.py generate() 中用 conan.tools.env.Environment 把全部 host 依赖的
+                        cpp_info.libdirs 追加进 LD_LIBRARY_PATH 并 save_script() 落到 conanbuild 环境，
+                        使配置期探针运行时能找到 Conan 缓存中的共享依赖
+rec_command:            conanfile.py::generate(): env = Environment(); for dep in self.dependencies.values(): for libdir in dep.cpp_info.libdirs: env.append_path("LD_LIBRARY_PATH", libdir); env.vars(self).save_script("conanbuildenv-<pkg>-runtime")
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      disable-run-probes
+fallback_description:   用项目自有选项关闭该可选特性（如 Kea 的 -Dmysql=disabled/-Dpostgresql=disabled/
+                        -Dkrb5=disabled），使探针根本不执行；诚实权衡：只适用于可选特性，核心依赖
+                        （log4cplus/openssl/boost）无法关闭，必须走推荐方案
+fallback_command:       meson setup -D<feature>=disabled
+fallback_auto_fix:      false
+fallback_impl:          meson-option
+
+forbid_1_pattern:       cp .*(\.so[^ ]*) /(usr|system|lib)
+forbid_1_reason:        把 Conan 缓存共享库拷入系统/全局路径以让探针通过属于缓存与系统污染（R26 精神）
+forbid_1_consequence:   版本漂移与跨任务污染，问题在其他库复现时更难归因
+
+forbid_2_pattern:       --build=missing
+forbid_2_reason:        探针加载失败不是「依赖缺失」，用 --build=missing 重编依赖既耗时不解决加载路径问题
+forbid_2_consequence:   掩盖真实根因，长耗时全量重建后仍失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-PATCH-001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-conan-dep-shared-libs-break-configure-conftest（Autotools/conftest 同源面）; E085; E090
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E429-draft-FC1A.md
+last_updated:           2026-09-17
+source_event:           kea-hook-lease-cmds/3.0.3 适配：configure 阶段 log4cplus 运行探针 NO (127) → meson.build:824 Unknown variable "log4cplus"
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17
+
+draft: true
+contributor_id: FC1A
