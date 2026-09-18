@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-test-refcount-import-and-refcount-semantics — CPAN 测试辅助模块的
+#   POD SYNOPSIS 导入形式不可照抄（Test::Builder 会把 import 参数当 plan），
+#   以及引用计数断言的匿名引用构造陷阱
+# 对应人类文档: knowledge/drafts/DRAFT-test-refcount-import-and-refcount-semantics.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-test-refcount-import-and-refcount-semantics
+trigger_tool:           perl|test
+phase:                  testing
+error_signature:        plan\(\) doesn't understand|
+                         Undefined subroutine &main::\w+ called|
+                         Looks like you failed \d+ test
+severity:               2
+category:               perl, testing, portability, conan
+match_keywords:         Test::Builder::Module, import => [], @EXPORT_OK, plan() doesn't
+                        understand, Undefined subroutine, Test::Refcount, refcount,
+                        B::svref_2object, REFCNT, Scalar::Util weaken, anonymous
+                        reference, refcount semantics, Regex refcount, do { my $var }
+title:                  CPAN 测试辅助模块的 import 语义与引用计数断言陷阱：
+                        取 @EXPORT_OK 须用 `import => []`；匿名标量引用要用 do{} 块隔离槽位
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             两个独立的、都在写 conan test_package 消费者断言时才会撞上的坑：
+                        ①**import 语义**——继承 Test::Builder::Module 的测试辅助模块
+                        （Test::Refcount、Test::More 同族）的 import 是
+                        Test::Builder::Module::import，**位置参数会被当作 plan 参数**；
+                        写 `use Test::Refcount qw( refcount )` 会把 qw( refcount )
+                        当成 plan 参数，报 `plan() doesn't understand refcount`；
+                        而只写 `use Test::Refcount;` 又拿不到 @EXPORT_OK 里的
+                        refcount，运行时报 `Undefined subroutine &main::refcount`。
+                        上游 POD 给出的正确形式是 `import => [qw( ... )]`。
+                        ②**引用计数断言的构造陷阱**——`my $var; my $ref = \\$var;`
+                        会让标量同时被词法槽位与引用持有（实测 refcount=2），
+                        断言 `refcount($ref) == 1` 必然失败；上游写法是
+                        `do { my $var; \\$var }` 让槽位及时出作用域。同类：
+                        正则引用在现代 perl 起始 refcount 即为 2，上游 t/04reftypes.t
+                        对 Regex 类型显式 skip（"Bleadperl"，perl >= 5.011），
+                        消费者断言也不应纳入该类型。
+affected_scope:         所有为 CPAN 测试辅助模块（Test::*）编写 conan test_package
+                        消费者用例、或直接用 @EXPORT_OK 中符号的场景；
+                        以及任何用 B::svref_2object->REFCNT 做引用计数断言、
+                        需要精确控制词法槽位生命周期的测试。
+                        实例：test-refcount 0.10 的消费者脚本（两种错法都踩过）。
+verification_cmd:       perl -MTest::Refcount -e 'use Test::Refcount qw( refcount )'
+                        # → plan() doesn't understand refcount
+                        perl -MTest::Refcount -e 'use Test::Refcount import => [qw( refcount )]; print refcount([])'
+                        # → 1
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           pod-import-form
+rec_description:        取 @EXPORT_OK 中的符号一律按上游 POD 的写法：
+                        `use Foo import => [qw( sym1 sym2 )]`（而非 `use Foo qw(...)`，
+                        后者对 Test::Builder::Module 子类会被当 plan）；只取 @EXPORT
+                        默认导出时才可省略参数。匿名引用断言按上游构造：标量用
+                        `do { my $var; \\$var }`，并避开 Regex 类型（起始 refcount 2）。
+rec_command:            use Test::Refcount import => [qw( is_refcount is_oneref refcount )];
+                        my $scalarref = do { my $var; \\$var };   # refcount == 1
+rec_auto_fix:           false
+rec_impl:               recipe-pattern
+
+fallback_priority:      2
+fallback_approach:      call-fully-qualified
+fallback_description:   若不确定 import 形式，直接全限定调用绕过导入语义差异：
+                        `Test::Refcount::refcount($ref)`；断言函数亦可用
+                        `Test::Refcount::is_oneref(...)`。缺点是写法啰嗦，但对
+                        任何 import 语义都安全，适合快速排障。
+fallback_command:       my $count = Test::Refcount::refcount($object);
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       改.*t/.*\.t.*(以|to).*(匹配|通过)|删.*测试.*refcount
+forbid_1_reason:        为让消费者断言通过而改/删上游测试或放宽断言，属以掩盖换通过，
+                        违反 R51。
+forbid_1_consequence:   测试证据失真；掩盖了构造写法错误这一真实原因。
+
+forbid_2_pattern:       refcount\(\$\w+\)\s*==\s*1.*#.*(regex|qr/)
+forbid_2_reason:        正则引用在现代 perl 起始 refcount 即为 2，断言其为 1 必然失败；
+                        上游已显式 skip 该类型。
+forbid_2_consequence:   假失败（把 perl 语义当成适配缺陷），浪费时间排查。
+
+principles:             real-upstream-test-evidence, upstream-source-untouched
+
+causes:                 []
+caused_by:              []
+similar_to:             [E155, DRAFT-perl-module-build-makemaker-substitution]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-test-refcount-import-and-refcount-semantics.md
+last_updated:           2026-09-18
+source_event:           test-refcount 0.10 适配（消费者断言两种构造错误实测）
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-18
+
+draft:                  true
+contributor_id:         1753
