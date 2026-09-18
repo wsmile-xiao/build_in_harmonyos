@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-hashmap-0.8.1-set-returns-null-on-insert — hashmap_set() 成功
+# 插入返回 NULL（替换返回旧值），失败须用 hashmap_oom() 判据
+#
+# 触发事件: hashmap 0.8.1（tidwall/hashmap.c）test_package 消费者用例
+#           运行时 "set alice failed" —— 按 "set 返回非空=成功" 的通用
+#           直觉判断导致首轮 G2 失败
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-hashmap-0.8.1-set-returns-null-on-insert
+source_lib:             hashmap 0.8.1
+trigger_tool:           test_package|conan|conan-verify|G2
+phase:                  testing|runtime|recipe
+error_signature:        hashmap_set.*返回 NULL|set.*failed|hashmap_oom|consumer.*failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               c, api, hashmap, semantics, consumer, test_package
+match_keywords:         hashmap_set, hashmap_oom, NULL, insert, replace,
+                        old item, 成功插入, 替换旧值, consumer, test.c,
+                        tidwall, hashmap.c, 返回语义
+title:                  hashmap_set() 成功插入返回 NULL、仅替换时返回旧值指针，失败判据是 hashmap_oom()
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  tidwall/hashmap.c 的 hashmap_set() 语义与常见容器 API 相反：成功**插入**
+  新键时返回 NULL（hashmap.c:294-295，`map->count++; return NULL;`）；
+  仅当**替换**已存在键时才返回旧值指针（hashmap.c:301-303 返回 map->spare）。
+  失败（OOM）时同样返回 NULL 并置 map->oom（hashmap.c:276-278）。因此
+  消费者不能以"返回非空=成功"判断，必须以 hashmap_oom() 区分"插入成功"
+  与"分配失败"。误判会让 test_package 消费者用例（以及任何真实上层业务）
+  把每一次成功插入当成失败。
+affected_scope:         所有直接消费 tidwall/hashmap.c 公开 API 的 C/C++ 程序
+                        （test_package 消费者用例、鸿蒙专项测试、上层应用）；
+                        以及任何采用"插入返回 NULL/替换返回旧值 + 独立 OOM
+                        查询"约定的容器库。
+verification_cmd:       ./test_hashmap 2>&1 | grep "consumer test PASSED";
+                        grep -n "map->count++; return NULL;" hashmap.c
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           check-hashmap-oom-after-set
+rec_description:        消费者测试/业务代码中，hashmap_set() 后一律先调用
+                        hashmap_oom(map) 判断是否分配失败；返回值为 NULL 且
+                        !hashmap_oom(map) 即插入成功；返回非 NULL 表示替换
+                        了旧值（指针指向 map->spare 中的旧项副本）。插入
+                        成功路径不要用返回值做断言。
+rec_command:            hashmap_set(map, &item); if (hashmap_oom(map)) { /* OOM */ }
+rec_auto_fix:           false
+rec_impl:               source-edit
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      assert-on-return-with-oom
+fallback_description:   若需断言返回值，仅在替换路径上断言非 NULL；插入路径用
+                        "assert(!hashmap_set(...)); assert(!hashmap_oom(map))" 组合。
+fallback_command:       while (true) { assert(!hashmap_set(map, &item)); if (!hashmap_oom(map)) break; }
+fallback_auto_fix:      false
+fallback_impl:          source-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       if \(!hashmap_set\(map, &.*\)\) \{.*fail.*\}
+forbid_1_reason:        成功插入也返回 NULL，会把每次成功插入误判为失败。
+forbid_1_consequence:   test_package/消费者用例报 "set failed"，G2/W3 失败。
+
+# ═══ Layer 4: 验证层 (Validation) ═══
+verified_on:            hashmap 0.8.1（OHOS armv8，clang 15.0.4，conan 2.29.1）
+verification_result:    按 hashmap_oom() 判据重写 test_package/test.c 后，
+                        conan-verify G2 PASS（1/1 test_hashmap Passed，exit 0）；
+                        鸿蒙专项测试 tests-ohos/ohos_test.c 亦按此语义 PASSED。
+
+# 反例/限制
+limitations: >
+  - 仅适用 tidwall/hashmap.c 及遵循"插入返回 NULL、替换返回旧值、独立 OOM
+    查询"约定的库；stb 风格（set 返回新项指针）的库不能套用。
+  - hashmap_set_with_hash/hashmap_delete_with_hash 同语义。
