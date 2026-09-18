@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Conan recipe for libnotify/0.8.3 (meson build).
+"""Conan recipe for libnotify/0.8.3.1 (meson build).
 
 libnotify 是 GNOME Desktop Notifications 库，actiona 的 notifyinstance.cpp
 需要 <libnotify/notify.h>。依赖 glib/gdk-pixbuf/dbus（制品仓已有）。
 """
 import os
+import shutil
 from conan import ConanFile
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.tools.meson import Meson, MesonToolchain
@@ -13,7 +14,7 @@ from conan.tools.layout import basic_layout
 
 class LibnotifyConan(ConanFile):
     name = "libnotify"
-    version = "0.8.3"
+    version = "0.8.3.1"
     description = "GNOME Desktop Notifications library（actiona notifyinstance 依赖）"
     license = "LGPL-2.1"
     homepage = "https://gitlab.gnome.org/GNOME/libnotify"
@@ -30,8 +31,15 @@ class LibnotifyConan(ConanFile):
         export_conandata_patches(self)
 
     def requirements(self):
-        # gdk-pixbuf/2.44.6 依赖 glib/2.84.0.1，统一版本避免版本冲突。
-        self.requires("glib/2.84.0.1", transitive_headers=True, transitive_libs=True)
+        # 与 glib/2.88 生态对齐：制品仓 gdk-pixbuf/2.44.6 配方仍硬编码
+        # glib/2.84.0.1 与 zlib/1.3.1.1，与其子树（libpng/libtiff/libjpeg-turbo）
+        # 在依赖图中与 glib/2.88.0.1 / zlib/1.3.1.1.1.1 冲突。用 force 统一
+        # 到 glib/2.88 生态（glib 保持 ABI 兼容，既有二进制可复用）。
+        # 注意：override=True 不产生直接依赖边（无传递依赖覆盖时会被丢弃），
+        # 而 package_info() 的 cpp_info.requires 引用了 glib::glib，故 glib
+        # 必须用 force=True（强制版本且添加直接依赖）。
+        self.requires("glib/2.88.0.1", transitive_headers=True, transitive_libs=True, force=True)
+        self.requires("zlib/1.3.1.1.1.1", override=True)
         self.requires("gdk-pixbuf/2.44.6", transitive_headers=True, transitive_libs=True)
         self.requires("dbus/1.14.10", transitive_headers=True, transitive_libs=True)
 
@@ -139,6 +147,27 @@ class LibnotifyConan(ConanFile):
 
     def package(self):
         Meson(self).install()
+        # OHOS loader fix: meson install's depfixer X's out the build rpath
+        # (absolute conan-cache path) in the installed .so, which corrupts the
+        # ELF so the OHOS loader refuses to map it (EACCES). Restore the
+        # pristine build .so (with valid rpath) over the installed one.
+        import glob as _glob
+        # package() 时 self.build_folder 指向 build-release 上级，找不到就沿
+        # package 目录向上递归搜索 build-release 里的原始 .so
+        search_roots = [os.path.dirname(self.package_folder), self.build_folder]
+        build_sos = []
+        for root in search_roots:
+            if root and os.path.isdir(root):
+                build_sos += _glob.glob(os.path.join(root, "**", "libnotify.so.4.0.0"),
+                                        recursive=True)
+        dst = os.path.join(self.package_folder, "lib", "libnotify.so.4.0.0")
+        # 优先 build 目录下的原始产物（带有效 rpath），跳过 destdir 里被
+        # depfixer 处理过的文件（rpath 被 'X' 覆盖 -> OHOS loader EACCES）
+        build_sos = [s for s in build_sos if "build" in s and s != dst]
+        for src in sorted(build_sos):
+            if os.path.isfile(src) and os.path.isfile(dst):
+                self.output.info("OHOS fix: restoring pristine libnotify.so.4.0.0 from %s" % src)
+                shutil.copy2(src, dst)
 
     def package_info(self):
         self.cpp_info.libs = ["notify"]
