@@ -1,0 +1,62 @@
+#====================================================================
+# E569 — 消费者配方 build() 未注入依赖运行库路径：in-tree 测试程序加载共享依赖失败
+# 出处: libosmocore/1.11.0 适配（PR #9889）；2026-09-14
+#====================================================================
+
+id:                     E569
+trigger_tool:           conan create
+phase:                  testing|runtime
+error_signature:        Error loading shared library libpcsclite\.so\.1|Error loading shared library lib[^:]*: No such file or directory \(needed by|tests were run, 1 failed
+
+severity:               medium
+category:               testing, dependency-library, shared-linking, environment
+match_keywords:         Error loading shared library, needed by, No such file or directory, make check, in-tree test, LD_LIBRARY_PATH, VirtualRunEnv, pcsc-lite
+title:                  消费者配方 build() 未注入依赖运行库路径：in-tree 测试程序加载共享依赖失败
+
+root_cause:             conan create 的构建期只自动应用工具链（build）环境，配方 build() 里 make check 触发的 in-tree 测试程序在运行期还要加载宿主依赖的共享库；依赖由 conan 管理、其 lib 目录不在任何全局搜索路径上，测试程序于是报 "Error loading shared library libpcsclite.so.1" 之类的加载错误直接失败（本包 make check 88 项中 1 项失败，正是 sim 测试）。这类失败在本地开发机上常被环境变量掩盖（CPPFLAGS/LDFLAGS/LD_LIBRARY_PATH 泄漏），必须用 scrubbed（无 ambient env）环境复现才会暴露，CI 干净环境首当其冲。
+affected_scope:         build() 内跑上游测试套件、且测试程序运行期加载宿主依赖共享库（pcsc、PAM、SCTP、图形类库等）的 autotools/cmake 配方
+verification_cmd:       LD_LIBRARY_PATH=<pcsc-lite pkg>/lib:<build>/src/*/.libs ./tests/sim/sim_test ; echo $?   # =0 证明库路径是唯一缺口（同一二进制不带该变量时 RC!=0）
+
+rec_priority:           1
+rec_approach:           在配方 build() 中套上依赖的运行环境（conan 2 用法：from conan.tools.env import VirtualRunEnv; env = VirtualRunEnv(self).environment(); with env.apply(): 包裹 configure/make/make check）。注意 make check 必须也在 with 块内，否则测试程序仍找不到库；保持 make 调用在块内声明（autotools = Autotools(self) 缩进进块内即可）。反模式：不要用 -Wl,-rpath 把构建机路径烘进产物（pre-scan 明确反对 build-machine rpath），也不要依赖外部 LD_LIBRARY_PATH（CI 环境没有）。若确有需要，可在 generate() 中同时输出 RunEnv 供消费者使用，但构建期测试依赖的是这里的 with env.apply()。
+rec_description:        build() 内用 with VirtualRunEnv(self).environment().apply(): 包裹 configure/make/make check
+rec_command:           在 conanfile.py 的 build() 中：env = VirtualRunEnv(self).environment() 然后 with env.apply(): 内依次 autotools.configure() / autotools.make() / autotools.make(target="check")，并在文件头 from conan.tools.env import VirtualRunEnv
+rec_auto_fix:           true
+rec_impl:
+
+fallback_priority:      2
+fallback_approach:      若不方便改动构建块结构：把测试步骤改成自建子进程调用（self.run("make check", env="conanrun")），或在 generate() 里生成 RunEnv 文件后用 environment_wrap_command 包裹。二者都不改变产物形态，仍优于把构建机路径写进 rpath。
+fallback_description:   self.run("make check", env="conanrun") 或 environment_wrap_command 包裹
+fallback_command:       self.run("make check", env="conanrun")   # 需 generate() 中已调用 VirtualRunEnv(self).generate()
+fallback_auto_fix:      false
+
+forbid_1_pattern:       extra_ldflags.*-Wl,-rpath,/storage|LDFLAGS.*-rpath.*builds
+forbid_1_reason:        把构建机绝对路径烘进 rpath 会在其他机器/CI 上失效并污染产物（pre-scan 反对 build-machine rpath）
+forbid_1_consequence:   产物在不同机器上行为不一致，且用户侧可能加载到构建机残留库
+forbid_2_pattern:       LD_LIBRARY_PATH=.*make check|export LD_LIBRARY_PATH.*check
+forbid_2_reason:        依赖外部环境变量而不写进配方，CI/干净环境无法复现（本包首轮 CI 正是被这类隐藏环境掩盖后又暴露）
+forbid_2_consequence:   本地绿、CI 红；修复轮次浪费
+
+principles:
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E569.md
+last_updated:           2026-09-14
+source_event:           libosmocore/1.11.0 conan-verify G2：88 tests/1 failed，testsuite.dir/51 sim 测试报 Error loading shared library libpcsclite.so.1；补 LD_LIBRARY_PATH 后同一测试 RC=0
+
+authors:
+source_pr:              9889
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-14
+
+draft: true
+contributor_id: A20A
