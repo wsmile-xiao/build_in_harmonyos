@@ -1,0 +1,53 @@
+# DRAFT-E5xx: libtool -nostdlib 链接丢失 clang_rt.builtins（aarch64 fp128 软浮点符号未定义）
+id: DRAFT-E5xx
+status: draft
+contributor: calbee21
+related_task: "13534 (libzimg 3.0.6, PR #10438)"
+created: 2026-09-17
+
+# Layer 0: 错误面
+trigger_tool:           ld / clang++ (libtool archive_cmds)
+phase:                  linking
+error_signature:        Error relocating .*libzimg\.so.*: (__addtf3|__subtf3|__multf3|__divtf3|__netf2|__eqtf2): symbol not found
+
+# Layer 1: 识别层
+severity:               2
+category:               platform, linking, build-system
+match_keywords:         __addtf3, __multf3, fp128, long double, libclang_rt.builtins, -nostdlib, libtool, clang++, shared library, symbol not found, Error relocating
+
+# Layer 2: 诊断层
+root_cause:             OHOS 的 clang 包装器给 libtool 的共享库链接注入 -nostdlib（libtool archive_cmds
+                        展开为 "$CC -shared $pic_flag $libobjs $deplibs $compiler_flags -soname ..."，
+                        其中 CC=clang++ 被包装为 -nostdlib 模式），禁用了 clang 驱动隐式链接的
+                        libclang_rt.builtins.a。aarch64 上 C++ 的 long double 是 128 位 fp128，
+                        其运算（+ - * / == !=）编译为 __addtf3/__subtf3/__multtf3/__divtf3/__netf2/
+                        __eqtf2 等 compiler-rt 软浮点内置函数。任何模板实例化 long double 的源码
+                        （如 zimg matrix.cpp 的 RowMatrix<long double>）编入 .so 后，运行时加载器
+                        无法解析这些符号，报 "Error relocating: __addtf3: symbol not found"（exit 127）。
+                        注意：链接期不报错（-shared 允许未定义符号），问题延迟到 dlopen/加载时爆发；
+                        链接可执行程序（unit_test 等）不走 -nostdlib，builtins 自动链入，故测试全绿
+                        而共享库单独带病。
+affected_scope:         所有在 OHOS aarch64 上用 autotools/libtool 构建共享库、且代码含 long double
+                        （fp128）运算的 C/C++ 库
+verification_cmd:       nm -D <built>.so | grep -E " U __(add|sub|mul|div)tf3|__n?etf2"
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           link-clang-rt-builtins
+rec_description:        在 LDFLAGS（conan 配方 generate() 里 AutotoolsToolchain.extra_ldflags 或
+                        configure LDFLAGS=...）追加 -lclang_rt.builtins。clang_rt 库目录已被 OHOS
+                        clang 包装器加入 -L 搜索路径，符号由静态 builtins 归档补齐进 .so。
+rec_command:            |
+  # conan 配方 generate() 内：
+  try:
+      tc.extra_ldflags.append("-lclang_rt.builtins")
+  except Exception:
+      tc.ldflags.append("-lclang_rt.builtins")
+  # 或手动 configure：
+  ./configure ... LDFLAGS="-lclang_rt.builtins"
+  # 验证：
+  make && nm -D .libs/libfoo.so | grep -cE " U __(add|sub|mul|div)tf3"  # 应为 0
+fallback:               无 libtool 介入时（直编 clang++ -shared）不触发；若不能改 LDFLAGS，可
+                        把 long double 实例化改为 double，或改用静态库（静态链接时 clang 驱动
+                        隐式带 builtins）。
+verify_builds:          48908 (PR #10438 CI, OpenHarmonyPCDeveloper-CI-007, L0/L1 全过)
