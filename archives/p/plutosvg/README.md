@@ -14,8 +14,7 @@ plutovg 提供。库为纯 C99 实现，源码同时提供 CMake 与 Meson 构�
 - GitHub 源码归档不含 plutovg 子模块内容，配方在 `source()` 中把官方
   plutovg 1.3.3 发布包 vendor 到 `plutovg/`，沿用上游 `add_subdirectory` 回退路径。
 - 配方默认构建静态库（`shared=False`）；freetype 集成保持上游默认关闭。
-- 上游无独立测试套件；17 项真实 API 检查的 Conan 消费者测试用于验证
-  版本、加载、几何、渲染与 PNG 输出。
+- 上游无独立测试套件；Conan 消费者测试验证版本、加载、几何、渲染与 PNG 输出。
 
 ## 依赖
 
@@ -27,7 +26,8 @@ plutovg 提供。库为纯 C99 实现，源码同时提供 CMake 与 Meson 构�
 ## 功能验证
 
 ```bash
-conan create archives/p/plutosvg/0.0.8 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+conan create archives/p/plutosvg/0.0.8 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+conan create archives/p/plutosvg/1.3.3 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
 ```
 
 ## 参考
