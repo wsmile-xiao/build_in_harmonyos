@@ -1,0 +1,81 @@
+#====================================================================
+# DRAFT-irsim-9.7.104-ohos-sbrk-getmorecore-malloc — OHOS 上 sbrk() 失败时
+#   内存分配器的 GetMoreCore 需走 malloc 分支（irsim base/mem.c）
+# 对应人类文档: knowledge/drafts/DRAFT-irsim-9.7.104-ohos-sbrk-getmorecore-malloc.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR irsim/9.7.104 适配 HarmonyOS PC（makefile/autotools 系）
+#====================================================================
+
+id:                     DRAFT-irsim-9.7.104-ohos-sbrk-getmorecore-malloc
+trigger_tool:           runtime|make|cc|clang|irsim
+phase:                  runtime|testing
+error_signature:        MEMORY WARNING|short on swap space|
+                         sbrk.*-1|sbrk.*SBRK_FAIL|
+                         Will sleep for 15 seconds and try again
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               platform, ohos, memory, portability
+match_keywords:         sbrk, GetMoreCore, mem.c, MEMORY WARNING, swap space,
+                         getrlimit, RLIMIT_DATA, OHOS, HarmonyOS, malloc,
+                         musl, fallback
+title:                  OHOS 上 sbrk() 返回失败导致自研内存池分配器卡死重试——
+                         扩展 malloc 分支（与上游 CYGWIN/APPLE 先例一致）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             HarmonyOS 平台上 sbrk() 调用返回 SBRK_FAIL（实测 sbrk(0)
+                         正常但 sbrk(4096) 即返回 -1，RLIMIT_DATA 无限制；
+                         R02 探测输出 sbrk0=0x58ac1e0000 small_4K=-1
+                         large_4M=-1，任何量级都不可用）。基于 sbrk
+                         的自研内存分配器（irsim base/mem.c GetMoreCore，SYSV/BSD
+                         分支）在 sbrk 失败后进入"打印 MEMORY WARNING + sleep 15s
+                         重试"循环（MAXTRIES=5），进程无法启动/卡死。同一内存管理
+                         代码在上游已为 CYGWIN/APPLE 提供 malloc(nbytes) 分支，
+                         OHOS 与其共享"不依赖 sbrk"特性；AC_RUN_IFELSE 特性
+                         检测在本机运行同样得到失败结论、交叉编译时被跳过，
+                         故保留 __OHOS__ 平台宏（R02 评估，见 notes.md）。
+affected_scope:         所有在 OHOS 上用 sbrk 实现自研内存池/堆分配的 C/C++
+                         软件（irsim 及同作者 magic 系工具；rpl_malloc 类
+                         AC_FUNC_MALLOC 误判是另一独立问题，见
+                         DRAFT-ohos-autotools-rpl-malloc）
+verification_cmd:       编译并在 OHOS 上运行；或 python3 -c
+                         "import ctypes; libc=ctypes.CDLL(None); print(libc.sbrk(0), libc.sbrk(1<<22))"
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           getmorecore-malloc-branch
+rec_description:        在 GetMoreCore 的编译条件中把 OHOS 并入已有 malloc 分支
+                         （#if defined(CYGWIN) || defined(__APPLE__) || defined(__OHOS__)），
+                         或当 sbrk 失败时回退 malloc(nbytes)。irsim 实测：
+                         扩展条件后 MEMORY WARNING 消失、回落至可执行、仿真正常。
+rec_command:            修改 base/mem.c 条件宏后重新 configure/make，
+                         再运行 irsim <prm> <sim> 冒烟
+rec_auto_fix:           true
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      check-platform-sbrk
+fallback_description:   先确认 sbrk 是否真的失败（小测试程序探测），
+                         若为个别库特例再评估是否仅改该库
+fallback_command:       python3 -c "import ctypes; libc=ctypes.CDLL(None); print(libc.sbrk(0), libc.sbrk(4096*1024))"
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       把 sleep 重试当作正常行为继续等待
+forbid_1_reason:        sbrk 失败是平台语义问题，15s×5 重试只会浪费时长，
+                        不会让 sbrk 变可用；必须走 malloc 分支
+forbid_1_consequence:   进程长时间挂起，测试/交付被误判为超时
+
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to:             DRAFT-ohos-autotools-rpl-malloc,E476
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-irsim-9.7.104-ohos-sbrk-getmorecore-malloc.md
+last_updated:           2026-09-16
+source_event:           irsim/9.7.104 适配 HarmonyOS PC 编译记录
