@@ -1,0 +1,143 @@
+#====================================================================
+# DRAFT-ohos-optional-dep-silent-degrade-stub-api —— 可选依赖缺失时 configure
+#   静默降级，部分公开 API 变为"返回错误的桩"，消费者测试必须显式划界
+# 对应文档: knowledge/drafts/DRAFT-ohos-optional-dep-silent-degrade-stub-api.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-optional-dep-silent-degrade-stub-api
+trigger_tool:           autotools|configure|conan|pkg-config
+phase:                  configuration|testing
+error_signature:        (optional|未发布).*依赖.*(缺失|不可用).*(降级|跳过)|
+                         PKG_CHECK_MODULES.*\[.*\]\]\)|
+                         (USE_|HAVE_).*not defined.*feature.*unavailable
+
+severity:               2
+category:               autotools, dependency, conan, testing, false-coverage, r51
+match_keywords:         PKG_CHECK_MODULES, AC_MSG_ERROR, xmlsec, USE_XMLSEC,
+                         可选依赖, optional dependency, 静默降级, silent degradation,
+                         stub, 桩, 降级可用, --with-xxx, feature gate,
+                         消费者测试划界, 未发布依赖, R51
+title:                  可选依赖缺失时 configure **静默降级**（PKG_CHECK_MODULES
+                        第三参为成功分支而非 AC_MSG_ERROR）—— 部分公开 API 变成
+                        返回错误的**桩**，消费者测试须**显式划界**，不得当作全量覆盖
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:            autotools 项目对可选依赖惯用
+                          ``PKG_CHECK_MODULES(XMLSEC, xmlsec1..., [xmlsec=yes], [xmlsec=no])``
+                        即**第三参是"找到"的成功分支**，没有 ``AC_MSG_ERROR``——于是
+                        依赖缺失时 configure **不失败**，而是把 ``xmlsec=no`` 记入
+                        条件，随后 ``AC_DEFINE(USE_XMLSEC, 1, ...)`` **被整个跳过**。
+                        后果是**部分公开 API 在编译期被替换为返回错误的桩**
+                        （本包实测：``pskc_sign_x509`` / ``pskc_verify_x509crt``），
+                        库仍能构建、多数功能可用，但**签名相关能力完全不存在**。
+                        危险有三层：
+                          ① 构建**成功**（configure/make 退出码 0），绿灯掩盖功能缺失；
+                          ② 桩**仍可链接**，调用方拿到的是运行时错误码而非链接错误，
+                             定位成本高；
+                          ③ 消费者测试若照抄上游测试清单，会**以为覆盖了全部 API**，
+                             实际有一整块从未被验证。
+                        必须与"缺失即报错"的**硬依赖**严格区分：硬依赖用
+                        ``AC_MSG_ERROR``（如本包的 libxml2），缺失时 configure 直接
+                        失败，不会产生"看似成功实则残缺"的产物。
+                        也与"依赖库符号未实现"不同层：那是库存在但符号空壳；本条是
+                        **功能分支在编译期被整体裁掉**。
+affected_scope:         一切用 ``PKG_CHECK_MODULES``/``AC_ARG_WITH``/``AC_ARG_ENABLE``
+                        把依赖做成**可选**的 autotools 项目；典型是"核心功能必需 +
+                        增强功能可选"的库（加密/签名/压缩/硬件加速等可选后端）。
+                        在适配场景下尤其突出：可选依赖常**未发布到制品仓**，于是被动
+                        落入降级分支——**这不是适配缺陷，但必须显式申报其边界**。
+                        与"构建失败需修依赖"不同：本类**不该**去补那个依赖来"消除问题"
+                        （若上游本就视其为可选），而应**如实记录能力边界**。
+verification_cmd:       ① 判定某依赖是硬必需还是可选（决定性——看有没有 AC_MSG_ERROR）：
+                          grep -n -A2 "PKG_CHECK_MODULES(<MODULE>" <src>/configure.ac
+                          # 形如 `... ,, [AC_MSG_ERROR([Cannot find X])])` → 硬依赖
+                          # 形如 `... , [x=yes], [x=no])`              → 可选，会降级
+                        # ② 确认降级是否真的发生（构建期）：
+                        grep -nE "checking .*(<feature>|<dep>)\.\.\. (yes|no)" <build>/config.log
+                        # ③ 确认哪些公开 API 因此变桩（交付物侧）：
+                        grep -nE "(USE_|HAVE_)<FEATURE>" <src>/config.h.in
+                        nm -D <pkg>/lib/lib<X>.so | grep -i <feature-symbol>   # 可判实现是否被裁
+                        # ④ 消费者测试须**显式**断言该边界，而非静默略过
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           declare-boundary-explicitly-and-test-the-rest
+rec_description:        三步处置，核心是**把边界变成可见事实**：
+                        ① **定性**：读 ``configure.ac`` 判定该依赖是 optional
+                           （无 ``AC_MSG_ERROR``）。若是 optional，**不得**为了"消除
+                           告警"去强行补一个未发布的依赖——那会偏离上游设计意图。
+                        ② **文档显式化**：在 ``notes.md`` 与
+                           ``manifest.yaml``（dependencies.optional）写明
+                           「该依赖缺失 → 该分支被裁 → 这些 API 变桩」，并列出**具体
+                           受影响的符号**，而不是笼统说"功能降级"。
+                        ③ **测试划界**：消费者测试**只覆盖降级后仍然可用的 API**，
+                           并在**代码注释 + MANIFEST.yml** 中显式写出"刻意不覆盖
+                           X/Y（需 Z，未发布）"。**禁止**用空壳断言（如只
+                           ``assert(true)``）假装覆盖，也**禁止**静默略过——
+                           那会让"未验证"与"已验证"在记录上无差别（R51）。
+                        配方内可加一条**构建期自检**：若探测到降级已发生，则输出
+                        warning 说明受影响面——让每次构建都留下一行可追溯的边界声明。
+rec_command:            # 判定：grep -n -A2 "PKG_CHECK_MODULES(<MOD>" configure.ac
+                        # 若探到降级，配方内：
+                        #   if downgraded: self.output.warning(
+                        #       "<dep> unavailable -> <feature> APIs are stubs; "
+                        #       "consumer tests intentionally cover only the rest")
+                        # 消费者测试注释须写明刻意不覆盖的符号与原因
+rec_auto_fix:           false
+rec_impl:               declare-boundary-explicitly-and-test-the-rest
+
+fallback_priority:      2
+fallback_approach:      publish-the-optional-dep-to-enable-full-coverage
+fallback_description:   若消费方**确实需要**该能力（例如上游测试套件要求全量 API），
+                        则须先把该可选依赖适配并发布到制品仓，再以 ``requires()``
+                        引入，使 configure 走"找到"分支。代价是依赖链变长、
+                        且引入了上游本可省去的构建负担——**仅在确有需求时做**，
+                        并注意此时**不应**在配方里硬编码启用开关（让自动探测生效）。
+fallback_command:       # 适配并发布 <optional-dep> → conan list 确认 → self.requires(...)
+fallback_auto_fix:      false
+fallback_impl:          publish-the-optional-dep-to-enable-full-coverage
+
+forbid_1_pattern:       为.*(可选依赖|optional).*(未发布|缺失).*(去|而).*(伪造|手工构造).*(该依赖|桩实现)|
+                         把.*可选依赖.*硬改成.*AC_MSG_ERROR.*(以|来).*(暴露|解决问题)
+forbid_1_reason:        上游把该依赖设计为可选，缺失时降级是**受支持配置**；伪造桩实现
+                        会与真库行为不一致而产生**虚假通过**;而把它硬改成 ``AC_MSG_ERROR``
+                        是**修改上游语义**，会让本可成功的构建变成失败。
+forbid_1_consequence:   要么给出不可信的功能"实现"，要么把可选依赖变成伪硬依赖，
+                        偏离上游并阻塞本可交付的适配。
+
+forbid_2_pattern:       消费者测试.*(照抄|沿用).*上游.*(全量|完整).*API.*(不|未).*核对.*可用性|
+                         因.*可选功能.*降级.*(便|就).*删除.*(测试|断言).*(不|未).*说明
+forbid_2_reason:        降级后部分 API 不可用，照抄上游清单会**假定覆盖全量**；
+                        而直接删除断言会让"能力缺失"与"验证通过"在记录上无差别（R51）。
+                        正确做法是**保留可验证部分 + 显式写出未覆盖部分及其原因**。
+forbid_2_consequence:   测试覆盖率虚高，整块能力从未被验证却在报告里显示为"已覆盖"。
+
+principles:             honest-reporting, measure-not-assume, upstream-compat-evidence
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-ohos-perl-noncore-runtime-dep-requires-vs-recommends]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-optional-dep-silent-degrade-stub-api.md
+last_updated:           2026-09-16
+source_event:           libpskc 2.6.14 适配（libpskc/configure.ac 的
+                        PKG_CHECK_MODULES(XMLSEC, xmlsec1..., [xmlsec=yes], [xmlsec=no])
+                        在 xmlsec1 缺失（ohpcd 未发布）时使 pskc_sign_x509 /
+                        pskc_verify_x509crt 变为桩；对比同文件 libxml2 用
+                        AC_MSG_ERROR 属硬依赖）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        D8A1
