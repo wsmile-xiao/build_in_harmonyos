@@ -97,11 +97,12 @@ target_compile_definitions(scintilla_core PRIVATE
 )
 
 # Force-include missing headers (Scintilla internal headers have fragile includes)
+# Use SHELL: prefix to prevent CMake from deduplicating -include flags
 target_compile_options(scintilla_core PRIVATE
-    -include cstddef
-    -include cstdint
-    -include cassert
-    -include cstring
+    "SHELL:-include cstddef"
+    "SHELL:-include cstdint"
+    "SHELL:-include cassert"
+    "SHELL:-include cstring"
 )
 
 # Optimization
@@ -133,10 +134,10 @@ target_compile_definitions(scintilla_ohos PRIVATE
 )
 
 target_compile_options(scintilla_ohos PRIVATE
-    -include cstddef
-    -include cstdint
-    -include cassert
-    -include cstring
+    "SHELL:-include cstddef"
+    "SHELL:-include cstdint"
+    "SHELL:-include cassert"
+    "SHELL:-include cstring"
     -O2
     -fPIC
 )
