@@ -1,0 +1,97 @@
+--- a/src/log/klog_mqueue.c
++++ b/src/log/klog_mqueue.c
+@@ -35,20 +35,21 @@
+ 
+ int	initMessageQueue(int flushInterval , int autoIncrement);
+ int	insertMessage(int lvl , const char *message);
+ int	flushMessageQueue(int locked);
+ void	emptyMessageQueue();
+ void	destroyMessageQueue();
+ void*	startMQDaemon(void* msec);
+ void	recycle() DESTRUCTOR;
+ 
+ static KLMessageQueue* pMQ;
++static volatile int	g_mqThreadStop	= 0;	//异步刷新线程退出标志（musl 无 pthread_cancel）
+ 
+ int initMessageQueue(int flushInterval , int autoIncrement)
+ {
+ 	if (pMQ)
+ 		return 0;
+ 	pMQ	= (KLMessageQueue*)calloc(1 , sizeof(KLMessageQueue));
+ 	if (!pMQ)
+ 	{
+ 		return errno;
+ 	}
+@@ -98,21 +99,21 @@
+ 		retv	= errno;
+ 		goto clean_up;
+ 	}
+ 	node->lvl		= lvl;
+ 	node->bufSize	= strnlen(message, STRNLEN_MAX);
+ 	node->bufSize	= node->bufSize > sizeof(node->buf) ? sizeof(node->buf) : node->bufSize;
+ 	memcpy(node->buf , message , node->bufSize * sizeof(char));
+ 
+ 	//插入消息队列
+ 	MLOCK(pMQ->mlock);
+-	if (__glibc_unlikely(pMQ->mnum >= pMQ->maxmessage))	//当前消息缓冲已满，扩充缓冲区
++	if (pMQ->mnum >= pMQ->maxmessage)	//当前消息缓冲已满，扩充缓冲区
+ 	{
+ 		// OUTPUT("缓冲区满\n");
+ 		if (pMQ->autoIncrementQueueSize)
+ 		{
+ 			KL_MessageNode** old	= pMQ->message;
+ 			unsigned long nextsize	= pMQ->maxmessage;
+ 			if (nextsize >= KLOG_DEFAULT_MSGGROWTHRESHOLD)	//若已达到指定阈值，则降低为缓慢扩充模式
+ 					nextsize	+= KLOG_DEFAULT_MSGGROWTH;
+ 			else
+ 			{
+@@ -253,39 +254,42 @@
+ 		pMQ->message[i]	= NULL;
+ 	}
+ 	pMQ->mnum	= 0;
+ 	MUNLOCK(pMQ->mlock);
+ }
+ 
+ void destroyMessageQueue()
+ {
+ 	if (!pMQ)
+ 		return;
+-	pthread_cancel(pMQ->thread_id);
++	/* OHOS/musl 无 pthread_cancel：置退出标志后 join 等待线程自然结束 */
++	g_mqThreadStop	= 1;
+ 	pthread_join(pMQ->thread_id ,NULL);
+ 	while (pMQ->mnum)
+ 	{
+ 		flushMessageQueue(0);
+ 	}
+ 	pthread_mutex_destroy(pMQ->mlock);
+ 	free(pMQ->mlock);
+ 	free(pMQ);
+ 	pMQ	= NULL;
+ }
+ 
+ void recycle()
+ {
+ 	destroyMessageQueue();
+ }
+ 
+ void* startMQDaemon(void* msec)
+ {
+ 	int interval	= *(int*)msec;
+-	while (1)
+-	{
+-		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE , NULL);
+-		pthread_testcancel();
+-		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE , NULL);
++	/* OHOS/musl 未提供 pthread 取消 API：改为协作式退出
++	   （destroyMessageQueue 置 g_mqThreadStop 后 join）。 */
++	while (!g_mqThreadStop)
++	{
+ 		usleep(interval * 1000);
++		if (g_mqThreadStop)
++			break;
+ 		flushMessageQueue(0);
+ 	}
+-}
++	return NULL;
++}

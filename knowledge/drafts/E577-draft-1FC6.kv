@@ -1,0 +1,118 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E577.kv，填写各字段
+# 对应的人类文档: doc/E577.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E577
+trigger_tool:           clang|gcc|cmake|make
+phase:                  compilation
+error_signature: fatal error: 'bits/types.h' file not found|fatal error: 'bits/[a-z0-9_./]+\.h' file not found|unknown type name '__uint8_t'|unknown type name '__intmax_t'|use of undeclared identifier '__glibc_likely'|use of undeclared identifier '__WORDSIZE'|undefined reference.*__glibc_unlikely
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: musl, libc, headers, portability, compat
+match_keywords: bits/types.h, __uint8_t, __intmax_t, __WORDSIZE, __PRI64_PREFIX, __glibc_likely, __glibc_unlikely, musl, OHOS, glibc internals, isdigit 宏
+title: glibc 内部类型/宏在 musl 下编译失败（bits/types.h、__uintN_t、__WORDSIZE、__glibc_likely）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 上游直接使用 glibc 内部实现：<bits/types.h>、__uintN_t/__intmax_t/__uintmax_t、__WORDSIZE、__PRI64_PREFIX、__glibc_likely/__glibc_unlikely；musl(OHOS) 不提供这些内部符号与头文件。musl 下 isdigit/isalpha 是宏，会把原先仅告警的传参错误升级为硬错误。
+affected_scope: 直接 include <bits/*.h>（最常见 <bits/types.h>），或使用 __uintN_t/__intmax_t/__uintmax_t/__WORDSIZE/__PRI64_PREFIX/__glibc_likely/__glibc_unlikely 等 glibc 私有符号的上游代码；也包括在 musl 下把 isdigit/isalpha/isupper 等「宏实现」的字分类函数与指针实参连用（glibc 下仅告警，musl 下升级为硬错误）的地方。
+verification_cmd: printf '#include <bits/types.h>\n' > /tmp/glibc_internal_probe.c && ${OHOS_CLANG} -fsyntax-only /tmp/glibc_internal_probe.c   # 期望 fatal error: 'bits/types.h' file not found；再 grep -rn '__glibc_likely\|__glibc_unlikely\|__WORDSIZE\|__uint8_t\|__PRI64_PREFIX' ${SRC_DIR} 列出全部命中点
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach: ①<bits/types.h>→<sys/types.h>；②删除 __ 前缀 typedef 重定义，改用 <stdint.h>/<inttypes.h>（PRIu64/UINTMAX_MAX 由标准头提供）；③__glibc_likely(x)/__glibc_unlikely(x)→(x)；④isdigit/isdigit 类宏的参数必须是 int 值（用 (unsigned char)*p）。
+rec_description:        用 C/POSIX 标准头与标准类型替换全部 glibc 私有实现：<bits/types.h>→<sys/types.h>，__uintN_t/__intmax_t/__uintmax_t→<stdint.h>，__WORDSIZE→sizeof(void*)*8 或 UINTPTR_MAX，__PRI64_PREFIX→<inttypes.h> 的 PRId64/PRIu64，__glibc_likely/unlikely(x)→(x)；字分类宏实参强制 (unsigned char)
+rec_command:            grep -rn 'bits/types\.h\|bits/[a-z0-9_]*\.h\|__uint[0-9]\+_t\|__intmax_t\|__uintmax_t\|__WORDSIZE\|__PRI64_PREFIX\|__glibc_likely\|__glibc_unlikely' ${SRC_DIR}   # 定位全部命中点；逐处改标准头并存为 patches/NNNN-<file>.patch（勿直接改工作副本）
+rec_auto_fix:           false
+rec_impl:
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach: 若上游必须与 glibc 分支共存、无法改成标准头，退到「薄 shim 头」方案：新建内部 compat/glibc-shim.h，用标准头为缺失符号提供等价定义（typedef __uint8_t→uint8_t、__glibc_likely(x)→(x)），仅在需要它的上游文件内 include；严禁把 musl 的 <bits/> 目录塞进 include path 或用 -I 指向 glibc 头，那会把头文件与 libc 实现错配，产生运行期 ABI 崩溃。
+fallback_description: 用内部 compat shim 头为 glibc 私有符号提供标准库等价定义（仅在无法改上游用法时）
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: #include\s*<bits/|__glibc_likely\s*\(|__glibc_unlikely\s*\(|__WORDSIZE
+forbid_1_reason: 这些是 glibc 私有实现细节，musl(OHOS) 既无对应头文件也无对应符号；任何形式的使用都把上游代码绑死在 glibc 上
+forbid_1_consequence: 编译期 fatal error / unknown type name（rc≠0）；即使靠 -I 指向 glibc 头侥幸编过，头文件与 musl 实现的错配也会在运行期以 ABI 不一致崩溃暴露
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: P005, P013
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E194, E169]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+keywords: bits/types.h, __uint8_t, __intmax_t, __WORDSIZE, __PRI64_PREFIX, __glibc_likely, __glibc_unlikely, glibc internals, musl, OHOS, 标准头替换, isdigit 宏
+software: libkysdk-base/3.0.1.3
+doc_file:               doc/E577.md
+last_updated: 2026-09-15
+source_event: libkysdk-base/3.0.1.3 适配（2026-09-15）：上游用 glibc 私有类型/宏（<bits/types.h>、__uint8_t、__WORDSIZE、__PRI64_PREFIX、__glibc_likely/unlikely）与 isdigit 宏传指针，OHOS musl 下编译失败；改用 <sys/types.h>/<stdint.h>/<inttypes.h> 与 (unsigned char) 强制转换
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 1FC6
