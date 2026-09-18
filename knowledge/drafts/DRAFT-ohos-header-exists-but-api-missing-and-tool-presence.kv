@@ -1,0 +1,121 @@
+#====================================================================
+# DRAFT-ohos-header-exists-but-api-missing-and-tool-presence.kv
+# 「检测通过」≠「能力可用」：OHOS 上 uapi 风格头/工具存在性造成的 4 类误判与降级
+# 来源: procenv 0.51 适配（contrib-9733，分支 feat/procenv-0.51）
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-header-exists-but-api-missing-and-tool-presence
+trigger_tool:           configure|cmake|clang|make|test
+phase:                  configuration|compilation|testing
+error_signature:        unknown type name 'cap_t'|unknown type name 'cap_value_type'|
+                         use of undeclared identifier 'CAP_EFFECTIVE'|
+                         config.status.*could not setup config files machinery|
+                         can't create ./conf.*subs1\.awk: Permission denied|
+                         Unable to create temporary file for communication|
+                         inaccessible or not found
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, headers, detection, toolchain, configure, testing, portability
+match_keywords:         sys/capability.h, libcap, cap_t, cap_get_proc, CAP_EFFECTIVE, AC_CHECK_HEADERS,
+                         ac_cv_header_sys_capability_h, config.status, subs1.awk, umask 077, mktemp,
+                         groff, xmlwf, json_pp, locale, libcheck, check_msg, TMPDIR, /tmp read-only
+title:                  OHOS 上「检测通过」不等于「能力可用」：uapi 风格头存在但 API 缺失、
+                        autoconf 临时目录/umask、构建期外部工具与 libcheck IPC 四类误判的判定与降级
+prescan_pattern:        AC_CHECK_HEADERS[(].*sys/capability[.]h|umask 077.*mktemp -d|groff .*-Tascii
+prescan_globs:          configure.ac, configure, configure.in, Makefile.am, *.ac, *.in, tests/*.sh
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             OHOS 的 sysroot/用户态与常见 Linux 发行版有三处结构性差异，会让"存在性检测"给出假阳/假阴：
+                        (1) **头存在但 API 缺失**：OHOS 自带 `<sys/capability.h>`（48 行、Huawei 裁剪版，
+                        属内核 uapi 风格），**不含 libcap 用户态 API**（`cap_t`/`cap_get_proc`/`cap_value_t`/
+                        `CAP_EFFECTIVE`）。autoconf 的 `AC_CHECK_HEADERS([sys/capability.h])` 因此**误通过**，
+                        源码段被启用后在编译期报 `unknown type name 'cap_t'`。正确检测应是**函数/符号**
+                        存在性（`AC_SEARCH_LIBS([cap_init], [cap])`）或显式 `ac_cv_header_sys_capability_h=no`。
+                        (2) **构建期临时目录**：autoconf 生成的 `configure`/`config.status` 用
+                        `umask 077 && mktemp -d ./confXXXXXX` 建临时目录，在 HMDFS 上随后的
+                        `subs1.awk` 写入报 `Permission denied` → `could not setup config files machinery`
+                        （放宽为 `umask 022` 即可，仓库 e2fsprogs 0003 已有同法先例）。
+                        (3) **构建期外部工具缺失**：上游测试/构建脚本依赖 `groff`（渲染 man page）、
+                        `xmlwf`/`json_pp`（校验格式）、`locale`，OHOS 都没有；脚本若把"工具缺失"
+                        当成测试失败，就会把平台差异记成产品缺陷。`libcheck` 的 fork/IPC 需要创建
+                        通信临时文件（`check_msg.c:317`），在 OHOS 上**任何 TMPDIR 都失败**（/tmp 只读、
+                        /dev/shm、$HOME 均复现），属依赖级限制。
+affected_scope:         所有用 autoconf 存在性检测选择可选功能、或依赖外部 CLI 工具做构建/测试的
+                        C/C++ 项目；具体实证：procenv 0.51（`sys/capability.h`、`config.status`、
+                        groff、libcheck）、仓库既有 e2fsprogs（umask 补丁）。
+verification_cmd:       # (1) 头存在但无 API（决定性反证）
+                        grep -cE "cap_t|cap_get_proc|CAP_EFFECTIVE" "$SR/usr/include/sys/capability.h"   # -> 0
+                        wc -l "$SR/usr/include/sys/capability.h"                                             # -> 48
+                        # (2) config.status 临时目录
+                        ./configure --host=aarch64-unknown-linux-ohos 2>&1 | grep -E "subs1.awk|config files machinery"
+                        # (3) 工具缺失
+                        command -v groff xmlwf json_pp locale || echo "missing build/test tools"
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           replace-existence-checks-with-capability-probes-and-degrade-honestly
+rec_description:        把"存在性检测"升级为"能力检测"，并让缺失项按"如实降级"处理：
+                        (1) 头存在 → 追加**函数/符号**检测（`AC_SEARCH_LIBS(cap_init, cap)`）或直接
+                        在配方里钉住 autoconf 缓存变量 `ac_cv_header_sys_capability_h=no`（不改源码、可复核）；
+                        (2) autoconf 临时目录：patch `configure` 把 `umask 077` → `022`（生成文件按 P003
+                        以 `.patch` 形式随配方提交）；
+                        (3) 构建/测试脚本：对 groff/xmlwf/json_pp/locale 等先 `command -v` 探测，
+                        缺失时 `msg` 提示并**跳过对应断言**（而不是整体失败）；TMPDIR 统一指向可写目录；
+                        依赖级限制（libcheck IPC）在测试报告中带命令与退出码单列，不修改上游判定。
+rec_command:            # 配方侧（Conan 例）
+                        tc.configure_args.append("ac_cv_header_sys_capability_h=no")
+                        # 补丁侧
+                        sed -i 's/umask 077/umask 022/g' configure
+                        # 测试脚本侧
+                        if ! command -v groff >/dev/null 2>&1; then msg "skip man cross-check"; return 0; fi
+rec_auto_fix:           false
+rec_impl:               conan 配方（缓存变量）+ conandata patches（configure/测试脚本）
+
+fallback_priority:      2
+fallback_approach:      force-disable-optional-feature
+fallback_description:   无法改上游检测逻辑时，用配方/环境显式关闭该可选功能（如 `--without-libcap`、
+                        `ac_cv_*` 缓存变量、`--disable-*`），并在 notes.md 记录"该能力在 OHOS 不可用"。
+fallback_auto_fix:      false
+fallback_impl:          build-arg-only
+
+forbid_1_pattern:       声明 HAVE_SYS_CAPABILITY_H 后自行 stub cap_t/CAP_* 常量让编译通过
+forbid_1_reason:        OHOS 无 libcap 用户态实现，stub 出来的能力语义是假的（读不到真实 capability）
+forbid_1_consequence:   产出"看起来支持 capabilities"的二进制，实际永远返回空/伪造值
+forbid_2_pattern:       把 groff/xmlwf/json_pp/locale 缺失当成产品缺陷并删除/注释上游测试用例
+forbid_2_reason:        工具缺失是平台差异，删测试会掩盖真实用例；应保留用例并显式 skip 该断言
+forbid_2_consequence:   上游测试覆盖被削弱，且报告失真
+forbid_3_pattern:       用全局 -Wno-error 或删除 -Werror 掩盖新编译器告警
+forbid_3_reason:        违反 P007；应精准到 `-Wno-error=<具体类别>`
+forbid_3_consequence:   真实错误被掩盖
+forbid_4_pattern:       用平台宏（#ifdef __OHOS__）守卫 libc 层面的差异（如 musl 缺某接口）
+forbid_4_reason:        差异的根因是 **libc**（musl vs glibc），不是平台名；用 `!defined(__GLIBC__)`
+                        这类 libc 特性守卫更准确、可覆盖其它 musl 发行版，也避免平台宏随平台数量膨胀
+forbid_4_consequence:   同一 libc 的其它平台漏判（守卫放错），且评审会以"平台宏滥用"打回
+
+principles:             R34, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 可选功能被误启用（编译失败）、config.status 失败、测试脚本假失败
+caused_by:              OHOS uapi 风格裁剪头 + HMDFS 临时目录限制 + 缺构建期 CLI 工具 + libcheck IPC
+similar_to:             E011, E091, E119
+conflicts_with:         []
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-header-exists-but-api-missing-and-tool-presence.md
+last_updated:           2026-09-16
+source_event:           procenv 0.51 OHOS aarch64 适配：sys/capability.h 误判（cap_t 未定义）、
+                        config.status subs1.awk 权限、groff 缺失、libcheck check_msg.c:317
+
+authors:                frj__
+source_pr:              (本分支 feat/procenv-0.51)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+draft:                  true
+contributor_id:         frj__
