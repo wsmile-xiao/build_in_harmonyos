@@ -1,0 +1,95 @@
+--- a/librdmacm/examples/rping.c
++++ b/librdmacm/examples/rping.c
+@@ -37,26 +37,45 @@
+ #include <stdio.h>
+ #include <errno.h>
+ #include <unistd.h>
+ #include <sys/poll.h>
+ #include <sys/eventfd.h>
+ #include <sys/types.h>
+ #include <sys/socket.h>
+ #include <netdb.h>
+ #include <semaphore.h>
+ #include <pthread.h>
++#include <signal.h>
+ #include <inttypes.h>
+ #include <rdma/rdma_cma.h>
+ #include "common.h"
+ 
+ static int debug = 0;
+ #define DEBUG_LOG if (debug) printf
++
++/* OHOS musl libc does not implement pthread_cancel(3).  Per knowledge
++ * E513, preserve joinable-thread teardown with a reserved signal whose
++ * handler exits the worker, then join. */
++static void rping_thread_exit_handler(int sig)
++{
++	(void)sig;
++	pthread_exit(NULL);
++}
++
++static void rping_setup_thread_exit(void)
++{
++	struct sigaction sa;
++
++	memset(&sa, 0, sizeof(sa));
++	sa.sa_handler = rping_thread_exit_handler;
++	sigaction(SIGUSR1, &sa, NULL);
++}
+ 
+ /*
+  * rping "ping/pong" loop:
+  * 	client sends source rkey/addr/len
+  *	server receives source rkey/add/len
+  *	server rdma reads "ping" data from source
+  * 	server sends "go ahead" on rdma read completion
+  *	client sends sink rkey/addr/len
+  * 	server receives sink rkey/addr/len
+  * 	server rdma writes "pong" data to sink
+@@ -706,22 +725,20 @@
+ static void *cq_thread(void *arg)
+ {
+ 	struct rping_cb *cb = arg;
+ 	struct ibv_cq *ev_cq;
+ 	void *ev_ctx;
+ 	int ret;
+ 	
+ 	DEBUG_LOG("cq_thread started.\n");
+ 
+ 	while (1) {	
+-		pthread_testcancel();
+-
+ 		ret = ibv_get_cq_event(cb->channel, &ev_cq, &ev_ctx);
+ 		if (ret) {
+ 			fprintf(stderr, "Failed to get cq event!\n");
+ 			pthread_exit(NULL);
+ 		}
+ 		if (ev_cq != cb->cq) {
+ 			fprintf(stderr, "Unknown CQ!\n");
+ 			pthread_exit(NULL);
+ 		}
+ 		ret = ibv_req_notify_cq(cb->cq, 0);
+@@ -928,21 +945,22 @@
+ 
+ 	rping_test_server(cb);
+ 	rping_disconnect(cb, cb->child_cm_id);
+ 	pthread_join(cb->cqthread, NULL);
+ 	rping_free_buffers(cb);
+ 	rping_free_qp(cb);
+ 	rdma_destroy_id(cb->child_cm_id);
+ 	free_cb(cb);
+ 	return NULL;
+ err3:
+-	pthread_cancel(cb->cqthread);
++	rping_setup_thread_exit();
++	pthread_kill(cb->cqthread, SIGUSR1);
+ 	pthread_join(cb->cqthread, NULL);
+ err2:
+ 	rping_free_buffers(cb);
+ err1:
+ 	rping_free_qp(cb);
+ err0:
+ 	free_cb(cb);
+ 	return NULL;
+ }
+ 
