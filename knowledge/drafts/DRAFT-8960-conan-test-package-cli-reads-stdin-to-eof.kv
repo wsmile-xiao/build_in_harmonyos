@@ -1,0 +1,102 @@
+#====================================================================
+# DRAFT-8960-conan-test-package-cli-reads-stdin-to-eof
+# — conan test_package 中「被测 CLI 读 stdin 到 EOF」，CI 的常开 stdin 使子进程永久阻塞直至超时
+# 触发事件: kea-shell 3.0.3 PR #10342 CI build #48667 失败（test_package 60s 超时）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-8960-conan-test-package-cli-reads-stdin-to-eof
+trigger_tool:           conan|test_package|python|test
+phase:                  testing|conan_build
+error_signature:        subprocess\.TimeoutExpired.*timed out after|Error in test\(\) method|
+                         for line in sys\.stdin|Read arguments from stdin|CI.*构建超时.*交互式
+
+severity:               2
+category:               conan, testing, cli-tool, non-interactive, portability
+match_keywords:         test_package, subprocess.run, stdin, EOF, DEVNULL, blocking, hang,
+                         timeout, stdin 常开, CI buildbot, PTY, echo |, interactive,
+                         "Read arguments from stdin", timeout after 60 seconds,
+                         conan create failed, L1_RESULT=fail
+
+title:                  conan test_package 里被测 CLI 读 stdin 至 EOF，CI 的常开 stdin 使子进程阻塞超时——测试侧须显式给 EOF（DEVNULL / echo |）
+
+topic: >
+  kea-shell（ISC Kea 的 REST 客户端）会把 stdin 上的可选参数拼进请求体，实现为
+  `for line in sys.stdin: params.args += line` —— **读到 EOF 才继续**。上游自己的进程测试
+  因此一律写成 `echo | kea-shell …`（喂一个空行并关闭管道）。
+  本包首版 test_package 用 `subprocess.run([kea-shell, ...], capture_output=True)` 运行被测 CLI，
+  没有给 stdin；本地（stdin = 终端/EOF）通过，CI（buildbot 的 stdin 是永不关闭的管道/PTY）下
+  被测进程永久阻塞在 stdin 读 → 测试脚本的 60 s 子进程超时抛 TimeoutExpired → conan create 失败。
+
+root_cause: >
+  1) 被测 CLI 的 stdin 语义是「可选参数，读到 EOF 为止」——不主动给 EOF 就无法结束读循环；
+  2) 测试侧 `subprocess.run()` 默认**继承父进程 stdin**：本地是终端（EOF 立即到达）→ 通过；
+     CI worker 的 stdin 是常开管道 → 子进程永远等不到 EOF；
+  3) CLI 内部的 `signal.alarm(timeout)` 兜底无效：它在该 stdin 循环**之后**才设置，
+     阻塞发生在报警器武装之前（故不是"程序缺陷"，而是"调用方式缺陷"）；
+  4) 失败形态容易被 CI 归类为"构建超时/交互式测试卡住"，误导到 `make check --no-interaction` 方向。
+
+durable_solution: >
+  在 test_package（或任何驱动被测 CLI 的脚本）中，对接受 stdin 的命令**显式给 EOF**：
+  - Python：`subprocess.run(cmd, stdin=subprocess.DEVNULL, ...)`（推荐，最简单）；
+  - shell：`echo | cmd …`（上游 kea 自己的测试写法）或 `cmd … < /dev/null`；
+  - 若确实要传参数：`subprocess.run(cmd, input=payload, text=True)`（communicate 会关闭 stdin）。
+  同时把子进程超时收紧（60 s → 30 s），让同类问题更快暴露。
+  复现/自检方法：让测试进程自身的 stdin 常开（`sleep 90 | python3 test_x.py`），或直接用
+  Popen(stdin=PIPE) 且不关闭 write 端——修复前必然阻塞、修复后应通过。
+
+impact: >
+  任何"CLI 从 stdin 读取输入直到 EOF"的包（kea-shell、passwd 类工具、从 stdin 读 JSON 的
+  管理客户端、交互式安装器等）在 conan test_package / CI smoke test 中都会踩；本地通过、
+  CI 失败是典型特征。
+
+recovery: >
+  若被测 CLI 的行为本身不适合非交互（必须在 TTY 上读口令等），则不要在该 CLI 上做端到端
+  断言，改为断言 `--version`/`--help` 等不读 stdin 的路径，并在 notes 中说明范围。
+
+evidence_chain: >
+  task kea-shell-3.0.3 适配（feat/kea-shell-3.0.3，PR #10342，CI build #48667）
+    - CI 日志尾部：
+      `subprocess.TimeoutExpired: Command '['…/kea-shell', '--host', '127.0.0.1', '--port', '45009',
+       '--service', 'dhcp4', 'list-commands']' timed out after 60 seconds`
+      `ERROR: kea-shell/3.0.3 (test package): Error in test() method, line 28`
+      `[fail] kea-shell/3.0.3 — conan create failed` / `L1_RESULT=fail: conan create failed`
+    - 本机精确复现（保持 stdin 常开且不关闭 write 端）：
+      修复前 `[stdin=常开管道（不关闭）] ❌ 阻塞 >8s`；`[stdin=DEVNULL] 完成 rc=1`
+    - 修复后：`sleep 90 | python3 test_kea_shell.py` → `checks run: 12 / all checks passed`；
+      以常开 stdin 管道运行 `conan create` → `EXIT_CODE = 0`
+    - 反证：上游自己的 `.sh` 测试均写 `echo | kea-shell …`（喂 EOF）
+
+verification_cmd: >
+  sleep 90 | python3 test_package/test_kea_shell.py
+  # 以及：python3 -c "import subprocess;p=subprocess.Popen(['conan','create','.'],stdin=subprocess.PIPE);print(p.wait())"
+
+limitations: >
+  仅覆盖"测试侧未给 EOF"这一类；若被测 CLI 在无 TTY 时行为异常（如需 ioctl/TTY），需另案处理
+  （参见 PTY 驱动交互测试相关草稿）。
+
+rec_priority:           1
+rec_approach:           feed-explicit-eof-to-cli-under-test
+rec_description: >
+  test_package 驱动被测 CLI 时统一显式给 EOF：Python 用
+  `subprocess.run(cmd, stdin=subprocess.DEVNULL, ...)`（或 `input=...`），shell 用 `echo | cmd`
+  或 `cmd < /dev/null`；并把子进程超时收紧到 30 s 便于快速暴露阻塞。
+rec_command:            subprocess.run([tool, *args], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
+rec_auto_fix:           false
+rec_impl:               test-package-stdin-dev
+
+doc_file:               knowledge/drafts/DRAFT-8960-conan-test-package-cli-reads-stdin-to-eof.md
+last_updated:           2026-09-16
+source_event:           kea-shell 3.0.3 PR #10342 CI build #48667 test_package 60s 超时（stdin 常开致阻塞）
+authors:                atomcode-executor
+source_pr:              10342
+source_commit:          849957404b
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:         1F4B
+related:                E214
