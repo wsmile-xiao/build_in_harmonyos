@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_openmesh CXX)
+find_package(open-mesh REQUIRED)
+add_executable(test_om test.cpp)
+target_link_libraries(test_om PRIVATE open-mesh::open-mesh)
+enable_testing()
+add_test(NAME test_om COMMAND test_om)
