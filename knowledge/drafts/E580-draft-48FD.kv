@@ -1,0 +1,105 @@
+#====================================================================
+# E580.kv — CMAKE_SYSTEM_NAME=OHOS 直接解决 CMake 平台识别+SONAME+插件DT_NEEDED
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E580
+trigger_tool: cmake|conan|readelf
+phase: configuration|compilation|linking|runtime
+error_signature: System is unknown to cmake, create: Platform/HarmonyOS|
+                         CMAKE_SYSTEM_NAME.*OHOS|
+                         .*System is unknown.*HarmonyOS|
+                         DT_NEEDED.*\.\./\.\./\.\./lib|
+                         Library soname: \[\]|no SONAME
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cmake, platform, detection, linking, ohos
+match_keywords:         CMAKE_SYSTEM_NAME, OHOS, HarmonyOS, Platform/OHOS.cmake,
+                         SONAME, DT_NEEDED, 插件相对路径, libdrumstick, drumstick-rt,
+                         System is unknown, cmake platform module
+title:                  CMAKE_SYSTEM_NAME=OHOS 直接解决 CMake 平台识别+SONAME+插件DT_NEEDED
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             conan 的 OHOS toolchain 默认将 CMAKE_SYSTEM_NAME 映射为
+                        "HarmonyOS"，而 CMake 4.1.x 只自带 Platform/OHOS.cmake
+                        （内容为 include(Platform/Linux)），没有
+                        Platform/HarmonyOS.cmake。于是 configure 阶段报
+                        "System is unknown to cmake, create: Platform/HarmonyOS"，
+                        CMake 回退到无平台模块路径，导致三个连带缺陷：
+                        (1) 库不生成 SONAME（readelf -d 无 Library soname 字段）；
+                        (2) 插件等子目录库的 DT_NEEDED 记录成相对路径
+                        （如 ../../../lib/libdrumstick-rt.so），运行期从插件
+                        目录解析错位，加载失败报 "Error loading shared library"；
+                        (3) 平台宏（Q_OS_LINUX 等）不可靠。
+                        在 toolchain/CMakeToolchain 中显式设置
+                        CMAKE_SYSTEM_NAME=OHOS 可让 CMake 加载
+                        Platform/OHOS.cmake（等价 Linux 平台），同时修复
+                        SONAME 生成与插件 DT_NEEDED 相对路径问题。
+affected_scope:         所有使用 CMake 构建共享库（.so）与子目录插件的
+                        HarmonyOS/OpenHarmony PC 适配，尤其是 conan
+                        CMakeToolchain 场景下 CMAKE_SYSTEM_NAME 被映射为
+                        HarmonyOS 的软件（实测 libdrumstick 2.10.0）。
+verification_cmd:       grep CMAKE_SYSTEM_NAME conan_toolchain.cmake;
+                        readelf -d lib/lib*.so | grep -E "SONAME|NEEDED";
+                        ctest --test-dir build --output-on-failure
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           cmake-system-name-ohos
+rec_description:        在 conanfile.py generate() 的 CMakeToolchain 中显式设置
+                        tc.variables["CMAKE_SYSTEM_NAME"] = "OHOS"（而非让
+                        conan profile 默认映射为 HarmonyOS），CMake 加载
+                        Platform/OHOS.cmake（include Linux），自动修复平台识别、
+                        SONAME 生成与插件 DT_NEEDED 相对路径问题。
+rec_command:            tc.variables["CMAKE_SYSTEM_NAME"] = "OHOS"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-cmake-toolchain-variable
+
+fallback_priority:      2
+fallback_approach:      soname-flag-manual
+fallback_description:   若无法设置 CMAKE_SYSTEM_NAME=OHOS，可手动设置
+                        CMAKE_SHARED_LIBRARY_SONAME_C_FLAG/CXX_FLAG 生成
+                        SONAME，但插件 DT_NEEDED 相对路径问题仍需单独处理。
+fallback_command:       tc.cache_variables['CMAKE_SHARED_LIBRARY_SONAME_C_FLAG']='-Wl,-soname,'
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-soname-flag
+
+forbid_1_pattern:       CMAKE_SYSTEM_NAME.*Linux
+forbid_1_reason:        设为 Linux 虽可绕过平台识别，但会丢失 OHOS 语义与
+                        平台专属宏，且插件/子目录 DT_NEEDED 相对路径问题
+                        未必一并修复。
+forbid_1_consequence:   适配结果依赖平台宏的软件在 OHOS 上行为不一致。
+forbid_2_pattern:       CMAKE_SKIP_RPATH
+forbid_2_reason:        关闭 SONAME 会让下游 DT_NEEDED 记录非可重定位路径
+                        （详见 E537）。
+forbid_2_consequence:   消费者在缓存清理/迁移后无法解析依赖。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P010, P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E092]
+similar_to:             [E092, E383, E267, E140]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E580.md
+last_updated: 2026-09-17
+source_event:           libdrumstick 2.10.0 HarmonyOS PC adaptation, conan-verify round 7 (rtTest 插件 DT_NEEDED 相对路径失败)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk <opendesk@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-17
+
+draft: true
+contributor_id: 48FD
