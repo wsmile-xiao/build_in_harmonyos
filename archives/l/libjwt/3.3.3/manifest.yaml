@@ -1,20 +1,82 @@
 version: 3.3.3
 status: built
-build_date: '2026-05-26'
+build_date: '2026-09-15'
+
 source:
-  url: https://github.com/benmcollins/libjwt/archive/refs/tags/v3.3.3.tar.gz
-  sha256: ''
+  url: "https://github.com/benmcollins/libjwt/archive/refs/tags/v3.3.3.tar.gz"
+  sha256: "a562e5548a8e10ac6fcba64a5e6d326c15712211cb54d25242c15e8b3250b4f2"
   tar_format: tar.gz
+
 build:
   system: cmake
   configure_options:
-  - -DCMAKE_BUILD_TYPE=Release
-  - -DENABLE_TESTS=OFF
+    - "WITH_TESTS=ON（上游默认值，此处显式声明；上游 11 个 libcheck 套件随构建注册并由本配方执行）"
+    - "WITH_GNUTLS=OFF（上游默认 ON=auto-detect；OHOS 不引入 gnutls，钉死以消除依赖图不确定性）"
+    - "WITH_JSON_C=OFF（JSON 后端使用 jansson，上游默认值）"
+    - "WITH_MBEDTLS=OFF / WITH_LIBCURL=OFF / WITH_KCAPI_MD=OFF / ENABLE_COVERAGE=OFF（均为上游默认值，显式声明以保证可复现）"
+    - "未传 BUILD_SHARED_LIBS：上游 CMakeLists 对该变量无任何分支，共享库与静态库被无条件同时构建"
   dependencies:
-  - jansson/2.15.0
-  - openssl/3.5.6
+    - "jansson/2.15.1.1"
+    - "openssl/3.5.6"
+    - "check/0.15.2"
+  dependency_notes:
+    - "check/0.15.2 以 test_requires 引入：不参与 package_id、不向下游传播，仅供本包编译期运行上游测试。"
+    - "openssl/3.5.6 制品仓只提供静态库（libcrypto.a/libssl.a），故 OpenSSL 被静态链入 libjwt.so。"
   cc: clang
   cxx: clang++
-patches_applied: []
+
+patches_applied:
+  - "0001-cmake-fix-codegen-bash-c.patch"
+
+artifacts:
+  libraries:
+    - "lib/libjwt.so"
+    - "lib/libjwt.a"
+  executables:
+    - "bin/jwt-verify"
+    - "bin/jwt-generate"
+    - "bin/jwk2key"
+    - "bin/key2jwk"
+  headers:
+    - "include/jwt.h"
+    - "include/jwt_export.h"
+
 knowledge_gained:
-- "\u9700\u8981 OpenSSL >= 3.0.0"
+  - "上游用 pkg_check_modules()（pkg-config）而不是 find_package() 定位依赖：CMake 配方必须启用 PkgConfigDeps 生成 jansson.pc/openssl.pc/check.pc，仅靠 CMakeDeps 无法满足 pkg_check_modules。"
+  - "libcheck 选临时目录的优先级是 TEMP → P_tmpdir 宏 → TMPDIR → 当前目录；OHOS libc 把 P_tmpdir 定义为只读的 /tmp，因此只设 TMPDIR 无效，必须设 TEMP。"
+  - "上游 add_test() 硬编码解释器 /bin/bash，OHOS 根文件系统只有 /bin/sh → ctest 无法驱动，须按 add_test 等价语义直接执行测试二进制。"
+  - "openssl/3.5.6 制品仓为静态库，libjwt.so 的 DT_NEEDED 因此只有 libjansson.so + libc.so，无 libcrypto 运行时依赖。"
+  - "conan 在同一进程内接着跑 test_package：build() 中改动的进程环境变量（TEMP/TMPDIR/LD_LIBRARY_PATH）必须还原，否则后续 make 会把 jobserver fifo 建到本包构建目录并报 Operation not permitted。"
+  - "CMake 缺 Modules/Platform/HarmonyOS.cmake 时 CMAKE_SHARED_LIBRARY_SONAME_<LANG>_FLAG 为空，而该变量同时是 cmGeneratorTarget::HasSOName() 的判据：只补它会让上游声明的 VERSION/SOVERSION 生效、产出两级版本化符号链接（在 HMDFS 上创建失败 → 链接报错）；正确做法是同时设 CMAKE_PLATFORM_NO_VERSIONED_SONAME=TRUE，产出单个实体 .so 加裸 DT_SONAME。仓库既有 expat/libharu/attica 等 9 个配方用的是同一组三行。"
+  - "libjwt v3 移除了 jwt_new/jwt_free 公开函数（头文件仅存 jwt_free_t typedef），符号探测/兼容层引用须改用 jwt_builder_new、jwt_checker_new、jwks_create 等 v3 API。"
+  - "上游 CMakeLists 的 codegen 命令用 add_custom_command(COMMAND bash -c \"${CMAKE_C_COMPILER} -E ...\")，CMake 拆词后引号丢失、bash -c 只拿到裸编译器名 → clang 预处理静默失败（Error 1 无输出）；改直接调 ${CMAKE_C_COMPILER} -E（patch 0001）。"
+  - "OHOS/musl 下 conan 的 self.run()（shell=True）驱动 cmake --build -jN（N>1）时，make jobserver 并行 spawn clang 子进程会静默失败（失败点随并行调度漂移）；直接 make -j1 / subprocess 执行 100% 成功。规避：conanfile build() 内用 subprocess 直接 make -j1 串行编译（编译量小的库可接受）。"
+
+validation:
+  local:
+    source_version_check: passed
+    source_sha256_check: passed
+    lang_preflight: passed
+    dependency_preflight_w0: passed
+    init_build: passed
+    conan_create: passed
+    conan_create_package_id: "a87045f68ba2575c2c64510330eaf74cc5aa4077"
+    upstream_tests: "passed (11/11 libcheck 套件, 147 checks, 0 失败 0 错误)"
+    test_package: "passed（test.c 12/12 + test_ohos.c 9/9 鸿蒙平台特有，合计 21/21）"
+    conan_verify: passed
+    w3_local_ci: "passed（JC prdiff 模式 1 软件/0 junk、L0、KC、L1a/L1b/L1c/L1e、L4、L5；L2 冒烟为 non-blocking）"
+    soname_gate: "passed（libjwt.so 带 DT_SONAME=libjwt.so，NEEDED 仅 libjansson.so + libc.so，无绝对路径）"
+    reason: >-
+      依赖三件套（jansson/2.15.1.1、openssl/3.5.6、check/0.15.2）经 conan download 实测均已发布；
+      conan create 干净通过（上游 11/11 libcheck 套件 147 checks 0 失败、
+      test_package 21/21 = test.c 12 + test_ohos.c 9 鸿蒙平台特有）；
+      conan-verify 判定 PASS；W3 本地 CI 模拟全门禁通过（JC/L0/KC/L1/L1e/L4/L5）。
+      L2 冒烟仅在四个 CLI 工具的 --version/--help 上返回非零（上游 CLI 未实现这两个选项），
+      该门禁自身标记为 non-blocking。本地含 1 个源码补丁
+      （0001-cmake-fix-codegen-bash-c.patch，修复上游 codegen 的 bash -c 引号拆词）；
+      共享库的 SONAME 缺口仍由 conanfile.py 的 CMake 变量修复（非源码补丁）。
+  ohos:
+    conan_create: pending_ci
+    reason: >-
+      本地（OHOS aarch64 设备）全链路已验证；官方 CI 为 clean 环境，需在 PR 阶段做最终复验
+      （重点：libcheck 的 TEMP 可写目录与上游测试执行路径）。
