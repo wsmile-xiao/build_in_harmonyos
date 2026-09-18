@@ -1,0 +1,101 @@
+--- a/lib/Support/Unix/Timer.inc
++++ b/lib/Support/Unix/Timer.inc
+@@ -16,69 +16,91 @@
+ #include <sys/times.h>
+ #endif
+ 
+ #if defined(HAVE_SYS_TIME_H) && defined(ENABLE_GETTIMEOFDAY)
+ #include <sys/time.h>
+ #endif
+ 
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+ #include <linux/perf_event.h>
+ #include <sys/ioctl.h>
++#include <sys/types.h>
+ #include <cstring>
+ #include <cstdlib>
++#include <cstdio>
++#include <cerrno>
+ #if defined(HAVE_ASM_UNISTD_H)
+ #include <asm/unistd.h>
+ #endif
+ #endif 
+ 
+ namespace skypat {
+ namespace testing {
+ namespace internal {
+ 
+ //===----------------------------------------------------------------------===//
+ // Timer Implementation
+ //===----------------------------------------------------------------------===//
+ class TimerImpl
+ {
+ public:
+-  TimerImpl() {
++  TimerImpl() : m_Fd(-1) {
+     if (-1 == g_ClkTick) {
+       g_ClkTick = sysconf(_SC_CLK_TCK);
+       assert((0 < g_ClkTick) && "sysconf error");
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+      struct perf_event_attr attr;
+      
+      memset(&attr, 0, sizeof(attr));
+ 
+      attr.inherit = 1;
+      attr.disabled = 1;
+      attr.type = PERF_TYPE_SOFTWARE;
+      attr.config = PERF_COUNT_SW_TASK_CLOCK;
+      attr.size = sizeof(attr);
+ 
+      m_Fd = syscall(__NR_perf_event_open, &attr, 0, -1, -1, 0);
++
++     /* Runtime capability probe: keep the perf clock only when the kernel
++        actually granted a descriptor; otherwise clock() below falls back
++        to a real clock source. */
++     if (m_Fd < 0) {
++       static bool s_Warned = false;
++       if (!s_Warned) {
++         s_Warned = true;
++         fprintf(stderr,
++                 "skypat: perf_event_open is unavailable (errno=%d); "
++                 "falling back to clock-based timing\n", errno);
++       }
++     }
+ #endif
+     }
+   }
+   ~TimerImpl() {
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+-    ioctl(m_Fd, PERF_EVENT_IOC_DISABLE);
+-    close(m_Fd);
++    if (m_Fd >= 0) {
++      ioctl(m_Fd, PERF_EVENT_IOC_DISABLE);
++      close(m_Fd);
++    }
+ #endif
+   }
+ 
+    testing::Interval clock() {
+ #if defined(HAVE_LINUX_PERF_EVENT_H)
+-     unsigned long long runtime;
+-     read(m_Fd, &runtime, sizeof(unsigned long long));
+-     return runtime;
+-#elif defined(HAVE_CLOCK_GETTIME) && defined(ENABLE_CLOCK_GETTIME)
++     if (m_Fd >= 0) {
++       unsigned long long runtime = 0;
++       if (read(m_Fd, &runtime, sizeof(unsigned long long)) ==
++           (ssize_t)sizeof(unsigned long long))
++         return runtime;
++     }
++#endif
++#if defined(HAVE_CLOCK_GETTIME) && defined(ENABLE_CLOCK_GETTIME)
+      struct timespec ts;
+      int r = clock_gettime(CLOCK_MONOTONIC, &ts);
+      return r == -1 ? -1 : ts.tv_sec * 1000000000LL + ts.tv_nsec;
+ #elif defined(HAVE_GETTIMEOFDAY) && defined(ENABLE_GETTIMEOFDAY)
+      struct timeval tv;
+      int r = gettimeofday(&tv, NULL);
+      return r == -1 ? -1 : tv.tv_sec * 1000000000LL + (tv.tv_usec * 1000LL);
+ #else
+      struct tms tm;
+      clock_t r = times(&tm);
