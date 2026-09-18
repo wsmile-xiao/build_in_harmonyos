@@ -10,9 +10,14 @@ MuPDF 是由 Artifex Software 开发的开源 PDF 渲染引擎，专注于速度
 
 | Version | Status | Date |
 |---------|--------|------|
+| 1.25.1  | built  | 2026-09-17 |
 | 1.27.2  | built  | 2026-05-25 |
 
 ## 构建说明
+
+> 以下构建说明针对 **1.27.2**（系统库方案）。**1.25.1** 采用全内嵌 thirdparty 子模块
+> 方案（14 个子模块按 tag 精确 commit 下载、零外部 conan 依赖、不裁剪功能），
+> 详见 `1.25.1/notes.md`。
 
 - 构建系统：GNU Makefile
 - 构建命令：`make USE_SYSTEM_LIBS=yes USE_SYSTEM_LCMS2=yes USE_SYSTEM_BROTLI=yes mujs=no html=no extract=no HAVE_GLUT=no HAVE_X11=no HAVE_OBJCOPY=no HAVE_LIBCRYPTO=yes`
