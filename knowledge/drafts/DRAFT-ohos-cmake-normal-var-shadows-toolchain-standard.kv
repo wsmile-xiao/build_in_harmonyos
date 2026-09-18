@@ -1,0 +1,119 @@
+#====================================================================
+# DRAFT-ohos-cmake-normal-var-shadows-toolchain-standard — 上游 CMakeLists 用
+#   普通变量固定 CMAKE_CXX_STANDARD 时，配方注入的 -std= 会被末尾追加值压掉
+# 对应文档: knowledge/drafts/DRAFT-ohos-cmake-normal-var-shadows-toolchain-standard.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-cmake-normal-var-shadows-toolchain-standard
+trigger_tool:           cmake|conan|clang|gcc|make
+phase:                  configuration|compilation
+error_signature:        (unknown type name 'concept'|no template named 'remove_cvref_t')|
+                         unknown type name '(FloatType|IntegralType|StringType)'|
+                         CXX_FLAGS.*-std=c\+\+(17|14).*-std=c\+\+(17|14)
+
+severity:               2
+category:               cmake, toolchain, conan, cxx-standard, porting
+match_keywords:         CMAKE_CXX_STANDARD, tc.variables, CMakeToolchain, extra_cxxflags,
+                         -std=c++17, 普通变量覆盖, 末尾追加, set(CMAKE_CXX_STANDARD),
+                         c++20, libcifpp, cif-tools, CXX_STANDARD_REQUIRED, 标准被压掉
+title:                  上游 CMakeLists 用普通变量 set(CMAKE_CXX_STANDARD 17) 固定标准时，
+                        配方经 tc.variables / extra_cxxflags 注入的 C++20 会失效——
+                        普通变量覆盖 cache 变量且 CMake 在命令行**末尾追加** -std=c++17
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             CMakeToolchain 通过 cache 变量（native file 里的
+                        `CMAKE_CXX_STANDARD = '20'`）传递标准，但上游 CMakeLists 若在
+                        子目录 scope 内用**普通变量** `set(CMAKE_CXX_STANDARD 17)`
+                        重新赋值，该普通变量会**遮蔽**（shadow）同名 cache 变量；CMake
+                        随后按这个普通变量生成编译标志，并把 `-std=c++17` **追加到
+                        命令行末尾**（实测 CXX_FLAGS 形态：
+                        `-stdlib=libc++ -std=c++20 -fexperimental-library -O3 -DNDEBUG
+                         -std=c++17` —— 后者胜出）。于是配方注入的 `-std=c++20` 形同
+                        摆设，依赖 C++20 头的下游报错（如 libcifpp 10 的 item.hpp
+                        报 unknown type name 'concept' / no template named
+                        'remove_cvref_t' / unknown type name 'FloatType'）。
+                        **两个常见"修法"均无效**（均已实测证伪）：
+                        ① `tc.variables["CMAKE_CXX_STANDARD"]="20"` → 被上游普通变量
+                           覆盖，CXX_FLAGS 仍是 -std=c++17；
+                        ② 把 `-std=c++20` 加进 `extra_cxxflags` → 被末尾追加的
+                           -std=c++17 压掉（若同时加进 extra_cflags，C 编译器还会报
+                           "invalid argument '-std=c++20' not allowed with 'C'"，
+                           TryCompile 阶段直接失败）。
+                        唯一可靠修法是 **patch 上游那一行**。
+affected_scope:         上游用普通变量（而非 cache 变量）固定 C++ 标准、且所需标准
+                        高于上游设定值的 CMake 工程；典型是"上游钉 C++17、但其依赖的
+                        新版本头文件要 C++20"。与 E096（CMake 在 OHOS 上**检测**不到
+                        编译器 C++ 标准能力）不同层：E096 是检测失败→需显式指定，本条
+                        是显式指定了却被上游覆盖→需改上游。
+verification_cmd:       在 build 目录查看实际生效的标志：
+                        grep '^CXX_FLAGS' CMakeFiles/<target>.dir/flags.make
+                        # 若末尾出现 -std=c++17 而配方要求 c++20，即命中本条；
+                        # 再看上游是否用普通变量：
+                        grep -n "set(CMAKE_CXX_STANDARD" <src>/CMakeLists.txt
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           patch-upstream-standard-line
+rec_description:        用补丁把上游 CMakeLists 里那一行普通变量直接改为所需标准
+                        （`set(CMAKE_CXX_STANDARD 17)` → `20`），作为 portability
+                        补丁提交；这是唯一能真正改变编译标志的修法。若上游同处还有
+                        `set(CMAKE_CXX_STANDARD_REQUIRED ON)`，保持不变即可。
+                        另注意：上游子目标可能**另有一处**独立的标准设置（如测试
+                        子目录的 CMakeLists 各有 cxx_std_NN），需分别 patch，不要
+                        假定根文件改了就全生效。
+rec_command:            grep -rn "CMAKE_CXX_STANDARD\\|cxx_std_" <src>/CMakeLists.txt <src>/*/CMakeLists.txt
+                        # 逐一改成本项目所需标准；随后用 flags.make 复核实际生效值
+rec_auto_fix:           false
+rec_impl:               patch-upstream-standard-line
+
+fallback_priority:      2
+fallback_approach:      force-flags-with-nonstandard-trick
+fallback_description:   若因故无法 patch 上游（例如该文件由构建期生成、或维护者要求
+                        零补丁），可尝试在 configure **之后**直接改写生成的
+                        flags.make / compile_commands 注入标准——但这绕过 CMake 的
+                        依赖跟踪，重新 configure 即失效，**脆弱且不推荐**；仅在
+                        补丁路径确实不可行时使用，并在 notes.md 写明该脆弱性。
+fallback_command:       # sed 改 build 目录 flags.make（不推荐，仅兜底）
+fallback_auto_fix:      false
+fallback_impl:          sed-generated-flags
+
+forbid_1_pattern:       用 tc\.variables\[.CMAKE_CXX_STANDARD.\].*认为.*生效|
+                         只加 extra_cxxflags.*-std=c\+\+20.*认为.*生效
+forbid_1_reason:        两者都会被上游普通变量或末尾追加的标准压掉——只写其一即
+                        "以为修好了"，实测 CXX_FLAGS 仍为 -std=c++17，浪费时间且
+                        问题伪装成"配方没写对"。
+forbid_1_consequence:   反复调配方却始终不生效，误判为 Conan 行为异常。
+
+forbid_2_pattern:       把 -std=c\+\+20.*加进 extra_cflags（C 语言标志）
+forbid_2_reason:        extra_cflags 会传给 C 编译器，clang/gcc 对 C 源文件拒绝
+                        `-std=c++20`（TryCompile 阶段报 invalid argument ... not
+                        allowed with 'C'），直接导致 configure 失败。
+forbid_2_consequence:   configure 阶段整体失败，且报错指向 C 编译器，容易误判为
+                        工具链问题而非配方失误。
+
+principles:             upstream-compat-evidence, measure-actual-flags
+
+causes:                 []
+caused_by:              []
+similar_to:             [E096]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-cmake-normal-var-shadows-toolchain-standard.md
+last_updated:           2026-09-16
+source_event:           cif-tools 2.0.0 适配（CMakeLists:43 钉 C++17，libcifpp/10.0.4
+                        头文件需 C++20；实测 CXX_FLAGS 末尾为 -std=c++17）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        4D18
