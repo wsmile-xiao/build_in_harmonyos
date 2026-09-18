@@ -1,0 +1,111 @@
+#====================================================================
+# DRAFT-perl-module-build-makemaker-substitution — CPAN 发行版以 Module::Build
+#   （Build.PL）为构建系统而 OHOS 无该模块时，用 perl 核心 ExtUtils::MakeMaker
+#   生成等价 Makefile.PL 继续构建（上游 t/ 仍可 make test 真跑）
+# 对应人类文档: knowledge/drafts/DRAFT-perl-module-build-makemaker-substitution.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-perl-module-build-makemaker-substitution
+trigger_tool:           perl|Makefile.PL|Build.PL|conan|make|test
+phase:                  configuration
+error_signature:        Can't\ locate\ Module/Build\.pm\ in\ @INC|
+                         Can't\ locate\ Module/Build/Tiny\.pm\ in\ @INC|
+                         system acceleration policy not enabled
+severity:               2
+category:               perl, build-system, packaging, conan, portability
+match_keywords:         Module::Build, Build.PL, Makefile.PL, ExtUtils::MakeMaker,
+                        Module::Build::Tiny, configure_requires, INSTALLDIRS, DESTDIR,
+                        site_perl, python-require, PERL5LIB, conan search, CPAN, PREREQ_PM
+title:                  CPAN 发行版以 Module::Build（Build.PL）为构建系统而 OHOS 缺该模块时，
+                        用 ExtUtils::MakeMaker 生成等价 Makefile.PL 继续构建
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             一部分 CPAN 发行版用上游 Module::Build（Build.PL，
+                        configure_requires Module::Build >= 0.4004）或 Module::Build::Tiny
+                        作为构建系统，而 OHOS 环境只带 perl 核心模块：设备 perl 5.42.2
+                        与 /data/service/hnp/bin/perl 5.42.0 均无 Module/Build.pm，
+                        制品仓也无 perl-module-build 制品 → `perl Build.PL` 直接以
+                        "Can't locate Module/Build.pm in @INC" 退出，构建无法起步。
+                        判定陷阱：用 `conan download <pkg> -r=ohpcd` 探测不存在的包会报
+                        误导性的 "system acceleration policy not enabled"（与网络/权限故障
+                        不可区分），必须用 `conan search <pkg>/* -r=ohpcd`（返回
+                        "Found 0 pkg/version recipes"）判定存在性。
+affected_scope:         所有以 Module::Build / Module::Build::Tiny 为构建系统的纯 Perl
+                        CPAN 发行版在 OHOS 上的适配（Future、Parallel::Pipes 等）。
+                        仅影响构建入口——纯 Perl 模块无 XS、无平台相关代码，功能不受影响。
+verification_cmd:       perl -MModule::Build -e 'print $Module::Build::VERSION' 2>&1
+                        # 期望 Can't locate Module/Build.pm
+                        conan search "perl-module-build/*" -r=ohpcd
+                        # 期望 Found 0 pkg/version recipes
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           build-script-substitution
+rec_description:        在 conanfile.py 的 build() 中，当源码根目录没有 Makefile.PL 时生成一个，
+                        由 perl 核心模块 ExtUtils::MakeMaker 驱动，**逐项转写**上游 Build.PL 的
+                        module_name / requires / test_requires（与 META.json 的 prereqs 对齐，
+                        避免遗漏运行时依赖声明）；随后 perl Makefile.PL INSTALLDIRS=site →
+                        make → make test → make install DESTDIR=<staging>。
+                        仅新增构建脚本、不改动上游源码，因此无需补丁（patches: {}）。
+                        打包：package_type=python-require（无 C/C++ 产物、无 bindirs → 无需
+                        commands.json）；安装前缀随 perl 构建而异，package()/package_info()
+                        必须遍历定位 .pm 找 site 目录（不可硬编码路径）；
+                        runenv_info.define_path("PERL5LIB", site) 注入供下游 use。
+rec_command:            test -f Makefile.PL || write Makefile.PL (WriteMakefile NAME/VERSION_FROM/
+                        PREREQ_PM/TEST_REQUIRES/NO_MYMETA=1);
+                        ${PERL} Makefile.PL INSTALLDIRS=site && make && make test &&
+                        make install DESTDIR="${STAGING}"
+rec_auto_fix:           false
+rec_impl:               recipe-pattern
+
+fallback_priority:      2
+fallback_approach:      tool-requires-module-build
+fallback_description:   若上游 Build.PL 含必须由 Module::Build 执行的逻辑（自定义 Action、
+                        auto_configure_requires 等），先立项把 Module::Build 适配并发布为
+                        tool_requires（perl-module-build），再走原生 perl Build.PL → ./Build。
+                        注意 E137：OHOS perl 的 ldflags/lddlflags 含 -fstack-protector-strong，
+                        会使 ExtUtils::CBuilder 的 C 编译器探测失败（ld.lld 不识别该编译期选项），
+                        XS 场景需先按 E137 处理。
+fallback_command:       self.tool_requires("perl-module-build/0.4234")
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       rm .*Build\.PL|sed -i.*Build\.PL|删除.*Build\.PL.*(以|to).*构建
+forbid_1_reason:        删除/改写上游构建脚本属破坏上游源码，不可复现、不可上游。
+forbid_1_consequence:   补丁不可复现；评审直接拒绝。
+
+forbid_2_pattern:       跳过.*make test|skip.*make test|TEST_VERBOSE=0.*#\s*no\s*tests
+forbid_2_reason:        上游测试套件是 R51 强制申报内容，跳过即失去适配可信度；
+                        以掩盖换通过。
+forbid_2_consequence:   PR 被拒；无法证明适配未破坏功能。
+
+forbid_3_pattern:       conan download .*-r=ohpcd.*(判定|判断).*(存在|发布)
+forbid_3_reason:        conan download 对不存在/未发布的包报 "system acceleration policy
+                        not enabled"，语义误导，据此会误判依赖已发布/未发布。
+forbid_3_consequence:   依赖链判断错误——要么白等一个不存在的包，要么误报 dependency_missing。
+
+principles:             real-upstream-test-evidence, reproducible-build-test, upstream-source-untouched
+
+causes:                 []
+caused_by:              []
+similar_to:             [E137, E155]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-perl-module-build-makemaker-substitution.md
+last_updated:           2026-09-18
+source_event:           future 0.52 适配（CPAN Future，纯 Perl，56 文件 778 用例 PASS）
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:          79aaf889a
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-18
+
+draft:                  true
+contributor_id:         1753
