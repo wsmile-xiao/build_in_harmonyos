@@ -1,0 +1,89 @@
+#====================================================================
+# DRAFT — 手写 Makefile 的链接行只带 $(CFLAGS)：交叉编译时依赖包的 -I/-L 没有
+#         注入点（CPPFLAGS/LDFLAGS/LDLIBS 全缺），并且 musl 不传递包含
+#         <sys/types.h>，同一份源码在 glibc 上"碰巧"编得过、在 OHOS 上直接炸
+# Timestamp: 2026-09-19
+# Software: zerofree 1.1.1（Makefile 全文 6 行；zerofree.c 依赖 e2fsprogs 的 libext2fs）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# 探针证据（OHOS 设备，aarch64-unknown-linux-ohos，clang 15.0.4 + musl）：
+#   [编译期] zerofree.c:190:5: error: unknown type name 'dev_t'
+#            zerofree.c:191:5: error: unknown type name 'mode_t'
+#   [链接期] ld.lld: error: unable to find library -lext2fs
+#   补丁 0001（CC?=gcc + 链接行接受 CPPFLAGS/CFLAGS/LDFLAGS/LDLIBS）+
+#   补丁 0002（源码显式 #include <sys/types.h>）之后，
+#   conan-verify G0-G4 / L2 / L4 / L5 全绿，test_package 14/14 断言通过。
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-zerofree-1.1.1-makefile-linkline-flags-and-musl-transitive-include
+trigger_tool:           make|cc|ld.lld|clang|cross-compile
+phase:                  compilation|linking
+error_signature:        unknown type name 'dev_t'|unknown type name 'mode_t'|
+                        ld\.lld: error: unable to find library -l\w+|
+                        undefined reference to `\w+'.
+
+severity:               3
+category:               build-system|makefile|portability|musl|cross-compile
+match_keywords:         手写 Makefile, 极简 Makefile, CC=gcc 硬编码, CC?=gcc,
+                        CPPFLAGS missing, LDFLAGS missing, LDLIBS missing,
+                        -lext2fs, libext2fs, e2fsprogs, com_err, uuid,
+                        musl transitive include, sys/types.h, dev_t, mode_t,
+                        glibc 传递包含, 交叉编译 flags 注入, R33,
+                        tools.build:compiler_executables, 链接顺序, undefined reference
+
+title:                  手写 Makefile 链接行只带 \$(CFLAGS)：交叉编译时依赖包的 -I/-L 无注入点（缺 CPPFLAGS/LDFLAGS/LDLIBS），且 musl 不传递包含 <sys/types.h>，导致 glibc 上能编、OHOS 上必炸
+
+probe_command:          |
+    # 1) 链接行是否有 flags 注入点
+    grep -nE '\$\(CC\)|CPPFLAGS|LDFLAGS|LDLIBS' Makefile
+    # 2) 依赖头文件是否依赖传递包含（有则 musl 下会炸）
+    grep -rl 'sys/types.h' "$(pkg-config --variable=includedir e2fsprogs)/ext2fs" 2>/dev/null || echo "无传递包含"
+
+root_cause:             |
+    极简手写 Makefile 通常不遵循 autotools 的变量约定：
+      all: zerofree.c
+          $(CC) $(CFLAGS) -o zerofree zerofree.c -lext2fs
+    1) CC 被硬编码成 gcc，交叉工具链无法覆盖（需 CC?=gcc）；
+    2) 链接行只有 $(CFLAGS)，$(CPPFLAGS)（依赖包 -I）、$(LDFLAGS)（-L）、
+       $(LDLIBS)（间接引用库）都没有位置可注入；
+    3) glibc 的 <ext2fs/ext2fs.h> 会传递包含 <sys/types.h>，musl 不会 ——
+       所以 dev_t/mode_t 在 x86-64 glibc 上"碰巧"可用，交叉到 OHOS 立刻
+       unknown type name。
+
+detection:              |
+    conan create 在交叉 profile 下：先编译期报 unknown type name 'dev_t'/'mode_t'，
+    补上显式包含后再在链接期报 unable to find library -l<dep>；
+    两者同时出现即命中本条目。
+
+fix:                    |
+    补丁化为外部 flags 可注入，次序刻意安排：
+
+        -CC=gcc
+        +CC?=gcc
+        -	$(CC) $(CFLAGS) -o zerofree zerofree.c -lext2fs
+        +	$(CC) $(CPPFLAGS) $(CFLAGS) -o zerofree zerofree.c $(LDFLAGS) -lext2fs $(LDLIBS)
+
+    -l<dep> 在 $(LDFLAGS) 之后（-L 先生效）、在 $(LDLIBS) 之前（间接引用符号
+    才能在单遍扫描里被解析）。再用补丁让源码显式 #include <sys/types.h>。
+
+    配方侧：不要读 shell 里的 CC（release worker 上可能为空），按 R33 从
+    tools.build:compiler_executables 取绝对路径，再 make CC=… CPPFLAGS=… …
+    传入。
+
+affected_scope:         所有"极简手写 Makefile"上游（单文件/少量文件的 C 工具，
+                        典型如 *utils、*tools 类小包），且依赖包的头文件存在
+                        glibc→musl 传递包含差异时。
+
+similar_to:             [E063, E158, E313, E491]
+conflicts_with:         []
+caused_by:              []
+
+authors:                username- <爱学鸿蒙的小格温队>
+source_event:           zerofree 1.1.1 适配（PR !10945，任务 12361）
+last_updated:           2026-09-19
