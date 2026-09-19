@@ -1,0 +1,106 @@
+#====================================================================
+# Draft knowledge entry - OHOS clang does not predefine
+# _POSIX_C_SOURCE: upstream conditional-compilation branches that test
+# `_POSIX_C_SOURCE >= 200112L` take the wrong (#else fallback) path and
+# collide with unistd.h declarations
+# Source package: cheat/1.0.4 (tests/jammed.c, tests/slow.c)
+#====================================================================
+
+id:                     DRAFT-cheat-1.0.4-posix-c-source-branch-select
+trigger_tool:           clang|cc|make|conan
+phase:                  build
+error_signature:        static declaration of 'sleep' follows non-static declaration|static declaration of '[A-Za-z_]+' follows non-static declaration|_POSIX_C_SOURCE.*branch
+
+severity:               2
+category:               platform-libc|feature-macros|conditionals|legacy-c
+match_keywords:         _POSIX_C_SOURCE, POSIX, feature-test macro, conditional compilation, unistd.h, static declaration, sleep, clang, OHOS, musl, glibc features.h, #elif
+title:                  OHOS clang does not predefine _POSIX_C_SOURCE, so upstream #elif branches selecting the POSIX API take the fallback branch and clash with unistd.h; declare the POSIX level at compile time
+
+root_cause:             Many legacy C projects guard POSIX-only code with
+                        `#elif _POSIX_C_SOURCE >= 200112L` and provide a
+                        static fallback in `#else` (e.g. a private static
+                        `sleep()`). On glibc hosts features.h implicitly
+                        predefines _POSIX_C_SOURCE, so the POSIX branch is
+                        taken. OHOS's clang + musl-based libc does NOT
+                        predefine it by default, so the compiler takes the
+                        `#else` branch and defines the private symbol —
+                        which then collides with the real declaration
+                        already pulled in by the same TU (e.g. cheat.h
+                        enables CHEAT_POSIXLY and includes unistd.h):
+                        `static declaration of 'sleep' follows non-static
+                        declaration` is a hard clang error. Measured on
+                        cheat 1.0.4: `tests/jammed.c:22` and
+                        `tests/slow.c:20` with the OHOS clang 15 toolchain
+                        (aarch64-unknown-linux-ohos).
+affected_scope:         Any C/C++ project whose source or test files branch
+                        on _POSIX_C_SOURCE (or siblings _XOPEN_SOURCE /
+                        _GNU_SOURCE) and provide fallback definitions,
+                        when compiled on OHOS; most often hits when the
+                        recipe build() compiles upstream tests directly.
+
+verification_cmd:       printf '#if _POSIX_C_SOURCE >= 200112L\n#include <unistd.h>\n#else\nstatic void sleep(int s){}\n#endif\nint main(void){return 0;}' > /tmp/probe.c; /data/service/hnp/bin/clang -I . -c /tmp/probe.c 2>&1 | grep -q "static declaration of 'sleep'" && /data/service/hnp/bin/clang -D_POSIX_C_SOURCE=200112L -I . -c /tmp/probe.c && echo PROBE_OK
+
+rec_priority:           1
+rec_approach:           declare-posix-level-cflag
+rec_description:        Add `-D_POSIX_C_SOURCE=200112L` to the compile
+                        flags of the affected build (recipe build()
+                        upstream-test gate, CFLAGS, or CMake
+                        CMAKE_C_FLAGS). This mirrors what glibc's
+                        features.h implicitly provides, so the upstream
+                        `#elif _POSIX_C_SOURCE >= 200112L` branch is
+                        selected and the fallback static definition is
+                        never compiled — no source edit, no semantic
+                        change to any test.
+rec_command:            clang -D_POSIX_C_SOURCE=200112L -I . -o prog -w tests/jammed.c && ./prog -s
+rec_auto_fix:           false
+rec_impl:               build-option
+
+fallback_priority:      2
+fallback_approach:      rename-private-symbol
+fallback_description:   If the fallback definition is truly needed
+                        (non-POSIX-only builds), rename the private
+                        symbol out of the libc namespace instead of
+                        defining a same-name static function.
+fallback_command:       sed -i 's/\bsleep(/cheat_private_sleep(/g' tests/jammed.c tests/slow.c
+fallback_auto_fix:      false
+fallback_impl:          patch
+
+forbid_1_pattern:       -Wno-error=.*static|no-error.*declaration
+forbid_1_reason:        "static declaration follows non-static" is a clang
+                        hard error (semantic declaration conflict), not a
+                        warning; no -Wno-error flag can downgrade it.
+forbid_1_consequence:   Compilation still fails at the same TU; time spent
+                        chasing a non-existent flag.
+
+forbid_2_pattern:       #define sleep|define\s+sleep\(
+forbid_2_reason:        Macro-izing the symbol cannot reconcile a static
+                        definition with the real unistd.h declaration; it
+                        either still conflicts or corrupts the libc
+                        declaration for every including TU.
+forbid_2_consequence:   Compile errors move unpredictably or the libc API
+                        is silently altered repo-wide.
+
+principles:             P-BUILD-002, P-PATCH-002
+causes:
+caused_by:
+similar_to:             [E032, E033, E152, DRAFT-musl-posix-decl-conflict-rename-legacy]
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-cheat-1.0.4-posix-c-source-branch-select.md
+last_updated:           2026-09-19
+source_event:           cheat/1.0.4 adaptation: jammed.c/slow.c compile
+                        failure fixed with -D_POSIX_C_SOURCE=200112L in
+                        the recipe build() upstream-test gate; 25/25 test
+                        files then compiled and ran, conan-verify G2 PASS.
+authors:                junshi_liu
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-19
+
+draft:                  true
+contributor_id:         junshi_liu
