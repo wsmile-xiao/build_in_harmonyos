@@ -1,0 +1,44 @@
+# ══ Draft knowledge entry — autotools 交叉适配的「宿主编译器检查 vs 目标库 LIBS」与静态依赖链接 ══
+# Timestamp: 2026-09-16
+# Software: iverilog 13.0 — 知识可跨库复用
+# Gate: conan create (G2) / configure / make install
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-iverilog-13.0-autotools-host-libs-forbuild-static-readline.md
+#
+# To promote:
+#   1. Review 错误摘录与证据
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id: DRAFT-iverilog-13.0-autotools-host-libs-forbuild-static-readline
+trigger_tool: conan|autotools|configure|make
+phase: build|configure|package
+error_signature: C compiler cannot create executables|AX_PROG_CC_FOR_BUILD|cannot run C compiled programs|undefined symbol: add_history|m4 subprocess failed|-lreadline .* -lncursesw|cannot guess build type|subs1.awk: Permission denied|could not setup config files machinery|z_errmsg.*recompile with -fPIC|system.vpi.*gzclose.*symbol not found
+severity: 2
+category: autotools, cross-compile, linking, static-libs, host-tools, ohos, packaging
+match_keywords: AX_PROG_CC_FOR_BUILD, AC_PROG_CC_FOR_BUILD, LIBS, AutotoolsDeps, cross_building, --host, readline, ncurses, add_history, static link order, DESTDIR, --prefix, module dir, tool_requires, bison, flex, gperf, m4, relocation, config.guess, --build, AS_TMPDIR, ac_tmp, E114, Permission denied, PIC, z_errmsg, system.vpi, dlopen, ac_cv_lib, gzclose
+title: autotools 交叉适配六类高发坑：① AX_PROG_CC_FOR_BUILD 用全局 LIBS 链接宿主编译器 → "C compiler cannot create executables"；② host/build 同一 profile 时 conan 不传 --host，configure 去运行目标程序；③ 静态 readline/ncurses 的最终链接与 install 重链缺 -l 顺序
+root_cause: ① iverilog configure.ac:17 AX_PROG_CC_FOR_BUILD 的「宿主编译器可用」检查使用全局 $LIBS 链接本机 gcc；AutotoolsDeps 把目标库（aarch64 的 -lreadline/-lbz2/-lz）写进 LIBS，本机 gcc 找不到这些目标库（或架构不符）→ configure: error: C compiler cannot create executables。② WSL 工作流 host/build 用同一 OHOS cross profile（ci/conan/build_and_test.sh 对 -pr:h/-pr:b 用同一 profile），conan 的 cross_building(self) 为假 → AutotoolsToolchain 不传 --host；但 CC 仍是 OHOS 交叉 clang，产出的 aarch64 程序被 configure 尝试运行 → cannot run C compiled programs。③ 注册表 readline/ncurses 只有静态库（ncurses 配方禁止 shared），且为通过 ① 清空了 LIBS，configure 的 AC_CHECK_LIB(readline) 无法解析 readline 内的 ncurses 符号 → 探测 no、HAVE_LIBREADLINE 未定义但代码仍引用 add_history；最终链接与 make install（install 依赖 all，会重链）都缺 -lreadline/-lhistory/-lncursesw → undefined symbol: add_history。附加：bison 由 deb/自定义工具提供时需 BISON_PKGDATADIR + M4 指向同目录，否则 "m4 subprocess failed"。
+  ④ CI/HMDFS 沙箱：OHOS worker 的 config.guess 在沙箱 tmp 编译 dummy.c 报 Permission denied → configure cannot guess build type；config.status 用 AS_TMPDIR 在 build 目录建 ./confXXXXXX，子进程写 subs1.awk 同样被拦（could not setup config files machinery）——须显式 --build/--host 并预建可写 ac_tmp/TMPDIR。 ⑤ Conan Autotools.make 把参数空格 join 后经 shell 执行：含空格的 LIBS= 在递归 sub-make 中被拆开，vpi 模块只拿到部分 -l → 须转义空格。 ⑥ 共享 VPI 模块不能链非 PIC 静态库：注册表 zlib 静态且非 PIC（z_errmsg recompile with -fPIC），bzip2 仅静态；iverilog configure 会自动探测它们，须用 ac_cv_lib_* 缓存变量显式关闭，否则运行期 system.vpi dlopen 报 gzclose: symbol not found。
+affected_scope: 所有在 OHOS 上交叉适配的 autotools 项目：使用 AC_PROG_CC_FOR_BUILD/AX_PROG_CC_FOR_BUILD（配置期需要宿主编译器/生成工具）或多个依赖库；依赖 readline/ncurses 等纯静态、且被链接进可执行文件的项目；采用 conan --prefix=/ + DESTDIR 安装、运行期按 $(prefix) 找资源（模块目录/资源目录）的项目
+verification_cmd: conan create archives/<...> -pr:h=<ohos cross profile> -pr:b=default（交叉）；检查 configure 命令行是否含 --host；grep -nE "cannot create executables|cannot run C compiled programs|undefined symbol: add_history" reports/*.log；grep -n "AX_PROG_CC_FOR_BUILD" configure.ac；grep -nE "^LIBS|^LDFLAGS" <build>/Makefile
+rec_priority: 1
+rec_approach: autotools-cross-libs-host-guards
+rec_description: 三条固定判据：① 若 configure 报 C compiler cannot create executables 且项目含 *_FOR_BUILD 宏：在 AutotoolsToolchain 的 configure_args 追加 "LIBS="（保留 CPPFLAGS/LDFLAGS，AC_CHECK_LIB 仍能定位目标库）——清空只影响 configure 期间的 LIBS；② 若配置阶段出现 "cannot run C compiled programs" 且日志显示 build==host（同 profile 工作流）：在对 OS==OHOS 的 configure_args 里补 --host=aarch64-linux-ohos，且 build_requirements 改用真实机器架构判断（platform.machine()）决定是否 tool_requires 注册表工具，避免把 aarch64 生成工具放到 x86_64 上跑；③ 若最终链接/ install 报缺 readline/ncurses 符号：把静态链接顺序抽成 recipe 方法（-lreadline -lhistory -lbz2 -lz -lformw -lmenuw -lpanelw -lncursesw -lpthread），在 build/check/install 三处都传 LIBS=（make install 会重新链接）。另：运行期模块/资源路径若被写死为 $(prefix)，交叉/relocation 后需用项目自身开关（如 -B）指定实际路径。
+rec_command: # ① configure 期：tc.configure_args.append("LIBS=")# ② OHOS 且非交叉时补 --host# ③ 所有 make 调用：# autotools.make(args=["-j1", "LIBS=-lreadline -lhistory -lbz2 -lz -lformw -lmenuw -lpanelw -lncursesw -lpthread"])# autotools.make(target="check", args=[...同 LIBS...])# autotools.install(args=[...同 LIBS...])
+rec_auto_fix: false
+rec_impl: recipe-autotools-libs-and-host-guards
+fallback_priority: 2
+fallback_approach: disable-optional-static-libs
+fallback_description: 若无法在 install 重链时传入静态链接顺序（或可选库始终探测失败），先用 -o <pkg>/*:with_readline=False、with_zlib=False、with_bz2=False 关掉可选库保证构建通过（注意此时 configure 的 AC_CHECK_LIB 探测会全部 no），但会丢失交互/压缩特性，仅作兜底；优先保住功能。
+fallback_command: conan create archives/<...> -o <pkg>/*:with_readline=False -o <pkg>/*:with_zlib=False -o <pkg>/*:with_bz2=False
+fallback_auto_fix: false
+fallback_impl: recipe-options-disable-optional
+principles: R3, R26, R34, R39
+similar_to: E467, E490, E317, E114
+doc_file: knowledge/drafts/DRAFT-iverilog-13.0-autotools-host-libs-forbuild-static-readline.md
+last_updated: 2026-09-16
+source_event: iverilog 13.0 交叉 conan create（最终 CREATE_EXIT=0，conan-verify G0-G3 PASS，W3 本地 CI 通过）依次遇到：configure C compiler cannot create executables → cannot run C compiled programs → undefined symbol: add_history（build 后又在 make install 重链复现）；证据日志 /mnt/e/dsh working/tasks/iverilog-13.0-2026-09-16/logs/030-036-*.log
+authors: staralsnow
+metrics_success_count: 0
+metrics_fail_count: 0
