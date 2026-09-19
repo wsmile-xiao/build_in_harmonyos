@@ -1,0 +1,120 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E582.kv，填写各字段
+# 对应的人类文档: doc/E582.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+#   只认加载器的 errno 后缀（: Permission denied / : EACCES），绝不以裸 `Error loading shared library`
+#   前缀匹配——真正「缺库」时动态加载器同样打印该前缀（: No such file or directory），据前缀会误判。
+id:                     E582
+trigger_tool: python|pip|install|runtime
+phase: runtime
+error_signature: Error loading shared library [^:]+\.so: Permission denied|Error loading shared library [^:]+\.so: EACCES
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: platform,limitation,ohos,security,python
+match_keywords: OHOS, hmmac, security label, dlopen, Permission denied, EACCES, E212, E502, static verification, ELF, .codesign, wheel, prebuilt, binary-sign-tool
+title: CI 任务域 hmmac 标签拒绝 dlopen 用户目录 .so（与 ELF 签名无关）：预编译 wheel 自检回退为静态 ELF/.codesign 校验
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: OHOS CI worker 的任务域安全标签（hmmac）按文件所在路径授权：仅 hnp_file 标签（/data/service/hnp 下的 .so）可被 dlopen，用户可写目录（/storage/Users 的 hmdfs 标签、/data/storage/el2/base 等）下的任何 .so 一律被拒，报 EACCES——日志形如 `Error loading shared library <path>.so: Permission denied`。这是路径/标签策略，与 ELF 代码签名无关（知识 E212/E502），故重签名无法修复 CI 失败；真机/交互设备域较宽松，因此预编译 wheel 本地可 import、CI 必红。真机（HNP worker）实测补充：把已签名 ELF 拷到新路径后 dlopen 报 Permission denied，用 `/data/service/hnp/bin/binary-sign-tool sign -inFile F -outFile F.signed -selfSign 1` 重签即恢复可加载（普通拷贝 Permission denied、重签后加载 OK），故 wheel 解包出的副本仍需重签名，但它绕不过 E212 的路径/标签策略。
+affected_scope: 所有在 CI worker 沙箱内需真实 dlopen 用户目录 .so 的预编译 wheel / 预编译二进制封装配方（Python Cython 扩展及其随附科学计算依赖，如 numpy/scipy）；真机与设备域可正常加载，偏差表现为「本地/真机全绿、CI 必红」，必须在 CI 侧按 errno 标记识别 E212 并回退静态校验
+verification_cmd: python3 -c "import yt, numpy; print(yt.__version__, numpy.__version__)"  # 真机可直接跑；CI worker 内必报 Error loading shared library <path>.so: Permission denied（E212/E502），此时改静态校验——逐个 .so 验 ELF 魔数（前 4 字节 \x7fELF）且含 .codesign 段（llvm-objdump -h 或 llvm-readelf -S，工具缺失时退化为纯 Python 字节扫描）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           conan-recipe          # 见 DESIGN §5 impl 列表
+rec_description: CI 不再要求真实 dlopen：配方自检 `import yt` 捕获 stderr，命中 errno 特定标记 `: Permission denied` / `: EACCES`（绝不用裸 `Error loading shared library` 前缀——真正缺库时该前缀相同，会误判）即判定为 E212（hmmac 路径/标签策略，重签名无法修复），回退到静态校验——对 staging 内每个 .so 校验 ELF 魔数（前 4 字节 \x7fELF）与 `.codesign` 段（llvm-objdump -h / llvm-readelf -S，工具缺失时退化为纯 Python 字节扫描），全部通过则打印 PASS 让 `conan create` 成功，并如实报告「运行时 import 需经 HNP 安装到真机验证」；任何非 E212 自检失败仍抛错。wheel 解包出的 .so 副本仍需在 build() 内用 binary-sign-tool 重签名（真机实测：已签名 ELF 换路径后 dlopen 失败、重签后恢复），但重签名不能绕过 CI 的 E212。真实功能证据来自真机/本地实测：上游套件 792 passed / 97 skipped / 0 failed、消费者测试 7/7；签名数 115 个共享对象、归一化扩展 93 个。参考实现 archives/y/yt/4.4.2（fix 实际落地处）与 archives/n/numpy/1.26.4（同类预编译扩展封装 + 签名）。
+rec_command: llvm-objdump -h <lib.so> | grep -q '\.codesign'   # CI E212 回退：静态校验每个 .so 为 ELF 且含 .codesign 段；真机侧副本需先 binary-sign-tool sign -inFile <lib.so> -outFile <lib.so>.signed -selfSign 1 && mv <lib.so>.signed <lib.so> && chmod 755 <lib.so>
+rec_auto_fix:           false                  # 引擎能否自动执行
+rec_impl:               conan-recipe                   # 内置实现名 (见 DESIGN §5)
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       Error loading shared library(?!.*: (Permission denied|EACCES))
+forbid_1_reason:        裸 `Error loading shared library` 前缀不可作为 E212 判据：真正缺库(ENOENT)同样输出该前缀，只有 errno 后缀 `: Permission denied` / `: EACCES` 才是 E212 标记
+forbid_1_consequence:   把「依赖缺失」误判为 E212 静态 PASS → 假绿，真实缺陷流入发布
+forbid_2_pattern:       (re-?sign|chmod 0?755).*(fix|resolv)|(up|down)grade (numpy|scipy)
+forbid_2_reason:        E212 是 hmmac 路径/标签策略（知识 E212/E502），与 ELF 代码签名、权限位、依赖版本无关——重签名/chmod/升降依赖版本都无法修复 CI 失败
+forbid_2_consequence:   方向性错误永不收敛；升降依赖还可能破坏依赖闭包与平台运行时一致性
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              E212, E502
+similar_to:             E077, E219
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+# ref: 交叉引用知识条目 — E212/E502（hmmac 路径/标签策略：CI 拒绝 dlopen 用户目录 .so，与签名无关）、E077（.codesign 签名段）、E219（CI 非 HNP python 门禁）
+ref:                    E212, E502, E077, E219
+doc_file:               doc/E582.md
+last_updated: 2026-09-17
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 4E17
