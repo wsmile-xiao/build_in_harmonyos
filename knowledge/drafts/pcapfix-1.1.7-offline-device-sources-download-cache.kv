@@ -1,0 +1,63 @@
+# ═══ Draft knowledge entry — 无外网真机上完整跑通 conan create：
+# core.sources:download_cache 预置（按文件内容 sha256 命中，不改 conandata
+# 官方 URL）；配置键是 core.sources: 不是 core.download:
+# Software: pcapfix 1.1.7（LAN 影子机 10.62.178.77 实证，github/gitcode/cnb/
+# gh-proxy 全部不可达）
+# Gate: 真机 conan create 全绿（源码从缓存命中，"retrieved from local download cache"）
+# Status: DRAFT
+
+id: pcapfix-1.1.7-offline-device-sources-download-cache
+severity: 2
+category: conan|network|ohos|ci
+trigger_tool: conan
+phase: source
+
+keywords: download_cache, core.sources:download_cache, offline, no network, shadow device, conan create, conandata, sha256, file://, mirror, SourcesCachingDownloader
+error_signature: 'Connection|timed out|SSLError|URLError|Could not download.*https?://|Failed to download'
+match_keywords: download cache, offline device, core.sources, SourcesCachingDownloader, conandata url, seed cache, isolated CONAN_HOME, 无外网
+
+root_cause: |
+  (1) 影子真机（如 LAN 10.62.178.77）完全没有出站网络：github.com/codeload、
+  gitcode.com、cnb.cool、gh-proxy.com 全部连不通（curl -sI 无任何输出），
+  conan create 在 source() 阶段必然失败。
+  (2) Conan 2 的 tools.files.get → conanfile.download → SourcesCachingDownloader
+  会先查 `core.sources:download_cache` 指定的缓存（注意：**不是**
+  `core.download:download_cache`，后者管 packages artifacts 缓存；conan 2.3x 也
+  没有 `conan config set` 子命令，直接写 global.conf）。
+  (3) 缓存命中路径公式（conan/internal/rest/download_cache.py）：
+  `source_path = <download_cache>/s/<文件内容的 sha256>`。命中且无
+  backup-sources 元数据 json 时也不强制重下（源码注释明确 "We do not want to
+  force re-downloading"）——只要求 conandata 里声明的 sha256 与预置文件一致。
+
+rec_approach: seed-sources-cache-keep-official-url
+rec_description: |
+  不改 conandata 官方 URL（R39/PF7 完好），三步预置：
+  (1) `mkdir -p $JOB/dlcache/s`，把源码包原样放到
+      `$JOB/dlcache/s/<conandata 声明的 sha256>`（传输用 `tar czf - | ssh tar xzf -`，
+      传完设备端 sha256sum 复核）。
+  (2) 隔离 `CONAN_HOME=$JOB/conan-home`：从设备 `$HOME/.conan2/settings.yml`
+      拷贝（保留 OHOS 枚举，防 "Invalid setting 'OHOS'"），global.conf 写两行：
+      `core.sources:download_cache=<绝对路径>` 与 `tools.build:jobs=1`（内存保护）。
+  (3) profile 用仓库 ci/conan/profiles/ohos-aarch64（push 到 $JOB 后按文件路径
+      -pr:h/-pr:b 引用）；PATH 前置 /storage/Users/currentUser/usr/local/bin:
+      /data/service/hnp/bin（裸 SSH 不加载 .profile，git 仍缺失但 conan create
+      不需要）；TMPDIR=$JOB/tmp。
+  conan create 正常下载步骤变成缓存命中，配方行为与在线 CI 一致。
+rec_command: |
+  # 1) 预置缓存（Windows 侧）
+  cat pkg.tar.gz | ssh -p 2222 dev 'cat > $JOB/dlcache/s/<sha256>'
+  # 2) conan create（设备侧）
+  export CONAN_HOME=$JOB/conan-home TMPDIR=$JOB/tmp
+  export PATH=/storage/Users/currentUser/usr/local/bin:/data/service/hnp/bin:$PATH
+  conan create <recipe> -pr:h=$JOB/ohos-aarch64 -pr:b=$JOB/ohos-aarch64 --build=missing
+rec_auto_fix: false
+
+affected_scope: |
+  任何在无外网真机上做手动 conan create 验证的零依赖配方。限制：依赖包也需
+  同法预置其源码包，或依赖二进制需预先 conan download 进隔离 home——有依赖的
+  包成本升高，优先给零依赖小包使用。注意该设备非交互 shell 无 git，凡需要
+  git 的步骤（conan 的 git source）不可用。
+
+verification: |
+  conan create 输出含 "Source ... retrieved from local download cache" 且构建/
+  测试全绿（pcapfix 1.1.7 于 2026-09-18 LAN 机实证：create3.log）
