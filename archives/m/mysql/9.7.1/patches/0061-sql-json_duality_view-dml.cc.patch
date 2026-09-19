@@ -1,0 +1,443 @@
+--- a/sql/json_duality_view/dml.cc
++++ b/sql/json_duality_view/dml.cc
+@@ -122,24 +122,50 @@
+   }(em_wrap(std::forward<Args>(args_to_wrap))...);
+ }
+ 
++// OHOS: the bundled libc++ (libcxx-ohos) ships a stub <ranges> header (the
++// whole namespace body is commented out), so provide the small subset of
++// std::ranges utilities used in this file in terms of the standard pre-C++20
++// algorithms and iterators.
++template <typename R>
++using iter_value_type_t = typename std::iterator_traits<
++    decltype(std::begin(std::declval<R &>()))>::value_type;
++
++template <typename Iterator>
++class range_subrange {
++ public:
++  range_subrange(Iterator b, Iterator e) : m_begin(b), m_end(e) {}
++  Iterator begin() const { return m_begin; }
++  Iterator end() const { return m_end; }
++  std::size_t size() const {
++    return static_cast<std::size_t>(m_end - m_begin);
++  }
++
++ private:
++  Iterator m_begin;
++  Iterator m_end;
++};
++
+ static constexpr std::string_view metadatakey = "_metadata";
+ static constexpr std::string_view etagkey = "etag";
+ 
+ /** Comparator which orders in the same way as Json_object orders its keys. */
+ struct Size_first_comparator {
+   template <typename RA, typename RB>
+-    requires std::ranges::contiguous_range<RA> &&
+-             std::ranges::contiguous_range<RB> &&
+-             std::is_same_v<std::ranges::range_value_t<RA>,
+-                            std::ranges::range_value_t<RB>>
++    requires requires(RA &ra, RB &rb) {
++               std::data(ra);
++               std::data(rb);
++               std::size(ra);
++               std::size(rb);
++             } &&
++             std::is_same_v<iter_value_type_t<RA>, iter_value_type_t<RB>>
+   constexpr bool operator()(RA &&ra, RB &&rb) const {
+-    auto sra = std::ranges::size(ra);
+-    auto srb = std::ranges::size(rb);
++    auto sra = std::size(ra);
++    auto srb = std::size(rb);
+     return sra != srb
+                ? sra < srb
+-               : std::memcmp(std::ranges::data(std::forward<RA>(ra)),
+-                             std::ranges::data(std::forward<RB>(rb)),
+-                             sra * sizeof(std::ranges::range_value_t<RA>)) < 0;
++               : std::memcmp(std::data(std::forward<RA>(ra)),
++                             std::data(std::forward<RB>(rb)),
++                             sra * sizeof(iter_value_type_t<RA>)) < 0;
+   }
+ };
+ constexpr Size_first_comparator size_less;
+@@ -621,6 +647,15 @@
+   const Key_column_info *kci = nullptr;
+   Json_dom *value = nullptr;
+   bool deferred_resolve = false;
++
++  // OHOS clang 15 / libcxx-ohos: parenthesized aggregate initialization
++  // (P0960) with default member initializers is not accepted inside
++  // std::construct_at (used by std::vector::emplace_back); provide an
++  // explicit constructor instead.
++  Resolve_column() = default;
++  Resolve_column(const Key_column_info *kci_arg, Json_dom *value_arg,
++                 bool deferred_resolve_arg)
++      : kci(kci_arg), value(value_arg), deferred_resolve(deferred_resolve_arg) {}
+ };
+ 
+ [[maybe_unused]] static std::ostream &operator<<(std::ostream &os,
+@@ -862,8 +897,7 @@
+   @param bindings range of bindings
+   @return true if error
+  */
+-[[nodiscard]] static bool resolve_column_range(
+-    const std::ranges::random_access_range auto &bindings) {
++[[nodiscard]] static bool resolve_column_range(const auto &bindings) {
+   // Look for resolving opportunities in join conditions
+   // Outer loop ensures that resolving opportunities in earlier bindings
+   // which are made possible by the current iteration can also be discovered
+@@ -1034,8 +1068,7 @@
+   @param bindings vector of bindings
+   @return true if error
+   */
+-[[nodiscard]] static bool resolve_columns(
+-    const std::ranges::random_access_range auto &bindings) {
++[[nodiscard]] static bool resolve_columns(const auto &bindings) {
+   // Populate Resolve_row with values provided directly by json document
+   DBUG_LOG("jdv_dml", "DML-RESOLVE: ");
+   for (const auto &bin : bindings) {
+@@ -1216,23 +1249,23 @@
+   using BT = typename BV::value_type;
+ 
+   auto share_pk_index = make_mr_index<BT>(thd, bindings);
+-  auto pks_with_explicit_vals = std::ranges::remove_if(
+-      share_pk_index,
+-      [](const BT &bin) {
++  auto pks_with_explicit_vals = std::remove_if(
++      share_pk_index.begin(), share_pk_index.end(),
++      [](const auto &entry) {
+         // By dropping both delete half bindings and also bindings for which
+         // the primary key is generated, we limit the check to only those
+         // pk which are explicitly provided. This is ok as we sort all bindings
+         // with generated PK later in insertion order.
+-        return bin.bound_object == nullptr;
+-      },
+-      unwrap_index_entry<BT>);
++        return entry.get().bound_object == nullptr;
++      });
+ 
+   // Create a range of those index entries which have a valid bound object
+   // Note that all bindings in this range will have a valid resolve_row.
+-  std::ranges::subrange valid_share_pk_index{share_pk_index.begin(),
+-                                             pks_with_explicit_vals.begin()};
++  range_subrange valid_share_pk_index{share_pk_index.begin(),
++                                      pks_with_explicit_vals};
+ 
+-  std::ranges::stable_sort(valid_share_pk_index, share_pk_less);
++  std::stable_sort(valid_share_pk_index.begin(), valid_share_pk_index.end(),
++                   share_pk_less);
+   DBUG_LOG("jdv_dml", "DML-DUP-CHECK: " << JX_(valid_share_pk_index.size()));
+ 
+ #ifndef NDEBUG
+@@ -1249,12 +1282,13 @@
+   // Loop over the index - examining entries belonging to the same table
+   for (auto index_it = valid_share_pk_index.begin();
+        index_it != valid_share_pk_index.end();) {
+-    std::ranges::subrange remaining{index_it, valid_share_pk_index.end()};
+-    auto same_table = std::ranges::equal_range(
+-        remaining, *index_it,
++    range_subrange remaining{index_it, valid_share_pk_index.end()};
++    auto same_table_eq = std::equal_range(
++        remaining.begin(), remaining.end(), *index_it,
+         [](const Index_entry<BT> &a, const Index_entry<BT> &b) {
+           return get_table_cache_key(a.get()) < get_table_cache_key(b.get());
+         });
++    range_subrange same_table{same_table_eq.first, same_table_eq.second};
+ 
+ #ifndef NDEBUG
+     for (const Index_entry<BT> &ie : same_table) {
+@@ -1275,8 +1309,8 @@
+ 
+     //  Look for a pkval which does not have the same deferred_resolve value
+     //  as the first
+-    auto badit = std::ranges::find_if(
+-        same_table | std::ranges::views::drop(1),
++    auto badit = std::find_if(
++        std::next(same_table.begin()), same_table.end(),
+         [&](const Index_entry<BT> &ie) {
+           return get_pk_rc(ie.get()).deferred_resolve != first_deferred_resolve;
+         });
+@@ -1301,7 +1335,7 @@
+     for (auto same_tbl_it = same_table.begin();
+          same_tbl_it != same_table.end();) {
+       DBUG_LOG("jdv_dml", "DML-DUP-CHECK: same_table loop");
+-      std::ranges::subrange same_table_remaining{same_tbl_it, same_table.end()};
++      range_subrange same_table_remaining{same_tbl_it, same_table.end()};
+       const BT &first_pk_bin = same_tbl_it->get();
+       const Resolve_column &first_pk_pkrc = get_pk_rc(first_pk_bin);
+ 
+@@ -1311,8 +1345,11 @@
+                               << RFL(first_pk_pkrc.value->get_location())
+                               << JX_(*first_pk_bin.ct_node));
+ 
+-      auto same_pk = std::ranges::equal_range(same_table_remaining,
+-                                              *same_tbl_it, share_pk_less);
++      auto same_pk_eq =
++          std::equal_range(same_table_remaining.begin(),
++                           same_table_remaining.end(), *same_tbl_it,
++                           share_pk_less);
++      range_subrange same_pk{same_pk_eq.first, same_pk_eq.second};
+ 
+       DBUG_LOG("jdv_dml", "DML-DUP-CHECK: " << JX_(same_pk.size()));
+ 
+@@ -1326,7 +1363,9 @@
+ 
+       // Loop over all those that have the same share-pk as the first,
+       // and verify that all column values are identical
+-      for (Index_entry<BT> &ie : same_pk | std::ranges::views::drop(1)) {
++      for (auto ie_it = std::next(same_pk.begin()); ie_it != same_pk.end();
++           ++ie_it) {
++        Index_entry<BT> &ie = *ie_it;
+         BT &same_pk_bin = ie.get();
+         const Content_tree_node &ct_node = *same_pk_bin.ct_node;
+ 
+@@ -1338,25 +1377,30 @@
+         const Resolve_column_vec &same_pk_cols =
+             same_pk_bin.resolve_row->columns;
+         // run mismatch to see if any columns have a different value
+-        auto mmr = std::ranges::mismatch(
+-            first_pk_cols, same_pk_cols,
++        auto mmr = std::mismatch(
++            first_pk_cols.begin(), first_pk_cols.end(), same_pk_cols.begin(),
++            same_pk_cols.end(),
+             [](const Resolve_column &a, const Resolve_column &b) {
+               return compare_doms(a.value, b.value) == 0;
+             });
+ 
+-        if (mmr.in1 != first_pk_cols.end()) {
++        if (mmr.first != first_pk_cols.end()) {
+           DBUG_LOG("jdv_dml",
+                    "DML-DUP-CHECK: Invalid duplicate from: "
+                        << ct_node
+-                       << ", offending column: " << mmr.in1->kci->column_name()
+-                       << ", values (" << json_dom_to_string(mmr.in1->value)
+-                       << " vs. " << json_dom_to_string(mmr.in2->value) << ")");
++                       << ", offending column: "
++                       << mmr.first->kci->column_name()
++                       << ", values ("
++                       << json_dom_to_string(mmr.first->value) << " vs. "
++                       << json_dom_to_string(mmr.second->value) << ")");
+ 
+           my_jdv_error<ER_JDV_PK_DUPLICATES_NOT_IDENTICAL>(
+               same_pk_bin.bound_object->get_location(),
+               ct_node.quoted_qualified_table_name(),
+-              first_pk_pkrc.kci->column_name(), mmr.in1->kci->column_name(),
+-              mmr.in2->value->get_location(), mmr.in1->value->get_location());
++              first_pk_pkrc.kci->column_name(),
++              mmr.first->kci->column_name(),
++              mmr.second->value->get_location(),
++              mmr.first->value->get_location());
+           return true;
+         }
+         // If same_pk_bin is actually identical, mark it as empty so that no
+@@ -1382,14 +1426,14 @@
+   @param bindings Binding index to merge
+  */
+ static void merge_bindings_for_update(Index<Two_object_binding> &bindings) {
+-  assert(std::ranges::is_sorted(bindings));
++  assert(std::is_sorted(bindings.begin(), bindings.end()));
+ 
+   // Look for adjacent same-pk bindings.
+   // We need to copy exiting_object from "delete" binding to "insert" binding to
+   // create an "update" binding.
+-  for (auto adjit = std::ranges::adjacent_find(bindings);
++  for (auto adjit = std::adjacent_find(bindings.begin(), bindings.end());
+        adjit != bindings.end();
+-       adjit = std::ranges::adjacent_find(adjit + 1, bindings.end())) {
++       adjit = std::adjacent_find(std::next(adjit), bindings.end())) {
+     Two_object_binding &cur = adjit->get();
+     Two_object_binding &nxt = (adjit + 1)->get();
+     DBUG_LOG("jdv_dml",
+@@ -1445,10 +1489,21 @@
+  */
+ [[nodiscard]] static bool check_for_unmatched_input_keys(
+     THD *thd, Json_object *input_obj, const Content_tree_node &ct_node) {
+-  assert(
+-      std::ranges::is_sorted(*input_obj | std::ranges::views::keys, size_less));
+-  auto keys_as_string_view_adaptor = std::ranges::views::transform(
+-      [](const auto &a) -> std::string_view { return a.first; });
++#ifndef NDEBUG
++  // The input keys must be ordered with the comparator used for the JDV keys
++  // below (required for the set_difference logic to be meaningful).
++  auto assert_key_ordered = [&]() {
++    for (auto it = input_obj->begin(); it != input_obj->end(); ++it) {
++      auto nxt = std::next(it);
++      if (nxt != input_obj->end()) {
++        assert(size_less(it->first, nxt->first));
++      }
++    }
++  };
++  assert_key_ordered();
++#endif /* NDEBUG */
++
++  auto key_of = [](const auto &a) -> std::string_view { return a.first; };
+ 
+   // Add 1 for _metadata in root objects
+   std::size_t jdv_key_count = ct_node.key_column_map().size() +
+@@ -1460,38 +1515,51 @@
+   std::string_view *all_keys = thd->mem_root->ArrayAlloc<std::string_view>(
+       jdv_key_count + input_obj->cardinality());
+ 
+-  // Create a view of the array slice for the JDV keys
+-  auto jdv_keys_rng = std::ranges::views::counted(all_keys, jdv_key_count);
++  // Array slice for the JDV keys
++  std::string_view *jdv_keys_begin = all_keys;
++  std::string_view *jdv_keys_end = all_keys + jdv_key_count;
+ 
+-  // Create a view of the array slice where the unmatched keys will be stored
+-  auto unmatched_dst_rng =
+-      std::ranges::views::counted(jdv_keys_rng.end(), input_obj->cardinality());
++  // Array slice where the unmatched keys will be stored
++  std::string_view *unmatched_keys_begin = jdv_keys_end;
+ 
+   // Grab all the JDV keys and sort them in the Json way
+-  // Returns std::ranges::copy_result
+-  auto cpr =
+-      std::ranges::copy(ct_node.key_column_map() | std::ranges::views::keys,
+-                        jdv_keys_rng.begin());
+-
+-  // Returns std::ranges::unary_transform_result
+-  auto utr = std::ranges::transform(
+-      ct_node.children(), cpr.out,
+-      [](const auto *ctn) -> std::string_view { return ctn->name(); });
+-
++  std::string_view *out = jdv_keys_begin;
++  for (const auto &kv : ct_node.key_column_map()) {
++    *out++ = key_of(kv);
++  }
++  for (const auto *ctn : ct_node.children()) {
++    *out++ = ctn->name();
++  }
+   // Add the _metadata key for root nodes
+   if (ct_node.is_root_object()) {
+-    *utr.out = metadatakey;
++    *out = metadatakey;
+   }
+-  std::ranges::sort(jdv_keys_rng, size_less);
++  std::sort(jdv_keys_begin, jdv_keys_end, size_less);
+ 
+   // Use set_difference to find unmatched keys and report an error if (at least)
+   // one was found.
+-  auto diffres = std::ranges::set_difference(
+-      *input_obj | keys_as_string_view_adaptor, jdv_keys_rng,
+-      unmatched_dst_rng.begin(), size_less);
+-  if (diffres.out != unmatched_dst_rng.begin()) {
++  auto input_it = input_obj->begin();
++  auto input_end = input_obj->end();
++  auto jdv_it = jdv_keys_begin;
++  auto dst_it = unmatched_keys_begin;
++  while (input_it != input_end && jdv_it != jdv_keys_end) {
++    if (size_less(key_of(*input_it), *jdv_it)) {
++      *dst_it++ = key_of(*input_it);
++      ++input_it;
++    } else if (size_less(*jdv_it, key_of(*input_it))) {
++      ++jdv_it;
++    } else {
++      ++input_it;
++      ++jdv_it;
++    }
++  }
++  while (input_it != input_end) {
++    *dst_it++ = key_of(*input_it);
++    ++input_it;
++  }
++  if (dst_it != unmatched_keys_begin) {
+     my_jdv_error<ER_JDV_UNMAPPED_KEY>(
+-        input_obj->get(*unmatched_dst_rng.begin())->get_location(),
++        input_obj->get(*unmatched_keys_begin)->get_location(),
+         ct_node.quoted_qualified_table_name());
+     return true;
+   }
+@@ -1714,8 +1782,9 @@
+ template <typename BIN>
+ [[nodiscard]] static bool flatten(std::vector<BIN> *stack) {
+   for (std::size_t pbx = 0; pbx < stack->size(); ++pbx) {
+-    if (std::ranges::any_of(
+-            (*stack)[pbx].ct_node->children(),
++    const auto &children = (*stack)[pbx].ct_node->children();
++    if (std::any_of(
++            children.begin(), children.end(),
+             [&](const Content_tree_node *child_ct_node) {
+               return (child_ct_node->is_root_object() ||
+                       child_ct_node->is_singleton_child())
+@@ -2143,7 +2212,8 @@
+ 
+   // On update all columns must be resolved in order the perform
+   // etag check.
+-  if (std::ranges::any_of(resolved_columns, [&](const auto &rc) {
++  if (std::any_of(resolved_columns.begin(), resolved_columns.end(),
++                  [&](const auto &rc) {
+         if (rc.value == nullptr) {
+           my_jdv_error<ER_JDV_MISSING_VALUE>(
+               binding.bound_object->get_location(),
+@@ -2374,7 +2444,7 @@
+   }
+ #endif
+ 
+-  if (std::ranges::any_of(bindings, [&](const auto &bin) {
++  if (std::any_of(bindings.begin(), bindings.end(), [&](const auto &bin) {
+         return check_for_unmatched_input_keys(thd, bin.bound_object,
+                                               *bin.ct_node);
+       })) {
+@@ -2392,7 +2462,7 @@
+   // are satisfied)
+   // - It becomes possible to use algorithms such as unique and adjacent_find
+   // (which operate on sorted ranges)
+-  std::ranges::sort(rank_index);
++  std::sort(rank_index.begin(), rank_index.end());
+ 
+   DBUG_LOG("jdv_dml", "DML-INSERT: Rank-sorted order on INDEX: ");
+ #ifndef NDEBUG
+@@ -2409,8 +2479,9 @@
+ 
+   return do_in_substatement_context(thd, [&](Diagnostics_area *caller_da) {
+     std::string stmt;
+-    return std::ranges::any_of(
+-        rank_index, [&](const Index_entry<const Single_object_binding> &ie) {
++    return std::any_of(
++        rank_index.begin(), rank_index.end(),
++        [&](const Index_entry<const Single_object_binding> &ie) {
+           const Single_object_binding &bin = ie.get();
+           if (bin.is_empty()) {
+             return false;
+@@ -2510,7 +2581,7 @@
+   }
+ #endif
+ 
+-  if (std::ranges::any_of(bindings, [&](const auto &bin) {
++  if (std::any_of(bindings.begin(), bindings.end(), [&](const auto &bin) {
+         return (bin.bound_object != nullptr &&
+                 check_for_unmatched_input_keys(thd, bin.bound_object,
+                                                *bin.ct_node));
+@@ -2532,7 +2603,7 @@
+   // - It becomes possible to use algorithms such as unique and adjacent_find
+   // (which operate on sorted ranges)
+   // - We can correctly merge together bindings that represent a single update.
+-  std::ranges::sort(rank_index);
++  std::sort(rank_index.begin(), rank_index.end());
+ 
+   DBUG_LOG(
+       "jdv_dml", "__DML-UPDATE: Rank-sorted order:" << [&]() {
+@@ -2550,8 +2621,8 @@
+ 
+   return do_in_substatement_context(thd, [&](Diagnostics_area *caller_da) {
+     std::string stmt;
+-    return std::ranges::any_of(
+-        rank_index, [&](const Index_entry<Two_object_binding> &ie) {
++    return std::any_of(rank_index.begin(), rank_index.end(),
++                       [&](const Index_entry<Two_object_binding> &ie) {
+           const Two_object_binding &bin = ie.get();
+           if (bin.is_empty()) {
+             return false;
+@@ -2598,8 +2669,9 @@
+   }
+   return do_in_substatement_context(thd, [&](Diagnostics_area *caller_da) {
+     std::string stmt;
+-    return std::ranges::any_of(
+-        std::ranges::reverse_view{bindings},
++    return std::any_of(
++        std::make_reverse_iterator(bindings.end()),
++        std::make_reverse_iterator(bindings.begin()),
+         [&](const Single_object_binding &bin) {
+           stmt.resize(0);
+           auto res = make_delete(thd, bin, &stmt);
