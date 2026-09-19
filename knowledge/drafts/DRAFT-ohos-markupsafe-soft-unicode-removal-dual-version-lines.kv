@@ -1,0 +1,124 @@
+#====================================================================
+# DRAFT-ohos-markupsafe-soft-unicode-removal-dual-version-lines —— MarkupSafe
+#   2.1 移除 soft_unicode 造成「同一仓内必须并存两条版本线」
+# 对应文档: knowledge/drafts/DRAFT-ohos-markupsafe-soft-unicode-removal-dual-version-lines.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-markupsafe-soft-unicode-removal-dual-version-lines
+trigger_tool:           python|conan|pip
+phase:                  runtime|dependency-resolution
+error_signature:        (ImportError|AttributeError).*soft_unicode|
+                         cannot import name 'soft_unicode' from 'markupsafe'|
+                         MarkupSafe.*(2\.1|removed).*soft_unicode
+
+severity:               3
+category:               python, dependency, versioning, packaging, pallets
+match_keywords:         soft_unicode, soft_str, markupsafe, Jinja2, jinja2 2.10,
+                         jinja2 3.1, MarkupSafe 2.1, version coexistence,
+                         同包多版本并存, 版本线, deprecated removed, flask chain,
+                         requests 2.22, 符号移除, ImportError
+title:                  MarkupSafe 2.1 移除了 soft_unicode —— 导致同一制品仓必须
+                        **并存两条 markupsafe 版本线**（Jinja2 2.x 要 ≤2.0.1、
+                        Jinja2 3.x 要 ≥2.1.1），不可用单版本互相替代
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             MarkupSafe 的 ``soft_unicode`` 是 1.x 的别名函数（等价于
+                        ``str()``），在 **2.0 被标记废弃、2.1 正式移除**；同一批次
+                        ``soft_str`` 被保留（实测 3.0.3 仍在
+                        ``src/markupsafe/__init__.py:64`` 定义）。
+                        而 **Jinja2 2.10.x 在 ``jinja2/utils.py`` 里
+                        ``from markupsafe import soft_unicode``** —— 于是出现
+                        「版本死锁」：
+                          · Jinja2 2.10.1  → 需 markupsafe **<= 2.0.1**
+                          · Jinja2 3.1.6   → 需 markupsafe **>= 2.1.1**
+                        两者**无法用同一个 markupsafe 版本同时满足**。因此在同一
+                        制品仓（ohpcd）里必须**并存两条版本线**，
+                        `markupsafe/1.1.1`（旧链）与 `markupsafe/3.0.3`（新链）
+                        各有独立消费者，谁也不能下架、也不能"升级即替代"。
+                        实测判据（消费者测试固化）：3.0.3 中 ``soft_unicode``
+                        **不存在**（源码 0 处命中），``soft_str`` **仍存在**。
+affected_scope:         同一仓内同时服务「旧 Pallets 链」（requests 2.22.0 →
+                        Jinja2 2.10.1）与「新 Pallets 链」（flask 3.x → Jinja2 3.1.x）
+                        的场景；ohpcd 已存在 markupsafe/1.1.1，新增 3.0.3 时必须
+                        按**并存**而非"升级"处理（版本目录、分支名、conanfile
+                        version 三者各自独立对齐 R40/L0n）。
+                        与 E241/E305（依赖版本区间不满足）不同层：那类是"可选新版
+                        即可解"，本条是"**区间互斥、必须并存**"。
+verification_cmd:       ① 确认目标版本是否已移除该符号：
+                          python3 -c "import markupsafe; print(hasattr(markupsafe,'soft_unicode'), hasattr(markupsafe,'soft_str'))"
+                          # 3.x 应输出 False True（soft_unicode 无、soft_str 有）
+                        # ② 确认消费者到底要哪一个：
+                        grep -rn "soft_unicode" <consumer>/ | head
+                        # ③ 查制品仓已有版本，判断是"新增并存"还是"升级替代"：
+                        conan list "markupsafe/*" -r=<remote>
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           publish-both-version-lines-side-by-side
+rec_description:        把两条版本线**作为两个独立版本目录并存发布**，不做升级替代：
+                          · `archives/m/markupsafe/1.1.1/`（服务 Jinja2 2.10.1 链）
+                          · `archives/m/markupsafe/3.0.3/`（服务 Jinja2 3.1.x 链）
+                        各自 conanfile `version`、分支名（`feat/markupsafe-<ver>`）、
+                        版本目录三者对齐（L0n/R40）。并在两边的 `notes.md` 写明
+                        并存理由与"不可互相替代"，避免后来者当作重复配方误删其一。
+                        交付形态按纯 Python 包惯例（直接拷 `markupsafe/` 目录，
+                        不调用 PEP 517 构建、不引入 build_requires）。
+rec_command:            # 两个版本目录各自独立建配方；packages 内拷贝包目录
+                        # archives/m/markupsafe/{1.1.1,3.0.3}/conanfile.py
+rec_auto_fix:           false
+rec_impl:               publish-both-version-lines-side-by-side
+
+fallback_priority:      2
+fallback_approach:      patch-consumer-import
+fallback_description:   若某天**只能**保留单版本（例如仓规要求收敛版本），则改为在
+                        **消费者侧**打补丁：把 `from markupsafe import soft_unicode`
+                        改写为 `soft_unicode = str` 之类的等效实现。但这改动落在
+                        第三方消费者源码上、每次升级都要重做，且偏离"上游兼容"
+                        原则——**仅作最后手段**，且必须在 notes.md 记录该补丁的
+                        存在与其脆弱性。
+fallback_command:       # 消费者内：sed 改写 import，或注入兼容 shim 模块
+fallback_auto_fix:      false
+fallback_impl:          patch-consumer-import
+
+forbid_1_pattern:       (升级|统一|收敛).*markupsafe.*(最新版|单一版本).*(即可|解决)|
+                        认为.*markupsafe.*3\.x.*可替代.*1\.1\.1
+forbid_1_reason:        两条版本线的**依赖区间互斥**（≤2.0.1 vs ≥2.1.1），
+                        不存在同时满足的单一版本；"升级到最新"会让旧链
+                        （Jinja2 2.10.1）在 import 时直接失败。
+forbid_1_consequence:   下架或覆盖旧版后，旧链消费者（requests 2.22.0 一线）
+                        全部 ImportError：`cannot import name 'soft_unicode'`。
+
+forbid_2_pattern:       断言.*(soft_str|soft_unicode).*(同时|一起).*(移除|不存在)|
+                        认为.*soft_unicode.*移除.*伴随.*soft_str.*移除
+forbid_2_reason:        实测二者命运不同：`soft_unicode` 2.1 移除，而 `soft_str`
+                        **保留至今**（3.0.3 源码仍有，且 `soft_str(None) == "None"`
+                        可调用）。把两者混为一谈会写出错误的消费者断言。
+forbid_2_consequence:   消费者测试误报（把一个仍存在的 API 断言为不存在），
+                        或据此做出错误的兼容性判断。
+
+principles:             upstream-compat-evidence, measure-not-assume, version-coexistence
+
+causes:                 []
+caused_by:              []
+similar_to:             [E241, E305]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-markupsafe-soft-unicode-removal-dual-version-lines.md
+last_updated:           2026-09-16
+source_event:           markupsafe 3.0.3 适配（与在途 markupsafe/1.1.1 构成并存；
+                        消费者测试固化 soft_unicode 不存在 / soft_str 存在的分界线）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  2
+metrics_fail_count:     1
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        B7A4
