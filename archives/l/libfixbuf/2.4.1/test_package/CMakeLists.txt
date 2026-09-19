@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libfixbuf C)
+find_package(libfixbuf CONFIG REQUIRED)
+add_executable(test_libfixbuf test_libfixbuf.c)
+target_link_libraries(test_libfixbuf PRIVATE libfixbuf::libfixbuf)
