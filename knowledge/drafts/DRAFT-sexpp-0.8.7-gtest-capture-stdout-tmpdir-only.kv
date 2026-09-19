@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT-sexpp-0.8.7-gtest-capture-stdout-tmpdir-only
+# OHOS 上 gtest 捕获流临时目录只认 TMPDIR，且能力来自制品仓 gtest 包的
+# 0001-tmpdir-ohos-sandbox.patch（不是 googletest 版本）；用于纠正
+# "GTest 不读任何环境变量/环境层无解" 的既有草稿结论。
+# 触发事件: sexpp 0.8.7 HarmonyOS PC 适配（分支 feat/sexpp-0.8.7）
+#====================================================================
+id:                     DRAFT-sexpp-0.8.7-gtest-capture-stdout-tmpdir-only
+draft:                  true
+contributor_id:         iKalous_OscarP
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+trigger_tool:           ctest|gtest|make|cmake|conan
+phase:                  testing
+error_signature:        Failed to create tmp file /data/local/tmp/gtest_captured_stream\.XXXXXX|
+                         Failed to open tmp file .*gtest_captured_stream\.XXXXXX|
+                         Failed to create tmp file /tmp/gtest_captured_stream\.XXXXXX|
+                         gtest-port\.cc:11[0-9][0-9]::|Signal 6 \(core dumped\)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, testing, portability, libc, hmdfs
+match_keywords:         gtest, googletest, CaptureStdout, CaptureStderr, CapturedStream,
+                         gtest_captured_stream, mkstemp, TMPDIR, TEST_TMPDIR, TEMP,
+                         /data/local/tmp, /tmp read-only, erofs, 平台阻塞, 上游测试, ctest
+title:                  gtest 捕获流在 OHOS 只读 TMPDIR 一个变量上生效，且该能力由制品仓 gtest 包补丁提供而非上游版本
+prescan_pattern:        CaptureStdout|CaptureStderr|gtest_captured_stream\.XXXXXX
+prescan_globs:          '*.cpp, *.cc, *.c, *.h, CMakeLists.txt'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  制品仓 gtest/1.17.0 的 patches/0001-tmpdir-ohos-sandbox.patch 把 googletest
+  gtest-port.cc 中 CapturedStream 的 #else 分支（原为硬编码 name_template="/tmp/"）
+  改成 getenv("TMPDIR") ?: "/data/local/tmp/"。OHOS clang 不定义 __ANDROID__
+  （实测 __ANDROID__=0、__OHOS__=1），gtest-port-arch.h 因此选 GTEST_OS_LINUX，
+  编译期正好命中被打补丁的 #else 分支——所以 TMPDIR 生效是补丁的结果，不是版本的结果。
+  上游 v1.14.0/v1.15.2/v1.16.0/v1.17.0 的非 Android 分支始终硬编码 "/tmp/"
+  （TempDir() 只在 Android 分支被调用），故升级 googletest 版本不能解决本问题。
+  设备侧 /tmp 为 erofs ro，/data/local/tmp 对 currentUser 亦不可写，故不设 TMPDIR 必崩。
+affected_scope: >
+  所有上游测试含 testing::internal::CaptureStdout()/CaptureStderr()（典型为 warning/
+  诊断输出断言用例）、并以 conan + CMake/ctest 在 OHOS 真机执行测试的 C/C++ 库；
+  不含 bundled/系统未打补丁 googletest 的构建（那类仍表现为环境变量全部无效）。
+verification_cmd: >
+  grep -n -A8 'name_template = "/tmp/"' archives/g/gtest/1.17.0/patches/0001-tmpdir-ohos-sandbox.patch;
+  mkdir -p w && TMPDIR=$PWD/w ./probe 2>&1 | tail -3;
+  env -u TMPDIR ./probe 2>&1 | grep -E "FATAL|Signal 6";
+  env -u TMPDIR TEST_TMPDIR=$PWD/w ./probe 2>&1 | grep -E "FATAL|Signal 6"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           registry-gtest-plus-tmpdir-only
+rec_description: >
+  test_requires("gtest/1.17.0") 取制品仓已打补丁的 googletest，配合 DOWNLOAD_GTEST=OFF
+  与 GTest_DIR 指向包内 lib/cmake/GTest；在 build() 跑 ctest 前用 conan Environment()
+  只导出 TMPDIR 到构建目录下的可写子目录（3 行，无源码补丁、无平台宏），捕获流用例即可真跑。
+rec_command: >
+  # conanfile.py build()
+  if can_run(self):
+      tmpdir = os.path.join(self.build_folder, "gtest-tmp"); os.makedirs(tmpdir, exist_ok=True)
+      env = Environment(); env.define("TMPDIR", tmpdir); env.define("CTEST_OUTPUT_ON_FAILURE", "1")
+      with env.vars(self).apply(): cmake.test()
+rec_auto_fix:           false
+rec_impl:               conanfile-build-env
+
+fallback_priority:      2
+fallback_approach:      patch-vendored-gtest-port
+fallback_description: >
+  仅当构建被迫使用 bundled/系统 googletest（无法换制品仓包）时适用：给该份 gtest-port.cc
+  的 #else 分支打同一处 getenv("TMPDIR") 补丁（与 DRAFT-cssc-gtest-tmp-hardcode 同法）。
+  禁止在这种构建里期待任何环境变量生效——未打补丁时 TMPDIR/TMP/TEMP/TEST_TMPDIR 全为 no-op。
+fallback_command: >
+  grep -n 'name_template = "/tmp/"' <gtest-src>/googletest/src/gtest-port.cc   # 命中即未打补丁
+fallback_auto_fix:      false
+fallback_impl:          patch-source
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       --gtest_filter=.*-.*(Warning|Warn)|计入分母不计通过|属真实平台阻塞
+forbid_1_reason: >
+  链接制品仓 gtest 时捕获流用例可以真过，用过滤排除并写成"平台阻塞"属台账失真，
+  并使后续会话误判无解（sexpp 0.9.1 记录即因此少报 2 例）。
+forbid_1_consequence:   rule2/rule4/rule8-9 判定不实；知识图谱继续传播错误因果链
+
+forbid_2_pattern:       export (TMP|TEMP|TEST_TMPDIR)=.*\$(TMPDIR|TMP |TEMP )|set_env.*TEST_TMPDIR
+forbid_2_reason:        实测矩阵：仅 TMPDIR 生效；TEST_TMPDIR/TMP/TEMP 单独设置均 FATAL，
+                         TMPDIR 与 TEST_TMPDIR 同时设置时 TMPDIR 胜出
+forbid_2_consequence:   变量看似设了实则没生效，用例继续 abort，排查方向被带偏
+
+forbid_3_pattern:       为已链接制品仓 gtest 的库再写 gtest-port\.cc 补丁
+forbid_3_reason:        与 archives/g/gtest/1.17.0/patches/0001-tmpdir-ohos-sandbox.patch 重复，
+                         把测试框架改动混进被测库 patches/
+forbid_3_consequence:   AI 检视/JC 噪声，补丁归属混乱，升级 gtest 包后出现双重补丁冲突
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R51, R34
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              E002
+similar_to:             E292, DRAFT-cssc-gtest-tmp-hardcode-death-test-abort,
+                         DRAFT-googletest-1.12.1-ohos-test-platform-constraints
+conflicts_with:         DRAFT-sexpp-0.9.1-gtest-captured-stream-tmp-hardcode
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-sexpp-0.8.7-gtest-capture-stdout-tmpdir-only.md
+last_updated:           2026-09-19
+source_event:           sexpp 0.8.7 conan create @ OHOS aarch64 (clang 15.0.4), 68/68 ctest passed
+authors:                iKalous_OscarP <2040466963@qq.com>
+source_pr:              
+source_commit:          
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19
