@@ -1,0 +1,48 @@
+#====================================================================
+# Draft: OHOS/HMDFS 上 conan build() 用 self.run 执行 cmake --build
+#        必现"静默失败"：make 报 Error 1 但 clang 无任何 error: 输出；
+#        改用 subprocess.run(capture_output=True) 后稳定通过
+#====================================================================
+
+id:                     DRAFT-ZMUSIC-1.3.0-OHOS-CONAN-SELF-RUN-SILENT-BUILD-FAILURE
+trigger_tool:           conan|cmake|make|clang|self.run|subprocess
+phase:                  build
+
+error_signature:        make\[[0-9]+\]: \*\*\* .*Error 1|
+                        Error in build\(\) method, line \d+|
+                        CMake\.build\(\)|
+                        ConanException: Error 2 while executing
+
+severity:               3
+category:               conan, ohos, hmdfs, build-environment, flaky-build
+match_keywords:         self.run, cmake --build, make Error 1, 无 error 输出, 静默失败,
+                        HMDFS, OHOS, conan build(), subprocess, capture_output,
+                        jobserver, 并行度, 手工重跑成功, 间歇性, zmusic
+
+title:                  OHOS/HMDFS 构建目录下 conan build() 用 self.run() 跑 cmake --build 必现静默失败（make Error 1 但无 error: 输出），改用 subprocess.run(capture_output=True) 即稳定通过
+
+root_cause:             在 OHOS 设备上，conan 的构建目录位于 HMDFS（~/.conan2/p/b/<随机目录>/build/Release）。recipe 的 build() 若用 `self.run("cmake --build ...")` 执行构建，make 会在首批编译单元上直接报 `Error 1`，而 clang 不产生任何 `error:` 输出（stderr 只有 warning）。同一条命令在**同一个**构建目录里手工执行（bash/sh -c、make -j4）却 100% 成功，说明源码、编译器、依赖注入均无误。实测排除项：并行度（-j20/-j4/-j2/-j1 全部复现，非 OOM；MemAvailable 有 4.6 GB）、构建目录新旧（clean 后手工跑仍成功）、jobserver（-j1 同样复现）、环境变量（env dump 与手工环境一致）。结论：根因落在 conan `self.run` 的实时管道读取路径与 OHOS/HMDFS 构建目录的交互上——子进程被异常终止且不留错误输出。
+
+affected_scope:          任何在 OHOS/HMDFS 构建目录里用 conan `self.run()` / `CMake.build()` 驱动 cmake --build 的配方。已验证实例：zmusic 1.3.0（主包 + test_package 均复现）。
+
+verification_cmd:       conan create archives/z/zmusic/1.3.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+
+rec_priority:           1
+rec_approach:           subprocess-run-capture-output
+rec_description:        build() 中改用 `subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=self.build_folder, env=os.environ)`，再自行 `self.output.info(...)` 打印输出尾部；失败时把 stdout+stderr 尾部打出来再抛 ConanException。zmusic 1.3.0 用此法后主包与 test_package 均一次通过。注意不要用 `CMake.build(build_tool_args=["--", "-jN"])`：该参数是**追加**在默认 `-j<核数>` 之后，且带 `--` 会让 make 把 -jN 当成目标名（`-- -j20 -- -j4` → No rule to make target '-j4'）；只传 `-jN` 时得到 `-- -j20 -jN`，GNU make 以**第一个** -j 为准，等于没限制。
+rec_command:            proc = subprocess.run(f'cmake --build "{self.build_folder}" -- -j{jobs}', shell=True, capture_output=True, text=True, cwd=self.build_folder, env=os.environ)
+rec_auto_fix:           false
+rec_impl:               archives/z/zmusic/1.3.0/conanfile.py build() 与 test_package/conanfile.py build()
+
+fallback_priority:      2
+fallback_approach:      redirect-to-file-then-cat
+fallback_description:   退一步可用 `self.run(f'{cmd} > build.log 2>&1')` 绕开管道（实测同样有效），失败时再 cat 日志尾部；缺点是不做额外输出时 CI 日志看不到构建进度。可在 subprocess 方案外叠加 2~3 次重试兜底（sleep 5s 后重跑，make 为增量构建不会从头开始）。
+fallback_command:       self.run(f'cmake --build "{self.build_folder}" -- -j{jobs} > build.log 2>&1 || tail -200 build.log')
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       CMake\.build\(build_tool_args=\["--", "-jN"\]\)|无上限地按 CPU 核数并行|把静默 Error 1 当成源码或编译器报错去改代码/加补丁
+forbid_1_reason:        build_tool_args 带 "--" 会拼成 "-- -j20 -- -j4" 让 make 报错；按核数并行（本机 20）在超大翻译单元（adlmidi inst_db / nuked_opl3）上内存压力过大；静默 Error 1 与源码无关，据此改代码或加补丁是纯浪费（曾在同一现象上试遍 -j20/-j4/-j2/-j1 全部无效）。
+forbid_1_consequence:   无谓的调参螺旋（R43）、误加平台宏补丁触发 PF5 拦截、浪费数小时预算。
+
+principles:             real-evidence-over-assumption, minimal-patch, reproduce-before-fix, environment-first-triage
