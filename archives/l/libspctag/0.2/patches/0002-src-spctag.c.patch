@@ -1,0 +1,242 @@
+--- a/src/spctag.c
++++ b/src/spctag.c
+@@ -20,20 +20,25 @@
+     along with libspctag.  If not, see <http://www.gnu.org/licenses/>.
+ */
+ 
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ 
+ #include "spctag.h"
+ #include "constants.h"
++
++SPCTAG_EXPORT int spctag_is_init = 0;
++SPCTAG_EXPORT int spctag_txt_tag = 0;
++SPCTAG_EXPORT struct TAGS_TXT *spctag_tags_txt = NULL;
++SPCTAG_EXPORT struct TAGS_BIN *spctag_tags_bin = NULL;
+ 
+ // Returned variables
+ char song_title[SPCTAG_SONGTITLE_LENGTH+1];
+ char game_title[SPCTAG_GAMETITLE_LENGTH+1];
+ char dumper_name[SPCTAG_DUMPERNAME_LENGTH+1];
+ char comments[SPCTAG_COMMENTS_LENGTH+1];
+ char dump_date[SPCTAG_DUMPDATE_TXT_LENGTH+1];
+ char length[SPCTAG_LENGTH_LENGTH+1];
+ char fade_length[SPCTAG_FADELENGTH_TXT_LENGTH+1];
+ char artist[SPCTAG_ARTIST_LENGTH+1];
+@@ -70,21 +75,21 @@
+  * param:
+  *     formated_channels: string composed of 0 and 1 that represent channels states
+  *     channels: channels encoded on a byte
+  */
+ void set_formated_channels( char* formated_channels, char* channels )
+ {
+ 	unsigned char masque;
+ 	int i;
+ 
+ 	for ( i=0; i<=7; i++ ) {
+-		masque = 0x1 << 7-i;
++		masque = 0x1 << (7-i);
+ 		
+ 		if ( formated_channels[i] == '1' )
+ 			*channels |= masque;
+ 		else {
+ 			masque = ~masque;
+ 			*channels &= masque;
+ 		}
+ 	}
+ }
+ 
+@@ -110,48 +115,60 @@
+ }
+ 
+ int spctag_init( FILE* file )
+ {
+ 	char header[SPCTAG_FILE_HEADER_LENGTH+1];	// SPC file header
+ 	char has_tag;
+ 	char test_tag[SPCTAG_TEST_LENGTH+1];
+ 
+ 	// Return if the file is not a SCP file
+ 	fseek( file, 0, SEEK_SET );
+-	fread( &header, sizeof( header ) - 1, 1, file );
++	if ( fread( &header, sizeof( header ) - 1, 1, file ) != 1 )
++		return SPCTAG_E_NOT_SPC;
+ 	header[SPCTAG_FILE_HEADER_LENGTH] = '\0';
+ 	if ( strcmp( header, SPCTAG_FILE_HEADER ) != 0 ) {
+ 		fprintf( stderr, "Not an %s\n", SPCTAG_FILE_HEADER );
+ 		return SPCTAG_E_NOT_SPC;
+ 	}
+ 
+ 	// Return if the file header do not contain ID666 tags
+ 	fseek( file, SPCTAG_HAS_TAGS, SEEK_SET );
+ 	has_tag = fgetc( file );
+ 	if ( has_tag != SPCTAG_TAGS_PRESENTS ) {
+ 		printf( "No ID666 tag.\n" );
+ 		return SPCTAG_E_NO_TAGS;
+ 	}
+ 
+ 	// Test if we have text or binary tags
+ 	fseek( file, SPCTAG_TEST_START, SEEK_SET );
+-	fread( &test_tag, SPCTAG_TEST_LENGTH, 1, file );
++	if ( fread( &test_tag, SPCTAG_TEST_LENGTH, 1, file ) != 1 )
++		return SPCTAG_E_NOT_SPC;
+ 	spctag_txt_tag = spctag_is_text( test_tag );
+ 
+ 	// Init tag struct
+ 	fseek( file, SPCTAG_TAGS_START, SEEK_SET );
+ 	if ( spctag_txt_tag ) {
+ 		spctag_tags_txt = (struct TAGS_TXT *)malloc( sizeof( struct TAGS_TXT ) );
+-		fread( spctag_tags_txt, sizeof( struct TAGS_TXT ), 1, file );
++		if ( spctag_tags_txt == NULL ||
++		     fread( spctag_tags_txt, sizeof( struct TAGS_TXT ), 1, file ) != 1 ) {
++			free( spctag_tags_txt );
++			spctag_tags_txt = NULL;
++			return SPCTAG_E_NOT_SPC;
++		}
+ 	} else {
+ 		spctag_tags_bin = (struct TAGS_BIN *)malloc( sizeof( struct TAGS_BIN ) );
+-		fread( spctag_tags_bin, sizeof( struct TAGS_BIN ), 1, file );
++		if ( spctag_tags_bin == NULL ||
++		     fread( spctag_tags_bin, sizeof( struct TAGS_BIN ), 1, file ) != 1 ) {
++			free( spctag_tags_bin );
++			spctag_tags_bin = NULL;
++			return SPCTAG_E_NOT_SPC;
++		}
+ 	}
+ 
+ 	spctag_is_init = 1;
+ 
+ 	return SPCTAG_SUCCESS;
+ }
+ 
+ char* spctag_get_songtitle()
+ {
+ 	if ( spctag_txt_tag )
+@@ -198,22 +215,35 @@
+ 	comments[SPCTAG_COMMENTS_LENGTH] = '\0';
+ 
+ 	return comments;
+ }
+ 
+ char* spctag_get_dumpdate()
+ {
+ 	if ( spctag_txt_tag )
+ 		strncpy( dump_date, spctag_tags_txt->dump_date, SPCTAG_DUMPDATE_TXT_LENGTH );
+ 	else {
+-		if ( spctag_tags_bin->dump_day != 0 && spctag_tags_bin->dump_month != 0 && spctag_tags_bin->dump_year != 0 )
+-			sprintf( dump_date, "%.2d/%.2d/%.4u", spctag_tags_bin->dump_month, spctag_tags_bin->dump_day, *(unsigned*)spctag_tags_bin->dump_year );
++		if ( spctag_tags_bin->dump_day != 0 && spctag_tags_bin->dump_month != 0 &&
++		     (spctag_tags_bin->dump_year[0] != 0 || spctag_tags_bin->dump_year[1] != 0) ) {
++			unsigned day = (unsigned)(unsigned char)spctag_tags_bin->dump_day;
++			unsigned month = (unsigned)(unsigned char)spctag_tags_bin->dump_month;
++			unsigned year = (unsigned)(unsigned char)spctag_tags_bin->dump_year[0] |
++			                ((unsigned)(unsigned char)spctag_tags_bin->dump_year[1] << 8);
++			if ( day > 99 )
++				day = 99;
++			if ( month > 99 )
++				month = 99;
++			if ( year > 9999 )
++				year = 9999;
++			snprintf( dump_date, sizeof( dump_date ), "%02u/%02u/%04u",
++			          month, day, year );
++		}
+ 		else
+ 			dump_date[0] = '\0';
+ 	}
+ 
+ 	dump_date[SPCTAG_DUMPDATE_TXT_LENGTH] = '\0';
+ 
+ 	return dump_date;
+ }
+ 
+ char* spctag_get_length()
+@@ -334,20 +364,23 @@
+ 	else {
+ 		char day_string[3];
+ 		char month_string[3];
+ 		char year_string[5];
+ 		char day, month;
+ 		unsigned year;
+ 
+ 		strncpy( day_string, new_dumdate+3, 2 );
+ 		strncpy( month_string, new_dumdate, 2 );
+ 		strncpy( year_string, new_dumdate+6, 4 );
++		day_string[2] = '\0';
++		month_string[2] = '\0';
++		year_string[4] = '\0';
+ 
+ 		day = atoi( day_string ) & 0xFF;
+ 		month = atoi( month_string ) & 0xFF;
+ 		year = atoi( year_string );
+ 
+ 		spctag_tags_bin->dump_day = day;
+ 		spctag_tags_bin->dump_month = month;
+ 		strncpy( spctag_tags_bin->dump_year, (char*)&year, SPCTAG_DUMPYEAR_BIN_LENGTH );
+ 	}
+ 
+@@ -396,50 +429,60 @@
+ 	return SPCTAG_SUCCESS;
+ }
+ 
+ int spctag_set_defaultchannels( char* new_defaultchannels )
+ {
+ 	if ( spctag_txt_tag ) {
+ 		set_formated_channels( new_defaultchannels, &spctag_tags_txt->default_channels );
+ 	} else {
+ 		set_formated_channels( new_defaultchannels, &spctag_tags_bin->default_channels );
+ 	}
++
++	return SPCTAG_SUCCESS;
+ }
+ 
+ int spctag_set_emulator( char* new_emulator )
+ {
+ 	if ( spctag_txt_tag ) {
+ 		if ( strcasecmp( new_emulator, "ZSNES") == 0 )
+ 			spctag_tags_txt->emulator = '1';
+ 		else if ( strcasecmp( new_emulator, "Snes9x") == 0 )
+ 			spctag_tags_txt->emulator = '2';
+ 		else
+ 			spctag_tags_txt->emulator = '0';
+ 	} else {
+ 		if ( strcasecmp( new_emulator, "ZSNES") == 0 )
+ 			spctag_tags_bin->emulator = 1;
+ 		else if ( strcasecmp( new_emulator, "Snes9x") == 0 )
+ 			spctag_tags_bin->emulator = 2;
+ 		else
+ 			spctag_tags_bin->emulator = 0;
+ 	}
++
++	return SPCTAG_SUCCESS;
+ }
+ 
+ int spctag_save( FILE* file )
+ {
+ 	// Move to the start of ID666 tags
+ 	fseek( file, SPCTAG_TAGS_START, SEEK_SET );
+ 
+ 	// Write structures to file
+ 	if ( spctag_txt_tag )
+ 		fwrite( spctag_tags_txt, sizeof(*spctag_tags_txt), 1, file );
+ 	else
+ 		fwrite( spctag_tags_bin, sizeof(*spctag_tags_bin), 1, file );
++
++	return SPCTAG_SUCCESS;
+ }
+ 
+ void spctag_free()
+ {
+-	if ( spctag_txt_tag )
++	if ( spctag_txt_tag ) {
+ 		free( spctag_tags_txt );
+-	else
++		spctag_tags_txt = NULL;
++	} else {
+ 		free( spctag_tags_bin );
+-}
++		spctag_tags_bin = NULL;
++	}
++	spctag_is_init = 0;
++}
