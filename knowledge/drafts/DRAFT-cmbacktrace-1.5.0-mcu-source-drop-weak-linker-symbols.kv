@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-cmbacktrace-1.5.0-mcu-source-drop-weak-linker-symbols
+# MCU 目标源码即插型（source-drop）库在 OHOS aarch64 的适配：
+# 弱符号链接脚本边界 + 架构专属语义优雅降级
+#
+# 场景: cmbacktrace 1.5.0（armink/CmBackTrace）是 ARM Cortex-M 故障回溯库，
+#       source-drop 形态：单编译单元 cm_backtrace.c + 头文件，上游无
+#       configure/make/CMake；cmb_cfg.h 需用户提供 cmb_println 与
+#       CMB_CPU_PLATFORM_TYPE；cm_backtrace.c 引用四个链接脚本符号
+#       （CMB_CSTACK_BLOCK_START/END、CMB_CODE_SECTION_START/END）；
+#       回溯算法依赖 Cortex-M BL/BLX Thumb 指令语义与 NVIC 寄存器。
+#       在 OHOS aarch64（无 Cortex-M 链接脚本、非 Thumb）上：
+#       ① 四个符号声明为 __attribute__((weak)) → 未定义时解析为 0，
+#          init 打印文档化栈配置提示并返回（不崩溃）；
+#       ② cm_backtrace_call_stack 返回 0 深度（BL/BLX 语义不适用）——
+#          优雅降级，属预期而非失败。
+# 适用: 所有面向 MCU/嵌入式目标、无构建系统、引用链接脚本符号或含
+#       架构专属内联汇编的 source-drop C 库在 OHOS PC/CI clean 环境落地配方。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-cmbacktrace-1.5.0-mcu-source-drop-weak-linker-symbols
+source_lib:             cmbacktrace 1.5.0
+trigger_tool:           conan|conan-verify|clang|ld
+phase:                  recipe|compilation|linking|testing
+error_signature:        undefined reference to (CMB_CSTACK_BLOCK_START|CMB_CSTACK_BLOCK_END|CMB_CODE_SECTION_START|CMB_CODE_SECTION_END)|
+                         _sstack|_estack|linker script symbol|MRS %0, msp|cmb_get_msp|CMB_CPU_PLATFORM_TYPE isn't defined|
+                         cmb_println isn't defined|source-drop|no build system|main stack configuration
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, mcpu, source-drop, no-build, linker-script, weak-symbol, graceful-degradation
+match_keywords:         Cortex-M, MCU, source-drop, 源码即插, 无构建系统, no build, single TU,
+                        单编译单元, linker script symbol, 链接脚本符号, weak symbol, 弱符号,
+                        CMB_CSTACK_BLOCK, cmb_cfg.h, cmb_println, CMB_CPU_PLATFORM_TYPE,
+                        MRS msp, MRS psp, graceful degradation, 优雅降级, call_stack depth 0,
+                        fault backtrace, 故障回溯, CMBackTrace
+title:                  MCU 目标 source-drop C 库在 OHOS 上：链接脚本符号 weak 化保链接、cmb_cfg 默认配置保编译、架构专属语义如实优雅降级
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             MCU 目标库（如 Cortex-M 故障回溯）默认以"用户粘贴进嵌入式工程"方式分发：
+                        (1) 配置头（cmb_cfg.h）留空宏，要求用户填 cmb_println 与 CPU 类型；
+                        (2) 编译单元引用链接脚本符号（_sstack/_estack/_stext/_etext 的封装），
+                            仅在 MCU 链接脚本中定义，非 MCU 平台链接必失败；
+                        (3) 回溯/故障诊断依赖 Cortex-M 专属指令语义（BL/BLX 检查、MRS msp/psp、
+                            NVIC 寄存器映射），在 aarch64 上不适用。
+                        若按普通库直接编译：配置头留空 → 预处理失败；链接脚本符号缺失 → 链接失败。
+affected_scope:         所有 MCU/嵌入式目标、source-drop 形态、无构建系统、引用链接脚本符号的
+                        C 库（故障回溯、RTOS 组件、外设驱动等）在 OHOS PC/CI 的 Conan 适配。
+verification_cmd:        CI_PACKAGES="archives/c/cmbacktrace/1.5.0" zsh ci/conan/build_and_test.sh; \
+                        消费者用例: clang -I<prefix>/include ohos_test.c <prefix>/lib/libcmbacktrace.a
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           mcu-source-drop-weak-symbol-graceful-degrade
+rec_description: |
+  (1) 配方形态：package_type="library"，source-drop 单 TU 直接编译——
+      build() 用 Conan conf（tools.build:compiler_executables）取 cc/ar（R33），
+      编译 cm_backtrace.c 生成静态库，package() 复制头文件
+      + lib + LICENSE；package_info().libs=["cmbacktrace"]。
+  (2) cmb_cfg.h 默认配置补丁：cmb_println 填 printf 实现、CMB_USING_BARE_METAL_PLATFORM、
+      CMB_CPU_PLATFORM_TYPE 填最常用 MCU 型号（如 M4）、CMB_PRINT_LANGUAGE 填英文，
+      使库"开箱即编译"（用户仍可用 CMB_USER_CFG 覆盖）。
+  (3) 链接脚本符号 weak 化补丁：cm_backtrace.c 中四个 extern const int 符号
+      加 __attribute__((weak))——非 MCU 平台未定义时解析为 0，链接通过；
+      init 检测 main_stack_size==0 打印文档化配置提示并返回（上游设计路径），
+      消费方在链接脚本或源码定义真实边界即可覆盖启用完整功能。
+  (4) 架构专属语义如实降级：aarch64 上 MRS msp/psp 内联汇编仅产生宽度警告不阻断
+      （这些函数仅在 MCU 故障路径调用）；call_stack 因 BL/BLX Thumb 语义不适用
+      返回 0 深度——测试断言 depth==0 且进程正常退出（优雅降级），不得伪造回溯结果。
+  (5) R38：纯库无 bin/ → 不建 commands.json。R49：无 requires → 无需注入 prefix。
+rec_command:            clang -std=c99 -O2 -fPIC -I<src>/cm_backtrace -c cm_backtrace.c -o cm_backtrace.o
+rec_auto_fix:           false
+rec_impl:               conan-recipe + patches
+
+fallback_priority:      2
+fallback_approach:      consumer-provided-bounds
+fallback_description:   若业务方需要完整回溯/故障诊断，由消费方在链接脚本或强符号定义中
+                        提供四个边界符号（栈/代码区真实地址范围），weak 声明自动让位，
+                        init_ok=true，调用栈与故障功能按 MCU 语义工作。
+fallback_command:       在消费方提供 const int CMB_CSTACK_BLOCK_START/END/CODE_* 强符号
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       伪造 call_stack 深度|把 depth=0 写成通过|伪造故障诊断输出
+forbid_1_reason:        架构专属语义在 aarch64 上不适用是真实边界，必须如实记录为优雅降级，
+                        不得编造回溯/诊断结果充数（R34 空壳测试同口径）。
+forbid_1_consequence:   CI 审计判定测试失真，PR 被一票否决。
+forbid_2_pattern:       cmb_cfg.h 补丁引入 __OHOS__ 平台宏
+forbid_2_reason:        R8：patches/ 默认禁止平台宏（本场景无需平台宏，弱符号机制是通用链接特性）。
+forbid_2_consequence:   preflight PF5 平台宏闸拦截。
+
+# ═══ Layer 4: 验证层 (Validation) ═══
+verified_on:            cmbacktrace 1.5.0（OHOS armv8 aarch64，clang 15.0.4，conan 2.29.1）
+verification_result:    conan-verify G0-G4 + L2/L4/L5 全 PASS；W3 本地 CI L0/L1/L1e/L4/L5
+                        全 PASS（test_package 1/1）；鸿蒙专项测试（reports/ohos-test/ohos_test.c）
+                        编译链接运行通过：init 打印文档化栈配置提示、firmware_info 正常输出、
+                        call_stack depth=0 且 exit 0（弱符号默认值优雅降级断言成立）。
+# 反例/限制
+limitations: >
+  - 仅适用"无构建系统、源码即插"的 MCU 库；有 CMake/Make 的上游走普通构建族模板。
+  - weak 符号为 0 时 cm_backtrace_init 不置 init_ok（CMB_ASSERT(init_ok) 会死循环），
+    消费方测试不得在未提供边界时调用 assert/fault 路径——OHOS 专项测试只调
+    init/firmware_info/call_stack 三个安全入口。
+  - 弱符号机制依赖 ELF weak 语义（GCC/clang 通用），MSVC 类工具链不适用。
+  - 上游测试清点：MCU 库通常无测试框架（cmbacktrace 为 0 项），demos 是 MCU 工程
+    不算独立用例，须如实写 source_declared_total=0 并附清点证据。
