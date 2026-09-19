@@ -1,0 +1,71 @@
+#====================================================================
+# DRAFT-ohos-conan-wheel-missing-distro
+# 社区源 conan wheel 的 distro 依赖带 platform_system 标记，OHOS 上被 pip 跳过，
+# conan 启动即 ModuleNotFoundError: No module named 'distro'
+# 来源：libiodbc2 3.52.16（CI setup.sh 首次运行失败）
+#====================================================================
+
+id:                     DRAFT-ohos-conan-wheel-missing-distro
+trigger_tool:           pip|conan
+phase:                  configuration
+error_signature:        ModuleNotFoundError: No module named 'distro'|
+                         Conan version: unknown|
+                         Conan 无法启动, Worker 环境需要修复
+
+severity:               3
+category:               ohos, conan, python, pip, environment-marker, ci-worker
+match_keywords:         distro, pip install --user, environment marker, platform_system,
+                         conan 2.29.1, load_global_conf, setup.sh, worker 环境, HNP python
+
+title:                  社区源 conan wheel 在 OHOS 上漏装 distro，导致 conan 无法启动
+
+root_cause:             conan 2.29.1 的 METADATA 把 distro 的依赖标记写成
+                        `platform_system == "Linux" or platform_system == "FreeBSD"`。
+                        OHOS 上 platform.system() 不返回 Linux/FreeBSD，标记不成立，
+                        pip 因此跳过 distro；而 conan 在 load_global_conf() 中无条件
+                        `import distro`，任何 conan 子命令启动即 ModuleNotFoundError。
+                        ci/conan/setup.sh 用 `conan --version 2>/dev/null || echo unknown`
+                        吞掉 stderr，现场只剩 "Conan version: unknown" 与
+                        "Worker 环境需要修复"，无法定位到缺包。
+affected_scope:         所有在 OHOS 上用 `pip install --user`（或任何按 wheel METADATA
+                        解析依赖的方式）安装社区源 conan 的 worker；预置了解释器前缀的
+                        环境（如 ~/.opendesk/interpreters/pip-global，含 distro-1.9.0）
+                        不受影响。
+verification_cmd:       python3 -m pip install --user distro && ~/.local/bin/conan --version
+                        → 期望输出 "Conan version 2.29.1"；
+                        反证：grep 'Requires-Dist: distro'
+                        ~/.local/lib/python3.12/site-packages/conan-2.29.1.dist-info/METADATA
+                        → 可见 platform_system == "Linux" or platform_system == "FreeBSD" 标记。
+
+rec_priority:           1
+rec_approach:           install-distro-after-user-install
+rec_description:        worker 侧执行 `python3 -m pip install --user distro` 一次即可
+                        （与 conan 同前缀，--force-reinstall conan 不移除它，长期有效）。
+                        框架侧建议在 setup.sh 的 --force-reinstall conan 之后补装 distro，
+                        或把 `conan --version 2>/dev/null` 的判定改为保留 stderr 首行，
+                        否则每个新 worker 都会复现且无有效报错。
+rec_command:            python3 -m pip install --user distro
+rec_auto_fix:           false
+rec_impl:               worker-environment
+
+fallback_priority:      2
+fallback_approach:      reuse-prewired-interpreter
+fallback_description:   若允许改动解释器来源，可直接复用预置前缀
+                        （PYTHONPATH=<prefix> <prefix>/bin/conan）绕开缺包；
+                        但 W3/CI 走的是 setup.sh 的 --user 安装路径，故仅作应急。
+fallback_command:       PYTHONPATH=/storage/Users/currentUser/.opendesk/interpreters/pip-global
+                        /storage/Users/currentUser/usr/local/bin/python3 -c "import conan"
+fallback_auto_fix:      false
+fallback_impl:          worker-environment
+
+forbid_1_pattern:       sed -i.*conan-2\.29\.1\.dist-info/METADATA|patch.*conan/internal/model/conf\.py
+forbid_1_reason:        site-packages 属宿主环境，不属于任务自有可改状态；改宿主会污染
+                        其他并发任务并且随 --force-reinstall 失效。
+forbid_1_consequence:   修复不可持续，其他任务受害。
+forbid_2_pattern:       pip install --target.*conan|vendor.*conan.*recipe
+forbid_2_reason:        把 conan 依赖 vendor 进配方超出包职责（R32/R38 边界）。
+forbid_2_consequence:   配方与构建工具链耦合，与 CI 的 setup.sh 行为分叉。
+
+principles:             P013,P014
+causes:                 []
+caused_by:              []
