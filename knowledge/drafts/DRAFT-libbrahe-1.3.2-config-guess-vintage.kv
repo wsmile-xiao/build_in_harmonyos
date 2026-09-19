@@ -1,0 +1,103 @@
+#====================================================================
+# DRAFT-libbrahe-1.3.2-config-guess-vintage - patch-autotools-ohos.pl
+# 在 2009/2010 世代 config.guess/config.sub 上结构性失效
+#====================================================================
+
+id:                     DRAFT-libbrahe-1.3.2-config-guess-vintage
+trigger_tool:           configure|autoconf|perl
+phase:                  configuration
+error_signature:        \[warn\] Could not find __ANDROID__/LIBC=android in config\.guess|Score: [0-5]/5|config\.guess: unable to guess system type|Invalid configuration .*aarch64-unknown-linux.* not recognized|uname -s = HarmonyOS
+
+severity:               3
+category:               autotools|configure|platform|triplet
+match_keywords:         patch-autotools-ohos.pl, config.guess, config.sub, timestamp, HarmonyOS, aarch64-unknown-linux-ohos, unable to guess system type, Invalid configuration, GUESS variable, echo exit 0, linux-ohos, early-exit passthrough
+title:                  老世代（2009–2011）config.guess/config.sub 上 E007/E205 的一键补丁脚本不生效，需改用心智模型不同的最小补丁形态
+
+root_cause:             scripts/patch-autotools-ohos.pl 的插入点与插入形态是按「新版 GNU config 脚本结构」写死的：
+                        ①config.guess 侧插入 `GUESS=${MACHINE}-unknown-linux-ohos` 赋值，但 2012 年以前的 config.guess
+                        每个 case 分支必须自行 `echo <triplet> ; exit 0` 才会终止脚本，赋值形式的分支会被继续向下执行，
+                        最终仍走到 "unable to guess system type"（实测 rc=1、脚本自报 Score: 1/5）；
+                        ②config.sub 侧的三处锚点（`android-linux` 分支、`case $os` OS 白名单、`linux-uclibc*-` 内核行）
+                        在 2010-01-22 版里根本不存在或不唯一，全部 grep 失败（[warn] Could not find android-linux /
+                        linux-uclibc pattern），因此既没加 ohos-linux 映射也没加 kernel-os 校验项；
+                        ③同版本 config.sub 其实已经能直通 aarch64-*-linux-gnu，唯一缺口是 `linux-ohos` 组合，
+                        所以「不认识 aarch64」与「不认识 ohos」是两件事，按新世代的三处修改去补会补错地方。
+                        三者叠加导致 E007/E205 推荐的一键命令对 2009/2010 世代包整体无效。
+affected_scope:         随包 config.guess/config.sub 时间戳早于约 2012 年的 autotools 项目（libbrahe 1.3.2 为
+                        config.guess 2009-12-30 + config.sub 2010-01-22；本仓库同世代存量很大，
+                        archives/ 内以 *.orig.tar.gz 形态取用的 2005–2012 上游包多属此类）。
+                        与 E268 互补：E268 记的是 2024+ 新 config.sub 上该脚本误判跳过，本条记的是 2012 前老脚本上该脚本插入无效。
+verification_cmd:       grep -m1 "^timestamp=" config.guess config.sub;
+                        perl scripts/patch-autotools-ohos.pl config.guess config.sub; echo rc=$?;
+                        sh ./config.guess; sh ./config.sub aarch64-unknown-linux-ohos;
+                        sh ./config.sub aarch64-unknown-linux-gnu
+
+rec_priority:           1
+rec_approach:           vintage-aware-minimal-triplet-patch
+rec_description:        先读时间戳判世代，再按世代选形态。老世代（本条）用两处最小补丁：
+                        ①config.guess：在 `case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in`
+                        之后插入 `*:HarmonyOS:*:*)` 分支，分支体内必须 `echo "${UNAME_MACHINE}-unknown-linux-ohos" ; exit 0`
+                        （不能只赋 GUESS），且要插在 case 顶部、位于所有机器限定分支之前
+                        （该版本没有通配 `*:Linux:*:*)`，Linux 匹配是 `arm*:Linux:*:*)`/`x86_64:Linux:*:*)` 这类
+                        机器限定分支，且没有 aarch64 条目）。
+                        ②config.sub：在「# Separate what the user gave into CPU-COMPANY…」之前插入 early-exit 直通块，
+                        把 `aarch64|arm|armv7|x86_64-*-linux-ohos` 原样 echo 后 exit 0，绕开该版本根本不存在的
+                        ohos 白名单；由于回显值仍是 `*-linux-ohos`，autoconf 归一化后 host_os=linux-ohos，
+                        2008 世代 libtool 的 `linux*)` 分支照常命中，因此不需要 --build/--host（E007 forbid_1 仍成立）。
+                        新世代包继续走 E007/E205 的 perl 脚本，并按 E268 复核 kernel 校验行。
+rec_command:            # 1) 判世代
+                        grep -m1 "^timestamp=" config.guess config.sub
+                        # 2) 老世代：config.guess 加 echo 分支
+                        #    case "${UNAME_MACHINE}:${UNAME_SYSTEM}:${UNAME_RELEASE}:${UNAME_VERSION}" in
+                        #      *:HarmonyOS:*:*)
+                        #          echo "${UNAME_MACHINE}-unknown-linux-ohos" ; exit 0
+                        #          ;;
+                        # 3) 老世代：config.sub 加 early-exit 直通块
+                        #    case $1 in
+                        #      aarch64-*-linux-ohos | arm-*-linux-ohos | armv7-*-linux-ohos | x86_64-*-linux-ohos)
+                        #        echo "$1" ; exit 0 ;;
+                        #    esac
+                        # 4) 验收：两条都须 rc=0
+                        sh ./config.guess && sh ./config.sub aarch64-unknown-linux-ohos
+rec_auto_fix:           false
+rec_impl:               package-patch
+
+fallback_priority:      2
+fallback_approach:      replace-with-modern-gnu-config-scripts
+fallback_description:   若某包需要的 OS 特性判断依赖现代 canonicalization（例如脚本还要认 musl/uclibc-ng 等新组合），
+                        可整文件替换为 GNU config 的 config.guess/config.sub 新版本（本仓 archives/a/aiksaurus/1.2.1+dev-0.12/
+                        patches/0002-config.sub.patch 即此形态：1549→1964 行整文件替换）。代价是补丁体积与评审成本，
+                        且仍需为 HarmonyOS 单独加检测分支（GNU config 至今不把 HarmonyOS 当 Linux 之外的系统识别），
+                        因此优先用上面的最小补丁。
+fallback_command:       # 见 archives/a/aiksaurus/1.2.1+dev-0.12/patches/0002-config.sub.patch
+fallback_auto_fix:      false
+fallback_impl:          package-patch
+
+forbid_1_pattern:       --build=aarch64-unknown-linux-gnu|--host=aarch64-unknown-linux-gnu
+forbid_1_reason:        本仓库既有先例（archives/a/a52dec/0.7.4/conanfile.py）用 --build/--host 把 OHOS 伪装成 linux-gnu 来绕过
+                        老 config.sub，但 E007/E011 明确禁止：这会把 configure 判成 cross_compiling=yes，
+                        AC_RUN_IFELSE 类运行时探测全部跳过并按 Linux/glibc 默认值生成 config.h。
+                        老世代最小补丁路线实测无需该参数，configure/make/install 全部 rc=0。
+forbid_1_consequence:   本地看似通过，config.h 与实际平台能力不符，问题以运行期形式复发。
+
+forbid_2_pattern:       GUESS=\$\{MACHINE\}-unknown-linux-ohos.*config\.guess
+forbid_2_reason:        把新世代的 GUESS 赋值形态照抄进 2012 年前的 config.guess：分支不会终止脚本，
+                        仍然走到 unable to guess 出口，形成「已打补丁」的假象。
+forbid_2_consequence:   同一命令复跑仍 rc=1，后续时间被消耗在重复调参上（R43 型死循环）。
+
+principles:             P001, P003, P011
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E072, E122, E205, E268, E160]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libbrahe-1.3.2-config-guess-vintage.md
+last_updated:           2026-09-18
+source_event:           libbrahe/1.3.2 积分赛适配（任务 8135，feat/libbrahe-1.3.2）
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
