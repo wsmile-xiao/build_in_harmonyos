@@ -1,0 +1,66 @@
+#====================================================================
+# DRAFT-odin-llvm-constrained-toolchain-bootstrap — OHOS 受限 LLVM 工具链上的自举型语言编译器适配模式
+# 状态：draft，不预占正式编号（编号只用 DRAFT- 描述性命名，最终编号由知识库主编确认）
+# 触发事件：odin dev-2026-08 HarmonyOS PC 适配（PR #10021，CI #47478 绿，2026-09-15）
+# 跨库旁证：odinfmt dev-2026-06 / ols dev-2026-06 失败路径.md（同源 LLVM 版本门禁报错与 bad_cast 误诊史）
+# 证据权威：learninglog/20260912odin-dev-2026-08/证据七环.md
+#====================================================================
+
+id:                     DRAFT-odin-llvm-constrained-toolchain-bootstrap
+trigger_tool:           build_odin.sh|llvm-config|clang|conan|runtime
+phase:                  configuration|compilation|linking|runtime|testing
+error_signature:        Unsupported LLVM version|Platform .* unsupported|Error loading shared library libLLVM|Error relocating .* LLVM.*: symbol not found
+
+severity:               3
+category:               ohos|toolchain|llvm|compiler|portability|bootstrap
+match_keywords:         LLVMInitialize, LLVMInitializeAllTargetInfos, LLVMInitializeAllTargets, llvm-config, LLVM_CONFIG, Unsupported LLVM version, 17..22, conanrun, conanbuild, libLLVM.so.22.1, LLVM_22.1, Platform unsupported, HarmonyOS unsupported, bad_cast, self-hosted compiler, bootstrap compiler, tool_requires, llvm/22.1.0, AArch64-only aggregate library, LD_LIBRARY_PATH, odin, build_odin.sh
+title:                  OHOS 受限 LLVM 工具链上自举型语言编译器的适配模式（LLVM_CONFIG 换制品仓 LLVM + per-target 初始化符号改 All 系列 + conanrun 注入运行期库路径）
+
+root_cause:             以 LLVM 为后端的语言编译器把宿主 LLVM 工具链当成隐含前提（Odin 本体为 C++，但其交付面必须构成自举闭环：用本包产出的 odin 再编译并运行 Odin 程序；odinfmt/ols 等下游工具更是用 Odin 自写、离开可用 odin 无法构建），构建脚本在三处硬编码了这种耦合：①LLVM 版本门禁（build_odin.sh 只接受 17-22，而宿主 /data/service/hnp/bin/llvm-config 为 15.0.4，自动探测与强制指定均被拒）；②LLVM 目标初始化按 arch 分支直接调用 per-target 符号（src/llvm_backend.cpp L3065-3111），而制品仓 llvm/22.1.0 交付的是 AArch64-only 聚合库 libLLVM.so.22.1，llvm-c/Target.h 只声明 All 系列与 AArch64 子集，per-target 声明不存在 → 编译期 undeclared identifier；③平台识别 case "$OS_NAME" 无 HarmonyOS 分支，落 `*` 直接拒绝。运行期还有一层独立误诊：冒烟阶段用 conanbuild 环境只注入 SDK LLVM 15 的路径，LD_LIBRARY_PATH 未指向 llvm/22.1.0/lib，症状是动态库加载失败并连带上百条符号重定位失败，与 ABI 无关；把该症状当成"新版 LLVM ABI bad_cast"会得出"平台不可适配"的错误结论。
+affected_scope:         在 OHOS/HarmonyOS PC 上需要 LLVM ≥17 的语言编译器与自举闭环工具链（Odin 及以其为依赖的 odinfmt/ols，其他以 LLVM 为后端并要求产物自举闭环的语言实现）；以及任何直接引用 per-target LLVMInitialize* 符号、或在构建期/运行期需要区分 conanbuild 与 conanrun 环境注入 LLVM 共享库路径的 LLVM C++ 消费者。
+verification_cmd:       conan create archives/o/odin/dev-2026-08 -pr:h= -pr:b= --build=odin/* && test_package/run_tests.sh
+
+rec_priority:           1
+rec_approach:           upstream-patch+env-fix（五子模式组合：版本门禁替换 + All 系列符号 patch + conanrun 运行期注入 + uname 平台映射 + 离线源码校验）
+rec_description:        ①版本门禁：宿主 llvm-config 15.0.4 不在 build_odin.sh 的 17-22 白名单内，改用制品仓 llvm/22.1.0 作 tool_requires，并把 LLVM_CONFIG 指向其 llvm-config，不修改上游版本下限；②聚合库符号：把 src/llvm_backend.cpp 的 per-target LLVMInitialize* 调用改为 LLVMInitializeAll* 系列（X86/ARM/AArch64/WebAssembly/RISCV 各分支统一，patches/0001-llvm-backend-all-target-init.patch，sha256 c30f86e31791248b8a35ec70724c2c7942aa95a325a903138104e1cb4978bcf8），AArch64 语义等价，不改上游功能；③运行期环境：冒烟与 test_package 的 self.run 一律用 env="conanrun"（不是 "conanbuild"），让 LD_LIBRARY_PATH 指向 llvm/22.1.0/lib；④平台识别：build_odin.sh 的 OS 分支把 uname -s=HarmonyOS 映射为 Linux，保留 aarch64 目标语义；⑤源码获取：本机 github.com:443 不可达、gitcode 镜像无 tools/，用本地 tarball 双源 sha256 核对后经 file:// 离线源构建，提交前还原为官方 URL。
+rec_command:            LLVM_CONFIG=<llvm-22.1.0>/bin/llvm-config ./build_odin.sh release  # 前置: conan install llvm/22.1.0 作 tool_requires；冒烟/test 用 conanrun env；patch 0001 覆盖 src/llvm_backend.cpp
+rec_auto_fix:           false
+rec_impl:               upstream-patch+env-fix
+
+fallback_priority:      2
+fallback_approach:      minimal-probe-abi-discrimination
+fallback_description:   遇到"新版 LLVM 共享库加载失败"时，先跑只链接 libLLVM.so.<major> 并调用一次 LLVM C API 的最小动态链接探针，并用 conanrun 注入正确 lib 目录：若探针 rc=0 则确认是环境注入问题（本模式已实证成立），若探针在正确 LD_LIBRARY_PATH 下仍以 rc=134 bad_cast 崩溃，才可判定为真实的 libc++ ABI 不兼容，此时才进入工具链降级/无法适配评审。禁止跳过该探针直接引用历史 bad_cast 结论。
+fallback_command:        conanrun 环境下运行 `./llvm_min_probe`（仅 dlopen/直接链接 libLLVM.so.22.1 + 一次 LLVM C API 调用）；记录 rc，禁止用 conanbuild 环境代替
+fallback_auto_fix:      false
+fallback_impl:          manual-review
+
+forbid_1_pattern:       直接引用 per-target LLVMInitialize(X86|ARM|AArch64|WebAssembly|RISCV)TargetInfo
+forbid_1_reason:        制品仓 llvm/22.1.0 是 AArch64-only 聚合库（libLLVM.so.22.1），llvm-c/Target.h 只生成 All 系列与 AArch64 的 per-target 声明；非 AArch64 分支的 per-target 符号在链接目标中不存在。
+forbid_1_consequence:   src/llvm_backend.cpp:3101 error: use of undeclared identifier 'LLVMInitializeARMTargetInfo'（同族 6 个），编译中止（r8 轮实测）。
+
+forbid_2_pattern:       用 conanbuild 环境运行/冒烟需要 llvm/22.1.0 的产物|把 libLLVM 加载失败归因为 .*bad_cast.*ABI
+forbid_2_reason:        conanbuild 只注入 SDK LLVM 15 路径，LD_LIBRARY_PATH 不指向 llvm/22.1.0/lib，产生的症状是加载失败与符号重定位失败，与 C++ ABI 无关；把环境注入问题写死为 ABI 不兼容会直接得出错误的"无法适配"结论（odinfmt/ols 的历史阻断结论即源出于此）。
+forbid_2_consequence:   冒烟报 Error loading shared library libLLVM.so.22.1 + 300+ 条 Error relocating ... symbol not found（rc=127），把可修复的环境问题误报为平台不可适配。
+
+principles:             P005, P010
+causes:
+caused_by:
+similar_to:             E349, E356, E486, E218, E286
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-odin-llvm-constrained-toolchain-bootstrap.md
+last_updated:           2026-09-15
+source_event:           odin dev-2026-08 HarmonyOS PC 适配（自举型语言编译器 + 受限 LLVM 工具链）
+
+authors:                Hawkninja21
+source_pr:              #10021
+source_commit:          5027c60ca7（A 链适配提交，CI #47478 绿）
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-15
+
+draft:                  true
+contributor_id:         Hawkninja21
