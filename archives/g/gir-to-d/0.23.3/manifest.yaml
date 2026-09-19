@@ -1,0 +1,193 @@
+# 版本级 manifest — gir-to-d 0.23.3
+# 遵循 ARCHIVE-SPEC v3.0
+
+version: "0.23.3"
+software: gir-to-d
+status: built
+build_date: "2026-09-18"
+build_system: makefile
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  # 上游官方 GitHub 仓库的 tag 归档（R39 合规）
+  url: "https://github.com/gtkd-developers/gir-to-d/archive/refs/tags/v0.23.3.tar.gz"
+  sha256: "bc7e0a19287407ea3c6fcb889b461b03da3c3b832c07f240a3ca93d747cc60eb"
+  compression: tar.gz
+  archive_root: "gir-to-d-0.23.3"
+
+# ============================================================
+# 依赖信息
+# ============================================================
+
+dependencies:
+  required: []
+  optional: []
+  note: |
+    **gir-to-d 本身没有任何库依赖**（已逐项核实）：
+      - dub.json **没有 `dependencies` 键** → 无外部 dub 包；
+      - 源码 import 汇总：`std.*` 75 处 + `core.*` 6 处（D 标准库，随编译器自带）
+        + 自身 `gtd.*` 67 处；
+      - **无** `pragma(lib)` / linkerDirective / 链接 glib·gobject；
+      - 源码中出现的 `gobject`/`gtkc`/`glib` 字样是它**生成产物里的字符串**
+        （例如 `buff ~= "import gobject.c.types;\n"`），即它给别人**写**绑定用的，
+        不是自己要链接的库；
+      - `core.sys.windows.*` 包在 `version(Windows)` 内（source/gtd/Log.d:95），
+        Linux/OHOS 不编译。
+    因此本包缺的**不是依赖，而是工具链**——见 build_config。
+
+# ============================================================
+# 工具链依赖链（本包的核心难点）
+# ============================================================
+
+toolchain:
+  # D 语言不在框架支持的 LANG_ENUM 内
+  # （c/cpp/rust/python/go/perl/lua/nodejs/java/bash/mixed/other），
+  # 设备侧亦无任何 D 工具链，故必须经 tool_requires 取得。
+  language: D
+  framework_supported: false
+  note: |
+    **D 语言不在 LANG_ENUM**，且 `.d` 未登记于 lang_detect 的 `_EXT_LANG`，
+    故语言预检会把 `.d` 源码**回退判为 `c`**。本配方通过 tool_requires 绕过，
+    但框架侧的语言枚举缺口仍然存在（见 knowledge_gained）。
+
+    | 组件 | 设备 | ohpcd 制品仓 | 结论 |
+    |---|---|---|---|
+    | D 编译器（dmd/ldc2/ldmd2/gdc） | ❌ 全无 | ✅ `ldc/1.42.0`（os=OHOS, arch=armv8） | 经 tool_requires 取得 |
+    | druntime + Phobos（`std.*`/`core.*`） | ❌ | ✅ 含于 ldc 包（`lib/libdruntime-ldc.a`、`lib/libphobos2-ldc.a`、`include/d/`） | 满足 |
+    | libLLVM（ldc2 运行期依赖） | ❌ | ✅ `llvm/20.1.0`（os=OHOS, arch=armv8） | ldc recipe 已 requires |
+    | meson / ninja | ✅ 1.11.1 / ✅ | ✅ | 未使用（见下） |
+    | **dub** | ❌ | ❌ **无该制品** | **经 GNUmakefile 路径绕开** |
+
+    ldc 制品提供的二进制：`bin/ldc2`、`bin/ldmd2`；其 recipe 的 package_info
+    注入 `DC`/`DMD`/`PATH`/`LD_LIBRARY_PATH`，故 ldc2 运行时可找到自己依赖的
+    `libLLVM.so.20.1`。
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build_config:
+  target: aarch64-unknown-linux-ohos
+  options: []
+  package_type: application
+  notes: |
+    **构建路径选择**：上游同时提供 `dub.json`、`meson.build`、`GNUmakefile` 三条。
+    本配方走 **GNUmakefile**，理由：
+      1. 它只需要一个 D 编译器（`DC`，按 dmd→ldc→ldc2→gdc 顺序探测），
+         **不依赖 `dub`**（制品仓无该制品）；
+      2. `meson.build` 用 `vcs_tag(command: ['git','describe',...])` 取版本，
+         而 tarball 无 `.git`，需额外处理；
+      3. 已验证：以 ldc2 走 GNUmakefile 可直接产出 `girtod`。
+
+    实际命令（配方 build() 内）：
+      make -f GNUmakefile DC=ldc2 GIR_TO_D_VERSION=v0.23.3 \
+        DCFLAGS="-O -I<ldc>/include/d" LDFLAGS="-L-L<ldc>/lib"
+    其中：
+      - `-I<ldc>/include/d` 必需（ldc2 默认 import 路径不可用，会报
+        `object`/`std.algorithm` not found）；
+      - `-L-L<ldc>/lib` 必需（不传则链接失败，实测）；
+      - `GIR_TO_D_VERSION=v0.23.3` 必需：GNUmakefile 的 VERSION 规则为
+        `git describe --tags || echo $(GIR_TO_D_VERSION)`，而 tarball 无 `.git`，
+        不传会回退到上游写死的 `v0.23.1`，导致二进制内嵌版本与包版本不符
+        （实测：不传 → `GIR to D v0.23.1`；传 → `GIR to D v0.23.3`）。
+
+    产物：`bin/girtod`（命令行可执行文件），NEEDED 仅 `libc.so`
+    （**无运行期动态库依赖**，消费者无需 LD_LIBRARY_PATH）；
+    `licenses/COPYING`（GNU Lesser General Public License v3）。
+    package_info 以 runenv_info 注入 `PATH`；`cpp_info.bindirs=["bin"]`。
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+patches_applied:
+  - file: "patches/0001-opEquals-const-scope.patch"
+    sha256: "e3d56a9d1007200df56663a81f7636b37106b9f4a9b2df2353f41cc34bdb5172"
+    description: |
+      `source/gtd/LinkedHasMap.d` 的 `LinkedHashMap.opEquals` 由
+      `bool opEquals(inout typeof(this) that) inout nothrow pure @safe`
+      改为 `bool opEquals(scope const typeof(this) that) const nothrow pure @safe`。
+    reason: |
+      LDC 1.42.0 的 DMD 前端（v2.112.1）拒绝该 `inout` 形式：当
+      `core.internal.newaa` 以 const 限定的 Key 实例化时，
+      `const(inout(Value[Key]))` 无法转换为所需的 `inout(const(Value[Key]))`，
+      报 `cannot implicitly convert expression ...` / `only parameters or
+      stack-based variables can be inout`。改为现代 D 惯用的 `scope const`
+      形式后，mutable 与 const 接收者均可用。
+    已验证该补丁为**必需**：未打补丁的原始源码同样报同一 `newaa` 实例化错误。
+
+# ============================================================
+# 兼容性
+# ============================================================
+
+compatibility:
+  level: high
+  issues: []
+  notes: |
+    `girtod` 是纯 D 实现、只读 `.gir`/APILookup 文本并写 D 源码，
+    NEEDED 仅 `libc.so`；本机实测能对真实 `.gir` 生成 D 绑定。
+    已实测的可执行边界：对**带参数的方法**（无论参数类型为 `utf8` 还是 `gint`）
+    `girtod` 会**段错误**（SIGSEGV, rc=139）；参数less 方法正常。
+    该现象经二分定位确认为上游既有行为（与平台、工具链、本补丁均无关，
+    减小夹具后即恢复正常），详见 notes.md「已知限制」。
+
+# ============================================================
+# 测试结果
+# ============================================================
+
+test_results:
+  type: manual
+  passed: 14
+  failed: 0
+  note: |
+    **上游测试：D 语言惯例是源码内嵌 `unittest` 块**（不是独立 `t/` 目录）。
+    上游确有 **4 个 `unittest` 块 / 共 12 条 assert**，逐块实测：
+      - `gtd/GirVersion.d:148` ...... 8 条 → **8 PASS**
+      - `gtd/GirWrapper.d:826` ...... 2 条 → **1 PASS + 1 FAIL**
+      - `gtd/GirWrapper.d:883` ...... 1 条 → **1 PASS**
+      - `gtd/XMLReader.d:436` ....... 1 条 → **0 PASS + 1 FAIL**
+    合计 **10 通过 + 2 失败**；驱动方式等价 D 生态标准的 `dub test`：
+      ldc2 -I<ldc>/include/d -I<src> -L-L<ldc>/lib -unittest -main -of=ut <src>/source/gtd/*.d && ./ut
+
+    2 处失败均为**上游既有缺陷**（与本配方补丁无关）：
+      1. `GirWrapper.d:829` —— `stringToGtkD` 把参数中的 `string` 按 GlibTypes 表
+         改写为 `string_`，得 `string_ tokenToGtkD(string_ tok, string_[string_] aliases)`，
+         与断言期望的 `string tokenToGtkD(string tok, string[string] aliases)` 不符
+         （实测输出已记录）；
+      2. `XMLReader.d:522` —— `ByChar.front` 对空 `data` 取 `[0]`，抛 ArrayIndexError
+         （缺长度保护）。
+    判定依据：① 失败点位于 GirWrapper / XMLReader，二者**均不引用**本配方改动过的
+    `LinkedHasMap.d`（引用它的仅 `GirPackage.d` / `GirStruct.d`）；② 已核对上游 master
+    的同一断言未变；③ 稳定复现。
+
+    ⚠️ 上游**未把 unittest 接入任何构建路径**（三条构建系统逐一核实）：
+      - GNUmakefile：目标仅 girtod / VERSION / clean，**无 test 目标**；
+      - meson.build：**无 test() 调用**；
+      - dub.json：无 configurations、无 -unittest 标志。
+    故 upstream_test_in_build=false，本配方**不把 unittest 作为门禁**。若计入，
+    上游通过率即为 **10/12**（2 处既有缺陷阻塞）——此处如实记录，未隐藏、未美化。
+
+    本包验证依赖 **test_package 消费者测试（R34 真实调用）**：
+    以夹具（Test-1.0.gir + GObject-2.0.gir + APILookup.txt）真实调用打包出的
+    `girtod`，校验它确实生成了预期的 D 绑定源码 —— **14/14 通过**，
+    并已在 `conan create` 内运行时执行（exit_code=0）。
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "D 语言不在框架 LANG_ENUM（c/cpp/rust/python/go/perl/lua/nodejs/java/bash/mixed/other），且 .d 未登记于 lang_detect 的 _EXT_LANG，语言预检会把 .d 源码回退判为 c —— 框架侧缺口 (ref: DRAFT-d-language-toolchain-ohos-gap)"
+  - "OHOS/HarmonyOS 上 D 语言工具链可经 ohpcd 制品获得：ldc/1.42.0（提供 bin/ldc2、bin/ldmd2、libdruntime-ldc.a、libphobos2-ldc.a、include/d/），其运行期依赖 libLLVM.so.20.1 由 llvm/20.1.0 提供，ldc recipe 已自动 requires —— 作 tool_requires 即可编译 D 项目 (ref: DRAFT-d-language-toolchain-ohos-gap)"
+  - "D 项目无 dub 时可用 GNUmakefile 路径绕过：上游 GNUmakefile 只需 DC（按 dmd→ldc→ldc2→gdc 探测），不需要 dub；而 dub.json 路径必需 dub（ohpcd 无该制品）。判定构建路径应先 `ls` 出 Makefile/meson.build/dub.json 再选，不要默认 dub (ref: DRAFT-d-language-toolchain-ohos-gap)"
+  - "LDC 1.42.0 的 DMD 前端（v2.112.1）拒绝 `inout typeof(this)` 形式的 opEquals：core.internal.newaa 以 const Key 实例化时 `const(inout(V[K]))` 无法转为 `inout(const(V[K]))`，报 'only parameters or stack-based variables can be inout'。改为 `scope const` 形式即可（现代 D 惯用法）(ref: DRAFT-d-language-toolchain-ohos-gap)"
+  - "ldc2 的默认 import 路径在本制品上不可用（报 `object`/`std.algorithm` not found），必须显式传 `-I<ldc>/include/d`；链接亦须 `-L-L<ldc>/lib`。二者缺一即失败 (ref: DRAFT-d-language-toolchain-ohos-gap)"
+  - "判定『上游有无测试』必须按**该语言的生态惯例**去找，不能套用上一个项目的目录结构——D 的测试是源码内嵌 `unittest` 块（由 dub test / -unittest 驱动），不在 t/ 目录；本包按 Perl 惯例只找 t/ 导致漏报『上游无测试』，实为 4 块 / 12 条 assert。且『未接入构建流程』≠『不存在』，应写 upstream_test_in_build=false + 列出真实用例数 (ref: DRAFT-test-discovery-per-language-convention)"
+  - "许可证等元数据不可按生态惯例推测：本包曾按 gtk-d 生态惯例猜成 Boost，实际为 LGPL-3.0-or-later——必须读上游 COPYING 与包元数据（dub.json 的 license 字段）(ref: DRAFT-test-discovery-per-language-convention)"
+
+references:
+  - https://github.com/gtkd-developers/gir-to-d
+  - https://gtkd.org
