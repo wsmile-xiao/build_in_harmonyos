@@ -1,0 +1,58 @@
+#====================================================================
+# Draft: OHOS libc 不导出 dlinfo(RTLD_DI_LINKMAP)，且 dlopen 句柄是与
+#        dlpi_addr 不对应的脱敏指针 —— 取已加载库路径须改用 dlsym + dladdr
+# 来源: libmongocrypt/1.20.1 适配（mcr_dll_path / crypt_shared 单例校验）
+#====================================================================
+
+id:                     DRAFT-LIBMONGOCRYPT-1201-OHOS-DLINFO-MISSING-DLADDR-PATH
+trigger_tool:           clang|cmake|make|ld|test|runtime
+phase:                  compilation|testing|runtime
+error_signature:        call to undeclared function 'dlinfo'|implicit declaration of function 'dlinfo'|undefined reference to dlinfo|undeclared identifier 'RTLD_DI_LINKMAP'|Cannot get path of loaded library on this platform
+
+severity:               2
+category:               libc, ohos, portability, headers, runtime
+match_keywords:         dlinfo, RTLD_DI_LINKMAP, link_map, dlfcn.h, dlopen handle, dlpi_addr, dl_iterate_phdr, dladdr, dli_fname, mcr_dll_path, crypt_shared, csfle
+
+title:                  OHOS libc 既无 dlinfo/RTLD_DI_LINKMAP 也不能用 dlpi_addr==handle 比对，dlopen 句柄是脱敏指针，反查已加载库路径只能 dlsym 已知导出符号后交给 dladdr
+
+root_cause:             OHOS sysroot 的 <dlfcn.h> 不声明 dlinfo、libc.so 也不导出该符号（动态符号表只有 dladdr 与 dl_iterate_phdr）；同时 dlopen() 返回的是不可解释的 token（实测 0x906a8f02f29aa087），
+                        既不指向 ELF 头也不等于任何模块的 dl_phdr_info.dlpi_addr（实测 dlpi_addr=0x5bb7000000），所以 glibc 的 dlinfo(RTLD_DI_LINKMAP) 与 musl 社区常见的 handle==dlpi_addr 比对两条路都走不通。
+                        注意 knowledge/musl-glibc-full-comparison-iso-posix.md 的 <dlfcn.h> 表把 dlinfo/RTLD_DI_LINKMAP 的 OHOS 列写成 ✅，与 SDK 实测相反，该列应更正为 ❌。
+affected_scope:         所有需要在运行时由 dlopen 句柄反查文件路径的代码：crypt_shared(csfle) 单例校验、插件去重、"已加载的是不是同一个 so"判断。libmongocrypt 1.20.1 的 mcr_dll_path()（src/os_posix/os_dll.c）是本次交付实例；失败面从"编译不过"延伸到"平台分支退化成跳过校验，进而 _test_csfle_load_twice_fail 断言失败"。
+verification_cmd:       SDK=$HOME/.harmonybrew/opt/ohos-sdk@26.0.0.18/native; grep -c dlinfo "$SDK/sysroot/usr/include/dlfcn.h"; "$SDK/llvm/bin/llvm-nm" -D --defined-only "$SDK/sysroot/usr/lib/aarch64-linux-ohos/libc.so" | grep -E 'dlinfo|dladdr|dl_iterate_phdr'; conan create archives/l/libmongocrypt/1.20.1 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+
+rec_priority:           1
+rec_approach:           resolve-known-symbol-then-dladdr
+rec_description:        在平台分支链里为 OHOS 单独加一支（必须排在 __linux__ 之前，因为 OHOS 的 clang 同时预定义 __linux__ 和 __OHOS__）：先用 mcr_dll_sym/dlsym 在该句柄里解析一个"必然存在于目标库中"的导出符号，再把它交给 dladdr()，取 Dl_info.dli_fname 作为库路径。被探测的符号名要按调用方语义选取：crypt_shared 库一定导出 MONGOC_CSFLE_FUNCTIONS_X 的首项 mongo_crypt_v1_status_create，libmongocrypt 自身一定导出 mongocrypt_version，两个都试即可覆盖两类句柄。命中后 mcr_dll_path_supported() 仍返回 true，让上游"必须拿到路径"的 assert 成立。
+rec_command:            sed -n '/#elif defined(__OHOS__)/,/^#elif defined(__linux__/p' src/os_posix/os_dll.c
+rec_auto_fix:           false
+rec_impl:               patches/0002-mcr_dll-path-via-dladdr-on-ohos.patch in archives/l/libmongocrypt/1.20.1/
+
+fallback_priority:      2
+fallback_approach:      declare-path-unsupported-and-skip-validation
+fallback_description:   把 OHOS 归入上游自带的 `mcr_dll_path_supported() == false` 分支（改动最小），代价是跳过"全局只有一个 crypt_shared"校验，依赖该校验的用例（libmongocrypt 的 _test_csfle_load_twice_fail）会断言失败，必须在测试声明里按用例记录为未通过并写明系统能力原因。
+fallback_command:       sed -i 's/#elif defined(__linux__) || defined(__FreeBSD__)/#elif (defined(__linux__) \&\& !defined(__OHOS__)) || defined(__FreeBSD__)/' src/os_posix/os_dll.c
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       自己声明 dlinfo 后继续链接使用|在 conandata/conanfile 里把 dlfcn 换成 libdl 垫片|直接给 __linux__ 分支加 -Wno-implicit-function-declaration 绕过编译
+forbid_1_reason:        符号在 libc.so 里根本不存在，声明只是把错误从编译期推到运行期（undefined symbol / 崩溃）；关掉告警更是让 mcr_dll_path 返回未初始化内容，crypt_shared 校验会静默误判。
+forbid_1_consequence:   编译期"通过"但 dlopen 路径校验在运行期失效，产物不可信，且 OHOS 上无法复现问题现场。
+
+principles:             real-evidence-over-assumption, minimal-upstream-diff, platform-branch-before-generic-linux
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-libmongocrypt-1.20.1-dlinfo-absent-ohos-dladdr.md
+last_updated:           2026-09-19
+source_event:           libmongocrypt/1.20.1 真机 conan create：os_dll.c:112 call to undeclared function 'dlinfo'
+
+# ═══ 知识协作 ═══
+draft:                  true
+contributor_id:         iKalous_OscarP
+authors:                iKalous_OscarP
+source_pr:              pending
