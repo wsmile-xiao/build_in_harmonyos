@@ -1,0 +1,72 @@
+id:                     E6345-draft-zimpl-cmake-install-rpath-tail-colon-eperm
+title:                  CMake install 规范化 RUNPATH 尾冒号（/path/lib: → /path/lib）导致 OHOS bin 可执行文件 execve EPERM
+trigger_tool:           cmake|install|runtime
+phase:                  installation|runtime
+error_signature:        Operation not permitted|Error 126 while executing|cannot execute.*Operation not permitted|install 后 bin.*无法执行
+severity:               3
+category:               cmake, linking, runtime, ohos
+match_keywords:         CMake install, RUNPATH, 尾冒号, trailing colon, 规范化, execve, EPERM, Operation not permitted, Error 126, musl loader, bin 可执行文件, RPATH 改写, 默认路径搜索, gmp 依赖
+root_cause:             CMake install() 安装阶段会对 ELF 做 RPATH 处理，RUNTIME RPATH 中的尾冒号
+                        （/path/lib: 表示"该目录之后继续搜索默认路径"）被规范化掉，变成
+                        /path/lib（仅搜索该目录，不再含默认路径搜索语义）。OHOS musl 动态
+                        loader 校验 ELF 时对 RUNPATH 语义敏感，改写后的 bin 可执行文件在
+                        execve 阶段被内核拒绝（Operation not permitted / Error 126），
+                        即使复制到任意位置、注入 LD_LIBRARY_PATH 也无法执行。
+                        只有保留尾冒号（/path/lib:）的原始构建产物才能正常 execve。
+affected_scope:         所有 CMake 项目生成的 bin/ 可执行文件且链接了 conan 仓库动态库
+                        （如 gmp/zlib）的 OHOS 适配；样本 1 字节翻转实验确认根因——
+                        仅 RUNPATH 尾部 1 字节（0x00 vs 0x3A）决定可执行性
+verification_cmd:       |
+  cmp -l <pkg>/bin/zimpl <build>/bin/zimpl   # 差异仅 RUNPATH 尾部 1 字节
+  readelf -d <pkg>/bin/zimpl | grep RUNPATH  # 无尾冒号 → EPERM
+  readelf -d <build>/bin/zimpl | grep RUNPATH # 有尾冒号 → 可执行
+  # package() 中用 build 目录原始 bin 覆盖 install 产物后 test_package 通过
+rec_priority:           1
+rec_approach:           package-override-with-build-bin
+rec_description:        cmake.install() 后在 package() 内用 build 目录的原始 bin 覆盖
+                        install 产物（保留链接期 RUNPATH 尾冒号），确保 OHOS loader 能
+                        execve。generate() 加 CMAKE_INSTALL_RPATH_USE_LINK_PATH=ON。
+rec_command:            |
+  # generate()
+  tc.variables["CMAKE_INSTALL_RPATH_USE_LINK_PATH"] = "ON"
+  # package()
+  cmake = CMake(self); cmake.install()
+  from conan.tools.files import copy
+  src_bin = os.path.join(self.build_folder, "bin", "zimpl")
+  if os.path.isfile(src_bin):
+      copy(self, "zimpl", src=os.path.dirname(src_bin),
+           dst=os.path.join(self.package_folder, "bin"))
+rec_auto_fix:           false
+rec_impl:               package-override-with-build-bin
+fallback_priority:      2
+fallback_approach:      cmake-skip-install-rpath
+fallback_description:   E504 同族方案：CMAKE_SKIP_INSTALL_RPATH=TRUE 跳过 install 期
+                        RPATH 改写（但需确认 bin 产物无 RUNPATH 也能定位依赖库，否则
+                        仍需 LD_LIBRARY_PATH/静态链接配合）
+fallback_command:       |
+  # generate()
+  tc.cache_variables["CMAKE_SKIP_INSTALL_RPATH"] = "TRUE"
+fallback_auto_fix:      false
+fallback_impl:          skip-install-rpath-override
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       patchelf.*--set-rpath|llvm-objcopy.*\.dynamic
+forbid_1_reason:        不要用 patchelf/objcopy 手工改 install 产物的 RUNPATH——OHOS 上
+                        改后 ELF 的 RUNPATH 尾冒号语义与 loader 校验可能再次不匹配，
+                        且工具链路径差异不可复现
+forbid_1_consequence:   test_package 仍报 Operation not permitted / Error 126，且补丁
+                        不可进 CI 干净环境复现
+principles:             P009
+similar_to:             [E504, E207, E077, E019]
+conflicts_with:         [E077]
+causes:                 []
+caused_by:              []
+prerequisite_of:        []
+doc_file:               knowledge/drafts/E6345-draft-zimpl-cmake-install-rpath-tail-colon-eperm.md
+source_event:           zimpl 3.7.1 适配（feat/zimpl-3.7.1, 2026-09-16）：conan-verify G2
+                        在 test_package 执行 bin/zimpl 报 Operation not permitted
+                        (Error 126)；逐项排查定位仅 RUNPATH 尾冒号缺失；1 字节翻转实验
+                        （b/build 二进制删除尾冒号→复现 EPERM，p/bin 二进制补上尾冒号→
+                        可执行）铁证根因；package() 覆盖后 G2-G5 全绿，check.sh 195/198
+                        通过。E504 覆盖 .so 场景，本条目覆盖 bin 可执行文件场景。
+last_updated:           2026-09-16
