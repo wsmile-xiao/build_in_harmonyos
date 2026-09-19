@@ -1,0 +1,87 @@
+# ═══ Draft knowledge entry — ConanFile.run() 继承输出流时 OHOS 上 clang 首个编译单元静默失败 ═══
+# Software: libncurses 6.6_p20260516 (ncurses 6.6, Autotools + Conan 2.29.1)
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: DRAFT-libncurses-6.6-conan-run-log-bound-steps
+draft: true
+title: ConanFile.run() 把进程输出流交给子进程时，OHOS 上 clang 在首个编译单元静默失败；把步骤输出绑定到日志文件即可恢复
+
+trigger_tool: make|clang|conan
+phase: compilation
+severity: 2
+category: build-system, conan, toolchain, compilation, debugging
+error_signature: |
+  make\[\d\]: \*\*\* \[[^\]]*(make_hash|make_keys|report_offsets|.*\$\(BUILD_EXEEXT\))[^\]]*\] Error 1|
+  ConanException: Error 2 while executing|
+  Error in build\(\) method.*_build_ohos
+
+match_keywords: ConanFile.run, self.run, conan_run, conan build scope, clang, no output, zero output, silent failure, make, Error 1, Error 2, OHOS, inherited stdout, stderr, redirect to log file, subprocess.run, capture_output=True, Autotools, bootstrap helper
+
+root_cause: |
+  Conan 的 ConanFile.run() 最终走 conan_run()，把 **recipe 进程自身的输出流**
+  （默认 stdout=sys.stderr）直接交给子进程；在 OHOS worker 上，以这种方式启动的
+  clang 会在第一个真正编译的翻译单元上以非 0 退出，且**不打印任何诊断信息**，
+  于是 make 只能报 "Error 1"，日志里搜不到任何 error:/fatal 行，看起来像某个
+  目标自身坏了。而同一目录、同一命令：
+    - 在 shell 里直接执行 → 成功；
+    - 通过同一个 run() 调用但把输出重定向到文件（cmd > log 2>&1）→ 成功；
+    - 通过 subprocess.run(capture_output=True) → 成功。
+  也就是说失败与"子进程输出流被 recipe 进程继承"这一形态绑定，而不是编译器参数、
+  源码或环境变量的问题（该 env 已逐项复现对照，CC/CFLAGS/CPPFLAGS/LD_LIBRARY_PATH/
+  TMPDIR/PATH 与 conan 生成值一致时 shell 执行仍成功）。
+
+affected_scope: |
+  OHOS worker 上所有通过 ConanFile.run() 驱动 Autotools/Makefile 构建、且在
+  build() 阶段真正启动编译器的配方。ncurses 这类会先用 $(BUILD_CC) 编译
+  make_hash/make_keys/report_offsets 引导程序的 Autotools 工程最容易命中，
+  因为这些是构建最早的编译单元，会被误判成"某个目标坏了"。
+
+verification_cmd: |
+  # 1) 失败形态：日志里有 make Error 1，但没有编译器诊断
+  grep -c "Error 1" <build_log>; grep -cE "error:|fatal error" <build_log>
+  # 2) 同一构建目录手工复现同一条编译命令（应成功）
+  # 3) 探针配方在同目录逐项对照（A 继承输出流 / D 重定向到文件）
+  conan create probes/makeprobe -pr:h=<profile> -pr:b=<profile>
+
+rec_approach: bind-step-output-to-log-file
+rec_description: |
+  不要让 recipe 进程的输出流直接继承给构建子进程。给每个构建步骤（configure /
+  make / make check / make install）单独一个日志文件，命令写成
+  "cmd > <log> 2>&1"，再用 run() 执行；失败时把日志尾部回显并抛出带日志路径的异常，
+  成功时把日志回显进 conan 输出以保留 CI 证据（L1b/L1c 会 grep 这些行）。
+  备选（等价可用）：subprocess.run(cmd, shell=True, capture_output=True, text=True,
+  cwd=..., env=os.environ.copy())，或 E009 的 "cmd | cat" 管道旁路——注意后者会把
+  管道末端（cat）的退出码当结果，会吞掉 make 的失败，必须显式取 make 的 rc。
+rec_command: |
+  self.run(f"{command} > {shlex.quote(str(log_path))} 2>&1", cwd=work, env=None)
+rec_auto_fix: false
+
+evidence: |
+  libncurses 6.6_p20260516（HarmonyOS PC, aarch64-unknown-linux-ohos, clang 15.0.4,
+  Conan 2.29.1）实测：
+  - 真实 W3 失败点：`make -j1` 在 ncurses/ 的首个编译单元
+    `clang -o make_hash ... tinfo/make_hash.c` 处报
+    `make[1]: *** [Makefile:270: make_hash] Error 1`，clang 无任何输出。
+  - 同一目录手工执行同一条 clang 命令：rc=0，产出 make_hash（27072 字节），
+    且 `./make_hash "-?"` rc=0。
+  - 探针配方（复用同一已 configure 的构建目录，逐项对照）：
+      A self.run(cmd, env=None)                    → rc=2, 无二进制
+      B self.run(cmd)（默认 env）                  → rc=2, 无二进制
+      C self.run(cmd + " | cat", env=None)         → rc=0（管道吞掉 make 的 rc，不可依赖）
+      D self.run(cmd + " > log 2>&1", env=None)    → rc=0, 生成 make_hash ✅
+      E subprocess.run(capture_output=True, env=os.environ.copy()) → rc=0, 生成 make_hash ✅
+  - 采用 D 形态（绑定日志）后，configure/make/make check/make install 四步全部通过。
+
+principles:
+causes:
+caused_by:
+similar_to: E009, E373, E232
+conflicts_with:
+prerequisite_of:
+
+authors:
+  - Kongling32
+source_pr:
+source_commit:
+draft_date: 2026-09-18
+last_updated: 2026-09-18
