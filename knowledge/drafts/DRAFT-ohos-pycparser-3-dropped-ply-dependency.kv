@@ -1,0 +1,119 @@
+#====================================================================
+# DRAFT-ohos-pycparser-3-dropped-ply-dependency —— pycparser 3.0 移除 PLY 依赖，
+#   使 cffi 链的适配面显著缩小（手写 lexer/parser 替代）
+# 对应文档: knowledge/drafts/DRAFT-ohos-pycparser-3-dropped-ply-dependency.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-pycparser-3-dropped-ply-dependency
+trigger_tool:           python|conan|pip
+phase:                  dependency-resolution|packaging
+error_signature:        No module named 'ply'|
+                         ModuleNotFoundError: No module named 'ply'|
+                         ImportError: cannot import name 'lex' from 'ply'
+
+severity:               2
+category:               python, dependency, packaging, pycparser, cffi
+match_keywords:         pycparser, PLY, ply, lex.lex, yacc.yacc, lextab, yacctab,
+                         cffi, 依赖图, 传递依赖, 手写 lexer, c_lexer, c_parser,
+                         依赖面收窄, vendored parser, 3.0
+title:                  pycparser 3.0 移除了 PLY 依赖（改为手写 lexer/parser）——
+                        cffi 链的适配面因此收窄，**不需要**先适配 ply
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             pycparser 早期版本依赖 **PLY**（Python Lex-Yacc）生成词法/
+                        语法分析器，并在包内带 ``lextab.py`` / ``yacctab.py`` 生成
+                        表。**3.0 改为手写实现**：``c_lexer.py`` 与 ``c_parser.py``
+                        仅 import 标准库（``dataclasses`` / ``enum`` / ``re`` /
+                        ``typing`` 及包内 ``.ast_transforms`` / ``.c_lexer``），
+                        ``pyproject.toml`` 亦未声明任何运行时 ``dependencies``。
+                        实测证据（读 sdist 源码）：``ply`` / ``lex.lex`` /
+                        ``yacc.yacc`` 出现次数均为 **0**，``lextab`` / ``yacctab``
+                        文件**不存在**。
+                        工程意义：pycparser 是 **cffi 的必需依赖**，而 cffi 又支撑
+                        cryptography 等大量包——若 pycparser 仍依赖 PLY，则整条链
+                        会多出一个必须先适配并发布的包（PLY）；3.0 让这个前置
+                        **消失**，直接收窄适配面。
+                        ⚠️ 迁移风险：反向操作（把 3.0 配方套用到 2.x 源码、或将来
+                        上游回退）会立刻出现 ``No module named 'ply'``，且此时
+                        错误发生在**使用者 import 时**（而非构建期），发现较晚。
+affected_scope:         依赖 pycparser 的链（cffi → cryptography / brotlicffi 等）；
+                        以及一切"分析 C 声明"的构建流程。版本选择上，**3.0 与 2.x
+                        的依赖面不同**，不可只改版本号沿用旧配方假设。
+                        与「版本区间不满足」类不同：本条的要点是**依赖集合本身
+                        变化**（少了一个包），而非版本号需要调整。
+verification_cmd:       ① 确认目标版本是否仍需要 PLY：
+                          grep -rn "^import ply\|^from ply\|import ply" <src>/pycparser/*.py
+                          # 3.x 应无输出
+                        # ② 确认生成表文件是否随包交付（旧版特征）：
+                        ls <src>/pycparser/lextab.py <src>/pycparser/yacctab.py 2>/dev/null
+                        # 3.x 应不存在
+                        # ③ 确认运行时依赖声明：
+                        grep -A5 "^dependencies" <src>/pyproject.toml   # 3.x 无该字段
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           package-as-pure-python-no-ply-requirement
+rec_description:        按**纯 Python 包**交付（源码直拷 ``pycparser/`` 目录进
+                        site-packages），**不添加 ply 依赖**、不引入 build_requires。
+                        交付文件含 ``c_ast.py``（上游预生成、随 sdist 发布，故无需
+                        在本配方内调用 ``_ast_gen.py``）与 ``_c_ast.cfg`` /
+                        ``_ast_gen.py``（后者本身是可导入的工具模块）。
+                        并在 ``build()`` 内加一条**构建期守卫**：若
+                        ``c_parser.py`` 出现 ``import ply`` / ``from ply`` 即
+                        ``ConanException`` 失败——把"上游回退引入 PLY"这种
+                        潜伏风险拦在**构建期**，而不是交付一个消费者一 import
+                        就 ImportError 的包。
+rec_command:            # build() 内守卫（实测有效的判据）：
+                        #   if "import ply" in open(f"{src}/pycparser/c_parser.py").read():
+                        #       raise ConanException("pycparser now imports ply ...")
+rec_auto_fix:           false
+rec_impl:               package-as-pure-python-no-ply-requirement
+
+fallback_priority:      2
+fallback_approach:      adapt-and-publish-ply
+fallback_description:   仅当必须使用**依赖 PLY 的旧版 pycparser**（例如消费者钉死
+                        2.x）时：需先把 ``ply`` 适配进制品仓并作为依赖引入。这是一条
+                        真实存在但**希望能避免**的支线——正是 3.0 让它可以不做。
+fallback_command:       # conan list "ply/*" -r=<remote>  → 若无则先适配 ply
+fallback_auto_fix:      false
+fallback_impl:          adapt-and-publish-ply
+
+forbid_1_pattern:       为 pycparser 3\.0.*(声明|添加).*ply.*依赖|
+                        照搬 2\.x 配方.*(保留|沿用).*ply
+forbid_1_reason:        3.0 已无 PLY 依赖，多声明的依赖会引入无谓的解析/发布负担，
+                        并可能因 ply 未发布而卡住依赖闸（PF4）。
+forbid_1_consequence:   为一个不存在的依赖阻塞整条 cffi 链。
+
+forbid_2_pattern:       因.*No module named .ply..*(判断|认为).*(上游缺陷|版本损坏)|
+                         删掉.*lextab|yacctab.*(以|来).*修复.*ply
+forbid_2_reason:        《No module named 'ply'》只在**误用旧配方 + 新版源码**
+                        或**新版配方 + 旧版源码**这类版本错配下出现；正确做法是
+                        让配方与源码版本匹配，而非去删生成表文件。
+forbid_2_consequence:   破坏上游包结构，且问题会在别的路径复现。
+
+principles:             measure-not-assume, upstream-compat-evidence
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-pycparser-3-dropped-ply-dependency.md
+last_updated:           2026-09-16
+source_event:           pycparser 3.0 适配（源码实测无 ply 依赖、无 lextab/yacctab；
+                        配方加构建期守卫防止上游回退）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        E5B3
