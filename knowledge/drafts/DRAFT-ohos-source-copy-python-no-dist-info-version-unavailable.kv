@@ -1,0 +1,127 @@
+#====================================================================
+# DRAFT-ohos-source-copy-python-no-dist-info-version-unavailable —— 源码直拷
+#   打包的 Python 包不含 .dist-info，惰性 __version__ 因 importlib.metadata 失败
+# 对应文档: knowledge/drafts/DRAFT-ohos-source-copy-python-no-dist-info-version-unavailable.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-source-copy-python-no-dist-info-version-unavailable
+trigger_tool:           python|conan
+phase:                  runtime|testing
+error_signature:        importlib\.metadata\.PackageNotFoundError.*|
+                         No package metadata was found for .*|
+                         PackageNotFoundError: No package metadata was found
+
+severity:               2
+category:               python, packaging, conan, metadata, testing
+match_keywords:         importlib.metadata, PackageNotFoundError, dist-info,
+                         __getattr__ __version__, lazy version, pallets,
+                         itsdangerous, markupsafe, 源码直拷, site-packages,
+                         wheel 安装产物, 包元数据, conan package_type python-require
+title:                  源码直拷式打包（只拷包目录、不含 .dist-info）使惰性
+                        `__version__` 不可用 —— importlib.metadata.version() 抛
+                        PackageNotFoundError，消费者断言必须避开 __version__
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             Pallets 系（itsdangerous / markupsafe / werkzeug 等）用模块级
+                        ``__getattr__`` **惰性**解析 ``__version__``：
+                        ```python
+                        def __getattr__(name):
+                            if name == "__version__":
+                                import importlib.metadata
+                                return importlib.metadata.version("itsdangerous")
+                        ```
+                        该调用会**遍历 sys.path 查找 ``<包名>-*.dist-info`` 目录**。
+                        而本仓 Python 包采用"源码直拷"式打包——``package()`` 只把可
+                        导入的包目录（如 ``itsdangerous/``）拷进 site-packages，
+                        **不含 wheel 安装才会生成的 ``.dist-info``**。于是
+                        ``importlib.metadata.version()`` 抛
+                        ``PackageNotFoundError: No package metadata was found for itsdangerous``。
+                        这是**打包形态的必然结果，不是 API 缺陷**：``.dist-info``
+                        属 wheel 安装产物，源码直拷模式本就不带。
+                        易误判点：import 本身成功、其余 API 全部正常，**只有**
+                        ``__version__`` 失败 —— 容易误诊为"包坏了/装错了"。
+affected_scope:         所有"直接拷包目录"交付的 Python 包（本仓全部 Python 包
+                        均如此），且其 ``__version__`` 走 importlib.metadata 或
+                        有 ``importlib-metadata`` 依赖的；典型是 Pallets 系
+                        （itsdangerous / markupsafe / werkzeug / click / flask）。
+                        与 DRAFT-multipledispatch-version-metadata-reconciliation
+                        不同层：那条是"**两个元数据来源互相不一致**"（setup.py 与
+                        模块 __version__ 各说各话，需双来源校验）；本条是"**元数据
+                        来源压根不存在**"（.dist-info 未随包交付）。
+verification_cmd:       ① 复现（在只有包目录的 site-packages 下）：
+                          python3 -c "import itsdangerous; print(itsdangerous.__version__)"
+                          # PackageNotFoundError: No package metadata was found for itsdangerous
+                        # ② 确认包目录里确实没有 dist-info：
+                        ls <site-packages>/ | grep -i dist-info   # 应无对应条目
+                        # ③ 确认目标包是否走惰性 metadata 版本：
+                        grep -n "importlib.metadata" <pkg>/__init__.py
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           avoid-version-assertions-use-functional-api
+rec_description:        消费者测试**避开 ``__version__``**，改为断言真正的公开 API
+                        行为（签名/序列化往返、转义语义、异常路径等）。这是正确
+                        的口径：``__version__`` 属**安装形态相关**的元数据，非该包
+                        承诺的 API 契约；用功能断言既稳定又能真正验证交付物可用。
+                        测试注释里写明**为何**不断言 __version__（避免后来者"补上"
+                        这个断言又踩坑）。
+                        若某包的 __version__ 恰好可用（如 markupsafe 3.0.3 走
+                        弃用告警路径仍能取到），也应用
+                        ``warnings.catch_warnings()`` 静默其 DeprecationWarning，
+                        不要让它污染测试输出。
+rec_command:            # 消费者测试：断言功能而非版本
+                        # assert signer.unsign(signer.sign("v")) == b"v"  而不是
+                        # assert pkg.__version__ == "2.2.0"
+rec_auto_fix:           false
+rec_impl:               avoid-version-assertions-use-functional-api
+
+fallback_priority:      2
+fallback_approach:      ship-dist-info-alongside
+fallback_description:   若**确实**需要 ``importlib.metadata.version()`` 可用
+                        （例如消费者框架强依赖它），则在 ``package()`` 内额外生成
+                        最简 ``<name>-<ver>.dist-info/METADATA`` 目录一并交付。
+                        代价是引入了"手工伪造元数据"，需保证 METADATA 字段与
+                        上游一致、且随版本更新同步——属可选增强，非默认做法。
+fallback_command:       # package() 内：写 <name>-<ver>.dist-info/METADATA
+                        # 内容含 Metadata-Version / Name / Version
+fallback_auto_fix:      false
+fallback_impl:          ship-dist-info-alongside
+
+forbid_1_pattern:       为.*__version__.*(补|加).*(.dist-info|METADATA).*(却未|但).*(同步|校验)|
+                         手工伪造.*dist-info.*(不|未).*校验
+forbid_1_reason:        伪造的 dist-info 若不与上游 METADATA 同步，会制造"元数据
+                        撒谎"——比缺失更糟（消费者据错误版本做兼容判断）。
+forbid_1_consequence:   版本信息错误传播到依赖解析与兼容分支判断。
+
+forbid_2_pattern:       因.*PackageNotFoundError.*(判定|认为).*(包损坏|安装失败|打包错误)|
+                        PackageNotFoundError.*导致.*(重装|重建)包
+forbid_2_reason:        import 与该包全部功能 API 均正常，只有 __version__ 失败 ——
+                        这是源码直拷形态的**预期行为**，重建不会改变结果。
+forbid_2_consequence:   反复重建排除一个不存在的故障，浪费时间并可能改坏配方。
+
+principles:             measure-not-assume, upstream-compat-evidence
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-multipledispatch-version-metadata-reconciliation]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-source-copy-python-no-dist-info-version-unavailable.md
+last_updated:           2026-09-16
+source_event:           itsdangerous 2.2.0 适配（__version__ 经 importlib.metadata
+                        解析，源码直拷交付无 .dist-info → PackageNotFoundError）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  2
+metrics_fail_count:     1
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        C1D9
