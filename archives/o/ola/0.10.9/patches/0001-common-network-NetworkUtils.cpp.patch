@@ -1,0 +1,89 @@
+diff --git a/common/network/NetworkUtils.cpp b/common/network/NetworkUtils.cpp
+index 4815c6c..bd1bcc3 100644
+--- a/common/network/NetworkUtils.cpp
++++ b/common/network/NetworkUtils.cpp
+@@ -333,6 +333,18 @@ bool NameServers(vector<IPV4Address> *name_servers) {
+   }
+ 
+   delete[] fixed_info;
++#elif !defined(HAVE_DECL__RES)
++  // The global `_res` resolver-state symbol is not exported by this libc
++  // (true on OHOS bionic, possibly on other embedded libcs). Without `_res`
++  // we cannot enumerate DNS nameservers at user level. Return success with
++  // an empty list -- OLA's RDM responders tolerate this gracefully (RDM
++  // nameserver discovery degrades to "no DNS advertised"). HAVE_DECL__RES
++  // is set by configure.ac via AC_LINK_IFELSE on the resolver state object
++  // (see the configure.ac companion patch).
++  (void)name_servers;
++  OLA_INFO << "NameServers() not supported: _res symbol unavailable; "
++              "returning empty list";
++  return true;
+ #else
+   // Init the resolver info each time so it's always current for the RDM
+   // responders in case we've set it via RDM too
+@@ -608,6 +620,65 @@ bool DefaultRoute(int32_t *if_index, IPV4Address *default_gateway) {
+   return GetDefaultRouteWithSysctl(if_index, default_gateway);
+ #elif defined(USE_NETLINK_FOR_DEFAULT_ROUTE)
+   return GetDefaultRouteWithNetlink(if_index, default_gateway);
++#elif !defined(_WIN32)
++  // Generic POSIX fallback: parse /proc/net/route. Used on systems where
++  // neither netlink (HAVE_LINUX_NETLINK_H / HAVE_LINUX_RTNETLINK_H) nor
++  // sysctl (HAVE_SYS_SYSCTL_H / HAVE_NET_ROUTE_H / HAVE_DECL_PF_ROUTE /
++  // HAVE_DECL_NET_RT_DUMP) was detected at configure time -- e.g. OHOS
++  // bionic (netlink headers conflict with <sys/socket.h>) and other
++  // embedded Linux systems. /proc/net/route is a kernel-provided file
++  // present on every Linux system with the same hex-encoded ASCII
++  // columns. The default route is the row whose Destination field is
++  // 00000000 and whose Flags include RTF_GATEWAY (0x2).
++  FILE *route_file = fopen("/proc/net/route", "r");
++  if (!route_file) {
++    OLA_WARN << "Could not open /proc/net/route: " << strerror(errno);
++    return false;
++  }
++  char line[512];
++  bool found = false;
++  // skip the header line
++  if (fgets(line, sizeof(line), route_file) == nullptr) {
++    fclose(route_file);
++    return false;
++  }
++  while (fgets(line, sizeof(line), route_file) != nullptr) {
++    char iface[64];
++    unsigned int destination = 0, gateway = 0;
++    unsigned int flags = 0, refcnt = 0, use = 0, metric = 0;
++    unsigned int mask = 0;
++    int matched = sscanf(line,
++        "%63s %x %x %x %u %u %u %x",
++        iface, &destination, &gateway, &flags, &refcnt, &use,
++        &metric, &mask);
++    if (matched < 8) {
++      continue;
++    }
++    if (destination != 0) {
++      continue;  // not the default route
++    }
++    if ((flags & 0x2) == 0) {  // RTF_GATEWAY
++      continue;
++    }
++    // /proc/net/route prints the gateway as %08X of the host-order int,
++    // which on little-endian (aarch64/x86_64) is the byte-reversed form
++    // of the BE-encoded address. IPV4Address stores a BE uint32_t, so
++    // byteswap before constructing. __builtin_bswap32 is a clang builtin
++    // (no libc dependency); ntohl() cannot be used here because on OHOS
++    // bionic it does not perform the expected conversion for this path.
++    *default_gateway = IPV4Address(
++        static_cast<in_addr_t>(__builtin_bswap32(gateway)));
++    *if_index = Interface::DEFAULT_INDEX;  // resolved by caller if needed
++    OLA_INFO << "Default gateway (from /proc/net/route): " << *default_gateway
++             << " on " << iface;
++    found = true;
++    break;
++  }
++  fclose(route_file);
++  if (!found) {
++    OLA_WARN << "No default route found in /proc/net/route";
++  }
++  return found;
+ #elif defined(_WIN32)
+   ULONG size = 4096;
+   PMIB_IPFORWARDTABLE forward_table =
