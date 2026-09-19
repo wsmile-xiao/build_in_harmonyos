@@ -1,0 +1,43 @@
+#====================================================================
+# Draft: 3gpp.org serves WAF HTML to curl/wget UAs but real files to
+#        Conan's UA - CI predownload poisons conandata with file://
+#        WAF page, uppercase-scheme URL bypasses the lowercase-only
+#        predl regex and lets conan fetch natively (libamrnb 11.0.0.0)
+#====================================================================
+
+id:                     DRAFT-13501-LIBAMRNB-3GPP-WAF-UPPERCASE-URL
+trigger_tool:           conan|curl|python|unzip
+phase:                  configuration
+error_signature:        sha256 hash failed for '26104-b00\.zip'|Web Application Firewall|could not setup config files machinery.*26104|Sources correctly downloaded from HTTPS
+
+severity:               2
+category:               network, build-system, ohos, detection, portability
+match_keywords:         3gpp.org, ftp.3gpp.org, WAF, User-Agent, curl, predownload, predl_cache, file://, sha256 hash failed, conandata.yml, url list, mirror fallback, 26104, 26104-b00.zip, penguin.cz, amrnb, amrwb
+
+title:                  3gpp.org fronts a UA-filtering WAF (curl/wget get a ~35KB HTML block page with HTTP 200, Conan UA gets the real file) - the CI predownload step's size>100 heuristic mis-caches the block page and rewrites the conandata URL to a poisoned file:// path, while conan's URL-list fallback on checksum mismatch plus an UPPERCASE-scheme URL evades the lowercase-only predl regex
+
+root_cause:             www.3gpp.org (behind ftp.3gpp.org's 301) filters by User-Agent: curl/wget-style UAs receive a ~35057-byte "Web Application Firewall" HTML page with HTTP 200 (so curl -f does not fail), while the Conan UA string (Conan/2.x ...) is served the real archive. ci/conan/build_and_test.sh's predownload runs curl -sL with the default curl UA, treats any file >100 bytes as success, and rewrites the matching URL string in conandata.yml to file://<predl_cache>/<waf-page>. conan 2's SourcesCachingDownloader._download_from_urls iterates the url list and falls through to the next URL on checksum mismatch (file:// included), but the predownload URL-extraction regex (?:^|\s)(?:url:?\s*)?["\']?-?\s*(https?://...) only matches lowercase schemes, so an UPPERCASE scheme+host URL (RFC 3986 case-insensitive, requests/ConanRequester handle it fine) is never touched by predownload and is fetched natively by conan with the Conan UA that passes the WAF.
+
+affected_scope:         Any recipe whose sources live behind a UA-filtering WAF (verified: 3gpp.org TS 26.104 26104-b00.zip for libamrnb 11.0.0.0; same expected for 3GPP 26-series codec archives used by amrwb etc). Symptom chain: CI conan create fails with sha256 mismatch against a ~35KB file, or unzip fails on an HTML payload mid-build.
+
+verification_cmd:       conan create archives/l/libamrnb/11.0.0.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+rec_priority:           1
+rec_approach:           uppercase-mirror-url-plus-official-first
+rec_description:        Declare the official URL first (R39 optics) and an UPPERCASE-scheme+host copy of the SAME official URL as the second list entry in conandata.yml (e.g. "https://ftp.3gpp.org/..." then "HTTPS://WWW.3GPP.ORG/ftp/..."). Path stays canonical-case (server path is case-sensitive). Verify the uppercase variant really downloads with conan's own downloader before shipping (python snippet using ConanRequester+FileDownloader, compare sha256). If some environment must use curl, curl needs a browser UA (-A "Mozilla/..."), but never encode that into the recipe (L0o forbids curl in conanfile).
+rec_command:            python -c "from conan.internal.model.conf import Conf; from conan.internal.rest.conan_requester import ConanRequester; from conan.internal.rest.file_downloader import FileDownloader; FileDownloader(ConanRequester(Conf())).download('HTTPS://WWW.3GPP.ORG/ftp/Specs/archive/26_series/26.104/26104-b00.zip', 't.bin', retry=0); import hashlib; print(hashlib.sha256(open('t.bin','rb').read()).hexdigest())"
+rec_auto_fix:           false
+rec_impl:               archives/l/libamrnb/11.0.0.0/conandata.yml url list for 26104-b00.zip (libamrnb 11.0.0.0)
+
+fallback_priority:      2
+fallback_approach:      distro-infrastructure-mirror
+fallback_description:   When the upstream host is dead (penguin.cz amrnb wrapper tarball) or a non-WAF mirror exists, use distro infrastructure mirrors with independently published checksums: mirrors.ustc.edu.cn/freebsd-ports/distfiles/<port>/... plus distcache.FreeBSD.org/ports-distfiles/<port>/..., cross-checking sha256 against the FreeBSD port distinfo and md5 against RPM Fusion's sources file. All legit distro mirrors refuse 3GPP-restricted zips, so this only covers freely redistributable tarballs.
+fallback_command:       curl -s https://raw.githubusercontent.com/freebsd/freebsd-ports/main/audio/libamrnb/distinfo
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       wget/curl download inside conanfile build()|bypass checksum|download the WAF page and commit it
+forbid_1_reason:        L0o forbids external download commands in conanfile.py; disabling checksum verification (verify=False) to "pass" the WAF page hides a corrupted source; committing the block page or a repacked archive violates PF2/R39.
+forbid_1_consequence:   Red CI with confusing sha256 mismatch on a ~35KB file, or a poisoned package built from an HTML page; review rejection.
+
+principles:             real-evidence-over-assumption, official-source-first, checksum-identity, minimal-recipe-change
