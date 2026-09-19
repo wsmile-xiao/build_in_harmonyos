@@ -1,0 +1,61 @@
+#====================================================================
+# DRAFT-ascon-c-1.3.0-cmake-rel-flags-combined-lib-naming - CMake REL_FLAGS 交叉覆盖 + 组合目录双命名库 + 无 install() 手动打包
+#====================================================================
+
+id:                     DRAFT-ascon-c-1.3.0-cmake-rel-flags-combined-lib-naming
+trigger_tool:           cmake|conan
+phase:                  configure|link|package
+error_signature:        invalid value '.*-O2' in '-std=c99 -O2'|Library '.*' not found in package|System is unknown to cmake.*Platform/HarmonyOS
+
+severity:               3
+category:               cmake|conan|lightweight-crypto|cross-compile|package
+match_keywords:         REL_FLAGS, march=native, mtune=native, CMakeToolchain, cache variable, semicolon, crypto_aead_hash, combined directory, dual-named library, no install rule, manual package, components, libs not found, CMakeDeps
+
+title:                  CMake 上游默认 REL_FLAGS 含 -march=native 时 OHOS 交叉构建必须整体覆盖；组合实现目录（crypto_aead_hash/）会按 crypto_aead_* 与 crypto_hash_* 双命名生成同内容库；上游无 install() 时配方需手动打包
+
+root_cause:             ①上游 CMake 项目把编译器优化旗标放进可缓存变量 REL_FLAGS/DBG_FLAGS（默认含 -march=native -mtune=native），在 OHOS 交叉工具链（clang aarch64-linux-ohos）下 -march=native 按构建机 CPU 生成指令，产物不可复现且可能链接失败；命令行传 -DREL_FLAGS="-std=c99 -O2" 含空格会被当成单个参数（报 invalid value 'c99 -O2' in '-std=c99 -O2'），必须用分号分隔列表（-DREL_FLAGS="-std=c99;-O2"）或在 CMakeToolchain 中 tc.variables 传分号列表。②上游对"组合实现目录"（如 crypto_aead_hash/asconv13 同时提供 AEAD 与 HASH）在 CMake 的 foreach(CRYPTO aead hash auth) 循环中 fallback 生成两个库：crypto_aead_<alg>_ref 与 crypto_hash_<alg>_ref，内容相同且都含完整符号集；配方 components 若按目录名臆想库名（crypto_aead_hash_asconv13_ref）会在 CMakeDeps 阶段报 "Library not found in package"。③上游 CMakeLists 无 install() 规则时 cmake.install() 为空操作，package() 需手动复制声明头（tests/crypto_*.h）与各实现头目录、静态库到包内。
+
+affected_scope:         在 HarmonyOS PC (aarch64) 上用 Conan+CMake 适配的 C 密码/嵌入式库：上游将编译旗标做成 cache 变量且默认含 -march=native；上游存在组合实现目录（一个目录同时服务多个 CRYPTO 类别）；上游无 install() 规则需手动打包。ascon-c 1.3.0 实测全覆盖。
+
+verification_cmd:       conan-verify G2 conan create 通过；test_package 消费者链接 ascon-c::asconv13 后 configure/compile/link/run 全通过；ctest 199/199 KAT 比对通过；nm 静态库可见 crypto_aead_encrypt/crypto_hash 符号。
+
+rec_priority:           1
+rec_approach:           override-rel-flags-plus-correct-component-libs-plus-manual-package
+rec_description:        在 generate() 用 CMakeToolchain 设置 tc.variables["REL_FLAGS"]="-std=c99;-O2"（分号列表，勿用空格字符串）整体覆盖上游默认 -march=native；先用 nm/CMake 日志确认实际生成的库名（组合目录按 CRYPTO 类别双命名，如 crypto_aead_asconv13_ref / crypto_hash_asconv13_ref，内容一致选其一），components.libs 用真实库名；上游无 install() 时 package() 手动 copy 声明头+实现头+*.a。
+
+rec_command:            tc.variables["REL_FLAGS"] = "-std=c99;-O2"; tc.variables["DBG_FLAGS"] = "-std=c99;-O2;-Wall;-Wextra;-Wshadow"; package(): copy(self, "crypto_aead.h", src=.../tests, dst=.../include); copy(self, "*.h", src=.../crypto_aead_hash/asconv13/ref, dst=.../include/crypto_aead_hash/asconv13/ref); copy(self, "*.a", src=bld, dst=.../lib, keep_path=False); cpp_info.components["asconv13"].libs = ["crypto_aead_asconv13_ref"]
+rec_auto_fix:           false
+rec_impl:               conan-cmake-recipe
+
+fallback_priority:      2
+fallback_approach:      patch-out-native-flags
+fallback_description:   若不便整体覆盖 cache 变量（例如上游在 CXXFLAGS 硬编码），可打补丁移除上游 -march=native（与 clthreads 2.4.2 同源经验）；但对 cache 变量型旗标，CMakeToolchain 覆盖更干净且不需要补丁维护。
+fallback_command:       patch 移除 CXXFLAGS/REL_FLAGS 中的 -march=native 后重建
+fallback_auto_fix:      false
+fallback_impl:          patch-based
+
+forbid_1_pattern:       -DREL_FLAGS="-std=c99 -O2"|tc\.variables\["REL_FLAGS"\]\s*=\s*"[^"]* [^"]*"
+forbid_1_reason:        含空格的 cache 变量在 CMake 中被当作单个参数（-std=c99 -O2 合成一个 -std 值），必然配置失败；须用分号分隔列表。
+forbid_1_consequence:   cmake configure 报 invalid value 'c99 -O2' in '-std=c99 -O2'，探索编译阶段浪费一轮。
+forbid_2_pattern:       components.*libs.*=.*\["crypto_aead_hash_.*"\]|libs.*crypto_aead_hash
+forbid_2_reason:        组合目录不产生 crypto_aead_hash_* 命名库，臆想库名在 CMakeDeps 阶段报 Library not found in package。
+forbid_2_consequence:   G2 conan create 失败，test_package find_package 配置中断。
+forbid_3_pattern:       cmake\.install\(\).*上游无 install|仅 cmake.install() 不手动 copy
+forbid_3_reason:        上游无 install() 规则时 cmake.install() 为空操作，产物不会进入包。
+forbid_3_consequence:   G4 产物完整性检查缺 lib/include，消费者链接失败。
+
+principles:             P010, P012, P020
+causes:                 []
+caused_by:              []
+similar_to:             [E092, DRAFT-8958-clthreads-makefile-stage-install-shadow, DRAFT-cmrc-2.0.1-cmake-module-distribution]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/DRAFT-ascon-c-1.3.0-cmake-rel-flags-combined-lib-naming.md
+last_updated:           2026-09-19
+source_event:           ascon-c 1.3.0 HarmonyOS PC 适配（CMake REL_FLAGS 覆盖 + 组合目录双命名库 + 手动打包）
+authors:                pc4-5
+source_commit:          (commit 时回填)
+
+metrics_success_count:  0
+metrics_fail_count:     0
