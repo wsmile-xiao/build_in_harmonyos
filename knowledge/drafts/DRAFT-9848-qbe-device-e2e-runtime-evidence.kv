@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT-9848-qbe-device-e2e-runtime-evidence -
+# 编译器后端的设备内端到端运行证据链：上游测试驱动先于被测编译器失败
+# （/tmp 硬编码），配方须补齐环境契约并以"生成→执行→行为比对"为验收
+# （qbe 1.2 OHOS arm64 实测：补丁前 49/50 全灭 → 补丁后 49 PASS + 1 skip）。
+#
+# 场景: qbe 1.2（SSA → amd64/arm64/rv64 汇编的编译器后端）在 OHOS PC
+#       （aarch64, clang 15.0.4 / OHOS SDK 26.0.0.18, HongMeng Kernel 1.12.0）
+#       适配：tools/test.sh 硬编码 tmp=/tmp/qbe.zzzz（OHOS /tmp 只读），
+#       原样运行 49 of 50 tests failed（cannot open '/tmp/qbe.zzzz.s'），
+#       失败发生在代码生成之前，被测后端行为完全不可观测；
+#       最小补丁 ${TMPDIR:-/tmp} 后 49 [ok] + 1 上游声明 skip + 0 fail。
+# 适用: 所有"自产代码执行型"编译器/代码生成/汇编器工具的上游测试套件与
+#       消费者验收；以及任何把临时文件路径写死 /tmp 的测试驱动。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-9848-qbe-device-e2e-runtime-evidence
+trigger_tool:           make|sh|clang|test
+phase:                  testing
+error_signature:        cannot open '/tmp/[^']+'|[0-9]+ of [0-9]+ tests failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               compiler, codegen, testing, portability, makefile
+match_keywords:         qbe, compiler backend, SSA, code generation, arm64, assembly, end-to-end, runtime evidence, native execution, test driver, TMPDIR, /tmp read-only, make check, qbe.ref, .ssa, driver code, nested compile, CC, qemu, skip directive, platform skip, output comparison, exit code, OHOS, HarmonyOS, device-side test, toybox, install(1), chibicc, tcc, nasm, yasm
+title:                  编译器后端的设备内端到端运行证据链：测试驱动先失效（/tmp 硬编码），验收须以"生成→执行→行为比对"为准
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游测试驱动把宿主机假设写死，失败点不在被测编译器：tools/test.sh 第 7 行 tmp=/tmp/qbe.zzzz，OHOS /tmp 只读（E002 同族）使全部用例在写出临时汇编前即失败（49 of 50 tests failed / cannot open '/tmp/qbe.zzzz.s'），"后端坏了"是伪象；同时设备内运行证据还需要配方补齐一整套环境契约：C 编译器须经 CC 传入（脚本 ${CC:-cc} 的默认值在干净 PATH 下不可依赖）、TARGET 由被测程序自描述（qbe -t? = arm64；config.h 由 Makefile 依 uname -m 生成 T_arm64）、用例内嵌 driver 经 awk 抽取后与生成的 .s 一起交给 cc 链接（嵌套编译）、-lpthread 在 OHOS clang 15.0.4 可直接链接、原生路径（TARGET 为空）不得启用交叉/qemu 分支；计数与判定边界同样是契约的一部分：test/ 共 64 个 .ssa 而 make check 的 glob [!_]*.ssa 只执行 50 个（14 个下划线前缀为上游设计排除）、dark.ssa 由首行声明在 arm64 跳过、qbe.ref 不随源码包发布且上游对汇编文本差异只打印且恒返回 0——汇编一致不是验收标准，行为（stdout diff / 返回码）才是。
+affected_scope:         "自产代码执行型"编译器/代码生成/汇编器工具的测试与消费验收：本仓语料含 qbe、chibicc、tcc、scc、cc65、sdcc、nasm、yasm、binutils、llvm/clang/gcc 工具链族；以及任何把临时文件路径写死 /tmp 的测试驱动（E002/E052 的"驱动硬编码、不吃 TMPDIR"变体）。与 E356（固定目标编译器在 armv8 出不了运行证据→双平面替代证明）互补：本条是能出运行证据时的完整证据链与判定标准；与 E387（LLVM lit 框架配置入口与最小子集）分层不同：本条为零框架、独立后端自带的最小 E2E 驱动。
+verification_cmd:       设备侧三条：①原样复现 sh tools/test.sh all → 期望 "49 of 50 tests failed" 且 cannot open '/tmp/qbe.zzzz.s'；②补丁后 TMPDIR=<writable> CC=<clang> sh tools/test.sh all → 期望 49 [ok] + 1 上游声明 skip（dark.ssa，arm64）+ "All is fine!"；③消费者 E2E：QBE_BIN=<pkg>/bin/qbe QBE_TEST_CC=<clang> bash test_package/test_qbe.sh → qbe -t?=arm64、hello stdout 相等、退出码 42、非法 SSA 非零拒绝（12 断言）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           tmpdir-aware-driver-plus-native-e2e-contract
+rec_description:        最小且行为保持地让驱动接受 TMPDIR（tmp=${TMPDIR:-/tmp}/qbe.zzzz；默认行为不变、不引入平台宏、无绝对路径），配方侧补全环境契约（编译器取自 tools.build:compiler_executables、TMPDIR 指向 build 目录、SHELL=sh 兼容无 /bin/sh 主机、原生路径不启用 qemu、无 install(1) 时用 copy 安装）；验收硬标准是"生成→链接→原生执行→行为比对"，编译通过不算数，汇编文本一致也不算数（qbe.ref 缺失时上游根本不会执行比对）。
+rec_command:            patch -p1 -i patches/0001-tools-test.sh.patch && TMPDIR=<build>/qbe-test-tmp CC=<clang> sh tools/test.sh all
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      recipe-side-driver-injection
+fallback_description:   无法向上游提补丁时，在配方 build() 中把驱动复制到 build 目录并注入 TMPDIR（sed 替换 tmp= 或整段重写），断言逻辑必须逐行等价；代价：配方与上游脚本分叉，须在 notes 说明并防止静默漂移。
+fallback_command:       sed 's|^tmp=/tmp/|tmp=${TMPDIR:-/tmp}/|' tools/test.sh > <build>/test.sh && TMPDIR=<build> CC=<clang> sh <build>/test.sh all
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       skip.*(tools/test\.sh|make check)|tests? (skipped|not run).*(no environment|无环境)|--list-tests.*empty
+forbid_1_reason:        上游套件是设备内唯一能证明"生成的代码真的能跑"的证据；以"没环境"为由跳过会把最强断言变成空壳（P013 的假绿形态）。
+forbid_1_consequence:   编译通过被当作可运行证据，arm64 后端（或任何代码生成器）的行为回归无法被发现，PR 的通过率是伪造的。
+forbid_2_pattern:       cmp.*asmref.*(fail|FAIL)|asm diff.*(fail|FAIL)|exact assembly (match|equality).*require
+forbid_2_reason:        上游对汇编文本差异只记录且恒返回 0，且 qbe.ref 不随源码包发布；把 asm diff 当失败会制造假失败，用它替代运行证据会制造假通过。
+forbid_2_consequence:   假失败（合法的指令选择差异被当回归）或更糟的假通过（从未执行生成的代码）。
+
+principles:             P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E002, E052, E356, E387]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-9848-qbe-device-e2e-runtime-evidence.md
+last_updated:           2026-09-16
+source_event:           qbe 1.2 OHOS arm64 适配（任务 #9848）：原样 49 of 50 tests failed（cannot open '/tmp/qbe.zzzz.s'）→ 补丁后 49 PASS + 1 上游声明 SKIP（dark.ssa）+ 0 FAIL；消费者 E2E 12/12
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:              10377
+source_commit:          3dff0580b
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-16
+
+# ═══ 草稿标记 (Draft tags, stripped on merge) ═══
+draft:                  true
+contributor_id:         9C4A
