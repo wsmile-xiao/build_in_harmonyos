@@ -1,0 +1,95 @@
+#====================================================================
+# Draft: aarch64/HarmonyOS PC long double (113-bit) 尾数超出 ull →
+#        任意精度整数库 float 互操作尾数存储需拓宽到 unsigned __int128
+# 适配实例: wide-integer 1.01 (PR 本任务)
+# 验证: OHOS clang 15 aarch64-unknown-linux-ohos 全量上游测试 30/30
+#====================================================================
+
+id:                     DRAFT-wide-integer-1.01-long-double-mantissa-storage
+status:                 pending-editor-review
+trigger_tool:           clang|cmake|conan
+phase:                  compilation
+error_signature:       static assertion failed due to requirement.*mantissa does not fit in unsigned long long|
+                       The width of the mantissa does not fit in unsigned long long|
+                       numeric_limits<long double>::digits.*digits.*unsigned long long
+
+severity:               2
+category:               platform, compiler, aarch64, portability, bigint
+match_keywords:         long double, mantissa, unsigned long long, unsigned __int128,
+                         aarch64, quad precision, LDBL_MANT_DIG 113, native_float_parts,
+                         float interop, uintwide_t, arbitrary precision, HarmonyOS PC
+
+title:                  aarch64 (HarmonyOS PC) 上 long double 为 113 位尾数的 IEEE quad，
+                        浮点→大整数转换的尾数存储若固定 ull 会编译期 static_assert 失败
+
+root_cause: >
+  x86-64 的 long double 是 80-bit 扩展精度（64 位尾数），恰好可以放入
+  unsigned long long；而 aarch64（HarmonyOS PC）的 long double 是 IEEE quad
+  （LDBL_MANT_DIG=113）。若任意精度整数库在 float→bigint 转换路径中以
+  unsigned long long 承接浮点尾数并写死
+  `static_assert(digits <= 64)`，在 aarch64 上实例化 long double 路径即编译失败，
+  即使该构造实际只处理非有限值（inf/nan 先行分支）也会因模板实例化而命中。
+  这是平台差异，不是库逻辑错误。
+
+affected_scope: >
+  任意精度整数 / 十进制浮点互操作类 C++ 库（uintwide_t、decwide_t、
+  boost::multiprecision backend 等）的 float/long double 构造或转换路径，
+  在 long double 尾数 > 64 位的平台上（aarch64 Linux/OHOS、arm64 macOS、
+  未来更长浮点类型）编译失败。
+
+error_excerpt: |
+  ./math/wide_integer/uintwide_t.h:1985:7: error: static assertion failed due to
+  requirement 'std::numeric_limits<long double>::digits <=
+  std::numeric_limits<unsigned long long>::digits':
+  Error: The width of the mantissa does not fit in unsigned long long
+
+rec_approach:            widen-mantissa-storage-type
+rec_description: >
+  将尾数存储类型从固定 ull 改为按浮点类型 digits 条件选择：
+  `std::conditional<(digits > 64), unsigned __int128, unsigned long long>::type`，
+  static_assert 改为对存储类型校验；归一化位移 `1 << (digits-1)` 同步改用
+  存储类型（否则 113 位移位在 64 位类型上是 UB）。float(24)/double(53)/
+  x86-64 long double(64) 不受影响，任何 digits>64 平台自动走 __int128 分支。
+
+rec_command: |
+  # 在 float→bigint 互操作类的尾数承载处：
+  using mantissa_storage_type =
+    typename std::conditional<(std::numeric_limits<FloatingPointType>::digits
+                                 > std::numeric_limits<unsigned long long>::digits),
+                              unsigned __int128,
+                              unsigned long long>::type;
+  # 然后 static_assert 与位移全部基于 mantissa_storage_type
+rec_auto_fix: false
+rec_impl: source-patch
+
+fallback_priority: 2
+fallback_approach: platform-guard-float-interop
+fallback_description: 若库不允许改动公共头（如仅能条件编译），可用
+  WIDE_INTEGER_DISABLE_FLOAT_INTEROP 类平台宏关闭 float 互操作，但会连带
+  关闭 float/double 路径，优先选择拓宽存储类型的方案。
+fallback_command: |
+  -D WIDE_INTEGER_DISABLE_FLOAT_INTEROP   # 全关（不推荐，精度路径一并关闭）
+fallback_auto_fix: false
+fallback_impl: recipe-definition
+
+forbid_1_pattern: ctest.*||true|test_package.*ignore|skip.*long.double
+forbid_1_reason: 平台差异必须用真实补丁适配并全量运行上游测试验证，不能跳过测试掩盖
+forbid_1_consequence: long double 构造精度回归无法被发现
+forbid_2_pattern: static_assert.*delete|reinterpret_cast.*mantissa
+forbid_2_reason: 删除断言或用重解释绕过属于掩盖，且位移 UB 仍存在
+forbid_2_consequence: 未定义行为与精度损失
+
+principles: P001, P005
+causes:
+caused_by:
+similar_to: E388, DRAFT-E999-ohos-musl-long-double-double-alias
+conflicts_with:
+prerequisite_of:
+
+doc_file: knowledge/drafts/DRAFT-wide-integer-1.01-long-double-mantissa-storage.md
+last_updated: 2026-09-19
+source_event: wide-integer 1.01 HarmonyOS PC 适配，上游测试 30/30 全量通过
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.95
