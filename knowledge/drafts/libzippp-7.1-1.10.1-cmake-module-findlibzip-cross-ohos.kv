@@ -1,0 +1,70 @@
+# ═══ Draft knowledge entry — upstream MODULE-mode FindLIBZIP.cmake under OHOS cross chain:
+# preseed find cache vars + explicit transitive deps + SDK libc++ runtime injection
+# Software: libzippp 7.1-1.10.1
+# Gate: conan-verify G2 (conan create, ohos-aarch64) + test_package 8/8 + W3 local green
+# Status: DRAFT
+
+id: libzippp-7.1-1.10.1-cmake-module-findlibzip-cross-ohos
+severity: 2
+category: build-system|cmake|ohos
+trigger_tool: cmake|conan
+phase: build
+
+keywords: FindLIBZIP.cmake, MODULE mode, find_package, find_path, find_library, ZLIB, cross-compiling, CMAKE_FIND_ROOT_PATH_MODE, libc++_shared.so, LD_LIBRARY_PATH, test_package
+error_signature: Imported target "libzip::zip" includes non-existent path|unable to find library -llibzippp|Error relocating .*libc\+\+|_ZTISt9exception: symbol not found|no type named 'libzippp_int64'
+match_keywords: FindLIBZIP, MODULE mode, find cache variable, imported target non-existent path, ZLIB_LIBRARY, libc++_shared.so, cross compile, conan test_package
+
+root_cause: |
+  (1) libzippp's upstream CMake uses MODULE mode: find_package(LIBZIP MODULE) with its own
+  cmake/FindLIBZIP.cmake that resolves three cache vars — LIBZIP_INCLUDE_DIR (find_path
+  zip.h), LIBZIP_LIBRARY (find_library zip), _libzip_pkgcfg (find_file libzip.pc) — and then
+  builds an IMPORTED target libzip::zip from them. Under the OHOS cross chain
+  (ohos.toolchain.cmake sets CMAKE_FIND_ROOT_PATH_MODE_* = ONLY), find_path/find_library
+  only search the sysroot, so a conan-provided dependency package folder is invisible
+  unless the cache vars are preseeded with real absolute paths.
+  (2) Inside FindLIBZIP.cmake there is a bare find_package(ZLIB REQUIRED). If zlib is only a
+  TRANSITIVE dep (pulled by libzip), the recipe cannot see its package folder, and CMake's
+  builtin FindZLIB under the cross chain resolves to non-existent RELATIVE paths
+  (ZLIB_LIBRARY=lib/libz.so, ZLIB_INCLUDE_DIR=<builddir>/include) — cmake configure then
+  fails at generate time with "Imported target libzip::zip includes non-existent path".
+  (3) The built library is lib/libzippp.so (upstream strips the lib prefix duplication with
+  set_target_properties(PREFIX "") so the linker name is zippp, not libzippp).
+  (4) C++ test binaries NEEDED libc++_shared.so: the OHOS SDK ships it under
+  llvm/lib/aarch64-linux-ohos/, which is not on the default loader path — link and runtime
+  both need the explicit path, or "Error relocating ...: symbol not found" at exec time.
+
+rec_approach: cmake-module-find-preseed + explicit-transitive-require + sdk-libcpp-runtime-inject
+rec_description: |
+  (1) Preseed every cache variable the upstream Find module consults, from the conan
+  dependency's real package folder, in the recipe build():
+      libzip = self.dependencies["libzip"]
+      -DLIBZIP_INCLUDE_DIR=<pkg>/include
+      -DLIBZIP_LIBRARY=<pkg>/lib/libzip.so
+      -D_libzip_pkgcfg=<pkg>/lib/pkgconfig/libzip.pc
+  plus the ohos-find-deps.cmake preload (CMAKE_FIND_ROOT_PATH/ PREFIX_PATH append +
+  MODE_* BOTH) via -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES (runs after toolchain, before first
+  find_package).
+  (2) Hoist the transitive dep to a DIRECT requirement (self.requires("zlib/<ver>")) so the
+  recipe can preseed the nested module's vars too (-DZLIB_INCLUDE_DIR/-DZLIB_LIBRARY with
+  real paths; prefer libz.so, fall back libz.a). Without this, FindZLIB invents relative
+  paths and generate dies even though configure printed "Found ZLIB".
+  (3) package_info libs must match the real artifact: lib/libzippp.so links as -lzippp.
+  (4) For a C++ shared lib + C++ test binary on OHOS: link with -L<SDK>/llvm/lib/aarch64-linux-ohos
+  -lc++ and at test() runtime prepend the same dir to LD_LIBRARY_PATH (loader cannot find
+  libc++_shared.so otherwise). conanrun env does NOT carry the SDK path.
+  (5) Upstream typedefs live at global scope (libzippp_int64), not inside namespace
+  libzippp — test sources must not qualify them.
+
+rec_commands:
+  - "conan create archives/l/libzippp/7.1-1.10.1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+
+verification: |
+  conan create on ohos-aarch64 (clang 15) succeeds: cmake configure "Found LIBZIP" with
+  preseeded paths, lib/libzippp.so + include/libzippp/libzippp.h + lib/cmake/libzippp/
+  packaged and signed; test_package 8/8 checks PASS including a real zip write/read
+  roundtrip (addData -> close -> getEntry -> readAsText).
+
+related:
+  - archives/l/libzip/1.11.4/conanfile.py (ohos-find-deps preload + ohos.toolchain discovery precedent)
+  - archives/j/jinja2cpp/0.9/test_package/conanfile.py (SDK libc++ LD_LIBRARY_PATH injection precedent)
+last_updated: 2026-09-20
