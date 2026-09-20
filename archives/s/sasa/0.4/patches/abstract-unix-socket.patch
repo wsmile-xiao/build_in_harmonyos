@@ -1,0 +1,58 @@
+--- a/src/socket-activate.c
++++ b/src/socket-activate.c
+@@ -141,16 +141,33 @@
+ 	if (sock == -1)
+ 		err(EXIT_FAILURE, "Could not create a Unix-domain socket");
+ 
++	const int is_abstract = address[0] == '@';
+ 	mode_t oldmask = 0;
+ 	long mode = 0;
+ 	struct sockaddr_un addr = { 0 };
+ 	addr.sun_family = AF_UNIX;
+-	const int written = snprintf(addr.sun_path, sizeof(addr.sun_path),
+-	    "%s", address);
+-	if (written < 0 || (size_t)written >= sizeof(addr.sun_path))
+-		err(EXIT_FAILURE, "Path too long for a Unix-domain socket");
+-	if (unlink(address) == -1 && errno != ENOENT)
+-		err(EXIT_FAILURE, "Failed to remove existing Unix-domain socket %s", address);
++	socklen_t addrlen = sizeof(addr);
++	if (is_abstract) {
++		/* Linux abstract namespace: sun_path[0] == '\0' and the name
++		 * follows in sun_path[1..]. It has no filesystem inode, so no
++		 * unlink()/chown() and no dependence on the working directory
++		 * length. This lets AF_UNIX socket activation work on HarmonyOS
++		 * PC where the writable filesystems refuse pathname socket
++		 * bind() with EPERM (see knowledge/E461). */
++		const size_t name_len = strlen(address); /* includes '@' */
++		if (name_len > sizeof(addr.sun_path) - 1)
++			err(EXIT_FAILURE, "Abstract socket name too long");
++		addr.sun_path[0] = '\0';
++		memcpy(addr.sun_path + 1, address + 1, name_len - 1);
++		addrlen = (socklen_t)(sizeof(addr.sun_family) + 1 + (name_len - 1));
++	} else {
++		const int written = snprintf(addr.sun_path, sizeof(addr.sun_path),
++		    "%s", address);
++		if (written < 0 || (size_t)written >= sizeof(addr.sun_path))
++			err(EXIT_FAILURE, "Path too long for a Unix-domain socket");
++		if (unlink(address) == -1 && errno != ENOENT)
++			err(EXIT_FAILURE, "Failed to remove existing Unix-domain socket %s", address);
++	}
+ 	/* Set umask for bind */
+ 	if (options[OPT_MODE].value != NULL) {
+ 		options[OPT_MODE].handled = true;
+@@ -160,11 +177,14 @@
+ 			    options[OPT_MODE].value, address);
+ 		oldmask = umask(~mode);
+ 	}
+-	if (bind(sock, (const struct sockaddr *)&addr, sizeof(addr)) == -1)
++	if (bind(sock, (const struct sockaddr *)&addr, addrlen) == -1)
+ 		err(EXIT_FAILURE, "Could not bind the Unix-domain socket to %s", address);
+ 	if (options[OPT_MODE].value != NULL)
+ 	  	umask(oldmask);
+ 
++	if (is_abstract)
++		return sock; /* abstract sockets have no filesystem ownership */
++
+ 	uid_t uid = 0;
+ 	gid_t gid = 0;
+ 	if (options[OPT_USER].value != NULL) {
