@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-4033-binwalk-2.3.4-ohos-python-subprocess-path-search
+#   OHOS 捆绑 Python：subprocess 裸命令名不走 PATH 搜索；
+#   pwd.getpwuid() 因 uid 无 passwd 条目抛 KeyError
+# 来源: PR #4033 feat(binwalk): 2.3.4 适配完成（补丁 0003 extractor 修复）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-4033-binwalk-2.3.4-ohos-python-subprocess-path-search
+trigger_tool:           python|runtime|test
+phase:                  runtime|testing
+error_signature:        FileNotFoundError: \[Errno 2\] No such file or directory: '[a-z0-9_-]+'|
+                        KeyError: 'getpwuid\(\): uid not found|
+                        getpwuid\(\): uid not found: \d+|
+                        Failed to load Extractor module
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform_limitation, python, subprocess, runtime
+match_keywords:         FileNotFoundError, No such file or directory, getpwuid,
+                        uid not found, posix_spawn, shutil.which, pwd.getpwuid,
+                        subprocess.call, bare name, PATH 搜索, Extractor module,
+                        binwalk, 提取失败, 工具未安装误判
+title:                  OHOS 捆绑 Python：subprocess 裸命令名不走 PATH 搜索（posix_spawn 无 p 变体）；pwd.getpwuid 因沙箱 uid 无 passwd 条目抛 KeyError
+prescan_pattern:        subprocess\.(call|run|Popen)\(\s*\[?\s*['"][a-z0-9_-]+['"]|pwd\.getpwuid
+prescan_globs:          **/*.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             HNP 打包的 Python 3.12 (…/lib/python3.12/subprocess.py) 含
+                        _IS_HARMONYOS 补丁：executable 无目录前缀时也走
+                        os.posix_spawn()；而 musl 的 posix_spawn（非 p 变体）对不含
+                        '/' 的路径不做 PATH 搜索，按相对 CWD 解析 execve('tar') →
+                        FileNotFoundError。shell=True 不受影响（shell 自己查 PATH），
+                        shutil.which() 逐目录 os.access(X_OK) 也不受影响。
+                        另外 OHOS 沙箱 uid（如 20020101）可能没有 passwd 数据库条目，
+                        pwd.getpwuid() 抛 KeyError——上游惯用 getpwuid 做 "非 root
+                        检查" 的代码（如 binwalk extractor.load()）在模块加载时崩溃。
+affected_scope:         纯 Python 三方库/工具的运行期与测试期；任何 subprocess 裸名
+                        调用外部命令（tar/cpio/unzip 等）或调用 pwd.getpwuid 的代码
+verification_cmd:       python3 -c "import subprocess; subprocess.call(['tar','--version'])"   # OHOS 上 FileNotFoundError（复现）
+                        python3 -c "import subprocess; subprocess.run('tar --version', shell=True)"  # OK（对照）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           shutil-which-preresolve
+rec_description:        源码 portability 补丁：外部命令先 shutil.which() 预解析为绝对路径；getpwuid 用 try/except KeyError 包裹并回退进程凭据（root 检查改用 os.getuid()==0）
+rec_command:            # cmd_list = shlex.split(command)
+                        # if cmd_list and not os.path.dirname(cmd_list[0]):
+                        #     resolved = shutil.which(cmd_list[0])
+                        #     if resolved: cmd_list[0] = resolved
+                        # try: user_info = pwd.getpwuid(os.getuid())
+                        # except KeyError: user_info = None
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      shell-true-invocation
+fallback_description:   无法改源码时改用 shell=True（由 shell 做 PATH 查找）或绝对路径调用
+fallback_command:       subprocess.run('tar --version', shell=True)
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       subprocess\.(call|run|Popen)\(\s*\[?\s*['"][a-z0-9_-]+['"]
+forbid_1_reason:        OHOS 捆绑 Python 上裸名调用必然 FileNotFoundError，易被误判为"工具未安装"
+forbid_1_consequence:   功能静默失效（binwalk -e 提取链路曾因此全断，test_dirtraversal 失败）
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003,P012
+
+# ═══ Layer 5: 度量 ═══
+confidence:             0.85
+similar_to:             E212,E077
+doc_file:               drafts/DRAFT-4033-binwalk-2.3.4-ohos-python-subprocess-path-search.md
+last_updated:           2026-09-18
