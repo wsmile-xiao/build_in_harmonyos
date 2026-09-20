@@ -1,0 +1,112 @@
+# ═══ Draft knowledge entry — libyal 发布包内置 common/config.h 遮蔽新生成头 ═══
+# Timestamp: 2026-09-19
+# Software: libfvde 20240502（知识可跨库复用：libyal 家族 crypto 包）
+# Task: feat/libfvde-20240502（lang-preflight/env_unsupported 之外的独立构建期缺陷）
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-E588-libyal-bundled-configsh-ssl-shadow.md
+#
+# 查重差异: 与 E412（configure 自动探测到未声明的 libcrypto → 显式可选后端策略）
+# 和 E284（交叉编译时生成 target config header）都不同——本条的问题是**上游把生成物
+# config.h 提交进了发布包**，其内容来自维护者机器（带 OpenSSL），而 C 源用引号
+# #include "config.h"，源树副本优先于构建树新副本，于是 configure 的探测结果被完全遮蔽。
+# 与 DRAFT-libfsntfs-release-archive-closure（libyal 自包含发布包闭包审计）互补：
+# 那条管"组件目录/生成文件齐不齐"，本条管"生成物齐了但内容是陈旧宿主机的"。
+
+id:                     DRAFT-E588-libyal-bundled-configsh-ssl-shadow
+trigger_tool:           conan|autotools|configure|make|gcc|clang
+phase:                  configure|build|dependency|crypto
+error_signature:        fatal error.*openssl/evp.h.*file not found|libhmac_md5_context.h.*openssl/evp.h|HAVE_OPENSSL_EVP_H.*config\.h|HAVE_LIBCRYPTO.*config\.h|libcaes.*openssl/evp.h.*not found
+severity:               2
+category:               build-system|autotools|vendored-dependency|openssl|generated-header|OHOS
+match_keywords:         libfvde, libbde, libluksde, libmodi, libyal, libhmac, libcaes,
+                        libcrypto, openssl/evp.h, HAVE_LIBCRYPTO, HAVE_OPENSSL_EVP_H,
+                        common/config.h, config.h.in, AC_CONFIG_HEADERS, quoted include,
+                        VPATH build, in-source build, --with-openssl=no, bundled dependency,
+                        maintainer machine, release tarball, stale generated file,
+                        HMBS, OHOS, conan create
+
+title:                  libyal 发布包内置陈旧 common/config.h（维护者机器带 OpenSSL）遮蔽 configure 新生成头 → 编译期 openssl/evp.h file not found；in-source configure 覆盖 + --with-openssl=no 走内置 libhmac/libcaes
+
+root_cause:             >
+  libyal 的 release tarball 同时包含生成物 common/config.h（由维护者机器上的
+  AC_CONFIG_HEADERS 生成）与模板 common/config.h.in。common/common.h 第 26 行用
+  **引号包含** #include "config.h"，C 预处理对引号包含先查"包含者所在目录"，因此
+  只要编译发生在源树/其子目录（含 -I../common 的 VPATH 构建），生效的永远是源树
+  里那份陈旧 config.h，configure 在构建树里新生成的同名头根本轮不到。
+  实测 libfvde 20240502 发布包的 common/config.h:239 是 #define HAVE_LIBCRYPTO 1、
+  :419 是 #define HAVE_OPENSSL_EVP_H 1（同一文件 :329/:371 还定义了
+  HAVE_LOCAL_LIBCAES/HAVE_LOCAL_LIBHMAC），而模板 config.h.in:238/418 对应的是
+  #undef。OHOS SDK sysroot（26.0.0.18）**没有** openssl/evp.h，于是 libhmac/libcaes
+  里被 HAVE_LIBCRYPTO/HAVE_OPENSSL_EVP_H 守卫的 #include <openssl/evp.h> 直接命中不存在的
+  头文件，报 fatal error: 'openssl/evp.h' file not found in libhmac_md5_context.h。
+  同族 libbde/20240502 配方注释记录了完全相同的现象（"Upstream auto-detect found a
+  libcrypto whose headers are absent at compile time"），说明这是发布包形态问题而非个例。
+
+affected_scope:         >
+  发布包里携带由宿主机生成的 config.h（或任何被引号 include 的生成头）并同时提供
+  local/vendored 可选后端（libhmac、libcaes、libcrypto、zlib、libintl 等）的 Autotools
+  项目，尤其是 libyal 家族的加密类库（libfvde/libbde/libluksde/libmodi/libfsapfs/
+  libvslvm/libpff…）。典型触发环境是"目标 sysroot 没有该可选库的可选头/或只有运行时 so"，
+  以及所有非 in-source 的 VPATH 构建。
+
+verification_cmd:       |
+  # 全部命令在设备可直接执行；TASK_DIR 用任务持久目录，不用 /tmp（设备 /tmp 只读）
+  TASK_DIR="$HOME/tmp/libfvde-20240502"; SRC="$TASK_DIR/src-check/libfvde-20240502"
+  # 1) 陈旧生成物 vs 模板：前者 define、后者 undef
+  grep -nE '^#define HAVE_LIBCRYPTO 1|^#define HAVE_OPENSSL_EVP_H 1' "$SRC/common/config.h"
+  grep -nE '^#undef HAVE_LIBCRYPTO|^#undef HAVE_OPENSSL_EVP_H'        "$SRC/common/config.h.in"
+  # 2) 引号包含 → 源树副本优先（这是遮蔽成立的关键）
+  sed -n '20,30p' "$SRC/common/common.h"        # 期望看到 #include "config.h"
+  # 3) 目标 sysroot 是否真的有该头（libfvde 实测：没有）
+  ls /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot/usr/include/openssl/evp.h
+  # 4) 正解验证：in-source configure 会把新头写回源树同一路径（覆盖陈旧副本）
+  grep -n 'config.status: creating common/config.h' "$TASK_DIR/dev-build1.log"
+  grep -nE '^#define HAVE_LIBCRYPTO|^#undef HAVE_LIBCRYPTO' "$SRC/common/config.h"   # 构建后应为 undef/缺失
+  # 5) 端到端：conan create 成功且 make check 有上游测试计数
+  conan create "$PWD/archives/l/libfvde/20240502" \
+      -pr:h="$PWD/ci/conan/profiles/ohos-aarch64" -pr:b="$PWD/ci/conan/profiles/ohos-aarch64" \
+      --build=missing --user=ohpcd --channel=stable
+
+rec_priority:           1
+rec_approach:           in-source-configure-plus-with-openssl-no
+rec_description:        >
+  两条一起用才稳：①**in-source 构建**（在该源码目录内直接跑 configure/make/make install
+  DESTDIR=…，即 conan 配方里 cwd=source_folder），让 config.status 把新的 common/config.h
+  写回源树同一路径，从物理上覆盖陈旧副本；②显式 --with-openssl=no，让 libhmac/libcaes
+  走包内自带的本地实现（HAVE_LOCAL_LIBHMAC/HAVE_LOCAL_LIBCAES），不引入声明外依赖，
+  也不再受宿主机 libcrypto 有无头文件的影响。若必须 VPATH 构建，则在 build() 开头删除
+  源树里的陈旧生成头（libbde 的做法：os.unlink(source_folder/common/config.h)），
+  因为 -I 顺序无法改变引号包含的解析规则。
+rec_command:            >
+  python3 - <<'EOF'
+  import os, glob, shutil
+  src=os.environ.get("BUILD_SRC_DIR") or "."
+  p=os.path.join(src,"common","config.h")
+  if os.path.isfile(p):
+      shutil.copy2(p, p+".shipped-orig"); os.unlink(p)
+      print("removed stale shipped", p)
+  EOF
+  # 随后 configure 必须带 --with-openssl=no（或确认目标 sysroot 真有 openssl 头）
+rec_auto_fix:           false
+rec_impl:               libyal-in-source-configure-crypto-selfcontained
+
+fallback_priority:      2
+fallback_approach:      patch-shipped-config-header
+fallback_description:   >
+  既不能 in-source 构建、也不能删除发布包文件时，把源树 config.h 里
+  HAVE_LIBCRYPTO/HAVE_OPENSSL_EVP_H 两行改成 #undef（等价于 config.h.in 的模板值），
+  或改 common/common.h 的引号包含为 #include <config.h> 并保证 -I<builddir>/common 在前。
+  两种改法都要在 PR 说明理由（改的是上游生成物，不是上游源文件）。
+
+forbid_1_pattern:       直接 apt/ohos 上找 openssl 头塞进 include 路径或全局注入 -lcrypto
+forbid_1_reason:        引入制品仓未发布的声明外依赖，且宿主机 libcrypto 与目标 sysroot 版本不一致时
+                        会在链接期以另一条错误再次失败（E412 同族）；包内已有本地实现可用
+forbid_2_pattern:       照抄 configure 输出后不改任何东西、把 openssl/evp.h not found 当工具链问题
+forbid_2_reason:        报错形态像缺依赖，实为发布包内陈旧生成物遮蔽，改工具链/装包都不解决
+
+principles:             P012
+similar_to:             E412, E284, E277, E007, E011
+doc_file:               knowledge/drafts/DRAFT-E588-libyal-bundled-configsh-ssl-shadow.md
+last_updated:           2026-09-19
+source_event:           archives/l/libfvde/20240502（feat/libfvde-20240502，设备实机 conan create）
+prescan_pattern:        ^#define HAVE_LIBCRYPTO 1|^#define HAVE_OPENSSL_EVP_H 1
+prescan_globs:          common/config.h, */common/config.h, **/common/config.h
