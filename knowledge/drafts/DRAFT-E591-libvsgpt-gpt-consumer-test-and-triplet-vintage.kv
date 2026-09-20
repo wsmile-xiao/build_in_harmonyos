@@ -1,0 +1,122 @@
+id: DRAFT-E591-libvsgpt-gpt-consumer-test-and-triplet-vintage
+status: pending-editor-review
+title: "libvsgpt/libyal GPT 卷系统在 OHOS 上的四个确定性陷阱：同一族 config.sub 对 linux-ohos 的接受度随发行版年代翻转；cp -r 丢 mtime 触发假 `automake-1.16: inaccessible or not found`；`*_by_identifier` 实为 entry index；合成合法 GPT 镜像做消费者测试的最小口径"
+category: testing, autotools, libyal, gpt, ohos
+build_system: autotools
+phase: build, test
+severity: 2
+match_keywords: >
+  libvsgpt, libyal, gpt, GUID Partition Table, EFI PART, protective MBR,
+  config.sub, config.guess, aarch64-unknown-linux-gnu, aarch64-unknown-linux-ohos,
+  Invalid configuration, OS 'ohos' not recognized, automake-1.16,
+  inaccessible or not found, automake-1.19, missing on your system, maintainer mode,
+  Makefile.in, cp -a, cp -r, mtime, get_partition_by_identifier,
+  has_partition_with_identifier, entry index, volume_close, get_version,
+  is_corrupt, header checksum, CRC-32, backup GPT header, test_package, check_PROGRAMS
+error_signature: >
+  Invalid configuration 'aarch64-unknown-linux-ohos': OS 'ohos' not recognized|
+  automake-1.16: inaccessible or not found|
+  WARNING: 'automake-1.16' is missing on your system|
+  Makefile:641: Makefile.in] Error 1|
+  dummy.c: Permission denied
+error_signature_note: >
+  5 个分支都是**纯字面量**（可同时作为正则消费，对 engine Phase B 的字面子串匹配也命中）。
+  第 4 条含 make 行号 `Makefile:641`，行号随包变化，判读时以 `Makefile.in] Error 1` 片段为准；
+  第 5 条取自 `config.guess` 在 HMDFS 上的真实报错 `can't create …/dummy.c: Permission denied`，
+  中间的 mktemp 目录名是**一次性随机值**故已省略，只保留两侧稳定片段 `dummy.c: Permission denied`。
+error_excerpt: >
+  $ ./config.sub aarch64-unknown-linux-ohos
+  Invalid configuration 'aarch64-unknown-linux-ohos': OS 'ohos' not recognized
+  $ ./config.sub aarch64-unknown-linux-gnu
+  aarch64-unknown-linux-gnu
+  ---
+  $ make -j2          # 源码副本用 cp -r 拷贝（未保留 mtime）
+   cd . && /bin/sh .../missing automake-1.16 --gnu
+  .../missing[81]: automake-1.16: inaccessible or not found
+  WARNING: 'automake-1.16' is missing on your system.
+  make: *** [Makefile:641: Makefile.in] Error 1
+  ---
+  include/libvsgpt.h.in:
+  int libvsgpt_volume_get_partition_by_identifier(
+       libvsgpt_volume_t *volume,
+       uint32_t entry_index,          /* 不是 GUID 指针 */
+       libvsgpt_partition_t **partition,
+       libvsgpt_error_t **error );
+root_cause: >
+  四个坑各自独立，都出现在「libyal 纯 C + autotools 发布包 + OHOS 设备」组合上：
+  (1) config.sub 的 OHOS 支持是**随发行版年代**变化的，不能按族名套用：libvsgpt 0-20240504
+  随包的 config.guess/config.sub（timestamp 均为 2023-06-23）不认 `linux-ohos`（实测 Invalid configuration），
+  而同族 2026 年的 libfsfat 0-20260208 的 config.sub 原生接受 `linux-ohos`。因此三元组的
+  选择必须先跑 `./config.sub <triplet>` 实测，再写进配方。
+  (2) 原生探索用 `cp -r` 复制源码树会把所有文件刷成同一 mtime，使 automake 认为
+  `Makefile.in` 相对 `Makefile.am` 过期，触发维护者模式重建；设备只有 automake 1.19，
+  而 tarball 的 `missing` 脚本只认 automake-1.16，于是报出与真实原因无关的
+  `automake-1.16: inaccessible or not found`。conan 的 `get()` 解包保留 mtime，故**配方侧
+  不受影响**——这是探索脚本的伪影。
+  (3) libvsgpt 的 `libvsgpt_volume_get_partition_by_identifier()` 与
+  `libvsgpt_volume_has_partition_with_identifier()` 的第二个参数是 `uint32_t entry_index`
+  （源码注释逐字：\"corresponding (partition) entry index\"），**不是 GUID**；按名字传
+  GUID 会编译失败或查不到条目。
+  (4) GPT 头校验和的判据是 `if ( stored_checksum != 0 && stored_checksum != calculated )`
+  → 校验和字段为 0 视为「不损坏」，但 `major_format_version != 1 || minor != 0` 会直接判
+  corrupt；且 `volume_open` 会同时读主/备两个 GPT 头并逐字段比对（header/backup block number
+  互为镜像、area start/end、disk identifier、entries 数/大小/校验和），主头损坏才回退备头，
+  两个都 corrupt 直接失败。合成测试镜像必须同时写主头、主 entries、备 entries、备头。
+affected_scope: >
+  (1) 按实测判据适用：任何 libyal（或其它 autotools）包在 OHOS 上配置前，都应先对随包
+  `config.sub` 跑一次目标三元组；2024 年代及更早的发行版普遍不认 `linux-ohos`。
+  (2) 只影响「手工 cp 源码树做原生探索」的路径；用 `cp -a`、`tar x`（保留 mtime）或
+  conan 的 `get()` 都不会命中。
+  (3) 逐字实测于 libvsgpt 0-20240504（Debian pristine orig tarball
+  sha256 60e8239d29c7f1a43282a96d86e82e147c3b87a4aa343db73be2870c465c6ac9）；其它 libyal
+  包的 `*_by_identifier` 语义需按各自 include/<lib>.h 的注释逐条核对，不作逐包断言。
+  (4) 合成 GPT 镜像的口径对任何「用 libvsgpt 读 GPT」的消费者测试都适用。
+rec_approach: measure-before-writing-triplet-and-preserve-mtime-in-native-probes
+rec_description: >
+  ① 写配方前先 `./config.sub aarch64-unknown-linux-ohos` 与
+  `./config.sub aarch64-unknown-linux-gnu` 各跑一次，按实测结果用
+  `update_configure_args()` 显式给 `--build/--host`（替换语义，避免与 AutotoolsToolchain
+  重复）。② 原生探索复制源码树一律 `cp -a`（或 `tar` 解包），保留 tarball 内 mtime；
+  见到 `automake-1.16 ... missing` 先核对 `Makefile.in` 与 `Makefile.am` 的 mtime，
+  不要据此判定「设备缺 automake」或去改上游文件。③ 写消费者测试前先读头文件注释确认参数
+  语义（`entry_index` vs GUID）与返回值约定（`volume_close` 成功返回 **0**；
+  `libvsgpt_get_version()` 返回上游版本串 `20240504`，不是 Conan 版本 `0-20240504`）。
+  ④ 需要 GPT 夹具时按最小合法布局合成：512B 扇区、LBA0 保护性 MBR、LBA1 主头、
+  LBA2..33 128×128B entries、LBA 34 起可用、镜像末尾 32 扇区备 entries + 最后 1 扇区备头；
+  主备两头的 header/backup LBA 互为镜像、area start/end、disk GUID、entries 数/大小/CRC
+  必须一致；头 CRC-32 = 对前 92 字节（校验和字段置 0）做标准 reflected CRC-32
+  （poly 0xEDB88320，init/final 0xFFFFFFFF）。
+  `rec_command` 的脚本做两件事：①对 `$TASK_DIR/native/src/config.sub` 打印两个三元组的
+  实测结果；②按第 4 节布局合成 GPT 镜像并用已安装包读回打印读数。
+rec_command: >
+  TASK_DIR=$HOME/tmp/libvsgpt-0-20240504; sh "$TASK_DIR/triplet-and-gpt-probe.sh"
+rec_auto_fix: false
+rec_impl: >
+  无仓库内补丁（不改上游任何文件、无 patches/）。设备实测逐字读数见
+  archives/l/libvsgpt/0-20240504/notes.md；采信轮日志见 reports/conan-create.log
+fallback_priority: 2
+fallback_approach: patch-config-sub-or-touch-generated-files
+fallback_description: >
+  若确需在极老发行版上使用 `linux-ohos` 三元组，可打补丁扩展 config.sub 的 os 表；
+  但本例实测 `aarch64-unknown-linux-gnu` 已能让 libtool 正常产出共享库并通过全部上游测试，
+  故**不加补丁**。原生探索若无法改拷贝方式，可对生成文件 `touch` 使其严格新于
+  Makefile.am/configure.ac（仅探索脚本，不进配方）。
+fallback_command: >
+  ./config.sub aarch64-unknown-linux-gnu; find . -name 'Makefile.in' -newer Makefile.am | head
+fallback_auto_fix: false
+fallback_impl: 补丁形态属配方改动，需重跑采信轮与 W4 审计；本任务未采用
+forbid_1_pattern: "改 config.sub 硬塞 linux-ohos|rm -f Makefile.am|assuming automake is missing"
+forbid_1_reason: >
+  为三元组改上游 config.sub 会把平台适配从「参数最小化」变成「改生成/配置文件」，且实测
+  不需要；把 mtime 伪影读成「设备缺 automake」会引向装工具链的错误方向（设备实际有
+  automake 1.19，只是 missing 脚本按 automake-1.16 命名找）。
+forbid_1_consequence: 配方面被污染（R6 违规风险）、排查方向错误、浪费一轮 CI
+prescan_pattern: "config\\.sub|linux-ohos|automake-1\\.16|_by_identifier|libvsgpt_volume_open"
+verify_builds: >
+  libvsgpt 0-20240504（任务 libvsgpt-0-20240504）：设备原生 configure/make/make check
+  全部 rc=0；`make check` 读数 TESTS 3 个入口（PASS 2 / SKIP 1 / FAIL 0，SKIP 为
+  test_vsgptinfo.sh——发布包不含 tests/input/ 夹具）+ check_PROGRAMS 20 个 C 测试程序
+  全部真实执行且 PASS，N=23；消费者测试 test_libvsgpt.c 通用断言 + test_ohos.c 鸿蒙专项
+  断言（在 TMPDIR 下合成合法 GPT 镜像并读回全链路）全通过；交付
+  lib/libvsgpt.so.1.0.0 + include/libvsgpt.h + bin/vsgptinfo + libvsgpt.pc。
+last_updated: 2026-09-20
