@@ -1,5 +1,5 @@
 /*
- * test_package consumer test for mesa 24.3.4.1 (HarmonyOS PC).
+ * test_package consumer test for mesa 24.3.4.1.1 (HarmonyOS PC).
  *
  * This test links against the packaged libOSMesa and exercises the desktop
  * OpenGL fixed-function entry points needed by Coin3. It also verifies that
