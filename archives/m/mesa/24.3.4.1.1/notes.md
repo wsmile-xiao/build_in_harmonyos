@@ -1,12 +1,13 @@
-# mesa 24.3.4.1 适配笔记（上游 Mesa 24.3.4，HarmonyOS PC）
+# mesa 24.3.4.1.1 适配笔记（上游 Mesa 24.3.4，HarmonyOS PC）
 
 ## 版本说明
 
-- Conan 包版本：`24.3.4.1`
+- Conan 包版本：`24.3.4.1.1`
 - 上游源码版本：`24.3.4`
-- 递增原因：`mesa/24.3.4` 已有适配包；本任务需要保留同一上游版本并调整产物为 OSMesa desktop OpenGL，避免覆盖已发布 recipe。
+- 递增原因（r21-r22）：`mesa/24.3.4.1` 已在 ohpcd registry 发布（OSMesa-only recipe，revision c2271de0）；本轮交付需在同一上游 Mesa 24.3.4 上启用 GBM/EGL/GLES 制品，按 R37 递增为 `mesa/24.3.4.1.1`，避免与已发布 24.3.4.1 recipe 冲突（already-published-different-recipe）。上游源码仍为官方 Mesa 24.3.4 tarball。
 - 当前目标：在无 X11/Wayland/DRM 的 HarmonyOS PC 上提供 `libOSMesa`，覆盖 Coin3 所需的 desktop OpenGL 固定管线入口。
 - 构建策略：只编译 Meson 的 `OSMesa` 目标，安装时使用 `--no-rebuild`，降低真机有限账户空间下的中间文件峰值。
+- GBM 修复增量（r17-r20）：`gbm=enabled` + `libdrm/2.4.133` requires + PkgConfigDeps，交付 `gbm.pc`/`gbm.h`/`libgbm.so`（含版本链接链），补丁 0007（harmonyos 按 DRM/KMS 平台识别）与 0008（libdrm 纯静态时 `--exclude-libs,ALL` 保持 libgbm 导出表仅 gbm_*，通过上游 gbm-symbols-check）。
 
 ## 编译环境
 - 构建系统: meson
@@ -87,7 +88,7 @@ meson test -C build      # 待构建工具依赖补齐后执行
 
 ```bash
 # Shadow CI 已执行：
-conan create archives/m/mesa/24.3.4.1 --build=missing
+conan create archives/m/mesa/24.3.4.1.1 --build=missing
 # test_package 输出：
 # OSMesa GL_VERSION: 3.3 (Compatibility Profile) Mesa 24.3.4
 # colored pixels: 1152
@@ -97,3 +98,13 @@ conan create archives/m/mesa/24.3.4.1 --build=missing
 
 **最后更新**: 2026-09-11
 **最终状态**: built（Shadow CI r8 通过）
+## r23 全量测试复验（2026-09-19）
+
+- 按官方 Mesa 24.3.4 源码 + patches 0001-0010 副本，OSMesa/softpipe 适用配置（osmesa=true/egl=enabled/gles1+gles2 enabled/build-tests=true）完整枚举测试声明：source_declared_total=49（r15 build-test 仅 45，缺 osmesa-render/osmesa-symbols-check/egl-symbols-check/egl-entrypoint-check）。
+- 全量执行 meson test：修复前 45 OK/3 FAIL/1 SKIP；新增 patches/0010（osmesa-symbols-check 对 libc weak-UND pthread_mutexattr_* 的 --ignore-symbol，llvm-nm -gP 四字段 'w 0 0' 被 symbols-check.py 误判为导出，GNU nm 两字段 'w' 本会跳过）后 osmesa-symbols-check FAIL→PASS，终态 46/49 (93.9%)。
+- 剩余 2 FAIL：util_tests（HMDFS 平台限制，Cache.* 7 例，候选挂载点全部无法满足真实 0700 语义，恢复条件已列）；general_ir_test（上游 GLSL IR 行为差异，r15 R12#7 同源）。1 SKIP：egl-symbols-check（静态 EGL 所致，上游脚本对 .a 返回 GNU skip 77）。
+- OHOS 专项 ohos_adapt_test ALL PASS；test_package test_mesa ALL PASS；libdrm/2.4.133 + pciutils/3.13.0 消费编译链接运行 exit 0；conan create RC=0。
+---
+
+**编译结束**: 2026-09-19 20:27
+**最终状态**: built

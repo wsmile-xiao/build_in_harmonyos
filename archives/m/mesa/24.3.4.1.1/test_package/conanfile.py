@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan test_package — mesa 24.3.4.1 L1 消费者验证."""
+"""Conan test_package — mesa 24.3.4.1.1 L1 消费者验证."""
 import glob
 import os
 import shlex
