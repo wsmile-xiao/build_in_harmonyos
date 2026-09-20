@@ -1,0 +1,109 @@
+#====================================================================
+# DRAFT-ci-predl-curl-missing-conandata-mirror-list-fallback
+# — CI pre-download 段硬依赖 curl（worker 可缺），缺 curl时回退 conan 下载器但单 URL 无镜像兜底——conandata 改列表形态让 conan 原生多源回退
+# 触发事件: 2026-09-19 六件 PR 连续命中（keditbookmarks #11112 / kxmlgui #10999 / kimageformats5 #10894 / libportal-gtk3 #10967 / daw-utf-range #11147 / gitpython #11142）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-ci-predl-curl-missing-conandata-mirror-list-fallback
+draft:                  DRAFT-ci-predl-curl-missing-conandata-mirror-list-fallback
+status:                 pending-editor-review
+trigger_tool:           build_and_test.sh|pre-download|curl|conan
+phase:                  ci_gate|download
+
+title:                  CI pre-download 段 curl 硬依赖缺位时单 URL 裸奔——conandata.yml 源改镜像列表形态，conan 原生多源下载兜底（worker 无 curl 自愈）
+
+category:               ci, conan, download, mirror, conandata
+match_keywords: >
+  No such file or directory: 'curl', pre-download, predl_cache, Failed to pre-download,
+  will rely on conan's download, download.kde.org, mirrors.nju.edu.cn, gh-proxy,
+  conandata.yml, url list, 429, Too Many Requests, source download failed,
+  CI worker, curl missing, multi-source fallback
+
+error_signature: >
+  \[fail\] \[Errno 2\] No such file or directory: 'curl'|\[WARN\] Failed to pre-download .*, will rely on conan's download|下载失败.*429|Failed to download.*source|Could not download from the URL
+
+severity:               2
+
+root_cause: >
+  ci/conan/build_and_test.sh 的 Pre-download 步骤（conan create 之前的 tarball 预拉）
+  用 python subprocess.run(['curl', '-sL', '--retry', '3', ...]) 下载源码包——
+  **curl 是 CI worker 环境的外部可执行依赖，而部分 buildbot worker（如 2026-09-19
+  实测的多个 worker）不装 curl**。缺 curl 时 subprocess 直接抛
+  FileNotFoundError: [Errno 2] No such file or directory: 'curl'，
+  try 1/2/3 三轮重试全部命中同一异常，pre-download 全败后只打一行
+  "[WARN] Failed to pre-download ..., will rely on conan's download" 回退
+  conan 自带下载器。但 conan source() 对 conandata.yml 的**单条 url**
+  没有镜像回退语义——上游源限流（download.kde.org 429）/不可达时
+  conan create 直接红，CI 失败类别还常被归为"网络问题"误导排查方向。
+  两类 worker 表现分裂：有 curl 的机器 pre-download 成功且把 URL 改写为
+  file:// 本地路径（绕过 conan 下载器），无 curl 的机器完全裸奔单 URL。
+  这不是某个包的孤立问题——**同一 PR 在不同 worker 上随机红绿**的根源
+  之一（六件 PR 同日实测：#11112/#10999/#10894/#10967/#11147/#11142）。
+
+solution: |
+  conandata.yml 的 sources.url 从单条字符串改为**镜像列表形态**（官方源
+  第一、镜像源第二），conan 原生按序尝试多源下载——pre-download 段无论
+  成败，conan 下载器都具备多源回退能力，配方对 worker 缺 curl 自愈：
+
+  ```yaml
+  # 修改前（单 URL，conan 下载器无回退）：
+  sources:
+    url: "https://download.kde.org/stable/release-service/26.04.0/src/keditbookmarks-26.04.0.tar.xz"
+    sha256: "ebaff0..."
+
+  # 修改后（镜像列表，conan 逐源尝试）：
+  sources:
+    url:
+      - "https://download.kde.org/stable/release-service/26.04.0/src/keditbookmarks-26.04.0.tar.xz"
+      - "https://mirrors.nju.edu.cn/kde/stable/release-service/26.04.0/src/keditbookmarks-26.04.0.tar.xz"
+    sha256: "ebaff0..."
+  ```
+
+  镜像选择按上游官方镜像站（KDE → mirrors.nju.edu.cn/kde；
+  GitHub → gh-proxy.com 前缀镜像，CI 的 get_mirror_list 同款）。
+  首发实现：keditbookmarks 26.04.0 commit b282b9c51f（PR #11112），
+  修后 #51382 全绿（L0/L1 全过）。同日 daw-utf-range #11147 / kxmlgui
+  #10999 / kimageformats5 #10894 / gitpython #11142 同款修法先后转绿。
+
+  自检命令（提交前确认已改列表形态）：
+  grep -A4 "sources:" conandata.yml | head -8   # url: 后应跟列表项 "- https://..."
+
+fallback: >
+  ① 换 worker 重试（撞到有 curl 的机器 pre-download 成功）——治标不治本，
+  同 PR 随机红绿依旧；② 框架级修复：pre-download 段改用 python urllib/
+  requests 实现或 shutil.which('curl') 探测降级——属 CI 基础设施改动，
+  须走单独框架 PR（W2 原子性，适配 PR 不得混入 ci/ 改动）；
+  ③ 上游源短时 429 限流时等待重试（依赖限流窗口，不可靠）。
+
+verify_builds: "#51089（修前红：curl×3 fail + conan 单源下载失败）, #51382（修后绿：mirror 列表 + L0/L1 全过）, #10999 #10894 #11147 #11142（同款场景先后转绿）"
+
+reference_impl: >
+  PR #11112 commit b282b9c51f "fix(keditbookmarks): conandata 源改 mirror
+  列表形态（CI worker 缺 curl 时 conan 原生多源下载兜底）"；
+  同场景佐证：PR #11147（daw-utf-range gh-proxy+github 双源）、PR #10967
+  （libportal-gtk3 gh-proxy+github 双源）、PR #10999（kxmlgui）、PR #10894
+  （kimageformats5）、PR #11142（gitpython files.pythonhosted.org）。
+
+affected_scope: >
+  所有 conandata.yml 带单条源码 URL 的适配配方，在无 curl 的 CI worker
+  上构建时；上游源限流/不可达（download.kde.org 429、github.com 超时）
+  加剧暴露。L0o 门禁已禁止配方 build() 里调 curl/wget（防配方侧 curl
+  依赖），但 pre-download 段是 CI 框架自身行为，配方侧唯一自保手段
+  就是多源列表。
+
+related_entries: "E017（GitHub 下载慢/超时 ghfast 镜像——单 URL 场景的镜像方案，本条增量在列表形态+CI pre-download 交互）、E299（conan source 失败分层诊断——分类框架，本条给出配方侧可执行修法）、E333（pre-download 正则截断 PyPI 连字符 URL——同 pre-download 段不同根因：正则缺陷 vs curl 缺失）、DRAFT-8960-raqm/jwt-cpp/ring-span-lite（pre-download URL 提取污染——同段第三类坑）"
+
+principles: P003, R39
+
+doc_file:               knowledge/drafts/DRAFT-ci-predl-curl-missing-conandata-mirror-list-fallback.md
+last_updated:           2026-09-19
+source_event:           2026-09-19 六件 PR 连续命中 CI pre-download curl 缺失（#11112 #10999 #10894 #10967 #11147 #11142）
+authors:                calbee21
+source_pr:              11112
+source_commit:          b282b9c51f
+
+metrics_success_count:  6
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-19

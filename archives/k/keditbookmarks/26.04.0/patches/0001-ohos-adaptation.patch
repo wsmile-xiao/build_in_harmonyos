@@ -1,0 +1,376 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index bf279d0..efc8a44 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -33,7 +33,7 @@ kde_clang_format(${ALL_CLANG_FORMAT_SOURCE_FILES})
+ 
+ set(KEDITBOOKMARKS_VERSION "5.97.0")
+ 
+-find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core DBus)
++find_package(Qt6 ${QT_MIN_VERSION} REQUIRED COMPONENTS Core)
+ find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
+     Codecs
+     ConfigWidgets
+@@ -41,8 +41,8 @@ find_package(KF6 ${KF_MIN_VERSION} REQUIRED COMPONENTS
+     I18n
+     KIO
+     Bookmarks
+-    Parts
+     WidgetsAddons
++    XmlGui
+     WindowSystem
+     IconThemes
+     Crash
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 2ee43f3..9901f2d 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -32,11 +32,6 @@ install(TARGETS kbookmarkmerger ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})
+ 
+ ########### next target ###############
+ add_executable( keditbookmarks)
+-set(toplevel_xml ${CMAKE_CURRENT_BINARY_DIR}/org.kde.keditbookmarks.xml)
+-qt_generate_dbus_interface( ${CMAKE_CURRENT_SOURCE_DIR}/toplevel.h org.kde.keditbookmarks.xml )
+-
+-qt_add_dbus_interface( keditbookmarks_SRCS ${toplevel_xml} toplevel_interface )
+-
+ kconfig_add_kcfg_files(keditbookmarks_SRCS settings.kcfgc )
+ target_sources(keditbookmarks PRIVATE
+    main.cpp
+@@ -82,7 +77,6 @@ target_sources(keditbookmarks PRIVATE
+ )
+ 
+ target_link_libraries(keditbookmarks kbookmarkmodel_private
+-   KF6::Parts
+    KF6::Bookmarks
+    KF6::WindowSystem
+    KF6::IconThemes
+@@ -92,7 +86,6 @@ target_link_libraries(keditbookmarks kbookmarkmodel_private
+    KF6::IconWidgets
+    KF6::KIOGui
+    KF6::Crash
+-   Qt6::DBus
+ )
+ 
+ install(TARGETS keditbookmarks          ${KDE_INSTALL_TARGETS_DEFAULT_ARGS})
+diff --git a/src/faviconupdater.cpp b/src/faviconupdater.cpp
+index 0381e7e..023f03d 100644
+--- a/src/faviconupdater.cpp
++++ b/src/faviconupdater.cpp
+@@ -9,19 +9,18 @@
+ #include "toplevel.h"
+ 
+ #include "keditbookmarks_debug.h"
+-#include <KLocalizedString>
+-
+ #include <KIO/FavIconRequestJob>
+-#include <KIO/SimpleJob>
+-#include <KIO/TransferJob>
+-#include <KParts/NavigationExtension>
+-#include <KParts/PartLoader>
++#include <KIO/Global>
++
++// OHOS adaptation: the KParts::ReadOnlyPart web-grabber fallback
++// (downloadIconUsingWebBrowser + FavIconWebGrabber) is removed: it loaded an
++// HTML KPart at runtime, which does not exist on HarmonyOS PC (dead path).
++// Only the KIO-based flow (KIO::favIconForUrl + KIO::FavIconRequestJob)
++// remains; when that job fails the error is reported via done().
+ 
+ FavIconUpdater::FavIconUpdater(QObject *parent)
+     : QObject(parent)
+ {
+-    m_part = nullptr;
+-    m_webGrabber = nullptr;
+ }
+ 
+ void FavIconUpdater::downloadIcon(const KBookmark &bk)
+@@ -46,101 +45,18 @@ void FavIconUpdater::downloadIcon(const KBookmark &bk)
+ 
+ FavIconUpdater::~FavIconUpdater()
+ {
+-    delete m_webGrabber;
+-    delete m_part;
+-}
+-
+-void FavIconUpdater::downloadIconUsingWebBrowser(const KBookmark &bk, const QString &currentError)
+-{
+-    // qCDebug(KEDITBOOKMARKS_LOG);
+-    m_bk = bk;
+-    webupdate = true;
+-
+-    if (!m_part) {
+-        auto partResult = KParts::PartLoader::instantiatePartForMimeType<KParts::ReadOnlyPart>(QStringLiteral("text/html"), nullptr, this);
+-        if (!partResult) {
+-            Q_EMIT done(false, i18n("%1; no HTML component found (%2)", currentError, partResult.errorString));
+-            return;
+-        }
+-
+-        auto part = partResult.plugin;
+-        part->setProperty("pluginsEnabled", QVariant(false));
+-        part->setProperty("javaScriptEnabled", QVariant(false));
+-        part->setProperty("javaEnabled", QVariant(false));
+-        part->setProperty("autoloadImages", QVariant(false));
+-        KParts::NavigationExtension *ext = KParts::NavigationExtension::childObject(part);
+-
+-        if (!ext) {
+-            Q_EMIT done(false, i18n("No browser component found"));
+-            return;
+-        }
+-
+-        connect(ext, &KParts::NavigationExtension::setIconUrl, this, &FavIconUpdater::setIconUrl);
+-        m_part = part;
+-    }
+-
+-    // The part isn't created by the webgrabber so that we can create the part
+-    // only once.
+-    delete m_webGrabber;
+-    m_webGrabber = new FavIconWebGrabber(m_part, bk.url());
+-    connect(m_webGrabber, &FavIconWebGrabber::done, this, &FavIconUpdater::done);
+-}
+-
+-// khtml callback
+-void FavIconUpdater::setIconUrl(const QUrl &iconURL)
+-{
+-    KIO::FavIconRequestJob *job = new KIO::FavIconRequestJob(m_bk.url());
+-    job->setIconUrl(iconURL);
+-    connect(job, &KIO::FavIconRequestJob::result, this, &FavIconUpdater::slotResult);
+-
+-    delete m_webGrabber;
+-    m_webGrabber = nullptr;
+ }
+ 
+ void FavIconUpdater::slotResult(KJob *job)
+ {
+     KIO::FavIconRequestJob *requestJob = static_cast<KIO::FavIconRequestJob *>(job);
+     if (job->error()) {
+-        if (!webupdate) {
+-            qCDebug(KEDITBOOKMARKS_LOG) << "favicon job failed, going to downloadIconUsingWebBrowser";
+-            // no icon found, try webupdater
+-            downloadIconUsingWebBrowser(m_bk, job->errorString());
+-        } else {
+-            qCDebug(KEDITBOOKMARKS_LOG) << "favicon job failed, emit done";
+-            // already tried webupdater
+-            Q_EMIT done(false, job->errorString());
+-        }
++        // OHOS: no HTML KPart fallback exists; report the KIO failure.
++        Q_EMIT done(false, job->errorString());
+         return;
+     }
+     m_bk.setIcon(requestJob->iconFile());
+     Q_EMIT done(true, QString());
+ }
+ 
+-/* -------------------------- */
+-
+-FavIconWebGrabber::FavIconWebGrabber(KParts::ReadOnlyPart *part, const QUrl &url)
+-    : m_part(part)
+-    , m_url(url)
+-{
+-    // FIXME only connect to result?
+-    //  connect(part, SIGNAL(result(KIO::Job*job)),
+-    //          this, SLOT(slotCompleted()));
+-    connect(part, &KParts::ReadOnlyPart::canceled, this, &FavIconWebGrabber::slotCanceled);
+-    connect(part, &KParts::ReadOnlyPart::completed, this, &FavIconWebGrabber::slotCompleted);
+-
+-    m_part->openUrl(m_url);
+-}
+-
+-void FavIconWebGrabber::slotCompleted()
+-{
+-    qCDebug(KEDITBOOKMARKS_LOG);
+-    Q_EMIT done(true, QString());
+-}
+-
+-void FavIconWebGrabber::slotCanceled(const QString &errorString)
+-{
+-    // qCDebug(KEDITBOOKMARKS_LOG) << errorString;
+-    Q_EMIT done(false, errorString);
+-}
+-
+ #include "moc_faviconupdater.cpp"
+diff --git a/src/faviconupdater.h b/src/faviconupdater.h
+index 6998c08..ac58acb 100644
+--- a/src/faviconupdater.h
++++ b/src/faviconupdater.h
+@@ -10,30 +10,13 @@
+ #include <KBookmark>
+ 
+ #include <KIO/Job>
+-#include <KParts/ReadOnlyPart>
+ #include <QUrl>
+-#include <kparts/part.h>
+ 
+-class FavIconWebGrabber : public QObject
+-{
+-    Q_OBJECT
+-public:
+-    FavIconWebGrabber(KParts::ReadOnlyPart *part, const QUrl &url);
+-    ~FavIconWebGrabber() override
+-    {
+-    }
+-
+-Q_SIGNALS:
+-    void done(bool succeeded, const QString &errorString);
+-
+-private Q_SLOTS:
+-    void slotCanceled(const QString &errorString);
+-    void slotCompleted();
+-
+-private:
+-    KParts::ReadOnlyPart *m_part;
+-    QUrl m_url;
+-};
++// OHOS adaptation: the KParts::ReadOnlyPart "web grabber" fallback path
++// (downloadIconUsingWebBrowser) is removed. It loaded an HTML KPart at
++// runtime (khtml/webengine part) which does not exist on HarmonyOS PC, so
++// the path was dead code here. FavIconUpdater keeps the KIO-based
++// downloadIcon() flow (KIO::favIconForUrl + KIO::FavIconRequestJob).
+ 
+ class FavIconUpdater : public QObject
+ {
+@@ -43,20 +26,16 @@ public:
+     explicit FavIconUpdater(QObject *parent);
+     ~FavIconUpdater() override;
+     void downloadIcon(const KBookmark &bk);
+-    void downloadIconUsingWebBrowser(const KBookmark &bk, const QString &currentError);
+ 
+ private Q_SLOTS:
+-    void setIconUrl(const QUrl &iconURL);
+     void slotResult(KJob *job);
+ 
+ Q_SIGNALS:
+     void done(bool succeeded, const QString &error);
+ 
+ private:
+-    KParts::ReadOnlyPart *m_part;
+-    FavIconWebGrabber *m_webGrabber;
+     KBookmark m_bk;
+-    bool webupdate;
++    bool webupdate = false;
+ };
+ 
+ #endif
+diff --git a/src/main.cpp b/src/main.cpp
+index d84fd98..603d911 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -16,6 +16,7 @@
+ #include <QApplication>
+ #include <QCommandLineOption>
+ #include <QCommandLineParser>
++#include <QDir>
+ 
+ #include <KAboutData>
+ 
+@@ -28,56 +29,13 @@
+ #include <KBookmarkManager>
+ #include <KCrash>
+ #include <QStandardPaths>
+-#include <toplevel_interface.h>
+ 
+-// TODO - make this register() or something like that and move dialog into main
+-static bool askUser(const QString &filename, bool &readonly)
+-{
+-    QString interfaceName = QStringLiteral("org.kde.keditbookmarks");
+-    QString appId = interfaceName + QLatin1Char('-') + QString().setNum(QApplication::applicationPid());
+-
+-    QDBusConnection dbus = QDBusConnection::sessionBus();
+-    QDBusReply<QStringList> reply = dbus.interface()->registeredServiceNames();
+-    if (!reply.isValid())
+-        return true;
+-    const QStringList allServices = reply;
+-    for (QStringList::const_iterator it = allServices.begin(), end = allServices.end(); it != end; ++it) {
+-        const QString service = *it;
+-        if (service.startsWith(interfaceName) && service != appId) {
+-            org::kde::keditbookmarks keditbookmarks(service, QStringLiteral("/keditbookmarks"), dbus);
+-            QDBusReply<QString> bookmarks = keditbookmarks.bookmarkFilename();
+-            QString name;
+-            if (bookmarks.isValid())
+-                name = bookmarks;
+-            if (name == filename) {
+-                int ret = KMessageBox::warningTwoActions(nullptr,
+-                                                         i18n("Another instance of %1 is already running. Do you really "
+-                                                              "want to open another instance or continue work in the same instance?\n"
+-                                                              "Please note that, unfortunately, duplicate views are read-only.",
+-                                                              QGuiApplication::applicationDisplayName()),
+-                                                         i18nc("@title:window", "Warning"),
+-                                                         KGuiItem(i18n("Run Another")), /* yes */
+-                                                         KGuiItem(i18n("Continue in Same")) /*  no */);
+-                if (ret == KMessageBox::ButtonCode::SecondaryAction) {
+-                    QDBusInterface keditinterface(service, QStringLiteral("/keditbookmarks/MainWindow_1"));
+-                    // TODO fix me
+-                    QDBusReply<qlonglong> value = keditinterface.call(QDBus::NoBlock, QStringLiteral("winId"));
+-                    qlonglong id = 0;
+-                    if (value.isValid())
+-                        id = value;
+-                        ////qCDebug(KEDITBOOKMARKS_LOG)<<" id !!!!!!!!!!!!!!!!!!! :"<<id;
+-#if HAVE_X11
+-                    KX11Extras::activateWindow((WId)id);
+-#endif
+-                    return false;
+-                } else if (ret == KMessageBox::ButtonCode::PrimaryAction) {
+-                    readonly = true;
+-                }
+-            }
+-        }
+-    }
+-    return true;
+-}
++// OHOS adaptation: the single-instance detection dialog (askUser) is
++// removed. It enumerated the D-Bus session bus for other running
++// keditbookmarks instances (Qt6::DBus + generated toplevel_interface),
++// and HarmonyOS PC has no session bus - the probe always failed and the
++// function returned true immediately. main() therefore always starts a
++// fresh instance.
+ 
+ int main(int argc, char **argv)
+ {
+@@ -96,6 +54,7 @@ int main(int argc, char **argv)
+ 
+     aboutData.setDesktopFileName(QStringLiteral("org.kde.keditbookmarks"));
+     KAboutData::setApplicationData(aboutData);
++
+     KCrash::initialize();
+ 
+     app.setWindowIcon(QIcon::fromTheme(QStringLiteral("bookmarks-organize")));
+@@ -244,14 +203,8 @@ int main(int argc, char **argv)
+             dbusObjectName = QStringLiteral("konqueror");
+     }
+ 
+-    bool readonly = false; // passed by ref
+-
+-    if (askUser((gotFilenameArg ? filename : QString()), readonly)) {
+-        KEBApp *toplevel = new KEBApp(filename, readonly, address, browser, caption, dbusObjectName);
+-        toplevel->setAttribute(Qt::WA_DeleteOnClose);
+-        toplevel->show();
+-        return app.exec();
+-    }
+-
+-    return 0;
++    KEBApp *toplevel = new KEBApp(filename, false, address, browser, caption, dbusObjectName);
++    toplevel->setAttribute(Qt::WA_DeleteOnClose);
++    toplevel->show();
++    return app.exec();
+ }
+diff --git a/src/toplevel.cpp b/src/toplevel.cpp
+index 7352b45..3fed390 100644
+--- a/src/toplevel.cpp
++++ b/src/toplevel.cpp
+@@ -29,7 +29,6 @@
+ #include <KMessageBox>
+ #include <KSharedConfig>
+ 
+-#include <QDBusConnection>
+ KEBApp *KEBApp::s_topLevel = nullptr;
+ 
+ KEBApp::KEBApp(const QString &bookmarksFile, bool readonly, const QString &address, bool browser, const QString &caption, const QString &dbusObjectName)
+@@ -40,7 +39,8 @@ KEBApp::KEBApp(const QString &bookmarksFile, bool readonly, const QString &addre
+     , m_readOnly(readonly)
+     , m_browser(browser)
+ {
+-    QDBusConnection::sessionBus().registerObject(QStringLiteral("/keditbookmarks"), this, QDBusConnection::ExportScriptableSlots);
++    // OHOS: no D-Bus session bus on HarmonyOS PC; single-instance D-Bus
++    // registration removed (main.cpp askUser adaptation note).
+     Q_UNUSED(address); // FIXME sets the current item
+ 
+     m_cmdHistory = new CommandHistory(this);
