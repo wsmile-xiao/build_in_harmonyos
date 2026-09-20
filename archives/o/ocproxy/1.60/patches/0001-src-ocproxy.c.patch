@@ -1,0 +1,179 @@
+--- a/src/ocproxy.c
++++ b/src/ocproxy.c
+@@ -21,23 +21,26 @@
+  * SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED
+  * TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+  * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+  * LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+  * NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  */
+ 
+ #define _GNU_SOURCE
+ 
++#include "config.h"
++
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <getopt.h>
++#include <stdio.h>
+ #include <signal.h>
+ #include <stdarg.h>
+ #include <stddef.h>
+ #include <string.h>
+ #include <unistd.h>
+ #include <arpa/inet.h>
+ #include <netinet/in.h>
+ #include <sys/socket.h>
+ #include <sys/time.h>
+ #include <sys/uio.h>
+@@ -202,20 +205,48 @@
+ 
+ static void warn(const char *fmt, ...)
+ {
+ 	va_list ap;
+ 
+ 	va_start(ap, fmt);
+ 	fflush(stdout);
+ 	fprintf(stderr, "warning: ");
+ 	vfprintf(stderr, fmt, ap);
+ 	va_end(ap);
++}
++
++static void print_version(void)
++{
++	printf("ocproxy %s - user-level SOCKS and port forwarding proxy\n",
++	       PACKAGE_VERSION);
++	printf("Copyright (C) 2011-2017 David M. Miller and contributors\n");
++	printf("This program is free software; see the LICENSE file for details.\n");
++}
++
++static void print_usage(void)
++{
++	printf("Usage: ocproxy [options]\n");
++	printf("\n");
++	printf("  -I <addr>            Tunnel interface IPv4 address (or INTERNAL_IP4_ADDRESS)\n");
++	printf("  -M <mtu>             Tunnel interface MTU (or INTERNAL_IP4_MTU)\n");
++	printf("  -d <addr>            DNS server address\n");
++	printf("  -o <domain>          Default domain name\n");
++	printf("  -D <port>            SOCKS5 listener port (or <addr>:<port>)\n");
++	printf("  -L <lp>:<host>:<rp>  Forward local port LP to host:RP over the tunnel\n");
++	printf("  -k <interval>        TCP keepalive interval in seconds\n");
++	printf("  -g                   Allow non-local SOCKS clients\n");
++	printf("  -v                   Verbose lwIP debugging output\n");
++	printf("  -T                   Dump tunnel traffic with tcpdump\n");
++	printf("  -V, --version        Print version and exit\n");
++	printf("  -h, --help           Print this help and exit\n");
++	printf("\n");
++	printf("The VPN file descriptor is taken from the VPNFD environment variable.\n");
+ }
+ 
+ static char *xstrdup(const char *s)
+ {
+ 	char *ret = strdup(s);
+ 	if (!ret)
+ 		die("out of memory\n");
+ 	return ret;
+ }
+ 
+@@ -897,34 +928,50 @@
+ 	{ "ip",			1,	NULL,	'I' },
+ 	{ "mtu",		1,	NULL,	'M' },
+ 	{ "dns",		1,	NULL,	'd' },
+ 	{ "domain",		1,	NULL,	'o' },
+ 	{ "localfw",		1,	NULL,	'L' },
+ 	{ "dynfw",		1,	NULL,	'D' },
+ 	{ "keepalive",		1,	NULL,	'k' },
+ 	{ "allow-remote",	0,	NULL,	'g' },
+ 	{ "verbose",		0,	NULL,	'v' },
+ 	{ "tcpdump",		0,	NULL,	'T' },
++	{ "version",		0,	NULL,	'V' },
++	{ "help",		0,	NULL,	'h' },
+ 	{ NULL }
+ };
+ 
+ int main(int argc, char **argv)
+ {
+ 	int opt, i, vpnfd;
+ 	char *str;
+ 	char *ip_str, *mtu_str, *dns_str;
+ 	ip_addr_t ip, netmask, gw, dns;
+ 	struct ocp_sock *s;
+ 	struct netif netif;
+ 
+ 	ip_str = mtu_str = dns_str = NULL;
+ 
++	/* Handle the informational switches before the VPNFD check so that
++	 * "ocproxy --version" and "ocproxy --help" work standalone, which is
++	 * what packaging and CI smoke checks expect. */
++	for (i = 1; i < argc; i++) {
++		if (!strcmp(argv[i], "-h") || !strcmp(argv[i], "--help")) {
++			print_usage();
++			return 0;
++		}
++		if (!strcmp(argv[i], "-V") || !strcmp(argv[i], "--version")) {
++			print_version();
++			return 0;
++		}
++	}
++
+ 	ocp_sock_free_list = &ocp_sock_pool[0];
+ 	for (i = 1; i < MAX_CONN; i++)
+ 		ocp_sock_pool[i - 1].next = &ocp_sock_pool[i];
+ 
+ 	event_base = event_base_new();
+ 	if (!event_base)
+ 		die("can't initialize libevent\n");
+ 
+ 	str = getenv("VPNFD");
+ 	if (!str)
+@@ -942,21 +989,21 @@
+ 
+ 		/* this could contain many addresses; just use the first one */
+ 		dns_str = xstrdup(str);
+ 		p = strchr(dns_str, ' ');
+ 		if (p)
+ 			*p = 0;
+ 	}
+ 
+ 	/* override with command line options */
+ 	while ((opt = getopt_long(argc, argv,
+-				  "I:M:d:o:D:k:gL:vT", longopts, NULL)) != -1) {
++				  "I:M:d:o:D:k:gL:vTVh", longopts, NULL)) != -1) {
+ 		switch (opt) {
+ 		case 'I':
+ 			ip_str = optarg;
+ 			break;
+ 		case 'M':
+ 			mtu_str = optarg;
+ 			break;
+ 		case 'd':
+ 			dns_str = optarg;
+ 			break;
+@@ -976,20 +1023,26 @@
+ 			fwd_add(optarg);
+ 			break;
+ 		case 'v':
+ 			debug_flags = LWIP_DBG_ON | LWIP_DBG_TRACE |
+ 				      LWIP_DBG_STATE | LWIP_DBG_FRESH |
+ 				      LWIP_DBG_HALT;
+ 			break;
+ 		case 'T':
+ 			tcpdump_enabled = 1;
+ 			break;
++		case 'V':
++			print_version();
++			return 0;
++		case 'h':
++			print_usage();
++			return 0;
+ 		default:
+ 			die("unknown option: %c\n", opt);
+ 		}
+ 	}
+ 
+ 	if (!ip_str || !mtu_str)
+ 		die("missing -I or -M\n");
+ 
+ 	if (!ipaddr_aton(ip_str, &ip))
+ 		die("Invalid IP address: '%s'\n", ip_str);
