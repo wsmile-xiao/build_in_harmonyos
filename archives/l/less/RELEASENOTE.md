@@ -12,7 +12,7 @@ cd less-661-ohos-aarch64 && sh install-less-661.sh
 
 | 版本 | 状态 | 补丁数 |
 |------|------|--------|
-| 661 | partial | 2 |
+| 661 | built | 0 |
 
 ## 当前版本 (661) 详情
 
@@ -24,11 +24,11 @@ cd less-661-ohos-aarch64 && sh install-less-661.sh
 - 构建系统: autotools
 - 目标: ohos-aarch64
 - 质量门禁: PASS
-- 补丁数: 2
+- 补丁数: 0
 
 ### 补丁列表
-- 0001-config.log.patch
-- 0002-less.patch
+
+无补丁
 
 ## 环境要求
 - HarmonyOS/OpenHarmony aarch64
