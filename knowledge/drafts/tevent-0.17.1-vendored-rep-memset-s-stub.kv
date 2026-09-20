@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: tevent 0.17.1 - replace.h maps memset_s to rep_memset_s via
+#        ZERO_STRUCT/BURN_DATA; the sole definition lives in
+#        lib/replace/replace.c, which cannot be compiled outside waf
+#        -> vendor a single-symbol compat object
+#====================================================================
+
+id:                     DRAFT-TEVENT-0171-VENDORED-REP-MEMSET-S-STUB
+trigger_tool:           conan|clang|ld|make|configure
+phase:                  compilation|link|packaging
+error_signature:        undefined symbol: rep_memset_s|#define memset_s rep_memset_s|AC_LIBREPLACE_NETWORK_CHECKS missing in configure|you must have a ftruncate function
+
+severity:               2
+category:               platform|portability|replace-layer|packaging
+match_keywords:         tevent, talloc, tdb, samba, lib/replace, replace.c, rep_memset_s, memset_s, ZERO_STRUCT, BURN_DATA, HAVE_MEMSET_S, volatile wipe, compat shim, undefined symbol, direct-cc, NO_CONFIG_H, waf bypass, vendored stub
+
+title:                  `undefined symbol: rep_memset_s` 的正解不是编译 replace.c（它依赖 waf 全量特性矩阵、脱离 waf 必失败），而是在 recipe 的 files/ 下只提供这一个符号，并按上游 volatile 语义实现以免敏感数据清零被优化掉
+
+root_cause:             replace.h 的 #define memset_s rep_memset_s 会让 ZERO_STRUCT / BURN_DATA 这类便利宏间接调用 rep_memset_s。上游唯一实现位于 lib/replace/replace.c:960，而该文件是为 waf 生成的完整 config.h 编写的一次性兼容层：它 unconditionally 依赖 AC_LIBREPLACE_NETWORK_CHECKS（未定义时 #error）、HAVE_FTRUNCATE（未定义时报 "you must have a ftruncate function"）、以及 struct tm 的完整定义（replace.h 只前向声明）。因此"把 replace.c 也编进去"这条第一直觉在 waf 之外必然失败，而且会连锁引出十几个无关的 autoconf 特性缺失，把一个单符号问题放大成构建系统问题。真正被引用的只有 rep_memset_s 一个符号（tevent_signal.o / tevent_epoll.o 经宏展开），其余 replace.c 内容对 tevent 毫无用处。
+affected_scope:         所有内嵌 lib/replace 且为绕开 waf 走 direct-cc 的 Samba 家族移植（tevent、talloc、tdb、ldb）；任何直接照抄"把 lib/replace/replace.c 加进源文件列表"的配方都会撞上。
+verification_cmd:       llvm-nm -u libtevent.a | grep rep_ && llvm-nm --defined-only files/tevent_ohos_compat.o
+
+rec_priority:           1
+rec_approach:           single-symbol-vendored-compat-object
+rec_description:        不要编译 replace.c。在 version 目录下建 files/<pkg>_ohos_compat.c，只导出 rep_memset_s，语义逐行对齐上游：dest == NULL 返回 EINVAL；destsz 或 count 超过 RSIZE_MAX（SIZE_MAX >> 1）或 count > destsz 时，仍按 destsz 清零并返回 ERANGE；否则写 count 字节返回 0。关键点是实现必须走 volatile 指针（或等价的内存屏障），因为上游在 HAVE_GCC_VOLATILE_MEMORY_PROTECTION 分支里放了一条 __asm__ volatile 屏障——BURN_DATA 的用途就是擦除口令/密钥，编译器把这段清零优化掉是安全问题而不只是行为差异。该 .c 用 exports_sources = "files/*" 导出，编译后单独成 .o 并归档进库（也可独立成 compat 归档）。这与仓库中 talloc/2.4.4 的 files/talloc_compat.c 是同一范式，Samba 家族应统一。
+rec_command:            ar rcs lib<pkg>.a <objs...> <pkg>_ohos_compat.o && llvm-nm -u lib<pkg>.a | grep rep_ || echo "rep_ 已全部满足"
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              11281
+source_commit:          526708c983
