@@ -4,14 +4,17 @@
 Sixel graphics encoding library
 
 ## OHOS 适配
-- 构建系统: autotools
-- 详见各版本 notes.md 获取适配详情
+- 构建系统: meson
+- 所有可选功能已启用: gd, gdk-pixbuf2, libcurl, jpeg, png
+- 默认静态链接 (OHOS动态链接器限制)
+- 补丁: 0001-meson-build-gd-pkgconfig.patch
 
 ## 依赖
-待补充
-
-## 功能验证
-待补充
+- libjpeg/10
+- libpng/1.6.58
+- gd/2.3.3.2
+- curl/8.15.0
+- gdk-pixbuf/2.44.6
 
 ## 参考
 - https://github.com/libsixel/libsixel
