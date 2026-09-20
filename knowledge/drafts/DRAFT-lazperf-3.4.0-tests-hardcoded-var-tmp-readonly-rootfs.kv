@@ -1,0 +1,127 @@
+# ═══ Draft knowledge entry — 测试夹具硬编码 /var/tmp 且忽略 mkstemp() 返回值：只读根文件系统上成组用例以「数据不匹配」失败 ═══
+# Timestamp: 2026-09-19
+# Software: lazperf 3.4.0 (LAS/LAZ LiDAR 读写与 LASzip 编解码库, PDAL 使用)
+# Gate: L1 (ctest) / rule4 真实通过率 / rule12 鸿蒙特有测试
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-lazperf-3.4.0-tests-hardcoded-var-tmp-readonly-rootfs
+trigger_tool:           ctest|gtest|cmake
+phase:                  testing
+error_signature:        mkstemp\(.*\)\s*;|/var/tmp|21 ran.*14 PASSED|FAILED.*extrabytes|
+                         FAILED.*variable_chunks|FAILED.*compression_decompression_is_symmetric|
+                         Could not open test file.*raw-sets
+
+severity:               2
+category:               testing, cmake, conan, portability, filesystem
+match_keywords:         /var/tmp, mkstemp, TMPDIR, read-only rootfs, empty file,
+                         ofstream, silent failure, gtest, ctest, lazperf, io_tests,
+                         makeTempFileName, OHOS, erofs, conan
+
+title:                  上游测试夹具硬编码 /var/tmp 且忽略 mkstemp() 返回值时，
+                        只读根文件系统上成组用例以「数据不匹配」而非「路径不可写」失败
+
+root_cause: >
+  lazperf 3.4.0 的 cpp/test/io_tests.cpp 里 makeTempFileName() 写死
+      std::string s("/var/tmp/fnXXXXXX");
+      mkstemp(const_cast<char *>(s.data()));
+      filename = s;
+  两个缺陷叠加：
+    (a) 路径写死 /var/tmp —— OHOS 的 / 是只读挂载（erofs），/var/tmp 甚至可能
+        根本不存在。POSIX 规定临时文件目录由 $TMPDIR 给出，$TMPDIR 对本函数
+        完全无效；
+    (b) mkstemp() 的返回值被丢弃 —— 失败（EROFS/ENOENT/EACCES）不产生任何
+        报错，函数照样把那个不存在的路径返回给调用方。
+  于是后续 `writer::named_file f(<该路径>, c)` 的 ofstream 打开失败也是静默的，
+  写入全部丢失，用例走到 `compare(outLaz, <期望文件>)` 时读回一个空文件 ——
+  失败信息指向的是「点数据不一致」，与实际原因（路径不可写）毫无关系。
+  ohos 上表现为固定一组用例失败、且这组用例名与「凡是写临时文件」完全对应。
+
+affected_scope: >
+  一切「测试夹具把临时文件路径写死为 /tmp、/var/tmp 等绝对路径，且不检查
+  mkstemp()/tmpfile()/open(O_CREAT) 的返回值」的上游测试套件，在只读根文件
+  系统（HarmonyOS/OHOS、只读容器镜像、CI 沙箱）上。判据是源码里同时出现
+  硬编码的 /tmp 或 /var/tmp 与一个返回值被丢弃的 mkstemp/mkstemps。
+  lazperf 3.4.0 实证：/var/tmp 挂成只读 tmpfs 后，io_tests 稳定
+  21 ran / 14 PASSED / 7 FAILED，失败的正是调用 makeTempFileName() 的那 7 个
+  用例（extrabytes、issue44、can_encode_large_files、variable_chunks、
+  compression_decompression_is_symmetric、writes_bbox_to_header、
+  write_laz_with_no_points_and_read_back）；/var/tmp 可写时同一二进制 21/21。
+  注意该文件里还有第 8 个调用点 io_tests.fast，被上游 /** **/ 块注释掉，
+  不计入可执行集 —— 数「受影响用例数」时要按可执行集数，不能按调用点数。
+
+verification_cmd: >
+  # 复现（不需要改任何源码，只需要让 /var/tmp 不可写）：
+  unshare -rm bash -c 'mount -t tmpfs -o ro,size=4M tmpfs /var/tmp && ./cpp/test/io_tests'
+  #   → 21 ran / 14 PASSED / 7 FAILED，失败名即那 7 个
+  # 定位写死点：
+  grep -rn '/var/tmp\|/tmp/' cpp/test/ | grep -v raw-sets
+  grep -n 'mkstemp' cpp/test/io_tests.cpp
+  # 打补丁后同一只读环境：
+  TMPDIR=<writable> ./cpp/test/io_tests    # → 21/21
+
+rec_priority:           1
+rec_approach:           resolve-scratch-dir-through-TMPDIR-with-cwd-fallback
+rec_description: >
+  在 patches/ 里只改 makeTempFileName()：按 POSIX 约定先取 $TMPDIR，失败再退回
+  当前目录（当前目录按定义可写），并把 mkstemp() 的 fd 收下（>=0 时 close，
+  失败也不静默）。改动是纯路径解析，用例数、用例体、断言全部不变，也不触碰被
+  安装的库代码 —— 属通用可移植性修复，可直接向上游提交（P005）。配方侧配套：
+  build() 内在 build_folder/tmp 建可写目录并把 TMPDIR/TMP/TEMP 注入给 ctest，
+  因为上游 add_test() 的 WORKING_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/../.."
+  在 CMAKE_RUNTIME_OUTPUT_DIRECTORY 未设置时解析成 /。
+rec_command:            >
+  TMPDIR=<writable> ctest --output-on-failure   # 期望 3/3，io_tests 21/21
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      precreate-the-scratch-file
+fallback_description:   >
+  不改上游、只在 build() 里预先造出测试要用的那个临时文件路径，让 mkstemp 的
+  失败后果被掩盖。不可取：路径里带 XXXXXX 模板，预造只能覆盖单个确定名字；
+  而且这等于承认「写不进去也不要紧」，一旦用例真需要写盘就变成假通过。
+  仅在补丁无法落地时作为本机调试兜底，CI 不采用。
+fallback_command:       （不推荐）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       skip.*(extrabytes|variable_chunks)|--gtest_filter=-|SKIP_TESTS
+forbid_1_reason:        把受影响的用例过滤/跳过 = 伪造通过率；rule4 要求如实统计
+                        「执行集 X/X + 未执行 Z」。
+forbid_1_consequence:   通过率造假，评审不可信，PR 驳回返工。
+forbid_2_pattern:       chmod 777 /var/tmp|mount -o remount,rw|mkdir -p /var/tmp
+forbid_2_reason:        在只读根文件系统上强行造一个可写 /var/tmp 属于改变被测
+                        环境而非适配库；OHOS 上做不到，做得到也不是消费者视角。
+forbid_2_consequence:   配方只在特权环境可用，真机/CI 行为不一致。
+forbid_3_pattern:       always.*exit 0|FAIL\(\).*->.*WARN|GTEST_SKIP\(\).*var.*tmp
+forbid_3_reason:        把断言降级成告警等于废掉该用例的回归保护；这 7 个用例
+                        断言的是 LAZ 写-读的字节一致性，是真断言。
+forbid_3_consequence:   测试假通过，编解码器回归失去保护。
+
+principles:             P005, P003, P014
+causes:                 []
+caused_by:              []
+similar_to:             E002（鸿蒙 /tmp 是 erofs 只读挂载，通用方案是把 TMPDIR
+                        指向可写目录；本条目是其更隐蔽的一面：路径写死在
+                        *测试夹具* 里 + 忽略 mkstemp 返回值，所以失败信息指向
+                        数据不匹配而不是路径不可写）、E265（上游测试硬编码 /tmp
+                        路径导致 mkdir 失败；同属「上游把临时目录当不变量」家族，
+                        区别在 E265 是 mkdir 直接报错，本条目是静默产出空文件）、
+                        DRAFT-isutf8-cmake-configure-download-benchmarks（同批
+                        lazperf 适配里的另一条：configure 期 file(DOWNLOAD)
+                        外部资源须收进默认 OFF 的选项守卫）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-lazperf-3.4.0-tests-hardcoded-var-tmp-readonly-rootfs.md
+last_updated:           2026-09-19
+source_event:           archives/l/lazperf/3.4.0 适配（只读 /var/tmp 下 io_tests 14/21 → 打补丁后 21/21）
+
+authors:                2301_76770579
+source_pr:              11316
+source_commit:          e1ccb7565c06026613570bfefae8b0dc7fc77be0
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-19
