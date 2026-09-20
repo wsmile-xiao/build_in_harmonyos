@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_pgexporter C)
+find_package(pgexporter REQUIRED)
+add_executable(test_pgexporter test_pgexporter.c)
+target_link_libraries(test_pgexporter pgexporter::pgexporter)
+enable_testing()
+add_test(NAME test_pgexporter COMMAND test_pgexporter)
