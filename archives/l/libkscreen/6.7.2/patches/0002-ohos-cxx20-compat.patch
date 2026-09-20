@@ -1,0 +1,287 @@
+From 9b897194d2071c387ebf348d6f9550ac77d38d44 Mon Sep 17 00:00:00 2001
+From: 2404_87638649 <87638649+2404_87638649@user.noreply.gitcode.com>
+Date: Sat, 19 Sep 2026 17:33:45 +0800
+Subject: [PATCH 2/2] OHOS: C++20 compatibility for the clang15/libc++15
+ toolchain
+
+The OHOS SDK ships clang 15 with libc++ 15: no <expected>, no <print>,
+no <format>, and _LIBCPP_HAS_NO_INCOMPLETE_RANGES hides the ranges
+algorithms and views adaptors. <compare>/operator<=> works fine.
+libkscreen 6.7.2 is written against C++23; rewrite the C++23-only
+constructs in C++20:
+
+  * SetConfigResult: std::expected<void, QString> becomes a small
+    struct with the same observable semantics (has_value/error)
+  * ranges::min_element/sort/find_if -> iterator-form algorithms
+  * views::filter/drop + ranges::to<QList> -> explicit loop
+  * views::zip + std::format in doctor.cpp -> index loop + QString::arg
+  * <print> include dropped (unused)
+  * CMAKE_CXX_STANDARD 23 -> 20
+---
+ CMakeLists.txt                            |  2 +-
+ backends/kwayland/waylandbackend.cpp      |  4 ++--
+ backends/kwayland/waylandoutputdevice.cpp |  3 ++-
+ src/abstractbackend.h                     | 17 +++++++++++++++--
+ src/config.cpp                            |  2 +-
+ src/doctor/doctor.cpp                     | 22 ++++++++++++++--------
+ src/doctor/doctor.h                       |  4 ++--
+ src/setconfigoperation.cpp                | 19 +++++++++++--------
+ 8 files changed, 48 insertions(+), 25 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 6ce71df..933821c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -7,7 +7,7 @@ set(QT_MIN_VERSION "6.10.0")
+ set(KF6_MIN_VERSION "6.26.0")
+ set(KDE_COMPILERSETTINGS_LEVEL "5.82")
+ 
+-set(CMAKE_CXX_STANDARD 23)
++set(CMAKE_CXX_STANDARD 20)
+ set(CMAKE_CXX_STANDARD_REQUIRED ON)
+ 
+ find_package(ECM ${KF6_MIN_VERSION} REQUIRED NO_MODULE)
+diff --git a/backends/kwayland/waylandbackend.cpp b/backends/kwayland/waylandbackend.cpp
+index cd0b8bf..15f797e 100644
+--- a/backends/kwayland/waylandbackend.cpp
++++ b/backends/kwayland/waylandbackend.cpp
+@@ -37,7 +37,7 @@ public:
+     void fail(const QString &error)
+     {
+         deleteLater();
+-        m_pendingResult.addResult(std::unexpected(error));
++        m_pendingResult.addResult(SetConfigResult::failure(error));
+         m_pendingResult.finish();
+     }
+     void finish()
+@@ -84,7 +84,7 @@ ConfigPtr WaylandBackend::config() const
+ QFuture<SetConfigResult> WaylandBackend::setConfig(const KScreen::ConfigPtr &newconfig)
+ {
+     if (!newconfig) {
+-        return QtFuture::makeReadyFuture<SetConfigResult>(std::unexpected(QStringLiteral("config is nullptr!")));
++        return QtFuture::makeReadyFuture<SetConfigResult>(SetConfigResult::failure(QStringLiteral("config is nullptr!")));
+     }
+ 
+     SetConfigJob *job = new SetConfigJob(this);
+diff --git a/backends/kwayland/waylandoutputdevice.cpp b/backends/kwayland/waylandoutputdevice.cpp
+index 7849d9d..e368b83 100644
+--- a/backends/kwayland/waylandoutputdevice.cpp
++++ b/backends/kwayland/waylandoutputdevice.cpp
+@@ -11,6 +11,7 @@
+ 
+ #include "../utils.h"
+ 
++#include <algorithm>
+ #include <QGuiApplication>
+ 
+ #include <mode.h>
+@@ -47,7 +48,7 @@ void WaylandOutputDeviceRegistry::kde_output_device_registry_v2_output(struct ::
+     connect(outputDevice, &WaylandOutputDevice::removed, this, [this, outputDevice]() {
+         Q_EMIT outputRemoved(outputDevice);
+ 
+-        const auto it = std::ranges::find_if(m_outputDevices, [outputDevice](const auto &candidate) {
++        const auto it = std::find_if(m_outputDevices.begin(), m_outputDevices.end(), [outputDevice](const auto &candidate) {
+             return candidate.get() == outputDevice;
+         });
+         if (it != m_outputDevices.end()) {
+diff --git a/src/abstractbackend.h b/src/abstractbackend.h
+index 37d1149..3f79ad0 100644
+--- a/src/abstractbackend.h
++++ b/src/abstractbackend.h
+@@ -13,14 +13,27 @@
+ #include <QFuture>
+ #include <QObject>
+ #include <QString>
+-#include <expected>
++
++#include <optional>
+ 
+ namespace KScreen
+ {
+ class Config;
+ 
+ 
+-typedef std::expected<void, QString> SetConfigResult;
++// OHOS libc++ 15 has no <expected>; a minimal value-or-error stand-in
++// with the same observable semantics for the void/QString case.
++struct SetConfigResult {
++    std::optional<QString> error;
++
++    constexpr bool has_value() const { return !error.has_value(); }
++    static SetConfigResult success() { return SetConfigResult(); }
++    static SetConfigResult failure(const QString &err) {
++        SetConfigResult r;
++        r.error = err;
++        return r;
++    }
++};
+ 
+ /**
+  * Abstract class for backends.
+diff --git a/src/config.cpp b/src/config.cpp
+index 553538f..d1c6cee 100644
+--- a/src/config.cpp
++++ b/src/config.cpp
+@@ -40,7 +40,7 @@ public:
+         if (outputs.empty()) {
+             return nullptr;
+         }
+-        return *std::ranges::min_element(outputs, [](const auto &left, const auto &right) {
++        return *std::min_element(outputs.begin(), outputs.end(), [](const auto &left, const auto &right) {
+             return left->priority() < right->priority();
+         });
+     }
+diff --git a/src/doctor/doctor.cpp b/src/doctor/doctor.cpp
+index f99a03b..cffbfda 100644
+--- a/src/doctor/doctor.cpp
++++ b/src/doctor/doctor.cpp
+@@ -9,6 +9,7 @@
+ #include <dpms.h>
+ 
+ #include <QCollator>
++#include <algorithm>
+ #include <QCoreApplication>
+ #include <QDBusConnection>
+ #include <QDBusMessage>
+@@ -23,8 +24,6 @@
+ #include <QScreen>
+ #include <QStandardPaths>
+ 
+-#include <print>
+-#include <ranges>
+ #include <utility>
+ 
+ #include "../backendmanager_p.h"
+@@ -183,7 +182,7 @@ void Doctor::setOptionList(const QStringList &outputArgs)
+ OutputPtr Doctor::findOutput(const QString &query)
+ {
+     const auto outputs = m_config->outputs();
+-    const auto it = std::ranges::find_if(outputs, [&query](const auto &output) {
++    const auto it = std::find_if(outputs.begin(), outputs.end(), [&query](const auto &output) {
+         return query == output->name() || query == output->uuid();
+     });
+     if (it != outputs.end()) {
+@@ -673,7 +672,7 @@ void Doctor::configReceived(KScreen::ConfigOperation *op)
+ 
+     const auto ret = applyConfig();
+     if (!ret.has_value()) {
+-        cout << "applying config failed! " << ret.error() << "\n";
++        cout << "applying config failed! " << (*ret.error) << "\n";
+     }
+     qApp->exit(0);
+ }
+@@ -736,9 +735,16 @@ void Doctor::showOutputs() const
+             cout << " None" << endl;
+         } else {
+             cout << endl;
+-            for (const auto &[info, index] : std::views::zip(customModes, std::views::iota(0))) {
++            int zipIndex = 0;
++            for (const auto &info : customModes) {
++                const int index = zipIndex++;
+                 cout << "\t\t" << index << ": ";
+-                cout << std::format("{}x{}@{:.2f}", info.size.width(), info.size.height(), info.refreshRate).c_str();
++                cout << (QStringLiteral("%1x%2@%3")
++                             .arg(info.size.width())
++                             .arg(info.size.height())
++                             .arg(info.refreshRate, 0, 'f', 2))
++                            .toStdString()
++                            .c_str();
+                 if (info.flags & ModeInfo::Flag::ReducedBlanking) {
+                     cout << " (reduced blanking)";
+                 }
+@@ -1085,7 +1091,7 @@ void Doctor::setAutoRotatePolicy(OutputPtr output, KScreen::Output::AutoRotatePo
+     m_changed = true;
+ }
+ 
+-std::expected<void, QString> Doctor::applyConfig()
++KScreen::SetConfigResult Doctor::applyConfig()
+ {
+     if (!m_changed) {
+         return {};
+@@ -1094,7 +1100,7 @@ std::expected<void, QString> Doctor::applyConfig()
+     if (setop->exec()) {
+         return {};
+     } else {
+-        return std::unexpected(setop->errorString());
++        return SetConfigResult::failure(setop->errorString());
+     }
+ }
+ 
+diff --git a/src/doctor/doctor.h b/src/doctor/doctor.h
+index 77eff90..08f6190 100644
+--- a/src/doctor/doctor.h
++++ b/src/doctor/doctor.h
+@@ -8,8 +8,8 @@
+ 
+ #include <QCommandLineParser>
+ #include <QObject>
+-#include <expected>
+ 
++#include "abstractbackend.h"
+ #include "output.h"
+ #include "types.h"
+ 
+@@ -58,7 +58,7 @@ Q_SIGNALS:
+ 
+ private:
+     // static QString modeString(KWayland::Server::OutputDeviceInterface* outputdevice, int mid);
+-    std::expected<void, QString> applyConfig();
++    KScreen::SetConfigResult applyConfig();
+     void parseOutputArgs();
+     KScreen::ConfigPtr m_config;
+     QCommandLineParser *m_parser;
+diff --git a/src/setconfigoperation.cpp b/src/setconfigoperation.cpp
+index a27d785..5f31d77 100644
+--- a/src/setconfigoperation.cpp
++++ b/src/setconfigoperation.cpp
+@@ -15,9 +15,9 @@
+ #include "kscreen_debug.h"
+ #include "output.h"
+ 
++#include <algorithm>
+ #include <QDBusPendingCall>
+ #include <QDBusPendingCallWatcher>
+-#include <ranges>
+ 
+ using namespace KScreen;
+ 
+@@ -120,7 +120,7 @@ void SetConfigOperation::start()
+             watcher->deleteLater();
+             const SetConfigResult result = watcher->result();
+             if (!result.has_value()) {
+-                setError(result.error());
++                setError(*result.error);
+             }
+             emitResult();
+         });
+@@ -170,18 +170,21 @@ void SetConfigOperationPrivate::fixPriorities()
+     // Here we make sure that among enabled outputs, each
+     // priority value is unique
+     const auto outputs = config->outputs();
+-    auto enabled = outputs | std::views::filter([](const auto &output) {
+-                       return output->isEnabled();
+-                   })
+-        | std::ranges::to<QList>();
++    QList<OutputPtr> enabled;
++    for (const auto &output : outputs) {
++        if (output->isEnabled()) {
++            enabled.push_back(output);
++        }
++    }
+     if (enabled.isEmpty()) {
+         return;
+     }
+-    std::ranges::sort(enabled, [](const auto &left, const auto &right) {
++    std::sort(enabled.begin(), enabled.end(), [](const auto &left, const auto &right) {
+         return left->priority() < right->priority();
+     });
+     uint32_t priority = enabled.front()->priority();
+-    for (const auto &output : enabled | std::views::drop(1)) {
++    for (int i = 1; i < enabled.size(); ++i) {
++        const auto &output = enabled.at(i);
+         if (output->priority() <= priority) {
+             output->setPriority(priority + 1);
+         }
+-- 
+2.45.2
+
