@@ -1,0 +1,55 @@
+#====================================================================
+# DRAFT — autotools 的 AC_CHECK_LIB 在库缺失时只打印一行 warning：
+#         configure 成功、二进制照常产出，但程序运行期走空/崩溃
+#         （libdv 1.0.0：encodedv --version 静默退出 0，裸跑 SIGSEGV 139）
+#         配方必须在 build 阶段用 config.h 断言"依赖真的被探测到"，
+#         而且判断写法不能踩 autoheader 的 /* #undef X */ 注释
+# Timestamp: 2026-09-17
+# Software: libdv 1.0.0（autotools，encodedv/dubdv/dvconnect 用 popt 解析命令行）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# 现场证据（OHOS 设备，conan create 的 test_package 阶段）：
+#   [test] encodedv --version
+#   encodedv --version did not report a version:            <-- 空输出
+#   本地 WSL 复核（同一份源码 + 缺 popt）：裸跑 encodedv 直接 SIGSEGV（139）
+#   configure 日志里只有：checking for poptGetContext in -lpopt... no
+#   本地复核：config.h 里是 /* #undef HAVE_LIBPOPT */，于是
+#   encodedv.c 整个 #if HAVE_LIBPOPT 块（选项表、--version、--help、usage）被消掉，
+#   只剩 filename = argv[1]; 这条 NULL 解引用路径。
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-libdv-tools-1.0.0-ac-check-lib-warns-instead-of-failing
+trigger_tool:           configure|make|clang
+phase:                  configuration|runtime
+error_signature:        checking for \w+ in -l\w+\.\.\. no| #undef HAVE_LIB\w+| did not report a version: \s*$| SIGSEGV|exit status 139|Segmentation fault
+severity:               3
+category:               autotools|configuration|runtime|silent-failure|cli
+match_keywords:         AC_CHECK_LIB, AC_CHECK_HEADERS, autoheader, config.h.in, #undef, HAVE_LIBPOPT, optional dependency, silent warning, configure succeeded, runtime segfault, empty --version, AutotoolsToolchain, extra_ldflags, extra_cflags, LIBS, cross build search path, getopt, popt, smoke test
+title:                  AC_CHECK_LIB 对可选依赖只警告不失败：configure 通过、二进制照常产出，缺依赖的程序在运行期静默空输出或 SIGSEGV；配方要在 build 阶段断言 config.h（注意 #undef 也是命中 "HAVE_X" 的字符串）
+root_cause:             autotools 里可选依赖的惯例写法是 AC_CHECK_LIB([popt], [poptGetContext]) 找不到库时它只往输出里写一行 checking for poptGetContext in -lpopt... no 并把 config.h 里对应的宏留成注释： /* #undef HAVE_LIBPOPT */ 源码随后的 #if HAVE_LIBPOPT 整块被预处理器消掉。 对 libdv 1.0.0 来说被消掉的是选项表、--version、--help 和 usage， 只剩 `filename = argv[1];` 这条路径： * `encodedv --version` 既不打印也不报错，退出码 0； * 裸跑 `encodedv` 解引用 argv[1] == NULL，SIGSEGV（139）。 也就是说"构建成功"与"程序可用"在这里完全脱钩： configure / make 全程零错误，只有真机执行才暴露。 交叉编译下更容易踩：AC_CHECK_LIB 只用到 $LIBS/$LDFLAGS 里的搜索路径， conan 的 AutotoolsToolchain 不保证把依赖包的 -L/-I 放进那条链接检查， 于是"依赖已经 requires() 了"并不等于"configure 能找到它"。
+affected_scope:         用 AC_CHECK_LIB / AC_CHECK_HEADERS 探测可选依赖的 autotools 项目， 尤其是缺依赖时只让功能"静默降级"（少一组选项、少一段输出）而不是 直接报错的 CLI 工具。CMake 的 find_package(... REQUIRED) 与之相反， 所以这类坑通常只在 autotools 包上出现。
+verification_cmd:       构建后确认宏真的被定义（不要只 grep 宏名）： grep -n '#define HAVE_LIBPOPT' <build>/config.h    # 必须命中 grep -n 'HAVE_LIBPOPT' <build>/config.h            # 注释形式的 #undef 也会命中，不能当判据 真机执行判据： <pkg>/bin/<tool> --version    # 退出码 0 且输出非空 <pkg>/bin/<tool>              # 必须是普通非零退出，不能是 139/段错误
+rec_priority:           1
+rec_approach:           assert-the-config-h-macro-in-build
+rec_description:        1) 把可选依赖提成硬依赖，保证它一定在场： def requirements(self): self.requires("popt/1.16") 2) 把它的搜索路径显式喂给 configure（AutotoolsToolchain 不保证 AC_CHECK_LIB 的链接检查能看到依赖的 -L/-I）： popt = self.dependencies["popt"] tc.extra_cflags.append(f"-I{os.path.join(popt.package_folder, 'include')}") tc.extra_ldflags.append(f"-L{os.path.join(popt.package_folder, 'lib')}") 3) 在 configure() 之后立刻断言 config.h，把"静默降级"变成构建期失败： for base in (self.build_folder, self.source_folder): config_h = os.path.join(base, "config.h") if os.path.isfile(config_h): with open(config_h, encoding="utf-8", errors="replace") as fh: if "#define HAVE_LIBPOPT" not in fh.read(): raise ConanException("configure did not detect popt ...") break 断言必须写成 '#define HAVE_X'，不能写成 'HAVE_X in text'： autoheader 把否定结果写成 /* #undef HAVE_X */， 这个字符串里同样含 "HAVE_X"，于是断言恒真、等于没写。 4) test_package 里再补两条运行期断言： --version 必须输出非空且退出 0；裸跑必须是非零的普通退出， 而不是 139/段错误——这条正好把上面的 `filename = argv[1]` 崩溃抓住。 注意 exit(-1) 在 shell 里也是 255，不能简单用 "rc >= 128 即信号" 判崩溃。
+rec_command:            grep -q '#define HAVE_LIBPOPT' config.h || { echo 'popt not detected'; exit 1; }
+rec_auto_fix:           false
+rec_impl:               assert-config-h-define-after-configure
+principles:             
+doc_file:               drafts/DRAFT-libdv-tools-1.0.0-ac-check-lib-warns-instead-of-failing.md
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+last_updated:           2026-09-17
+source_event:           libdv-tools 1.0.0 适配：configure 的 AC_CHECK_LIB(popt, poptGetContext) 没找到 popt 只报警告，encodedv --version 空输出、裸跑 SIGSEGV
+source_pr:              
+source_commit:          
+authors:                username- <ajOovSKTQ0vaLwZB.username-@noreply.gitcode.com>
