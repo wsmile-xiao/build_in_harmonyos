@@ -1,0 +1,277 @@
+--- a/src/XrdOfs/XrdOfsEvr.cc
++++ b/src/XrdOfs/XrdOfsEvr.cc
+@@ -43,99 +43,99 @@
+ #include "XrdNet/XrdNetSocket.hh"
+ #include "XrdSys/XrdSysHeaders.hh"
+ 
+ /******************************************************************************/
+ /*                     E x t e r n a l   L i n k a g e s                      */
+ /******************************************************************************/
+ 
+ extern XrdOfsStats OfsStats;
+ 
+ extern XrdSysTrace OfsTrace;
+-  
++
+ void *XrdOfsEvRecv(void *pp)
+ {
+      XrdOfsEvr *evr = (XrdOfsEvr *)pp;
+      evr->recvEvents();
+      return (void *)0;
+ }
+-  
++
+ void *XrdOfsEvFlush(void *pp)
+ {
+      XrdOfsEvr *evr = (XrdOfsEvr *)pp;
+      evr->flushEvents();
+      return (void *)0;
+ }
+ 
+-int XrdOfsScrubScan(const char *key, XrdOfsEvr::theEvent *cip, void *xargp) 
++int XrdOfsScrubScan(const char *key, XrdOfsEvr::theEvent *cip, void *xargp)
+     {return 0;}
+-  
++
+ /******************************************************************************/
+ /*                            D e s t r u c t o r                             */
+ /******************************************************************************/
+ 
+ XrdOfsEvr::~XrdOfsEvr()
+ {
+ 
+ // Close the FIFO. This will cause the reader to exit
+ //
+    myMutex.Lock();
+    eventFIFO.Close();
+    myMutex.UnLock();
+ }
+-  
++
+ /******************************************************************************/
+ /*                           f l u s h E v e n t s                            */
+ /******************************************************************************/
+-  
++
+ void XrdOfsEvr::flushEvents()
+ {
+    theClient *tp, *ntp;
+    int expWait, expClock;
+ 
+ // Compute the hash flush interval
+ //
+    if ((expWait = maxLife/4) == 0) expWait = 60;
+    expClock = expWait;
+ 
+ // We wait for the right period of time, unless there is a deferred event
+ //
+-   do {myMutex.Lock(); 
++   do {myMutex.Lock();
+        if ((ntp = deferQ)) deferQ = 0;
+           else runQ = 0;
+        myMutex.UnLock();
+        while(ntp)
+             {XrdSysTimer::Wait(1000*60);
+              expClock -= 60;
+              myMutex.Lock();
+              while((tp = ntp))
+                   {Events.Del(tp->Path);
+                    ntp = tp->Next;
+                    delete tp;
+                   }
+              if ((ntp = deferQ)) deferQ = 0;
+                 else runQ = 0;
+              myMutex.UnLock();
+              if (expClock <= 0)
+-                {myMutex.Lock(); 
++                {myMutex.Lock();
+                  Events.Apply(XrdOfsScrubScan, (void *)0);
+                  myMutex.UnLock();
+                  expClock = expWait;
+                 }
+             }
+        mySem.Wait();
+       } while(1);
+ }
+ 
+ /******************************************************************************/
+ /*                                  I n i t                                   */
+ /******************************************************************************/
+-  
++
+ int XrdOfsEvr::Init(XrdSysError *eobj) // Must be called 1st!
+ {
+    XrdNetSocket *msgSock;
+    char *p, path[2048];
+    int n;
+ 
+ // Set he error object (need to do only once)
+ //
+    eDest    = eobj;
+ 
+@@ -146,31 +146,45 @@
+        return 0;
+       }
+    strcpy(path, p); n = strlen(p);
+    if (path[n-1] != '/') {path[n] = '/'; n++;}
+    strcpy(&path[n], "ofsEvents");
+    XrdOucEnv::Export("XRDOFSEVENTS", path);
+ 
+ // Now create a socket to a path
+ //
+    if (!(msgSock = XrdNetSocket::Create(eobj,path,0,0660,XRDNET_FIFO)))
+-      return 0;
++      {
++#ifdef __OHOS__
++//    OHOS prohibits fifo creation on every available filesystem (mkfifo
++//    returns EPERM; even AF_UNIX pathname sockets are rejected). The
++//    ofsEvents fifo is an auxiliary channel for external staging tools,
++//    so degrade gracefully: keep the server running with external event
++//    ingestion disabled instead of aborting startup. Create() logs the
++//    original errno, so we don't re-check it here.
++       eobj->Emsg("Events", "External event ingestion disabled.",
++                  "FIFOs are unavailable on this filesystem.");
++       msgFD = -1;
++       return 1;
++#endif
++       return 0;
++      }
+    msgFD = msgSock->Detach();
+    delete msgSock;
+ 
+ // We succeeded and are now ready for the call to he second stage below
+ //
+    return 1;
+ }
+ 
+ /******************************************************************************/
+-  
++
+ int XrdOfsEvr::Init(XrdCmsClient *trgp)
+ {
+    pthread_t     tid;
+    int rc;
+ 
+ // Set the balancer pointers (err object set in 1st phase Init).
+ //
+    Balancer = trgp;
+ 
+ // Now start a thread to get incoming messages
+@@ -190,60 +204,66 @@
+       }
+ 
+ // All done
+ //
+    return 1;
+ }
+ 
+ /******************************************************************************/
+ /*                            r e c v E v e n t s                             */
+ /******************************************************************************/
+-  
++
+ void XrdOfsEvr::recvEvents()
+ {
+    EPNAME("recvEvent");
+    const char *tident = 0;
+    char *lp,*tp;
++
++#ifdef __OHOS__
++// The external event fifo may be unavailable on this platform (see Init()).
++//
++   if (msgFD < 0) return;
++#endif
+ 
+ // Attach the fifo FD to the stream
+ //
+    eventFIFO.Attach(msgFD);
+ 
+ // Now just start reading the events until the FD is closed
+ //
+    while((lp = eventFIFO.GetLine()))
+         {DEBUG("-->" <<lp);
+          if ((tp = eventFIFO.GetToken()) && *tp)
+             {if (!strcmp(tp, "stage")) eventStage();
+                 else eDest->Emsg("Evr", "Unknown event name -", tp);
+             }
+         }
+ }
+- 
++
+ /******************************************************************************/
+ /*                            W a i t 4 E v e n t                             */
+ /******************************************************************************/
+-  
++
+ void XrdOfsEvr::Wait4Event(const char *path, XrdOucErrInfo *einfo)
+ {
+ 
+ // Replace original callback with our callback so we can queue this event
+ // after the wait request has been sent to the client. This avoids a race
+ // where the client might get the resume signal before the wait request.
+ //
+    einfo->setErrCB((XrdOucEICB *)new theClient(this, einfo, path));
+ }
+- 
++
+ /******************************************************************************/
+ /*                            W o r k 4 E v e n t                             */
+ /******************************************************************************/
+-  
++
+ void XrdOfsEvr::Work4Event(theClient *Client)
+ {
+    struct theEvent *anEvent;
+    theClient *aClient = 0;
+ 
+ // First ste is to see if this event was posted
+ //
+    myMutex.Lock();
+    if (!(anEvent = Events.Find(Client->Path)))
+       Events.Add(Client->Path, new theEvent(0, 0, Client), maxLife);
+@@ -266,21 +286,21 @@
+ //
+    if (aClient) delete Client;
+ }
+ 
+ /******************************************************************************/
+ /*                       P r i v a t e   M e t h o d s                        */
+ /******************************************************************************/
+ /******************************************************************************/
+ /*                            e v e n t S t a g e                             */
+ /******************************************************************************/
+-  
++
+ // stage {OK | ENOENT | BAD} <path> [<msg>] \n
+ 
+ void XrdOfsEvr::eventStage()
+ {
+    int rc;
+    char *tp, *eMsg, *altMsg = 0;
+    struct theEvent *anEvent;
+ 
+ // Get the status token and decode it
+ //
+@@ -331,21 +351,21 @@
+                 anEvent->Happened = 1;
+                }
+             if (anEvent->aClient) sendEvent(anEvent);
+            }
+    myMutex.UnLock();
+ }
+ 
+ /******************************************************************************/
+ /*                             s e n d E v e n t                              */
+ /******************************************************************************/
+-  
++
+ void XrdOfsEvr::sendEvent(theEvent *ep)
+ {
+    theClient *cp;
+    XrdOucErrInfo *einfo;
+    int doDel = 0, Result = (ep->finalRC ? SFS_ERROR : SFS_OK);
+ 
+ // For each client, issue a call back sending the result back
+ // The event also goes in the deferred delete queue as we need to hold on
+ // to it just in case a client is in-transit
+ //
