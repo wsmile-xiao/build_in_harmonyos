@@ -5,7 +5,7 @@
 - 编译日期: 2026-06-05
 - 编译器: clang 15.0.4 / clang++
 - 目标平台: aarch64-unknown-linux-ohos (HarmonyOS)
-- 状态: built
+- 状态: published
 
 ## 编译步骤
 
@@ -27,7 +27,7 @@
 | # | 问题 | 根因 | 解决方案 |
 |---|------|------|----------|
 | 1 | PRI 宏空格问题 (C++11) | C++11 要求字符串字面量与宏标识符之间有空格: `"%"PRId64` 不合法 | 全局修复所有 `"%"PRIx` → `"%" PRIx`，涉及 fs_base.cpp, imginfo.cpp, misc.cpp, imagefile.cpp 等多个文件 |
-| 2 | getspnam/shadow password API 不可用 | HarmonyOS sysroot 有 shadow.h 但无 getspnam 实现 | 在 access.cpp 中用 `#ifdef __OHOS__` 守卫，改用 getpwnam + pw_passwd 替代 |
+| 2 | getspnam/shadow password API 不可用 | HarmonyOS sysroot 有 shadow.h 但无 getspnam 实现 | 在 access.cpp 中用 autoconf 功能检测 `#ifdef HAVE_GETSPNAM` 守卫（configure.ac 补丁在 AC_CHECK_FUNCS 列表追加 getspnam，configure/config.h.in 补丁同步生成检测），无 getspnam 时回退 getpwnam + pw_passwd（AI 检视意见修复，R8 合规：不再使用平台宏 `__OHOS__`） |
 | 3 | newt/slang GUI 依赖不可用 | OHOS 预编译仓库无 libnewt/libslang | `--disable-newt` 跳过 newt，在 gui_text.h 中提供 dummy 类替代 |
 | 4 | gui_text.h 含 newt 类型 | newtComponent 等类型仅在 HAVE_LIBNEWT 时可用 | 添加 HAVE_LIBNEWT 守卫，无 newt 时提供 CExceptionsGUI, CSavingWindow, CRestoringWindow, CSaveOptWindow, CRestoreOptWindow, CRestoreMbrWindow 等 dummy 类 |
 | 5 | CInterface 不完整类型 | 多个文件引用 CInterface 但未包含 interface.h | 添加 `#include "interface.h"` 到 fs_base.h, cbitmap.cpp, imginfo.cpp |
@@ -43,8 +43,8 @@
 
 ## 源码修改分类
 
-### 平台适配类 (__OHOS__ 守卫)
-- access.cpp: getspnam → getpwnam 替代
+### 平台适配类 (功能检测宏守卫)
+- access.cpp: getspnam → getpwnam 替代（HAVE_GETSPNAM 功能检测，R8 合规）
 - misc.cpp: sys/sysmacros.h 包含
 
 ### 条件编译类 (HAVE_LIBNEWT 守卫)
@@ -116,5 +116,12 @@ ELF 64-bit LSB pie executable, ARM aarch64, version 1 (SYSV), dynamically linked
 **最终状态**: built
 ---
 
-**编译结束**: 2026-06-05 11:50
+**编译结束**: 2026-08-17 23:29
 **最终状态**: published
+---
+
+**更新**: 2026-09-17 AI 检视意见修复（PR #4553）
+- R8 合规：access.cpp 补丁（0044）移除全部 6 处 `#ifdef __OHOS__` 平台宏，改为 `#ifdef HAVE_GETSPNAM` 功能检测守卫
+- 检测链补丁同步更新：0007 (configure.ac) AC_CHECK_FUNCS 列表追加 getspnam；0006 (configure) 插入 ac_fn_c_check_func getspnam 检测；0004 (config.h.in) 添加 `#undef HAVE_GETSPNAM`
+- OHOS (musl) 无 getspnam 符号 → 链接测试失败 → HAVE_GETSPNAM 未定义 → 走 getpwnam/pw_passwd 分支，运行时行为与原 `__OHOS__` 版本完全一致
+- config.guess 补丁（0003）中的 `#elif defined(__OHOS__)` 为构建系统平台探测的正常模式（检视意见 P3 已认定可忽略），保留
