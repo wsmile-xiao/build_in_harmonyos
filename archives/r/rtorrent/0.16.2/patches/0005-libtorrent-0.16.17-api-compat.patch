@@ -1,0 +1,207 @@
+--- a/src/display/window.h	2026-09-18 07:42:02.692600625 +0800
++++ b/src/display/window.h	2026-09-18 07:42:29.876597656 +0800
+@@ -3,7 +3,7 @@
+ 
+ #include <functional>
+ #include <torrent/utils/scheduler.h>
+-#include <torrent/utils/thread.h>
++#include <torrent/system/thread.h>
+ 
+ #include "canvas.h"
+ #include "globals.h"
+--- a/src/display/window_log.cc	2026-09-18 07:42:02.700598281 +0800
++++ b/src/display/window_log.cc	2026-09-18 07:42:29.880596563 +0800
+@@ -2,7 +2,7 @@
+ 
+ #include <ctime>
+ #include <torrent/torrent.h>
+-#include <torrent/utils/thread.h>
++#include <torrent/system/thread.h>
+ 
+ #include "canvas.h"
+ #include "utils.h"
+@@ -16,10 +16,8 @@
+ 
+   m_task_update.slot() = std::bind(&WindowLog::receive_update, this);
+ 
+-  unsigned int signal_index = torrent::main_thread::thread()->signal_bitfield()->add_signal(std::bind(&WindowLog::receive_update, this));
+-
+-  m_log->lock_and_set_update_slot([signal_index]() {
+-    torrent::main_thread::thread()->send_event_signal(signal_index, false);
++  m_log->lock_and_set_update_slot([this]() {
++    torrent::main_thread::callback_interrupt(std::bind(&WindowLog::receive_update, this));
+   });
+ }
+ 
+--- a/src/main.cc	2026-09-18 07:42:02.680601719 +0800
++++ b/src/main.cc	2026-09-18 09:33:37.568595625 +0800
+@@ -199,7 +199,7 @@
+     // platforms that do not properly pass signals to the target
+     // threads. Use '--enable-interrupt-socket' when configuring
+     // LibTorrent to enable this workaround.
+-    if (torrent::utils::Thread::should_handle_sigusr1())
++    if (false) // should_handle_sigusr1 removed in libtorrent 0.16.17
+       SignalHandler::set_handler(SIGUSR1, std::bind(&do_nothing));
+ 
+     torrent::log_add_group_output(torrent::LOG_NOTICE,    "important");
+@@ -486,7 +486,7 @@
+ 
+     rpc::commands.call_catch("event.system.startup_done", rpc::make_target(), "startup_done", "System startup_done event action failed: ");
+ 
+-    torrent::utils::Thread::self()->event_loop();
++    torrent::system::Thread::self()->event_loop();
+ 
+     control->core()->download_list()->session_save();
+     control->cleanup();
+@@ -678,5 +678,10 @@
+ 
+   std::cout << "Report bugs to <github.com/rakshasa/rtorrent>." << std::endl;
+ 
+-  exit(0);
++  // torrent::initialize() has already started the disk/net/tracker worker
++  // threads at this point. Running static destructors via exit(0) while those
++  // threads are still alive races with runtime teardown and intermittently
++  // aborts (SIGABRT) on OHOS/libc++, so terminate without unwinding here.
++  std::cout.flush();
++  std::_Exit(0);
+ }
+--- a/src/rpc/exec_file.cc	2026-09-18 07:42:02.684602813 +0800
++++ b/src/rpc/exec_file.cc	2026-09-18 07:42:29.900595781 +0800
+@@ -8,7 +8,7 @@
+ #include <rak/path.h>
+ #include <sys/types.h>
+ #include <sys/wait.h>
+-#include <torrent/utils/thread.h>
++#include <torrent/system/thread.h>
+ 
+ #include "exec_file.h"
+ #include "parse.h"
+--- a/src/rpc/scgi_task.cc	2026-09-18 07:42:02.688597969 +0800
++++ b/src/rpc/scgi_task.cc	2026-09-18 09:09:50.268595781 +0800
+@@ -11,7 +11,7 @@
+ #include <torrent/poll.h>
+ #include <torrent/torrent.h>
+ #include <torrent/utils/log.h>
+-#include <torrent/utils/thread.h>
++#include <torrent/system/thread.h>
+ 
+ #include "control.h"
+ #include "globals.h"
+@@ -40,8 +40,11 @@
+   if (!get_fd().is_valid())
+     return;
+ 
+-  torrent::main_thread::thread()->cancel_callback_and_wait(this);
+-  torrent::utils::Thread::self()->cancel_callback(this);
++  // libtorrent 0.16.17 replaced pointer-targeted callback cancellation with
++  // callback_id-based cancellation; wait for queued callbacks on both the
++  // worker and main threads before freeing the task (upstream rtorrent
++  // 0.16.23 does the same in SCgiTask::close).
++  torrent::system::cancel_callback_and_wait(m_callback_id, torrent::system::Thread::self(), torrent::main_thread::thread());
+ 
+   torrent::this_thread::poll()->remove_and_close(this);
+ 
+@@ -260,12 +263,12 @@
+ SCgiTask::receive_call(const char* buffer, uint32_t length) {
+   // TODO: Rewrite RpcManager.process to pass the result buffer instead of having to copy it.
+ 
+-  auto scgi_thread = torrent::utils::Thread::self();
++  auto scgi_thread = torrent::system::Thread::self();
+ 
+   auto result_callback = [this, scgi_thread](const char* b, uint32_t l) {
+       receive_write(b, l);
+ 
+-      scgi_thread->callback_interrupt_pollling(this, [this]() {
++      scgi_thread->callback_interrupt(m_callback_id, [this]() {
+           // Only need to lock once here as a memory barrier.
+           m_result_mutex.lock();
+           m_result_mutex.unlock();
+@@ -278,7 +281,7 @@
+ 
+   switch (content_type()) {
+   case rpc::SCgiTask::ContentType::JSON:
+-    torrent::main_thread::thread()->callback_interrupt_pollling(this, [buffer, length, result_callback]() {
++    torrent::main_thread::callback_interrupt(m_callback_id, [buffer, length, result_callback]() {
+         rpc.process(RpcManager::RPCType::JSON, buffer, length,
+                     [result_callback](const char* b, uint32_t l) {
+                       result_callback(b, l);
+@@ -288,7 +291,7 @@
+     break;
+ 
+   case rpc::SCgiTask::ContentType::XML:
+-    torrent::main_thread::thread()->callback_interrupt_pollling(this, [buffer, length, result_callback]() {
++    torrent::main_thread::callback_interrupt(m_callback_id, [buffer, length, result_callback]() {
+         rpc.process(RpcManager::RPCType::XML, buffer, length,
+                     [result_callback](const char* b, uint32_t l) {
+                       result_callback(b, l);
+--- a/src/rpc/scgi_task.h	2026-09-18 07:42:02.684602813 +0800
++++ b/src/rpc/scgi_task.h	2026-09-18 09:09:37.396595938 +0800
+@@ -4,6 +4,7 @@
+ #include <memory>
+ #include <mutex>
+ #include <torrent/event.h>
++#include <torrent/system/callbacks.h>
+ 
+ namespace utils {
+   class SocketFd;
+@@ -21,7 +22,8 @@
+ 
+   enum ContentType { XML, JSON };
+ 
+-  SCgiTask() { m_fileDesc = -1; }
++  SCgiTask()
++    : m_callback_id(torrent::system::make_callback_id()) { m_fileDesc = -1; }
+ 
+   bool                is_open() const      { return m_fileDesc != -1; }
+   bool                is_available() const { return m_fileDesc == -1; }
+@@ -46,6 +48,8 @@
+ 
+   SCgi*               m_parent;
+ 
++  torrent::system::callback_id m_callback_id;
++
+   std::mutex          m_result_mutex;
+ 
+   char*               m_buffer{nullptr};
+--- a/src/thread_worker.h	2026-09-18 07:42:02.668596406 +0800
++++ b/src/thread_worker.h	2026-09-18 07:42:29.916598594 +0800
+@@ -3,13 +3,13 @@
+ 
+ #include <atomic>
+ #include <string>
+-#include <torrent/utils/thread.h>
++#include <torrent/system/thread.h>
+ 
+ namespace rpc {
+ class SCgi;
+ }
+ 
+-class ThreadWorker : public torrent::utils::Thread {
++class ThreadWorker : public torrent::system::Thread {
+ public:
+   ThreadWorker() = default;
+   ~ThreadWorker();
+--- a/src/ui/element_log_complete.cc	2026-09-18 07:42:02.660597031 +0800
++++ b/src/ui/element_log_complete.cc	2026-09-18 07:42:29.916598594 +0800
+@@ -2,7 +2,7 @@
+ 
+ #include <torrent/exceptions.h>
+ #include <torrent/torrent.h>
+-#include <torrent/utils/thread.h>
++#include <torrent/system/thread.h>
+ 
+ #include "display/frame.h"
+ #include "display/manager.h"
+@@ -17,10 +17,8 @@
+ ElementLogComplete::ElementLogComplete(torrent::log_buffer* l) :
+     m_log(l) {
+ 
+-  unsigned int signal_index = torrent::main_thread::thread()->signal_bitfield()->add_signal(std::bind(&ElementLogComplete::received_update, this));
+-
+-  m_log->lock_and_set_update_slot([signal_index]() {
+-    torrent::main_thread::thread()->send_event_signal(signal_index, false);
++  m_log->lock_and_set_update_slot([this]() {
++    torrent::main_thread::callback_interrupt(std::bind(&ElementLogComplete::received_update, this));
+   });
+ }
+ 
