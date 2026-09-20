@@ -1,0 +1,111 @@
+# ═══ Draft knowledge entry — 无自带构建系统的「源码库」适配范式 + template 端口的强未定义钩子契约 + Ceedling include 路径还原 ═══
+# Timestamp: 2026-09-20
+# Software: tinyusb 0.18.0
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-tinyusb-0.18.0-source-library-template-port-hook-contract
+trigger_tool:           cmake|make|clang|conan
+phase:                  build|link|test
+error_signature:        undefined reference to .dcd_int_handler|undefined
+                         reference to .dcd_edpt_close|undefined reference to
+                         .tusb_time_millis_api|FATAL_ERROR.*target is not
+                         defined|tusb_common.h.*file not found
+severity:               3
+category:               build-system-detection|vendor-port-absence|link-hook-contract|test-harness
+match_keywords:         tinyusb, source library, no build entry point,
+                         add_tinyusb function only, tusb_config.h required,
+                         OPT_MCU_NONE, OPT_OS_NONE, portable/template,
+                         dcd_template, strong undefined symbol, dcd_int_handler,
+                         dcd_edpt_close, tusb_time_millis_api, Ceedling,
+                         project.yml src/**  include search path, CMock
+title:                  无自带构建入口的「源码库」（tinyusb 类）在 OHOS 上的
+                         direct-cc 适配范式；无平台 port 时走 template 端口，
+                        其留白是强未定义钩子契约（兼作端口替换哨兵）
+
+root_cause: >
+  某些库上游只提供"被 include / 被调用"的构建片段（tinyusb 的
+  src/CMakeLists.txt 只有 add_tinyusb(TARGET) 函数、src/tinyusb.mk 是
+  Makefile 片段），没有可独立调用的构建入口，且编译期行为完全由使用者的
+  配置头（tusb_config.h）决定；同时其 portable/ 下没有面向目标平台的控制器
+  后端，只能走 vendor 中立的 template 端口——而 template 端口是"故意留白"
+  的，留白处在链接期表现为强未定义符号。
+affected_scope: >
+  嵌入式/固件类源码库（tinyusb、lwip、FreeRTOS 风格中间件）在 Linux/OHOS
+  这类非其原生目标平台上适配时；以及所有"上游只有 CMake 函数或 .mk 片段"
+  的库。
+verification_cmd: >
+  grep -n "add_tinyusb\|project(" src/CMakeLists.txt     # 只有函数名 = 源码库
+  ls src/portable/ src/osal/                              # 有无目标平台后端
+  llvm-nm -u libtinyusb.a | sort -u                       # 归档解析后的剩余未定义
+rec_priority:           1
+rec_approach:           direct-cc-pinned-config-plus-template-port
+rec_description: >
+  判定与适配四步：(a) 判定"源码库"——顶层 CMakeLists 只有 add_*(TARGET)
+  函数、没有 project()/add_library()，或只有 *.mk 片段、或硬需求用户配置头
+  （#include "tusb_config.h"）→ 不走上游构建系统，改用 direct-cc 把配置与
+  源文件清单钉死，产出单一静态库并把整棵源码树随包发运。(b) 查 portable/
+  与 osal/ 是否有目标平台后端；没有则选 vendor 中立的 template 端口
+  （CFG_TUSB_MCU=OPT_MCU_NONE + CFG_TUSB_OS=OPT_OS_NONE），并额外编入上游
+  未列入 CMake 的 template 文件（本包 25 个源文件 = 上游 23 个 + 2 个
+  template）。(c) 补 template 留白：dcd_int_handler/dcd_edpt_close/
+  tusb_time_millis_api 三个钩子在消费侧定义；这三个重名定义也是"端口是否
+  已被真实 port 替换"的哨兵。(d) 复现 Ceedling 的 include 搜索路径
+  （os.walk(src/) 枚举全部子目录）才能编译上游用例；无 CMock 的用例件可直接
+  用源码树内 vendored Unity + 自备 runner 跑。
+rec_command: >
+  clang --target=aarch64-linux-ohos --sysroot=$SYSROOT -O2 -fPIC -std=gnu11
+    -I$PKG/files -I$SRC/src -c <25 files>          # CFG_TUSB_MCU=OPT_MCU_NONE
+  llvm-ar rcs libtinyusb.a *.o                     # 154,790 字节
+rec_auto_fix:           true
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      write-a-real-platform-port
+fallback_description:   >
+  为 OHOS 写一个真实的控制器 port（OHOS PC 上位 xHCI/DWC）。这属于新驱动
+  开发，远超"适配三方库"的范围，仅在确有需求且能长期维护时考虑；本包明确
+  把这一步留给使用者。
+fallback_command:       （超出适配范围，不推荐）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       走上游 CMake.*不写 toolchain|add_tinyusb.*直接调用
+forbid_1_reason:        源码库的 CMake 入口是函数不是构建入口，它要求调用者
+                         先提供一个提供配置头的 target（否则 FATAL_ERROR），
+                         且需要自己写 toolchain file——绕一圈回到原问题。
+forbid_1_consequence:   CI 在 configure 阶段 FATAL_ERROR，白跑一轮。
+forbid_2_pattern:       只给 -Isrc 就编译上游用例
+forbid_2_reason:        Ceedling 的 :source: ../../src/** 会把 src/ 每个子目录
+                         加进搜索路径，上游用例写的是裸 include
+                         ("tusb_common.h")，只给 -Isrc 必然 file not found。
+forbid_2_consequence:   上游用例全部编译失败，误判为源码缺陷。
+forbid_3_pattern:       OPT_MCU_NONE.*不编 template|省略
+                         portable/template/dcd_template.c
+forbid_3_reason:        template 文件不在上游 CMake 的源文件列表里（上游留给
+                         MCU port 提供），漏编会缺 dcd_edpt_close_all 等定义。
+forbid_3_consequence:   链接期缺符号面扩大，消费侧要补的钩子变多。
+forbid_4_pattern:       沿用 CFG_TUD_NET|不定义 TUP_DCD_ENDPOINT_MAX
+forbid_4_reason:        0.18.0 起 CFG_TUD_NET 拆分为 CFG_TUD_ECM_RNDIS/
+                         CFG_TUD_NCM；TUP_DCD_ENDPOINT_MAX 对不在
+                         tusb_mcu.h 里的 MCU（含 OPT_MCU_NONE）会 #warning
+                         后默认 8。
+forbid_4_consequence:   构建有 #warning，门禁"零警告"不达标（语义其实不变）。
+
+principles:             P001
+similar_to:             DRAFT-lbfgs-1.10-single-source-direct-compile-triage
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-tinyusb-0.18.0-source-library-template-port-hook-contract.md
+last_updated:           2026-09-20
+source_event:           archives/t/tinyusb/0.18.0
+
+authors:                2301_76770579
+source_pr:              11299
+source_commit:          52203ccd80
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20
