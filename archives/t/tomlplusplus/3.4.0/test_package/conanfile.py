@@ -6,6 +6,8 @@ CI runs this automatically via `conan create` (which invokes test_package).
 
 File location: archives/{letter}/tomlplusplus/{version}/test_package/conanfile.py
 """
+import os
+
 from conan import ConanFile
 from conan.tools.cmake import CMake, cmake_layout
 
@@ -28,5 +30,6 @@ class TomlplusplusTestConan(ConanFile):
     def test(self):
         cmake = CMake(self)
         cmake.test()
-        # Alternatively, run the binary directly:
-        # self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_tomlplusplus')}", env="conanrun")
+        # Also run the consumer binary directly so the test executes for real
+        # even if the CTest target is unavailable.
+        self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_tomlplusplus')}", env="conanrun")
