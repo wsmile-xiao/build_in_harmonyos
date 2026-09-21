@@ -1,0 +1,129 @@
+id: DRAFT-E628-rtklib-handwritten-makefile-multi-app-adaptation
+status: pending-editor-review
+title: "手写 Makefile 多子工程（RTKLIB 形态）适配五件套：init-build 因大小写不敏感把子目录误提升为源码根、每应用 makefile 的 LDLIBS 硬编码 iers.a、-ansi 隐藏 musl 的 gethostbyname、接收机解码器在 src/rcv 子目录、以及用静态链接从根上规避 RUNPATH/SONAME 家族"
+category: makefile, no-configure, nested-source-detection, case-insensitive-fs, test-counting, static-link, runpath
+build_system: makefile
+phase: build
+trigger_tool: ohc-init-build
+severity: 2
+prescan_pattern: '^(all|install|clean|test[0-9]+)\s*:|^\s*LDLIBS\s*=|^\s*CFLAGS\s*=.*-ansi|^\s*CC\s*=\s*gcc'
+prescan_globs: 'makefile, */makefile, */*/makefile, **/makefile'
+match_keywords: >
+  hand-written makefile, 手写 makefile, 无 configure, no top-level makefile,
+  顶层 makefile 缺失, app/consapp, 每应用 makefile, per-app makefile,
+  iers.a, -lgfortran, LDLIBS 覆盖, -ansi -pedantic, __STRICT_ANSI__,
+  gethostbyname implicit declaration, incompatible integer to pointer conversion,
+  src/rcv, receiver decoder subdirectory, pattern rule 单 %, double percent prerequisite,
+  nested source promotion, .orig .work 只剩 45 个文件, edit-tracker snapshot,
+  DT_NEEDED 只有 libc, 无 RUNPATH, 无 SONAME, makefile testN 目标计数
+error_signature: >
+  嵌套源码提升完成: app/consapp|
+  cannot find ../../../../lib/iers/gcc/iers.a|
+  undefined symbol: input_cresf|undefined symbol: input_javadf|
+  warning: implicit declaration of function 'gethostbyname'|
+  error: incompatible integer to pointer conversion assigning to 'struct hostent \*' from 'int'|
+  No rule to make target 'bin/|
+  no member named 'leaps' in 'nav_t'|use of undeclared identifier 'j'|
+  No rule to make target '../../src/qzslex.c'
+error_excerpt: >
+  ① init-build 误提升（本任务实测，真实源码 928 文件 → .work 仅 48 文件）：
+    ℹ️   嵌套源码检测: 找到源码在 app/consapp，正在提升到 rtklib-2.4.3.b34.orig ...
+    ✅   嵌套源码提升完成: app/consapp → rtklib-2.4.3.b34.orig
+    ✅   基线指纹: 45 个文件 (rtklib-2.4.3.b34.work)
+  ② 上游 app makefile 直接链接失败：
+    /data/service/hnp/bin/clang -o rnx2rtkp ... ../../../../lib/iers/gcc/iers.a -lgfortran -lm -lrt
+    ld.lld: error: cannot find ../../../../lib/iers/gcc/iers.a
+  ③ 只编 src/*.c 的链接失败：
+    ld.lld: error: undefined symbol: input_cresf
+    >>> referenced by rcvraw.c:1445 (src/rcvraw.c:1445) rcvraw.o:(input_rawf) in archive lib/libRTK.a
+  ④ -ansi -pedantic 下 stream.c 编译失败：
+    src/stream.c:1127:18: warning: implicit declaration of function 'gethostbyname'
+    src/stream.c:1127:17: error: incompatible integer to pointer conversion assigning to
+      'struct hostent *' from 'int' [-Wint-conversion]
+  ⑤ GNU make 双 % pattern 静默不匹配：
+    make: *** No rule to make target 'bin/convbin', needed by 'all'.  Stop.
+  ⑥ 上游自带测试的编译失败（t_time.c / t_rinex.c）与缺失源（src/qzslex.c）：
+    t_time.c:273:32: error: use of undeclared identifier 'j'
+    t_rinex.c:186:9: error: no member named 'leaps' in 'nav_t'
+    make: *** No rule to make target '../../src/qzslex.c', needed by 'qzslex.o'.
+root_cause: >
+  一类"上游没有构建系统、每个子程序自带 makefile"的 C 工程（RTKLIB 2.4.3 b34 为实证）会同时命中五个
+  互相独立的陷阱，且每个都表现为**看似无关**的报错：
+  ① **init-build 的嵌套源码提升在大小写不敏感文件系统上误判**：`_BUILD_MARKERS` 含 `Makefile`（大写 M），
+     而 RTKLIB 根目录**没有任何**构建文件、子目录 `app/consapp/` 有 `makefile`（小写）。设备文件系统
+     大小写不敏感（`os.path.samefile('MAN','man')` 为 True），`(dir/"Makefile").exists()` 因此命中
+     小写文件，`app/consapp` 被当成"嵌套的源码根"提升覆盖整个 `.orig`/`.work`。后果是静默的：工具打印
+     "✅ 提升完成 + 基线指纹 45 个文件"，而真实源码有 928 个；随后 `refresh-patch --auto` 生成的补丁
+     路径会整体错位（`convbin/gcc/makefile` 而不是 `app/consapp/convbin/gcc/makefile`）。
+  ② **每应用 makefile 的 LDLIBS 是"为作者本机写的"**：`LDLIBS = ../../../../lib/iers/gcc/iers.a
+     -lgfortran -lm -lrt` 无条件生效，而 `iers.a` 只在该应用定义 `-DIERS_MODEL` 时才被引用，上游 Linux
+     侧也不生成它 → 不改配方必然链接失败。
+  ③ **CFLAGS 里的 `-ansi -pedantic` 会隐藏 POSIX 声明**：定义 `__STRICT_ANSI__` 后 musl 的 `netdb.h`
+     不再声明 `gethostbyname`，隐式声明在 clang 15 下是**错误**（`-Wint-conversion`）而非警告。
+  ④ **源文件不在 `src/`**：接收机原始日志解码器在 `src/rcv/`（novatel/ublox/crescent/skytraq/javad/
+     nvs/binex/rt17/septentrio/ss2），只收集 `src/*.c` 必然缺 `input_*f` 符号。
+  ⑤ **GNU make 的 pattern rule 前提只能有一个 `%`**：`app/consapp/%/%.c` 不报错、只是永远匹配不上，
+     报错形态是目标的 "No rule to make target"，极易被误读成 makefile 写错。
+  另外这类工程的上游测试面是**散落在各 makefile 里的 `testN:` 目标**（本包 9 个 makefile 共 107 个），
+  不是统一的 test 目录，N 口径必须按"makefile 注册的测试目标数"取，且要逐条区分
+  "跑不了（缺夹具/缺硬件/上游配方被注释）"与"跑失败"。
+affected_scope: >
+  所有"上游用传统 makefile、无 autotools/CMake、且按子目录拆分多个可执行程序"的包。判定信号：
+  ①tarball 根目录没有 configure/CMakeLists.txt/makefile ②存在 `*/gcc/makefile` 或 `*/makefile` 形态的
+  子工程 makefile ③makefile 里出现 `LDLIBS = ... <某 .a>` 或 `-lgfortran` ④CFLAGS 带 `-ansi`。
+  四条中两条即适用。RTKLIB 之外的同族例子：bzrtp/bzip2 形态的 raw makefile、cronutils 的
+  `app/consapp` 类似布局。
+rec_priority: 1
+rec_approach: rebuild-orig-work-plus-toplevel-makefile-patch-plus-static-link
+rec_description: >
+  六步：
+  ① **纠正 .orig/.work**（不要试图改工具）：`SHA=$(cat .orig/.tarball-sha256); rm -rf .orig .work;
+     mkdir .orig && tar xzf <tarball> -C .orig --strip-components=1; printf '%s' "$SHA" > .orig/.tarball-sha256;
+     cp -a .orig .work`，再用 `ohc.edit_tracker.snapshot(work_dir, sw, ver)` 重建基线（本例 925 文件）。
+  ② **补一个顶层 makefile 走 patches/**（R1/R6：只加构建文件、不动上游源码）：`all` 把
+     `src/*.c` **和 `src/rcv/*.c`** 编成 `lib/libRTK.a` 一次，再让各程序链接它；`install` 只装
+     bin/lib/include（`mkdir -p` + `cp -f`，不用 install(1)——设备 PATH 里没有它），**不 strip**。
+     逐应用写显式规则（双 `%` 不可用）。用 `vpath %.c $(SRCDIR) $(SRCDIR)/rcv` + `$(OBJDIR)/%.o : %.c`
+     一次覆盖两个源码目录。
+  ③ **登记补丁**：`ohc-run.py track-edit add <sw> <ver> makefile` 后再 `refresh-patch --auto`
+     （只靠 `scan` 检测不到**新增**文件，必须显式 track）。
+  ④ **配方里显式覆盖构建变量**（R33）：`make -j2 CC=<conf 的 c> AR=... RANLIB=... CFLAGS="-O2"
+     LDLIBS="-lm -lrt -lpthread"`；`CFLAGS` 用 `-std=gnu11` 替掉上游的 `-ansi -pedantic`。
+  ⑤ **产物形态选静态**：`libRTK.a` + 全静态 CLI，链接后的 `readelf -d` 只剩 `libc.so` 一条 NEEDED、
+     无 `DT_RUNPATH`/`DT_RPATH` —— 这类二进制根本不存在"无 SONAME / 相对 RUNPATH 导致运行期
+     Permission denied"和"conanrun 的 LD_LIBRARY_PATH 掩盖错误 RUNPATH"两个面。反之若产出共享库，
+     必须 `-Wl,-soname,` 并对每个交付 ELF 逐个核 RUNPATH。
+  ⑥ **N 口径**：`for m in $(find . -name makefile); do grep -cE '^(test|utest)[0-9]+ *:' $m; done`
+     求和 = 107（含 `rnx2rtkp/gcc_mkl` 变体的 25 个同名目标），逐条跑并区分 PASS/FAIL/NOT_RUN；
+     **空配方目标（配方整行被注释）rc=0 但没有产出文件，绝不能记 PASS**。
+forbid_1_pattern: (手工把 .work 改成正确的源码树|改 tools/|改 framework/)
+forbid_1_reason: 工具侧修复（含大小写不敏感文件系统的 marker 判断）属框架改动，必须与软件 PR 分离
+forbid_1_consequence: 软件 PR 混入框架改动被 W2 原子性检查拦下
+forbid_2_pattern: (只编 src/\*\.c|src 目录下就是全部源码)
+forbid_2_reason: 接收机解码器在 src/rcv/ 子目录，只编 src/*.c 会在链接期才暴露 input_*f 未定义
+forbid_2_consequence: 编译期全绿、链接期一片 undefined symbol，排查方向被带偏到"少写依赖库"
+
+principles: P004, P006
+similar_to: E217（头文件找不到，CMake 语境；本条的 -ansi 隐藏声明与之签名家族相近但根因不同）、
+  DRAFT-cronutils-1.1-raw-makefile-ohos-cli-signing（同为 raw makefile + OHOS 交付，但那条讲签名，
+  本条讲构建入口与源码布局）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+verification_cmd: >
+  sh $HOME/tmp/rtklib-2.4.3.b34/run_upstream_tests.sh \
+     $HOME/ws/tmp/builds/rtklib-2.4.3.b34.work $HOME/tmp/rtklib-2.4.3.b34/upstream-tests
+  # 期望：107 行 results-A.tsv（不做夹具目录供给）与 results-B.tsv（提供 app/test -> ../test 后）；
+  #      两趟各 PASS+FAIL+NOT_RUN+TIMEOUT = 107；PASS 组 rc=0 且产出文件存在；NOT_RUN 组逐条给技术原因
+doc_file: knowledge/drafts/DRAFT-E628-rtklib-handwritten-makefile-multi-app-adaptation.md
+last_updated: 2026-09-20
+source_event: rtklib 2.4.3.b34 适配 HarmonyOS PC（上游 tomojitakasu/RTKLIB tag v2.4.3-b34）
+authors: SunShine_06
+source_pr:
+source_commit:
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.85
+metrics_last_used: 2026-09-20
