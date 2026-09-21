@@ -1,0 +1,69 @@
+#====================================================================
+# E629 — header-only 包的接口面两处缺口（依赖头未按组件传递 / Boost≥1.90 隐式包含消失）
+# 来源: permlib/0.2.9（纯头文件 C++ 模板库，公开头 47/84 直接 include <boost/...>）
+# 格式注意: 值里不出现 ASCII 冒号+空格（YAML 明文标量会断），正则里用 :\s 代替 ": "
+#====================================================================
+
+id:                     E629
+trigger_tool:           conan|clang|cmake
+phase:                  compilation|packaging|testing
+error_signature:        fatal error:\s+'boost/[A-Za-z0-9_/.]+\.hpp' file not found|no member named 'next' in namespace 'boost'; did you mean 'boost::foreach_detail_::next'|no member named 'next' in namespace 'boost'; did you mean simply 'next'|no matching constructor for initialization of 'AbstractBSGS<
+
+severity:               2
+category:               conan, packaging, headers, portability, boost
+match_keywords:         header-only, header-library, transitive_headers, cpp_info.requires, components, boost::headers, boost::boost, boost/next_prior.hpp, boost::next, 消费者 file not found, 公开头 include 依赖头, test_package, 消费者编译红
+prescan_pattern:        boost::(next|prior)\s*\(
+prescan_globs:          "*.h, *.hh, *.hpp, *.hxx, *.cpp, *.cc"
+title:                  header-only 包的接口面两处缺口——依赖头必须按**组件**传递（否则消费者 file not found），且 Boost≥1.90 不再隐式提供 boost::next
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             ① 组件化依赖的包级目标没有包含路径——boost 配方声明了 components（headers/atomic/filesystem/...），此时 CMakeDeps 生成的包级目标 boost::boost 的 INTERFACE_INCLUDE_DIRECTORIES 是空的，只有 Boost::headers 组件带 include。header-only 包若只写 requires("boost/x.y.z", transitive_headers=True) 而不同时写 cpp_info.requires = ["boost::headers"]，消费者拿到的是一串空 include 列表 ⇒ 消费者编译自家 TU 时 #include <boost/shared_ptr.hpp> 直接 fatal error（设备里恰好装了 boost 头时会被「喂饱」而假绿）。② Boost 1.90 起 boost::next()/boost::prior() 的声明不再由 boost/utility.hpp、boost/iterator/* 等头间接引入——老代码（2011 年前后的 C++98 模板库）在这些头里用 boost::next 却没显式 include <boost/next_prior.hpp> ⇒ 模板实例化时报 no member named 'next' in namespace 'boost'（note 链极长，容易误判成编译器/标准库问题）。
+affected_scope:         所有「公开头直接 include 第三方头」的 header-only/header-library Conan 包（本仓 461 个 header-library 配方同族）；以及所有依赖 Boost 旧隐式包含关系的 C++98/03 时代上游代码在 Boost≥1.90 下的编译。
+verification_cmd:       消费者侧——conan create 的 test_package 里 find_package(<pkg> CONFIG REQUIRED) + target_link_libraries(app PRIVATE <pkg>::<pkg>)，TU 内只 include 被测包的公开头、不写依赖包路径，编译通过即证明组件级传递生效；依赖版本侧——BOOST=$(conan cache path boost/1.90.0.4.1:<pkgid>) 后 ls $BOOST/include/boost/next_prior.hpp（存在），再 grep -rn 'boost::next' 上游源（缺 include 即命中）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           component-level-public-requires-plus-explicit-boost-include
+rec_description:        配方 requirements() 里写 requires("boost/1.90.0.4.1", transitive_headers=True)，并在 package_info() 里写 self.cpp_info.requires = ["boost::headers"]（组件级，不是包级 "boost::boost"）；同时给上游源码补最小补丁在每个 boost::next 使用点显式 #include <boost/next_prior.hpp>（补丁不含平台宏，任意平台同一份）。
+rec_command:            conanfile.py 的 requirements()/package_info() 各一行——self.requires("boost/1.90.0.4.1", transitive_headers=True) 与 self.cpp_info.requires = ["boost::headers"]；补丁在每个 boost::next 使用点的头文件里补 #include <boost/next_prior.hpp>
+rec_auto_fix:           false
+rec_impl:               conan-recipe-plus-upstream-patch
+
+fallback_priority:      2
+fallback_approach:      inject-dependency-include-dirs-explicitly
+fallback_description:   若依赖包没有 components（或组件名不稳定），退化为在 generate() 里用 tc.variables 显式注入该依赖的 include 目录（self.dependencies["boost"].cpp_info.aggregated_components().includedirs），代价是绕过 CMakeDeps 的 find_dependency 链、依赖路径被硬编码进消费者缓存。
+fallback_command:       tc.variables["BOOST_INCLUDE_DIR"] = ";".join(self.dependencies["boost"].cpp_info.aggregated_components().includedirs)
+fallback_auto_fix:      false
+fallback_impl:          recipe-generate-variables
+
+forbid_1_pattern:       transitive_headers=True\s*\)
+forbid_1_reason:        只写 transitive_headers 而不写组件级 cpp_info.requires——组件化依赖的包级目标 include 目录为空，消费者仍会 file not found（这是「配方写了依赖、消费者仍编译红」的根因）。
+forbid_1_consequence:   test_package/下游消费者编译期 fatal error 'boost/...' file not found；若设备里另有 boost 头则表现为「设备绿 CI 红」的假绿。
+
+forbid_2_pattern:       '#include\s*<boost/utility\.hpp>[^\n]*\n(?:[^\n]*\n){0,40}[^\n]*boost::next\s*\('
+forbid_2_reason:        依赖 <boost/utility.hpp> 等头间接提供 boost::next 的写法在 Boost≥1.90 下必然编译失败（声明已不再传递）。
+forbid_2_consequence:   编译期 no member named 'next' in namespace 'boost'，报错点在模板实例化深处（note 链很长），容易被误判成编译器/标准库问题。
+
+principles:             P010
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+reference:              archives/p/permlib/0.2.9/conanfile.py
+doc_file:               knowledge/drafts/E629-permlib-headeronly-boost-transitive-headers.md
+last_updated:           2026-09-20
+source_event:           permlib/0.2.9 适配——Boost 1.90 下消费者编译与 13 个上游 Boost.Test 可执行文件的真实编译+运行验证
+
+authors:                permlib-0.2.9-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft:                  true
+contributor_id:         E629
