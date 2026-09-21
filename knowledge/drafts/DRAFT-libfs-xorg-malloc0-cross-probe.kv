@@ -1,0 +1,97 @@
+# ═══ Draft knowledge entry — libFS 1.0.10 XORG_CHECK_MALLOC_ZERO 交叉编译探针 ═══
+# Timestamp: 2026-09-17
+# Software: libFS (libfs) 1.0.10
+# Gate: local conan create (feat/libfs-1.0.10 branch)
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-libfs-xorg-malloc0-cross-probe
+trigger_tool:           configure|autotools|conan
+phase:                  configure
+error_signature:        checking whether malloc\(0\) returns NULL\.\.\. configure: error: cannot run test program while cross compiling
+severity:               2
+category:               autotools|configure|cross-compile|xorg|malloc|ohos
+match_keywords:         XORG_CHECK_MALLOC_ZERO, malloc0returnsnull,
+                         MALLOC_ZERO_RETURNS_NULL, xorg_cv_malloc0_returns_null,
+                         cannot run test program while cross compiling,
+                         malloc(0), configure: error: in, config.log
+title:                  XORG_CHECK_MALLOC_ZERO 默认 auto 分支在交叉编译下运行
+                         conftest 探测 malloc(0) 导致 configure 中止——用
+                         --disable-malloc0returnsnull 固定语义跳过运行期探针
+
+root_cause: >
+  X.Org 宏 XORG_CHECK_MALLOC_ZERO 把 --enable-malloc0returnsnull 的默认值设为
+  "auto"：当 MALLOC_ZERO_RETURNS_NULL=auto 时，configure 编译并【运行】conftest
+  程序（malloc(0)/realloc(p,0)/calloc(0,10) 后按返回值 exit(0/1)）来探测目标
+  平台 malloc(0) 语义。Conan 交叉构建（-pr:h=ohos-aarch64 之外另有独立 build
+  profile，或 configure 识别出 --host=aarch64-linux-ohos 与 --build 不同）时
+  cross_compiling=yes，ac_fn_c_try_run 无法在构建机执行 host 程序，configure
+  直接 as_fn_error "cannot run test program while cross compiling" 中止。这是
+  X.Org util-macros 的通用行为，影响所有使用 XORG_CHECK_MALLOC_ZERO 的
+  libX* 库，非 libFS 特有缺陷。注意与 AC_FUNC_MALLOC (rpl_malloc 宏替换路径)
+  是不同根因：前者是 X.Org 宏的运行期探针直接报错中止；后者是 autoconf
+  内置宏误判后替换符号在链接期才失败。
+
+affected_scope:         所有在交叉编译（尤其 HarmonyOS PC OHOS aarch64）上用
+                        autotools 构建且 configure.ac 使用 XORG_CHECK_MALLOC_ZERO
+                        的 X.Org 库（libFS、libX11 系、libXres、libXtst 等实际或
+                        潜在用户）；只要 build profile 与 host profile 不同即触发。
+
+verification_cmd:       cd build_in_harmonyos_libfs && conan create archives/l/libfs/1.0.10 \
+                          -pr:h ohos-aarch64 -pr:b ohos-aarch64 -o shared=True --build=missing
+                        # 期望: 无 --disable-malloc0returnsnull 时 configure 报
+                        # "checking whether malloc(0) returns NULL... configure: error:
+                        # cannot run test program while cross compiling"；
+                        # 加上后 configure 通过、构建与 test_package 全绿。
+
+rec_priority:           1
+rec_approach:           xorg-malloc0-cross-disable-flag
+rec_description: >
+  在 OHOS configure 参数中追加 --disable-malloc0returnsnull：XORG_CHECK_MALLOC_ZERO
+  的选项解析（enable_malloc0returnsnull 未设置时 MALLOC_ZERO_RETURNS_NULL=auto
+  才走运行探针；--disable 显式置 no）直接跳过 conftest，MALLOC_ZERO_CFLAGS 为空。
+  OHOS musl 的 malloc(0) 返回可用非 NULL 指针（与置 no 的语义一致：库不假设
+  malloc(0) 返回 NULL，不为 NULL 检查加防御代码），行为正确。一条 configure
+  参数解决，零补丁、零源码改动。libXres 1.2.1 归档已用同款修复，可交叉引用。
+  注意（实现细节）：若配方在 _configure_ohos 里从新构造的 AutotoolsToolchain
+  实例取 configure_args 拼 CLI，必须 append 到该实例后再生效；只在 generate()
+  的实例上 append 会因取值对象不同而静默丢失（libfs 首次构建实测踩坑）。
+
+rec_command:            (AutotoolsToolchain configure_args 或手工 configure CLI 中)
+                        --disable-malloc0returnsnull
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      cache-variable-override
+fallback_description:   预置 xorg_cv_malloc0_returns_null=yes 缓存变量同样跳过
+                        运行探针（auto 分支检查缓存优先），但语义方向与 OHOS 实际
+                        相反（表示 malloc(0) 返回 NULL），会引入多余防御代码，不推荐。
+fallback_command:       xorg_cv_malloc0_returns_null=no ac_cv_func_malloc_0_nonnull=yes \
+                          ./configure --host=aarch64-linux-ohos ...
+fallback_auto_fix:      false
+fallback_impl:          cross-compile-cache-override
+
+forbid_1_pattern:       xorg_cv_malloc0_returns_null=yes
+forbid_1_reason:        缓存置 yes 表示 malloc(0) 返回 NULL，与 OHOS musl 实际语义
+                        相反，库会按返回 NULL 加防御分支，行为偏离目标平台。
+forbid_1_consequence:   库内 malloc(0) 返回值检查走错分支；虽能编译通过但语义错位，
+                        交叉验证与后续维护困难。
+
+principles:             P001, P003
+similar_to:             E029 (malloc 相关但根因不同), DRAFT-ohos-autotools-rpl-malloc (AC_FUNC_MALLOC 路径)
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-libfs-xorg-malloc0-cross-probe.md
+last_updated:           2026-09-17
+source_event:           feat/libfs-1.0.10 分支本地 conan create 首跑失败：configure
+                        探针中止；加 --disable-malloc0returnsnull 后 shared/static 双绿。
+authors:                AtomCode (glm-5.3)
+source_pr:
+source_commit:
