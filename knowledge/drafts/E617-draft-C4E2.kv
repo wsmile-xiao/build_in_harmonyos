@@ -1,0 +1,76 @@
+#====================================================================
+# E617 — DLP autotools 包的 -tools 子包：默认开关与父 tarball 全量 N 口径
+#====================================================================
+# 适用家族：document liberation project（libfreehand / libmspub / libmwaw /
+#           libe-book / libcdr / libvisio ...）的 -tools 子包
+
+# Layer 0: Error Surface
+id:                     E617
+trigger_tool:           reviewers / configure / make check
+phase:                  review
+error_signature: |
+  上游实测 N > 声明 N
+  上游有用例 [0-9]+ 个但一个也没测
+  0/[0-9]+
+  Werror.*deprecated-copy
+  U16_NEXT.*undeclared
+
+# Layer 1: Recognition
+severity:               3
+category:               dlp, autotools, subpackage, test-accounting, review
+prescan_pattern:        --enable-(tests|werror)|CPPUNIT_TEST\(|check_PROGRAMS|noinst_PROGRAMS\s*=\s*fh?fuzzer
+root_cause:             |
+  (1) **默认开关**：DLP 系 configure.ac 里 `--enable-werror` 与 `--enable-tests` 的默认值
+      常常都是 **yes**（`[enable_werror=yes]` / `[enable_tests=yes]`）。后果：
+        · werror 默认开 → 2017 年代码 + clang 15 的新告警（如
+          -Wdeprecated-copy-with-user-provided-copy）直接编译失败；打包应传
+          `--disable-werror`（上游自带开关、发行版惯例），**不要**照抄老归档那种
+          `#ifdef __OHOS__` 补 operator= 的写法（PF5 禁补丁新增 __OHOS__ 行）。
+        · tests 默认开 → CPPUNIT 是默认构建期依赖，上游 CPPUnit 套件**默认进构建**。
+          也就是说"不传 --disable-tests"是沿用上游默认，不是"为凑数字放开开关"；
+          正确做法是 tool_requires 上游测试框架并在 build() 内真实 `make check`
+          （HOME 指向构建目录内沙箱，禁止写用户真实 HOME）。
+  (2) **N 口径（红线）**：-tools 子包与父包同源 tarball，审方按**父 tarball 全量注册面**
+      量 N。必须把全部候选口径数出来取"用例/注册类"最大值，断言属另一单位只披露；
+      典型读数（libfreehand-0.1.2 实测）：
+        check_PROGRAMS=1、TESTS=1、CPPUNIT_TEST 注册用例=2、suite 注册=1、
+        测试/模糊测试源文件=3（src/test 2 + src/fuzz 1）→ 主 N=3；
+        CPPUNIT_ASSERT=20（只披露）。
+      未运行项（如 fuzz 目标需 -lFuzzingEngine）写 NOT_RUN + 技术原因，不得写 PASS，
+      也不得为了"跑起来"放开 --enable-fuzzers 引入不可得依赖。
+  (3) 常见硬编译错误：`U16_NEXT(...)` 宏在 ICU 新版展开为 do{...}while(0)，源码缺分号
+      会让紧随的声明落入 while 体（报 use of undeclared identifier）。
+
+# Layer 2: Fix Strategy
+rec_approach:           disable-werror-run-real-check-and-count-parent-surface
+fix_description:        |
+  (a) configure 加 --disable-werror（不改源码、不加平台宏）。
+  (b) tool_requires 上游测试框架（DLP 系通常 cppunit/1.15.1，制品仓已发布），
+      build() 里 make → make check（HOME=build/.test-home）→ make install。
+  (c) 源码级硬错误走 patches/ 最小补丁（平台无关，无 __OHOS__）：如给 U16_NEXT 补分号。
+  (d) N 五处同源（PR 正文 / manifest.yaml / test_package/MANIFEST.yml / notes.md /
+      reports/test-report.md），台账 TOTAL = PASS + FAIL + SKIP + NOT_RUN 自洽，
+      声明 N ≥ 父 tarball 任一候选口径读数。
+
+fix_code:               |
+  # generate()
+  tc.configure_args += ["--build=aarch64-unknown-linux-gnu",
+                        "--host=aarch64-unknown-linux-gnu",
+                        "--enable-static", "--disable-shared",
+                        "--disable-werror"]        # 上游默认 yes
+  # build_requirements()
+  self.tool_requires("cppunit/1.15.1")              # --enable-tests 默认 yes
+  # build()
+  autotools.configure(); autotools.make(args=["-j1"])
+  env = Environment(); env.define("HOME", os.path.join(self.build_folder, ".test-home"))
+  with env.vars(self).apply():
+      autotools.make(target="check", args=["-j1"])
+
+fix_reference:          archives/l/libfreehand-tools/0.1.2/, archives/l/libmspub-tools/0.1.4/
+
+# Layer 3: Validation
+validation:             |
+  - 构建日志出现 `test::<Suite>::<case> : OK` / `OK (N)` / `PASS test (exit status: 0)`
+    以及 automake 汇总 `# TOTAL: 1 # PASS: 1 # FAIL: 0`
+  - `grep -c CPPUNIT_ASSERT` 与 `CPPUNIT_TEST(` 计数写进 notes 与 PR（同单位）
+  - NOT_RUN 项在 notes/PR/MANIFEST.yml 三处一致，附不可得依赖的实测命令与读数
