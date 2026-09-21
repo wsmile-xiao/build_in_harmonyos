@@ -1,0 +1,68 @@
+#====================================================================
+# E631 — CMake 视 HarmonyOS 为未知平台：SONAME/RUNPATH 标志与 UNIX 变量全缺，且 install 期 RPATH 改写破坏 OHOS 签名
+#====================================================================
+
+id:                     E631
+trigger_tool:           cmake|conan|clang|readelf
+phase:                  configuration|build|package
+error_signature:        Error loading shared library liblsl\.so|System is unknown to cmake, create|Platform/HarmonyOS to use this system|exec .* Operation not permitted|no RUNPATH|Library runpath
+
+severity:               3
+category:               cmake|platform|ohos|soname|rpath|code-signing|conan
+match_keywords:         Platform/HarmonyOS, Platform/OHOS.cmake, CMAKE_SYSTEM_NAME=HarmonyOS, CMAKE_SHARED_LIBRARY_SONAME_C_FLAG, CMAKE_EXECUTABLE_RUNTIME_C_FLAG, CMAKE_SHARED_LIBRARY_RPATH_ORIGIN_TOKEN, UNIX variable, CMAKE_INSTALL_RPATH, CMAKE_BUILD_WITH_INSTALL_RPATH, CMAKE_USER_MAKE_RULES_OVERRIDE_C, RUNPATH, SONAME, Operation not permitted, .note.ohos.ident, conan toolchain, cache_variables, tc.variables, LSL_VERSION_OVERRIDE
+title:                  CMake 在 HarmonyOS 上是「未知平台」：SONAME/RPATH 链接标志与 UNIX 变量全部缺失，且 cmake --install 的 RPATH 改写会破坏 OHOS ELF 签名
+
+root_cause:             conan 的 CMakeToolchain 把 settings.os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS，但 CMake 4.1.2 只提供 Modules/Platform/OHOS.cmake（内容仅是 include(Platform/Linux)），没有 Platform/HarmonyOS.cmake，于是平台模块回落成 generic：CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG、CMAKE_SHARED_LIBRARY_RUNTIME_{C,CXX}_FLAG/_FLAG_SEP、CMAKE_SHARED_LIBRARY_RPATH_ORIGIN_TOKEN、CMAKE_EXECUTABLE_RUNTIME_{C,CXX}_FLAG 全为空 ⇒ ①共享库即使设了 VERSION/SOVERSION 也没有 DT_SONAME；②任何 RPATH 都写不进去，bin/ 下的工具在裸环境加载不到 ../lib 的 .so。同一根因还导致 Platform/HarmonyOS-Initialize.cmake 缺失 ⇒ CMake 的 UNIX 变量根本没人 set(UNIX 1)（CMakeCache 里连 UNIX 条目都没有），于是上游 `if(UNIX AND NOT APPLE)` 分支里的 CMAKE_INSTALL_RPATH 设置被整体跳过。第三层：即使补上了 RPATH，若构建期 RPATH 与安装期 RPATH 不同，cmake --install 会对 ELF 做 RPATH_CHANGE 就地改写，破坏 OHOS 的 .note.ohos.ident 代码签名 —— 装出来的可执行文件 exec 直接 EACCES（Operation not permitted，rc=126，措辞极易被误读成路径/权限问题）。
+affected_scope:         OHOS 上用 CMake 构建、且产物含共享库或 bin/ 下可执行文件的 Conan 配方（安装了 Platform/HarmonyOS.cmake 的更新版 CMake 不受影响）；liblsl/1.18.0.b2 实测三条全中
+verification_cmd:       ① readelf -d <pkg>/lib/libX.so.N.N.N 应同时出现 (SONAME) Library soname [libX.so.N] 与 (RUNPATH) [$ORIGIN;$ORIGIN/../lib]；② env -u LD_LIBRARY_PATH <pkg>/bin/<tool> --version 必须 rc=0（不能靠 conanrun 的 LD_LIBRARY_PATH）；③ cmake --install 前后对包内每个 .so/可执行文件 sha256sum 对比必须逐字节一致；④ grep -c harmonybrew <build>/CMakeCache.txt 必须为 0
+
+rec_priority:           1
+rec_approach:           rules-override-plus-build-with-install-rpath
+rec_description:        在 generate() 里针对 OHOS 三件事一起做：①写一份规则文件（CMAKE_SHARED_LIBRARY_SONAME_*、CMAKE_SHARED_LIBRARY_RUNTIME_*、_FLAG_SEP、RPATH_LINK、RPATH_ORIGIN_TOKEN、CMAKE_EXECUTABLE_RUNTIME_* 全部按 Platform/Linux.cmake 的取值补齐），用 CMAKE_USER_MAKE_RULES_OVERRIDE_C 与 _CXX 指过去（该文件在 CMakeCInformation/CMakeCXXInformation 里、平台模块之后被 include，所以能覆盖）；②显式设 CMAKE_INSTALL_RPATH=$ORIGIN;$ORIGIN/../lib（因为 UNIX 未定义，上游的 Linux 分支不会执行）；③设 CMAKE_BUILD_WITH_INSTALL_RPATH=ON，让构建产物直接带上最终 RPATH，install 阶段两侧一致因而不再改写 ELF。先例：archives/c/curl/8.15.0.1（①的形态）、archives/a/azure-identity-cpp（只做 SONAME 的窄形态）。
+rec_command:            tc.variables["CMAKE_USER_MAKE_RULES_OVERRIDE_C"]=rules; tc.variables["CMAKE_USER_MAKE_RULES_OVERRIDE_CXX"]=rules; tc.variables["CMAKE_BUILD_WITH_INSTALL_RPATH"]="ON"; tc.variables["CMAKE_INSTALL_RPATH"]="$ORIGIN;$ORIGIN/../lib"（rules 文件内容见 doc）
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      set-CMAKE_SYSTEM_NAME-Linux
+fallback_description:   把 CMAKE_SYSTEM_NAME 直接钉成 Linux 让 Platform/Linux.cmake 生效（449 个配方在用）。代价与风险：CMAKE_HOST_SYSTEM_NAME 仍是 HarmonyOS ⇒ CMAKE_CROSSCOMPILING=TRUE，且 install 期会真的改写 RPATH —— 实测该路线下 cmake --install 后 sha256 变化、落地可执行文件 exec 报 Operation not permitted，还需另配 BUILD_WITH_INSTALL_RPATH；不推荐作为首选。
+fallback_command:       tc.cache_variables["CMAKE_SYSTEM_NAME"]="Linux"
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       CMAKE_SKIP_RPATH|CMAKE_SKIP_INSTALL_RPATH.*ON|CMAKE_PLATFORM_NO_VERSIONED_SONAME.*ON
+forbid_1_reason:        靠关闭 RPATH/SONAME 生成「消掉」告警会让 DT_NEEDED 记录不可重定位路径，bin/ 工具与消费者在裸环境都无法加载；这不是修复而是把问题挪到消费者。
+forbid_1_consequence:   包在 CI 的 L2 裸环境 smoke 与消费者的 find_package 使用场景下失败。
+
+forbid_2_pattern:       LD_LIBRARY_PATH=.*\.conan2|PATH=.*\.conan2/p/
+forbid_2_reason:        用 LD_LIBRARY_PATH 掩盖 RUNPATH 缺陷：conanrun 注入的 LD_LIBRARY_PATH 会让 test_package 全绿，只有裸环境才暴露（本批 libfstfar 实测同族）。验证必须包含 env -u LD_LIBRARY_PATH 的裸跑。
+forbid_2_consequence:   假绿：本地与 CI 的关键加载路径证据全被掩盖。
+
+forbid_3_pattern:       tc\.cache_variables\["CMAKE_USER_MAKE_RULES_OVERRIDE
+forbid_3_reason:        cache_variables 只写进 CMakePresets/命令行、不进 conan_toolchain.cmake；任何「只给 -DCMAKE_TOOLCHAIN_FILE=...」的 configure 都会静默退回无 SONAME/无 RPATH。平台修正要用 tc.variables 落进工具链文件本身（反过来，需要在 project() 之前可见的变量如 LSL_VERSION_OVERRIDE 必须用 cache_variables —— 两者语义不同，见 doc）。
+forbid_3_consequence:   同一条修法在 conan create 下有效、手工 configure 下失效，产生难以定位的环境相关假绿。
+
+principles:             P010
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-libharu-2.3.0-missing-dt-soname, E481]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E631-draft-9C41.md
+last_updated:           2026-09-20
+source_event:           liblsl/1.18.0.b2 OHOS 适配：修 SONAME/RUNPATH 缺失 + install 期 RPATH 改写破坏签名
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9C41
