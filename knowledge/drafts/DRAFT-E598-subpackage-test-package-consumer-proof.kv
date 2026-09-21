@@ -1,0 +1,185 @@
+# ═══ Draft knowledge entry — 子包 test_package 的消费者验证三件套 ═══
+# 主题：同一上游 tarball 派生的 Conan 子包，如何写一个「不是空壳、且能证明链接/运行的
+#       就是本子包产物」的 test_package 消费者测试
+# 来源: libfstfar 1.8.4（openfst-1.8.4.tar.gz；同 tarball 兄弟 libfst / libfstconst /
+#       libfstngram / libfstlookahead）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+# 关联: E596（同 tarball 子包的 N 清点与 openfst 家族配方形态；本条只补 test_package 侧，
+#       不重复 N 清点与 install shim 部分）
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id: E598
+trigger_tool: "conan|clang++|pc-pr-review"
+phase: "verify|test"
+error_signature: "undefined reference to .fst::(IsSTList|IsSTTable)|Unknown FST type|GenericRegister::GetEntry: Error loading shared library .*-fst\\.so|FstRegisterer|test\\(\\) .*(stub|print-only|pass-only)|stub_test_method|链接的不是被测包"
+severity: "2"
+category: "conan, test_package, subpackage, sub-tarball, static-link, symbol-ownership, ohos, pf3, r34"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+match_keywords: "test_package,子包,同 tarball,消费者测试,空壳测试,stub,PF3,R34,链接期证明,符号归属,cpp_info.libs,传递静态依赖,lib/fst,whole-archive,REGISTER_FST,FstRegisterer,fst-types.o,Unknown FST type,GenericRegister,静态注册表,disable-shared,shared,rpath,ORIGIN,IsSTList,IsSTTable,openfst,libfstfar,libfstconst,libfstngram"
+title: "子包 test_package 怎么证明「测的就是本子包产物」：链接期符号归属 + 运行期 API 往返 + 交付面 CLI 往返"
+prescan_pattern: "REGISTER_FST|fst-types\\.cc|GenericRegister|IsSTList|IsSTTable|--whole-archive|cpp_info\\.libs|prepend_path\\(\\s*[\"']LD_LIBRARY_PATH|enable-shared|disable-shared|rpath"
+prescan_globs: "conanfile.py, test_package/conanfile.py, test_package/*.cc, test_package/*.sh, src/lib/fst-types.cc, src/include/fst/register.h, src/include/fst/generic-register.h"
+prescan_severity: "2"
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: |
+  同一 tarball 派生的子包（libfstfar ⊂ openfst、libgmpxx ⊂ GMP、libfstconst ⊂ openfst……）
+  有一个共同的假绿面：**头上/包里的东西看起来一样**。openfst 家族尤其极端——
+  各子包都由 openfst-1.8.4.tar.gz 构建、共用同一份 include/fst/** 头文件、
+  共用 libfst.a，只有那一个 libfst<ext>.a/.so 不同。于是三类常见写法全都无法证明
+  「测的是本子包」：
+    ① 只 grep 头文件/只断言文件存在（libfstconst 的 check 脚本形态就是这一类）——
+       头文件来自共同 tarball，任何兄弟包都满足；
+    ② `self.run("echo …")` / print-only / `pass` —— PF3（create-pr 前置硬闸）与
+       R34 直接拦，CI L1e 还会做破坏性反向验证（把被测包换坏，看测试是否变红）；
+    ③ 编译一个只用**公共头文件**的消费者（openfst 绝大部分实现是 header-only 模板）——
+       把 libfst<ext>.a 删掉照样编译通过、照样跑绿，等于没测交付物。
+  第二层坑在**链接期**：openfst 的核心类型注册表用 `REGISTER_FST` 宏
+  （fst/register.h:119-120）= 文件作用域 `static FstRegisterer` 静态对象，集中在
+  lib/fst-types.cc → libfst.a 的 fst-types.o。静态链接时链接器按需取对象文件，
+  无强引用就把 fst-types.o 剔除 → `FstRegister` 表空 → `Fst<Arc>::Read` 在
+  fst/fst.h:265-271 查不到 reader，走 generic-register.h:96-100 的
+  `dlopen("<type>-fst.so")` 回退 → 失败返回 nullptr。消费者与上游测试都会在这里
+  以「Unknown FST type vector」「cannot open shared object file」的形式假败/假绿。
+  第三层是**声明面**：子包的 `cpp_info.libs` 若只写自己那一个库，下游静态链接会
+  缺本包 LIBADD 里的核心库（libfstfar.la 的 LIBADD 是 ../../lib/libfst.la）；
+  反过来 `lib/fst/` 这类扩展模块目录只在对应 `--enable-<ext>` 打开时才存在，
+  无条件 prepend 进 LD_LIBRARY_PATH 会指向不存在的目录。
+
+affected_scope: |
+  所有「一个上游 tarball 拆成多个 Conan 包」的任务，以及任何一个库的
+  `package_type=library` 子包/扩展包配方。openfst 家族（libfst / libfstconst /
+  libfstngram / libfstlookahead / libfstfar）是当前批次的高频形态；同构形态还有
+  libgmpxx ⊂ GMP、lib*-tools ⊂ 主库、以及以「-fsts/-ext」开关切分产物的 autotools 项目。
+  与外部审查 rule4（上游用例多口径清点）是两个独立环节：N 清点管「上游有多少用例」，
+  本条管「本子包自己交付的那部分有没有被真正验证」。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+verification_cmd: |
+  # 在包目录执行（干净轮）。三件套各自的机器可读标记都应出现在日志里：
+  conan create archives/l/libfstfar/1.8.4 \
+    -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+  grep -E 'HMBS_CONSUMER_CHECKS|HMBS_HARMONY_SHELL_CHECKS|HMBS_TEST_PACKAGE_RESULT|HMBS_UPSTREAM_TEST_RESULT' \
+    "$TASK_DIR"/reports/conan-create.log
+  # 期望：HMBS_CONSUMER_CHECKS=14 HMBS_CONSUMER_FAILED=0
+  #       HMBS_HARMONY_SHELL_CHECKS=8 HMBS_HARMONY_SHELL_FAILED=0
+  #       HMBS_UPSTREAM_TEST_RESULT={"discovered":10,"executed":10,"passed":10,...}
+
+rec_priority: 1
+rec_approach: "subpackage-test-package-three-way-consumer-proof"
+rec_description: |
+  【第一件：链接期符号归属证明】先在本子包的**非头文件编译单元**里找一个强符号，
+  让消费者直接调用它。判据：该符号只在本子包源码里定义，兄弟包与核心库都没有。
+  openfst/FAR 例：`fst::IsSTList` / `fst::IsSTTable` 只在
+  extensions/far/stlist.cc、sttable.cc 里定义（libfstfar.a 之外无第二处）——
+  消费者调用它们，链接期就会把「有没有链到本子包产物」变成硬事实：
+  库被删/被换 → `undefined reference to 'fst::IsSTList(...)'` 立刻失败。
+  这是对 PF3「test() 必须有 self.run 实质逻辑」与 L1e 破坏性反向验证的正解：
+  破坏被测包后测试必然变红，因为符号不存在了。
+  ⚠ 不要用「grep 头文件 / 断言 bin 里有文件」代替——那些东西来自共同 tarball，
+     兄弟包全都满足，属结构性伪断言。
+
+  【第二件：运行期 API 往返，且要过注册表】真机编译+链接+执行一段消费者代码，
+  用公共 API 走一遍真实功能路径。openfst 例：`FarWriter<StdArc>::Create(path, STLIST)`
+  → `Add(key, fst)` → `FarReader<StdArc>::Open(path)` → `Find` → `GetFst` → 比对
+  states/arcs/start。链接参数必须 `-lfstfar -Wl,--whole-archive <libdir>/libfst.a
+  -Wl,--no-whole-archive -lm -ldl`：whole-archive 包夹是保住 REGISTER_FST 静态
+  注册表的唯一手段，缺了它就退化成 dlopen("<type>-fst.so") 假败。
+  多分支时把计数打出来（`HMBS_CONSUMER_CHECKS=<n> HMBS_CONSUMER_FAILED=<m>`），
+  让「鸿蒙特有测试」行的数字可复算而不是口述。
+  ⚠ 静态/动态两种 option 都要能跑：shared 时直接 `-lfstfar -lfst`，static 时走
+     whole-archive 形态，测试脚本里按产物扩展名分支，别写死一种。
+
+  【第三件：交付面 CLI 端到端往返】子包往往还交付一组命令行工具（FAR 交付 9 个
+  `far*`；核心 `--enable-bin` 另交付 37 个 `fst*`），这些是「包 install 得对不对」
+  的独有证据面：`fstcompile in.txt in.fst` → `farcreate --far_type=stlist in.fst out.far`
+  → `farinfo out.far`（确认键名）→ `farextract --keys=<key> out.far` →
+  `fstprint <key>` 与原始文本 `diff` 一致。全程只用**包内安装的**工具绝对路径
+  （`os.path.join(dep.package_folder, "bin")`），不依赖设备 PATH 上的同名工具——
+  否则测的是设备而不是包。每一项独立计数并在末尾打
+  `HMBS_HARMONY_SHELL_CHECKS=<n> HMBS_HARMONY_SHELL_FAILED=<m>`。
+
+  【两条声明面口径（同源子包必查）】
+  ⓐ `cpp_info.libs` 要含**传递静态依赖**：看本子包 .la 的 LIBADD——
+    libfstfar.la → ../../lib/libfst.la，故写 `["fstfar", "fst"]`；
+    只写 `["fstfar"]` 会让下游静态链接缺 fst，而本包确实交付了 libfst.a，
+    声明两条既不越界也不遗漏。
+  ⓑ `package_info()` 注入 `LD_LIBRARY_PATH` 前逐目录 `os.path.isdir` 判断：
+    `lib/fst/`（openfst 的 `*-fst.so` 扩展模块目录）只在 compact/const/ngram/… 被
+    `--enable` 时才生成，本子包只开一个开关时它通常不存在，无条件 prepend 会写进
+    不存在的路径。
+
+  【第三件的额外价值：它会抓出「库能链、工具不能用」的包级缺陷】libfstfar 实测：
+  静态（--disable-shared）构建下 fst-types.o 被链接器整块剔除（该对象只有文件作用域的
+  static FstRegisterer，没有被引用的强符号），FstRegister 表空 → 包内 fstinfo/fstprint/
+  farinfo/farextract 读任何 FST 都报 `Unknown FST type "vector"`，farcreate 静默写出
+  0 条目的空档案且 **rc=0（假成功）**；而第一、二件（消费者链接、API 往返）在
+  whole-archive 下**照样全绿**——只看前两件会得到一个"通过"的假结论。
+  机械判据：`llvm-nm -C <pkg>/bin/fstinfo | grep -c FstRegisterer` = 0（静态）vs 有（动态）。
+  修法：①把默认库形态改成 shared（动态库整库加载即执行全部静态注册器，也是上游
+  `./configure` 的默认）；②或保留静态但给**交付的二进制**也用
+  `-Wl,--whole-archive <libfst.a>` 重链；③交付的二进制还要打 `$ORIGIN/../lib`
+  可重定位 rpath——libtool 不自动加，缺了在裸 PATH/无 LD_LIBRARY_PATH 下加载器
+  找不到同包 libfst.so.26（CI 的 L2 smoke 正是这么跑的）。
+  ⚠ 加 rpath 时**判据必须只看那一行 LDFLAGS**，不能看整个 Makefile 里是否出现
+  `-rpath`：automake 生成的 Makefile 天然含 `am_libfst<ext>_la_rpath = -rpath $(libdir)`
+  这类无关变量（`src/extensions/far/Makefile` 有 3 处），按整文件判断会**整文件跳过**，
+  于是 `bin/fst*`（在 `src/bin/Makefile`）拿到了 rpath 而 `bin/far*`
+  （在 `src/extensions/far/Makefile`）没有 → 前者裸跑 OK、后者 rc=127
+  `Error loading shared library libfstfarscript.so.26`。判据：
+  `for b in fstinfo farinfo; do llvm-readelf -d <pkg>/bin/$b | grep RUNPATH; done`
+  —— 两者都应是 `$ORIGIN/../lib`。这个不一致**首轮 W4 审计直接判 P1**（交付面声明与实际相反）。
+
+  【计数口径】子包的「鸿蒙特有测试」行 = 消费者断言数 + 包内 CLI 检查数（本例 14+8=22），
+  与上游 N（父 tarball 口径）分栏；两者都不与对方混算（上游 N 的清点见 E596）。
+rec_command: "sh archives/l/libfstfar/1.8.4/test_package/check_libfstfar.sh <libdir> <includedir> <bindir> <workdir>"
+rec_auto_fix: false
+rec_impl: "symbol-ownership+api-roundtrip+cli-roundtrip"
+
+fallback_priority: 2
+fallback_approach: "consumer-compile-only-with-nm-fingerprint"
+fallback_description: |
+  设备上没有可用 C++ 编译器、或包是纯可执行交付面时：改为
+  ① 对交付的库跑 `llvm-nm`/`readelf -sW` 断言本子包独有符号存在（`IsSTList` 等）
+     并比对 `sha256sum`；
+  ② 直接执行包内 CLI 做端到端往返（第三件不变）。
+  注意这只是降级形态：符号表断言不能替代真实链接，PR 里必须写明降级原因。
+fallback_command: "llvm-nm --defined-only <pkg>/lib/libfstfar.a | grep -E 'IsSTList|IsSTTable'"
+fallback_auto_fix: false
+fallback_impl: "nm-symbol-fingerprint-plus-cli-roundtrip"
+
+# ★ 禁止策略 ★
+forbid_1_pattern: "test\\(\\).*only.*(print|echo|pass)|def test\\(self\\):\\s*\\n\\s*(print|pass)"
+forbid_1_reason: "PF3/R34 明令禁止空壳测试：print-only / pass-only 的 test() 不构成验证，CI L1e 会做破坏性反向验证把它戳穿"
+forbid_1_consequence: "建 PR 阶段被 PF3 硬拦，或 CI L1e 判失败（返工一轮 CI 额度）"
+forbid_2_pattern: "grep .*include/fst/extensions/far|\"bin/farcreate\" in .*exists"
+forbid_2_reason: "只用共同 tarball 提供的头文件/文件名做断言是结构性伪断言——兄弟包全都满足，删掉本子包产物测试照样绿"
+forbid_2_consequence: "审查判「未验证交付物」，且掩盖真实链接/打包缺陷（rule4/rule12 之外的独立扣分项）"
+forbid_3_pattern: "self\\.run\\([\\\"']farcreate|subprocess.*which\\([\\\"']far"
+forbid_3_reason: "测试必须用本包安装的工具绝对路径（package_folder/bin/…），走 PATH 会命中设备上的同名外部工具，测的是设备而不是包"
+forbid_3_consequence: "换一台设备/CI worker 结论翻转（设备全绿 ≠ CI 绿）"
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to: E596（同 tarball 子包的 N 清点与 openfst 家族配方形态：configure 开关、whole-archive、install shim；本条只补 test_package 消费者侧，不重复）
+caused_by: E596（REGISTER_FST/whole-archive 的机制在本条以「消费者链接参数」形态复现；条目内已给源码位置）
+conflicts_with:
+prerequisite_of: PF3 测试闸 / R34 / CI L1e 破坏性反向验证
+
+# ═══ 元数据 ═══
+doc_file: knowledge/drafts/DRAFT-E598-subpackage-test-package-consumer-proof.md
+last_updated: 2026-09-20
+source_event: "libfstfar 1.8.4 适配（openfst-1.8.4.tar.gz 的 FAR 子包，积分赛）"
+authors: "474F"
+source_pr: "pending"
+source_commit: "pending"
+
+# ═══ 质量度量 ═══
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.85
+metrics_last_used: 2026-09-20
