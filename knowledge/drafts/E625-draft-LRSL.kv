@@ -1,0 +1,177 @@
+#====================================================================
+# E625 — 手写 makefile 的 C 包在 OHOS 上的三重确定性陷阱：
+#        硬编码 /tmp 的 mkstemp 模板（失败后还 SIGSEGV）、
+#        装出来的可执行文件没有 $ORIGIN RUNPATH（conanrun 下假绿）、
+#        CLI 不认 --version/--help（L2 裸 PATH 冒烟必红）
+#====================================================================
+
+id:                     E625
+trigger_tool:           make|clang|conan|readelf|llvm-readelf
+phase:                  build|package|testing|shadow-ci
+error_signature: |
+  Error opening output file /tmp/lrs_restartXXXXXX
+  Error opening output file /tmp/lrs_stdinXXXXXX
+  *bad input file name
+  *lrs_setup failed
+  Error loading shared library liblrs.so.1: No such file or directory
+  install: inaccessible or not found
+  lrs: inaccessible or not found
+
+severity:               3
+category:               raw-makefile|conan|cli-tool|ohos|fake-green|packaging
+match_keywords:         lrslib, lrs, lrsnash, redund, minrep, fel, raw makefile,
+                        hand-written makefile, mkstemp, tmpfilename, /tmp read-only,
+                        TMPDIR, RUNPATH, RPATH, $ORIGIN, LD_LIBRARY_PATH, conanrun,
+                        L2 smoke test, --version, --help, exit 139, SIGSEGV,
+                        install -t, DESTDIR, liblrs.so.1, transitive_headers,
+                        gmp, ARITH, suf(), OHOS, aarch64
+title:                  >-
+                        Hand-written makefile C packages on HarmonyOS - /tmp-only
+                        mkstemp, missing $ORIGIN RUNPATH, and CLIs that reject --version
+
+prescan_pattern:        '/tmp/lrs_(restart|stdin)XXXXXX|Error opening output file /tmp/|mkstemp\(tmpfilename\)|install -t \$\(DESTDIR\)|requires\("gmp/[^"]+"\)\s*$'
+
+root_cause:             >
+                        A hand-written upstream makefile (no configure, no CMake) leaves
+                        three independent failure modes that all pass on a normal Linux
+                        box and all fail on HarmonyOS PC. (1) Upstream builds its
+                        temporary-file template as a literal "/tmp/<name>XXXXXX" and calls
+                        mkstemp() on it. /tmp is read-only in the platform sandbox, so
+                        mkstemp() fails; for lrslib that silently kills the 64/128-bit
+                        overflow restart, and the subsequent cleanup call dereferences the
+                        NULL dictionary and dies with exit 139 (SIGSEGV) while the only
+                        printed lines are "*bad input file name" / "*lrs_setup failed".
+                        (2) The upstream install rule puts executables in bin/ and the
+                        shared library in lib/ but links the executables without any
+                        RUNPATH, and upstream offers no $(LDFLAGS) hook in those link
+                        rules, so the installed tools can only be loaded through
+                        LD_LIBRARY_PATH. Any consumer test that runs them under conanrun
+                        is a false green because conanrun injects LD_LIBRARY_PATH; only
+                        the L2 bare-PATH smoke (bin/<tool> --version) exposes it with
+                        rc=127 "Error loading shared library". (3) The same tools treat
+                        every argument as an input file name, so bin/<tool> --version
+                        and --help exit non-zero (and, before the fix, segfault), which
+                        fails gate L2 for every shipped executable at once.
+                        A fourth, non-visible defect: when the public header chain of a
+                        dependency-selected back end includes the dependency header
+                        (lrslib.h -> ARITH -> "lrsgmp.h" -> <gmp.h>), the recipe needs
+                        requires(..., transitive_headers=True); without it the package
+                        builds green and only downstream consumers fail to compile.
+
+affected_scope:         >
+                        Historical C/C++ projects that ship a hand-written makefile whose
+                        install/executable layout separates bin/ from lib/, that create
+                        temporary files through a literal /tmp template, and that ship
+                        command line tools. The specific templates are lrslib 0.73; the
+                        three diagnosis patterns (mkstemp template, DT_RUNPATH of every
+                        delivered executable, bare-env --version) generalize to any OHOS
+                        package with a bin/ directory.
+
+verification_cmd:       >
+                        readelf -d <pkg>/lib/liblrs.so.1.0.0 | grep -E 'SONAME|NEEDED'  # SONAME=liblrs.so.1
+                        readelf -d <pkg>/bin/lrs | grep RUNPATH                        # $ORIGIN/../lib
+                        env -u LD_LIBRARY_PATH <pkg>/bin/lrs --version                # rc=0, must not need conanrun
+                        env -u LD_LIBRARY_PATH <pkg>/bin/lrs cube.ine | grep vertices=8
+                        TMPDIR=$(mktemp -d) env -u LD_LIBRARY_PATH <pkg>/bin/lrs big.ine   # overflow restart path
+                        sha256sum <build>/bin/lrs <pkg>/bin/lrs                        # install-time rewrite check
+
+rec_priority:           1
+rec_approach:           posix-tmpdir-plus-origin-rpath-plus-cli-conventions
+rec_description:        >
+                        Patch the two mkstemp templates to honour $TMPDIR with the
+                        historical default as fallback, and guard the stage-2 cleanup so a
+                        failed setup exits instead of crashing. Add a makefile variable
+                        RUNPATHFLAGS ?= -Wl,-rpath,'$$ORIGIN/../lib' (the doubled dollar is
+                        what survives make expansion; the single quotes are what stop the
+                        shell from expanding $ORIGIN) and append it to the link rules of
+                        the installed executables - do not use a whole-file guard, check
+                        the target line. Add --version/--help handling with exit status 0
+                        to every shipped tool. Declare requires("gmp/6.3.0",
+                        transitive_headers=True) because the GMP back end's public header
+                        chain includes <gmp.h>. Reproduce the install layout in package()
+                        with copy()/os.symlink() instead of `make install` (the upstream
+                        install rule depends on `install -t`, which does not exist here).
+
+rec_command:            >
+                        make -j2 CC=<clang> CFLAGS="-O3 -Wall -Ilrsarith-011/ -I<gmp>/include
+                        -L<gmp>/lib" INCLUDEDIR=<gmp>/include LIBDIR=<gmp>/lib
+                        SHLIBFLAGS=-L<gmp>/lib all-shared;
+                        readelf -d liblrs.so.1.0.0 | grep SONAME;
+                        readelf -d lrs-shared | grep RUNPATH;
+                        env -u LD_LIBRARY_PATH ./lrs-shared --version
+
+rec_auto_fix:           false
+rec_impl:               lrslib-conan-recipe-tmpdir-rpath-cli
+
+fallback_priority:      2
+fallback_approach:      verify-rpath-and-naked-smoke-manually
+fallback_description:   >
+                        If the recipe cannot inject RUNPATH at link time (for example an
+                        upstream makefile with no hook on the executable link line and a
+                        patch policy that forbids editing it), relink the delivered
+                        executables explicitly with -Wl,-rpath,'$ORIGIN/../lib' in
+                        package() and document it, or ship library-only. Never accept a
+                        conanrun-only smoke run as evidence: it cannot distinguish a
+                        correct RUNPATH from a missing one.
+fallback_command:       >
+                        clang -Wl,-rpath,'$ORIGIN/../lib' liblrs.so lrs-shared.o -o lrs-shared -L . -llrs;
+                        readelf -d lrs-shared | grep RUNPATH
+fallback_auto_fix:      false
+fallback_impl:          manual-rpath-relink
+
+forbid_1_pattern:       conanrun.*(passed|green).*(rpath|runpath)|test_package.*env="conanrun".*(proves|证明).*(可运行|runnable)
+forbid_1_reason:        >
+                        conanrun injects LD_LIBRARY_PATH, so a broken or absent RUNPATH
+                        still loads. Passing under conanrun says nothing about the
+                        installed layout.
+forbid_1_consequence:   >
+                        The package ships tools that fail with rc=127 for every user who
+                        does not source conanrun.sh; L2 bare-PATH smoke turns red only in
+                        CI, after the local round reported success.
+
+forbid_2_pattern:       grep -q.*-rpath.*(makefile|Makefile).*&&.*(skip|return)|-rpath.*anywhere in the file
+forbid_2_reason:        >
+                        A whole-file presence guard accepts a file where only one of
+                        several link rules got the flag; the remaining targets keep the
+                        broken RUNPATH.
+forbid_2_consequence:   >
+                        Part of the delivered executables still cannot be loaded without
+                        LD_LIBRARY_PATH while the guard reports the issue as handled.
+
+forbid_3_pattern:       'mkstemp.*"/tmp/|strcpy\(tmpfilename,"/tmp/|tmpnam\('
+forbid_3_reason:        >
+                        /tmp is read-only in the OHOS sandbox; a literal /tmp template
+                        makes mkstemp() fail at run time, which in lrslib silently
+                        disables the overflow restart and ends in SIGSEGV.
+forbid_3_consequence:   >
+                        Upstream regression cases that trigger arithmetic overflow fail
+                        with exit 139 while printing only "bad input file name" and
+                        "lrs_setup failed", pointing the investigation at the input data
+                        instead of the temporary directory.
+
+forbid_4_pattern:       'make install.*DESTDIR|install -t .*DESTDIR'
+forbid_4_reason:        >
+                        The platform has no `install` command, so makefile install rules
+                        built on `install -t` abort; reproduce the layout in the recipe
+                        instead of depending on a tool that does not exist.
+forbid_4_consequence:   >
+                        package() fails with "install: inaccessible or not found" after a
+                        fully successful compile, wasting a clean round.
+
+principles:             P001, P005, P010, P016, P020
+causes:                 []
+caused_by:              []
+similar_to:             [E011, E017, E228, E424]
+conflicts_with:         []
+prerequisite_of:        >
+                        hand-written makefile packages that deliver both bin/ tools and a
+                        shared library on HarmonyOS PC
+
+doc_file:               knowledge/drafts/E625-draft-LRSL.md
+last_updated:           2026-09-20
+source_event:           lrslib/0.73 HarmonyOS PC adaptation; three defects reproduced on the device before the patch
+authors:                dsh-agent
+source_pr:
+source_commit:
+
+metrics_success_count:  1
