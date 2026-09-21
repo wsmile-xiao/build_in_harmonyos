@@ -1,0 +1,72 @@
+#====================================================================
+# E617 — autotools 代码生成器无已发布 conan 包：gperf 走 missing 包装器 + perl 走 tool_requires
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     E617
+trigger_tool:           make
+phase:                  build
+error_signature: |
+  missing: gperf
+  gperf: command not found
+  No rule to make target 'tokenhash.h'
+  use of undeclared identifier .*in_word_set
+  BUILT_SOURCES.*tokenhash
+
+# Layer 1: Recognition
+severity:               2
+category:               autotools, codegen, toolchain, ohos, conan
+prescan_pattern:        AM_MISSING_PROG.*(GPERF|PERL)|BUILT_SOURCES\s*=.*(tokenhash|gperf)
+root_cause:             |
+  autotools 包把生成源码（词法表、语法表）挂在 BUILT_SOURCES 上，由 gperf/perl 之类的
+  代码生成器在构建期生成。两类失败模式：
+  (1) gperf：archives/g/gperf/3.1 有配方但**制品仓没有 binary**
+      （conan install --requires=gperf/3.1 --build=never 实测
+      "Package 'gperf/3.1' not resolved: Unable to find ... in remotes"），
+      因此 tool_requires("gperf/...") 不可用（R36 要求依赖先发布）。
+  (2) perl：制品仓通常**有**已发布 binary（perl/5.42.2.3 实测 rc=0），可直接 tool_requires。
+  关键机制：configure.ac 用 AM_MISSING_PROG([GPERF],[gperf]) 时，若 configure 期 PATH 里
+  没有 gperf，GPERF 被设成 `${SHELL} <build>/missing gperf`；automake 的 missing 包装器
+  **在构建期重新从 PATH 解析 gperf**，找到就真实执行、找不到才报 127。
+  因此「configure 日志里 GPERF='... missing gperf'」**不等于**构建一定失败——
+  判据要看构建日志里 missing 是否真的调起了 gperf、以及生成物是否有内容。
+  另一风险：生成命令常写成 `$(GPERF) ... | sed ... > out.h`，**管道吞掉 missing 的退出码**，
+  所以「生成器缺失」不会让 make 失败，而是留下空文件——好在消费该头文件的 TU 紧接着
+  就会编译失败（未声明标识符），是响亮失败而非假绿。
+
+# Layer 2: Fix Strategy
+rec_approach:           pin-perl-via-tool-requires-and-verify-generator-actually-ran
+fix_description:        |
+  (a) perl 类生成器：直接 build_requirements() → self.tool_requires("perl/<已发布版本>")。
+      实测 conan 会把该 perl 放上构建 PATH（日志显示
+      `/…/p/perl…/p/bin/perl …/gentoken.pl`）。
+  (b) gperf 类生成器：制品仓无 binary 时**不要**用 tool_requires（会触发 R36/缺包），
+      依赖 HNP 工具链提供的 /data/service/hnp/bin/gperf（设备与 CI worker PATH 同源；
+      受支持清单见 notes/device-facts.md §一.4），并在 notes/PR 写清这一外部依赖与
+      先例（archives/l/libhubbub/0.3.8）。
+  (c) 无论哪条路，都必须用**构建日志**证明生成器真实执行过（而不是 missing 报错后被
+      管道吞掉）：查 `missing gperf` 行之后生成物是否非空且头部含生成器版本，
+      例如 `head -1 tokenhash.h` → `/* C++ code produced by gperf version 3.1 */`。
+
+fix_code:               |
+  # conanfile.py
+  def build_requirements(self):
+      self.tool_requires("pkgconf/3.0.5")
+      # 制品仓已发布的 perl：gentoken.pl 生成 tokens.gperf（BUILT_SOURCES）
+      self.tool_requires("perl/5.42.2.3")
+      # 注意：gperf 无已发布 binary，不能 tool_requires；走 HNP PATH
+
+  # 构建后自证生成器真跑过（可放进 notes.md 的证据段）
+  #   grep -n "missing gperf" <build-log>
+  #   head -1 <build>/src/lib/tokenhash.h
+  #   → /* C++ code produced by gperf version 3.1 */
+
+fix_reference:          archives/l/libfreehand-tools/0.1.2/conanfile.py, archives/l/libhubbub/0.3.8
+
+# Layer 3: Validation
+validation:             |
+  - conan install --requires=gperf/3.1 --build=never → rc=1（证明不可 tool_requires）
+  - conan install --requires=perl/5.42.2.3 --build=never → rc=0（证明可 tool_requires）
+  - 构建日志出现 `/…/perl…/bin/perl …/gentoken.pl …`（tool_requires 生效）
+  - 构建日志出现 `missing gperf --compare-strncmp -C -m 20 tokens.gperf` 且产物
+    tokenhash.h 非空、头部为 gperf 3.1 生成标记（13258 B，libfreehand-tools 0.1.2 实测）
