@@ -1,0 +1,102 @@
+draft: DRAFT-ci-worker-curl-missing-predownload
+status: pending-editor-review
+id: E7xx
+doc_file: doc/E7xx.md
+title: CI Worker 缺 curl 的三连 fail 识别与配方侧判定法——Pre-download WARN 降级是良性平台噪音，与真红因分离诊断
+category: ci, conan, download, worker-env
+severity: 2
+build_systems: conan|ci-script
+stage: download
+trigger_tool: build_and_test.sh|pre-download|predl_cache|conan create
+match_keywords: >
+  No such file or directory: 'curl', Pre-download, predownload, predl_cache,
+  will rely on conan's download, 三连 fail, curl missing, 病机 worker,
+  platform noise, 良性噪音, WARN 降级, 无 curl, worker 池
+error_signature: >
+  \[Errno 2\] No such file or directory: 'curl'.*\[Errno 2\] No such file or directory: 'curl'.*\[Errno 2\] No such file or directory: 'curl'|Pre-download: extracting source URLs from conandata\.yml.*\[fail\] \[Errno 2\] No such file or directory: 'curl'|WARN Failed to pre-download .+, will rely on conan's download
+error_excerpt: |
+  [step] Pre-download: extracting source URLs from conandata.yml...
+    [fail] [Errno 2] No such file or directory: 'curl'
+    [fail] [Errno 2] No such file or directory: 'curl'
+    [fail] [Errno 2] No such file or directory: 'curl'
+  [WARN] Failed to pre-download kxmlgui-6.26.0.tar.xz, will rely on conan's download
+  （此后流水线继续——conan 自身下载器（Python requests）成功接手：
+   "Sources correctly downloaded from https://download.kde.org/..."）
+root_cause: |
+  CI Worker 池（buildbot conan-pr-check）部分机器（实证：CI-011/CI-032 等）
+  无 curl 二进制。ci/conan/build_and_test.sh 的 Pre-download 步骤（L1164-1297）
+  用外部 curl -sL --retry 3 从 conandata.yml 提取 URL 预下载源码包并改写为
+  file:// 路径——curl 不存在时连续 3 次报 [Errno 2] FileNotFoundError。
+  关键语义：Pre-download 是"尽力而为"加速层，失败后输出 WARN（非 ERROR）
+  降级——conan 自身 source() 的 Python requests 下载器会接手，走官方 URL
+  直接下载。因此三连 curl fail + WARN 后流水线继续 = 良性平台噪音，
+  配方侧无需任何修改；真正的红因要看 conan create 阶段的实际报错。
+solution: |
+  诊断决策树（配方侧判定法，不改配方）：
+
+  1. 识别形态：三连 `[fail] [Errno 2] No such file or directory: 'curl'`
+     出现在 "[step] Pre-download: extracting source URLs from conandata.yml..."
+     步骤内——是 CI 基础设施的外部 curl，不是配方/conanfile.py 的调用。
+  2. 看降级语义：紧随其后有 `[WARN] Failed to pre-download <pkg>, will
+     rely on conan's download` → WARN 降级不阻断，conan 的下载器接手。
+  3. 分离判定：
+     a) WARN 后流水线继续推进（conan source 下载成功/conan create 走到编译
+        测试段）→ curl 三连 fail 是病机噪音，真红因（若有）另找；
+     b) conan create 后续也死在 source() 下载（Max retries exceeded/
+        ConnectTimeout）→ 是 E569 的"缺 curl + github archive 302 重定向链死"
+        场景，按 E569 改 codeload 直链；或按 E372 加权威 HTTP fallback。
+  4. 不混淆分界线：grep 配方 test_package/ 与 conanfile.py 有无 curl 调用——
+     Pre-download 病机（无 curl 调用，纯 CI 侧）vs 配方侧调 curl（CI L0o
+     门禁禁止，subprocess/os.system 调 curl/wget 下载源码会被拦——后者才需
+     改 python3 urllib/requests）。
+  5. 处置：形态 3a 直接 /rebuild 撞健康 worker（实证：CI-007/CI-012/CI-020/
+     CI-026/CI-033/CI-036 均健康，无 curl 噪音，绿）；不需要动配方。
+
+  实证（五案连环，2026-09-19 同日）：
+  - PR !10999 kxmlgui：#51136(CI-011)/#51180(CI-032) 两轮红均含三连
+    curl fail + WARN，且 conan source 下载成功（"Sources correctly
+    downloaded"）——真红因是 kconfigwidgets/6.18.0 binary missing 触发
+    源码重建失败（Error in build() method line 143 cmake.configure()），
+    与 curl 无关；换健康 worker #51251(CI-036) 绿。
+  - PR !10894 kimageformats5：#51109(CI-011) 含同款噪音，真因另判；
+    最终 #51202(CI-012) 绿（配方未改）。
+  - PR !11112 keditbookmarks：#51089/#51148/#51160/#51255/#51298 五轮含
+    同款噪音（CI-011/CI-012 混跑），最终 #51466(CI-012) 绿（配方未改）。
+  - PR !11147 daw-utf-range：#51289(CI-032) 含同款噪音，AI review 通过，
+    绿轮 #51377(CI-020) 无噪音（配方未改）。
+  - 先例 PR !9693 mmkv（E569 草稿）：Pre-download 缺 curl + 镜像前缀剥除
+    形态——curl fail 后 conan 直连也死（302 链），需配方侧改 codeload
+    直链——与本条的"无需改"是同一 worker 病灶的两种下游表现（源 URL
+    是否可达决定走 3a 还是 3b）。
+fallback: >
+  若 /rebuild 连续 3 轮撞同一病机 worker 且 conan create 的 source() 下载
+  也失败（3b 场景）：(1) 按 E569 改 codeload 直链（github archive 形态）；
+  (2) 按 E372 加权威 HTTP fallback（download.kde.org 等官方源原生可达，
+  通常无需此步）；(3) 上游有官方镜像时换 R39 允许的权威镜像；(4) 都不行
+  按环境故障上报，禁止塞个人 fork/不明 CDN（R39 红线）。禁止的反应：
+  把配方 conandata.yml 改成 http:// 或塞 gh-proxy 前缀（会被 Pre-download
+  剥除且违反 R39）。
+verify_builds: '#51136, #51180（#10999 红轮含噪音+真因分离实证）→ #51251 绿；#51109（#10894）→ #51202 绿；#51089/#51148/#51160/#51255/#51298（#11112）→ #51466 绿；#51289（#11147）→ #51377 绿；#45043 系列（#9693 mmkv 先例）'
+reference_impl: >
+  PR !10999（kxmlgui，锚 PR，本轮 B 申报）+ !10894（kimageformats5）+
+  !11112（keditbookmarks）+ !11147（daw-utf-range）四 PR 同日连环实证；
+  !9693（mmkv）E569 草稿为同病灶的配方侧修法分支。
+principles: P005
+causes: []
+caused_by: []
+similar_to: [E372, E569]
+conflicts_with: []
+prerequisite_of: []
+notes: |
+  与 E372/E569 的边界：E372 讲"配方侧怎么加权威 HTTP fallback"、E569 讲
+  "配方侧怎么改 codeload 直链"——两者都是"改配方"的修法；本条讲"什么时候
+  不用改"（判定法）：Pre-download 的 curl 三连 fail + WARN 降级本身是良性
+  噪音，先分离真红因再决定动不动配方。三条合起来覆盖"缺 curl worker"的
+  完整决策空间：无需改（本条）/改直链（E569）/加 fallback（E372）。
+  CI 侧官方依据：build_and_test.sh L1164-1297（Pre-download 机制）、
+  L904-913（L0o 门禁禁止配方侧 curl——分界线的官方定义）。
+source_event: kxmlgui 6.26.0 PR !10999 构建号 #51136/#51180（2026-09-19）
+authors: j669539 <j669539@noreply.gitcode.com>
+source_pr: !10999
+source_commit:
+last_updated: 2026-09-19
