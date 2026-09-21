@@ -1,0 +1,80 @@
+# ═══ Draft knowledge entry — autotools config.status mktemp 临时目录：toybox vs GNU mktemp 的 umask 行为差异（E011 处方在 toybox 环境实证） ═══
+# Software: hyphen 2.8.9（所有 configure 用 `(umask N && mktemp -d ./confXXXXXX)` 的 autotools 包）
+# Gate: conan create build() / configure / config.status（HMDFS）
+# Status: DRAFT — same-stem .md/.kv pair（待审核 promote 为 E 条目）
+
+id: hyphen-2.8.9-autotools-mktemp-umask-toybox-gnu
+title: config.status 临时目录 Permission denied（E011 家族）在 toybox mktemp 环境下可用 umask 002（E011 处方）解决；DRAFT-6507 的 "mktemp 恒 0700" 仅适用于 GNU 实现，须按 mktemp 实现区分
+trigger_tool: autoconf / configure / config.status / mktemp
+phase: configuration
+error_signature: config\.status.*Permission denied.*subs[0-9]*\.awk|can't create .*conf[A-Za-z0-9]+/.*Permission denied|could not setup config files machinery
+
+severity: 3
+category: platform|hmdfs|autotools|tmpdir
+match_keywords: mktemp, confXXXXXX, umask 077, umask 002, Permission denied,
+  could not setup, config files machinery, hmdfs, setgid, subs1.awk, toybox, GNU
+
+keywords: mktemp, umask, toybox, GNU coreutils, HMDFS, setgid, config.status,
+  subs1.awk, E011, DRAFT-6507, 0700, 2771, 02771, hyphen
+
+root_cause: |
+  HMDFS（uid 映射 20001006 vs 进程 uid 20020101/20020083 等）下，autotools
+  config.status 硬编码 `(umask 077 && mktemp -d ./confXXXXXX)` 创建的 0700 目录
+  对当前进程不可写，产生 "subs1.awk: Permission denied / could not setup config
+  files machinery"（E011 根因族）。
+  修复处方的适用性取决于 mktemp 的具体实现：
+  - toybox mktemp（HarmonyOS 设备 /usr/bin/mktemp -> /system/bin/toybox，
+    0.8.12）：创建目录模式遵循 umask。umask 002 时创建 02771（drwxrws--x，
+    setgid 由 HMDFS 强制），组可写，写入通过 → E011 的 "umask 放宽" 处方有效。
+  - GNU coreutils mktemp（部分 CI/worker /usr/local/bin/mktemp 165760B）：
+    `mktemp -d` 恒以 0700 创建，umask 放宽无效 → 需 DRAFT-6507 的
+    `mkdir -m 0777`（或用 shell $$-$RANDOM 同构 fallback）路径。
+  设备与 CI worker 的 mktemp 实现可能不同，修复前必须先确认解析到的 mktemp。
+
+verification: |
+  hyphen/2.8.9 on HarmonyOS PC (aarch64) 实证（2026-09-21）：
+  (1) 设备 /usr/bin/mktemp = toybox 0.8.12；`(umask 002 && /usr/bin/mktemp -d ./confXXXXXX)`
+      → drwxrws--x 2771，写入 OK；`(umask 077 && mktemp -d ./confXXXXXX)` → drwx--S--- 2700，
+      写入 Permission denied；
+  (2) 补丁将 configure 两处 `umask 077` → `umask 002` 后，config.status 临时目录创建为
+      2771，conan create（ohos-aarch64 profile）G2 全绿，含 test_package 实跑；
+  (3) fallback 分支 `(umask 002 && mkdir "$tmp")` 同步生效；附 conan-create.log。
+
+rec_approach: umask-relax-toybox | mkdir-m0777-gnu
+rec_description: |
+  1) 先确认 device/CI worker 解析到的 mktemp 实现：`readlink -f $(command -v mktemp)`。
+  2) toybox mktemp：采用 E011 处方 —— 将 configure/config.status 内
+     `umask 077 && mktemp -d ./confXXXXXX` 改为 `umask 002 && mktemp -d ./confXXXXXX`
+     （含 fallback `(umask 002 && mkdir "$tmp")`），目录创建为 2771 组可写。
+     Conan recipe 中作为 conandata patches 固化即可（apply_conandata_patches）。
+  3) GNU mktemp（umask 放宽无效时）：按 DRAFT-6507 改用 `tmp=./conf$$-$RANDOM;
+     (umask 000 && mkdir "$tmp")`（mkdir 创建时定权限，绕开 mktemp 恒 0700
+     与 HMDFS chmod 被忽略两个坑）。
+rec_command: |
+  # toybox 环境（E011 处方可用）：
+  sed -i 's/umask 077 \&\& mktemp -d/umask 002 \&\& mktemp -d/g' configure
+  sed -i 's/(umask 077 \&\& mkdir/(umask 002 \&\& mkdir/g' configure
+rec_auto_fix: true
+rec_impl: source-patch
+
+fallback_priority: 2
+fallback_approach: mktemp-wrapper-umask002
+fallback_description: 若不便改 configure，可在 PATH 前置组可写 umask 的 mktemp 包装
+fallback_command: |
+  mkdir -p $TMPDIR/bin && cat > $TMPDIR/bin/mktemp <<'EOF'
+  #!/bin/sh
+  umask 002
+  exec /usr/bin/mktemp "$@"
+  EOF
+  chmod +x $TMPDIR/bin/mktemp && PATH=$TMPDIR/bin:$PATH ./configure ...
+fallback_auto_fix: false
+
+forbid_1_pattern: treat config.status tmp 失败为 configure 语义错误
+forbid_1_reason: 属 HMDFS 权限/umask 环境问题，非 configure 逻辑错误；不应改源码逻辑或跳过验证
+
+related: E011（umask 077+config.status 家族主条目）；DRAFT-6507-cln-mktemp-0700-hmdfs
+  （GNU mktemp 恒 0700 变体，与本案 toybox 行为互补，构成 mktemp 实现分诊边界）；
+  E046（HMDFS chmod 被忽略）；E175（autoreconf-regenerate / mktemp wrapper 另一方案）
+causes: []
+caused_by: []
+similar_to: [E011, DRAFT-6507-cln-mktemp-0700-hmdfs]
