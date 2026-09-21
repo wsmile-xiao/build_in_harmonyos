@@ -1,0 +1,78 @@
+# ══ Draft knowledge entry — autotools 库在 Conan 下选 static/shared 前必须实测的两件事 ══
+# Timestamp: 2026-09-20
+# Software: libgig 4.5.2（C++ / autotools + libtool；库 + 14 个 CLI 工具）
+# Gate: 原生 make check（4 套）、conan create（ohos-aarch64 profile，clang 15）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. 复核下方证据
+#   2. 重命名为 E627.kv 并移入 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 增加一行
+id: draft-libgig-4.5.2-autotools-static-vs-shared-two-traps
+title: autotools 库在 Conan 下选 static 还是 shared：libtool 绝对 RUNPATH 与静态链接暴露的静态初始化顺序缺陷
+trigger_tool: conan|make|ld|readelf
+phase: build|testing|installation
+error_signature: "Error loading shared library|Segmentation fault \\(core dumped\\)|Library runpath: \\[//lib"
+severity: 3
+category: autotools|libtool|static-linking|rpath|static-initialization-order|cross-compile
+match_keywords: RUNPATH, RPATH, //lib, libtool, pkglib_LTLIBRARIES, --disable-shared,
+  --enable-static, configure --prefix=/, static initialization order fiasco,
+  NativeDataTypeRegistry, SIGSEGV before main, Error loading shared library,
+  bare environment smoke, LD_LIBRARY_PATH masking
+keywords: RUNPATH, libtool, pkglib_LTLIBRARIES, static initialization order,
+  static link, --disable-shared, DESTDIR, conan package prefix
+root_cause: >
+  autotools 包（configure + libtool）在 Conan 下由 `--prefix=/` 配置、`make install DESTDIR=<pkg>`
+  安装，于是 **libtool 写进二进制的 RUNPATH 是安装期计算的绝对路径**：上游 `pkglib_LTLIBRARIES`
+  装在 `$(libdir)/$(PACKAGE)`，最终得到 `RUNPATH=//lib/<pkg>`（前缀 `/` 拼出的双斜杠）。
+  该路径在设备上不存在 → 裸环境跑 `bin/<tool>` 报
+  `Error loading shared library lib<name>.so.<N>: (needed by ./<tool>)`；
+  而 `test_package` 在 `conanrun` 环境里（LD_LIBRARY_PATH 已注入）**全绿**，
+  只有清掉 LD_LIBRARY_PATH 的裸跑才暴露 —— 与 libfstfar 的 `//lib` RUNPATH 同族。
+
+  改走 `--enable-static --disable-shared` 能从结构上消除这条面（工具自包含，
+  无 DT_NEEDED、无 RUNPATH），但**静态链接会把上游潜在的静态初始化顺序缺陷激活**：
+  库内 `static` 数据成员（此处 `DataType::m_nativeTypes`，定义在 Serialization.cpp）
+  属动态初始化，而**消费者 TU 的全局对象构造器**（此处 `NativeDataTypeRegistry<T>` 注册器）
+  在自身 TU 的动态初始化阶段就调用库函数访问该成员。链接顺序为「消费者对象 → 静态库成员」
+  时，消费者的构造器先跑，访问尚未构造的 map → **在 main() 之前 SIGSEGV（rc=139，
+  连 main 第一行 write(2,...) 都打不出来）**。shared 构建下 `.so` 的初始化先于可执行文件，
+  缺陷被掩盖，所以上游从未发现（上游 configure 默认同时建 shared 与 static，
+  测试链接 .la 时取 shared）。
+approach: >
+  不要凭 upstream 的 default_options 直觉选 static/shared，**两条路都要先实测**：
+  (1) 先做 shared 变体并读 `llvm-readelf -d bin/*`：若出现 `//lib/<pkg>` 这类绝对 RUNPATH，
+  说明需要 rpath 注入或改走静态；注意只看**目标那一行**的 LDFLAGS，不要整文件守卫；
+  (2) 再做 static 变体并**真跑上游测试**：若出现「main 之前 SIGSEGV / 无任何输出」，
+  先用**对象顺序最小复现**判定是不是静态初始化顺序缺陷 —— 同一条链接命令里把库对象
+  显式排在消费者对象之前，rc 变化即确诊；
+  (3) 确诊后按上游缺陷修（把库内 static 数据成员改成函数内 static 访问器，
+  首次使用即构造，与链接顺序无关），而不是把测试改掉或退回 shared 掩盖；
+  (4) 交付前对**每个交付产物**做裸环境 smoke（`unset LD_LIBRARY_PATH`）与
+  安装前后 sha256 对比。
+rec_command: |
+  # ① shared 变体：看 RUNPATH 是不是绝对路径（本包实测 14/14 全是 //lib/libgig）
+  ./configure --prefix=/ --host=aarch64-linux-ohos --build=aarch64-linux-ohos \
+      --enable-shared --disable-static && make -j2 && make install DESTDIR=$PWD/stage
+  for f in stage/bin/*; do llvm-readelf -d "$f" | grep -E 'RUNPATH|RPATH'; done
+  (cd stage/bin && env -u LD_LIBRARY_PATH ./gigdump -v; echo "rc=$?")   # rc=127 报缺 .so
+
+  # ② static 变体：真跑上游测试（本包 serializationtests 在 main 之前 SIGSEGV）
+  ./configure --prefix=/ --host=aarch64-linux-ohos --build=aarch64-linux-ohos \
+      --enable-static --disable-shared && make -j2 && make check
+
+  # ③ 最小复现（确诊静态初始化顺序，而不是别的崩溃）
+  clang++ $CXXFLAGS t4.cpp libgig.a           -o t4    # 139
+  clang++ $CXXFLAGS ser.o t4.cpp libgig.a     -o t4b   # 0（库对象在前即不崩）
+
+  # ④ 交付前：裸环境 smoke + 安装前后 sha256
+  (cd stage/bin && for t in *; do sh -c "unset LD_LIBRARY_PATH; exec ./$t --version"; done)
+  sha256sum src/tools/gigdump stage/bin/gigdump    # 必须一致（安装不得改写 ELF）
+forbid_1_pattern: (^|[; ])env LD_LIBRARY_PATH=.*(make check|--version)
+forbid_1_reason: >
+  用 conanrun / 手工 LD_LIBRARY_PATH 跑 smoke 会掩盖错误的 RUNPATH，
+  门禁全绿但交付物在裸环境不可用（本包与 libfstfar 两次独立实测）。
+forbid_1_consequence: 假绿：CI 的 L2 裸 PATH smoke 会在最晚一环报 rc=127/loader error。
+prescan_pattern: (pkglib_LTLIBRARIES|m_nativeTypes|static std::(map|vector|string))
+principles: P004
+evidence_path: archives/l/libgig/4.5.2/reports/test-report.md
