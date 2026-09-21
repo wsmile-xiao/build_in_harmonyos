@@ -1,0 +1,101 @@
+#====================================================================
+# DRAFT-perl-buildenv-info-missing-dependency-injection — perl 依赖包只声明
+#   runenv_info（无 buildenv_info）时，其 PERL5LIB 不进下游 build 上下文
+# 触发事件: test-metrics-any 0.01 适配（PR #11279，2026-09-20 真机实测）
+#   依赖方 metrics-any/0.10（已合入 main + ohpcd）
+#====================================================================
+
+id:                     DRAFT-perl-buildenv-info-missing-dependency-injection
+trigger_tool:           perl|conan|make|testing
+phase:                  testing|build
+error_signature:        Can't locate .* in \@INC.*you may need to install|
+                         Can't locate Metrics/Any/Adapter/Test\.pm|
+                         BEGIN failed--compilation aborted.*\@INC|
+                         make test.*Fail
+
+severity:               2
+category:               ohos|perl|conan|build-env|dependency
+match_keywords:         buildenv_info, runenv_info, PERL5LIB, define_path,
+                         prepend_path, conanbuild, conanrun, @INC, Makefile.PL,
+                         make test, perl dependency, 依赖注入, build 上下文,
+                         metrics-any, test-metrics-any
+
+title:                  perl 依赖包只声明 runenv_info 时不进下游 build 上下文，下游 build() 内跑测试需自行注入 PERL5LIB
+
+root_cause:             Conan 的两个 env 通道语义不同：runenv_info 只作用于**运行**
+                         上下文（消费方运行时、test_package 的 env="conanrun"），
+                         buildenv_info 才作用于**构建**上下文（本包 build() 内执行的
+                         命令、env=["conanbuild"]）。metrics-any/0.10 的
+                         package_info() 只声明了 runenv_info
+                         （`self.runenv_info.define_path("PERL5LIB", site)`），
+                         因此下游包在 build() 内跑 `make test` 时 PERL5LIB **不含**
+                         依赖的 site 目录 → 上游测试的
+                         `use Metrics::Any::Adapter::Test` 必然报
+                         Can't locate ... in @INC。这与依赖是否声明正确无关——
+                         依赖声明是对的，缺的是**env 通道声明**。
+                         实测全库：84 个 perl 类包声明了 runenv_info，其中 **55 个
+                         （65%）未声明 buildenv_info** —— 本形态是多数派而非个例。
+
+affected_scope:         下游 perl 包的 build() 内需要 `use` 依赖模块的所有场景，
+                         尤其是**配套测试组件**（如 Test::Metrics::Any 断言
+                         Metrics::Any 指标，其上游测试必须在 build 期载入后者）；
+                         以及任何链上出现"依赖只声明 runenv_info"的组合
+
+rec_priority:           1
+rec_approach:           explicit-dependent-perl5lib-injection
+rec_description:        不改动已合入的依赖配方（R21 越权 + 会让 PR 含两个包触发
+                         CI JC6 硬失败），在下游包 build() 内自行遍历依赖的
+                         package_folder 定位其 perl lib 根（含目标相对模块路径的
+                         目录），以 `export PERL5LIB="<dep_site>:$PERL5LIB"` 前置
+                         拼接注入后再执行 make test。不要硬编码安装前缀（perl 的
+                         site 路径随其构建而异）。
+rec_command: >
+  def _find_site(self, base, rel):
+      for root, _dirs, _files in os.walk(base):
+          if os.path.isfile(os.path.join(root, rel)):
+              return root
+      return None
+  # build() 内
+  dep = self.dependencies["metrics-any"]
+  dep_site = self._find_site(dep.package_folder, "Metrics/Any.pm")
+  env_prefix = f'export PERL5LIB="{dep_site}:$PERL5LIB" && '
+  self.run(env_prefix + "make test", cwd=self.source_folder)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-env-injection
+
+rec_2_approach:         expose-own-perl5lib-with-prepend-path
+rec_2_description:      本包自身暴露 PERL5LIB 时必须用 prepend_path 而非
+                         define_path。define_path 是**覆盖**语义，链上若每个包都用
+                         它，消费方只会拿到最后一个包的路径、其余依赖模块全部不可见
+                         （本例 use Test::Metrics::Any 后立即 use
+                         Metrics::Any::Adapter，会直接失败）。prepend_path 追加，
+                         保证本包与依赖的取值都保留。
+
+forbid_1_pattern:       为让测试跑通而修改已合入的依赖配方（给依赖补 buildenv_info）
+forbid_1_reason:        R21 协作者不得改他人路径；且会让本 PR 变成"两个包"，触发 CI
+                        JC6 硬失败（一个 PR 只允许一个软件目录）
+forbid_1_consequence:   越权 + PR 被 CI 直接拦截；或改动他人制品需重新发布
+
+forbid_2_pattern:       把受限测试 skip 掉或删除依赖用例使其"变绿"
+forbid_2_reason:        R51：以上游测试真实运行并如实申报为强制要求，skip 即掩盖
+forbid_2_consequence:   审计失真（R52），且真实缺陷被隐藏到消费期才暴露
+
+forbid_3_pattern:       硬编码依赖的 perl site 路径
+forbid_3_reason:        安装前缀随 perl 构建而异（实测
+                        .../perl_5.42.0/lib/site_perl/5.42.0），换环境即失效
+forbid_3_consequence:   本地通过、CI 或他人环境失败
+
+principles:             依赖声明正确 ≠ env 通道正确（runenv/buildenv 语义有别）;
+                        不改他人已合入路径，下游自行补环境; env 变量用追加语义
+                        (prepend_path) 而非覆盖语义; 不硬编码安装前缀
+
+verification_cmd:       # 不加注入: Can't locate Metrics/Any/Adapter/Test.pm in @INC
+                         # 加注入后: Files=4, Tests=10, Result: PASS
+                         conan list "metrics-any/0.10:*" -r=ohpcd   # → 1 个 package_id
+                         find <dep.package_folder> -name "Test.pm" -path "*Adapter*"
+
+related_docs:           DRAFT-perl-module-build-makemaker-substitution
+
+source_event:           archives/t/test-metrics-any/0.01 PR#11279
+first_seen_project:     test-metrics-any/0.01
+last_updated:           2026-09-20
