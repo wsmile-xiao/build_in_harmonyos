@@ -1,0 +1,52 @@
+id: DRAFT-E7xx-conan-override-kf-version-conflict
+category: conan, kf6, dependency-management, packaging
+severity: 2
+build_systems: conan|cmake
+stage: configuration|dependency-resolution
+match_keywords: Version conflict, Conflict between, in the graph, override=True, duplicated requirement, Duplicated requirement, kconfigwidgets, KF_DEP_VERSION, find_dependency, KF6, version floor, published cap
+error_signature: "ERROR: Version conflict: Conflict between <pkg>/6.26.0 and <pkg>/6.18.0 in the graph. Conflict originates from <pkg>/6.26.0"
+error_excerpt: |
+  ERROR: Version conflict: Conflict between ki18n/6.26.0 and ki18n/6.18.0 in the graph.
+  Conflict originates from kiconthemes/6.26.0
+  (second failure mode, if a plain requires + an override requires for the same ref coexist:)
+  ConanException: Duplicated requirement: kconfig/6.26.0
+root_cause: |
+  KDE Frameworks 6 线升级时，目标库（如 kxmlgui 6.26）的多数 KF6 依赖已发布 6.26 线，
+  但个别中间层依赖（如 kconfigwidgets）在 ohpcd 只有 6.18.0 cap。该 cap 包的 conanfile
+  锁死 6.18 线传递依赖（kconfig/6.18 等），与图中 6.26 线包的传递闭包产生同包双版本，
+  conan 2 默认拒绝。同时要警惕第二个坑：同一配方里对同一 ref 先普通 requires 再
+  override=True requires 会报 Duplicated requirement（override 形式本身就是一次声明，
+  且同时把它加入直接依赖）。
+  上游 CMake 侧还有第三层：项目 CMakeLists.txt 的 find_package(KF6ConfigWidgets ${KF_DEP_VERSION})
+  与导出的 KF6XmlGuiConfig.cmake.in 模板里的 find_dependency(KF6ConfigWidgets "@KF_DEP_VERSION@")
+  都要求 6.26.0 地板——两处都要补丁降到已发布 cap（漏掉 Config.cmake.in 会让消费者
+  test_package 在 find_dependency 时报 "compatible with requested version 6.26.0" 失败）。
+solution: |
+  # conanfile.py requirements()（单一声明，不与普通 requires 重复）：
+  def requirements(self):
+      self.requires("kconfigwidgets/6.18.0")          # cap 包正常声明
+      # 其余 KF6 线全部 override=True 单声明（既是直接依赖又是全图 pin）：
+      self.requires("kconfig/6.26.0", override=True)
+      self.requires("kcoreaddons/6.26.0", override=True)
+      self.requires("ki18n/6.26.0", override=True)
+      # ... kconfigwidgets 的 6.18 传递闭包逐项顶到 6.26
+
+  # 源码补丁（两处版本地板）：
+  # 1) CMakeLists.txt: find_package(KF6ConfigWidgets 6.18.0 REQUIRED)
+  # 2) KF6<Lib>Config.cmake.in: find_dependency(KF6ConfigWidgets "6.18.0")
+
+  # 验证：conan graph info 无冲突 → conan create --build=missing
+  # （cap 包按新 package_id 从源码重建，几分钟级）
+fallback: |
+  若 override 后 cap 包源码重建失败或 ABI 不兼容（运行期符号缺失），
+  回退 ksvg 6.26.0 先例：全链统一降到 cap 包所在版本线（全 6.18），
+  补丁把 KF_DEP_VERSION 整体降低（archives/k/ksvg/6.26.0/patches/0001）。
+verify_builds: pending-CI
+prescan_pattern: "Version conflict: Conflict between"
+kb_ref:
+notes: |
+  kxmlgui 6.26.0 实证（任务 #13725）：无 override 时 conan install 直接 Version conflict；
+  override 单声明后 graph 解析通过、kconfigwidgets/6.18.0 按新 package_id 源码重建成功、
+  上游 6/6 autotests 过、test_package 过。ABI 层面：KF6 同 major 系列保持兼容，
+  override 保证运行时每库只有唯一 6.26 副本。
+last_updated: 2026-09-19
