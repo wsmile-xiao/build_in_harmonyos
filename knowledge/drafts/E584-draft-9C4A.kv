@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E584.kv，填写各字段
+# 对应的人类文档: doc/E584.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E584
+trigger_tool: clang|clang++|ld|conan
+phase: compilation|linking
+error_signature: use of undeclared identifier .res_ninit.|use of undeclared identifier .res_nquery.|use of undeclared identifier .res_nclose.|undefined (reference|symbol).*res_n(query|init|close)|cannot find -lresolv
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: ohos, libc, resolver, network, portability
+match_keywords: res_ninit,res_nquery,res_nclose,__res_state,res_query,h_errno,resolv.h,libresolv,musl,glibc
+title: OHOS libc/NDK 无 glibc 重入解析器 API（res_n*）——改用经典 res_query()/h_errno
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: OHOS 的 libc（musl 系）与 NDK 头文件只提供经典非重入解析器 API（res_init/res_query/res_search/res_send/res_mkquery + dn_expand/dn_skipname，声明见 NDK resolv.h），不提供 glibc 的 res_ninit/res_nquery/res_nclose，也没有调用方持有的 struct __res_state 语义；从 glibc 移植的 DNS 客户端（自定义 MX/A/AAAA 查询）编译期报 use of undeclared identifier .res_n*.，链接期报 undefined symbol。实测 smtpping 1.1.4 Resolver 即此模式（nm -D /system/lib64/libc.so 无 res_n* 符号）。
+affected_scope: 使用 res_ninit/res_nquery/res_nclose 或依赖 struct __res_state 自定义解析器状态的 C/C++ 程序（DNS 工具、MTA、SMTP 探测器等 glibc 系移植代码）
+verification_cmd: printf %s "#include <resolv.h>\nint main(){struct __res_state s;res_ninit(&s);return 0;}" > t.c && clang --target=aarch64-linux-ohos --sysroot=$OHOS_SDK/sysroot t.c -o t 2>&1 | grep -q res_ninit && echo CONFIRMED
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: port-to-classic-resolver-api
+rec_description: 把查询入口替换为 res_query(domain, C_IN, type, buf, len) + 全局 h_errno（保留 NO_DATA 空答案语义）；删除调用方 struct __res_state 成员与 res_ninit/res_nclose 调用；响应解析继续用 dn_expand/dn_skipname（OHOS nameser.h 提供 HEADER/T_A/T_MX/T_AAAA/C_IN/HFIXEDSZ/QFIXEDSZ/INT16SZ/INT32SZ/MAXDNAME/GETSHORT 全套，dn_expand 为 libc 弱符号但运行可用）。仅当程序单线程或 fork 并发时安全（进程级全局态）；多线程程序需加锁或自实现 DNS 客户端。
+rec_command: patch resolver.cpp: res_nquery(&m_res, domain, ...) -> res_query(domain, ...); m_res.res_h_errno == NO_DATA -> h_errno == NO_DATA; drop res_ninit/res_nclose; patch resolver.hpp: drop struct __res_state member, add #include <netdb.h> for h_errno
+rec_auto_fix: false
+rec_impl: port-to-classic-resolver-api
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: link-libresolv-shim
+fallback_description: 若源码不便改动，可链接 NDK sysroot 的 libresolv.a（OHOS 提供）以满足 res_query 链接；但 res_n* 符号本身不存在，无法靠 shim 提供真实重入语义。
+fallback_command: add -lresolv to link flags (NDK sysroot provides libresolv.a)
+fallback_auto_fix: false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: res_ninit\\(|res_nquery\\(|res_nclose\\(
+forbid_1_reason: OHOS 无这些符号与声明，保留即编译/链接失败；强行 extern 声明只会把编译错误推迟为链接错误。
+forbid_1_consequence: 编译失败 use of undeclared identifier；或链接失败 undefined reference to res_nquery
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles: P001, P007
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E584.md
+last_updated: 2026-09-20
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9C4A
