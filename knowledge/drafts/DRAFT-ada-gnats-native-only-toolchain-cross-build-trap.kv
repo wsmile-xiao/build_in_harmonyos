@@ -1,0 +1,88 @@
+# ═══ Draft knowledge entry — Ada(GNAT) 工具链仅有 OHOS 原生制品，交叉构建必然失败 ═══
+# Timestamp: 2026-09-17
+# Software: libncursesada 6.3.20211021 (task #13329) / gcc-ada 9.5.0 / binutils 2.46.0
+# Gate: 依赖解析 + conan create（validate/交叉构建）
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-ada-gnats-native-only-toolchain-cross-build-trap.md
+
+id: DRAFT-ada-gnats-native-only-toolchain-cross-build-trap
+trigger_tool: conan|tool_requires|gcc-ada|gnatmake|cross_building
+phase: preflight|dependency-resolution|build
+error_signature: gcc-ada.*native OHOS build only|The OHOS GCC Ada package supports AArch64|
+                 ConanInvalidConfiguration.*gcc-ada.*OHOS|
+                 gnatmake.*run-time library not installed correctly|cannot locate file system.ads|
+                 cannot execute .as.: execvp|gcc-ada shell proxy: No such file or directory
+
+severity: 3
+category: toolchain, ada, gnats, cross-build, dependency, ohos-only
+match_keywords: gcc-ada, gnat, gnatmake, binutils, ada, AdaCurses, libncursesada, flang-ohos,
+                 native-only, cross_building, cross compile, tool_requires, build profile,
+                 OHOS/armv8, package_type application, R47, 语言迁移
+
+title: Ada/GNAT 在 ohpcd 只有 OHOS/armv8 制品（gcc-ada、binutils、gcc 同）；交叉构建必然在依赖解析或链接阶段失败，应尽早 validate 拒绝并改用原生两 profile
+
+root_cause: 制品的 settings 就把语言钉死在目标平台上（用 R35 允许的方式取证：
+            先 conan download "gcc-ada/9.5.0" -r=ohpcd，再对本地缓存 conan list "gcc-ada/9.5.0:*"）：
+            结果 os: OHOS, arch: armv8（package_type=application）；
+            binutils/2.46.0 与 gcc/9.5.0 同样只有 OHOS/armv8 制品；
+            gcc-ada 的 validate() 明确 raise（str(os) != "OHOS" 或 str(arch) != "armv8"）。
+            而 tool_requires 默认按 **build profile** 解析：WSL 交叉用 -pr:b=default（Linux/x86_64）时，
+            gcc-ada 被请求为 Linux 包 → 直接 ConanInvalidConfiguration 或无可用二进制；
+            即使侥幸取到 OHOS 制品，OHOS 原生 aarch64 的 gnatmake/gcc 也无法在 x86_64 宿主上执行。
+            本质：Ada 前端不能由 C-only 编译器构建（见 DRAFT-gcc-ada-ohos-xpm-seed-loader 的自举 seed），
+            因此不存在"用宿主 GCC 交叉编 Ada"的常规路径。
+
+affected_scope: 所有 Ada（GNAT）库/工具；凡 tool_requires 到"只有目标平台制品"的工具链（Ada、
+                以及同为 OHOS/armv8 的 flang-ohos、gcc、binutils）的项目；
+                任何用 -pr:b=default 的 WSL 交叉流程
+
+verification_cmd: conan download "gcc-ada/9.5.0" -r=ohpcd（R35：判断远端 binary 存在性禁止用 conan list/conan search，必须用 download）；
+                  下载后对本地缓存执行 conan list "gcc-ada/9.5.0:*" 查看 settings os/arch；配方内用 cross_building(self) 判定
+                  在配方内用 conan.tools.build.cross_building(self) 判定并在 validate() 拒绝；
+                  正确构建命令见 ci/conan/profiles/ohos-aarch64 头部注释（-pr:h 与 -pr:b 同一 profile）
+
+rec_priority: 1
+rec_approach: reject-cross-early-and-build-with-native-two-profiles
+rec_command: ①在 build_requirements() 里 tool_requires("gcc-ada/<ver>") 与 tool_requires("binutils/<ver>")；
+             ②在 validate() 里 if cross_building(self): raise ConanInvalidConfiguration(说明原因 + 给出正确命令)；
+             ③CI/交付一律用原生两 profile：conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64；
+             ④C 胶水必须与 Ada 同源：configure.in 的 CF_PROG_CC(gnatgcc gcc cc) 会被已注入的 $CC 抢先，
+               需在 generate() 里把 CC/CXX 覆写回 gcc/g++（gcc-ada）
+rec_description: 把"工具链只有 OHOS 原生制品"当成一等约束处理：先看清 settings，再尽早 validate 拒绝交叉，
+                 然后走原生两 profile；不要把它留到链接阶段以 gnatmake/ld 的晦涩报错暴露。
+                 另需注意 as/ld 由 binutils 提供（gcc-ada 包内没有汇编器/链接器），必须一并 tool_requires。
+rec_auto_fix: false
+rec_impl: 配方片段：
+          from conan.tools.build import cross_building
+          def build_requirements(self):
+              self.tool_requires("gcc-ada/9.5.0"); self.tool_requires("binutils/2.46.0")
+          def validate(self):
+              if cross_building(self): raise ConanInvalidConfiguration("...native OHOS build only...")
+          def generate(self):
+              tc = AutotoolsToolchain(self); env = tc.environment()
+              env.define("CC", "gcc"); env.define("CXX", "g++"); tc.generate(env)
+
+fallback_priority: 2
+fallback_approach: local-qemu-proot-execution-path
+fallback_description: 若必须在 x86_64 开发机上验证，可自建本地执行通路：qemu-aarch64-static 跑 OHOS 原生 ELF，
+                      proot 接管嵌套 execve（gcc→gnat1/as/ld，无需 root/binfmt）。三个必踩的坑：
+                      ①SDK sysroot 的 libc.so 只是链接桩（72KB，当 loader 用会 segfault），需换真正的 musl loader；
+                      ②必须同时 -isystem <sysroot>/usr/include 与 <sysroot>/usr/include/aarch64-linux-ohos（bits/alltypes.h 在后者）；
+                      ③GNU ld 在 qemu+proot 下报 EINVAL，链接器要换成 SDK 自带的 host-native ld.lld；
+                      另：guest 的 busybox 符号链接目录不可加进宿主 PATH（会 Exec format error）。
+                      局限：gcc.ohos-wrapper 注入的是设备绝对路径（/data/service/hnp/.../libunwind.a），
+                      proot bind 对嵌套 exec 出的 qemu 进程不可见 → 本地可完成编译与 gnatbind，链接以 CI 为准。
+
+forbid_1_pattern: 在交叉 profile 下强行把 gcc-ada 当 build 工具塞进 PATH 然后凭"编译通过"交付
+forbid_1_reason: OHOS 原生 aarch64 工具链在 x86_64 宿主上无法执行；即便用 qemu 跑通编译，
+                 链接/异常传播（libunwind 注入）语义与真机不同，不能作为交付证据
+forbid_2_pattern: 因为交叉编不了 Ada，就把 Ada 库改写成 C 或删除 Ada 绑定
+forbid_2_reason: 破坏上游交付物；正确做法是原生构建 + 如实记录语言
+
+similar_to: DRAFT-gcc-ada-ohos-link-only-libunwind (gcc-ada 链接期 libunwind 注入),
+            DRAFT-gcc-ada-ohos-xpm-seed-loader (Ada 前端需 seed 自举),
+            DRAFT-flang-minimal-runtime-link-contract (flang-ohos 同样 OHOS/armv8),
+            DRAFT-below-ohos-unsigned-rust-toolchain (另一"工具链仅有目标平台制品"实例)
+
+source_event: task #13329 libncursesada 6.3.20211021，2026-09-17 实测
+authors: ohpcd
+doc_file: DRAFT-ada-gnats-native-only-toolchain-cross-build-trap.md
