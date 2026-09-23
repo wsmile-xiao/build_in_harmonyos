@@ -1,0 +1,222 @@
+#====================================================================
+# DRAFT-E621-libheif-svtenc-1.23.0-encoder-plugin-options-and-cpu-thread-capability
+#   「编码器后端」插件子包的构建开关矩阵与 SIMD/多线程能力口径
+#   （libheif 的 SVT-AV1 编码后端 = 树内目标 heif-svtenc → libheif-svtenc.so）
+# 来源: feat/libheif-svtenc-1.23.0 适配 HarmonyOS PC（积分赛/新包）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E621-libheif-svtenc-1.23.0-encoder-plugin-options-and-cpu-thread-capability
+trigger_tool:           任务分派|cmake|conan|conan-verify|test_package
+phase:                  recipe-authoring|build|verification
+error_signature: |
+  Not compiling '<name>' backend|
+  cannot find -lSvtAv1Enc|
+  undefined reference to `pthread_setaffinity_np'|
+  no member named 'all_of' in namespace 'std::ranges'|
+  System is unknown to cmake, create: Platform/HarmonyOS|
+  DT_NEEDED.*\.\./libheif\.so|
+  dlopen.*libheif-.*\.so.*failed|
+  readelf -d <lib> 无 SONAME 行|
+  heif_have_encoder_for_format.*== *0|
+  插件装了但编码器没注册
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               packaging, plugin, options-matrix, simd, threading, verification
+match_keywords: |
+  plugin_option, WITH_SvtEnc, WITH_SvtEnc_PLUGIN, ENABLE_PLUGIN_LOADING,
+  plugin_compilation, heif-svtenc, libheif-svtenc, 编码后端, 编码插件,
+  SVT-AV1, SvtAv1Enc, svt_threads.h, EB_CREATE_THREAD,
+  pthread_setaffinity_np, __OHOS__, __linux__, ASM_NEON, NASM, NEON,
+  heif_have_encoder_for_format, DT_NEEDED, 私有 prefix, SVT_AV1_LTO,
+  CMAKE_SYSTEM_NAME, SONAME, Platform/HarmonyOS, Platform/OHOS,
+  _LIBCPP_ENABLE_EXPERIMENTAL, std::ranges
+title:                「编码器后端」插件子包：交付面必须同时满足 WITH_X + WITH_X_PLUGIN + ENABLE_PLUGIN_LOADING，能力证据必须落到 DT_NEEDED + 真跑一次编码，SIMD/线程亲和要按 __OHOS__∩__linux__ 双重定义判
+prescan_pattern:        ^archives/[a-z]/(lib|libs)?[a-z0-9_]*(heif|svtenc|svt|av1)[a-z0-9_-]*$
+prescan_globs:          archives/*/*heif*/*/conanfile.py, archives/*/svt*/*/conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: |
+  编解码类父库（libheif 型）把后端做成「同一个宏切三种形态」，而**编码后端与解码后端的
+  默认值不同**，导致照抄同族先例会静默错交付：
+  `macro(plugin_option NAME display defaultEnabled defaultPlugin)` 的实参矩阵（libheif 1.23.0
+  实测）——编码器 SvtEnc/RAV1E/OpenJPEG_ENCODER/OpenJPEG_DECODER/OPENJPH 「OFF ON」，
+  X265/X264/AOM_ENCODER「ON OFF」，解码器 LIBDE265「ON OFF」、DAV1D「OFF ON」。
+  `plugin_compilation(name …)` 的三分支：①found∧WITH_X∧PLUGIN_LOADING∧WITH_X_PLUGIN →
+  `add_library(heif-<name> MODULE)`（**唯一产生命名产物的分支**）；②found∧WITH_X 但插件
+  条件不成立 → `target_sources(heif PRIVATE …)` 静态编入宿主；③否则打
+  `Not compiling '<name>' backend`。分支②③都**编译成功、exit 0、没有任何告警**，包名所
+  指的 `libheif-<name>.so` 却根本不存在——典型的"绿但交付面为空"。
+  第二类坑在**能力口径**：插件文件存在 ≠ 后端可用。插件装载是运行期 dlopen，宿主按
+  目录扫描；编码器是否真的注册要问 `heif_have_encoder_for_format(AV1)`，而"注册成功"
+  也仍不等于"能编码"（配置参数、SIMD 分支、线程创建都在第一次 encode 才走到）。
+  第三类坑在**CPU/多线程特性**：OHOS 的 clang 同时定义 `__linux__` 与 `__OHOS__`，
+  于是上游所有 `#if defined(__linux__) && !defined(__ANDROID__)` 的 Linux-only 分支
+  **在 OHOS 上一律被选中**——SVT-AV1 的 `svt_threads.h` 就在该分支里调用
+  `pthread_setaffinity_np()`，而 OHOS 不提供该函数（链接期才炸）。反向的假绿同样存在：
+  补丁把它排除到 `#else` 分支后线程照样能建，只是不再钉线程亲和——**功能退化不是失败**，
+  所以"链接通过"不能当适配完成的证据。SIMD 侧同理：aarch64 走 NEON（不需要 NASM），
+  configure 打印的 `HAVE_ARM_PLATFORM`/`NEON_FLAG_SUPPORTED` 只是探测结果，
+  真正的判据是编译目标里出现 `ASM_NEON` 对象且运行期真跑通一次编码。
+  第四类坑在**平台模块**：设备 `uname -s` 报 `HarmonyOS`，而 SDK 的 CMake 只有
+  `Platform/OHOS.cmake`、没有 `Platform/HarmonyOS.cmake` → CMake 落「未知平台」回退
+  （配置期打印 `System is unknown to cmake, create: Platform/HarmonyOS`），
+  `CMAKE_SHARED_LIBRARY_SONAME_*` 未定义 → **共享库不带 SONAME**（`readelf -d` 无 SONAME 行）。
+  后果在插件形态下被放大：MODULE 链接宿主时把**构建期路径**写进 `DT_NEEDED`
+  （带斜杠 → 按 CWD 解析），宿主 `dlopen` 必失败，而构建期一切正常（假绿）。
+  这一条同时解释了两件事：仓库既有 `archives/l/libheif/1.18.2/notes.md` 的
+  "NEEDED 硬编码相对路径、未解决"，以及为什么全仓库 693 个配方都写
+  `CMAKE_SYSTEM_NAME=Linux`。
+
+affected_scope: |
+  所有「父库 + 可插拔后端」形态的编解码包，以及任何要判 Linux-only 分支在 OHOS 上是否
+  被选中的移植任务。仓内实证同族：libheif 的 7 个后端子包（svtenc/aom/dav1d/jpeg/
+  openh264/openjpeg/libde265）、handbrake 1.11.2（内树构建 33 个 contribs 含 svt-av1）、
+  msquic 2.6.1（同为 pthread_setaffinity_np 的 android guard 形态）。判类与交付面归属见
+  DRAFT-E618；本条只管「编码后端开关矩阵 + 能力/CPU 特性口径」。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           option-matrix-first-then-evidence-by-dt-needed-and-real-encode
+rec_description: |
+  【第一步 开关矩阵：三件套缺一不可，且要显式写全其余后端】
+  交付 heif-<name> 插件模块必须同时：
+    ENABLE_PLUGIN_LOADING=ON  ∧  WITH_<Name>=ON  ∧  WITH_<Name>_PLUGIN=ON
+  并把**其余全部** WITH_* 与 WITH_*_PLUGIN 显式置 False（默认值矩阵不对称为陷阱来源）。
+  自检（不看 cmake 的 ✅，看产物）：构建日志里必须出现
+  `Compiling '<name>' as dynamic plugin`，且 install 树里必须有 `libheif-<name>.so`。
+
+  【第二步 能力证据三件套（register-only 不算）】
+  ① readelf -d  <pkg>/lib/libheif/libheif-<name>.so | grep NEEDED
+       —— 必须同时有宿主（libheif.so）与后端运行库（如 libSvtAv1Enc.so*）；
+  ② 宿主侧注册断言：heif_have_encoder_for_format(<格式>) == 1，并用**未启用的后端**做
+     反证（同格式解码器 / 其它格式编码器必须 == 0），排除"其实是别的后端在应答"；
+  ③ 真跑一次编码并把输出落盘断言非空（heif_context_encode_image → heif_context_write_to_file）。
+     只有 ③ 会走到后端的配置/线程/SIMD 代码路径；①②全绿而 ③ 失败＝后端其实不可用。
+
+  【第三步 CPU/多线程特性口径】
+  · 判 Linux-only 分支是否被选中，不能只看 `__linux__`：OHOS 同时定义 `__OHOS__`，要按
+    「定义集合」判（clang -E 打印两行即可证明），再把上游 `#if defined(__linux__) &&
+    !defined(__ANDROID__)` 补成 `… && !defined(__OHOS__)`；
+  · 补丁落在**被内树构建的那个依赖的源码树**里（不一定要动父 tarball）：conandata.yml
+    的独立键 + `base_path` 指向子目录即可（见 rec_command）；
+  · 线程亲和丢失属功能退化：notes 要写清"退化到什么程度、如何验证其余功能未受损"，
+    不得写成"无影响"也不得写成"失败"；
+  · SIMD：aarch64 走 NEON 路径无需 NASM；验收看编译日志里的 NEON 目标对象存在 +
+    运行期真跑（③）。
+
+  【第四步 平台模块与 SONAME（插件形态下是硬伤）】
+  · 设备 `uname -s` = HarmonyOS，而 SDK 的 CMake 只有 Platform/OHOS.cmake、没有
+    Platform/HarmonyOS.cmake → CMake 落"未知平台"回退（配置期打印
+    `System is unknown to cmake, create: Platform/HarmonyOS`），
+    CMAKE_SHARED_LIBRARY_SONAME_* 未定义 → 共享库**不带 SONAME**；
+  · 自检：`readelf -d <lib>.so | grep SONAME`，无输出即中招；再看
+    `readelf -d <plugin>.so | grep NEEDED`——出现带斜杠的路径（如 `../libheif.so`）
+    就是它，运行期宿主 dlopen 必失败而构建期全程绿色；
+  · 修法：`tc.variables["CMAKE_SYSTEM_NAME"] = "Linux"`。**必须用 variables 而不是
+    cache_variables**——只有 variables 会落进 conan_toolchain.cmake，内树子工程复用
+    同一份 toolchain 时才一并生效；子工程若用 `-DCMAKE_TOOLCHAIN_FILE` 单独 configure，
+    仍建议再显式传一次 `-DCMAKE_SYSTEM_NAME=Linux` 兜底（两条路都覆盖）。
+    仓库 693 个配方同口径，先例 archives/a/ableton-link/3.1.2。
+rec_command: |
+  # —— 开关矩阵（父 tarball 根）——
+  grep -n 'plugin_option(' CMakeLists.txt
+  grep -n -A4 'macro(plugin_compilation ' libheif/plugins/CMakeLists.txt
+  # —— 确认 Linux-only 分支在 OHOS 上被选中（两行同时输出即 __OHOS__∧__linux__）——
+  printf '#ifdef __OHOS__\nOHOS_YES\n#endif\n#if defined(__linux__)\nLINUX_YES\n#endif\n' > "$TASK_DIR/probe/m.c" && \
+    /data/service/hnp/bin/clang -E "$TASK_DIR/probe/m.c" | grep -E 'OHOS_YES|LINUX_YES'
+  # —— 补丁适用性（内树构建的依赖源码树内 dry-run）——
+  cd "$TASK_DIR/upstream/SVT-AV1-v3.1.2" && git apply --check -p1 <patches>/0001-*.patch
+  # —— 能力证据三件套（装好后）——
+  # 包目录用 conan cache path 取（先 conan list "libheif-svtenc/1.23.0:*" 拿 package_id）；
+  # 直接对最终制品做 readelf，别拿构建树当证据：
+  readelf -d <包目录>/lib/libheif/libheif-svtenc.so | grep NEEDED
+  readelf -d <包目录>/lib/libSvtAv1Enc.so.3 | grep SONAME
+  # 运行期：test_package 的 14 项检查（含真跑一次 AV1 编码并断言输出 AVIF 非空）
+  conan test <包目录>/test_package libheif-svtenc/1.23.0
+rec_auto_fix:           false
+rec_impl:               option-matrix-then-dt-needed-and-real-encode
+
+fallback_priority:      2
+fallback_approach:      encoder-in-tree-when-registry-has-no-package
+fallback_description: |
+  若后端在制品仓**没有**任何版本（R35 实测：conan install --build=never / conan download
+  --only-recipe，且要带已发布包与篡改版本的对照组），不要声明 self.requires()——R36 是机械
+  门禁（finish step[5/10] 与 CI L0i 对每个 requires() 跑 conan download --only-recipe），
+  必然 HANDOFF。可行解是"包内树构建该后端"：requirements() 为空 + 源码 URL 放
+  conandata.yml 的独立键（CI 的 mirror-fallback 与 pre-download **只扫 conandata.yml**，
+  硬编码进 conanfile.py 就失去预下载/镜像回退）+ 私有 prefix（R49）+ 复用 CMakeToolchain
+  生成的 conan_toolchain.cmake（R33）。仓内已合并先例：handbrake 1.11.2 的 33 个 contribs。
+fallback_command: |
+  conan install --requires=svt-av1/4.1.0 --build=never -pr:h="$HOST_PROFILE"   # 期望 rc=1
+  conan download --only-recipe libde265/1.0.18 -r=ohpcd                        # 对照组 rc=0
+  conan download --only-recipe libde265/9.9.9  -r=ohpcd                        # 负对照 rc=1
+fallback_auto_fix:      false
+fallback_impl:          in-tree-build-bundled-encoder
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只设\s*WITH_[A-Za-z]+\s*=\s*True|WITH_[A-Za-z]+_PLUGIN.*未设|Not compiling.*backend.*忽略
+forbid_1_reason: |
+  WITH_X=ON 而 WITH_X_PLUGIN 保持默认时，后端被静态编入宿主或直接不编译；
+  两种情况 cmake 都 exit 0、无告警，但包名所指的 libheif-<name>.so 不存在。
+forbid_1_consequence:  交付面为空却"构建成功"（假绿），CI L0 结构检查与 W4 交付面核验判不符
+forbid_2_pattern:       heif_have_(encoder|decoder)_for_format.*==\s*1.*(通过|足够)|只断言注册
+forbid_2_reason: |
+  注册只证明 MODULE 被 dlopen 且后端声明了能力；编码器配置、线程创建、SIMD 分支
+  全在第一次 encode 才走到（SVT-AV1 的 EB_CREATE_THREAD 就在那里）。
+forbid_2_consequence:  后端其实不可用（缺库/参数不兼容）却报 PASS，CI/审查复算时暴露
+forbid_3_pattern:       线程亲和.*无影响|pthread_setaffinity_np.*(跳过|删除).*即可
+forbid_3_reason: |
+  排除 __OHOS__ 后线程仍创建、只是不再钉核，是**功能退化**：不能写成"无影响"，
+  也不能把"链接通过"当作适配完成的证据。要写清退化范围与替代验证（真跑编码）。
+forbid_3_consequence:  notes/manifest 与实测不符，W4 判描述失真（P1）
+forbid_4_pattern:      已定义\s*__OHOS__.*(所以|则).*无需补丁|只判\s*__linux__
+forbid_4_reason: |
+  OHOS 的 clang 同时定义 __linux__ 与 __OHOS__，上游 Linux-only 分支会被选中；
+  "定义了 __OHOS__" 恰恰是**需要**排除它的理由，不是跳过补丁的理由。
+forbid_4_consequence:  链接期 undefined reference to pthread_setaffinity_np（或更糟：静默走错分支）
+forbid_5_pattern:      只按\s*add_test\s*|\bN\s*=\s*(39|41)\b
+forbid_5_reason: |
+  子包按父 tarball 全量注册面取「用例/注册类」最大值：libheif 1.23.0 的 Catch2
+  TEST_CASE=217 ≫ CTest add_test=39、测试源文件=41（断言 4016 是另一单位，只披露）。
+forbid_5_consequence:  外部审查 rule4 判少报直接不通过
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to: |
+  DRAFT-E618-libheif-libde265-1.23.0-in-tree-plugin-module-subpackage（子包判类与交付面归属）、
+  DRAFT-msquic-2.6.1-pthread-setaffinity-np-android-guard（同一 __OHOS__ 排除形态）、
+  DRAFT-ohos-libcxx15-missing-cpp20-ranges-algorithms（宿主 C++20 能力缺口，本任务实测命中）、
+  archives/h/handbrake/1.11.2（内树构建编码器的已合并先例）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd: |
+  cd "$TASK_DIR/upstream/libheif-1.23.0" && \
+  grep -n 'plugin_option(' CMakeLists.txt | wc -l && \
+  grep -rho 'TEST_CASE' tests/*.cc | wc -l && \
+  printf '#ifdef __OHOS__\nOHOS_YES\n#endif\n#if defined(__linux__)\nLINUX_YES\n#endif\n' > "$TASK_DIR/probe/m.c" && \
+  /data/service/hnp/bin/clang -E "$TASK_DIR/probe/m.c" | grep -cE 'OHOS_YES|LINUX_YES'
+doc_file:               knowledge/drafts/DRAFT-E621-libheif-svtenc-1.23.0-encoder-plugin-options-and-cpu-thread-capability.md
+last_updated:           2026-09-20
+source_event: |
+  feat/libheif-svtenc-1.23.0 适配 HarmonyOS PC
+  （libheif 1.23.0 树内 SVT-AV1 编码后端插件模块，产物 lib/libheif/libheif-svtenc.so；
+   制品仓无 svt-av1 任何版本 → 包内树构建官方 v3.1.2 + OHOS 线程亲和补丁；
+   自包含交付插件装载版宿主；父全量注册面 N=217）
+authors:                SunShine_06
+source_pr:              ""
+source_commit:          ""
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20
