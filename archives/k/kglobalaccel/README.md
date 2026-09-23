@@ -1,8 +1,9 @@
 # kglobalaccel
 
-KDE Frameworks 6 global-shortcut framework (libKF6GlobalAccel.so). Provides
-application-global keyboard shortcuts that work independently of the focused
-window, plus the `KDED`-side registration interface over D-Bus.
+KDE Frameworks global-shortcut framework: the KF6 branch builds
+libKF6GlobalAccel.so; the KF5 branch (5.116.0) builds libKF5GlobalAccel.so.
+Provides application-global keyboard shortcuts that work independently of the
+focused window, plus the `KDED`-side registration interface over D-Bus.
 
 - Upstream: https://invent.kde.org/frameworks/kglobalaccel
 - License: LGPL-2.0-or-later
@@ -13,6 +14,7 @@ window, plus the `KDED`-side registration interface over D-Bus.
 
 | Version | Status | Notes |
 |---------|--------|-------|
+| 5.116.0 | built  | KF5 branch (Qt5): qt5-qtbase/5.15.2.2 (Qt5::DBus + Qt5::Widgets) + qt5-qtdeclarative/5.15.2 (tests) + ecm/6.26.0 (tool); BUILD_RUNTIME=OFF excludes the X11/XCB-only kglobalacceld daemon and its KF5Config/CoreAddons/Crash/DBusAddons/WindowSystem dependency block |
 | 6.26.0  | built  | First HarmonyOS PC adaptation: qtbase-sql-dbus 6.11.1 (Qt6::DBus) + qt6linguisttools 6.11.1 (poqm) + qtdeclarative 6.11.1 (tests) + ecm 6.26.0 |
 
 ## OHOS adaptation notes
