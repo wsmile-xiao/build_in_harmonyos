@@ -1,0 +1,41 @@
+#====================================================================
+# DRAFT-libuninum-2.7-lp64-ilp32-type-assumption-defects - ILP32-era C libraries on OHOS LP64: wchar_t/UTF32 width mismatch and zero-length read() assumptions
+#====================================================================
+
+id: DRAFT-libuninum-2.7-lp64-ilp32-type-assumption-defects
+trigger_tool: clang|bionic|cli
+phase: build|testing
+error_signature: CLI 每行只输出首字符|CLI 每行只读取首字符|output truncated.*first character|putu8s.*wchar_t|read\(fd.*0\).*-1
+
+severity: 3
+category: lp64|portability|wchar|posix-read|cli-tool|consumer-test
+match_keywords: wchar_t, UTF32, unsigned long, LP64, ILP32, aarch64, bionic, read fd buf 0, putu8s, fputu8, UTF8in, 单字符, 截断, 首字符, 类型宽度, end-to-end, numconv, bindirs, consumer test
+title: ILP32 时代 C 库在 OHOS LP64 (aarch64/bionic) 的类型宽度假设缺陷：wchar_t 与 unsigned long 混用、零长度 read 返回 -1
+
+root_cause: ILP32 时代（2000-2012）C 源码中"码点/宽字符 = 4 字节"的隐含假设在 LP64 上失效：(1) 边界层函数以 wchar_t(4B) 作形参而调用方按 UTF32=unsigned long(8B) 传缓冲，LP64 下 wchar_t != unsigned long，输出循环在首个码点高 4 字节 0 处当 L'\0' 终止，每行只输出首字符；(2) read(fd,buf,0) 零长度调用 glibc 返回 0 而 bionic 返回 -1，依赖该返回值的尾字节循环（while (BytesRead > 0 || BytesSoFar < BytesNeeded)）会过量吞读整行余下输入，每行只读入首字符。症状（CLI 每行单字符）与根因（类型/系统调用）分离，库 API 级测试全部通过，极易误判为平台 execve/文件系统问题。
+affected_scope: ILP32 时代的 C 库在 OHOS（aarch64 LP64 + bionic）构建后，库 API 正常但自带 CLI 工具每行单字符读/写；直接使用 read()/write() 并依赖零长度调用返回 0 的代码；需要同时交付库与 CLI 工具的包。libuninum 2.7 实测受影响（uniio.c putu8s/fputu8/UTF8in）。
+verification_cmd: 库级探针逐码点打印 IntToString 结果应完整；CLI 管道用例 printf '6453' | numconv -f Western -t Arabic_Western 输出应为 4 字符 8 字节（٦٤٥٣），修复前为单字符；test_package CLI 端到端用例（dependencies 元数据定位 bindirs）应通过。
+
+rec_priority: 1
+rec_approach: align-boundary-types-and-guard-zero-read
+rec_description: 边界层函数形参改为与调用方 extern 声明一致的显式宽度类型（UTF32/uint32_t，不用 wchar_t 表达码点语义）；零长度 read 用守卫消除（仅在 BytesSoFar < BytesNeeded 时读取，BytesRead <= 0 终止）；同时新增消费者 CLI 端到端用例（dependencies 元数据定位被测包可执行文件，不依赖 PATH）断言多字符输入输出的完整性，防止回归。
+rec_command: "补丁1: -fputu8(wchar_t c,FILE *fp) / +fputu8(UTF32 c,FILE *fp); -putu8s(wchar_t *str,FILE *fp) / +putu8s(UTF32 *str,FILE *fp). 补丁2: do{BytesRead=read(fd,&c[BytesSoFar+1],BytesNeeded-BytesSoFar);BytesSoFar+=BytesRead;}while(BytesRead>0||BytesSoFar<BytesNeeded) 改为 while(BytesSoFar<BytesNeeded){BytesRead=read(...);if(BytesRead<=0)break;BytesSoFar+=BytesRead;}. test_package: numconv = Path(dep.package_folder, dep.cpp_info.bindirs[0], \"numconv\"); self.run(f'sh \"{script}\" \"{numconv}\"', env=\"conanrun\")"
+rec_auto_fix: false
+rec_impl: unified-diff-patch-plus-test-package
+
+fallback_priority: 2
+fallback_approach: api-level-only-consumer-test
+fallback_description: 若上游 CLI 存在与本类无关的其他缺陷（如解析器崩溃），端到端用例先降级为库 API 全串断言（逐码点打印），仍保留对补丁所涉函数的库级回归，CLI 用例标注 SKIP 并记录上游限制。
+fallback_command: "库级: for (i=0; out[i]; i++) fprintf(stderr, \"out[%d]=%04lX\", i, (unsigned long)out[i]); 断言码点序列完整且无指针值混入"
+fallback_auto_fix: false
+fallback_impl: test-package-only
+
+forbid_1_pattern: \(wchar_t \*\) *(utf32|u32|codepoint|line|buffer)
+forbid_1_reason: 把 UTF32(8B) 缓冲强转为 wchar_t*(4B) 适配旧签名只是掩盖宽度差：码点被按 4 字节切片，高半字 0 仍被当作 L'\0'，截断依旧且可能越界读。
+forbid_1_consequence: 修复无效，截断/越界读残留，测试仍失败或偶发崩溃。
+
+forbid_2_pattern: read\([^,]+, *[^,]+, *0\)
+forbid_2_reason: read(fd, buf, 0) 的返回值平台相关（glibc 0 / bionic -1），依赖其区分"无尾字节"与"读错误"的逻辑在两个平台行为分裂。
+forbid_2_consequence: ILP32/glibc 上正常的输入处理在 OHOS bionic 上过量吞读或误判 EOF。
+
+source_draft: archives/l/libuninum/2.7（分支 feat/libuninum-2.7，patches/0002-uniio-utf8in-zero-read.patch、patches/0003-uniio-putu8-utf32.patch，test_package/test_cli.sh 端到端用例）
