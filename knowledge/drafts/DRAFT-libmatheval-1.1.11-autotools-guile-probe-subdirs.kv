@@ -1,0 +1,118 @@
+# ═══ Draft knowledge entry — libmatheval 1.1.11 autotools guile-config 探针 / SUBDIRS 裁剪 ═══
+# Timestamp: 2026-09-08
+# Software: libmatheval 1.1.11
+# Gate: G2 (conan create) / 上游正确性测试 / configure 探针核验
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the defect evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+
+id:                     DRAFT-libmatheval-1.1.11-autotools-guile-probe-subdirs
+trigger_tool:           configure|make|sh|conan|patch
+phase:                  build|test|porting|configure
+error_signature:        guile-config required but not found|
+                         config\.guess.*unable to guess system type|
+                         libguile\.h.*No such file|config\.sub.*not recognized|
+                         umask 077
+severity:               2
+category:               portability|autotools|config-probe|subdir-recursion|
+                         header-detection|hmfs|guile
+match_keywords:         libmatheval, autotools, GUILE_FLAGS, guile-config,
+                         config.sub linux-musl, config.guess mktemp, HMFS,
+                         SUBDIRS, automake, makeinfo, guile 2.2, scm_sizet,
+                         expression evaluator, autotest
+title:                  libmatheval 1.1.11（2013 autotools）OHOS 移植三坑合一：
+                         config.sub 不认 -musl、configure 硬探针 guile-config、
+                         SUBDIRS 含需 guile 的 tests 需裁剪
+
+root_cause: >
+  老 GNU autotools C 库在 OHOS aarch64(musl) 上连中三类结构性问题：
+  (1) 包内 2013 config.guess 的 mktemp 探针在 HMFS 写 dummy.c 报 Permission
+      denied（"unable to guess system type"），而同年 config.sub 只认 linux-gnu、
+      不认 -musl 拼写 → 既不能靠自动探测也不能写 aarch64-unknown-linux-musl；
+      (2) configure.in 无条件调用 GUILE_FLAGS，其 AC_PATH_PROG(guile-config)
+      找不到即 as_fn_error "guile-config required but not found" —— guile 对核心
+      库纯属可选，却在 configure 期硬性致命；
+  (3) 顶层 SUBDIRS = doc lib tests：doc 需 makeinfo，tests/matheval.c 是无条件
+      #include <libguile.h> 的 guile 扩展，且用 guile 1.8/2.0 时代 API
+      （scm_sizet/scm_makfrom0str/SCM_NUM2DBL），本仓已适配的 guile 2.2 已移除
+      → make all / make check 全走不通，只能 make SUBDIRS=lib 只编库。
+  三条坑分别用：显式 --build/--host=aarch64-unknown-linux-gnu（build==host 原生
+  模式、跳过 config.guess，config.sub 纯 shell 只校验给出的三元组）+ 环境变量预置
+  空探针 stub（GUILE_CONFIG/GUILE_TOOLS 指向只 exit 0 的脚本，绕开 PATH 搜索）+
+  automake SUBDIRS 变量覆盖（make SUBDIRS=lib [+ install]，pc 单独
+  make install-pkgconfigDATA）。
+affected_scope: >
+  任何自带预生成 configure/ltmain.sh（≥1 个 2013 前后 config.sub、无条件
+  guile/lua/perl 等解释器 -config 硬探针、顶层 SUBDIRS 混入依赖宿主工具的 tests/
+  doc）的 GNU autotools C 库迁移到 OHOS/无这些工具的目标时都适用。上游 make check
+  驱动若是解释器扩展（guile…），autotest 套件不可用，须以 C API 复现其 .at oracle
+  作 L1（诚实报告，不得谎称跑了上游套件）。
+verification_cmd: >
+  sh config/config.sub aarch64-unknown-linux-musl   # → Invalid (2013 config.sub)
+  sh config/config.sub aarch64-unknown-linux-gnu    # → aarch64-unknown-linux-gnu (OK)
+  grep -n 'guile-config required' configure         # 致命探针存在
+  GUILE_CONFIG=/x/guile-config ./configure --help >/dev/null  # stub 预置后 configure 过
+  make SUBDIRS=lib && make SUBDIRS=lib install && make install-pkgconfigDATA
+  conan create ...   # test_package C-API oracle 实跑 60/60
+rec_priority:           1
+rec_approach:           old-config.sub-native-triple + empty-probe-stub + SUBDIRS-trim
+rec_description: >
+  组合拳而非单点修复：(a) --build/--host 用 config.sub 认得的
+  aarch64-unknown-linux-gnu（不写 -musl），build==host 即原生，跳过会写盘失败的
+  config.guess；(b) 把 configure 硬性 -config 探针换成空 stub：写一个
+  compile/link 都只 exit 0 的脚本，经对应环境变量（GUILE_CONFIG/GUILE_TOOLS）
+  预置，configure 内部 GUILE_CFLAGS/LDFLAGS 即空、不触发 PATH 搜索；(c) 顶层
+  SUBDIRS 里把 tests/doc 用 make 变量覆盖掉，只编/装目标库子目录，pc 目标单独装；
+  (d) 顺带按仓内惯例把 configure 的 umask 077 → 022（HMFS 归档权限）。
+rec_command: >
+  configure:  --build=aarch64-unknown-linux-gnu --host=aarch64-unknown-linux-gnu
+               --prefix=<pkg> [--enable-shared --disable-static]
+  env:         TMPDIR=<writable>; GUILE_CONFIG=<stub>; GUILE_TOOLS=<stub>
+  make:        make SUBDIRS=lib [-j1];  make SUBDIRS=lib install;
+               make install-pkgconfigDATA   # 装顶层 .pc
+  测试:        test_package 用 C API 复现 tests/*.at 数值 oracle（同期望值）。
+rec_auto_fix:           true
+rec_impl:               portability-patch
+
+fallback_priority:      2
+fallback_approach:      bump-config-aux + drop-tests-dir
+fallback_description:   >
+  若必须跑上游 make check：用新版 config.sub/config.guess 覆盖（patch 包内
+  config/aux 脚本）并自行提供 guile；但 tests/matheval.c 是 guile 1.8/2.0 API，
+  guile 2.2 下仍须改驱动源码，代价高，一般不值。
+fallback_command:       （patch 更新 config.{guess,sub} 后 autoreconf 自举）
+fallback_auto_fix:      false
+fallback_impl:          toolchain-side-workaround
+
+forbid_1_pattern:       skip.*test|claim.*make check.*passed.*without.*guile
+forbid_1_reason:        不得谎称运行/通过上游 make check（tests/matheval.c 需
+                         libguile.h，未提供则根本编不过）。
+forbid_1_consequence:   覆盖伪造，评审/审计当场识破，知识条目作废。
+forbid_2_pattern:       config.sub.*musl.*force|--host=.*linux-musl.*2013
+forbid_2_reason:        2013 config.sub 不认 -musl，硬写该三元组 configure 直接退出。
+forbid_2_consequence:   构建期失败，且掩盖真正修复路径。
+forbid_3_pattern:       sed.*SUBDIRS.*Makefile\.in.*permanent
+forbid_3_reason:        用 make 变量覆盖 SUBDIRS 即可（一次运行期），勿改坏源树
+                         Makefile.in 造成不可复现。
+forbid_3_consequence:   源树被污染，sha/复现性被破坏。
+
+principles:             P001
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-libmatheval-1.1.11-autotools-guile-probe-subdirs.md
+last_updated:           2026-09-08
+source_event:           archives/l/libmatheval/1.1.11
+
+authors:                2301_76770579
+source_pr:              9000
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-08

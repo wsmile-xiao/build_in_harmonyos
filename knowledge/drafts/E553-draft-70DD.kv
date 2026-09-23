@@ -1,0 +1,60 @@
+#====================================================================
+# E553 — 随机文件 CLOSE 后 reopen 写 NULL 缓冲区段错误
+# 分配条件按指针判空修复（previous_buffer 标志误判复用）
+#====================================================================
+
+id:                     E553
+trigger_tool:           clang|make|runtime
+phase:                  testing|runtime
+error_signature:        Segmentation fault \(core dumped\)|Signal 11 \(core dumped\)|get #1.*段错误|随机文件.*段错误|PUTGET.*Segv
+
+severity:               2
+category:               compat, libc, runtime, portability
+match_keywords:         随机文件, random access, FIELD, LSET, PUT, GET, reopen, CLOSE, 段错误, Segmentation fault, core dumped, previous_buffer, dev_table, use-after-free, NULL, bwb_dio
+title:                  随机文件 CLOSE 后 reopen 写 NULL 缓冲区段错误：分配条件按指针判空修复
+
+root_cause:             老式 C I/O 库（如 bwb_dio.c）的 bwb_close 释放随机文件缓冲区并正确置 NULL，但 bwb_open 对 previously-closed 设备（mode==DEVMODE_CLOSED 使 previous_buffer=TRUE）跳过缓冲区重分配，dev_table[].buffer 保持 NULL；FIELD 将变量 sbuffer 映射到 NULL+offset，GET 语句按 reclen 循环写入 NULL 指针触发段错误
+affected_scope:         所有"CLOSE 同一设备号后重新 OPEN 并 GET"的随机文件访问场景；与平台无关（malloc/free 语义所致，glibc/musl 均复现），在 32 位时代被"复用旧缓冲区"的表面行为掩盖；典型于 1990s K&R 代码基线的 stdio 封装层
+verification_cmd:       最小 .bas 二分复现（OPEN "r"→FIELD→LSET→PUT→CLOSE→reopen→FIELD→GET 逐语句叠加）定位崩溃语句；应用修复后同一序列与完整测试脚本（如 putget.bas 双记录往返）均正常完成
+
+rec_priority:           1
+rec_approach:           null-guarded-buffer-realloc
+rec_description:        将缓冲区分配条件从 previous_buffer != TRUE 改为按 dev_table[].buffer 指针判空（==NULL 时分配）——保留"复用未释放缓冲区"的原设计意图（指针非 NULL 即有效），同时修复 CLOSE 后的 NULL 复用；修复点集中于 bwb_open 单处条件，不动 close/GET/FIELD 逻辑
+rec_command:            if (( mode == DEVMODE_RANDOM ) && ( dev_table[ req_devnumber ].buffer == NULL )) { dev_table[ req_devnumber ].buffer = CALLOC( rlen + 1, 1, ... ); }
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      close-preserve-buffer
+fallback_description:   若改动 open 分配条件影响面过大，可改为 bwb_close 不释放缓冲区（保留至下次 open 复用或进程退出）——代价是长期运行进程的内存驻留，仅在确认单次进程生命周期内设备号复用频率低时采用
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       (\bFREE\b.*buffer(?![^\n]*NULL)|dev_table\[.*\]\.buffer\s*=\s*NULL(?![^\n]*FREE))
+forbid_1_reason:        只清指针不释放会造成内存泄漏；只释放不清指针会造成本条目所述悬垂/NULL 复用——两半必须成对出现
+forbid_1_consequence:   段错误或内存泄漏在另一形态复发
+
+principles:
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E553.md
+last_updated: 2026-09-06
+source_event:           bwbasic 2.20pl2 适配（任务 #6153）：putget.bas 随机文件往返测试必现段错误，二分定位至 bwb_open 分配条件
+
+authors:
+source_pr:              "!8575"
+source_commit:          2565a31b
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-06
+
+draft: true
+contributor_id: 70DD

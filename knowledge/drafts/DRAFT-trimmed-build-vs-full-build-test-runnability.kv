@@ -1,0 +1,152 @@
+# ═══ Draft knowledge entry — 裁剪构建 vs 完整构建：测试可跑性判定 ═══
+# Timestamp: 2026-09-11
+# Software: util-linux 2.42（PR #9262）；同族线索 combblas 2.0.0（PR #9161）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-trimmed-build-vs-full-build-test-runnability
+trigger_tool:           conan|configure|autotools|cmake|make|meson
+phase:                  testing
+error_signature:        upstream ts test suite needs full .* tool environment|
+                         upstream tests need.*environment.*not available|
+                         Tests not compiled! Run 'make check-programs' to fix the problem|
+                         0/0 可跑|upstream tests.*0 [可by].*(run|runable|not runnable)|
+                         Error loading shared library [^:]+: Permission denied|
+                         Error relocating .*: [a-z_]+: symbol not found|
+                         [+][0-9]+[+]: (symbol not found|): symbol not found
+
+severity:               2
+category:               testing|false-declaration|ohos|build-config|claimability|diagnosis
+match_keywords:         disable-all-programs, only build libraries, trimmed build,
+                         full build, tests/run.sh, ts suite, make check-programs,
+                         test_ttyutils, upstream test runnability, package deliverable
+                         config vs test config, 0 runnable, rule 1.2 declaration,
+                         Error relocating, symbol not found, downstream symptom,
+                         Error loading shared library, Permission denied, llvm-nm -D,
+                         ctypes.CDLL, false symbol-gap attribution
+title:                  裁剪构建（只编库）不能作为「上游测试不可运行」的证据——须区分交付配置与测试可跑配置
+
+root_cause:             包配方为缩小交付面常做裁剪构建（autotools 的
+                         `--disable-all-programs --enable-libX`、cmake 的
+                         只构建目标库、meson 的 `-Dtests=false`），此时**包内
+                         不含上游测试所需的辅助二进制/工具**，于是容易顺势声明
+                         「上游测试需完整工具集环境，不可运行（rule 1.2）」。
+                         但**这是两个不同的命题**：
+                           (a) 「当前交付配置的产物里跑不了测试」——通常为真；
+                           (b) 「上游测试在 OHOS 上不可运行」——**未被 (a) 证明**。
+                         把 (a) 直接写成 (b) 会系统性低估通过率：这些套件往往
+                         只需在**完整构建**（不裁剪）下补齐少量环境适配即可跑通。
+                         实证：util-linux 2.42 原声明「ts 套件需完整工具集环境
+                         故不可运行（0 可跑）」——本地完整构建后 **91/91 套件
+                         全 PASS（176 sub-test）**，仅需 3 项环境适配。
+                         第二类误报来源是**测试框架自身的静默跳过**：如
+                         util-linux `tests/run.sh` 在未 `make check-programs` 时
+                         直接打印 `Tests not compiled!` 并 exit 1——若只看退出码
+                         或不追查摘要，会再次误判为「不可运行」。
+
+affected_scope:         所有「裁剪构建 + 上游自带测试套件」的适配：autotools
+                         （util-linux/acpica 类 `--disable-all-programs`）、
+                         cmake（只 enable 目标库）、meson（`-Dtests=false`）；
+                         尤其上游测试为「跑二进制 + 比对期望输出」型（ts/bats/
+                         lit/DejaGNU）时，辅助二进制缺失是唯一阻塞
+
+verification_cmd:       # 1) 先确认套件是否被静默跳过（框架层）
+                         bash tests/run.sh --srcdir=<src> --builddir=<build> <suite>
+                         #    若出现 "Tests not compiled!" → 需先 make check-programs
+                         # 2) 完整构建（去掉裁剪开关）后复跑
+                         ./configure --host=<triplet> --build=<triplet> && make -j4
+                         bash tests/run.sh --srcdir=<src> --builddir=<build>
+                         # 3) 断言真实执行痕迹（防假通过）
+                         grep -cE "\.\.\. (OK|FAILED)|All [0-9]+ tests (PASSED|FAILED)"
+
+rec_priority:           1
+rec_approach:           separate-delivery-config-from-test-config-then-full-build
+rec_description:        五步，缺一不可：
+                         ① **先分清两个命题**：交付配置（裁剪构建）跑不了测试，
+                            只说明 (a)；要声明 (b)「上游测试不可运行」必须另外举证。
+                         ② **做一次完整构建**（去掉 `--disable-all-programs`
+                            /`-Dtests=false` 等裁剪开关，保留上游默认目标集），
+                            用它的 builddir 跑套件——这是唯一能证伪 (b) 的手段。
+                         ③ **补齐环境适配**（此步才产生真实阻塞列表）：常见为
+                            上游测试脚本的 `#!/bin/bash` 需改指实际 bash（OHOS 无
+                            /bin/bash，E165）、只读 /tmp → TMPDIR、GNU 专属工具
+                           选项（toybox xargs 不支持 `-I`，见 E363）、
+                           框架自身的静默跳过（`make check-programs`）。
+                         ④ **断言真实执行痕迹**：必须核对套件摘要或逐用例
+                           `... OK/FAILED`，不能用「退出码 0」当通过证据
+                           （框架可静默跳过全部用例后仍退 0，E363）。
+                         ⑤ **先判加载、再判符号**：完整构建后仍失败时，报错**首行**
+                           往往是真因——若为 `Error loading shared library X:
+                           Permission denied`，则紧随其后的成串 `symbol not found`
+                           只是**下游症状**（库未装载，符号自然解析不到），
+                           不可据此断言上游库缺符号。判定顺序：先看有无
+                           loading/permission 报错 → 用 `llvm-nm -D <lib> | grep
+                           <sym>` 验证符号是否真的存在（存在则问题必在“加载”）
+                           → 用 `ctypes.CDLL('<abs path>')` 单库加载隔离真因。
+                           实务要点：PR/文档措辞必须写“依赖 .so 的 dlopen 权限
+                           问题”，不要写“某库运行时符号加载问题”——后者会被读成
+                           该上游库有缺陷（本轮 gusb/0.4.9 即据此修正措辞）。
+                         记录口径：ts/完整构建结果作为**本地实测**写入 manifest，
+                         并说明「配方裁剪使套件无法随包运行」，二者不可混为一谈。
+
+rec_command:            # 完整构建（以 util-linux 为例）
+                         cd $BUILD && TMPDIR=$BUILD $SRC/configure \
+                           --host=aarch64-unknown-linux-ohos \
+                           --build=aarch64-unknown-linux-ohos --disable-nls
+                         TMPDIR=$BUILD make -j4            # 不裁剪 → 含工具
+                         # 若需定向构建以绕开无关目标：
+                         make -j4 blkid findmnt uuidgen libblkid.la libuuid.la
+                         # 跑套件（PATH 前置 shim 目录）
+                         PATH=$SHIM:/data/service/hnp/bin:$PATH TMPDIR=$BUILD \
+                           bash tests/run.sh --srcdir=$SRC --builddir=$BUILD
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      record-both-configs-and-name-the-blocker
+fallback_description:   若完整构建后仍无法跑通（例如仅缺某个系统工具且无替代），
+                         则**同时记录两种配置的结果**并指名具体阻塞：交付配置为
+                         裁剪构建（套件不可随包运行）、完整构建实测结果 N/M 通过、
+                         剩余失败的具名原因。不得只留「不可运行」的整体声明
+fallback_command:       bash tests/run.sh --srcdir=<src> --builddir=<full-build> 2>&1 | tail -20
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       裁剪构建.*故.*上游测试不可运行|only build libraries.*tests not runnable|0 可跑
+forbid_1_reason:        裁剪构建只证明「交付配置产物内跑不了测试」，不能证明
+                         「上游测试在 OHOS 不可运行」；直接跳步 (b) 会系统性低估通过率
+forbid_1_consequence:   本可跑通的套件被报 0，PR 被审查方按「有可运行子集未尝试」打回
+forbid_2_pattern:       未完整构建.*即声明 rule 1\.2|凭裁剪配置写 rule 1\.2 环境限制
+forbid_2_reason:        rule 1.2 的「环境限制」需以尽力尝试为前提；未做完整构建
+                         即声明，属未举证
+forbid_2_consequence:   声明不成立，复审时被要求补测
+forbid_3_pattern:       退出码 0.*即视为.*通过|以 rc=0 作为套件通过依据
+forbid_3_reason:        测试框架可静默跳过全部用例后仍退 0（E363）；必须核对
+                         摘要或逐用例 OK/FAILED 的真实执行痕迹
+forbid_3_consequence:   引入假通过，通过率虚高
+
+principles:
+similar_to:             E363, E165, E488, E489, DRAFT-bats-suite-ohos-runtime-shims
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-11
+source_event:           util-linux/2.42（PR #9262）——原声明「ts 套件需完整工具集
+                         环境故不可运行」，完整构建后实跑 91/91 套件 PASS
+                         （176 sub-test）；blkid 11/11、mount 33/33、findmnt 6/6、
+                         uuidgen 2/2。同族：combblas 2.0.0（PR #9161）从「需外部
+                         TESTDATA 不可运行」纠正为实跑 18/20。
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9262
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true

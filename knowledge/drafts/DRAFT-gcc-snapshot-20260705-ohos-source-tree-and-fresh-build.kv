@@ -1,0 +1,103 @@
+#====================================================================
+# DRAFT-gcc-snapshot-20260705-ohos-source-tree-and-fresh-build - GCC snapshot OHOS source-tree and fresh-build constraints
+#====================================================================
+
+id:                     DRAFT-gcc-snapshot-20260705-ohos-source-tree-and-fresh-build
+trigger_tool:           conan|gcc|flex|autotools|bash
+phase:                  source|build|package|testing
+error_signature:        self.settings access in source() method is forbidden|settings.os.version value not defined|GCC_SNAPSHOT_SOURCE_TARBALL|gengtype-lex.cc|move-if-change|get_patches.sh|unknown option code|posix_spawn: Permission denied|posix_spawnp: Permission denied|collect-ld|real-ld|mkheader.sh|OHOS SDK sysroot headers were not found|native/llvm/ohos-sdk.org|conan create TIMED OUT after 3600s|Downloaded 88.7MB|7676387 pass(es)|build_jobs() returned 1|all-target-libgcc
+
+severity:               2
+category:               toolchain|autotools|source-extract|bundled-prerequisites|ohos-platform
+match_keywords:         gcc-snapshot, GCC snapshot, bundled prerequisites, flex, gengtype-lex.cc, source() forbidden, os.version, HMDFS, TMPDIR, CONFIG_SHELL, SHELL, move-if-change, get_patches.sh, disable-lto, option completion, target selftest, mkheader.sh, GNU as, sysroot, native/sysroot, llvm/bin/clang, HTTP Range, parallel download, mirror fallback, binary signing
+title:                  GCC snapshot 在 HarmonyOS 上需要拆分 source 阶段、本地 tarball 回退与生成器前置
+classification:         Path B / Path C candidate; final classification is subject to review
+
+root_cause:             GCC snapshot 是自举型工具链包，不只是一个普通库。它依赖 bundled GMP/MPFR/MPC，还需要 flex 在 generator 阶段生成 gengtype-lex.cc；同时 Conan 的 source() 不能读取 self.settings，OHOS 分支逻辑必须放到 settings 无关路径。HarmonyOS/HMDFS 下又会叠加脚本直 exec、只读 /tmp、工作目录恢复和权限位差异，所以必须把 source 解包、本地 tarball 回退、short-lived prepare 进程、shell 包装入口和显式 TMPDIR/SHELL/CONFIG_SHELL 一起处理，才能把 fresh build 跑完整。
+followup_root_cause:    这一版 snapshot 的 gcc/Makefile.in 已经是 `FLEX = @FLEX@`，所以不需要再强行替换为固定 `flex`；真正的额外门槛是 Conan generate() 里不能依赖裸 `clang`，必须默认到 `/data/service/hnp/bin/clang` 和 `/data/service/hnp/bin/clang++` 才能在这台设备上完成 sysroot 探测与 wrapper 生成。
+followup_root_cause_2:  Conan 的 `tool_requires("flex/2.6.4")` 只表示依赖已安装，不会自动进入 GCC 子构建的 PATH；generate() 需要显式注入 `FLEX`、`LEX` 和 flex/bin。
+followup_root_cause_3:  `--disable-lto` 不能只依赖 configure 选项；snapshot 仍会生成或编译少量 LTO option/source 引用，需要在 `c.opt` 和 LTO/GCC option consumers 中做禁用分支保护。
+followup_root_cause_4:  OHOS target xgcc 的 `-B` 搜索顺序会把构建树的 `gcc/as` 脚本当作 assembler，设备侧 direct exec 会返回 `posix_spawn: Permission denied`；构建期和安装后的包 wrapper 都必须优先指定 `/data/service/hnp/bin/`，并使用 shell wrapper 传入 sysroot 和 availability 宏。
+followup_root_cause_5:  `libgcc` 的 `mkheader.sh` 属于脚本生成步骤，HMDFS 上不能假设 chmod 后就能直接执行，Makefile 必须显式走 `$(SHELL)`。
+followup_root_cause_6:  `collect2 -debug` 确认 GCC 链接阶段实际会选择 `gcc/collect-ld`；HMDFS 对 `/data/service/hnp/bin/ld` 的 direct `posix_spawnp` 可能返回 Permission denied。必须用 OHOS clang-sign 构建一个真实 signed ELF launcher，通过 `/system/bin/sh` 转调 HNP `ld`，并把它同时命名为 `ld`、`collect-ld`、`real-ld`，构建期和安装包都要提供。
+followup_root_cause_7:  CI 的 `tools.build:compiler_executables` 可能把裸 clang 解析为 `/data/service/hnp/ohos-sdk.org/ohos-sdk_*/ohos/native/llvm/bin/clang`。如果仍按 HNP `/bin` 入口拼接 `ohos-sdk.org`，就会得到错误的 `native/llvm/ohos-sdk.org`；sysroot 应从 clang 路径的 `native`/`llvm` 祖先定位到同级 `native/sysroot`，并保留 HNP 根目录扫描作为回退。
+followup_root_cause_8:  CI worker 对 99.6 MB GCC 源包的单 HTTP 连接可能长期低速，Conan 直到固定 3600 秒窗口才被外层 timeout 截断，URL 回退不会在“连接仍未报错”时触发。对支持 Range 的源服务使用有限大小分块、并行请求、单块重试、顺序合并和最终 SHA256 校验，才能把网络波动限制在单块范围内。
+followup_root_cause_9:  OHOS profile 没有 tools.build:jobs 时，Conan build_jobs() 为兼容性返回 1；仅设置 jobs 上限仍会串行执行 GCC 自举。串行 all-gcc、all-target-libgcc、签名、selftest 和 consumer 前置步骤叠加后，会在源码下载已经完成的情况下仍耗尽 3600 秒。
+followup_root_cause_10: PR CI #44912 已完成 all-gcc 与 7,676,387 项 selftest，并在 all-target-libgcc 收尾处耗尽 3600 秒，证明上一轮 -j2 虽然生效但仍不足以覆盖受限 worker 的总构建窗口；CI bot 的“可能交互式测试卡住”只是通用诊断，不能替代最后构建目标的日志定位。
+followup_root_cause_11: PR CI #44956 已重复验证 -j4 仍在 all-target-libgcc 收尾处耗尽 3600 秒；对于明确交付 C frontend + static libgcc 的 OHOS 包，应通过 --disable-decimal-float 缩小 runtime 产品边界，并用 target-only -O2 -fPIC 去掉继承的 debug flags，而不是继续无界增加并发。
+followup_root_cause_12: PR CI #44992 已应用 decimal-float 关闭和 target -O2 -fPIC，耗时缩短 193 秒但仍超时；libgcc 编译行继续出现 -g，说明专用 LIBGCC2_DEBUG_CFLAGS 覆盖了普通 target flags，下一轮必须显式使用 LIBGCC2_DEBUG_CFLAGS=-g0。
+affected_scope:         GCC snapshot 类自举工具链包；尤其是带 bundled prerequisites、需要生成器、并在 HarmonyOS PC / HMDFS 环境下构建的 autotools 大包。
+verification_cmd:       在 OHOS 设备上执行 `GCC_SNAPSHOT_SOURCE_TARBALL=<local_tar.xz> conan create archives/g/gcc-snapshot/20260705 -pr:h ci/conan/profiles/ohos-aarch64 -pr:b ci/conan/profiles/ohos-aarch64 --build=missing`，应先完成 source 解包并继续进入 build/package；若缺少 flex 或 shell 包装，通常会在 gengtype-lex.cc、move-if-change、get_patches.sh 或 mkheader.sh 附近失败；目标编译阶段应确认 `-B/data/service/hnp/bin/` 位于构建树 `-B` 之前，并检查 `collect2 -debug` 解析到的 `collect-ld` 是真实 signed ELF。
+
+rec_priority:           1
+rec_approach:           source-range-cache-plus-generator-toolreq
+rec_description:        在 source() 中优先消费 CI file:// 缓存或本地 tarball，远程大包使用有序镜像、并行 Range、有限重试和最终 SHA256；保留 bundled GMP/MPFR/MPC 解包；将 flex 作为 tool_requires 单独适配；对 OHOS 构建显式设置 TMPDIR、CONFIG_SHELL、SHELL，并用有上限的 pipe jobserver；C/static-libgcc 产品关闭 decimal-float，并对 target libgcc 去掉继承的 debug flags。
+rec_command:            config_options(): self.settings.rm_safe("os.version"); source(): if GCC_SNAPSHOT_SOURCE_TARBALL exists, extract it, otherwise consume file:// cache or bounded Range URLs; build_requirements(): self.tool_requires("flex/2.6.4"); generate(): default compiler executables to /data/service/hnp/bin/clang and /data/service/hnp/bin/clang++, then inject flex/bin plus FLEX/LEX; build(): export TMPDIR/CONFIG_SHELL/SHELL and invoke configure/make through shell wrappers with OHOS -j4 pipe jobserver, --disable-decimal-float, and target CFLAGS_FOR_TARGET/CXXFLAGS_FOR_TARGET=-O2 -fPIC while retaining the lower generic cap for non-OHOS
+rec_auto_fix:           false
+rec_impl:               conan-recipe-plus-toolchain-dependency
+
+path_b_candidate:       true
+path_b_boundary:        只记录 gcc-snapshot 自身的自举工具链、bundled prerequisites、generator、HMDFS、sysroot、签名和 consumer-test 适配知识；flex/2.6.4 保持独立库边界，不把依赖库改动混入本库。
+path_b_evidence:        source URL and language; exact prerequisite versions; reproducible failure signatures; corrected Conan environment injection; shell/TMPDIR/sysroot/PIE/signing constraints; disabled-LTO and target-selftest transforms; host selftest pass count; all-target-libgcc archive; installed-package smoke; signed collect-ld launcher aliases; official runner conan create; 100/100 torture execution pass
+
+path_c_candidate:       true
+path_c_qualifying_items: criterion 3 - target assembler/backend integration, GNU as/ld, AArch64 PIE, generated ELF signing and OHOS sysroot coordination; criterion 4 - bundled GMP/MPFR/MPC plus independent flex/m4 generator chain, 3600-second default timeout exceeded, and high-cost selftest/torture verification
+path_c_boundary:         C 类候选不依赖闭源二进制或私有编译工具链；当前 recipe 只支持 C frontend、非 bootstrap、非 LTO、非 multilib 配置，最终等级由维护者和评审确认。
+
+reusable_knowledge_count: 20
+reusable_knowledge_1:    source() 阶段不读取 self.settings；将官方下载、SHA256、解包和 settings-independent 变换放在 source()，OHOS 专用逻辑延迟到 generate()/build()，避免 source 生命周期错误。
+reusable_knowledge_2:    大源包使用官方 URL + 固定 SHA256 + 显式本地 tarball 回退，并结合 no_copy_source 与最小源码保留集合，降低真机下载、复制和 HMDFS 状态压力。
+reusable_knowledge_3:    bundled GMP/MPFR/MPC 保持上游边界；flex/2.6.4 作为独立 tool_requires，显式注入 FLEX/LEX/M4/PATH，制品缺少 bin/flex 时只回退同版本 HNP 工具。
+reusable_knowledge_4:    HMDFS 下 chmod +x 不等于可 direct exec；Makefile 脚本通过 $(SHELL) 调用，Conan wrapper 通过 sh wrapper 调用，且每条命令导出可写 TMPDIR、SHELL、CONFIG_SHELL。
+reusable_knowledge_5:    host 与 target 工具必须分层解析绝对路径；清理环境中 AS=llvm-as 等与 GCC 语义冲突的导出，target assembly 使用 GNU as/ld。
+reusable_knowledge_6:    从 OHOS clang 真实路径自动探测 SDK native/sysroot，并校验 usr/include/aarch64-linux-ohos/bits/alltypes.h，再统一传给 configure、fixincludes 和 target wrapper。
+reusable_knowledge_7:    AArch64 OHOS host 工具采用 --enable-host-pie、PIE configure cache、签名 ELF 和 staged executable check，避免生成工具可以链接但无法执行。
+reusable_knowledge_8:    collect2 -debug 是定位 linker 名称的关键；collect2 可能选择 gcc/collect-ld，必须提供真实 signed ELF 的 ld/collect-ld/real-ld 别名，不能只放 shell 脚本。
+reusable_knowledge_9:    GCC 的 -B 顺序是行为契约；构建树和安装包分别把 launcher、HNP bin、GCC 内部版本目录和 sysroot 放入可审计顺序，内部版本从 gcc.real -dumpversion 获取。
+reusable_knowledge_10:   --disable-lto 仍需同步修改 c.opt、LTO consumers 和 option generation；目标 selftest 过滤必须基于明确的平台不适用证据，不能粗暴跳过全部 selftest。
+reusable_knowledge_11:   upstream torture executor 应保留 dg-additional-options，并分别统计 selftest pass(es)、torture 编译/运行、consumer 和负向测试，避免混淆测试口径。
+reusable_knowledge_12:   test_package 应使用安装后的 relocatable driver，完成真实目标编译、链接、签名和执行；shadow CI 还应确认移走 bin/lib 后测试会失败。
+reusable_knowledge_13:   交接文档应同时记录失败签名、修复边界、复跑命令、CI 分层结果和残余非阻断警告，让同类工具链包可直接复用。
+reusable_knowledge_14:   未执行的完整 testsuite、其他 frontend、bootstrap、LTO、multilib、shared/plugin、可选 runtime 和跨平台矩阵必须逐项写出原因、替代证据与影响；源码下载还应使用有序官方/镜像 URL 列表并保持同一 SHA256。
+reusable_knowledge_15:   `tools.build:compiler_executables` 解析出的 clang 可能位于 OHOS SDK 的 `native/llvm/bin`，sysroot 应沿路径找到 `native/sysroot`；固定把 `ohos-sdk.org` 接在 `llvm` 下会形成可误导的伪路径，错误信息应同时包含实际 compiler 和候选路径。
+reusable_knowledge_16:   大型公开源包不能只依赖有序 URL 回退：只要首个 TCP 连接持续但低速，Conan 就不会切换镜像。对确认支持 `Accept-Ranges` 的源服务，可用 4 MiB 分块、最多 8 路并行、每块有限重试、合并后单次 SHA256 校验；不改变官方校验值，也不修改 CI 全局超时。
+reusable_knowledge_17:   OHOS profile 未配置 tools.build:jobs 时，Conan build_jobs() 返回 1；在已验证支持 pipe jobserver 的 OHOS 路径设置明确的并发下界和上限，才能避免 GCC 自举在下载、HMDFS 和签名开销后退化为串行；同时优先消费 CI 的 file:// 预下载源包，保持最终 SHA256 校验。
+reusable_knowledge_18:   固定总超时要按最后一个完成的 make 目标定位：#44912 已完成 all-gcc/selftest 并在 all-target-libgcc 收尾处超时，上一轮 -j2 不足时可在确认 AArch64 worker 资源后提升到 -j4；应保留 pipe jobserver、非 OHOS 较低上限，并把 package/test_package 未进入的事实单独记录。
+reusable_knowledge_19:   #44956 证明 -j4 仍可能在 all-target-libgcc 收尾处耗尽固定窗口；C frontend + static libgcc 的 OHOS recipe 可用 --disable-decimal-float 明确关闭未交付 runtime，并以 target-only CFLAGS_FOR_TARGET/CXXFLAGS_FOR_TARGET=-O2 -fPIC 去除 debug I/O，不能靠删除零散源文件或宣称未测 ABI 通过。
+reusable_knowledge_20:   #44992 的日志显示 libgcc/Makefile.in 通过专用 LIBGCC2_DEBUG_CFLAGS 继续注入 -g；仅设置 CFLAGS_FOR_TARGET 不足以删除它，应该只在 all-target-libgcc 命令行覆写 LIBGCC2_DEBUG_CFLAGS=-g0，并单独核对普通 C consumer 与 libgcc 链接结果。
+diagnostic_matrix:       source settings forbidden -> 延迟平台逻辑; missing flex/m4 -> 显式 executable 与环境注入; script Permission denied -> sh/$(SHELL); /tmp failure -> build-local TMPDIR; PIE relocation -> host PIE; collect2 posix_spawnp -> signed collect-ld aliases; package libdir missing -> gcc.real -dumpversion
+knowledge_reuse_scope:   GCC/LLVM/binutils 等自举型 C/C++ 工具链；带 bundled prerequisites、生成器、OHOS sysroot、ELF signing、target assembler/linker 和高成本 upstream selftest 的大型 autotools 包
+
+fallback_priority:      2
+fallback_approach:      split-generator-and-source-cache
+fallback_description:   如果完整 fresh build 仍过慢，可继续把大 tarball 下载移到本机缓存或预热 source cache，但不要把 flex 或其他依赖内联进 gcc-snapshot 主库 PR。
+fallback_command:       seed local source cache for GCC tarball and keep flex as an independent adapted package
+fallback_auto_fix:      false
+fallback_impl:          cache-seeding-plus-separate-pr
+
+forbid_1_pattern:       self.settings\..*source\(\)
+forbid_1_reason:        Conan 禁止在 source() 中读取 settings；这样会让 source 阶段在不同 profile 上直接炸掉。
+forbid_1_consequence:   适配只能停在本机，无法在真机/CI 里稳定复现。
+
+forbid_2_pattern:       tool_requires\("flex/2.6.4"\).*source
+forbid_2_reason:        flex 是生成器前置，不该在 source() 里临时补齐；它应作为独立适配好的 tool_requires。
+forbid_2_consequence:   依赖边界混乱，后续主库 PR 会把依赖适配串进来。
+
+principles:             P010,P011
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-gcc-snapshot-20260705-ohos-source-tree-and-fresh-build.md
+last_updated:           2026-09-12
+source_event:           gcc-snapshot/20260705 HarmonyOS 前置适配、PR CI #44737 sysroot 复核、#44812 下载超时、#44864 串行构建超时、#44912/#44956/#44992 all-target-libgcc 时间窗复盘、#45033 成功复跑
+authors:                pc1-47-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  3
+metrics_fail_count:     6
+verification_result:    2026-09-11 official runner R4 on 10.62.229.155 passed full conan create, package test, 100/100 torture, L0/L1/L2/L4/L5, and exited 0; PR CI #44737 downloaded all four sources through the mirror but stopped in generate() because sysroot was derived as native/llvm/ohos-sdk.org; PR CI #44804 then passed Conan test_package, L0, L1, cleanup, and all seven CI steps in 3781 seconds; PR CI #44812 reached L0 but the single GCC source connection timed out at 3600 seconds, so the recipe added bounded parallel Range downloads with ordered mirrors and final SHA256 verification; PR CI #44864 reached GCC all-gcc and printed 7,676,387 selftest pass(es) but timed out because build_jobs() returned 1 in the OHOS profile; PR CI #44912 verified the -j2 recipe reached the end of all-target-libgcc but still exhausted 3600 seconds; PR CI #44956 repeated the same all-target-libgcc boundary with -j4; PR CI #44992 removed decimal/BID objects and reduced the timeout by 193 seconds but still showed libgcc -g injection at the same boundary; PR CI #45033 then passed with LIBGCC2_DEBUG_CFLAGS=-g0, conan-build-test 3562 seconds, total 3647 seconds, Conan test_package, L0/L1, and all seven CI steps successful while retaining bounded pipe parallelism and the file:// source-cache path
+current_blocker:        no current CI blocker; local Windows conan command remains unavailable because conan is not on PATH, which only limits local orchestration

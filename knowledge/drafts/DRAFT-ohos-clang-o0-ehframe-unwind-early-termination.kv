@@ -1,0 +1,43 @@
+draft: DRAFT-ohos-clang-o0-ehframe-unwind-early-termination
+status: pending-editor-review
+title: "OHOS clang 15 在 -O0 且无 -g 时 .eh_frame 不完整导致 _Unwind_Backtrace 帧收集提前终止——-fasynchronous-unwind-tables 修复"
+category: ohos, compiler, testing, unwind
+match_keywords: >
+  eh_frame, _Unwind_Backtrace, -fasynchronous-unwind-tables,
+  no debug symbols, unwind 提前终止, no_dbg,
+  BOOST_STACKTRACE_TEST_NO_DEBUG_AT_ALL, clang 15, 栈帧数不足
+error_signature: >
+  _Unwind_Backtrace.*(1|2) frame|min_size > 2|ns1 != return_from_nested_namespaces|unwind.*(premature|early) terminat|no_dbg.*(failed|assert)|stack depth.*1.*frame
+root_cause: >
+  gcc 默认总是生成完整异步展开表（.eh_frame 全函数覆盖），clang 仅在需要时
+  （异常传播可达/显式要求）生成。OHOS clang 15 在 -O0 且不带 -g（无调试符号）
+  时对部分函数省略 .eh_frame CFI 项，_Unwind_Backtrace 逐帧展开遇缺表项函数
+  即提前终止回调链，实测只收集 1-2 帧（Boost.Stacktrace basic 形态 no_dbg
+  变体断言 min_size>2 / ns1 != return_from_nested_namespaces 失败，rc=2）。
+  同参数加 -g 即完整 19 帧（llvm-readelf 确认两二进制均无 ICF 合并），证明
+  与优化/内联/符号 strip 无关，差异仅在 -g 顺带生成的完整展开表。
+solution: |
+  对所有"无调试符号（no -g）"编译的目标追加 -fasynchronous-unwind-tables
+  （强制完整异步展开表，等价 gcc 默认行为；不引入 -g，保持上游无调试符号
+  语义）。boost1.84-stacktrace_basic 1.84.0 实测修复（conanfile.py L304-318）：
+
+  ```python
+  no_dbg_defs = (f"-DBOOST_STACKTRACE_TEST_EXPORTS_TABLE_USAGE -O0 "
+                 f"-fasynchronous-unwind-tables")
+  compile_and_run(
+      "basic_ho_no_dbg",
+      [os.path.join(test_dir, "test.cpp"), os.path.join(test_dir, "test_impl.cpp")],
+      no_dbg_defs + " -DBOOST_STACKTRACE_TEST_NO_DEBUG_AT_ALL", "")
+  ```
+
+  三步鉴别法（先排除内联吞帧/strip 误判）：① 同参数加 -g 复测，恢复完整帧
+  即命中本条；② llvm-readelf -wf 查 .eh_frame 覆盖；③ 加 flag 复测 rc=0。
+fallback: >
+  不允许改编译参数时退回 no_dbg 变体加 -g（对照实验证明可恢复完整展开，
+  rc=0 完整 19 帧），代价是背离上游"无调试符号"变体语义（产物含 DWARF、
+  体积增大）；或接受帧数不完整并在测试报告标注 skip 平台原因（不推荐，
+  掩盖真实平台行为）。
+verify_builds: "#41620"
+reference_impl: >
+  archives/b/boost1.84-stacktrace_basic/1.84.0/conanfile.py（commit 5dc29c10fd，
+  no_dbg 变体编译参数）；草稿布局先例：E257-draft-E542.kv/.md

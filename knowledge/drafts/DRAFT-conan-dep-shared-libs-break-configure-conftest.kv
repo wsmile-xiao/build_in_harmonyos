@@ -1,0 +1,64 @@
+#====================================================================
+# DRAFT-conan-dep-shared-libs-break-configure-conftest
+#====================================================================
+
+id:                     DRAFT-conan-dep-shared-libs-break-configure-conftest
+trigger_tool:           configure|conan|cc
+phase:                  configuration
+error_signature:        cannot run C compiled programs|Error loading shared library .*needed by .*(conftest|conf_probe)|checking whether we are cross compiling.*error
+
+severity:               2
+category:               linking|autotools|conan
+match_keywords:         conftest, LD_LIBRARY_PATH, shared library, AutotoolsDeps, libdir, generate, conan, cross compiling, AC_RUN_IFELSE, conanbuild
+title:                  Conan 依赖的共享库使 configure conftest 无法运行，应在 generate() 把依赖 libdir 注入 LD_LIBRARY_PATH
+
+root_cause:             因果链：Conan 依赖图中的共享库只存在于 conan 缓存包目录（.conan2/p/<pkg>/p/lib）→ AutotoolsToolchain/AutotoolsDeps 只向编译与链接阶段提供 -I/-L → configure 的 AC_RUN_IFELSE 小程序（conftest）链接共享依赖后必须立即执行 → 平台动态加载器默认搜索路径不含 conan 缓存目录 → 加载失败（musl 措辞 "Error loading shared library libcurl.so: (needed by ./conftest)"）→ autoconf 误判 "cannot run C compiled programs" 并进入交叉编译模式（与 E064 同签名不同根因：E064 是安全弹窗拦截，本条是依赖共享库不可见）。边界：构建 shell（conanbuild 环境与交互 SSH shell）内 LD_LIBRARY_PATH 环境变量有效（探针实证）；E088 的 namespace 忽略 LD_LIBRARY_PATH 仅适用于安装运行态，两条互补不冲突。
+affected_scope:         任何以 Conan + Autotools 原生构建、且 host 依赖图中含共享库（非全静态）的项目
+verification_cmd:       mkdir -p /tmp/probe-conftest && cd /tmp/probe-conftest && printf 'int main(void){ return 0; }\n' > m.c && clang m.c -I/storage/Users/currentUser/.conan2/p/curl3b1c48f2fda9f/p/include -L/storage/Users/currentUser/.conan2/p/curl3b1c48f2fda9f/p/lib -lcurl -o conf_probe && ./conf_probe
+                        # 预期：Error loading shared library libcurl.so: (needed by ./conf_probe)
+                        LD_LIBRARY_PATH=/storage/Users/currentUser/.conan2/p/curl3b1c48f2fda9f/p/lib ./conf_probe
+                        # 预期：无输出退出 0。<curl_pkg> 为仓内任一 curl/8.15.0 共享包，可在 .conan2/p/ 下按名定位。
+
+rec_priority:           1
+rec_approach:           inject-dep-libdirs-ld-library-path
+rec_description:        在 recipe generate() 中用 conan.tools.env.Environment 把全部 host 依赖包的 bindirs 前置进 PATH（供 curl-config 等 PATH 探测工具）、libdirs 前置进 LD_LIBRARY_PATH（供 conftest 加载），再 env.vars(self).save_script() 落入 conanbuild 环境。dirb/2.22 与 aaphoto/0.45 两个独立 run 命中同一 error_signature 并以同法修复，复发面由 Conan+Autotools 组合保证。
+rec_command:            conanfile.py generate()：env = Environment(); 遍历 self.dependencies.host.values()，对 dep.cpp_info.bindirs 逐个 env.prepend_path("PATH", d)、对 dep.cpp_info.libdirs 逐个 env.prepend_path("LD_LIBRARY_PATH", d)；最后 env.vars(self).save_script("dep_libdirs")
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      ac-cache-or-static-probe
+fallback_description:   对个别运行检测改用 ac_cv_* 缓存变量显式给值（同 E064 fallback 思路），或让该检测链接依赖的静态库变体。诚实权衡：只覆盖检测层，不解决最终制品运行期的库可见性，仅作检测层退路并须记录。
+fallback_command:       ./configure ac_cv_header_stdc=yes ...（仅对确认安全的检测项逐个给值）
+fallback_auto_fix:      false
+fallback_impl:          configure-args
+
+forbid_1_pattern:       --host=|--build=
+forbid_1_reason:        conftest 运行失败不是交叉编译场景；用 --host 绕过会使全部检测走假设值（P-AUTOTOOLS-001、E064 级联）。
+forbid_1_consequence:   config.h 全错 → 编译失败或运行行为异常，且掩盖真实依赖可见性问题。
+
+forbid_2_pattern:       cp .*(\.so[^ ]*) /(usr|system|lib)
+forbid_2_reason:        把 conan 缓存共享库拷入系统/全局路径以"修好"加载器属于缓存与系统污染。
+forbid_2_consequence:   版本漂移与跨 run 污染，问题在其他库复现时更难归因。
+
+principles:             P-AUTOTOOLS-002, P-PATCH-001
+causes:
+caused_by:
+similar_to:             E064（同签名、根因为安全弹窗）; E019; E266; E269; E088（安装运行态边界）; DRAFT-swftools-autotools-hmdfs-2168
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-conan-dep-shared-libs-break-configure-conftest.md
+last_updated:           2026-09-11
+source_event:           dirb/2.22 HarmonyOS PC adaptation (run dirb-2.22); 第二实例 aaphoto/0.45
+
+draft:                  true
+contributor_id:         dirb-2.22
+authors:                GoliWie
+source_pr:
+source_commit:
+
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     0.90
+metrics_last_used:      2026-09-11

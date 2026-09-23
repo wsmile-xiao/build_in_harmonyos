@@ -1,0 +1,66 @@
+# ═══ Draft knowledge entry — rpmalloc 1.4.5 aarch64 deferred free CAS ordering ═══
+# Timestamp: 2026-09-08
+# Software: rpmalloc 1.4.5
+# Gate: upstream test test_crossthread / rpmalloc_finalize (HarmonyOS PC arm64, clang 15, -O2)
+# Status: UNMATCHED — local snapshot scan found no equivalent entry; needs review to promote to E-entry
+#
+# To promote:
+#   1. Review error excerpt + verification below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv and doc/E0XX.md
+
+id: DRAFT-rpmalloc-1.4.5-aarch64-deferred-free-cas-ordering
+severity: 2
+category: concurrency, memory-ordering, allocator, aarch64
+trigger_tool: test|runtime|conan
+phase: testing|runtime
+approach: upgrade atomic_cas_ptr from memory_order_relaxed to memory_order_acq_rel/acquire on the deferred-free span list push
+
+keywords: rpmalloc, deferred free, span_free_deferred, atomic_cas_ptr, relaxed, acquire, acq_rel, weak memory ordering, aarch64, arm64, Memory leak detected, finalize, linked list corrupted, cross thread free
+
+error_signature: Memory leak detected.*rpmalloc_finalize: 3034|Assertion failed: .*_mapped_pages == 0|Linked list corrupted.*1105
+match_keywords: rpmalloc, Memory leak detected, mapped_pages, finalize, deferred free, cross thread, aarch64, weak memory ordering, relaxed, CAS
+
+root_cause: rpmalloc 1.4.5 的跨线程释放路径把完全释放的 span 以 relaxed CAS 推入 owner heap
+  的 span_free_deferred 链表（span->free_list 复用为链表 next 指针），消费者用 acquire
+  exchange 取出链表。在 aarch64 弱内存序 + 优化（-O2 及以上）下，生产者对 next 指针的
+  写入与 CAS 之间缺少 release 同步，消费者可能读到损坏的 next，导致双向链表断言失败或
+  span 永不 unmap，finalize 时 _mapped_pages != 0 报 "Memory leak detected"
+affected_scope: 弱内存序（aarch64 等）平台上以 relaxed CAS + acquire exchange 配对推送/消费
+  无锁链表的库，尤其内存分配器/数据结构库的 deferred free 类跨线程释放路径
+verification_cmd: ./bin/linux/release/arm64/rpmalloc-test 2>&1 | tail -3; echo $?
+  # 修复前: "Assertion failed: (atomic_load32(&_mapped_pages) == 0) ..." exit 134
+  # 修复后: "All tests passed" exit 0
+  # 附带: TMPDIR=~ python3 scripts/ohc-run.py conan-verify rpmalloc 1.4.5
+
+rec_priority: 1
+rec_approach: upgrade-cas-memory-order
+rec_description: 把 deallocate_defer_free_span 入链使用的 atomic_cas_ptr 由
+  memory_order_relaxed 升级为 memory_order_acq_rel（成功）/memory_order_acquire（失败）。
+  该 helper 的唯一调用点即 deferred span 入链，升级后先前的 next 指针写入以 release
+  发布，与消费者的 acquire exchange 正确 synchronizes-with
+rec_auto_fix: true
+rec_impl: source-patch
+
+fallback_priority: 2
+fallback_approach: disable-optimization-for-tests
+fallback_description: 不推荐。在配方/测试中强制 -O0 掩盖竞态会偏离上游 Release 语义，
+  且无法证明 aarch64 弱内存序下无竞态
+fallback_auto_fix: false
+fallback_impl: none
+
+forbid_1_pattern: skip.*test_crossthread|disable.*finalize.*assert|#define NDEBUG.*rpmalloc
+forbid_1_reason: 跳过测试或关断言会掩盖回调中真实的内存序竞态，上游 2.0 重写即因此类问题
+forbid_2_pattern: -O0.*测试|fno-optimize.*掩盖
+forbid_2_reason: 降低优化不解决竞态，只改变时序，且偏离 Release 构建语义
+
+principles: P005,P015
+causes: []
+caused_by: []
+similar_to:
+conflicts_with: []
+prerequisite_of: []
+doc_file: doc/DRAFT-rpmalloc-1.4.5-aarch64-deferred-free-cas-ordering.md
+last_updated: 2026-09-08
+source_event: rpmalloc 1.4.5 upstream test_crossthread FAIL -> full suite PASS after CAS memory order fix on HarmonyOS PC arm64
+authors: pc1-57 <executor@oh-runner>

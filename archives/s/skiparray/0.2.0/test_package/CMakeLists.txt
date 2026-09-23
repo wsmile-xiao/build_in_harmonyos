@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_skiparray C)
+find_package(skiparray CONFIG REQUIRED)
+add_executable(test_skiparray test.c)
+target_link_libraries(test_skiparray PRIVATE skiparray::skiparray)
+enable_testing()
+add_test(NAME skiparray_api COMMAND test_skiparray)

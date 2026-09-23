@@ -1,0 +1,94 @@
+--- src/kpackage/private/packagejobthread.cpp	2026-08-27 18:54:06.712174532 +0800
++++ src/kpackage/private/packagejobthread.cpp	2026-08-28 08:25:28.520302500 +0800
+@@ -31,6 +31,70 @@
+ 
+ namespace KPackage
+ {
++// KArchive::copyTo() preserves ownership/permissions and, on some extraction
++// paths, relies on privileged syscalls (setreuid/chroot) that are restricted in
++// sandboxed environments (e.g. OHOS). When copyTo() fails, fall back to a plain
++// recursive extraction that only materialises file contents and re-creates the
++// directory tree. The fallback is unconditional and therefore testable in normal
++// builds, not gated behind a platform macro.
++static bool fallbackExtractArchiveEntry(const KArchiveEntry *entry, const QString &destBase)
++{
++    const QString destPath = destBase + QLatin1Char('/') + entry->name();
++    if (entry->isDirectory()) {
++        const auto *dir = static_cast<const KArchiveDirectory *>(entry);
++        QDir d(destPath);
++        if (!d.exists() && !d.mkpath(destPath)) {
++            return false;
++        }
++        const auto subEntries = dir->entries();
++        for (const QString &name : subEntries) {
++            const KArchiveEntry *child = dir->entry(name);
++            if (!child || !fallbackExtractArchiveEntry(child, destPath)) {
++                return false;
++            }
++        }
++        return true;
++    }
++    if (entry->isFile()) {
++        const auto *file = static_cast<const KArchiveFile *>(entry);
++        QFile out(destPath);
++        if (!out.open(QIODevice::WriteOnly)) {
++            return false;
++        }
++        const QByteArray data = file->data();
++        if (out.write(data) != data.size()) {
++            // Short/failed write (e.g. disk full, interrupted): surface an
++            // explicit failure instead of silently producing a truncated file.
++            out.close();
++            return false;
++        }
++        out.close();
++        return true;
++    }
++    // KF6 KArchiveEntry exposes symlink entries through symLinkTarget()
++    // (isFile()/isDirectory() are both false for them). A plain string content
++    // entry (e.g. the standard KZip "mimetype" marker) has an empty target.
++    const QString target = entry->symLinkTarget();
++    if (!target.isEmpty()) {
++        // HMDFS cannot replace an existing symlink in place: remove first.
++        QFile::remove(destPath);
++        return QFile::link(target, destPath);
++    }
++    return true;
++}
++
++static bool fallbackExtractArchive(const KArchiveDirectory *source, const QString &destBase)
++{
++    const auto entries = source->entries();
++    for (const QString &name : entries) {
++        const KArchiveEntry *entry = source->entry(name);
++        if (!entry || !fallbackExtractArchiveEntry(entry, destBase)) {
++            return false;
++        }
++    }
++    return true;
++}
++
+ bool copyFolder(QString sourcePath, QString targetPath)
+ {
+     QDir source(sourcePath);
+@@ -219,7 +283,19 @@
+         d->installPath = path;
+ 
+         const KArchiveDirectory *source = archive->directory();
+-        source->copyTo(path);
++        // copyTo() can fail when restricted syscalls (setreuid/chroot) block
++        // permission/ownership restoration in sandboxed environments (e.g.
++        // OHOS); fall back to plain content extraction so package installs
++        // still succeed. Unconditional (not platform-gated) so the fallback is
++        // exercised and testable in normal builds too.
++        if (!source->copyTo(path)) {
++            if (!fallbackExtractArchive(source, path)) {
++                d->errorMessage = i18n("Could not extract package file: %1", src);
++                d->errorCode = PackageJob::JobError::PackageOpenError;
++                delete archive;
++                return false;
++            }
++        }
+ 
+         QStringList entries = source->entries();
+         if (entries.count() == 1) {

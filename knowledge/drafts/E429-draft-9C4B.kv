@@ -1,0 +1,76 @@
+#====================================================================
+# 知识图谱草稿（draft）— curtain 0.3 路径 B 贡献
+# 贡献者: kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+# 来源 PR: #10116（分支 feat/curtain-0.3），与归档适配同一原子 PR 交付
+# 文件名由 python3 scripts/ohc-run.py graph add E429 --draft 生成
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E429
+trigger_tool: runtime|window|gtk
+phase: runtime
+error_signature: cannot open display|Gtk-WARNING.*cannot open display|GdkBroadwayDisplay|only.*[Bb]roadway|no native display backend
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: platform, portability, runtime, ohos, limitation
+match_keywords: GTK, Broadway, broadwayd, cannot open display, no display backend, ArkUI native host, overlay, click-through, input shape, window rect, uinput, snapshot_display, curtain
+title: 上游 UI 工具包在 OHOS 无原生显示后端（仅 Broadway）时的应用级运行时适配模式：ArkUI 原生宿主 + 行为核心 C 移植，窗口矩形=幕布/组件区域
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: OHOS 已发布的 GTK 3.24.43 仅启用 Broadway（HTML5/浏览器）后端（X11/Wayland 关闭）；原生进程无 DISPLAY/WAYLAND_DISPLAY，上游 gtk_init 直接失败（Gtk-WARNING: cannot open display，退出 1）。即使启动 broadwayd，GTK 也只是渲染到浏览器画布，不能覆盖 HarmonyOS 原生桌面，也不能提供桌面窗口的 input shape/全屏/置顶语义。结论：上游窗口层在 OHOS 不可用，应用必须在原生 UI 栈上重建宿主，并把与平台无关的行为核心（几何状态机/缩放）移植为可独立测试的 C 代码（curtain 0.3 实测：34 个补丁全为新增文件，上游源码零修改）。
+affected_scope: 所有 UI 工具包在 OHOS 无原生显示后端的桌面 GUI 应用/库（GTK Broadway-only 等）；尤其是行为依赖窗口几何的工具（遮罩/overlay、全屏置顶、点击穿透、窗口区域交互）。curtain 0.3（GTK3 遮罩工具）完整实例。
+verification_cmd: strings <gtk-pkg>/lib/libgtk-3.so | grep -E "broadway|wayland|x11" ; ./curtain 2>&1 | grep "cannot open display" ; hdc install -r entry-default-signed.hap && hdc shell aa start -b com.kasumizawamiyuu.curtainhost -a EntryAbility && hdc shell uinput -M -g 3000 1000 1700 1000 800 && hdc shell snapshot_display -f /data/local/tmp/curtain.jpeg
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: arkui-native-host-with-ported-behavior-core
+rec_description: 1) 不修改上游源码，新增 ArkUI 宿主工程（独立包名、全屏沉浸窗口）承载渲染与输入；2) 把平台无关的行为核心逐分支移植为无依赖 C（几何状态机=上游 callbacks.c；缩放语义=上游 utils.c::scale_surface，PNG 由平台 image 解码后 C 侧双线性+边缘镜像缩放）；3) 窗口矩形=幕布/组件矩形：初始全屏覆盖，拖拽释放后 recover()+moveWindowToAsync+resizeAsync 把窗口调整到剩余区域，窗口之外即桌面，天然实现“揭开区域可见 + 点击穿透”（等价上游 gtk_widget_input_shape_combine_region）；4) 触摸坐标=vp2px(windowX)+winX/winY 折算到屏幕绝对坐标驱动 C 状态机；5) 二进制资源（PNG）由 Conan package() 从上游源码树注入宿主 rawfile，不进补丁管线，图标用文本 SVG；6) 验证=无头 C 回归测试 + test_package + 真机 uinput/snapshot_display 逐行为取证（每步截图+日志）；7) 权限类限制（WINDOW_TOPMOST 返回 201、系统 Dock 恒在最上、自由窗口顶部热区）如实记录为 limitation。
+rec_command: hdc shell uinput -M -g 3000 1000 1700 1000 800 && hdc shell snapshot_display -f /data/local/tmp/curtain.jpeg
+rec_auto_fix: false
+rec_impl: manual-new-files-host-and-core-port
+
+# 回退方案
+fallback_priority:      2
+fallback_approach: offscreen-partial-declaration
+fallback_description: 若目标应用无法以原生宿主重建（依赖完整桌面控件树且交互面过大），退路是：归档内保留上游二进制与说明，功能状态按 partial 如实申报（Broadway 仅可作为“上游 GTK 可初始化”的旁证），并交付可测试的行为核心库与宿主源码，不宣称桌面行为完成。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl: recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern: GdkBroadwayDisplay.*(适配完成|验收|PASS|证据)|broadwayd.*(适配完成|验收|PASS)
+forbid_1_reason: Broadway 只是把 GTK 渲染进浏览器画布，不能覆盖 HarmonyOS 原生桌面，也不能提供窗口 input shape/几何语义；把它作为适配完成证据属于功能替换/误导。
+forbid_1_consequence: 评审不认可，且真机桌面遮罩/点击穿透行为实际缺失。
+forbid_2_pattern: (删除|绕过|stub|空实现).{0,40}(遮罩|幕布|几何|overlay|cover|click)
+forbid_2_reason: 不允许用空实现/桩替换上游核心行为来制造“编译通过”。
+forbid_2_consequence: 违反 R40“编译通过≠适配完成”，独立审计不合格。
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P013
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             E463, E471, E527, E321
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-09-15
+source_event: curtain 0.3 真机适配：GTK broadway-only 直启失败（cannot open display）→ ArkUI 原生宿主 + C 行为核心移植；真机全屏遮罩/拖拽揭开/点击穿透/回盖/退出/重启全部通过
+
+# ═══ 知识协作 ═══
+authors:
+source_pr: 10116
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9C4B

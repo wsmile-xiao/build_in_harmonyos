@@ -1,0 +1,64 @@
+# ═══ Draft knowledge entry — musl/OHOS 无 glibc 的 legacy BSD 定宽类型
+# u_int8_t..u_int64_t：glibc 经 sys/types.h（arpa/inet.h 等间接引入）提供，
+# musl 从不定义；老 C 工具常只在 __WIN32__ 分支兜底 typedef → Linux/glibc
+# CI 全绿、OHOS 首编即 unknown type name
+# Software: pcapfix 1.1.7（pcap.h/pcap_kuznet.h/pcapng.c 共 10 处报错实证）
+# Gate: conan-verify G2（conan create，ohos-aarch64，clang 15）+ test_package 9/9
+# Status: DRAFT
+
+id: pcapfix-1.1.7-musl-legacy-uint-bsd-types
+severity: 3
+category: portability|libc|build-system|ohos
+trigger_tool: clang|make|conan
+phase: build
+
+keywords: u_int32_t, u_int16_t, u_int8_t, u_int64_t, unknown type name, musl, glibc, sys/types.h, arpa/inet.h, BSD legacy types, typedef, pcapfix, pipebench, on-disk struct
+error_signature: 'error: unknown type name .u_int(8|16|32|64)_t.?; did you mean .uint(8|16|32|64)_t.?'
+match_keywords: u_int32_t, u_int16_t, unknown type name, musl types, BSD typedef, pcapfix, pipebench, glibc only
+
+root_cause: |
+  (1) glibc 的 <sys/types.h> 在 __USE_MISC（默认 _DEFAULT_SOURCE）下定义 legacy BSD
+  定宽类型 u_int8_t/u_int16_t/u_int32_t/u_int64_t；它会被 <arpa/inet.h>、<sys/socket.h>
+  等常见头间接引入。musl（OHOS libc）刻意不提供这组 BSD 别名。
+  (2) 2000 年代老 C 工具常在磁盘格式结构体里直接写 u_int32_t（如 pcapfix 的
+  pcap/pcap_kuznet/pcapng 包头结构），且只为 Windows 写了 typedef 兜底
+  （pcapfix.h 的 `#ifdef __WIN32__` 分支），假定非 Windows 即 glibc。
+  (3) 结果：上游在任何 glibc CI（含 Fedora/Debian 构建）都能编译，musl/OHOS
+  第一次编译就在结构体定义处报 `unknown type name 'u_int32_t'; did you mean
+  'uint32_t'?`（pcapfix 1.1.7 实测 10 处、跨 pcap.c/pcap_kuznet.c/pcapng.c 三个
+  编译单元）。
+
+rec_approach: common-header-guarded-typedef-block
+rec_description: |
+  在被所有编译单元最先 include 的公共头（pcapfix 场景即 pcapfix.h——4 个 .c 全部
+  第一个 include 它）的非 Windows 分支补一段带守卫的 typedef 块：守卫排除
+  __GLIBC__/__APPLE__/__FreeBSD__/__NetBSD__/__OpenBSD__（这些平台自带定义，
+  重复 typedef 在 -std=gnu99 下是约束违规），musl 及其他未知 libc 落入映射。
+  写法与上游自己的 Windows 侧兜底一致，最小且单一职责。若项目没有公共头，
+  则在每个使用 u_int* 的头各加一份（pipebench 0.40 先例：把上游 `#ifdef sun`
+  的映射块改为 `#if defined(sun) || !defined(__GLIBC__)`）。禁止 sed 批量替换
+  源码里的 u_int32_t→uint32_t（R6：改生成文件/大面源码不如规范 patch）。
+rec_command: |
+  # patches/0001-musl-legacy-uint-types.patch（unified diff, patch -p1）
+  # pcapfix.h 的 #else（非 __WIN32__）分支尾部追加：
+  #if !defined(__GLIBC__) && !defined(__APPLE__) && !defined(__FreeBSD__) && !defined(__NetBSD__) && !defined(__OpenBSD__)
+    typedef uint8_t u_int8_t;
+    typedef uint16_t u_int16_t;
+    typedef uint32_t u_int32_t;
+    typedef uint64_t u_int64_t;
+  #endif
+  # （前置条件：该头已 #include <inttypes.h>/<stdint.h>）
+rec_auto_fix: false
+
+affected_scope: |
+  任何在结构体/函数签名里使用 legacy BSD u_int*_t 的 C 源码，且面向 OHOS/musl
+  编译。已实证两例：pcapfix 1.1.7（pcap.h/pcap_kuznet.h/pcapng.c，公共头
+  pcapfix.h 一处修复全部编译单元）、pipebench 0.40（pipebench.c，改上游
+  `#ifdef sun` 块为 `!defined(__GLIBC__)` 守卫）。同族风险：一切解析 pcap/BSD
+  套接字结构的老抓包/网络工具。
+
+verification: |
+  conan create archives/p/pcapfix/1.1.7 -pr:h=ci/conan/profiles/ohos-aarch64
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+  （真机实测：未打补丁 10 处 unknown type name 编译失败；打补丁后全绿 +
+  test_package 9/9）

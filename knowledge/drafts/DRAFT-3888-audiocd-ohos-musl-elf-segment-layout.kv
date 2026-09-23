@@ -1,0 +1,53 @@
+id: DRAFT-3888-audiocd-ohos-musl-elf-segment-layout
+title: OHOS musl loader 拒绝多 RW LOAD 段布局（lld max-page-size 0x10000 与 patchelf 重排两类来源）
+category: platform, linking, runtime
+severity: 3
+match_keywords:
+  - dlopen
+  - Permission denied
+  - Error loading shared library
+  - max-page-size
+  - patchelf --replace-needed
+  - LOAD segment
+  - readelf -lW
+  - multi RW LOAD
+  - high-address segment
+  - 0x10000 alignment
+error_signature: "Error loading shared library <path>.so: Permission denied（dlopen/程序加载时）；readelf -lW 显示 5+ 个 LOAD 段且存在 VirtAddr 0x10000/0x20000/0x30000 的高址 RW 段（Align 0x10000），或一个 27KB 级 .so 被 patchelf --replace-needed 处理后膨胀到 ~198KB 且多出 3 个 RW LOAD 段"
+error_excerpt: "Error loading shared library /path/to/libfoo.so: Permission denied — 但 ls -la 显示 777/770 权限正常、文件可读、同目录其他 .so 可正常 dlopen；readelf -lW libfoo.so | grep -c '^  LOAD' >= 5"
+root_cause: |
+  OHOS musl 动态加载器拒绝 mmap 特定的 ELF program header 段布局（多个高址 RW LOAD 段，
+  典型形态是 .dynsym/.note.ohos.ident/.dynstr 被拆进 VirtAddr 0x10000/0x20000/0x30000 的
+  独立 RW 段，Align 0x10000）。两个独立来源都会产生这种布局：
+  1. lld 默认 max-page-size=0x10000：当动态段条目较多/字符串表较大时，lld 用 64K 页对齐
+     拆分段表（audiocd 26.04.3 的 libaudiocdplugins.so 实测 7 个 LOAD）；
+  2. OHOS 版 patchelf --replace-needed：修改 dynamic 段时按 0x10000 页重排 program
+     header（实测 4 LOAD/27KB 的库被处理后变 7 LOAD/198KB；--page-size 4096 可控制大小
+     但仍是 7 段布局，照样被拒）。
+  症状极易误导：musl 报 "Permission denied"，但 chmod 无效（HMDFS 上 chmod 本来也不生效），
+  文件权限、属主、SELinux 标签全部正常，同权限的兄弟库能加载。
+solution: |
+  预防（链接期）——在 Conan 配方 generate() 的 CMakeToolchain 注入：
+  ```python
+  tc.variables["CMAKE_SHARED_LINKER_FLAGS_INIT"] = "-Wl,-z,max-page-size=0x1000"
+  tc.variables["CMAKE_MODULE_LINKER_FLAGS_INIT"] = "-Wl,-z,max-page-size=0x1000"
+  ```
+  使 lld 输出常规 4-LOAD 布局。
+
+  止损（打包期）——不要对最终 .so 跑 patchelf --replace-needed 做 R05 relocatable
+  sweep：OHOS patchelf 会把段表重排成被拒布局。绝对路径 DT_NEEDED 在 CI 环境一致的
+  conan 缓存布局下可加载（libkcddb 26.04.3 已合入先例）。
+
+  诊断（30 秒确认）：readelf -lW libfoo.so | grep -cE '^  LOAD'——4 段可加载、5+ 段
+  （含高址 RW）被拒；用最小 dlopen 探针可区分本条与权限/签名类（E488/E502/E517）根因。
+fallback: |
+  若库已被 patchelf 破坏且无源码可重链：从构建树原始产物重新 install（跳过 sweep）。
+  若必须改 NEEDED：考虑等长字符串原地替换（仅当新旧 soname 等长）或上游修复 patchelf。
+verify_builds:
+  - "audiocd/26.04.3 本地 conan create（package_id 08149eb3890c4b1d2687a38b0ed16edb39e899dd）：加 max-page-size=0x1000 后 libaudiocdplugins.so 4-LOAD，dlopen 探针 OK，test_package 35/35 断言 ALL PASS；对照实验：同文件经 patchelf --replace-needed 三次后 7-LOAD/198KB，dlopen Permission denied"
+related_rules:
+  - R05 (relocatable linkage sweep)
+  - R34 (test_package 实质运行)
+kb_ref: ""
+last_updated: 2026-09-15
+origin_pr: "audiocd 26.04.3 适配（任务 #3888）"

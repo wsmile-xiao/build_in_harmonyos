@@ -1,0 +1,215 @@
+# ═══ Draft knowledge entry — configure 探针命令自身加载失败 → 版本判定错误 → 静默跳过整组测试 ═══
+# Timestamp: 2026-09-15
+# Software: debugedit 5.3（configure 探测 dwz 版本）；机制适用于任何用外来工具做条件探测的构建系统
+# Gate: PR #9255 / 真机 conan create 实测（config.log 铁证 + 新旧树对照）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-configure-probe-self-load-failure-misjudges-version
+trigger_tool:           configure|cmake|meson|conan|autotools
+phase:                  configure|test|test_package
+error_signature:        ac_cv_[a-z_]+='[^']*Error loading shared library[^']*'|
+                           ac_cv_[a-z_]+=[0-9]+-vs-Error loading shared library|
+                           Error loading shared library lib[a-z0-9]+\.so\.[0-9]+: \(needed by .*\)|
+                           tests were skipped|
+                           [A-Z_]+_CHECKS_OK='no'
+
+severity:               3
+category:               configure, probe, testing, runenv, linkage, environment, ohos
+match_keywords:         AC_CHECK_PROG, AC_CACHE_CHECK, ac_cv_, version probe, 版本探测,
+                           自身加载失败, Error loading shared library, GDB_ADD_INDEX_CHECKS_OK,
+                           静默跳过, skipped not failed, LD_LIBRARY_PATH, runenv, 工具依赖库,
+                           configure 误判, 探针
+title:                  configure 用外来工具做能力探测时，若该工具因依赖库不在 LD_LIBRARY_PATH 而自身加载失败，探测会读到「loader 错误文本」并静默判为不支持，导致整组检查/测试被跳过（表现为 skipped 而非 failed）
+
+root_cause: >
+  构建系统常用「运行某个工具并读取其 --version」来探测能力，且往往用 `2>&1` 一并捕获
+  stderr（因为老版本工具会把版本打到 stderr）。若该工具在 OHOS 上**自身加载失败**
+  （它的传递依赖 .so 不在 LD_LIBRARY_PATH），捕获到的就不是版本号，而是 loader 的错误文本：
+
+      # configure.ac（debugedit 上游，节选）
+      DWZ_VERSION_STRING=$(dwz --version 2>&1 | head -1)      # ← 2>&1 把错误并进版本字符串
+      DWZ_MAJOR=$(echo "$DWZ_VERSION_STRING" | sed -E 's/.* ([0-9]+)\.([0-9]+).*/\1/')
+      DWZ_MINOR=$(echo "$DWZ_VERSION_STRING" | sed -E 's/.* ([0-9]+)\.([0-9]+).*/\2/')
+      ...
+      if   test "$GDB_MAJOR" -lt "15";  then GDB_ADD_INDEX_CHECKS_OK="yes"
+      elif test "$DWZ_MAJOR" -gt "0";   then GDB_ADD_INDEX_CHECKS_OK="yes"
+      elif test "$DWZ_MINOR" -ge "16";  then GDB_ADD_INDEX_CHECKS_OK="yes"
+      else                                   GDB_ADD_INDEX_CHECKS_OK="no"
+      fi
+
+  实测铁证（同一配方，仅 LD_LIBRARY_PATH 注入与否不同）：
+
+      # 未注入依赖库路径 —— dwz 依赖 libelf→libzstd，加载失败
+      ac_cv_gdb_dwz_ver='16-vs-Error loading shared library libzstd.so.1: (needed by libelf-0.195.so)...'
+      GDB_ADD_INDEX_CHECKS_OK='no'
+
+      # 注入后
+      ac_cv_gdb_dwz_ver=16-vs-0.16
+      GDB_ADD_INDEX_CHECKS_OK='yes'
+
+  sed 因匹配不到 `数字.数字` 而原样返回错误文本，`test "$DWZ_MAJOR" -gt "0"` 对非数字
+  求值失败，三个分支全部落空 → 走 else → **判为「工具版本不支持」**。
+
+  后果的严重性在于**症状隐蔽**：
+    · configure 不报错，构建全程正常；
+    · 受影响的检查/测试被**静默标记为 skipped**，而不是 failed；
+    · 因此「通过率」看不到异常，甚至因为 skipped 通常不计入分母而显得更好；
+    · 适配者会误判「该功能 OHOS 不支持」，进而写进 notes/PR 描述作为环境限制——
+      而实际上它完全可用。
+
+  另一类同源风险：若探测的是**必需**能力且默认值为「不支持」，可能静默降级构建
+  （功能被关掉），产出「能编译但缺能力」的库，问题延迟到运行期才暴露。
+
+affected_scope: >
+  任何在 OHOS 上、用「运行外部工具读版本/能力」做条件判断的构建系统（autotools
+  AC_CHECK_PROG/AC_CACHE_CHECK、CMake find_program + execute_process、meson
+  find_program + run_command）。尤其是被探测工具**自身有传递依赖 .so** 的场景
+  （conan 包的 bin/ 里工具常动态链接同包的 lib/）。
+  典型信号：configure 正常结束但某 `*_CHECKS_OK` 为 no、测试被大量 skip、
+  `config.log` 里 ac_cv_* 缓存值含 "Error loading shared library"。
+  不适用：纯编译期探测（#include/链接测试，不运行目标工具）。
+
+verification_cmd:       # ① 决定性：在 config.log 里搜被污染的探测缓存值
+                           grep -nE "ac_cv_.*Error loading shared library" config.log
+                           # 期望：无输出；若有输出即为本 bug
+                           # ② 对照：把该工具的版本探测在同等环境下重跑一遍
+                           #    注意必须 source 构建环境（依赖库路径在其中）
+                           sh -c '. <generators>/conanbuild.sh
+                                  echo "dwz --version -> $(dwz --version 2>&1 | head -1)"'
+                           # 期望 "dwz version 0.16"；若为 "Error loading shared library ..."
+                           # 则确认工具自身加载失败
+                           # ③ 检查探测结果落在哪个分支
+                           grep -nE "GDB_ADD_INDEX_CHECKS_OK|_CHECKS_OK=" tests/atlocal config.log
+                           # ④ 反向验证：注入依赖库路径后重跑 configure，看判定是否翻转
+                           #    （本次注入后 GDB_ADD_INDEX_CHECKS_OK 由 no → yes）
+
+rec_priority:           1
+rec_approach:           inject-dependency-libdirs-into-runenv-so-probed-tools-can-load
+rec_description: >
+  在配方 generate() 里把**各依赖包的 libdirs 注入 LD_LIBRARY_PATH**（即 runenv），
+  使被探测的工具（及其传递依赖）能在构建/测试期正常加载：
+
+      for _n, dep in self.dependencies.items():
+          if not dep.package_folder:      # 未解析出二进制：cpp_info 返回相对默认值
+              continue
+          for p in dep.cpp_info.libdirs:
+              env.append_path("LD_LIBRARY_PATH", p)
+
+  ⚠️ `cpp_info.libdirs` / `bindirs` 在 `dep.package_folder` 为 `None` 时返回**相对默认值**
+  `['lib']` / `['bin']`，直接注入会生成裸 `lib`/`bin` 条目（实测 env 文件里出现
+  `LD_LIBRARY_PATH=…:lib:lib:lib:lib:…`），无意义且可能被 CWD 下同名目录误命中。
+  故先判 `dep.package_folder`，或在拼接时显式使用 `dep.package_folder` 作为前缀。
+
+  要点：
+    ① 必须覆盖**工具自身的传递依赖**，不只是直接 require 的那个包。
+       debugedit 案例中 dwz 依赖 libelf，libelf 又依赖 libzstd/libfts/libobstack——
+       全在依赖树里，但都不在系统路径。
+    ② 只做 PATH 注入不够：工具的**可执行性**与其**依赖库可达性**是两件事。
+       前者由 PATH 决定，后者由 LD_LIBRARY_PATH 决定。
+    ③ 修完必须**复验判定结果**（config.log 里 ac_cv_* 的值 / atlocal 里 *_CHECKS_OK），
+       而不是只看「构建通过」。本次修完 `GDB_ADD_INDEX_CHECKS_OK` 由 `no` → `yes`，
+       相关测试由「跳过」转为「真跑」。
+    ④ 若探测的是必需能力，除了修环境，还应在配方里**显式断言**期望判定结果
+       （必要时 patch configure 把默认值改掉），避免环境异常时静默降级。
+rec_command:            # 配方 generate() 中（与 PATH 注入并列）
+                           for _n, dep in self.dependencies.items():
+                               if not dep.package_folder:   # 跳过未解析出二进制的依赖
+                                   continue
+                               for p in dep.cpp_info.libdirs:
+                                   env.append_path("LD_LIBRARY_PATH", p)
+                           # 复验（不要只看构建 rc=0）
+                           #   grep -nE "ac_cv_.*Error loading shared library" <build>/config.log
+                           #   grep -nE "_CHECKS_OK=" <build>/tests/atlocal
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      set-the-probe-cache-variable-explicitly-or-default-to-fail-loud
+fallback_description: >
+  若不便（或不想）为探测去凑构建环境，退路是**直接给定探测结果**或**让失败显式化**：
+    · 注入 conan 的 cross-build 缓存变量（autotools `ac_cv_*` / CMake 的
+      `<VAR>-CACHE`）把已知正确的值写死，绕过探测；
+    · 或 patch configure，把「探测失败」从静默判 no 改为 `AC_MSG_ERROR`
+      （fail loud），避免能力被悄悄关掉。
+  代价：写死值会在环境变化时失真；改默认值属于改上游语义，需在 notes 说明。
+  仅在环境注入不可行（如工具链根本装不上）时使用。
+fallback_command:       # 方式一：预置缓存变量（autotools）
+                           #   conanfile: tools.build:cflags 之外，用
+                           #   tc.configure_args.append("ac_cv_gdb_dwz_ver=16-vs-0.16")
+                           # 方式二：patch configure，让探测失败显式报错
+                           #   -  else GDB_ADD_INDEX_CHECKS_OK="no"
+                           #   +  else AC_MSG_ERROR([dwz/gdb probe failed: $DWZ_VERSION_STRING])
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       测试被跳过.*就认为.*平台不支持|skipped.*说明.*OHOS.*限制|大量 skip.*属环境硬限制
+forbid_1_reason:        skipped 可能是**探测失败导致的静默降级**，而非真的不支持。必须先看
+                          config.log 里 ac_cv_* 的值是否含错误文本，再下「平台不支持」的结论。
+                        （debugedit 案例中「gdb-index/dwz 深度场景 OHOS 受限」这一结论
+                          就是错的——补上依赖库路径后该组测试完全可跑。）
+forbid_1_consequence:   把可用的功能写进 notes/PR 描述当「环境限制」，永久性地低估适配质量，
+                          且掩盖了真实的配置缺陷。
+
+forbid_2_pattern:       只注入.*PATH.*就够了|工具在 PATH 里.*就能运行|找到二进制.*即可用
+forbid_2_reason:        工具的「可执行性」由 PATH 决定，「依赖库可达性」由 LD_LIBRARY_PATH
+                          决定，两者独立。conan 包的 bin/ 里工具常动态链接同包的 lib/，
+                          只注入 PATH 时工具会以 "Error loading shared library" 失败。
+forbid_2_consequence:   configure 探测读到 loader 错误文本、判定翻转，而构建本身仍成功，
+                          问题完全隐藏。
+
+forbid_3_pattern:       构建通过.*即认为.*探测正确|rc=0.*说明.*configure.*正常
+forbid_3_reason:        本 bug 的特征就是「构建全程正常、rc=0」，但探测值被污染、
+                          能力判定错误。必须复验探测结果本身（config.log / atlocal），
+                          而不是构建退出码。
+forbid_3_consequence:   修复未验证就收工，能力仍被静默关闭，且以为已解决。
+
+forbid_4_pattern:       用 sed/grep.*解析.*版本.*即可靠|版本解析.*一定.*成功
+forbid_4_reason:        版本解析（尤其 `sed -E 's/.* ([0-9]+)\.([0-9]+).*/\1/'` 这类）
+                          在输入非预期时**不报错**，而是原样返回或返回空；随后
+                          `test` 对非数字求值失败并落到 else 分支，形成静默误判。
+                          解析失败必须显式检出，不能依赖「解析不出就自然为假」。
+forbid_4_consequence:   把「探测失败」与「确实不支持」混为一谈，产生错误的平台结论。
+
+forbid_5_pattern:       改完.*不.*复验.*判定|注入依赖路径.*不必.*再跑.*configure
+forbid_5_reason:        本类修复的效果体现在**判定翻转**（no → yes）与**跳过转真跑**上。
+                          不复验就无法确认修复生效，也无法发现「环境修好了但又暴露真失败」
+                          这类口径变化（本次确有测试从 skipped 转为真跑后失败）。
+forbid_5_consequence:   以为修好了实际没有；或把「跳过变真跑」误当作通过率提升。
+
+principles:             探测类故障要看**探测输入与缓存值**（config.log 的 ac_cv_*），
+                        而不是构建退出码；
+                        「跳过」与「失败」语义不同，前者可能是探测失败导致的静默降级，
+                        必须先排除再宣称平台不支持；
+                        工具的 PATH 可达性与依赖库可达性必须分别验证；
+                        修完要看判定是否翻转，并留意「跳过转真跑」带来的口径变化。
+similar_to:             E203, E493, E106, DRAFT-ohos-gnu-tool-injection-needs-prepend-and-datadir
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-configure-probe-self-load-failure-misjudges-version.md
+last_updated:           2026-09-15
+source_event:           debugedit 5.3 适配（PR #9255）：上游 configure 用
+                        `dwz --version 2>&1 | head -1` + sed 解析版本，再据
+                        「gdb<15 或 dwz 主版本>0 或 dwz 次版本>=16」判定
+                        GDB_ADD_INDEX_CHECKS_OK。OHOS 侧 gdb 为 16.3（>=15），
+                        但配方未把依赖 libdirs 注入 LD_LIBRARY_PATH，dwz 因
+                        libelf→libzstd 缺失而加载失败，config.log 实测为
+                        ac_cv_gdb_dwz_ver='16-vs-Error loading shared library libzstd.so.1: ...'
+                        且 GDB_ADD_INDEX_CHECKS_OK='no' → 整组 .gdb_index 测试被跳过。
+                        注入 libdirs + require dwz/0.16 后
+                        ac_cv_gdb_dwz_ver=16-vs-0.16、GDB_ADD_INDEX_CHECKS_OK='yes'，
+                        该组由 skipped 转为真跑。
+authors:                jumping_ggjjkk
+source_pr:              9255
+source_commit:          7d7b0c38b
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15

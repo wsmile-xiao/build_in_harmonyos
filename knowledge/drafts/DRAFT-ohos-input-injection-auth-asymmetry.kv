@@ -1,0 +1,65 @@
+#====================================================================
+# DRAFT - OHOS OH_Input_* injection authorization is asymmetric per event type
+#====================================================================
+
+id:                     DRAFT-ohos-input-injection-auth-asymmetry
+trigger_tool:           clang|runtime|test_package|conan
+phase:                  porting|runtime|testing
+error_signature:        INPUT_PERMISSION_DENIED|InjectMouseEvent.*201|AddMouseEventMonitor.*201|RequestInjection.*3900005|INPUT_INJECTION_AUTHORIZING|status=AUTHORIZING
+
+severity:               2
+category:               platform, api
+match_keywords:         OHOS, multimodalinput, oh_input_manager.h, OH_Input_InjectKeyEvent, OH_Input_InjectMouseEvent, OH_Input_RequestInjection, INPUT_PERMISSION_DENIED, INPUT_INJECTION_AUTHORIZING, 3900005, injection authorization, capability split, authorization callback
+title:                  OHOS multimodalinput injection authorization is asymmetric per event type: key injection is authorization-free while mouse injection and monitors get INPUT_PERMISSION_DENIED and RequestInjection stalls in AUTHORIZING, so injection CLIs must gate commands by real capability and point to OH_Input_RequestInjection instead of polling the callback
+
+root_cause:             The OHOS multimodalinput security model grades injection authorization by event type and caller shape, not by a single switch. The SDK sysroot ships usr/include/multimodalinput/oh_input_manager.h (declaring the UNAUTHORIZED/AUTHORIZING/AUTHORIZED state machine, OH_Input_RequestInjection, API 20, and OH_Input_CancelInjection) and libohinput.so, but the actual runtime behavior is undocumented: OH_Input_InjectKeyEvent returns INPUT_SUCCESS without any authorization, while OH_Input_InjectMouseEvent and OH_Input_AddMouseEventMonitor return INPUT_PERMISSION_DENIED (201) in non-interactive sessions, and OH_Input_RequestInjection returns INPUT_INJECTION_AUTHORIZING (3900005) with the registered callback never firing and OH_Input_QueryAuthorizedStatus staying AUTHORIZING. A tool that assumes one uniform injection capability therefore reports false failures or deadlocks waiting for an authorization transition that cannot complete in that session.
+
+affected_scope:         Any project that calls OHOS multimodalinput OH_Input_* injection APIs (InjectKeyEvent, InjectMouseEvent, event monitors, RequestInjection) from a CLI, daemon, automation backend or CI test on HarmonyOS PC.
+
+verification_cmd:       In a fresh device shell: test -f /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot/usr/include/multimodalinput/oh_input_manager.h && test -f /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot/usr/lib/aarch64-linux-ohos/libohinput.so; then save the complete standalone probe source from doc_file section 'Verification' as probe_ohinput.c (self-contained C program, no run artifacts needed) and run /data/service/hnp/bin/clang --target=aarch64-linux-ohos --sysroot=/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/sysroot -lohinput probe_ohinput.c -o probe_ohinput && ./probe_ohinput, which must print inject_key_a down=0 up=0 (key injection free), add_mouse_monitor: result=201, inject_move_initial: result=201, request_injection: result=3900005, auth_callback: called=0 status=none, query_authorized_after_request: result=0 status=AUTHORIZING, inject_move_after_request: result=201.
+
+rec_priority:           1
+rec_approach:           command-level-capability-split-with-authorization-guidance
+rec_description:        Run the probe first, then map every CLI command to the injection API it actually needs. Commands on authorization-free APIs (key injection) stay first-class. Commands on gated APIs (mouse injection, event monitors, pointer read-back) must check the gate and fail explicitly with a diagnostic that names OH_Input_RequestInjection as the authorization path; their tests must accept exactly two outcomes, authorized success or denied-with-diagnostic. Do not degrade the free capability because the gated one is denied, and do not fake success on the gated one.
+rec_command:            Add dual-outcome negative assertions for every gated command and an explicit unsupported boundary (same E240 pattern) for commands whose API surface does not exist at all (no pixel read-back, no clipboard write); embed the OH_Input_RequestInjection hint in the gate diagnostic.
+rec_auto_fix:           false
+rec_impl:               on-device-probe-then-split-cli-backend
+
+fallback_priority:      2
+fallback_approach:      explicit-unsupported-delivery-for-gated-commands
+fallback_description:   In environments where the interactive authorization flow cannot be reached (non-interactive CI, headless sessions), deliver gated commands as explicit-unsupported with the same diagnostic. Honest tradeoff: this masks capability instead of granting it and is only a delivery fallback for unauthorized environments; it must not be presented as the platform lacking the API, and authorized-environment behavior remains expected-but-unverified until tested interactively.
+fallback_command:       ./cliclick m 100,100 exits non-zero with a diagnostic naming OH_Input_RequestInjection; the negative test asserts success-or-denied-with-diagnostic and nothing else
+fallback_auto_fix:      false
+fallback_impl:          explicit-unsupported-plus-negative-tests
+
+forbid_1_pattern:       while.*(AUTHORIZING|3900005)|poll.*authorization|retry.*RequestInjection|wait.*auth.*callback
+forbid_1_reason:        In non-interactive sessions the RequestInjection callback never fires and the state stays AUTHORIZING, so any poll/retry loop waits for a transition that cannot complete.
+forbid_1_consequence:   The tool deadlocks or times out in CI and headless deployments instead of failing fast with an actionable diagnostic.
+
+forbid_2_pattern:       InjectKeyEvent.*success.*(assume|infer).*(InjectMouseEvent|monitor)|key.*ok.*(mouse|monitor).*supported
+forbid_2_reason:        The gate is asymmetric per event type: InjectKeyEvent is authorization-free, so key-injection success proves nothing about mouse/monitor capability.
+forbid_2_consequence:   False capability declaration: the tool advertises mouse automation that fails with INPUT_PERMISSION_DENIED (201) on real devices.
+
+principles:             P-SYSCALL-001, P-RUNTIME-001
+
+causes:                 []
+caused_by:              []
+similar_to:             [E240]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-input-injection-auth-asymmetry.md
+last_updated:           2026-09-09
+source_event:           archives/c/cliclick/5.1 HarmonyOS PC path B candidate (pure-C CLI reimplementation over OH_Input_*)
+
+authors:                GoliWie
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-09
+
+draft:                  true
+contributor_id:         GoliWie

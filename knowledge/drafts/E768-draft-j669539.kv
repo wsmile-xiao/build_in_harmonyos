@@ -1,0 +1,58 @@
+draft: E768-draft-j669539
+status: pending-editor-review
+title: "Conan CMakeDeps 同 cmake_file_name 撞名时属主包独占聚合、后者组件静默丢弃——双包依赖模式组件目标全丢失"
+category: conan, cmake, packaging
+match_keywords: >
+  cmake_file_name, CMakeDeps, same name, aggregate, BoostConfig.cmake,
+  find_package COMPONENTS, target not found, component dropped,
+  boost1.84, dual package, dependency mode, fully qualified target
+error_signature: >
+  Target "xxx" links to:\s*Boost::yyy.*but the target was not found|find_package\(Boost REQUIRED CONFIG COMPONENTS \w+\).*component.*not (?:found|declared)|Conan: Component target declared.*只出现一个包的组件
+root_cause: >
+  conan 2.29.1（OHOS 适配版）的 CMakeDeps 生成器在同一个 dependency graph
+  里遇到两个包声明相同 cmake_file_name（如 boost1.84-context 和
+  boost1.84-fiber 都用 "Boost"）时，聚合出的 <Name>Config.cmake /
+  <Name>Targets.cmake 只保留一个"属主包"的组件集（实测字母序靠前的包赢：
+  boost1.84-context vs boost1.84-fiber 时 context 赢），输家包的全部组件
+  目标被静默丢弃且无任何警告；被测包（test_package 的 tested_reference）
+  的组件同样不进聚合文件，conandeps_legacy 只留全限定全局目标名。结果：
+  消费者 find_package(Boost COMPONENTS fiber) 报组件目标不存在，
+  target_link_libraries(Boost::fiber) 报 "target was not found. A
+  find_package call is missing for an IMPORTED target"。这与 conan 官方
+  文档描述的"同名 cmake_file_name 组件聚合进同一 Config"行为不符——
+  实测（conan 2.29.1）是"独占"而非"聚合"。
+solution: |
+  双包依赖模式（包 A requires 包 B，两者原都设 cmake_file_name="Boost"）时：
+  1. 上游包（被依赖的，如 boost1.84-context）保留 cmake_file_name="Boost" 不动；
+  2. 下游包（如 boost1.84-fiber）改用**独立** cmake_file_name（包名风格，如
+     "boost1.84-fiber"，boost1.84-log 先例同款），组件 cmake_target_name 用
+     全限定名 "boost1.84-fiber::boost_fiber"；
+  3. 下游组件对上游组件的 requires 用**跨包全限定名**：
+     ```python
+     def package_info(self):
+         self.cpp_info.set_property("cmake_file_name", "boost1.84-fiber")
+         self.cpp_info.components["boost_fiber"].libs = ["boost_fiber"]
+         self.cpp_info.components["boost_fiber"].requires = [
+             "boost1.84-context::boost_context"]   # 跨包全限定
+         self.cpp_info.components["boost_fiber"].set_property(
+             "cmake_target_name", "boost1.84-fiber::boost_fiber")
+     ```
+  4. test_package 的 CMakeLists 用独立 find_package：
+     ```cmake
+     find_package(boost1.84-fiber REQUIRED CONFIG)
+     target_link_libraries(x PRIVATE boost1.84-fiber::boost_fiber)
+     ```
+     （跨包传递的 libboost_context.a 在链接期正确解析，实测成功）
+fallback: >
+  若因生态兼容原因必须保持 cmake_file_name="Boost"（消费者已按 Boost::xxx
+  短名集成），则只能放弃 conan requires 依赖模式、回到自包含路线（包内自带
+  依赖库源码一起编译，如 boost1.84-coroutine 自带 context 源）——代价是包
+  体重复、无法复用已发布依赖包。或等 conan 上游修复聚合行为后再迁移。
+verify_builds: #45444
+reference_impl: >
+  boost1.84-fiber 1.84.0（PR #9758，archives/b/boost1.84-fiber/1.84.0/
+  conanfile.py package_info + test_package/CMakeLists.txt）；实测探针：
+  /data/storage/el2/base/temp/fiber-cmake-probe（双包聚合行为复现）；
+  先例参照 boost1.84-log（独立 cmake_file_name 手法）
+id: E768
+doc_file: doc/E768.md

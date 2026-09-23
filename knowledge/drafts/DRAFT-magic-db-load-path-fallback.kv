@@ -1,0 +1,99 @@
+# ═══ Draft knowledge entry — libmagic 运行时 magic 数据库加载语义：仅 MAGIC env 回退可用，消费者须随包部署同版本 magic.mgc ═══
+# Timestamp: 2026-09-11
+# Software: 任何以 Conan 包消费 libmagic 的应用（本 run 案例括注：dares 0.6.5，仓内首个 -lmagic 消费者）
+# Gate: runtime (magic_load / magic_buffer)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review verification_cmd probes (probe 1/2 re-derives the failure surface)
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+
+id: draft-magic-db-load-path-fallback
+title: libmagic 运行时 magic 数据库四路加载路径在 Conan 包部署下仅 MAGIC 环境变量回退可用——CWD 相对路径/编译期默认路径/显式路径均不可靠，消费者必须随包部署与链接 libmagic 严格同版本的 magic.mgc 并以 runenv 注入 MAGIC
+trigger_tool: libmagic（file/x.y.z Conan 包）| magic_load
+phase: runtime
+error_signature: Could not load (file )?magic database|using default database|Warning: using regular magic file|found 0 files
+severity: 2
+category: conan, runtime, dependency-closure, data-resource
+match_keywords: magic_load, magic.mgc, MAGIC, libmagic, runenv_info, define_path,
+  apprentice_map, share/misc, default database
+keywords: libmagic, magic database, magic.mgc, MAGIC env, fallback, conan package,
+  prefix isolation, runtime data closure, -lmagic consumer, file classification
+root_cause: libmagic magic_load 按四路顺序定位 magic 数据库，在「Conan 前缀隔离部署 +
+  目标平台无系统级 /share/misc」下前三路全部失效：(1) 消费者硬编码的相对路径（如 dares
+  MAGIC_FILE "magic"）只查 CWD，且 apprentice_map 对编译版 .mgc 拒绝映射后按源格式重解析
+  二进制内容也失败——显式路径加载实测必然 -1；(2) 编译期默认路径指向 libmagic 构建机包前缀，
+  预编译 redistrib 后实测打开 "//share/misc/magic" 失效；(3) 上游随包分发的老式源格式
+  magic（file-3.x 时代语法）在 libmagic 5.48.1 下解析告警超限 load 返回 -1；
+  (4) 唯一可用：magic_load(cookie, NULL) 的回退链读 MAGIC 环境变量——注入与链接 libmagic
+  严格同版本的 magic.mgc 后真实分类恢复（"ASCII text"、文件落盘）。无可用数据库时消费者
+  核心功能整体失效（dares 对含可识别文件的镜像报 found 0 files）
+affected_scope: 任何以 Conan 包静态消费 libmagic（file/x.y.z）且运行时需要文件类型分类的
+  OHOS 应用（package_type=application 的 -lmagic 消费者尤甚）；机理锚定 libmagic
+  magic_load 加载顺序 + Conan 部署语义，与具体业务库无关；更广地，凡「静态链接依赖的
+  运行时数据资源」（tzdata/locale/ASN.1 表等）均属同类闭包问题
+verification_cmd: 仓库根目录（含 archives/d/dares/0.6.5 与 ci/conan/profiles/ohos-aarch64）下：
+  conan create archives/d/dares/0.6.5 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  --build=missing --build='dares/*'；然后 DARES_PKG=$(ls -d ~/.conan2/p/b/dares*/p | head -1)、
+  FILE_PKG=$(ls -d ~/.conan2/p/file*/p | head -1)（conan home 非默认时改从 create 日志
+  "Package folder" 行取值）；W=$(mktemp -d) && cd $W && printf 'dares smoke test\n%.0s' {1..640}
+  > image.img。探针1（失败面·默认路径）：env -u MAGIC $DARES_PKG/bin/dares -a -i image.img
+  -s out1 -l l1.log；grep 'found 0 files' l1.log 且见 //share/misc/magic 告警。探针2（机理面·
+  显式路径）：cp $FILE_PKG/share/misc/magic.mgc ./magic && env -u MAGIC $DARES_PKG/bin/dares
+  -a -i image.img -s out2 -l l2.log；grep 'found 0 files' l2.log 且见 "Could not load ... 'magic'"。
+  探针3（修复面·MAGIC env）：MAGIC=$DARES_PKG/share/dares/magic.mgc $DARES_PKG/bin/dares -a
+  -i image.img -s out3 -l l3.log；grep 'found 1 files' l3.log && ls out3/*.asc
+rec_priority: 1
+rec_approach: copy-dep-magic-mgc-plus-runenv-magic
+rec_description: 消费者 recipe 的 package() 从 file/x.y.z 依赖包复制 share/misc/magic.mgc
+  到本包 share/<name>/（数据与链接的 libmagic 严格同版本——继承 E546 的版本绑定不变量）；
+  package_info() 以 self.runenv_info.define_path("MAGIC", <pkg>/share/<name>/magic.mgc)
+  注入，命中 magic_load(cookie, NULL) 回退链，任意 CWD 皆可分类
+rec_command: 在 conanfile.py package()：
+  copy(self, "magic.mgc", os.path.join(self.dependencies["file"].package_folder, "share", "misc"),
+  os.path.join(self.package_folder, "share", "dares"))；package_info()：
+  self.runenv_info.define_path("MAGIC", os.path.join(self.package_folder, "share", "dares", "magic.mgc"))
+rec_auto_fix: false
+rec_impl: conan-package-info
+fallback_priority: 2
+fallback_approach: regen-source-magic-consumer-cwd
+fallback_description: 以 file 包内的源格式 magic 重新生成本 libmagic 版本可解析的源格式
+  数据库，放入消费者进程 CWD 名为 "magic"（喂给路 1 的相对路径假设）。诚实权衡：这只是
+  掩盖消费者「数据在 CWD」的上游假设而非修复它，且源格式解析随版本漂移脆弱（告警超限即
+  整体失败）；仅适用于无法注入环境的宿主场景，不替代 rec 方案
+fallback_command: file -C -m <file_pkg>/share/misc/magic（在可运行 file 的环境生成兼容
+  mgc/源库）；或直接分发与 libmagic 同版本的源格式 magic 文件到消费者 CWD
+fallback_auto_fix: false
+fallback_impl:
+forbid_1_pattern: packag(e|ing).*upstream.*(magic|magic\.mime)|copy\(self,\s*"magic",\s*self\.source_folder
+forbid_1_reason: 打包上游随源码分发的 file-3.x 时代 magic/magic.mime：该内容在 libmagic
+  5.48.1 下解析告警超限、load 返回 -1，装了反而把原本可用的回退路径指向必失败文件
+forbid_1_consequence: 消费者分类整体失效——对含可识别文件的镜像报 found 0 files，且比
+  不打包更难排查（存在看似合法的数据库文件）
+forbid_2_pattern: define\s+MAGIC_FILE\s+"(/[A-Za-z0-9_./~-]+)|magic_load\(.*\"/(usr|data|storage)
+forbid_2_reason: 把设备/包绝对路径写进源码 MAGIC_FILE 等编译期常量，违反移植规范（补丁
+  不可复现、路径随环境漂移）；Conan 包路径必须经依赖包路径探测 + runenv 注入解决
+forbid_2_consequence: 补丁携带机器相关绝对路径，换机/换缓存路径即失效，且污染上游可提交性
+principles: P009
+# principles note: P009 = P-RUNTIME-002（运行时闭包完整性，由 RPATH/NEEDED 闭包
+# 推广到数据资源闭包）；挂钩为 Curator 建议，最终取舍由知识库主编终裁
+causes: []
+caused_by: []
+similar_to: E499,E464,E546
+conflicts_with: []
+prerequisite_of: []
+
+doc_file: knowledge/drafts/DRAFT-magic-db-load-path-fallback.md
+source_run: oh-device-porting-v2 run dares-0.6.5（2026-09-11，设备对照实验矩阵 + 权威 CI 一次 PASS）
+last_updated: 2026-09-11
+source_event: dares 0.6.5（仓内首个 -lmagic 消费者）run 中对四路加载路径做逐一对照实验：
+  上游老式 magic 放 CWD → found 0 files；无任何数据库 → 编译期默认路径 //share/misc/magic
+  失效 found 0 files；编译版 mgc 放 CWD 显式路径 → 仍 "Could not load" + found 0 files；
+  MAGIC env 指向 file/5.48.1 包内 magic.mgc → found 1 files、真实分类 "ASCII text"、
+  .asc 落盘。据此落地 rec 方案后权威 CI 一次 PASS（L0-L5 全过，R34 负向测试确认真实依赖）。
+  诚实边界：本条为 L1 单库首例，阻塞面证据是设备实验矩阵 + 自包含探针而非 CI 失败日志
+  （修复先行、CI 未见过失败态），promote 前建议实跑探针 1/2 复现失败面
+metrics_success_count: 1
+metrics_fail_count: 2
+metrics_confidence: 0.9

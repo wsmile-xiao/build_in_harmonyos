@@ -5,6 +5,7 @@
 OpenSSL 在 HarmonyOS/OpenHarmony (aarch64) 上的编译和测试记录。
 
 **可用版本**:
+- **4.0.1** (首次适配, OpenSSL 4.x 系列): explicit getrandom entropy, static PIC package, musl-safe fd_set helper, no-pinshared
 - **3.5.6.1** (OHOS Conan revision, 推荐): explicit getrandom entropy, static PIC package, and 10/10 HarmonyOS PC target assertions
 - **3.5.6** (LTS, 已发布但已取代): RAND consumer may expose the unresolved OHOS `__fd_chk` dependency
 - **1.1.1w**: 需自定义平台配置和 `no-asm` 选项
@@ -147,6 +148,35 @@ error:1417B07B:SSL routines:tls_process_cert_verify:bad signature
 | 架构 | aarch64 |
 | 编译器 | clang (LLVM) |
 | 工具链 | llvm-ar, llvm-ranlib, llvm-nm |
+
+## OpenSSL 4.0.1 OHOS Conan 配方
+
+OpenSSL 4.x 系列在 HarmonyOS/OpenHarmony (aarch64) 上的适配。下游如需 OpenSSL 4 的新 API
+（ECH、ML-DSA、QUIC 增强、SLH-DSA 等）应引用 `openssl/4.0.1`。
+
+- 构建系统仍是 Perl `Configure`（大写 C），`linux-aarch64` 内置 target
+- `--with-rand-seed=getrandom` 显式选择内核熵源，排除 `DEVRANDOM_WAIT`/`FD_SET` 代码路径
+- `no-asm`（E006）、`no-shared`、`no-legacy`、`no-module`、`no-docs`、`no-pinshared`、`-fPIC`
+- `no-pinshared` 为 4.0 新选项：静态构建默认仍会为 libcrypto/libssl 加 pin 链接标记，
+  与 `no-shared` 一起配置以避免第三方共享库被意外 pin
+- 4.0 移除 engines（`ENGINESDIR` 不复存在，`no-engine` 恒为禁用态）；`install_sw`
+  分解为 `install_dev`/`install_modules`/`install_runtime`
+- musl 可移植性补丁两枚（按 4.0.1 上下文重新生成）：`apps/speed.c` 改走
+  `openssl_fdset` 有界助手；`include/internal/sockets.h` 在 `__MUSL__` 下用
+  `fds_bits` 布局实现该助手（不依赖 SDK 私有 `__fd_chk` 符号）
+
+### 与 openssl 3.x 系列的关系
+
+| 维度 | openssl (3.x) | openssl (4.x) |
+|------|---------------|-----------------|
+| 包名 | openssl | openssl |
+| 版本 | 3.5.x | 4.0.x |
+| ENGINESDIR | /lib/engines-3 | （已移除 engines） |
+| engine API | 可用（已弃用） | 移除（恒 no-engine） |
+| SSLv3/SSLv2 ClientHello | 兼容代码存在 | 移除 |
+| ECH (RFC 9849) | 无 | 支持 |
+| QUIC | 支持 | 增强（默认启用） |
+| 共享库版本 | libssl.so.3 | libssl.so.4（SHLIB_VERSION=4） |
 
 ## 经验总结
 

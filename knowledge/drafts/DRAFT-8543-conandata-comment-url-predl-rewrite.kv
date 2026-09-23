@@ -1,0 +1,62 @@
+#====================================================================
+# DRAFT — conandata.yml 注释中的裸 URL 会被 CI 预下载步骤当作下载源改写
+#         （str.replace 前缀碰撞 → source() NotADirectoryError）
+# Draft only: do not promote without reviewer assignment.
+# Trigger event: looktxt/1.4.1 adaptation (task #8543)
+#====================================================================
+
+id:                     DRAFT-8543-conandata-comment-url-predl-rewrite
+trigger_tool:           sh|python|conan
+phase:                  configuration
+error_signature:        NotADirectoryError:.*predl_cache|Error in source\(\) method.*NotADirectoryError|file://.*\.build-cache/predl_cache/[^ ]*/-/archive/
+
+severity:               3
+category:               conan, build-system, testing, filesystem
+match_keywords:         conandata.yml, build_and_test.sh, pre-download, 预下载, predl_cache, str.replace, sources.url, 注释 URL, mirror rewrite, NotADirectoryError, file://, conan-verify 与 CI 结果不一致
+title:                  conandata.yml 注释/描述里的裸 URL 会被 CI 预下载步骤按 str.replace 改写，污染真实的 sources.url
+
+root_cause:             ci/conan/build_and_test.sh 的预下载阶段先用正则把 conandata.yml 里出现的**所有** http(s) URL 抓出来（实测该正则原文为 (?:^|\s)(?:url:?\s*)?["']?-?\s*(https?://[^\s"']+) ，位于 build_and_test.sh:1202（re.MULTILINE），不区分代码行与注释行；门禁另有 trap 在退出时把 conandata.yml 还原为官方 URL，:1188），逐个下载并把文件内容里的该 URL 用 content.replace(url, 'file://<本地缓存文件>') 原地改写后再交给 conan create。当注释里的 URL 恰好是 sources.url 的严格前缀（同一 host + 同一段路径前缀，例如只写到项目主页或写到 tag 之前的目录）且在文件中先出现时，先执行的替换把真实 URL 行切成两半，剩余部分拼到 file:// 路径后面，得到一个不存在的本地路径；conan 的 source() 因此抛 NotADirectoryError。因为 conan-verify 走的是官方 HTTPS 直连（不改写 conandata.yml），同一配方在 conan-verify 下通过（G1/G2/G3 PASS，末行「配方验证通过」），只有 W3/CI 门禁失败——这是最容易被误判为“CI 环境问题”的地方。
+affected_scope:         所有在 conandata.yml 的注释、patch_description 或多 URL 字段中书写上游主页/镜像/发布目录 URL 的 Conan 配方；凡走 ci/conan/build_and_test.sh（含 W3 本地 CI 模拟）构建的包都受影响。
+verification_cmd:       cd <worktree> && grep -nE 'https?://[^" ]+' archives/<l>/<pkg>/<ver>/conandata.yml   # 若命中数 > 1 且某个 URL 是 sources.url 的前缀即高危；再 zsh ci/conan/build_and_test.sh archives/<l>/<pkg>/<ver> 复现，症状为 L1 conan create 失败并打印指向 .build-cache/predl_cache 的 NotADirectoryError
+
+rec_priority:           1
+rec_approach:           conandata-single-url-only
+rec_description:        conandata.yml 里只保留 sources.url 一处 URL：注释与描述性字段不写任何 http(s) 地址，尤其不写 sources.url 的前缀型地址；上游主页、镜像与来源核验信息移到软件级 README.md、版本级 manifest.yaml 与 notes.md（这些文件不被预下载解析）。文件顶部留下一行显式提醒，说明该约束的原因，避免后来者又把主页 URL 写回注释。
+rec_command:            grep -cE 'https?://[^" ]+' archives/<l>/<pkg>/<ver>/conandata.yml   # 期望输出 1
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:       conandata-url-rewrite-awareness-and-cache-hygiene
+fallback_description:   若确实必须在 conandata.yml 中保留第二个 URL（例如多源镜像声明），把注释 URL 写成与 sources.url 无公共前缀的形式（不同子域或加参数），并在排查时先删除 .build-cache/predl_cache/ 下被污染的文件再重跑门禁——中毒的缓存条目会让后续每次运行继续失败，即使 conandata.yml 已修好。
+fallback_command:       rm -f .build-cache/predl_cache/<hash>_<name> && zsh ci/conan/build_and_test.sh archives/<l>/<pkg>/<ver>
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       #.*(http|https)://|注释.*(url|URL)|patch_description:.*(http|https)://
+forbid_1_reason:        预下载步骤按正则抓取 conandata.yml 中任意位置的 URL，注释与描述字段没有任何豁免。
+forbid_1_consequence:   门禁/W3 以 NotADirectoryError 失败，而 conan-verify 全绿，形成“本地能建、CI 不能建”的假象，容易被误判为制品仓或设备网络问题。
+forbid_2_pattern:       conandata\.yml.*(永久|直接).*file://|sed.*conandata\.yml.*file://
+forbid_2_reason:        预下载会在运行结束后把 conandata.yml 还原为官方 URL（并有 E415 类残留检查），手工写入 file:// 路径等于绕过 R39 官方源要求。
+forbid_2_consequence:   配方离开该设备后不可复现，评审与 CI 的 conandata 与 HEAD 不一致，触发 R39/L0 失败。
+
+principles:             P003
+causes:                 []
+caused_by:              []
+similar_to:             [E333, E415, E372]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-8543-conandata-comment-url-predl-rewrite.md
+last_updated:           2026-09-19
+source_event:           looktxt/1.4.1 HarmonyOS PC adaptation (task #8543): conandata.yml 注释含项目主页裸 URL，本地 CI 门禁 L1 报 NotADirectoryError: .build-cache/predl_cache/acb8fbe0_looktxt/-/archive/v1.4.1/looktxt-v1.4.1.tar.gz，同配方 conan-verify 通过（G1/G2/G3 PASS）；删除注释 URL + 清理中毒缓存后门禁 100% 通过
+
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19
+draft:                  true
+contributor_id:         8543

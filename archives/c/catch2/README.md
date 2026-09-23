@@ -1,19 +1,9 @@
-# catch2 2.13.10-r0 — OpenHarmony 编译记录
+# catch2 3.8.1 HarmonyOS PC adaptation
 
-## 基本信息
-- 软件: catch2
-- 版本: 2.13.10-r0
-- 构建系统: autotools
-- 目标: ohos-aarch64
+Catch2 is a C++ testing framework packaged as static libraries by default for HarmonyOS PC. The recipe provides the upstream CMake targets `Catch2::Catch2` and `Catch2::Catch2WithMain`.
 
-## 编译指导
-<!-- 编译注意事项 -->
-
-## 补丁清单
-<!-- patches/ 目录中的补丁说明 -->
-
-## 已知限制
-<!-- 平台相关限制 -->
-
-## 功能验证
-<!-- 验证命令和结果 -->
+- Upstream: https://github.com/catchorg/Catch2/tree/v3.8.1
+- Build system: CMake
+- Dependencies: none
+- Source changes: none
+- Upstream verification: 113/113 CTest tests passed; SelfTest executed 460 test cases (442 passed, 7 skipped, 11 expected failures).

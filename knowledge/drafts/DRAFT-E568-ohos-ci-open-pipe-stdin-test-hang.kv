@@ -1,0 +1,81 @@
+# ═══ Draft knowledge entry — CI buildbot stdin 开放空管道导致交互型被测程序 fgets 挂死、流水线 14400s 超时 ═══
+# Timestamp: 2026-09-15
+# Software: choose-mirror 2.137（任何被测二进制读 stdin 且无输入不退出的 test_package）
+# Gate: conan test() / CI conan-build-test 测试阶段
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E568
+title: 交互型被测程序（cdebconf/debconf 状态机等）在 test() 里直接运行时，CI buildbot
+  worker（PTY: False）的 stdin 是打开的空管道，程序 fgets() 等待 frontend 回复永久
+  阻塞，输出几行后沉默，流水线耗满 14400s 被 buildbot 击杀（本地 shell stdin 已关闭
+  EOF 却通过）——环境依赖型测试
+trigger_tool: buildbot (CI conan-build-test) / conan test()
+phase: test
+error_signature: command timed out: 14400 seconds without output|program finished
+  with exit code 1.*elapsedTime=1[45]\d{3}|^======== Testing the package.*\n(.*\n){1,10}$
+severity: 1
+category: test-harness|ci|stdin|environment-dependent|hang
+match_keywords: command timed out, 14400, without output, PTY, stdin, hang,
+  fgets, blocked forever, passthrough frontend
+keywords: stdin 阻塞, fgets 挂死, 空管道, buildbot 超时, 14400s, PTY False,
+  交互型程序, cdebconf passthrough, debconf frontend, 环境依赖型测试,
+  本地通过 CI 失败, test_package 挂死, SIGALRM 有界等待, dup2 /dev/null, conan test()
+approach: 测试 harness 报"编译全绿、test() 启动后仅几行输出即沉默、无 FAIL 无退出、
+  14400s 被 buildbot 击杀"时，根因是被测交互程序在等待 stdin（CI worker stdin 是
+  打开的空管道，fgets 永久阻塞）。修复：harness 内 fork 后子进程 open("/dev/null")+
+  dup2(z,0) 再 exec（确定性 EOF，本地/CI 行为一致）；父进程 wait 用 SIGALRM 有界
+  等待（alarm(30)+waitpid(WNOHANG) 轮询，超时 SIGKILL）——任何未知阻塞源最多 30s
+  失败，绝不挂死流水线
+root_cause: 测试结论依赖父进程 stdin 的偶然状态：本地 OHOS shell stdin 已关闭 EOF →
+  fgets 立即 EOF → 状态机走完已知路径 SIGSEGV(139)；CI buildbot（PTY: False）stdin
+  是打开的空管道 → fgets 永久阻塞 → 挂死到 14400s 超时。测试 harness 未把子进程
+  stdin 与环境解耦
+affected_scope: 所有"被测二进制会读 stdin 且无输入时不主动退出"的包（交互状态机、
+  REPL 型工具、等待确认的 CLI）；本地通过但 CI 测试阶段无输出超时的 PR 均应先查此模式
+verification_cmd: sleep infinity | conan test <profile> <pkg> test_package/  # 复现 CI：修复前挂死，修复后立即出结果
+rec_priority: 1
+rec_approach: child-stdin-devnull-plus-sigalrm-bounded-wait
+rec_description: 子进程 /dev/null 强制 EOF + 父进程 SIGALRM 有界等待双重防护：
+  前者让本地与 CI 行为确定一致，后者保证任何未来未知阻塞源都不会挂死整条 CI 流水线
+rec_command: harness 子进程分支 open("/dev/null")+dup2(z,0)+execl；等待侧
+  sigaction(SIGALRM)+alarm(TEST_TIMEOUT)+waitpid(pid,&st,WNOHANG) 轮询，g_timed_out
+  置位时 kill(pid,SIGKILL)+waitpid 回收后判 FAIL
+rec_auto_fix: false
+rec_impl: test_package 测试 harness 源码改写（spawn 与 wait 方式）
+fallback_priority: 2
+fallback_approach: rewrite-test-as-noninteractive-or-script
+fallback_description: 若无法改 harness，改用非交互验证形态：仅做 --version/usage
+  快速退出断言 + ELF 符号/字符串字节扫描静态链接证据，不实际驱动交互状态机
+fallback_command: <bin> --help; strings <bin> | grep -q <关键符号>
+fallback_auto_fix: false
+fallback_impl: test_package 断言策略改写（弱化交互驱动）
+principles: 测试 harness 不得继承父进程 stdin 的偶然状态——子进程 fd 必须显式重定向
+  （/dev/null 或管道对端），且任何子进程等待必须有界（SIGALRM/timeout），否则 CI 与
+  本地环境的差异会把"可复现测试"变成"环境依赖测试"
+caused_by: 在本地 shell（stdin 已 EOF）下观察到的确定性行为（exit 139）被当作
+  跨环境不变量写进测试断言，未识别 cdebconf passthrough frontend 会阻塞读 stdin
+causes: CI conan-build-test 步骤 14400s 无输出超时被 buildbot 击杀，exit 1，
+  CI 侧失败诊断归为"未知"（无错误输出可归因）
+similar_to: E074（同为 hang，但 E074 是 make -j jobserver FIFO 并行问题，本条是
+  单进程测试 stdin 继承问题，修复点在被测程序 spawn 方式）
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-E568-ohos-ci-open-pipe-stdin-test-hang.md
+last_updated: 2026-09-15
+source_event: choose-mirror 2.137 PR #9740 构建 #45140（CI-020）：本地 30/30 exit 139 通过；
+  CI 输出 "CAPB backup align" 后沉默 14400s 被击杀（stdin 开放空管道，fgets 阻塞）。
+  变体 2 构建 #47903（CI-007，stdin 修复后）：test() 零字节 transcript 即 exit 139
+  （FAIL: transcript missing 'VERSION 2'）——CI 遗留 fd 3 被 debconfclient_new()
+  fdopen(3,"a") 当协议通道，dup2(5,1) 改道 stdout，transcript 全部进 fd 3。修复：
+  子进程 /dev/null + SIGALRM 30s + harness main() 开头清扫 fd>=3，三重防护后
+  stdin/fd 泄漏状态均不影响结果（泄漏复现：旧 harness 3>leak3.out 时 transcript
+  792B 进文件 FAIL；新 harness 0B PASS）
+authors: (choose-mirror 适配子任务)
+source_pr: 9740
+source_commit: (待提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.9
+metrics_last_used: 2026-09-15
+draft: true
+contributor_id: (choose-mirror)

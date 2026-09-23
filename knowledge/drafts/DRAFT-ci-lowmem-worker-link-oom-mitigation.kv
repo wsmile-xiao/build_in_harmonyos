@@ -1,0 +1,57 @@
+draft: DRAFT-ci-lowmem-worker-link-oom-mitigation
+status: pending-editor-review
+title: "CI 低内存 worker 链接期 OOM 削峰：重模板测试 -g0 不够时降 -Os（仅测试降档，库保持 -O2）"
+category: ci, linking, compiler-optimization, testing, boost
+match_keywords: >
+  linker command failed due to signal, linker signal, COMPILE_FAIL, 低内存, 削峰,
+  -Os, -g0, 重模板, 模板实例化, 链接内存峰值, CI worker, OOM, fiber, coroutine,
+  boost context, boost container, prg_exec_monitor
+error_signature: >
+  clang.*error: linker command failed due to signal
+root_cause: >
+  CI 集群存在内存配额偏低的 worker（实测 CI-007/CI-019/CI-021）。重模板类测试
+  （Boost container 的 tree/vector 家族、context 的纤维/协程、prg_exec_monitor
+  的异常路径）经完整 boost 头树大规模模板实例化，-O2 下链接期 clang/lld 内存
+  峰值（调试信息+模板实例化符号+优化中间数据结构）超出低内存 worker 限额，
+  链接器进程被 SIGKILL，clang 报 "error: linker command failed due to signal"。
+  诊断特征（资源病非配方错的判定）：同 commit 在不同 worker 结果不一（如
+  boost1.84-context commit 49f3c088f：CI-026 绿 #41267 / CI-021 红 #41383），
+  本地 16G 开发机同 commit 全绿（#8646 #41251）——若是配方问题任何机器都应失败。
+solution: |
+  削峰梯度逐级降档，只动测试编译、库本体保持原档（产物性能不受影响）：
+  第一档（基础）：Release 档测试编译统一 -g0（去调试信息，砍链接内存最大头）；
+  第二档（-g0 不够）：重模板测试名单 _HEAVY_TESTS 单独降 -Os -DNDEBUG -g0
+  （-Os 为代码尺寸优先档，模板实例化更省内存，断言语义不受优化级别影响）；
+  第三档（全量，点名仍不够时）：全部测试编译降 -Os -DNDEBUG -g0（context
+  纤维/协程测试整包都吃链接内存）。
+  ```python
+  # conanfile.py build()（boost1.84-context 1.84.0，commit e5403b9bc）
+  if self.settings.build_type == "Debug":
+      test_flags = base_flags          # Debug 本就 -O0，不动
+  else:
+      test_flags = base_flags.replace("-O2 -DNDEBUG -g0", "-Os -DNDEBUG -g0")
+  self._run_upstream_tests(boost_root, cxx, test_flags)
+  ```
+  第二档点名形态见 boost1.84-container（commit 25f3a1638）：
+  _HEAVY_TESTS = frozenset({"tree_test.cpp", "unsynchronized_pool_resource_test.cpp",
+  "uses_allocator_test.cpp", "vector_options_test.cpp", "vector_test.cpp"})
+  设计要点：仅测试降档、库本体保持 -O2；测试逐个串行编译（无并行 fork，单测试
+  内存峰值可控）；不改测试逻辑/源码（测试 .cpp 逐字节未动）。
+fallback: >
+  病机轮换：/rebuild 重触发让 CI 调度到常规内存 worker（集群多数机内存充足，
+  实测同 commit 换机即绿——#8435 #41130/#41135 红→#41154 绿、#8651 #41383
+  红→#41599 绿）；仍不够时个别极端测试可再降 -O1/-O0。不建议给库本体降档
+  （影响产物性能口径），不建议跳过测试（违反上游测试集成规则）。
+verify_builds: "#41130 红@CI-007, #41135 红@CI-021, #41154 绿(#8435)；#41251 红@CI-019, #41278 绿(#8646)；#41267 绿@CI-026(-g0 不够的对照), #41383 红@CI-021, #41599 绿(#8651)"
+reference_impl: >
+  #8435 boost1.84-container（首发：commit 3f0a1da51→25f3a1638，-g0 + 5 重测试 -Os，
+  CI #41154 绿）；#8646 boost1.84-prg_exec_monitor（二发：commit 049f42da9，4 测试
+  全量 -Os -g0，CI #41278 绿）；#8651 boost1.84-context（三发+加强：已有 -g0 仍
+  不够，commit e5403b9bc 测试全量降 -Os、库保持 -O2，CI #41599 绿）
+note: >
+  拟提升编号：由知识库主编确认。三次跨 PR 复现（container → prg_exec_monitor →
+  context）证明这是 CI 低内存 worker 边界的系统性适配知识，非单库孤例。
+source: >
+  boost1.84-context 1.84.0 OHOS PC 适配（PR #8651，认领人 calbee21，任务 6383）：
+  CI #41383 @CI-021 五个纤维/协程测试全部 linker signal 被杀（配方已有 -g0 仍
+  不够），commit e5403b9bc 测试全量降 -Os 后 #41599 绿。

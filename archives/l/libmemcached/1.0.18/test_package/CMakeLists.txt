@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_package CXX)
+find_package(libmemcached REQUIRED)
+enable_testing()
+add_executable(test_package test_package.cpp)
+target_link_libraries(test_package libmemcached::libmemcached)
+add_test(NAME test_package COMMAND test_package)

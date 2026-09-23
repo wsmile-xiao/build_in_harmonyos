@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-8959-kqwait-1.0.3-kqueue-to-inotify-faithful-rewrite — BSD kqueue 原生工具在 OHOS 上以 inotify 忠实重写的适配模式
+# 触发事件: kqwait 1.0.3 适配（OHOS 无 kqueue/kevent/EVFILT_VNODE，sysroot 无 sys/event.h）
+# 路径: Path B（知识库扩展）— 可解决的适配模式，非平台能力边界
+#====================================================================
+
+id:                     DRAFT-8959-kqwait-1.0.3-kqueue-to-inotify-faithful-rewrite
+trigger_tool:           clang|make|conan
+phase:                  compilation
+error_signature:        sys/event\.h: No such file or directory|
+                        use of undeclared identifier 'kqueue'|
+                        use of undeclared identifier 'kevent'|
+                        undefined reference to `kqueue`|
+                        undefined reference to `kevent`|
+                        fatal error: 'sys/event\.h' file not found
+
+severity:               2
+category:               platform, portability, kqueue, inotify, event-notification
+match_keywords:         kqueue, kevent, EVFILT_VNODE, EV_SET, NOTE_WRITE, NOTE_DELETE,
+                        NOTE_RENAME, sys/event.h, inotify, BSD, event notification,
+                        kqwait, libkqueue, epoll-shim
+
+title:                  BSD kqueue 原生工具在 OHOS 移植：以 inotify 忠实重写事件源（映射表 + 三大陷阱）
+
+topic: >
+  BSD 系工具/库以 kqueue(2)/kevent(2)（EVFILT_VNODE）为核心等待文件系统
+  事件。OHOS（HongMeng 内核 + musl）无 kqueue：sysroot 无 sys/event.h，
+  libc 无 kqueue/kevent 符号，内核无该 syscall。两条死路已被知识库证伪：
+  libkqueue 2.6.1（目录监听在 OHOS 行为失败）与 epoll-shim（E399：
+  32/166 CTest 失败，kqueue 模拟语义与原生 epoll 不符）。唯一忠实路径：
+  当工具只消费"文件/目录变化边沿事件"这一子语义时，用 OHOS 内核完整
+  支持的 inotify（探针 S1–S9 九类事件全过，含 IN_MOVE_SELF/
+  IN_DELETE_SELF）重写事件源，保持 CLI/输出/退出码逐字节一致。
+
+root_cause:             kqueue 是 BSD 私有内核事件机制，OHOS 内核（HongMeng）从未实现该 syscall；musl libc 相应不提供 sys/event.h 与 kqueue/kevent 符号。这是平台 API 家族缺失，不是构建检测问题（无法靠 -I/-l 修复），也不是可 shim 的用户态库缺口（libkqueue 与 epoll-shim 在 OHOS 均有行为性失败记录）。但 kqueue 的 EVFILT_VNODE 子集语义（文件/目录变化边沿通知）与 inotify 的能力正交重叠，可构造一一映射。
+  佐证链：sysroot /usr/local/sysroot/usr/include/ 无 sys/event.h；libc.so 1595 个动态符号无 kqueue/kevent；
+  inotify 探针 S1–S9（probes/inotify_semantics_probe.c）九类边沿事件在 OHOS aarch64 真机全过。
+
+durable_solution: >
+  语义映射表（EVFILT_VNODE → inotify mask）：
+    NOTE_WRITE  → IN_MODIFY|IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO
+    NOTE_DELETE → IN_DELETE_SELF（watch 路径自身被删）
+    NOTE_RENAME → IN_MOVE_SELF|IN_MOVED_FROM|IN_MOVED_TO
+  三大陷阱（本适配实测踩过）：
+    1) IN_DELETE ≠ kqueue NOTE_DELETE：inotify 的 IN_DELETE 是目录内
+       子项被删（对应 kqueue 目录的 NOTE_WRITE，走 dirinfo-diff 分支）；
+       IN_DELETE_SELF 才是 watch 路径自身被删。混淆会短路输出错误结果。
+    2) 上游 getopt() 返回值存 char：aarch64（及 arm64 musl）char 默认
+       unsigned，(char)-1==255 != -1 导致参数解析死循环。改 int。
+    3) 测试隔离：touch 已存在文件只发 IN_ATTRIB（kqueue NOTE_WRITE 同样
+       不含 utimens），场景间不清理残留会让复跑假超时。
+  流程：W0 平台能力判断（sysroot grep + libc 符号表 + inotify 探针）→
+  生成移植补丁（单一事件源替换，CLI/输出/退出码不动）→ 上游断言 1:1
+  移植执行 → conan create 全绿。
+
+rec_priority:           1
+rec_approach:           Rewrite the kqueue event source as inotify with the EVFILT_VNODE mapping table (NOTE_WRITE→IN_MODIFY|IN_CREATE|IN_DELETE|IN_MOVED_*, NOTE_DELETE→IN_DELETE_SELF, NOTE_RENAME→IN_MOVE_SELF|IN_MOVED_*), keeping CLI/stdout/exit codes byte-identical; upstream assertions ported 1:1 and executed in build()
+rec_description:        Faithful inotify rewrite of kqueue EVFILT_VNODE waiters on OHOS (libkqueue/epoll-shim routes are proven failures — see E399)
+rec_command:            conan create archives/k/kqwait/1.0.3 -pr:h ~/.conan2/profiles/ohos-aarch64-local -pr:b ~/.conan2/profiles/ohos-aarch64-local --build=kqwait/*
+
+applicability_conditions: >
+  适用：工具/库只消费 EVFILT_VNODE 文件系统边沿事件子集（等待-打印-
+  退出的单点等待器，如 kqwait、简单 watcher）；CLI 行为可作黄金基准。
+  不适用：依赖 kqueue 的非 VNODE 滤器（EVFILT_READ/WRITE/SIGNAL/
+  PROC/TIMER/USER），多路复用/水平触发语义，或需要 kqueue 可移植层
+  的大库（走 libkqueue/epoll-shim 已有失败记录，见 E399）。
+
+fail_closed_strategy: >
+  W0 阶段必须先证伪再动手：1) sysroot 无 sys/event.h 且 libc 符号表无
+  kqueue/kevent → 平台缺失确认；2) inotify 探针（7 类事件）必须全过，
+  任一失败即停止移植并记录平台能力边界；3) 禁止空实现/stub（始终返回
+  成功/失败的 kqueue 假体违反 SPEC）；4) 移植后上游断言必须 1:1 执行，
+  失败即 fail（不许 ignore_errors 放行核心语义）；5) 若目标依赖 VNODE
+  之外的 kqueue 滤器 → 直接给平台阻塞结论，不做假适配。
+
+evidence_refs: >
+  archives/k/kqwait/1.0.3/（完整适配：patches/0001-kqwait-ohos-inotify-port.patch，
+  archives/k/kqwait/1.0.3/t/run_upstream_tests.sh 15/15 PASS，archives/k/kqwait/1.0.3/notes.md 平台能力判断表）；
+  probes/inotify_semantics_probe.c（S1–S9 边沿事件探针）；
+  对照失败记录：archives/l/libkqueue/2.6.1/notes.md（目录监听失败）、
+  knowledge/doc/E399.md（epoll-shim 32/166 CTest 失败）。
+
+related_ids:            E399
+discovered_by:          kqwait 1.0.3 OHOS 适配（feat/kqwait-1.0.3 分支）
+first_seen:             2026-09-15
+status:                 draft

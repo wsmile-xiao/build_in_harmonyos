@@ -1,0 +1,79 @@
+# ═══ Draft knowledge entry — centerim 4.22.10 intl/version 遮蔽 <version> ═══
+# Timestamp: 2026-09-03
+# Software: centerim 4.22.10
+# Gate: PR (feat/centerim-4.22.10) / conan create 失败链
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-centerim-4.22.10-intl-version-shadow
+trigger_tool:           configure|autotools|gettext|libcxx|clang
+phase:                  build|compile
+error_signature:        intl/version:1:1: error: unknown type name 'GNU'|
+                         no type named 'size_t' in namespace 'std'|
+                         cannot combine with previous 'bool' declaration specifier|
+                         no member named 'gettext' in the global namespace|
+                         undefined symbol: rindex|
+                         error: no type named 'align_val_t' in namespace 'std'
+severity:               2
+category:               gettext|libcxx|autotools|clang|old-cxx|hmdfs
+match_keywords:         intl/version, GNU gettext, <version>, libc++,
+                         std namespace pollution, AM_GNU_GETTEXT, included intl,
+                         -Iintl, auto keyword, bool auto, rindex, strrchr,
+                         git-version.h.in, git_version, subs1.awk, umask 077
+title:                  gettext 捆绑 intl/version 标记文件遮蔽 libc++ <version> 头导致 std 命名空间污染；老 C++ 在 clang/libc++ 下 auto 关键字、rindex()、git_version 目标的四连坑
+
+root_cause: >
+  1) AM_GNU_GETTEXT（捆绑 intl）会把 -I<srcdir>/intl 加进 CPPFLAGS；intl/ 目录里有一个
+     VERSION 标记文件 `version`（内容为 "GNU gettext library from gettext-0.14.6"）。
+     对尖括号 include，clang 按 -I 目录顺序先于 libc++ 系统目录查找，因此 libc++ 头
+     (如 <cstddef>) 里任何 `#include <version>` 都会命中这个 intl/version 文件，把
+     "GNU gettext ..." 当 C++ 源码解析 → "unknown type name 'GNU'"；std 命名空间被
+     污染后 <new>/<cstddef> 抛出一串 "no type named 'size_t'/'align_val_t'" 级联错误。
+  2) 2009 年老 C++ 代码把 `auto` 当参数名（如 bool auto = false），C++11 起 auto 是
+     关键字 → "cannot combine with previous 'bool' declaration specifier"。
+  3) 老代码直接调用 POSIX 废弃的 rindex()，OHOS libc 无此符号 → 链接期
+     "undefined symbol: rindex"。
+  4) AM_GNU_GETTEXT 的 git_version 规则在 out-of-tree 构建里用裸相对路径
+     git-version.h.in（在源码目录、不在构建目录）→ sed 找不到输入文件；且 conan 源码
+     非 git 仓库，git-version-gen 失败（可容忍，版本置空）。
+  5) （联动）intl/libintl.h 由构建过程在 BUILD 目录生成，源码目录没有；include 路径里
+     只有源码 intl/ 时 <libintl.h> 解析到别处 → "no member named 'gettext'"。
+
+affected_scope:         autotools + 捆绑 gettext (AM_GNU_GETTEXT) 的 C/C++ 老项目在
+                        HarmonyOS PC (libc++ / clang-15) 上的 Conan 适配；任何引入
+                        -I<srcdir>/intl 且目录内含 `version` 标记文件的项目都会踩中。
+                        "老 C++ 在 C++11+ 下的 auto/rindex" 问题影响所有 2009 前代码库。
+
+verification_cmd:       在干净 Conan home 下执行
+                        conan create . -pr:h=.../ohos-aarch64 -pr:b=.../ohos-aarch64
+                        应完整通过 configure/make/test_package（--version/--help 冒烟）。
+
+rec_priority:           1
+rec_approach:           gettext-intl-version-neutralize + 老 C++ 四连
+rec_description: >
+  1) 补丁把 intl/version 内容改成 C++ 注释（// GNU gettext ...），使 `#include <version>`
+     命中它时得到合法的空头文件，消除 std 命名空间污染（最小、不破坏 gettext 机制）。
+  2) 老 C++ 用 -std=gnu++11 -fpermissive 编译（libc++ 最低支持 C++11），并把代码里
+     当标识符用的 `auto`（如 findresults 的 bool auto 参数）改名。
+  3) rindex() 一律替换为 strrchr()（POSIX 兼容）。
+  4) 补丁把 git_version 规则改为 $(srcdir)/git-version.h.in（前置依赖与 sed 输入都用
+     srcdir 前缀），容忍非 git 源码目录。
+  5) generate() 里给 CFLAGS/CXXFLAGS 追加 -I<build>/intl（生成 libintl.h 所在目录），
+     让 <libintl.h> 解析到真正的捆绑 gettext 头并声明 ::gettext()。
+
+rec_command:            ./configure --build=aarch64-linux-ohos --host=aarch64-linux-ohos \
+                          --with-ssl=no --with-fribidi=no --without-libjpeg \
+                          --disable-yahoo --disable-msn --disable-jabber
+rec_auto_fix:           false
+rec_impl:               conan-recipe-autotools-gettext-ohos
+
+fallback_priority:      2
+fallback_approach:      去掉捆绑 intl，改用系统/依赖 gettext
+fallback_description:   若无法改 intl/version，可考虑 --disable-nls 或改用外部 libintl；
+                        但 centerim 的 icqcommon.h 无条件 `#define _(s) ::gettext(s)`，
+                        必须保证 gettext 声明可用，不能只 --disable-nls。

@@ -12,15 +12,15 @@ libestr 是一个轻量级 C 字符串处理库，主要作为 rsyslog 日志系
 | 许可证 | LGPL-2.1 |
 | 来源 | https://github.com/rsyslog/libestr |
 | 构建系统 | autotools |
-| 依赖 | 无外部依赖（纯 C 库） |
-| 补丁 | 2 个（config.guess/config.sub OHOS 识别） |
+| 依赖 | 无运行时依赖；构建期 tool_requires automake/1.18 + libtool/2.5.4 |
+| 补丁 | 无（autoreconf 重新生成 config.guess/sub，tool_requires automake 提供 OHOS 支持） |
 
 ## OpenHarmony 适配状态
 
 - **编译状态**: ✅ published
 - **门禁验证**: ✅ PASS (G1-G4)
 - **功能测试**: ✅ 29/30
-- **补丁数量**: 2（仅 config.guess/config.sub）
+- **补丁数量**: 0（tool_requires automake 自带 OHOS-aware config.guess/sub）
 
 ## 编译要点
 

@@ -1,0 +1,187 @@
+# ═══ Draft knowledge entry — OHOS GL 直连符号是调度空桩 ═══
+# Timestamp: 2026-09-15
+# Software: freeglut 3.6.0（可复用于任何自持 GL 调用的库：cogl/clutter/imgui/SDL 等）
+# Gate: PR #10168 / 本地 conan create 实测（含密封探针 + 对照实验）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-gl-symbols-are-dispatcher-stubs
+trigger_tool:           ld|ld.lld|clang|cmake|meson|conan
+phase:                  link|build|test_package|runtime
+error_signature:        undefined reference due to --no-allow-shlib-undefined: glGetString|
+                           undefined reference due to --no-allow-shlib-undefined: glBegin|
+                           undefined reference to .*gl[A-Z][A-Za-z0-9_]*|
+                           glGetString\(GL_VERSION\) \+NULL|
+                           GL_VERSION=\(null\)
+
+severity:               3
+category:               graphics, opengl, egl, runtime, linkage, platform, ohos
+match_keywords:         eglGetProcAddress, libGLESv2, dispatcher stub, 调度空桩, GL stub,
+                           Bsymbolic, -Wl,-Bsymbolic, glGetString NULL, glClear no effect,
+                           undefined reference to glBegin, GLES1 fixed function,
+                           SDL_GL_GetProcAddress, GLX/EGL proc, 静默失效
+title:                  OHOS 的 libGLESv2.so 直连导出符号是调度空桩（glGetString 返回 NULL、绘制无报错但不生效）——真函数必须经 eglGetProcAddress 获取，库内自持 GL 调用者需加 -Wl,-Bsymbolic 调度层
+
+root_cause: >
+  OHOS 的 libGLESv2.so 所「导出」的 GL 符号并不是驱动真函数，而是**调度空桩**
+  （dispatcher stub）：符号存在、链接可过、调用不报错，但没有任何实际效果。
+  实测对照（同一进程、同一个已 eglMakeCurrent 的 GLES2 上下文）：
+
+    直连 glGetString(GL_VERSION)                    -> NULL
+    eglGetProcAddress("glGetString")(GL_VERSION)    -> "OpenGL ES 3.2 B301"
+    直连 glClearColor+glClear+glReadPixels          -> glGetError()=0x0 但像素未被清除
+    eglGetProcAddress 取到的同名入口做同样操作      -> 真渲染（pixel=255,0,0,255）
+
+  即「符号存在」不代表「函数可用」。只有经 eglGetProcAddress() 得到的才是驱动真函数
+  （EGL 规范本就要求扩展/驱动入口经 eglGetProcAddress 获取，OHOS 把这一要求推广到了
+  核心入口）。
+
+  对**库内部**直接调用 GL 函数的库（freeglut、cogl、clutter、imgui 等），后果是
+  灾难且隐蔽的：
+    · 编译链接全部通过，运行也不报错；
+    · 所有库内 GL 调用静默落空 —— 画面全黑/无变化，而 glGetError() 返回 0；
+    · 排查方向极易跑偏到「逻辑错误」「着色器错误」「上下文未创建」上。
+
+  另一个独立但同源的现象：**GLES1 固定管线入口在 OHOS 根本没有实现**。
+  OHOS 只提供 GLES2/GLES3（GLES2/gl2.h、libGLESv2.so），无 GLES/gl.h、
+  无 libGLESv1_CM；上游仍引用 glBegin/glEnd/glVertex3fv/glNormal3fv/
+  glTexCoord2fv/glColor4fv 等核心库会在**链接期**直接失败（--no-allow-shlib-undefined）：
+    undefined reference due to --no-allow-shlib-undefined: glBegin
+  实测经 eglGetProcAddress 探测这 7 个固定管线入口，仅 glColor4f 可解析，
+  其余 6 个返回 NULL —— 即 OHOS 上确实无实现，必须自备桩。
+
+affected_scope: >
+  所有在 OHOS 上自持 GL 调用的库/应用，尤其中间层库（freeglut、cogl、clutter、
+  imgui、SDL 的 GL 后端、老式 GL 工具库）。
+  用 GL 的**应用**若自己走 eglGetProcAddress（现代引擎通常如此）不受影响；
+  受影响的典型是「库内部直接调 GL」的那一层。
+  纯 GLES1 固定管线库在 OHOS 上无法直接链接，需自备桩或改走 shader 路径。
+
+verification_cmd:       # ① 判定「直连符号是否可用」的密封探针（无需任何库，直接验平台）
+                           #    写一个最小 EGL+GLES2 程序，创建 pbuffer 上下文后做三次对照
+                           eglGetDisplay(EGL_DEFAULT_DISPLAY) → eglInitialize → eglChooseConfig(EGL_PBUFFER_BIT)
+                           → eglCreatePbufferSurface → eglCreateContext(GLES2) → eglMakeCurrent
+                           # (a) 直连符号
+                           printf "%s\n", glGetString(GL_VERSION);        # 期望 NULL（空桩）
+                           # (b) 经 eglGetProcAddress
+                           typedef const GLubyte*(*F)(GLenum);
+                           F f=(F)eglGetProcAddress("glGetString");
+                           printf "%s\n", f(GL_VERSION);                  # 期望 "OpenGL ES 3.2 B301"
+                           # (c) 绘制是否真生效（决定性）
+                           glClearColor(0,0,0,1); glClear(GL_COLOR_BUFFER_BIT);
+                           unsigned char px[4]; glReadPixels(0,0,1,1,GL_RGBA,GL_UNSIGNED_BYTE,px);
+                           # 直连：px 全 0 且 glGetError()==0x0（假成功）；经 eglGetProcAddress：px 为清除色
+                           # ② 判定库内是否残留未定义 GL 符号（链接期风险的静态检查）
+                           readelf --dyn-syms <lib>.so | awk '$7=="UND"{print $8}' | grep -E '^gl[A-Z]'
+
+rec_priority:           1
+rec_approach:           route-gl-entrypoints-through-eglgetprocaddress-with-bsymbolic-dispatch-layer
+rec_description: >
+  在库内加一层 GL 调度层，把受影响的 GL 入口包一层，经 eglGetProcAddress() 解析真函数，
+  并用 -Wl,-Bsymbolic 链接，使**库自身的调用**绑定到本库的包装函数，而不是解析到
+  libGLESv2.so 的空桩。
+
+  三个要点缺一不可：
+    ① 包装函数名必须是 GL 原名（glGetString 不能改别名），否则库内调用不会命中；
+    ② 必须 -Wl,-Bsymbolic（或等效的符号绑定控制），否则 ld.so 可能把库内引用解析到
+       libGLESv2.so 的同名空桩上 —— 这是最容易漏、且症状与「没写调度层」完全相同的一步；
+    ③ 只包装**库内实际调用**的入口（用 readelf --dyn-syms 静态列 UND 的 gl* 符号做清单），
+       不必把整个 GL API 都包一遍。
+
+  对 GLES1 固定管线入口（OHOS 无实现），提供 no-op 桩并**一次性告警**（避免每次调用刷屏），
+  同时在 README/notes 如实声明「依赖固定管线的绘制路径不渲染」。
+
+  参考实现：freeglut 适配的 src/ohos/fg_gl_dispatch_ohos.c（146 行，PD 见 PR #10168）。
+rec_command:            # ① CMake：加入调度层源文件并把 -Bsymbolic 加到链接
+                           #   list(APPEND LIBS "-Wl,-Bsymbolic")
+                           # ② 调度层内（每个入口一个静态缓存 + 兜底）
+                           #   const GLubyte *glGetString(GLenum name){
+                           #       static PFN_GLGETSTRING real;
+                           #       if(!real) real=(PFN_GLGETSTRING)eglGetProcAddress("glGetString");
+                           #       return real?real(name):NULL;
+                           #   }
+                           # ③ GLES1 固定管线桩（OHOS 无实现）
+                           #   void glBegin(GLenum m){(void)m; warn_once("glBegin");}
+                           #   void glEnd(void){warn_once("glEnd");}
+                           # ④ 验证：库内未定义 GL 符号应归零
+                           readelf --dyn-syms lib<pkg>.so | awk '$7=="UND"{print $8}' | grep -cE '^gl[A-Z]'
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      make-consumers-resolve-proc-addresses-explicitly
+fallback_description: >
+  若不便在库内加调度层（例如要改动的调用点极多、或上游不接受该类补丁），
+  退路是**把 GL 函数指针的获取责任推给消费者**：库只提供上下文管理，
+  要求使用者在初始化后自行经 eglGetProcAddress 装填函数指针表。
+  代价：改变了库的既有 API 契约，消费者都要改代码；且库内部若仍有直接 GL 调用
+  （如 freeglut 的字体内核、菜单渲染）依然会静默失效。
+  故仅作为**过渡手段**，不推荐作为通用解。
+fallback_command:       # 库暴露 eglGetProcAddress 直通（SDL 的 SDL_GL_GetProcAddress 即此模式）
+                           # void *mygl_getproc(const char *name){ return (void*)eglGetProcAddress(name); }
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       链接通过.*即认为 GL 可用|编译通过.*GL.*正常|链接成功.*渲染.*正常
+forbid_1_reason:        OHOS 的 GL 直连符号存在且链接通过，但调用静默落空（glGetString 返回 NULL、
+                          绘制无报错但不生效）。「链接通过」「无报错」「glGetError()==0」
+                          三者都不构成 GL 可用的证明，只有「经 eglGetProcAddress 取到并
+                          产生可观测渲染结果」才是证明。
+forbid_1_consequence:   把空桩当可用，得到「画面全黑但不报错」的现象，排查方向被带偏到
+                          逻辑/着色器/上下文创建上，浪费大量时间且找不到真因。
+
+forbid_2_pattern:       写了.*调度层.*没加.*Bsymbolic|有.*wrapper.*不必.*Bsymbolic
+forbid_2_reason:        只写包装函数而不加 -Wl,-Bsymbolic 时，ld.so 对库内引用可能仍解析到
+                          libGLESv2.so 的同名空桩，症状与「完全没写调度层」一模一样
+                          （实测这就是最易漏的一步）。
+forbid_2_consequence:   以为修好了，实际渲染依旧全黑，且因为「代码明明写了调度层」
+                          反而更难怀疑到绑定问题。
+
+forbid_3_pattern:       混淆.*GLES1.*GLES2|用.*GLES2.*替代.*GLES1|GLES2.*支持.*固定管线
+forbid_3_reason:        OHOS 无 GLES1（无 GLES/gl.h、无 libGLESv1_CM），GLES2/GLES3 里
+                          根本没有 glBegin/glEnd/glVertex3fv 等固定管线入口 —— 实测经
+                          eglGetProcAddress 探测，7 个固定管线入口仅 glColor4f 可解析。
+                          二者不是「版本高低」而是「有无」，不能相互替代。
+forbid_3_consequence:   期望用 GLES2 顶上固定管线，结果链接期 undefined reference，
+                          或运行期空指针崩溃。
+
+forbid_4_pattern:       整个 GL API 全包装|包装所有 gl\* 函数
+forbid_4_reason:        只需包装**库内实际调用**的入口（freeglut 实测仅 13 个 UND gl* 符号，
+                          其中 6 个还是 GLES2 已有、运行期可解析的）。全量包装既无必要，
+                          还把维护面放大到整个 GL API。
+forbid_4_consequence:   无谓地增加补丁体积与后续上游合并冲突面。
+
+forbid_5_pattern:       glReadPixels 全 0.*就断定.*渲染失败|像素全 0.*必然.*渲染 bug
+forbid_5_reason:        在 OHOS 上空桩路径下 glClear+glReadPixels 会得到「像素全 0 且
+                          glGetError()==0x0」，这不是渲染正确性 bug，而是「调用根本没到驱动」。
+                          先判定符号来源（直连 vs eglGetProcAddress），再谈渲染。
+forbid_5_consequence:   直接去调渲染逻辑，忽略真正的根因（符号未走 eglGetProcAddress）。
+
+principles:             优先用最小的密闭探针判定平台行为（本次即一个 66 行的 EGL 探针），
+                        再用「直连 vs eglGetProcAddress」做受控对照，而不是先读代码猜；
+                        「无报错」不等于「生效」，需要可观测结果（像素值）作为证据。
+similar_to:             E321, E471, E527, DRAFT-ohos-egl-headless-no-gles1-baseline
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-ohos-gl-symbols-are-dispatcher-stubs.md
+last_updated:           2026-09-15
+source_event:           freeglut 3.6.0 适配（PR #10168）：消费者链接期报
+                        "undefined reference due to --no-allow-shlib-undefined: glBegin"
+                        → 定位为 OHOS 无 GLES1；进一步密封探针发现直连 GLES2 符号亦为空桩
+                        （glGetString 返回 NULL、glClear 无效果而 glGetError()=0x0），
+                        经 eglGetProcAddress 后真渲染（GL_VERSION=OpenGL ES 3.2 B301 /
+                        GL_RENDERER=Maleoon 916 / pixel=255,0,0,255）。
+authors:                jumping_ggjjkk
+source_pr:              10168
+source_commit:          ea8d3c781
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15

@@ -1,0 +1,60 @@
+draft: DRAFT-kf6-relative-needed-musl-cwd-shim
+status: pending-editor-review
+title: "已发布 KF6 包的相对路径 DT_NEEDED 在 OHOS musl 下按 cwd 解析，须以构建树 shim 目录满足 ctest 运行"
+category: linking, conan, testing
+match_keywords: >
+  musl, relative DT_NEEDED, cwd, ctest, KF6, libKF6ConfigCore,
+  ../../bin, path-style NEEDED, LD_LIBRARY_PATH, shim, symlink,
+  conan cache, consumer test, alkimia
+error_signature: >
+  Error loading shared library \.\./\.\./bin/libKF6[A-Za-z]+\.so.*needed by|
+  Error loading shared library \.\./bin/lib[A-Za-z0-9]+\.so.*needed by
+root_cause: >
+  部分 KF6 依赖包（kconfig/6.18.0、knewstuff/6.29.0.1 系）发布时其二级库
+  （libKF6ConfigGui.so、libKF6NewStuffWidgets.so）的 DT_NEEDED 记录的是其
+  自身构建树布局的相对路径（../../bin/libKF6ConfigCore.so）。OHOS 的 musl
+  动态加载器对带路径的 NEEDED 条目不查 LD_LIBRARY_PATH，而是相对进程 cwd
+  解析；下游包（如 alkimia 8.2.1）在自己的 conan build 树里跑 ctest 时，
+  cwd=build_folder，../../bin/ 指向 build 树外侧的不存在目录，于是测试
+  二进制在加载链上直接失败（Error loading shared library ../../bin/...）。
+  下游无法 patch 依赖包的 ELF（改不了已发布制品），必须在自己的构建环境
+  里满足该相对路径。
+solution: |
+  在 conanfile 的测试执行前构造"兼容目录" shim（knewstuff 6.29.0.1
+  _prepare_ctest_runtime_links 先例，alkimia 8.2.1 复用）：
+  ```python
+  def _prepare_ctest_runtime_links(self):
+      # ctest 以 cwd=build_folder 运行测试二进制；依赖包的相对 NEEDED
+      # ../../bin/libXxx.so 从 cwd 向上解析 -> build/../bin/
+      compatibility_bin = os.path.normpath(
+          os.path.join(self.build_folder, os.pardir, "bin"))
+      os.makedirs(compatibility_bin, exist_ok=True)
+      lib_sources = glob.glob(os.path.join(self.build_folder, "bin", "lib*.so*"))
+      for dep in self.dependencies.values():
+          if dep and dep.package_folder:
+              lib_sources.extend(glob.glob(
+                  os.path.join(dep.package_folder, "lib", "lib*.so*")))
+      for src in lib_sources:
+          dst = os.path.join(compatibility_bin, os.path.basename(src))
+          if os.path.exists(src) and not os.path.exists(dst):
+              try:
+                  os.symlink(src, dst)
+              except OSError:
+                  shutil.copy2(src, dst)
+  ```
+  test_package 的 conan test() 以 cwd=<test_package build folder> 运行
+  ./test_package，相对 NEEDED 解析到 test_package/../../bin/，shim 同理
+  落在该位置。注意 conan 2.29 的 test() 阶段 Environment 变量注入不生效，
+  LD_LIBRARY_PATH 类运行时变量须直接写 os.environ。
+fallback: >
+  若 shim 目录方案因文件系统限制（HMDFS 软链接异常）不可用：将依赖库
+  copy2 实体复制到兼容目录（代码已含 except OSError 分支）；或对本包产物
+  用 patchelf --replace-needed 重写相对路径为裸 basename（E537 方案），
+  但已发布依赖包自身的相对 NEEDED 无法在下游重写，shim 是唯一可行解。
+verify_builds: "#43546"
+reference_impl: >
+  knewstuff 6.29.0.1 conanfile.py _prepare_ctest_runtime_links（先例）；
+  alkimia 8.2.1 archives/a/alkimia/8.2.1/conanfile.py（复用+test_package
+  同款）+ test_package/conanfile.py test() shim。PR !9350。
+id: pending
+doc_file: doc/pending.md

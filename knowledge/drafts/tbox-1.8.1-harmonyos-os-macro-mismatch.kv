@@ -1,0 +1,78 @@
+# ═══ Draft knowledge entry — OHOS platform macro renamed but one include guard
+# still uses the old name; asm kernels are .hidden so shared builds drop them
+# Software: tbox 1.8.1
+# Gate: conan-verify G2 (conan create, ohos-aarch64) + test_package 10/10 + 设备原生 demo 套件
+# Status: DRAFT
+# Reserved entry id: E581 (tools/knowledge_id.py --claim，任务私有登记)
+
+id: tbox-1.8.1-harmonyos-os-macro-mismatch
+severity: 3
+category: build-system|configure|ohos|portability
+trigger_tool: configure|make|clang
+phase: build
+
+keywords: TB_CONFIG_OS_HARMONY, TB_CONFIG_OS_HARMONYOS, flock, LOCK_EX, sys/file.h, xmake.sh, hidden symbol, tb_context_make, static kind
+error_signature: use of undeclared identifier 'LOCK_EX'|call to undeclared function 'flock'|undefined symbol: tb_context_make|undefined symbol: tb_context_jump
+match_keywords: TB_CONFIG_OS_HARMONY, TB_CONFIG_OS_HARMONYOS, HarmonyOS, flock, LOCK_EX, hidden, tb_context, shared library, xmake.sh
+
+root_cause: |
+  (1) configure 的宿主判定直接取 `uname`（本机 HarmonyOS / aarch64），据此在
+  build/<plat>/<arch>/<mode>/tbox.config.h 里生成 `#define TB_CONFIG_OS_HARMONYOS 1`；
+  但 src/tbox/platform/bsd/filelock.c 第 27 行的 include 守卫写的是
+  `TB_CONFIG_OS_HARMONY`，全库仅此一处用旧名。于是该分支落到 `#include <fcntl.h>`，
+  而 <fcntl.h> 不声明 flock/LOCK_EX/LOCK_SH/LOCK_NB，clang 15 在
+  `platform/filelock.c` 处直接报 `use of undeclared identifier 'LOCK_EX'` 编译失败。
+  这是 1.8.1 的回归：1.8.1 变更日志含 “Improve configure script and option checking”，
+  生成宏改名后漏改了这处消费者。
+  (2) TBox 的汇编内核由 src/tbox/prefix/arm64/prefix.S 的 `function` 宏生成，该宏对
+  export 与非 export 两个分支都无条件输出 `.hidden`，因此 shared 版 libtbox.so 的
+  动态符号表里没有 tb_context_make/tb_context_jump（实测 `llvm-readelf --dyn-syms`
+  无此二符号），demo 的 platform_context 用例在链接期报 undefined symbol。
+  常规 C API（含 tb_coroutine_*）不在隐藏之列，消费者不受影响。
+  (3) 同一 configure 前端（xmake.sh）中 `--info=y` 不生效：同一批 `--float=y` /
+  `--force_utf8=y` / `--hash=y` 等开关都写入了 config.h，唯独 info 没有生成
+  TB_CONFIG_INFO_HAVE_VERSION，故产物中 `tb_version()` 未编译进去。
+  (4) 该 shell 前端**完全没有包探测**：`add_packages()` / `has_package()` 只存在于
+  xmake.lua。于是 `--database=y` 会编出一个没有任何后端的 database 模块——
+  TB_CONFIG_PACKAGE_HAVE_SQLITE3 永不置位，`add_files "database/*.c"` 也不含 `impl/`，
+  后端源文件 database/impl/sqlite3.c 根本不编译，链接期才报
+  `undefined symbol: tb_database_sqlite3_probe / _init`。且该前端里 target 之外调用
+  add_includedirs/add_links 会指向空 target，接线必须写在 `target "tbox"` / `target "demo"` 块内。
+
+rec_approach: append the new platform macro to the stale guard + keep static kind + assert version via header macros
+rec_description: |
+  (1) 设备与 CI worker 都是 `uname=HarmonyOS` 的 aarch64 OHOS 环境（CI profile 的
+  tools.build:compiler_executables 指向 /data/service/hnp/bin/clang，target
+  aarch64-unknown-linux-ohos），不需要交叉编译；配方仍显式传
+  `--plat=harmonyos --arch=arm64 --toolchain=envs`，并用 `--toolchain=envs`
+  让 configure 采用注入的 $CC/$CXX/$AR（编译路径一律取自 Conan conf，R33），
+  避免目标平台和编译器由 PATH 隐式决定。
+  (2) 最小补丁只在 filelock.c 的守卫上追加 `|| defined(TB_CONFIG_OS_HARMONYOS)`
+  （1 行，见 patches/0001-src-tbox-platform-bsd-filelock.c.patch）。不要去改
+  configure 生成宏的名字：`TB_CONFIG_OS_HARMONYOS` 是 1.8.x 的新口径，旧名只此一处残留。
+  若确实要 `<sys/file.h>`，本机实测该头存在且 flock/LOCK_EX 可用，补丁方向正确。
+  (3) 默认 `--kind=static`（上游默认 kind 也是 static）；shared 仅对不使用低层
+  tb_context_* 的消费者可用，不要假设 shared 一定能链接 demo。
+  (4) 消费者测试不要调用 tb_version()（info 开关未生效），改用已安装头中的
+  TB_VERSION_MAJOR/MINOR/ALTER 做版本自证。
+  (5) 要打开 database 模块，光传 `--database=y` 不够：配方需 `requires("sqlite3/…")`，
+  并由补丁在 `target "tbox"`（与 `target "demo"`）内用环境变量接收 sqlite3 的头/库路径，
+  然后 `add_defines "TB_CONFIG_PACKAGE_HAVE_SQLITE3=1"` + `add_includedirs` +
+  `add_files "database/impl/sqlite3.c"` + `add_linkdirs` + `add_links "sqlite3"`。
+  上游用例 database_sql 需运行期参数（`file://<db> <blob>`；注意 `sqlite3://` 不被识别），
+  无参调用会因 `tb_database_sql_init(NULL)` 返回空而**空洞通过**（return 0 但没跑 SQL）。
+
+rec_commands:
+  - "conan create archives/t/tbox/1.8.1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+  - "TB_SQLITE3_INCLUDEDIR=<sqlite3>/include TB_SQLITE3_LIBDIR=<sqlite3>/lib CC=/data/service/hnp/bin/clang CXX=/data/service/hnp/bin/clang++ AR=/data/service/hnp/bin/llvm-ar ./configure --plat=harmonyos --arch=arm64 --toolchain=envs --kind=static --charset=y --hash=y --float=y --force_utf8=y --xml=y --object=y --regex=y --coroutine=y --database=y --exception=y --small=no --demo=yes --prefix=/ && make -j1"
+  - "./demo database_sql 'file:///abs/path/db.sqlite' blobdata   # 无参是空洞通过，必须给 file:// 参数才是有效执行"
+
+verification: |
+  conan create（ohos-aarch64 / clang 15.0.4，含 sqlite3/3.49.1 依赖）从干净源码构建通过，
+  干净轮 apply_patch=3、test_package 10/10；设备原生 `--demo=yes` 构建出 160 个上游用例
+  （源码宏数与框架注册数两种口径一致）并逐个执行，结果见 PR 正文。
+
+related:
+  - archives/t/tbox/1.8.1/patches/0001-src-tbox-platform-bsd-filelock.c.patch
+  - knowledge/graph/E011.kv (HMDFS 目录权限，与本条无关但同为 OHOS 构建环境陷阱)
+last_updated: 2026-09-17

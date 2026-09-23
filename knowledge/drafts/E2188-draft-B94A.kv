@@ -1,0 +1,133 @@
+#====================================================================
+# DRAFT-E2188 — 发布版包 package_id 不编码 PIC 状态：
+# 同一 package_id 的 zlib 变体一为 PIC 一为非 PIC，静态库下游链接共享对象时炸
+# 触发: bambamc 0.0.50 HarmonyOS PC 适配（archives/b/bambamc/0.0.50）
+# 完整叙事与证据见同目录 E2188-draft-B94A.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E2188
+trigger_tool:           ld.lld|clang|make|conan
+phase:                  linking
+error_signature:        cannot be used against symbol 'z_errmsg'; recompile with -fPIC|
+                         R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol|
+                         R_AARCH64_ADD_ABS_LO12_NC cannot be used against symbol|
+                         recompile with -fPIC
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, linking, conan, dependency, static-library
+match_keywords:         z_errmsg, R_AARCH64_ADR_PREL_PG_HI21, R_AARCH64_ADD_ABS_LO12_NC,
+                         recompile with -fPIC, libz.a, package_id, PIC, fPIC, static-library,
+                         shared-object, DSO, conan, autotools, libtool, GOT, ADR_GOT,
+                         dependency-variant, published-binary, readelf -r
+title:                  发布版静态库包的 package_id 不编码 PIC 状态：同一远程上多个 ref
+                        可共享同一 package_id 而 PIC 状态不同；选到非 PIC 变体时链接共享对象报
+                        R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol 'z_errmsg'；
+                        用 conan cache path 精确解析包目录并对归档成员做 readelf -r 判定后钉 PIC 变体
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             本仓 zlib 的三个 ref 在本 profile 下解析出**完全相同的 package_id**
+                        （6b129b068851896169fae42d399fa922d239ce8a），但归档的 PIC 状态不同：
+                        zlib/1.3.1（配方未注入 -fPIC）的 libz.a 成员 zutil.o 对全局数据符号
+                        z_errmsg 使用 R_AARCH64_ADR_PREL_PG_HI21 + R_AARCH64_ADD_ABS_LO12_NC
+                        （PC 相对，仅可执行文件可用）；zlib/1.3.1.1 与 zlib/1.3.2 的配方均注入
+                        CFLAGS="-fPIC -O2"，同一成员使用 R_AARCH64_ADR_GOT_PAGE +
+                        R_AARCH64_LD64_GOT_LO12_NC（PIC 安全）。package_id 由
+                        settings+options+requires 计算，不含 CFLAGS，因此「用 conan list 看
+                        package_id 相同」不能推出「可链接性相同」——1.3.1.1/1.3.2 的配方 docstring
+                        已经写明「远端 ./configure --static 不加 -fPIC」，即修的是编包侧，而
+                        package_id 没随之变化，消费侧仍无法区分。下游把非 PIC 静态归档吸收进
+                        共享对象时，lld 对 z_errmsg 报 recompile with -fPIC，错误文案指向
+                        「重新编译」，容易误判为本项目/本配方缺 -fPIC（本项目对象其实已是 -fPIC），
+                        真因是依赖变体选错。
+affected_scope:         所有把依赖的**静态库**（libz.a 一类）吸收进 .so / Python 扩展 / 插件，
+                        且该依赖在远程存在多个 ref、package_id 却相同（或无法从 package_id
+                        区分 PIC）的 OHOS/Linux aarch64 适配任务；源头可由本仓 zlib/1.3.1、
+                        zlib/1.3.1.1、zlib/1.3.2 三个 OHOS armv8 binary 复现（三者 pid 同为 6b129b06…）。
+verification_cmd:        PID=6b129b068851896169fae42d399fa922d239ce8a
+                        # 必须用 conan cache path 精确解析，禁止 ls ~/.conan2/p/zlib*/p 通配
+                        P=$(conan cache path "zlib/1.3.1:$PID")
+                        ar p "$P/lib/libz.a" zutil.o > ./zutil.o
+                        readelf -r ./zutil.o | grep -A1 z_errmsg
+                        # PIC => R_AARCH64_ADR_GOT_PAGE / R_AARCH64_LD64_GOT_LO12_NC
+                        # 非 PIC => R_AARCH64_ADR_PREL_PG_HI21 / R_AARCH64_ADD_ABS_LO12_NC
+                        conan cache path "zlib/1.3.1.1:$PID"; conan cache path "zlib/1.3.2:$PID"
+                        # 三个 ref 解析到不同 p/ 目录、各自带不同 package revision，
+                        # 但 package_id 完全相同
+                        # 链接期反证（最小探针）：
+                        clang -shared -fPIC t.c -I"$P/include" -L"$P/lib" -lz \
+                          --target=aarch64-unknown-linux-ohos --sysroot=$SR -o t.so
+                        # zlib/1.3.1 rc=1（z_errmsg 重定位）；1.3.1.1 与 1.3.2 rc=0
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pin-pic-dependency-variant
+rec_description:        在配方 requirements() 里钉住**经归档成员探测确认 PIC** 的那个 ref（本例
+                        zlib/1.3.1.1），并在配方 docstring/manifest 里写明判据。选版前必须用
+                        conan cache path <ref>:<pid> 精确解析包目录，再对归档成员做 readelf -r
+                        判定，不要凭版本号新旧、package_id 或目录通配选。验收判据：共享对象链接
+                        rc=0，且 nm -D 里被吸收的依赖符号是局部（t/T 而非 U），readelf -d 的
+                        DT_NEEDED 只列 libc。
+rec_command:            # conanfile.py
+                        self.requires("zlib/1.3.1.1")   # PIC（同 pid 的 zlib/1.3.1 非 PIC）
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe
+
+fallback_priority:      2
+fallback_approach:      build-pic-variant-locally
+fallback_description:   若远程不存在任何 PIC 变体：以 --build=zlib/* 就地自建并把 -fPIC 注入
+                        上游构建（zlib 的 Makefile 支持 CFLAGS="-fPIC"），产出到任务私有 prefix；
+                        或按 §7.3 口径自建到包内。不得用 --exclude-libs/-Bsymbolic 之类链接期
+                        开关把非 PIC 重定位「压下去」——那只是把问题推给下一个消费者。
+fallback_command:       conan create . -o "zlib/*:shared=False" --build=zlib/* \
+                          --conf "tools.build:cflags=[\"-fPIC\"]"
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -Wl,--exclude-libs,ALL|-Wl,-Bsymbolic
+forbid_1_reason:        这两个开关能让非 PIC 归档「碰巧」链过（实测均 rc=0），但吸收进来的对象
+                        仍带 TEXTREL 风险的重定位，且符号被本地化后与真正 PIC 构建产物不等价；
+                        用它们掩盖等于把非 PIC 变体放行给下游
+forbid_1_consequence:   同一依赖会在下一个消费者（插件、Python 扩展、dlopen 场景）以同样或更难
+                        定位的形式再次失败，且此时已无本任务上下文
+forbid_2_pattern:       依赖变体选择只依据 conan list 的 package_id 或版本号新旧
+forbid_2_reason:        package_id 由 settings/options/requires 计算、不含 CFLAGS，无法区分 PIC；
+                        实测本仓 zlib 三个 ref（1.3.1/1.3.1.1/1.3.2）pid 完全相同而 PIC 状态不同
+forbid_2_consequence:   选版结论与可链接性无关，问题在链接期才暴露，错误文案还指向「本配方缺 -fPIC」
+forbid_3_pattern:       ls -d ~/.conan2/p/zlib\*/p|ar p \$\(ls -d .*zlib\*/p\)|head -1.*\.conan2/p/
+forbid_3_reason:        用通配符猜包目录会把**别的** ref 当成目标（本任务第一轮实测：把
+                        p/zlib56af09fbb4346 —— 实为 zlib/1.3.1 —— 当成 zlib/1.3.2，得出方向
+                        完全相反的「1.3.2 非 PIC」结论，且后续用同一错误路径「复核」形成循环自证）
+forbid_3_consequence:   结论被写反并进入文档与知识库；下游据此会误选真正非 PIC 的 ref。
+                        正确做法是 conan cache path "<ref>:<package_id>" 精确解析
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R26
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E005, E234, E539, E541
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/E2188-draft-B94A.md
+last_updated:           2026-09-11
+source_event:           archives/b/bambamc/0.0.50
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: B94A

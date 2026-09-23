@@ -1,0 +1,46 @@
+#====================================================================
+# DRAFT: 手写 Makefile 的依赖注入缝——origin 守卫 + ?= 变量外部注入
+#（mupen64plus-core 2.6.0 / N64 模拟器核心，任务 #6728）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-makefile-origin-guard-dep-injection
+trigger_tool:           make
+phase:                  configuration
+error_signature:        No zlib development libraries found|No libpng development libraries found|No SDL development libraries found|OS type.*not supported.*Please file bug report|sdl2-config.*not found|No freetype2 development libraries found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, make, cross-compile
+match_keywords:         Makefile, pkg-config, sdl2-config, origin, undefined, UNAME, uname -s, OS detection, dependency probe, make variable, injection, CROSS_COMPILE, CC gcc, mupen64plus, higan
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             手写 GNU Makefile 项目的两类探测在交叉/无 pkg-config 环境全部失败：① OS 探测 `UNAME ?= $(shell uname -s)` 对 HarmonyOS 无分支（报 "OS type not supported"）；② 依赖探测走 pkg-config/sdl2-config（交叉目标包不在系统 pkg-config 路径）。但此类 Makefile 的探测普遍带 `ifeq ($(origin X), undefined)` 守卫——预定义同名 make 变量即可整体跳过探测分支，UNAME 是 ?= 变量同样可外部覆盖；CC/CXX 虽在文件内硬编码 `CC = $(CROSS_COMPILE)gcc`，make 命令行变量优先级高于文件赋值，命令行传入即可覆盖。
+affected_scope:         一切手写 Makefile 且依赖 pkg-config 探测的 C/C++ 项目（mupen64plus-core、部分 higan 系、老旧游戏/模拟器项目）；对 autotools/cmake 项目不适用（它们有 config.guess/CMAKE_SYSTEM_NAME 机制）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           origin-guard-make-var-injection
+solution: |
+  # 三层注入，零源码补丁：
+  # 1) OS 探测：UNAME 是 ?= 变量，外部注入
+  make UNAME=Linux ...
+  # 2) 依赖探测：找到 Makefile 里的 origin 守卫变量名（形如 <DEP>_CFLAGS/<DEP>_LDLIBS），
+  #    从 conan 包路径构造（.pc 文件的 Cflags/Libs 等价展开）
+  make ZLIB_CFLAGS='-I<pkg>/include' ZLIB_LDLIBS='-L<pkg>/lib -lz' \
+       SDL_CFLAGS='-I<pkg>/include/SDL2 -D_REENTRANT' SDL_LDLIBS='-L<pkg>/lib -lSDL2' ...
+  # 3) 编译器覆盖：命令行 CC/CXX 覆盖文件内 `CC = $(CROSS_COMPILE)gcc`
+  make CC=<cross-clang> CXX=<cross-clang++> ...
+  # 注意：含空格的值必须 shell 引号包裹（conanfile 中 shlex.quote），
+  # 否则 make 把 -D_REENTRANT 当 make 选项解析（invalid option -- D）
+fallback: |
+  若 Makefile 无 origin 守卫（探测无条件执行）：
+  ① 装 pkgconf tool_requires + PkgConfigDeps 生成 .pc 并设 PKG_CONFIG_PATH（conan 标准 PkgConfigDeps 路线）；
+  ② 极端情况 patch Makefile 的探测段（最后手段，优先守卫注入）
+verify_builds:          mupen64plus 2.6.0 本地 conan create 全绿（2026-09-09，真机 OHOS aarch64）；CI 构建号待 PR 合入后回填
+prescan_pattern:        ifeq (\$\(origin .*\), undefined)
+
+# ═══ Layer 4: 证据层 (Evidence) ═══
+evidence_url:
+source_commit:          mupen64plus-core tag 2.6.0 projects/unix/Makefile L26/L305/L331
+notes:                  守卫注入比 patch 探测段更稳（上游升级不冲突）；探测变量名可 grep 'ifeq ($(origin' 一键枚举

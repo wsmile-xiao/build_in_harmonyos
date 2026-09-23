@@ -1,0 +1,72 @@
+#====================================================================
+# DRAFT-flang-minimal-runtime-link-contract
+# flang-ohos 精简运行集链接契约：编译/链接必须显式注入 SDK sysroot、
+# clang resource-dir 与 FortranRuntime/Decimal，不可依赖默认探测
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: devicexlib 0.9.1 HarmonyOS PC 适配（run devicexlib-0.9.1，2026-09-11）
+# 附带：knowledge/doc/E109.md 勘误注记（见文末，交知识库主编，不在本 run 直接改 E109）
+#====================================================================
+
+id:                     DRAFT-flang-minimal-runtime-link-contract
+trigger_tool:           flang-ohos|flang-new|cmake|conan|ld\.lld
+phase:                  configuration|compilation|linking
+error_signature:        No CMAKE_Fortran_COMPILER could be found|cannot open Scrt1\.o|cannot open crti\.o|cannot open crtbeginS\.o|unable to find library -l:libunwind\.a|libclang_rt\.builtins\.a: No such file or directory|linker command failed with exit code 1
+severity:               2
+category:               toolchain, fortran, ohos, linking
+match_keywords:         flang-ohos, flang-new, tool_requires, sysroot, resource-dir, FortranRuntime, FortranDecimal, libclang_rt.builtins, Scrt1.o, libunwind, LD_LIBRARY_PATH, libLLVM, libMLIR, libclang-cpp, FindLAPACK, FindOpenMP, CMAKE_Fortran_COMPILER, 精简运行集
+title:                  flang-ohos 精简运行集链接需显式注入 SDK sysroot/resource-dir 与 FortranRuntime/Decimal，不可依赖默认探测
+
+# Layer 2: Diagnosis
+root_cause:             flang-ohos/20.1.0 为设备原生 LLVM Flang 精简运行集（仅 bin/flang + libLLVM/libMLIR/libclang-cpp.so.20.1 + libFortran{Runtime,Decimal}.a），不含 clang builtins、crt 对象与 libomp。① 裸调用 flang 编译 Fortran 可过（前端自足），链接必败：ld.lld 报 cannot open Scrt1.o/crti.o/crtbeginS.o、unable to find -l:libunwind.a、cannot open <flang>/lib/clang/20/lib/aarch64-linux-ohos/libclang_rt.builtins.a（设备 P2-A 实证，EXIT=1）；② 正确契约=编译注入 --sysroot=<SDK>/native/sysroot -resource-dir=<SDK>/native/llvm/lib/clang/15.0.4，链接注入 -L<SDK>/native/llvm/lib/aarch64-linux-ohos（libunwind/libomp）-L<flang>/lib -lFortranRuntime -lFortranDecimal，运行 flang/lld 需 LD_LIBRARY_PATH=<SDK>/native/llvm/lib:<flang>/lib（前者补 lld 依赖的 libxml2.so.16，后者补 flang 运行期 libLLVM/libMLIR/libclang-cpp）——注入后同一程序链接并运行成功（设备 P2-B 实证，EXIT=0）；③ 库若不含任何对外 C 接口（纯 Fortran 静态库），CMake 的 find_package(LAPACK/OpenMP REQUIRED) 依赖 FindLAPACK/FindOpenMP 链接探测，在 flang 精简运行集 + SDK 组合下不可靠（探测可执行文件链接同样踩 ①的坑），需确定性 Find 模块 shim 或 CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY 规避；④ 无任何注入时 CMake 直接报 No CMAKE_Fortran_COMPILER could be found（设备默认工具链无 Fortran 编译器，phase-a-configure.log 实证）。
+affected_scope:         任何含 Fortran 的库在 OHOS 设备原生构建（conan tool_requires flang-ohos）：纯 Fortran 静态库（devxlib/lapack/scalapack 类）、Fortran+C 混合库（openblas 类）；消费方链接其产物时同样需要 libFortranRuntime/Decimal 闭包（建议包内随分发）。仓内已有 14 处消费 recipe（openblas 0.3.28/0.3.33/0.3.34、lapack 3.12.1、mpich、mumps、scalapack、arpack-ng、libxc、cblas、r-base、packmol、fortran-shlex、acepack、alfa），持续复发面由配方树保证。
+verification_cmd:       设备自包含两段对照（实测 EXIT 与输出见 reports/builder/draft-probes.log P2-A/P2-B）：①裸调用复现——printf 'program hello\n  print *, "flang link contract ok"\nend program\n' > hello.f90 后 env LD_LIBRARY_PATH=<SDK>/native/llvm/lib:<flang>/lib <flang>/bin/flang hello.f90 -o hello_a，预期 ld.lld 报 Scrt1.o/crtbeginS.o/libclang_rt.builtins.a/libunwind 一组错误且 EXIT=1；②契约注入通过——同 env 下 <flang>/bin/flang --sysroot=<SDK>/native/sysroot -resource-dir=<SDK>/native/llvm/lib/clang/15.0.4 hello.f90 -o hello_b -L<SDK>/native/llvm/lib/aarch64-linux-ohos -L<SDK>/native/llvm/lib/clang/15.0.4/lib/aarch64-linux-ohos -L<flang>/lib，预期 EXIT=0 且 ./hello_b 打印 "flang link contract ok"。其中 <SDK>=/data/service/hnp/ohos-sdk.org/*/ohos/native（glob 取最新），<flang>=conan 缓存 flang-ohos 包目录（conan cache path 或 dependencies.build 取得）。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           tool-requires-with-explicit-injection
+rec_description:        recipe 声明 tool_requires("flang-ohos/20.1.0")，在 generate() 统一注入：CMAKE_Fortran_COMPILER=<flang>/bin/flang；CMAKE_Fortran_FLAGS="-fPIC --target=aarch64-linux-ohos --sysroot=<SDK>/native/sysroot -resource-dir=<SDK>/native/llvm/lib/clang/15.0.4"；CMAKE_EXE_LINKER_FLAGS 含 -L<SDK>/native/llvm/lib/aarch64-linux-ohos -L<SDK>/native/llvm/lib -L<flang>/lib -lFortranRuntime -lFortranDecimal；build() 置 LD_LIBRARY_PATH=<SDK>/native/llvm/lib:<flang>/lib；package() 把 libFortranRuntime.a/libFortranDecimal.a 复制进包内 lib 并在 package_info.libs 声明（消费方链接闭包）。仓内先例：openblas 0.3.34、lapack 3.12.1；本 run devicexlib 0.9.1 按此全绿（CI L0-L5 pass）。
+rec_command:            conanfile.py generate()（摘要）：tc.variables["CMAKE_Fortran_COMPILER"]=fc; tc.variables["CMAKE_Fortran_FLAGS"]="--target=aarch64-linux-ohos --sysroot=%s -resource-dir=%s"%(sdk_sysroot,sdk_resdir); tc.variables["CMAKE_EXE_LINKER_FLAGS"]="-L... -lFortranRuntime -lFortranDecimal"; build(): os.environ["LD_LIBRARY_PATH"]=os.pathsep.join([sdk_llvm_lib, flang_lib])
+rec_auto_fix:           true
+rec_impl:               conan-recipe-generate（flang 包路径经 self.dependencies.build["flang-ohos"].package_folder 解析，SDK 路径 glob /data/service/hnp/ohos-sdk.org/*/ohos/native 兜底）
+
+fallback_priority:      2
+fallback_approach:      deterministic-find-module-shims
+fallback_description:   上游硬编码 find_package(LAPACK/FindOpenMP REQUIRED) 且默认 Find 模块链接探测不可靠时，在 generators 目录提供确定性 FindLAPACK.cmake/FindOpenMP.cmake shim（CMAKE_MODULE_PATH 指向）：LAPACK 映射 conan lapack 包（IMPORTED 目标指向 liblapack.a，接口闭包带上 libblas.a/libFortranRuntime.a/libFortranDecimal.a/m）；OpenMP 提供空 INTERFACE IMPORTED 目标（仅当上游只在 GPU 分支链接 OpenMP、CPU 路径不用其开关时成立，需在注释写明"shim 即最终语义"并接受能力边界）。诚实权衡：这是确定性映射，不是修复探测。
+fallback_command:       tc.variables["CMAKE_MODULE_PATH"]=self.generators_folder；devicexlib 0.9.1 conanfile.py _write_find_shims() 为可复制实现
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-generate（仅 CPU-only 场景；若库真正消费 OpenMP 开关则必须回退注入 libomp 并走 rec 路线补探测）
+
+forbid_1_pattern:       find_package\((LAPACK|OpenMP)\s+REQUIRED(?!.*(shim|CONFIG))时的裸默认探测|把 Find 模块探测结果当作链接闭包成立的证据
+forbid_1_reason:        flang 精简运行集下 FindLAPACK/FindOpenMP 的 try_compile 链接探测不可靠（缺 builtins/crt/libomp 显式路径），失败随机且报错远离真实缺口；探测通过也不代表消费方链接闭包成立。
+forbid_1_consequence:   configure 期非确定性失败或掩盖缺失的 FortranRuntime 闭包，问题后移到下游消费方才爆发。
+
+forbid_2_pattern:       把 flang 二进制/so 复制出 conan 包散装放置|全局持久 export LD_LIBRARY_PATH.*flang（profile/shell rc 级注入）
+forbid_2_reason:        散装复制脱离包管理（版本/路径漂移、消费方不可复现）；全局持久注入 flang 的 libLLVM/libMLIR 会污染同机其他 clang/lld 工具链的加载环境（SDK lld 对 libxml2.so.16 的加载路径本就敏感，openblas notes 有载）。
+forbid_2_consequence:   其他包构建出现不可复现的动态库加载错误，排查成本远高于 recipe 内按构建注入。
+
+# Layer 4: Principles
+principles:             P-TOOLCHAIN-001
+
+# Relations
+causes:                 []
+caused_by:              [flang-ohos 精简运行集无 builtins/crt, OHOS SDK 与 flang 资源目录版本错位（20.1 vs 15.0.4）]
+similar_to:             [E242, E258]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-flang-minimal-runtime-link-contract.md
+last_updated:           2026-09-11
+source_event:           devicexlib 0.9.1 适配（run devicexlib-0.9.1）：裸调用链接失败（Scrt1.o/builtins/libunwind）→ 注入契约后同程序链接运行成功；recipe 化后 CI 通过（Pass rate 100%，L4 为 testTargets 标识符触发的静态扫描误报 warn）、8 套件 176/176 上游测试全过
+
+# Authorship and provenance
+authors: GoliWie <GoliWie@noreply.gitcode.com>
+source_pr: 本 PR
+source_commit: 合并后回填
+
+# Quality metrics
+metrics_success_count:  3
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11

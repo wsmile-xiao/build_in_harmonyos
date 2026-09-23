@@ -1,0 +1,265 @@
+--- a/src/cube/test/network/CubeCallpathSubtreeValuesRequest_Test.cpp
++++ b/src/cube/test/network/CubeCallpathSubtreeValuesRequest_Test.cpp
+@@ -21,13 +21,261 @@
+ 
+ #include <config.h>
+ 
++#include <deque>
+ #include <string>
+-
++#include <vector>
++
++#include <gmock/gmock.h>
+ #include <gtest/gtest.h>
+ 
+ #include "CubeCallpathSubtreeValuesRequest.h"
++#include "CubeClientCallbackData.h"
++#include "CubeClientConnection.h"
++#include "CubeCnode.h"
+ #include "CubeError.h"
++#include "CubeIdIndexMap.h"
++#include "CubeIoProxy.h"
++#include "CubeMetric.h"
++#include "CubeRegion.h"
++#include "CubeServerCallbackData.h"
++#include "CubeServerConnection.h"
++#include "CubeSocket.h"
++#include "CubeSysres.h"
++#include "CubeSystemTreeNode.h"
+ 
+ using namespace cube;
+ using namespace std;
+ using namespace testing;
++
++// --- Stubs ---------------------------------------------------------
++// Mirrors src/cube/test/network/CubeMetricSubtreeValuesRequest_Test.cpp:
++// loopback connection stubs + NiceMock CubeIoProxy. The sibling metric
++// test passes on HarmonyOS aarch64, so the same harness shape is reused
++// with metric/cnode roles swapped per the CallpathSubtreeValuesRequest
++// client factory signature.
++
++class ClientConnectionStub
++    : public ClientConnection
++{
++public:
++    ClientConnectionStub()
++        : ClientConnection( SocketPtr( 0 ) )
++    {
++    }
++
++    void
++    send( const void* buffer,
++          size_t      size )
++    {
++        for ( size_t i = 0; i < size; ++i )
++        {
++            mBuffer.push_back( static_cast< const uint8_t* >( buffer )[ i ] );
++        }
++    }
++
++    deque< uint8_t > mBuffer;
++};
++
++
++class ServerConnectionStub
++    : public ServerConnection
++{
++public:
++    ServerConnectionStub()
++        : ServerConnection( SocketPtr( 0 ), 0 )
++    {
++    }
++
++    explicit ServerConnectionStub( const ClientConnectionStub& rhs )
++        : ServerConnection( SocketPtr( 0 ), 0 ), mBuffer( rhs.mBuffer )
++    {
++        // skip request header
++        for ( size_t i = 0; i < sizeof( NetworkRequest::marker_t )
++              + sizeof( NetworkRequest::id_t )
++              + sizeof( NetworkRequest::sequence_t )
++              + sizeof( NetworkRequest::marker_t ); ++i )
++        {
++            mBuffer.pop_front();
++        }
++    }
++
++    size_t
++    receive( void*  buffer,
++             size_t size )
++    {
++        for ( size_t i = 0; i < size; ++i )
++        {
++            static_cast< uint8_t* >( buffer )[ i ] = mBuffer.front();
++            mBuffer.pop_front();
++        }
++
++        return size;
++    }
++
++    deque< uint8_t > mBuffer;
++};
++
++
++class CubeIoProxyStub
++    : public CubeIoProxy
++{
++public:
++
++    MOCK_CONST_METHOD0( getCnodes, const vector< Cnode* >& ( ) );
++    MOCK_CONST_METHOD0( getRegions, const vector< Region* >& ( ) );
++    MOCK_CONST_METHOD0( getSystemResources, const vector< Sysres* >& ( ) );
++    MOCK_CONST_METHOD0( getMetrics, const vector< Metric* >& ( ) );
++    MOCK_METHOD0( closeReport, void() );
++};
++
++// --- Fixture -------------------------------------------------------
++
++class CallpathRequestT
++    : public Test
++{
++public:
++    virtual void
++    SetUp()
++    {
++        arbitraryText   = "arbitrary";
++        arbitraryNumber = 4711;
++        depthZero       = 0;
++        idZero          = 0;
++
++        Cnode*  parentCnodeNull  = static_cast< Cnode* >( 0 );
++        Sysres* parentSysresNull = static_cast< Sysres* >( 0 );
++
++        Region* temporaryRegion = setupRegion();
++        Metric* temporaryMetric = setupMetric();
++        metricSelection.push_back( make_pair( temporaryMetric,
++                                              CUBE_CALCULATE_INCLUSIVE ) );
++
++        rootCnode = setupCnode( temporaryRegion,
++                                parentCnodeNull );
++
++        Sysres* temporarySysres = setupSysres( parentSysresNull );
++        sysresSelection.push_back( make_pair( temporarySysres,
++                                              CUBE_CALCULATE_INCLUSIVE ) );
++
++        clientCallbackData = new ClientCallbackData();
++        serverCallbackData = new ServerCallbackData();
++
++        serverCallbackData->setCube( &cubeIoProxyStub );
++
++        ON_CALL( cubeIoProxyStub, getCnodes() )
++        .WillByDefault( ReturnRef( mStubCnodes ) );
++        ON_CALL( cubeIoProxyStub, getRegions() )
++        .WillByDefault( ReturnRef( mStubRegions ) );
++        ON_CALL( cubeIoProxyStub, getMetrics() )
++        .WillByDefault( ReturnRef( mStubMetrics ) );
++        ON_CALL( cubeIoProxyStub, getSystemResources() )
++        .WillByDefault( ReturnRef( mStubSysres ) );
++    }
++
++    virtual void
++    TearDown()
++    {
++        delete clientCallbackData;
++        delete serverCallbackData;
++    }
++
++    string                    arbitraryText;
++    size_t                    arbitraryNumber;
++    list_of_metrics           metricSelection;
++    list_of_sysresources      sysresSelection;
++    vector< Cnode* >          mStubCnodes;
++    vector< Region* >         mStubRegions;
++    vector< Metric* >         mStubMetrics;
++    vector< Sysres* >         mStubSysres;
++    value_container           inclusiveValues;
++    value_container           exclusiveValues;
++    Cnode*                    rootCnode;
++    IdIndexMap                idIndexMap;
++    ClientCallbackData*       clientCallbackData;
++    ServerCallbackData*       serverCallbackData;
++    size_t                    depthZero;
++    size_t                    idZero;
++    NiceMock<CubeIoProxyStub> cubeIoProxyStub;
++
++
++private:
++    Region*
++    setupRegion()
++    {
++        Region* region = new Region( arbitraryText, arbitraryText,
++                                     arbitraryText, arbitraryText,
++                                     arbitraryNumber, arbitraryNumber,
++                                     arbitraryText, arbitraryText,
++                                     arbitraryText, idZero );
++        mStubRegions.push_back( region );
++
++        return region;
++    }
++
++    Cnode*
++    setupCnode( Region* arbitraryRegion,
++                Cnode*  noParentCnode )
++    {
++        Cnode* cnode = new cube::Cnode( arbitraryRegion, arbitraryText,
++                                        arbitraryNumber, noParentCnode,
++                                        idZero );
++        mStubCnodes.push_back( cnode );
++
++        return cnode;
++    }
++
++    Sysres*
++    setupSysres( Sysres* noParentSysres )
++    {
++        Sysres* sysres = new SystemTreeNode( arbitraryText, arbitraryText,
++                                             arbitraryText,
++                                             static_cast< SystemTreeNode* >( 0 ),
++                                             idZero, idZero );
++        mStubSysres.push_back( sysres );
++
++        return sysres;
++    }
++
++    Metric*
++    setupMetric()
++    {
++        Metric* metric = Metric::create( arbitraryText, arbitraryText, "DOUBLE",
++                                         "sec", arbitraryText, arbitraryText,
++                                         arbitraryText, NULL, NULL,
++                                         CUBE_METRIC_INCLUSIVE, idZero,
++                                         arbitraryText, arbitraryText,
++                                         arbitraryText, arbitraryText,
++                                         arbitraryText,
++                                         false, CUBE_METRIC_NORMAL );
++        mStubMetrics.push_back( metric );
++
++        return metric;
++    }
++};
++
++
++// --- Tests ---------------------------------------------------------
++
++TEST_F( CallpathRequestT, packsAndUnpacksSameRequestData )
++{
++    size_t            zero( 0 );
++    NetworkRequestPtr clientRequest =
++        CallpathSubtreeValuesRequest::create( metricSelection,
++                                              sysresSelection,
++                                              *rootCnode,
++                                              depthZero,
++                                              idIndexMap,
++                                              &inclusiveValues,
++                                              &exclusiveValues );
++    ClientConnectionStub clientConnectionStub;
++    clientRequest->sendRequest( clientConnectionStub,
++                                clientCallbackData );
++
++    ServerConnectionStub serverConnectionStub( clientConnectionStub );
++    NetworkRequestPtr    serverRequest = CallpathSubtreeValuesRequest::create();
++
++    serverRequest->receiveRequestBody( serverConnectionStub,
++                                       serverCallbackData );
++
++    ASSERT_EQ( zero, serverConnectionStub.mBuffer.size() );
++}

@@ -1,0 +1,43 @@
+id: DRAFT-tweeny-4.1.0-v4-api-consumer-migration
+severity: 2
+category: conan,test-package,api,migration,header-only
+trigger_tool: conan|cmake|clang
+phase: testing
+approach: 消费者/测试按目标版本真实 API 重写——升级 header-only 库主版本时先核对上游测试源码与头文件 API（事件接口/参数类型强约束），再写 test_package 消费者测试；配方层不引入测试框架依赖，上游自带测试套件在适配流程独立枚举与运行（双口径台账）
+
+keywords: tweeny, onStep, event::step, during, uint32_t, static_assert, event::response, consumer test, header-only, v3, v4, major version, API breaking change, migration
+
+error_signature: no member named 'onStep' in 'tweeny::tween<float>'|during() parameters must be of type uint32_t|during() must have one frame count per tween component|static assertion failed.*is_same_v
+
+match_keywords: tweeny, onStep, on(event::step), during, uint32_t, consumer, test_package, no member named, static assertion failed
+
+root_cause: tweeny v4（tag v4.1.0）相对 v3（tag v3）为破坏性 API 升级：1) 事件接口由成员方法 onStep(cb) 改为 t.on(event::step, cb)，回调签名为 event::response(tween&)，返回 event::response::ok/unsubscribe；2) during() 参数强约束为 uint32_t（int 字面量触发 static_assert 'std::is_same_v<int, unsigned int>'），且多值 tween 的 during() 帧数必须与组件数一一对应（'sizeof...(FrameCountsType) == value_count'）；3) seek()/peek() 帧参数由 float 改为 uint32_t。沿用 v3 API 编写的消费者测试在 v4 下编译失败，错误在 conan create test_package 阶段（G2）暴露。
+
+rec_approach: |
+  1) 写 test_package/消费者测试前先读目标版本的头文件与 src/tests/ 上游测试源码，确认真实 API 形态（本库 v4 例：tweeny::from(0.0f).to(100.0f).during(10u).build()；事件用 t.on(tweeny::event::step, [](const auto& t){ ...; return tweeny::event::response::ok; }) 并在回调内 t.peek() 取值）。
+  2) 多值 tween 用 std::get<N>(t.peek())，单值走标量 API；during() 字面量显式写 u 后缀。
+  3) 配方 build() 保持上游测试选项 OFF（如 TWEENY_BUILD_TESTS=OFF），避免把测试框架（Catch2）引入制品依赖；上游自带测试套件在适配流程独立配置（如 -DTWEENY_BUILD_TESTS=ON + 制品仓 Catch2）并枚举/运行，按双口径统计（source_declared_total / configured_executable_total / executed_passed_total）。
+  4) 边界反例（E103）：上游 cmake_minimum_required 声明为 3.23...3.28 区间（最低 ≥3.5）时，CMake 4.x 直接接受，无需注入 CMAKE_POLICY_VERSION_MINIMUM=3.5——E103 只适用于最低版本 < 3.5 的旧项目。
+
+solution_cmds: |
+  # 消费者测试片段（tweeny 4.1.0，v4 API）
+  auto linearTween = tweeny::from(0.0f).to(100.0f).during(10u).build();
+  float v = linearTween.peek(5u);                 // 50.0f
+  linearTween.step(5);                             // 标量 API 直接返回 T
+  // 事件回调（v4 形态）
+  int calls = 0;
+  watched.on(tweeny::event::step, [&](const auto& t) {
+      ++calls; float cur = static_cast<float>(t.peek());
+      return tweeny::event::response::ok;
+  });
+  watched.step(3);
+  # 上游测试独立运行（本库 135/135 PASSED）
+  cmake -DTWEENY_BUILD_TESTS=ON -DCMAKE_PREFIX_PATH=<catch2-3.8.1-pkg> .. && cmake --build . && ctest
+
+verification: conan-verify G2 conan create 通过；test_package 1/1 Passed + ALL CHECKS PASSED（17 断言）；鸿蒙专项测试 17/17 PASS；上游测试 135/135 PASSED（135/135=100% 全量通过率）。
+
+fallback: 若目标版本 API 无文档可循，直接编译上游 src/tests/ 目录（框架头可用时）获取真实用法；或对报错行逐个按头文件 static_assert 提示修正。
+
+doc_refs: E103,E321,E322,E307,E216
+applies_to: 任何已归档旧版本（如 tweeny/3）的库在新主版本适配时的消费者测试迁移；任何"配方不引入测试框架依赖 + 上游测试独立运行"的 header-only 库
+last_updated: 2026-09-19

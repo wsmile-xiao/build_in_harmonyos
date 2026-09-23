@@ -1,0 +1,98 @@
+#====================================================================
+# DRAFT-lzham-1.0-stable1-musl-alloc-alignment — OHOS musl 极小分配
+#   仅 8 字节对齐破坏自定义分配器的 16 对齐不变量
+# 对应人类文档: knowledge/drafts/DRAFT-lzham-1.0-stable1-musl-alloc-alignment.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: lzham 1.0-stable1 适配 HarmonyOS PC（2015 年代自定义分配器）
+#====================================================================
+
+id:                     DRAFT-lzham-1.0-stable1-musl-alloc-alignment
+trigger_tool:           cmake|clang|clang++|make|test
+phase:                  compilation|testing|runtime
+error_signature:        lzham_realloc: bad ptr|
+                         lzham_free: bad ptr|
+                         realloc: bad ptr.*alignment|
+                         Assertion failed: "lzham_realloc: bad ptr"|
+                         alignment.*16.*required.*8
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               platform, portability, libc, musl, memory, alignment
+match_keywords:         musl, malloc, realloc, memalign, posix_memalign, alignment,
+                        16, 8, LZHAM_MIN_ALLOC_ALIGNMENT, custom allocator,
+                        bad ptr, OHOS, HarmonyOS, aarch64, flaky, heisenbug,
+                        vector resize, symbol_codec
+title:                  OHOS musl 极小 malloc/realloc 仅 8 字节对齐，破坏自定义
+                         分配器（lzham）的 16 对齐不变量——用 memalign 保证对齐
+                         并复检 realloc 返回值
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             OpenHarmony 的 musl 系运行时对极小尺寸（实测 2/3 字节）的
+                         malloc/realloc 只保证 8 字节对齐（glibc 对 malloc(1..16)
+                         恒 16 对齐，故上游正常）。lzham 1.0-stable1（2015 年）在
+                         lzham_mem.cpp 要求所有分配块 LZHAM_MIN_ALLOC_ALIGNMENT(16)
+                         对齐，并在此不变量上做 vector 原地 realloc。首次 8 对齐
+                         的字节矢量在扩容时触发 "lzham_realloc: bad ptr" 断言；
+                         由于依赖堆布局，表现为 Release 下 flaky（同一命令间歇
+                         成功/失败），而 ASan 构建稳定通过（其分配器返回 16 对齐，
+                         掩盖了缺陷）。musl realloc 移动分配时也可能落到 8 对齐
+                         小块，因此 realloc 返回值也必须复检对齐并修复
+affected_scope:         所有自带对齐契约（自定义 realloc 封装、LZHAM_MIN_ALLOC_
+                         ALIGNMENT 类常量）的 C/C++ 库在 OHOS/HarmonyOS musl
+                         运行时的构建与测试；2015 年前后年代代码尤甚
+verification_cmd:       实测触发前提: 编译小程序循环 malloc(1..16) 打印地址 mod 16
+                         （musl 下 malloc(2/3) 出现 8 对齐）；
+                         修复验证: conan create archives/l/lzham/1.0-stable1
+                         -pr:h=ci/conan/profiles/ohos-aarch64
+                         -pr:b=ci/conan/profiles/ohos-aarch64 && 连跑
+                         ./lzhamtest -v -m4 -d15 c <input> <out> 8 次全 exit 0
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           aligned-allocator-patch
+rec_description:        在分配器初始分配路径（非 WIN32）改用
+                         memalign(LZHAM_MIN_ALLOC_ALIGNMENT, size)；movable realloc
+                         返回的指针若未 16 对齐，则 memalign 新块、拷贝内容并
+                         free 旧块，再通过既有对齐断言。零 API 变化，仅改分配层
+rec_command:            (lzham_mem.cpp lzham_default_realloc)
+                         if (!p) { p_new = memalign(LZHAM_MIN_ALLOC_ALIGNMENT, size); }
+                         /* movable realloc 分支: 若 (p_new & (ALIGN-1)) 非 0，
+                            memalign 新块 + memcpy(新,旧,min(size,old_size)) + free(旧) */
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      runtime-probe
+fallback_description:   先用最小程序实测目标运行时不同分配 API 的实际对齐，确认
+                         触发前提（malloc 极小尺寸 8 对齐）后再定位具体分配路径
+fallback_command:       (小 C 程序) for sz in 1..16: malloc(sz) 打印 (uintptr_t)p % 16
+fallback_auto_fix:      false
+fallback_impl:          manual-diagnosis
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       忽略.*bad ptr|跳过.*对齐|#define LZHAM_MIN_ALLOC_ALIGNMENT 8
+forbid_1_reason:        降低对齐阈值会把问题掩盖到未对齐访问；断言是真实不变量
+forbid_1_consequence:   设备上过对齐类型/矢量访问仍可能崩溃或未定义行为
+forbid_2_pattern:       用 ASan 通过.*认为.*无缺陷
+forbid_2_reason:        ASan 分配器返回 16 对齐会掩盖 musl 8 对齐缺陷（本任务实测
+                         ASan 24/24 通过而 Release flaky）
+forbid_2_consequence:   误判为无问题，Release 产物在真实运行时间歇失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [E476]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               drafts/DRAFT-lzham-1.0-stable1-musl-alloc-alignment.md
+last_updated:           2026-09-08
+source_event:           lzham 1.0-stable1 r01 OHOS/aarch64: Release flaky
+                         "lzham_realloc: bad ptr"，ASan 稳定通过，memalign 修复后
+                         8/8 + 全矩阵通过
+authors:                pc4-3
+source_pr:              (lzham 1.0-stable1 知识库扩展 PR)
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.6

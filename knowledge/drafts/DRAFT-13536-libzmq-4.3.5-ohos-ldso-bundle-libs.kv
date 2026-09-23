@@ -1,0 +1,65 @@
+id: DRAFT-13536-libzmq-4.3.5-ohos-ldso-bundle-libs
+title: OHOS musl ldso 在 LD_LIBRARY_PATH 含 /data/storage/el1/bundle/libs 时中断后续搜索导致 libc++_shared.so 解析失败
+trigger_tool: conan|ctest|ld-musl
+phase: testing|runtime
+severity: 2
+category: platform, linking, testing
+match_keywords: libc++_shared.so, Error loading shared library, Error relocating, LD_LIBRARY_PATH, el1/bundle, test_package, conanrun, symbol not found
+
+error_signature: |
+  Error loading shared library libc++_shared.so: (needed by <pkg>/p/lib/lib<name>.so)
+  Error relocating <pkg>/p/lib/lib<name>.so: _Znwm: symbol not found
+  ConanException: Error 127 while executing (test() method)
+
+root_cause: |
+  OHOS PC 默认 shell 环境（及 OpenDesk CI worker 环境）的 LD_LIBRARY_PATH 末尾带
+  /data/storage/el1/bundle/libs/arm64（应用 bundle 目录，内容巨大，实测约 17 万项）。
+  musl ldso 逐条搜索 LD_LIBRARY_PATH 条目时，遍历该巨型目录耗尽内部预算/句柄后
+  直接放弃后续条目（包括 /system/lib64 与默认路径），导致 libc++_shared.so
+  解析失败。conan 的 VirtualRunEnv 在 test_package 阶段 prepend 包自身 lib 目录
+  并继承进程环境变量，因此 conan create 的 test() 里复现稳定；
+  手动 shell 覆盖 LD_LIBRARY_PATH=<pkg>/lib（不含 el1/bundle）时反而不复现。
+
+affected_scope: |
+  所有 C++（libc++）动态库包的 test_package：conan create 测试阶段运行依赖
+  libc++_shared.so 的可执行文件均可能踩中；本机 LD_LIBRARY_PATH 含 el1/bundle
+  条目时（OHOS PC 默认 shell 即如此）。
+
+verification_cmd: |
+  LD_LIBRARY_PATH="/data/storage/el1/bundle/libs/arm64:/system/lib64" ./<any_c++_elf>
+  # 复现：Error loading shared library libc++_shared.so
+  LD_LIBRARY_PATH="/system/lib64:/data/storage/el1/bundle/libs/arm64" ./<any_c++_elf>
+  # 通过：prepend /system/lib64 后正常
+
+rec_priority: 1
+rec_approach: prepend-system-lib64
+rec_description: |
+  test_package 的 test() 里用 conan Environment API 把 /system/lib64 prepend 到
+  LD_LIBRARY_PATH（在 el1/bundle 之前），使 libc++_shared.so 先于巨型目录解析。
+  禁止直接依赖/修改进程环境变量（R33）。
+rec_command: |
+  from conan.tools.env import Environment
+  def test(self):
+      env = Environment()
+      if self.settings.os == "OHOS":
+          env.prepend_path("LD_LIBRARY_PATH", "/system/lib64")
+      with env.vars(self).apply():
+          self.run(os.path.join(self.cpp.build.bindirs[0], "test_package"), env="conanrun")
+rec_auto_fix: false
+rec_impl: conanfile-test-patch
+
+fallback_priority: 2
+fallback_approach: build-static-test
+fallback_description: |
+  test_package 链接静态库（shared=False 消费选项或包只提供 static），绕开
+  libc++_shared.so 动态解析。仅在 prepend 方案不可用时使用。
+
+verify_builds: libzmq/4.3.5 本地 conan create（2026-09-16）：test() 首跑失败复现
+  签名，加 prepend 后 ALL HARMONYOS TESTS PASSED。
+authors: calbee21
+source_pr: pending
+source_commit: pending
+notes: |
+  实测行为（musl ldso）：条目含空格无碍；巨型目录条目在「先于含 libc++ 的条目」
+  时才致命。与 E077（ELF 签名）、E024（AF_UNIX）无重叠——本条是动态链接器
+  搜索路径中断问题，为通用平台坑。

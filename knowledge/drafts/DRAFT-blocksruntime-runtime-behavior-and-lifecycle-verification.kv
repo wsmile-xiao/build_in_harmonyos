@@ -1,0 +1,129 @@
+#====================================================================
+# DRAFT-blocksruntime-runtime-behavior-and-lifecycle-verification.kv
+# BlocksRuntime 的生命周期/行为验证方法：0.4.1 不重标 isa，堆块判据是
+# BLOCK_NEEDS_FREE+refcount；现代 clang 不再置 legacy BLOCK_HAS_DESCRIPTOR，
+# _Block_dump 会 exit(1)（路径 B 知识库草稿，一/二之二）
+# 来源: libblocksruntime 0.4.1 OHOS aarch64 适配（contrib-13066）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-blocksruntime-runtime-behavior-and-lifecycle-verification
+trigger_tool:           clang|test|runtime
+phase:                  runtime|testing
+error_signature:        Block compiled by obsolete compiler, please recompile source for this Block|
+                         not the same size, using old compiler\?\?|
+                         Block_release called upon a stack Block
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, clang, runtime, testing, static-library, portability
+match_keywords:         BlocksRuntime, Block_copy, Block_release, Block_size,
+                         _Block_dump, _NSConcreteMallocBlock, _NSConcreteStackBlock,
+                         _NSConcreteGlobalBlock, BLOCK_NEEDS_FREE, BLOCK_REFCOUNT_MASK,
+                         BLOCK_HAS_DESCRIPTOR, BLOCK_HAS_COPY_DISPOSE, isa, 生命周期,
+                         保留计数, 上游测试语料, testprefix.h, testfilerunner
+title:                  BlocksRuntime 移植后的行为/生命周期验证方法：堆块判据是 BLOCK_NEEDS_FREE+refcount
+                        而非 isa（0.4.1 拷贝不重标 _NSConcreteMallocBlock）；现代 clang 不置 legacy
+                        BLOCK_HAS_DESCRIPTOR 使 _Block_dump exit(1)，上游个别用例的“同尺寸/该报错”属
+                        legacy 预期，须与 OHOS 回归分开归类
+prescan_pattern:        _Block_dump\s*\(|_NSConcreteMallocBlock|\.isa\s*==|BLOCK_HAS_DESCRIPTOR
+prescan_globs:          *.c, *.h, *.cc, *.cpp
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             独立 BlocksRuntime 各实现（compiler-rt 0.4.1 / mackyle / 系统 libSystem）
+                        在“堆块如何标记”“legacy 位是否设置”上并不一致，直接照抄 Apple/新版语义做断言
+                        会得到假失败：
+                        (1) compiler-rt 0.4.1 的 _Block_copy 只 malloc+memmove 并置
+                        BLOCK_NEEDS_FREE|1，**不把 isa 改成 _NSConcreteMallocBlock**
+                        （runtime.c:202-212），故“copy 后 isa==Malloc”在 0.4.1 上恒为假；正确判据是
+                        NEEDS_FREE=1 且 refcount=1，且指针与栈块不同。
+                        (2) 无捕获的块是 global block（BLOCK_IS_GLOBAL），Block_copy 原样返回、
+                        不置 NEEDS_FREE。
+                        (3) 现代 clang 生成的块置新位 0x40000000、**不再置** legacy
+                        BLOCK_HAS_DESCRIPTOR(1<<29=0x20000000)，而 0.4.1 的 _Block_dump 见到该位缺失
+                        就 printf 并 exit(1)（runtime.c:462-465）；同理上游 hasdescriptor.c 假设
+                        inner/outer 的 descriptor->size 相同，在现代 clang 下实测为 36 vs 40（捕获
+                        4 字节 int vs 8 字节块指针），属 legacy 预期而非移植缺陷。
+affected_scope:         移植/打包任何 BlocksRuntime（或验证含块库）时的行为断言与上游语料归类；
+                        OHOS aarch64 + libblocksruntime 0.4.1 实证。任何把“isa 重标”当契约的
+                        消费者/测试都会在 0.4.1 上误判。
+verification_cmd:       # 行为探针（-fblocks 链接 libBlocksRuntime.a）
+                        cat > b.c <<'EOF'
+                        #include <stdio.h>
+                        #include <Block.h>
+                        #include <Block_private.h>
+                        int main(void){ int a=1; void (^s)(void)=^{ (void)a; }; void (^g)(void)=^{ (void)0; };
+                          struct Block_layout *l=(struct Block_layout*)s;
+                          printf("stack isa=%d flags=0x%08x NEEDS_FREE=%d\n", l->isa==(void*)_NSConcreteStackBlock, l->flags, !!(l->flags&BLOCK_NEEDS_FREE));
+                          void *h=Block_copy(s);
+                          struct Block_layout *hl=(struct Block_layout*)h;
+                          printf("heap sameptr=%d NEEDS_FREE=%d REFCOUNT=%u isa==Malloc=%d\n", h==(void*)s, !!(hl->flags&BLOCK_NEEDS_FREE), hl->flags&BLOCK_REFCOUNT_MASK, hl->isa==(void*)_NSConcreteMallocBlock);
+                          printf("global copy sameptr=%d legacy_HAS_DESCRIPTOR=%d new_bit_0x40000000=%d\n", Block_copy(g)==(void*)g, !!(l->flags&(1<<29)), !!(l->flags&0x40000000));
+                          return 0; }
+                        EOF
+                        clang -fblocks -I<pkg>/include b.c <pkg>/lib/libBlocksRuntime.a -o b && ./b
+                        # 期望（0.4.1 实测）：stack NEEDS_FREE=0；heap sameptr=0 NEEDS_FREE=1 REFCOUNT=1 isa==Malloc=0；
+                        # global copy sameptr=1；legacy_HAS_DESCRIPTOR=0；new_bit=1
+                        # 上游语料三步法（R51）：清点 51 → 运行/编译检查 → 归类回填
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           behavior-probe-plus-upstream-corpus-classification
+rec_description:        验证一个 BlocksRuntime 移植分两步：
+                        (a) 用上面的行为探针断言**可移植判据**（NEEDS_FREE/refcount/指针差异/
+                        HAS_COPY_DISPOSE、global 短路），不要断言 isa 重标或 legacy 位；
+                        (b) 跑上游语料（mackyle BlocksRuntime/tests 51 文件）：`-fblocks
+                        -include testprefix.h`，无 main 的用 -c；把结果分成 PASS / 负向编译用例复现 /
+                        跳过（记明缺 libdispatch 或 ObjC-GC）/ **上游 legacy 预期偏离** / OHOS 回归失败，
+                        只有最后一类才是移植缺陷。
+rec_command:            clang -w -fblocks -include testprefix.h -I<master> -I<master>/BlocksRuntime \
+                          -o t <test>.c libBlocksRuntime.a && ./t
+rec_auto_fix:           false
+rec_impl:               behavior-probe.c + 语料脚本（run/compile-only/skip 分类）
+
+fallback_priority:      2
+fallback_approach:      assert-only-portable-contract
+fallback_description:   无法跑全语料时，至少保留行为探针里“可移植契约”部分（栈/堆/global 的
+                        NEEDS_FREE/refcount/指针关系、HAS_COPY_DISPOSE），删除依赖具体 isa/legacy 位的断言。
+fallback_auto_fix:      false
+fallback_impl:          portable-contract-subset
+
+forbid_1_pattern:       copy.*isa.*_NSConcreteMallocBlock|Block_copy.*isa.*Malloc.*assert|assert.*isa.*Malloc
+forbid_1_reason:        0.4.1 的 _Block_copy 不重标 isa（实测 isa==Malloc=0 而 NEEDS_FREE=1）；
+                        把它当契约会误报移植失败（本任务第一版测试即因此产生 4 处假 FAIL）。
+forbid_2_pattern:       _Block_dump\s*\(.*\)\s*;.*(log|diag|report)
+forbid_2_reason:        现代 clang 块缺 legacy BLOCK_HAS_DESCRIPTOR，_Block_dump 会 printf+exit(1)，
+                        在诊断/日志路径调用会直接终止进程（实测 dump_rc=1）。
+forbid_3_pattern:       语料失败.*OHOS.*缺陷（未分类）|将上游 CONFIG open / legacy 断言失败直接计为移植失败
+forbid_3_reason:        上游用例含 legacy 预期（同尺寸、该报错、isa 重标）与需 libdispatch/GC 的子集，
+                        不分类会把 benign 差异当成移植缺陷，虚增失败率。
+forbid_4_pattern:       以 -fblocks -c 或语法检查通过宣称运行时正确
+forbid_4_reason:        编译期与运行库分离；必须链接并真实运行块（R34）。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R34, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 不分类的语料断言产生假失败；_Block_dump 误用导致进程退出
+caused_by:              各 BlocksRuntime 实现对堆块标记/legacy 位不一致 + 上游用例的 legacy 预期
+similar_to:             E019, E213
+conflicts_with:         []
+prerequisite_of:
+related:                DRAFT-ohos-clang-fblocks-missing-blocks-runtime
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-blocksruntime-runtime-behavior-and-lifecycle-verification.md
+last_updated:           2026-09-15
+source_event:           libblocksruntime 0.4.1 行为矩阵实测 + mackyle 上游语料 51 文件分类
+                        （32 运行 + 3 编译检查通过，7 负向复现，6 跳过，0 回归，3 上游 legacy 偏离）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                frj__
+source_pr:              (本分支 feat/libblocksruntime-0.4.1，关联 issue #3029)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15
+draft:                  true
+contributor_id:         frj__

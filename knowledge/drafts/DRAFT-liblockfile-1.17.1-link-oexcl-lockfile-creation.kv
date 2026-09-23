@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-liblockfile-1.17.1-link-oexcl-lockfile-creation
+# HMDFS 不支持硬链接：C 源码 link(2) 原子锁创建失败时回退 O_EXCL
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: liblockfile 1.17.1 HarmonyOS PC 适配（feat/liblockfile-1.17.1）
+#====================================================================
+
+id:                     DRAFT-liblockfile-1.17.1-link-oexcl-lockfile-creation
+trigger_tool:           dotlockfile|lockfile_create|make|conan
+phase:                  runtime|testing|build
+error_signature:        lockfile_create.*L_MAXTRYS|dotlockfile.*exit.*4|link.*Operation not permitted|ln.*Operation not permitted.*hard link|No rule to make target.*lockfile
+
+severity:               2
+category:               hmdfs|filesystem|atomic-lock|conan|source-patch
+match_keywords:         HMDFS, hard link, link(2), lockfile_create, L_MAXTRYS, O_EXCL,
+                        Operation not permitted, atomic lock, dotlockfile, lockfile,
+                        EPERM, EEXIST, inode, lstat, temporary lock
+title:                  On HMDFS, link(2)-based atomic lockfile creation fails with
+                        EPERM; fall back to open(O_WRONLY|O_CREAT|O_EXCL) with the
+                        same pid content while preserving EEXIST lock-held semantics
+root_cause:             liblockfile's lockfile_create() uses a two-phase atomic lock
+                        algorithm: create a unique temp lockfile with O_EXCL, write
+                        the pid, then link(tmplock, lockfile) to atomically publish
+                        the lock (link succeeds or fails with EEXIST if the target
+                        already exists; inode equality via lstat proves ownership).
+                        The HMDFS distributed filesystem does not support hard links
+                        (cross-device inodes are not unique), so link() returns EPERM.
+                        The code treats that as a transient "target exists" failure,
+                        retries, and finally returns L_MAXTRYS even though nobody
+                        holds the lock. EPERM (capability missing) must be
+                        distinguished from EEXIST (lock held).
+affected_scope:         C/C++ libraries that use link(2) as an atomic create-if-not-
+                        exists lock primitive (mail locks, dotlock, lockfile-family
+                        tools) when built and run on OHOS with $HOME on HMDFS; also
+                        any NFS-like filesystem without hard-link support.
+verification_cmd:       ln t1 locktest.lock 2>&1;   # expect Operation not permitted
+                        dotlockfile -l -r 1 testlock.lock; echo $?;   # 4 before, 0 after
+                        make test;   # run-tests.sh: tests OK
+
+rec_priority:           1
+rec_approach:           runtime-link-eperm-oexcl-fallback
+rec_description:        Replace the plain link(tmplock, lockfile) with a runtime probe:
+                        if link() fails with errno EPERM/EOPNOTSUPP/ENOTSUP, open the
+                        target with O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC (0644), write the
+                        same pid content, unlink the temp file and return L_SUCCESS;
+                        if open() fails with EEXIST, fall through to the existing
+                        stale-lock verification path so "lock held" semantics stay
+                        unchanged. Runtime errno probing (not #ifdef __OHOS__) keeps
+                        the patch effective on any hard-link-less filesystem and
+                        satisfies the no-platform-macro patch rule.
+rec_command:            # lockfile.c lockfile_create_save_tmplock():
+                        #   if (link(tmplock, lockfile) < 0 &&
+                        #       (errno == EPERM || errno == EOPNOTSUPP || errno == ENOTSUP)) {
+                        #       int lfd = open(lockfile, O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0644);
+                        #       if (lfd >= 0) { write pid; close; unlink(tmplock); return L_SUCCESS; }
+                        #   }   /* EEXIST or other errors: fall through to lstat/stale checks */
+rec_auto_fix:           true
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      precreate-target-oexcl
+fallback_description:   If link() is not used at all, or the library API cannot be
+                        patched, pre-create the lockfile with open(O_CREAT|O_EXCL)
+                        at the call site before invoking the library, then remove it
+                        afterwards; only safe when the library tolerates an existing
+                        empty lockfile.
+fallback_command:       touch via python: fd=os.open(lock, os.O_CREAT|os.O_EXCL|os.O_WRONLY, 0o644)
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       retry loop on EPERM|treat EPERM as EEXIST|unconditional link() removal
+forbid_1_reason:        EPERM is a capability gap, not contention; retrying burns time and
+                        still returns L_MAXTRYS. Unconditionally replacing link() breaks
+                        the superior link semantics on Linux/NFS-with-hardlinks.
+forbid_1_consequence:   Infinite "Operation not permitted" retries or behavior regression
+                        on filesystems that do support hard links.
+
+principles:             P004, P016
+similar_to:             E079, E220
+doc_file:               drafts/DRAFT-liblockfile-1.17.1-link-oexcl-lockfile-creation.md
+last_updated:           2026-09-05
+source_event:           archives/l/liblockfile/1.17.1 (feat/liblockfile-1.17.1)

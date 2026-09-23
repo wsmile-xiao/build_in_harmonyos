@@ -32,19 +32,30 @@ _ERROR_LINE_RE = re.compile(
 
 
 def _load_sidecar_metrics(pdir: Path) -> dict:
-    """v12.6.1: 本地 sidecar 命中记录（engine 写入，gitignored）。"""
+    """v12.6.1: 本地 sidecar 命中记录（engine 写入，gitignored）。
+
+    v12.20 返回归一化 v2 结构 {"entries": {eid: {...}}, "pending": [...]}；
+    兼容 v1 顶层 {eid: "date"}。
+    """
     import json
     sc = pdir / "knowledge" / ".metrics-local.json"
     if not sc.exists():
         return {}
     try:
-        return json.loads(sc.read_text(encoding="utf-8"))
+        data = json.loads(sc.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    if isinstance(data.get("entries"), dict):
+        return data
+    # v1 → v2 归一
+    entries = {k: {"last": v} for k, v in data.items()
+               if k not in ("entries", "pending") and isinstance(v, str)}
+    return {"entries": entries, "pending": []}
 
 
 def _parse_kv_metrics(gdir: Path, sidecar: dict | None = None) -> list[dict]:
     rows = []
+    sc_entries = (sidecar or {}).get("entries", {})
     for kvf in sorted(gdir.glob("E*.kv")):
         fields = {}
         for line in kvf.read_text(encoding="utf-8", errors="ignore").splitlines():
@@ -53,10 +64,16 @@ def _parse_kv_metrics(gdir: Path, sidecar: dict | None = None) -> list[dict]:
                 fields[m.group(1)] = m.group(2).strip()
         eid = fields.get("id", kvf.stem)
         # sidecar（当前机制）优先，.kv 遗留字段兜底
+        sc_ent = sc_entries.get(eid) or {}
         rows.append({
             "id": eid,
-            "last_used": (sidecar or {}).get(eid) or fields.get("metrics_last_used", ""),
+            "last_used": sc_ent.get("last", "")
+            if isinstance(sc_ent, dict) else sc_ent,
             "confidence": fields.get("metrics_confidence", ""),
+            "hits_success": sc_ent.get("s", 0)
+            if isinstance(sc_ent, dict) else 0,
+            "hits_fail": sc_ent.get("f", 0)
+            if isinstance(sc_ent, dict) else 0,
         })
     return rows
 

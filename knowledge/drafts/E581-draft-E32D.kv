@@ -1,0 +1,97 @@
+#====================================================================
+# E581.kv — meson 的 qt6 模块经 pkg-config 消费 qtbase 自带 .pc
+#           （prefix 指向构建机路径）失败，须 QT6_QMAKE 走 qmake 定位
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E581
+trigger_tool:           meson|qmake6|pkg-config|conan|clang++
+phase:                  configuration|compilation
+error_signature: "'QDBusInterface' file not found|fatal error: 'QDBus.*' file not found|qt6.*found via pkg-config|moc found: NO|Program /storage/Users/.*\.cache/conan2.*/bin/rcc found: NO|Run-time dependency qt6.*not found"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, meson, conan, qt6, pkg-config
+match_keywords: meson, qt6, qmake6, QT6_QMAKE, qtbase, pkg-config, Qt6Core.pc, prefix, .cache, conan, moc, rcc, uic, QDBusInterface, QDBusArgument
+title: meson 的 qt6 模块经 pkg-config 消费 qtbase 自带 Qt6*.pc（prefix 指向构建机 .cache 路径）导致 Qt 头文件找不到，须设置 QT6_QMAKE 强制走 qmake 定位
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: qtbase 制品仓包内自带 Qt6Core.pc/Qt6DBus.pc 等 .pc 文件，其
+  prefix 写死为构建该制品时机器上的 conan 缓存路径（形如
+  /storage/Users/xxx/.cache/conan2/p/b/...），消费者机器上该路径不存在。
+  meson 的 qt6 模块（import('qt6') + dependency('qt6', modules: [...])）
+  默认优先经 pkg-config 解析 Qt6 模块，拿到错误的 include 路径后编译报
+  "fatal error: 'QDBusInterface' file not found"；同时 meson 探测 Qt 工具
+  （moc/rcc/uic）时按 .pc 的 bindir/libexecdir 找也全部落空。
+  正确路径是让 meson 走 qmake6 定位（meson 优先 qmake，其次 pkg-config）：
+  显式设置 QT6_QMAKE 指向 qtbase 包内 bin/qmake6，并把 qtbase 的
+  bin/（qmake6）与 libexec/（moc/rcc/uic）加入 PATH。
+affected_scope: 所有依赖 qtbase（Qt6 Core/DBus/Gui/Xml 等）且用 meson
+  构建的软件；meson.build 中 dependency('qt6', modules: [...]) 的场景
+verification_cmd: echo $QT6_QMAKE && meson setup build -D<option>=false 2>&1 | grep -E "Run-time dependency qt6|qmake6 found"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           set-QT6_QMAKE-plus-qtbase-PATH
+rec_description: 在 conanfile.py generate()/build() 中设置 QT6_QMAKE 指向
+  qtbase 包内 bin/qmake6，将 qtbase 的 bin 与 libexec 加入 PATH，并把 qtbase
+  lib 及传递依赖 lib 加入 LD_LIBRARY_PATH；meson setup 输出应为
+  "Run-time dependency qt6 (modules: Core, DBus, Gui, Xml) found: YES (qmake)"
+rec_command: |
+  # conanfile.py build() 中（参照 c-rbtree/account-utils 手动 meson 先例）
+  qt_prefix = self.dependencies["qtbase"].package_folder
+  env_prefix = (
+      f"PATH={qt_prefix}/bin:{qt_prefix}/libexec:/data/service/hnp/bin:$PATH "
+      f"QT6_QMAKE={qt_prefix}/bin/qmake6 "
+      f"LD_LIBRARY_PATH={qt_prefix}/lib:<deps libs>:/system/lib64:..."
+  )
+  self.run(env_prefix + " meson setup <build> <src> --buildtype=release -Ddemo=false --prefix=/", env="conanbuild")
+  self.run(env_prefix + " meson compile -C <build> -j1", env="conanbuild")
+rec_auto_fix:           false
+rec_impl:               recipe-qt6-qmake-locate
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      patch-meson-build-qmake
+fallback_description: 若无 qtbase bin/qmake6（如只装了纯库制品），改为 patch
+  meson.build 显式指定 qmake 路径，或改用 CMake 构建系统消费 Qt6
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略
+forbid_1_pattern:       set_QT6_QMAKE.*/storage/Users/.*\.cache/
+forbid_1_reason:        .cache 是构建机缓存路径，消费者机器不存在，硬编码必然失败
+forbid_1_consequence:   本地假绿、CI/消费者机器上必然编译失败
+forbid_2_pattern:
+forbid_2_reason:
+forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R33, R36, R49
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E355, E438, E495
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E581.md
+last_updated: 2026-09-16
+source_event:           libopenrazer 0.4.0 适配（meson + qtbase/6.11.1.2，G2 conan create 反复失败 4 轮后定位）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: OpenDesk <opendesk@openharmony.dev>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-16
+
+draft: true
+contributor_id: E32D

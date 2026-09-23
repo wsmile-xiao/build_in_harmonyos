@@ -1,0 +1,50 @@
+# Conan Verify Report — pkgconf 3.0.4
+
+**Verdict**: PASS
+**Reference**: `pkgconf/3.0.4@ohpcd/stable`
+**Profile**: ohos-aarch64
+**Date**: 2026-09-03T18:37:39.095705
+
+## G0: ✅ PASS
+**Knowledge hit**: E090
+  📦 构建系统: meson
+  ⚠️ 已知风险 E090 未在配方中处理
+     根因: Meson 检测 HarmonyOS 为 'harmonyos' 而非 'linux'，
+导致 meson.build 中 `host_system == 'linux'` 条件检查失败，
+Linux 特有源文件（如 glib 的 gjou
+     方案: sed-replace
+     修复: find . -name meson.build -exec sed -i "s/if host_system == 'linux'/if host_system in ['linux', 'harmonyos']/g" {} +
+     ⚡ G2 conan create 可能因此失败，建议先修复
+
+## G1: ✅ PASS
+  ✅ name 声明
+  ✅ version 声明
+  ✅ source() 方法
+  ✅ build() 方法
+  ✅ package() 方法
+  ✅ package_info() 方法
+  ✅ export_sources() 方法
+  ✅ 补丁应用调用
+  ✅ R26: 系统同名库静态链接配置存在
+  ✅ conandata.yml 完整
+  ✅ test_package/ 存在 (R28)
+  ✅ test_package/MANIFEST.yml 存在
+
+## G2: ✅ PASS
+  ✅ conan create 成功
+  📄 日志: archives/p/pkgconf/3.0.4/reports/conan-create.log
+
+## G3: ✅ PASS
+  ✅ 无系统同名库冲突（R26 通过）
+
+## G4: ✅ PASS
+  ⚠️ 无法找到程序包 ID
+
+## L2: ✅ PASS
+  ⏭️ 跳过（无 cache 路径）
+
+## L4: ✅ PASS
+  ⏭️ 跳过（无 cache 路径）
+
+## L5: ✅ PASS
+  ⏭️ 跳过（无 cache 路径）

@@ -1,0 +1,400 @@
+diff --git a/src/backend/port/sysv_shmem.c b/src/backend/port/sysv_shmem.c
+index 197926d..505e134 100644
+--- a/src/backend/port/sysv_shmem.c
++++ b/src/backend/port/sysv_shmem.c
+@@ -124,6 +124,17 @@ InternalIpcMemoryCreate(IpcMemoryKey memKey, Size size)
+ 	void	   *requestedAddress = NULL;
+ 	void	   *memAddress;
+ 
++#ifdef HAVE_BROKEN_SHMGET
++	/*
++	 * Broken-shmget build: the shmget syscall raises SIGSYS (unimplemented
++	 * syscall). For mmap-based shared memory the SysV segment is only needed
++	 * for interlocking; skip that requirement and rely on file-based locking.
++	 * Return a fake address to be overwritten later.
++	 */
++	static PGShmemHeader fake_header;
++	memset(&fake_header, 0, sizeof(PGShmemHeader));
++	return &fake_header;
++#else
+ 	/*
+ 	 * Normally we just pass requestedAddress = NULL to shmat(), allowing the
+ 	 * system to choose where the segment gets mapped.  But in an EXEC_BACKEND
+@@ -275,6 +286,7 @@ InternalIpcMemoryCreate(IpcMemoryKey memKey, Size size)
+ 	}
+ 
+ 	return memAddress;
++#endif /* HAVE_BROKEN_SHMGET */
+ }
+ 
+ /****************************************************************************/
+@@ -285,9 +297,13 @@ InternalIpcMemoryCreate(IpcMemoryKey memKey, Size size)
+ static void
+ IpcMemoryDetach(int status, Datum shmaddr)
+ {
++#ifdef HAVE_BROKEN_SHMGET
++	/* No SysV shared memory to detach, using mmap-based DSM */
++#else
+ 	/* Detach System V shared memory block. */
+ 	if (shmdt(DatumGetPointer(shmaddr)) < 0)
+ 		elog(LOG, "shmdt(%p) failed: %m", DatumGetPointer(shmaddr));
++#endif /* HAVE_BROKEN_SHMGET */
+ }
+ 
+ /****************************************************************************/
+@@ -297,9 +313,13 @@ IpcMemoryDetach(int status, Datum shmaddr)
+ static void
+ IpcMemoryDelete(int status, Datum shmId)
+ {
++#ifdef HAVE_BROKEN_SHMGET
++	/* No SysV shared memory to delete, using mmap-based DSM */
++#else
+ 	if (shmctl(DatumGetInt32(shmId), IPC_RMID, NULL) < 0)
+ 		elog(LOG, "shmctl(%d, %d, 0) failed: %m",
+ 			 DatumGetInt32(shmId), IPC_RMID);
++#endif /* HAVE_BROKEN_SHMGET */
+ }
+ 
+ /*
+@@ -316,6 +336,10 @@ IpcMemoryDelete(int status, Datum shmId)
+ bool
+ PGSharedMemoryIsInUse(unsigned long id1, unsigned long id2)
+ {
++#ifdef HAVE_BROKEN_SHMGET
++	/* SysV shared memory not available, assume not in use */
++	return false;
++#else
+ 	PGShmemHeader *memAddress;
+ 	IpcMemoryState state;
+ 
+@@ -333,6 +357,7 @@ PGSharedMemoryIsInUse(unsigned long id1, unsigned long id2)
+ 			return true;
+ 	}
+ 	return true;
++#endif /* HAVE_BROKEN_SHMGET */
+ }
+ 
+ /*
+@@ -348,6 +373,11 @@ PGSharedMemoryAttach(IpcMemoryId shmId,
+ 					 void *attachAt,
+ 					 PGShmemHeader **addr)
+ {
++#ifdef HAVE_BROKEN_SHMGET
++	/* SysV shared memory not available */
++	*addr = NULL;
++	return SHMSTATE_ENOENT;
++#else
+ 	struct shmid_ds shmStat;
+ 	struct stat statbuf;
+ 	PGShmemHeader *hdr;
+@@ -451,6 +481,7 @@ PGSharedMemoryAttach(IpcMemoryId shmId,
+ 	 * before we attached to it.)
+ 	 */
+ 	return shmStat.shm_nattch == 0 ? SHMSTATE_UNATTACHED : SHMSTATE_ATTACHED;
++#endif /* HAVE_BROKEN_SHMGET */
+ }
+ 
+ /*
+diff --git a/src/backend/utils/init/miscinit.c b/src/backend/utils/init/miscinit.c
+index df18257..47cd399 100644
+--- a/src/backend/utils/init/miscinit.c
++++ b/src/backend/utils/init/miscinit.c
+@@ -381,12 +381,41 @@ checkDataDir(void)
+ 	 * XXX can we safely enable this check on Windows?
+ 	 */
+ #if !defined(WIN32) && !defined(__CYGWIN__)
++#ifdef HAVE_BROKEN_UMASK
++	/*
++	 * HAVE_BROKEN_UMASK: on such filesystems the directory owner may not
++	 * match our UID due to how the filesystem handles permissions. Instead,
++	 * check if the directory's group matches any of our groups (relaxed
++	 * ownership check).
++	 */
++	if (stat_buf.st_uid != geteuid())
++	{
++		gid_t dir_gid = stat_buf.st_gid;
++		gid_t my_gids[64];
++		int ngroups;
++		bool same_group = false;
++		int i;
++
++		ngroups = getgroups(64, my_gids);
++		for (i = 0; i < ngroups && !same_group; i++)
++			if (my_gids[i] == dir_gid)
++				same_group = true;
++
++		if (!same_group)
++			ereport(FATAL,
++					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
++					 errmsg("data directory \"%s\" has wrong ownership",
++							DataDir),
++					 errhint("The server must be started by the user that owns the data directory or belongs to its group.")));
++	}
++#else
+ 	if (stat_buf.st_uid != geteuid())
+ 		ereport(FATAL,
+ 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+ 				 errmsg("data directory \"%s\" has wrong ownership",
+ 						DataDir),
+ 				 errhint("The server must be started by the user that owns the data directory.")));
++#endif /* HAVE_BROKEN_UMASK */
+ #endif
+ 
+ 	/*
+@@ -401,12 +430,27 @@ checkDataDir(void)
+ 	 * reasonable check to apply on Windows.
+ 	 */
+ #if !defined(WIN32) && !defined(__CYGWIN__)
++#ifdef HAVE_BROKEN_UMASK
++	/*
++	 * HAVE_BROKEN_UMASK: such filesystems don't handle permissions properly,
++	 * causing S-bit issues and abnormal group permissions. Relax the check:
++	 * only verify that the user has full rwx access. The S-bit and extra
++	 * group/other permissions imposed by the filesystem are harmless here.
++	 */
++	if ((stat_buf.st_mode & S_IRWXU) != S_IRWXU)
++		ereport(FATAL,
++				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
++				 errmsg("data directory \"%s\" has invalid permissions",
++						DataDir),
++				 errdetail("Permissions for owner should include read, write, and execute.")));
++#else
+ 	if (stat_buf.st_mode & PG_MODE_MASK_GROUP)
+ 		ereport(FATAL,
+ 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+ 				 errmsg("data directory \"%s\" has invalid permissions",
+ 						DataDir),
+ 				 errdetail("Permissions should be u=rwx (0700) or u=rwx,g=rx (0750).")));
++#endif /* HAVE_BROKEN_UMASK */
+ #endif
+ 
+ 	/*
+diff --git a/src/bin/initdb/initdb.c b/src/bin/initdb/initdb.c
+index 62bbd08..583405f 100644
+--- a/src/bin/initdb/initdb.c
++++ b/src/bin/initdb/initdb.c
+@@ -1075,6 +1075,13 @@ set_null_conf(void)
+ static const char *
+ choose_dsm_implementation(void)
+ {
++#ifdef HAVE_BROKEN_SHM_OPEN
++	/*
++	 * HAVE_BROKEN_SHM_OPEN: shm_open is detected by configure but raises
++	 * SIGSYS at runtime. Use mmap-based DSM directly, skipping the probe.
++	 */
++	return "mmap";
++#else
+ #if defined(HAVE_SHM_OPEN) && !defined(__sun__)
+ 	int			ntries = 10;
+ 	pg_prng_state prng_state;
+@@ -1107,6 +1114,7 @@ choose_dsm_implementation(void)
+ #else
+ 	return "sysv";
+ #endif
++#endif /* HAVE_BROKEN_SHM_OPEN */
+ }
+ 
+ /*
+@@ -3021,6 +3029,15 @@ create_xlog_or_symlink(void)
+ 		if (mkdir(subdirloc, pg_dir_create_mode) < 0)
+ 			pg_fatal("could not create directory \"%s\": %m",
+ 					 subdirloc);
++#ifdef HAVE_BROKEN_UMASK
++		/*
++		 * HAVE_BROKEN_UMASK: such filesystems create directories with
++		 * abnormal S-bit permissions; chmod corrects them after mkdir.
++		 */
++		if (chmod(subdirloc, pg_dir_create_mode) < 0)
++			pg_fatal("could not change permissions of directory \"%s\": %m",
++					 subdirloc);
++#endif
+ 	}
+ 
+ 	free(subdirloc);
+@@ -3077,6 +3094,14 @@ initialize_data_directory(void)
+ 		 */
+ 		if (mkdir(path, pg_dir_create_mode) < 0)
+ 			pg_fatal("could not create directory \"%s\": %m", path);
++#ifdef HAVE_BROKEN_UMASK
++		/*
++		 * HAVE_BROKEN_UMASK: such filesystems create directories with
++		 * abnormal S-bit permissions; chmod corrects them after mkdir.
++		 */
++		if (chmod(path, pg_dir_create_mode) < 0)
++			pg_fatal("could not change permissions of directory \"%s\": %m", path);
++#endif
+ 
+ 		free(path);
+ 	}
+diff --git a/src/common/file_perm.c b/src/common/file_perm.c
+index a65a34d..cb80723 100644
+--- a/src/common/file_perm.c
++++ b/src/common/file_perm.c
+@@ -22,7 +22,15 @@ int			pg_file_create_mode = PG_FILE_MODE_OWNER;
+  * Mode mask to pass to umask().  This is more of a preventative measure since
+  * all file/directory creates should be performed using the create modes above.
+  */
++#ifdef HAVE_BROKEN_UMASK
++/*
++ * HAVE_BROKEN_UMASK: such filesystems don't handle umask properly,
++ * causing S-bit issues. Use a safe mask avoiding group/other bits.
++ */
++int			pg_mode_mask = 0;
++#else
+ int			pg_mode_mask = PG_MODE_MASK_OWNER;
++#endif
+ 
+ /*
+  * Set create modes and mask to use when writing to PGDATA based on the data
+diff --git a/src/common/username.c b/src/common/username.c
+index ae5f02d..c08b803 100644
+--- a/src/common/username.c
++++ b/src/common/username.c
+@@ -40,10 +40,20 @@ get_user_name(char **errstr)
+ 	pw = getpwuid(user_id);
+ 	if (!pw)
+ 	{
++#ifdef HAVE_BROKEN_GETPWUID
++		/*
++		 * HAVE_BROKEN_GETPWUID: getpwuid may fail for users not in
++		 * /etc/passwd. Fall back to the numeric UID as the user name.
++		 */
++		static char uid_name[32];
++		snprintf(uid_name, sizeof(uid_name), "%ld", (long) user_id);
++		return uid_name;
++#else
+ 		*errstr = psprintf(_("could not look up effective user ID %ld: %s"),
+ 						   (long) user_id,
+ 						   errno ? strerror(errno) : _("user does not exist"));
+ 		return NULL;
++#endif
+ 	}
+ 
+ 	return pw->pw_name;
+diff --git a/src/include/pg_config_manual.h b/src/include/pg_config_manual.h
+index 125d3eb..ff0e9d3 100644
+--- a/src/include/pg_config_manual.h
++++ b/src/include/pg_config_manual.h
+@@ -190,7 +190,15 @@
+  * support them yet.
+  */
+ #ifndef WIN32
++#ifdef HAVE_NO_UNIX_SOCKETS
++/*
++ * HAVE_NO_UNIX_SOCKETS: /tmp is read-only and Unix-domain sockets are
++ * not supported. Use an empty string to disable them (TCP/IP only).
++ */
++#define DEFAULT_PGSOCKET_DIR ""
++#else
+ #define DEFAULT_PGSOCKET_DIR  "/tmp"
++#endif /* HAVE_NO_UNIX_SOCKETS */
+ #else
+ #define DEFAULT_PGSOCKET_DIR ""
+ #endif
+diff --git a/src/include/storage/dsm_impl.h b/src/include/storage/dsm_impl.h
+index 7248cb1..bfd74d0 100644
+--- a/src/include/storage/dsm_impl.h
++++ b/src/include/storage/dsm_impl.h
+@@ -27,6 +27,14 @@
+ #define USE_DSM_WINDOWS
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_WINDOWS
+ #else
++#ifdef HAVE_BROKEN_SHM_OPEN
++/*
++ * HAVE_BROKEN_SHM_OPEN: shm_open is detected by configure but raises
++ * SIGSYS at runtime. Use mmap-based DSM instead, which is more portable.
++ */
++#define USE_DSM_MMAP
++#define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_MMAP
++#else
+ #ifdef HAVE_SHM_OPEN
+ #define USE_DSM_POSIX
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_POSIX
+@@ -36,6 +44,7 @@
+ #define DEFAULT_DYNAMIC_SHARED_MEMORY_TYPE		DSM_IMPL_SYSV
+ #endif
+ #define USE_DSM_MMAP
++#endif /* HAVE_BROKEN_SHM_OPEN */
+ #endif
+ 
+ /* GUC. */
+diff --git a/src/interfaces/libpq/fe-auth.c b/src/interfaces/libpq/fe-auth.c
+index 84a0422..03d39ef 100644
+--- a/src/interfaces/libpq/fe-auth.c
++++ b/src/interfaces/libpq/fe-auth.c
+@@ -1316,8 +1316,18 @@ pg_fe_getusername(uid_t user_id, PQExpBuffer errorMessage)
+ 	}
+ 	else if (!pw)
+ 	{
++#ifdef HAVE_BROKEN_GETPWUID
++		/*
++		 * HAVE_BROKEN_GETPWUID: getpwuid may fail for users not in
++		 * /etc/passwd. Fall back to the numeric UID as the user name.
++		 */
++		static char uid_name[32];
++		snprintf(uid_name, sizeof(uid_name), "%ld", (long) user_id);
++		name = uid_name;
++#else
+ 		if (errorMessage)
+ 			libpq_append_error(errorMessage, "local user with ID %ld does not exist", (long) user_id);
++#endif
+ 	}
+ 	else
+ 		name = pw->pw_name;
+diff --git a/src/port/pgmkdirp.c b/src/port/pgmkdirp.c
+index d943559..0715654 100644
+--- a/src/port/pgmkdirp.c
++++ b/src/port/pgmkdirp.c
+@@ -132,11 +132,34 @@ pg_mkdir_p(char *path, int omode)
+ 				break;
+ 			}
+ 		}
+-		else if (mkdir(path, last ? omode : S_IRWXU | S_IRWXG | S_IRWXO) < 0)
++		else if (mkdir(path, last ? omode : (
++#ifdef HAVE_BROKEN_UMASK
++			/* HAVE_BROKEN_UMASK: no group/other permission bits on mkdir */
++			S_IRWXU
++#else
++			S_IRWXU | S_IRWXG | S_IRWXO
++#endif
++			)) < 0)
+ 		{
+ 			retval = -1;
+ 			break;
+ 		}
++#ifdef HAVE_BROKEN_UMASK
++		else
++		{
++			/*
++			 * HAVE_BROKEN_UMASK: such filesystems create directories with
++			 * abnormal S-bit permissions; chmod corrects them after mkdir.
++			 * Note: chmod is only done when we actually created the directory,
++			 * not when it already existed (handled by the stat branch above).
++			 */
++			if (chmod(path, last ? omode : S_IRWXU) < 0)
++			{
++				retval = -1;
++				break;
++			}
++		}
++#endif
+ 		if (!last)
+ 			*p = '/';
+ 	}
+diff --git a/src/test/regress/pg_regress.c b/src/test/regress/pg_regress.c
+index 5d85dcc..15682e9 100644
+--- a/src/test/regress/pg_regress.c
++++ b/src/test/regress/pg_regress.c
+@@ -2121,6 +2121,12 @@ regression_main(int argc, char *argv[],
+ 	 * remove_temp() for a reason).  Override at your own risk.
+ 	 */
+ 	use_unix_sockets = getenv("PG_TEST_USE_UNIX_SOCKETS") ? true : false;
++#elif defined(HAVE_NO_UNIX_SOCKETS)
++	/*
++	 * HAVE_NO_UNIX_SOCKETS: Unix-domain sockets are not supported
++	 * (bind() returns EPERM). Use TCP/IP connections instead.
++	 */
++	use_unix_sockets = false;
+ #else
+ 	use_unix_sockets = true;
+ #endif

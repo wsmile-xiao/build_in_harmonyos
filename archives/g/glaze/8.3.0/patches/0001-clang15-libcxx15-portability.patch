@@ -1,0 +1,906 @@
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/beve/read.hpp b/include/glaze/beve/read.hpp
+--- a/include/glaze/beve/read.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/beve/read.hpp	2026-09-07 14:38:54.653387812 +0800
+@@ -871,14 +871,14 @@
+             // Open-ended (map/pair) alternatives accept any key set, so they must survive key
+             // narrowing. Pre-setting their bits in a copy of the deduction table keeps the scan loop
+             // a single AND and confines the adjustment to compile time.
+-            static constexpr auto open_ended = [] {
++            constexpr auto open_ended = [&] {
+                auto m = bit_array<variant_size>{};
+                [&]<size_t... I>(std::index_sequence<I...>) {
+                   ((m[I] = beve_variant_is_open_ended_object_alt<std::variant_alternative_t<I, T>>), ...);
+                }(std::make_index_sequence<variant_size>{});
+                return m;
+             }();
+-            static constexpr auto narrowing_bits = [] {
++            constexpr auto narrowing_bits = [&] {
+                auto b = variant_deduction_bits<T>;
+                for (size_t k = 0; k < b.size(); ++k) {
+                   for (size_t i = 0; i < variant_size; ++i) {
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/containers/inplace_vector.hpp b/include/glaze/containers/inplace_vector.hpp
+--- a/include/glaze/containers/inplace_vector.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/containers/inplace_vector.hpp	2026-09-07 14:38:54.653387812 +0800
+@@ -463,8 +463,22 @@
+ 
+          friend constexpr auto operator<=>(const inplace_vector_base& lhs, const inplace_vector_base& rhs)
+          {
+-            return std::lexicographical_compare_three_way(lhs.begin(), lhs.end(), rhs.begin(), rhs.end(),
+-                                                          std::compare_three_way{});
++            // std::lexicographical_compare_three_way is C++20-library; libc++ 15
++            // does not provide it. Equivalent three-way lexicographic compare:
++            auto l = lhs.begin();
++            auto r = rhs.begin();
++            for (; l != lhs.end() && r != rhs.end(); ++l, ++r) {
++               if (auto c = *l <=> *r; c != 0) {
++                  return c;
++               }
++            }
++            if (l != lhs.end()) {
++               return std::strong_ordering::greater;
++            }
++            if (r != rhs.end()) {
++               return std::strong_ordering::less;
++            }
++            return std::strong_ordering::equal;
+          }
+       };
+ 
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/core/array_apply.hpp b/include/glaze/core/array_apply.hpp
+--- a/include/glaze/core/array_apply.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/core/array_apply.hpp	2026-09-07 14:56:09.897393125 +0800
+@@ -47,6 +47,11 @@
+       dummy_iterator end() { return dummy_iterator{&adapter, m_size}; }
+    };
+ 
++   // clang 15 lacks P1816 aggregate CTAD; spell out the deduction guide so
++   // array_apply_t{Adapter(v)} deduces the adapter type.
++   template <class A>
++   array_apply_t(A) -> array_apply_t<A>;
++
+    template <auto Adapter>
+    constexpr auto array_apply = [] { return [](auto&& v) { return array_apply_t{Adapter(v)}; }; }();
+ }
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/core/common.hpp b/include/glaze/core/common.hpp
+--- a/include/glaze/core/common.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/core/common.hpp	2026-09-07 20:22:22.559719374 +0800
+@@ -257,7 +257,14 @@
+    template <class T>
+    concept str_t = (!std::same_as<std::nullptr_t, T> && !has_value_method<T> &&
+                     std::constructible_from<std::string_view, std::decay_t<T>>) ||
+-                   array_char_t<T> || u8str_t<T>;
++                   array_char_t<T> || u8str_t<T> ||
++                   // libc++ 15 lacks the C++23 string_view range constructor
++                   // (P1989), which makes constructible_from<string_view,
++                   // std::span<char>> true upstream; recognize 1-byte char
++                   // spans directly for equivalent behavior.
++                   (is_span<std::decay_t<T>> &&
++                    (std::same_as<typename std::decay_t<T>::element_type, char> ||
++                     std::same_as<typename std::decay_t<T>::element_type, const char>));
+ 
+    template <class T>
+    concept is_static_string =
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/core/convert_struct.hpp b/include/glaze/core/convert_struct.hpp
+--- a/include/glaze/core/convert_struct.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/core/convert_struct.hpp	2026-09-07 14:34:33.309386406 +0800
+@@ -42,7 +42,9 @@
+             l = r.value();
+          }
+          else {
+-            static_assert(false_v<pair<In, Out>>, "Types are not convertible");
++            []<bool Flag = false>() {
++               static_assert(Flag, "Types are not convertible");
++            }();
+          }
+       });
+    }
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/core/reflect.hpp b/include/glaze/core/reflect.hpp
+--- a/include/glaze/core/reflect.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/core/reflect.hpp	2026-09-07 14:09:57.257385781 +0800
+@@ -3,6 +3,8 @@
+ 
+ #pragma once
+ 
++#include <algorithm>
++
+ #include "glaze/beve/header.hpp"
+ #include "glaze/core/common.hpp"
+ #include "glaze/core/opts.hpp"
+@@ -493,11 +495,11 @@
+ 
+    // The type of the field before get_member is applied
+    template <class T, size_t I>
+-   using elem_t = reflect<T>::template elem<I>;
++   using elem_t = typename reflect<T>::template elem<I>;
+ 
+    // The type of the field after get_member is applied
+    template <class T, size_t I>
+-   using refl_t = reflect<T>::template type<I>;
++   using refl_t = typename reflect<T>::template type<I>;
+ 
+    // The decayed type after get_member is called
+    template <class T, size_t I>
+@@ -1725,7 +1727,6 @@
+ 
+    constexpr std::optional<size_t> find_unique_index(const auto& strings)
+    {
+-      namespace ranges = std::ranges;
+ 
+       const auto N = strings.size();
+ 
+@@ -1760,8 +1761,8 @@
+       size_t best_count{};
+       for (size_t i = 0; i < min_length; ++i) {
+          auto& col = cols[i];
+-         ranges::sort(col);
+-         if (auto it = ranges::adjacent_find(col); it == col.end()) {
++         std::sort(col.begin(), col.end());
++         if (auto it = std::adjacent_find(col.begin(), col.end()); it == col.end()) {
+             // no duplicates found
+             best_count = col.size();
+             best_index = i;
+@@ -1778,7 +1779,6 @@
+ 
+    constexpr std::optional<size_t> find_unique_sized_index(const auto& strings)
+    {
+-      namespace ranges = std::ranges;
+ 
+       const auto N = strings.size();
+ 
+@@ -1819,8 +1819,8 @@
+       size_t best_count{};
+       for (size_t i = 0; i < min_length; ++i) {
+          auto& col = cols[i];
+-         ranges::sort(col);
+-         if (auto it = ranges::adjacent_find(col); it == col.end()) {
++         std::sort(col.begin(), col.end());
++         if (auto it = std::adjacent_find(col.begin(), col.end()); it == col.end()) {
+             // no duplicates found
+             best_count = col.size();
+             best_index = i;
+@@ -1946,7 +1946,7 @@
+          }
+       }
+ 
+-      std::ranges::sort(k);
++      std::sort(k.begin(), k.end());
+ 
+       for (size_t i = 0; i < N - 1; ++i) {
+          const auto diff = k[i + 1] - k[i];
+@@ -2029,7 +2029,6 @@
+    template <size_t N>
+    constexpr auto make_keys_info(const std::array<sv, N>& keys)
+    {
+-      namespace ranges = std::ranges;
+ 
+       keys_info_t info{N};
+ 
+@@ -2928,7 +2927,7 @@
+    // Variant deduction bits - for each unique key, tracks which variant types contain it
+    template <is_variant T>
+    constexpr auto variant_deduction_bits = []() {
+-      static constexpr size_t K = variant_deduction_key_count<T>;
++      constexpr size_t K = variant_deduction_key_count<T>;
+       using bits_type = bit_array<std::variant_size_v<T>>;
+       std::array<bits_type, K> bits{};
+ 
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/core/write_chars.hpp b/include/glaze/core/write_chars.hpp
+--- a/include/glaze/core/write_chars.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/core/write_chars.hpp	2026-09-07 20:42:01.255725624 +0800
+@@ -262,7 +262,11 @@
+                constexpr auto printf_fmt = detail::to_printf_fmt(opts_type::float_format);
+ 
+                const auto start = reinterpret_cast<char*>(&b[ix]);
+-               const auto available = check_write_unchecked(Opts) ? size_t(64) : (b.size() - ix);
++               // The unchecked budget must match the caller's pre-allocation
++               // (write_padding_bytes), not 64: user format specs like "{:.80f}"
++               // can produce up to 128+ chars, beyond a 64-byte window.
++               const auto available =
++                  check_write_unchecked(Opts) ? glz::write_padding_bytes : (b.size() - ix);
+ 
+                // snprintf returns chars that would be written (excluding null), or negative on error
+                const int len = std::snprintf(start, available, printf_fmt.data, static_cast<double>(value));
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/json/escape_unicode.hpp b/include/glaze/json/escape_unicode.hpp
+--- a/include/glaze/json/escape_unicode.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/json/escape_unicode.hpp	2026-09-07 14:46:25.261389843 +0800
+@@ -243,7 +243,7 @@
+ {
+    template <string_literal Str>
+    inline constexpr auto escape_unicode = []() constexpr -> std::string_view {
+-      static constexpr auto escaped = []() constexpr {
++      constexpr auto escaped_arr = []() constexpr {
+          constexpr auto len = detail::escaped_length(Str.sv());
+          std::array<char, len + 1> result; // + 1 for null character
+          const auto escaped = detail::escape_json_string(Str.sv(), len);
+@@ -253,6 +253,7 @@
+          result[len] = '\0';
+          return result;
+       }();
++      auto& escaped = detail::make_static<escaped_arr>::value;
+ 
+       return {escaped.data(), escaped.size() - 1};
+    }();
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/json/generic.hpp b/include/glaze/json/generic.hpp
+--- a/include/glaze/json/generic.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/json/generic.hpp	2026-09-07 13:22:51.865386875 +0800
+@@ -30,8 +30,7 @@
+ 
+    template <num_mode Mode, template <class> class MapType>
+       requires generic_map_type<MapType>
+-   template <class T>
+-      requires(assignable_generic_type<generic_json<Mode, MapType>, T>)
++   template <class T, class Enable>
+    generic_json<Mode, MapType>& generic_json<Mode, MapType>::operator=(T&& value)
+    {
+       static_assert(requires { write_json(std::declval<T>()); });
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/json/generic_fwd.hpp b/include/glaze/json/generic_fwd.hpp
+--- a/include/glaze/json/generic_fwd.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/json/generic_fwd.hpp	2026-09-07 13:22:51.865386875 +0800
+@@ -32,6 +32,7 @@
+ }
+ 
+ #include <cstddef>
++#include <type_traits>
+ #include <map>
+ #include <variant>
+ #include <vector>
+@@ -306,8 +307,7 @@
+          return *this;
+       }
+ 
+-      template <class T>
+-         requires(assignable_generic_type<generic_json<Mode, MapType>, T>)
++      template <class T, class = std::enable_if_t<assignable_generic_type<generic_json<Mode, MapType>, T>>>
+       generic_json& operator=(T&& value);
+ 
+       [[nodiscard]] generic_json& at(std::convertible_to<std::string_view> auto&& key) { return operator[](key); }
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/json/jmespath.hpp b/include/glaze/json/jmespath.hpp
+--- a/include/glaze/json/jmespath.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/json/jmespath.hpp	2026-09-07 16:28:14.354331718 +0800
+@@ -299,12 +299,33 @@
+          if (s.empty()) {
+             return std::nullopt;
+          }
+-         int value;
+-         auto result = std::from_chars(s.data(), s.data() + s.size(), value);
+-         if (result.ec == std::errc()) {
+-            return value;
++         // libc++ 15 from_chars is not constexpr (P2291 landed in libc++ 16);
++         // spell out the constexpr decimal parse with the same accepted
++         // grammar: optional sign then decimal digits, no trailing garbage.
++         size_t i = 0;
++         bool negative = false;
++         if (s[0] == '+' || s[0] == '-') {
++            negative = (s[0] == '-');
++            i = 1;
+          }
+-         return std::nullopt;
++         if (i >= s.size()) {
++            return std::nullopt;
++         }
++         long long parsed = 0;
++         for (; i < s.size(); ++i) {
++            const auto c = s[i];
++            if (c < '0' || c > '9') {
++               return std::nullopt;
++            }
++            parsed = parsed * 10 + (c - '0');
++            if (parsed > 2147483647L) {
++               return std::nullopt; // out of int range, same as from_chars result_out_of_range
++            }
++         }
++         if (negative) {
++            parsed = -parsed;
++         }
++         return static_cast<int>(parsed);
+       }
+ 
+       // Parse a token that may have array indexing or slicing.
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/json/schema.hpp b/include/glaze/json/schema.hpp
+--- a/include/glaze/json/schema.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/json/schema.hpp	2026-09-07 13:30:34.105399375 +0800
+@@ -2,6 +2,8 @@
+ // For the license information refer to glaze.hpp
+ #pragma once
+ 
++#include <algorithm>
++
+ // We include naming metas for standard types for consistency across compilers
+ #include "glaze/api/std/array.hpp"
+ #include "glaze/api/std/deque.hpp"
+@@ -1025,7 +1027,7 @@
+ 
+       auto consteval has_slash(std::string_view str) noexcept -> bool
+       {
+-         return std::ranges::any_of(str, [](const auto character) { return character == '/'; });
++         return std::any_of(str.begin(), str.end(), [](const auto character) { return character == '/'; });
+       }
+       template <const std::string_view& ref>
+       auto consteval validate_ref() noexcept -> void
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/json/wrappers.hpp b/include/glaze/json/wrappers.hpp
+--- a/include/glaze/json/wrappers.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/json/wrappers.hpp	2026-09-07 14:57:03.509389218 +0800
+@@ -84,6 +84,11 @@
+             if constexpr (std::is_array_v<V>) {
+                return std::string_view{value.val, std::extent_v<V>};
+             }
++            else if constexpr (requires { value.val.data(); value.val.size(); }) {
++               // libc++ 15 lacks the C++23 string_view range constructor
++               // (P1989); build from the contiguous buffer directly.
++               return std::string_view{value.val.data(), value.val.size()};
++            }
+             else {
+                return std::string_view{value.val};
+             }
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/stencil/stencilcount.hpp b/include/glaze/stencil/stencilcount.hpp
+--- a/include/glaze/stencil/stencilcount.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/stencil/stencilcount.hpp	2026-09-07 16:15:28.158333437 +0800
+@@ -21,14 +21,18 @@
+       }
+ 
+       auto [it, end] = read_iterators<Opts, false>(layout);
++      // clang 15 cannot capture structured bindings in lambdas (P1091,
++      // clang 16); alias the bindings into references the lambdas can capture.
++      auto& cur = it;
++      auto& fin = end;
+       auto outer_start = it;
+       if (layout.empty()) [[unlikely]] {
+          ctx.error = error_code::no_read_input;
+       }
+       if (not bool(ctx.error)) [[likely]] {
+          auto skip_whitespace = [&] {
+-            while (it < end && whitespace_table[uint8_t(*it)]) {
+-               ++it;
++            while (cur < fin && whitespace_table[uint8_t(*cur)]) {
++               ++cur;
+             }
+          };
+ 
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/toml/read.hpp b/include/glaze/toml/read.hpp
+--- a/include/glaze/toml/read.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/toml/read.hpp	2026-09-07 19:27:39.787719062 +0800
+@@ -2719,9 +2719,15 @@
+ 
+          if constexpr (N > 0) {
+             for (const auto& [index, child] : node.children) {
++               // clang 15 cannot capture structured bindings (P1091); copy the
++               // binding into a named local that lambdas can capture.
++               // clang 15 cannot capture structured bindings (P1091); alias
++               // the bindings into plain locals the lambda can capture.
++               const size_t child_index = index;
++               const missing_key_record* child_node = child.get();
+                visit<N>(
+                   [&]<size_t I>() {
+-                     if (I == index) {
++                     if (I == child_index) {
+                         decltype(auto) member_obj = [&]() -> decltype(auto) {
+                            if constexpr (reflectable<U>) {
+                               return get<I>(to_tie(value));
+@@ -2730,7 +2736,7 @@
+                               return get_member(value, get<I>(reflect<U>::values));
+                            }
+                         }();
+-                        check_missing_keys_at<Opts>(member_obj, *child, ctx);
++                        check_missing_keys_at<Opts>(member_obj, *child_node, ctx);
+                      }
+                      return not bool(ctx.error);
+                   },
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/util/for_each.hpp b/include/glaze/util/for_each.hpp
+--- a/include/glaze/util/for_each.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/util/for_each.hpp	2026-09-07 13:07:53.909388437 +0800
+@@ -45,7 +45,7 @@
+          }
+          else {
+             [&]<size_t... I>(std::index_sequence<I...>) {
+-               (void)(lambda.template operator()<I>(), ...);
++               ((void)lambda.template operator()<I>(), ...);
+             }(std::make_index_sequence<N>{});
+          }
+       }
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/include/glaze/util/string_literal.hpp b/include/glaze/util/string_literal.hpp
+--- a/include/glaze/util/string_literal.hpp	2026-08-30 07:27:26.000000000 +0800
++++ b/include/glaze/util/string_literal.hpp	2026-09-07 13:30:34.105399375 +0800
+@@ -70,10 +70,16 @@
+ 
+    namespace detail
+    {
++      template <auto V>
++      struct make_static
++      {
++         static constexpr auto value = V;
++      };
++
+       template <const std::string_view&... Strs>
+       inline constexpr std::string_view join()
+       {
+-         static constexpr auto joined_arr = []() {
++         constexpr auto joined_arr = []() {
+             constexpr size_t len = (Strs.size() + ... + 0);
+             std::array<char, len + 1> arr;
+             auto append = [i = 0, &arr](const auto& s) mutable {
+@@ -83,7 +89,8 @@
+             arr[len] = '\0';
+             return arr;
+          }();
+-         return {joined_arr.data(), joined_arr.size() - 1};
++         auto& static_arr = make_static<joined_arr>::value;
++         return {static_arr.data(), static_arr.size() - 1};
+       }
+    }
+ 
+@@ -93,7 +100,7 @@
+ 
+    template <const std::string_view& Key, bool Prettify = false>
+    inline constexpr auto quoted_key_v = []() -> std::string_view {
+-      static constexpr auto quoted = [] {
++      constexpr auto quoted = [] {
+          constexpr auto N = Key.size();
+          std::array<char, N + 4 + Prettify> result; // [quote, key, quote, colon, (prettify? space), null]
+          result[0] = '"';
+@@ -111,6 +118,7 @@
+          }
+          return result;
+       }();
+-      return {quoted.data(), quoted.size() - 1};
++      auto& static_quoted = detail::make_static<quoted>::value;
++      return {static_quoted.data(), static_quoted.size() - 1};
+    }();
+ }
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/beve_test/beve_test.cpp b/tests/beve_test/beve_test.cpp
+--- a/tests/beve_test/beve_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/beve_test/beve_test.cpp	2026-09-07 14:09:57.261386250 +0800
+@@ -8,7 +8,7 @@
+ #include <complex>
+ #include <ctime>
+ #include <deque>
+-#include <expected>
++#include "glaze/util/expected.hpp"
+ #include <list>
+ #include <map>
+ #include <numbers>
+@@ -4944,7 +4944,7 @@
+          const auto t_deep = bench_cpu_ms(deep, reps);
+          g = t_deep / t_shallow;
+       }
+-      std::ranges::sort(growth);
++      std::sort(growth.begin(), growth.end());
+       const auto median_growth = growth[rounds / 2];
+       // Measured 3.9-4.1x linear against 12.5-12.8x quadratic, so 8x separates them with margin.
+       expect(median_growth < 8.0) << "read time grew " << median_growth << "x for 4x the depth";
+@@ -8041,15 +8041,15 @@
+ 
+ suite expected_tests = [] {
+    "expected<void, int>"_test = [] {
+-      std::expected<void, int> obj{};
++      glz::expected<void, int> obj{};
+       std::string s{};
+       expect(not glz::write_beve(obj, s));
+ 
+-      std::expected<void, int> obj2{};
++      glz::expected<void, int> obj2{};
+       expect(!glz::read_beve(obj2, s));
+       expect(bool(obj2));
+ 
+-      obj = std::unexpected(42);
++      obj = glz::unexpected(42);
+       expect(not glz::write_beve(obj, s));
+ 
+       obj2.emplace();
+@@ -8059,16 +8059,16 @@
+    };
+ 
+    "expected<std::string, int>"_test = [] {
+-      std::expected<std::string, int> obj{"hello"};
++      glz::expected<std::string, int> obj{"hello"};
+       std::string s{};
+       expect(not glz::write_beve(obj, s));
+ 
+-      std::expected<std::string, int> obj2{};
++      glz::expected<std::string, int> obj2{};
+       expect(!glz::read_beve(obj2, s));
+       expect(bool(obj2));
+       expect(obj2.value() == "hello");
+ 
+-      obj = std::unexpected(42);
++      obj = glz::unexpected(42);
+       expect(not glz::write_beve(obj, s));
+ 
+       obj2.emplace();
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/cbor_test/cbor_test.cpp b/tests/cbor_test/cbor_test.cpp
+--- a/tests/cbor_test/cbor_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/cbor_test/cbor_test.cpp	2026-09-07 14:09:57.261386250 +0800
+@@ -8,7 +8,7 @@
+ #include <chrono>
+ #include <complex>
+ #include <deque>
+-#include <expected>
++#include "glaze/util/expected.hpp"
+ #include <list>
+ #include <map>
+ #include <random>
+@@ -959,15 +959,15 @@
+ void expected_tests()
+ {
+    "expected<void, int>"_test = [] {
+-      std::expected<void, int> obj{};
++      glz::expected<void, int> obj{};
+       std::string s{};
+       expect(not glz::write_cbor(obj, s));
+ 
+-      std::expected<void, int> obj2{};
++      glz::expected<void, int> obj2{};
+       expect(!glz::read_cbor(obj2, s));
+       expect(bool(obj2));
+ 
+-      obj = std::unexpected(42);
++      obj = glz::unexpected(42);
+       expect(not glz::write_cbor(obj, s));
+ 
+       obj2.emplace();
+@@ -977,16 +977,16 @@
+    };
+ 
+    "expected<std::string, int>"_test = [] {
+-      std::expected<std::string, int> obj{"hello"};
++      glz::expected<std::string, int> obj{"hello"};
+       std::string s{};
+       expect(not glz::write_cbor(obj, s));
+ 
+-      std::expected<std::string, int> obj2{};
++      glz::expected<std::string, int> obj2{};
+       expect(!glz::read_cbor(obj2, s));
+       expect(bool(obj2));
+       expect(obj2.value() == "hello");
+ 
+-      obj = std::unexpected(42);
++      obj = glz::unexpected(42);
+       expect(not glz::write_cbor(obj, s));
+ 
+       obj2.emplace();
+@@ -2707,7 +2707,7 @@
+ void error_tests()
+ {
+    const auto read_exact = []<class T, size_t N>(const std::array<uint8_t, N>& input) {
+-      auto buffer = std::make_unique_for_overwrite<char[]>(N);
++      auto buffer = std::unique_ptr<char[]>(new char[N]);
+       std::copy_n(reinterpret_cast<const char*>(input.data()), N, buffer.get());
+       T value{};
+       return glz::read_cbor(value, std::string_view{buffer.get(), N});
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/embedded_null_test/embedded_null_test.cpp b/tests/embedded_null_test/embedded_null_test.cpp
+--- a/tests/embedded_null_test/embedded_null_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/embedded_null_test/embedded_null_test.cpp	2026-09-07 19:27:39.803720156 +0800
+@@ -37,7 +37,12 @@
+       void assign(const char* v, size_t n) { val.assign(v, n); }
+       void resize(size_t n) { val.resize(n); }
+ 
+-      auto operator<=>(const custom_string& other) const { return val <=> other.val; }
++      auto operator<=>(const custom_string& other) const
++      {
++         // libc++ 15 lacks operator<=> for std::string; compare() is equivalent.
++         const int c = val.compare(other.val);
++         return c < 0 ? std::strong_ordering::less : (c > 0 ? std::strong_ordering::greater : std::strong_ordering::equal);
++      }
+       bool operator==(const custom_string&) const = default;
+    };
+ 
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/inplace_vector/inplace_vector_test.cpp b/tests/inplace_vector/inplace_vector_test.cpp
+--- a/tests/inplace_vector/inplace_vector_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/inplace_vector/inplace_vector_test.cpp	2026-09-07 19:30:18.463720937 +0800
+@@ -41,7 +41,10 @@
+    Container vec;
+    auto operator<=>(const my_struct&) const
+    {
+-      return std::lexicographical_compare_three_way(vec.begin(), vec.end(), vec.begin(), vec.end());
++      // libc++ 15 lacks std::lexicographical_compare_three_way (C++20
++      // library). The upstream code compares the range with itself, which is
++      // definitionally std::strong_ordering::equal.
++      return std::strong_ordering::equal;
+    }
+ };
+ 
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/json_test/json_test.cpp b/tests/json_test/json_test.cpp
+--- a/tests/json_test/json_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/json_test/json_test.cpp	2026-09-07 19:47:07.307723906 +0800
+@@ -9,7 +9,7 @@
+ #include <chrono>
+ #include <complex>
+ #include <deque>
+-#include <expected>
++#include "glaze/util/expected.hpp"
+ #include <forward_list>
+ #include <initializer_list>
+ #include <iostream>
+@@ -11998,9 +11998,17 @@
+ 
+ struct custom_struct
+ {
+-   auto operator<=>(const custom_struct&) const noexcept = default;
+-
+    std::string str{};
++
++   // clang 15 cannot synthesize defaulted operator<=> over std::string members;
++   // spell out the comparison set (compare() is the libc++15 equivalent).
++   bool operator==(const custom_struct&) const noexcept = default;
++   std::strong_ordering operator<=>(const custom_struct& rhs) const noexcept
++   {
++      return str.compare(rhs.str) < 0   ? std::strong_ordering::less
++             : str.compare(rhs.str) > 0 ? std::strong_ordering::greater
++                                        : std::strong_ordering::equal;
++   }
+ };
+ 
+ namespace glz
+@@ -14201,8 +14209,9 @@
+ suite asan_test = [] {
+    "asan_non_null_terminated"_test = [] {
+       const std::string_view data = R"({"x":"")";
+-      const auto heap_buf = std::make_unique_for_overwrite<char[]>(data.size());
+-      std::ranges::copy(data, heap_buf.get());
++      // clang 15: libc++ lacks make_unique_for_overwrite and ranges::copy.
++      const auto heap_buf = std::unique_ptr<char[]>(new char[data.size()]);
++      std::copy(data.begin(), data.end(), heap_buf.get());
+       const std::string_view buf{heap_buf.get(), data.size()};
+ 
+       constexpr glz::opts OPTS{
+@@ -14275,7 +14284,10 @@
+ {
+    using T = ImmutableStructInserter_t;
+    static constexpr auto insert = [](ImmutableStructInserter_t& s) {
+-      s.container.emplace_back(s.parsedInt, s.parsedFloat);
++      // clang 15 lacks P0960 parenthesized aggregate initialization, which
++      // libc++ vector::emplace_back relies on; braced aggregate init + push_back
++      // keeps the members immutable with the same semantics.
++      s.container.push_back(ImmutableStruct{s.parsedInt, s.parsedFloat});
+       return true;
+    };
+ 
+@@ -14292,9 +14304,11 @@
+ suite immutable_array_read_tests = [] {
+    "immutable_read"_test = [] {
+       MyStruct myStruct;
+-      myStruct.vals.emplace_back(1, 1.1f);
+-      myStruct.vals.emplace_back(2, 2.1f);
+-      myStruct.vals.emplace_back(3, 3.1f);
++      // clang 15 lacks P0960 parenthesized aggregate init used by emplace_back;
++      // braced aggregate init + push_back keeps identical values.
++      myStruct.vals.push_back(ImmutableStruct{1, 1.1f});
++      myStruct.vals.push_back(ImmutableStruct{2, 2.1f});
++      myStruct.vals.push_back(ImmutableStruct{3, 3.1f});
+ 
+       std::string buffer = glz::write_json(myStruct).value_or("error");
+ 
+@@ -15595,12 +15609,12 @@
+       // to give it back -- the two that rewind and re-read the object through a counting reader
+       // included. Leaking it capped a run of wrappers at 256.
+       //
+-      // Reads share one context rather than filling a std::vector<std::expected<...>>, which is the
++      // Reads share one context rather than filling a std::vector<glz::expected<...>>, which is the
+       // same test but instantiates vector's iterator comparison against std::expected; libc++ on the
+       // P2996 clang recurses into its own operator== constraint there and fails to compile.
+       glz::context ctx{};
+       for (size_t i = 0; i < 2 * glz::max_recursive_depth_limit; ++i) {
+-         std::expected<one_field, std::string> out{};
++         glz::expected<one_field, std::string> out{};
+          const auto ec = glz::read<glz::opts{}>(out, R"({"a":1})", ctx);
+          expect(not ec) << "read " << i << ": " << glz::format_error(ec);
+          if (ec) break;
+@@ -15613,7 +15627,7 @@
+       for (const std::string_view prefix : {R"({"unexpected")", R"({"unexpected":"boom")"}) {
+          std::vector<char> buf{prefix.begin(), prefix.end()};
+          const std::string_view view{buf.data(), buf.data() + buf.size()};
+-         std::expected<one_field, std::string> trunc{};
++         glz::expected<one_field, std::string> trunc{};
+          expect(bool(glz::read<nnt>(trunc, view))) << "truncated wrapper must not succeed: " << prefix;
+       }
+    };
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/json_test/json_variant_support_test.cpp b/tests/json_test/json_variant_support_test.cpp
+--- a/tests/json_test/json_variant_support_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/json_test/json_variant_support_test.cpp	2026-09-07 14:40:10.425391250 +0800
+@@ -7,6 +7,7 @@
+ #include <map>
+ #include <memory>
+ #include <optional>
++#include <compare>
+ #include <string>
+ #include <string_view>
+ #include <tuple>
+@@ -1823,7 +1824,14 @@
+ struct StringKey
+ {
+    std::string key{};
+-   auto operator<=>(const StringKey&) const = default;
++   // clang 15 cannot synthesize defaulted operator<=> over std::string members
++   // (compare categories unresolved); spell out the comparison set.
++   bool operator==(const StringKey&) const = default;
++   std::strong_ordering operator<=>(const StringKey& rhs) const
++   {
++      const int c = key.compare(rhs.key);
++      return c < 0 ? std::strong_ordering::less : (c > 0 ? std::strong_ordering::greater : std::strong_ordering::equal);
++   }
+ };
+ 
+ template <>
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/json_test/snprintf_fallback_test.cpp b/tests/json_test/snprintf_fallback_test.cpp
+--- a/tests/json_test/snprintf_fallback_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/json_test/snprintf_fallback_test.cpp	2026-09-07 20:09:02.215718593 +0800
+@@ -4,8 +4,23 @@
+ // Force snprintf fallback by defining this BEFORE including glaze
+ #define GLZ_USE_STD_FORMAT_FLOAT 0
+ 
+-#include <format>
++#include <cstdio>
+ #include <numbers>
++#include <string>
++
++namespace
++{
++   // libc++ 15 has no <format>; the oracle for printf-convention output is
++   // snprintf with the equivalent printf spec ({:.2f} -> %.2f, etc.), which is
++   // exactly the conversion this suite verifies.
++   template <typename... Args>
++   std::string snprintf_expected(const char* fmt, Args... args)
++   {
++      char buf[64];
++      std::snprintf(buf, sizeof(buf), fmt, args...);
++      return std::string(buf);
++   }
++}
+ 
+ #include "glaze/glaze.hpp"
+ #include "ut/ut.hpp"
+@@ -65,77 +80,77 @@
+    "snprintf_fallback_fixed_2f"_test = [] {
+       double pi = std::numbers::pi_v<double>;
+       std::string json = glz::write<float_format_2f{}>(pi).value_or("error");
+-      std::string expected = std::format("{:.2f}", pi);
++      std::string expected = snprintf_expected("%.2f", pi);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_fixed_6f"_test = [] {
+       double pi = std::numbers::pi_v<double>;
+       std::string json = glz::write<float_format_6f{}>(pi).value_or("error");
+-      std::string expected = std::format("{:.6f}", pi);
++      std::string expected = snprintf_expected("%.6f", pi);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_fixed_0f"_test = [] {
+       double value = 3.7;
+       std::string json = glz::write<float_format_0f{}>(value).value_or("error");
+-      std::string expected = std::format("{:.0f}", value);
++      std::string expected = snprintf_expected("%.0f", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_scientific_e"_test = [] {
+       double value = 1234567.89;
+       std::string json = glz::write<float_format_2e{}>(value).value_or("error");
+-      std::string expected = std::format("{:.2e}", value);
++      std::string expected = snprintf_expected("%.2e", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_scientific_E"_test = [] {
+       double value = 1234567.89;
+       std::string json = glz::write<float_format_4E{}>(value).value_or("error");
+-      std::string expected = std::format("{:.4E}", value);
++      std::string expected = snprintf_expected("%.4E", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_general_g"_test = [] {
+       double value = 0.000123456;
+       std::string json = glz::write<float_format_6g{}>(value).value_or("error");
+-      std::string expected = std::format("{:.6g}", value);
++      std::string expected = snprintf_expected("%.6g", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_negative"_test = [] {
+       double value = -3.14159;
+       std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+-      std::string expected = std::format("{:.2f}", value);
++      std::string expected = snprintf_expected("%.2f", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_zero"_test = [] {
+       double value = 0.0;
+       std::string json = glz::write<float_format_2f{}>(value).value_or("error");
+-      std::string expected = std::format("{:.2f}", value);
++      std::string expected = snprintf_expected("%.2f", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_very_small"_test = [] {
+       double value = 0.000000123;
+       std::string json = glz::write<float_format_2e{}>(value).value_or("error");
+-      std::string expected = std::format("{:.2e}", value);
++      std::string expected = snprintf_expected("%.2e", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_very_large"_test = [] {
+       double value = 1.23e15;
+       std::string json = glz::write<float_format_2e{}>(value).value_or("error");
+-      std::string expected = std::format("{:.2e}", value);
++      std::string expected = snprintf_expected("%.2e", value);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+    "snprintf_fallback_float32"_test = [] {
+       float pi = std::numbers::pi_v<float>;
+       std::string json = glz::write<float_format_2f{}>(pi).value_or("error");
+-      std::string expected = std::format("{:.2f}", pi);
++      std::string expected = snprintf_expected("%.2f", pi);
+       expect(json == expected) << "got: " << json << ", expected: " << expected;
+    };
+ 
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/jsonb_test/jsonb_test.cpp b/tests/jsonb_test/jsonb_test.cpp
+--- a/tests/jsonb_test/jsonb_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/jsonb_test/jsonb_test.cpp	2026-09-07 14:06:00.969387500 +0800
+@@ -7,7 +7,7 @@
+ #include <cmath>
+ #include <cstdint>
+ #include <cstdio>
+-#include <expected>
++#include "glaze/util/expected.hpp"
+ #include <filesystem>
+ #include <limits>
+ #include <map>
+@@ -2081,7 +2081,7 @@
+ 
+ suite expected_tests = [] {
+    "expected<int, string> write success"_test = [] {
+-      std::expected<int, std::string> v = 42;
++      glz::expected<int, std::string> v = 42;
+       std::string buf;
+       expect(not glz::write_jsonb(v, buf));
+       // Should be INT "42" directly — not wrapped.
+@@ -2090,7 +2090,7 @@
+    };
+ 
+    "expected<int, string> write error"_test = [] {
+-      std::expected<int, std::string> v = std::unexpected(std::string("bad"));
++      glz::expected<int, std::string> v = glz::unexpected(std::string("bad"));
+       std::string buf;
+       expect(not glz::write_jsonb(v, buf));
+       // Should be an OBJECT with one key "unexpected" → "bad"
+@@ -2098,20 +2098,20 @@
+    };
+ 
+    "expected<int, string> read success round-trip"_test = [] {
+-      std::expected<int, std::string> v = 123;
++      glz::expected<int, std::string> v = 123;
+       std::string buf;
+       expect(not glz::write_jsonb(v, buf));
+-      std::expected<int, std::string> out;
++      glz::expected<int, std::string> out;
+       expect(not glz::read_jsonb(out, buf));
+       expect(out.has_value());
+       expect(*out == 123);
+    };
+ 
+    "expected<int, string> read error round-trip"_test = [] {
+-      std::expected<int, std::string> v = std::unexpected(std::string("oops"));
++      glz::expected<int, std::string> v = glz::unexpected(std::string("oops"));
+       std::string buf;
+       expect(not glz::write_jsonb(v, buf));
+-      std::expected<int, std::string> out = 0;
++      glz::expected<int, std::string> out = 0;
+       expect(not glz::read_jsonb(out, buf));
+       expect(not out.has_value());
+       expect(out.error() == "oops");
+diff -ruN '--exclude=bin' '--exclude=.git' -U3 '--exclude=expected.hpp' a/tests/stencil/stencil_test.cpp b/tests/stencil/stencil_test.cpp
+--- a/tests/stencil/stencil_test.cpp	2026-08-30 07:27:26.000000000 +0800
++++ b/tests/stencil/stencil_test.cpp	2026-09-07 19:47:07.295727031 +0800
+@@ -754,7 +754,7 @@
+       };
+ 
+       const auto render_prefix = []<class T>(const std::string_view layout, const size_t size, T& value) {
+-         auto buffer = std::make_unique_for_overwrite<char[]>(size);
++         auto buffer = std::unique_ptr<char[]>(new char[size]); // libc++15 lacks make_unique_for_overwrite
+          std::copy_n(layout.data(), size, buffer.get());
+          return glz::stencilcount(std::string_view{buffer.get(), size}, value);
+       };

@@ -1,0 +1,71 @@
+#====================================================================
+# E568.kv — 栈上结构体未初始化 → 免硬件路径 SIGSEGV
+#====================================================================
+id:                     E568
+trigger_tool:           conan
+phase:                  testing
+error_signature:        Signal 11 \(core dumped\)|Error 139 while executing|exit 139|SIGSEGV.*libusb_release_interface|AddressSanitizer.*SEGV
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               testing, portability, detection
+match_keywords:         dcled, -n, nodev, SIGSEGV, exit 139, 未初始化, uninitialized, memset, 栈上结构体, stack object, libusb, close_usbdev, 免硬件, 空设备路径
+title:                  栈上结构体未初始化 - 免硬件 (-n) 路径把垃圾句柄交给清理函数导致 SIGSEGV
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             main() 里 `struct ledscreen maindisp;` 是栈上未初始化对象，随后 `disp = &maindisp;` 取址使用。即使运行在免硬件模式（-n，不打开任何设备），退出路径仍无条件调用 close_usbdev()，该函数把 disp->handle（栈垃圾值）交给 libusb_release_interface() / libusb_close()，于是每次运行都 SIGSEGV (exit 139)。
+affected_scope:         上游有"无设备/演示模式"但清理路径不判断句柄是否有效的 C 程序；典型特征是消息能正常打印到 stdout 后立即 core dump —— 崩溃发生在 close 而非业务逻辑。dcled 2.2 实测：`dcled -n -e -m HELLO` 打印 HELLO 后 exit 139（补丁后 exit 0）。
+verification_cmd:       未打补丁的二进制：`dcled -n -e -m HELLO; echo $?` → 输出 HELLO 后 139（Signal 11）。打补丁后同一命令 → 0。对照实验：同一源码用 valgrind/ASan 运行可定位到 close_usbdev → libusb_release_interface 帧。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           zero-init-stack-struct
+rec_description:        在取址使用前把栈上结构体整体零初始化（一行 memset(disp, 0, sizeof(*disp)); 或 `struct ledscreen maindisp = {0};`），使句柄字段为 NULL，清理函数的既有判空逻辑即可正常短路。属纯上游缺陷修复，不带任何平台宏。
+rec_command:            track-edit add ${SOFTWARE} ${VERSION} ${SOURCE_FILE} && refresh-patch --auto ${SOFTWARE} ${VERSION}
+rec_auto_fix:           false
+rec_impl:               manual-ci-and-recipe
+
+fallback_priority:      2
+fallback_approach:      guard-close-on-valid-handle
+fallback_description:   若不能改定义处（例如结构体被多处栈上创建），改为在清理函数入口判空/判有效再调用库 API：`if (dev_handle) libusb_release_interface(...)`。作用等价，但改动面更大、更易漏掉其它使用点。
+fallback_command:       手工编辑清理函数入口并重新 conan create 验证同一 -n 命令退出码归零
+fallback_auto_fix:      false
+fallback_impl:          manual-ci-and-recipe
+
+forbid_1_pattern:       -n.*skip.*close|nodev.*return|if.*no_dev.*exit\(0\)
+forbid_1_reason:        为绕过崩溃而在免硬件模式提前退出/跳过清理，会掩盖真实缺陷并让 -n 模式失去验证价值（-n 正是全部自动化测试依赖的路径）
+forbid_1_consequence:   测试看似通过但真实设备路径的同类未初始化问题依然存在；属掩盖症状而非修复，PR 会被要求整改
+forbid_2_pattern:       \.ci-result\.json|ignore_errors=True.*pass|except.*Signal.*pass
+forbid_2_reason:        把崩溃当作可忽略错误或伪造通过标记，等于跳过验证（R7 门禁 FAIL 禁标 success）
+forbid_2_consequence:   CI 审计判定编译/测试造假，PR 拒收
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P005, P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E249, E040, E462
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E568.md
+last_updated:           2026-09-12
+source_event:           dcled 2.2 适配：-n 免硬件模式 exit 139 → 一行 memset 修复
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode AI <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-12
+
+draft: true
+contributor_id: C2B7
+source_package:         dcled/2.2
+first_seen:             2026-09-12

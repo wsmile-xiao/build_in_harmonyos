@@ -1,0 +1,122 @@
+#====================================================================
+# DRAFT-dwarf5-index-sections-toolchain-unsupported — OHOS 工具链默认
+#   DWARF5 索引节与不支持它的 DWARF 工具（dwz 类）冲突：编译包装降级
+#   到 -gdwarf-4 + 剥离 crt 调试信息
+# 对应人类文档: knowledge/drafts/DRAFT-dwarf5-index-sections-toolchain-unsupported.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9459 dwz 0.16 适配 HarmonyOS PC（上游测试通过率 0/62 → 48/62）
+#====================================================================
+
+id:                     DRAFT-dwarf5-index-sections-toolchain-unsupported
+trigger_tool:           dwz|dwarf-tool|clang|gcc|ld|objcopy|readelf|autotools|testing
+phase:                  testing|build
+error_signature:        Unknown debugging section \.debug_str_offsets|
+                         Unknown debugging section \.debug_addr|
+                         Unknown debugging section \.debug_rnglists|
+                         Unknown debugging section \.debug_line_str|
+                         relocation truncated to fit: R_AARCH64_LDST64_ABS_LO12_NC
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               dwarf, toolchain, testing, debug-info, ohos, portability
+match_keywords:         DWARF5, DWARF 5, .debug_str_offsets, .debug_addr,
+                         .debug_rnglists, .debug_line_str, DW_FORM_strx, gdwarf-4,
+                         crtbegin, Scrt1.o, clang_rt.crtbegin.o, -nostartfiles,
+                         strip-debug crt, dwz, debug_sections, indexed string
+title:                  上游 DWARF 工具不支持 DWARF5 索引节时，用编译包装把测试输入降级为纯 DWARF4（含剥离 crt 调试信息）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             两个因素叠加：① 工具侧——老 DWARF 工具（dwz 0.16 的
+                         debug_sections[] 表）不含 DWARF5 新增节（.debug_str_offsets /
+                         .debug_addr / .debug_rnglists / .debug_line_str），遇到即报
+                         "Unknown debugging section" 并中止；② 工具链侧——OHOS SDK 的
+                         clang 15 默认产出 DWARF5，且**链接进来的 crt 目标文件
+                         （Scrt1.o/crti.o/clang_rt.crtbegin.o/clang_rt.crtend.o）本身
+                         就是用 DWARF5 编译的**，因此仅给用户代码加 -gdwarf-4 无效：
+                         链接后二进制仍含 6 个 DWARF5 CU，工具照样报错。
+affected_scope:         OHOS 上任何"上游测试需要编译带调试信息的 ELF 输入、且被测
+                         工具只支持 DWARF4 及以下"的场景（dwz 首个实例；elfutils 老版
+                         本、binutils 老版本、gdb <8 等同类工具同理）；纯构建（无调试
+                         信息消费）不受影响
+verification_cmd:       # 判据：编译产物的 DWARF 版本与特殊节
+                         readelf --debug-dump=info <bin> | grep Version: | sort | uniq -c
+                         readelf -S <bin> | grep -cE 'debug_str_offsets|debug_addr'
+                         # 期望：仅 Version: 4、两个 count 均为 0
+                         # 再跑被测工具：dwz <bin> -o out（应无 Unknown debugging section）
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           compiler-wrapper-downgrade-plus-crt-strip
+rec_description:        写一个 CC/CXX 包装脚本供 make 的 CC=/CXX= 使用：① 遍历参数，
+                         剔除所有 -g* 调试选项（-g/-g0..3/-gdwarf-*/-ggdb*/-gz*），
+                         再在**末尾**统一追加 "-g -gdwarf-4"——顺序关键，-gdwarf-4
+                         放在 -g 之前会被 -g 重置回默认 DWARF5；② 链接阶段
+                         （参数无 -c/-E/-S）额外加 -nostartfiles 并显式传入**用
+                         objcopy --strip-debug 预处理过的** crt 目标文件，绕开 SDK
+                         crt 的 DWARF5 CU；③ 目标自身带 -nostdlib/-nostartfiles 时
+                         （如 start.o 类）不注入 crt，避免 _start 重复定义；④ 被测
+                         工具自身（如 dwz-for-test）也要用同一包装编译，否则它处理
+                         自己时同样报错。
+rec_command:            # 1) 生成剥离调试图的 crt 目录
+                         SYSROOT=<ohos-sdk>/native/sysroot/usr/lib/aarch64-linux-ohos
+                         RT=<ohos-sdk>/native/llvm/lib/clang/<ver>/lib/aarch64-linux-ohos
+                         mkdir -p crt-nodbg
+                         for f in $SYSROOT/{Scrt1,crt1,crti,crtn}.o \
+                                  $RT/clang_rt.{crtbegin,crtend}.o; do
+                           cp $f crt-nodbg/ && objcopy --strip-debug crt-nodbg/$(basename $f)
+                         done
+                         # 2) 包装脚本（要点：过滤 -g* → 末尾 -g -gdwarf-4 → 链接注入 crt）
+                         # 3) make CC=<wrapper> CXX=<wrapper2> [-j1]
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      per-section-objcopy-removal
+fallback_description:   若无法改编译命令（如输入是预编译产物），退化为 objcopy
+                         逐个删除不支持的调试节；注意会连锁暴露下一个节名
+                         （删 .debug_str_offsets 后报 .debug_addr，再报 .debug_rnglists），
+                         需循环直到工具接受——仅适合少量固定产物，不适合批量测试输入
+fallback_command:       objcopy --remove-section=.debug_str_offsets \
+                                  --remove-section=.debug_addr \
+                                  --remove-section=.debug_rnglists <bin>
+fallback_auto_fix:      false
+fallback_impl:          explicit-eligible-test-inventory
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       改上游.*加 DWARF5 支持|patch dwz\.c.*str_offsets|为过测试实现 DWARF5 解析
+forbid_1_reason:        给老工具补 DWARF5 索引节支持是上游功能开发（远超适配边界），
+                         需跟随每个上游版本维护；正确做法是让测试输入匹配工具已有能力
+forbid_1_consequence:   补丁随上游升级失效；适配 PR 变成功能 fork
+forbid_2_pattern:       skip.*该调试用例|N/A（未运行）|整体跳过涉及调试信息的测试
+forbid_2_reason:        降级编译即可真实执行——跳过属"有可运行子集未尝试"（rule 4）
+forbid_2_consequence:   测试覆盖率虚低，PR 被 rule 4 打回
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             E173
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-dwarf5-index-sections-toolchain-unsupported.md
+last_updated:           2026-09-11
+source_event:           dwz/0.16 HarmonyOS PC 适配（PR #9459）；上游 DejaGNU testsuite
+                         通过率 0/62 → 48/62，其中 24+ 个用例由本方案解锁
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9459
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true

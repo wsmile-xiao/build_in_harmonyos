@@ -1,0 +1,145 @@
+#==============================================================================
+# DRAFT-libfsntfs-release-archive-closure
+# libyal 多组件 Autotools 发布包的自包含闭包审计与可审计镜像回退
+#==============================================================================
+
+id:                     DRAFT-libfsntfs-release-archive-closure
+trigger_tool:           conan|download|autotools|make
+phase:                  source|dependency|configure|testing
+error_signature:        configure.*not found|Makefile.in.*not found|lib[a-z0-9]+.*not found|
+                        synclibs|404.*release|source.*not.*self-contained|input.*directory.*not found
+
+severity:               2
+category:               source-provenance|release-archive|bundled-dependency|autotools|test-evidence|OHOS
+match_keywords:         libfsntfs, libyal, libbfio, libcdata, libcerror, bundled dependency,
+                        self-contained release archive, generated Autotools files, configure.ac,
+                        Makefile.am, Debian orig tarball, release mirror, SHA-256, input directory,
+                        make check, Conan, HarmonyOS, OHOS
+
+title:                  libyal 多组件 Autotools 发布包的自包含闭包审计、镜像回退与测试能力分层
+
+root_cause: >
+  某些 libyal 项目的 Git 快照与正式发布包不是同一种输入：Git 快照只包含主库和构建
+  元数据，正式发布包还必须包含 configure、aclocal.m4、config.guess、config.sub、
+  Makefile.in 以及多个本地 libyal 组件目录。若只根据上游提交或版本号判断源码完整，
+  Conan 可能在 configure 前才发现生成文件或组件目录缺失；若随后调用未锁定的
+  synclibs.sh 或新增 Conan requires，则会把本应属于发布包完整性的判断错误地变成
+  依赖适配。另一个独立边界是上游 release URL 暂时不可用：可审计的发行版 orig
+  镜像只有在 SHA-256 固定且关键源文件与目标上游提交一致时才能作为等价输入。
+  上游 Autotools 测试还可能声明输入驱动 runner，但发布包没有 input 目录；此时应
+  将测试结果分为 PASS/SKIP/FAIL，不能把 fixture 缺失写成构建失败或全部通过。
+
+affected_scope: >
+  携带多个同族 libyal 组件、同时提交生成后的 Autotools 文件、并通过顶层
+  configure.ac/Makefile.am 直接编译这些组件的 C/C++ 发布包，尤其是 OHOS 上不能
+  依赖隐式网络同步的 Conan 适配。也适用于上游 release URL 不稳定、但 Debian/
+  Fedora 等发行版 orig 源包可取得的可复现构建场景。
+
+verification_cmd: |
+  # 1. 从 configure.ac/Makefile.am 提取本地组件，逐项验证目录存在
+  for d in libbfio libcdata libcerror libcfile libclocale libcnotify libcpath \
+           libcsplit libcthreads libfcache libfdata libfdatetime libfguid \
+           libfusn libfwnt libhmac libuna; do test -d "$d" || exit 1; done
+
+  # 2. 验证发布包的生成文件闭包
+  for f in configure aclocal.m4 config.guess config.sub Makefile.in; do
+      test -f "$f" || exit 1
+  done
+
+  # 3. 以固定哈希下载候选镜像并比较关键源文件
+  sha256sum libfsntfs_20251028.orig.tar.gz
+  cmp extracted/configure.ac upstream/configure.ac
+  cmp extracted/Makefile.am upstream/Makefile.am
+  cmp extracted/libfsntfs/Makefile.am upstream/libfsntfs/Makefile.am
+
+  # 4. 通过 Conan 与真实上游测试确认闭包可消费
+  CI_PACKAGES="archives/l/libfsntfs/20251028" zsh ci/conan/build_and_test.sh
+
+rec_priority:           1
+rec_approach:           release-archive-closure-audit
+rec_description: >
+  在 recipe 获取源码后先做发布包闭包审计：根据 configure.ac 和 Makefile.am 形成预期的
+  本地组件清单，检查所有目录及 configure/aclocal.m4/Makefile.in 等生成文件；缺项时
+  直接报“源包非自包含”，禁止隐式执行 synclibs.sh、临时拉取同族依赖或把这些目录
+  拆成当前 PR 的 Conan 依赖。若官方 release URL 不可用，选择发行版 orig 镜像时同时
+  固定文件名、URL、SHA-256、上游提交和源文件比对证据，并把官方 URL 作为溯源元数据
+  保留。测试阶段单独盘点 runner、可执行测试程序和 fixture 目录：缺少 input 只能
+  对依赖该 fixture 的 case 标记 SKIP，其他 case 继续执行并报告真实 PASS/FAIL。
+rec_command: |
+  get(self, url=mirror_url, filename=explicit_name, sha256=locked_sha256,
+      strip_root=True)
+  assert_complete_bundled_source(expected_dirs, generated_files)
+  compare_selected_sources(upstream_commit, source_archive)
+  make -j1
+  make -j1 check LOG_COMPILER="$CONFIG_SHELL"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-source-closure-gate
+
+fallback_priority:      2
+fallback_approach:      approved-generated-source-archive
+fallback_description: >
+  如果可用源包缺少生成文件，且目标确实是 Git 快照而不是 release archive，应转入
+  E337/E058 所述的可复现 bootstrap 或审批后的生成文件归档流程；不要把缺失文件
+  静默补入本草稿的发布包闭包结论。
+fallback_command:       configure --build=aarch64-unknown-linux-gnu --host=aarch64-unknown-linux-gnu
+fallback_auto_fix:      false
+fallback_impl:          bootstrap-or-approved-generated-archive
+
+forbid_1_pattern:       synclibs\.sh|git clone.*lib[a-z]+|conan\.requires.*lib[a-z]+
+forbid_1_reason:        自包含发布包的本地组件不应被隐式网络同步或拆成未经独立适配的依赖。
+forbid_1_consequence:   构建不可复现、破坏一库一分支边界，或把依赖库改动混入当前 PR。
+
+forbid_2_pattern:       release.*404.*use.*latest|sha256.*omit|source.*mirror.*unverified
+forbid_2_reason:        镜像回退必须由固定哈希和源文件身份比对约束，不能用浮动版本或无证据替换。
+forbid_2_consequence:   可能构建出与目标版本不同的源码，审核无法复核源包身份。
+
+forbid_3_pattern:       missing.*input.*FAIL|skip.*all.*tests|0/4.*make.*check|4/4.*all.*passed
+forbid_3_reason:        fixture 缺失只影响对应输入驱动 case；必须保留可运行 case 并如实区分 skip 与 fail。
+forbid_3_consequence:   测试证据失真，无法判断库代码与测试数据能力边界。
+
+forbid_4_pattern:       CONFIG_SHELL.*knowledge|umask.*knowledge|\.libs.*knowledge
+forbid_4_reason:        HMDFS shell、umask 和 libtool .libs 执行机制已有独立知识条目，本条只引用其结果。
+forbid_4_consequence:   造成与 E087/E330/E011 等现有条目的重复申报。
+
+principles:             P001, P005, P013, P016
+causes:                 []
+caused_by:              []
+similar_to:             E277, E337, E058, E270, E2147
+conflicts_with:         []
+prerequisite_of:        reproducible-autotools-adaptation-of-libyal-family-packages
+
+novelty_boundary: >
+  E277 解决“缺失的 vendored 依赖需要在 build 中 staging”的构建方案；本条解决
+  “发布包已经包含完整同族源码时，如何证明它是自包含输入并拒绝错误拆依赖”的入口审计。
+  E337/E058 解决 Git 快照缺少生成文件时的 bootstrap；本条在生成文件已存在时验证
+  release archive 身份，并处理 release URL 不可用的固定 orig 镜像回退。E270 解决
+  外部 CID/基线对象仓的离线闭包；本条只处理源码包内的组件目录和 Autotools 生成物。
+  E2147 处理嵌套 fixture 计数去重；本条只提供顶层 Autotools runner 的 input 目录能力
+  分层。E087/E330/E011 的 HMDFS 执行和权限机制不作为本条新增知识。
+
+verification_evidence: |
+  libfsntfs 20251028 实证：
+  - Debian orig tarball SHA-256 为
+    9edbd1982f8868121391a35696e34c413794a5d88cd91e4ec8b183133eb577f6；
+  - 归档包含 17 个本地 libyal 组件目录及 configure/aclocal.m4/config.guess/
+    config.sub/Makefile.in；
+  - configure.ac、Makefile.am、libfsntfs/Makefile.am 和 include/libfsntfs.h.in
+    与上游提交 f8994835320b989894fe53970c721efed83df220 的对应文件一致；
+  - 未新增外部 Conan requires，且配方在缺目录时会主动失败；
+  - 真机 shadow CI 的 make check 为 2 PASS、2 SKIP、0 FAIL，test_package 为 9/9 通用断言
+    加 5/5 OHOS 专项断言；
+  - 两个 SKIP 均由发布归档不包含 input 测试数据导致，未掩盖其他失败。
+  - OHOS 专项测试仅在 `__OHOS__` 目标编译，验证非 `/tmp` 的 `TMPDIR` 临时文件读写和清理。
+
+doc_file:               knowledge/drafts/DRAFT-libfsntfs-release-archive-closure.md
+last_updated:           2026-09-14
+source_event:           libfsntfs 20251028 OHOS PC adaptation and true-device shadow CI
+authors:                codex
+source_pr:              atomgit:OpenHarmonyPCDeveloper/build_in_harmonyos/pull/9922
+source_commit:          79f9f68645bf1ef7bc444e3e8b121de382320f22
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-14
+draft:                  true
+contributor_id:         libfsntfs-20251028-release-closure

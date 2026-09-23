@@ -1,0 +1,84 @@
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E429
+trigger_tool: meson|conan
+phase: configure
+error_signature:        Checking if "[A-Za-z0-9_]+" .* runs: NO \(127\)|Error loading shared library lib[a-z0-9+_-]+\.so(\.[0-9]+)?:|ERROR: Unknown variable "[a-z0-9_]+"\.
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: meson, conan, ohos, configure, dependency
+match_keywords: meson configure, runs: NO (127), Unknown variable, Error loading shared library, LD_LIBRARY_PATH, shared=True, log4cplus, compile-and-run probe, cpp.run(), meson-native-file, dependency not found
+title: Meson 配置期 compile-and-run 探针在 OHOS/Conan 下需 host 共享依赖可见
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  meson 的 dependency()/特性探针默认为"编译并运行"：native 构建下 meson 会真实执行
+  meson-private/tmpXXXX/output.exe 并读取退出码。当被探测依赖由 Conan 以 shared=True
+  提供时，运行期需要动态加载器能在 LD_LIBRARY_PATH 下找到其 .so；而 meson setup 由
+  MesonToolchain 生成、conanbuild.sh 尚未 source，运行期环境不含 Conan 包 lib 目录。
+  加载失败返回 127，meson 记录 'runs: NO (127)'，依赖变量被判未找到，配置以
+  'Unknown variable "<dep>"' 中止。meson-log 中可见
+  'Error loading shared library lib<name>.so.N: (needed by .../meson-private/tmpXXXX/output.exe)'。
+  注意与"依赖真的没找到"区分：本模式中 find_library/pkg-config 已成功（'Run-time dependency X found: YES'），
+  失败只发生在探针运行阶段。
+affected_scope: >
+  OHOS（或任何 native 构建）下使用 meson + Conan 依赖，且上游在配置阶段对共享依赖执行
+  compile-and-run 特性探针（如 log4cplus 的初始器/版本探针、openssl 能力探针）的项目。
+verification_cmd: >
+  grep -nE 'runs: NO \(127\)|Error loading shared library' <builddir>/meson-logs/meson-log.txt
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           inject-host-dependency-runtime-path-in-generate
+rec_description: >
+  在 conanfile.py 的 generate() 中，用 conan.tools.env.Environment 遍历
+  self.dependencies 的 cpp_info.libdirs，逐个追加进 LD_LIBRARY_PATH，并用
+  env.vars(self).save_script("conanbuildenv-<name>-runtime") 落盘；该脚本会被聚合进
+  conanbuild.sh，meson.configure() 前 Conan 已 source，配置期运行探针即可解析共享依赖。
+rec_command:            env = Environment(); [env.append_path("LD_LIBRARY_PATH", d) for dep in self.dependencies.values() for d in dep.cpp_info.libdirs]; env.vars(self).save_script("conanbuildenv-kea-runtime")
+rec_auto_fix:           false
+rec_impl:               conan-recipe-helper
+
+fallback_priority:      2
+fallback_approach:      disable-probe-only-when-upstream-flag-exists
+fallback_description: >
+  仅当上游提供官方开关可跳过该运行探针时，用该开关；不要自造语义。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       (meson\.build|meson\.options).*(probe|check).*force.*(true|yes)|把 runs: NO 直接改成 YES
+forbid_1_reason:        篡改探针结果为常量会掩盖真实能力探测（如 boost TLS/stream_truncated 探测），使后续编译期才发现缺陷
+forbid_1_consequence:   配置"假绿"，错误推迟到编译期或运行期，且偏离上游语义
+forbid_2_pattern:       shared\s*=\s*False.*(仅|只为).*(探针|probe)
+forbid_2_reason:        为绕开运行探针而把依赖改为静态，会改变产物形态与依赖链，不是针对根因的修复
+forbid_2_consequence:   包 ABI/依赖链与上游不一致，下游消费者行为不可预期
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P014
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E019, E073
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-09-16
+source_event:           kea-hook-stat-cmds/3.0.3 meson setup r4: log4cplus 探针 NO (127) -> Unknown variable
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:
+
+draft: true
+contributor_id: C4CE

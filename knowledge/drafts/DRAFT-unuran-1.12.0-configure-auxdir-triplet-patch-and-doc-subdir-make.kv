@@ -1,0 +1,122 @@
+# ═══ Draft knowledge entry — 已带 configure 的 autotools 包在 OHOS 上的最小构建路径 ═══
+# Timestamp: 2026-09-20
+# Software: unuran 1.12.0
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-unuran-1.12.0-configure-auxdir-triplet-patch-and-doc-subdir-make
+trigger_tool:           autotools|conan|configure|make|clang
+phase:                  configure|build|install
+error_signature:        cannot guess build type; you must specify one|makeinfo:
+                         not found|mktemp: failed to create directory via
+                         template|confXXXXXX.*Permission denied|config.sub:
+                         cannot run|make\[2\]: .*doc.*Error 127
+severity:               3
+category:               autotools|triplet|ac-config-aux-dir|build-driver|hmdfs
+match_keywords:         AC_CONFIG_AUX_DIR, ac_aux_dir, config.guess, config.sub,
+                         aarch64-linux-ohos, HarmonyOS uname, LIBC=ohos,
+                         makeinfo, texinfo, top-level SUBDIRS, make -C,
+                         MAKEFLAGS SUBDIRS override, umask 077, mktemp -d,
+                         HMDFS setgid, jobserver FIFO, -j1
+title:                  已带 configure 的 autotools 包在 OHOS 上的最小构建路径：
+                        在 AC_CONFIG_AUX_DIR 里找三元组 helper、E007 常只需打
+                        一半、别让顶层 make 进 doc/、configure 自己的 umask 077
+
+root_cause: >
+  (a) `AC_CONFIG_AUX_DIR([autoconf])` 把 config.guess/config.sub 放进子目录，
+  只往源码根找的 E007 补丁会**静默失效**（无报错、无 warning），最终以
+  'cannot guess build type' 的表象失败，难以归因。(b) 同一个上游的 config.sub
+  与 config.guess 的 autotools 年份常不同：config.sub 可能已认识 ohos* /
+  linux-ohos*，而 config.guess 仍不认 `uname -s` = HarmonyOS 且无 __OHOS__
+  的 libc 分支 —— 四处理论改写实际只落地两处。(c) 顶层 SUBDIRS 里的 doc/ 要
+  texinfo 的 makeinfo，CI worker 干净 PATH 没有；顶层 make/install 因此整体失败，
+  尽管库早已编好。(d) 老 autoconf 生成的 configure 含 `umask 077 && mktemp -d`；
+  HMDFS 强制目录 setgid，077 产出 drwx--S---，owner 自己都写不进去（E114）。
+affected_scope: >
+  所有"发行版 release tarball"形态的 autotools 包（已带 configure 与 Makefile.in，
+  不需要 autoreconf），尤其是 configure.ac 里写了 AC_CONFIG_AUX_DIR 的；以及
+  所有顶层 SUBDIRS 含 doc/、po/、tests/ 等带额外工具链依赖目录的上游。
+verification_cmd: >
+  grep -n 'AC_CONFIG_AUX_DIR' configure.ac configure
+  find <src> -name config.guess -o -name config.sub        # 看落在哪个子目录
+  grep -c 'ohos' <src>/<aux>/config.sub                    # >0 说明只需打 config.guess 那一半
+  grep -n 'makeinfo\|texinfo' <src>/doc/Makefile.am
+  grep -c 'umask 077' <src>/configure
+rec_priority:           1
+rec_approach:           aux-dir-aware-triplet-patch-and-per-subdir-make
+rec_description: >
+  四步：(a) 三元组 helper 沿 ('.', 'autoconf', 'config', 'build-aux', 'scripts')
+  依次探测，每一处改写各带自己的 idempotent guard（如 'LIBC=ohos' not in gc），
+  anchor 未命中时 output.warning 而非静默；改写后统一 chmod 0o755。
+  (b) 已生成的 configure 里把 umask 077 全部替换成 umask 022（E114）。
+  (c) 构建用 `autotools.make(args=["-C", sub, "-j1"])` 分目录驱动，跳过 doc/
+  等只产文档的目录；**不要**用命令行 SUBDIRS= 覆盖，它会经 MAKEFLAGS 传播进
+  sub-make 并冲掉嵌套 SUBDIRS。(d) 所有 make 带 -j1（E074 jobserver FIFO）。
+rec_command: >
+  autotools = Autotools(self)
+  autotools.configure()
+  for sub in ("scripts", "src"):
+      autotools.make(args=["-C", sub, "-j1"])
+  autotools.make(target="check", args=["-C", "tests", "-j1"])
+  autotools.install(args=["-C", "src", "-j1"])
+rec_auto_fix:           true
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      autoreconf-bootstrap-instead-of-shipped-configure
+fallback_description: >
+  若改写已生成的 configure 太脆（例如 configure 被上游用非常规方式再生成），
+  退回在 build() 里跑 autoreconf -fi 自己生成 configure，再用同一套 AUX_DIR 感知的
+  三元组改写。代价：需要 tool_requires autoconf/automake/libtool，worker 上多一份
+  工具链依赖，且生成结果随 toolchain 版本漂移，不如"改 tarball 自带 configure"
+  可复现。
+fallback_command:       autoreconf -fi && ./configure --host=aarch64-linux-ohos
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-build
+
+forbid_1_pattern:       os\.path\.join\(src_dir, ["']config\.guess["']\)|只往源码根找
+                         config\.(guess|sub)
+forbid_1_reason:        AC_CONFIG_AUX_DIR 下的 helper 不在源码根；只找根会让
+                          E007 补丁静默什么都不改，无报错无 warning。
+forbid_1_consequence:   最终以 'cannot guess build type; you must specify one'
+                          失败，浪费整轮 CI，且极易误判为"E007 没生效"而不是
+                          "补丁找错了文件"。
+
+forbid_2_pattern:       顶层 make( install)?$|make SUBDIRS=
+forbid_2_reason:        顶层 SUBDIRS 含 doc/（要 makeinfo）、po/（要 gettext）
+                          等只产文档/翻译的目录，CI worker 没有这些工具；而
+                          命令行 SUBDIRS= 覆盖经 MAKEFLAGS 传播，会冲掉每层
+                          sub-make 自己的嵌套 SUBDIRS。
+forbid_2_consequence:   前者构建整体失败在 doc/；后者 install 漏装子目录里的
+                          头文件，消费者编译时才暴露。
+
+forbid_3_pattern:       把 (gnu\*|android\*|\*) 无条件改写成含 ohos\* 而不过 guard
+forbid_3_reason:        上游的 config.sub 与 config.guess autotools 年份常不同，
+                          config.sub 往往**已经**认识 ohos*；无条件插入会造出重复
+                          分支甚至破坏语法。
+forbid_3_consequence:   configure 在解析 config.sub 时出错，或三元组被判为非
+                          法，失败点离真正的补丁很远。
+
+forbid_4_pattern:       复用已有构建树重跑 make check 来数上游用例数
+forbid_4_reason:        automake parallel-tests 把已存在的各用例 .log 当作
+                          up-to-date 直接跳过，TOTAL 因此低于真实值。
+forbid_4_consequence:   上报的 rule4 用例数偏低（实测 57 vs 真值 58），触发
+                          「少报」判罚。所有数字必须来自干净的构建树。
+
+principles:             P001
+similar_to:             DRAFT-lazperf-3.4.0-tests-hardcoded-var-tmp-readonly-rootfs
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-unuran-1.12.0-configure-auxdir-triplet-patch-and-doc-subdir-make.md
+last_updated:           2026-09-20
+source_event:           archives/u/unuran/1.12.0
+
+authors:                2301_76770579
+source_pr:              11324
+source_commit:          58c547029f47f710a531d94686adfc74b3ec4878
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

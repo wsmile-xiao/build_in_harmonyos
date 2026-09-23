@@ -16,8 +16,9 @@ It uses ffmpeg, convert (ImageMagick), and gifsicle as external tools to process
 - Node.js runtime
 
 ## Version 2.4.0
-- Status: built (2026-05-28)
-- Build system: custom (npm project)
+- Status: built (2026-08-06)
+- Build system: custom (npm project, npm install --omit=dev)
+- Conan recipe: conanfile.py + conandata.yml + test_package/
 - No ELF binaries (pure Node.js)
 
 ## Source

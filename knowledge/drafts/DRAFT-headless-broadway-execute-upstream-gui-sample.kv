@@ -1,0 +1,109 @@
+# ═══ Draft knowledge entry — 上游只有交互式 GUI 示例、无自动化测试时，用 GTK3 broadway 后端（broadwayd）在无显示环境真实执行示例并构造正负用例 ═══
+# Timestamp: 2026-09-21
+# Software: libexif-gtk 0.5.0 (GTK3 控件库；任何上游仅提供 gtk_init+gtk_main 示例的 GUI 库)
+# Gate: R51 上游测试三步法（清点 → 真实运行 → 如实回填）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-headless-broadway-execute-upstream-gui-sample
+trigger_tool:           make|test|runtime|gtk
+phase:                  testing|runtime
+error_signature:        cannot open display|Gtk-WARNING \*\*: .*cannot open display|
+                         There are no automated tests to run|Nothing to be done for 'check'\.|
+                         noinst_PROGRAMS.*test
+severity:               1
+category:               testing, ohos, runtime, packaging, portability
+match_keywords:         gtk, GTK3, broadway, broadwayd, GDK_BACKEND, BROADWAY_DISPLAY, cannot open display,
+                         headless, 无显示环境, 交互式示例, noinst_PROGRAMS, make check 空跑,
+                         TESTS=, check_PROGRAMS, 上游无测试, R51, gtk_main, gtk_init
+
+title:                  上游只有交互式 GUI 示例程序（无 TESTS/check_PROGRAMS）时，
+                        用 GTK3 broadway 后端（broadwayd，免 X11/Wayland）在无显示环境真实执行示例，
+                        并补 argc 分支/无效输入等负向用例，使“上游测试实际执行”可落地且可判 PASS
+
+root_cause: >
+  GUI 库（GTK/Qt 系）的上游常见形态：只有交互式示例程序，没有自动化测试。
+  以 libexif-gtk 0.5.0 为例：`tests/Makefile.am` 里只有
+  `noinst_PROGRAMS = test-libexif-gtk`，全仓无 `TESTS=`/`check_PROGRAMS`，
+  `make check` 在每个子目录输出 `Nothing to be done for 'check'.`（exit 0，空跑）；
+  `tests/test-libexif-gtk.c` 是 `gtk_init()` → 建窗 → `gtk_exif_browser_new()`
+  → `exif_data_new_from_file(argv[1])` → `gtk_main()` 的交互式示例，无断言、无退出码语义；
+  上游 `.travis.yml` 自述 "There are no automated tests to run"。
+  于是“上游测试必须实际执行”（R51）看起来无从落地 —— 常见误判是直接写“上游无测试入口”收工，
+  或用 test_package 顶替上游统计（R51 明确禁止）。
+  阻碍在于：CI/容器无 `DISPLAY`/`WAYLAND_DISPLAY`，示例一上来 `gtk_init()` 即
+  `Gtk-WARNING: cannot open display:` 并 exit 1，看起来“根本跑不起来”。
+
+affected_scope: >
+  所有上游仅提供交互式 GUI 示例（`noinst_PROGRAMS` + `gtk_main()`）而无自动化测试的
+  GTK/Qt 桌面库在 OHOS PC 上的适配；以及一切“上游测试入口存在但需要显示后端”的场景。
+  libexif-gtk 0.5.0 实证；同仓 gtk/3.24.43 配方（broadway 后端）为该方案提供运行时前提。
+
+verification_cmd: >
+  1) 清点（先判“有没有”）：grep -n '^TESTS\|check_PROGRAMS' */Makefile.am Makefile.am ; make check
+     libexif-gtk 实测：grep 无输出（exit 1）；make check 仅 5 处 "Nothing to be done"（exit 0）
+  2) 起显示服务（gtk 包自带 bin/broadwayd）：
+     export PATH="<gtk-pkg>/bin:$PATH"; broadwayd :5 &      # HTML5 后端，无需 X11/Wayland
+     export GDK_BACKEND=broadway BROADWAY_DISPLAY=:5
+  3) 真实运行示例（存活判据）：timeout 8 ./tests/test-libexif-gtk <exif.jpg>
+     退出码 124（被 timeout 杀死）= 已进入 gtk_main 主循环 = PASS
+  4) 负向用例（覆盖示例自身的错误分支）：
+     ./tests/test-libexif-gtk                    → g_error "You need to supply exactly one file to load."（exit 133）
+     ./tests/test-libexif-gtk <无 EXIF 的 jpg>   → g_error "Could not load EXIF data from '…'"（exit 133）
+
+rec_priority:           1
+rec_approach:           headless-broadway-run-upstream-sample
+rec_description: >
+  把“上游示例程序”当作测试入口真实执行：用 gtk 包自带的 `broadwayd` 提供 HTML5 显示服务
+  （GTK3 内置 broadway 后端，OHOS 侧 gtk/3.24.43 配方即以此替代 X11/Wayland），
+  以 `timeout N` 运行示例，**退出码 124 即证明已进入主循环**（程序自身无退出码语义，
+  故用“存活”而非“返回值”作为判据）；再补参数分支与无效输入的负向用例，覆盖示例显式走到的
+  g_error 路径。全部命令/退出码/日志留存，作为 R51 的“实际运行”证据。
+  libexif-gtk 0.5.0 实测 5 个用例 5 通过 0 失败 0 跳过（3 个有效 EXIF 图片 + 1 个无 EXIF 负向
+  + 1 个无参数分支），并写入 reports/test-report.md 与 test_package/MANIFEST.yml。
+rec_command: >
+  # 1) 依赖运行环境（conan 生成的聚合 env）
+  source <deps-build>/conanrun.sh
+  # 2) 显示服务
+  export PATH="<gtk-pkg>/bin:$PATH"; broadwayd :5 > broadwayd.log 2>&1 &
+  export GDK_BACKEND=broadway BROADWAY_DISPLAY=:5
+  # 3) 正/负用例
+  timeout 8 ./tests/test-libexif-gtk <exif.jpg>            # 124 = PASS
+  ./tests/test-libexif-gtk                                 # 期望 g_error(argc) exit 133
+  timeout 8 ./tests/test-libexif-gtk <no-exif.jpg>         # 期望 g_error(no EXIF) exit 133
+  # 4) 收尾
+  kill %1
+rec_auto_fix:           false
+rec_impl:               手工执行 + 结果写入 reports/test-report.md / test_package/MANIFEST.yml（R51 申报表）
+fallback_priority:      2
+fallback_approach:      gtk-init-check-negative-only
+fallback_description: >
+  若显示服务无法启动（如 gtk 包未带 broadwayd），至少执行**不需要显示**的分支：
+  无参数/非法参数的 g_error 路径 + 示例链接/加载成功（示例能被加载器解析即证明库可消费）。
+  此时必须在报告中标注“未覆盖 GUI 主循环路径”及其技术原因，不得写成“上游无测试入口”。
+fallback_auto_fix:      false
+fallback_impl:          仅参数分支
+
+forbid_1_pattern:       Xvfb|xvfb-run
+forbid_1_reason:        OHOS PC 无 X11 服务器，Xvfb 不可用；GTK3 的 broadway 后端才是平台既定显示抽象
+                        （gtk/3.24.43 配方注释明确禁用 X11/Wayland）
+forbid_1_consequence:   引入不可用的外部依赖，CI 上必然失败
+forbid_2_pattern:       上游无测试入口（直接收工）
+forbid_2_reason:        R51：上游确无测试须附清点证据（grep/`make check` 原始输出），
+                        且不得用 test_package 统计替代上游统计
+forbid_2_consequence:   评审以“硬性不通过”拒绝（真人评审第一拒绝原因）
+
+principles:             无自动化测试 ≠ 无测试入口；示例程序是可执行的验证载体，关键是给出可判定的判据
+caused_by:              上游 GUI 库长期以“示例即文档”的方式分发；CI 无显示后端
+causes:                 适配报告中“上游测试”一栏被误填为“无入口”，或用量不足被判不通过
+similar_to:             DRAFT-tigr-3.1.0-single-file-graphics-headless-compile（相邻但相反：用编译宏剔除窗口后端做 headless 编译，不是运行）；
+                        DRAFT-x11-pkgconfig-triple（X11 后端库在三元组上的依赖问题，与本条的显示后端替代路线互斥）
+doc_file:               knowledge/drafts/DRAFT-headless-broadway-execute-upstream-gui-sample.md
+last_updated:           2026-09-21
+source_event:           libexif-gtk 0.5.0 OHOS PC 适配，上游仅 tests/test-libexif-gtk 交互式示例
+authors:                AtomCode (OpenDesk)
+source_pr:              (本 PR)
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-21

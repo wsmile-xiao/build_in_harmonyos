@@ -1,0 +1,45 @@
+#====================================================================
+# Draft: plain file named "version" in the -I source root shadows the
+#        C++17 standard header <version> and breaks every C++17 TU
+#====================================================================
+
+id:                     DRAFT-SRCROOT-PLAIN-FILE-SHADOWS-STD-HEADER
+trigger_tool:           clang++|libc++|autotools|make|automake
+phase:                  compile
+error_signature:        expected unqualified-id|version:1:1: error
+
+severity:               2
+category:               header-shadowing
+match_keywords:         version, <version>, C++17, libc++, shadowing, include path, -I, top_srcdir, dist_doc_DATA, autotools, expected unqualified-id, header search
+
+title:                  A plain non-header file named like a C++ standard header in a directory added with -I shadows the real standard header (<version>): rename or move the file out of the include root instead of adjusting standard-library includes
+
+root_cause:             C++17 added standard headers whose names are common English words (version, compare, concepts, coroutine, ...). Autotools projects routinely pass -I$(top_srcdir) so sources can include private headers as <odb/database.hxx>. libodb 2.4.0 ships a plain-text documentation file literally named "version" at the source root (listed in dist_doc_DATA). With the source root on the include path, the preprocessor resolves the transitive #include <version> (pulled in by libc++ headers such as <memory>/<new> under C++17) to that text file, parses it as a header, and the compiler dies inside it with "error: expected unqualified-id" at version:1:1 - in every C++17 translation unit. The toolchain is fine; the project's own include root shadows the standard library.
+
+affected_scope:         Any project that puts its source root (or any directory holding files named like standard headers) into -I and compiles as C++17 or later: autotools -I$(top_srcdir), hand-written Makefiles, some cmake setups. Highest-risk names are the C++17/20 header words: version, compare, concepts, coroutine, source_location, ranges - statically scan the source root for such file names before building. Verified instance: libodb/libodb-pgsql 2.4.0 (plain-text "version" doc file at both source roots).
+
+verification_cmd:       d=$(mktemp -d) && printf 'text not C++\n' > "$d/version" && printf '#include <memory>\n#include <new>\nint main(){return 0;}\n' > "$d/tu.cxx" && { clang++ -std=c++17 -I"$d" -fsyntax-only "$d/tu.cxx" ; echo "expect FAIL: expected unqualified-id, error points inside $d/version" ; clang++ -std=c++17 -fsyntax-only "$d/tu.cxx" && echo "control without -I: clean" ; }
+
+rec_priority:           1
+rec_approach:           remove-or-rename-shadowing-file-out-of-include-root
+rec_description:        Take the shadowing file out of the include search path instead of touching include flags: remove it from the source root (for autotools drop it from dist_doc_DATA and delete the file, or move it under a doc/ subdirectory, or rename it to version.txt / generate it into the build dir). The include graph stays intact, the root cause is removed, and the fix is upstreamable. In libodb/libodb-pgsql 2.4.0 the source-root "version" doc files were dropped from dist_doc_DATA and deleted in the OHOS patches, after which every C++17 TU compiled clean again.
+rec_command:            apply the patch removing the source-root version file (dist_doc_DATA + file deletion) and rebuild: conan create archives/l/libodb-pgsql/2.4.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               archives/l/libodb-pgsql/2.4.0/patches/0001-odb-cxx17-header-compat.patch (libodb dist_doc_DATA + version file deletion) and patches/0002-libodb-pgsql-cxx17-header-compat.patch (libodb-pgsql dist_doc_DATA)
+
+fallback_priority:      2
+fallback_approach:      source-root-as-quoted-include-path
+fallback_description:   Replacing -I$(top_srcdir) with -iquote$(top_srcdir) (or reordering it after the system include dirs) unblocks the build because -iquote affects only "..." includes, not <...>. Honest trade-off: this masks the collision instead of removing it - the source root can still shadow any other standard header reached via angle includes - so record it as technical debt (P-CFLAGS-001) and prefer the rec fix for deliverables.
+fallback_command:       make CXXFLAGS='-iquote$(top_srcdir) ...' as a local experiment only
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       wrap the source root in -isystem|edit or reorder the SDK libc++ headers|suppress or delete the standard header
+forbid_1_reason:        -isystem changes diagnostic and search semantics while the text file still shadows <version> for angle includes; editing SDK/sysroot headers poisons every other build and cannot ship in a recipe.
+forbid_1_consequence:   shadowing not actually fixed (the failure resurfaces under a different -std or header), polluted SDK, non-reproducible clean builds.
+
+similar_to:             "E133(include search path conflicts with SDK headers), E130(libc++ C++17-only family)"
+
+principles:             P-PATCH-001, P-CFLAGS-001, platform-agnostic-fix, real-evidence-over-assumption
+
+doc_file:               knowledge/drafts/DRAFT-srcroot-plain-file-shadows-std-header.md

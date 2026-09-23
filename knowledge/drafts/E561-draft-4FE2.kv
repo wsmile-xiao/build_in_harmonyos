@@ -1,0 +1,128 @@
+#====================================================================
+# E561-draft-4FE2.kv — HTTP Content-Encoding 透明解压导致源码归档
+#   跨下载器 SHA256 不一致
+#   实例：morse 2.7 CATB tar.gz：curl raw=6ae4a76f… vs Conan decoded=48fc1b2b…
+#====================================================================
+
+# --- frontmatter 检索字段 ---
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E561
+trigger_tool:           conan|curl|requests|urllib3
+phase:                  source|download|recipe-creation
+error_signature:        sha256 hash failed.*Provided hash:.*Computed hash:|checksum mismatch.*sha256|different sha256.*same (url|source)|expected checksum.*actual checksum
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               network, conan, packaging, security, detection
+match_keywords:         Content-Encoding, x-gzip, transparent decode, gzip,
+                        sha256, checksum mismatch, curl, requests, urllib3,
+                        tar.gz, transparent decompression, 透明解压, 哈希不一致,
+                        跨下载器, hash failed, decoded body
+title:                  HTTP Content-Encoding 透明解压导致源码归档跨下载器 SHA256 不一致的诊断与修复
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             服务端对本身已是 gzip 归档的资源返回 Content-Encoding: x-gzip，
+                        curl 默认保存传输层原始字节（gzip 封装层），而 requests/urllib3 按
+                        HTTP 语义自动解码 Content-Encoding 后交付纯 tar 流。Conan 下载器
+                        因底层客户端行为取得解码后字节；SHA256 是对字节序列计算的，封装
+                        层不同必然产生不同哈希。两个哈希不同不等于源码内容不同，但配方
+                        需要确定、可重复、跨 CI 下载器稳定的字节身份，不能将客户端偶然
+                        观察到的解码后哈希直接替换为新标准哈希。
+affected_scope:         Conan tools.files.get/download 与底层 requests/urllib3；curl/wget
+                        与 Python HTTP 客户端交叉核验；.tar.gz/.tgz/.gz 源码归档；对
+                        gzip 资源返回 Content-Encoding: gzip/x-gzip 的服务器、代理或
+                        镜像；本地 curl SHA 正确但 CI/Conan checksum mismatch；跨客户端
+                        源码真实性核验。
+verification_cmd:       curl -sS -D <HDR_FILE> -o <RAW_FILE> <URL> && sha256sum <RAW_FILE> && python3 -c "import hashlib,requests;r=requests.get('<URL>');print(r.headers.get('content-encoding'),len(r.content),hashlib.sha256(r.content).hexdigest())" && gzip -dc <RAW_FILE> > <TAR_FILE> && cmp <TAR_FILE> <DECODED_FILE>
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           content-encoding-layer-aware-source-verification
+rec_description:        切换到同一上游维护者、同一 tag/commit、无 Content-Encoding 字节
+                        歧义、能被 curl 与 Conan 下载器稳定获取的官方归档；切换前先
+                        完成三层字节模型诊断（raw/decoded/源码树），证明旧 URL 的两个
+                        哈希等价、新归档源码树与旧归档逐文件一致。
+rec_command:            curl -sS -D <HDR_FILE> -o <RAW_FILE> <URL> && sha256sum <RAW_FILE> && python3 -c "import hashlib,requests;r=requests.get('<URL>');print(hashlib.sha256(r.content).hexdigest())" && gzip -dc <RAW_FILE> | cmp - <DECODED_FILE>
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      pin-raw-byte-layer
+fallback_description:   仅当无等价官方归档可用时：在下载层显式控制 raw response 读取、
+                        关闭自动 decode，固定实际校验层级；保存响应头与原始字节证据；
+                        确保 CI、Conan 与维护工具全部工作在同一字节层，并至少用 Conan
+                        实际下载器下载两次确认字节稳定。若 recipe 标准下载器无法保证
+                        该行为，拒绝使用该 URL 而非依赖本地缓存。
+fallback_command:       curl -sS -o <RAW_FILE> <URL> && sha256sum <RAW_FILE> && python3 -c "import urllib.request,hashlib;d=urllib.request.urlopen('<URL>').read();print(len(d),hashlib.sha256(d).hexdigest())"
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       未检查响应头.*(改|更新|写入).*sha256|直接替换.*(sha256|hash)
+forbid_1_reason:        未保存/检查 Content-Encoding、Content-Type、Content-Length、ETag、
+                        重定向链就改 SHA256，会把某个客户端偶然观察到的字节层哈希固化为
+                        假标准，其他客户端继续 mismatch。
+forbid_1_consequence:   CI 与本地反复 checksum mismatch，两个"官方哈希"互相矛盾。
+
+forbid_2_pattern:       只比较文件大小|仅比较 size|只看 content-length
+forbid_2_reason:        raw gzip 与解码后 tar 流大小必然不同（gzip 压缩层），大小相同
+                        不代表同层；大小差异也可见于截断，无法定位层错位。
+forbid_2_consequence:   误判为截断/漂移，忽略真正的 Content-Encoding 层错位根因。
+
+forbid_3_pattern:       依赖 \.tar\.gz 扩展名.*判断.*字节层|按扩展名.*(假定|判断).*(gzip|压缩)
+forbid_3_reason:        扩展名只声明意图，实际字节层由响应头与下载客户端行为共同决定。
+forbid_3_consequence:   curl 验证通过而 Conan 失败（或相反），层判断永远对不上。
+
+forbid_4_pattern:       (把|将).*(所有|全部).*hash mismatch.*归因.*上游|hash mismatch.*(都是|都是).*(漂移|替换)
+forbid_4_reason:        把所有 hash mismatch 一律归因于上游漂移会掩盖传输层语义差异，两个
+                        哈希可能都对应真实数据。
+forbid_4_consequence:   误删真实上游哈希、切换非官方镜像，来源真实性证据链断裂。
+
+forbid_5_pattern:       file://|predl_cache|个人.*(本地|缓存).*tarball
+forbid_5_reason:        file://、predl_cache 或个人本地 tarball 只是把问题推迟到没有该缓存的
+                        CI 机器，不提供任何来源真实性或跨下载器字节稳定性。
+forbid_5_consequence:   本地绿 CI 红，回到初始症状且新增环境依赖。
+
+forbid_6_pattern:       (只|仅).*(比较|验证).*(能解包|可解压|tar -t).*(不|而)(不|没有)?.*源码树
+forbid_6_pattern_note:  同 forbid_6
+forbid_6_reason:        只验证能否解包不比较源码树，无法区分打包差异与源码内容漂移。
+forbid_6_consequence:   把解包成功的不同版本源码当等价归档合入。
+
+forbid_7_pattern:       (切换|使用).*(非官方|第三方|未验证).*(镜像|归档)
+forbid_7_reason:        切换非官方镜像而不验证 tag/commit 与源码树等价，等于放弃来源真实性。
+forbid_7_consequence:   来源不可信，构建产物不可复现，安全审计无法闭合。
+
+forbid_8_pattern:       无法证明来源真实性.*(继续|通过|成功)|伪造.*(成功|通过)
+forbid_8_reason:        fail-closed 边界：无法建立来源与源码树等价关系时必须终止并报告，
+                        不得伪造成功。
+forbid_8_consequence:   假绿的构建和知识条目污染下游所有依赖该源码的适配。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P013
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to:             E406, E231
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               doc/E561.md
+last_updated:           2026-09-02
+source_event:           morse 2.7 源码真实性核验
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                4FE2
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-02
+
+draft:                  true
+contributor_id:         4FE2

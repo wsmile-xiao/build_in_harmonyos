@@ -1,0 +1,116 @@
+#====================================================================
+# DRAFT-ohos-conandata-patches-silently-unapplied — conandata.yml 声明了
+#   patches 却没在配方里调用 apply_conandata_patches，补丁被导出却不生效
+# 对应文档: knowledge/drafts/DRAFT-ohos-conandata-patches-silently-unapplied.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-conandata-patches-silently-unapplied
+trigger_tool:           conan|conan create|custom
+phase:                  configuration|compilation
+error_signature:        (构建行为与未打补丁完全一致)|
+                         CXX_FLAGS.*(17|14).*(补丁已声明)|patch.*(declared|声明).*(not applied|未应用)
+
+severity:               2
+category:               conan, patch, silent-failure, packaging
+match_keywords:         apply_conandata_patches, export_conandata_patches, export_sources,
+                         conandata.yml patches, 补丁未应用, 静默失效, silent no-op,
+                         patch 不生效, conanfile 忘记调用, 补丁声明, 构建无变化
+title:                  conandata.yml 里声明了 patches 却未在配方中调用
+                        apply_conandata_patches —— 补丁会被导出但永不应用，且**不报任何错**
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             Conan 2 的补丁应用**不是自动的**：conandata.yml 的 `patches:`
+                        列表只是"声明"，真正应用需在 conanfile 里显式两步——
+                        ① `export_sources()` 内 `export_conandata_patches(self)`（把补丁
+                        纳入导出源）；② `build()` 内 `apply_conandata_patches(self)`
+                        （按序应用）。两者**缺任一步都不会报错**：补丁文件照样被打包
+                        进配方导出目录，但构建时根本没用上。症状是**构建行为与完全
+                        不打补丁一模一样**——实测 cif-tools 2.0.0 声明了 C++ 标准补丁，
+                        却因漏调 `apply_conandata_patches` 而始终以 `-std=c++17` 编译
+                        （`grep '^CXX_FLAGS' flags.make` 末尾仍是 -std=c++17），
+                        表现成"补丁写错了"而非"补丁没跑"，极易误诊并反复重写补丁。
+affected_scope:         所有用 conandata.yml 声明补丁的 Conan 2 配方；特别是从
+                        autotools 范式（`apply_conandata_patches` 常写在 build 开头、
+                        已成肌肉记忆）切到新写 CMake/自定义配方时，容易整段漏掉。
+                        与 E282（补丁 base_path 定位错）、E515/E526（strip 层级与
+                        git-style 前缀）不同层——那三条是"应用了但打不对"，本条是
+                        "**压根没应用**"。
+verification_cmd:       ① 确认配方是否真的调用：
+                          grep -n "apply_conandata_patches\|export_conandata_patches" conanfile.py
+                        # ② 应用后核对构建标志/文件内容是否真变化（决定性）：
+                        grep '^CXX_FLAGS' CMakeFiles/<target>.dir/flags.make
+                        grep -n "<补丁应改的那一行>" <build>/<被改文件>
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           call-both-hooks-and-verify-effect
+rec_description:        在配方内补全两个钩子，并**用构建产物反证补丁真的生效**：
+                        ① `def export_sources(self): export_conandata_patches(self)`
+                        ② `def build(self): apply_conandata_patches(self)` 放在
+                           configure/编译**之前**（若补丁改的是构建脚本本身，必须在
+                           configure 前应用）。
+                        ③ 加一步自校：断言补丁的目标变化确实出现（如
+                           `flags.make` 里不再有 `-std=c++17`，或目标文件某行已改），
+                           防止将来重构时又静默退回。
+                        注意顺序：若补丁改 CMakeLists.txt，apply 必须在
+                        `cmake.configure()` 之前，否则 configure 已按旧文件生成缓存。
+rec_command:            # conanfile 内：
+                        #   def export_sources(self): export_conandata_patches(self)
+                        #   def build(self):
+                        #       apply_conandata_patches(self)   # 必须在 configure 前
+                        #       cmake = CMake(self); cmake.configure(); cmake.build()
+rec_auto_fix:           false
+rec_impl:               call-both-hooks-and-verify-effect
+
+fallback_priority:      2
+fallback_approach:      inline-source-replace
+fallback_description:   若补丁只有一两行替换、且希望免去"补丁机制"的整条链路，可在
+                        `source()` 内直接读写替换（`replace()` + 写回）。代价是绕过
+                        patches/ 目录的审计（R8/PF5 的平台宏闸不再覆盖此处），因此
+                        **仅适用于纯文本、非平台宏的机械替换**，且需在 notes.md
+                        说明为何不走 patches/。
+fallback_command:       # source() 内：t = open(p).read().replace(old, new); open(p,"w").write(t)
+fallback_auto_fix:      false
+fallback_impl:          inline-source-replace
+
+forbid_1_pattern:       补丁不生效.*(重写补丁|改补丁内容|怀疑补丁写错)|
+                         反复修改 patches?/.*\.patch 内容.*(仍未生效|没有变化)
+forbid_1_reason:        在"补丁根本没被应用"的情况下反复重写补丁内容，永远不会有
+                        效果——方向错了。应先确认 `apply_conandata_patches` 是否被
+                        调用，再判断补丁内容对错。
+forbid_1_consequence:   无谓迭代（本次实测期间即因未识别此点而多轮重写补丁），
+                        且可能把本来正确的补丁改坏。
+
+forbid_2_pattern:       只在 export_sources 内.*(认为|以为).*补丁已应用|
+                         只声明 patches.*不调用.*(认为|以为).*会自动应用
+forbid_2_reason:        export 只是把补丁纳入导出源，**应用**需另行调用；二者是
+                        两个独立步骤，且缺失任一步都不报错。
+forbid_2_consequence:   补丁目录"看起来齐全"（文件确实在），但构建从未使用——
+                        最坏的静默失效形态。
+
+principles:             measure-actual-effect, upstream-compat-evidence
+
+causes:                 []
+caused_by:              []
+similar_to:             [E282, E515, E526, E254]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-conandata-patches-silently-unapplied.md
+last_updated:           2026-09-16
+source_event:           cif-tools 2.0.0 适配（conandata 声明 C++ 标准补丁，配方漏调
+                        apply_conandata_patches → CXX_FLAGS 始终 -std=c++17）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        8F02

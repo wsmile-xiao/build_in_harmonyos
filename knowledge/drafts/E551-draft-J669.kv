@@ -1,0 +1,83 @@
+draft: E551-draft-J669
+status: pending-editor-review
+title: "Qt5→Qt6 源码级 API 迁移组合方案（QML 应用移植模式库）"
+category: qt6, porting, qml
+match_keywords: >
+  QTextCodec, QStringDecoder, QStringEncoder, XmlListModel, XmlRole,
+  XmlListModelRole, QtQuick.XmlListModel, QtQml.XmlListModel, ForceIntegerMetrics,
+  KeepEmptyParts, SkipEmptyParts, qplatformdefs, setOrientationUpdateMask,
+  append(int), qmake to cmake, qt5 port qt6
+error_signature: >
+  QTextCodec::codecForName|error: 'QTextCodec' file not found|no member named 'ForceIntegerMetrics' in 'QFont'|QString::KeepEmptyParts.*was not declared|XmlRole is not a type|Cannot assign to non-existent property "xml"|Cannot assign to non-existent property "query"|module "QtQuick.XmlListModel" is not installed|no member named 'setOrientationUpdateMask' in 'QScreen'|qplatformdefs.h.*file not found|no matching member function for call to 'append'|object of type 'QStringDecoder' cannot be assigned
+root_cause: >
+  Qt6 对 Qt5 做了成体系的 API 清理：QTextCodec 整体移除（归入 QStringConverter
+  族的 QStringDecoder/QStringEncoder，但 QStringConverter 删除拷贝赋值）、
+  QtQuick.XmlListModel 模块更名 QtQml.XmlListModel 且 XmlRole 改名
+  XmlListModelRole、XPath 式 query 属性改为 elementName/attributeName、
+  内联 xml 字符串属性移除只留 source URL、QFont::ForceIntegerMetrics 移除、
+  QString::KeepEmptyParts 移除（迁移至 Qt::SplitBehavior 命名空间，改 Qt::KeepEmptyParts）、QString::append(int)
+  隐式 QChar 转换移除、QByteArray↔QString 隐式转换移除（append(QChar)/
+  indexOf(QString) 断裂）、qplatformdefs.h 不再安装、Sailfish 私有扩展
+  QScreen::setOrientationUpdateMask 不存在。上游为 qmake 工程的 Qt5 QML 应用
+  （如 fingerterm）在 ohpcd Qt 6.11 栈上需一次完成全部迁移点，且 EPERM 签名
+  校验导致 conan 沙箱外无法直接运行验证（需 binary-sign-tool 重签后实测）。
+solution: |
+  逐点迁移（fingerterm 1.4.16 实证，补丁 0001-Port-fingerterm-to-Qt6-CMake）：
+  ```cpp
+  // 1. QTextCodec → QStringConverter 族（注意：copy-assign 被删，用 unique_ptr 持有）
+  #include <QStringDecoder>
+  #include <QStringEncoder>
+  std::unique_ptr<QStringDecoder> iDecoder;   // 原 QTextCodec* iTextCodec
+  std::unique_ptr<QStringEncoder> iEncoder;
+  // 构造（charset 名或默认 UTF-8，isValid() 判无效回落）：
+  const QByteArray requested = charset.isEmpty() ? QByteArrayLiteral("UTF-8") : charset.toLatin1();
+  iDecoder = std::make_unique<QStringDecoder>(requested);
+  if (!iDecoder->isValid()) iDecoder = std::make_unique<QStringDecoder>(QStringDecoder::Utf8);
+  // 用点：toUnicode(data) → (*iDecoder)(data)；fromUnicode(s) → (*iEncoder)(s)
+
+  // 2. QString::append(int) → append(QChar(int))
+  toWrite.append(QChar(asciiVal - 0x40));
+
+  // 3. QByteArray↔QString 隐式转换断裂：混用 QChar append + QString indexOf 的
+  //    缓冲区直接改 QString
+  QString buf;  // 原 QByteArray buf
+
+  // 4. QFont::ForceIntegerMetrics 移除 → setStyleHint(QFont::Monospace, QFont::PreferDefault)
+  // 5. static const char 类内初始化的 odr-use（fmt.arg(const char&)）需类外定义
+  const char Terminal::ch_ESC;  // terminal.cpp（头文件内已有 = 0x1B 初始化）
+  ```
+  ```cmake
+  # 6. qmake .pro → CMakeLists.txt（qt_add_resources 保留 qrc，AUTOMOC 开启，
+  #    DEPLOYMENT_PATH 变量化注入编译宏）
+  set(CMAKE_AUTOMOC ON)
+  find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick)
+  target_compile_definitions(fingerterm PRIVATE
+      DEPLOYMENT_PATH="${FINGERTERM_DEPLOYMENT_PATH}" ...)
+  ```
+  ```qml
+  // 7. XmlListModel 三连改名（模块/类型/属性）：
+  import QtQml.XmlListModel           // 原 import QtQuick.XmlListModel 2.0
+  XmlListModel {
+      source: term.userMenuXmlUrl()   // 原 xml: term.getUserMenuXml()（内联串移除）
+      query: "/userMenu/item"
+      XmlListModelRole { name: "title"; elementName: "title" }  // 原 XmlRole{query:"title/string()"}
+  }
+  // C++ 侧配套：Q_INVOKABLE QUrl userMenuXmlUrl() 返回
+  // QUrl("data:text/xml;charset=utf-8," + QUrl::toPercentEncoding(xml))
+  ```
+  // 8. qplatformdefs.h → <QtGlobal>；Sailfish setOrientationUpdateMask 整段删除
+  // 9. keyloader: split(",", QString::KeepEmptyParts) → split(",", Qt::KeepEmptyParts)（Qt6 命名空间迁移，语义精确等价）
+  运行时验证（conan 沙箱外 EPERM 时）：
+  /data/service/hnp/bin/binary-sign-tool sign -inFile <bin> -outFile <bin> -selfSign 1
+  然后 QT_QPA_PLATFORM=offscreen QML2_IMPORT_PATH=<qtdeclarative包>/qml 实测。
+fallback: >
+  无 XmlListModel 数据源需求时可直接删菜单 XML 功能（fingerterm 用户菜单为
+  可选特性）；QTextCodec 真需 codecForName 语义且名字集超 QStringConverter
+  支持范围时，可 requires qtcore5compat（含 QTextCodec 兼容实现）替代手迁移。
+verify_builds: "本地 conan create（fingerterm/1.4.16 armv8 OHOS 全绿，test_package 五层验证）；设备实测 QML UI 完整加载"
+reference_impl: >
+  fingerterm 1.4.16（Sailfish Qt5 终端模拟器）→ ohpcd Qt 6.11 栈全链路移植：
+  archives/f/fingerterm/1.4.16/patches/0001-Port-fingerterm-to-Qt6-CMake-for-HarmonyOS-PC.patch
+  （9 个 API 迁移点 + qmake→CMake + 运行时实测方法；PR #9187）
+id: E551
+doc_file: doc/E551.md

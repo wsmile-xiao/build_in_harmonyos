@@ -1,0 +1,103 @@
+#====================================================================
+# DRAFT-kf6-top-level-component-negotiation.kv
+# KF6 顶层依赖协商模式：KF_DEP_VERSION 地板放宽（6.25.0→6.14.0）+ 缺失/
+#   未发布组件（KIO、DBusAddons、IdleTime）移出 REQUIRED COMPONENTS /
+#   入 OPTIONAL_COMPONENTS + 消费者目录按 TARGET / KF6_<X>_FOUND 门控
+# 触发事件: baloo 26.04.3 (upstream frameworks 6.25.0) HarmonyOS PC 适配
+#   （ohpcd 首个 KIO 缺席实例；ohpcd KF6 发布线为 6.14/6.18/6.26/6.29 混合）
+#====================================================================
+
+id:                     DRAFT-kf6-top-level-component-negotiation
+trigger_tool:           cmake|conan|find_package|CMakeLists.txt
+phase:                  configuration|dependency-resolution
+error_signature:        Could NOT find KF6KIO|missing components: KIO|
+                         Could NOT find KF6.*\(missing:|find_package\(KF6 .* REQUIRED|
+                         Found KF6: success|minimum required is|KF6_.*_FOUND|OPTIONAL_COMPONENTS
+
+severity:               2
+category:               cmake|conan|kf6|dependency|component|ohos
+match_keywords:         KF6, find_package, COMPONENTS, OPTIONAL_COMPONENTS, KF_DEP_VERSION,
+                         KIO, kioworkers, DBusAddons, IdleTime, kded, qml, Qt6::Qml,
+                         add_subdirectory, KF6_KIO_FOUND, find_package(KF6 6.25.0),
+                         6.14.0, 地板放宽, 组件可选化, 消费者目录门控, BUILD_KINOTIFY
+title:                  KF6 顶层 find_package(KF6 <ver>) 与 ohpcd 发布基线错配：KF_DEP_VERSION 地板放宽 + 缺失组件入 OPTIONAL_COMPONENTS + 消费者目录按 TARGET/KF6_<X>_FOUND 门控
+
+root_cause: >
+  KF6/KDE 库的顶层 CMakeLists 通常 find_package(KF6 ${KF_DEP_VERSION} REQUIRED
+  COMPONENTS ...)，且 KF_DEP_VERSION 与自身发布版本同号（baloo 6.25.0 → 地板
+  6.25.0）。ohpcd 发布的 KF6 基线与上游不同步：为 6.14/6.18/6.26/6.29 混合发布线
+  （kcoreaddons/kconfig/ki18n 可到 6.26.0，solid/kfilemetadata/kcrash 停 6.14.0），
+  且部分组件未发布——KIO（kio/* 在 ohpcd remote 0 匹配，CI 实测
+  "Could NOT find KF6KIO ... missing components: KIO"）；DBusAddons、IdleTime
+  只被索引服务/extractor 等本次被裁剪的消费方使用。若保持 6.25.0 地板 + REQUIRED
+  COMPONENTS 含 KIO，configure 必然失败。解法是三层协商：(1) KF_DEP_VERSION 地板
+  放宽到 ohpcd 已发布最低线（6.14.0）；(2) 仅把最小集真实需要的组件留在 REQUIRED
+  COMPONENTS，其余（KIO）移入 OPTIONAL_COMPONENTS；(3) 消费者 add_subdirectory
+  用 if(TARGET Qt6::Qml) / if(BUILD_KINOTIFY AND KF6_KIO_FOUND) 等 CMake 探测结果
+  门控，而非平台名硬编码。
+
+affected_scope: >
+  任何顶层 find_package(KF6 <ver>) 高于 ohpcd 已发布最低 KF 线，或其 REQUIRED
+  组件（KIO/DBusAddons/IdleTime 等）在 ohpcd 未全发布的 KF6/KDE 库。首个 KIO
+  缺席实例是 baloo；未来所有 KIO 依赖方与新 KF6 家族库（kio 迁移链）都会命中。
+
+verification_cmd: >
+  conan list 'kio/*' -r ohpcd          # 0 匹配 → KIO 未发布
+  grep -n -e "Could NOT find KF6" -e "Found KF6: success" <build.log>
+    # 修复后: L305 "-- Found KF6: success (found suitable version "6.14.0",
+    #   minimum required is "6.14.0") found components: CoreAddons Config I18n
+    #   Solid FileMetaData Crash missing components: KIO"；KIO 落入
+    #   "The following OPTIONAL packages have not been found"
+    #   （build9-aci-round1.log L303-305 + L352-354）
+
+rec_priority:           1
+rec_approach:           kf6-version-floor-relax-plus-optional-components-plus-consumer-gating
+rec_description: >
+  (1) 顶层 set(KF_DEP_VERSION <ohpcd 已发布最低 KF 线>)（baloo: 6.25.0→6.14.0，
+  注释说明 floor 与 KF_VERSION 解耦）；(2) find_package(KF6 ${KF_DEP_VERSION}
+  REQUIRED COMPONENTS <最小集真实需要组件>) + OPTIONAL_COMPONENTS <缺失组件如
+  KIO>；(3) src/CMakeLists 消费者目录门控：qml 模块 if(TARGET Qt6::Qml)、
+  kioworkers if(BUILD_KINOTIFY AND KF6_KIO_FOUND)；被裁剪消费方才用的
+  DBusAddons/IdleTime 一并移出 COMPONENTS 并注释理由。全程以 CMake 探测结果
+  （TARGET / KF6_<X>_FOUND / find_package OPTIONAL）门控，符合"能力探测优于平台名
+  硬编码"态度审计（R8：查漏守卫，不以 __OHOS__ 命中数替代正确性判断）。
+rec_command:            (见 archives/b/baloo/26.04.3/patches/0001-relax-kf6-and-qt6-requirements.patch 顶层 CMakeLists + src/CMakeLists 段)
+rec_auto_fix:           false
+rec_impl:               顶层/子 CMakeLists 平台适配补丁（0001，OHOS-gated apply）
+
+fallback_priority:      2
+fallback_approach:      dependency-gap-defer
+fallback_description: >
+  若目标库存在无法裁剪的 REQUIRED 组件消费者（如整库强依赖 KIO 的索引服务链），在
+  KIO 发布前只能停在"依赖缺口-部分适配"，作为【无法适配-依赖未发布】能力诉求证据
+  备选，不作为本模式推荐 fix。
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       以平台名硬编码跳过组件 find|保留 REQUIRED 缺失组件后掩盖 configure|为缺失组件伪造 find_package 成功|不加条件地 add_subdirectory 依赖缺失组件的目录
+forbid_1_reason:        find_package 结果必须真实反映 ohpcd 发布面；平台能力判断应通过
+   CMake 探测结果/TARGET/KF6_<X>_FOUND 门控，而非平台名当能力或绕过真实结果。
+forbid_1_consequence:   掩盖 KIO 缺席会让消费者在链接/运行时才暴露缺 KIO 符号；违反
+   R8"该守卫的有没有漏"与态度审计"能力探测优于平台名硬编码"两条方向。
+
+based_on_library:       baloo
+based_on_version:       26.04.3
+upstream_version:       6.25.0
+source_url:             https://download.kde.org/stable/frameworks/6.25/baloo-6.25.0.tar.xz
+adapted_for:            HarmonyOS PC (OHOS aarch64, clang 15.0.4, ohpcd KF6 混合发布线)
+evidence_files:
+  - <worktree>/archives/b/baloo/26.04.3/patches/0001-relax-kf6-and-qt6-requirements.patch   # 第 1/2 组（顶层 + src）
+  - /storage/Users/currentUser/tmp/oh-device-porting/baloo-aci/build9-aci-round1.log  # L303-305 + L352-354（KIO missing / 6.14.0 / OPTIONAL not found）
+draft_created:          2026-09-06
+status:                 draft（未 promote；E*** 由知识库主编定）
+authors:                builder/path-update baloo-26.04.3（证据见 round-1 + curation/audit 报告）
+
+# —— 与现有知识的关系（查重证据，权威面 = worktree knowledge == origin/main）——
+#   E487/E542: Qt6 LinguistTools 消费/发布 provider（kdnssd/qt6linguisttools），主题是
+#     tool_requires/LinguistTools_DIR/provider 复用，不含"版本地板放宽+组件可选化+目录门控"。
+#   E537: Conan cache 绝对 DT_NEEDED/SONAME（链接/打包层），不同主题。
+#   kpackage-6.18.0.2-ohos-adaptation-patterns（drafts）: karchive 传递依赖
+#     find_dependency(ZLIB)/路径注入，属"传递依赖可发现性"，非顶层组件协商。
+#   DRAFT-baloo-kf6-ohpcd-cmake-toolchain-cppstd: 本 run 姊妹条目（cppstd 时序），不同坑。
+#   curation-report §5 检索 B/KIO/kioworkers/KF_DEP_VERSION/OPTIONAL_COMPONENTS → 0 命中
+#   （graph/doc/drafts 均无；kio/* 0 匹配 ohpcd）。

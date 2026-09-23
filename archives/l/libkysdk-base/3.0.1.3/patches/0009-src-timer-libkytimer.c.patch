@@ -1,0 +1,111 @@
+--- a/src/timer/libkytimer.c
++++ b/src/timer/libkytimer.c
+@@ -33,33 +33,38 @@
+ #include "sdkmarcos.h"
+ 
+ static void* timerCoreThread(void* data);		//定时器循环核心
+ static KTimerNode* findNodeByFD(unsigned int fd);	//根据fd查找节点
+ static KTimerNode* newTimerNode();
+ static void freeTimerNode(KTimerNode* node);
+ static int	testNodeInList(KTimerNode* node);
+ static void	insertIntoList(KTimerNode* node);	//插入节点，按照间隔时间的顺序从小到大排序
+ static void	deleteFromList(KTimerNode* node , int locked);		//从链表中删除节点
+ static pthread_t	g_coreThreadID;		//核心循环线程
++static volatile int	g_coreThreadStop	= 0;	//核心线程退出标志（musl 无 pthread_cancel，改协作式退出）
+ static KTimerNode*	g_list	= NULL;
+ static int	epollfd;	//事件池句柄
+ static int	curTimerCounts;	//当前已注册定时器数量
+ 
+ int	kdk_timer_init();	//初始化定时器核心
+ size_t 	kdk_timer_start(unsigned int intervalms, time_handler callback, KTimerAttribute attr, KTimerType type, void* userdata, int freeOnDelete);	//注册并开始一个定时器，返回定时器句柄号
+ void	kdk_timer_stop(size_t timerfd);	//停止一个定时器
+ void	kdk_timer_reset(size_t timerfd , unsigned int intervalms);
+ void	kdk_timer_destroy() DESTRUCTOR;		//销毁定时器核心
+ 
+ #ifndef	TFD_TIMER_CANCEL_ON_SET
+ #define	TFD_TIMER_CANCEL_ON_SET	(1 << 1)
+ #endif
++
++/* epoll_wait 超时（毫秒）：有限超时使核心线程能周期性观察退出标志。
++   无定时器到期时行为不变（仅周期性唤醒，不产生回调）。 */
++#define	KTIMER_EPOLL_TIMEOUT_MS	200
+ 
+ int kdk_timer_init()
+ {
+ 	if (g_coreThreadID > 0)
+ 		return 0;
+ 
+ 	epollfd	= epoll_create1(EPOLL_CLOEXEC);
+ 	if (epollfd <= 0)
+ 	{
+ 		printf("Epoll事件池创建失败！%s\n" , strerror(errno));
+@@ -163,33 +168,30 @@
+ 			return;
+ 		}
+ 		deleteFromList(node , 0);
+ 	}
+ 	return;
+ }
+ 
+ //定时器核心线程，负责循环处理已到期的定时器
+ static void* timerCoreThread(void* data)
+ {
+-	pthread_detach(pthread_self());
+-
+ 	KTimerNode* knode	= NULL;
+ 	int read_fds = 0;
+ 
+-	while (1)
+-	{
+-		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE , NULL);
+-		pthread_testcancel();
+-		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE , NULL);
+-
++	/* OHOS/musl 未提供 pthread_cancel/pthread_testcancel/
++	   pthread_setcancelstate：改用协作式退出（destroy 置 g_coreThreadStop
++	   后 join）。线程因此保持 joinable，不再 detach。 */
++	while (!g_coreThreadStop)
++	{
+ 		struct epoll_event activeEvs[KTIMER_MAXTIMERFD];
+-		read_fds	= epoll_wait(epollfd , activeEvs , KTIMER_MAXTIMERFD , -1);
++		read_fds	= epoll_wait(epollfd , activeEvs , KTIMER_MAXTIMERFD , KTIMER_EPOLL_TIMEOUT_MS);
+ 		if (read_fds < 0)
+ 		{
+ 			//printf("epoll wait error , %s\n" , strerror(errno));
+ 			continue;
+ 		}
+ 		for (int i = 0 ; i < read_fds ; i ++)
+ 		{
+ 			knode	= activeEvs[i].data.ptr;
+ 			pthread_mutex_lock(&knode->lock);
+ 			if (!testNodeInList(knode))
+@@ -357,23 +359,27 @@
+ 	{
+ 		tval.it_interval.tv_sec	= 0;
+ 		tval.it_interval.tv_nsec	= 0;
+ 	}
+ 	timerfd_settime(timerfd , 0 , &tval , NULL);
+ 	return;
+ }
+ 
+ void kdk_timer_destroy()	//停止所有定时器，并销毁定时器核心
+ {
+-	//终止线程运行
++	//终止线程运行（musl 无 pthread_cancel：置标志 + join 等待线程自行退出）
+ 	if (g_coreThreadID > 0)
+-		pthread_cancel(g_coreThreadID);
++	{
++		g_coreThreadStop	= 1;
++		pthread_join(g_coreThreadID , NULL);
++		g_coreThreadID		= 0;
++	}
+ 
+ 	//销毁链表
+ 	KTimerNode* node	= g_list;
+ 	while (node)
+ 	{
+ 		deleteFromList(node , 0);
+ 		node	= g_list;
+ 	}
+ 
+ 	//关闭epoll池

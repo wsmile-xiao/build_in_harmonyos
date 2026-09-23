@@ -1,0 +1,57 @@
+#====================================================================
+# Draft: boost 组件包拆分方法论（boost1.84 系列：math/atomic/wave/url/contract/system...）
+# 路径 B 素材：模板 + 依赖裁剪 + 测试选型 + 裁剪参数，可跨组件复用
+# 实操实例: boost1.84-math/1.84.0 (PR !8441) + boost1.84-system/1.84.0（并行会话独立验证四步法）
+#====================================================================
+
+draft:                 E998-boost-component-split-methodology
+status:                pending-editor-review
+id:                    E998
+trigger_tool:          conan|clang|cmake
+phase:                 configuration|testing
+error_signature:       b2.*incompatible|SHELL.*common\.jam|match-command-output|boost.*component.*split|boost1\.84-[a-z]+
+
+severity:              1
+category:              build-system, portability, testing, packaging, ohos
+prescan_pattern:       libs/([a-z_0-9]+)/build/Jamfile\.v2
+match_keywords:        boost 组件包, boost1.84-math, boost 组件拆分, b2 with-math, Jamfile.v2, libs/<lib>/src, header-only 树, 组件包命名, qt5-qt3d 先例, boost1.84-system
+title:                 boost 组件包拆分方法论：从完整 boost 包底稿裁剪单组件 conan 包的通用四步法（b2 不可用时的手动编译）
+
+root_cause:            boost 完整包（如 archives/b/boost/1.84.0）在 OHOS 只能手动编译（b2 的 SHELL 执行机制不兼容，E068/E099），且体积大（头文件树 244MB）、依赖多（zlib）。下游只需单个组件时按官方 Jamfile.v2 定义裁剪为独立组件包，可显著缩小体积与依赖面；但每个组件的源清单、include 路径、依赖、测试形态都不同，需要统一流程。
+affected_scope:        boost 1.84/1.85/1.90 系列的任意组件拆分包（math/atomic/wave/url/contract/system/serialization/log_setup/program_options 等）
+error_excerpt:         clang++ --version 命令在 Boost.Build 中失败 (tools/build/src/tools/common.jam:1164 match-command-output)
+rec_approach:          组件包拆分四步法（可复用）：①【裁剪依据】读 libs/<comp>/build/Jamfile.v2 提取官方源文件清单（如 math 的 C99_SOURCES×21 + TR1_SOURCES×21，每名 3 变体 = 126 文件），逐一核对磁盘无缺失；②【配方模板】复制 boost/<ver> 完整包底稿的 conanfile.py 骨架（_compile_lib 手动 clang++ 编译 + llvm-ar 归档），替换源清单与 include 路径（注意 libs/<comp>/src 的 pch.hpp 需要 -I 该目录）；③【依赖裁剪】grep 源码引用决定 requirements（math/system 不引 zlib → requirements 为空；iostreams 才需要 zlib）；④【测试选型】上游测试优先选不依赖 boost_unit_test_framework 编译库的纯 C/独立测试（如 math 的 test_tr1.c 是纯 C——__cplusplus 未定义时走 tr1_c_macros.ipp，须 clang C 模式编译 + -lc++；system 的 lightweight_test 系 94 个直接编译运行），test_package 覆盖 header-only API + 编译库 C 接口 + CMake 组件消费链路。命名用 <boost版本前缀>-<组件>（先例 qt5-qt3d/openssl-4），与完整包互不冲突；cmake_file_name 用独立命名空间（BoostMath::）避免与 Boost:: 冲突。
+
+solution:              |
+  # 组件包拆分四步法（完整参照 archives/b/boost1.84-math/1.84.0/conanfile.py，PR !8441）
+  # ① 提取官方源清单（libs/<comp>/build/Jamfile.v2 是唯一权威）
+  grep -A25 "SOURCES = " libs/<comp>/build/Jamfile.v2
+  # math 例：C99_SOURCES 21 名 + TR1_SOURCES 21 名，每名 3 变体（无后缀/f/l）= 126 .cpp
+  # ② 配方骨架（复用底稿 _compile_lib，替换清单与 include 路径）
+  cxxflags = "-std=c++17 -stdlib=libc++ -fPIC -I<boost_root> -I<root>/libs/<comp>/src -DBOOST_ALL_NO_LIB -DBOOST_SP_NO_PTHREAD_SETCANCELSTATE"
+  self._compile_lib("boost_<comp>", src_dir, src_files, cxx, ar, cxxflags)  # clang++ -c 逐文件 + llvm-ar rcs 归档
+  # ③ 依赖重判（不照抄底稿——底稿 zlib 来自 iostreams，组件裁剪后必须重新判定）
+  grep -rl "zlib\|iostreams" libs/<comp>/ | wc -l   # 0 → requirements() 留空
+  # ④ 测试选型（绕开 boost_unit_test_framework 编译库）
+  #   纯 C 测试（math 的 test_tr1.c）→ clang -std=c99 编译 + 链接行 -lc++（库内 C++ 异常）
+  #   lightweight_test 系（system 的 94 个）→ clang++ 直接编译运行，无需任何编译库
+  # test_package 三层覆盖：header-only API + 编译库 C 接口 + find_package(X COMPONENTS ...) 消费链路
+  # 命名规范：包名 boost<版本前缀>-<组件>（先例 qt5-qt3d/openssl-4）；
+  #          cmake_file_name 独立命名空间（BoostMath:: 与完整包 Boost:: 不冲突可共存）
+
+fallback:              |
+  # 组件测试全部依赖 unit_test_framework（无独立 main 测试）时：
+  # a) 从 libs/<comp>/example/ 取示例程序编译运行（system/atomic 类组件常用）
+  # b) 或退化为 test_package 自写 API 断言（PR 正文如实说明上游测试形态限制）
+  # 组件为 header-only（Jamfile.v2 无 SOURCES 变量，如 headers/mpl）时：
+  #   跳过编译步骤，只装完整 boost/ 头文件树（参照完整包 boost_headers 组件的定义方式）
+
+verify_builds:         #40536(首轮 CI 机网络 SSL 抖动失败), #40551(第二轮全绿), #40565(第三轮全绿，含草稿 commit)
+verify_cmd:            conan create archives/b/boost1.84-<comp>/<ver>/ -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+reference_impl:        archives/b/boost1.84-math/1.84.0/conanfile.py（126 源文件→6 库完整实现，PR !8441）；boost1.84-system/1.84.0（并行会话独立验证四步法：单 TU + 94 lightweight 测试）；底稿 archives/b/boost/1.85.0/notes.md
+solution_ref:          archives/b/boost1.84-math/1.84.0/conanfile.py（完整实现）；archives/b/boost/1.85.0/notes.md（底稿方案）
+related_docs:          knowledge/operations/build-systems.md, knowledge/operations/ohos-adaptation-patterns.md
+doc_file:              doc/E998.md
+pr_ref:                8441
+contributor_id:        j669539
+last_updated:          2026-09-05

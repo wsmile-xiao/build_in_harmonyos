@@ -1,0 +1,80 @@
+#====================================================================
+# E577.kv — OHOS musl catgets() 对无效 nl_catd 哨兵值解引用导致 SIGSEGV
+#====================================================================
+# 编号说明: graph E573/E574 已占用，drafts E575/E576/E579 已占用（跨目录
+#   扫描），最小空号 = E577（E578 亦空，取 E577）。创建后回查同 ID 无并发草稿。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E577
+trigger_tool:           runtime
+phase:                  runtime
+error_signature:        segmentation fault|SIGSEGV (core dumped)|signal 11|rc=-11|crashed with signal 11
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+prescan_pattern:        catgets\s*\(\s*MsgCat|condcatgets|nl_catd
+prescan_globs:          *.c, *.h, *.cpp
+severity: 3
+category: musl, runtime, locale, porting, signal
+match_keywords: catgets, catopen, nl_catd, nl_types.h, message catalog, SIGSEGV, 排版运行崩溃, glibc 正常 musl 崩溃
+title: OHOS musl 的 catgets() 不校验描述符有效性，catopen() 失败返回的 (nl_catd)-1 哨兵被直接解引用 → 每次调用必 SIGSEGV；glibc 对无效描述符容错返回 fallback 字符串，故 glibc 交叉编译/开发机上永不触发
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: POSIX 规定 catopen() 失败返回 (nl_catd)-1（哨兵值，非 NULL）。程序常见防御写法只判 NULL（if (cat) catgets(...)），把 -1 当有效描述符传给 catgets()。glibc 的 catgets() 对无效描述符防御性容错（返回 fallback 字符串），musl（OHOS libc）直接按指针解引用 → 落到 0xFFFFFFFFFFFFFFFF 非映射页 → SIGSEGV。凡「glibc 上正常、OHOS 上一运行就段错误」且进程用到 nl_types（message catalog）即命中本模式
+affected_scope: 所有在启动/初始化阶段调用 catopen() 且未检查 (nl_catd)-1 哨兵的 C/C++ 程序（lout 3.43.4 及同类用 message catalog 做本地化错误的工具）。特征：编译零告警、glibc 开发机一切正常、OHOS 目标机上首次走到错误消息/本地化路径即崩（崩溃点分散在所有 condcatgets/catgets 调用处）
+verification_cmd: 帧指针回溯定位崩溃帧是否落在 catgets() 调用点；确认 catopen() 调用返回值未被检查；在 OHOS 目标机 strace 下看进程是否在崩溃前 openat() locale catalog 失败（ENOENT）后继续运行
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           guard-sentinel-in-macro
+rec_description:        在 catgets() 调用处（或其包装宏）同时排除 NULL 与 (nl_catd)-1 两个无效值：(cat) != (nl_catd)0 && (cat) != (nl_catd)-1 ? catgets(cat, set, msg, s) : s。不关闭 locale 功能、不改 catopen 调用、不砍本地化路径——只按 POSIX 哨兵语义补防御检查。lout 3.43.4 实测：补丁 4 行后，-r3 全量用户手册 PS 后端和 -p -r1 全量 plain 后端均正常完成；plain 的 -r2+ 截断为上游既有行为
+rec_command:            patch -p1 < patches/0001-guard-catgets-against-invalid-nl_catd-sentinel.patch
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      disable-locale-with-evidence
+fallback_description:   仅当上游代码无法打哨兵补丁（如闭源二进制）时，通过构建宏关闭 locale 路径（如 lout 的 LOCALE_ON=0）——必须以补丁/变量形式给出可解释配置并在 notes.md 记录证据；禁止用 strip 或忽略段错误掩盖
+fallback_command:       make CC="..." CCFLAGS="-O -DLOCALE_ON=0"
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       LOCALE_ON=0
+forbid_1_reason:        用关闭上游 locale 功能来规避崩溃属于砍功能换通过（最小破坏原则禁止）；哨兵检查 4 行即可保留全部功能
+forbid_1_consequence:   上游本地化能力静默丢失，功能测试若覆盖多语言路径将假阴性；评审打回
+forbid_2_pattern:       strip.*bin|ulimit -c 0|trap.*SIGSEGV.*ignore
+forbid_2_reason:        以隐藏崩溃信号（strip core/忽略信号）代替根因修复
+forbid_2_consequence:   崩溃被吞但非法解引用仍在，UB 随时转移到其他调用点；评审直接打回
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# 说明: 与 E169（argp musl 缺失）同属 musl/glibc 行为差异家族，但 E169 是
+#   符号缺失（链接错误），本条是运行期语义差异（glibc 容错 vs musl 不容错），
+#   修复点也不同（补实现 vs 补哨兵检查）。
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E577.md
+last_updated: 2026-09-15
+source_event:           lout 3.43.4 OHOS 适配：无补丁时所有排版运行 SIGSEGV（rc=-11，含最小 hello 文档）；帧指针回溯定位到 condcatgets 展开的 catgets() 调用点；加哨兵检查后 -r3 全量用户手册 PS 后端正常完成，-p -r1 全量 plain 后端正常完成；plain 的 -r2+ 截断经未打补丁原版复现，确认不是本补丁引入
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-15
+
+draft: true
+contributor_id: LOUT

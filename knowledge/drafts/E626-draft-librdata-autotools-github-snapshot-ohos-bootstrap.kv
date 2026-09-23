@@ -1,0 +1,27 @@
+#====================================================================
+# Draft E626: autotools packages shipped as GitHub archive snapshots
+#             (no `configure` in the tree) fail to bootstrap on OHOS in
+#             four independent places; each has its own fix and each is
+#             silent-looking until it is hit.
+# Task: librdata 0-20210223-git-85757dc6 (device single-end workspace)
+# Reserved knowledge id: E626
+#====================================================================
+
+id: DRAFT-E626-LIBRDATA-AUTOTOOLS-GITHUB-SNAPSHOT-OHOS-BOOTSTRAP
+trigger_tool: conan
+phase: build-bootstrap
+error_signature: 'possibly undefined macro: AM_ICONV|can''t create \./conf[A-Za-z0-9]+/subs1\.awk|could not setup config files machinery|config\.guess: unable to guess system type|Perl_my_cxt_init: symbol not found'
+severity: 2
+category: autotools-bootstrap-ohos
+match_keywords: autoreconf, AM_ICONV, gettext, iconv.m4, config.status, confXXXXXX, umask 077, E114, HMDFS, config.guess, unable to guess system type, --build, --host, aarch64-unknown-linux-ohos, PERL5LIB, conan perl, HNP perl, Cwd.so, AutotoolsDeps, libz.so stub, DT_NEEDED
+title: GitHub archive 型 autotools 包在 OHOS 上自举必踩的四连（AM_ICONV / config.status umask / config.guess / PERL5LIB）——逐条判据与修法，外加 sysroot stub 库陷阱
+root_cause: 'Four independent defects hit in order when a recipe must run `autoreconf` because the source tree is a git snapshot with no generated `configure`. (1) Upstream uses AM_ICONV, whose macro comes from GNU gettext''s iconv.m4; that file is NOT in the OHOS build-tool closure (the conan gettext package installs no m4 files, HNP ships none), so autoconf aborts with ''possibly undefined macro: AM_ICONV''. (2) The generated configure creates its temp dir with `(umask 077 && mktemp -d ./confXXXXXX)`; HMDFS forces setgid and maps the directory owner to a shared uid, so it lands as drwx--S--- owned by 20001006 while the process euid is 20020085 -- config.status then cannot write ./confXXXXXX/subs1.awk and configure dies with ''could not setup config files machinery''. (3) AC_CANONICAL_HOST runs config.guess, which creates dummy.c inside the same kind of mktemp dir, giving ''can''t create .../dummy.c: Permission denied'' and then ''unable to guess system type''. (4) Declaring tool_requires(''autoconf/2.72'') pulls conan perl/5.42.2 whose buildenv exports a PERL5LIB pointing at its own XS modules; on OHOS autoreconf/autoconf resolve to /data/service/hnp/bin/*, whose shebang is pinned to HNP perl 5.42.0, so the load fails with "Can''t load .../perl5/5.42.2/.../Cwd.so ... Perl_my_cxt_init: symbol not found". Related fifth trap: the OHOS sysroot ships libz.so only as a stub (13888 B, every symbol at one address, SONAME libz.so; /system/lib64 has no libz.so and the runtime only provides /usr/lib/libz.so.1), so an upstream AC_CHECK_LIB([z],[deflate]) succeeds and writes DT_NEEDED libz.so, which cannot be loaded at run time.'
+affected_scope: Any OHOS/HarmonyOS recipe whose source tarball is a git archive snapshot without configure (GitHub archive/<sha>.tar.gz). Also any recipe that lets upstream AC_CHECK_LIB probe a library the OHOS sysroot only ships as a stub (libz.so here; check with readelf -d on the sysroot file and on the produced .so).
+verification_cmd: cd <src> && autoreconf -fi ; grep -c 'umask 077 && mktemp' configure ; grep -n 'AM_ICONV\|iconv.m4' configure.ac ; readelf -d <pkg>/lib/*.so | grep -E 'NEEDED|SONAME'
+rec_priority: 1
+rec_approach: four-step-recipe-bootstrap-fix
+rec_description: '(a) Patch configure.ac: replace AM_ICONV with AC_CHECK_HEADERS([iconv.h], [], [AC_MSG_ERROR(...)]) plus AC_CHECK_FUNCS([iconv_open iconv iconv_close], [], [AC_MSG_ERROR(...)]) -- OHOS musl libc provides iconv, and the hard-fail semantics are preserved. (b) After autotools.autoreconf(), rewrite the generated configure in build(): drop the ''umask 077 &&'' prefix from the mktemp -d branch and replace ''(umask 077 && mkdir "$tmp")'' with ''mkdir "$tmp"''; raise if the pattern is gone so the workaround cannot rot silently. (c) Append --build=aarch64-unknown-linux-ohos and --host=aarch64-unknown-linux-ohos to AutotoolsToolchain.configure_args (automake 1.18''s config.sub normalises the triplet; build==host keeps configure native so AC_CHECK_LIB really links and runs). (d) tool_require only automake/1.18 + libtool/2.5.4 and rely on HNP''s autoconf 2.72, otherwise conan perl poisons PERL5LIB. Additionally call AutotoolsDeps(self).generate(): AutotoolsToolchain alone injects no -I/-L/-l for dependencies.'
+rec_command: "python3 - <<'PY'   # (b) only; full recipe bootstrap is in the .md / reports\nimport io\np = \"configure\"\nd = io.open(p, encoding=\"utf-8\").read()\nd2 = d.replace('tmp=`(umask 077 && mktemp -d \"./confXXXXXX\") 2>/dev/null`',\n               'tmp=`mktemp -d \"./confXXXXXX\" 2>/dev/null`')\nd2 = d2.replace('(umask 077 && mkdir \"$tmp\")', 'mkdir \"$tmp\"')\nassert d2 != d, \"E114 pattern not found in configure\"\nio.open(p, \"w\", encoding=\"utf-8\").write(d2)\nPY"
+rec_auto_fix: false
+prescan_pattern: \(umask 077 && (mktemp -d|mkdir) "?\$?\{?tmp|AM_ICONV
+prescan_globs: configure.ac,configure.in,configure,config.status,Makefile.am,autogen.sh

@@ -1,0 +1,62 @@
+#====================================================================
+# DRAFT-conan-patch-hunk-exact-line-offset — Conan 2 apply_conandata_patches 按补丁 hunk 头行号精确匹配，区别于 GNU patch 模糊 offset
+# Source event: libjpeg9 9f 适配 round-01（E007 config.guess 补丁跨版本移植，@@ 头沿用旧行号导致 conan create 失败）
+# 姊妹条: DRAFT-conan-patch-cross-version-cumulative-hunks（connect-proxy 1.105，PR #9036）——同机理第一层实例 + 多补丁累计态第二层
+#====================================================================
+
+id:                     DRAFT-conan-patch-hunk-exact-line-offset
+trigger_tool:           conan|apply_conandata_patches|patch_ng
+phase:                  build
+error_signature:        Failed to apply patch: .+\.patch|hunk no\.[0-9]+ doesn.t match source file at line|source file is different
+
+severity:               2
+category:               conan, patch, patch-ng
+match_keywords:         apply_conandata_patches, hunk, does not match source file, exact line, offset, fuzz, GNU patch, dry-run, ConanException, conandata.yml
+title:                  Conan 2 apply_conandata_patches 按补丁 hunk 头行号精确匹配（区别于 GNU patch 模糊 offset/fuzz），移植重做补丁必须把 @@ 头行号对准目标文件实际行号
+
+root_cause:             Conan 2.x 经 patch_ng 应用 conandata.yml 注册的补丁时，先按 hunk 头 @@ -N 声明的旧文件行号做精确匹配，不匹配即告失败（日志形态：hunk no.1 does not match source file at line N → source file is different → ConanException: Failed to apply patch）。GNU patch 则按上下文在整文件范围搜索（fuzz/offset），行号偏差 ±2 仍可应用。因此「GNU patch --dry-run 通过」不能证明 Conan 可应用：跨版本移植/重做补丁（锚点内容相同、行号不同，如把 E007 config.guess 补丁移植到另一版本源码包）时，@@ 头沿用旧文件行号会只在 Conan 路径失败。
+affected_scope:         所有以 apply_conandata_patches + conandata.yml patches 应用补丁的 Conan 2.x 配方；尤其是同族跨版本移植单补丁与手写 unified diff 的场景。与 E526 同属 Conan 补丁管线语义坑且互为补充：E526 管 strip=0 剥离层级语义，本条管 hunk 行号精确匹配语义，pre-CI 校验须同时镜像两者。多补丁顺序应用的累计态行号问题属姊妹条 DRAFT-conan-patch-cross-version-cumulative-hunks 第二层，本条不覆盖。
+verification_cmd:       自包含最小复现探针（无需跑 conan）：grep -m1 "^@@" 补丁文件 得 hunk 起点行号 N 与首个 context 行；对目标文件执行 sed -n "Np" 目标文件，结果必须与该 context 行逐字节一致（剥去 diff 前缀空格）。注意 GNU patch --dry-run 通过不构成判据；最终判据是在干净 source_folder 实际调用 apply_conandata_patches 或 conan create。
+
+rec_priority:           1
+rec_approach:           rebase-hunk-header-to-target-file
+rec_description:        以目标源码文件实际行号重写补丁 @@ 头：grep -n 定位锚点，把 hunk 起始行号改为「锚点前的 context 行数」对应的精确值，因增删行同步更新新旧行计数；随后在干净源码树用 apply_conandata_patches（或 conan create）实测应用。写补丁时同时满足 E526 的 strip=0 语义（git format-patch 风格 a/ b/ 前缀可自动剥离）。
+rec_command:            最小字面示例（P=补丁文件，F=目标源码文件，以本次 libjpeg9 实证值为样例）：grep -m1 "^@@" P  →  读出 N=191；sed -n "191p" F 与 sed -n "4p" P 两条输出逐字节比对（4 = hunk 头之后首个 context 行在补丁内的行号）；修正：sed -i "s|@@ -193,6 +193,17 @@|@@ -191,6 +191,17 @@|" P；终判：在干净 source_folder 实际调用 apply_conandata_patches（或 conan create）。
+rec_auto_fix:           false
+rec_impl:               portability-patch
+
+fallback_priority:      2
+fallback_approach:      apply-with-gnu-patch-then-regenerate
+fallback_description:   若手头只有行号漂移的旧补丁：先在原始源码副本用 GNU patch（允许 offset/fuzz）应用成功，再用 diff -u 原始文件 已应用文件 重新生成 hunk 头行号精确的补丁并替换原补丁；重生成后仍须按 verification_cmd 探针与实际应用双重验证。
+fallback_command:       cp -r src pristine && cd src && patch -p1 -i 旧补丁 && cd .. && diff -u pristine/src/目标文件 src/目标文件 > 重新生成的补丁
+fallback_auto_fix:      false
+fallback_impl:          patch-regeneration
+
+forbid_1_pattern:       patch --dry-run.*(通过|PASS).*(即|视为|等于).*(可应用|验证通过)
+forbid_1_reason:        GNU patch 模糊 offset 会掩盖 hunk 头行号偏差，dry-run 结论与 Conan patch_ng 精确匹配语义不一致。
+forbid_1_consequence:   本地校验绿灯、conan create 报 ConanException: Failed to apply patch，失败后置到 CI。
+
+forbid_2_pattern:       跨版本复制补丁未改 @@ 行号|沿用旧文件行号
+forbid_2_reason:        同族不同版本源码包锚点内容相同但行号不同，@@ 头行号必须按目标文件重定位。
+forbid_2_consequence:   Conan 精确匹配失败，补丁无法应用，构建中断。
+
+principles:             P001, P003, P011
+
+causes:                 []
+caused_by:              []
+similar_to:             [E526, E475, E279, DRAFT-conan-patch-cross-version-cumulative-hunks]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-conan-patch-hunk-exact-line-offset.md
+last_updated:           2026-09-15
+source_event:           libjpeg9 9f 适配 round-01：E007 config.guess 补丁自 libjpeg/10（2024 版）移植到 jpeg-9f（2021 版），@@ -193 头沿用旧文件行号（实际锚点在 191）；GNU patch --dry-run 通过，conan create 报 ConanException: Failed to apply patch: patches/0001-config.guess.patch（证据 ci/round-01/full.log:179，前驱 WARN 逐条列出 hunk no.1 does not match source file at line 193 与 expected/actual 行）；@@ 头改为精确行号 -191 后 round-02/03 conan create 全绿。与 connect-proxy 1.105（PR #9036，姊妹条）构成同类两实例互证。
+
+authors: GoliWie <GoliWie@noreply.gitcode.com>
+source_pr: 交付时由主编回填
+source_commit: 合并后回填
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-15

@@ -1,0 +1,119 @@
+#====================================================================
+# DRAFT-gnupg-family-min-libgpg-error-version-varies-per-library
+#   —— GnuPG 家族各库对 libgpg-error 的最低要求不同，且声明变量名有两套
+# 对应人类文档: knowledge/drafts/DRAFT-gnupg-family-min-libgpg-error-version-varies-per-library.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9637 libksba 1.8.1 / PR #9638 pinentry 1.3.3 适配
+#
+# 收录标准说明（2026-09-12 按评审反馈瘦身）：
+#   只保留**非直觉**的部分 —— ① 各库下限差异大的实测数据；② 两套变量名导致的漏检。
+#   已删除"不要按同族推断"一类常识性论述与相应 fallback。
+# 与既有条目的关系:
+#   DRAFT-libksba-1.6.7.1-gnupg-family-autotools-version-mapping —— 讲该家族移植的
+#   四类坑（版本映射 / config.guess+musl / gpgrt-config / gl 目录边界），
+#   **未涉及"各库最低依赖版本要求不同"**（实测交叉过滤命中 0）。本条为其补充。
+#====================================================================
+
+id:                     DRAFT-gnupg-family-min-libgpg-error-version-varies-per-library
+trigger_tool:           configure|autotools|conan
+phase:                  dependency-scan
+error_signature:        .*\(at least version [0-9.]+ is required\)|
+                         configure: error: libgpg-error is too old|
+                         libgpg-error.*is too old|
+                         AM_PATH_GPG_ERROR.*failed
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               dependency, autotools, gnupg, versioning, configure
+match_keywords:         NEED_GPG_ERROR_VERSION, NEED_GPGRT_VERSION,
+                         NEED_LIBASSUAN_VERSION, AM_PATH_GPG_ERROR,
+                         libgpg-error 版本, 最低版本要求,
+                         minimum required version, gnupg 家族,
+                         version too old, dependency floor
+title:                  GnuPG 家族各库对 libgpg-error 的最低要求不同（1.16 / 1.28 / 1.56），且声明变量名有两套——只 grep 一种变量名会漏检最高要求
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             GnuPG 家族（gnupg / libksba / pinentry / libassuan / npth …）
+                         共用 libgpg-error 作基座，但**各库声明的最低版本彼此独立**。
+                         实测（2026-09-12，逐个读 configure.ac）：
+
+                         | 库 | 声明变量 | 最低要求 | 行 |
+                         |----|---------|---------|----|
+                         | gnupg 2.5.22    | `NEED_GPGRT_VERSION`     | **1.56** | :60 |
+                         | libksba 1.8.1   | `NEED_GPG_ERROR_VERSION` | **1.28** | :61 |
+                         | pinentry 1.3.3  | `NEED_GPG_ERROR_VERSION` | **1.16** | :239 |
+                         | pinentry 1.3.3  | `NEED_LIBASSUAN_VERSION` | 2.1.0    | :256 |
+
+                         ⚠️ **本条的核心：两套变量名。** gnupg 用
+                         `NEED_GPGRT_VERSION`，libksba / pinentry 用
+                         `NEED_GPG_ERROR_VERSION` —— 二者最终都喂给**同一个**
+                         `AM_PATH_GPG_ERROR` 宏。因此
+                           `grep NEED_GPG_ERROR_VERSION` 会**完全漏掉 gnupg 的 1.56**
+                         （反向亦然），而漏掉的恰好是**全族最高要求**。
+                         后果：依赖版本定得过低 → configure 阶段报
+                         `*** (at least version 1.56 is required.)` 硬失败。
+                         另一侧代价同样存在：若反向以最高要求为全族基准，则会让
+                         本可用现存 1.55 的库也被迫等待新版本发布。
+affected_scope:         OHOS（及任何从源码构建）适配 GnuPG 家族任一组件时；
+                         批量适配"共享基座库的软件族"时同类问题可能出现。
+verification_cmd:       # 两套变量名都要搜（缺一会漏检）
+                         grep -nE 'NEED_(GPG_ERROR|GPGRT|LIBASSUAN)_VERSION' <src>/configure.ac
+                         # 确认被哪个宏消费（判断是否硬约束）
+                         grep -nE 'AM_PATH_(GPG_ERROR|LIBASSUAN)' <src>/configure.ac
+                         # 与仓库现有版本比对
+                         conan search 'libgpg-error/*' -r=ohpcd
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           grep-both-var-names-then-pick-minimal-satisfying-version
+rec_description:        ① 对每个待适配库，从其 `configure.ac` 读最低要求 ——
+                            **两套变量名都搜**
+                            （`NEED_GPGRT_VERSION` **与** `NEED_GPG_ERROR_VERSION`，
+                             以及 `NEED_LIBASSUAN_VERSION` 等）；
+                         ② 与 ohpcd 现有版本比对，列成"库 → 最低要求 → 仓库现状 →
+                            是否需要新版本"表；
+                         ③ 只对确实不满足的库补新版本依赖；能满足的库直接用现有版本。
+                         记录口径：把该表写进适配方案，后续维护者无需再逐个推断。
+rec_command:            # 逐库（在各自源码目录内执行）
+                         grep -nE 'NEED_(GPG_ERROR|GPGRT|LIBASSUAN)_VERSION' configure.ac
+                         # 实测汇总
+                         #   gnupg 2.5.22   NEED_GPGRT_VERSION=1.56      → 需 1.61
+                         #   libksba 1.8.1  NEED_GPG_ERROR_VERSION=1.28  → 现有 1.55 即可
+                         #   pinentry 1.3.3 NEED_GPG_ERROR_VERSION=1.16  → 现有 1.55 即可
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只 grep NEED_GPG_ERROR_VERSION|grep NEED_GPG_ERROR_VERSION 即可
+forbid_1_reason:         gnupg 用 NEED_GPGRT_VERSION（另一套变量名），只搜前者会
+                         **完全漏掉** gnupg 的 1.56 —— 而它恰是全族最高要求
+forbid_1_consequence:    依赖版本定得过低 → configure 阶段硬失败
+forbid_2_pattern:       同族.*(统一|都一样).*版本|按家族.*推断.*版本
+forbid_2_reason:         实测各库下限差异极大（1.16 / 1.28 / 1.56），不存在族级统一值
+forbid_2_consequence:    要么以最高要求为全族基准（让本可满足的库也等待新版本发布），
+                         要么照抄某库而让另一库 configure 报 too old
+
+principles:
+similar_to:             DRAFT-libksba-1.6.7.1-gnupg-family-autotools-version-mapping
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-12
+source_event:           libksba/1.8.1（PR #9637）与 pinentry/1.3.3（PR #9638）适配：
+                         逐库读 configure.ac 得三档最低要求（gnupg 1.56 / libksba 1.28 /
+                         pinentry 1.16）；结论：libksba 与 pinentry 用 ohpcd 现存的
+                         libgpg-error/1.55 即满足，**只有 gnupg 需要 1.61**（前置由
+                         PR #9612 承担）。两套变量名（NEED_GPGRT_VERSION vs
+                         NEED_GPG_ERROR_VERSION）是漏检主因。
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9637
+source_commit:          1b341094b
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-12
+
+draft:                  true

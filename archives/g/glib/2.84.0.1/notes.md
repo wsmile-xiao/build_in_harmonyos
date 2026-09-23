@@ -106,3 +106,47 @@ conan create archives/g/glib/2.84.0.1 \
 
 **日期**: 2026-07-26
 **状态**: 配方启用上游 meson 套件；验收目标 `Ok: 312 / Fail: 0 / Skipped: 5`
+
+## Q3 libintl 定性（2026-09-02，结论 A — 环境专属）
+
+产物 `libglib-2.0.so` `NEEDED libintl.so.8` + UND `g_libintl_*` 由**包内 vendored
+proxy-libintl** `lib/libintl.so.8`（导出 g_libintl_*）解析，干净 LD_LIBRARY_PATH 下
+test_probe/dlopen 全通过，产物自洽。仅当机器装有 gettext（2026-08-05，
+`/storage/Users/currentUser/usr/local/lib/libintl.so.8`，导出 libintl_* 而非 g_libintl_*）
+且其目录在 LD_LIBRARY_PATH 中位于包 lib 之前时，运行时被遮蔽 → `g_libintl_*: symbol not found`。
+配方不改、版本不升（2.84.0.1）。验证记录见草稿
+`DRAFT-glib-2.84.0.1-gettext-libintl-ld-library-path-shadow.kv`。
+---
+
+**编译结束**: 2026-09-02 23:33
+**最终状态**: built
+
+## 测试闭环实测（2026-09-09，原生 OHOS worker）
+
+conan create 全绿实测（完整日志 `reports/conan-create.log`）：
+
+- **1385/1385 编译单元全部完成**；产物含 glib/gobject/gmodule/gthread/gio/girepository 六模块 .so + vendored libintl.so.8，`.codesign` 段实测存在（binary-sign-tool 自签）。
+- **上游 meson 套件**（`meson test --timeout-multiplier=16 --no-rebuild --no-suite=failing`，HarmonyOS uname 分支命中）：
+  - 注册 354（`meson-info/intro-tests.json` 实数）→ 34 项 `can_fail: harmonyos`（failing suite：glib 11 + gio 15 + core/cpp 8）→ **320 实跑**
+  - **`Ok: 312 / Expected Fail: 3 / Fail: 0 / Skipped: 5`**（与 manifest test_results 申报值逐项一致）
+  - EF 3 = 上游 C++ 标准探测 xfail（compiler 标准支持/非数值 "2b"）；Skip 5 = 上游 g_test_skip（4×overflow 需 size_t 边界 + /error/new-valist/invalid 非 x86_64）
+  - mutex/rwlock/1bit-mutex（B 类 can_fail）本次实测实际通过
+- **test_package 2/2**：`OK: g_strdup` + `OK: dlopen libglib-2.0.so`。
+- **验证环境修复（非配方缺陷）**：本地 profile 需前置 `/system/lib64`——binary-sign-tool `NEEDED libc++.so`（`__h` 命名空间，仅系统真 so 提供）；SDK `aarch64-linux-ohos/libc++.so` 是链接器脚本 `INPUT(-lc++_shared)`，运行期加载器不认，前置遮蔽后 sign-tool 报 86 个 `__h` 符号 not found（exit 127）。系统 `libc++_shared.so` 与 SDK 同为 `__n1` 命名空间，无遮蔽冲突。仓库 CI profile（无 aarch64-linux-ohos 前置路径）不受此问题影响。
+
+**验证状态**: conan create 全绿（build + 上游套件 + test_package）
+
+## CI worker 环境差异补强（2026-09-09 深夜，PR #9183 第 5 轮 CI）
+
+PR #9183 首轮真实构建（#43100）暴露 3 项 CI-only 失败（本地原生 worker 全过）：
+
+| 测试 | 本地实测 | CI worker 表现 | 处理 |
+|---|---|---|---|
+| `glib:mapping` | OK 0.27s | TIMEOUT 480.13s（mmap/msync 慢路径挂死） | `can_fail: harmonyos`（E215 模式） |
+| `glib:testing` | OK 8.39s（43 subtests） | TIMEOUT 480.12s（g_test fixtures 挂死） | `can_fail: harmonyos` |
+| `glib:unix` | OK 7.18s（20 subtests） | ERROR SIGABRT（资源受限沙箱） | `can_fail: harmonyos` |
+
+- can_fail 标记扩至 **37 处**（34 + 3），实跑口径 **354 → 37 排除 → 317**（309 OK + 3 EF + 5 SKIP + 0 Fail + 0 Timeout，本地复验实测汇总行）
+- patch 修改仅涉 `patches/0002`（conanfile.py/conandata.yml 的 sha 声明与结构不变——L0j 对比仅覆盖 conanfile.py/conandata.yml，patch 内容不在 R37 版本占用对比范围）
+- CI 实际执行时长 715s（下载+1385 编译+测试至 291/320），排除 3 项后全程在 3600s 默认预算内
+- 注：同晚 main 曾被 nanoflann PR #8486 的根目录遗留文件 `pr_body_final.md` 污染（22:14-23:18），触发 CI G0e 根目录白名单对**全平台新 PR**的系统性阻塞（G0e 读 `git ls-files` 即 index，而 checkout-pr 的 `git apply` 不更新 index——删除该文件的 PR 同样被拦）；平台管理员 force push main（c84a9cdc2e）清理后恢复

@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-gulrak-filesystem-1.5.8-hmdfs-file-creation-limit-test-ledger -
+# OHOS/HMDFS 文件创建类平台能力限制对 filesystem 类库上游测试的影响
+# （hard-link/FIFO/mknod/socket 被禁 + chmod 权限位归一化）
+# → 上游测试失败的正确分类与双口径统计
+#====================================================================
+
+id:                     DRAFT-gulrak-filesystem-1.5.8-hmdfs-file-creation-limit-test-ledger
+trigger_tool:           ctest|make check|filesystem|std::filesystem|ghc::filesystem|link|mkfifo|mknod|chmod
+phase:                  upstream-test|testing|qa
+error_signature:        Operation not permitted|
+                         fs\.op\.create_hard_link.*FAILED|
+                         fs\.op\.copy - copy.*Failed|
+                         is_block_file.*Failed|is_fifo.*Failed|
+                         is_socket.*Failed|fs\.op\.permissions.*Failed|
+                         hard_link_count.*Failed
+
+severity:               2
+category:               ohos, hmdfs, filesystem, testing
+match_keywords:         HMDFS, hard link, create_hard_link, mkfifo, fifo, mknod, block device,
+                         character device, socket, AF_UNIX, bind, chmod, permission bits,
+                         perms, std::filesystem, ghc::filesystem, Operation not permitted,
+                         FileTypeMixFixture, is_block_file, is_fifo, is_socket, test ledger,
+                         双口径, source_declared_total, executable_total
+title:                  OHOS/HMDFS 文件创建类平台能力限制组合（hard-link/FIFO/mknod/socket 被禁 + chmod 权限位归一化）→ filesystem 类库上游测试的正确分类与双口径统计
+
+root_cause:             |
+  OHOS PC 的 HMDFS 文件系统对部分 POSIX 文件创建/权限操作存在既有平台限制：
+  1) `link()`（硬链接）、`mkfifo()`（FIFO）、`mknod()`（块/字符设备）、`socket(AF_UNIX)+bind()`
+     全部返回 EPERM（"Operation not permitted"）——实测命令 ln/mkfifo/mknod/python sock.bind 均确认；
+  2) `chmod()` 权限位被归一化（实测 chmod 700 → 760），只读检测、resize_file 等依赖精确
+     权限位的语义与 POSIX 不同。
+  对 std::filesystem / ghc::filesystem 类库，上游测试中的 create_hard_link、copy 的
+  create_hard_links 分支、FileTypeMixFixture（is_block_file/is_character_file/is_fifo/
+  is_socket/is_regular_file/is_symlink/is_directory）、permissions 等用例在 OHOS 上
+  必然失败或无法构造 fixture。这是平台能力限制（上游用例在 OHOS 不可运行的真实技术原因），
+  不是当前库缺陷，不能通过库补丁改变，也不得伪写为通过。
+
+affected_scope:         所有以文件系统操作/文件类型判定为主体的 C/C++ 库（std::filesystem 实现、
+                        ghc::filesystem、filesystem 封装库）在 OHOS PC 的测试诊断与统计
+verification_cmd:       ln a b; echo link_rc=$?; mkfifo f; echo fifo_rc=$?; mknod b b 0 0; echo mknod_rc=$?; touch p; chmod 700 p; stat -c '%a' p; ctest --output-on-failure
+
+rec_priority:           1
+rec_approach:           platform-limit-honest-ledger
+rec_description:        按 R51 如实统计：全量枚举独立上游用例（source_declared_total），实际执行
+                        并记录每项结果；平台限制项计入分母但如实标注"平台能力限制不可运行"
+                        并附实测命令/退出码/errno 证据；按双口径同时给通过率
+                        （executed_passed_total/source_declared_total 与当前配置可执行集通过率）；
+                        不得把平台限制项写成失败（库缺陷）或已通过，也不得从分母中剔除。
+rec_command:            |
+  ctest -N          # 枚举注册项
+  ctest --output-on-failure   # 实际运行，记录失败项
+  # 平台能力实测（作为失败原因证据）：
+  ln a b 2>&1; mkfifo f 2>&1; mknod c c 0 0 2>&1
+  python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.bind('u.sock')"
+  touch p; chmod 700 p; stat -c '%a' p
+rec_auto_fix:           false（平台限制不可修，记录即止）
+rec_impl:               honest-test-ledger
+
+fallback_priority:      2
+fallback_approach:      error-code-surfacing-test
+fallback_description:   若库自身暴露创建类 API，可加平台专项测试验证"HMDFS 上创建操作经
+                        error_code 如实返回、不崩溃"（如 test_ghc_fs.cpp 对 create_hard_link
+                        断言 ec 非零），把平台限制转为可验证的库行为断言。
+fallback_command:       clang++ -std=c++17 -I<src>/include test_ghc_fs.cpp -o t && ./t
+fallback_auto_fix:       true
+fallback_impl:
+
+forbid_1_pattern:        把平台限制项伪写为通过|把不可运行项从分母剔除|把平台限制写成库缺陷并返工|
+                        以"没环境"为由拒绝运行|单写实际执行通过率替代全量通过率|把 ParseAndAddCatchTests
+                        未注册（名称含转义引号）的用例写成失败或已通过
+forbid_1_reason:         平台限制是真实技术原因，必须如实计入分母并在 PR 说明；伪写/剔除/误分类
+                        违反 R51 双口径统计与诚实回报原则；uninstantiated 用例（如 R02 发现的
+                        TEST_CASE 名含转义引号致 ParseAndAddCatchTests 无法注册）须单列为
+                        uninstantiated（非失败非通过），不得冒充注册数或通过数。
+forbid_1_consequence:    测试统计失真被 AI Review/CI 判 hard fail（R51 为真人评审第一拒绝原因）。
+
+principles:
+
+causes:                 [E046, E024, E076, E050]
+caused_by:              []
+similar_to:             [E046, E024, E076, E050, E052]
+conflicts_with:         []

@@ -1,0 +1,232 @@
+#====================================================================
+# DRAFT-ohos-perl-script-package-conan-adaptation
+#   —— OHOS 上适配「纯 Perl 脚本包」：shebang 改写 + conan perl 的 @INC 陷阱
+# 对应人类文档: knowledge/drafts/DRAFT-ohos-perl-script-package-conan-adaptation.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9650 triehash 0.3.1 适配（pure Perl 脚本，无编译）
+#
+# 与既有条目的关系（差异边界，已逐条核对）:
+#   DRAFT-ohos-autotools-maintainer-noregen —— 也提到「self.run 会重载
+#     conanbuildenv 覆盖 os.environ」与「命令内内联 PERL5LIB」。但其语境是
+#     **automake 版本冲突**（conanbuildenv 的 1.16 排在 1.18 前 → version
+#     mismatch），解法是内联 `PERL5LIB="$AM_PFX/share/automake-1.18"`。
+#   本条目讲的是**另一个成因**：conan 的 perl 包内建 @INC 被判成
+#     `//lib/perl5/...`（编译期前缀解析为空 → 双斜杠根路径，全部不存在），
+#     导致**连核心模块**（strict / PerlIO::encoding）都加载不了；
+#   且给出「选 lib 目录不能逆序取第一个、须以 strict.pm 判定」与
+#   「桩目录放 perl 包装器（`-I` 优先于 PERL5LIB）」两项该条目未涉及的判据/手段。
+#   二者成因与判据不同，互为补充；本条不重复其 automake 版本冲突部分。
+#   DRAFT-ohos-intltool-toolchain-stub —— 讲 intltool 工具链 stub（XML::Parser
+#     stub + PERL5LIB 前置），面向 **autotools 构建期工具缺失**；本条面向
+#     **纯 Perl 脚本包的分发**（shebang/安装/消费者调用），角度不同
+#     （实测该条目对 self.run 提及 0）。
+#====================================================================
+
+id:                     DRAFT-ohos-perl-script-package-conan-adaptation
+trigger_tool:           conan|perl|sh
+phase:                  packaging
+error_signature:        Unknown PerlIO layer "encoding"|
+                         Wide character in (printf|print) at .*\.pl line|
+                         Can't locate .*\.pm in @INC.*//lib/perl5/|
+                         /usr/bin/perl: (No such file or directory|not found)|
+                         env: ['\"]?perl -w['\"]?: No such file or directory|
+                         @INC entries checked: //lib/perl5/
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               perl, conan, packaging, shebang, ohos, fhs
+match_keywords:         perl, shebang, env perl, /usr/bin/perl, PERL5LIB, @INC,
+                         PerlIO, encoding, Wide character, //lib/perl5,
+                         package_info, runenv_info, buildenv_info,
+                         纯脚本包, script package, chmod +x, tool_requires
+title:                  OHOS 上适配纯 Perl 脚本包：shebang 改 env perl（并去掉 -w）+ 补 conan perl 缺失的 PERL5LIB（否则核心模块都加载不了）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             纯 Perl 脚本包（单文件 .pl，无编译）在 OHOS 上适配时会踩两类
+                         互相独立的坑：
+
+                         **① shebang 的两处问题（一次改对，否则装出的脚本不可执行）**
+                         · 上游写死 `#!/usr/bin/perl`（或 `#!/usr/bin/perl -w`），而
+                           **OHOS 无 /usr/bin/perl** —— perl 由 ohpcd 的 perl 包提供，
+                           位于包内 `bin/`。故须改为 `#!/usr/bin/env perl`，由 PATH 解析
+                           （仓库内已有 24 处采用该写法，为主流惯例）。
+                         · ⚠️ **不能只把 /usr/bin/perl 换成 /usr/bin/env perl 而保留
+                           `-w`**：`#!/usr/bin/env perl -w` 是**错误写法**。内核只把
+                           shebang 首个空白之后的**全部内容当作一个参数**传给解释器，
+                           于是 env 收到的是单个字符串 `"perl -w"`，它会去找一个名叫
+                           `perl -w` 的程序 → 失败。必须**一并去掉 `-w`**（脚本内多已
+                           `use warnings`，无功能损失）。
+
+                         **② conan 的 perl 包内建 @INC 是坏的，必须自己补齐模块路径**
+                         实测：`env -u PERL5LIB <perl_pkg>/bin/perl -e 'print "@INC"'`
+                         得到
+                           `//lib/perl5/site_perl/5.42.2  //lib/perl5/5.42.2 ...`
+                         即**编译期前缀被解析成了空串 → 双斜杠根路径**，全部**不存在**。
+                         后果：**连核心模块都加载不了** ——
+                           `env -u PERL5LIB <perl> -e 'require strict'`
+                           → `Can't locate strict.pm in @INC`
+                         故不能裸用该 perl，必须显式提供 `lib/perl5/<版本>` 及其
+                         arch 子目录。
+                         典型表现（triehash 实测）：
+                           · `Unknown PerlIO layer "encoding"` —— triehash.pl 用
+                             `:encoding(utf8)`，而 PerlIO::encoding 未被 @INC 覆盖；
+                           · 连带大量 `Wide character in printf` 警告 → **污染被测程序
+                             的标准输出**，使上游测试的期望输出 diff 失败。
+                         ⚠️ 关键判读：此时失败**不是被测程序的功能缺陷**，而是构建期
+                         perl 环境不完整；若误判成"库在 OHOS 有问题"会走错方向。
+
+                         ⚠️ **不要指望靠环境变量（PERL5LIB）把这件事送进去** ——
+                         实测 conanbuildenv **确实**导出了完整的 PERL5LIB（含各子目录），
+                         其写法是
+                           `export PERL5LIB="<conan 的长列表>${PERL5LIB:+:$PERL5LIB}"`
+                         注意这是**追加**（把已有值接在后面），**不是覆盖**；但因
+                         conan 自己的长列表排在前面、且其中混有损坏的 `//lib/perl5`
+                         条目，实测**仍会失败**（报 PerlIO/XS 加载错误）。
+                         结论：与其和 env 的**顺序/作用域**较劲，不如**绕开 env**。
+                         ★ **`-I` 优先于 PERL5LIB**（实测：给错的 PERL5LIB，但只要
+                         `-I<正确目录>`，核心模块即可加载）—— 这正是下面「perl 包装器」
+                         稳健的根据。
+                         ⚠️ 另一个坑：定位 perl 的 lib 目录**不能"逆序取第一个"** ——
+                         `lib/perl5` 下同时存在版本目录（如 `5.42.2`，含核心模块）与
+                         `site_perl`；逆序会把 `site_perl` 排在前面，而它**不含核心
+                         模块**（无 strict.pm），照样失败。应以「**是否含 strict.pm**」
+                         判定版本目录。
+affected_scope:         OHOS（及任何用 conan 分发脚本包）上适配**纯 Perl 脚本包**时；
+                         也适用于任何"在 recipe 内 self.run() 调用 conan 提供的
+                         解释器/工具"的场景（同族的 PYTHONPATH 等问题同理）。
+                         典型库：triehash、各类 *.pl 单文件工具、把 Perl 当运行时的
+                         脚本包。
+verification_cmd:       # ① shebang 是否被正确改写（且没有 -w 残留）
+                         head -1 <installed>/bin/<tool>
+                         # ② perl 的 @INC 是否指向不存在的 //lib/perl5（症状根源）
+                         <perl_pkg>/bin/perl -e 'print "$_\n" for @INC'
+                         # ③ 核心模块能否加载（决定性判据）
+                         <perl_pkg>/bin/perl -e 'require strict; print "strict OK\n"'
+                         <perl_pkg>/bin/perl -MPerlIO::encoding -e 'print "PerlIO OK\n"'
+                         # ④ 哪个目录真的含核心模块（用于选目录，勿逆序取首个）
+                         ls <perl_pkg>/lib/perl5/*/strict.pm
+                         # ⑤ 桩/包装器是否生效
+                         PATH=<stub>:$PATH perl -e 'print "wrapper OK\n"'
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           env-perl-shebang-no-w-plus-explicit-perl5lib-wrapper
+rec_description:        四步，缺一不可：
+                         ① **shebang 改 `#!/usr/bin/env perl` 且去掉 `-w`**（注意不是
+                            `env perl -w`），并把它做成 conandata 的 portability patch；
+                            在 build() 里**自校**首行是否真被改写（防补丁静默失效后
+                            装出不可执行的脚本）。
+                         ② **显式补齐 perl 的模块搜索路径**：不要寄望于 conanbuildenv
+                            的 PERL5LIB（实测它确实导出了长列表，但其排在前面的
+                            `//lib/perl5` 条目是坏的 → 仍失败）。应先自行在 perl 包内
+                            定位 `lib/perl5/<版本>`：**以是否含 `strict.pm` 判定**
+                            版本目录（不要按名称逆序/字典序取第一个），再带上其
+                            arch 子目录（如 aarch64-linux-thread-multi）。
+                         ③ **用「桩目录内的 perl 包装器」把路径钉死**：
+                            在桩/临时目录写一个可执行 `perl`，内容为
+                            `exec "<真 perl>" -I<lib1> -I<lib2> ... "$@"`，并把它所在
+                            目录**前置到 PATH**。脚本 shebang 经 `env perl` 命中的即
+                            我们的包装器 —— 而 **`-I` 的优先级高于 PERL5LIB**（实测：
+                            即便 PERL5LIB 给的是错值，只要 `-I` 正确，核心模块即可
+                            加载），故该做法对环境里的 PERL5LIB 取值/顺序不敏感。
+                            再内联 `PATH="<stub>:<perl_bin>:$PATH"` 确保 shebang 能
+                            找到包装器即可（PERL5LIB 不必再内联）。
+                         ④ **包装/分发**：把脚本装为 `bin/<tool>`（去掉 `.pl` 后缀）并
+                            `chmod +x`；`package_info` 声明 bindirs=["bin"]；
+                            可执行文件类包按 R38 建软件级 commands.json。
+                         记录口径：把「为何要去掉 -w」「为何要自带 perl 包装器（`-I`
+                         优先于 PERL5LIB）」写进配方注释 —— 否则后续维护者很容易
+                         "顺手"把 `-w` 加回去或删掉包装器，从而装出不可执行的脚本。
+rec_command:            # ① shebang patch（conandata 的 patches 里）
+                         #   -#!/usr/bin/perl -w
+                         #   +#!/usr/bin/env perl
+                         # ② build() 里定位 perl lib（以 strict.pm 判定版本目录）
+                         #   base = f"{perl_pkg}/lib/perl5"
+                         #   for name in sorted(os.listdir(base)):
+                         #       vdir = f"{base}/{name}"
+                         #       if os.path.isfile(f"{vdir}/strict.pm"): libs.insert(0, vdir)
+                         #       else: libs.append(vdir)
+                         # ③ 桩目录写 perl 包装器 + 前置 PATH
+                         #   save(stub/"perl", f'#!/bin/sh\nexec "{perl}" {" ".join("-I"+d for d in libs)} "$@"\n')
+                         #   chmod(stub/"perl", execute=True)
+                         # ④ 内联 env 执行（注意引号）
+                         #   run(f'PERL5LIB="{stub}:{":".join(libs)}" '
+                         #       f'PATH="{stub}:{perl_bin}:$PATH" sh ./tests/run-tests.sh')
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      skip-runtime-execution-and-report-honestly
+fallback_description:   若确实无法补齐 perl 运行环境（例如目标环境根本没有可用的
+                         perl 包），则**不要**伪装测试通过：把 test_package 的运行时
+                         执行如实标记为 SKIP 并在 manifest 的 test_note 说明原因
+                         （R34：绝不把"跑不了"当"通过"）。
+                         注意区分：本条的场景通常**可以**修好（补齐 PERL5LIB 即可），
+                         故应先尝试 ①②③ 再考虑改用本备选。
+fallback_command:       # 确认是否真无 perl 可用
+                         command -v perl || echo "no perl"
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       #!/usr/bin/env perl -w|env perl -w
+forbid_1_reason:          内核把 shebang 首个空白之后的全部内容当作**一个参数**传给
+                          解释器 → env 收到单个字符串 "perl -w" 并去找名为 "perl -w"
+                          的程序 → 必然失败（装出的脚本不可执行）
+forbid_1_consequence:     脚本在消费者侧直接报 "no such file or directory"，
+                          且因发生在内核 exec 阶段、错误信息不含脚本名，极难定位
+forbid_2_pattern:       逆序.*取.*lib/perl5|sort.*reverse.*perl5|perl5.*第一个.*目录
+forbid_2_reason:          lib/perl5 下同时有版本目录（含核心模块）与 site_perl
+                          （**不含 strict.pm**）；按名称排序/逆序取首个可能选中
+                          site_perl → 依然加载不了核心模块
+forbid_2_consequence:    以为"已经给了 PERL5LIB"却仍报模块缺失，排查方向被误导
+forbid_3_pattern:       依赖 conanbuildenv 的 PERL5LIB.*(即可|就够)|PERL5LIB 已注入.*无需处理
+forbid_3_reason:         实测 conanbuildenv **确实**导出了长 PERL5LIB（且是**追加**而非
+                          覆盖，尾部为 ${PERL5LIB:+:$PERL5LIB}），但其排在前面的是坏的
+                          `//lib/perl5/...` 条目 → 实测仍失败（PerlIO/XS 加载错误）
+forbid_3_consequence:    误以为"conan 已经帮我们注入了"，于是不再自行补齐路径，
+                          问题以"注入了却仍报模块缺失"的形式反复出现、排查无门
+forbid_4_pattern:       (Unknown PerlIO|Wide character).*库.*(缺陷|不兼容|有问题)
+forbid_4_reason:         这两个症状来自**构建期 perl 环境不完整**（内建 @INC 为坏的
+                          //lib/perl5 路径、缺核心模块），不是被测程序的功能缺陷
+forbid_4_consequence:    误判为库本身在 OHOS 上不可用而放弃适配/上报错误结论
+
+principles:
+similar_to:             DRAFT-ohos-autotools-maintainer-noregen, DRAFT-ohos-intltool-toolchain-stub
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-12
+source_event:           triehash/0.3.1（PR #9650）适配实测：
+                         · 上游 shebang `#!/usr/bin/perl -w` → OHOS 无 /usr/bin/perl；
+                           改为 `#!/usr/bin/env perl` **并去掉 -w** 后方可执行。
+                           实测对照：`#!/usr/bin/env perl -w` → `env: exec perl -w:
+                           No such file or directory`（证实该写法必败）
+                         · conan perl 包（perl/5.42.2）的内建 @INC 实测为
+                           `//lib/perl5/site_perl/5.42.2  //lib/perl5/5.42.2 ...`
+                           （编译期前缀解析为空 → 双斜杠根路径，**均不存在**）；
+                           `env -u PERL5LIB <perl> -e 'require strict'`
+                           → `Can't locate strict.pm in @INC`（连核心模块都加载不了）
+                         · 未补齐路径时 triehash.pl 的 :encoding(utf8) 报
+                           `Unknown PerlIO layer "encoding"` 并连带 Wide character
+                           警告污染输出 → 上游用例 diff 失败（非被测程序缺陷）
+                         · ⚠️ 更正：conanbuildenv **确实**导出了长 PERL5LIB（追加式
+                           `${PERL5LIB:+:$PERL5LIB}`，**不是覆盖**），但其排在前面的
+                           `//lib/perl5` 条目是坏的 → 实测仍失败。故问题不是"没注入"，
+                           而是"注入的内容里含坏路径"
+                         · ✅ 决定性依据：**`-I` 优先于 PERL5LIB** —— 实测给错的
+                           PERL5LIB + 正确的 `-I`，核心模块仍可加载。据此采用
+                           「桩目录 perl 包装器（带 -I）」+ 内联 PATH，上游 7/7 用例通过
+                         · 选目录须以 strict.pm 判定（逆序会选中无核心模块的 site_perl）
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9650
+source_commit:          5d04c87fd
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-12
+
+draft:                  true

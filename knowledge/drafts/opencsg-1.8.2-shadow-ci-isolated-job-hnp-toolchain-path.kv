@@ -1,0 +1,63 @@
+# ═══ Draft knowledge entry — 真机隔离 job 构建 cmake 不可用：hnp 工具链不在 PATH（Error 127） ═══
+# Software: opencsg 1.8.2
+# Gate: device shadow CI (conan create, ohos-aarch64, isolated job)
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: opencsg-1.8.2-shadow-ci-isolated-job-hnp-toolchain-path
+severity: 3
+category: ci|ohos|toolchain
+trigger_tool: conan|cmake
+phase: build
+
+keywords: cmake inaccessible or not found, Error 127, /data/service/hnp/bin, hnp toolchain, isolated job, run-conan-heavy, ohos-test-runner --path, PATH
+
+error_signature: /system/bin/sh: cmake: inaccessible or not found|Error 127 while executing|ConanException: Error 127
+
+match_keywords: cmake, hnp/bin, PATH, isolated job, run-conan-heavy, ohos-test-runner, Error 127, tool_requires cmake, L0i
+
+root_cause: |
+  CI 目标机上 hnp 工具链的 cmake / make / ninja / clang 位于 /data/service/hnp/bin，
+  但该目录不在隔离 job 的运行 PATH 上。ohos-prepare-isolated-conan-job.sh 生成的
+  run-conan-heavy.sh 只带 $HOME/ohpc-ci-shadow/python-user/bin:$HOME/.local/bin:$PATH，
+  未注入 /data/service/hnp/bin；ohos-test-runner.sh 的默认 TOOL_PATH 也不含它。
+  于是 conan create 在 build() 里调用 CMake().configure() 时，/system/bin/sh 找不到 cmake，
+  以 Error 127 失败。L0 全通过、源码下载与补丁应用都正常，失败点纯在工具查找。
+
+rec_approach: inject-hnp-bin-into-PATH-and-runner---path
+rec_description: |
+  按既有可用 job 的惯例调用 runner，把 /data/service/hnp/bin 同时放进导出的 PATH 和
+  ohos-test-runner.sh 的 --path；不要改基础设施脚本。绝对不要在库里加
+  tool_requires("cmake/...")：ohpcd 制品仓没有 cmake recipe 且 CI 禁用了 conancenter，
+  L0i 依赖发布检查会硬失败。
+rec_command: |
+  export PATH=$HOME/usr/local/bin:$HOME/.local/bin:/data/service/hnp/bin:/usr/bin:/bin:$PATH
+  ohos-test-runner.sh \
+    --user <user> --lib <lib> --task <task> --mode heavy \
+    --workdir "$REPO" \
+    --path "$HOME/usr/local/bin:$HOME/.local/bin:/data/service/hnp/bin:/usr/bin:/bin" \
+    -- "$HOME/usr/local/bin/zsh" -f -c \
+       'zsh -f ci/conan/setup.sh && zsh -f ci/conan/build_and_test.sh "$CI_PACKAGES"'
+rec_auto_fix: false
+
+affected_scope: |
+  所有在真机隔离 job 中用 conan create 构建、且构建系统需要 cmake/make/ninja 的库。
+  典型症状是 configure 阶段 Error 127，而非编译错误。
+
+verification_cmd: |
+  # 修正前后对比：先确认 hnp bin 里有 cmake，再确认 CI 运行 PATH 是否含它
+  command -v cmake || PATH=/data/service/hnp/bin:$PATH command -v cmake   # 后者应输出 /data/service/hnp/bin/cmake
+  # 修正后日志应出现 "-- Configuring done" / "Build files have been written" 而非 Error 127
+
+evidence: |
+  opencsg 1.8.2 真机 shadow CI：
+  - round1（job 生成脚本调用）与 round2 均在 cmake.configure() 处
+    "/system/bin/sh: cmake: inaccessible or not found" → Error 127。
+  - 改为显式注入 hnp PATH（export PATH + runner --path）后 round3 全绿：
+    L0/L1/L2/L4/L5 通过、exit code 0、test_package 9+2 断言全 [ok]。
+  - 同设备其它可用 job 的 run 脚本均可看到同一模式（PATH 与 --path 里含 /data/service/hnp/bin）。
+
+authors:
+  - codex
+source_pr:
+source_commit:
+draft_date: 2026-09-11

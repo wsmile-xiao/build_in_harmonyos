@@ -1,0 +1,76 @@
+#====================================================================
+# DRAFT-celero-2.10.0-conandata-patches-export-sources-hook.kv
+# conandata 补丁导出钩子用 export_sources()：exports() 不是合法方法、
+# export() 钩子里 export_folder 为 None 直接 TypeError
+# 触发事件: celero 2.10.0 适配真机 shadow CI 第 4/5 轮 L1 失败
+#（commits 2d514f3e03 / e4d0bc430c），第 6 轮改 export_sources 后通过
+#====================================================================
+
+id:                     DRAFT-celero-2.10.0-conandata-patches-export-sources-hook
+trigger_tool:           conan|conan create|conan export
+phase:                  export|build
+error_signature:        ERROR.*Error in export\(\) method.*export_conandata_patches|
+                         TypeError.*expected str, bytes or os\.PathLike object, not NoneType|
+                         'exports' shouldn't be a method, use 'export\(\)' instead
+
+severity:               2
+category:               conan|recipe|patches|conandata|api-misuse
+match_keywords:         export_conandata_patches, export_sources, def exports,
+                         shouldn't be a method, use 'export()', TypeError expected str,
+                         os.PathLike, not NoneType, conandata patches, patch_file,
+                         conan export, Copied .patch, Conan 2, 补丁导出
+title:                  Conan 2 conandata 补丁的正确导出钩子是 export_sources()：
+                        exports() 会被拒（只能做属性），export() 里 export_folder 尚未
+                        绑定（None）令 export_conandata_patches 抛 TypeError
+
+root_cause: >
+  AI 写补丁导出时的自然演进链两步全错：① `def exports(self):` ——Conan 2 里
+  exports 只能是类属性（文件匹配器），定义为方法在配方加载即报
+  "exports shouldn't be a method, use 'export()' instead"；② 改成 `def export(self):`
+  后，export_conandata_patches 内部 os.path.join(conanfile.export_folder, patch_file)
+  抛 "TypeError: expected str, bytes or os.PathLike object, not NoneType"——
+  export() 钩子调用时 export_folder 尚未绑定。正确钩子是 export_sources()：
+  此时导出目录已就绪，补丁作为"导出源"复制进配方缓存（conan export 输出
+  Copied 1 '.patch' file 即为成功指纹）。rocksdb7 等在库配方是现成先例。
+affected_scope: >
+  所有 Conan 2.x 配方中经 conandata.yml patches + export_conandata_patches 分发
+  补丁的场景（本仓库带补丁配方的主流模式）。错误发生在 conan create 最早的
+  export 阶段，任何下游编译配置都还没开始。
+verification_cmd: >
+  conan export <recipe-dir>    # 本地即可，无需工具链；成功指纹：
+  #   Copied N '.patch' file(s): 0001-xxx.patch, ...
+  # 失败指纹（本条错误面）：
+  #   ERROR ... 'exports' shouldn't be a method / Error in export() method ... TypeError
+
+rec_priority:           1
+rec_approach:           export-sources-hook
+rec_description: >
+  标准三件套（与 rocksdb7 先例一致）：
+  imports: from conan.tools.files import apply_conandata_patches, export_conandata_patches
+  export 钩子: def export_sources(self): export_conandata_patches(self)
+  source/build: source() 里 get() 之后 apply_conandata_patches(self)
+  改完先本地 conan export 验证导出（秒级、无工具链依赖），再上真机/CI，
+  避免烧一整轮 shadow CI 才发现钩子错。
+rec_command: >
+  conan export archives/<x>/<lib>/<ver>/ && grep "Copied.*patch" -
+fallback_priority:      2
+fallback_approach:      manual-copy-exports
+fallback_description:   exports 类属性手工列补丁文件（exports = "patches/*.patch"）+
+                        source() 里 patch(self, base_path(), patch_file) 手工应用。
+                        可用但绕开标准生命周期，conandata patch_type 元数据失去意义，不推荐。
+fallback_command:       exports = ["patches/*"]
+fallback_auto_fix:      false
+
+similar_to:             DRAFT-libstatgrab-0.92.1-conandata-patch-lifecycle（同一生命周期的
+                        相邻错误面：补丁未在 conandata 声明导致不导出/不应用；本条是钩子用错，
+                        两条签名互补）
+
+verified_on:            celero 2.10.0（真机 shadow CI；本地 conan 2.x export 亦验证）
+verification_result: >
+  第 4 轮（2d514f3e03）："exports shouldn't be a method" L1 fail；第 5 轮
+  （e4d0bc430c）："Error in export() method ... TypeError ... NoneType" L1 fail；
+  第 6 轮改 export_sources() 后配方导出与补丁应用正常，第 7 轮
+  （run 20260908T022643Z）G0/L0/L1/L4/L5 全 pass（L4 patches clean）。
+limitations: >
+  - 仅覆盖"钩子选错"错误面；补丁应用失败（patch 冲突/路径 base_path）见 E254/E282。
+  - conan 1.x 语法不同（exports_sources 属性），本条针对 Conan 2.x。

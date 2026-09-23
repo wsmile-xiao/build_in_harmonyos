@@ -1,10 +1,112 @@
---- notcurses-3.0.17.orig/src/lib/fd.c	2025-10-29 00:02:11.000000000 +0800
-+++ notcurses-3.0.17.work/src/lib/fd.c	2026-04-16 17:43:51.217051875 +0800
-@@ -425,7 +425,9 @@
+--- a/src/lib/fd.c
++++ b/src/lib/fd.c
+@@ -28,6 +28,10 @@
+ static int
+ ncfdplane_destroy_inner(ncfdplane* n){
+   int ret = close(n->fd);
++#ifndef HAVE_PTHREAD_CANCEL
++  close(n->stoppipe[0]);
++  close(n->stoppipe[1]);
++#endif
+   free(n);
+   return ret;
+ }
+@@ -35,7 +39,7 @@
+ // if pidfd is < 0, it won't be used in the poll()
+ static void
+ fdthread(ncfdplane* ncfp, int pidfd){
+-  struct pollfd pfds[2];
++  struct pollfd pfds[3];
+   memset(pfds, 0, sizeof(pfds));
+   char* buf = malloc(BUFSIZ + 1);
+   pfds[0].fd = ncfp->fd;
+@@ -45,11 +49,27 @@
+     pfds[1].fd = pidfd;
+     pfds[1].events = NCPOLLEVENTS;
+   }
++#ifndef HAVE_PTHREAD_CANCEL
++  // no pthread_cancel: also poll the stop pipe so ncfdplane_destroy() can
++  // wake a thread parked in poll() (e.g. a follow-mode fd that never EOFs).
++  pfds[fdcount].fd = ncfp->stoppipe[0];
++  pfds[fdcount].events = POLLIN;
++  const int totalfds = fdcount + 1;
++#else
++  const int totalfds = fdcount;
++#endif
++  bool stopped = false; // only ever set when !HAVE_PTHREAD_CANCEL
+   ssize_t r = 0;
+ #ifndef __MINGW32__
+-  while(poll(pfds, fdcount, -1) >= 0 || errno == EINTR){
++  while(poll(pfds, totalfds, -1) >= 0 || errno == EINTR){
+ #else
+-  while(WSAPoll(pfds, fdcount, -1) >= 0){
++  while(WSAPoll(pfds, totalfds, -1) >= 0){
++#endif
++#ifndef HAVE_PTHREAD_CANCEL
++    if(pfds[fdcount].revents){ // destroy requested
++      stopped = true;
++      break;
++    }
+ #endif
+     if(pfds[0].revents){
+       while((r = read(ncfp->fd, buf, BUFSIZ)) >= 0){
+@@ -74,7 +94,7 @@
+       break;
+     }
+   }
+-  if(r <= 0 && !ncfp->destroyed){
++  if(!stopped && r <= 0 && !ncfp->destroyed){
+     ncfp->donecb(ncfp, r == 0 ? 0 : errno, ncfp->curry);
+   }
+   if(ncfp->destroyed){
+@@ -108,8 +128,20 @@
+   ncplane_set_scrolling(ret->ncp, true);
+   ret->fd = fd;
+   ret->curry = opts->curry;
++#ifndef HAVE_PTHREAD_CANCEL
++  // no pthread_cancel: fdthread() also polls this pipe so that
++  // ncfdplane_destroy() can wake it up cooperatively.
++  if(pipe2(ret->stoppipe, O_CLOEXEC | O_NONBLOCK)){
++    free(ret);
++    return NULL;
++  }
++#endif
+   if(thread){
+     if(pthread_create(&ret->tid, NULL, ncfdplane_thread, ret)){
++#ifndef HAVE_PTHREAD_CANCEL
++      close(ret->stoppipe[0]);
++      close(ret->stoppipe[1]);
++#endif
+       free(ret);
+       return NULL;
+     }
+@@ -140,7 +172,18 @@
+       n->destroyed = true; // ncfdplane_destroy_inner() is called on thread exit
+     }else{
+       void* vret = NULL;
++#ifdef HAVE_PTHREAD_CANCEL
+       ret |= cancel_and_join("fdplane", n->tid, &vret);
++#else
++      // no pthread_cancel: wake the poll()ing thread via the stop pipe,
++      // then join it. donecb is suppressed on this path (upstream relies
++      // on cancellation, which also skips it).
++      char c = 1;
++      if(write(n->stoppipe[1], &c, sizeof(c)) < 0){
++        ret = -1;
++      }
++      ret |= pthread_join(n->tid, &vret);
++#endif
+       ret |= ncfdplane_destroy_inner(n);
+     }
+   }
+@@ -425,7 +468,12 @@
      // then exits. don't try to cancel the thread in that case; rely instead on
      // killing the subprocess.
      if(n->pidfd < 0){
-+#ifndef __OHOS__
++#ifdef HAVE_PTHREAD_CANCEL
++      // cancellation covers the corner case of a grandchild holding the
++      // pipe open; without pthread_cancel the join relies on the SIGKILL'd
++      // subprocess closing its end of the pipe (EOF).
        pthread_cancel(n->nfp->tid);
 +#endif
        // shouldn't need a cancellation of waittid thanks to SIGKILL

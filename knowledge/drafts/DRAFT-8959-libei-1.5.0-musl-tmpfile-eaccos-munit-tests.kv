@@ -1,0 +1,72 @@
+#====================================================================
+# DRAFT-8959-libei-1.5.0-musl-tmpfile-eaccos-munit-tests — musl tmpfile() 硬编码只读 /tmp 恒 EACCES，C 测试框架需代码级 $TMPDIR 替代
+# 触发事件: libei 1.5.0 适配（munit 测试全用例 ERROR "unable to create buffer for stderr"）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-8959-libei-1.5.0-musl-tmpfile-eaccos-munit-tests
+trigger_tool:           meson test|ctest|make check
+phase:                  testing
+error_signature:        unable to create buffer for stderr: Permission denied|tmpfile\(\) 返回 NULL|EACCES.*tmpfile|tmpfile: Permission denied
+
+severity:               2
+category:               ohos|testing|libc|meson|portability
+match_keywords:         tmpfile, EACCES, Permission denied, munit, /tmp,
+                         read-only, EROFS, musl, TMPDIR, stderr buffer,
+                         fork mode, 测试基建, 单元测试 ERROR
+
+title:                  Replace tmpfile() with a $TMPDIR unique-file fopen+unlink fallback in C test helpers when musl's tmpfile() fails with EACCES on OHOS
+
+topic: >
+  OHOS 沙箱 /tmp 只读（E002 已知），但 E002 的"设 TMPDIR 环境变量"方案
+  对 musl 的 tmpfile() 无效：musl tmpfile() 硬编码尝试 /tmp 路径且不读
+  TMPDIR 环境变量，任何调用 tmpfile() 的 C 代码恒返回 NULL/EACCES。
+  受影响的高发场景是 C 测试框架与测试辅助代码：munit 用 tmpfile() 捕获
+  子进程 stderr（fork 模式前置条件），测试源码用 tmpfile() 获取临时 fd
+  测 fd 传递。表现为"全部测试用例 ERROR，0% skipped"而非个别失败。
+
+root_cause:             musl libc 的 tmpfile() 实现硬编码生成 /tmp/tmpfileXXXXXX 形态路径（glibc 会按 TMPDIR/tmp 环境变量优先），OHOS 沙箱 /tmp 只读（EROFS/EACCES），tmpfile() 恒返回 NULL。测试框架（munit）在 fork/执行每个用例前无条件调用 tmpfile() 捕获 stderr 缓冲，失败即整用例 ERROR；测试代码自身的 tmpfile() 调用（仅取临时 fd）同样失败触发断言。环境变量 TMPDIR 对 musl tmpfile() 不生效，必须代码级替代。
+
+fix_pattern: >
+  在测试基建代码中用 $TMPDIR 下唯一文件替代 tmpfile()，保持语义等价
+  （fopen("w+") + 立即 unlink，fd 到 fclose 前持续有效）：
+
+  static FILE *test_tmpfile(void)
+  {
+      static unsigned int seq;
+      const char *tmpdir = getenv("TMPDIR");
+      char path[512];
+      FILE *fp;
+      if (tmpdir == NULL || *tmpdir == '\0')
+  #ifdef P_tmpdir
+          tmpdir = P_tmpdir;
+  #else
+          tmpdir = "/tmp";
+  #endif
+      snprintf(path, sizeof(path), "%s/test-tmpf-%ld-%u.tmp",
+               tmpdir, (long)getpid(), seq++);
+      fp = fopen(path, "w+");
+      if (fp == NULL)
+          return NULL;
+      unlink(path);
+      return fp;
+  }
+  #define tmpfile() test_tmpfile()
+
+  补丁落点（libei 1.5.0 实例）：
+  - subprojects/munit/munit.c（stderr_buf = tmpfile() 处无条件替换为 test_tmpfile() 调用）
+  - src/util-io.c 测试段（#if _enable_tests_ 内 #define tmpfile() 宏）
+  补丁策略：无条件替换（纯 POSIX，无平台宏）——R8 合规且跨 libc 通用；
+  TMPDIR 为空回退 P_tmpdir。禁止 __OHOS__ 门控（AI review 实锤打回过：
+  锁死单一平台 + 硬编码路径违规）。
+
+fallback: >
+  若不愿打补丁：LD_PRELOAD 一个 override tmpfile() 的 shim（E272 先例
+  用于 DejaGNU），但 shim 只救测试执行不救测试源码内调用，覆盖不全；
+  或裁掉 tests（-Dtests=disabled）——丢失上游测试覆盖，不推荐。
+
+verify_builds:          libei 1.5.0 本地实测（35/35 utils + 84/85 eierpecken，
+                         补丁前 0 用例可跑）
+applies_to:             munit 系（libei/libinput/libevdev 测试框架）、任何
+                         测试代码/库代码调用 tmpfile() 的 C 项目
+kb_ref:                 E002（/tmp 只读 TMPDIR 方案，本文补其 tmpfile() 盲区）、E272（dejagnu tmpfile-shim LD_PRELOAD 方案，本文为内联补丁方案）

@@ -1,0 +1,141 @@
+#!/usr/bin/env perl
+# Minimal dh_gencontrol shim for dh-builtusing upstream tests on OHOS.
+# Expands ${dh-builtusing:*}/${dh-staticbuiltusing:*}/${a:Built-Using}-style
+# substvars into debian/<pkg>/DEBIAN/control so check_control can verify the
+# real dh_builtusing output. Supports --arch/--indep filtering (best effort),
+# -c<file> control override, and trailing "-- -c<file>".
+use strict;
+use warnings;
+
+my $control_file = 'debian/control';
+my ($opt_arch, $opt_indep) = (0, 0);
+my @args = @ARGV;
+my @rest;
+while (@args) {
+    my $a = shift @args;
+    if ($a eq '--arch' || $a eq '-a') { $opt_arch = 1; }
+    elsif ($a eq '--indep' || $a eq '-i') { $opt_indep = 1; }
+    elsif ($a =~ /^-c(.*)$/ && length($1)) { $control_file = $1; }
+    elsif ($a eq '-c' || $a eq '--control') { $control_file = shift @args; }
+    elsif ($a =~ /^--control=(.*)$/) { $control_file = $1; }
+    elsif ($a eq '--') {
+        while (@args) {
+            my $b = shift @args;
+            if ($b =~ /^-c(.*)$/ && length($1)) { $control_file = $1; }
+            else { push @rest, $b; }
+        }
+    }
+    else { push @rest, $a; }
+}
+
+sub parse_control {
+    my ($file) = @_;
+    my @stanzas;
+    return @stanzas unless -f $file;
+    open my $fh, '<', $file or return @stanzas;
+    my %cur;
+    my $field = '';
+    while (my $line = <$fh>) {
+        $line =~ s/\r?\n$//;
+        # Debian control comment (see Dh_Lib.pm): skip '# ...' at column 0.
+        next if $line =~ /^#/;
+        if ($line eq '') {
+            push @stanzas, {%cur} if %cur;
+            %cur = ();
+            $field = '';
+            next;
+        }
+        if ($line =~ /^\s+(.*)$/ && $field ne '') {
+            $cur{$field} .= "\n$1";
+        } elsif ($line =~ /^([^:]+):\s*(.*)$/) {
+            $field = $1;
+            $cur{$field} = $2;
+        }
+    }
+    push @stanzas, {%cur} if %cur;
+    close $fh;
+    return @stanzas;
+}
+
+sub load_substvars {
+    my ($pkg) = @_;
+    my %h;
+    my $path = "debian/$pkg.substvars";
+    return %h unless -f $path;
+    open my $fh, '<', $path or return %h;
+    while (my $line = <$fh>) {
+        $line =~ s/\r?\n$//;
+        next if $line =~ /^\s*#/;
+        next if $line =~ /^\s*$/;
+        if ($line =~ /^([^=]+?)\?=(.*)$/) {
+            my ($k, $v) = ($1, $2);
+            $k =~ s/^\s+|\s+$//g;
+            $h{$k} = $v unless exists $h{$k};
+        } elsif ($line =~ /^([^=]+)=(.*)$/) {
+            my ($k, $v) = ($1, $2);
+            $k =~ s/^\s+|\s+$//g;
+            $h{$k} = $v;
+        }
+    }
+    close $fh;
+    return %h;
+}
+
+sub expand_vars {
+    my ($text, $vars) = @_;
+    my $prev = '';
+    my $cur = $text;
+    # Recursive expansion (substvars values may themselves contain ${...}).
+    for (my $i = 0; $i < 10 && $cur ne $prev; $i++) {
+        $prev = $cur;
+        $cur =~ s/\$\{([^}]+)\}/exists $vars->{$1} ? $vars->{$1} : "\${$1}"/ge;
+    }
+    return $cur;
+}
+
+my @stanzas = parse_control($control_file);
+shift @stanzas if @stanzas; # drop source stanza
+for my $s (@stanzas) {
+    my $pkg = $s->{Package};
+    next unless defined $pkg;
+    my $arch = $s->{Architecture} // 'any';
+    if ($opt_arch && $arch eq 'all') { next; }
+    if ($opt_indep && $arch ne 'all') { next; }
+    my %vars = load_substvars($pkg);
+    # First expand dh vars inside substvar values themselves.
+    for my $k (keys %vars) {
+        $vars{$k} = expand_vars($vars{$k}, \%vars);
+    }
+    for my $f ('Built-Using', 'Static-Built-Using') {
+        my $raw = $s->{$f};
+        next unless defined $raw;
+        my $exp = expand_vars($raw, \%vars);
+        $s->{$f} = $exp;
+    }
+    my $built = $s->{'Built-Using'};
+    my $static = $s->{'Static-Built-Using'};
+    # check_control greps '^Built-Using:.* <src> (= ...)' on a single line.
+    # Raw control fields are folded over continuation lines ("\\n...");
+    # unfold to one line so expanded values stay greppable (real dh_gencontrol
+    # writes unfolded DEBIAN/control). Without this, dpkg/gcc land on bare
+    # lines at column 0 and the 10basic check_control misses them.
+    for ($built, $static) {
+        next unless defined $_;
+        s/\r?\n/ /g;
+        s/\s+/ /g;
+        s/^\s+|\s+$//g;
+    }
+    my $out = "Package: $pkg\nArchitecture: $arch\n";
+    $out .= "Built-Using: $built\n" if defined $built && $built ne '';
+    $out .= "Static-Built-Using: $static\n" if defined $static && $static ne '';
+    my $dir = "debian/$pkg/DEBIAN";
+    require File::Path;
+    File::Path::make_path($dir);
+    open my $ofh, '>', "$dir/control" or do {
+        print STDERR "dh_gencontrol shim: cannot write $dir/control: $!\n";
+        exit 1;
+    };
+    print $ofh $out;
+    close $ofh;
+}
+exit 0;

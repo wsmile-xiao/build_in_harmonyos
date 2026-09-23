@@ -19,6 +19,8 @@ class MailioTestConan(ConanFile):
 
     def requirements(self):
         self.requires(self.tested_reference_str)
+        # Explicitly require boost for transitive header access (asio, date_time)
+        self.requires("boost/1.90.0.4")
 
     def layout(self):
         cmake_layout(self)

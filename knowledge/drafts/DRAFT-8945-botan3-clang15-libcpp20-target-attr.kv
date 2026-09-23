@@ -1,0 +1,173 @@
+# ═══ Draft knowledge entry — botan3 3.12.0 OHOS clang-15 libc++/ISA 坑链 ═══
+# Timestamp: 2026-09-08
+# Software: botan3 3.12.0 (Botan)
+# Gate: PR !8945 / 真机 11 轮 conan create 迭代
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-8945
+trigger_tool:           clang|clang\+\+|configure.py|botan|conan
+phase:                  configure|build|package|test_package
+error_signature:        Permission denied.*->.*build/include/public|
+                         error: use of undeclared identifier 'vaes(d|e|mc|imc)q_u8'|
+                         always_inline function '.*' requires target feature '\+simd', but would be inlined into|
+                         'operator<=>' is implicitly deleted|
+                         no member named 'equal' in namespace 'std::ranges'|
+                         no member named 'any_of' in namespace 'std::ranges'|
+                         unknown architecture '.*' in the 'target' attribute string|
+                         invalid operands to binary expression \('std::ostream'|
+                         no known conversion from 'const Botan::(OctetString|SymmetricKey)' to 'std::span|
+                         env argument to ConanFile\.run\(\) should be a list
+
+severity:               2
+category:               clang15|libcxx|c++20|spaceship|ranges|target-attribute|arm-neon|intrinsic|march|symlink|hmdfs|botan
+match_keywords:         BOTAN_FUNC_ISA, target attribute, always_inline requires target feature,
+                         +crypto+aes+simd, arch= rejected, operator<=> implicitly deleted,
+                         std::array spaceship, ranges::equal, ranges::any_of, three_way_comparable,
+                         vaeseq_u8 undeclared, __ARM_FEATURE_CRYPTO, macro gated intrinsics,
+                         -march=armv8.2-a+crypto+sha3+sm4, link-method=copy, hmdfs symlink,
+                         without-os-features, explicit_bzero, StrongSpan, kyber dilithium ml_kem,
+                         std::equal four iterator, CMAKE_CXX_STANDARD 20, cppstd=17 consumer,
+                         iosfwd incomplete ostream, missing sstream include,
+                         OctetString span conversion, SymmetricKey alias grep,
+                         test_bin_eq overload, using Botan::OctetString,
+                         make check TMPDIR prefix, ConanFile.run env list
+
+title:                  botan3 3.12.0 适配：OHOS clang-15 定制 libc++/arm_neon.h 库侧四类坑 + 测试侧三类坑——函数级 target attribute 不可用（多 feature 解析损坏）、intrinsic 宏门控需命令行 -march、std::array 无 operator<=>、ranges::equal/any_of 缺失——及 hmdfs symlink/botan 专用开关修复链
+
+root_cause: >
+  1) hmdfs（真机 /storage）对 symlink 创建返回 EACCES；botan configure.py 探测到
+     "主机支持 symlink" 后默认用 symlink 链接头文件进 build 目录 → configure 失败。
+  2) OHOS clang-15（15.0.4）定制 arm_neon.h 的 intrinsic 声明由 __ARM_FEATURE_CRYPTO
+     等预处理宏门控，且该头为裁剪版（vrevq_* 全删）；botan 3.12 的 BOTAN_FUNC_ISA
+     函数级 target(...") attribute 是编译期机制、不定义预处理宏 → 函数体内
+     vaeseq_u8/vaesdq_u8 等"未声明"。命令行无 -march 时全局宏也未定义。
+  3) 同一工具链上多 feature target attribute 解析损坏：target("+crypto+aes+simd")
+     的函数被 clang-15 判为"不含 +simd"（always_inline 跨 target 检查失败，
+     ghash_cpu.cpp 实锤）；arch= 前缀字符串（target("arch=armv8.2-a+crypto+aes+simd")）
+     被 outright 拒绝（unknown architecture）。最小复现三者均验证 → 函数级 ISA
+     attribute 路线在 OHOS clang-15 整体不可用（x86 特性串如 "pclmul,ssse3" 恰好
+     包含 SIMD 需求故上游 CI 不暴露）。
+  4) OHOS libc++15 的 std::array 无 operator<=>（LLVM 16 才实现）→ 成员为
+     std::array 且 operator<=>=default 的类（IPv6Address/Tag/DER_Hash/KeyId）在
+     有序容器 key 语境 "implicitly deleted" 编译失败；另缺 std::ranges::equal 与
+     std::ranges::any_of（range_value_t/begin/end 等概念设施存在，缺失逐算法）。
+  5) botan 系：musl 无 explicit_bzero；clang-15 C++20 concepts 下 Kyber/Dilithium
+     系（含 ml_kem/ml_dsa，共享 *_common 代码，重度 StrongSpan）编译失败（botan
+     3.6.1 记录一致），但 frodokem/classic_mceliece/sphincsplus/xmss 同用
+     StrongSpan 却可编译；上游测试二进制依赖 ranges 算法（12 处实际调用 + 上游
+     自注 TODO "need newer Clang"），须 0003 patch 改迭代器版后才能编译——最终
+     配方以 --build-targets=static,tests 全量启用并通过 make check。
+  6) 测试侧流头文件缺口：runner/test_stdout_reporter、test_asn1/test_bigint/
+     test_pubkey/test_tls 只含 <iosfwd> 或无 <sstream> 即用流 operator<</构造
+     stringstream；OHOS libc++15 传递包含更瘦，std::ostream 保持不完整类型 →
+     "invalid operands to binary expression"（0006 补 include）。
+  7) OctetString/SymmetricKey（同一类型的别名）传 std::span 形参无 viable 重载：
+     LLVM16 前 libc++ 的 span 容器构造要求 .data()，OctetString 只有 begin()/end()
+     （新版 libc 走 C++20 ranges 构造）。0007 逐调用点桥接 + 0008 在 tests.h 加
+     test_bin_eq(string_view, OctetString, OctetString) 重载（照 BigInt 模式
+     using Botan::OctetString; 导入）根治。教训：影响面排查按类型不按字面名。
+
+affected_scope:         C++20 库（尤其用函数级 target attribute 标注 SIMD/加密内核、
+                        defaulted spaceship 于 std::array 成员、std::ranges 算法者）
+                        在 OHOS clang-15 + 定制 libc++ 上的适配；botan 系库全部版本；
+                        任何消费 cppstd>17 库的 test_package。
+
+verification_cmd:       真机隔离 CONAN_HOME 下 conan create archives/b/botan3/3.12.0
+                        -pr:h ohos-aarch64 -pr:b ohos-aarch64 --build=missing；
+                        ctest 2/2（botan3_sha256 + botan3_aes_gcm）。
+                        最小复现：10 行 C++ 验证 target attribute 语义（见 md 草稿）。
+
+rec_priority:           1
+rec_approach:           global-march-plus-isa-attribute-disable（全局特性 + 关 attribute 路线）
+rec_description: >
+  1) configure 加 --link-method=copy 绕过 hmdfs symlink 限制（上游官方选项）。
+  2) configure 加 --cc-abi-flags=-march=armv8.2-a+crypto+sha3+sm4：命令行定义全部
+     特性宏，intrinsic 声明可见；clang-15 不认 +sha512 扩展名但 +sha3 组合下
+     vsha512hq_u64 已可见。
+  3) patch 源码把函数级 ISA 宏（如 BOTAN_FUNC_ISA）展开为空（#if 0 其定义条件）：
+     全局 -march 已启用特性，运行时 cpuid 门控仍在，无 attribute 即无 always_inline
+     跨 target 检查。勿尝试给特性串补 feature（clang-15 解析损坏，补了也没用）。
+  4) array 成员类的 defaulted spaceship → 手写 defaulted operator== +
+     operator<(a.m < b.m)（真机验证 array 的 ==/</均可用）；Strong<T> 类的
+     spaceship 有 requires(three_way_comparable<T>) 约束自动排除无需处理。
+  5) ranges::equal/any_of → 迭代器版 std::equal/std::any_of（span/vector 直接
+     begin/end）。影响面必须 grep -rl 全量盘点——head 截断曾漏掉 6/12 处导致
+     一整轮构建浪费。
+  6) botan 系：--without-os-features=explicit_bzero（优于手工注释 build.h 宏）；
+     --disable-modules=kyber,kyber_90s,kyber_common,kyber_round3,ml_kem,dilithium,
+     dilithium_aes,dilithium_common,dilithium_round3,ml_dsa（勿扩大禁用面）；
+     --build-targets=static,tests 启用上游测试套件，配 0003（ranges 改写）与
+     0005（mkstemp 走 TMPDIR）两个测试侧 patch，以
+     'TMPDIR=<build_folder> make -j1 check' 运行（ConanFile.run 的 env= 只收
+     profile 环境名列表）；测试还可能踩 0006（流头文件）与 0007/0008
+     （OctetString→span）两类坑，修法见 root_cause 6)/7)。
+  7) 打包：头文件自 build/include/public 拷入 include/botan-3（上游安装布局）+
+     cpp_info.includedirs=["include/botan-3"]；保留 toybox 长命令 ar 截断的
+     glob 重建 fallback（ar crs libbotan-3.a build/obj/lib/*.o）。
+  8) 消费者：test_package 自声明 CMAKE_CXX_STANDARD 20 + cxx_std_20（共享
+     profile 默认 cppstd=17）。
+rec_command:            python3 configure.py --cc=clang --cc-bin=... --os=linux --cpu=arm64
+                          --build-targets=static,tests --without-os-features=explicit_bzero
+                          --cc-abi-flags=-march=armv8.2-a+crypto+sha3+sm4
+                          --disable-modules=kyber,kyber_90s,kyber_common,kyber_round3,ml_kem,dilithium,dilithium_aes,dilithium_common,dilithium_round3,ml_dsa
+                          --link-method=copy --without-documentation
+rec_auto_fix:           false
+rec_impl:               conan-recipe-custom-python-configure-harmonyos
+
+fallback_priority:      2
+fallback_approach:      disable-simd-crypto-modules
+fallback_description:   若 patch ISA 宏不可行，禁用全部依赖函数级 attribute 的硬件
+                        加速模块（--disable-modules=aes_armv8,ghash_cpu,sha*_armv8,...），
+                        退回软件实现；性能损失明显，仅作兜底。
+fallback_command:       --disable-modules=aes_armv8,ghash_cpu,sha1_armv8,sha2_32_armv8,sha2_64_armv8,shacal2_armv8,sm3_armv8,sm4_armv8,sm4_hwaes,simd_hwaes,zfec_vperm,aes_crystals_xof
+fallback_auto_fix:      false
+fallback_impl:          software-fallback-modules
+
+forbid_1_pattern:       target\("(arch=)?[^"]*\+simd
+forbid_1_reason:        OHOS clang-15 对多 feature/arch= 前缀 target attribute 解析损坏，
+                        "+crypto+aes+simd" 仍被判为不含 +simd（最小复现实证）
+forbid_1_consequence:   always_inline 跨 target 检查失败，ghash_cpu 等内核无法编译
+
+forbid_2_pattern:       operator<=>\s*\(.*\)\s*const\s*=\s*default
+forbid_2_reason:        成员含 std::array 时 libc++15 无 array<=>，defaulted spaceship
+                        被隐式删除（仅当类用于有序容器/比较语境才报错，编译期才暴露）
+forbid_2_consequence:   std::set/map key 或 std::less 语境编译失败
+                        "cannot be compared because its 'operator<=>' is implicitly deleted"
+
+forbid_3_pattern:       std::ranges::(equal|any_of)
+forbid_3_reason:        OHOS libc++15 缺这两个算法（其他 ranges 设施存在，同文件其他
+                        ranges 用法可编译，缺失是逐算法的，易漏）
+forbid_3_consequence:   no member named 'equal'/'any_of' in namespace 'std::ranges'
+
+forbid_4_pattern:       grep.*std::ranges::.*\|\s*head
+forbid_4_reason:        影响面盘点被 head 截断会漏文件（botan3 实测 12 处只修 6 处，
+                        第七轮构建在 certstor.cpp 重新失败）
+forbid_4_consequence:   修复不完整，浪费整轮构建时间后才补齐
+
+principles:             P001, P003, P011
+similar_to:             E011, E549, E551
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-8945-botan3-clang15-libcpp20-target-attr.md
+last_updated:           2026-09-12
+source_event:           PR !8945 【知识库扩展】feat(botan3): 3.12.0 编译完成；
+                        真机 11 轮 + CI 6 轮 /rebuild 迭代（symlink →
+                        intrinsic 宏门控 → array spaceship → ranges::equal →
+                        target attribute 损坏 → ranges 补齐 → 头文件布局 →
+                        test cppstd → test 源码 bug → 2/2 绿；CI：测试流头文件 →
+                        OctetString span ×2 → using 导入 → run(env) 断言 → #45110 全绿）
+authors:                gcw_6YxinkyD
+source_pr:              8945
+source_commit:          589eea7347
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-12

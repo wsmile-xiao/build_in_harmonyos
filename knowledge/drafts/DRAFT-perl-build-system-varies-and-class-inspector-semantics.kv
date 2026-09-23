@@ -1,0 +1,124 @@
+#====================================================================
+# DRAFT-perl-build-system-varies-and-class-inspector-semantics — CPAN 发行版构建
+#   系统须逐包（逐版本）实地确认：同一软件 1.30 是 Module::Install（inc/ 随包）、
+#   1.36 是 Dist::Zilla 生成的普通 MakeMaker（无 inc/），都不能套 Module::Build 替换；
+#   Class::Inspector 的 subclasses 三态返回与 _class 校验口径
+# 对应人类文档: knowledge/drafts/DRAFT-perl-build-system-varies-and-class-inspector-semantics.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-perl-build-system-varies-and-class-inspector-semantics
+trigger_tool:           perl|Makefile.PL|Build.PL|make|test|conan
+phase:                  configuration
+error_signature:        Can't\ locate\ Module/Build\.pm\ in\ @INC|
+                         Use\ of\ uninitialized\ value\ \$filename\ in\ hash\ element|
+                         not\ ok\ \d+\ -\ -?>subclasses\ returns
+severity:               2
+category:               perl, build-system, testing, portability, conan
+match_keywords:         Module::Install, inc/, Module::Build, Dist::Zilla, Makefile.PL,
+                         Build.PL, subclasses, tri-state, 三态返回, _class, _inc_filename,
+                         Class::Inspector, 构建系统确认, 空字符串, undef
+title:                  CPAN 发行版构建系统须逐包（逐版本）确认——同一软件不同版本构建系统不同
+                        （Module::Install 随包 / Dist::Zilla 普通 MakeMaker 均无需替换），
+                        以及 Class::Inspector 的 subclasses 三态 / _class 校验口径
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             ①**构建系统不可类推**：纯 Perl CPAN 发行版至少有四种构建路径——
+                        ExtUtils::MakeMaker（自带 Makefile.PL）、Module::Build（Build.PL，
+                        OHOS 缺该模块需生成等价 Makefile.PL）、Dist::Zilla 生成
+                        Makefile.PL、以及 **Module::Install**。关键差异：Module::Install
+                        的引导常**随发行版打包在 inc/ 目录内**（inc/Module/Install.pm
+                        等），`perl Makefile.PL` 开箱可用，**不需要**外部安装，也**不需要**
+                        生成替代构建脚本。若一律按"Module::Build 系"处理而生成替代
+                        Makefile.PL，会白白引入与上游不一致的构建入口。
+                        ②**Class::Inspector 的两处 API 语义**：
+                        (a) `subclasses()` 是**三态**返回——命中子类→ARRAY ref、
+                        无命中→**空字符串 ''**、类名非法→**undef**（实现为
+                        `@found ? \@found : ''`）；一律按 ARRAY ref 断言必失败。
+                        (b) 把**非法类名**喂给 `installed()`/`filename()` 会触发上游
+                        `_inc_filename` 对 undef 取值，报
+                        `Use of uninitialized value $filename in hash element`；
+                        类名校验的正确入口是 `_class()`（上游自己的校验契约）。
+affected_scope:         所有纯 Perl CPAN 发行版适配（构建入口选择）、以及
+                        Class::Inspector 的消费者/测试代码（三态返回与校验入口）。
+                        实例：class-inspector **同一软件两个版本构建系统不同**——1.30 为
+                        Module::Install（inc/ 随包 8 个文件），1.36 为 Dist::Zilla 生成的普通
+                        Makefile.PL（直接 use ExtUtils::MakeMaker，**发行版内无 inc/**）；
+                        两者都无需替换构建脚本（两版本各自实测：1.30 为 4 文件 80 用例，
+                        1.36 为 6 文件 86 用例）。
+verification_cmd:       ls Makefile.PL Build.PL inc/Module/Install.pm 2>/dev/null
+                        # Makefile.PL + inc/Module/Install.pm 存在 → Module::Install 随包，直接沿用
+                        perl -MClass::Inspector -e 'print defined Class::Inspector->subclasses("No::Such"),"\n"'
+                        # 无命中 → 空字符串（不是 ARRAY ref）
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           per-distro-build-entry
+rec_description:        适配前**先列源码根目录的构建清单**再决定做法：
+                        (1) 有 Makefile.PL → 直接沿用（无论其背后是 MakeMaker、
+                        Dist::Zilla 还是 **Module::Install**；若见 inc/Module/Install.pm
+                        即知引导随包，无需外部依赖）；
+                        (2) 只有 Build.PL（Module::Build）→ 生成等价 Makefile.PL（逐项
+                        转写 module_name/requires/test_requires）；
+                        (3) 都没有 → 先查上游是否用别的（dub/meson 等）再议。
+                        配方对"预期的构建脚本缺失"**显式报错**，避免上游换构建系统时
+                        静默产出错误结果。
+                        针对 Class::Inspector：`subclasses()` 按三态断言（命中/''/undef），
+                        类名校验走 `_class()`。
+rec_command:            perl Makefile.PL INSTALLDIRS=site && make && make test
+                        # 三者皆适用于 Module::Install（引导随 inc/）
+rec_auto_fix:           false
+rec_impl:               recipe-pattern
+
+fallback_priority:      2
+fallback_approach:      inspect-upstream-changes
+fallback_description:   若发行版既无 Makefile.PL 也无 Build.PL，读其 META/MANIFEST 与
+                        Changes 判断构建系统；确属冷门系统（dub/meson/rake 等）时，
+                        不要强行套 MakeMaker 模板，应按其官方构建流程单独适配或
+                        上报 env_unsupported。
+fallback_command:       head -40 META.* MANIFEST Changes
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       所有\s*(纯\s*)?Perl\s*包.*(一律|统一).*(Module::Build|生成\s*Makefile\.PL)|
+                        不看源码.*生成\s*Makefile\.PL
+forbid_1_reason:        构建系统逐包不同；对 Module::Install/自带 Makefile.PL 的发行版
+                        强加替代脚本，会引入与上游不一致的构建入口，且掩盖真实构建路径。
+forbid_1_consequence:   配方与上游语义偏离，评审难以判断构建是否忠实。
+
+forbid_2_pattern:       subclasses\(.*\)\s*.*->\s*\[|ref\s+.*subclasses.*eq\s*['\"]ARRAY['\"].*除非.*命中
+forbid_2_reason:        subclasses() 无命中返回空字符串、非法类名返回 undef，
+                        一律按 ARRAY ref 断言必然假失败。
+forbid_2_consequence:   把上游的既定语义当成适配缺陷，浪费时间排查。
+
+forbid_3_pattern:       installed\(\s*['\"]?[0-9]|installed\(\s*['\"][^'\"]*[%$]
+forbid_3_reason:        非法类名喂给 installed()/filename() 会触发上游 _inc_filename
+                        的 undef 取值警告；应改用 _class() 做校验。
+forbid_3_consequence:   测试输出被警告噪声污染，误导排查方向。
+
+principles:             real-upstream-test-evidence, upstream-source-untouched,
+                        reproducible-build-test
+
+causes:                 []
+caused_by:              []
+similar_to:             [E155, DRAFT-perl-module-build-makemaker-substitution]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-perl-build-system-varies-and-class-inspector-semantics.md
+last_updated:           2026-09-18
+source_event:           class-inspector 适配（1.30 Module::Install-inc/ 随包 → 1.36 Dist::Zilla 普通 MakeMaker；
+                        另含 subclasses 三态与 _class 校验踩坑）
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:          e4f1afb8a
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-18
+
+draft:                  true
+contributor_id:         1753

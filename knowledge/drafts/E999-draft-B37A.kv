@@ -1,0 +1,91 @@
+#====================================================================
+# 纯数据包在 conan 生态的打包范式（pari-elldata/pari-galdata 实证）
+# 场景：三方库只含数据/资源文件（无 .c/.h、无编译、无链接），
+#       形态为 "tarball 解包 → 数据文件安装到 share/"。
+# 代表：pari-elldata 20210301、pari-galdata 20080411（同类先例
+#       wireless-regdb/2026.05.30、mbrola-hu1/1.002）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E999
+trigger_tool:           conan|test
+phase:                  installation|testing
+error_signature:        no callable API|data[- ]only package|no library, no headers|nothing to compile|test_package has no API to call|missing_setting_compiler|missing_setting_build_type|ModuleNotFoundError: hashes_
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               packaging, test, noarch, recipe
+match_keywords:         纯数据包, data package, noarch, package_id clear, data_only, R34 豁免, 数据完整性, pin sha256, resdirs, conf_info
+title:                  纯数据包（tarball→share/ 安装，无编译无链接）的 conan 配方范式与 R34 数据完整性测试豁免口径
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游包只发布数据文件（数据库/资源/表），不含源码与构建系统，常规 autotools/cmake 配方模板与 "编译 consumer 调 API" 的 test_package 形态均不适用，需要专用范式
+affected_scope:         所有"数据/资源包"类三方库（pari 系 elldata/galdata/nftables/polis/seadata、字库、语音库、规则库等）
+verification_cmd:       tar -tzf <tarball> | head  # 若只列出 data/** 而无 *.c/configure/CMakeLists.txt 即为纯数据包
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           noarch-data-package-pattern
+rec_description:        noarch 数据包五件套范式（见下），数据装 share/<生态>/<包名>/，测试以数据完整性验证替代 API 调用
+rec_command:            conan create <配方目录> -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               manual
+
+# 回退方案：若数据文件数量巨大（如 elldata 500 个 157MB），逐文件 pin 代价可接受
+# （哈希表生成一次后随配方走）；若数据是单一巨型文件，pin 单文件即可。
+fallback_priority:      2
+fallback_approach:      aggregate-hash-only
+fallback_description:   仅 pin tarball sha256 + 数据目录文件数 + 抽样内容断言（完整性弱于逐文件 pin，仅建议在文件数过多时用）
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 范式要点（五件套）★
+# 1) conanfile.py 骨架：
+#    - package_type = "unknown"（数据包非 library/application）
+#    - settings = "os", "arch", "compiler", "build_type"（L0p 硬门禁要求四项全声明！
+#      只写 ("os","arch") 会被 CI L0p missing_setting_compiler/build_type 拦截）
+#    - configure(): rm_safe("os.version") + rm_safe("compiler.cppstd")
+#    - package_id(): self.info.clear()  → noarch，全平台一个包
+#    - package(): copy 数据到 share/<生态>/<包名>/（如 share/pari/elldata/），
+#      README → share/doc/<包名>/，许可证 → licenses/（tarball 常不带 COPYING，
+#      README 内的许可声明可作为 licenses/ 交付）
+#    - package_info(): cpp_info.libs=[] / includedirs=[] / libdirs=[] / bindirs=[]，
+#      resdirs=["share"]，并用 buildenv_info/runenv_info.define_path("<PKG>_DATA_DIR", data_dir)
+#      + conf_info.define 导出数据目录
+# 2) build() 内嵌验证：跑与 test_package 同一个数据验证器（--source-root 模式），
+#    损坏下载在 conan create 阶段即失败（比装完才发现强）
+# 3) 测试豁免口径（R34）：被测包无 API 可调用 → test_package 的 test() 用
+#    self.run 执行数据完整性验证脚本（--package-root 模式）：
+#    a. 结构完整性：数据目录文件集合精确匹配（数量+命名，无缺失无多余）
+#    b. 载荷同一性：逐文件 sha256 与官方发布载荷 pin 表比对（从已校验 tarball 实算生成
+#       hashes_<pkg>.py，随配方走）——截断/损坏/替换文件全部拦截
+#    c. 内容健全性：抽验关键记录（如最小导数曲线 11a1 的 Weierstrass 系数）
+#    MANIFEST.yml 写明豁免理由（"数据包无 API 可调用，验证以数据完整性为准"）
+# 4) export_sources() 必须拷贝验证脚本 import 的一切模块（test_<pkg>.py + hashes_<pkg>.py），
+#    只拷主脚本会 ModuleNotFoundError
+# 5) 故障注入自证：截断一个数据文件 / 删一个文件，验证器必须 exit 1
+#    （先例：elldata 截断 ell5 → sha256 mismatch；删 ell250 → found 499 entries）
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       def test\(self\):\s*pass|print\(.+test passed
+forbid_1_reason:         数据包豁免≠空壳测试：豁免的是"调 API"形态，验证必须是真实执行的数据完整性检查
+forbid_1_consequence:    PF3/L1e 拦截（空壳测试），CI fail
+forbid_2_pattern:        package_type\s*=\s*"library"
+forbid_2_reason:         数据包不是库：声明 library 会误导消费端链接语义
+forbid_2_consequence:    下游误引 cpp_info.libs，集成报错
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P002, P005
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E999（wireless-regdb/mbrola-hu1 同范式先例）
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+author:                 calbee21 (Agent 5EB1)
+last_updated:           2026-09-04
+evidence:               pari-elldata 20210301（500 文件逐 pin，conan create 6/6×2 模式，W3 exit 0，W4 pass）+ pari-galdata 20080411（344 文件同范式）+ 先例 wireless-regdb/2026.05.30、mbrola-hu1/1.002

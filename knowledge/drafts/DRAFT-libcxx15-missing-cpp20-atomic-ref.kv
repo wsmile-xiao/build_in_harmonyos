@@ -1,0 +1,93 @@
+#====================================================================
+# DRAFT-libcxx15-missing-cpp20-atomic-ref
+# OHOS clang15/libc++15 缺 C++20 std::atomic_ref（libc++ 16 才实现）
+# 触发事件: smashtable 0.3.1 HarmonyOS PC 适配（patch 0001）
+#====================================================================
+
+id:                     DRAFT-libcxx15-missing-cpp20-atomic-ref
+trigger_tool:           clang|conan|cmake
+phase:                  compilation
+error_signature:        no template named 'atomic_ref' in namespace 'std'|
+                         no member named 'atomic_ref' in namespace 'std'|
+                         no template named 'atomic_ref'|
+                         atomic_ref.*has no member named 'store'|
+                         atomic_ref.*has no member named 'wait'
+
+severity:               3
+category:               libcxx, toolchain, compat, cxx20, portability, libc, concurrency
+match_keywords:         std::atomic_ref, atomic_ref, __cpp_lib_atomic_ref,
+                         lock-free, atomic, fetch_or, fetch_xor, fetch_add,
+                         fetch_sub, libc++, libcxx-ohos, OHOS SDK, clang 15,
+                         C++20, __atomic, lock-free container, concurrent
+title:                  OHOS libc++15 缺 C++20 std::atomic_ref：__cpp_lib_atomic_ref 特性宏守卫 + __atomic 内建最小 fallback
+
+root_cause: OHOS SDK26（ohos-sdk_26.0.0.18）配套 libc++ 15.0.4 未实现 C++20 P0019R4
+    std::atomic_ref（上游 libc++ 16.0 才落地）。<atomic> 头存在但不含该模板，
+    依赖原子引用的无锁/并发库（哈希表 slot 协议、epoch 计数、自旋锁）在
+    OHOS 上编译直接失败，而使用 libc++ 16+ 或 libstdc++ 11+ 的桌面 CI 不复现，
+    形成"本地绿、OHOS 红"的分叉。__has_include(<atomic>) 探测无效（头存在）。
+affected_scope: 目标 OHOS SDK26 clang15/libc++15 的所有 C++20 项目：直接使用
+    std::atomic_ref<T> 的库（并发容器、无锁索引、原子 epoch/引用计数），以及
+    上游按 P0019 写出的任何原子引用调用面。整型标量原子操作全部可被
+    __atomic_* 内建覆盖；浮点与指针 atomic_ref 同理可扩展但本触发实例未用到。
+verification_cmd: 复现: /data/service/hnp/bin/clang++ -std=c++20 -c probe.cpp
+    （probe.cpp 含 #include <atomic> 与 std::atomic_ref<int> r{v}; r.fetch_add(1);）
+    修复后: conan create . -pr:h ohos-aarch64 -pr:b default --build=missing -> exit 0
+
+rec_priority:           1
+rec_approach:           feature-macro-guard-plus-atomic-builtin-fallback
+rec_description: ①用标准特性宏守卫，不猜平台：
+    #if defined(__cpp_lib_atomic_ref) && __cpp_lib_atomic_ref >= 201711L
+    使用 std::atomic_ref；
+    #else 提供 fallback：整型标量上，load/store/fetch_add/fetch_sub/fetch_or/
+    fetch_xor 逐一映射到 __atomic_load_n/__atomic_store_n/__atomic_fetch_add/
+    __atomic_fetch_sub/__atomic_fetch_or/__atomic_fetch_xor（传入
+    static_cast<int>(std::memory_order)，枚举值与 __ATOMIC_*__ 一致，正是
+    std::atomic 自身的下沉路径），required_alignment 用 alignof(T)。
+    ②wait() 若被用到：OHOS 无 C++20 atomic 等待原语，降级为
+    while (load(order) == expected) std::this_thread::yield(); 轮询（无 futex
+    睡眠语义，就绪等待场景可接受），notify_all() 为空实现——适用边界必须
+    写进补丁注释。③fallback 无平台宏：libc++ 16+ / libstdc++ 走原路径，
+    行为完全不变；旧标准库走 __atomic 内建，语义等价。
+rec_command: # patch 0001（smashtable 0.3.1 验证通过，9/9 CTest 套件 548 用例全过）：
+    #   shared.hpp 的 atomic 词汇区：#if defined(__cpp_lib_atomic_ref) && __cpp_lib_atomic_ref >= 201711L
+    #     using atomic_ref = std::atomic_ref<scalar_type_>;
+    #   #else 最小 atomic_ref 类（__atomic 内建 + wait 轮询 + notify_all 空操作）
+rec_auto_fix:           false
+rec_impl:               recipe-patch-portable-atomic-ref-fallback
+
+fallback_priority:      2
+fallback_approach:      upgrade-sdk-toolchain
+fallback_description:   等 OHOS SDK 提供 libc++16+（atomic_ref 落地）整体升级；
+                         SDK15 为当前可用基线，升级依赖 SDK 发布节奏。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       grep.*atomic_ref.*-D.*_GLIBCXX|sed.*atomic_ref.*pthread
+forbid_1_reason:        atomic_ref 不是链接问题而是头文件能力缺失，-latomic/链接参数无效
+forbid_1_consequence:   掩盖真实根因，浪费时间在链接层调参
+forbid_2_pattern:       define.*__cpp_lib_atomic_ref
+forbid_2_reason:        手动 define 特性宏谎报能力，后续包含 <atomic> 内部未实现路径会爆炸
+forbid_2_consequence:   编译器/标准库内部一致性被破坏，UB
+
+principles:             P005, P011
+similar_to:             DRAFT-ohos-libcxx15-format-ranges-capability-gap, DRAFT-libcxx15-missing-cpp20-spaceship
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-libcxx15-missing-cpp20-atomic-ref.md
+last_updated:           2026-09-05
+source_event:           archives/s/smashtable/0.3.1 (patch 0001)
+
+authors:                73AA
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-05
+
+draft: true
+contributor_id:         73AA

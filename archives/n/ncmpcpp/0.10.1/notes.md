@@ -110,3 +110,11 @@
   still the default library type, so the packaged binary was not on PATH.
 - r15: package_type = "application" added (same as abcmidi/aa3d/iputils in this repo); VirtualRunEnv then injects the package's own bindir into PATH. However the PowerShell edit that added it also wrote a UTF-8 BOM into conanfile.py, and the CI L0 dependency check (ast.parse on the recipe source) rejects U+FEFF, so L0 died silently (stderr is redirected to /dev/null). r15/r16diag confirmed via zsh -x trace + direct repro: SyntaxError: invalid non-printable character U+FEFF.
 - r16: removed the BOM from conanfile.py/notes.md; device pipeline now fully green: L0/L1/L4/L5 = pass, Total 1 / Success 1 / Failed 0 (L2 skip: version/help failed, non-blocking). test_package runs `ncmpcpp --version` -> prints "ncmpcpp 0.10.1" and both assertions pass.
+
+
+## 2026-09-05 复查完善 (lkyz)
+
+- 独立复查tag 0.10.1 源码（gitcode 镜像，commit 3e6d992b938de9ba3019302027bd64dbcab6f8c6）：
+  5 个补丁 dry-run 全部干净（0001 一处 fuzz 1）；conanfile.py / test_package/conanfile.py 字节编译通过。
+- 修正 test_package/MANIFEST.yml：assertion_count 1 -> 2（脚本实际有 2 项断言：--version 成功退出 + 输出包含 0.10.1）。
+- 补全软件级 README.md 与 reports/（build-report.md、test-report.md），固化官方流水线验证结果。

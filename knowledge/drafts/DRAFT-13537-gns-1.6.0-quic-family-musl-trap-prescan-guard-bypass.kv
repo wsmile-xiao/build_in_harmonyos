@@ -1,0 +1,75 @@
+# ═══ Draft knowledge entry — QUIC/UDP 族库 musl 坑的预扫判定：特性宏守卫使 CMSG/affinity 坑不触发 ═══
+# Software: gamenetworkingsockets 1.6.0
+# Gate: conan create G2 全绿 + 上游 ctest 3/3（零源码补丁）
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: gns-1.6.0-quic-family-musl-trap-prescan-guard-bypass
+severity: 2
+category: platform|libc
+trigger_tool: conan|conan create|clang|cmake
+phase: pre-scan|configure
+
+keywords: musl, CMSG_NXTHDR, sign-compare, pthread_setaffinity_np, affinity, epoll, datagram, QUIC family, feature macro guard, PlatformSupportsRecvTOS, IP_RECVTOS, pre-processor, compiled out, zero patch
+
+error_signature: Wsign-compare.*CMSG_NXTHDR|use of undeclared identifier 'pthread_setaffinity_np'|implicit declaration of function 'pthread_setaffinity_np'
+
+match_keywords: CMSG_NXTHDR, pthread_setaffinity_np, musl, sign-compare, affinity, epoll datagram, feature guard, PlatformSupportsRecvTOS, IP_RECVTOS, pre-scan, QUIC family, msquic
+
+root_cause: |
+  musl 的两个 QUIC/UDP 族高频坑（pthread_setaffinity_np 缺失、CMSG_NXTHDR 宏 signed/unsigned
+  混用触发 -Werror -Wsign-compare）只在**调用点真实进入编译单元**时才成立。msquic（2.6.1）
+  无条件启用 TOS 读取（datapath_linux.c 直接 CMSG 遍历）故两坑全踩；但 Valve
+  GameNetworkingSockets（1.6.0）把 TOS 辅助数据遍历包在
+  `#if PlatformSupportsRecvMsg() && PlatformSupportsRecvTOS()` 里——OHOS/musl 下
+  PlatformSupportsRecvTOS() 因 IP_RECVTOS 特性探测失败走 false 分支，整段被预处理器裁掉；
+  且 gns 源码零 affinity 调用。同族不等于同坑：**坑的命中取决于上游是否用特性宏守卫 +
+  探测函数在该平台的实际取值**。
+
+rec_approach: prescan-guard-value-not-family-label
+rec_description: |
+  适配 QUIC/UDP/epoll 族库时，不要因"msquic 踩过 CMSG/affinity 坑"就预打补丁，先做三步预扫：
+  1) grep 源码 affinity 调用（pthread_setaffinity_np / sched_setaffinity）——零调用即免 patch1；
+  2) 找 CMSG_NXTHDR/CMSG_FIRSTHDR 使用点，检查其外层特性守卫宏（如 PlatformSupportsRecvTOS）；
+  3) 追守卫宏的平台判定链（platform_sockets.h 的 #if/#else 分支），确定 OHOS 下宏取值——
+     若探测函数（check_symbol_exists/defined(IP_RECVTOS) 类）在 musl 失败走 false，整段
+     被编译裁掉，无需 patch；只有无守卫直接展开 CMSG 宏的库（msquic 模式）才需要
+     pragma 降噪补丁。
+  判定物证：configure 日志里 check_symbol_exists 探测行 + 源码守卫链行号。
+rec_command: |
+  # 1) affinity 预扫
+  grep -rn "setaffinity" src/ --include="*.c" --include="*.cpp" --include="*.h"
+  # 2) CMSG 使用点与守卫
+  grep -rn "CMSG_NXTHDR" src/ --include="*.cpp" | head
+  # 3) 守卫宏取值链（gns 例）
+  grep -n "PlatformSupportsRecvTOS\|PlatformSupportsRecvMsg" src/public/tier0/platform_sockets.h
+rec_auto_fix: false
+
+affected_scope: |
+  所有 Linux epoll/datagram 系网络库的 OHOS 适配（QUIC/UDP/RTP 族：msquic、quiche、
+  lsquic、gamenetworkingsockets、enet 等）；以及任何"上游同类库踩过坑，本库是否照搬补丁"的
+  决策场景。
+
+verification_cmd: |
+  # 零补丁构建应全绿（G2）
+  conan create . --build=missing -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  # 上游测试全跑（有坑则 test_connection 的 recv 路径崩溃/报错）
+  ctest --output-on-failure
+
+evidence: |
+  gamenetworkingsockets 1.6.0：
+  - grep 全源码零 affinity 调用（msquic patch1 不适用）
+  - CMSG_NXTHDR 仅一处（socketthread.cpp:2446），外层守卫
+    `#if PlatformSupportsRecvMsg() && PlatformSupportsRecvTOS()`；
+    platform_sockets.h:192-195 显示 RecvTOS 由
+    `PlatformSupportsRecvMsg() && defined(IP_RECVTOS)` 决定，musl 头未按 glibc
+    方式定义该常量时走 false——预处理器裁掉整段（msquic patch2/3 不适用）
+  - 实测零补丁 conan create G2 全绿；上游 ctest 3/3 PASS
+    （crypto 2.09s / connection_quick 206s 回环真实收发 / connection_soak 长测）
+  - 对照组 msquic 2.6.1（同机同期）：三补丁全需要（affinity 守卫 ×1 + CMSG pragma ×2）
+
+authors:
+  - calbee21
+source_pr: 10660
+source_commit: 53a700e10
+verify_builds: 49965
+draft_date: 2026-09-18

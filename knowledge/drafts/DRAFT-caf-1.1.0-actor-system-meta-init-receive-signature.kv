@@ -1,0 +1,106 @@
+#====================================================================
+# DRAFT-caf-1.1.0-actor-system-meta-init-receive-signature.kv
+# CAF 1.x 消费契约：actor_system 前置 meta-object 初始化、receive 回调
+# 必须返回 void、typed spawn 需完整头文件、事件型 actor 显式退出
+# 触发事件: caf 1.1.0 HarmonyOS PC 适配（archives/c/caf/1.1.0，task_id
+#          caf-1.1.0-r01-pc5-7-20260905T171638Z）
+#====================================================================
+
+id:                     DRAFT-caf-1.1.0-actor-system-meta-init-receive-signature
+trigger_tool:           conan|cmake|clang|test|runtime
+phase:                  compile|runtime|testing
+error_signature:        actor_system created without calling caf::init_global_meta_objects|
+                         OnValue must return void|
+                         OnError must return void|
+                         infer_handle_from_class.*no type named 'type'|
+                         mail cache exceeded its maximum size
+
+severity:               2
+category:               api-contract|initialization|callback|template|actor|lifecycle
+match_keywords:         CAF, actor_framework, actor_system, init_global_meta_objects,
+                         meta_object, typed_actor, typed_event_based_actor,
+                         blocking_response_handle, receive, send_exit, user_shutdown,
+                         await_all_actors_done, scoped_actor
+title:                  CAF 1.x 消费者四大约束：actor_system 前初始化全局 meta 对象、blocking receive 回调返回 void、typed spawn 需完整头文件、事件型 actor 需显式退出
+
+root_cause: >
+  CAF 1.x 相对 0.19 系列重写了运行时初始化与类型注册机制。①创建任何
+  actor_system 实例之前必须调用 caf::core::init_global_meta_objects() 初始化
+  全局 meta-object 表，否则运行期 FATAL
+  "actor_system created without calling caf::init_global_meta_objects<>() before"
+  （exit 134）。②blocking_response_handle::receive 的 OnValue/OnError 两个回调
+  签名必须返回 void（static_assert 强制），结果只能通过引用捕获写出，不能
+  返回 int64_t/string 等值。③sys.spawn(typed_impl, ...) 推导 typed_actor 时，
+  若翻译单元仅包含 caf/typed_actor.hpp，typed_event_based_actor 仍是前向声明，
+  std::is_base_of 无法求值导致 infer_handle_from_class SFINAE 失败
+  （"no type named 'type'"）；必须补包含 caf/typed_event_based_actor.hpp。
+  ④事件型 actor（behavior 返回后继续等待消息）运行计数永不为 0，
+  sys.await_all_actors_done() 无限挂起；收尾必须显式 send_exit(user_shutdown)。
+affected_scope: >
+  任何消费 CAF 1.x（1.0/1.1 及同 API 主线）的 C++ 程序或库在 Linux/OHOS 上的
+  适配与消费者验证：test_package、上游测试驱动、示例程序、依赖 CAF 的下游库。
+  OHOS 平台无额外差异，约束为 CAF 1.x 自身 API 契约，跨平台通用。
+verification_cmd: >
+  caf::core::init_global_meta_objects();                      # main 入口首行
+  # blocking receive: 引用捕获 + void 回调
+  int64_t result; caf::error err;
+  self->mail(get_atom_v).request(actor, 5s)
+      .receive([&](int64_t v){ result = v; }, [&](caf::error& e){ err = std::move(e); });
+  # typed spawn: 包含 <caf/typed_actor.hpp> 与 <caf/typed_event_based_actor.hpp>
+  auto a = sys.spawn(counter_impl, counter);
+  # 收尾: 对每个事件型 actor send_exit(user_shutdown) 后再 await_all_actors_done()
+  # 实证: caf 1.1.0 OHOS 专项测试 8 actor × 200 轮往返计数 1600/1600 exit 0
+
+rec_priority:           1
+rec_approach:           caf-1x-consumer-init-and-signatures
+rec_description: >
+  ①入口先调 caf::core::init_global_meta_objects()（含 caf/init_global_meta_objects.hpp）。
+  ②receive 回调一律返回 void，值经 lambda 捕获的引用写出，错误经 caf::error 捕获。
+  ③typed actor 用 sys.spawn 时必须同时包含 typed_actor.hpp 与
+  typed_event_based_actor.hpp。④生命周期收尾先逐 actor send_exit(user_shutdown)
+  再 await_all_actors_done()，避免事件型 actor 造成挂起。
+rec_command:            >
+  # test_package.cpp / 消费者 main:
+  #   #include <caf/init_global_meta_objects.hpp>
+  #   int main(){ caf::core::init_global_meta_objects(); ... }
+  # receive: .receive([&res](const std::string& m){ res = m; }, [&err](caf::error& e){ err = std::move(e); });
+  # spawn: 见 root_cause ③；退出: self->send_exit(actor_cast<caf::actor>(a), caf::exit_reason::user_shutdown)
+rec_auto_fix:           false
+rec_impl:               consumer-adapt
+
+fallback_priority:      2
+fallback_approach:      downgrade-to-0.19-api
+fallback_description: >
+  若项目必须沿用 0.19 旧 API（无 init_global_meta_objects、receive 可返回值），
+  可锁定 CAF 0.19.x；但会失去 1.x 的 async/flow 等新能力，且上游已迁移 1.x，
+  不建议。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       actor_system created without calling.*ignore|setenv.*CAF_.*skip
+forbid_1_reason:        用环境变量/忽略掩盖初始化缺失会让类型注册缺陷在运行期随机暴露
+forbid_1_consequence:   跨进程/跨模块类型比较失败、序列化错乱
+forbid_2_pattern:       return.*from.*receive.*lambda|[](.*){ return .*; }.*receive
+forbid_2_consequence:   编译期 static_assert 直接失败，属于必然错误，无绕过价值
+
+principles:             P001, P011
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-caf-1.1.0-actor-system-meta-init-receive-signature.md
+last_updated:           2026-09-06
+source_event:           archives/c/caf/1.1.0 (r01, OHOS 首轮适配)
+
+authors:                pc5-7
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-06
+
+draft: true
+contributor_id:         pc5-7

@@ -1,0 +1,118 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E6343.kv，填写各字段
+# 对应的人类文档: doc/E6343.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E6343
+trigger_tool:           patch|python|conan|ci
+phase:                  configuration|testing
+error_signature:        Hunk.*FAILED|patch.*cannot apply|patch_ng.*(mismatch|failed)|Invalid Context|context does not match
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity:               3
+category:               patch, build-system, conan, testing
+match_keywords:         patch_ng, unified diff, hunk, line offset, git apply --check, Conan source snapshot, patch context, Shadow CI
+title:                  Conan patch_ng 需要针对实际解压源码验证补丁上下文
+prescan_pattern:        ^@@[[:space:]]*-[0-9]+|patch_ng|git apply
+prescan_globs:          *.patch, conanfile.py, *.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause:             unified diff 的 hunk 起始行号只是定位提示，真正能否应用取决于上下文行和 Conan 解压后的源码快照。源码归档、换行、前序补丁或生成文件差异会让看似正确的补丁在 Conan 实际使用的 patch_ng 阶段失败。
+affected_scope:         使用 conandata.yml/apply_conandata_patches 的 Conan 包，以及对 generated configure、Makefile.in 或连续补丁有依赖的 C/C++ 适配。
+verification_cmd:       python -c "import patch_ng; print('patch_ng available')" && git apply --check patches/*.patch
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           exact-source-patch-validation
+rec_description:        用与 Conan recipe 相同的源码归档和 patch_ng，在临时副本按 conandata.yml 顺序逐个应用，并同时执行 git apply --check。
+rec_command:            git apply --check patches/*.patch && conan create archives/e/ext2fuse/0.8.1 --build=missing
+rec_auto_fix:           false
+rec_impl:               patch-engine-parity-check
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      context-anchor-patch
+fallback_description:   删除脆弱的精确行号依赖，缩小 hunk 并保留稳定上下文锚点；修改后重新从干净源码复制验证，禁止在已经污染的树上刷新补丁。
+fallback_command:       patch -p1 --dry-run < patches/0006-fuse3-session-direntry.patch
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       toybox[[:space:]]+patch.*--dry-run|assume.*hunk.*line|refresh.*patch.*dirty
+forbid_1_reason:        某些设备 patch 的 dry-run 对 new-file 或 fuzz 情况并不等价于 Conan patch_ng；脏源码树刷新还会把前一次失败产生的 orig/bak 内容带入补丁。
+forbid_1_consequence:   本地误判通过，Shadow CI 才在编译前暴露 patch failure，浪费设备队列。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             R6, R16, R29
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E515, E526]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E6343.md
+last_updated: 2026-09-12
+source_event:           ext2fuse 0.8.1：两轮 Shadow CI 在 0006 patch hunk 上下文/偏移处失败；用 Conan 实际 patch_ng 对干净源码验证后修正，最终 run 通过。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                Codex
+source_pr:
+source_commit:          98febaf9ab
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-11
+
+draft: true
+contributor_id: 202B

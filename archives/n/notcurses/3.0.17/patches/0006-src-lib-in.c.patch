@@ -1,40 +1,96 @@
---- notcurses-3.0.17.orig/src/lib/in.c	2025-10-29 00:02:11.000000000 +0800
-+++ notcurses-3.0.17.work/src/lib/in.c	2026-04-17 00:42:26.099288436 +0800
-@@ -2559,8 +2559,13 @@
+--- a/src/lib/in.c
++++ b/src/lib/in.c
+@@ -110,6 +110,11 @@
+   struct initial_responses* initdata_complete;
+   int kittykbd;        // kitty keyboard protocol support level
+   bool failed;         // error initializing input automaton, abort
++#ifndef HAVE_PTHREAD_CANCEL
++  // cooperative shutdown: set by stop_inputlayer(), rechecked by the
++  // input thread on every (bounded) poll iteration
++  volatile sig_atomic_t stopping;
++#endif
+ } inputctx;
+ 
+ static inline void
+@@ -860,7 +865,7 @@
+   return 2;
+ }
+ 
+-static int 
++static int
+ kitty_cb_atxtn(inputctx* ictx, int n, int with_event){
+   uint32_t txt[5]={0};
+   unsigned val = amata_next_numeric(&ictx->amata, "\x1b[", ';');
+@@ -2553,12 +2558,28 @@
+   sigdelset(&smask, SIGTHR);
+ #endif
+   int events;
+-#if defined(__APPLE__) || defined(__MINGW32__)
++#if defined(__APPLE__) || defined(__MINGW32__) || !defined(HAVE_PPOLL)
+   int timeoutms = nonblock ? 0 : -1;
++#ifndef HAVE_PTHREAD_CANCEL
++  // no pthread_cancel: bound the wait so the input thread periodically
++  // rechecks the cooperative shutdown flag (see stop_inputlayer()). a
++  // pending event still returns immediately; only idle waits are capped.
++  if(timeoutms < 0){
++    timeoutms = 100;
++  }
++#endif
+   while((events = poll(pfds, pfdcount, timeoutms)) < 0){ // FIXME smask?
  #else
    struct timespec ts = { .tv_sec = 0, .tv_nsec = 0, };
    struct timespec* pts = nonblock ? &ts : NULL;
-+#ifdef __OHOS__
-+  int timeoutms = nonblock ? 0 : -1;
-+  while((events = poll(pfds, pfdcount, timeoutms)) < 0){
-+#else
++#ifndef HAVE_PTHREAD_CANCEL
++  // no pthread_cancel: bound the wait so the input thread periodically
++  // rechecks the cooperative shutdown flag (see stop_inputlayer()).
++  struct timespec stop_ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000, };
++  if(pts == NULL){
++    pts = &stop_ts;
++  }
++#endif
    while((events = ppoll(pfds, pfdcount, pts, &smask)) < 0){
  #endif
-+#endif
      if(errno == EINTR){
-       loginfo("interrupted by signal");
-       return resize_seen;
-@@ -2659,9 +2664,14 @@
+@@ -2628,6 +2649,11 @@
+     handoff_initial_responses_late(ictx);
+   }
+   for(;;){
++#ifndef HAVE_PTHREAD_CANCEL
++    if(ictx->stopping){
++      break; // cooperative shutdown requested by stop_inputlayer()
++    }
++#endif
+     read_inputs_nblock(ictx);
+     // process anything we've read
+     process_ibuf(ictx);
+@@ -2659,9 +2685,21 @@
  #ifndef __MINGW32__
      if(ti->ictx){
        loginfo("tearing down input thread");
-+#ifdef __OHOS__
-+      // OHOS: pthread_cancel 被禁用，detach 代替 cancel_and_join
-+      pthread_detach(ti->ictx->tid);
-+#else
++#ifdef HAVE_PTHREAD_CANCEL
        ret |= cancel_and_join("input", ti->ictx->tid, NULL);
        ret |= set_fd_nonblocking(ti->ictx->stdinfd, ti->stdio_blocking_save, NULL);
        free_inputctx(ti->ictx);
++#else
++      // no pthread_cancel: cooperative shutdown. wake the thread (SIGWINCH
++      // interrupts a poll in flight; the bounded poll timeout covers the
++      // rest), join it, and release all resources -- no detached-thread
++      // memory/fd leak.
++      ti->ictx->stopping = 1;
++      pthread_kill(ti->ictx->tid, SIGWINCH);
++      ret |= pthread_join(ti->ictx->tid, NULL);
++      ret |= set_fd_nonblocking(ti->ictx->stdinfd, ti->stdio_blocking_save, NULL);
++      free_inputctx(ti->ictx);
 +#endif
        ti->ictx = NULL;
      }
  #endif
-@@ -2669,6 +2679,24 @@
+@@ -2669,6 +2707,24 @@
    return ret;
  }
  
-+#ifdef __OHOS__
-+// OHOS: Clear initdata so input thread processes keyboard input normally.
++#ifdef NOTCURSES_TERM_QUIRKS
++// Clear initdata so the input thread processes keyboard input normally.
 +// Called after skipping handle_responses (no queries were sent).
 +void inputlayer_clear_initdata(inputctx* ictx){
 +  if(ictx){
@@ -46,7 +102,7 @@
 +    }
 +    pthread_mutex_unlock(&ictx->ilock);
 +    pthread_cond_broadcast(&ictx->icond);
-+    loginfo("OHOS: cleared initdata, input thread ready for normal input");
++    loginfo("cleared initdata, input thread ready for normal input");
 +  }
 +}
 +#endif
@@ -54,3 +110,39 @@
  int inputready_fd(const inputctx* ictx){
  #ifndef __MINGW32__
    return ictx->readypipes[0];
+@@ -2809,6 +2865,21 @@
+ 
+ int get_cursor_location(inputctx* ictx, const char* u7, unsigned* y, unsigned* x){
+   pthread_mutex_lock(&ictx->clock);
++  // a terminal that never answers the cursor report would leave us waiting
++  // forever on ccond. bound the wait so that callers degrade gracefully
++  // (the cursor position simply becomes unavailable).
++  struct timespec deadline;
++#if !defined(__APPLE__) && !defined(__MINGW32__)
++  // ccond is initialized with CLOCK_MONOTONIC (see pthread_condmonotonic_init)
++  clock_gettime(CLOCK_MONOTONIC, &deadline);
++#else
++  clock_gettime(CLOCK_REALTIME, &deadline);
++#endif
++  deadline.tv_nsec += 250 * 1000 * 1000;
++  if(deadline.tv_nsec >= 1000 * 1000 * 1000){
++    ++deadline.tv_sec;
++    deadline.tv_nsec -= 1000 * 1000 * 1000;
++  }
+   while(ictx->cvalid == 0){
+     if(ictx->coutstanding == 0){
+       if(tty_emit(u7, ictx->ti->ttyfd)){
+@@ -2817,7 +2888,12 @@
+       }
+       ++ictx->coutstanding;
+     }
+-    pthread_cond_wait(&ictx->ccond, &ictx->clock);
++    if(pthread_cond_timedwait(&ictx->ccond, &ictx->clock, &deadline) == ETIMEDOUT){
++      ictx->coutstanding = 0; // allow a fresh request on the next call
++      pthread_mutex_unlock(&ictx->clock);
++      logwarn("timed out waiting for cursor report; terminal doesn't answer queries?");
++      return -1;
++    }
+   }
+   const cursorloc* cloc = &ictx->csrs[ictx->cread];
+   if(++ictx->cread == ictx->csize){

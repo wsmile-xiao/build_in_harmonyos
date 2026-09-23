@@ -1,0 +1,41 @@
+version: "1.1.63"
+software: openxr
+status: built
+build_date: "2026-09-20"
+conan_ref: "openxr/1.1.63"
+build_system: cmake
+
+source:
+  url: "https://github.com/KhronosGroup/OpenXR-SDK-Source/archive/refs/tags/release-1.1.63.tar.gz"
+  sha256: "a3b97a36f11abe256a7ea1668a0a468aac9b738e94bea6b468f0ae31ad537a46"
+  tar_format: tar.gz
+
+build:
+  system: cmake
+  configure_options:
+    - "DYNAMIC_LOADER=ON"
+    - "BUILD_LOADER=ON"
+    - "BUILD_TESTS=ON"
+    - "BUILD_API_LAYERS=ON"
+    - "BUILD_SDK_TESTS=OFF"
+    - "BUILD_CONFORMANCE_TESTS=OFF"
+    - "BUILD_WITH_SYSTEM_JSONCPP=OFF"
+    - "BUILD_ALL_EXTENSIONS=OFF"
+  dependencies: []
+  cc: clang
+  cxx: clang++
+
+patches_applied:
+  - "0002-src-CMakeLists.txt.patch"
+
+knowledge_gained:
+  - "Conan 的 OHOS 工具链把 os=OHOS 映射成 CMAKE_SYSTEM_NAME=HarmonyOS，而上游用 `elseif(CMAKE_SYSTEM_NAME STREQUAL \"Linux\")` 定义 XR_OS_LINUX，HarmonyOS 匹配不到。后果不是少点优化：loader_platform.hpp 的 dlopen/dlsym 封装与 common/platform_utils.hpp 的 PlatformUtilsGetEnv 整段不编译，manifest_file.cpp 的运行时发现也会掉到 PlatformGetGlobalRuntimeFileName 分支。补丁 0002 把 HarmonyOS 并入 Linux 分支（ref: patches/0002-src-CMakeLists.txt.patch, 上游 src/CMakeLists.txt:219）"
+  - "1.1.60 归档里的 0003-src-cmake-presentation.cmake.patch 在 Conan 体系下是死代码：上游用 `if(CMAKE_SYSTEM_NAME STREQUAL \"Linux\") include(presentation)` 决定要不要做图形后端探测，HarmonyOS 下这个分支不可达，presentation.cmake 压根不会被 include，也就不存在需要往 BACKENDS 列表加 \"none\" 的问题。1.1.60 需要它，是因为那一版用自备 toolchain.cmake 把 CMAKE_SYSTEM_NAME 强制设成了 Linux；本配方不移植该补丁，也不传 PRESENTATION_BACKEND（传了只会收获 unused-variable 警告）"
+  - "BUILD_TESTS 必须开：vendored Catch2 只在 `if(BUILD_TESTS OR BUILD_CONFORMANCE_TESTS)` 时才 add_subdirectory(src/CMakeLists.txt:626)，关掉 BUILD_TESTS 会让 loader_test 因找不到 Catch2::Catch2 而 configure 失败。同时 BUILD_API_LAYERS 必须开 —— loader_test 的 add_dependencies 指向 XrApiLayer_test / api_dump / core_validation。BUILD_SDK_TESTS 必须关：hello_xr 等示例需要 XR_USE_PLATFORM_*（presentation backend），HarmonyOS 下必然配置失败"
+  - "上游全树的 ctest 目标只有一个：src/tests/loader_test/CMakeLists.txt 的 add_test(NAME loader_test ...)。它是 Catch2 写的，6 个 TEST_CASE / 10 个 SECTION；本配方在 build() 里实跑它（ref: conanfile.py _run_upstream_tests()）"
+  - "loader_test 的 6 个 TEST_CASE 里有 4 个开头就是 `if (!g_has_installed_runtime) SKIP(...)`，而 g_has_installed_runtime 靠上游自己生成的 test_runtime 清单来置位。清单找不到就静默 SKIP 4/6，ctest 照样退出 0，日志里只有一行 skipped —— 只看退出码会把\"大半没跑\"误判成\"全绿\"。因此配方读 LastTest.log 里 Catch2 的汇总行，把 skipped 非零与 total<6 都钉成硬失败（ref: conanfile.py _assert_testsuite_bounds()）"
+  - "上游生成的 test_runtime 清单里 library_path 用的是 $<TARGET_FILE_NAME:test_runtime>，即一个**裸文件名** libtest_runtime.so（manifest_file.cpp 对不含 '/' 的 library_path 走\"全局库搜索路径\"）。OHOS 加载器没有兜底搜索路径，所以运行 loader_test 必须把构建树里所有含 .so 的目录连同 OHOS SDK 的 llvm/lib 一起塞进 LD_LIBRARY_PATH，否则 dlopen 失败 → 上面那 4 个用例静默 SKIP（ref: conanfile.py _runtime_libdirs()）"
+  - "RuntimeInterface::LoadRuntime 末尾会把它自己与 negotiate 的任何失败统一归一化成 XR_ERROR_RUNTIME_UNAVAILABLE，与\"根本没找到运行时\"完全同码（ref: 上游 src/loader/runtime_interface.cpp:226-260）。所以想证明\"loader 真的把某个 .so dlopen 起来并调进 xrNegotiateLoaderRuntimeInterface\"，不能看 xrCreateInstance 的返回码，必须让 stub 运行时自己落一个可观测的痕迹（ref: test_package/stub_runtime.cxx 的 OPENXR_STUB_MARKER 哨兵文件）"
+  - "xrGetInstanceProcAddr 在 instance 为 XR_NULL_HANDLE 时只放行 xrCreateInstance / xrEnumerateApiLayerProperties / xrEnumerateInstanceExtensionProperties / xrInitializeLoaderKHR，其余名字一律在 loader_core.cpp 的 \"it is invalid to pass XR_NULL_HANDLE\" 分支被拦下并返回 XR_ERROR_HANDLE_INVALID（不是 XR_ERROR_FUNCTION_UNSUPPORTED）。这条给\"loader 没有对任何字符串都回 SUCCESS\"提供了一个不依赖运行时的可观测反证（ref: test_package/test_openxr.cxx）"
+  - "本包安装的是上游自己的 CMake 包配置（lib/cmake/openxr/OpenXRConfig.cmake + OpenXRTargets.cmake，NAMESPACE OpenXR::），消费者用 find_package(OpenXR REQUIRED) 即可拿到 OpenXR::openxr_loader / OpenXR::headers；test_package 刻意不吃 Conan 的 CMakeDeps，直接把这个包根交给 CMAKE_PREFIX_PATH，等于顺带验了这份上游 config 与安装树真的可用"
+  - "loader 的导出符号由 version script（openxr-loader.map）圈定，与静态库场景的符号可见性完全不同；test_package 里 xrGetInstanceProcAddr(XR_NULL_HANDLE, \"xrCreateInstance\", &fp) == XR_SUCCESS 且 fp 非空，就是\"version script 没把内核符号裁掉\"的直接证据"

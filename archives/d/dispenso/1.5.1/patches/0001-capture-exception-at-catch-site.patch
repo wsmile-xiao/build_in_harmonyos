@@ -1,0 +1,103 @@
+--- a/dispenso/detail/pipeline_impl.h
++++ b/dispenso/detail/pipeline_impl.h
+@@ -11,6 +11,8 @@
+ #include <optional>
+ #endif // C++17
+
++#include <exception>
++
+ #include <dispenso/detail/completion_event_impl.h>
+ #include <dispenso/detail/op_result.h>
+ #include <dispenso/detail/result_of.h>
+@@ -132,7 +134,7 @@ class LimitGatedScheduler {
+           });
+ #if defined(__cpp_exceptions)
+         } catch (...) {
+-          tasks_.trySetCurrentException();
++          tasks_.trySetCurrentException(std::current_exception());
+         }
+ #endif
+       });
+--- a/dispenso/detail/task_set_impl.h
++++ b/dispenso/detail/task_set_impl.h
+@@ -13,6 +13,8 @@
+
+ #pragma once
+
++#include <exception>
++
+ #include <dispenso/thread_pool.h>
+
+ namespace dispenso {
+@@ -117,7 +119,7 @@ class TaskSetBase {
+         try {
+           f();
+         } catch (...) {
+-          trySetCurrentException();
++          trySetCurrentException(std::current_exception());
+         }
+ #else
+         f();
+@@ -141,7 +143,7 @@ class TaskSetBase {
+         try {
+           f();
+         } catch (...) {
+-          trySetCurrentException();
++          trySetCurrentException(std::current_exception());
+         }
+ #else
+         f();
+@@ -185,7 +187,7 @@ class TaskSetBase {
+         try {
+           gen(i)();
+         } catch (...) {
+-          trySetCurrentException();
++          trySetCurrentException(std::current_exception());
+         }
+ #else
+         gen(i)();
+@@ -208,7 +210,10 @@ class TaskSetBase {
+     }
+   }
+
+-  DISPENSO_DLL_ACCESS void trySetCurrentException();
++  // Capture at the caller's catch site. With Clang shared-library builds,
++  // std::current_exception() in another module can otherwise return null for
++  // the active exception.
++  DISPENSO_DLL_ACCESS void trySetCurrentException(std::exception_ptr exception);
+   bool testAndResetException();
+
+   void registerChild(TaskSetBase* child) {
+--- a/dispenso/task_set.cpp
++++ b/dispenso/task_set.cpp
+@@ -51,23 +51,27 @@ TaskSetBase* parentTaskSet() {
+   return g_taskStackSize ? g_taskStack[g_taskStackSize - 1] : nullptr;
+ }
+
+-void TaskSetBase::trySetCurrentException() {
++void TaskSetBase::trySetCurrentException(std::exception_ptr exception) {
+ #if defined(__cpp_exceptions)
+   auto status = kUnset;
+   if (guardException_.compare_exchange_strong(status, kSetting, std::memory_order_acq_rel)) {
+-    exception_ = std::current_exception();
++    exception_ = std::move(exception);
+     guardException_.store(kSet, std::memory_order_release);
+     canceled_.store(true, std::memory_order_release);
+   }
++#else
++  (void)exception;
+ #endif // __cpp_exceptions
+ }
+
+ inline bool TaskSetBase::testAndResetException() {
+ #if defined(__cpp_exceptions)
+   if (guardException_.load(std::memory_order_acquire) == kSet) {
+     auto exception = std::move(exception_);
+     guardException_.store(kUnset, std::memory_order_release);
+-    std::rethrow_exception(exception);
++    if (exception) {
++      std::rethrow_exception(exception);
++    }
+   }
+ #endif // __cpp_exceptions
+   return canceled_.load(std::memory_order_acquire);

@@ -1,0 +1,68 @@
+# ═══ Draft knowledge entry — HMDFS uid 映射 + umask 077：mktemp 目录组位空致 config.status EACCES
+# .conan2 挂载点上进程 uid 与目录属主（数字 uid）不匹配，目录写权实际走
+# file_manager 组——umask 022 的目录（组 rw）可写，autoconf AS_TMPDIR 的
+# `umask 077 && mktemp -d` 目录（drwx--S---，组位空）建文件一律 EACCES。
+# 同一模式目录在 home/tmp 挂载点（属主名匹配）却可写，跨目录排查极易误判。
+# Software: libuio 0.3.0（2026-09-19 真机 10.62.178.77 实测定位，GNU mktemp 9.10）
+# Gate: conan create → config.status（BASH_ENV 注入修复后 configure/make/test 全绿）
+# Status: DRAFT
+
+id: libuio-0.3.0-hmdfs-uid-mapping-umask077-mktemp-eacces
+severity: 3
+category: ohos|build-system|libc|filesystem
+trigger_tool: config.status|configure|mktemp|make
+phase: build
+
+keywords: config.status, could not setup config files machinery, subs1.awk, Permission denied, mktemp, umask 077, AS_TMPDIR, drwx--S---, HMDFS, uid mapping, file_manager, BASH_ENV, CONFIG_SHELL, autoconf 2.72
+error_signature: '\./config\.status\[?\d*\]?: .*/conf[A-Za-z0-9]{6}/subs1\.awk: Permission denied|config\.status: error: could not setup config files machinery'
+match_keywords: config.status Permission denied, subs1.awk, mktemp umask, HMDFS 权限, drwx--S---, AS_TMPDIR, confXXXXXX, BASH_ENV, could not setup config files
+
+root_cause: |
+  (1) OHOS 真机 .conan2 所在 HMDFS 挂载点上，进程创建的目录显示属主为数字 uid
+  （如 20001006）而非进程自身身份名（currentUser）——属主匹配失败后 DAC 落到
+  组（file_manager）：组位有 rw（umask 022 映射出的 drwxr-s--x）才可写。
+  (2) autoconf（2.72 同）AS_TMPDIR 用 `(umask 077 && mktemp -d "./confXXXXXX")`
+  建临时目录：GNU mktemp 显式 chmod(0700) 在 HMDFS 上映射为 drwx--S---（组位
+  空）——既不匹配属主又无组位 → 在其中建任何文件 EACCES。
+  (3) config.status 第一写 `echo 'BEGIN {' >"$ac_tmp/subs1.awk"` 即失败，报
+  "could not setup config files machinery"。
+  (4) 迷惑性：同一 mkdir(0777&~umask) 的目录即使 umask 077 也是 drwxrws--x（组位
+  有）可写；在 home/tmp 挂载点（属主名匹配）连 drwx--S--- 都可写——跨目录、
+  跨挂载点行为不一致，bash -x 追到 line 817 才能定位。
+
+rec_approach: bash-env-mktemp-umask-wrapper
+rec_description: |
+  在 build 目录写 bash_env.sh：定义 mktemp() 包装（内部 `umask 022` 后调真
+  mktemp，目录拿到组 rw 的可写映射），并 export -f。配方设：
+  - BASH_ENV=<build>/bash_env.sh —— 每个非交互 bash（configure、config.status、
+    make 调的 $SHELL）启动时自动 source，函数全链路生效；
+  - CONFIG_SHELL=<hnp bash 绝对路径> —— config.status 与 Makefile 的 SHELL 默认
+    /bin/sh（mksh，不读 BASH_ENV），钉到 bash 才吃到包装；
+  - PWD=$build_folder（配合 bash 的 HMDFS getcwd 问题，见姊妹条目）。
+  注意：往 os.environ 塞 BASH_FUNC_mktemp%% 环境变量实测不生效（conan 的
+  conanbuild 包装会丢失），BASH_ENV 文件是可靠通道。
+rec_command: |
+  # bash_env.sh 内容（真 mktemp 路径取 shutil.which("mktemp")）：
+  # mktemp() {
+  #   local out
+  #   out=$( (umask 022; /bin/mktemp "$@") )
+  #   retval=$?
+  #   [ $retval -ne 0 ] && return $retval
+  #   printf '%s\n' "$out"
+  #   return 0
+  # }
+  # export -f mktemp
+  # 参考: archives/l/libuio/0.3.0/conanfile.py build() OHOS 块
+rec_auto_fix: false
+
+affected_scope: |
+  任何在 HMDFS conan 缓存上跑 autoconf/configure/automake 的构建（AS_TMPDIR 模式
+  全系：configure 自己、config.status、automake 的临时文件等）。已实证：libuio
+  0.3.0 真机（configure 最后一步卡死→修复后全绿）。凡报 "could not setup config
+  files machinery" / confXXXXXX 目录 Permission denied 都先查本条。判别口诀：
+  ls -ld 看 conf* 目录——drwx--S---（组位空）且属主是数字 uid 即命中。
+
+verification: |
+  真机复现（未修复）：cd <build> && bash ./config.status → confXXX/subs1.awk
+  Permission denied。修复后 conan create 全绿（2026-09-19，10.62.178.77，
+  ohos-aarch64-fixed）。

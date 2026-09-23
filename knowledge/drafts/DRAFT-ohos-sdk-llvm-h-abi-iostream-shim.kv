@@ -1,0 +1,49 @@
+#====================================================================
+# DRAFT - OHOS SDK LLVM 内嵌 __h ABI libc++，消费方须 __h 头 + iostream shim
+# contributor: pc2-15
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-sdk-llvm-h-abi-iostream-shim
+trigger_tool:           clang|clang++|ld.lld|cmake|conan
+phase:                  configuration|compilation|linking|runtime
+error_signature:        undefined reference .*std::__n1.*clang::|_ZNSt3__h4coutE|symbol not found|std::__h::cout|MultiplexConsumer
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               toolchain, abi, libc++, llvm, ohos, linking
+match_keywords:         __h, __n1, _LIBCPP_ABI_NAMESPACE, libclang-cpp.so, libLLVM.so, iostream, cout, cerr, iostream shim, ABI 命名空间, -nostdinc++
+title:                  OHOS SDK LLVM 内嵌 __h ABI libc++，消费方 C++ 代码须以 __h 头编译并补 iostream shim
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             >
+  OHOS SDK 预编译 clang/LLVM 共享库（libclang-cpp.so/libLLVM.so）静态内嵌构建时
+  的 libc++（ABI 内联命名空间 std::__h，NEEDED 仅 libc.so）；设备对外 libc++ 头
+  （libcxx-ohos）与运行库（libc++_shared.so）为 std::__n1。第三方库用 __n1 头
+  编译调用 clang C++ API → 符号 ABI 全不匹配；改用 __h 头后 clang 符号匹配，但
+  SDK 库不导出 iostream 全局对象（std::__h::cout/cerr），链接/运行仍缺符号。
+fix_hint:               >
+  ① 复制 libcxx-ohos 头，__config_site 中 _LIBCPP_ABI_NAMESPACE __n1→__h；
+  ② CXX_FLAGS 加 -nostdinc++ -isystem <__h头>；
+  ③ 自建 ohos_iostream_shim.cc（basic_ostream 绑定 fd1/2 + ios_base::Init）
+     打成静态库加入 EXE 链接；
+  ④ 库内 iostream 输出改 fprintf。
+
+# ═══ Layer 3: 方案层 (Solution) ═══
+solution:               __h-header-plus-iostream-shim
+solution_summary:       >
+  消费 SDK clang C++ API 的库统一用 __h ABI 头编译 + 自建 iostream shim；
+  不再依赖 __n1 头（避免 clang 符号不匹配）也不再使用 iostream 全局对象。
+commands:               >
+  cp -a <sdk>/include/libcxx-ohos/include/c++/v1 libcxx-h/v1
+  sed -i 's/#define _LIBCPP_ABI_NAMESPACE __n1/#define _LIBCPP_ABI_NAMESPACE __h/' libcxx-h/v1/__config_site
+  clang++ -std=c++17 -c ohos_iostream_shim.cc -o shim.o -nostdinc++ -isystem libcxx-h/v1
+  llvm-ar rcs libohos_iostream_shim.a shim.o
+evidence:               bcc-0.37.0 全目标编译通过；消费者用例/鸿蒙专项测试 PASS；conan-verify 8 门禁 PASS
+
+# ═══ Layer 4: 边界层 (Boundary) ═══
+applies_to:             >
+  链接 OHOS SDK clang/LLVM C++ API（libclang-cpp.so）的 C/C++ 库
+not_applies_to:         C ABI（libclang.so）消费者；按 __n1 构建的发布 llvm 包
+counterexample:         conan 发布 llvm/15.0.4 无 BPF target → bcc 需 SDK LLVM（含 BPF）才有此问题
+relations:              similar_to=E247; similar_to=E286; caused_by=OHOS SDK 预编译 clang 库 libc++ ABI 配置

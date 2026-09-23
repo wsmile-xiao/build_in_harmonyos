@@ -1,0 +1,69 @@
+draft: DRAFT-libical3-pkgconfig-consumer-chain
+status: pending-editor-review
+title: "CMake 包消费 conan glib/libxml2：pc-fix（prefix 修正+Requires 剥离+private 置空）+ LIBRARY_PATH/LD_LIBRARY_PATH 双通道注入 + presets_build_environment 通道"
+category: conan, build-system, pkg-config, glib
+match_keywords: >
+  pkg_check_modules, FindGLib, FindLibXML, glib-2.0.pc, prefix=/, proxy-libintl,
+  Package not found, Empty package name, libs-only-l, unable to find library -lxml2,
+  ical-glib-src-generator, presets_build_environment, buildenv_info, LIBRARY_PATH,
+  conan glib shared
+error_signature: >
+  No package 'glib-2.0' found|Package 'proxy-libintl', required by 'glib-2.0', not found|Empty package name in Requires|Package 'libpcre2-8', required by 'glib-2.0', not found|Package 'libffi', required by 'gobject-2.0', not found|unable to find library -lxml2|Error loading shared library libgobject-2.0.so.0: (needed by .*generator)
+root_cause: >
+  conan 侧 glib/libxml2 等共享库包安装的 .pc 文件 prefix=/（构建期 --prefix=/
+  安装路径 broken），且 glib-2.0.pc 的 Requires 引用未安装 .pc 的
+  proxy-libintl——上游 FindGLib/FindLibXML 用 pkg_check_modules 解析时
+  直接整体失败。三个独立坑叠加：(1) prefix broken 使 -L/-I 指向根目录；
+  (2) Requires/Requires.private 引用不可解析包名时 pkg-config 存在性
+  校验失败（即使 private 在非 static 模式不参与展开也校验存在性）；
+  (3) conan 2.29 的 self.dependencies.values() 传递依赖
+  package_folder=None（只填直接依赖），无法直接把 pcre2/zlib/libffi 的
+  pkgconfig 目录加入 PKG_CONFIG_PATH。另外两个连带问题：
+  pkg-config --libs-only-l 不含 -L（上游 FindLibXML 把 LIBXML_LIBRARIES
+  传 target_link_libraries 时缺库搜索路径）；构建期就地运行的生成器
+  工具链接 shared 依赖需 LD_LIBRARY_PATH（OHOS-on-OHOS 无 sysroot 隔离）。
+solution: |
+  配方 generate() 生成 pc-fix 目录（复制直接依赖 .pc → 改 prefix →
+  Requires 按逗号拆分剔除 proxy-libintl → Requires.private 整行置空），
+  build() 用 Environment().vars().apply() 包裹 cmake.configure()/build()，
+  注入 PKG_CONFIG_PATH（含 pc-fix）+ LIBRARY_PATH（链接期 -L 等效）+
+  LD_LIBRARY_PATH（构建期工具运行时）三通道：
+  ```python
+  def generate(self):
+      # pc-fix: 复制 .pc 副本，prefix 改真实包目录，
+      # Requires 剔除 proxy-libintl，Requires.private 整行置空
+      ...
+      # presets 通道（可选，对用 --preset 的下游有益）：
+      env = vbe.environment()
+      env.prepend_path("PKG_CONFIG_PATH", self._pkg_config_paths())
+      tc.presets_build_environment = env
+
+  def build(self):
+      env = Environment()
+      env.prepend_path("PKG_CONFIG_PATH", self._pkg_config_paths())
+      for pkg in ("glib", "libxml2"):
+          folder = self._dep_package_folder(pkg)
+          if folder:
+              env.prepend_path("LIBRARY_PATH", os.path.join(folder, "lib"))
+              env.prepend_path("LD_LIBRARY_PATH", os.path.join(folder, "lib"))
+      with env.vars(self).apply():
+          cmake.configure()
+          cmake.build()
+  ```
+  关键机制：CMake helper 直接拼 -D 参数调用 cmake（不读 preset 的
+  environment 字段），配方自身 buildenv_info 也不进 conanbuild.sh 的
+  preset 生效路径——进程内环境必须 Environment().vars().apply() 包裹。
+fallback: >
+  若依赖包的 .pc 完全不可救（如多个 broken 字段），改用 CMakeDeps
+  generator + CMAKE_DISABLE_FIND_PACKAGE_X 关闭上游 Find 模块，
+  手动 set(GLIB_LIBRARIES/CFLAGS) 或 patch 上游 CMakeLists 直接
+  target_link_libraries 依赖包绝对路径；构建期工具若不能就地运行，
+  回退上游 CMAKE_CROSSCOMPILING 的 native-build 导入方案
+  （IMPORT_ICAL_GLIB_SRC_GENERATOR 两段式构建）。
+verify_builds: "#9870 (CI #46335 passed), local conan create 48/48"
+reference_impl: >
+  archives/l/libical3/3.0.20/conanfile.py（_generate_pkg_config_fix/
+  _pkg_config_paths/build 方法）；相关先例：gssdp/1.6.6 的 glib2-pc-fix
+  （meson 场景，静态 glib 单副本问题）、E348 forwarding-pc。
+id: E543-候选
+doc_file: doc/E543.md

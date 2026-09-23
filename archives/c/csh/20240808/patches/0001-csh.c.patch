@@ -1,0 +1,193 @@
+--- a/csh.c
++++ b/csh.c
+@@ -33,21 +33,21 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+ #include <fcntl.h>
+ #include <errno.h>
+ #include <pwd.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <locale.h>
+ #include <unistd.h>
+ #include <limits.h>
+-#include <vis.h>
++#include "ohos-compat.h"
+ #include <stdarg.h>
+ 
+ #include "csh.h"
+ #include "proc.h"
+ #include "extern.h"
+ #include "pathnames.h"
+ 
+ /*
+  * C Shell
+  *
+@@ -145,24 +145,25 @@
+ bool    quitit = 0;
+ bool    fast = 0;
+ bool    batch = 0;
+ bool    mflag = 0;
+ bool    prompt = 1;
+ bool    enterhist = 0;
+ bool    tellwhat = 0;
+ 
+ extern char **environ;
+ 
+-static int	readf(void *, char *, int);
+-static off_t	seekf(void *, off_t, int);
+-static int	writef(void *, const char *, int);
++static ssize_t	readf(void *, char *, size_t);
++static int	seekf(void *, off_t *, int);
++static ssize_t	writef(void *, const char *, size_t);
+ static int	closef(void *);
++static cookie_io_functions_t cookief = {readf, writef, seekf, closef};
+ static int	srccat(Char *, Char *);
+ static int	srcfile(char *, bool, bool);
+ static void	phup(int);
+ static void	srcunit(int, bool, bool);
+ static void	mailchk(void);
+ static Char   **defaultpath(void);
+ 
+ int
+ main(int argc, char *argv[])
+ {
+@@ -217,26 +218,20 @@
+ 	for (tcp = *tempv; *tcp++;)
+ 	    continue;
+ 	for (tcp--; tcp >= *tempv; tcp--)
+ 	    tcp[1] = tcp[0];
+ 	*++tcp = '-';
+ 	argc--;
+     }
+     if (loginsh)
+ 	(void) time(&chktim);
+ 
+-    if (pledge("stdio rpath wpath cpath fattr getpw proc exec tty",
+-	NULL) == -1) {
+-	    perror("pledge");
+-	    exit(1);
+-    }
+-
+     /*
+      * Move the descriptors to safe places. The variable didfds is 0 while we
+      * have only FSH* to work with. When didfds is true, we have 0,1,2 and
+      * prefer to use these.
+      */
+     initdesc();
+     /*
+      * XXX: This is to keep programs that use stdio happy.
+      *	    what we really want is freunopen() ....
+      *	    Closing cshin cshout and csherr (which are really stdin stdout
+@@ -244,25 +239,25 @@
+      *	    gives us again stdin == cshin stdout == cshout and stderr == csherr.
+      *	    If that was not the case builtins like printf that use stdio
+      *	    would break. But in any case we could fix that with memcpy and
+      *	    a bit of pointer manipulation...
+      *	    Fortunately this is not needed under the current implementation
+      *	    of stdio.
+      */
+     (void) fclose(cshin);
+     (void) fclose(cshout);
+     (void) fclose(csherr);
+-    if (!(cshin  = funopen((void *) &SHIN,  readf, writef, seekf, closef)))
++    if (!(cshin  = fopencookie((void *) &SHIN,  "r", cookief)))
+ 	exit(1);
+-    if (!(cshout = funopen((void *) &SHOUT, readf, writef, seekf, closef)))
++    if (!(cshout = fopencookie((void *) &SHOUT, "w", cookief)))
+ 	exit(1);
+-    if (!(csherr = funopen((void *) &SHERR, readf, writef, seekf, closef)))
++    if (!(csherr = fopencookie((void *) &SHERR, "w", cookief)))
+ 	exit(1);
+     (void) setvbuf(cshin,  NULL, _IOLBF, 0);
+     (void) setvbuf(cshout, NULL, _IOLBF, 0);
+     (void) setvbuf(csherr, NULL, _IOLBF, 0);
+ 
+     /*
+      * Initialize the shell variables. ARGV and PROMPT are initialized later.
+      * STATUS is also munged in several places. CHILD is munged when
+      * forking/waiting
+      */
+@@ -966,21 +961,21 @@
+ 	sigprocmask(SIG_SETMASK, &sigset, NULL);
+ 	if (pjobs) {
+ 	    pjobs = 0;
+ 	    (void) fprintf(cshout, "\n");
+ 	    dojobs(jobargv, NULL);
+ 	    stderror(ERR_NAME | ERR_INTR);
+ 	}
+     }
+     sigdelset(&osigset, SIGCHLD);
+     sigprocmask(SIG_SETMASK, &osigset, NULL);
+-    (void) fpurge(cshout);
++    (void) fflush(cshout);
+     (void) endpwent();
+ 
+     /*
+      * If we have an active "onintr" then we search for the label. Note that if
+      * one does "onintr -" then we shan't be interruptible so we needn't worry
+      * about that here.
+      */
+     if (gointr) {
+ 	gotolab(gointr);
+ 	timflg = 0;
+@@ -1247,37 +1242,43 @@
+ 	return 1;
+ }
+ 
+ /*
+  * When didfds is set, we do I/O from 0, 1, 2 otherwise from 15, 16, 17
+  * We also check if the shell has already changed the descriptor to point to
+  * 0, 1, 2 when didfds is set.
+  */
+ #define DESC(a) (*((int *) (a)) - (didfds && *((int *) a) >= FSHIN ? FSHIN : 0))
+ 
++static ssize_t
++readf(void *oreo, char *buf, size_t siz)
++{
++    return read(DESC(oreo), buf, siz);
++}
++
++
++static ssize_t
++writef(void *oreo, const char *buf, size_t siz)
++{
++    return write(DESC(oreo), buf, siz);
++}
++
++
+ static int
+-readf(void *oreo, char *buf, int siz)
+-{
+-    return read(DESC(oreo), buf, siz);
+-}
+-
+-
+-static int
+-writef(void *oreo, const char *buf, int siz)
+-{
+-    return write(DESC(oreo), buf, siz);
+-}
+-
+-static off_t
+-seekf(void *oreo, off_t off, int whence)
+-{
+-    return lseek(DESC(oreo), off, whence);
++seekf(void *oreo, off_t *off, int whence)
++{
++    off_t result = lseek(DESC(oreo), *off, whence);
++
++    if (result == (off_t)-1)
++	return -1;
++    *off = result;
++    return 0;
+ }
+ 
+ 
+ static int
+ closef(void *oreo)
+ {
+     return close(DESC(oreo));
+ }
+ 
+ 

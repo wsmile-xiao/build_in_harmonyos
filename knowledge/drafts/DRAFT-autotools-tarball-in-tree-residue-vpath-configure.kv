@@ -1,0 +1,75 @@
+#====================================================================
+# DRAFT: 上游 tarball 携带 in-tree configure 残留（config.status/config.h/
+#        stamp-h1/Makefile）时 Conan VPATH 构建必触发 "source directory
+#        already configured"，应在 source() 清理残留
+#
+# 状态: 草稿（Curator 判定产出，未审核、未写入正式知识库；最终编号 Exxx 由知识库主编确认）
+# 来源: didiwiki/3.0.5 run CI 第 4 轮真实失败（VPATH 残留问题域）
+# 机理分层: L2 跨库工程模式层（第二实例 advancescan/1.18 同 error signature；
+#           配方树 103 处同模式清理实践，远超 ≥3 门槛）
+# 申报域: 构建系统语义（八分类之一）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-autotools-tarball-in-tree-residue-vpath-configure
+trigger_tool:           configure|autotools|conan create
+phase:                  build
+error_signature:        configure: error: source directory already configured; run "make distclean" there first
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, conan, vpath, packaging
+match_keywords:         source directory already configured, make distclean, config.status, stamp-h1, config.log, in-tree, VPATH, tarball residue, basic_layout
+title:                  上游 tarball 携带 in-tree configure 残留时 Conan VPATH 构建必报 source directory already configured，应在 source() 清理残留
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             完整因果机理链——(1) 上游发布习惯：部分 autotools 项目直接从已构建的源码树打 tarball 发布，归档内携带 config.status/config.log/config.h/stamp-h1/Makefile 等 in-tree configure 产物（didiwiki 3.0.5 tarball 112 条目即含全套残留）。(2) 触发命令：Conan basic_layout/VPATH 约定下，源码复制到 build folder 后在 build 目录执行 `sh <src>/configure`。(3) 失败点：autoconf 生成的 configure 检测到 srcdir 存在 config.status，判定"源目录已按另一构建目录配置过"，直接 as_fn_error "source directory already configured; run \"make distclean\" there first"（同一 generated autoconf 宏在 archives/a/advancescan/1.18/patches/0008-configure.patch:3762-3764 可见）→ configure 退出 1 → conan build 失败。(4) 归类：上游归档卫生 × autoconf VPATH 检测语义 × Conan VPATH 构建约定三者的确定性冲突；残留文件均由本次 configure 重新生成，可安全删除。
+affected_scope:         任何"从 in-tree 构建过的源码树直接打包发布"的 autotools 项目在 Conan（或任何 VPATH 构建）下的适配；命中判据为 configure 报 source directory already configured。
+verification_cmd:       # 三段自包含探针（Builder 2026-09-10 在 ohpc2 真机 fresh sandbox 实测，tarball SHA-256 290aee7f… 与官方双源核验一致；error signature 另由 ci-run-4.log 与 advancescan/1.18 notes 两 run 日志证实）：(1) 门禁复现：tar xzf ciwiki-3.0.5.tar.gz && mkdir b && cd b && sh ../ciwiki-3.0.5/configure --prefix=/tmp/probe  → configure: error: source directory already configured; run "make distclean" there first（任何 checking 前，configure 退出 1）。(2) 残留核验：解包后 ls 顶层即见 config.status、config.log、config.h、stamp-h1、Makefile，另有 src/scripts/docs 三级子目录 Makefile，全套 8 件。(3) 清理后：rm 上述 8 个明确路径文件后同命令 → 不再报 already configured，正常进入 checking（实测 9 项 checking 输出；显式 CC 时推进到 creating ./config.status；裸 PATH 探针 shell 无 C compiler 时止于编译器检测——尾部差异均属探针沙箱环境，与残留门禁无关）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: 在 recipe source() 解包后按固定清单删除 in-tree configure 残留：config.status、config.log、config.h、stamp-h1、顶层与各级子目录 Makefile（didiwiki 另含 src/scripts/docs 三级）（本 run 落地形态：archives/d/didiwiki/3.0.5/conanfile.py source() residues 清单，文件存在才删，逐项 os.remove）
+rec_description: 这些文件全部由本次 configure 重新生成，删除不损失任何上游语义；比补丁改 configure 或 make distclean 更确定。配方树 103 个 conanfile.py 含同样的 "config.status" 清理实践（abook/alien-arena/aldo/aribb24/asterisk-*/atool/awf-gtk 等），属既成工程惯例的知识化。
+rec_command: 见 archives/d/didiwiki/3.0.5/conanfile.py source()（residues 列表 + 逐项存在性判断删除）
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      手动 make distclean
+fallback_description:   在源目录对残留 Makefile 执行 make distclean。诚实权衡：distclean 依赖残留 Makefile 本身完好且 distclean 目标行为由上游 Makefile.in 定义，个别包的 distclean 会连带删除需保留的分发文件（E434 copystamp 先例：distclean 删掉 COPY_FILES），故确定性不如按清单删除；仅作退路。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# 禁止策略
+forbid_1_pattern:       为迁就残留改用 in-tree 构建（在源目录直接 configure/make），或用 --build/--host 绕过配置
+forbid_1_reason:        in-tree 构建与 Conan basic_layout/VPATH 约定冲突，且 E434 已证 in-tree 下 automake copystamp 类目标会 cp 同文件失败；--build/--host 绕过触发 P-AUTOTOOLS-001 自动拒绝
+forbid_1_consequence:   二次 configure 互相污染、构建产物混入源目录与打包层，跨轮次缓存复用时报错漂移，进入不可收敛的修复循环
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-PATCH-001, P-PATCH-003
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E434, E110, E082]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-autotools-tarball-in-tree-residue-vpath-configure.md
+last_updated: 2026-09-10
+source_event: didiwiki/3.0.5 run CI 第 4 轮真实失败 → source() 残留清理 → 第 6 轮 PASS（ci-run-4.log:175 → ci-run-6.log:401-405）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: oh-device-porting-v2 curator <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used: 2026-09-10

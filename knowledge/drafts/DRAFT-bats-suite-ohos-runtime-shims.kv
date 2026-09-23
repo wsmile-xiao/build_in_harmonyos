@@ -1,0 +1,142 @@
+#====================================================================
+# DRAFT-bats-suite-ohos-runtime-shims — bork 上游 bats 测试在 OHOS 实跑：
+#   respond_to 桩识别 + uname/egrep/install 三个 shim
+# 对应人类文档: knowledge/drafts/DRAFT-bats-suite-ohos-runtime-shims.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #8710 bork 0.14.0 适配（旧声明 0/366 → 实跑 366/366）
+# 与既有条目的关系: E143/E165 处理 shebang 解释器缺失；E272 是 DejaGNU
+#   套件的 spawn/tmpfile 两点；本条目是 bats 框架套件的实跑装配（不同框架）
+#====================================================================
+
+id:                     DRAFT-bats-suite-ohos-runtime-shims
+trigger_tool:           bats|bash|test|autotools|make
+phase:                  testing
+error_signature:        not ok 1 bats-gather-tests|
+                         \. test/helpers\.sh' failed|
+                         exited with code 127, indicating 'Command not found'|
+                         egrep is obsolescent; using grep -E|
+                         \`\[\[ -z \$\{output\} \]\]' failed
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               testing, bats, bash, shim, ohos, portability
+match_keywords:         bats, bats-core, @test, bats-gather-tests, respond_to,
+                         mock command, test/helpers.sh, uname -s, HarmonyOS,
+                         md5cmd, egrep obsolescent, coreutils install,
+                         busybox install, command not found 127, output assertion
+title:                  bats（Bash Automated Testing System）上游测试套件在 OHOS 实跑：先判定桩机制，再补 uname/egrep/install 三个环境 shim
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             结论先行——**"无测试框架"不等于"测试无法运行"**。纯 bash 工具的
+                         bats 套件常被误判为"依赖系统包管理器（brew/apt/npm/pip）故
+                         OHOS 全灭"，但多数套件用**桩替换**（如 bork 的 respond_to：
+                         `respond_to "brew list --formula" "cat $fixtures/brew-list.txt"`
+                         把外部命令映射到录制输出），并不真调包管理器。误判会导致
+                         通过率被无谓地报成 0。判定后真正需要补的只是 3 处
+                         **OHOS 与 Linux 的行为差异**：
+                         ① `uname -s` 返回 HarmonyOS，而上游 helpers 的平台分支只认
+                            Linux/Darwin/FreeBSD（bork 的 md5cmd 对未知平台 `return 1`），
+                            在 bats 的 `set -e` 语义下直接令 helpers.sh 加载失败 →
+                            表现为 `not ok 1 bats-gather-tests`，**全部 366 个用例 0 运行**
+                            （最易被误读为"框架不可用"）；
+                         ② OHOS grep 对 `egrep` 打印 "egrep is obsolescent" 警告到
+                            stderr，污染 bats 的 `[[ -z ${output} ]]` 断言（期望空输出）；
+                         ③ OHOS 无 coreutils `install`，调用即 127 Command not found。
+affected_scope:         OHOS 上任何 bats 驱动的上游测试套件（纯 bash/shell 工具常见：
+                         bork/bash-it 类配置管理工具、任何用 bats 做单测的 shell 项目）；
+                         三处差异均与业务逻辑无关，属运行时环境适配
+verification_cmd:       # 递进实测（每步结果必须不同，否则说明 shim 未生效）
+                         # 0) 无 shim —— 期望 0 运行（框架 gather 失败）
+                         cd <src> && BORK_SOURCE_DIR=<src> bats test/
+                         # 1) + uname shim —— 期望大部分通过
+                         PATH=<shim>/uname:$PATH bats test/
+                         # 2) + egrep shim 3) + install shim —— 期望全通过
+                         PATH=<shim>/uname:<shim>/egrep:<shim>/install:$PATH bats test/
+                         # 关键自证：shim 必须能被独立验证（uname -s 输出 Linux）
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           identify-stub-mechanism-then-add-runtime-shims
+rec_description:        两步，缺一不可：
+                         **第一步：先判定测试是"真调外部命令"还是"桩替换"**——
+                         读 test/helpers.sh 与任一用例，找 respond_to / mock / stub 类
+                         机制与 test/fixtures/ 目录。若为桩替换，则"缺包管理器"不构成
+                         不可运行的理由，必须实跑（否则会把可运行套件误报 0 通过率）。
+                         **第二步：按报错补齐 OHOS/Linux 行为差异 shim**（不改上游测试）：
+                         ① **uname shim**：仅把 `-s` 伪装为 Linux，其余参数原样透传
+                            （`if [ "$1" = "-s" ]; then echo Linux; else exec uname "$@"; fi`）
+                            ——修复 helpers 平台分支导致的 set -e 全线中断；
+                         ② **egrep shim**：`exec grep -E "$@"`——消除警告对 output
+                            断言的污染；
+                         ③ **install shim**：转发到 `busybox install`（busybox 有 install
+                            applet，支持 -d/-D/-o/-g/-m/-s/-p），并**剔除 busybox 不支持的
+                            GNU 专有选项**（如 `-C`/--compare）后转发。
+                         **务必做递进对照**（无 shim → +uname → +egrep → +install），
+                         每步观察通过率变化，用于证明每个 shim 都真实生效而非碰巧通过。
+rec_command:            # shimdir/uname
+                         #!/bin/sh
+                         if [ "$1" = "-s" ]; then echo Linux; else exec uname "$@"; fi
+                         # shimdir/egrep
+                         #!/bin/sh
+                         exec grep -E "$@"
+                         # shimdir/install（剔除 busybox 不支持的 -C）
+                         #!/bin/sh
+                         args=""; for a in "$@"; do case "$a" in -C) ;; *) args="$args $a";; esac; done
+                         exec busybox install $args
+                         # 运行
+                         BORK_SOURCE_DIR=<src> PATH=<shimdir>:$PATH bats test/
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      record-running-baseline-and-failed-cases
+fallback_description:   若补齐 shim 后仍有失败，逐条记录：用例名、失败断言、原始报错、
+                         已验证的 shim 覆盖范围——把"已运行基线"（如实数字）与"剩余
+                         失败的具名原因"一并写入 manifest，而不是退回"无法运行"的整体声明
+fallback_command:       bats test/ 2>&1 | grep -E '^(ok|not ok) ' | wc -l   # 实跑基线
+fallback_auto_fix:      false
+fallback_impl:          explicit-eligible-test-inventory
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       无 bats.*故.*全部无法运行|依赖系统包管理器.*0/366|跳过上游测试.*框架缺失
+forbid_1_reason:        框架缺失/环境依赖常可补（bats 可 vendoring；桩替换机制下
+                         包管理器根本不被调用）；不核实就声明 0 会低估适配质量、
+                         也会被审查方按"有可运行子集未尝试"打回
+forbid_1_consequence:   通过率被无谓报 0；管理员复核时发现可跑，PR 被打回
+forbid_2_pattern:       修改上游测试.*respond_to|改 test/.*\.bats|patch 上游测试使其通过
+forbid_2_reason:        改上游测试属越界（R6/R8）；且掩盖真实环境差异
+forbid_2_consequence:   适配 PR 变成测试 fork，上游升级即冲突
+forbid_3_pattern:       直接 PATH 注入.*不验证|未做递进对照即声称 shim 生效
+forbid_3_reason:        无法区分"shim 生效"与"该用例本来就能过"；也无法解释通过率
+                         变化的因果
+forbid_3_consequence:   归因错误，同类问题重复踩
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             E143, E165, E272, DRAFT-ohos-execve-path-redirect-shim
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-bats-suite-ohos-runtime-shims.md
+last_updated:           2026-09-11
+source_event:           bork/0.14.0 HarmonyOS PC 适配（PR #8710）；旧声明 0/366
+                         经实跑更正为 366/366（递进：0 → 361 → 364 → 366）
+
+# ═══ 知识协作 ═══
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              8710
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true

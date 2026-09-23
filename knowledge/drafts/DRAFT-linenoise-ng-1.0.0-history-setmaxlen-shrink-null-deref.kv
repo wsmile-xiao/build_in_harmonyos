@@ -1,0 +1,74 @@
+# DRAFT-linenoise-ng-1.0.0-history-setmaxlen-shrink-null-deref
+#====================================================================
+
+id:                     DRAFT-linenoise-ng-1.0.0-history-setmaxlen-shrink-null-deref
+trigger_tool:           clang|c++|runtime
+phase:                  runtime|testing
+error_signature:        Signal 11|SIGSEGV|Exception: 256|core dumped|Segmentation fault
+
+severity:               2
+category:               upstream-bug|memory|history-buffer|static-lib|regression
+match_keywords:         linenoiseHistorySetMaxLen, historyMaxLen, historyLen, memcpy,
+                         history shrink, linenoiseHistorySave, NULL deref, readline,
+                         line editing, buffer shrinking, stale capacity offset
+title:                  linenoise-ng v1.0.0 linenoiseHistorySetMaxLen 收缩历史时按
+                        historyMaxLen（容量）而非 historyLen（已填条目）偏移 memcpy，
+                        历史未满时拷入 NULL 槽，随后 linenoiseHistorySave 解引用 NULL
+                        崩溃（Signal 11）；修复 = 用 historyLen 偏移（antirez 原版语义）
+
+root_cause:             linenoise-ng v1.0.0 的 linenoiseHistorySetMaxLen(len) 在收缩
+                        (len<historyLen) 时执行
+                        memcpy(newHistory, history + historyMaxLen - tocopy, ...)
+                        —— 用容量 historyMaxLen 计算源偏移。历史未满
+                        (historyLen<historyMaxLen) 时该偏移指向 memset 零化的空槽，
+                        新数组元素为 NULL；随后 linenoiseHistorySave() 遍历
+                        history[j][0] 直接解引用 NULL → SIGSEGV。上游 antirez/linenoise
+                        原版使用 history + historyLen - tocopy（只拷贝已填条目尾部），
+                        linenoise-ng 引入回归。注意 linenoiseHistorySetMaxLen(0) 被拒绝
+                        (返回 0)；默认 historyMaxLen=100。
+
+affected_scope:         linenoise-ng v1.0.0（arangodb）历史功能；任何消费者在历史未满时
+                        收缩 maxlen 后调用 HistorySave/遍历历史即崩溃；OHOS 的鸿蒙专项
+                        非交互测试（归档 test_package/ohos_test.c，随 PR 交付）使该路径
+                        可复现，本 bug 非 OHOS 特有，属上游通用回归。
+
+verification_cmd:       # 随 PR 交付的回归（R02 起可复现）：
+                        # ① 鸿蒙专项 15 断言套件：test_package/ohos_test.c
+                        #    clang++ -std=c++11 -I<包 include 目录> ohos_test.c <liblinenoise.a> -o ohos_test && ./ohos_test
+                        #    修复前 Signal 11 (exit 139)；修复后 15/15 checks passed (exit 0)
+                        # ② 消费者收缩回归：test_package/test.c（conan create 自动运行 ctest）
+                        #    clang++ -std=c++11 -I<包 include> test.c <liblinenoise.a> -o t && ./t
+                        #    修复前 Signal 11 (exit 139)；修复后 OK (exit 0)
+                        # 反向核验（R02 实测）：仅应用 0001、不应用 0002 重建 lib →
+                        #    test.c 第 4 条断言后 Signal 11 (exit 139)，证明覆盖有效
+
+rec_priority:           1
+rec_approach:           use-filled-count-for-shrink-offset
+rec_description:        收缩历史缓冲区时，源偏移必须基于实际已填条目数 historyLen，
+                        而非容量 historyMaxLen：memcpy(newHistory, history + historyLen
+                        - tocopy, sizeof(char8_t*) * tocopy)。与 antirez/linenoise 原版
+                        一致；保持 Save 前 history[j] 非 NULL 不变式。附带：static 库
+                        C API 包 C++ 实现时，纯 C 消费者需 system_libs=["c++"](E247)。
+
+rec_command:            补丁 0002-src-linenoise.cpp.patch：
+                        `memcpy(newHistory, history + historyLen - tocopy, sizeof(char8_t*) * tocopy);`
+                        并配以 ohos_test.c 回归断言（收缩到 2 后 Save 只写非空行）。
+rec_auto_fix:           false
+rec_impl:               upstream-bugfix-patch-plus-regression-test
+
+fallback_priority:      2
+fallback_approach:      guard-save-against-null
+fallback_description:   若不能改上游，可在 linenoiseHistorySave 中对 history[j]==NULL 加
+                        判空跳过；但只掩盖症状，不修复 memcpy 错位，且与上游后续版本
+                        对齐困难，不推荐。
+fallback_command:       if (history[j] != NULL && history[j][0] != '\0') fprintf(...)
+fallback_auto_fix:      false
+fallback_impl:          defensive-null-guard-only
+
+forbid_1_pattern:       memcpy\(newHistory, history \+ historyMaxLen - tocopy
+forbid_1_reason:        容量偏移在历史未满时拷贝 NULL 槽，违反 Save 不变式，必崩。
+forbid_1_consequence:   linenoiseHistorySave 解引用 NULL → Signal 11，消费者进程崩溃。
+
+forbid_2_pattern:       linenoiseHistorySetMaxLen\(0\)
+forbid_2_reason:        len<1 时函数返回 0 且不设置 maxlen，调用方不能依赖收缩到 0。
+forbid_2_consequence:   误以为收缩到 0 会清空历史，实际静默失败。

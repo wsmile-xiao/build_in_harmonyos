@@ -1,0 +1,65 @@
+#====================================================================
+# DRAFT — 用 plain char 承接 getc()/fgetc() 再与 EOF 比较：
+#         plain char 无符号的目标平台上扫描状态机在文件末尾死循环
+# Draft only: do not promote without reviewer assignment.
+# Trigger event: looktxt/1.4.1 adaptation (task #8543)
+#====================================================================
+
+id:                     DRAFT-8543-plain-char-eof-sentinel-infinite-loop
+trigger_tool:           clang|make|test
+phase:                  runtime
+error_signature:        timeout.*(124|Killed).*(--test|make test)|make test.*(never returns|hang)|EOF.*(never|cannot) be (represented|stored) in char|char.*== *EOF
+
+severity:               3
+category:               portability, toolchain, c-language, abi, testing
+match_keywords:         EOF, getc, fgetc, getchar, plain char, unsigned char, aarch64-unknown-linux-ohos, CHAR_MIN, __CHAR_UNSIGNED__, char signedness, sentinel, infinite loop, 状态机, timeout 124, 100% CPU, file_scan
+title:                  以 char 变量承载 getc()/fgetc() 返回值并与 EOF 比较，在 plain char 默认无符号的目标上造成 EOF 处死循环
+
+root_cause:             C 允许 plain char 的符号性由实现决定；本机 OHOS/HarmonyOS PC 工具链（`clang -dumpmachine` = aarch64-unknown-linux-ohos，clang 15）实测 `limits.h` 的 CHAR_MIN == 0 且预定义 __CHAR_UNSIGNED__，即 plain char 默认无符号。getc()/fgetc() 按标准返回 int，可返回 EOF(-1)；把返回值存入 char 时 -1 变成 255，之后任何 `c == EOF`/`c == -1` 判定永不成立。若 EOF 是扫描状态机唯一的出口条件，循环就没有退出路径：进程 100% CPU 永久挂起，且**不产生任何错误信息**——测试表现为超时被杀（rc=124）而不是失败断言，因而极易被误记为“构建环境慢”或“测试预算不足”。looktxt 1.4.1 的具体位置：`file_scan()`（looktxt.c L2336–L2700）在 L2382 声明 `char c`，L2419 执行 `c = lk_tolower(getc(file.SourceHandle))`，与 EOF 的比较出现在三处：L2422 的 `if (c == EOF)`（只改写 last_eolpos/last_is 等状态、并不跳出）、L2464 的 `if (!(is & Beol) && !(is & Bseparator) && c != EOF && !lk_isprint(c))`（循环体内的不可打印字符兜底，同样永不因 EOF 触发）与 L2692 的 `} while (c != EOF)`（do-while 的唯一循环出口）。注意这与 E419（plain char 作为有符号 8 位样本、导致 INT8 API 数值差 256）同源于同一实现定义行为，但症状与正确处置不同：那里数据仍在、只是数值错；这里是哨兵值不可表示，控制流丢失。
+affected_scope:         任何把 getc/fgetc/getchar 返回值或“读到的字节 + EOF”放进 char/unsigned char 变量的 C 代码：手写词法/数值扫描器、行读取回退路径、CSV/配置解析器、以 `while ((c = getc(f)) != EOF)` 却声明 `char c` 的老式循环，以及把 EOF 与 char 数组元素比较的格式解析器。在 plain-char-unsigned 目标（含 OHOS aarch64、ARM32、RISC-V 等）上必然触发，在 plain char 默认有符号的 x86-64 Linux 上游开发机上通常隐形——实测以 `-fsigned-char` 在 aarch64 上复现“隐形”状态。
+verification_cmd:       timeout 25 ./<pkg-bin> --verbose --test examples/<官方输入> < /dev/null; echo "rc=$?"   # 124=挂起(未修复), 0=已修复。跑对照务必重定向 stdin，避免把等待标准输入误判为死循环。符号性：对含 #include <limits.h> 的探针文件跑 `clang -dM -E probe.c | grep -i CHAR_UNSIGNED` 并打印 CHAR_MIN。源码侧定位：先用 `grep -n "getc("` 找读取点，再用 `grep -nE "^[[:space:]]*(char|int)[[:space:]]+[a-z_]+[[:space:]]*;"` 找接收变量声明，并核对二者是否同一函数（打印函数边界，勿凭函数名猜测）
+
+rec_priority:           1
+rec_approach:           widen-eof-receiver-to-int
+rec_description:        把承接 getc()/fgetc() 返回值的变量类型改为 int（与标准规定的返回值域一致），使 EOF 可表示、状态机恢复出口。单行类型修正即可，不动算法、不加平台宏；用三组同机对照证明必要性——A 上游源码+默认选项 → timeout 25 rc=124，B 上游源码+`-fsigned-char` → rc=0（隔离出“符号性”这一唯一变量），C 打补丁+默认选项 → rc=0 且上游 `make test` 输出 Test OK——并把该对照表写进 notes 与 test-report。上游/发行版若已有同名修复（Debian 的 fix_infinite_loop.patch），按其语义对齐（只要求修同一处、同一类型转换，不假设两份补丁文件逐字相同），保证补丁可向上游提交（P005）。
+rec_command:            仅改接收变量类型一行（如 `sed -i 's/^    char c;$/    int c;/' looktxt.c`，务必先 grep 确认该行就是 getc 的接收变量）；随后 `timeout 25 ./looktxt --verbose --test examples/Al.lau </dev/null` 验证 rc=0，并跑上游 `make test` 取 Test OK
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:       toolchain-signed-char-mode
+fallback_description:   当上游代码把 plain char 当作有符号 8 位样本、且改动点多到无法逐个审时，用 -fsigned-char 统一目标平台的 char 符号性（见 E419）。本案实测：未打补丁 + `-fsigned-char` 在同一设备上确实不再挂起（rc=0），因此它可以作为定位手段（用它把“char 符号性”从其它嫌疑中隔离出来）。但不要当成交付方案：它只是把目标平台拉回上游开发机的假设，源码仍是错的，换编译器/换构建选项即复发，同时还会改变同包内其它 char 数据的比较与转换语义。
+fallback_command:       <ohos-clang> -O2 -fsigned-char -o <bin> -g looktxt.c   # 直接编译才有效：上游 Makefile 的编译行是 `${CC} -O2 -o looktxt -g looktxt.c $(NEXUS_NAPI)`，既不读 CFLAGS 也不读 EXTRA_CFLAGS，`EXTRA_CFLAGS=... make` 会被静默忽略（实测踩过：这样“构建”出来的二进制仍挂起，会得出错误结论）
+fallback_auto_fix:      false
+fallback_impl:          toolchain-compile-flag
+
+forbid_1_pattern:       timeout.*(提高|increase|raise).*(预算|timeout)|skip.*(make test|--test)|mark.*(passed|success).*(without|not).*(run|complet)
+forbid_1_reason:        挂起不是性能问题；放宽超时或跳过测试会把“无出口的控制流缺陷”记成绿色。
+forbid_1_consequence:   包在任何含数字/纯文本区域的输入上永久占满一个 CPU，运行期故障从构建期被推迟到用户现场。
+forbid_2_pattern:       #ifdef __OHOS__.*EOF|__OHOS__.*signed char|platform.*char.*guard
+forbid_2_reason:        这是可移植性缺陷而不是平台特性；用平台宏区分会让上游和其他 plain-char-unsigned 目标继续带 bug（R8/PF5 要求补丁不含平台特判）。
+forbid_2_consequence:   补丁无法提交上游，评审按 R8 拒绝；同一 bug 在别的 aarch64 目标复发。
+forbid_3_pattern:       -fsigned-char.*(唯一|最终|final)|仅靠编译选项修复.*EOF
+forbid_3_reason:        全局 char 语义开关掩盖哨兵值不可表示的事实，并可能改变同包内其他 char 数据的比较/转换行为。
+forbid_3_consequence:   上游代码保持错误，构建依赖特定编译标志，移植性与可审计性同时下降。
+
+principles:             P005, P013
+causes:                 []
+caused_by:              []
+similar_to:             [E419]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-8543-plain-char-eof-sentinel-infinite-loop.md
+last_updated:           2026-09-19
+source_event:           looktxt/1.4.1 HarmonyOS PC adaptation (task #8543): file_scan() 的 `char c`（looktxt.c L2382）承接 getc()（L2419）并与 EOF 比较（L2422、L2692），未打补丁二进制在 examples/Al.lau 上 timeout 25 → rc=124（100% CPU 永久挂起，插桩读数 c=255、ftell 冻结在 68137）；单行改 int c 后同一命令 rc=0、循环恰 68138 次退出，上游 make test 6/6 → Test OK；补丁无平台宏，与 Debian fix_infinite_loop.patch 语义等价
+
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19
+draft:                  true
+contributor_id:         8543

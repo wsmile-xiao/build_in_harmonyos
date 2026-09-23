@@ -1,0 +1,113 @@
+#====================================================================
+# DRAFT-ohos-static-tool-bypass-dlopen-limit — HMDFS 禁动态加载缓存共享库时，
+#   把构建期必需工具从源码静态编译（仅依赖 libc）
+# 对应文档: knowledge/drafts/DRAFT-ohos-static-tool-bypass-dlopen-limit.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-static-tool-bypass-dlopen-limit
+trigger_tool:           meson|cmake|make|clang|gcc|conan|runtime
+phase:                  configuration|compilation|build
+error_signature:        cannot execute binary file|
+                         error while loading shared libraries.*libexpat|
+                         Permission denied.*\.so|
+                         error while loading shared libraries.*libxml|
+                         No such file or directory: .*/(scanner|generator|tool)
+
+severity:               2
+category:               toolchain, build-tool, hmdfs, sandbox, porting
+match_keywords:         静态编译, -static, 内嵌工具, wayland-scanner, dlopen, HMDFS,
+                        禁止动态加载, 构建期工具, find_program, 缓存共享库,
+                        工具无法执行, libc only, 自编译工具
+title:                  制品仓里的构建期工具链接了共享库、在 HMDFS 上无法执行时，
+                        从源码静态编译一个等价工具（仅依赖 libc）作为替代
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             HMDFS（OHOS 的可写文件系统）对 Conan 缓存目录里的共享库
+                        **禁止动态加载**：制品仓提供的构建期工具（如 wayland 包自带的
+                        wayland-scanner）链接 libexpat.so / libxml2.so，即便文件存在、
+                        权限正常，执行时仍以 "error while loading shared libraries"
+                        或 "cannot execute binary file" 失败。而该工具是**构建另一包所必需**
+                        的（find_program / generator 阶段），不能用"跳过某测试"了事。
+                        此时正确形态是：用上游源码自行编译一个**静态链接**的等价工具
+                        （-static，仅依赖 libc），放进生成目录并让构建系统通过自造
+                        .pc / native 查找路径找到它——而不是试图修缓存里的 .so 权限。
+affected_scope:         需要"宿主侧工具"参与构建的包，且该工具由制品仓依赖提供并链接
+                        了共享库：协议代码生成器（wayland-scanner）、IDL/绑定生成器、
+                        资源编译器、代码生成型 build tool。典型组合是
+                        「数据包/协议包 + 内嵌工具」的适配。
+                        与"工具缺失"的区别：工具**存在且可读**，只是**执行时加载共享库失败**。
+verification_cmd:       <pkg>/bin/<tool> --help 2>&1 | head -3
+                        # 报 "error while loading shared libraries: lib*.so" 即命中
+                        ldd <pkg>/bin/<tool> | grep -v "libc.so"   # 确认它链接了缓存里的 .so
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           build-static-tool-from-source
+rec_description:        从上游源码静态编译一个等价工具，仅依赖 libc：
+                        ①在 conandata.yml 增加 scanner_sources（或同类字段），
+                          把工具所在包的源码 tarball 也下载到 source_folder 的子目录；
+                        ②手工生成该工具所需的最小配置头（config.h、
+                          *-version.h 由 .h.in 模板替换、用上游 embed.py 生成内嵌数据）；
+                        ③以 -static 编译，静态库依赖（如 libexpat.a）按序查找
+                          SDK 自带路径与依赖包内路径，**找不到即显式报错**（不静默降级）；
+                        ④把产物放进 generators_folder，并写一份 .pc 指过去
+                          （必要时注入 native file 的 [paths] pkg_config_path），
+                          使构建系统的 find_program / dependency(native: true) 能找到；
+                        ⑤构建顺序上**必须在 meson configure 之前**完成，
+                          因为 configure 会检查该工具是否存在。
+rec_command:            clang -o <gen>/<tool> -include config.h -I<src> -I<src>/src \
+                          <src>/<tool>.c <src>/util.c -I<expat-inc> <expat-lib>.a \
+                          -lm -lpthread -static
+rec_auto_fix:           false
+rec_impl:               build-tool-from-source
+
+fallback_priority:      2
+fallback_approach:      copy-rewrite
+fallback_description:   若该工具的功能无法从源码完整重建（例如依赖大量外部库），退而
+                        把工具所在包复制到**可写目录**并逐字节重写其 .so 依赖、放宽
+                        权限后再执行（copy-rewrite）。代价明显：绕过的是文件系统限制，
+                        脆弱且需在 notes.md 详述，仅当静态重建不可行时使用。
+fallback_command:       # 复制包到可写目录 + open/write 重写 .so + chmod + rename
+fallback_auto_fix:      false
+fallback_impl:          copy-rewrite
+
+forbid_1_pattern:       因.*(shared libraries|\.so).*失败.*关闭该工具相关(测试|功能)了事|
+                        静默.*-Dtests=false.*(规避|绕过).*工具无法执行
+forbid_1_reason:        该工具是**构建另一包所必需**的（不是可选测试的附属品）；关掉它
+                        对应的功能会让产物缺失，或让后续包直接构建不了——把"环境问题"
+                        转嫁成"功能缺失"。
+forbid_1_consequence:   交付一个功能不完整的数据包（缺协议代码生成能力），或使依赖它的
+                        下游包无法构建，且原因被掩盖在"按需关闭"的表述里。
+
+forbid_2_pattern:       chmod.*777.*\.so|修改缓存里.*\.so.*权限.*以使其可加载
+forbid_2_reason:        HMDFS 对缓存共享库的限制不是权限位问题（文件本身可读），
+                        改权限解决不了动态加载被拒；且改动 Conan 缓存属污染构建环境，
+                        影响同机其他包。
+forbid_2_consequence:   徒劳无功且引入缓存中毒风险（后续 create 报脏状态）。
+
+principles:             reproducible-build-test, upstream-compat-evidence, no-silent-skip
+
+causes:                 []
+caused_by:              []
+similar_to:             [E488, E331, E461]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-static-tool-bypass-dlopen-limit.md
+last_updated:           2026-09-16
+source_event:           wayland-protocols 1.47 适配（内嵌静态 wayland-scanner，
+                        替代 wayland 包里链接 libexpat.so/libxml2.so 的版本）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:         8D52

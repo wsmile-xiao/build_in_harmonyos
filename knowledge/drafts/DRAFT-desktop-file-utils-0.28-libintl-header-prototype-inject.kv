@@ -1,0 +1,127 @@
+#====================================================================
+# DRAFT-desktop-file-utils-0.28-libintl-header-prototype-inject —
+#   OHOS musl 无 gettext 隐式声明时，注入最小 libintl.h 原型声明头
+#   而非恒等宏：保留真实 gettext 语义（可链接真实 libintl 导出）
+# 对应人类文档: knowledge/drafts/DRAFT-desktop-file-utils-0.28-libintl-header-prototype-inject.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: desktop-file-utils 0.28 适配 HarmonyOS PC（meson + glib/2.84.0）
+#====================================================================
+
+id:                     DRAFT-desktop-file-utils-0.28-libintl-header-prototype-inject
+trigger_tool:           clang|cc|meson|ninja
+phase:                  compilation
+error_signature:        int-conversion.*gettext|incompatible integer to pointer.*gettext|
+                         implicit declaration of function 'gettext'|
+                         _\(String\).*gettext.*not declared|
+                         gi18n\.h.*gettext|20 处.*-Wint-conversion
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               gettext, i18n, libintl, compilation, ohos, meson, conan
+match_keywords:         gettext, gi18n.h, libintl, libintl.h, prototype, declaration,
+                         -Wint-conversion, musl, dgettext, format_arg, generators_folder,
+                         c_args, meson, glib, proxy-libintl, NLS, ENABLE_GETTEXT
+title:                  OHOS musl 无 gettext 原型时，向 generators_folder 注入最小
+                         libintl.h 声明头（9 个 gettext 家族原型 + format_arg），
+                         保留真实翻译语义——区别于恒等宏方案
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             glib 的 gi18n.h 无条件定义 `#define _(String) gettext (String)`。
+                        OHOS musl 的 libintl.h 不声明 gettext 家族函数（无隐式声明），
+                        clang 把 gettext("...") 当隐式 int，_() 返回值变 int 传给
+                        `const gchar *` 参数报 -Wint-conversion（desktop-file-utils
+                        实测 20 处）。与恒等宏方案触发同源，但本库仍可能启用 NLS
+                        （依赖真实 libintl 导出），需要的是"让 gettext 有正确原型"
+                        而非"把 gettext 变成恒等"。
+affected_scope:         所有在 OHOS 上、include glib/gi18n.h、meson 构建、且
+                        仍希望保留 gettext 语义（或 libintl.so 可链接）的
+                        GLib 生态库/工具（desktop-file-utils、GTK 系、GIO 系等）。
+verification_cmd:       conan create archives/d/desktop-file-utils/0.28 --build=missing
+                         -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                         # 期望: 覆盖前 20 处 -Wint-conversion；覆盖后 exit=0，
+                         # test_package OK-A（--version 输出 0.28）通过
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           libintl-header-prototype-inject
+rec_description:        在**消费方配方**的 generate() 里，向 self.generators_folder 写入
+                        最小 libintl.h（#ifndef _LIBINTL_H 守卫；include <locale.h>；
+                        extern "C" 包裹；声明 gettext/dgettext/dcgettext/ngettext/
+                        dngettext/dcngettext/bind_textdomain_codeset/bindtextdomain/
+                        textdomain 共 9 个原型，gettext/dgettext 带
+                        __attribute__((__format_arg__))），并通过
+                        MesonToolchain 的 tc.c_args.append('-I' + generators_folder)
+                        使所有 C 编译可见。与 DRAFT-ohos-gi18n-gettext-identity-macro
+                        （-Dgettext(x)=(x) 恒等宏）的区别：原型声明保留真实 gettext
+                        调用语义（若 libintl.so 可链接则真实翻译），恒等宏丢弃翻译。
+rec_command:            |
+  # conanfile.py generate() 实例（desktop-file-utils 0.28）
+  _libintl = os.path.join(self.generators_folder, "libintl.h")
+  if not os.path.isfile(_libintl):
+      with open(_libintl, "w", encoding="utf-8") as _f:
+          _f.write(
+              "#ifndef _LIBINTL_H\n#define _LIBINTL_H\n\n"
+              "#include <locale.h>\n\n"
+              "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n"
+              "extern char *gettext(const char *) __attribute__((__format_arg__(1)));\n"
+              "extern char *dgettext(const char *, const char *) __attribute__((__format_arg__(2)));\n"
+              "extern char *dcgettext(const char *, const char *, int) __attribute__((__format_arg__(2)));\n"
+              "extern char *ngettext(const char *, const char *, unsigned long);\n"
+              "extern char *dngettext(const char *, const char *, const char *, unsigned long);\n"
+              "extern char *dcngettext(const char *, const char *, const char *, unsigned long, int);\n"
+              "extern char *bind_textdomain_codeset(const char *, const char *);\n"
+              "extern char *bindtextdomain(const char *, const char *);\n"
+              "extern char *textdomain(const char *);\n\n"
+              "#ifdef __cplusplus\n}\n#endif\n\n#endif\n"
+          )
+  # MesonToolchain c_args 注入
+  tc.c_args.append("-I" + self.generators_folder)
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      gettext-identity-macro
+fallback_description:   若确实关闭 NLS（gettext=false、无翻译需求、libintl 不可链接），
+                        可用既有 DRAFT-ohos-gi18n-gettext-identity-macro 的
+                        -Dgettext(x)=(x) 恒等宏——零改动、一处修复，但丢弃翻译语义。
+fallback_command:       tc.c_args.append('-Dgettext(x)=(x)')
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       链接.*libintl\.so.*解决.*编译|LIBS?=.*-lintl.*编译
+forbid_1_reason:        E015/E027 的 -lintl 解决**链接期**符号缺失；本题是**编译期**
+                        原型缺失——链接库不解决编译错误
+forbid_1_consequence:   编译仍报 undeclared/int-conversion，且掩盖真实问题面
+forbid_2_pattern:       patch.*gi18n\.h.*#define gettext
+forbid_2_reason:        原型头注入可无损解决且改动最小，逐文件改 gi18n.h 改动面大
+forbid_2_consequence:   补丁面大难维护；被 rule 4 打回
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004
+
+# ═══ 关系图 ═══
+causes:
+caused_by:
+similar_to:             DRAFT-ohos-gi18n-gettext-identity-macro, E508
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-desktop-file-utils-0.28-libintl-header-prototype-inject.md
+last_updated:           2026-09-10
+source_event:           desktop-file-utils 0.28 HarmonyOS PC 适配（meson + glib/2.84.0）
+draft:                  true
+contributor_id:         pc1-2
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohpcd/pc1-2
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-10

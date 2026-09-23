@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E559.kv，填写各字段
+# 对应的人类文档: doc/E559.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E559
+trigger_tool:           ctest|test|runtime
+phase:                  testing|runtime
+error_signature: Cannot create a unique file name|mkdtemp: Read-only file system|Mat_VarDelete.*error|snprintf.*truncat
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity:               2
+category:               platform, portability, libc, ohos, build-system
+match_keywords:         TMPDIR, PATH_MAX, mkdtemp, mkstemp, snprintf, fixed buffer, path truncation, 临时目录, 缓冲区, matio, Mat_mktemp, temp template, buffer size
+title: C 库临时文件模板缓冲区按硬编码 /tmp 路径长度定长计算：长 TMPDIR 被 snprintf 长度检查拒绝或截断
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_ccause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 上游按硬编码 "/tmp/" + "XXXXXX" + "/temp.mat"（21 字节）定长计算临时文件模板缓冲区 MAT_MKTEMP_BUF_SIZE，且 mkdtemp 模板硬编码 /tmp。OHOS 根文件系统只读 → mkdtemp("/tmp/XXXXXX") 直接失败；即使代码读取 $TMPDIR，snprintf 的长度检查也会拒绝比 21 字节长的任何真实临时目录路径，或截断后回退 /tmp 仍然失败
+affected_scope: 所有"临时文件模板缓冲区大小按硬编码 /tmp 短路径计算"且需在长 TMPDIR 环境运行的 C/C++ 库（mkdtemp/mkstemp 模板族）；典型症状为 Mat_VarDelete 类"写临时副本再重命名"操作报 Cannot create a unique file name
+verification_cmd: TMPDIR=<长度>21B 的可写目录 ctest -R readwrite_delete_variables；修复前 391/8197 失败，修复后 8197/8197 全过
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           source-patch-tmpdir-pathmax-buffer          # 见 DESIGN §5 impl 列表
+rec_description:        模板缓冲区以 PATH_MAX 计算 + TMPDIR 优先解析 + 超长 TMPDIR 回归测试的三位一体源码修复
+rec_command:            TMPDIR=<超长可写目录> ctest -R readwrite_delete_variables && conan test test_package
+rec_auto_fix:           true
+rec_impl:               source-patch-tmpdir-pathmax-buffer
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: (path_buf|dir_buf|tpl_buf)\[\d{2,3}\]|sizeof\("/tmp/"\)\s*\+
+forbid_1_reason: 禁止用任何按 "/tmp/XXXXXX" 长度计算的定长小缓冲区或 sizeof("/tmp/")+N 表达式——PATH_MAX 级路径必须用 PATH_MAX 级缓冲区
+forbid_1_consequence: 长 TMPDIR 下 snprintf 拒绝或截断路径，静默回退 /tmp 在只读文件系统上必然失败
+forbid_2_pattern: /storage/Users/|/home/[a-z]+/|/data/service/hnp
+forbid_2_reason: 禁止硬编码设备/个人绝对路径作为临时目录回退——必须用 TMPDIR→/tmp 的 POSIX 标准链
+forbid_2_consequence: 换设备即坏，且违反 R35/上游可移植性
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             P014
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              [E002]
+similar_to:             [DRAFT-libkml-1.3.0-ohos-tempfile-null-guard, DRAFT-ohos-otmpfile-tmpdir-shim]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E559.md
+last_updated: 2026-09-05
+source_event:           libmatio/1.5.30 HarmonyOS PC 适配：上游 8197 ctest 中 391 个 readwrite_delete_variables 系列失败，根因 Mat_mktemp 模板缓冲区 21 字节 + /tmp 硬编码
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: E861

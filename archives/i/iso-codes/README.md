@@ -33,6 +33,12 @@ information.
 ## Installation
 
 Data files are installed to:
+
 - JSON files: `/usr/local/share/iso-codes/json/`
 - Translation files: `/usr/local/share/{domain}/`
 - pkg-config file: `/usr/local/share/pkgconfig/iso-codes.pc`
+
+Version 4.20.1 uses Meson and additionally installs JSON schemas,
+generated compatibility XML files, and legacy XML and gettext-domain
+symbolic links. The Conan package keeps these architecture-independent
+resources below `share/`.

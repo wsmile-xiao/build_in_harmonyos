@@ -1,0 +1,108 @@
+#====================================================================
+# 知识图谱草稿（libjpeg6b 6b2 适配产出，automake 1.11.1 / autoconf 2.65 谱系，2026-09-15）
+#====================================================================
+# 正式 E 编号由知识库主编确认，本稿不预占；stem 保留用于与同名 .md 成对检索。
+#
+# 与 E999-draft-B839 的关系：同一问题类（并行 install 目录创建竞态）的第二实例，
+# 子机理不同——本例命中 automake 生成的规则，推翻 E999 "autotools 生成规则基本
+# 免疫"的边界（autoconf ≤2.65 平台探测失败使 MKDIR_P 回退为 install-sh 时免疫
+# 失效）。处置建议：主编在 E999 晋级评审时将本稿并作同条目双实例证据（或独立成
+# 条后交叉引用），二者不要作为两条独立知识长期并存。
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-PARALLEL-INSTALL-INSTALL-SH-EEXIST-RACE
+stem:                   DRAFT-parallel-install-install-sh-eexist-race
+trigger_tool:           make, automake, install-sh, mkinstalldirs, conan
+phase:                  installation
+error_signature:        make\[1\]: \*\*\* \[Makefile:.*: install-data-local\] Error 1|mkdir .*include.*: File exists|make: \*\*\* \[Makefile:.*: install-am\] Error 2  # 伴生信号、非致命根因: make: jobserver mkfifo: ...: Operation not permitted
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, automake, make, parallel-install, install-sh, HMDFS, OHOS
+match_keywords:         parallel install, install-sh, File exists, install-data-local, install-includeHEADERS, MKDIR_P, mkinstalldirs, automake 1.11, -j1
+title: automake 生成规则的并行 install 目录竞态（install-sh 对 EEXIST 直接报错）：install 阶段必须 -j1
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: automake 1.11 时代生成的 Makefile.in 中，install-data-local
+  （Makefile.in:1065，用 mkinstalldirs → install-sh -d 建 $(includedir) 后装配置头）
+  与 install-includeHEADERS（Makefile.in:857，用 $(MKDIR_P)；autoconf 2.65 生成的
+  configure 在本设备探测 mkdir -p 失败时把 MKDIR_P 回退为 "install-sh -c -d"）是
+  两个相互独立的安装目标，各自先建 $(includedir) 再装各自的文件。install-sh 建目录
+  语义是 "test -d || mkdir"，且对 mkdir 返回的 EEXIST 直接以错误退出（不像
+  mkdir -p 幂等容忍已存在）。make install -j20（CI 默认并行度）下两目标并发，
+  后到者在 "test -d 已过、mkdir 未落" 的窗口撞上对方刚建的目录 →
+  "mkdir: File exists" → install-data-local Error 1 → install-am Error 2，
+  整个 install 失败。归类：构建系统语义（automake 安装目标并行语义 × install-sh
+  非幂等建目录 × 平台 MKDIR_P 探测回退），非上游代码缺陷、非库内 quirk。
+  串行 -j1 时两目标先后完整执行，后者的 test -d 命中即跳过，从不报错。
+  本例同时修正 E999-draft-B839 的边界判断："automake 生成的 install 通常带
+  mkinstalldirs/mkdir -p 与串行依赖、很少见到该竞态"仅在 MKDIR_P 探测成功时成立。
+  HMDFS 背景条件：平台拒绝 jobserver mkfifo（E074 族）只破坏跨 make 实例的令牌
+  传递，单实例内 -j 并发照常发生。
+affected_scope: 任何携带 automake ≤1.11 生成 Makefile.in（或 autoconf ≤2.65 且
+  MKDIR_P 回退 install-sh）的 autotools 项目，在 -j>1 下执行 make install
+verification_cmd: mkfifo /tmp/probe_fifo 2>&1; rm -f /tmp/probe_fifo  # [1] 背景条件探针，期望 Operation not permitted（E074 族）
+  D=/tmp/probe_inst_race; rm -rf "$D"; for i in $(seq 1 20); do ( sh -c "test -d $D || mkdir $D" & sh -c "test -d $D || mkdir $D" & wait ) 2>&1 | grep -q "File exists" && { echo "RACE reproduced at iter $i"; break; }; rm -rf "$D"; done  # [2] install-sh "test -d || mkdir" 竞态语义定向复现，期望 20 轮内 RACE reproduced
+  # [3] 真实触发路径：任一 automake ≤1.11 谱系包 make install DESTDIR=... -j20 复现 "[Makefile:*: install-data-local] Error 1" + "File exists"；同路径 -j1 复跑 PASS（自包含，不依赖任何 run 的日志）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach: serial-install-j1
+rec_description: automake ≤1.11 / autoconf ≤2.65 谱系的老包，make 的 build/check/
+  install 全部显式 -j1（Conan 配方三个调用均传 -j1）。风险谱系判定：Makefile.in
+  同时存在 install-data-local 建目录与 $(MKDIR_P)/install-sh 建 include 目录者即
+  命中（grep -n "install-data-local" Makefile.in；grep -n "MKDIR_P" Makefile.in）。
+  若必须保留并行，可尝试给 install 单独传 MKDIR_P="mkdir -p" 覆盖（toybox
+  mkdir -p 幂等可消除该半边竞态），但 install-data-local 走 mkinstalldirs 的半边
+  不受覆盖控制——因此 -j1 是唯一全覆盖解，MKDIR_P 覆盖只是部分缓解。
+rec_command:            autotools.make(args=["-j1"]); autotools.make(target="check", args=["-j1"]); autotools.install(args=["-j1"])
+rec_auto_fix:           false
+rec_impl:
+
+# 回退方案
+fallback_priority:      2
+fallback_approach: 预建目录法：install 前先 mkdir -p <DESTDIR>/{include,lib,share/man/man1}
+fallback_description: 只收窄竞态窗口、掩盖症状而非修复规则语义；对规则自建的更深层
+  子目录仍可能漏建，仅作无法改 -j1 场景的退路，不作为推荐方案替代
+fallback_command:       mkdir -p <DESTDIR>/{include,lib,share/man/man1}
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern: make install.*-j[2-9]|autotools\.install\(\) 不带 -j1
+forbid_1_reason: 老 automake install 规则的双建目录竞态在 -j>1 下存在真实概率窗口
+forbid_1_consequence: install 随机崩溃（-j20 下单次即复现），错误指向
+                      install-data-local，易误诊为上游 bug 或磁盘/权限问题
+forbid_2_pattern: make -k install|忽略 install Error 继续打包
+forbid_2_reason: 违反 P-BUILD-001（平台限制必须降级而非绕过），竞态不会因重试消失
+forbid_2_consequence: 头文件/库部分缺失的残缺包进入制品，问题后移到消费端
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P-BUILD-001, P-FS-001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E999-draft-B839（并行 install 目录创建竞态同问题类——本条为其 automake 谱系第二实例与机理增补）, E074（make -j/FIFO 族——FIFO 拒绝不阻止单实例并发）, E571-draft-BED8（同盯 install-data-local 但属 DESTDIR/srcdir 类，互斥不重叠）, E011（HMDFS 权限族）
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+keywords: parallel install, install-sh, EEXIST, File exists, install-data-local, install-includeHEADERS, MKDIR_P, mkinstalldirs, automake 1.11, autoconf 2.65, -j1, jobserver, mkfifo, HMDFS, OHOS, autotools, DESTDIR, conan
+software: libjpeg6b/6b2
+doc_file:               doc/DRAFT-parallel-install-install-sh-eexist-race.md
+last_updated: 2026-09-15
+source_event: libjpeg6b/6b2 适配：make install -j20 报 make[1]: *** [Makefile:1065: install-data-local] Error 1 + mkdir '.../include': File exists，-j1 复测全绿（round-01 失败实证）
+
+# ═══ 知识协作 ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-15
+
+draft: true
+contributor_id: GoliWie

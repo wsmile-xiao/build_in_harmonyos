@@ -1,0 +1,168 @@
+# ═══ Draft knowledge entry — 上游测试 fixture 走相对路径 + ADD_TEST COMMAND 也写相对路径（默认 WORKING_DIRECTORY 只对"build 目录是源码根直接子目录"成立）+ configure 期 FetchContent 联网拉 gtest + ctest 一个二进制算一个用例导致 gtest 汇总行被吃掉 ═══
+# Timestamp: 2026-09-20
+# Software: limonp 1.0.2
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-limonp-1.0.2-subdir-fixture-cwd-and-network-gtest-fetchcontent
+trigger_tool:           cmake|ctest|conan|clang|c++
+phase:                  configuration|testing|package
+error_signature:        Unable to open file.*\.\./test/.*|Cannot open
+                         file.*testdata|50% tests passed, 1 tests failed out
+                         of 2|FetchContent.*googletest|GIT_TAG
+                         release-1\.12\.1|Could NOT find GTest.*FETCHCONTENT|
+                         tests passed out of 0|No tests were found
+severity:               2
+category:               cmake, testing, headers, conan, packaging
+match_keywords:         limonp, ctest, ADD_TEST, WORKING_DIRECTORY,
+                         $<TARGET_FILE:...>, relative COMMAND resolution,
+                         relative fixture path, ../test/testdata, out-of-tree
+                         build, sibling build directory, FetchContent,
+                         googletest, GIT_TAG release-1.12.1, offline CI
+                         worker, find_package(GTest), GTest::gtest,
+                         GTest::gtest_main, duplicate symbol main, gtest_main.cpp,
+                         ctest one case per binary, ctest -V vs
+                         --output-on-failure, [  PASSED  ] N tests., header-only
+                         INTERFACE, unsigned char, TwocharToUint16, IsSpace guard
+title:                  上游 fixture 相对路径 + ADD_TEST 相对 COMMAND + 默认
+                         WORKING_DIRECTORY 只在"build 是源码根直接子目录"时成立
+                         —— Conan 的兄弟布局必然踩；顺带 configure 期
+                         FetchContent 联网与 ctest 粒度吞掉 gtest 汇总行
+
+root_cause: >
+  (a) limonp 的三个 fixture 用例（TConfig.cpp / TStdExtension.cpp /
+  TStringUtil.cpp）用 "../test/testdata/..." 这种**相对 cwd** 的路径打开文件，
+  而顶层 CMakeLists.txt 的 ADD_TEST 又写成 COMMAND ./test/demo 与
+  COMMAND ./test/test.run（相对路径），且没有 WORKING_DIRECTORY ——
+  CTest 于是用 build 目录当 cwd，相对 COMMAND 也从 build 目录解析。这套写法
+  只在"build 目录恰好是源码根的直接子目录"时成立（上游 CI 用
+  cmake -B <ws>/build 天然满足）。Conan 把 build 目录放在本地缓存里、与
+  source 目录**互为兄弟**，两条相对路径同时失配。
+  (b) test/unittest/CMakeLists.txt 用 FetchContent_Declare(googletest
+  GIT_REPOSITORY ... GIT_TAG release-1.12.1) + FetchContent_MakeAvailable
+  在 **configure 期 git clone**，CI worker 不可联网。
+  (c) ctest 把一个 gtest 二进制整体当成 **1 个用例**：只看 ctest 汇总行
+  完全看不出 test.run 里的 25 个 gtest 用例是否缩水；而
+  --output-on-failure 会把**通过**用例的输出整个吞掉，连 gtest 自己的
+  "[  PASSED  ] 25 tests." 都看不到，必须用 ctest -V。
+affected_scope: >
+  所有（1）测试 fixture 用相对路径、（2）ADD_TEST 的 COMMAND 写相对路径、
+  （3）没有显式 WORKING_DIRECTORY 的上游 CMake 工程 —— 尤其 header-only /
+  小工具类库，这类库的顶层 CMakeLists.txt 普遍假定"build 是 source 的子目录"。
+  Conan 的 cmake_layout 让 build 与 source 互为兄弟，是这条的必然触发器。
+  另适用于所有 CMake FetchContent / DownloadProject / ExternalProject 在
+  configure 期联网的上游，以及所有 ctest 套件里 gtest 二进制占比 > 1 的
+  PR（rule4 用例计数口径）。
+verification_cmd: >
+  grep -rn '\.\./' test/                      # fixture 用了相对 cwd 的路径
+  grep -n 'ADD_TEST' CMakeLists.txt           # COMMAND 是不是相对路径
+  grep -n 'WORKING_DIRECTORY' CMakeLists.txt  # 有没有显式 cwd
+  grep -rn 'FetchContent\|DownloadProject\|ExternalProject' test/ CMakeLists.txt
+  # 复现：源码与 build 互为兄弟（不是父子）时，不打 patch 0001 必然
+  #   50% tests passed, 1 tests failed out of 2
+rec_priority:           1
+rec_approach:           conan-side-working-directory-plus-conan-gtest-substitution
+rec_description: >
+  两条补丁，都保持"可向上游提交"（P005）：
+  (a) 给 ADD_TEST 补 WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}/test，并把
+  COMMAND 从 ./test/demo 改成 $<TARGET_FILE:demo> —— **必须同时改**，
+  因为相对 COMMAND 是相对 WORKING_DIRECTORY 解析的，只改 cwd 会把
+  可执行文件也找错。这样 out-of-tree（含 Conan 的兄弟布局）与 in-tree
+  两种 cwd 都解析得到同一个 fixture 目录。
+  (b) 把 FetchContent 的 configure 期 git clone 换成
+  find_package(GTest REQUIRED) + GTest::gtest；test.run 自带
+  gtest_main.cpp（定义了 main），所以**只能链 GTest::gtest**，链
+  GTest::gtest_main 会 duplicate symbol main。
+  配方侧：requirements() 用 self.test_requires("gtest/1.17.0.1")，
+  build() 内 cmake.configure()/build() 后跑 ctest -V，对 ctest 汇总行与
+  gtest 自己的 "[  PASSED  ] N tests." 做双重 hard check。
+rec_command: >
+  # patch 0001（顶层 CMakeLists.txt）
+  #   ADD_TEST(NAME ./test/demo     COMMAND $<TARGET_FILE:demo>)
+  #   ADD_TEST(NAME ./test/test.run COMMAND $<TARGET_FILE:test.run>)
+  #   SET_TESTS_PROPERTIES(./test/demo ./test/test.run
+  #     PROPERTIES WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}/test")
+  # patch 0002（test/unittest/CMakeLists.txt）
+  #   find_package(GTest REQUIRED)
+  #   TARGET_LINK_LIBRARIES(test.run GTest::gtest)
+  # 配方侧
+  def requirements(self):
+      self.test_requires("gtest/1.17.0.1")
+  # build(): self.run('ctest -V > ctest.log 2>&1', cwd=self.build_folder)
+  #          # ctest -V 而不是 --output-on-failure：后者吞掉通过用例的输出
+rec_auto_fix:           true
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      export-a-build-command-that-cds-into-the-source-test-dir
+fallback_description: >
+  若上游 CMakeLists.txt 不方便打补丁（例如补丁会与上游后续提交冲突），
+  可以退而在配方侧绕开 ctest：直接 self.run('"$<TARGET_FILE:test.run>"',
+  cwd=os.path.join(self.source_folder, "test")) 手工调两个可执行文件。
+  代价是丢掉了 ctest 的汇总行（rule4 可观测性变差），且仍受 (a) 影响的是
+  两个相对 COMMAND 而不是 fixture —— fixture 只要 cwd 对就能打开。
+  不如补丁干净，且偏离"实跑上游套件"的语义。
+fallback_command:       self.run('"{}"'.format(test_run_exe),
+                                 cwd=os.path.join(self.source_folder, "test"))
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-build
+
+forbid_1_pattern:       WORKING_DIRECTORY.*PROJECT_SOURCE_DIR.*(?!(TARGET_FILE))|只改
+                         WORKING_DIRECTORY 不改 COMMAND
+forbid_1_reason:        CMake 的 ADD_TEST 里 COMMAND 写相对路径时，该路径是
+                          相对 WORKING_DIRECTORY 解析的；只补 cwd 会让
+                          ./test/demo 变成 <source>/test/test/demo，可执行
+                          文件本身就找不到了 —— 从"4 个用例 fixture 打不开"
+                          变成"2 个用例二进制找不到"，看起来更糟。
+forbid_1_consequence:   用例从 FAIL 变成 NOT_FOUND/无法执行，且因为 ctest 汇总行
+                          仍然是 50%/2，症状高度相似，容易误判成"补丁没生效"。
+
+forbid_2_pattern:       (?i)FetchContent|DownloadProject|ExternalProject
+forbid_2_reason:        这些都是在 configure 期联网（git clone / 下载）。
+                          CI worker 不可联网；即使联网，GIT_TAG 写分支名
+                          （如 master）时每次拉到的不是同一份，用例数不可复现。
+                          limonp 钉的是 release-1.12.1，虽是 tag 但仍要联网。
+forbid_2_consequence:   CI 在 configure 阶段直接失败，白跑一轮 CI（本赛事 CI
+                          排队 ~2.5-3 小时）；若侥幸联网，上游用例数在不同
+                          时间点不可复现，rule4 声明值失去意义。
+
+forbid_3_pattern:       GTest::gtest_main|TARGET_LINK_LIBRARIES\(test\.run\s+gtest_main
+forbid_3_reason:        上游 test/unittest/gtest_main.cpp 是从 googletest 拷贝的
+                          一份自带 main() 的文件。再链 GTest::gtest_main
+                          （它提供的也是一个 main）会 duplicate symbol main。
+                          同理也不能把裸 target 名 gtest 直接沿用 ——
+                          Conan CMakeDeps 生成的叫 GTest::gtest。
+forbid_3_consequence:   链接期 duplicate symbol _main/ main，报错点在链接器而不是
+                          测试代码，容易误判成"gtest 版本不兼容"。
+
+forbid_4_pattern:       ctest[^\n]*--output-on-failure|只解析
+                         \d+% tests passed, \d+ tests failed out of \d+
+forbid_4_reason:        ctest 把一个 gtest 二进制整体当成 1 个用例：ctest 汇总
+                          行写的是 2/2，可 test.run 内部 25 个 gtest 用例
+                          缩水到 3 个时汇总行仍然是 2/2。而
+                          --output-on-failure 会吞掉**通过**用例的全部输出，
+                          连 gtest 自己的 "[  PASSED  ] 25 tests." 都不打印。
+                          必须用 ctest -V 把输出带回来，再对 gtest 自己的
+                          汇总行做 hard check（failed==0 且 passed==ran 且
+                          ran >= 期望值）。
+forbid_4_consequence:   出现"绿但空转"：CTest 报 2/2 通过，实际上游 25 个用例
+                          一个都没注册/一个都没跑；rule4 里声明的通过率
+                          与真实执行集脱节。
+
+principles:             P005
+similar_to:             DRAFT-tiny-dnn-1.0.0a3-header-only-triple-include-root-and-network-gtest-substitution, DRAFT-memtailor-1.4-subdir-ctest-false-pass-install-static-and-conan-gtest-targets
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-limonp-1.0.2-subdir-fixture-cwd-and-network-gtest-fetchcontent.md
+last_updated:           2026-09-20
+source_event:           archives/l/limonp/1.0.2
+
+authors:                2301_76770579
+source_pr:              11304
+source_commit:          aa991dc4b958d7cd01adba0835944b363615d99e
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

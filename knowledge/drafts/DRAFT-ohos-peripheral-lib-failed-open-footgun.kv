@@ -1,0 +1,85 @@
+# ═══ Draft knowledge entry — 外设库 failed-open 句柄访问器 NULL-deref footgun ═══
+# Timestamp: 2026-08-31
+# Software: c-periphery 1.0.0（Linux 外设 I/O C 库——mmio/i2c/spi/serial/gpio）
+# Gate: OHOS 无硬件环境 consumer 测试设计（test_periphery.c 17 断言）+ mmio RC=134 复现
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#
+# 解决一类问题：外设/寄存器映射类库在 open() 失败（如无 /dev/mem、/dev/i2c-*）
+# 后句柄字段部分初始化（mmio：ptr=NULL 但 aligned_size 有效；i2c/spi/serial：
+# fd=0）——访问器仅做边界/负值检查后解引用 NULL 或误操作（close(0) 误关 stdin）
+# ——无硬件环境消费者测试只测 open/close 错误路径 + notes 披露义务
+
+id: DRAFT-ohos-peripheral-lib-failed-open-footgun
+severity: 2
+category: harmonyos|peripheral|failed-open|null-deref|footgun|mmio|testing
+trigger_tool: mmio.c|test_periphery.c|clang
+phase: testing
+
+approach: 外设库（mmap/寄存器映射/设备节点访问类）在 open() 失败后句柄字段
+  部分初始化——mmio.c 实证：mmio_open 失败（open(/dev/mem) 返回 ENOENT）时返回前
+  已 memset 句柄并写入 base/size/aligned_base/aligned_size（aligned_size 有效），
+  ptr 保持 NULL——mmio_read*/write* 访问器仅做 (offset+len) 与 aligned_size 的
+  边界检查——检查通过后解引用 NULL（volatile 指针取值）——段错误（RC=134）——
+  同库 i2c/spi/serial 在 open 失败前均 memset 句柄→fd=0（非 -1）——close() 判
+  fd<0 为假——会 close(0) 误关 stdin——gpio_open 参数校验失败路径发生在 memset
+  前——句柄保持调用前未初始化状态——通用规避：无硬件环境消费者测试只测 open/close
+  错误路径（不调用 failed-open 句柄的访问器）+ 审计上游句柄初始化完整性
+  + notes 披露义务
+
+keywords: OHOS, no hardware, peripheral, failed-open, NULL deref, footgun,
+  mmio, /dev/mem, /dev/i2c-*, /dev/spidev*, fd=0, close(0), segfault,
+  mmap, mmio_read32, test design, disclosure
+
+error_signature: .*Segmentation fault.*|.*Signal 11.*|.*Assertion failed.*test_open_config_close.*|.*close\(0\).*|.*fd=0.*
+
+match_keywords: OHOS,peripheral,failed-open,NULL-deref,footgun,mmio,dev/mem,segfault,close(0),no hardware,test design
+
+root_cause: 外设/寄存器映射类库 open() 失败路径只初始化句柄的部分字段（错误码 +
+  元数据），未保证指针/文件描述符字段处于安全值——mmio 实证：open 失败返回前已
+  memset 句柄（error 字段、aligned_size 等有效）但 ptr=NULL——访问器边界检查只
+  校验 offset 不校验 ptr——越界检查通过后解引用 NULL 段错误——i2c/spi/serial
+  同理：open 失败前 memset 使 fd=0，close() 判负值守卫失效，误 close(0) 关 stdin
+  ——gpio 参数校验失败发生在 memset 前，句柄未初始化——本质是 failed-open 句柄
+  访问器 footgun——无硬件环境的消费者必然触发（无 /dev/mem、/dev/i2c-*、/dev/spidev*）
+
+affected_scope: 无硬件环境（OHOS 沙箱/CI）下消费外设/寄存器映射类库（mmap、
+  /dev 节点访问）的测试与程序——凡对 failed-open 句柄继续调用访问器或 close 的
+  代码路径——同类库模式：mmap/GPIO/I2C/SPI/串口设备访问库的失败路径
+
+verification_cmd: ./test_mmio（无 /dev/mem → mmio_open 返回 ENOENT → 访问器解引用
+  NULL → RC=134）；consumer test_package：只测 open/close 错误路径 → 17/17 断言通过
+
+rec_priority: 1
+rec_approach: consumer-test-error-path-only-and-disclosure
+
+rec_command: |
+  # 无硬件环境消费者测试设计：只测 open/close 错误路径，绝不调用 failed-open
+  # 句柄的访问器（mmio_read*/write* 等会解引用 NULL）
+  # 例（c-periphery 1.0.0 test_package/test_periphery.c 实证）：
+  r = mmio_open(&mmio, 0x44e10000u, 4096u);   # 无 /dev/mem → 失败
+  CHECK(r != 0, "mmio: open without /dev/mem fails");
+  CHECK(mmio_errno(&mmio) == ENOENT, "mmio: missing /dev/mem errno == ENOENT");
+  CHECK(mmio_close(&mmio) == 0, "mmio: close on failed-open handle returns 0");
+  # 审计上游句柄初始化完整性：open 失败路径逐字段检查 ptr/fd 状态
+  # notes 披露义务：footgun 必须如实披露，防下游消费者崩溃（R9/R34）
+rec_auto_fix: true
+
+fallback_priority: 2
+fallback_approach: upstream-handle-init-completeness-patch
+fallback_command: "若上游可在 open 失败路径把 ptr 置 NULL 后访问器加 ptr 校验、
+  把 fd 置 -1——可向 c-periphery 上游提交修复——需维护 fork 补丁（本 run 未采此路，
+  以测试规避 + 披露交付）"
+fallback_auto_fix: false
+
+principles: R9, R34
+source_pr:
+source_commit: 5a795daf5617c325470cdba7c761162d69bf6410
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.9
+metrics_last_used: 2026-08-31

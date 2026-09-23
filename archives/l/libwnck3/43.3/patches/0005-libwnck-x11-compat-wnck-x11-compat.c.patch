@@ -1,0 +1,440 @@
+--- /dev/null
++++ b/libwnck/x11-compat/wnck-x11-compat.c
+@@ -0,0 +1,437 @@
++/*
++ * X11 compatibility for GTK builds without the GDK X11 backend.
++ *
++ * libwnck remains an X11 client: EWMH state, events and pixmaps are read from
++ * a real X server.  Only the small GDK-X11/Cairo-Xlib glue surface used by
++ * libwnck is provided here.  GTK components may therefore use another GDK
++ * backend (Broadway on HarmonyOS) while libwnck talks X11 directly.
++ */
++#include <gdk/gdk.h>
++#include <glib.h>
++#include <X11/Xatom.h>
++#include <X11/Xlib.h>
++#include <X11/Xutil.h>
++#include <cairo.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "gdk/gdkx.h"
++#include "cairo-xlib.h"
++
++static Display *compat_display;
++static GMutex display_lock;
++static GHashTable *window_to_xid;
++static GHashTable *xid_to_window;
++static int trap_depth;
++static int trapped_error;
++static XErrorHandler previous_error_handler;
++static GList *event_filters;
++static guint event_source_id;
++
++typedef struct
++{
++  GdkWindow *window;
++  GdkFilterFunc function;
++  gpointer data;
++} CompatEventFilter;
++
++static Display *
++get_xdisplay (void)
++{
++  g_mutex_lock (&display_lock);
++  if (compat_display == NULL)
++    {
++      XInitThreads ();
++      compat_display = XOpenDisplay (NULL);
++    }
++  g_mutex_unlock (&display_lock);
++  return compat_display;
++}
++
++Display *
++gdk_x11_display_get_xdisplay (GdkDisplay *display)
++{
++  (void) display;
++  return get_xdisplay ();
++}
++
++GdkDisplay *
++gdk_x11_lookup_xdisplay (Display *xdisplay)
++{
++  if (xdisplay == NULL || xdisplay != get_xdisplay ())
++    return NULL;
++  return (GdkDisplay *) xdisplay;
++}
++
++static int
++compat_error_handler (Display *display,
++                      XErrorEvent *event)
++{
++  (void) display;
++  trapped_error = event->error_code;
++  return 0;
++}
++
++void
++gdk_x11_display_error_trap_push (GdkDisplay *display)
++{
++  Display *xdisplay = get_xdisplay ();
++  (void) display;
++  if (xdisplay == NULL)
++    return;
++  if (trap_depth++ == 0)
++    {
++      XSync (xdisplay, False);
++      trapped_error = Success;
++      previous_error_handler = XSetErrorHandler (compat_error_handler);
++    }
++}
++
++gint
++gdk_x11_display_error_trap_pop (GdkDisplay *display)
++{
++  Display *xdisplay = get_xdisplay ();
++  gint result = trapped_error;
++  (void) display;
++  if (xdisplay == NULL || trap_depth == 0)
++    return Success;
++  XSync (xdisplay, False);
++  result = trapped_error;
++  if (--trap_depth == 0)
++    XSetErrorHandler (previous_error_handler);
++  return result;
++}
++
++void
++gdk_x11_display_error_trap_pop_ignored (GdkDisplay *display)
++{
++  (void) gdk_x11_display_error_trap_pop (display);
++}
++
++Atom
++gdk_x11_get_xatom_by_name (const gchar *atom_name)
++{
++  Display *display = get_xdisplay ();
++  return display != NULL ? XInternAtom (display, atom_name, False) : None;
++}
++
++GdkAtom
++gdk_x11_xatom_to_atom (Atom xatom)
++{
++  Display *display = get_xdisplay ();
++  char *name;
++  GdkAtom atom;
++  if (display == NULL || xatom == None)
++    return GDK_NONE;
++  name = XGetAtomName (display, xatom);
++  if (name == NULL)
++    return GDK_NONE;
++  atom = gdk_atom_intern (name, FALSE);
++  XFree (name);
++  return atom;
++}
++
++const gchar *
++gdk_x11_get_xatom_name (Atom xatom)
++{
++  Display *display = get_xdisplay ();
++  char *name;
++  const gchar *interned;
++  if (display == NULL || xatom == None)
++    return NULL;
++  name = XGetAtomName (display, xatom);
++  if (name == NULL)
++    return NULL;
++  interned = g_intern_string (name);
++  XFree (name);
++  return interned;
++}
++
++gint
++gdk_x11_screen_get_screen_number (GdkScreen *screen)
++{
++  Display *display = get_xdisplay ();
++  (void) screen;
++  return display != NULL ? DefaultScreen (display) : 0;
++}
++
++gboolean
++gdk_x11_screen_supports_net_wm_hint (GdkScreen *screen,
++                                     GdkAtom property)
++{
++  Display *display = get_xdisplay ();
++  gchar *name;
++  Atom wanted, actual_type;
++  int actual_format;
++  unsigned long count, remaining, i;
++  unsigned char *data = NULL;
++  gboolean found = FALSE;
++  (void) screen;
++
++  if (display == NULL || property == GDK_NONE)
++    return FALSE;
++  name = gdk_atom_name (property);
++  if (name == NULL)
++    return FALSE;
++  wanted = XInternAtom (display, name, False);
++  g_free (name);
++  if (XGetWindowProperty (display, DefaultRootWindow (display),
++                          XInternAtom (display, "_NET_SUPPORTED", False),
++                          0, G_MAXLONG, False, XA_ATOM, &actual_type,
++                          &actual_format, &count, &remaining, &data) != Success)
++    return FALSE;
++  if (actual_type == XA_ATOM && actual_format == 32)
++    for (i = 0; i < count; i++)
++      if (((Atom *) data)[i] == wanted)
++        {
++          found = TRUE;
++          break;
++        }
++  if (data != NULL)
++    XFree (data);
++  return found;
++}
++
++static void
++ensure_window_maps (void)
++{
++  if (window_to_xid == NULL)
++    {
++      window_to_xid = g_hash_table_new (g_direct_hash, g_direct_equal);
++      xid_to_window = g_hash_table_new (g_direct_hash, g_direct_equal);
++    }
++}
++
++Window
++gdk_x11_window_get_xid (GdkWindow *window)
++{
++  Display *display = get_xdisplay ();
++  gpointer value;
++  Window xid;
++  if (display == NULL || window == NULL)
++    return None;
++  ensure_window_maps ();
++  value = g_hash_table_lookup (window_to_xid, window);
++  if (value != NULL)
++    return (Window) GPOINTER_TO_SIZE (value);
++  xid = XCreateSimpleWindow (display, DefaultRootWindow (display),
++                             0, 0, 1, 1, 0, 0, 0);
++  XSelectInput (display, xid, PropertyChangeMask | StructureNotifyMask);
++  XFlush (display);
++  g_hash_table_insert (window_to_xid, window, GSIZE_TO_POINTER ((gsize) xid));
++  g_hash_table_insert (xid_to_window, GSIZE_TO_POINTER ((gsize) xid), window);
++  return xid;
++}
++
++GdkWindow *
++gdk_x11_window_lookup_for_display (GdkDisplay *display,
++                                    Window window)
++{
++  (void) display;
++  ensure_window_maps ();
++  return g_hash_table_lookup (xid_to_window, GSIZE_TO_POINTER ((gsize) window));
++}
++
++static gboolean
++dispatch_x11_events (gpointer user_data)
++{
++  Display *display = get_xdisplay ();
++  GArray *snapshot;
++  GList *item;
++  guint i;
++  (void) user_data;
++
++  if (display == NULL)
++    return G_SOURCE_CONTINUE;
++
++  snapshot = g_array_new (FALSE, FALSE, sizeof (CompatEventFilter));
++  for (item = event_filters; item != NULL; item = item->next)
++    g_array_append_val (snapshot, *((CompatEventFilter *) item->data));
++
++  while (XPending (display) != 0)
++    {
++      XEvent event;
++      XNextEvent (display, &event);
++
++      for (i = 0; i < snapshot->len; i++)
++        {
++          CompatEventFilter *filter;
++          GdkFilterReturn result;
++
++          filter = &g_array_index (snapshot, CompatEventFilter, i);
++          result = filter->function ((GdkXEvent *) &event, NULL, filter->data);
++          if (result != GDK_FILTER_CONTINUE)
++            break;
++        }
++    }
++
++  g_array_free (snapshot, TRUE);
++  return G_SOURCE_CONTINUE;
++}
++
++void
++wnck_x11_window_add_filter (GdkWindow *window,
++                            GdkFilterFunc function,
++                            gpointer data)
++{
++  CompatEventFilter *filter;
++
++  g_return_if_fail (function != NULL);
++  filter = g_new (CompatEventFilter, 1);
++  filter->window = window;
++  filter->function = function;
++  filter->data = data;
++  event_filters = g_list_append (event_filters, filter);
++
++  if (event_source_id == 0)
++    event_source_id = g_timeout_add (16, dispatch_x11_events, NULL);
++}
++
++void
++wnck_x11_window_remove_filter (GdkWindow *window,
++                               GdkFilterFunc function,
++                               gpointer data)
++{
++  GList *item;
++
++  for (item = event_filters; item != NULL; item = item->next)
++    {
++      CompatEventFilter *filter = item->data;
++      if (filter->window == window && filter->function == function &&
++          filter->data == data)
++        {
++          event_filters = g_list_delete_link (event_filters, item);
++          g_free (filter);
++          break;
++        }
++    }
++
++  if (event_filters == NULL && event_source_id != 0)
++    {
++      g_source_remove (event_source_id);
++      event_source_id = 0;
++    }
++}
++
++static guint8
++scale_masked_component (unsigned long pixel,
++                        unsigned long mask)
++{
++  unsigned int shift = 0;
++  unsigned long value, maximum;
++  if (mask == 0)
++    return 0;
++  while ((mask & 1UL) == 0)
++    {
++      mask >>= 1;
++      shift++;
++    }
++  value = (pixel >> shift) & mask;
++  maximum = mask;
++  return (guint8) ((value * 255UL + maximum / 2UL) / maximum);
++}
++
++static cairo_surface_t *
++surface_from_drawable (Display *display,
++                       Drawable drawable,
++                       Visual *visual,
++                       int width,
++                       int height,
++                       gboolean bitmap)
++{
++  XImage *image;
++  cairo_surface_t *surface;
++  unsigned char *dst;
++  int stride, x, y;
++
++  if (display == NULL || drawable == None || width <= 0 || height <= 0)
++    return cairo_image_surface_create (CAIRO_FORMAT_INVALID, 0, 0);
++  image = XGetImage (display, drawable, 0, 0, (unsigned int) width,
++                     (unsigned int) height, AllPlanes, ZPixmap);
++  if (image == NULL)
++    return cairo_image_surface_create (CAIRO_FORMAT_INVALID, 0, 0);
++
++  if (bitmap)
++    surface = cairo_image_surface_create (CAIRO_FORMAT_A8, width, height);
++  else
++    surface = cairo_image_surface_create (CAIRO_FORMAT_RGB24, width, height);
++  if (cairo_surface_status (surface) != CAIRO_STATUS_SUCCESS)
++    {
++      XDestroyImage (image);
++      return surface;
++    }
++
++  dst = cairo_image_surface_get_data (surface);
++  stride = cairo_image_surface_get_stride (surface);
++  for (y = 0; y < height; y++)
++    for (x = 0; x < width; x++)
++      {
++        unsigned long pixel = XGetPixel (image, x, y);
++        if (bitmap)
++          dst[y * stride + x] = pixel != 0 ? 255 : 0;
++        else
++          {
++            XColor color;
++            guint8 red, green, blue;
++            uint32_t *row = (uint32_t *) (dst + y * stride);
++            if (visual != NULL && visual->red_mask != 0 &&
++                visual->green_mask != 0 && visual->blue_mask != 0)
++              {
++                red = scale_masked_component (pixel, visual->red_mask);
++                green = scale_masked_component (pixel, visual->green_mask);
++                blue = scale_masked_component (pixel, visual->blue_mask);
++              }
++            else
++              {
++                color.pixel = pixel;
++                XQueryColor (display, DefaultColormap (display,
++                                                       DefaultScreen (display)),
++                             &color);
++                red = color.red >> 8;
++                green = color.green >> 8;
++                blue = color.blue >> 8;
++              }
++            row[x] = 0xff000000U | ((uint32_t) red << 16) |
++                     ((uint32_t) green << 8) | blue;
++          }
++      }
++  cairo_surface_mark_dirty (surface);
++  XDestroyImage (image);
++  return surface;
++}
++
++cairo_surface_t *
++cairo_xlib_surface_create (Display *display,
++                           Drawable drawable,
++                           Visual *visual,
++                           int width,
++                           int height)
++{
++  return surface_from_drawable (display, drawable, visual, width, height,
++                                FALSE);
++}
++
++cairo_surface_t *
++cairo_xlib_surface_create_for_bitmap (Display *display,
++                                      Pixmap bitmap,
++                                      Screen *screen,
++                                      int width,
++                                      int height)
++{
++  (void) screen;
++  return surface_from_drawable (display, bitmap, NULL, width, height, TRUE);
++}
++
++int
++cairo_xlib_surface_get_width (cairo_surface_t *surface)
++{
++  return cairo_surface_get_type (surface) == CAIRO_SURFACE_TYPE_IMAGE ?
++         cairo_image_surface_get_width (surface) : 0;
++}
++
++int
++cairo_xlib_surface_get_height (cairo_surface_t *surface)
++{
++  return cairo_surface_get_type (surface) == CAIRO_SURFACE_TYPE_IMAGE ?
++         cairo_image_surface_get_height (surface) : 0;
++}

@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(chinese_consumer_test LANGUAGES CXX)
+
+add_executable(chinese_consumer_test chinese_consumer_test.cpp)
+target_compile_features(chinese_consumer_test PRIVATE cxx_std_17)

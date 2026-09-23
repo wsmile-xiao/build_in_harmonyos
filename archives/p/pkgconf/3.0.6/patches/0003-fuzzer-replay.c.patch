@@ -1,0 +1,229 @@
+--- a/fuzzer/replay.c
++++ b/fuzzer/replay.c
+@@ -28,77 +28,160 @@
+ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size);
+-
++
+-static void
++static size_t replayed_inputs;
++
++static bool
+ replay_file(const char *path)
+ {
+-	FILE *f = fopen(path, "rb");
++	FILE *f = fopen(path, "rb");
+-	if (f == NULL)
++	if (f == NULL)
+-		return;
++	{
++		fprintf(stderr, "replay: fopen(%s): %s\n", path, strerror(errno));
++		return false;
++	}
+-
++
+-	if (fseek(f, 0, SEEK_END) != 0)
++	if (fseek(f, 0, SEEK_END) != 0)
+-	{
++	{
++		fprintf(stderr, "replay: fseek(%s): %s\n", path, strerror(errno));
+-		fclose(f);
++		fclose(f);
+-		return;
++		return false;
+-	}
++	}
+-
++
+-	long len = ftell(f);
++	long len = ftell(f);
+-	rewind(f);
+-
+-	if (len < 0)
++	if (len < 0)
+-	{
++	{
++		fprintf(stderr, "replay: ftell(%s): %s\n", path, strerror(errno));
+-		fclose(f);
++		fclose(f);
+-		return;
++		return false;
+-	}
++	}
+-
++
+-	uint8_t *buf = malloc((size_t) len + 1);
++	if ((uintmax_t) len > (uintmax_t) SIZE_MAX)
++	{
++		fprintf(stderr, "replay: input is too large: %s\n", path);
++		fclose(f);
++		return false;
++	}
++
++	if (fseek(f, 0, SEEK_SET) != 0)
++	{
++		fprintf(stderr, "replay: fseek(%s): %s\n", path, strerror(errno));
++		fclose(f);
++		return false;
++	}
++
++	size_t size = (size_t) len;
++	uint8_t *buf = malloc(size > 0 ? size : 1);
+-	if (buf == NULL)
++	if (buf == NULL)
+-	{
++	{
++		fprintf(stderr, "replay: malloc(%s): out of memory\n", path);
+-		fclose(f);
++		fclose(f);
+-		return;
++		return false;
+-	}
++	}
+-
++
+-	size_t got = fread(buf, 1, (size_t) len, f);
+-	fclose(f);
++	size_t got = fread(buf, 1, size, f);
++	if (got != size)
++	{
++		if (ferror(f))
++			fprintf(stderr, "replay: fread(%s): %s\n", path, strerror(errno));
++		else
++			fprintf(stderr, "replay: fread(%s): unexpected end of file\n", path);
++		free(buf);
++		fclose(f);
++		return false;
++	}
++
++	if (fclose(f) != 0)
++	{
++		fprintf(stderr, "replay: fclose(%s): %s\n", path, strerror(errno));
++		free(buf);
++		return false;
++	}
+-
++
+-	LLVMFuzzerTestOneInput(buf, got);
++	LLVMFuzzerTestOneInput(buf, got);
+-	free(buf);
++	free(buf);
++	replayed_inputs++;
++	return true;
+ }
+-
++
+-static void
++static bool
+ replay_path(const char *path)
+ {
+-	struct stat st;
++	struct stat st;
+-	if (stat(path, &st) != 0)
++	if (stat(path, &st) != 0)
+-		return;
++	{
++		fprintf(stderr, "replay: stat(%s): %s\n", path, strerror(errno));
++		return false;
++	}
+-
++
+-	if (!S_ISDIR(st.st_mode))
++	if (!S_ISDIR(st.st_mode))
+-	{
+-		replay_file(path);
+-		return;
+-	}
++		return replay_file(path);
+-
++
+-	DIR *dir = opendir(path);
++	DIR *dir = opendir(path);
+-	if (dir == NULL)
++	if (dir == NULL)
+-		return;
++	{
++		fprintf(stderr, "replay: opendir(%s): %s\n", path, strerror(errno));
++		return false;
++	}
+-
++
+-	struct dirent *ent;
+-	while ((ent = readdir(dir)) != NULL)
++	bool ok = true;
++	size_t before = replayed_inputs;
++	for (;;)
+-	{
++	{
+-		if (ent->d_name[0] == '.')
++		errno = 0;
++		struct dirent *ent = readdir(dir);
++		if (ent == NULL)
++		{
++			if (errno != 0)
++			{
++				fprintf(stderr, "replay: readdir(%s): %s\n", path, strerror(errno));
++				ok = false;
++			}
++			break;
++		}
++
++		if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, ".."))
+-			continue;
++			continue;
+-
++
+-		char child[4096];
++		char child[4096];
+-		snprintf(child, sizeof child, "%s/%s", path, ent->d_name);
+-		replay_path(child);
++		int written = snprintf(child, sizeof child, "%s/%s", path, ent->d_name);
++		if (written < 0 || (size_t) written >= sizeof child)
++		{
++			fprintf(stderr, "replay: child path is too long: %s/%s\n", path, ent->d_name);
++			ok = false;
++			continue;
++		}
++
++		if (!replay_path(child))
++			ok = false;
+-	}
++	}
+-
++
+-	closedir(dir);
++	if (closedir(dir) != 0)
++	{
++		fprintf(stderr, "replay: closedir(%s): %s\n", path, strerror(errno));
++		ok = false;
++	}
++
++	if (replayed_inputs == before)
++	{
++		fprintf(stderr, "replay: corpus contains no input files: %s\n", path);
++		ok = false;
++	}
++
++	return ok;
+ }
+-
++
+ int
+ main(int argc, char *argv[])
+ {
++	bool ok = argc > 1;
++	if (!ok)
++		fprintf(stderr, "usage: %s <corpus-path> [...]\n", argv[0]);
++
+-	for (int i = 1; i < argc; i++)
++	for (int i = 1; i < argc; i++)
+-		replay_path(argv[i]);
++	{
++		if (!replay_path(argv[i]))
++			ok = false;
++	}
+-
++
+-	return 0;
++	printf("REPLAYED_INPUTS=%zu\n", replayed_inputs);
++	return ok && replayed_inputs > 0 ? EXIT_SUCCESS : EXIT_FAILURE;
+ }

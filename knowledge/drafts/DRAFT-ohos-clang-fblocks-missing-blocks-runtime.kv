@@ -1,0 +1,127 @@
+#====================================================================
+# DRAFT-ohos-clang-fblocks-missing-blocks-runtime.kv
+# OHOS clang 的 Blocks 是「编译期语言开关 + 链接期独立运行库」两半：
+# 有 -fblocks 不等于有运行库（路径 B 知识库草稿，一/二之一）
+# 来源: libblocksruntime 0.4.1 OHOS aarch64 适配（contrib-13066，分支 feat/libblocksruntime-0.4.1）
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-clang-fblocks-missing-blocks-runtime
+trigger_tool:           clang|ld
+phase:                  compilation|linking|runtime
+error_signature:        undefined symbol: _Block_copy|
+                         undefined symbol: _Block_release|
+                         undefined symbol: _Block_object_assign|
+                         undefined symbol: _Block_object_dispose|
+                         undefined symbol: _NSConcrete(Stack|Malloc|Global)Block|
+                         ld(\.lld)?: error: undefined symbol: _Block
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, clang, compiler, toolchain, linking, runtime, static-library, portability
+match_keywords:         -fblocks, blocks, Block, Block_copy, Block_release,
+                         _Block_copy, _Block_object_assign, _Block_object_dispose,
+                         _NSConcreteStackBlock, BlocksRuntime, libBlocksRuntime,
+                         Block.h, Block_private.h, clang blocks, closures,
+                         compiler-rt, 语言开关, 运行库, blocks support disabled
+title:                  OHOS clang 的 Blocks 是「编译期语言开关(-fblocks) + 链接期独立运行库」两半：
+                        有 -fblocks 不等于有运行库；错误只在链接期出现，修复必须同时补运行库并传播 -fblocks
+prescan_pattern:        \^\{|Block_copy\s*\(|Block_release\s*\(|-fblocks
+prescan_globs:          *.c, *.h, *.cc, *.cpp, *.mm, CMakeLists.txt, Makefile*, *.mk, *.am
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             Clang 的 Blocks（^{...}）被拆成两个独立交付物：编译期由 -fblocks 触发
+                        lowering，链接期由 compiler-rt 的 BlocksRuntime 提供运行库符号
+                        （_Block_copy/_Block_release/_Block_object_assign/_Block_object_dispose
+                        与 _NSConcrete*Block 类对象）。OHOS 的 clang「有前者、没后者」：
+                        -fblocks 可编译，但 SDK 不带运行库也不装 <Block.h>，于是含块代码
+                        在链接期才报 undefined _Block_*。两端互相独立且都必需，因此
+                        「-c 成功」「make 编过对象」都不能证明平台可用 Blocks；只有链接+运行
+                        才算验证。诊断还常被带偏：独立发行的 clang（如 harmonybrew/bin/clang
+                        23.x）没有可用链接器驱动，直接链接会报
+                        `clang: error: unable to execute command: posix_spawn failed`
+                        这种与缺库无关的误导信息。
+affected_scope:         所有在 OHOS（musl/clang/SDK）上使用 clang Blocks 的 C/C++ 项目与库；
+                        含间接依赖方（第三方库把块用于公开 API 或内部回调）。
+                        适配实证：libblocksruntime 0.4.1（contrib-13066）——
+                        运行库包 + 3 消费者 + mackyle 上游语料 51 文件。
+verification_cmd:       CC=<profile 指向的 SDK clang>
+                        # A. 编译期门
+                        $CC -std=c99 -fblocks -c b.c -o b.o          # rc=0（有 -fblocks 才过）
+                        $CC -std=c99 -c b.c -o b.o                    # rc=1: blocks support disabled ... -fblocks
+                        # B. 链接期门（运行库缺失）
+                        $CC -fblocks b.c -o b                        # rc!=0: ld.lld undefined symbol: _NSConcreteStackBlock/_Block_copy
+                        nm b.o | grep ' U _Block'                    # 悬空的运行库符号
+                        # C. 补运行库后
+                        $CC -fblocks b.c -lBlocksRuntime -o b && ./b  # rc=0
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           package-standalone-blocks-runtime-and-propagate-fblocks
+rec_description:        所属类别：编译器已实现的语言/代码生成特性（编译期开关）其独立运行库未随
+                        平台提供。同族判定三步：① `<CC> <flag> -c` 是否成功；② `nm obj | grep ' U '`
+                        是否悬空（须用含该特性的代码，只加开关不引用符号会假通过）；③ SDK
+                        `llvm/lib` 是否提供该运行库。OHOS 实测 openmp/ASan/TSan/profile 运行时均提供，
+                        唯独缺 BlocksRuntime。处置：在制品仓提供独立 BlocksRuntime 运行库包（libblocksruntime）：
+                        编译 compiler-rt BlocksRuntime 为 lib/libBlocksRuntime.a 并安装
+                        include/Block.h、Block_private.h。消费者以 -fblocks 编译并链接该库。
+                        ★ 关键点：由运行库包通过 cpp_info.cflags/cxxflags 传播 -fblocks，
+                        并提供 CMake 目标 BlocksRuntime::BlocksRuntime，使「链接运行库」即
+                        「自动获得语言开关」，从机制上消除两种半配置（只开语言不链库 /
+                        只链库不开语言）。本仓实例 archives/l/libblocksruntime/0.4.1/。
+rec_command:            conan create archives/l/libblocksruntime/0.4.1 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               conan-recipe + cpp_info.cflags/cxxflags=-fblocks + cmake target BlocksRuntime::BlocksRuntime
+
+fallback_priority:      2
+fallback_approach:      vendor-blocksruntime-into-project
+fallback_description:   不能新增 Conan 依赖时，把 compiler-rt BlocksRuntime 的 runtime.c + data.c
+                        与 Block.h/Block_private.h vendor 进项目自身构建；仍必须 -fblocks。
+fallback_auto_fix:      false
+fallback_impl:          项目内自编译（需自行保证语言开关与运行库同时到位）
+
+# ★ 禁止策略（均以实测为依据）★
+forbid_1_pattern:       (仅) -fblocks 而不链接运行库|-fblocks(?!.*Block)
+forbid_1_reason:        -fblocks 只过编译期门；缺运行库时链接期必失败，实测
+                        `ld.lld: error: undefined symbol: _NSConcreteStackBlock / _Block_copy`。
+forbid_1_consequence:   把链接期问题误判为编译期/环境问题，或在 -c/语法检查阶段就宣布“已支持 Blocks”。
+forbid_2_pattern:       目标含块代码却不加 -fblocks，指望只链接 BlocksRuntime 即可|
+                         BlocksRuntime::BlocksRuntime 被链接但源码未启用 -fblocks
+forbid_2_reason:        语言开关与运行库独立：无 -fblocks 时 clang 直接报
+                        `error: blocks support disabled - compile with -fblocks ...`，是否链接运行库无关。
+forbid_2_consequence:   编译期即失败；若只靠链接库“看起来配齐”，会掩盖语言开关缺失。
+forbid_3_pattern:       posix_spawn failed.*No such file or directory.*Block|缺运行库根因=clang 没有链接器
+forbid_3_reason:        harmonybrew 独立 clang（无链接器驱动）直接链接会给出 posix_spawn 误导信息；
+                        真正的缺库错误要用 SDK clang（Conan profile tools.build:compiler_executables.c）。
+forbid_3_consequence:   根因定位错误，去修链接器/环境而非补运行库，浪费轮次。
+forbid_4_pattern:       只提供 Block.h（头）而不提供 libBlocksRuntime
+forbid_4_reason:        Block.h 只有 Block_copy/Block_release 声明；符号实体在运行库里。
+forbid_4_consequence:   头对齐了、符号仍缺，表现为“明明 include 了 Block.h 还报 undefined”。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R34, R39, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 含 -fblocks 的目标链接失败（undefined _Block_*），阻塞 build/test
+caused_by:              OHOS clang/SDK 未提供 Blocks 运行库与 Block.h（语言开关与运行库分离）
+similar_to:             E003, E013, E019, E213
+conflicts_with:         []
+prerequisite_of:        DRAFT-blocksruntime-runtime-behavior-and-lifecycle-verification
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ohos-clang-fblocks-missing-blocks-runtime.md
+last_updated:           2026-09-15
+source_event:           libblocksruntime 0.4.1 OHOS aarch64 conan create；
+                        2x2 配置矩阵 + mackyle 上游语料（32 运行 + 3 编译检查通过、7 负向编译复现、6 跳过、0 失败）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                frj__
+source_pr:              (本分支 feat/libblocksruntime-0.4.1，关联 issue #3029)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15
+draft:                  true
+contributor_id:         frj__

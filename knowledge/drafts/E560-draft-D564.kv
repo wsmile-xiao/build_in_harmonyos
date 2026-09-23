@@ -1,0 +1,39 @@
+id: E560
+title: 头文件暂定定义导致 clang/lld duplicate symbol(OHOS utmp 宏缺失)
+category: linking
+severity: major
+error_signature: "ld.lld: error: duplicate symbol: <sym>"
+match_keywords: duplicate symbol, tentative definition, header, lld, utmp
+error_excerpt: >
+  ld.lld: error: duplicate symbol: foo_utmp
+  >>> defined at main.c
+  >>>            main.o:(foo_utmp)
+  >>> defined at internal.c
+  >>>            internal.o:(.bss+0x0)
+root_cause: >
+  旧 C 代码(90 年代)常在头文件中写 `struct X foo;`(暂定定义)而非 `extern` 声明,
+  用于推导 sizeof 宏。每个包含该头文件的 .o 都实例化一份符号。1990s gcc 将多个
+  暂定定义合并为一个(common symbol),而 clang 默认 -fno-common + ld.lld 严格拒绝
+  重复定义。触发条件组合:平台头文件(如 OHOS utmp.h)只定义了部分配套宏
+  (UT_HOSTSIZE/UT_LINESIZE/UT_NAMESIZE 有,UT_USERSIZE 无),使源码的
+  `#if !defined(UT_USERSIZE) || ...` 守卫块必然进入,暂定定义必然被编译。
+rec_approach: >
+  不要试图用 extern + 单点定义修补(头文件内 #define UT_*SIZE sizeof(foo.x) 宏
+  与 #include 顺序互相纠缠,不同 .c 的宏状态不一致,修复不收敛)。直接删除整个
+  foo_utmp 推导机制,用显式字面量替代:`#ifndef UT_USERSIZE #define UT_USERSIZE 32`
+  (32 = OHOS utmpx.h 中 ut_user[32] 的实际大小,先用探针程序或读 sysroot 头文件
+  确认)。一次修复,所有 .o 不再产生符号。
+prescan_pattern: "^struct utmp \\w+;"
+fix_commands: |
+  # 确认平台宏缺失情况(探针):
+  clang -E -xc - <<< '#include <utmp.h>' | grep UT_USERSIZE
+  # 若无输出 → UT_USERSIZE 未定义,删除头文件里的暂定定义块,替换为:
+  # #ifndef UT_USERSIZE
+  # #define UT_USERSIZE 32
+  # #endif
+auto_fixable: false
+verify_cmd: "make clean && make all CC=clang && nm src/*.o | grep foo_utmp || echo CLEAN"
+related_docs: knowledge/doc/E051.md
+kb_ref: E560
+last_updated: 2026-09-07
+source_package: cfingerd/1.4.3

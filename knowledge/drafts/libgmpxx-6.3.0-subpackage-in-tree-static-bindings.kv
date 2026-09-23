@@ -1,0 +1,121 @@
+# ═══ Draft knowledge entry — 上游源码树内的子库/绑定独立成包（libgmpxx ⊂ GMP） ═══
+# Software: libgmpxx 6.3.0（GMP 6.3.0 树内 C++ 绑定）
+# Gate: 设备干净轮 conan create + test_package + W3 本地 CI 全通过；上游 tests/cxx 22/22 实跑
+# Status: DRAFT — 编号 E585（与同目录同名 .md 成对）。取号经过：`knowledge_id.py --claim` 在本机
+#   假阴性报出 E565（该号已被上游 DRAFT-E565-musl-tcgeta-tcseta-redefine-guard 占用），改用三面人工
+#   复核后定 E585：①`git ls-tree -r upstream/main -- knowledge/` 名称+内容的 E 号集合（543–583 全占）
+#   ②各本地 worktree 的 knowledge/ 文件与整词引用（E584 已被 libbfio 任务占用）③主检出 knowledge/。
+
+id: libgmpxx-6.3.0-subpackage-in-tree-static-bindings
+severity: 3
+category: conan|autotools|subpackage|static|ohos
+trigger_tool: conan|autotools|make|ld
+phase: source|configure|package|linking
+
+keywords: 子包, 树内绑定, 上游源码树, gmpxx, GMP, ncurses form, libformw, 内部头, gmp-impl.h, config.h 同源, 内部符号, 双份安装, cpp_info.requires, visible, static-only, shared 选项
+
+error_signature: gmp-impl\.h.*No such file|fatal error .'gmp\.h' file not found|undefined reference to [`'\"]?__gmp_|undefined symbol .*__gmp_doprnt|Could NOT find GMP|multiple definition of [`'\"]?__gmp
+
+match_keywords: libgmpxx, gmpxx.h, gmp-impl.h, --enable-cxx, config.h 同源, 内部符号 ABI, 子库独立成包, 上游源码树, 双份安装, cpp_info.requires, visible=True, ConanInvalidConfiguration, shared 选项, libformw, ncurses, 静态专用
+
+prescan_pattern: (^|/)cxx/[^/]*\.cc$|-impl\.h$|--enable-cxx|--enable-[a-z]+[^ ]*cxx
+prescan_globs: configure.ac, configure, Makefile.am, Makefile.in, **/cxx/*.cc, **/*-impl.h
+prescan_severity: 2
+
+root_cause: |
+  有些"包名"不是独立上游项目，而是**另一个上游源码树内的子库/绑定**（实测：libgmpxx =
+  GMP 6.3.0 tarball 内的 C++ 绑定 gmpxx.h + cxx/*.cc；同族先例：libformw ⊂ ncurses、
+  libhogweed ⊂ nettle）。这类子库有三个共性问题：
+  ① 实现直接 `#include` 父项目的**内部头**（gmp-impl.h 依赖 configure 生成的 config.h 与内部
+     符号声明），脱离父项目的 configure 无法单独编译；
+  ② 其对象引用父库的**内部符号**（实测 `llvm-nm -u libgmpxx.a` 的 18 个 GMP 族未定义符号：
+     `__gmp_doprnt_*`、`__gmp_asprintf_*`、`__gmp_istream_*`、`__gmp_allocate_func`/`__gmp_free_func`、
+     `__gmpz_operator_in_nowhite` 等；**不含 `__gmpn_*`**），只有与父包
+     **同源配置**（同 tarball、同 configure 选项、同 config.h）时 ABI 才一致；
+  ③ 照抄"独立库"配方（只解包子目录、只装子库产物、不复用父包配置）会出现三类确定性问题：
+     内部头找不到（`gmp-impl.h: No such file`）→ 链接期内部符号 undefined → 或与父包双份安装
+     同名头/静态库（下游 `-lgmp` 命中两份）。
+
+rec_approach: reuse-parent-tarball + same-configure + trim-parent-artifacts
+rec_description: |
+  配方口径（libgmpxx 6.3.0 实测通过，可直接搬到同族子包）：
+  1) `source()`：用**父项目同一个 tarball**（URL/sha256 与父包逐字一致，便于追溯同源）；
+  2) `requirements()`：精确 pin 父包同版本；父包头是公开依赖时必须 `visible=True`
+     （Conan 2 + CMakeDeps 不为传递依赖生成 include 数据，否则消费者 `#include <gmp.h>` 失败，
+     且 test_package 需显式 `self.requires("gmp/6.3.0")` 作为直接依赖）；
+  3) `generate()`：复制父包的 configure 选项，仅追加子库开关（`--enable-cxx`）——
+     必须完整 configure 整树，不能只 configure 子目录，否则 config.h/内部符号 ABI 与父包不一致；
+  4) `package()`：完整 `make install` 后**删除父包本体产物**（libgmp.a / gmp.h / gmp.pc / 全树
+     `*.la`），避免与父包双份安装；`.la` 必须删（烤死绝对 libdir，会把下游 libtool 引到 `//lib` 死路）；
+  5) `package_info()`：`cpp_info.libs=[子库]`、`cpp_info.requires=["父包::父包"]`，并设
+     `cmake_file_name`/`cmake_target_name`/`pkg_config_name`；
+  6) 子库只能静态链接时：Conan 2 要求 library 型包声明 `shared` 选项 → 声明
+     `options={"shared":[True,False]}`，并在 `configure()` 里对 `shared=True` 抛
+     `ConanInvalidConfiguration` 指向父包的共享整包版本（不要用"声明了但静默无效"的选项冒充共享支持）。
+rec_command: |
+  # conandata.yml：sources.url/sha256 与父包逐字一致
+  # conanfile.py 关键片段
+  def requirements(self):
+      self.requires("gmp/6.3.0", headers=True, libs=True, visible=True)
+  def generate(self):
+      tc = AutotoolsToolchain(self)
+      tc.configure_args += ["--enable-static", "--disable-shared", "--with-pic", "ABI=64", "--enable-cxx"]
+      tc.generate()
+  def package(self):
+      Autotools(self).install()
+      for junk in ("lib/libgmp.a", "lib/libgmp.la", "include/gmp.h", "lib/pkgconfig/gmp.pc"):
+          p = os.path.join(self.package_folder, junk)
+          if os.path.isfile(p): os.remove(p)
+  def package_info(self):
+      self.cpp_info.libs = ["gmpxx"]
+      self.cpp_info.requires = ["gmp::gmp"]
+rec_auto_fix: false
+
+affected_scope: |
+  包名对应"上游源码树内的子库/绑定"而非独立项目的适配：子目录自带 Makefile.am 目标、
+  `configure --enable-<x>` 开关、或包名形如 `<父项目><子模块>`（gmpxx / formw / hogweed …）。
+  父包已在本仓库单独发布、且子包必须与父包同源链接的场景。反之，若子库已能独立发行
+  （自带 configure/CMake 与版本号），应按普通独立包适配，不套用本条目。
+
+verification_cmd: |
+  # 1) 包内产物与裁剪核对（父包本体必须 absent）
+  PKG=$(conan cache path libgmpxx/6.3.0@ohpcd/stable:<package_id>)
+  find "$PKG" -type f | sort
+  for f in lib/libgmp.a include/gmp.h lib/pkgconfig/gmp.pc; do [ -e "$PKG/$f" ] && echo "PRESENT $f" || echo "absent $f"; done
+  find "$PKG" -name '*.la' | wc -l          # 期望 0
+  # 2) 父包头对消费者可见（CMakeDeps 生成物里应有 find_dependency(gmp) 与 gmp::gmp）
+  grep -r "find_dependency(gmp)\|gmp::gmp" <test_package_build>/generators/*.cmake
+  # 3) 子库对象确实引用父包内部符号（同源 ABI 的直接证据）
+  llvm-nm -u "$PKG/lib/libgmpxx.a" | grep '__gmp_' | head
+  # 4) 上游子目录测试：libtool 因设备 HMDFS getcwd(2) 失效时改用直接静态链接 harness
+  #    （逐程序链 libtests.a/libgmpxx.a/libgmp.a 实跑，见 archives/l/libgmpxx/6.3.0/reports/upstream-tests-cxx-log.md）
+
+evidence: |
+  libgmpxx 6.3.0（PR !11150，2026-09-19）：
+  - source = GMP 6.3.0 官方 tarball，sha256 a3c2b80201b89e68616f4ad30bc66aee4927c3ce50e33929ca819d5c43538898
+    与 archives/g/gmp/6.3.0 逐字一致；设备干净轮实测 `Sources correctly downloaded from https://mirrors.tuna.tsinghua.edu.cn/gnu/gmp/gmp-6.3.0.tar.xz`。
+  - 产物核验：安装树 8 文件（include/gmpxx.h 129502B、lib/libgmpxx.a 46468B、lib/pkgconfig/gmpxx.pc 272B、
+    share/info/gmp.info*），lib/libgmp.a、include/gmp.h、lib/pkgconfig/gmp.pc 全 absent、`*.la` 0 个（无与 gmp/6.3.0 双份安装）。
+  - 上游 N 口径（返修实证：2026-09-20 外部审查 rule4 判「少报 实测 N=190 > 声明 N=22」）：
+    子包**不得只报自己那一支的用例数**——N 必须取**父 tarball 的完整注册面**，即 `tests/**`
+    各 `Makefile.am` 的 `check_PROGRAMS` 总数 **200**（= 190 个 `t-*` 命名项 + 10 个具名项
+    reuse/io/dive/dive_ui/convert/logic；取数命令见该包 `notes.md` 与
+    `test_package/MANIFEST.yml`），再按交付面把未运行项记 **NOT_RUN** 并逐目录归因
+    （本例 178 项测 libgmp C API，不在子包 install 面，C 库由父包交付）；
+    自洽式 `TOTAL 200 = PASS 22 + FAIL 0 + SKIP 0 + NOT_RUN 178`，通过率按执行口径写
+    22/22（100%）并显式写明与 N=200 的换算，不写成 22/200。
+  - 上游测试：tests/cxx 22 个 check_PROGRAMS 用直接静态链接 harness 实跑 22/22 PASS；
+    test_package 消费者程序 5 项计算断言全过（`RUN: ./test_gmpxx` + `all assertions passed`）；
+    W3 本地 CI `Total 1 / Success 1 / Failed 0`。
+  - 反证（两类失败形态分列，实测源码依据见下）：
+    ① 只解包 / 只对子目录 `-I`：`cxx/*.cc` 找不到内部头 `gmp-impl.h`（该头 `gmp-impl.h:144`
+       又 `#include "config.h"`，而 config.h 由**父项目 configure** 生成）→ 编译期失败；
+    ② 完整 configure 但省 `--enable-cxx`：`Makefile.am:127`、`cxx/Makefile.am:34` 的 `if WANT_CXX`
+       使 cxx 目标**根本不构建**，包装完却无 `gmpxx.h`/`libgmpxx.a` → 产物缺失（不是编译失败）；
+    两次同源构建的 libgmpxx.a 字节不同但大小恒为 46468B（ar 成员头 mtime 差异），不影响 ABI 判据。
+
+authors:
+  - Awstme
+source_pr: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/11150
+source_commit: 260cd0e04ce9b9150d975144502a8658df397a53
+draft_date: 2026-09-19

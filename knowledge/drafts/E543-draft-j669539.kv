@@ -1,0 +1,66 @@
+draft: E543-draft-j669539
+status: pending-editor-review
+title: "CI Worker dlopen 边界：Python 扩展包 test_package 的 E212 fallback（subprocess 捕获 + 符号级 ELF 验证，numpy 12 轮实证）"
+category: conan, testing, python, dynamic-loading, security, ci
+match_keywords: >
+  Python C extension, import numpy failed, Permission denied, dlopen,
+  test_package, CI worker, E212, E502, hmmac, ELF verification,
+  pycairo precedent, subprocess capture, ConanException without output,
+  PyInit_, .codesign section, NEEDED entry, libpython, static link,
+  jpeg_start_decompress, binary-sign-tool, selfSign
+error_signature: >
+  Permission denied.*\.so|dlopen failed.*Permission denied|
+  \[errno 212\]|e212|
+  ConanException without output|self\.run.*no stdout|
+  Missing \.codesign section|Missing libpython NEEDED
+root_cause: >
+  两层根因叠加：
+  (1) 平台边界（E502 族）：CI Worker 的 loader 策略拒绝进程启动后映射
+  （dlopen）用户构建的共享对象——CPython 的 import 机制正是 dlopen，因此
+  所有 Python C 扩展包的 test_package 在 CI Worker 上 import 即失败
+  （Permission denied），而同样模块在真机交互环境正常。实测矩阵：
+  dlopen ❌（#33869 连 release 签名也拒）/ LD_PRELOAD ❌（#33895）/
+  DT_NEEDED @ exec ✅（#33895 isl C tests）/ 真机交互 dlopen ✅（本地 7/7）。
+  (2) 检测陷阱（无任何条目记录）：conan 的 self.run() 异常不携带
+  stdout/stderr——导致 E212 判定代码在位却永远不触发（numpy #36896 实证：
+  fallback 分支写了但从未执行）。必须用 subprocess.run(capture_output=True)
+  捕获完整输出再做字符串判定。
+solution: |
+  五步 fallback 模式（numpy PR #7667 构建 #36910 CI 全绿实证）：
+
+  1. test() 用 subprocess 捕获（禁用 conan self.run）：
+  ```python
+  result = subprocess.run(cmd, shell=True, capture_output=True,
+                          text=True, timeout=300)
+  ```
+  2. returncode == 0 → 真实 import 路径全部通过（真机环境）；
+  3. 输出含 "Permission denied" / E212 → 判定 CI Worker dlopen 边界；
+  4. 降级为符号级 ELF 验证（结构等价性证明）：
+  ```python
+  for module in ext_modules:            # e.g. 19/19
+      data = open(module, "rb").read(4)
+      assert data == b"\x7fELF"        # ELF 魔数
+      readelf -S → .codesign 节存在     # 已签名
+      readelf --dyn-syms → PyInit_ 前缀符号  # CPython 入口
+      readelf -d → NEEDED 判据（见第 5 步）
+  ```
+  5. NEEDED "或符号"双判据（静态链入的库无 NEEDED 条目但符号在）：
+  libjpeg/10 静态链入 pillow _imaging.so 时无 jpeg NEEDED，但有
+  jpeg_start_decompress 符号——判据写 "NEEDED contains lib X OR
+  symbol X_* present"。
+
+  真实测试优先红线：本地/真机走完整 import+API 测试（numpy 7/7），
+  E212 fallback 仅在 Worker 拒载时兜底，测试统计以真实结果为准，
+  如实标注验证路径（真机运行 / Worker 结构验证）。
+fallback: >
+  ELF 验证仍失败（如 .codesign 缺失）时：package() 阶段对全部 .so 显式
+  binary-sign-tool sign -selfSign 重签后重验（numpy/pillow 均走通）；
+  签名工具本身失败时按 R41/R43 证据格式上报（每文件探测矩阵 +
+  Worker 编号 + 构建号），禁止 skip/stub 伪装绿灯。
+verify_builds: #36910, #36896, #36878, #36715, #33869, #33895
+reference_impl: >
+  numpy: PR #7667 构建 #36910（12 轮 CI 全绿实证）；
+  pycairo: archives/p/python-cairo/1.29.0 + PR #5093（E212 先例已合入）；
+  pillow: PR #7641 构建 #37369（E544 姊妹条目，setuptools 体系）
+id: E543
+doc_file: doc/E543.md

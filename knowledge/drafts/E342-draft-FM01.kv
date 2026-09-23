@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E342.kv，填写各字段
+# 对应的人类文档: doc/E342.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E342
+trigger_tool:           configure|cmake|meson|make|gcc|clang|ld|python|pip|install|test|runtime
+phase:                  configuration|compilation|linking|installation|testing|runtime
+error_signature: ctest.*moddivnbenchmark.*modnbenchmark|FASTMOD_EXHAUSTIVE_TESTS|unit\\.c|cppincludetest2
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity:               2
+category:               headers, build-system, cmake, conan, testing
+match_keywords:         header-only, INTERFACE, CTest, ctest -N, benchmark, exhaustive tests, test_package, assertion count
+title:                  CMake 默认 CTest 清单与 Makefile 穷举程序分离时的测试盘点与 header-only 消费者验证
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause:             上游同时提供 CMake 和 Makefile 两套测试入口：默认 CMake 只注册 moddivnbenchmark、modnbenchmark 两个 CTest benchmark，Makefile 才构建 unit.c 与 cppincludetest2.cpp；后两者没有被默认 CTest 注册，且 cppincludetest2 只有在 FASTMOD_EXHAUSTIVE_TESTS=ON 时才加入 CTest。只按 CTest 数量写“完整测试”会夸大正确性覆盖，只按可执行文件数量写“用例”又会混淆测试目标与断言。
+affected_scope:        采用 CMake 的 header-only C/C++ 库，尤其同时保留 Makefile/手工穷举测试和 CTest benchmark 的项目；也适用于 Conan 需要区分上游测试、可选测试和消费者测试的适配 PR。
+verification_cmd:      ctest -N --test-dir <build>; rg -n 'add_test|FASTMOD_EXHAUSTIVE_TESTS|unit|cppincludetest2' CMakeLists.txt tests/CMakeLists.txt Makefile; clang++ -std=c++11 -I <package>/include <consumer>.cpp -o <consumer> && <consumer>
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           source-registration-ledger-plus-consumer-smoke
+rec_description:        先从构建文件逐项盘点 CTest 注册、Makefile 构建但未注册的程序和 opt-in 测试，再在 Conan build() 保留默认上游 CTest；对 header-only 包用 self.run() 执行直接调用真实 API 的消费者测试，并在 MANIFEST/PR 中分别报告目标数、实际执行数、显式检查数和未运行原因。
+rec_command:            ctest --test-dir <build> --output-on-failure; <conan-test-package>/test_fastmod
+rec_auto_fix:           false
+rec_impl:               inventory-upstream-registrations
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      bounded-consumer-api-probe
+fallback_description:   当上游 opt-in 穷举程序的完整域遍历超出设备验证预算时，保留其源码和注册事实，诚实标为未运行；增加覆盖主要 API 和边界值的消费者探针，不把探针结果冒充上游穷举通过。
+fallback_command:       <conan-test-package>/test_fastmod
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       ctest -N.*assertion|CTest.*断言数|test.*全部通过.*未运行
+forbid_1_reason:        CTest 清单数量只表示注册的测试目标，不表示断言数；未运行的 Makefile/opt-in 程序不能被写成通过。
+forbid_1_consequence:   PR 测试规模失真，审查无法判断真实覆盖范围，且可能绕过完整上游测试要求。
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             P010
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E342-draft-FM01.md
+last_updated: 2026-09-03
+source_event:           fastmod 0.1.0: CMake/Makefile 测试入口盘点与 header-only Conan 消费者测试设计
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                Awstme
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:      2026-09-03
+
+draft: true
+contributor_id: FM01

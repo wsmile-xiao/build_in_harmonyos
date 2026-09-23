@@ -1,0 +1,29 @@
+#====================================================================
+# Draft: 消费者测试的判定链路不应经文件系统中间文件 —— OHOS 上 /tmp 只读、
+#        各环境可写目录不一，把"运行输出"落盘再 grep 等于给判据引入一个与被测
+#        对象无关的失败面；改用 popen 内存管道直读，判据只依赖被测程序本身
+#   Stem: devio-1.2-consumer-test-no-tmpfile-popen-capture — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-DEVIO-CONSUMER-TEST-NO-TMPFILE-POPEN-CAPTURE
+trigger_tool:           ci
+phase:                  testing
+error_signature:        can't create /tmp/.*: Read-only file system|grep: /tmp/.*: No such file or directory|Error in test\(\) method
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               ci-gate, test-design, filesystem
+match_keywords:         消费者测试, 临时文件, /tmp, Read-only file system, popen, 重定向, grep, test(), 判据, false fail, 中间文件
+
+title:                  消费者测试的判定链路不应经文件系统中间文件 —— OHOS 上 /tmp 只读会让 grep 判据凭空失败，改用 popen 内存管道直读
+
+root_cause:             常见写法是「把被测程序的输出重定向到 /tmp/xxx.out，再 grep 该文件」。在 OHOS 上 `/tmp` 是只读文件系统（实测消费级 HarmonyOS PC 与 CI runner 行为一致：`sh: can't create /tmp/xxx.out: Read-only file system`），于是重定向静默失败、`grep` 因文件不存在而返回 2，**test() 抛 ConanException**——CI 的 L1 门禁判 fail，但**被测二进制其实完全正常**。这不是被测对象缺陷，而是**测试判据把「文件系统可写」当成了隐含前提**，给判据引入了一个与验证目标无关的失败面。更糟的是失败信息（`grep: … No such file or directory`）看起来像被测程序没产出输出，容易把排查引向错误的"程序没跑起来"方向。
+affected_scope:         所有 `test_package` 中采用「重定向到临时文件 + 后续 grep/awk 处理」写法的消费者测试（C 的 `system()`、shell 的 `test.sh`、Python 的 `subprocess` 重定向都算）。实测实例：devio 1.2（PR !9180）与 devmem2 0.2（PR !9172）**两个包同一根因**，前者 `test -x` 类判定均正常、仅临时文件环节失败；修掉该写法后同一份配方立即通过。
+verification_cmd:       在测试所在环境执行 `echo x > /tmp/probe || echo READONLY`；若打印 READONLY，则任何以 /tmp 落盘为前提的判据都不可靠
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           in-memory-capture-via-popen
+rec_description:        改法：用 `popen("\"<被测路径>\" < /dev/null 2>&1", "r")` **直接读子进程输出**（内存管道，全程不落盘），断言在内存字符串上做；判定顺序固定为「① 排除跑不起来：pclose 返回 -1、!WIFEXITED（被信号杀死）、WEXITSTATUS ∈ {126,127} 或 >= 128 → 一律 FAIL 并把原始码写进断言详情（★ 必须判 >=128：popen 经 /bin/sh 中转，shell 把信号死亡转成 128+signum，SIGSEGV→139、SIGABRT→134，只列 {126,127,255} 会漏掉最常见的段错误）；② 语义断言：输出含**从源码抄出的**确定字面（如 devio 的 usage 关键字、daa2iso 的 `Usage: …`）」；③ 被测工具预期非 0 时不要断言 0。★ 另须**循环读到 EOF 再 pclose**：单次 fread 后立即 pclose，输出超过缓冲时子进程会因写端被关而收到 SIGPIPE（假通过）或阻塞死锁。★ 判据实现用显式 `expect(cond, ...)` 计数汇总，**不要用 `assert()`**——NDEBUG（Release）下 assert 会被整体编译掉，断言静默消失、测试变成永远通过的空壳。若上游确实必须落盘（例如工具本身就产出文件），把落盘目录取为 `$TMPDIR`／`self.build_folder` 下自建子目录并**显式校验目录可写**，绝不要写死 `/tmp`。参考实现：archives/d/devio/1.2/test_package/test_devio.c、archives/d/devmem2/0.2/test_package/test_devmem2.c、archives/c/crashme/2.8.5/test_package/test_crashme.c。附带收益：内存直读同时避免了 "shell 解析" 与 "临时目录权限" 两个额外变量，判据只依赖被测程序。
+rec_command:            # C 版判据骨架（无中间文件）\nsnprintf(cmd, sizeof(cmd), "\\\"%s\\\" < /dev/null 2>&1", bin);\nFILE *fp = popen(cmd, "r");\nif (!fp) return FAIL;\nsize_t n = 0, got;\nwhile (n < sizeof(buf)-1 && (got = fread(buf+n, 1, sizeof(buf)-1-n, fp)) > 0) n += got;\nbuf[n] = 0;\nint rc = pclose(fp);\nif (rc == -1) return FAIL;\nint killed = !WIFEXITED(rc);\nint code = killed ? -1 : WEXITSTATUS(rc);\nif (killed) return FAIL;\nif (code == 126 || code == 127 || code >= 128) return FAIL;\nexpect(strstr(buf, "<从源码抄出的字面>") != NULL, "语义断言", detail);
+rec_auto_fix:           false

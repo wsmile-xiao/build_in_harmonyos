@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT-ohos-github-tarball-sources-differ — GitHub 同 tag 的三种 tarball
+#   （release 资产 / codeload git-archive / api tarball）内容与校验和不同，
+#   写 conandata 前必须核对所取源与官方声明一致
+# 对应文档: knowledge/drafts/DRAFT-ohos-github-tarball-sources-differ.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-github-tarball-sources-differ
+trigger_tool:           conan|conan create|conan download|make|configure
+phase:                  source|configuration|compilation
+error_signature:        (Checksum mismatch|sha256 mismatch|hash mismatch|
+                        different checksum)[^\n]*(sha256)|Error: Invalid checksum|
+                        source.*does not match.*sha256|从 tarball 提取的源码.*不同
+
+severity:               2
+category:               packaging, source-download, conan, checksum, porting
+match_keywords:         GitHub, tarball, release asset, codeload, git-archive,
+                        api tarball, sha256, checksum mismatch, 三种 tarball,
+                        源码包, source url, conandata, R39, 官方 release,
+                        资产大小, 校验和
+title:                  GitHub 同 tag 的三种 tarball（release 资产 / codeload
+                        git-archive / api tarball）内容与校验和各不相同——
+                        写 conandata 前必须核对所取源与官方声明的大小/校验和一致
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             GitHub 对同一 tag 提供**三种不同的归档**，它们由不同机制
+                        生成，内容、大小与 sha256 均不同：
+                          - **release 资产**（用户上传，`releases/download/...`）：
+                            经发布流水线，通常内容最完整（可能含测试数据、生成文件）；
+                          - **codeload git-archive**（`codeload.github.com/<repo>/tar.gz/refs/tags/<tag>`）：
+                            直接从 git 树快照生成，**不含**发布时单独添加/生成的产物，
+                            目录名带 `refs/tags/` 路径痕迹，且 URL 尾部无 `.tar.gz` 扩展名
+                            （conan get() 会误判为 zip → BadZipFile，见 E276）；
+                          - **api tarball**（`api.github.com/repos/<repo>/tarball/<tag>`）：
+                            同样 git 树快照，但目录名是 `<repo>-<commit-sha>`，字节也
+                            与 codeload 不同。
+                        三者对同一 tag 的 sha256 **各不相同**。后果：若 conandata 的
+                        sha256 与实际所选 URL 的产物不一致，`get()` 在解压校验时报
+                        checksum mismatch；若用 codeload/api 的 hash 配 release URL
+                        或反之，同样失败。写 conandata 前必须先下载**实际所选 URL**、
+                        逐字节计算 sha256，并与官方 release 声明（Release 页或
+                        manifest 记录）核对。
+affected_scope:         所有从 GitHub 取源码的 conan 配方；尤其 release 资产与
+                        git-archive 内容差异大的项目（发布时生成文件、含测试数据、
+                        vendored 依赖等）。与 E276（codeload URL 无扩展名 → BadZipFile）
+                        相关但**问题层不同**：那是"解压格式误判"，本条是"三种源内容
+                        与校验和不同"——即使格式判断正确，选错源仍会校验失败。
+verification_cmd:       对同一 tag 分别下载三个源并比较：
+                        curl -fsSL https://github.com/<o>/<r>/releases/download/<t>/<r>-<t>.tar.gz | sha256sum
+                        curl -fsSL https://codeload.github.com/<o>/<r>/tar.gz/refs/tags/<t> | sha256sum
+                        curl -fsSL https://api.github.com/repos/<o>/<r>/tarball/<t> | sha256sum
+                        # 三者应各不相同；再与官方 release 声明核对
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           pick-source-then-hash
+rec_description:        ①先确定**官方源**（R39 优先 release 资产；无 release 才用
+                        git-archive）；②下载**该 URL 实际产物**，逐字节算 sha256，
+                        写入 conandata；③与官方声明（Release 页资产大小 / manifest
+                        source 段）核对；④若项目同时记录 codeload/api 的 hash，
+                        在 manifest 注明三种源差异与各自大小，防后人混用。
+                        关键：**绝不用"同 tag 的另一种源的 hash"** 配当前 URL。
+rec_command:            python3 -c "import urllib.request,hashlib; \
+                        d=urllib.request.urlopen('<所选URL>').read(); \
+                        print(len(d), hashlib.sha256(d).hexdigest())"
+rec_auto_fix:           false
+rec_impl:               pick-source-then-hash
+
+fallback_priority:      2
+fallback_approach:      cross-verify-manifest
+fallback_description:   若官方只有 git-archive 且项目强依赖发布时生成的文件（如
+                        eudev 的 keyboard-keys 数据、monocypher 的测试向量），
+                        git-archive 内容不全 → 需改用 release 资产，或在 manifest
+                        明确记录"该源不含 X，需构建期生成/下载"，并核对所取源与
+                        官方声明一致后采用。
+fallback_command:       # 对比 git-archive 与 release 资产的文件树（find 差异）
+fallback_auto_fix:      false
+fallback_impl:          cross-verify-manifest
+
+forbid_1_pattern:       用 release 的 sha256.*配 codeload/api 的 URL|
+                        用 codeload 的 sha256.*配 release URL|混用不同源的 hash 与 URL
+forbid_1_reason:        三种源内容不同，hash 与 URL 一一绑定；混用必然 checksum
+                        mismatch，且掩盖真正选源问题。
+forbid_1_consequence:   校验失败 + 反复换 hash 试错，浪费时间且可能误用不完整源。
+
+forbid_2_pattern:       只按.*(大小|md5).*判断.*源.*一致
+forbid_2_reason:        大小可能偶合相等（少见但存在），md5 同理；必须以 sha256
+                        逐字节核对，且针对**实际所选 URL**。
+forbid_2_consequence:   校验不充分 → 使用内容不完整/不同的源而不自知。
+
+principles:             upstream-compat-evidence, r39-official-source, checksum-truth
+
+causes:                 []
+caused_by:              []
+similar_to:             [E276, E392, E483]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-github-tarball-sources-differ.md
+last_updated:           2026-09-16
+source_event:           eudev 3.2.14 适配（manifest 记录 release 2188254B /
+                        codeload git-archive 2323748B / api tarball 2323865B，
+                        三者 sha256 均不同）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:              9614
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        5C41

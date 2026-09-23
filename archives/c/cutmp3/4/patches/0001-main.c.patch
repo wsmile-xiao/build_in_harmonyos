@@ -1,0 +1,265 @@
+--- a/main.c
++++ b/main.c
+@@ -8,20 +8,23 @@
+  ***************************************************************************/
+ 
+ /*
+ 	main.c   Cut MP3s framewise, VBR supported!
+ 	MP2 files should work since 2.0.4, as well!
+ 	The code is somewhat ugly and unsafe, sorry! At least it is fast :-)
+ 	(c) Jochen Puchalla 2003-2015  <mail@puchalla-online.de>
+ */
+ 
+ #include "cutmp3.h"
++
++#include <errno.h>
++#include <limits.h>
+ 
+ /* general buffersize */
+ #define BUFFER 32000
+ #define FN_LEN 8191
+ #define FS_BLOCK_SIZE 4096
+ 
+ /* 10 MB for VBR scanning */
+ #define SCANAREA 10485759
+ 
+ #ifdef DEBUG
+@@ -75,31 +78,52 @@
+ 	char album[255]="";
+ 	char year[255]="";
+ 	char track[255]="";
+ 	char comment[255]="";
+ 	/* title is used to determine whether we name the file "result000x.mp3"
+ 	or "artist - title.mp3", so leave it empty here! */
+ 	char title[255]="";
+ 
+ 	unsigned char ttable[BUFFER];
+ 	FILE *tblfile;
+-	char tblname[17] = "/tmp/tableXXXXXX";
++	char tblname[PATH_MAX] = "";
+ 
+ 	FILE *logfile;
+-	char logname[21] = "/tmp/mpg123logXXXXXX";
++	char logname[PATH_MAX] = "";
+ 	int fdlog=-1;
++
++static int make_temp_template(char *buffer, size_t size, const char *stem)
++{
++	const char *tmpdir = getenv("TMPDIR");
++	int written;
++
++	if (tmpdir == NULL || tmpdir[0] == '\0') tmpdir = "/tmp";
++	written = snprintf(buffer, size, "%s%s%sXXXXXX", tmpdir,
++			tmpdir[strlen(tmpdir)-1] == '/' ? "" : "/", stem);
++	if (written < 0 || (size_t)written >= size)
++	{
++		errno = ENAMETOOLONG;
++		return -1;
++	}
++	return 0;
++}
+ 
+ void exitseq(int foobar)
+ {
+ 	free(framepos1000);
+ 	free(id3v2);
+-	remove(logname);
++	if (logfile != NULL)
++	{
++		fclose(logfile);
++		logfile = NULL;
++	}
++	if (logname[0] != '\0') remove(logname);
+ 
+ 	exit(foobar);  /* now really exit */
+ 
+ 	(void)ht;
+ 	(void)htc;
+ }
+ 
+ void usage(char *text)
+ {
+ 	printf("\ncutmp3  version %s  \n", VERSION);
+@@ -778,39 +802,35 @@
+ /* This function shall return the volume (energy level)
+    of one frame. Taken from mpglib and mpcut. */
+ unsigned int volume(long playpos)
+ {
+ 	unsigned char a,b,c,d;
+ 	unsigned int level, framenum=4;
+ 	unsigned int i, frsize;
+ 	long pos;
+ 
+ 	FILE *volfile;
+-	static char volname[] = "/dev/shm/volXXXXXX";
++	char volname[PATH_MAX];
+ 	int fd=-1;
+ 
+ 	DBGPRINT(1, "\nvolume(): before prevframe(playpos)");
+ 
+ 	for (i=0; i<framenum ; i++) playpos=prevframe(playpos);  /* step back framenum frames */
+ 
+ 	DBGPRINT(1, "\nvolume(): after %ux prevframe %ld \n",framenum,playpos);
+ 
+-	if ((fd = mkstemp(volname)) == -1 || (volfile = fdopen(fd, "w+b")) == NULL)
+-	{
+-		DBGPRINT(1, "\nvolume(): /dev/shm not writable\n");
+-		strcpy(volname, "/tmp/volXXXXXX");
+-		if ((fd = mkstemp(volname)) == -1 || (volfile = fdopen(fd, "w+b")) == NULL)
+-		{
+-			/* open temp.vol.file read-writable zero length */
+-			perror("\ncutmp3: failed writing temporary volume mp3 in /tmp");
+-			exitseq(6);
+-		}
++	if (make_temp_template(volname, sizeof(volname), "vol") == -1 ||
++			(fd = mkstemp(volname)) == -1 || (volfile = fdopen(fd, "w+b")) == NULL)
++	{
++		/* open temp.vol.file read-writable zero length */
++		perror("\ncutmp3: failed writing temporary volume mp3");
++		exitseq(6);
+ 	}
+ 
+ 	frsize=1;
+ 	pos=playpos-1;
+ 
+ 	/* Copy 2*framenum valid frames to volfile */
+ 	for (framecount=0; framecount < 2*framenum ; framecount++)
+ 	{
+ 		while (frsize==1)
+ 		{
+@@ -1800,22 +1820,22 @@
+ 
+ 
+ /* This function plays sound at the current position */
+ void playsel(long playpos)
+ {
+ 	long playsize;
+ 	int skipframes=(real)howlong*(real)1000/fix_frametime; /* real time */
+ 	long pos;
+ 	FILE *outfile;
+ 	char command[1023];
+-	char playname[16] = "/tmp/playXXXXXX";
+-	static char prev_playname[16] = "";
++	char playname[PATH_MAX];
++	static char prev_playname[PATH_MAX] = "";
+ 	int fd=-1;
+ 	int i=0;
+ 	long tempfrnr=pos2frame(playpos);
+ 	unsigned int mins,secs;
+ 
+ 	if (prev_playname[0] != 0) {
+ 		// printf("remove file %s\n", prev_playname); /* debug */
+ 		remove(prev_playname); /* delete tempfile */
+ 	}
+ 
+@@ -1826,25 +1846,27 @@
+ 
+ 	if (!mute)
+ 	{
+ 		if (playsize < 0) playsize=0;
+ 		if (playpos < audiobegin)
+ 		{
+ // 			playsize=playsize-(audiobegin-playpos);
+ 			playpos=audiobegin;
+ 		}
+ 		if (playpos > filesize) playpos=filesize;
+-		if ((fd = mkstemp(playname)) == -1 || (NULL== (outfile = fdopen(fd, "w+b"))) )
+-		{
+-			perror("\ncutmp3: failed writing temporary mp3 in /tmp"); exitseq(9);
++		if (make_temp_template(playname, sizeof(playname), "play") == -1 ||
++				(fd = mkstemp(playname)) == -1 || (NULL== (outfile = fdopen(fd, "w+b"))) )
++		{
++			perror("\ncutmp3: failed writing temporary mp3"); exitseq(9);
+ 		} else {
+-			strncpy(prev_playname, playname, 16);
++			strncpy(prev_playname, playname, sizeof(prev_playname)-1);
++			prev_playname[sizeof(prev_playname)-1] = '\0';
+ 			fseek(mp3file, playpos, SEEK_SET);
+ 			copyfile(outfile, mp3file, playsize);
+ 			fclose(outfile);
+ 		}
+ 	}
+ 
+ 	pos=playpos;
+ 
+ 	if (!mute)
+ 	{
+@@ -2580,23 +2602,24 @@
+ 	startsecs=startmins=endsecs=endmins=0;
+ 	return;
+ }
+ 
+ 
+ /* This function writes a timetable when -a and -b is used */
+ void writetable()
+ {
+ 	int fd=-1;
+ 
+-	if ((fd = mkstemp(tblname)) == -1 || (NULL== (tblfile = fdopen(fd, "w+b"))) )
+-	{
+-		perror("\ncutmp3: failed writing temporary timetable in /tmp");exitseq(11);
++	if (make_temp_template(tblname, sizeof(tblname), "table") == -1 ||
++			(fd = mkstemp(tblname)) == -1 || (NULL== (tblfile = fdopen(fd, "w+b"))) )
++	{
++		perror("\ncutmp3: failed writing temporary timetable");exitseq(11);
+ 	}
+ 	fprintf(tblfile, "%s %s\n", userin, userout);
+ 	fclose(tblfile);
+ 	a_b_used=1;
+ 	return;
+ }
+ 
+ 
+ /* This function copies selections when using a timetable */
+ void cutfromtable(char *tablename, char *prefix)
+@@ -2810,23 +2833,24 @@
+ 	char *prefix = malloc(FN_LEN);
+ 	void (*play)(long playpos) = playsel;
+ 	prefix[0] = 0;
+ 
+ /* ------------------------------------------------------------------------- */
+ /*                   */
+ /* parse commandline */
+ /*                   */
+ /* ------------------------------------------------------------------------- */
+ 
+-	if ((fdlog = mkstemp(logname)) == -1 || (NULL== (logfile = fdopen(fdlog, "w+b"))) )
+-	{
+-		perror("\ncutmp3: failed writing temporary logfile in /tmp");exitseq(11);
++	if (make_temp_template(logname, sizeof(logname), "mpg123log") == -1 ||
++			(fdlog = mkstemp(logname)) == -1 || (NULL== (logfile = fdopen(fdlog, "w+b"))) )
++	{
++		perror("\ncutmp3: failed writing temporary logfile");exitseq(11);
+ 	}
+ 
+ 	readconf();       /* read configuration file first! */
+ 
+ 	if (argc<2) {usage("ERROR: missing filename");exitseq(1);}
+ 	else
+ 	{
+ 		while ((char1 = getopt(argc, argv, "cCkheqFf:a:b:i:o:O:I:d:D:s:")) != -1)
+ 		{
+ 			switch (char1)
+@@ -2858,21 +2882,21 @@
+ 					break;
+ 				case 'f':
+ 					if (NULL == (timefile = fopen(optarg,"rb") ) ) {
+ 						perror(optarg);
+ 						exitseq(3);
+ 					}
+ 					else tablename = optarg;
+ 					break;
+ 				case 'h':
+ 					usage("");
+-					exit(0);
++					exitseq(0);
+ 				case 'q':
+ 					mute=1;
+ 					break;
+ 				case 'i':
+ //					if (optarg==0) usage("Error: option requires an argument");
+ 					if (NULL == (mp3file = fopen(optarg,"rb") ) )
+ 					{
+ 						perror(optarg);
+ 						exitseq(2);
+ 					}

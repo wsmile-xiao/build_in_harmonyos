@@ -1,0 +1,49 @@
+# ═══ Draft knowledge entry — Qt Wayland 上游测试在 OHOS 深路径 conan 缓存目录的三重环境陷阱 ═══
+# Timestamp: 2026-09-17
+# Software: qtwayland 6.11.1（所有需要在 conan build 目录内运行 Wayland/Unix socket 测试的包）
+# Gate: conan create build() ctest / QtTest 执行
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-qtwayland-6.11.1-qt-tests-deep-path-socket-tmpdir-qpa
+title: Qt Wayland 上游测试（QTEST_MAIN/QCOMPOSITOR_TEST_MAIN）在 OHOS 深路径 conan 缓存目录三重失败：108 字节 socket 路径超限 + /tmp 只读 shm buffer + QPA 平台双分离，修复后 52/52 全量用例真跑通过
+trigger_tool: ctest / QtTest / QGuiApplication
+phase: testing
+error_signature: socket path ".*" plus null terminator exceeds 108 bytes|open /tmp/wayland-shm-XXXXXX failed: Read-only file system|Failed to create wl_display \(Connection refused\)|qt\.qpa\.plugin: Could not load the Qt platform plugin "wayland"
+severity: 3
+category: platform|testing|qt6
+match_keywords: exceeds 108 bytes, wayland-shm, XDG_RUNTIME_DIR, sun_path, QT_QPA_PLATFORM,
+  QCOMPOSITOR_TEST_MAIN, QTEST_MAIN, offscreen, qt_temp, XKB_CONFIG_ROOT, wayland_server,
+  qtwaylandscanner, WaylandScannerTools
+keywords: exceeds 108 bytes, wayland-shm, XDG_RUNTIME_DIR, sun_path, QT_QPA_PLATFORM,
+  QCOMPOSITOR_TEST_MAIN, QTEST_MAIN, offscreen, qt_temp, XKB_CONFIG_ROOT, wayland_server,
+  qtwaylandscanner, WaylandScannerTools, libxkbcommon, mkstemp, TMPDIR, EROFS
+approach: 四件套组合修复：①XDG_RUNTIME_DIR 与 TMPDIR 都指向短路径（/data/storage/el2/base/temp
+  级别，≤40 字符）——Unix domain socket 的 sun_path 限 108 字节，conan 缓存 p/b/<hash>/b/build/Release
+  深路径必超；且 QtTest wrapper 会用 TMPDIR 生成 qt_temp-XXXXXX 目录放 per-test socket。②上游测试
+  源码里硬编码 /tmp/wayland-shm-XXXXXX 的 mkstemp（OHOS /tmp 只读 EROFS）打补丁改读 TMPDIR。
+  ③Qt Wayland 测试双 QPA 平台分跑：client 侧测试（QCOMPOSITOR_TEST_MAIN 强制 QT_QPA_PLATFORM=
+  wayland，连进程内 mock compositor，QT_PLUGIN_PATH 须含本包构建的 ivi-shell 插件）与 compositor
+  侧测试（QTEST_MAIN + QGuiApplication 用 offscreen，自身创建 wl_display 服务端）各用一次 ctest
+  调用。④XKB_CONFIG_ROOT 指向 qtbase 包 share/X11/xkb（键盘用例 keymap 数据）+ 新增
+  libxkbcommon 直接依赖（tst_compositor 键盘用例的 XKB::XKB，经修正 prefix 的 xkbcommon.pc
+  解析）。
+root_cause: Qt 上游测试在 OHOS 独立构建环境的三重平台冲突：①POSIX Unix domain socket 的
+  sun_path 上限 108 字节，conan 缓存构建目录（~/.conan2/p/b/<hash>/b/build/Release）路径深度
+  必然超限——libwayland 报 "socket path ... plus null terminator exceeds 108 bytes"，QFATAL
+  abort；且 QtTest 的 ctest wrapper 自行用 TMPDIR 生成 qt_temp 目录存放 per-test
+  XDG_RUNTIME_DIR，TMPDIR 指向深路径时同样超限。②OHOS 的 /tmp 挂载只读文件系统（EROFS），
+  上游 mock client 的 ShmBuffer 用硬编码 /tmp/wayland-shm-XXXXXX 调 mkstemp，所有 buffer 型
+  用例（inputRegion/mapSurface/frameCallback 等十余个）失败。③Qt Wayland 的两类测试 main
+  宏对 QPA 平台要求相反：client 测试必须 wayland 平台（连 mock compositor），compositor 测试
+  的 QGuiApplication 必须离屏（无外部显示可连）。另有关键可行性发现：qtbase/6.11.1.2 conan
+  包自带 libexec/qtwaylandscanner 与 Qt6WaylandScannerTools CMake 包——wayland_server
+  特性在 standalone 构建即可启用（此前误判为仅 qtbase 超级构建提供）。
+rec_approach: short-tmpdir-socket + tmpdir-shm-patch + dual-qpa-ctest + xkb-config-root
+doc: 无（待 promote 后生成）
+
+verification: qtwayland/6.11.1 conan create 全绿（本地 ctest 2/2 Passed：tst_client_
+  iviapplication 5/5 + tst_compositor 53/53，58 执行项 100%）+ CI #49189 通过（2026-09-17）；
+  修复前同环境 100% 复现三重失败。
+related: E002（/tmp 只读设 TMPDIR——通用环境变量层，本条覆盖 socket 路径上限/QtTest wrapper
+  行为/QPA 分离三个 E002 未覆盖的维度）；E225（conan test 临时目录管理）；E265（/tmp 只读
+  下的上游测试替代执行）。

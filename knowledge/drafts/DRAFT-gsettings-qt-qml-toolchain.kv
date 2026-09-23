@@ -1,0 +1,95 @@
+# ═══ Draft knowledge entry — gsettings-qt 1.1.1（Qt6/QML + conan 依赖包）═══
+# Timestamp: 2026-09-15
+# Software: gsettings-qt 1.1.1（CMake + Qt6 + cmake-extras QmlPlugins）
+# Gate: 本地 conan create（W3 同参数）失败链 → 修复后通过
+# Status: DRAFT — 待人工/AI 审核后 promote 为 E-entry
+#
+# To promote:
+#   1. 复核下方 error_signature 与 rec_approach
+#   2. 重命名为 E0XX.kv 移入 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 增加一行
+#   4. 编写 knowledge/doc/E0XX.md（本目录同名 .md 可直接复用）
+
+id:                     DRAFT-gsettings-qt-qml-toolchain
+trigger_tool:           configure|cmake|make|test|conan
+phase:                  configuration|compilation|testing
+error_signature:        Could not find QML_PLUGIN_DUMP using the following names: qmlplugindump|
+                         Could not locate qmlplugindump\.|
+                         Type TestCase unavailable|
+                         module "QtQuick\.Window" is not installed|
+                         does not contain any test files matching 'tst_\*\.qml'|
+                         find_package\(QmlPlugins\) .* not found
+
+severity:               2
+category:               cmake, qt, qml, build-system, conan, testing
+match_keywords:         qmlplugindump, QML_PLUGIN_DUMP, QmlPlugins, add_qmlplugin, cmake-extras,
+                         QML2_IMPORT_PATH, QML_IMPORT_PATH, QuickTest, TestCase.qml,
+                         find_program REQUIRED, set_tests_properties, tst_*.qml
+title:                  Qt6/QML 工程依赖 conan 包时，"构建期工具 + QML 模块 + 测试工作目录"三类发现失败的统一处理
+
+root_cause: >
+  使用 Qt6 + cmake-extras(QmlPlugins) 的 QML 工程在 conan 环境下有三个相互独立的发现点，
+  都由"路径不在默认搜索位置"引起，而不是依赖缺失：
+  (1) configure 阶段 find_program(qmlplugindump REQUIRED)（以及 cmake-extras 的
+      QmlPluginsConfig.cmake 内部同名查找）只搜索 PATH 与 /usr/lib/qt<ver>/bin；
+      qmlplugindump 实际位于 qtdeclarative 依赖包的 bin/，宿主包（host requires）的
+      bin 目录默认不会进 PATH → configure 直接失败；
+      qmlplugindump 为 OHOS arm64 本机可执行文件，还额外需要 libQt6Qml/libQt6Core 可解析
+      （LD_LIBRARY_PATH）。
+  (2) 上游 qmltest 的 set_tests_properties(ENVIRONMENT "QML2_IMPORT_PATH=<build dir>") 会
+      **覆盖** 进程环境里的同名变量，而 QtTest/TestCase.qml 依赖 QtQuick.Window 等模块，
+      这些模块位于 qtdeclarative 包的 qml/ 目录 → QML 引擎报
+      "Type TestCase unavailable / module QtQuick.Window is not installed"。
+  (3) QuickTest 驱动按"工作目录"查找 tst_*.qml：ctest 在 add_test 所在目录运行（可通过），
+      但手工从任意目录运行同一可执行文件会报 "does not contain any test files matching"。
+  另有 cmake-extras 若声明为 host requires，会触发 conan 的
+  "direct dependency not used by any (cpp_info/components).requires" 报错。
+
+affected_scope:         Qt6 + QML 插件/QML 测试工程（gsettings-qt、lomiri/ayatana 系、
+                        任何 add_qmlplugin + qmltest 的上游工程）；C++ 非 QML 工程不受影响。
+verification_cmd:       conan create <recipe> -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=... \
+                          --build=missing --build="<pkg>/*"   # 观察 ctest 与 configure 输出
+
+rec_priority:           1
+rec_approach:           env-injection
+rec_description:        在配方 generate() 内注入 PATH/LD_LIBRARY_PATH/QML_IMPORT_PATH（不动上游文件）
+rec_command:            env.prepend_path("PATH", <qtdeclarative>/bin);
+                         env.prepend_path("LD_LIBRARY_PATH", <qtdeclarative>/lib);
+                         env.prepend_path("QML_IMPORT_PATH", <qtdeclarative>/qml);
+                         env.vars(self).save_script("conanbuild_<pkg>_env")
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      source-patch
+fallback_description:   给上游 tests/CMakeLists.txt 打补丁，把 QML 导入路径/工具路径显式写入
+                        （仅当工程不使用依赖包内工具、且必须改上游逻辑时；优先级低于环境注入）
+fallback_command:       python3 scripts/ohc-run.py refresh-patch --auto <pkg> <ver>
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       用 host requires 声明 cmake-extras|QmlPlugins 打补丁仅为改 QML2_IMPORT_PATH
+forbid_1_reason:        cmake-extras 是构建期 CMake 模块数据包，host requires 会污染消费者依赖链
+                        并触发 conan cpp_info.requires 校验报错；QML2_IMPORT_PATH 被上游测试属性
+                        覆盖，补丁属无效路径（应改用 QML_IMPORT_PATH）
+forbid_1_consequence:   conan create 在 package_info() 阶段失败，或测试仍然报 TestCase unavailable
+
+principles:             R1, R5, R26, R34
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/DRAFT-gsettings-qt-qml-toolchain.md
+last_updated:           2026-09-15
+source_event:           gsettings-qt 1.1.1 本地 conan create（第 1/2/3 次失败 → 第 4 次通过）
+
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-15

@@ -1,0 +1,178 @@
+#====================================================================
+# DRAFT-libgpg-error-musl-native-lockobj-and-thread-macros
+#   —— libgpg-error 在 musl/OHOS 上的锁 ABI 尺寸坑：
+#      锁 ABI 尺寸（lock-obj）须按目标 musl 实测尺寸生成，不可套用预置头
+# 对应人类文档: knowledge/drafts/DRAFT-libgpg-error-musl-native-lockobj-and-thread-macros.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9612 libgpg-error 1.61 适配（gnupg 链基座）
+# 与既有条目的关系（查重结论，2026-09-12 复核）:
+#   **E321-draft-F987**（已在 main）—— 主题为「gnulib weak-symbol 探测在 musl/OHOS
+#     引用不存在的 pthread_cancel」，已完整覆盖 `USE_POSIX_THREADS_WEAK` /
+#     `threadlib.m4` / `gl_cv_have_weak` / `pthread_cancel` 这条线索（含修法：
+#     patch threadlib.m4 强制 gl_cv_have_weak=no）。
+#     → 本条目**不再重复该部分**，仅在其 rec_description 中以一句指路。
+#   E404 / musl-glibc-developer-impact.md —— 也提 aarch64-unknown-linux-musl，
+#     但**均不含 lock-obj / --build==--host 相关逻辑**（实测命中各 0），是不同主题。
+#   `umask 077`(49 命中) / `TMPDIR 指向可写`(35) / `dummy.c`(12) /
+#     `unable to guess system type`(18) —— 这些**已被既有条目覆盖**，本条仅作为
+#     背景一句带过，不重复其方案细节。
+#====================================================================
+
+id:                     DRAFT-libgpg-error-musl-native-lockobj-and-thread-macros
+trigger_tool:           gcc|clang|configure|make|conan
+phase:                  build
+error_signature:        pthread_mutex_t.*size.*mismatch|
+                         GPGRT_LOCK_INITIALIZER|
+                         lock-obj-pub.*not found|
+                         _priv\[(4[0-9]|[0-9]{3})\].*(mismatch|differ)
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               musl, ohos, threads, abi, autotools, gpg-error
+match_keywords:         lock-obj, lock_obj, gen-posix-lock-obj, gen-lock-obj.sh,
+                         _priv, GPGRT_LOCK_T, GPGRT_LOCK_INITIALIZER, syscfg,
+                         force_use_syscfg, cross_compiling, --build, --host,
+                         pthread_mutex_t size, musl pthread, lock ABI,
+                         libgpg-error, gnupg, libgcrypt
+title:                  libgpg-error 在 musl 上：锁 ABI 尺寸须由 native 探针生成——cross 会套用 glibc 预置头，致尺寸不匹配（运行期才暴露）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             libgpg-error 把 pthread 锁的**尺寸**固化成平台相关的头
+                         （`src/lock-obj-pub.*.h`，定义 `GPGRT_LOCK_T` / `_priv[N]`）。
+                         libgcrypt/gnupg 依赖它，故尺寸必须与**目标 libc 的真实值**一致。
+                         两条各自独立、都能单独致错的路径：
+
+                         **① 锁 ABI 尺寸（lock-obj）—— 选错来源即尺寸不匹配**
+                         configure.ac 的判定（实测阅读 1.61 源码）：
+                           force_use_syscfg=no                       # 默认
+                           · w32 系统              → force_use_syscfg=yes
+                           · threads=no            → 直接生成
+                           · **cross_compiling=yes** 时再看 host 与 OBJDUMP：
+                               host 匹配 gnu/linux-gnu/**linux-musl**/emscripten
+                               且 find 到 OBJDUMP → **也生成**（用 host objdump 读尺寸）
+                               否则（如无 objdump、或 host 不匹配）→ **force_use_syscfg=yes**
+                           force_use_syscfg=yes 时 src/Makefile.am 用 `mkheader_opts = --cross`
+                           → 套用 `src/syscfg/` 里的**预置**头。
+                         致命点：`src/syscfg/` 里 **aarch64+musl 的预置头不存在**
+                         （实测该目录下 musl 仅有 `lock-obj-pub.x86_64-unknown-linux-musl.h`；
+                          aarch64 只有 gnu/apple/android 等）。以 `aarch64-unknown-linux-gnu.h`
+                          （glibc，`_priv[48]`）顶替 musl（实测 native 生成 `_priv[40]`）
+                         → **尺寸不一致**，下游 gnupg/libgcrypt 运行期会因锁尺寸不匹配
+                         出现难以排查的故障（非编译期报错，而是运行期行为异常）。
+                         → 故须让构建走 **native 路径**（`--build == --host`），由
+                         `gen-posix-lock-obj` 探针按**本机真实 musl** 生成。
+                         实测证据（同一 aarch64 目标）：
+                           native 生成（musl）: _priv[40]，622 字节
+                           syscfg 预置（glibc）: _priv[48]，676 字节
+
+                         **② 同批出现的 gnulib 线程宏误判（已由 E321 覆盖，此处不重复）**
+                         libgpg-error 的 `gl/` 亦内嵌 gnulib；musl 下会把 pthread 误判为
+                         「需外部 pthread」而定义 `USE_POSIX_THREADS_WEAK`，致
+                         `pthread_cancel` 未声明编译失败。
+                         → 该线索与修法**已由 `E321-draft-F987` 完整覆盖**
+                         （patch `gl/m4/threadlib.m4` 强制 `gl_cv_have_weak=no`），
+                         本条目不再重复，仅作背景说明。
+
+affected_scope:         OHOS（musl）上所有依赖 libgpg-error 锁 ABI 的库：
+                         libgcrypt / gnupg / libassuan / libksba / pinentry 等。
+                         在 **cross 构建且无 objdump**（或 host triplet 不匹配）时必然发生。
+                         注：同类「锁/结构 ABI 尺寸随 libc 变化」的问题不限于 libgpg-error。
+verification_cmd:       # ① 确认最终用的是 native 还是 syscfg 预置头
+                         ls <build>/src/lock-obj-pub.native.h     # 存在=走 native 生成
+                         grep -n "_priv\[" <build>/src/lock-obj-pub.native.h
+                         grep -n "_priv\[" <src>/src/syscfg/lock-obj-pub.aarch64-unknown-linux-gnu.h
+                         #   → native 40 vs glibc 预置 48（尺寸不同 = 必须走 native）
+                         # ② 确认交叉判定路径
+                         grep -n "force_use_syscfg\|cross_compiling" <src>/configure.ac
+                         # ③ 确认 syscfg 是否覆盖目标
+                         ls <src>/src/syscfg/ | grep -E "$(uname -m).*musl"   # aarch64+musl 应为空
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           native-musl-build-for-lock-obj-abi-size
+rec_description:        **让构建走 native 路径，使 lock-obj 按真实 musl 尺寸生成**：
+                         显式传 `--build=<target-triplet> --host=<同一triplet>`
+                         （如 `--build=aarch64-unknown-linux-musl
+                          --host=aarch64-unknown-linux-musl`）。`build == host`
+                         时 autoconf 不置 cross_compiling → 跳过 force_use_syscfg
+                         → 运行 `gen-posix-lock-obj` 探针生成 `lock-obj-pub.native.h`。
+                         副作用（正面）：该显式参数**同时**解决 config.guess 在
+                         HMDFS 上写探针失败的问题（既有条目已覆盖其细节，此处不展开）。
+                         注意：**不要**只靠"有 objdump 就能 cross 生成"这条路径 ——
+                         它依赖 host triplet 匹配 + 工具可用，条件更多、更脆。
+                         收尾自检：确认 `lock-obj-pub.native.h` **存在**且 `_priv`
+                         尺寸与目标 libc 相符。
+                         记录口径：把「为何必须 build==host」写进配方注释——否则后续
+                         维护者很容易"顺手"改回 cross 而引入**运行期**才暴露的锁尺寸问题。
+
+                         ⚠️ 本条目**只讲锁尺寸这一条线索**。同批适配中还会遇到
+                         gnulib 线程宏误判（`USE_POSIX_THREADS_WEAK` 致
+                         `pthread_cancel` 未声明）—— 该问题**已由 `E321-draft-F987`
+                         完整覆盖**（patch `gl/m4/threadlib.m4` 强制
+                         `gl_cv_have_weak=no`），此处不重复。
+rec_command:            # ① 配方侧（conanfile generate()）
+                         #   tc.configure_args += ["--build=aarch64-unknown-linux-musl",
+                         #                         "--host=aarch64-unknown-linux-musl"]
+                         # ② 验证
+                         #   test -f <build>/src/lock-obj-pub.native.h && grep -n '_priv\[' <build>/src/lock-obj-pub.native.h
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      provide-target-syscfg-header
+fallback_description:   若确实无法 native 构建（必须 cross），且目标 libc 在 `src/syscfg/`
+                         无预置头，则自行提供**与该 libc 真实尺寸一致**的
+                         `lock-obj-pub.<triplet>.h`（可由同架构同 libc 设备用
+                         `gen-posix-lock-obj` 生成一次后固化），并确保 configure 选到它。
+                         风险：尺寸一旦抄错就会变成**运行期**故障，故必须标注来源与
+                         生成方式、并在升级 libc 时复核。
+fallback_command:       # 在目标设备上生成一次，固化为 syscfg 头
+                         host=<triplet> src/gen-lock-obj.sh > src/syscfg/lock-obj-pub.<triplet>.h
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       lock-obj.*随便用.*预置|套用.*glibc.*头.*(即可|没问题)|尺寸.*应该一样
+forbid_1_reason:        锁尺寸随 libc 实现变化（实测 musl _priv[40] vs glibc _priv[48]），
+                        且 syscfg 里可能根本没有目标组合的预置头（aarch64+musl 实测 0 个）
+forbid_1_consequence:   编译可能通过，但下游 gnupg/libgcrypt **运行期**锁行为异常，
+                        极难排查（错在 ABI 尺寸而非逻辑）
+forbid_2_pattern:       「syscfg 里没有预置头」→ 直接拿任意 glibc 头改名顶上|cross.*(无|缺).*objdump.*也.*能.*生成
+forbid_2_reason:        预置头的 `_priv[N]` 是按**该 libc 的真实尺寸**写死的；glibc 与 musl
+                         尺寸不同（实测 48 vs 40），改名不改尺寸
+forbid_2_consequence:   编译可能通过，但下游运行期锁行为异常，且因"看起来已提供头文件"
+                         而更难怀疑到尺寸问题
+forbid_3_pattern:       顺手.*改回 cross|--build.*(移除|删掉).*省事
+forbid_3_reason:        build != host 会重新触发 force_use_syscfg → 锁尺寸来源又变回预置头
+forbid_3_consequence:   问题从"编译期可见"退化为"运行期不可见"，且偏离已验证配置
+
+principles:
+similar_to:             E321, E404, musl-glibc-developer-impact.md
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-12
+source_event:           libgpg-error/1.61（PR #9612，gnupg 链基座）适配实测：
+                          · configure.ac 的 force_use_syscfg 判定（w32 / threads=no /
+                            cross_compiling 且有 OBJDUMP 才生成，否则套用 syscfg）
+                          · syscfg 下 **aarch64+musl 预置头不存在**（musl 仅 x86_64）
+                          · native 生成 _priv[40]（622B） vs glibc 预置 _priv[48]（676B）
+                          · 修法：--build==--host（native）→ conan create EXIT=0，
+                            test_package dlopen + dlsym("gpg_strerror") PASS
+                          · 同批出现的 gnulib 线程宏误判（USE_POSIX_THREADS_WEAK 致
+                            pthread_cancel 未声明）**已由 E321-draft-F987 完整覆盖**，
+                            本条已删除该章节、避免重复（2026-09-12 复核更正）。
+                          注：config.guess 在 HMDFS 写探针失败 / TMPDIR / umask 077
+                          属既有条目已覆盖项，本条不重复。
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9612
+source_commit:          15bc0a5ae
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-12
+
+draft:                  true

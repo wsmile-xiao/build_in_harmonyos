@@ -1,0 +1,146 @@
+#====================================================================
+# DRAFT-10251-libnfc-tools-1.8.0-tools-subpackage-identification
+#   `<pkg>-tools` 类第三方库的「非独立上游」识别与适配口径
+# 来源: PR #10251 feat(libnfc-tools): 1.8.0 适配 HarmonyOS PC
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-10251-libnfc-tools-1.8.0-tools-subpackage-identification
+trigger_tool:           任务分派|apt|rpm|tar|conan
+phase:                  planning|dependency-resolution
+error_signature:        任务名.*-tools|任务名.*-cli|任务名.*-utils|
+                         找不到上游仓库|
+                         独立 tarball 不存在|
+                         depends on missing 主库
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               planning, packaging, subpackage, dependency-resolution
+match_keywords:         -tools, -cli, -utils, 拆分包, 非独立上游, 子包, 主库,
+                        %package cli, Source0, 同一 tarball, utils/, examples/,
+                        自含型, 依赖主包型, provider 配方, R36, R38, commands.json
+title:                  任务名为 `<pkg>-tools` 类时先做「非独立上游」识别（发行版拆分包口径），再按主库是否已发布选「依赖主包型 / 自含型」路线
+prescan_pattern:        -tools$|-cli$|-utils$
+prescan_globs:          archives/*/<pkg>-tools/**, archives/*/*-cli/**
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:            任务名形如 <pkg>-tools / <pkg>3-cli / <pkg>-utils 的三方库，
+                        在 Debian/RHEL/Alpine/SUSE 生态里多为**主库源包拆出的二进制
+                        子包**，不是独立上游项目：没有独立仓库/release，源码包与主库
+                        是同一份 tarball（如 libnfc-tools = libnfc-1.8.0 的
+                        utils/+examples/；libnl3-cli = libnl3 的 --enable-cli；
+                        RHEL 侧 %package cli + Source0 同为 libnl3_11_0 tarball）。
+                        若按普通独立库适配会答错三问：上游是谁 / 源码从哪拿 /
+                        要不要 requires 主库——导致整条路线跑偏（例如错认为需要
+                        一个并不存在的 <pkg>-tools-<ver>.tar.gz）。
+                        识别口径：① 上游有无独立仓库/release；② distro 侧是否
+                        <主库> 与 <主库>-tools 同源同版本（apt-cache showsrc /
+                        rpm --specfile 的 Source0 + %package）；③ 上游 tarball
+                        顶层结构与 utils//examples/ 内容。
+
+affected_scope:         所有任务名形如 <pkg>-tools / <pkg>3-cli / <pkg>-utils 的
+                        第三方库适配。仓内实证同类：libnfc-tools（utils/+examples）、
+                        libmspub-tools（主库 tools/）、libmysofa-tools（主库
+                        BUILD_TESTS 块内目标）、babl-tools、opus-tools、
+                        mupdf-tools；判定难点案例：libnl3-cli（主库已适配但版本
+                        停在 3.7.0，不属"主库未适配"的自含型同构情形）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           triage-subpackage-then-pick-route-by-provider-availability
+rec_description:        【第一步 识别】三步验证非独立上游：
+                        ① GitHub API 探测 <主库>-tools 仓库/releases 是否存在
+                          （或看 distro spec 的 Source0）；
+                        ② Debian `apt-cache showsrc <主库>` / RHEL
+                          `rpm -q --specfile` 看是否有 `%package tools|cli` 且
+                          Source0 与主库同 tarball；
+                        ③ 下载主库 tarball，`tar -tzf` 看顶层只有 <主库>-<ver>/，
+                          再 `ls <主库>-<ver>/utils <主库>-<ver>/examples`。
+
+                        【第二步 选路线（判据双向，不是照搬先例）】
+                        · 依赖主包型 ⟸ 主库**该版本**已在制品仓 →
+                          `self.requires("<主库>/<版本>")`，package() 只拷 bin/
+                          等工具产物（先例：babl-tools←babl/0.1.126、
+                          opus-tools←opus/1.5.2.1，均实测 ohpcd EXIT=0）；
+                        · 自含型 ⟸ 主库未适配或制品仓无该版本 → 自行编译，
+                          不 requires 主库（先例：libmysofa-tools、libmspub-tools、
+                          mupdf-tools）。
+                        ⚠️ 只能正推不能反推：自含型先例的前提是"主库至今未适配"；
+                        若主库**已有**适配只是**版本停滞**，不属同构情形 → 按 R36
+                        先适配并发布主库该版本，再写下游 provider 配方
+                        （E542 精神：独立归档库实为已发布父模块子组件时，
+                        provider 配方复用父制品，禁重新下载父源码编译）。
+                        ⚠️ 版本绑定：distro %package 常写死
+                        `Requires: %{name} = %{version}-%{release}`（强绑），但技术上
+                        子包源码可能对主库版本不敏感（tree/blob SHA 比对确认），
+                        且仓内**无**"子包版本 == 主包版本"硬规矩。
+
+                        【第三步 适配要点（通用）】5 条见 doc_file 正文：
+                        ①手写 Makefile 须显式合并 Toolchain+Deps 的 environment
+                        （E2186）；②主库内部头补 -I<src>/<内部目录>；③别假设
+                        config.h 宏被使用（先 grep HAVE_，决定是否 -DHAVE_CONFIG_H）；
+                        ④POSIX/XSI 接口缺特性宏（E033）；⑤R38 工具包双声明
+                        （软件级 commands.json type=tool + 配方 bindirs=["bin"]）。
+rec_command:            # 识别
+                        curl -sS https://api.github.com/repos/<owner>/<主库>-tools/releases | head -5
+                        tar -tzf <主库>-<ver>.tar.gz | head -5
+                        # 判据（制品仓口径，R35：禁止用 conan list/search 判断是否存在，
+                        #      搜索 API 对 binary 返回不完整；download 不存在时 EXIT=1）
+                        conan download "<主库>/<版本>" -r=ohpcd --only-recipe
+rec_auto_fix:           false
+rec_impl:               triage-then-recipe-route
+
+fallback_priority:      2
+fallback_approach:      ask-upstream-ownership-before-start
+fallback_description:   三条验证证据不全（无 distro 侧记录、无公开 spec）时，
+                        不要凭名字猜测：向任务方确认主库任务归属，或先按"依赖主包型"
+                        起草配方并标注假设，待主库版本落地再定稿。
+fallback_command:       —
+fallback_auto_fix:      false
+fallback_impl:          human-clarification
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       自含型.*因为.*先例|先例.*自含.*所以.*自含
+forbid_1_reason:         禁止用"同类先例是自含型"直接推断本包也走自含型：判据是
+                        主库该版本是否已发布（双向正推），先例前提可能是"主库
+                        至今未适配"，与本包情形未必同构（libnl3-cli 教训）
+forbid_1_consequence:   绕过 R36，产出与已发布主库并行的重复制品，制品仓形态冲突
+forbid_2_pattern:       下载.*主库.*源码.*重新编译（主库该版本已发布时）
+forbid_2_reason:         E542：独立归档库实为已发布父模块子组件时，provider 配方
+                        须复用父制品，禁止重新下载父模块源码编译（R36）
+forbid_2_consequence:   同族制品重复、版本漂移、CI 无法收敛
+forbid_3_pattern:       只写 commands.json|只写 bindirs
+forbid_3_reason:         R38 工具包须双声明：仅写软件级 commands.json 会让
+                        detect_bindirs 判为 library，与 type=tool 冲突 → PF8
+                        「库类型误加 commands.json」反面案例
+forbid_3_consequence:   PF8/L0k 类型判定不一致，CI 门禁失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E542（provider 配方复用父制品）、
+                        DRAFT-E2186-autotools-deps-missing-dep-flags（适配要点①）
+caused_by:
+conflicts_with:
+prerequisite_of:        DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard
+
+# ═══ 元数据 ═══
+verification_cmd:       tar -tzf <主库>-<版本>.tar.gz | head -3 && \
+                        conan download "<主库>/<版本>" -r=ohpcd --only-recipe
+doc_file:               knowledge/drafts/DRAFT-10251-libnfc-tools-1.8.0-tools-subpackage-identification.md
+last_updated:           2026-09-16
+source_event:           PR #10251 feat(libnfc-tools): 1.8.0 适配 HarmonyOS PC
+                        （libnfc-tools = libnfc-1.8.0 源码树 utils/+examples/ 拆分包，
+                        Alpine/SUSE 同口径；21 工具；走依赖主包型 requires libnfc/1.8.0）
+authors:                SunShine_06
+source_pr:              10251
+source_commit:          2ce1a91cd6
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-16

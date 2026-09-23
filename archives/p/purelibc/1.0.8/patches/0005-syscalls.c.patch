@@ -1,0 +1,218 @@
+--- a/syscalls.c
++++ b/syscalls.c
+@@ -39,35 +39,79 @@
+ #include <sys/wait.h>
+ #include <sys/sysinfo.h>
+ #include <sys/utsname.h>
+ #include <sys/timex.h>
+ #include <sys/sendfile.h>
+ #include <sys/xattr.h>
+ #include <sys/timeb.h>
+ #include <sys/mman.h>
+ #include <sys/epoll.h>
+ #include <sys/sysmacros.h>
++#if defined(__GLIBC__)
+ #include <bits/wordsize.h>
++#else
++/* musl (OHOS): <bits/wordsize.h> is a glibc private header; derive
++ * __WORDSIZE from the ABI instead. */
++#if defined(__LP64__) || defined(__aarch64__) || defined(__x86_64__)
++#define __WORDSIZE 64
++#else
++#define __WORDSIZE 32
++#endif
++#endif
+ #include <utime.h>
+ #include <stdarg.h>
+ #include <errno.h>
+ #include <stdio.h>
+ #include <unistd.h>
+ #include <fcntl.h>
+ #include <dlfcn.h>
+ #include <string.h>
+ #include <time.h>
+ #include <grp.h>
+ #include <limits.h>
+ #include <sched.h>
+ #include <stdlib.h>
+ #include "purelibc.h"
++#if !defined(__GLIBC__)
++/* musl (OHOS) aliases the LFS names onto the base symbols; purelibc
++ * provides real 64-bit variants, so drop the aliases. */
++#undef open64
++#undef creat64
++#undef stat64
++#undef fstat64
++#undef lstat64
++#undef pread64
++#undef pwrite64
++#undef preadv64
++#undef pwritev64
++#undef lseek64
++#undef openat64
++/* glibc's features.h defines this version test; derive it from the
++ * compiler instead. */
++#ifndef __GNUC_PREREQ
++#define __GNUC_PREREQ(maj, min) 	((__GNUC__ << 16) + __GNUC_MINOR__ >= ((maj) << 16) + (min))
++#endif
++/* glibc-internal types: musl exposes the public names only. */
++typedef off_t __off_t;
++typedef off_t __off64_t;
++typedef ssize_t __ssize_t;
++typedef int __rlimit_resource_t;
++typedef int __rusage_who_t;
++typedef int __priority_which_t;
++typedef int __itimer_which_t;
++#if defined(__LP64__) || defined(__aarch64__) || defined(__x86_64__)
++/* 64-bit ABIs pass the 64-bit offset in one register. */
++#define __LONG_LONG_PAIR(HI, LO) LO
++#else
++#define __LONG_LONG_PAIR(HI, LO) HI, LO
++#endif
++#endif
+ 
+ /* in case of pre-init call, use syscall */
+ sfun _pure_syscall = syscall;
+ sfun _pure_native_syscall;
+ 
+ #if 1
+ #if defined(__NR_mmap2)
+ static int _pageshift()
+ {
+ 	static int ps=0;
+@@ -1118,21 +1162,21 @@
+ 	 * depend  on  the memory sharing semantics of vfork() as it will, in that
+ 	 * case, be made synonymous to fork(2)." */
+ 	return fork();
+ }
+ 
+ int stime(const time_t *t){
+ 	struct timeval tivu = { *t,0};
+ 	return _pure_syscall(__NR_settimeofday,&tivu,NULL);
+ }
+ 
+-long int ptrace (enum __ptrace_request request, ...){
++long int ptrace (int request, ...){
+ 	va_list ap;
+ 	pid_t pid;
+ 	void *addr;
+ 	void *data;
+ 	long int res, ret;
+ 	va_start(ap, request);
+ 	pid=va_arg(ap, pid_t);
+ 	addr=va_arg(ap, void *);
+ 	data=va_arg(ap, void *);
+ 	va_end(ap);
+@@ -1184,26 +1228,26 @@
+ 
+ pid_t setsid(void){
+ 	return _pure_syscall(__NR_setsid);
+ }
+ 
+ int sethostname(const char *name, size_t len){
+ 	return _pure_syscall(__NR_sethostname,name,len);
+ }
+ 
+ #ifdef __NR_prlimit64
+-int prlimit(pid_t pid, enum __rlimit_resource resource, const struct rlimit *new_limit,
++int prlimit(pid_t pid, int resource, const struct rlimit *new_limit,
+ 		struct rlimit *old_limit) {
+ 	return _pure_syscall(__NR_prlimit64, pid, resource, new_limit, old_limit);
+ }
+ 
+-int setrlimit(__rlimit_resource_t resource, const struct rlimit *rlim){
++int setrlimit(int resource, const struct rlimit *rlim){
+ 	return prlimit(0,resource,rlim,NULL);
+ }
+ 
+ int getrlimit(__rlimit_resource_t resource, struct rlimit *rlim){
+ 	return prlimit(0,resource,NULL,rlim);
+ }
+ #else
+ int setrlimit(__rlimit_resource_t resource, const struct rlimit *rlim){
+ 	return _pure_syscall(__NR_setrlimit,resource,rlim);
+ }
+@@ -1651,23 +1695,30 @@
+ 		       int flags, ...)
+ {
+ 	va_list ap;
+ 	va_start (ap, flags);
+ 	void *newaddr = (flags & MREMAP_FIXED) ? va_arg (ap, void *) : NULL;
+ 	va_end (ap);
+ 	return (void *) _pure_syscall(__NR_mremap,old_address,old_size,new_size,flags,newaddr);
+ }
+ #else
+ void *mremap(void  *old_address,  size_t old_size , size_t new_size,
+-		       int flags)
+-{
+-	return (void *) _pure_syscall(__NR_mremap,old_address,old_size,new_size,flags);
++		       int flags, ...)
++{
++	unsigned long newaddr = 0;
++	if (flags & MREMAP_FIXED) {
++		va_list ap;
++		va_start(ap, flags);
++		newaddr = va_arg(ap, unsigned long);
++		va_end(ap);
++	}
++	return (void *) _pure_syscall(__NR_mremap,old_address,old_size,new_size,flags,newaddr);
+ }
+ #endif
+ 
+ int ftime(struct timeb *tp){
+ 	struct timeval tv;
+ 	struct timezone tz;
+ 	int rv=gettimeofday(&tv,&tz);
+ 	tp->time  = tv.tv_sec;
+ 	tp->millitm = tv.tv_usec/1000;
+ 	tp->timezone = timezone;
+@@ -1880,20 +1931,21 @@
+ 		return _pure_native_syscall(n,arg0,arg1,arg2,arg3,arg4,arg5);
+ 	else
+ 		return _pure_syscall(n,arg0,arg1,arg2,arg3,arg4,arg5);
+ }
+ 
+ sfun _pure_start(sfun pure_syscall, int flags)
+ {
+ 	int fdtmp;
+ 	if (__builtin_expect(_pure_native_syscall == syscall,0))
+ 		init();
++#if defined(__GLIBC__)
+ 	if (flags & PUREFLAG_STDIN) {
+ 		fdtmp=dup(fileno(stdin));
+ 		dup2(fdtmp,STDIN_FILENO);
+ 		stdin=fdopen(STDIN_FILENO,"r");
+ 		if (isatty(STDIN_FILENO))
+ 			setlinebuf(stdin);
+ 		close(fdtmp);
+ 	}
+ 
+ 	if (flags & PUREFLAG_STDOUT) {
+@@ -1906,20 +1958,27 @@
+ 	}
+ 
+ 	if (flags & PUREFLAG_STDERR) {
+ 		fdtmp=dup(fileno(stderr));
+ 		dup2(fdtmp,STDERR_FILENO);
+ 		stderr=fdopen(STDERR_FILENO,"a");
+ 		if (isatty(STDERR_FILENO))
+ 			setlinebuf(stderr);
+ 		close(fdtmp);
+ 	}
++#else
++	/* musl (OHOS): stdin/stdout/stderr are const-qualified pointers in
++	 * read-only memory, so the stream swap behind PUREFLAG_STD* cannot be
++	 * performed; the standard streams stay uncaptured while all other
++	 * syscall capture remains active. */
++	(void)flags;
++#endif
+ 	_pure_syscall=pure_syscall;
+ 	return _pure_native_syscall;
+ }
+ 
+ #endif
+ /* this is convenient since casting the return value of dlsym() to
+  * a function pointer erroneously procudes a warning */
+ #pragma GCC diagnostic ignored "-Wpedantic"
+ 
+ 	__attribute__ ((constructor))

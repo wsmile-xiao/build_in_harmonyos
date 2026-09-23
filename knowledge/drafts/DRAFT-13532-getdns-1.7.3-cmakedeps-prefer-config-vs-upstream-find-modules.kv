@@ -1,0 +1,69 @@
+draft: DRAFT-13532-getdns
+status: pending-editor-review
+id: DRAFT-13532
+doc_file: DRAFT-13532-getdns-1.7.3-cmakedeps-prefer-config-vs-upstream-find-modules.md
+title: 上游自带 cmake/modules/Find*.cmake 的项目（target 名 Check::Check 等）在 Conan 2 CMakeDeps 下 target not found——CMAKE_PROJECT_INCLUDE 注入禁用 PREFER_CONFIG 强制走上游 Find 模块
+category: build-system, cmake, conan, cross-compile
+match_keywords: >
+  CMAKE_FIND_PACKAGE_PREFER_CONFIG, CMakeDeps, CMakeToolchain, FindCheck,
+  FindLibev, FindLibevent2, FindLibuv, FindLibidn2, FindLibunbound,
+  Check::Check, Check::check, target name mismatch, CMAKE_PROJECT_INCLUDE,
+  cache_variables, tools.cmake.cmaketoolchain:find_package_prefer_config,
+  OPENSSL_ROOT_DIR, CHECK_DIR, LIBEV_DIR, LIBUV_DIR
+error_signature: >
+  Target "\S+" links to:\s*\n?\s*Check::Check|but the target was not found.*Check|find_package call is missing for an IMPORTED target.*Libuv::Libuv|Libev::Libev|Libevent2::Libevent_core
+root_cause: >
+  Conan 2 的 CMakeToolchain 生成的 conan_toolchain.cmake 在 find_paths
+  block 中无条件 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)（存在
+  CMakeDeps 生成文件时的固定行为）。该 set 位于 toolchain 尾部，晚于
+  一切 cache_variables 注入（-DCMAKE_FIND_PACKAGE_PREFER_CONFIG=OFF
+  进 cache 后仍被覆盖为 ON）；conf 键
+  tools.cmake.cmaketoolchain:find_package_prefer_config=False 只能写在
+  消费者 profile 的 [conf]（recipe 内 conf_info.define 不回灌自身构建）。
+  对上游自带完整 Find 模块、且模块定义的 target 名与 Conan CMakeDeps
+  config 文件不一致的项目（getdns：上游 FindCheck.cmake 定义
+  Check::Check，CMakeDeps check-config.cmake 定义 Check::check），
+  PREFER_CONFIG=ON 使 find_package(Check) 命中 Conan config → 上游
+  target 名悬空 → 配置期 Target "check_getdns" links to: Check::Check
+  but the target was not found。
+solution: |
+  # conanfile.py generate()：CMAKE_PROJECT_INCLUDE 注入（project() 之后、
+  # find_package 之前执行——恰好晚于 toolchain 的强制 ON、早于依赖查找）
+  def generate(self):
+      CMakeDeps(self).generate()
+      tc = CMakeToolchain(self)
+      inject = os.path.join(self.generators_folder,
+                            "conan-disable-prefer-config.cmake")
+      save(self, inject,
+           "set(CMAKE_FIND_PACKAGE_PREFER_CONFIG OFF)\n")
+      tc.variables["CMAKE_PROJECT_INCLUDE"] = inject
+      # openssl 走 CMake 内置 FindOpenSSL + root 提示
+      tc.variables["OPENSSL_ROOT_DIR"] = \
+          self.dependencies["openssl"].package_folder
+      tc.generate()
+
+  # build()：上游 Find 模块的 <NAME>_DIR 提示变量注入 Conan 依赖路径
+  def _find_hint_vars(self):
+      deps = {"CHECK_DIR": "check", "LIBIDN2_DIR": "libidn2",
+              "LIBEV_DIR": "libev", "LIBEVENT2_DIR": "libevent",
+              "LIBUV_DIR": "libuv"}
+      return {var: self.dependencies[d].package_folder
+              for var, d in deps.items() if d in self.dependencies}
+
+  def build(self):
+      apply_conandata_patches(self)
+      cmake = CMake(self)
+      cmake.configure(variables=self._find_hint_vars())
+      cmake.build()
+fallback: >
+  若上游 Find 模块本身有 bug（如 getdns 1.7.3 FindLibuv.cmake 的
+  LIBUV_LIBRARY vs LIBUV_LIBRARIES typo），先打 patch 修模块再启用本
+  方案；若只需补个别缺失 target，用 E473 的 cmake_build_modules 注入
+  法更轻量（E473 与本条同根因 PREFER_CONFIG=ON、不同分支：E473 适合
+  缺个别 target，本条适合上游 Find 模块完整、target 名成套失配需整体
+  切换查找模式的场景）。
+verify_builds: "#48475"
+reference_impl: >
+  getdns 1.7.3（PR #10261，archives/g/getdns/1.7.3/conanfile.py）；
+  关联正式条目 E473（同根因不同解法分支）
+last_updated: 2026-09-16

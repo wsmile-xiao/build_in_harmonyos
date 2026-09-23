@@ -442,3 +442,7 @@ archives/u/util-linux-login/
   实际 apply 后确认声明在 `include/shells.h:9-17`、定义在 `lib/shells.c:17-25`。
 - **当前状态**：本轮日志中 `libcommon*.la` 与 `nologin` 均链接成功，
   仅 login.o 编译失败；修复后预期进入 `make install` + `test_package`。
+
+## 清理记录
+
+2026-09-06 清理了误提交的 archives/u/util-linux-login/2.42.2/.ci-trigger（0 字节空文件），该文件不在 CI JC5 白名单内，会阻塞 junk_check。

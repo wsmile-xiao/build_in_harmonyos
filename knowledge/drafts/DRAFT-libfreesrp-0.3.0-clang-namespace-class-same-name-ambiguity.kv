@@ -1,0 +1,66 @@
+# ═══ Draft knowledge entry — clang: namespace 与类同名 + using-directive 限定查找歧义
+# Software: libfreesrp 0.3.0 (myriadrf)
+# Gate: conan-verify G2 (conan create, ohos-aarch64, clang 15.0.4) + test_package 7/7 + W3 L0/L1/L4/L5 + L1e
+# Status: DRAFT
+
+id: libfreesrp-0.3.0-clang-namespace-class-same-name-ambiguity
+severity: 3
+category: toolchain|clang|portability|cpp
+trigger_tool: clang|cmake
+phase: build
+
+keywords: FreeSRP, reference is ambiguous, namespace class same name, using namespace, injected-class-name, std::sample, narrowing, static_cast, cmake_symlink_library, versioned symlink, EACCES
+error_signature: reference to 'FreeSRP' is ambiguous|non-constant-expression cannot be narrowed|reference to 'sample' is ambiguous|failed to create symbolic link 'libfreesrp.so.0': Permission denied
+match_keywords: is ambiguous, using namespace, namespace, class, same name, narrowing, static_cast, cmake_symlink_library, symlink, Permission denied
+
+root_cause: |
+  (1) 上游在 `namespace FreeSRP` 内又声明 `class FreeSRP`（命名空间与类同名），
+  且 .cpp 顶部 `using namespace FreeSRP;`。using-directive 把类名注入全局作用域，
+  于是全局作用域对名字 `FreeSRP` 的查找同时命中「真命名空间」与「注入的类」，
+  clang>=14 对 qualified-id 首个分量直接报
+  `reference to 'FreeSRP' is ambiguous`（GCC 历史上放行）。文件里
+  `FreeSRP::FreeSRP::impl::xxx` 形态的类外定义全部中招。
+  (2) 第二重撞名：`using namespace std;` + `using namespace FreeSRP;` 并存时，
+  C++17 <algorithm> 的 `std::sample`（OHOS libc++ 在 -std=c++11 下仍暴露）与
+  `FreeSRP::sample` 对非限定名 `sample` 双双命中 → ambiguous。上游示例在此
+  libc++ 下从未编译通过，与本平台适配无关。
+  (3) `cmd_buf tx_buf{cmd.cmd, 1}`（enum command_id → unsigned char）属聚合
+  初始化窄化：GCC 仅告警，clang 按 -Wc++11-narrowing 报错。
+  (4) CMake 目标设了 VERSION/SOVERSION 时链接尾步 cmake_symlink_library 要建
+  libfreesrp.so.0 版本化符号链接；实测同一构建目录手工 `cmake --build` 100%
+  成功，而 conan 进程链（python→sh→make→cmake）内 3 次重试稳定 EACCES——
+  是沙箱进程上下文相关的环境问题（与 HMDFS 目录权限无关：目录内 ln -s 可用）。
+
+rec_approach: move out-of-class definitions into the namespace + drop one qualification; inject class aliases; static_cast narrowing; drop VERSION/SOVERSION for flat .so
+rec_description: |
+  (1) 最通用修法：把 .cpp 的类外定义整体包进 `namespace FreeSRP { ... }` 块并把
+  `FreeSRP::FreeSRP::X::` 降一层为 `FreeSRP::X::`（命名空间内部非限定查找先命中
+  类名即停，不再歧义），方法体不用改。可写最小复现先行验证各写法（本任务用
+  8 个变体逐一实测）。注意 fsl 老代码里 `FreeSRP::Util::X` 这类「命名空间级」
+  定义在块内要写成 `Util::X`。
+  (2) 对必须留在全局作用域的文件（含 main()）：在 using-directive 之后注入
+  `namespace FreeSRP { typedef FreeSRP FreeSRPClass; typedef sample FreeSRPSample; }`
+  （命名空间内部非限定查找无歧义），然后把 `FreeSRP::FreeSRP` → `FreeSRPClass`、
+  其余 `FreeSRP::X` → `X`（using-directive 已让成员可见）。不要用
+  `using FreeSRP::FreeSRP;`（using-declaration 会把类名带进全局，与命名空间同名
+  歧义依旧）。
+  (3) 窄化：聚合初始化处补 `static_cast<unsigned char>(...)`。
+  (4) 沙箱内 cmake 版本化符号链接 EACCES：对库交付影响极小，直接补丁去掉
+  `set_target_properties(... VERSION ... SOVERSION ...)`，交付扁平 libfreesrp.so
+  （OHOS 生态惯例；消费方 -lfreesrp 链接不受影响）。不要试图在配方里重试绕过。
+  (5) 生成补丁时用 `diff -u --label a/<path> --label b/<path>` 拼统一 diff，
+  避免依赖临时 a/b 目录树。
+
+rec_commands:
+  - "conan create archives/l/libfreesrp/0.3.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+  - "cd <build_dir> && cmake --build .   # conan 上下文内链接 EACCES 时，先手工复跑定位是环境还是代码"
+
+verification: |
+  conan create（ohos-aarch64 / clang 15.0.4）干净构建通过；test_package 消费者
+  7/7 断言 PASS（含 libusb init -99 无硬件错误路径）；W3 本地 CI 模拟
+  L0/L1/L4/L5 全 pass + L1e 破坏性反向验证通过；conan-verify G0-G4 + L2/L4/L5
+  全 PASS；libfreesrp.so 含 .codesign section（binary-sign-tool 签名生效）。
+
+related:
+  - archives/l/libfreesrp/0.3.0/patches/0001-fix-clang15-ambiguous-freeSRP-qualification.patch
+last_updated: 2026-09-18

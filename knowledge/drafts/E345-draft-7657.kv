@@ -1,0 +1,94 @@
+#====================================================================
+# E345-draft-7657 — 上游无条件 FetchContent 在离线 header-only 打包中的门控修复
+# 触发事件: earcut 3.2.3 HarmonyOS PC 适配（R01, pc2-5, 2026-09-04）
+# 主从明确: 上游 CMakeLists 无条件 FetchContent_MakeAvailable(测试 fixtures 依赖)，
+#           即使 EARCUT_BUILD_TESTS/BENCH/VIZ 全 OFF，configure 仍拉网络 -> 离线打包失败
+#====================================================================
+
+id:                     E345
+trigger_tool:           cmake|conan
+phase:                  configuration|packaging
+error_signature:        FetchContent.cmake.*failed: 1|CMake step for .* failed: 1|git version 1.6.5 or later required for --recursive|FetchContent_MakeAvailable.*GIT_VERSION_STRING=''|Performing download step.*FetchContent|_ep_add_download_command
+
+severity:               2
+category:               network, build-system, cmake, conan, testing
+match_keywords:         FetchContent, FetchContent_MakeAvailable, unconditional, configure-time download, offline CI, header-only, fixtures, picojson, GIT_VERSION_STRING, earcut, test-only bootstrap, FETCHCONTENT_SOURCE_DIR
+title:                  上游无条件 FetchContent（不挂在任何构建选项下）在离线/受限网络环境阻塞 header-only 打包；需打补丁将 fixtures 拉取门控到构建选项并本地绑定
+
+root_cause: >
+  某些上游 CMake 项目在 CMakeLists.txt 顶层无条件执行
+  FetchContent_Declare + FetchContent_MakeAvailable（拉取测试 fixtures / 依赖，如
+  earcut.js、picojson、googletest），不挂在 EARCUT_BUILD_TESTS 等构建选项的 if 块内。
+  即使配方在 generate() 中显式设置 BUILD_TESTS=OFF/BUILD_BENCH=OFF/BUILD_VIZ=OFF，
+  configure 阶段仍会尝试网络 Git 克隆；在 GitHub 直连不可达或离线 CI 上直接
+  ExternalProject 下载失败（如 'git version 1.6.5 or later required for --recursive
+  flag' / GIT_VERSION_STRING='' / 'CMake step for earcut_js failed: 1'），
+  纯 header-only 的 INTERFACE 目标也连带无法打包。
+
+affected_scope: >
+  上游 CMake 项目在顶层无条件 FetchContent 拉取测试/工具依赖（未挂在构建选项门控下）
+  的 Conan 配方；典型为 header-only 库（INTERFACE target）在 OHOS aarch64 或任意
+  无 GitHub 直连/离线/限速 CI worker 上的 conan create / conan-verify / finish W3。
+
+verification_cmd: >
+  cmake -DEARCUT_BUILD_TESTS=OFF -DEARCUT_BUILD_BENCH=OFF -DEARCUT_BUILD_VIZ=OFF <src>
+  2>&1 | grep -Ei 'FetchContent|Downloading|earcut_js|picojson';
+  conan create archives/e/earcut/3.2.3 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+
+rec_priority:           1
+rec_approach:           guard-unconditional-fetchcontent-then-bind-locally
+rec_description: >
+  对上游 CMakeLists.txt 打补丁：把无条件 FetchContent_Declare/MakeAvailable 的 fixtures
+  块包进 if (BUILD_TESTS OR BUILD_BENCH OR BUILD_VIZ) 条件；需要跑上游全量测试时用
+  -DFETCHCONTENT_SOURCE_DIR_* 把各依赖源指向本地已校验副本（官方 tag 经镜像拉取），
+  使纯 header 打包离线可过、测试路径可离线复现。配方 generate() 同时保持
+  BUILD_TESTS/BENCH/VIZ=OFF（R32 os in ("Linux","OHOS") + CMAKE_SYSTEM_NAME=Linux/aarch64）。
+rec_command: >
+  patches/0001-guard-fixtures-fetchcontent.patch（if (EARCUT_BUILD_TESTS OR EARCUT_BUILD_BENCH OR EARCUT_BUILD_VIZ) ... endif() 包裹 fixtures+两个 FetchContent 块）；
+  测试构建: cmake -DEARCUT_BUILD_TESTS=ON -DFETCHCONTENT_SOURCE_DIR_EARCUT_JS=<本地> -DFETCHCONTENT_SOURCE_DIR_PICOJSON=<本地> -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<本地>
+rec_auto_fix:           false
+rec_impl:               conan-patch-and-local-source-binding
+
+fallback_priority:      2
+fallback_approach:      disable-networked-upstream-tests-and-run-consumer-test
+fallback_description:   若打补丁成本高，沿用 E342：BUILD_TESTING/BUILD_TESTS=OFF + 保留真实消费
+                        test_package；但注意本模式是"无条件 FetchContent"，仅设选项 OFF 不够，
+                        仍须补丁门控或 FETCHCONTENT_SOURCE_DIR_* 绑定，否则 configure 依旧联网。
+fallback_command:       cmake -DBUILD_TESTING=OFF -DFETCHCONTENT_SOURCE_DIR_GOOGLETEST=<checked-source> <source>
+fallback_auto_fix:      false
+fallback_impl:          approved-offline-dependency
+
+forbid_1_pattern:       FetchContent_MakeAvailable.*(earcut_js|picojson|googletest).*outside.*if|remove.*FetchContent.*without.*guard
+forbid_1_reason:        直接删掉 FetchContent 块会连测试 fixtures 一起删掉，破坏上游测试入口。
+forbid_1_consequence:   上游测试无法运行或需要额外手工恢复，测试台账不可复现。
+forbid_2_pattern:       EARCUT_BUILD_TESTS=OFF.*no.*test_package|disable.*test.*without.*consumer
+forbid_2_reason:        禁用上游套件必须保留真实消费者 test_package（R34），不能空壳或全删。
+forbid_2_consequence:   包可编译但 CMake target/API/链接路径断裂无法被发现。
+forbid_3_pattern:       local.*69/69.*OHOS|OHOS.*69/69.*local|host-side.*CTest.*as.*target.*result
+forbid_3_reason:        本地(host)上游 CTest 结果与目标侧(test_package/消费者)测试必须分开报告，口径独立。
+forbid_3_consequence:   报告夸大目标侧覆盖，测试记录不可审计。
+
+principles:             P002, P003, P014
+causes:                 []
+caused_by:              []
+similar_to:             [E342, E377, E322, E017]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E345-draft-7657.md
+last_updated:           2026-09-05
+source_event:           earcut 3.2.3 HarmonyOS PC 适配 R01（pc2-5）conan-verify G2 失败：
+                        CMake FetchContent earcut_js 无条件下载在无 GitHub 直连环境失败
+                        （GIT_VERSION_STRING='' / CMake step failed: 1）
+
+authors: junshi_liu <liujsh2023@lzu.edu.cn>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-05
+
+draft: true
+contributor_id: 7657

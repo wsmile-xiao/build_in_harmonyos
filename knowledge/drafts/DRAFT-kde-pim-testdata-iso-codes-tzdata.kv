@@ -1,0 +1,70 @@
+draft: DRAFT-kde-pim-testdata-iso-codes-tzdata
+status: pending-editor-review
+title: "KDE PIM/KF6 库上游测试数据双注入：iso-codes（KCountry/XDG_DATA_DIRS）+ tzdata（TZDIR/QT_ZONEINFO）"
+category: conan, testing, kde
+match_keywords: >
+  KCountry, iso_3166-1.json, iso-codes, I18nLocaleData, KF6::I18nLocaleData,
+  QTimeZone, Europe/Amsterdam, Unable to determine system time zone,
+  TZDIR, QT_ZONEINFO, zoneinfo, XDG_DATA_DIRS, GenericDataLocation,
+  KDEInstallDirs, ecm_add_test, KDE PIM, khealthcertificate, kcalendarcore,
+  certificateIssueDate, country(), alpha3, alpha2
+error_signature: >
+  kf.i18n.localeData: Unable to open iso_3166-1.json|Unable to determine system time zone|QTimeZone\(.*\) Invalid QDateTime|Compared values are not the same.*country|Error loading shared library ../../bin/libKF6
+root_cause: >
+  KDE PIM/KF6 库的上游 autotest 常同时隐式依赖两类系统数据文件，OHOS 均不提供：
+  (1) KF6::I18nLocaleData 的 KCountry（国家码 alpha3→alpha2 转换、国名查询）在运行时经
+  QStandardPaths::GenericDataLocation 定位 iso-codes/json/iso_3166-1.json——OHOS 无
+  /usr/share/iso-codes，KCountry 退化返回原始 3 字母码，country() 比对测试 FAIL；
+  (2) 测试以 TZ=Europe/Amsterdam（Q_CONSTRUCTOR_FUNCTION）期望 QTimeZone("Europe/Amsterdam")
+  有效——OHOS 无 /usr/share/zoneinfo，Qt TZIF 后端 openZoneInfo() 全路径落空，时区字段
+  比对 FAIL（certificateIssueDate() 返回 Invalid QDateTime 或本地时区偏移值）。
+  另有伴生问题：已发布 KF6 二进制嵌入 build 树相对 DT_NEEDED（../../bin/libKF6XXX.so），
+  musl 需按 LD_LIBRARY_PATH 条目解析该相对路径。
+solution: |
+  两类数据包均以 tool_requires 注入（测试时数据，不进消费图/package_id，kfilemetadata
+  shared-mime-info 先例），在 _run_upstream_tests 的 test_env 中注入：
+
+  ```python
+  def build_requirements(self):
+      self.tool_requires("ecm/6.26.0")
+      self.tool_requires("iso-codes/4.20.1")   # KCountry ISO 3166-1 表
+      self.tool_requires("tzdata/2026.3")      # QTimeZone TZif 数据库
+
+  def _run_upstream_tests(self):
+      test_env = self._library_runtime_env()
+      # (1) iso-codes: KCountry 经 QStandardPaths GenericDataLocation 找
+      # iso-codes/json/iso_3166-1.json——把包内 share/ 树挂进 XDG_DATA_DIRS
+      iso_codes = self.dependencies.build.get("iso-codes")
+      if iso_codes and iso_codes.package_folder:
+          test_env.prepend_path(
+              "XDG_DATA_DIRS", os.path.join(iso_codes.package_folder, "share"))
+      # (2) tzdata: Qt TZIF 后端按 TZDIR 优先（openZoneInfo 先查 $TZDIR）
+      # + QT_ZONEINFO（Qt 命名时区查找）；Python tzdata 包布局在
+      # lib/python3.12/site-packages/tzdata/zoneinfo
+      tzdata = self.dependencies.build.get("tzdata")
+      if tzdata and tzdata.package_folder:
+          zoneinfo = os.path.join(
+              tzdata.package_folder,
+              "lib", "python3.12", "site-packages", "tzdata", "zoneinfo")
+          if os.path.isdir(zoneinfo):
+              test_env.define("TZDIR", zoneinfo)
+              test_env.define("QT_ZONEINFO", zoneinfo)
+      ...
+  ```
+
+  test_package 同理需要相对 DT_NEEDED 的 symlink farm：KF6 包内 libKF6I18nLocaleData.so
+  NEEDED ../../bin/libKF6I18n.so，测试二进制在 <layout-build>/<id>/ 时 farm 应建在
+  <layout-build>/../bin（exe 的 ../../bin 相对解析点）并加入 LD_LIBRARY_PATH——
+  musl 对相对 NEEDED 按 LD_LIBRARY_PATH 逐条目前缀解析，farm 目录必须在其中。
+fallback: >
+  若 iso-codes/tzdata 版本布局变化（Python site-packages 路径漂移），退化为
+  find_package 定位 + 构建树内复制数据文件（kfilemetadata 的 staged mime DB 模式：
+  复制 freedesktop.org.xml 进 <build>/share/mime/packages 再指 XDG_DATA_DIRS）。
+  QTimeZone 场景若 TZDIR 失效可改用 icu-data 包或 QTTimeZoneFromIcu 配置。
+verify_builds: "#10745 (khealthcertificate 26.04.3, CI pending)"
+reference_impl: >
+  khealthcertificate 26.04.3 PR #10745（iso-codes+tzdata 双注入首例）；
+  kcalendarcore 6.26.0（TZDIR/QT_ZONEINFO 先例，tzdata 单注入）；
+  kfilemetadata 6.28.0（XDG_DATA_DIRS staged share 树先例）
+id: E###-pending
+doc_file: doc/E###.md

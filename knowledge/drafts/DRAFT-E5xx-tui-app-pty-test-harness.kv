@@ -1,0 +1,68 @@
+draft: DRAFT-E5xx-tui-app-pty-test-harness
+status: pending-editor-review
+title: "TUI 终端应用非交互测试：ne abort on non-tty → pty.fork 宏驱动回归"
+category: testing
+severity: 2
+match_keywords: >
+  Cannot reopen input tty, abort, exit 134, SIGABRT, non-tty, stdin isatty,
+  freopen /dev/tty, TUI test, pty, pseudo-terminal, terminal editor test
+error_signature: >
+  Cannot reopen input tty|Aborted \(core dumped\)|exit code 134
+root_cause: >
+  终端类 TUI 应用（编辑器/文件管理器/交互 shell 工具）普遍在 main 早期检测
+  stdin 是否 tty；非 tty（CI 的管道 stdin）时尝试 freopen("/dev/tty") 抢占
+  控制终端，CI 环境无控制终端 → freopen 失败 → 直接 abort()。
+  表现：conan test / CI test 阶段 binary 瞬间 exit 134，stderr 只有
+  "Cannot reopen input tty"（或类似 Cannot open tty / not a terminal）。
+  另一类同族表现：程序挂起等待键盘输入（无 EOF 概念），直到超时被杀。
+solution: |
+  1. python pty.fork() 模拟终端：子进程 execve 目标二进制，父进程
+     select 非阻塞读输出 + waitpid 收真实退出码：
+  ```python
+  pid, fd = pty.fork()
+  if pid == 0:
+      os.execve(ne_bin, args, env)   # env 带 TERM=ansi + TERMINFO
+  while not io_done and time.time() < deadline:
+      r, _, _ = select.select([fd], [], [], 0.3)
+      if r:
+          try:
+              data = os.read(fd, 65536)
+              if not data: io_done = True
+              else: output += data
+          except OSError:
+              io_done = True   # OHOS: EIO 而非 EOF
+      else:
+          wpid, st = os.waitpid(pid, os.WNOHANG)
+          if wpid:
+              if os.WIFEXITED(st):
+                  return os.WEXITSTATUS(st), output
+              return -os.WTERMSIG(st), output
+  # 收尸逻辑：io_done 后给 2s 自然退出窗口，否则 kill+waitpid
+  ```
+  2. 优先找应用的宏/脚本模式参数（ne: --macro FILE；vim: -es / -c）
+     驱动完整功能往返（插入/查找替换/撤销+保存），远强于 --help 冒烟。
+  3. harness 独立成 test_package/<name>_pty_test.py，conanfile test()
+     用 self.run("python3 harness.py <bin> ...")（CI L0c/PF3 要求）。
+  4. TERM=ansi 最小集 + TERMINFO 指向包内 terminfo 数据库。
+fallback: >
+  无法 pty 时退化为 --help / 静态检查（低于 R34 实质测试要求，不推荐
+  单独使用）；ne 还有 NE_ANSI=1 内置终端模式（上游特例，不通用）。
+verify_builds: []
+reference_impl: >
+  ne 3.3.4 PR（feat/ne-3.3.4）：test_package/ne_pty_test.py 4 用例
+  （help 横幅/插入持久化/查找替换/撤销往返）全绿。
+affected_scope: >
+  ne/nano/joe/jed/micro 等终端编辑器；mc/ranger/vifm 等文件管理器；
+  htop/btop/dialog/whiptail 交互工具；任何 freopen("/dev/tty") 程序
+prescan_pattern: 'freopen\("/dev/tty"|isatty\(fileno\(stdin\)\)'
+last_updated: 2026-09-11
+
+rec_approach: >
+  （同 solution 摘要）pty.fork 模拟终端 + 宏模式驱动功能往返 +
+  EIO 后 waitpid 收尸 + harness 独立文件 self.run 调起 +
+  TERM=ansi/TERMINFO 最小集。
+verification_cmd: >
+  conan create archives/n/ne/3.3.4 -pr:h ci/conan/profiles/ohos-aarch64
+  -pr:b ci/conan/profiles/ohos-aarch64 --build=missing
+  期望输出含 "ne_pty_test: all 4 tests passed"；
+  负向验证（无 pty）：管道运行 ne --help → exit 134 (SIGABRT)。

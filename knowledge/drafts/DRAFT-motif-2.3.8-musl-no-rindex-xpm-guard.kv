@@ -1,0 +1,67 @@
+draft: true
+id: DRAFT-motif-2.3.8-musl-no-rindex-xpm-guard
+title: OHOS/musl 无 rindex(3)，而 XpmI.h 只在 SYSV/SVR4/VMS/WIN32/_SVID_SOURCE 下做 rindex→strrchr 映射——用 -Drindex=strrchr 外科式修复
+
+# ═══ Layer 0: 错误面 ═══
+trigger_tool: ld|clang|cpp|make
+phase: link|build
+error_signature: |
+  ld.lld: error: undefined symbol: rindex
+  >>> referenced by Xpmdata.c
+  >>> referenced by XpmWrFFrI.c
+  undefined symbol: rindex
+
+# ═══ Layer 1: 识别层 ═══
+severity: 2
+category: build-system, libc, x11
+match_keywords: rindex, strrchr, musl, XpmI.h, Xpmdata.c, XpmWrFFrI.c, SVID, legacy string function, libXm, Motif, Xpm
+
+# ═══ Layer 2: 诊断层 ═══
+symptoms: >
+  链接期报 undefined symbol: rindex，引用点集中在 Xpm 家族的 Xpmdata.c / XpmWrFFrI.c
+  （libXm 自带 Xpm 实现）。glibc 上不报错，只有 musl/OHOS 报。
+root_cause: >
+  rindex(3) 是 BSD/SVID 时代的 strrchr 别名。glibc 的 <strings.h> 无条件声明它；musl
+  不提供该遗留符号。上游 XpmI.h 有兼容映射，但被特性宏门控：
+  #if defined(SYSV) || defined(SVR4) || defined(VMS) || defined(WIN32) || defined(_SVID_SOURCE)
+  下才 #define rindex strrchr，否则只 #include <strings.h>（musl 下该头不声明 rindex），
+  于是两个 TU 各留下一个未定义符号。
+affected_scope: >
+  所有在 musl/OHOS 上构建、且含 Xpm 源码（或任何带同类特性宏门控的遗留字符串函数映射）
+  的库：Motif/libXm、独立 libXpm、其它从 X11 Xpm 分支出来的代码。
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority: 1
+rec_approach: cpp-define-macro-alias
+rec_description: >
+  在配方 OHOS 分支的 CPPFLAGS 追加 -Drindex=strrchr：因为是 CLI 宏定义，命中 TU 内
+  #ifndef rindex 的分支被跳过、使用点直接展开为 strrchr，无需改上游源码、无需补丁，
+  也不会像定义 _SVID_SOURCE 那样顺带打开其它 SVID 行为（更小的副作用面）。
+rec_command: |
+  environment.append("CPPFLAGS", "-Drindex=strrchr")
+  # 验证前先确认"只剩这一个遗留符号"：
+  #   llvm-nm -D --undefined-only libXm.so.4 | grep -E "^ *U " | sort -u
+rec_auto_fix: false
+rec_impl: manual
+
+fallback_priority: 2
+fallback_approach: define-svid-source
+fallback_description: >
+  定义 -D_SVID_SOURCE 让上游自己的兼容分支生效（#define rindex strrchr）。同样零补丁，
+  但会同时打开其它 SVID 相关分支，副作用面更大；仅当项目里存在多处同类门控且宏定义
+  方式覆盖不全时使用。
+fallback_command: environment.append("CPPFLAGS", "-D_SVID_SOURCE")
+fallback_auto_fix: false
+
+# ═══ Layer 4: 原则引用 ═══
+principles: R1(参数最少化), R2(补丁最小化), R8(补丁平台宏口径)
+
+# ═══ 元数据 ═══
+verified_on: motif 2.3.8（OHOS 6.0 aarch64，clang-15/musl/libc++）
+verification_result: >
+  加宏前后对比：llvm-nm 未定义符号表仅 rindex 一个真实缺口，加 -Drindex=strrchr 后
+  链接通过；motif/2.3.8 conan create 全链路绿（test_package assertions=18 failures=0），
+  libXm.so.4.0.4 正常生成并 dlopen 解析 Motif 入口点 7/7。
+limitations: >
+  - 只覆盖 rindex；同类遗留符号（index/bcmp 等）在本包中未出现，遇到需同样逐个核对。
+  - 未评估 libc++/musl 版本间行为差异（本机 OHOS SDK 26.0.0.18 实测）。

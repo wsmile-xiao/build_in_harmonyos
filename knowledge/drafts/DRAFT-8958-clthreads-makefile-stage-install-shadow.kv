@@ -1,0 +1,120 @@
+# ═══ Draft knowledge entry — clthreads 2.4.2 OHOS Makefile 共享库打包链障碍 ═══
+# Timestamp: 2026-09-08
+# Software: clthreads 2.4.2
+# Gate: PR !8958 / 真机 3 轮 conan create 迭代
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-8958
+trigger_tool:           make|install|ln|conan|clang
+phase:                  package
+error_signature:        make: install: Permission denied|
+                         make: \*\*\* \[.*install.*\] Error 127|
+                         ln: cannot create symbolic link.*Permission denied|
+                         Error linking.*Permission denied.*->.*|
+                         error: use of undeclared identifier 'pthread_cancel'
+
+severity:               2
+category:               makefile|packaging|install|symlink|hmdfs|shared-library|soname|staging|cross-compile|march-native
+match_keywords:         make install DESTDIR, install -d Permission denied, Error 127 install,
+                         ln -sf Permission denied, HMDFS symlink EACCES, usr/local/bin shadowing,
+                         soname chain copy, libclthreads.so.2, shutil.copyfile soname,
+                         conan package copy real files, march=native cross compile,
+                         CLTHREADS_NO_PTHREAD_CANCEL, ifeq CPPFLAGS wiring, patch regeneration lost hunk
+
+title:                  clthreads 2.4.2 适配：OHOS 真机 Makefile 共享库 package 阶段两重环境障碍——`install` 被不可执行的 ~/usr/local/bin/install 遮蔽（conan 构建环境独有，交互 shell 正常）+ HMDFS 拒绝 symlink 致 soname 链无法创建——及配方侧打包范式（copy + 真实文件副本）；附带 -march=native 交叉坑与重制补丁丢宏接线 hunk 流程教训
+
+root_cause: >
+  1) 真机 $HOME（HMDFS /storage）下 usr/local/bin/install 权限 rwxrwx---、
+     属主 20001006:file_manager，当前用户不可执行；conan profile buildenv 把
+     /storage/Users/currentUser/usr/local/bin 前置进 PATH 后，它遮蔽 /bin/install，
+     上游 Makefile 的裸 install 全部报 "make: install: Permission denied"（Error 127，
+     execvp 对不可执行文件）。交互 shell 的 PATH 不同，install 可用——同一台设备
+     两种环境结论相反，极易误判。
+  2) 真机 $HOME 与 CONAN_HOME（均在 /storage，HMDFS）对 ln -s/ln -sf 返回 EACCES；
+     上游 Makefile 用 ln -sf 组 libfoo.so -> libfoo.so.MAJ -> libfoo.so.MAJOR.MINOR
+     符号链接链，package 阶段无法创建。
+  3) 上游 2.4.2 Makefile 新增 CXXFLAGS += -march=native：OHOS 交叉 clang（x86_64
+     host 编 aarch64）按 host CPU 生成错误 target 参数，且不可复现。
+  4) 为上游重写的 Makefile 重制移植补丁时，遗漏 2.4.0 补丁中"make 变量→CPPFLAGS
+     -D 宏"的 ifeq 接线块；本机无交叉编译器，静态校验（git apply/conan export/
+     graph info）全部无法发现，真机编译才在 OHOS musl（pthread.h 不声明
+     pthread_cancel）的 #else 分支报 undeclared identifier。
+
+affected_scope:         一切 package 阶段调用 make install 或依赖裸 install/ln -sf
+                        的 Makefile 库适配（zita 系 clthreads/clxclient/zita-*、
+                        传统 Unix 库）；含 soname 符号链接链的共享库；上游 Makefile
+                        带 -march=native 的库；跨版本重制移植补丁的场景。
+
+verification_cmd:       真机隔离 CONAN_HOME：conan create archives/c/clthreads/2.4.2
+                        -pr:h ohos-aarch64 -pr:b ohos-aarch64 --build=missing（exit 0，
+                        test_package 2/2）；探测：ls -la ~/usr/local/bin/install
+                        （rwxrwx--- 异属主）；ln -sf foo ~/tmp/probe（EACCES）；
+                        conan env 内 command -v install vs 交互 shell 对比。
+
+rec_priority:           1
+rec_approach:           recipe-side-copy-packaging（配方侧打包 + 真实文件副本 soname 链）
+rec_description: >
+  1) package() 不调 make install：用 conan.tools.files.copy 落头文件与主库文件。
+  2) soname 链用真实文件副本（shutil.copyfile 生成 libfoo.so 与 libfoo.so.MAJ，
+     与 libfoo.so.MAJOR.MINOR 三份同内容），链接期与运行期行为等价，跨平台
+     （Linux CI / OHOS 真机）一致。
+  3) patch 移除上游 CXXFLAGS += -march=native（交叉编译必炸且不可复现）。
+  4) 平台宏接线（如 CLTHREADS_NO_PTHREAD_CANCEL）保持 make 变量→CPPFLAGS ifeq
+     结构，build() 命令行按 os 传变量。
+  5) 为上游新构建系统重制补丁时逐 hunk 对照旧补丁语义清单（尤其宏接线块），
+     本机静态校验不能替代真机首跑。
+rec_command:            conan create archives/c/clthreads/2.4.2 -pr:h ohos-aarch64
+                          -pr:b ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               conan-recipe-custom-makefile-harmonyos
+
+fallback_priority:      2
+fallback_approach:      fixed-install-path-or-make-install-patch
+fallback_description:   若必须保留 make install 路线：patch Makefile 把裸 install 换成
+                        $(INSTALL) 变量并在调用时指向绝对路径 /bin/install，符号链接
+                        改 cp -f 副本；仍依赖设备文件系统不拒绝 cp，通用性差于配方侧。
+fallback_command:       make -C source install INSTALL=/bin/install PREFIX=/ DESTDIR=...
+fallback_auto_fix:      false
+fallback_impl:          makefile-install-variable-override
+
+forbid_1_pattern:       (\bln\b.*-sf|ln -s)\s+\S+\s+\$HOME|\$CONAN_HOME
+forbid_1_reason:        HMDFS（/storage）对 symlink 创建返回 EACCES，$HOME 与
+                        CONAN_HOME 下的 soname/头文件符号链接链必然失败
+forbid_1_consequence:   package 阶段 "ln: cannot create symbolic link ... Permission
+                        denied"，打包中断
+
+forbid_2_pattern:       package.*\n.*self\.run\(.*make.*install(?!.*INSTALL=/bin/install)
+forbid_2_reason:        conan 构建环境 PATH 中 ~/usr/local/bin/install（不可执行，
+                        异属主）遮蔽 /bin/install，裸 install 必报 Error 127
+forbid_2_consequence:   "make: install: Permission denied"，打包中断；交互 shell
+                        复核正常导致误判为偶发
+
+forbid_3_pattern:       CXXFLAGS\s*\+?=\s*.*-march=native
+forbid_3_reason:        OHOS 交叉编译器按构建 host CPU 解析 native，target 参数
+                        错误且不可复现（zita 系新版 Makefile 普遍携带）
+forbid_3_consequence:   交叉编译期报非法 target/架构不匹配，或生成错误指令
+
+principles:             P001, P003, P011
+similar_to:             E011, E085, E999-DRAFT-8945
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-8958-clthreads-makefile-stage-install-shadow.md
+last_updated:           2026-09-08
+source_event:           PR !8958 【知识库扩展】feat(clthreads): 2.4.2 编译完成；
+                        真机 10.62.134.118 三轮 conan create 迭代（丢 ifeq hunk →
+                        install 遮蔽 → 配方侧打包 → 2/2 绿）
+authors:                gcw_6YxinkyD
+source_pr:              8958
+source_commit:          2cf719c66e
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-08

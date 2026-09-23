@@ -10,4 +10,5 @@ A portable fork of the high-performance regular expression matching library
 
 | Version | Status | Date |
 |---------|--------|------|
+| 5.4.11 | built | 2026-09-10 |
 | 5.4.12 | built | 2026-05-27 |

@@ -1,0 +1,136 @@
+#====================================================================
+# DRAFT-conan-delivery-chain-silent-traps.kv
+#   — conan 交付链两处「静默失败」陷阱：copy() 相对路径 fnmatch 零拷贝、
+#     严格 ISO C 隐藏 POSIX 声明致运行时段错误（路径 B 素材）
+# 来源: dasm 2.20.15-202011092.20.14.1 适配，2026-09-10
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E-draft-conan-delivery-chain-silent-traps
+trigger_tool:           conan|clang
+phase:                  packaging|testing|runtime
+error_signature:        # 陷阱一：无任何错误输出 —— package_folder/bin/ 不存在
+                        包内缺少预期二进制但 conan create 退出码 0|
+                        test_package 报 (missing) / no +x|
+                         # 陷阱二：编译仅告警，运行时段错误
+                        implicit declaration of function ['"]?popen['"]?|
+                        implicit declaration of function ['"]?pclose['"]?|
+                        initialization of ['"]?FILE \*['"]? from ['"]?int['"]?|
+                        Segmentation fault.*exit 139
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, packaging, test-package, silent-failure,
+                         posix, iso-c, feature-test-macro, ohos
+match_keywords:         conan.tools.files.copy, keep_path, fnmatch, package_folder,
+                         missing binary, popen, pclose, _POSIX_C_SOURCE,
+                         -std=c99, implicit declaration, FILE* from int,
+                         segmentation fault, test_package, 静默零拷贝
+title:                  conan 交付链两处静默失败：copy() 相对路径 fnmatch 零拷贝 +
+                        严格 ISO C 隐藏 POSIX 声明致运行时段错误
+prescan_pattern:        copy\(\s*self\s*,|popen\s*\(|pclose\s*\(
+prescan_globs:          conanfile.py, test_package/*.c, test_package/**/*.c
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             【陷阱一】conan.tools.files.copy(conanfile, pattern, src, dst)
+                        的 pattern 是与**相对 src 的路径**做 fnmatch，不是与
+                        basename 匹配。以 source_folder 为 src 去拷产物
+                        bin/dasm 时，相对路径是 "bin/dasm"，
+                        fnmatch("bin/dasm", "dasm") 为假 —— **一个字节都不拷、
+                        不报错、不告警、conan create 依旧退出 0**，
+                        package_folder/bin/ 直接不存在。规律：pattern 不含 '/'
+                        时，src 必须至少深入到产物所在那一层。
+                        对照组说明该语义：copy(self, "*", src=<sf>/machines)
+                        正常（'*' 能匹配含 '/' 的相对路径）；
+                        copy(self, "x.txt", src=<sf>/docs) 正常（文件就在顶层）。
+
+                        【陷阱二】popen/pclose/access/WIFEXITED 是 POSIX 而非
+                        ISO C。在严格 ISO C 方言下（显式 -std=c99/-std=c11，
+                        未定义 _POSIX_C_SOURCE），**glibc 与 musl 都会隐藏
+                        popen/pclose 的声明**；隐式 int 返回值被赋给 FILE* 造成
+                        指针截断，编译只有 warning，运行必段错误（实测
+                        glibc 2.35 上 exit 139）。
+                        隐蔽性来源：**CMake 默认 gnu 方言不暴露该问题**
+                        （gnu 方言下 _DEFAULT_SOURCE 自动定义），只有本地刻意
+                        加 -std=c99 编一遍才会现形。
+affected_scope:         所有 conan 产线的 package() 拷贝与 test_package 子进程直读。
+                        陷阱一与上游软件无关，纯交付链问题，任何包都可能中；
+                        陷阱二只影响用 -std=c99 等严格方言编 test 的包。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           src-scoped-copy-and-leading-feature-test-macro
+rec_description:        【陷阱一】让「相对 src 的路径」恰好等于 pattern：
+                            src = os.path.join(self.source_folder, "src")
+                            copy(self, "dasm", src=src, dst=bin_dst)
+                        并在 conan create 之后做一次**包目录实物核对**：
+                            conan cache path <ref>:<pkgid>
+                        逐项确认预期文件真的落地（这是唯一能发现静默零拷贝
+                        的动作，编译日志与退出码都查不出来）。
+
+                        【陷阱二】在 test 源文件**所有 #include 之前**加：
+                            #ifndef _POSIX_C_SOURCE
+                            #define _POSIX_C_SOURCE 200809L
+                            #endif
+                        并把「本地用 -std=c99 -Wall -Wextra 单独编一遍
+                        test_package」作为提交前固定自检动作——它能同时抓出
+                        隐式声明与格式截断类问题。
+rec_command:            conan create <dir> -pr:h=ohos-aarch64 -pr:b=default
+                        conan cache path <ref>:<pkgid>   # 实物核对
+                        cc -std=c99 -Wall -Wextra test_package/test_x.c -o /tmp/t
+rec_auto_fix:           false
+rec_impl:               recipe-pattern
+
+fallback_priority:      2
+fallback_approach:      test-package-asserts-installed-layout
+fallback_description:   若无法保证 src 层级写法正确，退一步让 test_package
+                        强制断言安装布局（access(pkg/bin/x, X_OK) 等）：
+                        一旦 package() 静默零拷贝，CI 立刻红，而不是把坏包
+                        合入。本仓各包已普遍这么做，可作为兜底防线。
+fallback_command:       expect(access(path, X_OK) == 0, "bin/x executable", "(no +x)")
+fallback_auto_fix:      false
+fallback_impl:          test-assertion
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       copy\(\s*self\s*,\s*["'][^/"']+["']\s*,\s*src\s*=\s*self\.source_folder\s*\)
+forbid_1_reason:         禁止以 source_folder 直接作 src 去拷**非顶层**产物
+                        （R8 意义上的无效适配）：该写法在产物位于子目录时
+                        静默零拷贝，产生"conan create 成功但包里没有二进制"
+                        的坏包，比直接报错危险。
+forbid_1_consequence:   CI 若缺安装布局断言则坏包合入，下游消费者拿到空包
+
+forbid_2_pattern:       -std=c99(?![^\n]*_POSIX_C_SOURCE)
+forbid_2_reason:         禁止在 test_package 里用严格 ISO C 方言而不先定义
+                        _POSIX_C_SOURCE：隐藏 popen/pclose 声明会产出"编译
+                        通过、运行段错误"的测试二进制，把真实缺陷掩盖成
+                        环境噪声。
+forbid_2_consequence:   测试看似运行实则崩溃，缺陷信号被淹没
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-picojson-1.3.0-conan-copy-absolute-dst、
+                        DRAFT-doctest-partial-target-zero-case-false-green
+                        （同族：交付链上的假绿/静默失败）
+caused_by:
+prerequisite_of:        所有 conan 产线的 package() 与 test_package
+
+# ═══ 元数据 ═══
+doc_file:               DRAFT-conan-delivery-chain-silent-traps.md
+last_updated:           2026-09-10
+source_event:           archives/d/dasm/2.20.15-202011092.20.14.1 适配
+                        （本包实际踩中陷阱一并修复；test_package 38/38
+                        在真实 OHOS aarch64 制品上实跑通过）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                XiaYuanOwO
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

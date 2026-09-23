@@ -1,0 +1,66 @@
+id:                     DRAFT-libcgroup-034-musl-loader-el1
+trigger_tool:           configure|conan|clang++|musl-ldso
+phase:                  configure
+error_signature:        Error loading shared library libc\+\+_shared\.so: \(needed by \./conftest\)|
+                         Error loading shared library libfts\.so\.0: \(needed by \./conftest\)|
+                         configure: error: cannot run C\+\+ compiled programs|
+                         configure: error: cannot run compiled programs
+
+severity:               2
+category:               platform|musl|loader|conan|autotools
+match_keywords:         LD_LIBRARY_PATH, el1, bundle, libc++_shared.so, conftest,
+                         cannot run C++ compiled programs, musl loader, library search,
+                         configure 127, exit 127, sandbox path, OHOS loader
+title:                  musl 加载器遇 LD_LIBRARY_PATH 中不可访问的 el1 应用沙箱目录时放弃整个库搜索（非跳过）
+
+root_cause: >
+  HarmonyOS PC 系统默认 LD_LIBRARY_PATH 尾部携带
+  /data/storage/el1/bundle/libs/arm64（另一个进程的应用沙箱目录）。
+  该目录存在、目录内也确实有 libc++_shared.so 等库文件，但对当前构建
+  进程不可访问（跨沙箱权限）。musl ldso 的行为不是"跳过该条目继续搜索
+  下一个路径"，而是把整条 LD_LIBRARY_PATH 的搜索判定为失败——任何
+  NEEDED 库（libc++_shared.so、libfts.so.0 等非系统默认路径库）都报
+  "Error loading shared library"，即使正确的路径（OHOS SDK llvm/lib）
+  排在它前面也无效。configure 的 AC_PROG_CXX/AC_CHECK_LIB conftest
+  运行因此全部 exit 127 → "cannot run C++ compiled programs"。
+  特征：手动 export 同样的路径串也会失败；只有把 el1 段从
+  LD_LIBRARY_PATH 里剥掉（或用命令前缀赋值替换整个变量）才恢复。
+
+affected_scope: >
+  所有在 HarmonyOS PC 上通过 conan create 构建、且 conftest/测试程序
+  链接了非系统默认路径共享库（libc++_shared.so、conan 包的 .so）的
+  autotools/cmake 项目。CI worker 的 profile 若已注入 SDK lib 路径
+  且启动环境含 el1 段同样命中。
+
+rec_priority:           1
+rec_approach:           sanitize-ld-library-path
+rec_description: >
+  在 recipe 的 build() 开头清洗 LD_LIBRARY_PATH：按 ':' 分段，剔除
+  含 /data/storage/el1/bundle 的段，再前置 OHOS SDK llvm/lib
+  （含 libc++_shared.so）与 host 依赖的 lib 目录；随后所有
+  self.run(..., env="conanbuild") 都继承清洗后的值。
+rec_command:           |
+  import os
+  cur = os.environ.get("LD_LIBRARY_PATH", "")
+  entries = [p for p in cur.split(":")
+             if p and "/data/storage/el1/bundle" not in p]
+  sdk = "/data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/lib"
+  if sdk not in entries:
+      entries.insert(0, sdk)
+  os.environ["LD_LIBRARY_PATH"] = ":".join(entries)
+
+verification_cmd:      |
+  # 复现（构建机上）：
+  LD_LIBRARY_PATH="/data/storage/el1/bundle/libs/arm64:$LD_LIBRARY_PATH" ./cxx_conftest  # 127
+  ./cxx_conftest  # 若继承系统默认且链接 libc++_shared.so 也 127
+
+fallback_priority:      2
+fallback_approach:      static-link-cxx-runtime
+fallback_description: >
+  对仅需要 C++ 编译器探测的场景可用 -static-libstdc++ 让 conftest 不
+  依赖 libc++_shared.so，但 conan 包依赖（libfts 等）仍需运行时加载，
+  治本仍是清洗 LD_LIBRARY_PATH。
+
+evidence_pr:            libcgroup 0.34 适配 PR
+evidence_builds:        本地 conan create 5 次失败→清洗后全绿
+metrics_success_count:  1

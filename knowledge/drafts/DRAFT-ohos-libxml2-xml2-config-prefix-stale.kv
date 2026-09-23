@@ -1,0 +1,76 @@
+#====================================================================
+# DRAFT-ohos-libxml2-xml2-config-prefix-stale — libxml2 制品包内 xml2-config 前缀陈旧导致 autotools 探测静默降级
+# 触发事件: libm17n-core 1.8.6（上游 m17n-lib）HarmonyOS PC 适配（PR #10176）
+#====================================================================
+
+id:                     DRAFT-ohos-libxml2-xml2-config-prefix-stale
+trigger_tool:           configure|conan
+phase:                  configuration|dependency
+error_signature:        checking for xmlParseMemory in -lxml2\.\.\. no|checking for libxml/tree\.h\.\.\. no|XML2_LD_FLAGS|DT_NEEDED.*libxml2
+
+severity:               2
+category:               autotools|conan|dependency|configuration
+match_keywords:         xml2-config, libxml2, conan package prefix, /usr/local hardcoded,
+                        AC_CHECK_PROG, AC_CHECK_LIB, HAVE_XML2, silent degradation,
+                        -I/usr/local/include/libxml2, -L/usr/local/lib, CPPFLAGS, LDFLAGS,
+                        pkg-config, PKG_CONFIG_LIBDIR, autotools probe
+title:                  conan libxml2 包内 xml2-config 硬编码 prefix=/usr/local，autotools 项目据此探测 libxml2 会静默判缺失（库被"成功"编译但缺少 XML 后端）
+
+root_cause: >
+    制品仓发布的 libxml2/2.15.3.1 包中带有 `bin/xml2-config`，该脚本是 **该包自身构建期
+    的残留**：脚本头部硬编码 `prefix=/usr/local`，因此
+    `xml2-config --cflags` = `-I/usr/local/include/libxml2`、
+    `xml2-config --libs` = `-L/usr/local/lib -lxml2 -lpthread -lm -ldl`。
+    采用 `AC_CHECK_PROG(xml2-config, ...)` 风格的 autotools 项目（m17n-lib 即为典型）会
+    把这两条输出**原样**塞进 CPPFLAGS/LIBS，于是：
+      - `AC_CHECK_LIB(xml2, xmlParseMemory)` 失败（-L 指向不存在的 /usr/local/lib）
+      - `AC_CHECK_HEADER(libxml/tree.h)` 失败（-I 指向不存在的 /usr/local/include/libxml2）
+    两者都失败 → HAVE_XML2 未定义 → 项目按"无 libxml2"分支编译（m17n-lib 会清空
+    XML2_LD_FLAGS），**构建仍然成功**，只有产物缺少 XML 后端、DT_NEEDED 里没有
+    libxml2 —— 属于最难发现的静默降级：CI 绿、测试若不校验 XML 功能也绿。
+    同时该 .pc/工具路径问题在"用制品包做依赖"的场景普遍存在：dependency 的 bin/ 目录
+    默认不在构建 PATH 上，一旦被显式加入 PATH（或系统里另有 xml2-config），脚本就会
+    把探测带偏。
+
+fix_approach: |
+    (1) 预置变量跳过程序查找：autoconf 的 AC_CHECK_PROG 在变量已赋值时不再搜索，
+    传 `HAVE_XML2_CONFIG=no` 即让项目走自身的回退分支
+    （m17n-lib 回退为 `-I/usr/include/libxml2` + `-lxml2 -lz -lpthread -lm`）；
+    (2) 用容器里的真实路径补齐：`CPPFLAGS += -I<dep>/include/libxml2 -I<dep>/include`、
+    `LDFLAGS += -L<dep>/lib`（取 `self.dependencies["libxml2"].cpp_info` 的
+    includedirs/libdirs，不要写死 /usr/local 或 conan 缓存路径）；
+    (3) 不要由配方把依赖的 bin/ 目录 prepend 到 PATH（本项目曾这样做，正是它让 xml2-config 生效）；
+    (4) 验证必须看产物：`readelf -d lib<name>.so | grep libxml2` 有 NEEDED 才算 XML 后端真正启用
+    （HAVE_XML2≠yes 时 XML2_LD_FLAGS 会被清空，因此 NEEDED 是可靠判据）；
+    (5) 顺带把 PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR 收敛到 conan 生成目录，避免宿主上
+    碰巧存在的 .pc（libthai/anthy/wordcut 等）被探测进链接串形成未声明依赖。
+
+affected_software: |
+    libm17n-core (上游 m17n-lib，AC_CHECK_PROG(xml2-config) 探测 libxml2),
+    任何用 xml2-config / *-config 脚本探测 conan 依赖的 autotools 项目
+    （尤其是把依赖 bin/ 目录加入 PATH 的配方），以及 libxslt/libxml2 家族的消费者。
+platform:               OHOS 6.0 arm64 (HongMeng Kernel), clang 15.0.4, conan 2.29.1 (ohpcd)
+verification: |
+    libm17n-core 1.8.6：修复前 `checking for xmlParseMemory in -lxml2... no` 且
+    `readelf -d lib/libm17n-core.so.0.4.2` 无 libxml2；预置 HAVE_XML2_CONFIG=no +
+    注入 <dep>/include{,/libxml2} 与 <dep>/lib 后 configure 通过、产物出现
+    `(NEEDED) Shared library: [libxml2.so.16]`，conan create EXIT=0，
+    test_package 56 项核心 API 断言原生执行 0 失败。
+conan_package:          libxml2/2.15.3.1
+applicable_to:          所有通过 `*-config` 脚本（xml2-config、curl-config、freetype-config…）
+                        探测依赖的 autotools 配方；所有"编译成功但功能缺失"的排查场景
+not_applicable_to: |
+    包内自带可用 .pc 且配方走 pkg-config 的依赖消费方式；
+    依赖的 prefix 已被制品仓在打包阶段就地改写的包（若其 *-config 输出指向包内真实路径则无此问题）；
+    非 autotools 构建系统（CMake/Meson 走 config-file 探测，不受 *-config 影响）
+dedup_keywords:         xml2-config stale prefix; HAVE_XML2_CONFIG; silent feature loss autotools;
+                        conan dependency *-config injection; DT_NEEDED as probe evidence
+dedup_conclusion: |
+    查重范围 knowledge/{doc,graph,drafts,index.tsv}：`xml2-config` 0 命中、`rpl_malloc`
+    见 DRAFT-ohos-autotools-rpl-malloc（同次适配的另一条独立结论，不重复）；
+    config.guess/HarmonyOS 识别见 E007/E160/E533/E545 与 DRAFT-hogweed-3.9.1
+    （其"HMDFS mktemp 目录内 dummy.c Permission denied"与本稿为不同故障面，本稿不重复收录）；
+    libintl/gettext 空壳见 DRAFT-ohos-gi18n-gettext-identity-macro 与 g_libintl_* 系列条目。
+    本稿新增价值核心：**制品包内 `*-config` 脚本前缀陈旧 → autotools 探测静默判缺失 →
+    产物功能缺失但构建/测试皆绿**，以及以 readelf DT_NEEDED 作为"后端是否真正启用"的判据。
+    drafts 中无同名/同 stem 草稿，不占用正式 E 编号。

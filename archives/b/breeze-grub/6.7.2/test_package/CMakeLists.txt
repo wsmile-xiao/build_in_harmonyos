@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.16)
+project(breeze_grub_consumer C)
+add_executable(test_breeze test_breeze.c)
+set_target_properties(test_breeze PROPERTIES C_STANDARD 99 C_STANDARD_REQUIRED YES)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+    target_compile_options(test_breeze PRIVATE -Wall -Wextra -Werror)
+endif()
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    # The official SDK injects --gcc-toolchain even for its self-contained sysroot.
+    target_compile_options(test_breeze PRIVATE -Wno-error=unused-command-line-argument)
+endif()

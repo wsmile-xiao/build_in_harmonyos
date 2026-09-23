@@ -1,0 +1,172 @@
+# ═══ Draft knowledge entry — 上游测试驱动对 TESTS= 里匹配不到的名字只 warn + 静默跳过：
+#     声明组数因此虚高，而日志里仍然写着 Result: PASS ═══
+# Timestamp: 2026-09-20
+# Software: openssl 3.0.21 (OpenSSL 3.0 LTS; 构建系统 custom-perl，测试驱动 test/run_tests.pl)
+# Gate: rule4 (上游测试数禁止少报/虚报) / rule12 (消费者侧实证)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-openssl-3.0.21-test-driver-silent-skip-of-unmatched-tests
+trigger_tool:           perl|make|conan|test-runner
+phase:                  testing
+error_signature:        found no match, skipping addition|Result: PASS|Files=\d+, Tests=\d+|
+                        TESTS=|HARNESS_JOBS|test/recipes/\*-.+\.t
+
+severity:               2
+category:               upstream-test-integrity, testing, rule4, perl, make, conan
+match_keywords:         上游测试驱动, TESTS=, 名单虚高, find_matching_tests, run_tests.pl,
+                         found no match, silent skip, warn 不停, 退出码 0, Result: PASS,
+                         Files=, Tests=, Test::Harness, 声明组数 vs 实跑组数,
+                         phantom test names, openssl, 3.0.16, 3.0.21, OHOS
+
+title:                  上游测试驱动对 `TESTS=` 里匹配不到的名字只 warn + 静默跳过
+                        （既不 die 也不改退出码），于是「名单组数」可以远大于「实跑组数」
+                        而日志仍打印 `Result: PASS` —— 声明通过率必须由驱动汇总行反证
+
+root_cause: >
+  OpenSSL 的测试驱动 `test/run_tests.pl` 把 `TESTS=` 里每个名字 glob 成
+  `test/recipes/*-<name>.t`：
+
+      my @matches = find_matching_tests($test);
+      if (scalar @matches == 0) {
+          warn "Test $test found no match, skipping ",
+              ($sign eq '-' ? "removal" : "addition"), "...\n";
+      } else {
+          foreach $test (@matches) { ... }
+      }
+      sub find_matching_tests {
+          my ($glob) = @_;
+          if ($glob =~ m|^[\d\[\]\?\-]+$|) { return glob(catfile($recipesdir,"$glob-*.t")); }
+          return glob(catfile($recipesdir,"*-$glob.t"));
+      }
+
+  **匹配不到就只 warn 一行，既不 die 也不改退出码**。于是：
+
+    * `make test` 依然打印 `Result: PASS`；
+    * 日志里只多出若干行 `Test <name> found no match, skipping addition...`；
+    * 人读 `Result: PASS` 就以为名单上的组全跑了。
+
+  这与「上游少报」相反 —— 这是**适配者多报**：配方作者凭印象/从旧版本拷贝/
+  从算法名猜出一串测试名写进 `TESTS=`，其中相当一部分在该版本下根本没有 recipe。
+  3.0.16 的配方正是如此：名单里有 40 个名字，实际只有 22 个能 glob 到 recipe。
+  18 个（test_md test_ciphers test_zuc test_siphash test_chacha test_poly1305
+  test_pkey test_ffc test_curve448 test_xxhash test_sm2 test_sm3 test_sm4
+  test_gost test_seed test_camellia test_aria test_des3）在 3.0.x 下无 recipe
+  （3.0 已把这些算法的用例并入 test_evp 等综合 recipe），却与注释/MANIFEST 里
+  写的「22 组」并存在同一份文档里，长期没有被发现。
+
+  这是**一类**问题，不是 OpenSSL 独有：任何「用名字选择测试」的驱动
+  （Perl Test::Harness 系、`ctest -R`、`meson test <name>`、`pytest -k`）
+  都有同样的形状 —— 编译器/驱动层的「选择」环节通常比「执行」环节宽松。
+  判据是：**驱动在所选集合为空时，是报错还是静默放过？**
+
+affected_scope: >
+  一切「配方里用名字列表选择上游测试子集」的包，尤其是：
+    (1) 测试由名字/glob 选择（`TESTS=`、`-R <regex>`、`-k <expr>`、`--tests <name>`）；
+    (2) 驱动对匹配不到的名字采取 warn/忽略语义（不 die、不改退出码）；
+    (3) 配方把「名单长度」当作「实跑组数」写进 MANIFEST/PR body。
+  openssl 3.0.16 实证：`test/recipes/` 在 3.0.16 有 258 条 `.t`、
+  在 3.0.21 有 259 条（差的是 3.0.21 新增的 `test_tls13ticket`）；
+  40 个声明名字里 22 个命中、18 个不命中。
+  注意：**上游 master/新版本里 recipe 集合会变**，所以「上一版能跑的名字」
+  在新版不一定还在 —— 名字列表必须按当前 tarball 重新校验，不能跨版本照抄。
+
+verification_cmd: >
+  # 1) 判定驱动是否为「静默跳过」语义（在解出的源码树里跑）：
+  grep -n -A 6 'sub find_matching_tests' test/run_tests.pl
+  grep -n 'found no match' test/run_tests.pl
+  #    → 只 warn、无 die/exit → 命中本条目
+
+  # 2) 复刻驱动的匹配规则，把配方里的名字列表逐个校验存在性：
+  #    （驱动用的是 glob(test/recipes/*-<name>.t)，此处用同一规则）
+  for n in <TESTS 里的每个名字>; do
+    ls test/recipes/*-"$n".t >/dev/null 2>&1 || echo "NO RECIPE: $n"
+  done
+
+  # 3) 跑完之后从日志里取驱动自己的汇总行，反证实跑组数：
+  grep -nE 'Files=[0-9]+, *Tests=[0-9]+' <测试日志>
+  #    → 断言 Files 等于名单里经校验存在的名字数
+
+  # 4) 交叉核对：官方列名入口（驱动自带 list 模式）应给出同一集合
+  perl test/run_tests.pl list 2>/dev/null | wc -l
+
+rec_priority:           1
+rec_approach:           preflight-glob-names-plus-postflight-files-assertion
+rec_description: >
+  两层校验，把「名单组数 vs 实跑组数」从人读日志变成构建期硬约束：
+  (1) **前置校验**：配方里维护的名字列表，在 build() 里逐个 glob
+      `test/recipes/*-<name>.t`（复刻驱动自己的 find_matching_tests 规则），
+      任何缺失即 `ConanException` 并在报错里点名是哪几个。列表里只保留命中项。
+  (2) **后置校验**：把测试输出**落盘**（而不是 `| tail -n 200` 直接进 stdout），
+      再正则抓驱动收尾打印的 `Files=N, Tests=M` 汇总行，断言 `N == len(名单)`；
+      同时用 `self.output.info` 把 N/M 打进 CI 日志，成为可复核的实数。
+      另加一条：日志里出现 `Test X found no match` 即 `ConanException` ——
+      这条 warn 本身就是「静默跳过发生过」的直接证据，与 `Files=` 汇总行互为冗余
+      （某些 harness 配置下汇总行可能不打印，但 warn 一定在）。
+  第三件（可选但推荐）：把「组数/子测试数/通过率」的声明与 N/M 对齐写进
+  MANIFEST 与 PR body，让声明值有出处。
+rec_command:            >
+  conan create archives/o/openssl/3.0.21 -pr:h ci/conan/profiles/ohos-aarch64 \
+    -pr:b ci/conan/profiles/ohos-aarch64 --build="openssl/*"
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      trust-result-pass-and-declare-the-nominal-list
+fallback_description:   >
+  沿用「照抄名单 + 看 `Result: PASS`」的老做法。不可取：`Result: PASS` 只说明
+  **实际执行的那些** recipe 通过了，对「名单里有多少个没被执行」完全无信息；
+  声明值会系统性地高于实跑值，且该偏差在日志里只表现为若干行 warn ——
+  这正是 3.0.16 把 22 组写成 40 个名字却长期无人发现的原因。
+fallback_command:       （不推荐）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       stable_tests\s*=\s*\(?[\s\S]{0,400}test_md.*test_ciphers|TESTS=.*test_pkey.*test_ffc
+forbid_1_reason:        把「看起来该有」的测试名（从旧版本/从算法名/凭印象）直接写进
+                        `TESTS=`，而该版本下并没有对应 recipe。驱动只 warn 后跳过，
+                        构建照绿，声明组数虚高。
+forbid_1_consequence:   rule4 判定为虚报，通过率无出处，评审驳回；且掩盖了真实覆盖缺口。
+
+forbid_2_pattern:       \|\s*tail\s+-n\s+\d+['\"]?\s*$.*make test|make test[\s\S]{0,80}\|\s*tail
+forbid_2_reason:        把测试输出 `| tail -n 200` 直接丢掉：驱动自己的
+                        `Files=N, Tests=M` 汇总行与 `found no match` 的 warn 都在被截断
+                        的流里，事后无法反证实跑组数，也无法复核「名单是否命中」。
+forbid_2_consequence:   验证只能靠人肉重跑，CI 日志里没有任何可复核的实数。
+
+forbid_3_pattern:       (skipped|SKIP).*upstream|上游测试.*跳过.*无关|manifest[\s\S]{0,60}pass_rate.*100%
+forbid_3_reason:        名单里若干个名字没被执行，却在 MANIFEST/body 里把
+                        「实跑的那部分」的 100% 通过率写成整份名单的通过率。
+                        正确做法是把名单收敛到实跑集合，再声明该集合的通过率。
+forbid_3_consequence:   通过率与覆盖面错配，rule4 不成立。
+
+forbid_4_pattern:       test_package/(test_\w+)\.c[\s\S]{0,200}(skip|SKIP|#if 0)
+forbid_4_reason:        上游测试只跑了一个子集时，消费者侧 test_package 是唯一的
+                        端到端覆盖证据；跳过或降级它等于本包没有验证。
+forbid_4_consequence:   通过率造假，rule12 不成立，PR 驳回。
+
+principles:             P003, P010, P014
+causes:                 []
+caused_by:              []
+similar_to:             E370（Meson fixture 清单：套件进程成功 ≠ 每个嵌套 fixture 通过，
+                        须从源码导出 key 集并逐个核对 PASS/SKIP/FAIL；同属
+                        「上游测试运行器的成功语义不足以证明覆盖面」）、
+                        E417（图像库按官方 CI 变体声明格式覆盖：不得把「不支持」
+                        写成「跳过」或夸大覆盖数 —— 同属声明与实跑对齐）、
+                        DRAFT-exprtk-0.0.3-upstream-test-cwd-data-silent-pass
+                        （上游测试因 cwd/数据缺失静默通过）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-openssl-3.0.21-test-driver-silent-skip-of-unmatched-tests.md
+last_updated:           2026-09-20
+source_event:           archives/o/openssl/3.0.21 适配（修 3.0.16 的 40 个声明名字 →
+                        22 个经 glob 校验存在的名字，并加前置 glob 校验 + 后置 Files= 断言）
+
+authors:                2301_76770579
+source_pr:              11373
+source_commit:          305fc1edf9fcfd579a93d4dedfd44dd1f704eb19
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

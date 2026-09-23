@@ -60,3 +60,7 @@ export PATH=/data/service/hnp/cmake.org/cmake_4.1.2/bin:/data/service/hnp/ninja.
 cd /storage/Users/currentUser/build_in_harmonyos
 conan create archives/c/cairo-gobject/1.18.4 --profile:host=/storage/Users/currentUser/build_in_harmonyos/ci/conan/profiles/ohos-aarch64 --profile:build=/storage/Users/currentUser/build_in_harmonyos/ci/conan/profiles/ohos-aarch64 --build=missing
 ```
+---
+
+**编译结束**: 2026-09-02 21:28
+**最终状态**: built

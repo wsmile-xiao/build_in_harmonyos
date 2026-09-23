@@ -1,0 +1,36 @@
+id: DRAFT-libpfm-4.13.0-make-sys-linux-gate
+error_signature: undefined symbol.*perf_validate_pattrs|undefined reference to.*perf_event|ifeq \(\$\(SYS\),Linux\)|SYS := \$\(shell uname -s\)
+match_keywords: uname,SYS,Linux,HarmonyOS,OHOS,make,Makefile,perf_event,undefined symbol,platform detection,gating
+category: platform-detection,build-system,make
+severity: medium
+root_cause: Makefile 型 C 库用 `SYS := $(shell uname -s)` 探测操作系统，并把 Linux 专属源文件（如 perf_event 支持）挂在 `ifeq ($(SYS),Linux)` 门控下。HarmonyOS 上 `uname -s` 返回 "HarmonyOS" 而非 "Linux"，导致整段源文件未编译进库，下游链接报 undefined symbol（本库实证：libpfm 4.13.0 的 lib/pfmlib_arm_perf_event.c 未进 libpfm.a，链接 tests/validate 报 pfm_arm_perf_validate_pattrs undefined）。
+rec_approach: 构建时用 make 变量覆盖 SYS=Linux（HarmonyOS 内核即 Linux 系，perf_event_open 等接口存在），使 Linux 门控源文件进入编译；不改上游源码。写法：`make SYS=Linux CC=<clang> ARCH=aarch64 ...`。适用于所有以 uname -s 探测 SYS 且用 ifeq ($(SYS),Linux) 门控的 Makefile 库。
+solution_cmds: |
+  # libpfm 4.13.0 实证（OHOS aarch64, clang 15）
+  make -j1 SYS=Linux CC=/data/service/hnp/bin/clang ARCH=aarch64 \
+       CONFIG_PFMLIB_NOPYTHON=y \
+       'DBG=-g -Wall -Werror -Wextra -Wno-unused-parameter -Wno-error=unused-but-set-variable -Wno-error=#warnings'
+  # 验证：libpfm.a 应包含 6 个 perf_event 对象
+  ar t lib/libpfm.a | grep -c perf_event   # -> 6
+verification: 覆盖 SYS=Linux 后库内 perf_event 对象出现，下游 validate 链接通过；74 个 PMU 事件表检查 + 51 个 ARM64 断言 + 3 个 perf 断言全部 Passed。未覆盖前链接报 undefined symbol。
+fallback: 若库对 SYS 分支有更强耦合（如 SYS 决定头文件路径），再考虑 sed 替换或补丁；优先 make 变量覆盖（零源码改动）。
+doc_refs: E090,E203
+applies_to: libpfm,make-based-libraries-with-ifeq-SYS-Linux-gating
+related_drafts: |
+  - K3(R02 修正): 上游 validate 的 5 个 struct ABI 自检（PFM_PMU_INFO_ABI0 等）在 64 位 aarch64 报 mismatch
+    (44 vs 56 / 48 vs 64 / 48 vs 64 / 20 vs 32 / 28 vs 40) 的根因实证为: OHOS musl 未定义 __WORDSIZE
+    （探针: _LP64 已定义而 __WORDSIZE=UNDEFINED），pfmlib.h 的 '#if __WORDSIZE == 64' 落入 else 分支取
+    32 位 ABI0 常量，与实际 64 位布局不符。属可修 musl libc 宏缺口（libc 探针类），修复=配方 make DBG
+    注入 -D__WORDSIZE=64（等价 glibc aarch64 行为），修复后 validate 'All tests passed' rc=0（5 mismatch→0，
+    74 表+51 ARM64+3 perf 仍全过）。恢复条件=工具链定义 __WORDSIZE 或上游改用 _LP64/__LP64__。
+    R01 中曾暂记为"上游校准伪影"，R02 实证为可修缺口，结论以本条目为准。
+  - K5(R02 新增): x86 事件表在 aarch64 交叉目标硬阻塞——开启 CONFIG_PFMLIB_ARCH_X86=y 后
+    lib/pfmlib_amd64.c:325 asm volatile("cpuid") 编译失败（cpuid 为 x86 独有 ISA，aarch64 无此指令/寄存器）。
+    阻塞归属=真实平台/ISA 硬阻塞，非配方可修；恢复条件=仅 x86_64 目标或带 cpuid 指令模拟的工具链。
+    与 E016（asm 不支持→disable-asm）同族但方案不同：本场景 cpuid 是 PMU 识别核心逻辑，无 no-asm 等价开关。
+  - K1(R02 强化): SYS 门控（uname -s 报 HarmonyOS → ifeq ($(SYS),Linux) 源未编入）修复 SYS=Linux 覆盖之外，
+    R02 逐类最小纳入实证: CONFIG_PFMLIB_ARCH_MIPS/y(14 通过)、ARM/y(32 通过)、POWERPC/y(31 通过) 均可在
+    OHOS aarch64 实际构建并运行 0 errors——架构门控值可独立开启，仅 x86 因 cpuid 硬阻塞不可。
+  - K2: clang15 + 上游默认 -Werror 的两类误报（unused-but-set-variable、OHOS sysroot <sys/poll.h> 重定向 #warning），
+    用 make 'DBG=...-Wno-error=unused-but-set-variable -Wno-error=#warnings' 最小放宽；sys/poll.h 部分与 E203 重叠。
+last_updated: 2026-09-08

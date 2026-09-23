@@ -1,0 +1,60 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_pcre2 LANGUAGES C)
+
+find_package(pcre2 CONFIG REQUIRED)
+
+foreach(required_path PCRE2_PACKAGE_ROOT PCRE2_PKGCONFIG_DIR)
+  if(NOT DEFINED ${required_path} OR "${${required_path}}" STREQUAL "")
+    message(FATAL_ERROR "${required_path} is required")
+  endif()
+endforeach()
+
+if(WIN32)
+  set(_pkg_config_path_separator ";")
+else()
+  set(_pkg_config_path_separator ":")
+endif()
+set(
+  ENV{PKG_CONFIG_PATH}
+  "${PCRE2_PKGCONFIG_DIR}${_pkg_config_path_separator}$ENV{PKG_CONFIG_PATH}"
+)
+find_package(PkgConfig REQUIRED)
+set(PKG_CONFIG_ARGN "--static")
+pkg_check_modules(PCRE2_PC REQUIRED IMPORTED_TARGET libpcre2-8)
+
+get_filename_component(_package_root "${PCRE2_PACKAGE_ROOT}" REALPATH)
+get_filename_component(_expected_pc_dir "${PCRE2_PKGCONFIG_DIR}" REALPATH)
+foreach(_variable pcfiledir prefix libdir includedir)
+  pkg_get_variable(_pc_${_variable} libpcre2-8 ${_variable})
+  get_filename_component(_pc_${_variable}_real "${_pc_${_variable}}" REALPATH)
+endforeach()
+if(NOT _pc_pcfiledir_real STREQUAL _expected_pc_dir)
+  message(FATAL_ERROR "pkg-config did not load the tested libpcre2-8.pc")
+endif()
+if(NOT _pc_prefix_real STREQUAL _package_root)
+  message(FATAL_ERROR "libpcre2-8.pc prefix escapes the tested package")
+endif()
+foreach(_variable libdir includedir)
+  string(FIND "${_pc_${_variable}_real}" "${_package_root}/" _package_prefix)
+  if(NOT _package_prefix EQUAL 0)
+    message(FATAL_ERROR "libpcre2-8.pc ${_variable} escapes the package")
+  endif()
+endforeach()
+
+enable_testing()
+
+foreach(width IN ITEMS 8 16 32)
+  add_executable(test_pcre2_${width} test_pcre2.c)
+  target_compile_definitions(test_pcre2_${width} PRIVATE PCRE2_CODE_UNIT_WIDTH=${width})
+  target_link_libraries(test_pcre2_${width} PRIVATE pcre2::${width}BIT)
+  add_test(NAME pcre2_${width}_api COMMAND test_pcre2_${width})
+endforeach()
+
+add_executable(test_pcre2_posix test_posix.c)
+target_link_libraries(test_pcre2_posix PRIVATE pcre2::POSIX)
+add_test(NAME pcre2_posix_api COMMAND test_pcre2_posix)
+
+add_executable(test_pcre2_pkgconfig test_pcre2.c)
+target_compile_definitions(test_pcre2_pkgconfig PRIVATE PCRE2_CODE_UNIT_WIDTH=8)
+target_link_libraries(test_pcre2_pkgconfig PRIVATE PkgConfig::PCRE2_PC)
+add_test(NAME pcre2_pkgconfig_api COMMAND test_pcre2_pkgconfig)

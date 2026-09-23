@@ -1,0 +1,187 @@
+# ═══ Draft knowledge entry — libvips 静态制品 codec 静默缺席（Meson feature option + pkg-config 名对齐） ═══
+# Timestamp: 2026-09-11
+# Software: vips (libvips) 8.18.4 / 8.18.4.1 (Meson, 可选编解码器全为 feature option)
+# Gate: 下游应用运行期（nip4 9.1.5 上游测试套件）+ conan create test_package
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the defect evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+
+id:                     DRAFT-vips-8.18.4.1-meson-codec-feature-pkgconfig
+trigger_tool:           meson|pkg-config|pkgconf|conan|PkgConfigDeps|vips
+phase:                  build|configure|package|runtime
+severity:               3
+category: >-
+  meson|feature-option|pkg-config|static-link|silent-disable|image-codec|
+  runtime-failure|test-blindspot|version-conflict|zlib|pic|package-id
+
+error_signature: |-
+  VipsForeignLoad: ".*" is not a known file format|
+  VipsForeignSave: ".*" is not a known file format|
+  is not a known file format|
+  Dependency "libjpeg" not found|Dependency "libpng" not found|
+  Run-time dependency .*jpeg.* found: NO|
+  jpeg: *DISABLED|png: *DISABLED|zlib: *DISABLED|
+  vips_foreign_find_load.*NULL|
+  Version conflict: Conflict between zlib/1\.3\.1 and zlib/1\.3\.1\.1
+
+match_keywords: >-
+  libvips, vips, meson feature option, project_options, auto disabled,
+  dependency('libjpeg'), dependency('libpng'), dependency('zlib'),
+  PkgConfigDeps pkg_config_name, libjpeg-turbo pkg_config_name detect,
+  pkg-config 名不对, codec 未编入, modules=disabled,
+  vips-modules runtime dir, VIPSHOME, is not a known file format,
+  vips_foreign_find_load, vips_jpegsave, vips_pngsave,
+  test_package 探测不到, nip4, _disabled_optional_features,
+  Version conflict zlib, glib2/2.88.0 zlib/1.3.1, libpng zlib/1.3.1.1,
+  override=True zlib, PIC 变体, 非 PIC libz.a, package_id 失配,
+  --build=missing 回退源码构建
+
+title: >-
+  libvips 静态制品的 codec「静默缺席」：Meson feature option 默认 auto 在
+  pkg-config 名对不上时静默 disabled，编译全绿、运行期才以
+  `VipsForeignLoad: "x.jpg" is not a known file format` 爆出；
+  test_package 只测核心算子时对该缺陷完全失明；开 PNG 还会
+  引爆 glib2/2.88.0(zlib/1.3.1) 与 libpng(zlib/1.3.1.1) 的
+  版本冲突，必须 override 到 **1.3.1.1** 而非 1.3.1
+
+root_cause: >-
+  1) libvips（Meson）把每个可选编解码器做成 `type: 'feature', value: 'auto'` 的
+  option（jpeg/png/zlib/tiff/webp/heif/...）。feature 的 auto 语义 = 找得到就启、
+  找不到就**静默 disabled**，既不报错也不影响 exit code。因此「编解码器没编进去」
+  这件事在 build 阶段没有任何信号。
+  2) 探测走 pkg-config：libvips 的 meson.build 依次
+  `dependency('libjpeg')` / `dependency('libpng', version: '>=1.2.9')` /
+  `dependency('zlib', version: '>=0.4')`。Conan 侧 PkgConfigDeps 生成的 .pc 名
+  取自每个包的 `pkg_config_name` 属性（缺省回落到包名）。三者必须同时对得上：
+  libjpeg-turbo 配方是「探测式」——把 install 出的 lib/pkgconfig/*.pc 排序取第一个
+  文件名 stem，得 `libjpeg`；libpng 配方显式声明 `libpng`；zlib 配方未声明→按包名得
+  `zlib`。任意一个对不上，对应 codec 静默掉，且**只在运行期**才暴露。
+  3) 运行期表现是「格式不认识」而非「codec 缺失」：
+  `VipsForeignLoad: "/path/photo.jpg" is not a known file format`——容易误判成
+  「文件路径错/权限错/文件名怪」，实际是 loader 根本没注册。
+  4) 反面样本：archives/v/vips/8.18.4 把**全部**可选特性硬编码进
+  `_disabled_optional_features()`（含 jpeg/png/zlib/tiff），且不暴露任何 codec
+  option → 其静态制品确定性地无法解码任何 JPEG/PNG。下游（nip4 上游 test-suite
+  31 项全要读 .jpg/.png）整套测试 0 可跑，报错全是上面那句。
+  5) **测试盲区**：8.18.4 的 test_package 只做 `vips_image_new_matrixv` +
+  `vips_avg`（纯内存算子，不碰图像 I/O）→ 「制品没有 codec」这个致命缺陷
+  在 CI 里 100% 不可见，能一路绿到合并、到下游才炸。
+  6) **开启 PNG 会顺带踩 zlib 版本冲突**：glib2/2.88.0 钉 zlib/1.3.1（非 PIC），
+  libpng/1.6.58 钉 zlib/1.3.1.1（PIC）→ Conan 直接报
+  `Version conflict: Conflict between zlib/1.3.1 and zlib/1.3.1.1 in the graph.
+  Conflict originates from glib2/2.88.0`（CI #44364 实测）。必须 consumer 侧
+  `self.requires("zlib/1.3.1.1", override=True)` 收口，且**只能收到 1.3.1.1**：
+  制品仓 libpng/1.6.58 二进制基于 1.3.1.1 构建，收到 1.3.1 会让 libpng 的
+  package_id 失配 → --build=missing 回退源码构建 → 撞沙箱 configure 失败。
+
+affected_scope: >-
+  一切消费「可选特性用 Meson feature option + pkg-config 探测」的静态 C/C++ 库
+  （libvips、gdk-pixbuf 的 jpeg、ffmpeg 系）；尤其是「配方把可选特性硬编码
+  disabled」的历史制品；以及 test_package 只覆盖纯内存/纯算法路径、不碰真实
+  I/O 的库；以及 glib2/2.88.0 与 libpng 同时入图的任何配方（zlib 版本冲突）。
+
+verification_cmd: |-
+  1) 构建后看 meson 摘要：grep -E '^\s+(jpeg|png|zlib)\s' builddir/meson-logs/meson-log.txt
+     或 configure 输出里 "jpeg: DISABLED" / "png: DISABLED"；
+  2) 制品取证：nm -D --defined-only libvips.so | grep -i jpeg；
+  3) 运行期：vips copy x.jpg out.png（无 codec 会报
+     VipsForeignLoad: "x.jpg" is not a known file format）；
+  4) CI 判据：conan create archives/v/vips/8.18.4.1 -pr:h ohos-aarch64
+     -pr:b ohos-aarch64 --build=missing，test_package 内
+     vips_foreign_find_load("test.jpg") 必须返回含 "jpeg" 的字符串。
+
+rec_priority:           1
+rec_approach:           explicit-enable-codecs-and-align-pkgconfig-names
+rec_description: >-
+  1) 新增 R 版本目录（不改已发布版本）：requirements() 加 libjpeg-turbo/3.2.0、
+  libpng/1.6.58（transitive_libs=True），并用
+  self.requires("zlib/1.3.1.1", override=True) 把整图 zlib 收口到 PIC 变体
+  （先例 abiword-plugin-pdf 3.0.8 / gmime 3.0.6 / awf-gtk 4.2.0）；
+  2) generate() 里对三个 feature 显式 tc.project_options[f] = "enabled"
+  （**不要留 auto**：auto 的静默 disabled 正是本坑的来源），同时把它们从
+  _disabled_optional_features() 移除，其余可选栈保持 disabled 控制风险面；
+  3) package_info().requires 只列 libjpeg-turbo / libpng 两个直接依赖；**zlib 不能列**
+  ——它只是 override=True 引入的图统一项，conan 会双向校验并中断打包：
+  "There are '(cpp_info/components).requires' that includes package 'zlib::', but
+  such package is not a direct requirement of the recipe"（CI #44368 实测）；
+  消费者仍经 libpng/glib2 传递拿到 -lz（同 gmime 3.0.6）；
+  4) 保持 modules=disabled：codec loader 直接编进 libvips 本体，运行期不需要
+  $VIPSHOME/lib/vips-modules-8.18/ 这类模块目录，少一类环境变量相关的现场问题；
+  5) test_package 必须自证 codec 存在：生成 16x16 三通道常量图 →
+  vips_jpegsave/vips_pngsave 落盘 → vips_foreign_find_load() 断言 loader 认领
+  扩展名 → 重新载入断言 尺寸/通道/像素（JPEG 容差 8，PNG 逐位精确）。
+rec_command:            conan create archives/v/vips/8.18.4.1 -pr:h ohos-aarch64 -pr:b ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               conan-recipe-meson-explicit-feature-options
+
+fallback_priority:      2
+fallback_approach:      build-and-publish-codec-augmented-vips-then-bump-consumer
+fallback_description: >-
+  若下游 PR 必须先绿：注意 --build=missing 只从制品仓拉缺失依赖，不会去仓库目录里
+  现编 → 新的 vips/8.18.4.1 必须先经本 PR 合并并由 release 流水线上传制品仓，下游把
+  requires("vips/8.18.4") 改成 vips/8.18.4.1 的下一个 PR 才可能 CI 转绿
+  （libxi→libxtst 同款时序）。
+fallback_command:       self.requires("vips/8.18.4.1", transitive_headers=True, transitive_libs=True)
+fallback_auto_fix:      false
+fallback_impl:          publish-then-bump-consumer-ordering
+
+forbid_1_pattern:       _disabled_optional_features\(\)[\s\S]{0,4000}?"jpeg"[\s\S]{0,4000}?"png"[\s\S]{0,4000}?"zlib"
+forbid_1_reason: >-
+  把 jpeg/png/zlib 与 tiff/heif 等一起塞进「默认全关」的禁用清单，等于保证制品无法
+  解码最常见的两种图像格式；下游一旦依赖图像 I/O 就整套测试不可跑（本坑实证）
+forbid_1_consequence: >-
+  编译全绿、CI 全绿、合并后下游运行期报 is not a known file format，排查代价极高
+
+forbid_2_pattern:       project_options\[\s*["'](jpeg|png|zlib)["']\s*\]\s*=\s*["']auto["']
+forbid_2_reason: >-
+  feature 的 auto = 探测不到就静默 disabled；pkg-config 名一旦对不上
+  （如把 libjpeg-turbo 的 .pc 名当成 libjpeg-turbo），构建期零信号
+forbid_2_consequence: >-
+  制品缺 codec 但 CI 全绿，缺陷被推迟到运行期/下游
+
+forbid_3_pattern:       test_package[\s\S]{0,2000}?vips_avg[\s\S]{0,2000}?return\s+0
+forbid_3_reason: >-
+  只做纯内存算子（vips_avg）的 test_package 无法证明任何图像 I/O 能力；
+  8.18.4 正因如此把这个致命缺陷藏到了合并之后
+forbid_3_consequence: >-
+  「测试通过」不等于「codec 可用」，下游才发现制品不可用
+
+forbid_4_pattern:       override=True\)[\s\S]{0,80}?zlib/1\.3\.1(?!\.)
+forbid_4_reason: >-
+  glib2/2.88.0 与 libpng 的 zlib 冲突有两种收口方向，收到 1.3.1（非 PIC、无 -fPIC
+  的旧版 libz.a）会让 libpng/1.6.58 的 package_id 失配，回退源码构建并撞沙箱
+  configure 失败
+forbid_4_consequence: >-
+  libpng 丢掉制品仓二进制 → --build=missing 现编 → C compiler cannot create
+  executables（E114 未修）构建中断
+
+forbid_5_pattern:       requires\([\s"']*zlib/[0-9.]+[\s"']*\)\s*$[\s\S]{0,200}?libpng
+forbid_5_reason: >-
+  libpng 是 zlib 的直接消费方，二者版本一旦分叉就是硬冲突；声明 libpng 时必须
+  同时给出 zlib override，不能指望 auto 解决
+forbid_5_consequence: >-
+  Conan 图上直接失败：Version conflict: Conflict between zlib/... in the graph.
+  Conflict originates from glib2/...
+
+principles:             P002, P011, P015
+similar_to:             E085, E999-DRAFT-libevdev-1.13.7-meson-harmonyos-uapi-header-probe
+conflicts_with:
+prerequisite_of:        DRAFT-nip4-9.1.5
+
+doc_file:               knowledge/drafts/DRAFT-vips-8.18.4.1-meson-codec-feature-pkgconfig.md
+last_updated:           2026-09-11
+source_event: >-
+  PR !9676 【依赖项】feat(vips): 8.18.4.1 启用 JPEG/PNG/zlib 编解码器；
+  证据链：nip4 PR !9517 CI #44345 全 31 项报 is not a known file format
+  （image 路径已由 symlink staging 修复）
+authors:                "2301_76770579"
+source_pr:              9676
+source_commit:          01dbb3636
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-11

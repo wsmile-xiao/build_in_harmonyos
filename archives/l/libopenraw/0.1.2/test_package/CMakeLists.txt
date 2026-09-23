@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libopenraw C)
+find_package(libopenraw REQUIRED)
+add_executable(test_libopenraw test_libopenraw.c)
+target_link_libraries(test_libopenraw PRIVATE libopenraw::libopenraw)
+enable_testing()
+add_test(NAME test_libopenraw COMMAND test_libopenraw)

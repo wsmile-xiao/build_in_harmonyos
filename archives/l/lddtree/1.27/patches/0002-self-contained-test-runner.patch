@@ -1,0 +1,186 @@
+--- a/Makefile
++++ b/Makefile
+@@ -1,20 +1,6 @@
+ 
+-check: lddtree.sh tests/Kyuafile Kyuafile
+-	kyua test || (kyua report --verbose && exit 1)
+-
+-tests/Kyuafile: $(wildcard tests/*_test)
+-	echo "syntax(2)" > $@.tmp
+-	echo 'test_suite("lddtree")' >> $@.tmp
+-	for i in $(notdir $(wildcard tests/*_test)); do \
+-		echo "atf_test_program{name='$$i',timeout=5}" >> $@.tmp ; \
+-	done
+-	mv $@.tmp $@
+-
+-Kyuafile:
+-	echo "syntax(2)" > $@.tmp
+-	echo "test_suite('alpine-conf')" >> $@.tmp
+-	echo "include('tests/Kyuafile')" >> $@.tmp
+-	mv $@.tmp $@
++check: lddtree.sh tests/lddtree_test tools/atf-sh-mini
++	sh tools/atf-sh-mini tests/lddtree_test
+ 
+ lint:
+ 	shellcheck -e SC3043 lddtree.sh
+--- /dev/null
++++ b/tools/atf-sh-mini
+@@ -0,0 +1,158 @@
++#!/bin/sh
++# tools/atf-sh-mini -- minimal ATF-compatible runner for lddtree's test suite.
++#
++# Runs tests/lddtree_test on systems that provide neither kyua nor atf-sh (e.g.
++# the HarmonyOS PC build environment).  It implements only the ATF shell API the
++# upstream tests use -- atf_get_srcdir, atf_test_case, atf_add_test_case,
++# atf_check (-s exit:N / -o / -e, match or not-match), atf_fail, atf_skip -- so
++# tests/lddtree_test and tests/test_env.sh stay byte-identical to upstream.
++# Usage: sh tools/atf-sh-mini tests/lddtree_test
++# Each case gets its own process and private working directory; a "N tests,
++# N passed, N failed, N skipped" summary and an "ASSERTIONS: total=N failures=M"
++# summary are printed and failures exit non-zero.
++
++[ $# -ge 1 ] || { echo "${0##*/}: usage: ${0##*/} TEST_PROGRAM" >&2; exit 2; }
++atf_prog=$1
++case $atf_prog in /*) ;; *) atf_prog=$PWD/$atf_prog ;; esac
++atf_srcdir=$(cd "$(dirname "$atf_prog")" && pwd -P) || exit 2
++# /tmp is read-only on this platform (R10): pick a writable scratch root and
++# export it so the tested /bin/sh inherits it for its own temporary files too.
++atf_tmp=${TMPDIR:-$HOME/tmp}
++mkdir -p "$atf_tmp" 2>/dev/null || atf_tmp=$PWD
++TMPDIR=$atf_tmp
++export TMPDIR
++atf_topdir=$(mktemp -d "$TMPDIR/atf-sh-mini.XXXXXX") || exit 2
++trap 'rm -rf "$atf_topdir"' EXIT
++
++# ---- ATF shell API -------------------------------------------------------
++# Assertion accounting: one atf_check call is one assertion no matter how many
++# -o/-e/-s specs it carries, and a failing atf_check or an atf_fail call is one
++# failure.  Each case body runs in its own subshell, so a tally is appended to
++# per-case files under $atf_topdir and summed by the parent afterwards.
++atf_count_assert() { echo x >>"$atf_case_asserts"; }
++atf_count_fail() { echo x >>"$atf_case_fails"; }
++atf_count_lines() {
++	atf_lines=0
++	while IFS= read -r atf_dummy; do
++		atf_lines=$((atf_lines + 1))
++	done <"$1"
++	printf '%s' "$atf_lines"
++}
++
++atf_get_srcdir() { printf '%s\n' "$atf_srcdir"; }
++atf_test_case() { :; }			# names arrive through atf_add_test_case
++atf_add_test_case() { atf_cases="$atf_cases $1"; }
++atf_report() { printf '%s: %s\n' "$atf_cur_case" "$*" >&2; }
++atf_show() { sed -e 's/^/    | /' "$1" >&2; }
++atf_fail() { atf_count_assert; atf_count_fail; atf_report "FAILED: $*"; exit 1; }
++atf_skip() { atf_report "SKIPPED: $*"; exit 77; }
++
++# Validate a newline-separated -o/-e spec list against a captured stream:
++# $1=specs, $2=stream name, $3=file.  An absent spec list means "must be empty".
++atf_match() {
++	atf_oldifs=$IFS
++	IFS='
++'
++	if [ -z "$1" ]; then
++		[ -s "$3" ] || { IFS=$atf_oldifs; return; }
++		atf_ok=no
++		atf_report "$2 expected to be empty, got:"
++		atf_show "$3"
++	else
++		# match:RE needs grep to succeed (inv=0), not-match:RE needs it to fail.
++		for atf_spec in $1; do
++			case $atf_spec in
++			match:*)     atf_re=${atf_spec#match:};     atf_inv=0 ;;
++			not-match:*) atf_re=${atf_spec#not-match:}; atf_inv=1 ;;
++			*) IFS=$atf_oldifs; atf_fail "atf_check: unsupported check '$atf_spec'" ;;
++			esac
++			grep -E -q -e "$atf_re" "$3"
++			if [ "$?" -ne "$atf_inv" ]; then
++				atf_ok=no
++				atf_report "$2 mismatch on '$atf_re', got:"
++				atf_show "$3"
++			fi
++		done
++	fi
++	IFS=$atf_oldifs
++}
++
++atf_check() {
++	atf_want_status=0
++	atf_spec_out=
++	atf_spec_err=
++	while [ $# -gt 0 ]; do
++		case $1 in
++		--) shift; break ;;
++		-s|-o|-e)
++			atf_opt=$1; shift
++			case $atf_opt in
++			-s) atf_want_status=${1#exit:} ;;
++			-o) atf_spec_out="$atf_spec_out$1
++" ;;
++			-e) atf_spec_err="$atf_spec_err$1
++" ;;
++			esac ;;
++		-*) atf_fail "atf_check: unsupported option '$1'" ;;
++		*) break ;;
++		esac
++		shift
++	done
++	[ $# -gt 0 ] || atf_fail "atf_check: no command given"
++
++	atf_count_assert
++	"$@" >"$atf_out" 2>"$atf_err"
++	atf_status=$?
++	atf_ok=yes
++	[ "$atf_status" -eq "$atf_want_status" ] || {
++		atf_ok=no
++		atf_report "exit status was $atf_status, expected $atf_want_status"
++	}
++	atf_match "$atf_spec_out" stdout "$atf_out"
++	atf_match "$atf_spec_err" stderr "$atf_err"
++	[ "$atf_ok" = yes ] && return 0
++	atf_count_fail
++	atf_failed=1
++	return 1
++}
++
++# ---- load the test program and run every registered case -----------------
++. "$atf_prog" || { echo "${0##*/}: cannot load $atf_prog" >&2; exit 2; }
++atf_cases=
++atf_init_test_cases
++atf_total=0; atf_passed=0; atf_nfailed=0; atf_nskipped=0; atf_exit=0
++atf_asserts=0; atf_assert_fails=0
++for atf_case in $atf_cases; do
++	atf_total=$((atf_total + 1))
++	atf_cur_case=$atf_case
++	atf_dir=$atf_topdir/$atf_total
++	atf_out=$atf_dir/out; atf_err=$atf_dir/err
++	atf_case_asserts=$atf_dir/asserts; atf_case_fails=$atf_dir/fails
++	mkdir -p "$atf_dir/work" || exit 2
++	: >"$atf_case_asserts"; : >"$atf_case_fails"
++	(
++		atf_failed=0
++		cd "$atf_dir/work" || exit 1
++		"${atf_case}_body"
++		atf_body_rc=$?
++		[ "$atf_failed" -eq 0 ] || exit 1
++		exit "$atf_body_rc"
++	) >"$atf_dir/log" 2>&1
++	atf_rc=$?
++	atf_n=$(atf_count_lines "$atf_case_asserts")
++	atf_asserts=$((atf_asserts + atf_n))
++	atf_n=$(atf_count_lines "$atf_case_fails")
++	atf_assert_fails=$((atf_assert_fails + atf_n))
++	case $atf_rc in
++	0)  atf_passed=$((atf_passed + 1));	atf_verdict=PASS ;;
++	77) atf_nskipped=$((atf_nskipped + 1));	atf_verdict=SKIP ;;
++	*)  atf_nfailed=$((atf_nfailed + 1));	atf_verdict=FAIL; atf_exit=1 ;;
++	esac
++	printf '%-32s %s\n' "$atf_case" "$atf_verdict"
++	[ "$atf_rc" = 0 ] || atf_show "$atf_dir/log"
++done
++echo
++printf '%s tests, %s passed, %s failed, %s skipped\n' \
++	"$atf_total" "$atf_passed" "$atf_nfailed" "$atf_nskipped"
++printf 'ASSERTIONS: total=%s failures=%s\n' "$atf_asserts" "$atf_assert_fails"
++exit $atf_exit

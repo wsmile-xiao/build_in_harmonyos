@@ -1,0 +1,65 @@
+# ═══ Draft knowledge entry — OHOS clang 15 / libc++ 15 的 C++20 能力缺口 ═══
+# Timestamp: 2026-09-12
+# Software: cdo 2.6.3（适用于所有在 OHOS clang 15 上构建的 C++20 项目）
+# Gate: conan create build()（configure 阶段 #error / 编译阶段 lambda 捕获报错）
+# Status: DRAFT — needs review to promote to E-entry
+
+id:                     draft-ohos-clang15-libcxx-cxx20-capability-gaps
+trigger_tool:           clang++|conan
+phase:                  configure|build
+error_signature:        C++20 Ranges library is Not Available!|
+                        no type named 'sort' in namespace 'std::ranges'|
+                        no member named 'views' in namespace 'std::ranges::views'|
+                        in capture list does not name a variable|
+                        reference to local binding .* declared in enclosing function
+
+severity:               2
+category:               platform|toolchain|compiler|c++
+match_keywords:         std::ranges, std::views, __cpp_lib_ranges,
+                        _LIBCPP_HAS_NO_INCOMPLETE_RANGES, _LIBCPP_ENABLE_EXPERIMENTAL,
+                        _LIBCPP_VERSION 15004, structured binding, P1091R3,
+                        lambda capture, clang 15, C++20, r11
+title:                  OHOS clang 15 + libc++ 15 的 C++20 能力缺口：ranges 需实验宏且特性宏值低于标准，结构化绑定不能被 lambda 捕获
+
+root_cause: OHOS clang 15.0.4 自带的 libc++ 15.0.4 把 C++20 ranges 归入"不完整特性"：
+  __config 中 `#if !defined(_LIBCPP_ENABLE_EXPERIMENTAL) && !defined(_LIBCPP_BUILDING_LIBRARY)`
+  会定义 _LIBCPP_HAS_NO_INCOMPLETE_RANGES，于是 std::ranges::sort/fill/fill_n/find/
+  max_element 等全部不存在、`__cpp_lib_ranges` 甚至没有定义（探针：-std=gnu++20 编译
+  `#include <version> <ranges>` 后宏未定义）。加 -D_LIBCPP_ENABLE_EXPERIMENTAL 后
+  ranges 可用，但 `__cpp_lib_ranges` 只有 201811L（标准 C++20 最终值是 202110L），
+  凡是按 `#if __cpp_lib_ranges >= 201911L` 判定的上游头文件仍会直接 #error。
+  另外 std::views::split / std::views::zip 在实验模式下依然缺失（仅由
+  __cpp_lib_ranges_zip 等宏守卫，说明上游通常已备好手写分支）。
+  同一套工具链的 clang 15 也尚未实现 P1091R3（lambda 捕获结构化绑定，clang 17 才有），
+  `auto [a,b] = f(); ... [a,b](){...}` 会报 "in capture list does not name a variable"。
+
+affected_scope: 所有在 OHOS clang 15/libc++ 15 上构建、并在源码里使用 std::ranges 算法/概念或
+  结构化绑定捕获的 C++20 项目（本次实证：cdo 2.6.3；cdo 的 cpp_lib.h 用
+  `__cpp_lib_ranges >= 201911L` 判定，共 4 处 lambda 捕获结构化绑定）。
+
+verification_cmd: conan create . -pr:h=ohos-aarch64-wsl -pr:b=default（cdo/2.6.3，2026-09-12：configure
+  通过、aarch64 ELF 产物生成）；探针：
+  echo '#include <version>
+  #include <ranges>' | <ohos-clang++> -std=gnu++20 -E -x c++ - | grep __cpp_lib_ranges
+
+rec_priority:           1
+rec_approach:           libcpp-experimental-ranges-plus-feature-macro-guard
+rec_description: ① recipe 的 CXXFLAGS 增加 `-D_LIBCPP_ENABLE_EXPERIMENTAL`（打开 libc++ 的实验性
+  ranges；实测该工程用到的全部 ranges 算法与概念可用）；
+  ② 对上游按 `__cpp_lib_ranges >= 201911L` 判定的头文件，改判为
+  `#if defined(__cpp_lib_ranges)`（标准特性宏探测，不引入平台宏）；
+  ③ 对 lambda 捕获结构化绑定的位置，先把绑定拷贝成普通局部变量再捕获（语义不变）。
+rec_command: 补丁示例见 archives/c/cdo/2.6.3/patches/0002-cpp-lib-incomplete-ranges.patch 与
+  0004/0005-*-lambda-structured-binding.patch；CXXFLAGS 示例：
+  tc.extra_cxxflags.append("-std=gnu++20"); tc.extra_cxxflags.append("-D_LIBCPP_ENABLE_EXPERIMENTAL")
+rec_auto_fix:           partial
+rec_impl:               recipe-cxxflags + upstream-header-guard-patch + capture-copy-patch
+
+fallback_priority:      2
+fallback_approach:      per-file-feature-detection
+fallback_description: 若不允许全局打开实验特性：可对用到 ranges 的 TU 单独加 -D_LIBCPP_ENABLE_EXPERIMENTAL，
+  或把 std::ranges::X(...) 手写替换为对应的 `std::X(v.begin(), v.end(), ...)`
+  （机械等价，但改动面大，仅作兜底）。std::views::split/zip 缺位时改为手写循环。
+
+doc_file:               knowledge/drafts/DRAFT-ohos-clang15-libcxx-cxx20-capability-gaps.md
+related:                E292（大型 C++ 数据处理库的 C++20 标准库能力边界，预审相似度 0.33）；cdo/2.6.3（archives/c/cdo/2.6.3/notes.md）；同类工具链缺口记录见 knowledge/drafts/DRAFT-6487-classads-libcxx-missing-string-out-instantiation.kv

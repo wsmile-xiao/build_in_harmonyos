@@ -1,0 +1,213 @@
+--- a/taskflow/utility/object_pool.hpp
++++ b/taskflow/utility/object_pool.hpp
+@@ -1,21 +1,42 @@
+ #pragma once
+ 
+ #include <array>
+ #include <cstddef>
+ #include <cstdint>
+-#include <memory_resource>
+ #include <memory>
+ #include <atomic>
+ #include <thread>
+ #include <utility>
+ #include "os.hpp"
++
++// Feature detection for the C++17 polymorphic memory resources. The OHOS SDK
++// (ohos-sdk_26.0.0.18) ships a libc++ 15 variant whose public header set omits
++// <memory_resource> and whose libraries export no std::pmr symbols, so the
++// backing pool falls back to the self-contained pool defined below.
++#if defined(__has_include)
++  #if __has_include(<memory_resource>)
++    #define TF_HAS_STD_PMR 1
++  #endif
++#endif
++
++#ifndef TF_HAS_STD_PMR
++  #define TF_HAS_STD_PMR 0
++#endif
++
++#if TF_HAS_STD_PMR
++  #include <memory_resource>
++#else
++  #include <mutex>
++  #include <new>
++  #include <vector>
++#endif
+ 
+ /**
+ @file object_pool.hpp
+ @brief object pool include file
+ */
+ 
+ namespace tf {
+ 
+ // ----------------------------------------------------------------------------
+ // TaggedHead128
+@@ -397,46 +418,166 @@
+ 
+ @par Chunk Amortization
+ 
+ When the hot-path stack is empty, a single @c std::pmr::synchronized_pool_resource::allocate
+ call acquires a mutex and either reuses a chunk or allocates a new one from
+ the system allocator. With @c max_blocks_per_chunk = 1024, one mutex acquisition
+ amortizes to ~1024 subsequent lock-free pops, yielding negligible mutex overhead
+ (roughly 0.001 mutex cost per allocation).
+ 
+ */
++#if !TF_HAS_STD_PMR
++
++// ----------------------------------------------------------------------------
++// SynchronizedBlockPool
++// ----------------------------------------------------------------------------
++
++/**
++@brief thread-safe fixed-size block pool used when the standard library has no
++       @c <memory_resource>
++
++The OHOS SDK (ohos-sdk_26.0.0.18) ships a libc++ 15 variant whose public header
++set omits @c <memory_resource> and whose libraries export no @c std::pmr
++symbols, so @c std::pmr::synchronized_pool_resource is unavailable there.
++
++This class provides the subset of the @c synchronized_pool_resource interface
++that @c tf::ObjectPool relies on — @c allocate, @c deallocate and @c release —
++with the same observable behaviour: a mutex-protected free list of recycled
++blocks that is grown in chunks of @c blocks_per_chunk blocks, so a single lock
++acquisition amortises over a whole chunk. Unlike @c synchronized_pool_resource,
++which maintains one pool per rounded-up block size, this pool serves a single
++block size; requests larger than that (or more strictly aligned) bypass the
++pool and go straight to @c ::operator new / @c ::operator delete.
++*/
++class SynchronizedBlockPool {
++
++  public:
++
++  SynchronizedBlockPool(
++    size_t block_size, size_t block_alignment, size_t blocks_per_chunk
++  ) :
++    _block_size      {block_size},
++    _block_alignment {block_alignment},
++    _blocks_per_chunk{blocks_per_chunk == 0 ? 1 : blocks_per_chunk} {
++  }
++
++  SynchronizedBlockPool(const SynchronizedBlockPool&) = delete;
++  SynchronizedBlockPool& operator=(const SynchronizedBlockPool&) = delete;
++
++  ~SynchronizedBlockPool() {
++    release();
++  }
++
++  void* allocate(size_t bytes, size_t alignment) {
++    if(bytes > _block_size || alignment > _block_alignment) {
++      // bypass the pool, mirroring polymorphic_allocator's upstream fallback
++      return ::operator new(bytes, std::align_val_t{alignment});
++    }
++    std::lock_guard<std::mutex> lock(_mutex);
++    if(_free_head == nullptr) {
++      _grow();
++    }
++    void* block = _free_head;
++    _free_head = *reinterpret_cast<void**>(block);
++    return block;
++  }
++
++  void deallocate(void* p, size_t bytes, size_t alignment) {
++    if(p == nullptr) {
++      return;
++    }
++    if(bytes > _block_size || alignment > _block_alignment) {
++      ::operator delete(p, bytes, std::align_val_t{alignment});
++      return;
++    }
++    std::lock_guard<std::mutex> lock(_mutex);
++    *reinterpret_cast<void**>(p) = _free_head;
++    _free_head = p;
++  }
++
++  void release() {
++    std::lock_guard<std::mutex> lock(_mutex);
++    for(void* chunk : _chunks) {
++      ::operator delete(chunk, std::align_val_t{_block_alignment});
++    }
++    _chunks.clear();
++    _free_head = nullptr;
++  }
++
++  private:
++
++  void _grow() {
++    void* chunk = ::operator new(
++      _block_size * _blocks_per_chunk, std::align_val_t{_block_alignment}
++    );
++    // Strong exception safety: if registering the chunk throws (std::vector
++    // growth can raise std::bad_alloc), release it instead of leaking. The
++    // chunk is deliberately recorded before any block is linked into the free
++    // list, so release() always sees every allocation this pool owns.
++    try {
++      _chunks.push_back(chunk);
++    }
++    catch(...) {
++      ::operator delete(chunk, std::align_val_t{_block_alignment});
++      throw;
++    }
++    char* base = static_cast<char*>(chunk);
++    for(size_t i = 0; i < _blocks_per_chunk; ++i) {
++      void* block = base + i * _block_size;
++      *reinterpret_cast<void**>(block) = _free_head;
++      _free_head = block;
++    }
++  }
++
++  size_t _block_size;
++  size_t _block_alignment;
++  size_t _blocks_per_chunk;
++
++  std::mutex _mutex;
++  void* _free_head {nullptr};
++  std::vector<void*> _chunks;
++};
++
++#endif
++
+ template <typename T, typename H = TaggedHead128, size_t LogSize = 5>
+ class ObjectPool {
+ 
+   static_assert(LogSize >= 1 && LogSize <= 15,
+     "LogSize must be in [1, 15]");
+ 
+   using Block = ObjectBlock<T>;
+ 
+   static constexpr size_t NumPools = 1u << LogSize;
+ 
+   struct alignas(TF_CACHELINE_SIZE) Shard {
+ 
+     // Hot path: lock-free Treiber stack of recycled blocks.
+     // _free_head sits on its own cache line (via the Shard alignas) so that
+     // hot-path CAS does not invalidate the line holding _backing's mutex.
+     std::atomic<H> _free_head {H{}};
+ 
+     // Cold path: backing allocator for fresh block memory.
+     // alignas pushes _backing to the next cache line, separating it from the
+     // hot _free_head above and preventing hot/cold false sharing.
++#if TF_HAS_STD_PMR
+     alignas(TF_CACHELINE_SIZE) std::pmr::synchronized_pool_resource _backing {
+       std::pmr::pool_options {
+         .max_blocks_per_chunk        = 1024,
+         .largest_required_pool_block = sizeof(Block)
+       }
+     };
++#else
++    alignas(TF_CACHELINE_SIZE) SynchronizedBlockPool _backing {
++      sizeof(Block), alignof(Block), 1024
++    };
++#endif
+ 
+     void push_free(Block* b) noexcept {
+       H cur = _free_head.load(std::memory_order_relaxed);
+       H next;
+       do {
+         // relaxed: the release CAS below synchronises-with pop_free's acquire,
+         // making this store visible to any thread that subsequently observes b
+         // at the head of the list.
+         b->next_free.store(
+           reinterpret_cast<Block*>(cur.get_ptr()), std::memory_order_relaxed);

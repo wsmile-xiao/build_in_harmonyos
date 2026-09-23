@@ -1,0 +1,166 @@
+#====================================================================
+# DRAFT-script-hardcoded-fhs-paths-need-patch-to-selflocate
+#   —— 纯脚本包硬编码 FHS 绝对路径：DESTDIR 改不了脚本内部，必须 patch 引入自定位
+# 对应人类文档: knowledge/drafts/DRAFT-script-hardcoded-fhs-paths-need-patch-to-selflocate.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9592 cron-apt 0.13.0.1 适配
+# 与既有条目的关系（互补，非重复）:
+#   DRAFT-script-selflocate-layout-mismatch（bork）—— 脚本**已有**自定位
+#     （BASH_SOURCE 推导），但 conanfile 的安装布局与之不匹配 → 交付包不可用。
+#     方向：**让布局去适配已有的自定位**。
+#   本条目（cron-apt）—— 脚本**根本没有**自定位，全是硬编码 /usr/... 绝对路径
+#     → 无论怎么装都指不到包内。方向：**patch 脚本、引入自定位**。
+#     两者的触发场景（做同类包时先判断属于哪一类）与修法都不同。
+#   E188（OHOS toybox install 功能受限）—— 讲 `make install` 这一步能否执行；
+#     本条目讲**即使 install 成功**，脚本内部写死的绝对路径依然指不到包内。
+#====================================================================
+
+id:                     DRAFT-script-hardcoded-fhs-paths-need-patch-to-selflocate
+trigger_tool:           conan|make|sh
+phase:                  packaging
+error_signature:        .*: No such file or directory|
+                         (functions|helpers)\.sh: not found|
+                         /usr/share/[a-z-]+/(functions|lib|.*\.sh).*No such file|
+                         /etc/[a-z-]+/.*not found|
+                         cannot open.*\/usr\/share\/[a-z-]+
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               packaging, shell, conan, install-layout, fhs, script
+match_keywords:         SHAREDIR, LIBDIR, LOGDIR, ACTIONDIR, ACTIONCONFDIR, DESTDIR,
+                         hardcoded absolute path, /usr/share, /etc, /var/log,
+                         source functions, shell script package,
+                         self-locating script, dirname $0, script packaging,
+                         conan package_folder, pure shell package, no-compile package
+title:                  纯脚本包硬编码 FHS 绝对路径（/usr/share、/etc）时，DESTDIR 只改安装前缀、改不了脚本内部——必须 patch 引入自定位
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             纯 shell 脚本包（无编译）常在脚本顶部把 FHS 路径**写死为绝对路径**，
+                         随后 `source`/`.` 这些路径下的伴随文件。实测 cron-apt 0.13.0.1 的
+                         src/cron-apt 有 **13 处**（实测 `grep -cE '^[A-Z_]+="/' src/cron-apt`）：
+                             LIBDIR="/var/lib/cron-apt"              # :194
+                             SHAREDIR="/usr/share/cron-apt"          # :195  ← 唯一影响**加载**的
+                             ACTIONDIR="/etc/cron-apt/action.d"      # :223
+                             ACTIONCONFDIR="/etc/cron-apt/config.d"  # :224
+                             MAILMSGDIR="/etc/cron-apt/mailmsg.d"    # :225
+                             MAILONMSGSDIR="/etc/cron-apt/mailonmsgs"    # :226
+                             SYSLOGONMSGSDIR="/etc/cron-apt/syslogonmsgs" # :227
+                             REFRAINFILE="/etc/cron-apt/refrain"     # :228
+                             ERRORMSGDIR="/etc/cron-apt/errormsg.d"  # :230
+                             SYSLOGMSGDIR="/etc/cron-apt/syslogmsg.d" # :231
+                             LOGMSGDIR="/etc/cron-apt/logmsg.d"      # :232
+                             LOGDIR="/var/log/cron-apt"              # :233
+                             APTCOMMAND="/usr/bin/apt-get"           # :257
+                         并在 :294 `. $SHAREDIR/functions` 加载辅助函数 ——
+                         故其中 **SHAREDIR 是唯一会导致「脚本根本跑不起来」的一处**，
+                         其余多为运行期读写位置（/etc、/var/log），影响的是功能而非加载。
+                         而 conan 包**不能写系统路径**（产物必须自包含在 package_folder 内）。
+                         关键认知：`make install DESTDIR=<pkg>` 只能把**安装动作**重定向到
+                         包内目录，**改不了脚本文件内部写死的字符串**——脚本运行时仍去
+                         `/usr/share/cron-apt/functions` 找，找不到即失败：
+                             .: /usr/share/cron-apt/functions: No such file or directory
+                         这类问题在 CI 里**可能被掩盖**：若 test_package 只断言"文件存在于
+                         包内某处"，而从不真实执行脚本，缺陷就不会暴露。
+                         ⚠️ 先判类别：若脚本**已**用 `$(dirname $0)` / BASH_SOURCE 自定位
+                         却仍失败，那是**布局不匹配**（见 DRAFT-script-selflocate-layout-
+                         mismatch），修 conanfile；若**根本没自定位**（本条），必须 patch 脚本。
+affected_scope:         OHOS 上所有"无编译 + 脚本内写死 FHS 绝对路径"的包：POSIX shell /
+                         bash 工具、Debian 原生包（cron-apt 类）、以及任何把 lib/helper
+                         装在 /usr/share/<pkg>/ 再 source 的脚本工具；同样适用于需要读
+                         /etc/<pkg>/ 配置、写 /var/log/<pkg>/ 的包
+verification_cmd:       # 1) 找出脚本里所有硬编码的 FHS 路径
+                         grep -nE '^[A-Z_]+="/(usr|etc|var|opt)/' <src>/<script>
+                         # 2) 确认它被用于 source（决定是否致命）
+                         grep -nE '^\s*\.\s*"\$[A-Z_]+' <src>/<script>
+                         # 3) 在包内实际执行脚本，看是否报 not found（防假通过）
+                         <pkg>/bin/<script> --help
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           patch-script-to-selflocate-with-env-override
+rec_description:        在 conanfile 的 `source()` 里 patch 脚本，把写死的 FHS 绝对路径改为
+                         **脚本自定位 + 环境变量覆盖**双层回退，并让 `package()` 按推导出的
+                         布局落盘。cron-apt 实测有效的写法（POSIX 兼容）：
+                             if [ -n "${PKG_SHAREDIR:-}" ] ; then
+                                 SHAREDIR="$PKG_SHAREDIR"
+                             else
+                                 SHAREDIR="$(cd "$(dirname "$0")/../share/<pkg>" 2>/dev/null && pwd -P)"
+                                 [ -d "$SHAREDIR" ] || SHAREDIR="/usr/share/<pkg>"
+                             fi
+                         要点：
+                         ① 用 `$0`（POSIX）而非 `${BASH_SOURCE[0]}`（bash 扩展；toybox sh
+                            不支持——见 E043）；
+                         ② 保留**系统路径兜底**，使脚本在「装到系统前缀」的部署方式下仍可用；
+                         ③ 提供环境变量覆盖（如 CRON_APT_SHAREDIR），便于测试与自定义布局；
+                         ④ 一并 patch 写日志/读配置类路径（如 LOGDIR / ACTIONCONFDIR），
+                            或改为可写目录，否则运行时仍会因 /etc、/var/log 不可写而失败；
+                         ⑤ 配套：**不调用 `make install`**（OHOS 无 coreutils install，见 E188），
+                            改由 conan 的文件工具按 patch 后的布局直接复制落盘，避免"patch 推导
+                            出的布局"与"Makefile 安装的布局"两套逻辑打架。
+rec_command:            # 判别类别（先做这步再动手）
+                         grep -nE 'dirname|BASH_SOURCE' <src>/<script>   # 有 → 属布局不匹配类
+                         # 找出硬编码路径
+                         grep -nE '^[A-Z_]+="/(usr|etc|var)/' <src>/<script>
+                         # 以 conan 文件工具替代 make install（示例）
+                         #   copy(self, "cron-apt", src=os.path.join(sf,"src"),
+                         #        dst=os.path.join(pf,"bin"), keep_path=False)
+                         #   copy(self, "functions", src=os.path.join(sf,"src"),
+                         #        dst=os.path.join(pf,"share","cron-apt"), keep_path=False)
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      install-gnu-coreutils-and-keep-absolute-paths
+fallback_description:   若不便 patch 脚本（如多脚本共享同一常量、或上游频繁变更），可改走
+                         "让绝对路径真的存在"的路线：装 GNU coreutils（E188 方案 2）并借助
+                         DESTDIR/prefix 把文件放到脚本期望的位置。但 conan 包**不允许写
+                         系统绝对路径**，故该路线只在"包内模拟前缀 + 运行时注入"时成立，
+                         复杂度与脆弱性都高于 patch；**且必须真实执行脚本验证**，不能只断言
+                         文件存在
+fallback_command:       # 参考 E188：从 cmd-pkgs 安装 GNU coreutils 9.10 提供完整 install
+                         conan install --requires=coreutils/9.10 -r=ohpcd
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只加 DESTDIR.*就算适配|DESTDIR.*即可.*(脚本|shell)|make install DESTDIR.*完成
+forbid_1_reason:        DESTDIR 只改安装动作的目标前缀，改不了脚本文件内部写死的绝对路径字符串
+forbid_1_consequence:   包能装但脚本运行时报 not found，交付包不可用；CI 若只断言文件存在则被掩盖
+forbid_2_pattern:       test_package.*只断言.*(存在|exist)|断言文件存在.*即可|ls .*包内.*通过
+forbid_2_reason:        存在性断言无法发现"路径指不到"，纯脚本包必须**真实执行**才有效
+forbid_2_consequence:   假通过——缺陷在用户侧才暴露（源码声明的功能全部不可用）
+forbid_3_pattern:       BASH_SOURCE.*用于.*(sh|POSIX)|用 \$\{BASH_SOURCE\[0\]\}.*自定位
+forbid_3_reason:        BASH_SOURCE 是 bash 扩展，toybox sh 下为空（E043）——纯 sh 包不可用
+forbid_3_consequence:   自定位结果为空 → 路径为空 → 报错更晦涩
+
+principles:
+similar_to:             DRAFT-script-selflocate-layout-mismatch, E188, E043
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-11
+source_event:           cron-apt/0.13.0.1（PR #9592）—— src/cron-apt 实测 **13 处**硬编码
+                         FHS 绝对路径（`grep -cE '^[A-Z_]+="/'`）。其中 **SHAREDIR
+                         ="/usr/share/cron-apt"（:195）是唯一影响加载的一处** ——
+                         :294 `. $SHAREDIR/functions` 加载伴随的辅助函数，找不到即脚本
+                         根本跑不起来；其余（LIBDIR :194、ACTIONDIR :223、ACTIONCONFDIR
+                         :224、MAILMSGDIR :225、MAILONMSGSDIR :226、SYSLOGONMSGSDIR :227、
+                         REFRAINFILE :228、ERRORMSGDIR :230、SYSLOGMSGDIR :231、LOGMSGDIR
+                         :232、LOGDIR :233、APTCOMMAND :257）多为运行期读写位置（/etc、
+                         /var/log），影响功能而非加载。
+                         OHOS 无 coreutils install（E188）故不调 make install，配方改用
+                         conan 文件工具落盘，并 patch SHAREDIR 为脚本自定位
+                         （dirname $0 上一级 + share/cron-apt）+ CRON_APT_SHAREDIR 覆盖；
+                         conan create EXIT=0，test_package 真实执行 --help PASS。
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9592
+source_commit:          ee7a75372
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true

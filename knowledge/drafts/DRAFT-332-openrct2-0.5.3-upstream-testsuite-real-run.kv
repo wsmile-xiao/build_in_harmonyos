@@ -1,0 +1,127 @@
+#====================================================================
+# DRAFT-332-openrct2-0.5.3-upstream-testsuite-real-run — rule4 新口径下
+# 上游 GTest 套件在 conan create 流程内全量真实执行（ctest 逐用例）
+# 触发事件: PR #9656 人工审核 2026-09-13 14:38 rule4 FAIL——上游 222 用例
+#   0 测被拒，新口径"平台限制/缺依赖/无环境等理由均不接受"。
+#   修复后 conan create 内 ctest 274/274 通过（0 失败 0 跳过 0 豁免）。
+#====================================================================
+
+id:                     DRAFT-332
+trigger_tool:           conan|cmake|ctest|clang++
+phase:                  testing|packaging
+error_signature:        rule4.*0/222.*不通过|
+                         上游有用例.*一个也没测|
+                         gtest/gtest.h.*file not found|
+                         undefined symbol: testing::internal::GetBoolAssertionFailureMessage|
+                         Werror.*Wsign-compare.*gtest|
+                         Unable to open park: missing objects|
+                         gtest_INCLUDE_DIRS_RELEASE. \)$
+severity:               2
+category:               conan|testing|gtest|ctest|test-requires|assets|cmake
+match_keywords:         rule4, WITH_TESTS, test_requires, tool_requires, visible,
+                         build_context_activated, gtest, GTest, find_package,
+                         ctest, gtest_discover_tests, 测试资产, replays.zip,
+                         objects.zip, openmusic, assets.json, TEST_P 参数化,
+                         静态用例数, 运行时展开, conan create, 上游测试, 真实执行,
+                         sign-compare, LD_LIBRARY_PATH, conanbuild, conanrun
+
+title:                  rule4 新口径下上游 GTest 套件在 conan create 内真实执行：test_requires 正解 + 测试资产三件套 + ctest 逐用例
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: |
+  人工审核新口径：上游有用例而 0 测（平台限制/缺依赖/无环境等理由均不接受）。
+  上游测试无法跑通的四大根因（openrct2 0.5.3 实证，逐个解决）：
+  1) GTest 依赖缺失：上游 tests/CMakeLists 用 find_package(GTest REQUIRED)，
+     CI 无系统 gtest 且 FetchContent 网络不可达。
+     【关键坑】conan 2.29.1 用 tool_requires("gtest/x", visible=True) +
+     CMakeDeps.build_context_activated=["gtest"] 虽能生成 GTestConfig.cmake，
+     但 build context 下组件 cpp_info 渲染不完整——gtest_*_LIBS_RELEASE 与
+     gtest_*_INCLUDE_DIRS_RELEASE 均为空 → 'gtest/gtest.h' file not found +
+     链接期 undefined symbol: testing::internal::GetBoolAssertionFailureMessage。
+     【正解】test_requires = "gtest/x.y.z"（conan 2 为测试框架设计的语义）：
+     不进包运行时依赖图（pkgid 不变）+ CMakeDeps 按完整 cpp_info 渲染
+     （LIBS/INCLUDE_DIRS 全有值）。
+  2) 测试数据资产缺失（上游 CMake 在 install 期经 DESTDIR 语义下载，conan
+     流程不可达）：
+     - replays.zip（TEST_P 参数化输入）→ source() 期解压进源码树
+       test/tests/testdata/replays/（上游 file(CREATE_LINK testdata) 符号链接
+       自动带入 build 目录；HMDFS 支持符号链接）
+     - objects.zip（sv6/park 加载必需物件）→ build() 期解压进 $BUILD/data/object
+       （缺失症状：LoadParkFromFile "missing objects" → MapGetFootpathElement
+       返回 null → 测试用例 segfault——不是代码 bug，是数据缺失）
+     - openmusic.zip 的 object/ 部分（部分 park 引用 openrct2.music.* 物件，
+       在 openmusic 包而非 objects 包）→ build() 期合并解压
+     三个 zip 的 URL+sha256 均抄自上游源码树 assets.json（与上游 CI 同源），
+     conandata.yml 加 testdata: 节 + download(sha256=) 强校验。
+  3) 运行时数据目录契约：测试二进制经 Platform.Linux GetInstallPath 搜索
+     {exeDir,cwd}/data——组装 $BUILD/data（language ← 源码 data/language 符号
+     链接 + object/ 解压内容）即可命中。
+  4) 工具链告警：上游全局 -Werror，gtest 1.17 头文件 EXPECT_LE/GE 模板在
+     clang15 下比较 size_t 与 int 触发 -Wsign-compare——顶层 CMakeLists 平台
+     豁免段（上游 APPLE/riscv64 同款位置）加 if(CMAKE_SYSTEM_NAME STREQUAL
+     "HarmonyOS") -Wno-error=sign-compare（-Werror 对其余告警保留）。
+
+  ctest 执行环境：env=["conanbuild","conanrun"] 组合——conanbuild 提供工具链
+  llvm lib（libc++_shared.so），conanrun 提供依赖包 libdirs；单用任一缺库
+  （#9606 坑族）。
+
+solution: |
+  conanfile.py 关键改动（openrct2 0.5.3 完整模板）：
+  ```python
+  class Openrct2Conan(ConanFile):
+      test_requires = "gtest/1.17.0.1"   # 不是 tool_requires！（见 root_cause 1）
+
+      def source(self):
+          # replays 参数化数据放源码树（上游符号链接自动带入 build）
+          self._fetch_testdata_zip("replays")
+          unzip(self, "replays.zip", os.path.join(
+              self.source_folder, "test", "tests", "testdata"))
+          # zip 内散装 *.parkrep 挪进 replays/ 子目录 ...
+
+      def generate(self):
+          deps = CMakeDeps(self); deps.generate()
+          tc = CMakeToolchain(self)
+          tc.variables["WITH_TESTS"] = True          # 上游测试开关
+          tc.variables["DOWNLOAD_REPLAYS"] = False   # 资产由配方自管
+          # （其余 DOWNLOAD_* 同理 OFF）
+
+      def build(self):
+          apply_conandata_patches(self); cmake.configure()
+          self.run("make -j1", env="conanbuild")
+          self._run_upstream_tests()
+
+      def _run_upstream_tests(self):
+          b = self.build_folder
+          # $BUILD/data：language 符号链接 + objects/openmusic 解压
+          # $BUILD/testdata：上游 configure 期已建符号链接（防御性兜底）
+          self._fetch_testdata_zip("objects")
+          unzip(self, "objects.zip", os.path.join(data_root, "object"))
+          self._fetch_testdata_zip("openmusic")
+          unzip(self, "openmusic.zip", om_tmp)
+          shutil.copytree(om_tmp/"object", obj_dir, dirs_exist_ok=True)
+          self.run(f'ln -sfn "{src_data}/language" "{data_root}/language"')
+          self.run(f'ln -sfn "{data_root}" "{b}/data"')
+          self.run(f'ctest --test-dir "{b}" --output-on-failure',
+                   env=["conanbuild", "conanrun"])
+  ```
+  conandata.yml 增加测试资产节（URL/sha256 抄上游 assets.json）：
+  ```yaml
+  testdata:
+    replays:   {url: ".../replays.zip",   sha256: "df40..."}
+    objects:   {url: ".../objects.zip",   sha256: "f483..."}
+    openmusic: {url: ".../openmusic.zip", sha256: "994b..."}
+  ```
+
+fallback: |
+  ① 若 gtest 需求版本在 ohpcd 无制品：先 conan list -r=ohpcd 实测，无则用
+  手工直编路径（matchit DRAFT-matchit-r01-gtest-ohpcd-offline-run：conan
+  install gtest 制品 + 目标 clang++ 直接编译上游测试源）——但配方内 ctest
+  路径的复现性更强，优先。
+  ② 若上游 install 期资产下载必须保留（DOWNLOAD_REPLAYS=ON 语义）：配方
+  package() 前手工预置资产到 install prefix，或 patch 上游 CMakeLists 把
+  install(CODE download) 改为 configure 期可跳过。
+  ③ 符号链接不可用环境：把源码 testdata 直接 copy 进 $BUILD/testdata。
+
+verify_builds: PR #9656 本地 conan create（2026-09-13，1757 行日志）: ctest "100% tests passed, 0 tests failed out of 274"; Package a53db40560517895afe33cb98682047db29f6519（pkgid 与不开测试时完全一致——test_requires 不进依赖图）; CI #46137 PASSED
+reference_impl: archives/o/openrct2/0.5.3/conanfile.py（_run_upstream_tests）+ patches/0020
+doc_file: doc/DRAFT-332.md

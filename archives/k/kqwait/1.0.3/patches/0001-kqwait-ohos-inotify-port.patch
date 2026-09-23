@@ -1,0 +1,233 @@
+--- a/kqwait.c
++++ b/kqwait.c
+@@ -1,6 +1,6 @@
+ #include <sys/types.h>
+ #include <sys/stat.h>
+-#include <sys/event.h>
++#include <sys/inotify.h>
+ #include <fcntl.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -7,6 +7,7 @@
+ #include <dirent.h>
+ #include <string.h>
+ #include <unistd.h>
++#include <errno.h>
+
+ #include "dirinfo.h"
+ #include "version.h"
+@@ -15,29 +16,37 @@
+  * kqwait - wait for write events on a file or directory
+  * Sven Schober <sven.schober@uni-ulm.de>
+  *
+- * Inspired by inotifywait[1] and the original kqueue paper[2].
++ * OpenHarmony (OHOS) port: BSD kqueue replaced by inotify.
+  *
+- * To build this just type:
++ * Upstream uses a single kevent(2) call with EVFILT_VNODE filters armed on
++ * every target (NOTE_RENAME|NOTE_WRITE|NOTE_DELETE), waits for the first
++ * event, prints which target changed (for directories: the dirinfo
++ * before/after diff), and exits 0. Errors exit 1.
+  *
+- *     make
++ * OHOS has no kqueue. The OHOS kernel's inotify (verified by
++ * probes/inotify_semantics_probe.c on aarch64: IN_MODIFY, IN_CREATE,
++ * IN_DELETE, IN_MOVED_FROM/TO, IN_MOVE_SELF, IN_ATTRIB, IN_DELETE_SELF,
++ * IN_CLOSE_WRITE all deliver) is used as the edge source instead:
+  *
+- * Call it like this:
++ *   NOTE_WRITE  ~= IN_MODIFY|IN_CREATE|IN_DELETE|IN_MOVED_FROM|IN_MOVED_TO
++ *   NOTE_RENAME ~= IN_MOVED_FROM|IN_MOVED_TO|IN_MOVE_SELF
++ *   NOTE_DELETE ~= IN_DELETE|IN_DELETE_SELF
+  *
+- *     ./kqwait <file>[ <file>]+
+- *
+- * Or this:
+- *
+- *     ./kqwait <dir>[ <dir]+
+- *
+- * Source: <https://github.com/sschober/kqwait>
+- * License: <https://github.com/sschober/kqwait/blob/master/README.md>
+- *
+- * [1]: https://github.com/rvoicilas/inotify-tools/wiki/
+- * [2]: http://people.freebsd.org/~jlemon/papers/kqueue.pdf
++ * Behavior preserved exactly:
++ *   - CLI: kqwait [-d] [-v] [-h] <file|dir> [<file|dir>]+
++ *   - stdout: file target -> "path\n"; dir target -> "+ path/name\n" /
++ *     "- path/name\n" from the dirinfo symmetric difference, or "path\n"
++ *     when the diff is empty; NOTE_DELETE on a watched path -> "- path\n".
++ *   - exit codes: 0 on event, 1 on usage/kernel errors, like upstream.
+  */
+
++#define TARGET_EVTS (IN_MODIFY | IN_CREATE | IN_DELETE | IN_MOVED_FROM | \
++                     IN_MOVED_TO | IN_MOVE_SELF | IN_DELETE_SELF)
+
+-#define TARGET_EVTS NOTE_RENAME|NOTE_WRITE|NOTE_DELETE
++/* Per-target watch context (replaces upstream's EV_SET udata). */
++typedef struct {
++  namedDirInfo *ndi;
++} watchCtx;
+
+ int DEBUG;
+
+@@ -44,11 +53,10 @@
+-void debug(int result, struct kevent* ev){
+-  if(DEBUG){
+-    fprintf(stderr, "res: %d, id: %d, %s %s %s\n",
+-        result,
+-        (int) ev[0].ident,
+-        ev[0].fflags & NOTE_RENAME ? "REN" : "",
+-        ev[0].fflags & NOTE_WRITE  ? "WRT" : "",
+-        ev[0].fflags & NOTE_DELETE ? "DEL" : ""
++static void debug_evt(const struct inotify_event *ie) {
++  if (DEBUG) {
++    fprintf(stderr, "res: 1, id: %d, %s %s %s\n",
++        (int) ie->wd,
++        ie->mask & (IN_MOVE_SELF|IN_MOVED_FROM|IN_MOVED_TO) ? "REN" : "",
++        ie->mask & (IN_MODIFY|IN_CREATE|IN_DELETE)          ? "WRT" : "",
++        ie->mask & (IN_DELETE|IN_DELETE_SELF)               ? "DEL" : ""
+         );
+   }
+ }
+@@ -67,7 +75,8 @@
+ int main(int argc, char** argv){
+   char *cmd = argv[0];
+   DEBUG = 0;
+-  char ch;
++  int ch; /* int, not char: on OHOS aarch64 char is unsigned, so (char)-1 != -1
++             would loop forever (upstream bug on unsigned-char platforms) */
+   while((ch = getopt(argc, argv, "dhv")) != -1) {
+     switch(ch){
+       case 'd':
+@@ -92,8 +101,6 @@
+
+   int filesCount = argc;
+
+-  struct kevent ev[filesCount];
+-
+   struct stat sb;
+
+   namedDirInfo ndi[filesCount];
+@@ -100,12 +107,9 @@
++  int wd_ndi[filesCount];   /* inotify wd -> target index (replaces ev[i]) */
++  watchCtx ctx[filesCount];
+
+-  dirInfo *diBefore, *diAfter, *diDifference;
+-
+   for(int i = 0; i < filesCount; i++){
+     char *filePath = argv[i];
+-    void *data;
+
+-    int fd = -1;
+-
+     if( stat( filePath, &sb) == -1 ){
+       fprintf(stderr,"Cannot stat: %s : ", filePath);
+       perror("");
+@@ -116,28 +120,66 @@
+     ndi[i].di   = NULL;
+     if( S_ISDIR( sb.st_mode) ){
+       ndi[i].type = D;
+-      diBefore = parseDir( filePath );
+-      ndi[i].di = diBefore;
++      ndi[i].di   = parseDir( filePath );
+     }
+-    data = &ndi[i];
++    ctx[i].ndi = &ndi[i];
++  }
+
+-    if( -1 == fd ){
+-      fd = open(filePath, O_RDONLY);
+-      if( -1 == fd) {
+-        perror("open");
+-        return -1;
+-      }
++  int fd = inotify_init();
++  if( -1 == fd ){
++    perror("inotify_init");
++    return 1;
++  }
++
++  /* Arm one watch per target — the inotify equivalent of the upstream
++   * EV_SET(..., EV_ADD|EV_ENABLE|EV_CLEAR, TARGET_EVTS, 0, data) loop.
++   * Watching the path itself (not the parent dir) mirrors kqueue's
++   * EVFILT_VNODE semantics for the watched-path events (delete/rename). */
++  for(int i = 0; i < filesCount; i++){
++    int wd = inotify_add_watch(fd, ndi[i].path, TARGET_EVTS);
++    if( -1 == wd ){
++      fprintf(stderr,"Cannot watch: %s : ", ndi[i].path);
++      perror("");
++      return 1;
+     }
++    wd_ndi[i] = wd;
++  }
+
+-    EV_SET(&ev[i], fd, EVFILT_VNODE,
+-        EV_ADD | EV_ENABLE | EV_CLEAR,
+-        TARGET_EVTS, 0, data);
++  /* Block for the first event — mirrors upstream's single blocking
++   * kevent(kq, ev, filesCount, ev, filesCount, NULL) call. */
++  char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
++  ssize_t len = read(fd, buf, sizeof(buf));
++  if( len <= 0 ){
++    fprintf(stderr, "result: %zd\n", len);
++    perror("read");
++    return 1;
+   }
+
+-  int kq = kqueue();
++  const struct inotify_event *ie;
++  const struct inotify_event *trigger_ie = NULL;
++  char *p = buf;
++  int result = 0;
++  namedDirInfo *trigger = NULL;
++  uint32_t trigger_mask = 0;
+
+-  int result =
+-    kevent(kq, ev, filesCount, ev, filesCount, NULL);
++  /* Parse all queued events; record the first watch that fired (upstream
++   * reports only ev[0]). */
++  for(; p < buf + len; ) {
++    ie = (const struct inotify_event *) p;
++    if( ie->mask & IN_IGNORED ) { p += sizeof(*ie) + ie->len; continue; }
++    if( ! trigger ){
++      for(int i = 0; i < filesCount; i++){
++        if( wd_ndi[i] == ie->wd ){
++          trigger = ctx[i].ndi;
++          trigger_ie = ie;
++          trigger_mask = ie->mask;
++          result = 1;
++          break;
++        }
++      }
++    }
++    p += sizeof(*ie) + ie->len;
++  }
+
+   if( result > 0 ){
+     if(DEBUG) fprintf(stderr, "num events: %d\n",result);
+@@ -144,7 +188,11 @@
+-    debug(result, ev);
++    debug_evt(trigger_ie);
+     namedDirInfo *ndip;
+-    ndip = ev[0].udata;
+-    if( ev[0].fflags & NOTE_DELETE ){
++    ndip = trigger;
++    /* kqueue NOTE_DELETE == the watched path ITSELF was unlinked.
++     * inotify's equivalent is IN_DELETE_SELF; IN_DELETE only means a
++     * child name vanished from a watched directory and must take the
++     * dirinfo-diff path below (upstream NOTE_WRITE branch). */
++    if( trigger_mask & IN_DELETE_SELF ){
+       fprintf(stdout, "- %s\n", ndip->path);
+     }
+     else {
+@@ -154,8 +202,8 @@
+       }
+       else{
+         /* event data points to directory */
+-        diAfter = parseDir( (char*) ndip->path);
+-        diDifference = symmetricDifference(ndip->di, diAfter);
++        dirInfo *diAfter = parseDir( (char*) ndip->path);
++        dirInfo *diDifference = symmetricDifference(ndip->di, diAfter);
+         if( DEBUG ) {
+           fprintf(stderr, "saved:\n");
+           printDirInfo( ndip->di );

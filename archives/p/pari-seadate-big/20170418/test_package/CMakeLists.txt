@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.15)
+project(pari_seadata_consumer LANGUAGES C)
+add_executable(test_seadata test_seadata.c)
+target_compile_features(test_seadata PRIVATE c_std_99)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(test_seadata PRIVATE -Wall -Wextra)
+endif()

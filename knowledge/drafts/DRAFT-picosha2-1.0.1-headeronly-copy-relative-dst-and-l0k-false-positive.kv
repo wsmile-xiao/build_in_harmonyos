@@ -1,0 +1,110 @@
+#====================================================================
+# DRAFT-picosha2-1.0.1-headeronly-copy-relative-dst-and-l0k-false-positive.kv
+# header-only 配方 package() 相对 dst 在 Conan2 缓存构建零产出 + headeronly 模板
+# 残留注释触发 L0k commands_json 假阳性（picosha2 1.0.1 实证）
+# 触发事件: picosha2 1.0.1 HarmonyOS PC 适配（archives/p/picosha2/1.0.1，r01）
+#====================================================================
+
+id:                     DRAFT-picosha2-1.0.1-headeronly-copy-relative-dst-and-l0k-false-positive
+trigger_tool:           conan|conan create|conan-verify|finish|build_and_test.sh
+phase:                  packaging|testing|quality-gate
+error_signature:        Imported target .* includes non-existent path|
+                         No files in this package!|
+                         package\(\): WARN: No files in this package|
+                         commands_json_r38|
+                         CLI tool detected but commands.json missing
+
+severity:               2
+category:               conan|packaging|header-only|no-build|quality-gate|commands.json
+match_keywords:         header-only, header-library, package_type, copy, dst, include,
+                         package_folder, source_folder, no_copy_source, cmake_layout,
+                         shared option, No files in this package, INTERFACE_INCLUDE_DIRECTORIES,
+                         commands_json_r38, L0k, CLI tool, dst="bin", template comment
+title:                  header-only 配方两大坑：Conan2 缓存构建中 package() 相对 dst 零产出（须用 package_folder 绝对路径）+ headeronly 模板残留变体 B/C 注释被 L0k 误判为 CLI 工具
+
+root_cause: >
+  (1) Conan 2.x 缓存构建（conan create）中 recipe 的 layout 决定 self.source_folder
+  与实际源码解压位置的关系。header-only 无编译配方若用 basic_layout 且 package()
+  里 copy(self,"*.h",src=self.source_folder,dst="include") 使用相对 dst，Conan
+  不会把 include/ 落进 package 目录（absolute package_folder 才是权威目标），
+  最终 conan create 报 "No files in this package!"，test_package 的 CMakeDeps
+  生成 imported target 引用不存在的 include 路径
+  （Imported target ... includes non-existent path .../p/include），G2 失败。
+  (2) W3 build_and_test.sh L0k 门禁用 grep 匹配 conanfile.py 里的
+  RUNTIME DESTINATION bin / dst="bin" 判定 CLI 工具，headeronly 模板保留的
+  变体 B/C 注释（copy(self,"picosha2",...,dst="bin")）虽为注释但被 grep 匹配，
+  误判"CLI tool detected but commands.json missing"→ commands_json_r38。
+affected_scope: >
+  OHOS/CI 下所有 header-only（无构建族 A）C/C++ 库的 Conan 2.x 配方：package()
+  copy dst 写法、headeronly 模板清理、G2/G1/L0k 门禁联动。与既有条目区别：
+  E257 已覆盖 G1 要求显式 build()（no-op 即可）；E277 已覆盖
+  "Package type is 'library', but no 'shared' option declared"；本条目聚焦
+  package() copy dst 与 L0k 模板注释误判两个未覆盖点。
+verification_cmd: >
+  conan-verify picosha2 1.0.1（G0-G4+L2/L4/L5 全 PASS）+ finish W3
+  build_and_test.sh RC=0（L0 全 pass 100%）
+
+rec_priority:           1
+rec_approach:           package-folder-absolute-dst-plus-strip-template-comments
+rec_description: >
+  (1) package() 的 copy 一律用 os.path.join(self.package_folder, "include") /
+  ("licenses") 绝对目标，不用相对 "include"/"licenses"；
+  (2) layout 用 cmake_layout(self, src_folder=".")（与 doxgen/args-parser/catch2
+  已合入 header-only 配方一致，不用 basic_layout）；
+  (3) package_type = "header-library"（无需 shared option，避免
+  "Package type is 'library', but no 'shared' option declared"，E277）；
+  (4) 生成配方后删掉 headeronly 模板的变体 B/C 注释块（含 dst="bin" 字样），
+  防止 W3 L0k grep 误判为 CLI 工具；
+  (5) test_package 的 test() 必须自跑真实二进制
+  （self.run(os.path.join(self.cpp.build.bindirs[0], "test_<name>"), env="conanrun")）
+  满足 L0d stub_test_method 门禁，且消费者测试真实 include 头并断言已知输出（R34）。
+rec_command:            >
+  # conanfile.py package():
+  #   copy(self, "*.h", src=self.source_folder,
+  #        dst=os.path.join(self.package_folder, "include"))
+  #   copy(self, "LICENSE*", src=self.source_folder,
+  #        dst=os.path.join(self.package_folder, "licenses"), keep_path=False)
+rec_auto_fix:           false
+rec_impl:               conanfile-edit
+
+fallback_priority:      2
+fallback_approach:      basic-layout-with-hack
+fallback_description:   >
+  若必须保留 basic_layout，可把 package() 里的 copy 源改为
+  os.path.join(self.source_folder, ...) 并显式 keep_path，但缓存构建中
+  source_folder 解析不稳定；cmake_layout(src_folder=".") 是已合入配方的
+  一致做法，优先采用。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       copy\(self, ".*", src=self\.source_folder, dst="include"\)$
+forbid_1_reason:        相对 dst 在 Conan2 缓存构建零产出（No files in this package）
+forbid_1_consequence:   G2 失败，test_package imported target 引用不存在 include 路径
+forbid_2_pattern:       dst="bin"|RUNTIME DESTINATION bin
+forbid_2_reason:        L0k grep 判 CLI 工具；header-only 库无 bin，残留注释/代码即误判
+forbid_2_consequence:   commands_json_r38 假阳性，W3 失败
+forbid_3_pattern:       package_type.*=.*"library".*header|package_type = "library"
+forbid_3_reason:        Conan2 要求 "library" 声明 shared option（E277），header-only 用 header-library
+forbid_3_consequence:   conan create 报 "Package type is 'library', but no 'shared' option declared"
+
+principles:             P005, P011
+similar_to:             E257, E277, E322, E470, E255, E241
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-picosha2-1.0.1-headeronly-copy-relative-dst-and-l0k-false-positive.md
+last_updated:           2026-09-05
+source_event:           archives/p/picosha2/1.0.1 (r01)
+
+authors:                pc1-35
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-05
+
+draft: true
+contributor_id:         pc1-35

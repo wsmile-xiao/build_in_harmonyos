@@ -1,0 +1,68 @@
+--- a/src/linux/platform.c
++++ b/src/linux/platform.c
+@@ -304,8 +304,38 @@
+          * It's not possible to only listen on FD close but no other operation
+          * should be performed on the kqueue.
+          */
++#if defined(__OHOS__)
++        {
++            /*
++             * OHOS does not reliably deliver the F_SETSIG RT close
++             * notification to sigwaitinfo (and si_fd is not populated).
++             * Poll with sigtimedwait + explicit fd-state scan so the
++             * monitoring thread always notices closed kqueues and exits
++             * deterministically at process exit (libc probe / R8).
++             */
++            struct timespec ts = { .tv_sec = 0, .tv_nsec = 100000000 };
++            res = sigtimedwait(&monitoring_sig_set, &info, &ts);
++        }
++#else
+         res = sigwaitinfo(&monitoring_sig_set, &info);
++#endif
+         if (res == -1) {
++#if defined(__OHOS__)
++            if (errno == EAGAIN) {
++                struct kqueue *kq, *kq_tmp;
++                int closed = 0;
++                tracing_mutex_lock(&kq_mtx);
++                LIST_FOREACH_SAFE(kq, &kq_list, kq_entry, kq_tmp) {
++                    if (fcntl(kq->kq_id, F_GETFD) < 0 && errno == EBADF) {
++                        closed = 1;
++                        kqueue_free(kq);
++                    }
++                }
++                if (closed && kq_cnt == 0)
++                    break; /* kq_mtx held; exit path unlocks it */
++                tracing_mutex_unlock(&kq_mtx);
++            }
++#endif
+             dbg_printf("sigwaitinfo(2): %s", strerror(errno));
+             continue;
+         }
+@@ -467,7 +497,17 @@
+          * to continue if it was processing a cleanup.
+          */
+         tracing_mutex_unlock(&kq_mtx);
+-
++#if defined(__OHOS__)
++        /*
++         * OHOS musl libc has no pthread_cancel, and pthread_join on the
++         * monitoring thread (which detaches itself before exiting) blocks
++         * forever on this libc. The monitoring thread exits on its own
++         * after the tgkill wake (sigtimedwait scan sees kq_cnt==0), so a
++         * join is not required here; the process is exiting anyway.
++         */
++        (void) retval;
++        (void) ret;
++#else
+         ret = pthread_join(monitoring_thread, &retval);
+         if (ret == 0) {
+             if (retval == PTHREAD_CANCELED) {
+@@ -478,6 +518,7 @@
+         } else {
+             dbg_printf("tid=%u - join failed: %s", tid, strerror(ret));
+         }
++#endif
+     }
+     else
+         tracing_mutex_unlock(&kq_mtx);

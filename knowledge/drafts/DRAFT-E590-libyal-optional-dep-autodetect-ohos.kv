@@ -1,0 +1,188 @@
+#====================================================================
+# DRAFT-E590-libyal-optional-dep-autodetect-ohos
+# libyal Autotools 可选依赖（zlib/libcrypto）在 OHOS 上的探测读数与「静态构建静默关闭」假绿
+#====================================================================
+
+id:                     DRAFT-E590-libyal-optional-dep-autodetect-ohos
+trigger_tool:           ohc-run.py conan-verify|conan create|configure|autotools
+phase:                  configure|dependency|verification
+
+error_signature:        DEFLATE compression support:|AES-ECB support:|AES-XTS support:|
+                        checking for zlib.h... no|checking for openssl/opensslv.h... no|
+                        with-openssl=no|with-zlib=no|unable to find supported zlib|
+                        checking for zlib >= 1.2.5... no
+
+prescan_pattern:        AX_LIBCRYPTO_CHECK_ENABLE|AX_ZLIB_CHECK_ENABLE|--with-openssl=no|--with-zlib=no
+prescan_globs:          configure.ac, m4/libcrypto.m4, m4/zlib.m4, conanfile.py
+
+severity:               2
+category:               dependency|autotools|optional-feature|feature-detection|false-green|OHOS
+
+match_keywords:         libyal, libfsapfs, libcaes, libhmac, libcrypto, openssl, zlib, DEFLATE,
+                        AES-XTS, AES-ECB, configure summary, auto-detect, optional dependency,
+                        --with-openssl=no, --with-zlib=no, --disable-shared, static build,
+                        OHOS sysroot, ohos-sdk, conanfile configure_args, HarmonyOS
+
+title:                  libyal 家族可选依赖（zlib/libcrypto）在 OHOS 上的探测读数：不要按族照抄 --with-openssl=no，且静态构建会静默关闭压缩与加密
+
+root_cause: >
+  libyal 各库的 configure.ac 把 zlib/libcrypto 等外部能力做成「可选、自动探测」项
+  （AX_ZLIB_CHECK_ENABLE / AX_LIBCRYPTO_CHECK_ENABLE，默认 auto-detect）：探测不到就
+  静默降级、不报错。因此同一个配方在设备与 CI 上可能得到不同的能力集合，而构建日志与
+  退出码完全相同——这是典型的假绿面。更隐蔽的一层是同族先例的「经验照抄」：libbde 与
+  libfvde 的配方为了不引入外部依赖显式传了 --with-openssl=no，但那是**该包当时的取舍**，
+  照抄到 libfsapfs 会连带改变能力集合且无人复核。实测 libfsapfs 20240429 在 OHOS 上
+  的探测结果是「zlib 有、libcrypto 无」，而加密能力并未丢失——AES/MD5/SHA256 由发布包
+  内嵌的 libcaes/libhmac 提供（summary 里显示 local 而不是 no）。第三层是 m4 宏的分支：
+  AX_ZLIB_CHECK_LIB / AX_LIBCRYPTO_CHECK_LIB 的第一行就是
+  `test "x$ac_cv_enable_shared_libs" = xno || test "x$ac_cv_with_openssl" = xno` → 只要
+  构建 shared=False（静态），两个能力都会被无条件置 no，无论系统里是否有 zlib/openssl。
+
+affected_scope: >
+  所有用 libyal 自家 m4 宏（AX_*_CHECK_ENABLE/AX_*_CHECK_LIB）自动探测可选依赖的
+  Autotools 包，尤其是 OHOS/嵌入式上依赖来自 sysroot 而非 Conan 的场景；也适用于任何
+  「探测不到就静默降级」的可选特性库（压缩、加密、宽字符、iconv、fuse）。
+  对静态构建（options shared=False / --disable-shared）尤其危险：能力被静默关闭且
+  构建日志不报错。
+
+verification_cmd: |
+  # 1) 只跑 configure，读能力摘要（不要把这一步混进完整构建）
+  mkdir -p "$TASK_DIR/probe" && cd "$TASK_DIR/probe"
+  tar xzf "$TASK_DIR/src-download/libfsapfs-experimental-20240429.tar.gz"
+  cd libfsapfs-20240429
+  sed -i 's/umask 077/umask 022/' configure && chmod 755 configure
+  (umask 022; CC=/data/service/hnp/bin/clang CONFIG_SHELL=/data/service/hnp/bin/bash \
+     SHELL=/data/service/hnp/bin/bash /data/service/hnp/bin/bash ./configure \
+     --disable-python --with-libfuse=no --enable-static-executables=no \
+     --enable-shared --disable-static \
+     --build=aarch64-unknown-linux-gnu --host=aarch64-unknown-linux-gnu) \
+     > configure.log 2>&1
+  sed -n '/^Building:/,/^Features:/p' configure.log
+
+  # 2) 判定 zlib/openssl 到底来自哪里（sysroot 还是 Conan）
+  grep -n "checking for zlib\|checking for openssl\|checking for EVP_" configure.log
+  /data/service/hnp/bin/clang -E -v -x c /dev/null 2>&1 \
+    | sed -n '/#include <\.\.\.> search starts here/,/End of search list/p'
+  pkg-config --exists zlib && echo zlib-pc-found || echo zlib-pc-absent
+  pkg-config --exists openssl && echo openssl-pc-found || echo openssl-pc-absent
+
+  # 3) 复核「静态构建静默关闭」：同一棵树改 --disable-shared --enable-static 再读摘要
+  #    （预期 DEFLATE/AES 相关行由 zlib/local 变成 no）
+
+rec_priority:           1
+rec_approach:           read-configure-summary-before-choosing-flags
+rec_description: >
+  配方里**不要**按同族先例照抄 --with-openssl=no / --with-zlib=no：先用一次只跑
+  configure 的探针读出该版本在 OHOS 上的真实能力摘要，再决定是保留自动探测还是显式关闭，
+  并把摘要逐字记进 notes.md。判读要点：
+  ① `checking for zlib >= 1.2.5... no` 不等于没有 zlib——紧接着的
+     `checking for zlib.h... yes` / `checking for uncompress in -lz... yes` 才是结论
+     （前者只是 pkg-config 没有 .pc 文件）；
+  ② `checking for openssl >= 1.0... no` + `openssl/opensslv.h... no` 只说明没有 OpenSSL；
+     libyal 的 AES/MD5/SHA256 由内嵌 libcaes/libhmac 提供，summary 显示 `local`，
+     **加密能力不丢**，不要写成「加密支持被禁用」；
+  ③ 设备上 zlib.h 来自 OHOS NDK sysroot
+     （`.../ohos-sdk_<版本>/ohos/native/llvm/bin/../../sysroot/usr/include`），CI worker
+     用同一 SDK → 设备与 CI 读数一致，这属于可复现而非设备特供；
+  ④ 若本包确实要关掉某能力，必须在 notes.md/PR 写明「关了哪一个、为什么、影响哪些功能」，
+     不能只留一个 flag。
+rec_command: |
+  sed -n '/^Building:/,/^Features:/p' configure.log
+  grep -n "checking for zlib\|checking for openssl" configure.log
+  pkg-config --exists zlib; echo "zlib pc rc=$?"
+  pkg-config --exists openssl; echo "openssl pc rc=$?"
+rec_auto_fix:           false
+rec_impl:               agent-reads-configure-summary-then-freezes-flags
+
+fallback_priority:      2
+fallback_approach:      pin-feature-off-explicitly-and-document
+fallback_description: >
+  当现场确实要产出「零外部依赖」的包（例如 CI 侧 sysroot 版本不可控）时，把能力显式关闭
+  并留痕：静态构建天然关闭（m4 第一行判 shared），或显式 --with-zlib=no --with-openssl=no；
+  同时在 manifest.build.configure_options 与 notes.md 里写明关闭项与功能影响，
+  并在 PR 正文「补充说明」声明该能力未覆盖（不得写成 PASS）。
+fallback_command:       ./configure --disable-python --with-libfuse=no --with-zlib=no --with-openssl=no
+fallback_auto_fix:      false
+fallback_impl:          explicit-feature-off-with-declared-impact
+
+forbid_1_pattern:       --with-openssl=no.*照抄|same-as-libfvde|同族先例.*直接复制
+forbid_1_reason:        可选能力开关是逐包逐版本的取舍，照抄会静默改变被交付包的能力集合。
+forbid_1_consequence:   交付物能力与 PR 声明不一致，评审无法从日志复核取舍依据。
+
+forbid_2_pattern:       AES.*no.*即加密不可用|without-openssl.*encryption-disabled
+forbid_2_reason:        libyal 的 AES/MD5/SHA256 由内嵌 libcaes/libhmac 提供，summary 的 local 即证明能力在。
+forbid_2_consequence:   把「有实现」误报成「能力缺失」，导致不必要的依赖引入或错误的功能声明。
+
+forbid_3_pattern:       静态构建.*能力摘要不核对|shared=False.*不读 summary
+forbid_3_reason:        m4 第一行按 shared 分支无条件关闭 zlib/libcrypto，静态构建必须复核摘要。
+forbid_3_consequence:   静态包静默缺失压缩/加密能力，而日志与退出码全绿。
+
+principles:             P001, P005, P016
+causes:                 []
+caused_by:              []
+similar_to:             E277, E007, E011
+conflicts_with:         []
+prerequisite_of:        libyal-family-optional-feature-declaration
+
+novelty_boundary: >
+  E277 讲的是「发布包已内嵌本地组件时如何证明闭包完整、不误拆依赖」；本条讲的是**外部可选
+  依赖**（zlib/openssl）的探测读数与取舍留痕，两者的对象与判据都不同。E007 讲 OHOS 三元组、
+  E011 讲 HMDFS umask，均不涉及能力探测。本条不重复 HMDFS/CONFIG_SHELL/libtool .libs 等已有
+  条目的机制，只引用其结果。
+
+verification_evidence: |
+  libfsapfs 20240429 实证（设备真机，2026-09-20，探针目录 $TASK_DIR/probe 同口径）：
+
+  1) 能力摘要（`sed -n '/^Building:/,/^Features:/p' configure.log`，逐字）：
+     DEFLATE compression support:                 zlib
+     libhmac support:                             local
+     MD5 support:                                 local
+     SHA256 support:                              local
+     libcaes support:                             local
+     AES-ECB support:                             local
+     AES-XTS support:                             local
+     FUSE support:                                no            （--with-libfuse=no，预期）
+
+  2) 探测过程逐字（同一份 configure.log）：
+     checking for zlib >= 1.2.5... no
+     checking for zlib.h... yes
+     checking for zlibVersion in -lz... yes
+     checking for uncompress in -lz... yes
+     checking for openssl >= 1.0... no
+     checking for openssl/opensslv.h... no
+     checking for openssl/evp.h... no
+
+  3) zlib.h 来源（clang 默认 include 搜索路径，逐字）：
+     /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/bin/../../sysroot/usr/include/aarch64-linux-ohos
+     /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/bin/../../sysroot/usr/include
+     → 属 OHOS NDK sysroot，非 harmonybrew/设备特供；CI worker 用同一 SDK，读数一致。
+
+  4) 反证「缺 libcrypto ≠ 缺加密」：同一棵树 `--with-openssl=no` 与否，configure 摘要里
+     AES-ECB/AES-XTS 均为 local（由内嵌 libcaes 提供）；libcrypto 仅影响 OpenSSL EVP
+     加速与 PBKDF 路径，不影响 libcaes/libhmac 的自有实现。
+
+  5) 静态构建的静默关闭（m4 源码逐字，libfsapfs 20240429 自带）：
+     m4/zlib.m4      : [test "x$ac_cv_enable_shared_libs" = xno || test "x$ac_cv_with_zlib" = xno],
+                       [ac_cv_zlib=no],
+     m4/libcrypto.m4 : [test "x$ac_cv_enable_shared_libs" = xno || test "x$ac_cv_with_openssl" = xno],
+                       [ac_cv_libcrypto=no],
+     → `--disable-shared` 时两项无条件 no，且 configure 不报错。
+
+  6) 本包最终取舍：保持 auto-detect（未传 --with-openssl/--with-zlib），
+     即 DEFLATE=zlib、AES-ECB/AES-XTS/MD5/SHA256=local；配方 configure_args 只有
+     --disable-python / --with-libfuse=no / --enable-static-executables=no + 三元组。
+
+doc_file:               knowledge/drafts/DRAFT-E590-libyal-optional-dep-autodetect-ohos.md
+last_updated:           2026-09-20
+source_event:           libfsapfs 20240429 HarmonyOS PC 适配（libyal 家族新包，OHOS 真机采信轮）
+authors:                AtomCode
+source_pr:              (同 PR 交付)
+source_commit:          (同 PR 交付)
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
+
+draft:                  true
+contributor_id:         libfsapfs-20240429-optional-dep-autodetect

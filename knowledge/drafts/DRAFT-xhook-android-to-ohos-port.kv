@@ -1,0 +1,66 @@
+id: DRAFT-xhook-android-to-ohos-port
+title: Android 出身 C 库迁移 OHOS 的四类通用适配点（liblog→HiLog/JNI桥/DT_ANDROID宏/PAGE_MASK+sigaction）
+category: porting
+severity: info
+match_keywords: android/log.h, __android_log_print, liblog, jni.h, JNI_OnLoad, DT_ANDROID_REL, PAGE_MASK, android_LogPriority, ndk-build, Android.mk, libhilog_ndk
+error_signature: "fatal error: 'android/log.h' file not found | fatal error: 'jni.h' file not found | use of undeclared identifier 'PAGE_MASK' | use of undeclared identifier 'DT_ANDROID_REL' | tentative definition has type 'struct sigaction' that is never completed"
+error_excerpt: |
+  libxhook/jni/xh_log.c:24:10: fatal error: 'android/log.h' file not found
+  xh_jni.c:24:10: fatal error: 'jni.h' file not found
+  xh_util.c:112:30: error: use of undeclared identifier 'PAGE_MASK'
+  xh_core.c:88:25: error: tentative definition of variable with internal linkage has incomplete non-array type 'struct sigaction'
+root_cause: >
+  Android 出身的 C 库（ndk-build 构建）默认依赖四类 bionic 专属设施：
+  (1) android liblog（<android/log.h> / __android_log_print / android_LogPriority）；
+  (2) JNI 桥（<jni.h>，为 Android Java 层导出 Java_com_* 符号）；
+  (3) bionic elf.h 的打包重定位扩展 tag（DT_ANDROID_REL/RELA/RELSZ/RELASZ = 0x6ffffee0..e3）；
+  (4) bionic 向用户态暴露的 PAGE_MASK 宏，以及 pthread.h 间接包含 signal.h（struct sigaction）。
+  OHOS musl sysroot 均不提供前两者，后两者的可见性不同。
+rec_approach: >
+  1) liblog→HiLog 桥接：__OHOS__ 分支 include <hilog/log.h>，本地定义与 android_LogPriority
+  数值兼容的枚举（HiLog LogLevel DEBUG=3 INFO=4 WARN=5 ERROR=6 FATAL=7 与 android 完全一致），
+  __android_log_print() 转发 OH_LOG_Print(LOG_APP, (LogLevel)prio, 0, tag, fmt, ...)，
+  链接 -lhilog_ndk.z（sysroot usr/lib 有 libhilog_ndk.z.so，运行时 /system 或设备提供）。
+  优先级比较逻辑（xh_log_priority <= ANDROID_LOG_DEBUG）无需改动。
+  2) JNI 桥整体 #if !defined(__OHOS__) 守卫编译排除（保留文件供 Android 继续构建）；
+  3) DT_ANDROID_* 四个 tag 在源文件头部 #ifndef 补 bionic 数值定义；
+  4) PAGE_MASK 用 sysconf(_SC_PAGESIZE) 派生（缓存），struct sigaction 显式 #include <signal.h>
+  并配 -D_GNU_SOURCE（-std=c11 严格模式下 musl 隐藏 sigaction 完整定义）。
+  5) 构建系统：上游只有 Android.mk 时，conanfile 直接驱动 clang 按原源文件清单+原 CFLAGS 编译，
+  编译器取自 tools.build:compiler_executables（R33）。
+solution: |
+  # xh_log.h 关键片段
+  #if defined(__OHOS__)
+  #include <hilog/log.h>
+  typedef enum { ANDROID_LOG_UNKNOWN=0, ANDROID_LOG_DEFAULT, ANDROID_LOG_VERBOSE,
+                 ANDROID_LOG_DEBUG, ANDROID_LOG_INFO, ANDROID_LOG_WARN,
+                 ANDROID_LOG_ERROR, ANDROID_LOG_FATAL, ANDROID_LOG_SILENT } android_LogPriority;
+  int __android_log_print(int prio, const char *tag, const char *fmt, ...);
+  #else
+  #include <android/log.h>
+  #endif
+
+  # xh_log.c 桥接实现
+  #if defined(__OHOS__)
+  #include <stdarg.h>
+  int __android_log_print(int prio, const char *tag, const char *fmt, ...)
+  {
+      va_list ap; va_start(ap, fmt);
+      int r = OH_LOG_Print(LOG_APP, (LogLevel)prio, 0, tag, fmt, ap);
+      va_end(ap); return r;
+  }
+  #endif
+
+  # 链接：-lhilog_ndk.z（package_info 里 system_libs = ["pthread", "hilog_ndk.z"]）
+fallback: >
+  若目标环境无 libhilog_ndk.z（纯命令行最小系统），可将 __android_log_print 桥接为
+  vfprintf(stderr,...)——功能降级但保持符号与签名兼容。xhook 本例未采用（OHOS PC 系统带 hilog）。
+verify_builds:
+  - "xhook 1.2.0 本地 conan create（OHOS PC 实机，clang-15 aarch64-linux-ohos）：7/7 源文件 -Werror 编译通过"
+  - "PLT hook 实测：hook malloc in dlopen'ed .so，计数 3→5（5s 窗口），old_func 捕获原 GOT 值"
+related_docs:
+  - knowledge/operations/ohos-adaptation-patterns.md
+prescan_pattern: "android/log\\.h|__android_log_print|LOCAL_LDLIBS.*-llog"
+last_updated: 2026-09-12
+source_pr: xhook-1.2.0
+author_agent: j669539

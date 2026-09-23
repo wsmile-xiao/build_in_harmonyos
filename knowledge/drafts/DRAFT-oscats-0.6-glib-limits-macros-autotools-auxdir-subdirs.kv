@@ -1,0 +1,241 @@
+# ═══ Draft knowledge entry — oscats 0.6 autotools 适配八类构建期坑（坑 0–7）═══
+# Timestamp: 2026-09-12
+# Software: oscats 0.6 (2011 autotools, GObject + GSL)
+# Gate: PR #9598 / task contrib-5528
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+#
+# 写法约定（为让本文件同时可被严格 YAML 解析器整份读入，见 PR #9598 评审意见）：
+#   - 以 `#` 开头的取值（如 forbid_3_pattern）用单引号包裹，避免被当注释丢弃；
+#   - 普通标量内不写「冒号+空格」，正则里改用 `:\s*`；
+#   - 普通标量内不写「空白+#」，CI 编号一律写作 `CI 44645`（不写 `#44645`）。
+# 注释行与 root_cause 的块标量（>）不受上述限制。
+
+id:                     DRAFT-oscats-0.6
+trigger_tool:           configure|autotools|make|clang|glib|conan
+phase:                  configure|build
+error_signature:        use of undeclared identifier 'G_MAX(UINT|DOUBLE)'|
+                        use of undeclared identifier 'G_MINDOUBLE'|
+                        machine 'aarch64' not recognized|
+                        No such file or directory.*cd src|
+                        Invalid configuration `aarch64-linux'|
+                        config\.status:\s*line [0-9]+:\s*print:\s*command not found|
+                        libtool:\s*line [0-9]+:\s*syntax error near unexpected token|
+                        shell-init:\s*error retrieving current directory:\s*getcwd:\s*cannot access parent directories:\s*Not supported|
+                        make.*jobserver mkfifo.*Operation not permitted|
+                        fatal error:\s*'gsl/gsl_vector\.h' file not found|
+                        -[IL]//(include|lib)|
+                        static declaration of 'select' follows non-static declaration
+
+severity:               3
+category:               autotools|glib|make|conan|harmonyos
+match_keywords:         basic_layout, build_folder, source_folder, build-release,
+                         os.getcwd, out-of-source, in-source, config.sub patch skipped,
+                         G_MAXUINT, G_MAXINT, G_MAXDOUBLE, G_MINDOUBLE, glib 2.80,
+                         gtypes.h, limits.h, float.h, -include, glib-compat.h,
+                         AC_CONFIG_AUX_DIR, config.sub, config.guess, ac_aux_dir,
+                         aarch64 not recognized, MAKEFLAGS, command-line variable,
+                         SUBDIRS, make -C, -Wno-error, per-target CFLAGS,
+                         -fcommon, tentative definition,
+                         CONFIG_SHELL, HNP bash, print -r --, ECHO, config.status,
+                         libtool 引号失衡, getcwd, HMDFS, Not supported,
+                         jobserver, mkfifo, TMPDIR, gsl-config, AX_PATH_GSL,
+                         GSL_CFLAGS, -I//include, -L//lib, disable-gsltest,
+                         static declaration follows non-static, select,
+                         sys/select.h, 信号回调重命名, G_CALLBACK
+title:                  oscats 0.6 autotools 适配八类坑（坑 0–7）：basic_layout 默认 build_folder 分离致源码树 patch 静默跳过、glib 2.80 移除 limits 宏须自带 limits/float、AC_CONFIG_AUX_DIR 决定 config.sub 落点、make 命令行变量递归污染 SUBDIRS、configure/make 两侧 shell 不一致致 libtool 引号失衡、TMPDIR 落在 HMDFS 致 jobserver mkfifo 失败、依赖包 gsl-config 硬编码 -I//include、私有 static 回调与 OHOS musl 的 POSIX select 原型冲突须重命名
+
+root_cause: >
+  0) basic_layout(self, src_folder=".") 只设 folders.source="."，folders.build 默认是
+     build-<build_type>（build-release），且 build() 期间 os.getcwd() == build_folder。
+     于是 self.build_folder=.../b/build-release 而 tarball 解包在 self.source_folder=.../b。
+     配方用 self.build_folder 拼 config/config.sub、configure 的路径全部指向
+     build-release/ 下不存在的文件，被 os.path.isdir 守卫静默跳过（两个 patch 的
+     self.output.info 一行都不打印），configure 仍调用 2009 版 config.sub →
+     "Invalid configuration `aarch64-linux': machine `aarch64' not recognized"。
+     注意 Autotools helper 的 configure()/install() 固定用 self.source_folder 定位脚本，
+     而 make() 用 os.getcwd()（= build_folder）：out-of-source 时 `make -C src` 也会落空。
+  1) glib 2.80 起从 glib/gtypes.h 删除 G_MININT/G_MAXINT/G_MINUINT/G_MAXUINT/
+     G_MINLONG/G_MAXLONG/G_MINULONG/G_MAXULONG/G_MINFLOAT/G_MAXFLOAT/G_MINDOUBLE/
+     G_MAXDOUBLE/G_MINSHORT/G_MAXSHORT（改用 C99 limits.h/float.h）。oscats 0.6 用
+     它们做 GObject 属性区间（1, G_MAXUINT, ...）与数值哨兵（±G_MAXDOUBLE / G_MINDOUBLE）。
+     关键细节：glib 的 gtypes.h 自身并不 include <limits.h>/<float.h>，故 -include 注入的
+     兼容 shim 必须自己带上这两个头，否则 INT_MAX/DBL_MAX 同样未声明。
+  2) 上游 configure.in 声明 AC_CONFIG_AUX_DIR([config])，故 configure 调用的是
+     $ac_aux_dir/config.sub = config/config.sub，而不是构建根的 config.sub（上游 tarball
+     根目录根本没有 config.sub）。2009/2010 版 config.sub 完全不认识 aarch64
+     （实测 config.sub aarch64-linux → machine 'aarch64' not recognized，rc=1）。
+  3) make 的命令行变量赋值（SUBDIRS=src）会写入 MAKEFLAGS 并递归传给所有子 make，
+     且优先级高于子 Makefile 的赋值 → 把 src/Makefile 自己的 SUBDIRS=liboscats 也改成
+     "src"，导致 cd src 不存在而失败。
+  4) shell 不一致（本坑最隐蔽）：ohos-aarch64 profile 的 [buildenv] 把 SHELL 与
+     CONFIG_SHELL 都指向 HNP bash（/data/service/hnp/bin/bash）。autoconf 用
+     `print -r -- -n` 探测 ECHO 能力，只要 configure 运行时的 shell 有 print 内建就
+     把 ECHO='print -r --' 写进 config.status；但 config.status 与 make/libtool 由
+     make 侧 shell 执行，若该 shell 无 print 内建 → 60+ 次
+     `config.status: line 685/697: print: command not found` → libtool 生成脚本
+     引号失衡 → `libtool: line 315: syntax error near unexpected token '}'`
+     （对应 configure 中 linux 分支 archive_expsym_cmds 的
+     `echo "local: *; };" >> $output_objdir/$libname.ver~`）。
+     另有 HNP bash 在 HMDFS 上 getcwd() 失败：`shell-init: ... getcwd: cannot access
+     parent directories: Not supported`。故 SHELL/CONFIG_SHELL 必须实测选定、两侧统一。
+  5) TMPDIR 落在 HMDFS：make 4.4+ 用 $TMPDIR 下 mkfifo 建 jobserver 命名管道，
+     HMDFS 不支持 mkfifo → `make: jobserver mkfifo: .../GMfifoXXXX: Operation not
+     permitted`；但 TMPDIR 直接清空/指向沙箱外又可能不可写（clang 报 "C compiler
+     cannot create executables"）。须逐候选实测「可写 + mkfifo 可用」。
+  6) 依赖包 gsl/2.8 的 bin/gsl-config 硬编码 prefix=/、exec_prefix=/、
+     includedir=//include，--cflags 输出 `-I//include`、--libs 输出 `-L//lib -lgsl ...`。
+     oscats 用 AX_PATH_GSL 直接把这些字符串抄进 GSL_CFLAGS/GSL_LIBS；配方又传了
+     --disable-gsltest 跳过自检编译 → 直到真正编译 models/l2p.c 才报
+     `fatal error: 'gsl/gsl_vector.h' file not found`。修法是复制 gsl-config 到构建目录、
+     就地把 //include //lib 与 prefix/exec_prefix/includedir 行改写成真实包路径，
+     再用 GSL_CONFIG 环境变量指向该副本。
+  7) OHOS musl 的 sys/select.h（经 glib/gmain.h 间接引入）在默认模式下无条件声明
+     POSIX `int select(int, fd_set*, ...)` 原型。oscats 的四个选题算法
+     （closest_diff / max_fisher / max_kl / pick_rand）各自定义了一个**文件内
+     static** 回调 `static gint select (OscatsTest*, OscatsExaminee*, ...)`，于是
+     clang 报硬错误（不是警告，-Wno-error 无法降级）：
+     `algorithms/max_kl.c:626:13: error: static declaration of 'select' follows
+      non-static declaration ... sys/select.h:40: previous declaration is here`。
+     宏改名（-Dselect=...）无效：它会同时改写 sys/select.h 的声明与私有定义，
+     两者仍是一名两态。必须把私有定义**重命名**出 POSIX 命名空间。
+
+affected_scope:         autotools 老项目（2009-2011 年代，含 AC_CONFIG_AUX_DIR）在
+                        HarmonyOS PC 上依赖 glib 2.80+/gsl 的 Conan 适配；glib limits 宏
+                        删除影响任何直接使用 G_MIN*/G_MAX* 的旧代码；shell/TMPDIR 两坑
+                        影响所有走 autotools + libtool 的包（不限 oscats）。
+
+verification_cmd:       conan create . -pr:h=$HOME/.conan2/profiles/ohos-aarch64 \
+                          -pr:b=$HOME/.conan2/profiles/ohos-aarch64 --build=missing
+                        应完整通过 configure / make -C src / test_package。
+
+rec_priority:           1
+rec_approach:           in-source-basic_layout + glib-shim-self-include + auxdir-aware-config-sub + make-C-not-SUBDIRS
+rec_description: >
+  0) layout() 用 basic_layout(self, src_folder=".", build_folder=".") 强制 in-source 构建，
+     使 self.build_folder == self.source_folder == os.getcwd()。否则 self.build_folder
+     默认指向 build-<build_type>/，用 self.build_folder 定位 tarball 源码树文件
+     （configure、config/config.sub、oscats.pc、src/liboscats/.libs）会全部落空，
+     os.path.isdir/os.path.exists 守卫会静默跳过 patch；且 make() 以 os.getcwd()
+     为工作目录，out-of-source 下 `make -C src` 找不到 src/。先例：kismet、ttfautohint。
+  1) 建 compat/glib-compat.h，先 #include <limits.h> 与 <float.h>，再对每个
+     G_MIN*/G_MAX* 用 #ifndef 守卫定义成对应的 C99 常量（G_MAXUINT→UINT_MAX、
+     G_MAXDOUBLE→DBL_MAX、G_MINDOUBLE→DBL_MIN 等）；配方 extra_cflags 加
+     ["-include", <source>/compat/glib-compat.h] 强制注入（export_sources 里
+     copy(self, "compat/*", ...) 保证进包）。
+  2) 查 configure.in/configure.ac 的 AC_CONFIG_AUX_DIR：若声明了目录 D，则 config.sub
+     必须覆盖到 <build>/D/config.sub（不是构建根）；同时给 configure 显式传
+     --build=<triplet> --host=<triplet>，使 config.guess 根本不被调用。
+  3) 只编某个子目录时用 make -C <dir>（Autotools 里 autotools.make(target="-C src")），
+     绝不用 make SUBDIRS=<dir> —— 命令行变量会经 MAKEFLAGS 递归污染子目录自身的 SUBDIRS。
+  4) 附加：per-target CFLAGS 在 automake 生成行里排在 $(CFLAGS) 之前，故向 CFLAGS 追加
+     -Wno-error 可覆盖 Makefile.am 里硬编码的 -Wall -Werror；2011 年代码需 -fcommon
+     （clang15 默认 -fno-common 会 multiple definition）。
+  5) generate() 里实测选 shell：对每个候选（shutil.which("bash")、~/.harmonybrew/bin/bash、
+     /bin/sh）在 build_folder 下跑 `cand -c pwd`，凡 returncode!=0 或 stderr 含
+     "Not supported"/"getcwd"/"shell-init" 的一律淘汰，选中的同时
+     self.buildenv.define("SHELL"/"CONFIG_SHELL", cand) 且写 os.environ，
+     保证 configure 与 make/config.status/libtool 用同一个 shell。先例：blogc 0.20.1。
+  6) generate() 里实测选 TMPDIR：候选 ~/tmp、/data/storage/el2/base/cache、现 TMPDIR，
+     逐个 makedirs + 写探针文件 + os.mkfifo 探针（except (OSError, AttributeError)）；
+     全部失败才退回 <build>/.conan_tmp。选中的同时 buildenv.define("TMPDIR", c) 并写
+     os.environ（build() 开头再兜底一次），使 make 的 jobserver fifo 落在支持 mkfifo 处。
+  7) 依赖提供的 *-config 脚本一律不盲信：定位 self.dependencies["gsl"].package_folder，
+     把 bin/gsl-config 复制到构建目录后，就地把 -I//include→-I<pf>/include、
+     -L//lib→-L<pf>/lib，并把 prefix=/exec_prefix=/includedir= 三行改写成真实路径，
+     chmod 755，os.environ["GSL_CONFIG"]=副本。这样 --disable-gsltest 不自检也安全。
+  8) 把与 POSIX 同名的**文件内 static** 定义改名出 POSIX 命名空间（本工程 4 个选题
+     算法的 `static gint select (...)` → `select_cb`，同时改其 `G_CALLBACK(...)` 引用；
+     GObject 信号名字符串 "select" 保持不动）。做成一枚 patch 放进 patches/ 并在
+     conandata.yml 的 patches 段声明。这正是既有知识条目
+     DRAFT-musl-posix-decl-conflict-rename-legacy（blimps 3.9 legacy getline 同款）
+     的 rec_approach=rename-legacy-definition 的应用；该条目 forbid 的
+     「-Wno-error 降级」与「#define 宏改名」两条路在本例同样无效。
+
+rec_command:            make -C src
+rec_auto_fix:           false
+rec_impl:               conan-recipe-autotools-harmonyos
+
+fallback_priority:      2
+fallback_approach:      patch 上游源码把 G_MAX* 各用点替换为 C99 常量
+fallback_description:   若不便注入 -include（例如工程有自己的 -include 链），可就地把
+                        使用 G_MIN*/G_MAX* 的源文件改成 INT_MAX/UINT_MAX/DBL_MAX 等；
+                        但对 20 余个使用点需逐个改动，远不如一个 shim 头经济。
+fallback_command:       sed -i 's/G_MAXUINT/UINT_MAX/g; s/G_MAXDOUBLE/DBL_MAX/g' src/**/*.c
+fallback_auto_fix:      false
+fallback_impl:          source-patch-c99-limits
+
+forbid_0_pattern:       basic_layout\(self,\s*src_folder=["']\.["']\)\s*(?!.*build_folder)
+forbid_0_reason:        basic_layout 默认 folders.build="build-<build_type>"，os.getcwd()
+                        (== build_folder) 与 source_folder 分离 → out-of-source 构建，
+                        按 self.build_folder 定位 tarball 源码树文件全部落空
+forbid_0_consequence:   config.sub / configure 的 patch 被 os.path.isdir 守卫静默跳过，
+                        configure 报 machine 'aarch64' not recognized；
+                        `make -C src` 也找不到 src/。CI 44595 实测
+
+forbid_1_pattern:       save\(self,\s*.*build_folder.*["']config\.sub["']
+forbid_1_reason:        工程有 AC_CONFIG_AUX_DIR([config]) 时，config.sub 的运行时位置是
+                        <build>/config/config.sub，覆盖构建根的 config.sub 不会被使用
+forbid_1_consequence:   configure 仍调用 2009 版 config.sub → machine 'aarch64' not
+                        recognized，configure 直接失败
+
+forbid_2_pattern:       make\s+SUBDIRS=
+forbid_2_reason:        make 命令行变量会写入 MAKEFLAGS 递归传给子 make，且优先级高于
+                        子 Makefile 的 SUBDIRS 赋值
+forbid_2_consequence:   子目录 SUBDIRS 被覆盖成同名目录 → cd <dir> 不存在 → make Error 1
+
+forbid_3_pattern:       '#include\s*<limits\.h>((?!<float\.h>)[\s\S])*#define\s+G_MAXDOUBLE'
+forbid_3_reason:        只 include <limits.h> 不足：DBL_MAX/DBL_MIN 在 <float.h>
+forbid_3_consequence:   G_MAXDOUBLE/G_MINDOUBLE 定义处 DBL_MAX 未声明，编译仍失败
+
+forbid_4_pattern:       buildenv\.define\(["'](SHELL|CONFIG_SHELL)["'],\s*["']/data/service/hnp/bin/bash
+forbid_4_reason:        HNP bash 在 HMDFS 上 getcwd() 失败，且 configure 侧与 make 侧
+                        shell 不一致时 ECHO 探测结果（print -r --）在 make 侧无 print 内建
+forbid_4_consequence:   config.status 报 60+ 次 print command not found → 生成的 libtool
+                        引号失衡 → `libtool line 315 syntax error near unexpected token '}'`；
+                        外加 shell-init getcwd Not supported。CI 44609 实测
+
+forbid_5_pattern:       TMPDIR\s*=\s*.*(build_folder|source_folder)
+forbid_5_reason:        HMDFS 不支持 mkfifo，make 4.4+ jobserver 需在 $TMPDIR 下建 fifo
+forbid_5_consequence:   make 报 `jobserver mkfifo .../GMfifoXXXXXX` Operation not permitted
+
+forbid_6_pattern:       -[IL]//(include|lib)
+forbid_6_reason:        依赖包 gsl/2.8 的 gsl-config 硬编码 prefix=/（因此 -I//include、
+                        -L//lib），AX_PATH_GSL 会原样抄入 GSL_CFLAGS/GSL_LIBS
+forbid_6_consequence:   --disable-gsltest 跳过自检后，真正编译才报
+                        `fatal error` 'gsl/gsl_vector.h' file not found。CI 44619 实测
+
+forbid_7_pattern:       (-Dselect=|#define\s+select\b).*|Wno-error=\w*select
+forbid_7_reason:        「static declaration follows non-static」是 clang 硬错误；
+                        宏改名会同时改写 sys/select.h 的 POSIX 声明与私有定义，
+                        两者仍是一名两态，冲突不变
+forbid_7_consequence:   编译原地失败；改宏后错误可能移动到别的 TU 或破坏 libc 声明
+
+principles:             P001, P003, P011
+similar_to:             E011, E007, E114
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-oscats-0.6-glib-limits-macros-autotools-auxdir-subdirs.md
+last_updated:           2026-09-11
+source_event:           PR 9598 feat(oscats) 0.6 适配 HarmonyOS PC；CI 44595
+                        （basic_layout build_folder 分离致 config.sub patch 静默跳过）；
+                        CI 44609（SHELL/CONFIG_SHELL 指向 HNP bash → print 缺失 →
+                        libtool 引号失衡；TMPDIR 落在 HMDFS → jobserver mkfifo 失败）；
+                        CI 44619（依赖包 gsl-config 硬编码 -I//include → gsl_vector.h
+                        找不到）；CI 44620（私有 static select 回调与 OHOS musl 的
+                        POSIX select 原型冲突，clang 硬错误）；CI 44645（L0+L1+
+                        test_package 全过，14 checks, 0 failed）；task contrib-5528
+authors:                yanjiaxin
+source_pr:              9598
+source_commit:          054306a96
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-11

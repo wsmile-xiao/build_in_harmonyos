@@ -1,0 +1,870 @@
+--- a/Makefile
++++ b/Makefile
+@@ -59,8 +59,8 @@
+ TEST_OBJECTS := $(TEST_SOURCES:.c=.o)
+ TEST_DEPENDS := $(TEST_SOURCES:.c=.d)
+ 
+-EXTRA_CFLAGS = $(shell $(PKG_CONFIG) --cflags glib-2.0,sqlite3,blkid,mount,uuid,libbsd)
+-EXTRA_LIBS   = $(shell $(PKG_CONFIG) --libs glib-2.0,sqlite3,blkid,mount,uuid)
++EXTRA_CFLAGS = $(shell $(PKG_CONFIG) --cflags glib-2.0,sqlite3,uuid)
++EXTRA_LIBS   = $(shell $(PKG_CONFIG) --libs glib-2.0,sqlite3,uuid)
+ 
+ ifdef DEBUG
+ 	# We link the system libsqlite3, so SQLITE_* build defines don't apply here.
+@@ -117,7 +117,7 @@
+ 
+ override CFLAGS += $(WARN_EXTRA) -D_FILE_OFFSET_BITS=64 -D_GNU_SOURCE \
+ 	-DVERSTRING=\"$(VERSION)\" $(EXTRA_CFLAGS) $(DEBUG_FLAGS)
+-LIBRARY_FLAGS += -Wl,--as-needed -latomic -lm $(EXTRA_LIBS)
++LIBRARY_FLAGS += -Wl,--as-needed -lm -lintl $(EXTRA_LIBS)
+ 
+ # make C=1 to check with sparse.
+ ifdef C
+--- a/src/dbfile.c
++++ b/src/dbfile.c
+@@ -2415,7 +2415,7 @@
+ }
+ 
+ static int iter_cb(void *priv, int argc, char **argv,
+-		char **column [[maybe_unused]])
++		char **column __attribute__((unused)))
+ {
+ 	iter_files_func func = priv;
+ 
+--- a/src/dedupe.c
++++ b/src/dedupe.c
+@@ -596,7 +596,15 @@
+ 		 */
+ 		if (status >= 0)
+ 			return DEDUPE_SUPPORT_YES;
+-		if (status == -EOPNOTSUPP || status == -ENOTTY)
++		if (status == -EOPNOTSUPP || status == -ENOTTY ||
++		    status == -EACCES)
++			/*
++			 * -EACCES joins the definite-no set for the stacking
++			 * filesystems on HarmonyOS: they refuse the dedupe
++			 * ioctl itself with EACCES even on a writable file the
++			 * caller just wrote, so here it never means "bad
++			 * credentials" - the probe fd is ours, opened O_RDWR.
++			 */
+ 			return DEDUPE_SUPPORT_NO;
+ 		return DEDUPE_SUPPORT_UNKNOWN;
+ 	}
+--- a/src/file_scan.c
++++ b/src/file_scan.c
+@@ -21,6 +21,23 @@
+ #include <sys/stat.h>
+ #include <sys/ioctl.h>
+ #include <sys/param.h>
++
++/*
++ * libc without a statx() wrapper (musl-based OHOS): take struct statx and the
++ * STATX_* constants from the kernel UAPI and call the syscall directly.
++ * glibc's <sys/stat.h> defines STATX_BASIC_STATS under _GNU_SOURCE, so the
++ * upstream path is untouched.
++ */
++#ifndef STATX_BASIC_STATS
++#include <linux/stat.h>
++#include <sys/syscall.h>
++#include <unistd.h>
++static inline int statx(int dirfd, const char *pathname, int flags,
++			unsigned int mask, struct statx *statxbuf)
++{
++	return (int)syscall(SYS_statx, dirfd, pathname, flags, mask, statxbuf);
++}
++#endif
+ #include <limits.h>
+ #include <fcntl.h>
+ #include <assert.h>
+@@ -36,8 +53,6 @@
+ #include <inttypes.h>
+ #include <linux/magic.h>
+ #include <sys/statfs.h>
+-#include <blkid/blkid.h>
+-#include <libmount/libmount.h>
+ #include <sys/sysmacros.h>
+ #include <uuid/uuid.h>
+ #include <stdatomic.h>
+@@ -476,6 +491,7 @@
+ 	size_t read_cap; /* offset of the next all-hole block: reads stop here (see fill_buffer) */
+ 	struct fiemap *fiemap;
+ 	unsigned int extent_cursor; /* resume hint for get_extent() in process_extents */
++	bool no_fiemap;		/* layout unavailable: read every block */
+ 	struct running_checksum *file_csum;
+ 	struct running_checksum *extent_csum;
+ };
+@@ -711,12 +727,6 @@
+ 	return 1;
+ }
+ 
+-static inline void mnt_unref_table_cleanup(struct libmnt_table **tb)
+-{
+-	if (tb && *tb)
+-		mnt_unref_table(*tb);
+-}
+-
+ static inline dev_t stx_to_dev(struct statx *stx)
+ {
+ 	return makedev(stx->stx_dev_major, stx->stx_dev_minor);
+@@ -931,6 +941,7 @@
+ 	uuid_t	uuid;
+ 	bool	is_btrfs;
+ 	bool	supported;	/* on the allowlist: usable without probing */
++	bool	uuid_from_fsid;	/* identity came from f_fsid, not a real UUID */
+ };
+ 
+ /*
+@@ -965,15 +976,11 @@
+ 	struct statx st;
+ 	struct statfs fs;
+ 	int ret;
+-	_cleanup_(mnt_unref_table_cleanup) struct libmnt_table *tb = NULL;
+ 	_cleanup_(closefd) int fd = longpath_open(path, O_RDONLY);
+-	_cleanup_(freep) char *uuid_found = NULL;
+ 	/* Every message below names the path, and this runs once per root (or
+ 	 * per fs), not per file - so escape it once here rather than in each
+ 	 * branch. */
+ 	declare_display_path(dpath, path);
+-
+-	struct libmnt_fs *dev = NULL;
+ 
+ 	if (fd == -1) {
+ 		eprintf("Cannot open %s: %s\n", dpath, strerror(errno));
+@@ -1018,59 +1025,40 @@
+ 			return 0;
+ 		}
+ 
+-		/* Relative to the fd: `path` may be over PATH_MAX (#117). */
+-		ret = statx(fd, "", AT_EMPTY_PATH, STATX_BASIC_STATS, &st);
+-		if (ret) {
+-			eprintf("Failed to stat %s: %s\n",
+-					dpath, strerror(errno));
+-			filescan_count_errno_skip(errno);
+-			return 1;
++		/*
++		 * No btrfs and no GETFSUUID: fall back to the filesystem's own
++		 * f_fsid as its identity. HarmonyOS filesystems (hmdfs, hmfs)
++		 * refuse FS_IOC_GETFSUUID with EACCES and ship no blkid, but
++		 * fstatfs() still answers with a stable per-mount id - and
++		 * identity only has to be stable and distinct, which is all
++		 * the fs-lock bookkeeping below uses it for.
++		 */
++		{
++			struct statfs idfs;
++
++			if (!fstatfs(fd, &idfs) &&
++			    (idfs.f_fsid.__val[0] || idfs.f_fsid.__val[1])) {
++				/* Pack the 8+8-byte fsid into a 16-byte UUID:
++				 * stable, per-mount, and enough for the lock. */
++				memcpy(probe->uuid, &idfs.f_fsid,
++				       sizeof(idfs.f_fsid));
++				probe->uuid_from_fsid = true;
++				/*
++				 * A filesystem without a real UUID ioctl on
++				 * HarmonyOS is one of the stacking filesystems
++				 * that refuse FIDEDUPERANGE too (verified on
++				 * hmdfs/hmfs/fuse). Record the verdict now so
++				 * a run on an empty tree - no file to probe -
++				 * still gets the degraded-run treatment below
++				 * instead of a fatal "unusable" report.
++				 */
++				locked_fs.dedupe = DEDUPE_SUPPORT_NO;
++				return 0;
++			}
+ 		}
+ 
+-		if (st.stx_dev_major == 0) {
+-			dprintf("%s lives on an unsupported filesystem, skipping. "
+-				"Please fill a bug if you think this is a mistake.\n",
+-					dpath);
+-			filescan_count_skip(SCAN_SKIP_UNSUPPORTED_FS);
+-			return 1;
+-		}
+-
+-		tb = mnt_new_table_from_file("/proc/self/mountinfo");
+-		if (!tb) {
+-			perror("unable to read and parse /proc/self/mountinfo");
+-			filescan_count_skip(SCAN_SKIP_UNSUPPORTED_FS);
+-			return 1;
+-		}
+-
+-		dev = mnt_table_find_devno(tb, stx_to_dev(&st), MNT_ITER_FORWARD);
+-		if (!dev) {
+-			eprintf("%s: unable to find the mount infos\n",
+-					dpath);
+-			filescan_count_skip(SCAN_SKIP_UNSUPPORTED_FS);
+-			return 1;
+-		}
+-
+-		fs_source = mnt_fs_get_source(dev);
+-		first_device = extract_first_device(fs_source);
+-
+-		if (!first_device) {
+-			eprintf("Memory allocation failed\n");
+-			filescan_count_skip(SCAN_SKIP_UNREADABLE);
+-			return 1;
+-		}
+-
+-		uuid_found = blkid_get_tag_value(NULL, "UUID", first_device);
+-		free(first_device);
+-		if (!uuid_found) {
+-			eprintf("libblkid could not get uuid for "
+-					"device %s. Run blkid as root to "
+-					"populate the cache.\n",
+-					mnt_fs_get_source(dev));
+-			filescan_count_skip(SCAN_SKIP_UNSUPPORTED_FS);
+-			return 1;
+-		}
+-
+-		uuid_parse(uuid_found, probe->uuid);
++		filescan_count_skip(SCAN_SKIP_UNSUPPORTED_FS);
++		return 1;
+ 	}
+ 	return 0;
+ }
+@@ -1213,8 +1201,14 @@
+ 		uuid_copy(locked_fs.uuid, probe.uuid);
+ 		locked_fs.dev = stx_to_dev(st);
+ 		locked_fs.is_btrfs = probe.is_btrfs;
++		/*
++		 * A definite no from the seed probe (HarmonyOS stacking
++		 * filesystems, identified by the fsid fallback) is already a
++		 * verdict; only an unprobed fs defers to the per-file probe.
++		 */
+ 		locked_fs.dedupe = probe.supported ? DEDUPE_SUPPORT_YES
+-						   : DEDUPE_SUPPORT_UNKNOWN;
++			: probe.uuid_from_fsid ? DEDUPE_SUPPORT_NO
++			: DEDUPE_SUPPORT_UNKNOWN;
+ 
+ 		return true;
+ 	}
+@@ -1244,9 +1238,11 @@
+ 		locked_fs.is_btrfs = probe.is_btrfs;
+ 		/* Same deferral as the empty-hashfile path above: a hashfile
+ 		 * records the filesystem's UUID, not whether it can be deduped,
+-		 * so a replay onto an unrecognised filesystem still has to ask. */
++		 * so a replay onto an unrecognised filesystem still has to ask.
++		 * A seed-time definite no (uuid_from_fsid) is still a verdict. */
+ 		locked_fs.dedupe = probe.supported ? DEDUPE_SUPPORT_YES
+-						   : DEDUPE_SUPPORT_UNKNOWN;
++			: probe.uuid_from_fsid ? DEDUPE_SUPPORT_NO
++			: DEDUPE_SUPPORT_UNKNOWN;
+ 		return true;
+ 	}
+ 
+@@ -1326,6 +1322,15 @@
+  * has already said so. Nor is an interrupted run, whose exit status belongs to
+  * the signal rather than to a question the user cut short.
+  */
++static bool run_dedupe_downgraded_flag;
++
++/* True once this run wanted dedupe but the filesystem proved unable; the flag
++ * is consumed by oans.c to print the degraded-run notice exactly once. */
++bool run_dedupe_downgraded(void)
++{
++	return run_dedupe_downgraded_flag;
++}
++
+ bool filescan_report_fs_unusable(void)
+ {
+ 	if (interrupted() || locked_fs.dedupe != DEDUPE_SUPPORT_UNKNOWN)
+@@ -2029,7 +2034,22 @@
+ 		break;			/* budget spent; report what we know */
+ 	case DEDUPE_SUPPORT_NO:
+ 		locked_fs.dedupe = DEDUPE_SUPPORT_NO;
+-		break;
++		/*
++		 * HarmonyOS adaptation: every writable filesystem here (hmdfs,
++		 * hmfs, fuse) refuses FIDEDUPERANGE, so a definite no is the
++		 * normal state, not a broken run. Aborting the walk would make
++		 * oans unable to scan anything at all; instead run degraded -
++		 * scan and hash complete, the dedupe phase is skipped like a
++		 * run started without it, and the verdict is still on record
++		 * in locked_fs.dedupe for anyone who asks.
++		 */
++		if (options.run_dedupe) {
++			options.run_dedupe = 0;
++			run_dedupe_downgraded_flag = true;
++			qprintf("Filesystem does not support FIDEDUPERANGE; "
++				"running scan+hash only, without dedupe.\n");
++		}
++		return true;
+ 	}
+ 
+ 	report_fs_unusable();
+@@ -2629,8 +2649,12 @@
+  */
+ static size_t hole_run_length(struct scan_ctxt *ctxt)
+ {
+-	struct fiemap_extent *e = get_extent(ctxt->fiemap, ctxt->off,
+-					     &ctxt->extent_cursor);
++	struct fiemap_extent *e;
++
++	if (ctxt->no_fiemap)
++		return 0;	/* no layout: nothing is known to be a hole */
++
++	e = get_extent(ctxt->fiemap, ctxt->off, &ctxt->extent_cursor);
+ 
+ 	if (!block_is_hole(e, ctxt->off))
+ 		return 0;			/* block holds some data */
+@@ -2661,6 +2685,9 @@
+ {
+ 	unsigned int cur = ctxt->extent_cursor;
+ 	size_t b = from;
++
++	if (ctxt->no_fiemap)
++		return ctxt->filesize;	/* no layout: nothing is a hole */
+ 
+ 	for (;;) {
+ 		struct fiemap_extent *e = get_extent(ctxt->fiemap, b, &cur);
+@@ -2754,7 +2781,7 @@
+ 
+ 	while (file_off < ctxt->off + bytes) {
+ 		extent = get_extent(ctxt->fiemap, file_off, &ctxt->extent_cursor);
+-		if (!extent) {
++		if (!extent || ctxt->no_fiemap) {
+ 			/*
+ 			 * No extent covers file_off, and get_extent() returns
+ 			 * the next extent for a hole, so this means file_off is
+@@ -3407,8 +3434,21 @@
+ 	posix_fadvise(ctxt.fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+ 
+ 	ctxt.fiemap = do_fiemap(ctxt.fd);
+-	if (!ctxt.fiemap)
+-		return;
++	if (!ctxt.fiemap) {
++		/*
++		 * No layout from FIEMAP (HarmonyOS filesystems refuse the
++		 * ioctl with EACCES). Rather than skipping the file, scan it
++		 * with an empty extent map: no hole is ever assumed, every
++		 * byte is read and hashed, and the file carries no extent
++		 * hashes. Dedupe quality degrades from block level to whole
++		 * file level on such filesystems, which is honest: there is
++		 * no extent information to compare.
++		 */
++		ctxt.fiemap = calloc(1, sizeof(*ctxt.fiemap));
++		if (!ctxt.fiemap)
++			return;
++		ctxt.no_fiemap = true;
++	}
+ 
+ 	/* Take over the interrupted run's state, if the layout still backs it. */
+ 	if (file->resume &&
+--- a/src/file_scan.h
++++ b/src/file_scan.h
+@@ -51,6 +51,7 @@
+  * and the wording, the way filescan_report_excludes() does.
+  */
+ bool filescan_report_fs_unusable(void);
++bool run_dedupe_downgraded(void);
+ 
+ /*
+  * How many scan roots named on the command line (or in a "-" stdin list) could
+--- a/src/filerec.h
++++ b/src/filerec.h
+@@ -19,7 +19,6 @@
+ #include <stdint.h>
+ #include <time.h>
+ #include <glib.h>
+-#include <bsd/sys/queue.h>
+ #include "rbtree.h"
+ #include "results-tree.h"
+ 
+--- a/src/find_dupes.c
++++ b/src/find_dupes.c
+@@ -367,7 +367,7 @@
+  * It went unseen while GLib called the worker directly (an uninstrumented
+  * library), which is why the trampoline is what surfaced it.
+  */
+-static void find_dupes_thread(void *item, void *priv [[maybe_unused]])
++static void find_dupes_thread(void *item, void *priv __attribute__((unused)))
+ {
+ 	struct cmp_ctxt *ctxt = item;
+ 
+--- a/src/hash-tree.c
++++ b/src/hash-tree.c
+@@ -162,7 +162,7 @@
+ 	free_file_hash_head(head);
+ }
+ 
+-static int cmp_blocks(void *priv [[maybe_unused]], struct list_head *a,
++static int cmp_blocks(void *priv __attribute__((unused)), struct list_head *a,
+ 		struct list_head *b)
+ {
+ 	struct file_block *fba, *fbb;
+--- a/src/memstats.h
++++ b/src/memstats.h
+@@ -32,7 +32,7 @@
+ #endif
+ static inline void increment_counters(unsigned long long *num_type,
+ 				      unsigned long long *max_type,
+-				      unsigned long long count, GMutex *mutex [[maybe_unused]])
++				      unsigned long long count, GMutex *mutex __attribute__((unused)))
+ {
+ #ifdef	LOCK_MEMSTATS
+ 	g_mutex_lock(mutex);
+@@ -45,7 +45,7 @@
+ #endif
+ }
+ static inline void decrement_counters(unsigned long long *num_type,
+-				      GMutex *mutex [[maybe_unused]])
++				      GMutex *mutex __attribute__((unused)))
+ {
+ #ifdef	LOCK_MEMSTATS
+ 	g_mutex_lock(mutex);
+@@ -60,7 +60,7 @@
+ static GMutex alloc_##_type##_mutex;					\
+ unsigned long long num_##_type = 0;					\
+ unsigned long long max_##_type = 0;					\
+-[[maybe_unused]] static inline struct _type *malloc_##_type(void)	\
++__attribute__((unused)) static inline struct _type *malloc_##_type(void)	\
+ {									\
+ 	struct _type *t = malloc(sizeof(struct _type));			\
+ 	if (t)								\
+@@ -68,7 +68,7 @@
+ 				   &alloc_##_type##_mutex);		\
+ 	return t;							\
+ }									\
+-[[maybe_unused]] static inline struct _type *calloc_##_type(int n)	\
++__attribute__((unused)) static inline struct _type *calloc_##_type(int n)	\
+ {									\
+ 	struct _type *t = calloc(n, sizeof(struct _type));		\
+ 	if (t)								\
+--- a/src/oans.c
++++ b/src/oans.c
+@@ -1683,6 +1683,15 @@
+ 	 */
+ 	if (!ret && filescan_report_fs_unusable())
+ 		ret = 1;
++	/*
++	 * HarmonyOS adaptation: when the filesystem was proved unable to
++	 * dedupe (the normal state here), a run that asked for dedupe ends
++	 * degraded but successful - say so once, here, where the verdict is
++	 * final. Empty trees never reach the per-file notice.
++	 */
++	if (!ret && run_dedupe_downgraded())
++		qprintf("Filesystem does not support FIDEDUPERANGE; "
++			"ran scan+hash only, without dedupe.\n");
+ 
+ 	/* Only once the walk actually ran: after a failure every pattern would
+ 	 * trivially have "matched nothing" and would bury the real error. */
+--- a/src/progress.c
++++ b/src/progress.c
+@@ -509,7 +509,9 @@
+ 	 * done size is bold, the "/" and total are dim, the percent takes the
+ 	 * status color - so the numbers stand out from the path.
+ 	 */
+-	switch (t->status) {
++	/* atomic_load: switch requires a plain integer type; some compilers
++	 * reject _Atomic-qualified controlling expressions. */
++	switch (atomic_load(&t->status)) {
+ 	case thread_scanning:
+ 	case thread_deduping: {
+ 		char ds[32], ts[32];
+@@ -576,7 +578,7 @@
+ 		if (s)
+ 			fputs("   ", stdout);
+ 
+-		switch (stages[s]) {
++		switch (atomic_load(&stages[s])) {
+ 		case ST_DONE:
+ 			printf("%s%s%s %s%s%s", col_green, tty ? "✔" : "x",
+ 			       col_reset, col_green, stage_name[s], col_reset);
+--- a/src/run_dedupe.c
++++ b/src/run_dedupe.c
+@@ -923,7 +923,7 @@
+  * to cover what they write; it pairs with the acquire in the
+  * g_thread_pool_free() wrapper. Both calls compile away outside a TSAN build.
+  */
+-static void dedupe_worker(void *priv, void *unused [[maybe_unused]])
++static void dedupe_worker(void *priv, void *unused __attribute__((unused)))
+ {
+ 	oans_tsan_work_acquire(priv);
+ 	dedupe_worker_body(priv);
+--- a/src/storage.c
++++ b/src/storage.c
+@@ -13,6 +13,7 @@
+ 
+ #include <errno.h>
+ #include <fcntl.h>
++#include <limits.h>
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+--- a/tests/unit/fixtures.h
++++ b/tests/unit/fixtures.h
+@@ -6,7 +6,7 @@
+  * is the order they were written in, which is what keeps each one declared
+  * before whatever uses it.
+  *
+- * `[[maybe_unused]] static` because each translation unit that includes this
++ * `__attribute__((unused)) static` because each translation unit that includes this
+  * gets its own copy of the ones it calls: without it a TU using half of them
+  * reports the other half under -Wunused-function, which -Werror then turns
+  * into a broken build. Same spelling src/memstats.h uses for the same reason.
+@@ -18,7 +18,7 @@
+ 
+ struct fm_rec { uint64_t log, phys, len; uint32_t flags; };
+ 
+-[[maybe_unused]] static struct fiemap *mkmap(const struct fm_rec *recs, unsigned int n)
++__attribute__((unused)) static struct fiemap *mkmap(const struct fm_rec *recs, unsigned int n)
+ {
+ 	struct fiemap *fm = calloc(1, sizeof(*fm) +
+ 				   n * sizeof(struct fiemap_extent));
+@@ -33,7 +33,7 @@
+ 	return fm;
+ }
+ 
+-[[maybe_unused]] static bool share(const struct fm_rec *ra, unsigned int na, uint64_t off_a,
++__attribute__((unused)) static bool share(const struct fm_rec *ra, unsigned int na, uint64_t off_a,
+ 		  const struct fm_rec *rb, unsigned int nb, uint64_t off_b,
+ 		  uint64_t len)
+ {
+@@ -52,7 +52,7 @@
+  * to the kernel on every run (#186) - and "no" whenever it cannot prove it.
+  */
+ /* Same records, same size -> same key; anything that changes the bytes doesn't. */
+-[[maybe_unused]] static bool key_of(const struct fm_rec *recs, unsigned int n, uint64_t size,
++__attribute__((unused)) static bool key_of(const struct fm_rec *recs, unsigned int n, uint64_t size,
+ 		   unsigned char *out)
+ {
+ 	struct fiemap *fm = mkmap(recs, n);
+@@ -62,13 +62,13 @@
+ 	return ok;
+ }
+ 
+-[[maybe_unused]] static bool near(double got, double want, double eps)
++__attribute__((unused)) static bool near(double got, double want, double eps)
+ {
+ 	double e = got - want;
+ 	return e < eps && e > -eps;
+ }
+ 
+-[[maybe_unused]] static struct dbhandle *memdb(void)
++__attribute__((unused)) static struct dbhandle *memdb(void)
+ {
+ 	struct dbhandle *db = dbfile_open_handle(NULL);
+ 
+@@ -90,7 +90,7 @@
+  * which is how the wrong-length-blob case below first passed against a column
+  * that does not exist.
+  */
+-[[maybe_unused]] static void exec(struct dbhandle *db, const char *sql)
++__attribute__((unused)) static void exec(struct dbhandle *db, const char *sql)
+ {
+ 	char *err = NULL;
+ 
+@@ -116,12 +116,12 @@
+  * validates: a write that failed must be *reported*, not swallowed into a run
+  * that exits 0 and looks like a correct one.
+  */
+-[[maybe_unused]] static void db_refuse_writes(struct dbhandle *db)
++__attribute__((unused)) static void db_refuse_writes(struct dbhandle *db)
+ {
+ 	exec(db, "PRAGMA query_only = ON");
+ }
+ 
+-static int abort_query_cb(void *unused [[maybe_unused]])
++static int abort_query_cb(void *unused __attribute__((unused)))
+ {
+ 	return 1;			/* non-zero: abort the running statement */
+ }
+@@ -144,17 +144,17 @@
+  * vacuous test that no assertion can tell apart from a good one - so a test
+  * relying on this must be checked by putting the bug back.
+  */
+-[[maybe_unused]] static void db_abort_queries_after(struct dbhandle *db, int ops)
++__attribute__((unused)) static void db_abort_queries_after(struct dbhandle *db, int ops)
+ {
+ 	sqlite3_progress_handler(db->db, ops, abort_query_cb, NULL);
+ }
+ 
+-[[maybe_unused]] static void db_allow_queries(struct dbhandle *db)
++__attribute__((unused)) static void db_allow_queries(struct dbhandle *db)
+ {
+ 	sqlite3_progress_handler(db->db, 0, NULL, NULL);
+ }
+ 
+-[[maybe_unused]] static uint64_t rows(struct dbhandle *db, const char *table)
++__attribute__((unused)) static uint64_t rows(struct dbhandle *db, const char *table)
+ {
+ 	char sql[64];
+ 
+@@ -163,7 +163,7 @@
+ }
+ 
+ /* The three counts oans itself reports. */
+-[[maybe_unused]] static void digest_of(unsigned char *out, unsigned int n)
++__attribute__((unused)) static void digest_of(unsigned char *out, unsigned int n)
+ {
+ 	for (unsigned int i = 0; i < DIGEST_LEN; i++)
+ 		out[i] = (unsigned char)(n * 7 + i * 31);
+@@ -171,7 +171,7 @@
+ /* The one row builder. Everything below adds columns to it rather than
+  * repeating the build - two near-identical copies differing by an inert line
+  * is what this replaced. */
+-[[maybe_unused]] static int64_t put_row(struct dbhandle *db, const char *name, uint64_t ino,
++__attribute__((unused)) static int64_t put_row(struct dbhandle *db, const char *name, uint64_t ino,
+ 		       uint64_t subvol, uint64_t size, unsigned int seq)
+ {
+ 	_cleanup_(file_cleanup) struct file f = {0};
+@@ -189,14 +189,14 @@
+ 		abort();
+ 	return id;
+ }
+-[[maybe_unused]] static int64_t put_unscanned_file(struct dbhandle *db, const char *name,
++__attribute__((unused)) static int64_t put_unscanned_file(struct dbhandle *db, const char *name,
+ 				  uint64_t ino, uint64_t subvol)
+ {
+ 	return put_row(db, name, ino, subvol, 4096, 1);
+ }
+ 
+ /* ... and the same row finished, the way a completed hash leaves it. */
+-[[maybe_unused]] static int64_t put_file(struct dbhandle *db, const char *name, uint64_t ino,
++__attribute__((unused)) static int64_t put_file(struct dbhandle *db, const char *name, uint64_t ino,
+ 			uint64_t subvol)
+ {
+ 	int64_t id = put_unscanned_file(db, name, ino, subvol);
+@@ -209,7 +209,7 @@
+ }
+ 
+ /* Build the map, ask, free - the shape share() and key_of() above have. */
+-[[maybe_unused]] static int layout_matches(struct dbhandle *db, int64_t fileid,
++__attribute__((unused)) static int layout_matches(struct dbhandle *db, int64_t fileid,
+ 			  const struct fm_rec *recs, unsigned int n)
+ {
+ 	struct fiemap *fm = mkmap(recs, n);
+@@ -243,7 +243,7 @@
+  * one map in eight, because "cannot prove it" is a case with its own rules and
+  * a generator that never produced one would leave them to the fixed tests.
+  */
+-[[maybe_unused]] static int64_t prop_donor(struct dbhandle *db, struct prop *p)
++__attribute__((unused)) static int64_t prop_donor(struct dbhandle *db, struct prop *p)
+ {
+ 	char name[64];
+ 
+@@ -265,7 +265,7 @@
+ /* Takes the fileid it will actually have: the tests look filerecs up by id,
+  * so a helper that invented its own numbering had to be bypassed by the one
+  * property that chooses ids. */
+-[[maybe_unused]] static struct filerec *mkfilerec(int64_t fileid)
++__attribute__((unused)) static struct filerec *mkfilerec(int64_t fileid)
+ {
+ 	char name[64];
+ 	struct filerec *f;
+@@ -277,7 +277,7 @@
+ 	return f;
+ }
+ 
+-[[maybe_unused]] static void prop_shuffle_u64(struct prop *p, uint64_t *a, unsigned int n)
++__attribute__((unused)) static void prop_shuffle_u64(struct prop *p, uint64_t *a, unsigned int n)
+ {
+ 	for (unsigned int i = n; i > 1; i--) {
+ 		unsigned int j = (unsigned int)prop_below(p, i);
+@@ -288,7 +288,7 @@
+ 	}
+ }
+ 
+-[[maybe_unused]] static int64_t put_dupe(struct dbhandle *db, const char *name, uint64_t ino,
++__attribute__((unused)) static int64_t put_dupe(struct dbhandle *db, const char *name, uint64_t ino,
+ 			unsigned int dg, uint64_t size, unsigned int seq,
+ 			unsigned int flags, unsigned int nr_extents)
+ {
+@@ -306,7 +306,7 @@
+  * there is not exactly one: that means the fixture is broken, and a test that
+  * quietly took the first of two groups would pass while the loader split them.
+  */
+-[[maybe_unused]] static struct dupe_extents *only_group(struct results_tree *res)
++__attribute__((unused)) static struct dupe_extents *only_group(struct results_tree *res)
+ {
+ 	if (res->num_dupes != 1 || RB_EMPTY_ROOT(&res->root))
+ 		abort();
+@@ -322,6 +322,18 @@
+  * the call site would pass while dereferencing nothing.
+  */
+ #define FM_CHUNK	(256 * 1024)
++
++/*
++ * Directory for real temp files: $TMPDIR when set, /tmp otherwise. Some
++ * platforms ship a read-only /tmp, so the hardcoded default cannot be relied
++ * on there; the fallback keeps upstream behaviour where it works.
++ */
++__attribute__((unused)) static const char *test_tmpdir(void)
++{
++	const char *dir = getenv("TMPDIR");
++
++	return dir && *dir ? dir : "/tmp";
++}
+ 
+ /* A real file to map. fd is -1 when this filesystem has no FIEMAP, which the
+  * callers treat as a skip rather than as a failure. */
+@@ -331,19 +343,17 @@
+ 	uint64_t size;
+ };
+ 
+-[[maybe_unused]] static struct fm_file fm_open(const char *name, unsigned int chunks, bool sparse)
++__attribute__((unused)) static struct fm_file fm_open(const char *name, unsigned int chunks, bool sparse)
+ {
+ 	struct fm_file f = { .fd = -1 };
+ 	_cleanup_(freep) char *buf = malloc(FM_CHUNK);
+-	const char *dir = getenv("DUPEREMOVE_TEST_DIR");
+ 	struct fiemap probe = { .fm_length = ~0ULL };
+ 	int fd;
+ 
+ 	if (!buf)
+ 		abort();
+ 	memset(buf, 0xa5, FM_CHUNK);
+-	snprintf(f.path, sizeof(f.path), "%s/oans-fiemap-XXXXXX",
+-		 dir && *dir ? dir : "/tmp");
++	snprintf(f.path, sizeof(f.path), "%s/oans-fiemap-XXXXXX", test_tmpdir());
+ 	fd = mkstemp(f.path);
+ 	if (fd < 0)
+ 		abort();
+@@ -351,7 +361,8 @@
+ 	/* Ask before relying on it. tmpfs answers EOPNOTSUPP here, and a bare
+ 	 * assertion failure would say nothing about why. */
+ 	if (ioctl(fd, FS_IOC_FIEMAP, &probe) < 0 &&
+-	    (errno == EOPNOTSUPP || errno == ENOTTY)) {
++	    (errno == EOPNOTSUPP || errno == ENOTTY ||
++	     errno == EACCES /* HMDFS: unsupported is reported as EACCES */)) {
+ 		printf("\n[fiemap] skipping %s: %s has no FIEMAP\n", name, f.path);
+ 		close(fd);
+ 		unlink(f.path);
+--- a/tests/unit/main.c
++++ b/tests/unit/main.c
+@@ -165,7 +165,7 @@
+ 	MU_RUN(test_prop_group_u64_truncates_to_a_prefix);
+ }
+ 
+-int main(int argc [[maybe_unused]], char *argv[]) {
++int main(int argc __attribute__((unused)), char *argv[]) {
+ 	exec_path = argv[0];
+ 	MU_RUN_SUITE(test_suite);
+ 	MU_REPORT();
+--- a/tests/unit/test_dbfile.c
++++ b/tests/unit/test_dbfile.c
+@@ -651,8 +651,11 @@
+  */
+ MU_TEST(test_dbfile_pruning_keeps_what_still_exists) {
+ 	_cleanup_(sqlite3_close_cleanup) struct dbhandle *db = memdb();
+-	char present[] = "/tmp/oans-prune-XXXXXX";
+-	int fd = mkstemp(present);
++	char present[PATH_MAX];
++	int fd;
++
++	snprintf(present, sizeof(present), "%s/oans-prune-XXXXXX", test_tmpdir());
++	fd = mkstemp(present);
+ 
+ 	if (fd < 0)
+ 		abort();
+@@ -707,8 +710,9 @@
+ 	 * that class, because it is the only one of them a test can produce
+ 	 * without being root or breaking hardware.
+ 	 */
+-	char loop[] = "/tmp/oans-prune-loop-XXXXXX";
+-
++	char loop[PATH_MAX];
++
++	snprintf(loop, sizeof(loop), "%s/oans-prune-loop-XXXXXX", test_tmpdir());
+ 	if (!mkdtemp(loop))
+ 		abort();
+ 	rmdir(loop);
+--- a/tests/unit/test_filerec.c
++++ b/tests/unit/test_filerec.c
+@@ -117,7 +117,7 @@
+ {
+ 	int fd;
+ 
+-	snprintf(path, sz, "/tmp/oans-filerec-XXXXXX");
++	snprintf(path, sz, "%s/oans-filerec-XXXXXX", test_tmpdir());
+ 	fd = mkstemp(path);
+ 	if (fd < 0 || write(fd, "hello", 5) != 5)
+ 		abort();
+--- a/tests/unit/test_interrupt.c
++++ b/tests/unit/test_interrupt.c
+@@ -174,8 +174,11 @@
+  * itself; eprintf() reaches stderr, which is capturable.
+  */
+ MU_TEST(test_the_wind_down_notice_is_said_once) {
+-	char path[] = "/tmp/oans-intr-XXXXXX";
+-	int fd = mkstemp(path);
++	char path[PATH_MAX];
++	int fd;
++
++	snprintf(path, sizeof(path), "%s/oans-intr-XXXXXX", test_tmpdir());
++	fd = mkstemp(path);
+ 	int saved = dup(STDERR_FILENO);
+ 	char buf[4096] = {0};
+ 	unsigned int seen = 0;
+--- a/tests/unit/test_longpath.c
++++ b/tests/unit/test_longpath.c
+@@ -27,7 +27,9 @@
+ 			const char *contents)
+ {
+ 	char comp[LP_COMP_LEN + 1];
+-	char base[] = "/tmp/oans-longpath-XXXXXX";
++	char base[PATH_MAX];
++
++	snprintf(base, sizeof(base), "%s/oans-longpath-XXXXXX", test_tmpdir());
+ 	size_t len = strlen(base);
+ 	int fd;
+ 
+--- a/tests/unit/test_storage.c
++++ b/tests/unit/test_storage.c
+@@ -199,8 +199,9 @@
+ }
+ 
+ MU_TEST(test_read_rotational_reads_what_sysfs_says) {
+-	char root[] = "/tmp/oans-sysfs-XXXXXX";
++	char root[PATH_MAX];
+ 	bool rot = true;
+ 
++	snprintf(root, sizeof(root), "%s/oans-sysfs-XXXXXX", test_tmpdir());
+ 	if (!mkdtemp(root))
+ 		abort();
+--- a/tests/integration/harness.py
++++ b/tests/integration/harness.py
+@@ -172,7 +172,21 @@
+ # --------------------------------------------------------------------------
+ # Reflink support probe
+ # --------------------------------------------------------------------------
+ 
++_FICLONE = 0x40049409
++
++
++def reflink_copy(src, dst):
++    """Clone src to dst without depending on an external coreutils cp."""
++    src_fd = os.open(src, os.O_RDONLY)
++    dst_fd = os.open(dst, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
++    try:
++        fcntl.ioctl(dst_fd, _FICLONE, src_fd)
++    finally:
++        os.close(dst_fd)
++        os.close(src_fd)
++
++
+ def reflink_supported(directory=TEST_ROOT):
+     os.makedirs(directory, exist_ok=True)
+     a = os.path.join(directory, ".reflink_probe_a")
+@@ -180,9 +194,11 @@
+     try:
+         with open(a, "wb") as f:
+             f.write(b"probe")
+-        rc = subprocess.run(["cp", "--reflink=always", a, b],
+-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+-        return rc == 0
++        try:
++            reflink_copy(a, b)
++        except OSError:
++            return False
++        return True
+     finally:
+         for p in (a, b):
+             try:
+@@ -582,5 +598,5 @@
+     def reflink(self, src_rel, dst_rel):
+         """Make dst a reflink (shared-extent) copy of src; returns dst path."""
+         src, dst = self.path(src_rel), self.path(dst_rel)
+-        subprocess.run(["cp", "--reflink=always", src, dst], check=True)
++        reflink_copy(src, dst)
+         return dst

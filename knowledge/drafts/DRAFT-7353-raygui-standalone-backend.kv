@@ -1,0 +1,125 @@
+# ═══ Draft knowledge entry — raygui 4.0 standalone backend consumer test ═══
+# Timestamp: 2026-09-13
+# Software: raygui 4.0
+# Gate: task 7353 / conan-verify G2 迭代链（本地 W3 前验证）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-7353
+trigger_tool:           clang|ld|cmake|conan_test
+phase:                  test_package|build|linking
+error_signature:        use of undeclared identifier 'BLANK'|
+                         use of undeclared identifier 'KEY_DELETE'|
+                         use of undeclared identifier 'KEY_LEFT_CONTROL'|
+                         use of undeclared identifier 'KEY_HOME'|
+                         initializing 'Vector2' \(aka 'struct Vector2'\) with an expression of incompatible type 'int'|
+                         static declaration of 'MeasureTextEx' follows non-static declaration|
+                         conflicting types for 'GetMouseWheelMove'|
+                         passing 'int' to parameter of incompatible type 'Color'|
+                         too many arguments provided to function-like macro invocation|
+                         undefined symbol: RL_FREE|
+                         undefined symbol: GetGlyphIndex|
+                         undefined symbol: GetCodepoint|
+                         undefined symbol: DrawTextCodepoint|
+                         undefined symbol: UnloadTexture|
+                         undefined symbol: GetScreenWidth
+
+severity:               2
+category:               linking, platform, api
+match_keywords:         RAYGUI_STANDALONE, RAYGUI_IMPLEMENTATION, header-only, raygui,
+                         BLANK, KEY_DELETE, GetMouseWheelMove, GetCharPressed, LoadFileText,
+                         MeasureTextEx, RL_FREE, GetGlyphIndex, GetCodepoint, DrawTextCodepoint,
+                         GetScreenWidth, UnloadTexture, standalone backend, incomplete type forward declaration
+title:                  Header-only GUI library that calls a host backend fails consumer test on host-less platform
+
+root_cause:             A header-only GUI library guarded by a backend mode switch (raygui.h with
+                         RAYGUI_STANDALONE) omits its host header (raylib.h) when the switch is set, so every
+                         host symbol its implementation section touches must be supplied by the consumer.
+                         The library's own STANDALONE declaration block only covers a subset: color macros
+                         (BLANK/GRAY/...), extra key codes (KEY_DELETE/KEY_HOME/KEY_END/KEY_INSERT/
+                         KEY_LEFT_SHIFT/KEY_LEFT_CONTROL), the RL_FREE allocator macro and host functions
+                         (Fade/MeasureTextEx/GetScreenWidth/GetGlyphIndex/GetCodepoint/DrawTextCodepoint/
+                         UnloadTexture) are called without any declaration. They surface one round at a
+                         time: undeclared identifier at compile time, implicit-int declarations that
+                         collide with the user's typed definitions (initializing Vector2 with int,
+                         conflicting types, static follows non-static), then undefined symbols at link
+                         time. An upstream changelog may even claim a dependency was removed while one
+                         call site survives (raygui 4.0 MeasureTextEx in the tooltip path).
+
+affected_scope:         Header-only libraries whose implementation calls a host-platform backend behind a
+                         mode switch (raygui RAYGUI_STANDALONE, nuklear-style pluggable backends) when the
+                         consumer platform lacks the host (OHOS without raylib/X11), typically in a Conan
+                         test_package that must compile the implementation TU to be a real test.
+
+verification_cmd:       conan create with test_package compiling RAYGUI_IMPLEMENTATION+RAYGUI_STANDALONE TU and asserting pure-logic APIs (GuiGetState/GuiIsLocked/GuiGetStyle roundtrip)
+
+rec_priority:           1
+rec_approach:           standalone-header-backend-completion
+rec_description:        Three-part backend completion, all BEFORE and AFTER a single include of the
+                         library header. (1) Before the include: define the host color macros (26),
+                         missing key codes, the allocator macro (RL_FREE -> free, matching the
+                         RAYGUI_MALLOC/CALLOC default), forward typedefs of the library's own structs as
+                         INCOMPLETE types (typedef struct Color Color; etc. — completed later inside the
+                         header, legal repeated typedef), and prototypes for every host function the
+                         implementation calls that the header itself does not declare. This kills
+                         implicit-int declarations in one pass instead of iterating error by error.
+                         (2) Keep function-like helper macros OUT of the pre-include block when call
+                         sites pass compound literals — a Fade(color, alpha) macro breaks on braces
+                         (too many arguments); declare a prototype instead. (3) After the include, define
+                         stubs matching the library's STANDALONE declaration block signatures exactly
+                         (raygui 4.0: GetMouseWheelMove returns float, GetCharPressed not GetKeyPressed,
+                         LoadFileText not LoadText, plus LoadTextureFromImage/SetShapesTexture/
+                         LoadCodepoints/UnloadCodepoints/DecompressData/UnloadFileText); define surviving
+                         host-call sites (MeasureTextEx) as non-static to match the implicit declaration
+                         ordering, and keep them in the same TU. Then assert pure-logic APIs (GuiGetState,
+                         GuiIsLocked, GuiSetStyle/GuiGetStyle roundtrip, GuiIconText) that need no
+                         rendering, so the test exercises the real compiled implementation.
+rec_command:            grep the header for undeclared host symbols before writing stubs: grep -oE "\b(Fade|GetColor|GetScreenWidth|GetGlyphIndex|GetCodepoint|DrawTextCodepoint|UnloadTexture|RL_FREE|KEY_[A-Z_]+)\b" raygui.h | sort -u, then diff against the STANDALONE declaration block
+rec_auto_fix:           false
+rec_impl:               test-package-backend-stubs
+
+fallback_priority:      2
+fallback_approach:      report-env-unsupported-or-header-only-distribution
+fallback_description:  If the library has no backend switch and hard-requires the host runtime, do not
+                         fake a test: distribute as header-only (package_type header-library) and either
+                         consume with a minimal implementation TU only when the backend seam exists, or
+                         report env_unsupported when no real API can run without the host.
+fallback_command:       inspect the header for a backend/mode switch before committing to a consumer test
+fallback_auto_fix:      false
+fallback_impl:          adaptation-scope-decision
+
+forbid_1_pattern:       printf.*PASSED|pass-only|include-only test
+forbid_1_reason:        A test that only includes the header or prints a string never compiles the
+                         implementation TU, hiding every backend symbol issue this entry describes.
+forbid_1_consequence:   CI green while real consumers cannot build against the package.
+
+forbid_2_pattern:       patch .*raygui\.h|edit upstream header to remove host calls
+forbid_2_reason:        Rewriting the upstream header to drop backend calls diverges the package from
+                         upstream semantics and violates the patch-minimality rule.
+forbid_2_consequence:   Package behavior drifts from upstream; every upstream update breaks the patch.
+
+principles:
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/DRAFT-7353-raygui-standalone-backend.md
+last_updated:           2026-09-13
+source_event:           raygui 4.0 OHOS conan-verify G2 eight-round convergence (task 7353, GLM-16)
+
+authors:                wanderlust_0823 <GLM-16 agent>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:

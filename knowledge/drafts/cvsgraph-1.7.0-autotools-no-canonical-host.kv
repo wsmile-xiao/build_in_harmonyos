@@ -1,0 +1,57 @@
+#====================================================================
+# cvsgraph-1.7.0-draft — 无 AC_CANONICAL_HOST 老 autotools：configure 会真实运行 conftest
+#====================================================================
+
+id:                     DRAFT-cvsgraph-nohost
+trigger_tool:           configure|autotools|autoconf|conan|make
+phase:                  configure
+error_signature:        configure: WARNING: you should use --build, --host, --target|
+                         cross_compiling=no|cannot find config.guess|cannot find config.sub|
+                         checking whether the C compiler works\.\.\. no|
+                         configure: error: cannot run C compiled programs|
+                         Error loading shared library libgd\.so|If you meant to cross compile
+severity:               2
+category:               autotools|configure|cross-compile|ohos|conftest|shared-library
+match_keywords:         AC_CANONICAL_HOST, config.guess, config.sub, cross_compiling,
+                         conftest, AC_PROG_CC, ac_cv_prog_cc_works, AC_CHECK_LIB,
+                         AutotoolsDeps, LD_LIBRARY_PATH, cannot run C compiled programs,
+                         host_alias
+title:                  无 AC_CANONICAL_HOST 的老 autotools 在 OHOS 上 configure 会真实运行 conftest——共享依赖必须内联注入 LD_LIBRARY_PATH
+
+root_cause: >
+  2008 年代 autoconf 2.5x 项目（如 cvsgraph 1.7.0）的 configure.in 不调用
+  AC_CANONICAL_HOST：tarball 无 config.guess/config.sub，cross_compiling
+  硬编码为 no，--host 被解析但完全不影响任何逻辑。后果是 configure 的
+  "checking whether the C compiler works" 与 AC_CHECK_FUNCS 会**真实运行**
+  编译出的 conftest 二进制。当 AutotoolsDeps 把共享依赖（-lgd 等）注入
+  LIBS 后，conftest 的 DT_NEEDED 含 libgd.so.3，而构建环境只有链接期 -L
+  没有运行期库路径 → "cannot run C compiled programs"。此报错极易误判为
+  XPM 签名/noexec——必须先看 config.log 里的真实失败行（"Error loading
+  shared library libgd.so.3"）。
+
+fix_template: >
+  【标准解法（CI 实证，PR #10072 修复轮）】configure 加
+  `--host=aarch64-linux-ohos`（不带 --build）：autoconf 2.5x 即使无
+  AC_CANONICAL_HOST，--host 也走官方 cross 触发器（configure 内
+  host_alias 非空且 build_alias 空 → cross_compiling=maybe）。conftest
+  可运行时（真机原生构建）正常通过保持 no；被 CI worker 沙箱拦截时
+  （cadaver #30663 实证：conftest 可执行文件禁止 exec，症状
+  "checking whether the C compiler works... no"）自动降级 cross 模式
+  继续，链接期 AC_CHECK_LIB 探测不受影响。CC 由工具链环境显式指定，
+  ac_tool_prefix 前缀查找不参与。
+  辅助：conftest 运行需库路径时从 conanautotoolsdeps.sh 提取 -L 目录
+  （正则 -L([^\s"]+)，\S+ 会吞 shell 行尾引号），**内联追加**注入
+  LD_LIBRARY_PATH（:$LD_LIBRARY_PATH 保留环境原值——CI lld 依赖
+  profile 注入的 llvm/lib 下 libxml2.so.16，替换语义会在部分 worker
+  上弄挂链接）。⚠️ Environment().define 无效：self.run(env="conanbuild")
+  会 source conanbuildenv-*.sh，其 export 覆盖外层值。
+  无效写法：ac_cv_prog_cc_works=yes cache 变量在 2.61 生成物上无效
+  （works 检查不读该缓存；cadaver 的 VAR=value 路线只适用 2.6x+ 生成物）。
+
+scope_note: >
+  适用于一切无 AC_CANONICAL_HOST/config.guess 的老 autotools 包（依赖
+  共享库或需在 CI worker 构建的场景尤甚）。判别法：configure.in 无
+  AC_CANONICAL_*、tarball 无 config.guess/config.sub → 不要打
+  config.guess 补丁（无文件可打）；--host=<triplet> 不带 --build 传给
+  configure 即可获得沙箱自适的 cross 降级；环境变量交叉 + 运行期库路径
+  内联追加注入。

@@ -1,0 +1,62 @@
+#====================================================================
+# E568 — 共享库静态烘入 static-only 依赖（talloc）形成双实例 → 跨 DSO 释放 abort
+# 出处: libosmocore/1.11.0 适配（PR #9889）；初版草稿 2026-09-14，同日更新为「版本脚本导出宿主」修法
+#====================================================================
+
+id:                     E568
+trigger_tool:           conan create
+phase:                  testing|runtime
+error_signature:        88 tests were run, 40 failed|41 failed|88 tests were run, 1 failed|Aborted \(Signal 6\)|Bad talloc magic value|_tc_free_internal|libtalloc\.a
+
+severity: high
+category:               linking, static-linking, dependency-library, static-library
+match_keywords:         Aborted, Signal 6, core dumped, talloc, libtalloc.a, Bad talloc magic value, _tc_free_internal, static-only, LOCAL symbol, two instances, version script, local: *;
+title:                  共享库静态烘入 static-only 依赖（如 talloc）形成双实例：跨 DSO 释放 abort（Signal 6）
+
+root_cause:             制品仓依赖只有静态变体（如 talloc/2.4.4 仅 libtalloc.a，无 shared 选项），消费者构建多个共享库时每个 DSO 各自把该静态库私有烘入；libtool 的版本脚本带 local: *; 且链接期 --exclude-libs 把烘入的依赖符号全部隐藏（实测 nm -D 中 talloc 符号数 = 0），于是每个 DSO 持有一份互相不可见的私有实例。当该依赖内部带「按实例随机化的状态」时，进程内出现两份实例即崩溃：talloc 的 chunk magic 由 talloc_test_get_magic 按每实例随机生成，A 实例分配的内存交给 B 实例释放时报 "Bad talloc magic value - unknown value" 后 abort()（实测 88 项上游测试 40/41 项失败、37 项为 Aborted/Signal 6）。注意 _tc_free_internal 在 libtalloc.a 里是 LOCAL 符号（nm 小写 t），单纯用 -Wl,--export-dynamic-symbol 导出实测为 0 个，必须走版本脚本路径。
+affected_scope:         多 DSO 结构 + 依赖只发静态变体 + 依赖内部有按实例随机化/全局状态（talloc、部分分配器、openssl 类全局初始化）的组合；共享库把静态依赖烘入且依赖符号被版本脚本隐藏时必然触发
+verification_cmd:       nm -D --defined-only src/core/.libs/libosmocore.so.22.1.0 | grep -c talloc   # 修前 =0（烘入且未导出）；修后 =71（core 成为唯一宿主）；nm -D --undefined-only src/gsm/.libs/libosmogsm.so.22.1.0 | grep -c talloc  # 修后 >0 表示改为引用 core 的导出而非私有烘入
+
+rec_priority:           1
+rec_approach:           修法分两层。① 符号归属层（本包实测有效，40 项失败 → 1 项）：选定链中最早加载的那个 DSO 作为该静态依赖的「唯一宿主」，在该 DSO 的 libtool 版本脚本（*.map）global: 段追加该依赖的全部公开符号（含版本节点，如 TALLOC_2.0.2），兄弟 DSO 的版本脚本同样追加但实际解析会统一落到宿主的第一份定义 → 兄弟库由「静态烘入」变成「对宿主导出符号的未定义引用」（实测 core 导出 71 个 talloc 符号，gsm/vty 等 DEF→UND），进程内只剩一份实例。要点：a) 必须改版本脚本，不能只用 --export-dynamic-symbol（LOCAL 符号不可导出）；b) 宿主选择与链接顺序一致（上游 Makefile.am 中 $(TALLOC_LIBS) 位置决定谁先烘入）；c) 改完后要重跑 refresh-patch 让 .map 变更进入补丁集。② 依赖侧根治（跨包，R36 顺序）：给依赖配方加 shared 选项并发布 shared 变体，消费者 requires 该变体，恢复上游默认的「共享依赖」语义。另：本包同时修了「共享依赖运行时找不到」的同类伴生问题——in-tree 测试程序运行期加载不到依赖的共享库（sim 测试报 Error loading shared library libpcsclite.so.1）时，在消费者配方 build() 中用 conan.tools.env.VirtualRunEnv(self).environment() 的 with env.apply(): 包裹 configure/make/make check，使依赖的 LD_LIBRARY_PATH 生效（见 E569）。
+rec_description:        首选：在宿主 DSO 的版本脚本 global: 段追加该静态依赖符号（实测 40→1 项失败）；根治：依赖侧发布 shared 变体
+rec_command:            宿主侧：向 libtool 版本脚本 src/*/libosmo*.map 的 global: 段追加该静态依赖的公开符号（含版本节点 TALLOC_2.0.2；脚本可用 sed/python 批量追加，逐文件确认 local: *; 仍保留在最后），随后重跑 refresh-patch --auto 把 .map 变更并入补丁集并重生成 conandata.yml；依赖侧根治：给 talloc 配方加 options={"shared":[True,False]} 发布 shared 变体后用 self.requires("talloc/2.4.4.1") + default_options={"talloc/*:shared": True}
+rec_auto_fix:           false
+rec_impl:
+
+fallback_priority:      2
+fallback_approach:      若必须共享交付且无法改依赖配方：先由依赖侧发布 shared（或至少 default-visibility）变体（R36 依赖优先：依赖先发布再构建下游），再让消费者 requires 该变体回落共享交付；此路径跨包，需依赖包作者配合，且 registry 必须允许同版本新增 shared 变体。
+fallback_description:   依赖侧先发 shared/default-visibility 变体（跨包阻塞，需上游配合）
+fallback_command:       conan create talloc/2.4.4 -o talloc/*:shared=True   # 前提：依赖配方本身含 shared 选项
+fallback_auto_fix:      false
+
+forbid_1_pattern:       conan create.*--build=missing.*(?!\.map)|--enable-shared.*--disable-static
+forbid_1_reason:        依赖只有静态变体且依赖内部状态按实例随机化时，共享消费者库若各自私有烘入且不导出该依赖符号，必然形成双实例
+forbid_1_consequence:   运行时 abort（Signal 6）：实测上游测试 88 项中本地 40 项 / CI 41 项失败，且任何下游消费者二进制同样会崩
+forbid_2_pattern:       package_type\s*=\s*"static-library".*规避|--disable-shared\s+--enable-static
+forbid_2_reason:        消费者侧改静态交付规避：静态归档不拉入没有未定义符号引用的成员 → 依赖的 constructor 式注册（on_dso_load）不执行；用 --whole-archive 补救又使测试的符号 interpose 打桩失效
+forbid_2_consequence:   能力静默缺失（gea_test 输出 GEA3 support: 0，期望 1）+ 失败用例由 8 项升至 13 项；交付形态不等价于上游语义，正确动作是上报 dependency_missing 并保持共享交付
+
+principles:
+
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E568.md
+last_updated:           2026-09-14
+source_event:           libosmocore/1.11.0 conan create: 修前 88 tests/40 failed（37 例 Aborted/Signal 6，abort 点 _tc_free_internal）；版本脚本导出宿主后 88 tests/1 failed（余下 1 项为共享依赖运行期路径问题，见 E569）
+
+authors:
+source_pr:              9889
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-14
+
+draft: true
+contributor_id: A20A

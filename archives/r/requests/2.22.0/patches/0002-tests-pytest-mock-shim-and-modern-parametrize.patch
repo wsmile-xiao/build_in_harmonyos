@@ -1,0 +1,152 @@
+diff --git a/tests/_shim_mocker.py b/tests/_shim_mocker.py
+new file mode 100644
+index 0000000..6b92422
+--- /dev/null
++++ b/tests/_shim_mocker.py
+@@ -0,0 +1,68 @@
++# -*- coding: utf-8 -*-
++"""Stdlib-based stand-in for the ``pytest-mock`` ``mocker`` fixture.
++
++``pytest-mock`` is not published on ohpcd, so it cannot be declared as a test
++requirement (a dependency must be published before it is consumed). The surface
++requests 2.22.0's own suite actually touches is tiny:
++
++    mocker.patch(target, new=...)      -- starts immediately, undone at teardown
++    mocker.patch.dict(mapping, dict)   -- starts immediately, undone at teardown
++    mocker.Mock() / mocker.MagicMock()
++
++``pytest-mock``'s ``patch()`` starts the patcher right away, whereas
++``unittest.mock.patch`` returns a patcher that must be started explicitly; the
++suite relies on the auto-start behaviour, which is what this shim provides.
++"""
++from unittest import mock as _mock
++
++import pytest
++
++
++class _AutoPatch(object):
++    """``mocker.patch`` that starts immediately and is undone at teardown."""
++
++    def __init__(self):
++        self._started = []
++
++    def _start(self, patcher):
++        try:
++            result = patcher.start()
++        except AttributeError:
++            # unittest.mock.patch.dict().start() returns None
++            patcher.start()
++            result = patcher
++        self._started.append(patcher)
++        return result
++
++    def __call__(self, *args, **kwargs):
++        return self._start(_mock.patch(*args, **kwargs))
++
++    def object(self, *args, **kwargs):
++        return self._start(_mock.patch.object(*args, **kwargs))
++
++    def dict(self, *args, **kwargs):
++        return self._start(_mock.patch.dict(*args, **kwargs))
++
++    def stopall(self):
++        for patcher in reversed(self._started):
++            try:
++                patcher.stop()
++            except RuntimeError:
++                pass
++        self._started = []
++
++
++class _Mocker(object):
++    Mock = _mock.Mock
++    MagicMock = _mock.MagicMock
++    NonCallableMock = _mock.NonCallableMock
++
++    def __init__(self, patch):
++        self.patch = patch
++
++
++@pytest.fixture
++def mocker():
++    patch = _AutoPatch()
++    yield _Mocker(patch)
++    patch.stopall()
+diff --git a/tests/conftest.py b/tests/conftest.py
+index cd64a76..d7b2dbf 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -1,11 +1,22 @@
+ # -*- coding: utf-8 -*-
+ 
+ import pytest
++
+ from requests.compat import urljoin
+ 
++# ``mocker`` fixture: supplied locally from stdlib unittest.mock, because
++# pytest-mock is not published on ohpcd (see tests/_shim_mocker.py).
++from ._shim_mocker import mocker  # noqa: F401
++
++try:
++    import pytest_httpbin  # noqa: F401
++
++    _HAS_HTTPBIN = True
++except ImportError:
++    _HAS_HTTPBIN = False
++
+ 
+-def prepare_url(value):
+-    # Issue #1483: Make sure the URL always has a trailing slash
++def _prepare_url(value):
+     httpbin_url = value.url.rstrip('/') + '/'
+ 
+     def inner(*suffix):
+@@ -14,11 +25,27 @@ def prepare_url(value):
+     return inner
+ 
+ 
+-@pytest.fixture
+-def httpbin(httpbin):
+-    return prepare_url(httpbin)
++if _HAS_HTTPBIN:
++
++    @pytest.fixture
++    def httpbin(httpbin):
++        return _prepare_url(httpbin)
++
++    @pytest.fixture
++    def httpbin_secure(httpbin_secure):
++        return _prepare_url(httpbin_secure)
++
++else:
++    # No external httpbin service available: skip the affected tests instead of
++    # erroring out with "recursive dependency involving fixture 'httpbin'".
++    def _httpbin_unavailable():
++        pytest.skip("requires an external httpbin service "
++                    "(pytest-httpbin is not available on ohpcd)")
+ 
++    @pytest.fixture
++    def httpbin():
++        _httpbin_unavailable()
+ 
+-@pytest.fixture
+-def httpbin_secure(httpbin_secure):
+-    return prepare_url(httpbin_secure)
++    @pytest.fixture
++    def httpbin_secure():
++        _httpbin_unavailable()
+diff --git a/tests/test_utils.py b/tests/test_utils.py
+index 59b0b0e..adf0b9c 100644
+--- a/tests/test_utils.py
++++ b/tests/test_utils.py
+@@ -33,7 +33,9 @@ class TestSuperLen:
+         'stream, value', (
+             (StringIO.StringIO, 'Test'),
+             (BytesIO, b'Test'),
+-            pytest.mark.skipif('cStringIO is None')((cStringIO, 'Test')),
++            pytest.param(cStringIO, 'Test',
++                         marks=pytest.mark.skipif(cStringIO is None,
++                                                  reason='cStringIO unavailable')),
+         ))
+     def test_io_streams(self, stream, value):
+         """Ensures that we properly deal with different kinds of IO streams."""

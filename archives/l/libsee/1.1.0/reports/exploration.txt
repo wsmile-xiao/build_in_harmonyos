@@ -1,0 +1,53 @@
+libsee 1.1.0 原始探索记录（2026-09-04）
+
+$ sha256sum $HOME/tmp/ohc-libsee-1.1.0/builds/libsee-1.1.0.tar.gz
+8d8a38757e06f266c8490faff2af116fa84b41de646446c0311998a99ab5539f  .../libsee-1.1.0.tar.gz
+
+$ sed -n '1,80p' .../libsee-1.1.0.orig/CMakeLists.txt
+cmake_minimum_required(VERSION 3.14)
+project(libsee VERSION 1.1.0 DESCRIPTION "See where you use LibC the most. Trace calls failing tests. Then - roast!")
+set(CMAKE_C_STANDARD 99)
+set(SOURCE_FILES libsee.c)
+set(OUTPUT_LIB_NAME "libsee")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_compile_options(-fPIC -nostdlib -nostartfiles)
+    set(LINK_OPTIONS "-shared")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Darwin") ...
+endif()
+add_library(${OUTPUT_LIB_NAME} SHARED ${SOURCE_FILES})
+set_target_properties(${OUTPUT_LIB_NAME} PROPERTIES PREFIX "")
+add_compile_options(-fno-builtin)
+target_link_options(${OUTPUT_LIB_NAME} PRIVATE ${LINK_OPTIONS})
+# no install() and no enable_testing()/add_test()
+
+$ wc -c .../libsee-1.1.0.orig/libsee_test.c
+0 .../libsee-1.1.0.orig/libsee_test.c
+
+$ cmake -S .../libsee-1.1.0.orig -B $HOME/tmp/ohc-libsee-1.1.0/native-build -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS='-fPIC -fno-builtin -nostdlib -nostartfiles' -DCMAKE_SHARED_LINKER_FLAGS=-shared
+-- Configuring done
+-- Generating done
+
+$ cmake --build $HOME/tmp/ohc-libsee-1.1.0/native-build
+[100%] Built target libsee
+
+$ ls -l $HOME/tmp/ohc-libsee-1.1.0/native-build/libsee.so
+-rwxrwx--- ... libsee.so
+
+$ LD_PRELOAD=$HOME/tmp/ohc-libsee-1.1.0/native-build/libsee.so true
+退出码：139（SIGSEGV）。该结果保留为失败，不伪造 PASS。
+
+补丁诊断：OHOS libc 会探测/调用 Annex K 的 `strcpy_s` 符号，而上游无条件导出该 `_s` wrapper，`dlsym(RTLD_NEXT, "strcpy_s")` 没有实现，最终触发崩溃。补丁改为基于 `__STDC_LIB_EXT1__` 能力宏，仅在 C library 声明 Annex K 时导出 `_s` wrappers；普通 libc interposers 保持启用。
+
+$ /data/service/hnp/bin/clang -shared -fPIC -fno-builtin -nostdlib -nostartfiles \\
+    $HOME/tmp/ohc-libsee-1.1.0/builds/libsee-1.1.0.work/libsee.c -o $HOME/tmp/ohc-libsee-1.1.0/preload-patched.so
+$ sha256sum $HOME/tmp/ohc-libsee-1.1.0/preload-patched.so
+56f654d8f719a37217f13cc4ba5bed6d65ef5a225f4616e92b66d9f2370be279  .../preload-patched.so
+$ LD_PRELOAD=$HOME/tmp/ohc-libsee-1.1.0/preload-patched.so /data/service/hnp/bin/bash -c true
+退出码：0。上述同一 `preload-patched.so` 输出 LibSee 实际函数统计（malloc/free/memmove 等），真实 preload 路径通过，stderr 为空。
+
+观察：上游 README 的手工命令也明确包含 -fno-builtin -fPIC -nostdlib -nostartfiles -shared；CMake 的 flags 仅针对 Linux/Darwin，recipe 因此显式注入以覆盖 OHOS。
+
+$ conan create ... -s:h os.version=6.0 -s:b os.version=6.0 -s:h compiler.libcxx=libc++ -s:b compiler.libcxx=libc++ --build=missing
+结果：包构建成功，手工复制 libsee.so 成功；test_package 编译成功并运行成功。
+消费者输出：libsee consumer: libsee_print_size -> 1,234,567
+并打印 LibSee 的实际函数统计。首次使用 profile 默认 libstdc++ 时失败：clang-15: invalid library name in argument '-stdlib=libstdc++'；改用 OHOS libc++ 后成功。CMake 报告 Problem parsing /proc/meminfo、jobserver mkfifo Operation not permitted，但未阻断构建。

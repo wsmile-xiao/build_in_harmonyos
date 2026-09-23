@@ -1,0 +1,48 @@
+#====================================================================
+# DRAFT-cpp-can-parser-1.0.0-stringtokenizer-assignment-comparison.kv
+# 上游字符串 tokenizer 把赋值误当比较：`if (result = '\n')` 恒真，fromString 完全不可用
+# 触发事件: cpp-can-parser 1.0.0 HarmonyOS PC 适配（R01，patch 0002-src-parsing-Tokenizer.cpp.patch）
+#====================================================================
+
+id:                     DRAFT-cpp-can-parser-1.0.0-stringtokenizer-assignment-comparison
+trigger_tool:           compile|clang|conan|test
+phase:                  compilation|testing
+error_signature:        CANDatabaseException: Syntax error: Expected .* but got "" at line [0-9]{3,}|
+                         line [0-9]{3,}.*tokenizer|fromString|StringTokenizer
+
+severity:               2
+category:               c++|tokenizer|string-parsing|assignment-as-condition|upstream-bug
+match_keywords:         StringTokenizer, doGetNextChar, result = '\n', assignment,
+                         == vs =, line counter, fromString, string tokenizer,
+                         addLine, char stream, CANDatabaseException, syntax error
+title:                  上游字符串 tokenizer 把 `if (result = '\n')` 赋值误当比较：每次取字符被覆盖为 '\n'、
+                        行计数恒增，字符串解析入口（fromString）必然失败；修复为 `==` 即可
+
+root_cause: >
+  src/parsing/Tokenizer.cpp 的 StringTokenizer::doGetNextChar() 写成
+  `if (result = '\n')`（赋值表达式，'\n' 非零恒真），把刚取到的字符覆盖成 '\n'，
+  addLine 每次都被置位导致 lineCnt 随字符数膨胀（报错行号远大于输入行数），
+  且解析器实际只看到换行符，DBC 字符串解析必然抛
+  CANDatabaseException（如 "Expected \"BS_\" but got \"\" at line 482"）。
+  对照 FileTokenizer::doGetNextChar() 的同逻辑为正确的 `==`，证明属上游笔误。
+affected_scope: >
+  所有上游代码里字符串/字符流 tokenizer 或循环中把赋值当比较（`if (x = <const>)`、
+  `while (c = f())` 等恒真表达式）的库；字符串源解析入口全面失效而文件源正常
+  （双入口 tokenizer 时症状极具迷惑性）。修复 1 行、零行为回归。
+verification_cmd: >
+  conan create rc=0 且 test_package test_consumer/harmonyos_specific_test 真实解析
+  DBC 输出 "consumer_check: ALL PASSED" / "harmonyos_specific_test OK:
+  platform=OHOS(aarch64)"；上游 cpc-test-parsing 回归 rc=0
+  （修复前 fromString 必抛异常，证据 conan_create.log 前段 + test_ledger.md）
+
+rec_priority:           1
+rec_approach:           fix-assignment-as-comparison
+rec_description: >
+  先定位 tokenizer 的取字符循环，凡 `if (x = ...)` / `while (x = ...)` 且右值非
+  变量立即指认赋值缺陷，改 `==`；若语义确为赋值后判断，改写为
+  `if ((x = f()) != sentinel)` 显式括号并保留返回值。修复后用字符串源解析入口
+  做端到端回归（上游文件源入口未必覆盖该路径）。
+rec_command:            >
+  grep -n "= '\\\\n')\|while *(.*=.*)" src/**/*.cpp   # 定位赋值当比较
+  # 修复: if (result = '\n')  ->  if (result == '\n')
+  # 回归: 调 fromString 的消费者测试必须真实解析通过

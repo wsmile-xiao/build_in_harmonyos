@@ -1,0 +1,537 @@
+--- a/qpdflib/qpdfwidget.cpp
++++ b/qpdflib/qpdfwidget.cpp
+@@ -11,262 +11,375 @@
+     but WITHOUT ANY WARRANTY; without even the implied warranty of
+     MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+     Lesser General Public License for more details.
++
++    OpenHarmony adaptation: Replaced WebEngine-based PDF.js rendering
++    with poppler-cpp native PDF rendering. The original PdfJsBridge
++    (QWebEngineView + QWebChannel + PDF.js) is replaced by direct
++    poppler page rendering via poppler::page::render().
+ */
+ 
+ #include <QDebug>
+ #include <QFile>
+ #include <QFileInfo>
+ #include <QVBoxLayout>
+-#include "pdfjsbridge.h"
++#include <QScrollArea>
++#include <QLabel>
++#include <QPainter>
++#include <poppler/cpp/poppler-document.h>
++#include <poppler/cpp/poppler-page.h>
++#include <poppler/cpp/poppler-image.h>
++#include <poppler/cpp/poppler-page-renderer.h>
++#include <poppler/cpp/poppler-toc.h>
++
+ #include "qpdfwidget.h"
+-
+-// NOTE:
+-// There is this bug in Qt https://bugreports.qt.io/browse/QTBUG-46973
+-// which causes the application to crash when loading from qrc:/ resources.
+-// Reported to be fixed as from Qt 5.6.0
+-
+-const QString cPdfViewerUrl("qrc:/pdfview/viewer.html");
+ 
+ // class private members
+ struct QPdfWidgetPrivate
+ {
+-    PdfJsBridge *pPdfJsBridge;
+-    bool ready;
+-    QByteArray pdfData;
+-    QString pdfFile;
++    poppler::document *pDocument;
++    int currentPage;         // 0-based index
++    int totalPages;
++    qreal scale;             // zoom scale factor
++    int rotation;            // cumulative rotation degrees (0, 90, 180, 270)
++    QScrollArea *pScrollArea;
++    QLabel *pPageLabel;
++    QImage currentImage;
++    bool toolbarVisible;
++    QString searchText;
++    int searchResultsCount;
+ };
+ 
+ QPdfWidget::QPdfWidget(QWidget *pParent)
+     : QWidget(pParent)
+ {
+     m = new QPdfWidgetPrivate;
+-    m->pPdfJsBridge = new PdfJsBridge();
+-    connect(m->pPdfJsBridge, &PdfJsBridge::initialized, this, &QPdfWidget::initialized);
+-    connect(m->pPdfJsBridge, &PdfJsBridge::loadFinished, this, &QPdfWidget::onLoadFinished);
+-    connect(m->pPdfJsBridge, &PdfJsBridge::pdfDocumentloaded, this, &QPdfWidget::onRenderPdfFinished);
+-    m->ready = false;
+-
+-    // Initialize pdf.js viewer
+-    QUrl url = QUrl::fromUserInput(cPdfViewerUrl);
+-    m->pPdfJsBridge->setUrl(url);
++    m->pDocument = nullptr;
++    m->currentPage = 0;
++    m->totalPages = 0;
++    m->scale = 1.0;
++    m->rotation = 0;
++    m->toolbarVisible = true;
++    m->searchText = QString();
++    m->searchResultsCount = 0;
++
++    // Create scroll area for page display
++    m->pScrollArea = new QScrollArea(this);
++    m->pScrollArea->setWidgetResizable(true);
++    m->pScrollArea->setAlignment(Qt::AlignCenter);
++
++    // Create label to display rendered page image
++    m->pPageLabel = new QLabel();
++    m->pPageLabel->setAlignment(Qt::AlignCenter);
++    m->pPageLabel->setStyleSheet("QLabel { background-color: #3E3E3E; }");
++    m->pScrollArea->setWidget(m->pPageLabel);
+ 
+     // widget layout
+     QVBoxLayout *pLayout = new QVBoxLayout();
+-    pLayout->setMargin(0);
+-    pLayout->addWidget(m->pPdfJsBridge);
++    pLayout->setContentsMargins(0, 0, 0, 0);
++    pLayout->addWidget(m->pScrollArea);
+     setLayout(pLayout);
++
++    // Emit initialized signal immediately (no async web engine loading needed)
++    emit initialized();
+ }
+ 
+ QPdfWidget::~QPdfWidget()
+ {
++    if (m->pDocument) {
++        delete m->pDocument;
++    }
+     delete m;
+ }
+ 
+ bool QPdfWidget::loadFile(const QString &path)
+ {
+     QFileInfo fi(path);
+-    if (fi.exists()) {
+-        m->pdfFile = path;
+-        renderPdfFile(path);
+-        return true;
+-    }
+-
+-    return false;
++    if (!fi.exists()) {
++        qWarning() << "File does not exist:" << path;
++        return false;
++    }
++
++    if (m->pDocument) {
++        delete m->pDocument;
++        m->pDocument = nullptr;
++    }
++
++    m->pDocument = poppler::document::load_from_file(path.toStdString());
++    if (!m->pDocument || m->pDocument->is_locked()) {
++        qWarning() << "Unable to load PDF document:" << path;
++        if (m->pDocument) {
++            delete m->pDocument;
++            m->pDocument = nullptr;
++        }
++        return false;
++    }
++
++    m->totalPages = m->pDocument->pages();
++    m->currentPage = 0;
++    m->scale = 1.0;
++    m->rotation = 0;
++
++    renderCurrentPage();
++
++    emit pdfDocumentLoaded();
++    return true;
+ }
+ 
+ void QPdfWidget::loadData(const QByteArray &data)
+ {
+-    m->pdfData = data;
+-    renderPdfData();
++    if (m->pDocument) {
++        delete m->pDocument;
++        m->pDocument = nullptr;
++    }
++
++    poppler::byte_array byteData(data.constData(), data.constData() + data.size());
++    m->pDocument = poppler::document::load_from_data(&byteData);
++    if (!m->pDocument || m->pDocument->is_locked()) {
++        qWarning() << "Unable to load PDF document from data";
++        if (m->pDocument) {
++            delete m->pDocument;
++            m->pDocument = nullptr;
++        }
++        return;
++    }
++
++    m->totalPages = m->pDocument->pages();
++    m->currentPage = 0;
++    m->scale = 1.0;
++    m->rotation = 0;
++
++    renderCurrentPage();
++
++    emit pdfDocumentLoaded();
+ }
+ 
+ void QPdfWidget::close()
+ {
+-    m->pPdfJsBridge->invokeJavaScript("PDFViewerApplication.close()");
++    if (m->pDocument) {
++        delete m->pDocument;
++        m->pDocument = nullptr;
++    }
++    m->totalPages = 0;
++    m->currentPage = 0;
++    m->currentImage = QImage();
++    m->pPageLabel->clear();
+ }
+ 
+ void QPdfWidget::setPage(int page)
+ {
+-    QString script = QString("PDFViewerApplication.page = %1")
+-                        .arg(page);
+-    m->pPdfJsBridge->invokeJavaScript(script);
++    // page parameter is 1-based externally, convert to 0-based internally
++    int internalPage = page - 1;
++    if (m->pDocument && internalPage >= 0 && internalPage < m->totalPages) {
++        m->currentPage = internalPage;
++        renderCurrentPage();
++    }
+ }
+ 
+ int QPdfWidget::page() const
+ {
+-    QVariant res = m->pPdfJsBridge->invokeJavaScriptAndWaitForResult("PDFViewerApplication.page");
+-    if (res.isValid()) {
+-        return res.toInt();
+-    }
+-    return 0;
++    // Return 1-based page number
++    return m->currentPage + 1;
+ }
+ 
+ int QPdfWidget::pagesCount() const
+ {
+-    QVariant res = m->pPdfJsBridge->invokeJavaScriptAndWaitForResult("PDFViewerApplication.pagesCount");
+-    if (res.isValid()) {
+-        return res.toInt();
+-    }
+-    return 0;
++    return m->totalPages;
+ }
+ 
+ void QPdfWidget::rotatePages(int degrees)
+ {
+-    QString script = QString("PDFViewerApplication.rotatePages(%1)")
+-                        .arg(degrees);
+-    m->pPdfJsBridge->invokeJavaScript(script);
++    m->rotation = (m->rotation + degrees) % 360;
++    if (m->rotation < 0) {
++        m->rotation += 360;
++    }
++    renderCurrentPage();
+ }
+ 
+ void QPdfWidget::zoomIn(int ticks)
+ {
+-    QString script = QString("PDFViewerApplication.zoomIn(%1)").arg(ticks);
+-    m->pPdfJsBridge->invokeJavaScript(script);
++    // Each tick increases scale by 1.25x
++    for (int i = 0; i < ticks; ++i) {
++        m->scale *= 1.25;
++    }
++    if (m->scale > 5.0) {
++        m->scale = 5.0;
++    }
++    renderCurrentPage();
+ }
+ 
+ void QPdfWidget::zoomOut(int ticks)
+ {
+-    QString script = QString("PDFViewerApplication.zoomOut(%1)").arg(ticks);
+-    m->pPdfJsBridge->invokeJavaScript(script);
++    // Each tick decreases scale by 0.8x (1/1.25)
++    for (int i = 0; i < ticks; ++i) {
++        m->scale *= 0.8;
++    }
++    if (m->scale < 0.1) {
++        m->scale = 0.1;
++    }
++    renderCurrentPage();
+ }
+ 
+ void QPdfWidget::zoomReset(qreal scale)
+ {
+-    QString script = QString("PDFViewerApplication.pdfViewer.currentScaleValue=%1").arg(scale);
+-    m->pPdfJsBridge->invokeJavaScript(script);
+-}
+-
+-void QPdfWidget::showDocumentProperties()
+-{
+-    m->pPdfJsBridge->invokeJavaScript("PDFViewerApplication.pdfDocumentProperties.open()");
++    m->scale = scale;
++    renderCurrentPage();
+ }
+ 
+ void QPdfWidget::setToolbarVisible(bool v)
+ {
+-    m->pPdfJsBridge->setToolbarVisible(v);
++    m->toolbarVisible = v;
+ }
+ 
+ void QPdfWidget::setFindBarVisible(bool v)
+ {
+-    QString script = QString("PDFViewerApplication.findBar.%1()")
+-            .arg(v ? "open" : "close");
+-    m->pPdfJsBridge->invokeJavaScript(script);
++    // Not applicable in poppler-based version
+ }
+ 
+ void QPdfWidget::findText(const QString &text)
+ {
+     if (!text.isEmpty()) {
+-        setFindFieldText(text);
+-    }
+-    // Sending an empty event will actually send 'find' since it will be prepended to
+-    // the event name.
+-    // All options options are (viewer.js:1155):
+-    // 'find',
+-    // 'findagain',
+-    // 'findhighlightallchange',
+-    // 'findcasesensitivitychange'
+-    m->pPdfJsBridge->invokeJavaScript("PDFViewerApplication.findBar.dispatchEvent('', false);");
++        m->searchText = text;
++    }
++    m->searchResultsCount = 0;
++
++    if (!m->pDocument || m->searchText.isEmpty()) {
++        return;
++    }
++
++    // Search across all pages and count results
++    QByteArray utf8 = m->searchText.toUtf8();
++    poppler::ustring searchText = poppler::ustring::from_utf8(utf8.constData(), static_cast<unsigned int>(utf8.size()));
++
++    for (int i = 0; i < m->totalPages; ++i) {
++        std::unique_ptr<poppler::page> p(m->pDocument->create_page(i));
++        if (p) {
++            poppler::rectf resultRect;
++            poppler::page::search_direction_enum direction = poppler::page::search_from_top;
++            while (p->search(searchText, resultRect, direction, poppler::case_insensitive)) {
++                m->searchResultsCount++;
++                direction = poppler::page::search_next_result;
++            }
++        }
++    }
+ }
+ 
+ void QPdfWidget::findNext()
+ {
+-    m->pPdfJsBridge->invokeJavaScript("PDFViewerApplication.findBar.dispatchEvent('again', false);");
++    // Simplified: search on current page and advance to next page
++    if (!m->pDocument || m->searchText.isEmpty()) {
++        return;
++    }
++    if (m->currentPage + 1 < m->totalPages) {
++        m->currentPage++;
++        renderCurrentPage();
++    }
+ }
+ 
+ void QPdfWidget::findPrevious()
+ {
+-    m->pPdfJsBridge->invokeJavaScript("PDFViewerApplication.findBar.dispatchEvent('again', true);");
++    if (!m->pDocument || m->searchText.isEmpty()) {
++        return;
++    }
++    if (m->currentPage - 1 >= 0) {
++        m->currentPage--;
++        renderCurrentPage();
++    }
+ }
+ 
+ int QPdfWidget::findResultsCount() const
+ {
+-    QVariant res = m->pPdfJsBridge->invokeJavaScriptAndWaitForResult("PDFViewerApplication.findController.matchCount");
+-    if (res.isValid()) {
+-        return res.toInt();
+-    }
+-    return 0;
++    return m->searchResultsCount;
+ }
+ 
+ void QPdfWidget::navigateTo(const QString &dest)
+ {
+-    QString escapedDest = dest;
+-    escapedDest.replace("\"", "\\\"");
+-    QString script = QString("PDFViewerApplication.pdfLinkService.navigateTo(\"%1\")")
+-            .arg(escapedDest);
+-    m->pPdfJsBridge->invokeJavaScript(script);
++    // Not fully supported - destination strings from PDF outline
++    // Could be implemented using poppler toc API
++    qInfo() << "navigateTo not fully implemented in poppler version:" << dest;
+ }
+ 
+ QStringList QPdfWidget::getDestinations() const
+ {
+-    return m->pPdfJsBridge->fetchPdfDocumentDestinations();
+-}
+-
+-QWebEngineView* QPdfWidget::internalWebEngineView() const
+-{
+-    return dynamic_cast<QWebEngineView*>(m->pPdfJsBridge);
+-}
+-
+-void QPdfWidget::onLoadFinished(bool status)
+-{
+-    if (!status) {
+-        qCritical() << "Unable to initialize the web view";
+-        return;
+-    }
+-
+-    m->ready = true;
+-    if (!m->pdfData.isEmpty()) {
+-        renderPdfData();
+-    } else if (!m->pdfFile.isEmpty()) {
+-        renderPdfFile(m->pdfFile);
+-    }
+-}
+-
+-void QPdfWidget::renderPdfData()
+-{
+-    if (!m->ready) {
+-        return;
+-    }
+-
+-    m->pdfData = m->pdfData.toBase64();
+-    QString script = QString("qpdf_ShowPdfFileBase64('%1')")
+-                        .arg(QString::fromUtf8(m->pdfData));
+-
+-    m->pPdfJsBridge->invokeJavaScript(script);
+-
+-    // Clear pdf data
+-    m->pdfData.clear();
+-}
+-
+-void QPdfWidget::renderPdfFile(const QString &file)
+-{
+-    if (!m->ready) {
+-        return;
+-    }
+-
+-    m->pdfData = m->pdfData.toBase64();
+-    QString script = QString("qpdf_ShowPdfFile('file://%1')")
+-                        .arg(file);
+-
+-    m->pPdfJsBridge->invokeJavaScript(script);
+-
+-    // Clear pdf data
+-    m->pdfData.clear();
+-}
+-
+-
+-void QPdfWidget::onRenderPdfFinished()
+-{
+-    emit pdfDocumentLoaded();
+-}
+-
+-void QPdfWidget::setFindFieldText(const QString &text)
+-{
+-    // Reset find controller.
+-    m->pPdfJsBridge->invokeJavaScriptAndWaitForResult("PDFViewerApplication.findController.reset()");
+-
+-    // Fill-in the find field.
+-    QString escapedText = text;
+-    escapedText.replace("\"", "\\\"");
+-    QString script = QString("PDFViewerApplication.findBar.findField.value=\"%1\"")
+-            .arg(escapedText);
+-    m->pPdfJsBridge->invokeJavaScript(script);
+-}
++    QStringList destinations;
++    if (m->pDocument) {
++        poppler::toc *docToc = m->pDocument->create_toc();
++        if (docToc) {
++            poppler::toc_item *rootItem = docToc->root();
++            if (rootItem) {
++                for (auto it = rootItem->children_begin(); it != rootItem->children_end(); ++it) {
++                    poppler::byte_array utf8 = (*it)->title().to_utf8();
++                    destinations.append(QString::fromUtf8(utf8.data(), static_cast<int>(utf8.size())));
++                }
++            }
++            delete docToc;
++        }
++    }
++    return destinations;
++}
++
++void QPdfWidget::renderCurrentPage()
++{
++    if (!m->pDocument) {
++        m->pPageLabel->clear();
++        return;
++    }
++
++    if (m->currentPage < 0 || m->currentPage >= m->totalPages) {
++        m->pPageLabel->clear();
++        return;
++    }
++
++    std::unique_ptr<poppler::page> p(m->pDocument->create_page(m->currentPage));
++    if (!p) {
++        qWarning() << "Unable to render page" << m->currentPage;
++        m->pPageLabel->clear();
++        return;
++    }
++
++    // Convert rotation to poppler-cpp enum (global scope in poppler-global.h)
++    poppler::rotation_enum popplerRotation = poppler::rotate_0;
++    switch (m->rotation) {
++        case 90:  popplerRotation = poppler::rotate_90; break;
++        case 180: popplerRotation = poppler::rotate_180; break;
++        case 270: popplerRotation = poppler::rotate_270; break;
++        default:  popplerRotation = poppler::rotate_0; break;
++    }
++
++    // Render at 72 DPI * scale factor via page_renderer
++    double dpi = 72.0 * m->scale;
++    poppler::page_renderer renderer;
++    poppler::image img = renderer.render_page(p.get(), dpi, dpi, -1, -1, -1, -1, popplerRotation);
++
++    if (!img.is_valid()) {
++        qWarning() << "Rendered image is not valid for page" << m->currentPage;
++        m->pPageLabel->clear();
++        return;
++    }
++
++    // Convert poppler::image to QImage
++    QImage::Format qFormat = QImage::Format_RGB888;
++    if (img.format() == poppler::image::format_argb32) {
++        qFormat = QImage::Format_ARGB32;
++    }
++
++    m->currentImage = QImage(reinterpret_cast<const uchar*>(img.data()),
++                             img.width(), img.height(),
++                             img.bytes_per_row(), qFormat).copy();
++
++    if (m->currentImage.isNull()) {
++        qWarning() << "Failed to convert poppler image to QImage for page" << m->currentPage;
++        m->pPageLabel->clear();
++        return;
++    }
++
++    m->pPageLabel->setPixmap(QPixmap::fromImage(m->currentImage));
++    m->pPageLabel->adjustSize();
++    updateView();
++}
++
++void QPdfWidget::updateView()
++{
++    // Ensure scroll area updates its viewport
++    m->pScrollArea->ensureVisible(0, 0);
++    update();
++}

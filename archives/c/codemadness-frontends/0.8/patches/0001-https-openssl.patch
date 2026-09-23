@@ -1,0 +1,146 @@
+--- a/https.c
++++ b/https.c
+@@ -12,7 +12,8 @@
+ #include <time.h>
+ #include <unistd.h>
+ 
+-#include <tls.h>
++#include <openssl/ssl.h>
++#include <openssl/err.h>
+ 
+ #define READ_BUF_SIZ        16384  /* read buffer in bytes */
+ #define MAX_RESPONSETIMEOUT 10     /* timeout in seconds */
+@@ -39,11 +40,11 @@
+ }
+ 
+ char *
+-readtls(struct tls *t)
++readssl(SSL *ssl)
+ {
+ 	char *buf;
+ 	size_t len = 0, size = 0;
+-	ssize_t r;
++	int r;
+ 
+ 	/* always allocate an empty buffer */
+ 	if (!(buf = calloc(1, size + 1)))
+@@ -56,19 +57,23 @@
+ 			if (!(buf = realloc(buf, size + 1)))
+ 				die("realloc: %s\n", strerror(errno));
+ 		}
+-		r = tls_read(t, &buf[len], READ_BUF_SIZ);
+-		if (r == TLS_WANT_POLLIN || r == TLS_WANT_POLLOUT) {
+-			continue;
+-		} else if (r <= 0) {
+-			break;
+-		}
+-		len += r;
++		r = SSL_read(ssl, &buf[len], READ_BUF_SIZ);
++		if (r <= 0) {
++			int e = SSL_get_error(ssl, r);
++			if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) {
++				continue;
++			}
++			if (e == SSL_ERROR_ZERO_RETURN ||
++			    (e == SSL_ERROR_SYSCALL && errno == 0)) {
++				break; /* server closed connection (HTTP/1.0) */
++			}
++			die("SSL_read: %s\n", ERR_error_string(ERR_get_error(), NULL));
++		}
++		len += (size_t)r;
+ 		buf[len] = '\0';
+ 		if (len > MAX_RESPONSESIZ)
+ 			die("response is too big: > %zu bytes\n", MAX_RESPONSESIZ);
+ 	}
+-	if (r == -1)
+-		die("tls_read: %s\n", tls_error(t));
+ 
+ 	return buf;
+ }
+@@ -126,11 +131,12 @@
+ char *
+ request(const char *host, const char *path, const char *headers)
+ {
+-	struct tls *t;
++	SSL_CTX *ctx;
++	SSL *ssl;
+ 	char request[4096];
+ 	char *data;
+ 	size_t len;
+-	ssize_t w;
++	int w;
+ 	int fd;
+ 
+ 	/* use HTTP/1.0, don't use HTTP/1.1 using ugly chunked-encoding */
+@@ -142,33 +148,52 @@
+ 		"%s"
+ 		"\r\n", path, host, headers);
+ 
+-	if (tls_init() == -1)
+-		die("tls_init\n");
+-
+-	if (!(t = tls_client()))
+-		die("tls_client: %s\n", tls_error(t));
++	ctx = SSL_CTX_new(TLS_client_method());
++	if (!ctx)
++		die("SSL_CTX_new: %s\n", ERR_error_string(ERR_get_error(), NULL));
++	SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
++	if (SSL_CTX_set_default_verify_paths(ctx) != 1)
++		die("SSL_CTX_set_default_verify_paths: %s\n",
++		    ERR_error_string(ERR_get_error(), NULL));
++
++	ssl = SSL_new(ctx);
++	if (!ssl)
++		die("SSL_new: %s\n", ERR_error_string(ERR_get_error(), NULL));
++	/* verify the server hostname and send SNI (same guarantees as before) */
++	if (SSL_set1_host(ssl, host) != 1)
++		die("SSL_set1_host: %s\n", ERR_error_string(ERR_get_error(), NULL));
++	if (SSL_set_tlsext_host_name(ssl, host) != 1)
++		die("SSL_set_tlsext_host_name: %s\n",
++		    ERR_error_string(ERR_get_error(), NULL));
+ 
+ 	fd = edial(host, "443");
+ 
+-	if (tls_connect_socket(t, fd, host) == -1)
+-		die("tls_connect: %s\n", tls_error(t));
++	if (SSL_set_fd(ssl, fd) != 1)
++		die("SSL_set_fd: %s\n", ERR_error_string(ERR_get_error(), NULL));
++	if (SSL_connect(ssl) != 1)
++		die("SSL_connect: %s\n", ERR_error_string(ERR_get_error(), NULL));
+ 
+ 	data = request;
+ 	len = strlen(data);
+ 	while (len > 0) {
+-		w = tls_write(t, data, len);
+-		if (w == TLS_WANT_POLLIN || w == TLS_WANT_POLLOUT)
+-			continue;
+-		else if (w == -1)
+-			die("tls_write: %s\n", tls_error(t));
++		w = SSL_write(ssl, data, (int)len);
++		if (w <= 0) {
++			int e = SSL_get_error(ssl, w);
++			if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE)
++				continue;
++			die("SSL_write: %s\n",
++			    ERR_error_string(ERR_get_error(), NULL));
++		}
+ 		data += w;
+-		len -= w;
+-	}
+-
+-	data = readtls(t);
+-
+-	tls_close(t);
+-	tls_free(t);
++		len -= (size_t)w;
++	}
++
++	data = readssl(ssl);
++
++	SSL_shutdown(ssl);
++	SSL_free(ssl);
++	SSL_CTX_free(ctx);
++	close(fd);
+ 
+ 	return data;
+ }

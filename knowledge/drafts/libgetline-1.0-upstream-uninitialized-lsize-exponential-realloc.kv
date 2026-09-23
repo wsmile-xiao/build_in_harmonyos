@@ -1,0 +1,35 @@
+# ═══ Draft knowledge entry — 上游行读取器未初始化 lsize + 翻倍复合导致指数级 realloc 爆炸 ═══
+# Software: libgetline 1.0
+# Gate: conan create (ohos-aarch64), test_package 长行增长测试
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: libgetline-1.0-upstream-uninitialized-lsize-exponential-realloc
+severity: 3
+category: portability|upstream-bug|memory
+trigger_tool: conan|make|test
+phase: build|test
+
+keywords: uninitialized lsize, SIZE_MAX, realloc, exponential, doubling, 2^N, buffer growth, line reader, UB, -O3, hang, libgetln_getline
+
+error_signature: |
+  libgetln_getline.*SIZE_MAX|realloc.*[0-9]{10,}|(size_t)-1.*getline|test.*Subprocess killed|hang.*small.*buffer|未初始化.*lsize|exponential.*realloc
+
+match_keywords: getline, realloc, lsize, doubling, buffer growth, uninitialized, SIZE_MAX, line reader
+
+root_cause: |
+  上游 libgetln_getline 的局部变量声明为 `size_t need, cplen, lsize, llen = 0;`，
+  只有 llen 被初始化，lsize/need/cplen 是未初始化垃圾（UB）。更隐蔽的是增长逻辑：
+  `if (lsize < *size * 2 && !MSB(size_t, *size)) lsize = *size * 2;` 把翻倍结果写回
+  lsize——而 lsize 又是整个 getline 调用的累计需求总量，下一块数据到来时
+  `lsize = lsize + need` 从已翻倍的值继续，于是每次 realloc 都翻倍：
+  cap 5→10→20→40→…→数 GB/PB（2^N 指数爆炸）。小缓冲（如 4 字节）逐块读长行时
+  必然触发；-O0 下表现为 realloc 巨大尺寸失败返回 SIZE_MAX，-O2/-O3 下为
+  挂起/内存爆炸/行为不定（UB 无定义行为）。16 字节缓冲读短行时翻倍次数少、堆栈
+  恰好为 0 时"侥幸"通过，问题被掩盖。
+
+rec_approach: |
+  两个最小补丁：①把 lsize 初始化为 0（消除 UB）；②翻倍改用独立临时变量
+  newsize = max(need 累计量, 2*当前 cap)，不再回写 lsize，避免指数复合。
+  验证：-O0 与 -O3 下均稳定返回正确行长（201 字节行 n=201, cap=320），
+  消费者与鸿蒙专项测试全绿。通用教训：读库的增长翻倍若复合进"运行总量"变量，
+  必现指数级 realloc；初始化所有局部变量后再依赖其值。

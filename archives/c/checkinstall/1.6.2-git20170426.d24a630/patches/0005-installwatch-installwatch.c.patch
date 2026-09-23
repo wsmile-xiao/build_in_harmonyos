@@ -1,0 +1,992 @@
+--- a/installwatch/installwatch.c
++++ b/installwatch/installwatch.c
+@@ -50,20 +50,47 @@
+ 
+ /* There's no d_off on GNU/kFreeBSD */
+ #if defined(__FreeBSD_kernel__)
+ #define D_OFF(X) (-1)
+ #else
+ #define D_OFF(X) (X)
+ #endif
+ 	
+ #include "localdecls.h"
+ 
++#if !defined(__GLIBC__)
++#  define _STAT_VER 0
++#  define _MKNOD_VER 0
++#  define __mode_t mode_t
++#  define __off64_t off64_t
++#  define __GLIBC_COMPAT 0
++#else
++#  define __GLIBC_COMPAT 1
++#endif
++
++/* version-agnostic stat-family calls */
++#if defined(__GLIBC__)
++#  define XSTAT_CALL(v,p,i)     true_xstat((v),(p),(i))
++#  define LXSTAT_CALL(v,p,i)    true_lxstat((v),(p),(i))
++#  define XSTAT64_CALL(v,p,i)   true_xstat64((v),(p),(i))
++#  define LXSTAT64_CALL(v,p,i)  true_lxstat64((v),(p),(i))
++#  define XMKNOD_CALL(v,p,m,d)  true_xmknod((v),(p),(m),(d))
++#  define FXSTATAT_CALL(v,df,p,i,fl) true_fxstatat((v),(df),(p),(i),(fl))
++#else
++#  define XSTAT_CALL(v,p,i)     true_statfn((p),(i))
++#  define LXSTAT_CALL(v,p,i)    true_lstatfn((p),(i))
++#  define XSTAT64_CALL(v,p,i)   true_statfn((p),(i))
++#  define LXSTAT64_CALL(v,p,i)  true_lstatfn((p),(i))
++#  define XMKNOD_CALL(v,p,m,d)  true_mknodfn((p),(m),(d))
++#  define FXSTATAT_CALL(v,df,p,i,fl) true_fstatatfn((df),(p),(i),(fl))
++#endif
++
+ #define DEBUG 1  
+ 
+ #define LOGLEVEL (LOG_USER | LOG_INFO | LOG_PID)
+ #define BUFSIZE 1024
+ 
+ #define error(X) (X < 0 ? strerror(errno) : "success")
+ 
+ int __installwatch_refcount = 0;
+ int __installwatch_timecount = 0;
+ 
+@@ -77,34 +104,43 @@
+ static int (*true_chroot)(const char *);
+ static int (*true_creat)(const char *, mode_t);
+ static int (*true_fchmod)(int, mode_t);
+ static int (*true_fchown)(int, uid_t, gid_t);
+ static FILE *(*true_fopen)(const char *,const char*);
+ static int (*true_ftruncate)(int, TRUNCATE_T);
+ static char *(*true_getcwd)(char*,size_t);
+ static int (*true_lchown)(const char *, uid_t, gid_t);
+ static int (*true_link)(const char *, const char *);
+ static int (*true_mkdir)(const char *, mode_t);
++#if defined(__GLIBC__)
+ static int (*true_xmknod)(int ver,const char *, mode_t, dev_t *);
++#else
++static int (*true_mknodfn)(const char *, mode_t, dev_t);
++#endif
+ static int (*true_open)(const char *, int, ...);
+ static DIR *(*true_opendir)(const char *);
+ static struct dirent *(*true_readdir)(DIR *dir);
+ #if (GLIBC_MINOR <= 4)
+ static int (*true_readlink)(const char*,char *,size_t);
+ #else
+ static ssize_t (*true_readlink)(const char*,char *,size_t);
+ #endif
+ static char *(*true_realpath)(const char *,char *);
+ static int (*true_rename)(const char *, const char *);
+ static int (*true_rmdir)(const char *);
++#if defined(__GLIBC__)
+ static int (*true_xstat)(int,const char *,struct stat *);
+ static int (*true_lxstat)(int,const char *,struct stat *);
++#else
++static int (*true_statfn)(const char *,struct stat *);
++static int (*true_lstatfn)(const char *,struct stat *);
++#endif
+ 
+ #if(GLIBC_MINOR >= 10)
+ 
+ static int (*true_scandir)(	const char *,struct dirent ***,
+ 				int (*)(const struct dirent *),
+ 				int (*)(const struct dirent **,const struct dirent **));
+ 
+ #else
+ 
+ static int (*true_scandir)(	const char *,struct dirent ***,
+@@ -115,21 +151,21 @@
+ static int (*true_symlink)(const char *, const char *);
+ static int (*true_truncate)(const char *, TRUNCATE_T);
+ static int (*true_unlink)(const char *);
+ static int (*true_utime)(const char *,const struct utimbuf *);
+ static int (*true_utimes)(const char *,const struct timeval *);
+ static int (*true_access)(const char *, int);
+ static int (*true_setxattr)(const char *,const char *,const void *,
+                             size_t, int);
+ static int (*true_removexattr)(const char *,const char *);
+ 
+-#if(GLIBC_MINOR >= 1)
++#if(__GLIBC_COMPAT && GLIBC_MINOR >= 1)
+ 
+ static int (*true_creat64)(const char *, __mode_t);
+ static FILE *(*true_fopen64)(const char *,const char *);
+ static int (*true_ftruncate64)(int, __off64_t);
+ static int (*true_open64)(const char *, int, ...);
+ static struct dirent64 *(*true_readdir64)(DIR *dir);
+ 
+ #if(GLIBC_MINOR >= 10)
+ static int (*true_scandir64)(	const char *,struct dirent64 ***,
+ 				int (*)(const struct dirent64 *),
+@@ -142,60 +178,94 @@
+ static int (*true_xstat64)(int,const char *, struct stat64 *);
+ static int (*true_lxstat64)(int,const char *, struct stat64 *);
+ static int (*true_truncate64)(const char *, __off64_t);
+ 
+ #endif
+ 
+ #if (GLIBC_MINOR >= 4)
+ static int (*true_openat)(int, const char *, int, ...);
+ static int (*true_fchmodat)(int, const char *, mode_t, int);
+ static int (*true_fchownat)(int, const char *, uid_t, gid_t, int);
++#if defined(__GLIBC__)
+ static int (*true_fxstatat)(int, int, const char *, struct stat *, int);
+ static int (*true_fxstatat64)(int, int, const char *, struct stat64 *, int);
++#else
++static int (*true_fstatatfn)(int, const char *, struct stat *, int);
++#endif
+ static int (*true_linkat)(int, const char *, int, const char *, int);
+ static int (*true_mkdirat)(int, const char *, mode_t);
+ static int (*true_readlinkat)(int, const char *, char *, size_t);
++#if defined(__GLIBC__)
+ static int (*true_xmknodat)(int, int, const char *, mode_t, dev_t *);
++#else
++static int (*true_mknodatfn)(int, const char *, mode_t, dev_t);
++#endif
+ static int (*true_renameat)(int, const char *, int, const char *);
+ static int (*true_symlinkat)(const char *, int, const char *);
+ static int (*true_unlinkat)(int, const char *, int);
+ #endif
+ 
+ #if defined __GNUC__ && __GNUC__>=2
+ 	#define inline inline
+ #else
+ 	#define inline
+ #endif	
+ 
+ static inline int true_stat(const char *pathname,struct stat *info) {
+-	return true_xstat(_STAT_VER,pathname,info);
++#if defined(__GLIBC__)
++	return XSTAT_CALL(_STAT_VER,pathname,info);
++#else
++	return true_statfn(pathname,info);
++#endif
+ }
+ 
+ static inline int true_mknod(const char *pathname,mode_t mode,dev_t dev) {
++#if defined(__GLIBC__)
+ 	return true_xmknod(_MKNOD_VER,pathname,mode,&dev);
++#else
++	return true_mknodfn(pathname,mode,dev);
++#endif
+ }
+ 
+ static inline int true_lstat(const char *pathname,struct stat *info) {
+-	return true_lxstat(_STAT_VER,pathname,info);
++#if defined(__GLIBC__)
++	return LXSTAT_CALL(_STAT_VER,pathname,info);
++#else
++	return true_lstatfn(pathname,info);
++#endif
+ }
+ 
+ #if (GLIBC_MINOR >= 4)
+ static inline int true_fstatat(int dirfd, const char *pathname, struct stat *info, int flags) {
+-	return true_fxstatat(_STAT_VER, dirfd, pathname, info, flags);
+-}
+-
++#if defined(__GLIBC__)
++	return FXSTATAT_CALL(_STAT_VER, dirfd, pathname, info, flags);
++#else
++	return true_fstatatfn(dirfd, pathname, info, flags);
++#endif
++}
++
++#if defined(__GLIBC__)
+ static inline int true_fstatat64(int dirfd, const char *pathname, struct stat64 *info, int flags) {
+ 	return true_fxstatat64(_STAT_VER, dirfd, pathname, info, flags);
+ }
++#else
++static inline int true_fstatat64(int dirfd, const char *pathname, struct stat *info, int flags) {
++	return true_fstatatfn(dirfd, pathname, info, flags);
++}
++#endif
+ 
+ static inline int true_mknodat(int dirfd, const char *pathname,mode_t mode,dev_t dev) {
++#if defined(__GLIBC__)
+ 	return true_xmknodat(_MKNOD_VER, dirfd, pathname, mode, &dev);
++#else
++	return true_mknodatfn(dirfd, pathname, mode, dev);
++#endif
+ }
+ 
+ #endif
+ 
+   /* A few defines to fix things a little */
+ #define INSTW_OK 0 
+   /* If not set, no work with translation is allowed */
+ #define INSTW_INITIALIZED	(1<<0)
+   /* If not set, a wrapped function only do its "real" job */
+ #define INSTW_OKWRAP		(1<<1)
+@@ -364,81 +434,103 @@
+ 	true_chroot      = dlsym(libc_handle, "chroot");
+ 	true_creat       = dlsym(libc_handle, "creat");
+ 	true_fchmod      = dlsym(libc_handle, "fchmod");
+ 	true_fchown      = dlsym(libc_handle, "fchown");
+ 	true_fopen       = dlsym(libc_handle, "fopen");
+ 	true_ftruncate   = dlsym(libc_handle, "ftruncate");
+ 	true_getcwd      = dlsym(libc_handle, "getcwd");
+ 	true_lchown      = dlsym(libc_handle, "lchown");
+ 	true_link        = dlsym(libc_handle, "link");
+ 	true_mkdir       = dlsym(libc_handle, "mkdir");
++#if defined(__GLIBC__)
+ 	true_xmknod      = dlsym(libc_handle, "__xmknod");
++#else
++	true_mknodfn     = dlsym(libc_handle, "mknod");
++#endif
+ 	true_open        = dlsym(libc_handle, "open");
+ 	true_opendir     = dlsym(libc_handle, "opendir");
+ 	true_readdir     = dlsym(libc_handle, "readdir");
+ 	true_readlink    = dlsym(libc_handle, "readlink");
+ 	true_realpath    = dlsym(libc_handle, "realpath");
+ 	true_rename      = dlsym(libc_handle, "rename");
+ 	true_rmdir       = dlsym(libc_handle, "rmdir");
+ 	true_scandir     = dlsym(libc_handle, "scandir");
++#if defined(__GLIBC__)
+ 	true_xstat       = dlsym(libc_handle, "__xstat");
+ 	true_lxstat      = dlsym(libc_handle, "__lxstat");
++#else
++	true_statfn      = dlsym(libc_handle, "stat");
++	true_lstatfn     = dlsym(libc_handle, "lstat");
++#endif
+ 	true_symlink     = dlsym(libc_handle, "symlink");
+ 	true_truncate    = dlsym(libc_handle, "truncate");
+ 	true_unlink      = dlsym(libc_handle, "unlink");
+ 	true_utime       = dlsym(libc_handle, "utime");
+ 	true_setxattr    = dlsym(libc_handle, "setxattr");
+         true_utimes      = dlsym(libc_handle, "utimes");
+         true_access      = dlsym(libc_handle, "access");
+ 
+ 
+ 
+-#if(GLIBC_MINOR >= 1)
++#if(__GLIBC_COMPAT && GLIBC_MINOR >= 1)
+ 	true_creat64     = dlsym(libc_handle, "creat64");
+ 	true_fopen64     = dlsym(libc_handle, "fopen64");
+ 	true_ftruncate64 = dlsym(libc_handle, "ftruncate64");
+ 	true_open64      = dlsym(libc_handle, "open64");
+ 	true_readdir64   = dlsym(libc_handle, "readdir64");
+ 	true_scandir64   = dlsym(libc_handle, "scandir64");
+ 	true_xstat64     = dlsym(libc_handle, "__xstat64");
+ 	true_lxstat64    = dlsym(libc_handle, "__lxstat64");
+ 	true_truncate64  = dlsym(libc_handle, "truncate64");
+         true_removexattr = dlsym(libc_handle, "removexattr");
+ #endif
+ 
+ #if (GLIBC_MINOR >= 4)
+ 
+ 	true_openat      = dlsym(libc_handle, "openat");
+ 	true_fchmodat      = dlsym(libc_handle, "fchmodat");
+ 	true_fchownat      = dlsym(libc_handle, "fchownat");
++#if defined(__GLIBC__)
+ 	true_fxstatat      = dlsym(libc_handle, "__fxstatat");
+ 	true_fxstatat64      = dlsym(libc_handle, "__fxstatat64");
++#else
++	true_fstatatfn      = dlsym(libc_handle, "fstatat");
++#endif
+ 	true_linkat      = dlsym(libc_handle, "linkat");
+ 	true_mkdirat      = dlsym(libc_handle, "mkdirat");
+ 	true_readlinkat      = dlsym(libc_handle, "readlinkat");
++#if defined(__GLIBC__)
+ 	true_xmknodat      = dlsym(libc_handle, "__xmknodat");
++#else
++	true_mknodatfn     = dlsym(libc_handle, "mknodat");
++#endif
+ 	true_renameat      = dlsym(libc_handle, "renameat");
+ 	true_symlinkat     = dlsym(libc_handle, "symlinkat");
+ 	true_unlinkat      = dlsym(libc_handle, "unlinkat");
+ 
+ #endif
+ 
+ 	if(instw_init()) exit(-1);
+ }
+ 
++#if defined(__GLIBC__)
+ void _init(void) {
+ 	initialize();
+ }
+ 
+ void _fini(void) {
+ 	instw_fini();	
+ }
++#else
++__attribute__((constructor)) static void iw_ctor(void) { initialize(); }
++__attribute__((destructor)) static void iw_dtor(void) { instw_fini(); }
++#endif
+ 
+ /*
+  * *****************************************************************************
+  */
+ 
+ /*
+  * procedure = / rc:=vlambda_log(logname,format,ap) /
+  *
+  * task      = / the va_list version of the lambda_log() procedure. /
+  */
+@@ -2796,57 +2888,59 @@
+ 	instw_apply(&instw);
+ 
+ 	result=true_mkdir(instw.translpath,mode);
+ 	logg("%d\tmkdir\t%s\t#%s\n",result,instw.reslvpath,error(result));
+ 
+ 	instw_delete(&instw);
+ 
+ 	return result;
+ }
+ 
++#if defined(__GLIBC__)
+ int __xmknod(int version,const char *pathname, mode_t mode,dev_t *dev) {
+ 	int result;
+ 	instw_t instw;
+ 	
+ 	REFCOUNT;
+ 
+ 	if (!libc_handle)
+ 		initialize();
+ 
+ #if DEBUG
+ 	debug(2,"mknod(%s,mode,dev)\n",pathname);
+ #endif
+ 
+ 	  /* We were asked to work in "real" mode */
+ 	if( !(__instw.gstatus & INSTW_INITIALIZED) ||
+ 	    !(__instw.gstatus & INSTW_OKWRAP) ) {
+-		result=true_xmknod(version,pathname,mode,dev);
++		result=XMKNOD_CALL(version,pathname,mode,dev);
+ 		return result;
+ 	}
+ 
+ 	instw_new(&instw);
+ 	instw_setpath(&instw,pathname);
+ 
+ #if DEBUG
+ 	instw_print(&instw);
+ #endif
+ 
+ 	instw_apply(&instw);
+ 	backup(instw.truepath);
+ 
+-	result=true_xmknod(version,instw.translpath,mode,dev);
++	result=XMKNOD_CALL(version,instw.translpath,mode,dev);
+ 	logg("%d\tmknod\t%s\t#%s\n",result,instw.reslvpath,error(result));
+ 
+ 	instw_delete(&instw);
+ 	
+ 	return result;
+ }
++#endif /* __GLIBC__ xmknod */
+ 
+ int open(const char *pathname, int flags, ...) {
+ /* Eventually, there is a third parameter: it's mode_t mode */
+ 	va_list ap;
+ 	mode_t mode;
+ 	int result;
+ 	instw_t instw;
+ 	int status;
+ 
+ 	REFCOUNT;
+@@ -3118,103 +3212,107 @@
+ 	    !(__instw.gstatus & INSTW_OKWRAP) ) {
+ 		result=true_scandir(dir,namelist,select,compar);
+ 		return result;
+ 	}
+ 
+ 	result=true_scandir(dir,namelist,select,compar);
+ 
+ 	return result;
+ }		
+ 
++#if defined(__GLIBC__)
+ int __xstat(int version,const char *pathname,struct stat *info) {
+ 	int result;
+ 	instw_t instw;
+ 	int status;
+ 
+ 	if (!libc_handle)
+ 		initialize();
+ 
+ #if DEBUG
+ 	debug(2,"stat(%s,%p)\n",pathname,info);
+ #endif
+ 
+ 	  /* We were asked to work in "real" mode */
+ 	if( !(__instw.gstatus & INSTW_INITIALIZED) ||
+ 	    !(__instw.gstatus & INSTW_OKWRAP) ) {
+-		result=true_xstat(version,pathname,info);
++		result=XSTAT_CALL(version,pathname,info);
+ 		return result;
+ 	}
+ 
+ 	instw_new(&instw);
+ 	instw_setpath(&instw,pathname);
+ 	instw_getstatus(&instw,&status);
+ 
+ #if DEBUG
+ 	instw_print(&instw);
+ #endif
+ 
+ 	if(status&INSTW_TRANSLATED) {
+ 		debug(4,"\teffective stat(%s,%p)\n",
+ 		      instw.translpath,info);
+-		result=true_xstat(version,instw.translpath,info);
++		result=XSTAT_CALL(version,instw.translpath,info);
+ 	} else {
+ 		debug(4,"\teffective stat(%s,%p)\n",
+ 		      instw.path,info);
+-		result=true_xstat(version,instw.path,info);
++		result=XSTAT_CALL(version,instw.path,info);
+ 	}
+ 
+ 	instw_delete(&instw);
+ 
+ 	return result;	
+ }
+-
++#endif /* __GLIBC__ xstat */
++
++#if defined(__GLIBC__)
+ int __lxstat(int version,const char *pathname,struct stat *info) {
+ 	int result;
+ 	instw_t instw;
+ 	int status;
+ 
+ 	if (!libc_handle)
+ 		initialize();
+ 
+ #if DEBUG
+ 	debug(2,"lstat(%s,%p)\n",pathname,info);
+ #endif
+ 
+ 	  /* We were asked to work in "real" mode */
+ 	if( !(__instw.gstatus & INSTW_INITIALIZED) ||
+ 	    !(__instw.gstatus & INSTW_OKWRAP) ) {
+-		result=true_lxstat(version,pathname,info);
++		result=LXSTAT_CALL(version,pathname,info);
+ 		return result;
+ 	}
+ 
+ 	instw_new(&instw);
+ 	instw_setpath(&instw,pathname);
+ 	instw_getstatus(&instw,&status);
+ 
+ #if DEBUG
+ 	instw_print(&instw);
+ #endif
+ 
+ 	if(status&INSTW_TRANSLATED) {
+ 		debug(4,"\teffective lstat(%s,%p)\n",
+ 			instw.translpath,info);
+-		result=true_lxstat(version,instw.translpath,info);
++		result=LXSTAT_CALL(version,instw.translpath,info);
+ 	} else {
+ 		debug(4,"\teffective lstat(%s,%p)\n",
+ 			instw.path,info);
+-		result=true_lxstat(version,instw.path,info);
++		result=LXSTAT_CALL(version,instw.path,info);
+ 	}
+ 
+ 	instw_delete(&instw);
+ 
+ 	return result;	
+ }
++#endif /* __GLIBC__ lxstat */
+ 
+ int symlink(const char *pathname, const char *slink) {
+ 	int result;
+ 	instw_t instw;
+ 	instw_t instw_slink;
+ 
+ 	REFCOUNT;
+ 
+ 	if (!libc_handle)
+ 		initialize();
+@@ -3511,21 +3609,21 @@
+         instw_apply(&instw);
+ 
+         result=true_removexattr(instw.translpath,name);
+         logg("%d\tremovexattr\t%s\t#%s\n",result,instw.reslvpath,error(result));
+ 
+         instw_delete(&instw);
+ 
+         return result;
+ }
+ 
+-#if(GLIBC_MINOR >= 1)
++#if(__GLIBC_COMPAT && GLIBC_MINOR >= 1)
+ 
+ int creat64(const char *pathname, __mode_t mode) {
+ /* Is it a system call? */
+ 	int result;
+ 	instw_t instw;
+ 
+ 	REFCOUNT;
+ 
+ 	if (!libc_handle)
+ 		initialize();
+@@ -3734,97 +3832,101 @@
+ 	    !(__instw.gstatus & INSTW_OKWRAP) ) {
+ 		result=true_scandir64(dir,namelist,select,compar);
+ 		return result;
+ 	}
+ 
+ 	result=true_scandir64(dir,namelist,select,compar);
+ 
+ 	return result;
+ }		
+ 
++#if defined(__GLIBC__)
+ int __xstat64(int version,const char *pathname,struct stat64 *info) {
+ 	int result;
+ 	instw_t instw;
+ 	int status;
+ 
+ #if DEBUG
+ 	debug(2,"stat64(%s,%p)\n",pathname,info);
+ #endif
+ 
+ 	  /* We were asked to work in "real" mode */
+ 	if( !(__instw.gstatus & INSTW_INITIALIZED) ||
+ 	    !(__instw.gstatus & INSTW_OKWRAP) ) {
+-		result=true_xstat64(version,pathname,info);
++		result=XSTAT64_CALL(version,pathname,info);
+ 		return result;
+ 	}
+ 
+ 	instw_new(&instw);
+ 	instw_setpath(&instw,pathname);
+ 	instw_getstatus(&instw,&status);
+ 
+ #if DEBUG
+ 	instw_print(&instw);
+ #endif
+ 
+ 	if(status&INSTW_TRANSLATED) {
+ 		debug(4,"\teffective stat64(%s,%p)\n",
+ 		      instw.translpath,info);
+-		result=true_xstat64(version,instw.translpath,info);
++		result=XSTAT64_CALL(version,instw.translpath,info);
+ 	} else {
+ 		debug(4,"\teffective stat64(%s,%p)\n",
+ 		      instw.path,info);
+-		result=true_xstat64(version,instw.path,info);
++		result=XSTAT64_CALL(version,instw.path,info);
+ 	}	
+ 
+ 	instw_delete(&instw);
+ 
+ 	return result;	
+ }
+-
++#endif /* __GLIBC__ xstat64 */
++
++#if defined(__GLIBC__)
+ int __lxstat64(int version,const char *pathname,struct stat64 *info) {
+ 	int result;
+ 	instw_t instw;
+ 	int status;
+ 
+ #if DEBUG
+ 	debug(2,"lstat64(%s,%p)\n",pathname,info);
+ #endif
+ 
+ 	  /* We were asked to work in "real" mode */
+ 	if( !(__instw.gstatus & INSTW_INITIALIZED) ||
+ 	    !(__instw.gstatus & INSTW_OKWRAP) ) {
+-		result=true_lxstat64(version,pathname,info);
++		result=LXSTAT64_CALL(version,pathname,info);
+ 		return result;
+ 	}
+ 
+ 	instw_new(&instw);
+ 	instw_setpath(&instw,pathname);
+ 	instw_getstatus(&instw,&status);
+ 
+ #if DEBUG
+ 	instw_print(&instw);
+ #endif
+ 
+ 	if(status&INSTW_TRANSLATED) {
+ 		debug(4,"\teffective lstat64(%s,%p)\n",
+ 			instw.translpath,info);
+-		result=true_lxstat64(version,instw.translpath,info);
++		result=LXSTAT64_CALL(version,instw.translpath,info);
+ 	} else {
+ 		debug(4,"\teffective lstat64(%s,%p)\n",
+ 			instw.path,info);
+-		result=true_lxstat64(version,instw.path,info);
++		result=LXSTAT64_CALL(version,instw.path,info);
+ 	}
+ 
+ 	instw_delete(&instw);
+ 
+ 	return result;	
+ }
++#endif /* __GLIBC__ lxstat64 */
+ 
+ int truncate64(const char *path, __off64_t length) {
+ 	int result;
+ 	instw_t instw;
+ 
+ 	if (!libc_handle)
+ 		initialize();
+ 
+ 	REFCOUNT;
+ 
+@@ -4035,40 +4137,41 @@
+ 	 }
+ 
+ 
+  	
+  	instw_delete(&instw);
+  
+ 	return result;
+ }
+ 
+ 
++#if defined(__GLIBC__)
+ int __fxstatat (int version, int dirfd, const char *path, struct stat *s, int flags) {
+  	
+  	int result;
+  	instw_t instw;
+  
+  	/* If all we are doing is normal open, forgo refcounting, etc. */
+          if(dirfd == AT_FDCWD || *path == '/')
+ 		{
+ 		 #if DEBUG
+ 			debug(2, "__fxstatat(%d,%s,%p,0%o)\n", dirfd, path, s, flags);
+ 		 #endif
+ 
+ 		 /* If we have AT_SYMLINK_NOFOLLOW then we need  */
+ 		 /* lstat() behaviour, according to fstatat(2) */
+ 
+ 		 if ( flags & AT_SYMLINK_NOFOLLOW ) {
+-		    return __lxstat(version, path, s); 
++		    return LXSTAT_CALL(version, path, s); 
+ 		 }
+ 		 else {
+-		    return __xstat(version, path, s);
++		    return XSTAT_CALL(version, path, s);
+ 		 }
+ 
+ 		}
+  
+  	REFCOUNT;
+  
+  	if (!libc_handle)
+  		initialize();
+  
+ #if DEBUG
+@@ -4077,71 +4180,73 @@
+  	
+  	/* We were asked to work in "real" mode */
+  	if(!(__instw.gstatus & INSTW_INITIALIZED) ||
+  	   !(__instw.gstatus & INSTW_OKWRAP)) {
+ 
+ 
+ 		 /* If we have AT_SYMLINK_NOFOLLOW then we need  */
+ 		 /* lstat() behaviour, according to fstatat(2) */
+ 
+ 		 if ( flags & AT_SYMLINK_NOFOLLOW ) {
+-		    return true_lxstat(version, path, s); 
++		    return LXSTAT_CALL(version, path, s); 
+ 		 }
+ 		 else {
+- 		    return true_xstat(version, path, s);
++ 		    return XSTAT_CALL(version, path, s);
+ 		 }
+ 	}
+ 
+ 	
+  	instw_new(&instw);
+  	instw_setpathrel(&instw,dirfd,path);
+  	
+ #if DEBUG
+  	instw_print(&instw);
+ #endif
+  
+ 		 /* If we have AT_SYMLINK_NOFOLLOW then we need  */
+ 		 /* lstat() behaviour, according to fstatat(2) */
+ 
+ 		 if ( flags & AT_SYMLINK_NOFOLLOW ) {
+- 		    result=__lxstat(version, instw.path, s);
++ 		    result=LXSTAT_CALL(version, instw.path, s);
+ 		 }
+ 		 else {
+- 		    result=__xstat(version, instw.path, s);
++ 		    result=XSTAT_CALL(version, instw.path, s);
+  		    
+ 		 }	
+  	
+  	instw_delete(&instw);
+  
+ 	return result;
+ }
+-
++#endif /* __GLIBC__ fxstatat */
++
++#if defined(__GLIBC__)
+ int __fxstatat64 (int version, int dirfd, const char *path, struct stat64 *s, int flags) {
+  	
+  	int result;
+  	instw_t instw;
+  
+  	/* If all we are doing is normal open, forgo refcounting, etc. */
+          if(dirfd == AT_FDCWD || *path == '/')
+ 		{
+ 		 #if DEBUG
+ 			debug(2, "__fxstatat(%d,%s,%p,0%o)\n", dirfd, path, s, flags);
+ 		 #endif
+ 
+ 		 /* If we have AT_SYMLINK_NOFOLLOW then we need  */
+ 		 /* lstat() behaviour, according to fstatat(2) */
+ 
+ 		 if ( flags & AT_SYMLINK_NOFOLLOW ) {
+-		    return __lxstat64(version, path, s); 
++		    return LXSTAT64_CALL(version, path, s); 
+ 		 }
+ 		 else {
+-		    return __xstat64(version, path, s);
++		    return XSTAT64_CALL(version, path, s);
+ 		 }
+ 
+ 		}
+  
+  	REFCOUNT;
+  
+  	if (!libc_handle)
+  		initialize();
+  
+ #if DEBUG
+@@ -4168,31 +4273,32 @@
+  	instw_setpathrel(&instw,dirfd,path);
+  	
+ #if DEBUG
+  	instw_print(&instw);
+ #endif
+ 
+ 	/* If we have AT_SYMLINK_NOFOLLOW then we need  */
+ 	/* lstat() behaviour, according to fstatat(2) */
+ 
+ 	if ( flags & AT_SYMLINK_NOFOLLOW ) {
+- 	   result=__lxstat64(version, instw.path, s);
++ 	   result=LXSTAT64_CALL(version, instw.path, s);
+ 	}
+ 	else {
+- 	   result=__xstat64(version, instw.path, s);
++ 	   result=XSTAT64_CALL(version, instw.path, s);
+ 	}
+  	
+  	instw_delete(&instw);
+  
+ 	return result;
+ 
+ }
++#endif /* __GLIBC__ fxstatat64 */
+ 
+ 
+ int linkat (int olddirfd, const char *oldpath,
+                   int newdirfd, const char *newpath, int flags) {
+  	
+  	int result;
+  	instw_t instwold;
+  	instw_t instwnew;
+  
+  	/* If all we are doing is normal open, forgo refcounting, etc. */
+@@ -4330,20 +4436,21 @@
+ #endif
+  	
+  	result=readlink(instw.path, buf, bufsiz);
+  	
+  	instw_delete(&instw);
+  
+ 	return result;
+ }
+ 
+ 
++#if defined(__GLIBC__)
+ int __xmknodat (int version, int dirfd,const char *path,mode_t mode,dev_t *dev) {
+  	
+  	int result;
+  	instw_t instw;
+  
+  	/* If all we are doing is normal open, forgo refcounting, etc. */
+          if(dirfd == AT_FDCWD || *path == '/')
+ 		{
+ 		 #if DEBUG
+ 			debug(2, "__xmknod(%d, %s, 0%o, %p)\n", version, path, mode, dev);
+@@ -4371,20 +4478,21 @@
+ #if DEBUG
+  	instw_print(&instw);
+ #endif
+  	
+  	result=__xmknod(version, instw.path, mode, dev);
+  	
+  	instw_delete(&instw);
+  
+ 	return result;
+ }
++#endif /* __GLIBC__ xmknodat */
+ 
+ 
+ int renameat (int olddirfd, const char *oldpath,
+                   int newdirfd, const char *newpath) {
+  	
+  	int result;
+  	instw_t instwold;
+  	instw_t instwnew;
+  
+  	/* If all we are doing is normal open, forgo refcounting, etc. */
+@@ -4542,10 +4650,156 @@
+ 	 }
+  	
+  	instw_delete(&instw);
+  
+ 	return result;
+ 
+ }
+ 
+ 
+ #endif /* GLIBC_MINOR >= 4 */
++
++
++/* ==================== musl (OHOS) standard-symbol interposers ====================
++ * glibc implements stat() as forwarding to the versioned __xstat(_STAT_VER,...);
++ * installwatch therefore exports __xstat/__lxstat/__xmknod/__fxstatat/__xmknodat
++ * to interpose them.  musl has NO versioned stat ABI - apps call stat/lstat/mknod
++ * (and fstatat/mknodat) directly.  We must export those public names (no version
++ * argument) so LD_PRELOAD interception keeps working under musl.
++ */
++#if !defined(__GLIBC__)
++
++int stat(const char *pathname, struct stat *info)
++{
++	int result;
++	instw_t instw;
++	int status;
++
++	if (!libc_handle)
++		initialize();
++
++	if (!(__instw.gstatus & INSTW_INITIALIZED) ||
++	    !(__instw.gstatus & INSTW_OKWRAP)) {
++		return true_statfn(pathname, info);
++	}
++
++	instw_new(&instw);
++	instw_setpath(&instw, pathname);
++	instw_getstatus(&instw, &status);
++
++	if (status & INSTW_TRANSLATED) {
++		result = true_statfn(instw.translpath, info);
++	} else {
++		result = true_statfn(instw.path, info);
++	}
++	instw_delete(&instw);
++	return result;
++}
++
++int lstat(const char *pathname, struct stat *info)
++{
++	int result;
++	instw_t instw;
++	int status;
++
++	if (!libc_handle)
++		initialize();
++
++	if (!(__instw.gstatus & INSTW_INITIALIZED) ||
++	    !(__instw.gstatus & INSTW_OKWRAP)) {
++		return true_lstatfn(pathname, info);
++	}
++
++	instw_new(&instw);
++	instw_setpath(&instw, pathname);
++	instw_getstatus(&instw, &status);
++
++	if (status & INSTW_TRANSLATED) {
++		result = true_lstatfn(instw.translpath, info);
++	} else {
++		result = true_lstatfn(instw.path, info);
++	}
++	instw_delete(&instw);
++	return result;
++}
++
++int mknod(const char *pathname, mode_t mode, dev_t dev)
++{
++	int result;
++	instw_t instw;
++
++	if (!libc_handle)
++		initialize();
++
++	if (!(__instw.gstatus & INSTW_INITIALIZED) ||
++	    !(__instw.gstatus & INSTW_OKWRAP)) {
++		return true_mknodfn(pathname, mode, dev);
++	}
++
++	instw_new(&instw);
++	instw_setpath(&instw, pathname);
++	instw_apply(&instw);
++
++	result = true_mknodfn(instw.translpath, mode, dev);
++
++	instw_delete(&instw);
++	return result;
++}
++
++int fstatat(int dirfd, const char *path, struct stat *s, int flags)
++{
++	int result;
++	instw_t instw;
++
++	if (dirfd == AT_FDCWD || *path == '/') {
++		if (flags & AT_SYMLINK_NOFOLLOW)
++			return true_lstatfn(path, s);
++		else
++			return true_statfn(path, s);
++	}
++
++	if (!libc_handle)
++		initialize();
++
++	if (!(__instw.gstatus & INSTW_INITIALIZED) ||
++	    !(__instw.gstatus & INSTW_OKWRAP)) {
++		if (flags & AT_SYMLINK_NOFOLLOW)
++			return true_lstatfn(path, s);
++		else
++			return true_statfn(path, s);
++	}
++
++	instw_new(&instw);
++	instw_setpathrel(&instw, dirfd, path);
++
++	if (flags & AT_SYMLINK_NOFOLLOW)
++		result = true_lstatfn(instw.path, s);
++	else
++		result = true_statfn(instw.path, s);
++
++	instw_delete(&instw);
++	return result;
++}
++
++int mknodat(int dirfd, const char *path, mode_t mode, dev_t dev)
++{
++	int result;
++	instw_t instw;
++
++	if (!libc_handle)
++		initialize();
++
++	if (!(__instw.gstatus & INSTW_INITIALIZED) ||
++	    !(__instw.gstatus & INSTW_OKWRAP)) {
++		return true_mknodatfn(dirfd, path, mode, dev);
++	}
++
++	instw_new(&instw);
++	instw_setpathrel(&instw, dirfd, path);
++
++	result = true_mknodatfn(dirfd, instw.path, mode, dev);
++
++	instw_delete(&instw);
++	return result;
++}
++
++#endif /* !defined(__GLIBC__) */

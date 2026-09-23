@@ -1,0 +1,92 @@
+#====================================================================
+# DRAFT-boost1.84-url-libcxx-shared-testbin-static-link.kv
+# OHOS 上 C++ 测试二进制运行期加载 libc++_shared.so 失败（rc=127）：静态打入或自省注入两流派
+# 触发事件: boost1.84-url 1.84.0 适配（archives/b/boost1.84-url/1.84.0，PR #8436）
+#   第一轮 conan create：19 个上游测试全部 FAIL rc=127 + test_package rc=127
+#   修复两轮：conanfile 测试链接加 -static-libstdc++；test_package/CMakeLists 加 target_link_options
+# 跨库复现: boost/1.85.0 元包(2026-09-02, 流派B)、boost1.84-thread(流派B)、
+#   boost1.84-serialization(流派A)、boost1.84-url(流派A) —— 4 个独立任务复现
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-boost1.84-url-libcxx-shared-testbin-static-link
+trigger_tool:           clang++|cmake|conan|ld|runtime
+phase:                  runtime|testing
+error_signature:        Error loading shared library libc\+\+_shared\.so|
+                         Error relocating .*: __cxa_pure_virtual: symbol not found|
+                         Error relocating .*: _ZSt9terminatev: symbol not found|
+                         Error relocating .*: _ZNSt4__n1.*(cout|cerr): symbol not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               libcxx, musl, linking, runtime, testing, conan
+match_keywords:         libc++_shared.so, __cxa_pure_virtual, symbol not found,
+                         Error relocating, rc=127, -static-libstdc++,
+                         -stdlib=libc++, print-file-name, LD_LIBRARY_PATH,
+                         NEEDED, libc.so, test binary, upstream test,
+                         conan create, CMAKE_SYSTEM_NAME, HarmonyOS
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: OHOS clang（-stdlib=libc++）默认将 C++ 可执行文件动态链接 libc++_shared.so（写入 DT_NEEDED），但该库不在系统默认加载路径也不在 conan profile buildenv 的 LD_LIBRARY_PATH（前置 SDK llvm/lib）内——实际位于 llvm/lib/aarch64-linux-ohos/ 子目录。musl 加载器按 NEEDED 找不到库时以 rc=127 退出，且 libc++ 运行时符号（__cxa_pure_virtual/_ZSt9terminatev/_ZNSt4__n1::cout 等）全部 undefined 而逐符号打印 Error relocating。编译链接期无任何报错、纯运行期失败，极具迷惑性（boost/1.84.0 底稿当年在设备 shell 环境侥幸通过，干净 conan build 环境即暴露）。
+affected_scope: 所有在 OHOS 上编译并运行 C++ 测试二进制的配方：conan create build() 内手动编译运行上游 C++ 测试（绕过 b2/ctest）、conan test_package 的 CMake 测试产物、任何 clang -stdlib=libc++ 产物需在无 SDK 环境变量注入的 shell 中直接运行的场景。
+verification_cmd: readelf -d <test_bin> | grep NEEDED && LC_ALL=C <test_bin> && echo rc=$?   # 修复前 NEEDED 含 libc++_shared.so 且运行 rc=127；流派A修复后 NEEDED 仅 libc.so 且 rc=0
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           static-libstdcxx-into-test-binary
+rec_description: >
+  流派 A（推荐，测试二进制首选）：链接时加 -static-libstdc++，把 libc++ 静态打入
+  可执行文件。NEEDED 仅剩 libc.so，产物在任意干净环境（CI worker、裸 shell）可直接
+  运行，无需环境变量配合——测试二进制天然是短命产物，静态打入无体积包袱。
+  conanfile 手动编译测试：cxxflags 追加 -static-libstdc++；
+  test_package (CMake)：target_link_options(<tgt> PRIVATE -static-libstdc++)，
+  平台判定用 CMAKE_SYSTEM_NAME MATCHES "HarmonyOS|OHOS"（注意：OHOS 适配版 conan
+  把 os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS，单判 "OHOS" 永不触发——url 适配
+  实测踩过此第二层坑）。
+rec_command: >
+  # conanfile.py（手动测试编译）:
+  #   test_flags = cxxflags + " -static-libstdc++"
+  #   cmd = f"{cxx} {test_flags} {src} test_main.cpp -L{lib_dir} -lboost_url -o {exe}"
+  # test_package/CMakeLists.txt:
+  #   if(CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS" OR CMAKE_SYSTEM_NAME STREQUAL "OHOS")
+  #       target_link_options(test_xxx PRIVATE -static-libstdc++)
+  #   endif()
+rec_auto_fix:           false
+rec_impl:               add-linker-flag
+
+fallback_priority:      2
+fallback_approach:      probe-libcxx-dir-inject-ld-library-path
+fallback_description: >
+  流派 B（必须动态链接时）：用 clang++ -print-file-name=libc++_shared.so 自省定位
+  SDK 内 libc++ 真实目录（clang 找到输出绝对路径；找不到原样回显），注入运行子进程的
+  LD_LIBRARY_PATH。运行命令须用双引号包裹 LD_LIBRARY_PATH="{}:${LD_LIBRARY_PATH:-}"
+  ——既处理含空格路径，又保证变量为空时展开为空串不残留空段（date_time PR #8455 实证）。
+  适用于产物必须动态链接 libc++（如生产库/工具链二进制/需跟 SDK 运行库同步）的场景。
+  先例：boost/1.85.0 元包、boost1.84-thread、boost1.84-date_time、boost/1.90.0.2.1 同款修复。
+fallback_command: >
+  # probe = subprocess.run(f"{cxx} -print-file-name=libc++_shared.so", shell=True, capture_output=True)
+  # if probe.stdout.strip().startswith("/"):
+  #     env = os.environ.copy()
+  #     env["LD_LIBRARY_PATH"] = os.path.dirname(probe.stdout.strip()) + os.pathsep + env.get("LD_LIBRARY_PATH", "")
+  #     subprocess.run([exe], env=env)
+fallback_auto_fix:      false
+fallback_impl:          set-env-var-subprocess
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       CMAKE_SYSTEM_NAME STREQUAL "OHOS"(?!.*HarmonyOS)
+forbid_1_reason:         OHOS 适配版 conan 将 settings.os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS，单判 "OHOS" 的分支永不触发，修复静默失效（url test_package 第二轮踩坑实证）。
+forbid_1_consequence:   条件块内 -static-libstdc++ 从不生效，test_package 二进制仍动态依赖 libc++_shared.so，ctest 阶段 rc=127。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R33（禁止裸 shell 环境变量，本条修复用链接旗标而非环境变量）、R34（测试必须真实运行）
+
+# ═══ Layer 5: 复现案例（跨库证据）═══
+# 1. boost/1.85.0 元包（2026-09-02）：4 库上游测试 rc=127 → 流派 B（print-file-name 自省注入）
+# 2. boost1.84-thread（2026-09-05）：同坑，引用 1.85.0 先例 → 流派 B
+# 3. boost1.84-serialization（2026-09-05）：同坑 → 流派 A（-static-libstdc++）
+# 4. boost1.84-url（2026-09-05，本条来源）：19 上游测试 + test_package 全 rc=127，
+#    两轮修复（conanfile + CMakeLists，含 CMAKE_SYSTEM_NAME 第二层坑）→ 流派 A
+# 5. boost1.84-date_time（2026-09-05，PR #8455）：同坑 → 流派 B'（print-file-name 定位 +
+#    LD_LIBRARY_PATH="{}:${LD_LIBRARY_PATH:-}" 双引号包裹运行命令——处理路径含空格/变量
+#    为空时展开为空串的场景，并叠加 OHOS 签名，同 1.90.0.2.1 先例）
+# 五个独立任务均各自独立发现并修复，无一入库固化——本条为首个。

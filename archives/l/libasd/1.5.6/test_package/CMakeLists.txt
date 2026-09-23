@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libasd CXX)
+find_package(libasd CONFIG REQUIRED)
+add_executable(test_libasd test.cpp)
+target_compile_features(test_libasd PRIVATE cxx_std_11)
+target_link_libraries(test_libasd PRIVATE libasd::libasd)
+enable_testing()
+add_test(NAME libasd_api COMMAND test_libasd)

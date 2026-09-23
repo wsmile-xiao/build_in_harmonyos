@@ -1,0 +1,119 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E556.kv，填写各字段
+# 对应的人类文档: doc/E556.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E556
+trigger_tool: make / ld
+phase: linking
+error_signature: cannot find -lssl|cannot find -lcrypto|pkg-config: not found|undefined reference to .SSL_|undefined reference to .OPENSSL
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: build-system, conan, ohos
+match_keywords: pkg-config,LDFLAGS,-lssl,-lcrypto,Makefile,SSL_LIBS
+title: 纯 Makefile 项目 pkg-config 依赖探测回退与 make 命令行 LDFLAGS 接管
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: plain Makefile 项目常以 LDFLAGS += $(SSL_LIBS) 方式注入依赖且 SSL_LIBS 由 pkg-config 探测;OHOS 无系统 openssl 开发库时 pkg-config 失败,Makefile 回退为裸 -lssl -lcrypto,链接器在默认搜索路径找不到库而报 cannot find -lssl
+affected_scope: 所有 plain GNU Makefile 且 Makefile 内用 pkg-config 探测 openssl 等可选依赖的 C 工具(如 proxytunnel)
+verification_cmd: conan create 后 readelf -d bin/<binary> 确认无 libssl.so NEEDED(静态链接成功)且 proxytunnel -V 正常输出
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: command-line-LDFLAGS-takeover
+rec_description: make 命令行传入 LDFLAGS=-L<conan_pkg>/lib -lssl -lcrypto 与 CFLAGS=-fPIC -O2 -I<conan_pkg>/include;make 命令行变量优先级高于 Makefile 内 += 追加赋值,可整体接管链接参数并指向 conan openssl 静态库,无需打补丁
+rec_command: make -j1 CC=clang CFLAGS=-fPIC -O2 -I$(conan cache path openssl/3.5.6.1)/include LDFLAGS=-L$(conan cache path openssl/3.5.6.1)/lib -lssl -lcrypto
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:       patch-Makefile-SSL_LIBS
+fallback_description:    对 Makefile 打补丁,将 SSL_LIBS 硬编码为 $(shell conan ... ) 输出或直接移除 pkg-config 探测
+fallback_command:        patch Makefile: SSL_LIBS = -L$$OPENSSL_LIB -lssl -lcrypto
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:        在 OHOS 上安装系统 openssl 开发包来满足 pkg-config
+forbid_1_reason:          R26 系统同名库隔离原则:conan 包必须链接制品仓依赖,不得引入系统库
+forbid_1_consequence:     产物依赖设备上的系统 libssl,破坏制品自包含性与可复现性
+forbid_2_pattern:         make install 直接复用上游 install 目标生成 man 页
+forbid_2_reason:           install 目标驱动 docs/ 子 Makefile,依赖 asciidoc+xmlto,CI 无此工具链
+forbid_2_consequence:      conan package() 阶段崩溃(exit 127)或打包出非预期文件
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E556-draft-DB80.md
+last_updated: 2026-09-07
+source_event: proxytunnel 1.13.0 适配,零补丁,W3 本地 CI 全绿
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                ningyu <405888464@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: DB80

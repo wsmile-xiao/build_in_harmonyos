@@ -316,7 +316,13 @@ Finished test run at Mon Jul 27 02:17:39 2026.
 
 The wrapper `exit-code.txt` is `0`, but the upstream harness summary is authoritative here and reports `Result: FAIL`. The test run is therefore recorded as upstream test failure, not as a pass.
 
-The summary contains 44 failing test-file entries, so the file-level upstream pass rate is `2864/2908` test programs (`98.49%`). The harness reports `Tests=1348696` actual subtests executed, but several failing test programs aborted early or produced TAP parse errors, so no reliable global passed-subtest count is claimed. Representative failure groups:
+The later review inventory counts 2927 upstream test programs. The recorded true-device harness run
+reported `Files=2908`, with 44 failing test-file entries, so 2864 executed programs passed.
+For the conservative PR-level rate, the 19 inventory entries not represented in that harness
+summary remain in the denominator and are not counted as passed: `2864/2927` (`97.85%`).
+The harness reports `Tests=1348696` actual subtests executed, but several failing test programs
+aborted early or produced TAP parse errors, so no reliable global passed-subtest count is claimed.
+Representative failure groups:
 
 - Link and filesystem semantics: `cpan/Archive-Tar`, `ext/File-Find`, `op/stat.t`, `op/taint.t`, and `io/fs.t` fail around symbolic links, hard links, link counts, and symlink traversal on OHOS storage.
 - Writable/permission-bit semantics: `cpan/ExtUtils-Install`, `cpan/File-Path`, `cpan/File-Temp`, `op/filetest.t`, `AnyDBM_File`, and `SDBM_File` expose the same `-w`/chmod/access mismatch that the recipe works around with actual create/unlink probes for build and install.

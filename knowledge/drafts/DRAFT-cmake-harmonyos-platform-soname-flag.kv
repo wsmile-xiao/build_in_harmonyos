@@ -1,0 +1,100 @@
+#====================================================================
+# DRAFT - CMAKE_SYSTEM_NAME=HarmonyOS 无平台模块导致共享库缺 DT_SONAME
+# contributor: GoliWie
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-cmake-harmonyos-platform-soname-flag
+trigger_tool:           cmake|clang|ld|readelf|patchelf
+phase:                  configuration|linking|runtime
+error_signature:        Error loading shared library [^ ]*\.so|DT_NEEDED.*(conan2/p|\.\./\.\./bin)|\(SONAME\).*缺失|no DT_SONAME|IMPORTED_NO_SONAME
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               linking, cmake, toolchain, ohos, packaging
+match_keywords:         SONAME, DT_SONAME, DT_NEEDED, HarmonyOS, CMAKE_SYSTEM_NAME, Platform module, -Wl,-soname, patchelf, IMPORTED_LOCATION, 路径形 DT_NEEDED
+title:                  CMAKE_SYSTEM_NAME=HarmonyOS 无平台模块导致共享库缺 DT_SONAME，应在链接期显式定义 SONAME flag
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             >
+  完整因果链（各环均有设备实测证据）：① Conan 的 OHOS profile 把
+  os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS 写入 CMakeToolchain；
+  ② CMake 按系统名查找 Modules/Platform/HarmonyOS.cmake，设备上 hnp
+  cmake 4.1.2 与 SDK cmake 3.28 两个安装均无该文件，仅有 OHOS.cmake，
+  而其全文只有 include(Platform/Linux) 且系统名为 HarmonyOS 时不生效；
+  ③ CMAKE_SHARED_LIBRARY_SONAME_<LANG>_FLAG 本应由此链路从
+  Platform/Linux.cmake（定义 "-Wl,-soname,"）继承，平台模块未加载即
+  保持未定义，CMake 因此不向链接器传 -Wl,-soname，也不生成版本化文件
+  名；④ 链接器对无 DT_SONAME 的输入共享库，把 IMPORTED_LOCATION/
+  构建树路径原样写入消费者 DT_NEEDED（绝对 conan-cache 路径或
+  ../../bin 相对路径），产物离开构建环境即加载失败；⑤ 归类为平台模块
+  语义缺失（工具链/构建系统层），非库内 quirk。
+affected_scope:         任何以 CMAKE_SYSTEM_NAME=HarmonyOS 配置 CMake 的交叉编译工程（Conan CMakeToolchain 或 OHOS SDK 工具链），尤其带 VERSION/SOVERSION 的共享库及其按 IMPORTED target 链接的可执行/库消费者
+verification_cmd:       |
+  # 1) 平台模块缺失 + flag 定义位置（cmake 安装路径按设备实际调整）
+  ls /data/service/hnp/cmake.org/cmake_4.1.2/share/cmake-4.1/Modules/Platform/HarmonyOS.cmake
+  #   → No such file or directory
+  grep -n 'SONAME' /data/service/hnp/cmake.org/cmake_4.1.2/share/cmake-4.1/Modules/Platform/Linux.cmake | head -1
+  #   → CMAKE_SHARED_LIBRARY_SONAME_C_FLAG "-Wl,-soname,"（定义存在但未被加载）
+  # 2) 链接器支持证据（工具链本身支持 -soname）
+  printf 'int f(){return 1;}\n' > s.c
+  clang --target=aarch64-linux-ohos -shared -fPIC s.c -Wl,-soname,libt.so.1 -o libt.so
+  llvm-readelf -d libt.so | grep SONAME    # → (SONAME) Library soname: [libt.so.1]
+  # 3) 工程级复现：带 VERSION/SOVERSION 的 CMake 共享库在 HarmonyOS 工具链下
+  #    构建后 readelf -d <lib>.so | grep SONAME —— 修复前无输出，设置
+  #    CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG="-Wl,-soname," 后出现 SONAME，
+  #    且消费者 DT_NEEDED 从路径形变为裸 soname 名。
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           link-time-soname-flag-injection
+rec_description:        在配方 generate()（或统一工具链封装）向 CMakeToolchain 注入 CMAKE_SHARED_LIBRARY_SONAME_C_FLAG 与 CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG（值 "-Wl,-soname,"，尾逗号必须保留，CMake 直接拼接 soname 值）。上游目标本就声明 VERSION/SOVERSION 时，lld 即产出真实 DT_SONAME 并版本化文件名，消费者 DT_NEEDED 记录裸 soname 名，经 LD_LIBRARY_PATH/RPATH 解析。producer 侧一次修复覆盖全部消费者，且保持工具链链接期自签名有效。
+rec_command:            conanfile.py generate(): tc.variables["CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG"] = "-Wl,-soname,"; tc.variables["CMAKE_SHARED_LIBRARY_SONAME_C_FLAG"] = "-Wl,-soname,"; 重新 conan create 后 llvm-readelf -d <pkg>/lib/<lib>.so* | grep SONAME
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      consumer-side-imported-soname-bridge
+fallback_description:   producer 不可改时，在消费者侧按 E537 方案补救：链接用 -l 裸名 + target_link_directories/IMPORTED_SONAME 桥接，或对已发布库产物做修补。诚实权衡：逐消费者修补、不消除 producer 产物的 SONAME 缺陷，每新增一个消费者都要重复处理。
+fallback_command:       target_link_libraries(app -L<libdir> -l<name>)（或 patchelf --set-soname <name>.so.<ver> <lib>——该改写若被孤立执行即 forbid_2 的 naive 失败模式 (rc=126)，须配合 fallback2/E077 四步重签流程 copy→remove-section→改→重签→chmod）；llvm-readelf -d <lib> | grep SONAME
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+fallback2_priority:     3
+fallback2_approach:     post-link-rewrite-with-e077-resign
+fallback2_description:  已签名产物做 post-link ELF 改写（如 patchelf --replace-needed 收敛路径形 DT_NEEDED）必须遵循 E077 四步流程：llvm-objcopy --remove-section .codesign → patchelf 改写 → binary-sign-tool sign -inFile F -outFile F -selfSign 1 → chmod a+x。设备归档探针实证：naive 改写不重签 exec 报 Operation not permitted (rc=126)；未先 remove-section 直接重签报 ".codesign section already exists" → SignElf 29 (rc=1)；四步后可执行文件 exec 与共享库 dlopen 均正常 (rc=0)。权衡：每产物多签名/改段两步，量产需 E077 批量脚本；能不改链接产物就不改。
+fallback2_command:      llvm-objcopy --remove-section .codesign F && patchelf --replace-needed <old> <new> F && binary-sign-tool sign -inFile F -outFile F -selfSign 1 && chmod a+x F
+fallback2_auto_fix:     false
+fallback2_impl:         post-install-script
+
+forbid_1_pattern:       发布 DT_NEEDED 含 conan-cache 绝对路径或 \.\./\.\./bin 相对路径的共享库/可执行
+forbid_1_reason:        路径形 DT_NEEDED 只在构建机（同 conan home/同构建树布局）上可解析，离开构建环境即加载失败，且 L5b 门禁只扫 lib/lib*.so 一级目录，可执行与子目录产物漏网。
+forbid_1_consequence:   制品在 CI 机构建、发布或用户侧运行时才暴露加载失败，返工面扩大到全部依赖该产物的下游。
+
+forbid_2_pattern:       patchelf/objcopy 修改 ELF 后不重签直接运行|未先 remove-section \.codesign 直接 binary-sign-tool 重签
+forbid_2_reason:        前者产物签名失配被加载器拒绝（Operation not permitted, rc=126）；后者 .codesign 段已存在使 binary-sign-tool 拒绝写入（".codesign section already exists" → SignElf 29），即 E077 forbid_2 记载的失败模式。
+forbid_2_consequence:   产物既不可执行也不可重签，容易被误判为"平台不支持 patchelf 后处理"而放弃正确方案（本条目的初版作者即误判过，探针更正）。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             [P-SIGN-001, P-PACK-001]
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E537, E077, E096]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-cmake-harmonyos-platform-soname-flag.md
+last_updated:           2026-09-04
+source_event:           qaccessibilityclient/0.6.0 + accessibility-inspector/26.04.3 适配（双包权威 CI PASS；2026-09-08 起后者包名重构为 accessibility/26.04.3，L0n/L0m 门禁）；Platform 模块缺失、clang -Wl,-soname 支持、E077 四步重签 exec/dlopen 均为 2026-09-03/04 设备实测，探针归档于 run reports/builder/probe-soname-sign/
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-04
+draft:                  true
+contributor_id:         GoliWie

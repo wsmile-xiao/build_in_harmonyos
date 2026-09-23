@@ -1,0 +1,79 @@
+# ═══ Draft knowledge entry — 预编译依赖 CMakeDeps 契约与消费者适配（include 注入 / libs 前缀 / 两阶段 API / glob 头文件安装）═══
+# Software: libpar2 0.2
+# Gate: conan-verify G2（test_package 消费者编译+运行）+ w3-local-ci
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: libpar2-0.2-consumer-contract-ohos-prebuilt-deps
+severity: 2
+category: ohos|conan|packaging|linking
+trigger_tool: conan|cmake|test_package
+phase: packaging|linking|testing
+
+keywords: CMakeDeps, INCLUDE_DIRS 空, prebuilt binary, sigc++, include 注入, cpp_info.libs par2, find_library lib 前缀, PreProcess, Process, SegFault, Makefile.am glob, 头文件未安装
+
+error_signature: '
+sigc++/sigc\+\+\.h file not found|
+Library .* not found in package.*system_libs|
+Signal 11|Segmentation fault.*consumer|
+fatal error: .*file not found'
+
+match_keywords: CMakeDeps, INCLUDE_DIRS, prebuilt, binary, 预编译, cpp_info, libs, find_library, 前缀, PreProcess, Process, 两阶段, SegFault, Makefile.am, glob, 头文件, test_package, 消费者, sigc
+
+root_cause: |
+  四类相互独立的消费者侧契约问题：
+  （1）ohpcd 预编译依赖二进制（如 libsigc/2.12.1）的 CMakeDeps 生成数据中
+  INCLUDE_DIRS 为空（尽管配方 package_info 声明了 includedirs），依赖其公开头
+  的消费者（libpar2 头 include <sigc++/sigc++.h>）在 test_package 编译时
+  "file not found"；
+  （2）autotools 库 lib_LTLIBRARIES = libpar2.la 的产物是 libpar2.a，
+  消费者 CMakeDeps find_library 会自动补 "lib" 前缀，若 cpp_info.libs 填
+  "libpar2" 会错误查找 liblibpar2.a → "Library 'libpar2' not found in package"；
+  （3）旧式 C++ 库采用分段 API（PreProcess + Process），直接调用 Process 时
+  内部加载步骤未执行（mainpacket 为空）→ 消费者 SegFault（Signal 11）；
+  （4）上游 Makefile.am 用 `library_include_HEADERS = *.h` glob 安装头文件，
+  OHOS 构建环境下 glob 未展开，包内 include/ 缺公开头，消费者 include 失败。
+
+rec_approach: consumer-contract-bridges-for-prebuilt-deps
+rec_description: |
+  （1）test_package generate() 用 self.dependencies["libsigc"].cpp_info 标准接口
+  收集 includedirs 并注入 CMakeToolchain 变量（LIBSIGC_INCLUDE_DIRS），
+  CMakeLists 用 target_include_directories 消费；配方 package_info 同时
+  cpp_info.requires = ["libsigc::libsigc"] 声明接口依赖；
+  （2）cpp_info.libs 填 autotools 库的短名（libpar2.la → "par2"），
+  不填带 "lib" 前缀的全名；
+  （3）消费者先 PreProcess() 再 Process()（公开 API 两阶段调用约定）；
+  （4）package() 用 conan copy(self, "*.h", source_folder, dst) 显式安装头文件，
+  不依赖上游 glob 安装规则。
+rec_command: |
+  # (1) test_package/conanfile.py generate()
+  tc = CMakeToolchain(self)
+  if "libsigc" in self.dependencies:
+      dep = self.dependencies["libsigc"]; pf = dep.package_folder or ""
+      incs = [i if os.path.isabs(i) else os.path.join(pf, i)
+              for i in dep.cpp_info.includedirs]
+      tc.variables["LIBSIGC_INCLUDE_DIRS"] = ";".join(incs)
+  tc.generate()
+rec_auto_fix: true
+
+affected_scope: |
+  消费预编译依赖二进制（CMakeDeps INCLUDE_DIRS 为空）的 C++ 库；
+  autotools 库名带 lib 前缀的库；提供两阶段 API 的旧式 C++ 库；
+  用 Makefile.am HEADERS glob 安装头文件的库。
+
+verification_cmd: |
+  conan create archives/<l>/<lib>/<ver> ...   # test_package 编译+运行 PASS
+  llvm-readelf -d <test>/test_libpar2 | grep NEEDED
+  find <p>/include -name '*.h' | head
+
+evidence: |
+  libpar2 0.2（本 PR）：
+  - test_package 消费者 PAR2 create+verify 闭环编译运行通过（eSuccess×3）
+  - 修复前：sigc++/sigc++.h not found → Library 'libpar2' not found →
+    verify SegFault（Signal 11）→ include/libpar2/ 仅 config.h，依次修复后 G2 PASS
+  - cpp_info.libs = ["par2"]：修复 find_library 前缀不匹配
+  - conan-verify 报告：G1-G4、L2/L4/L5 全 pass
+
+similar_to: E216, E217, E221, E300, E309, E447
+caused_by: []
+conflicts_with: []
+prerequisite_of: []

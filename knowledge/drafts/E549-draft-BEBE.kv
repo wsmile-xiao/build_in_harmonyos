@@ -1,0 +1,86 @@
+#====================================================================
+# E549 — 生成器-运行时分离包的消费者测试：在线生成器不可用时的
+#        手写生成代码等价物
+# 用法: 验证后由主编提升为正式 E549 条目
+# 对应的人类文档: knowledge/drafts/E549-draft-BEBE.md
+#
+# 实例: libantlr3c 3.5.3 (PR feat/libantlr3c-3.5.3)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E549
+trigger_tool:           conan|test|cmake|make
+phase:                  testing
+error_signature:        No rule to make target.*(parser|lexer)\.c|cannot find (antlr|Java|jar)|CLASSPATH.*antlr|requires a Java runtime|ERROR: Unable to find package.*(java|jdk)|test_package.*(fail|skip).*no generator|grammar.*\.g.*not compiled|unsatisfied.*generator.*requirement
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, cross-compile, conan, testing, api
+match_keywords:         generator runtime split, host generator, target runtime, hand-written generated-code equivalent, ANTLR, lexer, parser, test_package consumer, Java toolchain unavailable, online generator, generated source equivalence
+title:                  生成器-运行时分离包（如 ANTLR）的目标运行时在无生成器环境下的可审计消费者测试：手写生成代码等价物
+prescan_pattern:        (parser|lexer)\s*\(.*\)|@lexer::header|@members|ANTLR3_ENC_8BIT|antlr3\.(New|Common|String)Stream|tool_requires\(.*(java|jdk|antlr)
+prescan_globs:          *.c, *.h, CMakeLists.txt, conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游语言工具链是"宿主端生成器（ANTLR Java 工具：grammar→C 源）+ 目标端运行库（libantlr3c：驱动生成的 lexer/parser 源）"两件分离制品。制品仓只收录目标运行库包，不含生成器（Java 工具是构建期/开发期工具，不属于目标产物）；目标环境（OHOS AArch64）通常无 JVM。若 test_package 试图在目标环境运行 Java 生成器或要求制品仓新增 java/jdk 依赖，要么失败要么伪造"目标可运行 Java"的假象；若因此跳过消费者测试，则包的公共 API（字符流、token 流、识别、错误处理、资源释放）完全没有消费者级验证。
+affected_scope:         任何"生成器与运行库分离发布"的上游项目：ANTLR (Java tool + C/C++/Python/... runtime)、bison/flex（宿主生成器 + liby/libfl 一般随运行环境）、protoc + protobuf runtime、wayland-scanner + libwayland、glib-mkenums + glib、其他 grammar/code generator + runtime library 组合；特指 Conan 包只含运行库、test_package 需验证运行库公共 API 的场景。
+verification_cmd:       grep -rn "java\|jdk\|antlr-3\.\|\.jar" test_package/ conanfile.py | grep -v "^Binary" | head; ldd $(find ~/.conan2/p -name "libantlr3c*" -o -name "*.so*" | head -1) 2>/dev/null | grep -i "jvm\|libjava" ; grep -c "assert" test_package/*.c; ctest --output-on-failure
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           handwritten-generated-code-equivalent-consumer-test
+rec_description:        在 test_package 中手写"生成器本应生成的代码的等价物"——不调用生成器、不新增依赖，直接按上游生成代码的结构与 API 契约编写最小 lexer/parser C 源（等价于对 grammar 的最简识别机实现），与上游官方发布的示例/生成的代码形态对齐（可先在宿主用生成器产出参照物，或对照上游源码树中自带的生成代码样本），使消费者测试覆盖运行库的真实公共面：字符流构造、token 流构造、识别成功路径、语法错误路径、以及全套资源释放。生成器本身如需验证（如 ANTLR Java 工具），必须作为宿主工具另行验证，与目标运行库消费者测试严格分开；test_package 只消费目标运行库。
+rec_command:            # 结构参照（宿主侧可选）: java -cp antlr-3.5.3-complete.jar org.antlr.Tool Tiny.g
+                        # 消费者测试（目标侧，无 Java）:
+                        # test_package/consumer_tests.c 手写 MiniLexer/MiniParser 等价物
+                        #   1) antlr3FileStreamNew + ANTLR3_ENC_8BIT → 字符流
+                        #   2) antlr3CommonTokenStreamNew → token 流
+                        #   3) 识别成功: 断言 token 数/类型/文本
+                        #   4) 语法错误: 断言 reportError 回调与恢复
+                        #   5) free 全链资源, 断言无泄漏迹象(返回值 0)
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      upstream-sample-based-consumer-test
+fallback_description:   若上游源码树/发布物中自带已生成的示例代码（如 ANTLR 官方示例或源码树内的生成物），直接以该生成物为消费者测试载体，对运行库公共 API 逐一断言；此法依赖上游发布物里确实存在可独立编译的生成代码样本，且样本无需生成器即可编译。若上游无此类样本，退回推荐方案手写等价物。
+fallback_command:       # 以 libantlr3c 为例: 上游 runtime/C 无自带示例生成物，故用推荐方案
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 (与推荐方案同等重要） ★
+forbid_1_pattern:       (tool_requires|requires)\(.*(java|jdk|openjdk)[/0-9.]*\)|system\.java\.exists.*skip.*test|if.*no.*generator.*return
+forbid_1_reason:        给目标运行库包新增 Java 依赖会使目标产物引入不存在于制品仓的依赖（违反仓库先例）；"无生成器则跳过测试"会造成消费者验证静默缺失（E239 no-silent-skip 原则）
+forbid_1_consequence:   CI 假绿或包不可解析；消费者 API 面完全未验证，运行库 API 回归无法被捕获
+
+forbid_2_pattern:       exec.*java.*-jar.*test_package|Runtime\.getRuntime\(\)\.exec\(.*antlr|subprocess.*java.*-jar|target.*environ.*J[Aa]va
+forbid_2_reason:        在目标环境（OHOS AArch64）运行 Java 生成器伪造"目标端可跑生成器"的假象；生成器验证属于宿主工具域，目标端只消费运行库
+forbid_2_consequence:   目标环境无 JVM 时测试挂死/崩溃；即便宿主恰好能跑，验证结论也不代表目标环境能力
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             no-silent-skip, provenance-verifiable
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E546, E456, E359, E374, E423]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E549.md
+last_updated: 2026-09-04
+source_event:           libantlr3c 3.5.3 OHOS AArch64 适配：制品仓无 ANTLR Java 生成器包，目标环境无 JVM，上游 runtime 无自带测试与示例，test_package 必须验证运行库公共 API——手写生成代码等价物（MiniLexer/MiniParser）消费 libantlr3c 公共 API
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-04
+draft: true
+contributor_id: BEBE

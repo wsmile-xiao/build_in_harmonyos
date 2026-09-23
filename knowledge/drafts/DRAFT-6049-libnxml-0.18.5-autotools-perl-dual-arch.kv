@@ -1,0 +1,113 @@
+#====================================================================
+# DRAFT-6049-libnxml-0.18.5-autotools-perl-dual-arch — conan autotools 闭包内两套 perl 5.42.2 的 arch 目录冲突导致 aclocal Cwd.c handshake mismatch
+# 触发事件: libnxml 0.18.5 适配（conan create 首跑 autoreconf 即败）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-6049-libnxml-0.18.5-autotools-perl-dual-arch
+trigger_tool:           conan|autoreconf|aclocal|automake
+phase:                  conan_build|autoreconf|bootstrap
+error_signature:        Cwd\.c version mismatch|handshake.*0x[0-9a-f]+|Can't locate Cwd\.pm in \@INC|aclocal: error|
+                         perl: version mismatch
+
+severity:               2
+category:               conan|autotools|perl|bootstrap|ohos
+match_keywords:         autoreconf, aclocal, automake/1.18, PERL5LIB, Cwd.c,
+                         handshake, perl 5.42.2, aarch64-linux-thread-multi,
+                         harmonyos perl, .aclocal-real, shebang, conanbuild,
+                         tool_requires, automake wrapper
+title:                  Unify the bootstrap interpreter as system perl (PERL=perl + PERL5LIB limited to pure-Perl module dirs) when conan automake's *-real scripts shebang system perl but conanbuild PERL5LIB points at conan perl libs
+
+topic: >
+  本机（OHOS PC）同时存在两套 perl 5.42.2：系统 perl
+  /storage/Users/currentUser/usr/local/bin/perl（arch 目录名带 harmonyos）
+  与 conan perl/5.42.2 包（aarch64-linux-thread-multi，重定位后编译期 @INC
+  失效，全靠 PERL5LIB）。conan automake/1.18 包内的 sh 包装器 bin/aclocal
+  exec 的 .aclocal-real shebang 是构建 automake 包当时的系统 perl（绝对路径）；
+  而 conanbuild env 把 conan perl 的库目录塞进 PERL5LIB。系统 perl 进程加载
+  PERL5LIB 里另一套 perl 的 Cwd.so（XS 模块）即报
+  "Cwd.c: loadable library and perl binaries are mismatched (got handshake key 0xf880080, needed 0xf180080)"。
+  autoconf/2.72 包的 sh 包装器则相反（支持 PERL 环境变量覆盖，*-real 直接
+  shebang conan perl），两条路径对解释器的要求互相矛盾。
+
+root_cause:             conan automake 与 autoconf 包的包装脚本 perl shebang 不同源，conan perl 重定位后 @INC 失效必须依赖 PERL5LIB，系统 perl 进程加载另一套 perl 的 XS 模块 Cwd.so 即报 handshake mismatch
+  1) conan 的 automake/autoconf/perl 包各自包装脚本时记录的 shebang 不同源
+     （automake 包构建时用系统 perl，autoconf 包的包装器支持 $PERL 覆盖并
+     shebang conan perl），同一 conanbuild env 内无法用单一 PERL5LIB 同时
+     满足两套二进制；
+  2) conan perl 包被重定位（安装前缀 ≠ 编译前缀）后 @INC 编译期常量为
+     //lib/... 空路径，必须依赖 PERL5LIB，于是 PERL5LIB 一定会出现 conan
+     arch 目录，污染系统 perl 进程；
+  3) automake/autoconf 的业务模块（Automake/*.pm、Autom4te/*.pm）都是纯
+     Perl，不依赖任何 XS；XS 冲突只发生在核心模块（Cwd 等）。
+
+durable_solution: >
+  配方 build() 的自举命令显式统一解释器（对任何 autoreconf 自举的配方可复用）：
+    am = self.dependencies.build["automake/1.18"].package_folder
+    ac = self.dependencies.build["autoconf/2.72"].package_folder
+    self.run('PATH="<autoconf/bin>:<m4/bin>:$PATH" '
+             'PERL=perl PERL5LIB="%s/share/automake-1.18:%s/share/autoconf" '
+             'autoreconf -fi' % (am, ac), env="conanbuild")
+  1) PERL=perl：autoconf 包包装器以 $PERL 调 .autoreconf-real/.autom4te-real，
+     全链改走 PATH 上的系统 perl；
+  2) PERL5LIB 收敛为仅两个包的纯 Perl 模块目录（share/automake-1.18、
+     share/autoconf），核心 XS 模块回落系统 perl 自带 @INC —— Cwd.so 与
+     perl 二进制必然同源，handshake 不再失配；
+  3) 不改缓存包、不打补丁、不 shim，配方自包含。
+
+impact: >
+  只影响自举阶段（autoreconf -fi 一次调用）；configure/make 阶段不涉及 perl。
+  libnxml 0.18.5 修复后 autoreconf 一次通过，configure 17606 行正常生成。
+
+recovery: >
+  任何在 OHOS PC 上以 tool_requires automake/libtool/autoconf + autoreconf
+  自举的 conan 配方，出现 Cwd.c handshake / Can't locate Cwd.pm 时套用同一
+  PERL=perl + 双 share 目录 PERL5LIB 组合。若 automake 大版本不同，把
+  share/automake-1.18 换成对应版本目录。
+
+evidence_chain: >
+  task libnxml-0.18.5 适配（feat/libnxml-0.18.5 分支）
+    - 首跑 conan create：autoreconf -fi 报 "aclocal: Cwd.c ... handshake
+      mismatch (got 0xf880080, needed 0xf180080)"；
+    - 直接复现：PERL5LIB=<conan perl libs> 系统 perl -MCwd → 同错；
+      PERL5LIB=<automake share> 系统 perl -MCwd → ok，aclocal --version 1.18 ok；
+    - 修复后 conan create --build=libnxml/* 全链 CREATE=0；
+    - 日志 /storage/Users/currentUser/tmp/libnxml-adapt/conan-create.log。
+
+verification_cmd: >
+  cd archives/l/libnxml/0.18.5 && conan create . -pr:h=~/.conan2/profiles/ohos-aarch64-local -pr:b=~/.conan2/profiles/ohos-aarch64-local --build=libnxml/*
+
+limitations: >
+  依赖本机系统 perl 完整（OHOS PC 自带 5.42.2 harmonyos 版满足）。若某构建
+  机系统 perl 缺 Automake 依赖的核心模块（极少），则需退回给 conan perl 一
+  套完整 PERL5LIB 并统一用 conan perl 跑 autoconf 侧脚本（PERL=<conan perl
+  绝对路径>），同时把 automake *-real 的 shebang 统一到 conan perl（需要
+  重建 automake 包，成本更高）。
+
+rec_priority:           1
+rec_approach:           perl-interpreter-unification（PERL=perl + PERL5LIB 收敛为纯 Perl 模块目录）
+rec_description: >
+  build() 的自举命令显式统一解释器（任何 autoreconf 自举的 conan 配方
+  可复用）：PERL=perl 让 autoconf 包包装器以 PATH 上的系统 perl 执行
+  全链；PERL5LIB 收敛为仅 automake/autoconf 两包的纯 Perl 模块目录
+  （share/automake-1.18、share/autoconf），核心 XS 模块回落系统 perl
+  自带 @INC，Cwd.so 与 perl 二进制必然同源，handshake 不再失配；
+  不改缓存包、不打补丁、不 shim，配方自包含。
+rec_command:            PERL=perl PERL5LIB="<automake>/share/automake-1.18:<autoconf>/share/autoconf" PATH="<autoconf>/bin:<m4>/bin:$PATH" autoreconf -fi
+rec_auto_fix:           false
+rec_impl:               conan-recipe-autoreconf-perl-unify
+
+doc_file:               knowledge/drafts/DRAFT-6049-libnxml-0.18.5-autotools-perl-dual-arch.md
+last_updated:           2026-09-08
+source_event:           libnxml 0.18.5 适配，conan create 首跑 autoreconf 即报 Cwd.c handshake mismatch
+authors:                 atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-08
+
+draft:                  true
+contributor_id:         ffieldd22_-

@@ -1,0 +1,119 @@
+# ═══ Draft knowledge entry — OHOS 数据包/GSchema：intltool-merge 的 Perl XML::Parser + Conan CMakeDeps 三个 generate() 补丁点 ═══
+# Timestamp: 2026-09-12
+# Software: lomiri-schemas 0.1.11（UBports Lomiri 声明式数据包：GSettings schema + AccountsService D-Bus XML + polkit）
+# Gate: G2（conan create，ohos-aarch64 profile，clang 15）+ test_package 48/48 断言（OHOS 目标实跑）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the defect evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+id: ohos-datapackage-intltool-xmlparser-and-cmakedeps-paths
+severity: 3
+category: conan|cmake|pkg-config|build-system|gettext|perl
+trigger_tool: conan|cmake|intltool-merge|perl
+phase: configure,build
+
+keywords: intltool-merge, XML::Parser, Perl module missing, --xml-style, --no-translations, gschema.xml.in, GSettings, gettext marks, translatable, po directory, configure_file COPYONLY, CMakeDeps, CMakeConfigDeps, conan_cmakedeps_paths.cmake, CMAKE_PREFIX_PATH, CMAKE_PROGRAM_PATH, PkgConfigDeps, pkg-config custom variable, glib_compile_schemas, cmake-extras, GSETTINGS_LOCALINSTALL, LANGUAGES NONE, data package, CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT, /usr fallback, OHOS
+
+error_signature: 'You must have XML::Parser installed to run .*intltool-merge|Could NOT find GSettings \(missing: GSettings_DIR\)|pkg-config variable glib_compile_schemas not found|CMake Error.*CMAKE_INSTALL_PREFIX.*/usr|GSettings schemas will be installed into .*p/glib.*share/glib-2.0/schemas'
+
+match_keywords: intltool-merge, XML::Parser, Perl module missing, xml-style, no-translations, gschema render, conan_cmakedeps_paths, CMAKE_PREFIX_PATH, pkg-config variable loss, GSETTINGS_LOCALINSTALL, LANGUAGES NONE, data-only package, CMAKE_PROGRAM_PATH bin pinning
+
+root_cause: >
+  (1) 上游用 intltool_merge_translations(... STYLE xml NO_TRANSLATIONS) 渲染
+  *.gschema.xml.in，展开即 `intltool-merge --xml-style --quiet --utf8
+  --no-translations <in> <out>`。intltool-merge 是 Perl 脚本，`--xml-style` 分支的
+  readXml() 里 `eval 'require XML::Parser'`，缺失即 `die "You must have XML::Parser
+  installed to run $0"`。XML::Parser 是 CPAN 模块（非 perl core），OHOS 设备的 perl
+  没有安装，于是每个 schema 的渲染命令都失败，整个包构建中止。注意
+  `--no-translations` 并不绕过该分支：它只让 preparation() 跳过 gather_po_files /
+  get_translation_database，随后仍要 readXml 解析输入。
+  (2) Conan 2.x 的 CMakeConfigDeps（CMakeDeps 的实现）生成的
+  <generators>/conan_cmakedeps_paths.cmake 只写每个依赖的 <pkg>_DIR、
+  CMAKE_PROGRAM_PATH（直接依赖 bindirs）与 CMAKE_MODULE_PATH（所有依赖 builddirs），
+  **从不写 CMAKE_PREFIX_PATH**。而 CMakeToolchain 的 FindFiles 块是互斥二选一：
+  if(EXISTS conan_cmakedeps_paths.cmake) include(...) else() 自行 set(CMAKE_PREFIX_PATH
+  ...) endif()——路径文件一旦存在，自带的 CMAKE_PREFIX_PATH 就被跳过。后果：把 config
+  文件装在 share/cmake/<Module>/ 的构建期依赖（cmake-extras 的 GSettingsConfig.cmake
+  就是这种）无论如何 find_package 不到。
+  (3) PkgConfigDeps 生成的 .pc 从 cpp_info 反推，只含可推导字段；上游 .pc.in 的自定义
+  变量（glib 的 glib_compile_schemas、glib_genmarshal 等）丢失。
+  GSettingsConfig.cmake 靠 `pkg-config gio-2.0 --variable glib_compile_schemas` 拿工具
+  路径，空值会让 add_test 的命令首 token 变成 `--dry-run`（被当成程序名）而失败。
+  (4) 纯数据包 project(... LANGUAGES NONE) 仍有安装前缀语义：上游常用
+  `if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT) SET(CMAKE_INSTALL_PREFIX "/usr" ...
+  FORCE)` 兜底；CMakeToolchain 的 OutputDirsBlock 虽然在 toolchain 文件里 set 了
+  CMAKE_INSTALL_PREFIX=package_folder，仍会被上游 cache 变量 FORCE 覆盖。另外 GSettings
+  模块默认把 schema 装进 _glib_prefix（只读的 glib 依赖 prefix）。
+
+rec_approach: replace-intltool-xml-render-and-patch-cmakedeps-paths-in-generate
+rec_description: |
+  (1) schema 渲染：先判定能否用拷贝替代 intltool-merge——若所有 *.gschema.xml.in
+  不含 gettext 标记（无 `_` 前缀元素、无 translatable="yes"）且上游无 po/ 目录，
+  则 `--xml-style --no-translations` 的输出与原文逐字节等价。此时打补丁把
+  intltool_merge_translations(...) 换成
+  `configure_file("${XML_IN_FILE}" "${CMAKE_CURRENT_BINARY_DIR}/${XML_FILE}" COPYONLY)`，
+  并删掉 `find_package(Intltool REQUIRED)`、去掉 tool_requires("intltool")。
+  若确有翻译标记，则不能拷贝——应改为在 OHOS 侧提供 XML::Parser，或把渲染结果作为
+  构建产物分发，不得静默丢翻译。
+  (2)(3)(4) 在配方 generate() 里，先 CMakeDeps/PkgConfigDeps/CMakeToolchain 都
+  generate() 完，再对生成物做三处幂等追加：往 conan_cmakedeps_paths.cmake 追加
+  `list(PREPEND CMAKE_PREFIX_PATH "<cmake-extras 包目录>")` 与
+  `list(PREPEND CMAKE_PROGRAM_PATH "<gettext|glib>/bin")`；往 gio-2.0.pc 追加
+  `glib_compile_schemas=<glib>/bin/glib-compile-schemas`；
+  `tc.cache_variables["CMAKE_INSTALL_PREFIX"]=self.package_folder`（cache 变量压掉
+  上游 /usr 兜底）+ `tc.variables["GSETTINGS_LOCALINSTALL"]="ON"`。
+rec_command: |
+  # (1) patches/0001-*.patch —— data/schemas/CMakeLists.txt
+  #   -find_package(Intltool REQUIRED)
+  #   -    intltool_merge_translations("${XML_IN_FILE}" "${CMAKE_CURRENT_BINARY_DIR}/${XML_FILE}" ALL UTF8 STYLE "xml" NO_TRANSLATIONS)
+  #   +    configure_file("${XML_IN_FILE}" "${CMAKE_CURRENT_BINARY_DIR}/${XML_FILE}" COPYONLY)
+  #
+  # (2)(3)(4) conanfile.py generate()
+  tc = CMakeToolchain(self)
+  tc.cache_variables["CMAKE_INSTALL_PREFIX"] = self.package_folder
+  tc.variables["GSETTINGS_LOCALINSTALL"] = "ON"
+  tc.generate()
+  lines = []
+  extras = self.dependencies.build["cmake-extras"]
+  if extras and extras.package_folder:
+      lines.append(f'list(PREPEND CMAKE_PREFIX_PATH "{_posix(extras.package_folder)}")')
+  for ctx, name in ((self.dependencies.build, "gettext"), (self.dependencies, "glib")):
+      dep = ctx[name]
+      if dep and dep.package_folder:
+          b = _posix(os.path.join(dep.package_folder, "bin"))
+          lines.append(f'list(PREPEND CMAKE_PROGRAM_PATH "{b}")')
+  p = os.path.join(self.generators_folder, "conan_cmakedeps_paths.cmake")
+  if lines:
+      with open(p, "a" if os.path.isfile(p) else "w", encoding="utf-8") as fh:
+          fh.write("\n".join(lines) + "\n")
+  glib = self.dependencies["glib"]
+  pc = os.path.join(self.generators_folder, "gio-2.0.pc")
+  if glib and glib.package_folder and os.path.isfile(pc):
+      c = open(pc, encoding="utf-8").read()
+      if "glib_compile_schemas" not in c:
+          t = _posix(os.path.join(glib.package_folder, "bin", "glib-compile-schemas"))
+          open(pc, "a", encoding="utf-8").write(f"\nglib_compile_schemas={t}\n")
+rec_auto_fix: false
+
+affected_scope: >
+  (1) 所有在 OHOS 上经 intltool-merge 渲染 .in 文件的项目（GSettings schema、
+  .desktop 文件、GNU gettext 生态的 Autotools/CMake 工程）。判定可拷贝替代的前提是
+  源文件无 gettext 标记且无 po/ 目录，这对大量只借用 intltool 做「.in → 成品」
+  形式转换的项目都成立。
+  (2)(3)(4) 所有「构建期依赖提供 CMake config 且装在 share/cmake/<Module>/」的 Conan
+  配方（cmake-extras 家族），所有依赖上游 .pc.in 自定义变量的配方（glib 系），以及
+  所有纯数据类 CMake 包在 OHOS 上的安装前缀处理。
+
+verification_cmd: >
+  conan create archives/l/lomiri-schemas/0.1.11 --build=missing
+  -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  && <glib>/bin/glib-compile-schemas --strict --dry-run
+       <pkg>/share/glib-2.0/schemas
+
+authors:
+  - "2301_76770579"
+source_pr: 9687
+source_commit: pending
+draft_date: 2026-09-12

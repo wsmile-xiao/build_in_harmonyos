@@ -1,0 +1,126 @@
+#====================================================================
+# DRAFT-ohos-musl-glibc-specific-symbols — musl libc 缺 glibc 特有符号/
+#   变量/函数时需逐一宏替代或提供实现，且常跨多文件批量出现
+# 对应文档: knowledge/drafts/DRAFT-ohos-musl-glibc-specific-symbols.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-musl-glibc-specific-symbols
+trigger_tool:           gcc|clang|make|configure
+phase:                  compilation|configuration
+error_signature:        (use of undeclared identifier|implicit declaration of function)
+                        [^\n]*(program_invocation_short_name|program_invocation_name|
+                        get_current_dir_name|error_at_line|mkostemp)
+
+severity:               2
+category:               libc, musl, glibc, porting, compat
+match_keywords:         musl, glibc, program_invocation_short_name,
+                        program_invocation_name, get_current_dir_name, __progname,
+                        libc compat, 缺 glibc 特有, undeclared identifier,
+                        eudev, libudev, macro substitute, 替代实现
+title:                  musl libc 不提供 glibc 特有符号（program_invocation_
+                        short_name / program_invocation_name / get_current_dir_name
+                        等）——需跨多文件统一处置，且属"平台级数据缺口"
+                        而非单个 TU 的笔误
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             OHOS 使用 musl libc，而不少上游项目按 glibc 编写：
+                        引用 glibc 特有符号——包括变量
+                        `program_invocation_short_name` / `program_invocation_name`
+                        （glibc 提供、musl 不提供）与函数 `get_current_dir_name()`
+                        （glibc 扩展、POSIX 无）等。后果是**编译期**报
+                        "use of undeclared identifier" / "implicit declaration
+                        of function"，且此类引用通常**跨多个源文件批量出现**
+                        （实测 eudev 3.2.14：program_invocation_short_name 涉及
+                        15 个源文件）。单一 TU 的补丁无法穷尽，必须先枚举全树
+                        引用点再统一处置。
+affected_scope:         面向 glibc 编写、在 musl/OHOS 上构建的 C/C++ 项目；
+                        尤其系统工具类（udev/device manager、服务管理、procfs
+                        消费方）与 GNU 系库。与 E051（缺 syscall）、E086
+                        （struct ucred/SO_PEERCRED）、E102（mmsghdr）同属
+                        "musl 缺 glibc 生态"族，但**符号缺失层面不同**：
+                        那是内核/头文件结构，本条是 libc 符号。
+verification_cmd:       grep -rnE "program_invocation_short_name|program_invocation_name|get_current_dir_name" <src>/
+                        # 确认跨文件分布；再单文件编译验证报错形如
+                        # "use of undeclared identifier 'program_invocation_short_name'"
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           macro-or-provide-substitute
+rec_description:        按符号类型分两种处置，**均为无条件的纯 C 定义，
+                        不得使用平台条件编译宏（R8）**：
+                        ①**变量**（program_invocation_short_name 等）：在配方侧
+                        编译一个 compat 翻译单元**直接定义该符号**
+                        （`char *program_invocation_short_name = "udev";`）并链接
+                        进所有目标；或在公共头以无条件 `#define` 指向项目自备的
+                        等价变量（从 argv[0] 取 basename）。符号真实取值应取程序
+                        名，与上游 glibc 语义一致。
+                        ②**函数**（get_current_dir_name）：提供 POSIX 等价实现
+                        （`getcwd(NULL, 0)` 包装，musl 的 getcwd 已支持 NULL 自动
+                        分配）放入公共 util 文件，同样无条件。
+                        关键：**先全树 grep 枚举引用点**（含头文件间接引用），
+                        再统一处置，避免逐文件补丁遗漏。
+                        ⚠️ musl 的 `__progname` 不可直接作为替代：OHOS 的
+                        libc.so 虽导出该符号（`nm -D` 可见），但**头文件不声明**
+                        （实测 `-c` 编译报 use of undeclared identifier），
+                        需自备 extern 声明，且其语义是启动路径——不如直接定义
+                        一个明确取值的符号稳妥。
+rec_command:            grep -rln "program_invocation_short_name" <src>/ | wc -l
+                        # 枚举后：①compat 翻译单元定义缺失符号并链接进所有目标；
+                        # ②函数类提供 POSIX 等价实现（getcwd(NULL,0) 包装）；
+                        # 全程无条件编译宏
+rec_auto_fix:           false
+rec_impl:               macro-or-provide-substitute
+
+fallback_priority:      2
+fallback_approach:      per-file-patch
+fallback_description:   若项目无公共头可挂宏，或符号引用点过于分散，退化为逐文件
+                        patch（eudev 实测 15 个文件）。每个 patch 标注
+                        platform_only: True，禁止夹带功能改动；补丁清单写入
+                        manifest 的 patches_applied 供审计。
+fallback_command:       # per-file: 各引用文件顶部加无条件的纯 C 定义（不含任何
+                        # 平台条件编译宏，R8）：
+                        #   char *program_invocation_short_name = "udev";
+                        # 或提供 POSIX 等价函数实现（如 getcwd(NULL,0) 包装）
+fallback_auto_fix:      false
+fallback_impl:          per-file-patch
+
+forbid_1_pattern:       把缺符号当作.*(笔误|拼写错误).*逐个文件手改|
+                        #define program_invocation_short_name.*(argv\[0\]|错误等价物)
+forbid_1_reason:        若把平台级符号缺口误当局部笔误，会只修报错的文件、遗漏
+                        其余引用点；等价物选错（如把 argv[0] 全文而非 basename
+                        赋给 short_name）会导致运行时日志/行为异常且难以归因。
+forbid_1_consequence:   编译期补丁残缺（后续文件继续报错），或运行时输出错误
+                        程序名。
+
+forbid_2_pattern:       用 -D_GNU_SOURCE 或改 -std= 来"绕过"缺符号
+forbid_2_reason:        这些宏控制的是**头文件暴露**层面；musl **本身就不实现**
+                        这些符号，开 GNU_SOURCE 不会让它们出现——纯属无效操作
+                        且可能掩盖真正缺失项。
+forbid_2_consequence:   无效配置改动 + 错误暗示"符号已可用"，诊断被误导。
+
+principles:             upstream-compat-evidence, platform-truth-over-silent-fix
+
+causes:                 []
+caused_by:              []
+similar_to:             [E051, E086, E102, E091]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-musl-glibc-specific-symbols.md
+last_updated:           2026-09-16
+source_event:           eudev 3.2.14 适配（program_invocation_short_name 15 个
+                        源文件 + get_current_dir_name 替代实现）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:              9614
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        3A2F

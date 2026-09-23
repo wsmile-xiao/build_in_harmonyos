@@ -1,11 +1,13 @@
 # qtbase
 
-`qtbase` packages the Qt 6 foundation needed by Qt modules on HarmonyOS PC.
+Qt Base foundation for HarmonyOS PC, including Core, Network, Gui, Widgets,
+Xml, D-Bus, OpenSSL, native generators and Qt 6.11's integrated WaylandClient.
 
-| Version | Status | Modules |
-|---------|--------|---------|
-| 6.11.1 | pending | Core, Network, Gui, Widgets, Xml |
+| Version | Status | Validation |
+|---|---|---|
+| 6.11.1 | Historical pending entry | See its own version directory |
+| 6.11.1.2 | Native build and package verified | 28 default upstream programs; full suite 526/532 with six documented failures; fresh consumer and copied-kit runtime passed |
 
-The package provides Qt's native `Qt6Config.cmake` files and real
-`Qt6::Core`, `Qt6::Network`, `Qt6::Gui`, and `Qt6::Widgets` targets for
-downstream modules such as qtpositioning, qtlocation, Qthttpserver and Qtcharts.
+6.11.1.2 uses upstream Qt Base 6.11.1. See its notes.md and test report for
+the exact W3 identity, configuration and remaining boundaries. Wayland mock
+compositor verification does not establish OS desktop or complete KDE support.

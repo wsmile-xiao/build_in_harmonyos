@@ -1,0 +1,120 @@
+#====================================================================
+# DRAFT-ohos-musl-strlcat-strlcpy-gap-bridge.kv
+#   — musl/OHOS 缺 BSD 血统 strlcat/strlcpy 的识别与补桥模式（路径 B 素材）
+# 来源: dasm 2.20.15-202011092.20.14.1 适配，2026-09-10
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E-draft-ohos-musl-strlcat-gap
+trigger_tool:           clang|ld
+phase:                  compilation|linking
+error_signature:        implicit declaration of function ['"]?strlcat|
+                         implicit declaration of function ['"]?strlcpy|
+                         undefined reference to ['"]?strlcat['"]?|
+                         undefined reference to ['"]?strlcpy['"]?|
+                         error: call to undeclared function ['"]?strlcat['"]?
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform, libc, musl, ohos, portability, bsd-api
+match_keywords:         strlcat, strlcpy, musl, OHOS, BSD, OpenBSD, glibc-2.38,
+                         api-gap, implicit declaration, undefined reference,
+                         safe string copy, portability, libbsd
+title:                  musl/OHOS 无 BSD 的 strlcat/strlcpy，用 -include 宏改名补桥
+prescan_pattern:        \bstrlcat\s*\(|\bstrlcpy\s*\(
+prescan_globs:          *.c, *.h, *.cc, *.cpp, *.cxx
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             strlcat/strlcpy 源自 OpenBSD，**不是 C 标准库函数**：
+                         macOS/FreeBSD 原生提供，glibc 直到 2.38（2023-08）
+                        才纳入，musl 至今没有。因此 2018-2020 年代在
+                        macOS 上开发的 C 代码普遍"默认 libc 一定有"
+                        而直接调用，在 glibc>=2.38 的 Debian 上编过、
+                        换到 OHOS musl 立刻失败。
+                        失败形态随方言变化，容易误判：
+                          - 严格 ISO C（-std=c99/c11 且未定义
+                            _POSIX_C_SOURCE）→ implicit declaration
+                            of function 'strlcat'；clang 15+ 默认按错误
+                            处理，直接编译失败；
+                          - gnu 方言 → 仅告警，链接期 undefined
+                            reference to 'strlcat'。
+                        典型出现在错误/日志格式化代码里做安全的字符串
+                        追加（本项目 errors.c 三处）。
+affected_scope:         所有 BSD 血统或同期新写的 C 软件适配。同类"glibc
+                        有、musl 无"家族参见 musl-fts / musl-obstack /
+                        argp-standalone（本条补上 strlcat/strlcpy 这一支）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           include-prefixed-macro-rename-compat-shim
+rec_description:        配方侧补桥，**不改上游源码、不删调用、不加源码补丁**：
+                        ① 由 conanfile 生成一个兼容头 + 一个实现 .c；
+                        ② 兼容头用宏改名而不是条件声明：
+                             size_t dasm_compat_strlcat(char*, const char*, size_t);
+                             #define strlcat dasm_compat_strlcat
+                        ③ 编译每个单元时统一加
+                             -include <绝对路径>/compat.h
+                        ④ 实现 .c 参与链接。
+                        为什么用宏改名而不是 #if defined(__GLIBC__)：
+                        在已提供 strlcat 的 libc 上，<string.h> 里的原型
+                        会被一并改名成**同签名**的自带实现，不会重复定义；
+                        在 musl 上则同时给出声明与实现。一种写法覆盖两种
+                        libc，无需枚举。
+                        ★ 必须**严格复刻 OpenBSD 返回值语义**：截断时返回
+                        "拼接所需的完整长度"而不是"已写长度"。调用方常把
+                        返回值当已写偏移继续推进，用 strncat 凑会算错位置。
+rec_command:            cc -O2 -std=c99 -I. -include <abs>/compat.h -c a.c -o a.o
+                        cc ... <全部 .o> <compat.o> -o app
+rec_auto_fix:           false
+rec_impl:               recipe-pattern
+
+fallback_priority:      2
+fallback_approach:      libbsd-dependency
+fallback_description:   Debian/Alpine 生态有 libbsd 提供 strlcat/strlcpy
+                        （Alpine 用 libbsd 或 libbsd-dev 补这一族）。可用
+                        conan 依赖引入。缺点是引入额外运行时依赖、且
+                        libbsd 本身适配也是成本，只在多个包同时需要时才划算。
+fallback_command:       self.requires("libbsd/<ver>")
+fallback_auto_fix:      false
+fallback_impl:          conan-dependency
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       #define\s+strlcat\s*\(\s*.*\bn?strncat\b|sed.*strlcat.*strncat
+forbid_1_reason:         禁止用 strncat/strncpy 直接宏替换（R8）：两者语义
+                        不等价——strlcpy 保证 NUL 结尾且返回 src 全长，
+                        strncpy 不保证结尾、返回值是 dst；strlcat 返回值
+                        语义也不同。替换后缓冲区边界行为静默改变。
+forbid_1_consequence:   字符串截断/越界写入在测试期不暴露，运行时才踩内存
+
+forbid_2_pattern:       rm\s+.*\bstrlcat\b|删除.*strlcat.*调用|注释掉.*strlcat
+forbid_2_reason:         禁止删掉调用或注释掉（R8）：strlcat 承担的是错误
+                        消息拼接的实质逻辑，删掉等于功能缺失。
+forbid_2_consequence:   错误信息截断或丢失，诊断能力静默下降
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             argp-musl-gap-bridge、musl-fts、musl-obstack
+                        （同族：glibc 有 / musl 无 的补齐库家族）
+caused_by:
+prerequisite_of:        dasm 及所有调用 strlcat/strlcpy 的 C 软件适配
+
+# ═══ 元数据 ═══
+doc_file:               DRAFT-ohos-musl-strlcat-strlcpy-gap-bridge.md
+last_updated:           2026-09-10
+source_event:           archives/d/dasm/2.20.15-202011092.20.14.1 适配
+                        （上游套件 93 例 85 OK；test_package 38/38 在真实
+                        OHOS aarch64 制品上实跑通过）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                XiaYuanOwO
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:

@@ -65,3 +65,40 @@ std::ranges 算法随 C++20 标准库逐步落地，OHOS SDK 15 的 libc++ 未�
 - 适配 clang15/libc++15 + C++20 的 OHOS 库，使用 std::ranges 算法重载时适用。
 - 若上游已升级 toolchain 或源码可用经典迭代器替代，无需 polyfill。
 - 注意 lower_bound 投影 4 参签名与 binary_search 的排序前提，勿机械照搬。
+## 第二修复策略（调用点改写）：baloo 26.04.3 实证
+
+> 2026-09-06 追加。第一策略（ada ranges_compat.h polyfill）之外，同一问题
+> （OHOS libc++15 `_LIBCPP_HAS_NO_INCOMPLETE_RANGES` 隐藏全部 std::ranges 算法）
+> 在 baloo 上以第二种策略解决：**调用点改写**。
+
+- 前提差异：baloo 只在 `src/engine/andpostingiterator.cpp` 与
+  `src/engine/phraseanditerator.cpp` 两处用了 `std::ranges::any_of`，没有公共头
+  注入面；为 polyfill 新增头文件并让所有 TU 包含的成本高于直接改写调用点。
+- 做法（patch 0001 第 3 组）：
+
+  ```cpp
+  // before: std::ranges::any_of(m_iterators, [](const auto &e){ return e == nullptr; })
+  // after:  C++11 可移植
+  if (std::any_of(m_iterators.begin(), m_iterators.end(),
+                  [](const auto &e) { return e == nullptr; })) {
+      m_iterators.clear();
+  }
+  ```
+  同时把 `#include <ranges>` 换成 `#include <algorithm>`。
+- 触发时序证据：该 DRAFT 的 baloo 实例必须先把标准真提到 C++20（否则报的是
+  `no member named 'ranges' in namespace 'std'`，见
+  DRAFT-baloo-kf6-ohpcd-cmake-toolchain-cppstd 的 cppstd 时序坑）；到真 C++20 后
+  才进入本 DRAFT 的报错 `no member named 'any_of' in namespace 'std::ranges'`
+  （build4.log L451/L462）。
+- 验证：build8/build9（authoritative CI）21/21 PASS，test_package 1/1。
+
+### 策略对比
+
+| 维度 | ada polyfill（第一策略） | baloo 调用点改写（第二策略） |
+|------|--------------------------|------------------------------|
+| 适用 | 调用点多、有公共头/`<version>` 注入点 | 调用点少（≤ 个位数）、无干净注入面 |
+| 改动面 | 新增头 + 全部 TU 包含 | 仅改调用点 + include |
+| 风险 | 注入时机/签名（投影 4 参）易错 | 逐点改写易漏（需全仓扫描 std::ranges） |
+| 取舍 | 一次解决整库 | 轻量、可移植 C++11 |
+
+两策略同属"DRAFT-ohos-libcxx15-missing-cpp20-ranges-algorithms"一类，不另开 E 号。

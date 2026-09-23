@@ -1,0 +1,54 @@
+draft: E565-draft-2404
+status: pending-editor-review
+title: "qtbase 6.11 QCOMPARE 严格化：QString 与自定义 helper 的双向 operator== 重载修法"
+category: qt6-module-adapt, compat, testing
+match_keywords: >
+  QCOMPARE, QStringView, invalid operands to binary expression, compare_helper,
+  qCompare, CaseInsensitiveStringCompareHelper, QString, implicit conversion,
+  QtTest, qtestcase.h
+error_signature: >
+  qtestcase\.h:.*error: invalid operands to binary expression \('const QString' and 'const \w+'\)|no known conversion from 'const \w+' to 'const QString' for \d+(st|nd|rd|th) argument
+root_cause: >
+  qtbase 6.11 的 QTest::qCompare<T1,T2> 在实例化时先对 t1 == t2 做二元表达式推导
+  （actual 在左、expected 在右）。QString 只声明了 QString==QStringView 方向的
+  比较运算符（Q_DECLARE_STRONGLY_ORDERED 展开），不隐式接收自定义 helper 类型；
+  自定义 helper 类的成员 operator==（helper == QStringView/QString）在
+  反向操作数顺序下不参与重载决议。C++17 模式下（OHOS ohos-aarch64 profile
+  pins cppstd=17）推导更严格，问题必现。KDE/Qt 上游测试中大量
+  QCOMPARE(QStringActual, CustomHelper(expected)) 写法全部编译失败。
+solution: |
+  在测试源码的自定义 helper 结构体处做双向重载补丁（不改断言语义）：
+  ```cpp
+  struct CaseInsensitiveStringCompareHelper {
+      explicit CaseInsensitiveStringCompareHelper(QStringView str) : m_str(str) {}
+      QStringView m_str;
+      bool operator==(QStringView other) const {
+          return other.compare(m_str, Qt::CaseInsensitive) == 0;
+      }
+      // qtbase 6.11 严格化补丁：三向成员重载
+      bool operator==(const QString &other) const {
+          return other.compare(m_str, Qt::CaseInsensitive) == 0;
+      }
+      bool operator==(QLatin1String other) const {
+          return other.compare(m_str, Qt::CaseInsensitive) == 0;
+      }
+  };
+  // 反向操作数自由函数（qCompare 先推导 t1 == t2，QString 在左）
+  inline bool operator==(const QString &lhs,
+                         const CaseInsensitiveStringCompareHelper &rhs) {
+      return lhs.compare(rhs.m_str, Qt::CaseInsensitive) == 0;
+  }
+  ```
+  以 autotests 补丁形式（patches/000N-xxx.patch）随 conandata.yml 声明，
+  只在 OHOS 构建时 apply（build() 内 if self.settings.os == "OHOS"）。
+fallback: >
+  若测试本身不关键，可在 autotests/CMakeLists.txt 补丁中整体移除该测试
+  target（KIOCORE_ONLY 基线先例：链接未构建目标的测试一并移除）；
+  或者 _run_upstream_tests 用 ctest -E 排除。优先级低于双向重载修法
+  （后者保留上游断言）。
+verify_builds: "#44355"
+reference_impl: >
+  kio 6.26.0 PR #9560 patches/0006-autotests-kfileitemtest.cpp.patch
+  （https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/9560）
+id: E565
+doc_file: doc/E565.md

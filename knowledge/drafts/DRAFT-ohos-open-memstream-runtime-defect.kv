@@ -1,0 +1,70 @@
+#====================================================================
+# Draft knowledge entry — OHOS 运行期 open_memstream 缺陷导致依赖
+# memstream 的上游测试（Qt Test tojson 类）输出为空/失败
+# Source package: tinycbor/0.6.0 (task tinycbor-0.6.0-r03-pc5-3-20260906T073901Z)
+#====================================================================
+
+id:                     DRAFT-ohos-open-memstream-runtime-defect
+trigger_tool:           open_memstream|qmake|make check|conan install
+phase:                  testing|runtime
+error_signature:        fclose.*-9|fclose.*EBADF|open_memstream.*empty|Signal 5|core dumped|decoded stream empty|CborErrorInternalError|internal error
+
+severity:               2
+category:               testing|runtime|libc|ohos
+match_keywords:         open_memstream, memstream, fclose, EBADF, SIGTRAP, core dumped, tojson, decoded empty, Qt Test, qmake, make check, internal error, OHOS, libc, printf, stream
+
+title:                  OHOS runtime open_memstream is broken -> memstream-based upstream tests fail with empty output (environment defect, not library)
+
+root_cause:             >
+    On the OHOS aarch64 runtime (SDK 26.0.0.18 sysroot/musl-based), the libc
+    open_memstream() allocates a stream but fclose() returns -9/EBADF and the
+    in-memory buffer stays empty; the process may die with Signal 5 (SIGTRAP,
+    exit 133). Any upstream test helper that converts via open_memstream (e.g.
+    tinycbor tests/tojson parseOne(), and cbortojson.c convert_json_value which
+    checks `fclose(memstream) < 0 || *key == NULL` -> CborErrorInternalError)
+    therefore produces an empty decoded buffer and fails every QCOMPARE, while
+    the library itself is fine (parser/encoder using the same libtinycbor.a pass
+    100%). This is a runtime/libc defect, NOT a library or recipe failure.
+    A minimal pure-libc repro (open_memstream -> fprintf -> fclose) reproduces
+    fclose_rc=-9, size=0, buf='' and SIGTRAP without linking any library code.
+
+affected_scope:         C/C++ libraries whose upstream tests or conversion
+                        helpers use open_memstream/fmemopen-style streaming on
+                        OHOS; detected when Qt Test (or any) suite shows
+                        "decoded empty / compared values not the same / internal
+                        error" while the same library passes other test suites.
+
+verification_cmd:       "open_memstream(&buf,&size); fprintf(f,\"x\"); rc=fclose(f); printf(\"%d %zu '%s'\",rc,size,buf)"
+
+rec_priority:           1
+rec_approach:           classify-runtime-vs-library-and-record-recovery
+rec_description:        >
+    1) Reproduce open_memstream standalone with pure libc (no library code) to
+    prove the defect is in the runtime, not the library; 2) keep the honest
+    dual-caliber ledger: configured_executable_total includes all 54 slots,
+    report 42/54 pass and 12/54 fail with root cause = open_memstream runtime
+    defect + recovery condition (SDK fix, or rewrite the test helper with a
+    non-memstream streaming callback without touching upstream sources);
+    3) do NOT downgrade to "tests cannot run" (0/54) and do NOT mark the slots
+    as library failures; 4) verify binary availability with
+    `conan install --requires=<pkg> --build=never` + conan graph info, never
+    with `conan list` or `conan download --only-recipe` alone.
+rec_command:            'conan install --requires=qt/5.15.19 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=never; qmake -o Makefile tests.pro && make -C tests && ./tojson'
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      non-memstream-stream-callback
+fallback_description:   >
+    If a test helper must use streaming conversion and open_memstream is broken,
+    provide a non-memstream output path (e.g. direct buffer callback) in the
+    consumer/harness layer; do not patch upstream sources unless authorized.
+fallback_command:       ''
+fallback_auto_fix:      false
+
+forbid_1_pattern:       'qt/5\.15\.19.*未发布|0/54|hard-block.*qt'
+forbid_1_reason:        "R03 实测 qt/5.15.19 OHOS armv8 二进制存在（conan install --build=never 成功），不得保留未验证的'Qt 未发布/0/54'结论"
+forbid_1_consequence:   "未经验证结论导致台账失真，质量返工"
+
+forbid_2_pattern:       'open_memstream.*library bug|库缺陷'
+forbid_2_reason:        "parser/encoder 同库 100% 通过 + 纯 libc 最小复现证明为运行环境缺陷"
+forbid_2_consequence:   "错误归因会把环境缺陷误报为库缺陷"

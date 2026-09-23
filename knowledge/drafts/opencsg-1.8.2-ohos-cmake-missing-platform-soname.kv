@@ -1,0 +1,69 @@
+# ═══ Draft knowledge entry — OHOS CMake 缺 Platform/HarmonyOS.cmake：共享库无版本化 SONAME，消费者 NEEDED 记录绝对路径 ═══
+# Software: opencsg 1.8.2
+# Gate: device shadow CI conan create + local minimal repro
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: opencsg-1.8.2-ohos-cmake-missing-platform-soname
+severity: 2
+category: ohos|cmake|linking
+trigger_tool: cmake|ld
+phase: linking
+
+keywords: System is unknown to cmake, Platform/HarmonyOS, SONAME, SOVERSION, versioned soname, DT_NEEDED absolute path, libopencsg.so
+
+error_signature: System is unknown to cmake, create:\s*Platform/HarmonyOS|SONAME .*(empty|absent)|no versioned soname
+
+match_keywords: Platform/HarmonyOS, System is unknown to cmake, SONAME, SOVERSION, VERSION, DT_NEEDED, absolute path, CMake shared library
+
+root_cause: |
+  OHOS 上 CMake 没有 Platform/HarmonyOS.cmake（日志明确提示 "System is unknown to cmake,
+  create: Platform/HarmonyOS ..."）。平台规则缺失导致 add_library(... SHARED) 配合
+  VERSION/SOVERSION 属性时不生成版本化文件名（libfoo.so.1.2.3 + 符号链接），
+  也不传 -Wl,-soname。结果：包内只有 libfoo.so，无 SONAME；消费者二进制把
+  被链接库的绝对路径写进 DT_NEEDED（而不是库名），运行时依赖 rpath/绝对路径才能解析。
+  最小复现证明这是平台级限制，与具体库、与配方补丁无关。
+
+rec_approach: record-as-platform-limitation-do-not-hack-per-library
+rec_description: |
+  不要为了“让某个库的 PR 好看”而在库内手写 -Wl,-soname 之类的平台级 hack：那会偏离上游、
+  增加维护成本，且无法覆盖其它 CMake 库。正确做法是：记录为已知限制，基础设施补齐
+  Platform/HarmonyOS.cmake 或在 CMakeToolchain/toolchain file 统一注入 soname（一次修复
+  惠及所有 CMake 共享库）。适配报告与知识条目写明现象、最小复现与影响。
+rec_command: |
+  # 最小复现（在任何 OHOS 设备上跑）
+  cat > CMakeLists.txt <<'EOF'
+  cmake_minimum_required(VERSION 3.11)
+  project(t LANGUAGES CXX VERSION 1.8.2)
+  add_library(t SHARED t.cpp)
+  set_target_properties(t PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR})
+  EOF
+  echo 'int f(){return 42;}' > t.cpp
+  cmake -G "Unix Makefiles" -B b . && cmake --build b
+  llvm-readelf -d b/libt.so | grep -i soname   # 期望：无输出（平台限制）
+rec_auto_fix: false
+
+affected_scope: |
+  所有在 OHOS 上用 CMake 构建的共享库：即使正确设置 VERSION/SOVERSION，产物也没有
+  版本化文件名与 SONAME；下游消费者 DT_NEEDED 会记录绝对路径。纯静态库、可执行文件不受此影响
+  （autotools 构建的库有 SONAME，如 libpam.so.0）。
+
+verification_cmd: |
+  llvm-readelf -d <pkg>/lib/lib<name>.so | grep -iE "SONAME|NEEDED"
+  # 现状：无 SONAME；消费者 NEEDED 为绝对路径
+  file <pkg>/lib/lib<name>.so   # 只有一个文件，无 .so.N / .so.N.M 符号链接链
+
+evidence: |
+  opencsg 1.8.2：
+  - 设备 conan create 产物 lib/libopencsg.so（346560 bytes），llvm-readelf 无 SONAME；
+    消费者 test_opencsg 的 DT_NEEDED 为 <pkg>/lib/libopencsg.so 绝对路径。
+  - 本机用 OHOS SDK 工具链 + Ninja 构建同一源码则有 SONAME=libopencsg.so.1（平台差异，
+    说明不是源码/补丁问题）。
+  - 最小复现：设备 hnp cmake 4.1.2 对任何 add_library SHARED + VERSION/SOVERSION 均不产 soname；
+    对比 autotools 构建的 libpam.so 有 SONAME=libpam.so.0。
+  - CI 门禁（L0/L1/L2/L4/L5）不检查也不拒绝该差异，不影响本包通过。
+
+authors:
+  - codex
+source_pr:
+source_commit:
+draft_date: 2026-09-11

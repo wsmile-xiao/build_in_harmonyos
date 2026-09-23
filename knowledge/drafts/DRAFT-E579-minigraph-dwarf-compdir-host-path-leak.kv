@@ -1,0 +1,86 @@
+# ═══ Draft knowledge entry — minigraph 0.21 DWARF comp_dir 宿主路径泄漏 ═══
+# Timestamp: 2026-09-11
+# Software: minigraph/0.21 (纯 Makefile C)
+# Gate: task minigraph-0.21（配方 build() 设计 → 验收"无宿主路径"扫描）
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-E579-minigraph-dwarf-compdir-host-path-leak.md
+# 适用条件/反例/验证/限制/恢复条件见配对 .md；本 .kv 与 .md 字段相互对应
+
+id:                     DRAFT-E579
+trigger_tool:           make|conan|clang
+phase:                  packaging|verification
+error_signature:        strings.*binary.*\|.*grep /storage|strings.*\|.*grep /home|
+                        DW_AT_comp_dir.*storage|host path.*leak|宿主路径.*泄漏|
+                        build folder.*embedded|绝对路径.*二进制
+severity:               2
+category:               packaging|reproducibility|ohos|toolchain|recipe
+match_keywords:         strings, DWARF, DW_AT_comp_dir, -g, debug info, build path,
+                        absolute path, host path leak, -ffile-prefix-map,
+                        reproducible build, 二进制绝对路径, 宿主路径,
+                        交付验收, strings scan
+title:                  上游 CFLAGS 含 -g 时 DWARF comp_dir/头文件路径把构建机绝对路径嵌入二进制 → 需 -ffile-prefix-map 三重映射
+
+root_cause: 上游 Makefile 自带 CFLAGS="-g -Wall ... -O3"。-g 生成 DWARF 调试信息时，DW_AT_comp_dir 记录编译时工作目录的绝对路径，#line 引用的系统头文件记录工具链 sysroot 的绝对路径（如 /storage/Users/<user>/usr/local/bin/../sysroot/usr/include）。Conan 构建目录（~/.conan2/p/b/<hash>/b）和本机工具链安装路径因此被永久嵌入产物二进制，strings 可直接看到机器特定路径。验收规则（无宿主路径泄漏）不区分 DWARF 段还是代码段——任何 /home/、/Users/、/storage/ 命中即失败。注意 make -C <source_folder> 时编译器 cwd 是 source_folder（不是 Conan build_folder），单映射 build_folder 无效。
+affected_scope:         上游 CFLAGS 含 -g 的纯 Makefile/直接编译项目（无 configure
+                        可改）在 HarmonyOS PC Conan 配方 build() 的场景；所有需要
+                        二进制可复现/无宿主路径的交付（尤其 OHOS 真机部署）。
+
+verification_cmd:       strings <binary> | grep -E '^/storage|^/home|/Users/' —
+                        命中即泄漏；readelf --debug-dump=info <binary> | grep
+                        comp_dir 可看具体嵌入路径。
+
+rec_priority:           1
+rec_approach:           triple-ffile-prefix-map
+rec_description: >
+  在配方 build() 组装 CFLAGS 时追加三条 -ffile-prefix-map：
+  (1) os.path.abspath(self.source_folder) → 虚拟路径（make -C 下编译器 cwd）；
+  (2) os.path.abspath(self.build_folder) → 虚拟路径；
+  (3) 工具链根目录（os.path.dirname(os.path.dirname(os.path.abspath(cc)))）
+  → 虚拟路径（覆盖 sysroot 与 clang resource dir 的头文件引用）。
+  三条都要：实测只映射 build_folder 时 comp_dir 仍泄漏 source_folder 路径，
+  只映射前两条时 sysroot include 路径仍在 DWARF #line 里。
+rec_command:            maps=["-ffile-prefix-map={}=/pkg-build".format(os.path.abspath(f))
+                        for f in (self.source_folder,self.build_folder)];
+                        maps.append("-ffile-prefix-map={}=/_toolchain".format(
+                        os.path.dirname(os.path.dirname(os.path.abspath(cc)))));
+                        cflags = "<upstream cflags> " + " ".join(maps)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-cflags-prefix-map
+
+fallback_priority:      2
+fallback_approach:      strip-debug-info
+fallback_description:   交付前 strip 掉调试段（conan build() 末尾对产物执行
+                        llvm-objcopy --strip-debug）。简单但丢失调试能力，
+                        且 OHOS 符号化栈回溯需要 .debug 信息时不可用。
+fallback_command:       llvm-objcopy --strip-debug bin/minigraph
+fallback_auto_fix:      false
+fallback_impl:          post-build-strip
+
+forbid_1_pattern:       配方忽略上游 -g 产物中的宿主路径.*验收前未扫描
+forbid_1_reason:        CI 的 L5 只扫 lib/ 下 .so 的 DT_NEEDED 绝对路径，
+                        不覆盖二进制 DWARF；验收"无宿主路径"扫描会命中
+forbid_1_consequence:   本地全绿但交付验收失败；真机分发泄漏构建机信息
+
+forbid_2_pattern:       只映射 build_folder 一条 -ffile-prefix-map
+forbid_2_reason:        make -C <source> 的编译器 cwd 是 source_folder，
+                        DW_AT_comp_dir 记的是 cwd，单映射 build 无效
+forbid_2_consequence:   comp_dir 路径照旧泄漏（实测复现）
+
+principles:             P001, P003
+similar_to:             E295（签名门禁前置的产物完整性）、hoedown CFLAGS 草稿
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-E579-minigraph-dwarf-compdir-host-path-leak.md
+last_updated:           2026-09-11
+source_event:           task minigraph-0.21-20260911：conan create 全绿后
+                        strings 扫描发现 /storage/Users/currentUser/.conan2/
+                        p/b/<hash>/b 与工具链 sysroot 路径嵌入二进制；三重
+                        -ffile-prefix-map 后泄漏归零，17/17 测试通过。
+authors:                AtomCode
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11

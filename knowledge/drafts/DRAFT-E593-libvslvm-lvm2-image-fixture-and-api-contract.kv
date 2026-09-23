@@ -1,0 +1,82 @@
+#====================================================================
+# DRAFT-E593 — 合成合法 LVM2 物理卷镜像做 libvslvm 消费者测试的最小口径
+#              与 libvslvm 公共 API 契约
+# Status: DRAFT — 待审核 promote（E584=libbfio、E585=libgmpxx、E586/E591=libvsgpt
+#         已被并行任务占用；E593 经三面人工复核为空，复核记录见同目录 .md）
+#====================================================================
+
+id:                     DRAFT-E593-libvslvm-lvm2-image-fixture-and-api-contract
+title:                  合成合法 LVM2 物理卷镜像做消费者测试的三层结构与 libvslvm 专属约定（标签只认扇区 1、raw location descriptor 为元数据区相对偏移、identifier 必含终止符恰 39 字节、extent_size 解析后 ×512），以及 libvslvm 公共 API 的返回值/错误帧/消费边界契约
+trigger_tool:           conan test_package|libvslvm_handle_open|libvslvm_check_volume_signature|make check
+phase:                  testing
+error_signature:        'unsupported metadata area signature|unsupported number of metadata area descriptors|mismatch in checksum \( 0x[0-9a-fA-F]+ != 0x[0-9a-fA-F]+ \)|identifier size value out of bounds|unable to read signature at offset: 512'
+prescan_pattern:        'libvslvm_check_volume_signature|libvslvm_handle_open|LABELONE|libvslvm_metadata_area_read_data'
+severity:               3
+category:               testing, format, platform
+match_keywords:         LABELONE, LVM2 001, labelsector, metadata area,
+                         raw location descriptor, weak CRC32, 0xf597a6cf,
+                         pv_header, identifier size, extent_size, 4194304,
+                         error_sprint, error_backtrace_fprint, read_chunk_data,
+                         libvslvm, LVM2 volume system, lvm2 image fixture
+keywords:               LABELONE, LVM2 001, labelsector, metadata area header,
+                         raw location descriptor, weak CRC32, 0xf597a6cf,
+                         pv_header, identifier size 39, extent_size, 4194304,
+                         error_sprint outermost frame, error_backtrace_fprint,
+                         read_chunk_data internal API, libvslvm, LVM2,
+                         lvm2 image fixture, volume group, physical volume,
+                         logical volume, segment, stripe
+root_cause:             libvslvm（libyal 系）对 LVM2 磁盘格式的解析有四处与
+                         「直觉/真实 LVM2 工具行为」不同或文档不显眼的专属约定，
+                         手工合成 LVM2 夹具时逐一命中：①标签探测位置割裂——
+                         check_volume_signature_file_io_handle 只读固定偏移 512
+                         （恰好等于 LVM2 pvcreate 默认 labelsector=1），而
+                         handle open 扫描 0/512/1024/1536 四个扇区，标签放扇区 0
+                         会「签名查不到、打开却可行」；②元数据区头 512 字节的
+                         校验和在 +0、签名「 LVM2 x[5A%r0N*>」在 +4、raw
+                         location descriptor 在 +40（24 字节：offset/size/checksum/
+                         flags，全零项终止，最多扫 4 条）——解析时按真 LVM2 语义
+                         存 file_offset+offset（区相对偏移），后续却把存储值直接当
+                         绝对文件偏移读元数据，夹具必须写相对偏移；③元数据文本的
+                         id 字段解析器要求 identifier_size 恰 39 字节（38 字符
+                         6-4-4-4-4-4-6 连字符 UUID + 终止符），32 字符裸串报
+                         identifier size value out of bounds；④卷组解析器把
+                         extent_size 按 ×512 存储（元数据写 8192、getter 读
+                         4194304），段 offset/size 按 start_extent/extent_count ×
+                         存储值换算，断言若按元数据原值写必失败。另 label 头
+                         校验和为 weak CRC32（初值 0xf597a6cf、多项式
+                         0xEDB88320、无终 XOR），且必须在该扇区其余字段全部写完后
+                         计算（范围 +20..+512）。
+affected_scope:         所有为 libvslvm（及同族 LVM2 解析器）写合成镜像消费者
+                         测试、或在 OHOS 上做 LVM2 卷读回验证的任务；凡见到
+                         unsupported metadata area signature / mismatch in
+                         checksum / identifier size value out of bounds /
+                         签名检测通过但卷组字段断言全失败之一，先比对本条
+                         再改夹具。
+verification_cmd:       sh $TASK_DIR/native-probe.sh（设备原生构建 + 合成镜像
+                         31 项断言消费者探针，实测 rc=0、21+31 断言全过、
+                         make check TOTAL 3 / PASS 2 / SKIP 1）；
+                         或在仓库内走 conan create 全链路（test_package 即
+                         该夹具的定稿形态）
+rec_priority:           1
+rec_approach:           label-at-sector1 + metadata-area-relative-raw-locn +
+                         38char-dashed-uuid + extent-times512-assertions +
+                         api-return-contract
+rec_description:        按三层结构合成：扇区 1 写 LABELONE 标签（签名+扇区号+
+                         校验和+data_offset=32+「LVM2 001」）→ pv_header（32 字节
+                         标识符+卷大小）→ 数据区/元数据区描述符各 16 字节一项、
+                         全零项终止（元数据区描述符恰 1 条）；区偏移 4096 处写
+                         512 字节元数据区头（校验和在 +0、覆盖 +4..+512；签名
+                         「 LVM2 x[5A%r0N*>」在 +4；raw location descriptor 在
+                         +40，offset 写相对偏移 512、size=文本长、checksum=文本
+                         CRC、flags=0，全零项终止）；4608 处写 LVM2 元数据文本
+                         （id 用 38 字符连字符 UUID；extent_size=8192 断言按
+                         ×512=4194304 写）。API 断言口径：initialize/getter/
+                         set_codepage 成功=1，close=0，free=1，未打开即 close=-1，
+                         check_volume_signature 1/0/-1；error_sprint 只打最外层
+                         帧（内层原因用 error_backtrace_fprint）；read_chunk_data
+                         为内部 API，消费者最深断言到条带元数据。
+related:                E011（configure umask 077→022，本包构建期同样命中）；
+                         E591（libvsgpt 的 GPT 合成镜像与三元组年代差异——卷系统
+                         格式不同、三层结构不重叠）；E584（libyal TESTS/
+                         check_PROGRAMS 清点口径——本包 N=23 同构适用）
+doc:                    knowledge/drafts/DRAFT-E593-libvslvm-lvm2-image-fixture-and-api-contract.md

@@ -1,0 +1,66 @@
+# ═══ Draft knowledge entry — conan autotools 配方漏掉 AutotoolsDeps 时依赖 flags 缺失 ═══
+# Timestamp: 2026-09-11
+# Software: debfoster 2.8
+# Gate: G2 / conan create（configure 通过、make 失败）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-E2186
+trigger_tool:           conan|autotools|configure|make
+phase:                  generate|build
+error_signature:        fatal error: 'gc/gc.h' file not found|
+                         checking for GC_malloc in -lgc... yes|
+                         fatal error: 'pcre2.h' file not found|
+                         conanbuild.sh: CPPFLAGS does not contain the dependency include dirs
+severity:               2
+category:               autotools|conan|toolchain|build-system
+match_keywords:         AutotoolsToolchain, AutotoolsDeps, generate, configure_args, CPPFLAGS,
+                         LDFLAGS, includedirs, AC_CHECK_LIB, premature success,
+                         header not found, make -j1, conanfile template
+
+title:                  Conan autotools 配方只调 AutotoolsToolchain 时依赖的 -I/-L 不注入：
+                        AC_CHECK_LIB 仍报 yes，错误推迟到 make 才以 "header not found" 暴露
+
+root_cause: >
+  Conan 2 的 autotools 集成把职责拆成两个 generator：AutotoolsToolchain 只产出编译器与
+  它自己的 flags（CC/CXX/CFLAGS/CXXFLAGS/LDFLAGS 的基础值、configure_args、
+  --prefix/--bindir/... 安装路径），requirements 的 include/lib 路径由 AutotoolsDeps
+  写进 CPPFLAGS/LDFLAGS/LIBS。只生成前者时 configure 命令行与生成的 Makefile 里都看不到
+  任何依赖 -I/-L（实测编译行只有 `-DNDEBUG -Wall -O3`）。
+  更隐蔽的是失败位置：configure.ac 的 AC_CHECK_LIB(gc, GC_malloc) 只做链接探测，
+  不需要头文件，因此在缺少 -I 的情况下依然打印 `checking for GC_malloc in -lgc... yes`，
+  让 configure 全程 rc=0、看起来依赖解析正常；真正的失败推迟到 make 的第一个消费者
+  翻译单元，报 `fatal error: 'gc/gc.h' file not found`。只要不核对编译行里的 -I/-L，
+  就会把根因误判为上游源码或依赖包布局。
+
+recommended_fix: >
+  generate() 中两个 generator 都要生成（顺序为先 Toolchain 后 Deps）：
+
+    def generate(self):
+        AutotoolsToolchain(self).generate()
+        AutotoolsDeps(self).generate()
+
+  仓库内 177 个 autotools 配方已使用 AutotoolsDeps（先例
+  archives/g/guile/2.2.7.1/conanfile.py）。注意 templates/conanfile-autotools.py.tmpl
+  的 requirements() 是空的 `pass`，因此照抄模板不会暴露这一缺口；一旦给配方加了
+  self.requires(...) 就必须同时加 AutotoolsDeps。
+
+diagnosis_commands:
+  - "grep -n 'RUN: \".*/configure\"' reports/conan-create.log   # 看 configure 的安装路径参数"
+  - "grep -n 'conanautotoolstoolchain\\|conanautotoolsdeps' <build_folder>/build-*/conan/  # 两个脚本是否都生成"
+  - "grep -n -- '-I.*<dep>' reports/conan-create.log            # 编译行里是否真的带依赖 include"
+  - "grep -n 'checking for .* in -l<dep>\\.\\.\\. yes' reports/conan-create.log  # 假通过的确证"
+
+distinct_from: E467 讲的是 AutotoolsDeps 存在时 LIBS 被过早注入、导致 AC_PROG_CC 的
+  conftest 加载整条依赖闭包而失败（configure rc=77）；本条是相反的缺口面：Deps 缺失时
+  configure 反而全绿，失败点被推迟到 make
+
+affected_scope: 所有 conan + autotools 且带 self.requires() 的配方；漏掉 AutotoolsDeps
+  时只在被依赖的头文件第一次被 include 处暴露，与依赖包本身无关
+
+rec_priority: 1

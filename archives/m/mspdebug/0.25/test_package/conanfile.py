@@ -1,0 +1,19 @@
+import os
+
+from conan import ConanFile
+
+
+class MspdebugTestConan(ConanFile):
+    """test_package for mspdebug — runs test.sh which invokes the packaged
+    binary through the conanrun environment (resolves the packaged
+    libusb-compat/libusb dependencies at runtime)."""
+    settings = "os", "arch", "compiler", "build_type"
+    generators = "VirtualRunEnv"
+    test_type = "explicit"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def test(self):
+        bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
+        self.run(f"{bash} test.sh", env="conanrun")

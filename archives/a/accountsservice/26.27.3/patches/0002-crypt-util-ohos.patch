@@ -1,0 +1,87 @@
+--- a/meson.build
++++ b/meson.build
+@@ -79,6 +79,30 @@ foreach func: check_functions
+   config_h.set('HAVE_' + func.underscorify().to_upper(), cc.has_function(func))
+ endforeach
+ 
++# Portability feature probes for libc APIs that are optional or absent on
++# some platforms (e.g. musl-based OHOS libc exports none of them):
++#   - explicit_bzero(3): string.h
++#   - the shadow-password API getspnam(3)/fgetspent(3): shadow.h
++#   - the utmpx/wtmp accounting API utmpxname/setutxent/getutxent/endutxent:
++#     utmpx.h may exist without the functions
++#   - crypt(3): libc may export the symbol without declaring it in crypt.h
++# Sources gate their fallbacks on these neutral HAVE_* macros (no platform
++# ifdefs), so the same code path compiles and is verifiable everywhere.
++utmpx_prefix = '#include <utmpx.h>'
++portability_probes = [
++  ['HAVE_EXPLICIT_BZERO', cc.has_function('explicit_bzero', prefix: '#include <string.h>')],
++  ['HAVE_GETSPNAM', cc.has_function('getspnam', prefix: '#include <shadow.h>')],
++  ['HAVE_FGETSPENT', cc.has_function('fgetspent', prefix: '#include <shadow.h>')],
++  ['HAVE_UTMPXNAME', cc.has_function('utmpxname', prefix: utmpx_prefix)],
++  ['HAVE_SETUTXENT', cc.has_function('setutxent', prefix: utmpx_prefix)],
++  ['HAVE_GETUTXENT', cc.has_function('getutxent', prefix: utmpx_prefix)],
++  ['HAVE_ENDUTXENT', cc.has_function('endutxent', prefix: utmpx_prefix)],
++  ['HAVE_DECL_CRYPT', cc.has_header_symbol('crypt.h', 'crypt', prefix: '#define _GNU_SOURCE')],
++]
++foreach item: portability_probes
++  config_h.set(item[0], item[1])
++endforeach
++
+ if cc.has_member('struct passwd', 'pw_expire', prefix : '#include <pwd.h>')
+   config_h.set('HAVE_STRUCT_PASSWD_PW_EXPIRE', 1)
+ endif
+--- a/src/crypt-util.c
++++ b/src/crypt-util.c
+@@ -30,6 +30,35 @@
+ #include <unistd.h>
+ #endif
+ 
++/* Portability fallbacks gated by neutral feature macros from meson.build
++ * (no platform ifdefs). ADAPTATION COMPLETENESS NOTE (manual sign-off
++ * required, R40): on libcs lacking these APIs the fallbacks are functional
++ * equivalents, not silent no-ops:
++ *   - crypt: declaration only; the symbol itself exists in libc (verified
++ *     by checking libc.so's exported symbols), it is just not declared in
++ *     the empty libcrypt stub header
++ *   - explicit_bzero: real volatile wipe, memset semantics preserved
++ */
++#ifndef HAVE_DECL_CRYPT
++#if !defined(HAVE_LIBXCRYPT)
++extern char *crypt (const char *key, const char *salt);
++#endif
++#endif
++
++#ifndef HAVE_EXPLICIT_BZERO
++/* No explicit_bzero(3) in this libc (e.g. musl-based OHOS libc): wipe
++ * through a volatile pointer so the compiler cannot optimize the zeroing
++ * away. */
++void
++explicit_bzero (void *s, size_t n)
++{
++        volatile unsigned char *p = (volatile unsigned char *) s;
++
++        while (n-- > 0)
++                *p++ = 0;
++}
++#endif
++
+ #include "crypt-util.h"
+ 
+ #ifdef HAVE_LIBXCRYPT
+--- a/src/crypt-util.h
++++ b/src/crypt-util.h
+@@ -22,4 +22,13 @@
+ 
+ #include <glib.h>
+ 
++/* explicit_bzero(3) fallback for libcs without it (e.g. musl-based OHOS
++ * libc). Declared here so every TU that includes crypt-util.h (daemon.c,
++ * act-user.c, ...) can call it; implemented in crypt-util.c. The fallback
++ * only exists when meson's cc.has_function('explicit_bzero') probe failed
++ * (HAVE_EXPLICIT_BZERO unset in config.h). */
++#ifndef HAVE_EXPLICIT_BZERO
++extern void explicit_bzero (void *s, size_t n);
++#endif
++
+ gchar *hash_password (const gchar *plain);

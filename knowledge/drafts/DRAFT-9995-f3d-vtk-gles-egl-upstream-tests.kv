@@ -1,0 +1,75 @@
+# ═══ Draft knowledge entry — f3d 3.5.0 VTK/GLES/EGL 上游测试真跑链 ═══
+# Timestamp: 2026-09-18
+# Software: f3d 3.5.0 (VTK 9.4.1 consumer)
+# Gate: PR #9995 / 本地 conan create（rule4/rule5 修复链）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-9995
+draft:                  true
+contributor_id:         2404_87638649
+trigger_tool:           cmake|clang|ctest|binary-sign-tool
+phase:                  build|test
+error_signature:        use of undeclared identifier 'glDispatchCompute'|
+                         use of undeclared identifier 'GL_SHADER_STORAGE_BARRIER_BIT'|
+                         use of undeclared identifier 'GL_TIME_ELAPSED'|
+                         use of undeclared identifier 'glGetQueryObjectiv'; did you mean 'glGetQueryObjectuiv'|
+                         Error loading shared library \.\./lib/libf3d\.so|
+                         Error loading shared library libvtk[A-Za-z]+-9\.4\.so\.1.*Permission denied|
+                         install TARGETS RUNTIME_DEPENDENCY_SET is not supported on system "HarmonyOS"
+
+severity:               2
+category:               gles|egl|vtk|codesign|soname|cmake|ohos-loader
+match_keywords:         vtk_glad.h, GLES3/gl31.h, glDispatchCompute, glMemoryBarrier,
+                         GL_TIME_ELAPSED, EXT_disjoint_timer_query, gl2ext.h,
+                         GL_GLEXT_PROTOTYPES, codesign sidecar, binary-sign-tool,
+                         selfSign, dlopen Permission denied, SONAME, DT_NEEDED,
+                         ../lib/ relative path, ctest WORKING_DIRECTORY,
+                         F3D_TESTING_FORCE_RENDERING_BACKEND, EGL offscreen
+
+root_cause: |
+  VTK 9.4.1 built with VTK_OPENGL_USE_GLES serves vtk_glad.h which in GLES3
+  mode only includes <GLES3/gl3.h>. Consumers using GLES 3.1+ APIs
+  (compute shaders: glDispatchCompute/glMemoryBarrier; timer queries:
+  GL_TIME_ELAPSED/glGetQueryObjectiv) fail to compile because those are
+  declared in gl31.h / the EXT_disjoint_timer_query block of gl2ext.h.
+  Additionally, on OHOS two runtime blockers prevent ctest from running
+  VTK-linked binaries: (a) libs without an explicit SONAME get the
+  build-tree relative path ("../lib/libf3d.so") in consumers' DT_NEEDED,
+  unresolvable from ctest's CMake-binary-dir CWD; (b) the OHOS loader
+  requires a valid .codesign section for dlopen, and HMDFS keeps the
+  signature as sidecar data which conan's copy into the package cache
+  does not preserve ("Permission denied" on every dependency .so).
+
+rec_approach: |
+  1. GLES 3.1 compute APIs: after #include <vtk_glad.h> add
+     #if defined(GL_ES_VERSION_3_0)
+     #include <GLES3/gl31.h>
+     #endif
+  2. Timer query: #define GL_GLEXT_PROTOTYPES 1 + #include <GLES2/gl2ext.h>,
+     then map GL_TIME_ELAPSED -> GL_TIME_ELAPSED_EXT and
+     glGetQueryObjectiv -> glGetQueryObjectivEXT.
+  3. Bare SONAMEs: set_target_properties(<lib> PROPERTIES LINK_FLAGS
+     "-Wl,-soname,lib<name>.so") guarded by
+     CMAKE_SYSTEM_NAME STREQUAL "HarmonyOS"; prepend the build lib dir to
+     ctest's LD_LIBRARY_PATH.
+  4. Re-sign dependency .so before running tests:
+     binary-sign-tool sign -selfSign 1 -inFile <so> -outFile <so>.signed
+     then os.replace() (tool available at /data/service/hnp/bin/).
+  Verified on f3d 3.5.0 + VTK 9.4.1 (Maleoon 916, GLES 3.2): upstream
+  suite goes from 0/1018 (not runnable) to 523/630 (83%) real passes.
+
+fallback: |
+  If binary-sign-tool is unavailable (non-OHOS hosts), skip the re-sign
+  step and skip upstream test execution via an EGL/capability probe —
+  record the skip reason in the build log (CI headless path).
+
+verify_builds:         PR #9995 conan create 2026-09-18 (523/630 = 83% on device)
+
+related_rules:          P017, P019
+related_entries:        E207 (SONAME missing — same root cause for ./lib relative links), E077 (re-sign via binary-sign-tool post-install), E083 (selfSign JNI libs), E318 (compile-sign-run go tests)

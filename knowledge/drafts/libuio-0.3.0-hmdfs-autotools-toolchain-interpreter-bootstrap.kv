@@ -1,0 +1,75 @@
+# ═══ Draft knowledge entry — HMDFS 真机拒绝脚本 exec：autotools conan 工具包的解释器驱动自举
+# GitHub tag 归档无 configure 的 Autotools 包（需 autoreconf）在 HMDFS conan 缓存的
+# 真机上全线撞墙：automake/libtool 包的 sh shim 与 perl 脚本无法被 exec；
+# 本条给出 $ACLOCAL/$AUTOMAKE/$LIBTOOLIZE 内联 env 前缀 + 解释器形态的完整解法，
+# 同时解锁 libisal 曾经判死的"autotools 工具包在 HMDFS 不可建"。
+# Software: libuio 0.3.0（2026-09-19 真机 10.62.178.77 实测，conan 2.29.1 + automake/1.18 + libtool/2.5.4）
+# Gate: conan create（ohos-aarch64-fixed）→ autoreconf 全链通 → make → test_package 2/2
+# Status: DRAFT
+
+id: libuio-0.3.0-hmdfs-autotools-toolchain-interpreter-bootstrap
+severity: 3
+category: build-system|autotools|conan|ohos
+trigger_tool: autoreconf|aclocal|libtoolize|conan
+phase: build
+
+keywords: autoreconf, aclocal, libtoolize, Permission denied, HMDFS, script exec, automake/1.18, libtool/2.5.4, tool_requires, perl, shim, .aclocal-real, _lt_pkgdatadir, libtool-conan, symlink, autogen.sh, configure not shipped
+error_signature: 'Can.t exec .*\.conan2.*/bin/(aclocal|automake|libtoolize).: Permission denied|autoreconf: error: .* (aclocal|libtoolize) failed|\$pkgauxdir is not a directory|linking .* to .*/. failed'
+match_keywords: autoreconf, aclocal Permission denied, libtoolize, HMDFS script exec, automake tool_requires, autotools bootstrap, no configure in tarball, libtoolize pkgauxdir, autogen.sh
+
+root_cause: |
+  (1) OHOS 真机用户存储（/storage/Users/currentUser，HMDFS）上内核拒绝直接 exec
+  #! 脚本（仅 ELF 可执行，exit 126 / Permission denied；ELF 与 /data 上的脚本
+  不受限）。conan 缓存在 $HOME/.conan2（HMDFS）上，因此 automake/1.18、
+  libtool/2.5.4 工具包的 sh shim（bin/aclocal → exec .aclocal-real）与
+  perl 脚本全部无法被 autoreconf 调起。
+  (2) automake 包烤死 @INC="//share/automake-1.18"（prefix 置空的产物）且
+  1.18 无 automake_perllibdir 环境口，直接 perl 运行 .aclocal-real 会
+  "Can't locate Automake/Config.pm"。
+  (3) libtool/2.5.4 包损坏：conanbuild env 导出 _lt_pkgdatadir 指向包内
+  share/libtool-conan（空目录），而真身在 share/libtool（且缺 libtoolize 期望
+  的 m4/ 子目录，宏在 share/aclocal）。
+  (4) 上游 autogen.sh 普遍用 `autoreconf -s -f -i`——-s 是 --symlink，
+  HMDFS 拒绝 link(2)，libtoolize/automake --add-missing 全部 "linking failed"。
+
+rec_approach: interpreter-driven-autoreconf-env-overrides
+rec_description: |
+  autoreconf（autoconf 系在 SDK /data 上可正常 exec）尊重 $ACLOCAL/$AUTOMAKE/
+  $LIBTOOLIZE 环境变量覆盖。在配方 build() 里以内联 env 前缀（VAR="..." cmd 形式，
+  可穿透 conan 的 conanbuild env 包装；Environment().vars().apply() 实测无效）
+  把三个工具指到"解释器 + 脚本 + 重定位参数"形态：
+  - ACLOCAL="perl -I<pkg>/share/automake-1.18 <pkg>/bin/.aclocal-real
+    --automake-acdir=<pkg>/share/aclocal-1.18 --system-acdir=<pkg>/share/aclocal"
+    （-I 补 perl 模块目录；acdir 参数复刻包内 bin/aclocal shim 的重定位逻辑）
+  - AUTOMAKE="perl -I<同上> <pkg>/bin/.automake-real --libdir=<pkg>/share/automake-1.18"
+    （注意 automake 的重定位参数是 --libdir，不是 --automake-acdir）
+  - LIBTOOLIZE="sh <lt_pkg>/bin/libtoolize"（libtoolize 是 POSIX sh 脚本）
+  - _lt_pkgdatadir=<build>/ltdata：配方在 build 目录拼装 build-aux/ + libltdl/
+    （从 lt 包 share/libtool 拷贝）+ m4/（从 lt 包 share/aclocal 拷 *.m4）；
+    conan copy() 用目录名做 pattern 拷不动目录，须 mkdir 目标目录后 copy("*", src, dst)
+  - 不经上游 autogen.sh，直接 `mkdir -p m4 && touch ChangeLog && autoreconf -f -i`
+    （-i 为拷贝语义，替代 -s 符号链接）；TMPDIR 必须指到可写目录（libtoolize
+    的 sh 临时文件 + /tmp 只读）。
+  perl/clang/autoconf/m4/gawk/pkg-config 均在 SDK /data/service/hnp/bin，
+  PATH 前置即可。
+rec_command: |
+  # 配方内（libuio 0.3.0 conanfile.py _ohos_autogen_env + build()，完整可抄）：
+  # prefix = " ".join(f'{k}="{v}"' for k, v in autogen_env.items())
+  # self.run("mkdir -p m4 && touch ChangeLog", cwd=self.source_folder, env="conanbuild")
+  # self.run(f"{prefix} autoreconf -f -i", cwd=self.source_folder, env="conanbuild")
+  # 参考: archives/l/libuio/0.3.0/conanfile.py
+rec_auto_fix: false
+
+affected_scope: |
+  一切"GitHub tag 归档不含 configure、需 autoreconf 自举"的 Autotools 包，在
+  conan 缓存位于 HMDFS 的 OHOS 真机/CI 工作机上构建（tool_requires automake/
+  libtool）。已实证：libuio 0.3.0（真机全绿）。libisal 2.31.1 曾因此判死走
+  Makefile.unx 路线（"autotools 工具包在 HMDFS 不可建"），本条解法可回迁。
+  普通 Linux/非 HMDFS 存储不受影响（shim 直接可 exec）。
+
+verification: |
+  真机（10.62.178.77）：
+  export PATH=/data/service/hnp/bin:$HOME/.local/bin:$PATH
+  conan create <dir> --build=missing -pr:h ohos-aarch64-fixed -pr:b ohos-aarch64-fixed
+  （2026-09-19 实测：autoreconf→configure→make→test_package 2/2 全绿；
+  未修复前首障即 "Can't exec .../bin/aclocal: Permission denied"）

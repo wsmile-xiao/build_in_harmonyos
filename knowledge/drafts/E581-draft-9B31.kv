@@ -1,0 +1,71 @@
+#====================================================================
+# E581 — USB 后端初始化失败未检查返回值 → 解引用未初始化指针 (Signal 11)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E581
+trigger_tool: runtime
+phase: runtime
+error_signature: Signal 11|core dumped|Error 139|libusb_init|libusb_get_device_list
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category: memory, runtime, usb, portability
+match_keywords: Signal 11, core dumped, Error 139, SIGSEGV, libusb_init, libusb_get_device_list, 未初始化指针, 段错误
+title: USB 后端初始化失败时未检查返回值，未初始化的 libusb 上下文/设备列表被解引用导致 Signal 11
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: 库的公共 API 直接调用 libusb_init(&ctx) / libusb_get_device_list(ctx, &list) 且不检查返回值；当运行环境没有可用 USB 栈（CI 容器/沙箱无法访问 USB 设备节点，或 /dev/bus/usb 权限被拒）时这两个调用失败并保持出参未初始化，随后解引用未初始化指针（或把它传给 libusb_free_device_list/libusb_exit）即 Signal 11。本机有 USB 环境时同样二进制能正常运行，因此该缺陷只在无 USB 的运行环境暴露（环境相关，非确定性崩溃）。
+affected_scope: 所有经 libusb 枚举 USB 设备的库/工具，典型为 SDR、串口桥、USB 转接器驱动包；在 CI worker（无 USB 设备节点）与容器化运行环境必然触发，在本机/开发机可能完全正常
+verification_cmd: FAKE_LIBUSB_MODE=initfail LD_LIBRARY_PATH=<pkg>/lib:<libusb>/lib ./repro   # 用返回失败的 libusb 替身运行，未修复时 rc=139 (SIGSEGV)，修复后 rc=0 且返回"0 个设备"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: patch-source-check-libusb-return
+rec_description: 在库源码里补齐 libusb 返回值检查：出参先初始化为 NULL，libusb_init() 失败时直接返回"无设备"（count 返回 0 / 名字返回空串 / open 返回错误码），libusb_get_device_list() 失败时先 libusb_exit(ctx) 再返回；不要解引用或释放未初始化指针。用 refresh-patch --auto 固化为补丁，不直接改源码树。
+rec_command: python3 $SKILL_ROOT/scripts/ohc-run.py refresh-patch --auto <name> <version>
+rec_auto_fix: false
+rec_impl: patch-source
+
+fallback_priority: 2
+fallback_approach: skip-test-when-no-usb
+fallback_description: 若不允许改动第三方库源码（或补丁评审有阻力），退而在 test_package 里探测运行环境是否具备可用 USB 栈（调用 libusb_init 是否成功 / 设备数是否为 0），无 USB 时跳过设备枚举类用例并显式打印 SKIP 理由；此方案只让测试不再崩，消费方仍会在无 USB 环境崩溃，因此优先级低于源码修复。
+fallback_command:
+fallback_auto_fix: false
+fallback_impl:
+
+forbid_1_pattern: libusb_init\(&[a-z_]*ctx\);\s*\n\s*[a-z_]*cnt? *= *libusb_get_device_list
+forbid_1_reason: 连续两个 libusb 调用都不检查返回值，是本模式的标准形态；CI 无 USB 时必崩
+forbid_1_consequence: test_package 运行阶段 Signal 11 / Error 139，CI 判负，且崩溃点前无任何用例输出，排查成本高
+forbid_2_pattern: self\.run\(.*env=.conanrun.\)
+forbid_2_reason: 不能只靠 test() 里 self.run 包一层就认为安全——崩溃发生在被测库内部，包装不会拦截信号
+forbid_2_consequence: 误判"测试驱动有问题"而反复改测试代码，真正的库缺陷被掩盖（R43 调参螺旋）
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P007, P011
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E040, E249]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E581.md
+last_updated: 2026-09-17
+source_event:           libosmosdr/0.1.8.effcaa7 CI #49317 test_package Signal 11 (core dumped) / Error 139
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: wingsluo <wingsluo@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9B31

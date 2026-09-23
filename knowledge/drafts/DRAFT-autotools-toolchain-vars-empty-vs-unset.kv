@@ -1,0 +1,155 @@
+#====================================================================
+# DRAFT-autotools-toolchain-vars-empty-vs-unset — autotools configure 对
+#   AS/AR/STRIP 用 ${VAR-default}：环境导出**空串**即取空值（不会回退），
+#   汇编自检失败并报误导性的 "no NEON support"
+# 触发事件: x264 r3223 适配，CI（worker 导出空 AS）configure 阶段失败
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-autotools-toolchain-vars-empty-vs-unset
+trigger_tool:           configure|clang|make|conan
+phase:                  configuration
+
+error_signature:        no NEON support, try adding -mfpu=neon to CFLAGS|
+                        If you really want to run on such a CPU, configure with --disable-asm|
+                        unknown architectural extension: (dotprod|i8mm)|
+                        conftest\.S:.*error:.*(unknown directive|unknown architectural extension)
+
+severity:               2
+category:               build-system, toolchain, autotools, environment, portability, ohos
+
+match_keywords:         no NEON support, mfpu=neon, disable-asm, as_check, as_archext_check,
+                        AS 为空, 空串, ${VAR-default}, ${AS-${CC}}, ASFLAGS, conftest.S,
+                        unknown architectural extension, dotprod, i8mm, .arch_extension,
+                        toolchain env, export AS=, ccache, distcc, worker 环境变量
+
+title:                  autotools configure 对 AS/AR/STRIP 用 ${VAR-default}——环境把变量导出成「空串」时取到空值（不同于「未设置」会回退），汇编检查退化为执行 conftest.S 文件，报出与 NEON 无关的误导性 "no NEON support" 并 exit 1
+
+topic: >
+  x264 的 configure 在 AARCH64 分支做汇编自检：
+
+      as_check() { echo "$1" > conftest$AS_EXT;
+                   "$AS conftest$AS_EXT $ASFLAGS $2 -o conftest.o" ... }
+      if as_check "cmeq v0.8h, v0.8h, #0" ; then define HAVE_AARCH64; ...
+      else echo "no NEON support, try adding -mfpu=neon to CFLAGS"
+           echo "If you really want to run on such a CPU, configure with --disable-asm."
+           exit 1; fi
+
+  而 AS 的取值是 `AS="${AS-${CC}}"`（x264 configure 第 846 行）。
+  该写法是 POSIX 的「未设置才回退」：**若 AS 已设置但为空串，取到的就是空串**，
+  不会回退到 CC。此时 as_cmd 的开头变成空，shell 把它解析成
+  「执行 conftest.S 这个文件」——汇编检查必然失败，于是打印上面那条
+  把矛头指向 NEON 的错误并退出 1。
+
+root_cause:             上游 configure 用 ${VAR-default}（只认「未设置」，不认「已设置但为空」）
+                        取工具链变量；调用方把 AS 导出成空串时 AS=\"${AS-${CC}}\" 得到空值，
+                        汇编检查命令退化为执行 conftest.S 文件，as_check 失败后按「CPU 不支持 NEON」
+                        的分支报错退出。同一坑对 AR="${AR-...}"、STRIP="${STRIP-...}" 同样成立。
+                        常见来源：从别处继承的环境（CI worker 的 buildenv、ccache/distcc 包装、
+                        .zshrc/.profile 里的占位导出）把变量设成空值而非删除。
+
+durable_solution: >
+  配方在调用 configure 时**显式固定全部工具链变量为绝对路径**，不依赖任何
+  继承来的环境（R33）：
+
+      CC/AS            ← tools.build:compiler_executables 的 c，缺省回退 <hnp>/clang
+      AR/RANLIB/NM/STRIP ← 回退 <hnp>/llvm-ar / llvm-ranlib / llvm-nm / llvm-strip
+
+  实测命令行形态：
+
+      CC="/data/service/hnp/bin/clang" AS="/data/service/hnp/bin/clang" \
+      AR="/data/service/hnp/bin/llvm-ar" RANLIB=".../llvm-ranlib" \
+      NM=".../llvm-nm" STRIP=".../llvm-strip" \
+      INSTALL=/bin/install TMPDIR="<build>/_tmp" \
+      <hnp>/bash <src>/configure --host=... --enable-... ...
+
+  只补 AS 是治标：configure 里 AR / STRIP 用的是同一写法。
+
+impact: >
+  x264 r3223：CI 在 conan-build-test 的 configure 阶段 exit 1，整个包构建失败，
+  而本地（/data 与 HMDFS 两种 cwd）与真机手工构建均通过。补齐后 CI 可继续。
+
+affected_scope: >
+  所有「上游 configure 用 ${VAR-default} 取 AS / AR / RANLIB / STRIP 等工具链变量」的
+  autotools 或手写 configure 项目（x264 的汇编路径、libvpx、各类带 aarch64 汇编优化的
+  多媒体库）；在 CI worker、容器、或任何把工具链变量导出成空串/占位值的构建环境上会命中。
+  本地手工构建通常不命中（这些变量多为未设置），故表现为「本地通过、CI 失败」。
+
+recovery:               任何「上游 configure 用 ${VAR-default} 取工具链变量」的 autotools / 手写 configure
+                         项目（x264、部分 ffmpeg 前身、libvpx、各类汇编优化项目），在 CI 或陌生构建机上
+                         出现该错误签名时，先按本节 verification_cmd 复现「空串」条件，再在配方里把
+                         CC/AS/AR/RANLIB/NM/STRIP 全部显式固定为绝对路径。
+
+evidence_chain: >
+  task x264 r3223 适配（feat/x264-r3223，PR #9815）
+    - CI（worker CI-018）conan-build-test 报：
+        no NEON support, try adding -mfpu=neon to CFLAGS
+        If you really want to run on such a CPU, configure with --disable-asm.
+      且该次 configure 的 stdout **只剩这两行**（此前所有检查都写 stderr）。
+    - 本地相同参数两次直接构建均 rc=0（asm: yes）：一次 cwd 在 /data，一次 cwd 在
+      HMDFS(/storage)，且复刻了 CI 的 PATH / SHELL / CONFIG_SHELL / LD_LIBRARY_PATH。
+      → 排除 HMDFS 与 PATH 顺序两类假设。
+    - 读 configure 得 as_check 只用 $AS 做汇编（不执行产物），本机 clang 亦无问题。
+    - 构造受控矩阵（同一源码、同一目录、只变 AS 的导出状态）：
+        AS 未设置            → rc=0，stdout 27 行，asm: yes
+        AS=<hnp>/as          → rc=0，stdout 27 行，正常
+        AS=（空串）          → rc=1，stdout **2 行**，no NEON support...（与 CI 逐字一致）
+        AS=（空串）+ 显式 AS=clang → rc=0，stdout 27 行，asm: yes
+    - 修法落地后回归：以 `AS= conan create ...` 模拟该 worker 环境 → rc=0、无 NEON 错误、
+      checkasm 仍 2 次 "x264: All tests passed Yeah :)"、test_package 6/6 全过。
+
+verification_cmd: >
+  # ① 用「空串」精确复现（在源码目录内执行，输出应只剩 2 行且报 no NEON support）
+  export AS=; bash ./configure --host=aarch64-unknown-linux-gnu --enable-shared --enable-static --enable-pic
+  # ② 确认是空值而非未设置（-default 语义验证）
+  bash -c 'AS=; echo "AS=${AS-fallback}"'    # 打印空行 —— 空串不回退
+  bash -c 'unset AS; echo "AS=${AS-fallback}"'  # 打印 fallback —— 未设置才回退
+  # ③ 修法验证（同一目录重跑，应 rc=0 且 asm: yes）
+  export AS=; AS=/data/service/hnp/bin/clang bash ./configure --host=aarch64-unknown-linux-gnu ...
+
+limitations: >
+  ① 本条的「真凶是空串」在华硕 worker 上是**行为一致性的强推断**，非直接取证：
+     worker 文件系统与本地隔离，拿不到它那一轮的 config.log / env 快照。可信度依据：
+     空串是已知**唯一**能逐字复现该现象（含 stdout 只剩 2 行的细节）的条件。
+  ② 但「显式固定工具链变量为绝对路径」这一处置本身独立成立——它同时消除了
+     「空串」「被遮蔽」「继承污染」三类风险，属 R33 的正向加固，即使真凶另有其因也无害。
+  ③ 该错误签名也可能由真实原因触发（例如目标 CPU 确实无 NEON、或用了非 aarch64 的
+     汇编器）。判别顺序应为：先看 stdout 行数是否为 2（=死在 as_check），再看
+     config.log 里 as_cmd 原文是否出现空命令/异常二进制路径。
+
+rec_priority:           1
+rec_approach:           pin-all-toolchain-vars-absolute
+rec_description: >
+  在配方调用 configure 的命令行上内联显式赋值 CC/AS/AR/RANLIB/NM/STRIP 的绝对路径
+  （优先 tools.build:compiler_executables，缺省回退 hnp 工具链），使 configure 里所有
+  ${VAR-default} 展开都拿到非空且正确的值，不再受调用方环境（空串/遮蔽/污染）影响。
+rec_command:            CC=/data/service/hnp/bin/clang AS=/data/service/hnp/bin/clang AR=/data/service/hnp/bin/llvm-ar RANLIB=/data/service/hnp/bin/llvm-ranlib NM=/data/service/hnp/bin/llvm-nm STRIP=/data/service/hnp/bin/llvm-strip bash ./configure --host=aarch64-unknown-linux-gnu --enable-shared --enable-static --enable-pic
+rec_auto_fix:           false
+rec_impl:               conan-recipe-pin-toolchain-vars
+
+forbid_1_pattern:       为绕过 as_check 失败而直接加 --disable-asm
+forbid_1_reason:        as_check 失败是「工具链变量取到空值」的表征，不是「CPU 不支持 NEON」；
+                        --disable-asm 会真的丢掉全部 aarch64 汇编优化（实测本机 asm: yes 时可
+                        正常编译并跑通 102 项 checkasm），属把可修的问题降级为功能损失
+forbid_1_consequence:   产物性能大幅下降且掩盖真实根因；后续同类报错仍会复现
+forbid_2_pattern:       认为这是 NEON/CPU 能力问题而去调 -mfpu=neon 或换工具链版本
+forbid_2_reason:        错误文本来自 configure 的 else 分支，该分支不看任何 NEON 探测结果，
+                        只代表 as_check 这一条命令失败；aarch64 上用 -mfpu=neon 亦不适用
+forbid_2_consequence:   在错误方向上消耗多轮 rebuild，问题依旧
+
+doc_file:               knowledge/drafts/DRAFT-autotools-toolchain-vars-empty-vs-unset.md
+last_updated:           2026-09-13
+source_event:           x264 r3223 适配，CI worker 导出空 AS 导致 configure 汇编自检失败并报 "no NEON support"
+authors:                atomcode-executor
+source_pr:              9815
+source_commit:          ee0e8896c
+
+similar_to:             DRAFT-libpfm-4.13.0-make-sys-linux-gate, DRAFT-infoware-cpuid-arch-guard
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-13
+
+draft:                  true
+contributor_id:         ffieldd22_-

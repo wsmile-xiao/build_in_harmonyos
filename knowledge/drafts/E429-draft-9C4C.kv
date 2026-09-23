@@ -1,0 +1,76 @@
+#====================================================================
+# 知识图谱草稿（draft）— curtain 0.3 路径 B 贡献
+# 贡献者: kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+# 来源 PR: #10116（分支 feat/curtain-0.3），与归档适配同一原子 PR 交付
+# 文件名由 python3 scripts/ohc-run.py graph add E429 --draft 生成
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E429
+trigger_tool: napi|ArkTS|image
+phase: runtime
+error_signature: colors mismatch|PixelMapNapi|ReadPixelsToBuffer|SIGSEGV\(SEGV_MAPERR\)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category: ohos, api, memory, runtime, packaging
+match_keywords: NAPI, ArkTS, ArkUI, image.createPixelMap, external ArrayBuffer, readPixelsToBuffer, release, use-after-free, SIGSEGV, SEGV_MAPERR, cppcrash, PixelMapNapi, HAP
+title: ArkTS/NAPI 像素缓冲集成契约：image.createPixelMap 不接受 NAPI external ArrayBuffer（colors mismatch/进程崩溃）；异步图像对象必须在全部 await 完成后 release（否则 use-after-free 崩溃）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: 两个并列契约（curtain 0.3 真机实测）。1) 内存语义：NAPI 用 napi_create_external_arraybuffer 返回像素缓冲（零拷贝、内存归 C 核心/NAPI finalizer 管理）时，ArkTS 的 image.createPixelMap(buffer, options) 不接受其内存/长度语义，实测报 PixelMapNapi: colors mismatch（或进程崩溃），无法建立 PixelMap；必须用 napi_create_arraybuffer + memcpy 返回拷贝。2) 生命周期：image 的 createPixelMap/getImageInfo/readPixelsToBuffer 是异步接口（内部经 napi_queue_async_work_with_qos 排队），若在 await 全部完成前 release ImageSource/PixelMap，异步回调 resolve 后 Promise 续体恢复执行时会触碰已释放对象，产生 SIGSEGV(SEGV_MAPERR)，cppcrash 崩溃栈特征：主线程 #01 at initAsync entry (Curtain.ets) + 提交栈 OHOS::Media::PixelMapNapi::ReadPixelsToBuffer → napi_queue_async_work_with_qos。
+affected_scope: 所有 ArkUI 宿主 + NAPI 原生模块的应用（图像处理、游戏/渲染宿主、遮罩类应用），只要把 native 像素缓冲交给 ArkTS image API，或对 image 异步对象做过早 release，都会命中；curtain 0.3 实测 colors mismatch 1 次 + cppcrash 3 次。
+verification_cmd: hdc shell hilog -x | grep -E "PixelMapNapi|CurtainPage" ; hdc shell "ls -t /data/log/faultlog/faultlogger/ | grep curtainhost" ; hdc shell snapshot_display -f /data/local/tmp/shot.jpeg
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: copied-arraybuffer-and-release-after-all-awaits
+rec_description: 1) NAPI 像素输出必须用 napi_create_arraybuffer(env, len, &data, &value) + memcpy(data, pixels, len) 返回拷贝，禁止 napi_create_external_arraybuffer；2) ArkTS 侧用 try/finally 或线性顺序，把所有 image 异步调用（source.createPixelMap / decoded.getImageInfo / decoded.readPixelsToBuffer）全部 await 完成之后，再统一 release() ImageSource 与 PixelMap；3) 多对象/循环场景把 release 集中到最后一个 await 之后（不要在中间 await 前释放任何 image 对象）；4) 验收口径：hilog 不再出现 colors mismatch 且 pixelMap=true；/data/log/faultlog/faultlogger 不再新增该应用 cppcrash；snapshot_display 截图出现真实画面。
+rec_command: hdc shell hilog -x | grep -E "PixelMapNapi: colors mismatch|pixelMap=|setSource="
+rec_auto_fix: false
+rec_impl: source-patch
+
+# 回退方案
+fallback_priority:      2
+fallback_approach: caller-provided-buffer-reuse
+fallback_description: 若每帧拷贝开销不可接受：由 ArkTS 侧持久化一个 ArrayBuffer，NAPI 暴露 copyPixelsInto(AB) 写接口（仍有一次拷贝，但复用分配、避免每帧新建）；或把 PixelMap 构建整体下移到 native（使用 OH_PixelmapNative 原生接口），ArkTS 只消费句柄。两条均为本 PR 未采用的备选，采用前需单独验证。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl: manual-source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern: napi_create_external_arraybuffer
+forbid_1_reason: external ArrayBuffer 生命周期由 NAPI finalizer 管理，与 ArkTS image 框架期望的常规 ArrayBuffer 内存/长度语义不一致（实测 colors mismatch 或进程崩溃）。
+forbid_1_consequence: PixelMap 创建失败或应用进程崩溃（cppcrash），功能不可用。
+forbid_2_pattern: release\(\)[^\n]{0,60}(createPixelMap|readPixelsToBuffer|getImageInfo)
+forbid_2_reason: 在 image 异步调用完成前 release ImageSource/PixelMap，Promise 续体会触碰已释放对象（use-after-free）。
+forbid_2_consequence: SIGSEGV(SEGV_MAPERR) 崩溃，且崩溃栈不直接指向 release 行，定位成本高。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             E474, E462, E321
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E429.md
+last_updated: 2026-09-15
+source_event: curtain 0.3 真机适配：external ArrayBuffer 传给 image.createPixelMap 报 colors mismatch；异步图像对象过早 release 触发 3 次 cppcrash（SIGSEGV，栈含 PixelMapNapi::ReadPixelsToBuffer）
+
+# ═══ 知识协作 ═══
+authors:
+source_pr: 10116
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9C4C

@@ -1,0 +1,27 @@
+#====================================================================
+# DRAFT-E5xx-ohos-musl-unwind-tables-empty-stacktrace - OHOS musl 默认不发射 unwind tables 导致栈追踪库输出空栈
+#====================================================================
+
+id:                     DRAFT-E5xx-ohos-musl-unwind-tables-empty-stacktrace
+trigger_tool:           clang|gcc|cmake
+phase:                  build|testing
+error_signature:        backtrace frames: 0|frames: 0\b|<empty trace>|_Unwind_Backtrace.*0 frame|stack trace.*empty|trace\.frames\.size\(\) == 0
+
+severity:               2
+category:               platform|libc|unwinding|debugging
+match_keywords:         unwind tables, .eh_frame, funwind-tables, musl, backtrace, 0 frames, empty stack, stack trace, _Unwind_Backtrace, execinfo, stack walking, libbacktrace, backward-cpp, stacktrace library
+title:                  OHOS musl 工具链默认优化不发射 unwind tables，栈追踪库运行时输出 0 帧空栈
+
+root_cause:             OHOS musl 环境的 clang 默认编译优化（-O1/-O2）不发射 .eh_frame/unwind tables（glibc 生态的 GCC/clang 发行版默认带 -fasynchronous-unwind-tables）。所有依赖帧指针回溯或 unwind 信息的栈追踪方案（execinfo backtrace、libgcc _Unwind_Backtrace、libbacktrace、backward-cpp、boost::stacktrace、cpptrace）在运行时拿不到任何帧信息：backtrace() 返回 0、_Unwind_Backtrace 回调一次都不触发。编译链接全部成功，只有运行期才能发现空栈——构建期完全无告警。实测对照：同一程序加 -funwind-tables 后 backtrace 返回 3 帧、_Unwind_Backtrace 回调正常、cpptrace generate_trace() 完整输出含文件名/行号的栈帧。
+affected_scope:         HarmonyOS PC（musl libc）上任何依赖栈展开的库或程序：栈追踪库（cpptrace/libbacktrace/backward-cpp/boost::stacktrace）、崩溃收集器、性能采样器、异常诊断工具。凡 -O 优级编译且需要运行时回溯的目标都受影响。cpptrace 1.0.4 实测：不带该 flag 时 test 输出 <empty trace>，加上后 unittest 155/155 全过。
+verification_cmd:       写最小探针验证：void* buf[16]; int n = backtrace(buf, 16); 不带 -funwind-tables 时 n==0（空栈），带 -funwind-tables 编译后 n>=2（真实帧）。或跑栈库自带的栈追踪测试观察是否输出 0 帧。
+
+rec_priority:           1
+rec_approach:           add-funwind-tables-flag
+rec_description:        对需要运行时栈展开的目标（库本体、测试程序、消费方示例）在编译选项中显式加 -funwind-tables。Conan 配方里通过 CMakeToolchain 全局注入（tc.variables["CMAKE_CXX_FLAGS"] 追加）或对特定 target 加 target_compile_options；test_package/CMakeLists.txt 对测试目标显式添加。注意：栈库的公共头文件里 CPPTRACE_FORCE_NO_INLINE 等宏只能保证函数不被内联，不能弥补缺失的 unwind tables。
+rec_command:            CMakeLists.txt: if(NOT MSVC) target_compile_options(<target> PRIVATE -funwind-tables) endif()；或 Conan generate(): tc.variables["CMAKE_CXX_FLAGS"] = "... -funwind-tables"
+rec_auto_fix:           false
+rec_impl:               per-target-compile-flag
+fallback:               若目标平台/编译器不支持 -funwind-tables（如部分嵌入式工具链），退而使用 -fno-omit-frame-pointer + 帧指针回溯（部分栈库支持 fast path），或显式接受平台限制（栈追踪功能降级为空栈）并在 notes.md/PR 声明。OHOS clang 15 实测 -funwind-tables 完全可用。
+verify_builds:          cpptrace/1.0.4 本地 conan create（unittest 155/155 PASSED，test_cpptrace_ohos 4 帧 unwind OK）；CI 构建号待合入后回填
+prescan_pattern:        backtrace\s*\(|_Unwind_Backtrace|generate_raw_trace|stacktrace

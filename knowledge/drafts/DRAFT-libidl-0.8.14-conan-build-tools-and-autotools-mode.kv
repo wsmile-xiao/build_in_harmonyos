@@ -1,0 +1,111 @@
+# ══ Draft knowledge entry — OHOS 构建期工具包环境缺陷 + autotools 交叉/原生抉择 ══
+# Timestamp: 2026-09-18
+# Software: libidl 0.8.14（CORBA IDL 解析库；autotools + bison/flex + glib 依赖）
+# Gate: conan create（ohos-aarch64 profile，clang 15）rc=0；上游 tstidl 1/1（真机）、
+#       消费者断言 14/14（OHOS aarch64 真机实跑）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. 复核下方证据
+#   2. 重命名为 E0XX.kv 并移入 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 增加一行
+id: draft-libidl-0.8.14-conan-build-tools-and-autotools-mode
+title: bison/flex 工具包的 OHOS 环境缺陷（数据目录前缀、硬编码 m4 路径、无 bin）与 autotools 交叉/原生模式抉择（AC_RUN_IFELSE vs config.guess）
+trigger_tool: conan|configure|make|bison|flex|libtool
+phase: configuration|compilation|linking
+error_signature: m4 subprocess failed|cannot open: No such file or directory.*m4sugar\.m4|Broken pipe|is not a valid libtool archive|was moved|cannot run test program while cross compiling|flex is required|unable to guess system type
+severity: 3
+category: conan|autotools|build-system|toolchain|portability
+match_keywords: bison, BISON_PKGDATADIR, M4, m4 subprocess failed, flex, tool_requires,
+  virtualbuildenv, PATH, .la, "not a valid libtool archive", "was moved", DESTDIR,
+  AC_RUN_IFELSE, "cannot run test program while cross compiling", config.guess,
+  HMDFS, transitive_headers, cpp_info.requires, autotools, yacc, lex
+keywords: bison, BISON_PKGDATADIR, M4, m4, flex/2.6.4, flex/2.6.4.2, tool_requires,
+  VirtualBuildEnv, libtool .la, not a valid libtool archive, AC_RUN_IFELSE,
+  cross compiling, build==host, config.guess, unable to guess system type, HMDFS,
+  transitive_headers, transitive_libs, cpp_info.requires
+root_cause: >
+  (1) 制品仓的 bison 二进制在 OHOS 上不可直接用，需要两处环境修复：① 它的数据目录
+  是 `/=前缀`（Conan `--prefix=/` + `DESTDIR` 安装留下的痕迹），直接运行时找不到
+  `/share/bison/m4sugar/m4sugar.m4`，报 `cannot open: No such file or directory`；
+  ② 二进制里硬编码的 m4 路径是发布机上的 `/data/service/hnp/bin/m4`，在设备上不存在，
+  表现为 `bison: m4 subprocess failed` 与 `Broken pipe`（bison 通过 m4 管道生成代码，
+  m4 无法启动时写管道即 EPIPE）。更隐蔽的是：上游 autotools 项目常把 `YFLAGS` 写成
+  `-d -v 2>/dev/null`，把 bison 的 stderr 吞掉，日志里只剩 `make: *** [stamp-parser] Error 1`。
+  (2) `flex/2.6.4` 的包**不含 `bin/`**（无 flex 可执行文件），而 `flex/2.6.4.2` 含
+  可执行文件；`tool_requires` 选错版本时 configure 直接报 `flex is required ...`。
+  (3) autotools 在 OHOS 上的模式抉择：`configure` 里若有 `AC_RUN_IFELSE`（如检测
+  guint64 的 printf/scanf 格式），传不同的 `--build`/`--host` 会被判定为交叉编译，
+  直接失败 `cannot run test program while cross compiling`；而完全不传三元组又会触发
+  `config.guess`——实测现代 `config.guess`（2025-07-10）在 OHOS 上因无法在 HMDFS
+  创建临时文件而 `unable to guess system type`。
+  (4) 依赖包（glib/pcre2/libffi）内的 libtool `.la` 同样记录了 `libdir='/lib'`，
+  libtool 解析依赖 `.la` 时报 `library ... was moved` 继而
+  `` //lib/libpcre2-8.la' is not a valid libtool archive ``，链接中断。
+  (5) Conan 2 默认**不向消费者传播依赖**：库的公开头文件若 `#include <glib.h>`，
+  仅 `self.requires("glib/...")` 会让消费者编译时报 `glib.h: No such file`。
+approach: >
+  构建期工具一律用 tool_requires（制品仓已发布）并通过 VirtualBuildEnv 注入 PATH；
+  对 bison 额外注入 `BISON_PKGDATADIR=<bison包>/share/bison` 与 `M4=$(command -v m4)`；
+  flex 选 2.6.4.2。configure 用**相同的** `--build/--host` 三元组（既避免 config.guess，
+  又保持非交叉从而允许 AC_RUN_IFELSE 在设备上原生执行）。构建前删除依赖包的 `lib/*.la`。
+  公开头依赖用 `self.requires(..., transitive_headers=True, transitive_libs=True)` +
+  `cpp_info.requires` 显式传播。
+rec_command: |
+  # build_requirements()
+  self.tool_requires("flex/2.6.4.2")   # 注意：flex/2.6.4 的包不含 bin/
+  self.tool_requires("bison/3.8.2")
+
+  # requirements()：公开头依赖必须传播
+  self.requires("glib/2.84.0", transitive_headers=True, transitive_libs=True)
+
+  # generate()
+  bison = self.dependencies.build["bison"]
+  env = Environment()
+  env.define("BISON_PKGDATADIR", os.path.join(bison.package_folder, "share", "bison"))
+  m4 = shutil.which("m4")
+  if m4:
+      env.define("M4", m4)      # 覆盖 bison 内置的 /data/service/hnp/bin/m4
+  env.vars(self).save_script("conanbuildenv-bison")
+  VirtualBuildEnv(self).generate()   # 把 tool_requires 的 bin 注入 PATH
+  tc = AutotoolsToolchain(self)
+  tc.configure_args += ["--build=aarch64-linux-ohos", "--host=aarch64-linux-ohos"]
+  tc.generate()
+
+  # build()：删除依赖 .la（前缀失真），再 configure/make
+  for name in ("glib", "pcre2", "libffi"):
+      dep = self.dependencies.get(name)
+      for la in glob.glob(os.path.join(getattr(dep, "package_folder", "") or "", "lib", "*.la")):
+          os.remove(la)
+verification_cmd: >
+  conan create archives/l/libidl/0.8.14 --build=missing \
+    -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  # 期望 rc=0：上游 tstidl sample.idl exit 0；test_package 14/14 断言
+  # 诊断单点：
+  #   BISON_PKGDATADIR=<bison>/share/bison <bison> -y -d -v parser.y     # 仍报 m4 subprocess failed
+  #   BISON_PKGDATADIR=<bison>/share/bison M4=$(command -v m4) <bison> … # 成功
+  #   strings <bison>/bin/bison | grep m4                                # 可见硬编码路径
+affected_scope: >
+  所有在 OHOS 上用 autotools 且需要 yacc/lex 的项目（libIDL、acpica、ball、bandwidthd、
+  canl-c、perl 系等）；所有 configure 含 AC_RUN_IFELSE 的工程（guint64 格式、字节序、
+  类型宽度等）；所有链接 glib/pcre2 等 libtool 制品的工程；所有公开头文件引用第三方
+  头文件的 Conan 配方。
+related: >
+  与 E011（HMDFS 上 umask 077 临时目录不可写）同属“HMDFS 文件系统语义”族，但本条是
+  构建期工具与 autotools 模式问题；与“Conan --prefix=/ + DESTDIR 导致 .pc/.la 前缀
+  失真”同源（本条给出 .la 的处置与 bison 数据目录的处置）。已合入的
+  archives/b/bookloupe/2.0 用同样思路删除依赖 .la，可交叉引用。
+authors:
+  - "frj__ <241250055@smail.nju.edu.cn>"
+source_pr: pending
+source_commit: pending
+draft_date: 2026-09-18
+
+# ══ 补充：PR 规模与 AI 检视 ══
+# 本条目相关的一手经验：不要在上游 PR 中携带 config.sub/config.guess 全文
+# （2364+1818 行会导致平台 AI 检视以“变更过大”跳过，评审门禁 rule6 不满足）。
+# 正确做法是 16 行最小补丁（a52dec 先例）+ 显式 --build/--host。详见同目录 .md 附录。
+pr_size_lesson: >
+  上游 autotools PR 里避免携带 config.sub/config.guess 全文（各上千行）；平台 AI 检视
+  会因变更过大直接跳过（“7 个可审文件、4513 行，超出处理范围”），使 rule6 拿不到结论。
+  用最小早退补丁（16 行）+ 显式 --build/--host 即可达到同样效果。

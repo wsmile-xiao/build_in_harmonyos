@@ -1,0 +1,184 @@
+--- a/src/policy-xml.c
++++ b/src/policy-xml.c
+@@ -31,7 +31,17 @@
+ #include <string.h>
+ #include <stdlib.h>
+ #include <stdio.h>
+-#include <obstack.h>
++/* GNU <obstack.h> is only shipped by glibc; musl-based libcs (such as the
++ * one used on HarmonyOS) do not provide it. Fall back to the minimal
++ * compatible implementation vendored in src/obstack.h, which covers
++ * exactly the obstack subset used in this file. The system header is
++ * still preferred whenever the compiler can find it, so builds on
++ * glibc systems behave exactly as before. */
++#if defined(__has_include) && __has_include(<obstack.h>)
++#include <obstack.h>
++#else
++#include "obstack.h"
++#endif
+ 
+ #include <dpkg/dpkg.h>
+ #include <expat.h>
+--- /dev/null
++++ b/src/obstack.h
+@@ -0,0 +1,160 @@
++/*
++ * Minimal GNU obstack compatibility header.
++ *
++ * debsig-verify uses a small subset of the GNU obstack API in
++ * src/policy-xml.c (obstack_init, obstack_alloc, obstack_copy0 and
++ * obstack_free). The GNU C library ships <obstack.h>, but musl-based
++ * libcs (such as the one used on HarmonyOS) do not, so building there
++ * fails with "fatal error: 'obstack.h' file not found".
++ *
++ * This header implements exactly that subset on top of the chunk
++ * allocator macros the caller defines (obstack_chunk_alloc and
++ * obstack_chunk_free, the same contract as GNU obstack.h: policy-xml.c
++ * defines them as m_malloc from libdpkg and free from libc).
++ *
++ * Semantics follow the GNU documentation for the covered calls:
++ * - obstack_init() prepares an empty obstack; allocation is lazy, so
++ *   it cannot fail and always reports success;
++ * - obstack_alloc() returns a freshly allocated object that stays
++ *   valid until the obstack (or that object and everything after it)
++ *   is freed;
++ * - obstack_copy0() copies a byte range plus a terminating NUL byte;
++ * - obstack_free(h, NULL) releases every object of the obstack.
++ *
++ * Written for this port; not copied from any existing implementation.
++ */
++
++#ifndef DEBSIG_VERIFY_OBSTACK_H
++#define DEBSIG_VERIFY_OBSTACK_H
++
++#include <stddef.h>
++#include <stdlib.h>
++#include <string.h>
++
++/* Only the address of this struct is ever passed around by users,
++ * so its layout is private to this header. */
++struct obstack {
++  void **chunks;
++  size_t nchunks;
++  size_t capacity;
++};
++
++static int obstack_compat_init(struct obstack *h);
++static int obstack_compat_grow(struct obstack *h, void *chunk);
++static void *obstack_compat_alloc(struct obstack *h, size_t size,
++                                  void *(*allocfn)(size_t),
++                                  void (*freefn)(void *));
++static void *obstack_compat_copy0(struct obstack *h, const void *address,
++                                  size_t length, void *(*allocfn)(size_t),
++                                  void (*freefn)(void *));
++static void obstack_compat_free(struct obstack *h, void *object,
++                                void (*freefn)(void *));
++
++/* The macros below name obstack_chunk_alloc/obstack_chunk_free so that
++ * they are looked up at their expansion site (in policy-xml.c, after
++ * those macros are defined there), exactly like with the GNU header. */
++#define obstack_init(h) \
++  obstack_compat_init(h)
++
++#define obstack_alloc(h, size) \
++  obstack_compat_alloc((h), (size), obstack_chunk_alloc, obstack_chunk_free)
++
++#define obstack_copy0(h, address, length) \
++  obstack_compat_copy0((h), (address), (length), \
++                       obstack_chunk_alloc, obstack_chunk_free)
++
++#define obstack_free(h, object) \
++  obstack_compat_free((h), (object), obstack_chunk_free)
++
++static int
++obstack_compat_init(struct obstack *h)
++{
++  h->chunks = NULL;
++  h->nchunks = 0;
++  h->capacity = 0;
++  return 1;
++}
++
++static int
++obstack_compat_grow(struct obstack *h, void *chunk)
++{
++  void **grown;
++  size_t newcap;
++
++  if (h->nchunks == h->capacity) {
++    if (h->capacity == 0)
++      newcap = 16;
++    else
++      newcap = h->capacity * 2;
++    grown = realloc(h->chunks, newcap * sizeof(*grown));
++    if (grown == NULL)
++      return 0;
++    h->chunks = grown;
++    h->capacity = newcap;
++  }
++  h->chunks[h->nchunks] = chunk;
++  h->nchunks++;
++  return 1;
++}
++
++static void *
++obstack_compat_alloc(struct obstack *h, size_t size,
++                      void *(*allocfn)(size_t), void (*freefn)(void *))
++{
++  void *chunk;
++
++  if (size == 0)
++    size = 1;
++  chunk = allocfn(size);
++  if (chunk == NULL)
++    return NULL;
++  if (!obstack_compat_grow(h, chunk)) {
++    freefn(chunk);
++    return NULL;
++  }
++  return chunk;
++}
++
++static void *
++obstack_compat_copy0(struct obstack *h, const void *address, size_t length,
++                      void *(*allocfn)(size_t), void (*freefn)(void *))
++{
++  char *copy;
++
++  copy = obstack_compat_alloc(h, length + 1, allocfn, freefn);
++  if (copy == NULL)
++    return NULL;
++  memcpy(copy, address, length);
++  copy[length] = '\0';
++  return copy;
++}
++
++static void
++obstack_compat_free(struct obstack *h, void *object,
++                    void (*freefn)(void *))
++{
++  size_t i;
++  size_t first;
++
++  if (object == NULL) {
++    first = 0;
++  } else {
++    first = h->nchunks;
++    for (i = 0; i < h->nchunks; i++) {
++      if (h->chunks[i] == object) {
++        first = i;
++        break;
++      }
++    }
++  }
++  for (i = first; i < h->nchunks; i++)
++    freefn(h->chunks[i]);
++  if (first == 0) {
++    free(h->chunks);
++    h->chunks = NULL;
++    h->capacity = 0;
++  }
++  h->nchunks = first;
++}
++
++#endif /* DEBSIG_VERIFY_OBSTACK_H */

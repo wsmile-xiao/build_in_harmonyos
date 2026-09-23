@@ -1,0 +1,120 @@
+#====================================================================
+# DRAFT-ohos-clang15-missing-p0960-aggregate-paren-init — OHOS clang15 未实现
+#   C++20 P0960（聚合的括号式初始化），emplace_back/construct_at 报错
+# 对应文档: knowledge/drafts/DRAFT-ohos-clang15-missing-p0960-aggregate-paren-init.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-clang15-missing-p0960-aggregate-paren-init
+trigger_tool:           clang|cmake|conan|make
+phase:                  compilation
+error_signature:        no matching function for call to 'construct_at'|
+                         no matching constructor for initialization of|
+                         allocator_traits.*construct.*aggregate
+
+severity:               2
+category:               clang, libcxx, cxx20, porting, aggregate-init
+match_keywords:         P0960, aggregate init, 聚合括号初始化, construct_at,
+                         emplace_back, parenthesized initialization, clang15,
+                         clang 16, no matching constructor, libcifpp, cif-tools,
+                         std::make_unique, std::vector emplace
+title:                  OHOS clang15 未实现 C++20 P0960（聚合的括号式初始化）——
+                        `emplace_back` / `construct_at` / `make_unique` 对聚合类型报
+                        "no matching function for call to 'construct_at'"，需为聚合补显式构造函数
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             C++20 的 P0960（Paren-init of aggregates）允许用**圆括号**直接
+                        初始化聚合类型：`Agg x(1, 2.0)`、`v.emplace_back(1, 2.0)`、
+                        `std::make_unique<Agg>(1, 2.0)`。该特性 **Clang 16 才实现**，
+                        OHOS 的 clang 15 尚未支持——实测在 `-std=c++20` 与 `-std=c++2b`
+                        下**均失败**（不是标准开关问题）。失败点不在用户代码行，
+                        而在 libc++ 内部：`emplace_back` 走
+                        `allocator_traits::construct` → `std::construct_at`，
+                        报
+                          `__memory/allocator_traits.h:298: error: no matching function
+                           for call to 'construct_at'`
+                        并级联到 `vector::__construct_one_at_end` / `emplace_back`。
+                        因报错落在 C++ 标准库头文件里，**易误判为 libc++ 缺陷或
+                        工具链问题**，实际是编译器前端缺该 C++20 特性。
+affected_scope:         OHOS clang15 上构建、且对**聚合类型**（无用户声明构造函数的
+                        struct/class）使用圆括号式初始化的 C++20 项目；高频触发点是
+                        `std::vector<T>::emplace_back(args...)`、
+                        `std::make_unique<T>(args...)`、`std::construct_at`。
+                        与同族 P1091（lambda 捕获结构化绑定，见
+                        DRAFT-ohos-clang15-libcxx-cxx20-capability-gaps）同属
+                        "clang15 缺 C++20 特性"，但**特性不同、处置不同**。
+verification_cmd:       最小复现（聚合 + emplace_back）：
+                        printf '#include <vector>\nstruct B{int c;const char*a;};\nint main(){std::vector<B> v;v.emplace_back(1,"x");}\n' > p.cpp
+                        <ohos-clang++> -std=c++20 -fexperimental-library -stdlib=libc++
+                          --target=aarch64-linux-ohos --sysroot=<sysroot> -fsyntax-only p.cpp
+                        # 报 allocator_traits.h: no matching function for call to 'construct_at'
+                        # 对照：把 -std 换成 c++2b **同样失败**（证明是前端特性缺失，非标准版本）
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           add-explicit-ctor-to-aggregate
+rec_description:        为报错的**聚合类型补一个显式构造函数**，把圆括号初始化变成
+                        普通构造函数调用。补 ctor 而非改写每个调用点，是因为聚合的
+                        调用点可能有十几处（实测 cif-tools 的 `gBackslashCommands`
+                        有 8 处 `emplace_back` 站点），补一处 ctor 即可全解。
+                        补 ctor 前须确认该类型**没有指定初始化器**用法
+                        （`grep -E '\.<member>\s*='` 应为空），否则补 ctor 会破坏
+                        指定初始化（designated initializers 要求聚合）。
+                        同源先例：libcifpp/10.0.4 的 `_patch_aggregate_ctors`
+                        （为 virtual_table / virtual_cursor 补 ctor）即此思路。
+rec_command:            # 在聚合定义内补：
+                        #   Agg(int c, const char* a) : c(c), a(a) {}
+                        # 并确认无 designated-initializer 用法：
+                        grep -rnE "<TypeName>[^(]*\{[^}]*\.[a-zA-Z_]+\s*=" <src>/
+rec_auto_fix:           partial
+rec_impl:               patch-add-explicit-ctor
+
+fallback_priority:      2
+fallback_approach:      rewrite-call-sites-to-braces
+fallback_description:   若因故不能改类型定义（如该聚合在公共头且影响面过大、或
+                        确实使用了指定初始化器），退化为**改写调用点为花括号**：
+                        `v.emplace_back(1, "x")` → `v.push_back(B{1, "x"})`。
+                        缺点是要逐站点改写（本次 8 处），且 `make_unique` 一类调用
+                        需改为 `std::make_unique<B>(B{...})`，可读性略降。
+fallback_command:       # 逐站点：emplace_back(args...) -> push_back(T{args...})
+fallback_auto_fix:      false
+fallback_impl:          rewrite-call-sites
+
+forbid_1_pattern:       因 construct_at 报错.*(怀疑|归因).*(libc\+\+|标准库缺陷|工具链损坏)|
+                         报错在 allocator_traits.*(认为|判断).*是标准库问题
+forbid_1_reason:        报错位置在 libc++ 头文件里，只是**症状落点**；根因是 clang15
+                        前端未实现 P0960。归因给标准库会导致尝试换/降 libc++ 等
+                        无效方向。
+forbid_1_consequence:   在错误方向试错（改工具链、换标准库版本），真因未解。
+
+forbid_2_pattern:       用 -std=c\+\+2b.*(以为|认为).*可解 P0960|
+                         升标准版本.*解决.*construct_at
+forbid_2_reason:        实测 `-std=c++20` 与 `-std=c++2b` **同样失败**——P0960 是
+                        前端特性实现问题，与 `-std` 取值无关。
+forbid_2_consequence:   白试一轮，且可能顺带引入其他标准差异导致的编译错误。
+
+principles:             upstream-compat-evidence, measure-not-assume
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-ohos-clang15-libcxx-cxx20-capability-gaps]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-clang15-missing-p0960-aggregate-paren-init.md
+last_updated:           2026-09-16
+source_event:           cif-tools 2.0.0 适配（mmcql.cpp 的 gBackslashCommands
+                        emplace_back 触发 construct_at 报错，8 个站点）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  2
+metrics_fail_count:     1
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        2E77

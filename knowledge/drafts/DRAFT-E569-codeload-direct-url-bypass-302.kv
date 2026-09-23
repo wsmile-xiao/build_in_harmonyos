@@ -1,0 +1,68 @@
+draft: DRAFT-E569
+status: pending-editor-review
+id: E569
+doc_file: doc/E569.md
+title: CI Worker 缺 curl 时 GitHub archive 302 重定向链死——conandata.yml 源 URL 改 codeload 直链规避
+category: conan, ci, download, worker-env
+severity: 2
+match_keywords: >
+  codeload, github archive, 302 redirect, 重定向, No such file or directory: 'curl',
+  缺 curl, Pre-download, 源码下载超时, gh-proxy, 镜像前缀剥除, git 缺 libz,
+  Error loading shared library libz.so, Max retries exceeded, ConnectTimeoutError,
+  github.com timed out, worker 网络受限, curl -L, 跟随重定向
+error_signature: >
+  \[Errno 2\] No such file or directory: 'curl'|Pre-download.*failed.*will rely on conan's download|Error downloading file https://github\.com/.+/archive/refs/tags/.+\.tar\.gz.*Max retries exceeded|ConnectTimeoutError.*github\.com.*timed out|Error loading shared library libz\.so.*needed by.*git|源码下载超时.*github\.com/.+/archive/refs/tags
+root_cause: >
+  CI Worker 池（buildbot conan-pr-check）部分机器既无 curl 二进制又无可用的
+  git（git 缺 libz.so，exit 127）。conan 源码下载走两条通道：(1) CI 的
+  Pre-download 步骤用外部 curl 下载，curl 不存在直接 [Errno 2] 失败；
+  (2) conan 自身 source() 用 Python requests 直连。github.com 的 archive
+  形态 URL（/archive/refs/tags/vX.Y.Z.tar.gz）是 302 重定向（跳
+  codeload.github.com），需要客户端跟随重定向；且 conandata.yml 手动加
+  gh-proxy/ghfast 等镜像前缀会被 CI Pre-download 剥除（R39），镜像兜底无效。
+  因此 github archive 形态在缺 curl 的 worker 上整链死：Pre-download 死
+  （无 curl）→ conan 直连死（ConnectTimeout）→ 退化 git clone 死（git 缺
+  libz）。而 codeload.github.com 直链（/tar.gz/refs/tags/vX.Y.Z 形态）是
+  终端 URL，实测 HTTP 200 无跳转，tarball 字节与 archive 形态完全一致
+  （sha256 相同），任何可达 codeload 域名的 worker 均可直下。
+solution: |
+  conandata.yml 源 URL 从 archive 形态改为 codeload 直链形态（sha256 不变，
+  两者 tarball 字节一致）：
+
+  ```yaml
+  # 改前（302 重定向链，worker 缺 curl 时死）
+  sources:
+    url: "https://github.com/Tencent/MMKV/archive/refs/tags/v2.4.2.tar.gz"
+    sha256: "e77d81daab0c905c06cad6bceb6ad01ca606a428987e2f1f41a2aa162592c685"
+
+  # 改后（codeload 直链，200 无跳转，任何可达 worker 可下）
+  sources:
+    url: "https://codeload.github.com/Tencent/MMKV/tar.gz/refs/tags/v2.4.2"
+    sha256: "e77d81daab0c905c06cad6bceb6ad01ca606a428987e2f1f41a2aa162592c685"
+  ```
+
+  ⚠️ 连带修法（必须同做，否则换一个坑）：codeload URL 末段是 tag 名
+  （v2.4.2，无 .tar.gz 后缀），conan get() 按 basename 推断压缩格式会误走
+  zip 分支报 BadZipFile——source() 的 get() 必须显式传
+  filename="<软件>-<版本>.tar.gz"（详见 E276/E483）：
+
+  ```python
+  def source(self):
+      get(self, **self.conan_data["sources"],
+          filename="mmkv-2.4.2.tar.gz", strip_root=True)
+  ```
+
+  验证：本机 curl -fsSL 实测 codeload 直链 200 无 302；
+  sha256sum 与 archive 形态比对一致后才写 conandata.yml。
+fallback: >
+  codeload.github.com 也不可达（worker 出口连 codeload 域名都不通）时：
+  (1) 等待/重试撞有 curl 或 git 可用的健康 worker（git-clone 步骤能过即健康）；
+  (2) 上游有 GitCode/Gitee 官方镜像时换镜像 URL（R39 允许权威镜像）；
+  (3) 都不行 → 按环境故障上报（dependency_missing/env 边界），
+  禁止把个人 fork/不明 CDN 塞进 conandata.yml（R39 红线）。
+verify_builds: '#45043, #45076, #45127, #45160, #45233, #45255, #45277, #45278（失败实录）→ #45438, #45604（codeload 直链+filename 修复后 CI 绿）'
+reference_impl: >
+  PR !9693（mmkv 2.4.2）commit 5f2826d321（URL 改 codeload 直链）+
+  7a27efe6d5（get() 显式 filename）；同期对照 PR !9691（qrcodegen）/
+  !9692（xhook）同用 github archive 形态但踩中健康 worker（CI-007/CI-020/
+  CI-037）CI 绿——印证"下载路径是否踩重定向链"是决定因素而非纯随机网络抖动。

@@ -1,0 +1,171 @@
+--- a/src/symbols.cpp
++++ b/src/symbols.cpp
+@@ -230,6 +230,11 @@
+ #error "Environment not 32 or 64-bit."
+ #endif
+ 
++#if defined(__GLIBC__)
++/*
++ * glibc: dlinfo(handle, RTLD_DI_LINKMAP, &map) exposes the load map of the
++ * library, from which the dynamic symbol table can be walked directly.
++ */
+ std::vector<internal_symbol_info> get_symbols(void *handle, int fd) {
+     std::vector<internal_symbol_info> symbols_list;
+     struct link_map *map = nullptr;
+@@ -270,5 +275,156 @@
+ 
+     return symbols_list;
+ }
++#else
++/*
++ * Non-glibc Unix libcs (musl, and OpenHarmony's musl-based libc) do not
++ * provide dlinfo(). Symbol enumeration is done through dl_iterate_phdr():
++ * every loaded object's PT_DYNAMIC segment is parsed to locate its dynamic
++ * symbol table, and dlsym(handle, name) is used to keep only the symbols
++ * that actually resolve from the requested handle. This is equivalent to
++ * the glibc path for the purpose of symbol_info loadable reporting.
++ */
++struct symbol_enum_context {
++    void *handle;
++    std::vector<internal_symbol_info> *symbols;
++};
++
++static int collect_symbols(struct dl_phdr_info *info, size_t size, void *data) {
++    auto *context = static_cast<symbol_enum_context *>(data);
++    const ElfW(Dyn) *dynamic = nullptr;
++    unsigned long symentries = 0;
++    ElfSym *symtab = nullptr;
++    char *strtab = nullptr;
++    unsigned long strsize = 0;
++    const void *hash = nullptr;
++    const void *gnu_hash = nullptr;
++
++    for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
++        if (info->dlpi_phdr[i].p_type == PT_DYNAMIC) {
++            dynamic = reinterpret_cast<const ElfW(Dyn) *>(info->dlpi_addr +
++                                                         info->dlpi_phdr[i].p_vaddr);
++            break;
++        }
++    }
++
++    if (!dynamic)
++        return 0;
++
++    for (const ElfW(Dyn) *section = dynamic; section->d_tag != DT_NULL; ++section) {
++        if (section->d_tag == DT_SYMTAB)
++            symtab = reinterpret_cast<ElfSym *>(info->dlpi_addr + section->d_un.d_ptr);
++        else if (section->d_tag == DT_STRTAB)
++            strtab = reinterpret_cast<char *>(info->dlpi_addr + section->d_un.d_ptr);
++        else if (section->d_tag == DT_SYMENT)
++            symentries = section->d_un.d_val;
++        else if (section->d_tag == DT_STRSZ)
++            strsize = section->d_un.d_val;
++        else if (section->d_tag == DT_HASH)
++            hash = reinterpret_cast<const void *>(info->dlpi_addr + section->d_un.d_ptr);
++        else if (section->d_tag == DT_GNU_HASH)
++            gnu_hash = reinterpret_cast<const void *>(info->dlpi_addr + section->d_un.d_ptr);
++    }
++
++    if (!symtab || !strtab || strsize == 0)
++        return 0;
++
++    /*
++     * Determine the real .dynsym entry count with verifiable ELF semantics:
++     *  1. Preferred: DT_HASH. Its layout is nbucket(4) + nchain(4) + bucket[]
++     *     + chain[]; the nchain field (second 32-bit word) is the dynamic
++     *     symbol table entry count, defined by the ELF ABI.
++     *  2. Fallback: DT_GNU_HASH. The GNU hash table covers symbols with
++     *     index >= symoffset; walk every bucket chain (each chain ends with
++     *     the low bit set in chain[idx - symoffset]) and track the largest
++     *     symbol index. The table holds max(symoffset + 1, max_index + 1)
++     *     entries, which is >= the real count since every dynsym from
++     *     symoffset on appears in exactly one chain.
++     *  3. Neither hash table present: the entry count is not verifiable, so
++     *     refuse to guess and skip enumeration (provably safe, no OOB read).
++     * The previous strsize / symentries computation had no ELF meaning
++     * (DT_STRSZ is the string table byte size, DT_SYMENT the size of one
++     * symbol entry) and could under-enumerate or over-read .dynsym; it is
++     * removed.
++     */
++    unsigned long symbol_count = 0;
++
++    if (hash) {
++        const uint32_t *hash_data = static_cast<const uint32_t *>(hash);
++        symbol_count = hash_data[1]; /* nchain */
++    } else if (gnu_hash) {
++        const uint32_t *gh = static_cast<const uint32_t *>(gnu_hash);
++        const uint32_t nbuckets = gh[0];
++        const uint32_t symoffset = gh[1];
++        const uint32_t bloom_size = gh[2];
++        /*
++         * GNU hash table layout: nbuckets(4) symoffset(4) bloom_size(4)
++         * bloom_shift(4) bloom[bloom_size] buckets[nbuckets] chain[].
++         * IMPORTANT: the bloom filter entries are ElfW(Xword) wide — 8 bytes
++         * on 64-bit ELF, 4 bytes on 32-bit ELF. Reading them as uint32_t on
++         * a 64-bit target shifts buckets/chains pointers out of place.
++         */
++        const ElfW(Xword) *bloom = reinterpret_cast<const ElfW(Xword) *>(gh + 4);
++        const uint32_t *buckets = reinterpret_cast<const uint32_t *>(bloom + bloom_size);
++        const uint32_t *chains = buckets + nbuckets;
++        unsigned long max_index = 0;
++        /* Chain-walk safety guard: every bucket chain must end with the low
++         * bit of chain[idx - symoffset] set; on a corrupt/unverifiable table
++         * bail out instead of walking out of bounds. */
++        const unsigned long max_chain_steps = 1000000UL;
++
++        for (uint32_t b = 0; b < nbuckets; ++b) {
++            uint32_t idx = buckets[b];
++            if (idx == 0 || idx < symoffset)
++                continue;
++            unsigned long walked = 0;
++            for (;;) {
++                if (idx > max_index)
++                    max_index = idx;
++                uint32_t chain_word = chains[idx - symoffset];
++                if (chain_word & 1u)
++                    break;
++                if (++walked > max_chain_steps) {
++                    /* Unverifiable table: do not guess, skip this object. */
++                    return 0;
++                }
++                ++idx;
++            }
++        }
++
++        symbol_count = max_index + 1;
++        if (static_cast<unsigned long>(symoffset) + 1 > symbol_count)
++            symbol_count = static_cast<unsigned long>(symoffset) + 1;
++    } else {
++        /* No verifiable hash table: do not guess the entry count. */
++        return 0;
++    }
++
++    for (unsigned long i = 0; i < symbol_count; ++i) {
++        ElfSym *sym = &symtab[i];
++
++        if (DYLIB_ELF_ST_TYPE(sym->st_info) == STT_FUNC && sym->st_name < strsize) {
++            const char *name = &strtab[sym->st_name];
++
++            if (dlsym(context->handle, name))
++                add_symbol(*context->symbols, name, true);
++        }
++    }
++
++    return 0;
++}
++
++std::vector<internal_symbol_info> get_symbols(void *handle, int fd) {
++    std::vector<internal_symbol_info> symbols_list;
++    symbol_enum_context context = {handle, &symbols_list};
++
++    if (dl_iterate_phdr(collect_symbols, &context) != 0) {
++        const char *error = dlerror();
++        throw std::runtime_error("dl_iterate_phdr failed: " +
++                                 std::string(error ? error : "Unknown error (dlerror failed)"));
++    }
++
++    return symbols_list;
++}
++#endif
+ 
+ #endif

@@ -1,0 +1,64 @@
+id: DRAFT-grpc-component-rich-integration
+title: "registry 组件富 cmake 包（cmake_find_mode=none）作为下游库依赖时的五件套接线法"
+category: build-system
+severity: info
+error_signature: "cmake_find_mode=none + CMakeDeps 'Component.*not found in.*p' OR 'By not providing Findgrpc.cmake' OR 'openssl::openssl.*but the target was not found'"
+match_keywords:
+  - cmake_find_mode
+  - CMakeDeps component not found
+  - gRPCConfig.cmake
+  - openssl::openssl target not found
+  - find_dependency lowercase
+error_excerpt: |
+  ERROR: error generating context for 'X': Component 'grpc::grpc++' not found in 'grpc' p
+  CMake Error: The link interface of target ... contains: openssl::openssl / grpc::grpc but the target was not found
+  CMake Error: By not providing "Findgrpc.cmake" ... find a package configuration file provided by "grpc"
+root_cause: |
+  制品仓的部分重型包（grpc/1.70.0、protobuf/33.6）使用 cmake_find_mode=none——
+  保留上游原生 CMake config（gRPCConfig.cmake / protobuf-config.cmake），CMakeDeps
+  不为其生成 config 文件。下游包集成时四个坑连环：
+  1. 原生 config 的 target 名与 conan 包名不一致（gRPC::grpc++ vs grpc 包）；
+     conan 组件引用必须是 pkgname::x 字面量，无 components 的包只能写 grpc::grpc。
+  2. 上游构建系统（如 Arrow 的 FindgRPCAlt）用 find_package(gRPC CONFIG) 大写名，
+     而消费者 config（CMakeDeps 生成）find_dependency(grpc) 小写名——CMake 变量
+     区分大小写，gRPC_FOUND ≠ grpc_FOUND，小写查找会去找 grpcConfig.cmake（不存在）。
+  3. 原生 gRPCTargets.cmake 引用 openssl::openssl target——只有 conan 的
+     openssl-config.cmake（CMakeDeps 生成）才定义它；若上游库已用内置 FindOpenSSL
+     （OPENSSL_ROOT_DIR MODULE 模式）成功解析 openssl，conan config 永不加载，
+     gRPCTargets 报 target not found。
+  4. 交叉编译（CMAKE_CROSSCOMPILING=1）时 gRPCConfig.cmake 不 include
+     gRPCPluginTargets.cmake——gRPC::grpc_cpp_plugin target 缺失，proto 代码生成
+     挂掉（Arrow 用 ARROW_GRPC_CPP_PLUGIN 变量可显式指定插件路径绕过）。
+solution: |
+  五件套接线法（libarrow_flight 23.0.1 实证，CI+本地全绿）：
+  1. requires 显式声明 grpc/protobuf（不能只靠传递依赖——conan 校验直接依赖必须被组件引用）
+  2. toolchain 注入原生 config 路径：
+     tc.variables["gRPC_DIR"] = <grpc包>/lib/cmake/grpc
+     tc.variables["Protobuf_DIR"] = <protobuf包>/lib/cmake/protobuf
+     tc.variables["utf8_range_DIR"] = <protobuf包>/lib/cmake/utf8_range
+     tc.variables["absl_DIR"] = <abseil包>/lib/cmake/absl
+  3. 补丁在上游 resolve gRPC 之前预加载 conan openssl config：
+     if(NOT TARGET openssl::openssl)
+       find_package(openssl CONFIG REQUIRED)
+     endif()
+  4. 交叉编译插件：tc.variables["ARROW_GRPC_CPP_PLUGIN"] = <grpc包>/bin/grpc_cpp_plugin
+     （registry 的 grpc_cpp_plugin 是 OHOS 原生 arm64 二进制，构建主机可直接运行；
+     运行时需 LD_LIBRARY_PATH 指向 SDK llvm/lib——libc++_shared.so）
+  5. bridge 文件（关键创新）：包内 ship 一个 cmake_build_modules 别名文件，把
+     conan 组件引用名桥接到原生 target：
+     add_library(grpc::grpc INTERFACE IMPORTED)
+     set_target_properties(grpc::grpc PROPERTIES INTERFACE_LINK_LIBRARIES gRPC::grpc++)
+     add_library(protobuf::protobuf INTERFACE IMPORTED)
+     set_target_properties(protobuf::protobuf PROPERTIES INTERFACE_LINK_LIBRARIES protobuf::libprotobuf)
+     exports_sources = "cmake/*" 声明，package() copy 到 lib/cmake/，
+     package_info 用 cmake_build_modules 属性注册——下游 CMakeDeps 消费者自动 include。
+     test_package 的 CMakeLists.txt 需 find_package(gRPC CONFIG REQUIRED) 预加载
+     原生 config 后 set(grpc_FOUND TRUE) set(protobuf_FOUND TRUE) 跳过小写 find_dependency。
+fallback: |
+  无法 bridge 时退路：test_package/消费者 CMakeLists 直接 find_package(gRPC CONFIG)
+  并手动链接原生 target（gRPC::grpc++），绕过 conan 组件引用（下游体验差，不推荐）。
+verify_builds:
+  - libarrow_flight/23.0.1 本地 conan create 全绿（55 测试二进制 54 PASS）
+  - test_package 真实 localhost gRPC Flight RPC 往返 PASS
+prescan_pattern: "cmake_find_mode.*none"
+last_updated: "2026-09-17"

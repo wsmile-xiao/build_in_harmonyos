@@ -1,0 +1,140 @@
+#====================================================================
+# DRAFT — HarmonyOS 拒绝执行未签名 ELF：预编译工具链经 tool_requires
+# 进入 conan 构建后，须自签名并补齐运行库与 CA
+# 触发事件: below 0.11.0（Rust/cargo）HarmonyOS PC 适配，CI 连续三轮失败收敛
+# 日期: 2026-09-10
+#
+# 与既有条目的关系（增量说明）:
+#   E105/E154 = rustup 无法识别 HarmonyOS 宿主的平台事实（未给工具链落地路径）
+#   E318      = go test 临时 ELF 未签名（测试期、go test -c 产物）
+#   E509      = harmonybrew 动态二进制依赖 OpenSSL 3.x（系统旧 libssl 缺符号）
+#   本条增量 = 预编译工具链（rust-lang 官方 dist tarball，经制品仓
+#   rust-toolchain/1.97.1 以 tool_requires 引入）在 conan build 中完整可
+#   执行化：逐二进制 self-sign（含 rustc dlopen 的 librustc_driver）+
+#   cargo 运行库（OpenSSL≥3.5/libz）+ CA bundle。四类失败串联，缺一不可。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-BELOW-UNSIGNED-RUST-TOOLCHAIN
+trigger_tool:           cargo|rustc|conan|binary-sign-tool
+phase:                  configuration|compilation
+error_signature:        PermissionError.*Permission denied.*bin/cargo|unrecognized OS type: HarmonyOS|cannot execute.*cargo.*Permission denied|Error relocating.*cargo.*SSL_get0_group_name|Error loading shared library libssl\.so|download of config\.json failed.*certificate
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               ohos, rust, toolchain, security, unsigned-elf, conan, ca-cert
+match_keywords:         cargo, rustc, rust-toolchain, tool_requires, Permission denied, EACCES, errno 13, unsigned ELF, binary-sign-tool, selfSign, librustc_driver, unrecognized OS type, SSL_get0_group_name, libssl.so, LD_LIBRARY_PATH, cainfo, CERTIFICATE_VERIFY_FAILED, harmonybrew bottle
+title:                  HarmonyOS 拒绝 execve 未签名 ELF：预编译 Rust 工具链经 tool_requires 进入 conan 构建后，必须逐二进制自签名并补齐运行库与 CA，否则 cargo 四连fail
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             rust-lang 官方 dist tarball（以及任何预编译工具链包）内的
+                        cargo/rustc 不带 OHOS code signature，HarmonyOS 内核/hmmac
+                        拒绝 execve 未签名 ELF，报 PermissionError errno 13——
+                        与文件所在路径无关（conan 包目录、$HOME/tmp、build_folder
+                        表现一致），POSIX mode 位为 0755 也会被拒。签名后该错误
+                        立即消失，但随即暴露后续三个必须一并满足的运行条件：
+                        ① cargo 动态链接 libssl/libcrypto/libz，而 OHOS loader
+                        忽略 DT_RUNPATH，须显式 LD_LIBRARY_PATH；② 系统
+                        /usr/lib 的 OpenSSL 3.0 缺 SSL_get0_group_name（cargo
+                        1.97 需 ≥3.5）；③ 设备无默认 CA store，cargo 拉
+                        sparse 索引时报 certificate verify failed。
+                        另：rustup 引导在本平台不可用（uname -s 返回 HarmonyOS，
+                        rustup 报 unrecognized OS type），工具链只能由制品仓
+                        基础设施包提供。
+
+affected_scope:         所有在 HarmonyOS 上以 conan 构建、且依赖预编译工具链二进制
+                        的项目：Rust/cargo 配方（tool_requires rust-toolchain）、
+                        Go/zig/Deno 等自带发行包的语言，以及任何从 tarball 解包后
+                        直接 exec 的上游工具（make/install 等系统工具除外）。
+                        亦适用于需要在构建期 exec 上游预编译产物的 C/C++ 配方。
+
+verification_cmd: |
+  # 1) 判定是否为"未签名不可执行"（而非路径/noexec）
+  ls -l <toolchain>/bin/cargo            # mode 已是 0755 仍失败
+  <toolchain>/bin/cargo --version        # -> Permission denied (errno 13)
+  # 2) 对照：同目录下本机 clang 新编译二进制可执行（排除 noexec 挂载）
+  printf 'int main(){return 0;}\n' > t.c && clang t.c -o t && ./t && echo OK
+  # 3) 签名后立即恢复
+  binary-sign-tool sign -inFile cargo -outFile cargo.signed -selfSign 1 && chmod 755 cargo.signed
+  cargo.signed --version                 # -> cargo 1.97.1 ...
+  # 4) rustc 还需签它 dlopen 的 dylib
+  binary-sign-tool sign -inFile librustc_driver-*.so -outFile <same> -selfSign 1
+  # 5) cargo 运行库
+  readelf -d cargo | grep NEEDED         # libssl.so/libcrypto.so/libz.so
+  nm -D --defined-only /usr/lib/libssl.so.3 | grep -c SSL_get0_group_name   # 0 => 系统库不可用
+  # 6) CI 端到端
+  CI_PACKAGES="archives/b/below/0.11.0" zsh ci/conan/build_and_test.sh
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           sign-toolchain-binaries-and-provision-runtime
+rec_description:        conanfile.py 中以 tool_requires 引入制品仓 rust-toolchain
+                        基础设施包（rust-lang 官方 dist，宿主与目标均
+                        aarch64-unknown-linux-ohos）；在 _prepare_signed_toolchain()
+                        里把必须执行的 cargo/rustc 及 rustc dlopen 的
+                        librustc_driver-*.so 复制到 self.build_folder/rust-toolchain/，
+                        用 binary-sign-tool sign -selfSign 1 逐个签名（先写 .signed
+                        临时文件再 os.replace，避免就地签名截断；已签名用 marker
+                        文件幂等跳过），其余只读负载（lib/rustlib 等 ~500MB）软链
+                        避免复制。再用 _prepare_runtime_libs() 取 harmonybrew 的
+                        OHOS 预签名 bottle（openssl@3-3.6.4 + zlib-ng-compat）并
+                        sha256 校验，把含 libssl/libcrypto/libz 的目录前置进
+                        LD_LIBRARY_PATH（OHOS loader 忽略 DT_RUNPATH）。CA 用
+                        _ca_bundle() 探测 /etc/ssl/certs/cacert.pem 等路径，导出
+                        SSL_CERT_FILE/CURL_CA_BUNDLE 并在 $CARGO_HOME/config.toml
+                        写 [http] cainfo。最后 PATH 兜底 /system/bin（libbpf-sys
+                        的 make install_headers 需要 install 工具），
+                        PKG_CONFIG_PATH 注入依赖包的 lib/pkgconfig。
+rec_command:            CI_PACKAGES="archives/b/below/0.11.0" zsh ci/conan/build_and_test.sh
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      use-presigned-harmonybrew-toolchain-bottle
+fallback_description:   若签名工具不可用或不希望自行签名：改用 harmonybrew 的
+                        *.arm64_ohos.bottle.tar.gz（已预签名，解包即可执行，
+                        仓库既有 Rust 配方先例）。注意 bottle 的 bin/cargo 是
+                        指向 Cellar 绝对路径的 sh wrapper，解包到 build 目录后
+                        rc=127——须重写为 exec 本地 cargo.real，或直接使用
+                        cargo.real。同样仍需 LD_LIBRARY_PATH 指向其 openssl@3/zlib。
+fallback_command:       https://harmonybrew.atomgit.com/bottles/rust-1.97.1.arm64_ohos.bottle.tar.gz
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       rustup-init\.sh.*--default-toolchain|rustup target add
+forbid_1_reason:        标准 rustup 用 uname -s 判定宿主，HarmonyOS 返回
+                        "HarmonyOS" 不在支持列表，直接 fatal（E105/E154）。
+forbid_1_consequence:   构建在工具链引导阶段即失败，rc=1，白耗一轮 CI。
+
+forbid_2_pattern:       chmod 777.*cargo|chmod \+x.*未签名.*cargo
+forbid_2_reason:        失败根因是缺少 OHOS code signature，不是 POSIX mode 位；
+                        实测 mode 0755 仍 EACCES，chmod 无法绕过签名门禁。
+forbid_2_consequence:   误判方向、反复调权限，问题依旧。
+
+forbid_3_pattern:       LD_LIBRARY_PATH.*(/usr/lib|/system/lib)
+forbid_3_reason:        系统 OpenSSL 3.0 缺 cargo 1.97 需要的
+                        SSL_get0_group_name 符号，指向系统库会变成
+                        "Error relocating ...: symbol not found"。
+forbid_3_consequence:   从"库找不到"变成"符号找不到"，错误信息换一种但依旧失败。
+
+principles:             P013,P014
+causes:                 []
+caused_by:              []
+similar_to:             E105,E154,E318,E509
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-below-ohos-unsigned-rust-toolchain.md
+last_updated:           2026-09-10
+source_event:           below 0.11.0 HarmonyOS PC 适配（CI 三轮失败收敛）
+authors:                akajhsbnz <noreply@gitcode.com>
+source_pr:              8596
+source_commit:          c122a74f0e
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-10
+
+draft:                  true
+contributor_id:         akajhsbnz

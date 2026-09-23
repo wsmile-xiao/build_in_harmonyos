@@ -1,0 +1,79 @@
+#====================================================================
+# E577 — Automake test driver cannot launch a shebang test script on OHOS
+#
+# 差异化声明（重要，勿与相邻条目混淆）:
+#   E228  根因 = 无扩展名 libtool wrapper 无法直接执行（wrapper/ELF 同名双文件），
+#         且明确禁止对"混合 libtool/ELF 测试集"无条件设 LOG_COMPILER=/system/bin/sh。
+#   E087  根因 = HMDFS 上 chmod 不生效 → 脚本缺执行位（修法是 sh ./x.sh）。
+#   E165  根因 = /bin/bash 等 shebang 目标不存在（修法是改写 shebang 路径）。
+#   本条 根因 = shebang 目标存在，但内核/SELinux 拒绝经 shebang 启动脚本本身；
+#         且**前提是 TESTS 全为脚本**，此时 E228 的禁止规则不适用。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E577
+trigger_tool:           make|automake|sh|conan
+phase:                  testing
+error_signature:        test-driver:.*bad interpreter: Permission denied|bad interpreter: No such file or directory.*#!/(bin|usr).*(bash|sh)|FAIL\[?.*exit status: 126|Testsuite summary.*# FAIL:\s*1
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, testing, selinux, shell, portability
+match_keywords:         LOG_COMPILER,test-driver,bad interpreter,Permission denied,make check,exit 126,testsuite.sh,automake TESTS,shebang,conan create
+title:                  Automake 测试驱动无法以 shebang 启动测试脚本：改用 LOG_COMPILER 显式解释器
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 内核/SELinux 拒绝"以 shebang 方式启动脚本"这一机制本身，与 shebang 指向的解释器是否存在无关。automake 的 test-driver 默认把 TESTS 中的脚本当可执行文件直接 exec，于是在鸿蒙上必然 126 失败。关键判据：把 #!/bin/bash 改成 #!/bin/sh 后错误只是从 "No such file or directory" 变成 "Permission denied"，说明不是路径问题，改写 shebang 无法解决。
+affected_scope:         在原生 HarmonyOS 上运行 automake `make check`，且 TESTS 全部是 shell 脚本（不含 libtool wrapper 与 ELF 测试）的 autotools 包。典型为上游自带的 testsuite.sh 类端到端脚本。
+verification_cmd:       make -j1 check LOG_COMPILER=/system/bin/sh 2>&1 | tail -20 ; grep -c "bad interpreter" test/test-suite.log
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           log-compiler-explicit-interpreter
+rec_description:        给 make check 传 LOG_COMPILER=<可用 shell>，让 automake 驱动执行 `$(LOG_COMPILER) ./script`，脚本作为参数交给 shell，shebang 完全不被内核解析；无需修改上游任何测试文件，断言强度不变。仅当 TESTS 全为脚本时使用（混合 libtool/ELF 测试集须走 E228 的条件式 launcher）。
+rec_command:            autotools.make(target="check", args=["-j1", f"LOG_COMPILER={shlex.quote(shell)}"])   # shell="/system/bin/sh"
+rec_auto_fix:           false
+rec_impl:               conan-test-launcher
+
+fallback_priority:      2
+fallback_approach:      run-tests-explicitly-after-make-check
+fallback_description:   若上游测试不经 automake 驱动（自写 Makefile 直接 ./testsuite.sh），改为在 build() 中显式 `self.run(f'"{shell}" "{script}"')`，同样绕开 shebang，并由配方负责非零退出即失败。
+fallback_command:       self.run(f'"{shell}" "{os.path.join(self.source_folder,"test/testsuite.sh")}"')
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       LOG_COMPILER=.*sh.*(libtool|\.libs)|(chmod \+x|sed).*#!.*/bin/sh.*(test|suite).*仅此
+forbid_1_reason:        对含 libtool wrapper / ELF 的混合测试集无条件套 LOG_COMPILER=sh，会把真实 ELF 当脚本解析（见 E228）；单独改写 shebang 对"机制被拒"无效（本条已实测无效）。
+forbid_1_consequence:   非脚本测试无法运行或 make check 结果失真；修改 shebang 后仍 126，问题未解决却看似已改。
+forbid_2_pattern:       跳过.*bad interpreter|skip.*Permission denied.*126|伪造成 PASS
+forbid_2_reason:        平台限制必须降级到可用方案，不得以删减测试伪造通过（P013）。
+forbid_2_consequence:   上游测试覆盖被静默削减，质量门禁失效。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E228,E087,E165
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E577.md
+last_updated:           2026-09-14
+source_event:           iec16022 0.3.1 HarmonyOS PC shadow CI（隔离 job，make check 由 126 修复为 PASS）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                AtomCode (GLM-5.2) <atomcode-bot@atomgit.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-14
+
+draft: true
+contributor_id: 1EC1

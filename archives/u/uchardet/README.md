@@ -15,7 +15,7 @@ uchardet is a C language binding of the charset detection library from Mozilla. 
 
 ## Versions
 
-- 0.0.7 (2026-05-25)
+- 0.0.7 (2026-05-25 首次编译, 2026-09-18 Conan 适配 built)
 
 ## Links
 

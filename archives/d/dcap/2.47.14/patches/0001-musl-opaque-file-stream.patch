@@ -1,0 +1,241 @@
+--- a/src/dcap_stream.c
++++ b/src/dcap_stream.c
+@@ -42,6 +42,120 @@
+ #    define _IO_EOF_SEEN 0x10
+ #endif
+ 
++/* On libc with an opaque FILE type (musl, e.g. HarmonyOS), FILE has no
++ * accessible members (_fileno/_file/_magic/_flags/_chain/_lock/_IO_*),
++ * so the glibc-specific tricks below do not compile there.  For those
++ * targets dcap hands out private heap tokens cast to FILE * and keeps
++ * the virtual fd plus EOF/ERR bits in a small registry instead of
++ * inside FILE.  Real system FILE * values never enter the registry and
++ * are delegated to the system_* backend via fileno().  glibc (and other
++ * non-Linux) builds are untouched.
++ */
++#if defined(__linux__) && !defined(__GLIBC__) && !defined(__UCLIBC__)
++#define DCAP_OPAQUE_FILE 1
++#endif
++
++#ifdef DCAP_OPAQUE_FILE
++#include <pthread.h>
++
++struct dc_fake_file {
++	int fd;
++	int flags;
++	struct dc_fake_file *next;
++};
++
++static pthread_mutex_t dc_fake_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct dc_fake_file *dc_fake_list = NULL;
++
++/* Registry lookup: known token -> virtual fd; anything else is a real
++ * system FILE * -> fileno().  NULL yields -1 so callers fall through to
++ * the system_* backend instead of crashing.
++ */
++static int dc_fake_fd(FILE *fp)
++{
++	struct dc_fake_file *cur;
++	int fd = -1;
++
++	if (fp == NULL) {
++		return -1;
++	}
++	pthread_mutex_lock(&dc_fake_lock);
++	for (cur = dc_fake_list; cur != NULL; cur = cur->next) {
++		if ((FILE *)cur == fp) {
++			fd = cur->fd;
++			break;
++		}
++	}
++	pthread_mutex_unlock(&dc_fake_lock);
++	if (fd < 0) {
++		fd = fileno(fp);
++	}
++	return fd;
++}
++
++static FILE *dc_fake_alloc(int fd)
++{
++	struct dc_fake_file *node;
++
++	node = (struct dc_fake_file *)malloc(sizeof(*node));
++	if (node == NULL) {
++		return NULL;
++	}
++	node->fd = fd;
++	node->flags = 0;
++	pthread_mutex_lock(&dc_fake_lock);
++	node->next = dc_fake_list;
++	dc_fake_list = node;
++	pthread_mutex_unlock(&dc_fake_lock);
++	return (FILE *)node;
++}
++
++static void dc_fake_add_flags(FILE *fp, int flags)
++{
++	struct dc_fake_file *cur;
++
++	pthread_mutex_lock(&dc_fake_lock);
++	for (cur = dc_fake_list; cur != NULL; cur = cur->next) {
++		if ((FILE *)cur == fp) {
++			cur->flags |= flags;
++			break;
++		}
++	}
++	pthread_mutex_unlock(&dc_fake_lock);
++}
++
++static int dc_fake_has_flag(FILE *fp, int flag)
++{
++	struct dc_fake_file *cur;
++	int rc = 0;
++
++	pthread_mutex_lock(&dc_fake_lock);
++	for (cur = dc_fake_list; cur != NULL; cur = cur->next) {
++		if ((FILE *)cur == fp) {
++			rc = (cur->flags & flag) != 0;
++			break;
++		}
++	}
++	pthread_mutex_unlock(&dc_fake_lock);
++	return rc;
++}
++
++static void dc_fake_free(FILE *fp)
++{
++	struct dc_fake_file **prev, *cur;
++
++	pthread_mutex_lock(&dc_fake_lock);
++	for (prev = &dc_fake_list; (cur = *prev) != NULL; prev = &cur->next) {
++		if ((FILE *)cur == fp) {
++			*prev = cur->next;
++			free(cur);
++			break;
++		}
++	}
++	pthread_mutex_unlock(&dc_fake_lock);
++}
++#endif
++
+ 
+ #ifdef HAVE_FILE__MAGIC
+     #define FILE_NO(x) (x)->_magic
+@@ -49,6 +163,8 @@
+     #define FILE_NO(x) (x)->_fileno
+ #elif defined(HAVE_FILE__FILE)
+     #define FILE_NO(x) (x)->_file
++#elif defined(DCAP_OPAQUE_FILE)
++    #define FILE_NO(x) dc_fake_fd(x)
+ #else
+    #error "unsupported platform"
+ #endif
+@@ -68,7 +184,11 @@
+ 	m_unlock(&node->mux);
+ 
+ 	status =  dc_close(FILE_NO(fp));
++#ifdef DCAP_OPAQUE_FILE
++	dc_fake_free(fp);
++#else
+ 	free((char *)fp);
++#endif
+ 
+ 	return status ;
+ }
+@@ -83,7 +203,9 @@
+ 		return system_feof(fp);
+ 	}
+ 
+-#if defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
++#ifdef DCAP_OPAQUE_FILE
++	if ( dc_fake_has_flag(fp, _IO_EOF_SEEN) ) {
++#elif defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
+ 	if ( ((FILE *)fp)->_flags & _IO_EOF_SEEN ) {
+ #else
+ 	if ( ((FILE *)fp)->_flag & _IOEOF ) {
+@@ -128,6 +250,18 @@
+ 		}
+ 
+ 
++#ifdef DCAP_OPAQUE_FILE
++		fd = dc_open(file,oflags, 0644) ;
++		if ( fd < 0 ) {
++			return NULL ;
++		}
++
++		fp = dc_fake_alloc(fd);
++		if( fp == NULL ) {
++			dc_close(fd);
++			return NULL;
++		}
++#else
+ 		fp = (FILE *)malloc( sizeof(FILE) );
+ 		if( fp == NULL ) {
+ 			return NULL;
+@@ -152,6 +286,7 @@
+ 		}
+ 
+ 		FILE_NO(fp) = fd;
++#endif
+ 
+ 	} else {
+ 		dc_debug(DC_TRACE, "Running system native fopen [%s, %s]", file, mode);
+@@ -172,9 +307,16 @@
+ 		 return system_fdopen(fd, mode);
+ 	}
+ 
+-
++#ifdef DCAP_OPAQUE_FILE
++	fp = dc_fake_alloc(fd);
++	if( fp == NULL ) {
++		m_unlock(&node->mux);
++		return NULL;
++	}
++#else
+ 	fp = (FILE *)malloc( sizeof(FILE) );
+ 	if( fp == NULL ) {
++		m_unlock(&node->mux);
+ 		return NULL;
+ 	}
+ 
+@@ -191,6 +333,7 @@
+ #endif
+ 
+ 	FILE_NO(fp) = fd;
++#endif
+ 
+ 
+ 	m_unlock(&node->mux);
+@@ -211,7 +354,9 @@
+ 	switch(rc) {
+ 		case -1:
+ 		case 0:
+-#if defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
++#ifdef DCAP_OPAQUE_FILE
++			dc_fake_add_flags(fp, _IO_EOF_SEEN);
++#elif defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
+ 			((FILE *)fp)->_flags |= _IO_EOF_SEEN;
+ #else
+ 			((FILE *)fp)->_flag |= _IOEOF;
+@@ -312,7 +457,9 @@
+ 
+ 	switch(rc) {
+ 		case -1:
+-#if defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
++#ifdef DCAP_OPAQUE_FILE
++			dc_fake_add_flags(fp, _IO_ERR_SEEN);
++#elif defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
+ 			((FILE *)fp)->_flags |= _IO_ERR_SEEN ;
+ #else
+ 			((FILE *)fp)->_flag |= _IOERR ;
+@@ -320,7 +467,9 @@
+ 			rc= 0 ;
+ 			break ;
+ 		case 0:
+-#if defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
++#ifdef DCAP_OPAQUE_FILE
++			dc_fake_add_flags(fp, _IO_EOF_SEEN);
++#elif defined(__linux__) || defined(__GNU__) || defined(__FreeBSD_kernel__) || defined(__CYGWIN__) || defined(__APPLE__)
+ 			((FILE *)fp)->_flags |= _IO_EOF_SEEN ;
+ #else
+ 			((FILE *)fp)->_flag |= _IOEOF ;

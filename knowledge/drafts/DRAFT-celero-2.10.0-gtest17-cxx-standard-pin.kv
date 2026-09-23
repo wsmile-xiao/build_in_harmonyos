@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-celero-2.10.0-gtest17-cxx-standard-pin.kv
+# gtest >= 1.17 要求 C++17，上游 CMake 全局钉死 CMAKE_CXX_STANDARD 14，
+# test_requires 引入的 gtest 头在 C++14 翻译单元直接编译失败
+# 触发事件: celero 2.10.0 HarmonyOS PC 适配，真机 shadow CI 第 3 轮 L1 失败
+#（commit 7fc69c8d8c，run 20260908T001036Z），补丁 0001 修复后第 7 轮全绿
+#====================================================================
+
+id:                     DRAFT-celero-2.10.0-gtest17-cxx-standard-pin
+trigger_tool:           conan|conan create|cmake|clang++
+phase:                  build|compile
+error_signature:        gtest-port\.h.*C\+\+ versions less than C\+\+17 are not supported|
+                         use of class template 'function' requires template arguments.*gtest-param-test\.h|
+                         error.*gtest-port\.h.*static assertion
+
+severity:               2
+category:               conan|gtest|cmake|cxx-standard|ohos-toolchain|testing|build
+match_keywords:         gtest 1.17, gtest/1.17.0.1, C++17, C++14, CMAKE_CXX_STANDARD,
+                         CXX_STANDARD, gtest-port.h, gtest-param-test.h, test_requires,
+                         class template 'function', EXPECT_NO_THROW, upstream tests,
+                         上游测试, CELERO_ENABLE_TESTS, set(CMAKE_CXX_STANDARD 14)
+title:                  gtest >= 1.17 要求 C++17，上游 CMake 全局钉死 CMAKE_CXX_STANDARD 14 → 测试目标编译失败；
+                        用最小补丁仅提升 test 目标的 CXX_STANDARD，库本体保持上游默认标准
+
+root_cause: >
+  googletest 自 v1.17.0 起要求 C++17（gtest-port.h 静态断言拒绝更低标准，且
+  gtest-param-test.h 中 std::function 前向声明在 C++14 下无法使用，形成两条错误面）。
+  而大量上游 CMakeLists 在根目录无条件 `set(CMAKE_CXX_STANDARD 14)`——这是普通变量，
+  在 add_subdirectory 之前生效并被子目录目标继承，CMakeToolchain 注入的
+  -DCMAKE_CXX_STANDARD=17 cache 变量会被它覆盖（普通变量优先于 cache 变量读取）。
+  于是 test_requires gtest/1.17.x 的配方只要上游钉死 C++<17，测试目标（含上游
+  测试开关如 CELERO_ENABLE_TESTS/BUILD_TESTING 打开的 add_subdirectory(test)）
+  编译 gtest 头文件时必然失败。本仓库测试依赖统一为 gtest/1.17.0.1，该坑面广。
+affected_scope: >
+  所有 test_requires/要求 gtest >= 1.17 且上游 CMake 钉死 CMAKE_CXX_STANDARD < 17
+  的 Conan 2.x 配方（典型：根 CMakeLists 无条件 set(CMAKE_CXX_STANDARD 14) 的
+  CMake 库）。库本体通常仍是合法 C++14；失败集中在测试可执行目标。
+verification_cmd: >
+  grep -n "CXX_STANDARD" <source>/CMakeLists.txt   # 确认上游钉死与是否有 NOT DEFINED 守卫；
+  编译日志 grep -E "C\+\+ versions less than C\+\+17|class template 'function'"；
+  修复后 conan create 全量跑上游测试套件应全绿（celero: 67/67）
+
+rec_priority:           1
+rec_approach:           per-test-target-cxx17-patch
+rec_description: >
+  补丁只给测试可执行目标加标准覆盖，库目标与全局设置不动：
+  在 test/CMakeLists.txt 的 add_executable 之后插入
+  `set_target_properties(<test-target> PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)`。
+  优点：库本体保持上游文档标准（消费者无感知）、diff 最小（约 +4 行）、
+  不与 CMAKE_CXX_STANDARD 的全局语义纠缠。conandata.yml 登记
+  patch_type: portability，经 export_sources() + apply_conandata_patches() 应用。
+  注意：若上游测试链接 gtest_main，目标属性提升即可；CeleroSetDefaultCompilerOptions
+  类宏若显式追加 -std= 需一并检查（celero 无此问题）。
+rec_command: >
+  # 补丁核心（patches/0001-xxx.patch）：
+  # add_executable(${PROJECT_NAME})
+  #+set_target_properties(${PROJECT_NAME} PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+  conan export . && conan create .   # 先本地 export 验证补丁导出，再全量构建
+
+fallback_priority:      2
+fallback_approach:      whole-project-cxx17
+fallback_description:   补丁改根 CMakeLists 的 set(CMAKE_CXX_STANDARD 14) 为 17（或加
+                        NOT DEFINED 守卫后由 toolchain 传 17）。语义面大（库本体也变 17），
+                        仅在测试目标无法独立寻址（如单一大目标）时使用。
+fallback_command:       sed -i 's/set(CMAKE_CXX_STANDARD 14)/set(CMAKE_CXX_STANDARD 17)/' CMakeLists.txt
+fallback_auto_fix:      false
+
+forbid_1_pattern:       跳过/删除上游测试目标.*宣称.*测试通过|test_requires.*却.*ENABLE_TESTS=OFF.*100%
+
+verified_on:            celero 2.10.0（OHOS aarch64，clang 15.0.4，conan 2.29.1，真机 shadow CI）
+verification_result: >
+  修复前（run 20260908T001036Z）L1 fail：gtest-port.h "C++ versions less than
+  C++17 are not supported" ×15 + gtest-param-test.h "use of class template
+  'function' requires template arguments"。补丁 0001 后（run 20260908T022643Z）
+  上游 67 个 GTest 用例全量编译执行 67/67 PASSED，test_package 6 断言全 PASS，
+  G0/L0/L1/L4/L5 全 pass（L4 patches clean）。
+limitations: >
+  - 仅适用于"测试目标标准不够"类装配失败；若库本体源码在 C++17 下编译报错，
+    应先修库源码，不要整体提标准。
+  - 若上游用 target_compile_options(... -std=c++14) 显式加旗标，目标属性会与其
+    竞争（命令行两个 -std 以靠后者为准），需在补丁里一并移除显式旗标。
+  - gtest < 1.17（如 1.14/1.12）仍支持 C++14，可优先考虑降 gtest 版本规避；
+    但本仓库制品仓统一 gtest/1.17.0.1，per-test-target 补丁是首选。

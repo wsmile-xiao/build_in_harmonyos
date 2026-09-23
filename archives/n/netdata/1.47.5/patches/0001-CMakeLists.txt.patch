@@ -1,113 +1,100 @@
 diff -ruN a/CMakeLists.txt b/CMakeLists.txt
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
-@@ -98,21 +98,28 @@
-         set(OS_MACOS True)
-         find_library(IOKIT IOKit)
-         find_library(FOUNDATION Foundation)
-         message(STATUS " Compiling for MacOS... ")
- elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "FreeBSD")
-         set(OS_FREEBSD True)
-         message(STATUS " Compiling for FreeBSD... ")
+@@ -105,7 +105,13 @@
  elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
          set(OS_LINUX True)
          add_definitions(-D_GNU_SOURCE)
 -        message(STATUS " Compiling for Linux... ")
-+        # OpenHarmony reports as Linux to cmake; detect via cmake option OS_OHOS
++        # OpenHarmony may report as Linux to cmake; the OS_OHOS cache option
++        # (set by the Conan toolchain or -DOS_OHOS=ON) marks it explicitly.
 +        if(OS_OHOS)
-+                set(OS_OHOS True)
-+                add_definitions(-D__OHOS__)
-+                message(STATUS " Compiling for OpenHarmony (Linux-compatible, OHOS extensions enabled)...")
++                message(STATUS " Compiling for OpenHarmony (Linux-compatible)... ")
 +        else()
 +                message(STATUS " Compiling for Linux... ")
 +        endif()
  elseif("${CMAKE_SYSTEM_NAME}" STREQUAL "CYGWIN" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "MSYS" OR "${CMAKE_SYSTEM_NAME}" STREQUAL "Windows")
          set(OS_WINDOWS True)
  
-         if(NOT "${CMAKE_INSTALL_PREFIX}" STREQUAL "/opt/netdata")
-                 message(FATAL_ERROR "CMAKE_INSTALL_PREFIX must be set to /opt/netdata, but it is set to ${CMAKE_INSTALL_PREFIX}")
-         endif()
- 
-         if(BUILD_FOR_PACKAGING)
-                 set(NETDATA_RUNTIME_PREFIX "/")
-         endif()
-@@ -128,22 +135,25 @@
-                                 include_directories(c:/msys64/usr/include/w32api)
-                         elseif("$ENV{MSYSTEM}" STREQUAL "MINGW64")
-                                 include_directories(c:/msys64/mingw64/include)
-                         elseif("$ENV{MSYSTEM}" STREQUAL "UCRT64")
-                                 include_directories(c:/msys64/ucrt64/include)
-                         endif()
-                 endif()
+@@ -135,8 +141,13 @@
          endif()
  
          message(STATUS " Compiling for Windows (${CMAKE_SYSTEM_NAME}, MSYSTEM=$ENV{MSYSTEM})... ")
--else()
--        message(FATAL_ERROR "Unknown/unsupported platform: ${CMAKE_SYSTEM_NAME} (Supported platforms: FreeBSD, Linux, macOS, Windows)")
 +elseif("${CMAKE_SYSTEM_NAME}" MATCHES "OHOS|OpenHarmony|HarmonyOS")
 +        set(OS_OHOS True)
 +        set(OS_LINUX True)
-+        add_definitions(-D_GNU_SOURCE -D__OHOS__)
++        add_definitions(-D_GNU_SOURCE)
 +        message(STATUS " Compiling for OpenHarmony/HarmonyOS (treated as Linux-compatible)... ")
+ else()
+-        message(FATAL_ERROR "Unknown/unsupported platform: ${CMAKE_SYSTEM_NAME} (Supported platforms: FreeBSD, Linux, macOS, Windows)")
++        message(FATAL_ERROR "Unknown/unsupported platform: ${CMAKE_SYSTEM_NAME} (Supported platforms: FreeBSD, Linux, macOS, Windows, OpenHarmony)")
  endif()
  
  # This is intended to make life easier for developers who are working on one
- # specific feature.
- #
- # NOTE: DO NOT USE THIS OPTION FOR PRODUCTION BUILDS.
- option(DEFAULT_FEATURE_STATE "Specify the default state for most optional features" True)
- mark_as_advanced(DEFAULT_FEATURE_STATE)
+@@ -443,10 +454,36 @@
+ }
+ " HAVE_SETNS)
  
- # High-level features
-@@ -523,21 +533,21 @@
- check_c_source_compiles("
- int my_function() __attribute__((warn_unused_result));
++# pthread CPU affinity and thread-cancellation APIs may be missing on
++# musl-based systems (e.g. OpenHarmony); detect instead of assuming.
++check_c_source_compiles("
++#define _GNU_SOURCE
++#include <pthread.h>
++#include <sched.h>
++int main() {
++        cpu_set_t set;
++        cpu_set_t probe;
++        CPU_ZERO(&set);
++        CPU_SET(0, &set);
++        if(pthread_setaffinity_np(pthread_self(), sizeof(set), &set))
++                return 1;
++        return pthread_getaffinity_np(pthread_self(), sizeof(probe), &probe);
++}
++" HAVE_PTHREAD_SETAFFINITY_NP)
++
++check_c_source_compiles("
++#include <pthread.h>
++int main() {
++        int old;
++        return pthread_setcanceltype(0, &old) || pthread_setcancelstate(0, &old);
++}
++" HAVE_PTHREAD_SETCANCEL)
++
+ check_cxx_source_compiles("
++#include <cstdint>
  int main() {
-         return my_function();
+-        __atomic_load_8(nullptr, 0);
+-        return 0;
++        uint64_t a = 0;
++        return static_cast<int>(__atomic_load_n(&a, 0));
  }
- int my_function() {
-         return 1;
- }
- " HAVE_FUNC_ATTRIBUTE_WARN_UNUSED_RESULT)
+ " HAVE_BUILTIN_ATOMICS)
  
--if(OS_FREEBSD OR OS_MACOS)
-+if(OS_FREEBSD OR OS_MACOS OR OS_OHOS)
-         set(HAVE_BUILTIN_ATOMICS True)
- endif()
- 
- # openssl/crypto
- set(ENABLE_OPENSSL True)
- pkg_check_modules(TLS IMPORTED_TARGET openssl)
- 
- if(NOT TARGET PkgConfig::TLS)
-         if(OS_MACOS)
-                 execute_process(COMMAND
-@@ -1650,28 +1660,33 @@
- # brotli
- pkg_check_modules(LIBBROTLI libbrotlidec libbrotlienc libbrotlicommon)
- if(LIBBROTLI_FOUND)
-         set(ENABLE_BROTLI On)
-         target_include_directories(libnetdata PUBLIC ${LIBBROTLI_INCLUDE_DIRS})
-         target_compile_options(libnetdata PUBLIC ${LIBBROTLI_CFLAGS_OTHER})
-         target_link_libraries(libnetdata PUBLIC ${LIBBROTLI_LDFLAGS})
- endif()
- 
- # uuid
--if(OS_MACOS OR OS_WINDOWS)
-+if(OS_MACOS OR OS_WINDOWS OR OS_OHOS)
+@@ -1661,10 +1698,27 @@
          # UUID functionality is part of the system libraries here, so no extra
--        # stuff needed.
-+        # stuff needed. HarmonyOS: provide our own uuid implementation via arc4random.
-+        set(UUID_FOUND True)
-+        set(UUID_LIBRARIES "")
-+        set(UUID_INCLUDE_DIRS "")
+         # stuff needed.
  else()
 -        pkg_check_modules(UUID REQUIRED uuid)
 -        target_include_directories(libnetdata BEFORE PUBLIC ${UUID_INCLUDE_DIRS})
 -        target_compile_options(libnetdata PUBLIC ${UUID_CFLAGS_OTHER})
 -        target_link_libraries(libnetdata PUBLIC ${UUID_LDFLAGS})
 +        pkg_check_modules(UUID QUIET uuid)
-+        if(UUID_FOUND)
++        if(NOT UUID_FOUND)
++                # No libuuid (e.g. musl-based systems like OpenHarmony):
++                # fall back to arc4random_buf, availability checked here.
++                check_c_source_compiles("
++#include <stdlib.h>
++int main() {
++        unsigned char buf[16];
++        arc4random_buf(buf, sizeof(buf));
++        return 0;
++}
++" HAVE_ARC4RANDOM_BUF)
++                if(NOT HAVE_ARC4RANDOM_BUF)
++                        message(FATAL_ERROR "Neither libuuid nor arc4random_buf is available for UUID generation")
++                endif()
++        else()
++                set(HAVE_LIBUUID True)
 +                target_include_directories(libnetdata BEFORE PUBLIC ${UUID_INCLUDE_DIRS})
 +                target_compile_options(libnetdata PUBLIC ${UUID_CFLAGS_OTHER})
 +                target_link_libraries(libnetdata PUBLIC ${UUID_LDFLAGS})
@@ -115,10 +102,3 @@ diff -ruN a/CMakeLists.txt b/CMakeLists.txt
  endif()
  
  # uv
- pkg_check_modules(LIBUV REQUIRED libuv)
- target_include_directories(libnetdata BEFORE PUBLIC ${LIBUV_INCLUDE_DIRS})
- target_compile_options(libnetdata PUBLIC ${LIBUV_CFLAGS_OTHER})
- target_link_libraries(libnetdata PUBLIC ${LIBUV_LDFLAGS})
- 
- # crypto
- target_link_libraries(libnetdata PUBLIC PkgConfig::CRYPTO)

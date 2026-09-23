@@ -1,0 +1,16 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_intrusive_shared_ptr LANGUAGES CXX)
+
+find_package(isptr 1.6 CONFIG REQUIRED)
+
+add_executable(test_intrusive_shared_ptr test_intrusive_shared_ptr.cpp)
+target_link_libraries(test_intrusive_shared_ptr PRIVATE isptr::isptr)
+target_compile_features(test_intrusive_shared_ptr PRIVATE cxx_std_17)
+
+add_executable(test_intrusive_shared_ptr_ohos test_intrusive_shared_ptr_ohos.cpp)
+target_link_libraries(test_intrusive_shared_ptr_ohos PRIVATE isptr::isptr)
+target_compile_features(test_intrusive_shared_ptr_ohos PRIVATE cxx_std_17)
+
+include(CTest)
+add_test(NAME consumer_api COMMAND test_intrusive_shared_ptr)
+add_test(NAME ohos_atomic_api COMMAND test_intrusive_shared_ptr_ohos)

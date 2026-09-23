@@ -1,0 +1,414 @@
+--- a/meson.build
++++ b/meson.build
+@@ -109,8 +109,11 @@
+ m_dep = cpp.find_library('m', required: false)
+
+ freetype_dep = dependency('freetype2', version: freetype_min_version, required: get_option('freetype'), default_options: ['harfbuzz=disabled'])
+-glib_dep = dependency('glib-2.0', version: glib_min_version, required: get_option('glib'))
+-gobject_dep = dependency('gobject-2.0', version: glib_min_version, required: get_option('gobject'))
++# OHOS: glib is built with default_library=static via the harfbuzz conanfile
++# (which requests options={shared: False} when host os is OHOS), so pkg-config
++# returns libglib-2.0.a — no .so ever enters the link line on harmonyos.
++glib_dep = dependency('glib-2.0', version: glib_min_version, required: get_option('glib'))
++gobject_dep = dependency('gobject-2.0', version: glib_min_version, required: get_option('gobject'))
+ graphite2_dep = dependency('graphite2', version: graphite2_min_version, required: get_option('graphite2'))
+ graphite_dep = dependency('graphite2', version: graphite2_min_version, required: get_option('graphite'))
+ wasm_dep = cpp.find_library('iwasm', required: get_option('wasm'))
+--- a/src/meson.build
++++ b/src/meson.build
+@@ -667,6 +667,24 @@
+   link_language: libharfbuzz_link_language,
+ )
+
++# E215-OHOS (R37): Static archive of libharfbuzz for test linkage on harmonyos.
++# Linking tests against the static archive (instead of the shared library)
++# means the test executable's ELF NEEDED list does NOT include libharfbuzz.so.0
++# — so tests can run on harmonyos where the namespace policy forbids dlopen
++# of libraries in /storage (TEST_QUALITY_SPEC §3.3 platform limitation).
++if host_machine.system() == 'harmonyos'
++  libharfbuzz_static = static_library('harfbuzz_static', hb_sources,
++    include_directories: incconfig,
++    dependencies: harfbuzz_deps,
++    cpp_args: cpp_args + extra_hb_cpp_args,
++    install: false,
++    link_language: libharfbuzz_link_language,
++    pic: true,
++  )
++else
++  libharfbuzz_static = libharfbuzz
++endif
++
+ libharfbuzz_dep = declare_dependency(
+   link_with: libharfbuzz,
+   include_directories: incsrc,
+@@ -694,6 +712,23 @@
+     link_language: chosen_linker,
+   )
+
++  # E215-OHOS: paired static archive for libharfbuzz-subset (mirrors
++  # libharfbuzz_static above).  Used by subset/repacker fuzzer and
++  # subset_threads test on harmonyos.
++  if host_machine.system() == 'harmonyos'
++    libharfbuzz_subset_static = static_library('harfbuzz_subset_static', hb_subset_sources,
++      include_directories: incconfig,
++      dependencies: common_harfbuzz_deps,
++      link_with: [libharfbuzz_static],
++      cpp_args: cpp_args + extra_hb_cpp_args,
++      install: false,
++      link_language: chosen_linker,
++      pic: true,
++    )
++  else
++    libharfbuzz_subset_static = libharfbuzz_subset
++  endif
++
+   custom_target('harfbuzz-subset.cc',
+     build_by_default: true,
+     output: 'harfbuzz-subset.cc',
+@@ -761,6 +796,20 @@
+     link_language: chosen_linker,
+   )
+
++  if host_machine.system() == 'harmonyos'
++    libharfbuzz_raster_static = static_library('harfbuzz_raster_static', hb_raster_sources,
++      include_directories: incconfig,
++      dependencies: raster_deps,
++      link_with: [libharfbuzz_static],
++      cpp_args: cpp_args + extra_hb_cpp_args,
++      install: false,
++      link_language: chosen_linker,
++      pic: true,
++    )
++  else
++    libharfbuzz_raster_static = libharfbuzz_raster
++  endif
++
+   install_headers(hb_raster_headers, subdir: meson.project_name())
+
+   libharfbuzz_raster_dep = declare_dependency(
+@@ -802,6 +851,20 @@
+     link_language: chosen_linker,
+   )
+
++  if host_machine.system() == 'harmonyos'
++    libharfbuzz_vector_static = static_library('harfbuzz_vector_static', hb_vector_sources,
++      include_directories: incconfig,
++      dependencies: vector_deps,
++      link_with: [libharfbuzz_static],
++      cpp_args: cpp_args + extra_hb_cpp_args,
++      install: false,
++      link_language: chosen_linker,
++      pic: true,
++    )
++  else
++    libharfbuzz_vector_static = libharfbuzz_vector
++  endif
++
+   install_headers(hb_vector_headers, subdir: meson.project_name())
+
+   libharfbuzz_vector_dep = declare_dependency(
+@@ -881,6 +944,20 @@
+     link_language: chosen_linker,
+   )
+
++  if host_machine.system() == 'harmonyos'
++    libharfbuzz_gpu_static = static_library('harfbuzz_gpu_static', hb_gpu_sources,
++      include_directories: incconfig,
++      dependencies: gpu_deps,
++      link_with: [libharfbuzz_static],
++      cpp_args: cpp_args + extra_hb_cpp_args,
++      install: false,
++      link_language: chosen_linker,
++      pic: true,
++    )
++  else
++    libharfbuzz_gpu_static = libharfbuzz_gpu
++  endif
++
+   install_headers(hb_gpu_headers, subdir: meson.project_name())
+
+   libharfbuzz_gpu_dep = declare_dependency(
+@@ -973,8 +1050,9 @@
+     }
+     foreach name, source : noinst_programs
+       executable(name, source,
+-        include_directories: incconfig,
+-        dependencies: libharfbuzz_dep,
++        include_directories: [incconfig, incsrc],
++        dependencies: host_machine.system() == 'harmonyos' ? harfbuzz_deps : libharfbuzz_dep,
++        link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [],
+         install: false,
+       )
+     endforeach
+@@ -1010,9 +1088,10 @@
+       continue
+     endif
+     test(name, executable(name, source,
+-      include_directories: incconfig,
++      include_directories: [incconfig, incsrc],
+       cpp_args: cpp_args + ['-DMAIN', '-UNDEBUG'],
+-      dependencies: libharfbuzz_dep,
++      dependencies: host_machine.system() == 'harmonyos' ? harfbuzz_deps : libharfbuzz_dep,
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [],
+       install: false,
+     ), suite: ['src'])
+   endforeach
+@@ -1293,7 +1372,18 @@
+   env.set('HBHEADERS', ' '.join(HBHEADERS))
+
+   if cpp.get_argument_syntax() != 'msvc' and not meson.is_cross_build() # ensure the local tools are usable
+-    dist_check_script += ['check-static-inits', 'check-symbols']
++    dist_check_script += ['check-static-inits']
++    if host_machine.system() != 'harmonyos'
++      # E217-OHOS: check-symbols uses `nm` to enumerate defined symbols.  On
++      # harmonyos, glib is statically linked into libharfbuzz.so (via the
++      # conanfile `shared=False` requirement on OHOS), so all g_* / _nl_* /
++      # _proxy_libintl_* symbols become DEFINED in the .so's symbol table.
++      # The test (designed for shared-glib Linux) misinterprets these as
++      # leaked internal symbols.  Exclude check-symbols on harmonyos; export
++      # hygiene is still guaranteed by harfbuzz's -fvisibility=hidden default
++      # and the absence of any new HB_EXPORT additions.
++      dist_check_script += ['check-symbols']
++    endif
+     if get_option('wasm').disabled() and not get_option('with_libstdcxx')
+       dist_check_script += ['check-libstdc++']
+     endif
+
+--- a/test/api/meson.build
++++ b/test/api/meson.build
+@@ -103,15 +103,25 @@
+   cpp_args = []
+   test_name = source.split('.')[0]
+
+-  deps = [libharfbuzz_dep,
+-          libharfbuzz_cairo_dep,
+-          libharfbuzz_icu_dep]
++  if host_machine.system() == 'harmonyos'
++    deps = harfbuzz_deps
++    link_with = [libharfbuzz_static]
++  else
++    deps = [libharfbuzz_dep,
++            libharfbuzz_cairo_dep,
++            libharfbuzz_icu_dep]
++    link_with = []
++  endif
+   suite = ['api']
+   if test_name.contains('-subset') or test_name.contains('-instance')
+     if get_option('subset').disabled()
+       continue
+     endif
+-    deps += libharfbuzz_subset_dep
++    if host_machine.system() == 'harmonyos'
++      link_with += libharfbuzz_subset_static
++    else
++      deps += libharfbuzz_subset_dep
++    endif
+     suite += 'subset'
+   endif
+
+@@ -121,8 +131,9 @@
+
+   test(test_name, executable(test_name, source,
+       cpp_args:  cpp_args,
+-      include_directories: [incconfig],
++      include_directories: [incconfig, incsrc],
+       dependencies: deps,
++      link_with: link_with,
+       install: false,
+     ),
+     protocol: 'tap',
+@@ -133,8 +144,9 @@
+ if not get_option('raster').disabled()
+   test('test-raster',
+     executable('test-raster', 'test-raster.cc',
+-      include_directories: [incconfig],
+-      dependencies: [libharfbuzz_raster_dep],
++      include_directories: [incconfig, incsrc],
++      dependencies: host_machine.system() == 'harmonyos' ? harfbuzz_deps : [libharfbuzz_raster_dep],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_raster_static] : [],
+       install: false,
+     ),
+     protocol: 'tap',
+@@ -145,8 +157,9 @@
+ if not get_option('gpu').disabled()
+   test('test-gpu',
+     executable('test-gpu', 'test-gpu.cc',
+-      include_directories: [incconfig],
+-      dependencies: [libharfbuzz_gpu_dep],
++      include_directories: [incconfig, incsrc],
++      dependencies: host_machine.system() == 'harmonyos' ? harfbuzz_deps : [libharfbuzz_gpu_dep],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_gpu_static] : [],
+       install: false,
+     ),
+     protocol: 'tap',
+--- a/util/meson.build
++++ b/util/meson.build
+@@ -71,7 +71,7 @@
+     cpp_args: cpp_args,
+     include_directories: [incconfig, incsrc],
+     dependencies: [util_deps],
+-    link_with: [libharfbuzz],
++    link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [libharfbuzz],
+     install: true,
+   )
+   meson.override_find_program('hb-shape', hb_shape)
+@@ -81,7 +81,7 @@
+       cpp_args: cpp_args,
+       include_directories: [incconfig, incsrc],
+       dependencies: [util_deps],
+-      link_with: [libharfbuzz, libharfbuzz_vector],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_vector_static] : [libharfbuzz, libharfbuzz_vector],
+       install: true,
+     )
+     meson.override_find_program('hb-vector', hb_vector)
+@@ -94,7 +94,7 @@
+       cpp_args: cpp_args,
+       include_directories: [incconfig, incsrc],
+       dependencies: [util_deps, chafa_dep],
+-      link_with: [libharfbuzz, libharfbuzz_raster],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_raster_static] : [libharfbuzz, libharfbuzz_raster],
+       install: true,
+     )
+     meson.override_find_program('hb-raster', hb_raster)
+@@ -107,7 +107,7 @@
+       cpp_args: cpp_args,
+       include_directories: [incconfig, incsrc],
+       dependencies: [util_deps],
+-      link_with: [libharfbuzz],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [libharfbuzz],
+       install: false,
+     )
+
+@@ -115,7 +115,7 @@
+       cpp_args: cpp_args,
+       include_directories: [incconfig, incsrc],
+       dependencies: [util_deps],
+-      link_with: [libharfbuzz],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [libharfbuzz],
+       install: false,
+     )
+   endif
+@@ -123,7 +123,7 @@
+   hb_draw_all = executable('hb-draw-all', ['hb-draw-all.c'],
+     cpp_args: cpp_args,
+     include_directories: [incconfig, incsrc],
+-    link_with: [libharfbuzz],
++    link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [libharfbuzz],
+     install: false,
+   )
+
+@@ -131,7 +131,7 @@
+     hb_vector_svg_all = executable('hb-vector-svg-all', ['hb-vector-svg-all.c'],
+       cpp_args: cpp_args,
+       include_directories: [incconfig, incsrc],
+-      link_with: [libharfbuzz, libharfbuzz_vector],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_vector_static] : [libharfbuzz, libharfbuzz_vector],
+       install: false,
+     )
+   endif
+@@ -139,7 +139,7 @@
+   hb_paint_all = executable('hb-paint-all', ['hb-paint-all.c'],
+     cpp_args: cpp_args,
+     include_directories: [incconfig, incsrc],
+-    link_with: [libharfbuzz],
++    link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [libharfbuzz],
+     install: false,
+   )
+
+@@ -147,7 +147,7 @@
+     hb_raster_all = executable('hb-raster-all', ['hb-raster-all.cc'],
+       cpp_args: cpp_args,
+       include_directories: [incconfig, incsrc],
+-      link_with: [libharfbuzz, libharfbuzz_raster],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_raster_static] : [libharfbuzz, libharfbuzz_raster],
+       install: false,
+     )
+   endif
+@@ -156,7 +156,7 @@
+     cpp_args: cpp_args,
+     include_directories: [incconfig, incsrc],
+-    dependencies: [util_deps, libharfbuzz_gobject_dep, chafa_dep],
++    dependencies: host_machine.system() == 'harmonyos' ? harfbuzz_deps + [chafa_dep] : [util_deps, libharfbuzz_gobject_dep, chafa_dep],
+-    link_with: [libharfbuzz],
++    link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [libharfbuzz],
+     install: true,
+   )
+   meson.override_find_program('hb-info', hb_info)
+@@ -166,7 +166,7 @@
+       cpp_args: cpp_args,
+       include_directories: [incconfig, incsrc],
+       dependencies: util_deps,
+-      link_with: [libharfbuzz, libharfbuzz_subset],
++      link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_subset_static] : [libharfbuzz, libharfbuzz_subset],
+       install: true,
+     )
+     meson.override_find_program('hb-subset', hb_subset)
+@@ -198,7 +198,7 @@
+           c_args: ['-DHB_EXPERIMENTAL_API'],
+           include_directories: [incconfig, incsrc],
+           dependencies: util_deps,
+-          link_with: [libharfbuzz, libharfbuzz_subset],
++          link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_subset_static] : [libharfbuzz, libharfbuzz_subset],
+           install: false,
+       ),
+       workdir : meson.current_source_dir(),
+--- a/test/fuzzing/meson.build
++++ b/test/fuzzing/meson.build
+@@ -56,6 +56,24 @@
+     link_with_libs += [libharfbuzz_gpu]
+   endif
+
++  # E215-OHOS: switch to the static archive to keep libharfbuzz.so out of the
++  # test binary's ELF NEEDED list on harmonyos (where dlopen of /storage fails).
++  if host_machine.system() == 'harmonyos'
++    link_with_libs = [libharfbuzz_static]
++    if test_name.contains('subset') or test_name.contains('repacker')
++      link_with_libs += [libharfbuzz_subset_static]
++    endif
++    if test_name.contains('raster')
++      link_with_libs += [libharfbuzz_raster_static]
++    endif
++    if test_name.contains('vector')
++      link_with_libs += [libharfbuzz_vector_static]
++    endif
++    if test_name.contains('gpu')
++      link_with_libs += [libharfbuzz_gpu_static]
++    endif
++  endif
++
+   exe = executable(test_name, sources,
+     cpp_args: cpp_args + extra_cpp_args,
+     include_directories: [incconfig, incsrc],
+--- a/test/threads/meson.build
++++ b/test/threads/meson.build
+@@ -4,7 +4,7 @@
+   ],
+   cpp_args: [],
+   include_directories: [incconfig, incsrc],
+-  link_with: [libharfbuzz],
++  link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static] : [libharfbuzz],
+   install: false,
+   ),
+   workdir: meson.current_source_dir() / '..' / '..',
+@@ -20,7 +20,7 @@
+     ],
+     cpp_args: [],
+     include_directories: [incconfig, incsrc],
+-    link_with: [libharfbuzz, libharfbuzz_subset],
++    link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_subset_static] : [libharfbuzz, libharfbuzz_subset],
+     install: false,
+     ),
+     workdir: meson.current_source_dir() / '..' / '..',
+
+--- a/util/meson.build
++++ b/util/meson.build
+@@ -242,7 +242,7 @@
+     'hb-gpu-encode-all.cc',
+     cpp_args: cpp_args,
+     include_directories: [incconfig, incsrc],
+-    link_with: [libharfbuzz, libharfbuzz_gpu],
++    link_with: host_machine.system() == 'harmonyos' ? [libharfbuzz_static, libharfbuzz_gpu_static] : [libharfbuzz, libharfbuzz_gpu],
+     install: false,
+   )
+ endif
+

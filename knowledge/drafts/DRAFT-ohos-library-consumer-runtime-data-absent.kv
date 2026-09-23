@@ -1,0 +1,134 @@
+#====================================================================
+# DRAFT-ohos-library-consumer-runtime-data-absent —— 库的消费者需运行期数据文件
+#   （cracklib 词典/pw_dict），而制品只交付头与库，功能在运行期才失败
+# 对应文档: knowledge/drafts/DRAFT-ohos-library-consumer-runtime-data-absent.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-ohos-library-consumer-runtime-data-absent
+trigger_tool:           conan|python|custom
+phase:                  runtime|testing
+error_signature:        (pw_dict\.pwd|pw_dict): No such file or directory|
+                         (could not|error) loading dictionary|
+                         the dictionary check.*fail
+
+severity:               2
+category:               conan, testing, runtime-data, dependency, password, false-failure
+match_keywords:         cracklib, pw_dict, pwquality, dictionary, 运行期数据, runtime data,
+                         FascistCheck, dict_check, 词典, PWQ_ERROR_CRACKLIB_CHECK,
+                         data files not shipped, 消费者测试, 环境数据缺口, 非缺陷
+title:                  库的**消费者需运行期数据文件**（cracklib 词典 pw_dict）而制品
+                        只交付头与库 —— 功能在**运行期**才失败，须与环境缺陷区分
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             cracklib 的 ``FascistCheck`` 需要一个**已编译的词典**
+                        （``pw_dict.pwd`` / ``pw_dict.pwi``）才能在运行期做"词典检查"。
+                        而制品仓里的 cracklib 包为常规 C 库交付形态——**只含头文件与
+                        库文件**（实测 ``find <pkg> -name 'pw_dict*'`` 无结果），
+                        词典属**独立的数据包/运行期资产**，不随库交付。
+                        于是消费方（pwquality）的库**编译链接全部正常**，直到**运行期**
+                        调用到词典检查路径才失败：
+                          ``/__pkg_prefix__/share/cracklib/pw_dict.pwd: No such file or directory``
+                        并映射为
+                          ``PWQ_ERROR_CRACKLIB_CHECK``（-22，词典检查失败）
+                        以及级联的
+                          ``PWQ_ERROR_GENERATION_FAILED``（-24，pwquality_generate
+                          生成的候选密码过不了词典检查）
+                        关键在于**症状出现在运行期、且发生在依赖库内部**，容易被误判为
+                        "本适配的库坏了/打包错了"，实际是**环境数据缺口**（运维期安装
+                        词典即可解决），而非构建或打包缺陷。
+                        另一处附注：报错路径中的 ``__pkg_prefix__`` 是**构建期占位符**
+                        未被替换（实测该字符串来自 pwquality 自身库），会让报错看起来
+                        更"像 bug"，需一并识别。
+affected_scope:         一切"库本身可用、但其部分功能依赖**外部运行期数据**"的适配与
+                        测试场景；同类数据资产包括：拼写/词典（cracklib、hunspell）、
+                        时区库（tzdata）、证书库（ca-certificates）、MIME 表
+                        （shared-mime-info）、图标/字体缓存等。
+                        在**消费者测试**里尤其突出：测试跑在 CI/构建机上，这些数据
+                        资产通常未安装，于是**功能测试会假失败**——若不识别，会被
+                        误当作适配缺陷去"修代码"。
+                        与"依赖库缺失"不同：库**在**、头**在**、链接**正常**，
+                        失败发生在运行期且源于**数据**而非**符号**。
+                        与 E251（构建某个 NLP 词典数据包）不同层：E251 是"**构建**
+                        词典制品"，本条是"**库的消费者**需要词典**数据**才能行使功能"。
+verification_cmd:       ① 确认依赖包是否真的不含数据文件（决定性）：
+                          find <dep_package_folder> -name 'pw_dict*' -o -name '*.pwi'
+                          # 无输出 → 数据未随包交付
+                        # ② 确认系统是否已安装该数据资产：
+                        ls /usr/share/cracklib/ /usr/lib/cracklib_dict* 2>/dev/null
+                        # ③ 定位功能失败的真实来源（勿猜）：
+                        strings <pkg>/lib/lib<X>.so | grep -E "pw_dict|share/cracklib"
+                        # 可确认默认数据路径由哪个制品硬编码
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           probe-and-isolate-then-disable-feature
+rec_description:        把"数据缺口"与"适配缺陷"**显式区分**，三步走：
+                        ① **探测并固化**：在消费者测试里先以默认设置调用该功能，断言
+                           必须得到**预期的错误码**（如 pwquality 的 -22），把"环境无
+                           词典"这一事实写进断言而非任其导致泛化失败；
+                        ② **关闭该功能**后验证其余能力：如
+                           ``pwquality_set_int_value(pwq, PWQ_SETTING_DICT_CHECK, 0)``，
+                           再验证强密码通过（实测 score=100）、生成密码可回灌校验；
+                        ③ **如实申报**：在 notes.md / manifest.yaml 写明该功能在当前
+                           环境不可达及其原因（测试运行期数据缺失），并说明安装词典后
+                           即完整可用——**不得**因此判定适配失败或删除相关断言。
+                        命令行工具同理：优先选用**不依赖该数据**的代码路径做真实断言
+                        （如 pwscore 的"长度检查先于词典检查"、pwmake 的用法路径），
+                        对确实需要数据的路径则断言其**预期失败**。
+rec_command:            # 消费者测试内：
+                        #   int rc = pwquality_check(...);   // 默认设置（dict_check=1）
+                        #   assert(rc == PWQ_ERROR_CRACKLIB_CHECK);   // 固化数据缺口
+                        #   pwquality_set_int_value(pwq, PWQ_SETTING_DICT_CHECK, 0);
+                        #   rc = pwquality_check(...);       // 其余功能须通过
+rec_auto_fix:           false
+rec_impl:               probe-and-isolate-then-disable-feature
+
+fallback_priority:      2
+fallback_approach:      install-runtime-data-asset-in-test-env
+fallback_description:   若测试**必须**覆盖依赖数据的完整路径（例如要验证词典检查本身
+                        确实工作），则须在测试环境中真正提供该数据资产（安装词典包、
+                        或由另一制品仓条目交付该数据并在测试中引为依赖）。
+                        代价是测试环境依赖变重、且数据资产本身也需适配与发布；
+                        仅在确有必要时采用。
+fallback_command:       # 安装/提供 pw_dict.pwd 后按默认设置跑完整词典检查
+fallback_auto_fix:      false
+fallback_impl:          install-runtime-data-asset-in-test-env
+
+forbid_1_pattern:       因.*(词典|dictionary|pw_dict).*失败.*(判定|认为).*(适配失败|打包错误|库有 bug)|
+                        因.*运行期数据.*缺失.*(去|以).*(改库代码|改打包)
+forbid_1_reason:        库、头、链接均正常，缺的是**外部数据资产**；改代码或改打包无法
+                        造出词典，只会把正确实现改坏。
+forbid_1_consequence:   误改正确实现，且真实问题（环境数据）依然存在。
+
+forbid_2_pattern:       为.*(词典检查|dict_check).*(默认设置).*测试.*(跳过|删除断言).*(不|未).*说明|
+                         测试.*数据缺失.*(静默).*(skip|忽略)
+forbid_2_reason:        静默跳过使"数据缺失"与"功能正常"在记录上无差别（违反 R51），
+                        质量评估失真，也无法区分环境问题与适配问题。
+forbid_2_consequence:   覆盖率虚高；将来环境变化时无人知道该路径从未被验证。
+
+principles:             honest-reporting, measure-not-assume
+
+causes:                 []
+caused_by:              []
+similar_to:             [E251]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-library-consumer-runtime-data-absent.md
+last_updated:           2026-09-16
+source_event:           pwquality 1.4.5 适配（pwquality_check 默认设置返回 -22、
+                        pwquality_generate 返回 -24；实测 cracklib 包不含 pw_dict）
+
+authors:                AtomCode (deepseek-flash) <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-16
+
+draft:                  true
+contributor_id:        3D6F

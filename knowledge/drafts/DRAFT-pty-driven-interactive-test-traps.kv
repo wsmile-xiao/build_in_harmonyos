@@ -1,0 +1,190 @@
+#====================================================================
+# DRAFT-pty-driven-interactive-test-traps
+#   —— 用 pty 自动化测试交互式程序：三个必踩的坑（时序 / 同批关闭 / 假阳性）
+# 对应人类文档: knowledge/drafts/DRAFT-pty-driven-interactive-test-traps.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: PR #9638 pinentry 1.3.3 —— 用 pty 驱动 curses/tty 前端做协议功能测试
+# 与既有条目的关系（互补，非重复）:
+#   E028 —— Linux 端「ncurses 必须静态库」的编译要求（--without-shared）。
+#   本条目 —— 讲**静态链接 ncurses 的后果**：程序运行期需在磁盘上找到**可读**的
+#     terminfo 数据库，否则直接拒绝启动；以及"存在≠可读"的检测方法。
+#     查重（2026-09-12）: `cannot initialize terminal type` 命中 0；`terminfo` 命中 0；
+#     讲"静态链接 ncurses"的 2 条（dependencies.md / python-extensions.md）均只讲
+#     编译期链接方式，**terminfo 相关命中 0**（未涉及运行期后果）。
+#   pty 的 145 条命中中，**无一条**讲用 pty.fork 驱动交互程序做自动化测试
+#     （按 `pty\.fork|pty 驱动|openpty` 交叉过滤命中 0）。
+#====================================================================
+
+id:                     DRAFT-pty-driven-interactive-test-traps
+trigger_tool:           python|expect|conan
+phase:                  testing
+error_signature:        cannot initialize terminal type|
+                         ncurses: cannot initialize terminal type.*exiting|
+                         Error opening terminal|
+                         (输入.*(丢失|无效))|no input received|
+                         pexpect.*(timeout|EOF)
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               testing, pty, curses, terminfo, automation, tui
+match_keywords:         pty, pty.fork, openpty, 伪终端, expect, pexpect,
+                         curses, ncurses, terminfo, TERM, TERMINFO,
+                         cannot initialize terminal type, 交互式测试,
+                         interactive test automation, 假阳性, false positive,
+                         "OK Pleased to meet you", handshake
+title:                  用 pty 自动化测试交互式程序（curses/TUI）的三个必踩坑：时序与回车、同批关闭连接、断言假阳性
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             交互式程序（curses/TUI、密码提示等）无法用普通管道驱动——
+                        它需要 **tty**（isatty 为真、可做终端控制）。故用 pty 驱动。
+                        但 pty 是**双向异步**的，缺少显式同步就必然出错。实测（pinentry）
+                        暴露出三类坑，都会造成**假失败或假通过**：
+
+                        **坑一：curses 程序必须"等界面渲染完"再输入，且用 `\\r` 确认**
+                          curses 初始化（initscr/setupterm）与首帧绘制需要时间；
+                          过早写入会被行规程缓冲吞掉或落在初始化前。实测把命令与
+                          口令一次性灌入 → GETPIN 返回空。
+                          另：curses 下确认键是 **`\\r`（回车）**，只发 `\\n` **不生效**。
+                          正确顺序：等进程起来 → 发命令 → **固定延时等渲染** →
+                          写输入 → **`\\r`**。
+                          更稳的做法：**读输出直到出现预期提示**再输入（见 rec_command）。
+
+                        **坑二：不可把"退出命令"与"交互命令"同批发出**
+                          把 `BYE` 与 `GETPIN` 写进同一批 → 进程在**用户输入之前**
+                          就收到 BYE 并关闭连接 → GETPIN 永远拿不到数据。
+                          实测对照（同一二进制、同一输入）：
+                            BYE 与 GETPIN 同批   → 失败
+                            BYE 与 GETPIN 不同批 → 成功
+                          同样地，任何"结束/关闭"类命令都必须留到交互完成之后。
+
+                        **坑三：断言假阳性 —— `"OK"` 不代表业务成功**
+                          许多行式协议**握手首行本身就是成功串**（Assuan 为
+                          `OK Pleased to meet you`）。因此
+                            assert "OK" in output
+                          在**进程刚起来还没执行任何命令**时就为真 →
+                          断言恒真、永远 PASS。必须断言**业务数据行**或**错误行**
+                          （如断言 `D 1234` 或 `ERR`），而不是通用成功字。
+
+                        附带（curses 特有）：**静态链接 ncurses 的程序需要磁盘上
+                        存在"可读的" terminfo 数据库**，否则根本不启动：
+                          `ncurses: cannot initialize terminal type ($TERM="...")`
+                        注意"目录存在" ≠ "可读"——交叉构建产出的 terminfo 文件
+                        owner 常为构建用户且权限收紧（实测 `-rw-rw----`），
+                        须**实测可读性**后再选定 TERMINFO（见 verification_cmd）。
+affected_scope:         OHOS（及任何交叉构建环境）上用 pty/expect 自动化测试
+                         交互式程序时；尤其 curses/TUI 程序与命令行密码提示。
+                         也影响"用 pty 驱动 shell 做集成测试"的场景（同批关闭类错误）。
+verification_cmd:       # ① terminfo 可读性（不要只看目录是否存在）
+                         for d in /usr/share/terminfo "$TERMINFO" <pkg>/share/terminfo; do
+                           e="$d/$(printf %s "${TERM:-xterm}" | cut -c1)/${TERM:-xterm}"
+                           [ -f "$e" ] && [ -r "$e" ] && echo "USABLE $d"
+                         done
+                         # ② curses 是否能初始化（决定性判据）
+                         #    TERM=xterm TERMINFO=<可读目录> <bin> ; 看是否报
+                         #    "cannot initialize terminal type"
+                         # ③ 程序是否真的静态链入了 curses（NEEDED 里没有 libncurses
+                         #    却有 curses 行为 → 静态）
+                         readelf -d <bin> | grep NEEDED
+                         nm <bin> | grep -E ' T (initscr|setupterm)$'
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           render-wait-then-cr-plus-late-bye-plus-data-line-assert
+rec_description:        用 pty 驱动交互程序做自动化测试时，四条硬性规则：
+                         ① **先等渲染、再输入**，且**用 `\\r` 确认**（`\\n` 在 curses 下
+                            不生效）。更稳的是**读到预期提示再写**（`read_until`），
+                            而非固定 sleep —— 固定 sleep 在慢机上仍会假失败；
+                         ② **结束/关闭类命令（BYE 等）必须留到交互完成之后**，
+                            绝不与交互命令同批发出；
+                         ③ **断言业务数据行或错误行**，绝不断言通用成功字（`OK`）；
+                            若输出无结构化数据行，则断言"错误串**不**出现"作为下限；
+                         ④ **终端不可用时如实标 SKIP 并计数**，不要让它变成 FAIL，
+                            更不要让它静默算作 PASS（R34）。
+                         配套：测试脚本输出**机器可解析汇总行**
+                         （`RESULT: passed=N failed=M skipped=K`），由 test_package
+                         解析并对 failed>0 / passed==0 报错、skipped>0 告警。
+                         补充（curses 程序）：运行前确保 terminfo **可读**——按
+                         verification_cmd ① 逐个候选目录实测 `-r`，选定后再设 TERMINFO；
+                         找不到可读 terminfo 时走 ④（SKIP），不要伪造通过。
+rec_command:            # 骨架：读提示→输入→断言数据行→最后才 BYE
+                         #   pid, fd = pty.fork()
+                         #   if pid == 0: os.execv(BIN, [os.path.basename(BIN)])
+                         #   def read_until(pat, timeout=15):
+                         #       buf = b""; end = time.time() + timeout
+                         #       while time.time() < end:
+                         #           r,_,_ = select.select([fd], [], [], 0.3)
+                         #           if r:
+                         #               try: c = os.read(fd, 65536)
+                         #               except OSError: break
+                         #               if not c: break
+                         #               buf += c
+                         #               if re.search(pat, buf): break
+                         #       return buf
+                         #   os.write(fd, b"SETDESC Enter PIN\nSETPROMPT PIN:\nGETPIN\n")
+                         #   read_until(rb"(?i)pin:")          # ① 等渲染/等提示
+                         #   os.write(fd, b"1234"); time.sleep(.4)
+                         #   os.write(fd, b"\r")               # ① 回车确认（非 \n）
+                         #   out = read_until(rb"D \d+") or read_until(rb"ERR")
+                         #   assert b"D 1234" in out           # ③ 断言数据行，非 "OK"
+                         #   # ④ BYE 留到最后，绝不与 GETPIN 同批
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      skip-interactive-assertions-honestly
+fallback_description:   若环境**确实**无法提供可用终端（CI 无 pty、无可读 terminfo），
+                         则把交互类断言**标 SKIP 并计数**，只运行不依赖终端的断言
+                         （握手、GETINFO、错误处理等），并在汇总行与 test_note 中
+                         **明确写出跳过了什么、为什么**。
+                         底线：**绝不**把 skipped 并入 passed，也**绝不**因为
+                         "跑不了"就删掉这些断言（删掉等于失去覆盖且不留痕）。
+fallback_command:       # 汇总行必须区分三者
+                         #   RESULT: passed=N failed=M skipped=K
+                         # 且列出跳过项原因
+                         grep -E "RESULT:|SKIP" <log>
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       一次性.*(写入|发送).*全部命令.*再.*读|send_all.*then.*read
+forbid_1_reason:         交互式程序按提示逐步消费输入；一次性灌入会因渲染未完成/行规程
+                         缓冲而丢失，且 curses 下 `\n` 不是确认键（须 `\r`）
+forbid_1_consequence:    间歇性假失败（慢机上必现），最易被误判为"被测程序有 bug"
+forbid_2_pattern:       BYE.*(与|和).*GETPIN.*(同批|一起)|命令串.*含.*(BYE|quit|exit).*再.*交互
+forbid_2_reason:         结束命令会立即关闭连接，使后续交互永远拿不到数据
+                         （实测：同批→失败，不同批→成功）
+forbid_2_consequence:    交互断言必然失败，且原因隐蔽（日志里只看到"没收到数据"）
+forbid_3_pattern:       assert.*("OK"|'OK').*in.*(out|output|stdout)
+forbid_3_reason:         行式协议握手首行常为成功串（如 Assuan 的
+                         "OK Pleased to meet you"）→ 该断言在进程刚启动时为真，恒 PASS
+forbid_3_consequence:    假阳性：功能完全坏掉也照样"通过"（R34 要防的正是这个）
+
+principles:
+similar_to:             E028, DRAFT-no-upstream-tests-drive-real-interface
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-12
+source_event:           pinentry/1.3.3（PR #9638）—— 用 pty 驱动 pinentry-tty /
+                         pinentry-curses 做 Assuan 协议功能测试，16 项断言。实测踩坑：
+                         · curses 须等渲染完再输入、且用 \r 确认（\n 不生效）
+                         · BYE 与 GETPIN 同批 → 失败；不同批 → 成功
+                         · 仅断言 "OK" 会匹配握手首行 "OK Pleased to meet you"（假阳性）
+                         · pinentry-curses **静态链接 ncurses**（readelf -d 的 NEEDED
+                           只有 libassuan/libgpg-error/libc，无 libncurses；
+                           nm 可见 initscr 等符号）→ 须有**可读** terminfo，否则报
+                           "ncurses: cannot initialize terminal type" 并退出；
+                           实测制品内 terminfo 为 `-rw-rw----`（owner 为构建用户），
+                           故须实测 os.access(entry, R_OK) 而非判断存在性
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:              9638
+source_commit:          8751b8d2b
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-12
+
+draft:                  true

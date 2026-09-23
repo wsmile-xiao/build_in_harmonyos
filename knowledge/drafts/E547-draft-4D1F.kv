@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E547.kv，填写各字段
+# 对应的人类文档: doc/E547.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E547
+trigger_tool: clang|gdb
+phase: runtime|testing
+error_signature: Segmentation fault.*imageData|cast to smaller integer type 'int' from 'unsigned char|cast to 'unsigned char \*' from smaller integer type
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:                  64 位平台指针截断对齐：以 int 承接 malloc 指针做对齐运算产生非法地址         简短标题(一句话描述错误模式)
+severity: 3
+category: 64-bit, portability, image-processing, legacy-c
+match_keywords:         pointer truncation, uintptr_t, aarch64, image alignment, 64-bit portability, imageData, malloc alignment
+title:                  64 位平台指针截断对齐：以 int 承接 malloc 指针做对齐运算产生非法地址
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:             2007 年代 C 图像库用 (int)(ptr-1)/align*align+align 对 malloc 返回指针做对齐；指针先被截断为 32 位 int，64 位目标（aarch64/OHOS）上得到的高位丢失值既不等于原指针对齐结果也不可解引用，堆访问段错误；同模式 int 结果再被 cast 回指针。clang 15 编译期以 pointer-to-int/int-to-pointer cast 告警成对出现（每处 2 条）       一句话根因描述(逗号可分行)
+# affected_scope:         在 64 位平台编译的遗留 C/C++ 图像与多媒体库中所有「指针→int→指针」对齐惯用法：CamelliaLib 2.7.0 src/cam_utils.c 8 处（camAllocateImage 及 YUV/RGB/RGBA/BGR/BGRA 变体与 camClone）；任何含 (int)(ptr) 或 (unsigned char*)(int) 形态的老代码在 aarch64 上同样暴露   影响范围
+# verification_cmd:       make 2>&1 | grep -c "cast to smaller integer type 'int' from"; 消费者程序调用 camAllocateImage 后写 imageData 触发 SIGSEGV（native 冒烟实测 exit=139）；修复后同一消费者 24 项断言全过（SMOKE OK） 验证诊断是否正确的命令
+root_cause:             2007 年代 C 图像库用 (int)(ptr-1)/align*align+align 对 malloc 返回指针做对齐；指针先被截断为 32 位 int，64 位目标（aarch64/OHOS）上得到的高位丢失值既不等于原指针对齐结果也不可解引用，堆访问段错误；同模式 int 结果再被 cast 回指针。clang 15 编译期以 pointer-to-int/int-to-pointer cast 告警成对出现（每处 2 条）
+affected_scope:         在 64 位平台编译的遗留 C/C++ 图像与多媒体库中所有「指针→int→指针」对齐惯用法：CamelliaLib 2.7.0 src/cam_utils.c 8 处（camAllocateImage 及 YUV/RGB/RGBA/BGR/BGRA 变体与 camClone）；任何含 (int)(ptr) 或 (unsigned char*)(int) 形态的老代码在 aarch64 上同样暴露
+verification_cmd:       make 2>&1 | grep -c "cast to smaller integer type 'int' from"; 消费者程序调用 camAllocateImage 后写 imageData 触发 SIGSEGV（native 冒烟实测 exit=139）；修复后同一消费者 24 项断言全过（SMOKE OK）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority:           1
+rec_approach:           uintptr-t-pointer-alignment-rewrite
+rec_description:        把对齐运算中的指针统一改为 uintptr_t 参与整型运算（(uintptr_t)(ptr-1)/align*align+align）并补 stdint.h；无平台条件宏、32/64 位语义一致；逐处替换而非全局 -fpermissive 类编译器开关
+rec_command:            sed 替换模板: ((int)(ptr-1)/align) → ((uintptr_t)(ptr-1)/align); 验证: patch --dry-run -p1 后与探索副本 diff -rq 逐字节等价
+rec_auto_fix:           false
+rec_impl:               manual-patch
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:      compiler-diagnostic-driven-audit
+fallback_description:   以 clang -Wpointer-to-int-cast -Wint-to-pointer-conversion 全量清点截断点（CamelliaLib 2.7.0 恰为 8+8 条全在 cam_utils.c）逐处复核数据流宽度后再改；禁止只改告警点不改数据流（若对齐结果继续参与指针运算需一并核对）
+fallback_command:       make clean && make 2>&1 | grep -B1 "pointer.*cast" | grep "\.c:[0-9]*"
+fallback_auto_fix:      false
+fallback_impl:          diagnostic-workflow
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:       -fpermissive|-fcommon
+forbid_1_reason:        编译器宽容开关只压制告警不恢复被截断的高位地址，运行期仍段错误
+forbid_1_consequence:   假绿编译通过、运行期 SIGSEGV 且无编译期线索
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:             P003, P013    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:             P003, P013
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E547.md
+last_updated: 2026-09-05
+source_event:           camellia/2.7.0 HarmonyOS PC adaptation (开源鸿蒙PC专项积分赛)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 4D1F

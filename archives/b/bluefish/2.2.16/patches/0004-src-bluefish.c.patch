@@ -1,0 +1,205 @@
+--- a/src/bluefish.c
++++ b/src/bluefish.c
+@@ -15,20 +15,21 @@
+  * GNU General Public License for more details.
+  *
+  * You should have received a copy of the GNU General Public License
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  */
+ 
+ /*#define DEBUG */
+ 
+ #include <gtk/gtk.h>
+ #include <stdlib.h>				/* exit() on Solaris and unsetenv()  */
++#include <string.h>				/* strcmp() */
+ #include <time.h>				/* nanosleep */
+ 
+ #ifndef WIN32
+ #include <signal.h>             /* sigaction */
+ #endif
+ 
+ #ifdef MAC_INTEGRATION
+ #include <gtkosxapplication.h>
+ #endif
+ 
+@@ -88,20 +89,113 @@
+ 	return;
+ }
+ #endif							/* __GNUC__ */
+ 
+ void cb_print_version(const gchar * option_name, const gchar * value, gpointer data,
+ 					  GError ** error)
+ {
+ 	g_print("%s %s\n%s\n",_("Bluefish Editor"),VERSION,_("Visit us at http://bluefish.openoffice.nl"));
+ 	exit(0);
+ }
++
++/* Headless self-test hook (HarmonyOS PC): this runs before the GTK display
++ * is opened and exits, so the packaged binary can be verified on systems
++ * without an X server. It exercises the production string/word-count
++ * helpers from bf_lib.c (the same helpers bluefish uses for its rcfile
++ * configuration encoding) plus the libxml2 and GLib/GTK bindings. */
++
++static gboolean selftest_passed = TRUE;
++
++static void
++selftest_check(const gchar *name, gboolean ok)
++{
++	if (!ok)
++		selftest_passed = FALSE;
++	g_print("self-test: %s: %s\n", name, ok ? "PASS" : "FAIL");
++}
++
++static void
++selftest_run(void)
++{
++	gchar *escaped, *unescaped, *repeated, *truncated;
++	guint chars = 0, lines = 0, words = 0;
++	xmlDocPtr document;
++
++	/* escape_string()/unescape_string() are the value codec used when
++	 * bluefish reads and writes its rcfile configuration, so a round
++	 * trip must be lossless in both colon modes. */
++	escaped = escape_string("mode=default:path=a\\b", TRUE);
++	unescaped = unescape_string(escaped, TRUE);
++	selftest_check("config-escape-roundtrip-colon",
++				   g_strcmp0(unescaped, "mode=default:path=a\\b") == 0);
++	g_free(unescaped);
++	g_free(escaped);
++
++	escaped = escape_string("a:b", FALSE);
++	unescaped = unescape_string(escaped, FALSE);
++	selftest_check("config-escape-roundtrip-nocolon",
++				   g_strcmp0(unescaped, "a:b") == 0);
++	g_free(unescaped);
++	g_free(escaped);
++
++	repeated = bf_str_repeat("ab", 3);
++	selftest_check("string-repeat", g_strcmp0(repeated, "ababab") == 0);
++	g_free(repeated);
++	repeated = bf_str_repeat("ab", 0);
++	selftest_check("string-repeat-zero", g_strcmp0(repeated, "") == 0);
++	g_free(repeated);
++
++	truncated = trunc_on_char(g_strdup("path/to/file"), '/');
++	selftest_check("string-truncate-found", g_strcmp0(truncated, "path") == 0);
++	g_free(truncated);
++	truncated = trunc_on_char(g_strdup("nodelimiter"), '/');
++	selftest_check("string-truncate-missing",
++				   g_strcmp0(truncated, "nodelimiter") == 0);
++	g_free(truncated);
++
++	wordcount("", &chars, &lines, &words);
++	selftest_check("wordcount-empty", chars == 0 && lines == 0 && words == 0);
++	chars = lines = words = 0;
++	wordcount("one two\nthree", &chars, &lines, &words);
++	selftest_check("wordcount-ascii", chars == 13 && lines == 2 && words == 3);
++	chars = lines = words = 0;
++	wordcount("h\xc3\xa9llo w\xc3\xb6rld", &chars, &lines, &words);
++	selftest_check("wordcount-utf8", chars == 11 && lines == 1 && words == 2);
++
++	selftest_check("int-parse-digits", get_int_from_string("width=1280") == 1280);
++	selftest_check("int-parse-none", get_int_from_string("abc") == -1);
++
++	/* Bluefish links libxml2 for its XML handling; parse both a valid
++	 * document and a truncated one. An explicit byte length is used
++	 * because xmlReadMemory(..., -1, ...) is unreliable for in-memory
++	 * buffers on some libxml2 builds. */
++	xmlInitParser();
++	document = xmlReadMemory("<root><child/></root>",
++							 (int) strlen("<root><child/></root>"),
++							 "inline.xml", NULL, 0);
++	selftest_check("xml-parse-valid", document != NULL);
++	if (document)
++		xmlFreeDoc(document);
++	document = xmlReadMemory("<root>", (int) strlen("<root>"),
++							 "inline.xml", NULL, 0);
++	if (document)
++		xmlFreeDoc(document);
++
++	/* The version getters need no display; they prove that the packaged
++	 * binary really links the GLib/GTK libraries it was built against. */
++	selftest_check("glib-version", glib_check_version(2, 24, 0) == NULL);
++	selftest_check("gtk-version", gtk_get_major_version() >= 3);
++
++	g_print("self-test: %s\n", selftest_passed ? "PASS" : "FAIL");
++	exit(selftest_passed ? 0 : 1);
++}
++
+ 
+ static void init_default_session(Tsessionvars *session) {
+ 	session->enable_syntax_scan = session->view_main_toolbar
+ 			= session->view_left_panel
+ 			= session->filebrowser_focus_follow
+ 			= session->view_statusbar
+ 			= session->autoindent
+ 			= session->view_line_numbers
+ 			= session->view_cline
+ 			= session->view_blocks
+@@ -238,22 +332,41 @@
+ #ifdef STARTUP_PROFILING
+ 	g_print("startup_in_idle, end of state=%d, elapsed=%d\n",startup->state,(gint)(g_timer_elapsed(startuptimer,NULL)*1000.0));
+ #endif
+ 	startup->state++;
+ 	return TRUE;
+ }
+ 
+ int main(int argc, char *argv[])
+ {
+ 	static gboolean arg_curwindow = FALSE, arg_newwindow=FALSE;
++
+ 	static gchar **files = NULL;
+ 	Tstartup *startup;
++	{
++		gint bf_arg;
++		/* Headless option gate: --selftest must return before the GTK
++		 * display is opened (there is no X server on HarmonyOS PC). */
++		for (bf_arg = 1; bf_arg < argc; bf_arg++) {
++			if (strcmp(argv[bf_arg], "--selftest") == 0)
++				selftest_run();
++		}
++	}
++	{
++		gint bf_arg;
++		/* Headless option gate: --selftest must return before the GTK
++		 * display is opened (there is no X server on HarmonyOS PC). */
++		for (bf_arg = 1; bf_arg < argc; bf_arg++) {
++			if (strcmp(argv[bf_arg], "--selftest") == 0)
++				selftest_run();
++		}
++	}
+ 	
+ #ifdef PLATFORM_DARWIN
+ 	osx_setenv(&argc, &argv);
+ #endif	
+ 	
+ #ifdef MAC_INTEGRATION
+ 	GPollFunc orig_poll_func;
+ 	GPollFunc gdk_poll_func;
+ #endif
+ 
+@@ -338,20 +451,24 @@
+ 
+ 	GError *error = NULL;
+ 	GOptionContext *context;
+ 	const GOptionEntry options[] = {
+ 		{"curwindow", 'c', 0, G_OPTION_ARG_NONE, &arg_curwindow,
+ 		 N_("Open in existing window."), NULL},
+ 		{"newwindow", 'n', 0, G_OPTION_ARG_NONE, &arg_newwindow,
+ 		 N_("Open in new window."), NULL},
+ 		{"version", 'v', G_OPTION_FLAG_NO_ARG, G_OPTION_ARG_CALLBACK, (void *) cb_print_version,
+ 		 N_("Print version information."), NULL},
++		{"selftest", 0, 0, G_OPTION_ARG_NONE, NULL,
++		 N_("Run the headless self-test and exit."), NULL},
++		{"selftest", 0, 0, G_OPTION_ARG_NONE, NULL,
++		 N_("Run the headless self-test and exit."), NULL},
+ 		{G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &files,
+ 		 "Special option that collects any remaining arguments for us", NULL},
+ 		{NULL}
+ 	};
+ #if !GLIB_CHECK_VERSION(2, 32, 0)
+ 	/* g_thread_init() is called by default starting at glib 2.32 */
+ 	if (!g_thread_supported())
+ 		g_thread_init(NULL);
+ #endif
+ 

@@ -1,0 +1,83 @@
+# ═══ Draft knowledge entry — conan self.run 经 shell 传递 -DXXX='"..."' 字符串宏时引号被吞/转义错乱 ═══
+# Timestamp: 2026-09-12
+# Software: choose-mirror 2.137（任何在 conan build() 里 self.run 传 -D宏='带引号C字符串' 的 C/C++ 包）
+# Gate: conan create build() 编译阶段
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-E543
+title: conan build() 用 self.run 传 -DXXX='"C字符串"' 宏时，内层双引号被 /bin/sh 吃掉变裸标识符（use of undeclared identifier），或反斜杠转义 \\\" 经 conan 命令包装变成 \" 原样进编译器（missing terminating '"'）
+trigger_tool: clang / gcc（经 conan self.run → /bin/sh -c）
+phase: build
+error_signature: use of undeclared identifier '\w+'|expanded from here.*-D\w+ \w+|missing terminating '"'.*character.*-Winvalid-pp-token
+severity: 2
+category: build-system|quoting|shell|conan
+match_keywords: use of undeclared identifier, missing terminating, -D, self.run,
+  ARCH_TEXT, C string literal, double quote, backslash escape, shell expansion
+keywords: conan self.run, /bin/sh -c, shell quoting, -D 宏, C 字符串字面量, 双引号被吞,
+  反斜杠转义, undeclared identifier, invalid-pp-token, 单引号壳保护, Makefile
+  -DARCH_TEXT, 交叉编译宏传参
+approach: conan build() 里 self.run("... -DARCH_TEXT=...") 编译报 "use of undeclared
+  identifier 'xxx'"（宏值变成裸标识符）或 "missing terminating '\"'"（转义错乱）时，
+  根因是 self.run 走 /bin/sh -c，-D 宏值里的双引号被 shell 当作引号定界符消费。
+  修复：把宏值用**单引号壳**保护——-DARCH_TEXT='"aarch64"'。单引号内的一切字符
+  （含双引号、反斜杠）在 POSIX/OHOS /system/bin/sh 下原样保留，shell 剥掉外层
+  单引号后，编译器恰好收到带 C 引号的字面量 "aarch64"。禁止用裸双引号
+  （-DARCH_TEXT="aarch64"，会被 shell 吃掉），反斜杠转义双引号（\\\"）在 OHOS
+  /system/bin/sh 实测下未如 POSIX 预期被剥离、\" 原样进编译器
+  （missing terminating '"'），同样不可用
+root_cause: conan 的 ConanFile.run(shell=True) 经 /bin/sh -c 执行，命令字符串先被
+  shell 解析一次再交给编译器。-D 宏值若含 C 字符串字面量（需要传递字面双引号给
+  预处理器），裸双引号会被 shell 当引号定界符剥离（值退化裸标识符 → undeclared
+  identifier）；反斜杠转义双引号又会被 conan 的命令包装/shell 二次解释成 \" 原样
+  传给编译器（missing terminating '"'）。只有外层单引号能在 shell 层把内层双引号
+  原样保住
+affected_scope: 所有在 conan build() 用 self.run（而非 Makefile/AutotoolsToolchain
+  等自带正确引号处理的路径）直接拼 -D宏值且宏值含 C 字符串字面量的 C/C++ 包；
+  典型于 Makefile 里 -DARCH_TEXT='"$(DEB_HOST_ARCH)"' 这类需把 shell 展开结果再包一层
+  C 引号的宏，手工复刻到 conan self.run 时最容易踩。纯 Makefile/Autotools 路径
+  （make -C ... CFLAGS='-DARCH_TEXT="..."'）不触发，因 Makefile/shell 引号层与
+  conan self.run 拼接层不同
+verification_cmd: grep -nE "use of undeclared identifier|missing terminating" <conan-create.log>  # >0 且上下文是 -D 宏展开即命中
+rec_priority: 1
+rec_approach: single-quote-shell-wrap-cstring-macro
+rec_description: 在 conan self.run 的编译命令里，把含 C 字符串字面量的 -D 宏值用单引号壳
+  包住：-DARCH_TEXT='"aarch64"'。Python 源码里写作 "-DARCH_TEXT='\"aarch64\"'"
+  （外层 Python 双引号、中层 shell 单引号、内层 C 双引号）。shell 剥单引号后编译器
+  收到 -DARCH_TEXT="aarch64"（带 C 引号）
+rec_command: 在 conanfile build() 编译行把 -DARCH_TEXT="aarch64"（裸）或 -DARCH_TEXT=\\\"aarch64\\\"
+  （反斜杠）改成 -DARCH_TEXT='"aarch64"'（单引号壳）
+rec_auto_fix: false
+rec_impl: conanfile.py build() 编译命令字符串改写（不进被测软件源码，不产 patch）
+fallback_priority: 2
+fallback_approach: pass-macro-via-env-or-mak
+fallback_description: 若单引号壳仍与 conan 命令包装冲突，改走不经过 self.run shell
+  拼接的路径：AutotoolsToolchain/CMakeToolchain 的宏定义 API，或 make -C 让
+  Makefile 自带引号处理，或把值写进 -include 的小头文件
+fallback_command: make -C <src> ARCH=... 让 Makefile 内部处理 -DARCH_TEXT='"$(ARCH)"'
+fallback_auto_fix: false
+fallback_impl: 构建系统层（不手工拼 shell 字符串）
+principles: conan self.run 的 shell 拼接层比手工 shell 多一层命令包装，-D 宏里的 C
+  字符串引号必须用单引号壳在 shell 层保护；裸双引号会被 shell 吃掉、反斜杠转义
+  会被二次解释，二者都是错误形态
+caused_by: 把 Makefile 里 -DXXX='"$(VAR)"' 的写法直译成 conan self.run 字符串，忽略了
+  conan self.run 比裸 shell 多一层命令包装、且 -D 值需同时满足 shell 与预处理器两层
+causes: conan create build() 编译报 use of undeclared identifier（裸双引号形态）或
+  missing terminating '"'（反斜杠转义形态），宏未正确展开
+similar_to: DRAFT-E551（同为 conan self.run shell 拼接引号/转义类，E551 聚焦 bash/
+  libtool 的复杂命令转义，本条聚焦 -D 宏 C 字符串字面量单层引号保护）
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-E543-ohos-conan-run-shell-quote-cstring.md
+last_updated: 2026-09-12
+source_event: choose-mirror 2.137 OHOS aarch64 conan create；-DARCH_TEXT="aarch64"
+  裸双引号 → undeclared identifier 'aarch64'；-DARCH_TEXT=\\\"aarch64\\\" 反斜杠 →
+  missing terminating '"'；-DARCH_TEXT='"aarch64"' 单引号壳 → 编译通过
+authors: (choose-mirror 适配子任务)
+source_pr: (本 PR)
+source_commit: (待提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.85
+metrics_last_used: 2026-09-12
+draft: true
+contributor_id: (choose-mirror)

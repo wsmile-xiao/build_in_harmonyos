@@ -1,0 +1,68 @@
+# ═══ Draft knowledge entry — 无头 CI 下"核心功能需 GPU/GL context"的库如何写出真 test_package（R34/L1e 通过） ═══
+# Software: opencsg 1.8.2
+# Gate: device shadow CI L1 pass + L1e destructive negative pass
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: opencsg-1.8.2-ohos-headless-context-dependent-test-contract
+severity: 2
+category: testing|ohos|graphics
+trigger_tool: conan|ctest
+phase: testing
+
+keywords: headless CI, no GL context, GPU context required, R34 real test, L1e destructive negative, test_package contract, dlopen probe, render() needs context
+
+error_signature: (test_package).*render\(\).*(context|GL)|L1d: test\(\) method appears to be a fake test|fake test detected
+
+match_keywords: headless, GL context, GPU, R34, L1e, destructive negative, test_package, dlopen, render, context-dependent
+
+root_cause: |
+  某些库的核心功能必须依赖运行时上下文：图形库需要真实 OpenGL/GLES context、音频库需要
+  设备、显示库需要窗口系统。CI worker 无头、无 GPU，直接调用核心渲染/播放接口必然失败。
+  常见的两种错误应对：跳过测试（等于没有验证）、写只有 printf 的空壳测试（违反 R34/L1d，
+  且 CI 的 L1e 破坏性反向验证会识破）。需要一套既能在无头环境跑通、又真实依赖被测包的契约。
+
+rec_approach: context-free-API-surface-plus-runtime-loader-probe
+rec_description: |
+  把库的公开 API 分成"无需上下文"与"需要上下文"两类：
+  (1) 无上下文部分做实质断言——版本宏、核心对象的构造/析构、setter/getter、内部状态机、
+      选项与上下文键管理。这些都链接并调用被测包的真实符号，L1e 移走产物后会链接/运行失败，
+      满足 R34。
+  (2) 加"运行时加载器探针"：dlopen 该库在目标平台上真正依赖的运行时库，解析配方补丁
+      所依赖的入口符号（例如 GL 入口库与过程地址函数）。这既证明平台前提成立，又不创建上下文。
+  (3) 明确把"需要上下文"的路径标注为延后到应用侧/真机，写进 MANIFEST.yml 与 notes，
+      不谎称已覆盖。
+  这套契约对任何 context-dependent 库（图形/音频/显示/输入）都适用。
+rec_command: |
+  # test_package/test_<lib>.cpp 结构示例
+  #   A. 版本/枚举/对象生命周期/setter-getter/全局选项/上下文键 → 断言
+  #   B. dlopen("libGLv4.so"/"libEGL.so"/...) + dlsym(入口符号) → 存在则断言，不存在则 skip
+  #   C. 需要 context 的核心调用 → 不在 CI 执行，记录为应用侧验证项
+  conan create archives/<l>/<lib>/<ver> -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+rec_auto_fix: false
+
+affected_scope: |
+  所有核心功能依赖运行时上下文、又必须在无头 CI 上通过 conan create 的库（图形渲染、音频、
+  显示、以及任何需要设备/服务才能工作的库）。R34 要求测试实质调用被测包 API；
+  L1e 会移走产物验证测试确实依赖它。
+
+verification_cmd: |
+  # 通过标准：L1 pass（test_package 真实执行）+ L1e "Negative test confirmed"
+  # 且 test 二进制对被测包有未定义符号依赖：
+  llvm-nm -D -u <test_binary> | grep <LibNamespace>   # 应列出一批由被测包解析的符号
+  llvm-readelf -d <test_binary> | grep NEEDED         # 应含被测包库
+
+evidence: |
+  opencsg 1.8.2（render() 需真实 GL context）：
+  - 无上下文断言 9 项：OPENCSG_VERSION/STRING、Primitive 构造析构 + setOperation/Convexity/
+    BoundingBox、setOption/getOption、setContext/getContext。
+  - 运行时探针 2 项：dlopen libGLv4.so 且解析 glGetString；dlopen libEGL.so 且解析 eglGetProcAddress。
+  - 设备 shadow CI 结果：test_opencsg: PASS；L1_RESULT=pass；
+    L1e: Negative test confirmed — test genuinely depends on opencsg。
+  - 未覆盖（如实记录）：render() 的 Goldfeather/SCS + FBO/遮挡查询路径，需应用侧真实 GL context。
+  - 对照：本地对 test 二进制做 nm -D -u 检查，13 个 OpenCSG 符号由 libopencsg.so 解析。
+
+authors:
+  - codex
+source_pr:
+source_commit:
+draft_date: 2026-09-11

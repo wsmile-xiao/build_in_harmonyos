@@ -1,0 +1,261 @@
+--- /dev/null
++++ b/harmony/project/entry/src/main/ets/pages/Curtain.ets
+@@ -0,0 +1,258 @@
++import { hilog } from '@kit.PerformanceAnalysisKit';
++import { image } from '@kit.ImageKit';
++import { common } from '@kit.AbilityKit';
++import { display, window } from '@kit.ArkUI';
++import curtain from 'libcurtain.so';
++
++const DOMAIN = 0x2843;
++const TAG = 'CurtainPage';
++
++interface Rect {
++  minX: number;
++  minY: number;
++  maxX: number;
++  maxY: number;
++}
++
++@Entry
++@Component
++struct Curtain {
++  @State winX: number = 0;
++  @State winY: number = 0;
++  @State winW: number = 0;
++  @State winH: number = 0;
++  @State screenW: number = 0;
++  @State screenH: number = 0;
++  @State pixelMap: image.PixelMap | null = null;
++  @State ready: boolean = false;
++
++  private win: window.Window | null = null;
++  private dragging: boolean = false;
++  private ctx: CanvasRenderingContext2D =
++    new CanvasRenderingContext2D(new RenderingContextSettings(true));
++  private readonly context = this.getUIContext()?.getHostContext() as common.UIAbilityContext;
++
++  aboutToAppear(): void {
++    this.initAsync();
++  }
++
++  private async getWindow(): Promise<window.Window | null> {
++    if (this.win) {
++      return this.win;
++    }
++    try {
++      this.win = await window.getLastWindow(this.context);
++    } catch (e) {
++      hilog.error(DOMAIN, TAG, 'getLastWindow ERR %{public}s', JSON.stringify(e));
++    }
++    if (!this.win) {
++      try {
++        this.win = this.context.windowStage.getMainWindowSync();
++      } catch (e) {
++        hilog.error(DOMAIN, TAG, 'getMainWindowSync ERR %{public}s', JSON.stringify(e));
++      }
++    }
++    return this.win;
++  }
++
++  private async initAsync(): Promise<void> {
++    const win = await this.getWindow();
++    if (!win) {
++      return;
++    }
++    const sw = this.screenW;
++    const sh = this.screenH;
++    try {
++      const d = display.getDefaultDisplaySync();
++      this.screenW = d.width;
++      this.screenH = d.height;
++      const dispW = d.width;
++      const dispH = d.height;
++      hilog.info(DOMAIN, TAG, 'display %{public}dx%{public}d', dispW, dispH);
++      const ok = curtain.init(dispW, dispH);
++      hilog.info(DOMAIN, TAG, 'core init=%{public}s', String(ok));
++      if (!ok) {
++        return;
++      }
++      hilog.info(DOMAIN, TAG, 'step: load png');
++      const buffer = await this.loadPngBuffer();
++      if (!buffer) {
++        return;
++      }
++      hilog.info(DOMAIN, TAG, 'step: decode png');
++      const source = image.createImageSource(buffer);
++      const decoded = await source.createPixelMap({
++        desiredPixelFormat: image.PixelMapFormat.RGBA_8888
++      });
++      const info = await decoded.getImageInfo();
++      const srcW = info.size.width;
++      const srcH = info.size.height;
++      const rgba = new ArrayBuffer(srcW * srcH * 4);
++      await decoded.readPixelsToBuffer(rgba);
++      hilog.info(DOMAIN, TAG, 'step: pixels read %{public}dx%{public}d', srcW, srcH);
++      const accepted = curtain.setSource(rgba, srcW, srcH);
++      hilog.info(DOMAIN, TAG, 'step: setSource=%{public}s', String(accepted));
++      if (accepted) {
++        const scaled = curtain.getPixels();
++        const hasScaled = scaled !== null;
++        hilog.info(DOMAIN, TAG, 'step: getPixels=%{public}s expect=%{public}d',
++          String(hasScaled), dispW * dispH * 4);
++        if (scaled) {
++          try {
++            const pm = await image.createPixelMap(scaled, {
++              size: { width: dispW, height: dispH },
++              pixelFormat: image.PixelMapFormat.RGBA_8888
++            });
++            this.pixelMap = pm;
++            hilog.info(DOMAIN, TAG, 'step: pixelMap=%{public}s', String(pm !== null));
++          } catch (e) {
++            hilog.error(DOMAIN, TAG, 'createPixelMap ERR %{public}s', JSON.stringify(e));
++          }
++        }
++      }
++      decoded.release();
++      source.release();
++      this.syncWindowRect();
++      this.ready = this.pixelMap !== null;
++    } catch (e) {
++      hilog.error(DOMAIN, TAG, 'initAsync ERR %{public}s', JSON.stringify(e));
++    }
++  }
++
++  private async loadPngBuffer(): Promise<ArrayBuffer | null> {
++    try {
++      const data = await this.context.resourceManager.getRawFileContent('curtain.png');
++      return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
++    } catch (e) {
++      hilog.error(DOMAIN, TAG, 'loadPngBuffer ERR %{public}s', JSON.stringify(e));
++      return null;
++    }
++  }
++
++  private syncWindowRect(): void {
++    try {
++      const p = this.win?.getWindowProperties();
++      if (p) {
++        this.winX = p.windowRect.left;
++        this.winY = p.windowRect.top;
++        this.winW = p.windowRect.width;
++        this.winH = p.windowRect.height;
++        hilog.info(DOMAIN, TAG, 'window rect=(%{public}d,%{public}d,%{public}d,%{public}d)',
++          this.winX, this.winY, this.winW, this.winH);
++      }
++    } catch (e) {
++      hilog.error(DOMAIN, TAG, 'syncWindowRect ERR %{public}s', JSON.stringify(e));
++    }
++  }
++
++  private async applyRect(rect: Rect): Promise<void> {
++    const win = this.win;
++    if (!win) {
++      return;
++    }
++    const x = Math.round(rect.minX);
++    const y = Math.round(rect.minY);
++    const width = Math.max(1, Math.round(rect.maxX - rect.minX));
++    const height = Math.max(1, Math.round(rect.maxY - rect.minY));
++    try {
++      try {
++        await win.recover();
++      } catch (e) {
++        hilog.info(DOMAIN, TAG, 'recover skipped %{public}s', JSON.stringify(e));
++      }
++      await win.moveWindowToAsync(x, y);
++      await win.resizeAsync(width, height);
++      this.winX = x;
++      this.winY = y;
++      this.winW = width;
++      this.winH = height;
++      hilog.info(DOMAIN, TAG, 'applyRect (%{public}d,%{public}d,%{public}d,%{public}d)',
++        x, y, width, height);
++    } catch (e) {
++      hilog.error(DOMAIN, TAG, 'applyRect ERR %{public}s', JSON.stringify(e));
++    }
++  }
++
++  private handleTouch(event: TouchEvent): void {
++    for (const t of event.touches) {
++      const x = vp2px(t.windowX) + this.winX;
++      const y = vp2px(t.windowY) + this.winY;
++      if (t.type === TouchType.Down) {
++        this.dragging = true;
++        curtain.press(x, y);
++        if (curtain.shouldQuit()) {
++          this.quit();
++          return;
++        }
++        hilog.info(DOMAIN, TAG, 'down %{public}s', String(x) + ',' + String(y));
++      } else if (t.type === TouchType.Up || t.type === TouchType.Cancel) {
++        if (!this.dragging) {
++          return;
++        }
++        this.dragging = false;
++        const values = curtain.release(x, y);
++        hilog.info(DOMAIN, TAG, 'up %{public}s changed=%{public}s rect=%{public}s',
++          String(x) + ',' + String(y), String(values[4]), values.slice(0, 4).join(','));
++        if (curtain.shouldQuit()) {
++          this.quit();
++          return;
++        }
++        this.applyRect({
++          minX: values[0],
++          minY: values[1],
++          maxX: values[2],
++          maxY: values[3]
++        });
++      }
++    }
++  }
++
++  private quit(): void {
++    hilog.info(DOMAIN, TAG, 'quit requested');
++    this.context.terminateSelf();
++  }
++
++  build() {
++    Stack() {
++      if (this.pixelMap && this.ready) {
++        Image(this.pixelMap)
++          .width(this.screenW.toString() + 'px')
++          .height(this.screenH.toString() + 'px')
++          .position({
++            x: (-this.winX).toString() + 'px',
++            y: (-this.winY).toString() + 'px'
++          })
++          .interpolation(ImageInterpolation.None)
++          .hitTestBehavior(HitTestMode.None)
++      }
++      Canvas(this.ctx)
++        .width('25px')
++        .height('25px')
++        .position({
++          x: Math.max(0, this.winW - 25).toString() + 'px',
++          y: '0px'
++        })
++        .hitTestBehavior(HitTestMode.None)
++        .onReady(() => {
++          this.drawCross();
++        })
++    }
++    .width('100%')
++    .height('100%')
++    .onTouch((event: TouchEvent) => {
++      this.handleTouch(event);
++    })
++  }
++
++  private drawCross(): void {
++    this.ctx.strokeStyle = '#FFFFFF';
++    this.ctx.lineWidth = 2;
++    this.ctx.lineCap = 'round';
++    this.ctx.beginPath();
++    this.ctx.moveTo(5, 5);
++    this.ctx.lineTo(20, 20);
++    this.ctx.moveTo(20, 5);
++    this.ctx.lineTo(5, 20);
++    this.ctx.stroke();
++  }
++}

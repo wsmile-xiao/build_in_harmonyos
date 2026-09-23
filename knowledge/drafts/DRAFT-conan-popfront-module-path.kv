@@ -1,0 +1,42 @@
+id: DRAFT-E5xx-conan-module-path-popfront
+title: Conan CMakeDeps 下上游 POP_FRONT CMAKE_MODULE_PATH 弹错目录导致 bundled 依赖配置崩溃
+category: build-system
+severity: 2
+error_signature: "Unknown CMake command \"PRINT_CONFIG_SUMMARY\"; list(POP_FRONT CMAKE_MODULE_PATH); include(DefineOptions)"
+match_keywords: ohos, cmake, conan, FetchContent, CMAKE_MODULE_PATH, POP_FRONT, bundled, thrift, DefineOptions, PRINT_CONFIG_SUMMARY, arrow, parquet
+error_excerpt: "CMake Error at .../_deps/thrift-src/CMakeLists.txt:134 (PRINT_CONFIG_SUMMARY): Unknown CMake command \"PRINT_CONFIG_SUMMARY\"."
+root_cause: >
+  Conan 的 CMakeToolchain 生成 conan_toolchain.cmake，其中 `list(PREPEND CMAKE_MODULE_PATH
+  ${CMAKE_CURRENT_LIST_DIR})` 把 conan generators 目录插到 CMAKE_MODULE_PATH 最前端，
+  且发生在任何上游项目 CMakeLists 之前。当上游项目（如 Apache Arrow 的
+  ThirdpartyToolchain.cmake build_thrift()）用 `list(POP_FRONT CMAKE_MODULE_PATH)`
+  移除"自己"的模块路径、期望 bundled 依赖（FetchContent 拉取的 thrift）的
+  include(DefineOptions) 命中依赖自带的模块时——POP_FRONT 实际弹出的是 conan
+  generators 目录，上游的 cmake_modules 仍留在路径里。thrift 的
+  include(DefineOptions) 命中了 Arrow 的 DefineOptions.cmake（定义了完全不同的
+  宏集合，没有 PRINT_CONFIG_SUMMARY），thrift CMakeLists 尾部调用
+  PRINT_CONFIG_SUMMARY() 时报 Unknown CMake command，配置崩溃。
+solution: |
+  补丁将 POP_FRONT 改为按路径显式移除（ThirdpartyToolchain.cmake 自身所在目录即
+  为需要移除的条目）：
+
+      -  list(POP_FRONT CMAKE_MODULE_PATH)
+      +  list(REMOVE_ITEM CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+
+  同一补丁还需处理第二个问题：bundled thrift 的头文件（如
+  TTransportException.h）include boost/numeric/conversion/cast.hpp 等 boost 头，
+  而 BOOST_SOURCE=SYSTEM（Conan 预编译 boost）下 Arrow 只在 BOOST_VENDORED 时给
+  thrift 链接 Boost::headers——SYSTEM 场景 thrift 目标没有 boost include 路径，
+  parquet 源码编译 thrift 头时报 file not found。补丁追加：
+
+      +  if(NOT BOOST_VENDORED AND TARGET Boost::headers)
+      +    target_link_libraries(thrift PUBLIC $<BUILD_LOCAL_INTERFACE:Boost::headers>)
+      +  endif()
+
+  参考实现：build_in_harmonyos archives/l/libparquet/23.0.1/patches/fix_bundled_thrift_module_path.patch
+fallback: |
+  若无法给上游打补丁，可将 THRIFT_SOURCE=AUTO 并通过 CMAKE_PREFIX_PATH 提供系统
+  thrift；或整体跳过启用 ARROW_PARQUET。
+verify_builds: "本地 conan create 8 轮迭代验证（conan_create3-conan_create8 日志），62 测试目标全构建"
+prescan_pattern: "list\\(POP_FRONT CMAKE_MODULE_PATH\\)"
+last_updated: "2026-09-17"

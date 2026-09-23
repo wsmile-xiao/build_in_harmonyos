@@ -1,0 +1,93 @@
+#====================================================================
+# DRAFT-boost-te-1.0.0-headeronly-copy-abs-path-commit-incremental -
+# header-only 配方 package() copy() 相对 dst 陷阱 + W3 零提交 full 模式
+# 基线噪声的 commit-first 规避（boost-te 1.0.0 实测双新增差异）
+#
+# 场景: boost-te 1.0.0 (boost-ext/te, C++17 单头文件类型擦除库) OHOS armv8
+#       Conan 2.x 适配。两条与库本体无关、可跨库复用的配方/流程陷阱:
+#       (1) package() 中 copy() 用相对 dst="include" 被解析到 build 目录,
+#           头文件未进包 → test_package 配置期报
+#           "Imported target 'X::X' includes non-existent path .../p/include";
+#       (2) 新库分支零提交时 finish/W3 的 junk_check 回退 full 模式
+#           (git ls-files 整仓扫描), 命中 origin/main 上其他库历史遗留的
+#           跟踪杂项文件 (util-linux-login/.ci-trigger), JC5 fail;
+#           真实 CI 走 pr.diff 模式只查 PR 内文件, 不受影响。
+# 适用: 所有 header-only / copy-based 打包配方 + 共享 build_in_harmonyos
+#       仓库全部新库分支的 finish/W3 流程。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-boost-te-1.0.0-headeronly-copy-abs-path-commit-incremental
+source_lib:             boost-te 1.0.0
+trigger_tool:           conan|conan create|conan-verify|cmake|finish|build_and_test.sh|junk_check.sh
+phase:                  packaging|testing|ci|review
+error_signature:        Imported target.*includes non-existent path|INTERFACE_INCLUDE_DIRECTORIES.*non-existent|Junk Files: [1-9]|JC5:.*未登记的隐藏文件|检查模式: full|blocked_by_JC|L0_RESULT=fail: junk_check failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan|packaging|header-only|test_package|ci|git|infrastructure
+match_keywords:         header-only, copy(), package_folder, source_folder, 绝对路径, 相对路径, dst, Imported target, non-existent path, INTERFACE_INCLUDE_DIRECTORIES, CMakeDeps, junk_check, full 模式, incremental, 零提交, origin/main, 三点 diff, baseline noise, 基线噪声, JC5, commit-first, git rm --cached, ci-trigger, W3, finish, pr.diff
+title:                  header-only 配方 copy() 必须用绝对路径；新库分支先 commit 使 W3 junk_check 回退 incremental 规避 main 基线噪声
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  (1) Conan 2 copy() 的 dst 为相对路径时相对当前 build 目录解析，而非
+      package 目录；header-only 配方 package() 若写
+      copy(self, "*", src=..., dst="include")，头文件被打进 build 目录，
+      package 内无 include → CMakeDeps 生成的 INTERFACE_INCLUDE_DIRECTORIES
+      指向 package_folder/include 不存在路径，test_package 配置期直接报错；
+  (2) junk_check.sh 模式选择链：pr.diff > incremental（git diff
+      origin/main...HEAD）> full（git ls-files 整仓）。新库分支若零提交，
+      三点 diff 为空 → 回退 full 模式扫全仓，命中 origin/main 上其他库
+      历史提交带入的跟踪杂项文件（如空 blob .ci-trigger，不在
+      JC5_ALLOWED 白名单）→ JC5 fail 阻塞 W3；该文件不在本库 PR diff 内，
+      真实 CI（pr.diff 模式）不会命中，属共享基线噪声而非本库缺陷。
+
+affected_scope:         所有 header-only / copy-based 打包配方；共享 build_in_harmonyos
+                        仓库内新库零提交分支执行 finish/W3 的执行端
+verification_cmd:       # (1) 检查 package() 中 copy() 的 src/dst 是否 os.path.join 绝对路径;
+                        #     失败日志含 "Imported target ... includes non-existent path"
+                        # (2) git log origin/main --oneline -1 -- <被拦路径> 确认他库历史提交;
+                        #     git ls-files --error-unmatch <被拦路径> 确认跟踪基线;
+                        #     git status --porcelain -- <被拦路径> 应为空
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           headeronly-copy-abs-path + commit-first-incremental-w3
+rec_description:        (1) package() 的 copy() 一律使用绝对路径：
+                        copy(self, "boost/*", os.path.join(self.source_folder, "include"),
+                        os.path.join(self.package_folder, "include"))，禁止相对 dst；
+                        (2) 新库分支先 git add + git commit 本库工作（只暂存本库路径），
+                        使 git diff origin/main...HEAD 非空 → junk_check 自动回退
+                        incremental 只查本库文件 → W3 通过；全程不 git rm --cached
+                        其他库文件、不修改其他库、不伪造产物（区别于既有
+                        git rm --cached 隔离方案的零副作用替代路径）。
+rec_command:            # (1) 修配方: copy(self, "*", src=os.path.join(self.source_folder,
+                        #     "include"), dst=os.path.join(self.package_folder, "include"))
+                        # (2) git add archives/b/boost-te && git commit -m "feat(...)" &&
+                        #     python3 scripts/ohc-run.py finish <name> <ver> published
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe-edit + git-commit-before-finish
+
+# ═══ Layer 4: 验证层 (Verification) ★ ═══
+verification:           |
+  (1) 修后 conan create G2 PASS，test_package 消费者/专项二进制编译链接运行
+      全部退出码 0（boost-te 1.0.0 本轮实测日志:
+      /storage/Users/currentUser/tmp/boost-te-logs/adaptation_validation.log）；
+  (2) commit 后重跑 finish，W3 "检查模式: incremental (9 个文件)"，
+      JC_RESULT=pass / L0 pass / L1 pass / Pass rate 100% (1/1)，
+      状态 published（w3-local-ci.log 实测）。
+
+# ═══ Layer 5: 查重层 (Dedup) — 七轴 ═══
+dedup:
+  exact_duplicate:       false
+  causal_duplicate:      partial   # (2) 与 dr_mp3/kdbusaddons baseline-noise 草稿根因同源
+  trigger_overlap:       true      # (2) 触发面与既有 baseline-noise 草稿相同
+  solution_overlap:      partial   # (1) 绝对路径修复无既有记录; (2) 与既有 git rm --cached 方案不同
+  combination_novelty:   true      # (1)+(2) 组合为新增差异
+  boundary_novelty:      true      # 边界: 零提交→full 模式; 有提交→incremental
+  test_migration_novelty: false
+  similar_to:            [E257, E311, DRAFT-dr_mp3-0.7.2-baseline-noise-isolation, DRAFT-kdbusaddons-baseline-noise-isolation]
+  caused_by:             []
+  prerequisite_of:       []
+  conflicts_with:        []

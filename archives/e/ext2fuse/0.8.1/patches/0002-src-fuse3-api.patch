@@ -1,0 +1,183 @@
+diff --git a/src/fuse-ext2fs.c b/src/fuse-ext2fs.c
+index aaf87b7..a8f9726 100644
+--- a/src/fuse-ext2fs.c
++++ b/src/fuse-ext2fs.c
+@@ -5,7 +5,7 @@
+  *  or any later version. See the file COPYING.
+  */
+ 
+-#define FUSE_USE_VERSION 25
++#define FUSE_USE_VERSION 31
+ #include <fuse_lowlevel.h>
+ #include <fuse_opt.h>
+ 
+@@ -251,11 +251,19 @@ void op_unlink(fuse_req_t req, fuse_ino_t parent, const char *name)
+ }
+ 
+ void op_rename(fuse_req_t req, fuse_ino_t parent_ino, const char *name,
+-			fuse_ino_t newparent_ino, const char *newname)
++			fuse_ino_t newparent_ino, const char *newname,
++			unsigned int flags)
+ {
+ 	int ret;
+ 	const struct fuse_ctx *ctx = fuse_req_ctx(req);
+ 
++	if (flags != 0)
++	{
++		// ext2fuse does not implement RENAME_NOREPLACE or RENAME_EXCHANGE.
++		fuse_reply_err(req, EOPNOTSUPP);
++		return;
++	}
++
+ 	dbg("op_rename(oldparent %d, \"%s\" -> newparent %d, \"%s\")",
+ 		(int) parent_ino, name, (int) newparent_ino, newname);
+ 
+@@ -456,11 +464,12 @@ void op_rmdir(fuse_req_t req, fuse_ino_t parent, const char *name)
+ }
+ 
+ // The userdata should be a char * specifying the fs device to be mounted
+-void op_init(void *userdata)
++void op_init(void *userdata, struct fuse_conn_info *conn)
+ {
+ 	char *fs_device_name = (char *) userdata;
+ 	errcode_t ret;
+ 
++	(void)conn;
+ 	dbg("op_init(device_name %s)", fs_device_name);
+ 	// ext2fs_open(const char *name, int flags,
+ 	// 					int superblock, unsigned int block_size,
+@@ -668,32 +677,12 @@ static int parse_options(int argc, char *argv[])
+ 	return 0;
+ }
+ 
+-static int try_fuse_mount(char *mount_options)
+-{
+-	int fc = -1;
+-	struct fuse_args margs = FUSE_ARGS_INIT(0, NULL);
+-	
+-	/* The fuse_mount() options get modified, so we always rebuild it */
+-	if ((fuse_opt_add_arg(&margs, EXEC_NAME) == -1 ||
+-	     fuse_opt_add_arg(&margs, "-o") == -1 ||
+-	     fuse_opt_add_arg(&margs, mount_options) == -1)) {
+-		dbg("Failed to add FUSE mount options.");
+-		goto free_args;
+-	}
+-	
+-	fc = fuse_mount(options.mount_point, &margs);
+-
+-free_args:
+-	fuse_opt_free_args(&margs);
+-	return fc;
+-		
+-}
+-
+ int main(int argc, char *argv[])
+ {
+-	struct fuse_args custom_args = FUSE_ARGS_INIT(0,NULL);
+-	int err = -1;
+-	int fd;
++	struct fuse_args args = FUSE_ARGS_INIT(0, NULL);
++	struct fuse_session *se = NULL;
++	int err = 1;
++	int mounted = 0;
+ 
+ 	init_ext2_stuff();
+ 	
+@@ -703,34 +692,37 @@ int main(int argc, char *argv[])
+ 			options.device_name, options.mount_point);
+ 	} else {
+ 		usage(EXEC_NAME);
+-		return err;
++		goto out;
+ 	}
+ 
+-	if ((fd = try_fuse_mount(options.mount_options))!=-1) {
+-		struct fuse_session *se=(struct fuse_session*)1;
+-		if (fuse_opt_add_arg(&custom_args, "") == -1)
+-			se = NULL;
+-
+-		// Create the low-level session, and set the userdata to be
+-		// passed to op_init as the device name
+-		if(se!=NULL)
+-			se = fuse_lowlevel_new(&custom_args, &ext2fs_ops,
+-				sizeof(ext2fs_ops), options.device_name);
+-		if (se != NULL) {
+-			if (fuse_set_signal_handlers(se) != -1) {
+-				struct fuse_chan *ch = fuse_kern_chan_new(fd);
+-				if (ch != NULL) {
+-					fuse_session_add_chan(se, ch);
+-					err = fuse_session_loop(se);
+-				}
+-				fuse_remove_signal_handlers(se);
+-			}
+-			fuse_session_destroy(se);
+-		}
+-		close(fd);
++	if (fuse_opt_add_arg(&args, EXEC_NAME) == -1 ||
++	    fuse_opt_add_arg(&args, "-o") == -1 ||
++	    fuse_opt_add_arg(&args, options.mount_options) == -1) {
++		dbg("Failed to add FUSE mount options.");
++		goto out;
++	}
++
++	// Create the low-level session before mounting it with libfuse 3.x.
++	se = fuse_lowlevel_new(&args, &ext2fs_ops, sizeof(ext2fs_ops),
++			       options.device_name);
++	if (!se)
++		goto out;
++
++	if (fuse_set_signal_handlers(se) == -1)
++		goto destroy;
++
++	if (fuse_session_mount(se, options.mount_point) == 0) {
++		mounted = 1;
++		err = fuse_session_loop(se);
+ 	}
+-	fuse_unmount(options.mount_point);
+-	fuse_opt_free_args(&custom_args);
+ 
++	fuse_remove_signal_handlers(se);
++	if (mounted)
++		fuse_session_unmount(se);
++
++destroy:
++	fuse_session_destroy(se);
++out:
++	fuse_opt_free_args(&args);
+ 	return err ? 1 : 0;
+ }
+diff --git a/src/perms.c b/src/perms.c
+index f5a5b4f..e6d3d6a 100644
+--- a/src/perms.c
++++ b/src/perms.c
+@@ -1,4 +1,4 @@
+-#define FUSE_USE_VERSION 25
++#define FUSE_USE_VERSION 31
+ #include <fuse_lowlevel.h>
+ #include <syslog.h>
+ #include "ext2fs.h"
+diff --git a/src/readdir.h b/src/readdir.h
+index d7edd09..d37bc54 100644
+--- a/src/readdir.h
++++ b/src/readdir.h
+@@ -1,7 +1,7 @@
+ #ifndef READDIR_H
+ #define READDIR_H
+ 
+-#define FUSE_USE_VERSION 25
++#define FUSE_USE_VERSION 31
+ 
+ #include <fuse_lowlevel.h>
+ 
+diff --git a/src/symlink.h b/src/symlink.h
+index b3813b1..a6c9b47 100644
+--- a/src/symlink.h
++++ b/src/symlink.h
+@@ -1,6 +1,6 @@
+ #ifndef SYMLINK_H
+ #define SYMLINK_H
+ 
+-#define FUSE_USE_VERSION 25
++#define FUSE_USE_VERSION 31
+ 
+ #include <fuse_lowlevel.h>

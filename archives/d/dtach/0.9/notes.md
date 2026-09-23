@@ -63,11 +63,17 @@ $ readelf -d dtach | grep NEEDED
 
 - **HMDFS umask 077 限制（E011）**：configure/config.status 创建临时目录时不能使用 `umask 077`，否则 HMDFS 会 Permission denied。修复方式：移除 configure 中 `(umask 077 && mktemp)` 和 `(umask 077 && mkdir)` 的 `umask 077`。此问题影响所有使用 autotools 的软件在 HMDFS 上编译。
 - **Makefile 缺少 install 目标**：原版 Makefile.in 无 install 规则，已添加含 DESTDIR 支持的 install target。补丁中同时添加了 prefix/exec_prefix/bindir/mandir 变量，确保 configure 可以正确替换路径。
-- **无测试套件**：dtach 无 `make check` 目标，需手动 `--version` 验证。
+- **无上游自动化测试**：dtach 无 `make check` 目标，Conan `test_package` 负责消费者侧验证。
+
+## Conan 适配补充
+
+- 当前已补齐 Conan 2 配方、`test_package` 和软件级 `commands.json`
+- `test_package` 会验证 `--version`、`--help`，并通过 `-N` 模式启动一次最小脱离会话，确认可执行文件可用
+- 上游自动化测试统计保持为 0/0
 
 **编译结束**: 2026-06-12 02:45
-**最终状态**: published
+**最终状态**: built
 ---
 
 **编译结束**: 2026-06-12 14:34
-**最终状态**: published
+**最终状态**: built

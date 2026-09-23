@@ -584,28 +584,109 @@ def format_inline(result: MatchResult) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _sidecar_path(gdir: str) -> str:
+    return os.path.join(os.path.dirname(gdir.rstrip("/\\")),
+                        ".metrics-local.json")
+
+
+def _sidecar_load(path: str) -> dict:
+    """读 sidecar 并归一为 v2 结构；兼容 v1 顶层 {eid: "date"}。"""
+    import json
+    data = {}
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    entries = {}
+    raw = data.get("entries")
+    if isinstance(raw, dict):
+        entries = {k: v for k, v in raw.items() if isinstance(v, dict)}
+    else:
+        for k, v in data.items():
+            if k in ("entries", "pending"):
+                continue
+            if isinstance(v, str):
+                entries[k] = {"last": v}
+    pending = data.get("pending")
+    if not isinstance(pending, list):
+        pending = []
+    return {"entries": entries,
+            "pending": [p for p in pending if isinstance(p, str)]}
+
+
+def _sidecar_save(path: str, sc: dict) -> None:
+    import json
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(sc, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
 def _touch_metrics(eid: str, gdir: str) -> None:
-    """v12.6.1: 命中记录写入本地 sidecar（gitignored），不写共享 .kv。
+    """v12.20: 命中记录写入本地 sidecar v2（gitignored），不写共享 .kv。
 
     设计修正：直接改 .kv 会让每个包 PR 携带知识文件 diff，与并发 PR
     在同一 E 条目上产生合并冲突（社区规模必现）。sidecar 本地聚合、
     零污染；kb-report 同时读 sidecar 与 .kv 遗留字段。
+
+    v2 结构：{"entries": {eid: {"last": date, "s": n, "f": n}},
+              "pending": [eid, ...]}。
+    命中即入 pending，等待构建终局结算（settle_pending_outcomes）。
     """
     try:
-        import json
         from datetime import date
-        sidecar = os.path.join(os.path.dirname(gdir.rstrip("/")), ".metrics-local.json")
-        data = {}
-        if os.path.isfile(sidecar):
-            with open(sidecar, encoding="utf-8") as f:
-                data = json.load(f)
-        data[eid] = date.today().isoformat()
-        tmp = sidecar + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, sidecar)
+        path = _sidecar_path(gdir)
+        sc = _sidecar_load(path)
+        ent = sc["entries"].setdefault(eid, {})
+        ent["last"] = date.today().isoformat()
+        if eid not in sc["pending"]:
+            sc["pending"].append(eid)
+        _sidecar_save(path, sc)
     except Exception:
         pass  # 度量回写永不阻塞匹配
+
+
+def _record_outcome(eid: str, gdir: str, success: bool) -> None:
+    """v12.20: 单条即时记账（auto-retry 成败），并移出 pending。
+
+    替代 kb_metrics.record_result 直写共享 .kv 的旧路径（PR 污染）。
+    """
+    try:
+        from datetime import date
+        path = _sidecar_path(gdir)
+        sc = _sidecar_load(path)
+        ent = sc["entries"].setdefault(eid, {})
+        ent["last"] = date.today().isoformat()
+        key = "s" if success else "f"
+        ent[key] = int(ent.get(key, 0)) + 1
+        if eid in sc["pending"]:
+            sc["pending"].remove(eid)
+        _sidecar_save(path, sc)
+    except Exception:
+        pass
+
+
+def settle_pending_outcomes(gdir: str, success: bool) -> None:
+    """v12.20: 构建终局结算 —— pending 中全部命中条目按本次构建成败记账。
+
+    driver 全绿出口 settle(True)；_emit_handoff / build_cli 失败出口
+    settle(False)。幂等：pending 清空后重复调用无副作用。
+    """
+    try:
+        from datetime import date
+        path = _sidecar_path(gdir)
+        sc = _sidecar_load(path)
+        if not sc["pending"]:
+            return
+        today = date.today().isoformat()
+        key = "s" if success else "f"
+        for eid in sc["pending"]:
+            ent = sc["entries"].setdefault(eid, {})
+            ent["last"] = today
+            ent[key] = int(ent.get(key, 0)) + 1
+        sc["pending"] = []
+        _sidecar_save(path, sc)
+    except Exception:
+        pass
 
 
 # ═══════════════════════════════════════════════════════
