@@ -1,0 +1,235 @@
+#====================================================================
+# DRAFT-E622-libheif-aom-1.23.0-plugin-switch-matrix-and-vendored-codec
+#   libheif 插件子包的「三必修项」：
+#   ① _LIBCPP_ENABLE_EXPERIMENTAL（libc++ 15 隐藏 ranges）
+#   ② CMAKE_SYSTEM_NAME=Linux（无 SONAME → 插件 DT_NEEDED 变相对路径）
+#   ③ CMAKE_BUILD_WITH_INSTALL_RPATH=ON + CMAKE_INSTALL_RPATH=""（install 改写 RUNPATH → 破坏 OHOS 代码签名）
+#   附：两条可选路线（窄 SONAME 开关 / 装后重签）
+# 来源: feat/libheif-aom-1.23.0 适配 HarmonyOS PC（积分赛/新包）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E622-libheif-aom-1.23.0-plugin-switch-matrix-and-vendored-codec
+trigger_tool:           任务分派|clang|cmake|conan|conan-verify|dlopen
+phase:                  recipe-authoring|build|package|consumer-test
+error_signature: |
+  no member named 'all_of' in namespace 'std::ranges'|
+  no member named 'find' in namespace 'std::ranges'|
+  dlopen: Error loading shared library \.\./libheif\.so|
+  dlopen: Error loading shared library .*: Permission denied|
+  Cannot open plugin \(dlopen\)|
+  System is unknown to cmake, create: Platform/HarmonyOS|
+  Not compiling '<codec>' backend|
+  no SONAME|
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               packaging, plugin, platform, toolchain, rule4, rule36
+match_keywords: |
+  libheif 插件, 编解码后端, plugin_compilation, heif-aomdec, heif-aomenc,
+  libheif-aomdec.so, ENABLE_PLUGIN_LOADING, WITH_AOM_DECODER_PLUGIN,
+  _LIBCPP_ENABLE_EXPERIMENTAL, _LIBCPP_HAS_NO_INCOMPLETE_RANGES, std::ranges,
+  __cpp_lib_ranges, libc++ 15004, CMAKE_SYSTEM_NAME, Platform/OHOS.cmake,
+  SONAME, CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG, DT_NEEDED, RUNPATH, RPATH,
+  CMAKE_BUILD_WITH_INSTALL_RPATH, CMAKE_INSTALL_RPATH, .note.ohos.ident,
+  codesign, binary-sign-tool, llvm-objcopy, selfSign, Permission denied,
+  MODULE 插件, 树内 target
+title:                  libheif 插件子包三必修项：① libc++ ranges 编译期宏 ② CMAKE_SYSTEM_NAME 补 SONAME ③ 禁止 install 改写 RUNPATH（会破坏 OHOS 代码签名）
+prescan_pattern:        ^archives/[a-z]/libheif-[a-z0-9]+/[0-9][^/]*/(conanfile\.py|test_package/conanfile\.py)$
+prescan_globs:          archives/*/libheif-*/*/conanfile.py, archives/*/libheif-*/**/conanfile.py, archives/*/*/*/test_package/conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: |
+  【必修项 ①】OHOS SDK 的 libc++ 是 15004（clang 15.0.4）。SDK 头
+  .../llvm/include/c++/v1/__config:39 定义 _LIBCPP_VERSION 15004，:254-256 处
+  `#if !defined(_LIBCPP_ENABLE_EXPERIMENTAL) && !defined(_LIBCPP_BUILDING_LIBRARY)`
+  会定义 _LIBCPP_HAS_NO_INCOMPLETE_RANGES，把 <algorithm> 的 ranges 重载整体隐藏。
+  上游 libheif 用 CMAKE_CXX_STANDARD 20 且 box.cc 用 std::ranges::all_of/find →
+  编译期 3 errors。判读陷阱：粗粒度特性宏 __cpp_lib_ranges 仍为 201811L（"宏说有≠实现有"），
+  只能信真编译器探针。修法：tc.preprocessor_definitions["_LIBCPP_ENABLE_EXPERIMENTAL"]=None
+  （不改上游源码、不需要 -lc++experimental；先例 libpqxx/8.0.1、ladybug/0.18.2）。
+
+  【必修项 ②】设备 uname -s = HarmonyOS，而 SDK 的 CMake 只有 Modules/Platform/OHOS.cmake
+  （内容就是 include(Platform/Linux)），没有 Platform/HarmonyOS.cmake。Conan 只在
+  cross 时写 CMAKE_SYSTEM_NAME（GenericSystemBlock 的 `if(NOT DEFINED CMAKE_SYSTEM_NAME)`），
+  设备是原生编译（host==build，_get_generic_system_name() 在 os 与 arch 都相同时不返回系统名）
+  → 变量为空 → CMake 落到"未知平台"通用回退（打印 System is unknown to cmake，rc 仍为 0）
+  → 不设置 CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG → 共享库**既不写 SONAME 也不产生版本化文件名**。
+  插件以 MODULE 链接**树内**宿主 target（target_link_libraries(heif-<codec> PRIVATE … heif)），
+  宿主没有 SONAME 时链接器把路径原样写进 DT_NEEDED（实测 "../libheif.so"）；含斜杠的
+  DT_NEEDED 按**当前工作目录**解析，装到 <pkg>/lib/libheif/ 后必然失败。
+  两条可选路线：A) tc.cache_variables["CMAKE_SYSTEM_NAME"]="Linux"（693 个配方同口径，
+  但会翻转上游 `if(CMAKE_SYSTEM_NAME STREQUAL "Linux")` 分支并进入 cross 语义；
+  libheif 1.23.0 上游实测无此类分支）；B) 更窄：
+  tc.variables["CMAKE_SHARED_LIBRARY_SONAME_C_FLAG"/"_CXX_FLAG"]="-Wl,-soname,"（160 个配方，
+  不动 CMAKE_SYSTEM_NAME）。5 秒探针实测两条都能恢复 SONAME libfoo.so.1 与
+  libfoo.so/libfoo.so.1/libfoo.so.1.2.3 三个文件名。
+  同一根因的**子工程陷阱**：tc.cache_variables 只落 generators/CMakePresets.json
+  （Conan 的 CMake.__init__ 从 preset 取 cacheVariables 再以 -D 传**主工程**），
+  conan_toolchain.cmake 里没有它；配方里自己 configure 子工程（内树 codec）时要显式再传。
+
+  【必修项 ③】设备 clang launcher 在**链接期**写入 .note.ohos.ident 代码签名；CMake 默认
+  BUILD_WITH_INSTALL_RPATH=OFF 会在 `cmake --install` 时**就地改写**构建树 RUNPATH
+  （本例被清空）→ 文件字节变化（同尺寸 1423808，sha256 921d231f… → d5f87929…，
+  readelf -d 的 RUNPATH 由 1 条变 0 条）→ 签名失效 → OHOS 加载器拒绝映射，
+  dlopen 报 **Permission denied（EACCES）而不是 not found**。
+  最易误判点：宿主 libheif.so.1.23.0 安装前后 sha256 完全相同（无需改写）→ 只看宿主会以为
+  交付物没问题，必须单独查**插件**。命中范围判据：CMake 只给"链接了同一构建树内另一个
+  target"的目标加构建树 RPATH，故 libheif 的 7 个插件子包全中，而只链 Conan 依赖的普通包
+  不带该 RPATH、install 无需改写、不受影响——这就是仓库里大多数包没暴雷的原因。
+  修法 A（本包）：tc.variables["CMAKE_BUILD_WITH_INSTALL_RPATH"]=True +
+  tc.variables["CMAKE_INSTALL_RPATH"]=""（从源头不触发改写，安装前后逐字节一致）；
+  修法 B（更稳的兜底，能覆盖 install 之外的改写）：package() 里 cmake.install() 之后
+  对 lib/**/*.so* 跑 `llvm-objcopy --remove-section .codesign` + `binary-sign-tool sign
+  -inFile f -outFile f -selfSign 1`（已合并先例 openh264/2.6.0:130-136、ffmpeg/8.1.2:240-246）。
+  附带判读陷阱：libheif 会逐个 dlopen 插件目录下的**所有**文件，目录里任何加载不了的文件
+  （旧版本残留/手工样本）都会让 heif_init() 整体返回 code=11，把正确插件也判成未注册。
+
+  【交付面前提】插件子包要成立必须同时打开 ENABLE_PLUGIN_LOADING + WITH_<X> +
+  WITH_<X>_PLUGIN（aom 的 *_PLUGIN 默认 OFF，与 dav1d 等默认 ON 相反），并显式点名
+  --target heif <plugin targets>；否则配置/构建/安装全绿而包里没有插件（假绿）。
+
+affected_scope: |
+  所有"上游把编解码后端做成运行期 dlopen 的 MODULE 插件"的包，首当其冲是 libheif 家族
+  （libheif-aom / -dav1d / -libde265 / -openh264 / -openjpeg / -svtenc / -jpeg）。
+  必修项③的命中面更广：**任何交付共享库/可执行文件、且该目标链接了同一构建树内另一个
+  target**（树内互链）的包——CMake 给它加构建树 RPATH、install 时改写、签名失效。
+  仓内实证：archives/o/openh264/2.6.0、archives/f/ffmpeg/8.1.2（装后重签先例）、
+  archives/l/libpqxx/8.0.1 与 archives/l/ladybug/0.18.2（ranges 宏先例）、
+  archives/a/azure-identity-cpp/1.13.3 与 archives/a/attica/6.14.0（窄 SONAME 先例）、
+  archives/l/libheif/1.18.2/notes.md（"NEEDED 硬编码相对路径、未解决"＝同一根因）。
+  另：codec 本身没有 Conan 配方时（aom/svt-av1），需内树自包含构建、requirements() 留空
+  （先例 archives/h/handbrake/1.11.2）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           three-must-fix-then-pick-optional-routes
+rec_description: |
+  【先判交付面】grep -n "^plugin_option(" CMakeLists.txt 与
+  grep -n "plugin_compilation(" libheif/plugins/CMakeLists.txt，确认目标名与
+  (defaultEnabled, defaultPlugin)；显式点名 build 目标。
+
+  【必修项①（一行）】
+    if str(self.settings.os) in ("Linux", "OHOS"):
+        tc.preprocessor_definitions["_LIBCPP_ENABLE_EXPERIMENTAL"] = None
+
+  【必修项②（一行，路线 A 或 B 择一）】
+    A: tc.cache_variables["CMAKE_SYSTEM_NAME"] = "Linux"
+    B: for lang in ("C", "CXX"):
+           tc.variables[f"CMAKE_SHARED_LIBRARY_SONAME_{lang}_FLAG"] = "-Wl,-soname,"
+    自证：readelf -d 宿主有 SONAME、插件 DT_NEEDED **不含斜杠**；
+    若配方还 configure 子工程，子工程命令行显式再传一次 -DCMAKE_SYSTEM_NAME=Linux。
+
+  【必修项③（两行 / 或装后重签兜底）】
+    tc.variables["CMAKE_BUILD_WITH_INSTALL_RPATH"] = True
+    tc.variables["CMAKE_INSTALL_RPATH"] = ""
+    自证：安装前后 sha256sum 逐字节一致（**必须查插件，不能只查宿主**）。
+    兜底路线：package() 里对 lib/**/*.so* 重签（objcopy 去 .codesign + binary-sign-tool
+    -selfSign 1），先例 openh264/ffmpeg。
+
+  【验收四判据（缺一不可）】
+    ① 配置日志出现 "+ separate plugin"（不是 + built-in / - not found / - disabled）；
+    ② find <pkg>/lib -name 'libheif*.so*' 三个宿主文件 + libheif/ 下两个插件；
+    ③ readelf：宿主 SONAME=libheif.so.1、插件 NEEDED 无斜杠；安装前后 sha256 一致；
+    ④ test_package 真跑消费者（env="conanrun"）通过，且插件目录里**只有**交付面文件。
+
+  【N（rule4）】子包按父 tarball 全量注册面取「用例/注册类」最大值：
+    libheif 1.23.0 → Catch2 TEST_CASE 217（主 N）> add_test 39 = 测试目标 39 > 测试源文件 41；
+    断言 4016 属另一单位只披露。
+rec_command: |
+  # ① ranges（不带宏必失败，带宏 rc=0）
+  printf '#include <algorithm>\n#include <vector>\nint main(){std::vector<int> v{1};return std::ranges::find(v,1)==v.end();}\n' > "$TASK_DIR/ranges_probe.cc"
+  /data/service/hnp/bin/clang++ -std=c++20 -c "$TASK_DIR/ranges_probe.cc" -o "$TASK_DIR/ranges_probe.o" || true
+  grep -n "_LIBCPP_HAS_NO_INCOMPLETE_RANGES" /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/include/c++/v1/__config
+  # ② SONAME（三种取值对照）
+  readelf -d <libheif.so> | grep SONAME ; readelf -d <libheif-aomdec.so> | grep NEEDED
+  # ③ 安装前后逐字节一致（关键：查插件）
+  sha256sum <build_tree>/libheif/plugins/libheif-aomdec.so <pkg>/lib/libheif/libheif-aomdec.so
+  # ④ 交付面 + 消费者
+  grep -E "AOM AV1 (decoder|encoder) +: " <configure 日志>
+  ls <pkg>/lib/libheif/          # 只应有交付面文件
+rec_auto_fix:           false
+rec_impl:               three-must-fix-then-verify-in-package
+
+fallback_priority:      2
+fallback_approach:      resign-after-install-and-stop-if-signature-tool-missing
+fallback_description: |
+  若因某种 install 之外的改写（strip / patchelf / 打包期加工）导致签名失效，或
+  BUILD_WITH_INSTALL_RPATH 路线不生效，改用**装后重签**兜底：package() 内
+  cmake.install() 之后遍历 lib/**/*.so*（跳过软链），
+  `llvm-objcopy --remove-section .codesign <f> || true` 然后
+  `binary-sign-tool sign -inFile <f> -outFile <f> -selfSign 1`（先例
+  archives/o/openh264/2.6.0:130-136、archives/f/ffmpeg/8.1.2:240-246）。
+  若签名工具在目标环境缺失（CI worker 不含 /data/service/hnp/bin/binary-sign-tool），
+  不要静默跳过：如实记为未验证并上报，不做假绿。
+fallback_command: |
+  /data/service/hnp/bin/binary-sign-tool sign -inFile <f> -outFile <f> -selfSign 1
+fallback_auto_fix:      false
+fallback_impl:          resign-then-record
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       只查宿主.*sha256|宿主能加载.*所以.*没问题|readelf -d .*libheif\.so$.*grep SONAME
+forbid_1_reason: |
+  宿主安装前后逐字节一致（无需改写 RUNPATH），因此"宿主能加载"完全不能推出"插件没问题"；
+  签名失效只发生在被 install 改写的那个文件上（本例就是插件）。
+forbid_1_consequence:   带着 EACCES 的插件进 CI/审查，test_package 必红
+forbid_2_pattern:       CMAKE_BUILD_WITH_INSTALL_RPATH\s*=\s*(False|OFF)|CMAKE_INSTALL_RPATH\s*=\s*["']?/usr/local
+forbid_2_reason: |
+  默认的 install 期 RUNPATH 改写会破坏链接期写入的 .note.ohos.ident 代码签名，
+  OHOS 加载器随即以 EACCES 拒绝映射（dlopen 报 Permission denied）；
+  往 CMAKE_INSTALL_RPATH 烘 /usr/local 还叠加 R49/PF6 违规。
+forbid_2_consequence:   装出来的插件 dlopen 恒失败（编译安装全绿，最隐蔽的假绿）
+forbid_3_pattern:       WITH_[A-Za-z0-9_]+_PLUGIN\s*=\s*True(?![\s\S]{0,400}WITH_[A-Za-z0-9_]+\s*=\s*True)
+forbid_3_reason: |
+  WITH_<X>_PLUGIN=ON 单独打开无效：上层 `if (WITH_<X>) find_package()` 不执行、
+  <X>_FOUND 未定义 → plugin_compilation() 走 else → 不生成插件目标。
+forbid_3_consequence:   交付一个没有该后端的假绿包
+forbid_4_pattern:       只构建\s*heif\s*目标|--target heif\s*$|N\s*=\s*(39|41)\b
+forbid_4_reason: |
+  不点名插件目标时探测失败也不会让构建失败；子包 N 取父 tarball 全量注册面最大值 217，
+  按 add_test/源文件小口径申报即 rule4 少报。
+forbid_4_consequence:   假绿包 + 外部审查 rule4 不通过
+forbid_5_pattern:       tc\.cache_variables\["CMAKE_SYSTEM_NAME"\][\s\S]{0,600}cmake -S .*conan_toolchain\.cmake
+forbid_5_reason: |
+  cache_variables 只落 CMakePresets.json，不落 conan_toolchain.cmake；
+  用它给"只传 toolchain 文件的子工程"下变量会静默失效（回落到未知平台）。
+forbid_5_consequence:   子工程 SONAME/平台语义丢失（噪声满屏，最坏时共享库不可加载）
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to: |
+  DRAFT-E618-libheif-libde265-1.23.0-in-tree-plugin-module-subpackage（同族姊妹条）、
+  DRAFT-10251-libnfc-tools-1.8.0-tools-subpackage-identification、
+  archives/h/handbrake/1.11.2（in-tree contrib、requirements 留空先例）、
+  archives/o/openh264/2.6.0 与 archives/f/ffmpeg/8.1.2（装后重签先例）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd: |
+  TASK_DIR=$HOME/tmp/libheif-aom-1.23.0 && S=$WORKSPACE_ROOT/tmp/builds/libheif-aom-1.23.0.work && \
+  printf '#include <algorithm>\n#include <vector>\nint main(){std::vector<int> v{1};return std::ranges::find(v,1)==v.end();}\n' > "$TASK_DIR/ranges_probe.cc" ; \
+  /data/service/hnp/bin/clang++ -std=c++20 -c "$TASK_DIR/ranges_probe.cc" -o "$TASK_DIR/ranges_probe.o" ; \
+  grep -n "_LIBCPP_HAS_NO_INCOMPLETE_RANGES" /data/service/hnp/ohos-sdk.org/ohos-sdk_26.0.0.18/ohos/native/llvm/include/c++/v1/__config && \
+  grep -n "^plugin_option(" "$S/CMakeLists.txt" && \
+  grep -rho 'TEST_CASE' "$S"/tests/*.cc | wc -l
+doc_file:               knowledge/drafts/DRAFT-E622-libheif-aom-1.23.0-plugin-switch-matrix-and-vendored-codec.md
+last_updated:           2026-09-20
+source_event: |
+  feat/libheif-aom-1.23.0 适配 HarmonyOS PC（libheif 1.23.0 树内 aom 编解码后端插件模块，
+  产物 lib/libheif/libheif-aomdec.so + libheif-aomenc.so；内树自包含官方 libaom 3.9.1、
+  requirements() 留空；父全量注册面 N=217；三必修项全部实测复现并给出自证读数）
+authors:                SunShine_06
+source_pr:              "feat/libheif-aom-1.23.0（PR 见该分支）"
+source_commit:          "见该分支最终提交"
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  3
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
