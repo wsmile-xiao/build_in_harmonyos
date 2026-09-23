@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-lfortran-runtime-ohos-adaptation
+# LLVM 系编译器运行时库（LFortran 的 C 运行时）在 OHOS/musl 上的
+# 扩展符号缺失与「组件切分」构建模式
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: lfortran-runtime 0.61.0 HarmonyOS PC 适配
+#          （run lfortran-runtime-0.61.0，2026-09-20）
+#====================================================================
+
+id:                     DRAFT-lfortran-runtime-ohos-adaptation
+trigger_tool:           clang|llvm-nm|llvm-ar|ld|conan
+phase:                  compilation|linking|packaging
+error_signature:        call to undeclared function 'feenableexcept'|undefined reference to 'feenableexcept'|undefined symbol: feenableexcept|U feenableexcept
+severity:               2
+category:               toolchain, fortran, portability, runtime
+match_keywords:         lfortran, libasr, fortran runtime, intrinsic, feenableexcept, fenv, FPCR, liblfortran_runtime, lfortran_intrinsics, musl, glibc 扩展, 运行时库, 组件切分
+title:                  LLVM 系编译器运行时库在 OHOS/musl 上引用 glibc 专属扩展（feenableexcept）致未定义符号：需按 AArch64 FPCR 直写替代，并只切出可独立编译的 C 运行时代码
+prescan_pattern:        feenableexcept|liblfortran_runtime|lfortran_intrinsics\.c|__GLIBC__
+prescan_globs:          conanfile.py
+
+# Layer 2: Diagnosis
+root_cause:             LFortran（LLVM 系现代 Fortran 编译器）的 C 运行时库 liblfortran_runtime（src/libasr/runtime/lfortran_intrinsics.c）中 _lfortran_enable_fpe_traps() 在 #elif defined(__linux__) 分支调用 feenableexcept()（lfortran_intrinsics.c:8524）。feenableexcept 是 GNU/glibc 扩展，OHOS 使用的 musl 不提供——OHOS SDK sysroot 的 libc.so 仅导出 fegetexceptflag，无 feenableexcept。实测该符号是 liblfortran_runtime 在 OHOS 上唯一的非 libc/libm 未定义符号（llvm-nm -D -u）：编 .so 时因 -shared 默认允许未定义符号而看似通过，运行期调用该函数即符号解析失败；编静态库并被消费者调用时链接期直接 undefined reference。次要子模式=组件切分：上游顶层 CMake 强依赖 LLVM/MLIR 全量编译编译器主体，而运行时库本身是可独立编译的单文件 C（唯一前置 libasr/config.h，上游由 CMake configure_file 生成，全特性关闭时仅版本宏），因此正确做法是只切出该 C 运行时组件独立构建；Fortran 侧运行时模块（src/runtime/*.f90，CMAKE_Fortran_COMPILER=lfortran 自举）在无 LFortran 编译器的 OHOS 上不可交付。
+affected_scope:         任何「语言/编译器运行时库落地 OHOS」的场景：①引用了 glibc 专属扩展（feenableexcept/fedisableexcept、getauxval、__libc_*、execinfo backtrace 族等）的运行时/基础库在 musl 上出现未定义符号（静态链接受损、动态库运行期解析失败）；②上游为「编译器+运行时」整体工程、在 OHOS 只交付运行时组件时的构建切分。同类可复用：LLVM 系其它语言运行时、其它编译器/VM 附带运行时库。仓内相关：flang-ohos（工具链，不同路线）、netcdf-fortran（消费者）。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           non-glibc-guarded-portable-replacement
+rec_description:        在保留 glibc 路径的前提下，为 glibc 之外的 libc 追加等价实现，守卫用 POSIX 语义（__GLIBC__/__aarch64__）而非平台名（避免 __OHOS__ 空壳语意、符合「源码修改四不」）。对 feenableexcept：以 ARMv8-A FPCR 的 trap-enable 位（8=IOE/9=DZE/10=OFE/11=UFE/12=IXE）直接 mrs/msr 读写替代（与该文件既有 Apple/ARM64 分支同一手法）：#if defined(__GLIBC__) feenableexcept(excepts); #elif defined(__aarch64__) { mrs fpcr; 置位; msr fpcr; } #else (void)excepts; #endif。同时按「组件切分」只编译可独立编译的 C 运行时源文件，私有生成 libasr/config.h（等价于上游 configure_file 在全特性关闭时的产物），产出与上游同名的 .a/.so 与头文件。仓内先例：openfast 的 flang-ohos 全链经验（-resource-dir/-L<sdk>/llvm/lib/aarch64-linux-ohos 分工）。
+rec_command:            conanfile.py build()（摘要）：cc=self.conf.get("tools.build:compiler_executables")["c"]; ar=dirname(cc)/llvm-ar; self.run(f'{cc} -O2 -fPIC -I"src" -I"inc" -c .../lfortran_intrinsics.c -o lfortran_intrinsics.o'); self.run(f'{ar} rcs liblfortran_runtime_static.a lfortran_intrinsics.o')；generate(): 写 inc/libasr/config.h（版本宏）；patches/0001-musl-feenableexcept-fallback.patch 提供 __GLIBC__/__aarch64__ 守卫实现。
+rec_auto_fix:           true
+rec_impl:               conan-recipe + portability patch（守卫为 __GLIBC__/__aarch64__，与上游 Apple/ARM64 分支同风格）
+
+fallback_priority:      2
+fallback_approach:      link-time-shim
+fallback_description:   若不允许改上游源码，可在配方内提供 feenableexcept 的强符号 shim（单独 .c，随库编译进同一对象），实现同样走 FPCR 直写；代价是符号落进运行时库命名空间，与 libc 未来可能提供的同名符号存在冲突风险，仅在源码补丁不可行时使用。诚实权衡：shim 是确定性替代，不是「探测后回退」。
+fallback_command:       配方 build() 追加编译 compat/fenv_compat.c 并 ar 进同一静态库
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe（无源码补丁场景）
+
+forbid_1_pattern:       用 -Wl,--allow-shlib-undefined / 忽略 -Wimplicit-function-declaration 当作「已适配」|把 -shared 默认允许未定义符号的「链接成功」当作功能完整
+forbid_1_reason:        feenableexcept 在 musl 上永不解析，静态链接受损、动态库运行期调用即崩；忽略未定义符号掩盖真实缺口，问题后移到消费者运行期。
+forbid_1_consequence:   交付物在含 Fortran 的程序启用 --fpe-trap 时崩溃，且评审/使用者无法从构建日志察觉。
+
+forbid_2_pattern:       #ifdef __OHOS__ 空壳 stub（让 _lfortran_enable_fpe_traps 直接 return 而不实现）|把上游 Fortran 侧运行时模块用 C stub 顶替
+forbid_2_reason:        平台名专有守卫 + 空壳 stub 违反「源码修改四不/非空壳」（R8/R40）；用 stub 顶替 Fortran 模块会让功能静默丢失而测试全绿。
+forbid_2_consequence:   功能实际不可用却「编译通过」，是最危险的假阳性适配。
+
+# Layer 4: Principles
+principles:             P-TOOLCHAIN-001
+
+# Relations
+causes:                 []
+caused_by:              [musl 不提供 glibc 扩展 feenableexcept, 上游 Fortran 侧运行时模块需 LFortran 自举]
+similar_to:             [E109, E242, E6339]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-lfortran-runtime-ohos-adaptation.md
+last_updated:           2026-09-20
+verification_cmd:       ①编译并查看未定义符号：clang -O2 -fPIC -I<src>/src -I<inc> -c <src>/src/libasr/runtime/lfortran_intrinsics.c -o o.o 后 llvm-nm -u o.o | grep feenableexcept（未打补丁时命中）；②核对 musl 不提供：llvm-nm -D --defined-only <sysroot>/usr/lib/aarch64-linux-ohos/libc.so | grep -c feenableexcept 为 0；③补丁后复验：应用 0001 后 clang ... -shared 产出 .so，llvm-nm -D -u 中 feenableexcept 消失（其余 157 个未定义符号全为 libc/libm 标准符号），且 test_package 调用 _lfortran_enable_fpe_traps(1) 不崩溃。
+source_event:           lfortran-runtime 0.61.0 适配（run lfortran-runtime-0.61.0）：实测 feenableexcept 为唯一非 libc/libm 未定义符号 → 补丁 0001（FPCR 直写）修复 → conan create rc=0、test_package 6/6 实机通过、conan-verify 全门禁 PASS、CI #53958 绿 + AI 审查未发现问题
+
+# Authorship and provenance
+authors:                Hawkninja21 <18964641073@163.com>
+source_pr:              11519
+source_commit:          合并后回填
+
+# Quality metrics
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
+
+draft: true
+contributor_id:         Hawkninja21
