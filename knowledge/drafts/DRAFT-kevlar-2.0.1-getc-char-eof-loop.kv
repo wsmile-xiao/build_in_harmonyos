@@ -1,0 +1,42 @@
+#====================================================================
+# Draft: C stdio getc/fgetc return value read into plain char can never
+#        equal EOF(-1) on unsigned-char targets -> infinite loop
+#        (kevlar 2.0.1)
+#====================================================================
+
+id:                     DRAFT-kevlar-2.0.1-getc-char-eof-loop
+trigger_tool:           clang|gcc|make|conan
+phase:                  runtime|testing
+error_signature:        kevlar build hangs|md2html hangs|rst2html hangs|process.*100% CPU|output file empty|char c = getc|char c = fgetc
+
+severity:               2
+category:               c-language, stdio, signedness, portability
+match_keywords:         getc, fgetc, getchar, EOF, char, unsigned char, plain char, signedness, infinite loop, hang, busy loop, rst_get_file_length, file length, line count
+
+title:                  C stdio getc/fgetc return value read into plain char never equals EOF(-1) on unsigned-char targets -> infinite loop
+
+root_cause:             C leaves plain char signedness implementation-defined. On targets where plain char defaults to unsigned (e.g. OHOS arm64 clang 15), `getc()` returns EOF as int -1, but storing it into `char c` truncates -1 to 0xFF (255), so `c != EOF` stays true forever. Upstream loops such as `for (char c = getc(infile); c != EOF; c = getc(infile))` spin at 100% CPU and never terminate, producing empty output files. Build hosts with signed-char defaults pass, so the bug only surfaces on the target.
+
+affected_scope:         Any C source that reads getc/fgetc/getchar (or any stdio function returning int/EOF) into a plain char variable and compares against EOF, built for a target whose plain char is unsigned. Verified instance - kevlar-2.0.1 src/kevlar_rst_to_html.c rst_get_file_length() line 23 (the same file feeds both kevlar build and md2html/rst2html).
+
+verification_cmd:       run the built binary on the target: `bin/kevlar build` in a kevlar site dir completes instead of hanging; or compile a 2-byte file reader and observe getc() reading past EOF.
+
+rec_priority:           1
+rec_approach:           int-receiver-for-stdio-return
+rec_description:        Change the loop variable to int: `for (int c = getc(infile); c != EOF; c = getc(infile))`. int preserves the -1 == EOF semantics on every platform. This is a source-level minimal patch that does not change API or ABI and works on both signed- and unsigned-char targets. Do not rely on -fsigned-char alone (see E419) because it changes the semantic mode for the whole TU and does not address the int->char truncation pattern directly.
+rec_command:            apply patches/0002-src-kevlar_rst_to_html.c.patch (char c -> int c) and re-run the affected CLI
+rec_auto_fix:           false
+rec_impl:               archives/k/kevlar/2.0.1/patches/0002-src-kevlar_rst_to_html.c.patch
+
+fallback_priority:      2
+fallback_approach:      fread-based-line-count
+fallback_description:   Replace the getc loop with an fread()-based byte count (`while (fread(buf,1,sizeof buf,f)) n += memchr(buf,'\n',got)`). Also immune to signedness, and faster for large files, but a larger diff.
+fallback_command:       count '\n' via fread and memchr instead of getc
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       #ifdef __OHOS__|guard with platform macro|#define getc(x) something|rename EOF
+forbid_1_reason:        R8 forbids platform macros in patches; the int-receiver fix is portable to every platform and does not need conditional compilation.
+forbid_1_consequence:   PF5 preflight rejection and non-portable patches.
+
+principles:             minimal-patch, platform-agnostic-fix, c-stdio-correctness, real-evidence-over-assumption
