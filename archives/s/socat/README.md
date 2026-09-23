@@ -1,100 +1,97 @@
-# socat 1.8.0.3 for HarmonyOS
+# socat
 
-## 概述
+socat 是**多用途双向数据中继工具**，可在 socket / 文件 / 管道 / 命令等任意两种「地址」之间建立双向或单向的数据通道，常用于端口转发、调试代理、协议测试与网络服务联调。
 
-socat 在 HarmonyOS/OpenHarmony (aarch64) 上的编译指南和测试记录。
+## 功能概述
 
-## 软件信息
+- **地址类型丰富**：`TCP`/`TCP-LISTEN`/`UDP`/`UNIX-CONNECT`/`UNIX-LISTEN`/`EXEC`/`SYSTEM`/`OPEN`/`CREATE`/`FILE`/`PIPE` 等
+- **双向与单向中继**：默认双向；`-u` 单向（左→右）、`-U` 单向（右→左）
+- **数据转换**：`-x` 十六进制转储、`-v` 流量打印，便于调试
+- **辅助工具**：`filan`（文件描述符分析）、`procan`（进程/地址分析）
 
-| 项目 | 值 |
-|------|-----|
-| 名称 | socat |
-| 版本 | 1.8.0.3 |
-| 下载地址 | http://www.dest-unreach.org/socat/download/socat-1.8.0.3.tar.gz |
-| 官方文档 | {文档链接} |
+### 典型用途
 
-## 鸿蒙环境
+- **作为测试基础设施的中继组件**：swtpm 的测试套件即通过
+  `socat -x -t50 "FILE:...,rdonly" "UNIX-CONNECT:..."` 从 TPM 模拟器的
+  控制通道读取交换数据。
+- 端口转发、TCP/UDP 代理、串口与网络互通。
 
-| 项目 | 值 |
-|------|-----|
-| 系统版本 | HarmonyOS HongMeng Kernel 1.11.0 |
-| 架构 | aarch64 |
-| 编译器 | clang (LLVM) |
-| 构建系统 | autotools |
+## OHOS 适配
 
-## 编译步骤
+### 构建期
 
-```bash
-# 1. 下载源码
-wget http://www.dest-unreach.org/socat/download/socat-1.8.0.3.tar.gz
-tar -xzf {源码包}
-cd {源码目录}
+- **源码形态**：上游 release dist tarball，**自带 `configure` 与 `Makefile.in`**，
+  无需 `autoreconf`。因此**不涉及** `config.guess` 的 OHOS 三元组补丁 ——
+  `configure.ac` 内 `AC_CANONICAL_*` 命中为 0，configure 不调用 `config.guess`。
+  这与 swtpm / tpm2-tss（git archive 快照，须 autoreconf 并补 `config.guess`）不同。
 
-# 2. 应用补丁（如有）
-patch -p1 < patches/0001-xxx.patch
+- **`_res` 缺失（坑一）**：OHOS sysroot **有** `<resolv.h>`，但 libc **不导出**传统全局
+  `_res`（也无 `__res_state()` 访问器）。socat 的 `configure.ac:79` 用
+  `AC_HEADER_RESOLV()`，**只判断头文件是否存在** → `HAVE_RESOLV_H=1`，随后
+  `xio-ip.c` 在 `#if HAVE_RESOLV_H` 下直接使用 `_res.options`，编译失败：
 
-# 3. 配置
-./configure --prefix=$HOME/usr/local {其他选项}
+  ```
+  xio-ip.c:119:11: error: use of undeclared identifier '_res'
+  ```
 
-# 4. 编译
-make -j$(nproc)
+  修法：`ac_cv_header_resolv_h=no` → `HAVE_RESOLV_H` 不定义 → 跳过整段。
+  该段只提供 `res-debug`/`res-recurse` 等**已废弃**的 resolver 调优选项，
+  域名解析本身仍由 `getaddrinfo()` 正常提供。
+  > 同族知识条目：**E516**（OHOS libc omits `_res`/`__res_state`）。
 
-# 5. 安装
-make install
-```
+  > 对照：`--disable-res-deprecated` **无效**（只关 `WITH_RES_DEPRECATED`，不关 `HAVE_RESOLV_H`）。
 
-## 补丁说明
+- **`isastream()` 缺失（坑二）**：OHOS sysroot **有** `<sys/stropts.h>`
+  （内容仅 `#include <stropts.h>`），而 `<stropts.h>` **定义了 `I_LIST`**，
+  使 `filan.c:452` 的 `#ifdef I_LIST` 块激活并调用 `isastream()`；
+  但 libc **不声明也不导出**该函数，链接期报：
 
-### 0001-xxx.patch
+  ```
+  ld.lld: error: undefined symbol: isastream
+  >>> referenced by filan.c  >>> filan.o:(filan_stat) in archive libxio.a
+  ```
 
-**目的**: {补丁用途说明}
+  修法：`ac_cv_header_sys_stropts_h=no` → 不引入该头 → `I_LIST` 未定义 → 整段跳过。
+  该块为 SunOS STREAMS 遗留，与核心中继功能无关。
 
-**修改文件**:
-- `config.guess`: 添加 HarmonyOS 系统检测
-- `config.sub`: 添加 ohos 操作系统支持
+- **`umask 077`（E114 同族）**：`configure` 生成 `config.status` 时以
+  `(umask 077 && mktemp -d)` 建临时目录，HMDFS 强制目录 setgid 下 077 会失败：
 
-**关键修改详解**:
+  ```
+  ./config.status[692]: can't create ./confXXXXXX/subs1.awk: Permission denied
+  config.status: error: could not setup config files machinery
+  ```
 
-```diff
-# 关键代码片段
-```
+  由补丁 `0001-configure-drop-umask-077.patch` 移除两处 `umask 077`。
 
-## 遇到的问题
+- **`-j1`**：E074 —— HMDFS 上 jobserver fifo `EPERM`，并行 `make` 失败。
 
-### 问题1: {问题描述}
+### 运行期
 
-**现象**: {错误信息}
+- 核心中继功能（TCP / UDP / UNIX socket / 文件 / 管道）实测可用；
+  `test_package` 以 TCP 双向建立与内容到达作为判据。
+- OHOS 对 AF_UNIX 路径名 socket 有域限制，如需 UNIX 域可用
+  `/data/storage/el1/base` 下路径。
 
-**原因**: {根因分析}
+## 依赖关系
 
-**解决**: {解决方案}
+- **编译期**：无库依赖（仅 libc）；无需额外构建工具（自带 `configure`）
+- **运行期**：无第三方运行依赖
 
-## 测试结果
+> **下游消费方**：swtpm 的测试套件将本包列为 `--enable-tests` 的**五项硬门禁**之一
+> （`AC_PATH_PROG([SOCAT], socat)`，只做可执行性探测、不链接符号）。
+> 依赖链：`socat` → `swtpm tests/` → `gnupg tests/tpm2dtests`。
 
-详见 [test-report.md](./reports/test-report.md)
+## 可用版本
 
-| 测试项 | 结果 |
-|--------|------|
-| {功能1} | ✅ |
-| {功能2} | ✅ |
-| {功能3} | ⚠️ 部分功能受限 |
-
-## 验证安装
-
-```bash
-# 检查安装
-ls -la $HOME/usr/local/lib/libxxx*
-
-# 检查功能
-{验证命令}
-```
-
-## 经验总结
-
-1. {经验1}
-2. {经验2}
+| 版本 | 状态 | 说明 |
+|------|------|------|
+| `1.7.4.4.1` | ✅ built | 当前版本。基于上游 1.7.4.4 的 OHOS 适配轮次（本仓 `.1` 惯例，如 gnupg `2.4.9.1`）；源码 URL 与产物自报版本均为 1.7.4.4 |
+| `1.7.4.4` | built | 早期手工适配记录；`conandata.yml` 缺失，conan 侧无法直接构建 |
+| `1.8.0.3` | failed | 不完整：无 `conanfile.py`，其补丁为自动生成的空转 diff（仅改 autoconf 版本注释） |
 
 ## 参考资料
 
-- {参考链接1}
-- {参考链接2}
+- 官网：http://www.dest-unreach.org/socat/
+- 源码下载：http://www.dest-unreach.org/socat/download/
+- 知识条目：**E516**（OHOS libc omits `_res`/`__res_state`）、**E114**（umask 077 临时目录）
