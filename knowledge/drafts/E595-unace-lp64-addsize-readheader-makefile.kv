@@ -1,0 +1,85 @@
+#====================================================================
+# E595-unace-lp64-addsize-readheader-makefile -
+# 1990s 32 位假设的解包/压缩工具移植到 LP64（aarch64/x86_64）时的三类
+# 系统性断裂：ULONG/LONG 用 long（8 字节）导致 on-disk 32 位字段错位；
+# read_header 类解析器读 ADDSIZE 后不推进指针导致后续字段整体错一格；
+# makefile 链接行硬编码 gcc（unace 1.2b OHOS arm64 实测）。
+#
+# 场景: unace 1.2b（GPL 公开版，Debian pool tarball）在 OHOS PC（aarch64,
+#       clang 15 / OHOS SDK 26）构建成功后：unace l 能识别档案与文件数但
+#       文件名一列为空、日期 00.00.80、unace t 报 CRC-check error；去掉
+#       FILE 头 ADDSIZE 字段则列表恢复正常但解压读不到数据；编译期每文件
+#       一条 argument unused during compilation: '-dLO_HI_BYTE_ORDER'；
+#       直接 make 报 gcc: No such file or directory（链接行硬编码）。
+# 适用: 所有 32 位时代（typedef unsigned long、BCC/Watcom -d 宏、
+#       手写 makefile 链接行、自研 on-disk 结构逐字段解析）的 C 解包/
+#       归档工具在 LP64 目标的适配，以及"构建成功但功能面字段错乱"
+#       的老代码移植场景（列出项为空、CRC 校验必败、日期/大小错乱）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E595-unace-lp64-addsize-readheader-makefile
+source_lib:             unace 1.2b
+trigger_tool:           build-and-runtime
+phase:                  build, runtime
+error_signature:        "gcc: No such file or directory|argument unused during compilation: '-d[A-Z_]+|CRC-check error|One or more CRC-errors were found|Invalid archive file"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               portability, lp64, packaging, archive-format, build-system, data-corruption
+match_keywords:         unace, ACE archive, ULONG, unsigned long, LP64, aarch64, typedef, BUFP2LONG, BUF2LONG, ADDSIZE, HEAD_FLAGS, read_header, acestruc, portable.h, declare.h, unix/makefile, gcc, CC=clang, CRC-check error, fileexists, CASEINSENSE, byte order, LO_HI_BYTE_ORDER, HI_LO_BYTE_ORDER, stored, 档案, 解压, 文件名为空, 字段错位, 字节序, Debian pool, pkgsrc distfiles
+title:                  32 位假设的老解包工具在 LP64 上的三类断裂：ULONG 宽度、on-disk 指针不推进、链接行硬编码 gcc
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             三处独立断裂叠加：① declare.h 把 ULONG/LONG 定义为 unsigned long/long，LP64 下 8 字节，而 ACE on-disk 结构全按 32 位设计，解析宏 BUFP2LONG(p) *(ULONG*)((p+=4)-4) 指针步进 4 字节但按 ULONG* 读写，共享 head 缓冲的结构体槽位与步进错位；② read_header 用不推进指针的 BUF2LONG(tp) 读带 ACE_ADDSIZE flag 的 FILE 头 ADDSIZE 字段（acefile 0.6.8 确认真实 FILE 头必带 ADDSIZE），后续 PSIZE/SIZE/FTIME/ATTR/CRC32/TECH/FNAME 从 ADDSIZE 位置读起整体错位一格——FNAME_SIZE 读到 TECH.PARM=0（文件名列空）、CRC32 读到 ATTR（CRC 校验必失败）、FTIME 读到 SIZE（日期乱）；③ unix/makefile 链接行硬编码 gcc，命令行 CC= 只覆盖编译规则。
+affected_scope:         所有以 long 系 typedef 承载 on-disk 32 位字段、或手写 makefile 链接行、或自研二进制格式逐字段解析器的 32 位时代 C 工具（解包/归档/媒体容器类），移植到 aarch64/x86_64 等 LP64 目标时命中；"构建全绿但功能字段错乱"的老代码移植通用。
+verification_cmd:       用最小 stored 档案驱动四命令面断言：python3 mkace_test.py test.ace 生成夹具后 sh test_unace.sh <产物>/bin/unace test.ace work，期望 SUMMARY pass=7 fail=0（l 列出文件名与 21.09.26 型日期、t 打 2 次 CRC OK、e/x 提取内容逐字节一致）；只修 typedef 时文件名仍空即 ADDSIZE 错位仍在，只修 read_header 时字段仍乱即 typedef 宽度仍在。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           fixed-width-typedef-plus-pointer-advance-plus-cc-link-line
+rec_description:        三处最小补丁：① declare.h 的 ULONG/LONG 固定为 unsigned int/int（或 stdint.h 的 uint32_t/int32_t，Debian 004 同方向）；② read_header 的 BUF2LONG(tp) 改 BUFP2LONG(tp)（读 ADDSIZE 同时推进 tp，MAIN 头规范上不带 ADDSIZE flag 故不受影响）；③ makefile 链接行 gcc 改 $(CC) 并以命令行 CC=clang 覆盖（Debian 001 同方向）。不引入平台宏，保持通用。
+rec_command:           make -f unix/makefile CC=/data/service/hnp/bin/clang -j1
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      compiler-flags-workaround
+fallback_description:   无法动源码时用 -Duint32ULONG 之类的强制宏无法修复 typedef 问题，只能缓解链接行（CC= 覆盖）与死 flag（忽略 unused-argument warning）；字段错位必须源码补丁，无等价编译期出口。
+fallback_command:       make CC=clang CFLAGS="-O2 -DUNIX -DCASEINSENSE"
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       typedef\s+(unsigned\s+)?long\s+ULONG
+forbid_1_reason:        用 long 系 typedef 承载 on-disk 32 位字段：LP64 下槽位 8 字节，与 4 字节步进解析宏错位，字段值静默错乱
+forbid_1_consequence:   列表文件名为空、CRC 校验必败、日期/大小错乱，且构建期零告警
+forbid_2_pattern:       gcc \$\(CFLAGS\).*-o \$@
+forbid_2_reason:        makefile 链接行硬编码 gcc：命令行 CC= 覆盖不到，无 gcc 环境直接链接失败
+forbid_2_consequence:   "Error 127 / gcc: No such file or directory，CI 与设备编译器不一致"
+
+principles:             P008, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E002]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E595-unace-lp64-addsize-readheader-makefile.md
+last_updated:           2026-09-21
+source_event:           unace 1.2b OHOS aarch64 适配：l 列表文件名空 + CRC-check error，两种档案布局对照实验定位 read_header ADDSIZE 指针不推进
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                Awstme <awstme@qq.com>
+source_pr:
+source_commit:          f95d6f1fbf10eea571c4dc4a28cd7020809bb486
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
