@@ -1,0 +1,66 @@
+# ═══ E632 — CMake 模块模式 find_package 被 CMakeDeps config 抢跑 ═══
+# Timestamp: 2026-09-21
+# Software: libminc 2.5.0（同族：libmatio hdf5 分支补丁、netcdf hdf5 变量形态、clucene-core ZLIB_ROOT）
+# Gate: 新包适配真机 conan create + ctest + test_package（archives/l/libminc/2.5.0/notes.md）
+# Status: DRAFT — needs human/AI review to promote
+#
+# To promote:
+#   1. Review the content below
+#   2. Rename to E632.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E632.md
+
+id:                     E632
+trigger_tool:           conan|cmake|CMakeDeps|CMakeToolchain|find_package
+phase:                  configure|build
+error_signature: >-
+        fatal error: 'hdf5\.h' file not found|
+        Target "ZLIB::ZLIB" not found|
+        undefined reference to `(H5[A-Za-z]+|nc(open|inq|varget))|
+        Could NOT find NETCDF|
+        HDF5_INCLUDE_DIRS.*-NOTFOUND
+
+severity:               1
+category:               cmake|conan-recipe|cmakedeps|find-package|config-shadowing
+match_keywords:         find_package, HDF5_INCLUDE_DIRS, ZLIB_LIBRARY, NETCDF_INCLUDE_DIR,
+                        cmake_find_mode, CMAKE_FIND_PACKAGE_PREFER_CONFIG, CMakeDeps,
+                        HINTS, HDF5_ROOT, 模块模式, 抢跑
+title:                  CMake 模块模式 find_package 被 CMakeDeps config 抢跑：上游消费的大写变量/target 无人定义，需 cmake_find_mode=none + 预设模块 cache 变量
+
+root_cause: >
+  本仓 Conan 2.29 的 CMakeToolchain 恒定写 CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON，
+  find_package(<Dep>) 的 config 模式按小写文件名命中 CMakeDeps 生成的
+  <dep>-config.cmake，模块 Find<Dep>.cmake 不再执行；上游显式
+  HDF5_NO_FIND_PACKAGE_CONFIG_FILE=ON 只关 FindHDF5 模块内部的 config 分支，
+  挡不住 PREFER_CONFIG 全局抢跑。config 只定义 <dep>::<dep> 扁平 target 与
+  小写变量（hdf5_INCLUDE_DIRS），上游要消费的 HDF5_INCLUDE_DIRS/HDF5_LIBRARY、
+  ZLIB::ZLIB、NETCDF_INCLUDE_DIR/NETCDF_LIBRARY 无人定义——configure 宽松时
+  不炸，编译期才以 missing header / undefined reference / missing target 爆开。
+
+fix_recipe: >
+  generate() 三步：
+  1) for dep in (zlib, hdf5, netcdf): self.dependencies[dep].cpp_info.set_property("cmake_find_mode", "none")
+     （cmake_find_mode 是 cpp_info 属性，顶层 set_property 会 AttributeError；只挡 CMakeDeps config；系统已装第三方 config（harmonybrew lib/cmake/ZLIB）
+     还会抢跑，需 tc.cache_variables["CMAKE_IGNORE_PREFIX_PATH"]=$HOME/.harmonybrew）
+  2) tc.cache_variables 预设模块 cache 变量（tc.variables 普通变量会被 find_library 无视）：
+     ZLIB_ROOT / ZLIB_INCLUDE_DIR / ZLIB_LIBRARY(libz.a，跟随依赖图实态)、
+     HDF5_ROOT（FindHDF5 全部查找段 HINTS ${HDF5_ROOT}，勿预设组件库变量名）、
+     NETCDF_INCLUDE_DIR / NETCDF_LIBRARY（上游 FindNETCDF.cmake 无 root 语义）。
+  兜底：依赖 cpp_info 全量 -I/-L 注入 CMAKE_<LANG>_FLAGS 与 *_LINKER_FLAGS。
+
+affected_scope:         上游 CMake 按模块模式变量/target 消费 conan 依赖的所有包；
+                        不适用于已按 config target（find_package(x CONFIG)/x::x）消费的包。
+
+verification_cmd:       sh $HOME/tmp/libminc-2.5.0/reproduce-e632.sh
+                        （设备任务私有目录；真实 conan create + ctest + test_package 复跑）
+
+prescan_pattern:        find_package\s*\(\s*(HDF5|ZLIB|NETCDF|NETCDF_C)[^)]*REQUIRED
+repro_hint:             配方 requires 声明依赖 + 上游 CMakeLists 出现 ${HDF5_*}/${ZLIB_*}/${NETCDF_*}
+                        变量消费或 ZLIB::ZLIB target 链接即为命中面；
+                        conan create configure 期不炸、编译期 missing header/undefined reference 即本条。
+
+references:
+  - archives/l/libminc/2.5.0/conanfile.py（generate() 完整实现）
+  - archives/l/libmatio/1.5.30/conanfile.py（hdf5::hdf5 分支补丁 + -I/-L 注入先例）
+  - archives/c/clucene-core/2.3.3.4/conanfile.py（ZLIB_ROOT/ZLIB_LIBRARY 预设先例）
+  - archives/n/netcdf/4.9.3/notes.md（conan imported target 不可见于 try_compile 同族）
