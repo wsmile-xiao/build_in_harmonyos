@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""Conan recipe — quickfix 1.15.1 (QuickFIX C++ FIX protocol engine).
+
+Source: github.com/quickfix/quickfix tag v1.15.1 (sha256-anchored in
+conandata.yml).  quickfixdev.org (the historical download site) is
+unreachable, so the GitHub tag archive IS the official release artifact for
+1.15.1.  Note the upstream version quirk: configure.ac still says
+AC_INIT([QuickFIX], [1.14.3]) — upstream forgot to bump it for the 1.15.x
+tags; the package version follows the release TAG, not AC_INIT.  There is no
+version macro in the C++ API either, so the consumer test asserts behavior,
+not a version string.
+
+Build system: autotools.  The tag archive ships no generated configure, so
+build() bootstraps with autoreconf -fi.  OHOS-specific handling (all proven
+in-repo patterns, see accel-config 4.1.9):
+  - build_requirements() pulls automake/1.18 + libtool/2.5.4 (CI workers lack
+    aclocal/automake/libtoolize); autoconf/m4/perl stay on the SDK —
+    declaring conan autoconf would pull perl/5.42.2 whose XS modules
+    conflict with the SDK perl (Perl_my_cxt_init crash);
+  - a build-only mktemp wrapper sits first on PATH because config.status
+    runs `(umask 077 && mktemp -d ...)`, which on OHOS/HMDFS creates a
+    drwx--S--- directory that even the owner cannot write (configure dies
+    with "could not setup config files machinery");
+  - config.guess cannot classify the HongMeng kernel, so --build/--host are
+    passed explicitly (identical aarch64 triplet => native configure, the
+    AC_TRY_RUN probes really execute);
+  - UnitTest++ (bundled unit-test framework, built from its standalone
+    Makefile with CXX/CXXFLAGS overrides since it hardcodes g++) is compiled
+    as C++11 because it still uses `throw()` dynamic exception specs, which
+    C++17 removed;
+  - make runs with -j1 (HMDFS jobserver fifo EPERM noise avoided);
+  - configure appends `-std=c++0x` (C++11) after the toolchain flags, so the
+    library and the ut/at/pt binaries compile as C++11 regardless of the
+    profile cppstd — the consumer test must therefore compile with C++11 too
+    (quickfix headers use dynamic exception specifications extensively).
+
+Optional dependencies (OpenSSL / MySQL / PostgreSQL / Boost / STLPort / TBB,
+plus python2/python3/ruby/java SWIG bindings) all default to DISABLED in
+upstream configure.ac/Makefile.am; none of them is required, and no
+--without-* switch is passed (ax_lib_ssl.m4 treats "--without-openssl" as a
+user path and errors out).  Only libc/pthread is required at link time.
+"""
+import os
+import shutil
+
+from conan import ConanFile
+from conan.errors import ConanException, ConanInvalidConfiguration
+from conan.tools.files import (
+    apply_conandata_patches, copy, export_conandata_patches, get,
+)
+from conan.tools.gnu import Autotools, AutotoolsToolchain
+from conan.tools.layout import basic_layout
+
+# UnitTest++ built from its own standalone Makefile (not automake-managed).
+# It hardcodes CXX = g++ and still uses `throw()` dynamic exception specs
+# (removed in C++17), so the recipe drives it directly with the OHOS clang
+# and an explicit C++11 flag.
+_UTPP_CXXFLAGS = "-O2 -std=c++11"
+
+
+class QuickfixConan(ConanFile):
+    name = "quickfix"
+    version = "1.15.1"
+    description = (
+        "QuickFIX C++ Financial Information eXchange (FIX) protocol engine "
+        "library")
+    license = "QuickFIX Software License 1.0"
+    homepage = "https://github.com/quickfix/quickfix"
+    url = "https://github.com/quickfix/quickfix"
+
+    package_type = "library"
+
+    settings = "os", "compiler", "build_type", "arch"
+    options = {"shared": [True, False]}
+    default_options = {"shared": False}
+
+    def export_sources(self):
+        export_conandata_patches(self)
+
+    def build_requirements(self):
+        # Autotools bootstrap tools (build context only).  automake/1.18
+        # ships aclocal+automake (PERL5LIB pointed at its own share dir) and
+        # libtool/2.5.4 ships libtoolize; SDK (/data/service/hnp/bin) already
+        # provides autoconf/m4/perl, which are intentionally NOT declared.
+        self.tool_requires("automake/1.18")
+        self.tool_requires("libtool/2.5.4")
+
+    def validate(self):
+        if self.settings.os not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration(
+                f"Unsupported OS: {self.settings.os}")
+
+    def layout(self):
+        # In-source build (build_folder == source_folder): quickfix's
+        # src/C++/Makefile.am all-local hook creates relative symlinks
+        # (../src/C++/.libs/* into ../lib/, ../src/ut into ../test/) that
+        # assume the build tree mirrors the source tree 1:1, so an
+        # out-of-source (VPATH) build directory would break `make all`.
+        basic_layout(self, build_folder=".")
+
+    def source(self):
+        get(self, **self.conan_data["sources"], strip_root=True)
+
+    def _create_mktemp_wrapper(self):
+        """Build-only mktemp wrapper (never committed).
+
+        config.status generated by autoconf runs
+        ``(umask 077 && mktemp -d "./confXXXXXX")``.  On OHOS/HMDFS the
+        toybox mktemp creates a drwx--S--- directory the build user cannot
+        write into, so configure aborts with "could not setup config files
+        machinery".  The wrapper emulates `mktemp -d` with mkdir and prints
+        the created path; other invocations are forwarded to the real
+        mktemp.  PATH prepend is scoped to the conanbuild environment.
+        """
+        wrapper_dir = os.path.join(self.build_folder, "mktemp-wrapper")
+        os.makedirs(wrapper_dir, exist_ok=True)
+        wrapper = os.path.join(wrapper_dir, "mktemp")
+        if not os.path.exists(wrapper):
+            with open(wrapper, "w", encoding="utf-8") as f:
+                f.write("""#!/bin/sh
+mode=""
+for a in "$@"; do
+  case "$a" in
+    -d) mode="-d" ;;
+  esac
+done
+if [ "$mode" != "-d" ]; then
+  exec /usr/bin/mktemp "$@" 2>/dev/null || exit 1
+fi
+dir=""
+for a in "$@"; do
+  case "$a" in
+    -d) ;;
+    *)  dir="$a" ;;
+  esac
+done
+[ -n "$dir" ] || dir="./tmp.XXXXXX"
+base=$(dirname "$dir")
+pat=$(basename "$dir")
+out=""
+i=0
+while [ -z "$out" ] && [ $i -lt 100 ]; do
+  cand="$base/$(echo "$pat" | sed "s/XXXXXX/$$-$RANDOM/")"
+  if (umask 077 && mkdir -p "$cand" 2>/dev/null); then out="$cand"; fi
+  i=$((i+1))
+done
+if [ -n "$out" ]; then
+  echo "$out"
+  exit 0
+fi
+exit 1
+""")
+            os.chmod(wrapper, 0o755)
+        return wrapper_dir
+
+    def _prepare_build_env(self):
+        """Writable TMPDIR + CONFIG_SHELL + ACLOCAL_PATH extras.
+
+        automake/1.18 and libtool/2.5.4 already provide PATH / ACLOCAL_PATH /
+        _lt_pkgdatadir / LIBTOOLIZE via their buildenv_info inside the
+        conanbuild environment; the libtool aclocal dir is appended again for
+        robustness against env-layer differences.
+        """
+        tmpdir = os.path.join(self.build_folder, "tmp")
+        os.makedirs(tmpdir, exist_ok=True)
+        os.chmod(tmpdir, 0o755)
+        os.environ["TMPDIR"] = tmpdir
+        bash = shutil.which("bash") or "/bin/sh"
+        os.environ.setdefault("CONFIG_SHELL", bash)
+        os.environ.setdefault("SHELL", bash)
+
+        aclocal_dirs = []
+        for dep in self.dependencies.build.values():
+            if dep.ref.name == "libtool":
+                cand = os.path.join(dep.package_folder, "share", "aclocal")
+                if os.path.isdir(cand):
+                    aclocal_dirs.append(cand)
+        existing = os.environ.get("ACLOCAL_PATH", "")
+        extra = ":".join(d for d in aclocal_dirs if d)
+        os.environ["ACLOCAL_PATH"] = ":".join(
+            [d for d in [extra, existing] if d])
+        return bash
+
+    def _gnu_triplet(self, arch=None):
+        arch = str(arch or self.settings.arch)
+        arch_triplets = {
+            "armv8": "aarch64-unknown-linux-gnu",
+            "armv8.3": "aarch64-unknown-linux-gnu",
+            "aarch64": "aarch64-unknown-linux-gnu",
+        }
+        triplet = arch_triplets.get(arch)
+        if not triplet:
+            raise ConanInvalidConfiguration(f"Unsupported arch: {arch}")
+        return triplet
+
+    def generate(self):
+        self._prepare_build_env()
+        host_triplet = self._gnu_triplet()
+        build_arch = (
+            self.settings_build.get_safe("arch")
+            if self.settings_build else None)
+        build_triplet = self._gnu_triplet(build_arch or self.settings.arch)
+        tc = AutotoolsToolchain(self)
+        tc.configure_args.extend([
+            f"--build={build_triplet}",
+            f"--host={host_triplet}",
+        ])
+        # R26: system-name libraries default to static.
+        if not self.options.shared:
+            tc.configure_args.append("--enable-static")
+            tc.configure_args.append("--disable-shared")
+        env = tc.environment()
+        env.prepend_path("PATH", self._create_mktemp_wrapper())
+        tc.generate(env=env)
+
+    def build(self):
+        bash = self._prepare_build_env()
+        apply_conandata_patches(self)
+
+        # The tag archive ships no generated configure; bootstrap it.
+        if not os.path.exists(
+                os.path.join(self.source_folder, "configure")):
+            # GNU strictness automake requires ChangeLog (INSTALL is added by
+            # autoreconf --add-missing); upstream's own bootstrap touches both.
+            for required in ("ChangeLog", "INSTALL"):
+                required_path = os.path.join(self.source_folder, required)
+                if not os.path.exists(required_path):
+                    open(required_path, "a", encoding="utf-8").close()
+            self.run(
+                f"{bash} -c 'autoreconf -fi'",
+                cwd=self.source_folder, env="conanbuild")
+        if not os.path.exists(
+                os.path.join(self.source_folder, "configure")):
+            raise ConanException(
+                "autoreconf did not produce configure; see build log")
+
+        # Bundled UnitTest++ from its standalone Makefile (pruned from the
+        # top-level SUBDIRS; hardcoded CXX=g++ overridden with the toolchain
+        # compiler, C++11 because the framework still uses `throw()` specs).
+        cc = os.environ.get("CXX") or shutil.which("clang++") or "clang++"
+        self.run(
+            f"make libUnitTest++.a CXX='{cc}' CXXFLAGS='{_UTPP_CXXFLAGS}'",
+            cwd=os.path.join(self.source_folder, "UnitTest++"),
+            env="conanbuild")
+
+        autotools = Autotools(self)
+        autotools.configure()
+        # Top-level SUBDIRS is pruned to src bin spec test; `all` builds
+        # libquickfix.la plus the at/ut/pt no-inst binaries.
+        autotools.make(args=["-j1"])
+
+        # Upstream unit-test entry (test/runut.sh equivalent): the ut binary
+        # (symlinked into test/ by src/Makefile.am all-local) links the
+        # bundled UnitTest++ and the FIX engine test library; it binds
+        # 127.0.0.1:<port> for the socket test cases and exits non-zero when
+        # any UnitTest++ test fails.
+        self.run(
+            "./ut -p 54321 -f cfg/ut.cfg",
+            cwd=os.path.join(self.source_folder, "test"), env="conanbuild")
+
+    def package(self):
+        autotools = Autotools(self)
+        autotools.install()
+        # Ship the upstream license file alongside the package.
+        copy(self, "LICENSE", src=self.source_folder,
+             dst=os.path.join(self.package_folder, "licenses"),
+             keep_path=False)
+
+    def package_info(self):
+        self.cpp_info.libs = ["quickfix"]
+        self.cpp_info.set_property("pkg_config_name", "quickfix")
+        self.cpp_info.set_property("cmake_file_name", "quickfix")
+        self.cpp_info.set_property("cmake_target_name", "quickfix::quickfix")
+        # pthread lives in libc on OHOS/bionic; nothing else to link.
