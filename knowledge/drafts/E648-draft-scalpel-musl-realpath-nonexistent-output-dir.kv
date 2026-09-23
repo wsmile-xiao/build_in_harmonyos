@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: scalpel 1.60 (nolaforensix) - musl realpath() returns NULL for
+#        a not-yet-existing output directory; upstream copies the
+#        untouched buffer, turning forensic-soundness checks into
+#        bogus "non-empty output directory" aborts
+#====================================================================
+
+id:                     E648
+trigger_tool:           scalpel|clang|musl|realpath
+phase:                  compilation|testing
+error_signature:        non-empty output directory|forensic soundness|domain string|realpath|outputDirectoryOK|convertFileNames|incompatible integer to pointer
+
+severity:               2
+category:               portability|libc-divergence|musl|ohos-platform
+match_keywords:         scalpel, realpath, musl, glibc, output directory, forensic, non-empty, outputDirectoryOK, convertFileNames, uninitialized, ENOENT, POSIX-2008, foremost, file carver
+
+title:                  musl 的 realpath() 要求全路径存在（glibc 解析最长存在前缀）——上游对"尚不存在的输出目录"调 realpath 并无条件复制缓冲区，musl 下未初始化栈垃圾进入路径，表现为 forensic-soundness 假告警
+
+root_cause:             "scalpel（1.60 维护分支，commit 6960eb2 快照，C 语言）在 convertFileNames() 里对 -o 指定的输出目录做 realpath(state->outputdirectory, fn) 后无条件 strncpy 回 state。realpath() 在路径分量不存在时的行为分歧：glibc 会解析\"最长存在前缀\"并把尾部拼回后成功返回；musl（OHOS libc）严格按存在性校验，返回 NULL 且不触碰 resolved 缓冲区（设备实测 realpath(\"/nonexistent/x\",b) 得 r=NULL、b 空、errno=2）。输出目录按 forensic soundness 语义本来就不该预先存在，因此设备上正常使用即命中：未初始化的栈缓冲被拷进 outputdirectory，随后的 outputDirectoryOK() 对垃圾路径 opendir/readdir 触发 \"ERROR: You have attempted to use a non-empty output directory. In order to maintain forensic soundness, this is not allowed.\"（实测 10/10 循环命中；栈垃圾内容非确定，单次运行偶可侥幸通过）——报错文案与真实故障（libc 差异）毫无关联，是典型的\"错误文案误导归因\"。"
+affected_scope:         所有"对可能不存在的路径调 realpath 并复制返回值"的 C/C++ 工程（文件雕刻/取证/解包/安装类工具高发，这类工具的输出目录按语义就是不该预先存在的）；OHOS/musl 为目标平台、Debian/glibc 为开发平台的上游项目均受影响。
+verification_cmd:       cd $HOME/tmp/scalpel-1.60-git20240110.6960eb2 && sh reproduce-E648.sh   # 在设备上编译未打补丁源码并对不存在的输出目录运行 scalpel
+
+rec_priority:           1
+rec_approach:           check-realpath-return-before-copy
+rec_description:        对 realpath() 的返回值判空后再复制：if (realpath(path, fn)) { strncpy(...); }——失败时保留原路径即可（相对路径由调用方语义保证），不要试图手工拼前缀去模拟 glibc 行为。识别该类缺陷的快速探针：musl 下 realpath("/nonexistent/x", buf) 返回 NULL，glibc 下返回 "/nonexistent/x"；看到"对输出/临时目录的路径在程序里变成随机字符串"或"目录存在性校验报错但路径打印出来是乱码"时优先怀疑这一对差异。补丁保持平台中立（判空），不要写 #ifdef __OHOS__ 之类的平台宏（会被 PF5/上游审查拦截）。
+rec_command:            clang -D__LINUX -O2 -o scalpel helpers.c files.c scalpel.c dig.c prioque.c base_name.c -lm && printf 'html\ty\t100000\t<html\t</html>\n' > scalpel.conf && ./scalpel -c scalpel.conf -o carved_out image.img
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              pending
+source_commit:          6960eb28d53a88fc9994db0cdb4b20bdac1c99fd
