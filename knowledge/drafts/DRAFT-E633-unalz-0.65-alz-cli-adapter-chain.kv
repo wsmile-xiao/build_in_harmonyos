@@ -1,0 +1,91 @@
+# ═══ Draft knowledge entry — unalz 0.65 ALZ 解压 CLI 适配链（Makefile 硬编码编译器 / musl iconv 韩文文件名 / 最小 ALZ 夹具） ═══
+# Timestamp: 2026-09-21
+# Software: unalz 0.65
+# Gate: <待填：PR 号 / CI build 号>
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E633.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E633.md
+
+id:                     DRAFT-E633
+trigger_tool:           make|conan|runtime|test_package
+phase:                  build|test_package|runtime
+error_signature:        g\+\+.*not found|gcc.*not found|error.*unrecognized.*command.*g\+\+|
+                        make.*CC.*gcc.*clang|hardcoded.*compiler|
+                        iconv_open.*failed|ERR_ICONV_CANT_OPEN|Converting[ ]Error[ :]+Cannot[ ]open[ ]iconv|
+                        It's corrupted file\.|file open error|not an ALZ file|
+                        ERR_INVALID_FILE_CRC|invalid file CRC|
+                        unalz.*--version.*file open error|Usage[ :]+unalz
+
+severity:               2
+category:               makefile|compiler-override|iconv|cp949|euc-kr|alz|fixture|cli-smoke
+match_keywords:         linux-utf8, -D_UNALZ_ICONV, -D_UNALZ_UTF8, -liconv, musl iconv, CP949,
+                        EUC-KR, ALZ, BLZ, CLZ, fileDescriptor 0x40, stored, CRC32, zlib.crc32,
+                        make CC= CPP=, command-line variable, refresh-patch, EUC-KR source,
+                        utf-8 errors=replace, test fixture runtime generation
+
+title:                  unalz 0.65（ALZ/AlZip 解压 CLI）适配：Makefile 硬编码 gcc/g++ 的 make 变量覆盖、musl iconv 的 CP949 文件名转 UTF-8、EUC-KR 源码树的补丁生成边界与运行时最小 ALZ 夹具
+
+root_cause: >
+  1) 上游 Makefile 顶部硬编码 `CPP = g++` / `CC = gcc`（且把 C++ 编译器命名为 CPP），
+     conan 通过 buildenv 注入的 CC/CXX 不生效；conanfile 需以 make 命令行变量
+     （优先级高于文件内赋值）`make linux-utf8 CC="<c>" CPP="<cpp>"` 覆盖，编译器路径取
+     conan conf `tools.build:compiler_executables`（R33），不读裸 shell 环境变量。
+  2) OHOS 的 musl libc 内置 iconv 且支持 CP949/EUC-KR 别名（iconv_open("UTF-8","CP949")
+     实测可用），因此上游 `linux-utf8` 目标（-D_UNALZ_ICONV -D_UNALZ_UTF8，不带
+     -liconv）即可把 ALZ 归档内 EUC-KR 文件名转成 UTF-8 落盘；`posix`/`posix-utf8`
+     目标带 `-liconv`，musl 无独立 libiconv 会直接链接失败。
+  3) profile 的 compiler.cppstd=17 经 GnuToolchain 进 CXXFLAGS 后，2009 年源码里的
+     `register` 存储类说明符在 C++17 下从告警升级为硬错误（ISO C++17 does not allow
+     'register'）——设备裸 make（无 -std，默认 gnu++14）只见告警，会掩盖该雷；
+     移除 `register`（零语义影响）即可两头兼容。
+  4) unalz 源码 main.cpp/UnAlz.cpp 为 EUC-KR + CRLF 编码：refresh_patch 的 difflib
+     链路按 `read_text(utf-8, errors=replace)` 读文件——universal-newlines 折掉 \r、
+     非 ASCII 字节变 U+FFFD，生成的补丁上下文与目标文件字节失配（dry-run 必败、
+     补丁被静默丢弃 → conandata 引用悬空）；且设备 /usr/bin/patch 是 toybox，
+     对补丁剥 DOS newlines 后匹配 CRLF 目标同样必败。字节级 diff（latin-1 进出）
+     + git apply --check 才能生成可应用的补丁（conan 侧应用走 patch_ng，三形态
+     CRLF/EUC-KR 实测均可）。补丁名遵循 refresh-patch 的 `NNNN-<源文件名>.patch`
+     惯例（原子替换 + conandata slug 同步按此匹配）。
+  5) 上游 CLI 无 --version/--help（仅无参打印横幅），且错误路径（文件缺失/损坏）
+     一律 `return 0`——自动化冒烟必须断言输出文本；`--version` 被当作归档文件名。
+
+fix: >
+  1) 配方 build()：
+     comp_execs = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict)
+     cc = comp_execs.get("c") or "clang"; cxx = comp_execs.get("cpp") or "clang++"
+     self.run(f'make -j1 linux-utf8 CC="{cc}" CXX="{cxx}" CPP="{cxx}"', cwd=self.source_folder)
+  2) musl iconv 探针（10 行 C，iconv_open("UTF-8","CP949") 后 iconv 转换
+     \xc5\xd7\xbd\xba\xc6\xae.txt → 테스트.txt）；OHOS clang 15 直接编译运行。
+  3) `register unsigned int i` / `register char *d` 去掉 register 存储类说明符
+     （C++17 硬错误、C++98/14 零影响；随 0001-UnAlz.cpp.patch 一并交付）。
+  4) 补丁生成：字节级 diff（orig/work 均按 read_bytes+latin-1 1:1 映射，写盘
+     write_bytes）+ dry-run 用 git apply --check -p1（二进制 stdin）；保持 CRLF；
+     由 refresh-patch 按源文件名生成 0001-UnAlz.cpp.patch / 0002-main.cpp.patch
+     并自动登记 conandata（overlay 缺陷 C 修正）。
+  5) test_package 运行时用 python3 生成最小 ALZ（不提交二进制归档）：
+     b"ALZ\\x01"+le32(0) 全局头；b"BLZ\\x01" 本地头（le16(namelen)+attr 0x20+le32(DOS时间)
+     +descr 0x40(4字节长度字段)+unknown2 0x00+compMethod 0(stored)+unknown 0x00
+     +le32(crc32)+le32(csize)+le32(usize)+name(EUC-KR)+content）；b"CLZ\\x01"+12B 中央目录
+     （0,0,b"CLZ\\x03"）；b"CLZ\\x02" 结尾。解压路径强校验 CRC32，夹具必须算对。
+     消费者断言打输出文本（"Listing archive"/"Total 1 file"/"It's corrupted file."/
+     "file open error"），不用退出码判错。
+
+reproduction_command: >
+  设备可直接执行，已随任务留档 $HOME/tmp/unalz-0.65/repro/：
+  ① clang iconv-probe.c -o iconv-probe && ./iconv-probe（CP949/EUC-KR 别名 + 转换）；
+  ② alz-fixture-gen.sh（生成最小 ALZ 并按 UnAlz.cpp 解析规则回读校验）；
+  ③ make linux-utf8 CC=clang CXX=clang++ CPP=clang++（工作目录任一 EUC-KR 源码树）。
+
+evidence: >
+  <待填：conan create 干净轮日志 sha256、test_package PASS/FAIL 计数、iconv 探针输出、
+  -utf8 提取韩文文件名 ls 证据——全部逐字 .md 留 reports/>
+  采信轮实测（2026-09-21）：conan-create.log 干净轮 sha256=518f09fb8cc14284…；
+  test_package `# total: PASS=28 FAIL=0`（log 第 307 行）；iconv 探针输出
+  "CP949 -> ok / EUC-KR -> ok / convert rc=0 out=테스트.txt"。
+
+related:                E010（toybox 兼容）、E490（辅助脚本执行位——本包 G0 误报来源）
+knowledge_ref:          DRAFT-E633
