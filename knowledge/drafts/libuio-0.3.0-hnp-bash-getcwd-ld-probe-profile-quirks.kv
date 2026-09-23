@@ -1,0 +1,70 @@
+# ═══ Draft knowledge entry — hnp bash 在 HMDFS getcwd 失败 + 裸 ld 探测 + profile 缺 os.version（真机三小坑）
+# 10.62.178.77 类真机上的三件小而致命的坑：PATH 里的 hnp bash 在 HMDFS cwd 下
+# getcwd 全挂（configure 报 working directory cannot be determined，PWD 预设解）；
+# 老 autotools 探测裸 "ld" 而 SDK 只有 ld.lld 包装脚本（$LD 预设解，免符号链接）；
+# 设备自带 ohos-aarch64 profile 缺 os.version 导致 settings.os.version not defined。
+# Software: libuio 0.3.0（2026-09-19 真机 10.62.178.77 全套实测）
+# Gate: conan create（ohos-aarch64-fixed）全绿
+# Status: DRAFT
+
+id: libuio-0.3.0-hnp-bash-getcwd-ld-probe-profile-quirks
+severity: 2
+category: ohos|build-system|shell|conan
+trigger_tool: configure|bash|conan|autotools
+phase: build
+
+keywords: working directory cannot be determined, getcwd, hnp bash, PWD, mksh, ld.lld, bare ld, linker detection, LD environment, os.version, ohos-aarch64-fixed, settings.os.version value not defined, profile
+error_signature: 'configure: error: working directory cannot be determined|job-working-directory: error retrieving current directory|checking whether the .* linker \(.*\) supports shared libraries \.\.\. no|Invalid: .settings\.os\.version. value not defined'
+match_keywords: getcwd, working directory cannot be determined, PWD 预设, ld.lld, LD 环境变量, os.version, ohos-aarch64-fixed, mksh, hnp bash, profile
+
+root_cause: |
+  (1) PATH 首位的 /data/service/hnp/bin/bash（hnp bash）在 HMDFS cwd 下 getcwd(2)
+  系统调用失败：进程启动即 "shell-init: error retrieving current directory"，
+  configure 的 pwd 检查直接 fatal "working directory cannot be determined"。
+  /bin/sh（mksh）getcwd 正常，但 mksh 跑 config.status 又有别的坑（见姊妹条目
+  E-hmdfs-uid-mapping）——所以不能简单换 mksh。另一台真机（libfec，autoconf
+  2.69）的解是 CONFIG_SHELL=/bin/sh，本机 autoconf 2.72 + 本坑组合的正解是
+  预设 PWD 走 bash 的"逻辑 pwd"（bash 用 $PWD 且以 stat 校验，不依赖 getcwd）。
+  (2) 老 autotools（AC_PROG_LIBTOOL）探测裸 "ld"；SDK 只有 ld.lld 且它本身是
+  加 --code-sign 的 #!/bin/sh 包装（在 /data 上可 exec）。常规对策（celt）是
+  build 目录 bin/ 里造 ld→ld.lld 符号链接 + PATH 前置——但 HMDFS 拒绝 symlink，
+  复制包装脚本又因 HMDFS 拒脚本 exec 不可用。
+  (3) 设备预置 ohos-aarch64 profile 只有 [settings] 无 os.version；ohpcd 制品仓
+  二进制按 os.version=6.0 发布 → conan create 直接 "Invalid: 'settings.os.version'
+  value not defined"。设备上的 ohos-aarch64-fixed profile 才是齐的（os.version=6.0
+  + tools.build:compiler_executables 指向 SDK clang + cmake 路径）。
+
+rec_approach: pwd-preset-ld-env-profile-fixed
+rec_description: |
+  三件事按序做（真机 conan create 前置 export + 配方 build() 内兜底）：
+  1. PWD：配方 build() 设 os.environ["PWD"] = self.build_folder（os.environ
+     直改能穿透 conan 的 conanbuild 包装；随 env 传播给 configure/config.status/
+     make 全部子进程，bash 逻辑 pwd 全线可用）。
+  2. LD：os.environ["LD"] = <compiler 目录>/ld.lld——configure/libtool 尊重预设
+     $LD，完全绕开符号链接/复制两难。lld 以 "ld" 名义被调时按 argv[0] 走 GNU ld
+     仿真，包装脚本保持 --code-sign 行为。
+  3. profile：真机用 ohos-aarch64-fixed（-pr:h 与 -pr:b 同用），勿用裸
+     ohos-aarch64；若需自定义 profile 记得带 os.version=6.0。
+  另：会话级 PATH 前置 /data/service/hnp/bin:$HOME/.local/bin（clang/autoconf/
+  autoreconf/m4/perl/gawk/pkg-config 全在 SDK，conan 在 .local/bin）。
+rec_command: |
+  # 会话：
+  # export PATH=/data/service/hnp/bin:$HOME/.local/bin:$PATH
+  # conan create <dir> --build=missing -pr:h ohos-aarch64-fixed -pr:b ohos-aarch64-fixed
+  # 配方（build() OHOS 块）：os.environ["PWD"] / os.environ["LD"] 见
+  # archives/l/libuio/0.3.0/conanfile.py
+rec_auto_fix: false
+
+affected_scope: |
+  (1) 一切在 HMDFS 真机上需要 bash 跑脚本/构建的场景（bash 在非 HMDFS cwd 完全
+  正常，症状只在 cwd 落 HMDFS 时出现，易漏判）；(2) 任何老 autotools 包在
+  "SDK 只有 ld.lld + HMDFS 拒 symlink/脚本 exec"设备上的链接器探测；(3) 该类
+  真机的 profile 选择。已实证：libuio 0.3.0（三项全中，修复后全绿）。celt 的
+  ld→symlink 方案在此类设备不可移植，本条 $LD 方案通用。
+
+verification: |
+  真机（10.62.178.77）：
+  - 未设 PWD：bash <srcdir>/configure → "working directory cannot be determined"
+  - 设 PWD：configure 全过（实测 2026-09-19）
+  - LD 预设后 configure 报 "checking whether the clang linker
+    (/data/service/hnp/bin/ld.lld) supports shared libraries... yes"
