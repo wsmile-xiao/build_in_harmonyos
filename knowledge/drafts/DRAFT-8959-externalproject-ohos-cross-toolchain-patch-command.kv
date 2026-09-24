@@ -1,0 +1,134 @@
+# ═══ Draft knowledge entry — canopenterm 2.03 OHOS CMake ExternalProject vendored 依赖交叉编译链 ═══
+# Timestamp: 2026-09-12
+# Software: canopenterm 2.03
+# Gate: PR !8597 / 真机 OHOS 交叉构建 + 171/171 上游单元测试
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-8959
+trigger_tool:           cmake|conan|clang
+phase:                  build
+error_signature:        CMake Error.*toolchain file.*does not exist|
+                         The CMAKE_C_COMPILER for this platform.*|
+                         redefinition of 'sockaddr_storage'|
+                         conflicting types for 'uintptr_t'; did you mean|
+                         undefined reference to `SDL_|
+
+severity:               2
+category:               cmake|externalproject|cross-compile|toolchain|vendored-deps|patch-command|bionic|soname|rpath|platform-detection|harmonyos
+match_keywords:         ExternalProject_Add CMAKE_TOOLCHAIN_FILE, toolchain not inherited subbuild,
+                         CMAKE_SYSTEM_NAME=HarmonyOS UNIX is OFF, elseif(UNIX OR OHOS),
+                         PATCH_COMMAND git apply vendored dep, conan apply_conandata_patches main source only,
+                         sockaddr_storage redefinition bionic linux/can.h, cmocka __WORDSIZE uintptr_t aarch64,
+                         unversioned .so soname chain cross build, DT_SONAME plain, CMAKE_BUILD_RPATH $ORIGIN
+
+title:                  canopenterm 2.03 适配 OHOS：CMake ExternalProject vendored 依赖交叉编译链——子构建不继承 toolchain 文件须逐个显式传递 + 依赖源码补丁须经 PATCH_COMMAND 脚本注入 + bionic/cmocka/soname 四连坑
+
+root_cause: >
+  1) CMake ExternalProject_Add 子构建是独立的 CMake 调用，不继承主工程的
+     CMAKE_TOOLCHAIN_FILE；OHOS 交叉时 8 个 vendored 依赖（cJSON/CANvenient/
+     pocketpy/inih/isocline/Lua/SDL3/cmocka）全部退回 host 架构编译，
+     链接期报架构不匹配或 undefined reference。必须在每个 ExternalProject_Add
+     的 CMAKE_ARGS 里显式 -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}。
+  2) conan 的 apply_conandata_patches 只作用于主源码根；vendored 依赖的源码
+     补丁（bionic 头顺序、平台宏）必须经 ExternalProject_Add 的
+     PATCH_COMMAND 脚本注入，且脚本要幂等（OHOS 最小工具链 patch 是
+     toybox 无 -N：逐补丁先 patch -R --dry-run 探测，rc=0 说明已应用
+     则跳过，否则正向 patch -p1）。
+  3) OHOS Conan profile 设 CMAKE_SYSTEM_NAME=HarmonyOS，CMake 的 UNIX 变量为
+     OFF：上游以 if(UNIX) 选平台源码/链接库时整个 linux 分支落空。适配范式：
+     加 elseif(UNIX OR OHOS) 复用 linux 分支；Windows-only 资源（.rc）在 OHOS
+     置空变量。
+  4) bionic <sys/socket.h> 必须先于 <linux/can.h>，否则 <linux/socket.h> 重定义
+     sockaddr_storage（CANvenient SocketCAN 驱动必现）。
+  5) cmocka 1.1.7 的 __WORDSIZE 启发式只识别 x86_64/sparc，aarch64 OHOS 上把
+     uintptr_t 定义成 32 位与系统头冲突；补丁把 __aarch64__ 加进 64 位分支
+     （纯特征检测，不引入 __OHOS__ 等平台宏，R8 合规）。
+  6) 交叉构建 ExternalProject 产物无 soname 符号链接链：依赖方必须引用
+     unversioned .so 名，并给被依赖库强制 plain DT_SONAME（无版本后缀）；
+     上游 CMake 不生效 CMAKE_BUILD_RPATH，运行期库路径须在 recipe build()
+     用 patchelf --set-rpath "$ORIGIN/../lib" 写进可执行文件（conan
+     self.run 会展开 $ORIGIN 必须走 subprocess 列表参数；部分 OHOS
+     文件系统拒 patchelf in-place 重写，需临时副本+os.replace）。
+  7) GUI/常驻程序冒烟测试：CANopenTerm 装信号处理器捕获 SIGTERM，
+     toybox timeout 默认发 TERM 杀不掉导致测试挂死；冒烟改为后台启动+
+     存活判定+kill -9，其余 timeout 加 -k 兜底。
+
+affected_scope:         一切用 CMake ExternalProject/FetchContent 自带依赖源码、
+                        且需要 OHOS 交叉编译的 C 项目（CANopenTerm 系、SDL 系、
+                        带 vendored 测试框架的项目）；含 bionic socket 头顺序与
+                        cmocka 类型启发式的所有 aarch64 OHOS 构建。
+
+verification_cmd:       真机隔离 CONAN_HOME：conan create archives/c/canopenterm/2.03
+                        -pr:h ohos-aarch64 -pr:b ohos-aarch64 --build=missing
+                        （exit 0，test_package 19 断言全过，上游 171/171）；
+                        反证：移除任一 ExternalProject_Add 的
+                        -DCMAKE_TOOLCHAIN_FILE 后子构建按 host 架构编译必炸。
+
+rec_priority:           1
+rec_approach:           externalproject-toolchain-propagation-plus-patch-command
+rec_description: >
+  1) 主 CMakeLists 平台分支统一改为 elseif(UNIX OR OHOS) 复用 linux 源集；
+     Windows-only 资源改可选变量（OHOS 置空）。
+  2) 每个 ExternalProject_Add 的 CMAKE_ARGS 显式追加
+     -DCMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}（可封装成
+     OHOS_TOOLCHAIN_ARGS 变量集中维护）。
+  3) vendored 依赖源码补丁走 PATCH_COMMAND：新增独立 .cmake 脚本
+     （patch_<dep>.cmake）在子构建源码目录执行 patch -p1；OHOS toybox
+     patch 无 -N，逐补丁先 patch -R --dry-run 探测已应用则跳过（幂等可
+     重放），补丁文件随归档存放于 patches/<dep>-<ver>/。
+  4) 交叉构建产物按 unversioned .so 名引用，被依赖库设
+     SET_TARGET_PROPERTIES(... PROPERTIES SONAME 为 plain 名)。
+  5) recipe 设 CMAKE_BUILD_RPATH=$ORIGIN/../lib，package 布局
+     bin/+lib/+share/<name>/（运行数据），test_package 用包内数据副本作
+     工作目录跑上游测试套件。
+rec_command:            conan create archives/c/canopenterm/2.03 -pr:h ohos-aarch64
+                          -pr:b ohos-aarch64 --build=missing
+rec_auto_fix:           false
+rec_impl:               conan-recipe-cmake-externalproject-harmonyos
+
+fallback_priority:      2
+fallback_approach:      registry-deps-replace-externalproject
+fallback_description:   把 vendored 依赖替换为 registry 已适配版本（requires()
+                        声明 + find_package/CMakeDeps），绕开子构建 toolchain
+                        问题；但依赖版本锁定受 registry 覆盖限制，且改动上游
+                        构建面更大，canopenterm 场景（8 依赖、含未发布 SDL3 3.4.12）
+                        成本高于方案一。
+fallback_command:       conan create archives/c/canopenterm/2.03 ...（改后配方）
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-cmake-registry-deps
+
+forbid_1_pattern:       ExternalProject_Add\((\w+)[\s\S]{0,400}?(?!CMAKE_TOOLCHAIN_FILE)[\s\S]{0,80}\)\s*$
+forbid_1_reason:        无 toolchain 参数的 ExternalProject 在 OHOS 交叉下按
+                        host 架构构建依赖，链接期才暴露，排查成本高
+forbid_1_consequence:   undefined reference / 架构不匹配，依赖库与主程序
+                        ELF machine 不一致
+
+forbid_2_pattern:       if\s*\(\s*UNIX\s*\)
+forbid_2_reason:        OHOS profile 的 CMAKE_SYSTEM_NAME=HarmonyOS 使 UNIX 为
+                        OFF，裸 if(UNIX) 分支在 OHOS 静默落空
+forbid_2_consequence:   平台源码集/链接库选错，配置期不报错、构建或链接期
+                        才失败
+
+principles:             P001, P003, P011
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-8959-externalproject-ohos-cross-toolchain-patch-command.md
+last_updated:           2026-09-18
+source_event:           PR #10213 feat(canopenterm): 2.03 OHOS 适配——ExternalProject
+                        vendored 依赖交叉编译链 + 171/171 上游单元测试
+authors:                xiao921924
+source_pr:              10213
+source_commit:          ""
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-12
