@@ -1,0 +1,150 @@
+--- /dev/null
++++ b/harmony/host.cpp
+@@ -0,0 +1,147 @@
++#include <napi/native_api.h>
++#include <hilog/log.h>
++#include <SDL.h>
++#include <atomic>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <set>
++
++extern void RunBoulder(const std::string &, std::atomic<bool> &);
++namespace {
++std::thread worker;
++std::atomic<bool> running{false};
++std::mutex statusMutex;
++std::string message = "Waiting for surface";
++std::set<SDL_Keycode> heldKeys;
++std::set<int> heldButtons;
++
++void releaseInput() {
++    for (auto key : heldKeys) {
++        SDL_Event event{}; event.type = SDL_KEYUP;
++        event.key.state = SDL_RELEASED; event.key.keysym.sym = key;
++        event.key.keysym.scancode = SDL_GetScancodeFromKey(key);
++        SDL_PushEvent(&event);
++    }
++    for (auto button : heldButtons) {
++        SDL_Event event{}; event.type = SDL_MOUSEBUTTONUP;
++        event.button.state = SDL_RELEASED; event.button.button = button;
++        SDL_PushEvent(&event);
++    }
++    heldKeys.clear(); heldButtons.clear();
++}
++
++void report(const std::string &text) {
++    std::lock_guard<std::mutex> lock(statusMutex);
++    message = text;
++    OH_LOG_Print(LOG_APP, LOG_INFO, 0xB001, "BoulderHost", "%{public}s", text.c_str());
++}
++
++void render(std::string surface, int width, int height, std::string files) {
++    SDL_SetHint(SDL_HINT_VIDEODRIVER, "nativewindow");
++    SDL_SetHint(SDL_HINT_AUDIODRIVER, "ohaudio");
++    SDL_SetHint("SDL_NATIVEWINDOW_SURFACE_ID", surface.c_str());
++    SDL_SetHint("SDL_NATIVEWINDOW_WIDTH", std::to_string(width).c_str());
++    SDL_SetHint("SDL_NATIVEWINDOW_HEIGHT", std::to_string(height).c_str());
++    RunBoulder(files, running);
++    running = false;
++}
++
++void stopWorker() { releaseInput(); running = false; if (worker.joinable()) worker.join(); }
++
++napi_value Start(napi_env env, napi_callback_info info) {
++    size_t argc = 4;
++    napi_value args[4];
++    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
++    char surface[64]{};
++    char files[1024]{};
++    size_t filesLength = 0;
++    size_t length = 0;
++    int32_t width = 0, height = 0;
++    if (argc != 4 || napi_get_value_string_utf8(env, args[3], files, sizeof(files), &filesLength) != napi_ok || filesLength == 0 || napi_get_value_string_utf8(env, args[0], surface, sizeof(surface), &length) != napi_ok ||
++        napi_get_value_int32(env, args[1], &width) != napi_ok || napi_get_value_int32(env, args[2], &height) != napi_ok ||
++        length == 0 || width <= 0 || height <= 0) {
++        napi_throw_type_error(env, nullptr, "start requires surfaceId and positive pixel dimensions");
++        return nullptr;
++    }
++    stopWorker();
++    running = true;
++    worker = std::thread(render, std::string(surface), width, height, std::string(files));
++    return nullptr;
++}
++napi_value Stop(napi_env env, napi_callback_info) { stopWorker(); return nullptr; }
++napi_value ReleaseInput(napi_env, napi_callback_info) { releaseInput(); return nullptr; }
++napi_value Status(napi_env env, napi_callback_info) {
++    napi_value value;
++    std::lock_guard<std::mutex> lock(statusMutex);
++    napi_create_string_utf8(env, message.c_str(), message.size(), &value);
++    return value;
++}
++napi_value Key(napi_env env, napi_callback_info info) {
++    size_t argc = 2; napi_value args[2]; int32_t code = 0; bool pressed = false;
++    napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
++    if (argc != 2 || napi_get_value_int32(env,args[0],&code)!=napi_ok || napi_get_value_bool(env,args[1],&pressed)!=napi_ok || !running) return nullptr;
++    SDL_Keycode key = SDLK_UNKNOWN;
++    if (code>=2017 && code<=2042) key = SDLK_a + code-2017;
++    else if (code>=2000 && code<=2009) key = SDLK_0 + code-2000;
++    else if (code>=2090 && code<=2101) key = SDLK_F1 + code-2090;
++    else if (code>=2104 && code<=2112) key = SDLK_KP_1 + code-2104;
++    else switch(code) {
++      case 2012:key=SDLK_UP;break; case 2013:key=SDLK_DOWN;break;
++      case 2014:key=SDLK_LEFT;break; case 2015:key=SDLK_RIGHT;break;
++      case 2054:key=SDLK_RETURN;break; case 2070:key=SDLK_ESCAPE;break;
++      case 2050:key=SDLK_SPACE;break; case 2055:key=SDLK_BACKSPACE;break;
++      case 2049:key=SDLK_TAB;break; case 2047:key=SDLK_LSHIFT;break;
++      case 2048:key=SDLK_RSHIFT;break; case 2072:key=SDLK_LCTRL;break;
++      case 2073:key=SDLK_RCTRL;break; case 2045:key=SDLK_LALT;break;
++      case 2046:key=SDLK_RALT;break; case 2043:key=SDLK_COMMA;break;
++      case 2044:key=SDLK_PERIOD;break; case 2057:key=SDLK_MINUS;break;
++      case 2058:key=SDLK_PLUS;break; case 2066:key=SDLK_PLUS;break;
++      case 2068:key=SDLK_PAGEUP;break; case 2069:key=SDLK_PAGEDOWN;break;
++      case 2071:key=SDLK_DELETE;break; case 2081:key=SDLK_HOME;break;
++      case 2082:key=SDLK_END;break; case 2083:key=SDLK_INSERT;break;
++      case 2103:key=SDLK_KP_0;break; case 2113:key=SDLK_KP_DIVIDE;break;
++      case 2114:key=SDLK_KP_MULTIPLY;break; case 2115:key=SDLK_KP_MINUS;break;
++      case 2116:key=SDLK_KP_PLUS;break; case 2117:key=SDLK_KP_PERIOD;break;
++      case 2119:key=SDLK_KP_ENTER;break;
++    }
++    if (key!=SDLK_UNKNOWN) {
++      if (pressed) heldKeys.insert(key); else heldKeys.erase(key);
++      SDL_Event event{}; event.type=pressed?SDL_KEYDOWN:SDL_KEYUP;
++      event.key.state=pressed?SDL_PRESSED:SDL_RELEASED;event.key.keysym.sym=key;
++      event.key.keysym.scancode=SDL_GetScancodeFromKey(key);SDL_PushEvent(&event);
++    }
++    return nullptr;
++}
++napi_value Pointer(napi_env env, napi_callback_info info) {
++    size_t argc=4; napi_value args[4];int32_t action=0,button=0,x=0,y=0;
++    napi_get_cb_info(env,info,&argc,args,nullptr,nullptr);
++    if(argc!=4 || !running)return nullptr;
++    if(napi_get_value_int32(env,args[0],&action)!=napi_ok || napi_get_value_int32(env,args[1],&button)!=napi_ok || napi_get_value_int32(env,args[2],&x)!=napi_ok || napi_get_value_int32(env,args[3],&y)!=napi_ok)return nullptr;
++    SDL_Event event{};
++    if(action==0) {event.type=SDL_MOUSEMOTION;event.motion.x=x;event.motion.y=y;}
++    else {if (action==1) heldButtons.insert(button); else heldButtons.erase(button);
++      event.type=action==1?SDL_MOUSEBUTTONDOWN:SDL_MOUSEBUTTONUP;event.button.button=button;event.button.x=x;event.button.y=y;event.button.state=action==1?SDL_PRESSED:SDL_RELEASED;}
++    SDL_PushEvent(&event);return nullptr;
++}
++napi_value Init(napi_env env, napi_value exports) {
++    napi_property_descriptor methods[] = {
++        {"releaseInput", nullptr, ReleaseInput, nullptr, nullptr, nullptr, napi_default, nullptr},
++        {"key", nullptr, Key, nullptr, nullptr, nullptr, napi_default, nullptr},
++        {"pointer", nullptr, Pointer, nullptr, nullptr, nullptr, napi_default, nullptr},
++        {"start", nullptr, Start, nullptr, nullptr, nullptr, napi_default, nullptr},
++        {"stop", nullptr, Stop, nullptr, nullptr, nullptr, napi_default, nullptr},
++        {"status", nullptr, Status, nullptr, nullptr, nullptr, napi_default, nullptr}
++    };
++    napi_define_properties(env, exports, sizeof(methods) / sizeof(methods[0]), methods);
++    napi_add_env_cleanup_hook(env, [](void *) { stopWorker(); }, nullptr);
++    return exports;
++}
++#ifndef HOST_MODULE_NAME
++#define HOST_MODULE_NAME "boulderhost"
++#endif
++napi_module module = {1, 0, nullptr, Init, HOST_MODULE_NAME, nullptr, {0}};
++}
++extern "C" __attribute__((constructor)) void RegisterBoulderHost() { napi_module_register(&module); }
++
++void HostReport(const std::string &text) { report(text); }
