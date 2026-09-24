@@ -21,18 +21,19 @@
 - 不依赖 `fts(3)`：lr 自带 `opendir/readdir` 遍历，避开了 musl 对 `fts.h` 支持不完整这一常见障碍
 - Linux 代码路径在 OHOS 上真实可用：`sys/xattr.h` 的 `listxattr`/`llistxattr`（`-l`、`%x`）与 `mntent` 的 `scan_filesystems`（`%Y`、`fstype` 过滤器）在 HarmonyOS PC 上实测工作，`%Y` 报告 `hmdfs`
 - 安装：上游 `make install` 会写入 `PREFIX`（默认写死为系统前缀）且依赖 `install(1)`；配方 `package()` 改为直接复制 `bin/lr`、`share/man/man1/lr.1`、`share/zsh/site-functions/_lr` 到包目录，不触碰任何共享系统前缀
-- 上游无测试用例（Makefile 只有 `all/clean/install/FRC` 目标），适配补全 43 条行为回归断言，真实执行安装后的二进制
+- 上游无正式测试用例（Makefile 只有 `all/clean/install/FRC` 目标）；各适配版本通过 test_package 补全真实消费者行为与 HarmonyOS ELF/ABI 专项验证，其中 2.0.1 共执行 36 项检查
 - 与 Linux 的差异：`-l` 的属主/组列显示 OHOS 的 uid/gid 与其名称；HMDFS 不强制 `chmod(2)` 的只读语义，依赖权限拒绝的行为在设备上与 Linux 不同（与 lr 无关）
 
 ## 参考资料
 
-- 上游仓库与 tag 归档：<https://github.com/leahneukirchen/lr>（`v1.5.1`）
-- 手册：包内 `share/man/man1/lr.1`。用法摘要只在未知选项时打印到 stderr 并以 2 退出——上游 1.5.1 没有 `--help`/`--version`，`-h` 是"人类可读大小"开关而非帮助
+- 上游仓库：<https://github.com/leahneukirchen/lr>
+- 手册：各版本包内 `share/man/man1/lr.1`；`-h` 是“人类可读大小”开关而非帮助选项
 - zsh 补全：包内 `share/zsh/site-functions/_lr`
 - 使用说明与 Rosetta stone（`ls`/`find` 对照写法）：上游 `README.md`
 
 ## 版本
 
+- `2.0.1` — 适配 HarmonyOS PC，零源码补丁、仅依赖 libc；test_package 36/36 通过；详见 [2.0.1/notes.md](2.0.1/notes.md)
 - `1.5.1`（2020-01-18）— 适配 HarmonyOS PC（aarch64-linux-ohos / armv8），零补丁、零依赖；详见 [1.5.1/notes.md](1.5.1/notes.md)
 
 ## 产物
