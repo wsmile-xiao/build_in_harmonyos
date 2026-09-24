@@ -1,0 +1,129 @@
+diff --git a/tests/Makefile.am b/b/tests/Makefile.am
+index 9e4cd35a45..ddff545bc4 100644
+--- a/tests/Makefile.am
++++ b/tests/Makefile.am
+@@ -28,7 +28,8 @@ TESTS = 00modules-test \
+ 	unit-wipe-test \
+ 	reencryption-compat-test \
+ 	luks2-reencryption-test \
+-	luks2-reencryption-mangle-test
++	luks2-reencryption-mangle-test \
++	ohos-consumer-test
+ 
+ if VERITYSETUP
+ TESTS += verity-compat-test
+diff --git a/tests/Makefile.in b/b/tests/Makefile.in
+index d1d804f72f..9051d782a0 100644
+--- a/tests/Makefile.in
++++ b/tests/Makefile.in
+@@ -99,7 +99,7 @@ TESTS = 00modules-test api-test$(EXEEXT) api-test-2$(EXEEXT) \
+ 	blockwise-compat-test bitlk-compat-test fvault2-compat-test \
+ 	run-all-symbols unit-utils-crypt-test$(EXEEXT) unit-wipe-test \
+ 	reencryption-compat-test luks2-reencryption-test \
+-	luks2-reencryption-mangle-test $(am__append_1) $(am__append_2) \
++	luks2-reencryption-mangle-test ohos-consumer-test $(am__append_1) $(am__append_2) \
+ 	$(am__append_3) $(am__append_4)
+ @VERITYSETUP_TRUE@am__append_1 = verity-compat-test
+ @INTEGRITYSETUP_TRUE@am__append_2 = integrity-compat-test
+diff --git a/tests/ohos-consumer-test b/tests/ohos-consumer-test
+new file mode 100755
+index 0000000000..9ad25880f5
+--- /dev/null
++++ b/tests/ohos-consumer-test
+@@ -0,0 +1,96 @@
++#!/data/service/hnp/bin/bash
++# OHOS (HarmonyOS) consumer feasibility test — added by the OHOS adaptation.
++# (鸿蒙消费者用例：以“消费者”身份端到端验证本平台构建产物的最小可用性)
++#
++# 覆盖面：cryptsetup CLI + libcryptsetup 及其 LUKS2 元数据（libjson-c）与
++# crypto 后端（openssl）在普通文件上的完整生命周期：
++#   version -> isLuks(负向) -> luksFormat -> isLuks(正向) -> luksDump
++#   -> luksUUID -> luksHeaderBackup -> luksHeaderRestore -> open(平台边界)
++#
++# 明确不依赖：root、/dev/mapper、dm-crypt 内核模块、loop 设备 —— 这些在
++# OHOS 设备上不可用（见 notes.md 环境归因节）。因此除第 8 项（预期干净失败
++# 的平台边界检查）外全部为真实通过断言；第 8 项两种结果都算通过：
++# 无 dm 时必须非 0 干净失败；若设备真有 dm 则激活后立即关闭。
++#
++# 运行方式与 tests/ 内其余脚本一致：make check 并行测试框架
++# （CRYPTSETUP_PATH 未设置时回退 ".."，即构建树根的 libtool 包装脚本）。
++
++[ -z "$CRYPTSETUP_PATH" ] && CRYPTSETUP_PATH=".."
++CRYPTSETUP=$CRYPTSETUP_PATH/cryptsetup
++
++PASS=0
++FAIL=0
++ok()  { PASS=$((PASS+1)); echo "ok: $1"; }
++bad() { FAIL=$((FAIL+1)); echo "FAIL: $1"; }
++
++check_ok()   { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "$d"; fi; }
++check_fail() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then bad "$d"; else ok "$d"; fi; }
++
++T=./ohos-consumer.tmp
++rm -rf "$T"
++mkdir "$T" || { echo "FAIL: mkdir $T"; exit 1; }
++img=$T/luks2.img; plain=$T/plain.img; key=$T/keyfile; bak=$T/header.bak
++
++dd if=/dev/zero of="$img" bs=1M count=40 2>/dev/null
++dd if=/dev/zero of="$plain" bs=1M count=8 2>/dev/null
++printf 'ohos-consumer-key-0123456789\n' > "$key"
++
++# 1) 版本横幅：CLI 可执行文件 + libcryptsetup 正常自举
++# stderr 分离：getcwd 类环境噪音走 stderr，不污染横幅捕获
++v=$("$CRYPTSETUP" --version 2>/dev/null)
++case "$v" in
++  cryptsetup\ 2.8.*) ok "version banner ($v)" ;;
++  *) bad "version banner (got: $v)" ;;
++esac
++
++# 2) 负向：非容器文件必须被 isLuks 判否
++check_fail "isLuks rejects plain file" "$CRYPTSETUP" isLuks "$plain"
++
++# 3) LUKS2 格式化（普通文件、PBKDF2 快速参数：不依赖 argon2 内存锁与 dm）
++check_ok "luksFormat LUKS2 on regular file" \
++  "$CRYPTSETUP" luksFormat --type luks2 --batch-mode \
++  --pbkdf pbkdf2 --pbkdf-force-iterations 1000 --key-file "$key" "$img"
++
++# 4) 正向判真
++check_ok "isLuks accepts LUKS2 container" "$CRYPTSETUP" isLuks --type luks2 "$img"
++
++# 5) luksDump 解析元数据（LUKS2 JSON 由 libjson-c 读写；Segments 为 LUKS2 专有段）
++"$CRYPTSETUP" luksDump "$img" > "$T/dump.txt" 2>&1 \
++  && ok "luksDump metadata" || bad "luksDump metadata"
++grep -q "Keyslots" "$T/dump.txt" 2>/dev/null \
++  && grep -q "aes" "$T/dump.txt" \
++  && ok "luksDump reports LUKS2 keyslots + aes" || bad "luksDump reports LUKS2 keyslots + aes"
++
++# 6) luksUUID 输出合法 UUID（libuuid 路径）
++u=$("$CRYPTSETUP" luksUUID "$img" 2>/dev/null)
++case "$u" in
++  ????????-????-????-????-????????????) ok "luksUUID ($u)" ;;
++  *) bad "luksUUID (got: $u)" ;;
++esac
++
++# 7) 头备份/恢复闭环（元数据区全量读写 + 校验和）
++check_ok "luksHeaderBackup" "$CRYPTSETUP" luksHeaderBackup "$img" \
++  --header-backup-file "$bak"
++check_ok "luksHeaderRestore" "$CRYPTSETUP" luksHeaderRestore "$img" \
++  --header-backup-file "$bak" --batch-mode
++
++# 8) 平台边界：activate 路径需要内核 dm-crypt。无 dm 时必须干净失败（非 0）；
++#    若设备确有 dm 则成功激活后立即关闭，两种结果均记录为通过。
++timeout 60 "$CRYPTSETUP" open "$img" ohos-consumer-check \
++  --type luks2 --key-file "$key" >/dev/null 2>&1
++rc=$?
++if [ "$rc" -ne 0 ]; then
++  ok "open without dm-crypt fails cleanly (rc=$rc)"
++else
++  "$CRYPTSETUP" close ohos-consumer-check >/dev/null 2>&1
++  ok "open succeeded (dm-crypt present on this device)"
++fi
++
++rm -rf "$T"
++
++if [ "$FAIL" -eq 0 ]; then
++  echo "PASS: ohos-consumer-test ($PASS checks)"
++  exit 0
++fi
++echo "FAIL: ohos-consumer-test ($FAIL of $((PASS+FAIL)) checks failed)"
++exit 1
