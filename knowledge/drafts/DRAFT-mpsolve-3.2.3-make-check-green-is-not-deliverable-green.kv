@@ -1,0 +1,122 @@
+# ═══ Draft knowledge entry — autotools `make check` 退出 0 既不代表用例都跑了、也不代表交付物可用：check 套件只链构建树内的私有库，安装出来的 CLI 零覆盖 ═══
+# Timestamp: 2026-09-20
+# Software: mpsolve 3.2.3
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-mpsolve-3.2.3-make-check-green-is-not-deliverable-green
+trigger_tool:           make|automake|check|conan|clang
+phase:                  build|test|run
+error_signature:        make check.*exit 0|# SKIP:  [1-9]|# PASS:  0|# TOTAL:  0|
+                         test-suite.log|lib.*private\.la|--version.*usage|
+                         Usage:.*options|installed binary never executed by tests
+severity:               3
+category:               test-harness|false-pass|coverage-gap|cli-contract|
+                         reverse-verification
+match_keywords:         make check exit 0, automake parallel test harness,
+                         test-suite.log, # TOTAL / # PASS / # SKIP / # XPASS,
+                         check_PROGRAMS, TESTS, libmpsprivate.la, convenience
+                         library, private static library, installed CLI untested,
+                         bin/mpsolve, -v vs --version, usage branch, output format
+                         knob, -O f, -o digits, reverse verification, vacuous
+                         assertion
+title:                  `make check` 全绿 ≠ 交付物可用：autotools 的 check 程序
+                         常只链构建树内的**私有库**，安装出来的 CLI 在上游测试里
+                         零覆盖；而 automake 并行测试框架把 SKIP 计入 TOTAL，
+                         退出码 0 可能意味着大半用例被跳过
+
+root_cause: >
+  两个独立的"证据不足"叠在一起。 (a) **覆盖率缺口**：`src/tests/Makefile.am` 的
+  16 个 `check_PROGRAMS` **全部** `LDADD = ${top_builddir}/src/libmps/
+  libmpsprivate.la` —— 一个构建树内的 convenience/private 库，不安装、不对消费者
+  暴露。于是上游测试测的是 `libmps` 的内部 C API，而**交付物**（安装树里的
+  `bin/mpsolve` CLI + 安装出来的 `libmps.so`）**一条测试都没有**：版本握手、输入
+  格式解析、输出格式旋钮、以及在无桌面栈/无 tty/只读临时目录下能否跑，上游全无
+  覆盖。 (b) **汇总口径**：automake 的并行测试框架把 `SKIP` 计入 `TOTAL`，`make
+  check` 在"16 个程序里 10 个 SKIP"时照样退出 0；只吃退出码就把"只跑了 6/16"
+  当全绿。（同类机制还有 check(3) 自己的 `SKIP` 关键字、Catch2 的 `SKIP(...)`、
+  gtest 的 `GTEST_SKIP()`。）
+affected_scope: >
+  所有 autotools + `make check` 的库；所有把测试程序 link 到构建树内
+  convenience/private 库（`libfoo.la` / `libfoo-internal.la` / `libfooprivate.la`）
+  的上游；以及所有以 `exit 0` 表达"跳过"的测试框架。特别地，任何"上游只提供库、
+  但交付物是 CLI"的包——上游 check 越绿，越容易让人误以为 CLI 已被验证。
+verification_cmd: >
+  sed -n '/check_PROGRAMS/,/^TESTS/p' src/tests/Makefile.am         # 数程序条数
+  grep -n 'lib.*private\.la\|lib.*-internal\.la' src/tests/Makefile.am   # 是否只链私有库
+  grep -rn 'START_TEST' src/tests/*.c src/tests/*.cpp | wc -l      # 用例级朴素扫描
+  sed -n '/^# TOTAL/,/^# ERROR/p' src/tests/test-suite.log         # 汇总块（不要看退出码）
+  grep -n 'tcase_add_test' src/tests/*.c src/tests/*.cpp | wc -l   # 真正注册进 Suite 的条数
+rec_priority:           1
+rec_approach:           read-back-the-suite-summary-and-test-the-installed-binary
+rec_description: >
+  两层防御，缺一层就会假通过。 (a) **不要吃 `make check` 的退出码**：在
+  `build()` 里跑完上游套件后**回读** `src/tests/test-suite.log` 的 automake 汇总块
+  并硬校验——`FAIL`/`ERROR`/`SKIP`/`XPASS` 任一非零即抛异常，`TOTAL` 取不到或
+  `TOTAL < <Makefile.am 里 check_PROGRAMS 的条数>` 同样抛异常。条数要**从上游
+  Makefile.am 数出来**并钉死在配方里（本包 16），否则"有测试被静默跳过"这个
+  恰恰要防的场景不会被发现。 (b) **把安装树里的可执行文件当被测对象**：在
+  `test_package` 里 `self.run()` 真实执行 `<prefix>/bin/<cli>`，断言可观察行为。
+  (c) 凡"旋钮生效"型断言，**配一条反向验证**——先证"默认值不满足正向断言"，
+  否则正向断言可能是永真的（本包：默认输出既无 16 位以上有效数字也无 `Status:`
+  行，然后才断言 `-O f` 两者都有）。 (d) CI 只保留约 4000 字符的日志**尾部**，
+  所以 `make check` 失败时要**主动**把 `test-suite.log` 尾部打成 error 再抛出。
+rec_command: >
+  # build() 内：
+  self.run(f"{env_prefix} make -C src check -j1", cwd=sf, env="conanbuild")
+  summary = _parse_suite_summary(open("src/tests/test-suite.log").read())
+  bad = {k: summary.get(k, 0) for k in ("FAIL","ERROR","SKIP","XPASS") if summary.get(k, 0)}
+  if bad: raise ConanException(...)                     # 不吃退出码
+  if summary["TOTAL"] < MIN_UPSTREAM_TESTS: raise       # 16，从 Makefile.am 数出来
+  # test_package 内：真实执行安装出来的 CLI
+  self.run(f'sh smoke_mpsolve.sh "{pkg.package_folder}/bin/mpsolve"', env="conanrun")
+  # 反向验证（在正向断言之前）：
+  #   grep -qE '\(0\.1414213562373095' out.txt && fail "…正向断言可能是永真的"
+rec_auto_fix:           true
+rec_impl:               recipe-side-hard-assertion-plus-consumer-test
+
+fallback_priority:      2
+fallback_approach:      declare-the-coverage-gap-explicitly-instead-of-testing-it
+fallback_description: >
+  若包确实无法在 test_package 里执行二进制（纯头文件库、或交付物是数据文件），
+  退而求其次：在 body 与 `test_package/MANIFEST.yml` 里**如实声明**
+  "上游 N 条用例中，哪些属于未注册/未执行"，并把 `make check` 的汇总块原文贴出
+  来。声明不能替代验证，但至少不会把"退出码 0"包装成"全绿"。
+fallback_command:       sed -n '/^# TOTAL/,/^# ERROR/p' src/tests/test-suite.log
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       只看 make check.*退出码.*断言.*全绿|if .*make check.*rc=0|
+                         以 `make check` 返回 0 作为"上游测试通过"的唯一依据
+forbid_1_reason:        automake 并行测试框架把 SKIP 计入 TOTAL，退出 0 与
+                         "16 个程序都真跑了"不等价。
+forbid_1_consequence:   把"只跑了 2/16"当成"16/16 全绿"，上游回归套件价值归零。
+forbid_2_pattern:       为让套件"通过"而删掉/过滤失败用例|--gtest_filter=-
+                         SKIP_TESTS|把断言降级成告警
+forbid_2_reason:        适配的目标是让库在 OHOS 上跑对，不是让报表好看；
+                         被摘掉的用例往往正是暴露平台问题的那些。
+forbid_2_consequence:   伪造通过率，评审 rule 判不实；真实回归被永久掩盖。
+forbid_3_pattern:       grep .*bin/mpsolve.*断言|对二进制做 grep 代替运行时断言
+forbid_3_reason:        OHOS 上"符号/字符串在不在"与"运行期能不能跑起来"是两件
+                         事；交付物的核心命题是后者，只有真实运行才能证。
+forbid_3_consequence:   拿到静态证据却宣称验证了运行时行为，属于伪证。
+
+principles:             P-BUILD-001
+similar_to:             DRAFT-box2d-2.4.1-ctest-empty-suite-false-pass|
+                         DRAFT-openxr-1.1.63-harmonyos-must-join-linux-branch-and-runtime-negotiation-proof|
+                         E265
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-mpsolve-3.2.3-make-check-green-is-not-deliverable-green.md
+last_updated:           2026-09-20
+source_event:           archives/m/mpsolve/3.2.3
+
+authors:                2301_76770579
+source_pr:              11507
+source_commit:          9313486462
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20

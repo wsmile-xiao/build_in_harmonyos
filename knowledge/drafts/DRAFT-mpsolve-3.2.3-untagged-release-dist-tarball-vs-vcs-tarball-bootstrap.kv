@@ -1,0 +1,143 @@
+# ═══ Draft knowledge entry — 上游版本没有 VCS tag 时的权威发布物定位；以及「归档形态」（dist tarball vs VCS snapshot）如何决定整层构建引导 ═══
+# Timestamp: 2026-09-20
+# Software: mpsolve 3.2.3
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-mpsolve-3.2.3-untagged-release-dist-tarball-vs-vcs-tarball-bootstrap
+trigger_tool:           curl|tar|autoconf|automake|conan|patch
+phase:                  configure|build
+error_signature:        refs/tags/.*\.tar\.gz.*404|configure: No such file or
+                         directory|aclocal.*command not found|pkg\.m4.*not
+                         found|PKG_CHECK_MODULES.*syntax error|patch does not
+                         apply|Hunk #1 FAILED
+severity:               3
+category:               source-provenance|release-tarball-shape|build-bootstrap|
+                         patch-rot
+match_keywords:         上游无 tag, make dist tarball, orig.tar.bz2, 自带 configure,
+                         generated configure, Makefile.in, aclocal.m4, autoreconf -fi,
+                         ACLOCAL_PATH, pkg.m4, VCS snapshot, github archive tarball,
+                         patch 不 apply, register keyword, C++17, strip_root,
+                         Debian orig tarball, sha256 交叉验证
+title:                  上游版本没有 VCS tag 时，先定位权威发布物、再按**发布物形态**
+                         （dist tarball vs VCS snapshot）推导构建引导链；
+                        并警惕「上一版归档的补丁清单」在新版上已经失效
+
+root_cause: >
+  两件事被混为一谈：「源码版本」与「源码归档形态」。 (a) 上游并非每个发布版本都
+  打 VCS tag——MPSolve 最新 tag 停在 3.2.1，3.2.3 只以项目页上的 `make dist`
+  产物 `mpsolve-3.2.3.tar.bz2` 发布（Debian 的 `mpsolve_3.2.3.orig.tar.bz2`
+  即取自它）。此时 `https://github.com/<org>/<repo>/archive/refs/tags/<ver>.tar.gz`
+  是 404，但版本**确实存在**。(b) 更关键的是：同一版本的两种归档，**形态不同**，
+  差着一整层构建引导。VCS snapshot（GitHub `archive/...tar.gz`）只有
+  `configure.ac`/`Makefile.am`，需要 `autoreconf -fi` + autoconf/automake/libtool
+  的 tool_requires，还要在 OHOS 上为「禁 shebang exec」把 autotools 脚本包成 ELF
+  启动器；而 `make dist` tarball **自带生成好的 `configure`/`Makefile.in`/
+  `aclocal.m4`**，这一整层代价凭空消失。把后者当前者处理，会白写一整套引导与
+  tool_requires。
+affected_scope: >
+  所有"最新版本没有对应 VCS tag"的上游（项目页发布物 / GNU ftp / Debian orig
+  tarball 是唯一权威来源），以及所有由 autotools 驱动、且发布物可能是 dist
+  tarball 的库。反向也成立：从 chroot/发行版包里抓到的 `configure` 版本与
+  VCS snapshot 需要的 autoreconf 生态版本可能对不上。
+verification_cmd: >
+  curl -sI https://github.com/<org>/<repo>/archive/refs/tags/<ver>.tar.gz   # 404 ⇒ 无 tag
+  tar tjf <tarball> | grep -E '/(configure|Makefile\.in|aclocal\.m4)$'      # 有 ⇒ dist tarball
+  tar tjf <tarball> | grep -E '/(configure\.ac|Makefile\.am)$'              # 只有这些 ⇒ VCS snapshot
+  sha256sum <项目页发布物> ; # 与 Debian orig.tar.* 比 ⇒ 交叉验证权威性
+rec_priority:           1
+rec_approach:           pin-the-dist-tarball-and-derive-bootstrap-from-its-shape
+rec_description: >
+  三步：(a) **先判定"有无 tag"，再判定"发布物在哪"**——`curl -sI` 打 tag 归档
+  URL，404 就去看项目页/GNU ftp，并用 Debian 的 `<pkg>_<ver>.orig.tar.*` 的
+  sha256 做**交叉验证**（两边一致才敢认定是同一发布物）。(b) **用一条命令判定
+  归档形态**：`tar tjf <tarball> | grep -E '/(configure|Makefile\.in|aclocal\.m4)$'`
+  —— 命中 ⇒ dist tarball，配方里**不要**有 autoreconf、**不要** autoconf/automake/
+  libtool 的 tool_requires、**不要**为它们准备 OHOS ELF 启动器；只有
+  `configure.ac` ⇒ VCS snapshot，那套引导才必须写。(c) **每换一个版本，旧归档的
+  补丁清单必须重新验证**：逐条 `patch --dry-run`，能 apply 的才是真的还需要。
+  本包实测：3.2.1 的 `0001-mps-mpc-register-keyword.patch`（`register` 关键字在
+  C++17 被移除）到 3.2.3 已被上游自行修复，照搬必然 `Hunk #1 FAILED`，该条清空。
+  **但"上一版的补丁失效"推不出"本版不需要任何补丁"**：本版仍必须补上**平台适配**
+  补丁（config.guess / config.sub 的 HarmonyOS 三元组，见
+  DRAFT-mpsolve-3.2.3-config-sub-ohos-kernel-hunk-and-no-build-host-bypass）。
+  口径很简单：**上游 bug 补丁**会被上游自己修掉（会腐烂，每版都要 dry-run 重验）；
+  **平台适配补丁**上游永远不会修（必须每版都在场）。
+rec_command: >
+  conandata.yml:
+    sources:
+      url: "https://<project-page>/mpsolve-3.2.3.tar.bz2"     # 官方原始 URL，不追加镜像前缀
+      sha256: "<与 Debian orig.tar.bz2 一致的 sha256>"
+    patches:                                                 # 清掉已腐烂的上游 bug 补丁，
+      - patch_file: "patches/0001-config.guess-ohos.patch"   # 换上永不过期的平台适配补丁
+        patch_type: "portability"
+      - patch_file: "patches/0002-config.sub-ohos.patch"
+        patch_type: "portability"
+  conanfile.py（与 VCS snapshot 版相比，减法）：
+    # 无 build_requirements / 无 tool_requires("autoconf") 等
+    # 无 ACLOCAL_PATH 注入 pkg.m4
+    # 无 OHOS ELF 启动器
+    self.run(f"{SHELL_FIX} sh ./configure {cfg_args}", cwd=sf, env="conanbuild")
+rec_auto_fix:           true
+rec_impl:               recipe-side-source-selection
+
+fallback_priority:      2
+fallback_approach:      bootstrap-from-the-vcs-snapshot-instead
+fallback_description: >
+  若确实拿不到 dist tarball（例如只允许钉 commit），就退回 VCS snapshot 并把引导
+  层补全：tool_requires 钉精确版本的 autoconf/automake/libtool，`autoreconf -fi`
+  前把 ACLOCAL_PATH 指向 pkg-config 的 share/aclocal（否则 pkg.m4 缺失会让
+  PKG_CHECK_MODULES 展开成语法错误），并在 OHOS 上把 autotools 脚本包成 ELF
+  启动器（本域禁 shebang exec）。代价是配方复杂度与跨 worker 抖动面都显著变大。
+  注意：此时 sha256 钉的是 snapshot 归档，与 dist tarball 不是同一个值，
+  不能互相替换。
+fallback_command:       vcs-snapshot URL（archive/<sha>.tar.gz）+ tool_requires(autoconf/automake/libtool) + ACLOCAL_PATH
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       照搬上一版归档的补丁清单.*不逐条验证|沿用 3\.2\.1 的
+                         patches 目录
+forbid_1_reason:        补丁是"针对某份源码快照"的，上游在新版里修掉同一个问题后
+                         patch 必然 apply 失败；本包 0001 就是活例。
+forbid_1_consequence:   CI 在 source/patch 阶段直接失败，白跑一轮。
+forbid_2_pattern:       用 GitHub master/main 的 archive 冒充发布版本|手改
+                         sha256 让下载通过
+forbid_2_reason:        master 是流动快照，不是发布物；改 sha256 等于放弃完整性
+                         校验，把"源码来源可追溯"这条底线丢掉。
+forbid_2_consequence:   制品与声明的上游版本不一致且无从发现；评审按 rule 判
+                         提交不实。
+forbid_3_pattern:       因为 tarball 自带 configure.*仍跑 autoreconf
+forbid_3_reason:        dist tarball 的 configure 是 autoconf 用**它当时的**
+                         版本生成的，用本机 autoreconf 重生成会引入版本漂移
+                         （autoconf 2.69/2.71 生成的 configure 行为不同），
+                         纯属自找麻烦。
+forbid_3_consequence:   把一个本来"零引导"的构建变回"重引导"，且可能触发新的
+                         版本兼容问题。
+forbid_4_pattern:       "旧补丁 apply 失败"就宣布本版 patches 清空\s*不需要任何
+                         补丁|dist tarball 自带 configure.*所以连平台补丁也不用打
+forbid_4_reason:        "自带 configure"只说明省掉了 autoreconf 引导层，不说明
+                         这份 configure 认识鸿蒙——它的 config.guess/config.sub
+                         连同年代的 autoconf 一起冻结，永远不认识 linux-ohos。
+                         腐烂的是上游 bug 补丁，平台适配补丁每一版都必须在场。
+forbid_4_consequence:   CI 在 configure 阶段被 config.sub 拒收三元组（本包
+                         build #53927），并且很容易被误判成"这个包不适配鸿蒙"。
+
+principles:             P-BUILD-001
+similar_to:             DRAFT-ondir-0.2.4-official-tarball-homebrew-sha256-crosscheck|
+                         DRAFT-openxr-1.1.63-harmonyos-must-join-linux-branch-and-runtime-negotiation-proof|
+                         DRAFT-mpsolve-3.2.3-config-sub-ohos-kernel-hunk-and-no-build-host-bypass
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-mpsolve-3.2.3-untagged-release-dist-tarball-vs-vcs-tarball-bootstrap.md
+last_updated:           2026-09-20
+source_event:           archives/m/mpsolve/3.2.3
+
+authors:                2301_76770579
+source_pr:              11507
+source_commit:          9313486462
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20
