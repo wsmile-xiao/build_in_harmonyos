@@ -1,0 +1,62 @@
+# ═══ Draft knowledge entry — LV2 插件宿主契约：features 必须是 NULL 结尾数组，
+# 控制端口必须全连接，否则 instantiate/run 段错误（Signal 11 / exit 139）
+# Software: mda-lv2 1.2.12（适用于一切 lvz 包装的 LV2 插件及手写宿主探针）
+# Gate: conan-verify G2 (conan create, ohos-aarch64) + test_package 三级全过
+# Status: DRAFT
+
+id: mda-lv2-1.2.12-lv2-host-contract-features-null-array
+severity: 3
+category: runtime|lv2|host-contract|portability
+trigger_tool: dlopen|ctest|meson test
+phase: consume|test
+
+keywords: LV2, lv2_descriptor, lvz_instantiate, features, NULL terminated, connect_port, control_buffers, Signal 11, exit 139
+error_signature: Signal 11 \(core dumped\)|exit_code=139|SIGSEGV.*lvz_instantiate|instantiate.*Segmentation fault
+match_keywords: LV2, lv2, lvz, instantiate, features, NULL, dlopen, connect_port, Signal 11, 139, plugin host, bundle
+
+root_cause: |
+  LV2 规范约定宿主向 instantiate() 传"NULL 结尾的 LV2_Feature 指针数组"，
+  即"无 feature"也必须传 `{NULL}`（长度 1 的数组），而不是裸 NULL 指针。
+  mda-lv2 的 lvz 包装层（lvz/wrapper.cpp:100）不做防御：
+      for (int i = 0; features[i]; ++i) {
+  features==NULL 时第一次取 features[0] 即解引用 NULL → SIGSEGV（Signal 11，
+  exit 139），崩溃点在插件 .so 内、宿主栈里，极易被误判为"插件在 OHOS 上
+  无法运行"。同文件 lvz_run()（wrapper.cpp:150 附近）还会解引用全部
+  control_buffers[i][0]，因此 run() 前必须把所有控制端口 connect_port 到
+  有效 float 缓冲，漏连同样 Signal 11。真实复现（OHOS aarch64 本机）：
+  - tnull.c 传 NULL → `URI=...` 打印后 Signal 11 (core dumped)，EXIT=139
+  - tload.c 传 `{NULL}` + 8 控制/2 进/2 出全连接 → instantiate+run 480 帧
+    +cleanup 全生命周期 OK，RMS 正常输出
+  合规宿主（JALV/Carla）按规范传数组不受影响；此坑只打击手写加载代码、
+  test_package 探针和 CI 集成测试。
+
+rec_approach: pass a NULL-terminated (possibly empty) features array and connect every control port before run
+rec_description: |
+  任何在 OHOS 上做 LV2 插件发现/加载验证的代码（test_package、集成探针、
+  宿主移植）都要遵守两条最小宿主契约：
+  (1) instantiate 的 features 参数恒为 NULL 结尾数组——空 feature 集合写
+      `const LV2_Feature* feats[1] = { NULL };` 再传 feats，绝不传 NULL。
+      （LV2 头文件极小，探针可自 typedef 最小 LV2_Descriptor/LV2_Feature
+      复刻，不依赖 conan 的 lv2 包也能验证。）
+  (2) run() 前用 lv2_descriptor()->connect_port 把全部控制端口接到有效
+      float 缓冲（lvz 系包装层 run 时逐个解引用 control_buffers[i][0]，
+      漏连即崩）；音频输入/输出端口同样要有缓冲。
+  端口数不必解析 TTL：按 bundle 内 <Plugin>.ttl 的端口声明数（mda-lv2
+  最大 27 = JX10）取上界扫描 connect_port 即可；atom/event 类槽位对 lvz
+  包装层只触发 setEventInput 存储不被读取，传普通 float 缓冲无害。
+
+rec_commands:
+  - "./tnull <bundle>   # 反例：features=NULL → Signal 11, EXIT=139（复现用）"
+  - "./tload <bundle>   # 正例：feats={NULL}+全端口连接 → 全生命周期 OK"
+
+verification: |
+  OHOS aarch64 本机（clang 15.0.4）双探针对同一 TestTone.so 实测：
+  features=NULL → Signal 11 (core dumped), exit 139；features={NULL} 空数组
+  + 全端口连接 → instantiate+run(480)+cleanup 正常返回。conan create
+  （ohos-aarch64）的 test_package 以 NULL 结尾数组加载全部 36 个插件
+  dlopen+instantiate+run+cleanup 全过。
+
+related:
+  - archives/m/mda-lv2/1.2.12/notes.md (问题表 #3)
+  - archives/m/mda-lv2/1.2.12/test_package/src/test_mda_lv2.c (合规宿主探针实现)
+last_updated: 2026-09-21
