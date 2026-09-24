@@ -1,0 +1,86 @@
+id:                     E647-draft-libplist-2.6-dict-uint-api-backport-static-inline
+title:                  libplist 生态锁 2.3.0 而上游用 2.6+ 的 plist_dict_get_uint/copy_uint 时，逐字 backport static inline 并用 conanfile 版本探测门控
+trigger_tool:           ld|clang
+phase:                  linking|compilation
+error_signature:        undefined symbol.*plist_dict_get_uint|undefined symbol.*plist_dict_copy_uint|undeclared identifier 'PLIST_OPT_NONE'|plist_dict_get_uint.*undefined
+severity:               2
+category:               linking, portability, dependency, autotools
+match_keywords:         libplist, plist_dict_get_uint, plist_dict_copy_uint, PLIST_OPT_NONE,
+                        libimobiledevice, ideviceimagemounter, afcclient, idevicecrashreport,
+                        idevicebackup2, backport, static inline, undefined symbol, 2.6.0,
+                        2.3.0, plist_dict_compat
+root_cause:             libplist 2.6.0 新增 plist_dict_get_uint/plist_dict_copy_uint 等 dict
+                        helper 与 PLIST_OPT_NONE 枚举值。OHOS 制品仓整个 libimobiledevice
+                        家族（libimobiledevice/1.3.0、libimobiledevice-glue/1.3.0、
+                        libtatsu/1.0.5）都直接 require libplist/2.3.0，依赖图锁定该版本；
+                        上游 1.4.0 的工具源码（afcclient/idevicebackup2/idevicecrashreport/
+                        ideviceimagemounter）已改用新 API，链接期报 undefined symbol，
+                        编译期报 undeclared identifier 'PLIST_OPT_NONE'。
+affected_scope:         所有调用 libplist 2.6+/2.7.0 API 的 libimobiledevice 家族包与任何
+                        require libplist 的包；症状为工具链接 undefined symbol 或编译
+                        undeclared identifier
+verification_cmd:       |
+  # 调用面全集（在被测源码树根执行，勿截断 head——漏一个文件就再红一轮）
+  grep -rln "plist_dict_get_uint\|plist_dict_copy_uint" tools/ common/ src/
+  # libplist 2.3.0 头里是否已有这些 API（输出 0 = 无此 API，需 backport）
+  conan list "libplist/2.3.0:*"
+  conan cache path "libplist/2.3.0:<package_id>"   # 记为 <pkgdir>
+  grep -c "plist_dict_get_uint\|plist_dict_copy_uint" <pkgdir>/p/include/plist/plist.h
+  # 修复后自含性：NEEDED 不应出现 libplist
+  readelf -d <package>/bin/ideviceinfo | grep NEEDED
+rec_priority:           1
+rec_approach:           static-inline-backport-conanfile-gated
+rec_description:        把上游 2.6.0 的 plist_dict_get_uint/plist_dict_copy_uint 实现逐字
+                        backport 成 static inline 头（tools/plist_dict_compat.h），4 个
+                        调用文件在 plist/plist.h 后条件 include；门控宏不 patch configure
+                        （4 万行生成物 hunk 脆），由 conanfile generate() 读
+                        self.dependencies["libplist"].ref.version，Version(...) < "2.6.0"
+                        时 Environment().append("CPPFLAGS", "-DLIBPLIST_LT_2_6=1")
+                        （AutotoolsToolchain 没有 extra_cppflags 属性）。上游源码用
+                        plist_new_unix_date（2.7.0 API）无需处理——configure 有
+                        HAVE_PLIST_UNIX_DATE 探测，失败自动走 plist_set_date_val。
+rec_command:            |
+  # conanfile.py generate()
+  from conan.tools.scm import Version
+  plist_version = str(self.dependencies["libplist"].ref.version)
+  if Version(plist_version) < "2.6.0":
+      env.append("CPPFLAGS", "-DLIBPLIST_LT_2_6=1")
+rec_auto_fix:           false
+rec_impl:               static-inline-backport-conanfile-gated
+fallback_priority:      2
+fallback_approach:      pin-libplist-2.7.0-override
+fallback_description:   若依赖图允许统一升版，requires libplist/2.7.0（registry 已有）。
+                        仅当全家族不再锁 2.3.0 时可用；glue/tatsu 仍直接 require 2.3.0
+                        时会版本冲突，conan2 下需 override 且未经验证，不作首选
+fallback_command:       |
+  self.requires("libplist/2.7.0")   # 需全家族一致，否则 conan 版本冲突
+fallback_auto_fix:      false
+fallback_impl:          pin-libplist-2.7.0-override
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern:       grep -rln.*plist_dict_get_uint.*\|\s*head
+forbid_1_reason:        枚举调用面时用 head 截断会漏文件（libimobiledevice-progs 1.4.0
+                        实测：head 截断漏掉 idevicebackup2.c，补一个文件就再红一轮）；
+                        必须全量 grep -rln 后逐文件处理
+forbid_1_consequence:   链接在下一个工具处再次失败，每轮只前进一个文件，浪费构建轮次
+forbid_2_pattern:       patch configure.*PKG_CHECK_MODULES|LIBPLIST_VERSION=2\.3\.0
+forbid_2_reason:        不要去 patch 4 万行的生成版 configure 来降版本门槛或注入宏——
+                        hunk 上下文脆弱且随上游 reconfigure 漂移；版本探测在
+                        conanfile 侧用 Version() 比较依赖 ref 更稳（同族 libtatsu
+                        1.0.5 用 configure patch 属历史形态，可迁移）
+forbid_2_consequence:   patch 应用失败或对官方 tarball 的 configure 上下文漂移
+principles:             P014
+similar_to:             []
+conflicts_with:         []
+causes:                 []
+caused_by:              []
+prerequisite_of:        []
+doc_file:               knowledge/drafts/E647-draft-libplist-2.6-dict-uint-api-backport-static-inline.md
+source_event:           |
+  libimobiledevice-progs 1.4.0 适配（feat/libimobiledevice-progs-1.4.0,
+  2026-09-21）：工具链接报 undefined symbol（plist_dict_get_uint，
+  ideviceimagemounter 先红，修 3 文件后 idevicebackup2 再红），
+  afcclient 编译报 undeclared identifier 'PLIST_OPT_NONE'；
+  backport + 门控后 conan create 通过，21 工具打包，
+  NEEDED 仅 libcurl.so/libc.so。
+last_updated:           2026-09-21
