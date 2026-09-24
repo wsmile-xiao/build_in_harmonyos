@@ -1,0 +1,119 @@
+#====================================================================
+# Draft knowledge entry — 纯 Zsh 生态包在 lang-preflight 中零覆盖
+# 来源: zgen 0-20150919 适配（feat/zgen-0-20150919）
+# 单位: 可跨库复用（一类问题）——影响全部 zsh 插件/插件管理器/补全包
+# 配对人类文档: knowledge/drafts/E543-draft-27D5.md
+# 待办: 评审通过后 rename 为 E###.kv 移入 knowledge/graph/ 并补 index.tsv 行
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E543-draft-27D5
+trigger_tool:           ohc-run.py lang-preflight
+phase:                  preflight
+error_signature:        detected_language[\"']?: *[\"']?other|无源文件可统计|无可统计源文件|语言不匹配: task=(cpp|c|bash), detected=other
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               lang-preflight, shell, packaging, false-positive, ohos
+prescan_pattern:        ^#!/bin/zsh
+prescan_globs:          *.zsh, *.zsh-theme, _*, *.plugin.zsh
+match_keywords:         lang-preflight, lang_detect, detected_language, other, 无源文件可统计,
+                        zsh, .zsh, zsh plugin, zsh 插件, plugin manager, 补全函数, compdef,
+                        site-functions, env_unsupported, 纯脚本包, zgen, zinit, zimfw
+title:                  纯 Zsh 项目（.zsh + 无扩展名补全函数）被 lang-preflight 判为 other 且“无源文件可统计”，
+                        默认 --lang cpp 下会直接写 env_unsupported 终态，把本可适配的 zsh 生态包挡在门外
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             lang_detect.py 对 zsh 生态零覆盖，三级判定全部落空：
+                        ① _EXT_LANG 只映射 .sh/.bash→bash，没有 .zsh/.zsh-theme/.plugin.zsh，
+                           zsh 插件的主体文件因此不进统计；
+                        ② zsh 补全函数按约定命名为 _<命令>（如 _zgen）、无扩展名，同样统计不到；
+                        ③ 这类包没有 manifest、没有任何构建系统（无 Makefile/CMakeLists/meson.build），
+                           manifest 与 build_system 两级判据同时为空。
+                        三者叠加 → detected_language=other、source_stats=“无源文件可统计”。
+                        协议 §4.6 语言枚举也没有 zsh 值：bash ≠ zsh（zsh 专有语法如 typeset -f、
+                        emulate -L zsh、#compdef 在 bash 下不成立），把任务语言填 bash 属于谎报。
+                        默认任务语言为 cpp，于是 lang-preflight exit 2 并自动写 env_unsupported 终态——
+                        而本仓库已有 6 个同形态 zsh 包成功合入 main（zinit/zimfw/zsh-autopair/
+                        zsh-autocomplete/zsh-git-prompt/zsh-history-substring-search），规则与实践矛盾。
+affected_scope:         一切纯 Zsh 项目：插件（*.plugin.zsh）、插件管理器（zgen/zinit/zimfw/antigen 族）、
+                        主题（*.zsh-theme）、补全包（_<命令> 函数文件）；
+                        以及任何“主体源码无已知扩展名 + 无构建系统 + 无 manifest”的解释型脚本包
+verification_cmd:       python3 -c "import sys;sys.path.insert(0,'scripts');from ohc.lang_detect import detect_language;print(detect_language('<源码目录>'))"
+                        # 期望看到 detected_language=other、source_stats='无源文件可统计'
+                        # 交叉验证主体确为 zsh: head -1 *.zsh; grep -l '^#compdef' _*
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           declare-other-and-adapt-as-zsh
+rec_description:        先零副作用地跑 detect_language 预判（见 verification_cmd，不写终态），
+                        确认判定为 other 后用 --lang other 申报并继续适配——按检测结果如实申报，
+                        既不谎报 bash，也不因工具零覆盖就放弃一个可交付的包。
+                        随后按 zsh 生态打包范式产出配方：
+                        ① 补丁把 #!/bin/zsh 改成 #!/usr/bin/env zsh（OHOS 无 /bin/zsh，
+                           且该写法无平台宏、不触发 R8/PF5）；
+                        ② 主脚本装 share/<pkg>/，补全函数 _<命令> 装 share/zsh/site-functions/
+                           并用 runenv_info.prepend_path("FPATH", ...) 暴露；
+                        ③ package_id.clear()（解释型脚本与 arch/compiler/build_type 无关）；
+                        ④ package_type="application" + 软件级 commands.json（binary:false）满足 PF8/R38；
+                        ⑤ test_package 用构建机 zsh 实跑（zsh -n 语法 + source 后调用公开子命令），
+                           无 zsh 时显式 warning skip，绝不把 skip 记为通过。
+                        并在 notes.md 写明“任务语言按 other 申报”的理由与证据。
+rec_command:            python3 $SKILL_ROOT/scripts/ohc-run.py lang-preflight <软件> <版本> --src <源码目录> --lang other
+rec_auto_fix:           false
+rec_impl:               langpreflight-boundary-review
+
+fallback_priority:      2
+fallback_approach:      report-env-unsupported-with-language-fields
+fallback_description:   仅当复核后确认主体确实不是 shell 脚本（例如主体是 Rust/Go 等 CI 无工具链的语言），
+                        才按 env_unsupported 上报，并补齐 detected_language + language_evidence 三项
+fallback_command:       python3 $SKILL_ROOT/scripts/ohc-run.py result <软件> <版本> --status env_unsupported --detected-language other --ev-build-system "none" --ev-manifest "未发现语言 manifest 文件" --ev-source-stats "无源文件可统计" --failed-reason "..."
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       --lang bash（用于纯 zsh 项目）|detected_language *: *bash（zsh 项目）
+forbid_1_reason:        bash ≠ zsh：zsh 专有语法（typeset -f、emulate -L zsh、setopt、#compdef、
+                        ${1[1]} 下标）在 bash 下不成立，填 bash 是把工具缺陷掩盖成假申报
+forbid_1_consequence:   语言字段失真，后续按 bash 生态做依赖/测试决策会连锁出错；协议字段可信度受损
+forbid_2_pattern:       为通过预检在源码树里新增 .sh 壳文件|把 .zsh 改名为 .sh
+forbid_2_reason:        为迎合检测器改写上游源码结构，属于本地 workaround，知识不可复用且污染补丁
+forbid_2_consequence:   上游源码偏离、补丁体积虚增；同类零覆盖在下一个 zsh 包重复发生
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R47
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-dshlibs-0.109-lang-preflight-pure-script-package-misdetect, E483
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E543-draft-27D5.md
+last_updated:           2026-09-21
+source_event:           zgen 0-20150919 适配：detect_language 返回 detected_language=other，
+                        language_evidence={build_system:none, manifest:未发现语言 manifest 文件,
+                        source_stats:无源文件可统计}；源码仅 4 个文件（zgen.zsh/_zgen/README.md/LICENSE）。
+                        按 --lang other 申报后完成适配，conan create 通过，test_package 26 条断言全过。
+                        查重：已有 DRAFT-dshlibs-0.109（纯 bash + install-only Makefile 被误判为 c）
+                        场景不同——该条是“被错判成别的语言”，本条是“统计面为空判 other + 枚举无 zsh”。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
+
+draft:                  true
