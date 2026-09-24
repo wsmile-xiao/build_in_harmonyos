@@ -1,0 +1,275 @@
+--- a/src/third-party/date/src/tz.cpp
++++ b/src/third-party/date/src/tz.cpp
+@@ -2002,6 +2002,243 @@
+ 
+ #endif  // !MISSING_LEAP_SECONDS
+ 
++// [OHOS adaptation: slim TZif support] ─────────────────────────────────────
++// zic(1) since 2020b emits "slim" TZif files by default (and the conan
++// tzdata package ships exactly that): the transition table stops at the
++// last rule change and the recurring behavior is carried by the TZif
++// footer, a POSIX TZ string like "PST8PDT,M3.2.0,M11.1.0".  This vendored
++// copy of the date library predates that format: get_info() applies the
++// type of the last file transition to *all* later times, which yields
++// wrong offsets/abbreviations for every date past it (US winter dates
++// reported as -0700/PDT).  The helpers below parse the footer and expand
++// its annual rules into concrete transitions so the existing plain
++// transition-table lookup stays correct.  No effect on "fat" files whose
++// table already covers the horizon.
++struct slim_rule
++{
++    int         month_ = 0;  // M form: 1..12
++    int         week_  = 0;  // M form: 1..5, 5 = last <dow> of month
++    int         dow_   = 0;  // M form: 0 = Sunday .. 6
++    int         kind_  = 0;  // 0 = Mm.w.d, 1 = Jn, 2 = n
++    int         jday_  = 0;  // Jn / n forms
++    std::chrono::seconds time_ = std::chrono::hours{2};
++    char        suffix_ = 'w';  // 'w' wall, 's' standard, 'u' UTC
++};
++
++static
++std::string
++slim_parse_abbrev(const std::string& s, std::size_t& i)
++{
++    if (i < s.size() && s[i] == '<')
++    {
++        auto j = s.find('>', i);
++        if (j == std::string::npos)
++            return std::string();
++        auto a = s.substr(i + 1, j - i - 1);
++        i = j + 1;
++        return a;
++    }
++    std::size_t j = i;
++    while (j < s.size() && std::isalpha(static_cast<unsigned char>(s[j])))
++        ++j;
++    auto a = s.substr(i, j - i);
++    i = j;
++    return a;
++}
++
++// POSIX offsets are signed "west positive"; the caller negates the result
++// to obtain the UTC offset.
++static
++std::chrono::seconds
++slim_parse_offset(const std::string& s, std::size_t& i)
++{
++    using namespace std::chrono;
++    bool neg = false;
++    if (i < s.size() && (s[i] == '+' || s[i] == '-'))
++        neg = s[i++] == '-';
++    int vals[3] = {0, 0, 0};
++    int n = 0;
++    while (n < 3)
++    {
++        int v = 0;
++        std::size_t digits = 0;
++        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
++        {
++            v = v * 10 + (s[i] - '0');
++            ++i;
++            ++digits;
++        }
++        if (digits == 0)
++            break;
++        vals[n++] = v;
++        if (i < s.size() && s[i] == ':')
++            ++i;
++        else
++            break;
++    }
++    auto off = hours{vals[0]} + minutes{vals[1]} + seconds{vals[2]};
++    return neg ? -off : off;
++}
++
++static
++slim_rule
++slim_parse_rule(const std::string& s, std::size_t& i)
++{
++    slim_rule r;
++    if (i < s.size() && s[i] == 'M')
++    {
++        ++i;
++        r.kind_ = 0;
++        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
++            r.month_ = r.month_ * 10 + (s[i++] - '0');
++        if (i < s.size() && s[i] == '.')
++            ++i;
++        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
++            r.week_ = r.week_ * 10 + (s[i++] - '0');
++        if (i < s.size() && s[i] == '.')
++            ++i;
++        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
++            r.dow_ = r.dow_ * 10 + (s[i++] - '0');
++    }
++    else if (i < s.size() && s[i] == 'J')
++    {
++        ++i;
++        r.kind_ = 1;
++        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
++            r.jday_ = r.jday_ * 10 + (s[i++] - '0');
++    }
++    else
++    {
++        r.kind_ = 2;
++        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
++            r.jday_ = r.jday_ * 10 + (s[i++] - '0');
++    }
++    if (i < s.size() && s[i] == '/')
++    {
++        ++i;
++        r.time_ = slim_parse_offset(s, i);
++    }
++    if (i < s.size() && (s[i] == 's' || s[i] == 'u'))
++        r.suffix_ = s[i++];
++    return r;
++}
++
++// UTC timepoint of the rule in year y; wall-clock ('w') rule times are
++// resolved against prev_off, the UTC offset in effect before the switch.
++static
++date::sys_seconds
++slim_rule_time(const slim_rule& r, date::year y,
++               std::chrono::seconds prev_off, std::chrono::seconds std_off)
++{
++    using namespace std::chrono;
++    using namespace date;
++    sys_days sd;
++    if (r.kind_ == 0)
++    {
++        const auto ym = y/month{static_cast<unsigned>(r.month_)};
++        if (r.week_ == 5)
++        {
++            sd = sys_days(ym/weekday{static_cast<unsigned>(r.dow_)}[last]);
++        }
++        else
++        {
++            const auto first = sys_days(ym/day{1});
++            const int wd1 = weekday{first}.c_encoding();
++            const int delta = (r.dow_ - wd1 + 7) % 7;
++            sd = first + days{delta + (r.week_ - 1) * 7};
++        }
++    }
++    else if (r.kind_ == 1)
++    {
++        // Jn: day n of the year, Feb 29 never counted
++        sd = sys_days(y/January/1) + days{r.jday_ - 1};
++        if (y.is_leap() && r.jday_ >= 60)
++            sd += days{1};
++    }
++    else
++    {
++        // n: zero-based day of year, Feb 29 counted
++        sd = sys_days(y/January/1) + days{r.jday_};
++    }
++    sys_seconds tp{sd.time_since_epoch()};
++    if (r.suffix_ == 'w')
++        tp -= prev_off;
++    else if (r.suffix_ == 's')
++        tp -= std_off;
++    return tp + r.time_;
++}
++
++static
++void
++expand_slim_footer(const std::string& footer,
++                   std::vector<expanded_ttinfo>& infos,
++                   std::vector<transition>& trans)
++{
++    using namespace std::chrono;
++    using namespace date;
++    // POSIX TZ: std offset[dst[offset][,start[/time],end[/time]]]
++    std::size_t i = 0;
++    const auto std_abbrev = slim_parse_abbrev(footer, i);
++    if (std_abbrev.empty() || i >= footer.size())
++        return;
++    const auto std_off = -slim_parse_offset(footer, i);  // POSIX sign inverted
++    if (i >= footer.size() || footer[i] == ',')
++        return;                       // no DST part: nothing recurring
++    const auto dst_abbrev = slim_parse_abbrev(footer, i);
++    if (dst_abbrev.empty())
++        return;
++    auto dst_off = std_off + hours{1};           // POSIX default save = 1h
++    if (i < footer.size() && footer[i] != ',')
++        dst_off = -slim_parse_offset(footer, i); // explicit POSIX dst offset
++    if (i >= footer.size() || footer[i] != ',')
++        return;
++    ++i;
++    const auto start_rule = slim_parse_rule(footer, i);
++    if (i >= footer.size() || footer[i] != ',')
++        return;
++    ++i;
++    const auto end_rule = slim_parse_rule(footer, i);
++
++    if (trans.empty())
++        return;
++    const auto last_tp = trans.back().timepoint;
++    const date::year y0{date::year_month_day{
++        date::floor<date::days>(last_tp)}.year()};
++
++    infos.push_back(expanded_ttinfo{std_off, std_abbrev, false});
++    infos.push_back(expanded_ttinfo{dst_off, dst_abbrev, true});
++    const expanded_ttinfo* std_info = &infos[infos.size() - 2];
++    const expanded_ttinfo* dst_info = &infos[infos.size() - 1];
++
++    // Expand the annual rules past the file's horizon.  2400 keeps the
++    // table bounded while covering any practically relevant lookup date;
++    // the last synthesized state persists for later dates, matching zic's
++    // own "run the rule out" behavior.
++    const int last_year = 2400;
++    for (int yv = int(y0); yv <= last_year; ++yv)
++    {
++        const year y{yv};
++        std::vector<transition> add;
++        const auto start = slim_rule_time(start_rule, y, std_off, std_off);
++        const auto end   = slim_rule_time(end_rule, y, dst_off, std_off);
++        // Southern-hemisphere zones switch end-before-start within a year;
++        // emit in ascending time order and skip what the file already has.
++        if (start <= end)
++        {
++            add.push_back(transition{start, dst_info});
++            add.push_back(transition{end, std_info});
++        }
++        else
++        {
++            add.push_back(transition{end, std_info});
++            add.push_back(transition{start, dst_info});
++        }
++        for (auto& t : add)
++            if (t.timepoint > last_tp)
++                trans.push_back(t);
++    }
++}
++
+ template <class TimeType>
+ void
+ time_zone::load_data(std::istream& inf,
+@@ -2018,7 +2255,11 @@
+     if (leap_seconds.empty() && tzh_leapcnt > 0)
+         leap_seconds = load_leaps<TimeType>(inf, tzh_leapcnt);
+ #endif
+-    ttinfos_.reserve(infos.size());
++    // [OHOS adaptation: slim TZif] +4 headroom for the footer-derived
++    // std/DST ttinfos appended by expand_slim_footer(); appending after
++    // load_data() would otherwise reallocate ttinfos_ and dangle the
++    // transition->info pointers built below.
++    ttinfos_.reserve(infos.size() + 4);
+     for (auto& info : infos)
+     {
+         ttinfos_.push_back({seconds{info.tt_gmtoff},
+@@ -2078,6 +2319,15 @@
+         load_counts(inf, tzh_ttisgmtcnt, tzh_ttisstdcnt, tzh_leapcnt,
+                          tzh_timecnt,    tzh_typecnt,    tzh_charcnt);
+         load_data<int64_t>(inf, tzh_leapcnt, tzh_timecnt, tzh_typecnt, tzh_charcnt);
++        // [OHOS adaptation: slim TZif] the POSIX TZ footer follows the
++        // v2 data block; expand its annual rules into transitions so
++        // lookups beyond the (trimmed) table stay correct.
++        inf.ignore(1, '\n');
++        std::string slim_footer;
++        try { std::getline(inf, slim_footer); }
++        catch (...) { slim_footer.clear(); }
++        if (!slim_footer.empty())
++            expand_slim_footer(slim_footer, ttinfos_, transitions_);
+     }
+ #if !MISSING_LEAP_SECONDS
+     if (tzh_leapcnt > 0)

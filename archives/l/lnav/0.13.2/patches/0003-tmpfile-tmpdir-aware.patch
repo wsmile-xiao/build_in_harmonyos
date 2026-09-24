@@ -1,0 +1,121 @@
+--- a/src/base/fs_util.hh
++++ b/src/base/fs_util.hh
+@@ -30,6 +30,7 @@
+ #ifndef lnav_fs_util_hh
+ #define lnav_fs_util_hh
+ 
++#include <cstdio>
+ #include <filesystem>
+ #include <optional>
+ #include <set>
+@@ -127,6 +128,11 @@
+ Result<std::pair<std::filesystem::path, auto_fd>, std::string> open_temp_file(
+     const std::filesystem::path& pattern);
+ 
++// Like tmpfile(3): an unlinked "wb+" stream, but created under the lnav
++// work directory instead of the compile-time /tmp default, so it works on
++// systems where /tmp is read-only (e.g. OpenHarmony).
++Result<FILE*, std::string> open_unlinked_temp_file();
++
+ Result<std::string, std::string> read_file(const std::filesystem::path& path);
+ 
+ enum class write_file_options {
+--- a/src/base/fs_util.cc
++++ b/src/base/fs_util.cc
+@@ -33,6 +33,8 @@
+ 
+ #include "fs_util.hh"
+ 
++#include "paths.hh"
++
+ #include <stdlib.h>
+ #include <sys/param.h>
+ 
+@@ -408,6 +410,25 @@
+     return Ok(std::make_pair(std::filesystem::path(pattern_copy), auto_fd(fd)));
+ }
+ 
++Result<FILE*, std::string>
++open_unlinked_temp_file()
++{
++    static const std::filesystem::path dir = [] {
++        std::error_code ec;
++        auto d = lnav::paths::workdir();
++        std::filesystem::create_directories(d, ec);
++        return d;
++    }();
++
++    auto tmp_pair = TRY(open_temp_file(dir / "lnav.tmp.XXXXXX"));
++    std::FILE *fh = fdopen(tmp_pair.second.release(), "wb+");
++    if (fh == nullptr) {
++        return Err(std::string(strerror(errno)));
++    }
++    std::filesystem::remove(tmp_pair.first);
++    return Ok(fh);
++}
++
+ Result<std::string, std::string>
+ read_file(const std::filesystem::path& path)
+ {
+--- a/src/log_format.cc
++++ b/src/log_format.cc
+@@ -2176,11 +2176,13 @@
+ 
+         auto_mem<FILE> tmpout(fclose);
+ 
+-        tmpout = std::tmpfile();
+-        if (!tmpout) {
+-            log_error("unable to create temporary file");
++        auto tmp_fh = lnav::filesystem::open_unlinked_temp_file();
++        if (tmp_fh.isErr()) {
++            log_error("unable to create temporary file: %s",
++                      tmp_fh.unwrapErr().c_str());
+             return;
+         }
++        tmpout = tmp_fh.unwrap();
+         fcntl(fileno(tmpout), F_SETFD, FD_CLOEXEC);
+         auto fd_copy = auto_fd::dup_of(fileno(tmpout));
+         fd_copy.close_on_exec();
+--- a/src/cmds.io.cc
++++ b/src/cmds.io.cc
+@@ -291,7 +291,12 @@
+     }
+ 
+     if (ec.ec_dry_run) {
+-        outfile = tmpfile();
++        auto tmp_fh = lnav::filesystem::open_unlinked_temp_file();
++        if (tmp_fh.isErr()) {
++            outfile = nullptr;
++        } else {
++            outfile = tmp_fh.unwrap();
++        }
+         toclose = outfile;
+     } else if (split_args[0] == "-" || split_args[0] == "/dev/stdout") {
+         auto ec_out = ec.get_output();
+--- a/src/sysclip.cc
++++ b/src/sysclip.cc
+@@ -34,6 +34,7 @@
+ #include <stdio.h>
+ #include <unistd.h>
+ 
++#include "base/fs_util.hh"
+ #include "base/injector.hh"
+ #include "base/lnav_log.hh"
+ #include "config.h"
+@@ -128,12 +129,13 @@
+         log_info("  ... falling back to OSC 52");
+         auto_mem<FILE> retval(osc52_close);
+ 
+-        retval = tmpfile();
+-        if (retval.in() == nullptr) {
++        auto tmp_fh = lnav::filesystem::open_unlinked_temp_file();
++        if (tmp_fh.isErr()) {
+             return Err(
+                 fmt::format(FMT_STRING("unable to open temporary file: {}"),
+-                            strerror(errno)));
++                            tmp_fh.unwrapErr()));
+         }
++        retval = tmp_fh.unwrap();
+ 
+         return Ok(std::move(retval));
+     }
