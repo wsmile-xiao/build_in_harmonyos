@@ -1,0 +1,187 @@
+# ═══ Draft knowledge entry — 鸿蒙三元组卡在 config.sub 的**第二道**校验；以及「一键补丁脚本自证成功」与「用 --build/--host 绕过」这两个反面模式 ═══
+# Timestamp: 2026-09-20
+# Software: mpsolve 3.2.3 (autoconf 2.71 一代的 dist tarball)
+# Gate: G2 (conan create) / L1 构建期 configure
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-mpsolve-3.2.3-config-sub-ohos-kernel-hunk-and-no-build-host-bypass
+trigger_tool:           autoconf|config.sub|configure|conan|sh
+phase:                  configure
+error_signature:        OS .ohos. not recognized|
+                         Kernel .linux. not known to work with OS .ohos.|
+                         Invalid configuration .aarch64-unknown-linux-ohos|
+                         configure: error: .*config\.sub .* failed|
+                         checking host system type.*Invalid configuration|
+                         patch-autotools-ohos\.pl.*Score: 4/5|
+                         OS `ohos' not recognized|linux-ohos
+severity:               3
+category:               autotools,triplet,platform-porting,false-positive,verification
+match_keywords:         config.sub, config.guess, linux-ohos, ohos-linux,
+                        三元组 triplet, aarch64-unknown-linux-ohos,
+                        patch-autotools-ohos.pl, --build, --host, 交叉编译 cross-compiling,
+                        AC_RUN_IFELSE, config.h, 内核-OS 校验表, case $kernel-$os,
+                        OS 类型列表, case $os, 一键补丁脚本, 自检假象,
+                        autoconf 2.71, timestamp='2022-01-03', E007, P-AUTOTOOLS-001
+
+title:                  config.sub 认 linux-ohos 要**两道**关口同时打开（OS 类型列表 +
+                        内核-OS 校验表），只补前者会在下一道再死一次；而仓库的
+                        一键脚本 patch-autotools-ohos.pl 在新一代 config.sub 上会
+                        把内核那道**静默漏掉**并自报 ✅（守卫被子串自顶），
+                        所以「脚本说成功」不是判据，「把补丁后的 config.sub 真跑一遍」才是；
+                        另外 --build/--host 既不合法也救不了场——它绕不出补丁，只把
+                        configure 骗进交叉编译、让运行时探测与 config.h 双双失真
+
+root_cause: >
+  一个 autoconf `configure` 对同一个三元组输入有**两道**独立关口，都在 config.sub 里：
+
+    (1) `case $os in`  —— OS 类型列表，需含 `ohos*`
+        缺则：Invalid configuration `aarch64-unknown-linux-ohos':
+              OS `ohos' not recognized
+    (2) `case $kernel-$os in` —— 内核-OS 组合校验表，需含 `linux-ohos*`
+        缺则：Invalid configuration ...: Kernel `linux' not known to work
+              with OS `ohos'.
+
+  两者是**串联**的：修好 (1) 只是让流程推进到 (2)，并不会顺带修好 (2)。
+  mpsolve 3.2.3 的 dist tarball 里 config.sub 的 `timestamp='2022-01-03'`
+  （autoconf 2.71 一代），其 `maybe_os` 分支已经包含 `linux-*` 通配，于是 4 段输入
+  `aarch64-unknown-linux-ohos` 走的是 `basic_machine=$field1-$field2 /
+  basic_os=$field3-$field4` 直取路径，拆出 `kernel=linux, os=ohos`，正好先后撞上
+  这两道关口。
+
+  更值得记的是**踩坑路径**：仓库自带的一键脚本 `scripts/patch-autotools-ohos.pl`
+  本应把三处都补上，但它在这类 config.sub 上会漏掉 (2)：
+
+    · §2.1 先插入 `basic_os=linux-ohos`（ohos-linux 映射）；
+    · §2.3 的守卫是 **整文件**子串测试 `unless ($sc =~ /linux-ohos/)`
+      —— 刚被 §2.1 写进去的字符串把守卫顶成"已存在"，于是 skip；
+    · 脚本自己的收尾自检又是同一个整文件匹配 `$sc =~ /linux-ohos/`，
+      因此照旧打印 `Score: 4/5` + `✅ Patching successful.`
+
+  实测（本包）：脚本跑完，`sh config.sub aarch64-unknown-linux-ohos` 仍然报
+  `Kernel `linux' not known to work with OS `ohos'.` —— 一次"自证成功"的假象。
+  「守卫/自检用整文件子串、而被检查的分片早被同脚本的前序步骤改过」是这类脚本的
+  通用失效模式；判据只能是**把补丁后的产物真跑一遍**。
+
+  另一半根因是**绕过**：旧配方传 `--build=aarch64-unknown-linux-gnu
+  --host=aarch64-unknown-linux-ohos` 来躲开 config.guess 认不出鸿蒙的问题。
+  这既违反 P-AUTOTOOLS-001（禁用 --build/--host 绕过），又并不省事——config.sub
+  照样要认 `linux-ohos`，所以 (1)(2) 还是得补；代价却是 configure 因 build ≠ host
+  判定为**交叉编译**，`AC_RUN_IFELSE` 一类运行时探测被整体跳过、config.h 退回保守
+  默认值（E007 已写明这一后果），在真机上跑出与配置不符的行为。
+
+affected_scope: >
+  一切在鸿蒙 PC（OHOS aarch64）上由 autotools 驱动、且发布物自带 config.guess /
+  config.sub 的包——尤其是 autoconf 2.70+ 一代的 dist tarball（`case $kernel-$os`
+  结构）与任何"手工/脚本补过 config.sub"的历史包。反向也成立：凡是用
+  `--build=... --host=...` 显式写死一对三元组的配方，都应回查是否本可使用
+  「补 config.guess/config.sub + 让 configure 自己猜」这条路。
+
+verification_cmd: >
+  # (a) 判据一：把补丁后的 config.sub 真跑一遍（不信任何脚本的自报 ✅）
+  sh <src>/config.sub aarch64-unknown-linux-ohos     # 期望原样回显；报错即 (1)/(2) 未补齐
+  sh <src>/config.sub aarch64-ohos-linux             # 3 段写法也应放行
+  # (b) 判据二：确认两道关口的补丁都在位
+  grep -n 'ohos\*'      <patch>/config.sub-*.patch   # OS 类型列表
+  grep -n 'linux-ohos\*' <patch>/config.sub-*.patch  # 内核-OS 校验表
+  # (c) 判据三：确认宿主侧是原生构建而不是被绕成交叉编译
+  #     桩 uname（-s HarmonyOS / -m aarch64）后跑 configure，日志里两行都应是 ohos：
+  #     checking build system type... aarch64-unknown-linux-ohos
+  #     checking host system type...  aarch64-unknown-linux-ohos
+  # (d) 反例复现（脚本假阳性）：对同一 config.sub 跑仓库脚本，再重复 (a)
+  perl scripts/patch-autotools-ohos.pl <config.guess> <config.sub>   # 报 Score 4/5 ✅
+  sh <config.sub> aarch64-unknown-linux-ohos                         # 仍报 Kernel/OS 错
+
+rec_priority:           1
+rec_approach:           patch-both-config-sub-gates-and-let-configure-guess-the-triplet
+rec_description: >
+  两步同时做，缺一不可。
+  (1) **补丁补齐两道关口**：给 config.sub 补 `ohos-linux` 映射 + OS 列表 `ohos*`
+      + **内核-OS 校验表 `linux-ohos*`**（后者是一键脚本会漏的那处）；给 config.guess
+      补 HarmonyOS 分支（`*:HarmonyOS:*:*` 早返回，输出 `${MACHINE}-unknown-linux-ohos`）。
+      补完必须用 `sh config.sub aarch64-unknown-linux-ohos` **实跑验证**，
+      而不是看任何脚本的自检输出。
+  (2) **配方里删掉 --build/--host**：让 configure 用补好的 config.guess 自己猜出
+      `aarch64-unknown-linux-ohos`，build == host，走真·原生构建分支
+      （AC_RUN_IFELSE 之类的运行时探测才会真的执行）；不要用 `--build=...gnu
+      --host=...ohos` 这种"一对不相等三元组"把 configure 骗成交叉编译。
+  代价：需维护两条 portability 补丁（平台永不需要"修掉"它们，不像上游 bug 补丁会腐烂）；
+  收益：把"必须绕"变成"不用绕"，同时保住 config.h 的可信度。
+rec_command:            >
+  # conandata.yml
+  patches:
+    - patch_file: "patches/0001-config.guess-ohos.patch"
+      patch_description: "config.guess: HarmonyOS case -> aarch64-unknown-linux-ohos"
+      patch_type: "portability"
+    - patch_file: "patches/0002-config.sub-ohos.patch"
+      patch_description: "config.sub: ohos-linux mapping + ohos* in OS list + linux-ohos* in kernel-OS list"
+      patch_type: "portability"
+  # conanfile.py —— 三元组交给 config.guess，不传 --build/--host
+  self._my_configure_args = (f"--prefix={self.package_folder} "
+                             "--disable-ui --disable-documentation ...").split()
+  # 断言：两道关口都开
+  sh config.sub aarch64-unknown-linux-ohos   # => aarch64-unknown-linux-ohos
+rec_auto_fix:           true
+rec_impl:               recipe-side-portability-patches-plus-native-guess
+
+fallback_priority:      2
+fallback_approach:      explicit-build-host-triplets-with-config-sub-patched
+fallback_description: >
+  只在"该 configure 确实无法用上 config.guess / 或必须显式声明三元组"的少数情形下，
+  才退回显式传三元组；此时**至少**要让 build 与 host 相等
+  （`--build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos`），
+  否则 configure 按交叉编译处理、跳过运行时探测。注意：这么做的**前提仍然是
+  config.sub 已补好两道关口**——显式传三元组并不能省掉补丁，config.sub 一样要被调用。
+  mpsolve 本包不需要这条退路（config.guess 补丁后自己就猜得对）。
+fallback_command:       --build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos   # 仅当 config.guess 路线不可用时
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       一键脚本打印 .*✅.*就判定 config\.sub 已补好|
+                        只看 patch-autotools-ohos\.pl 的 Score/自检输出
+forbid_1_reason:        该脚本的内核-OS 守卫是整文件子串测试，会被它自己前一步插入的
+                        `basic_os=linux-ohos` 顶成真；收尾自检用同一个整文件匹配，
+                        于是"漏补"与"通过"同时发生。判据必须是补丁后产物的实跑结果。
+forbid_1_consequence:   CI 在 configure 阶段再挂一次（Kernel `linux' not known to
+                        work with OS `ohos'），白跑一轮；若恰好只跑到 OS 列表那道，
+                        还会误判为"补丁已生效、问题在别处"。
+forbid_2_pattern:       用 --build=.*gnu --host=.*ohos 绕开 config\.(guess|sub)|
+                        因为 config\.guess 认不出鸿蒙就改传 --host
+forbid_2_reason:        P-AUTOTOOLS-001/E007：显式给出不相等的一对三元组 = 向 configure
+                        声明"在交叉编译"，AC_RUN_IFELSE 一类运行时探测整体跳过、
+                        config.h 退回保守默认；而且它**并不能**省掉 config.sub 补丁。
+forbid_2_consequence:   真机上拿到一份与平台能力不符的 config.h（探测结果全是"否"），
+                        故障以"功能缺失/结果异常"的形式晚得多才暴露，难归因。
+forbid_3_pattern:       只补 OS 类型列表.*不补内核-OS 校验表|
+                        改完 OS 列表就宣布三元组适配完成
+forbid_3_reason:        config.sub 的两道关口串联且报错文案不同（先 `OS `ohos' not
+                        recognized`，后 `Kernel `linux' not known to work with OS
+                        `ohos'`），只修第一道会在下一道以另一个措辞再次失败，
+                        容易被误当成"修了没用"。
+forbid_3_consequence:   在两轮 CI 之间反复怀疑方向，或误判为"鸿蒙根本不适配这个包"。
+
+principles:             P-AUTOTOOLS-001（禁用 --build/--host 绕过）、
+                        P012（边界与反例：一键脚本的"失败补丁"以成功姿态返回）
+causes:                 []
+caused_by:              autoconf 2.70+ 的 config.sub 采用 case $kernel-$os 双段校验，
+                        而仓库一键脚本按"3 段输入 + 单一 OS 列表"的旧形态编写
+similar_to:             E007（patch-autotools-script：config.guess/config.sub 补丁）；
+                        DRAFT-openxr-1.1.63-harmonyos-must-join-linux-branch-and-runtime-negotiation-proof
+                        （同族：鸿蒙必须并入 linux 分支，且运行时协商要有证据）；
+                        DRAFT-mpsolve-3.2.3-untagged-release-dist-tarball-vs-vcs-tarball-bootstrap
+                        （同一包的另一半故事：dist tarball 自带 configure，但自带≠认得鸿蒙）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-mpsolve-3.2.3-config-sub-ohos-kernel-hunk-and-no-build-host-bypass.md
+last_updated:           2026-09-20
+source_event:           archives/m/mpsolve/3.2.3 适配（CI build #53927：configure 阶段
+                        config.sub 拒收 aarch64-unknown-linux-ohos）
+
+authors:                2301_76770579
+source_pr:              11507
+source_commit:          9313486462
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
