@@ -1,0 +1,122 @@
+# DRAFT - knowledge entry: install 期未能完整替换目标文件 → 产物截断且丢 .codesign
+# Timestamp: 2026-09-20
+# Software: swtpm 0.10.1 (autotools, libtool install 到 HMDFS conan package 目录)
+# Task: swtpm-0.10.1 适配；bin/swtpm 打包后 exec 报 EPERM
+# Status: DRAFT — 配对 knowledge/drafts/DRAFT-ohos-install-truncates-large-binaries-codesign-loss.md
+
+id: DRAFT-ohos-install-truncates-large-binaries-codesign-loss
+trigger_tool: ginstall|libtool|make|conan-create|runtime
+phase: installation|packaging|runtime
+
+error_signature: |
+    ginstall: error deallocating '.*': Permission denied|
+    .*/bin/\w+: (inaccessible|not found)|
+    failed to run command .*: Permission denied|
+    exec.*operation not permitted
+
+severity: 2
+category: conan, autotools, packaging, ohos, signing
+match_keywords: ginstall, install-sh, libtool, Permission denied, deallocating,
+                 codesign, .codesign, strip, EPERM, truncated binary, package(),
+                 libexecdir, bin, HMDFS
+
+title: >
+  autotools/libtool 安装阶段未完整替换目标文件，导致包内大体积可执行文件被截断、
+  OHOS `.codesign` 段丢失、运行时 exec 报 EPERM
+
+root_cause: >
+  现象（swtpm 0.10.1 实测，可复现）：
+    构建树 src/swtpm/swtpm   = 7203328 bytes，含 `.codesign` 段，`--version` 正常
+    包内   <pkg>/bin/swtpm   = 1235968 bytes，**无 `.codesign` 段**，exec 报 EPERM
+  构建日志伴随：
+    ginstall: error deallocating '<pkg>/bin/swtpm': Permission denied
+  同类命中 swtpm_localca、swtpm_setup（也是大体积产物）；
+  体积小的 swtpm_bios(31104)、swtpm_ioctl(43392) **未受影响**，签名字段完好、可执行。
+
+  即 install 阶段对这几个目标文件未能完整替换，留下的截断副本同时丢失了
+  OHOS 链接期签名段；而 OHOS 内核对缺少 `.codesign` 的 ELF 拒绝执行（EPERM）。
+
+  说明：本条目只陈述**可复现的观测事实**。受影响的三个产物恰好都是动态链接
+  libtpms/glib 等外部库的大体积二进制，但未进一步区分「体积」与「依赖外部库」
+  两种可能；在受控可写目录中单独调用 ginstall 覆盖同名文件是成功的，
+  故机理尚未定位。修法不依赖机理：**不信任 install 产物，从构建树回填**。
+
+affected_scope: >
+  autotools + libtool 安装、且 package() 依赖 `make install` 落盘可执行文件、
+  产物体积较大（本例 >1MB）的 OHOS conan 包；HMDFS 上更易触发。
+  小体积工具通常不受影响。
+
+verification_cmd: |
+    # 1) 构建树残留错误（若返回非空，说明正是此问题扫描）
+    grep -n "error deallocating" build.log
+    # 2) 对比构建树与包内产物的体积与签名字段
+    stat -c "%s %n" build/src/swtpm/swtpm <pkg>/bin/swtpm
+    llvm-readelf -S <pkg>/bin/swtpm | grep -c codesign      # 期望 1（实际可能 0）
+    # 3) 直接验证可执行性（最终判据）
+    <pkg>/bin/swtpm --version                              # 期望输出版本号
+
+rec_priority: 1
+rec_approach: restore-binaries-from-build-tree-in-package
+rec_description: >
+  package() 内先执行 autotools.install()，随后对 bin/ 下每个产物执行
+  「先删目标、再从构建树 copyfile、再 chmod 0755」。删除步骤是必要的：
+  install 留在目标路径上的截断副本必须先移除，直接覆盖会保留错误内容。
+rec_command: |
+    def _restore_binaries(self):
+        import glob as _glob
+        bindir = os.path.join(self.package_folder, "bin")
+        os.makedirs(bindir, exist_ok=True)
+        for src_dir in sorted(_glob.glob(os.path.join(self.build_folder, "src", "*"))):
+            name = os.path.basename(src_dir)
+            candidate = os.path.join(src_dir, name)
+            if not os.path.isfile(candidate):
+                continue
+            dst = os.path.join(bindir, name)
+            if os.path.exists(dst):
+                os.remove(dst)          # 必须先删：install 留下的是截断副本
+            shutil.copyfile(candidate, dst)
+            os.chmod(dst, 0o755)
+
+    def package(self):
+        autotools = Autotools(self)
+        autotools.install()
+        self._restore_binaries()
+rec_auto_fix: false
+rec_impl: conanfile-package-restore
+
+fallback_priority: 2
+fallback_approach: stage-install-to-clean-dir-then-copy
+fallback_description: >
+  不直接 install 到 package_folder，而是 install 到一个**全新空目录**
+  （DESTDIR=<tmp>），再把产物拷进 package_folder。已用受控实验验证：
+  安装到干净目录时产物体积与 `.codesign` 均正常（7203328 bytes、含签名）。
+  适用于产物众多、逐个回填不便的场景。
+fallback_command: |
+    make install DESTDIR=<fresh-empty-dir>
+    cp -a <fresh-empty-dir>/. <package_folder>/
+fallback_auto_fix: false
+fallback_impl: conanfile-destdir-staging
+
+forbid_1_pattern: (strip|llvm-strip).*bin
+forbid_1_reason: >
+  在 OHOS 上 strip 会移除/破坏链接期写入的 `.codesign` 段，使 ELF 无法执行
+  （见 DRAFT-ohos-elf-skip-strip-codesign、E077）；本例的截断副本同样是
+  「签名段消失 → EPERM」的同一后果，用 strip 处理绝不可行。
+forbid_1_consequence: 产物 exec 报 EPERM / operation not permitted
+
+principles: P017
+similar_to: DRAFT-ohos-elf-skip-strip-codesign, E077, E574, DRAFT-parallel-install-install-sh-eexist-race
+conflicts_with:
+prerequisite_of:
+
+doc_file: knowledge/drafts/DRAFT-ohos-install-truncates-large-binaries-codesign-loss.md
+last_updated: 2026-09-20
+source_event: archives/s/swtpm/0.10.1 (feat/swtpm-0.10.1)
+authors: AtomCode <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-20

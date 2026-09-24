@@ -1,0 +1,110 @@
+# DRAFT - knowledge entry: autoreconf 生成的 config.guess 无法用 source 期补丁修
+# Timestamp: 2026-09-20
+# Software: swtpm 0.10.1 (autotools, git-archive snapshot without pre-generated configure)
+# Task: swtpm-0.10.1 conan 适配；configure 报 cannot guess build type
+# Status: DRAFT — 配对 knowledge/drafts/DRAFT-ohos-autoreconf-config-guess-not-patchable-at-source.md
+
+id: DRAFT-ohos-autoreconf-config-guess-not-patchable-at-source
+trigger_tool: conan|conan-create|autoreconf|configure
+phase: build|bootstrap|configure
+
+error_signature: |
+    configure: error: cannot guess build type; you must specify one|
+    config\.guess: unable to guess system type|
+    config\.guess.*uname -s = HarmonyOS|
+    conan export .*: Patch file does not exist.*config\.guess
+
+severity: 2
+category: conan, autotools, build-system, ohos, portability
+match_keywords: autoreconf, config.guess, config.sub, build type, cannot guess,
+                 git archive, tag snapshot, no configure, source(), build(),
+                 apply_conandata_patches, conandata.yml, tool_requires, automake
+
+title: >
+  autoreconf 在 build() 期才生成 config.guess，source() 期补丁打不到——
+  git-archive 快照类 autotools 包必须在 build() 内就地修补
+
+root_cause: >
+  上游以 git archive 形式发布 tag 快照（swtpm 0.10.1 的
+  github.com/.../archive/refs/tags/v0.10.1.tar.gz），压缩包内**没有** configure /
+  config.guess / config.sub —— 只有 configure.ac / Makefile.am。
+  配方因此必须 tool_requires automake+libtool 并在 build() 内 `autoreconf -fi`
+  才会「现造」出 configure 与 config.guess。
+
+  而 configure 用的 config.guess 是 autoreconf 从 **automake 安装目录**复制过来的
+  （swtpm 实测来源：<automake>/share/automake-1.18/config.guess），automake/1.18
+  自带的该文件没有 HarmonyOS 分支（grep -c ohos = 0）。HarmonyOS 上
+  `uname -s` 返回 HarmonyOS，脚本随即报 "unable to guess system type"，
+  configure 进而报 "cannot guess build type; you must specify one"。
+
+  关键点：这个文件在 source() 阶段**尚不存在**，所以写进 conandata.yml 的补丁
+  即便内容正确也无从应用（apply_conandata_patches 找不到目标文件，conan export
+  或 patch 阶段即失败）。必须在 build() 内、autoreconf 成功之后就地修补。
+
+affected_scope: >
+  所有「git archive / codeload tag 快照 + 构建期 autoreconf」的 autotools 包，
+  在 HarmonyOS 上 configure 时必然踩到；对已带配置齐全 config.guess 的
+  release dist tarball 不受影响（那类用常规 source() 期补丁即可）。
+
+verification_cmd: |
+    # 1) 确认上游快照不含 configure / config.guess
+    tar tzf v0.10.1.tar.gz | grep -E '(^|/)(configure|config\.guess)$'   # 应无输出
+    # 2) 确认 automake 自带 config.guess 不认 HarmonyOS
+    grep -c HarmonyOS <automake-prefix>/share/automake-1.18/config.guess    # 期望 0
+    # 3) 修补后实测输出
+    sh config.guess      # 期望 aarch64-unknown-linux-ohos
+
+rec_priority: 1
+rec_approach: patch-generated-config-guess-inside-build
+rec_description: >
+  在 build() 内 autoreconf 之后、configure 之前，调用一个就地修补函数，
+  把 *:HarmonyOS:*:* 分支插到 config.guess 的 NetBSD 分支之前
+  （等价于本仓 scripts/patch-autotools-ohos.pl 的 config.guess 部分）。
+  同时**不要**用 --build/--host 传三元组绕过（R1 禁止；CI 上传
+  --build=<gnu triplet> 会触发 C compiler cannot create executables）。
+rec_command: |
+    def build(self):
+        self.run("autoreconf -fi", cwd=self.source_folder, env="conanbuild")
+        if str(self.settings.os) == "OHOS":
+            _patch_config_guess(os.path.join(self.source_folder, "config.guess"))
+        _drop_umask_077(os.path.join(self.source_folder, "configure"))
+        autotools = Autotools(self)
+        autotools.configure()
+rec_auto_fix: false
+rec_impl: conanfile-build-hook
+
+fallback_priority: 2
+fallback_approach: pre-patch-automake-share-config-guess
+fallback_description: >
+  在 build() 里先修补 tool_requires 提供的 automake 安装目录下的
+  config.guess（autoreconf 会复制它），随后 autoreconf 自动带上 HarmonyOS 分支。
+  缺点：改动的是依赖包目录（共享、可能只读），不推荐；仅当上游源码树路径
+  不可预测时作为兜底。
+fallback_command: |
+    # 不推荐：修改依赖包内容
+    sed -i ... <automake-prefix>/share/automake-1.18/config.guess
+fallback_auto_fix: false
+fallback_impl: tool-requires-patch
+
+forbid_1_pattern: (--build=|--host=).*linux-ohos
+forbid_1_reason: >
+  R1 禁止显式三元组；且 CI 上传 --build=<gnu triplet> 会触发
+  "C compiler cannot create executables"（psfex / weightwatcher / skymaker 同报）。
+forbid_1_consequence: CI configure 直接失败，本地却可能通过（环境差异）
+
+principles: P017
+similar_to: E007, E072, E268
+conflicts_with:
+prerequisite_of: DRAFT-ohos-install-truncates-large-binaries-codesign-loss
+
+doc_file: knowledge/drafts/DRAFT-ohos-autoreconf-config-guess-not-patchable-at-source.md
+last_updated: 2026-09-20
+source_event: archives/s/swtpm/0.10.1 (feat/swtpm-0.10.1)
+authors: AtomCode <noreply@atomgit.com>
+source_pr:
+source_commit:
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-20
