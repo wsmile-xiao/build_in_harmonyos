@@ -1,0 +1,124 @@
+#====================================================================
+# E664-autotools-config-script-deps-need-explicit-prefix
+#   config 脚本型 autotools 依赖发现（curl-config/x-config 宏）在 conan
+#   下必须显式 --with-<lib>=<包目录>，AutotoolsDeps 的 -I/-L/-l 覆盖不到
+# 来源: PR feat(lnav): 0.13.2 适配 HarmonyOS PC
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E664-autotools-config-script-deps-need-explicit-prefix
+trigger_tool:           configure|conan
+phase:                  configuration
+error_signature:        libcurl required to build|
+                        curl-config.*not found|
+                        checking for curl\.\.\. no|
+                        either specify a valid PCRE2 installation|
+                        sqlite3 (library|headers) not found|
+                        libunistring required to build
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, conan, dependency, configuration, m4-macro
+match_keywords:         curl-config, xml2-config, pcre2-config, ncurses6-config,
+                        AC_PATH_PROG, LIBCURL_CHECK_CONFIG, AX_CHECK_PCRE2,
+                        --with-libcurl, --with-pcre2, config script,
+                        AutotoolsDeps, CPPFLAGS, LDFLAGS, conan 包目录,
+                        prefix, 探测, 系统目录,PKG_CHECK_MODULES
+prescan_pattern:        _config.*AC_PATH_PROG|AC_PATH_PROG.*_config|
+                        CHECK_CONFIG|\b[xpnc][a-z0-9]*-config\b
+prescan_globs:          configure.ac, m4/*.m4, **/configure.ac, aclocal.m4
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             autotools 依赖发现有两族，注入通道完全不同：
+                        ① 库探测族（AC_CHECK_LIB/AC_SEARCH_LIBS/AC_CHECK_HEADERS）
+                        只吃编译器环境变量 —— conan 的 AutotoolsDeps 把
+                        -I/-L/-l 注入 CPPFLAGS/LDFLAGS/LIBS 即全覆盖；
+                        ② config 脚本族（LIBCURL_CHECK_CONFIG 的 curl-config、
+                        pkg-config 形态、以及 AX_CHECK_PCRE2 这类"默认只搜
+                        /usr/local /usr 系统目录"的宏）**不读**这些环境变量的
+                        注入语义：AC_PATH_PROG 沿 PATH 找 curl-config（conan
+                        host 依赖的 bin/ 不在 conanbuild PATH），AX_CHECK_PCRE2
+                        的默认 places 是字面系统目录。结果：机器上明明有 conan
+                        版依赖，configure 仍报 not found/required to build，
+                        或更糟——扫到宿主系统同名库形成静默错配。
+                        conan 包内的 config 脚本还常带构建期陈旧 prefix
+                        （xml2-config 家族问题），即使找到也要校验输出。
+
+affected_scope:         所有 configure.ac 使用 config 脚本型宏探测依赖的
+                        autotools 包在 conan/交叉环境下的配置阶段；典型宏：
+                        LIBCURL_CHECK_CONFIG、AX_CHECK_PCRE2、
+                        XDT_CHECK_PACKAGE、各种 x*-config。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           explicit-with-prefix-to-conan-package-folder
+rec_description:        在 conanfile generate() 里用
+                        self.dependencies["<ref>"].package_folder 组装显式
+                        宏参数：--with-libcurl=<curl 包目录>、
+                        --with-pcre2=<pcre2 包目录>、--with-sqlite3=<包目录>。
+                        对 LIBCURL_CHECK_CONFIG，AC_PATH_PROG 会先查
+                        $withval/bin；对 AX_CHECK_PCRE2，withval 目录被插到
+                        搜索链最前。确定性最强：依赖只可能命中 conan 那一份，
+                        与宿主系统目录彻底隔离（同时建议 --disable-system-paths
+                        关掉 /opt/local /usr/local 兜底扫描）。
+rec_command:            tc.configure_args.append(f"--with-libcurl={self.dependencies['curl/8.15.0.1'].package_folder}")
+rec_auto_fix:           false
+rec_impl:               conan-configure-arg
+
+fallback_priority:      2
+fallback_approach:      path-prepend-config-script
+fallback_description:   把依赖包的 bin/ 前置到构建 env PATH
+                        （env.append_path("PATH", dep.cpp_info.bindirs[0])），
+                        让 AC_PATH_PROG 命中 conan 的 config 脚本。缺点：
+                        包内脚本 prefix 陈旧时输出的 -I/-L 是错路径
+                        （xml2-config 家族坑），需再校验或改用主方案。
+fallback_command:       env.append_path("PATH", os.path.join(dep.package_folder, "bin"))
+fallback_auto_fix:      false
+fallback_impl:          conan-env-path
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       ac_cv_(lib|header|search)_[a-z0-9_]+=(yes|no)
+forbid_1_reason:        用 cache 变量硬灌探测结论绕过发现（ac_cv_*=yes）会让
+                        configure 跳过验证，真错配被静默放行——除非同时校验
+                        被灌结论的产物路径，否则是假绿通道
+forbid_1_consequence:   链接期/运行期才发现符号或版本错配，排查成本翻倍
+forbid_2_pattern:       -I/usr/(local/)?include|-L/usr/(local/)?lib64?
+forbid_2_reason:        往系统前缀注入搜索路径（R49/E524 共享前缀禁令）——
+                        worker 与本地共享文件系统互相污染
+forbid_2_consequence:   本机过、CI 挂，或反向
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+# ⚠️ 与 xml2-config 条目同族但根因不同：那条是「找到了但包内脚本 prefix 陈旧」，
+#    本条是「宏的发现通道根本不吃 AutotoolsDeps 注入，需显式 --with 前缀」。
+similar_to:             DRAFT-ohos-libxml2-xml2-config-prefix-stale（config 脚本
+                        陈旧 prefix；签名家族重叠、根因不同）、
+                        DRAFT-conan-dep-shared-libs-break-configure-conftest
+                        （同为 conan 依赖注入通道与 configure 探测的错配面）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       grep -n "LIBCURL_CHECK_CONFIG\|AX_CHECK_PCRE2" <包>/configure.ac
+                        # 命中即核对本条；构建日志应出现
+                        # checking for curl... <conan 包路径>（而非系统目录）
+doc_file:               knowledge/drafts/E664-autotools-config-script-deps-need-explicit-prefix.md
+last_updated:           2026-09-22
+source_event:           lnav 0.13.2 适配（feat/lnav-0.13.2）：
+                        LIBCURL_CHECK_CONFIG 经 AC_PATH_PROG 找 curl-config、
+                        AX_CHECK_PCRE2 默认只搜系统目录，AutotoolsDeps 注入
+                        无效；显式 --with-*=<包目录> 后一次通过
+authors:                lnav-0.13.2 任务
+source_pr:              feat/lnav-0.13.2
+source_commit:          待 PR 建立后回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-22
