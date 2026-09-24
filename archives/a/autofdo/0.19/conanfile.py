@@ -32,8 +32,12 @@ class AutofdoConan(ConanFile):
 
     def source(self):
         get(self, **self.conan_data["sources"], strip_root=True)
-        # The official release archive already contains both vendored
-        # submodules; avoid network-dependent duplicate downloads.
+        # The release archive may omit vendored submodules; fetch only missing
+        # directories so existing archive contents are never overwritten.
+        for name, sub in self.conan_data["submodules"].items():
+            destination = os.path.join("third_party", name)
+            if not os.path.isdir(destination) or not os.listdir(destination):
+                get(self, **sub, strip_root=True, destination=destination)
 
     def generate(self):
         tc = AutotoolsToolchain(self)
