@@ -1,0 +1,52 @@
+#====================================================================
+# DRAFT — 构建期的"纯数据依赖"（hwdata 的 pnp.ids / pci.ids、IANA 注册表、
+#         时区库……）在 conan 里没有配方，而上游把系统路径写死成回退：
+#         不能靠伪造 .pc 或 build() 里联网下载，应当把数据文件随配方携带，
+#         并用补丁把回退路径改到它
+# Timestamp: 2026-09-17
+# Software: libdisplay-info 0.3.0（meson，tool/gen-search-table.py 由 custom_target 调用，需要 hwdata 的 pnp.ids）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# 现场证据（OHOS 设备）：
+#   meson setup 报 File /usr/share/hwdata/pnp.ids does not exist
+#   早期版本改成 build() 里 curl 下载 pnp.ids：
+#     raw.githubusercontent.com 不可达时 curl: (28) timed out after 60001 ms，
+#     整条 conan create 拖到任务超时（一次跑满 50 分钟）
+#   改为随配方携带后：紧接着的一次设备验证 G0-G4 / L2 / L4 / L5 全绿
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-libdisplay-info-tools-0.3.0-build-time-data-dependency-hwdata
+trigger_tool:           meson|python|cmake|configure
+phase:                  configuration|generation
+error_signature:        File /usr/share/hwdata/pnp\.ids does not exist| dependency\('?hwdata'?\)|Run-time dependency hwdata found: NO| curl: \(28\) timed out|ValueError: not enough values to unpack
+severity:               2
+category:               build-system|packaging|data-files|offline|meson
+match_keywords:         hwdata, pnp.ids, pci.ids, iana, tzdata, dependency('hwdata'), fallback path, /usr/share/hwdata, meson.build fallback, custom_target, gen-search-table, export_sources, no conan recipe, pure data package, offline build, curl timeout, raw.githubusercontent.com
+title:                  构建期依赖"纯数据包"（hwdata/IANA/时区库）时不要伪造 .pc、也不要在 build() 里联网下载：把数据文件随配方携带，并用补丁把上游写死的系统路径回退改到它
+root_cause:             上游把这类数据包当"系统本来就有的东西"：meson 里写 dep_hwdata = dependency('hwdata', required: false, native: true) if dep_hwdata.found() hwdata_dir = dep_hwdata.get_variable(pkgconfig: 'pkgdatadir') pnp_ids = files(hwdata_dir / 'pnp.ids') else pnp_ids = files('/usr/share/hwdata/pnp.ids')   # 兜底 endif 注意 native: true：这是给**构建机**找数据，不是给目标机， 所以设备上的路径缺失绕不过去，也不会随 requires() 传播。 容器/设备上既没有 hwdata 的 pkg-config 文件，也没有 /usr/share/hwdata/pnp.ids，于是 meson setup 直接以 "File /usr/share/hwdata/pnp.ids does not exist" 中断。 这类包（hwdata、IANA 注册表、tzdata）在 conan 制品仓里 通常没有配方，也不能像普通库那样靠 requires() 解决。 两种常见自救都有副作用： (a) 在配方里伪造一个 hwdata.pc 只为过 dependency() 检查： 等于给构建期塞了一份假元数据，路径与版本都与真实数据 脱钩，而且每个用到它的配方都要各造一份； (b) 在 build() 里 curl 下载数据文件：构建从离线变成联网， 镜像站不可达时表现为奇怪的整任务超时 （curl: (28) timed out after 60001 ms）， 而不是一条明确的构建错误。
+affected_scope:         构建期需要"系统数据文件"的工程，尤其是把数据路径写成 dependency() 未命中时的兜底常量、且该常量指向发行版路径 （/usr/share/...）的情况。纯数据依赖若真的进了制品仓， 优先用 requires() + get_variable()，本条目只覆盖"没有配方"的场景。
+verification_cmd:       在没有 hwdata 的机器上直接跑 configure 阶段即可复现： grep -n "pnp.ids\|hwdata" meson.build meson setup builddir    # 期望 File /usr/share/hwdata/pnp.ids does not exist 打包后判据（应完全离线）： grep -c "get(self" conanfile.py            # 只允许 source() 里的源码下载 ls <recipe>/data/pnp.ids                   # 数据文件随配方携带
+rec_priority:           1
+rec_approach:           ship-data-file-and-patch-the-fallback-path
+rec_description:        1) 把数据文件放进配方目录（如 data/pnp.ids）， export_sources() 里导出： def export_sources(self): export_conandata_patches(self) copy(self, "data/pnp.ids", src=self.recipe_folder, dst=self.export_sources_folder) 2) 用补丁把上游的兜底常量改成配方内的相对路径： -  pnp_ids = files('/usr/share/hwdata/pnp.ids') +  pnp_ids = files('data/pnp.ids') 这样 dependency('hwdata') 仍然 not found，但兜底命中随配方携带的文件。 3) source() 里在 get() 之后确认它落在源码树里： dst_dir = os.path.join(self.source_folder, "data") if not os.path.isfile(os.path.join(dst_dir, "pnp.ids")): ... 从 export_sources_folder / recipe_folder 复制 ... Conan 2.30 已把 export_sources 直接铺进源码树 （export_sources_folder == source_folder），此时 src 与 dst 是同一目录，copy() 会抛 "copy() 'src' and 'dst' arguments must have different values"， 必须先判断目标是否已存在、再比较 normpath 后决定是否 copy。 4) 构建期加一条自检，避免数据文件悄悄丢失后静默生成空表： 文件不存在直接抛 ConanException，而不是让 custom_target 跑出空结果。
+rec_command:            patch -p1 < 0002-meson-hwdata-ids.patch && cp data/pnp.ids <src>/data/pnp.ids
+rec_auto_fix:           false
+rec_impl:               ship-build-time-data-with-recipe-and-patch-fallback
+principles:             
+doc_file:               drafts/DRAFT-libdisplay-info-tools-0.3.0-build-time-data-dependency-hwdata.md
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+last_updated:           2026-09-17
+source_event:           libdisplay-info-tools 0.3.0 适配：meson 的 dependency('hwdata') 未命中后回退到写死的 /usr/share/hwdata/pnp.ids，设备上不存在；改为随配方携带 data/pnp.ids + 补丁改写兜底路径
+source_pr:              
+source_commit:          
+authors:                username- <ajOovSKTQ0vaLwZB.username-@noreply.gitcode.com>
