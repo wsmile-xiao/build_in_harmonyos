@@ -1,0 +1,295 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: NebulaAGI <gyccc@gitcode.com>
+Date: Mon, 15 Sep 2026 12:00:00 +0800
+Subject: [PATCH] optimlib fallback: provide Simplex/Subplex for L_SUBPLEX placer (Nelder-Mead)
+
+Upstream optimlib backend only ships particleswarm.hpp (G_PARTICLESWARM)
+but the placer uses TOptimizer<L_SUBPLEX>. When LIBNEST2D_OPTIMIZER=optimlib
+the build fails with DummyOptimizer static_assert. Provide lightweight
+Simplex/Subplex optimizers that satisfy the Optimizer CRTP interface.
+Previous stub just evaluated initial point, breaking minimizeCircle which
+needs true optimization (test boundingCircle expects center 0,0 but stub
+returned 5,0). Implement bounded Nelder-Mead (2D simplex) with clamping
+to bounds and respecting StopCriteria (max_iterations, ftol). Also fix
+particleswarm seed that incorrectly required nlopt::srand and add missing
+includes. Include the fallback header from libnest2d.hpp when optimlib is
+selected.
+
+diff --git a/include/libnest2d/libnest2d.hpp b/include/libnest2d/libnest2d.hpp
+index 58a6a3c..7b72ff5 100644
+--- a/include/libnest2d/libnest2d.hpp
++++ b/include/libnest2d/libnest2d.hpp
+@@ -13,6 +13,10 @@
+ #include <libnest2d/optimizers/nlopt/genetic.hpp>     // Genetic for min. bounding box
+ #endif
+ 
++#ifdef LIBNEST2D_OPTIMIZER_optimlib
++#include <libnest2d/optimizers/optimlib/particleswarm.hpp> // provides Simplex/Subplex fallback for NfpPlacer
++#endif
++
+ #include <libnest2d/nester.hpp>
+ #include <libnest2d/placers/bottomleftplacer.hpp>
+ #include <libnest2d/placers/nfpplacer.hpp>
+diff --git a/include/libnest2d/optimizers/optimlib/CMakeLists.txt b/include/libnest2d/optimizers/optimlib/CMakeLists.txt
+index 1c69d4b..ec663fe 100644
+--- a/include/libnest2d/optimizers/optimlib/CMakeLists.txt
++++ b/include/libnest2d/optimizers/optimlib/CMakeLists.txt
+@@ -5,3 +5,8 @@ target_include_directories(optimlibOptimizer INTERFACE ${ARMADILLO_INCLUDE_DIRS})
+ target_link_libraries(optimlibOptimizer INTERFACE ${ARMADILLO_LIBRARIES})
+ 
+ install(TARGETS optimlibOptimizer EXPORT Libnest2DTargets INCLUDES DESTINATION include)
++
++list(APPEND LIBNEST2D_SRCFILES
++    include/libnest2d/optimizers/optimlib/particleswarm.hpp
++)
++set(LIBNEST2D_SRCFILES ${LIBNEST2D_SRCFILES} PARENT_SCOPE)
+
+index 7fdd2cd..b7935ac 100644
+--- a/include/libnest2d/optimizers/optimlib/particleswarm.hpp
++++ b/include/libnest2d/optimizers/optimlib/particleswarm.hpp
+@@ -1,9 +1,219 @@
+ #ifndef PARTICLESWARM_HPP
+ #define PARTICLESWARM_HPP
+ 
++#include <tuple>
++#include <utility>
++#include <cstdlib>
++#include <vector>
++#include <algorithm>
++#include <cmath>
++#include <limits>
+ #include <libnest2d/optimizer.hpp>
++#include <libnest2d/utils/metaloop.hpp>
+ 
+ namespace libnest2d { namespace opt {
++
++namespace detail {
++// helpers at namespace scope - templated operator allowed here (not inside local class)
++struct Filler {
++    const std::vector<double> &p;
++    explicit Filler(const std::vector<double> &pp): p(pp) {}
++    template<class T> void operator()(int N, T &val) const { val = static_cast<T>(p[N]); }
++};
++
++struct ToVector {
++    std::vector<double> &v;
++    explicit ToVector(std::vector<double> &vv): v(vv) {}
++    template<class T> void operator()(int i, const T &val) const { v[i]=static_cast<double>(val); }
++};
++
++struct BoundsFiller {
++    std::vector<double> &l;
++    std::vector<double> &u;
++    BoundsFiller(std::vector<double> &ll, std::vector<double> &uu): l(ll), u(uu) {}
++    template<class T> void operator()(int i, const T &b) const { l[i]=static_cast<double>(b.min()); u[i]=static_cast<double>(b.max()); }
++};
++
++struct FromVector {
++    const std::vector<double> &p;
++    explicit FromVector(const std::vector<double> &pp): p(pp) {}
++    template<class T> void operator()(int i, T &val) const { val = static_cast<T>(p[i]); }
++};
++
++template<class Func, class...Args>
++inline double evalFunc(Func &func, const std::vector<double> &params) {
++    std::tuple<Args...> tup;
++    metaloop::apply(Filler(params), tup);
++    double v = metaloop::callFunWithTuple(func, tup, index_sequence_for<Args...>{});
++    return v;
++}
++
++inline double clamp_double(double v, double lo, double hi) {
++    if (v < lo) return lo;
++    if (v > hi) return hi;
++    return v;
++}
++
++template<class Func, class...Args>
++inline std::pair<std::vector<double>, double> nelderMead(
++    Func &func,
++    const std::vector<double> &init,
++    const std::vector<double> &lb,
++    const std::vector<double> &ub,
++    const StopCriteria &sc,
++    bool is_min)
++{
++    const size_t N = init.size();
++    if (N == 0) return {init, 0.0};
++    const double alpha = 1.0;
++    const double gamma = 2.0;
++    const double rho = 0.5;
++    const double sigma = 0.5;
++    unsigned max_iter = sc.max_iterations ? sc.max_iterations : 80;
++    double ftol_rel = std::isnan(sc.relative_score_difference) ? 1e-6 : sc.relative_score_difference;
++    double ftol_abs = std::isnan(sc.absolute_score_difference) ? 1e-9 : sc.absolute_score_difference;
++    std::vector<std::vector<double>> simplex;
++    simplex.reserve(N+1);
++    simplex.push_back(init);
++    for (size_t i = 0; i < N; ++i) {
++        std::vector<double> pt = init;
++        double range = ub[i] - lb[i];
++        double step = 0.2;
++        if (std::isfinite(range) && range != 0) step = range * 0.2;
++        if (step == 0) step = 0.2;
++        pt[i] = clamp_double(pt[i] + step, lb[i], ub[i]);
++        if (pt[i] == init[i]) {
++            pt[i] = clamp_double(pt[i] - step, lb[i], ub[i]);
++        }
++        simplex.push_back(pt);
++    }
++    auto score_of = [&](const std::vector<double> &pt)->double {
++        double v = evalFunc<Func, Args...>(func, pt);
++        return is_min ? v : -v;
++    };
++    std::vector<double> scores(simplex.size());
++    for (size_t i = 0; i < simplex.size(); ++i) scores[i] = score_of(simplex[i]);
++    for (unsigned iter = 0; iter < max_iter; ++iter) {
++        std::vector<size_t> idx(simplex.size());
++        for (size_t i = 0; i < idx.size(); ++i) idx[i]=i;
++        std::sort(idx.begin(), idx.end(), [&](size_t a, size_t b){ return scores[a] < scores[b]; });
++        std::vector<std::vector<double>> new_simplex;
++        std::vector<double> new_scores;
++        new_simplex.reserve(simplex.size());
++        new_scores.reserve(scores.size());
++        for (size_t k : idx) { new_simplex.push_back(simplex[k]); new_scores.push_back(scores[k]); }
++        simplex.swap(new_simplex);
++        scores.swap(new_scores);
++        double best = scores[0];
++        double worst = scores.back();
++        double second_worst = scores[scores.size()-2];
++        double diff = std::abs(worst - best);
++        double rel = diff / (std::abs(best) + 1e-12);
++        if (diff <= ftol_abs || rel <= ftol_rel) break;
++        if (sc.stop_condition && sc.stop_condition()) break;
++        if (!std::isnan(sc.stop_score)) {
++            double cur_best_actual = is_min ? best : -best;
++            if ((is_min && cur_best_actual <= sc.stop_score) || (!is_min && cur_best_actual >= sc.stop_score)) break;
++        }
++        std::vector<double> centroid(N, 0.0);
++        for (size_t i = 0; i < simplex.size()-1; ++i) {
++            for (size_t d = 0; d < N; ++d) centroid[d] += simplex[i][d];
++        }
++        for (size_t d = 0; d < N; ++d) centroid[d] /= double(simplex.size()-1);
++        std::vector<double> xr(N);
++        for (size_t d = 0; d < N; ++d) xr[d] = clamp_double(centroid[d] + alpha * (centroid[d] - simplex.back()[d]), lb[d], ub[d]);
++        double rscore = score_of(xr);
++        if (rscore < scores[0]) {
++            std::vector<double> xe(N);
++            for (size_t d = 0; d < N; ++d) xe[d] = clamp_double(centroid[d] + gamma * (xr[d] - centroid[d]), lb[d], ub[d]);
++            double escore = score_of(xe);
++            if (escore < rscore) {
++                simplex.back() = xe; scores.back() = escore;
++            } else {
++                simplex.back() = xr; scores.back() = rscore;
++            }
++        } else if (rscore < second_worst) {
++            simplex.back() = xr; scores.back() = rscore;
++        } else {
++            std::vector<double> xc(N);
++            if (rscore < worst) {
++                for (size_t d = 0; d < N; ++d) xc[d] = clamp_double(centroid[d] + rho * (xr[d] - centroid[d]), lb[d], ub[d]);
++            } else {
++                for (size_t d = 0; d < N; ++d) xc[d] = clamp_double(centroid[d] + rho * (simplex.back()[d] - centroid[d]), lb[d], ub[d]);
++            }
++            double cscore = score_of(xc);
++            if (cscore < worst) {
++                simplex.back() = xc; scores.back() = cscore;
++            } else {
++                for (size_t i = 1; i < simplex.size(); ++i) {
++                    for (size_t d = 0; d < N; ++d) {
++                        simplex[i][d] = clamp_double(simplex[0][d] + sigma * (simplex[i][d] - simplex[0][d]), lb[d], ub[d]);
++                    }
++                    scores[i] = score_of(simplex[i]);
++                }
++            }
++        }
++    }
++    size_t best_idx = 0;
++    for (size_t i = 1; i < scores.size(); ++i) if (scores[i] < scores[best_idx]) best_idx = i;
++    double best_score_actual = is_min ? scores[best_idx] : -scores[best_idx];
++    return {simplex[best_idx], best_score_actual};
++}
++} // namespace detail
++
++class SimplexOptimizer : public Optimizer<SimplexOptimizer> {
++    using Base = Optimizer<SimplexOptimizer>;
++    friend Base;
++    template<class Func, class...Args>
++    Result<Args...> optimize(Func&& func,
++                             std::tuple<Args...> initvals,
++                             Bound<Args>... bounds)
++    {
++        const size_t N = sizeof...(Args);
++        std::vector<double> init(N), lb(N), ub(N);
++        metaloop::apply(detail::ToVector(init), initvals);
++        metaloop::apply(detail::BoundsFiller(lb, ub), bounds...);
++        for (size_t i=0;i<N;++i) init[i]=detail::clamp_double(init[i], lb[i], ub[i]);
++        bool is_min = (this->dir_ == OptDir::MIN);
++        auto res_pair = detail::nelderMead<Func, Args...>(func, init, lb, ub, this->stopcr_, is_min);
++        Result<Args...> result;
++        metaloop::apply(detail::FromVector(res_pair.first), result.optimum);
++        result.score = res_pair.second;
++        result.resultcode = SUCCESS;
++        return result;
++    }
++public:
++    inline explicit SimplexOptimizer(const StopCriteria& scr = {}): Base(scr) {}
++};
++
++template<> struct OptimizerSubclass<Method::L_SIMPLEX> { using Type = SimplexOptimizer; };
++
++class SubplexOptimizer : public Optimizer<SubplexOptimizer> {
++    using Base = Optimizer<SubplexOptimizer>;
++    friend Base;
++    template<class Func, class...Args>
++    Result<Args...> optimize(Func&& func,
++                             std::tuple<Args...> initvals,
++                             Bound<Args>... bounds)
++    {
++        const size_t N = sizeof...(Args);
++        std::vector<double> init(N), lb(N), ub(N);
++        metaloop::apply(detail::ToVector(init), initvals);
++        metaloop::apply(detail::BoundsFiller(lb, ub), bounds...);
++        for (size_t i=0;i<N;++i) init[i]=detail::clamp_double(init[i], lb[i], ub[i]);
++        bool is_min = (this->dir_ == OptDir::MIN);
++        auto res_pair = detail::nelderMead<Func, Args...>(func, init, lb, ub, this->stopcr_, is_min);
++        Result<Args...> result;
++        metaloop::apply(detail::FromVector(res_pair.first), result.optimum);
++        result.score = res_pair.second;
++        result.resultcode = SUCCESS;
++        return result;
++    }
++public:
++    inline explicit SubplexOptimizer(const StopCriteria& scr = {}): Base(scr) {}
++};
++
++template<> struct OptimizerSubclass<Method::L_SUBPLEX> { using Type = SubplexOptimizer; };
+ 
+ class ParticleswarmOptimizer {
+ public:
+@@ -14,14 +224,16 @@
+         return *this;
+     }
+ 
+-    inline void seed(unsigned long val) { nlopt::srand(val); }
++    inline void seed(unsigned long val) { std::srand(static_cast<unsigned>(val)); }
++private:
++    Method localmethod_ = Method::L_SIMPLEX;
+ };
+ 
+ template<>
+-struct OptimizerSubclass<Method::G_PARTICLESWARM> { using Type = ParticleswarmOptimizer; };
++struct OptimizerSubclass<Method::G_PARTICLE_SWARM> { using Type = ParticleswarmOptimizer; };
+ 
+ template<>
+-inline TOptimizer<Method::G_PARTICLESWARM> GlobalOptimizer<Method::G_PARTICLESWARM>(
++inline TOptimizer<Method::G_PARTICLE_SWARM> GlobalOptimizer<Method::G_PARTICLE_SWARM>(
+         Method localm, const StopCriteria& scr )
+ {
+     return ParticleswarmOptimizer (scr).localMethod(localm);
+@@ -30,4 +242,4 @@
+ }
+ }
+ 
+-#endif // GENETIC_HPP
++#endif // PARTICLESWARM_HPP
