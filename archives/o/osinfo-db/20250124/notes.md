@@ -63,5 +63,22 @@ ls $TEST_PREFIX/$DEFAULT_PREFIX/share/osinfo/
 - 通常通过osinfo-db-import工具安装，但本平台没有此工具，手动复制数据文件即可
 ---
 
-**编译结束**: 2026-06-08 20:57
+**编译结束**: 2026-08-26 00:34
 **最终状态**: built
+
+## 重试会话复验记录（2026-09-20）
+
+第 2 次尝试接续修复：服务端校验 PR #6637 时报 `sha mismatch`（前序会话
+result.json 的 commit_hash 取自错误仓库状态，与 PR 分支头不一致），本包
+配方本身 CI/AI 检视均已通过，无需改动 conanfile.py/conandata.yml/test_package。
+
+本次动作：
+
+1. 检出 `feat/osinfo-db-20250124`，本地复验 `conan create`（ohos-aarch64
+   profile）——test_package 通过：`version=20250124, os_xml=930, total_files=1077`
+2. 手工下载源码核验 sha256：`7ca717f0...7250` 与 conandata.yml 一致，
+   并将 manifest.yaml 中空缺的 `source.sha256` 字段补齐
+3. 推送本提交更新 PR 头部 SHA，重新触发 CI 并确认通过后，以正确的
+   pr_url/pr_number/commit_hash/branch 重写 result.json
+
+**复验结论**: 配方自包含可复现，数据包安装结构与版本校验均正常。
