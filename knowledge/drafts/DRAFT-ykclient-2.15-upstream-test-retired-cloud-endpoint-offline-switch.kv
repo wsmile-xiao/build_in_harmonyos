@@ -1,0 +1,91 @@
+# ═══ Draft knowledge entry — 上游测试断言依赖已退役的第三方在线服务：用上游自带离线开关宏，并按四层口径申报 ═══
+# Timestamp: 2026-09-22
+# Software: ykclient 2.15（通用：任何测试套件断言外部 HTTP 服务响应、且上游自带 offline/without-internet 开关宏的包）
+# Gate: 配方 build() 内真实执行上游测试（conan create / CI 同源）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: DRAFT-ykclient-2.15-upstream-test-retired-cloud-endpoint-offline-switch
+title: 上游测试的断言目标（第三方在线服务端点）已停用，导致用例在任何平台都无法成立：改用上游自带离线开关宏让网络断言走 SKIPPED 分支，并按"静态声明/开关排除/运行进入/SKIPPED 次数"四层口径申报
+trigger_tool: autoconf|automake|make check|conan
+phase: testing
+error_signature: 'validation request, expect REPLAYED_OTP|Test SKIPPED|api\.yubico\.com/wsapi/2\.0/verify\
+  返回 HTTP 403（断言目标是外部服务的响应值，服务停用后该断言在任何平台都不成立）'
+severity: 3
+category: upstream-test|network-dependency|test-accounting|offline-switch
+match_keywords: retired endpoint, HTTP 403, TEST_WITHOUT_INTERNET, Test SKIPPED, wsapi, 在线校验端点, 断言目标失效, 上游自带开关, make check 网络用例, rule4 少报
+keywords: 上游测试, 已退役端点, 外部服务停用, 离线开关宏, TEST_WITHOUT_INTERNET, ifndef, SKIPPED,
+  测试账本, 四层口径, N_static, 编译期排除, 逐点归因, 不删用例, rule4
+prescan_pattern: TEST_WITHOUT_INTERNET|ifndef[[:space:]]+TEST_WITHOUT|api\.[a-z]+\.(com|net)
+prescan_globs: tests/**/*.c, test/**/*.*, **/*test*.c, **/Makefile.am
+safety_boundary: 仅适用于「断言目标是外部服务且该服务已停用、上游自身提供离线开关」的情形。反例一：
+  服务仍在但本机网络/证书受限——那是基础设施故障（R41 口径），不得用本条改判；反例二：上游**没有**
+  离线开关而需要改测试源码——属修改上游用例，必须逐项申报（§10），不适用本条的"零改动"结论；
+  反例三：为了让 make check 变绿而整体不执行或缩小分母，本条明确禁止
+approach: 交叉编译或受限网络下 `make check` 大面积失败/报错指向外部 HTTP 服务时，先确认该服务是否
+  **已停用**（本次实测目标端点返回 HTTP 403，且与本机网络无关）。若成立，不要删用例也不要整体跳测：
+  搜索上游是否自带离线开关宏（本例 `TEST_WITHOUT_INTERNET`，表现为网络断言块被
+  `#ifndef TEST_WITHOUT_INTERNET` 包住、#else 分支打印 Test SKIPPED）。在配方里通过
+  AutotoolsToolchain 的 `extra_cflags` 加 `-D<开关宏>` 启用，使网络断言走上游写好的 SKIPPED 分支、
+  离线断言照常真实执行；runner 仍以真实退出码参与 make check
+root_cause: 两层叠加。第一层在服务侧——上游用例把断言目标写死为某个第三方在线接口的响应值，服务方
+  停用或改版后该断言在任何环境都不成立（与 OHOS 适配无关，属**上游测试资产过期**）。第二层在申报侧——
+  开关宏生效后，测试数量呈现四个不同数字：静态 TEST() 标记点数、被 `#ifndef` 开关**从编译中排除**的
+  点数、运行期实际进入的点数、进入点内打印 SKIPPED 的次数（同一循环点可打印多次）。只报其中一个
+  （尤其是只报 runner 数或只报进入数）会被 rule4 按"实测数大于申报数"判少报
+affected_scope: 测试套件断言依赖外部 HTTP 服务、且上游提供离线/无网络开关宏的包。已知实例：
+  ykclient 2.15（YubiCloud wsapi v1 校验端点，现返回 403）。同族可探测对象：各类在线校验/授权
+  客户端库（Yubico 系、OAuth/OTRS 客户端、远程 license 校验库）
+verification_cmd: |-
+  命中判据四段（每段都能重跑，本例读数在括号内）：
+  1) 总标记点数与 N_static：grep -cE '^[[:space:]]*TEST\(' tests/<suite>.c（36）；
+     awk '/^#if 0/{f=1} /^#endif/{f=0} f&&/TEST\(/{c++} END{print c+0}' 得死区数（9）
+     ⇒ N_static = 36 - 9 = 27
+  2) 开关编译排除数（注意：不能数 #ifndef 指令行，实测指令行有 16 处，与排除点数无关）：
+     awk '/#ifndef TEST_WITHOUT_INTERNET/{d=1} /^#endif/{d=0} d&&/TEST\(/{c++} END{print c+0}'
+     tests/<suite>.c（6）⇒ 启用开关后进入运行期的点数 = 27 - 6 = 21
+     （实测 tests/selftest.log 的 'Test <file>:<line>' 头行数 = 21，与推算吻合）
+  3) SKIPPED 次数与纯离线点数：make check 后
+     grep -c 'Test SKIPPED' tests/selftest.log（16）；按头行分段统计含 SKIPPED 的进入点（15）
+     ⇒ 纯离线完整断言点数 = 21 - 15 = 6
+  4) runner 层：sed -n '4,12p' tests/test-suite.log（TOTAL 1 / PASS 1 / FAIL 0 / ERROR 0）
+
+rec_priority: 1
+rec_approach: enable-upstream-offline-switch-and-report-four-layer-counts
+rec_description: 配方编译期以 `extra_cflags` 注入上游自带离线开关宏（本例 `-DTEST_WITHOUT_INTERNET`），
+  使网络断言走上游 SKIPPED 分支、离线断言真实执行；正文/notes 按四层口径写清 N_static、开关排除数、
+  运行进入数、SKIPPED 次数，并对每个含网络断言的进入点给出**具体技术原因**（端点已由服务方停用，
+  附本次实测的 403 事实），不得写"没网络/环境问题"这类空白理由
+rec_command: 配方 generate() 内 `tc.extra_cflags.append("-DTEST_WITHOUT_INTERNET")` 后照常
+  `make -j1 check`；申报前用 verification_cmd 三段各自复算一遍
+rec_auto_fix: false
+rec_impl: 配方侧（编译期宏 + 账本口径），不改上游源码、不改测试断言
+fallback_priority: 2
+fallback_approach: itemized-test-skipped-with-external-evidence
+fallback_description: 若上游没有离线开关，则不得改判通过：要么按 §10 逐用例 `test_skipped` 附技术原因
+  并保留真实分母，要么把网络断言改为本地可控的对端（自建 mock 服务），后者属修改上游测试需逐项申报
+fallback_command: make -j1 check 保持原样，逐点在 notes/正文列 test_skipped 与原因
+fallback_auto_fix: false
+fallback_impl: 配方侧或测试侧改造
+principles: 测试资产过期是"上游事实"而非"适配缺陷"，但**申报口径必须可复算**；判据是能不能把
+  27/21/15/16 这四个数各自指向一条命令输出；不为通过率删用例或缩分母
+caused_by: 第三方在线服务停用使上游断言目标失效 + 交叉/受限网络环境下该类失败易被误判为适配问题
+causes: 若整体不跑 make check 会被 rule4 判"0 执行不通过"；若只按 runner 数（1）申报又会被"实测数
+  大于申报数"判少报；若误删网络用例则失去上游真实覆盖并需在正文逐项说明
+similar_to: 与 §12.72（rule4 实测口径的四种上游形态）同属申报口径，但 §12.72 未覆盖"启用上游自带离线
+  开关后静态声明数、编译期排除数、运行进入数与 SKIPPED 次数四者不一致"这一层，本条补的就是这一层。
+  draft-review 实测 TOP3（均远低于 0.30 create 阈值）——E465（worker 上用户目录 .so 被拒的 LD_PRELOAD
+  场景，score 0.05）、E228（automake/libtool 测试 wrapper 与 .libs 真实 ELF 不同名，0.05）、
+  E458（release tarball 未打包 bundled 依赖源码，0.04），均不同根因不同签名
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-ykclient-2.15-upstream-test-retired-cloud-endpoint-offline-switch.md
+last_updated: 2026-09-22
+source_event: ykclient 2.15 配方 build() 内真实执行上游 selftest 套件。改前（不加开关）网络用例直接
+  向已停用的 YubiCloud wsapi 端点发请求；改后（-DTEST_WITHOUT_INTERNET）test-suite.log 呈
+  TOTAL 1 / PASS 1 / FAIL 0，selftest.log 内 21 个 TEST() 点进入、16 次 Test SKIPPED、
+  6 个纯离线点完整断言执行。消费者测试 test_package 另有 15 条断言全通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: QC-10
+source_pr:
+source_commit:
