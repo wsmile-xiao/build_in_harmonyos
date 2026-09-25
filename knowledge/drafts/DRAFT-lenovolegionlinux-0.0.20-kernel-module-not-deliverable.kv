@@ -1,0 +1,138 @@
+# ═══ Draft knowledge entry — 内核态/DKMS 交付物不可由用户态适配框架交付 ═══
+# Timestamp: 2026-09-20
+# Software: lenovolegionlinux 0.0.20 (LenovoLegionLinux)
+# Gate: 无法适配记录 — W3 构建尝试实测失败（clang 15 + OHOS aarch64 sysroot）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-lenovolegionlinux-0.0.20
+trigger_tool:           clang|make|kbuild|dkms|conan
+phase:                  preflight|configure|build
+error_signature:        fatal error: 'linux/acpi\.h' file not found|
+                         make: \*\*\* No rule to make target 'modules'\.  Stop\.
+
+severity:               2
+category:               kernel|platform|limitation|detection|toolchain|build-system
+match_keywords:         obj-m, Kbuild, KSRC, /lib/modules, dkms.conf, insmod, modprobe,
+                         linux/acpi.h, linux/platform_device.h, linux/hwmon.h,
+                         linux/platform_profile.h, _UAPI_LINUX_MODULE_H, UAPI stub,
+                         kernel headers, MODULE_LICENSE, module_init
+title:                  内核态/DKMS 交付物（Kbuild obj-m）不可由 OHOS PC 用户态适配框架交付：判定清单、实测证据与上报路径
+
+root_cause: >
+  一类软件的交付物本身位于内核空间，例如 out-of-tree Linux 内核模块（上游 Makefile 使用
+  obj-m += <mod>.o 且 KSRC := /lib/modules/$(KERNELVERSION)/build）、DKMS 包或发行版
+  kernel driver。OHOS PC 的适配框架（conan recipe + HNP 非特权用户空间沙箱）只构建与交付
+  用户态制品（lib/、bin/、include/），对这类交付物存在三重结构性障碍：
+  1) 构建需要目标机内核构建树（KSRC），而 OHOS aarch64 sysroot 不是内核源码/构建树
+     （实测：sysroot 的 usr/src、usr/include/linux/kconfig.h、usr/include/config、
+     usr/include/generated 均不存在；以 sysroot 作 KSRC 执行 Kbuild 报
+     "No rule to make target 'modules'"）；
+  2) 所需头是内核内部头，sysroot 只提供 UAPI 桩（lenovolegionlinux 实测 16 个头中
+     sysroot 仅有 5 个，其中 4 个为 _UAPI_ 桩，linux/module.h 仅 23 行、只含
+     MODULE_INIT_IGNORE_MODVERSIONS 与 MODULE_INIT_IGNORE_VERMAGIC 两个常量，
+     MODULE_LICENSE/module_init/module_exit/THIS_MODULE/struct module/__init 命中均为 0；
+     缺 linux/acpi.h、linux/platform_device.h、linux/hwmon.h、linux/platform_profile.h、
+     linux/moduleparam.h 等 11 个），编译在第一个内核头处即终止；
+  3) 交付需要 root 权限把 .ko 安装到 /lib/modules/<kver>/kernel/... 并用 insmod/modprobe
+     加载，沙箱既无权限也无内核模块支持面；
+  此外该类驱动通常强绑定特定硬件/固件（本例：DMI_SYS_VENDOR=="LENOVO" 的 Legion 机型 +
+  ACPI/WMI 嵌入式控制器 PNP0C09，源码中 wmi_ 395 次、acpi_ 131 次），目标设备无对应
+  固件接口，功能既不可用也不可在 CI 验证；而只交付其中的用户态子集（本例 python/ CLI）
+  会使包失去全部功能，属平台禁止的裁剪。
+
+affected_scope:         以 Linux 内核模块为交付物的软件（out-of-tree 内核驱动、DKMS 包、
+                        发行版 kernel driver、需与内核同版本编译的模块）在 OHOS PC
+                        用户态适配流程中的任务；同族软件即使语言为 C/C++ 也不适用本流程。
+
+verification_cmd:       # 1) 交付物性质（是否内核态）
+                        grep -n "obj-m\|KERNELDIR\|KSRC\|/lib/modules" Makefile */Makefile 2>/dev/null
+                        # 2) 逐头核验目标 sysroot（UAPI 桩 vs 真实内核头）
+                        #    ⚠ 头名必须用 sed 按尖括号抽取：tr -d "#include<>" 删的是字符集合，
+                        #    会把 <linux/module.h> 破坏成 " x/mo.h"，导致所有头恒报 MISSING（伪证据）；
+                        #    grep 前缀放宽以覆盖 "#include<x.h>" 与缩进写法
+                        grep -hE '^[[:space:]]*#[[:space:]]*include[[:space:]]*<[^>]+>' *.c \
+                          | sed -E 's/.*<([^>]+)>.*/\1/' | sort -u | while read -r h; do
+                          test -e "$SYSROOT/usr/include/$h" && echo "present $h" || echo "MISSING $h"; done
+                        # 3) UAPI 桩判定（真实内核头含模块注册 API）
+                        grep -c "_UAPI_\|MODULE_LICENSE\|module_init" "$SYSROOT/usr/include/linux/module.h"
+                        # 4) 内核构建树存在性
+                        test -e "$SYSROOT/usr/src" -o -e "$SYSROOT/usr/include/linux/kconfig.h" \
+                          && echo "kernel tree?" || echo "no kernel build tree"
+                        # 5) 实测编译（应失败于第一个内核内部头）
+                        clang --target=aarch64-linux-ohos --sysroot="$SYSROOT" -fsyntax-only <module>.c
+
+rec_priority:           1
+rec_approach:           detect-kernel-space-then-escalate
+rec_description: >
+  判定顺序（全部为可复现命令，见 verification_cmd）：
+  1) 看交付物是否内核态：上游 Makefile 出现 obj-m / KERNELDIR / KSRC /
+     /lib/modules/$(uname -r)/build，或存在 dkms.conf、DEST_MODULE_LOCATION 即为内核态；
+  2) 逐头核验目标 sysroot：统计「缺失」与「UAPI 桩」两类；UAPI 桩的判据是文件行数很小
+     （本例 20~62 行）且含 _UAPI_ 宏、不含 MODULE_LICENSE/module_init/struct module；
+  3) 确认无内核构建树（usr/src、linux/kconfig.h、include/config、include/generated）；
+  4) 用交叉 clang 做一次 -fsyntax-only 实测，取第一个失败的头部作为证据；
+  5) 检查是否存在「不裁剪」的交付路径：若唯一可行交付是用户态子集（例如本例 python/ 层），
+     而该子集的功能依赖内核模块暴露的接口（本例硬编码 /sys/module/legion_laptop/...），
+     则该子集只能作为**分层交付**的一部分，不得裁剪后宣称适配完成；
+  6) 处置（2026-09-20 修订：分层交付 + 分层声明，配对草稿
+     DRAFT-lenovolegionlinux-0.0.20-kernel-module-source-snapshot-delivery）：
+     (a) 用户态层作为 package_type=application 制品真实交付并验证（site-packages + bin 入口，
+         内核模块缺失时优雅降级，conan create 必须真实通过）；
+     (b) 内核模块源码按上游原目录布局随包交付（share/<pkg>/upstream/），并做 fail-closed
+         静态契约校验（源码缺失即非 0 退出）；
+     (c) 在 PR 描述与 manifest.yaml 中**分层声明**内核态构建/加载未执行（不声明通过）；
+     (d) 上游用例中可在 OHOS 侧执行的部分（本例 tests/test_python_cli.sh 与
+         tests/test_python_cli_installed.sh）必须进 CI 真实执行，其余逐条给出实测阻塞证据；
+     仅当用户态子集完全不能独立工作且无任何可交付制品时，才退回「无法适配」issue 通道
+     （先例 archives/a/aegisub/3.4.2/notes.md → issue #2136；无 conanfile.py 的包目录会被
+     CI 判 No packages to build 而失败）。
+  禁止项：不得伪造内核头、不得以空壳 stub 让源码「编译通过」、不得交付预编译 .ko、
+  不得把「源码契约通过」声称为「内核态功能通过」。
+
+rec_command:            grep -n "obj-m\|KSRC\|/lib/modules" Makefile */Makefile; \
+                         clang --target=aarch64-linux-ohos --sysroot="$SYSROOT" -fsyntax-only <module>.c
+rec_auto_fix:           false
+rec_impl:               kernel-module-space-detect-then-source-snapshot-delivery
+
+fallback_priority:      2
+fallback_approach:      report-unadaptable-via-issue (仅当无任何可交付制品时)
+fallback_description:   若连用户态子集也无法作为独立制品交付（既无 recipe 也无二进制），
+                         按仓库手册以「无法适配」issue 申报（不建无 conanfile.py 的包 PR）；
+                         其余情况走主方案的 (a)(b)(c)(d) 分层交付，不得改用裁剪交付。
+fallback_command:       (无 — 见 archives/a/aegisub/3.4.2/notes.md 的 issue 申报格式)
+fallback_auto_fix:      false
+fallback_impl:          unadaptable-issue-report
+
+forbid_1_pattern:       (touch|echo|cat >)[^\n]*include/linux/(acpi|wmi|platform_device|hwmon|moduleparam)\.h
+forbid_1_reason:        伪造内核内部头或留空壳 stub 只能让编译通过，不产出可加载的内核模块
+forbid_1_consequence:   交付物在目标机不可加载、无任何功能，评审判定为伪造/裁剪，任务失败
+
+forbid_2_pattern:       (insmod|modprobe)\s+\S+\.ko
+forbid_2_reason:        适配框架运行在非特权用户空间沙箱内，且目标机不加载第三方未签名模块
+forbid_2_consequence:   构建/测试阶段必然失败（权限或内核拒绝），并污染 worker 环境
+
+principles:
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-lenovolegionlinux-0.0.20-kernel-module-not-deliverable.md
+last_updated:           2026-09-20
+source_event:           lenovolegionlinux 0.0.20 适配任务（平台任务 contrib-13021）：
+                        W3 实测 clang 15 + OHOS aarch64 sysroot 编译内核模块失败
+                        （linux/acpi.h 缺失，exit 1）；Kbuild 方式无内核构建树
+                        （No rule to make target 'modules'，exit 2）
+authors:                lkyz
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     1
+metrics_confidence:     0.0
+metrics_last_used:      2026-09-20
