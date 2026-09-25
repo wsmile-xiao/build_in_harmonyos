@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-E725-libmng-2.0.3-readdisplay-callbacks-virtual-clock — mng_readdisplay 的 8 回调强制契约与无限循环动画的虚拟时钟消费者模式
+# 触发事件: libmng 2.0.3 适配（消费者测试依次踩 NOCALLBACK/段错误/APPTIMERERROR/死循环四坑）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-E725-libmng-2.0.3-readdisplay-callbacks-virtual-clock
+trigger_tool:           gcc|clang|ld|test
+phase:                  testing
+error_signature:        mng_readdisplay.*MNG_NOCALLBACK|
+                         rc=3$|
+                         Segmentation fault.*getcanvasline|
+                         mng_readdisplay.*MNG_APPTIMERERROR|
+                         rc=902$|
+                         超时.*display_resume|timeout.*readdisplay
+
+severity:               2
+category:               api-contract, testing, animation, ohos
+match_keywords:         libmng, MNG, 回调 ABI, NOCALLBACK,
+                         readdisplay, getcanvasline 返回 mng_ptr,
+                         settimer, gettickcount, NEEDTIMERWAIT,
+                         display_resume, 虚拟时钟, 无限循环动画,
+                         TERM chunk, APPTIMERERROR, 帧延时
+title:                  libmng mng_readdisplay 强制 8 回调（缺一 NOCALLBACK），动画流需 settimer=TRUE + display_resume 循环 + 虚拟时钟，否则段错误/APPTIMERERROR/死循环
+
+topic: >
+  libmng 2.0.3 用 mng_readdisplay 解码 MNG 流时的完整回调契约与动画
+  语义（上游头文件注释不完整，gtk-mng-view 示例依赖 GTK 主循环，无
+  独立消费者参考）。消费者依次会踩四个坑，每个坑的错误特征完全不同：
+  1) 缺任一必需回调 → MNG_NOCALLBACK(3)；
+  2) getcanvasline 返回 NULL → display 阶段直接写行缓冲 → 段错误(139)；
+  3) settimer 返回 FALSE → set_delay 立即 MNG_APPTIMERERROR(902)；
+  4) settimer 返回 TRUE 但 gettickcount 恒定 → 帧延时永不满足，
+     display_resume 死循环（无限循环动画 TERM iteration=0 永不结束）。
+
+root_cause: >
+  1) mng_readdisplay 入口 MNG_VALIDCB 强制校验 8 个回调: openstream/
+     closestream/readdata/processheader/getcanvasline/refresh/
+     gettickcount/settimer，缺任一直接返回 MNG_NOCALLBACK(3)——
+     错误码不指明缺哪个；
+  2) getcanvasline 契约是返回可写行缓冲指针(mng_ptr)，display 直接
+     memcpy 进该缓冲，返回 NULL 即崩；
+  3) settimer 语义: TRUE=已安排唤醒（库返回 NEEDTIMERWAIT 等消费者
+     循环 display_resume），FALSE=无定时器支持——但 set_delay 路径
+     对 FALSE 直接 APPTIMERERROR(902)，FALSE 不可用；
+  4) 帧延时判定用 gettickcount 差值: 恒定时钟下延时永不满足;
+     官方 fixture linux.mng 的 TERM chunk action=3 iteration=0
+     表示无限循环, 真实时间等价无限等待。
+
+durable_solution: >
+  消费者测试的完整模式（已在 libmng/2.0.3 test_package 31/31 验证）:
+  1) 注册全部 8 回调（memalloc/memfree 也建议注册走 calloc/free）；
+  2) getcanvasline 返回真实尺寸的静态行缓冲（宽度×4 RGBA8）;
+  3) settimer 记录 msecs 到全局变量并返回 TRUE;
+  4) gettickcount 返回全局虚拟时钟;
+  5) readdisplay 返回 NEEDTIMERWAIT(15) 时循环:
+     虚拟时钟 += pending_delay（无则 +1）→ mng_display_resume;
+  6) 无限循环动画（TERM iteration=0）加有界退出: 播满一帧
+     （canvas_lines >= 图高）即成功断言, 循环上限 ~1000 防挂死;
+  7) 断言用"≥整帧行数"而非精确值（多帧动画 getcanvasline 按帧累加）。
+
+impact: >
+  libmng/2.0.3 test_package 31/31 通过（含动画整读、程序化 MNG 构造、
+  错误/截断输入）; test_ohos H5 真实解码 4/4。
+
+recovery: >
+  任何用 libmng/JNG/MNG 解码的消费者（图像查看器、图标引擎、测试
+  程序）按此模式实现; 也可迁移到任何"回调 + 定时器驱动动画"的 C 库
+  （如 giflib 无定时器版可直接跳过 3-6 步）。
+
+evidence_chain: >
+  task libmng-2.0.3 适配（feat/libmng-2.0.3 分支）
+    - libmng_hlapi.c 2225-2240 MNG_VALIDCB 序列（8 回调强制）;
+    - 逐坑实测: rc=3 → 段错误 139 → rc=902 → 120s 超时, 四种症状
+      对应四个缺陷;
+    - linux.mng TERM payload 0300000000017fffffff（action=3,
+      iteration=0x00000000 无限, delay=0x017fffff）;
+    - 修复后 31/31 + 10/10 全绿（tap.txt 全量输出留档）。
+
+verification_cmd: >
+  conan create archives/l/libmng/2.0.3 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing 2>&1 | grep "checks=31 fails=0"
+
+limitations: >
+  libmng 2.0.3 API 特定（2.x 系列同构）; 1.0.x 回调集略少（无
+  gettickcount/settimer 的用法不同）。虚拟时钟模式要求 settimer 与
+  gettickcount 配套使用，单独改任一个都会引入新坑（3↔4 组合）。
+
+rec_priority:           1
+rec_approach:           full-callbacks-virtual-clock（8 回调全注册 + settimer TRUE + 虚拟时钟 display_resume 有界循环）
+rec_description: >
+  消费者按完整契约注册 8 回调; getcanvasline 返回真实行缓冲;
+  settimer 记录延时返回 TRUE; gettickcount 读虚拟时钟;
+  NEEDTIMERWAIT 循环内推进虚拟时钟再 display_resume; 无限循环动画
+  加 canvas_lines >= 高度退出条件与 1000 次上限。
+rec_command:            conan create archives/l/libmng/2.0.3 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing 2>&1 | grep "checks=31 fails=0"
+rec_auto_fix:           false
+rec_impl:               consumer-test-virtual-clock
+
+doc_file:               knowledge/drafts/DRAFT-E725-libmng-2.0.3-readdisplay-callbacks-virtual-clock.md
+last_updated:           2026-09-11
+source_event:           libmng 2.0.3 消费者测试依次踩 NOCALLBACK/段错误/APPTIMERERROR/死循环四坑
+authors:                 atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-11
+
+draft:                  true
+contributor_id:         ffieldd22_-
