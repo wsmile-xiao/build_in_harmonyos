@@ -1,0 +1,91 @@
+#====================================================================
+# E600 (draft) — libpng ≤1.2 私有 API 在 libpng ≥1.4 下全面失效
+# 对应的人类文档: E600-draft-D74E.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E600
+trigger_tool:           clang
+phase:                  compilation
+error_signature: |
+  define PNG_INTERNAL
+  call to undeclared function 'png_handle_(IHDR|tIME|tEXt|zTXt|iTXt|IEND|unknown)'
+  implicit declaration of function 'png_handle_
+  no member named '(idat_size|chunk_name|mode|jmpbuf|bit_depth|color_type|interlace_type|num_text|mod_time|valid)' in 'png_(struct|info)_def'
+  incomplete definition of type 'struct png_(struct|info)_def'
+  use of undeclared identifier 'ZLIB_VERSION'
+  'png_read_destroy' was not declared
+  png_convert_to_rfc1123.*deprecated
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               portability, headers, compat, build-system
+prescan_pattern:        define\s+PNG_INTERNAL|png_handle_(IHDR|tEXt|zTXt|iTXt|tIME)|png_ptr->(idat_size|chunk_name|mode)|info_ptr->(bit_depth|width|height|color_type|num_text|mod_time|valid)|png_read_destroy
+prescan_globs:          *.c, *.h, *.cc, *.cpp
+match_keywords:         libpng, PNG_INTERNAL, png_handle_IHDR, png_handle_tEXt, png_struct_def, info_ptr, png_read_destroy, ZLIB_VERSION, png_convert_to_rfc1123, png_jmpbuf
+title:                  面向 libpng 1.0/1.2 写的程序在 libpng ≥1.4 下编译失败：私有 API 与结构体字段全部不再公开
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             libpng 1.4 起把 png_struct / png_info 改成不透明类型并停止随 png.h 安装内部头，四类旧写法同时失效：
+ (1) #define PNG_INTERNAL 不再有任何效果，png_handle_IHDR/tEXt/zTXt/iTXt/tIME/IEND/unknown、png_crc_read、png_read_data 等分块级函数不再对外声明；
+ (2) png_ptr->idat_size/chunk_name/mode/jmpbuf 与 info_ptr->bit_depth/width/height/color_type/interlace_type/num_text/text/mod_time/valid 等字段直接访问报 incomplete type；
+ (3) png.h 不再间接包含 zlib.h，旧代码里的 ZLIB_VERSION 变成未声明标识符；
+ (4) png_read_destroy() 已移除，png_convert_to_rfc1123() 自 1.6 起带 PNG_DEPRECATED。
+ 失败点分散在几十行上，容易被误判成"缺头文件"或"编译器太严格"，从而走上逐行 #ifdef 的歧路。
+affected_scope:         所有直接操作 libpng 内部结构的历史 PNG 工具/库（pngmeta、pngcheck 衍生工具、老 SOIF/RDF 摘要器、图形套件内置的 PNG 读取器）。
+ 与运行平台无关：任何链接 libpng ≥1.4 的目标都会命中；鸿蒙 PC 适配时因制品仓只提供 libpng 1.6 而必然触发。
+verification_cmd:       grep -nE 'PNG_INTERNAL|png_handle_|png_ptr->|info_ptr->' <src>/*.c
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           port-to-public-libpng-api
+rec_description:        整体迁移到公共 API，而不是逐个错误打补丁：删掉自制的分块遍历函数，改用 png_read_png(png_ptr, info_ptr, 0, NULL) 一次读完（IDAT 之后的 tEXt/tIME 同样进 info）；
+ 字段改用 png_get_IHDR / png_get_text / png_get_tIME / png_get_valid 读取；setjmp 用 png_jmpbuf(png_ptr)；销毁用 png_destroy_read_struct(&png_ptr, &info_ptr, &end_info)（取地址而非传值）；
+ 时间格式化改用 png_convert_to_rfc1123_buffer(char out[29], ...) 并处理其返回 0（tIME 非法）的情形；另外显式 #include <zlib.h> 补回 ZLIB_VERSION。
+rec_command:            sed -i 's/^#define PNG_INTERNAL$//' <src>/*.c && grep -n 'png_handle_\|png_ptr->\|info_ptr->' <src>/*.c
+rec_auto_fix:           false
+rec_impl:               manual-patch
+
+fallback_priority:      2
+fallback_approach:      pin-legacy-libpng
+fallback_description:   仅当上游代码量大到无法迁移时，才考虑把依赖钉在 libpng 1.2.x 分支；该分支早已停止安全维护，制品仓通常也不提供，实际适配中应优先走迁移方案。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       -D__OHOS__|#ifdef __OHOS__
+forbid_1_reason:        这是 libpng 版本演进导致的可移植性问题，与运行平台无关，用平台宏包住等于把上游 bug 伪装成平台差异
+forbid_1_consequence:   补丁被 PF5 平台宏闸拦截；即使放行，同一份代码在其它平台仍然编译不过
+forbid_2_pattern:       png_struct_def|png_info_def|struct png_struct
+forbid_2_reason:        在自己的代码里重新声明 libpng 内部结构体以"恢复"字段访问，会与实际编译 libpng 时的配置产生 ABI 不一致
+forbid_2_consequence:   编译能过但运行时读到错位字段，表现为随机乱码或段错误，比编译失败更难定位
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               E600-draft-D74E.md
+last_updated:           2026-09-20
+source_event:           pngmeta 1.11 适配（archives/p/pngmeta/1.11），libpng 1.6.58.3
+# 查重证据：index.tsv 中 libpng 相关条目为 0；draft-review 判定 create（最相似项 score 0.0）。
+# 已知先例仅存在于归档笔记而非知识图谱：pngnq 1.1（archives/p/pngnq/）记录过
+# "libpng ≥1.5 的 png.h 不再内嵌 zlib.h"，那是本条目第 (3) 项的子集，其余三项（PNG_INTERNAL
+# 失效、结构体字段私有化、png_read_destroy 移除 / rfc1123 弃用）无任何已有条目覆盖。
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-20
