@@ -1,0 +1,97 @@
+# ═══ Draft knowledge entry — 用 SIG_SETMASK 探测 BSD 信号 API，在 OHOS/musl 必然选错分支
+# SIG_SETMASK 是 POSIX 强制定义的宏（sigprocmask 的 how 参数），任何 libc 都有；
+# 而 BSD 的 sigvec()/struct sigvec 早被 sigaction 取代，musl/OHOS 从不提供，
+# 现代 glibc 也已移除 → `#ifdef SIG_SETMASK` 恒真 → 编译期 incomplete type
+# Software: socket 1.1（utils.c init_signals()，2 处实证）
+# Gate: conan-verify G1-G4/L2/L4/L5 全绿 + test_package 运行时 7/7（qemu-aarch64 实跑，含 SIGTERM 路径）
+# Status: DRAFT
+
+id:                     DRAFT-socket-1.1-bsd-sigvec-probe-sig-setmask
+severity: 3
+category: portability|libc|signal|ohos
+trigger_tool: clang|make|conan
+phase: build
+
+keywords: struct sigvec, sigvec, SIG_SETMASK, incomplete type, BSD signals, sigaction, sigfillset, musl, init_signals, socket, 4.3BSD, feature probe
+error_signature: "error: variable has incomplete type 'struct sigvec'"
+match_keywords: struct sigvec, incomplete type sigvec, SIG_SETMASK, sigvec undeclared, BSD signal API, implicit declaration of function 'sigvec'
+
+root_cause: |
+  (1) 4.2/4.3BSD 时代的代码普遍用 `#ifdef SIG_SETMASK` 当作「本机是 BSD 信号 API」
+  的特性探测。探测的是**宏**，而要用的是 `sigvec()` / `struct sigvec` 这套 **API 本体**，
+  两者没有依赖关系。
+  (2) POSIX.1 要求 <signal.h> 定义 SIG_SETMASK（sigprocmask/pthread_sigmask 的 how
+  取值），musl/OHOS 当然定义（实测 sysroot/usr/include/signal.h:32 `#define SIG_SETMASK 2`）；
+  而 sigvec 在 OHOS sysroot 头文件里出现 0 次（`grep -rlw sigvec` 命中 0 个文件）。
+  (3) 于是探测恒为真 → 选中 BSD 分支 → `static struct sigvec svec = { handler, ~0, 0 }`
+  报 incomplete type，`sigvec(i, &svec, NULL)` 报隐式声明。
+  (4) 同一探针在现代 glibc 上同样失效（本机 gcc 实测：定义了 SIG_SETMASK，
+  `struct sigvec` 报 storage size isn't known），所以这是「老 BSD 特性探测」通病；
+  区别在于 musl 完全没有 BSD 兼容兜底层，OHOS 上无论加什么 _BSD_SOURCE 之类的
+  feature test macro 都救不回来，必须改代码。
+
+rec_approach: replace-bsd-sigvec-with-posix-sigaction
+rec_description: |
+  直接删掉 `#ifdef SIG_SETMASK` 探测与 BSD 分支，统一改用 POSIX sigaction：
+  `struct sigaction sact; sact.sa_handler = h; sigfillset(&sact.sa_mask);
+  sact.sa_flags = 0; sigaction(i, &sact, NULL);`。
+  sigfillset 对应原 sigvec 的 `sv_mask = ~0`（处理器执行期间屏蔽所有信号），
+  `sa_flags = 0` 对应 `sv_flags = 0`，语义与上游意图等价，且无平台宏分支，
+  glibc/musl/OHOS 通吃。
+  **不要**退化成裸 `signal(i, h)`（Debian socket 1.1-10.1 的做法是把宏改名成
+  `BSD_SIG_SETMASK` 让探测恒假、落到 `signal()` 分支）：那样会丢掉处理器执行期间的
+  信号屏蔽，且 signal() 的重入/重置语义在各 libc 上本就不统一。
+  也不要用 `-D__OHOS__` 之类平台宏绕道（R-patches：补丁里禁止平台宏）。
+rec_command: |
+  # patches/0003-utils.c.patch（unified diff, patch -p1）
+  -#ifdef SIG_SETMASK           /* only with BSD signals */
+  -    static struct sigvec svec = { exitsig, ~0, 0 } ;
+  -#endif
+  +    struct sigaction sact ;   /* POSIX replacement for BSD sigvec */
+  +    sact.sa_handler = exitsig ;
+  +    sigfillset(&sact.sa_mask) ;
+  +    sact.sa_flags = 0 ;
+   ...
+  -#ifdef SIG_SETMASK
+  -        sigvec(i, &svec, NULL) ;
+  -#else
+  -        signal(i, exitsig) ;
+  -#endif
+  +        sigaction(i, &sact, NULL) ;
+rec_auto_fix: false
+
+fallback_approach: disable-bsd-branch-by-renaming-the-probe
+fallback_description: |
+  改不动信号语义时（例如补丁要尽量贴近发行版），可把探测宏改名成一个永不定义的名字
+  （Debian 用 BSD_SIG_SETMASK），让代码落到 `signal()` 分支。编译能过，但会丢失
+  处理器屏蔽字，属降级方案。
+
+forbidden: |
+  ❌ 用 -D_BSD_SOURCE / -D_DEFAULT_SOURCE 试图让 musl 吐出 struct sigvec
+     原因: musl 根本没有这个结构体，feature test macro 无法凭空造出 BSD 兼容层
+     后果: 编译错误原样复现，白白浪费一轮交叉编译
+  ❌ 手写一个 struct sigvec 并 typedef 到 sigaction 上
+     原因: sv_mask 是 int 位掩码、sa_mask 是 sigset_t，信号号 > 31 时语义不等价
+
+affected_scope: |
+  任何 4.2/4.3BSD 年代、用 `#ifdef SIG_SETMASK` 选择信号 API 的 C 程序，交叉编译到
+  OHOS/musl 时必触发。已实证一例：socket 1.1（utils.c init_signals()，结构体定义 +
+  调用点共 2 处）。同族风险：同期的网络/终端小工具（BSD 风格 daemon、老 telnet/ftp
+  衍生工具、sigvec/sigblock/sigsetmask 一族 API 的使用者）。
+  识别方法：交叉编译前 `grep -rn "sigvec\|sigblock\|sigsetmask\|sigpause" src/`，
+  命中即预判此坑。
+
+verification: |
+  # 根因探针（本机实测，2026-09-21）
+  printf '#include <signal.h>\nint main(void){struct sigvec v;(void)v;return 0;}\n' > /tmp/p.c
+  gcc -c /tmp/p.c                                     # glibc: storage size of 'v' isn't known
+  aarch64-unknown-linux-ohos-clang -c /tmp/p.c        # musl:  incomplete type 'struct sigvec'
+  grep -rn "define SIG_SETMASK" $OHOS_SYSROOT/usr/include/signal.h   # → 命中（宏在）
+  grep -rlw "sigvec" $OHOS_SYSROOT/usr/include/ | wc -l              # → 0（API 不在）
+  # 修复后门禁
+  conan create archives/s/socket/1.1 -pr:h=ci/conan/profiles/ohos-aarch64 \
+    -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+  # test_package 在 qemu-aarch64 下运行时 7/7 通过，其中 SIGTERM 用例直接验证
+  # 新装的 sigaction 处理器：退出码 241 == 256 + (-SIGTERM)，stderr 打印信号名
+
+doc_file:               knowledge/drafts/DRAFT-socket-1.1-bsd-sigvec-probe-sig-setmask.md
