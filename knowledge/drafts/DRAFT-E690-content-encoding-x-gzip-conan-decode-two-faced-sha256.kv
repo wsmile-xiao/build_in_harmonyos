@@ -1,0 +1,84 @@
+#====================================================================
+# DRAFT-E690-content-encoding-x-gzip-conan-decode-two-faced-sha256 -
+# 上游服务器给 .tar.gz 无条件打 Content-Encoding: gzip/x-gzip → Conan 的
+# requests/urllib3 栈透明解码一层，按"解码面"算 sha256 与 conandata 记录的
+# "文件面"必然 mismatch；两条已过审修法（blepvco urllib 回退保权威 sha /
+# bsdgames 改记解码面 sha+双面披露）与三步定性法（把网络瞬时与解码定式分开）。
+# simstring 1.0（chokkan.org）OHOS arm64 实测：两轮采信轮同错 G2 红。
+#
+# 场景: simstring 1.0 源 URL https://www.chokkan.org/software/dist/
+#       simstring-1.0.tar.gz（233446B，官方 dist==Debian .dsc PGP 同值
+#       386f5e18…f0e4171）；conan create 的 source() 恒报 Provided
+#       386f5e18 / Computed fa0fa296（=gunzip 后 plain tar 1187840B 的 sha）。
+# 适用: 一切"官方源是静态站 .tar.gz/.tar.xz/.zip 且响应带 Content-Encoding"
+#       的包；conan 2.x requests 下载栈（OHOS 适配版同）；也覆盖 CI 预下载
+#       curl 缺失后退化为 conan 直连下载的 worker（device-facts §一.4 同族）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E690-content-encoding-x-gzip-conan-decode-two-faced-sha256
+source_lib:             simstring 1.0
+trigger_tool:           conan-verify
+phase:                  source
+error_signature:        "ConanException: sha256 hash failed for .* Provided hash:.*Computed hash|Computed hash: [0-9a-f]{64}"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, download, http, checksum, provenance
+match_keywords:         sha256 hash failed, Computed hash, Content-Encoding, x-gzip, gzip, urllib3 decode, requests, transparent decompression, two-faced sha256, 双面 sha256, conandata sha256, gunzip -c, curl -O, check_sha256, urllib fallback, chokkan.org, ibiblio, blepvco, bsdgames-nonfree, libquantum, source(), get(), W4 复算, 同源锚定, 文件面, 解码面, 传输编码, integrity check, provenance
+title: '上游服务器对 .tar.gz 打 Content-Encoding: gzip/x-gzip：Conan 栈透明解码后算出"解码面" sha256，与 conandata"文件面"必然 mismatch——urllib 回退保权威 sha（或改记解码面+双面披露）'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: 'HTTP Content-Encoding 允许服务器声明实体的传输编码：静态站（Apache AddEncoding / nginx gzip 模块 / 中间盒）对 .tar.gz 一律回 200 + Content-Encoding: gzip 或 x-gzip（simstring 实测 4 形态：A-E=gzip→gzip；identity/bogus/缺省→x-gzip，body 恒为原文件 233446B），语义上"实体=解码后的 tar"；Conan 2.x 用 requests.Session 发请求（urllib3 decode_content 默认开）→ iter_content 吐解码后的 plain tar（1187840B）→ file_downloader.check_checksum 按 conandata 的文件面 sha256 校验必然失败；且 conan 只豁免 content-encoding=="gzip" 的长度检查，x-gzip 形态还会先撞 "Transfer interrupted before complete"（blepvco 实测）。curl/urllib(不认该头)保存的是文件面字节 → 同一 URL 两个客户端拿到两个不同但各自自洽的"正确字节"，这是确定性定式而非网络瞬时。'
+affected_scope:         所有 conan 2.x source()/get() 下载带该响应头的静态源（.tar.gz/.tgz/.zip 等同理）；设备与 CI worker 只要走 conan 直连下载就同命中（worker PATH 无 curl、CI 预下载 subprocess curl 在 OHOS 恒 ENOENT → 退化 conan 下载，blepvco notes 实测）；W4/外部审查独立复算默认走 curl 文件面，故"记哪个面"直接决定审计结论。
+verification_cmd: "三步定性（落 $TASK_DIR，秒级）：①gunzip -c <文件面tarball> | sha256sum == 报错 Computed 值（simstring: fa0fa296…，命中即判解码定式）；②python3 -c \"import urllib.request,hashlib;print(hashlib.sha256(urllib.request.urlopen('<url>').read()).hexdigest())\" == conandata sha256（urllib 不认 Content-Encoding，文件面自证）；③curl -sS -H 'Accept-Encoding: identity' -D - -o /dev/null <url> | grep -i content-encoding（simstring 实测仍回 x-gzip ⇒ 请求头诱导无效，排除\"改请求头可修\"）。三步全命中 = 解码定式，禁止当网络瞬时重跑。"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           urllib-fallback-keep-canonical-file-sha
+rec_description: '先例 a（blepvco 0.1.0，已过本仓 CI/Review）：source() 先走 get()；捕 ConanException 后打 warning（引根因与两面 sha 实测值），用 urllib.request.urlopen 拉原始字节（urllib 不做 Content-Encoding 解码 = 文件面）落盘 → check_sha256(self, archive, self.conan_data["sources"]["sha256"]) 兜底校验 → unzip(strip_root=True) → os.remove。conandata sha256 保持**文件面权威值**（官方发行物/Debian .dsc/curl -O 同源可复现），W4 与外部审查用 curl 独立复算才不会判 mismatch；PR 正文与 notes 双面披露：curl -O→文件面 sha、gunzip -c→解码面 sha（simstring: 386f5e18… / fa0fa296…）+ Content-Encoding 形态实测。'
+rec_command:            python3 -c "import ast;ast.parse(open('conanfile.py').read())" && grep -n "urlopen\|check_sha256" conanfile.py   # 回退落位自检后进采信轮
+rec_auto_fix:           true
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      declare-decoded-sha-with-two-faced-comment
+fallback_description:    先例 b（bsdgames-nonfree 2.17，已过审）：双 gzip 场景（解码一层后仍是 .tar.gz、无法取原始文件字节）才用——conandata sha256 改记 conan 落盘字节（解码面）并在注释里同时写出 curl 文件面 sha 与解码面 sha。**单 gzip 文件禁用**：解码面是 plain tar，审查方 curl -O 复算得到文件面 sha 会判 mismatch（W4 独立复算必踩）。先例 c（libquantum 1.0.0）改用无该响应头的权威镜像 CDN——要求镜像与发行物字节同源且有第二方 distinfo 佐证，无镜像时不可用。
+fallback_command:        sha256sum <文件面tarball>; gunzip -c <文件面tarball> | sha256sum   # 两面都要写进 conandata 注释/PR 正文
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       盲目重跑采信轮.*sha256|更换随机镜像.*绕过.*sha
+forbid_1_reason:        解码定式是确定性的：同 URL 同栈每轮必同错，盲跑只是烧轮次（simstring 两轮实测同值）；换无佐证镜像会丢同源锚定并触发 PF7 源 URL 闸
+forbid_1_consequence:   同类红累积到停损线仍未定位；或源被审出搬运/不可复现直接 FAIL
+
+forbid_2_pattern:       sha256:\s*[0-9a-f]{64}.*#.*(curl -O 一致)|把解码面 sha 声明为与 curl 一致
+forbid_2_reason:        双面 sha 声明互相矛盾——解码面 sha 不可能等于 curl -O 结果，声明错面会让审计方按"可复现命令复算不符"判伪造/不一致
+forbid_2_consequence:   审计与外部审查按 sha mismatch/证据造假处理（P0 档），整轮返工
+
+principles:             P001, P011, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E299, E017]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-E690-content-encoding-x-gzip-conan-decode-two-faced-sha256.md
+last_updated:           2026-09-23
+source_event:           simstring 1.0 OHOS arm64：采信轮两轮同错 G2 sha256 hash failed（Provided 386f5e18 / Computed fa0fa296）三步定性坐实解码定式，按 blepvco 先例 urllib 回退修复
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                dsh-agent-session-de4f7e68
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-23

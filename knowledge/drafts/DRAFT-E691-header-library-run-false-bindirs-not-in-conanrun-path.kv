@@ -1,0 +1,87 @@
+#====================================================================
+# DRAFT-E691-header-library-run-false-bindirs-not-in-conanrun-path -
+# header-library 类型包的 cpp_info.bindirs 永不进 conanrun PATH：
+# VirtualRunEnv 只对 require.run=True 的依赖跑 runenv_from_cpp_info
+# （tools/env/virtualrunenv.py:79），header-library 的 requires 边 run=False
+# → 生成的 conanrunenv-*.sh 变量表为空 → test_package 里裸调包内二进制
+# 恒 Error 127（命令不存在），而包内产物完好、直跑 rc=0，极具迷惑性。
+# 修法：test() 把 package_folder/bin 作 $1 显式传给测试脚本（abiword 族先例）；
+# 或 package_type=application 使 run=True（aa3d 先例，但头文件库标 application
+# 属表意失真，本任务裁决否决）。simstring 1.0 OHOS arm64 实测（round4）。
+#
+# 场景: conan create 全绿到 test_package：消费者二进制（12 断言）通过，
+#       随后 test.sh 五查全部 [TP] FAIL (rc=127)、test() 报 Error 1 while
+#       executing——日志里 simstring: command not found，但包目录
+#       p/b/.../p/bin/simstring 实物在、直跑 -v rc=0。
+# 适用: 一切 package_type="header-library"（及其它 run=False 类型）却 install
+#       了可执行文件的包的 test_package；也覆盖"conanrun 里 PATH 空表"的任何
+#       排查（生成脚本 for v in 空循环即该机制的指纹）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E691-header-library-run-false-bindirs-not-in-conanrun-path
+source_lib:             simstring 1.0
+trigger_tool:           conan-verify
+phase:                  test
+error_signature:        "Error in test\\(\\) method.*Error 1 while executing|command not found.*simstring|\\[TP\\] FAIL .*\\(rc=127\\)"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, runenv, package_type, test_package, environment
+match_keywords:         header-library, package_type, require.run, VirtualRunEnv, conanrun, conanrunenv, runenv_from_cpp_info, cpp_info.bindirs, PATH, Error 127, command not found, bindirs 不进 PATH, test_package, run=False, application, aa3d, abiword, 显式传参, package_folder/bin, 空变量表, for v in, 装载健康但找不到命令, simstring
+title:                  header-library 的 bindirs 永不进 conanrun PATH（VirtualRunEnv 只认 require.run=True）：test_package 裸调包内二进制恒 127——显式传 bin 目录修（abiword 先例），勿改 package_type 表意
+
+# ═══ Layer 2: 诊断层 (Diagnostic) ═══
+root_cause:             conan 的 VirtualRunEnv.environment() 逐依赖判断 `if require.run:` 才调 runenv_from_cpp_info（其内部本有 _prepend_path("PATH", cpp_info.bindirs)）——requires 边的 run 标志由被依赖包 package_type 推导：application/shared 等可运行类型 run=True，header-library（及静态库）run=False ⇒ bindirs 被短路、runenv 不含任何 PATH 项。生成的 conanrunenv-<cfg>-<arch>.sh 里 `for v in` 变量列表为空（这就是机制指纹），source 后包内二进制不在 PATH，test_package 五查全部 rc=127 command not found。迷惑点：包目录产物完整（bin+include+share）、直跑 rc=0、消费者 C++ 测试全过——失败只发生在"裸命令名"这一步，容易误判为打包缺失或装载器问题。
+affected_scope:         一切 header-library/static 等 run=False 类型却安装了可执行文件的包的 test_package；一切依赖 conanrun PATH 找被测二进制的脚本/CI 步骤（G4/L2 类 smoke 若按裸名调用同样踩）；conan 2.x 全系（判定在 VirtualRunEnv 内部，与平台无关）。
+verification_cmd:       三步定性（落 $TASK_DIR）：①看生成脚本指纹：cat <build>/generators/conanrunenv-release-armv8.sh——含 `for v in` 空循环即中机制；②包内实物与直跑：conan cache path "<ref>:<package_id>" 后 ls bin/ && <pkg>/bin/<tool> -v; echo rc=$?（rc=0 排除打包/装载）；③PATH 探针：bash -c '. <generators>/conanrun.sh; command -v <tool> || echo NOT on PATH; <tool> …; echo rc=$?'（NOT on PATH + 127 即坐实）。对照判别：同仓 package_type=application 的包（aa3d）同法 source conanrun 后 command -v 命中。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pass-bindir-as-explicit-test-arg
+rec_description: "test() 里显式取 bin 目录作参数传给测试脚本：bindir = os.path.join(self.dependencies[\"<pkg>\"].package_folder, \"bin\")；self.run(f'\"{bash}\" \"{script}\" \"{bindir}\"', env=\"conanrun\")；脚本头部 BIN_DIR=\"${1:?usage: test.sh <package-bin-dir>}\"、SIM=\"$BIN_DIR/simstring\"，全部检查用 \"$SIM\"（缺参即报错退出，不静默降级）。abiword-plugin-* 族 test_package（test_docbook.sh 等 `${1:?}`/`$1` 取 pkg_folder）与本包同型、多例过 CI。优点：不动 package_type、不依赖 runenv 规则、缺参早失败。"
+rec_command:            bash -n test_package/test.sh && python3 -c "import ast,io;ast.parse(io.open('test_package/conanfile.py',encoding='utf-8').read())" && bash test_package/test.sh "$(conan cache path '<pkg>/<ver>@<ref>:<pkg_id>')/bin"   # build 目录内复验 5/5 rc=0
+rec_auto_fix:           true
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      package_type-application-for-run-true
+fallback_description:    改 package_type="application" 使 requires 边 run=True → conanrun PATH 自动含 bindirs、脚本可裸调（aa3d 先例：application + test.sh 里裸 aa3d 过 CI）。代价与禁界：头文件库标 application 属**表意失真**，对下游消费语义有害、W4/外部审查大概率挑刺（本任务 simstring 裁决明确否决）；仅当包本质就是"工具为主、头文件为附带"时才用。另一条同族路：自测脚本不依赖 PATH，直接用 self.dependencies 传绝对路径（与首选同效）。
+fallback_command:        grep -n 'package_type' conanfile.py   # application 时须确认软件级 commands.json 存在（PF8/L0k）
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+forbid_1_pattern:       cp .*bin/.* \$PATH|ln -s .*package_folder/bin /usr/local/bin|export PATH=.*\.conan2/p/
+forbid_1_reason:        往系统/全局 PATH 注入缓存路径或伪造命令入口，把测试环境问题掩盖成"能找到命令"，跨机不可复现且可能污染共享设备
+forbid_1_consequence:   假绿：CI worker 与他人环境不一致；提交面若含注入则被审出环境篡改（P0 档）
+
+forbid_2_pattern:       self.run\(f?["'].*(test|smoke).*["'](,\s*env=)?\)?\s*$|print\(.*OK.*\)\s*;\s*return 0
+forbid_2_reason:        用"跳过调用/只打印成功"消 127——PF3 空壳测试闸与 R34 欺骗判据直接命中
+forbid_2_consequence:   verdict=fail 一票否决，整轮返工
+
+principles:             P001, P011, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E690, E299]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-E691-header-library-run-false-bindirs-not-in-conanrun-path.md
+last_updated:           2026-09-23
+source_event:           simstring 1.0 OHOS arm64：round4 采信轮 test_package 五查 rc=127，virtualrunenv.py:79 require.run 短路机制钉死，按 abiword 先例显式传 bin 目录修复
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                dsh-agent-session-de4f7e68
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-23
