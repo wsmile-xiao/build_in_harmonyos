@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-conan2-cmake-presets-requires-toolchain-generate - Conan 2.x cmake_layout 不产出 CMakePresets.json，CMake(self) 前必须 generate() 显式 CMakeToolchain
+#====================================================================
+
+id:                     DRAFT-conan2-cmake-presets-requires-toolchain-generate
+trigger_tool:           conan|cmake
+phase:                  generate|configure
+error_signature:        CMakePresets\.json was not found.*generators folder|Check that you are using CMakeToolchain as generator
+
+severity:               2
+category:               conan|cmake|build-system|toolchain|packaging
+match_keywords:         CMakePresets.json, cmake_layout, CMakeToolchain, CMake(self), generate(), conan 2.x, generators folder, cache_variables, CMAKE_SYSTEM_NAME, CMAKE_SYSTEM_PROCESSOR, OHOS, armv8, aarch64
+title:                  Conan 2.x 中 cmake_layout 只定义目录布局、不产出 CMakePresets.json，CMake(self) 构建前必须在 generate() 显式 CMakeToolchain().generate()；OHOS 目标按 E092 设 CMAKE_SYSTEM_NAME=Linux（库名仅括号案例：kicad-library-symbols 10.0.5 首报）
+
+root_cause:             Conan 2.x 的配方生成管线是 layout() → generate() → build() 三段：layout() 阶段的 cmake_layout(self) 只计算 build/ generators/ 目录布局（build/<build_type> 与 build/<build_type>/generators），本身不生成任何工具链文件；CMakePresets.json 由 CMakeToolchain 在 generate() 阶段写入 generators 目录。若配方只写了 cmake_layout 而没有 generate()（或 generators 属性）产出 CMakeToolchain，conan 2.x 不会隐式补生成任何 generator，随后 build() 里 CMake(self) 初始化时按约定到 <build>/Release/generators 目录找 CMakePresets.json，找不到即抛 ConanException: CMakePresets.json was not found ... Check that you are using CMakeToolchain as generator。这是配方作者把 cmake_layout 误当"完整 CMake 集成"的语义错位：layout 解决"文件放哪"，generate 解决"工具链从哪来"，二者缺一不可。
+
+affected_scope:         任何使用 conan 2.x CMake 帮助类（CMake/CMakeConfigure/CMakeBuild 等）且配方缺 generate() 的项目（cmake_layout 与 CMake 帮助类齐备、唯独没有 CMakeToolchain 生成步骤）；数据型 CMake 安装工程与普通编译型工程同样受影响。kicad-library-symbols 10.0.5 首报。
+
+verification_cmd:       >
+                        # 自包含最小 recipe 二步探针：任意装有 conan 2.x + CMake 的环境，
+                        # 复制整段到空目录执行。STEP1 期望复现 "CMakePresets.json was not
+                        # found"（exit 非 0）；STEP2 加 generate() 后期望 exit=0。
+                        mkdir -p presets-probe/src && cd presets-probe &&
+                        printf 'cmake_minimum_required(VERSION 3.15)\nproject(probe NONE)\ninstall(CODE "message(STATUS probe-install-ok)")\n' > src/CMakeLists.txt &&
+                        cat > conanfile.py <<'EOF'
+                        import os
+                        from conan import ConanFile
+                        from conan.tools.cmake import CMake, cmake_layout
+                        HAS_GENERATE = os.environ.get("PROBE_HAS_GENERATE") == "1"
+                        if HAS_GENERATE:
+                            from conan.tools.cmake import CMakeToolchain
+                        class ProbeConan(ConanFile):
+                            name = "probe"
+                            version = "0.1.0"
+                            settings = "os", "compiler", "build_type", "arch"
+                            def layout(self):
+                                cmake_layout(self)
+                            if HAS_GENERATE:
+                                def generate(self):
+                                    CMakeToolchain(self).generate()
+                            def build(self):
+                                cmake = CMake(self)
+                                cmake.configure()
+                                cmake.build()
+                        EOF
+                        conan profile detect --force
+                        conan create . ; echo "STEP1 exit=$? 期望非 0 且报 CMakePresets.json was not found（复现）"
+                        PROBE_HAS_GENERATE=1 conan create . ; echo "STEP2 exit=$? 期望 0（通过）"
+
+rec_priority:           1
+rec_approach:           generate-cmaketoolchain-with-ohos-platform-guard
+rec_description:        在配方中显式补 generate()：实例化 CMakeToolchain 并调用其 generate()，使 conan 在 generate 阶段把 conan_toolchain.cmake 与 CMakePresets.json 写入 cmake_layout 约定的 generators 目录，CMake(self) 即可正常初始化；OHOS 目标按 E092 的平台语义（CMake 无 HarmonyOS 平台模块）以 cache_variables 设 CMAKE_SYSTEM_NAME=Linux、CMAKE_SYSTEM_PROCESSOR 按 armv8→aarch64 映射（conan settings 的 armv8 即 64 位 ARM，CMake 侧名称为 aarch64），对 project(... NONE) 的纯数据工程与 POSIX 纯库均无副作用。
+rec_command:            from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout; def layout(self): cmake_layout(self); def generate(self): tc = CMakeToolchain(self); (tc.cache_variables.__setitem__("CMAKE_SYSTEM_NAME", "Linux"), tc.cache_variables.__setitem__("CMAKE_SYSTEM_PROCESSOR", "aarch64" if str(self.settings.arch) == "armv8" else str(self.settings.arch)) if self.settings.os in ("Linux", "OHOS") else None); tc.generate(); def build(self): cmake = CMake(self); cmake.configure(); cmake.build()
+rec_auto_fix:           false
+rec_impl:               conan-recipe-generate-method
+
+fallback_priority:      2
+fallback_approach:      bypass-cmake-helper-direct-system-cmake
+fallback_description:   若环境暂时无法走 generate()（如受限的旧 conan 包装层），可在 build() 绕开 CMake(self) 帮助类，用 self.run 直接调用系统 cmake 并手工传入平台与构建类型变量。诚实权衡：此路失去 conan 工具链与依赖集成——conanbuild 环境、profile conf（编译器路径、sysroot）、CMakeDeps 依赖路径均不再自动注入，跨 profile 可复现性丧失，仅作临时退路，不得作为常规方案沉淀。
+fallback_command:       def build(self): self.run("cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64"); self.run("cmake --build build"); # package() 侧改用 cmake --install build 或 copy 收集产物，同样需手工传 CMAKE_INSTALL_PREFIX
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-self-run-cmake
+
+forbid_1_pattern:       (^|/)CMakePresets\.json$
+forbid_1_reason:        禁止把生成物 CMakePresets.json 预置进配方/export_sources/仓库来"喂饱" CMake(self) 的存在性检查：该文件由 CMakeToolchain 按具体包 ID 的构建目录生成，路径含 conan 缓存哈希（p/<pkg>/<package_id>/b/.../generators），预置副本随包 ID 与构建布局变化必然失配。
+forbid_1_consequence:   本机某一次构建可能侥幸通过，掩盖 generate()/CMakeToolchain 缺失这一根因；换版本、换 profile、换缓存路径后 CMake(self) 再次崩溃，且预置文件里的编译器/平台变量脱离 conan profile 管理，失去可复现性并污染审计（生成物入库）。
+
+principles:             P-TOOLCHAIN-001
+causes:                 []
+caused_by:              []
+similar_to:             [E092, E526]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-conan2-cmake-presets-requires-toolchain-generate.md
+last_updated:           2026-09-18
+source_event:           kicad-library-symbols 10.0.5 HarmonyOS PC 适配：CI attempt3 于 build() 抛 ConanException: CMakePresets.json was not found，补 generate()+CMakeToolchain 后权威 CI 全绿
+authors:                why6666666
+source_pr:              pending（本 run 单提交随分支交付，未推送）
+source_commit:          pending-review（随 amend 变动，合并时回填）
+
+metrics_success_count:  0
+metrics_fail_count:     0
