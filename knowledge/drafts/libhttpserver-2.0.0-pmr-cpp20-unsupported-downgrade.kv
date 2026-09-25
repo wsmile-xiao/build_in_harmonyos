@@ -1,0 +1,116 @@
+# ═══ Draft knowledge entry — C++20 std::pmr/memory_resource unavailable on OHOS
+# libc++ 15004: downgrade-to-C++17-release workflow + autotools bootstrap cross wiring
+# Software: libhttpserver 0.19.0 (assigned upstream tag 2.0.0)
+# Gate: conan-verify G2 (conan create, ohos-aarch64) + upstream tests 149/152 + W3 local green
+# Status: DRAFT
+
+id: libhttpserver-2.0.0-pmr-cpp20-unsupported-downgrade
+severity: 3
+category: platform|toolchain|cpp-standards|build-system
+trigger_tool: clang++|configure|conan
+phase: build
+
+keywords: memory_resource, std::pmr, C++20, libc++ 15004, clang 15, AX_CXX_COMPILE_STDCXX, env_unsupported, version downgrade, autoreconf, tool_requires, ac_cv, AC_CHECK_LIB, cross-compiling, lstdc++
+error_signature: fatal error: 'memory_resource' file not found|ld\.lld: error: unable to find library -lstd\+\+|Unable to connect daemon to port
+match_keywords: memory_resource, pmr, C++20, libc++, clang 15, memory_resource file not found, lstdc++, autoreconf, ac_cv_lib, cross compile, AC_CHECK_LIB, MHD_start_daemon, umask 077
+
+root_cause: |
+  (1) The OHOS toolchain ships libc++ 15004 (clang 15). The standard <memory_resource>
+  header (C++17 pmr) is NOT present — only experimental/memory_resource exists under
+  llvm/include/c++/v1/. Upstream releases whose core implementation uses std::pmr
+  (arena allocators) cannot compile: 'memory_resource' file not found. This is a
+  toolchain capability boundary, not a package defect; patching out pmr means
+  rewriting the upstream core data structures (violates minimal-patch).
+  (2) Old-generation autotools releases (libhttpserver 0.19.0) hardcode
+  AM_LDFLAGS="-lstdc++" in configure.ac; OHOS uses libc++, so the link fails with
+  "ld.lld: error: unable to find library -lstdc++". Upstream already handles this
+  per-OS (freebsd branch clears AM_LDFLAGS) — the fix is a new linux-ohos* case
+  branch, not a platform macro.
+  (3) Release tarballs that ship no ./configure force build() to run autoreconf -fi;
+  automake/libtool must come in as tool_requires (resolved by the BUILD profile).
+  (4) Cross AC_CHECK_HEADER/AC_CHECK_LIB probes execute host test programs —
+  impossible under cross; they must be preseeded via ac_cv_* env vars plus
+  CPPFLAGS/LDFLAGS pointing at the conan dependency package.
+
+rec_approach: cpp20-pmr-downgrade-to-cpp17-release + ohos-host-os-link-branch + autoreconf-tool-requires + acv-preseed
+rec_description: |
+  (1) When an assigned upstream tag requires C++20 std::pmr: verify the toolchain
+  boundary first (echo '#include <memory_resource>' | clang++ -std=c++20 -x c++ -
+  -fsyntax-only -> fatal error), then check the previous release line for a C++17
+  no-pmr version and adapt that, documenting the env_unsupported evidence chain for
+  the assigned tag in notes.md (do NOT hack pmr out — it is the core design).
+  (2) For -lstdc++ hardcoding: add a linux-ohos* case branch next to the existing
+  freebsd branch that clears AM_LDFLAGS (pure build-system branch, no platform
+  macro — R8 compliant). Patch configure.ac BEFORE autoreconf so the branch also
+  lands in the generated configure.
+  (3) For no-configure tarballs: build_requirements tool_requires automake/1.18 +
+  libtool/2.5.4; run autoreconf -fi in source() or build() with the conanbuild env;
+  both -pr:h and -pr:b must be passed to conan create.
+  (4) Cross AC_CHECK preseeds: export ac_cv_header_<h>=yes and
+  ac_cv_lib_<lib>_<func>=yes in os.environ before autotools.configure(), with
+  CPPFLAGS=-I<dep>/include LDFLAGS=-L<dep>/lib in AutotoolsToolchain configure_args.
+  (5) After autoreconf, the generated configure embeds umask 077 (E011 HMDFS);
+  rewrite to umask 022 — idempotent-harmless on CI Linux workers.
+  (6) SSL upstream tests fail with "Unable to connect daemon to port" when the
+  libmicrohttpd dependency package was built --disable-https: that is a dependency
+  capability boundary (document as per-test exemption, not a package defect).
+
+rec_commands:
+  - "echo '#include <memory_resource>' | clang++ -std=c++20 -x c++ - -fsyntax-only  # toolchain boundary probe"
+  - "conan create archives/l/libhttpserver/0.19.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+
+solution: |
+  (1) Toolchain boundary probe — one line, runs anywhere the OHOS clang++ exists:
+  ```
+  echo '#include <memory_resource>' | clang++ -std=c++20 -x c++ - -fsyntax-only
+  # -> fatal error: 'memory_resource' file not found   (only experimental/ ships)
+  ```
+  (2) Version decision: count pmr coupling in the assigned tag
+  (`grep -c "std::pmr" -r src/` = 36 across http_request_impl / connection_state),
+  verify the previous release line is pmr-free (`grep -c "std::pmr"` = 0 on 0.19.0),
+  adapt the C++17 release; keep the full env_unsupported evidence chain for the
+  assigned tag in notes.md (probe output + pmr census + AX_CXX_COMPILE_STDCXX([20])).
+  (3) conanfile.py skeleton for the downgraded autotools release:
+  ```python
+  def build_requirements(self):
+      if self.settings.os == "OHOS":
+          self.tool_requires("automake/1.18")   # tarball ships no ./configure
+          self.tool_requires("libtool/2.5.4")
+  def build(self):
+      env = build_env()                       # conanbuild env
+      self.run("autoreconf -fi", env=env)     # bootstrap before configure
+      # cross AC_CHECK_* cannot run host programs -> preseed cache vars
+      env.define("ac_cv_header_microhttpd_h", "yes")
+      env.define("ac_cv_lib_microhttpd_MHD_start_daemon", "yes")
+      autotools = AutotoolsToolchain(self)
+      autotools.configure(configure_args=[...,"CPPFLAGS=-I<dep>/include","LDFLAGS=-L<dep>/lib"])
+      # conan create ... -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+  ```
+  (4) Patch 0001 (configure.ac): add a `linux-ohos*` case branch next to the
+  upstream freebsd branch that clears AM_LDFLAGS="-lstdc++" (OHOS links libc++).
+  Patch BEFORE autoreconf so the branch lands in the generated configure.
+
+fallback: >
+  If the previous release line is ALSO unusable (pmr already mandatory, or API
+  breakage unacceptable): (a) shim experimental/memory_resource behind a feature
+  macro as a stopgap — only when the library does not rely on pmr override
+  semantics; (b) do NOT hack pmr out of the core design — file the version
+  anomaly through the platform task channel: release the assigned-tag task and
+  re-import a correct-version task (proven here: platform task #13777 released
+  the unsupported 2.0.0 + #13910 re-imported 0.19.0 aligned to taskBranch);
+  (c) track SDK toolchain upgrades — once libc++ ships <memory_resource>,
+  revisit the 2.x line.
+
+verify_builds: #53017, #53145, #53426, #53664
+verification: |
+  conan create on ohos-aarch64 (clang 15) succeeds for 0.19.0: autoreconf bootstrap
+  + patched linux-ohos link branch + ac_cv preseeds; lib/libhttpserver.so packaged;
+  test_package 6/6 (real embedded HTTP server start/GET/stop roundtrip); upstream
+  littletest suite executed locally: 152 tests / 811 checks, 808 pass, 3 SSL-only
+  failures exempted (libmicrohttpd package built without HTTPS).
+
+related:
+  - archives/a/abiword-plugin-clarisworks/3.0.8/conanfile.py (autoreconf + tool_requires + E114 umask precedent)
+  - knowledge/graph/E011.kv (HMDFS umask 077 config.status)
+  - archives/l/libmicrohttpd/1.0.1 (dependency; built --disable-https)
+last_updated: 2026-09-20
