@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-E685-autotools-legacy-configscripts-harmonyos-hmdfs-umask -
+# 老 autotools 发行包在 OHOS 上的两处平台闸：2009/2010 老 config.guess/sub
+# 不识 HarmonyOS/aarch64（E007 官方一键脚本对老基线只成功一半），以及
+# autoconf `umask 077 && mktemp -d "./confXXXXXX"` 在本设备落盘属主映射 +
+# 丢 group-w 后 config.status 必炸（E110/E125 的真实根因，原地改 umask 即可，
+# 不必换构建目录）。simstring 1.0 OHOS arm64 实测。
+#
+# 场景: simstring 1.0（2010-03 autotools 发行包，config.guess/sub 时间戳
+#       2009-04-27）在 HarmonyOS PC（aarch64, clang 15.0.4, HongMeng
+#       Kernel 1.12.0, HMDFS 工作区）从零适配：./configure 先报
+#       "cannot guess build type"，打完 E007 补丁后又在 config.status 阶段
+#       报 "can't create ./confXXXXXX/subs1.awk: Permission denied"。
+# 适用: 一切 bundle 老 GNU config 脚本（时间戳 <2011，无 aarch64/linux-ohos）
+#       的 autotools 软件包，以及一切在本设备跑 autoconf configure 的包
+#       （config.status/configure 的临时目录 idiom 是 autoconf 内置的，
+#       所有 autotools 包共享同一失败面）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E685-autotools-legacy-configscripts-harmonyos-hmdfs-umask
+source_lib:             simstring 1.0
+trigger_tool:           configure
+phase:                  build
+error_signature:        "configure: error: cannot guess build type|unable to guess system type|Invalid configuration `aarch64-unknown-linux-ohos'.*not recognized|can't create \\./conf[A-Za-z0-9]+/subs1\\.awk|config files machinery"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, configure, config.guess, config.sub, filesystem, permissions, portability
+match_keywords:         config.guess, config.sub, cannot guess build type, HarmonyOS, uname -s, linux-ohos, aarch64, patch-autotools-ohos.pl, E007, E110, E125, umask 077, mktemp -d, confXXXXXX, subs1.awk, Permission denied, config.status, HMDFS, group-w, shared uid mapping, 0002-configure-umask-022.patch, 老 config 脚本, 临时目录权限, a52dec, aalib, cross_compiling
+title:                  老 config.guess/sub 不识 HarmonyOS 且 autoconf umask 077 临时目录在本设备必炸：E007 脚本只对现代基线有效，umask 077→022 原地修
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             两处独立机制叠加：(1) 发行包 bundle 的 config.guess/config.sub 时间戳 2009-04-27，CPU 表无 aarch64、OS 表无 HarmonyOS/linux-ohos，uname -s=HarmonyOS 落入兜底分支报 "cannot guess build type"，官方 scripts/patch-autotools-ohos.pl 的定位锚（__ANDROID__/LIBC=android、android-linux、linux-uclibc）在老基线上不存在 → 只改 config.guess 一处（cg=1 sub=0，自检 Score 1/5 rc=1），config.sub 仍拒 aarch64-unknown-linux-ohos；(2) 设备 euid=20020085 而任何目录落盘属主恒被映射为共享 uid 20001006（gid 1006 共享组），写权限完全依赖 group-w——autoconf configure/config.status 内置 `umask 077 && mktemp -d "./confXXXXXX"`，toybox mktemp -d 的目录权限对 umask 敏感（077→drwx--S--- 丢 group-w → touch 拒绝；022→drwxr-s--x；002→drwxrws--x 均可写），于是 config.status 写 ./confXXXXXX/subs1.awk 必报 Permission denied（E110/E125 把它记成"HMDFS 限制"，并推荐换 VPATH/非 HMDFS 目录——同一文件系统下机制相同，换目录无效）。
+affected_scope:         所有 bundle 老 GNU config 脚本（<2011）的 autotools 包（config.guess/sub 两处必改）；以及所有跑 autoconf configure 的包（configure 与由其生成的 config.status 各含同一 umask 077 idiom，两处都要改；新老 autoconf 同款）。与 E007（平台三元组）、E110/E125（config.status 权限）同族，本条给出两者的判据与最小修法。
+verification_cmd:       复现 1（老基线半成功）：cd $TASK_DIR/w0/minpatch && cp <上游>/config.guess <上游>/config.sub . && perl $TARGET_REPO/scripts/patch-autotools-ohos.pl config.guess config.sub; echo rc=$? → 老基线 rc=1 cg=1 sub=0，现代基线（/storage/Users/currentUser/.harmonybrew/share/automake-1.19/config.guess，timestamp 2026-05-17）rc=0 且 sh ./config.guess 输出 aarch64-unknown-linux-ohos。复现 2（umask 根因）：cd $TASK_DIR/w0 && ( umask 077; d=$(mktemp -d permAXXXXXX); ls -ld $d; touch $d/x; echo touch_rc=$? ) → drwx--S--- touch_rc=13；同一命令 umask 022 → drwxr-s--x touch_rc=0。修后验证：sh ./configure --prefix=... rc=0 且 "checking build system type... aarch64-unknown-linux-ohos"（未传 --build/--host，非交叉编译）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           legacy-config-minimal-patch-plus-umask-relax
+rec_description:        两步原地修（各一条最小补丁，仓内 a52dec/aalib 已有同形态先例）：①对老 config.guess 在主 case（case "${UNAME_MACHINE}:${UNAME_SYSTEM}:..." in）首个分支前插入 HarmonyOS 分支（按 UNAME_MACHINE 映射 aarch64/x86_64/i686 后 echo ${MACHINE}-unknown-linux-ohos; exit），对老 config.sub 加三处（maybe_os 组合表加 linux-ohos*、CPU 表加 aarch64、os 字段表加 -linux-ohos*）——语义与 patch-autotools-ohos.pl 对现代基线的产出一致；若坚持用官方脚本，则先把 config.guess/sub 整体升级到 automake 自带现代版（含 android/linux-uclibc 锚）再跑，脚本自检 5 分制须 ≥4 且 rc=0；②configure 内两处 `umask 077 &&` → `umask 022 &&`（mktemp 与 mkdir 回退分支），config.status 由 configure 内嵌模板生成故只改 configure 即可，a52dec 的 0002-configure-umask-022.patch 正是此形。全程禁止 --build/--host（E007：会翻成 cross_compiling=yes 跳过 AC_RUN_IFELSE，config.h 失真）；native 构建验证判据=configure 打印 aarch64-unknown-linux-ohos 且 cross checking 为 no。
+rec_command:            perl $TARGET_REPO/scripts/patch-autotools-ohos.pl config.guess config.sub || python3 <手写同语义补丁脚本> ; sed -i 's/umask 077 \&\& mktemp/umask 022 \&\& mktemp/g; s/umask 077 \&\& mkdir/umask 022 \&\& mkdir/g' configure
+rec_auto_fix:           true
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      upgrade-config-baseline-then-official-script
+fallback_description:    老基线手写补丁不便时，用设备 automake 自带现代 config.guess/sub（/storage/Users/currentUser/.harmonybrew/share/automake-1.19/，timestamp 2026-05-17，含 __ANDROID__/android-linux/linux-uclibc 锚点）整体替换源码内两文件，再跑官方 patch-autotools-ohos.pl（cg=2 sub=1 自检 4/5 即 rc=0）；代价=补丁 diff 变成整文件重写（约 100KB 文本），审阅面变大，须在 notes/PR 正文披露基线版本与来源（GNU config 项目文件，非发行版改包）。
+fallback_command:        cp /storage/Users/currentUser/.harmonybrew/share/automake-1.19/config.guess /storage/Users/currentUser/.harmonybrew/share/automake-1.19/config.sub . && perl $TARGET_REPO/scripts/patch-autotools-ohos.pl config.guess config.sub && sh ./config.guess
+fallback_auto_fix:      true
+fallback_impl:          source-patch
+
+forbid_1_pattern:       --build=|--host=
+forbid_1_reason:        E007 明令禁止：传 --build/--host 会让 configure 判 cross_compiling=yes，AC_RUN_IFELSE 全部跳过、平台能力落到硬编码默认值，config.h 与真实平台不符
+forbid_1_consequence:   编译看似通过但 config.h 错位（运行期/链接期诡异失败），与"设备绿 CI 红"叠加难排查
+
+forbid_2_pattern:       mkdir -p .*build.*&& cd .*build.*\.\./.*configure|rm -rf .*conf[A-Za-z0-9]+
+forbid_2_reason:        E110/E125 的"换构建目录"建议在本设备同文件系统下无效（同一 umask+属主映射机制），只会把问题藏进新目录；通配 rm conf* 又会因设备文件系统大小写不敏感误删 configure/config.log 等同前缀文件
+forbid_2_consequence:   问题复现且排查绕远，或误删 configure/config.status/config.log 破坏构建树
+
+principles:             P001, P003, P011
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E110, E125]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-E685-autotools-legacy-configscripts-harmonyos-hmdfs-umask.md
+last_updated:           2026-09-23
+source_event:           simstring 1.0 OHOS arm64 适配：cannot guess build type + config.status Permission denied 双闸实测（含 toybox mktemp umask 敏感性三态对照）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                dsh-agent-session-de4f7e68
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-23
