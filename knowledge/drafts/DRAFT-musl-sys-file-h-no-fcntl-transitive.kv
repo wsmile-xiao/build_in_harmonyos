@@ -1,0 +1,81 @@
+#====================================================================
+# DRAFT-musl-sys-file-h-no-fcntl-transitive -
+# musl <sys/file.h> 不透传 fcntl 声明：F_GETFL/F_SETFL/O_* 必须直接包含
+# <fcntl.h>（glibc 聚合头透传纵容的间接包含，musl 上确定性编译失败）。
+#
+# 场景: l2tpns 2.5.0 在 OHOS PC（aarch64, clang 15.0.4 / musl libc）首轮
+#       make 命中 cli.c 5 处 + cluster.c 6 处 use of undeclared identifier
+#       'F_GETFL'/'F_SETFL'/'O_NONBLOCK'/'O_RDONLY'/'O_DIRECTORY'；
+#       两文件均只包含 <sys/file.h>，glibc 下编译通过（聚合头透传 fcntl.h），
+#       musl 的 sys/file.h 仅提供 flock/LOCK_* 文件锁接口。
+# 适用: 所有在 glibc 上只经 <sys/file.h> 等聚合头间接获得 fcntl 命令字/
+#       O_* 状态标志声明的 C/C++ 源；设置非阻塞 IO（F_GETFL|O_NONBLOCK）
+#       的网络/守护进程软件是高频命中面。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-musl-sys-file-h-no-fcntl-transitive
+source_lib:             l2tpns 2.5.0
+trigger_tool:           build
+phase:                  build
+error_signature:        use of undeclared identifier 'F_GETFL'|use of undeclared identifier 'F_SETFL'|use of undeclared identifier 'O_NONBLOCK'|use of undeclared identifier 'O_RDONLY'|use of undeclared identifier 'O_DIRECTORY'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               musl, glibc, headers, build, compiler, portability
+match_keywords:         sys/file.h, fcntl.h, F_GETFL, F_SETFL, O_NONBLOCK, O_DIRECTORY, O_RDONLY, use of undeclared identifier, musl, glibc, include what you use, 聚合头透传, 非阻塞, fcntl 命令字, 文件状态标志
+title:                  musl <sys/file.h> 不透传 fcntl 声明：F_GETFL/F_SETFL/O_* 必须直接包含 <fcntl.h>
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             glibc 的 <sys/file.h> 内部包含 <fcntl.h>，聚合透传 fcntl 命令字（F_GETFL/F_SETFL 等）与 O_* 状态标志声明；musl 的 <sys/file.h> 严格限定文件锁职责（flock/lockf/LOCK_*），不暴露任何 fcntl 接口。凡在 glibc 上"碰巧编译通过"的间接包含，移植到 musl（含 OHOS SDK sysroot）时在使用处确定性报 use of undeclared identifier，且失败点随使用位置跨文件扩散。
+affected_scope:         所有在 glibc 上只经 <sys/file.h>（或类似聚合头）间接获得 fcntl 声明的 C/C++ 翻译单元；网络/守护进程类软件设置非阻塞 IO（F_GETFL|O_NONBLOCK）与打开目录（O_RDONLY|O_DIRECTORY）为高频命中面；OHOS SDK sysroot 等 musl 环境必现。
+verification_cmd:       printf '#include <sys/file.h>\nint p(int fd){return fcntl(fd, F_GETFL);}\n' > p1.c && clang -c p1.c -o /dev/null   （musl 期望失败: use of undeclared identifier）; printf '#include <sys/file.h>\n#include <fcntl.h>\nint p(int fd){return fcntl(fd, F_GETFL);}\n' > p2.c && clang -c p2.c -o /dev/null   （补包含后期望通过）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           add-fcntl-include-per-file
+rec_description:        凡使用 fcntl 命令字或 O_* 状态标志的翻译单元直接 #include <fcntl.h>（include what you use）；最小、可解释、对 glibc 无副作用（include guard 吸收重复包含）。l2tpns 落地为 patches/0002-fcntl-include.patch：在 cli.c/cluster.c 的 #include <sys/file.h> 后插入 #include <fcntl.h>。
+rec_command:            patch -p1 -i patches/0002-fcntl-include.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      per-file-include-fix-fallback-force-include
+fallback_description:   源码不可产出补丁时的兜底：构建期 -include fcntl.h 对全部翻译单元强制注入（如 EXTRA_CFLAGS=-include fcntl.h）；代价是掩盖缺包含文件清单，且 force-include 头必须幂等。
+fallback_command:       make EXTRA_CFLAGS=-include fcntl.h
+fallback_auto_fix:      true
+fallback_impl:
+
+forbid_1_pattern:       #define\s+(F_GETFL|F_SETFL|O_RDONLY|O_WRONLY|O_RDWR|O_NONBLOCK|O_DIRECTORY|O_CREAT)\s+[0-9]
+forbid_1_reason:        手抄 fcntl 命令字/O_* 宏值：这些是平台 ABI 常量，跨 libc/架构不保证稳定，把实现细节固化进源码
+forbid_1_consequence:   在其他 libc/架构上语义漂移甚至静默错误，上游拒绝合并
+forbid_2_pattern:       (_GNU_SOURCE|__USE_MISC).*(sys/file.h|fcntl)|define.*_GNU_SOURCE.*F_GETFL
+forbid_2_reason:        依赖 glibc 特性宏让 musl 的 <sys/file.h> "漏出" fcntl 声明：musl 无该机制，方向无效
+forbid_2_consequence:   修不中根因，浪费时间并可能引入无关的 glibc 扩展暴露
+
+principles:             P-SYSCALL-001, P-PATCH-001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E119]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-musl-sys-file-h-no-fcntl-transitive.md
+last_updated:           2026-09-23
+source_event:           l2tpns 2.5.0 OHOS arm64 适配：首轮 make 在 cli.c/cluster.c 命中 11 处 fcntl/O_* undeclared identifier（manual-make.log/manual-make2.log 实测）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                GoliWie <GoliWie@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-23
