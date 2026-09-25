@@ -1,0 +1,123 @@
+#====================================================================
+# DRAFT-ohos-fortify-source-defeats-libc-wrap-mock -
+#   _FORTIFY_SOURCE 把 libc 调用改写成 __*_chk，使链接期 --wrap 打桩失配
+#====================================================================
+# 与既有条目的关系（差异化定位，勿重复申报）:
+#
+#  E999-draft-8FBE《OHOS libc 符号族 configure 误检的 ac_cv 禁用模式》——
+#  讲的是 **configure 探测层**：AC_CHECK_FUNCS 因 __fread_chk/__fgets_chk 存在于
+#  libc.so 而误判 HAVE=1，随后业务编译报 implicit declaration（声明受
+#  __FORTIFY_COMPILATION 门控）。
+#
+#  本条是**测试打桩层**：fortify 不导致编译失败，而是把调用点**静态改写**为
+#  `__read_chk`/`__write_chk`，使链接器的 `-Wl,--wrap=read` 匹配不到符号 →
+#  桩函数从不被调用 → 测试框架报 "Has remaining non-returned values: __wrap_read"。
+#  同一个宏，但作用阶段（编译改写 vs 探测误判）与症状完全不同。
+#====================================================================
+
+id:                     DRAFT-ohos-fortify-source-defeats-libc-wrap-mock
+trigger_tool:           make|clang|gcc|ld|test
+phase:                  testing|linking|compilation
+error_signature:        Has remaining non-returned values: __wrap_|
+                         __read_chk|__write_chk|__open_chk|__memcpy_chk|
+                         ERROR:.*__wrap_(read|write|open|calloc|malloc)
+
+severity:               2
+category:               ohos, testing, libc, portability, build-system
+match_keywords:         _FORTIFY_SOURCE, __read_chk, __write_chk, __open_chk,
+                         --wrap, linker wrap, cmocka, Has remaining non-returned
+                         values, mock, AX_ADD_FORTIFY_SOURCE, tpm2-tss
+title:                  _FORTIFY_SOURCE 把 libc 调用改写为 __*_chk，
+                         使 `-Wl,--wrap=read/write/…` 打桩失配、桩函数从不被调用
+
+root_cause: |
+  `-D_FORTIFY_SOURCE=2` 会在**编译期**把部分 libc 调用点改写为带边界检查的
+  `__*_chk` 变体（`read`→`__read_chk`、`write`→`__write_chk`、`open`→`__open_chk`、
+  `memcpy`→`__memcpy_chk`…）。
+
+  而 `-Wl,--wrap=<sym>` 的语义是：把**对 `<sym>` 的未定义引用**重定向到
+  `__wrap_<sym>`。写成 `__read_chk` 的引用与 `read` 不是同一符号，因此
+
+      -Wl,--wrap=read      ← 拦不到 __read_chk
+      -Wl,--wrap=write     ← 拦不到 __write_chk
+
+  → 桩函数从未被调用 → cmocka 的 mock 队列无人消费 →
+     "Has remaining non-returned values: __wrap_read"（或被测代码拿到未初始化值）。
+
+  容易被误判为"测试本身有问题"，实则是加固选项与打桩机制的交互。
+
+  实测确认（tpm2-tss 4.2.0，秒级单文件探针，编译真实调用点 src/util-io/io.c）：
+      $CC -O2 -D_FORTIFY_SOURCE=2 -c io.c      → nm -u 见 __read_chk __write_chk
+      $CC -O2 -D_FORTIFY_SOURCE=2 -U_FORTIFY_SOURCE -c io.c → 无 __*_chk
+
+affected_scope: >
+  任何「用链接期 --wrap 打桩 libc 调用」的测试套件，在编译时开启了
+  _FORTIFY_SOURCE 的工程上。autotools 工程若自带 AX_ADD_FORTIFY_SOURCE
+  （如 tpm2-tss 的 --enable-defaultflags 默认开）尤其容易命中，
+  因为该宏由上游注入、与测试框架无关，排查时容易漏看。
+
+verification_cmd: |
+  # 1) 确认失败测试是否用 --wrap 打桩 libc 函数
+  grep -oE '\-\-wrap=[a-z_]+' */Makefile* | sort -u
+  # 2) 看被测调用点是否被改写为 __*_chk（秒级，无需全量构建）
+  $CC -O2 -D_FORTIFY_SOURCE=2 -c <调用点>.c -o /tmp/p.o && nm -u /tmp/p.o | grep _chk
+  # 3) 对照：追加 -U_FORTIFY_SOURCE 后 __*_chk 应消失
+
+rec_priority:           1
+rec_approach:           compile-mock-under-test-targets-without-fortify
+rec_description: >
+  让**测试相关的编译**不带 _FORTIFY_SOURCE（在 fortify 的 -D 之后追加
+  -U_FORTIFY_SOURCE 即可），使 libc 调用点保持普通符号、--wrap 才能匹配。
+  落点必须在**被调用代码所在的编译单元**上——调用点常在库对象（src/…）而非
+  测试对象（test/…）里，只改测试目标的 CFLAGS 够不到。
+rec_command: |
+  # 单点验证（复用已有构建树，秒级）：
+  #   删掉受影响对象（.o/.lo **以及 .a**，陈旧归档会带回 fortified 副本）
+  #   再以「剥掉 fortify 的 CPPFLAGS」重建并跑测试
+  find src/util-io src/tss2-tcti test/unit -name '*.o' -o -name '*.lo' -o -name '*.a' | xargs rm -f
+  make check -j1 CPPFLAGS="-DNDEBUG -U_FORTIFY_SOURCE"
+  # 交付物不应降低加固：测试通过后用原参数 make 重建一次
+rec_auto_fix:           false
+rec_impl:               build-flag-scoped-override
+
+fallback_priority:      2
+fallback_approach:      patch-upstream-to-disable-fortify-for-tests
+fallback_description: >
+  若不便控制编译命令，可给上游打补丁：在 TESTS_CFLAGS（automake 用
+  `test_*_CFLAGS = $(AM_CFLAGS) $(TESTS_CFLAGS)` 传导到所有测试目标）里加
+  -U_FORTIFY_SOURCE。注意：仅当**调用点也在测试对象内**时才够用；调用点在库
+  对象时仍需 rec_approach 的做法。上游有时已对个别目标这样处理（可对照）。
+fallback_command:       grep -n 'U_FORTIFY_SOURCE' Makefile-test.am Makefile.in
+fallback_auto_fix:      false
+fallback_impl:          portability-patch
+
+forbid_1_pattern:       删除断言|注释掉失败用例|把该测试加进 XFAIL 掩过
+forbid_1_reason:        这是加固选项与打桩机制的交互问题，用测试框架的机制消除
+                        缺陷会掩盖真实行为，且失去该用例的覆盖
+forbid_1_consequence:   R51 口径失真，评审拒绝
+
+forbid_2_pattern:       全局关闭 _FORTIFY_SOURCE 且不区分交付物与测试
+forbid_2_reason:        交付的 .so 会失去 hardening，等于为跑测试降低安全加固
+forbid_2_consequence:   引入安全回退，评审会要求改回
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [E999]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-fortify-source-defeats-libc-wrap-mock.md
+last_updated:           2026-09-19
+source_event:           archives/t/tpm2-tss/4.2.0：上游 make check 由 41/47
+                        （6 项 --wrap 单测失败）提升至 47/47
+authors:                jumping_ggjjkk <jumping_ggjjkk@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19
+
+draft:                  true
