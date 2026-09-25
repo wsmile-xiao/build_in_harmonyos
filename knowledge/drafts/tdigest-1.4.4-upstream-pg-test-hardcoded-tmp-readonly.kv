@@ -1,0 +1,107 @@
+# ═══ Draft knowledge entry — PostgreSQL 扩展上游回归测试硬编码 /tmp（OHOS 只读）与 \i 相对包含 ═══
+# Software: tdigest 1.4.4 (PostgreSQL extension, upstream test suite test/sql + test/expected)
+# Evidence: OHOS PC aarch64, /tmp = erofs (ro)，pg_regress 首轮 9/10
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: tdigest-1.4.4-upstream-pg-test-hardcoded-tmp-readonly
+severity: 2
+category: testing, platform, limitation, environment, ohos
+trigger_tool: test|pg_regress|psql|make
+phase: testing
+
+title: PostgreSQL 扩展上游回归测试的 /tmp 硬编码与 \i 相对包含在 OHOS 上的两处适配
+
+keywords: pg_regress, COPY TO /tmp, read-only file system, erofs, E002, \i relative include, cwd, inputdir, expected.out 同步替换
+
+error_signature: could not open file "/tmp/.*" for writing: Read-only file system|could not open file "/tmp/.*" for reading|No such file or directory.*\.sql
+
+match_keywords: pg_regress, COPY TO /tmp, read-only file system, erofs, /tmp, TMPDIR, \i, relative include, inputdir, cwd, expected output, regression diff
+
+root_cause: |
+  两处独立的平台/工具约束会让上游 PG 扩展回归套件在 OHOS 上假失败：
+  1) 上游测试脚本可能把数据文件路径硬编码为 `/tmp`（COPY TO '/tmp/...'）。
+     OHOS 上 `/tmp` 是只读 erofs 挂载（E002），服务端进程写入即报
+     `could not open file "/tmp/..." for writing: Read-only file system`，
+     后续 FROM 读取因文件不存在而级联失败；该用例 100% 失败，其余用例不受影响。
+  2) 上游测试脚本常用 `\i tdigest--1.0.0.sql` 之类的**相对包含**去建扩展对象；
+     pg_regress 的 psql 子进程 cwd 不是 inputdir，若 cwd 里没有这些脚本，
+     整个用例会以 `<file>.sql: No such file or directory` 失败（一次影响多个用例）。
+
+affected_scope: |
+  所有用 pg_regress 跑上游回归套件的 PostgreSQL 扩展；
+  尤其是 COPY / 导出导入类用例（硬编码 /tmp）与把扩展 SQL 通过 \i 引入的免 CREATE EXTENSION 套件。
+
+verification_cmd: |
+  grep -rn "/tmp/" <upstream test dir>/sql/          # 找出硬编码路径
+  grep -rn '^\\\\i ' <upstream test dir>/sql/        # 找出相对包含
+  cat <test dir>/regression.diffs                    # 失败差异
+
+rec_priority: 1
+rec_approach: runtime-path-rewrite-plus-cwd-staging
+rec_description: |
+  不修改归档中保存的上游测试文件（保持逐字节一致），在测试运行时：
+  (a) 把测试副本里的 `/tmp/` 字面量统一改写到工作目录下的可写 tmp/，
+      **同时作用于 .sql 与对应 .out**，使 psql 回显与期望输出仍逐行匹配；
+  (b) 把扩展的 `tdigest--*.sql` 复制到 pg_regress 的 cwd（即 --inputdir 同一目录），
+      满足 `\i` 相对包含。
+rec_command: |
+  mkdir -p "$TESTDIR/sql" "$TESTDIR/expected" "$TESTDIR/tmp"
+  cp "$TESTS_DIR/sql/"*.sql "$TESTDIR/sql/"; cp "$TESTS_DIR/expected/"*.out "$TESTDIR/expected/"
+  cp "$SHAREDIR/extension/"tdigest--*.sql "$TESTDIR/"        # \i 相对包含
+  sed -i "s#/tmp/#$TESTDIR/tmp/#g" "$TESTDIR/sql/copy.sql" "$TESTDIR/expected/copy.out"
+  ( cd "$TESTDIR" && "$PG_REGRESS" --inputdir="$TESTDIR" --outputdir="$TESTDIR" ... )
+rec_auto_fix: false
+rec_impl: test-harness-path-rewrite
+
+fallback_priority: 2
+fallback_approach: patch-upstream-test-files-in-archive
+fallback_description: |
+  直接把 /tmp 改写到归档内的上游测试文件里。可执行但会破坏"归档与上游逐字节一致"的
+  可审计性（须在 PR 的上游测试修改说明中逐条披露），仅在 harness 无法运行时使用。
+fallback_command: sed -i 's#/tmp/#<writable-dir>/#g' archives/<l>/<pkg>/<ver>/test_package/sql/copy.sql
+fallback_auto_fix: false
+fallback_impl: archive-file-patch
+
+forbid_1_pattern: 只替换 \.sql 不替换 expected/\.out|只替换 expected 不替换 sql
+forbid_1_reason: pg_regress 会回显被执行的 SQL；两侧不同步时 diff 必然失败，且失败原因具有误导性。
+forbid_1_consequence: 用例恒失败，容易误判为扩展功能缺陷。
+forbid_2_pattern: 直接跳过该用例 / 把它标记为 skip 而不说明
+forbid_2_reason: 上游用例数会与清点结果不符（R51 评审口径：上游测试数与清点不符 → 硬性不通过）。
+forbid_2_consequence: PR 被评审拒绝；测试统计失真。
+forbid_3_pattern: 用 TMPDIR 环境变量期望 PostgreSQL 改变 COPY 绝对路径语义
+forbid_3_reason: COPY 的绝对路径不受 TMPDIR 影响，TMPDIR 只影响其它临时文件；
+forbid_3_consequence: 误以为已修复，实际用例仍 100% 失败。
+
+principles: P012, P014
+
+causes: []
+caused_by: []
+similar_to: []
+conflicts_with: []
+prerequisite_of: []
+
+doc_file: doc/tdigest-1.4.4-upstream-pg-test-hardcoded-tmp-readonly.md
+
+last_updated: 2026-09-24
+source_event: tdigest 1.4.4 OHOS 适配：pg_regress 首轮 9/10，唯一失败项 copy
+
+evidence: |
+  tdigest 1.4.4 @ OHOS PC aarch64（postgresql/18.3 @ ohpcd）：
+  - regression.diffs（上游 test/sql/copy.sql，唯一失败用例）：
+      COPY tdigest_src TO '/tmp/tdigest_copy_text.out';
+      +ERROR:  could not open file "/tmp/tdigest_copy_text.out" for writing: Read-only file system
+      COPY tdigest_dst FROM '/tmp/tdigest_copy_text.out';
+      +ERROR:  could not open file "/tmp/tdigest_copy_text.out" for reading: No such file or directory
+      +HINT:  COPY FROM instructs the PostgreSQL server process to read a file...
+  - 平台事实：`mount` 显示 `/dev/block/dm-0 on /tmp type erofs (ro,...)`；
+      `touch /tmp/x` → `Read-only file system`（E002）。
+  - 另一处（cwd）实测：在 cwd 不含 tdigest--*.sql 时运行 pg_regress，
+      basic/cast/conversions/… 全部用例报 `<file>.sql: No such file or directory`
+      （10/10 失败）；把扩展 SQL 复制进 cwd 后恢复。
+  - 修复后：`# All 10 tests passed.`（10/10，exit=0）；归档内 test_package/sql 与
+      test_package/expected 与上游 tarball 仍 `diff -r` 为空（逐字节一致）。
+
+authors:
+source_pr:
+source_commit:
+draft_date: 2026-09-24
