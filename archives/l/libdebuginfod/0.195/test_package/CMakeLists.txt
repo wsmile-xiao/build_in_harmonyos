@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.13)
+project(test_debuginfod C)
+find_package(libdebuginfod REQUIRED)
+add_executable(test_probe test_debuginfod.c)
+target_link_libraries(test_probe PRIVATE libdebuginfod::libdebuginfod)
+enable_testing()
+add_test(NAME probe COMMAND test_probe)
