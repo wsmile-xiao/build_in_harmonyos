@@ -1,0 +1,59 @@
+#====================================================================
+# Draft: x86_64 runner 上 qemu-user 跑不了 OHOS 动态链接产物（musl loader 段错误），
+#        静态链接副本可跑——功能验证走静态副本，发布产物保持动态链接
+#   Pairs with: E544-draft-7C1A.md
+#====================================================================
+
+id:                     E544-DRAFT-7C1A
+trigger_tool:           qemu|test|conan|runtime
+phase:                  testing
+error_signature:        qemu: uncaught target signal 11 \(Segmentation fault\)|aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64\.so\.1'|Could not open '/lib/ld-musl-aarch64\.so\.1': No such file or directory
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               cross-compile, testing, musl, limitation, ohos
+match_keywords:         qemu-aarch64, qemu-user, binfmt_misc, ld-musl-aarch64.so.1, 段错误, Segmentation fault, 动态链接, 静态链接, -static, test_package 无法运行, can_run, x86 runner, 交叉验证, skip 不等于 pass
+title:                  x86_64 runner 上 qemu-user 无法运行 OHOS aarch64 动态链接产物（musl loader 段错误），静态副本可跑
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             在 x86_64 构建机上验证 OHOS aarch64 产物时有两道坎：(1) 动态链接产物的解释器是 /lib/ld-musl-aarch64.so.1，宿主根本没有该路径，binfmt_misc 直接报 "Could not open '/lib/ld-musl-aarch64.so.1'"；(2) 即使用 qemu-aarch64 -L <sysroot> 并把 NDK 的 libc.so 软链成 ld-musl-aarch64.so.1 把路径补齐，OHOS 的 musl 动态加载器在 qemu-user 下仍然 uncaught signal 11——用最小 hello world 同样复现，与被测程序无关，属 qemu-user 与该 loader 的兼容性限制。同一份源码用 -static 编译后在 qemu 下可以正常运行并产出正确输出，说明问题只在动态加载阶段。
+affected_scope:         所有在 x86_64 runner 上对 OHOS aarch64 产物做运行时验证的适配任务：test_package 的 self.run、CI 脚本的 L2 smoke test、上游测试套件实跑。注意 conan profile 里 build 与 host 都是 os=OHOS，can_run() 返回 True，并不代表物理 CPU 是 aarch64——不能拿 can_run() 当能否执行的判据。
+verification_cmd:       printf '#include <stdio.h>\nint main(void){puts("x");return 0;}\n' > /tmp/h.c && $CC -o /tmp/h /tmp/h.c && qemu-aarch64 /tmp/h; $CC -static -o /tmp/hs /tmp/h.c && qemu-aarch64 /tmp/hs   # 动态段错误 + 静态成功 = 命中
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           static-copy-for-qemu-functional-check
+rec_description:        两件事分开做：(1) 功能验证——用 $CC -static 额外编译一份**仅用于测试**的副本，在 qemu-aarch64 下跑完整功能断言（上游测试脚本可用 PATH 前置一个 exec qemu-aarch64 <static-bin> "$@" 的 wrapper 直接复用），把真实通过率写进 notes.md 与 PR；(2) 发布产物**保持动态链接不变**，不要为了能跑测试就把包改成静态。test_package 里先做产物层校验（ELF magic + e_machine==0xB7 + 可执行位），再探测能否执行：不能执行就打印 [skip] 与探测输出原文，能执行（CI 的 aarch64 真机）就跑完整运行时断言——两种环境同一份脚本，CI 上自动升级为实跑。
+rec_command:            $CC -static -o "$TMPDIR/prog_static" prog.c && printf '#!/bin/sh\nexec qemu-aarch64 %s "$@"\n' "$TMPDIR/prog_static" > "$TMPDIR/qbin/prog" && chmod +x "$TMPDIR/qbin/prog" && PATH="$TMPDIR/qbin:$PATH" sh upstream-testsuite.sh
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      artifact-only-with-explicit-skip
+fallback_description:   程序无法静态链接（依赖 dlopen/NSS 等）时，本机只做产物层校验，运行时断言如实标 skip 并写明原因与"需在 aarch64 主机复跑"，由 CI 真机完成实跑。绝不把 skip 记成通过。
+fallback_command:       readelf -h <bin> | grep -E 'Machine|Type'
+fallback_auto_fix:      false
+
+forbid_1_pattern:       把 skip 计为 pass|test\(\) 中 try/except 吞掉执行失败后 return 0|PR 里写"测试通过"但无实跑证据
+forbid_1_reason:        伪造运行证据属审计一票否决项；L1e 破坏性反向验证与真人评审都会核对
+forbid_1_consequence:   PR 被判欺骗检测，整轮适配作废
+forbid_2_pattern:       为了能在 qemu 下跑测试而把发布包改成静态链接
+forbid_2_reason:        链接方式属于产物形态，不应被验证手段倒推；静态化会绕开 Conan 的依赖管理并可能违反 R26 之外的打包约定
+forbid_2_consequence:   包体积膨胀、依赖升级无法生效、与制品仓其他包的链接策略不一致
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E356, E374]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/E544-draft-7C1A.md
+last_updated:           2026-09-21
+source_event:           since 1.1 适配（archives/s/since/1.1）：x86_64 runner 上动态产物 qemu 段错误，静态副本跑通上游 6 条功能断言
+
+authors:                lilliv3 (OHC agent 7C1A)
