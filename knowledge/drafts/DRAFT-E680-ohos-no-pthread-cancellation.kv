@@ -1,0 +1,95 @@
+# ═══ Draft knowledge entry — OHOS NDK 缺 pthread cancellation API ═══
+# Timestamp: 2026-09-23
+# Software: samhain 4.1.4
+# Gate: 任务卡 10371 链接失败（ld.lld undefined symbol ×3）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-E680
+trigger_tool:           conan|make|clang-linker
+phase:                  build|link
+error_signature:        'undefined symbol: pthread_cancel\b|undefined symbol: pthread_testcancel\b|undefined symbol: pthread_setcanceltype\b|ld\.lld: error: undefined symbol: pthread_(cancel|testcancel|setcanceltype)'
+prescan_pattern:        'undefined symbol: pthread_(cancel|testcancel|setcanceltype)'
+
+severity:               2
+category:               ohos-ndk|pthread|cancellation|link|porting-shim
+match_keywords:         pthread_cancel, pthread_testcancel, pthread_setcanceltype,
+                        libpthread.a, libc.so, seccomp, cancellation API,
+                        SH_MUTEX_LOCK, sh_pthread_cancel_all, ESRCH,
+                        readelf --dyn-syms, NDK sysroot
+title:                  OHOS NDK 不提供 pthread cancellation 三函数（pthread_cancel/testcancel/setcanceltype）
+                        的符号——链接失败的集中 shim 方案（保留真实 mutex/线程，仅补取消 API 缺口）
+
+root_cause: >
+  OHOS NDK sysroot 的 libc.so 与 libpthread.a 都不导出 pthread_cancel()、
+  pthread_testcancel()、pthread_setcanceltype()（readelf 实查三符号计数全 0），
+  pthread.h 也只暴露 PTHREAD_CANCEL_* 宏而无函数原型；glibc/musl 系统上这些符号
+  存在于 libc（或 libpthread），因此「设备上编译过的老代码」在 OHOS 上会在链接期
+  报 undefined symbol。凡在 mutex 宏里内联 pthread_setcanceltype、在线程体里调
+  pthread_testcancel、或提供 cancel_all 型收尾 API 的项目（HIDS/守护类老 C 项目
+  常见）都会命中。pthread_create/pthread_join/pthread_mutex_* 本身是存在的——
+  项目往往「除取消家族外全部可链」，失败面很小但致命。
+
+affected_scope:         所有在 OHOS 上使用 POSIX 线程取消语义的 C/C++ 项目；
+                        典型载体：mutex 宏包装（setcanceltype 成对出现）、
+                        线程体 testcancel 取消点、退出期 cancel_all 收尾。
+
+verification_cmd:       |-
+                        # 符号缺失实证（设备可直接执行）
+                        SYSROOT=$(dirname "$(command -v clang)")/../sysroot/usr/lib/aarch64-linux-ohos
+                        for s in pthread_cancel pthread_testcancel pthread_setcanceltype; do
+                          printf '%s: ' $s
+                          readelf --dyn-syms -W "$SYSROOT/libc.so" | grep -c " $s\$"
+                        done   # 预期全 0；pthread_create 应为 1
+                        # 链接失败复现
+                        printf '#include <pthread.h>\nint main(){pthread_cancel(*(pthread_t*)0);}\n' > $TASK_DIR/p.c
+                        clang $TASK_DIR/p.c -o $TASK_DIR/p
+                        # 预期: ld.lld: error: undefined symbol: pthread_cancel
+
+rec_priority:           1
+rec_approach:           pthread-cancel-shim-header-first（集中 shim + 原型前置 + ESRCH 语义）
+rec_description: >
+  1) 不要改用「关掉整个 HAVE_PTHREAD」路线：samhain 这类项目的 mutex 功能依赖
+     pthread（mutex 符号存在且可用），关掉会波及大量未守卫调用点；且 autoconf 的
+     acx_pthread_ok 由搜索过程计算，无用户覆盖钩子，禁用需改 configure.ac+autoreconf
+     （CI worker 缺 automake，代价高）。
+  2) 在唯一提供实现的翻译单元**头部**（任何调用点之前）集中放 3 个 shim：
+       - int pthread_setcanceltype(int type, int *oldtype)
+           { if (oldtype) *oldtype = type; return 0; }
+         —— 必须写 *oldtype：SH_MUTEX_UNLOCK 会读它做「restore」，不写就是未初始化读。
+       - void pthread_testcancel(void) { return; }
+         —— 平台上根本不存在待决取消，语义自洽。
+       - int pthread_cancel(pthread_t t) { (void)t; return ESRCH; }
+         —— 必须返回**非 0**：调用方典型形态是
+            `if (0 != pthread_cancel(th)) flag[i]=0;` → 失败即放弃该槽位并**跳过
+            join**，从而退出期不挂死（若返回 0 会让调用方 join 等待一个永不
+            取消的线程 → 死锁）。
+  3) **原型必须前置**到首次调用之前：隐式声明 (int) 与 void 定义冲突会报
+     `conflicting types for 'pthread_testcancel'`（本任务实测踩中）。
+  4) 注释里写清平台依据（readelf 证据），避免审计把 shim 当「伪造行为」——
+     这是「平台缺 API 的显式空洞」，不是测试造假。
+  5) shim 放在包内源码补丁（patches/），CI 与设备同一份；本仓库工具链恒为
+     OHOS sysroot，无跨平台覆盖风险。
+
+rec_command:            '见 rec_description 2) 的三段 shim 源码；落点 src/<提供实现的文件>.c 头部（原型前置到首次调用之前）'
+rec_auto_fix:           false
+rec_impl:               conan-recipe-source-patch-with-header-shims
+
+fallback_priority:      2
+fallback_approach:      compile-out-cancellation-feature（关掉取消功能的编译面）
+fallback_description: >
+  若项目把取消语义收敛在独立 feature 宏后（而非散入 mutex 宏），优先在 configure
+  层面关掉该 feature（避免运行期语义空洞）；前提是调用点均有守卫且宏有无实现双
+  路径（samhain 的 sh_pthread.h 虽有无 pthread 回退分支，但多处调用点未守卫，
+  实测不可行——见 root_cause 同任务分析）。
+fallback_command:       ./configure --disable-<threading-feature>
+fallback_auto_fix:      false
+fallback_impl:          configure-flag-disable-feature
+
+principles:             P003
+similar_to:             E007
