@@ -1,0 +1,158 @@
+--- /dev/null
++++ b/src/usr.bin/calendar/preprocess.c
+@@ -0,0 +1,155 @@
++/*
++ * Built-in preprocessing for calendar(1) files.
++ *
++ * The original code delegates #include expansion to an external C
++ * preprocessor (cpp).  HarmonyOS PC does not ship a preprocessor
++ * (/usr/bin/cpp does not exist), so calendar would fail to open any
++ * calendar file.  Expand #include directives in-process instead,
++ * honouring the same -I search path semantics as the original cpp
++ * invocation (-I. plus _PATH_INCLUDE).
++ *
++ * expand_calendar() takes ownership of fdin and always closes it.
++ */
++
++#include <sys/stat.h>
++
++#include <ctype.h>
++#include <err.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "pathnames.h"
++
++#define MAX_INCLUDE_DEPTH	32
++
++static const char *includedirs[3];
++
++static void
++init_includedirs(void)
++{
++	static int initialized;
++	const char *p;
++
++	if (initialized)
++		return;
++	initialized = 1;
++	includedirs[0] = ".";
++	p = _PATH_INCLUDE;
++	if (strncmp(p, "-I", 2) == 0)
++		p += 2;
++	includedirs[1] = (*p != '\0') ? p : NULL;
++	includedirs[2] = NULL;
++}
++
++static FILE *
++openincluded(const char *name, int quoted, const char *curdir)
++{
++	char path[PATH_MAX];
++	FILE *fp;
++	int i;
++
++	if (quoted && curdir != NULL && *curdir != '\0') {
++		if (snprintf(path, sizeof(path), "%s/%s", curdir, name) <
++		    (int)sizeof(path)) {
++			if ((fp = fopen(path, "r")) != NULL)
++				return fp;
++		}
++	}
++	for (i = 0; includedirs[i] != NULL; i++) {
++		if (snprintf(path, sizeof(path), "%s/%s", includedirs[i],
++		    name) >= (int)sizeof(path))
++			continue;
++		if ((fp = fopen(path, "r")) != NULL)
++			return fp;
++	}
++	return NULL;
++}
++
++static int
++expandstream(FILE *in, FILE *out, const char *curdir, int depth)
++{
++	char *line = NULL, *p, *q, *end, name[PATH_MAX], ndir[PATH_MAX];
++	size_t cap = 0, n;
++	ssize_t len;
++	int quoted, rc = 0;
++	const char *slash;
++	FILE *inc;
++
++	while ((len = getline(&line, &cap, in)) != -1) {
++		p = line;
++		while (isspace((unsigned char)*p))
++			p++;
++		if (strncmp(p, "#include", 8) == 0 &&
++		    isspace((unsigned char)p[8])) {
++			q = p + 8;
++			while (isspace((unsigned char)*q))
++				q++;
++			quoted = (*q == '"');
++			if (quoted || *q == '<') {
++				char close = quoted ? '"' : '>';
++				q++;
++				if ((end = strchr(q, close)) != NULL) {
++					n = (size_t)(end - q);
++					if (n == 0 || n >= sizeof(name))
++						goto copy;
++					memcpy(name, q, n);
++					name[n] = '\0';
++					if (depth >= MAX_INCLUDE_DEPTH) {
++						warnx("include depth exceeded: %s", name);
++						continue;
++					}
++					if ((inc = openincluded(name, quoted,
++					    curdir)) == NULL) {
++						warnx("cannot open include \"%s\"",
++						    name);
++						continue;
++					}
++					if ((slash = strrchr(name, '/')) != NULL) {
++						n = (size_t)(slash - name);
++						if (n >= sizeof(ndir))
++							n = sizeof(ndir) - 1;
++						memcpy(ndir, name, n);
++						ndir[n] = '\0';
++					} else
++						snprintf(ndir, sizeof(ndir), "%s",
++						    (curdir != NULL && *curdir != '\0') ?
++						    curdir : ".");
++					if (expandstream(inc, out, ndir,
++					    depth + 1) == -1) {
++						fclose(inc);
++						rc = -1;
++						break;
++					}
++					fclose(inc);
++					continue;
++				}
++			}
++		}
++copy:
++		if (fputs(line, out) == EOF) {
++			rc = -1;
++			break;
++		}
++	}
++	free(line);
++	return rc;
++}
++
++int
++expand_calendar(int fdin, FILE *out)
++{
++	FILE *in;
++	int rc;
++
++	if ((in = fdopen(fdin, "r")) == NULL) {
++		close(fdin);
++		return -1;
++	}
++	init_includedirs();
++	rc = expandstream(in, out, ".", 0);
++	fclose(in);
++	return rc;
++}
