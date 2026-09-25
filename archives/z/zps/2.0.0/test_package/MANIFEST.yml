@@ -1,0 +1,87 @@
+# test_package/MANIFEST.yml — zps/2.0.0
+# CI L0e 强制要求此文件存在（声明上游测试来源）
+package: zps/2.0.0
+homepage: "https://github.com/orhun/zps"
+
+# 上游测试入口：scripts/test.sh
+# （.github/workflows/ci.yml: working-directory=scripts / run: ./test.sh / UPLOAD=true）
+# 上游脚本是 && 链的冒烟测试（编译 example/zproc.c 造僵尸 → 编译 src/zps.c →
+# 逐条 CLI 调用 → gcov 覆盖率 → 可选 codecov 上传），没有 ctest/pytest 注册表。
+upstream_check_command: "cd scripts && ./test.sh"
+
+# build() 中未集成上游测试：上游脚本假定 glibc+gcc+gcov 宿主，且会就地编译、
+# 造僵尸进程、向僵尸父进程发信号，不适合放进 conan create 的 build 阶段。
+# 改由 run_upstream_tests.sh 在实机上真实执行并记录（compiler shim: gcc→OHOS clang）。
+upstream_test_in_build: false
+upstream_test_command: "bash run_upstream_tests.sh（阶段 A 原样运行上游脚本 + 阶段 B 逐用例复算）"
+
+# 实机实测（HarmonyOS PC aarch64 / clang 15.0.4 / HongMeng Kernel）
+#   PASS 12（含 2 条补全用例） / FAIL 0 / SKIP 3 / NA 2
+upstream_test_result:
+  total: 17
+  passed: 12
+  failed: 0
+  skipped: 3
+  not_applicable: 2
+  log: "reports/upstream-tests.log"
+  script_log: "reports/upstream-test-script.log"
+  junit: "reports/upstream-tests-junit.xml"
+  phase_a_exit_code: 1
+  phase_a_exit_reason: "上游脚本末行清理 `rm -v zps zps.c.* zps.gc*` 里的 `zps.c.*`（gcov 产物 zps.c.gcov）在本平台不存在 → rm 报 No such file or directory → 脚本以 1 退出；属覆盖率工具链缺失的清理副作用，非被测程序缺陷。除上游 && 链中与工具契约冲突而短路的 `./zps -s 9`（rc=1，见 C10 及其后 C11/C12 从未执行）外，其余功能步骤均为 rc=0"
+  skipped_reason:
+    - "C10-C12（zps -s 9 / -s SIGTERM / -s term 单独使用）：上游把它们写在 `./zps -q && ./zps -s 9 && …` 的第 2-4 位，而工具的 settings_check 明确要求 -s 必须与 -r/-p 同用（rc=1）→ && 链在第 2 位短路，后两条命令在上游脚本中从未执行。用例与工具契约冲突，记为 SKIP（组合用法由补全用例 C16/C17 覆盖）"
+  not_applicable_reason:
+    - "C14 gcov zps.c：OHOS 无 GNU 工具链（gcc/gcov 均不存在），覆盖率报告不可复现"
+    - "C15 codecov 上传：仅当 UPLOAD=true 时执行且需公网 codecov 客户端，上游默认不设置该变量，本地不启用"
+
+# 上游测试用例清点（scripts/test.sh 逐条命令，共 15 项上游步骤）
+upstream_tests:
+  - file: scripts/test.sh
+    source: zps-2.0.0/scripts/test.sh
+    description: "代码覆盖构建 + CLI 冒烟：gcc -fprofile-arcs -ftest-coverage 编译 src/zps.c"
+    command: "C02: gcc -fprofile-arcs -ftest-coverage -s -O3 -Wall -Wextra -pedantic zps.c -o zps"
+  - file: example/zproc.c
+    source: zps-2.0.0/example/zproc.c
+    description: "僵尸工厂：fork 一个立即退出的子进程且父进程 sleep 不 wait()，用于产生 defunct 进程"
+    command: "C01: gcc -O3 -Wall zproc.c -o z.o  &&  C03: ./z.o & ./z.o &"
+  - file: src/zps.c
+    source: zps-2.0.0/src/zps.c
+    description: "CLI 用例 1：./zps -v && ./zps -h && printf '1' | ./zps -p"
+    command: "C04-C06"
+  - file: src/zps.c
+    source: zps-2.0.0/src/zps.c
+    description: "CLI 用例 2：./zps -a && ./zps -r（列举全部进程 + 向僵尸父进程发 SIGTERM）"
+    command: "C07-C08"
+  - file: src/zps.c
+    source: zps-2.0.0/src/zps.c
+    description: "CLI 用例 3：./zps -q && ./zps -s 9 && ./zps -s SIGTERM && ./zps -s term（静默回收 + 信号解析）"
+    command: "C09-C12（C10-C12 见 skipped_reason）"
+  - file: src/zps.c
+    source: zps-2.0.0/src/zps.c
+    description: "CLI 用例 4：./zps -n（禁用颜色）"
+    command: "C13"
+  - file: src/zps.c
+    source: zps-2.0.0/src/zps.c
+    description: "覆盖率报告与上传：gcov zps.c + bash <(curl -s https://codecov.io/bash)（UPLOAD=true）"
+    command: "C14-C15（本平台 NA）"
+
+# 补全用例（适配时新增，覆盖上游缺失的 -s 真实组合语义）
+added_tests:
+  - name: "zps -r -s CHLD"
+    reason: "README 推荐用 SIGCHLD 触发僵尸父进程回收；上游从未在合法组合下验证过信号解析"
+    command: "C16: ./zps -r -s CHLD"
+  - name: "zps -r -s 9|15|SIGTERM|term"
+    reason: "覆盖数字信号号与信号名（含无 SIG 前缀）在 -r 组合下的解析路径"
+    command: "C17"
+
+# test_package 自带测试（消费者视角验证打包产物）
+test_package_tests:
+  - file: test.sh
+    description: "驱动包内 bin/zps：-v 版本串、-h 全选项、非 TTY 表头、真僵尸检测、`-r -s CHLD` 回收闭环（非破坏性：信号仍广播到全系统僵尸父进程，但 SIGCHLD 无害且 helper 按门控标记 wait()，不像默认 `-r` 的 SIGTERM 会终止无关父进程）、`-p -s CHLD` 管道选号、-s 参数校验（7 项断言；断言口径容忍主机上并发存在的无关僵尸）"
+    command: "bash test.sh（conanrun 环境，PATH 含包内 bin/）"
+  - file: test_ohos.sh
+    description: "HarmonyOS 专项：ELF64/AArch64 + musl 解释器、DT_NEEDED 仅 libc.so、无 RPATH、.note.ohos.ident + .codesign 段、/proc 枚举自身进程、内核线程(ppid=2)过滤、2 个真僵尸检出→回收（-r -s CHLD，无害信号）→消失、信号名/号解析（-p -s 形式，未选编号时不发信号；含 NOSUCHSIG 拒绝）、非 TTY 无 ANSI（9 项断言）"
+    command: "bash test_ohos.sh"
+
+# 测试断言总数（消费者 7 + 鸿蒙专项 9 + 上游逐用例 17）
+assertion_count: 33
