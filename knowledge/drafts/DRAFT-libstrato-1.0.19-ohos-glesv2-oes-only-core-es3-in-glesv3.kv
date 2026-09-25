@@ -1,0 +1,136 @@
+# ═══ Draft knowledge entry — OHOS GLESv2 只给 OES 后缀 VAO 名，核心 ES3 名在 GLESv3 ═══
+# Timestamp: 2026-09-23
+# Software: libstrato 1.0.19（可复用于任何在 OHOS 上调用核心 ES3 入口的 GL/GLES 库：
+#           SDL/cogl/clutter/imgui/rsgl/自研渲染后端等）
+# Gate: 本地 conan create 实测（加载期重定位失败 → 加 -lGLESv3 → 22 条消费者断言全过）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-libstrato-1.0.19-ohos-glesv2-oes-only-core-es3-in-glesv3
+trigger_tool:           ld.lld|ld|clang|cmake|conan
+phase:                  link|runtime|test_package
+error_signature:        Error relocating .*: glGenVertexArrays: symbol not found|Error relocating .*: glBindVertexArray: symbol not found|Error relocating .*: glDeleteVertexArrays: symbol not found
+severity:               3
+category:               platform, linking, gfx, ohos
+match_keywords:         glGenVertexArrays, glBindVertexArray, glDeleteVertexArrays, VertexArraysOES, libGLESv2, libGLESv3, EGL, symbol not found, Error relocating, VAO, 顶点数组对象, GLES3
+
+title:                  OHOS 的 libGLESv2.so 只导出 OES 后缀的 VAO 入口名，核心 ES3 名（glGenVertexArrays/glBindVertexArray/glDeleteVertexArrays）只在 libGLESv3.so 里 —— 用核心名的库必须同时链 GLESv3，否则加载期重定位即报 symbol not found
+
+root_cause: OHOS 的 GL 运行库是分层 + 转发结构，同一族符号在两个库里并不重叠。
+  （1）libGLESv2.so 是单地址转发桩——实测 675 个导出符号全部指向同一地址
+  （0xa1b0），运行期再把调用转给真实驱动。它导出的顶点数组对象（VAO）入口是
+  OES 后缀扩展名：glGenVertexArraysOES / glBindVertexArrayOES /
+  glDeleteVertexArraysOES。
+  （2）核心 ES3 名 glGenVertexArrays / glBindVertexArray /
+  glDeleteVertexArrays（无 OES 后缀）只在 libGLESv3.so 中导出，两者互不包含。
+  实测（设备 sysroot，llvm-nm -D --defined-only，按符号名精确比对）：
+  GLESv2 里核心名 0 个 / OES 名 3 个；GLESv3 里核心名 3 个 / OES 名 0 个。
+  （3）OHOS 的 musl 动态加载器按 BIND_NOW 立即重定位：库的 .so 里凡是
+  DT_NEEDED 集合中无人提供的符号（含函数），加载期即报
+  Error relocating <lib>.so.N: <sym>: symbol not found 并中止进程——不是运行期
+  惰性解析，也不是静默落空。
+  （4）因此当上游只链 GLESv2（Linux 上常见写法，因桌面 GLESv2 库同时提供核心名
+  与 OES 名）而源码调用核心 ES3 名时，产物的这三个符号无人提供，消费者一加载该
+  库就失败。症状会误导排查方向（看起来像 GL 驱动缺失或上下文没建起来，实际是链接
+  集合缺一个库）。
+
+affected_scope: 任何在 OHOS 上调用核心 ES3 入口（无 OES 后缀）的库或应用，尤其是：从 Linux/桌面
+  移植、原本 target_link_libraries(... GLESv2) 就能过的渲染后端；用 VAO 的现代 GL
+  代码路径。典型触发形态：上游示例 App 在 App 层同时链了 EGL GLESv3 OpenSLES，
+  而库自身只链了 GLESv2 ⇒ 打成库包（conan 等）后就暴露为加载期失败。
+
+verification_cmd:       SYS=<ohos sysroot>/usr/lib/aarch64-linux-ohos; llvm-nm -D --defined-only $SYS/libGLESv2.so | awk '$3=="glGenVertexArrays"'; llvm-nm -D --defined-only $SYS/libGLESv2.so | awk '$3=="glGenVertexArraysOES"'; llvm-nm -D --defined-only $SYS/libGLESv3.so | awk '$3=="glGenVertexArrays"'; llvm-readelf -d <产物>.so | grep NEEDED
+
+rec_priority:           1
+rec_approach:           link-glesv3-alongside-glesv2
+rec_description: 在原有 GLESv2 之外同时链上 GLESv3（-lGLESv3，或 target_link_libraries 追加
+  GLESv3），让核心 ES3 名有提供者。上游自己的示例 App 就是这么做的
+  （target_link_libraries(engine ... EGL GLESv3 OpenSLES)）——即 App 层链接集合
+  里含 GLESv3，库包要把它下沉到库自身。
+  实施要点：①若上游 CMakeLists 的 OHOS 分支写死了 GLESv2，不必改上游源码，可在
+  配方侧用 -DCMAKE_SHARED_LINKER_FLAGS="-lGLESv3 ..." 追加；②改完用
+  llvm-readelf -d 确认 NEEDED 里出现 libGLESv3.so，并且 llvm-nm -D --undefined-only
+  里不再有这三个核心名；③消费者运行期仍需能解析 libGLESv3.so（OHOS 设备上位于
+  sysroot 的 lib 目录；musl 下建议 DT_RPATH）。
+rec_command:            -DCMAKE_SHARED_LINKER_FLAGS="-lEGL -lGLESv3 -lhilog_ndk.z -lace_ndk.z -lace_napi.z"
+rec_auto_fix:           false
+rec_impl:               conanfile-edit
+
+fallback_priority:      2
+fallback_approach:      map-core-names-to-oes-names
+fallback_description: 若因故不能新增 GLESv3 依赖（例如目标 OHOS 版本确实只提供 GLESv2），退路是在编译
+  期把核心名映射到 OES 名：
+  -DglGenVertexArrays=glGenVertexArraysOES
+  -DglBindVertexArray=glBindVertexArrayOES
+  -DglDeleteVertexArrays=glDeleteVertexArraysOES
+  （或等价的头文件宏层）。代价：OES 版本语义与核心版不完全等价（无 VAO 的 OES 变体
+  在某些驱动上行为受限，且未来若上游改回核心名会静默失配），属过渡手段。
+fallback_command:       -DCMAKE_C_FLAGS="-DglGenVertexArrays=glGenVertexArraysOES -DglBindVertexArray=glBindVertexArrayOES -DglDeleteVertexArrays=glDeleteVertexArraysOES"
+fallback_auto_fix:      false
+fallback_impl:          conanfile-edit
+
+forbid_1_pattern:       链接通过.*就认为.*GL.*可用|能编过.*说明.*GLES.*没问题
+forbid_1_reason: 本机制恰恰编译期与链接期都可能通过（构建机 sysroot 里有 libGLESv2.so、符号在链接
+  时"看起来"由 GLESv2 满足），失败发生在加载期。用"编过了"判定完成会漏掉它。
+forbid_1_consequence:   把库交付出去，消费者一加载就崩，且错误信息指向符号而非配置。
+
+forbid_2_pattern:       glGenVertexArrays.*未定义.*是驱动问题|VAO.*失败.*说明.*设备不支持 ES3
+forbid_2_reason: "驱动不支持 ES3"与"链接集合缺 libGLESv3"症状相似但根因完全不同：前者
+  eglGetProcAddress 也拿不到、且 glGetString(GL_VERSION) 不显示 ES3；后者设备
+  GL_VERSION 正常显示 OpenGL ES 3.2（实测 Maleoon 916），只是入口符号没接上。
+  先用 llvm-nm -D 在 sysroot 里做符号归属判定，再谈驱动能力。
+forbid_2_consequence:   误判为设备能力不足 → 错误降级到 OES 名或放弃适配。
+
+forbid_3_pattern:       只改 consumer.*不必改库|让 App 补.*就行.*库不用管
+forbid_3_reason: 上游"App 层补链接"的模式在源码内建场景成立，但交付成 conan 等库包后，库是独立
+  产物，其 DT_NEEDED 缺失会直接让任何消费者加载失败；把责任推给每个消费者等于把缺陷
+  外移。
+forbid_3_consequence:   包能构建、能测试通过（若测试恰好也链了 GLESv3）却在真实下游
+  失败，缺陷在错误的地方暴露。
+
+forbid_4_pattern:       用.*eglGetProcAddress.*逐个取.*VAO.*当通用解|所有 GL 入口都改 eglGetProcAddress
+forbid_4_reason: eglGetProcAddress 是针对调度空桩（符号存在但转发到空实现）的正确解法，见
+  DRAFT-ohos-gl-symbols-are-dispatcher-stubs。本机制是符号根本不存在于已链接集合，
+  正确解法是补链接；用 eglGetProcAddress 绕过会把简单问题复杂化，且语义上仍需保证
+  入口非空才能用。
+forbid_4_consequence:   无谓地引入函数指针分发层与 -Bsymbolic 绑定要求，放大维护面。
+
+forbid_5_pattern:       把.*Error relocating.*当成.*运行期.*问题.*去查上下文|加载失败.*先查.*EGL.*初始化
+forbid_5_reason: Error relocating ...: <sym>: symbol not found 是加载器在重定位阶段打印的，进程
+  已经起不来，根本还没走到 EGL 初始化/上下文创建。同签名的另一族根因见
+  DRAFT-lld-shlib-undefined-host-contract（宿主应用提供的全局量同样报该签名）。
+forbid_5_consequence:   在错误的阶段排查，浪费时间在 GL 上下文与驱动上。
+
+principles: ①GNU/Linux 上能编能链不等于 OHOS 上能加载——OHOS 加载器立即重定位，符号缺口在
+  加载期就是硬失败，验收必须包含真实加载/执行一步；②同族符号在不同 .so 里不重叠是
+  OHOS GL 的既定分层，判定符号归属要用 llvm-nm -D 实测两个库，不要按 Linux 经验假设
+  GLESv2 里都有；③上游把系统库留在 App 层的模式在库包场景必须下沉到库自身，这是打包
+  边界问题而不是上游 bug；④最小密闭探针（nm 对照 + readelf NEEDED）比读代码猜快得多。
+similar_to:             DRAFT-ohos-gl-symbols-are-dispatcher-stubs, DRAFT-ohos-egl-headless-no-gles1-baseline, DRAFT-lld-shlib-undefined-host-contract, E520, E078, E509, E321
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-libstrato-1.0.19-ohos-glesv2-oes-only-core-es3-in-glesv3.md
+last_updated:           2026-09-23
+source_event: libstrato 1.0.19（StratoHAL）OHOS 适配：上游自带 STRATO_TARGET_OPENHARMONY 目标，
+  其 target_link_libraries 只写 m GLESv2 OpenSLES librawfile.z.so，而
+  src/glrender.c 第 658/659/742/1553+ 行调用核心 ES3 名。conan create 的 test_package
+  加载产物时报 Error relocating .../libstrato.so.1: glGenVertexArrays: symbol not found
+  （另两个同族）；同批报出的 egl*/OH_LOG_Print/OH_NativeXComponent_*/napi_* 属
+  "上游把系统库留给 App 层"的另一半问题，其宿主契约族见
+  DRAFT-lld-shlib-undefined-host-contract。加 -lGLESv3（连同 -lEGL -lhilog_ndk.z
+  -lace_ndk.z -lace_napi.z）后消除，22 条消费者断言全过，
+  conan-verify G0/G1/G2/G3/G4/L2/L4/L5 全 PASS。
+authors:                hw-3
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-23
