@@ -1,0 +1,135 @@
+# ═══ Draft knowledge entry — C++11 窄化错误在 switch/case-负值 上不适用 bcp 的 gnu++14 降档修法 ═══
+# Timestamp: 2026-09-24
+# Software: xplc 0.3.13 (C core + C++ tests, autoconf 2.59)
+# Gate: make（配置成功后第一个编译单元 xplc/moduleloader.cpp）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签 (自由文本, 用于分组过滤)
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+
+id:                     DRAFT-E705
+trigger_tool:           clang|clang++|make|conan
+phase:                  compilation
+error_signature:        "case value evaluates to -[0-9]+ which cannot be narrowed to type 'unsigned int'|Wc\\+\\+11-narrowing|cannot be narrowed to type 'unsigned int'"
+
+severity:               2
+category:               c++, compilation, autotools, portability, standard-flags
+match_keywords:         narrowing, Wc++11-narrowing, case -1, unsigned int,
+                         switch, extra_cxxflags, cxxflags property, gnu++14,
+                         UNSTABLE, cppstd, E293, bcp, downlevel, moduleloader
+
+title:                  "旧 C++ 的 `switch(unsigned){ case -1: }` 在 C++11 起即硬错误，bcp 先例的 gnu++14 降档对此无效——只能警告豁免或改码"
+
+root_cause: >
+  `-Wc++11-narrowing` 在 C++11 起把「负的常量表达式收窄进无符号类型」从 warning 提升为
+  hard error；`-Wdynamic-exception-spec`/`-Wregister`（E293、bcp 先例）则是 **C++17 才移除**
+  的特性，在 -std=gnu++14 下仍是合法语法。二者都表现为「2000 年代代码在现代默认标准下编译
+  失败」，但**失效边界不同**：降档到 gnu++14 能救后者，救不了前者——窄化在 11 即死，gnu++14
+  实测同样 rc=1。xplc 0.3.13 的触发点是 `xplc/moduleloader.cpp:65` 在 `#ifdef UNSTABLE` 分支
+  里 `switch(moduleinfo->version_major)`（`unsigned int`）挂 `case -1:`；0.3.13 minor=3 为奇数
+  → configure 判定 unstable → 注入 `-DUNSTABLE` → 该分支必然编译。
+  另有一层 conan API 陷阱：`AutotoolsToolchain.cxxflags` 是 **property（只读派生）**，
+  `tc.cxxflags.append(...)` 静默不生效；必须用 `tc.extra_cxxflags`。
+affected_scope: >
+  任何在现代 C++ 标准下编译、且在 `switch` 到无符号量时挂负值 case 的旧 C++ 源码；
+  尤其 autoconf 用「奇数 minor = unstable」开关把负值哨兵（-1 = UNSTABLE 模块 ABI 版本）
+  条件编译进生产代码的项目。凡考虑按 bcp/E293 经验改用 gnu++14 的场景，都必须先分辨
+  失效的是 C++17-移除特性还是 C++11-新增错误。
+verification_cmd: >
+  cat > $HOME/tmp/xplc-0.3.13/w0/narrow-probe.cpp <<'EOF'
+  struct M { unsigned int v; };
+  int f(const M* m){ switch(m->v){ case -1: return 1; default: return 0; } }
+  EOF
+  for s in c++17 gnu++14 gnu++98; do
+    /data/service/hnp/bin/clang++ -std=$s -DUNSTABLE -c $HOME/tmp/xplc-0.3.13/w0/narrow-probe.cpp -o /dev/null
+    echo "std=$s rc=$?"
+  done
+  /data/service/hnp/bin/clang++ -std=c++17 -DUNSTABLE -Wno-c++11-narrowing \
+    -c $HOME/tmp/xplc-0.3.13/w0/narrow-probe.cpp -o /dev/null && echo "with-flag rc=0"
+  # 预期: c++17 rc=1 / gnu++14 rc=1（降档无效）/ gnu++98 rc=0 / with-flag rc=0
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+
+recommended_fix: >
+  保留 profile 的 compiler.cppstd=17（降档会偏离 CI 矩阵），在配方 generate() 里给
+  extra_cxxflags 加 -Wno-c++11-narrowing；不要改上游源码把 case -1 改成无符号常量
+  （会同时改动模块 ABI 语义面）。注意顺序：AutotoolsDeps 与 AutotoolsToolchain 都要
+  generate，且 cxxflags 只能经 extra_cxxflags 注入。
+
+diagnosis_commands:
+  - "grep -n 'cannot be narrowed' reports/conan-create.log          # 确认窄化类型(unsigned int/char/int 决定修法)"
+  - "grep -n 'Wno-c++11-narrowing' <build>/config/config.mk         # 豁免是否真的进了 CXXFLAGS（property 陷阱自查）"
+  - "grep -n 'std=' reports/conan-create.log | head                # 实际标准档，排除误以为在 gnu++14"
+  - "grep -rn 'case -1:' <src> --include=*.cpp                      # 触发源是否在 UNSTABLE 条件编译内"
+
+distinct_from: >
+  E293（bcp 动态异常规范 throw(...) / register）是 **C++17 移除**特性，降档 gnu++14 有效——
+  本条是 **C++11 新增**错误，gnu++14 实测同样 rc=1，降档无效，只能豁免或改码；
+  DRAFT-ifcplusplus-2.5-aarch64-char-mask-narrowing 与 hfsm2 草稿的窄化发生在
+  `static const char[] = {-1}` 列表初始化（plain char 在 aarch64 默认 unsigned），
+  修复位是源码显式 signed char；本条窄化发生在 `switch(unsigned)` 的 `case -1:`，
+  修复位是编译警告豁免，且与 aarch64 char 默认符号性无关（x86 上同样失败）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+
+rec_priority:           1
+rec_approach:           suppress-narrowing-warning-keep-cppstd
+rec_description:        在配方 generate() 中通过 tc.extra_cxxflags 注入 -Wno-c++11-narrowing，
+                        保持 compiler.cppstd=17 不变，不改上游源码。
+rec_command:            def generate(self):\n    tc = AutotoolsToolchain(self)\n    tc.extra_cxxflags.append("-Wno-c++11-narrowing")\n    tc.generate()
+rec_auto_fix:           false
+rec_impl:               conan-recipe-generate
+
+fallback_priority:      2
+fallback_approach:      patch-source-to-unsigned-sentinel
+fallback_description: >
+  若项目明确要求 -Werror 且不接受该警告豁免，则补丁把 case -1: 改为
+  与 version_major 同类型的哨兵（需上游确认 UNSTABLE 模块 ABI 语义），
+  或把该分支改写为 if (version_major == (unsigned)-1)。
+fallback_command:       "-p1 补丁: case -1: → if (moduleinfo->version_major == (unsigned int)-1) { ... break; }"
+fallback_auto_fix:      false
+fallback_impl:          upstream-patch
+
+# ═══ 禁止策略 (forbid_*) ═══
+
+forbid_1_pattern:       "-std=gnu\\+\\+14|-std=c\\+\\+14|-fpermissive"
+forbid_1_reason:        gnu++14 对 C++11 起的窄化错误无效（本任务最小复现实测 rc=1），
+                        改标准档只会偏离 CI 的 compiler.cppstd=17 矩阵并掩盖真实修复位置。
+forbid_1_consequence:   编译依旧失败，或在别的包上因降档掩盖真正需要修的 C++17 移除特性，
+                        导致同一 PR 里两类问题被同一个「降档」动作误判为已解决。
+
+forbid_2_pattern:       "case -1\\s*:.*→.*case 4294967295|-DUNSTABLE=0|去掉.*UNSTABLE"
+forbid_2_reason:        UNSTABLE 是 autoconf 按「minor 为奇数」写入的模块 ABI 标记，
+                        擅自去掉会改变 xplc 模块版本协商语义，且与库本体的 -DUNSTABLE 不一致。
+forbid_2_consequence:    消费者与库的 UNSTABLE 定义不一致，头文件展开成不同的类布局
+                        （UNSTABLE_INTERFACE 有无 static bool 成员），ABI 级错配。
+
+# ═══ 关联 ═══
+principles:             P010
+causes:                 []
+caused_by:              []
+similar_to:             [E293, DRAFT-ifcplusplus-2.5-aarch64-char-mask-narrowing]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-E705-cpp11-narrowing-unsigned-switch-case-minus-one.md
+last_updated:           2026-09-24
+source_event:           xplc/0.3.13 HarmonyOS PC 适配（族C 最小复现钉死 bcp 降档修法的适用边界）
+authors:                xplc-0.3.13-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
