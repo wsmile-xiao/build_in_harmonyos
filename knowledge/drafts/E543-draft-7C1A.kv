@@ -1,0 +1,56 @@
+#====================================================================
+# Draft: refresh-patch --auto 报「无有效新补丁」——.work 与 .orig 是硬链接，
+#        原地写回的编辑器把两边一起改了，difflib 比对恒为空
+#   Pairs with: E543-draft-7C1A.md
+#====================================================================
+
+id:                     E543-DRAFT-7C1A
+trigger_tool:           patch|make|conan
+phase:                  configuration
+error_signature:        无有效新补丁，保留现有|refresh-patch.*\(0 files, \+0/-0\)|patches/ 目录为空.*conandata.*patches: \{\}
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               build-system, patch, detection, limitation
+match_keywords:         refresh-patch, 无有效新补丁, 空补丁, 硬链接, hardlink, inode, .work, .orig, difflib, patches 为空, 补丁未生成, apply_conandata_patches 无补丁
+title:                  init-build 的 .work 与 .orig 为硬链接，原地写回的编辑修改会同时改到 .orig，导致 refresh-patch 生成空补丁
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             init-build 创建源码工作副本时用硬链接（日志明确写 ".work 已创建 (硬链接)"），.orig/<file> 与 .work/<file> 共享同一 inode。若修改源码的工具是"原地写回"（以 O_TRUNC 打开原文件写入，而不是写临时文件再 rename），则 .orig 的内容被一并改写；refresh-patch --auto 的 per-file difflib 比对两边内容完全相同，判定"无有效新补丁"，patches/ 为空、conandata.yml 的 patches 保持 {}，最终配方在干净源码上构建时缺少全部适配改动（而本地 .work 里"看起来改好了"，极具迷惑性）。
+affected_scope:         所有走 init-build → 手工改源码 → refresh-patch --auto 的适配任务。凡编辑器/脚本对源文件原地写回（Python open(path,"w")、cat > file、truncate 后写）都会触发；sed -i 与多数编辑器采用"写临时文件 + rename"，rename 会断开硬链接因而不受影响。症状还有一个变体：先前已被污染的 .orig 会让后续所有补丁都缺失对应 hunk。
+verification_cmd:       ls -li "$BUILD_SRC_DIR/Makefile" "${BUILD_SRC_DIR%.work}.orig/Makefile"   # 两行 inode 相同 = 命中；再 diff -u .orig/f .work/f 为空但文件内容确已修改即可确认
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           restore-orig-from-tarball-and-unlink
+rec_description:        修复三步：(1) 把改好的文件备份出来 cp .work/f /tmp/f.mod；(2) rm -f .orig/f .work/f 断开硬链接，并从下载的源码包重新解出干净副本 tar xzf <src>.tar.gz -O '*/f' > .orig/f（解完核对 sha256 与上游一致）；(3) cp /tmp/f.mod .work/f 放回修改版，此时两边 inode 不同，重跑 refresh-patch --auto 即可正常产出补丁。预防做法：动手改源码前先对要改的文件执行 cp --remove-destination 或 rm + 重建，确保 .work 内该文件独占 inode。
+rec_command:            cp "$W/f" /tmp/f.mod && rm -f "$O/f" "$W/f" && tar xzf "$SRC_TARBALL" -O --wildcards '*/f' > "$O/f" && cp /tmp/f.mod "$W/f" && python3 scripts/ohc-run.py refresh-patch --auto <name> <ver>
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      reinit-build-from-scratch
+fallback_description:   改动很少时，直接删掉 .orig/.work 重跑 init-build 拉一份干净源码，再用"先断链后编辑"的方式重做修改。
+fallback_command:       rm -rf "$O" "$W" && python3 scripts/ohc-run.py init-build <name> <ver> --url=<URL>
+fallback_auto_fix:      false
+
+forbid_1_pattern:       手写 .patch|直接编辑 conandata.yml 的 patches 指向未生成的补丁
+forbid_1_reason:        R3 规定补丁只能由 refresh-patch --auto 生成；手写补丁与真实源码状态脱节，行号/上下文极易漂移
+forbid_1_consequence:   conan create 阶段 patch_ng 报 source/target file does not exist 或补丁静默不生效，CI 上表现为"本地能过、CI 构建的是未打补丁的源码"
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E484]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/E543-draft-7C1A.md
+last_updated:           2026-09-21
+source_event:           since 1.1 适配（archives/s/since/1.1）：改 Makefile 后 refresh-patch 报"无有效新补丁"，ls -li 确认 .orig/.work 同 inode
+
+authors:                lilliv3 (OHC agent 7C1A)
