@@ -1,0 +1,89 @@
+--- a/src/algos/demosaicing.c
++++ b/src/algos/demosaicing.c
+@@ -33,21 +33,25 @@
+ #include "gui/message_dialog.h"
+ #include "gui/dialogs.h"
+ #include "io/sequence.h"
+ #include "io/fits_sequence.h"
+ #include "io/seqwriter.h"
+ #include "io/image_format_fits.h"
+ #include "io/conversion.h"
+ #include "algos/demosaicing.h"
+ #include "algos/statistics.h"
+ 
++#ifndef HAVE_LIBRTPROCESS
++#define USE_SIRIL_DEBAYER TRUE
++#else
+ #define USE_SIRIL_DEBAYER FALSE
++#endif
+ 
+ const char *filter_pattern[] = {
+ 	"RGGB",
+ 	"BGGR",
+ 	"GBRG",
+ 	"GRBG",
+ 
+ /* XTRANS */
+ 	"GGRGGB" // ----> XTRANS_1
+ 	"GGBGGR"
+@@ -1173,31 +1177,60 @@
+ 				top_down = FALSE;
+ 			}
+ 		}
+ 		if (!top_down)
+ 			fits_flip_top_to_bottom(fit); // TODO: kind of ugly but not easy with xtrans
+ 		compile_XTrans_pattern(fit->bayer_pattern, xtrans);
+ 	} else {
+ 		adjust_Bayer_pattern(fit, &pattern);
+ 	}
+ 
++#ifdef HAVE_LIBRTPROCESS
+ 	float *newbuf = debayer_buffer_new_float(buf, &width, &height, interpolation, pattern, xtrans);
+ 	if (!newbuf)
+ 		return 1;
+ 
+ 	fit_debayer_buffer(fit, newbuf);
+ 	if (interpolation == XTRANS && !top_down) {
+ 		fits_flip_top_to_bottom(fit);
+ 	}
+ 	/* we remove Bayer header because not needed now */
+ 	clear_Bayer_information(fit);
+ 	return 0;
++#else
++	// No librtprocess: fall back to siril debayer for float.
++	// debayer_buffer_siril works on WORD; convert buf to WORD, debayer,
++	// then convert the result to a freshly-allocated float buffer whose
++	// ownership is transferred to fit_debayer_buffer (mirroring the
++	// HAVE_LIBRTPROCESS branch and debayer_ushort).
++	{
++		WORD *wordbuf = malloc((size_t)width * height * sizeof(WORD));
++		if (!wordbuf) return 1;
++		for (int i = 0; i < width * height; i++)
++			wordbuf[i] = (WORD)buf[i];
++		WORD *newbuf = debayer_buffer_siril(wordbuf, &width, &height, interpolation, pattern, xtrans, 16);
++		free(wordbuf);
++		if (!newbuf) return 1;
++		size_t npix = (size_t)width * height * 3;
++		float *fbuf = malloc(npix * sizeof(float));
++		if (!fbuf) { free(newbuf); return 1; }
++		for (size_t i = 0; i < npix; i++)
++			fbuf[i] = (float)newbuf[i];
++		free(newbuf);
++		fit_debayer_buffer(fit, fbuf);
++		if (interpolation == XTRANS && !top_down) {
++			fits_flip_top_to_bottom(fit);
++		}
++		clear_Bayer_information(fit);
++		return 0;
++	}
++#endif
+ }
+ 
+ int debayer(fits *fit, interpolation_method interpolation, sensor_pattern pattern) {
+ 	if (fit->type == DATA_USHORT)
+ 		return debayer_ushort(fit, interpolation, pattern);
+ 	else if (fit->type == DATA_FLOAT)
+ 		return debayer_float(fit, interpolation, pattern);
+ 	else return -1;
+ }
+ 
