@@ -1,0 +1,89 @@
+# ═══ Draft knowledge entry — E665: HMDFS 文件系统语义缺口与 OHOS 无 passwd UID 的移植修法 ═══
+# Timestamp: 2026-09-22
+# Software: s-nail 14.9.25 (Berkeley mail 家族 MUA)；修法模式适用于一切在
+#           OHOS/HMDFS 上做 mkdir/link/权限检查/uid 查询的 C 程序
+# Gate: 真机上游测试套件 607 用例 15 FAIL → 5 FAIL 的三轮排障
+#       （archives/s/s-nail/14.9.25/notes.md、reports/）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the content below
+#   2. Rename to E665.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E665.md
+
+id:                     DRAFT-E665-HMDFS-MAILDIR-PORT
+trigger_tool:           build|runtime|maildir|mkdir|link|getpwuid|chmod|conan
+phase:                  configure|build|testing|runtime
+error_signature:        Cannot associate a name with uid|
+                        Cannot create directory .*/tmp|
+                        Cannot link .* to .*|
+                        Not a regular file, or accessible by non-user|
+                        Cannot canonicalize .*
+severity:               1
+category:               portability|hmdfs|filesystem|maildir|ohos-device|permission
+match_keywords:         HMDFS, maildir, link, rename, umask, getpwuid, passwd, mkdir,
+                        EACCES, st_nlink, 0600, dotlock, chmod, 鸿蒙, 硬链接, 权限位
+title:                  HMDFS 四类移植地雷：umask×属主映射使 0700 目录自不可访问、无硬链接、
+                        属主独占权限位丢失、应用域 UID 无 passwd 条目
+
+root_cause: >
+  1) umask×属主映射（目录自不可访问）：HMDFS 把新建目录的属主映射为共享身份
+     （ls 显示 20001006），而进程 euid 是应用域号（如 20020085）。默认 umask 0077
+     下 mkdir(mode 0777) 的目录落盘为 drwx--S---(2700)，组位被剥掉后进程对
+     "自己的"目录反而只剩 other 类判定 → 一切在目录内的创建/写操作 EACCES。
+     对照实验：同一目录 umask 0022 下创建则落盘 drwxr-s--x(2751) 且可写。
+     实测复现：s-nail 默认 *umask*=0077，Maildir tmp/new/cur 层级创建必失败。
+  2) 硬链接缺失：HMDFS link(2) 恒失败（ maildir 投递 tmp→new、状态迁移
+     new→cur、cp -al 均命中；cp -al 还会静默退化为整树复制）。
+     link()+unlink() 的原子语义在"同文件系统内"可由 rename(2) 等价替代。
+  3) 属主独占权限位丢失：chmod 0600 实际落盘 0660（other 位丢失之外，
+     组位无法移除）。依赖 owner-only 检查的软件特性把这类文件判为不安全
+     （s-nail: Not a regular file, or accessible by non-user → .netrc 拒载）。
+  4) 应用域 UID 无 passwd 条目：getuid()=20020085 而 /etc/passwd 无对应行，
+     getpwuid() 返回 NULL。Berkeley mail 家族（s-nail/heimdal mail 等）把
+     NULL 直接 n_panic，启动即 SIGABRT。
+
+affected_scope:         OHOS/HMDFS 设备上一切创建目录/硬链接/做权限检查/查 passwd 库的
+                        原生程序；Maildir 类邮箱目录、锁文件、dotlock、.netrc、
+                        setuid 辅助程序是高发区。
+
+verification_cmd:       在设备可写目录 clang 编译最小探针：mkdir(d,0700) 后
+                        fopen(d/"x","w")；link(a,b)；chmod 0600 后 stat -c %a；
+                        独立 C 程序打印 getpwuid(getuid())。四探针结论与本条
+                        root_cause 逐一对应（见配套 .md 的命令与输出）。
+
+rec_priority:           1
+rec_approach:           scoped-umask-mkdir-and-rename-fallback-and-env-identity
+rec_description:        ① mkdir 调用点作用域化放宽 umask（保存旧值→umask(0022)→mkdir→恢复，
+                        目录内文件仍受进程原 umask 约束，不放大文件可见性）；
+                        ② link()+unlink() 语义处在 link(2) 失败时回退 rename(2)（同文件系统
+                        原子等价）；③ getpwuid 失败时从 LOGNAME/USER/HOME 合成身份回退；
+                        ④ 不要改弱 owner-only 安全检查（netrc 类），申报为环境限制。
+rec_command:            保存旧 umask；umask(0022); rc=mkdir(name,0777); umask(old);
+                        if(link(tfn,nfn)&&rename(tfn,nfn)) 报错;
+                        pw=getpwuid(getuid()); if(!pw) 用 getenv("LOGNAME")/getenv("USER")/"/" 合成
+rec_auto_fix:           false
+rec_impl:               archives/s/s-nail/14.9.25/patches/000{1,2,3}-*.patch（三处修法可直接移植）
+
+fallback_priority:      2
+fallback_approach:      document-as-ohos-env-limit
+fallback_description:   无法在不削弱安全语义的前提下适配的（owner-only 检查、st_nlink 断言类
+                        上游测试），按 OHOS 环境限制如实申报 FAIL 及证据，不为凑绿改弱检查。
+fallback_command:       grep -n "ERROR:" 上游测试日志 && 逐项对照本条 error_signature
+fallback_auto_fix:      false
+fallback_impl:          archives/s/s-nail/14.9.25/reports/ 的 netrc/pipe_handlers 失败判读
+
+forbid_1_pattern:       chmod\(.*0700\).*mkdir|umask\(0?077\).*mkdir.*maildir
+forbid_1_reason:        HMDFS 上先 umask 0077 再建 0700 目录，目录落盘 2700 后对创建进程自身
+                        EACCES，后续所有目录内写操作必失败（实测三轮复现）
+forbid_1_consequence:   Maildir/缓存/锁目录类功能整体不可用，且错误被误判为磁盘权限配置问题
+
+forbid_2_pattern:       if\s*\(link\(.*\)\s*==\s*-1\)\s*\{\s*goto jerr
+forbid_2_reason:        HMDFS 无硬链接，仅报错不回退会让"link+unlink 即移动"的语义全部失效
+forbid_2_consequence:   Maildir 投递/状态迁移失败，上游测试断言成簇 FAIL（s-nail 实测 10 项）
+
+principles:             P003
+caused_by:
+causes:
+related:                DRAFT-E665
