@@ -1,0 +1,116 @@
+# ═══ Draft knowledge entry — 内核模块类软件在 OHOS 侧的分层交付模式 ═══
+# Timestamp: 2026-09-20
+# Software: lenovolegionlinux 0.0.20 (LenovoLegionLinux)
+# Gate: 内核态不可构建，但用户态层 + 上游测试脚本可交付、可执行 —— 处置模式沉淀
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the recipe/test_package referenced below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-lenovolegionlinux-0.0.20-kernel-module-source-snapshot-delivery
+trigger_tool:           conan|make|kbuild|dkms|python
+phase:                  configure|build|test
+error_signature:        fatal error: 'linux/acpi\.h' file not found|
+                         No rule to make target 'modules'\.  Stop\.|
+                         No packages to build
+
+severity:               1
+category:               kernel|platform|build-system|limitation|test|detection
+match_keywords:         obj-m, Kbuild, KSRC, dkms.conf, kernel module, source snapshot,
+                         fail-closed contract test, package_type=application,
+                         site-packages, console_scripts, upstream tests executable,
+                         argcomplete, optional dependency, layered declaration,
+                         上游用例可执行子集, 分层声明
+
+title:                  内核模块类三方库在 OHOS 的交付模式：用户态层真实交付 + 内核模块源码快照 + fail-closed 契约 + 上游可执行用例进 CI + 分层声明
+
+root_cause: >
+  交付物为内核模块（Kbuild obj-m / DKMS）的软件，在 OHOS PC 用户态 conan 适配框架内无法
+  构建 .ko（无内核构建树、缺内核内部头、无 insmod 权限）。但这类软件通常仍有两块可交付物：
+  (1) 用户态层（CLI/库/脚本），(2) 上游源码与测试脚本。若只写一份「无法适配」说明就关单，
+  会丢掉这两块可验证的工作；若只交付用户态层而不声明边界，则是「裁剪后宣称完成」。
+  正确做法是分层交付、分层声明，并把上游用例中可在 OHOS 侧执行的部分真正跑起来。
+
+affected_scope:         交付物含内核模块，但同时提供用户态组件或可静态校验的上游源码的软件；
+                        与 DRAFT-lenovolegionlinux-0.0.20-kernel-module-not-deliverable（判定清单）
+                        配对使用：前者回答「这是什么、能不能适配」，本条回答「判定后怎么交付」。
+
+verification_cmd:       # 1) 配方可构建（用户态层）
+                        conan create archives/<l>/<pkg>/<ver> -pr:h=ci/conan/profiles/ohos-aarch64 \
+                          -pr:b=ci/conan/profiles/ohos-aarch64 --build='<pkg>/*'
+                        # 2) 上游用例的可执行子集（本例 12 个脚本中的 2 个 CLI 用例）
+                        ls <src>/tests/*.sh | wc -l
+                        bash <pkg>/share/<pkg>/upstream/tests/test_python_cli.sh   # 源树变体
+                        PATH=<pkg>/bin:$PATH bash <src>/tests/test_python_cli_installed.sh
+                        # 3) 内核模块源码契约（fail-closed）
+                        bash test_package/test_kernel_module_contract.sh <pkg>/share/<pkg>/upstream
+
+rec_priority:           1
+rec_approach:           kernel-module-source-snapshot-plus-userspace-delivery
+rec_description: >
+  五步落地（每步都有可机械核验的产物）：
+  1) 用户态层真实交付：package_type=application；build() 用目标解释器对交付模块做全量
+     compileall 字节码编译（真实编译步骤 + 逐文件 Compiling 日志）；package() 布局
+     lib/pythonX.Y/site-packages + bin/ 控制台入口（入口脚本内自带 site-packages 定位，
+     使 bin/xxx --help 在 conanrun 之外也能跑通，CI L2 冒烟即过）；配套 commands.json（R38）。
+  2) 上游源码按原目录布局随包交付（share/<pkg>/upstream/）：内核模块源码 + 上游测试脚本 +
+     用户态源码。好处有二：上游源树变体的测试脚本可**逐字执行**（脚本用 BASH_SOURCE 定位
+     自身 → 快照内路径即成立）；平台将来提供内核构建树时无需重新拉取上游。
+  3) 内核模块源码 fail-closed 契约测试：对包内源码校验 module_init/exit、ACPI/WMI、DMI 机型
+     绑定、hwmon、platform_profile、Kbuild obj-m/KSRC、DKMS 字段与「不得存在预编译 .ko」；
+     源码缺失一律非 0 退出（绝不静默通过）。
+  4) 平台特有测试（鸿蒙特有测试）：目标机上无内核接口时的优雅降级（断言提示文案 + 无
+     traceback）、site-packages/入口打包契约、目标解释器可导入交付模块。本例实测退出码为 0，
+     因此断言对象是 stdout 文案而非退出码（上游 main() 不传播子命令返回值）。
+  5) 分层声明：PR 描述 + manifest.yaml 分别列出「已执行并通过」「未执行（附实测原因）」，
+     未执行项不进通过数。上游用例逐条状态写进 test_package/MANIFEST.yml（含 not_verified 段）。
+  配套依赖处置：上游 install_requires 中制品仓无制品的**可选**依赖（本例 argcomplete 只提供
+  shell 补全），按上游既有可选依赖写法（darkdetect）降级为可选导入，不裁剪功能、不跳过测试。
+
+rec_command:            grep -n "obj-m\|KSRC" <src>/**/Makefile; \
+                         conan create <pkg_dir> -pr:h=ci/conan/profiles/ohos-aarch64 \
+                           -pr:b=ci/conan/profiles/ohos-aarch64 --build='<pkg>/*'
+rec_auto_fix:           false
+rec_impl:               userspace-package-plus-kernel-source-snapshot
+
+fallback_priority:      2
+fallback_approach:      record-only-pr (record files without conanfile.py)
+fallback_description:   若用户态层确实无法作为制品交付（无构建系统、无任何可安装文件），
+                         则退回记录性 PR + 知识草稿；注意包目录没有 conanfile.py 会被
+                         CI 判 [error] No packages to build（exit 1），须改为只提交
+                         知识草稿或走 issue 通道。
+fallback_command:       CI_PACKAGES="" zsh ci/conan/build_and_test.sh
+fallback_auto_fix:      false
+fallback_impl:          record-only-without-package-dir
+
+forbid_1_pattern:       (touch|cat >)[^\n]*(include/linux/(acpi|wmi|hwmon|platform_profile|moduleparam)\.h|\.ko$)
+forbid_1_reason:        伪造内核内部头 / 空壳 stub / 预编译 .ko 只能让检查看起来通过
+forbid_1_consequence:   交付物在目标机不可用，评审判定为伪造，任务失败
+
+forbid_2_pattern:       manifest\.yaml[^\n]*status:[^\n]*published\b(?s).*内核模块
+forbid_2_reason:        内核态未构建却把整体状态写成 published/success 属分层声明缺失
+forbid_2_consequence:   被判定为伪造状态，PR 打回
+
+principles:
+similar_to:             DRAFT-lenovolegionlinux-0.0.20-kernel-module-not-deliverable
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-lenovolegionlinux-0.0.20-kernel-module-source-snapshot-delivery.md
+last_updated:           2026-09-20
+source_event:           lenovolegionlinux 0.0.20 适配任务（平台任务 contrib-13021 / PR #11320）：
+                        上一轮审查 VERDICT=FAIL（rule4 编译状态=失败且上游 12 用例 0 个实测；
+                        rule12 鸿蒙特有测试 N=0）。本轮按分层交付模式重构为真实制品 +
+                        上游可执行用例进 CI + 鸿蒙平台契约测试，本地 CI（ci/conan/build_and_test.sh）
+                        L0/L1/L2/L4/L5 全绿、pass rate 1/1。
+authors:                lkyz
+source_pr:              https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/11320
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-20
