@@ -1,0 +1,129 @@
+#====================================================================
+# DRAFT E703 — OHOS 上 strip 让 hnp clang 自带的 .codesign 签名失效：
+#              装出来的可执行文件 Operation not permitted
+# Timestamp: 2026-09-24
+# Software: integrit 4.1（autotools application，install 规则含 $(STRIP)）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#
+# 探针证据（OHOS 设备 aarch64，clang 15.0.4）：
+#   ./integrit -V                                  → integrit version 4.1 (rc=0)  67968B
+#   make install（含 $(STRIP)）→ bin/integrit -V   → Operation not permitted       51032B
+#   cp ./integrit <别处> && 执行                    → integrit version 4.1 (rc=0)
+#   readelf -S：未 strip [37] .codesign / strip 后 [24] .codesign  ← section 都在
+#   make STRIP= install → bin/integrit -V          → integrit version 4.1 (rc=0)  67968B
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to Ennn.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/Ennn.md
+#====================================================================
+
+id:                     DRAFT-E703-INTEGRIT-4.1-STRIP-INVALIDATES-CODESIGN-EPERM
+trigger_tool:           make|install|strip|autotools|loader|binary-sign-tool
+phase:                  packaging|testing
+error_signature:        'Operation not permitted|bash: .*: Operation not permitted|install-sh.*-m 755'
+
+severity:               3
+category:               ohos, codesign, strip, autotools, packaging, loader
+match_keywords:         Operation not permitted, EPERM, .codesign, codesign,
+                        strip, $(STRIP), STRIP=-s, install-sh, make install,
+                        装完跑不了, 安装后不可执行, 加载器拒绝, hnp clang,
+                        binary-sign-tool, selfSign, test_package 挂,
+                        section 还在, 签名失效, 布局失配, integrit
+
+title:                  上游 install 用 $(STRIP) 时，hnp clang 写入的 .codesign 签名随 strip 后布局失配 ⇒ 装出来的可执行文件 Operation not permitted（section 仍在但校验失败）；在 install 调用上传 STRIP= 禁 strip 即可
+
+probe_command:          |
+    cd <源码目录>
+    # 1) make 产物（未 strip）能否跑
+    ./integrit -V
+    # 2) 用上游规则 strip 后安装，看是否 EPERM
+    make install && <prefix>/bin/integrit -V
+    # 3) cp 一份未 strip 的试跑（排除权限位/目录差异）
+    cp ./integrit ./cp-test && ./cp-test -V
+    # 4) 签名 section 对照（证明不是被删）
+    readelf -S ./integrit | grep codesign
+    readelf -S <prefix>/bin/integrit | grep codesign
+    # 5) 禁 strip 修复后复验
+    make STRIP= install && <prefix>/bin/integrit -V
+
+root_cause:             |
+    hnp clang 给每个 ELF 链接一个 `.codesign` 签名 section，加载器执行前校验它。
+    上游 autotools 的 install 规则普遍是 `$(INSTALL) $(STRIP) -m 755 …`，configure
+    检测到 strip 后令 `STRIP = -s`；strip 去掉符号表改变了文件布局，原先写入的
+    .codesign 不再匹配实际内容 ⇒ 校验失败 ⇒ Operation not permitted。
+    关键反直觉点：`readelf -S` 里 .codesign **两边都还在**（integrit 实测 [37] 与 [24]），
+    所以"section 还在 = 签名没问题"是错的 —— 是签名内容失配，不是 section 缺失。
+
+detection:              |
+    三条同时成立即命中：① make 产物能跑、install 产物 EPERM；
+    ② cp 未 strip 原始产物能跑（排除权限/文件系统因素）；
+    ③ readelf -S 两边都有 .codesign。
+    注意与 HMDFS 权限问题区分：那里是 chmod 不生效（文件可读），这里是文件能读能执行、
+    只是被加载器拒绝。
+
+fix:                    |
+    方法一（推荐，零源码改动）—— Makefile 命令行变量优先级最高，在 install 调用上传空 STRIP：
+
+        def package(self):
+            autotools = Autotools(self)
+            autotools.install(args=["STRIP="])   # Conan 自动补 DESTDIR= ⇒ make DESTDIR=<pkg> STRIP= install
+
+    实测产物回到未 strip 字节数、可执行、man/info 仍完整安装。
+    反例：`configure STRIP=` **传不进去**（AC_PROG_STRIP 仍定成 -s），autotools_vars 也不如
+    make 命令行可靠 —— 必须在 install 调用上覆盖。
+
+    方法二（退路）—— 布局定稿后重新自签：
+
+        LD_LIBRARY_PATH= binary-sign-tool sign -selfSign <binary>
+
+    调 hnp 宿主工具前必须清 LD_LIBRARY_PATH（conanbuild 注入的是目标 sysroot，
+    宿主工具会报 Error loading shared library libc++.so）；
+    **禁止对 .so 重签**（本机 musl 加载器 SIGSEGV），只对可执行文件用。
+
+affected_scope:         任何上游 install 规则含 $(STRIP)、且产物要作为可执行文件被
+                        test_package / CI 运行的包。autotools 项目几乎默认如此，是
+                        application 类包的系统性风险：构建与上游测试全绿，
+                        只有消费已安装产物那一步才爆，极像 test_package 写错了。
+
+verification_cmd:       cd "$TASK_DIR/w0/src/integrit-4.1" && make STRIP= install \
+                          && "$TASK_DIR/w0/nostrip-prefix/bin/integrit" -V
+
+rec_priority:           1
+rec_approach:           disable-strip-on-install
+rec_description:        适用**支持 $(DESTDIR) 的包**：package() 用 autotools.install(args=["STRIP="])
+                        禁掉安装期 strip，保持 .codesign 与最终字节布局一致（test_package 只测
+                        已安装产物时须走此步，否则会把 EPERM 误判成消费者测试写错）。
+                        **本包 integrit 不适用本条路径**：三份 Makefile.in 的 $(DESTDIR) 计数全为 0、
+                        make install 会直写根目录（报错形如 install 无法写入 //info、Permission denied），
+                        故 package() 改为直接 copy 收 make 原产物——同样未经 $(STRIP)、签名同样有效。
+rec_command:            仅适用支持 $(DESTDIR) 的包：autotools.install(args=["STRIP="])；本包零 $(DESTDIR) 故 package() 改用 copy 收产物
+rec_auto_fix:           false
+rec_impl:               archives/i/integrit/4.1/notes.md 问题表#4（本包真实修法：package() copy 收原产物，零 install 调用）
+
+fallback_priority:      2
+fallback_approach:      resign-after-install
+fallback_description:   无法禁 strip 时，对可执行文件在布局定稿后自签
+                        （LD_LIBRARY_PATH= binary-sign-tool sign -selfSign）；
+                        严禁对 .so 重签。
+fallback_command:       LD_LIBRARY_PATH= binary-sign-tool sign -selfSign <prefix>/bin/<prog>
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       看到 .codesign section 仍在就断定签名有效|把安装产物 EPERM 当成 test_package 写错去改消费者测试|对 .so 执行 binary-sign-tool 重签
+forbid_1_reason:        section 存在不等于签名与当前字节布局匹配（strip 后必然失配）；
+                        EPERM 是打包期引入的，改消费者测试治不了根且削弱验证；
+                        对 .so 重签会让本机 musl 加载器 SIGSEGV。
+forbid_1_consequence:   误诊方向浪费排查时间；改消费者测试导致验证面缩水并可能被 W4 判伪；
+                        .so 重签直接把运行时打挂。
+
+similar_to:             [coinor-symphony notes: OHOS 一切 ELF 运行前须 binary-sign-tool 自签, device-facts 附录: .codesign 禁止对 .so 重签]
+conflicts_with:         []
+caused_by:              []
+
+principles:             real-evidence-over-assumption, minimal-patch, diagnose-before-fix, test-the-installed-artifact
+
+authors:                integrit-4.1 任务（任务卡 7495）
+source_event:           integrit 4.1 适配（feat/integrit-4.1）
+last_updated:           2026-09-24
