@@ -1,0 +1,11 @@
+cmake_minimum_required(VERSION 3.8)
+project(test_crc_cpp LANGUAGES CXX)
+enable_testing()
+find_package(crc_cpp REQUIRED CONFIG)
+add_executable(test_crc_cpp test.cpp)
+target_link_libraries(test_crc_cpp crc_cpp::crc_cpp)
+add_test(NAME test_crc_cpp COMMAND test_crc_cpp)
+# HarmonyOS 专项测试（#ifdef __OHOS__ 实质逻辑, R6）
+add_executable(test_ohos_special ohos_special_test.cpp)
+target_link_libraries(test_ohos_special crc_cpp::crc_cpp)
+add_test(NAME test_ohos_special COMMAND test_ohos_special)
