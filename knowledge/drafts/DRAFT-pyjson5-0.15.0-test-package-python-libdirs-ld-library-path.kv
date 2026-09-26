@@ -1,0 +1,78 @@
+# ═══ Draft knowledge entry — test_package 调用 conan python 依赖二进制必须显式注入 libdirs ═══
+# Timestamp: 2026-09-24
+# Software: pyjson5 0.15.0 R03（任何 test_package 显式调用 conan python 解释器二进制的纯 Python 包）
+# Gate: conan create test_package test()（CI worker vs 设备端加载器路径不一致）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-pyjson5-0.15.0-test-package-python-libdirs-ld-library-path
+title:                  Conan test_package 显式调用 conan python 解释器二进制时，必须把 python 依赖包 cpp_info.libdirs 注入 LD_LIBRARY_PATH（设备端隐式加载器可解析 ≠ CI worker 可解析）
+trigger_tool:           conan|test_package|python|ld
+phase:                  test|runtime
+error_signature:        Error loading shared library libpython3.12.so.1.0: (needed by .*bin/python3.12)|
+                        Error relocating .*: Py_BytesMain: symbol not found|
+                        ConanException: Error 127 while executing
+severity:               2
+category:               linking|runtime|python|conan
+match_keywords:         LD_LIBRARY_PATH, libpython, libpython3.12.so.1.0, python3.12, conan python,
+                        test_package, test(), cpp_info, libdirs, Error 127, Error loading shared library,
+                        Py_BytesMain, 隐式加载器, CI worker, device loader, PYTHONPATH, 纯 Python 包
+keywords:               pyjson5, json5, test_package, conanfile.py, LD_LIBRARY_PATH, cpp_info.libdirs,
+                        dependencies["python"], restricted env self-check, CI build #54716
+approach: |
+  test_package 的 test() 若显式调用 conan 依赖的 python 解释器二进制
+  （os.path.join(python.package_folder, "bin", "python3.12")）直接运行测试脚本，
+  必须同时显式注入该依赖包的 lib 目录到 LD_LIBRARY_PATH：
+  1) 取 self.dependencies["python"].cpp_info.libdirs（如 ["lib"]），拼
+     package_folder 得绝对路径，os.pathsep.join 为 LD_LIBRARY_PATH 值；
+     不得硬编码绝对缓存路径，不得依赖设备端隐式加载器搜索路径；
+  2) 注入方式用 shell 级 `env LD_LIBRARY_PATH=... PYTHONPATH=... cmd` 形式
+     （Conan2 run(env=...) 在本机部分环境未生效，env 命令形式真实可静态解析），
+     同时保留 PYTHONPATH（site-packages）注入与 PATH 前置 bin；
+  3) 复验硬要求（加载器环境自检）：在清空外层 LD_LIBRARY_PATH 的受限环境下
+     重跑 conan create，确认 (a) bin/pyjson5 CLI 仍成功、(b) 经 conan python
+     二进制的鸿蒙专项脚本断言全部 PASS；自检失败说明修复仍依赖隐式路径。
+root_cause:             conan python 依赖包的 bin/python3.12 动态链接
+                        libpython3.12.so.1.0（NEEDED）；设备端加载器默认路径
+                        恰能解析该库，而 CI worker（conan-pr-check）加载器路径
+                        不能解析 → 同一配方本地 PASS / 远端 CI FAIL。
+                        只注入 PYTHONPATH（模块导入路径）不解决解释器二进制
+                        自身的动态库加载（这是两个独立的运行时路径问题）。
+affected_scope:         所有在 OHOS PC（arm64）适配、test_package 显式调用 conan
+                        python/3.x 解释器二进制的纯 Python 包（python_class_task）
+rec_priority:           1
+rec_approach:           test-package-inject-python-libdirs
+rec_description:        test() 中按 self.dependencies["python"].cpp_info.libdirs 构造
+                        LD_LIBRARY_PATH 并以 shell env 形式注入；受限环境自检复验
+rec_command:            env -u LD_LIBRARY_PATH conan create archives/p/pyjson5/0.15.0
+                        -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                        --build=pyjson5/*（受限环境重跑自检，日志含 8 断言 PASS）
+rec_auto_fix:           false
+rec_impl:               参考 archives/p/pyjson5/0.15.0/test_package/conanfile.py
+fallback_priority:      2
+fallback_approach:      Conan VirtualRunEnv（generate() 生成 runenv）或 tool_requires
+                        python 让 Conan 自动注入运行环境；或改用包内 CLI 包装
+                        （bin/pyjson5 自身前置 sys.path）而非直接调用解释器二进制
+fallback_description:   显式注入不可行时，优先让 Conan 运行环境机制或包内包装承载
+fallback_command:       （见 Conan2 VirtualRunEnv / runenv_info 文档）
+fallback_auto_fix:      false
+fallback_impl:          不适用
+principles:             运行时路径必须显式声明（与 E004/E019 同族原则的 python 解释器形态）；
+                        PYTHONPATH 与 LD_LIBRARY_PATH 是两条独立注入通道；
+                        复验必须在与 CI 等价的受限环境下进行
+caused_by:              conan python 二进制 NEEDED libpython3.12.so.1.0 + 设备/CI 加载器路径不一致
+causes:                 CI test_package test() 第 2 条 RUN 失败（Error 127）→ L1_RESULT=fail
+similar_to:             E019（运行时库加载失败 → set-ld-library-path 通用形态）、
+                        E088（RUNPATH/RPATH/LD_LIBRARY_PATH namespace 形态）、
+                        DRAFT-pyjson5-0.15.0-pure-python-no-build-packaging（R02 打包模式）、
+                        DRAFT-pyjson5-0.15.0-unittest-pythonpath-recovery（R02 PYTHONPATH 恢复）
+doc_file:               knowledge/drafts/DRAFT-pyjson5-0.15.0-test-package-python-libdirs-ld-library-path.kv
+last_updated:           2026-09-24
+source_event:           pyjson5 0.15.0 R03 CI 返工（task pyjson5-0.15.0-r03-pc1-16-20260924T124000Z，CI build #54716）
+authors:                AtomCode
+source_pr:              feat/pyjson5-0.15.0
