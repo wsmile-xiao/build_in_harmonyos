@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — AFLplusplus 4.33c (Makefile-based fuzzer)."""
+"""Conan recipe — AFLplusplus 4.33c.1 (Makefile-based fuzzer)."""
 import os
 import shutil
 
@@ -10,7 +10,7 @@ from conan.tools.layout import basic_layout
 
 class AflplusplusConan(ConanFile):
     name = "aflplusplus"
-    version = "4.33c"
+    version = "4.33c.1"
     description = (
         "AFL++ is a fast instrumented fuzzer with many enhancements "
         "over the original AFL."
@@ -170,6 +170,13 @@ class AflplusplusConan(ConanFile):
                 fp = os.path.join(self.source_folder, f)
                 if os.path.isfile(fp) and not os.path.islink(fp):
                     shutil.copy2(fp, os.path.join(dst_lib_afl, f))
+
+        # dynamic_list.txt — linker --dynamic-list input required by afl-cc
+        # (insert_object "dynamic_list.txt" aborts without it); upstream
+        # installs it to HELPER_PATH (GNUmakefile.llvm).
+        dl_src = os.path.join(self.source_folder, "dynamic_list.txt")
+        if os.path.isfile(dl_src):
+            shutil.copy2(dl_src, os.path.join(dst_lib_afl, "dynamic_list.txt"))
 
         # Headers.
         headers_dir = os.path.join(self.source_folder, "include")
