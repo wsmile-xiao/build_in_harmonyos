@@ -1,0 +1,80 @@
+#====================================================================
+# DRAFT-7605-jellyfish-mkfifo-named-pipes-unavailable
+#   HarmonyOS 全局拒绝 mkfifo(2)（EPERM）：依赖命名管道（named pipe / FIFO）
+#   的功能与上游测试须运行期能力探测 + 跳过/回退（jellyfish 2.3.1 实测）
+#   来源: feat/jellyfish-2.3.1（赛道二 jellyfish 2.3.1 适配）
+#   状态: 草稿（待主编 promote）
+#   注: 本文件字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-7605-jellyfish-mkfifo-named-pipes-unavailable
+source_lib:             jellyfish 2.3.1
+trigger_tool:           runtime|test|make
+phase:                  testing|runtime
+error_signature:        Failed to create named fifos: Operation not permitted|
+                         mkfifo.*(EPERM|Operation not permitted)|
+                         mkfifo: inaccessible or not found|
+                         fifo.*Permission denied
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform, syscall, kernel, posix, limitation, testing
+match_keywords:         mkfifo, mkfifoat, named pipe, named fifo, FIFO, EPERM,
+                         Operation not permitted, tmp_pipes, generator,
+                         jellyfish, /dev/shm, toybox, runtime capability probe,
+                         harness, /tmp read-only, unit test skip, gtest_filter
+title:                  HarmonyOS 沙箱全局拒绝 mkfifo(2)（EPERM）：命名管道不可用，依赖 FIFO 的功能/测试需运行期探测后跳过或回退
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             HarmonyOS（HongMeng Kernel 1.12.0，HAD-W32 真机）对普通用户域进程的 mkfifo(2) 一律返回 -1/EPERM：实测 HMDFS 用户目录、构建目录、甚至 1777 的 /dev/shm 全部 EPERM，且 toybox 未提供 mkfifo 命令（"inaccessible or not found"）。既非路径/权限问题，也非只读文件系统（其余 EROFS/EACCES 是混淆项），而是平台安全域策略禁止创建命名管道。jellyfish 的 generator 机制（jellyfish count -g/-G 从子进程命令流式读取输入）内部用 mkfifo 建管道并抛出 "Failed to create named fifos: Operation not permitted"；内核/沙箱限制下无运行期 workaround。
+affected_scope:         所有使用命名管道（mkfifo/mkfifoat）做进程间流式传输的 C/C++ 工具与测试框架（命令行工具 generator 输入、shell 测试脚手架、以 FIFO 模拟 pipe() 的测试）；以及"编译期/命令存在性检测 ≠ 运行期权限"的受限安全域场景。jellyfish 实测影响：lib/generator_manager.cc 的 tmp_pipes 全线不可用（单元测试 TmpPipes.*、GeneratorManager.OneLiners 失败；tests/multi_file.sh、tests/bloom_counter.sh 的 generator 子测试失败）。
+verification_cmd:       设备侧最小复现：python3 -c "import os,errno;os.mkfifo('/dev/shm/probe')" → OSError errno=1 EPERM；command -v mkfifo → not found。修复后：测试脚本以 mkfifo 能力探测分支运行，FIFO 缺失时跳过 generator 用例、其余用例照常执行（make check 不再因 FIFO 失败）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           runtime-capability-probe-with-skip-or-equivalent-fallback
+rec_description:        在测试/脚手架层做运行期能力探测（`if mkfifo probe; then 原路径; else 跳过或等价回退; fi`），不引入平台宏、不改上游产物语义：①能力探测用真实调用而非 uname 硬编码；②能等价替换的用例给出等价路径（jellyfish bloom_counter.sh 用文件参数装载同一份重复输入，直方图 md5 不变）；③无法等价替换的子测试如实跳过并打印原因（jellyfish multi_file.sh generator 子测试），单元测试用 gtest filter 排除并用日志声明（--gtest_filter=-TmpPipes.*:GeneratorManager.OneLiners），其余 5 万余用例照常运行；④PR 的"上游测试用例修改说明"逐条披露。
+rec_command:            cd <源码树> && make check   # 运行期探测分支自动生效
+rec_auto_fix:           false
+rec_impl:               source-patch-tests
+
+fallback_priority:      2
+fallback_approach:      port-fifo-consumer-to-anonymous-pipe-or-socketpair
+fallback_description:   若功能本身必须可用（不能只在测试层跳过）：改写使用方，把"按路径打开的命名管道"改为父进程 pipe()/socketpair() + fork/exec 前 dup2 到子进程 stdout，父进程直接持读端 fd；代价是要重构上游 IPC 代码（jellyfish 的 generator_manager 需改命令启动与读端获取方式），改动大且偏离上游实现，建议单独版本（X.Y.Z.N）并向上游提交。
+fallback_command:       无（需源码级重构）
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       删除.*断言|always.*return 0|exit 0.*#.*fifo|stub.*mkfifo
+forbid_1_reason:        禁止用"让测试看起来通过"的方式掩盖平台能力缺失（删/弱化断言、stub mkfifo、把失败改跳过而不在 PR 披露）：违反 R8/R34 测试诚信
+forbid_1_consequence:   伪造通过率，审查/审计一票否决
+forbid_2_pattern:       sudo|chmod.*mkfifo|LD_PRELOAD.*mkfifo|mount.*-o.*dev
+forbid_2_reason:        通过提权/预加载/重新挂载绕过平台安全策略不属于三方库适配边界，CI 与用户环境不可复现
+forbid_2_consequence:   不可复现的环境篡改，评审拒绝
+
+principles:             P005
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E051, E002]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-7605-jellyfish-mkfifo-named-pipes-unavailable.md
+last_updated:           2026-09-21
+source_event:           jellyfish 2.3.1 OHOS PC 适配：真机 mkfifo EPERM 实测（/dev/shm 亦拒绝），上游测试以运行期能力探测处理
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
