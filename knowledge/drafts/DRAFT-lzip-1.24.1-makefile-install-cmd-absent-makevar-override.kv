@@ -1,0 +1,125 @@
+# ═══ Draft knowledge entry — 上游 Makefile 硬编码 INSTALL=install：OHOS 用户态无 install 命令，用 make 命令行变量覆盖为 cp/mkdir 等价语义 ═══
+# Timestamp: 2026-09-22
+# Software: lzip 1.24.1（通用：任何"自研 configure + 裸 Makefile"且把安装工具做成 INSTALL/INSTALL_PROGRAM/INSTALL_DATA/INSTALL_DIR 变量的包）
+# Gate: 配方 package() 内真实执行上游 install 目标（conan create / CI 同源）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+# 用法：复制为 DRAFT-<你的包>-<你的版本>-makefile-install-cmd-absent-makevar-override.{kv,md}，
+#       把全部证据字段换成本包实测值，随该包 PR 原子提交。
+
+id: DRAFT-lzip-1.24.1-makefile-install-cmd-absent-makevar-override
+title: 上游 Makefile 把安装工具写成可覆盖变量（INSTALL = install）时，OHOS 用户态无 install 命令导致 package 阶段 Error 127；在 make 命令行覆盖 INSTALL/INSTALL_PROGRAM/INSTALL_DATA/INSTALL_DIR 为 cp -f / mkdir -p，免补丁、免改打包逻辑、保留上游 install 目标语义
+trigger_tool: make / conan
+phase: installation
+error_signature: '/bin/sh: install: inaccessible or not found|make: \*\*\* \[Makefile:.* install-bin\] Error 127'
+severity: 2
+category: platform|hmdfs|makefile|packaging|installation
+root_cause: 'OHOS PC 用户态没有 GNU coreutils 的 install 命令（实测 command -v install 为空、/usr/bin/install 不存在），而 lzip 这类自研 configure + 裸 Makefile 项目把安装工具写成 make 变量（INSTALL = install，再由 INSTALL_PROGRAM/DATA/DIR 与 recipe 中的 $(INSTALL_*) 引用），生成的 Makefile 无任何平台判断 ⇒ package 阶段必然 127。因为是变量把手，GNU make 的「命令行变量优先于 makefile 内 = 赋值」规则可在不触碰上游源码的前提下整体替换安装工具语义（cp -f 承担复制、mkdir -p 承担 install -d），上游 if [ ! -d ] then $(INSTALL_DIR) 与 $(INSTALL_PROGRAM) src dst 的结构、DESTDIR 与 prefix 落点语义全部保留。'
+affected_scope: |-
+  所有"上游 Makefile 把安装工具做成可覆盖变量、且运行环境缺 `install`"的包：lzip 家族
+  （lzip/lzlib/plzip/pdlzip 同作者同构 configure）、其余自研 configure 或手写 Makefile 的 C/C++ 小工具。
+  不适用：autotools 项目（config.status 已按平台生成 INSTALL 变量，通常走 E108 的 ginstall 补丁或
+  automake 自带的 install-sh 脚本，无需本机制）。
+verification_cmd: |-
+  command -v install                                  # 空 ⇒ 环境缺 install
+  make install-bin DESTDIR=<t>                        # 复现：/bin/sh: install: inaccessible or not found + Error 127
+  make install-bin DESTDIR=<t> INSTALL="cp -f" INSTALL_PROGRAM="cp -f" \
+       INSTALL_DATA="cp -f" INSTALL_DIR="mkdir -p"    # 通过：mkdir -p + cp -f，产物落点与 bindirs 声明一致
+  find <t> -type f                                    # 复验落点（等效性证据）
+
+match_keywords: install inaccessible or not found, Error 127, INSTALL_PROGRAM, INSTALL_DATA, INSTALL_DIR,
+  make 命令行变量覆盖, 裸 Makefile, 自研 configure, install-bin, DESTDIR, cp -f, mkdir -p, 无补丁打包
+keywords: make, install 命令缺失, GNU make 命令行变量优先级, INSTALL 变量, cp 等价语义,
+  裸 Makefile 包, 免补丁, DESTDIR 语义, 文件模式位, OHOS 用户态, conan package()
+prescan_pattern: INSTALL[[:space:]]*[:?]?=[[:space:]]*install|INSTALL_(PROGRAM|DATA|DIR)|install[[:space:]]+-[dm]
+prescan_globs: "**/Makefile, **/Makefile.in, **/GNUmakefile, **/configure"
+safety_boundary: |-
+  仅适用于上游 Makefile 把安装工具做成"变量引用"（形如 INSTALL = install，命令行里写 $(INSTALL_PROGRAM)）
+  的包——GNU make 规则：命令行变量优先于 makefile 内的 = / := 赋值。反例与禁忌：
+  ①上游用 override INSTALL := ... 强制赋值时命令行覆盖无效，只能打补丁；
+  ②安装命令是内联字面量（recipe 里直接写 install -m 755 ...，不经变量）⇒ 没有可覆盖的把手，
+  只能打补丁或配方侧自行复制；
+  ③需要设置权限位的场景要确认：cp -f 沿用源文件模式位，不再执行 -m 755/644，若上游依赖
+  安装时的模式收敛（如把可执行文件去掉写位），需在配方内补一次 chmod，否则可能交付不可执行或
+  过宽权限的文件；
+  ④不得用本机制掩盖真正的交叉编译错误——只在 install 这一步失败、编译链接已成功时使用；
+  ⑤DESTDIR 语义不变（覆盖后仍会造出 DESTDIR 前缀目录），若配方原本靠 DESTDIR 重装到 package_folder，
+  覆盖后必须复验产物落点与 bindirs 声明一致。
+approach: make-var-install-override
+rec_priority: 1
+rec_auto_fix: false
+rec_impl: 配方侧（不改上游源码、不打补丁、不改打包逻辑）
+rec_description: |-
+  在 package() 里调用上游 install 目标时，通过 make 命令行把安装工具变量替换为 OHOS 用户态一定存在的
+  等价命令：INSTALL="cp -f"、INSTALL_PROGRAM="cp -f"、INSTALL_DATA="cp -f"、INSTALL_DIR="mkdir -p"。
+  上游的 if [ ! -d ... ]; then $(INSTALL_DIR) ...; fi + $(INSTALL_PROGRAM) src dst 两段结构原样保留，
+  因此不丢目录创建、不丢 DESTDIR/prefix 语义，也不需要把打包逻辑改写成 Python 复制。
+rec_command: |-
+  make install-bin INSTALL="cp -f" INSTALL_PROGRAM="cp -f" INSTALL_DATA="cp -f" INSTALL_DIR="mkdir -p"
+fallback_priority: 2
+fallback_auto_fix: false
+fallback_impl: 配方侧自行复制 / 上游补丁
+fallback_approach: recipe-side-copy-or-patch
+fallback_description: |-
+  若上游无可覆盖的变量把手（内联字面量或 override 赋值），退化为两条之一：
+  A) 配方内不调上游 install 目标，直接用 shutil.copyfile + chmod 复制产物（lzip 1.26 归档 notes 即此法，
+     代价是要自己维护落点目录结构与模式位，且绕过上游的 install 目标语义）；
+  B) 给上游 Makefile 打补丁把 INSTALL 默认值改掉（代价是要维护补丁、且 patch 需随版本升级重做）。
+fallback_command: |-
+  A) python -c "import shutil,os;os.makedirs(dst,exist_ok=True);shutil.copyfile(src,os.path.join(dst,prog));os.chmod(...,0o755)"
+  B) 补丁把 "INSTALL = install" 改为 "INSTALL = cp -f"（strip: 1）后照常 make install
+principles: |-
+  OHOS 用户态是一个"没有 GNU coreutils 完整安装工具集"的环境：install / install-info 这类宿主工具常缺失，
+  而裸 Makefile 项目习惯把它们写成可覆盖变量——命令行变量覆盖是 GNU make 自带能力，
+  成本低于补丁、可移植性与上游同构，是这类包打包阶段的首选把手；
+  判据：失败发生在 install recipe、且报 "install: inaccessible or not found"，编译链接均已成功。
+caused_by: 设备/HMDFS 用户态 PATH 无 install 命令（实测 command -v install 为空、/usr/bin/install 不存在）
+  + 上游自研 configure 生成的 Makefile 硬编码 INSTALL = install
+causes: conan package() 阶段上游 install 目标以 Error 127 失败，配方无法交付产物；
+  在 CI 上表现为 "构建测试完成" 之后的打包步骤失败
+similar_to: |-
+  查重结论（诚实申报）：**症状层面已被两条正式条目覆盖**，本条的新增价值在**解法路径**，
+  按 AGENTS §6.2 判 hit 条件 2（"症状相同但用既有条目没写的另一条解法 ⇒ 不算 hit，按 create 报"）申报 create。
+  E098（cp-chmod-replace）：**签名完全相同**（`install: command not found|sh: install: inaccessible or
+  not found`）、根因相同（toybox/用户态无 install）、affected_scope 同为"Makefile 里用 install 装文件"。
+  差异=解法：E098 让人**放弃上游 install 目标、自己手写** `mkdir -p && cp && chmod`（manual-install）；
+  本条在**上游把安装工具做成变量**时不动 install 目标，只在 make 命令行把
+  INSTALL/INSTALL_PROGRAM/INSTALL_DATA/INSTALL_DIR 换成 `cp -f` / `mkdir -p`
+  ⇒ 保留上游的目录判断、DESTDIR 前缀展开与安装清单语义（上游若继续装 man/info 不必逐条重写），
+  chmod 也不再必需（cp 沿用源模式位，需收敛时补一次）。代价与边界=**必须有变量把手**：
+  上游写 `override INSTALL :=` 或把 `install -m 755` 内联进 recipe 时无处可覆盖 ⇒ 退回 E098 或补丁。
+  E108（patch-makefile-in-ginstall）：同症状族第三条解法——按 R6 改上游 Makefile.in 把 install 换成
+  ginstall。本机实测 ginstall 确实可得（`~/usr/local/bin/ginstall` = GNU coreutils 9.10、可执行，
+  且在 conan buildenv 的 PATH 内）⇒ 不是"标准解法不可用"，而是存在代价更低的另一条路：
+  E108 要按版本维护补丁并引入设备侧 coreutils 依赖（CI worker 不保证有 ginstall）。
+  DRAFT-8958-clthreads-makefile-stage-install-shadow：签名是 `install: Permission denied`
+  （被不可执行的 `~/usr/local/bin/install` 遮蔽）+ HMDFS 拒绝 symlink，解法是配方侧 Python 复制，
+  与本条（命令根本不存在 + 变量覆盖）签名与修法均不同。
+  E312/E313：亦出现 `/usr/bin/install` 缺失，但绑定 Ruby gem extconf/grntest 工具链场景。
+  DRAFT-heatshrink-0.4.1-make-cflags-commandline-override：同为"make 命令行变量"技术，
+  但那条是 CFLAGS 追加语义（`+=` 与命令行优先级），本条是安装工具替换语义，机制与判据均不同。
+  draft-review 实测 TOP3（2026-09-22）：E108 0.30 / E098 0.28 / E307 0.27 ⇒ 灰区 review-similar
+  （merge-into 阈值 0.55 未触及）。组分清单：GNU make 命令行变量优先级 + toybox 无 install（E098 根因）
+  + 上游 Makefile 变量把手形态；组合后新增的解题路径=**零补丁、零上游源码改动、保留 install 目标语义**
+  的打包阶段修法，这是 E098/E108 都没给出的适用面。
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-lzip-1.24.1-makefile-install-cmd-absent-makevar-override.md
+last_updated: 2026-09-22
+source_event: |-
+  lzip 1.24.1 配方（PR 本号）在 build() 干净重跑通过、package() 调 make install-bin 时报
+  make: *** [Makefile:87: install-bin] Error 127。设备实测三步探针（同一构建目录）：
+  P1 command -v install ⇒ 空，ls /usr/bin/install ⇒ No such file or directory；
+  P2 make install-bin DESTDIR=<t> ⇒ /bin/sh: install: inaccessible or not found + Error 127；
+  P3 同命令追加 INSTALL="cp -f" INSTALL_PROGRAM="cp -f" INSTALL_DATA="cp -f" INSTALL_DIR="mkdir -p"
+  ⇒ mkdir -p + cp -f 两行按上游语义执行，产物落点正确（P3_RC=0）。
+  修后 conan-verify G1/G2/G3/G4 全 PASS，build() 内 make check -j1 真实执行上游
+  testsuite/check.sh 的 220 个断言块并打印 "tests completed successfully"。
+  证据日志 ~/tmp/uc2/qc10-r2/verify-lzip-clean.log 与 archives/l/lzip/1.24.1/reports/conan-create.log。
+authors: QC-10
+source_pr: (本 PR)
+related_issue: https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/3229
+source_commit: (待提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-22
