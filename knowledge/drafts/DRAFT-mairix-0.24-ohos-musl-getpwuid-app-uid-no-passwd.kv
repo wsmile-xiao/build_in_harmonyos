@@ -1,0 +1,114 @@
+#====================================================================
+# DRAFT-mairix-0.24-ohos-musl-getpwuid-app-uid-no-passwd
+#   OHOS musl 上应用 uid 无 passwd 条目：getpwuid() 恒返回 NULL，
+#   任何"拿不到用户名就退出"的工具在建库/加锁路径上必死
+# 来源: mairix 0.24 适配（本配方 PR；dotlock.c 建库锁路径）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+# 证据: 真机实测 `getpwuid: Not supported` + exit(1)；回退补丁后
+#       建库/检索全链路通过（35 用例套件可运行，消费者测试通过）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-mairix-0.24-ohos-musl-getpwuid-app-uid-no-passwd
+trigger_tool:           clang|make|cmake
+phase:                  runtime
+error_signature:        getpwuid.*Not supported|
+                        perror\("getpwuid"\)|
+                        getpwuid\(getuid\(\)\)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform-runtime, musl, passwd, app-uid, dotlock
+match_keywords:         getpwuid, getpwnam, passwd, pw_name, app uid,
+                        dotlock, lock file, Not supported, HOME, whoami,
+                        用户名, 锁文件, 建库, musl, OHOS, hnp
+title:                  OHOS musl 应用 uid 无 passwd 条目：getpwuid() 恒 NULL，依赖它的工具链路（锁文件/用户名诊断/HOME 推断）直接致命退出
+prescan_pattern:        getpwuid|getpwnam|pw_name|\.lock
+prescan_globs:          **/*.c, **/*.cpp, **/*.h
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 上应用进程跑在专用 app uid（如 20020100）下，
+                        /etc/passwd 不存在该 uid 的条目，musl 的
+                        getpwuid()/getpwnam() 因此返回 NULL（部分路径 stderr
+                        打 "Not supported"）。桌面 Linux 惯例代码把
+                        getpwuid 失败当致命错误处理（perror + exit），典型
+                        触点：①NFS 安全的 dotlock 锁文件（把 pw_name 写进
+                        锁信息作诊断，mairix/tdl 风格）；②$HOME 未设时用
+                        passwd 推断家目录；③whoami 类身份打印。这些代码在
+                        平台上 100% 复现失败——与环境无关，是 uid 体系差异。
+
+affected_scope:         所有在运行期调用 getpwuid/getpwnam 的命令行工具。
+                        本题实证：mairix 建索引时 dotlock_database() 路径
+                        必经 getpwuid，未打补丁时任何建库操作即退出。
+                        注意区分：getenv("HOME") 优先的代码（如 mairix 的
+                        expandstr.c）不受影响——仅"passwd 失败即退出"的
+                        分支致命。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           static-fallback-struct-on-null
+rec_description:        最小侵入补丁：getpwuid 返回 NULL 时不退出，构造
+                        static struct passwd 用固定名（如 "unknown"）回填
+                        pw_name 后继续。判别要点：先确认 pw 结果只用于
+                        **诊断性输出**（锁信息文件、日志、提示语），不参与
+                        权限/路径语义——若是后者（如用 pw_dir 当 HOME 且
+                        HOME 未设），改用 getenv 回退并显式声明降级。
+                        本题实证：dotlock.c 仅 fprintf(pw->pw_name) 到锁
+                        信息文件，回退零行为损失；打补丁后 35 用例套件
+                        与消费者测试全链路可跑。
+rec_command:            补丁骨架：static struct passwd fb; static char n[]="unknown";
+                        if (!pw) { fb.pw_name = n; pw = &fb; }
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      env-prepared-runtime
+fallback_description:   不改源码时，运行前准备 /etc/passwd 条目不可行
+                        （无 root）；可行的是仅当失败分支发生在
+                        "HOME 推断"场景时，运行环境显式 export HOME/USER
+                        绕开 getpwuid 调用路径。锁文件场景无此绕法，必须
+                        走主方案补丁。
+fallback_command:       export HOME=/storage/Users/currentUser USER=Ember5843
+fallback_auto_fix:      false
+fallback_impl:          env-injection
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       改.*getuid|伪造.*uid|chroot.*passwd|LD_PRELOAD.*getpwuid
+forbid_1_reason:        uid 体系是平台安全边界；伪造 uid/劫持 libc 解析
+                        掩盖真实差异且不可审计
+forbid_1_consequence:   平台安全模型冲突，构建产物不可信
+forbid_2_pattern:       忽略.*锁文件|禁用.*locking.*绕过
+forbid_2_reason:        dotlock 防的是并发建库损坏，直接禁锁把数据完整性
+                        问题推迟到运行期；正确做法是补 pw_name 回退后保留
+                        锁机制
+forbid_2_consequence:   并发场景数据库损坏，测试单跑不显、CI 并发必炸
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             libnm-1.52.1-ohos-loader-rejects-symlinked-dt-needed
+                        （同为"平台运行期体系差异"，但对象是 loader）；
+                        yices-2.7.0-llvm-strip-exec-denied（exec 策略差异）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       id -u   # 应用 uid（非 passwd 条目）
+                        # 带补丁产物：mairix -f rc  建库成功生成 database 文件
+doc_file:               knowledge/drafts/DRAFT-mairix-0.24-ohos-musl-getpwuid-app-uid-no-passwd.md
+last_updated:           2026-09-21
+source_event:           mairix 0.24 适配：dotlock.c getpwuid NULL → exit(1)；
+                        0001 补丁回退 static fallback 后全链路通过；
+                        真机日志指纹 `getpwuid: Not supported`
+authors:                sunjunyang
+source_pr:              本 PR（mairix 0.24 配方 PR，合并后回填编号）
+source_commit:          本分支 HEAD
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-21
