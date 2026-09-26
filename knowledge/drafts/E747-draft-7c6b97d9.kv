@@ -1,0 +1,62 @@
+#====================================================================
+# E747 — Conan 静态 Boost.Test 归档与上游 BOOST_TEST_MODULE 生成 main
+#        的 duplicate symbol: main 冲突（BOOST_TEST_DYN_LINK=0 被
+#        defined() 判真），用 BOOST_TEST_NO_MAIN 解
+#====================================================================
+
+draft: E747-draft-7c6b97d9
+status: pending-editor-review
+title: "上游测试用 Boost.Test 时的 duplicate symbol: main——conan CMakeDeps 给静态 boost_unit_test_framework 注入 BOOST_TEST_DYN_LINK=0，unit_test.hpp 按 defined() 判真使上游 main.cpp 再生成一个 main，而归档 unit_test_main.o 同时持有必须被调用的 unit_test_main() 函数；加 -DBOOST_TEST_NO_MAIN 让归档独占 main"
+category: conan, cmake, boost, test, link
+match_keywords: >
+  duplicate symbol: main, unit_test_main.o, unit_test_main.cpp,
+  libboost_unit_test_framework.a, BOOST_TEST_DYN_LINK=0,
+  BOOST_TEST_DYN_LINK, BOOST_TEST_NO_MAIN, BOOST_TEST_MODULE,
+  init_unit_test, boost test static link, CMakeDeps,
+  find_package Boost unit_test_framework, ctest
+error_signature: >
+  ld.lld: error: duplicate symbol: main|defined at main\.cpp|defined at unit_test_main\.cpp|in archive .*libboost_unit_test_framework\.a|clang-15: error: linker command failed with exit code 1
+root_cause: |-
+  两条机制叠加：
+  1) conan-center boost 包（header_only=False, shared=False）的 CMakeDeps
+     目标给所有消费者注入 `-DBOOST_TEST_DYN_LINK=0`——意图是「0 = 静态」，
+     但 boost/test/unit_test.hpp 里生成 main 的守卫写的是
+     `#if defined(BOOST_TEST_DYN_LINK) && defined(BOOST_TEST_MAIN) &&
+     !defined(BOOST_TEST_NO_MAIN)`，`defined()` 对值为 0 的宏同样为真；
+  2) 静态归档 libboost_unit_test_framework.a 的 unit_test_main.o 成员同时
+     定义了 `main` 和 `boost::unit_test::unit_test_main()`（llvm-nm 实测，
+     T 符号各一）。任何由 BOOST_TEST_MODULE 生成 main 的上游测试 TU 都会
+     调用 unit_test_main()，链接器因此必然拉入该成员 → 两个 main 冲突。
+  结论：该归档下「用户态 main」与「归档 main」不可能共存，调参
+  Boost_USE_STATIC_LIBS / DYN_LINK 取反都无解（归档成员由 unit_test_main()
+  引用拉动，与宏无关）。报错只给 main.cpp 与归档成员两处定义地址，不提示
+  任何宏根因，极易误判成上游 CMakeLists 问题。
+affected_scope: |
+  任何上游测试用 find_package(Boost COMPONENTS unit_test_framework) +
+  BOOST_TEST_MODULE 且在 build() 内跑 ctest 的 Conan 配方（ohpcd 静态
+  boost 1.84/1.90/1.91 全系同款注入）；原生（非 conan）构建若直接链接
+  conan 缓存里的静态 boost 同样命中。
+verification_cmd: |
+  llvm-nm --defined-only -A <boost-pkg>/lib/libboost_unit_test_framework.a | grep -w main
+  # → unit_test_main.o: ... T main（且同成员有 T _ZN5boost9unit_test14unit_test_main...）
+solution: |-
+  测试目标注入 -DBOOST_TEST_NO_MAIN，抑制上游 TU 生成 main，由归档
+  unit_test_main.o 提供唯一 main；它的未定义符号 `init_unit_test()`
+  正由 BOOST_TEST_MODULE 生成的 TU 解析——这才是该静态归档的设计契约。
+  配方落点（CMake 项目）：
+      tc = CMakeToolchain(self)
+      tc.extra_cxxflags = ["-DBOOST_TEST_NO_MAIN"]
+  CXX flags 只作用于 C++ TU（测试），不影响 C 库本体编译。
+  原生对照构建等价写法：
+      cmake ... "-DCMAKE_CXX_FLAGS=-DBOOST_TEST_NO_MAIN"
+  修后链路验证：ctest 3/3 Passed（含 Boost.Test 6 case/59 断言 ×3 可执行）。
+fallback: |-
+  若上游显式拒绝该宏，备选是改上游 main.cpp 用包含式入口
+  （boost/test/included/unit_test.hpp，array-hash 先例，需补丁+声明），
+  或改用 header-only Boost.Test 归档变体；两者都动上游文件，优先 NO_MAIN。
+verify_builds: "naive-tsearch 0.1.1（2026-09-25 设备实测）：native ctest 3/3 + conan create rc=0（修前 rc=1 duplicate symbol: main，修后同命令 rc=0）"
+reference_impl: >-
+  archives/n/naive-tsearch/0.1.1/conanfile.py generate() 中
+  tc.extra_cxxflags = ["-DBOOST_TEST_NO_MAIN"]（含根因注释）
+id: E747
+doc_file: doc/E747.md
