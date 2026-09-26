@@ -1,0 +1,80 @@
+# ═══ Draft knowledge entry — 手写 Makefile 的“架构分支 + 平台专属子项目” ═══
+# Timestamp: 2026-09-24
+# Software: tboot 1.10.5（手写多级 Makefile：tboot/safestringlib/lcptools-v2/tb_polgen/utils/docs）
+# Gate: 本地 make 首个错误 + conan create 全绿（同一套补丁）
+# Status: DRAFT — 待人工/AI 审核后 promote 为 E-entry
+#
+# To promote:
+#   1. 复核下方 error_signature 与 rec_approach
+#   2. 重命名为 E0XX.kv 移入 knowledge/graph/
+#   3. 在 knowledge/graph/index.tsv 增加一行
+#   4. 编写 knowledge/doc/E0XX.md（本目录同名 .md 可直接复用）
+
+id:                     DRAFT-makefile-arch-subproject-exclusion
+trigger_tool:           make|clang|gcc|ld|conan
+phase:                  compilation|linking
+error_signature:        unsupported argument 'i686' to option '-march='|
+                         unsupported option '-m32' for target|
+                         invalid (output|input) constraint '=?(a|A)' in asm|
+                         unrecognized instruction.*(in|out)|
+                         value size does not match register size specified by the constraint
+severity:               2
+category:               portability, build-system, make, architecture, patch
+match_keywords:         uname -m, TARGET_ARCH, -march=i686, -m32, -melf_i386, SUBDIRS,
+                         TARGETS, inline asm, MSR, io port, x86, freestanding
+title:                  手写多级 Makefile 工程的“架构二元分支 + 平台专属子项目”：非 x86 目标误加 -m32/-march=i686 或编到 x86 内联汇编，需按 TARGET_ARCH 三态剔除
+
+root_cause:             上游手写 Makefile 常用 TARGET_ARCH ?= $(shell uname -m | sed …) 做二元分支
+                        （x86_64 → -m64；else → -m32 -march=i686）；aarch64 落进 else，
+                        clang 直接 error: unsupported argument 'i686' to option '-march='（gcc 亦然）；
+                        同类工程往往还混着只对 x86 有意义的子项目/工具（freestanding 引导固件、读 MSR/IO 端口的
+                        诊断工具），它们即便绕开 -m32 也会因 x86 内联汇编（in/out、约束 '=a'）编译失败；
+                        这类工程不能靠“换交叉编译参数”解决——目标平台本来就不产出这些产物，正确做法是界定构建范围。
+affected_scope:         含 x86（或其它平台）专属子项目的手写 Makefile 工程：固件/引导模块、平台诊断工具
+                        与可移植宿主工具混排的项目；以及任何以 uname -m 二元分支表达机器参数的旧 Makefile。
+verification_cmd:       make CC=clang -j1 2>&1 | head -20（看首个错误落在哪个子项目）；
+                        grep -n "uname -m\|TARGET_ARCH" Makefile Config.mk */Config.mk
+
+rec_priority:           1
+rec_approach:           source-patch
+rec_description:        在 Makefile 层把“架构二元分支”改为三态，并对仅平台专属的子项目/目标做条件剔除（x86 目标行为保持不变）
+rec_command:            |
+                        # ① 机器参数：只在 x86 目标追加
+                        ifeq ($(TARGET_ARCH),x86_64)
+                        LIBDIR := lib64
+                        CFLAGS += -m64
+                        else ifeq ($(TARGET_ARCH),x86_32)
+                        LIBDIR := lib
+                        CFLAGS += -m32 -march=i686
+                        else
+                        LIBDIR := lib          # aarch64 等：不加任何 x86 机器参数
+                        endif
+                        # ② 平台专属子项目/工具：非 x86 目标剔除
+                        ifneq (,$(filter $(TARGET_ARCH),x86_32 x86_64))
+                        SUBDIRS := tboot safestringlib lcptools-v2 tb_polgen utils docs
+                        else
+                        SUBDIRS := safestringlib lcptools-v2 tb_polgen utils docs
+                        endif
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      make-var-override
+fallback_description:   仅当上游分支已支持 `TARGET_ARCH` 传参时可用：`make TARGET_ARCH=<arch>`；**不要**用命令行 `CFLAGS=…` 覆盖（会吃掉各层 Makefile 的 `+=` 追加，例如子项目的 -I/-D 私有标志）
+fallback_command:       make TARGET_ARCH=aarch64 -j1
+fallback_auto_fix:      false
+
+prescan_pattern:        uname -m|march=i686|melf_i386|TARGET_ARCH
+prescan_globs:          Makefile, Makefile.*, *.mk, */Makefile
+
+# ═══ 现网证据（本条目来源）═══
+# 软件：tboot 1.10.5（顶层 Makefile:17 SUBDIRS、Config.mk:20-21、tboot/Config.mk:50、utils/Makefile:14）
+# 首个错误：clang-15: error: unsupported argument 'i686' to option '-march='（common/boot.S）
+# 第二类错误：../tboot/include/io.h:55 invalid output constraint '=a' in asm（utils/txt-acminfo）
+# 修复：archives/t/tboot/1.10.5/patches/0001（Config.mk 三态）、0002（顶层 SUBDIRS）、0009（utils TARGETS）
+# 结果：aarch64 上 make rc=0 / conan create rc=0；x86 目标仍保留原 SUBDIRS 与机器参数
+#
+# 关联：R8/PF5（patches/ 禁止 __OHOS__ 平台宏）——本方案用**架构**（TARGET_ARCH）而非
+#       平台宏表达条件，语义更准确（同样适用于其它非 x86 目标），且不触发 PF5；
+#       R32（recipe 内 settings.os 判断须 in ("Linux","OHOS")）同属“用能力/架构表达，
+#       不用单一平台名硬编码”的同类原则。
