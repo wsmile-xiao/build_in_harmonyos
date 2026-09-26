@@ -1,0 +1,30 @@
+#====================================================================
+# Draft: 数值插值/拟合类判据的「包含性契约」，以及三类不该进断言的派生值 ——
+#        手册里的 "includes the input set" 可直译成自闭合属性判据（免对照表）；
+#        反向地，程序名(argv[0])、想当然的单调性、上游未定义的错误退出码
+#        这三类"派生值/未验证假设"写进断言必然假失败
+#   Stem: spline-1.2-inclusion-contract-and-derived-value-traps — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-SPLINE-INCLUSION-CONTRACT-AND-DERIVED-VALUE-TRAPS
+trigger_tool:           ci
+phase:                  testing
+error_signature:        usage: <name>.*|version .*|assert_contains.*name|expected non-zero exit|monoton
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               test-design, false-fail, coverage, ci-gate
+match_keywords:         test_package, 消费者测试, 插值, 拟合, 数值, golden 向量, 包含性, includes, 契约, argv[0], 程序名, 单调性, 退出码, 派生值, 假失败, 环境相关
+
+title:                  数值插值/拟合类判据用「包含性契约」替代 golden 向量；同时剔除三类派生值/未验证假设
+
+root_cause:            数值工具（插值、拟合、平滑、重采样）的输出是一大串浮点数，作者往往认为"只能靠 golden 向量验证"，于是要么抄一屏常数、要么干脆只测 `--help`。但这类工具的手册里通常写着一句**契约**——aspline 原文："produces a similar set … and **includes the input set** on standard output"。把它直译成"每个输入点必须出现在输出中"就是一条**完全自闭合**的判据，不需要任何期望表，且直击工具最核心的语义（插值曲线必须过给定点）。配套的"常量保持性"（常量输入必须常量输出）则从反方向锁住"不得改动已确定的值"。这两条对任意输入规模成立、可参数化，覆盖度只受采样点数量限制。反向的坑同样真实且高频：把**由环境或实现派生的值**写进断言（`argv[0]` 派生的程序名、路径、时间戳、PID）会在本地跑通而在 CI/换名调用时假失败；把**未验证的单调性**当规律（"参数变大输出必变多"）会忽略"输出必须包含输入点"这类托底约束；把**上游并未定义的错误退出码**写死则会与实现事实冲突。
+affected_scope:         所有数值/数据变换类工具与其消费者测试，以及任何"输出是大串数据"的命令。实测实例：spline 1.2 / aspline（`archives/s/spline/1.2`，PR !9xxx）——本次落地**真实踩中全部三个负向陷阱**。同类可套用：plotutils 的 spline、gnuplot 平滑、数据重采样/抽稀工具、图像缩放与卷积、单位换算、排序与归一化、无损压缩的往返校验。
+verification_cmd:       查手册里的契约句：`man aspline | grep -i "includes\|preserves\|exact"` → "includes the input set"；查程序名是否派生：把二进制复制成别的名字再 `-V`，输出里的名字会跟着变（实测 `aspline` → `spline`）；查单调性是否成立：对 `-n ∈ {2,3,4,5}` 统计输出行数，实测 5/7/5/9 —— **非单调**；查错误退出码：`aspline -a; echo $?` → 打印错误与用法但**退出码为 0**。
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           inclusion-contract-plus-constant-preservation-minus-derived-values
+rec_description:        改法分正向与负向两部分。**正向（两条自闭合属性，免对照表）**：① **包含性契约**——遍历全部输出行，对每个输入点 (x,y) 断言其出现（浮点比较用 `fabs(...) < 1e-9` 量级容差）；② **常量保持性**——输入全为常量 y=c 时，输出每一行都必须仍为 c，用 ≥3 个常量（正/零/负）各跑一遍。两者联合覆盖"过给定点"与"不改动已确定值"两个方向。**负向（三类禁入项，本包全部真实踩中）**：① **`argv[0]` 派生值禁入**——用法行与版本串里的程序名取自 `argv[0]` basename，本地叫 aspline、测试把包内二进制复制成 `<包名>` 后就变成 spline，导致 3 条断言在 qemu 上直接挂（`实际输出: spline version 1.2`）；改断言与名字无关的部分（选项规格 `[-hv][-a [xstep]]`、`version 1.2`、`supply abscissas automatically`）。同类派生值：绝对路径、时间戳、PID、临时目录名、hostname、随机数。② **未验证的单调性禁入**——`-n N` 语义是"约 N 个区间"，但输出必须包含输入点，故区间数少于输入点数时被托底，行数**非单调**（`-n 3`→7 行、`-n 4`→5 行）；改断言"行数 ≥ 输入点数"与"行数 ≤ 2n+2"两条真实成立的属性，并只在 n 远大于输入点数的**稳定区间**断言精确值（`-n 20`→21 行）。③ **上游未定义的错误退出码禁入**——`-a` 缺参时上游打印报错与用法但**退出码仍为 0**；改断言"报错信息 + 用法块 + 未因信号终止"，并把实测退出码 `printf("[INFO] … 实测退出码 = %d")` 留痕，而不是写成期望值。★ 判据实现照旧：`expect()` 计数而非 `assert()`、`popen` 内存直读不落盘（OHOS `/tmp` 只读，输入数据集写 argv 传入的 scratch 目录）、`pclose==-1 || !WIFEXITED || code∈{126,127} || code>=128` 判"跑不起来"、循环读到 EOF 再 `pclose`。参考实现：archives/s/spline/1.2/test_package/test_spline.c（51 条断言）。
+rec_command:            # ① 包含性契约（免对照表）——遍历输出核对每个输入点\nfor (j = 0; j < n_input; j++) {\n    int found = 0;\n    for (q = 0; q < lines; q++) {\n        double x, y;\n        if (!get_point(buf, q, &x, &y)) continue;\n        if (fabs(x - XS[j]) < 1e-9 && fabs(y - YS[j]) < 1e-6) { found = 1; break; }\n    }\n    expect(found, "输入点出现在输出中", "");\n}\n\n# ② 常量保持性\nfor (k = 0; k < 3; k++) {          /* c ∈ {5, 0, -3.25} */\n    for (j = 0; j < lines; j++) { get_point(buf, j, &x, &y); if (fabs(y - c) > 1e-9) { bad = 1; break; } }\n    expect(lines > 0 && !bad, "常量保持性", "");\n}\n\n# ③ 派生值禁入：只断言与程序名无关的部分\nexpect_contains("-V", buf, "version 1.2");                 /* ❌ 不要写 "aspline version 1.2" */\nexpect_contains("-h", buf, "[-hv][-a [xstep]]");           /* ❌ 不要写 "usage: aspline" */\n\n# ④ 未验证的单调性禁入：改断言上下界 + 稳定区间精确值\nif (lines < 5) ge = 0; if (lines > 2 * n + 2) ranged = 0;\nexpect(ge && ranged, "-n 行数在 [输入点数, 2n+2] 内", "");\nexpect(count_lines == 21, "-n 20 时输出 21 行", "");
+rec_auto_fix:           false
