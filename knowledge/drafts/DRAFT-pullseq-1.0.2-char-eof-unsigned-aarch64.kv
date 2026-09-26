@@ -1,0 +1,17 @@
+error_signature: "rc=143 [(]Signal 15 [)]|VmHWM=[0-9.]+GB|KILL pid=.* comm=|out of memory|std::bad_alloc"
+root_cause: "aarch64 上主流工具链（OHOS clang 等）把 plain char 默认实现为无符号（char != signed char，unsigned char 为默认）。以 `char ch;` 接收 getc()/fgetc()/getchar() 返回值的 C 代码，EOF(-1) 存入后变为 255，`while ((ch = getc(fp)) != EOF)` 永不成立 → 单字符读循环不终止、行缓冲 realloc 指数扩容直到内存耗尽或被止损。上游在有符号 char 平台（x86-64 glibc）开发测试，从不复现；aarch64 上 KB 级输入即可吃掉 GB 级内存（pullseq 实测 34 字节 FASTA → 6.4GB RSS，同根因可回溯解释此前 10.26GB 冒烟事故——当时被误判为'输入过大'）。"
+rec_approach: "接收 getc/fgetc/getchar/ungetc 返回值的变量一律声明为 int（C 标准：这些函数返回 int 以容纳 EOF）。修复点按 getc 站点定位：grep -n 'getc(' 排查每个读循环的接收变量类型。pullseq 实例：file_read.c:23 `char ch;` → `int ch;` 单行修复，全源码仅此一处站点。"
+fallback_approach: "若上游读循环庞大不便逐点修：编译期加 `-fsigned-char` 强制有符号 char（clang/GCC 均支持，aarch64 生效），可整包消除该类缺陷；代价是与上游 x86 构建的语义一致性更好但掩盖其它 char 符号性依赖，优先逐点修 int。"
+fallback_command: "grep -rn --include='*.c' --include='*.h' -E 'char[[:space:]]+[a-zA-Z_]*ch[a-zA-Z_]*[[:space:]]*;|=[[:space:]]*getc\\(|=[[:space:]]*fgetc\\(|getchar\\(\\)' src/ | head -20"
+prescan_pattern: "char[[:space:]]+ch[[:space:]]*;|char[[:space:]]+c[[:space:]]*;|= getc\\(|= fgetc\\(|getchar\\(\\)"
+prescan_globs: ["**/*.c", "**/*.h", "**/*.cc"]
+rec_command: "sed -i 's/^\\(\\s*\\)char ch;$/\\1int ch;/' src/file_read.c  # 逐站点：把接收 getc 返回值的 char 变量改 int"
+safety_boundary: "适用于任何在 aarch64/ARM 工具链上构建、逐字符读文件/流的 C 程序（FASTA/CSV/配置解析器、CLI 工具）。不适用于：①已显式声明 signed char 或用 int 接收的代码；②C++ 流（istream::get 返回 int_type，无此问题）；③仅 Windows/MSVC 目标（MSVC char 有符号）。判别要点：症状是'小输入吃 GB 内存/被 OOM 或看门狗终止'而非断言失败；直接跑二进制喂 KB 级输入采样 VmRSS 增长即可确认。similar_to: 无同族条目——E011/E386 家族是 shell/getcwd 类环境问题，与本条（C 语言符号性+EOF）机制不同。"
+similar_to: ""
+conflicts_with: ""
+caused_by: ""
+match_keywords: ["char", "unsigned char", "EOF", "getc", "fgetc", "getchar", "ungetc", "aarch64", "内存失控", "realloc", "read loop", "无限循环", "OOM", "rc=143", "SIGTERM"]
+error_excerpt: "smoke: pullseq -n failed rc=143 (Signal 15 )  ← 被止损看门狗 SIGTERM | [memguard] 越线 rss=6438MB (limit=6000MB) pid=22567 comm=pullseq cmd=pullseq -i in.fa -n names.txt（in.fa 仅 34 字节）| while ((ch = getc(fp)) != EOF) { ... (*lineptr)[buf_pos++] = ch; }（ch 为 char，EOF 比较永假）"
+severity: P1
+category: c, portability, memory
+last_updated: 2026-09-21
