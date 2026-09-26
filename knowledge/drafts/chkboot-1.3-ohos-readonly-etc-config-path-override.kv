@@ -1,0 +1,155 @@
+# ═══ Draft knowledge entry（通用型：一类问题，非单库 case-by-case）═══
+# 问题类：OHOS 系统路径只读/缺失（/etc 只读、/var/lib 不存在），任何把配置/状态
+#         硬编码到系统路径的命令行工具都会「读取失败 → 变量未定义 → 语义塌缩」，
+#         表现为静默失效或假告警，而不是明确报错
+# 来源实例：chkboot 1.3（5 个脚本硬编码 source /etc/default/chkboot.conf）
+# Status: DRAFT
+
+id: ohos-readonly-system-path-config-override
+title: OHOS 系统路径只读/缺失：命令行工具配置路径必须可被环境变量覆盖（${VAR:-默认}），否则静默失效或假告警
+severity: 2
+category: platform|filesystem|portability|shell
+trigger_tool: shell|runtime|configure
+phase: installation|runtime|configuration
+
+# ── 识别层 ──
+error_signature: "mkdir: '/etc.*Read-only file system|/etc/.*\\.conf: No such file or directory|/etc/issue: No such file or directory|/var/lib.*No such file or directory"
+match_keywords: /etc 只读, Read-only file system, 系统路径, source 硬编码路径, 未定义变量, 变量塌缩, 假告警, 误报, 静默失效, 配置文件路径, /var/lib 不存在, /etc/issue 不存在, shell 脚本包
+error_excerpt: |
+  $ chkboot-check                       # 上游脚本原样
+  chkboot-check: line 10: /etc/default/chkboot.conf: No such file or directory
+  CHKBOOT ALERT!                        ← 假告警：实际无任何变更
+  cat: /: Permission denied
+  $ mkdir -p /etc/default
+  mkdir: '/etc/default': Read-only file system
+
+# ── 诊断层 ──
+root_cause: |
+  OHOS 把系统目录置为只读/缺省：`/etc` 是 Read-only file system（`mkdir /etc/default` 直接失败），
+  `/etc/issue`、`/etc/default/*` 不存在且不可创建，`/var/lib` 也不存在。
+  上游工具通常把配置路径硬编码为 `source /etc/default/<pkg>.conf`，于是：
+  (1) 配置读不到（source 失败）；
+  (2) **更隐蔽**的是失败方式——`source` 失败不会终止脚本（无 set -e），后续变量保持未设置，
+      `${A}/${B}` 这类拼接会塌缩成 `/`（或空串），使 `[[ -s / ]]`（目录）恒为真之类的判断
+      得到与真实状态无关的结果 → 工具**假告警/静默失效**，退出码不可信；
+  (3) 因此“安装期把配置写进 /etc”的修法在 OHOS 上不可能成立。
+
+affected_scope: |
+  所有从硬编码系统路径读取配置/写状态的可执行工具：`source /etc/default/*.conf`、
+  读 `/etc/<pkg>/*`、写 `/etc/issue`、把数据目录默认设为 `/var/lib/<pkg>` 等；
+  这类工具打包为 Conan 包后还要能“可重定位运行”，因此路径必须可注入。
+
+verification_cmd: |
+  mkdir -p /etc/default || echo "read-only /etc 确认"
+  bash -c 'if [ ! $(grep -c X /etc/issue) = 0 ]; then echo reached; fi'   # /etc/issue 缺失时表达式退化，静默跳过
+  <PKG>_CONF=<tmp conf> <tool>; echo rc=$?
+
+# ── 使用说明（HOW-TO，按序执行）──
+usage: |
+  1) 定位所有硬编码系统路径：`grep -rn "/etc/\|/var/lib\|/etc/issue" <上游脚本>`。
+  2) 最小补丁（每处一行）把 `source /etc/default/x.conf` 改成
+     `source "${X_CONF:-/etc/default/x.conf}"` —— **默认值保持上游原样**，
+     非 OHOS 平台行为逐字不变，只有显式设置时才改变。
+  3) 让包内提供默认配置并注入：
+     - 配置随包安装在 `res/default/x.conf`（不要装到 /etc）；
+     - recipe `package_info()` 用 `runenv_info.define("X_CONF", "<pkg>/res/default/x.conf")`
+       （或 `define_path`）→ conan 环境内开箱可用。
+  4) 对该路径的**写操作**加守卫：只有目标可写才写，例如
+     `if [ "$?" = 1 ] && [ -w /etc/issue ]; then … >> /etc/issue; fi`（OHOS 上只读 ⇒ 干净跳过）。
+  5) 验证三件事（缺一不可）：
+     ① 设置 X_CONF 指向包内配置 → 工具 rc 与语义正确；
+     ② 不设置 X_CONF → 行为回到上游（本平台会因路径不存在而退化，故必须能观察差异）；
+     ③ 脚本在 OHOS bash 下 `bash -n` 通过（避免把修复写成平台私有路径后不可解析）。
+
+applicable_scope: |
+  ✅ 适用：任何 CLI/守护/通知脚本从系统路径读配置或写状态；打包为 Conan 包需可重定位；
+     纯 shell 包与含脚本的编译型包均适用。
+  ❌ 不适用／需换做法：
+     - 上游已有 `--config <path>` 之类的参数 → 直接用参数，不必加环境变量；
+     - 需要“系统级共享配置”的场景（多用户共享 /etc）→ OHOS 上不可能，必须改为包内相对路径，
+       并在文档中明确“不再读取系统 /etc”；
+     - 不要把路径改成平台私有绝对路径（`/data/service/hnp/...`）来“修好”——换机即失效（E049 禁令）。
+
+# ── 输入输出定义 ──
+io_contract: |
+  输入：
+    - 平台事实：目标系统路径是否可写/存在（`mkdir -p /etc/default` 的 rc；`/etc/issue`、`/var/lib` 存在性）
+    - 上游资产：脚本内硬编码路径清单（grep 结果）、配置文件的默认内容
+    - recipe 输入：package_folder（放 res/default/x.conf）、runenv_info
+  输出：
+    - 补丁：`source "${X_CONF:-<上游默认路径>}"`（每处一行，默认值不变）
+    - 包内默认配置 `res/default/x.conf`
+    - 运行期：设置 X_CONF 时工具语义正确（rc 与输出符合真实状态）；未设置时行为与上游一致
+    - 文档：明确“OHOS 上请通过 X_CONF 指定配置；/etc 只读无法写入”
+  判据（可自动断言）：
+    - `X_CONF=<好配置> <tool>` → rc=0 且无假告警；`<有变更的配置>` → rc=1 且输出含变更明细
+    - 未设置 X_CONF 且系统路径不存在 → 结果与设置时**不同**（证明覆盖是载荷性的）
+  失败边界：
+    - 补丁必须保持默认值 = 上游值（不得把默认改成平台私有路径）
+    - 写系统路径的代码必须带可写性守卫；守卫缺失在 OHOS 上会产生可见错误输出
+
+# ── 示例 ──
+examples: |
+  【示例 1｜通用补丁（任意 `source /etc/default/<pkg>.conf` 的工具）】
+    -source /etc/default/mytool.conf
+    +source "${MYTOOL_CONF:-/etc/default/mytool.conf}"
+
+  【示例 2｜Conan 注入（通用）】
+    def package_info(self):
+        self.runenv_info.define("MYTOOL_CONF",
+            os.path.join(self.package_folder, "res", "default", "mytool.conf"))
+
+  【示例 3｜写 /etc/issue 的守卫（通用）】
+    -if [ "$?" = 1 ]; then echo "$OUT" >> /etc/issue; fi
+    +if [ "$?" = 1 ] && [ -w /etc/issue ]; then echo "$OUT" >> /etc/issue; fi
+
+  【示例 4｜本次来源实例：chkboot 1.3】
+    现象：chkboot-check 报假告警（`CHKBOOT DATA/ALERT` 变量未定义 → 路径塌缩为 `/` → `[[ -s / ]]` 为真）
+    处理后：CHKBOOT_CONF=<临时配置> → 无变更 rc=0（空输出）、有变更 rc=1 且列出变更文件与 sha512
+    证据：chkboot-1.3-evidence/17-runtime-repro.log、18-runtime-fixed.log
+    配套用例（鸿蒙特有）：ohos-conf-from-package-env、ohos-conf-override-required
+
+# ── 方案层 ──
+rec_priority: 1
+rec_approach: env-overridable-default-path
+rec_description: |
+  `source "${X_CONF:-<上游默认>}"`（默认值不变）+ recipe runenv 注入包内配置路径 +
+  对系统路径写操作加可写性守卫。改动极小、可移植、非 OHOS 平台零影响。
+rec_command: |
+  # 补丁（每个 source 处一行）
+  sed -i 's|^source /etc/default/\(.*\)\.conf$|source "${MYTOOL_CONF:-/etc/default/\1.conf}"|' <scripts>
+  # recipe
+  self.runenv_info.define("MYTOOL_CONF", os.path.join(self.package_folder, "res", "default", "mytool.conf"))
+rec_auto_fix: false
+rec_impl: patch-env-default
+
+fallback_priority: 2
+fallback_approach: wrapper-script
+fallback_description: 不改上游脚本：包内 bin/<tool> 作为 wrapper，export X_CONF=<包内配置> 后 exec 真实脚本
+fallback_command: |
+  printf '#!/usr/bin/env bash\nexport MYTOOL_CONF="${MYTOOL_CONF:-$(dirname "$0")/../res/default/mytool.conf}"\nexec "$(dirname "$0")/mytool.real" "$@"\n' > bin/mytool
+fallback_auto_fix: false
+fallback_impl: wrapper-script
+
+forbid_1_pattern: sed -i .*\|/etc/default\|/data/service/hnp\|/system/etc
+forbid_1_reason: 把配置路径改写成平台私有绝对路径 → 换机/换 worker 即失效（E049）
+forbid_1_consequence: 包不再可移植，后续版本要反复改路径
+forbid_2_pattern: (mkdir -p /etc/.*|cp .* /etc/|>> /etc/)
+forbid_2_reason: OHOS /etc 只读，安装期/运行期写系统目录必然失败
+forbid_2_consequence: 安装或运行报 Read-only file system；若被 `\|\| true` 吞掉则产生静默失效
+forbid_3_pattern: ^source /etc/.*(不带 :- 覆盖)
+forbid_3_reason: 新增代码继续硬编码只读系统路径 = 把平台缺陷复制到新包
+forbid_3_consequence: 同类假告警/静默失效在下一个包重复出现
+
+principles: R1, R8, R26
+
+similar_to: E002, E049
+related:
+  - archives/c/chkboot/1.3/patches/0001-chkboot.patch … 0005
+  - knowledge/graph/E002.kv（/tmp 只读 → 显式改到可写位置，同类“只读系统路径”陷阱）
+  - knowledge/graph/E049.kv（禁止硬编码平台私有路径）
+doc_file: drafts/chkboot-1.3-ohos-readonly-etc-config-path-override.md
+last_updated: 2026-09-26
+
+draft: true
+contributor_id: chkboot-1.3
