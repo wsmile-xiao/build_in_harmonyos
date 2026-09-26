@@ -12,8 +12,14 @@ PDCurses/libcaca/SDL/GGI 等）。
 
 | 版本 | 显示后端 | 关键依赖 |
 |------|----------|----------|
+| `archives/m/myman/0.7.0` | ncursesw 文本终端 | ncurses/6.6（SourceForge 正式源码包，数据编译内建） |
 | `archives/m/myman/0.7.1` | ncursesw 文本终端 | ncurses/6.6（数据/BUILTIN_* 编译内建，仅动态依赖 libc） |
 | `archives/m/myman/2009-10-30` | X11（PDCurses for X = XCurses） | libx11/6.4.0 + libxext/6.4.0 + vendored X11 栈（libXt/libXmu/libXpm/libXaw…） |
+
+## HarmonyOS PC 适配（archives/m/myman/0.7.0，ncursesw 文本终端）
+
+- 使用 SourceForge 官方 `myman-0.7.0.tar.gz`（SHA-256 固定于配方）；依赖 `ncurses/6.6`。
+- 该版本通过包内烟雾测试执行 `myman --version` 与 `myman --help`。
 
 ## HarmonyOS PC 适配（archives/m/myman/0.7.1，ncursesw 文本终端）
 
