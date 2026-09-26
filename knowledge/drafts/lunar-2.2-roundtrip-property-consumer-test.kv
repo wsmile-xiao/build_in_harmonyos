@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: 双向映射类工具的消费者测试应优先用"往返一致性"判据 —— 硬编码对照表
+#        只能覆盖你想到的样例，而 solar→lunar→solar 这种自闭合判据让被测程序
+#        自己证明自己在整个输入区间内自洽；代价是必须**显式列出不可逆输入**
+#        （闰月需额外 -l 标志），否则会把"测试写漏的输入"误报成"程序有 bug"，
+#        或者更糟：静默跳过而假装覆盖到了
+#   Stem: lunar-2.2-roundtrip-property-consumer-test — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-LUNAR-ROUNDTRIP-PROPERTY-CONSUMER-TEST
+trigger_tool:           ci
+phase:                  testing
+error_signature:        (无具体错误串；本条目是判据设计规约，用于提升 L1 测试的覆盖质量)
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               test-design, coverage, ci-gate
+match_keywords:         test_package, 消费者测试, 往返, round-trip, 幂等, 编解码, 双向映射, 对照表, 覆盖, 闰月, 逆向不可解, 属性测试, property-based, 自闭合判据
+
+title:                  双向映射类工具的消费者测试优先用往返一致性判据（自闭合、免对照表），并显式列出不可逆输入
+
+root_cause:             `test_package` 里对"编解码 / 双向映射"类工具（日期↔日期、文本↔二进制、序列化↔反序列化、坐标变换、单位换算）最常见的写法是**硬编码几个期望输出**（`assert(strstr(out,"Lunar : 1999.11.25.0"))`）。这种写法有两个结构性缺陷：① **覆盖由作者想象力决定**——只有你想到的日期被验证，区间边界、跨世纪、闰年附近的输入全在盲区；② **判据本身可能抄错**——一旦期望字面量是从错误运行结果"反抄"回来的，测试会忠实地把 bug 固化成"期望行为"（绿得很稳定）。反过来，**往返一致性**（encode 后再 decode 必须回到原点）把判据交给被测程序自证，覆盖度只受采样点数量限制，且**任何一侧的编码缺陷都会被另一侧的解码暴露**（或反之），无法靠"把错误输出抄成期望值"掩盖。代价是：真实世界里总有**不可逆 / 有损 / 需要额外上下文**的输入分支，必须**显式枚举并跳过**——静默跳过等于把盲区藏起来。
+affected_scope:         所有"输出可再作为输入喂回自己"的 CLI 工具与库。实测实例：lunar 2.2（PR !9xxx，`archives/l/lunar/2.2`）——`lunar Y M D` ↔ `lunar -i Y M D`；同类可套用：base64/uuencode、xxd+revert、morse、ROT-N、单位换算（ifmetric）、坐标变换、tar/cpio 往返、压缩↔解压。★ 不适用于有损或有状态的转换（有损压缩、哈希、随机化输出），这类只能靠硬编码向量 + 明确的有损性说明。
+verification_cmd:       `lunar 2024 2 10 | sed -n 's/^Lunar : \([0-9.]*\)\..*/\1/p' | tr '.' ' ' | xargs lunar -i | grep 'Solar : 2024.2.10.0'` —— 任选一个日期，往返一次；若回到原点则判据成立，返回非 0 即该采样点不可逆（需列入排除表）
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           self-closing-roundtrip-with-explicit-irreversible-list
+rec_description:        改法：在 `test_package` 里加一段"往返遍历"，对跨越**整个支持区间**的 N 个采样点（含上下界）执行 `A(x) → 解析出 y → B(y) → 断言 == x`。三点必须做到：① **采样点覆盖区间端点**——本包取公历支持区间的下界 1900-01-31 与上界 2049-12-31，协议/格式类工具则取最小/最大合法值；② **解析用 sscanf 抽字段，不要用 shell 管道切字符串**——shell 切分依赖 locale 与分隔符恰好为 `.`，且会把解析失败伪装成"断言不相等"，让定位成本翻倍；③ **不可逆输入显式枚举并打印 `[SKIP]`**——lunar 的闰月（输出 `Lunar : 2023.2Leap.20.0`）反查需要额外的 `-l` 标志，直接喂 `-i 2023 2 20` 会得到**不同**的公历日期（实测 2023.3.11 而非 2023.4.10），若不排除就会把"测试构造的输入不可解"误报成"程序不一致"。★ 闰月本身仍须单独用例覆盖（`-i -l 2023 2 20` → `Solar : 2023.4.10.0`），否则排除动作就变成了真正的覆盖缺口。★ 判据实现仍须遵守本仓库既有规范：`expect()` 计数而非 `assert()`（NDEBUG 下 assert 会被编译掉）、`popen` 内存直读不落盘（OHOS `/tmp` 只读）、`pclose==-1 || !WIFEXITED || code∈{126,127} || code>=128` 一律判"跑不起来"。参考实现：archives/l/lunar/2.2/test_package/test_lunar.c（12 个采样点往返 + 4 条闰月/日界单独用例，共 67 条断言）。
+rec_command:            # 往返遍历骨架（C 版）\nfor (i = 0; i < N; i++) {\n    run_prog("%d %d %d", pt[i].y, pt[i].mo, pt[i].d, buf);\n    sscanf(strstr(buf,"Lunar :"), "Lunar : %d.%d.%d.%d", &ly,&lm,&ld,&lh);\n    if (is_irreversible(buf, ly)) { printf("  [SKIP] irreversible input\\n"); continue; }   /* 显式，不静默 */\n    run_prog("-i %d %d %d", ly, lm, ld, buf);\n    sscanf(strstr(buf,"Solar :"), "Solar : %d.%d.%d.%d", &by,&bm,&bd,&bh);\n    expect(by==pt[i].y && bm==pt[i].mo && bd==pt[i].d, "round-trip", detail);\n}
+rec_auto_fix:           false
