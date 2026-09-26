@@ -1,0 +1,57 @@
+#====================================================================
+# DRAFT-11327-upstream-dist-drops-referenced-header-non-x86-path
+# Upstream dist tarball omits a referenced header that only non-x86 branches include
+#====================================================================
+
+id:                     DRAFT-11327-upstream-dist-drops-referenced-header-non-x86-path
+trigger_tool:           make|automake|configure|clang|conan
+phase:                  build|compile
+error_signature:        "vec_neon\\.h:[0-9]+:[0-9]+: fatal error: 'os_support\\.h' file not found|fatal error: '.*\\.h' file not found.*make.*Error 2"
+severity:               2
+category:               autotools, upstream-packaging, platform-branch, header-completeness, ohos-platform
+match_keywords:         os_support.h, vec_neon.h, vec.h, noinst_HEADERS, make dist, release tarball, git archive, NEON, DISABLE_NEON, aarch64, header not found, patch -p1, autoreconf, Makefile.in
+title:                  上游发行包漏打包被引用的既有头文件（未列入 noinst_HEADERS），且仅非 x86 平台分支 include —— arm64/NEON 必现 file not found；
+                         判定用"引用头 vs 实际存在文件"扫描，修复用同源上游 header patch；跳过 autoreconf 时改 Makefile.am 无效
+
+root_cause:             >
+  1) 上游 Makefile.am 的 noinst_HEADERS 逐条声明随发行包分发的头文件；被 src/vec.h / src/vec_neon.h 引用的
+  src/os_support.h 未列入，make dist 只收集清单内（及 _SOURCES/_HEADERS 列出的）文件，于是该头既不在 release tarball，
+  也不在上游 git（raw.githubusercontent v0.2/main 均 404）。
+  2) 引用点在平台分支内部：vec.h 的 __AVX__/__SSE2__ 分支走 vec_avx.h 不引用它，__ARM_NEON__ 分支走 vec_neon.h（第 35 行
+  #include "os_support.h"），最后的通用 #else 分支同样引用 —— 因此 x86 构建全绿、aarch64 必现失败，上游仅在 x86 上自测不会暴露。
+  3) 因为发行包自带预生成 configure/Makefile.in 且适配流程跳过 autoreconf，仅修改 Makefile.am（把该头补进 noinst_HEADERS）
+  不会被重生成，对本次构建零效果；必须补头文件本体（或改 Makefile.in/跑 autoreconf）。
+
+affected_scope:         >
+  任何用 Autotools make dist 发布、且被 include 的头文件未列入 noinst_HEADERS/EXTRA_DIST 的 C/C++ 库；
+  尤其"仅特定平台/架构分支（NEON、汇编后端、私有平台目录）引用"的私有头——上游 x86 CI 全绿、移植到 OHOS aarch64 才暴雷。
+  同型扩展：CMake 分发 tarball/install 规则漏带被 include 的私有头文件。不覆盖构建期生成物缺失（版本串/模型权重/表/configure 本身），
+  也不覆盖可选特性分支（如 #ifdef ENABLE_OSCE 下的 osce.h）未启用时的缺失。
+
+verification_cmd:       >
+  解包发行包后运行 include 完整性扫描（见配对 .md 的 python3 片段）确认 os_support.h 缺失且被 vec.h/vec_neon.h 引用；
+  git ls-tree -r v0.2 与 release 资产中均无该文件；随后 patch -p1 --dry-run 通过；
+  最后在 OHOS aarch64 上 conan create 通过（rnnoise 0.2 实测 CI build #52746：L0/L1 门禁 + test_package 5 断言全过）。
+
+rec_priority:           1
+rec_approach:           add-license-compatible-header-patch
+rec_description:        在 conandata.yml 声明一个 header patch，从同源同许可证上游（本例 Opus celt/os_support.h，BSD-3-Clause，与 rnnoise 同为 Xiph）
+                         补回被引用符号（OPUS_COPY/OPUS_MOVE/OPUS_CLEAR），并把上游头名 opus_defines.h 改指本库已有 common.h（提供 OPUS_INLINE）；
+                         不引入新依赖、不改上游行为；notes.md 记录上游打包缺陷与补丁理由。
+rec_command:            patch_file: "patches/0001-add-missing-os_support-header.patch"; apply via apply_conandata_patches(self) in build()
+rec_auto_fix:           false
+rec_impl:               conan-recipe|source-patch|knowledge-draft
+
+fallback_priority:      2
+fallback_approach:      edit-Makefile.in-or-run-autoreconf
+fallback_description:   若必须修正打包清单本身（而非仅本次构建），须修改 Makefile.in（发行包内预生成物）或在配方内执行 autoreconf 重生成；
+                         注意二者会改变构建路径（autoreconf 在受限 worker 上有 fork/OOM 风险），须在 notes 说明理由。
+fallback_command:       autoreconf -fi && ./configure ...   # 或直接 sed 修改 Makefile.in 的 noinst_HEADERS
+fallback_auto_fix:      false
+
+forbid_1_pattern:       "把缺失头文件内容内联到引用它的 .c/.h 源文件里"
+forbid_1_reason:        破坏上游源码结构、隐藏打包缺陷，且同一头被多处引用时需要重复内联。
+forbid_1_consequence:   补丁不可向上游复用、后续版本升级即失效，评审按"单库临时补丁"退回（不满足路径 B 通用性）。
+forbid_2_pattern:       "只在 notes.md 记录失败并跳过 NEON 路径（如强行 -DDISABLE_NEON 走通用分支）"
+forbid_2_reason:        通用分支同样 #include "os_support.h"，且会丢失目标平台 SIMD 性能路径。
+forbid_2_consequence:   构建仍失败或产物性能退化，掩盖真实根因。
