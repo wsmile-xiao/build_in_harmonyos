@@ -1,0 +1,60 @@
+draft: DRAFT-cmake-checklibexists-ohos-static-link
+status: pending-editor-review
+title: "CMake CheckLibraryExists/-l&lt;name&gt; 型依赖探测在 OHOS 交叉构建下的接线：显式 -I + 检查与链接双 -L + 只含 .a 的私有 lib 目录"
+category: cmake, ohos, conan, static-link, dependency-wiring
+match_keywords: >
+  CHECK_LIBRARY_EXISTS, CheckLibraryExists, target_link_libraries, -l<name>,
+  CMAKE_REQUIRED_LINK_OPTIONS, CMAKE_REQUIRED_FLAGS, CMAKE_EXE_LINKER_FLAGS,
+  find_library, FIND_ROOT_PATH_MODE, ONLY, 依赖接线, 静态链接, lib<name>.a,
+  HAVE_LIB, config.h.cmake, cmakedefine, try_compile, sysroot, 交叉编译
+error_signature: >
+  undefined reference to [`'](ZSTD_|lzma_|BZ2_|gz)[A-Za-z_]+|HAVE_LIB(Z|BZ2|LZMA|ZSTD).*未定义|
+  #cmakedefine HAVE_LIB\w+ 生成的 config\.h 中未定义|/bin/sh: .*cannot find -l\w+|ld\.lld: error: unable to find library -l\w+
+root_cause: >
+  上游 CMake 工程若用「功能探测式」找依赖——`CHECK_LIBRARY_EXISTS(<so> <func> "" HAVE_LIBX)`
+  判定可用性，再 `target_link_libraries(<target> <so> ...)` 用裸库名链接（无 find_package /
+  无 find_library / 无 CONFIG 包）——在 OHOS 交叉构建下会同时踩两点：
+  (1) 交叉链的 FIND_ROOT_PATH_MODE=ONLY 会把 sysroot 之外的 conan 包路径滤掉，依赖头文件
+      (`zlib.h`/`bzlib.h`/`lzma.h`/`zstd.h`) 找不到；
+  (2) `CHECK_LIBRARY_EXISTS` 内部是 `try_compile`，它既不继承最终链接的
+      `CMAKE_EXE_LINKER_FLAGS`，也不会去 conan 包目录找库，于是 `-l<so>` 解析失败
+      → 探测静默返回 false → `config.h` 里 `#cmakedefine HAVE_LIBX` 全部未定义
+      → 编译出的二进制缺少对应功能（表面"编译通过"，实为功能缺失）。
+solution: |
+  在 recipe 的 build() 里用「私有 lib 目录 + 双 -L + 显式 -I」接线，完全不改上游源码：
+
+  ```python
+  # ① 只把依赖的 .a 暴露进私有目录（搜索路径上无 .so，-l<name> 必然解析为静态库）
+  libdir = os.path.join(self.build_folder, "zst-static-libs"); os.makedirs(libdir, exist_ok=True)
+  includes = []
+  for dep in ("zlib", "bzip2", "xz", "zstd"):
+      pkg = self.dependencies[dep].package_folder
+      includes.append(os.path.join(pkg, "include"))
+      for a in glob.glob(os.path.join(pkg, "lib", "*.a")):
+          os.symlink(a, os.path.join(libdir, os.path.basename(a)))   # HMDFS 失败则 shutil.copy2
+
+  defs = [
+      f'-DCMAKE_TOOLCHAIN_FILE="{toolchain}"', "-DCMAKE_POLICY_VERSION_MINIMUM=3.5",
+      # ② 头文件：显式 -I（FIND_ROOT_PATH_MODE=ONLY 会屏蔽 conan 包）
+      '"-DCMAKE_C_FLAGS={}"'.format(" ".join("-I" + i for i in includes)),
+      # ③ 探测（try_compile）与最终链接**都要** -L，两个变量不可互相替代
+      f'"-DCMAKE_REQUIRED_LINK_OPTIONS=-L{libdir}"',
+      f'"-DCMAKE_EXE_LINKER_FLAGS=-L{libdir}"',
+  ]
+  ```
+
+  验证探测真的生效（否则是静默降级）：configure 后检查生成的 `config.h`
+  四个 `#define HAVE_LIB*` **全部**存在、`CMakeCache.txt` 里 `HAVE_LIB*:INTERNAL=1`；
+  最终产物用 `llvm-readelf -d` 确认 `DT_NEEDED` 符合预期（全静态时只剩 `libc.so`）。
+fallback: >
+  若某个依赖没有 .a（例如 zstd 早期版本只发 .so），则不建私有目录，改为把该依赖 lib 目录
+  加进 `-L` 并设置 RPATH（`-DCMAKE_INSTALL_RPATH=<dep lib>` + `-DCMAKE_BUILD_WITH_INSTALL_RPATH=ON`），
+  并在 test_package 用 `env="conanrun"` 运行；本次 zst 0.4 通过选用 zstd/1.5.7.1（同包含
+  libzstd.a）避免走这条路。
+verify_builds: "zst 0.4（archives/z/zst/0.4/reports/w3-local-ci.log exit 0；上游 ctest 161 项实测 139 通过/14 失败(环境)/8 跳过）"
+reference_impl: >
+  archives/z/zst/0.4/conanfile.py 的 `_static_lib_dir()` + `build()`（kilobyte/zst 0.4，
+  CMakeLists 用 CHECK_LIBRARY_EXISTS(Z z gzread)/BZ2/LZMA/ZSTD 探测四压缩库后裸名链接）。
+  产物 bin/zst 的 DT_NEEDED 仅 libc.so，四压缩库全静态链入。
+id: E550
+doc_file: knowledge/drafts/DRAFT-cmake-checklibexists-ohos-static-link.md
