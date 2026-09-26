@@ -1,0 +1,136 @@
+#====================================================================
+# Draft: 同族小版本任务的「编译面等价性」判定法
+#        （打补丁后全树 diff，差异须全部落在 recipe 关闭的子目录 / 非编译面）
+# 交付实例: libkcddb 26.04.0（PR !11783，任务 #8241）——与 26.04.3 判定为等价
+# 反例对照: xz 5.8.1 vs 5.8.3（编译面有真实差异，必须重新适配）
+#====================================================================
+
+id:                     E644
+trigger_tool:           patch|diff|conan|recipe-search
+phase:                  pre-analysis
+
+error_signature:        Hunk #\d+ (FAILED|succeeded at \d+ \(offset)|with fuzz)|patch.*--dry-run.*(failed|FAILED)|同族.*版本.*(直接复用|沿用配方)|sibling version reuse
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               verification, version-bump, archive-reuse, pre-analysis
+match_keywords:         同族小版本, sibling version, 版本递增, 复用配方, 归档演进, patch dry-run, fuzz, offset, diff -rq, 编译面, 等价性, BUILD_KCM, po/, 翻译文件, 预分析
+title:                  同族小版本任务复用既有配方前，必须做「编译面等价性」判定：同一补丁 dry-run 全绿 + 打补丁后全树 diff，差异只允许落在 recipe 关闭的子目录与非编译面
+prescan_pattern:        (已有|既有).*归档.*v?[0-9]+\.[0-9]+\.[0-9]+|archives/[a-z]/[^/]+/[0-9]|任务.*同族|version bump
+prescan_globs:          archives/**, conandata.yml, patches/*.patch, reports/*
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause: |
+  制品仓中大量任务属于「同族多小版本」形态：某个库已有归档版本（如 libkcddb/26.04.3、
+  xz/5.8.3），新任务要求另一个小版本（libkcddb/26.04.0、xz/5.8.1）。最省力的做法是沿用既有配方，
+  但**版本之间是否等价必须实测判定**，否则两类事故：
+
+  1. **补丁带 fuzz/offset 应用**：上游在版本间改动了补丁上下文，`patch` 仍"成功"但落点偏移，
+     产物行为可能与预期不符；更糟的是某些封装对失败是静默的（本仓 `apply_conandata_patches`
+     遇到已应用/失败的行为需按 conan 版本确认），于是"构建成功"掩盖了未适配的事实。
+  2. **判定为可复用但实际不可**：版本间源码/构建脚本已变，沿用配方后出现只在 CI 才暴露的失败，
+     而此时已经消耗了一轮 CI 队列（本仓 CI 排队 3–6 小时）。
+
+  反之，**过度保守**会浪费一遍完整适配工作。判据要机械可判、可复核。
+
+  本条目给出三步判定法，核心洞见：**只需证明"参与编译的文件集合"等价**，不需要整棵树等价——
+  KDE Gear / KDE Frameworks 的小版本差异常常只落在 `po/` 翻译与**被配方关闭的子目录**
+  （如 `BUILD_KCM=OFF` 的 kcmcddb）里，这些差异对产物无影响。
+
+affected_scope: |
+  所有「制品仓已有同族版本、任务要求补另一小版本」的任务，尤其 KDE Gear（26.04.x）、
+  KDE Frameworks 6（6.x）、以及任何按 `release-service/<ver>` 发布的小版本序列。
+  实测正例：libkcddb 26.04.0 ← 26.04.3（判定等价，配方直接沿用）。
+  反例对照：xz 5.8.1 → 5.8.3 之间存在真实编译面差异（需 `-all-static`、`test_package`
+  取交叉编译器两处改动），不能仅凭"同族"复用。
+verification_cmd: |
+  # ① 补丁 dry-run 全绿（无 fuzz/offset）
+  patch -p1 --dry-run --forward < patches/0001-*.patch ; echo "exit=$?"
+  # ② 打补丁后全树 diff
+  diff -rq lib-$VER lib-$SIBLING ; echo "exit=$?（1=有差异，逐行看）"
+  # ③ 差异归属判定（差异文件必须全部命中"非编译面/已关闭子目录"白名单）
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           three-step-compile-surface-equivalence
+rec_description: |
+  对同族两版本各解包一份，**应用同一个补丁**，然后：
+
+  1. **补丁一致性**：`patch -p1 --dry-run --forward` 对目标版本**全部文件**返回 0，
+     输出无 `with fuzz` / `offset`（有 offset 需人工确认上下文）。文件数应与既有归档
+     `patches/` 声明的文件数一致。
+  2. **全树差异枚举**：`diff -rq <new> <sibling>`，得到差异文件清单（不要只看源码目录）。
+  3. **差异归属判定（判定规则）**：差异文件必须**全部**落在下列白名单，才判定"编译面等价、
+     配方可整体沿用"：
+     - **配方已关闭的子目录**：配方里 `BUILD_*=OFF` / 未 `add_subdirectory` 的目录
+       （例：`kcmcddb/` 因 `BUILD_KCM=OFF` 不参与编译）；
+     - **非编译面**：`po/`（翻译，且若关闭文档/翻译则完全不影响）、`doc/`、`*.md`、测试数据；
+     - 差异若落在**源码 / CMakeLists.txt / tests/** 上 → **判定不等价**，必须按正常适配流程
+       重新处理差异（并对照既有归档逐项说明改了什么）。
+  4. 判定结论写进版本级 `manifest.yaml` / `notes.md` 与 PR 正文，附上可复现命令与差异清单
+     （差异文件数、归属理由），使复核者可直接重跑。
+
+  本方法同时给无法在本地执行目标产物的配方（E643）提供了**合法的本地证据上限**：
+  编译面等价 + 同族版本已由 CI 构建 ⇒ 新版本的构建结论可由 CI 承接，而无需伪造本地编译结果。
+rec_command:            diff -rq lib-$VER lib-$SIBLING
+rec_auto_fix:           false
+rec_impl:
+
+solution: |
+  # 判定脚本骨架（同族小版本复用前跑一遍）
+  PATCH=patches/0001-*.patch
+  for v in $VER $SIBLING; do
+    tar -xf $PKG-$v.tar.* && ( cd $PKG-$v && patch -p1 --forward --dry-run < ../$PATCH ) || exit 1
+    ( cd $PKG-$v && patch -p1 --forward < ../$PATCH )
+  done
+  diff -rq $PKG-$VER $PKG-$SIBLING | tee /tmp/diff.list
+  # 白名单过滤：留下"不该有的差异"
+  grep -vE '/(po|doc)/|\.md$|kcmcddb/' /tmp/diff.list && echo "⚠️ 编译面有差异 → 需重新适配" || echo "✅ 编译面等价"
+
+fallback_priority:      2
+fallback_approach:      per-file-attribution-with-sibling-diff-notes
+fallback_description:   若差异落在编译面但只是极小的版本噪音（如版本号字符串），逐文件人工归因并在 notes.md 列出"改了什么/为什么无影响"，不要笼统声称"同族可复用"
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       同族.*(可直接|直接).*复用|照搬.*既有配方|沿用.*(无需|不用).*(验证|核对)
+forbid_1_reason:        未经 ①②③ 三步判定就宣称可复用；补丁 fuzz/offset 与版本间真实改动都会被掩盖
+forbid_1_consequence:   产物与预期不符或只在 CI 暴露失败，白烧一轮 3–6 小时 CI 队列
+
+forbid_2_pattern:       (整树|全树).*(逐字节|byte-identical).*(相同|等价).*(但|而).*(未|没).*diff
+forbid_2_reason:        等价性结论必须给出可复现命令与差异清单；口头断言"等价"无法复核，等同未验证
+forbid_2_consequence:   复核者无法重跑，判定不可追溯
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E644.md
+last_updated:           2026-09-21
+source_event:           libkcddb 26.04.0 适配（PR !11783）：同一补丁对 26.04.0/26.04.3 双份源码 dry-run 全绿，打补丁后全树 diff 仅 9 个文件不同（po/ 8 个 + kcmcddb/kcm_cddb.json），libkcddb/、tests/、CMakeLists.txt 逐字节相同 → 判定配方可整体沿用
+
+# ═══ 知识协作 ═══
+authors:                Zmaomao
+source_pr:              11783
+source_commit:          86cba138e
+verify_builds:
+reference_impl:         archives/l/libkcddb/26.04.0/manifest.yaml（local_passed 段记录了本判定结论）、archives/l/libkcddb/26.04.3/（对照的同族归档）
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-21
+
+draft:                  DRAFT-libkcddb-26.04.0-sibling-version-compile-surface-equivalence
+status:                 pending-editor-review
+contributor_id:         ZM01
