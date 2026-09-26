@@ -1,0 +1,128 @@
+#====================================================================
+# DRAFT-aghermann-1.1.2-build-tool-elf-hmdfs-unsigned-exec-denial
+#   conan 缓存内构建期工具 ELF 未签名，HMDFS exec 报
+#   "<tool>: Operation not permitted"（Error 126）
+# 来源: PR #10748 feat(aghermann): 1.1.2 适配 HarmonyOS PC
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-aghermann-1.1.2-build-tool-elf-hmdfs-unsigned-exec-denial
+trigger_tool:           make|autotools|conan|sh
+phase:                  build
+error_signature:        _glib_tools/[a-zA-Z-]+\[3\]:\s*.*/bin/[a-zA-Z-]+:\s*Operation not permitted|
+                        glib-compile-resources.*Operation not permitted|
+                        make.*Error 126|
+                        exec.*unsigned.*ELF.*not permitted
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, filesystem, elf-signing, build-tools, autotools, conan
+match_keywords:         glib-compile-resources, glib-compile-schemas, gdbus,
+                        Operation not permitted, Error 126, unsigned ELF,
+                        .codesign, binary-sign-tool, llvm-objcopy, selfSign,
+                        HMDFS, conan cache, build tool, self-sign, wrapper,
+                        LD_LIBRARY_PATH, autotools, gresource
+title:                  conan 缓存内构建期工具（glib-compile-resources 等）未签名被 HMDFS 拒绝执行："<tool>: Operation not permitted" + make Error 126
+prescan_pattern:        Operation not permitted.*(/bin/|glib-compile)|Error 126
+prescan_globs:          **/Makefile, build log, conan create output
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             HarmonyOS 对用户区 ELF 执行有签名校验（HMDFS/安全策略，
+                        同 E318/E486 家族）。conan 依赖包（如 glib）bin/ 下的
+                        构建期工具是包发布时链出的 ELF，其签名状态随 worker
+                        环境而异：部分 worker 的签名校验状态会拒绝执行 conan
+                        缓存（~/.cache/conan2）内的未签名 ELF，exec 返回
+                        EPERM，sh 打印 "<tool>: Operation not permitted"，
+                        make 报 Error 126。典型触发链：autotools 工程的
+                        data/ui Makefile 用 glib-compile-resources 生成
+                        .gresource → 构建尾声才调用 → 编译/链接全部通过后
+                        才在 build 阶段失败。本地能复现与否取决于本机签名
+                        校验状态，属环境差异——"本地通过 CI 失败"的高发形态。
+                        注意与 E024（AF_UNIX bind）/E079（硬链接）区分：本条
+                        的 EPERM 发生在 execve 一个 ELF 时，且报错行由 sh
+                        打出、路径指向 conan 缓存内的工具二进制。
+
+affected_scope:         所有在 build() 期间执行 conan 依赖包 bin/ 下工具的
+                        配方（glib-compile-resources / glib-genmarshal /
+                        gdbus-codegen / gettext 工具 / itstool 等都属此家族）。
+                        本题实证：aghermann 1.1.2（GTK 栈）在 CI worker
+                        OpenHarmonyPCDeveloper-CI-007 上 glib-compile-resources
+                        exec 被拒（构建 #51312），同缓存路径本地可执行。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           copy-strip-resign-before-first-exec
+rec_description:        构建期首次执行前，把工具复制到构建私有目录（勿改 conan
+                        缓存原文件——缓存共享，就地改签名会污染其他构建），用
+                        llvm-objcopy --remove-section .codesign 清掉旧签名段，
+                        binary-sign-tool sign -selfSign 1 自签，chmod +x 后
+                        让 wrapper/PATH 指向副本。执行包内工具的 wrapper 脚本
+                        同时补 LD_LIBRARY_PATH（收集所有依赖包 lib 目录），
+                        一并解决 relocation 后 libgio/libglib 加载失败。签名
+                        工具缺失或签名失败时降级为原路径，保证已在允许执行
+                        未签名 ELF 的环境上行为不变。判别三行：
+                        ① 失败行是 sh 打的 "<path>/<tool>: Operation not permitted"（非编译器/链接器报错）
+                        ② file <tool> 确认是 ELF 且路径在 conan 缓存内
+                        ③ 手工执行同一工具确认 EPERM，签名后可执行
+rec_command:            llvm-objcopy --remove-section .codesign <tool>.unsigned 2>/dev/null || true;
+                        binary-sign-tool sign -inFile <tool>.unsigned -outFile <tool>.signed -selfSign 1;
+                        mv <tool>.signed <tool>.unsigned && chmod +x <tool>.unsigned
+rec_auto_fix:           false
+rec_impl:               conan-recipe-sign-helper
+
+fallback_priority:      2
+fallback_approach:      avoid-host-tool-at-build-time
+fallback_description:   绕开对构建期工具的依赖：改用补丁让 make 跳过 .gresource
+                        生成（预生成产物入库）或用 python 等价物替代工具。
+                        侵入上游构建逻辑，仅当工具无法签名（如无 binary-sign-tool
+                        的最小环境）时使用。
+fallback_command:       patches/000X-skip-gresource.patch
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       改.*conan.*缓存.*原.*(文件|二进制)|in-place.*sign.*cache
+forbid_1_reason:        禁止就地给 conan 缓存内依赖包二进制签名——缓存跨构建共享，
+                        就地修改破坏"每次构建从原始依赖状态出发"的可复现性，
+                        且会掩盖真实环境差异（本地改过 → 本地过 → CI 仍炸）
+forbid_1_consequence:   本地/CI 行为分叉，问题定位困难；缓存损坏影响其他包构建
+forbid_2_pattern:       setenforce|关闭.*签名.*校验|disable.*verification
+forbid_2_reason:        禁止尝试关闭系统签名校验——OHOS 安全策略不可也不应绕过，
+                        CI worker 无 root 权限
+forbid_2_consequence:   命令失败或引入安全风险
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E318（go test 未签名 ELF 被拒执行，同为签名校验拒绝 exec；
+                        本条把方案从 go test 场景推广到 conan 依赖包内的任意构建期工具）、
+                        E486（GCC 引导构建中宿主 ELF 首次执行前签名，link-interception
+                        思路同源；本条是「非引导、包内自带工具」的简化变体）、
+                        E079（HMDFS 硬链接 Operation not permitted；报错文本相同
+                        但系统调用不同，execve vs link，注意区分）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       file <conan-cache>/glib*/p/bin/glib-compile-resources
+                        # ELF shared object; 直接执行若报 Operation not permitted 即命中；
+                        # 复制+objcopy+binary-sign-tool 自签后同命令应输出 2.84.0
+doc_file:               knowledge/drafts/DRAFT-aghermann-1.1.2-build-tool-elf-hmdfs-unsigned-exec-denial.md
+last_updated:           2026-09-20
+source_event:           PR #10748 feat(aghermann): 1.1.2 适配；CI 构建 #51312 在
+                        worker CI-007 上 glib-compile-resources exec 被拒
+                       （Operation not permitted → make Error 126），编译链接
+                        全部通过；修复为复制+清码+自签后构建通过
+authors:                yanjiaxin
+source_pr:              10748
+source_commit:          cbee1679de
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20

@@ -1,0 +1,95 @@
+#====================================================================
+# DRAFT-aghermann-1.1.2-test-package-sh-posix-array-split
+#   test_package .sh 用 bash 数组语法（read -a / ${arr[@]} / <<<），
+#   conan 以 /bin/sh 执行 → toybox 拆分失败 → 依赖闭合误报
+#   "NEEDED lib not resolvable"（CI #59412/#59738 实测失败）
+# 来源: PR #10748 feat(aghermann): 1.1.2 适配 HarmonyOS PC
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-aghermann-1.1.2-test-package-sh-posix-array-split
+trigger_tool:           conan|sh|test_package
+phase:                  test
+error_signature:        ERROR\(HarmonyOS\): NEEDED lib not resolvable: lib[a-zA-Z0-9_.-]+\.so(\.\d+)*|
+                        ERROR\(HarmonyOS\): dynamic dependencies not closed on OHOS|
+                        Error in test\(\) method.*ConanException: Error 1
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, conan, test-package, shell, posix, toybox, dynamic-linking
+match_keywords:         NEEDED lib not resolvable, DT_NEEDED, dynamic dependencies not closed,
+                        test_ohos.sh, read -a, here-string, <<<, toybox, /bin/sh,
+                        LD_LIBRARY_PATH, dependency closure, conan create, test_package
+title:                  test_package 的 .sh 依赖闭合检查用了 bash 数组语法（read -a/<<</${arr[@]}），conan 用 /bin/sh 执行时被 toybox 静默拆分失败，误报 "NEEDED lib not resolvable"
+prescan_pattern:        NEEDED lib not resolvable|dynamic dependencies not closed
+prescan_globs:          **/test_package/*.sh, conan create output
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             conan test_package 的 conanfile.py 用 self.run('"{}" ...'.format(shell, ...))，
+                        其中 shell = CONFIG_SHELL 或硬编码 "/bin/sh"，显式以 /bin/sh 执行
+                        test_*.sh（脚本 shebang 被忽略）。OHOS 的 /bin/sh 是 toybox：
+                        不支持 bash 数组（read -a 不建数组、${arr[@]} 退化为标量、
+                        <<< here-string 不可用）。旧实现用
+                        "IFS=':' read -r -a DIRS <<< ${LD_LIBRARY_PATH:-}" 拆路径，
+                        在 toybox 下 DIRS 变成整个字符串（${#DIRS[@]} = 字符串长度），
+                        for 循环拿不到各目录 → LD_LIBRARY_PATH 扫描静默失效，
+                        只剩 /system/lib64 /vendor/lib64 → 包私有库（lib/aghermann）
+                        与 fftw/gsl 等依赖库全部误报 "not resolvable"。
+                        关键判别：同一构建里 test_edf.sh 实际运行二进制成功
+                        （动态装载器经 conanrun LD_LIBRARY_PATH/RUNPATH 能找到库），
+                        说明依赖并未真的缺失——是检查脚本自身坏了。
+                        与 E511 同属"本地通过 CI 失败"高发形态，但 E511 是
+                        exec 被拒（EPERM），本条是 shell 语法兼容（无报错、静默错判）。
+
+affected_scope:         所有在 test_package/*.sh 里用 bash 专属语法（read -a、
+                        here-string <<<、${arr[@]}、[[ ]]、set -o pipefail 之外的
+                        bashism）做依赖闭合/路径扫描/环境解析的鸿蒙适配配方。
+                        实证：aghermann 1.1.2 test_ohos.sh 在 CI worker CI-018
+                        （#59412）与 CI-002（#59738）均误报 6 个 NEEDED 库
+                        （libsigfile/libsigproc/libfftw3/libfftw3_threads/libgsl/
+                        libgslcblas）不可解析；本地 OpenHarmony-6.1.0.115 同现。
+                        set -o pipefail / $( ) / case 等 POSIX 构造在 toybox 可用，
+                        test_edf.sh（同 shell 执行）正常即证。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           posix-sh-only-test-scripts
+rec_description:        test_package 的 .sh 必须写成 POSIX sh 兼容（conan 用
+                        /bin/sh 显式执行，忽略 shebang，不能假设 bash 存在）：
+                        ① 路径拆分改用 "OLDIFS=$IFS; IFS=':'; set -- ${VAR:-};
+                           IFS=$OLDIFS" 位置参数法，再 for d in "$@" 遍历；
+                        ② 逐行喂 while read 用 heredoc（done <<EOF ... EOF）
+                           代替 here-string（<<<）；
+                        ③ 全文件 grep 自查 bashism：read -a、<<<、${arr[@]}、
+                           [[、{a,b}、$'\n' 等一律不用。
+                        判别三行：
+                        ① 报 "NEEDED lib not resolvable" 但同构建实质运行测试
+                          （执行包内二进制）通过 → 脚本误报而非依赖缺失；
+                        ② 检查脚本内 read -a / <<< / ${arr[@]} 之一存在；
+                        ③ /bin/sh 直接执行脚本复现（toybox 下数组拆分失效），
+                           bash 执行却通过 → 坐实。
+rec_command:            OLDIFS=$IFS; IFS=':'; set -- ${LD_LIBRARY_PATH:-}; IFS=$OLDIFS;
+                        for d in "$@" /system/lib64 /vendor/lib64; do [ -e "$d/$lib" ] && found="$d/$lib" && break; done
+                        (实例: archives/a/aghermann/1.1.2/test_package/test_ohos.sh)
+rec_auto_fix:          false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      runtime-run-as-closure-proof
+fallback_description:   若脚本仍需额外稳健性，把"实际运行二进制成功"作为依赖
+                        闭合的最终证明（动态装载器解析成功即闭合），路径扫描
+                        仅作诊断提示、不作为失败判据；无 ldd 的 OHOS 上
+                        /system/lib64 系统库与 conanrun LD_LIBRARY_PATH 之外的
+                        RUNPATH 场景尤其如此。
+fallback_auto_fix:     false
+
+forbid_1_pattern:       禁止在 test_package/*.sh 使用 read -a / here-string <<<
+                        / ${arr[@]} 等 bash 专属构造（toybox /bin/sh 静默错判，
+                        无报错难排查）
+
+principles:
+
+causes:                 E511(近亲: 本地通过 CI 失败的环境差异形态，exec EPERM),
+                        E248(CI worker 缺 automake/aclocal，同为工具链面差异)
