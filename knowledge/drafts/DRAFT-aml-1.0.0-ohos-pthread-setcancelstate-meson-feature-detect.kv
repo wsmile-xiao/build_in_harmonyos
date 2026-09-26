@@ -1,0 +1,91 @@
+#====================================================================
+# DRAFT-aml-1.0.0-ohos-pthread-setcancelstate-meson-feature-detect
+# 触发事件: aml 1.0.0 R01 适配（pc2-46, 2026-09-24）
+#   链接错误 ld.lld: undefined symbol: pthread_setcancelstate
+#   根因: 编译期 sysroot 头（pthread.h）无 pthread_setcancelstate 声明，
+#         sysroot libc 无该符号（链接失败）；而设备运行 libc
+#         /system/lib64/libc.so 实际导出 pthread_cancel(T) /
+#         pthread_setcancelstate(W) / pthread_testcancel(W)（nm -D 实证）
+#   方案: Meson cc.has_function 特性检测 + HAVE 宏守卫，无平台宏硬编码
+#====================================================================
+
+id:                     DRAFT-aml-1.0.0-ohos-pthread-setcancelstate-meson-feature-detect
+status:                 pending-editor-review
+trigger_tool:           meson|clang|ld
+phase:                  configuration|compilation|linking
+error_signature:        undefined symbol: pthread_setcancelstate|
+                         ld.lld: error: undefined symbol: pthread_setcancelstate|
+                         call to undeclared function 'pthread_setcancelstate'
+
+severity:               2
+category:               build-system, libc, compat, threading, ohos, meson
+match_keywords:         pthread_setcancelstate, pthread_cancel, undefined symbol,
+                         meson, has_function, cc.has_function, HAVE_ macro,
+                         feature detection, meson.build, thread-pool, OHOS,
+                         musl, sysroot, libc, platform guard
+
+title:                  OHOS pthread_setcancelstate 链接失败用 Meson 特性检测宏守卫（勿硬编码平台宏）
+
+root_cause: >
+  OHOS 编译工具链（SDK 26 sysroot）的头文件 pthread.h 不声明
+  pthread_setcancelstate（编译期 implicit declaration 警告），且链接期
+  sysroot libc 无该符号（ld.lld: undefined symbol）。但设备运行时 libc
+  /system/lib64/libc.so 实际导出该符号（pthread_cancel T、
+  pthread_setcancelstate W、pthread_testcancel W，nm -D 实证）——因此
+  这是「编译期 sysroot 缺声明/缺符号」问题，不是「运行时不存在」。
+  与 Android 的处理思路相同：在 worker 线程中禁用线程取消并非必须行为，
+  缺失时可安全跳过。既有知识 E127（undef 宏，OpenMP 特化）、E507
+  （CheckCXXSymbolExists + Boost 特化）、E085（PTHREAD_IN_USE_DETECTION_HARD）、
+  DRAFT-libplctag（镜像 __ANDROID__ 分支）均未覆盖 Meson 构建系统 +
+  特性检测 + 保留 __ANDROID__ 守卫的通用写法。
+
+rec_approach:           meson-feature-detect-macro-guard
+rec_description: >
+  ①meson.build 中在 cc = meson.get_compiler('c') 之后探测函数存在性：
+    have_pthread_setcancelstate = cc.has_function('pthread_setcancelstate',
+      prefix: '#include <pthread.h>')
+    if have_pthread_setcancelstate
+        c_args += '-DHAVE_PTHREAD_SETCANCELSTATE'
+    endif
+  ②调用点（如 thread-pool worker 的 pthread_setcancelstate(
+    PTHREAD_CANCEL_DISABLE, NULL)）改为：
+    #if !defined(__ANDROID__) && defined(HAVE_PTHREAD_SETCANCELSTATE)
+        pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+    #endif
+  ③特性检测优于平台列表：无需硬编码 __OHOS__（符合 R8/PF5），跨 libc
+    变体（musl/OHOS/其他裁剪 libc）自动适配。
+  ④保持上游已有的 __ANDROID__ 守卫，仅叠加 HAVE 宏。
+
+rec_command: >
+  meson setup builddir --prefix=$DEFAULT_PREFIX
+  ninja -C builddir
+  期望输出: libaml.so.1.0.0 链接成功（无 undefined symbol: pthread_setcancelstate）
+
+rec_auto_fix:           false
+rec_impl:               source-patch + meson-feature-detection
+
+affected_scope: >
+  OHOS 上所有以 Meson 构建、worker/后台线程中调用 pthread_setcancelstate
+  的 C/C++ 库（如 aml 1.0.0、其他事件循环/线程池库）；同样适用于
+  sysroot 头缺声明但运行时 libc 导出符号的声明型修复边界判定。
+
+verification_cmd: >
+  nm -D /system/lib64/libc.so | grep -E 'pthread_(cancel|setcancelstate|testcancel)'
+  # 设备运行 libc: pthread_cancel T / pthread_setcancelstate W / pthread_testcancel W
+  grep -c 'pthread_setcancelstate' <sdk>/sysroot/usr/include/pthread.h
+  # 期望 0（编译期 sysroot 头无声明）
+
+boundary: >
+  ①若目标 libc 同时提供符号与头文件声明（glibc），特性检测自动为真，
+  该守卫不改变任何行为；
+  ②若软件必须依赖 pthread_setcancelstate 的语义（非可选优化）时不可跳过，
+  需声明型 compat header（见 DRAFT-ohos-pthread-cancel-decl）；
+  ③MesonToolchain 的 conf 下编译器以绝对路径注入时 has_function 仍可用；
+  ④本方案不注入 __OHOS__ 平台宏，避免 PF5 平台宏闸拦截。
+
+principles:
+similar_to:             [E085, E127, E507, E513]
+causes:                 []
+caused_by:              []
+prerequisite_of:        []
+conflicts_with:         []
