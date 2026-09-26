@@ -1,0 +1,159 @@
+# 版本级 manifest — cffi 2.1.1（Python 版）
+# 遵循 ARCHIVE-SPEC v3.0
+
+version: "2.1.1"
+software: cffi
+status: built
+build_date: "2026-09-20"
+build_system: pyproject
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  # PyPI 官方托管（R39 合规）
+  url: "https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz"
+  sha256: "dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be"
+  compression: tar.gz
+  archive_root: "cffi-2.1.1"
+
+# ============================================================
+# 软件识别（同名不同上游，务必区分！）
+# ============================================================
+
+software_identity:
+  note: |
+    ⚠️ **本仓有两个不相关的上游都叫 "cffi"**，仅版本号不同：
+      · cffi/0.24.1 —— `github.com/cffi/cffi`，Common Lisp 的 FFI 库
+        （ASDF 构建，package_type=header-library，早在 ohpcd 发布）
+      · cffi/2.1.1 —— **本包**，`github.com/python-cffi/cffi`，Python 的
+        C Foreign Function Interface（C 扩展 + libffi，package_type=library）
+    两者同名不同物、无任何代码关系。Conan 引用始终带版本，故
+    `cffi/2.1.1` 与 `cffi/0.24.1` 不会互相解析到；下游 `conan install`
+    必须显式指定版本。
+    之所以仍沿用 `cffi`（而非改名 `python-cffi`）：PyPI 上的分发包名就是
+    `cffi`，改名会与上游包名不一致；且仓内已有 50 个包名对应多个 homepage
+    的并存先例（版本号即区分手段）。若维护者倾向与 `cairo`/`python-cairo`、
+    `glib`/`pygobject` 的命名惯例对齐，可改名为 `python-cffi`（需同时改
+    目录名与配方 `name`，以过 PF8 slug 闸）。
+
+homepage_actual: "https://github.com/python-cffi/cffi"
+
+# ============================================================
+# 依赖信息
+# ============================================================
+
+dependencies:
+  required:
+    - "python/3.12.9"
+    - "libffi/3.5.2"
+    - "pycparser/3.0"
+  optional: []
+  note: |
+    · python/3.12.9 —— Python.h + libpython3.12.so（链接期必需：musl 不从主
+      可执行文件导出 Python 符号，只链接会得到"链接成功但 import 失败"的模块）。
+    · libffi/3.5.2 —— `_cffi_backend` 的唯一外部链接依赖（setup.py
+      `libraries = ['ffi']`）。ohpcd 制品为 static-library，自带 ffi.h、
+      libffi.a 与 lib/pkgconfig/libffi.pc（实测）。
+    · pycparser/3.0 —— 运行期依赖（pyproject.toml:
+      `dependencies = ["pycparser; implementation_name != 'PyPy'"]`）；
+      cffi/cparser.py 在运行期 `import pycparser`，故消费者必须能拿到它。
+
+    **package_type=library 的原因**：conan 禁止 python-require 依赖带类型的库
+      ERROR: Package 'cffi/2.1.1' with type 'python-require' cannot have a
+             'static-library' dependency to 'libffi/3.5.2'
+    libffi 为 static-library、python 为 library，故声明 library + shared 选项
+    （与 psutil 7.2.2 / lxml 6.1.1 一致）。
+
+    构建期 setuptools（>=77.0.3，pyproject build-backend=setuptools.build_meta）
+    **未发布到 ohpcd**（实测 `conan list setuptools/* -r=ohpcd` = 0 条），
+    按 PF4 不写成 tool_requires，改为构建期从平台 pip 镜像引导（pillow 先例）。
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build_config:
+  target: aarch64-unknown-linux-ohos
+  options: []
+  notes: |
+    上游为 src 布局（src/cffi 纯 Python 层、src/c/_cffi_backend.c C 扩展）。
+    build() 走 `setup.py build_ext --inplace`（与仓内 psutil/lxml/pillow 同款），
+    显式注入 CFLAGS（Python.h + ffi.h）与 LDFLAGS（-lpython3.12 -lffi
+    -fuse-ld=bfd），产物 `_cffi_backend*.so` 落 `<source_folder>/src/`
+    （distutils 的 --inplace 依 `package_dir={"": "src"}` 拷到 cwd 下的 src/）。
+
+    **必须签名**：OHOS 要求 dlopen 的 .so 带 .codesign 段，否则
+    `ImportError: ... Permission denied`（实测未签名时报此错）。build 期与
+    package 期各签一次（conan 的 copy() 会使既有签名失效）。
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+patches_applied: []
+
+# ============================================================
+# 兼容性
+# ============================================================
+
+compatibility:
+  level: high
+  issues:
+    - "testing/cffi1/test_verify1.py::test_verify_dlopen_flags：OHOS 加载器不做 RTLD_GLOBAL 全局符号传播（纯 ctypes 探针实测复现），平台能力限制，配方内探针判定后 deselect"
+  notes: |
+    C 扩展本体在 OHOS aarch64 上编译、签名、dlopen、回调、结构体、ABI 调用
+    全部正常（消费者测试 23/23）。唯一未通过项是**平台能力限制**，非库缺陷：
+
+    · RTLD_GLOBAL 传播：`ctypes.CDLL(liba, mode=RTLD_GLOBAL)` 载入的库，其导出
+      符号无法被之后载入的另一个库解析（实测 libb.so `probe_sym_a: symbol
+      not found`），与 musl 的 dlopen 作用域语义相关。配方用 `_rtld_global_propagates()`
+      **先探针实测**，仅在确认平台不支持时才 deselect 该用例——平台放开后自动恢复。
+
+    测试环境适配（非源码补丁）共 6 处，详见 notes.md 问题表。
+
+# ============================================================
+# 测试结果
+# ============================================================
+
+test_results:
+  type: manual
+  # total = passed + failed + skipped + xfailed + deselected（自洽口径）
+  total: 1853
+  passed: 1729
+  failed: 0
+  skipped: 119
+  xfailed: 4
+  deselected: 1
+  note: |
+    上游测试（R51，2026-09-20 实测）：**38 个 test_*.py 模块**
+    （testing/cffi0 16 + testing/cffi1 17 + testing/embedding 5），实测
+    **1729 passed, 119 skipped, 1 deselected, 4 xfailed**，**零失败**
+    （`conan create` 内 916s，与保留日志 .ci_logs/conan_build_cffi_2.1.1.log 一致；
+    另一次 896s 的同类运行结果计数完全相同）。
+    total 口径 = passed(1729) + failed(0) + skipped(119) + xfailed(4) + deselected(1) = 1853。
+    通过率口径 = passed/(passed+failed) = 1729/1729 = **100%**。
+      · 119 skipped：上游自身 skipif（含 win32/bsd 分支、缺可选依赖等）
+      · 1 deselected：test_verify_dlopen_flags，平台限制（RTLD_GLOBAL 不传播），
+        探针实测后按需 deselect
+      · 4 xfailed：上游自身标记的预期失败
+    上游测试已集成进 build()（upstream_test_in_build: true）。
+    适配后：test_package 消费者测试（R34 真实 API）**23/23 = 100%**。
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "OHOS 的 hnp CPython 里 subprocess 走 os.posix_spawn()（非 posix_spawnp），对裸名命令不做 PATH 搜索——即使造了 cc→clang 的 PATH shim 也无效；须按 pillow 10.4.0 先例在测试进程注入 sitecustomize 补丁 subprocess.Popen.__init__，用 shutil.which 解析裸名后再 exec。E405 已给出调用方改写类修法（绝对路径/shell=True/which），本条补的是**调用方不归你掌控**的场合（distutils 硬编码 ['cc']、第三方库内部 Popen），故用进程内补丁而非改调用方 (ref: E405)"
+  - "musl 不从主可执行文件导出 Python 符号，故『测试运行期现场编译』的 C 扩展（cffi verify/recompile 会编上百个）必须显式 -lpython3.12，否则 dlopen 报 PyImport_ImportModule: symbol not found；而宿主解释器的 sysconfig LDSHARED 不带该标志，需在测试环境补 LDFLAGS。本条**非新知**：E004 已载同一机制（musl BIND_NOW + 扩展 NEEDED 无 libpython → 改 LDSHARED 加 -lpython）；本包是其变体——修的不是 Python 自身的 LDSHARED（不可改），而是**测试进程内**为现场编译补 LDFLAGS（实测 134 项 ImportError → 0）(ref: E004)"
+  - "OHOS 加载器不做 RTLD_GLOBAL 全局符号传播：以 RTLD_GLOBAL 载入的库，其符号无法被之后载入的库解析（纯 ctypes 探针实测 libb.so symbol not found）；依赖该语义的用例属平台能力限制，应先探针实测再 deselect，不写死跳过。本条**非新知**：DRAFT-corrade-2020.06-ohos-cmake-plugin-shared-linking 已载明 musl 加载器的符号查找范围仅自身 DT_NEEDED 链、不含主程序已加载库的全局作用域（与 glibc 不同）；本包是该结论在『上游用例把它当默认行为来断言』场景下的落地（探针实测 + 按需 deselect）(ref: DRAFT-corrade-2020.06-ohos-cmake-plugin-shared-linking)"
+  - "setuptools 引导目录**不能放进测试 PYTHONPATH**：PYTHONPATH 条目不会执行其 .pth（distutils-precedence.pth），于是子进程只有 setuptools 顶层包而无 distutils shim，嵌套 venv 里的 distutils 构建仍报 No module named 'distutils'；正确做法是让子环境各自 pip 装 setuptools（实测该坑：zintegration 7 项 ERROR → 8 passed）。已沉淀为独立条目，全库此前无覆盖 (ref: DRAFT-ohos-pythonpath-entry-skips-pth)"
+  - "OHOS 无 /sbin/ldconfig 且无 gcc，ctypes.util.find_library('m'/'dl') 恒返回 None（E068），而 libm.so/libdl.so 实际可 dlopen；cffi 的 ffi.dlopen('m') 正是走 find_library，故测试环境需按 soname 回退探测（实测该回退让 24+2 项由失败转通过）"
+  - "用宿主解释器跑 Python 包的编译型测试时，必须把 conan python 依赖的 lib 从 LD_LIBRARY_PATH 剔除（否则宿主解释器身份被 conan 版 libpython 翻转：sys.platform 由 ohos 变 linux，sysconfig 去找按 conan 编译平台拼出的 _sysconfigdata__linux_* → sysconfig.get_config_var 抛 ModuleNotFoundError）；但 embedding 类用例又需要宿主 libpython 在 LD_LIBRARY_PATH 上（否则其生成的可执行文件 exit 127），故须先剔除 conan 版、再前置宿主 LIBDIR，二者分别处理。已沉淀为独立条目，全库此前无覆盖 (ref: DRAFT-ohos-conan-libpython-hijacks-host-interpreter)"
+
+references:
+  - https://github.com/python-cffi/cffi
+  - https://cffi.readthedocs.io/
+  - https://pypi.org/project/cffi/2.1.1/
