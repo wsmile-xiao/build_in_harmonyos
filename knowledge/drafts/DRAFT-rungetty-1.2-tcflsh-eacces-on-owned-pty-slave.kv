@@ -1,0 +1,67 @@
+# ═══ Draft knowledge entry — OHOS 上 ioctl(TCFLSH) 在自有且已持有控制终端的 pty 从端仍返回 EACCES；并给出"父会话 vs setsid 会话首进程"两分支判据 ═══
+# Timestamp: 2026-09-25
+# Software: rungetty 1.2（宿主证据；适用于一切依赖清缓冲的 getty / 终端会话类程序）
+# Gate: 真机探针（与配方同一 clang 工具链编译，A 机鸿蒙 PC 执行）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id: DRAFT-rungetty-1.2-tcflsh-eacces-on-owned-pty-slave
+title: 'OHOS 对 tty 行规程的 TCFLSH 命令做准入限制：在自有 pty 从端、即使已成功 TIOCSCTTY 成为控制终端，ioctl(TCFLSH,*) 与 tcflush() 仍稳定返回 EACCES(13)（Linux 返回 0），而同 fd 上 tcgetattr/tcsetattr/cfsetispeed 全部正常 ⇒ 登录前清缓冲静默失效；配套判据：测 TTY 类 ioctl 支持度必须先 fork+setsid 取会话首进程身份，否则父会话里的 EPERM（TIOCSCTTY 无资格）会被误判成平台不支持'
+trigger_tool: clang|make|conan|ioctl
+phase: building
+error_signature: 'errno=13.*TCFLSH|ioctl\(.*TCFLSH.*ret=-1.*errno=13|tcflush.*Permission denied'
+severity: 2
+category: ohos-capability|tty|terminal|runtime-probe
+root_cause: '平台对 tty 行规程命令做了选择性放行：本包实测 TIOCSCTTY 在会话首进程下 ret=0，而 TIOCCONS 与 TCFLSH 恒 ret=-1 errno=13(EACCES)，与是否持有控制终端、与主端/从端、与 O_NOCTTY 标志均无关 ⇒ 属能力面偏差而非配置项，libc 的 tcflush() 只是同一 ioctl 的包装，换 API 不改变结果。'
+affected_scope: |-
+  已验证：rungetty 1.2 的两处 ioctl(0, TCFLSH, *)（:305 传 0=TCIFLUSH、:594 传 2=TCIOFLUSH）；pty 从端路径。
+  同病人群：getty 族与终端会话管理类程序（mingetty/agetty 变体、串口会话与终端复用工具）中
+    「清缓冲」语义会静默失效 —— 上游若不查返回值，则既不退非零也不崩，常规消费者测试发现不了。
+  已排除（勿套用本条）：tcgetattr / tcsetattr / cfsetispeed 与 pty 建立全链路（实测均正常）；
+    vhangup 与 SIGSYS/seccomp 面属既有条目 E245（libc 未导出 vhangup 但内核 syscall 存在）、
+    E246（seccomp 拦截 Linux 私有 syscall 致 SIGSYS）、E051（SIGSYS 行为细节）覆盖面，
+    且已合入的 agetty/2.42.2 已按该路线做过 shim ⇒ 本条不重复申报。
+verification_cmd: |-
+  # 两分支判据（同一段 fd，只差会话身份）
+  posix_openpt(O_RDWR|O_NOCTTY) + grantpt + unlockpt + ptsname + open(slave)   # 本包全部 ret=0
+  # 分支A 父会话内
+  ioctl(fd, TIOCSCTTY, 1)      # ret=-1 errno=1  EPERM  ⇒ 无资格，不是平台不支持
+  ioctl(fd, TCFLSH, TCIOFLUSH) # ret=-1 errno=13 EACCES
+  # 分支B fork 后子进程 setsid()
+  setsid()                     # ret=新 sid
+  ioctl(fd, TIOCSCTTY, 1)      # ret=0  ⇒ 控制终端接管能力存在
+  ioctl(fd, TCFLSH, TCIOFLUSH) # ret=-1 errno=13 EACCES  ⇒ 本条结论：清缓冲被平台拒绝
+match_keywords: TCFLSH, tcflush, 清缓冲, EACCES, TIOCSCTTY, setsid, session leader, 控制终端, pty 从端, posix_openpt, getty, 终端会话, 能力探针, OHOS 能力面
+keywords: TCFLSH 被拒, tcflush EACCES, TIOCSCTTY 资格, setsid 会话首进程, 两分支判据, getty 清缓冲失效, 终端能力面探针
+prescan_pattern: 'ioctl\s*\(\s*[A-Za-z_0-9]+\s*,\s*TCFLSH|tcflush\s*\('
+prescan_globs: "**/*.c, **/*.cc, **/*.cpp"
+safety_boundary: |-
+  ①判 TTY 类 ioctl 支持度前必须先 fork+setsid 取会话首进程身份：父会话下的 EPERM 只能证明"无资格"，
+    不能写成"平台不支持"（本包第一轮就因此误报，已在宿主 notes 附录 C 留痕并推翻）。
+  ②不得因 TCFLSH 被拒就 stub 掉上游调用或改其语义：保留调用、如实记 errno，行为降级写进已知限制。
+  ③不得把 TCFLSH 成功当作包可用性的判据（消费者测试应断言实际语义，例如输出内容与退出码）。
+  ④errno 分类必须分开写：EACCES/EPERM（权限或准入）、ENOTTY（节点不支持该命令）、
+    ENOENT（节点不存在）、ENXIO（无设备）、SIGSYS（seccomp 击杀，属 E246/E051 面）—— 混写会导致处置方向错误。
+  ⑤与 E245 处方的矛盾（conflicts_with: E245）：冲突**仅在其处方**——E245 第 23-24/30-31 行主张「内核 syscall 仍在（__NR_vhangup=58），可通过 syscall(SYS_vhangup) 直调」并给出该 shim，且已被合入件 agetty/2.42.2 的 src/ohos-utmpx-shim.c:19-22 实现；本包真机读数证伪该处方：fork 子进程内 syscall(SYS_vhangup) 的子在 **SIGSYS(31) 被杀**（不是 ENOSYS、不是返回错误码）⇒ E245 的『直调』路径在 OHOS 上会把进程打死，必须弱符号可选化。E245 关于『libc 未封装而内核宏存在』的事实不冲突，仍予引用。
+similar_to: |-
+  E245（libc 未导出 vhangup，声明缺失+符号缺失，内核 syscall 存在）与 E246（seccomp 拦截私有 syscall ⇒ SIGSYS）：
+    同属"getty 族在 OHOS 的能力面"人群，但命令不同、失败层次不同（链接期 / 信号击杀 vs 本条运行期 errno），
+    本条不申报这两面。E051（SIGSYS 行为细节，signal 31，部分 syscall 不可捕获）同上。
+  E220（composite-ohos-toolchain-adaptation）为工具链组合条目，不涉及 tty 命令准入。
+conflicts_with: E245
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-rungetty-1.2-tcflsh-eacces-on-owned-pty-slave.md
+last_updated: 2026-09-25
+source_event: |-
+  rungetty 1.2 适配实证（2026-09-25 主理-42，A 机鸿蒙 PC，平台任务 10319，分支 feat/rungetty-1.2）。
+  探针：139 行 C 文件（sha256 b314a554239d8de32933ce96263755b49f7f18d21bb92b619812291306a0b3f9），
+  编译 /data/service/hnp/bin/clang -Wall -Wextra（rc=0，与配方同工具链）；设备 uname 见宿主 notes 附录 A。
+  原始读数全文随宿主包入库：archives/r/rungetty/1.2/notes.md 附录 A（读数）/ B（探针源码）/ C（方法学自我更正）。
+  方法学自纠：第一版把 sys/syscall.h 的包含写在 ifdef SYS_vhangup 内，误报宏不存在，且紧接的按号裸调
+  当场杀进程；修正后确认 SYS_vhangup 宏存在（nr=58），附录 A 为修正版读数。
+authors: 主理-42（rungetty 1.2 实证）
+source_pr: 待建（分支 feat/rungetty-1.2）；关联 Issue #3409
+source_commit: c61c6825db
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-25
