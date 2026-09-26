@@ -1,0 +1,4 @@
+cmake_minimum_required(VERSION 3.15)
+project(kicad_packages3d_test LANGUAGES CXX)
+add_executable(kicad_packages3d_probe kicad_packages3d_probe.cpp)
+target_compile_features(kicad_packages3d_probe PRIVATE cxx_std_11)
