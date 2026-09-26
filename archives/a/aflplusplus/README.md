@@ -4,7 +4,7 @@ AFL++ (American Fuzzy Lop Plus Plus) is a fast instrumented fuzzer with
 many enhancements over the original AFL: better instrumentation, faster
 mutations, additional sanitizers, custom mutator API, and more.
 
-- **Versions**: 4.33c, 4.34c-r0
+- **Versions**: 4.33c, 4.33c.1, 4.34c-r0
 - **Homepage**: https://github.com/AFLplusplus/AFLplusplus
 - **License**: Apache-2.0
 - **Build System**: Makefile (GNUmakefile)

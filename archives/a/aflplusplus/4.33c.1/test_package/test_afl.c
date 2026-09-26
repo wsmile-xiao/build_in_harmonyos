@@ -1,8 +1,10 @@
 /*
- * test_afl.c — AFLplusplus test_package integration test.
+ * test_afl.c — AFLplusplus test_package header-ABI test.
  *
- * Verifies that the AFL++ headers are installed and usable,
- * and that the key type/macro definitions are accessible.
+ * Verifies that the packaged AFL++ headers (include/afl) are installed and
+ * usable from consumer code, and that the key type/macro definitions that
+ * define AFL++'s ABI contract are accessible and correct. The companion
+ * test_target.c + test() exercise the packaged binaries themselves.
  */
 #include <stdio.h>
 #include <string.h>
@@ -22,7 +24,15 @@ int main(void) {
         printf("PASS: VERSION = %s\n", VERSION);
     }
 
-    /* 2. Core types (u8/u32/u64) have expected sizes. */
+    /* 2. VERSION carries the upstream source revision (v4.33c). */
+    if (VERSION == NULL || strstr(VERSION, "4.33c") == NULL) {
+        fprintf(stderr, "FAIL: VERSION does not contain 4.33c\n");
+        failures++;
+    } else {
+        printf("PASS: VERSION contains 4.33c\n");
+    }
+
+    /* 3. Core types (u8/u32/u64) have expected sizes. */
     if (sizeof(u8) != 1) {
         fprintf(stderr, "FAIL: sizeof(u8) = %zu, expected 1\n", sizeof(u8));
         failures++;
@@ -41,7 +51,7 @@ int main(void) {
     } else {
         printf("PASS: sizeof(u64) == 8\n");
     }
-    /* 3. MAP_SIZE is defined and reasonable (1 << 16 = 65536). */
+    /* 4. MAP_SIZE is defined and reasonable (1 << 16 = 65536). */
     if (MAP_SIZE != (1U << 16)) {
         fprintf(stderr, "FAIL: MAP_SIZE = %u, expected %u\n",
                 (unsigned)MAP_SIZE, 1U << 16);
