@@ -1,0 +1,75 @@
+--- a/security.c
++++ b/security.c
+@@ -7,6 +7,7 @@
+ 
+ #include "paxinc.h"
+ #include "seccomp-bpf.h"
++#include <setjmp.h>
+ 
+ #ifdef __linux__
+ 
+@@ -50,12 +51,54 @@
+ # undef WANT_SECCOMP
+ #endif
+ 
++/*
++ * unshare(2) does not always fail as an ordinary syscall: when an installed
++ * seccomp filter traps the call (SECCOMP_RET_TRAP) the kernel delivers SIGSYS
++ * to the caller instead of returning -1 with an errno, and the default
++ * disposition of that signal kills the process.  Neither the return value nor
++ * errno can report such an outcome, so guard the call: take SIGSYS for its
++ * duration only and translate a trap into EPERM, which is the one failure
++ * ns_unshare() below already degrades into "no namespaces available".  Where
++ * unshare() is permitted, or fails with an errno of its own, behaviour is
++ * unchanged.
++ */
++static sigjmp_buf ns_unshare_env;
++
++static void ns_unshare_sigsys(int sig)
++{
++	(void)sig;
++	siglongjmp(ns_unshare_env, 1);
++}
++
++static int ns_unshare_guarded(int flags)
++{
++	struct sigaction trap, old;
++	int ret;
++
++	memset(&trap, 0, sizeof(trap));
++	trap.sa_handler = ns_unshare_sigsys;
++	sigemptyset(&trap.sa_mask);
++	if (sigaction(SIGSYS, &trap, &old) != 0)
++		return unshare(flags);
++
++	if (sigsetjmp(ns_unshare_env, 1) == 0) {
++		ret = unshare(flags);
++		sigaction(SIGSYS, &old, NULL);
++		return ret;
++	}
++
++	/* Trapped before the syscall could take effect. */
++	sigaction(SIGSYS, &old, NULL);
++	errno = EPERM;
++	return -1;
++}
++
+ static int ns_unshare(int flags)
+ {
+ 	int flag, ret = 0;
+ 
+ 	/* Try to oneshot it.  Maybe we'll get lucky! */
+-	if (unshare(flags) == 0)
++	if (ns_unshare_guarded(flags) == 0)
+ 		return flags;
+ 	/* No access at all, so don't waste time below. */
+ 	else if (errno == EPERM)
+@@ -71,7 +114,7 @@
+ 	flag = 1;
+ 	while (flags) {
+ 		if (flags & flag) {
+-			if (unshare(flag) == 0)
++			if (ns_unshare_guarded(flag) == 0)
+ 				ret |= flag;
+ 			flags &= ~flag;
+ 		}
