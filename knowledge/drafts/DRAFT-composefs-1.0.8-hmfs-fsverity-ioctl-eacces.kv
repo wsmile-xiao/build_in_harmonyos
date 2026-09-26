@@ -1,0 +1,42 @@
+#====================================================================
+# DRAFT-composefs-1.0.8-hmfs-fsverity-ioctl-eacces — HMFS 对 FS_IOC_MEASURE_VERITY 返回 EACCES
+#====================================================================
+
+id:                     DRAFT-composefs-1.0.8-hmfs-fsverity-ioctl-eacces
+trigger_tool:           composefs|mkcomposefs|lcfs-writer|fsverity|ioctl|build|test
+phase:                  runtime|build|testing
+error_signature:        error accessing .*: Invalid argument|FS_IOC_MEASURE_VERITY|measure_fsverity|EACCES|Permission denied.*verity|lcfs_fd_get_fsverity|ENOVERITY
+
+severity:               2
+category:               hmfs, fs-verity, ioctl, platform, aarch64, ohos, filesystem
+match_keywords:         fsverity, FS_IOC_MEASURE_VERITY, EACCES, ENODATA, ENOTTY, EOPNOTSUPP, ENOVERITY, HMFS, in-memory digest, composefs, lcfs
+title:                  HarmonyOS HMFS 对 FS_IOC_MEASURE_VERITY ioctl 返回 EACCES（Linux 为 ENODATA/ENOTTY/EOPNOTSUPP），composefs 类库把该 errno 当"意外错误"中止构建——需把 EACCES/EINVAL 归一化为 ENOVERITY 回退进程内摘要计算
+
+root_cause:             HMFS 内核文件系统对 FS_IOC_MEASURE_VERITY 返回 EACCES（探针实测 errno=13），而 Linux ext4/overlayfs 对未启用 fs-verity 的文件返回 ENODATA、对不支持该 ioctl 的文件系统返回 ENOTTY/EOPNOTSUPP。composefs lcfs_fd_measure_fsverity 仅把 ENODATA/EOPNOTSUPP/ENOTTY 归一化为 ENOVERITY，EACCES 落入"意外错误"分支（lcfs_fd_get_fsverity 不回退），导致 mkcomposefs/lcfs_build 对整个目录树扫描失败并报 "error accessing <path>: Invalid argument"。
+
+affected_scope:         任何在 OHOS 设备用户数据分区（HMFS）上构建或运行并探测 fs-verity 状态的工具链；composefs mkcomposefs/lcfs_build/lcfs_fd_get_fsverity 路径；类似用 FS_IOC_MEASURE_VERITY 做能力探测的库。
+verification_cmd:       ioctl 探针（clang 编译, 打开普通文件后 ioctl(FS_IOC_MEASURE_VERITY) 打印 errno=13 EACCES）；补丁后 lcfs_fd_measure_fsverity 返回 -ENOVERITY(=-25)，lcfs_fd_get_fsverity 返回 0 且摘要确定（同内容同摘要、异内容异摘要）；mkcomposefs 目录扫描通过（check-units test_objects OK）
+
+rec_priority:           1
+rec_approach:           ioctl-errno-canonicalization
+rec_description:        把 FS_IOC_MEASURE_VERITY 返回的 EACCES（以及 EINVAL，HMFS 用 EINVAL 表达同类语义的变体）与 ENODATA/EOPNOTSUPP/ENOTTY 一并归一化为 ENOVERITY，让调用方进入"内核无 fs-verity"分支，回退到进程内 fs-verity 摘要计算（composefs 已内置该回退，见 lcfs_fd_get_fsverity）。归一化位置应集中在 measure 函数内，使 get/measure 两条调用链同时受益。
+rec_command:            sed -i "s/errno == ENODATA || errno == EOPNOTSUPP || errno == ENOTTY/errno == ENODATA || errno == EOPNOTSUPP || errno == ENOTTY || errno == EACCES/" libcomposefs/lcfs-writer.c；make && ./tests/test-lcfs
+rec_auto_fix:           true
+rec_impl:               source-patch-with-validation
+
+fallback_priority:      2
+fallback_approach:      run-on-posix-fs
+fallback_description:   若目标工具不允许改 errno 语义，可在具备完整 POSIX ioctl 语义的挂载点（ext4/tmpfs）上运行受影响入口；执行端无可迁移挂载点时按平台限制如实记录并保留恢复条件。
+fallback_command:       在 ext4/tmpfs 挂载点重建测试工作目录后重跑受影响入口
+fallback_auto_fix:      false
+fallback_impl:          document-with-recovery-condition
+
+forbid_1_pattern:       伪造通过|把 EACCES 当作目标文件权限问题去 chmod 文件|删除 fs-verity 探测路径
+forbid_1_reason:        EACCES 是 HMFS 对"不支持该 ioctl"的 ABI 表达，不是文件权限问题；chmod 无法消除；删除探测路径掩盖真实能力探测。
+forbid_1_consequence:   审计失真一票否决；质量返工。
+
+principles:             P020
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-tar-1.35-hmdfs-dir-xattr-einval
+conflicts_with:         []
