@@ -1,0 +1,60 @@
+"""Pinned SHA-256 hashes of the pari-seadata-big 20170418 data files.
+
+Generated from the verified upstream archive
+seadata-big.tar (7c4db2624808a5bbd2ba00f8b644a439f0508532efd680a247610fdd5822a5f2)
+downloaded from
+https://pari.math.u-bordeaux.fr/pub/pari/packages/seadata-big.tar
+
+The archive ships 44 gzip-compressed Atkin modular polynomials
+(sea503.gz .. sea797.gz, one per prime level 500 < p < 800) plus README.big.
+The pinned digests are of the compressed files exactly as distributed by
+upstream, so the test_package turns into a payload-identity check: a
+truncated, recompressed or substituted dataset fails loudly.
+"""
+
+PAYLOAD_SHA256 = {
+    "sea503.gz": "d6917303015a9ea71b342c6d40b81d7e778fd411a904625b2362228405616bb8",
+    "sea509.gz": "c0f09b400e3442be06fcbe9f162660448498e43a08b69b656c68e4352a3f445a",
+    "sea521.gz": "c1673ab3a4cdab16688eba800c3201db7162004c2cd91a7c30e63049f63701ae",
+    "sea523.gz": "18b5f6d252613ab628785f4640669dfc86cbb9b08107c6121163c2ec4df503d7",
+    "sea541.gz": "07a5f8167b578407f2d0b0600071f1e5423b5a305a63739b6256cc68a31a37ae",
+    "sea547.gz": "f3a74e323fddc4b8d3f1e3d641852017bb89ac3cfbe883077e4e29d1797112b9",
+    "sea557.gz": "e9dfa25f372e44a74eca939815762deaf1a44aa46c79f76d6079f954d536449d",
+    "sea563.gz": "afc37ba464493f4b6422ccd1955e209fc5d9a69094ee15f1cd6984f6ae5937d9",
+    "sea569.gz": "788fc3db5cb40c7c97d7086f5b605cb84477aa85115c01120d11604214255d5f",
+    "sea571.gz": "f9fa5c2f8d16ec6608060197edb10be0277bca3961aabab5bdf3b970967203de",
+    "sea577.gz": "9041873f61901164196fb265c9f48e6b416faa34d017a3bcdeff53398e328dfe",
+    "sea587.gz": "7f0a772ca04fd56e30dfab732f9180ea360faafa03fc6ef737401d838dbe1b5f",
+    "sea593.gz": "f2161e543a410afdea8ec190dcc3f924ba12534a31ce25fc3fd32b3d99ce50e0",
+    "sea599.gz": "a9056cbb7e2819d1ef9a19c907033f700b46f0e1164a2cc122e112a5f1c620bb",
+    "sea601.gz": "3a07ce36b5a337368eaba296c8c1b0530a3f5d0a11e98894fc0efbd8ed524ff5",
+    "sea607.gz": "f5fc96ee449fcb9db71fb532f15fdf6d6dbc4972f0c560c3658d6c771448a46b",
+    "sea613.gz": "cfc5193be755f24afa3e696dcb8b9d13094433a9e5066204d147f2dcac4d3122",
+    "sea617.gz": "0ca3d3f5e5f4ec961ffe0df8128bd184fee00ede4b52eaa2125be36b90b130f6",
+    "sea619.gz": "554e0243c5155641029636702dbda2f39252f97b2fcd7daef17ad5a797674700",
+    "sea631.gz": "534cd038dac8ecf43575639df6d88e465a05fa2b58d58a0efbc85cd8a1905065",
+    "sea641.gz": "82a11c76259744d526d809851abff8ede457318d9dadb537245c5d35909a049d",
+    "sea643.gz": "ef639ccdce0ad782160846826b6840cb1951619c96fe3da52b2ee63f7be5788a",
+    "sea647.gz": "43c91d340847ffd3c95b788b9f81932b36f74e8ad1c56e8543ea26fbc9f9bc13",
+    "sea653.gz": "52eae11b279711f666b34b498057c64d838a7ed8823f4458dbf9948499166412",
+    "sea659.gz": "2ef247f5f9e279d8742a150e20471b29b78475bc445b77f20b56e911d8215fd0",
+    "sea661.gz": "ebefe694a5eddd438ca4c4d2a81d470ee9b8698f606f0339ff918169e217f880",
+    "sea673.gz": "d579119719a9fd8e620324d206aa2544595799583f0535c5842704c3ee9a3f47",
+    "sea677.gz": "0494c6d78b75bda29d6f05f9cbeb9be416e63210d155b80d116b2ae4e17336ab",
+    "sea683.gz": "7ab61f1e085ce9106a0862444d70852642cab6500adf2abb45cc2f5ff15ad296",
+    "sea691.gz": "d25fd8b6d1ff46142f025f2834c16d75a843b9e611d93b83d59d90101ae09b6d",
+    "sea701.gz": "6a387146443c89471eae4373bd188c44c932ab0e07f7a11487c9f11e0bdc6d63",
+    "sea709.gz": "4f44cb7e15ff9162f979c80dc2636d065993252ff40463fe31eb311964d88285",
+    "sea719.gz": "3b35884d24ff4c072cc36fcf84986b3736fc3ec91deb2df6db173ebc95bf4a8e",
+    "sea727.gz": "e3d0642911f6fbd919e21ea7379f381aa3e39b2885ccf9d1bb860ee99d653a91",
+    "sea733.gz": "b7575a08dc6f1169e54e573fe90d6dbbc770d9be50aaefa8510b3d5e3fc43c8d",
+    "sea739.gz": "beb718cba0910f8f21086a051abe0ed003cd8e2c2cf6179b87b84c6c9304e90e",
+    "sea743.gz": "39fa382bbf7c3990ab2384b93fa3fb3af534921b4f863a939d1629efa190bbdd",
+    "sea751.gz": "d0d6565fbb680a83600f4620f83e5f11404d16b305cd3f63745e14965216543d",
+    "sea757.gz": "b8a813b6477d4a9df5fec5b610f12dc44963438ecca695500a728dc7bee1d4fa",
+    "sea761.gz": "bac88c8a4792387af33f8b7309e4eb948a994e59b055af31b9511942833dbe54",
+    "sea769.gz": "07ff7ffc56ecc247fd2e487fbd9fcc502839a3f121be53b9d55e5e05fa3a8fc2",
+    "sea773.gz": "2c466a67d9baccd71a52bfc9b6990dd0f5c523ec685ed25958872d485fbfb1fd",
+    "sea787.gz": "de2c35e5c4ff980a3b8069808b44d645fdced35d90c6189256f540c490666bc4",
+    "sea797.gz": "928492818b1817dfd2209e8682918732a777ba0770df4d108d2bc6c82d4f7064",
+}
