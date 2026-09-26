@@ -1,0 +1,58 @@
+# ═══ Draft knowledge entry — 框架 L1e 重跑 conan test 只传 -pr、不传 -pr:b：
+#     build profile 回落 CONAN_HOME 的 profiles/default（os=Linux）⇒ 配方 test() 里的
+#     can_run()/cross_building 早退护栏必然命中 ⇒ 测试体被静默 return 0，
+#     L1e 反而把真测试判成假测试（而真·假测试能过 L1e）
+# Software: probalign 1.4（HarmonyOS PC aarch64 / B 机实证）
+# Gate: 带护栏 round2 → L1e [fail] fake test；删护栏 round3 → L1e [ok] + 消费者 29/29
+# Status: DRAFT
+# 注：本文件把 root_cause / affected_scope / rec_description / fallback_description 写成单行，
+#     是因为 scripts/ohc/draft_review.py 的 _parse_simple_fields 会丢掉所有缩进行，
+#     块标量（key: |）里的正文对查重打分不可见。
+
+id: DRAFT-probalign-1.4-l1e-conan-test-missing-build-profile
+title: 框架 L1e 重跑 conan test 只传 -pr（host profile）不传 -pr:b ⇒ build profile 回落 CONAN_HOME 的 default(os=Linux) ⇒ test() 里的 can_run()/cross_building 早退护栏必然命中 ⇒ 测试体被静默跳过，L1e 把真测试判成假测试
+trigger_tool: conan|buildbot
+phase: testing
+severity: 2
+category: conan, testing, ci-harness, cross-build
+error_signature: fake test detected \(R34\)|test does not depend on .* must call its API|consumer test skipped: target cannot run|negative test: test does not depend on package
+match_keywords: L1e, R34, conan test, -pr, -pr:b, Profile build, build profile 回落, can_run, cross_building, default profile, os=Linux, fake test detected, 静默跳过, 破坏性反向验证
+root_cause: ci/conan/build_and_test.sh 内两处 conan 调用的 profile 参数不对称（行号为本窗 grep -n 实测）。第 316/318 行的 conan create 同时传 -pr:h 与 -pr:b 且指向同一份 OHOS profile，host 与 build 一致故不构成交叉，can_run() 为真，test() 实跑；第 1646-1647 行 L1e 的破坏性反向验证重跑 conan test 只传 -pr "$PROFILE_FILE" 而无 -pr:b，build profile 因此回落到 CONAN_HOME 的 profiles/default（实测该文件为 os=Linux），host=OHOS 配 build=Linux 被判为交叉构建，cross_building(self) 为真而 can_run(self) 为假。凡在 test() 里放「跑不了就 return」这类早退护栏的配方，都会在 conan create 阶段实跑、却在 L1e 阶段静默 return 0；而 L1e 的判据恰好是退出码（第 1650 行的 [fail] 分支），并且该调用用 >/dev/null 2>&1 丢弃全部输出（第 1647 行），护栏自己打印的 skipped 提示连日志都进不去。后果是验证通道本身失真且失真方向与 R34 的意图相反：真测试（确实依赖被测包）被 L1e 判成假测试而 FAIL，真·假测试（压根不依赖被测包）因同样返回 0 而落到第 1656 行的 [ok] 分支被放行。这不是配方写错、也不是 conan 行为异常，而是 harness 两处调用参数不一致所致。
+affected_scope: 只影响 test() 内含交叉性/可运行性早退护栏（if not can_run(self): return、if cross_building(self): return，以及"打印 skipped 提示后 return"的变体）的配方在 L1e 这一步的判决，且需 CONAN_HOME 的 profiles/default 的 os 与 host profile 不同才触发。纯库包中测试体本就不执行产物的情形走 L2_RESULT=skip: no bin/ 一类路径，不受影响；不写这类护栏的 CLI 包不受影响（本包删护栏后连 L1e 的命令形状也实跑 29/29）。
+verification_cmd: |
+  # 两条命令只差一个 -pr:b；同一 recipe、同一 test_package、同一 HEAD c8e7bed
+  conan test archives/p/probalign/1.4/test_package "probalign/1.4@ohpcd/stable" \
+      -pr ci/conan/profiles/ohos-aarch64 --build=missing
+  # → 输出第 22 行 "Profile build:"、第 30 行 os=Linux（即回落 default）
+  conan test archives/p/probalign/1.4/test_package "probalign/1.4@ohpcd/stable" \
+      -pr ci/conan/profiles/ohos-aarch64 -pr:b ci/conan/profiles/ohos-aarch64 --build=missing
+  # → 第 22 行 "Profile build:"、第 30 行 os=OHOS、第 100 行 PASS（29/29 assertions）
+  # 通用自检判据：看 conan test 输出头部 "Profile build:" 段里的 os= 是否为 OHOS。
+rec_priority: 1
+rec_approach: harness-pass-pr-b-to-l1e-conan-test
+rec_description: 把第 1646-1647 行的 L1e 调用与同一脚本第 316/318 行的 conan create 对齐，补上 -pr:b "$PROFILE_FILE"。属框架文件改动，必须单开一个 PR，不得夹进任何包的配方 PR。补 -pr:b 只是把护栏的判定前提恢复正常，不改变 L1e 的判据本身；建议同批把该调用的 >/dev/null 2>&1 改为留档，否则"测试被跳过"与"测试真的不依赖被测包"在日志里无法区分。
+rec_command: conan test "$TEST_PKG_DIR" "${pkg_name}/${pkg_ver}" -pr "$PROFILE_FILE" -pr:b "$PROFILE_FILE" --build=missing
+rec_auto_fix: false
+rec_impl: manual
+fallback_priority: 2
+fallback_approach: recipe-side-drop-cross-run-early-return-and-prove-by-sabotage
+fallback_description: 单个包的 PR 内可自保的做法（probalign 1.4 本包采用，提交 a281710157）。一是 test() 不放 can_run()/cross_building 早退护栏——package_type="application" 的 CLI 包唯一可消费产物就是 bin/，"跑不了"对它是失败而不是跳过。二是不得把"L1e 变绿"当作"测试真跑过"的证据，本地按 L1e 的口径自己做一次破坏性复现（搬走包缓存里的 bin/ 再跑 conan test），必须看到 FAIL 与非零退出码。三是反向也要测，产物齐备时同一命令必须 PASS，否则第二步的 FAIL 没有意义。
+fallback_command: |
+  mv <pkg_cache>/bin <backup>/bin
+  conan test archives/p/probalign/1.4/test_package "probalign/1.4@ohpcd/stable" \
+      -pr ci/conan/profiles/ohos-aarch64 --build=missing   # 期望非零退出 + FAIL
+  mv <backup>/bin <pkg_cache>/bin
+fallback_auto_fix: false
+fallback_impl: manual
+principles: R34
+causes: []
+caused_by: []
+similar_to: E374|DRAFT-conan-delivery-chain-silent-traps
+conflicts_with: []
+prerequisite_of: []
+doc_file: knowledge/drafts/DRAFT-probalign-1.4-l1e-conan-test-missing-build-profile.md
+last_updated: 2026-09-25
+source_event: probalign 1.4 适配（round2 W3 本地 CI 模拟里 L1e 判 fake test；两条命令只差 -pr:b）
+authors: 主理-33
+source_pr:
+draft: true
