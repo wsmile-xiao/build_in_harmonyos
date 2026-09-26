@@ -1,0 +1,106 @@
+#====================================================================
+# DRAFT-bc-ur-0.3.0-autotools-recipe-relocate-build-qualified-mount —
+# autotools 配方级自动修复：构建目录所在文件系统不保留 POSIX 0700/exec
+# 语义（HMDFS）时，build() 探测合格挂载点并迁移 autotools 构建
+# 关联库: bc-ur 0.3.0（R03，OHOS aarch64 远端 CI 复验驱动）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 触发: conan create build() 的 autotools.configure() 阶段，config.status 以
+# `(umask 077 && mktemp -d ./confXXXXXX)` 创建 0700 临时目录并在其中写入
+# subs1.awk 时 EACCES（Permission denied）→ could not setup config files
+# machinery → ConanException Error 1。CI 构建工作区固定位于 HMDFS 用户存储
+# （不保留/不允许 POSIX 权限位），同一首错在 R01/R02/R03 三次复现。
+id:                     DRAFT-bc-ur-0.3.0-autotools-recipe-relocate-build-qualified-mount
+trigger_tool:           conan|autotools|make|config.status
+phase:                  build|configure
+error_signature:        config\.status.*subs1\.awk.*Permission denied|
+                         could not setup config files machinery|
+                         config\.status.*line [0-9]+.*Permission denied
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, autotools, conan, hmdfs, permissions,
+                         recipe-pattern, relocation
+match_keywords:         config.status, subs1.awk, confXXXXXX, umask 077,
+                         mktemp, Permission denied, EACCES, HMDFS, 0700,
+                         folders.build, mount probe, tmpfs, relocate build,
+                         conanfile, build(), package(), config files machinery
+title:                  autotools 配方内自动修复：构建目录文件系统不保留 POSIX
+                         0700/exec 语义（HMDFS）时探测合格挂载点并迁移构建
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             autoconf 生成的 config.status 以 `(umask 077 && mktemp -d
+                         ./confXXXXXX)` 创建 0700 临时目录（ac_tmp），随后在其中
+                         写/读 subs1.awk（L604-694）。OHOS HMDFS 不保留 POSIX
+                         权限位：mkdir 0700 被归一化为 2771、脚本 700→760（本机
+                         取证），严格设备上对 0700 目录内写入直接 EACCES（远端
+                         CI 三次同首错，构建工作区固定 /storage/Users 下 HMDFS
+                         用户存储）。tmpfs/ext4 严格保留 0700/exec 语义 → 在
+                         合格挂载点上构建即可规避。既有知识（E060 tmpfs /
+                         E125 relocate-build-dir / E011 umask / E112 bypass-
+                         mktemp / DRAFT-6507 mkdir -m 0777）均为 runner 手动或
+                         configure 补丁手段，未提供随库自包含的配方级自动方案。
+affected_scope:         所有在 HMDFS（或任意不保留 POSIX 权限位的文件系统）上以
+                         Conan/autotools 构建的库；配方级模式可整体复制。
+verification_cmd:       conan create（CONAN_HOME 指向 HMDFS 构建工作区）→
+                         build() 探测 mkdtemp 0700 语义失败 → 迁移到合格挂载点
+                         （mkdir 0700 + stat drwx------ 700 + ./x.sh exec 探测）→
+                         configure/config.status 成功生成全部 Makefile（无
+                         Permission denied）；conan-verify G1-G4/L2/L4/L5 全过。
+
+rec_priority:           1
+rec_approach:           recipe-relocate-build-to-qualified-mount
+rec_description:        conanfile.py build() 前探测构建目录所在文件系统是否保留
+                         POSIX 0700/exec 语义：在 build_folder 内以 os.mkdir(0700)
+                         探测，stat 实测模式 != 0700（HMDFS 归一化 2771）或写/
+                         exec 探测异常即判定需迁移；随后在候选合格挂载点
+                         （/data/storage/el2/base、/data/local/tmp 等 tmpfs）
+                         以 mkdir 0700 + stat drwx------ 700 + ./x.sh exec 探测
+                         选出合格目录，复制源码（in-source，兼容手写 Makefile
+                         install 裸名头文件约束）并执行与 Autotools helper 完全
+                         一致的 configure_args（读 conanbuild.conf）configure /
+                         make -j1 / make install DESTDIR=package_folder；package()
+                         仅清理专用构建根（.bc-ur-build-<pid>，守卫 basename，
+                         绝不触碰挂载根本身）；无合格挂载点回退 in-place（文档
+                         记录恢复条件）。
+rec_command:            def build(self):\n    if self._build_folder_needs_relocation():\n        work = self._relocated_work_dir()\n        if work:\n            self.run('cd "{work}" && ./configure {args}', env="conanbuild")\n            self.run('cd "{work}" && make -j1', env="conanbuild")\n            self._relocated_work = work\n            return\n    autotools = Autotools(self); autotools.configure(); autotools.make(args=["-j1"])
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe
+
+fallback_priority:      2
+fallback_approach:      runner-relocate-build-dir
+fallback_description:   无法改配方或设备无合格挂载点时，按 E060/E125 由 runner/CI
+                         将 CONAN_HOME/构建工作区指向保留 POSIX 权限的文件系统（
+                         ext4/tmpfs）；恢复条件=框架调整 CI 构建工作区位置。
+fallback_command:       export CONAN_HOME=/path/to/tmpfs; export TMPDIR=/path/to/tmpfs
+fallback_auto_fix:      false
+fallback_impl:          manual-runner
+
+forbid_1_pattern:       modify.*framework.*build_and_test|patch.*shell\.*zi\.*drop|伪装成本库修复
+forbid_1_reason:        框架 CI 脚本（ci/conan/build_and_test.sh 等）与 harness 属框架
+                         范围，不得随本库 PR 修改；本地 W3 harness 的 zsh heredoc
+                         临时文件问题（TMPPREFIX 默认 /tmp/zsh 落在只读 /tmp）属
+                         本机运行环境观察（需 export TMPPREFIX=/writable/dir），
+                         不属库交付知识，不建草稿。
+forbid_1_consequence:   框架文件混入本库 PR 触发 W2/JC6 拦截；伪装修复触发质量返工。
+
+# ═══ Layer 3: 治理层 (Governance) ═══
+principles:             []
+causes:                 []
+caused_by:              []
+similar_to:             E060, E125, E011, E052, E110, E112, E114, E118, DRAFT-6507-cln-mktemp-0700-hmdfs
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ Layer 4: 证据层 (Evidence) ═══
+doc_file:               knowledge/drafts/DRAFT-bc-ur-0.3.0-autotools-recipe-relocate-build-qualified-mount.md
+last_updated:           2026-09-25
+source_event:           bc-ur 0.3.0 R01/R02/R03 远端 CI 同首错（config.status subs1.awk EACCES）
+source_pr:              (待 PR 编号)
+source_commit:          (待 push 后填充)
+metrics_success_count:  1
+metrics_fail_count:     3
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-25
+authors:                pc2-34 <noreply@atomgit.com>
