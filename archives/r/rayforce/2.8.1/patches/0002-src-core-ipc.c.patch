@@ -1,0 +1,55 @@
+--- a/src/core/ipc.c
++++ b/src/core/ipc.c
+@@ -1785,20 +1785,52 @@
+ {
+     if (!frame) return RAY_ERR_TYPE;
+     ray_poll_t* poll;
+     ray_selector_t* sel = conn_resolve(&poll, handle);
+     if (!sel) return RAY_ERR_IO;
+ 
+     /* The queue node holds its own reference; the caller keeps its own. */
+     ray_poll_buf_t* node = ray_poll_buf_from_frame(frame);
+     if (!node) return RAY_ERR_OOM;
+ 
++    /* Admission gate (#486): a subscriber whose queue would exceed the
++     * process default is dropped and closed AT ADMISSION, and a subscriber
++     * with a per-connection override large enough to hold the frame keeps
++     * receiving.  The check must run BEFORE the direct-send attempt: the
++     * send path only consults conn_tx_append when the frame would block
++     * (rc>0), so a frame the socket accepts immediately would otherwise
++     * bypass the limit entirely. */
++    {
++        int64_t add = node->size - node->offset;
++        int64_t limit_bytes = 0, limit_frames = 0;
++        int64_t nf = 0;
++        int64_t pending = 0;
++        conn_tx_limits(sel, &limit_bytes, &limit_frames);
++        pending = conn_tx_pending(sel, &nf);
++        if (add < 0 || pending > limit_bytes - add) {
++            ray_poll_buf_free(node);
++            return RAY_ERR_IO;
++        }
++        if (limit_frames > 0 && nf + 1 > limit_frames) {
++            ray_poll_buf_free(node);
++            return RAY_ERR_IO;
++        }
++        /* High-water mark: an admitted frame counts toward the transmit
++         * backlog even when the direct send drains it immediately — the
++         * override's purpose is to let a frame larger than the process
++         * default through, and the hwm must reflect that admission.
++         * conn_tx_append does the same for the queued path. */
++        int64_t now = pending + add;
++        if (now > sel->tx.hwm_bytes) sel->tx.hwm_bytes = now;
++        if (poll && now > poll->tx_hwm_bytes) poll->tx_hwm_bytes = now;
++    }
++
+     int rc = 0;
+     if (sel->tx.buf) {
+         rc = 1;                         /* keep ordering behind queued bytes */
+     } else {
+         rc = conn_try_send_frame(sel, node);
+     }
+ 
+     if (rc == 0) {
+         ray_poll_buf_free(node);
+     } else if (rc > 0) {
