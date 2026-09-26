@@ -1,0 +1,96 @@
+#====================================================================
+# DRAFT-inn-ndebug-invalid-void-cast-macro.kv
+# 上游 `#define X() (void(0))` 是无效 C; 只在 Release(-DNDEBUG) 分支触发
+#====================================================================
+
+id:                     DRAFT-inn-ndebug-invalid-void-cast-macro
+trigger_tool:           clang|gcc|make
+phase:                  compilation
+error_signature:        expected '\)'.*expand|\Q(void(0))\E|
+                         error: expected '\)'|
+                         expected expression
+
+severity:               2
+category:               compilation, conan, clang, ndebug, upstream-latent-bug
+match_keywords:         void(0), ((void)0), NDEBUG, expected ')',
+                         expected expression, macro expansion, -DNDEBUG,
+                         Release, latent bug, assert
+
+title:                  上游宏体 `(void(0))` 是非法 C（正确写法 `((void)0)`），只在 Release(-DNDEBUG) 分支展开时才暴露
+
+root_cause:             上游 innfeed/article.c 写的是
+                         `#if defined(NDEBUG) \n # define VALIDATE_HASH_TABLE() (void(0))`
+                         —— `(void(0))` 把 `void(0)` 当作表达式，而 `void` 是类型名，
+                         不是可调用对象，故展开到调用点 `VALIDATE_HASH_TABLE();`
+                         变成 `(void(0));`，clang 报
+                         "expected ')'" + "expected expression"。
+                         正确写法是 `((void)0)`（把一个值为 0 的表达式转成 void 类型）。
+                         该宏只在 `#if defined(NDEBUG)`（即 Release/CMake Release、
+                         conan 的 build_type=Release 会加 -DNDEBUG）分支命中，
+                         Debug 走 `hashValidateTable()` 分支，因此**上游 Debug 构建
+                         永远看不到这个错误** —— 属典型 latent bug。
+affected_scope:         所有以 Release 构建（-DNDEBUG）该版本 innfeed 的组合；
+                         更一般地：任何 `#define M() (void(0))` 形态的上游宏，
+                         在开启 NDEBUG 时必编译失败
+
+verification_cmd:       # 最小复现（3 行即可确认 clang 语义）
+                         printf '#define V() (void(0))\nint main(void){ V(); return 0; }\n' > m.c
+                         clang m.c -o m          # error: expected ')'
+                         printf '#define V() ((void)0)\nint main(void){ V(); return 0; }\n' > m2.c
+                         clang m2.c -o m2        # OK
+
+rec_priority:           1
+rec_approach:           patch-macro-to-correct-cast
+rec_description:        给上游打补丁，把 NDEBUG 分支的宏体改成 `((void)0)`。
+                         这是纯事实错误修正（不是平台适配），补丁应标注
+                         `patch_type: upstream-bug` 而非 portability，
+                         并建议上游合并（可附 PR 链接）。
+rec_command:            patch 内容:
+                         -#    define VALIDATE_HASH_TABLE() (void(0))
+                         +#    define VALIDATE_HASH_TABLE() ((void)0)
+rec_auto_fix:           true
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      build-debug-instead-of-release
+fallback_description:   临时把 build_type 降到 Debug 以避开 NDEBUG 分支。
+                         ⚠️ 仅作应急：会改变优化级别与产物体积，
+                         不可用于发布制品，且掩盖上游真实缺陷。
+fallback_auto_fix:      false
+
+forbid_1_pattern:       把该文件的宏调用整行注释掉/删除调用点
+forbid_1_reason:        hashValidateTable 是上游内部一致性校验，
+                         删调用即删功能（R51 掩盖而非解决）
+forbid_1_consequence:   上游升级时冲突、且失去校验能力
+
+forbid_2_pattern:       定义为空 `#define VALIDATE_HASH_TABLE()`
+forbid_2_reason:        空宏在 `X();` 处展开为 `;` 虽可编译，
+                         但把"类型错误"改成"静默去掉校验"，同样属掩盖
+forbid_2_consequence:   Debug/Release 行为分叉被掩盖，后续更难点查
+
+principles:             编译错误须修根因而非绕过; 平台无关的上游缺陷应单独标注
+                         并回馈上游; 不改写上游测试与校验语义
+
+causes:
+caused_by:
+similar_to:             E259(Conan Release 的 -DNDEBUG 让 assert 内含副作用表达式
+                         整体不求值，触发上游 latent bug —— 同为
+                         "Release/NDEBUG 才暴露的上游缺陷" 模式)
+conflicts_with:
+prerequisite_of:
+
+doc_file:               doc/DRAFT-inn-ndebug-invalid-void-cast-macro.md
+last_updated:           2026-09-25
+source_event:           archives/i/inn2/2.7.4 — conan create(Release) 报
+                         article.c:275 expected ')'; 手工 -O2 无 NDEBUG 时不复现
+first_seen_project:     inn2/2.7.4
+contributor_id:         ATOMCODE
+
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-25
