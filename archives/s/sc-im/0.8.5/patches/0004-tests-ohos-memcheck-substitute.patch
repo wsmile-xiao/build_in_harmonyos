@@ -1,0 +1,1163 @@
+diff -ruN a/tests/ohos-leaktrack.c b/tests/ohos-leaktrack.c
+--- a/tests/ohos-leaktrack.c	1970-01-01 08:00:00.000000000 +0800
++++ b/tests/ohos-leaktrack.c	2026-09-26 00:55:54.258988749 +0800
+@@ -0,0 +1,548 @@
++/* leaktrack.c — 泄漏族替代验证：LD_PRELOAD 分配器计数 + 可达性分类（sc-im 0.8.5 返修）
++ *
++ * 输出（env SCIM_LEAK_LOG 指定路径）：
++ *   ==<pid>== leaktrack: outstanding: <N> bytes in <M> blocks
++ *   ==<pid>== leaktrack: definitely lost: <N> bytes in <M> blocks
++ *   ==<pid>== leaktrack: indirectly lost: <N> bytes in <M> blocks
++ *   ==<pid>== leaktrack: possibly lost: <N> bytes in <M> blocks
++ *   ==<pid>== leaktrack: still reachable: <N> bytes in <M> blocks
++ *   ==<pid>== leaktrack: externally freed (not tracked): <K>
++ *
++ * 语义对齐（LSan 同款保守可达性分析，LSan runtime 在 OHOS 不可用）：
++ *   根集 = 退出时刻寄存器 + 主线程栈 + /proc/self/maps 可写区（跳过本库簿记区）
++ *         + 所有存活块自身内容；词粒度保守扫描。
++ *   unreachable 块 → 无其它 lost 块指向 = definitely lost；被 lost 块指向 = indirectly lost
++ *   reachable 但仅被「块内偏移指针」命中 = possibly lost（对齐 valgrind 口径）
++ *   三条 valgrind 泄漏断言 = definitely/indirectly/possibly 三行为 0。
++ *
++ * 构建：clang -shared -fPIC -O1 -o libleaktrack.so leaktrack.c -ldl
++ */
++#define _GNU_SOURCE
++#include <dlfcn.h>
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <unistd.h>
++
++typedef void *(*malloc_f)(size_t);
++typedef void *(*calloc_f)(size_t, size_t);
++typedef void *(*realloc_f)(void *, size_t);
++typedef void (*free_f)(void *);
++typedef int (*posix_memalign_f)(void **, size_t, size_t);
++
++static malloc_f  real_malloc;
++static calloc_f  real_calloc;
++static realloc_f real_realloc;
++static free_f    real_free;
++static posix_memalign_f real_pma;
++static volatile int inited;
++static pid_t startup_pid;
++
++/* ---------- 自带 mmap 分配器（bootstrap/簿记用，永不走钩子） ---------- */
++#define RAWMAX 64
++static void *raw_ptrs[RAWMAX];
++static size_t raw_sz[RAWMAX];
++static int   raw_cnt;
++
++static void *raw_alloc(size_t n) {
++    size_t sz = (n + 4095) & ~(size_t)4095;
++    void *p = mmap(NULL, sz, PROT_READ | PROT_WRITE,
++                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (p == MAP_FAILED) return NULL;
++    if (raw_cnt < RAWMAX) { raw_ptrs[raw_cnt] = p; raw_sz[raw_cnt] = sz; raw_cnt++; }
++    return p;
++}
++
++static int is_raw(void *p) {
++    for (int i = 0; i < raw_cnt; i++) if (raw_ptrs[i] == p) return 1;
++    return 0;
++}
++
++static void init_real(void) {
++    if (inited) return;
++    inited = 1;
++    real_malloc  = (malloc_f)dlsym(RTLD_NEXT, "malloc");
++    real_calloc  = (calloc_f)dlsym(RTLD_NEXT, "calloc");
++    real_realloc = (realloc_f)dlsym(RTLD_NEXT, "realloc");
++    real_free    = (free_f)dlsym(RTLD_NEXT, "free");
++    real_pma     = (posix_memalign_f)dlsym(RTLD_NEXT, "posix_memalign");
++}
++
++/* ---------- registry：开放寻址 + 墓碑 ---------- */
++typedef struct { unsigned char st; void *p; size_t sz; unsigned long ra; } ent_t;
++#define USED 1
++#define TOMB 2
++static ent_t  *tab;
++static size_t  cap, used_cnt, tomb_cnt, live_cnt;
++static unsigned long live_bytes;
++static unsigned long extern_frees, realloc_seen, oom_cnt;
++
++static size_t hashp(void *p) {
++    unsigned long v = (unsigned long)p;
++    v ^= v >> 16; v *= 0x45d9f3bUL; v ^= v >> 15;
++    return (size_t)v;
++}
++
++static void reg_grow(void);
++
++static void reg_add_ra(void *p, size_t sz, unsigned long ra) {
++    if (!tab) {
++        cap = 16384;
++        tab = raw_alloc(cap * sizeof(ent_t));
++        if (!tab) { cap = 0; oom_cnt++; return; }
++        memset(tab, 0, cap * sizeof(ent_t));
++    }
++    if (used_cnt + tomb_cnt + 1 >= cap) { reg_grow(); if (used_cnt + tomb_cnt + 1 >= cap) { oom_cnt++; return; } }
++    size_t i = hashp(p) & (cap - 1);
++    for (;;) {
++        if (tab[i].st == USED) {
++            if (tab[i].p == p) { live_bytes += sz; live_bytes -= tab[i].sz; tab[i].sz = sz; tab[i].ra = ra; return; }
++            i = (i + 1) & (cap - 1); continue;
++        }
++        if (tab[i].st == TOMB) tomb_cnt--;
++        tab[i].st = USED; tab[i].p = p; tab[i].sz = sz;
++        tab[i].ra = ra;
++        used_cnt++; live_cnt++; live_bytes += sz;
++        return;
++    }
++}
++
++static void reg_grow(void) {
++    size_t ncap = cap * 2;
++    ent_t *nt = raw_alloc(ncap * sizeof(ent_t));
++    if (!nt) return;
++    memset(nt, 0, ncap * sizeof(ent_t));
++    ent_t *old = tab; size_t oc = cap;
++    tab = nt; cap = ncap; used_cnt = 0; tomb_cnt = 0;
++    for (size_t k = 0; k < oc; k++) {
++        if (old[k].st != USED) continue;
++        size_t i = hashp(old[k].p) & (ncap - 1);
++        while (tab[i].st == USED) i = (i + 1) & (ncap - 1);
++        tab[i].st = USED; tab[i].p = old[k].p; tab[i].sz = old[k].sz;
++        used_cnt++;
++    }
++    /* 旧表是 mmap 区，不回收（回收会走 free 钩子） */
++}
++
++static int reg_del(void *p, size_t *outsz) {
++    if (!tab || !p) return 0;
++    size_t i = hashp(p) & (cap - 1);
++    for (size_t n = 0; n < cap; n++) {
++        if (tab[i].st == 0) return 0;
++        if (tab[i].st == USED && tab[i].p == p) {
++            if (outsz) *outsz = tab[i].sz;
++            live_cnt--; live_bytes -= tab[i].sz;
++            tab[i].st = TOMB; tab[i].p = NULL; tab[i].sz = 0;
++            tomb_cnt++; used_cnt--;
++            return 1;
++        }
++        i = (i + 1) & (cap - 1);
++    }
++    return 0;
++}
++
++/* ---------- 可达性分析 ---------- */
++typedef struct { unsigned char marked, interior, exact, pending, from_root; unsigned long from; } mark_t;
++static mark_t *mk_tab;
++static size_t  mk_cap;
++
++static ent_t *reg_find(void *p) {
++    if (!tab) return NULL;
++    size_t i = hashp(p) & (cap - 1);
++    for (size_t n = 0; n < cap; n++) {
++        if (tab[i].st == 0) return NULL;
++        if (tab[i].st == USED && tab[i].p == p) return &tab[i];
++        i = (i + 1) & (cap - 1);
++    }
++    return NULL;
++}
++
++static size_t idx_of(ent_t *e) { return (size_t)(e - tab); }
++
++/* 扫描一个字：命中块起点→标记；命中块内偏移→记 interior */
++static unsigned long heap_lo = ~0UL, heap_hi = 0;
++
++/* 有序区间索引：报告期按基址排序，二分查找（精确覆盖 interior 指针，不靠探查） */
++typedef struct { unsigned long base; size_t sz; size_t idx; } iv_t;
++static iv_t *iv;
++static size_t iv_n;
++static size_t total_marked;
++
++static int iv_cmp(const void *a, const void *b) {
++    const iv_t *x = a, *y = b;
++    if (x->base < y->base) return -1;
++    if (x->base > y->base) return 1;
++    return 0;
++}
++
++/* 值命中：把标记记到命中的块上（exact=基址命中，interior=块内偏移） */
++static void mark_value(unsigned long w, unsigned long at, int from_root) {
++    if (w < 0x10000) return;
++    if (w < heap_lo || w > heap_hi) return;      /* 不在堆范围内：直接跳过 */
++    size_t lo = 0, hi = iv_n;
++    while (lo < hi) { size_t m = (lo + hi) / 2;
++        if (iv[m].base <= w) lo = m + 1; else hi = m; }
++    if (lo == 0) return;
++    iv_t *c = &iv[lo - 1];
++    if (w < c->base + c->sz) {
++        size_t k = c->idx;
++        if (!mk_tab[k].marked) { mk_tab[k].marked = 1; mk_tab[k].pending = 1; total_marked++; }
++        if (!mk_tab[k].from) mk_tab[k].from = at;          /* 记录命中字的地址 */
++        if (w == c->base) mk_tab[k].exact = 1;
++        else if (!mk_tab[k].exact) mk_tab[k].interior = 1;
++        if (from_root) mk_tab[k].from_root = 1;
++    }
++}
++
++/* 地址判定：该「字的存放地址」是否落在某个活块内（活块内容不作根，改由阶段 2 传播） */
++static int addr_in_live(unsigned long a) {
++    if (a < heap_lo || a > heap_hi) return 0;
++    size_t lo = 0, hi = iv_n;
++    while (lo < hi) { size_t m = (lo + hi) / 2;
++        if (iv[m].base <= a) lo = m + 1; else hi = m; }
++    if (lo == 0) return 0;
++    iv_t *c = &iv[lo - 1];
++    return (a < c->base + c->sz) ? 1 : 0;
++}
++
++/* 阶段 1：根扫描 —— 只有「存放地址不在任何活块内」的字才算根 */
++static void scan_span_root(unsigned long lo, unsigned long hi) {
++    const unsigned long *p = (const unsigned long *)lo;
++    const unsigned long *e = (const unsigned long *)hi;
++    for (; p < e; p++) {
++        if (addr_in_live((unsigned long)p)) continue;   /* 活块内容留给阶段 2 */
++        mark_value(*p, (unsigned long)p, 1);
++    }
++}
++
++/* 阶段 2：传播 —— 从已标记块的内容出发继续标记 */
++static void propagate(void) {
++    int changed = 1;
++    while (changed) {
++        changed = 0;
++        for (size_t k = 0; k < cap; k++) {
++            if (tab[k].st != USED || !mk_tab[k].marked || !mk_tab[k].pending) continue;
++            mk_tab[k].pending = 0;
++            const unsigned long *p = (const unsigned long *)tab[k].p;
++            const unsigned long *e = (const unsigned long *)((unsigned char *)tab[k].p + tab[k].sz);
++            for (; p < e; p++) {
++                size_t before = total_marked;
++                mark_value(*p, (unsigned long)p, 0);
++                if (total_marked > before) changed = 1;
++            }
++        }
++    }
++}
++
++/* 只跳过本库簿记子区间（内核可能把簿记 mmap 与真实数据区合并成同一 maps 行，
++   整行跳过会把真实「根」一起丢掉——实测 OHOS param 缓存根就落在合并区里） */
++static void scan_range(const void *lo_, const void *hi_) {
++    unsigned long lo = ((unsigned long)lo_) & ~(unsigned long)7;
++    unsigned long hi = ((unsigned long)hi_) & ~(unsigned long)7;
++    if (hi <= lo) return;
++    for (;;) {
++        unsigned long nx = hi;
++        for (int i = 0; i < raw_cnt; i++) {
++            unsigned long a = (unsigned long)raw_ptrs[i] & ~(unsigned long)7;
++            unsigned long b = (a + raw_sz[i] + 7) & ~(unsigned long)7;
++            if (b <= lo || a >= hi) continue;
++            if (a < nx) nx = a;
++            break;
++        }
++        if (nx > lo) scan_span_root(lo, nx < hi ? nx : hi);
++        if (nx >= hi) return;
++        /* 跳到簿记区之后 */
++        unsigned long after = nx;
++        for (int i = 0; i < raw_cnt; i++) {
++            unsigned long a = (unsigned long)raw_ptrs[i];
++            unsigned long b = (a + raw_sz[i] + 7) & ~(unsigned long)7;
++            if (after >= ((unsigned long)raw_ptrs[i] & ~(unsigned long)7) &&
++                after < b) after = b;
++        }
++        if (after <= lo) after = lo + 4096;       /* 保险：不死循环 */
++        lo = after;
++        if (lo >= hi) return;
++    }
++}
++
++static int comm_ok(void) {
++    if (startup_pid && getpid() != startup_pid) return 0;   /* fork 子进程 */
++    /* 执行器把自身 pid 写进文件：只有它的直接子进程上报（sc-im 会再拉起自身进程） */
++    const char *pf = getenv("SCIM_LEAK_PPID_FILE");
++    if (pf && *pf) {
++        FILE *fp = fopen(pf, "r");
++        if (!fp) return 0;
++        long want = 0;
++        if (fscanf(fp, "%ld", &want) != 1) { fclose(fp); return 0; }
++        fclose(fp);
++        if ((long)getppid() != want) return 0;
++    }
++    const char *want = getenv("SCIM_LEAK_COMM");
++    if (!want || !*want) want = "sc-im";
++    FILE *cf = fopen("/proc/self/comm", "r");
++    if (!cf) return 0;
++    char buf[64] = {0};
++    size_t n = fread(buf, 1, sizeof(buf) - 1, cf);
++    fclose(cf);
++    while (n && (buf[n-1] == '\n' || buf[n-1] == ' ')) buf[--n] = 0;
++    return strcmp(buf, want) == 0;
++}
++
++/* 平台运行时自有分配点抑制名单（校准程序 no-op 实测 + 符号归属确认；
++   valgrind 用 --suppressions 做同一件事，此处等价内联）。可用 env 覆盖。 */
++static const char *DEFAULT_SUPPRESS =
++    "CachedParameterCreate,getdelim,_Znwm";
++static char sup_buf[512];
++static const char *sup_list;
++
++static void sup_init(void) {
++    if (sup_list) return;
++    const char *e = getenv("SCIM_LEAK_SUPPRESS");
++    if (e && *e) { snprintf(sup_buf, sizeof sup_buf, "%s", e); }
++    else { snprintf(sup_buf, sizeof sup_buf, "%s", DEFAULT_SUPPRESS); }
++    sup_list = sup_buf;
++}
++
++static int is_suppressed(unsigned long ra) {
++    Dl_info di;
++    if (!ra) return 0;
++    sup_init();
++    if (!dladdr((void *)ra, &di) || !di.dli_sname) return 0;
++    const char *s = sup_list;
++    while (*s) {
++        const char *comma = strchr(s, ',');
++        size_t n = comma ? (size_t)(comma - s) : strlen(s);
++        if (n && strncmp(s, di.dli_sname, n) == 0 && !di.dli_sname[n]) return 1;
++        if (!comma) break;
++        s = comma + 1;
++    }
++    return 0;
++}
++
++static void report(void) {
++    if (getenv("SCIM_LEAK_DEBUG")) {
++        char c[64] = {0}; FILE *cf = fopen("/proc/self/comm", "r");
++        if (cf) { size_t n=fread(c,1,63,cf); fclose(cf); while(n&&(c[n-1]=='\n'))c[--n]=0; }
++        fprintf(stderr, "[report pid=%d ppid=%d comm=%s live=%zu startup=%d]\n",
++                (int)getpid(), (int)getppid(), c, live_cnt, (int)startup_pid);
++    }
++    const char *path = getenv("SCIM_LEAK_LOG");
++    unsigned long def_b = 0, ind_b = 0, pos_b = 0, reach_b = 0;
++    unsigned long def_n = 0, ind_n = 0, pos_n = 0, reach_n = 0;
++    unsigned long rt_def_b = 0, rt_def_n = 0, rt_pos_b = 0, rt_pos_n = 0;
++    int _nsup = 0;
++
++    if (tab) {
++        mk_tab = raw_alloc(cap * sizeof(mark_t));   /* 按 tab 下标（0..cap-1）索引 */
++        mk_cap = cap;
++        if (mk_tab) {
++            memset(mk_tab, 0, cap * sizeof(mark_t));
++
++            /* 堆范围 + 有序区间索引（用于 scan_word 二分） */
++            iv = raw_alloc((live_cnt + 1) * sizeof(iv_t));
++            iv_n = 0;
++            if (iv) {
++                for (size_t k = 0; k < cap; k++) {
++                    if (tab[k].st != USED) continue;
++                    unsigned long a = (unsigned long)tab[k].p;
++                    iv[iv_n].base = a; iv[iv_n].sz = tab[k].sz; iv[iv_n].idx = k;
++                    iv_n++;
++                    if (a < heap_lo) heap_lo = a;
++                    if (a + tab[k].sz > heap_hi) heap_hi = a + tab[k].sz;
++                }
++                qsort(iv, iv_n, sizeof(iv_t), iv_cmp);
++            }
++
++            /* 根 1：寄存器（aarch64 x0-x15, x19-x30；近似 memcheck 的寄存器扫描） */
++            volatile unsigned long regs[40];
++            memset((void *)regs, 0, sizeof(regs));
++            __asm__ volatile(
++                "mov x16, %0\n"
++                "stp x0, x1, [x16], #16\n"
++                "stp x2, x3, [x16], #16\n"
++                "stp x4, x5, [x16], #16\n"
++                "stp x6, x7, [x16], #16\n"
++                "stp x8, x9, [x16], #16\n"
++                "stp x10, x11, [x16], #16\n"
++                "stp x12, x13, [x16], #16\n"
++                "stp x14, x15, [x16], #16\n"
++                "stp x19, x20, [x16], #16\n"
++                "stp x21, x22, [x16], #16\n"
++                "stp x23, x24, [x16], #16\n"
++                "stp x25, x26, [x16], #16\n"
++                "stp x27, x28, [x16], #16\n"
++                "stp x29, x30, [x16], #16\n"
++                "str x17, [x16], #8\n"
++                "str x18, [x16], #8\n"
++                : : "r"(regs) : "x16", "x17", "x18", "memory");
++            scan_range(regs, regs + 40);
++
++            /* 根 2：/proc/self/maps 中可写私有映射（含堆、栈、数据段；簿记区已跳过） */
++            FILE *mf = fopen("/proc/self/maps", "r");
++            if (mf) {
++                char line[512];
++                int dbg = getenv("SCIM_LEAK_DEBUG") != NULL;
++                while (fgets(line, sizeof line, mf)) {
++                    unsigned long lo, hi; char perm[8] = {0};
++                    if (sscanf(line, "%lx-%lx %7s", &lo, &hi, perm) != 3) continue;
++                    if (perm[0] != 'r' || perm[1] != 'w') continue;
++                    if (dbg && getenv("SCIM_LEAK_MAPS"))
++                        fprintf(stderr, "[maps] %lx-%lx raw=%d\n", lo, hi, raw_cnt);
++                    scan_range((void *)lo, (void *)hi);
++                }
++                fclose(mf);
++            }
++            /* 阶段 2：从已标记块传播（活块内容不作根，避免自指/环互相证明可达） */
++            propagate();
++
++            /* 分类 */
++            { size_t _u=0; for (size_t k=0;k<cap;k++) if (tab[k].st==USED) _u++;
++              if (getenv("SCIM_LEAK_DEBUG")) fprintf(stderr, "[leaktrack] used=%zu live=%zu cap=%zu iv=%zu\n", _u, live_cnt, cap, iv_n); }
++            for (size_t k = 0; k < cap; k++) {
++                if (tab[k].st != USED) continue;
++                if (is_suppressed(tab[k].ra)) {        /* 平台运行时自有分配点 */
++                    if (getenv("SCIM_LEAK_DEBUG") && _nsup < 8) { Dl_info d2; dladdr((void*)tab[k].ra,&d2);
++                        fprintf(stderr,"[leaktrack] suppressed ra=%p sym=%s\n",(void*)tab[k].ra, d2.dli_sname?d2.dli_sname:"?"); _nsup++; }
++                    if (!mk_tab[k].marked) { rt_def_b += tab[k].sz; rt_def_n++; }
++                    else if (!mk_tab[k].exact) { rt_pos_b += tab[k].sz; rt_pos_n++; }
++                    continue;
++                }
++                if (mk_tab[k].marked) {
++                    if (mk_tab[k].exact) { reach_b += tab[k].sz; reach_n++; }
++                    else { pos_b += tab[k].sz; pos_n++; }
++                    continue;
++                }
++                /* lost：看是否被其它 lost 块指向 */
++                int from_lost = 0;
++                for (size_t j = 0; j < cap && !from_lost; j++) {
++                    if (tab[j].st != USED || j == k) continue;
++                    if (!mk_tab[j].marked) {   /* j 也是 lost */
++                        unsigned char *b = (unsigned char *)tab[j].p;
++                        size_t n = tab[j].sz / 8;
++                        for (size_t w = 0; w < n; w++) {
++                            unsigned long v;
++                            memcpy(&v, b + w * 8, 8);
++                            if (v >= 0x10000 &&
++                                (void *)v >= tab[k].p &&
++                                (void *)v < (unsigned char *)tab[k].p + tab[k].sz) {
++                                from_lost = 1; break;
++                            }
++                        }
++                    }
++                }
++                if (from_lost) { ind_b += tab[k].sz; ind_n++; }
++                else { def_b += tab[k].sz; def_n++; }
++            }
++        }
++    }
++
++    if (getenv("SCIM_LEAK_DEBUG") && tab) {
++        fprintf(stderr, "[leaktrack pid=%d] --- lost/interior blocks ---\n", (int)getpid());
++        for (size_t k = 0; k < cap; k++) {
++            if (tab[k].st != USED) continue;
++            if (mk_tab && mk_tab[k].marked && mk_tab[k].exact) continue;
++            {
++                Dl_info di; const char *sn = "?";
++                if (dladdr((void *)tab[k].ra, &di) && di.dli_sname)
++                    sn = di.dli_sname;
++                fprintf(stderr, "[leaktrack]   %p sz=%zu exact=%d interior=%d ra=%p %s from=%p\n",
++                        tab[k].p, tab[k].sz,
++                        mk_tab ? mk_tab[k].exact : -1,
++                        mk_tab ? mk_tab[k].interior : -1,
++                        (void *)tab[k].ra, sn,
++                        (void *)(mk_tab ? mk_tab[k].from : 0));
++            }
++        }
++    }
++    if (!path || !*path) return;
++    if (!comm_ok()) return;                 /* 只统计目标程序本体（子进程不落盘） */
++    FILE *f = fopen(path, "w");
++    if (!f) return;
++    fprintf(f, "==%d== leaktrack: outstanding: %lu bytes in %zu blocks\n",
++            (int)getpid(), live_bytes, live_cnt);
++    fprintf(f, "==%d== definitely lost: %lu bytes in %lu blocks\n",
++            (int)getpid(), def_b, def_n);
++    fprintf(f, "==%d== indirectly lost: %lu bytes in %lu blocks\n",
++            (int)getpid(), ind_b, ind_n);
++    fprintf(f, "==%d== possibly lost: %lu bytes in %lu blocks\n",
++            (int)getpid(), pos_b, pos_n);
++    fprintf(f, "==%d== still reachable: %lu bytes in %lu blocks\n",
++            (int)getpid(), reach_b, reach_n);
++    fprintf(f, "==%d== platform-runtime noise (suppressed by origin): "
++               "definitely %lu bytes/%lu blocks, interior-only %lu bytes/%lu blocks\n",
++            (int)getpid(), rt_def_b, rt_def_n, rt_pos_b, rt_pos_n);
++    fprintf(f, "==%d== leaktrack: externally freed (not tracked): %lu\n",
++            (int)getpid(), extern_frees);
++    fprintf(f, "==%d== leaktrack: realloc calls seen: %lu, oom: %lu\n",
++            (int)getpid(), realloc_seen, oom_cnt);
++    fclose(f);
++}
++
++/* ---------- interposers ---------- */
++void *malloc(size_t n) {
++    unsigned long ra = (unsigned long)__builtin_return_address(0);
++    if (!inited) init_real();
++    if (!real_malloc) return raw_alloc(n ? n : 1);       /* dlsym 自举期 */
++    void *p = real_malloc(n);
++    if (p) reg_add_ra(p, n, ra);
++    return p;
++}
++
++void *calloc(size_t a, size_t b) {
++    if (!inited) init_real();
++    if (!real_calloc) {
++        void *p = raw_alloc(a && b ? a * b : 1);
++        if (p) memset(p, 0, a && b ? a * b : 1);
++        return p;
++    }
++    void *p = real_calloc(a, b);
++    if (p) reg_add_ra(p, a ? a * b : b, (unsigned long)__builtin_return_address(0));
++    return p;
++}
++
++void *realloc(void *old, size_t n) {
++    if (!inited) init_real();
++    if (old && is_raw(old)) {                            /* 自举期块 */
++        void *p = malloc(n);
++        if (p && old) memcpy(p, old, n);
++        return p;
++    }
++    if (!real_realloc) return malloc(n);
++    realloc_seen++;
++    size_t oldsz = 0;
++    void *p = real_realloc(old, n);
++    if (p) { reg_del(old, &oldsz); reg_add_ra(p, n, (unsigned long)__builtin_return_address(0)); }
++    return p;
++}
++
++void free(void *p) {
++    if (!p) return;
++    if (!inited) init_real();
++    if (is_raw(p)) return;                               /* 自举期块，不交还原分配器 */
++    if (!real_free) return;
++    size_t sz = 0;
++    if (reg_del(p, &sz)) {
++        /* 释放即清零：消除悬挂指针作为「根」（对齐 memcheck 的 freed=unaddressable 口径）。
++           只清用户请求区，不碰 chunk 头；UAF 检出由 ASan 那一趟负责。 */
++        if (sz) memset(p, 0, sz);
++    } else {
++        extern_frees++;
++    }
++    real_free(p);
++}
++
++int posix_memalign(void **m, size_t a, size_t s) {
++    if (!inited) init_real();
++    if (!real_pma) return EINVAL;
++    int rc = real_pma(m, a, s);
++    if (rc == 0 && m && *m) reg_add_ra(*m, s, (unsigned long)__builtin_return_address(0));
++    return rc;
++}
++
++__attribute__((constructor)) static void lt_init(void) {
++    init_real();
++    startup_pid = getpid();      /* 只有本体进程上报；fork 子进程不覆盖日志 */
++    atexit(report);
++}
+diff -ruN a/tests/ohos-memcheck-subst b/tests/ohos-memcheck-subst
+--- a/tests/ohos-memcheck-subst	1970-01-01 08:00:00.000000000 +0800
++++ b/tests/ohos-memcheck-subst	2026-09-26 01:05:24.350989062 +0800
+@@ -0,0 +1,133 @@
++#!/bin/sh
++# ohos-memcheck-subst —— sc-im 0.8.5 上游 memcheck 断言的「替代执行器」（OHOS 平台）
++#
++# 背景：设备上 valgrind 不可运行（信号投递内核层失效，证据见
++#       archives/s/sc-im/0.8.5/notes.md「替代验证」一节），上游 8 条
++#       assert_iffound_notcond 读取的 ${NAME}_vallog 因此无人生成。
++# 本脚本在补丁 0004 的 subst 分支被调用，产出**同款 memcheck 行式**的
++# ${NAME}_vallog，使上游那 6 条断言行**逐字原样**执行：
++#       泄漏 3 族  ←  tests/ohos-leaktrack.c（LD_PRELOAD 分配器记账 + 保守可达性分类）
++#       越界 3 族  ←  AddressSanitizer 报告按行式翻译（READ/WRITE/attempting free）
++# 未初始化 2 族 OHOS 无等价手段（无 MSan 运行时、LSan 不支持、valgrind 不可用）
++# ⇒ 由测试脚本打 SKIP 行，**不在此处伪造日志**。
++#
++# 用法：ohos-memcheck-subst <NAME> <program> [args...]
++# 环境：
++#   SCIM_SUBST_DIR  中间产物目录（默认 <tests>/.subst）
++#   SCIM_ASAN_BIN   ASan 版被测程序（默认 $SCIM_SUBST_DIR/sc-im.asan，缺失则现建）
++# 退出码 = 第 1 步（原始程序）的退出码；产物缺失（无法替代验证）时退 127，
++# 使功能断言一并变红——**宁可红，不空过**。
++set -u
++
++NAME=${1:?usage: ohos-memcheck-subst <NAME> <program> [args...]}
++shift
++PROG=${1:?missing program}
++shift
++
++HERE=$(cd "$(dirname "$0")" && pwd)
++SUB=${SCIM_SUBST_DIR:-$HERE/.subst}
++mkdir -p "$SUB" 2>/dev/null || true
++# 设备 /tmp 只读：给编译器/运行时一个可写 TMPDIR（继承值可能是 $HOME，不可信）
++if [ ! -w "${TMPDIR:-/nonexistent}" ] 2>/dev/null; then
++    TMPDIR=$SUB/tmp
++    mkdir -p "$TMPDIR" 2>/dev/null || true
++    export TMPDIR
++fi
++BUILDLOG=$SUB/build.log
++LEAKSO=$SUB/libleaktrack.so
++ASANBIN=${SCIM_ASAN_BIN:-$SUB/sc-im.asan}
++VALLOG=${NAME}_vallog
++ASANLOG=$SUB/${NAME}.asan.log
++LEAKOUT=$SUB/${NAME}.leak.out
++STDIN_FILE=$SUB/${NAME}.stdin
++
++: > "$VALLOG"        # 日志文件必须真实存在（否则 grep 空过 = 假绿）
++
++# ---- 1) 泄漏族工具（LD_PRELOAD 分配器记账） ----
++if [ ! -f "$LEAKSO" ]; then
++    if ! clang -shared -fPIC -O1 -o "$LEAKSO" "$HERE/ohos-leaktrack.c" -ldl \
++         >>"$BUILDLOG" 2>&1; then
++        echo "ohos-memcheck-subst: libleaktrack.so build failed" >&2
++        echo "==0== Invalid read of size (SUBSTITUTE UNAVAILABLE: libleaktrack build failed)" >> "$VALLOG"
++        exit 127
++    fi
++fi
++
++# ---- 2) 越界族工具（ASan 版被测程序；缺失则现建一次） ----
++if [ ! -x "$ASANBIN" ]; then
++    srcdir=$(dirname "$PROG")
++    base=$(basename "$PROG")
++    {
++        echo "=== [ohos-memcheck-subst] build asan variant $(date) src=$srcdir ==="
++        rm -rf "$SUB/asan-src"
++        cp -a "$srcdir" "$SUB/asan-src"
++        make -C "$SUB/asan-src" clean
++        make -C "$SUB/asan-src" CC="clang -fsanitize=address" \
++            YACC="${YACC:-bison -y}" -j2
++    } >>"$BUILDLOG" 2>&1
++    if [ -x "$SUB/asan-src/$base" ]; then
++        cp "$SUB/asan-src/$base" "$ASANBIN"
++    fi
++fi
++if [ ! -x "$ASANBIN" ]; then
++    echo "ohos-memcheck-subst: asan binary unavailable (see $BUILDLOG)" >&2
++    echo "==0== Invalid read of size (SUBSTITUTE UNAVAILABLE: asan binary)" >> "$VALLOG"
++    exit 127
++fi
++
++# ---- 3) 读入 stdin，跑两趟 ----
++cat > "$STDIN_FILE"
++
++# 执行器自身 pid：leaktrack 只在其直接子进程里上报（sc-im 会再拉起自身进程）
++PPIDF=$SUB/${NAME}.ppid
++echo $$ > "$PPIDF"
++
++# 3a) 原始程序 + 泄漏记账：其 stdout/stderr 即功能断言所见输出
++LD_PRELOAD="$LEAKSO" SCIM_LEAK_LOG="$LEAKOUT" SCIM_LEAK_PPID_FILE="$PPIDF" \
++    "$PROG" "$@" < "$STDIN_FILE" > "$SUB/${NAME}.out1" 2>&1
++RC=$?
++cat "$SUB/${NAME}.out1"
++
++# 3b) ASan 版：只取其诊断输出
++SCIM_ASAN_RUN=1 ASAN_OPTIONS=detect_leaks=0:abort_on_error=0 \
++    "$ASANBIN" "$@" < "$STDIN_FILE" > "$SUB/${NAME}.out2" 2> "$ASANLOG" || true
++
++# ---- 4) 合成 memcheck 行式 ${NAME}_vallog ----
++{
++    echo "==ohos-memcheck-subst== log for ${NAME} (memcheck substitute: leaktrack + AddressSanitizer)"
++    if [ -s "$LEAKOUT" ]; then
++        cat "$LEAKOUT"
++    else
++        echo "==0== Invalid read of size (SUBSTITUTE UNAVAILABLE: leak log empty)"
++    fi
++    if [ -s "$ASANLOG" ]; then
++        # 越界三族 ← ASan 报告行式翻译（每个上游 pattern 一条同款行）
++        if grep -q "READ of size" "$ASANLOG"; then
++            echo "==0== Invalid read of size (translated from AddressSanitizer)"
++            grep -m1 "READ of size" "$ASANLOG" | sed 's/^/==0==   asan: /'
++        fi
++        if grep -q "WRITE of size" "$ASANLOG"; then
++            echo "==0== Invalid write of size (translated from AddressSanitizer)"
++            grep -m1 "WRITE of size" "$ASANLOG" | sed 's/^/==0==   asan: /'
++        fi
++        if grep -qE "attempting free on address which was not malloc|attempting double-free" "$ASANLOG"; then
++            echo "==0== Invalid free() / delete (translated from AddressSanitizer)"
++            grep -m1 -E "attempting free on address which was not malloc|attempting double-free" "$ASANLOG" \
++                | sed 's/^/==0==   asan: /'
++        fi
++        # 未映射的 ASan ERROR（新错误类型）→ 必须让断言变红，绝不静默放过
++        if grep -q "ERROR: AddressSanitizer" "$ASANLOG"; then
++            if ! grep -qE "READ of size|WRITE of size|attempting free on address which was not malloc|attempting double-free" "$ASANLOG"; then
++                echo "==0== Invalid read of size (UNMAPPED AddressSanitizer error)"
++                grep -m1 "ERROR: AddressSanitizer" "$ASANLOG" | sed 's/^/==0==   asan: /'
++            fi
++        fi
++    elif [ -s "$SUB/${NAME}.out2" ]; then
++        # ASan 趟确实执行且无诊断输出 ⇒ 干净，不写任何 Invalid 行
++        :
++    else
++        echo "==0== Invalid read of size (SUBSTITUTE UNAVAILABLE: asan run produced no output)"
++    fi
++} > "$VALLOG"
++
++exit $RC
+diff -ruN a/tests/test-getent-range.sh b/tests/test-getent-range.sh
+--- a/tests/test-getent-range.sh	2026-09-26 00:50:23.286989062 +0800
++++ b/tests/test-getent-range.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -11,8 +11,17 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ 
+@@ -41,17 +50,21 @@
+ "
+ check_log(){
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test-getent-range]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test-getent-range]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test-getent-range]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ }
+ #echo -e "${CMD}" | ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp\|Change\|wider'
+diff -ruN a/tests/test-replace.sh b/tests/test-replace.sh
+--- a/tests/test-replace.sh	2026-09-26 00:50:23.274987812 +0800
++++ b/tests/test-replace.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,8 +8,17 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ 
+@@ -57,17 +66,21 @@
+ "
+ assert "echo -e '${CMD}' | $VALGRIND_CMD ../src/sc-im --nocurses --nodebug --quit_afterload 2>&1" $EXP
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test-replace]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test-replace]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test-replace]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ assert "echo -e '${CMD2}' |../src/sc-im --nocurses --nodebug --quit_afterload 2>&1" 7
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+diff -ruN a/tests/test1.sh b/tests/test1.sh
+--- a/tests/test1.sh	2026-09-26 00:50:23.222988280 +0800
++++ b/tests/test1.sh	2026-09-26 01:02:45.506989062 +0800
+@@ -8,24 +8,37 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ assert "echo GETNUM C2 | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp'" "81"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test1]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation" "!"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test1]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation" "!"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test1]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
+diff -ruN a/tests/test2.sh b/tests/test2.sh
+--- a/tests/test2.sh	2026-09-26 00:50:23.230986874 +0800
++++ b/tests/test2.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,24 +8,37 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ assert "echo GETNUM C2 | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp\|left'" "81"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test2]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test2]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test2]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
+diff -ruN a/tests/test3.sh b/tests/test3.sh
+--- a/tests/test3.sh	2026-09-26 00:50:23.238987187 +0800
++++ b/tests/test3.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,24 +8,37 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ assert "echo GETNUM A0 | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp\|left'" "3.3"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test3]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test3]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test3]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
+diff -ruN a/tests/test4.sh b/tests/test4.sh
+--- a/tests/test4.sh	2026-09-26 00:50:23.242987343 +0800
++++ b/tests/test4.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,8 +8,17 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ 
+@@ -17,17 +26,21 @@
+ assert "echo -e '${CMD}' | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp\|left\|Change'" "2.3\n0"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test4]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test4]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test4]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
+diff -ruN a/tests/test5.sh b/tests/test5.sh
+--- a/tests/test5.sh	2026-09-26 00:50:23.246986718 +0800
++++ b/tests/test5.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,8 +8,17 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ 
+@@ -17,17 +26,21 @@
+ assert "echo -e '${CMD}' | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp'" "3404115"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test5]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test5]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test5]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
+diff -ruN a/tests/test6.sh b/tests/test6.sh
+--- a/tests/test6.sh	2026-09-26 00:50:23.254988124 +0800
++++ b/tests/test6.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,8 +8,17 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ 
+@@ -17,17 +26,21 @@
+ assert "echo -e '${CMD}' | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp\|Change'" "16\n23"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test6]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test6]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test6]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
+diff -ruN a/tests/test8.sh b/tests/test8.sh
+--- a/tests/test8.sh	2026-09-26 00:50:23.258991249 +0800
++++ b/tests/test8.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,8 +8,17 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ 
+@@ -17,17 +26,21 @@
+ assert "echo -e '${CMD}' | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp\|Change'" "14\n13"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test8]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test8]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test8]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
+diff -ruN a/tests/test9.sh b/tests/test9.sh
+--- a/tests/test9.sh	2026-09-26 00:50:23.266989843 +0800
++++ b/tests/test9.sh	2026-09-26 01:02:45.510990624 +0800
+@@ -8,8 +8,17 @@
+ 
+ if command -v valgrind >/dev/null 2>&1; then
+     VALGRIND_CMD='valgrind -v --log-file=${NAME}_vallog --tool=memcheck --track-origins=yes --leak-check=full --show-leak-kinds=all --show-reachable=no'
++    MEMCHECK_MODE=valgrind
++elif [ -n "${SCIM_MEMCHECK_SUBST:-}" ]; then
++    # OHOS 平台替代验证（补丁 0004）：valgrind 在本设备不可运行，
++    # 改由 ohos-memcheck-subst 产出同款 memcheck 行式 ${NAME}_vallog：
++    # 泄漏 3 族 = ohos-leaktrack.c（LD_PRELOAD 记账+保守可达性）,
++    # 越界 3 族 = AddressSanitizer 报告行式翻译；未初始化 2 族如实 SKIP。
++    VALGRIND_CMD="/bin/sh $(dirname "$0")/ohos-memcheck-subst ${NAME}"
++    MEMCHECK_MODE=subst
+ else
+     VALGRIND_CMD=''
++    MEMCHECK_MODE=none
+ fi
+ . assert.sh
+ 
+@@ -17,17 +26,21 @@
+ assert "echo -e '${CMD}' | $VALGRIND_CMD ../src/sc-im ${NAME}.sc --nocurses --nodebug --quit_afterload 2>&1 |grep -v '^$\|Interp\|Change\|wider'" "23"
+ 
+ #we check valgrind log
+-if [ -n "$VALGRIND_CMD" ]; then
++if [ "$MEMCHECK_MODE" = "none" ]; then
++    echo "SKIP[test9]: 8 memcheck assertions (valgrind unavailable)"
++else
+     assert_iffound_notcond ${NAME}_vallog "definitely lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "indirectly lost.*bytes" "0 bytes"
+     assert_iffound_notcond ${NAME}_vallog "possibly lost.*bytes" "0 bytes"
+-    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
+-    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
+     assert_iffound_notcond ${NAME}_vallog "Invalid read of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid write of size"
+     assert_iffound_notcond ${NAME}_vallog "Invalid free() / delete"
+-else
+-    echo "SKIP[test9]: 8 memcheck assertions (valgrind unavailable)"
++    if [ "$MEMCHECK_MODE" = "valgrind" ]; then
++    assert_iffound_notcond ${NAME}_vallog "Uninitialised value was created by a heap allocation"
++    assert_iffound_notcond ${NAME}_vallog "Conditional jump or move depends on uninitialised value"
++    else
++        echo "SKIP[test9]: 2 memcheck assertions (uninit families: OHOS 无等价手段)"
++    fi
+ fi
+ if [ "$1" != "keep-vallog" ] && [ -f ${NAME}_vallog ];then
+     rm ${NAME}_vallog
