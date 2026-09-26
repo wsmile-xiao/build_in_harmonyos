@@ -1,0 +1,105 @@
+#====================================================================
+# E543-draft-419E.kv — conan OHOS profile 双侧同构 → autotools 三元组缺失
+# 对应文档: knowledge/drafts/E543-draft-419E.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E543
+trigger_tool:           configure
+phase:                  configuration
+error_signature:        configure: error: cannot run C compiled programs|
+                         Invalid configuration .*linux-ohos.*: machine .* not recognized|
+                         checking build system type\.\.\. Invalid configuration|
+                         cannot guess build type|
+                         aarch64-binfmt-P: Could not open '/lib/ld-musl-aarch64\.so\.1'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, cross-compile, conan, portability
+match_keywords:         conan, AutotoolsToolchain, cross_building, profile host build,
+                         config.guess, config.sub, aarch64-linux-ohos, --host, --build,
+                         triplet, libtool, autotools, OHOS, machine not recognized
+title:                  conan 的 OHOS profile 两侧同构使 cross_building 为 False，autotools 不获得三元组；配方写死 --build 又会反噬 x86 交叉构建机
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             ci/conan/profiles/ohos-aarch64 被同时用作 -pr:h 与 -pr:b，两侧 settings 完全相同，
+                         conan 的 cross_building() 因此判定为 False，AutotoolsToolchain 不生成 --host/--build。
+                         老 autotools 项目（config.guess/config.sub 早于 2012 年的 aarch64、更早于 OHOS）
+                         于是只能用 config.guess 猜出构建机三元组来配置 libtool 与平台规则；
+                         而若配方把 --build 直接写死成目标三元组，则在 x86_64 交叉构建机上 build==host，
+                         configure 判定为原生编译并尝试运行目标机产物，因缺 /lib/ld-musl-aarch64.so.1 而失败。
+affected_scope:         所有随包 config.guess/config.sub 早于 aarch64/OHOS 的 autotools 老项目，
+                         在 conan OHOS profile 下构建时（实测 jday/2.4 的 2004 年脚本；同族 aalib/1.4p5）；
+                         构建机为 x86_64 交叉机或 aarch64 原生机时表现不同，需同时成立
+verification_cmd:       ./config.sub aarch64-linux-ohos && ./config.guess &&
+                         grep -n 'host=aarch64-linux-ohos' conanfile.py &&
+                         grep -c ac_fn_c_try_run configure
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           host-triplet-only-with-config-guess-patch
+rec_description:        补齐两个 autoconf 辅助脚本，配方仅在 settings.os == "OHOS" 时追加
+                         --host=aarch64-linux-ohos，不写死 --build —— build 三元组交给 config.guess 探测。
+                         ⚠ config.guess 必须按**构建机真实 uname** 打分支：鸿蒙 PC 真机
+                         uname -s 返回 HarmonyOS（非 Linux），须加 aarch64:HarmonyOS:*:* 分支输出
+                         aarch64-unknown-linux-ohos（与 host 规范化值相同 → 真机走原生编译）；
+                         x86_64 交叉构建机命中既有 x86_64:Linux 分支 → 走交叉编译。
+                         只加 aarch64:Linux 分支在真机上不会命中（实测 CI #57604 失败）。
+rec_command:            tc.configure_args.append("--host=aarch64-linux-ohos")  # 配合 patches/ 修 config.sub 与 config.guess
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      upgrade-autoconf-helper-scripts
+fallback_description:   直接用新版 GNU config.guess/config.sub 整体替换随包脚本（适用于上游脚本过旧、
+                         需要补的条目过多时），代价是补丁体积大、与上游差异面变宽。
+fallback_command:       cp <new>/config.{guess,sub} .
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       --build=aarch64[-\w]*-(linux-)?ohos
+forbid_1_reason:        在 x86_64 交叉构建机上使 build == host，configure 按原生编译处理并运行目标机产物
+forbid_1_consequence:   configure: error: cannot run C compiled programs（qemu binfmt-P 下报缺 musl 加载器），
+                         W3 本地 conan create 直接失败
+forbid_2_pattern:       ac_fn_c_try_run
+forbid_2_reason:        仅当项目确实存在运行期探测（AC_RUN_IFELSE）时，本条的 --host 方案才需要复核——
+                         此时按交叉处理会改用缓存默认值
+forbid_2_consequence:   config.h 取到与目标平台不符的默认值；应先 grep -c ac_fn_c_try_run configure 确认为 0
+
+forbid_3_pattern:       aarch64:Linux:\*:\*
+forbid_3_reason:        只给 config.guess 加 aarch64:Linux 分支不足以覆盖鸿蒙 PC 真机——真机
+                         uname -s 返回 HarmonyOS，该分支永不命中；随后 config.guess 落到兜底逻辑，
+                         要往 $TMPDIR 写 dummy.c 做编译探测，HMDFS 上 Permission denied
+forbid_3_consequence:   configure: error: cannot guess build type; you must specify one（CI #57604 实测）；
+                         必须同时提供 aarch64:HarmonyOS:*:* 分支
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E011, E072, E074, E122, E205, E525]
+conflicts_with:         [E122, E205]
+# 冲突说明：E122/E205 的 forbid 口径是「禁止用 --build/--host 作为 workaround」，
+# 适用于能原生判定 ohos、且项目含 AC_RUN_IFELSE 的场景；本条适用于构建机与目标机
+# 架构本就不同（x86_64 交叉机）且 conan profile 两侧同构导致工具链不注入三元组的场景，
+# 此时 --host 是正确语义。判定命令：grep -c ac_fn_c_try_run configure（为 0 则本条适用）。
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E543-draft-419E.md
+last_updated:           2026-09-21
+source_event:           archives/j/jday/2.4
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
