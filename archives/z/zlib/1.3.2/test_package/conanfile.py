@@ -27,6 +27,10 @@ class TestPkg(ConanFile):
         cc = compilers.get("c", "clang") if compilers else "clang"
         # 静态 libz.a：编译 + 静态链接 + 运行，验证 -fPIC 对象可用且符号完整。
         self.run(f"{cc} test.c -o test_probe {inc} -L{libdir} -lz")
+        # 鸿蒙特有测试：libz.a 为 PIC，可被共享库吸收（非 PIC 会在此链接期报 R_AARCH64）。
+        self.run(f"{cc} -shared -fPIC ohos_pic_probe.c -o libz_ohos_probe.so {inc} -L{libdir} -lz")
+        # 鸿蒙特有测试：__OHOS__ / HarmonyOS 运行时 / 真实 API 往返 / PIC 探针 dlopen。
+        self.run(f"{cc} test_ohos.c -o test_ohos {inc} -L{libdir} -lz -ldl")
 
     def test(self):
         if cross_building(self):
@@ -34,3 +38,4 @@ class TestPkg(ConanFile):
             return
         bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
         self.run(f"{bash} -c './test_probe'", env="conanrun")
+        self.run(f"{bash} -c './test_ohos ./libz_ohos_probe.so'", env="conanrun")
