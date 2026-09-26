@@ -1,0 +1,132 @@
+# ═══ Draft knowledge entry — HarmonyOS CMake 平台模块缺失的 rpath 后果面 ═══
+# Timestamp: 2026-09-25
+# Software: libproperties 1.1.2（任何「CMake + 共享库 + add_test/ctest」工程同型）
+# Gate: W0 平台探针 + 真机 conan create 干净轮（ctest 2/2 绿）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+draft:                 "E736-harmonyos-cmake-missing-platform-rpath-ctest-ld-library-path"
+status:                "pending-editor-review"
+id:                    "E736"
+trigger_tool:          "cmake|ctest|ld|clang|readelf"
+phase:                 "configuration|build|runtime"
+error_signature:       "Error loading shared library [^ ]*\\.so|Error relocating [^ ]*: [A-Za-z0-9_]+: symbol not found|System is unknown to cmake|tests failed out of [0-9]+"
+
+severity:              2
+category:              "cmake,build-system,testing,linking,ohos"
+prescan_pattern:       "add_test\\s*\\(|enable_testing\\s*\\(|CMAKE_(BUILD|INSTALL)_RPATH|CMAKE_SHARED_LIBRARY_SONAME"
+match_keywords:        "HarmonyOS, CMAKE_SYSTEM_NAME, Platform module, rpath, CMAKE_BUILD_RPATH, LD_LIBRARY_PATH, ctest, Error loading shared library, Error relocating, RUNPATH, DT_SONAME, SONAME flag, 版本化文件名, 构建树内测试"
+title:                 "CMAKE_SYSTEM_NAME=HarmonyOS 无平台模块使 rpath 链接标志缺失：CMAKE_BUILD_RPATH 静默无效、构建树内 ctest 加载共享库失败；应给测试命令注入 LD_LIBRARY_PATH，并同时补 CMAKE_SHARED_LIBRARY_SONAME_C_FLAG"
+
+root_cause: >-
+  一条根因、两个可独立观测的后果面（各环均有 2026-09-25 设备实测）：
+  ① Conan OHOS profile 把 os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS；
+  ② CMake 按系统名查 Modules/Platform/HarmonyOS.cmake，设备 hnp cmake 4.1.2 无该文件
+  （configure 首屏逐字打 `System is unknown to cmake, create: Platform/HarmonyOS to use
+  this system...`），于是 Platform/Linux.cmake 里定义的共享库/可执行链接旗标
+  （-Wl,-soname, 与 rpath 族）从未被加载；
+  ③ 后果面 A（本条主体）：rpath 旗标未定义 ⇒ CMake 的 rpath 机制整体静默失效——
+  配了 CMAKE_BUILD_RPATH/CMAKE_INSTALL_RPATH、CMAKE_SKIP_RPATH=NO，链接行里依然
+  一个 -Wl,-rpath 都不加，readelf -d 测试可执行文件的 RPATH|RUNPATH 计数恒为 0；
+  构建树内跑 ctest 时 musl 加载器按裸 soname 找不到同目录的共享库 ⇒
+  `Error loading shared library libX.so.N` ⇒ 0% tests passed，形态极像「库坏了/工具链坏了」；
+  ④ 后果面 B（同根因，已在既有条目侧记）：CMAKE_SHARED_LIBRARY_SONAME_<LANG>_FLAG
+  同样未定义 ⇒ 不仅缺 DT_SONAME，CMake 连版本化文件名都不生成，安装树只剩裸 libX.so
+  （W3 L5a `缺少 DT_SONAME`）。③④ 必须一起修，只修其一会留下半套产物。
+
+affected_scope: >-
+  一切以 CMAKE_SYSTEM_NAME=HarmonyOS 配置、产出共享库并用 CMake/ctest 驱动测试的工程
+  （Conan CMakeToolchain 与 OHOS SDK 工具链两条路都命中）；影响面=build() 里的上游测试
+  与消费者 test_package，不在库本身的编译（编译链接阶段不受影响，只有运行期解析受影响）。
+
+verification_cmd: >-
+  # 段1：平台模块缺失（设备 cmake 4.1.2；路径按设备实际 cmake 安装调整）
+  ls /data/service/hnp/share/cmake-4.1/Modules/Platform/HarmonyOS.cmake 2>&1 | tail -1
+  #   → No such file or directory；configure 首屏另有 "System is unknown to cmake, create: Platform/HarmonyOS"
+  #
+  # 段2：rpath 静默失效 + LD_LIBRARY_PATH 兜底（最小工程，新 shell 可直接跑，不引用任何 run 日志）
+  P="$HOME/tmp/e736-rpath-probe"; rm -rf "$P"; mkdir -p "$P/src"; cd "$P/src" || exit 1
+  cat > CMakeLists.txt <<'EOF'
+  cmake_minimum_required(VERSION 3.15)
+  project(e736 C)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/q.c" "int q736(void){return 42;}\n")
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/t.c" "#include <stdio.h>\nint q736(void);\nint main(void){printf(\"%d\\n\",q736());return q736()==42?0:1;}\n")
+  add_library(q736 SHARED "${CMAKE_CURRENT_BINARY_DIR}/q.c")
+  add_executable(t "${CMAKE_CURRENT_BINARY_DIR}/t.c")
+  target_link_libraries(t q736)
+  enable_testing()
+  add_test(NAME t COMMAND t)
+  EOF
+  cmake -S . -B "$P/b" -DCMAKE_BUILD_RPATH="$P/b" >/dev/null 2>&1
+  cmake --build "$P/b" -j4 >/dev/null 2>&1
+  readelf -d "$P/b/t" | grep -cE 'RPATH|RUNPATH'
+  #   → 0（显式设了 CMAKE_BUILD_RPATH 也一条不加 = rpath 机制静默失效）
+  ls "$P/b" | grep '^lib'
+  #   → 只有 libq736.so（无 SONAME flag ⇒ CMake 不生成 .so.1/.so.<ver> 版本化文件名）
+  (cd "$P/b" && ctest) 2>&1 | grep 'tests passed'
+  #   → 0% tests passed, 1 tests failed out of 1（Error loading shared library libq736.so）
+  (cd "$P/b" && LD_LIBRARY_PATH="$P/b" ctest) 2>&1 | grep 'tests passed'
+  #   → 100% tests passed, 0 tests failed out of 1
+  #
+  # 段3：修法（生产侧两行）——加 -DCMAKE_SHARED_LIBRARY_SONAME_C_FLAG 后重跑段2
+  cmake -S . -B "$P/c" -DCMAKE_BUILD_RPATH="$P/c" -DCMAKE_SHARED_LIBRARY_SONAME_C_FLAG="-Wl,-soname," >/dev/null 2>&1
+  cmake --build "$P/c" -j4 >/dev/null 2>&1
+  ls "$P/c" | grep '^lib'; readelf -d "$P/c/libq736.so" | grep -i soname
+  #   → libq736.so -> libq736.so.1 -> libq736.so.1.1.2（本探针无 VERSION 故只多 SONAME 行）
+  #
+  # 注意：段2 的共享库名不要用 libm.so/libc.so 等会被加载器特殊解析的名字——
+  # 实测用 libm.so 时即使 LD_LIBRARY_PATH 指向正确目录也报 "m: symbol not found"（假阴性）。
+
+rec_priority:          1
+rec_approach:          "scoped-ld-library-path-for-ctest-plus-soname-flag"
+rec_description: >-
+  ① 在配方 generate() 注入 tc.variables["CMAKE_SHARED_LIBRARY_SONAME_C_FLAG"] = "-Wl,-soname,"
+  （C 工程只加 C 项即可，加 CXX 项会在纯 C 工程打 "Manually-specified variables were not used"
+  告警）——同时消掉后果面 B，让安装树出现版本化文件名与 DT_SONAME；
+  ② 在 build() 跑上游 ctest 之前，把**构建树目录**前置进本进程 LD_LIBRARY_PATH 再调
+  `ctest --test-dir <build folder> --output-on-failure`，作用域仅限这一次测试命令，
+  不改上游 CMakeLists、不加补丁、不影响 package() 与消费者环境。
+  ②是「原生机制不可用时的降级」（P-ENV-001 要求优先原生机制——本平台的原生机制
+  CMAKE_BUILD_RPATH 已实测为 no-op，见 verification_cmd 段2），符合 P-BUILD-001
+  「平台限制必须降级而非绕过」。
+rec_command:           'tc.variables["CMAKE_SHARED_LIBRARY_SONAME_C_FLAG"] = "-Wl,-soname,"; os.environ["LD_LIBRARY_PATH"] = build_dir + os.pathsep + os.environ.get("LD_LIBRARY_PATH",""); self.run("ctest --test-dir <build_dir> --output-on-failure", cwd=build_dir)'
+rec_auto_fix:          false
+rec_impl:              "archives/l/libproperties/1.1.2/conanfile.py :: generate() + build()::_run_upstream_ctest"
+
+fallback_priority:     2
+fallback_approach:      "patch-cmake-test-environment-property"
+fallback_description:   可以用补丁给上游 CMakeLists 的 add_test 后追加 set_tests_properties(<case> PROPERTIES ENVIRONMENT \"LD_LIBRARY_PATH=<build dir>\")——这是 CMake 的测试级原生机制，作用面更窄。代价：改动上游文件 ⇒ 必须 refresh-patch 两面同步 + 补丁三关（NUL=0 / @@≥1 / 真 apply 后 cmp 一致），且只对用 CMake 注册用例的工程有效（裸 Makefile 工程没有该挂点）。
+fallback_command:       'apply_conandata_patches(self) 后 ctest --test-dir <build folder> --output-on-failure；或 set_tests_properties(1.properties PROPERTIES ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}")'
+fallback_auto_fix:      false
+fallback_impl:          "patches/0001-*.patch + conandata.yml patches 段"
+
+fallback2_priority:     3
+fallback2_approach:     "static-build-removes-loader-resolution"
+fallback2_description:  把 BUILD_SHARED_LIBS=OFF 构建静态库，链接期直接归档、运行期无加载器解析问题。代价：交付面与上游默认（shared ON）不一致，且完全失去 DT_SONAME/版本化文件名的覆盖，W3 的 L5a SONAME 门禁与消费者 dlopen 场景不再被验证——只在产物本就不需要共享形态时用。
+fallback2_command:      'tc.variables["BUILD_SHARED_LIBS"] = "OFF"'
+fallback2_auto_fix:     false
+fallback2_impl:         "conanfile.py :: generate()"
+
+forbid_1_pattern:      "CMAKE_BUILD_RPATH|CMAKE_INSTALL_RPATH|CMAKE_SKIP_RPATH"
+forbid_1_reason:       本平台上 rpath 旗标根本未被定义，这三个变量是**静默 no-op**：设了以后 readelf 仍读到 0 条 RPATH/RUNPATH，给人「已修复」错觉。
+forbid_1_consequence:  ctest 继续 0% tests passed，排障方向被带偏到「库/工具链坏了」，反复重配重编仍不绿。
+
+forbid_2_pattern:      "ctest.*(注释|删除|去掉)|#\\s*self\\.run\\(.*ctest|LIBPROPERTIES_TEST.*OFF"
+forbid_2_reason:       把上游测试从 build() 摘掉来消红，属伪造通过面：上游套件不再执行，CI L1c 找不到 ctest 痕迹，N/N′ 口径随之塌陷。
+forbid_2_consequence:  违反 R51「上游测试必须真实执行」，外部审查按实测 N > 声明 N 或无执行痕迹判不通过。
+
+principles:            [P-ENV-001, P-BUILD-001]
+caused_by:             platform-module-missing-harmonyos
+causes:                ctest-shared-lib-load-failure|non-versioned-shared-artifact
+similar_to:            [E537, E096]
+conflicts_with:        []
+prerequisite_of:       []
+doc_file:              "drafts/DRAFT-E736-harmonyos-cmake-missing-platform-rpath-ctest-ld-library-path.md"
+last_updated:          "2026-09-25"
+source_event:          "libproperties 1.1.2 适配（github/tinyhubs/libproperties tag 1.1.2，sha256 9ee3903648f8de6c9e2d71fd778721844cc9881dcc2afe2c66cdb2d1cb86b39a）；段1–段3 探针 2026-09-25 设备实测，干净轮 ctest 2/2 绿"
+authors:               "libproperties-1.1.2 任务"
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      "2026-09-25"
