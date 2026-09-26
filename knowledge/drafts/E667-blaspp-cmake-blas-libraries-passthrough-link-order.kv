@@ -1,0 +1,114 @@
+# ═══════════════════════════════════════════════════════════════════
+# E667 blaspp 族 CMake 后端探测：BLAS_LIBRARIES 直通 + 静态链接拓扑序
+#   BLASFinder/LAPACKFinder 的 -lblas/-llapack 名称探测无法感知 flang
+#   Fortran 运行时依赖 → "BLAS++ requires a BLAS library and none was
+#   found"；即使探测过了，静态链接序不当也会 undefined reference
+# 来源: feat/blaspp-2024.10.26（设备原生 conan create 实测，2026-09-22）
+# 路径: 依赖项任务 blaspp/2024.10.26 首轮即绿（configure 探测全命中）
+# 状态: 草稿（待审核 promote）
+# ═══════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E667
+trigger_tool:           cmake|conan
+phase:                  configuration|building
+error_signature:        BLAS\+\+ requires a BLAS library and none was found|
+                        BLAS library not found|
+                        requires a LAPACK library and none was found|
+                        undefined reference to `_(s|d|c|z)(dot|gemm|axpy)_|
+                        undefined reference to `_FortranAio
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, cmake, blas, lapack, fortran, static-link
+match_keywords:         blaspp, lapackpp, BLASFinder, LAPACKFinder, BLAS_LIBRARIES,
+                        LAPACK_LIBRARIES, use_cmake_find_blas, BLA_VENDOR, libblas.a,
+                        FortranRuntime, xerbla, flang, SLATE, cblas, try_compile,
+                        -lblas, -llapack, 名字修饰, mangling, LP64
+title:                  BLAS++/LAPACK++ 族 CMake 后端探测失败（-lblas 裸链接缺 Fortran 运行时）；
+                        应走 BLAS_LIBRARIES/LAPACK_LIBRARIES 直通候选并按静态拓扑序排列
+prescan_pattern:        BLAS\+\+ requires a BLAS library|BLASFinder|LAPACKFinder|use_cmake_find_blas
+prescan_globs:          conanfile.py, CMakeLists.txt, cmake/*.cmake
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             blaspp/lapackpp（UTK ICL SLATE 族）不用 conan，其
+                        cmake/BLASFinder.cmake、LAPACKFinder.cmake 逐候选
+                        try_compile/try_run（候选含 MKL/ESSL/OpenBLAS/Accelerate/
+                        generic "-lblas"）。鸿蒙侧两个坑：① ohpcd 的参考
+                        libblas.a（blas|lapack 包）是 flang 编译的 Fortran 库，
+                        xerbla.o 引用 _FortranAio*/_FortranAStopStatement，
+                        裸 "-lblas"/"-llapack" 链接探针必失败（缺 Fortran 运行时）；
+                        ② CMakeToolchain 设 CMAKE_SYSTEM_NAME=HarmonyOS →
+                        CMAKE_CROSSCOMPILING=1，try_run 跳过运行（上游 finder
+                        内置该分支：能链接即视为可用），同时 blas=auto 时
+                        ILP64 候选也会被"链接通过"误选——必须让 LP64 候选
+                        首位命中（直通清单下 mangling 外层、int 内层，
+                        " "(LP64) 在 -DBLAS_ILP64 之前，首个成功即 break，
+                        LP64 确定性优先）。
+affected_scope:         blaspp、lapackpp 及任何消费其 finder 的 SLATE 族包；
+                        也适用于一切"静态 BLAS/LAPACK + flang 运行时"组合的
+                        CMake 工程在 OHOS 上的探测。上游 blaspp tag v2024.10.26、
+                        lapackpp tag v2024.10.26 双包实证。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           blas-libraries-passthrough
+rec_description:        走 finder 内置的第一候选 BLAS_LIBRARIES/LAPACK_LIBRARIES
+                        直通（用户显式给定库全路径清单），不使用
+                        use_cmake_find_blas（CMake 内置 FindBLAS 同样无法感知
+                        Fortran 运行时）。清单必须按静态链接拓扑序（GNU 单遍
+                        语义下也安全）：消费者在提供者之前——
+                        BLAS_LIBRARIES = liblapack.a;libcblas.a;libblas.a;
+                        libFortranRuntime.a;libFortranDecimal.a;m
+                        LAPACK_LIBRARIES = liblapack.a;libFortranRuntime.a;
+                        libFortranDecimal.a;m
+                        （lapack.a/cblas.a 是 BLAS 符号的消费者，必须在
+                        libblas.a 之前；Fortran 运行时收尾）。
+                        cblas.h/-lcblas 的发现靠编译器搜索路径环境变量
+                        CPATH（头）与 LIBRARY_PATH（-l 搜索），在 build()
+                        内指向 cblas 包 include/lib，仅作用本构建会话。
+                        conan 消费面：package_info 设
+                        cmake_file_name/cmake_target_name = blaspp/blaspp::blaspp
+                        （与上游 blasppConfig 命名一致，lapackpp 即按
+                        find_package(blaspp) 消费），cpp_info.requires 传递
+                        lapack::lapack、cblas::cblas。
+rec_command:            tc.variables["BLAS_LIBRARIES"] = ";".join([lapack_a, cblas_a, blas_a, frt_a, fdec_a, "m"])
+                        tc.variables["LAPACK_LIBRARIES"] = ";".join([lapack_a, frt_a, fdec_a, "m"])
+                        os.environ["CPATH"] = cblas_include; os.environ["LIBRARY_PATH"] = cblas_lib
+rec_auto_fix:           false
+rec_impl:               conanfile-generate-toolchain-variables
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       use_cmake_find_blas=ON|BLA_VENDOR=.*|find_package\(BLAS\)
+forbid_1_reason:        CMake 内置 FindBLAS/FindLAPACK 的试链接同样无法感知 flang
+                        Fortran 运行时依赖，且其 OpenBLAS/MKL 分支与参考 BLAS 无关
+forbid_1_consequence:   探测失败 FATAL_ERROR 或误选候选，浪费整轮构建
+forbid_2_pattern:       BLAS_LIBRARIES.*libblas\.a;liblapack\.a|blas\.a.*放.*lapack\.a.*之前.*当.*lapack.*消费.*BLAS
+forbid_2_reason:        静态库单遍链接语义：提供者（libblas.a）排在消费者
+                        （liblapack.a/libcblas.a）之前时，后拉入的成员引用的
+                        BLAS 符号无处解析（GNU ld 严格单遍下必失败）
+forbid_2_consequence:   configure 探针过了但 tester/消费者链接 undefined reference
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P017
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             blas/3.12.1（同源问题：libblas.a 需 FortranRuntime 随链，
+                        该包走 make 路径绕开 CMake 探测）、
+                        lapack/3.12.1（flang tool_requires + 运行时随包先例）
+caused_by:
+conflicts_with:
+prerequisite_of:        lapackpp/2024.10.26（lapackpp find_package(blaspp) 硬依赖）
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/b/blaspp/2024.10.26 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望：configure 段 "Found BLAS library: …liblapack.a;…libcblas.a;…libblas.a;…"
+                        # "-DBLAS_FORTRAN_ADD_ yes"、"Found CBLAS library"、"Found LAPACK library"
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:              # PR 创建后由知识库主编回填（执行体单次 push 口径，见 final-report 遗留项）
+source_commit:          # 随 PR 合并时由知识库主编回填（同上）
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
