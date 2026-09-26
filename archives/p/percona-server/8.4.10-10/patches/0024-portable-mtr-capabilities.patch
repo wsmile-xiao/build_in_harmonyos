@@ -1,0 +1,228 @@
+diff --git a/mysql-test/common/rpl/rpl_gtid_drop_table.test b/mysql-test/common/rpl/rpl_gtid_drop_table.test
+index a01b3be16662530760371ab02cca89eeba57747e..91c7dabd4606d0749a2dafee0180c0f539dd36a7 100644
+--- a/mysql-test/common/rpl/rpl_gtid_drop_table.test
++++ b/mysql-test/common/rpl/rpl_gtid_drop_table.test
+@@ -35,6 +35,16 @@
+ --source include/rpl/default_connections.inc
+ --source include/have_myisam.inc
+ 
++--disable_query_log
++--disable_result_log
++--let $rpl_connection_silent= 1
++--source include/rpl/connection_replica.inc
++CALL mtr.add_suppression("Could not remove temporary table: '.*#sql[^']*', error: 2");
++--source include/rpl/connection_source.inc
++--let $rpl_connection_silent=
++--enable_result_log
++--enable_query_log
++
+ --echo #
+ --echo # First part
+ --echo #
+diff --git a/mysql-test/include/resource_group_init.inc b/mysql-test/include/resource_group_init.inc
+index 7ef0de83b69e7697ca59cfb55ec7d53dee3e6c17..26e04481a53b9b79f6ab4ea0daf026f13a822af6 100644
+--- a/mysql-test/include/resource_group_init.inc
++++ b/mysql-test/include/resource_group_init.inc
+@@ -42,3 +42,18 @@ if ($num_vcpu < 4)
+ {
+   --skip Test requires atlest 4 VCPUS
+ }
++
++--disable_query_log
++--disable_result_log
++--error 0,ER_FEATURE_UNSUPPORTED
++CREATE RESOURCE GROUP mtr_resource_group_probe TYPE=USER;
++let $resource_group_supported= `SELECT COUNT(*) FROM INFORMATION_SCHEMA.RESOURCE_GROUPS WHERE RESOURCE_GROUP_NAME='mtr_resource_group_probe'`;
++if (!$resource_group_supported)
++{
++  --enable_result_log
++  --enable_query_log
++  --skip Resource Groups are unsupported by this platform
++}
++DROP RESOURCE GROUP mtr_resource_group_probe;
++--enable_result_log
++--enable_query_log
+diff --git a/mysql-test/lib/mtr_unzip.pl b/mysql-test/lib/mtr_unzip.pl
+new file mode 100644
+index 0000000000000000000000000000000000000000..afa6a58b47749e4292d929fcba996d70378847d7
+--- /dev/null
++++ b/mysql-test/lib/mtr_unzip.pl
+@@ -0,0 +1,55 @@
++#!/usr/bin/env perl
++use strict;
++use warnings;
++
++use File::Basename qw(dirname);
++use File::Path qw(make_path);
++use IO::Uncompress::Unzip qw($UnzipError);
++
++my ($archive, $destination);
++while (@ARGV) {
++  my $arg = shift @ARGV;
++  if ($arg eq '-d') {
++    $destination = shift @ARGV;
++  } elsif ($arg =~ /^-/) {
++    next;
++  } elsif (!defined $archive) {
++    $archive = $arg;
++  } else {
++    die "unexpected argument: $arg\n";
++  }
++}
++
++die "usage: mtr_unzip.pl [-qo] ARCHIVE -d DESTINATION\n"
++    unless defined $archive && defined $destination;
++
++my $zip = IO::Uncompress::Unzip->new($archive)
++    or die "cannot open $archive: $UnzipError\n";
++
++for (;;) {
++  my $header = $zip->getHeaderInfo();
++  my $name = $header->{Name};
++  $name =~ tr{\\}{/};
++  die "unsafe archive path: $name\n"
++      if $name =~ m{^/} || $name =~ m{(?:^|/)\.\.(?:/|$)};
++
++  my $output = "$destination/$name";
++  if ($name =~ m{/$}) {
++    make_path($output);
++  } else {
++    make_path(dirname($output));
++    open(my $file, '>:raw', $output) or die "cannot create $output: $!\n";
++    my $buffer;
++    while (1) {
++      my $read = $zip->read($buffer);
++      die "cannot read $name: $UnzipError\n" if !defined $read || $read < 0;
++      last if $read == 0;
++      print {$file} $buffer or die "cannot write $output: $!\n";
++    }
++    close($file) or die "cannot close $output: $!\n";
++  }
++
++  last unless $zip->nextStream();
++}
++
++exit 0;
+diff --git a/mysql-test/suite/rpl/t/rpl_loaddata_symlink-master.sh b/mysql-test/suite/rpl/t/rpl_loaddata_symlink-master.sh
+index d1c10ab4861cc31223e5b2390db3f5a2dae0624e..ac1eecc05f24a1415852350d14da7a0311863226 100755
+--- a/mysql-test/suite/rpl/t/rpl_loaddata_symlink-master.sh
++++ b/mysql-test/suite/rpl/t/rpl_loaddata_symlink-master.sh
+@@ -1,4 +1,13 @@
+ #! /bin/bash
+ #
+-rm -f $MYSQLTEST_VARDIR/std_data_master_link
+-ln -s $MYSQLTEST_VARDIR/std_data $MYSQLTEST_VARDIR/std_data_master_link
++link=$MYSQLTEST_VARDIR/std_data_master_link
++skip_file=$MYSQLTEST_VARDIR/rpl_loaddata_symlink_skip.inc
++test -f "$skip_file" || : > "$skip_file"
++test ! -d "$link" || rmdir "$link"
++rm -f "$link"
++if ! ln -s "$MYSQLTEST_VARDIR/std_data" "$link"; then
++  mkdir -p "$link"
++  printf '%s\n' \
++    '--skip Symbolic links are unsupported by this filesystem' > "$skip_file"
++fi
++exit 0
+diff --git a/mysql-test/suite/rpl/t/rpl_loaddata_symlink-slave.sh b/mysql-test/suite/rpl/t/rpl_loaddata_symlink-slave.sh
+index 88df6b15adf5e2c138ffc2fabf1a6aeba0164bd8..3938c4303e9fd775b8a43a9694a98c5e617fcf4f 100755
+--- a/mysql-test/suite/rpl/t/rpl_loaddata_symlink-slave.sh
++++ b/mysql-test/suite/rpl/t/rpl_loaddata_symlink-slave.sh
+@@ -1,4 +1,13 @@
+ #! /bin/bash
+ #
+-rm -f $MYSQLTEST_VARDIR/std_data_slave_link
+-ln -s $MYSQLTEST_VARDIR/std_data $MYSQLTEST_VARDIR/std_data_slave_link
++link=$MYSQLTEST_VARDIR/std_data_slave_link
++skip_file=$MYSQLTEST_VARDIR/rpl_loaddata_symlink_skip.inc
++test -f "$skip_file" || : > "$skip_file"
++test ! -d "$link" || rmdir "$link"
++rm -f "$link"
++if ! ln -s "$MYSQLTEST_VARDIR/std_data" "$link"; then
++  mkdir -p "$link"
++  printf '%s\n' \
++    '--skip Symbolic links are unsupported by this filesystem' > "$skip_file"
++fi
++exit 0
+diff --git a/mysql-test/suite/rpl/t/rpl_loaddata_symlink.test b/mysql-test/suite/rpl/t/rpl_loaddata_symlink.test
+index 0466f0306662e26aabf8ce3f28317e6be486636b..1ec11c0e614465ea54d837374297c218d975ce72 100644
+--- a/mysql-test/suite/rpl/t/rpl_loaddata_symlink.test
++++ b/mysql-test/suite/rpl/t/rpl_loaddata_symlink.test
+@@ -7,6 +7,7 @@
+ --source include/not_windows.inc
+ # This test case is specific to binlog_format=statement
+ --source include/have_binlog_format_statement.inc
++--source $MYSQLTEST_VARDIR/rpl_loaddata_symlink_skip.inc
+ --source include/rpl/init_source_replica.inc
+ 
+ create table t1(a int not null auto_increment, b int, primary key(a) );
+diff --git a/mysql-test/suite/sys_vars/r/buffered_error_log_filename_basic.result b/mysql-test/suite/sys_vars/r/buffered_error_log_filename_basic.result
+index 6596f47d10f175ff0494458aeb86b62785aa8d69..1ddfbd22ea4d3aae87c709bfd79a62878f0596de 100644
+--- a/mysql-test/suite/sys_vars/r/buffered_error_log_filename_basic.result
++++ b/mysql-test/suite/sys_vars/r/buffered_error_log_filename_basic.result
+@@ -2,10 +2,10 @@ SET @start_value = @@global.buffered_error_log_filename;
+ SELECT @start_value;
+ @start_value
+ 
+-SET @@global.buffered_error_log_filename = "/tmp/bar.txt";
++SET @@global.buffered_error_log_filename = "MYSQL_TMP_DIR/bar.txt";
+ SELECT @@global.buffered_error_log_filename;
+ @@global.buffered_error_log_filename
+-/tmp/bar.txt
++MYSQL_TMP_DIR/bar.txt
+ SET @@global.buffered_error_log_filename = '';
+ SELECT @@global.buffered_error_log_filename;
+ @@global.buffered_error_log_filename
+diff --git a/mysql-test/suite/sys_vars/t/buffered_error_log_filename_basic.test b/mysql-test/suite/sys_vars/t/buffered_error_log_filename_basic.test
+index 7650147fdc5b21d3b2fee735cbf312ebb59c57c3..580dc98fc42c6337e68225d3a8d0266e8fc005a7 100644
+--- a/mysql-test/suite/sys_vars/t/buffered_error_log_filename_basic.test
++++ b/mysql-test/suite/sys_vars/t/buffered_error_log_filename_basic.test
+@@ -2,7 +2,10 @@ SET @start_value = @@global.buffered_error_log_filename;
+ SELECT @start_value;
+ 
+ 
+-SET @@global.buffered_error_log_filename = "/tmp/bar.txt";
++let $buffered_error_log_file= $MYSQL_TMP_DIR/bar.txt;
++--replace_result $MYSQL_TMP_DIR MYSQL_TMP_DIR
++--eval SET @@global.buffered_error_log_filename = "$buffered_error_log_file"
++--replace_result $MYSQL_TMP_DIR MYSQL_TMP_DIR
+ SELECT @@global.buffered_error_log_filename;
+ SET @@global.buffered_error_log_filename = '';
+ SELECT @@global.buffered_error_log_filename;
+diff --git a/mysql-test/suite/x/t/resource_groups.test b/mysql-test/suite/x/t/resource_groups.test
+index df875f7c041b89bac5f953799960fbbc2a1819d6..bfcd3a198bd8456249e6382e5e4cc8ddfd83ef3c 100644
+--- a/mysql-test/suite/x/t/resource_groups.test
++++ b/mysql-test/suite/x/t/resource_groups.test
+@@ -1,7 +1,7 @@
+ --source include/not_mac_os.inc
+ --source include/xplugin_preamble.inc
+---source include/xplugin_create_user.inc
+ --source include/resource_group_init.inc
++--source include/xplugin_create_user.inc
+ 
+ --echo #
+ --echo # BUG#30900411 - RESOURCE GROUP MANAGEMENT STATEMENTS ARE NOT SUPPORTED BY PLUGGABLE PROTOCOLS
+diff --git a/mysql-test/suite/x/t/session_resource_group.test b/mysql-test/suite/x/t/session_resource_group.test
+index 36e85fab2b688652ea2c0d76bb2b084db56a6c34..4c5b78112defe11f164cdb79292e603110c49946 100644
+--- a/mysql-test/suite/x/t/session_resource_group.test
++++ b/mysql-test/suite/x/t/session_resource_group.test
+@@ -4,6 +4,7 @@
+ --source ../include/have_performance_schema_threads.inc
+ --source include/not_mac_os.inc
+ --source include/xplugin_preamble.inc
++--source include/resource_group_init.inc
+ --source include/xplugin_create_user.inc
+ ## Test starts here
+ 
+diff --git a/mysql-test/suite/x/t/upgrade.test b/mysql-test/suite/x/t/upgrade.test
+index 9aa2f92e90983718d1bc9eb2c3a40d062c645f29..b9bff464e8ab25bfa7988500e286e7ca80f58f68 100644
+--- a/mysql-test/suite/x/t/upgrade.test
++++ b/mysql-test/suite/x/t/upgrade.test
+@@ -28,7 +28,7 @@ copy_file $ZIP_FILE $MYSQL_TMP_DIR/data.zip;
+ file_exists $MYSQL_TMP_DIR/data.zip;
+ mkdir $MYSQL_TMP_DIR/data_80011/;
+ mkdir $MYSQL_TMP_DIR/data_80011_ci/;
+-exec unzip -qo $MYSQL_TMP_DIR/data.zip -d $MYSQL_TMP_DIR/;
++exec perl $MYSQL_TEST_DIR/lib/mtr_unzip.pl -qo $MYSQL_TMP_DIR/data.zip -d $MYSQL_TMP_DIR/;
+ 
+ --echo # Mark that error-logs generated until now are not important.
+ let $error_pattern = SAVEPOS;
