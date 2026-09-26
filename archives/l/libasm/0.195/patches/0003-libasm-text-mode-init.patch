@@ -1,0 +1,53 @@
+libasm text-mode 上下文/节字段初始化修复（上游 bug，适配时发现并修复）。
+
+上游 libasm 只在 binary 路径（prepare_binary_output / binary_newscn）初始化
+AsmCtx 与 AsmScn 的字段；text 输出路径（prepare_text_output / text_newscn）
+不初始化。但 asm_end -> __libasm_finictx -> free_section 无条件遍历/释放
+content/subnext/symbol_tab 等字段 —— text 模式（textp=true，无需内部
+libebl，是 libasm 可独立消费的公共 API）下这些字段是 malloc 垃圾值，
+asm_end 必崩（实测 SIGTRAP/Segfault）。修复让 text 路径与 binary 路径
+做同样的初始化。
+
+上游测试（tests/asm-tst*.c）只跑 binary 模式（用 ebl_openbackend_machine），
+未覆盖 text 模式，故上游从未触发此崩溃。
+
+--- a/libasm/asm_begin.c
++++ b/libasm/asm_begin.c
+@@ -45,6 +45,18 @@
+ static AsmCtx_t *
+ prepare_text_output (AsmCtx_t *result)
+ {
++  /* Initialize the context the same way prepare_binary_output does.
++     Upstream only initialized these in the binary path; asm_end ->
++     __libasm_finictx frees them unconditionally, so a text-mode context
++     crashed on asm_end (SIGTRAP/segfault) with uninitialized fields.  */
++  result->section_list = NULL;
++  asm_symbol_tab_init (&result->symbol_tab, 67);
++  result->nsymbol_tab = 0;
++  result->section_strtab = dwelf_strtab_init (true);
++  result->symbol_strtab = dwelf_strtab_init (true);
++  result->groups = NULL;
++  result->ngroups = 0;
++
+   if (result->fd == -1)
+     result->out.file = stdout;
+   else
+--- a/libasm/asm_newscn.c
++++ b/libasm/asm_newscn.c
+@@ -67,6 +67,16 @@
+ static AsmScn_t *
+ text_newscn (AsmScn_t *result, GElf_Word type, GElf_Xword flags)
+ {
++  /* Initialize per-section fields exactly like binary_newscn does:
++     asm_end -> __libasm_finictx -> free_section walks content/subnext,
++     which must not be uninitialized garbage in text mode.  */
++  result->subsection_id = 0;
++  result->offset = 0;
++  result->max_align = 1;
++  result->content = NULL;
++  result->pattern = (struct FillPattern *) __libasm_default_pattern;
++  result->subnext = NULL;
++
+   /* Buffer where we construct the flag string.  */
+   char flagstr[sizeof (GElf_Xword) * 8 + 5];
+   char *wp = flagstr;
