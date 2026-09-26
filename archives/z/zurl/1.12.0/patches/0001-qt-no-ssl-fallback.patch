@@ -1,0 +1,143 @@
+# 0001-qt-no-ssl-fallback.patch — zurl 1.12.0
+# Upstream src/websocket.cpp uses QSslSocket unconditionally (even for
+# plain ws:// it constructs a QSslSocket and only branches on
+# connectToHostEncrypted vs connectToHost). Only the openssl/x509
+# re-verify block is guarded by HAVE_OPENSSL.
+# When Qt itself is built with -no-openssl (QT_NO_SSL, as in
+# qt5-qtbase/5.15.2.2), <QSslSocket> declares no QSslSocket/QSslError
+# types, so the build fails with "unknown type name 'QSslSocket'" plus
+# cascading QPointer conversion errors. Forcing HAVE_OPENSSL off does
+# not help: the failing code is not inside any HAVE_OPENSSL guard.
+# Fix: keep the upstream QSslSocket path when Qt provides SSL, fall
+# back to QTcpSocket otherwise. wss:// on a QT_NO_SSL build fails at
+# runtime with the regular ErrorTls; plain ws:// (including the
+# upstream QtTest suites on local QTcpServer) works on both configs.
+--- a/src/websocket.cpp
++++ b/src/websocket.cpp
+@@ -35,7 +35,10 @@
+ #include <QUrl>
+ #include <QPointer>
+ #include <QRandomGenerator>
++#include <QTcpSocket>
++#ifndef QT_NO_SSL
+ #include <QSslSocket>
++#endif
+ #include "log.h"
+ #include "bufferlist.h"
+ #include "addressresolver.h"
+@@ -338,7 +341,7 @@ public:
+ 	bool ignoreTlsErrors;
+ 	int maxRedirects;
+ 	int maxFrameSize;
+-	QSslSocket *sock;
++	QTcpSocket *sock;
+ 	QUrl requestUri;
+ 	HttpHeaders requestHeaders;
+ 	QByteArray requestKey;
+@@ -883,28 +886,64 @@ private slots:
+ 		if(!self)
+ 			return;
+ 
+-		sock = new QSslSocket(this);
+-		connect(sock, &QSslSocket::connected, this, &Private::sock_connected);
+-		connect(sock, &QSslSocket::readyRead, this, &Private::sock_readyRead);
+-		connect(sock, &QSslSocket::bytesWritten, this, &Private::sock_bytesWritten);
+-		connect(sock, &QSslSocket::disconnected, this, &Private::sock_disconnected);
+-#if QT_VERSION >= 0x060000
+-		connect(sock, &QSslSocket::errorOccurred, this, &Private::sock_error);
+-		connect(sock, &QSslSocket::sslErrors, this, &Private::sock_sslErrors);
+-#else
+-		connect(sock, static_cast<void (QSslSocket::*)(QAbstractSocket::SocketError)>(&QSslSocket::error), this, &Private::sock_error);
+-		connect(sock, static_cast<void (QSslSocket::*)(const QList<QSslError> &)>(&QSslSocket::sslErrors), this, &Private::sock_sslErrors);
+-#endif
+-
+ 		bool useSsl = (requestUri.scheme() == "wss");
+ 		int port = requestUri.port(useSsl ? 443 : 80);
+ 
+ 		log_debug("ws: connecting to %s:%d%s", qPrintable(addr.toString()), port, useSsl ? " (ssl)" : "");
+ 
++#ifndef QT_NO_SSL
++		QSslSocket *sslSock = 0;
++		if(useSsl)
++		{
++			sslSock = new QSslSocket(this);
++			sock = sslSock;
++		}
++		else
++		{
++			sock = new QTcpSocket(this);
++		}
++#else
++		if(useSsl)
++		{
++			// This Qt build was configured without SSL support
++			// (QT_NO_SSL, e.g. -no-openssl): wss:// cannot be served.
++			// Fail the request with the regular TLS error instead of
++			// failing the build.
++			log_debug("ws: wss requested but Qt has no SSL support");
++			cleanup();
++			state = Idle;
++			errorCondition = ErrorTls;
++			emit q->error();
++			return;
++		}
++		sock = new QTcpSocket(this);
++#endif
++		connect(sock, &QTcpSocket::connected, this, &Private::sock_connected);
++		connect(sock, &QTcpSocket::readyRead, this, &Private::sock_readyRead);
++		connect(sock, &QTcpSocket::bytesWritten, this, &Private::sock_bytesWritten);
++		connect(sock, &QTcpSocket::disconnected, this, &Private::sock_disconnected);
++#if QT_VERSION >= 0x060000
++		connect(sock, &QTcpSocket::errorOccurred, this, &Private::sock_error);
++#else
++		connect(sock, static_cast<void (QTcpSocket::*)(QAbstractSocket::SocketError)>(&QTcpSocket::error), this, &Private::sock_error);
++#endif
++#ifndef QT_NO_SSL
++		if(sslSock)
++		{
++#if QT_VERSION >= 0x060000
++			connect(sslSock, &QSslSocket::sslErrors, this, &Private::sock_sslErrors);
++#else
++			connect(sslSock, static_cast<void (QSslSocket::*)(const QList<QSslError> &)>(&QSslSocket::sslErrors), this, &Private::sock_sslErrors);
++#endif
++		}
++
+ 		if(useSsl)
+-			sock->connectToHostEncrypted(addr.toString(), port, requestUri.host());
++			sslSock->connectToHostEncrypted(addr.toString(), port, requestUri.host());
+ 		else
+ 			sock->connectToHost(host, port);
++#else
++		sock->connectToHost(host, port);
++#endif
+ 	}
+ 
+ 	void resolver_resultsReady(const QList<QHostAddress> &results)
+@@ -1128,6 +1167,7 @@ private slots:
+ 		tryNextAddress();
+ 	}
+ 
++#ifndef QT_NO_SSL
+ 	void sock_sslErrors(const QList<QSslError> &errors)
+ 	{
+ 		if(log_outputLevel() >= LOG_LEVEL_DEBUG)
+@@ -1145,7 +1185,7 @@ private slots:
+ 			if(!connectHost.isEmpty() && trustConnectHost)
+ 			{
+ #ifdef HAVE_OPENSSL
+-				QSslCertificate cert = sock->peerCertificate();
++				QSslCertificate cert = static_cast<QSslSocket *>(sock)->peerCertificate();
+ 				QByteArray der = cert.toDer();
+ 				const unsigned char *p = (const unsigned char *)der.data();
+ 				X509 *opensslCert = d2i_X509(NULL, &p, der.size());
+@@ -1161,8 +1201,9 @@ private slots:
+ 		}
+ 
+ 		if(ignoreTlsErrors || hostMismatchOk)
+-			sock->ignoreSslErrors();
++			static_cast<QSslSocket *>(sock)->ignoreSslErrors();
+ 	}
++#endif
+ };
+ 
+ WebSocket::WebSocket(QObject *parent) :
