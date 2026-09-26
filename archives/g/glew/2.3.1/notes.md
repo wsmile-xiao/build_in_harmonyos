@@ -1,41 +1,44 @@
-# glew 2.3.1 适配笔记
+# GLEW 2.3.1 OpenHarmony PC adaptation
 
-## 编译环境
-- 构建系统: {cmake|autotools|makefile|meson|custom}
-- 编译日期: {2026-05-29}
-- 编译器: clang/clang++
-- 状态: {published|built|failed}
+## Source and scope
 
-## 编译步骤
+- Official release: `glew-2.3.1`
+- Archive: `https://downloads.sourceforge.net/project/glew/glew/2.3.1/glew-2.3.1.tgz`
+- SHA-256: `B64790F94B926ACD7E8F84C5D6000A86CB43967BD1E688B03089079799C9E889`
+- Conan dependencies: none
+- Package shape: static `libGLEW.a`, generated headers, license, and pkg-config metadata
 
-{用文字描述实际编译步骤，包括关键的 configure/cmake 命令}
+The package uses upstream `SYSTEM=linux-clang-egl`, disables GLU, and builds only
+`glew.lib.static`. The shared library and the `glewinfo`/`visualinfo` tools need a
+platform window-system/runtime closure and are outside this dependency package.
 
-## 遇到的问题与解决方案
+## Adaptation
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-{按需添加行}
+The upstream Makefile hard-codes `/tmp` for distribution staging. The patch uses
+`TMPDIR` while retaining `/tmp` as the non-OHOS fallback. Because the project is a
+bare Makefile build, the recipe explicitly forwards Conan's target flag, sysroot,
+compiler, and archiver instead of assuming CMakeToolchain injection.
 
-## 源码修改
+Static consumers inherit `GLEW_STATIC`, `GLEW_EGL`, `GLEW_NO_GLU`, and the OHOS
+`EGL`/`GLv4` system libraries. This is required because the public header must
+use the static-library API contract and references to `eglGetProcAddress` inside
+the archive must be resolved when the consumer links.
 
-{如有补丁，列出文件名和修改内容；无则删除此节}
+## Tests
 
-## 依赖版本
+The 2.3.1 source distribution has no `test` or `check` target, so the upstream
+inventory is 0/0. The Conan test package links the packaged archive through the
+generated `glew::glew` target and verifies the full, major, minor, and micro
+version strings through `glewGetString()`. `GLEW_VERSION_MAJOR`,
+`GLEW_VERSION_MINOR`, and `GLEW_VERSION_MICRO` are API selector constants, not
+numeric compile-time version macros. The OHOS/armv8 create and consumer
+compile/link completed successfully before target-device execution.
 
-{列出本次编译依赖的具体软件版本}
+Target runtime evidence is maintained outside the candidate tree under the task's
+immutable W3 evidence directory.
 
-## 验证结果
-
-```bash
-{验证命令和结果}
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-{有打包产物时添加；无则删除此节}
-
-## 注意事项
-
-{需要特别注意的点；无则删除此节}
+During target preparation, HMDFS projected a requested `0750` mode for the
+self-signed consumer to `0710`. Permission validation therefore binds the
+security semantics actually required by execution: owner execute must be set,
+group/other write must be clear, and the exact observed mode must be retained in
+the receipt. A successful `chmod` alone is not sufficient evidence.
