@@ -1,0 +1,40 @@
+# 软件级 manifest — mpop
+# 遵循 ARCHIVE-SPEC v3.0
+
+software: mpop
+display: "mpop"
+description: "mpop：非交互式 POP3 取信客户端（把邮件取到 Maildir、交给 MDA 或打到标准输出），支持 APOP/CRAM-MD5/PLAIN/NTLM/OAUTHBEARER 与 STLS/POP3S；随包提供 mpopd（对本地提供 POP3 服务的 Maildir 守护进程）"
+category: network
+homepage: "https://marlam.de/mpop/"
+license: GPL-3.0-or-later
+build_system: autotools
+
+# ============================================================
+# OHOS 适配知识（跨版本通用）
+# ============================================================
+
+ohos_adaptation:
+  key_points:
+    - "package_type=application 的 CLI 网络程序：package_info 不导出 cpp_info.libs（只声明 bindirs=bin、resdirs=share），可执行命令由软件级 commands.json 声明为 [mpop, mpopd]（R38/L0k）；上游 src/Makefile.am 的 bin_PROGRAMS = mpop mpopd 一次产出两枚，configure.ac 的 BUILD_MPOPD 默认 yes"
+    - "E007/E160 有两种落地形态，本包取第一种：①起草期就用仓内 scripts/patch-autotools-ohos.pl 生成 diff，作为**随包 patches**（0001/0002）由 export_conandata_patches 应用——可复现、审查人看得见 diff，且不需要 export_sources 带 helper；②运行期在 build() 里调 helper（lft/3.98 那种，因为它的 config.guess 在 config/ 子目录且是发布生成物）。两种都⛔不许用 --build/--host 绕过：本包 configure.ac 确有 AC_RUN_IFELSE 形态的 getaddrinfo/AI_IDN 探测，误判成交叉编译会静默跳过并生成错误 config.h。实测绕过后 cross compiling = no"
+    - "E011/E114：configure 里 (umask 077 && mktemp -d ./confXXXXXX) 建的目录在 HMDFS 回读成 0660 丢检索位 ⇒ config.status 建不了 machinery；build() 里就地把 umask 077 改写为 022（实测命中 2 处），未命中打 warning。configure 属发布产物 ⇒ 不走 patches/"
+    - "E386：profile [buildenv] 注入 CONFIG_SHELL=/data/service/hnp/bin/bash，该 bash 在 HMDFS 上 getcwd() 失败而 configure 会用它 re-exec 自身 ⇒ 起手即死；必须在**同一条命令**里 unset（generate() 期 env.unset 会被运行期重注入击败）。同一条命令再内联 LD_LIBRARY_PATH=<依赖 libdir>（E467：AutotoolsDeps 把依赖 -l 放进 $LIBS，最早的运行探测因此链接整条闭包而被加载器拒载，被误报成编译器不可用）"
+    - "上游'探测正确但调用点漏守护'是 OHOS 上的一类高频链接期故障：本包 configure.ac 有 AC_CHECK_FUNCS([getpass])，实测 config.h 里就是 /* #undef HAVE_GETPASS */（OHOS libc 既不声明也不导出 getpass），而 src/password.c:215 无条件调用 ⇒ 失败推迟到 CCLD：ld.lld: error: undefined symbol: getpass。正解是把**上游自己的** HAVE_GETPASS 宏用起来加 #ifdef，并披露功能后果（口令改走 password_program/--passwordeval 或 netrc），不要新增探测、不要 -include 假声明"
+    - "gnulib vendored 头可能只在 C23 下可编译：src/base64.h 声明返回 bool 的原型却不 include <stdbool.h>。OHOS clang 15 默认 C17（实测 __STDC_VERSION__=201710L）⇒ unknown type name 'bool'。补 include 即可；⛔不要为了省事把整个包升到 -std=c2x（会改全局语言标准并牵出别的探测差异）"
+    - "texinfo 面：doc/Makefile.am 的 info_TEXINFOS 让 make/check/install 都调 makeinfo，而设备无该命令且仓内 archives/t/texinfo/7.3 没有 conanfile.py（未发布）⇒ 不能 tool_requires。取 corpus 自有惯例 MAKEINFO=true 挂在 make 命令行（先例 autoconf/2.72、anubis/4.3）；发布包自带生成好的 .info，手册与 info 页仍照常安装，只是不重生成"
+    - "依赖可得性要区分'不可得'与'不该用'：本包 libgsasl 属前者（configure.ac 硬约束 >= 2.1，仓内只登记 1.8.1 且目录里没有 conanfile.py），gettext 与 libsecret 属后者（preflight 实测两者均已发布，但 gettext 的 cpp_info.libs 列了包里不提供的 libasprintf ⇒ 悬空 -lasprintf；libsecret-1 会拖入 glib 闭包）。排除必须写明理由，并把由此消失的功能做成可观察断言（mpop --version 的 'Authentication library: built-in' 行）而不是沉默"
+    - "运行期是**共享**依赖闭包时（实测 DT_NEEDED = libc.so, libgcrypt.so.20, libgnutls.so.30, libgpg-error.so.0, libidn2.so.0, libtasn1.so.6），消费者测试必须显式证明它消费的是本包依赖：本包 test_mpop.sh 最后一条负对照是「剥掉 Conan 运行库搜索路径后 mpop 必须被加载器拒载」；反向不成立——command -v 命中同名命令不等于本包提供了它"
+    - "无外网、无本地服务对端时，把断言放在任何网络动作**之前**的真实代码路径上：版本横幅与编译期常量替换、--help/usage、选项校验（EX_USAGE=64 一族）、配置文件解析失败（EX_IOERR=74 / EX_CONFIG=78）、--configure 的地址合法性（EX_DATAERR=65，早于 SRV 查询）。跑不到的 POP3 会话/TLS 握手/IDN 上网逐条声明跳过并附实测错误签名（如 cannot connect to 127.0.0.1, port 1999: Connection refused + 退出码 75），绝不记成通过"
+  common_dependencies:
+    - gnutls
+    - libidn2
+
+# ============================================================
+# 版本索引
+# ============================================================
+
+versions:
+  "1.4.22":
+    status: built
+    build_date: "2026-09-26"
+    conan_ref: "mpop/1.4.22"
