@@ -1,0 +1,89 @@
+# ═══ Draft knowledge entry — 交互式 termios 口令读取：恢复前二次 tcgetattr 会让 tcsetattr 变空操作 ═══
+# Software: mini-httpd 1.30 (htpasswd 工具, musl/OHOS)
+# Gate: AI 静态审查 P2 + 源码逻辑比对 + 非 tty 自动化测不到（诚实标注）
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: mini-httpd-1.30-termios-restore-in-interactive-getpass
+severity: 2
+category: ohos|terminal|posix|code-review
+trigger_tool: grep|readelf|manual
+phase: adaptation
+
+keywords: termios, tcgetattr, tcsetattr, TCSAFLUSH, ECHO, getpass, htpasswd, interactive stdin, isatty, pty, musl, glibc
+
+error_signature: 交互式输入口令后终端回显不恢复（无报错、退出码 0）|可疑静态特征：(tcsetattr.*&told).*前二次 tcgetattr
+
+match_keywords: termios, tcgetattr, tcsetattr, TCSAFLUSH, ECHO, getpass, 口令, 回显不恢复, 交互式, pty, non-tty, 自动化测不到
+
+root_cause: |
+  上游在关闭终端回显后、恢复前**又读了一次当前 termios**：
+      tcgetattr(STDIN_FILENO, &told);        /* 保存原始状态（此时 ECHO 已被清除） */
+      told.c_lflag &= ~ECHO; tcsetattr(..., &told);   /* 关回显 */
+      ...读取口令...
+      tcgetattr(STDIN_FILENO, &told);        /* ← 二次读取：把"已关回显"的状态覆盖进 told */
+      tcsetattr(STDIN_FILENO, TCSAFLUSH, &told);      /* 写回的是同一状态 → 等价空操作 */
+  结果：进程退出后终端 ECHO 仍为关，用户看不到自己的输入。
+  **关键**：该缺陷只在 stdin 是 tty 时触发。自动化/消费者测试的 stdin 是管道或文件，
+  不进 `isatty()` 分支 → **测试全绿也发现不了**，属"非 tty 路径不可达"类缺陷，
+  只能靠静态审查或人工交互复现。musl 与 glibc 的 getpass 实现不同，musl 侧更常见
+  上游自带 termios 实现（而非调用 libc getpass）。
+
+rec_approach: save-original-termios-once-and-guard-restore
+rec_description: |
+  **恢复前不得再次读取 termios**。正确写法：首次 `tcgetattr` 成功后置一个标志，
+  恢复时仅在标志为真时写回保存值：
+      int tty_changed = 0;
+      if (tcgetattr(STDIN_FILENO, &told) == 0) { tty_changed = 1; told.c_lflag &= ~ECHO; ... }
+      ...
+      if (tty_changed) (void) tcsetattr(STDIN_FILENO, TCSAFLUSH, &told);
+  顺带清理同一函数里"剥离换行前取值"造成的不可达分支（如 `if (len > sizeof(buf)-1) ...`）。
+  审查口径：**任何"关回显→恢复"的代码块，恢复行之前不允许出现第二次 tcgetattr**。
+rec_command: |
+  grep -n "tcgetattr\|tcsetattr\|ECHO\|TCSAFLUSH" <上游>/htpasswd*.c <上游>/*getpass*.c
+  # 判定：tcsetattr 之前若还有第二次 tcgetattr(&told) → 命中本条目
+rec_auto_fix: false
+
+affected_scope: |
+  所有"自行实现交互式口令读取（termios 开关回显）"的上游包，尤其 musl/OHOS 上走自实现而
+  非 libc getpass 的工具：htpasswd/auth 类工具、带 --password 交互提示的 CLI、数据库/服务端
+  管理工具。**不适用**于直接调用 glibc getpass 的包。适用边界=需要 tty 才能复现，
+  非 tty 自动化测试**不能**作为"已修好"的证据。
+
+safety_boundary: |
+  ①只在 stdin 为 tty 时触发，无需 tty 的构建/测试环境无法复现 → 不能用"测试通过"反推无此缺陷；
+  ②修补丁时必须保持"保存一次、写回一次"的语义，不要引入 `tcsetattr(T CSANOW)` 等改变排空语义的写法；
+  ③该缺陷不影响构建产物与 CI 判定，属功能正确性缺陷，需在 notes/PR 中如实说明"交互路径未经自动化验证"。
+
+verification_cmd: |
+  # 静态：确认恢复行前无二次 tcgetattr
+  grep -B3 "tcsetattr" <patched>/htpasswd.c
+  # 设备本地：conan create 通过 + 消费者 smoke（非 tty 部分）
+  # 交互路径（无法自动化，如实标注）：人工在 tty 下执行 htpasswd -c pwfile user，输入口令后确认回显恢复
+
+evidence: |
+  mini-httpd 1.30（PR #11542，补丁 patches/0001-musl-getpass.patch）：
+  - 原补丁在恢复前保留了第二个 `tcgetattr(STDIN_FILENO, &told)`，使 `tcsetattr(..., TCSAFLUSH, &told)`
+    成为空操作；AI 静态审查标为 P2（终端 ECHO 不恢复）。
+  - 整改：新增 `int tty_changed = 0;`，首次 tcgetattr 成功置 1，恢复改为
+    `if (tty_changed) (void) tcsetattr(STDIN_FILENO, TCSAFLUSH, &told);`；同时删除不可达的 `len > 80` 分支。
+  - 设备本地 `conan create archives/m/mini-httpd/1.30 ...` 通过，消费者 smoke 输出
+    `mini-httpd consumer OK: htpasswd + HTTP round-trip`（**非 tty 路径**）。
+  - 交互式 tty 分支无法在无 pty 的 CI 中触发，故证据为"源码逻辑 + 对照仓库既有只保存一次的写法（apg/bacula-client/isync）"。
+
+prescan_pattern: 'tcgetattr\s*\(\s*STDIN_FILENO\s*,\s*&told\s*\)'
+prescan_globs: ['**/*getpass*.c', '**/htpasswd*.c', '**/*passwd*.c']
+
+fallback_approach: pty-driven-interactive-regression-in-test_package
+fallback_description: |
+  若上游不接受补丁，可在 test_package 用 pty 驱动交互路径做回归（openpty/forkpty 后喂口令，
+  再断言 termios ECHO 位已恢复）。**代价**：CI worker 与当前 conan 环境通常无 pty/不可用，
+  该回归有很高概率无法在 CI 落地，只能作为本机一次性证据——因此不推荐作为主要手段。
+fallback_command: |
+  # 仅本机可行（CI 无 pty 时跳过并如实标注）
+  python3 -c "import pty,os; pid,fd=pty.fork(); ..."   # 概念示意：forkpty 后驱动 htpasswd 并读回 termios
+
+authors:
+  - CIW
+source_pr: 11542
+source_commit: 56b71e61ed
+draft_date: 2026-09-21
