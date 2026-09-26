@@ -1,0 +1,72 @@
+#====================================================================
+# DRAFT-appstream-1.2.0-ohos-meson-glib-tool-binaries-wrapper.kv
+# glib 包内 host 工具（glib-compile-resources 等）从 conan 缓存路径 exec 失败
+# （HMDFS 受限 + LD_LIBRARY_PATH 缺失）→ meson machine file [binaries] 映射
+# wrapper 脚本（export LD_LIBRARY_PATH 再 exec 原二进制）
+# 实例：appstream 1.2.0（archives/a/appstream/1.2.0，R02）
+#====================================================================
+
+id:                     DRAFT (proposed E5xx，最终编号由知识库主编确认)
+trigger_tool:           meson|ninja
+phase:                  compilation
+error_signature:        Error loading shared library libgio-2\.0\.so\.0. \(needed by .*glib-compile-resources\)|
+                        FAILED: \[code=127\].*glib-compile-resources|
+                        glib-compile-resources.*Error loading shared library
+severity:               3
+category:               build-system, meson, hmdfs, toolchain, conan, ohos
+match_keywords:         glib, glib-compile-resources, glib-mkenums, meson, ninja, machine file,
+                        binaries, wrapper, LD_LIBRARY_PATH, conan cache, HMDFS, gresource,
+                        MesonToolchain, tc.binaries
+title:                  glib 包内 host 工具从 conan 缓存路径 exec 失败（HMDFS + 动态库路径）→ meson [binaries] wrapper 映射
+root_cause:             HMDFS 上 conan 缓存副本从缓存路径直接 exec 已签名 ELF 受限；
+                        同时 glib-compile-resources 运行时需 LD_LIBRARY_PATH 指向 glib 包
+                        lib（buildenv_info 的 LD_LIBRARY_PATH 未聚合进 conanbuild 环境）；
+                        meson 在 configure 期用 find_program 把工具解析为绝对路径，
+                        ninja 直接调用原二进制，prepend PATH 的 wrapper 不再生效。
+affected_scope:         meson + Conan + glib 家族包在 OHOS/HMDFS 上使用 glib-compile-resources /
+                        glib-mkenums 生成 gresource/enum 代码的项目（gtk 系、appstream 系等）。
+verification_cmd:       conan create archives/a/appstream/1.2.0 -pr:h=<abs>/ci/conan/profiles/ohos-aarch64 -pr:b=<abs>/ci/conan/profiles/ohos-aarch64 --build=missing
+rec_priority:           1
+rec_approach:           meson-binaries-wrapper-mapping
+rec_description:        generate() 中为 glib 包内 ELF 工具（glib-compile-resources）生成
+                        wrapper 脚本：先 export LD_LIBRARY_PATH=<glib_pkg>/lib 再
+                        exec 原二进制；并把工具名通过 MesonToolchain
+                        `tc.binaries[工具名] = wrapper路径` 写入 machine file [binaries]
+                        ——meson find_program 优先读机器文件，ninja 调用 wrapper。
+                        纯 python 脚本工具（glib-mkenums）若无动态库依赖可只 prepend PATH
+                        或同样走 tc.binaries。
+rec_command:            |
+  tools_dir = os.path.join(self.build_folder, "glib-tools")
+  os.makedirs(tools_dir, exist_ok=True)
+  for tool in ("glib-compile-resources", "glib-mkenums"):
+      src = os.path.join(glib_pkg, "bin", tool)
+      wrapper = os.path.join(tools_dir, tool)
+      with open(wrapper, "w") as fh:
+          fh.write("#!/bin/sh\n")
+          fh.write(f"export LD_LIBRARY_PATH={glib_pkg}/lib:$LD_LIBRARY_PATH\n")
+          fh.write(f'exec "{src}" "$@"\n')
+      os.chmod(wrapper, 0o755)
+      tc.binaries[tool] = wrapper
+rec_auto_fix:           false
+rec_impl:               conan-recipe-generate
+forbid_1_pattern:       self\.buildenv_info\.prepend_path\(.*LD_LIBRARY_PATH.*\).*only
+forbid_1_reason:        仅 buildenv_info 设置 LD_LIBRARY_PATH 不生效——ninja 直接调用
+                        configure 期解析的绝对路径，且聚合 env 未携带该变量（实测）
+forbid_2_pattern:       shutil\.copyfile.*glib-compile-resources.*cache.*直接 exec
+forbid_2_reason:        从缓存路径 exec 受 HMDFS 签名/权限限制；wrapper 内 export 后 exec
+                        原二进制即可，无需重签
+principles:             R33, R49
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-ohos-autotools-glib-tool-inject, E527]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               knowledge/drafts/DRAFT-appstream-1.2.0-ohos-meson-glib-tool-binaries-wrapper.md
+last_updated:           2026-09-20
+source_event:           appstream-1.2.0 R02（archives/a/appstream/1.2.0）
+authors:                pc2-19
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8

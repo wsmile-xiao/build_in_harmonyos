@@ -1,0 +1,59 @@
+--- a/qt/pool.cpp	2026-09-20 11:38:32.140691719 +0800
++++ b/qt/pool.cpp	2026-09-20 11:38:32.140691719 +0800
+@@ -23,6 +23,7 @@
+ #include "pool.h"
+ 
+ #include <QStringList>
++#include <QTimer>
+ #include <QUrl>
+ #include <QLoggingCategory>
+ #include "chelpers.h"
+@@ -38,9 +39,11 @@
+     Pool *q;
+     AsPool *pool;
+     QString lastError;
++    QTimer *glibPump;
+ 
+     PoolPrivate(Pool *q)
+-        : q(q)
++        : q(q),
++          glibPump(nullptr)
+     {
+         pool = as_pool_new();
+     }
+@@ -68,6 +71,15 @@
+     auto *d = static_cast<PoolPrivate *>(user_data);
+     g_autoptr(GError) error = NULL;
+ 
++    /* OHOS qtbase 未内建 glib 事件集成：GTask 完成回调挂在默认 GMainContext 的
++     * idle source，纯 Qt 事件循环从不迭代它 → 这里先停掉 generate() 中启动的
++     * glib 泵，再正常发出 loadFinished。 */
++    if (d->glibPump != nullptr) {
++        d->glibPump->stop();
++        d->glibPump->deleteLater();
++        d->glibPump = nullptr;
++    }
++
+     if (as_pool_load_finish(cpool, result, &error)) {
+         Q_EMIT d->q->loadFinished(true);
+     } else {
+@@ -109,6 +121,19 @@
+                        NULL, // cancellable
+                        (GAsyncReadyCallback) pool_ready_async_cb,
+                        d.get());
++
++    /* OHOS 的 qtbase 未编译 QEventDispatcherGlib，GLib 默认主上下文只在被显式
++     * 迭代时才分派 GTask 完成回调；QTest 事件循环不迭代它 → loadFinished 永不
++     * 发出（as-test_qt-pool testLoadAsync 超时）。用 0ms QTimer 泵在每个 Qt
++     * 事件循环 tick 里迭代一次默认 glib 上下文，回调完成后自动停止。 */
++    if (d->glibPump == nullptr) {
++        d->glibPump = new QTimer(d->q);
++        d->glibPump->setInterval(0);
++        QObject::connect(d->glibPump, &QTimer::timeout, d->q, []() {
++            g_main_context_iteration (NULL, FALSE);
++        });
++        d->glibPump->start();
++    }
+ }
+ 
+ void Pool::clear()
