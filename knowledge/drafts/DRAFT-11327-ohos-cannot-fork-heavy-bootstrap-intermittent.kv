@@ -1,0 +1,51 @@
+#====================================================================
+# DRAFT-11327-ohos-cannot-fork-heavy-bootstrap-intermittent
+# Intermittent "can't fork - try again" on resource-constrained CI workers: diagnose environment first, avoid heavy bootstrap
+#====================================================================
+
+id:                     DRAFT-11327-ohos-cannot-fork-heavy-bootstrap-intermittent
+trigger_tool:           autoreconf|aclocal|automake|sh|conan|buildbot
+phase:                  configure|build|ci-infra
+error_signature:        "can't fork - try again|fork: Out of memory|aclocal failed with exit status: 1|(grep|cut): Out of memory"
+severity:               2
+category:               ci-infra, autotools-bootstrap, resource-limits, diagnosis, ohos-platform
+match_keywords:         can't fork, try again, aclocal, autoreconf, automake, Out of memory, fork failed, worker, EAGAIN, buildbot, CI, flaky, intermittent, -j1, dist tarball, pre-generated configure
+title:                  受限 CI worker 上的间歇性 can't fork：同一 SHA 不同 worker 结果不一致 = 环境资源问题；优先移除高 fork 开销的自举（用自带 configure 的发行包），
+                         必要时降并发与重试，并如实记录对照证据
+
+root_cause:             >
+  worker 在 fd/内存/进程数压力下 fork() 返回 EAGAIN（"can't fork - try again"），高 fork 开销的 Autotools 自举链
+  （autoreconf 依次 fork aclocal/autoconf/autoheader/libtoolize/automake）最先失败并只报 "exit status 1"，不暴露资源根因。
+  判据是同一 commit 在不同 worker 上结果不一致（rnnoise 0.2：同一 SHA 在 CI-020 上 autoreconf 通过，在 CI-011/CI-032 上 can't fork），
+  且同批日志中 CI 自身脚本（grep/cut/knowledge_check.sh）也报 Out of memory —— 属环境性而非配方缺陷。
+
+affected_scope:         >
+  所有在共享/受限 worker 上执行 Autotools 自举或高并发编译（大内存链接）的适配任务；
+  同型间歇签名：fork: Out of memory、Resource temporarily unavailable、内存压力下的 Bus error；
+  亦适用于"同一 SHA 重跑即过"的一切排障场景（先同 SHA 对照判环境，再决定改配方）。
+
+verification_cmd:       >
+  判环境：对同一 SHA 发起 /rebuild 并对比不同 worker 结果（本例 CI-020 pass vs CI-011/CI-032 can't fork），同时检查同批日志是否出现
+  Out of memory/fork: Out of memory 旁证；判修复：配方仅在缺 configure 时才 autoreconf（发行包自带则跳过）并 make -j1，
+  在 OHOS aarch64 上 conan create 通过（rnnoise 0.2 修复后 CI build #52746：L0/L1 门禁 + test_package 全过）。
+
+rec_priority:           1
+rec_approach:           skip-bootstrap-with-release-tarball-and-serialize
+rec_description:        优先使用自带预生成 configure/Makefile.in 的官方发行包以移除自举步骤；配方写成"缺 configure 才回退 autoreconf"，
+                        并将 make 降为 -j1 以避开资源竞争；笔记中记录"间歇性环境失败 + 同 SHA 对照证据"。
+rec_command:            _cfg = os.path.join(self.source_folder, "configure"); if not os.path.exists(_cfg): self.run("autoreconf -fi", cwd=self.source_folder, env="conanbuild")
+rec_auto_fix:           false
+rec_impl:               conan-recipe|ci-retry|knowledge-draft
+
+fallback_priority:      2
+fallback_approach:      retry-on-idle-worker
+fallback_description:  官方只提供 git 快照（必须自举）时：等待队列空闲重试/换 worker，并保留失败日志与对照；不得把环境失败改写为通过或跳过测试。
+fallback_command:       # 在 PR 上再次 /rebuild，观察是否落到空闲 worker；notes.md 记录两次 worker 与结果对照
+fallback_auto_fix:      false
+
+forbid_1_pattern:       "把环境失败当作配方缺陷去删改正常构建逻辑（如删掉自举、硬编码产物）"
+forbid_1_reason:        根因在 worker 资源，改配方会破坏必要的构建路径并掩盖真实问题。
+forbid_1_consequence:   产物不完整或不可复现，后续复现/复用失败。
+forbid_2_pattern:       "将失败状态改为通过 / 跳过测试以绕过间歇失败"
+forbid_2_reason:        违反 R9/伪造状态规则，属欺骗性行为。
+forbid_2_consequence:   评审 request changes，取消计分资格。
