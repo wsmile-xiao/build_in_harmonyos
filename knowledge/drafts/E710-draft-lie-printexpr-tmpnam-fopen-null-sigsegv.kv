@@ -1,0 +1,56 @@
+#====================================================================
+# Draft: lie 2.2.2 — printexpr() 对 tmpnam+fopen 返回值不判 NULL，
+#        OHOS /tmp 只读(EROFS) 下 fopen 恒 NULL → SIGSEGV(rc=139)
+#====================================================================
+
+id:                     E710
+trigger_tool:           runtime|build|test_package
+phase:                  runtime
+error_signature:        'Segmentation fault|SIGSEGV|signal 11|rc=139|printexpr|tmpnam\(tmpfile\)|cur_out=fopen'
+severity:               2
+category:               c, runtime, null-deref, portability, ohos
+match_keywords:         lie, LiE, printexpr, tmpnam, fopen, EROFS, read-only tmp, SIGSEGV, rc=139, cur_out, invoke_pager, NULL pointer, tmpfile, /tmp 只读, help query
+title:                  上游 C 程序对 tmpnam+fopen 不判 NULL：OHOS /tmp 只读(EROFS) 下 fopen 返 NULL，随后经该 FILE* 写入即 SIGSEGV(rc=139)——补 NULL 回退 stdout（对齐同文件既有先例）即修
+
+root_cause:             print.c:601 `tmpnam(tmpfile); cur_out=fopen(tmpfile,"w"); invoke_pager=true;` 不检查 fopen 返回值。OHOS 设备 /tmp 挂载为只读(EROFS)，fopen 恒返 NULL，下一行开始 printdocument 经 cur_out(FILE*) 写入即解引用 NULL → SIGSEGV(139)。同文件 learn.c:135 与 print.c 另三处分页点均有 `cur_out==stdout→stdout` 回退先例，唯此处缺失——属上游 portability 缺陷而非平台不可移植。判据要点：tmpnam 产名正常（不判空只在 fopen 上翻车），且上游三入口测试 0 命中 `?` 查询（缺陷不在上游断言面上，测试全绿也测不到）。
+
+affected_scope:         一切在 /tmp 只读环境用 tmpnam/tmpfile+fopen 且不判返回值的旧 C 程序的交互查询/输出分页路径；上游测试面不受影响（rc 全绿），仅消费者/交互 `?` 查询触发——典型「上游测试 41/41 全绿但二进制一用就崩」形态。
+
+verification_cmd:       printf '?help\n' | /storage/Users/currentUser/tmp/lie-2.2.2/w0/x/LiE/lie >/dev/null 2>&1; echo rc=$?    # 补丁树 rc=0；同一命令对未打补丁树 rc=139（双证留档 w0/pre.out 0B + w0/post2.out 364B）；补丁三关复验： cd /storage/Users/currentUser/tmp/lie-2.2.2/applychk && patch -p1 --dry-run < /storage/Users/currentUser/ws/worktrees/lie-2.2.2/archives/l/lie/2.2.2/patches/0001-printexpr-null-check.patch && echo PATCH_OK
+
+prescan_pattern:        tmpnam\s*\([^)]*\)\s*;\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*fopen\s*\(
+
+rec_priority:           1
+rec_approach:           portability-null-fallback-stdout
+rec_description:        在 fopen 调用后立即判 NULL：失败则 `cur_out=stdout; invoke_pager=false;`（输出直落 stdout、不起分页器），成功才启用 pager 分支——与同文件既有三处 `cur_out==stdout→stdout` 形态完全对齐，纯 portability 补丁、不含 __OHOS__ 平台宏（PF5 免拦）。配套两条判据：①上游测试 0 命中该路径时仍须做 portability 补丁（测试全绿≠消费者不崩），修前 rc=139→修后 rc=0 双证留档；②test_package 用 `?help`/`?dim` 消费者断言把该面固化为回归，防止补丁被后续 refresh 回退。
+rec_command:            printf '?help\n' | lie 2>&1 | grep -q 'Other useful help available' && echo NULL_FALLBACK_OK
+rec_auto_fix:           false
+rec_impl:               patches
+
+fallback_priority:      2
+fallback_approach:       pager-shim-or-readonly-probe
+fallback_description:   若上游拒绝 NULL 回退形态：备选=调用侧前置只读探针（ fopen 临时名失败即 export PAGER=cat 走 stdout 直出），或 wrapper 注入 PAGER=cat 使 invoke_prog 空转无害；均劣于源码补丁（治标），仅在补丁面被 PF 拦时使用。
+fallback_command:       PAGER=cat printf '?help\n' | lie 2>&1 | head -3
+fallback_auto_fix:      false
+fallback_impl:          manual-patch
+
+forbid_1_pattern:       把 rc=139 直接归因为「平台不可移植/需要 __OHOS__ 宏」而放弃补丁
+forbid_1_reason:        同文件三处已有 stdout 回退先例，缺陷是上游漏判 NULL 而非平台差异；加平台宏反而触发 PF5 硬拦且破坏可移植性。
+forbid_1_consequence:   误走止损把可移植修复包变成平台分叉包，PF5 A 类硬拦或 W4 判 P1 返工。
+
+forbid_2_pattern:       用自家探针未修前的 rc=139 直接给上游定罪
+forbid_2_reason:        探针缺 #include <stdlib.h> 时 getenv 隐式声明自身即崩（双支同签名）；不先修探针三连复跑 rc=0 会把探针缺陷记到上游账上。
+forbid_2_consequence:   补丁打错位置（改探针侧或误判上游无缺陷），真实 SIGSEGV 漏网，消费者侧复崩。
+
+doc_file:               doc/E710.md
+last_updated:           2026-09-24
+source_event:           lie 2.2.2 适配 rc=139 探针双支定性 + printexpr NULL 补丁（任务卡 8460）
+
+authors:                Awstme
+source_pr:              待回填（草稿随本任务 PR 提交）
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-24
