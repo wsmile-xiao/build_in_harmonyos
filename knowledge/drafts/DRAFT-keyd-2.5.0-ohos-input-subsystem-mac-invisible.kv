@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT-keyd-2.5.0-ohos-input-subsystem-mac-invisible
+#   OHOS MAC 把整个 input 子系统对用户态隐藏——stat() 与 open() 同为 EACCES
+#   （存在性在用户态不可判定），且 opendir("/dev/input") 返回 EACCES 而非空集合
+#   （枚举式探测把"被策略拒绝"静默读成"没有设备"＝假绿家族）。
+# 来源: keyd 2.5.0 适配 HarmonyOS PC（路径 B，平台任务 7806）
+# 实证: 2026-09-24 HarmonyOS PC 真机非 root 会话，探针逐字 errno +
+#       conan create 全绿（上游 86 例单元套件 + 41 条消费者断言，逐例严格断言 errno=EACCES）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 注：本条的辨别性指纹不是"打不开 /dev/uinput"这一泛化现象，而是
+#     ①errno 落在 EACCES 而非 ENOENT（⇒ 存在性不可判定，区别于 E237），
+#     ② syscall 正常返回 -1（区别于 E584 的 SIGSYS 信号终止），
+#     ③父目录 readdir 也被拒且**不是**空集合（⇒ 计数式探测静默假绿）。
+id:                     keyd-2.5.0-ohos-input-subsystem-mac-invisible
+trigger_tool:           make|clang|python3
+phase:                  test|runtime
+error_signature:        'inotify: Permission denied|Permission denied.*/dev/input|errno=13  Permission denied|existence undecidable from user space'
+match_keywords:         /dev/uinput, /dev/input/event, EACCES, uinput, UI_DEV_CREATE, EVIOCGBIT, inotify_add_watch, opendir 非空集合, 枚举假绿, 虚拟键盘守护进程, input 子系统不可见, MAC 策略, stat 与 open 同为 EACCES, keyd
+severity:               2
+category:               ohos|portability|input|security|test
+title:                  OHOS MAC 把整个 input 子系统对用户态隐藏——stat 与 open 同为 EACCES（存在性不可判定），opendir 被拒而非返回空集合（枚举式探测静默假绿）
+prescan_pattern:        /dev/uinput|/dev/input/event|UI_DEV_CREATE|EVIOCGBIT|inotify_add_watch
+prescan_globs:          "**/src/**/*.c, **/t/runner.py, **/tests/**/*.py, **/*.py"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+root_cause:             (1) OHOS 的强制访问控制（既不是普通 DAC，也不是 seccomp）把 input
+                        子系统整片对非特权用户态关闭。本包实测六条入口全部 EACCES(13)——
+                        stat("/dev/uinput")、stat("/sys/class/misc/uinput/dev")、
+                        open("/dev/uinput",O_WRONLY)、open("/dev/input/event0")、
+                        opendir("/dev/input")、inotify_add_watch(fd,"/dev/input")；
+                        而 inotify_init1() 本身成功（返回 fd=3）。⇒ 被拒的是"访问 input 节点"这一整类，不是某个 syscall。
+                        (2) 关键点一，errno 是 EACCES 而非 ENOENT ⇒ **存在性在用户态不可判定**。
+                        "stat 判存在"这类探测在这里拿不到任何存在性信息，既不能断定节点在、
+                        也不能断定不在。这与 E237（ACPI 类节点 ENOENT＝根本不存在）是两种失败
+                        模式、两种处置（分诊口径见 rec_description 第 3 步）。
+                        (3) 关键点二，opendir("/dev/input") 返回 EACCES，**不是返回空目录**。
+                        凡是"枚举 event* 得到 0 个就当作没有键盘"的计数式探测都会把"被策略
+                        拒绝"读成"没有设备"并正常继续——本包上游 src/device.c:218 的 opendir 与集成测试
+                        t/runner.py:146 的 glob.glob("/dev/input/event*") 正是这个形状。
+                        与 E584（configure 探测报 yes、运行期被 SIGSYS 终止）同族但机制不同：
+                        这里 syscall 规矩地返回 -1/EACCES，是调用方没有检查 opendir 的返回值。
+                        (4) 阳性对照证明拒绝是子系统级而非全局——同一进程 open("/dev/null")
+                        成功（fd=3）、readdir("/dev") 成功（243 个表项）。另有一处非对称值得
+                        记录，stat("/sys/class/input") 成功（mode 0755）而
+                        stat("/sys/class/misc/uinput/dev") 为 EACCES ⇒ sysfs 的 class 目录可见、
+                        其下 misc 设备节点不可见，按单一目录外推"整片可见/整片不可见"都会错。
+                        (5) 顺序性事实（影响"第一条真实错误"的定位）——守护进程 keyd 在抵达
+                        uinput 之前先死在 socket 锁上，本机 /var/run 不存在，src/ipc.c 的 open
+                        返回 ENOENT，逐字错误串为 open 冒号 No such file or directory，rc=255。
+                        ⇒ 只看"跑一下守护进程"的输出会把 MAC 结论误记成路径缺失，
+                        两个平面（socket＝ENOENT / input＝EACCES）必须分开断言。
+
+# ═══ Layer 2: 修复层 (Solution) ═══
+rec_priority:           1
+rec_approach:           stat-open-readdir-triple-probe-with-positives-then-errno-asserted-runtime-degradation
+rec_description:        投入配方改造**之前**先做一次非 root 探针（本包实现 252 行、10 例），取逐字 errno，再按 errno 三分诊定性。
+                        (1) 探针必须覆盖上游真实使用的三类入口，缺一判不准——stat 读节点属性、
+                        open 写入端、opendir 父目录枚举；若上游监听热插拔，再加 inotify_init1 与
+                        inotify_add_watch 两步（init 成功不代表 add_watch 成功）。
+                        (2) 对照项不可省——同进程内 open("/dev/null") 与 readdir("/dev") 必须成功，
+                        否则读到 EACCES 只能说明该 uid 什么都干不了，说明不了 input 子系统被单独关闭。
+                        (3) errno 分诊（不得凭印象）——EACCES/EPERM 属策略性不可见，按本条交付
+                        "编译照交 + 运行期 errno 断言降级"；ENOENT 属数据面根本不存在，**停手上报
+                        用户**（工作区【无法适配】赛道已取消，agent 不得自判）；被信号终止
+                        （SIGSYS）转 E584 口径。
+                        (4) 交付形态——不加 ifdef 宏砍功能、不改判通过、不用 timeout 或 || true 吞错。
+                        数据平面照常编译链接进包，探针编成 test_package 里的真实消费者二进制，
+                        逐入口断言"被拒且 errno 为 EACCES"，并同时断言两条对照项成立。
+                        (5) 测试面不因平台受限而缩分母——上游同一批 86 个 t/*.t 语料有两条入口，
+                        进程内单元入口（Makefile:113）真实执行 86/86 通过，需 root 与 uinput 的
+                        端到端集成入口（t/run.sh 第 5-9 行 whoami!=root 即 sudo 重启）单列"平台受限未执行 86 例"
+                        并附逐字 errno，不删用例、不缩分母、不冒充通过。
+rec_command:            clang -O1 -o probe_input probe_input.c && ./probe_input   （逐字读数见下方 verification 段）
+rec_impl:               test-package-kernel-probe
+rec_auto_fix:           false
+fallback_priority:      2
+fallback_approach:      one-process-per-case-for-upstream-unit-runner
+fallback_description:   若上游单元驱动在同一进程内跑多用例且首错即 exit(-1)，则按"一个用例一个进程"
+                        重新驱动，否则套件会在第 1 例之后被静默截断（本包 t/test-io.c:268）。
+fallback_command:       for f in t/*.t; do ./bin/test-io t/test.conf "$f" || fail=1; done
+fallback_auto_fix:      false
+fallback_impl:          recipe-build-method
+safety_boundary:        本条只证伪"非特权用户态可见"，**不**证明 root 或 MAC 策略调整后数据面可用
+                        （本机无 root、/var/run 不存在，守护模式未经验证）；不适用 E237 的 ENOENT
+                        形态，也不适用 seccomp 信号终止形态（E584）；若 CI worker 以特权运行，
+                        探针结论可能整体反转，申报前须在目标执行路径上重测一次；sysfs 可见性按节点
+                        分层，不得由单一目录成败外推整片。
+
+# ═══ Layer 3: 关联 (Linkage) ═══
+similar_to:             E237（ACPI 类节点 ENOENT＝不存在，签名形似而 errno 不同、处置不同）、
+                        E584（System V IPC 被 seccomp 以 SIGSYS 终止且 configure 探测报绿——同为
+                        假绿家族，但本条 syscall 正常返回 -1/EACCES）、E031（SELinux 拒普通用户
+                        访问 /proc，同属策略性不可见但子系统不同）、E008（SELinux 对用户进程访问非普通
+                        文件的 fstat/lseek 返回 EACCES——同为 stat 族 EACCES，但客体是已打开的非普通 fd，
+                        不含设备节点父目录枚举）、E303（受限运行域拒绝读根目录项，与本条第 (3) 点同形，
+                        本条的增量是节点 EACCES 与父目录 EACCES 叠加导致枚举计数不可判别）、
+                        DRAFT-libevdev-1.13.7-meson-harmonyos-uapi-header-probe
+                        （hw-1 名下、随 PR#12123 提交，讲**构建期** uapi 头缺失；本条讲**运行期**节点
+                        被 MAC 拒绝，两者可先后命中同一包，互指仅为便于检索）
+caused_by:
+conflicts_with:
+prerequisite_of:
+verification_cmd:       conan create archives/k/keyd/2.5.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=<同> --build=missing --user=ohpcd --channel=stable
+doc_file:               knowledge/drafts/DRAFT-keyd-2.5.0-ohos-input-subsystem-mac-invisible.md
+last_updated:           2026-09-24
+source_event:           keyd 2.5.0 适配 HarmonyOS PC（平台任务 7806，路径 B）
+authors:                hw-3
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-24
