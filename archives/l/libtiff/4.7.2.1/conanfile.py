@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — libtiff 4.7.2 (cmake)"""
+"""Conan recipe — libtiff 4.7.2.1 (cmake)"""
 from conan import ConanFile
 from conan.tools.files import collect_libs, get
 import os
@@ -10,7 +10,7 @@ from conan.tools.files import apply_conandata_patches
 
 class LibtiffConan(ConanFile):
     name = "libtiff"
-    version = "4.7.2"
+    version = "4.7.2.1"
     package_type = "library"
     settings = "os", "arch", "compiler", "build_type"
     options = {"shared": [True, False], "fPIC": [True, False]}
@@ -79,8 +79,12 @@ class LibtiffConan(ConanFile):
         defs.append("-Dlerc=ON")
         defs.append("-Djbig=ON")
         defs.append("-Dlzma=ON")
-        defs.append("-Dtiff-tools=OFF")
-        defs.append("-Dtiff-tests=OFF")
+        # R51: 上游测试套件可通过 -c "user.libtiff:tests=ON" 打开（本地验证用；
+        # CI 常规构建仍关，测试构建产物不进包）。注意：上游 ctest 需 tiff-tools。
+        defs.append("-Dtiff-tools=ON" if self.conf.get("user.libtiff:tests", default=False)
+                    else "-Dtiff-tools=OFF")
+        defs.append("-Dtiff-tests={}".format(
+            "ON" if self.conf.get("user.libtiff:tests", default=False) else "OFF"))
         defs.append("-Dtiff-docs=OFF")
         defs.append("-Dtiff-contrib=OFF")
         defs.append("-Dtiff-opengl=OFF")
