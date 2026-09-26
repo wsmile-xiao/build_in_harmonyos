@@ -1,0 +1,29 @@
+#====================================================================
+# Draft: 随包数据文件（工具用相对路径打开的那种）必须在消费者测试里被真正走到 ——
+#        "包里有这个文件" 与 "测试覆盖了这个分支" 是两回事；前者由 file_packaged
+#        日志证明，后者只能由 cd 到数据目录再执行来证明，否则该分支永远绿而空跑
+#   Stem: lunar-2.2-cwd-relative-datadir-branch — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-LUNAR-CWD-RELATIVE-DATADIR-BRANCH
+trigger_tool:           ci
+phase:                  testing
+error_signature:        .*not found.*|No such file or directory|cannot open.*(dat|bitmap|table|dict|zone)
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               test-design, packaging, coverage
+match_keywords:         数据文件, 相对路径, cwd, share, 随包安装, bitmap, 字库, 时区表, 词典, test_package, 分支覆盖, 假绿
+
+title:                  工具用相对路径打开随包数据文件时，消费者测试必须 cd 到包内数据目录再执行，否则该分支永远不被覆盖
+
+root_cause:            有一类经典 CLI 用**相对路径**打开自己的数据文件（lunar 的 `char BMfile[] = "lunar.bitmap"`、字库、词典、时区表、termcap 条目、zone 文件……），因此这些功能**依赖进程 CWD**。写 `test_package` 时通常只做两件事：`copy()` 把数据文件装进 `share/<pkg>/`，然后 `self.run(f'"{test_exe}" "{bin}"')` —— 测试进程的 CWD 是 **test_package 的构建目录**，于是被测程序在那里找不到数据文件、要么报错退出、要么静默降级。结果是：**数据文件相关的那条分支从未被执行**，但测试全绿，因为没人断言过它。更隐蔽的是它在开发机上"看起来能跑"（开发者手动在源码目录里执行过），一到 CI 就暴露成 `-b` 功能不可用，而 CI 日志里不会出现任何失败。判据缺口 = 数据文件被正确安装（`package(): Packaged 1 '.bitmap' file` 能证明）+ **测试确实在数据目录下执行过**（只能由测试自己证明）。
+affected_scope:         所有 `package()` 里安装了 `share/**` 数据文件、且被测工具以相对路径读取它们的包。实测实例：lunar 2.2（`archives/l/lunar/2.2`，PR !9xxx，`-b` bitmap 字形需 `lunar.bitmap`）。同类：`terminfo`/`termcap` 工具、拼写检查词典、时区数据库工具、tzdata 消费者、字体/字形工具、`zone` 文件生成器。
+verification_cmd:       在 test_package 构建目录下直接跑 `"<bin>" -b 2000 1 1`；若打印 `Bitmap file 'lunar.bitmap' not found.` 而非失败退出，即证明该分支在默认 CWD 下不可达，必须显式指定数据目录
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           pass-package-datadir-as-argv-and-cd
+rec_description:        改法：三步。① conanfile.py 的 `package()` 把数据文件装到 `share/<pkg>/`（`copy(self, "lunar.bitmap", src=self.source_folder, dst=os.path.join(self.package_folder, "share", "lunar"))`），并在 `package_info()` 里声明 `self.cpp_info.resdirs = ["share"]`；② test_package 的 `test()` 把**包内数据目录路径作为参数**传给测试程序：`data_dir = os.path.join(self.dependencies["lunar"].package_folder, "share", "lunar")`，`self.run(f'"{test_exe}" "{bin_path}" "{data_dir}"')`；③ 测试程序对**依赖数据文件的用例**用 `cd` 切换 CWD 后再执行：`snprintf(cmd, sizeof(cmd), "cd \"%s\" && \"%s\" %s < /dev/null 2>&1", data_dir, bin, args)`。★ 不要用"把数据文件复制到测试 CWD"来绕过——那验证的是"文件可复制"，不是"包内安装位置正确"，包把数据装错目录时测试依然全绿。★ 也不要 `chdir()` 后不恢复：同一次测试进程内其余用例的 CWD 会被污染，且 `popen` 用的是 `/bin/sh -c`，`chdir` 对子进程的继承关系容易误判；用 shell 的 `cd A && B` 语义最明确。★ 数据目录路径**可能含空格**（conan package_folder 是用户可控路径），必须双引号包裹整个路径。★ 断言要针对"没报 not found"而非"退出码为 0"：lunar 在 bitmap 缺失时打印 `Bitmap file 'lunar.bitmap' not found.` **并以 1 退出**——只断言退出码会漏掉这个降级路径；应同时断言 `strstr(out, "not found") == NULL` 与输出非空。★ 数据目录未提供时（本地无包）应打印跳过而不是静默跳过，保留可见性。参考实现：archives/l/lunar/2.2/test_package/test_lunar.c（argv[2] 传数据目录，含 `-b` 正/负两条断言）与 archives/l/lunar/2.2/test_package/conanfile.py。
+rec_command:            # conanfile.py\ndata_dir = os.path.join(self.dependencies["<pkg>"].package_folder, "share", "<pkg>")\nself.run(f'"{test_exe}" "{bin_path}" "{data_dir}"')\n\n# test_xxx.c —— 依赖数据文件的用例走 cd（路径必须引号包裹）\nif (g_data_dir && *g_data_dir)\n    snprintf(cmd, sizeof(cmd), "cd \\"%s\\" && \\"%s\\" %s < /dev/null 2>&1", g_data_dir, g_bin, args);\nelse\n    snprintf(cmd, sizeof(cmd), "\\"%s\\" %s < /dev/null 2>&1", g_bin, args);\nexpect(strstr(out, "not found") == NULL, "数据文件在包内可达", detail);\nexpect(strlen(out) > 32, "产出非空", "");
+rec_auto_fix:           false
