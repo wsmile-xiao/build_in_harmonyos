@@ -1,0 +1,60 @@
+#====================================================================
+# Draft: HarmonyOS 缺 CMake 平台模块 → 共享库无 DT_SONAME（含 install(EXPORT) 打出 IMPORTED_NO_SONAME）
+# 来源: tdlib/1.8.0 适配（W3/L5 门禁 L5a + L5c 双报）
+# 复用面: OHOS 上任何产出 .so 的 CMake 包
+# 关系: 与既有 DRAFT-libharu-2.3.0-missing-dt-soname（同根因，只报 L5a）与
+#       E383/E330/E537、drafts/E631-draft-9C41（rules-override 全量形态）高度重叠；
+#       本条只补两点未记录的增量：①L5c（install(EXPORT) 产出 IMPORTED_NO_SONAME）；
+#       ②在 generate() 里用 tc.cache_variables 注入该 flag 是可行的（时机够）。
+#       建议 merge-into DRAFT-libharu-2.3.0-missing-dt-soname / E383。
+#====================================================================
+
+draft:                 true
+id:                    DRAFT-tdlib-1.8.0-harmonyos-soname-export-imported-no-soname
+status:                pending-editor-review
+trigger_tool:          cmake|linking|test
+phase:                 linking|installation
+error_signature:       缺少 DT_SONAME|IMPORTED_NO_SONAME TRUE|soname_gate_failed|L5_RESULT=fail: soname_gate_failed|L5c:.*\.cmake.*IMPORTED_NO_SONAME
+
+severity:              2
+category:              ohos, cmake, linking, relocatable, packaging
+prescan_pattern:       add_library\([^)]*SHARED|set_target_properties\([^)]*SOVERSION
+prescan_globs:         CMakeLists.txt, *.cmake
+match_keywords:        DT_SONAME, IMPORTED_NO_SONAME, L5c, soname_gate_failed, Platform/HarmonyOS.cmake, CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG, CMAKE_USER_MAKE_RULES_OVERRIDE, install(EXPORT, TdTargets-release.cmake
+title:                 OHOS 共享库缺 DT_SONAME 的第二症状：install(EXPORT) 生成的 *Targets-release.cmake 被打上 IMPORTED_NO_SONAME，下游只能按完整路径链接（CI L5c 拦截）
+
+root_cause:            根因与既有 libharu/E383 条目相同：CMake 4.1.2 无 Platform/HarmonyOS.cmake（只有 Platform/OHOS.cmake，内容仅 include(Platform/Linux)，而 conan 把 os=OHOS 映射为 CMAKE_SYSTEM_NAME=HarmonyOS），使 CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG 为空、链接模板 <SONAME_FLAG> 为空 ⇒ .so 无 DT_SONAME。**增量**：CMake 的 export 生成器在写 IMPORTED_* 时，会依据同一 SONAME flag 是否为空来决定 IMPORTED_NO_SONAME 与 IMPORTED_SONAME——flag 为空 ⇒ 导出的 xxxTargets-release.cmake 里带 `IMPORTED_NO_SONAME TRUE`，下游 find_package 后只能按完整路径（而非 -lfoo + SONAME）链接，CI 的 L5c 门禁会直接判 fail。即「一个缺失的平台模块」同时污染了产物 ELF 与它的 CMake 包元数据。
+affected_scope:        OHOS 上所有 add_library(... SHARED) 且随包 install(EXPORT ...) 的 CMake 包
+error_excerpt:         [fail] L5a: libtdjson.so 缺少 DT_SONAME — 下游链接器无法按 SONAME 寻址 / [fail] L5c: 1 个 .cmake 文件含 IMPORTED_NO_SONAME TRUE — 下游必须按完整路径链接
+verification_cmd:      llvm-readelf -d <pkg>/lib/libfoo.so | grep -E 'SONAME|NEEDED' ; grep -n 'IMPORTED_SONAME\\|IMPORTED_NO_SONAME' <pkg>/lib/cmake/<Pkg>/<Pkg>Targets-release.cmake
+rec_priority:          1
+rec_approach:          rules-override-soname-flag
+rec_description:       在 generate() 写一份规则文件，把 CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG 恢复为 -Wl,-soname,，并用 CMAKE_USER_MAKE_RULES_OVERRIDE_{C,CXX} 指向它（该 override 在 CMakeCInformation/CMakeCXXInformation 中、平台模块之后被 include，故能覆盖）。此时工具链/链接规则在 project() 之后才生效，因此 tc.cache_variables 注入是可行的（与 CMAKE_POLICY_VERSION_MINIMUM 的时机陷阱相反）。
+rec_command:           save(self, rules, 'set(CMAKE_SHARED_LIBRARY_SONAME_%s_FLAG "-Wl,-soname,")\n' % lang); tc.cache_variables["CMAKE_USER_MAKE_RULES_OVERRIDE_%s" % lang] = rules
+rec_auto_fix:          false
+rec_impl:              cmake-rules-override
+fallback_priority:     2
+fallback_approach:     narrow-soname-flags-only
+fallback_description:  只设 tc.cache_variables["CMAKE_SHARED_LIBRARY_SONAME_{C,CXX}_FLAG"]="-Wl,-soname,"（E383 的窄形态）。若目标未设 SOVERSION，SONAME 会变成不带版本的真实文件名，可接受；但若上游同时依赖 RPATH 规则（Platform/Linux.cmake 的 RUNTIME_* 变量），仍需本条的 override 全量补齐（见 drafts/E631-draft-9C41）
+fallback_command:      tc.cache_variables['CMAKE_SHARED_LIBRARY_SONAME_C_FLAG']='-Wl,-soname,'; tc.cache_variables['CMAKE_SHARED_LIBRARY_SONAME_CXX_FLAG']='-Wl,-soname,'
+fallback_auto_fix:     false
+forbid_1_pattern:      CMAKE_SKIP_BUILD_RPATH|CMAKE_NO_SONAME|NO_SONAME=TRUE|patchelf.*--set-soname
+forbid_1_reason:       关掉 SONAME/整体跳过 RPATH 会让下游 DT_NEEDED 记成绝对 conan 缓存路径（不可搬迁），或在 HMDFS 上就地改写 ELF 破坏 OHOS 签名
+forbid_1_consequence:  产物不可搬迁 / 装出来的二进制 exec EACCES；L5a/L5b/L5c 门禁仍会失败
+
+principles:            P009, P016
+causes:                []
+caused_by:             []
+similar_to:            [E383, E330, E537, E631]
+conflicts_with:        []
+prerequisite_of:       []
+doc_file:              knowledge/drafts/DRAFT-tdlib-1.8.0-harmonyos-soname-export-imported-no-soname.md
+last_updated:          2026-09-24
+source_event:          tdlib 1.8.0 W3 首轮 L5=fail（L5a+L5c）→ 加 rules override 后 L5=pass，TdTargets-release.cmake 由 IMPORTED_NO_SONAME 变为 IMPORTED_SONAME_RELEASE "libtdjson.so.1.8.0"
+authors:               OpenDesk <opendesk@local>
+source_pr:
+source_commit:
+metrics_success_count: 0
+metrics_fail_count:    0
+metrics_confidence:    0.0
+metrics_last_used:
