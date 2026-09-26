@@ -1,0 +1,109 @@
+#====================================================================
+# Draft: 在 find 仍在遍历的目录里用 `find -exec` 改名/复制，
+#        OHOS 的 toybox find 会把改名后的新目录项再次匹配，
+#        导致同一文件被改名两次、副本被再次复制
+# 对应人类文档: knowledge/drafts/E543-draft-036F.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: mrename 1.2 适配 PR #11843，CI 构建 #57971 test_package 2 条断言失败
+#
+# 与既有条目的关系（互补，非重复）:
+#   E010 / E106 / E188 / E254 —— toybox 的 sed/expr、cat、install、patch
+#     **选项或行为不兼容**，命令直接报错或输出错乱。本条目的 find 选项完全合法、
+#     也不报错，差异在**遍历语义**：遍历途中目录被修改时是否看得到新目录项。
+#   E043 / E543-draft-EE19 —— shell 语法方言（bash 变量/运算符）。本条目与
+#     shell 方言无关，换成任何 shell 解释都一样会重复处理。
+#   engine 以本条目关键词查询只命中 E032（readdir 头文件声明），无相关条目。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E543
+trigger_tool:           find|test|runtime|shell
+phase:                  testing|runtime
+error_signature:        FAIL .*renamed file present: expected <1> got <0>|
+                         FAIL .*no file (renamed|copied) twice|
+                         (renamed|processed|copied) twice|
+                         duplicate(d)? (rename|processing)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               compat, platform, shell, filesystem
+match_keywords:         toybox find, find -exec, readdir, directory traversal, rename during traversal,
+                         renamed twice, processed twice, duplicate rename, mv inside find, fts,
+                         GNU find, batch rename, mrename, mcpmv, find ./ -name
+prescan_pattern:        find\s+\S+.*-exec\s+\S*(mv|cp|rename|mcpmv)\b
+prescan_globs:          *.sh, *.bash, bin/*, scripts/*, Makefile*
+title:                  在 find 仍在读取的目录里用 find -exec 改名或复制：OHOS 的 toybox find 边读边处理，会把改名后的新目录项再次匹配，同一文件被改名两次（GNU find 先读完整个目录，桌面上不暴露）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             GNU find 基于 fts：进入一个目录时先把全部目录项读进内存，再逐个处理，
+                         处理期间新建或改名产生的目录项不会被本轮遍历看到。
+                         HarmonyOS PC 的 find 由 toybox 提供，读一个目录项就处理一个（流式），
+                         而 POSIX 对"遍历期间新增的目录项是否由后续 readdir 返回"不作规定——
+                         取决于文件系统把新名字写在当前读取位置之前还是之后。
+                         于是 `find ./ -name '*.log' -exec mv {} pre{} \;` 这类命令里，
+                         `pre1c.log` 仍匹配 `*.log`，被再次改名成 `pre2pre1c.log`；
+                         copy 模式则把刚生成的副本再复制一遍。命令本身不报错、退出码为 0。
+affected_scope:         所有在被遍历目录内做改名/复制/新建、且新名字仍能匹配同一 find 条件的
+                         脚本工具（批量改名、批量加前缀/后缀、就地转换格式等）。
+                         是否暴露取决于文件系统的目录项布局：实测 OHOS runner 上单个文件即触发；
+                         本地 ext4 上 ≤60 个文件不触发、200 个文件时 81 个被改名两次；tmpfs 上不触发。
+                         因此在桌面 Linux（GNU find）或小目录上跑测试都会漏检。
+verification_cmd:       d=$(mktemp -d); cd "$d"; for i in $(seq 200); do : > f$i.log; done; toybox find ./ -name '*.log' -exec sh -c 'mv "$1" "p_$(basename "$1")"' sh {} \; ; ls | grep -c '^p_p_'   # >0 即命中
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           snapshot-find-results-before-mutating
+rec_description:        先把 find 的全部匹配结果存进变量（快照），遍历结束后再逐个处理：
+                         `matches=$(find ./ -name "$1")`，然后 `IFS` 设为换行（单行写法
+                         `IFS=$(printf '\n_'); IFS=${IFS%_}`，勿写 `IFS='\n'`——那是反斜杠加 n）、`set -f` 关闭通配，
+                         `for m in $matches; do mcpmv "$m" ...; done`，最后恢复 IFS 与 `set +f`。
+                         纯 POSIX sh，toybox/GNU find、dash/bash/mksh 下行为一致；
+                         含空格与 `* ? [ ]` 的文件名均安全（文件名含换行符除外）。
+                         测试必须断言"每个文件恰好处理一次"（目录文件总数 + 不存在双前缀名），
+                         并用上百个文件的目录跑一轮，才能在本地文件系统上稳定暴露。
+rec_command:            matches=$(find ./ -name "$1"); oldifs=$IFS; IFS=$(printf '\n_'); IFS=${IFS%_}; set -f; for m in $matches; do handle "$m"; done; set +f; IFS=$oldifs
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      stage-into-separate-directory
+fallback_description:   把结果写到另一个目录（或先改成不再匹配条件的临时名，全部完成后再统一改回），
+                         让新名字不可能被同一次 find 再次匹配。适用于文件名可能含换行符、
+                         不能按行快照的场景；代价是改动上游逻辑更多。
+fallback_command:       find ./ -name "$1" -exec mv {} {}.mrename-tmp \; && 逐个把 *.mrename-tmp 改成目标名
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -exec\s+\S+.*\{\}\s*\+
+forbid_1_reason:        把 `-exec ... \;` 改成 `-exec ... {} +` 看似"遍历完再执行"，但 find 会在参数攒满
+                         一批（ARG_MAX）时中途执行，大目录下仍会在遍历途中改名，只是更难复现。
+forbid_1_consequence:   小目录测试全绿、真实大目录上重复处理，问题被推迟到用户侧暴露。
+
+forbid_2_pattern:       /data/service/hnp/.*findutils|PATH=.*gnu.*find
+forbid_2_reason:        在配方或 wrapper 里强行改用 GNU findutils 绕过，会给零依赖脚本包引入额外运行期依赖，
+                         且依赖的仍是"实现恰好先读完目录"这一未被 POSIX 保证的行为。
+forbid_2_consequence:   换到另一种流式 find 实现（busybox 等）时问题复发。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E010, E188]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E543-draft-036F.md
+last_updated: 2026-09-24
+source_event:           mrename 1.2 PR #11843 CI 构建 #57971：OHOS runner 上 test_package
+                         `move: renamed file present` 与 `spaces: filename preserved` 失败（passed=11 failed=2）；
+                         本地换用 toybox 0.8.14 find 在 ext4 上复现（200 文件中 81 个被改名两次），
+                         快照修复后 200/200 与 1000/1000 均恰好处理一次
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:              11843
