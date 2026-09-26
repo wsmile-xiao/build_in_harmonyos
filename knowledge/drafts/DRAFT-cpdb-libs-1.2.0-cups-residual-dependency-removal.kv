@@ -1,0 +1,96 @@
+#====================================================================
+# DRAFT-cpdb-libs-1.2.0-cups-residual-dependency-removal — 残留 CUPS 依赖（-lcups 链接 + cups/cups.h + PWG 介质转换）在 OHOS 无 CUPS 包时的移除方案
+# 触发事件: cpdb-libs 1.2.0 适配（conan create 编译首错 undefined/提示 cups 头缺失）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-cpdb-libs-1.2.0-cups-residual-dependency-removal
+trigger_tool:           conan|make|cc
+phase:                  conan_build|compilation|linking
+error_signature:        cups/cups\.h.*No such file|cannot find -lcups|pwg_media_t.*undeclared|
+                         pwgMediaForPWG.*implicit|undefined reference to .*cups
+
+severity:               2
+category:               conan|dependency|glib|ohos|portability
+match_keywords:         cups, -lcups, cups/cups.h, pwg_media_t, pwgMediaForPWG,
+                         pwgMediaForPPD, PWG media, residual dependency, passthrough,
+                         vestigial dependency, print backend
+title:                  OHOS 无 CUPS 包时，残留 CUPS 依赖（仅用于 PWG 介质名可读转换的两个工具函数）可三处联动移除：去 -lcups、去 cups 头、转换函数 passthrough
+
+topic: >
+  cpdb-libs v1.2.0 前端库 lib/Makefile.am 无条件链接 -lcups，
+  frontend_helper.h include <cups/cups.h>，且 frontend_helper.c 的
+  pwg_to_readable/readable_to_pwg 调用 CUPS 的 pwgMediaForPWG/pwgMediaForPPD
+  做 PWG 介质名↔可读名双向转换。经全源码 grep，这两个函数只在
+  print_option() 的调试输出中被调用，不属于前端工作主路径。cups 不在
+  ohpcd registry（conan search cups -> Recipe not found），且 HarmonyOS
+  无系统 cups。后续 2.0-b5 上游已整体移除 cups 链接，证明该依赖对该库
+  并非必需。
+
+root_cause:             v1.2.0 的 CUPS 依赖仅服务于 PWG 介质名可读转换（上游历史
+  遗留），非前端核心功能；OHOS/registry 均无 cups 包，直接导致编译
+  （cups/cups.h 缺失）、链接（-lcups 缺失）失败。
+
+durable_solution: >
+  三处联动补丁（缺一不可）：
+  1) lib/Makefile.am：前端库 LIBADD 去掉 -lcups（其余 -lpthread -lm -lcrypt 保留）；
+  2) lib/frontend_helper.h：去掉 #include <cups/cups.h>；
+  3) lib/frontend_helper.c：pwg_to_readable/readable_to_pwg 改为原样返回输入
+     （passthrough，缺失 CUPS 表时无转换；调用契约不变，调用方仍可安全使用）。
+  示例（0003）：
+    const char *pwg_to_readable(const char *pwg_media_name) { return pwg_media_name; }
+    const char *readable_to_pwg(const char *readable_media_name) { return readable_media_name; }
+  决策依据：先全源码 grep 确认 cups_* 符号仅在两处工具函数内被引用且非主路径；
+  不得在缺少真实依赖的情况下用 dummy/空壳顶替（R34/R36 红线），移除属于
+  真实依赖裁剪而非伪造。
+
+impact: >
+  只影响介质名可读转换（UI 显示层，无 CUPS 后端时本来就没有可读名）；核心
+  前端/打印流程不受影响。cpdb-libs 1.2.0 实测编译、链接、消费者测试
+  12/12 PASS。
+
+recovery: >
+  处理上游声明 -lfoo 但实际符号仅被非主路径引用的库：先 grep 确认符号引用
+  点与调用链，再联动移除链接/头/实现三处；保留 API 签名与返回值契约（原
+  实现无表时本就返回输入原值，passthrough 与失败分支语义一致）。
+
+evidence_chain: >
+  task cpdb-libs-1.2.0 适配（feat/cpdb-libs-1.2.0 分支）
+    - conan create 编译首错：frontend_helper.c:824 use of undeclared identifier
+      'pwg_media_t' / 'pwgMediaForPWG'（cups 头被移除后暴露）；
+    - grep -rn 'cups[A-Za-z_]*(' lib/ demo/ -> 无任何生效 cups_* API 调用；
+    - 三处补丁后 conan create 全过，W3 RC=0，消费者 12/12 PASS；
+    - 日志 archives/c/cpdb-libs/1.2.0/reports/conan-create.log。
+
+verification_cmd: >
+  cd archives/c/cpdb-libs/1.2.0 && conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+limitations: >
+  仅当 CUPS 依赖确为残留（符号非主路径、上游后续版本已去掉）时可裁剪；若
+  前端主流程依赖 CUPS 打印接口，则必须先适配并发布 cups 包（R36 依赖先
+  发布）或请求分析端另行绑定，不得裁剪。
+
+rec_priority:           1
+rec_approach:           residual-dependency-trim-with-passthrough（残留依赖三处联动移除 + 转换函数 passthrough）
+rec_description: >
+  对仅服务于非主路径工具函数且 registry/系统均无对应包的依赖，先 grep 确认
+  引用点与调用链，再联动移除 链接(-l库)/头 include/实现（转换函数改
+  passthrough 保留契约）；决策参照上游后续版本是否已移除该依赖。
+rec_command:            LIBADD 去 -lcups; 去 #include <cups/cups.h>; pwg_* 改 passthrough
+rec_auto_fix:           false
+rec_impl:               patch-trim-residual-cups-dependency
+
+doc_file:               knowledge/drafts/DRAFT-cpdb-libs-1.2.0-cups-residual-dependency-removal.md
+last_updated:           2026-09-25
+source_event:           cpdb-libs 1.2.0 适配，编译/链接缺 cups 包
+authors:                atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-25
+
+draft:                  true
+contributor_id:         pc2-16

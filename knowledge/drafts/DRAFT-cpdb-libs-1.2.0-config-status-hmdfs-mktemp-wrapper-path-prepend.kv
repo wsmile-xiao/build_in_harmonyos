@@ -1,0 +1,109 @@
+#====================================================================
+# DRAFT-cpdb-libs-1.2.0-config-status-hmdfs-mktemp-wrapper-path-prepend — HMDFS 上 config.status 临时目录（AS_TMPDIR umask 077 mktemp）权限失败：PATH-prepend 可执行 mktemp wrapper 方案
+# 触发事件: cpdb-libs 1.2.0 返工（远端 CI PR #12677 conan build+test 失败：conf*/subs1.awk Permission denied）
+# 路径: Path B（知识库扩展）
+# 多轴查重: 见 archives/c/cpdb-libs/1.2.0/reports/knowledge-candidate-ledger.md r02 段 C08
+#====================================================================
+
+id:                     DRAFT-cpdb-libs-1.2.0-config-status-hmdfs-mktemp-wrapper-path-prepend
+trigger_tool:           conan|config.status|configure|mktemp
+phase:                  conan_build|configuration
+error_signature:        \./config\.status.*conf[A-Za-z0-9]{6}/subs1\.awk: Permission denied|
+                         config\.status: error: could not setup config files machinery|
+                         could not setup config files machinery
+
+severity:               3
+category:               ohos|build-system|filesystem|autotools
+match_keywords:         config.status, couldn't setup config files machinery, subs1.awk,
+                         Permission denied, mktemp, umask 077, AS_TMPDIR, drwx--S---,
+                         HMDFS, uid mapping, file_manager, confXXXXXX, PATH prepend,
+                         mktemp wrapper, toybox mktemp, conanbuild
+title:                  HMDFS 上 autoconf AS_TMPDIR（umask 077 && mktemp -d）产 drwx--S--- 目录使构建进程无法写 subs1.awk；用 PATH-prepend 可执行 mktemp wrapper（mkdir 模拟）恢复
+
+topic: >
+  autoconf 生成文件（configure/config.status）用 `(umask 077 && mktemp -d
+  "./confXXXXXX")` 创建临时目录（AS_TMPDIR），期望 0700。HMDFS 上 toybox
+  mktemp 显式 chmod(0700) 映射为 drwx--S---（组位空，setgid 无组写），且
+  OHOS 进程 uid 映射异常（如 CI bad uid 20020101）非目录属主 → DAC 落到组位
+  但组位为空 → `echo 'BEGIN {' >"$ac_tmp/subs1.awk"` EACCES：
+  "./config.status: line 800: ./confGfDnfg/subs1.awk: Permission denied" +
+  "config.status: error: could not setup config files machinery"。本地 R01
+  通过是因为本地进程恰好是目录属主（DAC 走属主位）；远端 CI 复现失败。
+
+root_cause:             autoconf AS_TMPDIR 以 (umask 077 && mktemp -d) 建临时目录并依赖
+  0700 权限语义；HMDFS 不保留 0700，toybox mktemp chmod(0700) 映射为
+  drwx--S---（组位空）；构建进程 uid 映射异常（bad uid）非属主、组位又空 →
+  目录内建文件 EACCES → config.status "could not setup config files machinery"。
+
+durable_solution: >
+  配方 generate()（OHOS 分支）创建 build_folder/mktemp-wrapper/mktemp
+  可执行 sh 脚本并 prepend 到 PATH（scoped conanbuild env）：
+  1) 解析参数：`-d` 走模拟，其余转发真 mktemp（exit code 保留）；
+  2) `-d` 时用 `(umask 077 && mkdir -p "$cand")` 模拟（sh 变量替换
+     XXXXXX → $$-$RANDOM，重试 ≤100 次），mkdir 在 HMDFS 产 drwxrws--x
+     （组位 rw）——构建进程即使非属主也可写；
+  3) 打印创建路径，exit 0；失败 exit 1。
+  wrapper 仅存在于 build_folder，不落盘系统目录、不提交（R6）。
+  configure 子进程（PATH 查找 mktemp）即可命中；非 -d 调用原样转发。
+
+impact: >
+  只影响 configure/config.status 临时目录创建阶段；修复后 conan create
+  exit=0（0 处 Permission denied）、消费者测试 12/12 PASS、W3 RC=0、
+  finish_success。cpdb-libs 1.2.0 实测（2026-09-25）。
+
+recovery: >
+  任何在 HMDFS/受限文件系统上跑 autoconf 构建，报 conf*/subs1.awk
+  Permission denied / could not setup config files machinery 时：
+  1) ls -ld conf* 看模式——drwx--S---（组位空）即命中；
+  2) 套用 PATH-prepend 可执行 mktemp wrapper（镜像 accel-config/4.1.9
+     同款实现）；
+  3) 备选：BASH_ENV bash 函数 + CONFIG_SHELL=bash（DRAFT-libuio 方案，
+     需 bash + CONFIG_SHELL 钉扎）；sed 改 ac_tmp 变量（E112/E114）——本
+     方案对 mksh/sh config.status 同样生效（不依赖 bash 专属 export -f）。
+
+evidence_chain: >
+  task cpdb-libs-1.2.0 r02 返工（feat/cpdb-libs-1.2.0 分支）
+    - 远端 CI PR #12677：config.status line 800 confGfDnfg/subs1.awk
+      Permission denied + could not setup config files machinery；
+    - 本地取证 forensics-r02.log：HMDFS mount（setgid seclabel hmfs），
+      umask 077 + mktemp -d → mode=2771 owner=20001006:file_manager；
+      chmod 700/777 均被映射为 2771（不保留 700 语义）；
+    - 修复后 repro-r02-fixed-conan-create.log：exit=0，
+      config.status: creating Makefile/pc 全成功，12/12 PASS；
+    - W3 repro-r02-finish.log：RC=0，JC_RESULT=pass，L0/L1/L4/L5 pass；
+    - 日志 /storage/Users/currentUser/tmp/cpdb-libs-r01-logs/。
+
+verification_cmd: >
+  cd archives/c/cpdb-libs/1.2.0 && conan create . --build=cpdb-libs/* -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+limitations: >
+  wrapper 只在 PATH 命中（configure 子进程调 mktemp 走 PATH）时生效；
+  若上游脚本以绝对路径调用 mktemp 则不适用（需换 BASH_ENV 方案）。
+  mkdir 产 drwxrws--x 组位可写依赖进程属组可写语义；组位被安全策略
+  封锁的极端挂载需结合 tmpfs/换构建目录（E060/E110）。
+
+rec_priority:           1
+rec_approach:           path-prepend-mktemp-wrapper（PATH-prepend 可执行 mktemp wrapper，mkdir 模拟 -d）
+rec_description: >
+  generate() 在 OHOS 分支把 build_folder/mktemp-wrapper/mktemp（模拟
+  `mktemp -d` 用 mkdir 产 drwxrws--x 可写目录、非 -d 转发真 mktemp 保
+  退出码）prepend 进 PATH（conanbuild env 作用域），修复 autoconf
+  AS_TMPDIR 在 HMDFS 上 0700 语义失效导致的 subs1.awk Permission denied。
+rec_command:            见 evidence_chain / conanfile.py _create_mktemp_wrapper()
+rec_auto_fix:           false
+rec_impl:               conan-recipe-path-prepend-mktemp-wrapper
+
+doc_file:               knowledge/drafts/DRAFT-cpdb-libs-1.2.0-config-status-hmdfs-mktemp-wrapper-path-prepend.md
+last_updated:           2026-09-25
+source_event:           cpdb-libs 1.2.0 r02 返工，远端 CI config.status 临时目录权限失败
+authors:                atomcode-executor
+source_pr:              12677
+source_commit:          7ea51bff234f01c9404f118e346119b7700fbdea
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-25
+
+draft:                  true
+contributor_id:         pc2-16
