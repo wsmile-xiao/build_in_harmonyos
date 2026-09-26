@@ -1,0 +1,161 @@
+id: DRAFT-E620-libheif-plugin-external-codec-dep-and-version-semantics
+status: pending-editor-review
+title: "libheif 插件子包对外部编解码库的依赖声明与版本口径：包名是 codec、版本是父 tarball、find_package 名≠conan 包名（CMakeDeps config/module 大小写陷阱导致后端被静默跳过）"
+category: cmake, conan, libheif, plugin, external-dependency, cmakedeps, find-package, version-semantics, subpackage
+build_system: cmake
+phase: generate
+trigger_tool: conan-create
+severity: 2
+match_keywords: >
+  libheif, libheif-openjpeg, libheif-aom, libheif-jpeg, libheif-svtenc, libheif-dav1d,
+  openjpeg, openjpeg2, libopenjp2, opj_*, OPENJPEG_FOUND, OPENJPEG_LIBRARIES,
+  OPENJPEG_INCLUDE_DIRS, OpenJPEG_FOUND, OpenJPEG_VERSION, OPENJPEG_MAJOR_VERSION,
+  find_package(OpenJPEG 2), cmake_additional_variables_prefixes, cmake_find_mode,
+  CMAKE_FIND_PACKAGE_PREFER_CONFIG, CMakeDeps, FindOpenJPEG.cmake, OpenJPEGConfig.cmake,
+  plugin_compilation, plugin_option, WITH_OpenJPEG_DECODER_PLUGIN, heif-j2kdec, heif-j2kenc,
+  子包版本口径, 包名即 codec 名, 依赖声明, R36 依赖先发布, 元数据孤儿
+error_signature: >
+  Not compiling 'j2kdec' backend|
+  Not compiling 'j2kenc' backend|
+  OpenJPEG J2K decoder[ .]*: - not found|
+  OpenJPEG J2K encoder[ .]*: - not found|
+  Could NOT find OpenJPEG|
+  OpenJPEG found, but we need version 2\.x\.x|
+  OPENJPEG_FOUND.*NOTFOUND|
+  openjpeg/2\.5\.4.*not found|
+  Cannot load recipe.*openjpeg
+error_excerpt: >
+  设备实测（本任务 conan create，日志 $TASK_DIR/dev-build2.log）：
+
+  ① 依赖在远端可用（R35 口径，真跑不是 list）：
+     $ conan install --requires=openjpeg/2.5.4 --build=never -pr:h=<绝对 profile>
+     → openjpeg/2.5.4#9f4e31751289e8fdf8faec21932895ed - Downloaded (ohpcd)
+       openjpeg/2.5.4: Package installed 30a828c3393c8a79c509dc8bed859f16757b162f
+
+  ② CMakeDeps 三态对照（同机同依赖，只改 set_property；原始读数
+     $TASK_DIR/cmakedeps-three-way-evidence.txt，逐字日志
+     $TASK_DIR/dep-wiring-evidence/probe-{config,both,openjpeg}-cmake.log）：
+       [默认 config，无 set_property]      OpenJPEG_FOUND=1  OPENJPEG_FOUND=（空）  OPENJPEG_LIBRARIES=（空）
+       [both + OPENJPEG 前缀]              OpenJPEG_FOUND=1  OPENJPEG_FOUND=（空）  OPENJPEG_LIBRARIES=OPENJPEG::OpenJPEG
+       [module + OPENJPEG 前缀，本包采用]   OpenJPEG_FOUND=1  OPENJPEG_FOUND=1     OPENJPEG_LIBRARIES=OPENJPEG::OpenJPEG
+     三态 conan install / cmake configure 的退出码**都是 0**；只有第三态让 libheif 的
+     if (OPENJPEG_FOUND AND WITH_OpenJPEG_DECODER) 为真。module 形态下逐字读数：
+       FindOpenJPEG.cmake:63  set(OPENJPEG_FOUND 1)
+       -- PROBE OpenJPEG_FOUND=1
+       -- PROBE OPENJPEG_FOUND=1
+       -- PROBE OPENJPEG_INCLUDE_DIRS=<openjpeg 包>/include/openjpeg-2.5
+       -- PROBE OPENJPEG_LIBRARIES=OPENJPEG::OpenJPEG
+       -- PROBE OpenJPEG_VERSION=2.5.4
+       -- PROBE OPENJPEG_MAJOR_VERSION=          <- 空（首轮已命中，上游 2.x 兜底分支不执行）
+
+  ③ 交付面真正被编译（否则只有这一行是判据）：
+     -- Compiling 'j2kdec' as dynamic plugin
+     -- Compiling 'j2kenc' as dynamic plugin
+     -- Not compiling 'libde265' backend
+     -- Not compiling 'aomdec' backend
+     （其余 16 个后端均为 Not compiling）
+
+root_cause: >
+  libheif 1.23.0 的每个编解码后端都靠 ``find_package(<Codec>)`` 拿外部编解码库；
+  子包（``libheif-<codec>``）的**包名是 codec 名、版本号却是父 tarball 的版本**——
+  两条版本轴必须分开读：``libheif-openjpeg/1.23.0`` 表示 "libheif 1.23.0 的 openjpeg 后端"，
+  它 ``requires("openjpeg/2.5.4")`` 才是 OpenJPEG 本体的版本；``conandata.yml`` 的
+  url+sha256 也必须是**父 tarball**（libheif v1.23.0）的，不是 codec 的。
+  同一 codec 在本仓库还可能有两个配方（``openjpeg/2.5.4`` 与 ``openjpeg2/2.5.4``），
+  选哪个不是口味问题而是**可发现性问题**：见下。
+
+  真正的坑是 **find_package 名 ≠ conan 包名 ≠ 变量前缀大小写**：
+  ① ``find_package`` 名：上游写死 ``find_package(OpenJPEG 2)``（CMakeLists.txt:267）；
+     conan 包叫 ``openjpeg``（另有历史包 ``openjpeg2``）。
+  ② CMakeDeps 生成的文件名由 ``cmake_file_name`` 决定（``openjpeg/2.5.4`` 里是 ``OpenJPEG``，
+     恰好命中；``openjpeg2/2.5.4`` 是 ``openjpeg2``，**命中不了** ``find_package(OpenJPEG 2)``）。
+  ③ 变量前缀大小写：CMakeDeps 在 **config 模式**只 ``set`` 与 find_package 同名大小写的
+     ``OpenJPEG_*``；而 libheif 的 ``plugin_compilation()`` 宏判的是**全大写**
+     ``${OPENJPEG_FOUND}`` / ``${OPENJPEG_LIBRARIES}`` / ``${OPENJPEG_INCLUDE_DIRS}``
+     （宏体 libheif/plugins/CMakeLists.txt:2-45：:21 用 ${varName}_INCLUDE_DIRS、:22 用
+     ${varName}_LIBRARIES；j2kdec/j2kenc 注册在 :86,90。而顶层 CMakeLists.txt:374 用的是
+     正确大小写的 ``OpenJPEG_FOUND``——上游自己就不一致）。
+  ④ 而且 CMakeToolchain 默认 ``CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON``
+     （conan/tools/cmake/toolchain/blocks.py:678），所以即使同时生成 config+module 两套，
+     config 也先赢 → ``OPENJPEG_FOUND`` 仍未定义。
+
+  四者叠加的后果是**假绿**：``find_package`` 不报错（找到 config 了）、configure 成功、
+  包能建出来、install 也成功——但 ``plugin_compilation()`` 的 ``if (OPENJPEG_FOUND …)``
+  为假，只打一行 ``Not compiling 'j2kdec' backend`` 就静默降级，交付物里没有插件模块。
+
+  解法（消费方在 ``generate()`` 里显式覆盖 CMakeDeps 属性，不改上游源码）：
+  ``deps.set_property("openjpeg", "cmake_find_mode", "module")`` +
+  ``deps.set_property("openjpeg", "cmake_additional_variables_prefixes", ["OPENJPEG"])``。
+  module 模板会 ``set(OPENJPEG_FOUND 1)`` 并补齐 ``OPENJPEG_LIBRARIES/INCLUDE_DIRS``；
+  ``find_package(OpenJPEG 2)`` 的版本检查由 module 内的
+  ``find_package_handle_standard_args(OpenJPEG … VERSION_VAR OpenJPEG_VERSION)`` 承担
+  （实测 2.5.4 ≥ 2 通过）。同族先例：``archives/l/leptonica/1.85.0`` 也为自己设了
+  ``cmake_additional_variables_prefixes=["OPENJPEG"]``（它只在注释里写了原因）。
+
+  另有一类不可忽略的前置：**依赖必须是"有 conanfile.py/conandata.yml 且已发布 binary"的包**。
+  ``archives/`` 下存在只有 manifest/notes 的"元数据孤儿"，对它们写 ``requires()`` 会在
+  ``finish`` step[5/10] 与 CI L0i 的 ``conan download --only-recipe`` 处 Handoff（R36）。
+  判定必须先真跑 ``conan install --requires=<pkg>/<ver> --build=never``（R35：禁用
+  ``conan list/search`` 判断 binary 是否存在）。
+affected_scope: >
+  所有"父项目 + 每个外部编解码库一个子包"的形态：libheif 1.23.0 的
+  openjpeg/aom/jpeg/svtenc/dav1d/libde265/openh264 七个子包（同构，逐个都要过同一组判据）；
+  更一般地适用于任何 conan 包把上游 ``find_package(<Name>)`` 名、conan 包名、变量前缀
+  三者拆开的场景。判定信号：①上游 CMake 用 ``find_package(<大写混合名>)``
+  ②消费方代码用 ``${<全大写>_FOUND}/${<全大写>_LIBRARIES}`` 判存在/链接
+  ③conan 包名是全小写。三条全中即适用本条。
+rec_priority: 1
+rec_approach: cmakedeps-module-mode-plus-uppercase-variable-prefix
+rec_description: >
+  消费方 ``generate()`` 里对 codec 依赖设置
+  ``cmake_find_mode="module"`` + ``cmake_additional_variables_prefixes=["<UPPER>"]``，
+  使上游 ``find_package(<Name> <Version>)`` 在 module 模式命中并同时得到
+  ``<UPPER>_FOUND``/``<UPPER>_LIBRARIES``/``<UPPER>_INCLUDE_DIRS``；
+  并在 ``package()`` 末尾对交付面做存在性自检（插件模块必须真在
+  ``<pkg>/lib/libheif/``），把"静默跳过后端"变成硬失败。
+rec_command: >
+  TASK_DIR=$HOME/tmp/libheif-openjpeg-1.23.0; sh "$TASK_DIR/verify-openjpeg-dep-wiring.sh"
+rec_auto_fix: false
+rec_impl: >
+  archives/l/libheif-openjpeg/1.23.0/conanfile.py 的 generate()（CMakeDeps 属性）+
+  package()（交付面自检）；仓库既有独立依赖包 archives/o/openjpeg/2.5.4
+fallback_priority: 2
+fallback_approach: consumer-side-cache-variable-pinning
+fallback_description: >
+  若某 codec 的仓库包既没有合适的 cmake_file_name、也无法用 module 模式命中
+  （例如只有 pkg-config 名），退化为在 generate() 里用 cache 变量直接钉住
+  依赖包实际路径（同族先例：libheif 的 FindLIBDE265.cmake 走
+  libfind_pkg_check_modules + find_path/find_library，就只能在配方里
+  tc.cache_variables["LIBDE265_INCLUDE_DIR"/"LIBDE265_LIBRARY"] 直接给路径）。
+fallback_command: >
+  N/A
+fallback_auto_fix: false
+fallback_impl: 本任务未采用（openjpeg 可用 module 模式命中）
+forbid_1_pattern: >
+  requires\(\s*["']openjpeg2/|cmake_file_name["']\s*,\s*["']openjpeg2["']
+forbid_1_reason: >
+  仓库里 openjpeg/2.5.4 与 openjpeg2/2.5.4 是同一上游库的两个配方，主流口径是
+  openjpeg/2.5.4（5 个已合并包在用：imagemagick-full/leptonica/opencv/poppler/openslide），
+  且只有它的 cmake_file_name="OpenJPEG" 能命中
+  libheif 的 find_package(OpenJPEG 2)。选 openjpeg2 会让后端静默降级。
+forbid_1_consequence: >
+  configure 静默跳过 j2kdec/j2kenc（Not compiling …），交付物无插件模块（假绿）
+forbid_2_pattern: >
+  (requires\(\s*["']openjpeg/)|(set_property\(\s*["']openjpeg["']\s*,\s*["']cmake_find_mode["']\s*,\s*["']both["'])
+forbid_2_reason: >
+  声明了 openjpeg 依赖却把 cmake_find_mode 设成 both/config：CMakeToolchain 默认
+  CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON，config 先生效且只 set OpenJPEG_*，
+  全大写 OPENJPEG_FOUND 仍缺失 → 与不设属性等价（仍是静默降级）。
+forbid_2_consequence: 误以为"已配置好依赖"，实际交付面缺插件；W4 会按交付面与声明不符判 P1
+prescan_pattern: "OPENJPEG_FOUND|OPENJPEG_LIBRARIES|find_package\\(OpenJPEG|cmake_additional_variables_prefixes|cmake_find_mode|plugin_compilation\\(j2k"
+verification_cmd: >
+  TASK_DIR=$HOME/tmp/libheif-openjpeg-1.23.0;
+  sh "$TASK_DIR/verify-openjpeg-dep-wiring.sh"   # W0 真拉依赖 + CMakeDeps 形态探测 +
+                                                 # 交付面 readelf/nm 特性级检查，rc=0 即复现通过
+doc_file: knowledge/drafts/DRAFT-E620-libheif-plugin-external-codec-dep-and-version-semantics.md
+verify_builds: >
+  （待回填：libheif-openjpeg 1.23.0 采信轮干净轮读数——
+   Compiling 'j2kdec'/'j2kenc' as dynamic plugin、
+   HMBS_UPSTREAM_TEST_RESULT=…、test_package LIBSHEIF_OPENJPEG_CONSUMER checks_total/passed、
+   readelf -d 插件 NEEDED libopenjp2.so）
+last_updated: 2026-09-20
