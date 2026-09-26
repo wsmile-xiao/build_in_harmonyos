@@ -1,0 +1,91 @@
+#====================================================================
+# E401 draft — libretro 核心 dlopen 消费者测试必须先注册 retro_set_environment 再 retro_init
+# 触发事件: beetle-vb-libretro 1.2.8 适配（test_package 鸿蒙专项测试 Signal 11 段错误）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     E401
+trigger_tool:           test|runtime|dlopen|conan
+phase:                  testing|runtime
+error_signature:        Signal 11 \(core dumped\)|Segmentation fault|139|retro_init.*segfault|retro_set_environment
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform|ohos|testing|dlopen|compat
+match_keywords:         libretro, retro_*, retro_set_environment, retro_init, dlopen,
+                        core dumped, Signal 11, Segfault, emulator core, plugin,
+                        consumer test, test_package, frontend, environ_cb,
+                        RETRO_ENVIRONMENT, beetle, mednafen, mupen64plus, snes9x
+title:                  Libretro 核心消费者测试必须先注册 retro_set_environment 再调用 retro_init，否则 dlopen 后 retro_init 处 Signal 11 段错误
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             Libretro ABI 契约要求前端先调用 retro_set_environment() 注册 environ 回调，
+                        retro_init() 内部会对 environ_cb 解引用（SET_PERFORMANCE_LEVEL / GET_VARIABLE /
+                        GET_LOG_INTERFACE 等）。直接 dlopen 核心后调用 retro_init 而回调为 NULL 时，
+                        在 retro_init 处 SIGSEGV（Signal 11, RC=139）。引擎命中 E338 仅为关键词重叠
+                        （E338 根因是 OHOS getpwuid 返回 NULL，与 libretro 回调注册无关）。
+affected_scope:         所有 libretro 核心（beetle-* 系列、mupen64plus、snes9x、gambatte 等）的
+                        OHOS 消费者测试 / 前端集成：dlopen 核心后必须先注册 environ 回调再 retro_init。
+verification_cmd:       编译并运行 test_ohos.c（dlopen 核心 + set_environment + init + get_system_av_info
+                        + deinit），对比有无 set_environment 的执行结果
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           libretro-environ-pre-register
+rec_description:        消费者测试（test_package）在 dlopen 后、retro_init 前调用 retro_set_environment 注册
+                        最小 environ 回调：SET_*（SET_PERFORMANCE_LEVEL/SET_PIXEL_FORMAT/SET_VARIABLES）
+                        返回 true，GET_* 返回 false；随后校验 retro_api_version()==1、
+                        retro_get_system_info() 的 library_name/valid_extensions、
+                        retro_get_system_av_info() 的 fps/sample_rate/geometry，最后 retro_deinit。
+rec_command:            test_ohos.c 中 set_environment(test_ohos_environ); core_init(); ... core_deinit();
+rec_auto_fix:           false
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      no-libretro-abort
+fallback_description:   若被测对象不是 libretro 核心（无 retro_set_environment 符号），不得硬套本方案；
+                        返回 dlopen 符号缺失错误并由库类型判定接手。
+fallback_command:       dlsym 校验 retro_set_environment 存在后再注册
+fallback_auto_fix:      false
+
+# ═══ Layer 4: 知识映射层 (Knowledge Mapping) ═══
+topic: >
+  以 beetle-vb-libretro 1.2.8（Mednafen VB 的 libretro 移植，纯 Makefile 插件库）为例：
+  test_package 的鸿蒙专项测试首次直接 dlopen 核心 → retro_init()，在 retro_init 处 Signal 11
+  (core dumped)，conan create 的 test() 阶段失败 RC=139。根因是 libretro ABI 的固定契约：
+  retro_init() 内部会调用 environ_cb（全局函数指针，由 retro_set_environment 设置），未注册时
+  NULL 解引用。补上最小 environ 回调（SET_* 返回 true、GET_* 返回 false 的文档默认行为）并
+  前置注册后，完整生命周期（init → get_system_info → get_system_av_info → deinit）通过，
+  输出 "ohos lifecycle ok: fps=50.27 sample_rate=44100.00 geometry=384x224 extensions=vb|vboy|bin"。
+
+root_cause_detail: >
+  1) libretro.h 定义 retro_environment_t 回调由前端通过 retro_set_environment 注入；
+  2) 核心内部（libretro.cpp）在 retro_init 路径上直接调用 environ_cb(...)，无空指针守卫；
+  3) 消费者测试若不模拟前端注册动作，等价于 NULL 回调调用 → SIGSEGV；
+  4) E338 的 "Signal 11/core dumped" 关键词命中是误匹配（E338 为 passwd/homedir 问题）。
+
+solution_detail: >
+  最小 environ 回调契约（文档默认行为）：
+    - RETRO_ENVIRONMENT_SET_PERFORMANCE_LEVEL(8) → true
+    - RETRO_ENVIRONMENT_SET_PIXEL_FORMAT(10)     → true
+    - RETRO_ENVIRONMENT_SET_VARIABLES(16)        → true
+    - 其余（GET_VARIABLE(15)/GET_LOG_INTERFACE(27)/GET_PERF_INTERFACE(28) 等）→ false
+  调用顺序：dlopen → dlsym(retro_set_environment/retro_init/retro_deinit/...) →
+  retro_set_environment(cb) → retro_init() → retro_get_system_info()/retro_get_system_av_info() 断言
+  → retro_deinit() → dlclose。断言点：retro_api_version()==1、library_name=="Beetle VB"、
+  valid_extensions 含 "vb"、fps/sample_rate/geometry 为正且非零。
+
+boundary: >
+  适用：一切以 retro_* ABI 对外、由前端 dlopen 加载的 libretro 核心，其 test_package 消费者
+  测试可整体复用本模式（只改核心文件名与断言常量）。
+  反例：普通共享库（无 retro_* 符号）不需要也不应调用 retro_set_environment；仅需常规
+  dlopen + 调用其导出 API。E442/E345 处理的是"从宿主应用树剥离的 ELF 插件"打包策略，与
+  本固定 ABI 的注册契约不重叠。
+
+related_entries:        E338, E442, E345, E283, E392
+prerequisite_of:        后续 libretro 核心（mupen64plus/snes9x/beetle-* 等）OHOS 消费者测试
+conflicts_with:         none
+# 查重差异（相对既有条目）
+dedup_diff:             E338: 仅 Signal 11 关键词重叠，根因(passwd)与方案(env/源码守卫)均不同；
+                        E442/E345: 同为 dlopen 插件契约族但聚焦打包策略，方案与本模式无交集；
+                        E283/E392: 配方层契约，与本 ABI 注册契约为不同层。
