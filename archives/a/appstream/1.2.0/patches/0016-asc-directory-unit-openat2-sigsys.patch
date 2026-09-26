@@ -1,0 +1,62 @@
+--- a/compose/asc-directory-unit.c	2026-09-25 07:03:53.201030781 +0800
++++ b/compose/asc-directory-unit.c	2026-09-25 07:04:27.025031562 +0800
+@@ -38,6 +38,8 @@
+ #ifdef HAVE_LINUX_OPENAT2_H
+ #include <linux/openat2.h>
+ #include <sys/syscall.h>
++#include <setjmp.h>
++#include <signal.h>
+ #endif
+ 
+ #include "as-utils-private.h"
+@@ -225,6 +227,16 @@
+  * Check whether openat2() actually works here.
+  * Sandboxes may reject the call (grrr!!!), so we try it instead of guessing.
+  */
++static sigjmp_buf asx_openat2_probe_env;
++
++static void
++asx_openat2_sigsys_handler (int sig)
++{
++	/* openat2() is blocked by seccomp on this platform (SIGSYS): jump back to
++	 * the probe and fall back to userspace path resolution instead of dying. */
++	siglongjmp (asx_openat2_probe_env, 1);
++}
++
+ static gboolean
+ asc_openat2_usable (void)
+ {
+@@ -232,10 +244,32 @@
+ 	static gboolean usable = FALSE;
+ 
+ 	if (g_once_init_enter (&initialized)) {
+-		gint fd = asc_openat2 (AT_FDCWD, ".", ASC_O_LOOKUP);
++		struct sigaction old_sa;
++		struct sigaction sa;
++		gint fd = -1;
++		gboolean probe_died = FALSE;
++
++		/* Some sandboxes (e.g. OHOS seccomp) kill the calling process with
++		 * SIGSYS when the openat2() syscall is blocked, instead of returning
++		 * an error code. Guard the probe so we can fall back gracefully. */
++		memset (&sa, 0, sizeof (sa));
++		sa.sa_handler = asx_openat2_sigsys_handler;
++		sigemptyset (&sa.sa_mask);
++		sigaction (SIGSYS, &sa, &old_sa);
++
++		if (sigsetjmp (asx_openat2_probe_env, 1) == 0)
++			fd = asc_openat2 (AT_FDCWD, ".", ASC_O_LOOKUP);
++		else
++			probe_died = TRUE;
++
++		sigaction (SIGSYS, &old_sa, NULL);
++
+ 		usable = fd >= 0;
+ 		if (fd >= 0)
+ 			g_close (fd, NULL);
++		else if (probe_died)
++			g_debug ("openat2() is blocked by a sandbox (SIGSYS), will resolve "
++				 "paths in userspace instead.");
+ 		else
+ 			g_debug ("Unable to use openat2() (%s), will resolve paths "
+ 				 "in userspace instead.",
