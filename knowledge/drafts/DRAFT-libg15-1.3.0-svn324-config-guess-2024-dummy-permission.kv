@@ -1,0 +1,53 @@
+#====================================================================
+# DRAFT-libg15-1.3.0-svn324-config-guess-2024-dummy-permission.kv
+# 现代 config.guess（2024-07-27，automake 1.18 tool_requires）无 HarmonyOS
+# 分支：OHOS 上落到 dummy.c 临时探测段（umask 077 的 $TMPDIR/cgXXXXXX 在
+# HMDFS 共享缓存 setgid 继承后跨 UID 不可写）→ "dummy.c: Permission denied"
+# → "cannot guess build type"。本地/CI 差异根因 = automake 工具链代际不一致。
+# 完整叙事与证据见同目录 .md
+#====================================================================
+
+id:                     DRAFT (最终编号由知识库主编确认)
+trigger_tool:           config.guess|automake --add-missing|configure|conan create build()
+phase:                  configuration
+error_signature:        config.guess: line [0-9]+: .*dummy\.c: Permission denied|unable to guess system type|cannot guess build type|config.guess timestamp = 2024-07-27
+severity:               2
+category:               autotools, config.guess, ohos, conan, toolchain
+match_keywords:         config.guess, 2024-07-27, automake 1.18, tool_requires, dummy.c, Permission denied, unable to guess, cannot guess build type, HarmonyOS, aarch64-unknown-linux-ohos, GUESS=, HMDFS, setgid, umask 077, TMPDIR, 本地通过 CI 失败, automake 1.16, 代际差异
+title:                  现代 config.guess（2024-07-27，tool_requires automake/1.18）无 HarmonyOS 分支 → OHOS 落到 dummy.c 临时探测段，HMDFS 上 dummy.c: Permission denied → cannot guess build type；本地通过/CI 失败根因是 automake 工具链代际不一致
+root_cause:             机理链（libg15 1.3.0-svn324 PR #11727 CI #59402 实证，config.guess timestamp=2024-07-27）：(1) 2024 代 config.guess 主 case 无 `*:HarmonyOS:*:*)` 分支（本地系统 automake 1.16 自带的 2023-08-22 版有该分支）；(2) HarmonyOS 不匹配任何分支 → 落到脚本尾部 "No uname command or uname output not recognized" 段，先 `set_cc_for_build` 再 `cat > "$dummy.c"`；(3) `set_cc_for_build` 用 `(umask 077 && mktemp -d "$TMPDIR/cgXXXXXX")` 建 0700 临时目录，HMDFS 共享缓存上 setgid 继承（2700）后跨 UID 不可写 → `dummy.c: Permission denied` → "unable to guess system type" → configure: cannot guess build type。(4) 本地通过/CI 失败根因：本地 PATH 回退到 $HOME/usr/local/bin 的 automake 1.16（其 config.guess 已带 HarmonyOS 分支，直接 echo 三元组退出），CI worker（USER=100）因 E443 跨 UID 0770 不可执行该目录，automake 解析到 tool_requires automake/1.18 → 2024 原版 config.guess
+affected_scope:         使用 tool_requires automake（≥1.17，自带 2024 config.guess）在 OHOS/HMDFS 上构建的 autotools 包；判别命令 grep -c HarmonyOS config.guess 返回 0；config.sub 2024 已认 linux-ohos（无需改动），仅 config.guess 缺分支
+verification_cmd:       # 副本验证（只读 TMPDIR=/tmp 证明不触碰临时目录）
+                        cp <automake-pkg>/share/automake-1.18/config.guess cg
+                        grep -c HarmonyOS cg                      # 0 = 未补
+                        <注入 *:HarmonyOS:*:*) GUESS=... 分支于主 case esac 前>
+                        TMPDIR=/tmp sh cg                         # 预期 aarch64-unknown-linux-ohos rc=0
+                        # 全量验证（强制 conan automake 工具链，等价 CI）
+                        conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=... --build="libg15/*"
+                        # 构建产物 config/config.guess 应含 HarmonyOS 分支；configure result: aarch64-unknown-linux-ohos
+rec_priority:           1
+rec_approach:           post-bootstrap-config-guess-injection
+rec_description:        bootstrap（automake --add-missing）后再打 config.guess 补丁：在主 case 的 esac 前（锚 "# Do we have a guess based on uname results?" 注释，唯一；回退锚 *:NetBSD:*:*）注入现代 GUESS= 形态分支 `*:HarmonyOS:*:*` → case "$UNAME_MACHINE" 归一化 → `GUESS=${MACHINE}-unknown-linux-ohos` + `;;`。脚本末尾有统一 `echo "$GUESS"` 出口，GUESS= 赋值即生效，直接输出三元组并退出，完全不触碰 dummy.c 临时目录。guard：grep -c HarmonyOS >0 跳过（本地已补场景）。config.sub 2024 已认 ohos，无需改
+rec_command:            在 conanfile.py build() 中 bootstrap 后以 replace 注入上述分支（见 libg15 1.3.0-svn324 配方 _fix_config_guess_ohos）；或对该脚本运行 E007 官方 scripts/patch-autotools-ohos.pl（其 §1.2 注入分支即现代 GUESS= 形态）
+rec_auto_fix:           false
+rec_impl:               recipe-post-bootstrap-patch
+fallback_priority:      2
+fallback_approach:      build-env-toolchain-pinning
+fallback_description:   让 bootstrap 固定使用带 OHOS 分支的 automake（如本地 $HOME/usr/local/bin 的 1.16），避免 tool_requires 现代 automake 的 config.guess 参与 --add-missing。代价：CI 上该目录跨 UID 不可执行（E443），依赖部署带 OHOS 补丁的 automake 资产，通用性差
+fallback_command:       PATH 固定 /usr/local/bin 优先 + 禁用 tool_requires automake，或 bundle 带 HarmonyOS 分支的 config.guess 到配方 export_sources 并阻止 automake 覆盖
+fallback_auto_fix:      false
+fallback_impl:          manual
+forbid_1_pattern:       --build=.*linux-|--host=.*linux-
+forbid_1_reason:        以交叉三元组绕过系统检测是铁律 P-AUTOTOOLS-001：鸿蒙为原生编译环境，绕过导致 cross_compiling=yes → AC_RUN_IFELSE 跳过 → config.h 错误
+forbid_1_consequence:   configure 结果静默错误，问题后移到编译/运行期
+forbid_2_pattern:       只补 config.sub 不补 config.guess
+forbid_2_reason:        config.sub 2024 已认 linux-ohos；缺的是 config.guess 的识别分支。只改 config.sub 无济于事
+forbid_2_consequence:   configure 仍在 config.guess 处失败（dummy.c: Permission denied / cannot guess build type）
+forbid_3_pattern:       把"本地通过"当作"CI 也会通过"而不做工具链等价验证
+forbid_3_reason:        本地 automake 1.16（OHOS 补丁 config.guess）与 CI tool_requires automake/1.18（2024 原版）行为不同——同配方在两端结果相反
+forbid_3_consequence:   提交后 CI 反复失败，浪费 rebuild 轮次
+principles:             [P-AUTOTOOLS-001, P-PATCH-001]
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E160, DRAFT-E564, DRAFT-config-guess-era-echo-exit]
+conflicts_with:         []
