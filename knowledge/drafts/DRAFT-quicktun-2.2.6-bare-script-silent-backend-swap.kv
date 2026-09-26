@@ -1,0 +1,138 @@
+#====================================================================
+# DRAFT-quicktun-2.2.6-bare-script-silent-backend-swap —— 上游构建入口是
+#   裸 shell 脚本时，"编译器探测即选型"失败会静默换成仓库内置实现且退出码 0，
+#   使 requires() 声明与交付物不一致；config.h／编译命令行／DT_NEEDED 四层判据
+#   全部不可用时，唯一硬判据是链接期产物双断言。
+# 对应文档: knowledge/drafts/DRAFT-quicktun-2.2.6-bare-script-silent-backend-swap.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+id:                     DRAFT-quicktun-2.2.6-bare-script-silent-backend-swap
+trigger_tool:           conan|sh|clang|ld|readelf
+phase:                  build|packaging|verification
+error_signature:        Building TweetNaCl|not optimized for performance\. Please install|Using shared (libsodium|libnacl)|fell back to the bundled|no libsodium-only symbol
+
+severity:               2
+category:               conan, dependency, build-system, false-green, backend-selection, bare-script
+title:                  裸 shell 构建入口的"编译器探测即选型"失败会**静默换成仓库内置实现**且退出码 0（照常产出全部二进制）——当 config.h／编译命令行／DT_NEEDED 四层判据都不可用时，唯一硬判据是**链接期产物双断言**（内置实现的目标文件不出现 + 只可能来自该依赖的符号在位）
+
+match_keywords:         静默换后端, 探测即选型, bundled fallback, silent backend swap, TweetNaCl, libsodium, CPATH, LIBRARY_PATH, DT_NEEDED, 静态折入, 假依赖, 声明依赖未使用, 链接期断言, 专有符号排他性, 裸脚本构建, 无配置出口, build.sh, 退出码 0, false green, R33, R49
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             上游只有 90 行裸 shell 的 build.sh 作为构建入口：没有 configure、没有
+                         Makefile、没有任何命令行开关或配置文件可用来指定依赖位置或选定后端。
+                         它把加密后端做成"编译器探测即选型"——
+                         build.sh:37 的「if $cc -shared -lsodium tmp/libtest1.c -o tmp/libtest 2>/dev/null; then」
+                         是唯一决策点；探测失败即落到 build.sh:49-58 的 else 分支，编仓库自带
+                         src/tweetnacl.c（build.sh:52）并把 CRYPTLIB 换成 obj/tweetnacl.o，
+                         然后**照常产出 out/ 下全部二进制、脚本退出码仍是 0**。三层叠加才致命：
+                         ① 探测失败与构建失败完全脱钩（探测命令自带 2>/dev/null 且被用作 if 条件，
+                         脚本的 set -e 拦不住）；② 换的是**同一套 Curve25519/XSalsa20/Poly1305
+                         原语的另一份实现**，实测两版 quicktun.keypair 对同一秘密标量给出逐字节
+                         相同的公钥 ⇒ 行为测试、消费者测试、--version 烟雾全都区分不出来；
+                         ③ 链成的是静态折入形态，readelf -d 的 NEEDED 只剩 libc.so，
+                         被声明的依赖不在动态依赖表里 ⇒ 常规的"查 DT_NEEDED 核对依赖"直接落空。
+                         后果：配方向 Conan 声明的 requires(libsodium) 与实际交付物不再一致，
+                         而所有机械门禁（退出码／G0-G4／L0-L5／test_package）全部照样通过。
+
+affected_scope:         同时满足三条的包：①上游构建入口是裸 shell 脚本或裸命令序列（无
+                         configure／Makefile.am／CMake／meson，因而没有配置出口）；②脚本内部
+                         用编译器探测选实现（形如 if \$cc -shared -l<dep> probe.c; then …; else
+                         编内置实现; fi），且 else 分支不退出；③该依赖在制品仓已发布且配方已
+                         显式 requires()（否则属上游设计内的合法降级，归
+                         DRAFT-ohos-optional-dep-silent-degrade-stub-api 管）。
+                         典型面：自带 TweetNaCl／libtomcrypt／单文件 SHA／内嵌 JSON 替身实现的
+                         加密与网络类 CLI；本条实证宿主为 quicktun/2.2.6。
+
+safety_boundary:        适用：判据链已被逐层否证到只剩产物的场合（无 config.h、无命令行回显、
+                         无 DT_NEEDED 痕迹、运行期无差异）。
+                         不适用：有 config.h 的 autotools 包（走 DRAFT-libdv-tools 的
+                         #define HAVE_X 断言）；有 CMake option 池的包（读 option 并排除 build/）；
+                         依赖本就未发布的可选降级（那里明令禁止为消除告警强行补依赖）。
+                         反例：上游 else 分支是"裁掉功能"而不是"换等价实现"时，运行期会有症状，
+                         用运行期断言更省，本条只覆盖"无症可查"这一格。
+                         解除条件：上游若提供显式后端开关（--with-libsodium 或可传 CRYPTLIB），
+                         优先走开关并删掉本断言，回归零补丁路线。
+                         风险：判据②按字节在产物里搜符号名，理论上受"内联后符号改名"影响，
+                         故①②两条同时用，且①的目标文件路径必须取自上游脚本自身那行编译命令。
+
+verification_cmd:       ① 先证明四层判据逐层不可用（顺序不能反）：
+                           find <src> -name config.h -o -name configure -o -name Makefile.in   必须全为空
+                           <构建命令> 不回显探测阶段命令行、无 config.log／makeopts 落盘
+                           readelf -d out/<bin> | grep NEEDED      依赖不在表里（静态折入 ⇒ 只剩 libc.so）
+                           同输入跑两份产物，公钥／输出逐字节相同   运行期无法区分后端
+                         ② 证明断言用的符号是排他的（决定性一步，别凭印象）：
+                           grep -rc <symbol> <src>          整棵树命中必须为 0
+                           grep -oE "crypto_[a-z]+" <src>/tweetnacl.h | sort -u    内置实现不导出该族
+                         ③ 证明降级分支真的可观测：内置分支被编出来时会留下目标文件
+                           ls <src>/obj/tweetnacl.o         出现即已降级（取自 build.sh:52 那行 -o 目标）
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           assert-link-time-artifacts-in-build
+rec_description:        在 build() 里紧跟构建命令之后做**链接期产物双断言**，任一不过直接
+                         raise ConanException（不是 warning，warning 会被门禁吞掉）：
+                         ① 内置实现的目标文件不得出现——该文件只有 else 分支才会被编出来，
+                            路径取自上游脚本自己那行 -o 目标，不是猜的；
+                         ② 产物字节里必须有"只可能来自被声明依赖"的符号——先用
+                            grep -rc <symbol> <src> 证明整棵上游树命中 0 次，再拿它当判据；
+                         ③ 判据一律取链接期既成事实，不取 stdout 措辞（上游改一句文案就失效）。
+                         配套两件事（缺了"探测能命中"就是运气）：用 Environment 把依赖自己的
+                         package_folder 下的 includedirs/libdirs 追加进 CPATH/LIBRARY_PATH
+                         （R49，不引用共享系统前缀）；脚本把编译器写死时打一个补丁改成
+                         ${CC:-cc}，CC 由 AutotoolsToolchain 注入（R33）。
+                         另外必须核实上游脚本自己有没有往 LIBRARY_PATH 塞系统前缀
+                         （本包 build.sh:33 塞了 /usr/local/lib/）：本机 /usr/local 不存在 ⇒
+                         探测命中只能来自注入路径；若该目录存在且装有同名库，"依赖已发布"与
+                         "链到系统库"就分不开，须在 notes 里写明。
+rec_command:            见 rec_description ①②；最小实现（quicktun/2.2.6 实际落地形态）：
+                           tn_obj = os.path.join(self.source_folder, "obj", "tweetnacl.o")
+                           if os.path.isfile(tn_obj): raise ConanException("fell back to the bundled TweetNaCl: …")
+                           blob = open(os.path.join(self._out_dir, "quicktun.combined"), "rb").read()
+                           if b"crypto_generichash_blake2b" not in blob: raise ConanException("no libsodium-only symbol …")
+                         排他性证明（同轮实测）：grep -rc crypto_generichash <src> 无输出；
+                         src/tweetnacl.h 导出的前缀只有 crypto_auth/box/core/hash/hashblocks/
+                         onetimeauth/scalarmult/secretbox/sign/stream/verify
+rec_auto_fix:           false
+rec_impl:               assert-bundled-object-absent-and-dependency-only-symbol-present
+
+fallback_priority:      2
+fallback_approach:      ship-bundled-backend-and-drop-the-requirement
+fallback_description:   若判定内置实现才是本包该交付的形态（依赖未发布，或上游明确视其为可选），
+                         就不要保留 requires() 声明：三处同步改①requirements() 去掉该依赖；
+                         ②notes.md 与 manifest.yaml 写明"该能力由 <内置实现文件> 提供、不是 <依赖>"
+                         并给等价性/差异性实测；③test_package/MANIFEST.yml 标出覆盖边界。
+                         代价：丢掉上游标榜的性能与审计口径，且后续消费方按声明期待真依赖时
+                         会拿到与预期不符的实现。
+fallback_command:       见 fallback_description（无单一命令；关键是"声明与交付同时改"）
+fallback_auto_fix:      false
+fallback_impl:          remove-declared-dependency-and-declare-boundary
+
+principles:             honest-reporting, measure-not-assume, evidence-over-exit-code, upstream-compat-evidence
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-libdv-tools-1.0.0-ac-check-lib-warns-instead-of-failing, DRAFT-ohos-optional-dep-silent-degrade-stub-api, DRAFT-E590-libyal-optional-dep-autodetect-ohos, DRAFT-E2186-autotools-deps-missing-dep-flags, DRAFT-E623-libheif-dav1d-1.23.0-plugin-consumer-contract-and-dlopen-signing]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               drafts/DRAFT-quicktun-2.2.6-bare-script-silent-backend-swap.md
+last_updated:           2026-09-25
+source_event:           quicktun/2.2.6 适配（分支 feat/quicktun-2.2.6，鸿蒙 PC B 机真机实测）：
+                         未注入依赖路径的原样构建实跑进内置分支
+                         （~/tmp/uc2/z45-quicktun/build-asis.log:2-4）；注入后后端归真
+                         （archives/q/quicktun/2.2.6/reports/w3-local-ci.log:189）；
+                         静态折入与符号排他性证据 archives/q/quicktun/2.2.6/../reports/
+                         与 ~/tmp/uc2/z45-quicktun/artifact-probe.log:6-14
+source_pr:
+source_commit:
+authors:                主理-45-子代理2
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-25
+
+draft:                  true
+contributor_id:         Z45B2
