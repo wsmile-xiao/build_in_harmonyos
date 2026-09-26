@@ -1,0 +1,56 @@
+# ═══ Draft knowledge entry — HMDFS inode 耗尽表现为 ENOSPC：git worktree 检出与依赖源码解压失败 ═══
+# Timestamp: 2026-09-25
+# Software: coordgenlibs 3.0.2 (task coordgenlibs-3.0.2-r01-pc1-45)
+# Gate: bootstrap (worktree creation) / conan install (source extraction)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the defect evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+
+id:                     DRAFT-coordgenlibs-3.0.2-hmdfs-inode-sparse-worktree
+trigger_tool:           git|conan|cmake|tar
+phase:                  bootstrap|source|configure
+error_signature:        No space left on device|cannot create directory at 'archives/.*'|
+                         OSError: \[Errno 28\]|unable to create file .*test_package|
+                         .*tar.*No space left on device
+severity:               2
+category:               hmfs|git|worktree|inode|quota|conan|build-infra
+match_keywords:         inode, no space left on device, ENOSPC, hmdfs, worktree,
+                         sparse-checkout, git worktree add, --no-checkout, --cone,
+                         conan cache clean, source extraction, df -i, df -h,
+                         filesystem quota, 88k files, full checkout
+prescan_pattern:        git worktree add|sparse-checkout|df -i|inode
+root_cause:             HMDFS 账户文件系统 inode 配额耗尽（df -i 显示 100%，
+  48.45M/48.46M used，仅剩数千到数万）时，磁盘容量（df -h 仍显示数百 GB 空闲）会
+  掩盖真实瓶颈：git worktree 全量检出、conan 依赖源码解压、tar 解包等需要一次性
+  创建海量小文件（本仓 main 全量 88.7k 文件，boost 1.84 源码 ~150k 文件）的操作
+  会以 "No space left on device" / "Errno 28" 失败，失败点在不同批次漂移
+  （cpuinfo→cpplocate→cmp→coin）。直接重试无法解决，错误信息误导为磁盘满。
+affected_scope:         所有在 HMDFS 账户上需要创建大量文件的任务：git worktree 全量
+  检出（多工作树账户尤其严重）、conan create 源码解压、大 tarball。inode 充足时
+  不受影响。检测方法: df -h（容量）与 df -i（inode）必须同时查看。
+verification_cmd:       df -i /storage/Users/currentUser | tail -1   # 观察 IUse% 100% 与
+                        IFree 仅剩数千时即触发阈值；df -h 同路径对比容量仍空闲
+rec_priority:           1
+rec_approach:           sparse-worktree-plus-cached-deps
+rec_command: |
+  # 1) 创建唯一 worktree 且不触发全量检出（git 元数据完整，分支/HEAD/提交不受影响）
+  git worktree add --no-checkout <path> <branch>
+  git -C <path> sparse-checkout init --cone
+  git -C <path> sparse-checkout set scripts references templates ci .gitcode knowledge archives/<首字母>/<库名>
+  git -C <path> checkout
+  # 2) conan 依赖源码解压同类 ENOSPC：
+  conan cache clean "*"        # 清理损坏残留；rm -rf ~/.conan2/p/<残缺包> 释放 inode
+  #    优先复用已构建的缓存二进制（其 header 已在缓存中），避免再次源码解压
+  df -i <账户根> | tail -1     # 复核 inode 余量，决定是否继续
+rec_description:          先用 df -i 判 inode 而非 df -h；worktree 用 --no-checkout +
+  sparse-checkout --cone（仅检出任务所需路径，如 scripts/knowledge/archives/<lib> 等，
+  数量级从 88.7k 降到 ~4.7k）；git sparse 不影响 commit/push/diff/审计，PR 交付完整。
+  依赖源码解压失败时清理 conan 缓存残留并复用已构建缓存产物，而非重试源码解压。
+rec_approach_evidence:   coordgenlibs 3.0.2 (pc1-45): 全量检出 3 次失败（No space left，
+  inode 余 5k → 全量需 88.7k），sparse 检出后 在 同一 worktree 完成 init-build →
+  conan-verify（G0-G4/L2/L4/L5 全 PASS）→ finish → W3 全门禁；上游测试 20/20。
+affected_scope_detail:   HMDFS 账户 inode 配额场景；inode 充足或不同文件系统不受影响；
+  需要整仓文件的操作（如仓库级 grep 脚本）不适用 sparse 方案。
