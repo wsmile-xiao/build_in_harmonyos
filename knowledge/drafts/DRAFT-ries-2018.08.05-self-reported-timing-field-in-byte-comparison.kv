@@ -1,0 +1,142 @@
+# ═══ Draft knowledge entry — ries 2018.08.05：消费者断言把被测程序自报的计时字段纳入逐字节比较 ═══
+# Timestamp: 2026-09-25
+# Software: ries 2018.08.05
+# Gate: 本地 conan create + test_package 9 条真机用例（B 机 HarmonyOS aarch64，2026-09-25 19:05 轮）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ries-2018.08.05-self-reported-timing-field-in-byte-comparison
+title:                  '确定性求解器的正常输出里带一枚不可抑制的墙钟字段（ries 收尾摘要 printf("  Time: %.3f\n", tsec)），被消费者断言纳入逐字节比较后，同一命令同臂重跑必然随机翻面（假失败）；修法=只掩该字段（字段级）+ 用同一掩码做字段级正对照，比较面其余字节一个不放宽'
+trigger_tool:           'test_package harness（sh + cmp/diff 逐字节断言）；被测程序 Ries 2018.08.05 print_end()'
+phase:                  test
+error_signature:        '\[test\] FAIL -n3 output is byte-identical on re-run|RIES_TEST_SUMMARY total=9 passed=8 failed=1'
+severity:               2
+category:               test-harness|determinism|clock-field|byte-comparison
+match_keywords:         逐字节一致, byte-identical, cmp -s, 重跑翻面, 假失败, 秒表字段, 墙钟耗时, elapsed time, Time 字段, 正对照, 字段级掩码, 确定性输出, flaky
+keywords:               被测程序自报计时字段, 消费者断言把时钟纳入比较, 行级排除放过非时钟差异, 掩码后全量比对, 不缩分母
+
+root_cause:             '被测程序的算法输出是确定的，但它在收尾摘要里额外打印一枚墙钟秒表：Ries 的 print_end() 里 tsec = gettime()（ries.c:7511），随后 printf("  Time: %.3f\n", tsec)（ries.c:7540，2018.08.05 钉版行号）；该字段只受 g_enable_output 约束（--find-expression 一类非交互用法会整块抑制统计输出），正常 CLI 用法下没有任何选项能单独关掉它。于是「重复执行同一命令 ⇒ 输出逐字节一致」这条消费者断言在原理上就不成立——机器越忙、该字段越容易落在不同的毫秒值上、断言越容易翻面。B 机 aarch64 实测 30 次 ries -n3 2.5063：整份输出 2 种 md5（0ebaa69b1b 23 次 / 0c29bb0b95 7 次），与该字段读值 0.001（23 次）/ 0.000（7 次）逐次一一对应；掩掉该字段后 30 次只剩 1 种 md5（aeefc3f5ed）⇒ 除时钟外所有字节（等式列表、max complexity、dead-ends 三个计数、expressions、distinct、Memory、Total equations tested）在 30 跑里全部恒定。再放一枚竞争 CPU 的进程连跑两次，原始 cmp rc=1，同一对文件掩掉该字段后 cmp rc=0。定性：这不是 OHOS / 工具链 / 依赖 / 上游缺陷，而是消费者 harness 自己把被测程序自报的计时字段纳入了逐字节比较，属测试件缺陷，症状为随机假失败。'
+
+affected_scope: >-
+  任何"重跑同一命令并逐字节比对两次输出"的消费者断言，且被测程序会在正常输出里打印
+  自报耗时/秒表/时间戳一类字段（*summary* 行里的 Time、elapsed、took、seconds、
+  CPU time、Duration，或任何 time/gettimeofday/clock_gettime 的结果被 printf 进输出）。
+  高发形态是求解器、编译器基准、"跑完打印统计"的 CLI 工具。
+  不适用：程序输出本身完全确定（无时钟字段）而重跑仍翻面 —— 那要先查 harness 落点与
+  环境（见 similar_to 的两族），不要引本条；也不适用"上游测试大面积失败"的定性。
+
+verification_cmd: >-
+  N=30 次跑同一条命令到 30 个文件，分别对全量与"仅掩掉该字段"的两套文本取 md5 并
+  sort -u 计数：全量 2 种、掩码后 1 种 ⇒ 差异完全由该字段贡献，其余字节恒定；
+  再并排放一枚 CPU 竞争进程连跑两次，取原始 cmp rc 与掩码后 cmp rc（应 1 与 0）。
+  Ries 2018.08.05 实测读数（B 机，逐件见 archives/r/ries/2018.08.05/reports/assert9-det3/）：
+  全量 md5 23/7 分成 0ebaa69b1b 与 0c29bb0b95，掩码后 1 种 aeefc3f5ed，
+  加负载两跑 raw cmp rc=1、masked cmp rc=0。
+
+prescan_pattern: 'Time: |elapsed|Duration|clock_gettime|gettimeofday'
+prescan_globs: '**/*.c, **/*.cpp, **/test_package/test.sh'
+
+rec_approach:         field-level-clock-mask-plus-field-level-positive-control
+rec_priority:         1
+rec_impl:             'test_package/test.sh 的断言改写（配方与上游源码均不动）'
+rec_command: >-
+  sed -E 's/Time:[[:space:]]*[0-9][0-9.]*/Time: <elapsed>/' a.txt > norma.txt
+  sed -E 's/Time:[[:space:]]*[0-9][0-9.]*/Time: <elapsed>/' b.txt > normb.txt
+  cmp -s norma.txt normb.txt; norm_rc=$?
+  diff norma.txt normb.txt | grep -vE '^[0-9]+(,[0-9]+)?[acd][0-9]+(,[0-9]+)?$|^---$' > undisposed.txt
+  [ "$norm_rc" = "0" ] && [ ! -s undisposed.txt ]
+
+rec_description: >-
+  两条闸门，缺一不可。① 主门禁：对两臂输出各跑**同一条字段级 sed**，把该字段
+  冒号后面的数字换成固定占位串（Time: 后到行尾之前的其它字节、以及同一行上的其它字段
+  全部原样保留），再对掩码后的两份文本 cmp。② 正对照：对**同一对掩码后文本**跑 diff，
+  只允许 diff 的 hunk 头（形如 13c13 与 --- 分隔行）出现，
+  任何一条正文差异都算未处置差异 ⇒ 断言失败。正对照的作用是给失败留可定位的现场，
+  并堵死"把差异归因到时钟字段"的口头声明。
+  要点：掩码与排除都必须是**字段级**。逐行整行放过（例如 diff 后 grep -vE "...|Time: "）
+  看着等价，实则会把与该字段同行的其它差异一起放过 —— Ries 的 Time 就印在
+  dead-ends 三个计数所在的第 13 行末尾
+  （"         dead-ends:        2581         1907         4488  Time: 0.001"），
+  实测同一对文本在第 13 行同时改动 dead-ends 计数与 Time 值时，行级排除的未处置差异是
+  0 字节（盲），字段级排除的是 159 字节（抓到）。
+  分母与断言条数不变（Ries 仍 9 条），改动全部落在 test_package/test.sh，
+  不进 export_sources、不改 recipe revision。
+
+forbid_1_pattern: 'grep -vE .*Time: '
+forbid_1_reason: >-
+  禁止用整行排除充当正对照。被测程序常把时钟与其它计数印在同一行，行级排除会连非时钟
+  差异一起放过，声称强度高于实际强度（本包就是这么写第一版的，靠字段级 sed 的主门禁才
+  没构成凑绿）。
+
+forbid_2_pattern: 'diff .* /dev/null|截断比较面|只比前 N 行'
+forbid_2_reason: >-
+  禁止通过缩小比较面来"修"这个问题（去掉 dead-ends/Memory/计数行、只比等式列表等）。
+  该断言的价值恰恰在于验证**全部**统计恒定；只掩一枚确实随机的字段，其余留在面内。
+
+forbid_3_pattern: '\|\| true|ignore_errors|test_skipped 整条断言'
+forbid_3_reason: >-
+  禁止用吞退出码、ignore_errors、SKIP 通道或删掉整条断言绕过；也禁止因"随机"就把
+  flaky 定性成平台/上游缺陷。这是 harness 缺陷，改 harness 的写法，不改断言的强度。
+
+fallback_approach:    suppress-the-statistics-block-or-pin-a-single-field-comparison
+fallback_description: >-
+  若该字段与被统计输出同属一个可关闭的块（Ries 是 g_enable_output，
+  --find-expression 一类用法会整块抑制统计），可改用不打印统计的那条 CLI 形态做逐字节
+  对照，另用一条**只比等式列表**的弱断言覆盖统计块；两种形态都要留真机读数。
+  代价是比较面被合法地缩小了，须在 notes 里写明缩到了哪里。
+
+dedup_notes: >-
+  判重（2026-09-25 主理-45-子代理3 在 worktree 实跑，逐字读数与行号见
+  archives/r/ries/2018.08.05/reports/knowledge-candidate-ledger.md 候选 3 节）：
+  knowledge/graph|doc|operations 三档词集实测命中 A 组（stopwatch/elapsed time/wall.clock/
+  clock_gettime/non-determinis）25 条、B 组（逐字节/秒表/计时字段/墙钟/随机失败/flaky）23 条、
+  C 组（Time: 加空格）2 条；逐条核对**全部异层**——E152.kv:4,12 与 E270.kv:8,12,17,30 是
+  时钟源/宏在 OHOS 可不可用，E057.kv:8,13,16,19,23 是 regrtest 开满 worker 造成的真不确定
+  （解法 env-var-override），E488.kv:40,70 的"逐字节"是 HMDFS 上重写 .so 的手法，
+  E537 两处是散文 "at link time:" 的字面假阳性 ⇒ 机制级命中 0。
+  knowledge/drafts 手工 grep（A 组 19 条 / B 组 171 条 / 组合探针 4 件；因 draft-review
+  只取 knowledge/graph/index.tsv、不扫 drafts）命中件也全在不同层，逐件实读到行：
+  DRAFT-9995-f3d-vtk-gles-egl-upstream-tests.kv:39,55 是 OpenGL 常量名 GL_TIME_ELAPSED、
+  DRAFT-8425-libusbsio-2.1.13-upstream-deleted-equivalent-source.kv:9,14 是产物等价源判定、
+  DRAFT-8959-kqwait-1.0.3-kqueue-to-inotify-faithful-rewrite.kv:33 与同名 .md:52,60 是移植义务、
+  DRAFT-9200-lddtree-shell-tool-portability.kv:57 是不许擅改上游测试件、
+  DRAFT-8543-refresh-patch-rename-conandata-desync.kv:19,56 与 DRAFT-E577-buffer-sysv-ipc-posix.kv:47
+  与 DRAFT-E616-upstream-auto-tarball-vs-release-src-asset-submodules.md:92,95 是产物字节对照、
+  DRAFT-10686-skypat-perf-events-runtime-capability-probe.kv:42 与 E558-draft-7899.kv:78 与
+  E544-draft-A7F3.kv:16,27 与 E430-draft-7707.kv:42 是取时路径与符号可用性。
+  scripts|ci|docs 0 命中；池内最近邻 M15 方向相反。结论=create，非 hit。
+
+similar_to: 'DRAFT-PKG-VER-hishell-swallows-sigalrm（池内 M15）, DRAFT-9200-lddtree-shell-tool-portability, DRAFT-8425-libusbsio-usbdk-drivers-not-buildable'
+
+safety_boundary: >-
+  层次差是本条立项的依据，三条都对齐到行号：① 池内最近邻 M15
+  （DRAFT-PKG-VER-hishell-swallows-sigalrm.kv 的 :7 title、:10 error_signature、
+  :16 root_cause、:41 rec_description，池索引行 README.md:31）**方向相反** —— M15 是上游用信号实现超时被
+  hishell 吞掉，导致"该失败的没失败"（假通过 + 少报超时）；本条是被测程序自报耗时
+  进了逐字节比较，导致"该稳定的不稳定"（假失败）。症状、根因、修法三者皆不同。
+  ② 本仓既有口径"同一 test.sh 原生全绿而 conan 下差 1 条 ⇒ 先查 CWD / 两臂输入字节 /
+  env 三臂"与"L1e 把参考输出相对写到 cwd 被负照轮覆写"讲的是 **harness 落点与环境**
+  造成的差异（差异来源在框架，修法是挪落点/补 -pr:b）；本条差异来源在**被测程序自身的
+  printf**，双臂同臂、同 cwd、同 env 也必然翻面。Ries 本包的排除顺序是先按三臂口径把
+  环境说否证掉（test_package 下无残留 ⇒ 未触发 mkdir 失败的 WORK=. 回退；
+  conanrun.sh 同臂 6 轮对照），才落到时钟说 ⇒ 两条口径是互补的执行顺序，不是同一条知识。
+  ③ 申报前必须自己留下"全量 md5 多种 / 掩码后一种"的逐跑读数表与加负载两跑对照，
+  否则无法与"落点被覆写""env 三臂不一致"区分。E174（make install 缺 install(1)）与本包
+  按文件名保留为 hit 引用，不占本条知识位。
+
+source_event: >-
+  ries 2018.08.05（HarmonyOS PC 积分赛）首轮交付：断言 9 写作"两次 ries -n3 2.5063
+  的输出 cmp 逐字节一致"，18:42 那轮 9/9 通过、18:50 同树同机同 conan 重跑即变
+  total=9 passed=8 failed=1；反证与修订轮逐件读数已随 PR 落在
+  archives/r/ries/2018.08.05/reports/assert9-fixcheck/（old4.log 为 8/1 那一轮，
+  old1-3、old5-6 与 new1-6 是同臂 6 轮对照），30 跑读数表在
+  archives/r/ries/2018.08.05/reports/assert9-det3/。
+source_commit:        'feat/ries-2018.08.05 —— test_package/test.sh 断言 9 的字段级掩码与字段级正对照；证据件同 PR 的 reports/assert9-*'
+source_pr:            'https://atomgit.com/wanderlust_0823/build_in_harmonyos/pulls （feat/ries-2018.08.05）'
+authors:              主理-45-子代理3
+last_updated:         '2026-09-25'
