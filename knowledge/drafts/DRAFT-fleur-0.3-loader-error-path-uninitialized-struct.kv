@@ -1,0 +1,84 @@
+#====================================================================
+# DRAFT-fleur-0.3-loader-error-path-uninitialized-struct
+#   C 加载器错误路径返回未初始化结构体 → 消费者 free(垃圾指针) 崩溃
+# 来源: fleur 0.3 适配（HarmonyOS PC aarch64）
+# 路径: Path B（知识库扩展）— 与 E249 部分覆盖，新增加载器错误路径形态
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-fleur-0.3-loader-error-path-uninitialized-struct
+trigger_tool:           runtime|gdb|clang
+phase:                  runtime
+error_signature:        Signal 5|Signal 11|core dumped|Incoherent header|reading filter file|Cannot load bitarray
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               memory, error-path, loader
+match_keywords:         uninitialized struct, error path, early return, free, garbage pointer,
+                        from_file, loader, bloom filter, destroy, Signal 5, core dumped,
+                        未初始化结构体, 错误路径, 早退, 释放, 垃圾指针
+title:                  C 库加载器（from_file 类）错误路径早退返回未初始化结构体，消费者调 destroy/close 时 free(垃圾指针) 崩溃
+prescan_pattern:        struct\s+\w+\s+[A-Za-z_]+\s*=|\.error\s*=\s*1\s*;|return\s+\w+;
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             加载类函数（fleur_bloom_filter_from_file 等）在错误路径
+                        （文件头校验失败 / fread 失败 / seek 失败）只设置 error 字段
+                        即 return，其余字段（v/Data/M 等指针与长度）保持栈垃圾；
+                        调用方对错误态对象调 destroy/close 清理函数 →
+                        free(未初始化指针) → SIGTRAP/SIGSEGV（本案例 Signal 5）。
+                        与 E249（未初始化 shared/owned 所有权标志）同属
+                        "未初始化字段→清理函数 free 崩溃"族，但本候选的触发形态是
+                        "加载器错误路径早退 + 消费者对错误态对象仍调 destroy"，
+                        E249 是"构造函数借用对象未初始化所有权标志 + 清理函数释放
+                        调用者栈对象"；修复位置不同（本候选=入口零初始化整体结构体）。
+
+affected_scope:         所有 C 库中"从文件/流加载结构体、校验失败早退返回部分初始化
+                        结构体、API 约定调用方随后调 destroy/close/free"的模式；
+                        上游测试与真实消费者同样会踩中；非 OHOS 专有（glibc 上
+                        同为未定义行为，仅崩溃信号/时机不同）。实证：fleur 0.3
+                        suite_2 test_reading_full 读 hang2 坏文件后崩溃。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           zero-initialize-struct-at-entry
+rec_description:        加载函数入口整体零初始化结构体（`BloomFilter bf = {0};`），
+                        错误路径返回时指针字段恒为 NULL，destroy/close 对 NULL
+                        free 安全；不改测试、不改 API、最小侵入（+1/-1 行）。
+                        判别三行：
+                        ① 找到 from_file/load/parse 类加载函数；
+                        ② 确认错误路径 return 前只设了 error 字段；
+                        ③ grep 调用方是否对错误态对象调 destroy/close。
+rec_command:            sed -n '/fleur_bloom_filter_from_file/,/^}/p' fleur/fleur.c
+rec_auto_fix:           false
+rec_impl:               manual-source-fix
+
+fallback_priority:      2
+fallback_approach:      set-null-on-error-paths
+fallback_description:   逐个错误分支显式置 v=NULL/Data=NULL（更局部，但易漏分支）；
+                        入口整体零初始化更简单可靠，优先。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          manual-source-fix
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       跳过.*错误路径|只测.*正常路径|把.*错误态.*free.*注释掉|忽略.*SIGSEGV
+forbid_1_reason:        错误路径崩溃是真实缺陷，屏蔽/跳过=伪造通过；必须修复库源码后复验
+forbid_1_consequence:   包"通过"但真实消费者在坏输入时崩溃
+forbid_2_pattern:       free\(NULL\)|free\(.*\)\s*=\s*0|改.*测试.*绕过
+forbid_2_reason:         不得通过改测试或包装 free 掩盖缺陷；修复点在库源码错误路径
+forbid_2_consequence:   库缺陷残留，其他消费者仍崩溃
+
+principles:             P-MEMORY
+causes:                 []
+caused_by:              []
+similar_to:             [E249]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               knowledge/drafts/DRAFT-fleur-0.3-loader-error-path-uninitialized-struct.md
+last_updated:           2026-09-26
+source_event:           fleur 0.3 suite_2 test_reading_full（hang2 坏头文件）Signal 5 core dumped
+authors:                pc4-45 <noreply@atomgit.com>
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
