@@ -72,4 +72,7 @@ would otherwise resolve in CONFIG mode to the installed `check-config.cmake`
 (`Check::Check` / uppercase `CHECK_FOUND`) and drop the whole CTest tree. With no
 config discoverable, `find_package` falls back to MODULE mode and the bundled
 module consumes the two seeds above (configure log: `-- Found Check: .../libcheck.a`).
+---
 
+**编译结束**: 2026-09-23 21:04
+**最终状态**: built
