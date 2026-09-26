@@ -135,3 +135,16 @@ python3 scripts/ohc-run.py conan-verify npth 1.8.1
 
 本地实测（设备 aarch64-unknown-linux-ohos，clang 15）：上游 make check 4/4 PASS，
 消费者测试 test.c PASS，鸿蒙特有测试 3 组断言 ALL PASSED。
+
+## 迭代验证（2026-09-25，PR fix/npth-1.8.1）
+
+main 已合并的 npth-1.8.1 基础上迭代，未改动配方（conanfile.py/conandata.yml，避免 L0j 同版本冲突）：
+
+1. **鸿蒙特有测试增强**：`test_package/test_npth_ohos.c` 由 3 组断言扩展至 8 组——
+   原 3 组（平台宏前提、musl 无 pthread_tryjoin_np、线程真实调度回归）保留，
+   新增 5 组：`npth_get_version` 版本 API、`npth_attr` detach 状态往返、
+   线程局部存储 `npth_key` TLS、`npth_mutex` lock/unlock、双线程并发调度计数。
+2. **断言数**：test_package/MANIFEST.yml 由 12 更新为 28。
+3. **本地实测**（设备 aarch64-unknown-linux-ohos，clang 15.0.4，musl）：
+   上游 `make check` 4/4 PASS，增强后鸿蒙特有测试 8 组断言 ALL PASSED，
+   消费者测试 test.c PASS。

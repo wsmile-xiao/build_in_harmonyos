@@ -9,8 +9,12 @@
  *   3. 补丁成果回归：在 OHOS musl 上 npth 线程真实调度——
  *      子线程通过 npth_usleep（musl clock_nanosleep 路径）自旋计数，
  *      主线程 npth_join 回收并断言计数生效，npth_protect/unprotect 语义正常。
+ *   4. 迭代增强（2026-09-25）：补充版本 API、线程属性（detach）、
+ *      线程局部存储 TLS、互斥锁、多线程并发调度等断言组，进一步覆盖
+ *      npth 在 OHOS/musl 上的运行时能力（R34 实质调用）。
  */
 #include <dlfcn.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -112,6 +116,178 @@ static int check_thread_scheduling(void)
     return 0;
 }
 
+/* ---- 4. 版本 API：npth_get_version 返回非空版本串 ---- */
+static int check_version_api(void)
+{
+    const char *v = npth_get_version(NULL);
+    if (!v || !*v) {
+        fprintf(stderr, "ohos-test: npth_get_version returned empty\n");
+        return 1;
+    }
+    printf("ohos-test: npth_get_version OK (%s)\n", v);
+    return 0;
+}
+
+/* ---- 5. 线程属性：npth_attr detach 状态 set/get 往返 ---- */
+static int check_thread_attr(void)
+{
+    npth_attr_t attr;
+    int detach = 0;
+    int err;
+
+    err = npth_attr_init(&attr);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_attr_init failed: %d\n", err);
+        return 1;
+    }
+    err = npth_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_attr_setdetachstate failed: %d\n", err);
+        return 2;
+    }
+    err = npth_attr_getdetachstate(&attr, &detach);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_attr_getdetachstate failed: %d\n", err);
+        return 3;
+    }
+    if (detach != PTHREAD_CREATE_DETACHED) {
+        fprintf(stderr, "ohos-test: unexpected detachstate %d\n", detach);
+        return 4;
+    }
+    npth_attr_destroy(&attr);
+    printf("ohos-test: npth_attr detach state roundtrip OK\n");
+    return 0;
+}
+
+/* ---- 6. 线程局部存储：npth_key 在 OHOS musl 上可用 ---- */
+static npth_key_t tls_key;
+
+static void *tls_worker(void *arg)
+{
+    (void)arg;
+    if (npth_setspecific(tls_key, (void *)0x2A) != 0)
+        return NULL;
+    return npth_getspecific(tls_key);
+}
+
+static int check_thread_tls(void)
+{
+    npth_t tid;
+    void *retval = NULL;
+    int err;
+
+    err = npth_key_create(&tls_key, NULL);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_key_create failed: %d\n", err);
+        return 1;
+    }
+    err = npth_create(&tid, NULL, tls_worker, NULL);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_create(tls) failed: %d\n", err);
+        return 2;
+    }
+    err = npth_join(tid, &retval);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_join(tls) failed: %d\n", err);
+        return 3;
+    }
+    if (retval != (void *)0x2A) {
+        fprintf(stderr, "ohos-test: TLS value not propagated (got %p)\n", retval);
+        return 4;
+    }
+    npth_key_delete(tls_key);
+    printf("ohos-test: npth_key TLS roundtrip OK\n");
+    return 0;
+}
+
+/* ---- 7. 互斥锁：npth_mutex 在保护态下 lock/unlock 往返 ---- */
+static int check_mutex(void)
+{
+    npth_mutex_t mtx;
+    int err;
+
+    err = npth_mutex_init(&mtx, NULL);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_mutex_init failed: %d\n", err);
+        return 1;
+    }
+    err = npth_mutex_lock(&mtx);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_mutex_lock failed: %d\n", err);
+        return 2;
+    }
+    err = npth_mutex_unlock(&mtx);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_mutex_unlock failed: %d\n", err);
+        return 3;
+    }
+    err = npth_mutex_destroy(&mtx);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_mutex_destroy failed: %d\n", err);
+        return 4;
+    }
+    printf("ohos-test: npth_mutex lock/unlock OK\n");
+    return 0;
+}
+
+/* ---- 8. 多线程并发：两线程各自自旋计数，join 全部回收 ---- */
+static volatile int conc_a = 0;
+static volatile int conc_b = 0;
+
+static void *conc_worker(void *arg)
+{
+    int i;
+    (void)arg;
+    for (i = 0; i < 3; i++) {
+        npth_usleep(1000);
+        conc_a++;
+    }
+    return NULL;
+}
+
+static void *conc_worker2(void *arg)
+{
+    int i;
+    (void)arg;
+    for (i = 0; i < 3; i++) {
+        npth_usleep(1200);
+        conc_b++;
+    }
+    return NULL;
+}
+
+static int check_concurrency(void)
+{
+    npth_t ta, tb;
+    int err;
+
+    err = npth_create(&ta, NULL, conc_worker, NULL);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_create(A) failed: %d\n", err);
+        return 1;
+    }
+    err = npth_create(&tb, NULL, conc_worker2, NULL);
+    if (err) {
+        fprintf(stderr, "ohos-test: npth_create(B) failed: %d\n", err);
+        return 2;
+    }
+    if (npth_join(ta, NULL)) {
+        fprintf(stderr, "ohos-test: npth_join(A) failed\n");
+        return 3;
+    }
+    if (npth_join(tb, NULL)) {
+        fprintf(stderr, "ohos-test: npth_join(B) failed\n");
+        return 4;
+    }
+    if (conc_a != 3 || conc_b != 3) {
+        fprintf(stderr, "ohos-test: concurrency counters a=%d b=%d (expected 3/3)\n",
+                conc_a, conc_b);
+        return 5;
+    }
+    printf("ohos-test: concurrent threads OK (a=%d b=%d)\n", conc_a, conc_b);
+    return 0;
+}
+
 int main(void)
 {
     int rc;
@@ -130,6 +306,26 @@ int main(void)
     }
 
     rc = check_thread_scheduling();
+    if (rc)
+        return rc;
+
+    rc = check_version_api();
+    if (rc)
+        return rc;
+
+    rc = check_thread_attr();
+    if (rc)
+        return rc;
+
+    rc = check_thread_tls();
+    if (rc)
+        return rc;
+
+    rc = check_mutex();
+    if (rc)
+        return rc;
+
+    rc = check_concurrency();
     if (rc)
         return rc;
 
