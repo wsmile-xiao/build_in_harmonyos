@@ -1,0 +1,88 @@
+# ═══ Draft knowledge entry — autosetup 系 configure 在 OHOS 的三连错与配方三改 ═══
+# Timestamp: 2026-09-25
+# Software: jimtcl 0.83 (任何捆绑 autosetup 的包：jimtcl 系 / sqlite-autoconf 系 / 直接 vendored autosetup/)
+# Gate: 原生 ./configure / conan create build()
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+id: DRAFT-E723
+severity: 2
+category: build-system|platform|autosetup
+trigger_tool: configure / autosetup
+phase: configuration
+error_signature: "No working C compiler found\\. Tried|unable to guess system type|Invalid configuration .*ohos.*not recognized|Unknown option --oldincludedir|Unknown option --static"
+match_keywords: autosetup, CC_FOR_BUILD, jimsh0, autosetup-find-tclsh, config.guess, config.sub, oldincludedir, static-library, HarmonyOS, linux-ohos
+prescan_pattern: "(No working C compiler found|cc-check-functions\\s+ualarm|autosetup-config\\.guess)"
+prescan_globs: "autosetup/autosetup-find-tclsh,autosetup/autosetup-config.guess,auto.def"
+prescan_severity: warning
+title: "autosetup 系 configure 在 OHOS 的三连错：CC_FOR_BUILD 自举 + config.guess/sub 注入 + 剔除 Conan 注入参数"
+
+approach: |-
+  autosetup 包在 OHOS 上按固定顺序爆三类错，按序三改即通（jimtcl 0.83 实测 rc=0）：
+  ① `No working C compiler found. Tried cc and gcc.` —— `autosetup/autosetup-find-tclsh`
+  自举 `jimsh0` 只试 cc/gcc/c89/c99 且不读 CC；配方 generate() 里
+  `env.define("CC_FOR_BUILD", conf["tools.build:compiler_executables"]["c"])`
+  （AutotoolsToolchain 只在跨构建时自动生成该变量，native 双 profile 下必须自己加）。
+  ② config.guess/config.sub 陈旧（vendored 2021-06-03）：先注入 HarmonyOS 分支到主 case
+  首位（`*:HarmonyOS:*:*` → `${UNAME_MACHINE}-unknown-linux-ohos`，**必须早于一切
+  编译探测分支**，否则落到 set_cc_for_build 的 TMPDIR 写测试并在 HMDFS umask 077 下
+  `can't create .../cgXXXXXX/dummy.c: Permission denied`）；config.sub 在 2021 版布局下
+  需要两处——`case $os` 的通用 OS 列表加 `ohos*`、`case $kernel-$os` 组合表加
+  `linux-ohos*`（此代 maybe_os 已有 `linux-*` 通配，不需 E564 的旧式 maybe_os 锚点）。
+  ③ Conan AutotoolsToolchain 注入的 `--oldincludedir/--datarootdir`（autosetup/system.tcl
+  兼容表没有）与 `--enable-static/--disable-shared`（package_type=static-library 时注入，
+  autosetup 只认 `--shared`）会在 configure 首屏 `Error: Unknown option ...` ——
+  generate() 里按前缀剔除 tc.configure_args。
+  另：Conan 2.29 `package_type` 枚举是 `static-library`（连字符），`library` 类型强制要求
+  shared 选项。
+
+root_cause: |-
+  autosetup 是独立于 autoconf 的实现（Steve Bennett），其编译器探测表、标准目录选项表与
+  GNU config 脚本代际、Conan 的 autotools 假设三者互不相容：
+  - find-tclsh 自举不消费 CC/CC_FOR_BUILD 之外的编译器命名，而 OHOS 设备 PATH 无 cc/gcc；
+  - vendored config.* 是 2021-06-03 快照，无 HarmonyOS/ohos 分支（同 E564 的代际问题，
+    但本条锚点是 2021 版新式布局：主 case `case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in` 与 `case $os`/`case $kernel-$os` 两段校验）；
+  - Conan AutotoolsToolchain 按 GNU autotools 想定默认参数（install 目录 + shared/static
+    二元开关），autosetup 只实现其中子集。
+
+affected_scope: |-
+  一切 vendored `autosetup/` 目录的上游（jimtcl 0.83、sqlite-autoconf、autosetup 自身生态）；
+  判别命令：`ls autosetup/autosetup-find-tclsh` 或 `prescan_pattern` 命中
+  `No working C compiler found`。
+
+verification_cmd: |-
+  # 落点均为设备可执行路径（$TASK_DIR / 检出内），不用 /tmp
+  cd "$WORKSPACE_ROOT/tmp/builds/jimtcl-0.83.work"   # 未打补丁的 pristine 源
+  CC=/data/service/hnp/bin/clang ./configure --prefix=/ 2>&1 | head -3
+  #   → No working C compiler found. Tried cc and gcc.（或 unable to guess system type）
+  cd "$TASK_DIR/applytest/jimtcl-0.83"                # 已打 0001/0002 的源
+  sh autosetup/autosetup-config.guess                 # → aarch64-unknown-linux-ohos
+  sh autosetup/autosetup-config.sub aarch64-unknown-linux-ohos  # → 原样接受，rc=0
+  conan create "$PACKAGE_DIR" -pr:h="$HOST_PROFILE" -pr:b="$HOST_PROFILE" -c tools.build:jobs=4  # rc=0
+
+rec_priority: 1
+rec_approach: portable-recipe-three-fixes
+rec_description: 配方三改：generate() 注入 CC_FOR_BUILD + 剔除 autosetup 不认的注入参数；两份 portability 补丁注入 HarmonyOS/ohos 分支（conandata 登记 patch_type=portability，refresh_patch 两面同步）
+rec_command: "grep -q 'autosetup-config.guess' \"$PACKAGE_DIR/conandata.yml\" && conan create \"$PACKAGE_DIR\" -pr:h=\"$HOST_PROFILE\" -pr:b=\"$HOST_PROFILE\" -c tools.build:jobs=4  # rc=0 即三改齐备"
+rec_auto_fix: false
+rec_impl: 配方 generate() 内联 + patches/*.patch 随配方分发
+fallback_priority: 2
+fallback_approach: explicit-build-triplet
+fallback_description: 传 --build=aarch64-unknown-linux-gnu 跳过 config.guess（仅在无法打补丁时）；会掩盖三元组真值且 config.sub 校验仍在，优先级低
+fallback_command: "./configure --build=aarch64-unknown-linux-gnu  # 备选，不推荐作主方案"
+fallback_auto_fix: false
+fallback_impl: 手工 configure 参数（仅应急）
+principles: 先看报错序（自举编译器 → config.* → 未知选项）定位层级；补丁注入点必须早于编译探测路径
+caused_by: autosetup 自举链与 GNU config/Conan 的三方假设不一致；设备无 cc/gcc；HMDFS umask 077 放大 config.guess 探测路径的失败
+causes: 三类报错任一出现即触发本条；与 E564 的差别是脚本代际与锚点布局
+similar_to: E564（旧式 2012 config.* 的换锚点补丁，本条为 2021 vendored autosetup 版布局 + CC_FOR_BUILD + Conan 参数剔除，两者的 config.sub 锚点集合不同）；E007（新式 GNU config 的 perl 工具方案）
+conflicts_with: 无（E564 的 maybe_os 锚点在 2021 版多余但不冲突；E007 的 perl 工具对本代脚本不适用）
+prerequisite_of: ""
+doc_file: knowledge/drafts/DRAFT-E723-ohos-autosetup-configure-bootstrap.md
+last_updated: 2026-09-25
+source_event: jimtcl 0.83 OHOS 适配（任务 contrib-14157），configure 三连错实测后三改 rc=0
+authors: AtomCode (deepseek-harness 执行体)
+source_pr: feat/jimtcl-0.83
+source_commit: ""
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.85
+metrics_last_used: 2026-09-25
