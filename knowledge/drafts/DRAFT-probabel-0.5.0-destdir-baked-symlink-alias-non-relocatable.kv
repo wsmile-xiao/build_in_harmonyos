@@ -1,0 +1,115 @@
+# ═══ Draft knowledge entry — 上游 install 钩子用 ln -s $(DESTDIR)$(bindir)/x 造别名 ⇒ conan 打包后链接烙进构建期绝对路径，交付物不可重定位 ═══
+# Timestamp: 2026-09-22
+# Software: probabel 0.5.0（通用：任何在 install 规则里自建符号链接别名的包——autotools 的
+#           install-data-local / install-exec-hook，或裸 Makefile 里 ln -s $(DESTDIR)…）
+# Gate: 配方 package() 内真实执行上游 install 目标 + 交付包目录被 conan 重定位（换 CONAN_HOME / 换机）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+# 用法：复制为 DRAFT-<你的包>-<你的版本>-destdir-baked-symlink-alias-non-relocatable.{kv,md}，
+#       把 PKG/VER 与全部证据字段换成本包实测值，随该包 PR 原子提交；
+#       **只有真在本包 package() 后看到链接目标含构建期绝对路径才配这条**。
+
+id: DRAFT-probabel-0.5.0-destdir-baked-symlink-alias-non-relocatable
+title: 上游 install 钩子以 `ln -s $(DESTDIR)$(bindir)/<prog>` 自建别名时，conan package() 不带 DESTDIR 安装会把**构建期 package_folder 绝对路径**烙进符号链接目标 ⇒ 包内别名在换 CONAN_HOME/换机后悬空；修法=package() 内把该链接改写为相对目标，HMDFS 拒绝建软链时退化为复制
+trigger_tool: make / install / conan
+phase: packaging
+error_signature: 'ls -l bin/<alias> -> <构建期绝对 package_folder>/bin/<prog>|dangling symlink after package relocation|包内别名换 CONAN_HOME 后不可解析'
+severity: 2
+category: packaging|symlink|relocatability|autotools|hmdfs
+root_cause: '上游 install 钩子用 `ln -s $(DESTDIR)$(bindir)/<prog>` 建立别名，而 conan 的 package() 以 `make install`（prefix=package_folder、**无 DESTDIR**）安装 ⇒ automake 把 $(DESTDIR) 展开为空、$(bindir) 展开成构建期 package_folder 下的绝对路径，于是别名链接的目标被**固化成构建机上的绝对路径**写进交付包。原地自测（同一 CONAN_HOME、同一路径）链接仍能解析，所以 conan create、G4 产物检查与 test_package 都不会报错；只有当包被复制到别的 CONAN_HOME 或由其它机器从远端拉取时，目标路径不再存在，别名才暴露为悬空链接——属于"可重定位性"类静默缺陷，判据是链接目标里出现 package_folder 绝对前缀。'
+match_keywords: install-exec-hook, ln -s $(DESTDIR), install-data-local, 符号链接别名, 绝对路径烙进包,
+  不可重定位, dangling symlink after relocation, probabel.pl, 相对链接改写, package_folder 绝对路径
+keywords: autotools 安装钩子, DESTDIR 语义, 可重定位安装包, conan 缓存路径, 悬空软链,
+  os.symlink, shutil.copyfile 退化, HMDFS 链接限制, 交付完整性, R26/G4 产物检查
+prescan_pattern: 'ln\s+-s[^\n]*\$\(DESTDIR\)|install-data-local|install-exec-hook'
+prescan_globs: "**/Makefile.am, **/Makefile.in, **/Makefile, **/CMakeLists.txt"
+safety_boundary: |-
+  只适用于**上游自己在 install 阶段建符号链接别名**的包（判据：Makefile.am/Makefile 里
+  `ln -s $(DESTDIR)…`，或交付目录里出现指向绝对路径的链接）。边界与禁忌：
+  ①指向**另一个 conan 依赖包**的资源链接不适用——那属 E362/E382（依赖所有权问题，必须按
+  self.dependencies 解析真实节点并实体化，盲目复制同名文件会打包过期/无关内容）；
+  ②若清理逻辑用 Path.is_file() 判断链接是否存在，注意它会跟随目标、悬空时返回 False
+  （E395），必须用 lexists/is_link 语义，否则残留别名会被当成"已清理"；
+  ③改写为相对链接前须确认链接与目标在**同一目录**（跨目录相对目标要按真实相对路径计算），
+  否则修完仍是坏链接；
+  ④设备文件系统若拒绝建软链（HMDFS/E018/E050 家族），退化为复制目标文件，
+  并保留可执行位（chmod 755），此时须在 notes 写明"别名已由链接改为副本"，
+  因为这会丢掉上游"一处更新两处生效"的原语义。
+approach: rewrite-alias-symlink-relative
+rec_priority: 1
+rec_approach: package-post-install-relative-link
+rec_description: |-
+  在 package() 的上游 install 之后做一次修正：删掉带绝对目标的别名链接，用**同目录相对名**重建
+  （os.symlink("<prog>", "<alias>")）；捕获 OSError 时退化为 shutil.copyfile + chmod 755。
+  修正后必须在 test_package 里断言该别名可解析且可执行——否则缺陷会随版本升级回归。
+rec_command: |-
+  # 配方 package() 内
+  bindir = os.path.join(self.package_folder, "bin")
+  alias  = os.path.join(bindir, "probabel.pl")
+  if os.path.islink(alias): os.unlink(alias)
+  try:
+      os.symlink("probabel", alias)
+  except OSError:
+      shutil.copyfile(os.path.join(bindir, "probabel"), alias)
+  os.chmod(alias, 0o755)
+rec_auto_fix: false
+rec_impl: 配方侧（package() 后处理，不改上游源码、不改安装规则）
+fallback_priority: 2
+fallback_approach: drop-alias-from-package
+fallback_description: |-
+  若该别名无实际使用者（仅历史兼容名），可在 package() 内直接删除并在 notes/正文逐项说明
+  "上游安装的二号入口未交付"；不得静默删除后仍按原交付面申报。
+fallback_command: os.remove(os.path.join(self.package_folder, "bin", "probabel.pl"))
+fallback_auto_fix: false
+fallback_impl: 配方侧
+principles: |-
+  conan 包必须**可重定位**：包目录会被缓存、下载、在不同 CONAN_HOME 路径下解出。
+  任何在构建机上展开成绝对路径的链接/写入内容（`$(DESTDIR)$(prefix)` 形式的 ln -s、
+  编译期写死的 --prefix）在**本机自测时都能通过**，只有换路径才暴露 ⇒
+  交付校验必须包含"把包目录复制到别处后入口是否仍可解析"这一条，
+  而不能只看 `conan create` 与 test_package 在原地通过。
+caused_by: 上游 src/Makefile.am:436 的 install 钩子 `ln -s $(DESTDIR)$(bindir)/probabel $(DESTDIR)$(bindir)/probabel.pl`
+  ＋ conan package() 以 `make install`（无 DESTDIR、prefix=package_folder）方式安装
+causes: 交付包内 bin/probabel.pl 指向构建机上的绝对 package_folder 路径；包被复制到其它
+  CONAN_HOME/其它机器后成为悬空链接，用户按文档使用 probabel.pl 入口即失败；
+  G4/产物完整性与原地 test_package 都不会报错（静默缺陷）
+verification_cmd: |-
+  # 1) 看交付包里的链接目标是否含构建期绝对路径
+  ls -l <package_folder>/bin/probabel.pl            # 未修：-> /…/home-x/p/b/<id>/p/bin/probabel；已修：-> probabel
+  # 2) 模拟重定位（忠实复现换 CONAN_HOME/换机）
+  X=~/tmp/relo; mkdir -p $X/A/bin $X/B/bin; cp <prog> $X/A/bin/; cp <prog> $X/B/bin/
+  ln -s $X/A/bin/<prog> $X/B/bin/<alias>; rm -rf $X/A
+  [ -e $X/B/bin/<alias> ] && echo 可解析 || echo **悬空**
+  # 对照：ln -s <prog> 的相对链接在同样搬移后仍可解析
+affected_scope: 在 install 阶段自建符号链接别名的 autotools/裸 Makefile 包（common：*.pl/*.py
+  兼容别名、无扩展名包装器、man page 别名、libsover 链接由上游 install 生成等）
+similar_to: |-
+  E362/E382：同属"交付里的链接不可用"，但那两条处理的是**指向另一个依赖包所有权的资源链接**
+  （依赖叠加安装、HMDFS 拒绝保留悬空链接 ⇒ 必须从 self.dependencies 解析并实体化为普通文件）；
+  本条的链接目标就在**同一目录内**、问题只在"目标路径被展开成绝对路径 ⇒ 不可重定位"，
+  修法也不同（改相对链接，而非跨包实体化）。
+  E395：讲的是**清理代码**用 Path.is_file() 漏判悬空别名（is_file 跟随目标）；本条是别名**生成**侧
+  的成因，二者互补——修完本条若要删别名，判定仍须按 E395 用 lexists 语义。
+  E018/E050/E079：HMDFS 对 symlink/hardlink 的系统级限制（拒绝建链/用复制替代）——本条的
+  fallback 正是复用它们的结论。
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-probabel-0.5.0-destdir-baked-symlink-alias-non-relocatable.md
+last_updated: 2026-09-22
+source_event: |-
+  probabel 0.5.0（任务 9728）交付包实测：修 package() 前 `ls -l bin/` 显示
+  `probabel.pl -> /storage/Users/currentUser/tmp/ch/home-qc10-probabel/p/b/proba71b739ce08285/p/bin/probabel`
+  （目标含构建期绝对路径）。配方加入"改写为相对链接"后，同一位置变为
+  `probabel.pl -> probabel`，且 test_package 第 9 号断言（别名可解析并可执行）通过。
+  重定位模拟（设备实测 2026-09-22）：把含绝对目标链接的目录树复制后删除原路径 ⇒
+  `probabel.pl: **悬空** -> /…/home-A/build/proba71b/p/bin/probabel`；
+  同场景的相对链接 `probabel.rel: 可解析`。脚本 ~/tmp/uc2/qc10-r2/pbsym2.sh。
+  上游裸 `make install DESTDIR=<t>` 亦复现同一规则（产出树内 probabel.pl 指向
+  `<t>` + 构建期 package_folder 的拼接绝对路径），脚本 ~/tmp/uc2/qc10-r2/pbsym.sh。
+  同期 conan-verify G1/G2/G3/G4 通过、build() 内上游 `make -j1 check` 11 项全 PASS。
+authors: QC-10
+source_pr: (本 PR)
+source_commit: (待提交后回填)
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-22
