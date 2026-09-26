@@ -1,0 +1,67 @@
+# ═══ Draft knowledge entry — aarch64 plain char unsigned 使 fgetc/EOF 判据失效 ═══
+# Timestamp: 2026-09-24
+# Software: psignifit 2.5.6（Debian 同源 bug #975467 / arm64.patch）
+# Gate: W0 源码面 + 真机构建/运行实测（文件输入面 rc=1 "input stream is too big"）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+draft:                 "E713-psignifit-aarch64-fgetc-eof"
+status:                "pending-editor-review"
+id:                    "E713"
+trigger_tool:          "clang|conan|make"
+phase:                 "build|test"
+error_signature:       "input stream is too big|Wtautological-constant-out-of-range-compare.*fgetc|fgetc.*EOF"
+
+severity:              2
+category:              "portability,ohos,upstream-bug,aarch64"
+prescan_pattern:       "while\\s*\\(\\s*\\(\\s*c\\s*=\\s*fgetc"
+match_keywords:        "input stream is too big, fgetc, EOF, unsigned char, signed char, aarch64, arm64.patch, 975467, LoadBatchFromFile, MaxBufSize"
+title:                 "aarch64 上 plain char 为 unsigned：fgetc/EOF 判据永不成立，输入流被无限读入直到缓冲上限，报 input stream is too big"
+
+root_cause: >-
+  ELF aarch64 平台 ABI 规定 plain char 为 unsigned（x86 为 signed）。老 C 代码常见写法
+  while((c=fgetc(stream))!=EOF) 把 int 返回值塞进 char c 后再与 EOF(-1) 比较：
+  读到 EOF 时 (char)-1 被保存为 255，与 -1 永不相等 → 循环不退出，把 0xFF 无限灌进缓冲区，
+  直到程序自己的 maxBufSize 上限（psignifit 是 8192 字节）后抛业务错误
+  "input stream is too big"。该错误文案会掩盖真因（看起来像输入文件过大）。
+  clang 在 aarch64 上对该模式给出 -Wtautological-constant-out-of-range-compare 警告，
+  可作为静态预测信号；x86 上不报警告也不触发，因此只有交叉到 arm64 才暴露。
+
+affected_scope: >-
+  任意用 char 接收 fgetc/getc 并与 EOF 比较的老 C 项目在 aarch64/armhf/riscv64
+  （plain char unsigned 的平台）上的**文件与 stdin 输入面**；纯内存遍历（不读流）不受影响。
+  已知实例：psignifit 2.5.6（Debian bug#975467，官方 arm64.patch）。
+
+verification_cmd: >-
+  clang -O2 $HOME/tmp/psignifit-2.5.6/w0/repro-fgetc-eof.c -o $HOME/tmp/psignifit-2.5.6/w0/repro-fgetc-eof
+  && printf hello | $HOME/tmp/psignifit-2.5.6/w0/repro-fgetc-eof
+  # aarch64 实测 rc=2 打印 "never reaches EOF after 1000001 reads (last value=255, EOF=-1)"
+  # 真实程序复现：未打补丁的 psignifit 跑 `psignifit dat prefs` → rc=1 "input stream is too big"
+
+rec_priority:          1
+rec_approach:          signed-char-narrowing-fix-at-recv-site
+rec_description: >-
+  只把**读流那一处**的 char 收窄改成 signed char（或把变量改成 int 后再收窄入库），
+  让 (char)-1 与 EOF 相等；不要顺手改其它同名 char 变量（psignifit batchfiles.c 里另有
+  两处 char c 是在内存缓冲上按下标遍历，改动无益且扩大 diff）。Debian arm64.patch 即此修法，
+  上游 2005 年停更未合（forwarded: no），发行版补丁可安全照搬。
+rec_command:           "sed -i 's/^\\tchar c;$/\\tsigned char c;/' <src>/batchfiles.c   # 仅 LoadBatchFromFile 内一处，需以 hunk 上下文定位"
+rec_auto_fix:          false
+rec_impl:              "archives/p/psignifit/2.5.6/patches/0001-aarch64-signed-char-file-input.patch"
+
+fallback_priority:     2
+fallback_approach:     prescan-and-static-warning-gate
+fallback_description:  预扫描阶段用 prescan_pattern 命中 `char c` + `fgetc(...)!=EOF` 模式，并要求 -Wtautological-constant-out-of-range-compare 无告警再进构建（该告警仅在 plain char unsigned 的目标上出现，是零误报的静态信号）
+fallback_command:      "grep -rn 'fgetc' <src> && clang -Wtautological-constant-out-of-range-compare -c <suspect>.c"
+fallback_auto_fix:     false
+fallback_impl:         ""
+
+forbid_1_pattern:      "raise.*maxBufSize|增大.*缓冲|无限.*循环.*修复"
+forbid_1_reason:       放大缓冲上限只是把崩溃推迟，EOF 判据错误仍在，且会把内存耗尽风险带给 CI worker
+forbid_1_consequence:  假修复通过本地短输入测试，长输入/CI 上再次爆同类错误
+
+principles:            P003
+caused_by:             aarch64-abi-plain-char-unsigned
+causes:                input-stream-too-big
+related:               DRAFT-E714
+doc_file:              "doc/E713.md"
+last_updated:          "2026-09-24"
