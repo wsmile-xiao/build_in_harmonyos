@@ -1,0 +1,69 @@
+#====================================================================
+# Draft: wise 2.4.1 — AArch64 上 char 默认无符号，使 `char c = fgetc()`
+#        与 EOF(-1) 的比较恒假，EOF 被当作一个碱基写入序列
+#        （长度 +1 / 坐标整体偏移 / 部分组合段错误）
+#====================================================================
+
+id:                     DRAFT-WISE-241-AARCH64-UNSIGNED-CHAR-EOF-FGETC
+trigger_tool:           conan|clang|make|perl
+phase:                  runtime|testing
+error_signature:        Error in promoterwise: <  Length = 798 Reversed 1|
+                         Error in promoterwise: >  Length = 797 Reversed 1|
+                         Signal 11 \(core dumped\)|
+                         \[98:101 "CODON"\]|\[97:100 "CODON"\]|
+                         char c;.*fgetc|c == EOF|result of comparison of constant -1 with expression of type 'char' is always false
+
+severity:               2
+category:               platform|portability|aarch64|char-signedness|legacy-c
+match_keywords:         char signedness, unsigned char, AArch64, AAPCS64, -fsigned-char,
+                         fgetc, getc, EOF, -Wtautological-constant-out-of-range-compare,
+                         sequence length +1, off-by-one, coordinate shift, SIGSEGV,
+                         legacy C, x86 vs ARM, ebi wise2, genewise, estwise, dynlibsrc sequence.c
+title:                  AArch64 上 char 默认无符号使 `char c = fgetc(); c == EOF` 恒假：EOF 被当成一个碱基写入，表现为长度 +1 / 坐标整体偏移 / 段错误，补 -fsigned-char 即修复（wise 2.4.1 上游测试 4/12 → 12/12）
+
+root_cause:             AArch64（AAPCS64）上裸 `char` 默认是 **unsigned char**（x86_64 上默认是有符号）。
+上游 2007 年代码在多处以 `char` 变量接收 `fgetc()`/`getc()`，再与 `EOF`（-1）比较判文件结束：
+
+                            char c;
+                            c = fgetc(ifp);
+                            if( c == EOF || c == '>' || c == '/' ) break;   /* 恒假 */
+                            seqbuffer[i++] = c;
+
+                        无符号 char 参与整型提升后为 0..255，与 -1 永不相等，clang 甚至会给出
+                        `-Wtautological-constant-out-of-range-compare` 提示。于是读到文件末尾时
+                        不会 break，而是把 (char)EOF == 0xFF 当作一个碱基写进序列缓冲区；
+                        随后才在下一轮循环或以 fgets 返回 NULL 的方式退出。
+
+affected_scope:         任何把 `fgetc()`/`getc()` 结果存进裸 `char` 再与 EOF 比较的 C 代码，在
+                        AArch64/RISC-V 等默认 unsigned char 的目标上都会命中；本次 wise 2.4.1
+                        实测散布在 dynlibsrc/sequence.c（FASTA/PIR/GCG/EMBL 等 6 处比较）、
+                        HMMer2/sqio.c、dnaindex/{largeseqreader,kmer_assembly,findbad_kmer}.c、
+                        base/wisestring.c、HMMer2/sre_string.c、dynlibsrc/randommodel.c 等
+                        （全仓 12 个文件、11 处 `!=/== EOF` 比较）。
+
+verification_cmd:       # 1) 复现平台差异（一行 C 程序）
+                        printf '#include <stdio.h>\nint main(){char c=(char)200;printf("signed=%%d EOFeq=%%d\\n",(c<0),(c==EOF));return 0;}\n' > cs.c && clang -o cs cs.c && ./cs
+                        # 输出 signed=0 EOFeq=0 → char 无符号且 EOF 比较恒假；加 -fsigned-char 后 signed=1
+                        # 2) 上游测试对照
+                        cd src/test && perl testman.pl -cf ../wisecfg < short.test   # 无该标志 4/12；有则 12/12
+                        # 3) 静态排查
+                        grep -rnE 'char +(c|ch|cc|chr) *;' --include=*.c src | wc -l
+
+rec_priority:           1
+rec_approach:           add-fsigned-char-for-legacy-char-eof-code
+rec_description:        对这类遗留 C 代码，优先在构建标志里加 `-fsigned-char`（恢复其在 x86 上的
+                        原始语义），而不是逐处把 `char c;` 改成 `int c;`。理由：① 模式散布面广
+                        （wise 实测 12 文件 / 11 处比较），逐处改易漏且会引入 .c 与预生成 .dy
+                        的分叉；② 全局标志覆盖上游测试未触及的路径；③ 该代码面向 ASCII
+                        文本数据（序列/矩阵/命令参数），恢复有符号不改变正确行为。
+                        若项目的字节处理确实依赖无符号 char（如哈希/位运算），则应改为逐处
+                        `int` 或显式 `(unsigned char)` 转换，不要全局切换。
+                        判据：若 `grep -rn 'char .*fgetc' || 'char .*getc'` 命中且伴随 `== EOF`，
+                        基本可断定需要本修复；clang 的
+                        `-Wtautological-constant-out-of-range-compare` 是免费信号。
+rec_command:            make CC=clang CFLAGS="... -fsigned-char ..."
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              PENDING
+source_commit:          PENDING
