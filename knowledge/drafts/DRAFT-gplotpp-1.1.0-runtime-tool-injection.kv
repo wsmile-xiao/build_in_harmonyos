@@ -1,0 +1,128 @@
+#====================================================================
+# DRAFT-gplotpp-1.1.0-runtime-tool-injection - header-only 库上游测试
+# 运行时工具（gnuplot）注入：必须 tool_requires 声明驱动 CI 干净环境
+# 拉取 + conan2 缓存截断前缀 glob + HMDFS isfile-not-X_OK + self.run
+# 命令内嵌 PATH + 避开 CTest 环境
+#
+# 场景: gplotpp 1.1.0 (ziotom78, C++17 单头文件 Gnuplot 接口库) OHOS
+#       armv8 Conan 2.x 适配。上游 doctest 套件（tests/run_tests.cpp，
+#       2 个 TEST_CASE）在运行时通过 popen 驱动真实 `gnuplot` 可执行文件；
+#       OHOS PC 无系统 gnuplot，需从 ohpcd 制品仓 gnuplot/6.0.3 的
+#       conan2 本地缓存定位并注入运行路径。库本体 zero 依赖、零补丁。
+# R02 修订（2026-09-26）: R01 仅在执行端本地缓存注入 gnuplot，远端 CI
+#       干净环境无该缓存 → GPLOTPP_GNUPLOT_BIN=NOT_FOUND → 上游测试
+#       popen 失败 → CHECK fail → SIGABRT → L1_RESULT=fail。正确做法是
+#       在配方 build_requirements() 中声明 tool_requires("gnuplot/6.0.3")
+#       （test_package 同样声明），让 conan create/build_and_test.sh 在
+#       干净 CI 从 ohpcd registry 自动拉取工具二进制，_find_gnuplot_bin
+#       优先从 self.dependencies.build["gnuplot"].package_folder 定位；
+#       缓存 glob 仅作本地兜底。严禁在未找到 gnuplot 时静默跳过上游测试。
+# 适用: 所有 header-only / 无构建库中"上游测试或消费者用例需要外部
+#       运行时工具可执行文件"的配方（gnuplot 类工具：matplotlib 前端、
+#       gnuplot 前端、latex/dvipng 渲染、wkhtmltopdf 等）。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-gplotpp-1.1.0-runtime-tool-injection
+source_lib:             gplotpp 1.1.0
+trigger_tool:           conan|conan create|conan-verify|cmake|doctest|popen|gnuplot
+phase:                  testing|build|package|test_package
+error_signature:        sh: gnuplot: inaccessible or not found|
+                         CHECK\( fin != nullptr \) is NOT correct|
+                         test case CRASHED: SIGABRT|
+                         env argument to ConanFile\.run\(\) should be a list|
+                         Running tests\.\.\..*Failed.*0% tests passed|
+                         cannot open initial state save file: Permission denied|
+                         unknown or ambiguous terminal type
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan|header-only|testing|runtime-tool|hmdfs|ohos|registry
+match_keywords:         gnuplot, popen, doctest, conan2 cache, 截断前缀, gnupla03c6b9f7091e,
+                         glob, os.access, X_OK, HMDFS, chmod 无效, isfile, PATH 注入,
+                         self.run env 列表, conanrun, CTest 不继承 PATH, cmake.test(),
+                         gd terminal, gif animate, svg, 运行时工具, ohpcd registry,
+                         gnuplot/6.0.3, 消费者验证, test_ohos
+title:                  header-only 库上游测试运行时工具注入：conan2 缓存截断前缀 glob（gnu* 非 gnuplot*）+ HMDFS 禁 X_OK 探测改用 isfile + self.run 命令内嵌 export PATH（非 env dict）+ 避开 CTest 直跑消费者
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  (1) gplotpp 上游测试/消费者通过 popen("gnuplot --persist") 驱动真实
+      gnuplot 可执行文件；OHOS PC 无系统 gnuplot，conan create 干净环境
+      的 PATH 不含 gnuplot → popen 返回空连接，redirect_to_svg 无输出文件，
+      测试 CHECK(fin != nullptr) 失败 → SIGABRT；
+  (2) 从 ohpcd 制品仓下载的 gnuplot/6.0.3 落在 conan2 缓存
+      ~/.conan2/p/<截断前缀+哈希>/p/bin/gnuplot，目录名为
+      `gnupla03c6b9f7091e`（名称前缀+哈希截断），用 glob "gnuplot*" 匹配
+      不到，须用 "gnu*"；
+  (3) HMDFS（真机 /storage）忽略 chmod，os.access(path, X_OK) 恒 False
+      （R49/E046 语义），用 X_OK 过滤缓存二进制会误判不存在 → 改用
+      os.path.isfile；
+  (4) Conan 2 的 self.run(env=...) 只接受 generator 名或 VAR=VALUE 字符串
+      列表，传 dict 报 AssertionError；且 CTest（cmake.test()）在独立环境
+      起子进程不继承注入 PATH → 消费者/上游测试改由 self.run 命令内嵌
+      `export PATH=...; <binary>` 直跑。
+
+affected_scope:         所有需要把外部运行时工具（非库依赖）注入上游测试/消费者
+                        用例的配方；共享 build_in_harmonyos 仓库 OHOS 真机执行端
+verification_cmd:       export PATH=$(dirname <gnuplot-cache-bin>):$PATH && ./run_tests;
+                        python3 test_ohos/run_ohos_test.py <pkg_folder>;
+                        grep -E "GNUPLOT_BIN|2 passed" reports/conan-create.log
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           runtime-tool-requires + command-embedded-PATH
+rec_description: >
+  1) 声明：配方 build_requirements() 加 self.tool_requires("gnuplot/6.0.3")
+     （test_package/conanfile.py build_requirements() 同样声明），使远端
+     conan create/build_and_test.sh 在干净 CI 从 ohpcd registry 解析并
+     拉取工具二进制到构建上下文；
+  2) 定位：_find_gnuplot_bin()（实例方法）优先
+     self.dependencies.build["gnuplot"].package_folder/bin/gnuplot，
+     再 shutil.which，再排序 glob ~/.conan2/p/gnu*/p/bin/gnuplot 且
+     os.path.isfile 过滤（禁止 os.access(X_OK)——HMDFS chmod 无效恒
+     False）；本地缓存 glob 仅作兜底，不依赖执行端私有状态；
+  3) 注入：Conan 2 self.run 用命令内嵌
+     `export PATH="<dir>${PATH:+:$PATH}"; "<binary>" --no-skip`
+     （避免 env=dict 断言错误；CTest 不继承 PATH 故不依赖 cmake.test()，
+     test_package 同样直接 self.run 消费者二进制）；
+  4) 禁止静默跳过：gnuplot 未找到时 raise RuntimeError 拒绝运行上游
+     套件（防 L1_RESULT 被跳过或伪造）；
+  5) 测试输出选择：OHOS gnuplot 6.0.3 缺 gd/cairo 终端（gif animate
+     "unknown or ambiguous terminal type"），SVG 可用 → 消费者/鸿蒙专项
+     断言用 redirect_to_svg（文本标签可 grep），上游 animation 用例无断言
+     如实记录不计失败。
+rec_command:            # 配方 build_requirements(): 见 gplotpp 1.1.0 conanfile.py
+                        # _find_gnuplot_bin(): self.dependencies.build["gnuplot"]
+                        #   .package_folder/bin/gnuplot 优先
+                        # test_package: self.run('export PATH="%s${PATH:+:$PATH}"; "%s"' % (gpdir, exe))
+rec_auto_fix:           false
+rec_impl:               manual-conan-recipe-edit
+
+# ═══ Layer 4: 验证层 (Verification) ★ ═══
+verification:           |
+  (1) 上游测试：conan create 日志 "GPLOTPP_GNUPLOT_BIN=/storage/Users/
+      currentUser/.conan2/p/gnupla03c6b9f7091e/p/bin/gnuplot"，
+      "[doctest] test cases: 2 | 2 passed | 0 failed | 0 skipped"，
+      "assertions: 5 | 5 passed"；
+  (2) 消费者：test_package 直接运行 test_gplotpp 退出码 0，SVG 标签
+      ConsumerSeries/ConsumerX/ConsumerY 核验通过；
+  (3) 鸿蒙专项：test_ohos 4/4 通过（T1 ELF aarch64 / T2 musl / T3 无宿主
+      路径 / T4 真实制图标签核验），日志 SHA-256
+      9d624298c594aedde62ac77498c6da5420a4782fdddbd2843e13285556d5de73；
+  (4) W3 本地 CI：L0/L1/L4/L5 pass，Pass rate 100% (1/1)，.ci-result.json
+      exit_code=0。
+
+# ═══ Layer 5: 查重层 (Dedup) — 七轴 ═══
+dedup:
+  exact_duplicate:       false
+  causal_duplicate:      false     # 与 E540(工具 PATH)/E307(header-only 直编) 根因不同
+  trigger_overlap:       partial   # 与 E540（shadow-ci runner PATH）触发面部分同源
+  solution_overlap:      partial   # E540 用 runner --path 预置；本方案用缓存 glob+命令内嵌
+  combination_novelty:   true      # 截断前缀 glob + isfile-not-X_OK + 命令内嵌 PATH 组合新增
+  boundary_novelty:      true      # 边界：CTest 不继承注入 PATH；OHOS gnuplot 缺 gd 终端
+  test_migration_novelty: true     # 消费者/专项测试迁到 SVG 终端做标签断言
+  similar_to:            [E540, E307, E298, E046, E321]
+  caused_by:             []
+  prerequisite_of:       []
+  conflicts_with:        []
