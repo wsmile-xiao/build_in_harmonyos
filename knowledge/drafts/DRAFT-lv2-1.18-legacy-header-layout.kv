@@ -1,0 +1,111 @@
+#====================================================================
+# DRAFT-lv2-1.18-legacy-header-layout
+# LV2 1.18 只装 include/lv2/<spec>/*.h：旧式 <lv2.h> 与 lv2/lv2plug.in/ns/...
+# 路径的插件源码需构建期兼容头（源码补丁非必需）
+#====================================================================
+
+id:                     DRAFT-lv2-1.18-legacy-header-layout
+
+# ═══ Layer 0: 错误面 ═══
+trigger_tool:           clang|make|cmake|conan
+phase:                  compilation
+error_signature:        fatal error: 'lv2\.h' file not found|
+                         fatal error: 'lv2/lv2plug\.in/ns/[^']+' file not found|
+                         'lv2\.h' file not found
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               build-system, headers, portability, compat
+match_keywords:         lv2.h, lv2plug.in, lv2core, LV2 1.18, legacy header path,
+                         header layout removed, lv2 plugin, lv2 bundle, audio plugin,
+                         compat include, lv2/core/lv2.h, header-only dependency
+title:                  LV2 1.18 只提供 include/lv2/<spec>/*.h，旧式 <lv2.h> / lv2/lv2plug.in/ns/... 的插件源码需构建期兼容头
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             LV2 1.18 的安装布局只有 include/lv2/<spec>/<header>.h
+                        （core/atom/urid/midi/time/ui/options/buf-size/...）。2012 年前后写成的
+                        LV2 插件源码仍用旧写法：#include <lv2.h>（扁平 lv2core 头）与
+                        #include "lv2/lv2plug.in/ns/ext/<spec>/<header>.h"（旧 URI 风格路径）。
+                        经核实 LV2 上游 v1.14.0 / v1.16.0 / v1.18.0 的源码树均**不存在**
+                        include/lv2.h（gitlab raw 全部 404），因此这不是 conan lv2 包漏装文件，
+                        而是上游头布局迁移：依赖头齐全，只是路径不同。
+affected_scope:         所有依赖 LV2 的旧插件/宿主源码（LV2 1.14 之前的写法）。
+                        实测：infamousPlugins 0.3.2（23 个源文件 = 15 处 <lv2.h> + 10 个文件
+                        使用 lv2/lv2plug.in/ns/ext/{urid,midi,atom,time,buf-size,options} 与
+                        ns/extensions/ui/ui.h）；同仓 archives/a/artyfx、archives/b/boops 同源问题。
+verification_cmd:       1) grep -rhoE '#include *[<"][^>"]*lv2[^>"]*[>"]' src/ | sort -u
+                           （列出全部 LV2 头写法）；
+                        2) curl -s -o /dev/null -w '%{http_code}' \
+                             https://gitlab.com/lv2/lv2/-/raw/v1.18.0/include/lv2.h   → 404
+                           （确认上游无扁平头，排除 recipe 漏装）；
+                        3) ls "$(conan cache path lv2/1.18.11-git --folder=package)"/include/lv2/core/lv2.h；
+                        4) nm -D <plug>.so | grep lv2_descriptor 非空。
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           build-time-compat-include-root
+rec_description:        在 recipe 的 generate() 中把旧路径映射为 LV2 1.18 实际头文件：于
+                        build_folder 下生成私有兼容头目录（每条旧路径一个只含
+                        #include <现代路径> 的 shim 头），再经 tc.extra_cflags /
+                        tc.extra_cxxflags 以 -I 前置。上游源码零改动、不污染依赖包缓存、
+                        不碰共享前缀（R49 私有注入范式）。
+rec_command:            compat = os.path.join(self.build_folder, "lv2-legacy-include")
+                        for legacy, modern in {"lv2.h": "lv2/core/lv2.h", \
+                            "lv2/lv2plug.in/ns/lv2core/lv2.h": "lv2/core/lv2.h", \
+                            "lv2/lv2plug.in/ns/ext/urid/urid.h": "lv2/urid/urid.h", \
+                            "lv2/lv2plug.in/ns/ext/midi/midi.h": "lv2/midi/midi.h", \
+                            "lv2/lv2plug.in/ns/ext/atom/util.h": "lv2/atom/util.h", \
+                            "lv2/lv2plug.in/ns/ext/atom/forge.h": "lv2/atom/forge.h", \
+                            "lv2/lv2plug.in/ns/ext/time/time.h": "lv2/time/time.h", \
+                            "lv2/lv2plug.in/ns/ext/buf-size/buf-size.h": "lv2/buf-size/buf-size.h", \
+                            "lv2/lv2plug.in/ns/ext/options/options.h": "lv2/options/options.h", \
+                            "lv2/lv2plug.in/ns/extensions/ui/ui.h": "lv2/ui/ui.h"}.items():
+                            save(self, os.path.join(compat, legacy), f"#include <{modern}>\n")
+                        tc.extra_cflags.append("-I" + compat)
+                        tc.extra_cxxflags.append("-I" + compat)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-compat-include
+
+fallback_priority:      2
+fallback_approach:      source-patch-modern-includes
+fallback_description:   若项目要求源码可独立编译（不接受构建期 -I），改为源码补丁批量替换为
+                        现代路径（<lv2.h> → <lv2/core/lv2.h>；lv2/lv2plug.in/ns/ext/X/ → lv2/X/；
+                        lv2/lv2plug.in/ns/extensions/ui/ui.h → lv2/ui/ui.h）。代价：旧插件常涉及
+                        20+ 文件（本例 23 个），补丁噪音大。
+fallback_command:       sed -i 's|#include<lv2\.h>|#include<lv2/core/lv2.h>|; s|lv2/lv2plug\.in/ns/extensions/|lv2/|g; s|lv2/lv2plug\.in/ns/ext/|lv2/|g' $(grep -rl lv2 src/)
+fallback_auto_fix:      true
+fallback_impl:          conan-recipe-source-patch
+
+forbid_1_pattern:       在依赖包 package_folder 内创建符号链接/写入文件
+forbid_1_reason:        archives/a/artyfx 与 archives/b/boops 的旧做法是在 lv2 依赖的 conan
+                        缓存目录里建 lv2plug.in 符号链接；这会修改**共享依赖包**，并发构建
+                        互相影响，且 HMDFS 下 symlink 覆盖受限。
+forbid_1_consequence:   依赖包被本地污染 → 产物不可复现、CI（干净环境）与本地结果不一致
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-lv2-1.18-legacy-header-layout.md
+last_updated:           2026-09-24
+source_event:           infamousPlugins 0.3.2 HarmonyOS PC adaptation (manual build + conan create)
+
+authors:                Rz114514 <Rz114514@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-24
+
+draft: true
+contributor_id: Rz114514
