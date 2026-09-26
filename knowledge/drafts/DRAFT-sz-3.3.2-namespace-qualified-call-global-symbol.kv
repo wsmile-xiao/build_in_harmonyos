@@ -1,0 +1,67 @@
+# ═══ Draft knowledge entry — 头文件内部 using namespace 使 API 看似成员、实为全局：限定名调用编译失败 ═══
+# Software: sz 3.3.2 (test_package/test_sz.cpp)
+# Gate: 消费者测试按 SZ3::SZ_compress 调用 → error: no template named 'SZ_compress' in namespace 'SZ3'
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: sz-3.3.2-namespace-qualified-call-global-symbol
+severity: 2
+category: cpp|api-usage|test-package|portability
+trigger_tool: clang++|cmake|nm
+phase: verification
+
+keywords: 消费者测试, using namespace, 限定名, no template named, no member named, 全局函数, namespace, 头文件契约, C++
+
+error_signature: no template named '[A-Za-z_]+' in namespace|no member named '[A-Za-z_]+' in namespace|is not a member of '[A-Za-z_]+'
+
+match_keywords: no template named|no member named|using namespace
+
+root_cause: >
+  上游头文件内部写了 `using namespace X;`（或 `using X::foo;`），把本来属于命名空间 X 的名字**注入到全局**；
+  于是符号在**全局命名空间**里是可见的，但在 X 下**并没有以限定名声明**。
+  消费者测试若按"看起来像成员"的方式写 `X::foo(...)`，编译期即报 `no template named 'foo' in namespace 'X'`。
+  （sz 实测：sz.hpp 内 `using namespace SZ3`，`SZ_compress/SZ_decompress` 实为全局函数。）
+
+rec_approach: verify-real-qualification-then-use-unqualified-name
+rec_description: >
+  ①先查上游头文件与实现，确认符号的**真实限定**：
+  `grep -n "<symbol>" <header>` 看定义处是否在 `namespace X { ... }` 内，或只是 `using namespace X;` 之后的全局可见名；
+  必要时用 `nm -C <lib>` / `c++filt` 看符号的 mangled 名以确证命名空间；
+  ②按**真实限定**调用：符号真在全局 ⇒ 直接用**非限定名**（不要加 `X::`）；真在 X 内 ⇒ 才写 `X::`；
+  ③**不得**为通过而改库、加 `namespace X { using ::foo; }` 之类 shim，或在测试里 `#define` 掩盖。
+rec_command: |
+  grep -n 'using namespace' include/*.hpp | head
+  nm -C build/*.a 2>/dev/null | grep -m3 '<symbol>'
+rec_auto_fix: false
+prescan_pattern: 'using namespace [A-Za-z_]+;'
+prescan_globs: ['**/include/**/*.hpp', '**/include/**/*.h']
+
+fallback_approach: compile-probe-both-forms
+fallback_description: >
+  头文件复杂（多层 using/条件编译）时，写 10 行探针分别尝试 `X::foo(...)` 与 `foo(...)` 两种调用，
+  以**能编译通过的那种**为准并记入报告；探针留 ~/tmp/uc2/<包>/。
+fallback_command: clang++ -fsyntax-only probe.cpp -Iinclude
+
+safety_boundary: >
+  ①不得改上游库或加命名空间 shim 去迎合错误调用（那会污染制品语义）；
+  ②不得用 `#define foo X::foo` 之类宏掩盖；
+  ③若符号在该平台的 libc++/musl 下确实缺失（另一类问题），按相应条目处理，别混进本条；
+  ④消费者测试的调用方式必须与**上游文档示例**一致，文档缺失时才以探针为准。
+affected_scope: >
+  任何为 C++ 库写 test_package 的场景，尤其上游头文件大量使用 `using namespace X;` 的库
+  （数值库/算法库常见）。判据：报错文本为 **no template named / no member named ... in namespace ...**，
+  且把限定符去掉就能编译。
+  与"`using namespace std;` 引起**二义性**（ambiguous）"的条目不同：本条是**限定名不存在**，不是二义。
+verification_cmd: |
+  clang++ -fsyntax-only test_package/test_sz.cpp -I<include>   # 修正前后对比报错文本
+
+evidence: >
+  sz 3.3.2（PR #11675）实测：消费者测试初版写 `SZ3::SZ_compress(...)` →
+  `error: no template named 'SZ_compress' in namespace 'SZ3'`；
+  根因见 notes.md 第 44 行：`SZ_compress/SZ_decompress 是全局函数（sz.hpp 内部 using namespace SZ3），非 SZ3::`；
+  改为**非限定调用**后编译通过，消费者测试 1/1 passed（N=65536 float，absErrorBound=0.1，断言 maxErr≤bound）。
+authors:
+  - CIW
+source_pr: "11675"
+source_commit: 3bb60399
+draft_date: 2026-09-21
+similar_to: DRAFT-farmhash-1.1.0-cxx17-std-data-ambiguity
