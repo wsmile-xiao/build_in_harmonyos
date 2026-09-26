@@ -1,0 +1,135 @@
+#====================================================================
+# DRAFT-ctags-6.2.1.1-hmdfs-mktemp-AS_TMPDIR-unwritable
+#   HMDFS 上 toybox mktemp -d 产出的目录不可写（chmod 无效、test -w 虚报），
+#   autoconf 的 AS_TMPDIR 因此失败：config.status: could not setup
+#   config files machinery
+# 来源: ctags 6.2.1.1 适配 HarmonyOS PC（目标库任务）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ctags-6.2.1.1-hmdfs-mktemp-AS_TMPDIR-unwritable
+trigger_tool:           configure|make|install|runtime
+phase:                  configuration|testing
+error_signature:        can't\s+create\s+\.?/?conf[A-Za-z0-9]+/|
+                        could\s+not\s+setup\s+config\s+files\s+machinery|
+                        can't\s+create\s+.*/cg[A-Za-z0-9]+/|
+                        cannot\s+create\s+a\s+temporary\s+directory
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               platform, hmdfs, ohos, autotools, limitation, compat
+match_keywords:         mktemp, mktemp -d, AS_TMPDIR, config.status,
+                        could not setup config files machinery, confXXXXXX,
+                        cgXXXXXX, permission denied, chmod 不生效, HMDFS,
+                        临时目录不可写, test -w, umask
+title:                  HMDFS 上 toybox mktemp -d 的目录不可写（chmod 无效 + test -w 虚报），autoconf AS_TMPDIR 失败（config.status: could not setup config files machinery）
+prescan_pattern:        mktemp\s+-d|AS_TMPDIR|conftest.*mktemp
+prescan_globs:          configure, configure.ac, Makefile.am, *.sh, m4/*.m4
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             HMDFS（HarmonyOS 分布式文件系统）上，进程创建的文件/目录
+                        owner 被固定为 file_manager 服务账户，而调用进程 uid 不同；
+                        因此访问完全依赖 group/other 权限位。具体地：
+                        ①toybox 的 `mktemp -d` 创建目录时显式指定 0700（实测
+                          得到 drwx--S--- / 2700），group 与 other 均无权限；
+                        ②HMDFS **忽略 chmod**（实测 chmod 777 后权限位不变，
+                          对应 E046 类限制），所以"创建后再 chmod"不可行；
+                        ③`test -w` 在该目录上**虚报为可写**（access() 判断与
+                          实际写入不一致），所以"探测可写再回退"也不可行。
+                        autoconf 的 AS_TMPDIR（生成 config.status 的临时目录，
+                        以及 config.guess 的 set_cc_for_build）优先用
+                        `(umask 077 && mktemp -d "./confXXXXXX")`，成功返回路径
+                        后立刻用于写 subs1.awk 等中间文件 → Permission denied →
+                        "config.status: error: could not setup config files
+                        machinery"，configure 中止。
+                        对照：shell `mkdir` 在同一目录下得到 drwxrws--x
+                        (2771，group 可写)，因此 mkdir 路径可用；`umask` 对
+                        mkdir 的结果被 HMDFS 归一化，改 umask 无实际作用。
+
+affected_scope:         所有在 HMDFS 工作目录（如 ~/tmp、项目目录、$TMPDIR）
+                        下运行 autoconf 生成/使用的临时目录逻辑的项目：
+                        - autoconf ≥2.64 生成的 configure/config.status（AS_TMPDIR）
+                        - GNU config.guess/config.sub（set_cc_for_build）
+                        - 任何自行调用 `mktemp -d` 后写文件的构建脚本
+                        本项目实证：ctags 6.2.1（configure 内置 AS_TMPDIR 与
+                        config.status 模板两处）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           replace-mktemp-with-mkdir-in-configure
+rec_description:        【定性三步（缺一不可，因为 chmod/test -w 都会骗人）】
+                        ① 观察报错目录名形态：confXXXXXX / cgXXXXXX ⇒ mktemp 模板；
+                        ② 实测目录权限：`ls -ld <tmpdir>` 得到 drwx--S---（2700）
+                           ⇒ group 无权限；若为 drwxrws--x（2771）则不是本模式；
+                        ③ 实测 `chmod 777 <tmpdir>` 后权限位**不变**，且
+                           `test -w <tmpdir>` 返回真但 `echo x > <tmpdir>/f`
+                           失败 ⇒ 确认 HMDFS 语义。
+                        【修复】把 AS_TMPDIR（configure 内及其写出的
+                        config.status 模板）的 mktemp 优先分支去掉，直接用
+                        mkdir 分支：
+
+                            {
+                              tmp=./conf$$-$RANDOM
+                              (umask 077 && mkdir "$tmp")
+                            } || as_fn_error $? "cannot create a temporary directory in ." "$LINENO" 5
+
+                        注意两点：ⓐ configure 与它生成的 config.status 是**两处
+                        独立文本**，若只改 configure 的主体而漏改 config.status
+                        模板，重跑 configure 仍会在 config.status 阶段失败（本包
+                        实测踩过：`grep -c 'confXXXXXX' configure` 必须为 0）；
+                        ⓑ 若 mktemp 出现在 config.guess 的 set_cc_for_build 中，
+                        优先用"提前 return 的平台分支"绕开（见
+                        DRAFT-ctags-6.2.1.1-ohos-config-guess-harmonyos-uname），
+                        否则同样需要改写。
+                        【验证】configure 退出码 0，且 config.status 成功生成
+                        Makefile / config.h（"config.status: creating ..."）。
+rec_command:            grep -c 'mktemp' configure config.status 2>/dev/null   # 期望 0（AS_TMPDIR 处）
+                        ./configure --prefix=$PREFIX && echo CONFIGURE_OK
+rec_auto_fix:           false
+rec_impl:               patch-configure-as-tmpdir
+
+fallback_priority:      2
+fallback_approach:      重定向临时目录到非 HMDFS 路径
+fallback_description:   若无法改 configure（例如必须保持上游文件字节一致），可用
+                        环境变量把临时目录指向非 HMDFS 文件系统（若平台存在）。
+                        但 OHOS 上 /tmp 常为只读（E002），且 HMDFS 覆盖用户目录，
+                        实际可选项有限，故仅作兜底。
+fallback_command:       TMPDIR=<non-hmdfs-dir> ./configure
+fallback_auto_fix:      false
+fallback_impl:          tmpdir-redirect
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       chmod\s+(-R\s+)?[0-7]{3,4}\s+.*conf|chmod.*mktemp
+forbid_1_reason:        HMDFS 忽略 chmod，加 chmod 是无效补救（看似合理实则不生效），
+                        会掩盖真实根因
+forbid_1_consequence:   构建仍失败，浪费时间；评审关注根因描述准确性
+forbid_2_pattern:       test\s+-w.*mktemp|if\s+\[\s+-w\s+\$tmp\s+\]
+forbid_2_reason:        HMDFS 上 test -w 虚报可写，据此分支不会触发回退
+forbid_2_consequence:   修复看似生效实则无效
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P008
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-ctags-6.2.1.1-ohos-config-guess-harmonyos-uname（同一类首次 configure 失败，常同时出现）
+caused_by:              E046（HMDFS chmod 不生效/权限固定）
+conflicts_with:
+prerequisite_of:        R1 参数最少化（改 configure 而非传环境变量绕过）
+
+# ═══ 元数据 ═══
+verification_cmd:       cd <src> && ./configure --prefix=$PREFIX   # 期望 RC=0 且生成 Makefile
+                        # 或: python3 scripts/ohc-run.py conan-verify ctags 6.2.1.1
+doc_file:               knowledge/drafts/DRAFT-ctags-6.2.1.1-hmdfs-mktemp-AS_TMPDIR-unwritable.md
+last_updated:           2026-09-26
+source_event:           ctags 6.2.1.1 适配（was: config.status: could not setup config files machinery）
+authors:                OpenDesk
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26
