@@ -1,0 +1,110 @@
+# ═══ Draft knowledge entry — clang -pedantic rejects the GNU `##__VA_ARGS__`
+# token-paste extension; GCC accepts it silently so upstream CI never sees it
+# Software: zcfan 1.4.0 (hand-written Makefile, single translation-unit C99 CLI)
+# Gate: conan-verify G2 (conan create, ohos-aarch64) + test_package 5/5 +
+#       tests/ohos_spec.sh 5/5 + finish W3
+# Evidence: archives/z/zcfan/1.4.0/notes.md, reports/upstream-tests.md
+
+id:                     E6401
+trigger_tool:           make|clang
+phase:                  compilation
+error_signature:        token pasting of ',' and __VA_ARGS__ is a GNU extension|Wgnu-zero-variadic-macro-arguments
+
+severity: 3
+category: portability,compat,clang
+match_keywords: gnu-zero-variadic-macro-arguments, ##__VA_ARGS__, token pasting of ',' and __VA_ARGS__, variadic macro, pedantic, Werror, clang, gnu99
+title: clang -pedantic 拒绝 GNU ##__VA_ARGS__ 变参宏扩展（GCC 静默接受，上游 CI 掩盖）
+
+root_cause: |
+  上游 printf 风格日志宏使用 GNU 变参粘贴扩展以吃掉空参时的悬空逗号：
+
+      #define info(fmt, ...) fprintf(stderr, "[INF] " fmt, ##__VA_ARGS__)
+      #define err(fmt,  ...) fprintf(stderr, "[ERR] " fmt, ##__VA_ARGS__)
+
+  GCC 在 -pedantic 下静默接受 ##__VA_ARGS__（属其文档化扩展），GCC 构建链一路绿色；
+  clang 则按非标准扩展诊断：
+
+      error: token pasting of ',' and __VA_ARGS__ is a GNU extension
+      [-Werror,-Wgnu-zero-variadic-macro-arguments]
+
+  由于上游 Makefile 自带 -Werror，该诊断升级为致命错误：2 个宏定义引发 10 条 error，
+  构建中断。OHOS 工具链就是 clang，因此任何"GCC 干净 + 此宏形态"的上游工程在
+  HarmonyOS 上必然失败。失败被上游 CI 系统性掩盖：其 workflow 只跑 make lint、
+  make clean clang-tidy、make clean clang-everything，而后者显式带
+  -Wno-gnu-zero-variadic-macro-arguments，且从不用 clang 跑裸 make。
+
+affected_scope: |
+  使用 ##__VA_ARGS__ 格式宏、且以 clang -pedantic/-Wpedantic + -Werror 构建的
+  C/C++ 项目（2010 年代只经 GCC/glibc 验证过的代码库极常见）。
+
+verification_cmd: |
+  clang -std=gnu99 -pedantic -Wall -Wextra -Werror src.c -o /dev/null
+  # 未修复 -> error: token pasting of ',' and __VA_ARGS__ is a GNU extension
+  # 已修复 -> 无输出，exit 0
+
+rec_priority: 1
+rec_approach: source-patch
+rec_description: |
+  改为**无命名形参的全变参宏**，使 __VA_ARGS__ 恒含至少一个实参（格式串），
+  悬空逗号自然不存在，因而无需 ##：
+
+      #define info(...) fprintf(stderr, "[INF] " __VA_ARGS__)
+      #define err(...)  fprintf(stderr, "[ERR] " __VA_ARGS__)
+
+  展开与原实现逐字节等价：
+      err("glob: %s: %s\n", a, b) -> fprintf(stderr, "[ERR] " "glob: %s: %s\n", a, b)
+      err("boom\n")               -> fprintf(stderr, "[ERR] " "boom\n")
+  标准 C99、pedantic 零告警、不引入任何平台宏（R8/PF5 合规）、不改变平台分支。
+  前提：所有调用点至少传入格式串——改写前先清点调用点。
+rec_command: |
+  grep -nE '\b(info|err)\(' src.c      # 先确认每个调用点都传了格式串
+  # 然后应用 2 行宏改写补丁（ship as patches/0001-*.patch）
+rec_auto_fix: false
+rec_impl: source-patch
+
+fallback_priority:      2
+fallback_approach: add-cflags
+fallback_description: |
+  追加 -Wno-gnu-zero-variadic-macro-arguments。**顺序敏感**：必须排在 -pedantic
+  之后，否则后出现的 -pedantic 会重新启用该子诊断。注入点宜用上游构建系统的
+  扩展变量（若 Makefile 的 CPPFLAGS 为空则可用），**不要**用命令行 CFLAGS——
+  GNU make 命令行赋值会整体替换 := 赋值的上游告警集，静默丢掉 -Werror 等。
+fallback_command: |
+  make CC=clang CPPFLAGS="-Wno-gnu-zero-variadic-macro-arguments"
+fallback_auto_fix:      false
+fallback_impl: add-cflags
+
+forbid_1_pattern: -D__OHOS__|#ifdef __OHOS__
+forbid_1_reason: >-
+  用平台宏包裹该宏既无必要（改写本身平台无关），也违反 R8 / PF5（patches/ 默认
+  禁止平台宏）。
+forbid_1_consequence: PR 被 create-pr 前置硬闸 PF5 拦截。
+
+forbid_2_pattern: -Wno-error|-Wno-error=pedantic|(^|[[:space:]])-w([[:space:]]|$)
+forbid_2_reason: >-
+  整体放宽告警或降级 -Werror 会掩盖真实诊断，且是评审红线；缺陷在宏，不在告警。
+forbid_2_consequence: 上游严格告警契约失效，审计降档。
+
+principles: R8,R33,R51
+
+causes:                 []
+caused_by:              []
+similar_to:             E094
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E6401.md
+last_updated: 2026-09-22
+source_event:           zcfan 1.4.0 适配（首轮 make CC=clang 失败，10 × -Wgnu-zero-variadic-macro-arguments）
+
+authors: AVA <3480711629@qq.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 43B7
