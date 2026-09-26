@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan recipe — mypaint-brushes 2.0.2 (pure brush-data package).
+"""Conan recipe — mypaint-brushes 2.0.2.1 (pure brush-data package).
 
 Pure autotools data package: brushes/*.myb + order.conf (7 brush groups,
 196 brushes) plus share/pkgconfig/mypaint-brushes-2.0.pc. No C/C++
@@ -31,17 +31,17 @@ from conan.tools.layout import basic_layout
 
 class MypaintbrushesConan(ConanFile):
     name = "mypaint-brushes"
-    version = "2.0.2"
+    version = "2.0.2.1"
     description = "Brushes used by MyPaint and other software using libmypaint"
     license = "CC0-1.0"
     homepage = "https://github.com/mypaint/mypaint-brushes"
     url = "https://github.com/mypaint/mypaint-brushes"
 
-    # Pure brush-data package: no binary, no library (R38: no commands.json).
-    # NOTE: the conan package_type attribute is deliberately omitted here —
-    # the CI L0k gate treats an application-style package_type value as a
-    # CLI tool that must declare commands.json, but this package ships zero
-    # executables (R38 data/library branch applies).
+    # 纯数据包显式声明 package_type="unknown"（对齐已合入纯数据包先例
+    # kicad-demos 10.0.4 / linux-firmware-brcm）。零可执行文件 → 非
+    # application 且 bindirs 为空，不触发 L0k/R38 commands.json 要求。
+    package_type = "unknown"
+
     settings = "os", "arch", "compiler", "build_type"
 
     def export_sources(self):
@@ -78,6 +78,10 @@ class MypaintbrushesConan(ConanFile):
         # --prefix=package_folder comes from AutotoolsToolchain; files land at
         # <pkg>/share/mypaint-data/2.0/brushes + <pkg>/share/pkgconfig/*.pc
         autotools.install()
+
+    def package_id(self):
+        # 纯数据包：内容与 settings 无关，清空 package id（kicad-demos 先例同款）。
+        self.info.clear()
 
     def package_info(self):
         # Pure data package: no libs, no binaries, no headers.

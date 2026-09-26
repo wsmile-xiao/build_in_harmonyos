@@ -1,5 +1,5 @@
 #!/bin/bash
-# Substantive data-package verification for mypaint-brushes 2.0.2 (R34).
+# Substantive data-package verification for mypaint-brushes 2.0.2.1 (R34).
 # Usage: test_mypaint_brushes.sh <package_folder>
 # Exits non-zero on the first integrity violation.
 
