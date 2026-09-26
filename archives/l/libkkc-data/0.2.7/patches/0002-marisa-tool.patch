@@ -1,0 +1,143 @@
+diff --git a/tools/sortlm.py b/tools/sortlm.py
+index edc471a..ec660bd 100644
+--- a/tools/sortlm.py
++++ b/tools/sortlm.py
+@@ -16,26 +16,56 @@
+ # You should have received a copy of the GNU General Public License
+ # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ 
+-import struct
+-import marisa
++import os
+ import re
++import struct
++import subprocess
++import tempfile
+ 
+ NGRAM = 3
+ NGRAM_LINE_REGEX = '^([-0-9.]+)[ \t]+([^\t]+?)(?:[ \t]+([-0-9.]+))?$'
+ 
++
++def build_trie(keys, output_path, tool, want_ids=True):
++    """Build a marisa trie from `keys` (in order), save it, return {key: id}.
++
++    The trie is built by the `marisa_tool` helper process rather than by an
++    in-process marisa extension: the OHOS build worker only lets a process
++    load shared objects that carry the `hnp_file` security label, while build
++    products live in user-owned paths (hmdfs label), so importing a freshly
++    built CPython extension module there fails with "Permission denied"
++    (hmmac security labels, see knowledge E212).
++    """
++    workdir = os.path.dirname(os.path.abspath(output_path)) or "."
++    fd, keys_path = tempfile.mkstemp(prefix=".sortlm-keys-", dir=workdir)
++    os.close(fd)
++    try:
++        with open(keys_path, "w", encoding="utf-8", newline="\n") as f:
++            for key in keys:
++                f.write(key + "\n")
++        command = [tool, "build", keys_path, output_path]
++        if not want_ids:
++            command.append("--no-ids")
++        output = subprocess.check_output(command)
++    finally:
++        os.remove(keys_path)
++    key_ids = {}
++    for line in output.decode("utf-8").splitlines():
++        key_id, _, key = line.partition("\t")
++        key_ids[key] = int(key_id)
++    return key_ids
++
++
+ class SortedGenerator(object):
+-    def __init__(self, infile, output_prefix):
++    def __init__(self, infile, output_prefix, marisa_tool):
+         self.__infile = infile
+         self.__output_prefix = output_prefix
++        self.__marisa_tool = marisa_tool
+         self.__ngram_line_regex = re.compile(NGRAM_LINE_REGEX)
+ 
+         self.__ngram_entries = [{} for x in range(0, NGRAM)]
+ 
+-        self.__vocab_keyset = marisa.Keyset()
+-        self.__input_keyset = marisa.Keyset()
+-
+-        self.__vocab_trie = marisa.Trie()
+-        self.__input_trie = marisa.Trie()
++        self.__vocab_ids = {}
+ 
+         self.__min_cost = 0.0
+ 
+@@ -54,6 +84,8 @@ class SortedGenerator(object):
+                 break
+ 
+         unigram_count = 0
++        vocab_keys = []
++        input_keys = []
+         while True:
+             line = self.__infile.readline()
+             if line == "":
+@@ -65,15 +97,18 @@ class SortedGenerator(object):
+             if not match:
+                 continue
+             strv = match.groups()
+-            self.__vocab_keyset.push_back(strv[1])
++            vocab_keys.append(strv[1])
+             if not strv[1] in ("<s>", "</s>", "<UNK>"):
+                 if "/" not in strv[1]:
+                     continue
+                 (input, output) = strv[1].split("/")
+-                self.__input_keyset.push_back(input)
++                input_keys.append(input)
+ 
+-        self.__vocab_trie.build(self.__vocab_keyset)
+-        self.__input_trie.build(self.__input_keyset)
++        self.__vocab_ids = build_trie(vocab_keys,
++                                      self.__output_prefix + ".1gram.index",
++                                      self.__marisa_tool)
++        build_trie(input_keys, self.__output_prefix + ".input",
++                   self.__marisa_tool, want_ids=False)
+ 
+     def __read_ngrams(self):
+         self.__infile.seek(0)
+@@ -99,11 +134,9 @@ class SortedGenerator(object):
+                 ngram = strv[1].split(" ")
+                 ids = []
+                 for word in ngram:
+-                    agent = marisa.Agent()
+-                    agent.set_query(word)
+-                    if not self.__vocab_trie.lookup(agent):
++                    if word not in self.__vocab_ids:
+                         continue
+-                    ids.append(agent.key_id())
++                    ids.append(self.__vocab_ids[word])
+                 cost = float(strv[0])
+                 if cost != -99 and cost < self.__min_cost:
+                     self.__min_cost = cost
+@@ -118,13 +151,8 @@ class SortedGenerator(object):
+ 
+     def write(self):
+         self.__min_cost = -8.0
+-        self.__write_tries()
+         self.__write_ngrams()
+ 
+-    def __write_tries(self):
+-        self.__vocab_trie.save(self.__output_prefix + ".1gram.index")
+-        self.__input_trie.save(self.__output_prefix + ".input")
+-
+     def __write_ngrams(self):
+         def quantize(cost, min_cost):
+             return max(0, min(65535, int(cost * 65535 / min_cost)))
+@@ -182,8 +210,12 @@ if __name__ == '__main__':
+                         help='language model file')
+     parser.add_argument('output_prefix', metavar='OUTPUT_PREFIX', type=str,
+                         help='output file prefix')
++    parser.add_argument('--marisa-tool', metavar='PATH', type=str,
++                        default=os.environ.get('MARISA_TOOL', 'marisa_tool'),
++                        help='marisa_tool helper used to build the tries')
+     args = parser.parse_args()
+ 
+-    generator = SortedGenerator(args.infile, args.output_prefix)
++    generator = SortedGenerator(args.infile, args.output_prefix,
++                                args.marisa_tool)
+     generator.read();
+     generator.write();
