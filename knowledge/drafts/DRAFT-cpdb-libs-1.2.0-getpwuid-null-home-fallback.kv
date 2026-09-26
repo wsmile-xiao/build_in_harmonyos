@@ -1,0 +1,97 @@
+#====================================================================
+# DRAFT-cpdb-libs-1.2.0-getpwuid-null-home-fallback — get_absolute_path 对 getpwuid() NULL 未判空解引用导致 Signal 11，需判空并 fallback $HOME
+# 触发事件: cpdb-libs 1.2.0 适配（conan create 消费端测试 Signal 11 崩溃）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-cpdb-libs-1.2.0-getpwuid-null-home-fallback
+trigger_tool:           conan|test|runtime
+phase:                  testing|runtime
+error_signature:        Signal 11|Segmentation fault|core dumped|getpwuid.*NULL|
+                         passwdEnt->pw_dir
+
+severity:               3
+category:               libc, musl, posix, environment, runtime
+match_keywords:         getpwuid, pw_dir, getpwnam, passwd, HOME, getenv,
+                         tilde expansion, ~ path, HMDFS, no passwd entry,
+                         NULL dereference, Segmentation fault, Signal 11,
+                         get_absolute_path
+title:                  OHOS/沙箱无 passwd 库条目时 getpwuid() 返回 NULL，展开 ~ 路径的代码必须判空并 fallback $HOME，否则解引用 pw_dir 即崩溃
+
+topic: >
+  cpdb-libs v1.2.0 frontend_helper.c 的 read_settings_from_disk() 调用
+  get_absolute_path("~/.CPD-print-settings")，该函数对 "~" 前缀直接
+  getpwuid(getuid()) 后未判空就取 passwdEnt->pw_dir。在 OHOS 沙箱
+  （HMDFS UID 映射、/etc/passwd 无对应条目）中 getpwuid() 返回 NULL
+  （复现 uid=20020083 pw=0），解引用 NULL -> Signal 11 (core dumped)。
+  消费者测试（仅创建 FrontendObj，尚不涉及 D-Bus）即触发，表现为 conan
+  create 的 test_package 阶段崩溃。
+
+root_cause:             getpwuid() 在无 passwd 库条目的 OHOS/沙箱环境返回 NULL，
+  上游代码未判空即解引用 passwdEnt->pw_dir，任何路径含 "~" 的调用
+  （如设置文件读写）都会段错误。
+
+durable_solution: >
+  判空 + fallback $HOME：
+    struct passwd *passwdEnt = getpwuid(getuid());
+    char *home = passwdEnt ? passwdEnt->pw_dir : NULL;
+    if (home == NULL)
+      home = getenv("HOME");
+    if (home == NULL)
+      return NULL;
+  getenv("HOME") 在 OHOS 沙箱/普通 POSIX 环境均可用，语义等价（pw_dir 与
+  HOME 通常一致）；仍无 HOME 时返回 NULL 由调用方处理（原代码本就允许
+  返回 NULL）。
+
+impact: >
+  修复所有 "~" 路径展开路径的段错误；消费端测试 12/12 PASS，
+  conan create 全流程通过。
+
+recovery: >
+  任何在 OHOS/无 passwd 条目环境运行的三方库，若信号处理/路径展开逻辑
+  直接使用 getpwuid/getpwnam 结果且未判空，一律补判空 + $HOME fallback；
+  快速验证：getpwuid(getuid()) 返回 NULL 即命中（本环境实测 uid 无
+  passwd 条目）。
+
+evidence_chain: >
+  task cpdb-libs-1.2.0 适配（feat/cpdb-libs-1.2.0 分支）
+    - conan create 消费端测试 Signal 11 (core dumped)，main 仅执行
+      get_boolean/get_string_copy/get_new_Settings/get_new_FrontendObj；
+    - 最小复现：clang 编译 getpwuid(getuid()) 打印 -> "uid=20020083 pw=0"
+      （NULL）；
+    - read_settings_from_disk() -> get_absolute_path("~/.CPD-print-settings")
+      即崩溃点；
+    - 补丁 0004 判空+fallback 后 conan create 12/12 PASS；
+    - 日志 archives/c/cpdb-libs/1.2.0/reports/conan-create.log。
+
+verification_cmd: >
+  cd archives/c/cpdb-libs/1.2.0 && conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+
+limitations:           需 getenv("HOME") 可用；极精简环境无 HOME 时返回 NULL（调用方需
+  容忍 NULL，上游原代码已允许）。与 DRAFT-empty-login-identity（rcs
+  身份链 getlogin_r 空成功）同域：都是 OHOS 无 passwd 条目导致的 libc
+  返回异常，但错误面不同（本条目是 NULL 解引用崩溃 vs 空身份串）。
+
+rec_priority:           1
+rec_approach:           getpwuid-null-check-with-home-fallback（getpwuid 判空 + getenv("HOME") fallback）
+rec_description: >
+  对 getpwuid()/getpwnam() 返回值先判空，空时 fallback getenv("HOME")，
+  再空时返回 NULL；适用于所有展开 "~" 路径的库。
+rec_command:            struct passwd *p = getpwuid(getuid()); char *home = p ? p->pw_dir : NULL; if (!home) home = getenv("HOME"); if (!home) return NULL;
+rec_auto_fix:           false
+rec_impl:               patch-getpwuid-null-home-fallback
+
+doc_file:               knowledge/drafts/DRAFT-cpdb-libs-1.2.0-getpwuid-null-home-fallback.md
+last_updated:           2026-09-25
+source_event:           cpdb-libs 1.2.0 适配，消费端测试 Signal 11 崩溃
+authors:                atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-25
+
+draft:                  true
+contributor_id:         pc2-16
