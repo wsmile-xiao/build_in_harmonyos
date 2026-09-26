@@ -1,0 +1,82 @@
+# ═══ Draft knowledge entry — 缺 pkg.m4 时未守卫 PKG_CHECK_MODULES 的解析期残留 ═══
+# Timestamp: 2026-09-21
+# Software: sngrep 1.8.3（irontec，autotools SIP 流查看器）
+# Gate: 任务 10763 / 分支 feat/sngrep-1.8.3（autoreconf 后 configure 解析失败 → 去 pkg-config 化补丁后 11/11 全过）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# 查重边界（§6.2 家族命中四条件）：
+#   §970（经验汇总）：同族症状（syntax error near unexpected token GLIBS,），
+#     标准解法=从 /data/service/hnp/pkg-config.org/*/share/aclocal/pkg.m4 拷 pkg.m4
+#     进 m4/ 再 autoreconf —— 本条与其症状同源但**解法不同**（非标准解法），
+#     按四条件之 2 判 create 而非 hit；
+#   E089：replace-pkginstalldir，症状/签名不同（@am_AUTOM4TE@ 等），非同条；
+#   E2186：AC_CHECK_LIB 不注入 -I/版本约束的反例——本条 safety_boundary 直接引用。
+
+id:                     DRAFT-sngrep-1.8.3-pkg-m4-missing-parse-error
+trigger_tool:           autoreconf|autoconf|configure|sh
+phase:                  configuration
+error_signature:        syntax error near unexpected token '[A-Z]+,'\|
+                         configure\[[0-9]+\].*syntax error.*unexpected|
+                         ^\s*PKG_CHECK_MODULES\([A-Z]+, .*\)$
+
+severity:               2
+category:               build-system|autotools|m4|toolchain|environment
+match_keywords:         pkg.m4, PKG_CHECK_MODULES, PKG_CHECK_EXISTS, m4_ifdef,
+                         autoreconf, aclocal, configure syntax error,
+                         parse-time, 字面残留, 未守卫, OHOS toolchain
+
+title:                  OHOS 工具链缺 pkg.m4 时 configure.ac 未守卫的 PKG_CHECK_MODULES 自举后在 configure 中字面残留，产生解析期语法错且 --without-* 禁用特性不可规避
+
+root_cause:             OHOS 设备 aclocal 搜索路径（/storage/Users/currentUser/usr/local/share/aclocal）
+                        无 pkg.m4：autoreconf -fi 展开时，m4_ifdef([PKG_CHECK_MODULES],…) 守卫处
+                        能正常回落到 else 分支（AC_CHECK_LIB 探测），但**未被 m4_ifdef 守卫**的
+                        PKG_CHECK_MODULES([NAME], [pkg]) 调用会原样留进生成的 configure——
+                        作为 shell 语句它在**解析期**即报 syntax error（unexpected 'NAME,'）。
+                        关键行为偏差：该错误与运行时无关——即使 configure 参数传了
+                        --without-gnutls（对应分支运行时永不进入），shell 仍需整文件语法通过，
+                        因此禁用该特性不能规避，必须在 m4 层面消除。
+                        与守卫处的对照构成判别方法：同一 configure 里其它 PKG_CHECK 调用点
+                        正常回落 → 只有未守卫处残留 → 定位方式为在生成的 configure 里
+                        grep -n 'PKG_CHECK_MODULES(' 找裸行。
+
+affected_scope:         在无 pkg.m4 的工具链上 autotools 自举的所有项目（上游把
+                        PKG_CHECK_* 用在 m4_ifdef 守卫之外的均中招）；特性已
+                        --without/--disable 的场景同样炸，属"必踩"级
+
+verification_cmd:       grep -n 'PKG_CHECK_MODULES\|PKG_CHECK_EXISTS' configure.ac；
+                         autoreconf -fi && grep -n '^\s*PKG_CHECK' configure；
+                         bash -n configure   （解析期校验，残留即报错）
+
+rec_priority:           1
+rec_approach:           ac-depkgconfigify
+rec_description:        两条可行解法，按可用性择一：
+                        a) 标准解法（§970）：从设备 pkg-config 安装处拷 pkg.m4 进
+                           项目 m4/ 再 autoreconf —— 保留上游 pkg-config 探测的
+                           -I/-L/版本约束注入能力；
+                        b) 去 pkg-config 化（本条新增路径）：把目标探测段改写为
+                           纯 AC_CHECK_LIB/AC_CHECK_HEADER —— 适用于该探测所在
+                           特性本包已整体禁用（分支运行时不进入，无探测代价），
+                           或依赖探测极简的场景。写补丁时必须声明：
+                           AC_CHECK_LIB 不注入 -I/版本约束（E2186 反例），
+                           启用该特性的下游需自行补 CPPFLAGS/PKG_CONFIG_PATH。
+rec_command:            sngrep 1.8.3 实例（补丁 patches/0003-configure.ac.patch）：
+                        configure.ac libgcrypt 段——
+                        原为 m4_ifdef([PKG_CHECK_MODULES]…) 守卫整段加
+                        "if test …pkgconfig…" 探测 if/else/fi 结构，
+                        改写为 AC_CHECK_LIB([gcrypt],[gcry_md_map_name],…)
+                        验证 autoreconf -fi && bash -n configure && grep -c '^\s*PKG_CHECK' configure   （应为 0）
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      copy-pkg-m4
+fallback_description:   标准解法（§970）：cp /data/service/hnp/pkg-config.org/*/share/aclocal/pkg.m4
+                         <项目>/m4/ 后重新 autoreconf。适合需要保留 pkg-config
+                         探测语义（多依赖、-I/-L/版本约束）的项目；代价是补丁
+                         外还依赖设备绝对路径的宏文件，CI 干净环境需一并携带。
+
+evidence:
+  - "sngrep 1.8.3（任务 10763）：configure 报 `./configure[7752]: syntax error: unexpected 'LIBGCRYPT,'`，--without-gnutls 不规避；bash -n configure 复现解析失败"
+  - "生成的 configure 中 grep 确认 PKG_CHECK_MODULES(LIBGCRYPT, libgcrypt) 以裸 shell 语句残留；同文件 m4_ifdef 守卫处（gnutls/openssl/pcre2 探测）均正常回落"
+  - "去 pkg-config 化补丁后：bash -n 通过，conan create 全链通过，上游 make check 11/11 PASS"
+  - "查重：经验汇总 §970 为同症状不同解法（四条件之 2 → create）；E089 症状不同；E2186 为本条 safety_boundary 引用的 -I 注入反例"
