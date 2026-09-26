@@ -1,0 +1,114 @@
+--- a/src/pipewire/data-loop.c
++++ b/src/pipewire/data-loop.c
+@@ -1,17 +1,18 @@
+ /* PipeWire */
+ /* SPDX-FileCopyrightText: Copyright © 2018 Wim Taymans */
+ /* SPDX-License-Identifier: MIT */
+ 
+ #include <pthread.h>
+ #include <errno.h>
+ #include <limits.h>
++#include <signal.h>
+ #include <sys/resource.h>
+ 
+ #include "pipewire/log.h"
+ #include "pipewire/data-loop.h"
+ #include "pipewire/private.h"
+ #include "pipewire/thread.h"
+ #include "pipewire/utils.h"
+ 
+ PW_LOG_TOPIC_EXTERN(log_data_loop);
+ #define PW_LOG_TOPIC_DEFAULT log_data_loop
+@@ -41,29 +42,60 @@
+ 	this->running = false;
+ }
+ 
+ static void thread_cleanup(void *arg)
+ {
+ 	struct pw_data_loop *this = arg;
+ 	pw_log_debug("%p: leave thread", this);
+ 	this->running = false;
+ 	pw_loop_leave(this->loop);
+ }
++
++#ifndef HAVE_PTHREAD_CANCEL
++/* HarmonyOS libc does not provide pthread_cancel(). The data loop stop
++ * path falls back to delivering SIGUSR1 to the loop thread; this handler
++ * runs in an async-signal-safe context and exits the thread so that the
++ * pending pthread_cleanup handlers are executed and the joiner can
++ * reclaim the thread. */
++static void fallback_cancel_handler(int sig)
++{
++	(void)sig;
++	pthread_exit(NULL);
++}
++
++static int fallback_cancel_thread(pthread_t thread)
++{
++	return pthread_kill(thread, SIGUSR1);
++}
++#endif
+ 
+ static void *do_loop(void *user_data)
+ {
+ 	struct pw_data_loop *this = user_data;
+ 	int res;
+ 	struct spa_callbacks *cb = &this->loop->control->iface.cb;
+ 	const struct spa_loop_control_methods *m = cb->funcs;
+ 	void *data = cb->data;
+ 	int (*iterate) (void *object, int timeout) = m->iterate;
++#ifndef HAVE_PTHREAD_CANCEL
++	struct sigaction sa;
++
++	/* HarmonyOS libc does not provide pthread_cancel(); install an
++	 * async-signal-safe exit handler so that a SIGUSR1 delivered by the
++	 * fallback cancel path below terminates this thread through
++	 * pthread_exit(), which runs the pending pthread_cleanup handlers
++	 * (thread_cleanup) and lets the joiner reclaim the thread. */
++	memset(&sa, 0, sizeof(sa));
++	sigemptyset(&sa.sa_mask);
++	sa.sa_handler = fallback_cancel_handler;
++	sigaction(SIGUSR1, &sa, NULL);
++#endif
+ 
+ 	pw_log_debug("%p: enter thread", this);
+ 	pw_loop_enter(this->loop);
+ 
+ 	pthread_cleanup_push(thread_cleanup, this);
+ 
+ 	while (SPA_LIKELY(this->running)) {
+ 		if (SPA_UNLIKELY((res = iterate(data, -1)) < 0)) {
+ 			if (res == -EINTR)
+ 				continue;
+@@ -270,21 +302,31 @@
+  *
+  */
+ SPA_EXPORT
+ int pw_data_loop_stop(struct pw_data_loop *loop)
+ {
+ 	pw_log_debug("%p stopping", loop);
+ 	if (loop->running) {
+ 		struct spa_thread_utils *utils;
+ 		if (loop->cancel) {
+ 			pw_log_debug("%p cancel", loop);
++#ifdef HAVE_PTHREAD_CANCEL
+ 			pthread_cancel(loop->thread);
++#else
++			/* HarmonyOS libc does not provide pthread_cancel();
++			 * fall back to delivering SIGUSR1 to the loop thread
++			 * (handler installed in do_loop), which exits the
++			 * thread through pthread_exit() so the cleanup
++			 * handlers run and the join below succeeds. */
++			if (fallback_cancel_thread(loop->thread) < 0)
++				pw_log_warn("%p: cancel signal failed: %m", loop);
++#endif
+ 		} else {
+ 			pw_log_debug("%p signal", loop);
+ 			pw_loop_invoke(loop->loop, do_stop, 1, NULL, 0, false, loop);
+ 		}
+ 		pw_log_debug("%p join", loop);
+ 		if ((utils = loop->thread_utils) == NULL)
+ 			utils = pw_thread_utils_get();
+ 		spa_thread_utils_join(utils, (struct spa_thread*)loop->thread, NULL);
+ 		pw_log_debug("%p joined", loop);
+ 	}
