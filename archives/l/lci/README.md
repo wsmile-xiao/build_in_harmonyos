@@ -47,3 +47,32 @@ line editing comes from the vendored `replxx` (C++).
 | Version | Status | Notes |
 |---------|--------|-------|
 | 1.1     | built  | v1.1 release tag, 2024-12-14; submodules pinned by the tag |
+
+---
+
+## lci 1.3 — justinmeza/lci（LOLCODE 1.3 解释器）
+
+> ⚠️ 注意：本目录另含 chatziko/lci 1.1（纯 λ 演算交互式解释器，GPL-2.0），
+> 两者是**不同上游项目的同名软件**，请勿混淆。
+
+- 上游: https://github.com/justinmeza/lci (Justin J. Meza)
+- License: GPL-3.0-or-later
+- 构建系统: CMake (>= 3.31，单一 `lci` 可执行文件)
+- 依赖: 无（仅链接 libm）
+- 定位: 按 LOLCODE 1.3 语言规范解析并执行 LOLCODE 程序
+
+### 1.3 OHOS 适配笔记
+
+- 纯 C 项目零补丁零配置修改直通：CMake configure/make 一次通过。
+- 上游测试 319 例（318 独立用例 + 1 基准）经 ctest 全量运行 319/319 PASS。
+- test_package 真实消费者验证：运行已安装 `lci` 解释器执行 LOLCODE 程序
+  并核验输出与退出码（R34，非空壳）。
+- 知识路径决定: path_a_no_knowledge（适配零错误，无新增跨库可复用知识，
+  详见 archives/l/lci/1.3/notes.md 知识候选台账）。
+
+## Versions
+
+| Version | Upstream | Status | Notes |
+|---------|----------|--------|-------|
+| 1.1     | chatziko/lci（λ演算） | built | v1.1 release tag, 2024-12-14 |
+| 1.3     | justinmeza/lci（LOLCODE） | built | v1.3 release tag; 本地 W3/conan-verify 通过，待远端 CI 发布 |
