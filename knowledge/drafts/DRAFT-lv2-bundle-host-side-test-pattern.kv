@@ -1,0 +1,116 @@
+#====================================================================
+# DRAFT-lv2-bundle-host-side-test-pattern
+# LV2 插件 bundle 的宿主侧实测范式：端口表按括号深度解析、activate/deactivate 可选、
+# OHOS 下用 dladdr 替代 /proc/self/maps
+#====================================================================
+
+id:                     DRAFT-lv2-bundle-host-side-test-pattern
+
+# ═══ Layer 0: 错误面 ═══
+trigger_tool:           clang|conan|test_package
+phase:                  testing
+error_signature:        Signal 11 \(core dumped\)|
+                         segmentation fault|
+                         /proc/self/maps.*(unreadable|Permission denied)|
+                         UNKNOWN PORT YO
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               test, audio, headers, portability, ohos
+match_keywords:         LV2 bundle, lv2_descriptor, lv2:port, lv2:index, lv2:default, scalePoints,
+                         port list parsing, activate NULL, deactivate NULL, optional callback,
+                         dlopen RTLD_NOW, dladdr, RTLD_NOLOAD, /proc/self/maps unreadable,
+                         audio plugin consumer test, manifest.ttl
+title:                  LV2 插件 bundle 宿主侧实测范式（端口表解析 / 可选回调判空 / OHOS 取图源用 dladdr）
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             为 LV2 插件 bundle 写消费者测试时有四类互相独立的陷阱：
+                        (1) 端口表：bundle 的 .ttl 把端口写成**多元素列表**
+                            `lv2:port [ … ], [ … ], … ;`，且单个端口元素内可嵌套
+                            `lv2:scalePoints [ … ]` —— 按“第一个 ]”截断会把 20+ 端口只解析出前几个，
+                            未连接的端口指针为 NULL，插件 run() 解引用即 SIGSEGV
+                            （实测 casynth 23 端口只解出 3 个 → 崩溃）。
+                        (2) 可选回调：LV2 规范中 activate/deactivate 是**可选**的，描述符里可以为
+                            NULL（casynth 即如此）；宿主无条件调用必崩。
+                        (3) 端口完备性：运行时无法从 LV2_Descriptor 得知端口数，只连“自己算出的”
+                            端口会漏连；应按 .ttl 的 max index 连接 0..max，越界 index 由插件自行
+                            忽略（octolo 打印 "UNKNOWN PORT YO!!" 但无害）。
+                        (4) OHOS 平台：/proc/self/maps **不可读**（SELinux），用它做“镜像来源/
+                            依赖已映射”校验必然失败；应改用 dladdr() 取入口点所在镜像路径，
+                            依赖链用 RTLD_NOLOAD 且必须在 dlclose 之前查（否则依赖已随插件卸载）。
+affected_scope:         所有为 LV2 插件包编写 test_package 的场景（本仓 archives/a/artyfx、
+                        archives/b/boops、archives/i/infamousplugins 均为 LV2 bundle）；
+                        其中 (4) 适用于 OHOS 上任何需要“加载来源 / 依赖已解析”证据的测试。
+verification_cmd:       1) 端口表：输出 "port map read from bundle .ttl: … (N ports)"，
+                           N 应与 `grep -c 'lv2:index' <bundle>/<plug>.ttl` 一致（多 descriptor 取 max+1）；
+                        2) 全生命周期：每个 descriptor 跑通 instantiate→connect→activate→run→
+                           deactivate→cleanup（infamousPlugins 实测 12 bundle / 13 descriptor）；
+                        3) 音频输出无 NaN/Inf；
+                        4) dladdr(lv2_descriptor) 的 dli_fname == dlopen 传入路径；
+                        5) dlopen("libzita-resampler.so.1", RTLD_NOW|RTLD_NOLOAD) 非 NULL。
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           ttl-driven-host-test
+rec_description:        宿主侧测试按 bundle 自带 .ttl 驱动而非硬编码端口表：逐个 lv2:port 起，
+                        用**括号深度**匹配端口元素边界（兼容多元素列表与嵌套 lv2:scalePoints），
+                        从元素取 lv2:index 与 InputPort/OutputPort/AudioPort/ControlPort/CVPort/
+                        AtomPort 与 lv2:default；音频输入喂正弦、控制端口写 lv2:default、其余清零；
+                        按 0..max(index) 全连接；音频输出断言 isfinite；activate/deactivate 判空后再调。
+rec_command:            for (char *q = open; *q; q++) {            /* 括号深度匹配元素边界 */
+                            if (*q == '[') depth++;
+                            else if (*q == ']' && --depth == 0) { close = q; break; }
+                        }
+                        if (desc->activate)   desc->activate(instance);
+                        if (desc->deactivate) desc->deactivate(instance);
+                        if (dladdr(entry, &info) && info.dli_fname)     /* 替代 /proc/self/maps */
+                            assert(strcmp(info.dli_fname, so_path) == 0);
+                        void *dep = dlopen(soname, RTLD_NOW | RTLD_NOLOAD);  /* dlclose 之前 */
+rec_auto_fix:           false
+rec_impl:               conan-test-package
+
+fallback_priority:      2
+fallback_approach:      per-descriptor-port-map
+fallback_description:   若插件把不同 descriptor 的端口表拆在同一 .ttl 的不同插件块（`a lv2:Plugin`
+                        分段）且 index 空间不重叠，可按插件块分别建端口表、对每个 descriptor 只连
+                        自己的端口；更精确但解析器复杂得多，连通 0..max 已足以避免 NULL 解引用。
+fallback_command:       以 "a lv2:Plugin" 切分 .ttl，逐块建立 index→类型 映射后按 descriptor 序对应
+fallback_auto_fix:      false
+fallback_impl:          conan-test-package
+
+forbid_1_pattern:       用 /proc/self/maps 判断“从哪个镜像加载/依赖是否映射”
+forbid_1_reason:        OHOS 上 /proc/self/maps 不可读（SELinux，实测 maps unreadable），该断言
+                        必然失败；且 dlclose 后依赖链已卸载，事后统一检查同样失效。
+forbid_1_consequence:   测试假失败或假通过（把“查不到”当成“不依赖/不安全”）
+
+forbid_2_pattern:       desc->activate\(|desc->deactivate\( 前不判空
+forbid_2_reason:        LV2 允许 activate/deactivate 为 NULL（casynth 未实现），无条件调用必崩
+forbid_2_consequence:   测试自身 SIGSEGV，掩盖真实插件问题
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P013
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-lv2-bundle-host-side-test-pattern.md
+last_updated:           2026-09-24
+source_event:           infamousPlugins 0.3.2 HarmonyOS PC adaptation (test_package 实测 207/207)
+
+authors:                Rz114514 <Rz114514@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-24
+
+draft: true
+contributor_id: Rz114514
