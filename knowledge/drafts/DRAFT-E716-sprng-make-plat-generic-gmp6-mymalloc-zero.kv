@@ -1,0 +1,102 @@
+#====================================================================
+# Draft: sprng 2.0a 移植三连坑（make.$(PLAT) 平台选择 / gmp6 头文件代差 /
+#        _mymalloc size==0 → pmlcg unpack 假失败）+ 上游 void main 的 rc 假绿
+# 路径 B 素材：任务卡 10876（sprng/2.0a，feat/sprng-2.0a）
+# 实操实例: archives/s/sprng/2.0a（本任务，设备实测 13/13 + checksprng 17/18）
+#====================================================================
+
+draft:                 E716-sprng-make-plat-generic-gmp6-mymalloc-zero
+status:                pending-editor-review
+id:                    E716
+trigger_tool:          conan|make|clang
+phase:                 configuration|build|testing
+error_signature:       'duplicate symbol: primes|undefined symbol: __mpn_add_n|SPRNG was unable to unpack the generator|memory allocation failure in file'
+
+severity:              2
+category:              build-system, portability, gmp, testing, upstream-defect, ohos
+prescan_pattern:       'make\.\$\(PLAT\)|make\.GENERIC|make\.INTEL|_mymalloc'
+match_keywords:        sprng, make.$(PLAT), PLAT=GENERIC, PLAT=INTEL, make.CHOICES, make.GENERIC, CFLAGS 钉死, primes, -fno-common, duplicate symbol, gmp.h, gmp6, __mpn_add_n, _mymalloc, mpz _mp_alloc, pmlcg, pack_rng, unpack_rng, void main, rc 未定义, checksprng, 质量测试, KS 百分数
+title:                 老式 make.$(PLAT) C 工程移植到 OHOS 的三连坑与 rc 判据：默认平台硬写 MPI 路径须显式 PLAT=GENERIC、1999 捆绑 gmp.h 与 gmp6 符号不兼容、_mymalloc size==0 致 pmlcg unpack 恒 NULL（上游固有），外加上游 void main 让 rc 不可作判据
+
+root_cause:            |
+  三处互相独立、都表现为“编译/自检红但根因不在 OHOS 适配”的问题：
+  ① 平台选择：顶层 Makefile `include make.CHOICES` 再 `include $(SRCDIR)/make.$(PLAT)`，
+     上游默认 `PLAT = INTEL`，而 make.INTEL 硬写 `MPICC=mpicc`、`MPIDIR=-L/usr/local/mpi/...`、
+     `MPILIB=-lmpich`、`CFLAGS ... -I/usr/local/mpi/include`。OHOS/CI 均无 MPI，于是
+     “看着是可移植工程、默认一跑就死在 MPI 路径上”。必须显式 `PLAT=GENERIC`
+     （GENERIC 的 MPIDIR/MPILIB 为空、CFLAGS 不含 MPI 路径），并把 make.CHOICES 的默认值
+     一并改掉做双保险（命令行变量会随 MAKEFLAGS 传给所有子 make）。
+  ② 头文件代差：1999 年捆绑的 `SRC/pmlcg/gmp.h`（GMP 1.x 时代）与 gmp6 链接不兼容——
+     老头不带 `#define mpz_init __gmpz_init` 这类别名，实测 undefined
+     `__mpn_add_n/__mpn_sub_n/mpz_init/mpz_init_set_str/mpz_clear`。编译期无错、
+     **链接期才炸**，形态极易误判为“缺依赖”。正解是按 Debian 同款改 `#include <gmp.h>`
+     （并在 Makefile 依赖清单里同步删掉 gmp.h）。
+  ③ 上游固有缺陷：`SRC/memory.c` 的 `_mymalloc` 对 `size == 0` 显式 `return NULL`；
+     pmlcg 的 `init_rng` 用 `mpz_init_set_ui(&k, gennum)` 作 spawn key，**gennum==0 ⇒ k=0 ⇒
+     GMP `_mp_alloc=0`**（gmp 6.3.0 实测 `mpz_init` 后 alloc=0 size=0），于是
+     `pmlcg_unpack_rng` 走 `mymalloc(0) → NULL → unpack 返回 NULL`，上游自检 checksprng 的
+     “Simple C interface” 判 FAILED。同一程序的 Default 接口 PASSED，是因为它 pack 的是
+     spawn 出来的流（gennum≠0、k≠0）——自洽证据，说明这是上游 bug 而非移植问题。
+  ④ 附带（判据层）：上游 8 个测试 `void main`、6 个 K&R `main(argc,argv)` 隐式 int 且成功
+     路径无 `return` ⇒ **进程返回值未定义**。设备实测成功却 rc=8（equidist/gap/runs）、
+     rc=72（wolff/metropolis），而结果行完整、统计值正常。把 rc 当判据会得到假 FAIL。
+
+affected_scope:        sprng 2.0a 全量；凡 1990s `make.$(PLAT)` 风格 C 工程（make.CHOICES +
+                       make.<平台> 分档）、凡捆绑老 gmp.h 的生成器、凡用 void main 的老测试套件
+                       都会命中同类症状
+
+error_excerpt:         'ld.lld: error: duplicate symbol: primes  /  ld.lld: error: undefined symbol: __mpn_add_n  /  FAILED: SPRNG was unable to unpack the generator  /  ERROR: Unpacked ... instead of ...Prime modulus LCG'
+
+rec_approach:          |
+  A. 平台与 flags（flags 面先实测落点，再钉）
+     1) grep 所有 Makefile 的 include 行，确认 flags 变量在哪一个文件定义
+        （本例 TESTS/EXAMPLES/SRC/<gen>/SRC/sprng 全部 include 同一个 make.GENERIC，
+         编译行统一 `$(CC) -c $(CFLAGS)` ⇒ CFLAGS/CLDFLAGS 就是注入面）；
+     2) 构建命令显式 `PLAT=GENERIC CC=<绝对路径 clang> AR=<绝对> RANLIB=<绝对>`
+        （裸命令名在设备子进程无 PATH 搜索）；
+     3) 把 CFLAGS/CLDFLAGS 在 make.<平台> 里钉成 `-O3 -pipe -DNDEBUG`，同时**保留**上游
+        `$(PMLCGDEF) $(MPIDEF)`（丢了会让可选生成器从分发表消失）并新增
+        `$(CPPFLAGS)`/`$(LDFLAGS)` 注入口，供配方注入 conan 依赖的 -I/-L；
+     4) make.CHOICES 的默认 PLAT 同步改掉（命令行 + 文件双保险）。
+  B. gmp 头文件代差
+     `#include "gmp.h"` → `#include <gmp.h>`，Makefile 依赖清单同步删 gmp.h，
+     配方 `requires("gmp/<ver>")` 并把 includeirs/libdirs 经 CPPFLAGS/LDFLAGS 注入。
+  C. _mymalloc / pmlcg unpack（上游固有缺陷）
+     先做 A/B 定位再决定：把“唯一 FAILED 的那一项”单独跑并保留 stderr，
+     若失败点在 `mymalloc(size==0)` 且 gennum==0，即本条；**不修库语义**
+     （改 pack/unpack 会改变库行为且无上游背书），如实记录、单列已知限制。
+  D. rc 判据
+     老 C 测试套件先看 main 的签名：`void main` / K&R 无 return ⇒ rc 未定义，
+     判据改**输出断言**（结果行存在 + 统计值落接受域），rc 原样留档；
+     不要改上游测试源码去“凑绿”。
+
+solution:              |
+  # 1) 平台与 flags（在配方 build() 里）
+  make -j1 PLAT=GENERIC CC=/data/service/hnp/bin/clang AR=… RANLIB=… \
+       CPPFLAGS='-I<conan gmp>/include' LDFLAGS='-L<conan gmp>/lib' -C SRC
+  make -j1 <同上> -C TESTS
+  # 2) 补丁要点（本任务 0001-...patch，9 文件 12 hunk）
+  #    make.CHOICES: #PLAT=INTEL → PLAT=GENERIC
+  #    SRC/make.GENERIC: RANLIB=echo→ranlib；CFLAGS/CLDFLAGS 钉 -O3 -pipe -DNDEBUG
+  #                       并留 $(CPPFLAGS)/$(LDFLAGS)
+  #    SRC/pmlcg/pmlcg.c: #include "gmp.h" → #include <gmp.h>
+  #    SRC/primes_32.c/primes_64.c: int primes[] → static（-fno-common 必撞 duplicate symbol）
+  # 3) 自检判据
+  grep '^TESTLIST' TESTS/Makefile          # 注册数 = N（本例 13，fft 不在表内）
+  # 固定 seed 离线跑，rc 只留档、判据看结果行
+
+fallback:              |
+  - 无法取得系统/上游 gmp.h 时：用 conan 包 `gmp/<ver>` 的 includedirs/libdirs 注入
+    （CPPFLAGS/LDFLAGS 注入口），不要把 conan 缓存路径硬编码进补丁。
+  - 若同名全局符号不止一处：优先 `static` 化（改动最小、语义不变），
+    而不是改名或加 `-fcommon`（后者掩盖真实冲突）。
+  - 若上游自检有非平台性 FAILED：先证明“平台无关”（本例用 `_mymalloc` 的 size==0 分支
+    与 GMP 语义都不依赖 OS/架构），再决定只记录不修；**不得写成 PASS**。
+
+verify_cmd:            'python3 $HOME/ws/tools/conan_verify_round.sh sprng 2.0a --repo $TARGET_REPO --task-dir $TASK_DIR'
+reference_impl:        'archives/s/sprng/2.0a/conanfile.py（自定义 build() 直调 make.$(PLAT)）；archives/s/sprng/2.0a/patches/0001-sprng-2.0a-ohos-build-portability.patch'
+solution_ref:          'archives/s/sprng/2.0a/notes.md（PLAT=GENERIC 依据、CFLAGS 落点实测、seeds 判据、rc 判据、checksprng 根因）'
+related_docs:          'notes/device-facts.md §一.14（裸命令名）、§一.18（同名双实现）、dispatch-book 止损先例 #4/#7/#14'
+doc_file:              'drafts/DRAFT-E716-sprng-make-plat-generic-gmp6-mymalloc-zero.md'
+pr_ref:                'feat/sprng-2.0a'
+last_updated:          2026-09-24
