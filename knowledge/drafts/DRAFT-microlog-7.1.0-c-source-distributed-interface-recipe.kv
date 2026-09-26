@@ -1,0 +1,101 @@
+#====================================================================
+# DRAFT-microlog-7.1.0-c-source-distributed-interface-recipe
+# C 源码分发 INTERFACE 库（install 装 .c 源 + 手写 targets 在消费方编译）在 HarmonyOS 的
+# Conan 适配模式（cmake_find_mode=none + builddirs 透传自带 config）
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: microlog 7.1.0 HarmonyOS PC 适配（task_id microlog-7.1.0-r01-pc4-42）
+#====================================================================
+
+id:                     DRAFT-microlog-7.1.0-c-source-distributed-interface-recipe
+trigger_tool:           conan|cmake|conan-verify|test_package
+phase:                  packaging|testing|recipe
+error_signature:        ulog_output_add.*ULOG_BUILD_EXTRA_OUTPUTS disabled|BadZipFile|find_package\(microlog|microlog::microlog|source-distributed|INTERFACE library|consumers compile
+
+severity:               2
+category:               c-source-library|conan-recipe|interface-library|ohos|path-b|source-distributed
+match_keywords:         microlog, ulog, log.c, rxi, single-file C library, INTERFACE,
+                         cmake_find_mode, builddirs, target_sources, installed source,
+                         consumer-side compile, ULOG_BUILD_EXTRA_OUTPUTS, feature macros
+title:                  C 源码分发 INTERFACE 库在 HarmonyOS 的 Conan 配方模式（消费方编译 .c + cmake_find_mode=none 透传自带 config）
+
+root_cause: >
+  rxi/log.c 系单文件 C 库（microlog/ulog、stb 风格）以 CMake INTERFACE target 分发，但 install
+  不仅装 include/ulog.h，还把 ulog.c 源文件装入 share/<lib>/src/，并由包内手写
+  micrologTargets.cmake 在消费方重新定义 STATIC target（target_sources 引用已装 .c +
+  target_include_directories PUBLIC）。这与 header-only INTERFACE 库（E321/E322，仅头文件、
+  无消费方编译源文件语义）不同：配方不能用 package_type=header-library + self.info.clear()
+  一刀切。且特性宏（ULOG_BUILD_EXTRA_OUTPUTS / ULOG_BUILD_TOPICS_MODE / ULOG_BUILD_TIME）
+  须在编译期由消费者配置，默认配置下 ulog_output_add/ulog_topic_add 返回 INVALID
+  （WARN: 'ulog_output_add' called with ULOG_BUILD_EXTRA_OUTPUTS disabled）——
+  消费者测试必须按上游语义在编译期补 -D 宏，不能断言默认配置下自定义输出可用。
+affected_scope: >
+  rxi/log.c 系、stb 风格、以及任何 install 装 .c 源文件并在消费方编译的 CMake INTERFACE
+（源码分发）C 库的 OHOS/Conan 配方；消费者需 find_package(lib CONFIG) 获 lib::lib target。
+verification_cmd:       CI_PACKAGES="archives/m/microlog/7.1.0" zsh ci/conan/build_and_test.sh
+
+#────────────────────────────────────────────────────────────────────
+# 建议方案 (rec_approach)
+#────────────────────────────────────────────────────────────────────
+rec_approach: >
+  1) conanfile.py（CMake 配方）:
+     - generate(): CMakeToolchain，关 ULOG_BUILD_TESTS=False（上游单测单独执行）
+     - source(): get(self, **self.conan_data["sources"], strip_root=True)
+     - build()/package(): 上游 cmake configure/build/install 原样打包
+     - package_info():
+         self.cpp_info.set_property("cmake_file_name", "<lib>")
+         self.cpp_info.set_property("cmake_target_name", "<lib>::<lib>")
+         self.cpp_info.set_property("cmake_find_mode", "none")   # 用包自带 config
+         self.cpp_info.includedirs = ["include"]
+         self.cpp_info.builddirs    = ["lib/cmake/<lib>"]       # 透传自带 config 目录
+  2) conandata.yml: 官方规范归档 URL 必须带 .tar.gz 扩展名
+     （codeload tar.gz/refs/tags 形式 basename 无扩展名 → conan get() 误按 zip 解压 →
+     BadZipFile，见 E276；直接换官方 archive URL 亦可）
+  3) test_package/test_ohos 消费者测试:
+     - find_package(<lib> CONFIG REQUIRED) + link <lib>::<lib>（自带 targets 会编译已装 .c）
+     - 特性宏在消费方编译期配置（与上游 tests/unit 一致的基础配置，如
+       -DULOG_BUILD_EXTRA_OUTPUTS=8 -DULOG_BUILD_TIME=1 -DULOG_BUILD_TOPICS_MODE=..._STATIC）
+     - 断言可观察输出（stdout 捕获 / 文件输出 / handler 计数），禁止空壳
+  4) 平台临时目录: 消费者文件输出测试用显式可写路径，勿依赖 tmpfile()
+     （OHOS /tmp 只读且 libc 不遵循 TMPDIR，见既有 E002/E265/E272 体系）
+do_res: >
+  1) 配方必须区分“源码分发”（install 装 .c）与“header-only”：源码分发不要
+     package_type=header-library（无 self.info.clear() 一刀切），也不要伪造
+     cpp_info.libs（无预编译 .a/.so）
+  2) cmake_find_mode="none" 时 CMakeDeps 不生成 config；消费方必须经 builddirs
+     指向包自带 lib/cmake/<lib>（E451/E322-cmake-find-mode-none-target-bridge 为消费方
+     目标名桥接知识，本条目为打包侧模式）
+  3) 不要改上游测试源码换通过率；tmpfile 类失败如实记入双口径台账分母（reports/upstream-test-ledger.md）
+
+#────────────────────────────────────────────────────────────────────
+# 验证 / 证据
+#────────────────────────────────────────────────────────────────────
+verification_method: conan-verify G1-G4 全过 + test_package 1/1 通过 + test_ohos T1-T3 全过
+verification_cmd2:   python3 scripts/ohc-run.py conan-verify microlog 7.1.0
+verification_result: |
+  - G1/G0/G2/G3/G4 + L2/L4/L5 PASS（conan create 干净构建）
+  - test_package: test_microlog 通过（stdout 捕获断言消息与级别字符串）
+  - test_ohos: T1 aarch64 ELF PASS、T2 无宿主路径泄漏 PASS（-ffile-prefix-map）、
+    T3 消费者编译链接运行 PASS（主题路由 + 文件输出 + 级别字符串 + ulog_event_to_cstr）
+  - 上游测试双口径: 113/119 (95.0%)，4 失败用例全部为 tmpfile() 平台限制（见台账）
+
+error_excerpt: |
+  WARN  .../share/microlog/src/ulog.c:1147: 'ulog_output_add' called with
+  ULOG_BUILD_EXTRA_OUTPUTS disabled
+  FAIL: ulog_output_add() returned ULOG_OUTPUT_INVALID
+
+doc_file:               knowledge/drafts/DRAFT-microlog-7.1.0-c-source-distributed-interface-recipe.md
+last_updated:           2026-09-23
+source_event:           microlog/7.1.0 HarmonyOS PC adaptation, task microlog-7.1.0-r01-pc4-42-20260922T193355Z
+
+authors:                AtomCode
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     4
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-23
+
+draft:                  true
+contributor_id:         none
