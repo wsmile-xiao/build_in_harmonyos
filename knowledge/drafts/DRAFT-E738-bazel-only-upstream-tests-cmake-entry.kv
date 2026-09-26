@@ -1,0 +1,109 @@
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-E738
+trigger_tool:           conan|cmake|ctest
+phase:                  build|testing
+
+error_signature: |-
+  'gtest/gtest.h' file not found|
+  Could not find a package configuration file provided by "gtest"|
+  undefined reference to `RUN_ALL_TESTS`|
+  AttributeError.*has no attribute 'test_requires'|
+  L1c: No upstream make check/ctest in log|
+  upstream tests are only wired via Bazel
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, conan-recipe, build-system, portability
+prescan_pattern:        cc_test|@googletest|tests/src/.*\.cc|subdir\('tests'\)
+match_keywords: tinyalsa, Bazel, cc_test, googletest, gtest, gtest_main, test_requires, build_requirements, ctest, CMakeDeps, CMake 子工程, 层 1 上游测试, 上游测试入口, TEST_QUALITY_SPEC, gtest_list_tests, 参数化用例, INSTANTIATE_TEST_SUITE_P
+title:                  上游 tests/ 只接 Bazel 时，用配方生成的 CMake 子工程补层 1 测试入口（conan gtest 钩子与导出契约两坑）
+
+root_cause: |-
+  tinyalsa v2.0.0 的 tests/ 是 6 个 gtest（C++17）用例，唯一的构建接线在 Bazel 的
+  `BUILD`（`cc_test` + `@googletest//:gtest_main`）；CMakeLists.txt / meson.build /
+  Makefile 三处都没有 test/check 目标，`ctest` 与 `make check` 全都无从谈起。要满足
+  「层 1：上游官方测试在 build() 里跑」（docs/TEST_QUALITY_SPEC.md §3），只能由配方
+  自己补入口。补的过程中有三个互相独立的坑，任一都会让测试段整体失效：
+  1. Conan 2.x 只调用 `requirements()` 与 `build_requirements()` 两个钩子，把 gtest
+     写成名为 `test_requirements()` 的方法**永远不会被执行**（依赖不进图、CMakeDeps
+     不生成 gtest-config.cmake），且不报错；正确写法是在 `build_requirements()` 里
+     调用 conan 注入的 `self.test_requires("gtest/1.17.0")`（traits: headers/libs=True、
+     visible=False、test=True，不传染下游）。
+  2. conan gtest 1.17.0 的 CMakeDeps 只声明 `gtest::gtest`，`gtest_LIBS_RELEASE` 只有
+     `gtest`，**不导出 gtest_main**（上游 BUILD 是链 `@googletest//:gtest_main` 的），
+     直接 add_executable 会 undefined reference to main。
+  3. 测试子工程必须复用 `self.generators_folder/conan_toolchain.cmake`（否则拿不到
+     CMAKE_PREFIX_PATH/CMAKE_CXX_STANDARD=17/libc++），并把被测产物路径
+     `libtinyalsa.so` 作为链接输入，保证测的是本次构建的库而不是别的副本。
+affected_scope:         所有上游只用 Bazel/CMake 子目录/自有脚本驱动测试、在 CMake/meson/
+  makefile 三入口任一被 manifest 选中的 C/C++ 包；凡 conan 侧要在 build() 里跑上游
+  gtest/Catch2 套件的配方都会命中钩子与导出契约两坑。
+verification_cmd: |-
+  conan create "$HOME/ws/worktrees/tinyalsa-2.0.0/archives/t/tinyalsa/2.0.0" \
+    -pr:h="$HOME/ws/worktrees/tinyalsa-2.0.0/ci/conan/profiles/ohos-aarch64" \
+    -pr:b="$HOME/ws/worktrees/tinyalsa-2.0.0/ci/conan/profiles/ohos-aarch64" \
+    -c tools.build:jobs=4
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           recipe-generated-cmake-test-subproject
+rec_description: |-
+  在 build() 里用 conan 的 save() 往 build 目录写一个独立 CMake 子工程（**不写进
+  上游源码树**，不产生补丁）：find_package(gtest REQUIRED CONFIG) + 显式列出上游
+  tests/src/*.cc + 自带 4 行 gtest_main.cpp + 把本仓库刚构建的 libtinyalsa.* 当链接
+  输入；用 `-DCMAKE_TOOLCHAIN_FILE=<generators_folder>/conan_toolchain.cmake` 配置，
+  `cmake --build --parallel <tools.build:jobs>`，最后 `ctest --test-dir <dir>
+  --output-on-failure` 当构建判据（同时满足 CI L1c 对日志里 ctest 痕迹的要求）。
+  配方侧必须：①gtest 放 `build_requirements()` 里 `self.test_requires(...)`；
+  ②用 `--gtest_list_tests`（可加 --gtest_filter）机械清点注册数，作为 N 的候选数法
+  读数打进日志，避免源码宏数与框架注册数混用（tinyalsa 40 → 68，差额全部来自
+  INSTANTIATE_TEST_SUITE_P 的 Range 参数化展开）。
+rec_command: |-
+  # 配方 build() 内（示意，路径全部来自 conan 上下文，可复现）
+  save(self, os.path.join(tests_root, "CMakeLists.txt"), _TESTS_CMAKE)
+  save(self, os.path.join(tests_root, "gtest_main.cpp"), _GTEST_MAIN)
+  self.run('cmake -S "%s" -B "%s" -DCMAKE_TOOLCHAIN_FILE="%s" -DCMAKE_BUILD_TYPE="%s"'
+           ' -DTINYALSA_SRC="%s" -DTINYALSA_LIB="%s"' % (
+               tests_root, tests_build,
+               os.path.join(self.generators_folder, "conan_toolchain.cmake"),
+               self.settings.build_type, self.source_folder, lib_path))
+  self.run('cmake --build "%s" --parallel %s' % (tests_build, jobs))
+  self.run('ctest --test-dir "%s" --output-on-failure' % tests_build)
+  # 清点（N 的框架注册口径）
+  self.run('"%s" --gtest_list_tests > "%s"' % (binary, list_file))
+rec_auto_fix:           false
+rec_impl:               conanfile-build-method
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      direct-clang-plus-gtest-pkg
+fallback_description:   无法生成 CMake 子工程时，直接用 tools.build:compiler_executables 的
+  clang++ 编译 tests/src/*.cc，头/库路径取 self.dependencies["gtest"].cpp_info 与
+  build 目录，仍必须走 ctest 或等价的显式判据，并保留同样的清点与失败归因输出。
+fallback_command:       clang++ -std=c++17 -I<src>/include -I<src>/tests/include <tests> -I<gtest>/include -L<gtest>/lib -lgtest -o tinyalsa_upstream_tests
+fallback_auto_fix:      false
+fallback_impl:          manual-compile
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       def test_requirements\(self\)|rm .*tests/|--gtest_filter=.*\bonly\b
+forbid_1_reason:         Conan 2.x 不调用名为 test_requirements() 的方法（依赖静默不进图）；
+  删上游 tests/ 属于「删除测试凑数」红线；用 filter 但不打印 total/ran/skipped 清点则等于压小 N。
+forbid_1_consequence:   测试段静默失效或 N 少报被审方按 R51/Rule4 直接判不通过（实测少报红线：
+  「实测 N > 声明 N」即 FAIL）。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             real-evidence-over-assumption, minimal-recipe-diff, count-with-own-oracle
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E470, E321]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+last_updated:           2026-09-25
+source_event:           archives/t/tinyalsa/2.0.0 (conanfile.py build() 层 1 测试子工程)
+
+draft:                  true
+contributor_id:         E738
