@@ -1,0 +1,46 @@
+#====================================================================
+# DRAFT — OHOS 无系统 libpam 时 PAM 侧包的 meson 救援三脚架：
+#   linux-pam 已发布包提供 libpam+pam_appl.h、find_library 用
+#   LIBRARY_PATH/CPATH 注入（不吃 pkg-config）、conan prefix=/ 布局
+#   用 split-usr=true 通过上游 rootprefix 自检；PAM 模块真机 dlopen 成立
+# Timestamp: 2026-09-24
+# Software: wtmpdb 0.75.0（HarmonyOS PC aarch64 实证，HongMeng Kernel 1.12.0）
+# Status: DRAFT — 待复审提升为正式 E 条目
+#====================================================================
+
+id: DRAFT-wtmpdb-0.75.0-ohos-libpam-rescue-meson-tripod
+severity: 2
+category: ohos|pam|meson|conan|portability
+trigger_tool: meson|cc|clang|ld|conan
+phase: configuration|linking|testing|runtime
+
+keywords: libpam, linux-pam, pam_wtmpdb, find_library, pam not found, LIBRARY_PATH, CPATH, pkg-config 不生效, split-usr, rootprefix, Prefix is not below root prefix, dlopen, pam_appl.h, security 模块目录, conan prefix DESTDIR
+error_signature: 'C shared or static library .pam. not found|Prefix is not below root prefix|security/pam_appl.h.*not found'
+match_keywords: OHOS 无 libpam, linux-pam/1.7.2, find_library 搜索路径, LIBRARY_PATH 注入, CPATH 注入, meson rootprefix, split-usr true, conan prefix 斜杠 DESTDIR, dlopen PAM 模块, tst-dlopen, pam_appl.h, meson conan 救援
+
+root_cause: OHOS 的 sysroot 与 harmonybrew 均不提供 libpam（meson `cc.find_library('pam')` 是 required 默认 true 的硬依赖，configure 直接 fatal：'C shared or static library pam not found'），但制品仓已发布 linux-pam/1.7.2（libpam.so.0 + include/security/*.h + 模块目录，OHOS 构建可用）。消费侧接线有两个连环坑：(1) meson 的 find_library 只走编译器链接行搜索路径，不读 pkg-config / CMakeDeps 式注入——conan 构建环境的 PATH/LDFLAGS 里依赖包目录默认不可见，必须用 Environment 把依赖包 lib/ 前置进 LIBRARY_PATH（链接探测）、include/ 前置进 CPATH（头文件探测），并给 meson test 运行期加 LD_LIBRARY_PATH（PAM 模块 DT_NEEDED libpam.so.0 需可解析）；(2) 上游为 distro 打包写的 rootprefix 自检（prefix 必须等于 rootprefix 或在其之下）与 conan meson 约定（-Dprefix=/ + install 时 DESTDIR=package_folder）结构性冲突——显式 -Dsplit-usr=true 使 rootprefix 归位 '/' 即通过，rootlibdir 相对 libdir 派生，pam 模块经 DESTDIR 落到 package_folder/lib/security。
+
+rec_approach: linux-pam-dep-plus-meson-tripod
+rec_description: 配方 requirements 引 linux-pam/1.7.2（同法引 sqlite3 等其它 find_library 依赖）；generate() 里用 Environment(scope=build) prepend LIBRARY_PATH=各依赖包 lib、CPATH=各依赖包 include、LD_LIBRARY_PATH=各依赖包 lib；MesonToolchain project_options 设 split-usr=true（conan 默认 prefix=/ 约定下通过上游 rootprefix 自检）；验证口径=上游 tst-dlopen 真机 dlopen 自建 PAM 模块成功 + 消费者真调导出 API。反例：只加 PkgConfigDeps 不注入 LIBRARY_PATH 时 find_library 仍报 not found；rootprefix/prefix 手工指到 package_folder 会因 conan 实际 configure 传 prefix=/ 而误判失败。
+rec_command: |
+  # 救援三件套（generate() 内）
+  env = Environment()
+  env.prepend_path("LIBRARY_PATH", ":".join(dep_libdirs))   # find_library 链接探测
+  env.prepend_path("CPATH", ":".join(dep_incdirs))          # security/pam_appl.h
+  env.prepend_path("LD_LIBRARY_PATH", ":".join(dep_libdirs))# meson test 运行期
+  env.vars(self, scope="build").save_script("dep_paths")
+  tc.project_options["split-usr"] = "true"                  # rootprefix -> '/'
+  # 依赖：self.requires("linux-pam/1.7.2")（libpam.so+pam_appl.h 已在制品仓）
+
+rec_auto_fix: false
+rec_impl: recipe
+
+affected_scope: 一切在 OHOS 上需要 PAM 的包（PAM 模块本身、pam_start/getpwnam_r+PAM 登录链、su/pam_* 系工具），以及一切用 meson find_library 消费 conan 依赖、或带 distro 式 prefix/rootprefix 自检的 meson 上游包（第三脚 split-usr 与 libpam 无关，独立适用）。
+
+verification: 'wtmpdb 0.75.0（2026-09-24，HongMeng 1.12.0，clang 15.0.4+musl，conan 2.29.1）：未接线前逐字首错 ''meson.build:94:12: ERROR: C shared or static library pam not found''（sysroot/brew 全仓 find libpam 为空）；接线后 conan create G1-G4 全绿——meson test 6 注册 = 4 Ok + 2 上游自退 77 skip（tst-get_id 非 root 无 /var、tst-varlink getuid!=0），其中 tst-dlopen 读数 ''dlopen() of "./pam_wtmpdb.so" succeeded'' 实证 PAM 模块在 OHOS 可构建可加载；test_package 消费者 6/6（真调 wtmpdb_login/logout/read_all/get_id 断言 sqlite 记账行为，含 -2=无开放会话、-14=SQLITE_CANTOPEN 语义）。'
+
+similar_to: DRAFT-util-linux-login-2.42.2-ohos-musl-pam-portability（autotools+utmpx 路径，本条为 meson+find_library/布局路径，组网互补）, E394（LD_PRELOAD fixture 时序——本方案不经 pam_wrapper，签名与解法均不同，非 hit）, E121（utmpx 调用方缺失——wtmpdb 是替代实现非调用方，utmpx 命中 0，不适用）
+conflicts_with:
+caused_by:
+
+principles: 能力缺失先看制品仓是否已有移植包，再看构建系统的探测通道（pkg-config ≠ find_library ≠ CMake）——接线要对准探测机制本身
