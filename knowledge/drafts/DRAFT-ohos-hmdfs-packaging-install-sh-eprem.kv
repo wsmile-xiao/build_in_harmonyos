@@ -1,0 +1,82 @@
+draft: true
+id: DRAFT-ohos-hmdfs-packaging-install-sh-eprem
+title: OHOS/HMDFS 上打包期 make install 的两类必失败（cp 无法覆盖已存在可执行文件 EPERM、install-sh 无法执行 EACCES/126）——改为 copy() 显式打包并加存在性断言
+
+# ═══ Layer 0: 错误面 ═══
+trigger_tool: make|install-sh|cp|autotools
+phase: package|install
+error_signature: |
+  cp: .*: Operation not permitted
+  /bin/sh: \./install-sh: can't execute: Permission denied
+  make.*\[.*install-info.*\] Error 126
+  make.*\[.*dinotrace_exe.*\] Error 1
+
+# ═══ Layer 1: 识别层 ═══
+severity: 2
+category: packaging, ohos, filesystem, build-system
+match_keywords: HMDFS, make install, install-sh, cp overwrite, Operation not permitted, EPERM, Error 126, Permission denied, DESTDIR staging, package(), chmod 不生效, umask 077
+
+# ═══ Layer 2: 诊断层 ═══
+symptoms: >
+  autotools 包在 package()/install 阶段失败，且失败点与源码无关：
+  (1) 上游 install 规则里的 `cp obj_dir/bin ./bin`（把刚构建的二进制复制到顶层目录）报
+      `cp: <path>: Operation not permitted`，make 以 Error 1 终止——即使目标文件属主与权限
+      看似可写；
+  (2) 上游用自带 ./install-sh 做安装时报 `/bin/sh: ./install-sh: can't execute: Permission
+      denied`（make Error 126）。
+root_cause: >
+  OHOS 的 HMDFS 对 chmod/权限做归一化且忽略部分权限位：
+  (1) 对**已存在**的可执行文件做原地覆盖（cp 截断重写）会被拒（EPERM）——文件是上一次
+      `make` 刚产出的同名二进制；先 rm -f 再 cp 即成功；
+  (2) 从 tar 解出的脚本文件（install-sh 等）即便 `ls -l` 显示可执行，内核 execve 仍拒绝
+      （chmod 位不生效），只能用 `sh <script>` 方式调用或改用 copy()。
+affected_scope: >
+  所有在 HMDFS 上执行 `make install` / `make DESTDIR=... install` 的 autotools 包，尤其
+  上游 install 规则依赖 (a) 先 build 再 cp 二进制到顶层目录、(b) 调用随包分发的 install-sh
+  的项目（GNU 传统 autotools 两者都常见）。CI worker 与本地 OHOS 设备同受此限。
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority: 1
+rec_approach: explicit-copy-packaging
+rec_description: >
+  package() 不再把 `make install` 当作产物来源：用 conan `copy()` 显式安装真实产物
+  （bin/<exe>、share/info/*.info、licenses/COPYING），安装后对每个必需产物做
+  os.path.isfile 断言，缺失即 raise ConanException；上游 `make install` 若保留只作为
+  日志留证且必须 (a) 先 `rm -f` 顶层同名二进制、(b) 输出到 build_folder 下的 staging 目录
+  （不落 package_folder）、(c) ignore_errors=True。绝不把 ignore_errors 的输出当产物。
+rec_command: |
+  # conanfile.py package() 要点
+  copy(self, "dinotrace", src=self.build_folder, dst=os.path.join(self.package_folder, "bin"), keep_path=False)
+  copy(self, "dinotrace.info", src=self.source_folder, dst=os.path.join(self.package_folder, "share", "info"), keep_path=False)
+  staging = os.path.join(self.build_folder, "install-staging")
+  self.run(f"rm -f dinotrace dinotrace.exe && make install DESTDIR={shlex.quote(staging)}",
+           ignore_errors=True, env="conanbuild")
+  missing = [rel for rel, p in expected.items() if not os.path.isfile(p)]
+  if missing:
+      raise ConanException("packaging incomplete; missing: " + ", ".join(missing))
+rec_auto_fix: false
+rec_impl: manual
+
+fallback_priority: 2
+fallback_approach: sh-invoked-install-helper
+fallback_description: >
+  保留上游 install 规则但绕开 execve：用 `sh ./install-sh -c -m 644 ...` 或
+  `make INSTALL='sh ./install-sh -c' install`；同时把 `cp` 覆盖改为 `rm -f && cp`。
+  能跑通上游原始安装路径，但改动面更大、且仍受其它权限归一化影响，作为备选。
+fallback_command: make INSTALL='sh ./install-sh -c' install DESTDIR=<staging>
+fallback_auto_fix: false
+
+# ═══ Layer 4: 原则引用 ═══
+principles: R20(禁止手动打包的例外口径：copy() 属配方式打包而非手工上传), R23(平台检测优先于改生成文件), E011(HMDFS 权限归一化)
+
+# ═══ 元数据 ═══
+verified_on: dinotrace 9.4f（OHOS 6.0 aarch64，clang-15，conan 2.29.1）
+verification_result: >
+  dinotrace 9.4f 实测复现两类失败并验证修法：失败原始行
+  `cp: .../b/dinotrace: Operation not permitted`、`make: *** [Makefile:135: dinotrace_exe] Error 1`、
+  `/bin/sh: ./install-sh: can't execute: Permission denied`、`make: *** [Makefile:196: install-info] Error 126`；
+  改为 copy()+存在性断言后 conan create EXIT_CODE=0，产物 bin/dinotrace（346560 B）、
+  share/info/dinotrace.info（118559 B）、licenses/COPYING 齐全，test_package assertions=6 failures=0。
+limitations: >
+  - 未逐一验证 `sh install-sh` 备选路径在所有 GNU 辅助脚本上的可用性。
+  - 现象在 HMDFS 上稳定复现；其它 OHOS 挂载点（如 /data 本地卷）未对比测试。
