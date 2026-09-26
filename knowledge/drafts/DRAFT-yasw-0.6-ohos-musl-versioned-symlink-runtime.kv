@@ -1,0 +1,118 @@
+#====================================================================
+# DRAFT-yasw-0.6-ohos-musl-versioned-symlink-runtime
+#   OHOS 动态加载器**不跟随 .so 版本化符号链接**：DT_NEEDED 写 libfoo.so.5
+#   而 lib 目录里只有 libfoo.so.5 → libfoo.so.5.15.19 的符号链接时，
+#   加载报 "Error loading shared library libfoo.so.5: (needed by …)" → 退出码 127
+# 来源: yasw 0.6 适配（依赖 qt/5.15.19.1；qt 包内 lib/*.so.5 均为符号链接）
+#       含 20 行最小复现（自建 libprobe.so.1 + main，见 .md）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-yasw-0.6-ohos-musl-versioned-symlink-runtime
+trigger_tool:           runtime|ld|ld-musl
+phase:                  runtime|testing
+error_signature:        Error loading shared library lib[A-Za-z0-9_+.-]+\.so(\.[0-9]+)+: \(needed by |Error relocating .*: .*: symbol not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               runtime, linking, ohos, musl, limitation
+match_keywords:         Error loading shared library, needed by, symbol not found, 127, 符号链接, symlink,
+                        versioned symlink, libQt5, .so.5, DT_NEEDED, soname, LD_LIBRARY_PATH, conan 包, 解引用
+title:                  OHOS 动态加载器不跟随 .so 版本化符号链接 → 运行期 "Error loading shared library libX.so.5"（退出码 127），需按 DT_NEEDED 传递闭包解引用复制
+prescan_pattern:        Error loading shared library[\s\S]{0,40}so(\.[0-9]+)+:\s*\(needed by
+prescan_globs:          test.sh, *.sh
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             本 OHOS 环境的动态加载器在按 DT_NEEDED 的 soname 打开共享库时**不解析符号链接**：
+                        给定目录中已存在 libfoo.so.5 → libfoo.so.5.15.19 的符号链接（目标真实存在、可读），
+                        加载器仍报 `Error loading shared library libfoo.so.5: (needed by <exe>)` 并以
+                        127 退出。conan 打包时会把 `lib/libX.so.5.15.19`（真实文件）与
+                        `libX.so{,.5,.5.15}`（符号链接）一并放进包，因此**凡是以 conan 包目录作为
+                        LD_LIBRARY_PATH 直接运行**的动态链接产物都会命中。
+                        最简复现（本机实测，20 行）：
+                          A) 目录内放 `libprobe.so.1 -> libprobe.so.1.0`（符号链接）→
+                             `Error loading shared library libprobe.so.1: (needed by ./main)`，exit 127
+                          B) 目录内放 `libprobe.so.1`（真实文件副本）→ `answer=42`，exit 0
+                        两者仅"符号链接 vs 真实文件"一项不同 ⇒ 变量已隔离。
+affected_scope:         所有在 OHOS 上**以 conan 包目录为 LD_LIBRARY_PATH** 直接运行动态链接产物的场景
+                        （L2 冒烟门禁的 `bin/<exe> --version`、运行期手工验证、打包后自检）。
+                        构建期不受影响（qmake/moc/uic/rcc 静态链接 Qt；编译链接阶段由 clang 解析路径）。
+                        具象实证：yasw 0.6（Qt5 GUI，NEEDED 含 libQt5{PrintSupport,Widgets,Gui,Xml,Core}.so.5）。
+                        注意与 E478/签名族区分：本症状**无** "Operation not permitted" 字样。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           dereference-copy-transitive-closure
+rec_description:        在测试/冒烟脚本里按 **DT_NEEDED 传递闭包**（readelf -d 迭代遍历）把命中的库
+                        **解引用复制**（`cp -L`）到一个可写的临时目录，再用该目录作为 LD_LIBRARY_PATH
+                        重试。必须同时排除两类路径，否则会反向破坏环境：
+                          ① 系统库目录（/system/*、/vendor/*、/lib*、/usr/lib*）—— 整批搬运会把系统库
+                             也复制进来，导致 timeout 等系统程序自身加载失败（退出 127）；
+                          ② /system/lib64/libc.so —— 复制它会破坏 musl 的 libc 绑定（同样 127）。
+                        系统库一律交由系统自行解析。
+rec_command:            for name in $(readelf -d "$item" | sed -n 's/.*(NEEDED).*\[\(.*\)\].*/\1/p'); do
+                          path=$(find_in_ldpaths "$name"); [ -n "$path" ] || continue
+                          case "$path" in /system/*|/vendor/*|/lib/*|/lib64/*|/usr/lib/*) continue ;; esac
+                          [ -e "$dest/$name" ] || cp -L "$path" "$dest/$name"    # -L = 解引用
+                          queue="$queue $dest/$name"                             # 继续遍历其依赖
+                        done
+rec_auto_fix:           false
+rec_impl:               test-sh-relocate-libs
+
+fallback_priority:      2
+fallback_approach:      create-real-file-hardlinks-or-copies-in-package-adjacent-dir
+fallback_description:   若不便做闭包遍历，可至少把**直接依赖**的真实文件副本放到可写目录
+                        （`cp -L`），并把该目录置于 LD_LIBRARY_PATH 最前；但传递依赖仍需展开，
+                        否则二级依赖同样命中本问题。
+fallback_command:       mkdir -p "$d" && for f in <pkg>/lib/*.so*; do [ -L "$f" ] && cp -L "$f" "$d/"; done
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       把(整|全部).*LD_LIBRARY_PATH.*(都)?(复制|搬运).*(临时|tmp)目录
+forbid_1_reason:        LD_LIBRARY_PATH 常含 /system/lib64 等系统目录，整批复制会引入系统库副本
+forbid_1_consequence:   timeout/bash 等系统程序自身加载失败（127）；复制 libc.so 会破坏 musl libc 绑定
+forbid_2_pattern:       patchelf.*(--set-soname|--replace-needed|--set-rpath)
+forbid_2_reason:        OHOS 内核对共享库做完整性/签名校验，改写过的副本加载可能被拒（Permission denied）
+forbid_2_consequence:   产物被改动后无法加载，且掩盖真实问题
+forbid_3_pattern:       跳过.*(运行|启动|冒烟).*用例|exit code 127.*视为.*(不适用|跳过)
+forbid_3_reason:        127 是本条明确的可修复环境限制，不是"不可测"；跳过会丢失唯一的运行期证据
+forbid_3_consequence:   GUI/运行期缺陷逃逸到 PR，人工验证时才暴露
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-E5xx-registry-so-baked-absolute-needed-symlink（**相关但不同**：那条是
+                        DT_NEEDED 里**烙印了发布机的绝对路径**，解法是在烙印路径处建 symlink 指向真实库；
+                        本条是**按 soname 打开时加载器不解析符号链接**，解法相反——把符号链接**解引用为
+                        真实文件**。两条都以 "Error loading shared library" 开头，需按"NEEDED 是否为绝对
+                        路径"区分）、
+                        E478（conan-verify package ID 解析族）
+caused_by:              OHOS 加载器行为 + conan 打包采用版本化符号链接
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       # 最小复现（自包含，不依赖 Qt）
+                        clang -shared -fPIC -Wl,-soname,libprobe.so.1 -o libprobe.so.1.0 libprobe.c
+                        clang -o main main.c -L. -l:libprobe.so.1.0
+                        mkdir A && cp libprobe.so.1.0 A/ && ln -sf libprobe.so.1.0 A/libprobe.so.1
+                        env LD_LIBRARY_PATH=$PWD/A ./main; echo "A_EXIT=$?"   # 期望 127
+                        mkdir B && cp libprobe.so.1.0 B/libprobe.so.1
+                        env LD_LIBRARY_PATH=$PWD/B ./main; echo "B_EXIT=$?"   # 期望 0 / answer=42
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  0
+metrics_fail_count:     1
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
+
+draft: true
+contributor_id:         yasw-0.6
