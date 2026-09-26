@@ -1,0 +1,83 @@
+# ═══ Draft knowledge entry — header-only 库的上游 gtest 测试树在 tarball +
+#     CMake 4.x + gtest 1.17 三重边界下的最小补丁法（空 git 子模块 / 老 CMake
+#     版本下限 / gtest 头要求 C++17）
+# Software: boolinq 3.0.4（HarmonyOS PC aarch64 clang15 + CMake 4.1.2 实证）
+# Gate: conan create G2 —— 上游 214/214 通过 + 消费者 26/26 通过
+# Status: DRAFT（Reserved entry id E741，tools/knowledge_id.py --claim）
+
+id:                       boolinq-3.0.4-tarball-empty-submodules-cmake4-gtest-cxx17
+severity:                 3
+category:                 c++|cmake|header-only|test|portability|tarball|gtest
+trigger_tool:             cmake|conan
+phase:                    build
+
+keywords:                 add_subdirectory, does not contain a CMakeLists.txt file, git submodule, externals/googletest, CMAKE_MINIMUM_REQUIRED, Compatibility with CMake < 3.5 has been removed, gtest 1.17, C++17, find_package(GTest CONFIG), GTest::gtest_main, -fprofile-arcs, header-only
+error_signature:          'does not contain a CMakeLists.txt file'
+match_keywords:           does not contain a CMakeLists.txt file, Compatibility with CMake < 3.5 has been removed from CMake, CMAKE_MINIMUM_REQUIRED (VERSION 3.0), externals/googletest, .gitmodules, gtest/gtest.h:63 error, a C++17 or later language standard is required, -fprofile-arcs -ftest-coverage, find_package(GTest CONFIG), GTest::gtest_main, ADD_SUBDIRECTORY, header-only upstream tests, HMBS_UPSTREAM_TEST_RESULT
+prescan_pattern:          'ADD_SUBDIRECTORY \(externals/|CMAKE_MINIMUM_REQUIRED \(VERSION 3\.[0-4]\)|gtest_main\n'
+prescan_globs:            CMakeLists.txt, */CMakeLists.txt, **/CMakeLists.txt
+
+root_cause: |
+  三个互相独立、按顺序暴露的构建边界，全部出现在「tarball 源 + 上游 CMake
+  测试树 + Conan gtest」的组合里（boolinq 3.0.4 实测，2026-09-25）：
+  (1) release tarball 不含 git 子模块内容——.gitmodules 指向的
+      externals/googletest、externals/benchmark 在 tarball 里是空目录，
+      根 CMakeLists 的 ADD_SUBDIRECTORY 直接 fatal
+      "does not contain a CMakeLists.txt file"（git clone --recursive 才有）。
+  (2) 老项目根 CMakeLists 写 cmake_minimum_required(VERSION 3.0)，
+      CMake 4.x（设备 4.1.2）已移除 <3.5 兼容 → configure 阶段硬错误
+      "Compatibility with CMake < 3.5 has been removed from CMake"。
+  (3) conan gtest/1.17.0 头文件实测要求 C++17（clang15 下 -std=c++11 /
+      -std=c++14 编译 rc=1，-std=c++17 rc=0），而多数上游测试树把
+      CMAKE_CXX_STANDARD 钉在 11/14 → include <gtest/gtest.h> 即炸；
+      同时上游常带 -fprofile-arcs -ftest-coverage 全局 flags，设备无
+      lcov/gcov 链路，纯测试构建不该背覆盖率插桩。
+
+rec_approach:             tarball-cmake-test-tree-minimal-patch
+rec_description: |
+  header-only 库不动交付面，只对测试构建树做最小补丁（本例 2 补丁、40 个
+  测试 .cpp 与库头零改动）：
+  (1) 根 CMakeLists：cmake_minimum_required 抬到 3.15；删除空子模块子目录
+      的 ADD_SUBDIRECTORY（externals/googletest、externals/benchmark、bench）
+      与随之失效的 ADD_DEPENDENCIES … gtest/benchmark 行；
+  (2) 测试 CMakeLists：CMAKE_CXX_STANDARD 11 → 17；加
+      find_package(GTest CONFIG REQUIRED)，链接名 gtest_main/gtest →
+      GTest::gtest_main/GTest::gtest（GTest_DIR 由配方 generate() 指向
+      conan gtest 包的 lib/cmake/GTest）；删除全局 gcov 插桩 flags 行；
+  (3) 配方 build_requirements() test_requires gtest/<版本>，在 build() 里
+      cmake.configure + cmake.build 后真跑测试二进制、解析 gtest 汇总行
+      计数（非零即失败），HMBS_UPSTREAM_TEST_RESULT 如实报数；
+  (4) 补丁经 refresh-patch --auto 生成、conandata patches 列表双面登记。
+  反例：给 tarball 去 clone googletest 子模块（网络+版本漂移，sha 面扩大）；
+  或用 -DCMAKE_POLICY_VERSION_MINIMUM=3.5 绕 CMake 4 错误（不修根因、
+  下个闸再炸）。
+
+rec_command: |
+  # 设备可直接复现（落任务目录，不用 /tmp）：
+  R="$HOME/tmp/boolinq-3.0.4/w0/repro"; mkdir -p "$R"
+  curl -fsSL -o "$R/3.0.4.tar.gz" https://github.com/k06a/boolinq/archive/3.0.4.tar.gz
+  sha256sum "$R/3.0.4.tar.gz"   # 期望 3cbee2b5f70ad98a8dfd1332dad0554a60628b69acb2477b5f035155fb9aed45
+  tar -xzf "$R/3.0.4.tar.gz" -C "$R" --strip-components=1
+  ls "$R/externals/googletest"   # 空目录（tarball 不含子模块内容）
+  cmake -S "$R" -B "$R/build" 2>&1 | grep -E "Compatibility with CMake|does not contain a CMakeLists"  # 复现两处硬错误
+  # gtest 1.17 C++ 下限探针：
+  GP=$(conan cache path "gtest/1.17.0:21b17f8b2bc0e9511e276e3d57a23893067cefe5")
+  printf '#include <gtest/gtest.h>\nTEST(P,works){EXPECT_EQ(1,1);}\n' > "$R/gp.cpp"
+  /data/service/hnp/bin/clang++ -std=c++17 -I"$GP/include" -c "$R/gp.cpp" -o "$R/gp.o"  # rc=0（c++11/c++14 rc=1）
+rec_auto_fix:             false
+
+affected_scope: |
+  一切「release tarball + 上游 CMake 测试树挂 git 子模块」的仓库（googletest/
+  benchmark 子模块最常见）；一切 cmake_minimum_required < 3.5 的老项目在
+  CMake 4.x 设备上；一切用 conan gtest >= 1.14 系（1.17 要求 C++17）而测试树
+  钉旧标准的配方。header-only 库尤甚：G4/L2/L4/L5 门禁走跳过分支还并列打 ✅
+  （device-facts §二.17），必须人工补测消费者面。
+
+verification: |
+  boolinq 3.0.4（2026-09-25，HarmonyOS PC aarch64，clang 15.0.4，CMake 4.1.2）：
+  - 补丁前：configure 阶段先报 CMake 3.0 兼容移除，修掉后再报
+    externals/googletest 缺 CMakeLists（两处均实测）；
+  - 补丁后：conan create rc=0，上游 214 声明 / 214 执行 / 214 通过 / 0 失败
+    （boolinq-test 213 + boolinq-test14 1，HMBS_UPSTREAM_TEST_RESULT 实打实报）；
+  - 消费者 test_package 26 断言 0 失败（include <boolinq/boolinq.h> 真跑）；
+  - 打包头文件 sha256 与 tarball 源逐字节一致（7a3996f7…904fb）。
