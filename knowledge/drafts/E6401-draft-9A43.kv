@@ -1,0 +1,78 @@
+#====================================================================
+# E6401 (draft) — OHOS musl 的 BUFSIZ 为 1024（glibc 8192）：以
+#                 fgets(buf, BUFSIZ, fp) 读"整行"的程序在 OHOS 上静默切段长行
+# Source: multisort 1.1 适配（HarmonyOS PC aarch64）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6401
+trigger_tool:           runtime|test
+phase:                  runtime|testing
+error_signature:        define BUFSIZ 1024|, BUFSIZ,|BUFSIZ 1024|BUFSIZ=1024|BUFSIZ is 1024
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               musl, libc, portability, runtime
+prescan_pattern:        fgets\s*\([^;]*\bBUFSIZ\b
+match_keywords:         BUFSIZ, fgets, stdio.h, long line, line buffer, truncated line, split line, 长行, 切段, 行缓冲
+title:                  OHOS musl BUFSIZ=1024（glibc 8192）：fgets(buf, BUFSIZ) 把 1024 字节以上的行切段，编译零告警、运行时输出截断/串行
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             BUFSIZ 是 libc 的实现常量（C 标准只要求 >= 256），OHOS SDK sysroot 的 musl stdio.h 定义为 1024，
+                        glibc 为 8192。老代码常用 char buf[BUFSIZ(+1)] + fgets(buf, BUFSIZ, fp) 当作"读一整行"，
+                        在 glibc 上 8191 字节以内的行都完整，在 OHOS 上 1023 字节以上的行被拆成多次 fgets 返回：
+                        续段被当成新的一行处理（按行解析/排序/计数/逐行加前缀全部出错）。编译、链接、短行测试都不会暴露，
+                        只有真实长行（Combined Log 的长 URL/UA、长配置行、长 CSV 记录）在运行时出错。
+                        multisort 1.1 实例：续段里的 `[FBAN/...]` 被 conv_time() 当作日期解析，写入 \0 后提前返回，
+                        fputs 截断输出，1313+67 字节输入只剩 1 行 1359 字节。
+affected_scope:         在 OHOS（musl，SDK sysroot usr/include/stdio.h: #define BUFSIZ 1024）上运行、以 BUFSIZ 作为行缓冲长度
+                        并假定一次 fgets/fgetws 得到完整一行的 C/C++ 程序：日志/文本处理类 CLI、配置解析器、行过滤器等；
+                        glibc 平台 1024-8191 字节的行正常、OHOS 上出错，属于移植后才出现的静默行为差异。
+                        不影响只把 BUFSIZ 用作 setbuf()/setvbuf() 缓冲区或块读写（fread/fwrite）大小的代码。
+verification_cmd:       grep -n 'define BUFSIZ' $OHOS_SDK/native/sysroot/usr/include/stdio.h; grep -rnE 'fgets\s*\([^;]*\bBUFSIZ\b' <src>; 构造一条 >1024 字节的输入行，在目标机（或同源静态重链副本经 qemu-aarch64）运行，与输入/glibc 版输出逐字节比对
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           explicit-line-buffer-size
+rec_description:        补丁里为程序自己的行缓冲引入显式常量（如 #define LINEBUF_SIZE 8192，与 glibc 行为一致），缓冲声明与所有对应的 fgets 长度参数统一改用它；不依赖 libc 常量、不需要平台宏，glibc/musl 同一代码路径
+rec_command:            在源码中改 char buf[BUFSIZ + 1] -> char buf[LINEBUF_SIZE + 1]、fgets(buf, BUFSIZ, fp) -> fgets(buf, LINEBUF_SIZE, fp)，经 refresh-patch --auto 生成补丁；用 >1024 字节的输入行回归
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      posix-getline
+fallback_description:   需要支持任意长度行时改用 POSIX.1-2008 getline()（OHOS musl 已提供），由 libc 动态扩容缓冲；改动面比常量替换大，适合本来就要处理超长行的程序
+fallback_command:       char *line = NULL; size_t cap = 0; ssize_t n = getline(&line, &cap, fp); ... free(line);
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -DBUFSIZ=|#\s*undef\s+BUFSIZ|#\s*define\s+BUFSIZ
+forbid_1_reason:        BUFSIZ 是 stdio.h 提供的 libc 常量（setbuf() 的缓冲区大小约定），在 CFLAGS 或源码里重定义它会与头文件定义冲突，并改变同一翻译单元里 setbuf/setvbuf 等用法的含义
+forbid_1_consequence:   宏重定义告警/错误；程序与 libc 对缓冲区大小的认知不一致，行为不可预测
+forbid_2_pattern:       __OHOS__.*BUFSIZ|BUFSIZ.*__OHOS__|__MUSL__.*BUFSIZ
+forbid_2_reason:        行缓冲长度与平台无关，显式常量即可让所有 libc 行为一致；按平台宏分支违反 R8（patches/ 默认禁平台宏），且让 glibc/musl 走不同代码路径
+forbid_2_consequence:   PF5/审计拦截；两套代码路径各自需要验证
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E414]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E6401.md
+last_updated: 2026-09-23
+source_event:           multisort 1.1 适配：3015 字节的 CLF 日志行在 OHOS 版（同源静态重链经 qemu-aarch64）输出被截断，x86 glibc 版正常；sysroot stdio.h:50 为 #define BUFSIZ 1024。engine 对该现象误匹配 E493（program_invocation_name），知识库正式条目与草稿均无 BUFSIZ/fgets 行长度条目（E302 仅在 open_memstream 验证命令中提及 BUFSIZ）。另：knowledge/musl-glibc-full-comparison-iso-posix.md:412 把 musl 的 BUFSIZ 记为 4096，与 OHOS SDK 头文件（及上游 musl）的 1024 不符，建议 promote 时一并更正
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:
+source_commit:
+
+draft: true
+contributor_id: 9A43
