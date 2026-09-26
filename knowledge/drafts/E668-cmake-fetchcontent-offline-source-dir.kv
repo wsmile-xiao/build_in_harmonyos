@@ -1,0 +1,104 @@
+# ═══════════════════════════════════════════════════════════════════
+# E668 CMake FetchContent 构建期 git clone 不可复现：离线化注入
+#   FETCHCONTENT_SOURCE_DIR_<名>
+#   （"Cloning into..." / "fatal: could not read Username" / 构建期联网失败）
+# 来源: feat/blaspp-2024.10.26（上游 test/CMakeLists.txt FetchContent 拉取
+#       testsweeper tag v2024.05.31；lapackpp 的 tester 同样依赖 testsweeper）
+# 路径: 依赖项任务 blaspp/2024.10.26
+# 状态: 草稿（待审核 promote）
+# ═══════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E668
+trigger_tool:           cmake|git|conan
+phase:                  building
+error_signature:        Fetching.*FetchContent|Cloning into|could not read Username|FetchContent_MakeAvailable.*failed|RPC failed|Failed to connect to github
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               build-system, cmake, fetchcontent, network, reproducibility
+match_keywords:         FetchContent, FetchContent_Declare, GIT_REPOSITORY,
+                        FETCHCONTENT_SOURCE_DIR, git clone, 构建期联网, testsweeper,
+                        blaspp, lapackpp, Offline, 离线, vendor
+title:                  CMake FetchContent 在构建期 git clone 第三方源（网络/git 可用性/
+                        tag 漂移三重不可复现）；用官方变量 FETCHCONTENT_SOURCE_DIR_<名>
+                        指向随配方导出的本地源码目录消除，上游 CMakeLists 零改动
+prescan_pattern:        FetchContent_Declare|FetchContent_MakeAvailable|GIT_REPOSITORY
+prescan_globs:          CMakeLists.txt, **/CMakeLists.txt
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游工程用 FetchContent_Declare(GIT_REPOSITORY github…
+                        GIT_TAG vX) + FetchContent_MakeAvailable 在 conan
+                        create / CI 构建期实时 clone（blaspp test/CMakeLists.txt
+                        拉 testsweeper；SLATE 族常见）。三个不可复现面：
+                        ① CI worker / 设备构建环境的网络与 github 可达性不受
+                        配方控制；② git 二进制在构建 env 中是否在 PATH 不受
+                        配方控制（OHOS Python 对裸命令名不做 PATH 搜索是另一
+                        独立坑）；③ GIT_TAG 若非 commit 锚定则上游 force push
+                        会改变构建输入（配方 sha256 管不住构建期下载物）。
+affected_scope:         blaspp（testsweeper v2024.05.31）、lapackpp（tester 同样
+                        FetchContent testsweeper）及一切 SLATE 族/含 FetchContent
+                        的上游 CMake 工程。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           fetchcontent-source-dir-offline
+rec_description:        把同 tag 源码以解包源码形态随配方导出（conanfile
+                        export_sources() 把 vendor/<name>-<ver>/ 复制进源码树；
+                        注意 PF2 制品闸禁 tarball，必须解包入仓），configure 时
+                        设 CMake 官方变量
+                        FETCHCONTENT_SOURCE_DIR_<大写名>=<源码树>/vendor/…
+                        ——FetchContent_MakeAvailable 检测到该变量即跳过下载
+                        用本地目录，上游 CMakeLists 零改动、语义与上游一致
+                        （同 tag 版本在配方内 sha256 锚定）。
+                        名字映射：declare 名 testsweeper → 变量后缀大写
+                        TESTSWEEPER；只对单一代替方案有效，若上游 declare 了
+                        多个外部项目需逐个锚定。
+rec_command:            copy(self, "*", src=os.path.join(self.recipe_folder, "vendor", "testsweeper-2024.05.31"), dst=os.path.join(self.export_sources_folder, "vendor", "testsweeper-2024.05.31"))
+                        tc.variables["FETCHCONTENT_SOURCE_DIR_TESTSWEEPER"] = os.path.join(self.source_folder, "vendor", "testsweeper-2024.05.31")
+rec_auto_fix:           false
+rec_impl:               cmake-cache-variable
+
+fallback_priority:      2
+fallback_approach:      add-subdirectory-patch
+fallback_description:   打补丁把 FetchContent 块替换为 add_subdirectory(vendor/…)。
+                        仅当上游该 CMakeLists 还需其他改动、要合并补丁时用；
+                        缺点是补丁与上游耦合（上游改 test/CMakeLists.txt 即
+                        hunk 失配），优先级低于零改动变量注入。
+fallback_command:       # -D FETCHCONTENT_FULLY_DISCONNECTED=ON 是另一官方开关，但它
+                        # 要求所有依赖都已提供，语义过宽；定向变量更可控
+fallback_auto_fix:      false
+fallback_impl:          patch-cmakelists
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       让构建期 git clone 留在配方里|维持 FetchContent 联网.*不改
+forbid_1_reason:        构建输入被构建期网络行为决定：设备本地通过 ≠ CI worker
+                        通过（沙箱网络面不同），且 GIT_TAG 非 commit 锚定时可被
+                        上游改写，配方 sha256 无法覆盖
+forbid_1_consequence:   本地绿 CI 红的不可复现失败；补丁/配方变更时构建物漂移
+forbid_2_pattern:       vendor/.*\.tar\.|把.*tarball.*放.*vendor
+forbid_2_reason:        PF2/JC3 制品闸禁止源码仓收录压缩包/归档；vendor 必须
+                        解包为源码目录入仓
+forbid_2_consequence:   提审被 PF2 拦截，返工重导出
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P017
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E667（同任务 blaspp 配方的另一构建不可复现面：后端探测）
+caused_by:
+conflicts_with:
+prerequisite_of:        lapackpp/2024.10.26（tester 同样 FetchContent testsweeper）
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/b/blaspp/2024.10.26 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望：构建日志 "_deps/testsweeper-build" 直接由本地 vendor
+                        # 目录构建，无 "Cloning into"、无任何 FetchContent 下载行
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:              # PR 创建后由知识库主编回填（执行体单次 push 口径，见 final-report 遗留项）
+source_commit:          # 随 PR 合并时由知识库主编回填（同上）
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
