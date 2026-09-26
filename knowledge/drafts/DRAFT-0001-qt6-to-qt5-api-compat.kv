@@ -1,0 +1,60 @@
+# DRAFT-0001: Qt6 代码库向 Qt5.15（OHOS PC qt5-qtbase）移植的 API 兼容诊断与裁剪模式
+
+- 条目主题：面向 Qt6 的 C/C++ Qt 库移植到 HarmonyOS PC（qt5-qtbase, Qt 5.15）时的 API 差异诊断清单 + 系统化桩替换（stub）与裁剪模式。
+- 状态：草稿（待知识库主编审核，拟提升编号 Exxx）
+- 关联 PR：!10575（feat/libkysdk-applications-3.0.1.2）
+
+## 适用场景
+将面向 Qt6 语法/API 的 Qt C++ 库（KDE / openkylin / kylin 系组件）适配到鸿蒙 PC
+平台的 qt5-qtbase 时，编译报错形如：
+
+- `error: no member named 'Accent' in 'QPalette'`
+- `error: unknown type name 'QEnterEvent'`
+- `error: no member named 'setAccessibleName' in 'QLabel'`
+- `error: member reference type 'const QPixmap *' is a pointer; did you mean to use '->'`
+- `fatal error: 'QGSettings' file not found`（依赖 gsettings-qt6 不可得）
+- `error: static assertion failed HasQ_OBJECT_Macro<QGSettings>::Value`（stub 头缺 Q_OBJECT）
+- `Project ERROR: Unknown module(s) in QT: sql svg`（qt5-qtbase 无 QtSql/QtSvg 模块）
+
+## 诊断步骤
+1. 按"Qt6 → Qt5.15 API 差异速查"表逐一核对编译错误归属的 API 族。
+2. 每个命中点：查 Qt5.15 是否存在等价 API → 替换；无等价 → 裁剪该调用/分支；
+   涉及缺失 Qt 模块（QtSql/QtSvg）时同时去掉 `.pro` 的 `QT += ... sql svg` 声明。
+3. 私有/平台依赖（QGSettings/gsettings-qt6、UKUI 协议、KF5 KWindowShadow）：
+   写 stub 头（`Q_OBJECT` + `signals:`）并把 stub 头加入 qmake `HEADERS`
+   生成 moc —— 否则 Qt5.15 new-style `connect(&QGSettings::changed, ...)` 触发
+   `HasQ_OBJECT_Macro` 静态断言失败、链接缺 `staticMetaObject`/信号符号。
+4. 测试目标单独编译（test_package 内多 .pro 并行构建）时：stub 头要同时在
+   该测试 `.pro` 注册 `INCLUDEPATH` + `HEADERS`，否则测试链接缺 metaobject。
+5. `QT_NO_ACCESSIBILITY`（OHOS 工具链/Qt 默认定义）：被其保护的成员/实现若被
+   其他文件引用，需移出宏保护，否则出现"声明在、实现无"的链接缺失。
+6. headless/offscreen 下 GUI 测试：`QFileDialog::exec()` 无真实文件选择器会阻塞
+   —— 测试脚本加 `timeout` 保护 + 裁剪无断言价值的对话框触发调用。
+
+## Qt6 → Qt5.15 API 差异速查
+| Qt6 语法/API | Qt5.15 处理 |
+| --- | --- |
+| `QPalette::Accent`（Qt6.2） | 映射 `QPalette::Highlight` 或裁剪分支 |
+| `QEnterEvent`（`enterEvent(QEnterEvent*)`） | 统一改 `QEvent*` |
+| `QWidget::setAccessibleName/Description`（Qt6.3） | 裁剪（Qt5 无） |
+| `QLabel::pixmap()` 返回类型 | Qt6 值 / Qt5 `const QPixmap*` → 指针判空后取值 |
+| `QSvgRenderer`、`QtSql` | 裁剪使用 + 去 `.pro` 的 `QT += ... sql svg` |
+| `QGSettings`（gsettings-qt6） | stub 头：`Q_OBJECT` + `signals: changed` + `HEADERS` 注册 moc |
+| KF5 `KWindowShadow` | 保留 Qt-only 路径（如 `qt_blurImage`），stub 平台阴影 API |
+| `#include <QGSettings>`（单层） vs `<QGSettings/QGSettings>`（双层） | 与 stub 目录层级保持一致 |
+
+## 证据（真实执行）
+- libkysdk-applications 3.0.1.2 适配（PR !10575）：本地 17 轮 conan create 迭代，
+  4 个 qmake 测试目标全部编译链接成功；test-alm `Totals: 5 passed, 0 failed`、
+  test-ukenv `4 passed, 0 failed`、test-widgetutils `3 passed, 0 failed` 真实执行；
+  test-qtwidget 编译链接成功（含 stub moc），2 用例通过，addfilebuttonTest 因
+  offscreen 无文件选择器阻塞（已按上游测试修改说明如实申报）。
+
+## 推广价值
+- 所有依赖 Qt6 语法/API 的 C/C++ Qt 库向鸿蒙 PC（qt5-qtbase）适配。
+- KDE/openkylin 系 Qt 控件库、KF5 依赖裁剪、QGSettings/UKUI 私有协议 stub 模式。
+- 可复用为"Qt 大版本迁移"通用诊断清单（不限于鸿蒙）。
+
+## 查重关键词
+Qt6→Qt5、QPalette::Accent、QEnterEvent、setAccessibleName、QLabel::pixmap、
+QGSettings stub、Q_OBJECT moc、QT_NO_ACCESSIBILITY、qt5-qtbase、HarmonyOS PC
