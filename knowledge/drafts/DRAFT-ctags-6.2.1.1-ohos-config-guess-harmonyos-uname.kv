@@ -1,0 +1,136 @@
+#====================================================================
+# DRAFT-ctags-6.2.1.1-ohos-config-guess-harmonyos-uname
+#   HarmonyOS 的 uname -s 返回 "HarmonyOS"（而非 "Linux"），autotools 的
+#   config.guess 无法猜测 build triple → configure 报
+#   "cannot guess build type; you must specify one"
+# 来源: ctags 6.2.1.1 适配 HarmonyOS PC（目标库任务）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ctags-6.2.1.1-ohos-config-guess-harmonyos-uname
+trigger_tool:           configure
+phase:                  configuration
+error_signature:        cannot\s+guess\s+build\s+type|
+                        has\s+failed\s+to\s+recognize\s+the\s+operating\s+system|
+                        config\.guess.*(failed|unable)
+                        (unable to guess system type)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               platform, ohos, autotools, detection, compat
+match_keywords:         cannot guess build type, cannot guess build, config.guess,
+                        config.sub, uname, HarmonyOS, harmony os, linux-ohos,
+                        autoconf, configure failed, build triple, 三元组, 交叉三元组
+title:                  HarmonyOS 的 uname -s 返回 HarmonyOS，autotools config.guess 猜不出三元组（configure: cannot guess build type）
+prescan_pattern:        AC_CANONICAL_(BUILD|HOST|TARGET)
+prescan_globs:          configure.ac, configure.in, Makefile.am, config.guess, config.sub
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OpenHarmony 内核的 uname 输出为
+                        "HarmonyOS"（uname -s）与 "HongMeng Kernel x.y.z"
+                        （uname -r），而 GNU config.guess 的识别 case
+                        （case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:
+                        $UNAME_VERSION）里没有 HarmonyOS 分支，也没有
+                        *-linux-ohos 的通用回退；于是脚本落到"猜不出"路径，
+                        调用 set_cc_for_build 做编译器探测后失败，最终以
+                        configure: error: cannot guess build type 中止。
+                        注意 config.sub（≥2024-05-27）已接受 ohos* OS 与
+                        linux-ohos* 内核组合，因此**通常只有 config.guess
+                        需要补**，config.sub 无需改动。另：探测失败时常见的
+                        伴随报错 "can't create .../cgXXXXXX/dummy.c:
+                        Permission denied" 是 HMDFS 临时目录问题
+                        （见 DRAFT-ctags-6.2.1.1-hmdfs-mktemp-AS_TMPDIR-unwritable），
+                        两者常常在同一日志里同时出现，需分开归因。
+
+affected_scope:         所有使用 autoconf/autotools（AC_CANONICAL_BUILD/
+                        AC_CANONICAL_HOST/AC_CANONICAL_TARGET 或依赖
+                        config.guess）且平台上 uname -s != Linux 的项目，
+                        在 HarmonyOS/OpenHarmony 上首次 configure 时命中。
+                        本项目实证：ctags 6.2.1（release tarball 内置
+                        configure，config.guess timestamp 2024-07-27）。
+                        同构项目：libnfc-tools、Cutter、任意 tarball 分发
+                        的 GNU autotools 包。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           patch-config-guess-add-harmonyos-branch
+rec_description:        【定性】执行 ./config.guess，若 exit≠0 且 stderr 含
+                        "has failed to recognize the operating system"，
+                        同时 uname -s 输出 HarmonyOS，即命中本模式。
+                        【修复】在 config.guess 的
+                        `case $UNAME_MACHINE:$UNAME_SYSTEM:$UNAME_RELEASE:$UNAME_VERSION in`
+                        分支表**最前面**插入 HarmonyOS 分支，直接把机器映射为
+                        `<machine>-unknown-linux-ohos` 并 return——由于该分支
+                        不调用 set_cc_for_build，可同时规避 HMDFS 临时目录
+                        问题。参考实现（补丁新增行）：
+
+                            *:HarmonyOS:*:*)
+                                case $UNAME_MACHINE in
+                                    armv7* | armv8* | arm*) GUESS=arm-unknown-linux-ohos ;;
+                                    aarch64* | arm64*)      GUESS=aarch64-unknown-linux-ohos ;;
+                                    x86_64 | amd64)         GUESS=x86_64-unknown-linux-ohos ;;
+                                    i?86)                   GUESS=i686-unknown-linux-ohos ;;
+                                    *)                      GUESS=$UNAME_MACHINE-unknown-linux-ohos ;;
+                                esac
+                                ;;
+
+                        若项目用 autoreconf 重新生成 configure，可改
+                        configure.ac；若只分发预生成 configure（常见于
+                        release tarball），则直接 patch config.guess 文件
+                        （它会被 configure 调用，不是生成物的一部分）。
+                        【验证】./config.guess 输出 aarch64-unknown-linux-ohos；
+                        随后 configure 通过 "checking build system type"。
+                        【禁止】不要用 --build=/--host=/--target= 传参绕过
+                        （本仓库 R1/平台规约：native 场景走 config.guess 修复，
+                        传参掩盖问题且不可复用于其他包）。
+rec_command:            ./config.guess            # 修复后应输出 <machine>-unknown-linux-ohos
+rec_auto_fix:           false
+rec_impl:               patch-config-guess
+
+fallback_priority:      2
+fallback_approach:      替换为较新 gnuconfig
+fallback_description:   用最新 gnuconfig 的 config.guess/config.sub 覆盖（部分
+                        发行版打包了含 ohos 的新版本）。仅在无法 patch 上游文件
+                        时使用；注意上游 tarball 的 config.guess 可能是较新版本，
+                        盲目"降级替换"会引入无关 diff（ctags 历史归档即踩此坑：
+                        用 2023 版整体替换 2024 版，产生大量噪声 diff）。
+fallback_command:       cp /usr/share/gnuconfig/config.guess .
+fallback_auto_fix:      false
+fallback_impl:          replace-gnuconfig
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       --build=.*linux-ohos|--host=.*linux-ohos|--target=.*linux-ohos
+forbid_1_reason:         用 configure 传参掩盖识别缺陷，不产生可复用的平台知识，
+                        且下游包逐个传参不可维护
+forbid_1_consequence:   评审要求改为 config.guess 补丁，返工
+forbid_2_pattern:       整体替换 config\.guess
+forbid_2_reason:         上游 config.guess 版本可能比本地"已知 good"版本更新，
+                        整体替换会引入大量无关 diff 且丢失上游修复
+forbid_2_consequence:   补丁不可评审、评审要求最小化补丁
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P008
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-ctags-6.2.1.1-hmdfs-mktemp-AS_TMPDIR-unwritable（同一日志内常同时出现，但根因不同）
+caused_by:
+conflicts_with:
+prerequisite_of:        R1 参数最少化 / 平台适配要求"改 config.guess 而非传 --build"
+
+# ═══ 元数据 ═══
+verification_cmd:       cd <src> && ./config.guess          # 期望: aarch64-unknown-linux-ohos
+                        # 或: python3 scripts/ohc-run.py conan-verify ctags 6.2.1.1
+doc_file:               knowledge/drafts/DRAFT-ctags-6.2.1.1-ohos-config-guess-harmonyos-uname.md
+last_updated:           2026-09-26
+source_event:           ctags 6.2.1.1 适配（was: 首个错误 configure: cannot guess build type）
+authors:                OpenDesk
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26
