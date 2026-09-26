@@ -1,0 +1,66 @@
+#====================================================================
+# DRAFT — refresh-patch 的 `_GENERATED_NAMES` 把 Makefile 列为生成物，
+#         且该分类在「已修改文件」分支也被调用 ⇒ 你手工改过的上游
+#         Makefile 被判为构建产物、静默丢弃，工具报「无差异，保留现有补丁」
+# Draft only: do not promote without reviewer assignment.
+# Trigger event: jmeters/0.4.5 adaptation (task #7646), B 机真机
+#====================================================================
+
+id:                     DRAFT-7646-refresh-patch-generated-names-makefile
+trigger_tool:           python|ohc refresh-patch
+phase:                  packaging
+error_signature:        "无差异，保留现有补丁|无编辑追踪器，使用排除规则扫描差异|无法定位源码目录: orig=None"
+
+severity:               2
+category:               conan, patch, build-system, tooling
+match_keywords:         refresh-patch, refresh_patch.py, _GENERATED_NAMES, _is_likely_generated, _classify, diff_files, Makefile, config.h, libtool, 无差异，保留现有补丁, 无编辑追踪器, edit-tracker, .edit-tracker.json, snapshot, track-edit, init_build, 补丁丢失, 静默丢弃
+title:                  refresh-patch 规则回退分支用「生成物名单」分类已存在文件，改过的 Makefile 被判生成物而静默丢弃，工具报无差异且 rc=0
+
+root_cause:             'scripts/ohc/refresh_patch.py:22 的注释写着名单适用面「only used for NEW files in right_only」，但 :23-26 的 _GENERATED_NAMES 集合里含 Makefile、config.h、libtool、stamp-h1、stamp-h、config.cache、config.h.in~、configure.lineno；消费它的 _is_likely_generated（:46 定义，:59-60 命中名单即 return True）经由 _classify（:184 定义，:186-188 把 generated 翻成 False=不要这个文件）在两个分支被调用。right_only（新文件）分支符合注释语义，但 :215 的 `for f in dcmp.diff_files:`（两边都存在但内容不同 = 被修改的源文件）分支 :220 也执行 `verdict = _classify(mod_file)`，:221-222 `if verdict is False: continue` 直接跳过——于是被改过的上游 Makefile 连进 diff_pairs 的机会都没有。auto_mode（:370）在无编辑追踪器时（:386 use_tracker 为假 → :416 打印「⚠️ 无编辑追踪器，使用排除规则扫描差异...」→ :418 _find_differences）走这条规则路径，diff_pairs 为空 → :430-432 打印「无差异，保留现有补丁」并 return 0。工具以成功退出码收尾，补丁里不含任何 Makefile 改动，磁盘上的旧补丁原样留着，看起来「已生成」，实际内容与被改后的 work 树无关。'
+
+affected_scope:         '凡补丁目标文件名命中 _GENERATED_NAMES 的包，即 kokkinizita/suckless 一类裸 Makefile 上游（本包补丁唯一改的就是 source/Makefile），以及任何改过 config.h / libtool 的包。触发条件是比对 .orig 基线时 work 树里没有 .edit-tracker.json（手工准备 .orig/.work 两棵树、从 init-build 之外进入 refresh-patch、或追踪器被清理）。反例（不受害）：走 init-build 全流程且编辑都被 track-edit add 记录过的包——:390-413 的精准分支只按追踪器列表生成、不调用 _classify。'
+verification_cmd:       'python3 scripts/ohc-run.py refresh-patch --auto <pkg> <ver>; git -C <wt> diff --stat -- archives/<l>/<pkg>/<ver>/patches   # 判据：git diff 有改动而 refresh-patch 报「无差异」即命中本机制'
+
+prescan_pattern:        ^[-+].*(march=native|\$\(INSTALL\))|patches/0001-.*[Mm]akefile\.patch
+prescan_globs:          archives/**/patches/*.patch
+
+safety_boundary:        '本条只描述工具行为与绕行法，不主张改框架：为了让我认 Makefile 而去删 _GENERATED_NAMES 条目是框架改动（要单独 PR），且会让 configure 生成的 Makefile 污染补丁。绕行后的强制复核动作是逐行看补丁正文（grep -n 开头的 +/- 行），名单外文件不受影响、无需绕行。'
+
+rec_priority:           1
+rec_approach:         create-edit-tracker-baseline-via-module-api-then-precise-mode
+rec_description:      '绕开规则回退分支，把运行逼进精准模式（:390-413，该分支不做 classify）。追踪器基线只能由模块级 API 建立，CLI 没有重置基线入口（scripts/ohc/edit_tracker.py:256-280 的子命令只有 scan（:263）/ add（:269）/ list（:275），没有 snapshot），所以正确姿势是——手工准备纯净 .orig 与改过的 .work 两棵树，然后在小驱动脚本里 import 并调用 edit_tracker.snapshot(work_dir, software="", version="")（edit_tracker.py:73 定义，init_build.py:337 内部调的就是它）建基线，再跑 refresh-patch --auto，此时输出变为「追踪到 N 个文件变更」+「精准模式: 只对 N 个追踪文件生成补丁」。生成后必须用 git diff / grep 逐行核对补丁正文（本包为 +5/-5，去 -march=native 与 install→$(INSTALL)），确认改动真进了补丁再入库。'
+rec_command:            python3 -c "import sys; sys.path.insert(0,'scripts'); from ohc.edit_tracker import snapshot; snapshot('<work 目录绝对路径>', software='', version='')" && python3 scripts/ohc-run.py refresh-patch --auto <pkg> <ver> && grep -n '^[-+]' archives/<l>/<pkg>/<ver>/patches/*.patch
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      write-the-patch-by-hand-and-record-the-tool-bypass
+fallback_description:   '当两棵树的基线也无法建立（例如上游 tarball 无法稳定到手）时，直接手写 unified diff 放进 patches/，并在 manifest.yaml 的 patch_generation 与 notes.md 里写明该补丁非工具生成、以及为什么绕开 refresh-patch。这条路内容上可靠，代价是丢掉 refresh-patch 的幂等重生成能力——此后任何一次 finish 的 Step 1 都可能重扫/改名（见同目录 DRAFT-8543-refresh-patch-rename-conandata-desync），所以补丁分类回填要放在最后一次 finish 之后。'
+fallback_command:       diff -u <(tar xOf <tarball> <top>/Makefile) <work>/source/Makefile > archives/<l>/<pkg>/<ver>/patches/0001-<name>.patch
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       看到「无差异，保留现有补丁」就当补丁已正确生成|直接 git add patches/
+forbid_1_reason:        该文案只说明 diff_pairs 为空，不说明你的改动不存在；对被改过且命中生成物名单的文件它必然给这个读数。
+forbid_1_consequence:   补丁里没有 Makefile 改动，构建在 CI 上因 -march=native 之类被丢弃的选项失败，或安装阶段找不到 install 程序，排查方向被引向 conanfile.py。
+forbid_2_pattern:       为让规则路径认出 Makefile 而去改 _GENERATED_NAMES|把 Makefile 从名单里删掉
+forbid_2_reason:        那是框架文件，改它要单独 PR，且会让 configure 生成的 Makefile 污染补丁；本条给的是不改框架前提下的绕行路径。
+forbid_2_consequence:   配方 PR 混入框架改动，W2 PR 原子性检查与评审直接打回。
+forbid_3_pattern:       用 track-edit add 补一条记录当作已有基线
+forbid_3_reason:        add 只往 .edit-tracker.json 追加「我改过这个文件」的事实，判变更仍要拿基线指纹比对；没有 snapshot() 建的基线时它报「.edit-tracker.json 不存在，先运行 snapshot」。
+forbid_3_consequence:   白跑一轮，仍落到规则回退分支，仍报「无差异」。
+
+principles:             P003, P005, P011
+causes:                 []
+caused_by:              []
+similar_to:             [E066, E090, E095, E249, E503]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-7646-refresh-patch-generated-names-makefile.md
+last_updated:           2026-09-26
+source_event:           'jmeters/0.4.5 HarmonyOS PC adaptation (task #7646, B 机)：补丁目标就是被修改的 source/Makefile，refresh-patch 走规则回退时连续多轮报「✅   无差异，保留现有补丁」；改为手工 .orig/.work 两棵树 + 模块级 edit_tracker.snapshot() 建基线后，同一命令输出「追踪到 1 个文件变更」+「精准模式: 只对 1 个追踪文件生成补丁」并生成 +5/-5 的 0001-source-Makefile.patch。证据 round2-refreshpatch.log:3,5（反例 round2-l.log:19）、round2-m.log:76,78、round2-rp6.log:5,7；第 2 棒 finish 的 Step 1 再次打印同一对读数（w3-r1.log:20-23），说明每次重跑都会重新触发。'
+
+authors:                主理-64
+source_pr:
+source_commit:          1bdd1b0c5155ecf9372ce7babd2552c448df133f
