@@ -1,0 +1,115 @@
+#====================================================================
+# DRAFT-ohos-pytest-timeout-thread-method-destroys-run —— pytest-timeout 的
+#   --timeout-method=thread 在挂起时调 os._exit(1)，会杀掉**整个 run**，
+#   导致「无用例名、无失败清单、无汇总行」的不可归因失败
+# 触发事件: werkzeug 3.1.8 适配（PR #11302）CI #54059 全套件超时且无法归因
+#====================================================================
+
+id:                     DRAFT-ohos-pytest-timeout-thread-method-destroys-run
+trigger_tool:           pytest|conan|python
+phase:                  testing
+error_signature:        \+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+\+ Timeout \+\+\+|
+                         wait_ready.*time\.sleep|
+                         Failed: Timeout \(>.*\) from pytest-timeout|
+                         upstream pytest 运行器异常退出.*未解析到失败用例|
+                         (no FAILED lines).*returncode != 0
+
+severity:               2
+category:               python, testing, conan, detection, environment
+match_keywords:         pytest-timeout, timeout-method, thread, signal, os._exit,
+                         wait_ready, while True, 无界重试, dev_server, 子进程起服务,
+                         不可归因, 无失败清单, R51, upstream pytest, 挂死, hang,
+                         faulthandler, dump stacks
+
+title:                  pytest-timeout 用 --timeout-method=thread 时挂起会 os._exit(1)
+                        杀掉整个 run —— 输出只剩 Timeout 分隔线，失败完全不可归因；
+                        改 --timeout-method=signal 可把挂死变成该用例的一次普通失败
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             上游测试若含【以子进程起服务、父进程轮询直到就绪】的用例，
+                        就绪判定常写成**无界**循环：
+
+                        ```python
+                        # werkzeug tests/conftest.py:192-198
+                        def wait_ready(self):
+                            while True:
+                                try:
+                                    self.request("/ensure"); return
+                                except (ConnectionRefusedError, FileNotFoundError):
+                                    time.sleep(0.1)      # ← 永不到期
+                        ```
+
+                        子进程因**任何**原因起不来（缺依赖、缺发行版元数据、worker
+                        资源饥饿 fork 不动）时，该用例不是"失败"而是**挂死**。
+                        此时收尾方式决定了可诊断性：
+
+                        - `--timeout-method=thread`：pytest-timeout 用定时线程
+                          dump 各线程栈后调 **`os._exit(1)`** —— 进程立即消失，
+                          **整个 run 被丢弃**。输出只剩
+                          `+++++++++++ Timeout +++++++++++` 与超时那一刻的栈，
+                          **没有用例名、没有失败清单、没有汇总行**；对配方而言就是
+                          "exit=1 且解析不到任何 FAILED"，与"运行器自己崩了"无法区分。
+                        - `--timeout-method=signal`：SIGALRM 中断**当前用例**，
+                          该用例记为普通失败
+                          （`FAILED <nodeid> - Failed: Timeout (>120.0s) from
+                          pytest-timeout.`），**run 继续**，其余用例结果完整保留，
+                          挂死点可精确归因。
+
+                        本条的鉴别特征：**输出超长但只有 Timeout 分隔线、零 FAILED 行**。
+
+affected_scope:         所有在配方里用 pytest 跑上游套件、且套件含"子进程起服务 +
+                        无界轮询就绪"用例的 Python 包；以及任何把
+                        `--timeout-method=thread` 当作"更安全默认值"的用法
+
+rec_priority:           1
+rec_approach:           attributable-timeout-method
+rec_description:        跑上游套件时用 `--timeout-method=signal`（而非 thread），使挂起
+                        被记为**该用例的一次普通失败**而非整 run 猝死；这样 R51 要求的
+                        失败清单与逐项归因才拿得到。若还要对**纯超时**做有界重试，须满足：
+                        ① 仅当失败**全部**是超时（任何断言失败一律直接失败，不重跑）；
+                        ② 按 node id 原样重跑同一批用例（不跳过、不改断言、不删用例）；
+                        ③ 只重试一次，并把两次输出都写进报告。signal 方法要求 python
+                        侧能收到 SIGALRM（OHOS 实测可用）。
+rec_command: >
+  # 让挂死可归因
+  pytest tests -q --no-header -p no:cacheprovider -p timeout \
+      --timeout=120 --timeout-method=signal --basetemp=<short-path>
+  # 验证：挂死用例应产出可解析的失败行
+  #   FAILED tests/xxx.py::test_hangs - Failed: Timeout (>8.0s) from pytest-timeout.
+rec_auto_fix:           false
+rec_impl:               recipe-pytest-signal-timeout
+
+forbid_1_pattern:       用 --timeout-method=thread 跑上游套件，看到 Timeout 分隔线就把该次运行当作"平台/基础设施问题"重跑，不追究挂死点
+forbid_1_reason:        thread 方法的 os._exit(1) 会抹掉整 run 的证据，重跑得到的仍是
+                        同一份不可归因输出；挂死的真实原因（缺依赖/缺元数据/资源饥饿）
+                        永远浮不出来
+forbid_1_consequence:   反复 /rebuild、每轮耗时数十分钟且零信息增量；或把挂死误判为
+                        平台不支持该库
+
+forbid_2_pattern:       把"失败全部是超时"以外的任何失败（断言失败、收集错误）也纳入重跑
+forbid_2_reason:        真失败重跑只会重复失败并浪费一轮；且重跑会削弱失败信号的严肃性
+forbid_2_consequence:   掩盖真实缺陷、延长 CI 时间
+
+forbid_3_pattern:       用 --deselect/--ignore/把它标记 skip 来"解决"挂死，而不先查清
+                        子进程为何起不来
+forbid_3_reason:        挂死是症状不是根因；先查清（读 dev-server 子进程日志、
+                        basetemp 现场）再决定是平台限制还是适配缺陷
+forbid_3_consequence:   平台能力变化被永久掩盖；R51 的上游测试申报失真
+
+principles:             超时方法决定可诊断性（signal 可归因 / thread 抹证据）;
+                        无界轮询就绪 + 子进程起不来 = 挂死而非失败;
+                        重跑只允许"全部失败均为超时"且原样重跑、仅一次、留双份证据;
+                        先读子进程日志再判平台限制
+verification_cmd:       # 挂死用例在两种方法下的收尾对照（实测）
+                         pytest <hang-test> -p timeout --timeout=8 --timeout-method=signal
+                         #   → FAILED ... - Failed: Timeout (>8.0s) from pytest-timeout.
+                         #     run 继续，后续用例仍执行
+                         pytest <hang-test> -p timeout --timeout=8 --timeout-method=thread
+                         #   → +++++ Timeout +++++ 后进程消失，无 FAILED 行
+
+related_docs:           doc/E543.md, doc/E544.md,
+                         DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv,
+                         DRAFT-ohos-pytest-host-py312-incompat
+source_event:           archives/w/werkzeug/3.1.8 PR#11302 CI#54059（全套件超时不可归因）
+first_seen_project:     werkzeug/3.1.8
+last_updated:           2026-09-21
