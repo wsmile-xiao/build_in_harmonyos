@@ -1,0 +1,92 @@
+# ====================================================================
+# DRAFT-7640-jkmeter-0.9.0 — HMDFS 上已签名 ELF 的 chmod 抛 EPERM（非 E046 静默失效），防御式位检查兜底
+# ====================================================================
+
+id:                     DRAFT-7640-jkmeter-0.9.0-signed-elf-chmod-eperm-defensive
+trigger_tool:           python|conan
+phase:                  testing|packaging
+title:                  HMDFS 上对已签名 ELF 调 os.chmod 抛 EPERM 异常（缓存包复用场景才现形），chmod 前防御式位检查 + stat 读兜底
+error_signature:        PermissionError.*chmod|
+                        os\.chmod.*EPERM|
+                        \[Errno 1\] Operation not permitted.*\.chm|
+                        chmod.*Operation not permitted
+severity:               2
+category:               hmdfs, codesign, conan, packaging, filesystem
+keywords:               signed ELF, chmod, EPERM, HMDFS, test_package, cache reuse,
+                        defensive chmod, stat, conan package id 复用
+match_keywords:         chmod, EPERM, signed, ELF, HMDFS, os.chmod
+
+root_cause: HarmonyOS 的 HMDFS/安全子系统对**已签名（codesign 附带签名段）的 ELF**
+  施加了写保护：对这类文件再调 os.chmod 会直接抛 PermissionError
+  [Errno 1] Operation not permitted——是**响亮异常**，不是 E046 那种
+  「chmod 返回成功但权限不生效」的静默失效。触发场景有个隐蔽点：
+  conan **首跑**（重新解包/重打包）时产物是刚落盘的未签文件，chmod 正常；
+  **缓存包复用**（package_id 相同、包体从缓存展开或直用）时产物带着签名段，
+  test_package / 打包脚本里的 chmod 立刻 EPERM。⇒ 该坑在 CI 绿了一轮之后
+  的任何复跑、以及下游消费者复用包时才爆炸，首轮构建根本看不到。
+  与 E046 的区别：E046 是 chmod 静默失效（返回成功、mode 没变），坑测试断言；
+  本条是 chmod 抛异常（响亮失败），坑打包/测试脚本流程。解法也不同：
+  E046 是检测后 skip-test，本条是防御式 chmod（先 stat 读位，位已在即跳过，
+  异常兜底降级为警告），不 skip 流程。
+  与 E077B 的区别：E077B 是 codesign 本身无效/签名不可用（签名面）；
+  本条的文件签名是完好的，只是签名后的文件不可再 chmod（写保护面）。
+
+affected_scope: 所有 test_package / 打包脚本 / install 脚本里对 bin/ 下 ELF 调
+  chmod +x 或 chmod 权限位的 conan 包；凡产物经过 codesign 的 OHOS
+  打包链都受影响；复跑/缓存命中场景必现。
+
+verification_cmd: |
+  # 复现（在缓存展开的包目录里）：
+  python3 -c "import os; os.chmod('<包>/bin/<已签程序>', 0o755)"
+  # 期望：PermissionError: [Errno 1] Operation not permitted
+  # 防御式写法验证：
+  python3 -c "
+  import os, stat
+  p='<包>/bin/<已签程序>'; m=stat.S_IMODE(os.stat(p).st_mode)
+  if not m & 0o111: os.chmod(p, m | 0o111)
+  print('mode', oct(m))"
+
+rec_approach:           defensive-chmod-stat-first
+rec_description: 对产物的 chmod 一律改防御式三段：①先 os.stat 读当前 mode；
+  ②目标位已存在 ⇒ 跳过 chmod（最常见路径，零系统调用风险）；
+  ③确需改位才 chmod，且 try/except PermissionError 降级为日志警告
+  而非流程失败（ELF 能执行不依赖 chmod 位在 HMDFS 上的呈现时）。
+  ⛔ 不要用「先删除再重写文件再 chmod」绕——对已签文件重写同样会被拒，
+  还会破坏签名段。⛔ 不要静默吞所有 OSError——只兜 PermissionError，
+  其他错误照常抛出以免掩盖真问题。
+rec_command: |
+  import os, stat
+  def ensure_exec(path):
+      mode = stat.S_IMODE(os.stat(path).st_mode)
+      if not mode & 0o111:
+          try:
+              os.chmod(path, mode | 0o111)
+          except PermissionError as e:
+              print(f"warn: chmod skipped on signed ELF {path}: {e}")
+rec_auto_fix:           false
+
+fallback_approach:      fresh-extract-then-chmod
+fallback_description: 确需改位的场景（如权限确实缺失），在解包后、签名前的窗口期内完成
+  chmod（顺序：解包 → chmod → 签名）；缓存复用路径无法重排时，
+  在配方 build() 里以「复制到可写目录再操作」替代原地 chmod。
+fallback_command: 'python3 -c "import os,stat; print(oct(stat.S_IMODE(os.stat(os.path.abspath(\"<bin程序>\")).st_mode)))"'
+
+safety_boundary: 1) 首轮构建绿 ≠ 没这个坑——必须在**缓存命中/复用**条件下复跑一次
+  test_package 才算验证过（conan install 缓存命中或同 package_id 二次 create）；
+  2) 只兜 PermissionError，别把 KeyboardInterrupt/SystemExit 一类一起吞；
+  3) stat 兜底读也要 try——极端情况下文件不可读时按明确失败处理，别输出假通过。
+
+evidence: jkmeter 0.9.0（任务 7640，主理-60 执行棒实测 2026-09-26，B 机）：
+  test_package 对 bin/jkmeter（68224B，codesign 附签）os.chmod 在缓存包
+  复用轮抛 PermissionError [Errno 1]；首跑轮同一路径正常（重打包产物未签）。
+  整改：test_package 改防御式（位已在即跳过 + stat 兜底）后复跑全绿，
+  conan-verify 8 门全 PASS（reports/conan-verify-report.md Verdict: PASS）、
+  finish built 成功（reports/w3-local-ci.log，Success 1 / Failed 0）。
+  提交链：f77d3a4cfd（chmod 防御式）→ e60553b3e3（终稿）。
+
+similar_to:             [E046]
+caused_by:              []
+authors:                [主理-60]
+source_pr: ""
+source_commit: ""
+draft_date:             2026-09-26
