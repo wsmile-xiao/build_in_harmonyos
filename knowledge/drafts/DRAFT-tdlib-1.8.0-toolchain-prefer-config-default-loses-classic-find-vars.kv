@@ -1,0 +1,58 @@
+#====================================================================
+# Draft: conan CMakeToolchain 默认打开 CMAKE_FIND_PACKAGE_PREFER_CONFIG，上游经典 Find 变量被"静默饿死"
+# 来源: tdlib/1.8.0 适配（CMakeLists 用 OPENSSL_FOUND/OPENSSL_INCLUDE_DIR/OPENSSL_CRYPTO_LIBRARY/OPENSSL_SSL_LIBRARY）
+# 复用面: 所有上游用 find_package(X) 的 MODULE 变量（大写 XXX_FOUND/XXX_INCLUDE_DIR/XXX_LIBRARIES）驱动
+#         条件编译或 include/link 的 CMake 工程，在 conan CMakeDeps 下都会踩到
+# 关系: E447 记录了同一机制在「上游 vendored Find 模块（SDL2）」上的表现；本条补齐
+#       「CMakeToolchain 默认值才是根因、可用 conf 关闭」这一未记录事实
+#====================================================================
+
+draft:                 true
+id:                    DRAFT-tdlib-1.8.0-toolchain-prefer-config-default-loses-classic-find-vars
+status:                pending-editor-review
+trigger_tool:          cmake|configure
+phase:                 configuration
+error_signature:       Can't find OpenSSL.*stop .* building|Can't find zlib.*stop .* building|NOT [A-Z_]+_FOUND[^\n]*return\(\)|find_package\([A-Za-z0-9_]+\) 命中 config 但 [A-Z_]+_FOUND 仍未定义
+
+severity:              3
+category:              cmake, conan, dependency, toolchain, detection
+prescan_pattern:       find_package\(\s*(OpenSSL|ZLIB|ZLIB|PNG|JPEG|SQLite3|cURL)\b
+prescan_globs:         CMakeLists.txt, *.cmake
+match_keywords:        CMAKE_FIND_PACKAGE_PREFER_CONFIG, find_package_prefer_config, CMakeDeps 只设小写, OPENSSL_FOUND, OPENSSL_CRYPTO_LIBRARY, OPENSSL_SSL_LIBRARY, ZLIBConfig.cmake, 静默 return, stop TDLib building, 经典 MODULE 变量, 大写变量为空
+title:                 CMakeToolchain 默认 CMAKE_FIND_PACKAGE_PREFER_CONFIG=ON：上游 find_package 命中了 config 却拿不到经典大写变量，构建静默变成空壳
+
+root_cause:            conan 的 CMakeToolchain 在 generic_system 块里默认写 set(CMAKE_FIND_PACKAGE_PREFER_CONFIG ON)（conf tools.cmake.cmaketoolchain:find_package_prefer_config 默认 True；实测生成文件第 137/139 行）。于是上游裸 find_package(OpenSSL) 优先走 CONFIG 模式，命中 CMakeDeps 生成的 openssl-config.cmake，而后者只定义小写 openssl_* 变量与 openssl::openssl 目标；上游依赖的经典 MODULE 变量（OPENSSL_FOUND / OPENSSL_INCLUDE_DIR / OPENSSL_LIBRARIES / OPENSSL_CRYPTO_LIBRARY / OPENSSL_SSL_LIBRARY）一个都不存在。若上游用 if (NOT OPENSSL_FOUND) 做门禁并 return()，configure 只打印 WARNING 就静默放弃后半段配置——不报错、但目标全不生成（比硬失败更隐蔽）。
+affected_scope:        上游用 MODULE 变量（而非 imported target）消费依赖的所有 CMake 工程；OpenSSL/zlib 这类「CMake 自带 FindXXX 模块 + 包元数据用大写变量」的库最典型
+error_excerpt:         CMake Warning at CMakeLists.txt:176 (message): Can't find OpenSSL: stop TDLib building；同一次 configure 中 ZLIB 因为其 conan 包恰好产出 ZLIBConfig.cmake（定义了 ZLIB_FOUND/ZLIB_INCLUDE_DIR/ZLIB_LIBRARIES）而正常
+verification_cmd:      grep -n "PREFER_CONFIG" <generators>/conan_toolchain.cmake   # 默认 ON；再 grep configure 日志是否出现 "Can't find .*: stop .* building"
+rec_priority:          1
+rec_approach:          bridge-classic-find-vars-to-conan-package
+rec_description:        在 generate() 里把经典变量显式接到 conan 包（不改上游源码、不动 PREFER_CONFIG）：置 XXX_FOUND=True 并在需要时给出 INCLUDE/LIB 路径，使上游门禁通过且 include/link 指向 conan 包。若上游用 imported target 则无需此步。
+rec_command:           tc.cache_variables["OPENSSL_FOUND"]=True; tc.cache_variables["OPENSSL_ROOT_DIR"]=pkg; tc.cache_variables["OPENSSL_INCLUDE_DIR"]=pkg+"/include"; tc.cache_variables["OPENSSL_CRYPTO_LIBRARY"]=pkg+"/lib/libcrypto.a"; tc.cache_variables["OPENSSL_SSL_LIBRARY"]=pkg+"/lib/libssl.a"; tc.cache_variables["OPENSSL_LIBRARIES"]=ssl+";"+crypto
+rec_auto_fix:          false
+rec_impl:              cmake-toolchain-cache-vars-bridge
+fallback_priority:     2
+fallback_approach:     disable-prefer-config
+fallback_description:  用 -c tools.cmake.cmaketoolchain:find_package_prefer_config=False 让 MODULE 模式优先；仅当构建机/包内存在可被 MODULE 找到的头与库（或配合 XXX_ROOT 指向 conan 包）才可行，且会同时影响所有依赖的查找路径，需回归验证（E447 记录了该方向在 SDL2 vendored Find 模块上的不确定性）
+fallback_command:      conan create . -c tools.cmake.cmaketoolchain:find_package_prefer_config=False
+fallback_auto_fix:     false
+forbid_1_pattern:      patch.*(OPENSSL|ZLIB)_(FOUND|INCLUDE_DIR|LIBRARIES)|sed.*OPENSSL_FOUND
+forbid_1_reason:       改上游 CMakeLists 的变量名属「为平台改源码」，会把变量大小写差异固化进补丁，后续上游升级即冲突；且掩盖了「conan toolchain 默认值」这一真正根因
+forbid_1_consequence:  知识不可迁移（每个库都要各patch一次）、补丁维护成本随上游升级累积
+
+principles:            P006, P013
+causes:                []
+caused_by:             []
+similar_to:            [E447, E412]
+conflicts_with:        []
+prerequisite_of:       []
+doc_file:              knowledge/drafts/DRAFT-tdlib-1.8.0-toolchain-prefer-config-default-loses-classic-find-vars.md
+last_updated:          2026-09-24
+source_event:          tdlib 1.8.0 适配：configure 出现 Can't find OpenSSL（日志 06）→ 接线经典变量后 Found OpenSSL（日志 07）
+authors:               OpenDesk <opendesk@local>
+source_pr:
+source_commit:
+metrics_success_count: 0
+metrics_fail_count:    0
+metrics_confidence:    0.0
+metrics_last_used:
