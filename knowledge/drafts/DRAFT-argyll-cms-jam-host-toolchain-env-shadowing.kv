@@ -1,0 +1,75 @@
+#====================================================================
+# DRAFT-argyll-cms-jam-host-toolchain-env-shadowing.kv
+# 宿主工具链环境变量覆盖构建工具自身的变量默认值（Jam / autoconf / make）
+# Software: argyll-cms 3.5.0（Perforce Jam 构建）
+# Gate: W3 本地 CI（ci/conan/build_and_test.sh）— 34 个 Archive 目标失败并级联
+# Status: DRAFT（待主编审核；建议归入 build-system / toolchain 类）
+#====================================================================
+
+id:                     DRAFT-argyll-cms-jam-host-toolchain-env-shadowing
+title:                  宿主工具链环境变量与构建工具同名变量静默错配：AR=llvm-ar 顶掉 Jam 的 `AR ?= ar rusc`，归档命令缺操作符导致全部 .a 失败
+trigger_tool:           jam|ar|configure|make
+phase:                  compilation|configuration
+error_signature:        llvm-ar: error: unknown option [a-zA-Z]|
+                         OVERVIEW: LLVM Archiver|
+                         unknown option .\nUSAGE: llvm-ar|
+                         Archive .*lib[A-Za-z0-9_-]+\.a .*failed|
+                         llvm-ranlib: error
+severity:               3
+category:               build-system, toolchain, portability, ohos, conan
+match_keywords:         llvm-ar: error: unknown option, AR=llvm-ar, ar rusc,
+                         jam AR override, Archive failed, LLVM Archiver,
+                         environment variable imported by jam, host toolchain env,
+                         CFLAGS from host env, /usr/local prefix leak
+
+root_cause:             构建工具会把宿主环境里的同名工具链变量读成自己的配置，而宿主导出的
+                         那一套不满足该工具的语法约定。Jam 会把与 jam 变量同名的环境变量直接
+                         导入变量表，于是 Jambase 的 `AR ?= ar rusc` 被环境里的 `AR=llvm-ar`
+                         顶掉（`?=` 只在“未设置”时生效，这里已经“设置”了），归档动作变成
+                         `llvm-ar <archive> <objs>`（缺操作符），llvm-ar 把归档文件名首字母
+                         当成选项，报 `unknown option n` 并使全部 Archive 目标失败、级联 skip
+                         掉所有可执行文件；autoconf 的 AC_PROG_AR/libtool 同样直接用环境里的
+                         AR/RANLIB，内置三方库（jpeg/tiff）的 configure 里出现同一错误。
+                         同一批变量还会经 Jambase 的 `CCFLAGS ?= $(CPPFLAGS) ...`、
+                         `LINKFLAGS ?= $(LDFLAGS)` 把宿主 `-I/-L$HOME/usr/local` 收编进每条
+                         编译/链接命令，把共享用户前缀混进构建（R49/E524 同类风险）。
+affected_scope:         任何“构建工具自身从环境变量取配置”的项目：Jam（AR/CC/C++/LINK/
+                         CCFLAGS/LINKFLAGS/RANLIB）、autoconf+libtool（AR/RANLIB/NM/STRIP/LD/
+                         CC/CFLAGS/LDFLAGS/CPPFLAGS）、make（MAKE/AR/RANLIB/CFLAGS/LDFLAGS）。
+                         OHOS 设备把通用工具链（llvm-ar/llvm-ranlib/llvm-nm…）导出为全局环境
+                         变量，是否命中取决于“变量名是否与项目变量同名”。
+verification_cmd:        env | grep -E '^(AR|RANLIB|NM|STRIP|AS|LD|CFLAGS|LDFLAGS|CPPFLAGS)=' ;
+                         grep -n '^[ \t]*AR[ \t]*?=' Jambase ;
+                         grep -n "llvm-ar: error: unknown option" <build.log>
+
+rec_priority:           1
+rec_approach:           sanitize-host-toolchain-env-vars
+rec_description:        构建前剔除构建工具会隐式读取的宿主工具链变量
+                         （AR RANLIB NM STRIP AS LD CFLAGS CXXFLAGS CPPFLAGS LDFLAGS），
+                         再用确定性通道补回来：编译器取自 tools.build:compiler_executables
+                         （R33）；归档器/链接器由项目自己的构建配置钩子显式给出——Jam 用上游
+                         自带的 JamExtra（`CC = ... ; AR = ar rusc ; RANLIB = "" ;`），
+                         autotools 用 AutotoolsToolchain/LIBS；依赖的 -I/-L/-rpath 只从
+                         self.dependencies 的 cpp_info 注入，避免把 $HOME/usr/local 带进链接行。
+rec_command:            python: for v in ("AR","RANLIB","NM","STRIP","AS","LD","CFLAGS",
+                         "CXXFLAGS","CPPFLAGS","LDFLAGS"): os.environ.pop(v, None)
+rec_auto_fix:           false
+rec_impl:               conanfile-env-sanitize
+
+fallback_priority:      2
+fallback_approach:      pass-explicit-tool-flags
+fallback_description:   无法改配方时用构建工具命令行强制覆盖：`jam -sAR="ar rusc" -sCC=<clang>`
+                         或 `make AR="ar rusc" RANLIB=ranlib`；autotools 用
+                         `./configure AR=ar RANLIB=ranlib`。缺点：每处调用都要重复，且内置
+                         三方库自己的 configure 仍需在环境层处理。
+fallback_command:       jam -sAR='ar rusc' -sCC=clang -fJambase
+fallback_auto_fix:      false
+
+similar_to:             E012（方向相反：E012 是“找不到/用错 GNU ar”，本条是“同名变量被宿主
+                         值顶掉、且覆盖值语法不完整”）、E007（config.guess 不认识 HarmonyOS）、
+                         E011（HMDFS umask 077）
+principles:             P010
+doc:                    无（待 promote 后生成 doc/DRAFT-argyll-cms-jam-host-toolchain-env-shadowing.md）
+last_updated:           2026-09-27
+hits:                   1
+source:                 argyll-cms/3.5.0（conanfile.py build() 环境净化 + JamExtra 的 AR/CC 显式赋值）
