@@ -1,0 +1,60 @@
+#====================================================================
+# E6417 draft — Unix compress(1) 源码包 (.tar.Z / LZW) 在 conan get()、
+#               init-build 与设备 toybox gzip 上都解不开
+# 对应文档: knowledge/drafts/E6417-draft-CC63.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     E6417
+trigger_tool:           conan|python|install
+phase:                  source|configuration
+error_signature:        BadZipFile.*File is not a zip file.*\.tar\.Z|\.tar\.Z.*BadZipFile|解压失败: not a gzip file|gzip: .*\.Z: not in gzip format|gzip: .*: not gzip
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               conan, packaging, source-download, url-extension
+match_keywords:         .tar.Z, .Z, compress, uncompress, LZW, 1f9d, BadZipFile, File is not a zip file, not a gzip file, Aminet, get(), unzip, zcat, toybox gzip
+title:                  Unix compress(.tar.Z, LZW) 源码包：conan get() 落入 zip 分支报 BadZipFile，init-build 按 gzip 解失败，设备 toybox gzip 无 LZW
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             .tar.Z 是 Unix compress(1) 的 LZW 流（魔数 1F 9D），不是 gzip。conan.tools.files.unzip() 只按扩展名识别 tar.gz/tgz/tbz2/tar.bz2/tar/gz/tar.xz/txz，其余一律交给 zipfile，于是 get() 报 "BadZipFile: File is not a zip file"（与 E483 同签名但根因不同：URL 有扩展名，只是格式不受支持）；ohc init-build 的 _guess_tar_format() 对未知扩展名默认 tar.gz，报 "解压失败: not a gzip file"；鸿蒙设备用户态是 toybox，其 gzip 不含 LZW 解码，gzip -dc/zcat 在 CI 设备上同样失败；source() 阶段 profile 的 buildenv 尚未生效，cmake -E tar（libarchive 支持 compress）是否在 PATH 不受配方控制。
+affected_scope:         以 Unix compress(.Z/.tar.Z) 分发源码的老软件：Aminet（misc/unix 下大量 .tar.Z）、NAIF CSPICE、早期 GNU/BSD/netlib 归档等。x86 构建机上 GNU gzip 能解 .Z，所以本地手工解包成功、CI 设备 source() 失败的“本地绿 CI 红”风险最高。
+verification_cmd:       head -c 2 <archive> | od -An -tx1   # 输出 1f 9d 即 compress(LZW)；1f 8b 才是 gzip
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           recipe-inline-python-unlzw
+rec_description:        source() 里不用 get()：download(url, file, sha256=...) 取回 .tar.Z，用配方内置的纯 Python LZW 解码（gzip unlzw.c 的约 50 行移植）得到 tar 字节流，再用 tarfile 逐成员解出（剥顶层目录、拒绝绝对路径与 ..）。不依赖构建机或设备上的 gzip/uncompress/cmake，x86 runner 与鸿蒙设备行为一致；download() 支持 CI 预下载改写后的 file:// URL。
+rec_command:            download(self, src["url"], archive, sha256=src["sha256"]); tar_bytes = _unlzw(open(archive, "rb").read()); tarfile.open(fileobj=io.BytesIO(tar_bytes))
+rec_auto_fix:           false
+rec_impl:               manual-recipe-edit
+
+fallback_priority:      2
+fallback_approach:      cmake-e-tar-libarchive
+fallback_description:   配方已 tool_requires cmake 或能保证 source() 时 cmake 在 PATH 时，用 cmake -E tar xf <file>.tar.Z（CMake 内置 libarchive 支持 compress）；archives/c/cspice/67.0.0.1 为先例。
+fallback_command:       self.run('cd "%s" && cmake -E tar xf %s' % (self.source_folder, archive_name))
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+# ═══ 禁止策略 ═══
+forbid_1_pattern:       gzip -dc .*\.tar\.Z|zcat .*\.tar\.Z|uncompress .*\.Z
+forbid_1_reason:        依赖构建机的 GNU gzip/ncompress；鸿蒙设备 toybox gzip 无 LZW，CI 上 source() 失败。
+forbid_1_consequence:   x86 本地 W3 通过而 CI 设备在 source 阶段红，白跑一轮 CI。
+forbid_2_pattern:       sources:.*\.tar\.gz.*(repack|重打包)|filename=.*\.tar\.gz.*\.tar\.Z
+forbid_2_reason:        把 .Z 重新打包成 .tar.gz 上传到第三方位置或伪造 filename 扩展名，违反 R39 官方源要求且 sha256 不再对应上游。
+forbid_2_consequence:   PF7 源 URL 闸 / 审计拦截，或解压仍失败。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P010
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E483, E271]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E6417-draft-CC63.md
+last_updated:           2026-09-25
+source_event:           ppunpack/1.0（Aminet misc/unix/ppsmall-1.0.tar.Z）：init-build 报 "解压失败: not a gzip file"；conan unzip() 实测 BadZipFile；配方改为 download + 内置 Python unlzw，与 zcat 输出逐字节一致（16384 字节 tar），conan create 通过。
