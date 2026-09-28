@@ -1,0 +1,4 @@
+cmake_minimum_required(VERSION 3.15)
+project(fabric_completion_test LANGUAGES CXX)
+add_executable(fabric_completion_probe fabric_completion_probe.cpp)
+target_compile_features(fabric_completion_probe PRIVATE cxx_std_11)
