@@ -1,0 +1,34 @@
+#!/usr/bin/env python3
+"""Consumer-side checks for the HarmonyOS Yodl application package."""
+
+import os
+import shutil
+
+from conan import ConanFile
+from conan.tools.layout import basic_layout
+
+
+class YodlTestConan(ConanFile):
+    settings = "os", "compiler", "build_type", "arch"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def layout(self):
+        basic_layout(self)
+
+    def test(self):
+        script = os.path.join(self.source_folder, "test_yodl.sh")
+        target = os.path.join(self.build_folder, "test_yodl.sh")
+        shutil.copy(script, target)
+        bindir = self.dependencies[self.tested_reference_str].cpp_info.bindir
+        shell = self._resolve_shell()
+        self.run(f'{shell} "{target}" "{bindir}"', env="conanrun")
+
+    @staticmethod
+    def _resolve_shell():
+        for candidate in ("/data/service/hnp/bin/bash", "/usr/bin/zsh",
+                          "/bin/sh", "sh"):
+            if os.path.isfile(candidate):
+                return candidate
+        return "sh"
