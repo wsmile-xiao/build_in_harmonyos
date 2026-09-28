@@ -1,0 +1,166 @@
+# ═══ Draft knowledge entry — Conan 打的 postgresql 是 DESTDIR 可重定位安装、configure 前缀为空，pg_config 回 "//include/postgresql/server" 这类指向文件系统根的路径；凡是用 pg_config 反查安装位置的上游构建（PGXS/autotools/meson）都必须先塞一个只改路径类查询的 pg_config shim ═══
+# Timestamp: 2026-09-20
+# Software: pgroonga 4.0.8
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pgroonga-4.0.8-conan-postgresql-empty-prefix-pg-config-shim
+trigger_tool:           conan|meson|make|clang|sh
+phase:                  configuration
+error_signature:        pg_config --includedir-server.*//|No such file or
+                         directory.*//include/postgresql|Cannot find
+                         postgres\.h|//lib/postgresql|pg_config: not found|fatal
+                         error: 'postgres\.h' file not found|/usr/include/postgresql
+severity:               2
+category:               conan, packaging, postgresql, relocation, build-system,
+                         headers
+match_keywords:         pg_config, --includedir-server, --pkglibdir, --sharedir,
+                         --bindir, --cppflags, --cflags_sl, --pgxs, DESTDIR,
+                         empty configure prefix, relocatable install, //include,
+                         double slash path, PostgreSQL extension, PGXS,
+                         PG_CONFIG, meson -Dpg_config=, pgroonga, postgresql/18.3
+title:                  Conan 打包的 postgresql 前缀为空：pg_config 回 "//..."
+                        坏路径，必须塞 pg_config shim
+
+root_cause: >
+  Conan 打的 postgresql 制品用 DESTDIR 安装、configure 的 prefix 留空，装出来的
+  树是「可重定位」的：包内的 pg_config 记录的并非是包目录而是空前缀。于是
+  `pg_config --includedir-server` 回 `//include/postgresql/server`、
+  `--pkglibdir` 回 `//lib/postgresql`、`--sharedir` 回 `//share/postgresql`、
+  `--bindir` 回 `//bin`、`--cppflags` 回 `-I//include/postgresql/server
+  -I//include`。`//` 在 Linux 上等价于 `/`，所以这些路径指向的是**文件系统
+  根**而不是包目录 —— 编译期 `postgres.h` 找不到，链接期 pkglibdir 写不进去。
+  而上游构建（PGXS 的 Makefile、autotools 的 PG_CONFIG、meson 的
+  pg_config 查询）普遍把 pg_config 当成唯一可信的安装位置来源，不会去
+  猜包目录，因此必然踩上。
+
+affected_scope: >
+  所有「编译期需要 PostgreSQL 服务端头 / 链接期需要 pkglibdir / 安装期需要
+  sharedir」的 PG 扩展与 PG 客户端库，只要它的 PostgreSQL 来自 Conan
+  （`tool_requires("postgresql/*")` 或 `requires("postgresql/*")`，OHOS
+  场景下两者都会解析到同一份可重定位制品）。具体形式包括但不限于：
+  PGXS 的 `make USE_PGXS=1`、autotools 的 `./configure PG_CONFIG=...`、
+  meson 的 `run_command(pg_config, ...)` 或 `-Dpg_config=`。
+  反向不适用：直接用 `postgresql/18.3` 自己 build 的包（它知道自己的
+  package_folder）与在本仓库 build() 里从源码自举 PG 树的配方
+  （如 postgresql-topn/2.7.0）都不需要 shim。
+
+verification_cmd: >
+  # 1. 先看依赖包自己的 pg_config 说了什么（在 conan create 的
+  #    generate() 阶段或任何能拿到 package_folder 的地方）
+  "$PG_PKG/bin/pg_config" --includedir-server   # 期望看到 //include/postgresql/server
+  "$PG_PKG/bin/pg_config" --pkglibdir           # 期望看到 //lib/postgresql
+  "$PG_PKG/bin/pg_config" --cppflags            # 期望看到 -I//include/postgresql/server
+  # 2. 再确认包内真实目录存在
+  ls "$PG_PKG/include/postgresql/server/postgres.h"
+  ls "$PG_PKG/lib/postgresql/pgxs/src/makefiles/pgxs.mk"
+  # 3. 判据：上面 1 是坏路径、2 存在 → 必须生成 shim
+rec_priority:           1
+rec_approach:           generate-a-path-only-pg-config-shim-and-pass-it-to-the-build
+rec_description: >
+  在 `generate()` 里往 `<generators>/pgsql-bin/pg_config` 写一个 `#!/bin/sh`
+  包装脚本，只把**路径类**查询重定向到 `dependencies.build["postgresql"]
+  .package_folder` 下的真实目录（--includedir / --includedir-server /
+  --pkglibdir / --sharedir / --bindir / --libdir / --pgxs / --cppflags /
+  --cflags_sl），其余参数一律 `exec "$REAL" "$@"` 转发给真 pg_config
+  （--version / --configure / --cc 等仍要真实值，上游会用来做版本判断与
+  特性探测）。写好 chmod +x，然后把 shim 的路径交给上游：
+  meson 是 `-Dpg_config=<shim>`，autotools 是 `./configure PG_CONFIG=<shim>`，
+  PGXS 是 `make PG_CONFIG=<shim>`。
+  注意 --cflags_sl 上游期望的是「shared library 编译标志」，实现里给的是
+  空字符串（CMake/Meson 自己会加 -fPIC），而 `--cppflags` 要回
+  `-I<includedir-server> -I<includedir>` **两个** -I，缺一个就会在
+  `#include "postgres.h"` 之后的 `#include "utils/..."` 处断掉。
+rec_command: >
+  # conanfile.py::generate() 摘要
+  pg_pkg = self.dependencies.build["postgresql"].package_folder
+  script = '''#!/bin/sh
+  REAL="%s/bin/pg_config"
+  case "$1" in
+    --includedir)        echo "%s/include" ;;
+    --includedir-server) echo "%s/include/postgresql/server" ;;
+    --pkglibdir)         echo "%s/lib/postgresql" ;;
+    --sharedir)          echo "%s/share/postgresql" ;;
+    --bindir)            echo "%s/bin" ;;
+    --libdir)            echo "%s/lib" ;;
+    --pgxs)              echo "%s/lib/postgresql/pgxs/src/makefiles/pgxs.mk" ;;
+    --cppflags)          echo "-I%s/include/postgresql/server -I%s/include" ;;
+    --cflags_sl)         echo "-fPIC" ;;
+    *)                   exec "$REAL" "$@" ;;
+  esac
+  ''' % (pg_pkg, pg_pkg, ...)
+  # 写 <generators>/pgsql-bin/pg_config + chmod +x，然后交给上游：
+  tc.project_options["pg_config"] = shim        # meson
+  # autotools:  ./configure PG_CONFIG=<shim>
+  # PGXS:       make PG_CONFIG=<shim>
+rec_auto_fix:           true
+rec_impl:               recipe-side-generate
+
+fallback_priority:      2
+fallback_approach:      materialize-the-postgresql-install-tree-into-a-writable-prefix
+fallback_description: >
+  若上游完全不接受外部 pg_config（例如 PGXS 的 Makefile 早于参数解析就用
+  `$(shell pg_config ...)` 或在 include 阶段就展开），可以退而把 postgresql
+  包的内容**按真实布局**复制/符号链接到 build 目录下的一个假前缀里，再把
+  PATH 前置到 `<fake>/bin`，让上游调到的 pg_config 就是这个假前缀自己的。
+  代价：多一份可能上百 MB 的树（含 include/ 与 bin/），且假前缀里的
+  pg_config 仍是包内那个（它自己回的还是 //...），需要连同 #1 的 shim
+  一起放进去 —— 于是复杂度反而更高。仅在 #1 被上游的构建时机挡住时使用。
+fallback_command:       ln -s "$PG_PKG/include" "<fake>/include" && ln -s "$PG_PKG/lib" "<fake>/lib" && PATH="<fake>/bin:$PATH"
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-build
+
+forbid_1_pattern:       cpp_info\.(includedirs|libdirs)\s*=.*postgresql/server|直接
+                         拼 <pkg_folder>/include/postgresql/server 给上游而绕过
+                         pg_config
+forbid_1_reason:        绕过 pg_config 只解决了"编译期找得到头"，解决不了
+                          "上游自己拿 pg_config 算 pkglibdir / sharedir /
+                          cppflags / 版本"这些后续步骤：上游仍会拿到 //...
+                          并在链接或安装阶段失败，症状从"找不到 postgres.h"
+                          变成"装到了文件系统根 / 权限拒绝"，更难归因。
+                          而且抢在 pg_config 之前喂路径属于"改上游的探测逻辑"，
+                          超出打包职责（P005）。
+forbid_1_consequence:   一轮 CI 白跑（本赛事 CI 排队 ~2.5-3 小时），失败点从
+                          configure 期挪到 install 期，错误信息与真正原因
+                          （空前缀）脱钩，下一轮还会踩同一个坑。
+
+forbid_2_pattern:       --prefix\s*=.*package_folder|--prefix.*\$\(pwd\)|给
+                         postgresql 传 --prefix 重装
+forbid_2_reason:        postgresql 是**依赖包**不是本包要构建的对象，用
+                          --prefix 重装等于在配方里重编一份 PG；既浪费
+                          构建时间，也把「依赖」变成了「本包产物」，违反
+                          规则 20 的 PR 原子性（一个 PR 只包含一个配方）。
+                          真要自举请照 postgresql-topn/2.7.0 的做法写成
+                          显式的 build 期自举，而不是靠 --prefix 偷改依赖。
+forbid_2_consequence:   构建时间暴涨到不可控（PG 全量构建 10min+），
+                          且同一份 PG 在依赖缓存与本包产物里出现两份，
+                          后续 package_info/依赖图会自相矛盾。
+
+forbid_3_pattern:       chmod.*pg_config(?![^\n]*shim)|把包内 bin/pg_config
+                         改成可执行/就地改写包内 pg_config
+forbid_3_reason:        Conan cache 是**只读**的：就地改写依赖包的 pg_config
+                          会直接失败；即使侥幸可写，被改写的内容也不会
+                          随包指纹变化，下一次 CI 拿到的是"改过又没改"的
+                          不确定状态。shim 必须落在本包自己的
+                          generators_folder 下。
+forbid_3_consequence:   失败信息是 permission denied 而不是路径错误，
+                          且跨 worker 表现不一致（有的 worker 恰好可写），
+                          属最难排查的一类抖动。
+
+principles:             P005
+similar_to:             DRAFT-pgroonga-4.0.8-groonga-dep-baked-build-prefix-pc-and-plugins-dir
+conflicts_with:
+prerequisite_of:        DRAFT-pgroonga-4.0.8-pg-extension-relocatable-install-and-discovery
+
+doc_file:               knowledge/drafts/DRAFT-pgroonga-4.0.8-conan-postgresql-empty-prefix-pg-config-shim.md
+last_updated:           2026-09-20
+source_event:           archives/p/pgroonga/4.0.8
+
+authors:                2301_76770579
+source_pr:              11628
+source_commit:          3cdf9f29a0ab
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20

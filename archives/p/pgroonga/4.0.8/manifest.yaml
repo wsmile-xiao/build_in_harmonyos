@@ -1,0 +1,49 @@
+# 版本级 manifest — pgroonga 4.0.8
+# 文件位置: archives/p/pgroonga/4.0.8/manifest.yaml
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "4.0.8"
+software: pgroonga
+
+status: built
+build_date: "2026-09-20"
+build_system: meson
+
+source:
+  url: "https://github.com/pgroonga/pgroonga/releases/download/4.0.8/pgroonga-4.0.8.tar.gz"
+  sha256: "09509b7c23f29bcb00d8c769b222156a023ee7ddd896ee875b0a4acdcd657498"
+  tar_format: tar.gz
+
+build:
+  system: meson
+  configure_options:
+  - "install_to_postgresql=false —— 产物不装进 PostgreSQL 安装目录，落在包内 lib/ 与 share/extension/（Conan 打的 postgresql/18.3 是 DESTDIR 可重定位安装，无固定 pkglibdir 可写）"
+  - "datadir=\"share\" —— ConanToolchain 默认把 datadir 设为 resdirs[0]（res），改回 share 才能得到 share/extension/<name>.control 这一真实 PG 扩展布局"
+  - "message_pack=enabled / xxhash=enabled —— 上游默认 auto（探测到就启用），显式钉住以对齐 requirements() 里钉住的 msgpack/7.0.1 与 libxxhash/0.8.3，避免 CI 上探测结果漂移导致产物特性变化"
+  - "test=false —— 上游 test=true 会硬 find_program('ruby')（跑 test/prepare.rb 生成 pg_regress schedule）；OHOS 无 ruby。回归改由 test_package 用 pg_regress 直接驱动，并用 Python 复刻 prepare.rb 的 schedule 生成"
+  - "pg_config=<generated shim> —— 上游用 pg_config 反查 PG 安装位置（--includedir-server/--pkglibdir/--sharedir/--bindir/--cppflags/--cflags_sl），而 Conan 的 postgresql 前缀为空、pg_config 会回 //include/postgresql/server 这类坏路径；generate() 生成 shim 只重定向路径类查询"
+  dependencies:
+  - "groonga/16.0.8 (host, run=True；检索引擎，7 个 shared_module 都链接 libgroonga.so。run=True 见 knowledge_gained 最后一条：SHARED 包会把 STATIC 依赖整条闭包挤出运行期)"
+  - "msgpack/7.0.1 (host)"
+  - "libxxhash/0.8.3 (host)"
+  - "postgresql/18.3 (tool_requires —— CI 的 -pr:b 与 -pr:h 是同一个 OHOS profile，故解析到已发布的 OHOS 制品，一次下载即拿到 include/postgresql/server 头 + lib/postgresql + pgxs + initdb/pg_ctl/psql/pg_regress 全套)"
+  cc: clang
+  cxx: clang++
+
+patches_applied: []
+
+knowledge_gained:
+- "PostgreSQL 扩展包在 Conan 里应当打 tool_requires 而不是 requires：CI 的 -pr:b 与 -pr:h 是同一个 OHOS profile，tool_requires 直接解析到已发布的 OHOS postgresql 制品，构建期就能拿到服务端头、pgxs 与全套服务端可执行文件，不必像 postgresql-topn 那样在 build() 里从源码自举一份 PG（那份做法要额外处理 config/install-sh 与 clang -E 当 cpp 用）"
+- "Conan 打的 postgresql 是 DESTDIR 可重定位安装（configure 前缀为空），pg_config 会回 //include/postgresql/server、//lib、//share/postgresql 这类指向文件系统根而非包目录的路径；凡是用 pg_config 反查安装位置的上游构建（PGXS/autotools/meson 皆有）都必须先塞一个只改路径类查询的 pg_config shim，未知参数原样转发给真 pg_config"
+- "上游 tarball（或 Conan 包）里的 *.pc 常常烘焙了构建机前缀：groonga/16.0.8 的 groonga.pc 前缀是构建机路径，直接用会把 -I/-L 指到不存在的目录。配方 generators=\"PkgConfigDeps\" 让 Conan 重新生成，MesonToolchain 会自动把 generators 目录写进 pkg_config_path（CMakeToolchain/autotools 同理，把 generators 目录放进 PKG_CONFIG_PATH）"
+- "PG 扩展的产物布局由上游的 install_to_postgresql / datadir 两个开关决定：关掉 install_to_postgresql 后模块落到 get_option('libdir')、扩展脚本落到 get_option('datadir')/'extension'；而 ConanToolchain 默认 datadir=resdirs[0]，不显式改回 share 就会得到 share/res/extension 这种谁都找不到的路径"
+- "PostgreSQL 18 的 load_external_function 对「简单名」（$libdir/ 之后不再出现目录分隔符）会剥掉 $libdir/ 前缀交给 dynamic_library_path 搜索——所以 pgroonga.control 里 module_pathname='$libdir/pgroonga' 在未设置编译期前缀的可重定位 PG 上依然可用，无需打补丁改写 control"
+- "扩展的发现路径可以在运行期用 extension_control_path（PG 18+）与 dynamic_library_path 的集群参数注入，指向 Conan 包内的 share/extension 与 lib：这样包既能被真集群加载，又不需要往 PG 安装目录里写任何东西（入库目录只读、且不可重定位）"
+- "★ extension_control_path 与 dynamic_library_path 语义不同：extension_control_path 收的是**基目录**——PG 18 的 get_extension_control_directories()（src/backend/commands/extension.c）对列表中每一个**不是字面量 $system** 的元素都会再拼一层 '/extension'（`else mangled = psprintf(\"%s/extension\", piece);`），且 parse_extension_control_file() 有断言 control_dir 必须以 /extension 结尾。所以必须写 '<pkg>/share'，写成 '<pkg>/share/extension' 会被拼成 share/extension/extension → CREATE EXTENSION 报 `extension \"X\" is not available`（现象：布局断言全过、.control 就在包内，PG 却说找不到）。要直接写带 /extension 的绝对路径，只能写成字面量 $system 让 PG 自行展开。dynamic_library_path 则**不**补任何后缀。"
+- "仓库打包的 postgresql/18.3 定义了 HAVE_NO_UNIX_SOCKETS，pg_regress 不能用 --temp-instance，必须 --host/--port 连一个已启动的 TCP 集群；集群参数用 listen_addresses='localhost' + 显式端口"
+- "上游 rubygem 回归入口（prepare.rb 生成 schedule）不可用时不必放弃全量用例：prepare.rb 的行为只有「递归收集 sql/**.sql、每个写一行 `test: <相对路径>`、为每个目录预建 results/<dir>」三件事，用 Python 十几行即可等价复刻，从而在不引入 ruby 的前提下保持与上游完全一致的用例集合"
+- "pgroonga 4.0.8 的上游回归是 1600 个 sql/**.sql 用例（expected/ 下另有 50 个 _1/_2 备用 oracle 覆盖 PG 版本与环境差异），上游 CI 在 PG 14~19 上用同一份 expected/ 全绿——说明该 oracle 集合本身跨 PG 版本稳定；注意上游**默认分支 main** 的朴素扫描是 1608，比钉版多出 8 例（function/physical-table-names/* 5 与 index-scan/view-statistics/user-indexes/* 3），rule4 的声明值须按 1608 报"
+- "groonga 的插件目录是编译期烘焙进 libgroonga.so 的（该包内硬编码的是构建机路径），设备上不存在；运行期用 GRN_PLUGINS_DIR 覆盖即可。另：mecab/stem 是 groonga 的**外部**插件（Debian 上另有 groonga-tokenizer-mecab / groonga-token-filter-stem 两个包），OHOS groonga/16.0.8 未编入，故 function/tokenize/metadata 与 full-text-search/text/options/token-filters/custom 这 2 例必然拿到 unsupported tokenizer/filter"
+- "★ Conan 2 里「SHARED 包的传递依赖全部被 Skipped binaries」是**默认**行为，不是环境问题：requires.py:transform_downstream() 对「pkg_type=SHARED 的包 → 它的依赖」这类边一律压成 headers=False / libs=False / run=require.run；而依赖若声明 package_type=library + shared=False（STATIC），process_package_type() 会给它 set_if_none(\"_run\", False)。两者相乘 ⇒ Requirement.files 为假 ⇒ graph_binaries._skip_binaries() 的 deps_required（收集条件 req.files or (req.direct and is_consumer)）收不到它 ⇒ 整条闭包标成 BINARY_SKIP ⇒ installer.py 直接 continue、set_base_package() 不调用 ⇒ 测试配方里 dep.package_folder is None。症状：test_package 的 Skipped binaries 段列出全部依赖、LD_LIBRARY_PATH 只剩被测包与 tool_requires 两个目录、运行期 `Error loading shared library libXXX.so: (needed by .../被测.so)`。修法：在**消费侧配方**把该 require 显式标 run=True（`self.requires(\"groonga/16.0.8\", run=True)`），它让 req.files 为真、把依赖钉回运行期闭包（顺带让使用者的 conanrun.sh 带上该 libdir）。判据：**不能只信 conaninfo.txt 的 shared 值**——groonga/16.0.8 写着 shared=False，包内却只有 libgroonga.so / libgroonga.so.0 / libgroonga.so.0.0.0（conanmanifest.txt 里 .a 计数为 0），消费者 pgroonga.so 的 DT_NEEDED 里确实有 libgroonga.so.0。要同时看「包内实际装了什么」（.a/.so 分布）与「消费者产物的 DT_NEEDED」，两者对不上时就在消费侧用 run=True 补齐。另有不必加 run=True 的一类：依赖产物的 DT_NEEDED 已经把第三方静态链进去时（此处 libgroonga.so.0 的 DT_NEEDED 只有 libc++_shared.so 与 libc.so，故 lz4/zlib 不必管；msgpack/libxxhash 包内只有 .a，同理）。"
+- "★ 依赖包的 .so 符号链接必须在消费侧物化（E073）：`Error loading shared library X: (needed by Y)` 冒号后 **strerror 为空**是「文件找得到、但加载不了」的特征，与 `No such file or directory`（搜索路径上没有）、`Permission denied`（未签名，E077）三分。本例 groonga/16.0.8 包内 lib/libgroonga.so 与 lib/libgroonga.so.0 都只是指向 libgroonga.so.0.0.0 的符号链接——判定法：conanmanifest.txt 对符号链接记的是**目标字符串**的 md5，实测 64b2e588…==md5(\"libgroonga.so.0\")、33c7fb34…==md5(\"libgroonga.so.0.0.0\")，而对照 sdl12-compat 的 libSDL-1.2.so.0 记的是真文件 md5（设备上加载正常）。HMDFS 解析不了这类链接，而 pgroonga.so 的 DT_NEEDED 恰是链接名 libgroonga.so.0。被加载的是依赖包、改不了它的配方，故在 test_package 把各依赖 libdir 顶层符号链接展开成真文件副本、置于 LD_LIBRARY_PATH 最前（副本按字节复制自带原签名）。排除 E077：libgroonga.so.0.0.0 的 .codesign 段存在（type=1、4096 字节、非零 75），与可加载的 libSDL-1.2.so.0/libpq.so.5（非零 76）同类。同类处置见 libsigc/2.12.1、fluidsynth/2.5.7、libxft/2.3.8。"
+- "★ 鸿蒙内核只让装载带有效 .codesign 段的 ELF（E077），而**加载者是 dlopen 还是 execve 无关**：PostgreSQL 用 load_external_function→dlopen 加载扩展模块，未签名的 lib/pgroonga.so 直接得到 `could not load library .../pgroonga.so: Error loading shared library .../pgroonga.so: Permission denied`（EPERM），于是 test_package 的 14 条行为断言全灭、CI 却把类别标成「测试失败/上游官方测试未通过」。凡产物里有 .so 的库配方（尤其「只出库不出可执行文件」因而容易忘记签名的 PG 扩展/插件），package() 末尾都要对包内真实 ELF 走一遍 llvm-objcopy --remove-section .codesign + binary-sign-tool -selfSign 1（跳过版本化 .so 的软链，用 4 字节 0x7fELF 魔数判 ELF）。判据：CI 报测试失败时先看 errno 文本，出现 Permission denied 且路径是 .so ⇒ E077，改配方重签即可，与库本身无关。"
