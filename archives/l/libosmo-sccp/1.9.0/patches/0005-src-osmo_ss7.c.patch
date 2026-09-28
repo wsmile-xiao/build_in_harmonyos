@@ -1,0 +1,129 @@
+--- a/src/osmo_ss7.c
++++ b/src/osmo_ss7.c
+@@ -20,40 +20,44 @@
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  *
+  */
+ 
+ #include <string.h>
+ #include <errno.h>
+ #include <unistd.h>
+ #include <inttypes.h>
+ #include <netdb.h>
+ #include <netinet/in.h>
++#ifdef HAVE_LIBSCTP
+ #include <netinet/sctp.h>
++#endif
+ 
+ #include <osmocom/sigtran/osmo_ss7.h>
+ #include <osmocom/sigtran/mtp_sap.h>
+ #include <osmocom/sigtran/protocol/mtp.h>
+ #include <osmocom/sigtran/protocol/sua.h>
+ #include <osmocom/sigtran/protocol/m3ua.h>
+ 
+ #include <osmocom/core/linuxlist.h>
+ #include <osmocom/core/select.h>
+ #include <osmocom/core/utils.h>
+ #include <osmocom/core/talloc.h>
+ #include <osmocom/core/logging.h>
+ #include <osmocom/core/msgb.h>
+ #include <osmocom/core/socket.h>
+ #include <osmocom/core/sockaddr_str.h>
+ 
+ #include <osmocom/netif/stream.h>
+ #include <osmocom/netif/ipa.h>
++#ifdef HAVE_LIBSCTP
+ #include <osmocom/netif/sctp.h>
++#endif
+ 
+ #include "sccp_internal.h"
+ #include "xua_internal.h"
+ #include "ss7_internal.h"
+ #include "xua_asp_fsm.h"
+ #include "xua_as_fsm.h"
+ 
+ #define MAX_PC_STR_LEN 32
+ 
+ bool ss7_initialized = false;
+@@ -1209,10 +1213,81 @@
+ 		break;
+ 	case M3UA_TMOD_BCAST:
+ 		if (as->cfg.mode == OSMO_SS7_AS_TMOD_BCAST)
+ 			return true;
+ 		break;
+ 	default:
+ 		break;
+ 	}
+ 	return false;
+ }
++
++#if !defined(HAVE_LIBSCTP)
++/* OpenHarmony / HarmonyOS adaptation:
++ *
++ * The platform has no libsctp and its kernel does not support SCTP
++ * (socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP) -> EPROTONOSUPPORT), so the
++ * libosmocore dependency is built with --disable-libsctp.  libosmocore then
++ * does NOT export the SCTP multi-address ("multi-homing") helpers that this
++ * file's callers use.  Provide local fallbacks so the library still links and
++ * runs:
++ *
++ *  - osmo_sock_multiaddr_get_ip_and_port(): replicate libosmocore's own
++ *    non-SCTP default path (single address via osmo_sock_get_ip_and_port).
++ *  - osmo_multiaddr_ip_and_port_snprintf(): pure formatting helper, re-implemented.
++ *  - osmo_sock_multiaddr_add/del_local_addr(): SCTP multi-homing is not
++ *    applicable on a single-homed (TCP) socket; the local bind set is fixed at
++ *    connect/bind time, so treat as a successful no-op.
++ *
++ * These are only compiled when HAVE_LIBSCTP is undefined (i.e. exactly on
++ * platforms that need them), so they never collide with libosmocore's real
++ * SCTP-enabled implementations.
++ */
++int osmo_sock_multiaddr_get_ip_and_port(int fd, int ip_proto, char *ip, size_t *ip_cnt, size_t ip_len,
++					char *port, size_t port_len, bool local)
++{
++	if (*ip_cnt == 0) {
++		*ip_cnt = 1;
++		return 0;
++	}
++	*ip_cnt = 1;
++	return osmo_sock_get_ip_and_port(fd, ip, ip_len, port, port_len, local);
++}
++
++int osmo_multiaddr_ip_and_port_snprintf(char *str, size_t str_len,
++					const char *ip, size_t ip_cnt, size_t ip_len,
++					const char *portbuf)
++{
++	const char *first;
++	bool is_v6;
++	int off = 0;
++
++	if (ip_cnt == 0) {
++		snprintf(str, str_len, "NULL:%s", portbuf ? portbuf : "");
++		return strlen(str);
++	}
++
++	first = &ip[0];
++	is_v6 = !!strchr(first, ':');
++	if (is_v6)
++		off += snprintf(str + off, str_len - off, "[");
++	off += snprintf(str + off, str_len - off, "%s", first);
++	if (is_v6)
++		off += snprintf(str + off, str_len - off, "]");
++	if (portbuf)
++		off += snprintf(str + off, str_len - off, ":%s", portbuf);
++	return off;
++}
++
++int osmo_sock_multiaddr_add_local_addr(int sfd, const char **addrs, size_t addrs_cnt)
++{
++	/* SCTP multi-homing is unavailable; the socket is single-homed and its
++	 * local address set was already fixed at bind/connect time. */
++	return 0;
++}
++
++int osmo_sock_multiaddr_del_local_addr(int sfd, const char **addrs, size_t addrs_cnt)
++{
++	/* See osmo_sock_multiaddr_add_local_addr() above. */
++	return 0;
++}
++#endif /* !HAVE_LIBSCTP */
