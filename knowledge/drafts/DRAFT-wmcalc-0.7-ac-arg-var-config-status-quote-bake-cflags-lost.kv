@@ -1,0 +1,66 @@
+#====================================================================
+# Draft: autotools PKG_CHECK_MODULES 的 AC_ARG_VAR 逃逸口只能走环境变量；
+#        以 configure 命令行参数传值时，引号被 config.status 原样烘进生成的
+#        Makefile ⇒ 编译器收到单个带引号参数并静默忽略，症状只剩头文件找不到
+#        （与 E075 的 C_INCLUDE_PATH 过滤同症状、不同因、不同处方）
+# Trigger instance: wmcalc 0.7（任务 11937，构建机 B，2026-09-27）
+#====================================================================
+
+id:                     DRAFT-WMCALC-0.7-AC-ARG-VAR-CONFIG-STATUS-QUOTE-BAKE-CFLAGS-LOST
+trigger_tool:           configure|config.status|make|pkg-config|autoconf
+phase:                  configuration|compilation
+error_signature:        'fatal error: .*X11/Xlib\.h: No such file or directory|\.h: No such file or directory'
+severity:               2
+category:               autotools, pkg-config, quoting, build-env
+match_keywords:         AC_ARG_VAR, PKG_CHECK_MODULES, config.status, 引号, quoting, 烘进 Makefile,
+                        X11_CFLAGS, X11_LIBS, 静默忽略, silently ignored, 环境变量传值
+
+title:                  |-
+  PKG_CHECK_MODULES 的 AC_ARG_VAR 逃逸口只能用环境变量传值。写成 configure 命令行参数时，值被 config.status
+  原样烘进生成的 Makefile，引号使编译器收到单个带引号参数并静默忽略整组 -I，症状只剩一句头文件找不到
+
+root_cause:             |-
+  autoconf 的 AC_ARG_VAR 会把用户经命令行传入的变量写进 config.status 的替换表，再原样展开到 AC_SUBST 的目标
+  （通常是生成的 Makefile）。若传值时带 shell 引号（形如 X11_CFLAGS 等于 "-I/a -I/b"），这层引号不会被剥掉，
+  而是成为 Makefile 里该变量值的一部分。make 展开后交给编译器的是单个以引号开头的参数，其 -I 路径因此整体失效，
+  且编译器不报错，只剩下游的 fatal error 找不到 X11/Xlib.h。正确通道是环境变量：AC_ARG_VAR 声明的变量在未出现在
+  命令行时会回落到同名环境变量，值经 autoconf 正常展开、不带多余引号。
+
+affected_scope:         |-
+  所有用 PKG_CHECK_MODULES + AC_ARG_VAR（autoconf 对 *_CFLAGS/*_LIBS 的标准做法）、且适配侧需要手工指定头/库
+  路径的 autotools 工程；conan 配方里给 configure 传命令行变量的写法尤其容易踩。不适用：pkg-config 因
+  C_INCLUDE_PATH 主动过滤掉 -I 的情形（走 E075，处方相反，要移除 C_INCLUDE_PATH/LIBRARY_PATH）。
+
+verification_cmd:       |-
+  grep -n '^X11_CFLAGS' <构建目录>/Makefile      # 值以引号开头即命中本条
+
+rec_priority:           1
+rec_approach:           pass-via-environment-not-configure-args
+rec_description:        |-
+  把 AC_ARG_VAR 家族的变量一律经环境变量注入（conan 侧用构建环境/VirtualBuildEnv，或 self.run 前置赋值），
+  configure 命令行不再带同名参数；改完必须用 grep 看生成的 Makefile 里该行值已不带引号（一手判据），
+  只看 configure 是否成功会得出错结论，因为 configure 照样通过。
+
+rec_command:            'X11_CFLAGS="$X11_CFLAGS" X11_LIBS="$X11_LIBS" ./configure --build=aarch64-unknown-linux-ohos --host=aarch64-unknown-linux-ohos && grep -n "^X11_CFLAGS" Makefile'
+rec_auto_fix:           false
+rec_impl:               |-
+  wmcalc 0.7 采用本处方：不再把 X11_CFLAGS/XEXT_CFLAGS/XPM_CFLAGS 写成 configure 命令行参数，改由环境变量传入，
+  编译行里的 -I 恢复生效（一手：改前报 fatal error 找不到 X11/Xlib.h，改后同一编译行可解析到 conan 包内 include 目录）。
+
+fallback_priority:      2
+fallback_approach:      quote-free-single-token-per-flag
+fallback_description:   |-
+  确需在命令行传时，把每个 flag 拆成不带引号的独立参数（或改用 configure 提供的 --with-* 类通道），
+  并同样以 grep 复验 Makefile 里的值。给整串加引号的"看起来更规范"写法正是本条的触发形态。
+
+fallback_command:       'grep -nE "^[A-Z0-9_]+_CFLAGS *:?= *\"" Makefile || echo NO_QUOTE_BAKED'
+
+forbid_1_pattern:       以 configure 命令行参数形式传 AC_ARG_VAR 家族变量并给整串加引号
+forbid_1_reason:        |-
+  引号会经 config.status 烘进生成的 Makefile，使编译器收到单个带引号参数而静默丢弃整组 -I/-L；configure 阶段
+  不报错，故障推迟到编译期且症状与真因相距两层，定位成本高。
+
+forbid_1_consequence:   |-
+  表现为第三方头文件找不到，容易被误判成依赖未发布或头文件缺失，进而错手 block 转手、或去改上游源码，浪费整轮构建。
+
+principles:             real-evidence-over-assumption, verify-generated-file-not-configure-exit-code
