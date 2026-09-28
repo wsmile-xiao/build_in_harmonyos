@@ -1,0 +1,64 @@
+#====================================================================
+# DRAFT-10001-qt6-cmake-mixed-link-ohos
+# Qt6 CMake 应用 + 非 Qt 第三方库裸 SET() 混链的 OHOS Conan 适配模式
+# 来源: qastools 1.4.0 适配 (2026-09-19)
+#====================================================================
+
+id:                     DRAFT-10001
+trigger_tool:            cmake|conan create|ld.lld|clang
+phase:                  configure|compilation|linking
+error_signature:        Failed to find required Qt component "LinguistTools"|Could NOT find Qt6Svg \(missing: Qt6Svg_DIR\)|fatal error: 'libudev\.h' file not found|ld\.lld: error: unable to find library -l(udev|alsa)|undefined symbol: udev_new
+match_keywords:          Qt6, LinguistTools, Qt6Svg_DIR, CMAKE_PREFIX_PATH, libudev.h, UDEV_LIBRARIES, SET (, bare library name, musl, sstream, implicit instantiation, qastools, multi-package Qt
+category:               build-system, cmake, conan, qt6
+severity:               2
+status:                 draft
+agent_id:               atomcode-qastools
+forbid_1_pattern:       #include <linux/netlink.h>.*qastools
+forbid_1_reason:        本条目不涉及 netlink 头文件冲突；那是 E091 的领域。
+forbid_2_pattern:       conan\s+install.*-r\s+(conancenter|ohpcd)
+forbid_2_reason:        本条目是消费侧适配模式，不是下载/配方发布问题。
+root_cause: >
+  Qt6 CMake 应用 + 非 Qt 第三方库混链在 Conan/OHOS 下五个固定卡点：
+  (1) Qt 组件跨包分布（qtbase 不含 Svg/Tools 等独立包组件），
+  find_package(Qt6 COMPONENTS X) 必然找不到 X 的 Config 文件；
+  (2) 制品仓 qtbase 变体普遍未构建 Qt6LinguistTools（lupdate/lrelease），
+  上游把 LinguistTools 设为 REQUIRED 时 configure 直接失败；
+  (3) 顶层 INCLUDE_DIRECTORIES 不进入子目录 CMakeLists 作用域，
+  CMakeDeps 导入 target 也无法替换上游裸 SET() 出的路径变量；
+  (4) 上游子目录 SET(FOO_LIBRARIES foo) 覆盖顶层 -DFOO_LIBRARIES=<绝对路径>，
+  静态库/无搜索路径环境（HMDFS）下链接必挂；
+  (5) musl/libc++ 头链比 glibc 短，glibc 下靠间接包含的 STL 头变显式缺失。
+rec_approach: >
+  按卡点编号五步修复：
+  (1) conanfile generate() 把每个 Qt 包目录拼进 CMAKE_PREFIX_PATH，
+  并对每个独立包组件设 Qt6<Comp>_DIR=<包目录>/lib/cmake/Qt6<Comp> 缓存变量
+  （E438 单包场景的多包扩展）；
+  (2) 翻译运行时加载时 patch 守卫 FIND_PACKAGE(Qt6 QUIET COMPONENTS
+  LinguistTools)，缺失则跳过 i18n 子目录（.qm 未生成回退英文）；
+  编译期嵌 .qm 则需先补建含 LinguistTools 的 qtbase 变体；
+  (3) 顶层 CMakeLists PROJECT() 之后 patch 注入 INCLUDE_DIRECTORIES(${X_INCLUDE_DIRS})，
+  值由 conanfile tc.cache_variables 传入绝对路径；
+  (4) conanfile 改传 FOO_LIBRARIES_CACHE=<绝对路径> 避免同名覆盖，
+  patch 子目录 IF(DEFINED FOO_LIBRARIES_CACHE) SET(FOO_LIBRARIES
+  "${FOO_LIBRARIES_CACHE}") ELSE() SET(FOO_LIBRARIES foo) ENDIF()；
+  (5) musl 报 implicit instantiation/undeclared identifier 处显式 #include 对应 STL 头。
+rec_command: >
+  conan create archives/q/qastools/1.4.0 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_cmd: >
+  conan create archives/q/qastools/1.4.0 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_expect: >
+  修复前首错序列: LinguistTools -> Qt6Svg_DIR -> libudev.h -> undefined symbol: udev_new;
+  修复后 test_package TP-001..006 全 PASS（三可执行文件存在 + ELF magic + NEEDED 表）。
+evidence:
+  - "PR: #11414 【知识库扩展】feat(qastools): 1.4.0 适配 HarmonyOS PC"
+  - "temp/qastools/qastools-problem-log.md (P1..P6)"
+  - ".ci_logs/target_qastools.log (本地 conan create 全通过)"
+  - "archives/q/qastools/1.4.0/patches/0001..0005"
+applies_to:
+  - "Qt6 CMake 应用 + alsa/udev 等非 Qt 库混链（音频 GUI 系）"
+  - "kde/qt 应用系项目（find_package Qt6 多组件）"
+  - "上游用裸 SET() 管理依赖路径的 CMake 项目（Conan 消费侧通用）"
+principles:              P005, P011, P014
+caused_by:               E438
