@@ -1,0 +1,198 @@
+# ═══ Draft knowledge entry — 同一个 API 里「返回 GError」和「直接 abort」混着来：GssConfigFile 的两条前置条件违约是 g_assert，不是错误返回；写消费端测试时必须先分清哪条是哪条，否则一个负向用例会把整个测试二进制带走 ═══
+# Timestamp: 2026-09-20
+# Software: libgsystemservice 0.3.0 (GssConfigFile)
+# Gate: 消费端测试设计 / rule12 鸿蒙特有测试的可写性
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libgsystemservice-0.3.0-config-file-preconditions-abort-instead-of-returning-gerror
+trigger_tool:           cc|clang|conan|meson
+phase:                  test|runtime
+error_signature:        assertion failed \(key_file != NULL\)|
+                         assertion failed \(error == NULL\)|
+                         Bail out!|Test killed by SIGSEGV|Aborted \(core dumped\)|
+                         g_assert_no_error|g_assert \(key_file
+severity:               3
+category:               api-semantics,error-handling,contract-mismatch,testing,
+                        abort-vs-gerror,doc-drift
+match_keywords:         GssConfigFile, gss_config_file_new, gss_config_file_get_string,
+                        gss_config_file_get_groups, g_assert, g_assert_no_error,
+                        g_return_val_if_fail, GError, 前置条件 precondition,
+                        契约 contract, 负向用例 negative test, g_test_trap_subprocess,
+                        整个测试进程被带走, docstring 与实现不一致,
+                        "This function does no file I/O", GResource default-path
+
+title:                  同一个库的 API 会把「前置条件违约」分成两种截然不同的
+                        呈现方式——**返回 GError** 与 **`g_assert` 直接 abort**。
+                        分不清就会写出一个「负向用例」，它不返回错误，而是把
+                        整个测试进程杀掉，连剩下的用例一起带走
+
+root_cause: >
+  `GssConfigFile` 的三个入口，失败呈现方式是**混着来的**，而且文档不会告诉你
+  哪条是哪条。
+
+  (a) **构造期：资源里的默认配置读不到 → abort，不是返回 NULL。**
+  `gss_config_file_new()` 的文档写的是：
+
+      * This function does no file I/O.
+      * Returns: (transfer full): a newly allocated #GssConfigFile
+
+  这两句都对，但合起来会误导人。源码 `constructed()`：
+
+      g_assert (self->default_resource != NULL);
+      g_assert (self->default_path != NULL);
+
+      bytes = g_resource_lookup_data (self->default_resource, self->default_path,
+                                      G_RESOURCE_LOOKUP_FLAGS_NONE, &error);
+      g_assert_no_error (error);                       /* ← 路径写错就 abort 在这里 */
+
+      self->key_file = g_key_file_new ();
+      g_key_file_load_from_bytes (self->key_file, bytes, G_KEY_FILE_NONE, &error);
+      g_assert_no_error (error);                        /* ← 默认配置语法错也 abort */
+
+  「no file I/O」说的是 `key_file_paths` 里那些**磁盘文件**是惰性加载的；而
+  `default_resource` / `default_path` 指的那份默认配置是**构造期就强制读**的。
+  于是「`default_path` 拼错了」不是一个可捕获的错误，而是**对象构造即进程终止**。
+
+  (b) **查询期：key 在所有文件里都不存在 → 同样 abort。**
+  `gss_config_file_get_file_for_key()` 逐个文件找这个 key：
+
+      for (i = 0; i <= self->n_paths; i++)
+        {
+          ...
+          if (g_key_file_has_key (key_file, group_name, key_name, NULL))
+            break;
+        }
+      /* Not found? */
+      if (i > self->n_paths)
+        {
+          key_file = NULL;
+          path = NULL;
+        }
+      ...
+      return TRUE;                      /* ← 注意：返回 TRUE，只是 key_file 是 NULL */
+
+  而调用方（`get_uint` / `get_boolean` / `get_string` / `get_strv`）拿到之后是：
+
+      if (!gss_config_file_get_file_for_key (self, ..., &key_file, ..., error))
+        return 0;
+      g_assert (key_file != NULL);      /* ← 走到这里 = abort */
+
+  文档的措辞是「The given key **must exist** in the default configuration file,
+  if not in any others」——这确实是个前置条件，但它违约的代价不是
+  `G_KEY_FILE_ERROR_KEY_NOT_FOUND`，而是进程终止。
+
+  (c) **同一批函数里另外两种失败却是正常的 GError。** 这是最容易判断错的地方：
+
+      | 调用 | 失败 | 呈现 |
+      |---|---|---|
+      | `gss_config_file_new(paths, res, 拼错的 default_path)` | 资源里找不到 | **abort** |
+      | `get_uint(...)` 值越界 | 不在 [min,max] | `G_KEY_FILE_ERROR_INVALID_VALUE` ✅ |
+      | `get_*()` 某个候选文件语法坏 | 解析失败 | `G_KEY_FILE_ERROR_PARSE` ✅ |
+      | `get_*()` key 哪儿都没有 | 前置条件违约 | **abort** ⚠️ |
+      | `get_groups()` | 无 key 参数，不做 `g_assert` | 只返回组列表 ✅ |
+
+  (d) 所以「契约」这件事要一个函数一个函数地读源码，不能按库名/按类名一刀切。
+
+affected_scope: >
+  所有为「GNOME/GLib 风格库」写**消费端测试**或适配配方的人；所有打算写
+  「负向用例」（喂坏输入、断言报错）的人；以及所有根据 docstring 推断
+  错误行为的人。在 CI 上后果尤其糟：abort 会把**同一个二进制里剩下的用例
+  全部带走**，日志尾部只剩一行 `Bail out!`，看起来像环境问题或构建问题，
+  而不是「这条用例本来就不该这么写」。
+
+verification_cmd: >
+  # 1) 文档说的和实现做的是不是一回事 —— 先读 constructed()
+  grep -n 'g_assert_no_error\|g_assert (' <src>/libgsystemservice/config-file.c
+  #   → 构造期两条 + 四个 get_* 各一条 g_assert (key_file != NULL)
+  # 2) 「找不到 key」这条路径的真实返回值
+  sed -n '/Not found?/,/return TRUE/p' <src>/libgsystemservice/config-file.c
+  #   → key_file = NULL; 然后 return TRUE   ← 真正的违约发生在调用方
+  # 3) 想写负向用例？先确认它是不是 abort 型 —— 用一个**子进程**跑，别在主进程里试
+  #    （GLib 自带：g_test_trap_subprocess，宿主进程只看子进程的退出信号）
+  grep -n 'g_test_trap_subprocess' <src>/libgsystemservice/tests/config-file.c
+  # 4) 写消费端测试时，只挑 GError 型失败做负向对照
+  #    可安全断言的：越界 uint（INVALID_VALUE）、语法坏文件（PARSE）
+  #    不可直接断言的：缺 key（abort）、default_path 拼错（abort）
+
+rec_priority:           1
+rec_approach:           classify-each-entry-point-as-gerror-or-abort-before-writing-tests
+rec_description: >
+  给一个库写消费端测试（或适配配方里的 test_package）之前，先把**每个入口点**
+  按失败呈现方式分成三类，再决定怎么写断言：
+
+    1. **返回 GError** —— 可以写负向用例，正常断言 error domain / code；
+    2. **返回哨兵值 + GError**（本包 `get_uint` 越界返回 0 且带错误）—— 断言
+       返回值与错误**两者**，否则「返回 0」会被误读成「读到了 0」；
+    3. **`g_assert` / `g_assert_no_error` 型前置条件** —— **不要在测试主进程里
+       触发它**。真要覆盖，用子进程（`g_test_trap_subprocess` 或直接
+       `g_spawn` 一个最小程序）并断言子进程的**终止信号**，因为 abort 会
+       连带杀掉同二进制内其余所有用例，把「一条用例写错」伪装成「整套环境坏了」。
+
+  分类依据只能来自**读源码**（`g_assert*` / `g_return_val_if_fail` / `g_error_new`
+  的出现位置），不能来自 docstring：本包的 docstring 只写了「key must exist」
+  这个前置条件，没有一个字提示违约代价是 abort。
+rec_command:            >
+  # 分类（源码里三种模式各出现几次、在哪个函数里）
+  grep -n 'g_assert_no_error\|g_assert (\|g_return_val_if_fail\|g_set_error\|g_key_file_error' \
+       <src>/libgsystemservice/config-file.c
+
+  # 消费端测试只断言 GError 型失败（本包 test_package/test.c 的做法）：
+  /* 越界 → 拒绝而不是 clamp */
+  CHECK (gss_config_file_get_uint (config, "Test", "Number", 5000, 6000, &error) == 0);
+  CHECK (g_error_matches (error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_INVALID_VALUE));
+  /* 候选文件语法坏 → 报 PARSE，而不是被当成「没有这个 key」 */
+  CHECK (gss_config_file_get_uint (broken, "Test", "Number", 0, G_MAXUINT, &error) == 0);
+  CHECK (g_error_matches (error, G_KEY_FILE_ERROR, G_KEY_FILE_ERROR_PARSE));
+rec_auto_fix:           false
+rec_impl:               test-design-classification
+
+fallback_priority:      2
+fallback_approach:      cover-abort-typed-preconditions-in-a-subprocess-or-not-at-all
+fallback_description:   >
+  如果确实要覆盖 abort 型前置条件（例如想证明「default_path 拼错会立刻失败」），
+  就地开子进程：`g_test_trap_subprocess` 让同一条用例在主进程里再跑一遍并只
+  检查子进程的退出方式；或把最小复现编成独立小程序用 `g_spawn_sync` 跑，
+  断言 `WIFSIGNALED (status)` / 非零退出码。**不要**在主进程里直接触发，
+  否则其后所有用例都不会执行，日志里只剩 `Bail out!`。
+fallback_command:       grep -n 'g_test_trap_subprocess' -A 12 <src>/libgsystemservice/tests/config-file.c
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       断言.*缺 key.*返回.*GError|test.*missing.*key.*assert.*KEY_NOT_FOUND
+forbid_1_reason:        key 在所有文件里都不存在时返回的仍是 TRUE，违约在调用方的
+                        g_assert (key_file != NULL)，触发即 abort。
+forbid_1_consequence:   测试二进制当场终止，其后用例全部未执行；CI 日志只剩 Bail out!，
+                        会被误判为环境/构建故障，白烧一轮排查。
+forbid_2_pattern:       按 docstring 推断错误行为|文档说返回 GError 所以.*断言
+forbid_2_reason:        本包的 docstring 只声明前置条件（"key must exist"），不声明
+                        违约代价；代价是 abort 还是 GError 只能从源码看出来。
+forbid_2_consequence:   断言写错，且错得看不出来（测试「通过」是因为提前退出了）。
+forbid_3_pattern:       把 get_uint.*返回 0.*当成.*读到了 0|assert.*== 0.*没有检查 error
+forbid_3_reason:        越界/缺 key 时 get_uint 返回 0 且带错误；不检查 error 就分不清
+                        「值是 0」与「读失败了」。
+forbid_3_consequence:   静默把失败当成功——正是 rule4/rule12 要防的那类假通过。
+
+principles:             P012（边界与反例）, rule12（鸿蒙特有测试的可观测行为断言）
+causes:                 []
+caused_by:              GLib 系 API 把「编程错误」与「运行时错误」分开处理：
+                        前者用 g_assert/g_return_* 表示（不可恢复），后者用 GError 表示
+similar_to:             DRAFT-clips-6.3-embedded-api-semantics（嵌入 API 的语义陷阱）、
+                        E265（上游测试注册表与执行集不是一回事——同属「按 API 契约
+                        的字面意思推断行为」这一类错误）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libgsystemservice-0.3.0-config-file-preconditions-abort-instead-of-returning-gerror.md
+last_updated:           2026-09-20
+source_event:           archives/l/libgsystemservice/0.3.0 适配（写 test_package 的负向
+                        对照时读 config-file.c，发现 get_* 的 g_assert (key_file != NULL)
+                        与构造期的 g_assert_no_error 都是 abort 型）
+
+authors:                2301_76770579
+source_pr:              11565
+source_commit:          1b6e7ef6bf
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
