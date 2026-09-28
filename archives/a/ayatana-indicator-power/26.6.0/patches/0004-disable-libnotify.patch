@@ -1,0 +1,108 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -64,6 +64,10 @@
+ set(SERVICE_LIB "ayatanaindicatorpowerservice")
+ set(SERVICE_EXEC "ayatana-indicator-power-service")
+ add_definitions(-DSERVICE_EXEC="${SERVICE_EXEC}")
++# libnotify 不可用：OHOS 无 D-Bus 通知守护进程；且 libnotify→gdk-pixbuf 依赖链
++# 内嵌静态 glib 会与 libayatana-common 的 glib 符号互操作导致进程崩溃。
++# 关闭通知功能，notifier.c 以 DISABLE_NOTIFY 桩替代全部 libnotify 调用。
++add_definitions(-DDISABLE_NOTIFY)
+ 
+ find_package (PkgConfig REQUIRED)
+ include (CheckIncludeFile)
+@@ -74,7 +78,6 @@
+     glib-2.0>=2.36
+     gio-2.0>=2.36
+     gio-unix-2.0>=2.36
+-    libnotify>=0.7.6
+     libayatana-common>=0.9.1
+ )
+ 
+--- a/src/notifier.c
++++ b/src/notifier.c
+@@ -34,7 +34,16 @@
+ #include "notifier.h"
+ #include "utils.h"
+ 
++#ifdef DISABLE_NOTIFY
++/* libnotify 在 OHOS 上不可用：无 D-Bus 通知守护进程；且 libnotify→gdk-pixbuf
++   依赖链内嵌的静态 glib 会与 libayatana-common 的 glib 符号互操作，导致进程
++   启动即崩溃（cannot register existing type 'gchar'）。此处以最小桩类型/宏维持
++   notifier 的 GObject 结构完整，全部通知 API 由下方空操作桩替代。 */
++typedef struct _NotifyNotification NotifyNotification;
++#define NOTIFY_EXPIRES_NEVER 0
++#else
+ #include <libnotify/notify.h>
++#endif
+ 
+ #include <glib/gi18n.h>
+ 
+@@ -64,7 +73,9 @@
+ 
+ static GParamSpec * properties[LAST_PROP];
+ 
++#ifndef DISABLE_NOTIFY
+ static int instance_count = 0;
++#endif
+ 
+ /**
+ ***
+@@ -219,6 +230,8 @@
+ ****  Notifications
+ ***/
+ 
++#ifndef DISABLE_NOTIFY
++
+ static void
+ on_notify_notification_finalized (gpointer gself, GObject * dead)
+ {
+@@ -410,6 +423,23 @@
+   g_free (body);
+ }
+ 
++#else /* DISABLE_NOTIFY：libnotify 不可用，以下为空操作桩。
++         电池警告（is-warning）仅在通知展示/清除时翻转，无通知则恒为 FALSE。 */
++static void
++notification_clear (IndicatorPowerNotifier * self)
++{
++  priv_t * const p = get_priv (self);
++  p->notify_notification = NULL;
++  dbus_battery_set_is_warning (p->dbus_battery, FALSE);
++}
++
++static void
++notification_show (IndicatorPowerNotifier * self)
++{
++  (void) self;
++}
++#endif /* DISABLE_NOTIFY */
++
+ /***
+ ****
+ ***/
+@@ -526,11 +556,13 @@
+ static void
+ my_finalize (GObject * o G_GNUC_UNUSED)
+ {
++#ifndef DISABLE_NOTIFY
+   /* FIXME: This is an awkward place to put this.
+      Ordinarily something like this would go in main(), but we need libnotify
+      to clean itself up before shutting down the bus in the unit tests as well. */
+   if (!--instance_count)
+     notify_uninit();
++#endif
+ }
+ 
+ /***
+@@ -550,8 +582,10 @@
+ 
+   p->cancellable = g_cancellable_new();
+ 
++#ifndef DISABLE_NOTIFY
+   if (!instance_count++ && !notify_init(SERVICE_EXEC))
+     g_critical("Unable to initialize libnotify! Notifications might not be shown.");
++#endif
+ 
+   #ifdef LOMIRI_FEATURES_ENABLED
+   p->accounts_service_sound_proxy_pending = TRUE;
