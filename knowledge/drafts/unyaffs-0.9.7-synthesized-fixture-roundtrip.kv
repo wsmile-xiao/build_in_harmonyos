@@ -1,0 +1,33 @@
+#====================================================================
+# Draft: 二进制容器格式解析工具的消费者测试 —— 在测试进程内**程序化合成夹具**，
+#        并用"合成→解析→逐字节比对"的往返属性替代 golden 向量；前提是先确认
+#        被测程序不校验校验和/ECC，否则合成不可行（须改用真实样本）
+#   Stem: unyaffs-0.9.7-synthesized-fixture-roundtrip — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-UNYAFFS-SYNTHESIZED-FIXTURE-ROUNDTRIP
+trigger_tool:           ci
+phase:                  testing
+error_signature:        (无具体错误串；本条目是判据设计规约。典型症状是把二进制样本塞进仓库、或解析类工具只测了 --help)
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               test-design, fixtures, coverage, ci-gate
+match_keywords:         test_package, 消费者测试, 二进制样本, 夹具, fixture, 合成, 容器格式, 解析器, 镜像, ECC, 校验和, 往返, golden, 路径穿越
+
+title:                  二进制容器格式解析工具：在测试进程内程序化合成夹具，用往返属性替代 golden 向量
+
+root_cause:            对"解析某种二进制容器格式"的工具（文件系统镜像、归档、协议帧、固件包、字体、位图），消费者测试最常见两种退化写法：**① 把二进制样本文件提交进仓库**——样本来源不明、体积大、无法审查、且一旦上游格式变化就失效；**② 只测 `--help`/版本/不存在的文件**——真正决定价值的解析逻辑一行都没覆盖，测试漂亮地全绿而工具可能完全跑不通。根因是作者默认"夹具必须是一个真实文件"，于是要么去找样本、要么放弃功能测试。实际上，只要被测程序**不校验校验和/纠错码**，夹具完全可以在测试进程内**按格式规范程序化构造**：测试代码即格式文档，夹具随代码一起演进、可审查、零二进制资产，并且天然支持**参数化**（同一构造器跑遍各种尺寸/边界）。把它与"合成→解析→逐字节比对"的往返属性结合，判据就变成一个自闭合的闭环，不需要任何期望输出表。
+affected_scope:         所有解析结构化二进制输入的工具与库。实测实例：unyaffs 0.9.7（`archives/u/unyaffs/0.9.7`，PR !9xxx）——按 YAFFS2 的 chunk（2048 数据 + 64 spare）与 yaffs_PackedTags2 标签在测试内合成镜像。同类可套用：tar/cpio/ar、zip/gzip 容器、cpio initramfs、FAT/ext 镜像工具、PCAP、BMP/PNG 头解析器、SQLite 文件工具、ELF/PE/DWARF 读取器、字体（TTF/OTF）工具、bittorrent bencode。★ 前置条件必须显式确认：**被测程序不校验校验和/ECC/签名**；若校验，则必须实现该校验算法（可行但要额外对齐规范）或退回真实样本，并在测试里写明原因。
+verification_cmd:       `grep -n 'ecc\|crc\|checksum\|verify' unyaffs.c unyaffs.h` → 实测仅 unyaffs.h 有 `yaffs_ECCOther` 结构体定义、unyaffs.c 无任何校验逻辑 → 合成可行。若结果相反，则须先实现校验算法
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           in-process-fixture-synthesis-plus-roundtrip-property
+rec_description:        改法：四步。**① 先判定合成可行性**——`grep` 被测源码确认无 ECC/CRC/签名校验；有不通过内容校验则合成可行（结构仍需正确）。**② 在测试进程内实现一个夹具构造器**：把格式规范翻译成写字节的代码。关键在于**字段偏移要与被测程序的 C 结构体布局一致**——最稳的做法是把上游头文件里的 `typedef struct` **原样抄进测试**（编译器会算出相同偏移），而不是手工数偏移；本包同时提供了实测标定的偏移宏作为交叉校验（`oh->type@0 / parentObjectId@4 / name@10 / yst_mode@268 / fileSize@292`）。**③ 判据主体用往返属性**：`合成(输入集合) → 被测程序解析/提取 → 逐字节比对`。输入集合要**穷举边界**：0 字节（空文件）、1 字节、块大小−1、块大小（正好一块）、块大小+1、整数块、跨多块（本包实测 0/1/2047/2048/2049/4096/10000）。这一条把"解析器是否正确重建了数据"完全交给被测程序自证，且覆盖度只受采样点数量限制。**④ 用合成能力覆盖安全与错误边界**：
+  · **路径穿越**——构造对象名含 `/` 或 `..` 的镜像，断言被测程序**拒绝**（本包实测 `Illegal file name` + 非 0 退出），并**额外断言**恶意路径未在目标目录之外落地（`fopen` 探测）。
+  · **损坏输入**——0 字节、纯随机字节、合法镜像的**截断前缀**，断言退出码明确、且**不因信号终止**（`pclose==-1 / !WIFEXITED / code∈{126,127} / code>=128` 判"跑不起来"）。
+  · **选项边界**——上限值、上限+1、非数字参数，断言回落用法。
+  ★ 合成夹具必须写入 `argv` 传入的 **scratch 目录**（OHOS `/tmp` 只读），并先写探针文件探测可写性，把"目录不可写"与"被测程序有缺陷"区分开。★ 判据实现照旧：`expect()` 计数而非 `assert()`、`popen` 内存直读、循环读到 EOF 再 `pclose`。参考实现：archives/u/unyaffs/0.9.7/test_package/test_unyaffs.c（54 条断言，含 7 档尺寸往返、路径穿越拒绝、3 类损坏输入）。
+rec_command:            # 夹具构造器骨架：字段偏移与上游结构体对齐\nstatic void put32(unsigned char *p, unsigned v){ p[0]=v&0xff; p[1]=(v>>8)&0xff; p[2]=(v>>16)&0xff; p[3]=(v>>24)&0xff; }\nstatic void make_chunk(unsigned char *out, const unsigned char *data, size_t dlen,\n                       unsigned seq, unsigned objid, unsigned chunkid, unsigned nbytes){\n    memset(out, 0xff, CHUNK_SIZE + SPARE_SIZE);          /* spare 未用区填 0xff（NAND 擦除态） */\n    if (data && dlen) memcpy(out, data, dlen);\n    put32(out + CHUNK_SIZE + 0, seq); put32(out + CHUNK_SIZE + 4, objid);\n    put32(out + CHUNK_SIZE + 8, chunkid); put32(out + CHUNK_SIZE + 12, nbytes);\n}\n\n# 往返属性：穷举块边界\nstatic const size_t SIZES[] = { 0, 1, 2047, 2048, 2049, 4096, 10000 };\nfor (k = 0; k < 7; k++) {\n    build_image(img, one, d1, l1, 1);                      /* 合成 */\n    run_capture("-c 2 -s 64 \\"%s\\" \\"%s\\"", img, outdir);  /* 提取 */\n    read_file("<outdir>/f0.bin", got, sizeof got, &rl);\n    expect(rl == len && memcmp(got, src, len) == 0, "往返逐字节一致", "");\n}\n\n# 路径穿越：合成恶意对象名，断言拒绝 + 未逃逸\nexpect(rc != 0, "含 '/' 的对象名被拒绝", "");\nexpect(strstr(buf, "Illegal file name") != NULL, "报明确错误", "");\nf = fopen("<scratch>/escape.txt", "rb");\nexpect(f == NULL, "未写出到 scratch 根目录（无路径穿越）", "");\nif (f) fclose(f);
+rec_auto_fix:           false
