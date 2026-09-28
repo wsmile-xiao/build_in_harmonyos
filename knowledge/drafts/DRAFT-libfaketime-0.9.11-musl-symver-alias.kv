@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-libfaketime-0.9.11-musl-symver-alias.kv — 路径 B 草稿（待人工 promote）
+# 与同名 .md 成对提交。字段口径见 knowledge/graph/_template.kv。
+# 实证来源：libfaketime 0.9.11 在 HarmonyOS PC（OHOS aarch64 / clang 15 / musl）
+# 真机 conan create，链接期 8 个符号报 undefined version GLIBC_2.x。
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+trigger_tool:           "clang, ld, make"
+phase:                  "linking"
+error_signature:        "ld.lld: error: .* has undefined version GLIBC_[0-9.]+|symbol .* has undefined version|expected a '@' in the name"
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               "libc, musl, portability, ohos, build-system"
+prescan_pattern:        "\\.symver|version-script=|GLIBC_[0-9]+\\.[0-9]+"
+prescan_globs:          "*.c, *.h, Makefile*, *.mk, *.map"
+match_keywords:         ".symver, undefined version, GLIBC_2.33, version-script, ld.lld, musl, interposer, alias"
+title:                  "上游用 .symver/version-script 绑定 glibc 符号版本节点，在 musl/OHOS 上链接期即失败"
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             "glibc 的符号版本机制（.symver 汇编指示 + --version-script 里的 GLIBC_x.y 节点）是 glibc 专有；OHOS 用 musl，libc.so 里不存在任何 GLIBC_x.y 版本定义，ld.lld 因此在'符号有版本引用但找不到版本定义'处直接报错。次生坑：把 .symver 第二个参数去掉 @ 试图表达'无版本别名'也不行——OHOS 的 clang 内联汇编前端（IntegratedAsm/AArch64）强制要求 .symver 名字带 @，报 expected a '@' in the name"
+affected_scope:         "任何以 .symver + version-script 拦截或重定位 libc 符号的库（LD_PRELOAD 型 interposer、符号版本化 shim、时间/内存/线程拦截器），在 OHOS aarch64 上必定链接失败"
+verification_cmd:       'grep -rn "\.symver\|version-script" src/ && nm -D --defined-only <so> | grep -E "GLIBC_|_2[0-9]+$"'
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           "symver-alias-branch"
+rec_description:        "用 #if defined __GLIBC__ 包住原 .symver 块（glibc 路径零改动），#else 分支对每个拦截点用 __attribute__((alias)) 把'当前 ABI 变体'导出为未版本化的公开名；同时把 --version-script 参数化成可替换变量，OHOS 侧换一份匿名（无版本节点名）的 local-only map，只把 _22/_225/_232/_233 实现名设为 local。载体要求：这份 OHOS-only map 由配方 build() 用 save() 生成，不要用补丁新增文件——本仓 finish 的 refresh-patch --auto 只按'已存在的源文件'逐个重生成补丁并静默丢弃 new-file hunk，落地后会报 ConanException: Patch file does not exist"
+rec_command:            "sed -i 's/--version-script=libfaketime.map/--version-script=$(VERSION_SCRIPT)/' src/Makefile && make VERSION_SCRIPT=libfaketime.map.ohos"
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      "drop-symver-block"
+fallback_description:   "整块删掉 .symver 声明与 version script（仓库既有 libfaketime 0.9.10 归档的做法）——能链接通过，但静默丢掉全部 5 个拦截点，属于必须避免的反例，见 forbid_1"
+fallback_command:       ""
+fallback_auto_fix:      false
+fallback_impl:          ""
+
+forbid_1_pattern:       "(delete|remove|drop).*\\.symver|\\.symver.*(removed|deleted)"
+forbid_1_reason:        "删掉 .symver 之后，timer_settime_233 / timer_gettime_233 / pthread_cond_timedwait_225 / pthread_cond_timedwait_232 / pthread_cond_init_232 这些实现函数没有任何公开名指向它们：库能链接、能加载、时钟类 API 照常工作，但 POSIX 定时器与 pthread_cond_timedwait 的拦截能力已经消失，且实现名反而被导出污染 ABI"
+forbid_1_consequence:   "构建与既有计时类测试全绿（libc 会顶替应答），缺陷只在用了被拦截 API 的消费者身上延迟暴露；这类回归对时间断言完全不可见，必须靠符号归属断言才抓得住"
+
+# 有效性判据（本机制自带的三级验收口径）
+# 1) 静态：nm -D 公开名必须是未版本化导出、实现名不得出现
+# 2) 运行时（时间语义）：FAKETIME=-15d 下用伪造钟的 abstime 调 pthread_cond_timedwait，
+#    未被拦截则 deadline 落后真实钟 15 天 -> 立即 ETIMEDOUT；必须实测等待 >=800ms 才算生效
+# 3) 运行时（符号归属）：LD_PRELOAD 后用 dlsym(RTLD_DEFAULT)+dladdr 断言命中库本身，
+#    并断言本进程 time/clock_gettime/gettimeofday/getpid/pthread_cond_timedwait 的绑定地址落在该库。
+#    注意：不能改用 dlopen() 检查——libfaketime.so.1 在 OHOS 上 dlopen 直接 SIGSEGV
+#    （未签名的构建目录副本同样如此，而 libz.so 可正常 dlopen），它是纯 LD_PRELOAD 载荷
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             ""
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               "drafts/DRAFT-libfaketime-0.9.11-musl-symver-alias.md"
+last_updated:           2026-09-25
+source_event:           "libfaketime 0.9.11 在 HarmonyOS PC（OHOS aarch64, clang 15, musl）conan create，链接 libfaketime.so.1 时 8 个符号报 undefined version GLIBC_2.x"
+
+# ═══ 知识协作 ═══
+authors:                "TGFAT-1 <tgfat-1@local>"
+source_pr:              ""
+source_commit:          ""
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-25
