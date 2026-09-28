@@ -9,3 +9,8 @@
 
 ## 降级边界声明
 - 只装 `install-bin`（tarlz 单工具）：`install-doc/install-man` 需 GROFF+ps2pdf（PDF 手册），设备/CI 无此工具链，故文档不随包
+
+## 上游测试执行情况（2026-09-28 设备实测，R51）
+- `make check`（testsuite/check.sh，lzip/1.25 入 PATH）：8 命名组全过（--delete/--dereference/--append/dirs-and-links/long-names/--compress/bad-input/--keep-damaged）
+- 初始 create/extract roundtrip 内容逐字节一致；6 处 "Mode differs" 均为 mode 位差异（hmdfs 不保留 Unix mode 位，平台文件系统语义，与本配方 umask  workaround 同类），非逻辑失败
+- harness 自带平台容忍：link 测试因系统无 ln 被跳过（"ln does not work on your system"）
