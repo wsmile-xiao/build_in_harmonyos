@@ -1,0 +1,256 @@
+--- /dev/null
++++ b/src/utility/cpp20_compat.hpp
+@@ -0,0 +1,253 @@
++/**
++ * @file cpp20_compat.hpp
++ * @brief Polyfills for C++20 standard library features missing on older libraries.
++ *
++ * The OHOS SDK toolchain (clang 15.0.4 / libc++ 15.0.4) predates four C++20
++ * library features that this code base uses: std::atomic_ref (libc++ 16),
++ * std::jthread (libc++ 16), std::lexicographical_compare_three_way and the
++ * std::ranges algorithm overloads (equal/all_of/find_if/is_sorted/sort).
++ *
++ * Every polyfill below is guarded by the corresponding standard feature-test
++ * macro, so on a standard library that implements the feature the polyfill is
++ * not declared at all and the native implementation is used unchanged. The
++ * fallbacks only cover the call surface actually used by this library; they
++ * are never compiled when the feature macro is present.
++ */
++#ifndef GAPP_UTILITY_CPP20_COMPAT_HPP
++#define GAPP_UTILITY_CPP20_COMPAT_HPP
++
++#include <algorithm>
++#include <atomic>      // std::memory_order
++#include <compare>     // std::weak_ordering, std::compare_three_way
++#include <cstddef>     // std::size_t
++#include <functional>  // std::identity, std::invoke
++#include <iterator>    // std::begin, std::end, std::distance
++#include <ranges>      // feature-test macro __cpp_lib_ranges
++#include <thread>      // std::thread (jthread fallback)
++#include <type_traits>
++#include <utility>     // std::forward
++
++#if !defined(__cpp_lib_jthread)
++
++namespace std
++{
++    /**
++    * Minimal std::jthread replacement for standard libraries predating the
++    * C++20 jthread (libc++ before 16). Construction mirrors std::thread;
++    * destruction joins the thread, which is the only jthread-specific
++    * behaviour this library relies on (stop tokens are not used).
++    */
++    class jthread
++    {
++    public:
++        jthread() noexcept = default;
++
++        template<typename Callable, typename... Args>
++        explicit jthread(Callable&& func, Args&&... args) :
++            thread_(std::forward<Callable>(func), std::forward<Args>(args)...)
++        {}
++
++        jthread(jthread&&) noexcept = default;
++        jthread& operator=(jthread&&) noexcept = default;
++        jthread(const jthread&) = delete;
++        jthread& operator=(const jthread&) = delete;
++
++        ~jthread()
++        {
++            if (thread_.joinable()) thread_.join();
++        }
++
++        void join() { thread_.join(); }
++        void detach() { thread_.detach(); }
++        [[nodiscard]] bool joinable() const noexcept { return thread_.joinable(); }
++        [[nodiscard]] thread::id get_id() const noexcept { return thread_.get_id(); }
++        void swap(jthread& other) noexcept { thread_.swap(other.thread_); }
++
++    private:
++        thread thread_;
++    };
++
++} // namespace std
++
++#endif // !defined(__cpp_lib_jthread)
++
++
++#if !defined(__cpp_lib_atomic_ref)
++
++namespace std
++{
++    /**
++    * Minimal std::atomic_ref replacement for standard libraries predating the
++    * C++20 atomic_ref (libc++ before 16). Only the operation surface used by
++    * this library is provided; each operation maps onto the __atomic_* compiler
++    * builtins, which are what std::atomic itself lowers to, and the
++    * std::memory_order enumerators match the __ATOMIC_* values so they can be
++    * passed through unchanged.
++    */
++    template<typename T>
++    class atomic_ref
++    {
++        static_assert(std::is_trivially_copyable_v<T>, "std::atomic_ref requires a trivially copyable type");
++        static_assert(!std::is_reference_v<T>, "std::atomic_ref requires an object type");
++
++    public:
++        static constexpr size_t required_alignment = alignof(T);
++
++        explicit atomic_ref(T& obj) noexcept : ptr_(&obj) {}
++        atomic_ref(const atomic_ref&) noexcept = default;
++        atomic_ref& operator=(const atomic_ref&) noexcept = default;
++
++        [[nodiscard]] bool is_lock_free() const noexcept { return true; }
++
++        [[nodiscard]] T load(memory_order order = memory_order_seq_cst) const noexcept
++        {
++            T out{};
++            __atomic_load(ptr_, &out, static_cast<int>(order));
++            return out;
++        }
++
++        void store(T desired, memory_order order = memory_order_seq_cst) const noexcept
++        {
++            __atomic_store(ptr_, &desired, static_cast<int>(order));
++        }
++
++        T exchange(T desired, memory_order order = memory_order_seq_cst) const noexcept
++        {
++            T out{};
++            __atomic_exchange(ptr_, &desired, &out, static_cast<int>(order));
++            return out;
++        }
++
++        T fetch_add(T arg, memory_order order = memory_order_seq_cst) const noexcept
++        {
++            return __atomic_fetch_add(ptr_, arg, static_cast<int>(order));
++        }
++
++        T fetch_sub(T arg, memory_order order = memory_order_seq_cst) const noexcept
++        {
++            return __atomic_fetch_sub(ptr_, arg, static_cast<int>(order));
++        }
++
++        bool compare_exchange_weak(T& expected, T desired,
++                                    memory_order success = memory_order_seq_cst,
++                                    memory_order failure = memory_order_seq_cst) const noexcept
++        {
++            return __atomic_compare_exchange(ptr_, &expected, &desired, true,
++                                              static_cast<int>(success), static_cast<int>(failure));
++        }
++
++        bool compare_exchange_strong(T& expected, T desired,
++                                      memory_order success = memory_order_seq_cst,
++                                      memory_order failure = memory_order_seq_cst) const noexcept
++        {
++            return __atomic_compare_exchange(ptr_, &expected, &desired, false,
++                                              static_cast<int>(success), static_cast<int>(failure));
++        }
++
++        operator T() const noexcept { return load(); }
++        T operator=(T desired) const noexcept { store(desired); return desired; }
++
++        T operator++() const noexcept { return fetch_add(T{1}); }
++        T operator++(int) const noexcept { return fetch_add(T{1}); }
++        T operator--() const noexcept { return fetch_sub(T{1}); }
++        T operator--(int) const noexcept { return fetch_sub(T{1}); }
++
++    private:
++        T* ptr_;
++    };
++
++} // namespace std
++
++#endif // !defined(__cpp_lib_atomic_ref)
++
++
++#if !defined(__cpp_lib_three_way_comparison)
++
++namespace std
++{
++    /**
++    * Minimal std::lexicographical_compare_three_way (C++20) for standard
++    * libraries that do not provide it; equivalent to the standard formulation
++    * over ranges::lexicographical_compare_three_way.
++    */
++    template<typename InputIt1, typename InputIt2, typename Cmp>
++    constexpr weak_ordering lexicographical_compare_three_way(InputIt1 first1, InputIt1 last1,
++                                                              InputIt2 first2, InputIt2 last2,
++                                                              Cmp comp = compare_three_way{})
++    {
++        for (; first1 != last1 && first2 != last2; ++first1, ++first2)
++        {
++            if (const auto c = comp(*first1, *first2); c != 0) return c;
++        }
++        if (first1 == last1 && first2 == last2) return weak_ordering::equivalent;
++        return first1 == last1 ? weak_ordering::less : weak_ordering::greater;
++    }
++
++} // namespace std
++
++#endif // !defined(__cpp_lib_three_way_comparison)
++
++
++#if !defined(__cpp_lib_ranges)
++
++namespace std::ranges
++{
++    /**
++    * Minimal std::ranges algorithm overloads not present in this platform's
++    * libc++ (equal, all_of, find_if, is_sorted, sort). Each delegates to the
++    * classic iterator-based algorithm; projections are applied through
++    * std::invoke, exactly as the ranges versions do.
++    */
++    template<typename R1, typename R2>
++    constexpr bool equal(R1&& r1, R2&& r2)
++    {
++        return std::equal(std::begin(r1), std::end(r1), std::begin(r2), std::end(r2));
++    }
++
++    template<typename R, typename Pred, typename Proj = identity>
++    constexpr bool all_of(R&& r, Pred pred, Proj proj = {})
++    {
++        for (auto&& elem : r)
++        {
++            if (!std::invoke(pred, std::invoke(proj, elem))) return false;
++        }
++        return true;
++    }
++
++    template<typename I, typename S, typename Pred, typename Proj = identity>
++    constexpr I find_if(I first, S last, Pred pred, Proj proj = {})
++    {
++        for (; first != last; ++first)
++        {
++            if (std::invoke(pred, std::invoke(proj, *first))) return first;
++        }
++        return first;
++    }
++
++    template<typename R, typename Comp = std::less<>, typename Proj = identity>
++    constexpr bool is_sorted(R&& r, Comp comp = {}, Proj proj = {})
++    {
++        auto prev = std::begin(r);
++        const auto last = std::end(r);
++        if (prev == last) return true;
++        for (auto next = std::next(prev); next != last; ++next, ++prev)
++        {
++            if (std::invoke(comp, std::invoke(proj, *next), std::invoke(proj, *prev))) return false;
++        }
++        return true;
++    }
++
++    template<typename R, typename Comp = std::less<>, typename Proj = identity>
++    void sort(R&& r, Comp comp = {}, Proj proj = {})
++    {
++        std::sort(std::begin(r), std::end(r), [&comp, &proj](auto&& lhs, auto&& rhs)
++        {
++            return std::invoke(comp, std::invoke(proj, lhs), std::invoke(proj, rhs));
++        });
++    }
++
++} // namespace std::ranges
++
++#endif // !defined(__cpp_lib_ranges)
++
++#endif // GAPP_UTILITY_CPP20_COMPAT_HPP
