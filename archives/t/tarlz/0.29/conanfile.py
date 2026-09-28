@@ -149,7 +149,14 @@ class TarlzConan(ConanFile):
                 f"{shlex.quote(shell)} ./configure "
                 f"{' '.join(shlex.quote(a) for a in self._configure_args())}"
             )
-            self._run_ohos("make -j1")
+            # Diaz's Makefile hardcodes CXX=c++ (ignores env); override on
+            # the make command line with the profile compilers (R33).
+            compilers = self._compiler_environment_items()
+            self._run_ohos(
+                f"make -j1 "
+                f"CC={shlex.quote(compilers.get('CC', 'cc'))} "
+                f"CXX={shlex.quote(compilers.get('CXX', 'c++'))}"
+            )
 
     def _unpack_upstream(self, shell):
         """lzip -d + tar -xf the verified .tar.lz into the build folder."""
