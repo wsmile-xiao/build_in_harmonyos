@@ -1,0 +1,168 @@
+diff --git a/include/mapbox/geojson_impl.hpp b/include/mapbox/geojson_impl.hpp
+index 621a86c..d9ed3e9 100644
+--- a/include/mapbox/geojson_impl.hpp
++++ b/include/mapbox/geojson_impl.hpp
+@@ -409,16 +409,31 @@ struct to_value {
+         return result;
+     }
+ 
+-    rapidjson_value operator()(const std::vector<value>& array) {
++    rapidjson_value operator()(const value::const_array_ptr_type& array) {
+         rapidjson_value result;
+         result.SetArray();
+-        for (const auto& item : array) {
++        for (const auto& item : *array) {
+             result.PushBack(value::visit(item, *this), allocator);
+         }
+         return result;
+     }
+ 
+-    rapidjson_value operator()(const std::unordered_map<std::string, value>& map) {
++    rapidjson_value operator()(const value::const_object_ptr_type& map) {
++        rapidjson_value result;
++        result.SetObject();
++        for (const auto& property : *map) {
++            result.AddMember(
++                rapidjson::GenericStringRef<char> {
++                    property.first.data(),
++                    rapidjson::SizeType(property.first.size())
++                },
++                value::visit(property.second, *this),
++                allocator);
++        }
++        return result;
++    }
++
++    rapidjson_value operator()(const value::object_type& map) {
+         rapidjson_value result;
+         result.SetObject();
+         for (const auto& property : map) {
+diff --git a/include/mapbox/geojson_value_impl.hpp b/include/mapbox/geojson_value_impl.hpp
+index 699c348..a4dcabd 100644
+--- a/include/mapbox/geojson_value_impl.hpp
++++ b/include/mapbox/geojson_value_impl.hpp
+@@ -26,8 +26,8 @@ T convert(const value &);
+ 
+ template <>
+ point convert<point>(const value &val) {
+-    assert(val.is<value::array_type>());
+-    if (!val.is<value::array_type>()) {
++    assert(val.getArray() != nullptr);
++    if (val.getArray() == nullptr) {
+         throw error("coordinates must be of an Array type");
+     }
+ 
+@@ -41,8 +41,8 @@ point convert<point>(const value &val) {
+ 
+ template <typename Container>
+ Container convert(const value &val) {
+-    assert(val.is<value::array_type>());
+-    if (!val.is<value::array_type>()) {
++    assert(val.getArray() != nullptr);
++    if (val.getArray() == nullptr) {
+         throw error("coordinates must be of an Array type");
+     }
+ 
+@@ -57,7 +57,7 @@ Container convert(const value &val) {
+ 
+ template <>
+ geometry convert<geometry>(const value &val) {
+-    auto *valueObject = val.getObject();
++    auto valueObject = val.getObject();
+     if (!valueObject) {
+         throw error("GeoJSON must be an object");
+     }
+@@ -80,7 +80,7 @@ geometry convert<geometry>(const value &val) {
+             throw error("GeometryCollection must have a geometries property");
+         }
+ 
+-        const auto *geometryArray = geometriesIt->second.getArray();
++        const auto geometryArray = geometriesIt->second.getArray();
+         if (!geometryArray) {
+             throw error("GeometryCollection geometries property must be an array");
+         }
+@@ -93,7 +93,7 @@ geometry convert<geometry>(const value &val) {
+         throw error(typeString + " geometry must have a coordinates property");
+     }
+ 
+-    const auto *coordinateArray = coordinatesIt->second.getArray();
++    const auto coordinateArray = coordinatesIt->second.getArray();
+     if (!coordinateArray) {
+         throw error("coordinates property must be an array");
+     }
+@@ -116,7 +116,7 @@ geometry convert<geometry>(const value &val) {
+ 
+ template <>
+ feature convert<feature>(const value &val) {
+-    auto *valueObject = val.getObject();
++    auto valueObject = val.getObject();
+     if (!valueObject) {
+         throw error("GeoJSON must be an object");
+     }
+@@ -156,7 +156,7 @@ feature convert<feature>(const value &val) {
+     auto propertiesIt = valueObject->find("properties");
+     if (propertiesIt != valueObject->end() &&
+         !propertiesIt->second.is<mapbox::geojson::null_value_t>()) {
+-        if (!propertiesIt->second.is<value::object_type>()) {
++        if (!propertiesIt->second.is<value::object_ptr_type>()) {
+             throw error("properties must be an object");
+         }
+         result.properties = *propertiesIt->second.getObject();
+@@ -167,7 +167,7 @@ feature convert<feature>(const value &val) {
+ 
+ template <>
+ geojson convert<geojson>(const value &val) {
+-    auto *valueObject = val.getObject();
++    auto valueObject = val.getObject();
+     if (!valueObject) {
+         throw error("GeoJSON must be an object");
+     }
+@@ -189,7 +189,7 @@ geojson convert<geojson>(const value &val) {
+             throw error("FeatureCollection must have features property");
+         }
+ 
+-        const auto *featureArray = featuresIt->second.getArray();
++        const auto featureArray = featuresIt->second.getArray();
+         if (!featureArray) {
+             throw error("FeatureCollection features property must be an array");
+         }
+@@ -215,8 +215,8 @@ geojson convert(const value &val) {
+         [](const std::string &jsonString) {
+             return jsonString == "null" ? geometry{} : parse(jsonString);
+         },
+-        [](const value::object_type &jsonObject) {
+-            return convert<geojson>(static_cast<const mapbox::geojson::value &>(jsonObject));
++        [](const value::object_ptr_type &jsonObject) {
++            return convert<geojson>(value(*jsonObject));
+         },
+         [](const auto &) -> geojson { throw error("Invalid GeoJSON value was provided."); });
+ }
+diff --git a/test/test.cpp b/test/test.cpp
+index 2906e0a..1afa48f 100644
+--- a/test/test.cpp
++++ b/test/test.cpp
+@@ -173,13 +173,17 @@ static void testFeature(bool use_convert) {
+ 
+     const auto &nested = f.properties.at("nested");
+ 
+-    // Explicit recursive_wrapper as a workaround for https://github.com/mapbox/variant/issues/102
+-    assert(nested.is<mapbox::util::recursive_wrapper<values>>());
+-    assert(nested.get<values>().at(0).is<std::uint64_t>());
+-    assert(nested.get<values>().at(0).get<std::uint64_t>() == 5);
+-    assert(nested.get<values>().at(1).is<mapbox::util::recursive_wrapper<prop_map>>());
+-    assert(nested.get<values>().at(1).get<prop_map>().at("foo").is<std::string>());
+-    assert(nested.get<values>().at(1).get<prop_map>().at("foo").get<std::string>() == "bar");
++    // mapbox-geometry 2.x stores arrays/objects as shared_ptr (feature.hpp
++    // value::const_array_ptr_type / const_object_ptr_type). Use the accessors
++    // instead of the old recursive_wrapper<values> variant types.
++    assert(nested.getArray() != nullptr);
++    const auto &nestedArray = *nested.getArray();
++    assert(nestedArray.at(0).is<std::uint64_t>());
++    assert(nestedArray.at(0).get<std::uint64_t>() == 5);
++    assert(nestedArray.at(1).getObject() != nullptr);
++    const auto &nestedObj = *nestedArray.at(1).getObject();
++    assert(nestedObj.at("foo").is<std::string>());
++    assert(nestedObj.at("foo").get<std::string>() == "bar");
+ 
+     assert(parse(writeGeoJSON(data, use_convert)) == data);
+ }
