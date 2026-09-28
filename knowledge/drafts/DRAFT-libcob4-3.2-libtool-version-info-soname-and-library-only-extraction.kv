@@ -1,0 +1,189 @@
+# ═══ Draft knowledge entry — 从 autotools 大包里拆运行库做独立 conan 包：包名由 libtool `-version-info` 反推 SONAME；"构建范围"与"安装范围"必须分开（上游测试套件经编译器驱动，不能只 build 子目录） ═══
+# Timestamp: 2026-09-21
+# Software: libcob4 3.2（GnuCOBOL 运行库 libcob.so.4，LGPL 部分；与 gnucobol 3.2 同源）
+# Gate: 包边界与安装范围判定（"这个包到底该交付什么、该跑什么测试"）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libcob4-3.2-libtool-version-info-soname-and-library-only-extraction
+trigger_tool:           make|libtool|ld|conan|readelf
+phase:                  build|package
+error_signature:        conan 需要 lib<name><N>/<ver> 但上游没有同名项目|
+                         任务包名在源码树里搜不到对应目录|
+                         -version-info\s+[0-9]+:[0-9]+:[0-9]+|
+                         lib<name>\.so\.[0-9]+\.[0-9]+\.[0-9]+|
+                         make\s+-C\s+\S+\s+install（想只装子目录）|
+                         把 make install 的整棵树当库包交付（含 bin/ 编译器）
+
+severity:               2
+category:               autotools, libtool, soname, abi, shared-library, conan, packaging, build-scope
+match_keywords:         libtool, -version-info, current:revision:age, SONAME, DT_SONAME,
+                        lib<name>.so.N, ABI 主版本, conan 包名, package_type=library,
+                        make -C <subdir> install, pkginclude_HEADERS, include_HEADERS,
+                        umbrella header, 伞头文件, 拆包, 运行库与编译器分离, LGPL/GPL 边界,
+                        upstream testsuite driven by compiler, build scope vs install scope,
+                        libcob, libcob.so.4, libcob.so.4.2.0, gnucobol, GnuCOBOL
+
+title:                  当一个 conan 包名形如 `lib<name><N>`（例：libcob4）时，它通常**不是**一个独立的
+                        上游项目，而是某个已有上游库的 ABI 主版本切片 —— 包名与产物文件名应由
+                        autotools 工程里 libtool 的 `-version-info current:revision:age` 反推：
+                        SONAME = `lib<name>.so.(current-age)`，真实文件 = `lib<name>.so.(current-age).age.revision`。
+                        拆出这类「只有运行库」的包时，**构建范围**（`make`，可能必须全量）与
+                        **安装范围**（`make -C <libdir> install`）必须分开决策，否则要么丢掉上游
+                        测试、要么把编译器一起交付。
+
+root_cause: >
+  任务/下游给出的包名常常只是「某个 SONAME 的裸名字」，源码树里并没有与之对应的目录。两条独立
+  的判断需要分开做：
+
+  (1) **包名 = ABI 切片，不是项目名。** autotools + libtool 的共享库，其 ABI 完全由
+      `*_la_LDFLAGS` 里的 `-version-info` 决定：
+          libcob_la_LDFLAGS = $(COB_FIX_LIBTOOL) -version-info 6:0:2 -no-undefined
+      libtool 语义（current:revision:age）：
+          SONAME     = lib<name>.so.(current-age)              → libcob.so.4
+          真实文件名 = lib<name>.so.(current-age).age.revision → libcob.so.4.2.0
+      所以 conan 包名 `libcob4` 就是「libcob 的 ABI 主版本 4」，上游仍然是 GnuCOBOL 3.2，
+      与既有的 `gnucobol/3.2` 包同一份 tarball（SHA256 逐字相同）。**不要**因为搜不到
+      名为 libcob4 的上游仓库就判定「无法适配」；也不要去看 release/age 去推包名 ——
+      只有 `current-age` 进 SONAME，`age`/`revision` 只影响文件名与兼容性语义。
+
+  (2) **构建范围 ≠ 安装范围。** 拆库包最容易犯的错是「既然只要 libcob，那就
+      `make -C libcob` 吧」。这在本例里会直接砍掉上游测试：GnuCOBOL 的
+      `tests/testsuite`（autotest，1226 用例）是**经 `cobc` 编译器驱动**的，
+      只构建 `libcob/` 子目录拿不到 `cobc`，`make check` 无从跑起。
+      正确做法是把两件事解耦：
+          build()    ：完整 `./configure && make -j1 && make check`  ← 上游测试照跑
+          package()  ：`make -C libcob install DESTDIR=<pkg>`        ← 只装运行库
+      于是既要满足「上游测试必须真跑」，又只交付运行库。反过来，如果直接用顶层
+      `make install` 然后把不想要的东西删掉，容易漏删（libtool 的 `.la`、静态库、
+      `bin/cobc`、`share/gnucobol/**`、`lib/gnucobol/CBL_OC_DUMP.so` 都在其中），
+      交付物清单会随上游版本悄悄漂移。
+
+  拆包时还有一到两个容易漏的细节：
+      * 子目录的 `pkginclude_HEADERS` 会被 `make -C <subdir> install` 装走，但
+        **顶层的伞头文件**（`Makefile.am` 里的 `include_HEADERS = libcob.h`）不在
+        该子目录的 install 规则里，必须由配方手工 `copy()` 补上，否则下游
+        `#include <libcob.h>` 直接编不过。
+      * libtool 会在 libdir 里留下 `<name>.la`，`--disable-static` 之外还要显式删掉它
+        与可能存在的 `.a`。
+
+affected_scope: >
+  一切「上游把可执行程序与共享库放在同一份 autotools 源码树里交付，而任务只要求其中
+  一个共享库」的场景。典型特征：
+      * 任务/下游给出的包名形如 `lib<name><N>`，在源码树里 grep 不到同名目录；
+      * `Makefile.am` 里能 grep 到 `_la_LDFLAGS` 带 `-version-info C:R:A`；
+      * 仓库里已经存在一个同源码的「大包」（本例 gnucobol/3.2），交付物是它的超集；
+      * 上游测试套件由该树里的编译器/工具驱动（`tests/testsuite` 需要 `cobc`）。
+  判据一（包名来源）：`grep -nE '_la_LDFLAGS.*-version-info' <libdir>/Makefile.am`
+      有输出 → 由 `-version-info C:R:A` 算 SONAME `C-A`，据此命名 conan 包。
+  判据二（安装范围）：`grep -nE '^(include_HEADERS|pkginclude_HEADERS)' Makefile.am <libdir>/Makefile.am`
+      顶层与子目录都命中 → 伞头文件必须手工补装。
+  反向判据：上游源码树里确实存在与该包名同名的目录/项目时，本条不适用；工程用
+  `-release` 而非 `-version-info`、或 SONAME 由 CMake 的 `VERSION/SOVERSION` 决定时，
+  推导公式不同（CMake 见 DRAFT-libharu-2.3.0-missing-dt-soname 那条）。
+  容易踩的推断：看到「上游没有叫 libcob4 的仓库」就判定任务不可做；看到「只交付一个
+  .so」就以为构建也可以只做子目录。
+
+verification_cmd: >
+  # 判据一：库的 ABI（决定包名与交付文件名）
+  grep -nE '_la_LDFLAGS.*-version-info' libcob/Makefile.am
+  #   期望 -version-info 6:0:2 → SONAME libcob.so.4，真实文件 libcob.so.4.2.0
+
+  # 判据二：伞头文件装在哪一层
+  grep -nE '^(include_HEADERS|pkginclude_HEADERS)' Makefile.am libcob/Makefile.am
+  #   顶层 include_HEADERS = libcob.h  → make -C libcob install 装不到，必须手工 copy
+
+  # 判据三：交付物清单（装了哪些、有没有混进编译器/配置目录）
+  conan create archives/l/libcob4/3.2 -pr:h=<ohos> -pr:b=<ohos>
+  ls <package_folder>          # 期望只有 include/ 与 lib/libcob.so*，没有 bin/
+  ls <package_folder>/lib      # 期望 libcob.so / libcob.so.4 / libcob.so.4.2.0，无 .la/.a
+
+  # 判据四：ABI 与链接名可用（消费者视角，不靠 grep 二进制）
+  #   test_package 用 -lcob 链接并运行 → 证明 libcob.so → libcob.so.4 → libcob.so.4.2.0 链完整
+
+  # 判据五：上游测试真跑了（而不是被"只构建子目录"砍掉）
+  grep -aE 'tests behaved as expected|tests were skipped' <build>/libcob4-upstream-check.log
+
+rec_priority:           1
+rec_approach:           name-library-package-by-libtool-soname-and-split-build-scope-from-install-scope
+rec_description: >
+  三步：
+    (A) **定名**：读 `libcob/Makefile.am` 的 `-version-info C:R:A`，算 SONAME
+        `libcob.so.(C-A)`，conan `name = "libcob4"`（与包目录名严格一致，L0m-4），
+        `package_type = "library"`，`cpp_info.libs = ["cob"]`。
+    (B) **构建全量、安装收敛**：build() 走完整 `./configure && make -j1 && make check`
+        （上游测试必须真跑，且它经 cobc 驱动，砍掉就没了）；package() 才
+        `autotools.install(args=["-C", "libcob"])`，把范围收敛到运行库与子目录头文件。
+    (C) **补齐 + 清理**：手工 `copy("libcob.h" → include/)` 补顶层伞头文件；
+        删除 `lib/libcob.la`、`lib/libcob.a`。交付物用 `artifacts:` 清单写死在
+        manifest.yaml 里，便于评审逐条核对。
+  自检：`conan create` 后包内应只有 `include/` 与 `lib/libcob.so*`，且构建日志里
+  能找到上游测试汇总行。
+rec_command:            >
+  # conanfile.py
+  #   build():   autotools.configure(); autotools.make(args=["-j1"])
+  #              self.run("make MAKEINFO=true -j1 check > <log> 2>&1; ...")
+  #   package(): autotools.install(args=["-C", "libcob"])
+  #              copy(self, "libcob.h", src=self.source_folder, dst=<pkg>/include, keep_path=False)
+  #              rm <pkg>/lib/libcob.la <pkg>/lib/libcob.a
+  #   package_info(): self.cpp_info.libs = ["cob"]; requires = ["gmp::gmp"]
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      full-install-then-prune-the-package-folder
+fallback_description: >
+  如果不方便用 `make -C <libdir> install`（例如子目录的 install 目标依赖顶层已安装
+  的东西），可以退而做顶层 `make install` 到 package_folder，再按白名单 prune：
+  只保留 `lib/lib<name>.so*` 与 `include/**`，其余（bin/、share/、lib/<name>/、
+  *.la、*.a）全部删除。可用，但交付物清单变成"排除法"，上游新增一个安装目录时
+  不会被自动发现 —— 白名单式的 `-C <libdir> install` 更稳。
+  仅作退路，且必须在 notes.md 里写明 prune 清单。
+fallback_command:       >
+  autotools.install()            # 顶层全量 install 到 package_folder
+  # 然后按白名单删除：bin/, share/, lib/<name>/ (模块目录), lib/*.la, lib/*.a,
+  #                  以及 lib/ 下所有不匹配 lib<name>.so* 的文件
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       make\s+-C\s+\S+\s*(&&|\|\||;|\n).*(make\s+(check|-C\s+\S+\s+check))|只构建子目录.*make check
+forbid_1_reason:        上游测试套件（tests/testsuite）由同源码树里的编译器驱动，只构建库
+                        子目录拿不到 cobc，make check 静默无输出或直接失败；"上游测试真跑"
+                        是硬性口径，砍掉后等于本包从未验证过。
+forbid_1_consequence:   构建日志里没有上游测试汇总行，上游测试数只能声明 0 或从兄弟包借用，
+                        直接命中「少报/未跑」类判定；而库里行为早已被改用过的补丁改变却无测试覆盖。
+
+forbid_2_pattern:       (cp|install|rsync).*\.so\.?[0-9.]*\s+.*(from|从).*(gnucobol|兄弟包|sibling)
+forbid_2_reason:        从兄弟包的产物树里把 .so 拷过来拼一个"新包"，等于交付一份来源不明的
+                        二进制：没有本包的构建记录、没有本包跑过的测试、许可证边界也没重新确认。
+forbid_2_consequence:   包不可复现（兄弟包一升级就漂移），验证结果与产物不对应，评审无法核对。
+
+forbid_3_pattern:       把 make install 的整棵树（含 bin/ 与 share/）作为 library 包交付|package_type\s*=\s*"library".*\n.*install\(\)\s*$（全量 install 不收敛）
+forbid_3_reason:        `--with-math=gmp` 之类的 autotools 工程 install 出去的是整个工具链
+                        （编译器、运行器、配置/copybook 目录、模块 .so）。整棵树当库包交付会让
+                        包边界与问题描述不符、体积膨胀、并把 GPL 的可执行文件混进声称 LGPL 的包里。
+forbid_3_consequence:   包类型与内容不一致（下游以为只拿到库却混进可执行文件），许可证边界
+                        表述失实，交付清单随上游版本漂移。
+
+principles:             P001, P003, P004
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-libharu-2.3.0-missing-dt-soname（同族：共享库的 SONAME/ABI 判定；
+                          本条关注 autotools/libtool 侧由 -version-info 反推包名与交付边界，
+                          那条关注 CMake 侧 SONAME 链接标志缺失）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libcob4-3.2-libtool-version-info-soname-and-library-only-extraction.md
+last_updated:           2026-09-21
+source_event:           archives/l/libcob4/3.2 适配（任务给出的包名 libcob4 在上游不存在，
+                        由 libcob/Makefile.am 的 -version-info 6:0:2 反推为 libcob.so.4；
+                        构建全量跑上游 1226 用例，安装收敛到 libcob 子目录）
+
+authors:                2301_76770579
+source_pr:              11597
+source_commit:          b7d8ba783
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-21
