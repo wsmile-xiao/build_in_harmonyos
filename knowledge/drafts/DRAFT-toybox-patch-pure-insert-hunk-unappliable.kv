@@ -1,0 +1,66 @@
+#====================================================================
+# DRAFT-toybox-patch-pure-insert-hunk-unappliable.kv
+# toybox patch（0.8.12）对"纯插入 hunk"（无 - 行）在上下文行合计 ≥7 时
+# 误报 Hunk FAILED：内容逐字节一致、文件不改写、rc=1；把插入改写为相邻行
+# -/+ 替换对形状即可稳定应用（conan patch_ng 路径不受该形状影响）。
+# 完整叙事、实测矩阵与查重表见同目录 .md
+#====================================================================
+
+id:                     DRAFT-toybox-patch-pure-insert-hunk-unappliable
+trigger_tool:           patch|toybox|conan|apply_conandata_patches
+phase:                  patching
+error_signature:        Hunk [0-9]+ FAILED [0-9]+/[0-9]+\.|Hunk #[0-9]+ FAILED at [0-9]+|patching .*（文件未变）|Hunk.*FAILED.*rc=1
+severity:               2
+category:               toybox, patch, conan, portability
+match_keywords:         toybox patch, 纯插入 hunk, pure-insert, hunk 形状, Hunk FAILED, 替换对, replace-pair, 上下文, context, 合计 7, apply_conandata_patches, patch_ng, dry-run, 静默不改写, ohos
+title:                  toybox patch（0.8.12）对"纯插入 hunk"（只有上下文与 + 行、无 - 行）在上下文行合计 ≥7 时误报 Hunk FAILED——内容逐字节一致仍 rc=1 且文件零改动；把插入改写为插入点前一行上下文的 -/+ 替换对（内容不变）后跟 + 行即可稳定应用；conan patch_ng 路径不受该形状影响
+root_cause:             toybox 0.8.12 patch 的纯插入 hunk 形状敏感性（实测矩阵，目标 GNU config timestamp='2018-05-05' 版 build-aux/config.sub，上下文经 od -c 核对逐字节一致、零偏移）：前导上下文 4 行+插入 4 行+尾随 3 行（@@ -137,7 +137,11 @@）→ Hunk 1 FAILED 137/137（rc=1，文件未被修改）；前导 3+尾随 4（@@ -138,7 +138,11 @@）→ FAILED 138/138（rc=1）；前导 3+尾随 3（@@ -138,6 +138,10 @@，上下文合计 6）→ rc=0 正常应用；同一改动改写为插入点前一行 -/+ 替换对形状（@@ -137,7 +137,11 @@）→ dry-run 与实际应用均 rc=0。即上下文行合计 7 必败（无论前导/尾随如何分配）、合计 6 可过；仅约束"前导 ≤3"不充分。归因疑似（未做 toybox 源码级定论）：其 hunk 前缀处理疑似含至多 3 行 fuzz 式消解，纯插入上下文超限即整体判 FAILED。两条边界：不是偏移问题（区别于 E510 的 fuzz/offset 容差缺失，本条零偏移仍失败）；不是 conan 路径问题（同形状补丁经 apply_conandata_patches=patch_ng 正常应用、conan create 全绿，patch_ng 的约束是 hunk 头行号精确匹配，见 DRAFT-conan-patch-hunk-exact-line-offset）
+affected_scope:         设备端 patch 命令（toybox 用户态）应用 unified diff 的一切场景：手动 dry-run/应用预检、构建脚本内 patch 调用（E510 场景）、非 conan 补丁管线；写"新增 case 分支/列表项"类纯插入改动时高发。不影响 conan patch_ng 路径的纯插入 hunk
+verification_cmd:       # 自包含探针序列（行号按 GNU config timestamp='2018-05-05' 版，build-aux/config.sub 1834 行；其他版本行号漂移需先重新定位）
+                        mkdir /tmp/probe && cd /tmp/probe
+                        tar xzf globus-gsi-proxy-ssl_6.6.orig.tar.gz   # sha256=2b26087089993bf69d6827e9ce01c1afbc34d9ca8bf9d63cbcd55b5aae370f5b
+                        cd globus_gsi_proxy_ssl-6.6
+                        /bin/sh build-aux/config.sub aarch64-unknown-linux-ohos   # [0] pristine 基线：输出 aarch64-unknown-linux-gnu-ohos（rc=0，静默改写对照）
+                        patch -p1 < probes/hunk2.patch                 # [A] 纯插入 @@ -137,7：预期 Hunk 1 FAILED 137/137（rc=1）
+                        patch -p1 < probes/diag_pureinsert7_trail4.patch   # [B] 纯插入 @@ -138,7（尾随 4）：预期 FAILED 138/138（rc=1）
+                        patch -p1 < probes/diag_pureinsert6.patch      # [C] 纯插入 @@ -138,6（合计 6）：预期 rc=0（边界）
+                        patch -p1 --dry-run < probes/v1_replace_style.patch && patch -p1 < probes/v1_replace_style.patch   # [D] 替换对形状：预期两次 rc=0
+                        sed -n '129p;141p;144p;1412p' build-aux/config.sub   # 四处改动行逐行核对
+                        /bin/sh build-aux/config.sub aarch64-unknown-linux-ohos   # 断言原样输出（4 段）
+                        /bin/sh build-aux/config.sub aarch64-linux-ohos           # 断言 aarch64-unknown-linux-ohos（3 段）
+                        # 实测落盘（2026-09-26，toybox 0.8.12）：/storage/Users/currentUser/tmp/oh-device-porting-v2/gsps66/probe-pureinsert.log（[0]+[A]+[B]+[C]）、probe-replace-pair.log（[D] + 断言双 PASS）
+rec_priority:           1
+rec_approach:           rewrite-pure-insert-as-replace-pair
+rec_description:        写"插入"类改动时避免纯插入 hunk 形状：把插入点前一行上下文改写为内容不变的 -/+ 替换对（语义 no-op）后接 + 新行（实测 [D] 稳定通过 toybox patch 与 patch_ng 双路径）；备选形状为并入相邻替换 hunk（合并 hunk，实测 rc=0，代价是 hunk 粒度变粗）。诚实权衡：替换对比纯插入多一对冗余行、diff 审查时需多看一眼确认 no-op；但不需要任何环境依赖且双路径兼容。验证时不得以 GNU patch 或单一路径（仅 patch 或仅 patch_ng）的通过/失败下结论——两路径判据不同且互不代替
+rec_command:            # 生成补丁后，设备端一次性验证（形状 + 语义双断言）
+                        patch -p1 --dry-run < patches/0001-config.sub-ohos.patch && patch -p1 < patches/0001-config.sub-ohos.patch && sed -n '129p;141p;144p;1412p' build-aux/config.sub && sh build-aux/config.sub aarch64-unknown-linux-ohos
+rec_auto_fix:           false
+rec_impl:               patch-shape-rewrite
+fallback_priority:      2
+fallback_approach:      prepend-gnu-patch
+fallback_description:   按 E510 方案把 harmonybrew 的 GNU patch（~/.harmonybrew/bin/patch）前置到 PATH 再应用补丁。诚实权衡：GNU patch 对本形状无敏感性，但该退路只在 patch 命令路径生效（不影响 patch_ng），依赖 harmonybrew 及 gpatch 的安装状态，且没有消除 toybox 对其他补丁的形状/偏移敏感性；形状重写仍是无依赖的首选
+fallback_command:       export PATH="$HOME/.harmonybrew/bin:$PATH" && patch --version | head -1 && patch -p1 < patches/0001-config.sub-ohos.patch
+fallback_auto_fix:      false
+fallback_impl:          conanfile-env-override
+forbid_1_pattern:       在 toybox 设备上以纯插入形状（尤其上下文合计 ≥7）交付补丁，且仅以 GNU patch 或 patch_ng 单路径验证通过即出结论
+forbid_1_reason:        纯插入 hunk 在 toybox patch 上内容逐字节一致仍 Hunk FAILED 且文件零改动；单路径验证会把"设备端不可应用"误判为"补丁正确"，或反向把 toybox FAILED 误判为"补丁内容错误"而误改/误弃正确补丁
+forbid_1_consequence:   设备端补丁应用阶段失败或文件静默未更新，构建/校验结果与补丁意图背离；返工与 CI 资源浪费
+forbid_2_pattern:       为迁就形状而修改补丁语义内容（删掉待插入行、改写目标文件、或去掉插入改动）
+forbid_2_reason:        形状问题的正确解是改写 hunk 形状（替换对/合并 hunk），不是牺牲补丁语义
+forbid_2_consequence:   补丁意图丢失，config.sub 白名单缺失，后续 configure 静默改写或失败
+principles:             [P-PATCH-001, P-PATCH-004]
+causes:                 []
+caused_by:              []
+similar_to:             [E510, DRAFT-no-tail-newline-hunk-unappliable, DRAFT-conan-patch-hunk-exact-line-offset, DRAFT-autotools-config-sub-silent-ohos-triplet]
+conflicts_with:         []
+prerequisite_of:        []
+doc_file:               knowledge/drafts/DRAFT-toybox-patch-pure-insert-hunk-unappliable.md
+last_updated:           2026-09-26
+source_event:           globus-gsi-proxy-ssl 6.6 OHOS 适配：config.sub ohos 补丁（含纯插入 hunk）在设备 toybox 0.8.12 patch 下 Hunk FAILED（内容逐字节一致），探针矩阵（前导 4/3 × 尾随 3/4 + 替换对）定位为纯插入形状问题；同一形状补丁经 conan patch_ng 路径应用成功（conan create 全绿）
+authors:                why6666666 <why6666666@noreply.atomgit.com>
+source_pr:              pending（feat/globus-gsi-proxy-ssl-6.6 交付 PR）
+source_commit:          pending（随 PR 交付后回填）
+metrics_success_count:  2
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-26
