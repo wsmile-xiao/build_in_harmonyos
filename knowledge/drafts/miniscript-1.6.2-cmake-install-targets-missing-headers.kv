@@ -1,0 +1,87 @@
+# ═══ Draft knowledge entry — 上游 CMake 仅 install(TARGETS) 未安装头文件时，
+# 配方 package() 必须补装公开头文件（保持上游目录结构），否则 test_package 引用
+# INTERFACE_INCLUDE_DIRECTORIES 指向不存在路径导致 G2 失败
+# Software: miniscript 1.6.2（MiniScript C++ 实现）
+# Gate: conan-verify G2 (conan create, ohos-aarch64) → test_package cmake.configure()
+# Status: DRAFT（预留编号 E543）
+
+id: miniscript-1.6.2-cmake-install-targets-missing-headers
+severity: 2
+category: build-system|cmake|packaging|conan
+trigger_tool: cmake|conan
+phase: packaging
+
+keywords: install(TARGETS, install headers, INTERFACE_INCLUDE_DIRECTORIES, non-existent path, package_folder, copy, include directory, CMakeDeps, test_package
+error_signature: Imported target .* includes non-existent path|INTERFACE_INCLUDE_DIRECTORIES|The installation package was faulty and references files it does not provide
+match_keywords: install TARGETS, headers not installed, non-existent path, include, INTERFACE_INCLUDE_DIRECTORIES, conan package, CMakeDeps, test_package, package_folder include
+
+root_cause: |
+  上游 CMakeLists 只写 `install(TARGETS lib bin)` 而不安装公开头文件（无
+  install(DIRECTORY ...)），CMake 对 PUBLIC include 目录的 install() 不会自动复制
+  头文件。Conan package() 阶段产物目录（package_folder）因此缺失 include/；
+  test_package 构建时 CMakeDeps 生成的 imported target 仍声明
+  INTERFACE_INCLUDE_DIRECTORIES 指向 `package_folder/include`，configure 阶段报
+  “Imported target ... includes non-existent path”，G2 硬失败。
+  头文件只有被显式复制进 package_folder/include 后才满足消费者编译。
+
+affected_scope: 所有上游 CMake 仅 install(TARGETS)（未 install(DIRECTORY ...) 头文件）的
+  C/C++ 库适配，在 OHOS aarch64 + Conan 2 CMakeDeps 下 conan create 的 test_package 阶段必然暴露。
+verification_cmd: conan create 后检查 package_folder/include 是否存在相应头文件；
+  复跑 conan create 观察 G2 是否通过。
+
+rec_priority: 1
+rec_approach: package-copy-headers-preserve-upstream-layout
+rec_description: |
+  在 conanfile.py package() 中 cmake.install() 之后，用
+  `copy(self, "*.h", src=os.path.join(self.source_folder, "<上游头文件目录>"),
+  dst=os.path.join(self.package_folder, "include", "<上游子目录>"))` 补装公开头文件，
+  保持与上游 include 路径（#include <Sub/Header.h>）一致的目录结构。
+  libs 名与上游 target 名一致（如 miniscript-cpp → cpp_info.libs=["miniscript-cpp"]）。
+rec_command: |
+  from conan.tools.files import copy
+  import os
+  def package(self):
+      cmake = CMake(self); cmake.install()
+      copy(self, "*.h",
+           src=os.path.join(self.source_folder, "MiniScript-cpp", "src", "MiniScript"),
+           dst=os.path.join(self.package_folder, "include", "MiniScript"))
+rec_auto_fix: false
+rec_impl: conan-recipe
+
+fallback_priority: 2
+fallback_approach: upstream-install-directory-patch
+fallback_description: 以最小补丁为上游 CMakeLists 增加
+  install(DIRECTORY <include目录> DESTINATION include)，随 patches/ 进入 CI 构建；
+  需保持与 R8（补丁默认无平台宏）一致。
+fallback_command:
+fallback_auto_fix: false
+fallback_impl: conan-patch
+
+forbid_1_pattern: touch.*include|mkdir.*include.*&&.*exit 0|create_file.*include
+forbid_1_reason: 用空占位文件欺骗 include 存在不修复真实头文件缺失，消费者仍无法编译。
+forbid_1_consequence: G2 假绿但下游消费者 include 失败，PF3/L1e 反向验证仍拦截。
+forbid_2_pattern: __OHOS__|OHOS.*ifdef
+forbid_2_reason: 头文件安装属于 CMake 安装规则问题，与操作系统宏无关，不应引入平台宏。
+forbid_2_consequence: 无意义平台分叉，混淆安装语义。
+
+principles: P002,P013
+causes: []
+caused_by: []
+similar_to: [E322, E498]
+conflicts_with: []
+prerequisite_of: []
+
+source_pr: miniscript-1.6.2-r01
+last_updated: 2026-09-23
+source_event: |
+  miniscript 1.6.2 上游 CMakeLists 仅 install(TARGETS miniscript-cpp minicmd)。
+  G2 conan create 首跑失败：test_package configure 报 “Imported target
+  'miniscript::miniscript' includes non-existent path
+  .../.conan2/p/b/minisb*/p/include”。根因即头文件未随包安装。
+  配方 package() 补装 MiniScript/*.h 到 include/MiniScript 后 G2 PASS，
+  test_package 消费者通过公开 Interpreter API 运行脚本验证输出与全局变量。
+
+metrics_success_count: 1
+metrics_fail_count: 1
+metrics_confidence: 0.9
+metrics_last_used: 2026-09-23
