@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-fyba-4.1.1-vpath-relative-include
+#   autotools out-of-source（VPATH）构建下，Makefile.am 跨子目录
+#   `-I../sibling` 相对包含失效，头文件找不到
+# 来源: PR 适配 fyba 4.1.1（Kartverket SOSI 库）到 HarmonyOS PC 时实证
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 辨别性指纹：AM_CPPFLAGS 中出现 `-I../兄弟目录` 相对路径 + VPATH 构建语境
+# （srcdir != builddir，conan basic_layout 的标准形态）。
+id:                     DRAFT-fyba-4.1.1-vpath-relative-include
+trigger_tool:           make|automake|libtool|clang
+phase:                  compilation
+error_signature:        fatal error: '[^']+\.h' file not found|
+                        AM_CPPFLAGS.*-I\.\./|
+                        -I\.\./[A-Za-z_]+.*file not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, autotools, vpath, flags, portability
+match_keywords:         VPATH, out-of-source, out-of-tree, srcdir, builddir,
+                        AM_CPPFLAGS, -I../, 相对包含, relative include,
+                        top_srcdir, sibling, 兄弟子目录, fygm.h, file not found,
+                        conan build, in-source, autotools
+title:                  autotools 子目录 Makefile.am 用 `-I../兄弟目录` 相对包含：out-of-source（VPATH）构建下解析到构建目录，头文件找不到
+prescan_pattern:        ^AM_CPPFLAGS.*-I\.\./|^[A-Za-z_]+_CPPFLAGS.*-I\.\./
+prescan_globs:          Makefile.am, */Makefile.am, **/Makefile.am
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游 Makefile.am 把跨子目录的头文件引用写成
+                        `-I../GM -I../UT` 这种**相对当前子目录**的路径。in-source
+                        构建（configure 在源码目录运行）下 `../GM` 恰好指向源码树
+                        兄弟目录，编译通过；conan 采用 out-of-source（VPATH）构建
+                        （basic_layout → build-release/src/FYBA），编译命令在
+                        build-release 下执行，`../GM` 解析到构建目录的兄弟路径，
+                        而构建目录里没有头文件（头文件只存在于源码树），于是
+                        `#include <fygm.h>` 报 file not found。症状是"in-source
+                        全绿、conan/CI 报找不到"，必须用 `$(top_srcdir)` 锚定源码根。
+affected_scope:         所有用 automake/libtool、子目录 Makefile.am 以 `-I../兄弟目录`
+                        引用相邻子目录头文件、且被 out-of-source（VPATH）构建的工程。
+                        本题实证：fyba 4.1.1 的 src/FYBA/Makefile.am
+                        `AM_CPPFLAGS = ... -I../GM -I../UT`，conan create 阶段报
+                        `src/FYBA/fyba.h:88:10: fatal error: 'fygm.h' file not found`。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           patch-makefile-am-top-srcdir
+rec_description:        最小补丁把 `-I../兄弟` 改为 `-I$(top_srcdir)/<路径>`（VPATH 安全，
+                        源码树与构建树均能解析）。$(top_srcdir) 在 automake 子目录
+                        Makefile 中恒为源码根，构建目录不参与该相对解析。
+rec_command:            patches/0001-*-top-srcdir-includes.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      in-source-build
+fallback_description:   若不允许改上游（无补丁空间），配方改用 in-source 构建
+                        （layout/build 目录=源码目录）绕开 VPATH 相对解析；
+                        但 in-source 在 conan/CI 中非常规，且可能与 cleanup 冲突。
+fallback_command:       layout(src_folder=".")
+fallback_auto_fix:      false
+fallback_impl:          conan-in-source
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       cp.*\.h.*include|把.*头文件.*拷到|ln -s.*\.h
+forbid_1_reason:         禁止用拷贝/软链头文件到构建或系统目录绕过——污染产物与系统
+                        路径，掩盖相对包含解析的真因（G3 同名库隔离精神）
+forbid_1_consequence:   本机可编、产物/其他包被污染，问题推迟
+forbid_2_pattern:       in-source.*构建.*通过.*因此无问题|srcdir.*builddir.*已通过
+forbid_2_reason:        本模式在 in-source 下常因相对路径凑巧成立而不复现，不能据此
+                        判定无问题；conan/CI 走 VPATH 构建
+forbid_2_consequence:   本地 PASS、conan/CI 报 file not found
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P006, P004
+
+# ═══ 关系图 (Relations) ═══
+# 签名家族与 E217/E169/DRAFT-10251 同属"头文件找不到"，但根因各不同：
+#   E217 = CMake 消费者 includedirs 安装子目录；E169 = OHOS 缺 IPC 头；
+#   DRAFT-10251 = automake per-target *_CPPFLAGS 空值替换 AM_CPPFLAGS（变量语义）；
+#   本条 = AM_CPPFLAGS 内相对 `-I../` 路径在 VPATH 下解析到构建目录（路径语义）。
+similar_to:             E217（头文件找不到，CMake 语境）、
+                        E041（VPATH 构建语境，automake 重生成）、
+                        DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/f/fyba/4.1.1 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+doc_file:               knowledge/drafts/DRAFT-fyba-4.1.1-vpath-relative-include.md
+last_updated:           2026-09-27
+source_event:           fyba 4.1.1 适配 HarmonyOS PC（task fyba-4.1.1-r01-pc4-4）；
+                        src/FYBA/Makefile.am `-I../GM -I../UT` 在 conan VPATH 构建下
+                        fygm.h 找不到，`$(top_srcdir)` 补丁后 conan create G2 PASS
+                        + W3 本地 CI PASS
+authors:                pc4-4
+source_pr:              TBD
+source_commit:          TBD
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-27
