@@ -1,0 +1,70 @@
+#====================================================================
+# DRAFT-embedded-log-1.0.1-no-build-system-c-lib-direct-compile - 零构建系统裸 C 库的 Conan 直接编译配方模式
+#====================================================================
+
+id:                     DRAFT-embedded-log-1.0.1-no-build-system-c-lib-direct-compile
+trigger_tool:           conan|clang|llvm-ar
+phase:                  configuration|compilation|package
+error_signature:        Package type is 'library', but no 'shared' option declared|conan-init.*autotools.*模板|No makefile|no build system
+
+severity:               2
+category:               conan|build-system|static-library|compiler|packaging
+match_keywords:         无构建系统, no build system, bare C, 裸 C 库, static-library, shared option, 直接编译, direct compile, llvm-ar, 平铺头文件, flat header, conan-init, autotools 误判, only .c/.h source
+
+title:                  零构建系统裸 C 库（仅 .c/.h 源码）的 Conan 配方模式：static-library 绕 shared 契约 + conf 编译器直接编译 + 平铺头文件安装
+
+root_cause:             ①上游仅提供 .c/.h 源码、无任何构建系统（无 Makefile/configure/CMake）时，ohc-run.py conan-init 按 URL 猜测构建系统会误判为 autotools 并生成错误模板；②Conan 2 的 package_type="library" 强制要求声明 shared 选项契约（Package type is 'library', but no 'shared' option declared），纯静态库不便引入无意义的 shared 分支；③无构建系统意味着 build() 必须手写直接编译（clang -c + llvm-ar rcs），package() 必须平铺拷贝头文件与 .a。
+
+affected_scope:         所有"上游无任何构建系统、仅 .c/.h 源码"的纯 C 库（典型：嵌入式/单片式小库，单文件 C 程序，header + 单 .c 实现）。反例：上游有 Makefile（走 E392 raw-makefile 模式）、有 configure/CMake（走对应构建系统模式）、纯单头文件无需编译（走 E257 header-only 模式）的库不适用。
+
+verification_cmd:       python3 scripts/ohc-run.py conan-verify embedded-log 1.0.1 2>&1 | grep -E "G[0-4]: PASS|配方验证通过"
+
+rec_priority:           1
+rec_approach:           static-library-plus-direct-compile-plus-flat-header
+rec_description:        ①package_type 声明为 "static-library"（而非 "library"），绕开 Conan 2 的 shared 选项契约；②build() 中从 Conan conf 取编译器（conf 子键在 OHOS 适配版 Conan 2.29.1 未注册时 try/except 回退 PATH 上的 clang/llvm-ar，R33 合规），执行 clang -c -O2 -fPIC -std=c99 直接编译 .c 并用 llvm-ar rcs 打包静态库；③package() 用 copy 平铺拷贝公共头文件（log.h/log_cfg.h 同目录互 include，必须同层）与 libembedded-log.a，LICENSE 一并拷贝；④cpp_info.libs 声明库名。
+
+rec_command:            package_type = "static-library"; def build(): cc = conf_get_or_fallback("c", "clang"); ar = conf_get_or_fallback("ar", "llvm-ar"); self.run(f"{cc} -c -O2 -fPIC -std=c99 -I{src_dir} {src_dir}/log.c -o log.o"); self.run(f"{ar} rcs libembedded-log.a log.o"); def package(): copy(self, "log.h", src=src, dst=include, keep_path=False); copy(self, "log_cfg.h", src=src, dst=include, keep_path=False); copy(self, "libembedded-log.a", src=build, dst=lib, keep_path=False)
+
+rec_auto_fix:           false
+rec_impl:               conanfile-edit
+
+fallback_priority:      2
+fallback_approach:      declare-shared-contract
+fallback_description:   若必须保留 package_type="library"（例如下游消费者依赖 CMakeDeps 生成的 shared/static 双目标），则按 E283 声明 options = {'shared': [True, False]} + default_options = {'shared': False} 并将该选项传给构建命令。
+fallback_command:       options = {'shared': [True, False]}; default_options = {'shared': False}
+fallback_auto_fix:      false
+fallback_impl:          conanfile-edit
+
+forbid_1_pattern:       package_type\s*=\s*"library"|package_type\s*=\s*'library'
+forbid_1_reason:        零构建系统纯静态库用 "library" 类型会被 Conan 2 拒绝（缺 shared 选项契约），且引入无意义的 shared 分支。
+forbid_1_consequence:   conan create 在配置阶段报 "Package type is 'library', but no 'shared' option declared"，配方无法构建。
+
+forbid_2_pattern:       self\.run\(f?"make|autotools\.configure|Autotools\(self\)
+forbid_2_reason:        上游无构建系统时不存在 Makefile/configure，任何 make/autotools 调用必然失败；必须直接调用编译器。
+forbid_2_consequence:   build() 报 "No targets specified. No makefile found" 或 autotools.configure 失败，浪费整轮验证。
+
+forbid_3_pattern:       os\.environ\[.CC.\]|os\.environ\[.CFLAGS.\]|\$\{CC\}|\$\{CFLAGS\}
+forbid_3_reason:        R33 禁止依赖未定义的 shell 环境变量；编译器必须来自 Conan conf（或其合规回退）。
+forbid_3_consequence:   release worker 上 CC/CFLAGS 为空导致编译静默失败。
+
+forbid_4_pattern:       copy\(self,\s*"\*\.h"|include\s*=\s*.*src/log\.h[^,]*
+forbid_4_reason:        头文件 log.h 以 #include "log_cfg.h" 相对包含，若只拷 log.h 或拷贝到不同层级，消费者编译报找不到 log_cfg.h；必须把互包含头平铺拷到同一 include 目录。
+forbid_4_consequence:   消费者 include <log.h> 时找不到 log_cfg.h，test_package 编译失败。
+
+principles:             P010, P014, P016
+causes:                 []
+caused_by:              []
+similar_to:             [E283, E392, E257]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-embedded-log-1.0.1-no-build-system-c-lib-direct-compile.md
+last_updated:           2026-09-23
+source_event:           embedded-log 1.0.1 HarmonyOS PC 适配（零构建系统裸 C 库：conan-init autotools 误判 + library/shared 契约 + 直接编译配方）
+authors:                pc7-18
+source_commit:          (commit 时回填)
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:       2026-09-23
