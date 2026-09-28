@@ -98,18 +98,25 @@ class UnadfConan(ConanFile):
         # clang promotes. -fcommon keeps the tentative globals in the 2006
         # headers linkable under clang's -fno-common default.
         #
+        # Overriding CFLAGS replaces the Makefile's own value wholesale, so the
+        # upstream include paths have to be carried over: Lib/Makefile passes
+        # -I./Generic -I.. -I., and Demo/Makefile passes -I../Lib. Without them
+        # adf_hd.c fails on the very first #include.
+        #
         # CFLAGS is passed as a make variable assignment, so its value must be
         # one shell word: self.run() goes through a shell and would otherwise
-        # split "-O2 -fcommon ..." into separate argv entries that make reads
-        # as invalid options.
-        cflags = "-O2 -fcommon -std=gnu99 -Wno-strict-prototypes"
-        common = (f"CC={cc} AR={ar} RANLIB={ranlib} DEPEND= "
-                  f"CFLAGS='{cflags}'")
+        # split it into separate argv entries that make reads as invalid
+        # options.
+        base = "-O2 -fcommon -std=gnu99 -Wno-strict-prototypes"
+        lib_cflags = f"{base} -I./Generic -I.. -I."
+        demo_cflags = f"{base} -I../Lib"
+        common = f"CC={cc} AR={ar} RANLIB={ranlib} DEPEND="
 
         # R9: -j1 only.
-        self.run(f"make -C Lib {common} -j1", cwd=self.source_folder)
-        # Demo/Makefile uses LIBDIR-relative -I and links ../Lib/libadf.a.
-        self.run(f"make -C Demo {common} -j1", cwd=self.source_folder)
+        self.run(f"make -C Lib {common} CFLAGS='{lib_cflags}' -j1",
+                 cwd=self.source_folder)
+        self.run(f"make -C Demo {common} CFLAGS='{demo_cflags}' -j1",
+                 cwd=self.source_folder)
 
     def package(self):
         lib = os.path.join(self.source_folder, "Lib")
