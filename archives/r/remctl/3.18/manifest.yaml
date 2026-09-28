@@ -1,0 +1,98 @@
+# 版本级 manifest — remctl 3.18
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "3.18"
+software: "remctl"
+
+# 编译状态: published | built | failed | archived
+# 本 PR 未走 release/upload 流水线（制品尚未进制品仓），真实状态为 built
+status: built
+
+build_date: "2026-09-27"
+build_system: autotools
+
+# 源码信息（与 conandata.yml 严格同源）
+source:
+  url: "https://archives.eyrie.org/software/kerberos/remctl-3.18.tar.gz"
+  sha256: "393c896b6bd9585e75fbc33d8299e23785b5e6418c5b15456c8d27b04f357d42"
+  # 交叉验证：与 Debian 池件 remctl_3.18.orig.tar.xz（612028B）解包后 `diff -r` 逐字节一致，
+  # 仅压缩形态不同。池 URL 一律不进 conandata.yml（§12.3）。
+  site_root_404_note: "软件页根 /releases/ /files/ 三种猜测 URL 实测全 404；官方直链在 archives 子域（另有同名 .asc 签名件）"
+
+build:
+  # tarball 自带预生成 configure ⇒ 不需要 autoreconf/autotools tool_requires。
+  # CI 的 -pr:h 与 -pr:b 同为 ci/conan/profiles/ohos-aarch64 ⇒ conan 判 cross_building()=False，
+  # 不注入 --build/--host，而随包 build-aux/config.guess 是 2022-01-09 版、全文 grep -ci ohos=0，
+  # 故 configure 报 "cannot guess build type"。按经验汇总 §12.1 显式传交叉三元组
+  # （两边都写 ohos 会被 config.sub 误判），并配合 patches/0001 让随包 config.sub(2022-01-03)
+  # 认得 *-linux-ohos。不依赖框架 patch-autotools-ohos.pl：CI worker 上 OHC_SKILL_ROOT 不可达。
+  configure_options:
+    - "--build=aarch64-unknown-linux-gnu"
+    - "--host=aarch64-unknown-linux-ohos"
+    - "--with-krb5=<krb5/1.22.1 package_folder>"
+    - "--with-gssapi=<krb5/1.22.1 package_folder>"
+    - "--with-libevent=<libevent/2.1.12 package_folder>"
+  dependencies:
+    - "krb5/1.22.1（ohpcd 已发布 OHOS armv8 制品；1.22.2 在 remote 连配方都不存在，实测 Unable to find ⇒ 只能 pin 1.22.1）"
+    - "libevent/2.1.12（声明为 requires(..., visible=False)：只服务本包 server 侧二进制，不传播给 libremctl 使用者）"
+  cc: clang
+  extra_cflags:
+    - "-I<libevent/2.1.12 package_folder>/include"   # 全局：上游只把 LIBEVENT_CPPFLAGS 挂在 server 目标
+  extra_ldflags:
+    - "-L<libevent/2.1.12 package_folder>/lib"
+  make_jobs: "-j2（configure 后 make -j2；make check 用 -j1）"
+  max_rss_mb: 2500            # memcap-run.py --slow --mb 2500 硬预算（超限 rc=90 止损）
+  measured_peak_rss_mb: 205   # 末次实测 MEMCAP[run] peak=205MB
+  resource_note: "外层 build-slot（全机基准 2 槽）+ 内层 memcap 硬预算；同窗同一时刻只 1 个构建"
+
+# 补丁信息（均在 conandata.yml 的 patches: 中声明、由 build() 首行 apply_conandata_patches 真实应用）
+patches_applied:
+  - "patches/0001-config-sub-ohos-triplet.patch"
+  - "patches/0002-ohos-relocatable-perl-shebang.patch"
+patch_classification:
+  0001: "portability —— 上游回补：随包 config.sub(2022-01-03) 全文无 ohos，直跑 `sh build-aux/config.sub aarch64-unknown-linux-ohos` 报 OS 'ohos' not recognized；两处白名单（OS 表 `| ohos*`、kernel-os 表 `| linux-ohos*`）即修复，其余三元组回归输入结果不变"
+  0002: "portability —— 6 个测试脚本 shebang 写死 /usr/bin/perl（本机 perl 只在 ~/usr/local/bin）⇒ make check 里这 6 集 ABORTED，连它们自带的 skip_all 门都进不去；改为 /usr/bin/env perl 后转为上游自身的带因 skip"
+patch_generation: "两条均手工从新鲜解包件生成，并做 `patch --dry-run` / 实打 / `-R` 反向 revert 三向校验（revert 后与原件 diff -q 逐字节一致）；不是 refresh-patch --auto 产物"
+
+# 配方内就地处理（不产出补丁文件：对象是生成物/测试前置件，写成补丁会把生成文件伪装成源码改动）
+in_recipe_adaptations:
+  - "E386（设备级 getcwd 挂）：generate() 内先 VirtualBuildEnv(self).generate() 再 Environment().define(CONFIG_SHELL/SHELL=/bin/sh)+save_script —— 顺序是胜负点，profile [buildenv] 经 VirtualBuildEnv 落 conanbuildenv-*.sh 且排最后会覆盖配方的 define（实测 . ./conanbuild.sh 后 SHELL 终值）"
+  - "E114（HMDFS setgid + umask 077）：build() 内就地去掉 configure 里 2 处 umask 077 包裹（保留真实 mktemp/mkdir），未命中则 warn 不静默；与 archives/4/4ti2/1.6.10 同源做法。症状逐字 `./config.status[1035]: can't create ./conf52vraT/subs1.awk: Permission denied`"
+  - "依赖可见性：本包 configure 走 krb5-config/AC_SEARCH_LIBS 而非 PKG_CHECK_MODULES ⇒ PkgConfigDeps 无效，按仓库既有写法（arb 2.9.0 / alpine 2.26）把依赖 package_folder 作 --with-* 显式喂给 configure"
+  - "测试运行期：build 作用域 prepend_path LD_LIBRARY_PATH（krb5/libevent 的 lib 目录）。make check 曾 53 集 exit 127，直跑测试二进制打印 `Error loading shared library libkrb5.so.3` 坐实是运行期解析不到、**不是**未签名 ELF 不可执行"
+  - "测试前置件：生成 tests/config/krb5.conf（6 行最小 [libdefaults] default_realm）。server/acl/localgroup 的 16 条断言是纯 ACL 逻辑、不需 KDC 与票据，只需该文件；缺时 generate-krb5-conf 报 'no krb5.conf found, see test instructions'"
+
+# 测试计数（与 PR 正文两张表、notes.md §6、test_package/MANIFEST.yml、构建日志五向同源）
+tests:
+  upstream_runner: "自研 C TAP 驱动：Makefile.am:609 `check-local: $(check_PROGRAMS)` 内执行 `tests/runtests -l '$(abs_top_srcdir)/tests/TESTS'`（本包有正式 check 钩子，与 lksctp-tools 那种只有 check_PROGRAMS 的静默零执行不同）"
+  N_static: 1319          # 下界口径：41 个 *-t.c 字面 plan 求和 1239 + 4 个脚本 plan 求和 80；另 8 个 *-t.c 的 plan 为运行时计算、静态不可核验
+  N_registered_sets: 57   # tests/TESTS 非注释非空行（47 个 C 程序 + 10 个脚本）
+  N_registered: 975       # 真机 harness 逐字 Files=57, Tests=975（整集 1..0 # skip 的集按 TAP 协议贡献 0 计划数）
+  N_executed_passed: 912  # 975 - 63 条文件内条件 # skip
+  N_skipped_intra_file: 63
+  N_skipped_sets: 29      # 整集带因跳过：22 集 Kerberos tests not configured + 7 集作者/自动化门
+  N_failed: 0
+  N_consumer: 5           # test_package/test_remctl.c，3 组 5 断言，独立 .c 源文件满足 CI L0c
+  pass_rate_line: "执行项 912/912（100%）；静态全量口径 912/1319，未执行 344 条声明所在 29 集逐项带因，未从分母删除"
+  upstream_tests_executed_in_build: true
+  upstream_test_command: 'autotools.make(target="check", args=["-j1"])'
+  verbatim_log_lines:
+    - "All tests successful, 63 tests skipped."
+    - "Files=57,  Tests=975,  26.90 seconds (2.14 usr + 2.66 sys = 4.81 CPU)"
+    - "ok 1 - remctl_new returns a handle … ok 5 - one-shot result reports failure / 1..5"
+  modification_of_upstream_tests: "仅 shebang 可重定位（0002，6 文件各 1 行）+ 补一个上游要求的测试前置配置文件；未删除、未缩小分母、未把任何未执行项计入通过"
+
+known_limitations:
+  - "语言绑定未交付：perl/php/python/ruby 仅在 --enable-* 时构建（configure.ac:161-194），本包按默认（全关）构建，不交付任何绑定"
+  - "22 个上游测试集需要 krb5 客户端配置与**活 KDC**（tests/tap/kerberos.c:318,338 的 skip_all 'Kerberos tests not configured'），HarmonyOS PC 无 KDC/keytab ⇒ 整集由上游自身带因跳过，未宣称通过"
+  - "7 个集是上游自身的作者/自动化测试门（skip_unless_author / skip_unless_automated，守卫变量 AUTHOR_TESTING/RELEASE_TESTING/AUTOMATED_TESTING；另 valgrind/logs 需 valgrind、util/xmalloc 需作者位）"
+  - "server/remctld 与 remctl-shell 随包交付但未在真机做端到端服务验证：需要 KDC 与 keytab，本平台不具备该前置；验证责任由 5 条不依赖服务端的消费者断言 + 上游 912 条实跑断言承担"
+  - "消费者测试运行时依赖：test_remctl 链接静态 libremctl.a，其传递依赖（krb5 的 .so）由 conan 的 VirtualRunEnv 提供 LD_LIBRARY_PATH；若消费方绕过 conan 环境直接执行该二进制会报 Error loading shared library libkrb5.so.3"
+  - "本包显式写死 --build/--host 三元组（SKILL §4.1 更偏好由 config.guess 探测）：原因是随包 config.guess(2022-01-09) 无任何 OHOS 分支，而 CI worker 取不到框架的 patch-autotools-ohos.pl（REPO_ROOT 不 export，lksctp 已证）；如后续基线带上含 OHOS 分支的 config.guess，应改为只打补丁、不写死三元组"
+
+knowledge_gained:
+  - "conan 的 conanbuild.sh 按各 env 脚本被**保存的先后**串 source，profile [buildenv] 由 VirtualBuildEnv 写进 conanbuildenv-*.sh ⇒ 配方级 Environment().define() 想覆盖 profile 同名变量，必须让 VirtualBuildEnv(self).generate() 先跑，否则被链尾覆盖且全程无告警（E386 因此在'已修'状态下仍红一整轮）"
+  - "make check 的 exit 127 不等于'OHOS 未签名 ELF 不可执行'：直跑测试二进制看到 `Error loading shared library …` 才是真相，AutotoolsToolchain 只给链接期 -L、不写 rpath，且 conanbuild 无 LD_LIBRARY_PATH"
+  - "'能不能启动'与'该不该跑'是两件事：6 个 perl 测试集因 shebang 写死而 ABORTED，掩盖了它们本会走自己的 skip_all 带因退出"
+  - "依赖建模要按符号实证而非 configure.ac 有无 AC_ARG_WITH：libevent 只出现在 server 目标（Makefile.am:185 client_libremctl_la_LIBADD 无 event、client/*.c 里 event_ 命中 0），故应 requires(..., visible=False)；conan 2.29 无 private= 关键字"
+  - "上游测试目标可能只在自己的目标上挂 CPPFLAGS（Makefile.am 224/239 行 vs 测试复用 SERVER_FILES 的 422 行），在发行版上被 /usr/include 掩盖、在 OHOS 上暴露 ⇒ 判定'上游 Makefile 有缺陷'要看是否全局传播，而不是只看主编译是否通过"
