@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""Conan test_package — fixed_point_arith 0.0-git9b5da0fa97 消费者验证 (L1)。
+
+通过 CMake 链接触发的固定点/向量/四元数公开 API 做闭环计算验证。
+"""
+import os
+
+from conan import ConanFile
+from conan.tools.cmake import CMake, cmake_layout
+
+
+class FixedPointArithTestConan(ConanFile):
+    settings = "os", "compiler", "build_type", "arch"
+    generators = "CMakeDeps", "CMakeToolchain"
+
+    def requirements(self):
+        self.requires(self.tested_reference_str)
+
+    def layout(self):
+        cmake_layout(self)
+
+    def build(self):
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+
+    def test(self):
+        cmake = CMake(self)
+        cmake.test()
+        # 直接运行二进制兜底（与 ctest 等价）
+        self.run(f"{os.path.join(self.cpp.build.bindirs[0], 'test_fixed_point_arith')}",
+                 env="conanrun")
