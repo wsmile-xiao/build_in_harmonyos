@@ -1,0 +1,139 @@
+--- a/Rendering/VolumeOpenGL2/vtkOpenGLProjectedTetrahedraMapper.cxx
++++ b/Rendering/VolumeOpenGL2/vtkOpenGLProjectedTetrahedraMapper.cxx
+@@ -186,20 +186,24 @@
+     {
+       // determine if we have MSAA
+       GLint winSampleBuffers = 0;
+       glGetIntegerv(GL_SAMPLE_BUFFERS, &winSampleBuffers);
+       GLint winSamples = 0;
+       if (winSampleBuffers)
+       {
+         glGetIntegerv(GL_SAMPLES, &winSamples);
+       }
+ 
++#ifdef GL_ES_VERSION_3_0
++      // The floating-point accumulation target is single-sampled on ES.
++      winSamples = 0;
++#endif
+       int dsize = rw->GetDepthBufferSize();
+       if (dsize == 0)
+       {
+         dsize = 24;
+       }
+ 
+       vtkOpenGLFramebufferObject* fo = this->Framebuffer;
+       fo->SetContext(rw);
+       rw->GetState()->PushFramebufferBindings();
+ 
+@@ -480,20 +484,47 @@
+   vtkOpenGLRenderWindow* renderWindow =
+     static_cast<vtkOpenGLRenderWindow*>(renderer->GetRenderWindow());
+   vtkOpenGLState* ostate = renderWindow->GetState();
+ 
+   // Copy existing Depth/Color buffers to FO
+   if (this->UseFloatingPointFrameBuffer && this->CanDoFloatingPointFrameBuffer)
+   {
+     scoped_annotate annotator2("PTM::UseFloatingPointFrameBuffer");
+     fo = this->Framebuffer;
+ 
++#ifdef GL_ES_VERSION_3_0
++    vtkOpenGLState::ScopedglEnableDisable stencilSaver(ostate, GL_STENCIL_TEST);
++    vtkOpenGLState::ScopedglColorMask colorMaskSaver(ostate);
++    ostate->vtkglDisable(GL_STENCIL_TEST);
++    ostate->vtkglColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++    vtkNew<vtkTextureObject> copiedColor;
++    copiedColor->SetContext(renderWindow);
++    copiedColor->Allocate2D(this->CurrentFBOWidth, this->CurrentFBOHeight, 4, VTK_UNSIGNED_CHAR);
++    copiedColor->CopyFromFrameBuffer(0, 0, 0, 0, this->CurrentFBOWidth, this->CurrentFBOHeight);
++    vtkNew<vtkTextureObject> copiedDepth;
++    copiedDepth->SetContext(renderWindow);
++    copiedDepth->AllocateDepth(this->CurrentFBOWidth, this->CurrentFBOHeight, vtkTextureObject::Float32);
++    copiedDepth->CopyFromFrameBuffer(0, 0, 0, 0, this->CurrentFBOWidth, this->CurrentFBOHeight);
++    ostate->PushFramebufferBindings();
++    fo->Bind(GL_DRAW_FRAMEBUFFER);
++    fo->ActivateDrawBuffer(0);
++    vtkOpenGLState::ScopedglViewport viewportSaver(ostate);
++    ostate->vtkglViewport(0, 0, this->CurrentFBOWidth, this->CurrentFBOHeight);
++    {
++      vtkOpenGLState::ScopedglEnableDisable blendSaver(ostate, GL_BLEND);
++      vtkOpenGLState::ScopedglEnableDisable depthSaver(ostate, GL_DEPTH_TEST);
++      ostate->vtkglDisable(GL_BLEND);
++      ostate->vtkglDisable(GL_DEPTH_TEST);
++      copiedColor->CopyToFrameBuffer(nullptr, nullptr);
++    }
++    renderWindow->TextureDepthBlit(copiedDepth);
++#else
+     // bind draw+read to set it up
+     ostate->PushFramebufferBindings();
+     fo->Bind(vtkOpenGLFramebufferObject::GetDrawMode());
+     fo->ActivateDrawBuffer(0);
+ 
+     if (!fo->CheckFrameBufferStatus(vtkOpenGLFramebufferObject::GetDrawMode()))
+     {
+       vtkErrorMacro("FO is incomplete ");
+     }
+ 
+@@ -513,20 +544,21 @@
+     }
+     else
+     {
+       // incompatible, blit only color attachment
+       ostate->vtkglBlitFramebuffer(0, 0, this->CurrentFBOWidth, this->CurrentFBOHeight, 0, 0,
+         this->CurrentFBOWidth, this->CurrentFBOHeight, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+       // depth values are sampled from srcDepthTexture into our framebuffer's depth attachment.
+       renderWindow->TextureDepthBlit(srcDepthTexture);
+     }
+ 
++#endif
+     vtkOpenGLCheckErrorMacro("failed at glBlitFramebuffer");
+   }
+ 
+   // has something changed that would require us to recreate the shader?
+   if (!this->Tris.Program)
+   {
+     // build the shader source code
+     std::string VSSource = vtkglProjectedTetrahedraVS;
+     std::string FSSource = vtkglProjectedTetrahedraFS;
+     std::string GSSource;
+@@ -1072,24 +1104,41 @@
+   }
+ 
+   if (fo)
+   {
+     // copy from our fbo to the default one
+     fo->Bind(vtkOpenGLFramebufferObject::GetReadMode());
+ 
+     // draw to default fbo
+     ostate->PopDrawFramebufferBinding();
+ 
++#ifdef GL_ES_VERSION_3_0
++    {
++      // ES blits cannot expand a single-sample source into an MSAA target.
++      vtkOpenGLState::ScopedglEnableDisable stencilSaver(ostate, GL_STENCIL_TEST);
++      vtkOpenGLState::ScopedglColorMask colorMaskSaver(ostate);
++      ostate->vtkglDisable(GL_STENCIL_TEST);
++      ostate->vtkglColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
++      vtkOpenGLState::ScopedglEnableDisable blendSaver(ostate, GL_BLEND);
++      vtkOpenGLState::ScopedglEnableDisable depthSaver(ostate, GL_DEPTH_TEST);
++      vtkOpenGLState::ScopedglViewport viewportSaver(ostate);
++      ostate->vtkglDisable(GL_BLEND);
++      ostate->vtkglDisable(GL_DEPTH_TEST);
++      ostate->vtkglViewport(0, 0, this->CurrentFBOWidth, this->CurrentFBOHeight);
++      fo->GetColorAttachmentAsTextureObject(0)->CopyToFrameBuffer(nullptr, nullptr);
++    }
++#else
+     // Depth buffer has not changed so only copy color
+     ostate->vtkglBlitFramebuffer(0, 0, this->CurrentFBOWidth, this->CurrentFBOHeight, 0, 0,
+       this->CurrentFBOWidth, this->CurrentFBOHeight, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+ 
++#endif
+     vtkOpenGLCheckErrorMacro("failed at glBlitFramebuffer");
+ 
+     // restore default fbo for both read+draw
+     ostate->PopReadFramebufferBinding();
+   }
+ 
+   // Restore the blend function.
+   vtkOpenGLCheckErrorMacro("failed at glPopAttrib");
+ 
+   ostate->vtkglDepthMask(GL_TRUE);

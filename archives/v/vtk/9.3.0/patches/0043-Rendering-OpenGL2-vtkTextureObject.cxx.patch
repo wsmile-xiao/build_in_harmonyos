@@ -1,0 +1,1004 @@
+--- a/Rendering/OpenGL2/vtkTextureObject.cxx
++++ b/Rendering/OpenGL2/vtkTextureObject.cxx
+@@ -1,74 +1,193 @@
+ // SPDX-FileCopyrightText: Copyright (c) Ken Martin, Will Schroeder, Bill Lorensen
+ // SPDX-License-Identifier: BSD-3-Clause
+ #include "vtkTextureObject.h"
+ 
+ #include "vtk_glew.h"
+ 
++#ifdef GL_ES_VERSION_3_0
++#include <GLES2/gl2ext.h>
++#endif
++
+ #include "vtkObjectFactory.h"
+ 
+ #include "vtkNew.h"
++#include "vtkDataArray.h"
++#include "vtkSmartPointer.h"
+ #include "vtkOpenGLBufferObject.h"
+ #include "vtkOpenGLError.h"
+ #include "vtkOpenGLFramebufferObject.h"
+ #include "vtkOpenGLRenderUtilities.h"
+ #include "vtkOpenGLRenderWindow.h"
+ #include "vtkOpenGLResourceFreeCallback.h"
+ #include "vtkOpenGLShaderCache.h"
+ #include "vtkOpenGLState.h"
+ #include "vtkOpenGLTexture.h"
+ #include "vtkOpenGLVertexArrayObject.h"
+ #include "vtkPixelBufferObject.h"
+ #include "vtkRenderer.h"
+ #include "vtkShaderProgram.h"
+ 
+ #include "vtkOpenGLHelper.h"
+ 
+ #include <cassert>
++#include <algorithm>
++#include <cmath>
++#include <cstring>
++#include <vector>
+ 
+ //#define VTK_TO_DEBUG
+ //#define VTK_TO_TIMING
+ 
+ #ifdef VTK_TO_TIMING
+ #include "vtkTimerLog.h"
+ #endif
+ 
+ #include "vtkTextureObjectFS.h"
+ #include "vtkTextureObjectVS.h" // a pass through shader
+ 
+ #define BUFFER_OFFSET(i) (reinterpret_cast<char*>(i))
+ 
+ // Mapping from DepthTextureCompareFunction values to OpenGL values.
+ //------------------------------------------------------------------------------
+ VTK_ABI_NAMESPACE_BEGIN
++#ifdef GL_ES_VERSION_3_0
++namespace
++{
++// ES lacks normalized 16-bit texture formats. Convert only the transfer data,
++// preserving the logical scalar type used by GetShiftAndScale and Download.
++class vtkGLESRawTextureInput
++{
++public:
++  vtkGLESRawTextureInput(vtkOpenGLState* state, unsigned int width, unsigned int height,
++    unsigned int depth, int components, int dataType, bool expandRGB,
++    unsigned int& internalFormat, unsigned int& format, unsigned int& uploadType, void*& data)
++    : State(state)
++  {
++    const bool floatStorage = internalFormat == GL_R32F || internalFormat == GL_RG32F ||
++      internalFormat == GL_RGB32F || internalFormat == GL_RGBA32F ||
++      internalFormat == GL_R16F || internalFormat == GL_RG16F ||
++      internalFormat == GL_RGB16F || internalFormat == GL_RGBA16F;
++    const bool normalized16 = floatStorage &&
++      (dataType == VTK_SHORT || dataType == VTK_UNSIGNED_SHORT);
++    const bool rgba = expandRGB && components == 3 &&
++      (dataType == VTK_FLOAT || normalized16) &&
++      (internalFormat == GL_RGB32F || internalFormat == GL_RGBA32F);
++    if (!normalized16 && !rgba)
++    {
++      return;
++    }
++    if (rgba)
++    {
++      internalFormat = GL_RGBA32F;
++      format = GL_RGBA;
++    }
++    uploadType = GL_FLOAT;
++    if (!data)
++    {
++      return;
++    }
++    GLint unpackBuffer = 0;
++    glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &unpackBuffer);
++    if (unpackBuffer != 0)
++    {
++      this->Valid = false;
++      return;
++    }
++    for (int i = 0; i < 6; ++i)
++    {
++      glGetIntegerv(this->Names[i], &this->Values[i]);
++    }
++    const size_t rowLength = this->Values[1] ? this->Values[1] : width;
++    const size_t imageHeight = this->Values[2] ? this->Values[2] : height;
++    const size_t first = (static_cast<size_t>(this->Values[5]) * imageHeight + this->Values[3]) *
++        rowLength + this->Values[4];
++    const int outputComponents = rgba ? 4 : components;
++    this->Pixels.resize(static_cast<size_t>(width) * height * depth * outputComponents);
++    for (size_t z = 0; z < depth; ++z)
++    {
++      for (size_t y = 0; y < height; ++y)
++      {
++        for (size_t x = 0; x < width; ++x)
++        {
++          const size_t source = (first + (z * imageHeight + y) * rowLength + x) * components;
++          const size_t target = ((z * height + y) * width + x) * outputComponents;
++          for (int c = 0; c < components; ++c)
++          {
++            this->Pixels[target + c] = dataType == VTK_UNSIGNED_SHORT
++              ? static_cast<const unsigned short*>(data)[source + c] / 65535.0f
++              : dataType == VTK_SHORT
++              ? std::max(-1.0f, static_cast<const short*>(data)[source + c] / 32767.0f)
++              : static_cast<const float*>(data)[source + c];
++          }
++          if (rgba)
++          {
++            this->Pixels[target + 3] = 1.0f;
++          }
++        }
++      }
++    }
++    for (int i = 0; i < 6; ++i)
++    {
++      this->State->vtkglPixelStorei(this->Names[i], i == 0 ? 1 : 0);
++    }
++    this->Active = true;
++    data = this->Pixels.data();
++  }
++
++  ~vtkGLESRawTextureInput()
++  {
++    if (this->Active)
++    {
++      for (int i = 0; i < 6; ++i)
++      {
++        this->State->vtkglPixelStorei(this->Names[i], this->Values[i]);
++      }
++    }
++  }
++
++  bool Valid = true;
++
++private:
++  vtkOpenGLState* State;
++  bool Active = false;
++  const GLenum Names[6] = { GL_UNPACK_ALIGNMENT, GL_UNPACK_ROW_LENGTH, GL_UNPACK_IMAGE_HEIGHT,
++    GL_UNPACK_SKIP_ROWS, GL_UNPACK_SKIP_PIXELS, GL_UNPACK_SKIP_IMAGES };
++  GLint Values[6] = {};
++  std::vector<float> Pixels;
++};
++}
++#endif
++
+ static GLint OpenGLDepthTextureCompareFunction[8] = { GL_LEQUAL, GL_GEQUAL, GL_LESS, GL_GREATER,
+   GL_EQUAL, GL_NOTEQUAL, GL_ALWAYS, GL_NEVER };
+ 
+ //------------------------------------------------------------------------------
+ static const char* DepthTextureCompareFunctionAsString[8] = { "Lequal", "Gequal", "Less", "Greater",
+   "Equal", "NotEqual", "AlwaysTrue", "Never" };
+ 
+ // Mapping from Wrap values to OpenGL values
+ #ifndef GL_ES_VERSION_3_0
+ //------------------------------------------------------------------------------
+ static GLint OpenGLWrap[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT,
+   GL_CLAMP_TO_BORDER };
+ 
+ //------------------------------------------------------------------------------
+ static const char* WrapAsString[4] = { "ClampToEdge", "Repeat", "MirroredRepeat", "ClampToBorder" };
+ 
+ #else
+ //------------------------------------------------------------------------------
+-static GLint OpenGLWrap[3] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT };
+-
+-//------------------------------------------------------------------------------
+-static const char* WrapAsString[3] = { "ClampToEdge", "Repeat", "MirroredRepeat" };
++static GLint OpenGLWrap[4] = { GL_CLAMP_TO_EDGE, GL_REPEAT, GL_MIRRORED_REPEAT,
++  GL_CLAMP_TO_BORDER_EXT };
++
++//------------------------------------------------------------------------------
++static const char* WrapAsString[4] = { "ClampToEdge", "Repeat", "MirroredRepeat", "ClampToBorder" };
+ 
+ #endif
+ 
+ // Mapping MinificationFilter values to OpenGL values.
+ //------------------------------------------------------------------------------
+ static GLint OpenGLMinFilter[6] = { GL_NEAREST, GL_LINEAR, GL_NEAREST_MIPMAP_NEAREST,
+   GL_NEAREST_MIPMAP_LINEAR, GL_LINEAR_MIPMAP_NEAREST, GL_LINEAR_MIPMAP_LINEAR };
+ 
+ // Mapping MagnificationFilter values to OpenGL values.
+ //------------------------------------------------------------------------------
+@@ -83,34 +202,42 @@
+   GL_DEPTH_COMPONENT,   // native
+   GL_DEPTH_COMPONENT,   // fixed8
+   GL_DEPTH_COMPONENT16, // fixed16
+ #ifdef GL_DEPTH_COMPONENT24
+   GL_DEPTH_COMPONENT24, // fixed24
+ #else
+   GL_DEPTH_COMPONENT16,
+ #endif
+ #ifdef GL_DEPTH_COMPONENT32
+   GL_DEPTH_COMPONENT32, // fixed32
++#elif defined(GL_DEPTH_COMPONENT32F)
++  // Match the 32-bit format selected by PopulateFramebuffer on ES.
++  GL_DEPTH_COMPONENT32F,
+ #else
+   GL_DEPTH_COMPONENT16,
+ #endif
+ #ifdef GL_DEPTH_COMPONENT32F
+   GL_DEPTH_COMPONENT32F, // float16
+   GL_DEPTH_COMPONENT32F  // float32
+ #else
+   GL_DEPTH_COMPONENT16, GL_DEPTH_COMPONENT16
+ #endif
+ };
+ 
+ //------------------------------------------------------------------------------
+ static GLenum OpenGLDepthInternalFormatType[7] = {
+-  GL_UNSIGNED_INT, GL_UNSIGNED_INT, GL_UNSIGNED_INT, GL_UNSIGNED_INT, GL_UNSIGNED_INT,
++  GL_UNSIGNED_INT, GL_UNSIGNED_INT, GL_UNSIGNED_INT, GL_UNSIGNED_INT,
++#if !defined(GL_DEPTH_COMPONENT32) && defined(GL_DEPTH_COMPONENT32F)
++  GL_FLOAT,
++#else
++  GL_UNSIGNED_INT,
++#endif
+ #ifdef GL_DEPTH_COMPONENT32F
+   GL_FLOAT, GL_FLOAT
+ #else
+   GL_UNSIGNED_INT, GL_UNSIGNED_INT
+ #endif
+ };
+ 
+ //------------------------------------------------------------------------------
+ vtkStandardNewMacro(vtkTextureObject);
+ 
+@@ -268,21 +395,21 @@
+ #else
+     if (this->Target)
+ #endif
+     {
+       glBindTexture(this->Target, this->Handle);
+       vtkOpenGLCheckErrorMacro("failed at glBindTexture");
+ 
+       // See: http://www.opengl.org/wiki/Common_Mistakes#Creating_a_complete_texture
+       // turn off mip map filter or set the base and max level correctly. here
+       // both are done.
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+       if (this->Target != GL_TEXTURE_2D_MULTISAMPLE)
+ #endif
+       {
+         glTexParameteri(this->Target, GL_TEXTURE_MIN_FILTER,
+           this->GetMinificationFilterMode(this->MinificationFilter));
+         glTexParameteri(this->Target, GL_TEXTURE_MAG_FILTER,
+           this->GetMagnificationFilterMode(this->MagnificationFilter));
+ 
+         glTexParameteri(this->Target, GL_TEXTURE_WRAP_S, this->GetWrapSMode(this->WrapS));
+         glTexParameteri(this->Target, GL_TEXTURE_WRAP_T, this->GetWrapTMode(this->WrapT));
+@@ -440,27 +567,51 @@
+ {
+   assert("pre: is_bound" && this->IsBound());
+ 
+ #if defined(GL_TEXTURE_BUFFER)
+   if (this->Target == GL_TEXTURE_BUFFER)
+   {
+     return;
+   }
+ #endif
+ 
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+   if (this->Target == GL_TEXTURE_2D_MULTISAMPLE)
+   {
+     return;
+   }
+ #endif
+ 
++#ifdef GL_ES_VERSION_3_0
++  const bool usesBorder = this->WrapS == ClampToBorder || this->WrapT == ClampToBorder ||
++    this->WrapR == ClampToBorder;
++  if (usesBorder)
++  {
++    int major = 0, minor = 0;
++    this->Context->GetOpenGLVersion(major, minor);
++    bool supported = major > 3 || (major == 3 && minor >= 2);
++    GLint count = 0;
++    glGetIntegerv(GL_NUM_EXTENSIONS, &count);
++    for (GLint i = 0; i < count && !supported; ++i)
++    {
++      const char* extension = reinterpret_cast<const char*>(glGetStringi(GL_EXTENSIONS, i));
++      supported = extension && (std::strcmp(extension, "GL_EXT_texture_border_clamp") == 0 ||
++        std::strcmp(extension, "GL_OES_texture_border_clamp") == 0);
++    }
++    if (!supported)
++    {
++      vtkErrorMacro("ClampToBorder requires ES 3.2 or a texture border clamp extension.");
++      return;
++    }
++    glTexParameterfv(this->Target, GL_TEXTURE_BORDER_COLOR_EXT, this->BorderColor);
++  }
++#endif
+   glTexParameteri(this->Target, GL_TEXTURE_WRAP_S, OpenGLWrap[this->WrapS]);
+   glTexParameteri(this->Target, GL_TEXTURE_WRAP_T, OpenGLWrap[this->WrapT]);
+ 
+ #ifdef GL_TEXTURE_WRAP_R
+   glTexParameteri(this->Target, GL_TEXTURE_WRAP_R, OpenGLWrap[this->WrapR]);
+ #endif
+ 
+   glTexParameteri(this->Target, GL_TEXTURE_MIN_FILTER, OpenGLMinFilter[this->MinificationFilter]);
+ 
+   glTexParameteri(this->Target, GL_TEXTURE_MAG_FILTER, OpenGLMagFilter[this->MagnificationFilter]);
+@@ -472,21 +623,21 @@
+   {
+     glTexParameteri(this->Target, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+   }
+   else
+   {
+     glTexParameteri(this->Target, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+   }
+ #endif
+ 
+   // if mipmaps are requested also turn on anisotropic if available
+-#ifdef GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT
++#if defined(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT) && !defined(GL_ES_VERSION_3_0)
+   if (GLEW_EXT_texture_filter_anisotropic)
+   {
+     float aniso = 0.0f;
+     glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &aniso);
+     if (aniso > this->MaximumAnisotropicFiltering)
+     {
+       aniso = this->MaximumAnisotropicFiltering;
+     }
+     glTexParameterf(this->Target, GL_TEXTURE_MAX_ANISOTROPY_EXT, aniso);
+   }
+@@ -857,20 +1008,23 @@
+ {
+   switch (vtktype)
+   {
+     case ClampToEdge:
+       return GL_CLAMP_TO_EDGE;
+     case Repeat:
+       return GL_REPEAT;
+ #ifdef GL_CLAMP_TO_BORDER
+     case ClampToBorder:
+       return GL_CLAMP_TO_BORDER;
++#elif defined(GL_CLAMP_TO_BORDER_EXT)
++    case ClampToBorder:
++      return GL_CLAMP_TO_BORDER_EXT;
+ #endif
+     case MirroredRepeat:
+       return GL_MIRRORED_REPEAT;
+     default:
+       return GL_CLAMP_TO_EDGE;
+   }
+ }
+ 
+ //------------------------------------------------------------------------------
+ unsigned int vtkTextureObject::GetWrapTMode(int vtktype)
+@@ -1107,22 +1261,33 @@
+   this->Target = target;
+   this->Components = numComps;
+   this->Width = width;
+   this->Height = 1;
+   this->Depth = 1;
+   this->NumberOfDimensions = 1;
+   this->Context->ActivateTexture(this);
+   this->CreateTexture();
+   this->Bind();
+ 
++  unsigned int uploadType = this->Type;
++#ifdef GL_ES_VERSION_3_0
++  vtkGLESRawTextureInput input(this->Context->GetState(), width, 1, 1,
++    numComps, dataType, true, this->InternalFormat, this->Format, uploadType, data);
++  if (!input.Valid)
++  {
++    vtkErrorMacro("Raw normalized texture conversion requires a CPU pointer.");
++    this->Deactivate();
++    return false;
++  }
++#endif
+   glTexImage2D(this->Target, 0, this->InternalFormat, static_cast<GLsizei>(this->Width), 1, 0,
+-    this->Format, this->Type, static_cast<const GLvoid*>(data));
++    this->Format, uploadType, static_cast<const GLvoid*>(data));
+ 
+   vtkOpenGLCheckErrorMacro("failed at glTexImage1D");
+ 
+   this->Deactivate();
+   return true;
+ }
+ 
+ // Description:
+ // Create a texture buffer basically a 1D texture that can be
+ // very large for passing data into the fragment shader
+@@ -1383,24 +1548,153 @@
+     pbo->Delete();
+     return nullptr;
+   }
+ 
+   pbo->Bind(vtkPixelBufferObject::PACKED_BUFFER);
+   this->Bind();
+ 
+ #ifndef GL_ES_VERSION_3_0
+   glGetTexImage(target, level, this->Format, this->Type, BUFFER_OFFSET(0));
+ #else
+-  (void)level;
+-  (void)target;
+-  // you can do something with glReadPixels and binding a texture as a FBO
+-  // I believe for ES 2.0
++  // GLES has no glGetTexImage. Read each color image through a temporary
++  // framebuffer, using the implementation's supported format/type pair.
++  // Repack the channels into the texture's public component count and type.
++  vtkOpenGLState* state = this->Context->GetState();
++  const unsigned int width = std::max(1u, this->Width >> level);
++  const unsigned int height = std::max(1u, this->Height >> level);
++  const unsigned int depth = target == GL_TEXTURE_3D ? std::max(1u, this->Depth >> level) : 1u;
++  vtkSmartPointer<vtkDataArray> packed;
++  packed.TakeReference(vtkDataArray::CreateDataArray(vtktype));
++  packed->SetNumberOfComponents(this->Components);
++  packed->SetNumberOfTuples(static_cast<vtkIdType>(width) * height * depth);
++  GLint previousPack = 0;
++  GLint packValues[4];
++  const GLenum packNames[] = { GL_PACK_ALIGNMENT, GL_PACK_ROW_LENGTH, GL_PACK_SKIP_ROWS,
++    GL_PACK_SKIP_PIXELS };
++  glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &previousPack);
++  glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
++  for (int i = 0; i < 4; ++i)
++  {
++    glGetIntegerv(packNames[i], &packValues[i]);
++    state->vtkglPixelStorei(packNames[i], i == 0 ? 1 : 0);
++  }
++  state->PushFramebufferBindings();
++  GLuint framebuffer = 0;
++  glGenFramebuffers(1, &framebuffer);
++  state->vtkglBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
++  bool success = true;
++  for (unsigned int layer = 0; layer < depth && success; ++layer)
++  {
++    if (target == GL_TEXTURE_3D)
++    {
++      glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, this->Handle, level, layer);
++    }
++    else
++    {
++      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, target, this->Handle, level);
++    }
++    if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
++    {
++      vtkErrorMacro("Texture readback requires a color-renderable texture image.");
++      success = false;
++      break;
++    }
++    state->vtkglReadBuffer(GL_COLOR_ATTACHMENT0);
++    GLint readFormat = 0, readType = 0;
++    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_FORMAT, &readFormat);
++    glGetIntegerv(GL_IMPLEMENTATION_COLOR_READ_TYPE, &readType);
++    int readComponents = 4;
++    if (readFormat == GL_RED || readFormat == GL_RED_INTEGER)
++    {
++      readComponents = 1;
++    }
++    else if (readFormat == GL_RG || readFormat == GL_RG_INTEGER)
++    {
++      readComponents = 2;
++    }
++    else if (readFormat == GL_RGB || readFormat == GL_RGB_INTEGER)
++    {
++      readComponents = 3;
++    }
++    else if (readFormat != GL_RGBA && readFormat != GL_RGBA_INTEGER && readFormat != GL_BGRA_EXT)
++    {
++      vtkErrorMacro("Unsupported texture readback format: " << readFormat);
++      success = false;
++      break;
++    }
++    const int readVtkType = vtkGetVTKType(readType);
++    if (!readVtkType || readComponents < this->Components)
++    {
++      vtkErrorMacro("Unsupported texture readback format/type: " << readFormat << "/" << readType);
++      success = false;
++      break;
++    }
++    vtkSmartPointer<vtkDataArray> pixels;
++    pixels.TakeReference(vtkDataArray::CreateDataArray(readVtkType));
++    pixels->SetNumberOfComponents(readComponents);
++    pixels->SetNumberOfTuples(static_cast<vtkIdType>(width) * height);
++    const GLenum setupError = glGetError();
++    if (setupError != GL_NO_ERROR)
++    {
++      vtkErrorMacro("Texture readback setup failed: " << setupError);
++      success = false;
++      break;
++    }
++    glReadPixels(0, 0, width, height, readFormat, readType, pixels->GetVoidPointer(0));
++    const GLenum readError = glGetError();
++    if (readError != GL_NO_ERROR)
++    {
++      vtkErrorMacro("GLES texture readback failed: " << readError);
++      success = false;
++      break;
++    }
++    const bool normalized = this->Format != GL_RED_INTEGER && this->Format != GL_RG_INTEGER &&
++      this->Format != GL_RGB_INTEGER && this->Format != GL_RGBA_INTEGER;
++    for (vtkIdType pixel = 0; pixel < pixels->GetNumberOfTuples(); ++pixel)
++    {
++      for (int component = 0; component < this->Components; ++component)
++      {
++        // GL_BGRA_EXT may be the preferred read format on GLES drivers.
++        const int sourceComponent = readFormat == GL_BGRA_EXT && component < 3 ? 2 - component : component;
++        double value = pixels->GetComponent(pixel, sourceComponent);
++        if (normalized && readVtkType != vtktype)
++        {
++          if (readVtkType != VTK_FLOAT)
++          {
++            value = std::max(-1.0, value / pixels->GetDataTypeMax());
++          }
++          if (vtktype != VTK_FLOAT)
++          {
++            value = std::round(value * packed->GetDataTypeMax());
++            value = std::max(packed->GetDataTypeMin(),
++              std::min(packed->GetDataTypeMax(), value));
++          }
++        }
++        packed->SetComponent(static_cast<vtkIdType>(layer) * width * height + pixel, component, value);
++      }
++    }
++  }
++  state->PopFramebufferBindings();
++  glDeleteFramebuffers(1, &framebuffer);
++  for (int i = 0; i < 4; ++i)
++  {
++    state->vtkglPixelStorei(packNames[i], packValues[i]);
++  }
++  glBindBuffer(GL_PIXEL_PACK_BUFFER, previousPack);
++  pbo->UnBind();
++  if (!success || !pbo->Upload1D(vtktype, packed->GetVoidPointer(0),
++                    static_cast<unsigned int>(packed->GetNumberOfTuples()), this->Components, 0))
++  {
++    this->Deactivate();
++    pbo->Delete();
++    return nullptr;
++  }
+ #endif
+ 
+   vtkOpenGLCheckErrorMacro("failed at glGetTexImage");
+   this->Deactivate();
+   pbo->UnBind();
+ 
+   pbo->SetComponents(this->Components);
+ 
+   return pbo;
+ }
+@@ -1436,23 +1730,34 @@
+   this->Depth = depth;
+   this->NumberOfDimensions = 3;
+ 
+   this->Context->ActivateTexture(this);
+   this->CreateTexture();
+   this->Bind();
+ 
+   // Source texture data from the PBO.
+   this->Context->GetState()->vtkglPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+ 
++  unsigned int uploadType = this->Type;
++#ifdef GL_ES_VERSION_3_0
++  vtkGLESRawTextureInput input(this->Context->GetState(), width, height, depth,
++    numComps, dataType, false, this->InternalFormat, this->Format, uploadType, data);
++  if (!input.Valid)
++  {
++    vtkErrorMacro("Raw normalized texture conversion requires a CPU pointer.");
++    this->Deactivate();
++    return false;
++  }
++#endif
+   glTexImage3D(this->Target, 0, this->InternalFormat, static_cast<GLsizei>(this->Width),
+     static_cast<GLsizei>(this->Height), static_cast<GLsizei>(this->Depth), 0, this->Format,
+-    this->Type, static_cast<const GLvoid*>(data));
++    uploadType, static_cast<const GLvoid*>(data));
+ 
+   this->Deactivate();
+ 
+   return vtkOpenGLCheckErrors("Failed to allocate 3D texture.");
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkTextureObject::AllocateProxyTexture3D(
+   unsigned int width, unsigned int height, unsigned int depth, int numComps, int dataType)
+ {
+@@ -1513,29 +1818,41 @@
+     return false;
+   }
+ 
+   GLenum target = GL_TEXTURE_2D;
+   this->Target = target;
+   this->Components = numComps;
+   this->Width = width;
+   this->Height = height;
+   this->Depth = 1;
+   this->NumberOfDimensions = 2;
++
+   this->Context->ActivateTexture(this);
+   this->CreateTexture();
+   this->Bind();
+ 
+   // Source texture data from the PBO.
+   this->Context->GetState()->vtkglPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+ 
++  unsigned int uploadType = this->Type;
++#ifdef GL_ES_VERSION_3_0
++  vtkGLESRawTextureInput input(this->Context->GetState(), width, height, 1,
++    numComps, dataType, true, this->InternalFormat, this->Format, uploadType, data);
++  if (!input.Valid)
++  {
++    vtkErrorMacro("Raw normalized texture conversion requires a CPU pointer.");
++    this->Deactivate();
++    return false;
++  }
++#endif
+   glTexImage2D(this->Target, 0, this->InternalFormat, static_cast<GLsizei>(this->Width),
+-    static_cast<GLsizei>(this->Height), 0, this->Format, this->Type,
++    static_cast<GLsizei>(this->Height), 0, this->Format, uploadType,
+     static_cast<const GLvoid*>(data));
+ 
+   vtkOpenGLCheckErrorMacro("failed at glTexImage2D");
+ 
+   this->Deactivate();
+   return true;
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkTextureObject::CreateCubeFromRaw(
+@@ -1564,23 +1881,35 @@
+   this->NumberOfDimensions = 2;
+   this->Context->ActivateTexture(this);
+   this->CreateTexture();
+   this->Bind();
+ 
+   // Source texture data from the PBO.
+   this->Context->GetState()->vtkglPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+ 
+   for (int i = 0; i < 6; i++)
+   {
++    void* pixels = data ? data[i] : nullptr;
++    unsigned int uploadType = this->Type;
++#ifdef GL_ES_VERSION_3_0
++    vtkGLESRawTextureInput input(this->Context->GetState(), width, height, 1,
++      numComps, dataType, true, this->InternalFormat, this->Format, uploadType, pixels);
++    if (!input.Valid)
++    {
++      vtkErrorMacro("Raw normalized texture conversion requires a CPU pointer.");
++      this->Deactivate();
++      return false;
++    }
++#endif
+     glTexImage2D(GL_TEXTURE_CUBE_MAP_POSITIVE_X + i, 0, this->InternalFormat,
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), 0, this->Format,
+-      this->Type, data ? static_cast<const GLvoid*>(data[i]) : nullptr);
++      uploadType, pixels);
+     vtkOpenGLCheckErrorMacro("failed at glTexImage2D");
+   }
+ 
+   if (this->GenerateMipmap)
+   {
+     glGenerateMipmap(GL_TEXTURE_CUBE_MAP);
+   }
+ 
+   this->Deactivate();
+   return true;
+@@ -1633,21 +1962,21 @@
+   return true;
+ }
+ 
+ //------------------------------------------------------------------------------
+ bool vtkTextureObject::AllocateDepth(unsigned int width, unsigned int height, int internalFormat)
+ {
+   assert("pre: context_exists" && this->GetContext() != nullptr);
+   assert(
+     "pre: valid_internalFormat" && internalFormat >= 0 && internalFormat < NumberOfDepthFormats);
+ 
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+   this->Target = (this->Samples ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D);
+ #else
+   this->Target = GL_TEXTURE_2D;
+ #endif
+ 
+   this->Format = GL_DEPTH_COMPONENT;
+ 
+   // Try to match vtk type to internal fmt
+   if (!this->Type)
+   {
+@@ -1662,21 +1991,21 @@
+   this->Width = width;
+   this->Height = height;
+   this->Depth = 1;
+   this->NumberOfDimensions = 2;
+   this->Components = 1;
+ 
+   this->Context->ActivateTexture(this);
+   this->CreateTexture();
+   this->Bind();
+ 
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+   if (this->Samples)
+   {
+     glTexImage2DMultisample(this->Target, this->Samples, static_cast<GLint>(this->InternalFormat),
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), GL_TRUE);
+   }
+   else
+ #endif
+   {
+     glTexImage2D(this->Target, 0, static_cast<GLint>(this->InternalFormat),
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), 0, this->Format,
+@@ -1686,41 +2015,41 @@
+   vtkOpenGLCheckErrorMacro("failed at glTexImage2D");
+ 
+   this->Deactivate();
+   return true;
+ }
+ 
+ bool vtkTextureObject::AllocateDepthStencil(unsigned int width, unsigned int height)
+ {
+   assert("pre: context_exists" && this->GetContext() != nullptr);
+ 
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+   this->Target = (this->Samples ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D);
+ #else
+   this->Target = GL_TEXTURE_2D;
+ #endif
+ 
+   this->Format = GL_DEPTH_STENCIL;
+   this->Type = GL_UNSIGNED_INT_24_8;
+   this->InternalFormat = GL_DEPTH24_STENCIL8;
+ 
+   this->Width = width;
+   this->Height = height;
+   this->Depth = 1;
+   this->NumberOfDimensions = 2;
+   this->Components = 1;
+ 
+   this->Context->ActivateTexture(this);
+   this->CreateTexture();
+   this->Bind();
+ 
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+   if (this->Samples)
+   {
+     glTexImage2DMultisample(this->Target, this->Samples, static_cast<GLint>(this->InternalFormat),
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), GL_TRUE);
+   }
+   else
+ #endif
+   {
+     glTexImage2D(this->Target, 0, static_cast<GLint>(this->InternalFormat),
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), 0, this->Format,
+@@ -1769,41 +2098,41 @@
+ 
+ //------------------------------------------------------------------------------
+ // Description:
+ // Create a 2D color texture but does not initialize its values.
+ // Internal format is deduced from numComps and vtkType.
+ bool vtkTextureObject::Allocate2D(
+   unsigned int width, unsigned int height, int numComps, int vtkType, int level)
+ {
+   assert(this->Context);
+ 
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+   this->Target = (this->Samples ? GL_TEXTURE_2D_MULTISAMPLE : GL_TEXTURE_2D);
+ #else
+   this->Target = GL_TEXTURE_2D;
+ #endif
+ 
+   this->GetDataType(vtkType);
+   this->GetInternalFormat(vtkType, numComps, false);
+   this->GetFormat(vtkType, numComps, false);
+ 
+   this->Components = numComps;
+   this->Width = width;
+   this->Height = height;
+   this->Depth = 1;
+   this->NumberOfDimensions = 2;
+ 
+   this->Context->ActivateTexture(this);
+   this->CreateTexture();
+   this->Bind();
+ 
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+   if (this->Samples)
+   {
+     glTexImage2DMultisample(this->Target, this->Samples, static_cast<GLint>(this->InternalFormat),
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), GL_TRUE);
+   }
+   else
+ #endif
+   {
+     glTexImage2D(this->Target, level, static_cast<GLint>(this->InternalFormat),
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), 0, this->Format,
+@@ -1980,23 +2309,99 @@
+ // Copy a sub-part of a logical buffer of the framebuffer (color or depth)
+ // to the texture object. src is the framebuffer, dst is the texture.
+ // (srcXmin,srcYmin) is the location of the lower left corner of the
+ // rectangle in the framebuffer. (dstXmin,dstYmin) is the location of the
+ // lower left corner of the rectangle in the texture. width and height
+ // specifies the size of the rectangle in pixels.
+ // If the logical buffer is a color buffer, it has to be selected first with
+ // glReadBuffer().
+ // \pre is2D: GetNumberOfDimensions()==2
+ void vtkTextureObject::CopyFromFrameBuffer(
+-  int srcXmin, int srcYmin, int vtkNotUsed(dstXmin), int vtkNotUsed(dstYmin), int width, int height)
++  int srcXmin, int srcYmin, int dstXmin, int dstYmin, int width, int height)
+ {
+   assert("pre: is2D" && this->GetNumberOfDimensions() == 2);
++
++#ifdef GL_ES_VERSION_3_0
++  if (this->Format == GL_DEPTH_COMPONENT || this->Format == GL_DEPTH_STENCIL)
++  {
++    // CopyTexImage2D accepts color formats on ES. Resolve depth to a matching
++    // attachment, then sample it into the requested destination depth format.
++    auto state = this->Context->GetState();
++    GLint depthBits = 0;
++    GLint stencilBits = 0;
++    GLint componentType = 0;
++    glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
++      GL_FRAMEBUFFER_ATTACHMENT_DEPTH_SIZE, &depthBits);
++    glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
++      GL_FRAMEBUFFER_ATTACHMENT_STENCIL_SIZE, &stencilBits);
++    glGetFramebufferAttachmentParameteriv(GL_READ_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
++      GL_FRAMEBUFFER_ATTACHMENT_COMPONENT_TYPE, &componentType);
++    if (depthBits == 0 || glGetError() != GL_NO_ERROR)
++    {
++      vtkErrorMacro("The read framebuffer has no readable depth attachment.");
++      return;
++    }
++
++    // ES requires identical source/destination rectangles when resolving MSAA.
++    // Preserve the source origin in the resolve target; crop in the shader copy.
++    const int resolvedWidth = srcXmin + width;
++    const int resolvedHeight = srcYmin + height;
++    vtkOpenGLState::ScopedglEnableDisable scissorSaver(state, GL_SCISSOR_TEST);
++    state->vtkglDisable(GL_SCISSOR_TEST);
++    vtkNew<vtkTextureObject> resolvedDepth;
++    resolvedDepth->SetContext(this->Context);
++    if (stencilBits)
++    {
++      resolvedDepth->SetInternalFormat(componentType == GL_FLOAT
++          ? GL_DEPTH32F_STENCIL8 : GL_DEPTH24_STENCIL8);
++      resolvedDepth->SetFormat(GL_DEPTH_STENCIL);
++      resolvedDepth->SetDataType(componentType == GL_FLOAT
++          ? GL_FLOAT_32_UNSIGNED_INT_24_8_REV : GL_UNSIGNED_INT_24_8);
++      resolvedDepth->Create2DFromRaw(resolvedWidth, resolvedHeight, 1, VTK_UNSIGNED_INT, nullptr);
++    }
++    else
++    {
++      resolvedDepth->AllocateDepth(resolvedWidth, resolvedHeight, componentType == GL_FLOAT
++          ? vtkTextureObject::Float32
++          : depthBits > 16 ? vtkTextureObject::Fixed24 : vtkTextureObject::Fixed16);
++    }
++    resolvedDepth->SetMinificationFilter(vtkTextureObject::Nearest);
++    resolvedDepth->SetMagnificationFilter(vtkTextureObject::Nearest);
++
++    vtkNew<vtkOpenGLFramebufferObject> copyFramebuffer;
++    copyFramebuffer->SetContext(this->Context);
++    state->PushFramebufferBindings();
++    copyFramebuffer->Bind(GL_DRAW_FRAMEBUFFER);
++    copyFramebuffer->AddDepthAttachment(resolvedDepth);
++    copyFramebuffer->DeactivateDrawBuffers();
++    state->vtkglBlitFramebuffer(srcXmin, srcYmin, srcXmin + width, srcYmin + height,
++      srcXmin, srcYmin, resolvedWidth, resolvedHeight, GL_DEPTH_BUFFER_BIT, GL_NEAREST);
++    const GLenum resolveError = glGetError();
++    if (resolveError != GL_NO_ERROR)
++    {
++      vtkErrorMacro("Depth resolve failed: " << resolveError);
++      state->PopFramebufferBindings();
++      return;
++    }
++    copyFramebuffer->RemoveDepthAttachment();
++    copyFramebuffer->AddDepthAttachment(this);
++    vtkOpenGLState::ScopedglViewport viewportSaver(state);
++    vtkOpenGLState::ScopedglEnableDisable stencilSaver(state, GL_STENCIL_TEST);
++    state->vtkglDisable(GL_STENCIL_TEST);
++    state->vtkglViewport(dstXmin, dstYmin, width, height);
++    this->Context->TextureDepthBlit(
++      resolvedDepth, srcXmin, srcYmin, resolvedWidth, resolvedHeight);
++    state->PopFramebufferBindings();
++    this->Activate();
++    return;
++  }
++#endif
+ 
+   // make assumption on the need to resolve
+   // based on MultiSample setting
+   if (this->Context->GetMultiSamples())
+   {
+     vtkNew<vtkOpenGLFramebufferObject> resolvedFBO;
+     resolvedFBO->SetContext(this->Context);
+     this->Context->GetState()->PushFramebufferBindings();
+     resolvedFBO->PopulateFramebuffer(width, height,
+       /* useTextures = */ true,
+@@ -2010,23 +2415,28 @@
+     // hence we restore the read buffer bindings to read from the original
+     // frame buffer.
+     this->Context->GetState()->PopReadFramebufferBinding();
+ 
+     vtkOpenGLState::ScopedglViewport vsaver(this->Context->GetState());
+     this->Context->GetState()->vtkglViewport(0, 0, width, height);
+     vtkOpenGLState::ScopedglScissor ssaver(this->Context->GetState());
+     this->Context->GetState()->vtkglScissor(0, 0, width, height);
+ 
+     // Now blit to resolve the MSAA and get an anti-aliased rendering in
+-    // resolvedFBO.
++    // resolvedFBO. The GLES depth branch above handles its own matching format.
++#ifdef GL_ES_VERSION_3_0
++    const GLbitfield resolveMask = GL_COLOR_BUFFER_BIT;
++#else
++    const GLbitfield resolveMask = GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT;
++#endif
+     this->Context->GetState()->vtkglBlitFramebuffer(srcXmin, srcYmin, srcXmin + width,
+-      srcYmin + height, 0, 0, width, height, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
++      srcYmin + height, 0, 0, width, height, resolveMask, GL_NEAREST);
+ 
+     // Now make the resolvedFBO the read buffer and read from it.
+     this->Context->GetState()->PushReadFramebufferBinding();
+     resolvedFBO->Bind(GL_READ_FRAMEBUFFER);
+     resolvedFBO->ActivateReadBuffer(0);
+ 
+     this->Activate();
+ 
+     glCopyTexImage2D(this->Target, 0, this->InternalFormat, 0, 0, width, height, 0);
+ 
+@@ -2080,47 +2490,57 @@
+   {
+     return;
+   }
+ 
+   this->Width = width;
+   this->Height = height;
+ 
+   this->Context->ActivateTexture(this);
+   this->Bind();
+ 
++  unsigned int allocationType = this->Type;
++#ifdef GL_ES_VERSION_3_0
++  // Reuse the raw-upload storage selection for a null reallocation. The
++  // logical SHORT/UNSIGNED_SHORT type still describes normalized readback.
++  void* emptyData = nullptr;
++  vtkGLESRawTextureInput storage(this->Context->GetState(), this->Width, this->Height,
++    this->Depth, this->Components, vtkGetVTKType(this->Type), false,
++    this->InternalFormat, this->Format, allocationType, emptyData);
++#endif
++
+   if (this->NumberOfDimensions == 2)
+   {
+-#ifdef GL_TEXTURE_2D_MULTISAMPLE
++#if defined(GL_TEXTURE_2D_MULTISAMPLE) && !defined(GL_ES_VERSION_3_0)
+     if (this->Samples)
+     {
+       glTexImage2DMultisample(this->Target, this->Samples, static_cast<GLint>(this->InternalFormat),
+         static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), GL_TRUE);
+     }
+     else
+ #endif
+     {
+       glTexImage2D(this->Target, 0, static_cast<GLint>(this->InternalFormat),
+         static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height), 0, this->Format,
+-        this->Type, nullptr);
++        allocationType, nullptr);
+     }
+   }
+   else if (this->NumberOfDimensions == 3)
+   {
+     glTexImage3D(this->Target, 0, static_cast<GLint>(this->InternalFormat),
+       static_cast<GLsizei>(this->Width), static_cast<GLsizei>(this->Height),
+-      static_cast<GLsizei>(this->Depth), 0, this->Format, this->Type, nullptr);
++      static_cast<GLsizei>(this->Depth), 0, this->Format, allocationType, nullptr);
+   }
+ #ifdef GL_TEXTURE_1D
+   else if (this->NumberOfDimensions == 1)
+   {
+     glTexImage1D(this->Target, 0, static_cast<GLint>(this->InternalFormat),
+-      static_cast<GLsizei>(this->Width), 0, this->Format, this->Type, nullptr);
++      static_cast<GLsizei>(this->Width), 0, this->Format, allocationType, nullptr);
+   }
+ #endif
+ 
+   vtkOpenGLCheckErrorMacro("failed at texture resize");
+   this->Deactivate();
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkTextureObject::PrintSelf(ostream& os, vtkIndent indent)
+ {
