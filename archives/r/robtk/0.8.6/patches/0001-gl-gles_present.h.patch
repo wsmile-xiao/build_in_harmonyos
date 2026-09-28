@@ -1,0 +1,212 @@
+--- /dev/null
++++ b/gl/gles_present.h
+@@ -0,0 +1,209 @@
++/* robwidget - OpenGL ES presentation layer (HarmonyOS / EGL)
++ *
++ * Copyright (C) 2026 robtk OHOS port.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2, or (at your option)
++ * any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program; if not, write to the Free Software Foundation,
++ * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
++
++ * -------------------------------------------------------------------------
++ * HarmonyOS has no desktop OpenGL: libGLESv3.so only implements OpenGL ES
++ * 3.x, which means the fixed-function pipeline used by ui_gl.c
++ * (glMatrixMode/glOrtho/glBegin/glTexEnv/GL_TEXTURE_RECTANGLE_ARB) is not
++ * available.  This header replaces the three presentation helpers of
++ * ui_gl.c with an OpenGL ES 3 implementation:
++ *
++ *   opengl_init()                - build the (tiny) blit program
++ *   opengl_reallocate_texture()  - (re)allocate the ARGB texture
++ *   opengl_draw()                - upload the cairo canvas & blit it 1:1
++ *
++ * The cairo canvas is CAIRO_FORMAT_ARGB32, i.e. premultiplied BGRA on
++ * little-endian hosts; it is uploaded as GL_RGBA and the byte order is
++ * restored with a fragment shader swizzle, so no vendor extension
++ * (GL_EXT_texture_format_BGRA8888) is required.
++ */
++#ifndef ROBTK_GLES_PRESENT_H
++#define ROBTK_GLES_PRESENT_H
++
++#include <EGL/egl.h>
++#include <GLES3/gl3.h>
++#include <stdio.h>
++#include <stdlib.h>
++
++static GLuint    rtk_gles_prog      = 0;
++static GLint     rtk_gles_attr_pos  = -1;
++static GLint     rtk_gles_attr_tex  = -1;
++static GLint     rtk_gles_uni_tex   = -1;
++static EGLContext rtk_gles_ctx      = EGL_NO_CONTEXT;
++
++/* fullscreen quad: NDC position + texture coordinate (v flipped, cairo rows
++ * are top-down while GL texture rows are bottom-up) */
++static const GLfloat rtk_gles_quad[16] = {
++	/*  x      y     u     v  */
++	-1.0f, -1.0f, 0.0f, 1.0f,
++	 1.0f, -1.0f, 1.0f, 1.0f,
++	-1.0f,  1.0f, 0.0f, 0.0f,
++	 1.0f,  1.0f, 1.0f, 0.0f
++};
++
++static GLuint
++rtk_gles_compile(GLenum kind, const char* src)
++{
++	GLuint shader = glCreateShader(kind);
++	if (!shader) {
++		return 0;
++	}
++	glShaderSource(shader, 1, &src, NULL);
++	glCompileShader(shader);
++	GLint ok = GL_FALSE;
++	glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
++	if (!ok) {
++		char log[512];
++		GLsizei n = 0;
++		glGetShaderInfoLog(shader, sizeof(log) - 1, &n, log);
++		log[n] = '\0';
++		fprintf(stderr, "robtk: GLES shader compile failed: %s\n", log);
++		glDeleteShader(shader);
++		return 0;
++	}
++	return shader;
++}
++
++static void
++opengl_init(void)
++{
++	static const char* vert_src =
++		"attribute vec2 pos;\n"
++		"attribute vec2 tex;\n"
++		"varying vec2 uv;\n"
++		"void main() {\n"
++		"  uv = tex;\n"
++		"  gl_Position = vec4(pos, 0.0, 1.0);\n"
++		"}\n";
++	static const char* frag_src =
++		"precision mediump float;\n"
++		"varying vec2 uv;\n"
++		"uniform sampler2D tex;\n"
++		"void main() {\n"
++		"  gl_FragColor = texture2D(tex, uv).bgra;\n"
++		"}\n";
++
++	/* GL program names are per EGL context: a UI that is destroyed and
++	 * re-created gets a new context (and HarmonyOS hosts may own several),
++	 * so rebuild the blit program whenever the context changes. */
++	const EGLContext cur_ctx = eglGetCurrentContext();
++	if (rtk_gles_prog && cur_ctx == rtk_gles_ctx) {
++		return;
++	}
++	rtk_gles_prog = 0;
++	rtk_gles_ctx  = cur_ctx;
++
++	GLuint vert = rtk_gles_compile(GL_VERTEX_SHADER, vert_src);
++	GLuint frag = rtk_gles_compile(GL_FRAGMENT_SHADER, frag_src);
++	if (!vert || !frag) {
++		fprintf(stderr, "robtk: OpenGL ES blit program unavailable.\n");
++		if (vert) { glDeleteShader(vert); }
++		if (frag) { glDeleteShader(frag); }
++		return;
++	}
++
++	rtk_gles_prog = glCreateProgram();
++	glAttachShader(rtk_gles_prog, vert);
++	glAttachShader(rtk_gles_prog, frag);
++	glBindAttribLocation(rtk_gles_prog, 0, "pos");
++	glBindAttribLocation(rtk_gles_prog, 1, "tex");
++	glLinkProgram(rtk_gles_prog);
++	GLint ok = GL_FALSE;
++	glGetProgramiv(rtk_gles_prog, GL_LINK_STATUS, &ok);
++	if (!ok) {
++		char log[512];
++		GLsizei n = 0;
++		glGetProgramInfoLog(rtk_gles_prog, sizeof(log) - 1, &n, log);
++		log[n] = '\0';
++		fprintf(stderr, "robtk: GLES program link failed: %s\n", log);
++		glDeleteProgram(rtk_gles_prog);
++		rtk_gles_prog = 0;
++		return;
++	}
++	glDeleteShader(vert);
++	glDeleteShader(frag);
++
++	rtk_gles_attr_pos = glGetAttribLocation(rtk_gles_prog, "pos");
++	rtk_gles_attr_tex = glGetAttribLocation(rtk_gles_prog, "tex");
++	rtk_gles_uni_tex  = glGetUniformLocation(rtk_gles_prog, "tex");
++
++	glDisable(GL_DEPTH_TEST);
++	/* cairo ARGB32 is premultiplied: use the corresponding blend function */
++	glEnable(GL_BLEND);
++	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
++	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
++}
++
++static void
++opengl_reallocate_texture(int width, int height, unsigned int* texture_id)
++{
++	glViewport(0, 0, width, height);
++	glClear(GL_COLOR_BUFFER_BIT);
++
++	if (*texture_id) {
++		glDeleteTextures(1, texture_id);
++	}
++	glGenTextures(1, texture_id);
++	glBindTexture(GL_TEXTURE_2D, *texture_id);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
++			GL_RGBA, GL_UNSIGNED_BYTE, NULL);
++}
++
++static void
++opengl_draw(int width, int height, unsigned char* surf_data, unsigned int texture_id)
++{
++	if (!surf_data || !texture_id) {
++		return;
++	}
++	if (!rtk_gles_prog || eglGetCurrentContext() != rtk_gles_ctx) {
++		/* context changed (new UI instance): the blit program must be
++		 * rebuilt before it can be used */
++		rtk_gles_prog = 0;
++		opengl_init();
++	}
++	if (!rtk_gles_prog) {
++		return;
++	}
++
++	glClear(GL_COLOR_BUFFER_BIT);
++
++	glUseProgram(rtk_gles_prog);
++	glActiveTexture(GL_TEXTURE0);
++	glBindTexture(GL_TEXTURE_2D, texture_id);
++	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0,
++			GL_RGBA, GL_UNSIGNED_BYTE, surf_data);
++	glUniform1i(rtk_gles_uni_tex, 0);
++
++	glVertexAttribPointer(rtk_gles_attr_pos, 2, GL_FLOAT, GL_FALSE,
++			4 * sizeof(GLfloat), rtk_gles_quad);
++	glVertexAttribPointer(rtk_gles_attr_tex, 2, GL_FLOAT, GL_FALSE,
++			4 * sizeof(GLfloat), rtk_gles_quad + 2);
++	glEnableVertexAttribArray(rtk_gles_attr_pos);
++	glEnableVertexAttribArray(rtk_gles_attr_tex);
++	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++	glDisableVertexAttribArray(rtk_gles_attr_pos);
++	glDisableVertexAttribArray(rtk_gles_attr_tex);
++	glBindTexture(GL_TEXTURE_2D, 0);
++	glUseProgram(0);
++}
++
++#endif /* ROBTK_GLES_PRESENT_H */
