@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E430.kv，填写各字段
+# 对应的人类文档: doc/E430.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E430
+trigger_tool:           make|cmake|test|build
+phase:                  compilation|testing
+error_signature: jobserver mkfifo|mkfifo.*Operation not permitted|make.*Operation not permitted.*fifo
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity:               2
+category:               build-system, ohos, limitation, make
+match_keywords:         jobserver, mkfifo, Operation not permitted, make -j, -j1, 并行构建, CTest, 测试程序链接, "*** Error", can not create fifo
+title: OHOS 上 make 无法创建 jobserver fifo（Operation not permitted），并行构建测试程序必然失败，需对测试目标强制 -j1
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: OHOS 设备的文件系统/沙箱限制不允许 make 在 /tmp 或构建目录下创建 jobserver 命名管道（mkfifo），而 GNU make 在 `-j N`（N>1）或继承 MAKEFLAGS 并行标志时**必定**先建 jobserver fifo；fifo 建不出来就直接 `make: *** [目标] Error`，与源码无关。上游的测试程序（CTest 里的 libcheck 程序）往往在 build 末尾才链接编译，因此表现为「库编译成功、测试目标失败」。
+affected_scope: 所有在 OHOS 上用 make/CMake/autotools 并行构建测试程序的包；库本身的首次 make 若未并行则可能侥幸通过，test 阶段才暴露
+verification_cmd: cd <构建目录> && make -j2 2>&1 | grep -i 'jobserver\|mkfifo' ; make -j1 2>&1 | tail -3
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: force-serial-build-for-test-targets
+rec_description: 在 Conan 配方里对「构建测试程序」的那一步显式串行（CMake 用 `cmake --build <build_folder> --target <测试目标> -- -j1`，或 `self._run(...)` 时清掉 MAKEFLAGS 并传 -j1）；不要为了并行而在配方里 export MAKEFLAGS=-jN。
+rec_command:            cmake --build "${CMAKE_BUILD_DIR}" --target ${TEST_TARGETS} -- -j1
+rec_auto_fix: false
+rec_impl: conan-recipe-serial-test-build
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: export MAKEFLAGS=-j[2-9]| export MAKEFLAGS=-j[0-9]{2,}| cmake --build .* -- -j[2-9]
+forbid_1_reason: 显式并行标志让 make 一定尝试创建 jobserver fifo，在 OHOS 上必失败；库能编过只是侥幸（依赖顺序恰好适合），测试目标会随机报错
+forbid_1_consequence: 「库编译成功、测试目标失败」的假故障，浪费整轮 conan create / CI 周期，且容易被误判为源码或链接问题
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             E429
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E430-draft-BDBB.md
+last_updated: 2026-09-26
+source_event:           rhonabwy 1.1.13 适配：build() 内 `cmake --build <b> --target <19 个测试程序>` 在 OHOS 上以默认并行度失败（make: jobserver mkfifo: ... Operation not permitted），改为 `cmake --build ... -- -j1` 后 19 个测试程序全部构建并通过 CTest
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: BDBB
