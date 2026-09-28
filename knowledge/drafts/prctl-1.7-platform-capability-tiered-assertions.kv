@@ -1,0 +1,30 @@
+#====================================================================
+# Draft: 不要把本地验证环境的能力固化成断言 —— 同一个二进制在本地 qemu 与 CI
+#        真机上对同一系统调用的返回码可以完全不同；平台专有 / 内核相关的行为
+#        必须写成**运行时分级判据**（两种结果各自断言），而不是把本地观测到的
+#        "必然失败"写死，否则 CI 上会成片失败而根因是判据本身
+#   Stem: prctl-1.7-platform-capability-tiered-assertions — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-PRCTL-PLATFORM-CAPABILITY-TIERED-ASSERTIONS
+trigger_tool:           ci
+phase:                  testing
+error_signature:        This platform does not implement .* prctl feature|Starting a shell|not supported on this architecture|ENOSYS|EINVAL|Operation not supported|Function not implemented
+
+# ═══ Layer 1: 识别层 ═══
+severity:               4
+category:               test-design, portability, false-fail, ci-gate
+match_keywords:         test_package, 消费者测试, 本地验证, qemu, 内核能力, 平台专有, 架构相关, ia64, aarch64, 运行时分级, 能力探测, 优雅降级, 假失败, 判据缺陷
+
+title:                  不要把本地验证环境的能力固化成断言：平台专有行为的判据必须运行时分级
+
+root_cause:            本地验证链（本例：Windows 宿主 + WSL Ubuntu aarch64 + qemu-aarch64 执行 OHOS clang 交叉编译产物）能在提交前跑通消费者的功能断言，因此很容易把**本地观测到的行为**当成"平台事实"写进判据。但本地执行用的仍是**宿主内核**（Ubuntu aarch64），不是 CI 目标机（OpenHarmony）的内核：同一个二进制、同一次编译、同一组参数，`prctl(PR_SET_UNALIGN, …)` 在本地内核返回 EINVAL（工具打印 "This platform does not implement …" 并退出 1），在 OHOS 内核上**成功返回 0**（工具继续执行，`-v` 下回显 `Set "unaligned" to "silent"`）。于是"平台不实现该操作"这个看起来铁板钉钉的断言，在 CI 上 5 个选项 × 2 条断言 = 10 条**成片失败**，而根因是**判据把本地环境的能力当成了规范**，不是被测程序缺陷。这类系统调用/内核特性相关的选项在跨平台移植里到处都是（prctl、ifmetric/netlink、zcfan/sysfs hwmon、hdparm/ATA 直通、perf/PMU、ethtool/驱动特性位、mount 选项、cgroup 控制器），每一条都可能踩中。
+affected_scope:         所有"行为依赖内核/平台能力"的选项与命令：`prctl` 的 `--unaligned`/`--fpemu`（自测实例）、`--mcekill`；`ifmetric`；`zcfan`；`hdparm` 的多数操作；`perf` 的事件；`ethtool -K`；`sysctl` 架构相关 knobs；`setarch`；`mount` 的 fs 专有选项；`ip link set` 的部分属性。★ 注意区分两种"平台不实现"：**编译期缺失**（`#ifdef` 挡住、符号不存在）是确定的、可以写死；**运行期拒绝**（syscall 返回 EINVAL/ENOSYS）是不确定的、必须运行时分级。
+verification_cmd:       同一二进制在两个环境各跑一次并对比退出码：本地 `"<bin>" --unaligned=silent -v; echo $?` 与 CI worker 上同一条命令。若两者退出码不同，说明该行为**依赖环境**，判据必须分级。本例实测：本地 rc=1 + "does not implement"；OHOS rc=0 + "Starting a shell"。
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           runtime-tiered-assertions-both-branches-asserted
+rec_description:        改法：把"平台专有选项"的判据从**单分支硬断言**改成**双分支运行时分级**，两条分支各断言其应有的表现，覆盖同一不变量「**合法取值必须得到明确结果，不得静默通过**」。骨架：运行 `--<feat>=<val> -v` → `rc != 0` 时断言「必须打印 `does not implement set_<feat> prctl feature`」（优雅降级，不许静默成功）；`rc == 0` 时断言「必须回显 `Set "<feat>" to "<val>"`」且「不得同时出现平台不实现错误」。★ 关键点：**两个分支都要有断言**——只断言一端等于把判据退化成"环境适配"；两个分支都断言，无论跑在哪个内核上都真正验证了契约。★ 判据里要**打印实际走了哪个分支**（`[INFO] 平台实现 --unaligned` / `[INFO] 平台不实现 --unaligned（退出码 1）`），否则日志里看不出环境差异，下次踩同一坑。★ 把**与平台无关的错误路径**单独抽成稳定基线并保持硬断言：非法取值（`--unaligned=bogus`）必须在所有平台回落用法并退出非 0——这条在本地与 OHOS 上**都通过**，是真正可依赖的契约。★ 对"本地通、CI 挂"的断言，优先怀疑**判据假设了本地环境**，而不是被测程序：本例的错误信息 `实际输出: Starting a shell` 恰恰证明程序工作正常（选项被接受后走到了默认动作），一眼就能区分。参考实现：archives/p/prctl/1.7/test_package/test_prctl.c（`case_platform_option()`，66 条断言；本地走 A 分支、OHOS 走 B 分支，两边都全绿）。
+rec_command:            # 双分支运行时分级断言（C 版骨架）\nstatic void case_platform_option(const char *feat, const char *val) {\n    snprintf(args, sizeof args, "--%s=%s -v", feat, val);\n    snprintf(notimpl, sizeof notimpl, "does not implement set_%s prctl feature", feat);\n    snprintf(conf, sizeof conf, "Set \\"%s\\" to \\"%s\\"", feat, val);\n    rc = run_capture(args, buf, sizeof buf);\n    if (rc != 0) {                      /* 分支 A：平台不实现 → 必须明确报错 */\n        expect(strstr(buf, notimpl) != NULL, "打印平台不实现错误", buf);\n        printf("  [INFO] 平台不实现 --%s（退出码 %d）\\n", feat, rc);\n    } else {                            /* 分支 B：平台实现 → 必须回显设置结果 */\n        expect(strstr(buf, conf) != NULL, "回显设置结果", buf);\n        expect(strstr(buf, notimpl) == NULL, "成功时不报平台不实现", "");\n        printf("  [INFO] 平台实现 --%s\\n", feat);\n    }\n}\n\n# 与平台无关的稳定基线，保持硬断言\ncase_expect("--unaligned=bogus", 1, NULL, 0, /* want_usage */ 1);   /* 本地与 CI 都通过 */
+rec_auto_fix:           false
