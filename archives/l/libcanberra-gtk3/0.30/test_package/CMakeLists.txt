@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.15)
+project(libcanberra_gtk3_api_surface C)
+
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBCANBERRA_GTK3 REQUIRED IMPORTED_TARGET libcanberra-gtk3)
+
+add_executable(libcanberra_gtk3_api_surface api_surface.c)
+target_link_libraries(libcanberra_gtk3_api_surface PRIVATE PkgConfig::LIBCANBERRA_GTK3)
+target_compile_options(libcanberra_gtk3_api_surface PRIVATE -Werror)
+
+enable_testing()
+add_test(NAME libcanberra_gtk3_api_surface COMMAND libcanberra_gtk3_api_surface)
