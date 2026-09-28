@@ -1,0 +1,125 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: libfaketime/0.9.11
+homepage: "https://github.com/wolfcw/libfaketime"
+
+# 上游没有 configure/automake，因此没有 `make check`；测试入口是顶层 Makefile 的
+# `test` 目标（依赖 timetest + functest + libmallocintercept.so，最后跑 ./test.sh）
+# 和 test/Makefile 的 `snippets` 目标。用 `make -n test` / `make -n snippets` 枚举。
+upstream_check_command: "make -n test; make -n -C test snippets"
+
+# conanfile.py build() 中是否已集成上游测试
+upstream_test_in_build: true
+upstream_test_command: >-
+  make -j1 CC=<profile clang> PREFIX=<pkg> LIBDIRNAME=/lib/faketime
+  VERSION_SCRIPT=libfaketime.map.ohos FAKETIME_COMPILE_CFLAGS=<...> test
+  && make -j1 ... -C test snippets   (OHOS aarch64 真机, 2026-09-25, 退出码 0)
+
+# 计数口径（五维账本）：
+#   N_static      = 62  上游源码中登记的测试单元（见下逐项来源）
+#   N_registered  = 55  默认 CFLAGS 下 testframe/test.sh/snippets 实际注册并可执行
+#   N_executed    = 55  真机全部执行，两条 make 目标退出码均为 0
+#   N_not_run     = 7   6 个受 -DINTERCEPT_SYSCALL 编译门控 + 1 个上游故意失败样例
+#   N_consumer    = 12  test_package 场景（4 个消费者程序，3 次构成随机数三元组）
+# 来源：test/functests/test_*.sh 逐条 run_testcase（1+1+1+31=34）、test/test.sh 的
+# 9 个 "Running ..." 场景、test/Makefile snippets 两个聚合目标（6 expectation +
+# 6 snippet）、test/Makefile 门控的 5 个 syscall* 目标 + confirm_variadic_promotion、
+# test/functests/dont_test_false.sh（文件名不匹配 testframe 的 test_*.sh 通配）。
+
+upstream_tests:
+  - file: test/functests/test_exclude_mono.sh
+    source: libfaketime-0.9.11/test/functests/test_exclude_mono.sh
+    description: "FAKETIME_DONT_FAKE_MONOTONIC=1 时单调钟不受影响（1 个 run_testcase）"
+    command: "./testframe.sh functests"
+    result: "PASS 1/1"
+  - file: test/functests/test_null.sh
+    source: libfaketime-0.9.11/test/functests/test_null.sh
+    description: "FAKETIME='' 空值时不得伪造时间（out=0 ref=<epoch>）"
+    command: "./testframe.sh functests"
+    result: "PASS 1/1"
+  - file: test/functests/test_true.sh
+    source: libfaketime-0.9.11/test/functests/test_true.sh
+    description: "默认不加载时输出真实时间"
+    command: "./testframe.sh functests"
+    result: "PASS 1/1（0 个断言点，套件正常退出）"
+  - file: test/functests/test_walkone.sh
+    source: libfaketime-0.9.11/test/functests/test_walkone.sh
+    description: "以 2^0..2^30 秒为偏移逐档检查 date 输出与期望一致（31 个原子用例）"
+    command: "./testframe.sh functests"
+    result: "PASS 31/31"
+  - file: test/test.sh
+    source: libfaketime-0.9.11/test/test.sh
+    description: >-
+      9 个端到端场景：无偏移基线、绝对日期 2003-01-01、START @2005-03-29、
+      -10d 偏移、-10d 且 FAKE_STAT 关闭、+10d x1 速率、date -15d、
+      malloc 拦截、malloc 拦截 + FAKETIME_TIMESTAMP_FILE；每场景驱动 timetest
+      （time/ftime/gettimeofday/clock_gettime/stat + pthread_cond_timedwait
+      REALTIME/MONOTONIC 各睡眠 1s + SIGALRM 计时器）
+    command: "./test.sh"
+    result: >-
+      PASS 9/9 场景（顶层 make test 退出码 0）。唯一偏差：timetest 内部
+      `timer_getoverrun(timerid1) FAILED, must be 3 but got: 4` 在**全部**场景
+      复现，包括 LD_PRELOAD 但不设 FAKETIME 的基线场景，因此与伪造时间无关，
+      是本机 POSIX 定时器投递粒度问题（musl timer_create 与内核 itimer 的
+      overrun 计数在 40ms 调度抖动下不稳定）；上游 timetest 只打印不置退出码。
+  - file: test/snippets/*.c (test_variable_data.sh)
+    source: libfaketime-0.9.11/test/snippets/{clock_gettime,clock_gettime_heap,getentropy,getpid,getrandom,time}.variable
+    description: "6 个 expectation：跨 env 变化时 snippet 返回值随 FAKETIME/FAKERANDOM_SEED 变化"
+    command: "./test_variable_data.sh clock_gettime clock_gettime_heap getentropy getpid getrandom time"
+    result: "PASS 6/6（需 -DFAKE_RANDOM -DFAKE_PID，见 0001 之外的 FAKETIME_COMPILE_CFLAGS）"
+  - file: test/snippets/*.c (test_constructors.sh)
+    source: libfaketime-0.9.11/test/snippets/{clock_gettime,clock_gettime_heap,getentropy,getpid,getrandom,time}.c
+    description: "6 个 snippet 的库构造函数初始化路径（LD_PRELOAD / 直连 .so 两种模式）"
+    command: "./test_constructors.sh <snippet>"
+    result: "PASS 6/6"
+
+# 未执行的上游测试（逐项技术原因，均非本次适配引入）
+upstream_tests_not_executed:
+  - file: test/snippets/syscall.c
+    reason: "test/Makefile 在 CFLAGS 不含 -DINTERCEPT_SYSCALL 时把 syscall* 从 TEST_SNIPPETS/EXPECTATIONS 中 filter-out，构建系统根本不注册"
+  - file: test/snippets/syscall_clock_gettime.c
+    reason: "同上，-DINTERCEPT_SYSCALL 编译门控"
+  - file: test/snippets/syscall_clock_gettime_heap.c
+    reason: "同上，-DINTERCEPT_SYSCALL 编译门控"
+  - file: test/snippets/syscall_clock_gettime.variable
+    reason: "同上，-DINTERCEPT_SYSCALL 编译门控（expectation 侧）"
+  - file: test/snippets/syscall_clock_gettime_heap.variable
+    reason: "同上，-DINTERCEPT_SYSCALL 编译门控（expectation 侧）"
+  - file: test/variadic_promotion
+    reason: "confirm_variadic_promotion 仅在 -DINTERCEPT_SYSCALL 下加入 ALL_TESTS"
+  - file: test/functests/dont_test_false.sh
+    reason: "上游自身的'故意失败'样例，文件名 dont_ 前缀使其不被 testframe.sh 的 test_*.sh 通配收集，注册数即为 0"
+
+test_package_tests:
+  - file: clock_probe.c
+    description: "断言 time()/clock_gettime(CLOCK_REALTIME)/gettimeofday() 三者均落在 --expect ±tol 秒内；被 5 个场景驱动（faketime CLI 绝对时间、-2d 相对偏移、@2000-01-01 绝对时间、MT 版库、以及不预加载的反向对照）"
+    command: "faketime '<YYYY-MM-DD HH:MM:SS>' ./clock_probe --expect <target> --tol 5 / LD_PRELOAD=libfaketime.so.1 FAKETIME=... ./clock_probe"
+  - file: cond_probe.c
+    description: "timer_settime/timer_gettime 返回值区间断言 + pthread_cond_timedwait 在伪造钟上真实等待 ≥800ms 才 ETIMEDOUT（未被拦截则 15 天前的 deadline 会立即返回）"
+    command: "LD_PRELOAD=libfaketime.so.1 FAKETIME=-15d ./cond_probe"
+  - file: abi_probe.c
+    description: "在 LD_PRELOAD 下用 dlsym(RTLD_DEFAULT)+dladdr 断言：11 个公开符号必须归属到 libfaketime.so.1（libc 顶替不算通过）、8 个 _22/_232/_233 内部实现符号必须不可见、并且本进程自身 time/clock_gettime/gettimeofday/getpid/pthread_cond_timedwait 的绑定地址必须落在 libfaketime（5 条）"
+    command: "LD_PRELOAD=<pkg>/lib/faketime/libfaketime.so.1 ./abi_probe libfaketime.so.1"
+  - file: misc_probe.c
+    description: >-
+      FAKE_PID：getpid() 必须等于 FAKETIME_FAKEPID；FAKE_RANDOM：同一
+      FAKERANDOM_SEED 在两个独立进程里必须产出完全相同的 16 字节流、换种子必须不同、
+      不设种子时必须落回真实内核熵（两次读结果不同）。种子取 64 位十六进制值，
+      与上游 test/snippets/getrandom.variable(0xDEADBEEFDEADBEEF) 同规格——
+      fakerandom_msws() 的第 i 字节 = (i*seed)>>32，因此 16 字节读要出现非零字节需
+      seed >= 2^28；低于该值整条流为全零（本机实测：1 与 20260925 均输出 16 个 0 字节）
+    command: "LD_PRELOAD=libfaketime.so.1 FAKETIME_FAKEPID=424242 ./misc_probe --pid / ./misc_probe --random --seed <file>"
+
+assertion_count: 54
+# 计数口径：clock_probe 3 断言 × 5 次调用（场景 1/2/3/4/10）= 15；cond_probe 3；
+# abi_probe 11+8+5 = 24；misc_probe --pid 1；--random 4 次调用 × 2（getrandom 长度
+# + getentropy 返回码）= 8；random 的 3 条跨运行比较（同种子相等 / 换种子不等 /
+# 无种子两次读不等）= 3。消费者场景共 12 次真实执行（其中 3 次构成 FAKE_RANDOM
+# 确定性三元组），全部由退出码或显式 raise 判定，无"只打印不断言"的步骤。
+
+# §14.1④ 资源预算：test_package 全部探针都是 O(1) 内存的计时程序，
+# 上游测试最长场景只 sleep 数秒；实测峰值 RSS 远低于 100MB。
+max_rss_mb: 256
