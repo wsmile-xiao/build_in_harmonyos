@@ -1,0 +1,41 @@
+#====================================================================
+# DRAFT-libvoikko-4.3.3-autotools-config-status-mktemp-umask-permission - Autoconf config.status on OHOS /storage: umask-077 temp dir ownership causes Permission denied; shims shadowed by buildenv PATH prepend
+#====================================================================
+
+id: DRAFT-libvoikko-4.3.3-autotools-config-status-mktemp-umask-permission
+trigger_tool: autotools|config.status|mktemp|conan
+phase: configure|build
+error_signature: config.status.*can't create ./conf.*/subs1.awk.*Permission denied|could not setup config files machinery|configure.*: /data/service/hnp/bin/bash: inaccessible|C\+\+ compiler cannot create executables
+
+severity: 3
+category: autotools|ohos|filesystem|umask|mktemp|config-shell|shim
+match_keywords: config.status, subs1.awk, Permission denied, mktemp, umask 077, drwx--S---, setgid, /storage, HarmonyOS, CONFIG_SHELL, /data/service/hnp/bin/bash, PATH=+(path), buildenv, shim, compiler_executables, --code-sign, -Werror, prefix, usr/local, AutotoolsToolchain
+title: Autoconf config.status 在 HarmonyOS /storage 上因 umask-077 临时目录属主映射 Permission denied，以及 recipe shim 被 buildenv PATH=+ 前置遮蔽
+
+root_cause: OHOS aarch64 非 root currentUser 构建 autotools 包时三连坑：(1) ohos-aarch64 profile buildenv 把 CONFIG_SHELL 指向设备上不存在的 /data/service/hnp/bin/bash，configure 第~139行 exec $CONFIG_SHELL 自重执行直接 127；(2) config.status 固定执行 (umask 077 && mktemp -d ./confXXXXXX)，在 /storage/Users/currentUser 挂载上，非属主(实测 euid 20020108)建的 umask-077 目录出来是 drwx--S---（属主显示 file_manager 20001006），当前进程非属主非该组且无法 chmod，写 subs1.awk 即 Permission denied；默认 umask022 目录 drwxr-s--x 可写；(3) build() 里 os.environ['PATH']=shim:PATH 无效，AutotoolsToolchain 的 conanbuild.sh 用 PATH=+(path) 前置 profile 目录，shim 被排到后面，mktemp/uname 仍解析到真实程序。
+affected_scope: OHOS PC(aarch64，非 root currentUser，home 在 /storage/Users/currentUser) 原生(build==host)构建任何 GNU Autotools 包；用 Conan AutotoolsToolchain 且 profile 的 CONFIG_SHELL/compiler_executables 路径与设备实际不符；configure 已过全部特性测试却在 config.status 生成 awk 脚本时 Permission denied。
+verification_cmd: cd build-release; (umask 077 && mktemp -d ./confX); echo hi > ./confX/f 应 Permission denied; (umask 022 && mktemp -d ./confY); echo hi > ./confY/f 应成功; 在 configure 命令里 echo $PATH|tr ':' '\n'|head 确认 shim 排最前。
+
+rec_priority: 1
+rec_approach: inline-config-shell-and-umask-resetting-mktemp-shim
+rec_description: build() 里写 mktemp shim（内部 umask 022 再 exec 真实 mktemp）和 uname shim，在 self.run configure 命令行内联 PATH=<shim>:$PATH 与 CONFIG_SHELL=/bin/sh SHELL=/bin/sh；手动 configure 时补 --prefix=/ --libdir=/lib --includedir=/include；-Werror 用 patch/sed 去掉（OHOS 链接期 flag 在 -c 期告警）；compiler_executables 指向真实 clang。
+rec_command: "shim: printf '#!/bin/sh\\numask 022\\nexec /storage/Users/currentUser/usr/local/bin/mktemp \"$@\"\\n' > $BUILD/_shim/mktemp; chmod 755. configure: self.run(f'PATH={_shim}:$PATH CONFIG_SHELL=/bin/sh SHELL=/bin/sh ../configure --prefix=/ --libdir=/lib --includedir=/include --disable-...'). 编译器覆盖: -c 'tools.build:compiler_executables={\"c\":\"/storage/Users/currentUser/usr/local/bin/clang\",\"cpp\":\"/storage/Users/currentUser/usr/local/bin/clang++\"}'"
+rec_auto_fix: false
+rec_impl: recipe-shims-plus-inline-env
+
+fallback_priority: 2
+fallback_approach: run-as-root-or-fix-profile
+fallback_description: 若可用 root 或标准镜像运行（root 绕过属主检查，umask-077 目录可写），则无需 mktemp shim；根因修复是修 ohos-aarch64 profile 的 CONFIG_SHELL/compiler_executables 路径并让 mktemp 可被非属主写。
+fallback_command: "export CONFIG_SHELL=/bin/sh; export CC=$(command -v clang); export CXX=$(command -v clang++); 以 root 跑 conan create"
+fallback_auto_fix: false
+fallback_impl: profile-fix
+
+forbid_1_pattern: os\.environ\[.PATH.\].*=.*_shim.*PATH\s*$
+forbid_1_reason: 只在 Python 里前置 shim 没用：conanbuild.sh 的 PATH=+(path) 会把 profile 目录前置，shim 仍被 shadow，mktemp/uname 解析到真实程序。
+forbid_1_consequence: shim 看似就位却不生效，错误依旧，反复试错浪费真机时间。
+
+forbid_2_pattern: chmod 777.*conf|chmod.*mktemp.*dir
+forbid_2_reason: 非属主对 umask-077 目录 chmod 返回 EPERM（常被 2>/dev/null 吞掉），目录仍是 drwx--S---，写文件依旧 Permission denied。
+forbid_2_consequence: 修复无效，config.status 继续在同一处失败。
+
+source_draft: archives/l/libvoikko/4.3.3（分支 feat/libvoikko-4.3.3，conanfile.py build() 内 uname/mktemp shim + 内联 PATH/CONFIG_SHELL，test_package dlopen+voikkoInit 消费者用例真机通过）
