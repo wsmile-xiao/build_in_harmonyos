@@ -1,0 +1,63 @@
+#====================================================================
+# shadow-job-stale-ci-profile.kv
+# 隔离 job repo 链式复制的陈旧 CI profile 缺 PATH 注入, build 阶段工具 127
+# 触发实例: libuinputplus 0.1.4 真机 shadow CI r2
+#====================================================================
+
+trigger_tool:            ohos-prepare-isolated-conan-job.sh|--repo-source|run-conan-heavy.sh|shadow CI
+phase:                   build
+error_signature:         cmake: inaccessible or not found|
+                          CMake\.configure\(\).*Error 127|
+                          /system/bin/sh: (cmake|ninja|zsh): inaccessible or not found
+severity:                2
+category:                ci, conan, environment, shadow-ci
+match_keywords:          shadow CI, 隔离 job, repo-source, 陈旧 profile,
+                          ohos-aarch64, buildenv, PATH 注入, data/service/hnp/bin,
+                          cmake not found, Error 127, inaccessible,
+                          conanbuild, 沙箱
+
+root_cause:              真机隔离 job 的 repo 经 --repo-source 链式复制(设备无
+                          git, 每个新 job 从旧 job 的 repo 拷贝), 是创建时刻的
+                          陈旧快照。现行 ci/conan/profiles/ohos-aarch64 的
+                          [buildenv] 段含 PATH=+(path)/data/service/hnp/bin 与
+                          LD_LIBRARY_PATH(lld 依赖 libxml2.so.16) 注入, 而旧
+                          副本只有 CONFIG_SHELL/SHELL 两行。conan create 走到
+                          package build() 的 CMake.configure() 时 conanbuild
+                          环境 PATH 里没有 hnp/bin, 报 cmake: inaccessible
+                          or not found (127)——设备上其实装着 cmake。
+                          与 E307 的区别: E307 是目标机真没装 cmake(test_package
+                          阶段, 方案绕开 cmake 直编); 本例工具存在, 是沙箱
+                          profile 陈旧导致注入缺失, 直编方案反而错误。
+affected_scope:          所有走 --repo-source 链式复制的真机 shadow CI job;
+                          特征是 L0 已过、conan create 在 build 阶段以 127 失败
+verification_cmd:        ls /data/service/hnp/bin/cmake   # 存在 → 非工具缺失
+                          grep -A3 buildenv <job>/repo/build_in_harmonyos/ci/conan/profiles/ohos-aarch64
+                          # 无 PATH=+(path) 行 → 沙箱 profile 陈旧
+
+rec_priority:            1
+rec_approach:            refresh-sandbox-ci-profile
+rec_description:         ① 先证伪"工具缺失": ls /data/service/hnp/bin/cmake;
+                          ② diff 沙箱 repo 的 ci/conan/profiles/ohos-aarch64
+                          与当前 main 版, 关键看 [buildenv] 的 PATH/LD_LIBRARY_PATH
+                          注入行; ③ 用当前 main 的 profile 覆盖沙箱副本后重跑
+                          runner。注意: 这是 shadow 沙箱修复, 只改设备上 job
+                          repo 的副本, 不进 PR(PR 基线是 CI worker 现行 main)
+rec_command:             scp <worktree>/ci/conan/profiles/ohos-aarch64 \
+                          <device>:<job>/repo/build_in_harmonyos/ci/conan/profiles/ohos-aarch64
+rec_auto_fix:            false
+rec_impl:                manual
+
+fallback_priority:      2
+fallback_approach:       fresh-repo-from-current-job
+fallback_description:    不改 profile 时, 换一个近期成功跑过 CMake 包的 job
+                          repo 作为 --repo-source 重建 job(其 profile 较新);
+                          缺点是链式复制仍会逐渐陈旧, 治标不治本
+fallback_auto_fix:       false
+
+forbid_1_pattern:        在配方里给 self.run/环境硬编码 PATH 或依赖 ${CC} 等
+                          shell 变量来"绕过"(R33); 配方无错, 不应改配方
+principles:
+
+causes:                  E307(同为 cmake 127, 但那是目标机真缺工具、
+                          test_package 阶段; 本条工具在、build 阶段、
+                          沙箱基础设施陈旧)
