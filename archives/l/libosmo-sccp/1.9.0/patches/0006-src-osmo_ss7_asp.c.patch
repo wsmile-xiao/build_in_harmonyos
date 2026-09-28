@@ -1,0 +1,301 @@
+--- a/src/osmo_ss7_asp.c
++++ b/src/osmo_ss7_asp.c
+@@ -20,48 +20,53 @@
+  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+  *
+  */
+ 
+ #include <string.h>
+ #include <errno.h>
+ #include <unistd.h>
+ #include <inttypes.h>
+ #include <netdb.h>
+ #include <netinet/in.h>
++#ifdef HAVE_LIBSCTP
+ #include <netinet/sctp.h>
++#endif
+ 
+ #include <osmocom/sigtran/osmo_ss7.h>
+ #include <osmocom/sigtran/mtp_sap.h>
+ #include <osmocom/sigtran/protocol/mtp.h>
+ #include <osmocom/sigtran/protocol/sua.h>
+ #include <osmocom/sigtran/protocol/m3ua.h>
+ 
+ #include <osmocom/core/linuxlist.h>
+ #include <osmocom/core/select.h>
+ #include <osmocom/core/utils.h>
+ #include <osmocom/core/talloc.h>
+ #include <osmocom/core/logging.h>
+ #include <osmocom/core/msgb.h>
+ #include <osmocom/core/socket.h>
+ #include <osmocom/core/sockaddr_str.h>
+ #include <osmocom/core/osmo_io.h>
+ 
+ #include <osmocom/netif/stream.h>
+ #include <osmocom/netif/ipa.h>
++#ifdef HAVE_LIBSCTP
+ #include <osmocom/netif/sctp.h>
++#endif
+ 
+ #include "sccp_internal.h"
+ #include "xua_internal.h"
+ #include "ss7_internal.h"
+ #include "xua_asp_fsm.h"
+ #include "xua_as_fsm.h"
+ 
++#ifdef HAVE_LIBSCTP
+ static int _setsockopt_peer_primary_addr(int fd, const struct osmo_sockaddr *saddr)
+ {
+ 	int rc;
+ 
+ 	struct sctp_setpeerprim so_sctp_setpeerprim = {0};
+ 
+ 	/* rfc6458 sec 8: "For the one-to-one style sockets and branched-off one-to-many
+ 	 * style sockets (see Section 9.2), this association ID parameter is ignored"
+ 	 */
+ 
+@@ -101,20 +106,21 @@
+ 	rc = setsockopt(fd, IPPROTO_SCTP, SCTP_PRIMARY_ADDR,
+ 			&so_sctp_prim, sizeof(so_sctp_prim));
+ 	if (rc < 0) {
+ 		char buf[128];
+ 		strerror_r(errno, (char *)buf, sizeof(buf));
+ 		LOGP(DLSS7, LOGL_ERROR, "setsockopt(SCTP_PRIMARY_ADDR, %s) failed: %s\n",
+ 		     osmo_sockaddr_to_str(saddr), buf);
+ 	}
+ 	return rc;
+ }
++#endif
+ 
+ /***********************************************************************
+  * SS7 Application Server Process
+  ***********************************************************************/
+ 
+ struct value_string osmo_ss7_asp_protocol_vals[] = {
+ 	{ OSMO_SS7_ASP_PROT_NONE,	"none" },
+ 	{ OSMO_SS7_ASP_PROT_SUA,	"sua" },
+ 	{ OSMO_SS7_ASP_PROT_M3UA,	"m3ua" },
+ 	{ OSMO_SS7_ASP_PROT_IPA,	"ipa" },
+@@ -231,20 +237,21 @@
+ 		fd = osmo_stream_srv_get_fd(asp->server);
+ 	else
+ 		fd = osmo_stream_cli_get_fd(asp->client);
+ 
+ 	if (fd < 0)
+ 		return fd;
+ 
+ 	return osmo_sock_multiaddr_del_local_addr(fd, &new_loc_addr, 1);
+ }
+ 
++#ifdef HAVE_LIBSCTP
+ int ss7_asp_apply_peer_primary_address(const struct osmo_ss7_asp *asp)
+ {
+ 	struct osmo_sockaddr_str addr_str;
+ 	struct osmo_sockaddr addr;
+ 	uint16_t local_port;
+ 	int fd, rc;
+ 
+ 	/* No SCTP Peer Primary Address explicitly configured, do nothing. */
+ 	if (asp->cfg.local.idx_primary == -1)
+ 		return 0;
+@@ -305,21 +312,23 @@
+ 	if (rc < 0)
+ 		return rc;
+ 	rc = osmo_sockaddr_str_to_sockaddr(&addr_str, &addr.u.sas);
+ 	if (rc < 0)
+ 		return rc;
+ 	LOGPASP(asp, DLSS7, LOGL_INFO, "Set Primary Address %s\n",
+ 		osmo_sockaddr_to_str(&addr));
+ 	rc = _setsockopt_primary_addr(fd, &addr);
+ 	return rc;
+ }
+-
++#endif
++
++#ifdef HAVE_LIBSCTP
+ /* Returns whether the address signalled in the SCTP_PEER_ADDR_CHANGE matches
+  * the user-configured Primary Address. */
+ static bool sctp_peer_addr_change_ev_addr_matches_our_primary(const struct osmo_ss7_asp *asp,
+ 							      const union sctp_notification *notif)
+ {
+ 	const char *primary_str;
+ 	int primary_str_type;
+ 	struct osmo_sockaddr ev_addr, primary;
+ 
+ 	OSMO_ASSERT(asp->cfg.remote.idx_primary >= 0);
+@@ -375,20 +384,21 @@
+ 		break;
+ 	case SCTP_ADDR_MADE_PRIM:
+ 		/* If another primary addr was made primary, overwrite it by setting it again */
+ 		match = sctp_peer_addr_change_ev_addr_matches_our_primary(asp, notif);
+ 		if (!match)
+ 			ss7_asp_apply_primary_address(asp);
+ 	default:
+ 		break;
+ 	}
+ }
++#endif
+ 
+ /* Set default values for local and remote peer hosts if they are not yet set.
+  *  \param[in] asp ASP for which to set default hosts.
+  *  \returns true if values where changed, false otherwise.
+  *
+  * If the ASP is already started, osmo_ss7_asp_restart() must be called
+  * afterwards in order to apply the new settings.
+  * This API is internal, hence doesn't appear in osmo_ss7.h
+  */
+ bool ss7_asp_set_default_peer_hosts(struct osmo_ss7_asp *asp)
+@@ -729,20 +739,21 @@
+ 	if (asp->cfg.is_server)
+ 		return !!asp->server;
+ 	else
+ 		return !!asp->client;
+ }
+ 
+ /***********************************************************************
+  * libosmo-netif integration for SCTP stream server/client
+  ***********************************************************************/
+ 
++#ifdef HAVE_LIBSCTP
+ static int get_logevel_by_sn_type(int sn_type)
+ {
+ 	switch (sn_type) {
+ 	case SCTP_ADAPTATION_INDICATION:
+ 	case SCTP_PEER_ADDR_CHANGE:
+ #ifdef SCTP_AUTHENTICATION_INDICATION
+ 	case SCTP_AUTHENTICATION_INDICATION:
+ #endif
+ #ifdef SCTP_SENDER_DRY_EVENT
+ 	case SCTP_SENDER_DRY_EVENT:
+@@ -787,20 +798,21 @@
+ 			(notif->sn_paddr_change.spc_state == SCTP_ADDR_UNREACHABLE) ?
+ 			osmo_sctp_sn_error_str(notif->sn_paddr_change.spc_error) : "None");
+ 		}
+ 		break;
+ 	default:
+ 		LOGPASP(asp, DLSS7, log_level, "%s %s\n",
+ 			pfx, osmo_sctp_sn_type_str(notif->sn_header.sn_type));
+ 		break;
+ 	}
+ }
++#endif
+ 
+ /* netif code tells us we can read something from the socket */
+ int ss7_asp_ipa_srv_conn_rx_cb(struct osmo_stream_srv *conn, int res, struct msgb *msg)
+ {
+ 	struct osmo_ss7_asp *asp = osmo_stream_srv_get_data(conn);
+ 
+ 	if (res <= 0) {
+ 		if (res == -EAGAIN) {
+ 			msgb_free(msg);
+ 			return 0;
+@@ -824,36 +836,39 @@
+ 	unsigned int ppid;
+ 	int flags;
+ 	int rc = 0;
+ 
+ 	/* process the received xUA message */
+ 	flags = msgb_sctp_msg_flags(msg);
+ 
+ 	LOGPASP(asp, DLSS7, LOGL_DEBUG, "%s(): sctp_recvmsg() returned %d (flags=0x%x)\n",
+ 		__func__, rc, flags);
+ 
++#ifdef HAVE_LIBSCTP
+ 	if (flags & OSMO_STREAM_SCTP_MSG_FLAGS_NOTIFICATION) {
+ 		union sctp_notification *notif = (union sctp_notification *) msgb_data(msg);
+ 		log_sctp_notification(asp, "xUA SRV", notif);
+ 		asp_handle_sctp_notif_monitor_primary_address(asp, notif);
+ 
+ 		switch (notif->sn_header.sn_type) {
+ 		case SCTP_ASSOC_CHANGE:
+ 			if (notif->sn_assoc_change.sac_state == SCTP_RESTART)
+ 				xua_asp_send_xlm_prim_simple(asp, OSMO_XLM_PRIM_M_SCTP_RESTART,
+ 							     PRIM_OP_INDICATION);
+ 		default:
+ 			break;
+ 		}
+ 		msgb_free(msg);
+ 		return 0;
+ 	}
++#endif
++
+ 	if (res <= 0) {
+ 		msgb_free(msg);
+ 		osmo_stream_srv_destroy(conn);
+ 		return rc;
+ 	}
+ 
+ 	ppid = msgb_sctp_ppid(msg);
+ 	msg->dst = asp;
+ 	rate_ctr_inc2(asp->ctrg, SS7_ASP_CTR_PKT_RX_TOTAL);
+ 
+@@ -930,24 +945,27 @@
+ 	/* update the socket name */
+ 	talloc_free(asp->sock_name);
+ 	asp->sock_name = osmo_sock_get_name(asp, fd);
+ 
+ 	LOGPASP(asp, DLSS7, LOGL_INFO, "Client connected %s\n", asp->sock_name);
+ 
+ 	/* Now that we have the conn in place, the local/remote addresses are
+ 	 * fed and the local port is known for sure. Apply SCTP Primary addresses
+ 	 * if needed:
+ 	 */
++#ifdef HAVE_LIBSCTP
+ 	if (asp->cfg.trans_proto == IPPROTO_SCTP) {
+ 		rc = ss7_asp_apply_peer_primary_address(asp);
+ 		rc = ss7_asp_apply_primary_address(asp);
+-	} else {
++	} else
++#endif
++	{
+ 		if (asp->cfg.proto == OSMO_SS7_ASP_PROT_IPA) {
+ 			/* we use the lower 4 bits of the asp_id feld as SLS; let's initialize it here from a
+ 			 * pseudo-random value */
+ 			asp->asp_id = rand() & 0xf;
+ 		}
+ 	}
+ 
+ 	if (asp->lm && asp->lm->prim_cb) {
+ 		/* Notify layer manager that a connection has been
+ 		 * established */
+@@ -1023,37 +1041,40 @@
+ 	struct osmo_ss7_asp *asp = osmo_stream_cli_get_data(conn);
+ 	unsigned int ppid;
+ 	int flags;
+ 	int rc = 0;
+ 
+ 	flags = msgb_sctp_msg_flags(msg);
+ 
+ 	LOGPASP(asp, DLSS7, LOGL_DEBUG, "%s(): sctp_recvmsg() returned %d (flags=0x%x)\n",
+ 		__func__, msgb_length(msg), flags);
+ 
++#ifdef HAVE_LIBSCTP
+ 	if (flags & OSMO_STREAM_SCTP_MSG_FLAGS_NOTIFICATION) {
+ 		union sctp_notification *notif = (union sctp_notification *) msgb_data(msg);
+ 		log_sctp_notification(asp, "xUA CLNT", notif);
+ 		asp_handle_sctp_notif_monitor_primary_address(asp, notif);
+ 
+ 		switch (notif->sn_header.sn_type) {
+ 		case SCTP_ASSOC_CHANGE:
+ 			if (notif->sn_assoc_change.sac_state == SCTP_RESTART)
+ 				xua_asp_send_xlm_prim_simple(asp, OSMO_XLM_PRIM_M_SCTP_RESTART,
+ 							     PRIM_OP_INDICATION);
+ 		default:
+ 			break;
+ 		}
+ 		if (res == 0)
+ 			xua_cli_close_and_reconnect(conn);
+ 		goto out;
+ 	}
++#endif
++
+ 	if (res < 0) {
+ 		xua_cli_close_and_reconnect(conn);
+ 		goto out;
+ 	} else if (res == 0) {
+ 		xua_cli_close_and_reconnect(conn);
+ 
+ 		goto out;
+ 	}
+ 
+ 	ppid = msgb_sctp_ppid(msg);
