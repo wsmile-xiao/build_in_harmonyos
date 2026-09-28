@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E749.kv，填写各字段
+# 对应的人类文档: doc/E749.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E749
+trigger_tool: conan|autoreconf|aclocal|perl
+phase: build
+error_signature: Perl_my_cxt_init.*symbol not found|Can.t load .*auto/Cwd/Cwd\.so|Error relocating .*\.so.*symbol not found at .*XSLoader
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: platform|ohos|perl|toolchain|conan-tool-requires
+match_keywords: PERL5LIB, HNP, /data/service/hnp/bin/perl, perl XS, Cwd.so, Perl_my_cxt_init, symbol not found, aclocal, automake, autoconf, tool_requires, autoreconf, .aclocal-real shebang, threaded, aarch64-linux-thread-multi, HNP autoreconf shadow
+title: tool_requires autoconf 会把 perl/5.42.2 的 PERL5LIB（threaded XS）灌进构建环境，而 automake/aclocal 的 shebang 写死 HNP 的非线程 perl —— 两者混用必炸 `Perl_my_cxt_init` 符号失配（symbol not found）；正解是不 tool_requires autoconf（用 HNP 的 autoreconf/autoconf），只留 automake/1.18 并把 PERL5LIB 收窄到 automake share
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: HNP（/data/service/hnp）自带 autoconf/autoreconf/autoheader/autom4te/m4/perl（perl 5.42.0，archname=aarch64-linux，非线程），但**不含 aclocal/automake**；conan 的 automake/1.18 包里 `.aclocal-real`/`.automake-real` 的 shebang 被写死为 `#!/data/service/hnp/bin/perl`（PATH 前置改不了绝对 shebang）。一旦配方再 tool_requires autoconf/2.72，它的传递依赖 perl/5.42.2（archname=aarch64-linux-thread-multi，线程版）会把自己的 XS 库目录灌进 buildenv 的 PERL5LIB；于是 HNP 的非线程 perl 去加载线程版的 `auto/Cwd/Cwd.so`，动态重定位缺 `Perl_my_cxt_init` 直接失败，aclocal 第 31 行 `require File::Path` 即中止、autoreconf rc=255。两层叠加还有第二面：OHOS profile 把 /data/service/hnp/bin 排在 PATH 最前，HNP 的 autoreconf 会遮蔽 conan 提供的同名工具，而设备上 harmonybrew 的 aclocal/automake 1.19 又会让「设备全绿、CI 却用 1.18」的两套判据面出现（设备事实 §一.4 同族）。
+affected_scope: 任何用 autotools 上游树且需要 autoreconf 的配方，只要同时 tool_requires autoconf（连带 perl）并由 automake tool_requires 提供 aclocal，就会命中；与本机是否 harmonybrew 无关，CI worker 同样命中（HNP 是 worker 工具链）
+verification_cmd: sh -c "P=$(ls -d $HOME/.conan2/p/perl*/p/lib/perl5/5.42.2 2>/dev/null | head -1); [ -n \"$P\" ] && PERL5LIB=$P /data/service/hnp/bin/perl -MCwd -e 1"; sh -c "unset PERL5LIB; /data/service/hnp/bin/perl -MCwd -e \"print qq(ok\\n)\""
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: drop-autoconf-tool-require-narrow-perl5lib
+rec_description: 不要 tool_requires autoconf/2.72（它连带 perl/5.42.2，PERL5LIB 注入即触发 XS 符号失配）；HNP 已有 autoreconf/autoconf/autoheader/autom4te/m4/perl，直接用它，只补 HNP 缺的 automake/1.18。每条 self.run 前缀 `PATH="<conan-bin>:…:$PATH" PERL5LIB="<automake-pkg>/share/automake-1.18"`：PATH 前置保证设备与 CI 都用 conan 的 aclocal/automake（避免 harmonybrew 1.19 与 CI 1.18 两套判据面），PERL5LIB 收窄后 HNP perl 用自己的核心 XS、Automake::* 纯 perl 模块仍可加载。若必须保留 autoconf tool_requires，则要给 aclocal/automake 做 shim 用 conan perl 绝对路径调 .real 脚本，代价更大。
+rec_command: self.run(f"{env_pre} autoreconf -fi", cwd=work)   # env_pre = PATH="<conan bin>:$PATH" PERL5LIB="<automake share>"
+rec_auto_fix: false
+rec_impl: recipe
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file: E749-draft-ohos-perl-xs-perl5lib-clash.md
+last_updated: 2026-09-26
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 47D9
