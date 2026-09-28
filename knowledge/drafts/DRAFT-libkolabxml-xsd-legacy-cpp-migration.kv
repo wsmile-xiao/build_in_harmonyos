@@ -1,0 +1,81 @@
+draft: DRAFT-libkolabxml-xsd-legacy-cpp-migration
+status: pending-editor-review
+title: "老 C++ XML 绑定库的 OHOS 迁移知识链：CodeSynthesis XSD 工具链预生成 + C++17 auto_ptr/线程局存语义迁移（libkolabxml 实证）"
+category: legacy-code, code-generation, portability, cppstd, boost, qt5, build-system
+match_keywords: >
+  xsdcxx, xsdbin, CodeSynthesis, XSD code generation, cxx-tree, libxsd,
+  XSD_CXX11, XSD_CXX11_TEMPLATE_ALIAS, std::auto_ptr, unique_ptr migration,
+  thread_specific_ptr, thread_local, boost_thread not linked, 2014 legacy C++,
+  schema grammar array, pre-generated bindings, version file <version> conflict,
+  wostream Path operator<<
+error_signature: >
+  Could NOT find XSDCXX|xsdcxx: command not found|grammar-input-stream|no template named 'auto_ptr' in namespace 'std'|xsd::cxx::xml::dom::auto_ptr.*not declared|get_tss_data.*undefined|set_tss_data.*undefined|boost::thread_specific_ptr.*undefined reference|XSD_CXX11_TEMPLATE_ALIAS.*template alias
+root_cause: >
+  一类"双亡老库"：业务库（2014 前的 C++）依赖的代码生成器生态同样停止维护
+  （CodeSynthesis XSD 4.0.0 末版 2014 年）。构建期需要 host 端 xsdcxx/xsdbin
+  两个工具把 .xsd 生成 C++/Tree bindings 与 grammar 数组，但 CI 交叉编译
+  worker 无这些工具（制品仓无 xsd 包，官方预编译二进制仅 x86_64，OHOS arm64
+  本机无法运行）。同时期源码三重 C++17 断裂叠加：①std::auto_ptr 被 C++17
+  移除（含 libxsd 的 dom::auto_ptr 兼容层——在 XSD_CXX11 模式下不存在）；
+  ②boost 1.90 conan 包不含编译版 boost_thread，thread_specific_ptr 的
+  get_tss_data/set_tss_data 未定义；③clang-on-OHOS 伪装 GCC 4.2，
+  XSD_CXX11_TEMPLATE_ALIAS 不会从 __GNUC__>=4.7 自动推导。CMake 2.8.5 时代
+  的 minimum required 也被 CMake 4.x 拒绝。多层断裂互相纠缠：不先解决工具链
+  就无法生成代码，不解决宏与 auto_ptr 生成的代码也编不过。
+solution: |
+  完整知识链（五环，libkolabxml 1.2.1 全链实证）：
+
+  # 环1：host 工具链自举（OHOS 本机从源码编 xsdcxx/xsdbin）
+  #   xsd-4.0.0+dep.tar.bz2 官方一体包，OHOS SDK clang + conan 静态 xerces-c/3.2.5
+  #   坑a：组件目录无扩展名 `version` 文件与 libc++ #include <version> 冲突
+  #        （新版 libc++ 无条件包含）→ 重命名 version.txt（仅 dist 目标引用）
+  #   坑b：libxsd-frontend operator<<(wostream&, Path) 报错（path.string() 是
+  #        char 串不能流给 wostream）→ 逐字符 widen
+  make CXX=clang++ CC=clang CXXFLAGS="-O2 -std=c++14 -I<xerces>/include" \
+       LDFLAGS="-L<xerces>/lib" LIBS="-lxerces-c -lc++ -lc++abi -ldl -lpthread"
+  #   运行时 LD_LIBRARY_PATH 指向 SDK libc++_shared.so
+
+  # 环2：预生成（命令与上游 CMakeLists 一致，必须加 --std c++11）
+  xsdcxx cxx-tree --std c++11 --generate-polymorphic --generate-serialization \
+    --namespace-map http://kolab.org=KolabXSD --root-element icalendar ... <xsd>
+  #   --std c++11 不加则默认 c++03 生成的代码用 dom::auto_ptr，
+  #   在 XSD_CXX11 模式 libxsd 头下不存在——生成器 flag 与宏体系必须配套
+  xsdbin --array-name iCalendar_schema --output-dir . <xsd>
+
+  # 环3：产物进 patches/（bindings/ + *-schema.cxx + libxsd header-only runtime）
+  #   conanfile.py build() copy 进源码树；patch 上游 CMakeLists：
+  #   XSDCXX 不可用时 copy 预生成文件（保留原 xsdcxx 命令 fallback）
+
+  # 环4：C++17 语义迁移
+  #   std::auto_ptr → unique_ptr：声明点直换；所有权转移点必须显式 std::move
+  - note = KolabXSD::note(doc);
+  + note = KolabXSD::note(std::move(doc));          # auto_ptr 拷贝即转移
+  - prop.recurrence_id(recurrenceId);
+  + prop.recurrence_id(std::move(recurrenceId));
+  #   xsd::cxx::xml::dom::auto_ptr<T> → unique_ptr<T>（libxsd C++11 别名）
+  #   boost::thread_specific_ptr<T> → thread_local T*（等价线程局存，
+  #   避开 conan boost 无编译 boost_thread）
+  #   测试里 boost::thread → std::thread
+
+  # 环5：宏三件套 + CMake 4 兼容 + qt5 三坑
+  -DXSD_CXX11 -DXSD_CXX11_TEMPLATE_ALIAS -DXSD_CXX11_NULLPTR
+  #   （clang-on-OHOS __GNUC__==4 伪装，TEMPLATE_ALIAS 不自动推导）
+  CMAKE_POLICY_VERSION_MINIMUM=3.5        # cmake_minimum_required(2.8.5)
+  #   qt5/5.15.19：-DCMAKE_PREFIX_PATH=<pkg>/lib/cmake（不能用 toolchain cache
+  #   变量——覆盖 CMakeDeps prepend 致 ECM 找不到）；mkspecs 断链 symlink 修复；
+  #   zlib/1.3.1.1 force=True 统一 qt5 与 libcurl 的 zlib 版本
+fallback: >
+  环1 无 OHOS 本机环境时：xsdcxx 可在任意 Linux x86_64 编译（xsd-4.0.0+dep
+  make 或 build2），预生成产物是纯 C++ 源码与平台无关。环4 无法上 C++11 时：
+  编译 -std=c++03 或 -D_LIBCPP_ENABLE_CXX17_REMOVED_AUTO_PTR（libc++ 逃生口，
+  不可移植仅过渡）。环2 无法 patch CMakeLists 时：用 CMAKE_DISABLE_FIND_PACKAGE_XSDCXX +
+  add_custom_command 外层注入。boost_thread 硬需求时：改用源码内嵌
+  boost::thread 的 header-only 替代或换 std::thread（本例实测语义等价）。
+verify_builds: "#11169 本地 conan create OHOS arm64 PASS；上游 5 测试可执行文件 84/84 PASS（bindingstest 27、conversiontest 39、kolabconversationtest 4、parsingtest 3、validationtest 11）；test_package note round-trip PASS"
+prescan_pattern: "xsdcxx|find_program\\(XSDCXX|thread_specific_ptr|std::auto_ptr"
+reference_impl: >
+  PR #11169（libkolabxml 1.2.1）：patches/0001-0009 + patches/bindings/（14 文件
+  预生成）+ patches/libxsd/（header-only runtime 106 头）。配套单点草稿：
+  DRAFT-E-xsd-toolchain-pregen（环1-3）、DRAFT-E-autoptr-unique-ptr（环4 auto_ptr 部分）。
+  详见 archives/l/libkolabxml/1.2.1/notes.md 8 个坑段落全记录。
+last_updated: 2026-09-19
