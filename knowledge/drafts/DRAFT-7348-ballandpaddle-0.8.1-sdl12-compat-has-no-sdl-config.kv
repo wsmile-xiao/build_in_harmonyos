@@ -1,0 +1,201 @@
+# ═══ Draft knowledge entry — SDL 1.2 时代的 autotools 消费者用 AM_PATH_SDL 找 `sdl-config` 脚本，而 sdl12-compat 包里没有该脚本：必须在 build_folder 造一个外壳并经**绝对路径**的 SDL_CONFIG 注入 ═══
+# Timestamp: 2026-09-21
+# Software: ballandpaddle 0.8.1 (GNU Ball and Paddle，内嵌 Guile 的打砖块游戏)
+# Gate: 构建准入（依赖已正确注入却仍报 "SDL not found" 的判定与修法）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-7348-ballandpaddle-0.8.1-sdl12-compat-has-no-sdl-config
+trigger_tool:           configure|autoconf|pkg-config|cc|ld
+phase:                  configure
+error_signature:        checking for sdl-config\.\.\. no|
+                         SDL not found|
+                         AM_PATH_SDL|sdl-config: not found|
+                         configure: error: .*SDL.*|
+                         cannot find SDL|sdl\.pc.*No such file|
+                         Package sdl was not found in the pkg-config search path|
+                         sdl-config.*Permission denied|
+
+severity:               3
+category:               build, autotools, sdl, conan, portability, probe-mismatch
+match_keywords:         sdl-config, AM_PATH_SDL, SDL_CONFIG, SDL_CFLAGS, SDL_LIBS,
+                         sdl12-compat, libSDL-1.2, sdl.pc, AC_PATH_PROG, autotools,
+                         SDL 1.2, SDL 1.3, sdl2, compatibility layer, legacy audio,
+                         cross compiling SDL, AC_TRY_RUN sdltest, ballandpaddle
+
+title:                  SDL 1.2 时代的 autotools 工程靠 `AM_PATH_SDL` **执行 `sdl-config` 脚本**
+                        取 flags，而 `sdl12-compat` 只提供 `libSDL-1.2` 与头文件、**不含** `sdl-config`
+                        与 `sdl.pc` —— 依赖已由包管理器正确注入（`-L`/`-I`/`-lSDL-1.2` 全在），
+                        configure 仍会报「SDL not found」；须自造外壳脚本并**按绝对路径**注入 `SDL_CONFIG`
+
+root_cause: >
+  这是「探针找的东西」与「当代制品提供的东西」错位，且错位发生在**构建期工具**层面，
+  不在库层面。
+
+  (1) **`AM_PATH_SDL` 是按「可执行脚本」找 SDL 的，不是按 `.pc` 找的。**
+  上游 aclocal.m4 里的宏展开后等价于：
+      AC_PATH_PROG(SDL_CONFIG, sdl-config, no, [$PATH])
+      ...
+      SDL_CFLAGS=`$SDL_CONFIG $sdlconf_args --cflags`
+      SDL_LIBS=`$SDL_CONFIG $sdlconf_args --libs`
+  也就是说 SDL 1.2 的 flags 从来不是由 `pkg-config sdl` 决定的，而是由 `sdl-config`
+  这个**随 SDL 1.2 一起安装的 shell 脚本**决定的（它自己 `--version/--cflags/--libs`
+  三个开关各打印一行）。SDL 1.2 的 `.pc` 文件（sdl.pc）是后加的、且很多工程根本不用。
+
+  (2) **`sdl12-compat` 是 ABI 兼容层，不是 SDL 1.2 的重新打包。**
+  它提供 `libSDL-1.2.so`（NEEDED: `libSDL2-2.0.so.0`）+ 一套 SDL 1.2 头文件，
+  但**刻意不提供 `sdl-config`**（因为它自己不实现 SDL 1.2 的构建工具链），
+  包里通常也**没有** `lib/pkgconfig/sdl.pc`。
+  实测判据（必做，见 verification_cmd）：
+      find <sdl12-compat-prefix> -name 'sdl-config' -o -name 'sdl.pc'   # → 无输出
+      ls <sdl12-compat-prefix>/lib/libSDL-1.2*                          # → 有输出
+
+  (3) **症状极具误导性，因为依赖确实装好了。** conan 的 AutotoolsDeps/VirtualBuildEnv
+  会把 `-L<dep>/lib -lSDL-1.2` 与 `-I<dep>/include/SDL` 都注入 `CPPFLAGS`/`LDFLAGS`。
+  于是构建日志里同时出现「依赖路径全对」和 `checking for sdl-config... no` →
+  `SDL not found`。**看到 "not found" 的第一反应是「依赖没装上」，而这里是「探针找错了东西」。**
+  这与 E 族里「探针写死 soname」是同一类错误的两个变体：**依赖对了，探针错了。**
+
+  (4) **注入通道有一个必须知道的细节：绝对路径的 `SDL_CONFIG` 会被直接采信。**
+  `AM_PATH_SDL` 用 `AC_PATH_PROG` 找脚本，但 autoconf 的 `AC_PATH_PROG` 语义是
+  「若变量已非空则**不覆盖**」。因此把 `SDL_CONFIG` 预先设为**绝对路径**即可绕开
+  `PATH` 查找（也是唯一稳妥的方式：避免同名 `sdl-config` 被别的依赖带进来）。
+  注意必须是绝对路径 —— `AC_PATH_PROG` 对已赋值的**相对**路径不保证解析到 build 目录。
+  另外仍需把外壳所在目录前置进 `PATH`，因为有些构建脚本**直接**调 `sdl-config`
+  而不走 `AM_PATH_SDL`（ballandpaddle 的 `configure` 走宏，但同族工程两种都有）。
+
+affected_scope: >
+  一切「用 SDL 1.2（或任何带 `*-config` 脚本的老式库）+ autotools/m4 宏探测」的组合，
+  在只提供现代兼容层（sdl12-compat / SDL2）或只提供 `.pc` 的环境上构建时。
+  判据一（工程侧）：`grep -n 'AM_PATH_SDL\|sdl-config' configure.ac aclocal.m4`
+  有输出 → 该工程靠 `sdl-config` 取 flags，与 `.pc` 无关。
+  判据二（制品侧）：`find <sdl-prefix> -name 'sdl-config' -o -name 'sdl.pc'`
+  无输出而 `ls <sdl-prefix>/lib/libSDL-1.2*` 有输出 → 必须自造外壳。
+  两条同时命中 → 直接套用本条的 rec_approach，不必再试 `PKG_CONFIG_PATH` 之类的方向。
+  同族信号（不止 SDL）：`ncurses*-config`、`gtk-config`、`xml2-config`、`curl-config`、
+  `freetype-config`、`sdl2-config` —— 这些 `*-config` 脚本在「只发 `.pc` 的现代打包」
+  里普遍缺席，而老 autotools 工程普遍依赖它们。反过来，只发 `*-config` 不发 `.pc`
+  的库也要注意（老 SDL 系）。
+  容易踩的推断：看到 `checking for <X>... no` 就去翻依赖清单 / 怀疑 conan 注入 ——
+  先看探针找的是**库**还是**可执行脚本**；后者与 `-L`/`-l` 完全无关。
+
+verification_cmd: >
+  # 判据一：工程是否靠 sdl-config 脚本（而非 .pc）取 flags
+  grep -n 'AM_PATH_SDL' configure.ac aclocal.m4
+  grep -n 'sdl-config' configure | head
+  #   有输出 → flags 全部来自执行 sdl-config，PKG_CONFIG_PATH 无论怎么设都没用
+
+  # 判据二：制品里到底有没有 sdl-config / sdl.pc（决定要不要自造外壳）
+  find <sdl12-compat-prefix> -name 'sdl-config' -o -name 'sdl.pc'    # 期望：无输出
+  ls -l <sdl12-compat-prefix>/lib/libSDL-1.2*                        # 期望：libSDL-1.2.so / .a
+
+  # 判据三：依赖其实已经注入（证明「不是依赖没装」）
+  #   构建日志里应有 -I<dep>/include/SDL 与 -L<dep>/lib -lSDL-1.2（来自 AutotoolsDeps）
+  grep -n -- '-lSDL-1.2' <build_folder>/conanbuild.sh conanautotoolstoolchain.sh 2>/dev/null
+
+  # 判据四：修复后外壳真的被用上（configure 应打印已找到的绝对路径）
+  grep -n 'checking for sdl-config' config.log
+  #   期望：... = /abs/path/to/build_folder/sdl-config
+  grep -n 'SDL_CFLAGS\|SDL_LIBS' config.log | head
+  #   期望：分别含 -I<dep>/include/SDL 与 -L<dep>/lib -lSDL-1.2
+
+  # 判据五：外壳必须可执行，且四个开关都能答
+  <build_folder>/sdl-config --version      # → 1.2.68（兼容层版本）
+  <build_folder>/sdl-config --cflags       # → -I<dep>/include/SDL
+  <build_folder>/sdl-config --libs         # → -L<dep>/lib -lSDL-1.2
+  <build_folder>/sdl-config --static-libs  # → 同上（老工程会用这个开关）
+
+rec_priority:           1
+rec_approach:           synthesize-an-sdl-config-shim-in-the-build-folder-and-inject-its-absolute-path-via-SDL_CONFIG
+rec_description: >
+  三步，全部发生在**构建期环境**，不碰上游源码、不给 sdl12-compat 打补丁：
+    1. 在 `build_folder` 写一个 `sdl-config`（`#!/bin/sh` + `case "$1" in`），
+       至少实现 `--version`（打印兼容层版本，如 `1.2.68`）、
+       `--prefix`/`--exec-prefix`（打印依赖前缀）、
+       `--cflags`（打印 `-I<dep>/include/SDL`）、
+       `--libs`/`--static-libs`（打印 `-L<dep>/lib -lSDL-1.2`），
+       未知开关 `*) exit 1`（**不要**打印空串后 exit 0 —— 那会让 configure 拿到空
+       SDL_CFLAGS 而静默通过，症状变成后续编译期找不到 `SDL.h`）。
+    2. 补可执行位：`os.chmod(path, S_IXUSR|S_IXGRP|S_IXOTH)`。
+       **必须显式补**：很多共享文件系统（含 HMDFS 挂载的源码/构建目录）不保留
+       tarball 里的 exec 位，`save()` 写出的文件默认 0644，configure 会报
+       `sdl-config: Permission denied`（这又是一种新的误导性症状）。
+    3. 注入两路：
+       `SDL_CONFIG='<绝对路径>'` + 把 `build_folder` 前置进 `PATH`
+       （前者覆盖走 `AM_PATH_SDL` 的工程，后者覆盖直接调 `sdl-config` 的工程）。
+       路径必须**绝对** —— `AC_PATH_PROG` 对已赋值的变量不覆盖，相对路径不可靠。
+  自检：`config.log` 里 `checking for sdl-config` 那一行应回显该绝对路径，
+  且 `SDL_CFLAGS`/`SDL_LIBS` 非空。
+rec_command:            >
+  # 1) 写外壳（build_folder/sdl-config）
+  #    --version -> 1.2.68 ; --cflags -> -I<dep>/include/SDL ;
+  #    --libs|--static-libs -> -L<dep>/lib -lSDL-1.2 ; *) exit 1
+  # 2) os.chmod(shim, 0o755)
+  # 3) env: SDL_CONFIG='<abs shim>'  PATH='<build_folder>:<dep bins>:$PATH'
+  # 4) configure（注意 --cflags 的目录是 include/SDL，不是 include）
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      point-PKG_CONFIG_PATH-at-a-hand-written-sdl-pc-and-hope-the-project-uses-pkg-config
+fallback_description:   >
+  只有当工程**同时**支持 `pkg-config sdl` 时才有意义：手写一个 `sdl.pc` 放进
+  build_folder 并把 `PKG_CONFIG_PATH` 指过去。但这条对 ballandpaddle 之类
+  纯 `AM_PATH_SDL` 工程**完全无效**（它们根本不调 pkg-config），而且手写 `.pc`
+  的 `Version:` 必须落在工程 `SDL_VERSION` 检查的区间内，否则报的是
+  「SDL version 太旧」——又是另一种误导性症状。仅当确认工程走 pkg-config 时使用，
+  且优先找依赖包是否**本来就发了** `sdl.pc`（有些 sdl2 系包会发）。
+fallback_command:       PKG_CONFIG_PATH=<build_folder>:$PKG_CONFIG_PATH  # build_folder 内放手写 sdl.pc
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       补丁.*sdl-config|sed\s+-i.*AM_PATH_SDL|改上游 configure.ac 把 AM_PATH_SDL 换成 PKG_CHECK_MODULES
+forbid_1_reason:        把「本环境只提供兼容层、没提供 sdl-config」这个**构建期环境事实**
+                        写成上游源码变更。工程换成 pkg-config 探测后，在所有仍然正常
+                        提供 sdl-config 的平台上（发行版 SDL 1.2 包）行为反而改变，
+                        且上游升级必冲突。
+forbid_1_consequence:   适配不可上游化（P005），补丁语义错误且成为长期维护负担。
+                        正确位置是**构建期注入一个外壳**，m4 宏原样不动。
+
+forbid_2_pattern:       sdl-config.*\*\)\s*;;|\*\)\s*exit\s+0|外壳未知开关打印空串|default\)\s*echo\s*$|sdl-config.*\*) \s*echo
+forbid_2_reason:        外壳对未知开关若 `exit 0` 并打印空串，`AM_PATH_SDL` 会拿到空的
+                        `SDL_CFLAGS`/`SDL_LIBS` **且不报错** —— configure 通过，
+                        失败被推迟到编译期（`SDL.h: No such file`）或链接期
+                        （`undefined reference to SDL_Init`），现场与根因离得很远。
+forbid_2_consequence:   症状从「configure 期一句 SDL not found」退化成
+                        「编译/链接期一堆无关错误」，排查成本大幅上升。
+
+forbid_3_pattern:       chmod\s+0*755.*tarball|依赖\s+tarball\s+的可执行位|不补\s*\+x.*sdl-config|SDL_CONFIG=\./sdl-config|SDL_CONFIG=sdl-config
+forbid_3_reason:        两个独立的静默失败：①`save()` 写出的文件默认 0644，
+                        在不保留 exec 位的挂载（HMDFS 等）上 configure 报
+                        `sdl-config: Permission denied`，看起来像权限/工具链问题而非
+                        本包问题；②`SDL_CONFIG` 用**相对**路径时，`AC_PATH_PROG`
+                        「已赋值则不覆盖」的语义会把它原样留下，configure 在
+                        非 build 目录下（或子目录里的 Makefile 重跑）解析不到。
+forbid_3_consequence:   本机（保留 exec 位、且 cwd == build_folder）通过、目标环境
+                        失败，适配不可复现。
+
+principles:             P014, P005
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-7348-ballandpaddle-0.8.1-ac-check-lib-probes-a-fixed-soname
+                        （同族：**依赖已正确注入，但探针找的东西与制品不符** ——
+                         本条是「探针找可执行脚本」，那条是「探针按写死的 soname 找库」）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-7348-ballandpaddle-0.8.1-sdl12-compat-has-no-sdl-config.md
+last_updated:           2026-09-21
+source_event:           archives/b/ballandpaddle/0.8.1 适配（AM_PATH_SDL 找 sdl-config；
+                        ohpcd 只发 sdl12-compat，无 sdl-config / sdl.pc）
+
+authors:                2301_76770579
+source_pr:              11639
+source_commit:          7db987f3a694adf10e13ac08cace191cadfe1fec
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-21
+
+draft:                  true
+contributor_id:         2301_76770579
