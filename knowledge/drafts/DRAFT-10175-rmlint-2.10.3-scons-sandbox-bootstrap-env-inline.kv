@@ -1,0 +1,43 @@
+#====================================================================
+# Draft: SCons packages on OHOS - sandbox bootstrap of SCons itself
+#        (pip --target into the Conan build folder) plus the three
+#        inline-env pitfalls that break python3 -m SCons in G2
+#        (rmlint 2.10.3; same shape as gpsd/dxx-rebirth/vixl)
+#====================================================================
+
+id:                     DRAFT-10175-RMLINT-SCONS-SANDBOX-BOOTSTRAP-ENV-INLINE
+trigger_tool:           scons|python3|conan
+phase:                  configuration|build
+error_signature:        No module named SCons|Checking for glib.*not found|AttributeError.*buildenv_info|scons: \*\*\* .* Error
+
+severity:               1
+category:               build-system, scons, conan, ohos, python
+match_keywords:         SCons, python3 -m SCons, PYTHONPATH, PKG_CONFIG_PATH, buildenv_info, VirtualBuildEnv, PkgConfigDeps, tool_requires, sandbox bootstrap, save_script
+
+title:                  SCons projects on OHOS: bootstrap SCons into a build-folder private prefix and call python3 -m SCons with inline PYTHONPATH/PKG_CONFIG_PATH, because SCons is absent from the image and the ohpcd registry and aggregated conanbuild env does not carry either path
+
+root_cause:             Three stacked facts: (1) OHOS images and the ohpcd Conan registry ship no scons binary/module and Conan does not distribute SCons recipes, so tool_requires("scons/x") is impossible (same conclusion as archives/g/gpsd/3.26). The repo convention is to pip-install SCons into an isolated prefix inside the Conan build folder (self.build_folder/_scons_env) - never --target into user site-packages. (2) Environment(self).save_script("scons_env") writes a separate script that is NOT sourced into the aggregated conanbuild.sh, so PYTHONPATH only carried via save_script dies with "No module named SCons"; the python3 -m SCons invocation needs PYTHONPATH inline on the command line. (3) PkgConfigDeps writes glib-2.0.pc etc. into generators_folder but buildenv_info.append_path("PKG_CONFIG_PATH", ...) is a ConanFile attribute that must be set BEFORE VirtualBuildEnv(self).generate(); on this Conan/platform combination the aggregated conanbuild.sh still does not carry the path, so SConstruct pkg-config probes fail ("Checking for glib-2.0 >= 2.64 ... not found") unless PKG_CONFIG_PATH is also given inline. Additionally SConstruct environments whitelist only PATH/TERM/HOME/PKG_CONFIG_PATH for child processes, which makes PKG_CONFIG_PATH the only viable discovery channel (CFLAGS/LDFLAGS injection is silently ignored).
+
+affected_scope:         Every SCons-built package adapted for HarmonyOS PC (rmlint 2.10.3 measured; gpsd 3.26 / dxx-rebirth 0.6 / vixl 5.5.5 use the same shape). Symptoms appear in conan-verify G2 as either "No module named SCons", missing-dependency pkg-config failures, or AttributeError when buildenv_info is misused on a VirtualBuildEnv instance.
+
+verification_cmd:       conan create archives/<x>/<pkg>/<ver> -pr:h ci/conan/profiles/ohos-aarch64 -pr:b ci/conan/profiles/ohos-aarch64 --build=missing   # expect: SCons banner via python3 -m SCons, "Checking for glib-2.0 >= 2.64... yes", full compile
+
+rec_priority:           1
+rec_approach:           sandbox-scons-prefix-plus-inline-env
+rec_description:        In generate(): (a) pip install --no-input --target=<build_folder>/_scons_env scons==<ver> (private prefix, no --user, no system pollution); (b) patch SCons.Platform.posix SHELL 'sh' -> '/system/bin/sh' with a no-op-if-absent replace (OHOS has no /bin/sh); (c) PkgConfigDeps(self).generate() then derive any missing component .pc files into generators_folder; (d) set self.buildenv_info.append_path("PKG_CONFIG_PATH", self.generators_folder) BEFORE VirtualBuildEnv(self).generate(); (e) in build() invoke PYTHONPATH=<prefix> PKG_CONFIG_PATH=<gens> python3 -m SCons -j1 CC=<profile conf c> AR=.. RANLIB=.. --without-<optional...> with cwd=source_folder. Compilers/AR must come from self.conf tools.build:compiler_executables (R33), never bare shell vars.
+rec_command:            PYTHONPATH=<build_folder>/_scons_env PKG_CONFIG_PATH=<generators_folder> python3 -m SCons -j1 CC=<clang> --without-<opt>
+rec_auto_fix:           false
+rec_impl:               archives/r/rmlint/2.10.3/conanfile.py (_install_scons/_patch_scons_shell/_scons_command/_ensure_gio_unix_pc)
+
+fallback_priority:      2
+fallback_approach:      abandon-scons-handwrite-makefile
+fallback_description:   If the pip mirror is unreachable in a constrained environment, hand-rolled compilation without SCons is the last resort (libobjcryst/mars/websocketpp precedent) but loses upstream build logic and is not recommended for SCons projects with configure-style probes.
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       pip install --user scons|pip install into site-packages|sed -i on conanbuild.sh|hardcode /usr/local into PKG_CONFIG_PATH
+forbid_1_reason:        Installing into the user environment breaks clean-worker reproducibility and violates R49 (build_folder private prefix); SYS_PREFIX//usr/local literals are PF6-blocked; editing the generated conanbuild.sh is editing a generated file (R6).
+forbid_1_consequence:   CI worker pollution, unreproducible builds, preflight PF6 hard block, review rejection.
+
+principles:             minimal-env-surface, private-prefix-injection, generated-files-are-read-only, profile-conf-for-compilers
