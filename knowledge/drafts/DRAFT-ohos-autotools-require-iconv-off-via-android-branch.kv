@@ -1,0 +1,147 @@
+#====================================================================
+# DRAFT-ohos-autotools-require-iconv-off-via-android-branch -
+#   借上游自带的 *-linux-android* 分支把 OHOS 归入「全 UTF-8、免 iconv」路径，
+#   从而绕开对 libiconv 的强依赖（免新增/免运行时链接失败）
+#====================================================================
+# 与既有条目的关系（差异化定位，勿重复申报）:
+#
+#  E072 / E122 / E268 与 DRAFT-autotools-config-sub-silent-ohos-triplet 等条目
+#  讲的是 **config.sub/config.guess 层面的三元组识别**（"Kernel 'linux' not known
+#  to work with OS 'ohos'"、白名单加 linux-ohos*）。本条**不重复**该层。
+#
+#  本条补的是识别**之后**的策略：一旦三元组被正确识别为 *-linux-ohos*，
+#  在 configure 的 **os 分支**（android / darwin / …）里把它并入 android，
+#  借上游已有的 `require_iconv=no` 决策关掉 iconv 强依赖。
+#  实测 knowledge/ 全库 "require_iconv" 命中 0 —— 属空白。
+#
+#  与 libksba 同族草稿（DRAFT-libksba-1.6.7.1-gnupg-family-autotools-version-mapping）
+#  的关系：那篇讲 gpgrt-config / 版本映射 / gl 边界，**未涉及 iconv 开关**。
+#====================================================================
+
+id:                     DRAFT-ohos-autotools-require-iconv-off-via-android-branch
+trigger_tool:           configure|autotools|aclocal|configure.ac
+phase:                  configuration
+error_signature:        You need iconv|
+                         libiconv.*not found|
+                         AM_ICONV.*failed|
+                         cannot find iconv|
+                         undefined reference to .*iconv|
+                         Error relocating .*: libiconv.*symbol not found|
+                         iconv_open.*not found
+
+severity:               2
+category:               ohos, autotools, portability, configure, dependency, libc
+match_keywords:         require_iconv, AM_ICONV, libiconv, iconv_open, have_android_system,
+                         linux-android, linux-ohos, config.sub whitelist, autotools,
+                         fully utf-8, G_INTL_STATIC_COMPILATION, gnupg
+title:                  autotools 包可借上游自带 *-linux-android* 分支让 OHOS 落入
+                         「全 UTF-8、免 iconv」路径（require_iconv=no），避免 libiconv
+                         强依赖与运行期链接失败
+
+root_cause: |
+  许多 autotools 工程用"目标系统分支"决定是否需要 iconv。以 gnupg 2.5.22 为例
+  （configure.ac）：
+
+  ```
+  :663  require_iconv=yes          # 默认要求 iconv
+  :666  have_android_system=no
+  ...
+  :a    *-linux-android*)
+  :b        have_android_system=yes
+  :c        # Android is fully utf-8 and we do not want to use iconv to
+  :d        # keeps things simple
+  :e        require_iconv=no       # ← 关键：关掉 iconv 强依赖
+  :f        build_wks_tools=no
+  ...
+  :1262 if test "$require_iconv" = yes; then  → AM_ICONV / 依赖 libiconv
+  :2034 if test "$require_iconv" = yes; then  → 同上（第二处）
+  ```
+
+  问题：`*-linux-ohos*` **不在任何分支里**，于是落到"默认 require_iconv=yes"，
+  从而强行依赖 libiconv —— 而这在 OHOS 上代价不小：
+    · 需额外引入/适配 libiconv 依赖；
+    · 或即使构建通过，运行期仍可能报 `libiconv` 符号重定位失败。
+
+  main 上 `archives/g/gnupg/2.4.9/notes.md` 记录的正是这一类
+  **libiconv 运行时链接失败**（该版本因此未能交付）。
+
+  OHOS 与 Android 同属"系统层全 UTF-8"的实现，本就不需要 iconv 转换，
+  因此**复用上游既有的 android 分支语义**比新增 ohos 分支更小、更稳。
+
+affected_scope: >
+  所有含 `require_iconv` / `AM_ICONV` / "目标平台决定要不要 iconv" 逻辑的
+  autotools 工程，在 OHOS 上适配时；对"图标/文本处理"以外的大多数库，
+  iconv 只是为老式非 UTF-8 locale 兜底，OHOS 下并不需要。
+
+verification_cmd: |
+  # 1) 确认默认要求 iconv 且无 ohos 分支
+  grep -nE 'require_iconv|have_android_system|linux-android|linux-ohos' configure.ac
+  # 2) 确认 iconv 被真正消费的位置（判断是否强约束）
+  grep -n 'AM_ICONV\|require_iconv' configure.ac
+  # 3) 打补丁后 configure 应打印 require_iconv=no / 不再探测 libiconv
+  ./configure … && grep -n 'iconv' config.log | head
+
+rec_priority:           1
+rec_approach:           map-ohos-into-upstream-android-os-branch
+rec_description: >
+  在 configure（或 configure.ac）的系统分支里，把 `*-linux-ohos*` 与
+  `*-linux-android*` 并列写入同一分支，使 OHOS 继承该分支的既有决策
+  （典型为 `require_iconv=no`、`build_wks_tools=no` 等）。这样避免新增依赖，
+  也避免运行期 libiconv 符号重定位失败。
+rec_command: |
+  # 情形 A：仓库里只提交 configure（无 autoreconf 需求，gnupg 即此类）
+  #   直接改 configure 分支行为（本仓 gnupg 的 0003-configure.patch 同时做了 umask 077→022）：
+  #     -    *-linux-android*)
+  #     +    *-linux-android* | *-linux-ohos* | *-unknown-linux-gnu*)
+  #          have_android_system=yes
+  #          require_iconv=no
+  #
+  # 情形 B：能跑 autoreconf 时，改 configure.ac 同一处分支再加 autoreconf -fi
+  # 注意：需先确保 config.sub 已识别 *-linux-ohos*（否则不会进入该分支，
+  #       见 E007 / E268；识别层与策略层是两件事）
+rec_auto_fix:           false
+rec_impl:               portability-patch
+
+fallback_priority:      2
+fallback_approach:      add-real-libiconv-dependency
+fallback_description: >
+  若该工程确实依赖 iconv 做编码转换（例如文本转码类工具），不能关掉时，
+  则正经适配并引入 libiconv 依赖，并注意运行期 `NEEDED libiconv.so` 的
+  解析（OHOS 上须保证依赖 lib 目录进入 LD_LIBRARY_PATH，参见预编译产物
+  RUNPATH 相关条目）。
+fallback_command:       conan list 'libiconv/*' -r=ohpcd
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-edit
+
+forbid_1_pattern:       新增 *-linux-ohos*) 分支却只设 have_android_system=yes 而未同步 require_iconv
+forbid_1_reason:        上游 android 分支的 iconv 决策与该标志成对出现；
+                        只抄一半会留下 require_iconv=yes 的默认值，问题依旧
+forbid_1_consequence:   configure 仍报 You need iconv / 运行期仍链接失败
+
+forbid_2_pattern:       把 iconv 探测失败改写成 warning 后继续|忽略 AM_ICONV 失败
+forbid_2_reason:        若工程真的用 iconv 转换编码，静默忽略会在运行期产生乱码/崩溃，
+                        掩盖问题
+forbid_2_consequence:   缺陷后移，评审拒绝
+
+principles:
+causes:                 []
+caused_by:              [E007]
+similar_to:             [E007, E268]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-autotools-require-iconv-off-via-android-branch.md
+last_updated:           2026-09-19
+source_event:           archives/g/gnupg/2.5.22（PR #9613）：0003-configure.patch 让
+                        *-linux-ohos* 走 android 分支（require_iconv=no），
+                        规避 main 上 2.4.9 记录的 libiconv 运行时链接失败
+authors:                jumping_ggjjkk <jumping_ggjjkk@noreply.gitcode.com>
+source_pr:              9613
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-19
+
+draft:                  true
