@@ -1,0 +1,217 @@
+--- a/ui_gl.c
++++ b/ui_gl.c
+@@ -63,21 +63,24 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <string.h>
+ #include <math.h>
+ #include <pthread.h>
+ #include <assert.h>
+ 
+ #include "pugl/pugl.h"
+ 
+-#ifdef __APPLE__
++#ifdef RTK_GLES
++/* OpenGL ES presentation (HarmonyOS/EGL): no glu.h, no fixed-function GL */
++#include "gl/gles_present.h"
++#elif defined(__APPLE__)
+ #include "OpenGL/glu.h"
+ #else
+ #include <GL/glu.h>
+ #endif
+ 
+ #ifndef GL_BGRA
+ #define GL_BGRA 0x80E1 // GL_BGRA_EXT
+ #endif
+ #ifndef GL_RGBA8
+ #define GL_RGBA8 GL_RGBA
+@@ -96,20 +99,21 @@
+ 
+ #define ROBTK_MOD_SHIFT PUGL_MOD_SHIFT
+ #define ROBTK_MOD_CTRL PUGL_MOD_CTRL
+ #include "gl/posringbuf.h"
+ #include "robtk.h"
+ 
+ #ifdef WITH_SIGNATURE
+ # include "gpg_init.c"
+ #endif
+ 
++#ifndef RTK_GLES /* desktop GL presentation; GLES version lives in gl/gles_present.h */
+ static void opengl_init () {
+ 	glClearColor (0.0f, 0.0f, 0.0f, 0.0f);
+ 	glDisable (GL_DEPTH_TEST);
+ 	glEnable (GL_BLEND);
+ 	glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+ 	glEnable (GL_TEXTURE_RECTANGLE_ARB);
+ }
+ 
+ static void opengl_draw (int width, int height, unsigned char* surf_data, unsigned int texture_id) {
+ 	if (!surf_data) { return; }
+@@ -153,20 +157,21 @@
+ 	glClear (GL_COLOR_BUFFER_BIT);
+ 
+ 	glDeleteTextures (1, texture_id);
+ 	glGenTextures (1, texture_id);
+ 	glBindTexture (GL_TEXTURE_RECTANGLE_ARB, *texture_id);
+ 	glTexImage2D (GL_TEXTURE_RECTANGLE_ARB, 0, GL_RGBA8,
+ 			width, height, 0,
+ 			GL_BGRA, GL_UNSIGNED_BYTE, NULL);
+ 	glTexEnvi (GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_DECAL);
+ }
++#endif /* !RTK_GLES */
+ 
+ static cairo_t* opengl_create_cairo_t (int width, int height, cairo_surface_t** surface, unsigned char** buffer)
+ {
+ 	cairo_t* cr;
+ 	const int bpp = 4;
+ 
+ 	*buffer = (unsigned char*) calloc (bpp * width * height, sizeof (unsigned char));
+ 	if (!*buffer) {
+ 		fprintf (stderr, "robtk: opengl surface out of memory.\n");
+ 		return NULL;
+@@ -186,20 +191,24 @@
+ 		fprintf (stderr, "robtk: cannot create cairo context\n");
+ 		return NULL;
+ 	}
+ 
+ 	return cr;
+ }
+ 
+ /*****************************************************************************/
+ 
+ #include "gl/xternalui.h"
++
++#ifdef RTK_GLES
++#include "gl/ohosui.h"
++#endif
+ 
+ typedef struct {
+ 	PuglView*            view;
+ 	LV2UI_Resize*        resize;
+ 	LV2UI_Write_Function write; // unused for now
+ 	LV2UI_Controller     controller; // unused for now
+ 	PuglNativeWindow     parent; // only valud during init
+ 	bool                 ontop;
+ 	unsigned long        transient_id; // X11 window ID
+ 
+@@ -1004,24 +1013,26 @@
+ 			}
+ 			break;
+ 		case LVGL_TOP_LEFT:
+ 			{
+ 	self->xoff = 0; self->yoff = 0; self->xyscale = 1.0;
+ 	glViewport (0, (height - self->height), self->width, self->height);
+ 			}
+ 			break;
+ 	}
+ 
+-	glMatrixMode (GL_PROJECTION);
+-	glLoadIdentity ();
+-	glOrtho (-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
+-	queue_draw_full(self->tl);
++#ifndef RTK_GLES
++		glMatrixMode (GL_PROJECTION);
++		glLoadIdentity ();
++		glOrtho (-1.0f, 1.0f, -1.0f, 1.0f, -1.0f, 1.0f);
++#endif
++		queue_draw_full(self->tl);
+ }
+ 
+ /*****************************************************************************/
+ /* puGL callbacks */
+ 
+ static void onGlInit (PuglView *view) {
+ 	GLrobtkLV2UI* self = (GLrobtkLV2UI*)puglGetHandle(view);
+ #ifdef DEBUG_UI
+ 	printf("OpenGL version: %s\n", glGetString (GL_VERSION));
+ 	printf("OpenGL vendor: %s\n", glGetString (GL_VENDOR));
+@@ -1579,25 +1590,29 @@
+ 	}
+ 
+ 	if (self->transient_id != 0) {
+ 		self->ontop = false;
+ 	}
+ 
+ 	if (getenv("X42_ON_TOP")) {
+ 		self->ontop = 0 != atoi (getenv("X42_ON_TOP"));
+ 	}
+ 
++#ifndef RTK_OFFSCREEN
+ 	if (!self->parent && !self->extui) {
+ 		fprintf(stderr, "error: No parent window provided.\n");
+ 		free(self);
+ 		return NULL;
+ 	}
++#endif
++	/* RTK_OFFSCREEN (HarmonyOS/EGL): an absent parent window means the UI
++	 * is rendered into an offscreen pbuffer instead of a native window. */
+ 
+ 	self->ui_closed = NULL;
+ 	self->close_ui = FALSE;
+ 	self->rb = posrb_alloc(sizeof(RWArea) * 48); // depends on plugin and threading stategy
+ 
+ #ifdef WITH_SIGNATURE
+ 	self->gpg_shade = 0;
+ # include "gpg_check.c"
+ #endif
+ 
+@@ -1748,28 +1763,58 @@
+  */
+ 
+ #ifdef HAVE_IDLE_IFACE
+ #ifdef USE_GUI_THREAD
+ static const LV2UI_Idle_Interface idle_iface = { idle };
+ #else
+ static const LV2UI_Idle_Interface idle_iface = { process_gui_events };
+ #endif
+ #endif
+ 
++#ifdef RTK_GLES
++static PuglView*
++rtk_ohos_ui_view(LV2UI_Handle handle)
++{
++	GLrobtkLV2UI* self = (GLrobtkLV2UI*)handle;
++	return self ? self->view : NULL;
++}
++
++static int
++rtk_ohos_ui_grab_frame(LV2UI_Handle handle, int* width, int* height, unsigned char* rgba)
++{
++	GLrobtkLV2UI* self = (GLrobtkLV2UI*)handle;
++	if (!self || !self->view) {
++		return -1;
++	}
++	return puglGrabFrame(self->view, width, height, rgba);
++}
++
++static const RTKOhosUi ohos_ui_iface = {
++	RTK_OHOS_UI_ABI,
++	rtk_ohos_ui_view,
++	rtk_ohos_ui_grab_frame
++};
++#endif
++
+ static const void*
+ gl_extension_data(const char* uri)
+ {
+ #ifdef HAVE_IDLE_IFACE
+ 	if (!strcmp(uri, LV2_UI__idleInterface)) {
+ 		return &idle_iface;
+ 	} else
+ #endif
++#ifdef RTK_GLES
++	if (!strcmp(uri, RTK_OHOS_UI_URI)) {
++		return &ohos_ui_iface;
++	} else
++#endif
+ 	return extension_data(uri);
+ }
+ 
+ static const LV2UI_Descriptor gl_descriptor = {
+ 	RTK_URI RTK_GUI "_gl",
+ 	gl_instantiate,
+ 	gl_cleanup,
+ 	gl_port_event,
+ 	gl_extension_data
+ };
