@@ -1,0 +1,83 @@
+# ═══ Draft knowledge entry — 设备强制 ELF 签名拦截 conan 下载依赖库：消费者测试运行期 dlopen EPERM，须本机 binary-sign-tool selfSign 重签缓存 ═══
+# Timestamp: 2026-09-22
+# Software: dmenu 5.4（通用：任何"产物为可执行文件、其 DT_NEEDED 指向 conan 下载的共享库、
+#           且 test_package 在设备上真实执行该产物"的包）
+# Gate: conan-verify G2（conan create 含 test_package 运行）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id: DRAFT-dmenu-5.4-downloaded-deps-codesign-device-enforced
+title: 设备强制校验 ELF .codesign 签名（CI worker 不强制）：conan 下载的依赖库若签名不受本机信任，消费者测试运行期加载即 EPERM（musl 报 "Error loading shared library"，直接 exec 报 "Operation not permitted"）；对本机 CONAN_HOME 缓存内被拦依赖逐个 llvm-objcopy 去旧 .codesign 段 + binary-sign-tool sign -selfSign 1 重签 + chmod a+x 即放行
+trigger_tool: conan|musl|ld-musl|binary-sign-tool|llvm-objcopy|llvm-readelf
+phase: runtime|testing
+error_signature: 'Error loading shared library lib[\w+.-]+\.so[\d.]*: \(needed by|Error relocating .+ symbol not found|Operation not permitted'
+severity: 2
+category: platform|security|linking|runtime|conan
+root_cause: 'OHOS PC 设备侧加载器对共享库按 .codesign 签名做内容级放行（经验汇总实测先例：设备强制、CI worker 不强制），且放行与文件路径无关、按文件内容哈希/签名判定——本机 clang 新链接的产物自带 ad-hoc 签名段可直接加载，但 conan download/install 落入本机缓存的制品库来自不同构建机/签名链，其 .codesign 不被本机信任 ⇒ 消费者可执行文件（本机自编、能加载）的 DT_NEEDED 指到这些库时，musl 加载器报 "Error loading shared library libX.so.N: (needed by …)"，即使该库确实就在 LD_LIBRARY_PATH 目录里；同目录自编库正常加载是判别特征（文件级拦截，非路径级）。同文件直接 exec 报 "Operation not permitted"（EPERM）交叉印证。E077 只覆盖"配方自身产物打包后重签"，本条覆盖的是"依赖侧制品在本机消费者测试运行期被拦"这一独立场景。'
+affected_scope: |-
+  任何满足以下全部条件的包：①产物为可执行文件（application/tool 型）；
+  ②其 DT_NEEDED 指向 conan 制品仓下载的共享库（无静态 .a 可静态链接时必现）；
+  ③test_package 在鸿蒙 PC 设备上真实执行该产物（R34 实质测试要求）。
+  不适用：纯库包（产物不被执行）、CI 侧验证（worker 不强制签名，见 catch2/2.13.10-r0 先例）、
+  依赖带静态库可供 -l:xxx.a 全静态链接的包。
+verification_cmd: |-
+  # 1) 判别"文件级拦截"而非"路径级找不到"：同一 LD_LIBRARY_PATH 目录里自编库能加载、下载库报
+  #    Error loading shared library libX.so.N: (needed by <bin>)
+  LD_LIBRARY_PATH=<conan 依赖 lib 目录们> <包内可执行文件> -v   # rc=127，缺符号刷屏
+  # 2) 直接 exec 被拦库交叉印证（EPERM=签名不受信；能 exec 的库静默或“不是可执行格式”）
+  <lib 目录>/libfontconfig.so.1      # Operation not permitted
+  # 3) 签名段核对：被拦库与放行库都有 .codesign 段（占位/他机签名），区别在是否被本机信任
+  llvm-readelf -S <lib> | grep codesign
+  # 4) 修复：对每个被拦依赖库（真实文件，非符号链接）执行
+  llvm-objcopy --remove-section .codesign <lib>
+  LD_LIBRARY_PATH= binary-sign-tool sign -inFile <lib> -outFile <lib> -selfSign 1
+  chmod a+x <lib>
+  # 5) 复跑同一命令：rc=0 且输出正确（本例 dmenu -v => "dmenu-5.4"）
+rec_approach: 'local-conan-cache-codesign-resign-selfsign：对本机任务 CONAN_HOME 缓存内被设备签名门拦下的依赖 .so 副本，按 E077 四步自签放行（依赖侧变体，无 ELF 改写步）——边界仅限该缓存副本，配方与制品仓零改动、交付产物不变；CI worker 不强制签名校验，CI 侧无需也不应复刻。仅是本机跑通消费者测试的前置条件，不构成对包缺陷的修复'
+rec_description: '设备侧对共享库 .codesign 段做内容级签名校验（CI worker 不强制），当 conan 从制品仓下载、落入本机缓存的依赖库其签名不受本机信任时，本机自编消费者可执行文件在运行期加载该库被拒；解法是按 E077 四步（去旧 .codesign 段 → 重签 → 恢复权限）对本机任务 CONAN_HOME 缓存内的被拦 .so 副本逐个 selfSign 重签。边界——配方、制品仓与交付产物零改动，终端用户下载该制品在设备上仍会撞同一道签名门，故本条的价值在诊断面（error_signature 与“文件级拒载 vs 路径级缺失”的判别），不在 rec 面；rec_auto_fix 只能为 false，属 manual 操作，不构成对该包缺陷的修复。判别要点——同一 LD_LIBRARY_PATH 目录里本机新链接的 libX11.so.6 能加载、下载的 libfontconfig.so.1 被拒，直接 exec 该 .so 报 Operation not permitted，即文件级内容拒载而非路径缺失；与“SONAME 文件在包里根本不存在”的 E274/E316 族不同根因。'
+rec_command: '① llvm-objcopy --remove-section .codesign <被拦库真实文件，非符号链接>；② LD_LIBRARY_PATH= binary-sign-tool sign -inFile <lib> -outFile <lib> -selfSign 1；③ chmod a+x <lib>（签名后权限归零，必须恢复）；④ 复跑同一消费者命令确认真跑通（本例 LD_LIBRARY_PATH=<conan 依赖 lib 目录> dmenu -v 输出 dmenu-5.4、rc=0）——①～③ 逐库循环，dmenu 实测对象为任务缓存内 36 个制品 .so，改动全部落在本机可重建的 CONAN_HOME 缓存副本'
+match_keywords: Error loading shared library, Operation not permitted, needed by, codesign, .codesign,
+  binary-sign-tool, selfSign, ELF 签名, 消费者测试, test_package 运行期, dlopen EPERM,
+  conan 下载依赖, musl 加载器, LD_LIBRARY_PATH, 符号 not found, 设备强制
+keywords: OHOS 代码签名, 签名信任链, 内容哈希放行, conan 缓存重签, llvm-objcopy remove-section,
+  application 包运行期, 消费者可执行文件, 制品仓下载库, 设备 vs CI 签名策略差异
+prescan_pattern: 'package_type\s*=\s*"application"|cpp_info\.bindirs|test\(\).*conanrun'
+prescan_globs: "**/conanfile.py, **/test_package/conanfile.py, **/test_package/test.sh"
+safety_boundary: |-
+  ①只签"本机 CONAN_HOME 缓存内的制品副本"，绝不改制品仓/配方/他人缓存——conan 缓存可随时
+  重下重建，本操作与 CI 无关（CI worker 不强制，签不签都能跑）。
+  ②签名后权限会归零，必须 chmod 恢复可执行位（E077 四步顺序不可变）。
+  ③binary-sign-tool 调用时要剔除 LD_LIBRARY_PATH（否则加载工具链运行时库失败，
+  _ZNSt3__h* 符号全缺——E077 已录）。
+  ④先 objcopy 去旧 .codesign 再签，否则报 ".codesign section already exists"。
+  ⑤若包可全静态链接（依赖有 .a），优先静态链接绕开整个运行期签名议题（R26 同源思路）。
+similar_to: |-
+  draft-review 实测 TOP3（2026-09-22）：E274 0.59（sig=0.89）/ E316 0.47 / E186 0.46，
+  未及 merge-into 0.55。**E274/E316 高分来自 musl 报错文本相同**，但根因不同族：
+  E274=打包漏建 SONAME 符号链接（文件真的不存在，修法=package() 补 symlink）、
+  E316=移动包后 SONAME 实体缺失（同为文件缺失族）；本条**文件存在且路径可达**，
+  被设备签名门按内容拒载（判别特征=同目录自编库放行 + 直接 exec EPERM +
+  .codesign 段俱在），修法=本机重签而非补文件。E077（自身产物重签，工具链同源）、
+  E083（JDK native 库自签）为相邻场景。按"症状同、根因/解法不同 ⇒ create"口径申报，
+  判别要点已写进草稿的误诊对照表。
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-dmenu-5.4-downloaded-deps-codesign-device-enforced.md
+last_updated: 2026-09-22
+source_event: |-
+  dmenu 5.4 配方（本 PR）conan-verify G2：编译/链接/安装全过，test_package 运行期
+  dmenu 报 Error relocating ... FcCharSetCreate/XftFontMatch: symbol not found（刷屏）。
+  排障路径：①conanrun.sh 无 LD_LIBRARY_PATH（补 VirtualRunEnv）；②手动注入依赖 lib 目录
+  后 libX11.so.6 可加载、libfontconfig.so.1/libXft.so.2 仍报 Error loading shared library
+  （同目录文件级差异，路径级解释不成立）；③被拦库直接 exec 报 Operation not permitted，
+  readelf 见三库 .codesign 段俱在；④按 E077 四步对任务 CONAN_HOME 缓存内 36 个制品 .so
+  逐个重签（signed=36 failed=0）后 LD_LIBRARY_PATH 下 dmenu -v 输出 "dmenu-5.4" rc=0；
+  ⑤补 VirtualRunEnv 后 conan-verify 全绿，消费者测试 4/4 PASS。
+  证据：archives/d/dmenu/5.4/reports/conan-create.log（PASS 1-4）、
+  ~/tmp/uc2/dmenu-5.4/conan-verify.log（rc 历史 2→2→0）。
+authors: DS-33
+source_pr: dmenu 5.4 交付 PR（本 PR 原子提交本草稿）
+source_commit: fe6c5a0c48
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-22
