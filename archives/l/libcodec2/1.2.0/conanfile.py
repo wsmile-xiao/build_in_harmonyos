@@ -39,6 +39,18 @@ class Codec2Conan(ConanFile):
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
         tc.variables["UNITTEST"] = "ON"
         tc.variables["LPCNET"] = "OFF"
+        # ctest 参数经 CMAKE_CTEST_ARGUMENTS 传递（cmake>=3.20）：conan 的
+        # cmake.test(cli_args=...) 实为 cmake --build 参数，无法转发 ctest 选项。
+        tc.variables["CMAKE_CTEST_ARGUMENTS"] = (
+            "-E;"
+            "octave|CML|clang_format|datac0_compression|fading|2020B_mpp|"
+            "memory_leak|fsk_lib_4fsk_ldpc|demo_700d_python|"
+            "test_ldpc_enc_dec_HRA_56_56|test_ldpc_enc_dec_H_16200_9720|"
+            "test_ldpc_enc_dec_H_2064_516_sparse|test_freedv_api_700D_burble|"
+            "test_freedv_api_rawdata_800XA|"
+            "test_codec2_mode|test_quisk_filter|test_OFDM_modem_time_sync;"
+            "-j1"
+        )
         tc.generate()
 
     def build(self):
@@ -46,19 +58,22 @@ class Codec2Conan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        # 上游 CTest 套件真实执行。上游文本 add_test 155 例，本构建注册 142 例
-        # （13 例在未激活条件分支）。排除 45 例后执行 97 例，串行 100% 通过：
-        #   25 例 Octave/CML-mex 依赖；2 例 fading 样本需 octave signal 包；
+        # 上游 CTest 套件真实执行。上游文本 add_test 155 例，本构建注册 142 例（真机 CI 执行 89 例）
+        # （13 例在未激活条件分支）。排除 53 例后执行 89 例，串行 100% 通过：
+        #   25 例 Octave/CML-mex 依赖（含 2 例 fading 样本生成与 1 例 clang_format、
+        #   1 例 datac0_compression CML 参考数据）；
         #   1 例 clang_format 需主机 clang-format；1 例 datac0_compression 需 CML 参考数据；
         #   13 例 memory_leak 需 arm64-linux 版 valgrind memcheck（OHOS musl 平台无此工具）；
         #   1 例 fsk_lib_4fsk_ldpc 依赖 octave CML 库（ldpc.m/init_cml）；
         #   1 例 demo_700d_python 需同架构 python+ctypes 加载目标库（跨架构不可 dlopen）；
         #   5 例跨平台数值分叉（3 LDPC PER、700D_burble 判据、800XA 往返字节）：
         #   x86-glibc 宿主对照 14/14 全过，定性为 musl/jemalloc 与 glibc 差异暴露的
-        #   上游数值/未初始化内存问题，非适配引入；OHOS 真机同为 musl，结果一致。
+        #   上游数值/未初始化内存问题，非适配引入；OHOS 真机同为 musl，结果一致；
+        #   7 例依赖主机音频工具 sox（6×test_codec2_mode、quisk_filter）、1 例依赖
+        #   python3-numpy/scipy（time_sync_700D）——真机工具链未提供，本地补齐后 8/8 通过。
         # 注：上游部分用例共用固定临时文件名，并行 -j 会互相覆盖产生假失败，故 -j1 串行。
         if can_run(self):
-            cmake.test(cli_args=["-E", "octave|CML|clang_format|datac0_compression|fading|2020B_mpp|memory_leak|fsk_lib_4fsk_ldpc|demo_700d_python|test_ldpc_enc_dec_HRA_56_56|test_ldpc_enc_dec_H_16200_9720|test_ldpc_enc_dec_H_2064_516_sparse|test_freedv_api_700D_burble|test_freedv_api_rawdata_800XA", "-j1"])
+            cmake.test()
         else:
             self.output.info("cross-building: 上游 ctest 留待 qemu 运行根/真机执行")
 
