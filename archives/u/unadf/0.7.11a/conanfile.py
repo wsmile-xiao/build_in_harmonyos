@@ -97,8 +97,14 @@ class UnadfConan(ConanFile):
         # gnu99 and silence the prototype/implicit-decl diagnostics that modern
         # clang promotes. -fcommon keeps the tentative globals in the 2006
         # headers linkable under clang's -fno-common default.
+        #
+        # CFLAGS is passed as a make variable assignment, so its value must be
+        # one shell word: self.run() goes through a shell and would otherwise
+        # split "-O2 -fcommon ..." into separate argv entries that make reads
+        # as invalid options.
         cflags = "-O2 -fcommon -std=gnu99 -Wno-strict-prototypes"
-        common = f"CC={cc} AR={ar} RANLIB={ranlib} DEPEND= CFLAGS={cflags}"
+        common = (f"CC={cc} AR={ar} RANLIB={ranlib} DEPEND= "
+                  f"CFLAGS='{cflags}'")
 
         # R9: -j1 only.
         self.run(f"make -C Lib {common} -j1", cwd=self.source_folder)
