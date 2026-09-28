@@ -1,0 +1,70 @@
+# ═══ Draft knowledge entry — GUI 应用编译期绝对数据路径（PKGDATADIR）在 OHOS conan 包内不可解析 → 应用内环境变量覆盖（默认回退）═══
+# Timestamp: 2026-09-27
+# Software: gnutrition 0.33（Conan 适配）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-gnutrition-0.33-app-datadir-env-override
+trigger_tool:           conan|configure|make|clang|runtime
+phase:                  packaging|runtime
+error_signature:        cannot open database.*food\.db|unable to open database file|
+                         GNUTRITION_DATADIR|//share/|/share/.*/food\.db
+severity:               2
+category:               packaging, conan, runtime, data-files, application, gtk
+match_keywords:         GNUTRITION_DATADIR, PKGDATADIR, pkgdatadir, DATADIR, food.db, 数据路径,
+                         GUI 应用, GTK, snprintf, 编译期绝对路径, 环境变量覆盖, getenv, 默认回退
+title:                  GUI 应用把数据目录编死成编译期宏（PKGDATADIR）再用 snprintf 拼数据文件时，
+                        OHOS conan 包内路径不可解析；应用内须加环境变量覆盖（默认回退编译期值）
+
+root_cause:             上游 main.c 用编译期宏 GNUTRITION_DATADIR（= $datadir/gnutrition，
+                        configure --prefix=/ 时成为 "//share/gnutrition"）直接 snprintf 拼 food.db
+                        绝对路径。conan 打包后数据实际位于 <package_folder>/share/gnutrition，
+                        不在 "/" 下，运行时不设任何变量则 db_open 失败退出 1：
+                        "cannot open database '//share/gnutrition/food.db'"。
+                        与库场景（E546 gupnp-av / libint2 草稿）不同：GUI 应用没有 cpp_info 消费者
+                        注入点（cpp_info.defines / runenv_info 只对链接它的库/程序生效），
+                        修复只能在应用源码内完成 —— getenv 覆盖 + 空值回退编译期默认。
+
+affected_scope:         带数据文件（food.db / .xsd / .dtd / locale / 资源）且用编译期
+                        PKGDATADIR/DATADIR 宏 + 绝对路径拼接的 GUI/CLI 应用（GTK/Qt 等），
+                        尤其 configure --prefix=/ 打包的 OHOS conan 场景；
+                        同触发类的库侧方案见 E546（runenv_info.define_path）与
+                        libint2 草稿（cpp_info.defines），应用侧需本方案。
+
+verification_cmd:       GTK_BACKEND=broadway GNUTRITION_DATADIR=<pkg>/share/gnutrition XDG_DATA_HOME=<tmp> \
+                        <pkg>/bin/gnutrition  → 无 "cannot open database"（越过 sqlite3 数据层）；
+                        GNUTRITION_DATADIR=/nonexistent ... → 报错含 /nonexistent/food.db（覆盖生效）；
+                        不设变量 → 报错含 //share/gnutrition/food.db（默认回退保持）。
+                        test_package/harmonyos_specific_test.c 三用例实测 3/3 PASS（OHOS aarch64）。
+
+rec_priority:           1
+rec_approach:           in-app-env-override-with-default-fallback
+rec_description:        应用源码里把数据路径改为：getenv("GNUTRITION_DATADIR") 非空则用之，
+                        否则回退编译期 GNUTRITION_DATADIR 宏；配 3 用例运行探针（有效/无效/未设置）
+                        验证覆盖与回退双向语义。适用于所有带 PKGDATADIR 拼接的 GUI 应用。
+rec_command:            |
+  static char food_db_full_path[1024];
+  const char *datadir = getenv ("GNUTRITION_DATADIR");
+  if (datadir == NULL || *datadir == '\0')
+    datadir = GNUTRITION_DATADIR;
+  snprintf(food_db_full_path, sizeof(food_db_full_path), "%s/food.db", datadir);
+  db_path = food_db_full_path;
+rec_auto_fix:           false
+rec_impl:               in-app-getenv-datadir-override
+
+fallback_priority:      2
+fallback_approach:      install-to-share-path
+fallback_description:   把包内数据安装到编译期路径对应的位置（本场景 "/share/gnutrition"）——
+                        OHOS 系统分区只读不可行；仅适用于可写前缀场景，不推荐。
+fallback_command:       ""
+fallback_auto_fix:      false
+fallback_impl:          n/a
+
+forbid_1_pattern:       测试直接读源码树 data|test.*\.\./.*/food\.db|GNUTRITION_DATADIR=.*source
+forbid_1_reason:        让测试读构建期源码树数据，等于绕过"打包是否完整"与"运行期寻址是否断裂"的验证
+forbid_1_consequence:   包内数据缺失（漏装 share/）不会被发现，问题转移到真实用户
