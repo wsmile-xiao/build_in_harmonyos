@@ -58,19 +58,20 @@ class Codec2Conan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        # 上游 CTest 套件真实执行。上游文本 add_test 155 例，本构建注册 142 例（真机 CI 执行 89 例）
-        # （13 例在未激活条件分支）。排除 53 例后执行 89 例，串行 100% 通过：
-        #   25 例 Octave/CML-mex 依赖（含 2 例 fading 样本生成与 1 例 clang_format、
-        #   1 例 datac0_compression CML 参考数据）；
-        #   1 例 clang_format 需主机 clang-format；1 例 datac0_compression 需 CML 参考数据；
+        # 上游 CTest 套件真实执行。上游文本 add_test 155 例，本构建注册 142 例
+        # （13 例在未激活条件分支），排除 54 例后执行 88 例，串行 100% 通过
+        # （qemu + OHOS musl 运行根实测：100% tests passed, 0 tests failed out of 88）：
+        #   25 例 Octave/CML-mex/fading 样本/clang_format/CML 参考数据依赖
+        #   （OHOS 无 Octave 生态与主机 clang-format 工具）；
         #   13 例 memory_leak 需 arm64-linux 版 valgrind memcheck（OHOS musl 平台无此工具）；
         #   1 例 fsk_lib_4fsk_ldpc 依赖 octave CML 库（ldpc.m/init_cml）；
         #   1 例 demo_700d_python 需同架构 python+ctypes 加载目标库（跨架构不可 dlopen）；
         #   5 例跨平台数值分叉（3 LDPC PER、700D_burble 判据、800XA 往返字节）：
         #   x86-glibc 宿主对照 14/14 全过，定性为 musl/jemalloc 与 glibc 差异暴露的
         #   上游数值/未初始化内存问题，非适配引入；OHOS 真机同为 musl，结果一致；
-        #   7 例依赖主机音频工具 sox（6×test_codec2_mode、quisk_filter）、1 例依赖
-        #   python3-numpy/scipy（time_sync_700D）——真机工具链未提供，本地补齐后 8/8 通过。
+        #   9 例依赖主机工具：sox×8（7×test_codec2_mode、quisk_filter）、
+        #   python3-numpy/scipy×1（test_OFDM_modem_time_sync_700D）——真机工具链
+        #   未提供，本地补齐工具后 9/9 通过（补充验证）。
         # 注：上游部分用例共用固定临时文件名，并行 -j 会互相覆盖产生假失败，故 -j1 串行。
         if can_run(self):
             cmake.test()
