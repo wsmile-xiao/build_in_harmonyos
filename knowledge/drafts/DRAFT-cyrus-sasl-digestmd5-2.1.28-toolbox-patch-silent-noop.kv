@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-cyrus-sasl-digestmd5-2.1.28-toolbox-patch-silent-noop -
+# 本机 CLI patch 是 toybox 极简实现：对 diff --git/hunk 补丁静默 no-op，
+# rc=0 且打印 "patching <file>"，源码实际未改 —— 补丁有效性证据必须来自
+# Conan patch_ng / 真实构建，而不是本机 patch 的退出码。
+#
+# 场景: cyrus-sasl-digestmd5 2.1.28（autotools）适配中对
+#       config/config.guess、utils/testsuite.c 打补丁：`patch -p1
+#       --dry-run` 与 `patch -p1` 均 rc=0 并打印 "patching
+#       config/config.guess"，但随后 `diff -u <orig> <work>` 为空、
+#       configure 依旧报 "cannot guess build type"；`patch --version`
+#       显示 toybox 0.8.12（非 GNU patch）。
+# 适用: 所有在 OHOS 设备/精简系统上做 autotools 或源码补丁类适配的
+#       流程；以及"补丁应用成功"类证据的判定口径。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-cyrus-sasl-digestmd5-2.1.28-toolbox-patch-silent-noop
+source_lib:             cyrus-sasl-digestmd5 2.1.28
+trigger_tool:           patch
+phase:                  configuration
+error_signature:        patching [A-Za-z0-9_./-]+|patch -p1.*rc=0 而源码未变|toybox 0\.8\.12|cannot guess build type 仍复现
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               autotools, patch, toolchain, portability, verification
+match_keywords:         toybox patch, busybox patch, diff --git, hunk header, silent no-op, patch rc=0, patching <file>, config.guess, cannot guess build type, apply_conandata_patches, patch_ng, 补丁未生效, 假成功, 验证证据, dry-run, strip, p1, HMOS 精简 patch, verification integrity
+title:                  本机 CLI patch 为 toybox 实现时对 diff --git 补丁静默 no-op（rc=0 但源码未改），补丁有效性须以 Conan patch_ng/真实构建为证据
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             设备精简环境的 `patch` 指向 toybox 0.8.12：它只解析 `---/+++` 的文件名，不实现 `diff --git` 头与 `@@ -a,b +c,d @@` hunk 区间语义，遇到不认识的补丁内容时既不报错也不落盘（源码文件 mtime 被更新但内容与原文一致），并返回 0 并打印 "patching <file>"；因此"patch 成功"这一信号在本机完全不可信，据此判断会得到"补丁已应用"的假结论（cyrus-sasl 2.1.28 的 config.guess/config.sub 补丁与 utils/testsuite.c 补丁都踩到）。Conan 的 apply_conandata_patches 走自身 patch_ng（纯 Python）实现，应用正常，故同一补丁在 conan create 中生效而在本机 CLI 下"无效"。
+affected_scope:         所有在 OHOS 设备/精简系统上以 CLI patch 验证或应用源码补丁的流程（autotools config.guess/config.sub、测试源码可移植性补丁、conandata patches 的本地预验证），以及任何把"工具退出码 0"直接当作"操作已生效"证据的判定环节。同类风险：busybox patch、精简 grep/sed 的扩展语义缺失。
+verification_cmd:       判定补丁是否真的应用：(1) `diff -u <pristine> <patched>` 必须非空且与补丁内容一致；(2) Python 侧 `from patch_ng import fromfile; fromfile(p).apply(strip=1, root=copy_dir)` 返回 True 且目标文件含预期改动；(3) 端到端以真实构建为准——conan create 日志出现 `Apply patch (…)` 且 configure 输出预期三元组（本例 `checking build system type... aarch64-unknown-linux-ohos`）。禁止仅凭 `patch` 的 rc 作为证据。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           patch-evidence-via-patch-ng-and-real-build
+rec_description:        本地勘探阶段改源码时使用字节级编辑（python 精确替换，保持行尾空白）或 Conan patch_ng 应用补丁；补丁有效性证据固定为三选其一：与 pristine 的 diff 内容比对、patch_ng 逐条 apply 结果、conan create 中 configure/编译的真实读数。交付物中的补丁仍由 refresh-patch --auto 生成并由 patch_ng 验证。
+rec_command:            python3 - <<'PY'
+from patch_ng import fromfile
+ps = fromfile("archives/c/cyrus-sasl-digestmd5/2.1.28/patches/0002-config-config.guess.patch")
+print("apply =", ps.apply(strip=1, root="/tmp/pristine-copy"))
+PY
+rec_auto_fix:           false
+rec_impl:               procedure
+
+fallback_priority:      2
+fallback_approach:      byte-level-source-edit
+fallback_description:   无法引入 patch_ng 时，用 python 以字节为单位定位唯一匹配片段并替换（不用会规范化空白的编辑器/工具），再用 `diff -u` 与 pristine 比对确认改动范围最小。
+fallback_command:       python3 -c "p='config/config.guess'; d=open(p,'rb').read(); assert d.count(old)==1; open(p,'wb').write(d.replace(old,new))"
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       仅凭\s*patch\s+-p1\s+.*rc=0\s*(判定|认为).*(补丁|patch).*(已|成功)应用
+forbid_1_reason:        本机 patch 可能是 toybox/busybox 实现，对 diff --git/hunk 静默 no-op，rc=0 与"已应用"不等价
+forbid_1_consequence:   补丁未生效却宣称已应用 → configure/编译在后续环节失败，定位成本高且证据链失真
+forbid_2_pattern:       sed\s+-i.*(config\.guess|config\.sub|testsuite\.c)
+forbid_2_reason:        直接 sed 原地改源码且不留补丁，distclean/重新解包后丢失，无法复现
+forbid_2_consequence:   归档不可复现，CI 干净环境下失败
+
+principles:             P011, P003
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E129]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-cyrus-sasl-digestmd5-2.1.28-toolbox-patch-silent-noop.md
+last_updated:           2026-09-26
+source_event:           cyrus-sasl-digestmd5 2.1.28 适配：patch -p1 rc=0 但 diff 为空、configure 仍报 cannot guess build type，patch --version = toybox 0.8.12
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ran (feat/cyrus-sasl-digestmd5-2.1.28)
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-26
