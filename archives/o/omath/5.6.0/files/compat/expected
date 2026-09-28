@@ -1,0 +1,200 @@
+// OHOS PC 工具链兼容垫片：libc++ 15（clang 15.0.4 / ohos-sdk_26.0.0.18，_LIBCPP_VERSION 15004）
+// 没有 <expected>（<expected> 是 libc++ 16 才落地的 C++23 库特性，本设备与 CI worker 的 SDK 均为 15.0.4）。
+// 本文件以「同名头文件」形式挂进 -I 搜索路径（用户 -I 先于系统头搜索），使 omath 上游的
+// #include <expected> 落到本实现，无需改动上游任何一行源码。
+//
+// 实现范围：omath 5.6.0 实际用到的 expected 构造/观察器/比较（std::expected<T,E>，
+// 无 expected<void>、无 and_then/transform 单子成员）。
+// 存储用 std::optional<T> + std::optional<E>（不用 std::variant：libc++15 的 variant 析构
+// 不是 constexpr，会破坏上游 `static_assert(base64_decode(..).has_value())` 这类常量求值用例；
+// optional 的析构在 libc++15 中是 constexpr，已实测通过）。
+// 若目标平台的 libc++ 已原生提供 <expected>，请勿再使用本垫片。
+#pragma once
+
+#include <exception>
+#include <optional>
+#include <type_traits>
+#include <utility>
+
+namespace std
+{
+inline namespace omath_compat
+{
+
+template<class E>
+class unexpected
+{
+public:
+    using error_type = E;
+
+    constexpr explicit unexpected(const E& error) noexcept(is_nothrow_copy_constructible_v<E>)
+        : m_error(error)
+    {
+    }
+    constexpr explicit unexpected(E&& error) noexcept(is_nothrow_move_constructible_v<E>)
+        : m_error(std::move(error))
+    {
+    }
+
+    [[nodiscard]] constexpr const E& error() const& noexcept { return m_error; }
+    [[nodiscard]] constexpr E& error() & noexcept { return m_error; }
+    [[nodiscard]] constexpr E&& error() && noexcept { return std::move(m_error); }
+
+private:
+    E m_error;
+};
+
+template<class E>
+unexpected(E) -> unexpected<E>;
+
+template<class E>
+[[nodiscard]] constexpr unexpected<decay_t<E>> make_unexpected(E&& error)
+{
+    return unexpected<decay_t<E>>(std::forward<E>(error));
+}
+
+template<class E>
+class bad_expected_access : public exception
+{
+public:
+    explicit bad_expected_access(E error) : m_error(std::move(error)) {}
+    [[nodiscard]] const E& error() const noexcept { return m_error; }
+    [[noreturn]] static void throw_exception(E error) { throw bad_expected_access(std::move(error)); }
+    const char* what() const noexcept override { return "bad expected access"; }
+
+private:
+    E m_error;
+};
+
+template<class T, class E>
+class expected
+{
+    static_assert(!is_same_v<remove_cvref_t<T>, remove_cvref_t<E>>,
+                  "std::expected<T, E> requires T and E to be different types");
+
+public:
+    using value_type = T;
+    using error_type = E;
+
+    // —— 构造 ——
+    constexpr expected() noexcept(is_nothrow_default_constructible_v<T>)
+        requires is_default_constructible_v<T>
+        : m_value(in_place)
+    {
+    }
+
+    template<class U = T, enable_if_t<is_constructible_v<T, U&&>, int> = 0>
+    constexpr expected(U&& value) noexcept(is_nothrow_constructible_v<T, U&&>)
+        : m_value(in_place, std::forward<U>(value))
+    {
+    }
+
+    template<class G, enable_if_t<is_convertible_v<const G&, E>, int> = 0>
+    constexpr expected(const unexpected<G>& error) noexcept(is_nothrow_constructible_v<E, const G&>)
+        : m_error(in_place, error.error())
+    {
+    }
+    template<class G, enable_if_t<!is_convertible_v<const G&, E>, int> = 0>
+    constexpr explicit expected(const unexpected<G>& error) noexcept(is_nothrow_constructible_v<E, const G&>)
+        : m_error(in_place, error.error())
+    {
+    }
+
+    // 从另一个 expected（值类型/错误类型可转换）转换
+    template<class U, class G,
+             enable_if_t<is_constructible_v<T, const U&> && is_constructible_v<E, const G&>, int> = 0>
+    constexpr expected(const expected<U, G>& other) noexcept(is_nothrow_constructible_v<T, const U&> &&
+                                                             is_nothrow_constructible_v<E, const G&>)
+    {
+        if (other.has_value())
+            m_value.emplace(other.value());
+        else
+            m_error.emplace(other.error());
+    }
+
+    expected(const expected&) = default;
+    expected(expected&&) = default;
+    expected& operator=(const expected&) = default;
+    expected& operator=(expected&&) = default;
+    ~expected() = default;
+
+    template<class U = T, enable_if_t<is_constructible_v<T, U&&> && is_assignable_v<T&, U&&>, int> = 0>
+    constexpr expected& operator=(U&& value)
+    {
+        m_error.reset();
+        m_value.emplace(std::forward<U>(value));
+        return *this;
+    }
+
+    template<class G, enable_if_t<is_constructible_v<E, const G&> && is_assignable_v<E&, const G&>, int> = 0>
+    constexpr expected& operator=(const unexpected<G>& error)
+    {
+        m_value.reset();
+        m_error.emplace(error.error());
+        return *this;
+    }
+
+    // —— 观察器 ——
+    [[nodiscard]] constexpr bool has_value() const noexcept { return m_value.has_value(); }
+    constexpr explicit operator bool() const noexcept { return has_value(); }
+
+    [[nodiscard]] constexpr T& value() & { ensure_value(); return *m_value; }
+    [[nodiscard]] constexpr const T& value() const& { ensure_value(); return *m_value; }
+    [[nodiscard]] constexpr T&& value() && { ensure_value(); return std::move(*m_value); }
+
+    [[nodiscard]] constexpr E& error() & noexcept { return *m_error; }
+    [[nodiscard]] constexpr const E& error() const& noexcept { return *m_error; }
+    [[nodiscard]] constexpr E&& error() && noexcept { return std::move(*m_error); }
+
+    [[nodiscard]] constexpr T& operator*() & noexcept { return *m_value; }
+    [[nodiscard]] constexpr const T& operator*() const& noexcept { return *m_value; }
+    [[nodiscard]] constexpr T&& operator*() && noexcept { return std::move(*m_value); }
+
+    constexpr T* operator->() noexcept { return m_value.operator->(); }
+    constexpr const T* operator->() const noexcept { return m_value.operator->(); }
+
+    template<class U>
+    [[nodiscard]] constexpr T value_or(U&& fallback) const&
+    {
+        return m_value ? *m_value : static_cast<T>(std::forward<U>(fallback));
+    }
+    template<class U>
+    [[nodiscard]] constexpr T value_or(U&& fallback) &&
+    {
+        return m_value ? std::move(*m_value) : static_cast<T>(std::forward<U>(fallback));
+    }
+
+private:
+    constexpr void ensure_value() const
+    {
+        if (!m_value.has_value())
+            bad_expected_access<E>::throw_exception(*m_error);
+    }
+
+    optional<T> m_value;
+    optional<E> m_error;
+};
+
+template<class T, class E, class U, class G>
+[[nodiscard]] constexpr bool operator==(const expected<T, E>& lhs, const expected<U, G>& rhs) noexcept(
+    noexcept(*lhs == *rhs) && noexcept(lhs.error() == rhs.error()))
+{
+    return lhs.has_value() == rhs.has_value() &&
+           (lhs.has_value() ? (*lhs == *rhs) : (lhs.error() == rhs.error()));
+}
+
+template<class T, class E, class U>
+[[nodiscard]] constexpr bool operator==(const expected<T, E>& lhs, const U& rhs) noexcept(noexcept(*lhs == rhs))
+{
+    return lhs.has_value() && (*lhs == rhs);
+}
+
+template<class E, class G>
+[[nodiscard]] constexpr bool operator==(const unexpected<E>& lhs, const unexpected<G>& rhs) noexcept(
+    noexcept(lhs.error() == rhs.error()))
+{
+    return lhs.error() == rhs.error();
+}
+
+}  // namespace omath_compat
+}  // namespace std
