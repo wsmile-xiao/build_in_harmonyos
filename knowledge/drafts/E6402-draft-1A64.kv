@@ -1,0 +1,119 @@
+#====================================================================
+# E6402-draft-1A64.kv — autotools 配方主动用 LIBS="<外部依赖>" 补齐
+#   静态链接闭包时，必须把该依赖的 -L/-I 提前注入 LDFLAGS/CFLAGS；
+#   否则 configure 首轮「whether the C compiler works」试探即失败：
+#     ld.lld: error: unable to find library -l<name>
+#     configure: error: C compiler cannot create executables
+#   实例：cyrus-sasl-scram 2.1.28（SCRAM 静态闭包需 -lcrypto）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6402
+trigger_tool:           configure|clang|conan
+phase:                  configuration
+error_signature:        unable to find library -l\w+|C compiler cannot create executables|checking whether the C compiler works\.\.\. no
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, linking, toolchain, conan
+match_keywords:         LIBS, extra_ldflags, extra_cflags, AutotoolsToolchain, configure_args, C compiler cannot create executables, unable to find library, static link closure, -lcrypto, openssl, libcrypto, conanbuild, LDFLAGS
+title:                  autotools 配方用 LIBS 注入外部依赖补齐静态闭包时缺 -L 路径 → configure 首轮编译器试探失败（C compiler cannot create executables）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: |
+  上游 autotools 项目的某分支只把 provider 库加进「共享插件」的链接变量，未加进
+  静态归档的 SASL_STATIC_LIBS/LIBS，因此下游客必须显式以 LIBS="-l<crypto>" 参与链接
+  （cyrus-sasl 2.1.28 的 SCRAM 分支即典型：configure.ac 里 SCRAM_LIBS=-lcrypto 只服务
+  shared plugin，DIGEST 分支才有 SASL_STATIC_LIBS+=$LIB_DES）。配方把 LIBS 直接写在
+  configure 命令行前缀，Autoconf 会把它写进 Makefile 供 make 使用——这本身正确。
+
+  陷阱在于：LIBS 从 configure 的**第一条**编译命令起就生效，而 Autoconf 首轮
+  「whether the C compiler works」（configure 约 3985 行）会执行
+  `<CC> $CFLAGS $CPPFLAGS $LDFLAGS conftest.c $LIBS`，
+  此时 LDFLAGS 里并不包含该依赖的 libdir（AutotoolsToolchain 不会把依赖的 cpp_info
+  libdir 自动并入首轮试探；实测 LDFLAGS 只有 profile 的用户级 -L）。于是链接 -l<crypto>
+  找不到 → ld.lld: error: unable to find library -lcrypto → configure: error: C compiler
+  cannot create executables，错误信息伪装成「编译器不可用」，极易误判为工具链问题。
+
+  判别要点：config.log 里报错命令行含你注入的 -l<name>，且 -L 列表中没有该依赖路径；
+  同一源码树手工编译（显式带 -L<dep>/lib）却通过 —— 即为本条。
+affected_scope:        所有 autotools 三方库适配中，配方通过 LIBS（或 configure_args 里
+                        追加 LIBS=）主动补齐**外部依赖**静态链接闭包的场景；多依赖、依赖
+                        库不在系统默认搜索路径（Conan 缓存路径）时必现。典型症状：
+                        "ld.lld: error: unable to find library -l<name>" +
+                        "configure: error: C compiler cannot create executables"。
+verification_cmd:       grep -n "conftest.c" <build>/config.log | grep -o "\-l[a-z0-9_-]*"
+                        # 修复前：命令行含注入的 -l 而 -L 缺依赖目录
+                        # 修复后：命令行同时含 -L<dep>/lib 与 -l<dep>，configure rc=0
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:          inject-dependency-includedir-libdir-into-toolchain
+rec_description: |
+  Conan 配方 generate() 中，把该依赖的 include/lib 目录显式并入工具链旗标，使
+  configure 首轮试探即可解析注入的 -l：
+    tc.extra_ldflags.append("-L%s/lib" % dep_root)
+    tc.extra_cflags.append("-I%s/include" % dep_root)
+  注意 AutotoolsToolchain **没有** extra_cppflags 属性（实测实例属性仅
+  cflags/cxxflags/defines/ldflags/rcflags + extra_cflags/extra_cxxflags/extra_ldflags/
+  extra_defines），include 若走「cppflags」会 AttributeError，需并入 extra_cflags 或
+  由 cpp_info 传播。保留 LIBS="-l<dep>"（它同时服务 make 阶段的静态链接闭包）。
+rec_command: |
+  def generate(self):
+      tc = AutotoolsToolchain(self)
+      dep_root = str(self.dependencies["<dep>"].package_folder)
+      tc.extra_cflags.append("-I%s/include" % dep_root)
+      tc.extra_ldflags.append("-L%s/lib" % dep_root)
+      tc.configure_args.extend([... "--with-<dep>=%s" % dep_root])
+      tc.generate()
+rec_auto_fix:           true
+rec_impl:               conan-recipe-generate-extra-flags
+
+fallback_priority:      2
+fallback_approach:     bind-dir-configure-flag-only
+fallback_description:   若上游 configure 支持 --with-<dep>=<DIR>（自带 -I/-L 拼装），仅靠该
+                        开关不足以救首轮试探（试探早于该检测发生）→ 仍须补 LDFLAGS，故本兜底仅
+                        适用于「LIBS 不在 configure 期注入、只在 make 期传入」的写法。
+fallback_command:       make -j1 LIBS="-l<dep>"（configure 阶段不设 LIBS）
+fallback_auto_fix:      false
+fallback_impl:          make-arg-only
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       tc\.extra_cppflags
+forbid_1_reason:        AutotoolsToolchain 无该属性，配方在 generate() 即 AttributeError 崩
+forbid_1_consequence:   conan create 直接失败，误以为是配方其他部分问题
+forbid_2_pattern:       sed.*config\.log|手改 config\.log|cache.*ac_cv.*cc_works
+forbid_2_reason:        config.log 是生成物；用缓存变量掩盖真实链接失败会让后续 make 阶段炸
+forbid_2_consequence:   configure 假通过、make 阶段报未定义符号，定位成本更高
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P006, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E524, E533
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E6402-draft-1A64.md
+last_updated:           2026-09-26
+source_event:           cyrus-sasl-scram 2.1.28 适配：conan create 首轮 build() 失败
+                        （configure: error: C compiler cannot create executables），
+                        config.log 显示 conftest.c 链接 -lcrypto 而 LDFLAGS 无 openssl/lib；
+                        在 generate() 补 extra_ldflags/extra_cflags 后 conan create rc=0
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk Agent <noreply@opendesk.local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-26
+
+draft: true
+contributor_id: 1A64
