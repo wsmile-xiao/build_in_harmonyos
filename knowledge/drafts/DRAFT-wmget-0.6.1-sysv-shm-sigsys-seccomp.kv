@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-wmget-0.6.1-sysv-shm-sigsys-seccomp -
+# SysV IPC（shmget/shmat）在 OHOS PC 上编译链接可用但运行期被内核
+# SIGSYS(31) 拦截：探针稳定复现，POSIX shm_open 同机正常（wmget 0.6.1
+# 真机实测）。
+#
+# 场景: wmget 0.6.1（C 语言 X11 DockApp 后台下载管理器）在 OHOS PC
+#       （aarch64, clang 15.0.4 / OHOS SDK 26.0.0.18）：server.c 的
+#       init_shmem() 调 shmget(IPC_PRIVATE,…)+shmat()，编译、链接均
+#       无任何告警（sysroot 含 <sys/shm.h>、libc 有符号）；运行期进程
+#       直接死于 Signal 31 (SIGSYS, "Bad system call")，退出码 159，
+#       稳定复现；最小探针（shmget→shmctl IPC_RMID）同判。对照组
+#       POSIX shm_open()/shm_unlink() 同机同编译器运行正常（fd 分配
+#       成功，rc=0）。
+# 适用: 所有在运行期使用 SysV IPC（shmget/shmat/shmdt/shmctl、
+#       semget/semop、msgget/msgsnd）的 C/C++ 程序在 OHOS PC 上的
+#       适配，以及一切"编译期能力检测 ≠ 运行期可用性"的 syscall
+#       受限面（编译零告警、运行即 SIGSYS 的静默雷区）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-wmget-0.6.1-sysv-shm-sigsys-seccomp
+source_lib:             wmget 0.6.1
+trigger_tool:           runtime
+phase:                  runtime
+error_signature:        Signal 31|SIGSYS|Bad system call|core dumped.*(shm|sysv)|could not allocate shared memory segment|shmget.*fail|exit code 159|killed by signal 31
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               platform, syscall, kernel, runtime, portability
+match_keywords:         shmget, shmat, shmdt, shmctl, semget, semop, msgget, msgsnd, System V IPC, SysV shm, sys/shm.h, sys/sem.h, sys/msg.h, IPC_PRIVATE, SIGSYS, Signal 31, Bad system call, seccomp, kernel拦截, 运行期拦截, shared memory segment, daemon crash, dockapp, X11 dock, fork, 退出码159, rc=159, 编译通过运行崩溃, shm_open, POSIX shared memory, mmap, MAP_SHARED
+title:                  SysV IPC 编译链接可用但运行期被 OHOS PC 内核 SIGSYS(31) 拦截：编译期头文件/符号检测失效，须改 POSIX shm_open 或 mmap
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS PC 内核（安全策略/seccomp 面）在运行期直接杀死发起 SysV IPC 系统调用的进程：shmget(IPC_PRIVATE, 4096, IPC_CREAT|0600) 最小探针在真机上编译、链接全通过（OHOS sysroot 自带 <sys/shm.h>，libc 导出 shmget/shmat/shmctl 符号），但进程收到 Signal 31 (SIGSYS "Bad system call") 即死、退出码 159（=128+31）、core dumped，稳定复现且无任何 errno 机会（错误处理代码来不及执行）。同机对照组 POSIX shm_open() 运行正常。头文件存在性（编译期）与 syscall 运行期可用性完全脱节：任何依赖 configure/CMake 探测 <sys/shm.h> 或链接成功的选型判断都会漏判，唯有运行期探针或内核行为知识可发现。
+affected_scope:         所有运行期使用 SysV IPC 的 C/C++ 程序（X11 DockApp/后台服务器用 shm 共享任务队列、多进程统计共享、System V 信号量互斥、老式消息队列 IPC）在 OHOS PC 上的运行期；广义适用于"编译零告警、运行即 SIGSYS"的 syscall 受限面判别（编译期能力检测 ≠ 运行期可用性）。
+verification_cmd:       设备侧最小复现：cat > /tmp/t.c <<'E'\n#include <sys/shm.h>\nint main(void){int id=shmget(IPC_PRIVATE,4096,IPC_CREAT|0600);if(id>=0)shmctl(id,IPC_RMID,0);return id<0?1:0;}\nE\nclang --target=aarch64-linux-ohos --sysroot=<OHOS sysroot> t.c -o t && ./t; echo rc=$?  # 期望（未适配平台）: Signal 31 (core dumped), rc=159；对照组 shm_open("/p",O_CREAT|O_RDWR,0600) 同机 rc=0
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           replace-sysv-ipc-with-posix-shm-or-mmap
+rec_description:        把 SysV shmget/shmat 面替换为等价的 POSIX 面与通用原语：任务队列共享用 shm_open+ftruncate+mmap(MAP_SHARED)（同机实测可用）或直接 mmap(NULL,len,PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0)（fork 继承）；System V 信号量场景优先改事件驱动（poll/eventfd）或 POSIX 命名信号量；保持源码平台中立（不加平台宏）， shm_open 在少数平台需 -lrt。无法改源码时如实上报平台限制，禁止伪造运行证据。
+rec_command:            patch -p1 -i patches/0001-replace-sysv-shm-with-posix-shm.patch
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      declare-runtime-limitation-headless-verify-cli
+fallback_description:   无法替换 IPC 面时（如仅 UI/守护路径使用 SysV shm）：在 notes.md 声明该运行面为平台受限（启动即 SIGSYS），验证口径收缩到可无头运行的真实路径（CLI 契约 --help/--version rc=0 + 产物 ELF/链接层），不得声称受限面已适配成功。
+fallback_command:       ./conan test（test_package 只断言 CLI 契约与产物 ELF；notes.md 记录 SIGSYS 平台事实与探针证据）
+fallback_auto_fix:      true
+fallback_impl:
+
+forbid_1_pattern:       (assert|if\s*\()\s*\(?(shmget|shmat)\([^)]*\)\s*[!=]=?\s*-?1?\)?.*(exit|abort)
+forbid_1_reason:        把"编译链接通过"当"运行期可用"：SIGSYS 是信号即死，任何用户态错误分支都不会执行，靠 ret<0 分支兜底是无效防护
+forbid_1_consequence:   守护进程/UI 启动即崩且无日志线索（仅 core dump），评审可复现打回
+forbid_2_pattern:       sysctl|setenforce|/proc/sys.*seccomp|echo .* > /proc/sys/kernel
+forbid_2_reason:        通过改内核安全参数放行被拦 syscall 不属于三方库适配边界，在 CI 与用户环境不可复现，且破坏平台安全模型
+forbid_2_consequence:   不可复现的环境篡改，评审拒绝
+
+principles:             P013, P015, P008
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E220, E022]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-wmget-0.6.1-sysv-shm-sigsys-seccomp.md
+last_updated:           2026-09-27
+source_event:           wmget 0.6.1 OHOS PC aarch64 适配：shmget 探针真机实测 Signal 31 (SIGSYS) rc=159，shm_open 对照 rc=0
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                主理-73 <主理-73@local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-27
