@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_dbus_test_runner C)
+find_package(glib CONFIG REQUIRED)
+find_package(dbus-test-runner CONFIG REQUIRED)
+add_executable(test_consumer test_consumer.c)
+target_link_libraries(test_consumer PRIVATE dbus-test-runner::dbus-test-runner glib::glib-2.0)
