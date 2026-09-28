@@ -67,12 +67,21 @@ class UnadfConan(ConanFile):
             candidates = [candidates]
         get(self, **dict(entry, url=candidates[0]), strip_root=True)
 
+    def _toolchain(self):
+        """R33: take the toolchain from Conan conf, never from the shell env.
+
+        The profile stores tools.build:compiler_executables as a dict
+        ({'c': ..., 'cpp': ...}), so it must be read whole and then keyed —
+        reading the per-tool sub-key raises ConanException.
+        """
+        ce = self.conf.get("tools.build:compiler_executables", default={},
+                           check_type=dict) or {}
+        return (ce.get("c") or "clang",
+                ce.get("ar") or "llvm-ar",
+                ce.get("ranlib") or "llvm-ranlib")
+
     def build(self):
-        # R33: take the toolchain from Conan conf, never from the shell env.
-        cc = self.conf.get("tools.build:compiler_executables:c", "clang", check_type=str)
-        ar = self.conf.get("tools.build:compiler_executables:ar", "llvm-ar", check_type=str)
-        ranlib = self.conf.get("tools.build:compiler_executables:ranlib",
-                               "llvm-ranlib", check_type=str)
+        cc, ar, ranlib = self._toolchain()
 
         # Upstream LP64 fix (Debian 64-bit-fixes): without it adfEnvInitDefault()
         # exits 1 on any 64-bit target.

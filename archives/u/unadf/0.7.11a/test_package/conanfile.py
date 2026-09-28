@@ -21,14 +21,17 @@ class UnadfTestConan(ConanFile):
         self.requires(self.tested_reference_str)
 
     def build(self):
-        cc = self.conf.get("tools.build:compiler_executables:c", "clang",
-                           check_type=str)
+        # Same shape as the main recipe: the profile keeps
+        # tools.build:compiler_executables as a dict, so read it whole.
+        ce = self.conf.get("tools.build:compiler_executables", default={},
+                           check_type=dict) or {}
+        cc = ce.get("c") or "clang"
+        pkg = self.deps_cpp_info["unadf"].package_folder
         # Link against the packaged libadf.a and the packaged headers.
         self.run(
-            f"{cc} -std=gnu99 -I{{{{package_folder}}}}/include "
-            f"{{{{source_folder}}}}/test_unadf_lib.c "
-            f"-L{{{{package_folder}}}}/lib -ladf -o test_unadf_lib".format(
-                package_folder=self.deps_cpp_info["unadf"].package_folder)
+            f"{cc} -std=gnu99 -I{pkg}/include "
+            f"{self.source_folder}/test_unadf_lib.c "
+            f"-L{pkg}/lib -ladf -o test_unadf_lib"
         )
 
     def test(self):
