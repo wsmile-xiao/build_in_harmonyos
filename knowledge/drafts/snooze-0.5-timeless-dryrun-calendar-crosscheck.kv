@@ -1,0 +1,30 @@
+#====================================================================
+# Draft: 时间/调度类工具用"干跑 + 独立历法交叉验证"做判据，绝不进入真实等待 ——
+#        干跑输出的是未来时刻，任何硬编码时间戳都会过夜即失效；改用"格式形状 +
+#        严格递增 + 字段约束 + 与独立历法实现自洽"四条不变量后，判据完全时间无关，
+#        而且第 4 条让测试自身成为历法正确性的独立裁判
+#   Stem: snooze-0.5-timeless-dryrun-calendar-crosscheck — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-SNOOZE-TIMELESS-DRYRUN-CALENDAR-CROSSCHECK
+trigger_tool:           ci
+phase:                  testing
+error_signature:        (无具体错误串；本条目是判据设计规约。典型症状是时间类测试"过夜即红")
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               test-design, determinism, ci-gate
+match_keywords:         test_package, 消费者测试, 调度, cron, 定时, 时间, 干跑, dry-run, 时间戳, 硬编码, 过夜失效, 时钟, 时区, 递增, 历法, 星期, 交叉验证
+
+title:                  时间/调度类工具用"干跑 + 独立历法交叉验证"做判据，绝不进入真实等待
+
+root_cause:            调度类工具（cron 替代品、at、延时执行器）的消费者测试有两个陷阱。**陷阱一：真实等待**——工具的正常模式是"睡到下一个匹配时刻再执行命令"，测试若直接调用被测程序而不加干跑开关，会 sleep 到下一个匹配点（可能几分钟到几小时），把 CI 挂死或触发超时判 fail，而失败原因与产物质量无关。**陷阱二：硬编码时间戳**——干跑输出的是"未来 5 次运行时刻"，这些值**随当前时刻滑动**：今天记录的 `2026-09-19T00:00:00+0800` 明天就不再出现；若把输出快照当 golden 向量，测试会在第二天自动变红（或更糟：用相对时间容差把断言模糊化，覆盖度归零）。此外时区差异（CI 容器常为 UTC）会让任何写死 `+0800` 的断言直接失败。
+affected_scope:         所有输出与"当前时刻"相关的工具：cron/snooze/anacron/at/systemd-timer 类调度器、`date`/`cal`/`tzdata` 消费者、`find -mtime`、`logrotate` 干跑、`rsync --dry-run`、备份/保留策略计算器。实测实例：snooze 0.5（`archives/s/snooze/0.5`，PR !9xxx）——`-n` 干跑打印接下来 5 次运行时刻。★ 不适用于本身就要求真实睡眠的用例（如"验证延迟确实生效"），那类必须显式放宽超时并把睡眠压到秒级。
+verification_cmd:       连续两次调用 `snooze -n -H 0 -M 0 echo hi`，两次的**第一行时间戳必然不同**（随当前时刻滑动）。若两次完全相同，说明该工具的输出与当前时刻无关，可以安全使用 golden 向量；否则必须改用不变量判据
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           dryrun-mode-plus-timeless-invariants-plus-independent-calendar
+rec_description:        改法：三层。**① 只用干跑模式**——snooze 的 `-n` 打印"接下来 5 次会运行的时刻"并立即退出；所有用例都带 `-n`，测试**永不进入真实等待**（本包 180 条断言中零次 sleep）。**② 四条时间无关不变量**：P1 干跑恰好输出 5 行（上游 `-n` 的定义，行数本身就是契约）；P2 每行形状匹配 `YYYY-MM-DDTHH:MM:SS[+-]ZZZZ Ddd ...`（**只校验结构，不校验数值**，且时区偏移按 `[+-]\d{4}` 通配，因此 CI 的 UTC 与本机 +0800 都能通过）；P3 5 个时刻**严格递增**（用 `days_from_civil` 折算成绝对秒后比较，跨月/跨年也成立）；P4 打印的星期缩写与日期**自洽**。**③ P4 是核心**：在测试里用 Howard Hinnant 的 `days_from_civil` **独立实现一遍**日期→星期换算，要求 `weekday = ((days_from_civil(y,m,d) % 7) + 7 + 4) % 7`（0=周日；1970-01-01 是周四）—— 于是测试自身成了历法正确性的**独立裁判**，不需要任何对照表，就能在跨月、跨年、闰年边界上发现被测程序的日期算术缺陷（本包实测覆盖 2027-01-01、2027-04-10、2028-04-09 等跨年点，全部自洽）。**④ 字段约束**：对 `-H/-M/-d/-w/-D` 逐项校验输出字段落在请求的集合内（如 `-w 1-5` 时星期 ∈ {Mon..Fri}、`-D 1,100,200` 时年积日 ∈ {1,100,200}——年积日同样由测试独立算出，闰年 366 天规则要自己实现）。**⑤ 负向对照**：`-J 30` 时每行必须出现精确后缀 `(plus up to 30s for jitter)`；不带 `-J` 时输出里**不得出现** `jitter` —— 只测"有"不测"没有"会让"恒为真"的实现蒙混过关。★ 判据实现照旧：`expect()` 计数而非 `assert()`、`popen` 内存直读不落盘（OHOS `/tmp` 只读）、`pclose==-1 || !WIFEXITED || code∈{126,127} || code>=128` 判"跑不起来"、循环读到 EOF 再 `pclose`。参考实现：archives/s/snooze/0.5/test_package/test_snooze.c（180 条断言）。
+rec_command:            # ① 只用干跑\nsnprintf(args, sizeof args, "-n %s", pattern_and_cmd);   /* 绝不省略 -n */\n\n# ④ 独立历法（Howard Hinnant days_from_civil）\nstatic long long days_from_civil(int y, unsigned m, unsigned d) {\n    long long yy = y - (m <= 2);\n    long long era = (yy >= 0 ? yy : yy - 399) / 400;\n    unsigned yoe = (unsigned)(yy - era * 400);\n    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;\n    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;\n    return era * 146097 + (long long)doe - 719468;\n}\n/* P4: 与打印的星期比对（0=Sunday；1970-01-01 是周四 → +4） */\nint wd = (int)(((days_from_civil(t.y, t.mo, t.d) % 7) + 7 + 4) % 7);\nexpect(strcmp(t.wday, NAMES[wd]) == 0, "星期自洽", t.wday);\n/* P3: 严格递增 */\nt.abs = days_from_civil(t.y,t.mo,t.d) * 86400LL + t.h*3600 + t.mi*60 + t.s;\nif (i > 0) expect(t.abs > prev.abs, "严格晚于上一行", "");\n\n# ⑤ 负向对照\nexpect(strstr(buf, "jitter") == NULL, "无 -J 时不出现 jitter 后缀", "");
+rec_auto_fix:           false
