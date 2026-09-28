@@ -1,0 +1,79 @@
+#====================================================================
+# Draft: 上游 199x 老 tarball 把与 make 目标**同名**的预编译件连同源码打包
+#        ⇒ make 依目标规则形态 + 双方陈旧 mtime 判"目标已最新"：直接源规则目标必跳过、链接型目标因缺 .o 必重编
+#        ⇒ 外来架构（32-bit 386）二进制可能被当成交付物
+# Trigger instance: xringd 1.20（任务 12186，构建机 B，2026-09-27）
+# Issue: #3505
+#====================================================================
+
+id:                     DRAFT-XRINGD-1.20-UPSTREAM-TARBALL-PREBUILT-MAKE-TARGET-NAME-STALE-MTIME-SKIP
+trigger_tool:           make|tar|unzip|conan|package
+phase:                  compilation|installation|packaging
+error_signature:        'file: .*ELF executable, 32-bit LSB 386|file: .*dynamic.*/lib/ld-linux.so.1|make: .{0,3}uartcount.{0,24}is up to date'
+severity:               2
+category:               build-reproducibility, upstream-release-hygiene, make, packaging
+match_keywords:         预编译件, prebuilt binary, make 目标同名, up to date, mtime, 时间戳,
+                        aout bin, LSM, tarball 自带二进制, 外来架构, 386, 交叉编译, 交付物污染
+
+title:                  |-
+  上游老 tarball 把与 make 目标同名的预编译件连同源码发布时，make 会不会真编译取决于双方陈旧 mtime 的先后，
+  判据是「规则形态 + 时间戳」而非纯运气（本包无 `is up to date` 日志读数，结论由 Makefile 规则形态推出）；必须在构建前显式清除这些同名目标件，否则可能把外来架构的二进制当成交付物
+
+root_cause:             |-
+  1996/1997 年代的发布惯例是把源码与一份当时编好的可执行件一起 tar 打包（xringd 的 LSM 描述原文即
+  "Source and an aout bin are included"）。这些可执行件的**文件名正好等于 Makefile 里的目标名**，
+  而 tar 解包会把目标件与源件的 mtime 一并还原成发布当年的时间戳。make 的判定规则是"目标不比源新就跳过"，
+  于是是否真实编译**取决于目标的规则形态**：直接源规则目标（本包 `uartcount: uartcount.c`，Makefile L58-59）在随包的
+  `uartcount`(1997-07-09 07:14) 比 `uartcount.c`(1996-01-17 08:02) 新时**必然跳过**；链接型目标（本包
+  `xringd: $(OBJ)`，Makefile L40/L42）因包内**没有任何 `.o` 前置件**而**必然重编**。⇒ 判据是「规则形态 + 时间戳」，
+  ⚠ 本包至今**没有留下过** `is up to date` 的日志读数，跳过结论由 Makefile 规则形态推出，不是实测复现。不编时 build() 静默"成功"，package() 把包内那枚 **32-bit LSB 386、动态链接
+  /lib/ld-linux.so.1** 的 ELF 拷进 aarch64 交付目录，故障推迟到运行期才暴露（Exec format error /
+  文件不存在），且 CI 与静态门禁都看不出来。
+
+affected_scope:         |-
+  命中条件收紧为两条同时成立：①随包件与某个 make 目标**同名**；②该目标是**直接源规则**（目标名即唯一源文件的产物，
+  不依赖 `.o` 之类包内不存在的前置件）——只有这种目标会被跳过并原样交付；链接型目标虽同名但必重编，其风险面退化为
+  `package()` 误拷贝而非「交付产物是外来架构」。199x 年 bare Makefile 工程尤其常见，
+  带 .lsm 自述 "include bin" 的那批基本都吃这一刀）。不适用：①预编译件名与 make 目标不同名（make 必然重编）；
+  ②上游走现代 make dist 惯例的纯源码归档；③已用 make -B 或 make clean all 强制重编且不依赖时间戳的场景
+  （此时清除虽非必需，仍建议清，以免 package 阶段误拷贝）。
+
+verification_cmd:       |-
+  # 三条读数缺一不可，"无扩展名"只能出题不能定案
+  find <解包目录> -type f ! -name '*.*'                 # 找出可能的无扩展名件
+  file <解包目录>/xringd <解包目录>/uartcount           # 期望看到 ELF ... 32-bit LSB 386
+  od -c -N 16 <解包目录>/xringd                          # 魔数 \\177ELF + 架构字节
+  grep -nE '^(xringd|uartcount)[[:space:]]*:' <解包目录>/Makefile   # 名字是否与 make 目标同名
+
+rec_priority:           1
+rec_approach:           remove-stale-prebuilt-targets-before-make
+rec_description:        |-
+  在配方 build() 里、调用 make 之前显式删除这些与目标同名的上游预编译件，使"产物必然来自本次交叉编译"成为
+  结构性保证而不是时间戳运气。删除动作要在 notes 里留下被删件的 file 原文读数（判据可复核），
+  ⛔ 只写"已清理"三个字。
+
+rec_command:            'python3 -c "import os; [os.remove(p) for p in (\"xringd\", \"uartcount\") if os.path.isfile(p)]" && make'
+
+rec_auto_fix:           false
+rec_impl:               |-
+  xringd 1.20 采用本处方：build() 内先删除包内 xringd/uartcount 两枚 1997 年预编译件再执行 make，
+  交付件为本次 aarch64 交叉编译产物；消费者测试以 ELF 机器码断言（elf_machine）确认交付二进制不是 386。
+
+fallback_priority:      2
+fallback_approach:      force-compile-without-relying-on-mtime
+fallback_description:   |-
+  若不便删（例如上游另有文件依赖该名字），改用 make -B 或先 make clean 再 make，强制绕开时间戳判定；
+  收口仍需用 file/od 复验产物架构，不能只看 make 退出码。
+
+fallback_command:       'make -B && file ./xringd'
+
+forbid_1_pattern:       直接 make 并仅以退出码判定"编译成功"，不检查包内是否已有同名预编译件
+forbid_1_reason:        |-
+  make 在目标件 mtime 不早于源件时根本不启动编译器，退出码照样是 0；配方会把上游随包带的 386 ELF 当成
+  本次交叉编译产物交付，问题推迟到运行期才炸（Exec format error），而 W3/CI 全绿，排查成本极高。
+
+forbid_1_consequence:   |-
+  交付物含外来架构二进制 ⇒ 真机运行报格式错误或符号缺失，容易被误判成工具链/平台能力问题，甚至错手把
+  一个本可修的包转成"平台不可行"。
+
+principles:             real-evidence-over-assumption, artifact-identity-must-be-verified-not-inferred-from-exit-code
