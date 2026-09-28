@@ -1,0 +1,95 @@
+# ═══ Draft knowledge entry — 真机 shadow CI 启动会话缺工具链 PATH 导致 cmake exit 127 ═══
+# Software: libsv 1.2 (CMake, 零依赖共享库)
+# Evidence: OHOS PC aarch64 (HarmonyOS/HongMeng 1.12.0), cmake 4.1.2 @ /data/service/hnp/bin, conan 2.29.1 (OHOS 适配版)
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: libsv-1.2-shadow-ci-runner-toolchain-path
+severity: 2
+category: environment, conan, cmake, ci
+trigger_tool: conan|cmake|zsh|ssh
+phase: build
+
+title: 真机 shadow CI 的 cmake/ninja/make 依赖启动会话 PATH，runner 默认环境不含 /data/service/hnp/bin
+
+keywords: shadow CI, inaccessible or not found, exit 127, cmake, /data/service/hnp/bin, buildenv, +(path), PATH 前缀, run-conan-heavy, env.txt 对照
+
+error_signature: cmake: inaccessible or not found|ninja: inaccessible|make: inaccessible.*conan.*build\(\)
+
+match_keywords: inaccessible or not found, Error 127, cmake.configure, CMakeToolchain, run-conan-heavy.sh, ohos-test-runner, PATH, hnp, buildenv, shadow CI
+
+root_cause: |
+  真机的 cmake(4.1.2)/ninja/make 全部位于 /data/service/hnp/bin，不在 runner
+  继承的默认 PATH 中；ci profile [buildenv] 的 `PATH=+(path)/data/service/hnp/bin`
+  是 OHOS 适配版 conan 专属语法，在 job 实际调用的 conan 环境里未生效
+  （run 目录 logs/env.txt 的 PATH 无该目录）。conan 依赖图与 source() 阶段
+  正常（编译器走 tools.build:compiler_executables 绝对路径），只在
+  build() 的 cmake.configure() 处 exit 127。cmake 可达性实际取决于
+  启动 runner 的 ssh 会话环境（对照：同日同 profile 的 libuinputplus job
+  因启动会话自带工具链 PATH 而 cmake 执行成功）。
+
+affected_scope: |
+  所有在真机跑 shadow CI 的 CMake 类 conan 配方（build() 调 CMake helper、
+  无 cmake tool_requires、依赖系统 PATH 提供构建工具）；
+  同样适用于 make/ninja 等其它位于 /data/service/hnp/bin 的构建工具。
+
+verification_cmd: |
+  # 1) run 目录日志定位失败点
+  grep -n "RUN: cmake" <run-dir>/logs/stdout.log
+  grep "^PATH=" <run-dir>/logs/env.txt        # 期望不含 /data/service/hnp/bin 即中招
+  # 2) 设备上验证工具本体可用（ls 报 Permission denied 是 HMDFS 元数据怪癖，不代表不可执行）
+  /data/service/hnp/bin/cmake --version
+
+rec_priority: 1
+rec_approach: runner-launch-path-prefix
+rec_description: |
+  启动 runner 的 ssh 命令显式前缀工具链 PATH。这是环境组装而非绕过排队——
+  ohos-test-runner.sh --mode heavy 照常获取全局锁排队。
+rec_command: |
+  ssh <device> 'PATH=/data/service/hnp/bin:$PATH sh ~/ohos-users/codex/<job>/run-conan-heavy.sh'
+rec_auto_fix: false
+rec_impl: env-prefix-on-launch
+
+fallback_priority: 2
+fallback_approach: recipe-tool-requires-cmake
+fallback_description: |
+  配方 tool_requires 一个 conan 化 cmake 包（由 conan 缓存提供可执行文件并注入
+  conanbuild PATH），彻底摆脱系统 PATH；代价是引入额外依赖与下载，轻量库不划算。
+fallback_command: tool_requires("cmake/x.y.z")
+fallback_auto_fix: false
+fallback_impl: recipe-change
+
+forbid_1_pattern: tc\.variables\["CMAKE_SYSTEM_NAME"\]\s*=\s*"Linux"
+forbid_1_reason: r1 误判教训：把 127 归因到 CMAKE_SYSTEM_NAME 并加/删 Linux 别名均不能改变结果（有别名 127、删掉仍 127）；PATH 才是根因。适配版 conan 已自动映射 HarmonyOS，手动别名属过时 workaround。
+forbid_1_consequence: 浪费整轮真机窗口，且别名会覆盖适配版 conan 的 OHOS 自动处理。
+forbid_2_pattern: 在配方 self\.run 中硬编码 /data/service/hnp/bin
+forbid_2_reason: 配方应保持环境无关（R33 精神）；工具链路径属于启动环境职责。
+forbid_2_consequence: 配方绑死特定 worker 布局，换环境即失效。
+
+principles: R33, R41
+
+causes: []
+caused_by: []
+similar_to: E064, E108, E165, E248
+conflicts_with: []
+prerequisite_of: []
+
+doc_file: doc/libsv-1.2-shadow-ci-runner-toolchain-path.md
+
+last_updated: 2026-09-27
+source_event: libsv 1.2 真机 shadow CI r1-r6 迭代（job libsv-1.2-20260927）
+
+evidence: |
+  libsv 1.2（OHOS PC aarch64，2026-09-27）：
+  - r1（配方含 lasi 式 Linux 别名）与 r2（删除别名）：均
+    `/system/bin/sh: cmake: inaccessible or not found`，exit 127——证明
+    别名与 127 无关。
+  - env.txt PATH=/storage/.../python-user/bin:...:/bin:/usr/bin:...（无 hnp/bin）。
+  - 设备实测：`PATH=/data/service/hnp/bin:$PATH sh -c 'command -v cmake'`
+    → /data/service/hnp/bin/cmake（cmake version 4.1.2）；
+    `ls -la /data/service/hnp/bin/cmake` 反而 Permission denied（HMDFS 元数据怪癖）。
+  - r3 起带 PATH 前缀重跑：`[100%] Built target test_*` 编译全部通过。
+
+authors:
+source_pr:
+source_commit:
+draft_date: 2026-09-27
