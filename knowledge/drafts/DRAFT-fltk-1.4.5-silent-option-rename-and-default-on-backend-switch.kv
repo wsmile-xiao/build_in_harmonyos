@@ -1,0 +1,142 @@
+# ═══ Draft knowledge entry — CMake 大版本选项整体改名导致的「配方假通过」+ 上游默认 ON 的自动探测型后端开关 ═══
+# Timestamp: 2026-09-20
+# Software: fltk 1.4.5
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-fltk-1.4.5-silent-option-rename-and-default-on-backend-switch
+trigger_tool:           cmake|clang|conan|pkg-config
+phase:                  configure|build|link
+error_signature:        Manually-specified variables were not used by the
+                         project|FLTK_BACKEND_WAYLAND is turned off|Terminating:
+                         one or more required software package(s) missing|
+                         undefined reference to .Fl_PNG_Image|unknown CMake
+                         command|CMake Warning.*not used
+severity:               4
+category:               build-system-detection|silent-option-invalidation|
+                         default-on-feature-probe|library-packaging|test-harness
+match_keywords:         fltk, FLTK_USE_XFT, FLTK_USE_XINERAMA, FLTK_USE_XRENDER,
+                         FLTK_USE_XCURSOR, FLTK_USE_XFIXES, FLTK_BUILD_GL,
+                         FLTK_GRAPHICS_CAIRO, FLTK_USE_SYSTEM_LIBJPEG,
+                         FLTK_USE_SYSTEM_LIBPNG, FLTK_BACKEND_X11,
+                         FLTK_BACKEND_WAYLAND, OPTION_USE_XFT,
+                         OPTION_USE_XINERAMA, OPTION_CAIRO, OPTION_USE_GL,
+                         FLTK_BUILD_SHARED_LIBS, fltk_png, fltk_jpeg, fltk_z,
+                         fltk_images, fl_create_example, dlopen XShape,
+                         fl_utf8locale, filename_ext, Manually-specified
+                         variables, option rename, major version upgrade,
+                         pkg_check_modules silent fallback
+title:                  CMake 大版本升级时构建选项整体改名 → 配方"看起来传进去了、
+                         实际一个都没生效"（静默退化）；以及上游默认 ON 且
+                         "探测不到就静默自关 / 探测到就 FATAL_ERROR" 的自动
+                         探测型后端开关
+
+root_cause: >
+  两类同源的静默失效。(a) CMake 对未知的 -D 变量既不报错也不失败，只在
+  configure 末尾给一句 "Manually-specified variables were not used by the
+  project"——所以跨大版本沿用旧选项名（FLTK 1.3.x 的 OPTION_USE_XFT/
+  OPTION_USE_XINERAMA/OPTION_CAIRO/OPTION_USE_GL 在 1.4.5 全部改名为
+  FLTK_USE_XFT/FLTK_USE_XINERAMA/FLTK_GRAPHICS_CAIRO/FLTK_BUILD_GL）会让
+  配方声明与实际构建完全脱钩：构建成功、CI 全绿、包内容却由上游默认值决定。
+  (b) 上游新增的 FLTK_BACKEND_WAYLAND 在 UNIX 上默认 ON（options.cmake:280），
+  其分支用 pkg_check_modules 探测 wayland-client/cursor/protocols/xkbcommon：
+  探测不到就 unset + set(...,0) 静默自关（选项没生效但构建"成功"），探测到了
+  则强制 FLTK_GRAPHICS_CAIRO=TRUE 并要求 Xfixes/Xrender/Xft/Xcursor/Xinerama
+  全部存在，缺一即 FATAL_ERROR。两种结果都不可接受。
+affected_scope: >
+  所有在 CMake 大版本升级中沿用旧选项名、或依赖上游"自动探测 + 探测失败静默
+  降级"开关的库；FLTK 1.4.x 全系（含 1.4.0–1.4.5）；以及任何有
+  "backend/features probe → silently downgrade" 模式的 CMake 工程。
+verification_cmd: >
+  grep -n "^ *option(" CMake/options.cmake                # 核对当前版本真实选项名
+  grep -n "Manually-specified variables" configure.log   # 有这段 = 已被静默吞掉
+  grep -n "unset(.*CACHE)" CMake/options.cmake           # 找静默自关的开关
+  llvm-nm -u libfltk_images.a | grep -E "Fl_(PNG|JPEG)_Image"  # 验证图像库链接链
+rec_priority:           1
+rec_approach:           pin-explicit-version-matched-options-and-disable-autoprobe-backend
+rec_description: >
+  四步：(a) 跨大版本升级时先 `grep -n "^ *option(" CMake/options.cmake` 取
+  当前版本的真实选项名，逐个改写配方（FLTK 1.4.x 的完整对照表见 .md 场景一），
+  再在 configure 日志里 grep "Manually-specified variables were not used by
+  the project" 自证没有任何一条被吞掉——这是判断"配方是否真的生效"的唯一
+  硬证据。(b) 对所有"自动探测 + 探测失败静默自降级"的开关（含
+  FLTK_BACKEND_WAYLAND、FLTK_BUILD_GL 这类只在探测到依赖时才声明 option()
+  的），一律显式写 OFF/ON，不依赖上游默认值——让配方声明的语义与实际构建
+  一致，避免"换个 worker 就炸"。(c) 注意"恒建静态库 + BUILD_SHARED_LIBS 是
+  额外语义"的库：shared=False 时 package() 不需任何删库逻辑，只有显式 shared
+  时才 rm("*.a")。(d) 随包内置编译的图像库若是独立静态库（fltk_png/jpeg/z），
+  必须逐个列进 cpp_info.libs 且按依赖顺序排列（fltk_images→fltk_png,jpeg→z），
+  头文件目录（include/FL/images）也要作为 include 根暴露。
+rec_command: >
+  grep -n "^ *option(" CMake/options.cmake
+  # 配方: tc.variables["FLTK_BACKEND_WAYLAND"]="OFF"
+  #       tc.variables["FLTK_USE_XFT"]="OFF" ...（按当前版本真实名逐条写）
+  #       self.cpp_info.libs=["fltk_images","fltk_png","fltk_jpeg","fltk_z","fltk"]
+  #       self.cpp_info.includedirs=["include", "include/FL/images"]
+rec_auto_fix:           true
+rec_impl:               recipe-side-configure
+
+fallback_priority:      2
+fallback_approach:      verify-effective-options-via-CMakeCache.txt
+fallback_description: >
+  若 configure 日志拿不到（CI 只回传摘要/截断），改为解析构建目录的
+  CMakeCache.txt 逐条核对选项终值（FLTK_BACKEND_WAYLAND:BOOL=OFF 等），
+  或改用 -Wdev/--warn-unused-cli 让 CMake 对未使用变量显式告警。这只是
+  "事后核对"通道，不如在配方里钉死显式值。
+fallback_command:       grep -E "^(FLTK_|OPTION_)" build/CMakeCache.txt
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       大版本升级只改 version.*沿用 1.3.x 的 OPTION_USE_|
+                        保留 FLTK_BACKEND_WAYLAND 默认|不写
+                         FLTK_BACKEND_WAYLAND=OFF
+forbid_1_reason:        CMake 对未知 -D 变量不报错不失败；选项整体改名后沿用
+                         旧名 = 全部静默失效（只在 configure 末尾一行提示）。
+                         FLTK_BACKEND_WAYLAND 默认 ON 时，探测不到就静默自关
+                         （假通过），探测到就要求一堆 X 扩展库并 FATAL_ERROR。
+forbid_1_consequence:   构建成功但包语义与配方声明不符；或换个装了 wayland
+                         开发包的 worker 直接 FATAL_ERROR，白烧一轮 CI。
+forbid_2_pattern:       只声明 libs=.fltk_images.*,.*.fltk. 就完事|
+                         package_info 漏 fltk_png|漏 fltk_jpeg|漏 fltk_z
+forbid_2_reason:        FLTK_USE_SYSTEM_* 全 OFF 时 png/jpeg/z 是随包内置
+                         **分别编译**的独立静态库，fltk_images 只是 PUBLIC
+                         依赖它们（src/CMakeLists.txt:846,905-907，
+                         png/CMakeLists.txt:101）。
+forbid_2_consequence:   消费者用到 Fl_PNG_Image/Fl_JPEG_Image 时链接期未定义
+                         符号，且报错点在消费者侧，定位成本高。
+forbid_3_pattern:       cmake --build . --target test|沿用 1.3.x 的
+                         upstream_check_command.*target test
+forbid_3_reason:        1.4.x 源码树内没有 enable_testing()/add_test()，
+                         `--target test` 直接失败；上游 test/ 是独立 demo，
+                         由 test/CMakeLists.txt 的 fl_create_example() 生成并
+                         挂在 all 目标下。
+forbid_3_consequence:   "上游测试"步骤直接报错，误判为适配失败；或照抄
+                         1.3.11 档案的 MANIFEST.yml 写出错误的 check 命令。
+forbid_4_pattern:       因为.*GUI.*库.*只编译不运行|测试.*跳过 self.run|
+                         只用 cmake.build() 当 test_package
+forbid_4_reason:        版本宏 / fl_utf8* / fl_filename_* / Fl_Text_Buffer 这
+                         一族 API 的代码路径不经过窗口/屏幕驱动，在无 X
+                         display 的沙箱可真实运行；G0 要求 test_package 有
+                         literal 的 self.run()。平台特有差分（fl_utf8locale
+                         的 LC_ALL 三态）因结果静态缓存在函数内，必须用
+                         **多个独立进程**断言。
+forbid_4_consequence:   test_package 退化成"只编译"，G0/L0d 门禁不达，
+                         且失去对真实运行时行为的钉死。
+
+principles:             P-BUILD-001
+similar_to:             DRAFT-gnustep-gui-0.31.1-make-cli-flags
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-fltk-1.4.5-silent-option-rename-and-default-on-backend-switch.md
+last_updated:           2026-09-20
+source_event:           archives/f/fltk/1.4.5
+
+authors:                2301_76770579
+source_pr:              11407
+source_commit:          5eb08f011e
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20
