@@ -1,0 +1,71 @@
+#====================================================================
+# DRAFT-cmake-host-gate-silent-skip — CMake 宿主门禁按 SYSTEM_NAME/SYSTEM_PROCESSOR
+#   名称匹配 AND 判定并静默 return()，非 Linux 名称宿主需门禁正则与 Platform 模块
+#   双修，并以 STATUS "Not building" 清点静默跳过
+# 最终编号 Exxx 由知识库主编确认后回填。
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     DRAFT-cmake-host-gate-silent-skip
+trigger_tool:           cmake
+phase:                  configuration
+error_signature:        Not building .* NextGen plugin|only support AMDGPU in Linux .* hosts|System is unknown to cmake|Unable to determine platform
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               platform, detection, cmake, build-system
+match_keywords:         cmake, CMAKE_SYSTEM_NAME, CMAKE_SYSTEM_PROCESSOR, HarmonyOS, Linux, Platform module, silent return, Not building, plugins-nextgen, host gate, uname -p, aarch64
+title:                  CMake 宿主门禁按 SYSTEM_NAME/SYSTEM_PROCESSOR 名称匹配做 AND 判定并静默 return()，非 Linux 名称宿主需门禁正则与 Platform 模块双修并用 STATUS "Not building" 清点静默跳过
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             上游以宿主平台名称匹配做组件构建门禁：openmp/libomptarget/plugins-nextgen/amdgpu/CMakeLists.txt（LLVM 18.1.8 第 25-28 行）用 if(NOT (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(ppc64le)|(aarch64)$" AND CMAKE_SYSTEM_NAME MATCHES "Linux")) { libomptarget_say("Not building ..."); return() }，两个条件都是名称弱探测。HarmonyOS 宿主上 uname -s=HarmonyOS → CMAKE_SYSTEM_NAME=HarmonyOS，CMake 无 Platform/HarmonyOS 模块（报警告 System is unknown to cmake，create: Platform/HarmonyOS），第二条件失败；同机 uname -p=unknown → CMAKE_SYSTEM_PROCESSOR=unknown，第一条件也失败；AND 双条件任一失败即走 return()，configure 以 rc=0 正常结束，插件目标静默缺席，仅在 STATUS 行留一条 Not building 提示。完整因果链：工具实现证据（CMake 按 uname -s 查 Platform/<name>.cmake、SYSTEM_PROCESSOR 取自 uname -p）→ 触发命令（cmake -B build -S llvm 携带 LLVM_ENABLE_PROJECTS=openmp）→ 失败点（无 CMake Error、无编译错误，目标直接不存在）→ 归类（平台探测语义差异：门禁正则与 Platform 模块双重缺口，静默失败形态）。带 Platform shim 后若仅修名称半边，门禁仍会因 PROCESSOR=unknown 拦截——两半必须同时处理。
+affected_scope:         任何以 CMAKE_SYSTEM_NAME/CMAKE_SYSTEM_PROCESSOR（或 if(WIN32)/elseif(UNIX) 三分支）名称匹配做宿主或组件门禁的 CMake 项目（LLVM openmp plugins-nextgen 各后端、按平台名启停子组件的上层工程），在系统名不被 CMake 识别、或 uname -p 输出非常规值的宿主（HarmonyOS 等）上构建时组件被静默跳过或误判。与 E140（SYSTEM_NAME=HarmonyOS 不匹配 Linux）、E092（System is unknown to cmake）、E090（meson host_system 名不匹配）、E100（平台 unknown 导致组件禁用）、E532（平台三分支落 else()）同属平台名称识别族。
+verification_cmd:       uname -s; uname -p（HarmonyOS 宿主得 HarmonyOS/unknown，即 CMAKE_SYSTEM_NAME/CMAKE_SYSTEM_PROCESSOR 弱探测来源）；最小 AND 门禁工程复现静默 return()：mkdir -p /tmp/gate-probe && cd /tmp/gate-probe && printf 'cmake_minimum_required(VERSION 3.20)\nproject(gate C)\nif(NOT (CMAKE_SYSTEM_PROCESSOR MATCHES "(x86_64)|(ppc64le)|(aarch64)$" AND CMAKE_SYSTEM_NAME MATCHES "Linux"))\n  message(STATUS "Not building AMDGPU NextGen plugin: only support AMDGPU in Linux x86_64, ppc64le, or aarch64 hosts")\n  return()\nendif()\nmessage(STATUS "BUILDING plugin")\n' > CMakeLists.txt && cmake -B build -S . ; echo rc=$?（printf 的 \n 由 printf 展开；预期输出 Not building 行且 rc=0——门禁跳过不报错，此即"静默"本质）；诊断范式：对 configure 输出 grep -E 'Not building|System is unknown to cmake' 清点被静默跳过的组件，不得以 rc=0 判定组件齐全；修复后预期：STATUS 出现 Building AMDGPU NextGen plugin 且 Not building 计数为 0
+
+# ═══ Layer 3: 方案空间 ═══
+rec_priority:           1
+rec_approach:           platform-gate-regex-plus-platform-module-shim
+rec_description:        AND 门禁两个半边都要处理，缺一不可。(a) 门禁正则增加宿主系统名分支：CMAKE_SYSTEM_NAME MATCHES "(Linux|HarmonyOS)"（补丁 0002，语义为"linux 内核同名宿主与 Linux 同等放行"，最小、可向上游提交，其他平台零行为变化）；(b) 补 CMake Platform 模块 shim：自写 Platform/HarmonyOS.cmake（set(CMAKE_SYSTEM_PROCESSOR aarch64) + include(Platform/Linux)），经 -DCMAKE_MODULE_PATH 注入，同时消除 System is unknown to cmake 警告与 LLVM HandleLLVMOptions.cmake:194 "Unable to determine platform" 致命错，并把 PROCESSOR 从 uname -p 的 unknown 纠正为真实目标架构（与构建 profile arch 一致）；(c) 配置完成后以 STATUS "Not building" 清点收尾，确认无组件被静默跳过。
+rec_command:            补丁 0002 修改 plugins-nextgen/amdgpu/CMakeLists.txt 门禁行为 MATCHES "(Linux|HarmonyOS)"；构建目录外置 _cmake_modules/Platform/HarmonyOS.cmake（内容两行：set(CMAKE_SYSTEM_PROCESSOR aarch64) 与 include(Platform/Linux)），configure 加 -DCMAKE_MODULE_PATH=<该目录>；验证：configure 输出 grep 'Building AMDGPU NextGen plugin' 命中、grep -c 'Not building' 为 0。
+rec_auto_fix:           true
+rec_impl:               patch-recipe-cmake
+
+fallback_priority:      2
+fallback_approach:      force-system-name-linux-override
+fallback_description:   无法修改门禁正则时，在 project() 之前（toolchain 文件或初缓存）显式 -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 强制按 Linux 处理。诚实权衡：掩盖真实平台名而非修复（等同向构建系统谎称 Linux），会置 CMAKE_CROSSCOMPILING=TRUE 改变上游交叉编译语义，并污染项目内其他以系统名区分行为的逻辑（OS_LINUX 宏、安装路径、特性探测），仅作退路并须记录技术债。
+fallback_command:       cmake -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 -DCMAKE_C_COMPILER=<cc> -DCMAKE_CXX_COMPILER=<cxx> -B build -S <src>（SYSTEM_NAME/SYSTEM_PROCESSOR 必须在 project() 前注入，否则首次 project() 已按真实宿主名完成平台判定）
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       -DCMAKE_SYSTEM_NAME=Linux.*不声明权衡|set\(CMAKE_SYSTEM_NAME[[:space:]]*Linux\)
+forbid_1_reason:        静默冒充 Linux 违反"能力探测优于平台名硬编码"：不声明权衡的平台名伪装会污染上游其他系统名分支的判定。
+forbid_1_consequence:   上游按系统名区分的行为（宏定义、安装路径、平台特性探测）误走 Linux 路径，问题后移到编译期或运行期才暴露。
+forbid_2_pattern:       删除.*return\(\)|注释.*门禁|整体跳过.*plugins-nextgen
+forbid_2_reason:        直接删除/注释宿主门禁或整体剔除插件子目录是绕过上游守卫，不是平台适配。
+forbid_2_consequence:   不可向上游提交，其他平台行为被破坏，后续版本合并必然冲突。
+
+# ═══ Layer 4: 原则 ═══
+principles:             P004,P005
+
+# ═══ Relations ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E140,E092,E090,E100,E532]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ Metadata ═══
+doc_file:               drafts/DRAFT-cmake-host-gate-silent-skip.md
+last_updated:           2026-09-15
+source_event:           libomptarget-rtl-amdgpu 18.1.8（LLVM openmp monorepo）HarmonyOS PC 真机适配：未打补丁时 amdgpu 插件被名称门静默 return()（probe 日志：未补丁 configure 出现原始措辞 "only support AMDGPU in Linux x86_64..."，带名称补丁无 shim 时出现 "System is unknown to cmake" 与 LLVM Unable to determine platform 致命错，Platform shim 就位后仍被 PROCESSOR=unknown 半边拦截，PROCESSOR 纠正后 configure 全通）；最终以补丁 0002 + Platform/HarmonyOS.cmake shim 修复，权威 CI run3 实测插件构建且 test_package dlopen+dlsym 通过。探针日志留档于本 run 临时目录（run 结束后以 CI 日志为准）。
+
+# ═══ Authorship and provenance ═══
+authors: why6666666
+source_pr: 交付 PR 后回填
+source_commit: 合并后回填
+
+# ═══ Quality metrics ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15
