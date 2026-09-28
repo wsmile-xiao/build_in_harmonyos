@@ -1,0 +1,30 @@
+#====================================================================
+# Draft: 消费者测试若用「退出码非 0 即通过 / 跑完即通过」这类弱判定，会把
+#        二进制加载失败（126/127/255）与信号终止误判为通过，使 CI 的 L1
+#        「测试执行验证」门禁失去拦截能力 —— 必须先排除这三类码并校验
+#        WIFEXITED，再断言语义输出
+#   Stem: crashme-2.8.5-consumer-test-exitcode-126-127-255-guard — pairs with same-stem .md
+#====================================================================
+
+id:                     DRAFT-CRASHME-CONSUMER-TEST-EXITCODE-126-127-255-GUARD
+trigger_tool:           ci
+phase:                  testing
+error_signature:        exit 126|exit 127|Permission denied|not found|bad interpreter|Error while loading|误判为通过|false pass
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               ci-gate, test-quality, ohos-exec
+match_keywords:         126, 127, 255, WIFEXITED, 退出码, false pass, 假绿, L1 门禁, 消费者测试, popen, system, 信号终止, Permission denied, 加载失败
+
+title:                  消费者测试的"跑完即通过"弱判定会把二进制加载失败（126/127/255）与信号终止误判为通过 —— 必须显式排除并校验 WIFEXITED
+
+root_cause:             在 OHOS 上"程序跑不起来"主要表现为三类退出码：126（无执行权限 / exec 被拒，实测消费级 HarmonyOS PC 的 SELinux 域限制即返回 126）、127（找不到解释器或文件）、255（动态加载器失败）；此外被信号杀死时 WIFEXITED 为假、WEXITSTATUS 取值无意义。若消费者测试写成「system() 返回非 0 即算通过」或「只检查输出非空」，上述三类"根本没跑起来"的情形会被计入 PASS，于是 CI 的 L1 门禁（测试执行验证）表面全绿、实际未验证任何东西。反向也成立：被测工具本身可能**故意**非 0 退出（如 crashme 的崩溃注入、mlddc 的 usage 错误路径 exit 10），于是"断言退出码为 0"同样不可靠。
+affected_scope:         所有 `test_package` 中的 C/C++/shell 消费者测试，尤其是被测对象是 CLI 工具、其正常/错误路径都会返回非 0 的包。检测信号：测试在本地（交叉编译跳过）绿、在 CI 上也绿，但把二进制换成 `/bin/false` 或不存在的文件**仍然绿**——说明判定无效。
+verification_cmd:       在 test_package 里临时把被测路径替换为 `/nonexistent`：若测试仍 PASS，则该断言未排除 126/127/255
+
+# ═══ Layer 2: 决策层 ═══
+rec_priority:           1
+rec_approach:           explicit-exitcode-and-wifexited-guard
+rec_description:        统一用 popen 直读 + 三态判定（同时避免落盘 /tmp——OHOS 的 /tmp 只读，写中间文件本身就会制造 E325/E223 类失败）：(1) 排除"跑不起来"——pclose 返回 -1、!WIFEXITED(rc)（被信号杀死）、WEXITSTATUS ∈ {126,127,255} 一律 FAIL 并把原始码写进断言详情；(2) 语义断言——再检查输出非空且含该工具**确定的**字符串（从源码里抄出真实字面，如 daa2iso 的 "Usage:"），不要泛泛断言"输出不为空"；(3) 工具本身预期非 0 时不要断言 0，而断言"未落在 126/127/255 且未被信号杀死"。参考实现：archives/c/crashme/2.8.5/test_package/test_crashme.c 的 safe_run()、archives/d/devio/1.2/test_package/test_devio.c、archives/d/devmem2/0.2/test_package/test_devmem2.c。对"故意崩溃"型工具（crashme），刻意不执行其崩溃路径，只做静态校验 + 辅助工具的安全调用。
+rec_command:            # 判定模板（C 语言，无中间文件）\nint rc = pclose(fp);\nif (rc == -1 || !WIFEXITED(rc)) FAIL;\nint code = WEXITSTATUS(rc);\nif (code == 126 || code == 127 || code == 255) FAIL;   /* 跑不起来 */\nassert_output_contains(buf, "Usage");
+rec_auto_fix:           false
