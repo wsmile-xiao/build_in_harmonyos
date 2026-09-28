@@ -1,0 +1,60 @@
+#====================================================================
+# E6418 draft — 1990s 基准/计时类 C 源码用 CLK_TCK 换算 times() 滴答：
+#               OHOS musl sysroot 无此宏（现代 glibc 同样没有）
+# 对应文档: knowledge/drafts/E6418-draft-9D56.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     E6418
+trigger_tool:           clang|gcc|make
+phase:                  compile
+error_signature:        use of undeclared identifier 'CLK_TCK'|'CLK_TCK' undeclared|CLK_TCK.*undeclared
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               libc, api, legacy-c, compile
+match_keywords:         CLK_TCK, _SC_CLK_TCK, sysconf, times(), struct tms, undeclared identifier, musl, clock ticks, HZ, benchmark
+title:                  老式 C 代码 times()/CLK_TCK 换算秒数：OHOS musl 无 CLK_TCK 宏，改 sysconf(_SC_CLK_TCK)
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             CLK_TCK 是 POSIX.1-1988/ANSI 草案时代的"每秒时钟滴答数"宏，POSIX.1-2001 已删除，改由 sysconf(_SC_CLK_TCK) 运行时查询（times() 返回值与 struct tms 字段的单位）。OHOS NDK sysroot（musl 系）的 <time.h>/<sys/times.h>/<limits.h> 均不定义 CLK_TCK，只在 <unistd.h> 提供 _SC_CLK_TCK（值 2）；现代 glibc 在默认特性宏（_DEFAULT_SOURCE ⇒ __USE_XOPEN2K）下同样不定义，gcc -std=c89 亦报 undeclared。1990s 的基准、计时、进程统计工具（ubench、dhrystone 的 times 分支、utime 等）直接用它做除数，于是编译期 error。不能用 CLOCKS_PER_SEC 顶替：那是 clock() 的单位（XSI 规定恒为 1000000），而 times() 的单位是内核 USER_HZ（Linux/OHOS 为 100），错用会让换算出的秒数小 10^4 倍，校准循环（while (load(i) < 0.4s) i*=2）甚至不收敛。
+affected_scope:         所有用 times()+CLK_TCK 计时的老 C 程序（基准测试、benchmark 校准循环、进程 CPU 统计）；交叉到 OHOS 与在现代 glibc 上原生编译都会命中，属于 legacy-C 移植问题而非 OHOS 独有，但在 OHOS 适配老软件时高频同时出现的还有 sys_errlist（见 similar_to 草稿）与 K&R 隐式声明。
+verification_cmd:       grep -rn 'CLK_TCK' <src> ; printf '#include <unistd.h>\nlong t(void){return sysconf(_SC_CLK_TCK);}\n' | clang -x c -c - -o /dev/null   # 前者列出待替换点，后者证明 _SC_CLK_TCK 可用
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           replace-clk-tck-with-sysconf
+rec_description:        在源码补丁里把 CLK_TCK 的每个使用点替换为 sysconf(_SC_CLK_TCK)（需 <unistd.h>，多数老代码已包含），保持除法语义不变；这是可移植 POSIX 写法，不需要 __OHOS__ 等平台宏，补丁可直接进 patches/。ubench 0.32 实测：-cs/-ms 单次校准回报 0.40s，与 0.4s 目标一致。
+rec_command:            sed -i 's/(double )CLK_TCK/(double )sysconf(_SC_CLK_TCK)/' cpubench.c membench.c   # 在 .work 中改源码后 refresh-patch --auto 生成补丁
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      compat-define-guarded
+fallback_description:   使用点很多、不宜逐点改时，在公共头里加 #ifndef CLK_TCK / #define CLK_TCK sysconf(_SC_CLK_TCK) / #endif（特性探测式守卫，不是平台宏），语义同上。
+fallback_command:       printf '#ifndef CLK_TCK\n#define CLK_TCK sysconf(_SC_CLK_TCK)\n#endif\n' >> common.h
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ═══ 禁止策略 ═══
+forbid_1_pattern:       -DCLK_TCK=CLOCKS_PER_SEC|#define CLK_TCK CLOCKS_PER_SEC
+forbid_1_reason:        CLOCKS_PER_SEC 是 clock() 的单位（1000000），不是 times() 的滴答率（100），换算结果错 10^4 倍，基准校准失真或死循环。
+forbid_1_consequence:   编译通过但基准分数/计时全部错误，test_package 的时长断言或 CI 超时暴露。
+forbid_2_pattern:       -DCLK_TCK=100|#define CLK_TCK 100
+forbid_2_reason:        硬编码滴答率假设内核 USER_HZ=100，不可移植；sysconf 是 POSIX 规定的查询方式。
+forbid_2_consequence:   在非 100Hz 的内核/容器上计时静默偏差。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P010
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [tevent-0.17.1-musl-strerror-sys-errlist-remap, DRAFT-irpas-0.10-musl-errlist-registry-replace]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E6418-draft-9D56.md
+last_updated:           2026-09-26
+source_event:           ubench/0.32（ibiblio system/benchmark）：OHOS clang 报 cpubench.c:93 / membench.c:83 "use of undeclared identifier 'CLK_TCK'"（另有 sys_errlist ×5）；补丁改 sysconf(_SC_CLK_TCK) 后 conan create 通过，test_package 经 qemu-aarch64 实跑 -cs/-ms 回报 0.40s 校准时长。
