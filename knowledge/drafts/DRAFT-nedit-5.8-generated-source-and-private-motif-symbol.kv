@@ -1,0 +1,137 @@
+# ═══ Draft knowledge entry — 两个"不要引入的不必要依赖" ═══
+# Timestamp: 2026-09-20
+# Software: nedit 5.8
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-nedit-5.8-generated-source-and-private-motif-symbol
+trigger_tool:           make|clang|conan|linker
+phase:                  configuration|compilation|linking
+error_signature:        bison: command not found|yacc: command not found|
+                         undefined reference to `_XmVersionString'|
+                         undefined symbol: _XmVersionString|
+                         parse\.c|parse_noyacc\.c|HAVE__XMVERSIONSTRING|
+                         BUILD_UNTESTED_NEDIT|GetMotifStability
+severity:               2
+category:               build-system|generated-source|linking|private-abi|
+                         motif|portability
+match_keywords:         bison, yacc, parse.y, parse_noyacc.c, generated source,
+                         checked-in fallback, mtime, cc -c, HAVE__XMVERSIONSTRING,
+                         _XmVersionString, XmVERSION_STRING, libXm private symbol,
+                         BUILD_UNTESTED_NEDIT, GetMotifStability, MotifKnownGood,
+                         debian/rules CFLAGS, unnecessary dependency
+
+title:                  两个"不要引入的不必要依赖"：生成文件的上游回退（用
+                        parse_noyacc.c 顶掉 yacc）与私有符号开关
+                        （-DHAVE__XMVERSIONSTRING 会把 libXm 私有符号拉进链接）
+
+root_cause: >
+  (a) source/parse.c 是由 source/parse.y 经 bison 或 yacc 生成的，
+  上游 Makefile.common 的规则是三级回退：
+      parse.c: parse.y
+          bison -o parse.c parse.y || ( yacc parse.y && mv y.tab.c parse.c ) \
+              || cp parse_noyacc.c parse.c
+  也就是说上游**自带**一份 checked-in 的回退实现（parse_noyacc.c）。在干净
+  worker 上 bison/yacc 都不在，构建会走到第三级（能成功，但多一次失败尝试），
+  而且如果源码包解压后 parse.y 的 mtime 比新写出来的 parse.c 更晚，make 会
+  反复重跑这个规则。预拷贝回退是确定性的做法。
+  (b) source/help.c 用 #ifdef 决定"运行期 Motif 版本字符串"从哪来：
+      #ifdef HAVE__XMVERSIONSTRING
+      extern char _XmVersionString[];
+      #else
+      static char _XmVersionString[] = "unknown";
+      #endif
+  定义这个宏，链接期就必须能从 libXm 解析出 **私有** ABI 符号
+  _XmVersionString（Motif 不承诺该符号存在或稳定）。Debian 定义它是为了在
+  "-V" 里打印运行期 Motif 版本，代价是链接期绑死一个非公开符号；本包的一个
+  真正依据是 Motif 2.3.8 会被 util/motif.c:GetMotifStability() 判为
+  MotifKnownGood（XmFullVersion == 200308 落在 2.2.3–2.3.8 的"good"区间），
+  所以 Debian 的另一个宏 -DBUILD_UNTESTED_NEDIT 也不必要。
+affected_scope: >
+  所有"生成文件 + checked-in 回退"的项目（bison/yacc、flex、gperf、setext 等），
+  以及所有"用 #ifdef 打开一个可选能力、代价是依赖非公开 ABI"的上游开关
+  （private symbol、internal header、_Xm* / _g_* / 未导出的 glibc 内部函数）。
+verification_cmd: >
+  grep -n 'parse\.c: parse\.y' -A3 source/Makefile.common
+  ls source/parse_noyacc.c
+  grep -n 'HAVE__XMVERSIONSTRING' -B2 -A3 source/help.c
+  grep -n 'HAVE__XMVERSIONSTRING\|BUILD_UNTESTED_NEDIT' debian/rules
+  grep -n 'XmFullVersion' util/motif.c
+rec_priority:           1
+rec_approach:           prefer-upstream-fallback-and-refuse-private-abi-flags
+rec_description: >
+  两条独立但同源的规则。**规则一（生成文件）**：凡是遇到"由工具生成"的源文件，
+  先查上游有没有 checked-in 的回退实现。有就**预拷贝**它覆盖生成产物，让构建
+  完全不需要该工具；拷贝会把 mtime 设为当前时间，恰好让它比生成规则的输入
+  （.y/.l）更新，从而让 make 认为无需重跑生成器。这样做有三重收益：worker 少
+  一个工具依赖、构建路径唯一确定、不依赖"bison 恰好装在哪"。
+  **规则二（可选能力开关）**：遇到 #ifdef 出来的可选能力，逐个评估它在目标
+  平台上是否需要。判据不是"功能更全更好"，而是"打开它是否引入了一个不稳定的
+  依赖"。**不定义是零风险的默认，定义才需要证据**——证据形式是：目标平台上
+  该符号确实存在、已发布、且被上游承诺为公开 ABI。发行版的 CFLAGS 在这里只能
+  当线索：Debian 定义它是因为它要打印运行期版本，且有 glibc 级的兼容性保证
+  可依赖；OHOS 上这两条都不自动成立。
+rec_command: >
+  # 规则一
+  shutil.copyfile(os.path.join(src, "source", "parse_noyacc.c"),
+                  os.path.join(src, "source", "parse.c"))
+  # 规则二
+  cflags += ["-DUSE_DIRENT", "-DUSE_LPR_PRINT_CMD"]   # 不加 HAVE__XMVERSIONSTRING
+rec_auto_fix:           true
+rec_impl:               recipe-side-build
+
+fallback_priority:      2
+fallback_approach:      tool_requires-the-generator
+fallback_description: >
+  如果上游**没有** checked-in 回退（生成文件是构建的硬前提），就在配方里加
+  tool_requires（bison/flex/gperf 等），让 Conan 负责把生成器带上 worker。
+  代价：多一个 tool_requires 与一次求解，生成结果随工具版本漂移（可复现性
+  下降），且工具本身要在 OHOS 上能跑（bison 是 pure C，通常没问题）。
+  本包**不需要**——parse_noyacc.c 是官方回退。注意：如果走了这条路，
+  千万不要把生成产物也提交进仓库，否则两种来源不一致会非常难查。
+fallback_command:       tool_requires("bison/3.8.2") + autotools.make(target="parse.c")
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-toolchain
+
+forbid_1_pattern:       因为 bison/yacc 缺失就在配方里 patch 掉 parse\.c 的生成
+                           规则或手写一个 parse\.c
+forbid_1_reason:         上游已经提供了官方回退 parse_noyacc.c；手写/改写会
+                           直接与上游语法表脱节，而且下次升级上游时无人会想起
+                           还要同步这份手工文件。
+forbid_1_consequence:    解析器行为与上游 parse.y 悄悄不一致（语法接受集变化），
+                           运行期才以莫名其妙的方式暴露。
+forbid_2_pattern:       为了"版本输出更完整"顺手加上 -DHAVE__XMVERSIONSTRING
+forbid_2_reason:         该宏把 libXm 的**私有**符号 _XmVersionString 拉进
+                           链接期；Motif 不承诺这个符号存在、导出或稳定。
+forbid_2_consequence:   undefined reference to `_XmVersionString'——而 Motif
+                           本身编得好好的，报错看起来像"Motif 包不完整"，
+                           归因方向完全错。
+forbid_3_pattern:       把 debian/rules 的 -DBUILD_UNTESTED_NEDIT 一并抄进来
+forbid_3_reason:         这个宏是给"上游已知有问题的 Motif 版本"用的逃生门；
+                           本包依赖的 Motif 2.3.8 被 util/motif.c 判为
+                           MotifKnownGood（200308），加上它只会掩盖真实问题。
+forbid_3_consequence:   真出现 Motif 相关崩溃时，稳定性自检已经被人为静音，
+                           排查难度陡增。
+forbid_4_pattern:       在 worker 上依赖"碰巧装了某个代码生成器"
+forbid_4_reason:         干净 worker 与开发机的工具集不同；依赖隐含工具的构建
+                           会在换 worker 时随机失败，或退回到回退分支（于是
+                           编译的是另一份实现却无人知晓）。
+forbid_4_consequence:   跨 worker 抖动，以及"本地能过 CI 不能过"的经典困局。
+
+principles:             P001
+similar_to:             DRAFT-nedit-5.8-use-dirent-musl-vs-distro-cflags
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-nedit-5.8-generated-source-and-private-motif-symbol.md
+last_updated:           2026-09-20
+source_event:           archives/n/nedit/5.8
+
+authors:                2301_76770579
+source_pr:              11631
+source_commit:          e8f7c9b9e
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20

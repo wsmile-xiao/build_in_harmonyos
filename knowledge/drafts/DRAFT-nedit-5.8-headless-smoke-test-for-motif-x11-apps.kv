@@ -1,0 +1,120 @@
+# ═══ Draft knowledge entry — X11/Motif 图形应用的 headless 冒烟测试范式 ═══
+# Timestamp: 2026-09-20
+# Software: nedit 5.8
+# Gate: G2 (conan create) / L1 (test_package)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-nedit-5.8-headless-smoke-test-for-motif-x11-apps
+trigger_tool:           conan|x11|motif|test
+phase:                  testing
+error_signature:        Can't open display|XtOpenDisplay|XOpenDisplay|
+                         XtWarning|DISPLAY|Error loading shared library
+                         libXm\.so\.4|PermissionError.*Errno 13|
+                         no X server|:0\.0
+severity:               2
+category:               testing|x11|motif|headless|runtime-link
+match_keywords:         X11, Motif, libXm.so.4, XtOpenDisplay, XOpenDisplay,
+                         DISPLAY, XAPPLRESDIR, headless, smoke test,
+                         VirtualRunEnv, conanrun, LD_LIBRARY_PATH,
+                         maskArgvKeywords, XrmParseCommand, option table,
+                         PrintVersion, -V, -version, PIE, ET_DYN
+
+title:                  X11/Motif 图形应用的 headless 冒烟测试范式：先找"在
+                        XtOpenDisplay 之前应答"的开关，再用"摘掉 DISPLAY 必须
+                        失败"做反向自证
+
+root_cause: >
+  图形程序的默认验收动作是"启动它"，而 CI worker 上没有 X server，
+  XtOpenDisplay 必然失败。直接跑主程序只能得到一次失败，无法区分"程序坏了"
+  和"没有显示"。但很多老程序把版本/用法查询放在打开 display 之前：nedit 在
+  XtOpenDisplay 返回 NULL 之后的 !TheDisplay 分支里应答 -V/-version 并 exit(0)
+  （源码注释就写着 "Respond to -V or -version even if there is no display"）；
+  nc 则在 processCommandLine 里、XtOpenDisplay 之前就 printNcVersion()+exit(0)。
+  另一方面，"能跑版本"这件事本身**不能**证明这是个真的 X 客户端——一个把
+  main() 写成只打版本的 stub 也能通过。于是需要两个方向都断言：功能性（版本
+  路径可用）与反向性（没有显示时主路径必须失败）。此外，图形程序通常是动态
+  链接，且依赖链比消费者自己的 runenv 深得多，运行期能否找到 libXm.so.4 及其
+  X11 传递依赖，是这条测试真正在验的东西。
+affected_scope: >
+  所有 X11/Xt/Motif 图形应用的 Conan 冒烟测试；以及任何"依赖一个在目标机上
+  未必存在的服务/设备/显示"的可执行包——范式相同：找一个不依赖该服务的查询
+  路径，再补一条"服务缺失时必须失败"的反向断言。
+verification_cmd: >
+  grep -n 'XtOpenDisplay\|XOpenDisplay' source/*.c
+  grep -n "Can't open display" source/*.c
+  grep -n 'XrmOptionDescRec\|OpTable' source/*.c
+  sed -n '/if (!TheDisplay)/,+12p' source/nedit.c
+rec_priority:           1
+rec_approach:           find-pre-display-query-path-and-assert-both-directions
+rec_description: >
+  四步。(a) 先在源码里定位查询路径：grep XtOpenDisplay/XOpenDisplay，看有没有
+  在它之前（或在其失败分支里）应答的 version/usage/help 开关。判断某个开关能否
+  存活**必须读选项表**，不能凭直觉：Xt 路径上 CreatePreferencesDatabase 会调
+  XrmParseCommand，它只从 argv 里移除**选项表里认得**的参数（nedit 的
+  preferences.c OpTable / nc 的 OpTable 都不含 -V，所以 -V 原样留下）；
+  nedit 还会为 -geometry/-iconic 之类做 maskArgvKeywords（把 '-' 换成 ' '、
+  之后再还原），-V 不在保护列表里，不受影响。(b) 在 test_package 里**主动**
+  os.environ.pop("DISPLAY") 再起进程，不要假设 worker 环境干净。(c) 两个方向
+  都断言：带 -V 退出码 0 且输出含版本串；不带 -V 时退出码非 0 且 stderr 含
+  "Can't open display"。后者证明它确实会去开显示，从而证明前者是"提前应答"
+  而不是"根本不打开显示"。(d) 图形程序普遍动态链接：把 **整张依赖图**的
+  libdir 前缀进 LD_LIBRARY_PATH（conanrun 只覆盖声明了 runenv 的节点），再
+  用绝对路径从包缓存执行产物。另外可断言版本输出里那行编译期/运行期信息
+  （nedit 的 "With Motif:"），它顺带证明编译期头文件与链接的 libXm 版本一致。
+rec_command: >
+  env = dict(os.environ); env.pop("DISPLAY", None)
+  subprocess.run([pkg/bin/nedit, "-V"], env=env)      # 退出码 0，"NEdit 5.8"
+  subprocess.run([pkg/bin/nedit], env=env)            # 退出码 != 0，"Can't open display"
+rec_auto_fix:           false
+rec_impl:               recipe-side-test
+
+fallback_priority:      2
+fallback_approach:      xvfb-or-virtual-display-wrapper
+fallback_description: >
+  若目标程序**没有**任何 pre-display 的查询路径（所有行为都要求 display），
+  可在测试环境里起一个虚拟显示（Xvfb / Xephyr），把 DISPLAY 指向它后再执行。
+  代价：worker 上需要额外安装并能启动 Xvfb，测试期多一个常驻进程（要处理
+  超时与残留），且在 OHOS 上未必有 Xvfb；收益是能真正走到窗口创建路径。
+  本包不需要——nedit 与 nc 都提供了 pre-display 应答路径。
+fallback_command:       Xvfb :99 -screen 0 1024x768x24 & DISPLAY=:99 nedit -V
+fallback_auto_fix:      false
+fallback_impl:          ci-side-environment
+
+forbid_1_pattern:       假设 worker 上没有 DISPLAY，直接运行主程序
+forbid_1_reason:         CI worker 是否导出 DISPLAY 不由配方决定；一旦某个
+                           worker 恰好带着 DISPLAY，测试会去连一个半死的 X
+                           server 并卡住或随机失败。
+forbid_1_consequence:    跨 worker 抖动，或测试超时。
+forbid_2_pattern:       只断言"能打印版本"而不断言"没有显示时会失败"
+forbid_2_reason:         一个把 main() 写成只打版本的 stub 同样能打印版本；
+                           只做正向断言无法区分"真 X 客户端"与"假程序"。
+forbid_2_consequence:    假测试通过，L1e 的破坏性反向验证之外再无第二道
+                           guard；这类测试也给不出任何移植价值。
+forbid_3_pattern:       用 PATH 查找或让 /bin/sh 启动 ELF 产物
+forbid_3_reason:         OHOS 的 /system/bin/sh（mksh）不能执行 ELF；
+                           靠 PATH 查找则在 L1e 把 bin/ 移走之后可能仍从别处
+                           命中同名程序，掩盖"测试不依赖被测包"。
+forbid_3_consequence:    L1e 判定为假测试；或跨 worker 因为 PATH 不同而抖动。
+forbid_4_pattern:       只靠 grep 二进制里有没有 "NEdit" 字符串来判定可执行
+forbid_4_reason:         字符串存在于 ELF 的只读段并不代表程序能跑；图形程序
+                           真正的风险在运行期动态链接，不在符号表。
+forbid_4_consequence:    链接期/运行期问题（缺 libXm.so.4、未签名 ELF）全部
+                           漏检，直到用户第一次运行才发现。
+
+principles:             P001
+similar_to:             DRAFT-openvi-7.9.33-nonautotools-argv0-mode-musl-pty-ncurses-override
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-nedit-5.8-headless-smoke-test-for-motif-x11-apps.md
+last_updated:           2026-09-20
+source_event:           archives/n/nedit/5.8
+
+authors:                2301_76770579
+source_pr:              11631
+source_commit:          e8f7c9b9e
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
