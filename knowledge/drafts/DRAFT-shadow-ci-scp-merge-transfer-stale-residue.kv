@@ -1,0 +1,69 @@
+#====================================================================
+# DRAFT knowledge entry - 真机 shadow CI：scp -r 合并传输把旧 job 目录的运行残留带进包目录
+# Source: simh/3.8.1 真机验证 2026-09-27（job simh-3.8.1-shadow-20260927-134801）
+#====================================================================
+
+id: DRAFT-shadow-ci-scp-merge-transfer-stale-residue
+trigger_tool: scp|ssh|conan|junk_check
+phase: testing|shadow-ci
+error_signature: __pycache__|build-release|conanbuild\.sh.*test_package|junk_check.*fail|JC[0-9].*fail|找不到的文件|多出的文件|file count mismatch
+severity: 2
+category: shadow-ci, device, transfer, contamination
+match_keywords: scp -r, 合并传输, merge, 残留, stale files, 真机 job, ohos-prepare-isolated-conan-job, 包目录污染, __pycache__, build-release, 文件清单核对, shadow CI
+
+title: 向已存在的真机 job 包目录 scp -r 是"合并"不是"替换"——旧运行的 __pycache__/build-release 等残留会混入本次测试，传输后必须核对精确文件清单
+
+root_cause: >
+  真机隔离 job 的 repo 目录经常来自 --repo-source 复制的旧仓库（内含上次适配的
+  同名包目录）或上次运行现场。scp -r local_dir remote_dir/ 的语义是逐文件合并：
+  新文件覆盖同名旧文件，但旧目录里多出来的文件/子目录**原样保留**。本次实测残留两类：
+  (1) 上次本地导入配方时 Python 生成的 3.8.1/__pycache__/conanfile.cpython-312.pyc；
+  (2) 上次旧版草稿在设备上跑过的 test_package/build-release/（conanbuild.sh 等
+      Conan 生成物）。后果：a) junk_check/JC 门禁可能因包目录内多出文件而 fail；
+  b) test_package 目录混入旧构建产物，测试行为不可复现；c) "传输成功"的错觉——
+      单看 scp 退出码 0 无法发现缺文件/多文件。
+
+affected_scope: 所有真机 shadow CI 传输环节：向已存在（含 repo-source 预置或上轮
+  运行遗留）的 job 包目录做 scp -r / tar 解包覆盖的场景。
+
+verification_cmd: >
+  # 传输后必须核对（数量+名单一致才允许跑 runner）:
+  find <job>/repo/build_in_harmonyos/archives/<x>/<pkg>/<ver> -type f | sort
+  # 对照本地: git ls-files archives/<x>/<pkg> 或本地 find | sort，逐项 diff
+  # 本地 8 个文件 vs 设备实测首次 14 个（多出 __pycache__/*.pyc 与
+  # test_package/build-release/conan/*.sh）→ 清理后复验 8/8
+
+rec_priority: 1
+rec_approach: clean-exact-package-dir-then-transfer-then-verify-count
+rec_description: >
+  传输前三步：1) 只对"计算出的当前 job 内的精确包目录"执行 rm -rf（遵守避坑指南
+  9.2 的路径约束：绝不对计算出的上级目录递归删除）；2) scp -r 传输；3) 传输后在
+  设备端 find -type f 列清单，与本地逐项比对（文件数+路径完全一致）再启动 runner。
+  若 job repo 来自 --repo-source 旧仓库，先确认该仓库内同名包目录的状态，或传输后
+  以本地清单为准删除多余项。本地打包前置：import 过 conanfile.py 的环境要先清
+  __pycache__ 再 git add（或确认 .gitignore 覆盖），避免从源头就带上 pyc。
+rec_command: >
+  # 设备端（K=私钥路径占位, H=host, D=精确包目录——先展开校验再执行）
+  ssh ... "rm -rf '$D'"        # 仅限当前 job 内精确包目录，遵守避坑指南 9.2
+  scp -i ... -P 2222 -r "$LOCAL/pkgdir" "$H:${D%/*}/"
+  ssh ... "find '$D' -type f | sort"    # 与本地清单逐项 diff，一致才跑 runner
+rec_auto_fix: false
+rec_impl: manual
+fallback_priority: 2
+fallback_approach: tar-single-archive-transfer
+fallback_description: >
+  打成单 tar 归档传输、设备端解到全新目录（tar 无法"合并残留"，解包前目录为空），
+  规避合并语义；传输后同样核对清单。注意避开避坑指南 9.3 的文本管道破坏 tar 坑
+  （用 scp 传 .tar 或 base64）。
+conflicts_with: []
+notes: >
+  查重边界：避坑指南 9.3 讲"文本管道破坏 tar 二进制流"（传输损坏），本条讲
+  "传输成功但目录合并带入旧残留"（传输污染）——失败面与处置均不同；
+  指南 9.2 讲覆盖删除的安全路径约束，本条复用其约束并补"合并语义+清单核对"流程。
+  全库检索 scp/残留/stale merge：无既有条目覆盖此失效模式。
+verify_builds: >
+  simh/3.8.1 真机 2026-09-27 实测：首次传输后设备端 14 个文件（多 6 个残留），
+  清理后 8/8 与本地一致，runner 全绿；若未清理，junk_check/L0 存在被污染风险。
+authors: codex
+source_pr: pending
+source_commit: 9eb7708c16 (feat/simh-3.8.1)

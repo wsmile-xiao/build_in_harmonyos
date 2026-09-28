@@ -1,0 +1,65 @@
+#====================================================================
+# DRAFT knowledge entry - simh 3.8.1 makefile CC 变量承载"整条编译命令"的第三种形态
+# Source package: simh/3.8.1（上游 V3.8-1，手写 GNU makefile，纯 C）
+#====================================================================
+
+id: DRAFT-simh-3.8.1-makefile-cc-full-command-override
+trigger_tool: make|clang|ld.lld
+phase: compilation
+error_signature: gcc: No such file or directory|undefined symbol.*(strncasecmp|usleep)|undefined reference.*(fmod|log|exp|sqrt)|multiple definition|duplicate symbol
+severity: 2
+category: build-system, make, toolchain
+match_keywords: GNU makefile, CC as full command, CC 变量含 flags, command-line CC override, 覆盖丢 flags, OS_CCDEFS, -D_GNU_SOURCE, LDFLAGS link order, -lm 后置, musl, raw makefile, simh
+
+title: makefile 的 CC 变量承载整条编译命令（gcc+flags）时命令行 CC= 是"整体替换"——必须自行补齐关键 flags，否则失败延迟到编译/链接后段且难归因
+
+root_cause: >
+  手写 makefile 中 gcc 的出现位置有三种形态，CC= 命令行覆盖的语义完全不同：
+  (a) CC 只含编译器名（`CC := g++`，DRAFT-cohomcalg）→ 覆盖即换名，上游 flags 原样保留；
+  (b) gcc 写死在 recipe 正文（cnrbtree，DRAFT-cnrbtree）→ 覆盖无效，必须改 recipe；
+  (c) CC 含完整命令（`CC = gcc -std=c99 -U__STRICT_ANSI__ -g $(OS_CCDEFS) -I .`，
+      OS_CCDEFS = -lrt -lm -D_GNU_SOURCE，simh 形态）→ 命令行 CC="clang ..." 是
+      【整体替换】：上游 flags 全部消失。
+  形态 (c) 的危害在于失败被延迟且分散：丢 -D_GNU_SOURCE → musl 下 strncasecmp/usleep
+  隐式声明报错（且 clang 15 下是 error）；丢 -lm/-lrt 的位置语义 → 链接期 undefined
+  reference（-lm 必须落在源文件之后，写进 CC 串会在源文件之前而失效，须改用 LDFLAGS，
+  该 makefile 的链接规则恰为 ${CC} <srcs> -o $@ ${LDFLAGS}）。
+  判据：打开 makefile 看 CC 行——含空格+flags 即形态 (c)，覆盖串必须重新声明全部关键 flags。
+
+affected_scope: 所有"CC 变量含完整编译命令"的老式手写 makefile C 项目（simh V3.8-1、
+  部分 2000 年代模拟器/工具链项目）；交叉编译换编译器（gcc→clang）时必踩。
+
+verification_cmd: >
+  # 形态判据: grep -n '^CC' makefile  → 含 flags 即形态(c)
+  # 真机/本机验证（simh 26 目标）:
+  make CC="clang -std=c99 -U__STRICT_ANSI__ -O2 -D_GNU_SOURCE -fcommon -I." LDFLAGS="-lm" -j1
+  # 错误示范（丢 -D_GNU_SOURCE）→ strncasecmp/usleep 隐式声明 error；
+  # 错误示范（-lm 写进 CC 串）→ 链接期 undefined reference to fmod/log/exp
+
+rec_priority: 1
+rec_approach: cc-override-redeclare-critical-flags
+rec_description: >
+  build() 从 self.conf.get("tools.build:compiler_executables") 取 clang（R33），
+  覆盖串显式重声明关键 flags：-std=c99 -U__STRICT_ANSI__（上游语义）+ -D_GNU_SOURCE
+  （musl 扩展声明）+ -I.；库链接移到 LDFLAGS（-lm，保证位于源文件之后）。
+  -lrt 可去可留：本例去除（musl 将 clock_gettime 并入 libc），但注意 E628/rtklib
+  在 LDLIBS 里保留 -lrt 亦可链接成功，说明该平台对 -lrt 有兜底，非必改项。
+  此形态下 -fcommon 的取舍见 DRAFT-clang-fno-common-header-globals（其 forbid_1
+  针对"默认无脑加"，上游不可改时按该条 fallback_approach 使用并记录技术债务）。
+rec_command: >
+  cc_cmd = f"{cc} -std=c99 -U__STRICT_ANSI__ -O2 -D_GNU_SOURCE -fcommon -I."
+  self.run(f'make CC="{cc_cmd}" LDFLAGS="-lm" -j1', cwd=self.source_folder)
+rec_auto_fix: false
+rec_impl: conan-recipe-build
+similar_to: [DRAFT-cohomcalg-0.32-makefile-gxx-override, DRAFT-cnrbtree-0.3-makefile-recipe-gcc-hardcode, DRAFT-E628-rtklib-handwritten-makefile-multi-app-adaptation, DRAFT-clang-fno-common-header-globals]
+conflicts_with: []
+notes: >
+  与三个既有条目的边界：cohomcalg=形态(a) 换名即可；cnrbtree=形态(b) 覆盖无效；
+  E628=per-app LDLIBS 硬编码需显式 LDLIBS= 覆盖。本条补形态(c)——覆盖"成功"但
+  丢 flags，失败延迟且难归因；三者合起来构成 gcc 出现位置的三形态判据表。
+verify_builds: >
+  simh/3.8.1：本机（OHOS SDK clang-15 交叉）26/26；真机 shadow CI 2026-09-27
+  同命令 26/26，L0-L5 全 pass。对照实验：丢 -D_GNU_SOURCE / -lm 写入 CC 串均复现对应失败。
+authors: codex
+source_pr: pending
+source_commit: 9eb7708c16 (feat/simh-3.8.1)
