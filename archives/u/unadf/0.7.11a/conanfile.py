@@ -83,15 +83,16 @@ class UnadfConan(ConanFile):
     def build(self):
         cc, ar, ranlib = self._toolchain()
 
-        # Upstream LP64 fix (Debian 64-bit-fixes): without it adfEnvInitDefault()
-        # exits 1 on any 64-bit target.
+        # Upstream fixes, both taken verbatim from Debian: without the first
+        # adfEnvInitDefault() exits 1 on any 64-bit target, without the second
+        # Lib/Generic/adf_nativ.h does not parse at all.
         apply_conandata_patches(self)
 
-        # Hand-written defendian.h instead of running Lib/myconf (no /bin/sh on
-        # OHOS; aarch64 is little-endian, which is what the probe would emit).
-        lib = os.path.join(self.source_folder, "Lib")
-        with open(os.path.join(lib, "defendian.h"), "w") as fh:
-            fh.write(DEFENDIAN)
+        # The recipe used to synthesise Lib/defendian.h here. It does not need
+        # to: patch 0002 repoints the seven `#include "defendian.h"` sites at
+        # Lib/Win32/defendian.h, which ships in the tarball and defines
+        # LITT_ENDIAN=1 for a little-endian host. aarch64 is little-endian, and
+        # adf_env.c would abort at runtime if the macro disagreed with the host.
 
         # 2006 sources predate C89 prototypes in some definitions; build as
         # gnu99 and silence the prototype/implicit-decl diagnostics that modern
