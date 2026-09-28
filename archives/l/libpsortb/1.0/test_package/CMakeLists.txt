@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_libpsortb C CXX)
+find_package(libpsortb CONFIG REQUIRED)
+add_executable(test_libpsortb test_libpsortb.cpp)
+target_link_libraries(test_libpsortb PRIVATE libpsortb::libpsortb)
