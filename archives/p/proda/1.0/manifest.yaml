@@ -1,0 +1,136 @@
+# 版本级 manifest — archives/p/proda/1.0/manifest.yaml
+# 遵循 ARCHIVE-SPEC v3.0
+
+# ============================================================
+# 必须字段
+# ============================================================
+
+version: "1.0"
+
+# published | built | failed | archived
+# 本轮为 built：conan create 与 conan-verify 已在鸿蒙 PC 真机通过，未 upload
+# （upload 只在合并进 main 后由 CI release 流水线执行）
+status: built
+
+build_date: "2026-09-25"
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  # 见 notes.md『许可与来源取证』：官方上游 http://proda.stanford.edu/proda_1_0.tar.gz
+  # 从 B 机实测 HTTP 200 / 38868 B，与下面的 sha256 逐字相同，但**只有明文 http**；
+  # 其 https 版 URL 的服务器证书不覆盖 proda.stanford.edu 主机名（curl rc=60，
+  # 拿不到任何 HTTP 状态码）⇒ 不存在可用的官方 https 通道。
+  # 故 sources 取 Debian 官方池的 **pristine orig**（Format 3.0 quilt，无 +dfsg、无 repack）作 https 载体。
+  # ⚠ 下一行的 upstream_official_url 是**信息字段、不是下载字段**：CI 不会去下载明文 http。
+  # 两端 sha256 实测逐字相同，该哈希同时命中 proda_1.0-13.dsc 的 Checksums-Sha256。
+  url: "https://deb.debian.org/debian/pool/main/p/proda/proda_1.0.orig.tar.gz"
+  upstream_official_url: "http://proda.stanford.edu/proda_1_0.tar.gz"
+
+  sha256: "439a93bf35e1a29ac1d5dde51e61f2cb174618596afaaaaa27d33a8ea1868a08"
+
+  tar_format: tar.gz
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build:
+  # 裸 Makefile：无 configure、无 install 目标、无 PREFIX 变量
+  system: makefile
+
+  # 无 configure。编译参数通过 **make 命令行变量** 注入（不是环境变量）：
+  # 上游 `CXX = g++` / `CXXFLAGS = ...` 是无条件赋值，
+  # make 优先级「命令行 > Makefile 内赋值 > 环境变量」，
+  # 故 GnuToolchain 之类只注入环境变量的手段对本 Makefile 是 no-op。
+  configure_options: []
+
+  make_args:
+    - "-j1"                       # HMDFS 上 jobserver FIFO 不可靠
+    - "CXX=<conf tools.build:compiler_executables.cpp>"
+    - "CXXFLAGS=-W -Wall -O2 -DNDEBUG -std=c++17"
+
+  # W0/R35 实测：零外部依赖（唯一链接项 -lm 由 musl 自带）
+  dependencies: []
+
+  package_type: application
+  produces_libraries: false
+  produces_headers: false
+
+  cc: clang
+  cxx: clang++
+
+  # 上游 release 那两行注释带 x86 专有开关
+  #（-mmmx -msse -msse2 -mfpmath=sse -march=pentium4 -mcpu=pentium4），
+  # aarch64 上必炸 ⇒ CXXFLAGS 按 profile 重组，并因此丢掉
+  # -DVERSION="1.00"（实测该宏在 35 个源文件里从未被引用，无副作用）
+  cxxflags_note: "rebuilt from Conan profile; upstream release line is x86-only"
+
+  size_debug_bytes: 748096
+  size_release_bytes: 141824
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+patches_applied:
+  - "0001-Main.cc-name-shadowed-libc-errno.patch"
+  - "0002-Sequence.cc-missing-stdio-h-include.patch"
+  - "0003-Utilities.cc-fgetc-EOF-into-unsigned-char.patch"
+
+patch_classification:
+  - file: 0001-Main.cc-name-shadowed-libc-errno.patch
+    type: manual
+    platform_only: False
+    guard: none
+    mechanism: "局部变量 errno 与 musl 的 errno 宏冲突（glibc 下无宏故静默通过，并遮蔽真 errno 使出错判定成死代码）"
+  - file: 0002-Sequence.cc-missing-stdio-h-include.patch
+    type: manual
+    platform_only: False
+    guard: none
+    mechanism: "缺直接 #include <stdio.h>，依赖 glibc 的传递包含；musl 传递包含面更窄"
+  - file: 0003-Utilities.cc-fgetc-EOF-into-unsigned-char.patch
+    type: manual
+    platform_only: False
+    guard: none
+    mechanism: "char 接 fgetc() 再比 EOF；aarch64/clang 上 char 默认 unsigned，EOF 折成 255 永不退出 ⇒ 死循环抛 std::bad_alloc"
+
+# 三个补丁均**不含**平台宏（R8 / PF5 友好），改的是通用可移植性缺陷，
+# 在 Linux/musl 上同样正确，不是 __OHOS__ 专用分支。
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "proda 的 Makefile 用无条件赋值 `CXX = g++`，因此环境变量注入完全无效：必须走 make 命令行变量（make 优先级 命令行 > Makefile 内赋值 > 环境变量）。这类包不该挂 GnuToolchain —— 它只注入环境变量，留着会误导读者以为编译器生效了"
+  - "上游没有任何 install 目标也没有 PREFIX 时，package() 手工 copy 二进制即可；设备上没有 coreutils install(1)，补 make install 目标只会引入新坑"
+  - "裸 Makefile 的 in-source 构建（.o 与可执行文件落在源码根）必须在 basic_layout 之后设 self.folders.build = '.'，否则 make 在空 build 目录里找不到 Makefile"
+  - "★`char ch; while ((ch=fgetc(f)) != EOF)` 在 char 默认 unsigned 的 aarch64/clang 上永不为假 ⇒ 读文件死循环、缓冲区倍增到抛 std::bad_alloc。编译期零告警，只在运行时表现为疑似 OOM，静态扫描与 CI 都抓不到 —— 移植到 ARM 必查"
+  - "局部变量取名撞上 libc 宏（errno）在 glibc 上静默通过、在 musl 上编译失败；且 glibc 那次'成功'本身已是遮蔽真 errno 的死代码 bug"
+  - "用了 fprintf/FILE 却没直接 #include <stdio.h> 的包，在 musl 上会因传递包含面收窄而报 use of undeclared identifier；但**只修实测报错的那一个文件**——本包另外 4 个同样缺直接包含的文件因自家头文件已带 stdio.h 而能编过，不许顺手批量加"
+  - "上游 tarball 内零许可声明时不得凭空写 SPDX：授权口径要取到权威再分配方的 copyright 文件（本例 Debian debian/copyright 的 License: PD）"
+  - "官方上游只有明文 http 时，'既官方又 https'的 URL 客观不存在；此时只能取字节逐字相同的 pristine orig 作 https 载体并在 conandata/notes 双处披露（PF7 需 PR 说明 + --no-preflight）"
+
+# verify-build 兼容字段
+build_system: makefile
+
+# ============================================================
+# 测试账本（与 test_package/MANIFEST.yml、run_tests.sh 打印数、
+# test_package/conanfile.py 的 MIN_PASS、notes.md 五维账本四处逐字同源）
+# ============================================================
+
+tests:
+  upstream_static_total: 0
+  upstream_executable: 0
+  upstream_passed: 0
+  upstream_skipped: 0
+  upstream_failed: 0
+  consumer_scenarios: 14
+  consumer_assertions: 31
+  consumer_passed: 31
+  consumer_failed: 0
+  consumer_skipped: 0
+  pass_floor: 31
