@@ -1,0 +1,78 @@
+#====================================================================
+# Draft: sollya 8.0 (autotools, git 归档无预生成 configure) —
+#        config.guess / config.status 在 HarmonyOS + HMDFS 上双杀
+#        第一关 config.guess 不认 HarmonyOS/HongMeng uname，fallback 写 dummy.c
+#          又被权限拒 => cannot guess build type
+#        第二关 config.status 用 umask 077 && mktemp -d 建 confXXXXXX，
+#          HMDFS 强制 setgid 落盘 drwx--S---(2700) => euid 非属主且 egid 不在
+#          group => other 位无 w => 写 subs1.awk 被拒 =>
+#          could not setup config files machinery
+#        正解 = 显式 --build=aarch64-unknown-linux-ohos + 剥生成物 configure
+#        里的 umask 077（E114 同族），两处一并处理否则只过第一关
+#        本文件为 YAML：长值一律用 |- 块标量，避免值内英文冒号空格被解析成
+#        嵌套 mapping（自检见 verification_cmd 段）
+#====================================================================
+
+id:                     DRAFT-E678-SOLLYA-AUTOTOOLS-CONFIG-GUESS-STATUS-HMDFS-HARMONYOS
+trigger_tool:           configure|make|autoreconf
+phase:                  compilation|configuration
+
+error_signature: |-
+  configure: error: cannot guess build type; you must specify one|config.status: error: could not setup config files machinery|unable to guess system type|/conf[a-zA-Z0-9]{6}/subs[0-9]*\.awk: Permission denied|/cg[a-zA-Z0-9]{6}/dummy\.c: Permission denied
+
+prescan_pattern: |-
+  AC_INIT\(|autogen\.sh|autoreconf -i|LT_INIT|AC_CONFIG_MACRO_DIR
+
+severity:               2
+category:               platform|portability|autotools|hmdfs-permission
+
+match_keywords: |-
+  config.guess, config.sub, config.status, autogen.sh, autoreconf, LT_INIT, AC_INIT, umask 077, mktemp -d, confXXXXXX, cgXXXXXX, cannot guess build type, could not setup config files machinery, HarmonyOS, HongMeng, uname, HMDFS, setgid, drwx--S---, --build, GNU triplet, aarch64-unknown-linux-ohos, E114
+
+title: |-
+  configure: error: cannot guess build type 与 config.status: error: could not setup config files machinery 是同一根源的两道关：HarmonyOS uname 不被 config.guess 识别（第一关）+ HMDFS umask 077 建的临时目录不可写（第二关），必须 --build=<GNU 三元组> 绕过第一关并剥生成物 configure 的 umask 077 放过第二关，只修其一只会在下一道关再炸
+
+root_cause: |-
+  两个失败点同源于「上游 tarball 只带 configure.ac、须 autoreconf bootstrap」的包在 HarmonyOS/HMDFS 上的环境差异。
+  第一关：build-aux/config.guess（2026-05-17 版）用 uname -s = HarmonyOS / uname -r = HongMeng Kernel 1.12.0 无法识别平台，转而进入 fallback 分支（set_cc_for_build）自建临时目录写 dummy.c 编译探测。
+  第二关：该 fallback 与 config.status 自身都用 (umask 077 && mktemp -d "$TMPDIR/cgXXXXXX") 与 ./confXXXXXX 建临时目录，而 HMDFS 强制给目录加 setgid 并按共享属主映射落盘（A/B 对照实测：umask 077 && mktemp -d 得 mode=0o2700 uid=20001006，而进程 euid=20020085、目录 gid=1006 group=file_manager 不含该 egid，故 other 位无 w，写入 Permission denied；对照组普通 mkdir 0700 落盘 mode=0o2771，文件系统增益 group rwx，故可写）。因此 configure 先报 cannot guess build type（第一关），即使显式给了 --build 绕过它，config.status 仍会在 line 873 的 ./confXXXXXX/subs1.awk: Permission denied 处报 could not setup config files machinery（第二关）。
+  注意：只把 AC_COMPILE_IFELSE 改成 AC_LINK_IFELSE 修不了 —— configure 阶段走裸 clang（无 libtool -nostdlib、无 -L 位置约束，config.log 可证），探测恒通过，无法复现 make/config.status 期的失败，故必须无条件显式给三元组并无条件剥 umask 077。
+  同根源第三种表现（同族、本次一并处理）：ld.lld: error: unable to find library -lstdc++ —— libtool 链 .so 必加 -nostdlib 使 clang driver 不再做 -lstdc++ 到 libc++ 的内部映射，加上硬编码 -lstdc++ 排在 SDK -L 之前而 lld 按位置向左解析，且文件系统无 libstdc++ 实体，需另把 configure.ac 的 ADD_LSTDC 置 no、tests-lib/Makefile.am 的 LDADD 改 -lc++。
+
+affected_scope: |-
+  所有「上游发布形态为 git 归档或仅含 configure.ac（无预生成 configure）的 autotools 包」在 HarmonyOS PC 上的 bootstrap 与 configure 阶段；凡 configure 或 config.status 输出含 cgXXXXXX / confXXXXXX 临时路径 Permission denied 的一律命中本条；凡 uname -s = HarmonyOS 且未显式给 --build 的 configure 一律命中第一关。
+  参考先例 archives/a/abiword-plugin-clarisworks/3.0.8/conanfile.py 的 _drop_umask_077() 与 tc.configure_args.append("--build=aarch64-unknown-linux-ohos") 为同款修法（其注释亦逐字记载两层归因）。
+
+verification_cmd: |-
+  SRC=/storage/Users/currentUser/ws/tmp/builds/sollya-8.0.work
+  grep -nE 'cannot guess build type|could not setup config files machinery' "$TASK_DIR/native-explore.log" && echo "两关仍命中(坏)" || echo "两关已过(好)"
+  grep -n 'ADD_LSTDC="yes"' "$SRC/configure" && echo "生成物仍旧(坏)" || echo "生成物已采纳(好)"
+  grep -c 'umask 077 && mktemp' "$SRC/configure"
+  grep -n '^LIBS = ' "$SRC/Makefile"
+
+rec_priority:           1
+rec_approach:           explicit-gnu-triplet-plus-drop-umask-077-in-generated-configure
+
+rec_description: |-
+  两步必须成对做，且顺序是硬约束。
+  第一步（绕第一关）：configure 显式加 --build=aarch64-unknown-linux-ohos（与本机 clang Target 同值，见 notes/device-facts.md 附录；config.sub 实测认识该值，另有 aarch64-unknown-linux-gnu 与 aarch64-pc-linux-gnu 亦可）。给 --build 后 config.guess 完全不再被调用，自证读数为 step2 段 config.guess 与 cannot guess 命中数 0、走到 creating ./config.status 为 1、configure: error 为 0。
+  第二步（过第二关）：在 autoreconf 之后、configure 之前，对生成物 configure 做两处替换 —— tmp=`(umask 077 && mktemp -d "./confXXXXXX") 2>/dev/null` 换成 tmp=`mktemp -d "./confXXXXXX" 2>/dev/null`，以及 (umask 077 && mkdir "$tmp") 换成 mkdir "$tmp"。这是生成物、不进 git、每次 autoreconf 重新生成，留痕在 conanfile 的同名 _drop_umask_077() 于 build() 每次执行（等同 build() 里的 sed，属标准配方适配形态，免 refresh-patch 登记）。
+  顺序硬约束：若改的是 configure.ac / Makefile.am 这类上游源文件，补丁必须在 autoreconf 之前打，否则 autoreconf 已用补丁前的源生成 configure 与 Makefile.in，后改源对生成物零效果。实测证据：源 configure.ac:680 已是 ADD_LSTDC="no"，而生成 configure:21791 仍是 ADD_LSTDC="yes"、Makefile:425 LIBS 仍含 -lstdc++、tests-lib/Makefile.in:3182 仍是 -lstdc++，make 照旧 ld.lld: unable to find library -lstdc++。
+  自证必须读生成物而非读源：只读源的 remaining_targets=0 是「自证对象错」，它证明了不相干的命题（源已改不等于生成物已采纳）。应在 configure 之后校验三项 —— 生成 configure 无 ADD_LSTDC="yes"、Makefile 的 LIBS 行无 -lstdc++、tests-lib/Makefile 的 LDADD 无 -lstdc++。
+
+rec_command: |-
+  SRC=/storage/Users/currentUser/ws/tmp/builds/sollya-8.0.work
+  grep -n 'cannot guess build type\|could not setup config files machinery' "$TASK_DIR/native-explore.log" && echo 仍命中 || echo 两关已过
+  grep -c 'umask 077 && mktemp' "$SRC/configure"
+  grep -n '^LIBS = ' "$SRC/Makefile"
+  grep -n 'LDADD.*lstdc' "$SRC/tests-lib/Makefile" || echo tests-lib已改lc++
+
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              pending
+source_commit:          59eaed1f647b214c4c0f1eac4414918bc838cd24
+discovered_by: |-
+  sollya-8.0 task 10797 (W0 原生探索一跑一修 R1->R6)
+related_entries: |-
+  E114 (HMDFS umask 077 / 0700 -> drwx--S---), device-facts 一.10 (目录模式落盘后不可改、属主映射), device-facts 一.13 (mkfifo jobserver 噪声)
