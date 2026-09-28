@@ -1,0 +1,30 @@
+#!/usr/bin/env roundup
+#
+# [OHOS] HarmonyOS 消费者可行性用例（本次适配新增）
+#
+# 该 plan 由被测包安装的 roundup 自身执行（自举），用于验证 roundup 在
+# HarmonyOS /bin/sh（mksh R59）环境下的核心消费者能力：
+#   1. 安装后可在 PATH 中找到 roundup 可执行文件
+#   2. ROUNDUP_VERSION 环境变量正确导出（版本可编程探测）
+#   3. OHOS 用户态临时目录（mktemp）可用（roundup 沙箱依赖）
+#   4. /bin/sh（POSIX shell 解释器）存在且可执行（plan 执行前提）
+
+describe "roundup consumer checks on HarmonyOS (mksh)"
+
+it_roundup_is_on_path() {
+    command -v roundup >/dev/null
+}
+
+it_roundup_version_matches() {
+    test "$ROUNDUP_VERSION" = "0.0.6"
+}
+
+it_mktemp_works_on_ohos() {
+    roundup_t=$(mktemp)
+    test -f "$roundup_t"
+    rm -f "$roundup_t"
+}
+
+it_posix_sh_is_available() {
+    test -x /bin/sh
+}

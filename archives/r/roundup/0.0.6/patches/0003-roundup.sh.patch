@@ -1,0 +1,142 @@
+--- a/roundup.sh
++++ b/roundup.sh
+@@ -28,21 +28,22 @@
+ # "Sandbox Test Runs" below for more insight.
+ 
+ # Usage and Prerequisites
+ # -----------------------
+ 
+ # Exit if any following command exits with a non-zero status.
+ set -e
+ 
+ # The current version is set during `make version`.  Do not modify this line in
+ # anyway unless you know what you're doing.
+-ROUNDUP_VERSION="0.0.5"
++# [OHOS适配] 上游 v0.0.6 tag 内漏更版本号（仍为 0.0.5），对齐真实 tag 版本
++ROUNDUP_VERSION="0.0.6"
+ export ROUNDUP_VERSION
+ 
+ # Usage is defined in a specific comment syntax. It is `grep`ed out of this file
+ # when needed (i.e. The Tomayko Method).  See
+ # [shocco](http://rtomayko.heroku.com/shocco) for more detail.
+ #/ usage: roundup [--help|-h] [--version|-v] [plan ...]
+ 
+ roundup_usage() {
+     grep '^#/' <"$0" | cut -c4-
+ }
+@@ -78,20 +79,27 @@
+ then
+     roundup_plans="$@"
+ else
+     roundup_plans="$(ls *-test.sh)"
+ fi
+ 
+ : ${color:="auto"}
+ 
+ # Create a temporary storage place for test output to be retrieved for display
+ # after failing tests.
++# [OHOS适配] mksh 无 printf 内建（bash 有）。plan 的 before/after 可能故意
++# 置空 $PATH（见 edge-test.sh 边界用例），届时 mksh 下信号发射所需的外部
++# printf/grep 会不可达、运行器子壳静默死亡。启动时备份运行器自身 $PATH，
++# 供每个测试的信号发射前恢复（upstream 意图即 roundup 须在 plan 破坏
++# $PATH 后幸存）。
++roundup_path_backup=$PATH
++
+ roundup_tmp="$PWD/.roundup.$$"
+ mkdir -p "$roundup_tmp"
+ 
+ trap "rm -rf \"$roundup_tmp\"" EXIT INT
+ 
+ # __Tracing failures__
+ roundup_trace() {
+     # Delete the first two lines that represent roundups execution of the
+     # test function.  They are useless to the user.
+     sed '1d'                                   |
+@@ -196,20 +204,27 @@
+ # listed in a isolated sandbox.
+ for roundup_p in $roundup_plans
+ do
+     # Create a sandbox, source the test plan, run the tests, then leave
+     # without a trace.
+     (
+         # Consider the description to be the `basename` of the plan minus the
+         # tailing -test.sh.
+         roundup_desc=$(basename "$roundup_p" -test.sh)
+ 
++        # [OHOS适配] OHOS mksh 预置大量 applet 别名（如 `alias ls=ls`），
++        # alias 查找先于 $PATH，plan 清空/破坏 $PATH 后 `command -v` 仍会
++        # 命中别名（bash 非交互 shell 不定义/不展开别名，无此问题）。
++        # 沙箱启动先清空别名以恢复“沙箱隔离”语义；plan 自行定义的别名
++        # 在此之后不受影响。
++        unalias -a 2>/dev/null || :
++
+         # Define functions for
+         # [roundup(5)][r5]
+ 
+         # A custom description is recommended, but optional.  Use `describe` to
+         # set the description to something more meaningful.
+         # TODO: reimplement this.
+         describe() {
+             roundup_desc="$*"
+         }
+ 
+@@ -252,22 +267,30 @@
+                         # If `before` wasn't redefined, then this is `:`.
+                         before
+                     } &>"$roundup_tmp/$roundup_test_name"
+                     # disable tracing again. Its trace output goes to /dev/null.
+                     set +x
+                 } &>/dev/null
+ 
+                 # exit subshell with return code of last failing command. This
+                 # is needed to see the return code 253 on failed assumptions.
+                 # But, only do this if the error handling is activated.
+-                set -E
+-                trap 'rc=$?; set +x; set -o | grep "errexit.*on" >/dev/null && exit $rc' ERR
++                # [OHOS适配] `set -E`（bash errtrace 扩展）在 mksh(/bin/sh) 中
++                # 属特殊内建致命错误，会直接终止整个 shell；mksh 与 bash 均支持
++                # ERR trap，dash 两者皆不支持。用子壳探测降级：探测在子壳中失败
++                # 不会杀死运行器本体，dash 下优雅跳过 ERR trap（set -e 语义兜底）。
++                if (set -E) 2>/dev/null; then
++                    set -E
++                fi
++                if (trap ':' ERR) 2>/dev/null; then
++                    trap 'rc=$?; set +x; PATH=$roundup_path_backup; set -o | grep "errexit.*on" >/dev/null && exit $rc' ERR
++                fi
+ 
+                 # If `before` wasn't redefined, then this is `:`.
+                 before
+ 
+                 # Momentarily turn off auto-fail to give us access to the tests
+                 # exit status in `$?` for capturing.
+                 set +e
+                 (
+                     # Set `-xe` before the test in the subshell.  We want the
+                     # test to fail fast to allow for more accurate output of
+@@ -283,20 +306,26 @@
+                 # status will result in `$?` being set with `set`'s status
+                 # instead.
+                 roundup_result=$?
+ 
+                 # It's safe to return to normal operation.
+                 set -e
+ 
+                 # If `after` wasn't redefined, then this runs `:`.
+                 after
+ 
++                # [OHOS适配] 恢复运行器自身 $PATH：mksh 下 printf/grep 为外部
++                # 命令，plan 在 before/after 中清空 $PATH 时信号发射必须仍可
++                # 生存（edge-test.sh: it_hath_path_til_after /
++                # it_hath_not_path_before_thy）。
++                PATH=$roundup_path_backup
++
+                 # This is the final step of a test.  Print its pass/fail signal
+                 # and name.
+                 if [ "$roundup_result" -ne 0 ]
+                 then printf "f"
+                 else printf "p"
+                 fi
+ 
+                 printf " $roundup_test_name\n"
+             )
+         done
