@@ -1,0 +1,213 @@
+# ═══ Draft knowledge entry — AC_CHECK_LIB 的库名是**写死的 soname**（guile 1.8 `-lguile` → 2.x `-lguile-2.2`）：依赖已由包管理器正确注入时，configure 仍会 AC_MSG_ERROR 终止；判据是「源码用的是哪代 API」而不是「上游要哪个版本」 ═══
+# Timestamp: 2026-09-21
+# Software: ballandpaddle 0.8.1 (GNU Ball and Paddle)
+# Gate: 构建准入（探针 soname 与制品 soname 不一致的判定与修法）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-7348-ballandpaddle-0.8.1-ac-check-lib-probes-a-fixed-soname
+trigger_tool:           configure|autoconf|cc|ld|pkg-config
+phase:                  configure
+error_signature:        checking for \w+ in -l\S+\.\.\. no|
+                         can't find guile|
+                         AC_MSG_ERROR.*can't find|
+                         library not found.*-l\S+-\d|
+                         cannot find -l\S+-\d\.\d|
+                         undefined reference to .*scm_|hello you must
+                         install.*(guile|boost|icu)|
+                         Package .* was not found in the pkg-config search path.*versioned
+
+severity:               3
+category:               build, autotools, soname, conan, portability, probe-mismatch
+match_keywords:         AC_CHECK_LIB, AC_SEARCH_LIBS, soname version, libguile,
+                         libguile-2.2, guile 1.8 vs 2.x, AC_MSG_ERROR, autoconf probe,
+                         hardcoded -l name, versioned soname, boost, icu, lua5.1,
+                         SDL 1.2, dependency injected but not found, ballandpaddle
+
+title:                  `AC_CHECK_LIB(guile, scm_boot_guile, ...)` 里的**库名是写死的 soname**，
+                        不是包名：guile 1.8 的 soname 是 `libguile.so`、2.x 是 `libguile-2.2.so`，
+                        老工程按 `-lguile` 探测时**依赖已正确注入**也会失败并 `AC_MSG_ERROR`
+                        终止 configure；判据是读源码**实际用的是哪代 API**，据此决定
+                        改探针（对齐库名）还是改依赖（真的降版本）
+
+root_cause: >
+  (1) **`AC_CHECK_LIB(LIB, FUNC)` 的 `LIB` 是字面量 `-l<LIB>`，不是包标识。**
+  它生成的是 `checking for <FUNC> in -l<LIB>` + 一条真实链接测试。因此
+  `AC_CHECK_LIB(guile, scm_boot_guile, LIBS="-lguile $LIBS", AC_MSG_ERROR(...))`
+  探测的**不是「guile 这个包在不在」，而是「`-lguile` 这个文件名能不能解析」**。
+  带 soname 版本号的库（guile / boost / icu / lua5.x / libpng16 / SDL 系）在
+  主版本跃迁后，`lib<name>.so` 这个**文件名本身消失了**：
+
+      guile 1.8  ->  libguile.so
+      guile 2.x  ->  libguile-2.2.so      (随 minor 走)
+
+  于是上游 `configure.ac:29` 那行在 guile 2.x 环境下**必然**失败：
+
+      AC_CHECK_LIB(guile, scm_boot_guile,
+                  LIBS="-lguile $LIBS",
+                  AC_MSG_ERROR(can't find guile. This software REQUIRES guile.))
+
+  (2) **症状极其误导，因为依赖确实装好了。** conan 的 AutotoolsDeps 会把
+  `-L<guile>/lib`、`-I<guile>/include/guile/2.2`、`-lguile-2.2` 全注入
+  `CPPFLAGS`/`LDFLAGS`/`LIBS`。构建日志里同时出现「依赖路径全对」和
+  `checking for scm_boot_guile in -lguile... no` → `can't find guile`。
+  **看到 can't find 就以为是依赖没装/版本太老，会白翻依赖清单。**
+
+  (3) **决定改哪一边的唯一判据：源码实际调用的是哪代 API。**
+  这一条把「探针与事实不符」和「上游真的需要老版本」区分开：
+  - **源码已用新 API** → 是**探针**过期，只对齐探针库名即可。**不改任何行为，
+    不降任何依赖，不改任何源码**，补丁甚至可以直提上游。
+    ballandpaddle 就是这一类：`src/extension.cpp` / `src/ball.cpp` 用的是
+    `scm_to_locale_string` / `scm_from_int` / `scm_c_eval_string` —— 全是
+    **Guile 2.x API**（Guile 1.8 里这些叫 `SCM_STRING_CHARS` / `scm_long2num`
+    等）。即上游早就迁到 2.x 了，只是 `AC_CHECK_LIB` 那行的库名忘了跟着改。
+  - **源码真用老 API** → 才是真的需要老版本依赖，此时改探针只会把失败
+    从 configure 期推到编译期（`undefined reference to ...` / 隐式声明），
+    更糟。
+
+  (4) **库名写法还因库而异，不能凭包名猜。** `-lguile-2.2`（guile 2.x）、
+  `-lboost_system`（boost，`_` 不是 `-`）、`-licui18n`（icu 把版本写进库名段）、
+  `-llua5.1`（lua）。**一律以制品里的真实文件名为准**，即
+  `ls <prefix>/lib/lib<name>*.so*` 的输出，而不是包名或 `.pc` 名。
+
+affected_scope: >
+  一切「老 autotools 工程 + 带 soname 版本号的库 + 现代打包」的组合。
+  判据一（工程侧）：`grep -nE 'AC_CHECK_LIB|AC_SEARCH_LIBS' configure.ac`
+  的库名与 `ls <dep>/lib/lib<name>*.so*` 的实际文件名不一致 →
+  探针过期（`-lguile` vs `libguile-2.2.so`、`-lboost_thread` vs
+  `libboost_thread.so`、`-licuuc` vs `libicuuc.so.72` 的同名情况另说）。
+  判据二（依赖侧）：`grep -- '-l<探测到的名字>' <build_folder>/conanbuild*.sh`
+  **无**输出，而 `-l<真实名字>` **有**输出 → 注入的是真名，探针用的是旧名，
+  确认是探针问题。
+  判据三（源码侧，决定改哪边）：`grep -n 'scm_to_\|SCM_STRING_CHARS\|scm_long2num'`
+  —— 命中 2.x 风格 → 对齐探针；命中 1.8 风格 → 真的需要老版本。
+  同族：`PKG_CHECK_MODULES` 的 `foo >= 1.2` 版本约束（那是**版本**不匹配，
+  与 soname 文件名是两件事）；`AC_CHECK_LIB(X, ...)` 中 X 带 `-` 分隔的数字段
+  （如 `lua-5.4`）同理。
+  容易踩的推断：①「can't find ⇒ 依赖没装」——先看注入的 `-l` 名字对不对；
+  ②「上游要 Guile 1.8 就降级」——先看源码 API；③「库名 = 包名」——以
+  `ls <prefix>/lib` 为准。
+
+verification_cmd: >
+  # 判据一：探针写死的库名 vs 制品真实 soname
+  grep -nE 'AC_CHECK_LIB\(|AC_SEARCH_LIBS\(' configure.ac
+  ls <dep-prefix>/lib/lib<name>*.so*          # 例：libguile-2.2.so.1 / libguile-2.2.so
+  #   两者不一致 → 探针过期
+
+  # 判据二：注入的是真名（证伪「依赖没装」）
+  grep -on -- '-l[A-Za-z0-9_.+-]*' <build_folder>/conanbuild*.sh | sort -u | grep -i guile
+  #   期望：-lguile-2.2（无 -lguile）
+
+  # 判据三：源码用的是哪代 API（决定改探针还是改依赖）
+  grep -rn 'scm_to_locale_string\|scm_from_int\|scm_c_eval_string' src/ | head
+  #   命中 → 源码已是 2.x API，只需对齐探针库名
+  grep -rn 'SCM_STRING_CHARS\|scm_long2num\|scm_makfrom0str' src/ | head
+  #   命中 → 源码真用 1.8 API，此时才需要老版本依赖
+
+  # 判据四：修复后探针真的通过
+  grep -n 'checking for scm_boot_guile in -lguile-2.2' config.log
+  #   期望：... yes
+  grep -n '^LIBS=' config.log | tail -1
+  #   期望：含 -lguile-2.2
+
+  # 判据五：产物实际链上的是哪个 soname（终局核对）
+  readelf -d <installed-bin> | grep -i guile
+  #   期望：NEEDED libguile-2.2.so.1
+
+rec_priority:           1
+rec_approach:           align-the-probe-library-name-with-the-real-soname-after-confirming-the-source-uses-the-new-api
+rec_description: >
+  顺序不能颠倒，否则容易改错方向：
+    1. **先读源码 API**（判据三）。确认源码已用新一代 API（guile 例：
+       `scm_to_locale_string` / `scm_from_int`）→ 结论是「探针过期」。
+    2. **再看制品真名**（判据一）。`ls <dep>/lib/` 取真实文件名，通常是
+       `lib<name>-<minor>.so` 或 ``lib<name><major>.so``，**以文件名为准**，
+       不按包名/`.pc` 名猜。
+    3. **改探针**：把 `exit/configure` + `configure.ac` 里该库的全部字面量
+       一起替换（通常 3~5 处：`checking for ...` 的回显串、`LIBS="-lX $LIBS"`、
+       `AC_MSG_ERROR` 附近等）。**同时改 `configure` 与 `configure.ac`** ——
+       tarball 自带已生成的 `configure`，只改 `configure.ac` 不会重新生成
+       （沙箱也没有 autoconf），等于没改；只改 `configure` 则上游升级后
+       重新生成会丢修复。
+    4. **不改任何行为**：不降依赖版本、不改 `LIBS` 的组装逻辑、不碰源码。
+       补丁语义上可直提上游（`AC_CHECK_LIB(guile-2.2, ...)` 在 guile 2.x 平台
+       本来就该这么写；若上游要兼容 1.8/2.x 双线，正确写法是分支探测而非单名）。
+  配套（同 PR 内已登记）：同时改 `configure` 与 `configure.ac` 会造成
+  GNU patch 按 diff 头时间戳设置 mtime，而 `configure.ac` 的 hunk 排在后面 →
+  **`configure.ac` 比 `configure` 新** → 触发 `Makefile` 里的
+  `configure: configure.ac` 重生成规则 → 沙箱无 autoconf 直接失败。
+  必须显式归一化时间戳（把 autotools 输入 `touch` 成 2000-01-01、生成物
+  `touch` 成当前时间；同仓库先例 `archives/l/libmodbus/3.2.0`）。
+rec_command:            >
+  # 1) grep 源码确认 API 代际   2) ls <dep>/lib 取真实 soname
+  # 3) sed/补丁：configure 与 configure.ac 同时替换 -l<old> -> -l<new>
+  # 4) 归一化 mtime：touch -d '2000-01-01 00:00:00' configure.ac aclocal.m4 Makefile.am
+  #                   touch configure Makefile.in
+  # 5) 复验：grep 'in -l<new>' config.log -> yes ; readelf -d <bin> | grep NEEDED
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      build-the-libname-compatibility-symlink-inside-the-dependency-package
+fallback_description:   >
+  在依赖包里补一个 `lib<name>.so -> lib<name>-<minor>.so` 的兼容符号链接，
+  让老探针的 `-l<name>` 能解析。**只有在无法改消费者侧（例如消费者是闭源
+  预编译脚本）时才用**，且必须清楚代价：
+  ① 这是**改依赖制品**，会波及所有消费者（这个 `.so` 一旦被链接，
+  `DT_NEEDED` 记的是 `libguile.so` 这个**并不存在的 soname**，运行期解析失败
+  —— 符号链接解决的是**链接期**找不到文件，不是运行期找不到 soname）；
+  ② 需要额外 `-Wl,-soname` 处理才真正成立；
+  ③ 与「依赖包应当最小、可预期」的原则冲突。
+  在能改消费者时一律优先 rec_approach。
+fallback_command:       ln -s libguile-2.2.so <dep>/lib/libguile.so   # 仅供链接期兜底，运行期仍需 soname 正确
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       把\s+guile\s+降级|downgrade.*guile.*1\.8|requires:=.*guile/1\.8|requires=.*guile/1\.8|改用\s+libguile\.so\s+的旧包
+forbid_1_reason:        把「探针写过期库名」误判成「上游需要 Guile 1.8」。上游源码用的
+                        是 Guile 2.x API（`scm_to_locale_string` 等，1.8 里不存在），
+                        降级到 1.8 后源码根本编译不过；而且 ohpcd 只发布 guile/2.2.7，
+                        降级方向在产品上也不存在。
+forbid_1_consequence:   问题从「configure 期一句 can't find guile」被推到
+                        「编译期一片 undefined reference / 隐式声明」，根因被彻底掩埋。
+
+forbid_2_pattern:       只改\s+configure\s+不改\s+configure\.ac|patch.*configure$\b(?!.*configure\.ac)|sed\s+-i.*configure\s*$|sed -i './configure' 而不带 configure.ac
+forbid_2_reason:        只改已生成的 `configure`：上游升级/有人重跑 autoconf 后修复丢失，
+                        且补丁不可上游化。反过来只改 `configure.ac` 更糟 —— 沙箱没有
+                        autoconf，`configure` 不会重新生成，改动**完全无效**，
+                        症状是「补丁打了但没用」。
+forbid_2_consequence:   适配看起来「有时生效有时不生效」，取决于是否有人重跑 autoconf；
+                        产物行为不可复现。
+
+forbid_3_pattern:       AC_CHECK_LIB\(\s*\w+\s*,\s*\w+\s*\)\s*$|AC_CHECK_LIB\(\s*\w+\s*,\s*\w+\s*,\s*\[\s*\]\s*\)|AC_CHECK_LIB.*\bguile\b.*但库名按包名猜|按包名猜库名|-lguile\b(?!-)
+forbid_3_reason:        库名不是包名：`-lguile-2.2`（guile 2.x）、`-lboost_system`
+                        （下划线不是连字符）、`-licui18n`（icu 把版本嵌在名字段里）、
+                        `-llua5.1`（lua）。凭包名/`.pc` 名猜库名会写出解不开的
+                        `-l`，得到与原来一模一样的 «can't find» 报错，白改一轮。
+forbid_3_consequence:   补丁看似生效（grep 能搜到新名字）但 configure 仍失败，
+                        排查时间被浪费在「补丁为什么没用」而不是「名字还是错的」。
+
+principles:             P014, P005
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-7348-ballandpaddle-0.8.1-sdl12-compat-has-no-sdl-config
+                        （同族：**依赖已正确注入，但探针在找不存在的东西** ——
+                         本条探针找「写死的 soname 文件名」，那条找「可执行脚本」）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-7348-ballandpaddle-0.8.1-ac-check-lib-probes-a-fixed-soname.md
+last_updated:           2026-09-21
+source_event:           archives/b/ballandpaddle/0.8.1 适配（上游 configure.ac:29
+                        按 -lguile 探测，而 guile/2.2.7 只提供 libguile-2.2.so）
+
+authors:                2301_76770579
+source_pr:              11639
+source_commit:          7db987f3a694adf10e13ac08cace191cadfe1fec
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-21
+
+draft:                  true
+contributor_id:         2301_76770579

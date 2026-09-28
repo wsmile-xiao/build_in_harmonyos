@@ -1,0 +1,77 @@
+# 版本级 manifest — ballandpaddle 0.8.1
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "0.8.1"
+software: "ballandpaddle"
+status: built
+build_date: "2026-09-21"
+build_system: autotools
+
+source:
+  url: "https://ftp.gnu.org/gnu/ballandpaddle/ballandpaddle-0.8.1.tar.gz"
+  sha256: "de82d17ab032e9a997eb0537820053d6a84661b283df1be7724756d054f3f77d"
+  tar_format: tar.gz
+
+build:
+  system: autotools
+  configure_options:
+    - "--prefix=/"
+    - "--bindir=${prefix}/bin"
+    - "--sbindir=${prefix}/bin"
+    - "--libdir=${prefix}/lib"
+    - "--includedir=${prefix}/include"
+    - "--oldincludedir=${prefix}/include"
+    - "--disable-nls"
+    - "--build=aarch64-unknown-linux-gnu"
+    - "--host=aarch64-unknown-linux-gnu"
+    - "SDL_CONFIG=<build_folder>/sdl-config（外壳脚本，转发到 sdl12-compat）"
+    - "MAKEINFO=/bin/true make -j1"
+  dependencies:
+    - sdl12-compat/1.2.68
+    - sdl_image/1.2.12
+    - sdl_mixer/1.2.12
+    - sdl_ttf/2.0.11
+    - guile/2.2.7
+    - gmp/6.3.0
+  cc: clang
+  cxx: clang++
+
+test_results:
+  type: consumer-side
+  upstream_declared: 0
+  upstream_registered: 0
+  upstream_executed: 0
+  consumer_checks: 30
+  consumer_passed: 30
+  consumer_failed: 0
+
+patches_applied:
+  - "0001-configure-umask.patch"
+  - "0002-configure-guile-soname.patch"
+  - "0003-src-main-gsubr-subr-cast.patch"
+
+knowledge_gained:
+  - "[ref: E011] HMDFS 下 autoconf 用 umask 077 建的 0700 临时目录对构建进程不可写，须放宽为 022。"
+  - "[reference: notes.md] SDL 1.2 时代的 autotools 消费者依赖 `sdl-config`，而 ohpcd 只有 sdl12-compat（不含该脚本）→ 需在 build_folder 写外壳并经 SDL_CONFIG 注入。"
+  - "[reference: notes.md] `sdl-config` 外壳（AM_PATH_SDL 那一路，结果进 SDL_CFLAGS/SDL_LIBS）与 `AutotoolsDeps`（其余 host 依赖，结果进 CPPFLAGS/LDFLAGS/LIBS）是两条**互不替代**的通路，两者缺一不可；上游 configure.ac 无 pkg-config 兜底时，少了 AutotoolsDeps 会直接死在 `can't find guile`。"
+  - "[reference: notes.md] AC_CHECK_LIB 的库名是**写死的 soname**：Guile 1.8 时代是 -lguile，Guile 2.x 是 -lguile-2.2；上游源码用新 API 但探针留旧库名时，只需对齐探针。"
+  - "[reference: notes.md] 补丁同时改 configure 与 configure.ac 会因 mtime 倒挂触发 autoconf 重生成，须显式归一化生成物时间戳。"
+  - "[reference: notes.md] 已发布 guile/2.2.7 包有两处**头文件**缺口（链接面无碍）：(a) 上游 Makefile.am:46-47 把顶层 libguile.h 装进 include/guile/2.2/，配方 package() 只拷了子目录 libguile/*.h，消费者的 `#include <libguile.h>` 必然 file not found（而 -I 是对的）；(b) 公开头 libguile/numbers.h 直接 `#include <gmp.h>`，cpp_info 未传递 gmp 的头。消费者侧兜底：compat/ 放上游逐字副本并经 export_sources 随配方走 + 追加 -I<source_folder>/compat；再显式 requires gmp（同版本，不引入第二份二进制）。"
+  - "[ref: E027] OHOS libc 无 libintl → --disable-nls。"
+  - "[reference: notes.md] C++11 起，**列表初始化**（`T x = { a, b };`）里的窄化转换是语言规则层面的 hard error（clang 报 `non-constant-expression cannot be narrowed from type 'int' to 'Sint16' ... [-Wc++11-narrowing]`），cppstd≥11 的 profile 下直接编译失败；`-Wc++11-narrowing` 只是这条**语言**诊断的名字，不是可忽略的普通 warning。老 SDL1.2 代码库大量这么写 `SDL_Rect`（域是 Sint16/Uint16）——如 ballandpaddle `src/ball.cpp:48-49`，即使源码里已经写了 `(int)` 显式转换也仍是 int。处理：`AutotoolsToolchain.extra_cxxflags` 追加 `-Wno-c++11-narrowing`，零补丁（同族先例 nuvie/0.5、freeimage/3.18.0 的 -Wno-register；buddy/2.4 的 -Wno-error=register）。判据：报错行带 `[-Wc++11-narrowing]` 时优先用旗标，别去给每一处补 static_cast。"
+  - "[reference: notes.md] autotools 的 `--prefix` 只管以 `$(prefix)` 为基准的目录：上游把 `desktopdir` 硬编码成**绝对路径** `/usr/share/applications`（`Makefile.am:3`，不带 `$(prefix)`）时，`--prefix=/` 与 `DESTDIR` 都改不了它的层级，文件会落到 `<pkg>/usr/share/applications/`。automake 不给 `*dir` 加 `override`，故可在 `make install` 命令行直接覆盖（`desktopdir=/share/applications`），零补丁。排查手法：`grep -n 'dir = /' Makefile.in` 找全这类硬编码变量。"
+  - "[reference: notes.md] Guile 2.2 的 `scm_t_subr` 是 `typedef void *`（libguile/scm.h），回调形参因此是 `void *` 而非函数指针类型：C 允许函数指针隐式转 `void *`（仅告警），C++ 禁止（clang `no matching function for call to 'scm_c_define_gsubr'`）。上游 `src/main.cpp` 的 68 处注册用 `(SCM (*)() ) fcn`，C++ 下必须换成 API 自己的形参 typedef `(scm_t_subr)`。属「以 void* 收函数指针的 C API」这一通用类，非 Guile 专属。"
+
+patch_classification:
+  - file: "0001-configure-umask.patch"
+    type: portability
+    platform_only: true
+    guard: "HMDFS configure 临时目录权限"
+  - file: "0002-configure-guile-soname.patch"
+    type: portability
+    platform_only: false
+    guard: "已发布 guile/2.2.7 的 soname 为 libguile-2.2.so（无 libguile.so）"
+  - file: "0003-src-main-gsubr-subr-cast.patch"
+    type: portability
+    platform_only: false
+    guard: "Guile 2.2 的 scm_t_subr 是 void*，C++ 不允许函数指针隐式转换（C 允许）"
