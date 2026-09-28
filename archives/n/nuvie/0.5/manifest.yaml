@@ -1,0 +1,66 @@
+# 版本级 manifest — nuvie 0.5
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "0.5"
+software: "nuvie"
+status: built
+build_date: "2026-09-20"
+build_system: autotools
+
+source:
+  url: "https://downloads.sourceforge.net/project/nuvie/Nuvie/0.5/nuvie-0.5.tgz"
+  sha256: "ff026f6d569d006d9fe954f44fdf0c2276dbf129b0fc5c0d4ef8dce01f0fc257"
+  tar_format: tar.gz
+
+build:
+  system: autotools
+  configure_options:
+    - "--prefix=/"
+    - "--bindir=${prefix}/bin"
+    - "--sbindir=${prefix}/bin"
+    - "--libdir=${prefix}/lib"
+    - "--includedir=${prefix}/include"
+    - "--oldincludedir=${prefix}/include"
+    - "--disable-tools"
+    - "--build=aarch64-unknown-linux-gnu"
+    - "--host=aarch64-unknown-linux-gnu"
+    - "SDL_CONFIG=<build_folder>/sdl-config（外壳脚本，转发到 sdl12-compat）"
+  dependencies:
+    - sdl12-compat/1.2.68
+  cc: clang
+  cxx: clang++
+
+test_results:
+  type: consumer-side
+  upstream_declared: 0
+  upstream_registered: 0
+  upstream_executed: 0
+  consumer_checks: 29
+  consumer_passed: 29
+  consumer_failed: 0
+
+patches_applied:
+  - "0001-configure-umask.patch"
+  - "0002-nuvieDefs-clamp-avoid-macro.patch"
+
+knowledge_gained:
+  - "[reference: notes.md] `Look.h:31` 声明 `const char *look_tbl[2048];`，而 0.5 的 `Look.cpp:40` 在构造函数里写 `look_tbl[2047] = '\\0';` —— C 里合法（字符常量即整型 0），C++ 里是 hard error：clang 报 `incompatible integer to pointer conversion assigning to 'const char *' from 'char'`，`make` 停在 `Look.o`。上游 master 已把该行改成 `NULL`。修法与 0001/0002 不同：0.5 的 Look.cpp 与 master 行号不对齐（master 构造函数多一行空行），按 hunk 打补丁需要原文上下文而 SourceForge 源本机取不回（403/SSL），故改用 `replace_in_file(strict=True)` 按内容锚定做单行等价替换 —— 找不到即报错，不会静默跳过。判据：**补丁文件用于有上下文、需留档的源码级改动；单行无上下文的等价修复用内容锚定替换更稳**。"
+  - "[ref: E011] HMDFS 下 autoconf 用 umask 077 建的 0700 临时目录对构建进程不可写，须放宽为 022（configure 会把该段文本原样写进生成的 config.status，一处补丁同时修两期）。"
+  - "[reference: notes.md] SDL 1.2 时代的 autotools 消费者依赖 `sdl-config` 可执行脚本，而 ohpcd 只有 sdl12-compat（不含该脚本）→ 在 build_folder 写外壳并经 SDL_CONFIG 注入；AM_PATH_SDL 的 AC_PATH_PROG 对**已按绝对路径赋值**的 SDL_CONFIG 直接采信。"
+  - "上游 Makefile.am 把工程内 include 目录写成裸相对路径（CXXFLAGS = @CXXFLAGS@ -Iactors -Imisc …，源码树子目录在顶层），只支持 in-tree 构建（srcdir==builddir==cwd）；conan basic_layout 默认 out-of-tree(VPATH) 使这些 -I 全部落空 → actors/Actor.cpp:27 `#include \"U6misc.h\"` 报 fatal error: 'U6misc.h' file not found。修法：configure/make/install 三处 self.run() 加 cwd=self.source_folder（conan 的 run(env=...) 只 source 绝对路径的 conanbuild.sh，不 cd，cwd 如实生效）"
+  - "[reference: notes.md] sdl-config 外壳与 AutotoolsDeps 是两条**独立**通路：SDL 的 -I/-l 走外壳，其余 host 依赖走 AutotoolsDeps 注入的 CPPFLAGS/LDFLAGS/LIBS，二者缺一不可。"
+  - "[reference: notes.md] 补丁打的是**已生成的** configure，其 mtime 会被 GNU patch 改写成 diff 头时间戳；automake 1.11 生成物里 `config.h.in: $(am__configure_deps)` 会触发 autoheader 重生成，故 mtime 归一化必须把 config.h.in 一并 touch 到新。"
+  - "[reference: notes.md] 无 CLI 的交互式程序（游戏/全屏应用）用「必经早期失败路径 + 有界运行器」构造确定性断言：nuvie 的 g_console 仅在 ConsoleInit() 之后非空，而 ConsolePause() 在 g_console == NULL 时立即返回，故 initConfig() 失败这条路径必然自行退出（退出码 1）。"
+  - "[reference: notes.md] 函数式宏与 C++ 标准库同名实体会让 libc++ 头文件不可解析：nuvieDefs.h 的三参 clamp 宏吃掉 <algorithm> 里 std::clamp 的四参重载声明（预处理器报 too many arguments to function-like macro invocation），修法是 #ifdef __cplusplus 下改为同名真函数、C 侧保留宏。判据：该宏在 C 下正确，只在 C++ 传递包含标准库头时才坏。"
+  - "[reference: notes.md] C++17 移除了 `register` 存储说明符，clang 在 `-std=c++17` 下把它当 **hard error** 而非 warning（`error: ISO C++17 does not allow 'register' storage class specifier [-Wregister]`），老 C++ 代码（nuvie 0.5 的 screen/Scale.inl 三处）会直接编译失败。构建期在 AutotoolsToolchain.extra_cxxflags 追加 `-Wno-register` 关掉诊断即可，零补丁（同仓库先例 freeimage/3.18.0）。判据：报错行带 `[-Wregister]` 且 cppstd=17 时优先用旗标而不是改源码。"
+  - "[reference: notes.md] 收窄初始化列初始化（narrowing in initializer list）同样是「C++98 只是 warning、C++11 起是 hard error」的一类：nuvie 的 screen/Screen.cpp:1870/1886 把 uint32 表达式放进聚合初始化的 Uint16（SDL 的 unsigned short）成员，clang 报 `error: non-constant-expression cannot be narrowed from type 'uint32' to 'Uint16' in initializer list [-Wc++11-narrowing]`。与 `register` 同解：extra_cxxflags 追加 `-Wno-c++11-narrowing`，零补丁（同仓库先例 ballandpaddle/0.8.1）。判据：报错行带 `[-Wc++11-narrowing]` 时先加旗标，别改上游结构。"
+
+patch_classification:
+  - file: "0001-configure-umask.patch"
+    type: portability
+    platform_only: true
+    guard: "HMDFS configure 临时目录权限"
+  - file: "0002-nuvieDefs-clamp-avoid-macro.patch"
+    type: portability
+    platform_only: false
+    guard: "libc++ <algorithm> 的 std::clamp 与同名三参函数式宏冲突（C++ 传递包含即触发）"

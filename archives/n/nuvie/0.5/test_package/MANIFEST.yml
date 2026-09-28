@@ -1,0 +1,98 @@
+# test_package/MANIFEST.yml
+# CI 脚本 (ci/conan/build_and_test.sh L0e) 要求本文件存在。
+# R51 — 上游测试清单（2026-09-21 对 nuvie-0.5 官方 tarball 审计）
+
+package: nuvie/0.5
+homepage: "https://nuvie.sourceforge.net/"
+
+# ── R51 上游测试清单 ────────────────────────────────────────────────
+# nuvie 0.5 **没有**自动化测试套件。2026-09-21 对官方 tarball
+# （sha256 ff026f6d569d006d9fe954f44fdf0c2276dbf129b0fc5c0d4ef8dce01f0fc257）
+# 的审计证据：
+#   $ grep -n 'TESTS\|check_PROGRAMS\|check_SCRIPTS' Makefile.am tools/Makefile.am
+#       -> 无输出（automake 的 check 目标仅按 SUBDIRS = tools 递归，无测试目标）
+#   $ ls tools/  -> 全是 noinst_PROGRAMS 开发者数据拆分工具（本配方 --disable-tools
+#                    关闭），与游戏运行无关，也不是测试
+#   $ ls data/   -> 12 个 UI 边框/滚动条 .bmp + 4 个按键映射 .txt，全是运行期资产
+#   $ ls builds/ -> linux/{nuvie.cfg.in,nuvie.desktop,nuvie.spec.in} 等打包物料，
+#                    无测试夹具
+# => 上游测试：0 个文件、0 个注册用例、0 条断言、0 次执行。
+upstream_check_command: "grep -n 'TESTS\\|check_PROGRAMS' Makefile.am tools/Makefile.am  # 无输出，上游无测试目标"
+upstream_test_in_build: false
+upstream_test_command: ""
+upstream_tests: []
+
+# ── test_package 测试（消费者侧验证）───────────────────────────────
+# test_nuvie.sh 实跑**安装后的** bin/nuvie，断言 29 项。
+test_package_tests:
+  - file: test_nuvie.sh
+    description: >
+      实跑安装后的 nuvie 二进制，走两条**必然自行退出**的早期失败路径：
+      (B) HOME 未设置且 cwd 无 nuvie.cfg → initConfig() 失败，这条在
+      ConsoleInit() 之前 return，故 g_console 仍为 NULL、ConsolePause() 立即
+      返回，进程确定性退出（退出码 1）；
+      (C) HOME 指向可写空目录 → initDefaultConfigUnix 写出 $HOME/.nuvierc，
+      initConfig() 返回 true，执行流进入 new Screen() → Screen::init() →
+      set_screen_mode()。
+
+      注意 C 组**不断言**「SDL_Init 一定失败」，也**不断言** g_console 仍为
+      NULL：实测在 OHOS/sdl12-compat 上，SDL_VIDEODRIVER 指向不存在的驱动
+      并不会让 SDL_Init(SDL_INIT_VIDEO) 返回负值，进程会继续走到
+      set_safe_video_settings / set_screen_mode()（CI #62596 实测输出
+      "Couldn't initialize SDL_VIDEO!"，nuvie.cpp:400，注意是下划线而不是
+      Screen::init 的 "Couldn't initialize SDL: %s"；也不打印
+      "Initializing screen!"）。执行流因此越过了 ConsoleInit()。
+      判据是 check_any（「执行到 Screen/SDL 这一段代码」，模式写成不带尾部
+      标点的 "Couldn't initialize SDL" 以同时覆盖两种文案）+
+      check_none（无加载器/符号解析失败），
+      并核对 .nuvierc 已写出；退出码仍观测为 1（进程自行退出），C 组另叠一个
+      30 秒 run_bounded 兜底：万一将来上游行为变化导致挂死，只会记一条 FAIL
+      而不是拖垮 CI。
+      并核对 18 个安装产物（8 个 BorderU6_*.bmp、4 个 ScrollBar*.bmp、
+      4 个按键映射 .txt、.desktop、图标）。
+    command: "sh test_nuvie.sh <package_folder>"
+
+assertion_count: 29
+
+# ── rule12 鸿蒙特有测试 ────────────────────────────────────────────
+# 鸿蒙特有集 = B 组（无配置路径，5 条）+ C 组（配置加载 + SDL 初始化路径，5 条）
+# = 10 条。这 10 条必须**真实执行已安装的 OHOS aarch64 二进制**才能得到输出，
+# 因此「能跑出这些 stderr 行」同时证明了：
+#   (1) 该 ELF 在 OHOS 上被动态加载器接受 —— libSDL-1.2.so 等全部 NEEDED
+#       （含 sdl12-compat 的传递依赖 SDL2）解析成功；漏一个会在 main() 之前被
+#       拒绝，退出码是 127/126 而非 1，且 stderr 会是 cannot open shared object
+#       这种**另一种文本**（B 组两条 check_not 正是这条判据）；
+#   (2) 符号全部解析成功（-lSDL-1.2 的链接期与运行期一致；B 组 check_not
+#       "undefined symbol"）；
+#   (3) main() → Nuvie::init() → initConfig() 的 C++ 代码在 OHOS 上真实执行：
+#       B 组断到 "Debugging enabled"（main() 启动日志）与
+#       "No config file found!"（initConfig 失败诊断），C 组断到
+#       "Loading Config from"（配置读取）与 check_any
+#       「Attempting to set vid mode:」/「Couldn't initialize SDL」/
+#       「Initializing screen!」/「Unable to create surface」——
+#       即执行流确实进入了 Screen/SDL 这一段（**实测命中
+#       "Couldn't initialize SDL_VIDEO!"**，nuvie.cpp:400 的
+#       set_safe_video_settings：该平台上 SDL_Init(SDL_INIT_VIDEO)
+#       对不存在的 SDL_VIDEODRIVER 并不返回负值，故不会命中
+#       Screen::init 的 "Couldn't initialize SDL: %s"，这一分支随平台/驱动
+#       而异，故用 check_any 且模式不带尾部标点以覆盖两种文案），并核对
+#       initDefaultConfigUnix 真的在 OHOS 文件系统上写出了非空的
+#       $HOME/.nuvierc（HMDFS 写路径可用）。
+mohos_specific_tests:
+  - file: test_nuvie.sh
+    description: >
+      B 组 5 条 + C 组 5 条：在 OHOS aarch64 上实跑打包后的游戏二进制，断言
+      「无配置路径」的完整 stderr 文本与「配置加载路径」到达 Screen/SDL 段
+      以及两者的自行退出（退出码 1，C 组另叠 30 秒 run_bounded 兜底），等价于
+      「动态链接链全解析 + C++ 初始化逻辑 + HMDFS 配置读写全部在 OHOS 上通过」。
+    assertion_count: 10
+
+# 未执行项（如实登记，附技术理由）：
+#   真正的游戏循环 —— SDL 显示窗口 + U6/Martian Dreams/Savage Empire 游戏数据
+#   加载。CI 沙箱无显示设备，且 Ultima 6 的原始游戏数据受版权保护、不随本包
+#   分发，故本脚本只断言运行期资产**已安装且非空**，不断言运行期加载。
+unexecuted:
+  - item: "游戏主循环（SDL 显示 + Ultima 6 数据文件加载）"
+    reason: "CI 沙箱无显示设备；且 Ultima 6 原始游戏数据受版权保护、不随本包分发，无法在测试期提供合法输入"
+  - item: "二进制静态属性（readelf/file/soname 检查）"
+    reason: "断言写在**可观测运行行为**上（stderr 文本与退出码），不做二进制静态属性检查，避免与打包器/工具链实现细节耦合"
