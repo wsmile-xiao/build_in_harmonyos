@@ -1,0 +1,98 @@
+# ═══ Draft knowledge entry — 上游在 Makefile 里用 pkg-config 要 flags 时，第二条修法是覆写 make 变量而非造 alias .pc ═══
+# Timestamp: 2026-09-26
+# Software: qcontrol 0.5.7（NAS 外设守护进程，裸 Makefile + lua/5.1.5）；结论适用于任何"Makefile 用 $(shell pkg-config --cflags/--libs <模块名>) 取参数"的上游
+# Gate: 本地 conan create + conan-verify（G1/G2/G3 PASS）+ 消费者测试 45/45（行为 20 ＋ 平台 25）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-qcontrol-0.5.7-makefile-pkgconfig-name-via-cpp-info-override
+trigger_tool:           make|pkg-config|conan|clang|ld
+phase:                  build|link
+error_signature:        |-
+  No package 'lua5\.1' found
+  Package 'lua5\.1', required by '.*', is not available
+  Command 'pkg-config --cflags lua5\.1[^']*' failed
+  make: \*\*\* \[.*\] Error 1
+
+severity:               2
+category:               packaging, pkg-config, lua, ohos, build-system, makefile
+match_keywords:         pkg-config, PkgConfigDeps, .pc 文件名, 模块名不一致, lua5.1, lua-5.1, Makefile shell pkg-config, cpp_info 覆写 make 变量, CFLAGS, LIBS_DYNAMIC, PKG_CONFIG=false, 关条件探测, 零补丁, NEEDED 自证, R33
+title:                  上游把 pkg-config 模块名硬编码在 Makefile 的 shell 调用里、而 conan 发布件生成的 .pc 名与之不同时，除"造 alias .pc"外还有第二条修法——从 cpp_info 取 cflags/libs 直接覆写 make 的编译/链接变量，并把 pkg-config 探测本身关掉
+
+root_cause: "上游 Makefile 不是用 PKG_CHECK_MODULES 让 configure 去问包，而是自己在命令行里写死模块名向 pkg-config 要 flags（qcontrol 是 Makefile:9-11 的 pkg-config --cflags/--libs lua5.1，另 Makefile:13 还有一条 libsystemd-daemon 条件探测）。conan 的 PkgConfigDeps 按发布件的 cpp_info 命名生成 .pc，本包生成的是 lua-5.1.pc 而非 lua5.1.pc ⇒ 上游问的名字永远查不到：pkg-config --exists lua5.1 实测 rc=1 报 No package 'lua5.1' found，而查发布名 lua-5.1 能正常给出 -DLUA_USE_POSIX -DLUA_USE_DLOPEN -I… 与 -L… -llua -ldl -lm。名字不一致是根因，与 lua 本身、与交叉工具链都无关。"
+
+affected_scope: >
+  任何「Makefile 里用 $(shell pkg-config --cflags/--libs <名字>) 取参数，或把 pkg-config 调用写在编译规则里」
+  的上游，且该 <名字> 与 conan 发布件生成的 .pc 名不同（横杠/前缀/版本后缀差异都可能中招：lua5.1 与 lua-5.1、
+  gtk+ 与 gtk、以及带 -2.0/-3.0 后缀的 GLib 系）。configure/meson/cmake 型上游不适用本条（它们走
+  PKG_CHECK_MODULES / find_package，有各自的缓存变量可预置）。
+
+rec_priority:           1
+rec_impl:               manual
+rec_auto_fix:           false
+rec_command: |
+  在 conanfile.py 的 build() 里从 self.dependencies[...] 的 cpp_info 取出编译/链接参数，用 make 命令行变量覆写
+  上游 Makefile 的那两个变量，并把探测关掉；本包形态是：
+    make CFLAGS="<cpp_info.cflags 拼接>" LIBS_DYNAMIC="<cpp_info.system_libs + shared_libs 拼接>" PKG_CONFIG=false
+  要点三条：① 参数一律来自 cpp_info（R33，不自己拼编译开关，也不写死宿主路径）；
+  ② 对上游的 *条件探测* 用环境变量短路（PKG_CONFIG=false ⇒ 走 Makefile 里"探测失败就不启用该特性"的分支），
+     这样 0 补丁、不改上游一行源码；
+  ③ 覆写变量前必须先确认该变量在**编译规则里**的用法（若上游写成 CXXFLAGS?=-c 这种"命脉"形态，覆写会把编译变成链接，
+     同族 skewer 0.2.2 实撞过：症状是 ld.lld: error: undefined symbol）；本包 CFLAGS/LIBS_DYNAMIC 是纯参数拼接型才可覆写。
+rec_description: >
+  用 cpp_info 覆写 make 变量绕过 pkg-config 命名差异，并以短路探测变量的方式关掉上游的条件探测；
+  代价是失去上游探测自带的版本约束与特性开关判定，因此链接完整性必须自己留证（本包用消费者测试里的
+  NEEDED 集合断言 + 无宿主路径断言来补这一刀）。
+rec_fix_code: ""
+
+fallback_priority:      2
+fallback_approach:      既有条目的做法——在 generate() 里补一枚 alias .pc
+fallback_impl:          manual
+fallback_command:       见 knowledge/drafts/DRAFT-ohos-pkgconfig-name-alias.kv（来源 zeitgeist/1.0.4，在 generate() 里按期望名写一份转发的 .pc，保留上游探测路径不变）
+fallback_description: >
+  两条路的取舍：需要保留上游的 pkg-config 判定语义（例如上游还要读 --modversion、或同一模块名被多处查询）时用
+  alias .pc；只想零补丁零新文件、且上游只取 cflags/libs 时用本条。本包实测走本条即可，未新增 .pc。
+
+verification_cmd: |
+  # 1) 坐实根因是名字不一致而不是没装 lua
+  conan install --requires=lua/5.1.5 -g PkgConfigDeps
+  PKG_CONFIG_PATH=<生成的 build folder> pkg-config --exists lua5.1 ; echo rc=$?     # 期望 rc=1 + No package 'lua5.1' found
+  PKG_CONFIG_PATH=<同上> pkg-config --cflags --libs lua-5.1                          # 期望给出 -I/-L/-llua -ldl -lm
+  # 2) 复验修法：create 后判产物链接完整、无宿主路径
+  python3 scripts/ohc-run.py conan-verify qcontrol 0.5.7                             # 期望 G1/G2/G3 PASS
+  sh test_package/test_ohos.sh                                                       # 平台断言含 NEEDED、.codesign、无宿主绝对路径
+
+boundary: >
+  适用：Makefile 用 shell 调 pkg-config 取 flags，且被覆写变量是纯参数拼接型。
+  不适用：configure/meson/cmake 型（用各自的 cache/option 预置）；上游除 cflags/libs 还依赖 --modversion 或
+  多处查同一名字时，优先用 alias .pc（否则等于悄悄删掉了上游的版本校验）。
+  ⚠ 反例与代价：关掉探测会让上游"探测到就启用"的特性静默变弱（本包的 libsystemd-daemon 条件探测就是这样被关掉的，
+  必须在 notes.md 里写明"该特性在 OHOS 上未启用"，不能当成已通过）；另外 cpp_info 是否带齐 linkage 要实测——
+  本窗曾推断"用 cpp_info 的 libs 会漏 -lm -ldl"，**实测证伪**（lua-5.1 的 Libs 本身就带 -ldl -lm），
+  所以既不要盲信"pkg-config 一定给全"，也不要盲信"cpp_info 一定漏"。
+  配套坑（同包实测）：上游 Makefile 的 -g 会把构建机绝对路径（/storage/…）写进产物，与"产物无宿主路径"断言冲突，
+  需在覆写 CFLAGS 时一并去掉。
+
+principles:             P001, P004
+similar_to:             [DRAFT-ohos-pkgconfig-name-alias, DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override, DRAFT-ohos-glib-sub-pc-merge-vars]
+conflicts_with:         []
+prerequisite_of:        所有 Makefile 内直接调 pkg-config 且模块名与发布 .pc 名不同的 OHOS 移植
+
+applicable_libs:        qcontrol, 任何 Makefile 直调 pkg-config 的老式上游（lua/tcl/tk/glib 子模块系尤其常见）
+reuse_existing:         false
+new_draft:              true
+
+doc_file:               knowledge/drafts/DRAFT-qcontrol-0.5.7-makefile-pkgconfig-name-via-cpp-info-override.md
+last_updated:           2026-09-26
+source_event:           archives/q/qcontrol/0.5.7
+source_pr:              本包交付分支 feat/qcontrol-0.5.7（PR 号由平台按分支自动关联，与本 Issue 双向互链）
+source_commit:          8fcca31888aadf00f78814c45d005a935337379e
+authors:                主理-63
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.7
