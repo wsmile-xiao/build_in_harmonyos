@@ -1,0 +1,119 @@
+# ═══ Draft knowledge entry — Conan 打补丁用 patch_ng（非 GNU patch），hunk 源侧区间
+# 重叠时 apply_conandata_patches 抛 IndexError：合并成单 hunk / 拆成多个 patch 文件 ═══
+# Timestamp: 2026-09-22
+# Software: nuvie 0.5（Ultima 6 / Martian Dreams / Savage Empire 的开源引擎，SDL 1.2）
+# Gate: 构建准入（build() 内 apply_conandata_patches 直接崩，L0 之后才暴露）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-6380-nuvie-0.5-patch-ng-overlapping-hunks-indexerror
+trigger_tool:           conan
+phase:                  compilation
+
+severity:               3
+category:               conan, build, patch, ohos, ci
+match_keywords:         apply_conandata_patches, patch_ng, IndexError list index out of range, overlapping hunks, hunk startsrc, GNU patch works but conan fails, patch_applied_then_crash, conan.tools.files.patch, hunkfind, hunklineno, strip does not help, premature end of source file, merge hunks into one, split into multiple patch files
+
+title:                  Conan 2 用纯 Python 的 patch_ng 打补丁（不是 GNU patch）。当同一个
+                        文件的两个 hunk 源侧区间重叠（后一 hunk 的 startsrc 落在前一 hunk
+                        覆盖区间内）时，patch_ng 的单遍校验循环无法重新同步，会把
+                        hunkfind 停在前一个 hunk 上并让 hunklineno 越界，抛
+                        IndexError: list index out of range —— 而 GNU patch(1) 能正常打
+
+root_cause: >
+  Conan 2 的 conan.tools.files.patch() 用内置的 patch_ng（纯 Python），不是 GNU patch(1)。
+  patch_ng.PatchSet.apply() 校验 hunk 的循环对源文件**只扫一遍**：
+    - hunkfind（当前 hunk 的源侧期望行）**只在 行号 == hunk.startsrc 那一刻**才重算；
+    - 当前 hunk 的最后一行源侧行被消费掉时，它把 hunkno 推进到下一个 hunk，
+      **但不会重算 hunkfind**。
+  两者相安无事的前提是 hunk 在源文件里按区间递增且互不重叠。一旦后一个 hunk 的
+  startsrc 落在前一个 hunk 覆盖的区间之内：
+    (1) 校验到前一个 hunk 末行时 hunkno 被推进；
+    (2) 下一个 hunk 的 startsrc 是**已经走过**的行号，`行号 == hunk.startsrc`
+        再也不会成立 → hunkfind 永远停留在前一个 hunk 的列表上；
+    (3) 而校验条件 `行号 < hunk.startsrc + len(hunkfind)` 仍然成立，于是
+        hunkfind[hunklineno] 的 hunklineno 一路自增到越界 → IndexError。
+  迷惑点：`Apply patch (...)` 那行**已经打印**（说明 conandata 解析成功、补丁文件
+  读到了），报错类型是 IndexError 而非 ConanException（说明是 conan 内部调用的
+  第三方库崩了），且同一个补丁手工用 GNU patch -p0 打**完全成功** —— 所以
+  「手工能打」不能作为「Conan 能打」的证据。
+
+affected_scope:         Conan 2 所有走 conandata.yml patches / apply_conandata_patches /
+  export_conandata_patches + conan.tools.files.patch 的配方。与具体库无关，
+  任何手工生成或拆分不当的 unified diff 都可能命中。
+
+rec_priority:           1
+rec_approach:           merge-overlapping-hunks-into-one
+rec_description: >
+  **把源侧区间重叠的 hunk 合并成一个。** 两处改动通常本来就挨得很近（同一个代码块），
+  合并后 hunk 头行数 = 合并区间内的源侧行数。合并时注意：
+    - 两处 -/+ 对都要保留，顺序按源文件里的先后；
+    - 落在两段之间的上下文行只写一次（不要重复，否则源侧计数与 hunk 头不符）；
+    - 合并后重新核对 hunk 头的源/目标行数：源侧 = 上下文 + '-' 行数，
+      目标侧 = 上下文 + '+' 行数。
+  nuvie 实例：@@ -5651,7 + @@ -5656,7（后者起点 5656 落在前者覆盖的 5651..5657 内）
+  → 合并为 @@ -5651,12 +5651,12，单 hunk 覆盖 5651..5662。
+  判据：**Conan 下 hunk 必须按源文件区间严格递增且首尾不重叠。** 判的是**源侧区间**
+  （'-' 那半），有效长度是 `len(hunkfind)`（该 hunk 里 ' ' 与 '-' 开头的行数），
+  不是 hunk 头声明的 ,n。
+  提前发现（写补丁后按规则扫一遍，别只看 git apply / patch(1) 能不能打）：
+    - 把 .patch 按 `--- `/`+++ ` 行切分成若干 item（**不同文件之间的 hunk 不相互约束**，
+      误报全部来自跨文件的假阳性）；
+    - 每个 item 内对相邻 hunk 检查
+      `next.startsrc <= prev.startsrc + (prev 中 ' ' 与 '-' 开头的行数) - 1`；
+    - 命中即为必炸（或至少必判 premature end of source file）。
+  本地复现（定位真因的最快路径）：
+    import patch_ng
+    ps = patch_ng.fromfile("<the>.patch")
+    ps.apply(strip=0, root="<源文件所在目录>")
+  抛 IndexError 时，栈帧局部变量里 hunkfind 的长度 = 上一个 hunk 的长度、
+  hunklineno 已越界 —— 一眼定罪。
+rec_command:            python -c "import patch_ng; print(patch_ng.fromfile('patches/x.patch').apply(strip=0, root='.'))"
+rec_auto_fix:           false
+rec_impl:               unified-diff-overlapping-hunk-rewrite
+
+fallback_1_approach:    split-into-multiple-patch-files
+fallback_1_description: >
+  两处相隔很远、硬合并会拖进大段无关上下文时：拆成多个 .patch 文件，**每个文件只
+  含一个 hunk**，conandata 里按顺序列出、patch_description 分别写。conan 会按顺序
+  分别调用 patch()，每个文件各扫一遍，互不影响。
+
+fallback_2_approach:    shift-later-hunk-context-past-prev-end
+fallback_2_description: >
+  不拆文件时：把后一个 hunk 的上下文整体下移，使它的 startsrc 严格大于
+  `prev.startsrc + len(prev 的 ' '/'-' 行数) - 1`。代价是要多带几行上下文。
+  两处确实存在顺序倒错（后一 hunk 源位置在前一之前）时**无解** —— patch_ng 是单遍
+  扫描，只能排成递增顺序或拆文件。
+
+fallback_3_approach:    do-not-try-strip
+fallback_3_description: >
+  **不要在 conandata 里加/改 strip 试图绕过**：strip 只影响源/目标文件名的层级解析
+  （a/、b/ 前缀剥离），与 hunk 定位完全无关。nuvie 这个补丁 strip 取 0 还是 1 都会走到
+  同一个崩溃点。
+
+verification_cmd: >
+  # 1) 双验证：GNU patch 能打 且 patch_ng 复现 IndexError（两者都做，才能确认是"补丁
+  #    写法"而非"环境/路径"问题）
+  patch -p0 < patches/0001-configure-umask.patch        # → 成功（误导来源）
+  python -c "import patch_ng; patch_ng.fromfile('patches/0001-configure-umask.patch').apply(strip=0, root='.')"
+                                                        # → IndexError: list index out of range
+  # 2) 合并成单 hunk 后对**源文件副本**实跑：
+  #    → 返回 True、两处替换都落到目标行、不留 .orig 备份、源文件里 umask 077 归零
+  # 3) 提交后由 CI 实跑 conan create 验证（Apply patch 行之后不再有 ERROR:）
+
+verification: >
+  nuvie 0.5 实测：合并前 patch_ng 抛 IndexError: list index out of range（崩在
+  patch_ng.py:1142，hunkno=1 而 hunkfind 仍是 hunk0 的 7 行、hunklineno=7）；
+  合并为 @@ -5651,12 +5651,12 后 patch_ng.fromfile(...).apply(strip=0, root=...) 返回
+  True，5654 / 5659 两行均替换为 umask 022、源文件里 umask 077 归零、无 .orig 残留。
+  全仓库扫描 13009 个 .patch 文件，仅本处属"消费者侧真会命中"的重叠（另有一处
+  archives/a/argus-clients/5.0.3 是 legacy 目录、无 conanfile，不参与构建）。
+
+related:
+  - archives/n/nuvie/0.5/patches/0001-configure-umask.patch
+  - archives/n/nuvie/0.5/notes.md
+  - archives/s/sdl_image/1.2.12/patches/0001-configure.patch (同类改动但单 hunk，可直接对照)
+  - archives/b/ballandpaddle/0.8.1/patches/0001-configure-umask.patch (同上)
+
+source_pr:              11647
+source_commit:          ac94b36a62c015d965754f3399a31d1efda12ffc
+last_updated:           2026-09-22
