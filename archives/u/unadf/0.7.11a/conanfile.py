@@ -58,12 +58,14 @@ class UnadfConan(ConanFile):
         basic_layout(self)
 
     def source(self):
+        # conan_data is keyed [package_name/version] -> entry. The leading
+        # "unadf/" is the conan reference name, not a literal key.
         # CI rewrites conandata `url` into a [mirror, upstream] list; accept both.
-        candidates = self.conan_data["sources"][self.version]["url"]
+        entry = self.conan_data["sources"][f"{self.name}/{self.version}"]
+        candidates = entry["url"]
         if not isinstance(candidates, list):
             candidates = [candidates]
-        get(self, **dict(self.conan_data["sources"][self.version], url=candidates[0]),
-            strip_root=True)
+        get(self, **dict(entry, url=candidates[0]), strip_root=True)
 
     def build(self):
         # R33: take the toolchain from Conan conf, never from the shell env.
