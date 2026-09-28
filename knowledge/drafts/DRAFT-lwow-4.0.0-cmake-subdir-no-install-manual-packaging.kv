@@ -1,0 +1,80 @@
+#====================================================================
+# DRAFT-lwow-4.0.0-cmake-subdir-no-install-manual-packaging
+#   CMake 子工程库无 install 规则时的 Conan 2 手动打包与产物路径探测
+# 来源: lwow 4.0.0 适配（PR 待建，Path B 知识库扩展）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-lwow-4.0.0-cmake-subdir-no-install-manual-packaging
+trigger_tool:           conan|cmake
+phase:                  packaging|configuration
+error_signature:        Library '.*' not found in package|
+                         No built .* library archive found|
+                         CMake\.configure\(\) got an unexpected keyword argument 'source_dir'|
+                         cmake install.*no rule to make target install
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               cmake, conan, packaging, layout
+match_keywords:         cmake_layout, build_script_folder, source_dir, install rules,
+                        add_library, library.cmake, package(), copy *.a, build_folder,
+                        build/Release, no install, manual packaging
+title:                  上游为 CMake 子工程且无 install 规则时，用 build_script_folder 编子目录并在 package() 候选探测库产物
+prescan_pattern:        library\.cmake|no install.*rule|add_library\([^)]*\)[^\n]*target_sources
+prescan_globs:          archives/*/*/conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:            上游把库定义在子目录（如 lwow/lwow/CMakeLists.txt 仅
+                        include(library.cmake)），library.cmake 只 add_library +
+                        target_sources，不写任何 install() 规则 → cmake install
+                        无产物，conan create 的 test_package 必然找不到库文件。
+                        同时：① CMake.configure() 无 source_dir 参数，子目录工程
+                        必须用 build_script_folder="<子目录>"；② conan 2 cmake_layout
+                        下 self.build_folder 已指向 <cache>/b/<hash>/b/build/Release
+                        （不是 <cache>/b/.../b），直接拼 "build/Release" 会指向
+                        不存在的深层路径。
+affected_scope:         Conan 2 配方适配"库定义在子目录、无 install 规则"的 CMake
+                        工程（multi-add_library 或 library.cmake 风格）。仓内实证：
+                        lwow 4.0.0（lwow/ 子目录，library.cmake 定义 lwow +
+                        lwow_devices 两个库）。
+verification_cmd:       conan create . -pr:h=ci/conan/profiles/ohos-aarch64 \
+                        -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing \
+                        && conan cache path lwow/4.0.0:* 检查 lib/*.a 存在
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           build-script-folder-plus-candidate-lib-probe
+rec_description:        build() 用 cmake.configure(build_script_folder="lwow") 指向
+                        库子目录（该子目录是独立可 configure 的 CMake 工程）；
+                        package() 用候选路径列表探测库产物目录，命中后再
+                        copy *.a/*.so：candidates = [
+                          build_folder/build/Release,
+                          build_folder/Release,
+                          build_folder/lwow,
+                          build_folder 本身
+                        ]，任一项存在 .a/.so 即采用；全 miss 则 raise
+                        ConanException 显式失败（不静默产空包）。
+                        头文件从 source_folder/<子目录>/src/include 复制。
+rec_command:            tc = CMakeToolchain(self) ... cmake.configure(build_script_folder="lwow") \
+                        lib_src = 首个含 .a/.so 的候选目录; copy *.a/*.so → package_folder/lib
+rec_auto_fix:           false
+rec_impl:               manual-recipe
+fallback_priority:      2
+fallback_approach:      upstream-install-rule-patch
+fallback_description:   若允许改上游构建文件，可在子目录 CMakeLists 补 install()
+                        (TARGETS lwow ARCHIVE DESTINATION lib) 使 cmake.install()
+                        生效；但优先不改上游，用 package() 手动打包。
+fallback_command:       add install(TARGETS ... ARCHIVE DESTINATION lib \
+                        PUBLIC_HEADER DESTINATION include) 到子目录 CMakeLists
+fallback_auto_fix:      true
+fallback_impl:          patch
+forbid_1_pattern:       package\(\).*copy.*空目录|raise.*skip|pass.*package\(\)
+forbid_1_reason:        空包或静默跳过会产出无产物包，CI 测试链接必然失败。
+forbid_1_consequence:   test_package Library not found，门禁失败且难定位。
+forbid_2_pattern:       os\.path\.join\(self\.build_folder, "build", "Release"\).*直接 copy
+forbid_2_reason:        cmake_layout 下 build_folder 已含 build/Release，直接拼接路径不存在。
+forbid_2_consequence:   copy 静默零文件，产出空包。
+principles:             P012, P014
+doc_file:               knowledge/drafts/DRAFT-lwow-4.0.0-cmake-subdir-no-install-manual-packaging.md
