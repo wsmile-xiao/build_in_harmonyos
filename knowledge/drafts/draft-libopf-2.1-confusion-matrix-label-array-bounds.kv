@@ -1,0 +1,82 @@
+#====================================================================
+# DRAFT — 统计矩阵按"类别数"分配但按"程序产生的标签值"索引：
+#         聚类/分类输出 label 超过 nlabels → 堆越界写
+# Draft only: do not promote without reviewer assignment.
+# Trigger event: libopf/2.1 adaptation (task libopf-2.1-r01-PC1-14)
+#====================================================================
+
+id:                     draft-libopf-2.1-confusion-matrix-label-array-bounds
+trigger_tool:           clang|make|test|runtime
+phase:                  runtime
+error_signature:        Computing accuracy \.\.\.Signal 11|heap-buffer-overflow.*opf_ConfusionMatrix|
+                        opf_ConfusionMatrix.*label|cluster.*num of clusters.*nlabels|
+                        error_matrix.*label
+
+severity:               2
+category:               c-language, portability, abi
+match_keywords:         confusion matrix, label, nlabels, cluster, heap-buffer-overflow,
+                        array bounds, SIGSEGV, max label, opf_ConfusionMatrix, opf_Accuracy,
+                        label 越界, 混淆矩阵
+title:                  统计/误差矩阵按 nlabels+1 分配、却用程序产生的 label（可达聚类数、
+                        超过 nlabels）做列索引 → 堆越界写；修复为按 max(label) 扩容分配
+
+root_cause:             libopf 的 opf_ConfusionMatrix 与 opf_Accuracy 都以
+                        `sg->nlabels + 1` 分配矩阵行数（列索引用 label），但无监督聚类
+                        （opf_cluster）输出的簇标签以"簇数"编号，可大于真实类别数
+                        nlabels；`CM[truelabel][label]++` / `error_matrix[label][0]++`
+                        以越界 label 写堆 → 部分数据组合下 SIGSEGV（example5 场景3/5
+                        实测 Signal 11，ASan 定位 OPF.c:1688）。x86-64 上同代码通常
+                        因堆布局差异侥幸存活，aarch64/OHOS 稳定崩溃。
+affected_scope:         任何按"类别/簇数声明计数"分配统计矩阵、却以运行时产生的
+                        标签值做索引的 C 库：混淆矩阵、误差矩阵、直方图、计数表等；
+                        在无监督/半监督/聚类输出场景尤其常见。
+verification_cmd:       构造 label > nlabels 的小数据（如 4 节点 2 类、手动置 label=3）
+                        调用矩阵函数；ASan 复现 `clang -fsanitize=address ...` 定位越界行，
+                        修复后同输入应返回有效数值且无 ASan 报告。
+
+rec_priority:           1
+rec_approach:           size-array-by-max-label
+rec_description:        矩阵分配前先扫描一次节点，取 max(truelabel, label) 的最大值作为
+                        矩阵维度上限（maxlabel+1），保持既有循环/统计语义不变；不改
+                        输出格式、不加平台宏。
+rec_command:            在 opf_ConfusionMatrix/opf_Accuracy 开头增加 maxlabel 扫描
+                        （`for i in nnodes: if node[i].label > maxlabel: maxlabel = node[i].label`），
+                        所有 calloc/循环边界从 sg->nlabels 改为 maxlabel；重编后跑全部
+                        examples 与专项测试取证。
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      clamp-label-index
+fallback_description:   若无法改矩阵维度（外部 API 固定），可在写入前把 label 钳制到
+                        [1, nlabels]；但会丢失聚类输出信息、accuracy 失真，仅作临时
+                        兼容，不推荐作为长期修复。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       __OHOS__|ifdef.*OHOS
+forbid_1_reason:        越界与平台无关，是数组维度与索引域不匹配的上游缺陷；
+                        平台宏掩盖不了分配错误。
+forbid_1_consequence:   修复假象，其他数据组合仍可能越界。
+forbid_2_pattern:       realloc.*on.*error|ignore.*label
+forbid_2_reason:        忽略非法 label 会让统计静默错误，且无法定位根因。
+forbid_2_consequence:   测试假绿、下游拿到错误统计。
+
+principles:             P005,P013
+causes:                 []
+caused_by:              []
+similar_to:             [draft-libopf-2.1-snode-char-unsigned-nil-sentinel]
+conflicts_with:         []
+prerequisite_of:        []
+last_updated:           2026-09-27
+source_event:           libopf/2.1 r01：example5（无监督聚类）部分场景 opf_accuracy
+                        SIGSEGV；ASan 定位 opf_ConfusionMatrix（OPF.c:1688）heap-buffer-overflow，
+                        opf_Accuracy error_matrix[label] 同型越界；按 max(label) 扩容后
+                        example5 全 5 场景 rc=0，鸿蒙专项测试构造 label=3>nlabels=2 场景
+                        acc=50.00% 无越界，conan create G2 PASS。
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-27
+authors:                PC1-14
