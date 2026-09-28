@@ -1,0 +1,129 @@
+# ═══ Draft knowledge entry — CMakeLists 里的 set(CMAKE_CXX_STANDARD ...) 是普通变量，遮蔽 toolchain 写入的 cache 变量：只在 generate() 抬 cppstd 无效 ═══
+# Timestamp: 2026-09-20
+# Software: osm2pgrouting 3.0.0（需 C++20 的 libpqxx 8.x）
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-osm2pgrouting-3.0.0-cmakelists-cxx-standard-shadows-toolchain-cache
+trigger_tool:           cmake|conan|clang
+phase:                  configuration|compilation
+error_signature:        unknown type name 'std::span'|no member named 'starts_with' in 'std::string'|#error .*requires C\+\+20|requires the language dialect "CXX20"|concept .* requires|does not support C\+\+20|cppstd|CMAKE_CXX_STANDARD
+severity:               3
+category:               conan, cmake, cxx-standard, toolchain, build-system, compilation
+match_keywords:         CMAKE_CXX_STANDARD, CMAKE_CXX_STANDARD_REQUIRED, CMAKE_CXX_EXTENSIONS,
+                         cppstd block, conan_toolchain.cmake, normal variable shadows cache,
+                         CACHE STRING, libpqxx 8, C++20, C++17, std::span, starts_with,
+                         cxx_std_20, target_compile_features, osm2pgrouting
+title:                  CMakeLists 里的 set(CMAKE_CXX_STANDARD 17) 是**普通变量**、遮蔽
+                        toolchain 写入的 cache 变量（CACHE STRING），所以只在 generate()
+                        抬 cppstd 不生效：标准必须在 CMakeLists 里一并补丁，且两边取值必须一致
+
+root_cause: >
+  CMake 的变量查找顺序里**普通变量优先于同名 cache 变量**。
+  CMakeToolchain 把 cppstd 写进 conan_toolchain.cmake 用的是
+      set(CMAKE_CXX_STANDARD 20 CACHE STRING "")
+  —— 这是 cache 变量；而上游 CMakeLists 紧接着在目录作用域里执行自己的
+      if (PQXX_VERSION VERSION_GREATER_EQUAL "7.0.0")
+        set(CMAKE_CXX_STANDARD 17)
+  —— 这是普通变量，且优先级更高。此后 add_executable/add_library 出来的目标全部按
+  C++17 编译，libpqxx 8.x 的公共头（用 std::span、std::string::starts_with、concepts）
+  自然编不过。
+  陷阱在于 toolchain 文件看起来完全正确：conan_toolchain.cmake 里明明写着 20，
+  conan install 输出的 cppstd 也是 20，于是失败被归因到 libpqxx 而非配方。
+  这段还是**版本条件分支**，PQXX_VERSION 来自 bundled FindPQXX.cmake；上一则条目
+  把 find_package(PQXX) 换成 CMakeDeps config 包后该变量不再按上游预期取值，
+  所以这段只能整段替换而非微调。
+
+affected_scope: >
+  所有上游 CMakeLists 里出现 set(CMAKE_CXX_STANDARD ...) /
+  set(CMAKE_CXX_STANDARD_REQUIRED ...) / set(CMAKE_CXX_EXTENSIONS ...) 的工程
+  —— 这是项目钉语言级别的最常见写法。
+  profile 里改 cppstd、generate() 里改 toolchain.blocks["cppstd"]、
+  conf tools.build:cxxflags 加 -std=c++20、命令行 -DCMAKE_CXX_STANDARD=20，
+  **四条全部失效**（前两条写 cache 变量被遮蔽；第三条的 -std=gnu++17 由
+  CMakeLists 的变量生成并排在自加 flag 之后；第四条同为 cache 变量）。
+  同族：meson/autotools 工程在 CXXFLAGS 里硬写 -std=c++17。
+
+verification_cmd: >
+  grep -n 'CMAKE_CXX_STANDARD\|CMAKE_CXX_STANDARD_REQUIRED' <source_folder>/CMakeLists.txt
+  grep -n 'CXX_STANDARD' <generators_folder>/conan_toolchain.cmake
+  grep -n 'cppstd' <recipe>/conanfile.py
+  conan create archives/o/osm2pgrouting/3.0.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+  #   判据口诀：profile 说 20 但报错说 17 → 先 grep 源树的 CMAKE_CXX_STANDARD
+
+rec_priority:           1
+rec_approach:           patch-cmakelists-cxx-standard-and-mirror-it-in-generate-cppstd-block
+rec_description: >
+  补丁里整段替换上游的版本条件分支为：
+      set(CMAKE_CXX_STANDARD 20)
+      set(CMAKE_CXX_STANDARD_REQUIRED ON)
+  配方 generate() 同步：
+      toolchain.blocks["cppstd"].values["cppstd"] = "20"
+      toolchain.blocks["cppstd"].values["cppstd_extensions"] = "OFF"   # (libpqxx/8.0.1 同款)
+  两边**必须一致**：toolchain 的 cppstd 决定依赖包按什么标准构建、也决定 CMake 缓存里
+  没被 CMakeLists 覆盖到的那些值；补丁写 20 而 profile 留 17，换来的是 ABI/stdlib 层面
+  的错配（莫名其妙的链接或运行期错误），而不是干净的 configure 失败。
+  其余有效路径只有两条：打补丁**删掉**那个 set() 让 toolchain 生效；或在自己的补丁代码里
+  target_compile_features(<tgt> PUBLIC cxx_std_20)。若树里别的目标另加 cxx_std_NN，
+  CMake 取最大值，没问题；**反向**（CMakeLists 低于 toolchain）才是坏的。
+  本工程 package_type="application"，没有"从消费侧 override"的退路，补丁是唯一选项。
+rec_command: >
+  # patches/0001-CMakeLists.txt.patch 第三个 hunk：
+  #   -if (PQXX_VERSION VERSION_GREATER_EQUAL "7.0.0")
+  #   -  set(CMAKE_CXX_STANDARD 17)
+  #   -...
+  #   +set(CMAKE_CXX_STANDARD 20)
+  #   +set(CMAKE_CXX_STANDARD_REQUIRED ON)
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      compile-only-workaround-with-cxxflags
+fallback_description: >
+  在 generate() 里往 CMAKE_CXX_FLAGS 追加 -std=c++20（而非 conf tools.build:cxxflags）。
+  之所以能赢，是因为 CMAKE_CXX_FLAGS 变量本身在 CMakeLists 里没有被重设，追加的内容
+  会排在 CMAKE_CXX_STANDARD 生成的 -std 之后。不可取：产物对"上游何时改动了
+  CMAKE_CXX_FLAGS"极其敏感，且依赖包仍按 profile 的 17 构建，ABI 未必一致；
+  仅作为补丁无法落地时的本机兜底，CI 不采用。
+fallback_command:       （不推荐）toolchain.variables["CMAKE_CXX_FLAGS"] += " -std=c++20"
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-generate
+
+forbid_1_pattern:       只在 profile 里把 cppstd 从 17 改成 20|只改 generate() 的 cppstd
+                          而不动 <source_folder>/CMakeLists.txt
+forbid_1_reason:         两者写入的都是 cache 变量，被 CMakeLists 的普通变量 set()
+                           遮蔽，编译仍然走 C++17。
+forbid_1_consequence:    libpqxx 头文件报 std::span / starts_with 不存在，
+                          失败点离真正的配置错误很远，容易误判为 libpqxx 或 libc++ 的问题。
+
+forbid_2_pattern:       conf tools\.build:cxxflags=.*-std=c\+\+20|CMAKE_CXX_FLAGS.*-std=
+forbid_2_reason:         CMakeLists 的 set(CMAKE_CXX_STANDARD 17) 会生成 -std=gnu++17，
+                           排在用户自加 flag 之后生效；且依赖包仍按 17 构建，两侧标准不一致。
+forbid_2_consequence:    补丁看起来"加了标准却没用"，或换来 ABI 错配的隐性故障。
+
+forbid_3_pattern:       补丁写 C\+\+20 而 profile/generate() 留 17（或反之）
+forbid_3_reason:         同一棵树里依赖与本工程用不同语言标准编译，属于 stdlib/ABI
+                           层面的不一致，CMake 不会报错。
+forbid_3_consequence:    链接期或运行期的隐性问题，排查成本远高于一次 configure 失败。
+
+principles:             P003, P005, P014
+similar_to:             E096（cmake-cxx-standard-explicit —— 同属"语言标准必须显式、
+                           不能靠默认"家族，本条补上"显式写了也会被遮蔽"这一层）、
+                        E322（header-only INTERFACE 库关闭上游默认 tests 并消费
+                           CONFIG target）
+related_rules:          R4, R12
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-osm2pgrouting-3.0.0-cmakelists-cxx-standard-shadows-toolchain-cache.md
+last_updated:           2026-09-20
+source_event:           archives/o/osm2pgrouting/3.0.0 适配（PQXX>=7→C++17 分支换成 C++20）
+
+authors:                2301_76770579
+source_pr:              11626
+source_commit:          177a27fd7136f769a959fa7d6ca44a550ca47ac7
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
