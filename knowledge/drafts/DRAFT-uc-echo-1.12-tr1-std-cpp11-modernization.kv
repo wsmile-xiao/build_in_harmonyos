@@ -1,0 +1,117 @@
+#====================================================================
+# DRAFT-uc-echo-1.12-tr1-std-cpp11-modernization
+#   OHOS clang/libc++ 不带 C++ TR1 头：pre-C++11 源码
+#   fatal error: 'tr1/unordered_map' file not found
+# 来源: uc-echo 1.12 适配（feat/uc-echo-1.12，2011 年 C++03/TR1 代码）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-uc-echo-1.12-tr1-std-cpp11-modernization
+trigger_tool:           clang|libcxx|make|cmake|autotools|conan
+phase:                  compilation
+error_signature:        fatal error: 'tr1/[a-z_]+'. file not found|
+                        tr1/(unordered_map|unordered_set|memory|tuple|functional|hash)|
+                        std::tr1::|error:.*tr1
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               platform, compiler, libcxx, portability, c++11
+match_keywords:         tr1, tr1/unordered_map, tr1/memory, tr1/tuple,
+                        std::tr1, C++03, pre-C++11, C++0x, TR1,
+                        unordered_map, shared_ptr, tuple, modernization,
+                        libc++, OHOS, clang, file not found, 现代化
+title:                  OHOS clang/libc++ 无 C++ TR1 头：pre-C++11 源码报 fatal error: 'tr1/xxx' file not found
+prescan_pattern:        #include\s*<tr1/|std::tr1::|\btr1::(unordered_map|shared_ptr|tuple|get|make_tuple)
+prescan_globs:          *.hpp, *.h, *.cpp, *.cc, *.cxx
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             2011 年前后（C++11 之前）的 C++ 源码常使用 TR1 扩展
+                        （std::tr1::unordered_map/shared_ptr/tuple 等，经
+                        <tr1/...> 头引入）。GNU libstdc++ 十余年持续保留 tr1
+                        兼容头，这类代码在 Linux/glibc 上一直能编；OHOS 的
+                        clang 使用 libc++，而 libc++ 从未提供 std::tr1（TR1
+                        内容早已并入 C++11 的 std），于是报头文件找不到。
+                        这是工具链/标准库属性，与构建系统无关——make/cmake/
+                        autotools 工程同样命中；与本包逻辑无关，换机器/换
+                        sysroot 不消失。
+
+affected_scope:         所有使用 TR1 的 pre-C++11 C++ 源码在 OHOS（及任何
+                        libc++ 平台）上的编译。识别特征：源码含
+                        `#include <tr1/...>` 或 `std::tr1::`/`tr1::` 限定名。
+                        实证：uc-echo 1.12 十个 .cpp/.hpp 文件 41 处 tr1 引用
+                        （unordered_map/shared_ptr/tuple/get/make_tuple）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           tr1-to-std-cpp11-modernization
+rec_description:        纯文本语义等价替换（TR1 组件即 C++11 std 对应组件的
+                        原型，ABI 无关、签名一致）：
+                        ① `#include <tr1/X>` -> `#include <X>`（X = unordered_map/
+                        unordered_set/memory/tuple/functional）；
+                        ② `std::tr1::X` -> `std::X`；
+                        ③ 裸 `tr1::X` -> `std::X`。
+                        sed 表达式顺序敏感：先替换 std::tr1:: 再替换裸 tr1::，
+                        否则产生 std::std::。
+                        替换后核验哈希/等值仿函数满足 std::unordered_map 的
+                        Hash/KeyEqual 模板要求（与 TR1 相同，通常无需改动）。
+                        修完必须真编译+跑消费者测试：aarch64 上另有 plain char
+                        符号性陷阱（见 uc-echo notes），与本条同现时补
+                        -fsigned-char。
+rec_command:            sed -i 's|std::tr1::|std::|g; s|tr1::|std::|g; s|<tr1/unordered_map>|<unordered_map>|g; s|<tr1/memory>|<memory>|g; s|<tr1/tuple>|<tuple>|g' <files...>
+rec_auto_fix:           true
+rec_impl:               textual-sed
+
+fallback_priority:      2
+fallback_approach:      tr1-shim-headers
+fallback_description:   源码树内加 tr1/ 目录垫片头（#include <memory> 等 +
+                        namespace tr1 { using std::shared_ptr; ... }），构建
+                        加 -I.。不改上游正文但垫片要往 namespace std 塞名字
+                        （std::tr1:: 用法需要），属未定义行为边缘，仅当上游
+                        文件过多不宜逐文件替换时用。
+fallback_command:       mkdir -p tr1 && printf '#include <memory>\nnamespace tr1 { using std::shared_ptr; }\n' > tr1/memory
+fallback_auto_fix:      false
+fallback_impl:          shim-header
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       vendor.*boost|引入.*boost.*tr1|拷贝.*tr1.*头文件
+forbid_1_reason:        禁止为 TR1 兼容引入 boost 或拷贝第三方 tr1 头——语义
+                        等价的 std 替换零依赖即可完成，vendor 反而引入许可与
+                        版本维护负担
+forbid_1_consequence:   依赖膨胀、许可混杂、后续包重复踩坑
+forbid_2_pattern:       -D.*TR1|ifdef.*__OHOS__.*tr1|平台宏.*包裹.*tr1
+forbid_2_reason:        禁止用平台宏包裹 tr1 代码做双路径——TR1 与 std 语义
+                        等价，双路径徒增分支且 patches/ 平台宏违反 R8/PF5
+forbid_2_consequence:   补丁被 PF5 拦截或审核意见
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# 症状是 "file not found" 家族，但根因是标准库不提供该头（libc++ 无 TR1），
+# 与缺系统头（E169 argp.h 类 API 缺口）和 CMake include 路径（E217）不同层。
+similar_to:             E169（缺头类症状；API 缺口，根因不同）、
+                        E217（头文件找不到症状；CMake 路径，根因不同）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       grep -rn "tr1" <src> --include=*.cpp --include=*.hpp | wc -l
+                        # 期望 0；随后完整编译 + 消费者测试
+doc_file:               knowledge/drafts/DRAFT-uc-echo-1.12-tr1-std-cpp11-modernization.md
+last_updated:           2026-09-27
+source_event:           uc-echo 1.12 适配：DNASeq.hpp:6 首报
+                        'tr1/unordered_map' file not found（OHOS SDK clang 15 /
+                        libc++）；10 文件 41 处 tr1 引用文本替换后 6/6 二进制
+                        构建成功，消费者端到端纠错测试全绿
+authors:                主理-73
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-27
