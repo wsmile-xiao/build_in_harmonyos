@@ -1,0 +1,149 @@
+#====================================================================
+# DRAFT-ohos-agent-socket-tmpdir-only-bindable-path -
+#   OHOS 上 AF_UNIX 路径名 bind 的可用落点是唯一的挂载点，且多数被测程序
+#   把 socket 放在 <TMPDIR>/ 之下 → 必须重定向 TMPDIR 才能让 agent 类用例真跑
+#====================================================================
+# 与既有条目的关系（差异化定位，勿重复申报）:
+#
+#  E461《OHOS filesystem matrix rejects AF_UNIX file-socket bind; use abstract
+#  namespace》—— 已确立**原则层**：HMDFS 拒 AF_UNIX bind(EPERM)、/tmp 只读 erofs、
+#  /dev/shm 对 bind 返 EACCES，建议"优先抽象命名空间，回退 unix:tmpdir=$TMPDIR"。
+#
+#  本条不重复该原则，补的是 E461 **缺失的可操作落点与因果链**：
+#    ① E461 说"回退 $TMPDIR"，但未给出**哪些 $TMPDIR 可用**——实测除
+#       /data/storage/el1/base（及其 el2/el3/el4 同级 base）外**全部不可 bind**；
+#       照 E461 字面把 TMPDIR 设成 $HOME 或 ~/.cache 仍然失败（EPERM）。
+#    ② E461 未指出**被测程序常把 socket 放在临时目录之下**（GNUPGHOME←getcwd←TMPDIR），
+#       因此"改 TMPDIR"不是可选的优化，而是让 agent/peer 类用例能跑起来的**唯一开关**。
+#    ③ 本条给出可量化效果（gnupg 上游套件 50.0% → 91.4%）。
+#
+#  gulrak-filesystem 系草稿（DRAFT-gulrak-filesystem-1.5.8-hmdfs-file-creation-limit-
+#  test-ledger）列了 link/mkfifo/mknod/socket 平台限制组合，属**库侧测试分类**视角，
+#  未涉及"选哪个目录 + TMPDIR 因果链"。与 links 类限制的**解法**见同族 0004 补丁条目。
+#====================================================================
+
+id:                     DRAFT-ohos-agent-socket-tmpdir-only-bindable-path
+trigger_tool:           gpg-agent|dbus-daemon|libdbus|test-driver|make check|python socket|any agent/peer IPC
+phase:                  testing
+error_signature:        can't connect to the gpg-agent: IPC connect call failed|
+                         error binding socket to .*S\.gpg-agent.*Operation not permitted|
+                         Failed to bind socket .*Read-only file system|
+                         Operation not permitted.*bind|
+                         waiting for the agent to come up
+
+severity:               2
+category:               ohos, testing, filesystem, networking, socket, selinux
+match_keywords:         AF_UNIX, bind, EPERM, EROFS, EACCES, TMPDIR, GNUPGHOME,
+                         gpg-agent, gpg-connect-agent, S.gpg-agent, dbus, abstract socket,
+                         HMDFS, /dev/shm, /data/storage/el1/base, IPC connect call failed,
+                         test environment, upstream test
+title:                  OHOS 上 AF_UNIX 路径名 bind 只有个别挂载点可用（/data/storage/el*/base），
+                         而 agent 类被测程序把 socket 建在 <TMPDIR>/ 之下 → 必须把 TMPDIR
+                         重定向到该挂载点，套件才能真正执行（gnupg 上游 50.0% → 91.4%）
+
+root_cause: |
+  OHOS PC 的可写文件系统对 AF_UNIX **路径名** socket 的 bind() 存在挂载点级限制：
+
+  | 路径 | bind() | 说明 |
+  |------|--------|------|
+  | /tmp | EROFS(30) | 只读 erofs 挂载（/dev/block/dm-0），连普通文件都写不了 |
+  | $HOME、~/.cache、conan 构建树 | EPERM(1) | HMDFS 拒绝 |
+  | /dev/shm | EACCES(13) | 可写普通文件，bind 被拒 |
+  | /data | EACCES(13) | 权限不足 |
+  | **/data/storage/el1/base**（及 el2/el3/el4 同级 base） | **OK** | 实测唯一可用落点 |
+
+  抽象命名空间（`\0` 前缀、不落盘）在**所有**路径均可用 —— 这与 E461 一致，
+  但**被测程序通常不提供该选项**：它们按 `$TMPDIR` 或 `getcwd()` 拼路径名 socket。
+
+  关键因果链（gnupg 实测）：测试框架先用 `mkdtemp()` 在 **TMPDIR** 下建临时目录，
+  再 `(setenv "GNUPGHOME" (getcwd) #t)`（tests/openpgp/setup.scm:44）把 GNUPGHOME
+  设为该目录 → gpg-agent 的 `S.gpg-agent` 落在 `<TMPDIR>/<tmpdir>/` 之下。
+  因此 **TMPDIR 决定了 agent socket 的可 bind 性**：TMPDIR 指向上述可用挂载点，
+  agent 正常启动；指向 $HOME 等则 `IPC connect call failed`，套件在 setup 阶段即中止。
+
+  另注：socket 路径长度也是变量（`sun_path` 限 108 字节）。实测把 TMPDIR 由
+  71 字符缩到 24 字符后，openpgp 通过数由 53 提升到 55（另 2 项 agent 超时消失），
+  故除挂载点外**也应尽量缩短 TMPDIR**。
+
+affected_scope: >
+  任何在测试期 fork 出"本地 IPC 服务 + 客户端"的上游套件（OpenPGP/GnuPG 家族、
+  D-Bus 服务、各种 peer/agent 模式），只要其 socket 路径来自 $TMPDIR / getcwd()，
+  在本设备上就会因挂载点限制而整包失败；纯函数式单测与 handler 级测试不受影响。
+
+verification_cmd: |
+  # 1) 逐挂载点探 bind：找出本机可用落点
+  python3 - <<'EOF'
+  import socket, os
+  for d in ("/tmp", os.path.expanduser("~"), os.path.expanduser("~/.cache"),
+            "/dev/shm", "/data/storage/el1/base"):
+      p = os.path.join(d, "probe.sock")
+      try:
+          s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM); s.bind(p); s.close(); os.unlink(p)
+          print("OK  ", d)
+      except Exception as e:
+          print("FAIL", d, type(e).__name__, e)
+  EOF
+  # 2) 用可用落点作 TMPDIR 跑 agent 类套件
+  TMPDIR=/data/storage/el1/base/<short> make check
+
+rec_priority:           1
+rec_approach:           tmpdir-redirect-to-bindable-mount-and-shorten
+rec_description: >
+  把测试期的 TMPDIR 指向实测可 bind 的挂载点（本机为 /data/storage/el1/base，
+  同级 el2/el3/el4 的 base 亦可），并尽量缩短该路径（sun_path 限 108 字节）。
+  若被测程序**自带**抽象命名空间选项，优先用之（见 E461），否则重定向 TMPDIR 是
+  唯一可行开关。不要为了"跑通"而放宽系统目录权限，也不要伪造通过。
+rec_command: |
+  # 挂载点探测（见 verification_cmd），选一个 OK 的作为 TMPDIR 基址
+  W=/data/storage/el1/base/t          # 刻意取短名
+  rm -rf "$W"; mkdir -p "$W"; chmod 700 "$W"
+  TMPDIR="$W" make check
+  # gnupg 实测：openpgp 由 53 → 60 succeeded（配合 gpgconf link 回退补丁后 64/64）
+rec_auto_fix:           false
+rec_impl:               test-env-tmpdir-redirect
+
+fallback_priority:      2
+fallback_approach:      abstract-namespace-only-honest-skip
+fallback_description: >
+  若被测程序无法重定向（socket 路径硬编码到不可 bind 的位置），且不提供抽象
+  命名空间选项，则如实记录为"平台能力限制不可运行"，附逐挂载点实测 errno 证据，
+  按 R51 双口径统计；不得改写成 skip/xfail 冒充通过。
+fallback_command:       python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.bind('\0probe'); print('abstract OK')"
+fallback_auto_fix:      false
+fallback_impl:          honest-test-ledger
+
+forbid_1_pattern:       把 TMPDIR 设成 \$HOME|~/.cache|/dev/shm 后声称"已解决 AF_UNIX 限制"
+forbid_1_reason:        这三个位置实测 bind 分别返 EPERM/EACCES，照 E461 字面"回退 $TMPDIR"
+                        而未先探挂载点，套件仍会整包失败
+forbid_1_consequence:   白跑一轮，问题未解还被记为已修
+
+forbid_2_pattern:       为了 bind 成功而 chmod/chown 系统目录|把 socket 挪到系统目录
+forbid_2_reason:        平台限制不该用放宽权限去掩盖；且 SELinux 域限制与目录权限无关
+forbid_2_consequence:   违反最小权限原则，评审拒绝
+
+forbid_3_pattern:       agent 起不来就整体跳过套件并计入 skipped
+forbid_3_reason:        实测重定向 TMPDIR 后 agent 可正常启动、绝大多数用例可跑，
+                        直接跳过属未尽力
+forbid_3_consequence:   R51 口径失真（分母被人为缩小）
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [E461]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-agent-socket-tmpdir-only-bindable-path.md
+last_updated:           2026-09-19
+source_event:           archives/g/gnupg/2.5.22（PR #9613）：上游 make check 由
+                        2/4=50.0% 提升至 70/70=100%（规范口径）
+authors:                jumping_ggjjkk <jumping_ggjjkk@noreply.gitcode.com>
+source_pr:              9613
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-19
+
+draft:                  true
