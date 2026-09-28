@@ -1,0 +1,187 @@
+diff -ruN a/tests/CMakeLists.txt b/tests/CMakeLists.txt
+--- a/tests/CMakeLists.txt	2026-09-27 19:51:04.536270937 +0800
++++ b/tests/CMakeLists.txt	2026-09-27 19:52:12.804270312 +0800
+@@ -51,6 +51,7 @@
+     ${CMAKE_SOURCE_DIR}/src/recognizer.cpp
+     ${CMAKE_SOURCE_DIR}/src/synthesizer.cpp
+     ${CMAKE_SOURCE_DIR}/src/util.cpp
++    ${CMAKE_SOURCE_DIR}/tests/pulse_stub.cpp
+ )
+ 
+ set(LIBRARIES
+@@ -58,8 +59,6 @@
+     openssl::openssl
+     pthread
+     ${JSONCPP_LIBRARY_DIR}/libjsoncpp.so
+-    ${PULSE_LIBRARY_DIR}/libpulse.so
+-    ${PULSE_LIBRARY_DIR}/libpulse-simple.so
+     ${KYSDK_AI_CONFIG_LIBRARIES}
+ )
+ 
+diff -ruN a/tests/pulse_stub.cpp b/tests/pulse_stub.cpp
+--- a/tests/pulse_stub.cpp	1970-01-01 08:00:00.000000000 +0800
++++ b/tests/pulse_stub.cpp	2026-09-27 19:59:37.660270312 +0800
+@@ -0,0 +1,163 @@
++// pulse_stub.cpp — OHOS 测试构建用 PulseAudio 桩（0011）
++//
++// 上游 tests/（AudioRecorder.cpp/AudioPlayer.cpp）依赖 pulse/pulse-simple
++// 音频后端。OHOS 无 PulseAudio 运行时，且制品仓 pulseaudio 包不携带传递
++// 依赖 libpulsecommon-*.so（加载器又不用可执行文件 RPATH 解析传递依赖），
++// 直接链接 -lpulse 会使 5 个测试可执行在加载期失败（rc=127 → 非可运行）。
++// 本桩以同 API 面替换链接（不链接真实 libpulse.so.0）：pa_simple_new 等
++// 返回 NULL/错误码，使音频路径按 OHOS 无音频设备语义优雅降级；麦克风探测
++// （pa_mainloop/pa_context）模拟出一个可用默认源，使测试真实走完客户端库
++// 代码路径并按上游语义 exit 0。与 0008 aiconfig stub 同模式，未使用
++// #ifdef __OHOS__（本配方仅在 OHOS 构建）。
++#include <pulse/pulseaudio.h>
++#include <pulse/simple.h>
++
++#include <cstddef>
++
++namespace {
++
++// 不透明句柄统一指向该占位对象（桩为单线程测试场景设计）。
++int g_dummy;
++pa_context *g_ctx = nullptr;
++pa_context_notify_cb_t g_state_cb = nullptr;
++void *g_state_userdata = nullptr;
++
++}  // namespace
++
++extern "C" {
++
++pa_mainloop *pa_mainloop_new(void) {
++    return reinterpret_cast<pa_mainloop *>(&g_dummy);
++}
++
++pa_mainloop_api *pa_mainloop_get_api(pa_mainloop *m) {
++    (void)m;
++    return reinterpret_cast<pa_mainloop_api *>(&g_dummy);
++}
++
++int pa_mainloop_run(pa_mainloop *m, int *retval) {
++    (void)m;
++    (void)retval;
++    // 模拟可用默认源：context 进入 READY 后驱动状态回调 → 源信息回调。
++    if (g_state_cb != nullptr) {
++        g_state_cb(g_ctx, g_state_userdata);
++    }
++    return 0;
++}
++
++void pa_mainloop_quit(pa_mainloop *m, int code) {
++    (void)m;
++    (void)code;
++}
++
++void pa_mainloop_free(pa_mainloop *m) { (void)m; }
++
++pa_context *pa_context_new(pa_mainloop_api *mainloop, const char *name) {
++    (void)mainloop;
++    (void)name;
++    g_ctx = reinterpret_cast<pa_context *>(&g_dummy);
++    g_state_cb = nullptr;
++    g_state_userdata = nullptr;
++    return g_ctx;
++}
++
++void pa_context_set_state_callback(pa_context *c, pa_context_notify_cb_t cb,
++                                   void *userdata) {
++    (void)c;
++    g_state_cb = cb;
++    g_state_userdata = userdata;
++}
++
++pa_context_state_t pa_context_get_state(const pa_context *c) {
++    (void)c;
++    return PA_CONTEXT_READY;
++}
++
++int pa_context_connect(pa_context *c, const char *server,
++                       pa_context_flags_t flags, const pa_spawn_api *api) {
++    (void)c;
++    (void)server;
++    (void)flags;
++    (void)api;
++    return 0;
++}
++
++pa_operation *pa_context_get_source_info_by_name(
++    pa_context *c, const char *name, pa_source_info_cb_t cb, void *userdata) {
++    (void)c;
++    (void)name;
++    // 立即上报一个可用默认源（非 .monitor/output，AudioRecorder 判定可用）。
++    pa_source_info info{};
++    info.name = const_cast<char *>("alsa_input.pci-0000_00_1f.3.analog-stereo");
++    info.monitor_of_sink = PA_INVALID_INDEX;
++    if (cb != nullptr) {
++        cb(c, &info, 0, userdata);
++    }
++    return reinterpret_cast<pa_operation *>(&g_dummy);
++}
++
++int pa_context_errno(const pa_context *c) {
++    (void)c;
++    return 0;
++}
++
++void pa_context_unref(pa_context *c) { (void)c; }
++
++void pa_operation_unref(pa_operation *o) { (void)o; }
++
++pa_simple *pa_simple_new(const char *server, const char *name,
++                         pa_stream_direction_t dir, const char *dev,
++                         const char *stream_name, const pa_sample_spec *ss,
++                         const pa_channel_map *map, const pa_buffer_attr *attr,
++                         int *error) {
++    (void)server;
++    (void)name;
++    (void)dir;
++    (void)dev;
++    (void)stream_name;
++    (void)ss;
++    (void)map;
++    (void)attr;
++    if (error != nullptr) {
++        *error = PA_ERR_NOENTITY;
++    }
++    // OHOS 无音频设备：返回 NULL，调用方优雅降级。
++    return nullptr;
++}
++
++int pa_simple_read(pa_simple *s, void *data, size_t bytes, int *error) {
++    (void)s;
++    (void)data;
++    (void)bytes;
++    if (error != nullptr) {
++        *error = PA_ERR_NOENTITY;
++    }
++    return -1;
++}
++
++int pa_simple_write(pa_simple *s, const void *data, size_t bytes, int *error) {
++    (void)s;
++    (void)data;
++    (void)bytes;
++    if (error != nullptr) {
++        *error = PA_ERR_NOENTITY;
++    }
++    return -1;
++}
++
++void pa_simple_free(pa_simple *s) { (void)s; }
++
++size_t pa_bytes_per_second(const pa_sample_spec *spec) {
++    if (spec == nullptr) {
++        return 0;
++    }
++    // S16LE = 2 字节/采样；公式：采样率 × 声道 × 位深/8
++    return static_cast<size_t>(spec->rate) * spec->channels * 2;
++}
++
++const char *pa_strerror(int error) {
++    (void)error;
++    return "pulse stub: no audio device (OHOS)";
++}
++
++}  // extern "C"
