@@ -1,0 +1,153 @@
+# ═══ Draft knowledge entry — 上游自带的 cmake/FindXxx.cmake 探的是构建主机：改用 CONFIG 模式的 CMakeDeps 包，Boost 也要加 CONFIG ═══
+# Timestamp: 2026-09-20
+# Software: osm2pgrouting 3.0.0（OSM → PostgreSQL/PostGIS 导入器，CLI）
+# Gate: G2 (conan create) + test_package 22/22
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-osm2pgrouting-3.0.0-bundled-find-modules-probe-build-host
+trigger_tool:           cmake|conan
+phase:                  configuration
+error_signature:        Could NOT find PostgreSQL|Could NOT find PQXX|libpqxx couldn't be found|Could NOT find EXPAT|undefined reference to `pqxx::|undefined reference to `PQconnectdb|/usr/include/postgresql|pg_config: not found|found unsuitable version
+severity:               3
+category:               conan, cmake, cross-compile, host-leak, build-system, portability
+match_keywords:         CMAKE_MODULE_PATH, bundled Find module, FindPostgreSQL, FindPQXX,
+                         FindBoost, pg_config, /usr/include/postgresql, /usr/local/include,
+                         $ENV{ProgramFiles}/PostgreSQL, host leak, CMakeDeps, CONFIG mode,
+                         libpq::libpq, libpqxx::pqxx, expat::expat, Boost::program_options,
+                         cmake_file_name, CMAKE_PREFIX_PATH, PostgreSQL_ROOT, osm2pgrouting
+title:                  上游自带 cmake/FindXxx.cmake 时 find_package() 走 module 模式、
+                        探的是**构建主机**：改为 CONFIG 模式的 CMakeDeps 包
+                        （libpq::libpq / libpqxx::pqxx / expat::expat），
+                        且 find_package(Boost ...) 也必须加 CONFIG，否则 CMake 内建 FindBoost 截胡
+
+root_cause: >
+  osm2pgrouting 的顶层 CMakeLists 把自带的 cmake/ 前插进 CMAKE_MODULE_PATH：
+      LIST(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
+  随后 find_package(PostgreSQL REQUIRED) / find_package(PQXX REQUIRED) /
+  find_package(EXPAT REQUIRED) 全部走 **module 模式**并命中 bundled 模块：
+    · cmake/FindPostgreSQL.cmake：find_program(pg_config) → execute_process 取
+      --includedir/--libdir → find_path(POSTGRESQL_INCLUDE_DIR libpq-fe.h)，候选路径
+      /usr/include/postgresql*、/usr/pgsql-*/include、$ENV{ProgramFiles}/PostgreSQL/*/include；
+    · cmake/FindPQXX.cmake：find_path(PQXX_INCLUDE_DIR NAMES pqxx/pqxx PATHS
+      /usr/local/include /usr/include ...) + find_library(PQXX_LIBRARIES NAMES pqxx)。
+  这些候选路径描述的全是**跑 cmake 的那台机器**，与 OHOS 目标无关。两种结局都坏：
+    (a) 宿主装了 PostgreSQL/libpq-dev —— 编得过、链得上宿主的 libpq-fe.h 与 libpq.so，
+        产物在 CI 上"成功"，到设备上跑不起来（或链接期 ABI 不匹配）；
+    (b) 宿主什么都没装 —— configure 直接 'Could NOT find PostgreSQL' 终止。
+  更糟的是 (a) 是 **worker 相关**的：同一个 commit 在干净的 worker 上过、在装了
+  libpq-dev 的 worker 上挂，看起来像 CI 抖动而不是配方 bug。
+  第三处更隐蔽：find_package(Boost ${BOOST_MINIMUM_VERSION} REQUIRED COMPONENTS
+  program_options) 默认也是 module 模式，会命中 CMake **内建** FindBoost ——
+  即便前三家都改好了，Boost 仍会把宿主的 libboost_program_options 拉进来。
+
+affected_scope: >
+  所有自带 cmake/ 目录、或对"构建主机上也装了的库"做 module 模式 find_package 的
+  上游工程：PostgreSQL/libpq、libpqxx、expat、zlib、bzip2、curl、Lua、ncurses
+  （这几个都是 CMake 自建或 bundle 了 Find 模块的常见目标）。
+  判据：源树里出现 CMAKE_MODULE_PATH 的 APPEND/PREPEND，或配方里只靠 *_DIR /
+  *_ROOT 去"告诉" find_package 位置而没有 CONFIG 关键字。
+  同族：petsc-complex 的 --with-x 自动探测宿主 X11、--with-petsc-arch 由
+  sys.platform 推导构建树名 —— 三者共性是 **native probe 悄悄决定交叉产物的属性**。
+
+verification_cmd: >
+  grep -n 'CMAKE_MODULE_PATH' <source_folder>/CMakeLists.txt
+  ls <source_folder>/cmake/Find*.cmake
+  grep -rn 'pg_config\|/usr/include\|ProgramFiles' <source_folder>/cmake/
+  conan install . --requires=libpq/18.1 -pr:h=ohos-aarch64 --build=never
+  #   → CMakeDeps 回显：find_package(libpq) / target_link_libraries(... libpq::libpq)
+  conan create archives/o/osm2pgrouting/3.0.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+  #   → configure 阶段不再出现 pg_config / /usr/include 相关探测；assertions: 22, failures: 0
+
+rec_priority:           1
+rec_approach:           config-mode-cmakdeps-and-map-targets-back-to-legacy-variables
+rec_description: >
+  把三处 find_package 改成 **config 模式**并显式加 CONFIG 关键字（正是这个关键字让
+  CMake 跳过 CMAKE_MODULE_PATH 与 bundled 模块）：
+      find_package(libpq CONFIG REQUIRED)
+      find_package(libpqxx CONFIG REQUIRED)
+      find_package(EXPAT CONFIG REQUIRED)
+      find_package(Boost CONFIG REQUIRED COMPONENTS program_options)
+  包名取 CMakeDeps 生成的文件名（= 依赖的 cmake_file_name，默认即包名）：
+  libpq/18.1 → libpq-config.cmake（target libpq::libpq）；libpqxx/8.0.1 设了
+  cmake_file_name=libpqxx → libpqxx-config.cmake（target libpqxx::pqxx）；
+  expat → expat-config.cmake（target expat::expat）。find_package(EXPAT CONFIG)
+  能命中 expat-config.cmake，因为 config 模式下 CMake 同时找 <Name>Config.cmake
+  与 <lowercase-name>-config.cmake。
+  config 包只定义 imported target，不会回填上游后半段仍在用的旧变量名，所以把 target
+  重新映射回去（CMake 允许把 target 当库名传给 target_link_libraries）：
+      set(POSTGRESQL_LIBRARIES libpq::libpq)
+      set(PQXX_LIBRARIES libpqxx::pqxx)
+      set(EXPAT_LIBRARIES expat::expat)
+  传递性 include 目录随 target 走，INCLUDE_DIRECTORIES(... ${POSTGRESQL_INCLUDE_DIR} ...)
+  里那几个空变量无害。CMakeToolchain 会把 generators 目录 list(PREPEND) 进
+  CMAKE_PREFIX_PATH，所以无需额外传 *_DIR。
+  不想打补丁时的替代做法（osm2pgsql/2.3.1 用的就是这条）：在 generate() 里把
+  {EXPAT,BZIP2,ZLIB,LUA}_INCLUDE_DIR(_S)、{X}_LIBRARY(_RELEASE/_DEBUG)/{X}_LIBRARIES
+  以 cache variable 的形式钉成**具体文件路径**，libpq 则用 PostgreSQL_ROOT。
+  缺点是路径拼装（.so vs .a、子目录）很脆；而且若依赖还要求 C++20，见配套条目，
+  补丁终究躲不掉。
+rec_command: >
+  sed -i 's/find_package(PostgreSQL REQUIRED)/find_package(libpq CONFIG REQUIRED)/;
+          s/find_package(PQXX REQUIRED)/find_package(libpqxx CONFIG REQUIRED)/;
+          s/find_package(EXPAT REQUIRED)/find_package(EXPAT CONFIG REQUIRED)/;
+          s/find_package(Boost \(.*\) REQUIRED COMPONENTS/find_package(Boost CONFIG REQUIRED COMPONENTS/'
+         CMakeLists.txt
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      pin-cache-variables-from-generate
+fallback_description: >
+  不打补丁，改在配方 generate() 里把每个依赖的头/库以 cache variable 钉死：
+  cmake_variables 或 toolchain.cache_variables 写入 {EXPAT,BZIP2,ZLIB,LUA}_INCLUDE_DIR(_S)
+  与 {X}_LIBRARY(_RELEASE/_DEBUG)/{X}_LIBRARIES 的具体路径，libpq 用 PostgreSQL_ROOT
+  （osm2pgsql/2.3.1 已实证）。代价：路径要自己拼（静态/动态后缀、多子目录），
+  依赖包布局一变就断；而且只要上游 CMakeLists 里还有 set(CMAKE_CXX_STANDARD ...)
+  遮蔽 toolchain 的 cache 变量，仍需补丁（见配套条目）。
+fallback_command:       （见 archives/o/osm2pgsql/2.3.1/conanfile.py 的 generate()）
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-generate
+
+forbid_1_pattern:       只靠 -DPOSTGRESQL_ROOT= / -DPostgreSQL_ROOT= / -DXXX_DIR= 让
+                          bundled Find 模块"找对地方"
+forbid_1_reason:         bundled 模块仍然在跑，只是起点被挪了；它照样会扫
+                          /usr/include、$ENV{ProgramFiles}，一旦宿主有同名库就可能
+                          抢先命中，而且不同 worker 行为不一致。
+forbid_1_consequence:    交叉产物链接宿主库，设备上 undefined reference 或运行期崩溃，
+                          且同一个 commit 在 CI 上时绿时红，极难归因。
+
+forbid_2_pattern:       export CMAKE_MODULE_PATH=""|删除上游 cmake/Find*.cmake 后
+                          改回 find_package(PostgreSQL)
+forbid_2_reason:         上游 CMakeLists 自己会 APPEND 回去，覆盖环境变量；
+                          删掉模块文件只是让 module 模式失败，并没有换成 config 模式。
+forbid_2_consequence:    configure 依然走 module 模式（找不到就报 Could NOT find
+                          PostgreSQL），问题原样保留。
+
+forbid_3_pattern:       find_package(Boost ...) 不加 CONFIG 只改前三家
+forbid_3_reason:         Boost 默认 module 模式，命中 CMake 内建 FindBoost，
+                          它按主机路径搜索 libboost_program_options。
+forbid_3_consequence:    前三处改完看似干净，Boost 却悄悄把宿主库链进来 ——
+                          最后仍是一个"CI 绿、设备挂"的产物。
+
+principles:             P003, P005, P014
+similar_to:             E456（Windows→OHOS 交叉构建必须把目标侧 Qt 与宿主 moc/rcc/uic
+                          分开 —— 同属"native 侧工具/库不该进交叉产物"）、
+                        E487（qt6linguisttools 需要 tool_require + 钉死 *_DIR ——
+                          同一族的"find_package 找错地方"）、
+                        E393（CMAKE_MODULE_PATH 相关的 CMakeAutoGen 路径修复）、
+                        E296（Windows 构建主机上补全 OHOS meson cross file）
+conflicts_with:
+prerequisite_of:        DRAFT-osm2pgrouting-3.0.0-cmakelists-cxx-standard-shadows-toolchain-cache
+
+doc_file:               knowledge/drafts/DRAFT-osm2pgrouting-3.0.0-bundled-find-modules-probe-build-host.md
+last_updated:           2026-09-20
+source_event:           archives/o/osm2pgrouting/3.0.0 适配（bundled find 模块探宿主 → CONFIG 模式）
+
+authors:                2301_76770579
+source_pr:              11626
+source_commit:          177a27fd7136f769a959fa7d6ca44a550ca47ac7
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20

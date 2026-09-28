@@ -1,0 +1,131 @@
+# ═══ Draft knowledge entry — 产物要连后端服务、CI 又没有该服务（且上游零测试）时，test_package 怎么写才算端到端 ═══
+# Timestamp: 2026-09-20
+# Software: osm2pgrouting 3.0.0（需要活的 PostgreSQL+PostGIS+pgRouting 才能干活）
+# Gate: L0d（def test 里必须有真 self.run）+ rule4/rule12
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-osm2pgrouting-3.0.0-cli-test-without-backend-service
+trigger_tool:           conan|cmake
+phase:                  testing
+error_signature:        No tests were found|CTest: No tests|0 tests|upstream has no test suite|could not connect to server|connection refused|FATAL:  role .* does not exist|assertions: 0
+severity:               2
+category:               conan, testing, cli, serverless, ohos, portability
+match_keywords:         test_package, package_type application, no upstream tests, self.run,
+                         L0d, VirtualRunEnv, CONFIG_SHELL, bash not sh, LD_LIBRARY_PATH,
+                         connection refused, program_options, pqxx::connection, exit code,
+                         MANIFEST.yml, assertion_count, /dev/null, port 1, osm2pgrouting
+title:                  产物必须连活的后端服务、CI 里又没有该服务（且上游零测试）时，
+                        test_package 仍要真跑二进制：驱动 **命令行 + 连接** 这条路径
+                        （program_options → pqxx::connection → libpq → socket），
+                        断言横幅、回显的配置和退出码，而不是断言数据库结果
+
+root_cause: >
+  osm2pgrouting 的全部价值是"把 .osm 导进装了 PostGIS+pgRouting 的 PostgreSQL 并建
+  拓扑表"。CI 没有这样的服务器，上游也**一条测试都没有**（无 tests/、无
+  enable_testing()/add_test()，唯一的 .github workflow 需要先起真 PostgreSQL），
+  于是"补全测试用例"的担子全在消费侧。两条歧路：
+    (a) 偷懒：test_package 只查文件存在、或 grep 二进制、或 def test 里没有真
+        self.run —— 既过不了 CI 门禁 L0d，也证明不了任何事（空壳二进制照样绿）；
+    (b) 过度：在配方里拉起 PostgreSQL —— 把可移植性配方变成基础设施配方，
+        worker 之间行为不一致，且需要特权。
+  出路在于注意到该工具的 **fail-fast 路径本身已经穿过整条运行时栈**：
+  argv → boost::program_options 解析 → 打印解析后的配置 → 构造 pqxx::connection
+  → libpq → TCP socket。把它指向 127.0.0.1:1（无人监听），socket 之前每一层都被
+  真实执行，且结果**确定**，不需要任何服务端；此时 stdout 横幅与 exit code 就是
+  这个产物本身的可观测行为。
+
+affected_scope: >
+  所有 package_type="application" 且运行期需要服务/数据库/网络对端/专用硬件的上游：
+  数据库客户端（libpq、libpqxx、mysql、mongo、redis 客户端）、导入器
+  （osm2pgsql、osm2pgrouting）、网络客户端，以及一切 CLI 最后落在"连接"上的工具。
+  同样适用于**上游零测试**的工程 —— 此时 rule4 的"上游用例数"为 0，
+  全部依赖消费侧断言，必须自己把 22 条写扎实并做破坏性自检。
+
+verification_cmd: >
+  conan create archives/o/osm2pgrouting/3.0.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing
+  #   → test_package/test.sh: assertions: 22, failures: 0
+  # 破坏性自检（证明断言不是恒真）：
+  #   移走 package 里的 bin/ 后重跑 → staging 的 cp 失败，打印
+  #   'FAIL: cannot stage …/bin/osm2pgrouting (package bin/ missing?)' 并 exit 1
+
+rec_priority:           1
+rec_approach:           end-to-end-cli-assertions-on-parse-path-and-connection-failure
+rec_description: >
+  test_package/test.sh 按三组写 ~22 条断言，全部在**无 PostgreSQL** 时成立：
+  ① 产物健康：bin/osm2pgrouting 存在且可执行；share/osm2pgrouting/ 下 4 个
+     mapconfig*.xml + COPYING 存在非空；mapconfig_for_cars.xml 以 '<?xml' 开头。
+  ② 选项解析面：--version 与 -v 均 exit 0 且输出版本串；--help exit 0、输出选项横幅
+     并提到 --file/--dbname；**无参数 exit 0**（上游 catch(required_option) 后返回 0）、
+     输出含 required 并打印选项说明；未知选项 exit 非 0 且输出含 unrecognised/unrecognized。
+  ③ 连接路径：run -f /dev/null -d <probe-db> -h 127.0.0.1 -p 1，断言 stdout 含
+     'COMMAND LINE CONFIGURATION'；含 'Filename = /dev/null' 且 'dbname = <probe-db>'
+     （**证明 argv 真的走到了配置对象**）；含"测试数据库连接"那行；进程 exit 1。
+  要点：
+   · /dev/null 当输入文件、端口 1 当目标 —— 两者在任何 worker 上都以同样方式失败，
+     断言的是行为的公共前缀，而不是某个服务器的答案；
+   · 脚本结尾 echo "assertions: $checks, failures: $failures"，失败时非 0 退出，
+     给门禁一个可机读汇总行；
+   · **不要 set -e** 与计数辅助函数混用（第一条"预期失败"就会让脚本死掉），
+     本项目用 set -uo pipefail，门禁在计数器上；
+   · OHOS 细节：驱动必须经 **bash** 跑而非 /system/bin/sh（mksh 跑 ELF 不可靠），
+     用 CONFIG_SHELL 或显式 /data/service/hnp/bin/bash；LD_LIBRARY_PATH **前插**
+     /system/lib64（libc++_shared.so 在那），不要覆盖 VirtualRunEnv 提供的依赖目录；
+   · 只断言真实二进制的 stdout 文本：不 grep ELF、不 tr、不调依赖自带的工具。
+  配套：MANIFEST.yml 里如实记 upstream_tests: []（含"上游确无测试"的证据）+
+  assertion_count: 22。
+rec_command: >
+  bash test.sh "<package_folder>"     # test_package/ 内，LD_LIBRARY_PATH 已前插 /system/lib64
+rec_auto_fix:           false
+rec_impl:               test-side
+
+fallback_priority:      2
+fallback_approach:      in-container-postgres-via-docker
+fallback_description:   >
+  在 CI worker 上起一个 postgres 容器（含 PostGIS/pgRouting），让 test_package 真导入
+  一份极小 .osm 并断言建出的拓扑表行数。功能覆盖最强，但要求 worker 有容器运行时、
+  拉得到镜像、且端口不被占用 —— 违反"配方只依赖 conan 与工具链"的前提，跨 worker 抖动，
+  CI 上不可复现，故不作为主方案。真机验收阶段可另行手工执行。
+fallback_command:       （不适用于本仓库 CI）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       ^\s*self\.run\([^)]*ls\b|grep\s+[\x27"]?[A-Za-z0-9_./-]+[\x27"]?\s+
+                          .*\.so|assert.*isfile\(.*bin/osm2pgrouting
+forbid_1_reason:        用 ls/grep/isfile 代替真跑二进制：空壳产物照样全绿，
+                          且 CI 门禁 L0d 明确要求 def test 里有真 self.run。
+forbid_1_consequence:   测试假通过；门禁判失败要求返工；即便侥幸合入也不提供任何回归保护。
+
+forbid_2_pattern:       pg_ctl|initdb|docker run|service postgresql start
+forbid_2_reason:        配方里拉起后端服务 = 把可移植性配方变成基础设施配方，
+                          需要特权与容器运行时，worker 之间不可复现。
+forbid_2_consequence:    CI 时绿时红（依赖 worker 环境），且真机/CI 行为不一致。
+
+forbid_3_pattern:       set -e$|set -e\s*$|exit 0.*#.*failures
+forbid_3_reason:        与"预期失败"断言混用时 set -e 会让脚本在第一条预期失败处终止；
+                          写死 exit 0 则让汇总行的 failures 失去意义。
+forbid_3_consequence:    要么只跑到一半（后续断言从未执行却被计为通过），
+                          要么失败被吞掉，门禁读到假绿。
+
+principles:             P003, P005
+similar_to:             E325（Conan test_package 在 OHOS 上应先解析可用 shell 再跑脚本
+                           —— 本条同样用了 CONFIG_SHELL/bash-not-sh）、
+                        E298（Conan test_package 的显式运行与环境）、
+                        E307（Conan test_package 缺少 CMake 时使用 profile 编译器直编）、
+                        E281（无编译步骤的资源型包用 test_package 做消费者完整性验证
+                           —— 同属"没有上游测试时，消费侧断言就是全部证据"）
+related_rules:          R4, R12, R38
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-osm2pgrouting-3.0.0-cli-test-without-backend-service.md
+last_updated:           2026-09-20
+source_event:           archives/o/osm2pgrouting/3.0.0 适配（上游 0 测试，消费侧 22 断言）
+
+authors:                2301_76770579
+source_pr:              11626
+source_commit:          177a27fd7136f769a959fa7d6ca44a550ca47ac7
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
