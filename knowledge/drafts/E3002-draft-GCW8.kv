@@ -1,0 +1,66 @@
+#====================================================================
+# Draft E3002 — mkstemp 探针的 musl 安全语义与 TMPDIR 规避（/tmp 只读）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E3002
+trigger_tool:           waf|configure|make
+phase:                  configuration
+error_signature:        Checking for HAVE_SECURE_MKSTEMP|mandatory failure for this one|The configuration failed|mkstemp.*0600|secure mkstemp
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               libc, musl, ohos, detection, compat
+match_keywords:         mkstemp, HAVE_SECURE_MKSTEMP, mktemp, rep_mkstemp, /tmp, mode 0600, TMPDIR, chmod, HMDFS, 故意放宽
+title:                  mkstemp 探针的 musl 安全语义：`恰 0600` vs `属主可读写且组/他人无写`，用 TMPDIR 规避 /tmp 只读（OHOS）
+prescan_pattern:        HAVE_SECURE_MKSTEMP|mandatory failure for this one|mkstemp
+prescan_globs:          wscript, wscript_build, *.c, *.h, configure
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             Samba `lib/replace` 的 `HAVE_SECURE_MKSTEMP` 探针（execute=True）运行时在 `TMPDIR(/tmp)` 创建 `test.XXXXXX` 并断言其 mode 恰为 `0600`。OHOS `/tmp` 只读（E002），且 HMDFS 把新建文件权限归一化为 `0640`（chmod 不生效，E046）——探针**在任何可写目录都必然判 not found**；上游把该探针标为 `mandatory=True`（注释 "lets see if we get a mandatory failure for this one"），configure 直接中止。判定标准过严：musl/OHOS 的语义是"属主可读写且组/他人无写"即安全，与"恰 0600"不一致。
+affected_scope:         所有走 Samba lib/replace 探针的包（samba/tdb/talloc/tevent/ldb 及其依赖），以及任何在 /tmp 只读 + HMDFS mode 归一化平台上做 0600 探针的软件。
+verification_cmd:       (cd $TMPDIR && umask 077; touch t && stat -c%%a t)   # 观察实际 mode；运行 configure 观察 HAVE_SECURE_MKSTEMP 结果
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           ohos-mkstemp-secure-probe
+rec_description:        探针改用 TMPDIR（可写目录）并放宽安全判定为「属主可读写且组/其他无写权限」（而非恰 0600），由探针**真实结果**驱动 `HAVE_SECURE_MKSTEMP`；不硬编码设备路径、不强改 chmod。
+rec_command:            ./configure   # 配合 conan 注入可写 TMPDIR；或按需置 build env TMPDIR=<W>/tmp
+rec_auto_fix:           false
+rec_impl:               archives/s/samba/4.21.0/patches/0001-lib-replace-wscript.patch
+
+fallback_priority:      2
+fallback_approach:      lib-replace-bundled-replacement
+fallback_description:   若探针"not found"是真实结果，则接受它并让 lib/replace 编译其 bundled 实现（rep_mkstemp 等），保持真值语义，不做条件宏绕过。
+fallback_command:       make   # 触发 lib/replace 去构建 bundled 实现
+fallback_auto_fix:      false
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       hardcode /dev/shm|inject -D__OHOS__|chmod.*probe|point probe at device-only path
+forbid_1_reason:        R8/PF5 禁平台宏；放宽 chmod 或把探针指向设备专用路径=伪造通过；硬编码设备路径不跨 CI。
+forbid_1_consequence:   W4/preflight 欺骗式适配发现；CI 不可复现。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             real-evidence-over-assumption, minimal-patch, platform-agnostic-fix
+
+# ═══ 关系图 ═══
+causes:                 [E3002]
+caused_by:              []
+similar_to:             [E2002]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 / 协作 / 度量 ═══
+doc_file:               knowledge/drafts/E3002-draft-GCW8.md
+last_updated:           2026-09-21
+source_event:           samba 4.21.0 configure：Checking for HAVE_SECURE_MKSTEMP : not found + mandatory failure 中断；改 TMPDIR + 放宽后 : ok
+authors:                gcw_Pp8UzTBn (AtomCode ds)
+source_pr:              11515
+source_commit:          (随 feat/samba-4.21.0 一并提交时回填)
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-21
+
+draft: true
+contributor_id: GCW8
