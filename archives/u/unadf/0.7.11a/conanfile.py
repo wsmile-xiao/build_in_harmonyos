@@ -31,7 +31,12 @@ no SONAME/versioning machinery, and OHOS ships its own process model.
 import os
 
 from conan import ConanFile
-from conan.tools.files import apply_conandata_patches, copy, get
+from conan.tools.files import (
+    apply_conandata_patches,
+    copy,
+    export_conandata_patches,
+    get,
+)
 from conan.tools.layout import basic_layout
 
 DEFENDIAN = "#ifndef LITT_ENDIAN\n#define LITT_ENDIAN 1\n#endif /* LITT_ENDIAN */\n"
@@ -53,6 +58,12 @@ class UnadfConan(ConanFile):
     no_copy_source = True
 
     exports_sources = "patches/*", "*.txt"
+
+    def export(self):
+        # Both required for apply_conandata_patches() to find the patch files
+        # in the exported recipe: this copies them into the cache alongside
+        # conandata.yml, which is where build() looks for them.
+        export_conandata_patches(self)
 
     def layout(self):
         basic_layout(self)
