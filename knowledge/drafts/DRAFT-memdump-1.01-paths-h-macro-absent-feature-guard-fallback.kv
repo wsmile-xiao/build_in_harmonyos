@@ -1,0 +1,42 @@
+#====================================================================
+# Draft: OHOS libc 的 <paths.h> 不提供 _PATH_MEM/_PATH_KMEM 宏常量
+#        ⇒ 上游无条件使用这两个宏的包在 OHOS 上编译期报未声明标识符；
+#        处方＝照上游自身 SUNOS5 分支的内联写法加 #ifndef 特征守卫回退字面量
+#        （⛔ 用平台宏判分支——PF5 禁补丁新增行出现 __OHOS__；
+#          ⛔ 命令行注入带引号的宏值——引号要穿透 make/shell 两层）
+# Trigger instance: memdump 1.01（任务 8788，构建机 B，2026-09-27）
+#====================================================================
+
+id:                     DRAFT-MEMDUMP-1.01-PATHS-H-MACRO-ABSENT-FEATURE-GUARD-FALLBACK
+trigger_tool:           clang|make|conan
+phase:                  compilation
+error_signature:        'use of undeclared identifier .*_PATH_MEM|use of undeclared identifier .*_PATH_KMEM'
+severity:               2
+category:               musl, libc-header, macro-constant, compile-error
+match_keywords:         paths.h, _PATH_MEM, _PATH_KMEM, /dev/mem, /dev/kmem, undeclared identifier, 头文件宏常量, feature guard, ifndef, 内联回退, SUNOS5, makedefs
+
+title:                  OHOS libc 的 paths.h 只导出 24 枚 _PATH_ 宏、不含 _PATH_MEM/_PATH_KMEM ⇒ 上游直接用这两个宏的包编译期即挂；须加 #ifndef 特征守卫回退字面量，⛔ 平台宏判分支、⛔ 命令行注入带引号的宏值
+
+root_cause:             memdump.c 在 SVR5/4 分支里无条件引用 _PATH_MEM 与 _PATH_KMEM。这两个名字不是 libc 函数或符号，而是 paths.h 里的字符串字面量宏。OHOS 工具链的 paths.h 实测只导出 24 枚 _PATH_ 宏（_PATH_BSHELL、_PATH_CONSOLE、_PATH_DEFPATH、_PATH_DEV、_PATH_DEVNULL 等），_PATH_MEM 与 _PATH_KMEM 命中 0 ⇒ 预处理后没有该宏名，编译到引用处报「use of undeclared identifier」。属「头文件宏常量层」的缺失，与 libc 函数符号缺失、未实现 syscall、socket 结构与常量差异都不在同一层。
+
+affected_scope:         任何直接引用 _PATH_* 设备路径类字面量宏的上游代码（musl 侧本就未导出这两个），尤其「上游假设 glibc/BSD 的 paths.h 内容更全」的取证与设备访问类老工具。不适用：需要补的是 libc 函数/变量符号（走 DRAFT-ohos-musl-glibc-specific-symbols）、或宏在但缺 include（走 E129 一类的 include 面）。
+
+verification_cmd:       printf "#include <paths.h>\\nint main(){return 0;}\\n" > ~/tmp/uc2/p.c && clang --target=aarch64-unknown-linux-ohos -E -dM ~/tmp/uc2/p.c | grep -c "_PATH_"
+
+rec_priority:           1
+rec_approach:           feature-guard-inline-fallback-mirroring-upstream-own-branch
+rec_description:        照上游自己已有的 SUNOS5 分支形状（该分支体内就是 define _PATH_MEM 为字面量 /dev/mem）加特征守卫：ifndef _PATH_MEM / define / endif，KMEM 同理，共新增恰 6 行。补的是「宏不存在」这个可探测特征，不是「平台是 OHOS」这个身份 ⇒ 跨 libc 行为不变（glibc 侧守卫不触发），且补丁新增行不含平台宏，过 PF5。
+rec_command:            grep -c "^+.*__OHOS__" archives/m/memdump/1.01/patches/0001-memdump.c.patch
+rec_auto_fix:           false
+rec_impl:               memdump 1.01 的 patches/0001-memdump.c.patch 第 14-19 行即上述两枚守卫；实测该补丁新增行里 __OHOS__ 命中 0；未打补丁时编译报 notes.md:60-62 三行错误，打补丁后 21 条断言全通过。
+
+fallback_priority:      2
+fallback_approach:      reject-two-shortcuts-tried-and-voided
+fallback_description:   两条被实测否决的捷径记在这里防再试：一、DEFS=-DSUNOS5 看着能让上游自带分支去 define _PATH_MEM，但该分支同时改变其它行为面，等于换平台语义而不是补宏；二、在 conanfile 里用命令行 define 注入宏值，因为值要带引号且需穿透 make 与 shell 两层，实测引号丢失后宏值不再是字符串字面量。
+fallback_command:       grep -n "已试过的失败方案" -A 6 archives/m/memdump/1.01/notes.md
+
+forbid_1_pattern:       在补丁新增行里用 __OHOS__ 或 __MUSL__ 之类平台宏判分支
+forbid_1_reason:        仓内静态审查 PF5 规定补丁新增行不得出现私有平台宏；按平台身份分支会把「缺宏」这一可探测特征写死成永久分叉，换 libc 后仍带病。
+forbid_1_consequence:   静态审查命中即判整改，且该补丁在别的 libc 上行为不再与上游等价。
+
+principles:             real-evidence-over-assumption, minimal-patch, feature-detection-over-platform-detection
