@@ -1,0 +1,55 @@
+# ═══ Draft knowledge entry — 手写 Makefile 交叉编译：
+# 链接变量名不是 LDFLAGS；从链接规则反推真实变量名，命令行覆盖即生效、无需 patch
+# Software: pcaputils 0.8（nongnu/Savannah，递归 Rules.mk，4 CLI + util.a，无 install）
+# Gate: 真机 conan create + test_package 4/4（OHOS aarch64, frp-tip）
+# Status: DRAFT
+
+id: pcaputils-0.8-handwritten-makefile-linkvar-override
+severity: 2
+category: build|makefile|ohos
+trigger_tool: conan|make
+phase: build
+
+keywords: makefile, handwritten, LDFLAGS, LF_ALL, link line, per-target LL_TGT, no install target, command-line override, CC=gcc hardcode, cpp_info includedirs libdirs, pcaputils, libpcap, judy
+error_signature: 'ld.lld: error: unable to find library -l(pcap|Judy)'
+match_keywords: handwritten Makefile, link variable not LDFLAGS, LF_ALL, recursive Rules.mk, per-target link libs, no install target, make VAR= override, unable to find library, multi-binary CLI
+
+root_cause: |
+  (1) 手写/递归 Makefile 工程（无 autotools/cmake）的链接标志变量名是作者自起的
+      （本例 LF_ALL，= 立即展开赋值），不是 autotools 约定的 LDFLAGS。按惯例传
+      make LDFLAGS=-L... 在链接行没有注入点 → ld 找不到依赖库。
+  (2) 但 make 命令行 VAR=value 优先级高于 Makefile 内任何赋值（= 或 ?= 都覆盖），
+      所以 LF_ALL= 这种硬编码链接变量也能在命令行直接覆盖，无需为注入 -L 改源码。
+  (3) -l 库是每目标私有的（src/Rules.mk 里 $(d)/pcapip: LL_TGT := -lpcap -lJudy），
+      不要顶层统一加；顶层只需把 -L 塞进链接行共用变量。
+  (4) 此类工程无 install 目标；产物在子目录（src/*. 二进制、util/util.a 内部不发布），
+      必须在 Conan package() 用 copy() 手工收。
+  (5) CC=gcc 硬编码同理，命令行 make CC=clang 直接覆盖（R33）。
+
+rec_approach: read-link-rule-then-override-real-var-names
+rec_description: |
+  (a) 先读链接行：grep 找 LINK = $(CC) <VAR> ... 里那个 <VAR>（本例 LF_ALL），
+      不要假设是 LDFLAGS。再 grep LL_TGT/LF_TGT 看每目标私有链接库。
+  (b) 在 Conan build() 从 self.dependencies[X].cpp_info 取 includedirs/libdirs，
+      拼成 -I/-L 字符串，命令行传入：
+      make CC=clang AR=llvm-ar -j1 CFLAGS='-O2 <-I...>' LF_ALL='-rdynamic <-L...> ...'
+  (c) -L<dep>/lib 必须在每目标 -l 之前（GNU ld 单遍扫描）。
+  (d) package() 用 copy() 把 src/ 下每个二进制收到 bin/；内部 util.a 不发布。
+  (e) 反直觉点：若链接行已有具名共用变量，不要学"补 LDFLAGS 槽位"去 patch Makefile；
+      只有像 zerofree（6 行 Makefile 连 $(CFLAGS) 都没有）那种连槽位都没有才改源码。
+rec_command: |
+  make CC=clang AR=llvm-ar -j1 CFLAGS='-O2 -I<dep>/include' LF_ALL='-rdynamic -L<dep>/lib -Wl,--as-needed'
+  # 诊断: grep -nE '\$\(CC\).*=' Makefile */Rules.mk   # 找真实链接变量名
+rec_auto_fix: false
+
+affected_scope: |
+  一切手写/递归 Makefile、无 configure/CMake、多二进制、无 install 目标的老 C 工程
+  （2026 普查 Makefile 类占配方约 21%）。判据：链接行 grep 不到 LDFLAGS/LDLIBS，
+  却有作者自起的 *_ALL/EXTRA_LIBS 等变量；命令行覆盖该变量即可，避免无谓源码补丁。
+
+verification: |
+  conan create archives/p/pcaputils/0.8 -pr:h=ohos-aarch64 --build=missing
+  → 4 个 ELF aarch64 动态链接二进制产出（pcapdump/pcapip/pcappick/pcapuc），
+    test_package 4/4 打印 Usage，真机 OHOS aarch64 通过（2026-09-26）。
+  附带教训：静态预判 <execinfo.h> 会在 musl 失败，真机实际一次通过——glibc-only
+  头先真机编一次再决定是否打 stub patch，勿凭 glibc 经验提前改源码。
