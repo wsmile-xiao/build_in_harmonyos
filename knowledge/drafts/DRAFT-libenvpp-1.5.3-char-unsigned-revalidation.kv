@@ -1,0 +1,98 @@
+#====================================================================
+# DRAFT-libenvpp-1.5.3-char-unsigned-revalidation.kv
+# 主题: aarch64 上 plain char 默认 unsigned，使 libenvpp 字符串解析的
+#       std::is_unsigned_v 复校验分支把 char 当整数复验并误抛 parser_error
+# 来源: libenvpp 1.5.3 R01 上游测试 756 断言实测（3 断言失败后源码补丁修复）
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     DRAFT-libenvpp-1.5.3-char-unsigned-revalidation
+trigger_tool:           clang|cmake|conan|test
+phase:                  testing
+error_signature:        Failed to validate whether '[a-zA-Z]' was correctly parsed as '[a-zA-Z]'|
+                        CHECK_NOTHROW.*parsed == expected.*unexpected exception|
+                        parser_error.*Failed to validate whether
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               platform, toolchain, c++, upstream-tests, char-signedness, parser
+match_keywords:         is_unsigned_v, std::is_unsigned_v, construct_from_string, unsigned char,
+                        signed char, plain char, parser_error, aarch64, OHOS, upstream tests,
+                        string parsing, re-validation, 复校验, char 解析
+
+# ═══ Layer 2: 诊断层 ═══
+title:                  aarch64 上 plain char 默认 unsigned 触发库内 is_unsigned_v 复校验分支，char 字符串解析误抛 parser_error
+root_cause:             C/C++ plain char 符号性由实现定义，aarch64（含 OHOS，AAPCS64）默认无符号。
+                        libenvpp detail::construct_from_string 对 stringstream 可构造类型先按类型解析，
+                        再用 `if constexpr (!is_same_v<T,bool> && is_unsigned_v<T>)` 做复校验：
+                        把输入字符串另以 int64_t 重新解析，若失败则抛 parser_error。char 在 aarch64 上
+                        is_unsigned_v 为 true，于是 "a"/"A"/"a " 等 char 输入被第二次以 int64 解析而失败，
+                        抛 "Failed to validate whether 'a' was correctly parsed as 'a'"。x86-64 上游开发机
+                        plain char 默认有符号（is_unsigned_v<char> 为 false），该分支不触发，测试全绿——问题只在目标平台暴露。
+affected_scope:         使用 std::is_unsigned_v 做整型/字符复用校验分支的 C++ 字符串解析库（CLI/配置解析、
+                        环境变量解析等），运行在 plain char 默认无符号的目标（aarch64/OHOS/ARM32/RISC-V）。
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           exclude-char-family-from-unsigned-revalidation
+rec_description:        在 is_unsigned_v 复校验分支中排除字符类型（char/signed char/unsigned char）：
+                        该分支本意是校验"负数被无符号整型吸收/溢出"，对字符类型无意义；
+                        排除后 char 解析走正常 stringstream 路径。以 patches 补丁形式修改库源码。
+rec_command:            patch 1:
+                        - if constexpr (!std::is_same_v<T, bool> && std::is_unsigned_v<T>) {
+                        + if constexpr (!std::is_same_v<T, bool> && std::is_unsigned_v<T> && !std::is_same_v<T, char>
+                        +               && !std::is_same_v<T, signed char> && !std::is_same_v<T, unsigned char>) {
+                        随后重跑上游测试套件全量验证
+rec_auto_fix:           true
+rec_impl:               upstream-source-patch
+
+fallback_priority:      2
+fallback_approach:      fsigned-char-control-group
+fallback_description:   若不允许改库源码，可用 -fsigned-char 使 char 转有符号绕开该分支，
+                        但会改变整个翻译单元的 char 语义，需评估 ABI/其他代码影响；对本库
+                        （无 ABI 承诺的纯 C++ 库）源码补丁为更精确的最小修复。
+fallback_command:       cmake -DCMAKE_CXX_FLAGS="-fsigned-char" ...
+fallback_auto_fix:      false
+fallback_impl:          toolchain-flag
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       __OHOS__|#ifdef __OHOS__|OHOS.*ifdef
+forbid_1_reason:        这是编译器 plain-char 模式/类型特征分支问题，不是操作系统差异；平台宏会在其他
+                        char 有符号的目标引入分叉且违反 R8 补丁平台宏规范
+forbid_1_consequence:   条件分叉掩盖 ABI 意图，不同目标编译出不一致的解析语义
+forbid_2_pattern:       skip\(.*char|禁用.*char.*测试|CHECK.*关闭|断言.*修改.*通过
+forbid_2_reason:        修改上游断言/禁用测试掩盖平台差异，违反 R6/诚实归因
+forbid_2_consequence:   套件假绿，下游消费者仍收到错误解析行为
+forbid_3_pattern:       static_cast.*unsigned.*char.*test.*only
+forbid_3_reason:        仅在测试里强转不能修复库 API 的真实解析行为
+forbid_3_consequence:   消费者路径仍抛异常
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R6, R11, R12
+
+# ═══ 关系图 ═══
+causes:
+caused_by:
+similar_to:             E419, DRAFT-clipp-1.2.3-ohos-char-signedness-value-conversion,
+                        DRAFT-8543-plain-char-eof-sentinel-infinite-loop,
+                        DRAFT-9645-polyseed-aarch64-char-signed-utf8-lazy
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-libenvpp-1.5.3-char-unsigned-revalidation.md
+last_updated:           2026-09-22
+source_event:           libenvpp 1.5.3 R01 上游测试 81 用例/756 断言实测：parser 测试
+                        "Leading and trailing whitespaces" 3 断言失败（char 'a'/'A'/'a '），
+                        补丁排除 char 族复校验后 81/81、756/756 全绿
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                pc1-7
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-22
