@@ -1,0 +1,68 @@
+#====================================================================
+# DRAFT-c-data-structures-tinyhashmap64-probe-mask — 开放寻址哈希表
+# 初始容量必须为 2^n-1(全 1 掩码):hmap64__grow 首次 new_max=16 导致
+# 探测死循环
+#
+# 触发事件: c-data-structures 0.0-git0c2d777456(schellingb)首轮适配——
+#           上游 test.c 在 test_hmap64 挂死(timeout 124,VmSize 涨至
+#           2GB+),test_buf/test_hmap 正常;gdb attach 受限,最终用
+#           最小复现 + 32/64 位版本对比定位。
+# 路径: Path B(知识库扩展)
+#====================================================================
+
+id:                     DRAFT-c-data-structures-tinyhashmap64-probe-mask
+source_lib:             c-data-structures 0.0-git0c2d777456
+trigger_tool:           clang|test|runtime
+phase:                  testing|runtime
+error_signature:        Testing buf.*hang|test_hmap64.*hang|timeout.*124|
+                        VmSize.*GB|dead loop|stuck in probe|i &= maxlen|
+                        hash table.*infinite loop
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               c, hashmap, probe, mask, open-addressing, hang, algorithm
+match_keywords:         tinyhashmap64, hmap64__grow, new_max, 2^n-1, power of two
+                        minus one, open addressing, linear probing, i &= maxlen,
+                        slot mask, hash table hang, infinite loop, VmSize,
+                        dead loop, 探测掩码, 死循环, 全 1 掩码
+title:                  开放寻址哈希表初始容量必须是 2^n-1(全 1 掩码):容量 16 时探测掩码只命中槽 0/16,碰撞后线性探测死循环
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: >
+  hmap64__grow 首次分配 `new_max = 16`(0b10000),而探测循环
+  `for (i = key;; i++) if (hdr->keys[i &= hdr->maxlen] == key)` 依赖
+  maxlen 是 2^n-1(全 1 掩码)才能覆盖全部槽位。maxlen=16 时 `i &= 16`
+  只产生槽 0 或 16:插入两个字符串键 "foo"(hash&16=16)+"bar"(hash&16=0)
+  后,探测缺失键 "baz"(hash&16=0,与 "bar" 冲突)→ `i++` 再次 `& 16`
+  永远回到 0/16 → 死循环,进程 CPU 100%、VmSize 持续增长直至被
+  timeout 杀死。上游 32 位版 tinyhashmap.h:172 用 `15` 正确(全 1 掩码),
+  64 位版是复制时的笔误。诊断要点:挂死位置在该函数首个
+  memcmp/查询断言之后、32 位同构代码正常、VmSize 异常增长。
+affected_scope:         所有使用 `i &= maxlen` 线性探测的开放寻址哈希表
+                        (stb、khash 类、tinyhashmap 系、自研哈希表),
+                        尤其是首次容量写成非 2^n-1 值的库;排查
+                        "哈希表查询/插入挂死、CPU 100%、内存暴涨"时
+                        应先核对容量掩码。
+verification_cmd:       最小复现(插入 2 个字符串键后查询缺失键)挂死;
+                        修复 16→15 后 -O0/-O2 全量 test.c 通过(exit 0);
+                        32/64 位版本对比(32 位 15 正常、64 位 16 挂死)
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           power-of-two-minus-one-probe-mask
+rec_description:        开放寻址哈希表首次分配容量必须为 2^n-1(15/31/63/...),
+                        使 `i &= maxlen` 成为全 1 掩码覆盖全部槽位;修复
+                        `new_max = 16` → `new_max = 15`(与同库 32 位版
+                        对比即可确认正确值)。修复后需全量重跑上游测试,
+                        并补最小复现(两键插入 + 缺失键查询)验证不再挂死。
+rec_command:            将 hmap64__grow 的 `new_max = (old_ptr ? old_hdr->maxlen * 2 + 1 : 16)`
+                        改为 `: 15`;对比同库 32 位版本确认全 1 掩码约定
+rec_auto_fix:           false
+rec_impl:               patch-upstream-initial-capacity-mask
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      add-probe-cycle-guard
+fallback_description:   若不能改容量初始值,探测循环加步进上限
+                        (for n = 0..maxlen,超上限即报满)可避免无限循环,
+                        但会改变 API 语义,不推荐作为首选。
