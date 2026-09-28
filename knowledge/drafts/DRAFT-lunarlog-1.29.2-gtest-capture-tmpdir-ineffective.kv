@@ -1,0 +1,65 @@
+#====================================================================
+# DRAFT — gtest CaptureStderr/CaptureStdout 硬编码 /tmp, TMPDIR 无效
+#         (lunarlog 1.29.2 OHOS 适配, executor pc7-21)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-lunarlog-1.29.2-gtest-capture-tmpdir-ineffective
+trigger_tool:           ctest|gtest|conan
+phase:                  testing
+error_signature:        Failed to create tmp file /tmp/gtest_captured_stream|Failed to open tmp file /tmp/gtest_captured_stream|Subprocess aborted.*gtest|gtest-port\.cc:11[0-9][0-9]
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               platform, ohos, testing, gtest
+match_keywords:         gtest_captured_stream, CaptureStderr, CaptureStdout, gtest-port.cc, /tmp, erofs, read-only, TMPDIR, TMP, TEMP, subprocess aborted, GTEST_OS_LINUX_ANDROID, mkstemp
+title:                  OHOS 上 gtest 捕获流硬编码 /tmp（仅 Android 分支读 TMPDIR），TMPDIR/TMP/TEMP 设置无效导致测试 Subprocess aborted
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 系统 /tmp 为 erofs 只读挂载。gtest-port.cc CaptureStream() 的临时文件路径选择按平台分支：GTEST_OS_LINUX_ANDROID 分支调用 TempDir()（读 TMPDIR），GTEST_OS_IOS 分支走 confstr，其余所有平台（含 OHOS/通用 Linux）直接硬编码 name_template = "/tmp/"（gtest-port.cc:1132），完全不读 TMPDIR/TMP/TEMP 环境变量。任何调用 testing::internal::CaptureStderr()/CaptureStdout() 的上游测试都会尝试在只读 /tmp 上 mkstemp 而失败，GTEST_CHECK_ 直接 abort → ctest 报 Subprocess aborted。
+affected_scope:         所有依赖 gtest CaptureStderr/CaptureStdout 的 C/C++ 上游测试在 OHOS（及任何 /tmp 只读且非 Android 的 POSIX 平台）上的适配；同时影响"临时目录恢复规则"的判定——E002 的 set-env-var TMPDIR 方案对本场景无效。
+verification_cmd:       touch /tmp/.probe_write; echo $?  # Read-only file system
+                        # 且 gtest-port.cc 源码确认:
+                        #   sed -n '1126,1134p' <gtest>/src/gtest-port.cc
+                        # 设置 TMPDIR/TMP/TEMP 后重跑受影响测试, 首错不变:
+                        #   TMPDIR=$HOME/tmp TMP=$HOME/tmp TEMP=$HOME/tmp ctest -R <test>
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           classify-as-platform-block-with-recovery-condition
+rec_description:        1) 先按临时目录恢复规则执行恢复尝试：创建用户可写专用目录（chmod 700 并 stat 验证）、设置 TMPDIR/TMP/TEMP 后重跑同一入口；2) 若同一首错复现（gtest 捕获流仍写 /tmp），将该入口如实归为平台阻塞，计入上游总分母但不计通过；3) 恢复条件写清：需可写 /tmp（重新挂载/bind）或 gtest 增加 TMPDIR 支持；4) 不得把 abort 写成失败/通过，也不得修改上游测试伪造通过。
+rec_command:            mkdir -p $HOME/tmp/gtest-tests && chmod 700 $HOME/tmp/gtest-tests && stat -c '%A' $HOME/tmp/gtest-tests
+                        TMPDIR=$HOME/tmp/gtest-tests TMP=$HOME/tmp/gtest-tests TEMP=$HOME/tmp/gtest-tests ctest -R "RollingFileTest.EnsureOpenFailure" --output-on-failure
+rec_auto_fix:           false
+rec_impl:               report-and-block
+
+fallback_priority:      2
+fallback_approach:      patch-gtest-or-provide-writable-tmp
+fallback_description:   若允许改测试基础设施：给 gtest CaptureStream 增加 TMPDIR 读取，或确保存在可写 /tmp（bind mount / tmpfs），随后该入口可正常运行。
+fallback_command:       mount -t tmpfs tmpfs /tmp   # 需 root, 非阻塞路径
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       将 gtest 捕获流 abort 写成库测试失败|把设置 TMPDIR 说成已恢复而实际未验证|修改上游测试跳过以伪造通过
+forbid_1_reason:         该首错是平台/框架基础设施限制而非被测库缺陷, 伪造通过或误分类会污染上游通过率与返工判断。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P014
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E002]
+similar_to:             [E002, E110, E292]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-lunarlog-1.29.2-gtest-capture-tmpdir-ineffective.md
+last_updated:           2026-09-23
+source_event:           lunarlog 1.29.2 OHOS 适配, 上游 1157 用例中 4 项 Subprocess aborted
+source_pr:              (PR 创建后补填)
+source_commit:          (commit 后补填)
+metrics_success_count:  0
+metrics_fail_count:     4
+metrics_confidence:     0.8
