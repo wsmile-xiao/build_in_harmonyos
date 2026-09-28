@@ -1,0 +1,37 @@
+#====================================================================
+# DRAFT-socat-1.8.1.3-ohos-chardev-write-pollout — OHOS 字符设备写端
+# POLLOUT 永不就绪导致 select/poll 数据循环挂起
+# 关联库: socat 1.8.1.3（r01，OHOS aarch64 实测）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 触发: socat /dev/null /dev/null 进入数据转移循环后永久挂起
+# （select 只监听写端 fd，OHOS 永不报告可写）；test.sh 健全性检查
+# `$SOCAT /dev/null /dev/null`（test.sh:191）卡死整个测试套件。
+id:                     DRAFT-socat-1.8.1.3-ohos-chardev-write-pollout
+trigger_tool:           socat|clang
+phase:                  runtime|testing
+error_signature:        socat /dev/null /dev/null hangs|data transfer loop hangs|select.*write fd never writable|POLLOUT never ready|character device write
+severity:               2
+category:               platform, ohos, poll, chardev
+match_keywords:         POLLOUT, select, poll, /dev/null, /dev/zero, char device, character device, writable, data transfer loop, socat, hang, never ready, O_WRONLY
+title:                  OHOS 上 select/poll 对字符设备写端 fd 永不报告可写，依赖写端就绪的程序会永久挂起
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 内核 poll/select 对字符设备（/dev/null、/dev/zero）的 O_WRONLY fd 从不返回 POLLOUT/可写（普通文件、socketpair 立即就绪）。依赖 select/poll 等待写端就绪后再写入的程序（如 socat 双向数据转移循环）会永久阻塞在 poll/select。
+affected_scope:         任何在 OHOS 上使用 select/poll 等待非 socket 写端就绪的 C 程序（autotools/手动 socket 程序、数据中继/代理类工具），尤其以 /dev/null 或字符设备为写端时。
+verification_cmd:       timeout 10 socat /dev/null /dev/null; echo $?  # 修复前挂起(RC=124 超时杀)，修复后 RC=0
+                          python3 -c "import os,select; fd=os.open('/dev/null',os.O_WRONLY); print(select.select([],[fd],[],3))"  # 3 秒不返回可写
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           skip-pollout-for-non-socket-write-fd
+rec_description:        对非 socket 写端 fd（fstat 后 S_ISREG/S_ISCHR，含普通文件/字符设备）视为始终可写：不加入 poll 集合（fd=-1）并直接置 maywr=true，跳过 POLLOUT 等待。写普通文件/字符设备不会阻塞，等待 POLLOUT 本就不必要。**r02 细化**：①仅对 S_ISREG/S_ISCHR 生效，管道/FIFO 排除（STALL 等地址故意填满写管道，须保留 POLLOUT 等待，否则 write 阻塞且循环死等）；②当转移循环 4 个 poll fd 全部禁用且某方向 mayrd&&maywr 已就绪时（如 readbytes 消耗后 EOF 待处理），跳过 poll 直接进入 transfer 评估（retval=1 模拟就绪），避免 select 空 fd 集+NULL 超时永久阻塞。
+rec_command:            socat.c 数据转移循环：fd2out/fd1out 赋值处，if (fd>=0 && fstat(fd,&st)==0 && (S_ISREG(st.st_mode)||S_ISCHR(st.st_mode))) { fd=-1; maywr=true; }（两处对称分支）；fd 全部 <0 且 (mayrd1&&maywr2)||(mayrd2&&maywr1) 时 retval=1 跳过 xiopoll
+rec_auto_fix:           false
+rec_impl:               patch-source
+
+fallback_priority:      2
+fallback_approach:      total-timeout
+fallback_description:   无法改源码时可用 -T 总超时兜底（socat -T N /dev/null /dev/null 可退出），但会截断正常长任务，仅作应急；测试套件级应改源码
+fallback_auto_fix:      false

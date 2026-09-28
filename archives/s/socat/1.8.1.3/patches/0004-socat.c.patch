@@ -1,0 +1,93 @@
+--- a/socat.c
++++ b/socat.c
+@@ -1094,48 +1094,89 @@
+ 	     !socat_opts.righttoleft) {
+ 	    if (!mayrd1 && !(XIO_RDSTREAM(sock1)->eof > 1)) {
+ 		fd1in->fd = XIO_GETRDFD(sock1);
+ 		fd1in->events = POLLIN;
+ 	    } else {
+ 		fd1in->fd = -1;
+ 	    }
+ 	    if (!maywr2) {
+ 		fd2out->fd = XIO_GETWRFD(sock2);
+ 		fd2out->events = POLLOUT;
++		/* OHOS: poll() never reports writability for regular files
++		   and character devices (e.g. /dev/null); writes to them do
++		   not block, so treat them as always writable.  Pipes/FIFOs
++		   are excluded: they can fill up (e.g. the STALL address
++		   fills its write pipe on purpose) and must keep the
++		   POLLOUT wait. */
++		struct stat st;
++		if (fd2out->fd >= 0 && fstat(fd2out->fd, &st) == 0 &&
++		    (S_ISREG(st.st_mode) || S_ISCHR(st.st_mode))) {
++		   fd2out->fd = -1;
++		   maywr2 = true;
++		}
+ 	    } else {
+ 		fd2out->fd = -1;
+ 	    }
+ 	 } else {
+ 	     fd1in->fd = -1;
+ 	     fd2out->fd = -1;
+ 	 }
+ 	 if (XIO_READABLE(sock2) &&
+ 	     !(XIO_RDSTREAM(sock2)->eof > 1 && !XIO_RDSTREAM(sock2)->ignoreeof) &&
+ 	     !socat_opts.lefttoright) {
+ 	    if (!mayrd2 && !(XIO_RDSTREAM(sock2)->eof > 1)) {
+ 		fd2in->fd = XIO_GETRDFD(sock2);
+ 		fd2in->events = POLLIN;
+ 	    } else {
+ 		fd2in->fd = -1;
+ 	    }
+ 	    if (!maywr1) {
+ 		fd1out->fd = XIO_GETWRFD(sock1);
+ 		fd1out->events = POLLOUT;
++		/* OHOS: poll() never reports writability for regular files
++		   and character devices (e.g. /dev/null); writes to them do
++		   not block, so treat them as always writable.  Pipes/FIFOs
++		   are excluded: they can fill up (e.g. the STALL address
++		   fills its write pipe on purpose) and must keep the
++		   POLLOUT wait. */
++		struct stat st;
++		if (fd1out->fd >= 0 && fstat(fd1out->fd, &st) == 0 &&
++		    (S_ISREG(st.st_mode) || S_ISCHR(st.st_mode))) {
++		   fd1out->fd = -1;
++		   maywr1 = true;
++		}
+ 	    } else {
+ 		fd1out->fd = -1;
+ 	    }
+ 	 } else {
+ 	     fd1out->fd = -1;
+ 	     fd2in->fd = -1;
+ 	 }
+ 	 /* frame 0: innermost part of the transfer loop: check FD status */
+-	 retval = xiopoll(fds, 4, to);
++	 /* OHOS: when every polled fd is disabled (e.g. readbytes consumed on
++	    a regular file, or non-socket write side treated as always
++	    writable) but a transfer direction is already known ready
++	    (mayrd&&maywr), select() would block forever and the subsequent
++	    timeout path would just continue without evaluating the ready
++	    direction; skip the poll entirely and let the transfer evaluation
++	    below run with retval=1 (simulated ready). */
++	 if (fd1in->fd < 0 && fd2in->fd < 0 &&
++	     fd1out->fd < 0 && fd2out->fd < 0 &&
++	     ((mayrd1 && maywr2) || (mayrd2 && maywr1))) {
++	    retval = 1;
++	 } else {
++	    if (to == NULL) {
++	       timeout = socat_opts.pollintv;
++	       to = &timeout;
++	    }
++	    retval = xiopoll(fds, 4, to);
++	 }
+ 	 if (retval >= 0 || errno != EINTR) {
+ 	    break;
+ 	 }
+ 	 _errno = errno;
+ 	 Info1("poll(): %s", strerror(errno));
+ 	 errno = _errno;
+       } while (true);
+ 
+       /* attention:
+ 	 when an exec'd process sends data and terminates, it is unpredictable
