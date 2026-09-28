@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-restclient-cpp-0.5.3-loopback-httpbin-standin.kv — 路径 B 草稿（待人工 promote）
+# 与同名 .md 成对提交。字段口径见 knowledge/graph/_template.kv。
+# 实证来源：restclient-cpp 0.5.3 在 HarmonyOS PC（OHOS aarch64 / clang 15 / musl）
+# 真机 conan create，上游 51 个 gtest 用例改为由配方自托管的回环服务提供端点后实跑。
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+trigger_tool:           "ctest, make, python3, curl"
+phase:                  "testing"
+error_signature:        "(Connection refused|Could not resolve host|Couldn't resolve host name|error:20SSL_?[A-Z_]*HANDSHAKE|CURLE_COULDNT_CONNECT|Problem ssl steering)|0 tests? passed, [0-9]+ tests? failed out of [0-9]+|Test #1.*(httpbin|api\\.reqbin)|ctest .*No tests were found"
+
+# ═══ Layer 1: 识别层 ═══
+severity:               3
+category:               "testing, ci, http-client, loopback, test-harness, portability, ohos"
+prescan_pattern:        "https?://(www\\.)?httpbin\\.org|api\\.reqbin\\.com|squid|httpbin\\.com|requests\\.get\\(|urllib2|remote server|EXTERNAL_HOST"
+prescan_globs:           "test/*, tests/*, */test/*, CMakeLists.txt, Makefile.am, Makefile.in, *.gemspec, package.json"
+match_keywords:         "httpbin, squid, public test endpoint, internet-dependent unit test, loopback stand-in, gtest_discover_tests, PRE_TEST, self-signed localhost cert, CONNECT proxy, CI 无公网出口, 0 executed, 上游测试必须在 build() 中执行"
+title:                  "上游测试运行时打公网端点（httpbin/squid/reqbin）时，用配方自托管的纯标准库回环替身替换端点，使整套 gtest 在 CI/真机上真实执行"
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             "一批 C/C++ 库把'测试端点'写死成公网 HTTP 服务（restclient-cpp 的 51 例里，RestClientTest/ConnectionTest 打 httpbin.org，ConnectionTestRemote 还要求真实 TLS 握手与一个 CONNECT 代理，代理配置来自 test/squid.conf）。这类依赖在集成环境里同时断三条路：CI worker 无公网出口、真机不装 docker/httpbin/squid、即便有网也随时被上游服务限流。表现为整批用例连接失败，或者更糟——为绕过失败而把测试入口整体关掉，交付'0 执行'。知识库既有条目只覆盖构建期取不到测试框架（FetchContent 拉 googletest），没有覆盖'测试运行时的外部服务端'这一类"
+affected_scope:         "所有把断言对象寄托在外部 HTTP 服务上的客户端库测试套件：libcurl/c-ares 系 HTTP 客户端、OAuth/REST SDK、任何 Makefile.am/CMakeLists 里出现 httpbin、requestbin、ngrok、httpbin.org、或要求 squid/privoxy/tinyproxy 的代理用例。判定信号：测试源码里出现字面量公网域名，或测试目标启动即连不上"
+verification_cmd:       "grep -rnE 'https?://[a-z0-9.-]+\\.(org|com|io)' test/ tests/ 2>/dev/null | head; grep -rln 'squid\\|proxy' test/ 2>/dev/null; <已装替身的配方> conan create ... 2>&1 | grep -E 'Total Tests:|tests passed|tests failed'"
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           "stdlib-loopback-standin-in-build"
+rec_description:        "把外部端点收敛成可覆盖的常量（RESTCLIENT_TEST_SERVER / _URL_TLS / _PROXY_URL），再用一个零第三方依赖的 Python 标准库服务在配方 build() 里自托管同一组语义：明文 HTTP(8998) 复刻 httpbin 的 /get /post /put /patch /delete /options /anything /headers /basic-auth/<u>/<p> /redirect/<n> /delay/<s> /status/<code>，TLS(8999) 用仅绑定 127.0.0.1/localhost 的自签名证书（配 SetCAInfoFilePath 编译期注入 CA 路径），代理(3128) 只做 CONNECT 转发——这三层分别覆盖连接、TLS 校验和代理三条独立代码路径，缺一层就有一批用例失去意义。替身必须做 ready-file 握手并有早退检测（进程早退就把它的日志路径抛出来），否则失败会伪装成'全部超时'。关键保真约束：断言按字面比较，所以响应必须是 pretty JSON 且以换行结尾、恒发 Connection: keep-alive、保留请求头原始大小写、url 字段由原始 request-target + Host 头重建。构建期注意 gtest_discover_tests 的 PRE_BUILD 默认会在 build 阶段执行测试程序，交叉构建必须显式改 PRE_TEST。最后：只排除确实无法本地复刻的单例（HTTP/2 版本协商），用 ctest -E 排除并在正文'未执行测试'里逐项写原因，不删用例、不把跳过判成通过"
+rec_command:            "conan create archives/r/restclient-cpp/0.5.3 -pr:h=<ohos-aarch64> -pr:b=<ohos-aarch64>   # -pr:b 同档使 can_run() 为真，套件才在设备本机执行"
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      "run-suite-on-host-with-remote-endpoints"
+fallback_description:   "保留公网端点，只在有网的本机跑一次并把日志当证据，CI 上置 0 执行或整批跳过。能过结构门禁，但交付物在 CI 上没有任何真实测试信号，且公网服务限流会让用例随机翻红——只作为定位替身缺陷的对照手段，不作为交付口径"
+fallback_command:       ""
+fallback_auto_fix:      false
+fallback_impl:          ""
+
+forbid_1_pattern:       "删掉.*(test|用例)|set\\(.*Tests.*OFF|enable_testing\\(\\)|exclude.*all|BUILD_TESTING=OFF|return\\(\\)\\s*;\\s*//\\s*skip"
+forbid_1_reason:        "'跑不动就不跑'在本仓是不可交付口径（规则要求上游测试在 build() 内真实执行）。更隐蔽的失败模式是删掉/跳过之后仍然'全绿'，把'零覆盖'洗成'高通过率'"
+forbid_1_consequence:   "静态审查会直接判测试口径不通过退回；即使侥幸过审，客户端库的传输层/TLS/代理三条主路径在集成环境里完全无人验证，真实回归（例如 curl 版本升级导致 CA 校验语义变化）只能在下游暴露"
+
+# 有效性判据（本机制自带的三级验收口径）
+# 1) 注册数：ctest -N 的 Total Tests 必须等于按源码逐个 TEST_F 数出的静态活跃数
+#    （restclient-cpp 实测 26 + 22 + 3 = 51；grep 命中的第 52 处是上游注释掉的 TestSSLCert，
+#     不计入。配方里做成硬门禁：不等即 raise，防'静默 0 测试'）
+# 2) 执行数与通过数：来自同一份 ctest 汇总行，且失败数必须为 0；被排除/被 skip 的用例
+#    逐项写技术原因（本例：HTTP/2 协商 1 例排除、上游自带 GTEST_SKIP 1 例沿用）
+# 3) 端点归零：跑完后测试进程/日志里不得再出现任何公网域名解析；代理与 TLS 用例的
+#    目标必须分别是 127.0.0.1:3128 与 localhost:8999
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             ""
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               "drafts/DRAFT-restclient-cpp-0.5.3-loopback-httpbin-standin.md"
+last_updated:           2026-09-27
+source_event:           "restclient-cpp 0.5.3 在 HarmonyOS PC（OHOS aarch64, clang 15, musl）conan create：上游 51 例原依赖公网 httpbin.org 与本机 squid，改为配方 build() 内自托管回环替身后实跑"
+
+# ═══ 知识协作 ═══
+authors:                "TGFAT-1 <tgfat-1@local>"
+source_pr:              ""
+source_commit:          ""
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-27
