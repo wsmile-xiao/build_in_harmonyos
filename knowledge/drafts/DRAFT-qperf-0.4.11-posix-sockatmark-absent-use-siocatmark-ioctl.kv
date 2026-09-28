@@ -1,0 +1,52 @@
+#====================================================================
+# DRAFT-qperf-0.4.11-posix-sockatmark-absent-use-siocatmark-ioctl.kv
+# OHOS 的 C 库连 POSIX 标准函数 sockatmark(3) 都不声明、不导出，需按特性
+# 改发该函数规范自身定义的底层 ioctl(fd, SIOCATMARK, &val)。
+# 触发实例: qperf 0.4.11 src/support.c:466（conan create G2，2026-09-24/25
+#           HarmonyOS PC B 机 aarch64 真机）。
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-QPERF-0.4.11-POSIX-SOCKATMARK-ABSENT-USE-SIOCATMARK-IOCTL
+trigger_tool:           clang|ld.lld|conan
+phase:                  compilation|linking
+error_signature:        call to undeclared function 'sockatmark'|implicit declaration of function 'sockatmark'|undefined symbol: sockatmark|referenced by support.c
+
+severity:               2
+category:               compat, libc, musl, headers
+match_keywords:         sockatmark, SIOCATMARK, out-of-band data, urgent data, TCP urg, POSIX, musl, OHOS, undefined symbol, call to undeclared function, sys/socket.h, bits/ioctl.h, ioctl, qperf, atmark
+
+title:                  OHOS C 库连 POSIX 标准函数 sockatmark(3) 都不声明也不导出，需按特性改发该函数规范自身定义的底层 ioctl(fd, SIOCATMARK, &val)
+
+root_cause:             sockatmark(3) 由 POSIX.1-2001 标准化，glibc 与 macOS 都在 <sys/socket.h> 里声明它，因此上游 C 代码普遍把它当作"POSIX 就有"而直接使用。OHOS 工具链的 C 库既不声明也不导出该符号：编译期 clang 报 call to undeclared function 'sockatmark'（-Wimplicit-function-declaration，非致命），链接期 ld.lld 报 undefined symbol: sockatmark（致命）。缺的不是 GNU/BSD 扩展，而是 ISO POSIX 标准函数，所以 musl 上游"不实现非 POSIX 扩展"这一条常见解释在此不成立——musl 自己确实提供 sockatmark，且其实现就是发一条 SIOCATMARK ioctl。OHOS 的 SDK 头 <bits/ioctl.h> 反而提供了 SIOCATMARK，缺的只是那层 POSIX 包装。
+
+affected_scope:         任何直接调用 sockatmark(3) 的 C 代码（网络工具的带外/紧急数据判定，如 qperf 的 mark_remote_failure、含 OOB 处理的 RPC/协议栈、部分数据库与代理客户端）。同类的"POSIX 标准函数在 OHOS C 库缺失"若也落在有底层 ioctl/syscall 可用的场景，可套同一修法。已实测触发: qperf 0.4.11 src/support.c:466（conan create G2，2026-09-24/25，HarmonyOS PC B 机 aarch64 / HongMeng Kernel 1.12.0）。
+
+verification_cmd:       grep -rn sockatmark <OHOS-sysroot>/usr/include || echo NO_DECLARATION; grep -rn 'define SIOCATMARK' <OHOS-sysroot>/usr/include/*/bits/ioctl.h; printf '#include <stdio.h>\nint sockatmark(int);\nint main(void){printf(\\"%%d\\", sockatmark(0));return 0;}\n' > t.c && clang t.c   # 链接期报 undefined symbol: sockatmark
+
+prescan_pattern:        \bsockatmark\s*\(
+prescan_globs:          *.c,*.h
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           reimplement-posix-func-via-underlying-ioctl
+rec_description:        在调用方补一个本地静态包装函数，直接发 sockatmark(3) 规范自身定义的底层操作 ioctl(fd, SIOCATMARK, &atmark)（POSIX 原文即"equivalent to ioctl(fildes, SIOCATMARK, &atmark)"，musl 的 sockatmark 亦是同一条 ioctl），因此与参考实现同构而非伪造返回值。开关按特性分流（#ifdef SIOCATMARK）而非按平台分流：具备该 ioctl 的平台走 ioctl，不具备的平台保留原 POSIX 调用，对 glibc/macOS 零行为变化，补丁里不含任何平台宏。失败时返回 -1 并把 errno 交给调用方，与 POSIX 错误语义一致。
+rec_command:            patch: 在 src/support.c 增加 static int socket_atmark(int fd){ #ifdef SIOCATMARK int atmark=0; if (ioctl(fd,SIOCATMARK,&atmark)<0) return -1; return atmark; #else return sockatmark(fd); #endif } 并把 sockatmark(RemoteFD) 调用点换成 socket_atmark(RemoteFD)，同时补 #include <sys/ioctl.h>（实例: archives/q/qperf/0.4.11/patches/0001-support-sockatmark-via-siocatmark.patch）
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      weak-symbol-compat-definition
+fallback_description:   若目标平台连 SIOCATMARK 都不提供（例如非 Linux 家族），退回 E534 记录的兼容层写法：在包的 compat 文件里给出 __attribute__((weak)) 的 sockatmark 强实现，链接期由 libc 优先。代价是会同时改变所有调用点的语义、且必须给真值（返回 0 会让"无带外数据"变成静默错误结论），故只在 ioctl 路径不可用时采用；绝不可用 return 0 占位蒙过链接。
+fallback_auto_fix:      false
+
+safety_boundary:        适用边界: 仅当"缺失函数是某个已被平台提供的底层接口(ioctl/syscall)的薄包装"时适用——此时按特性改写与参考实现等价。已实测: sockatmark 声明在 sysroot 全头树命中 0 处、libc.so 导出 0 个符号、自带原型仍链接失败(证明缺的是符号而非声明)，而 SIOCATMARK 在 5 个头文件中定义、ioctl(SIOCATMARK) 编译链接 rc=0 且出产物。与 E245 的分工: E245 处理"libc 未封装但内核**裸 syscall**存在"(需查 __NR_xxx 并用 syscall() 直调，其方案且要求平台宏"非 OHOS 不启用")，本条处理"存在**同层已导出的 ioctl**"(不经裸 syscall、不需平台宏，R8/PF5 友好)——同族两条不同解法路线，不可互替。反例(不适用): 缺失函数承载平台确实没有的能力(如真正的 OOB 队列语义、RDMA verbs、perf_event 权限)，此时改 ioctl 只是把编译错误换成错误的运行期结论，应按能力缺失申报而不是补包装;反例(勿混用): GNU/BSD 扩展函数缺失(gethostid/strverscmp/getusershell/secure_getenv)属 E534/E081 家族，其"musl 有意不实现非 POSIX 扩展"的根因解释对本条不成立。风险: #else 分支在无 SIOCATMARK 的平台上会重新引入隐式声明，故该分支必须保留原型可见的原头文件包含。
+
+similar_to:             E245(最近邻: OHOS libc 未导出 vhangup——声明缺失+符号缺失但内核 syscall 存在，方案 ohos-syscall-shim 且"非 OHOS 平台不启用"即需平台宏；本条差异=底层接口是同层已导出的 ioctl 而非裸 syscall，且按特性而非平台分流), E534(OHOS musl 缺 GNU/BSD 扩展函数的弱符号兼容层 —— 函数类别与解法均不同), E081(musl 缺 secure_getenv 导致 undeclared/implicit declaration —— GNU 扩展且解法为加声明), E086(SO_PEERCRED/struct ucred 缺失 —— 用 __OHOS__ 平台宏门控，本条刻意不用平台宏)
+
+forbid_1_pattern:       用 __OHOS__ 等平台宏把 sockatmark 调用整段删掉或 return 0 占位（把链接错误换成静默错误结论，且违反 R8/PF5 对补丁内平台宏的限制）
+principles:
+
+last_updated:           2026-09-25
+authors:                主理-26 <z26@local>
