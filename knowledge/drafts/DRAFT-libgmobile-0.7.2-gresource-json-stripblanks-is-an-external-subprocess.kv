@@ -1,0 +1,175 @@
+# ═══ Draft knowledge entry — gresources 的 preprocess 指令把「构建期工具依赖」藏进子进程：glib-compile-resources 既不链接也不 vendor json-glib，它只是 PATH 查找 json-glib-format ═══
+# Timestamp: 2026-09-20
+# Software: libgmobile 0.7.2 (Phosh 项目的 glib 基础库，meson)
+# Gate: G2 (conan create) / L1 构建期 configure+build
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libgmobile-0.7.2-gresource-json-stripblanks-is-an-external-subprocess
+trigger_tool:           meson|gnome.compile_resources|glib-compile-resources|conan|grep|llvm-readelf
+phase:                  configure|build
+error_signature:        json-glib-format.*not found|Failed to execute child process.*json-glib-format|
+                         g-resources.*json-stripblanks|preprocess=.*json-stripblanks|
+                         FileNotFoundError.*json-glib-format|not found in PATH|
+                         configure: error:.*glib-compile-resources|
+                         DT_NEEDED.*libjson-glib|undefined reference.*json_
+severity:               2
+category:               build-system,meson,glib,gresource,hidden-build-dependency,parent-dependency,self-check
+match_keywords:         gresources, preprocess, json-stripblanks, glib-compile-resources,
+                        json-glib-format, JSON_GLIB_FORMAT, g_find_program_in_path,
+                        子进程 subprocess, PATH, DT_NEEDED, 链接图 vs 依赖图,
+                        gnome.compile_resources, --manual-register, meson,
+                        构建期工具依赖 build-time tool dependency, 幻觉链接,
+                        meson wrap fallback, wrap_mode=nodownload, libgmobile, gmobile
+
+title:                  gresources 的 preprocess="json-stripblanks" 不是一条链接依赖，
+                        而是一次 **PATH 查找的外部子进程调用**——只看「链接了什么」
+                        会得出「不需要 json-glib」的相反结论；构建期必须把
+                        json-glib 的 bin/ 放进 PATH（或设 JSON_GLIB_FORMAT），
+                        运行期则完全不需要它
+
+root_cause: >
+  glib 的 GResource 编译链把「预处理」做成了**运行期外挂**，而不是编译进
+  glib-compile-resources 的能力。以 ohpcd 的 glib/2.84.0.1 制品为证：
+
+      bin/glib-compile-resources
+        DT_NEEDED: libc.so libgio-2.0.so libgobject-2.0.so libglib-2.0.so libintl.so
+        strings:   JSON_GLIB_FORMAT / json-stripblanks / json-glib-format
+
+  即：**没有** libjson-glib 这条 DT_NEEDED，但二进制里有 json-glib-format
+  这个程序名。对应 glib 源码里 `g_find_program_in_path()` + `g_spawn` 的写法
+  ——它是把 `json-glib-format` 当**子进程**执行，命令行里的程序名可由环境变量
+  `JSON_GLIB_FORMAT` 覆盖。
+
+  这构成一个反直觉的三角：
+    · 「链接图」说：glib 不依赖 json-glib；
+    · 「运行期」说：glib-compile-resources 也不依赖 json-glib（只在编译资源
+      的那一刻需要那个二进制）；
+    · 「构建期」说：**这一刻**必须能从 PATH 找到 json-glib-format，否则资源
+      编译直接失败。
+  于是「链接图完整」与「构建能力完整」是两件不同的事，而构建系统
+  （meson 的 gnome 模块）**不会**替你把这条工具依赖表达出来——它只负责把
+  glib-compile-resources 找出来调，子进程要找谁，它并不知道。
+
+  另一层陷阱是这条依赖**藏在 preprocess 属性里**：只有当
+  `data/*.gresources.xml` 里出现 `preprocess="json-stripblanks"` 时它才存在。
+  libgmobile 0.7.2 的 data/gmobile.gresources.xml 里 34 个 `<file>` 全部带这个
+  属性，所以是本包的硬前提；而上游把它写在 XML 里（不是 meson.build 的
+  dependency() 里），扫 meson.build 是看不见的。
+
+affected_scope: >
+  一切用 meson / autotools 编译 GResource 并启用 `preprocess="json-stripblanks"`
+  的项目（glib 生态里 Phosh 系、GNOME 系都有）。更一般地：**所有把构建期工具
+  依赖实现为「PATH 查找 + 子进程」的构建步骤**——pkg-config 的
+  `PKG_PROG_PKG_CONFIG`、gtk-doc 的 `gtkdoc-scan`、gobject-introspection 的
+  `g-ir-scanner`、`glib-mkenums` / `glib-genmarshal` 同理。凡是打包时只把依赖
+  的 lib/ 路径喂给链接器、却没把 bin/ 喂给 PATH 的配方，都会在这一类步骤上以
+  「找不到某某工具」而不是「未定义符号」的形式失败。反向也成立：这一条也说明
+  **不该**因为「资源里有 JSON」就顺手把 json-glib 声明成 glib 的构建依赖，
+  那是把工具依赖错记成库依赖。
+
+verification_cmd: >
+  # (a) 判据一：先证明「不是链接依赖」——看 DT_NEEDED，别看 strings 就下结论
+  llvm-readelf -d <glib_pkg>/bin/glib-compile-resources | grep NEEDED
+  llvm-strings <glib_pkg>/bin/glib-compile-resources | grep -i 'json'
+  #     → NEEDED 无 libjson-glib；strings 有 JSON_GLIB_FORMAT / json-glib-format
+  # (b) 判据二：确认这条路真的被用到（否则本条不成立）
+  grep -n 'preprocess=' <src>/data/*.gresources.xml
+  grep -c 'json-stripblanks' <src>/data/*.gresources.xml
+  # (c) 判据三：负向复现——把 json-glib 的 bin/ 从 PATH 里摘掉再 configure
+  env PATH=<without-json-glib-bin> meson setup _b <src>   # → 资源编译阶段炸
+  # (d) 判据四：正向——把 bin/ 放回去（或显式覆盖变量）再 configure
+  JSON_GLIB_FORMAT=<json-glib_pkg>/bin/json-glib-format meson setup _b <src>
+  # (e) 自检：产物里应有资源符号，且安装树里**不该**出现 json-glib 的 .so
+  nm -D <build>/libgmobile.so | grep -i gm_get_resource
+  ls <pkg>/bin/   # 只有 json-glib 自己才会带 json-glib-format
+
+rec_priority:           1
+rec_approach:           put-the-tool-owner-bin-dir-on-PATH-and-pin-JSON_GLIB_FORMAT
+rec_description: >
+  两条同时做，都不改上游：
+  (1) 配方在 build/package 环境里，把**所有 host 依赖**的 `bin/` 目录前置进
+      PATH（不要只挑 glib 一个——工具可能由任意一个依赖提供）。
+  (2) 再显式 `JSON_GLIB_FORMAT=<json-glib_pkg>/bin/json-glib-format`
+      （按前述 `g_find_program_in_path` + 环境变量覆盖的语义），把「靠 PATH 猜」
+      塌缩成「钉死路径」，跨 worker 不会因为 PATH 顺序抖动而时好时坏。
+  同时**不要**因为看到 JSON 就改 glib 的依赖表：链接图是对的，缺的只是构建期
+  的 PATH。Json-glib 在本包里仍然是**运行期**依赖（gm_display_panel_* 走
+  libjson-glib 解析面板 JSON），两种角色要在配方里分开表达。
+rec_command:            >
+  # conanfile.py generate()/build()：环境
+  env = Environment()
+  for dep in self.dependencies.host.values():
+      b = os.path.join(dep.package_folder, "bin")
+      if os.path.isdir(b): env.prepend_path("PATH", b)          # (1)
+  tool = find_host_tool("json-glib-format")
+  if tool: env.define("JSON_GLIB_FORMAT", tool)                 # (2)
+  with env.vars(self).apply():
+      Meson(self).configure(); Meson(self).build()
+  # 依赖表：glib 与 json-glib 都是运行期 requires，不要往 glib 里塞 json-glib
+rec_auto_fix:           true
+rec_impl:               recipe-side-build-env
+
+fallback_priority:      2
+fallback_approach:      disable-the-preprocess-at-build-time
+fallback_description:   >
+  若确实拿不到 json-glib-format（例如平台不提供该工具），可以退化：把
+  gresources.xml 里的 `preprocess="json-stripblanks"` 去掉（或改用
+  `preprocess="xml-stripblanks"`）。代价是**产物语义变了**——嵌入的 JSON 不再
+  被压缩，资源体积变大，而且这是改上游数据文件、会永久偏离上游；只有在
+  「工具确实不可能提供」时才用，且必须在 notes 里写明资源内容与上游不一致。
+  libgmobile 本包不需要这条退路——json-glib/1.10.6 制品自带
+  `bin/json-glib-format`。
+fallback_command:       sed -i 's/ preprocess="json-stripblanks"//' data/*.gresources.xml
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       看到 .gresources.xml 里有 JSON 就.*把 json-glib 声明成 glib 的构建依赖|
+                        往 glib 配方的 requirements 里加 json-glib
+forbid_1_reason:        链接图里根本没有 libjson-glib 这条 DT_NEEDED——缺的不是
+                        库，是构建期的 PATH。把工具依赖记成库依赖，会凭空给 glib
+                        制造一条本不存在的依赖边，并且**修不好**这个问题
+                        （库在 lib/ 里，子进程照样在 PATH 里找不到工具）。
+forbid_1_consequence:   依赖图被污染（glib → json-glib 形成环或层次倒挂），
+                        但资源编译仍然失败，排查方向被带偏。
+forbid_2_pattern:       用 --wrap-mode=nofallback 之外的.*wrap 让 meson 去下载 json-glib|
+                        fallback: \['json-glib'.*\] 触发 wrap 下载
+forbid_2_reason:        上游 meson.build 里 `dependency('json-glib-1.0', fallback: [...])`
+                        的 fallback 只在**依赖未找到**时才走子项目下载。既然
+                        json-glib 已由 conan 提供，正确做法是让它被正常找到
+                        （配 wrap_mode=nodownload 兜底），而不是放开网络让
+                        meson 去 clone 一份子项目——那会拿到与制品不同源的版本。
+forbid_2_consequence:   CI worker 不可联网时直接失败；即使联网成功，也把
+                        「制品仓里的版本」和「源码构建出的版本」混成一体，
+                        制品不可复现。
+forbid_3_pattern:       llvm-strings.*json-glib.*就断定.*链接了 json-glib|
+                        只看 strings 不看 DT_NEEDED 下依赖结论
+forbid_3_reason:        程序名会以字符串形式出现在二进制里（因为要用它去
+                        g_spawn），把它当链接证据会得出完全相反的结论。
+forbid_3_consequence:   误加依赖边、误判失败原因，白跑一轮 CI。
+
+principles:             P-BUILD-001, P012（边界与反例：链接图完整 ≠ 构建能力完整）
+causes:                 []
+caused_by:              glib 把 json-stripblanks 实现为「PATH 查找 + g_spawn
+                        外部 json-glib-format」，而 meson 的 gnome 模块只表达
+                        「找 glib-compile-resources」，不表达「它还会找谁」
+similar_to:             DRAFT-mpsolve-3.2.3-make-check-green-is-not-deliverable-green
+                        （同族：报表/退出码层面的「看起来够了」与真实能力脱节）；
+                        E007（config.guess/config.sub 补丁族——同为「工具链自带的
+                        平台知识过期/缺失」，但那一条缺的是三元组识别，本条缺的是
+                        一个外部可执行文件的可见性）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libgmobile-0.7.2-gresource-json-stripblanks-is-an-external-subprocess.md
+last_updated:           2026-09-20
+source_event:           archives/l/libgmobile/0.7.2 适配（data/gmobile.gresources.xml
+                        34 处 preprocess="json-stripblanks"）
+
+authors:                2301_76770579
+source_pr:              11556
+source_commit:          b3bbdd4352
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
