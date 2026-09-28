@@ -1,0 +1,143 @@
+#====================================================================
+# Draft: 依赖包的 CMake 包版本可能等于 libtool 的 API 版本，而不是发布 tag
+#        （find_package(<dep> X.Y.Z) 的版本号该从哪里取）
+# 交付实例: libbpp-popgen 2.4.1（PR !11783 同批，Bio++ 家族）
+#====================================================================
+
+id:                     E645
+trigger_tool:           cmake|conan|autotools|pkg-config
+phase:                  configuration
+
+error_signature:        Could NOT find (bpp-seq|bpp-core)|find_package \((bpp-seq|bpp-core) [0-9]+\.[0-9]+\.[0-9]+ REQUIRED\)|PACKAGE_VERSION "[0-9]+\.[0-9]+\.[0-9]+"|could not find a configuration file.*compatible with requested version|Config file: .*-config-version\.cmake
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               cmake, conan, autotools, versioning, dependency-graph
+match_keywords:         find_package, API version, ABI version, SOVERSION, libtool, CURRENT:REVISION:AGE, PACKAGE_VERSION, config-version.cmake, SameMajorVersion, 版本口径, bpp-seq, bpp-core, Bio++
+title:                  libtool 系的库把 CMake 包版本写成 API 版本（CURRENT-AGE.AGE.REVISION），不等于发布 tag；find_package 的版本号必须去依赖包的 config-version.cmake 里取，不能按 tag 猜
+prescan_pattern:        write_basic_package_version_file|CURRENT.*REVISION.*AGE|SOVERSION \$\{.*VERSION_MAJOR\}|find_package \([a-z0-9-]+ [0-9]+\.[0-9]+\.[0-9]+ REQUIRED\)
+prescan_globs:          CMakeLists.txt, *.cmake, *.cmake.in, conandata.yml
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause: |
+  一批 autotools/libtool 时代的 C/C++ 库沿用 libtool 的
+  `CURRENT:REVISION:AGE` 规则生成共享库版本，并用它同时生成 CMake 包版本：
+
+  ```cmake
+  SET(${PROJECT_NAME}_VERSION_CURRENT  "14")   # 接口号
+  SET(${PROJECT_NAME}_VERSION_REVISION "0")
+  SET(${PROJECT_NAME}_VERSION_AGE      "2")    # 向后兼容的接口跨度
+  MATH(EXPR ..._VERSION_MAJOR "${..._VERSION_CURRENT} - ${..._VERSION_AGE}")  # 14-2 = 12
+  SET(${PROJECT_NAME}_VERSION "${MAJOR}.${AGE}.${REVISION}")                   # 12.2.0
+  write_basic_package_version_file(... VERSION ${PROJECT_VERSION} COMPATIBILITY SameMajorVersion)
+  ```
+
+  于是 `lib/cmake/<pkg>/<pkg>-config-version.cmake` 里的 `PACKAGE_VERSION` 是
+  **API 版本**，与发布 tag 无关：Bio++ 实例——发布 tag `2.4.1`，而
+
+  | 包 | 发布 tag | config-version.cmake 里的 PACKAGE_VERSION | 上游 CMakeLists 里实际请求的版本 |
+  |---|---|---|---|
+  | bpp-seq | 2.4.1 | **12.0.0**（CURRENT 14 − AGE 2 = 12） | bpp-popgen 请求 `find_package(bpp-seq 12.0.0 REQUIRED)` |
+  | bpp-core | 2.4.1 | **4.1.0** | bpp-seq 的 config 请求 `find_package(bpp-core 4.1.0 REQUIRED)` |
+
+  危害有两面：
+  1. **照 tag 猜版本** → `find_package(bpp-seq 2.4.1)` 报
+     "Could not find a configuration file ... compatible with requested version 2.4.1"
+     （或干脆 not found），而依赖其实就在那里，很容易误判成"制品仓没发布/包坏了"；
+  2. **为了让 configure 过而把版本号改成 tag** → 绕过 `SameMajorVersion` 的 ABI 兼容性检查，
+     可能在 ABI 不匹配时静默通过，产出的二进制到运行期才炸。
+
+  （另一个容易混淆的来源：`SOVERSION` 与 API 版本同源——`readelf -d libbpp-seq.so` 的
+  SONAME `libbpp-seq.so.12` 同样是 12，可作为交叉印证。）
+affected_scope: |
+  所有用 libtool 版本规则 + `write_basic_package_version_file` 的库，以及它们的下游配方。
+  实测实例：Bio++ 2.4.1 家族（bpp-popgen 依赖 bpp-seq 12.0.0 / bpp-core 4.1.0），
+  同族归档 archives/l/libbpp-core/2.4.1、archives/l/libbpp-seq/2.4.1。
+  同类候选：GSL、部分 ImageMagick/VTK 时代库、任何 CMakeLists 里出现
+  `${PROJECT_NAME}_VERSION_CURRENT/_REVISION/_AGE` 三元组的项目。
+verification_cmd: |
+  # 1) 依赖包真正的 CMake 包版本（唯一权威）
+  grep -n 'PACKAGE_VERSION' <dep_pkg>/lib/cmake/<name>/<name>-config-version.cmake
+  # 2) 上游自己想请求的版本（依赖方的 CMakeLists 里写着）
+  grep -n 'find_package *(<dep>' <src>/CMakeLists.txt
+  # 3) 交叉印证：共享库 SONAME 里的主版本号 = API 主版本
+  readelf -d <dep_pkg>/lib/lib<dep>.so | grep SONAME
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           read-package-version-from-dependency-config
+rec_description: |
+  1) **不要按发布 tag 猜版本**。判定依赖的 CMake 包版本，只看三处（按权威性排序）：
+   ① 依赖包 `lib/cmake/<name>/<name>-config-version.cmake` 里的 `set(PACKAGE_VERSION "...")`；
+   ② 依赖方（上游 CMakeLists）自己写的 `find_package(<dep> X.Y.Z)` —— 直接把上游请求的
+      字符串照搬即可，最省事也最不容易错；
+   ③ `readelf -d` 的 SONAME 主版本号交叉印证（API 主版本）。
+  2) **在 Conan 配方里**：优先让依赖走 Conan 图而不是上游 config——
+  `self.requires("<dep>/<release_tag>")` 用**发布 tag**（Conan 版本号），
+  而 CMake 侧用 Conan 生成的 target `<dep>::<dep>`，两者不必一致：
+  Conan 用 package_id/settings 保证 ABI 匹配，CMake 侧的版本字符串就不再是判据。
+  3) 若必须调用上游 config（例如依赖方 CMakeLists 写死了 `find_package(bpp-seq 12.0.0)` 且
+  不便改动），则确保请求的版本字符串与 `PACKAGE_VERSION` 一致，并在 notes.md 记录口径来源。
+rec_command:            grep -n 'PACKAGE_VERSION' "$(conan cache path <dep>/<ver>:<pid>)/lib/cmake/<name>/<name>-config-version.cmake"
+rec_auto_fix:           false
+rec_impl:
+
+solution: |
+  # 判定（Bio++ 实测）
+  $ grep -n PACKAGE_VERSION ~/.conan2/p/*/p/lib/cmake/bpp-seq/bpp-seq-config-version.cmake
+  12:set(PACKAGE_VERSION "12.0.0")          # ← 这才是 find_package 要的版本
+  $ grep -n 'find_package *(bpp' bpp-popgen-2.4.1/CMakeLists.txt
+  56:find_package (bpp-seq 12.0.0 REQUIRED)  # 上游自己请求的就是 API 版本
+
+  # 配方侧：Conan 用发布 tag，CMake 用 Conan target（两套版本号各司其职）
+  def requirements(self):
+      self.requires("libbpp-seq/2.4.1")      # 发布 tag
+  # 并且让上游 CMakeLists 走 target 而不是上游 config（见 0001 补丁）
+
+fallback_priority:      2
+fallback_approach:      pin-requested-version-to-package-version
+fallback_description:   若不便改上游 CMakeLists，就把请求版本改成 config-version.cmake 里的 PACKAGE_VERSION（并在 notes.md 写明该值来自依赖包 config，不是发布 tag）
+fallback_command:       # 改 find_package(bpp-seq 2.4.1) -> find_package(bpp-seq 12.0.0)
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       find_package *\([a-z0-9-]+ <发布tag>.*REQUIRED\)|把版本号改成发布 tag
+forbid_1_reason:        按发布 tag 请求会直接找不到 config；若为了过配置而删掉版本约束，则绕过 SameMajorVersion 的 ABI 兼容检查
+forbid_1_consequence:   要么 configure 假失败、要么 ABI 不匹配静默通过，运行期才崩
+
+forbid_2_pattern:        (patch|sed).*(删|删掉|remove).*version.*find_package|find_package.*(去掉|删除).*版本
+forbid_2_reason:        删除版本约束不等于解决版本口径问题；应显式对齐到 PACKAGE_VERSION，或改走 Conan 图（package_id 保证 ABI）
+forbid_2_consequence:   依赖 ABI 漂移无人发现
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E498, E495]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E645.md
+last_updated:           2026-09-23
+source_event:           libbpp-popgen 2.4.1 适配：上游 CMakeLists 请求 find_package(bpp-seq 12.0.0) 而 bpp-seq 发布 tag 是 2.4.1；读 config-version.cmake 确认 PACKAGE_VERSION=12.0.0，bpp-core 为 4.1.0
+
+# ═══ 知识协作 ═══
+authors:                Zmaomao
+source_pr:              12093
+source_commit:          (见 PR !12093 的最新提交)
+verify_builds:
+reference_impl:         archives/l/libbpp-popgen/2.4.1/patches/0001-cmake-use-conan-libbpp-seq-target.patch、archives/l/libbpp-seq/2.4.1/conanfile.py（docstring 里记的 4.0.0 与实测 4.1.0 的口径差异）
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-23
+
+draft:                  DRAFT-libbpp-popgen-2.4.1-cmake-package-version-is-api-version
+status:                 pending-editor-review
+contributor_id:         ZM01
