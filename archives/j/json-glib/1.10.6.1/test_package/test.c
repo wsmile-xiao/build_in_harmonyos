@@ -49,7 +49,7 @@ int main(void) {
         return 1;
     }
 
-    printf("test json-glib 1.10.6: OK (name=%s, value=%d)\n", name, value);
+    printf("test json-glib 1.10.6.1: OK (name=%s, value=%d)\n", name, value);
     g_object_unref(parser);
     return 0;
 }
