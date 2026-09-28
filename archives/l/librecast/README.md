@@ -13,7 +13,7 @@ Autotools (configure + make). Upstream ships a hand-written `src/Makefile.in` th
 (`all: $(SOFILES)`) — there is no static build target.
 
 ## Dependencies
-- `lcrq/0.3.1` — RaptorQ FEC; `include/librecast/net.h` includes `<lcrq.h>` (public require)
+- `lcrq/0.4.1` — RaptorQ FEC; `include/librecast/net.h` includes `<lcrq.h>` (public require)
 - `libsodium/1.0.22` — encryption/hashing; `include/librecast/crypto.h` includes `<sodium.h>` (public require)
 - System: pthread, m, dl
 - Bundled (not separate packages, built by the top-level configure):
@@ -36,19 +36,20 @@ Autotools (configure + make). Upstream ships a hand-written `src/Makefile.in` th
   `pthread_cancel` but it returns `ENOSYS`, `pthread_setcanceltype` is absent, and the cross sysroot libc does not
   export any of them, so `liblibrecast.so` could not even be relocated. The library's thread teardown is rewritten
   to cooperative shutdown (NULL-job stop sentinels for the smolq/mld queues, stop flags plus `shutdown()`/socket
-  close to release blocking `recvmsg()`), and callers use `q_pool_destroy_q()`.
+  close to release blocking `recvmsg()`), and callers use `q_pool_stop()`.
 - **RFC 3542 `inet6_opt_*`** — musl never implemented the hop-by-hop/destination option builders that
   `libs/libmld/src/mld.c` calls, and OHOS has no provider anywhere (SDK headers, sysroot libc, device libc).
   A conforming implementation (same bytes as glibc/FreeBSD, transcribed from the KAME reference) is compiled in.
-- **Upstream defect** — `include/librecast/net.h` and `src/librecast_pvt.h` use `FILE` without including
-  `<stdio.h>`; Release builds (`-DNDEBUG`) lose the transitive include from `lcrq.h`, giving
-  `unknown type name 'FILE'`. `<stdio.h>` added to both.
-- Upstream tarball contains 121 dangling symlinks (`test/**/*.test`, resolved at build time) — incompatible with
+- Upstream tarball contains dangling symlinks (`test/**/*.test`, resolved at build time) — incompatible with
   `shutil.copytree` on HMDFS; `.work` is rebuilt with Python `tarfile` preserving symlinks.
 - In-source build only (no VPATH; `src/Makefile` links `../libs/libmld/src/*.o` by relative path) — the recipe uses
   `basic_layout(self, build_folder=".")`.
+- Source mirror: codeberg.org rate-limits CI workers (HTTP 429); source fetched from `git.sr.ht` mirror.
 
 ## Versions
+- 0.11.2 — adapted 2026-09-26. Conan recipe depends on `lcrq/0.4.1` + `libsodium/1.0.22`; 25 portability patches;
+  test_package consumer test exercises `lc_ctx_new`/`lc_channel_new`/`lc_socketpair` lifecycle.
+  See `0.11.2/notes.md`.
 - 0.8.0 — built 2026-09-24. `conan-verify` G0-G4 + L2/L4/L5 all PASS; artifacts `dlopen` on device with no
   `LD_PRELOAD`; test_package consumer test 20/20.
   Upstream tests: nested `libs/libmld` suite 10 run / 8 OK / 2 WARN / 0 FAIL;
