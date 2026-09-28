@@ -1,0 +1,82 @@
+--- a/src/endpoint.c
++++ b/src/endpoint.c
+@@ -49,39 +49,74 @@
+ #if defined(HAVE_NETDB_H) && defined(AF_UNSPEC) && defined(AF_INET) \
+     && defined(AF_INET6)
+ #    define HAVE_INET_SOCKETS 1
+ #endif
+ #ifndef SO_REUSEPORT
+ #    define SO_REUSEPORT SO_REUSEADDR
+ #endif
+ #define POSTSRSD_SOCKET_LISTEN_QUEUE 16
+ 
+ #ifdef HAVE_UNIX_SOCKETS
++/* On HarmonyOS, binding a filesystem-path unix socket is blocked (EPERM),
++ * but Linux abstract-namespace sockets work (E461). Postfix socketmaps accept
++ * the "unix:abstract:name" form; accept it here and create an abstract socket
++ * (sun_path[0] = '\0') which needs no filesystem entry.
++ */
+ static int create_unix_socket(const char* path)
+ {
+     struct sockaddr_un sa;
+     if (NULL_OR_EMPTY_STRING(path))
+     {
+         log_error("expected file path for unix socket");
+         return -1;
+     }
+-    if (acquire_lock(path) > 0)
++    int abstract = 0;
++    if (strncmp(path, "abstract:", 9) == 0)
++    {
++        abstract = 1;
++        path += 9;
++        if (NULL_OR_EMPTY_STRING(path))
++        {
++            log_error("expected abstract socket name");
++            return -1;
++        }
++    }
++    if (!abstract && acquire_lock(path) > 0)
+         unlink(path);
+     int sock = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+     if (sock < 0)
+         goto fail;
+     sa.sun_family = AF_UNIX;
+     memset(sa.sun_path, 0, sizeof(sa.sun_path));
+-    strncpy(sa.sun_path, path, sizeof(sa.sun_path) - 1);
+-    if (bind(sock, (const struct sockaddr*)&sa, sizeof(struct sockaddr_un)) < 0)
+-        goto fail;
+-    if (chmod(path, 0666) < 0)
++    socklen_t addrlen = (socklen_t)sizeof(struct sockaddr_un);
++    if (abstract)
++    {
++        /* Bound the copy: sun_path holds at most sizeof()-1 bytes after the
++         * leading '\0'; a longer config value must not overflow the stack
++         * sockaddr (address length simply clamps to the full name space). */
++        size_t nlen = strlen(path);
++        if (nlen > sizeof(sa.sun_path) - 1)
++            nlen = sizeof(sa.sun_path) - 1;
++        sa.sun_path[0] = '\0';
++        memcpy(sa.sun_path + 1, path, nlen);
++        /* For abstract sockets the address length determines the name; using
++         * sizeof(sockaddr_un) would include trailing NUL padding and make the
++         * bound name differ from the short form used by the connecting peer. */
++        addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + nlen);
++    }
++    else
++    {
++        strncpy(sa.sun_path, path, sizeof(sa.sun_path) - 1);
++    }
++    if (bind(sock, (const struct sockaddr*)&sa, addrlen) < 0)
++        goto fail;
++    if (!abstract && chmod(path, 0666) < 0)
+         goto fail;
+     if (listen(sock, POSTSRSD_SOCKET_LISTEN_QUEUE) < 0)
+         goto fail;
+     return sock;
+ fail:
+     log_perror(errno, NULL);
+     if (sock >= 0)
+         close(sock);
+     return -1;
+ }
