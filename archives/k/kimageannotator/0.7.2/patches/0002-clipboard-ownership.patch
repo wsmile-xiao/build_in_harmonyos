@@ -1,0 +1,54 @@
+Fix double free of the shared AnnotationItemClipboard when two or more tabs exist.
+
+AnnotationTabWidget creates ONE AnnotationItemClipboard and passes the same
+pointer to every tab's AnnotationArea, while ~AnnotationArea unconditionally
+deletes it. Adding a second tab (public addTab API) therefore destroys the
+clipboard twice: the first ~AnnotationArea frees it, the second one calls a
+virtual destructor through a dangling vtable and the process segfaults.
+Reproduced on HarmonyOS PC (aarch64) with a two-tab destroy sequence; the
+pattern is platform independent. Fix: transfer sole ownership to
+AnnotationTabWidget (the creator) - AnnotationArea no longer deletes the
+shared clipboard, AnnotationTabWidget deletes it exactly once.
+
+--- a/src/annotations/core/AnnotationArea.cpp
++++ b/src/annotations/core/AnnotationArea.cpp
+@@ -67,10 +67,12 @@
+ 	delete mPropertiesFactory;
+ 	delete mItemFactory;
+ 	delete mItems;
+ 	delete mKeyHelper;
+ 	delete mUndoStack;
+ 	delete mItemModifier;
+-	delete mItemClipboard;
++	// mItemClipboard is a single instance shared by every tab's
++	// AnnotationArea and owned by AnnotationTabWidget; deleting it here
++	// double-frees as soon as a second tab exists.
+ 	delete mDevicePixelRatioScaler;
+ }
+ 
+--- a/src/gui/annotator/tabs/AnnotationTabWidget.h
++++ b/src/gui/annotator/tabs/AnnotationTabWidget.h
+@@ -38,5 +38,5 @@
+ public:
+ 	AnnotationTabWidget(Config *config, AbstractSettingsProvider *settingsProvider);
+-	~AnnotationTabWidget() override = default;
++	~AnnotationTabWidget() override;
+ 	int addTab(const QPixmap &image, const QString &title, const QString &toolTip);
+ 	int insertTab(int index, const QPixmap &image, const QString &title, const QString &toolTip);
+ 
+--- a/src/gui/annotator/tabs/AnnotationTabWidget.cpp
++++ b/src/gui/annotator/tabs/AnnotationTabWidget.cpp
+@@ -52,6 +52,12 @@
+ 	connect(mTabClickFilter, &AnnotationTabClickEventFilter::closeTabTriggered, mTabCloser, &AnnotationTabCloser::closeTabTriggered);
+ }
+ 
++AnnotationTabWidget::~AnnotationTabWidget()
++{
++	// Sole owner of the clipboard shared by all tab AnnotationAreas.
++	delete mItemClipboard;
++}
++
+ int AnnotationTabWidget::addTab(const QPixmap &image, const QString &title, const QString &toolTip)
+ {
+ 	auto content = new AnnotationTabContent(image, mConfig, mSettingsProvider, mItemClipboard);
+ 
