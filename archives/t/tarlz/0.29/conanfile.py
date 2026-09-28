@@ -219,6 +219,12 @@ class TarlzConan(ConanFile):
         temporary.mkdir(parents=True, exist_ok=True)
         environment = Environment()
         environment.define_path("TMPDIR", str(temporary))
+        # tool_requires binaries (lzip for the .tar.lz unpack) are not on
+        # a raw subprocess PATH — expose them explicitly (R33: declared
+        # build requirement, not ambient PATH).
+        for dep in self.dependencies.build.values():
+            for bindir in dep.cpp_info.bindirs:
+                environment.prepend_path("PATH", bindir)
         # Raw subprocess never sees conan's dependency flags, so expose
         # the direct host dependencies' headers/libraries explicitly
         # (configure probes -llz itself; it only needs -I/-L to find it).
