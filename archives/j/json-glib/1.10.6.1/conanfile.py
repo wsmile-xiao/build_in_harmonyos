@@ -4,6 +4,7 @@
 JSON library for GLib/GObject based applications.
 Required dependency for GEGL's operation graph serialization.
 """
+import glob
 import os
 import shutil
 import sys
@@ -16,7 +17,7 @@ from conan.tools.meson import Meson, MesonToolchain
 
 class JsonGlibConan(ConanFile):
     name = "json-glib"
-    version = "1.10.6"
+    version = "1.10.6.1"
     description = "JSON library for GLib/GObject based applications"
     license = "LGPL-2.1-or-later"
     homepage = "https://gitlab.gnome.org/GNOME/json-glib"
@@ -153,9 +154,13 @@ class JsonGlibConan(ConanFile):
         )
         tc.project_options["wrap_mode"] = "nodownload"
         tc.project_options["introspection"] = "disabled"
-        tc.project_options["tests"] = "false"
+        tc.project_options["tests"] = "true"
+        tc.project_options["conformance"] = "true"
         tc.project_options["documentation"] = "disabled"
         tc.project_options["man"] = "false"
+        # OHOS 上 gettext msgfmt 被 glib proxy libintl 遮蔽（symbol not found），
+        # nls 翻译与本库功能无关，禁用避免 po/ 构建失败（libdbusmenu 同类问题）。
+        tc.project_options["nls"] = "disabled"
         tc.generate()
         self._inject_meson_binaries()
 
@@ -166,10 +171,41 @@ class JsonGlibConan(ConanFile):
         meson = Meson(self)
         meson.configure()
         meson.build()
+        # rule4: 上游测试必须在 build() 真实执行（meson test，含 conformance 330 子测试）。
+        # json-glib 测试为纯 JSON 解析（无 dbus/图形依赖），本地实测 17/17 通过。
+        meson.test()
 
     def package(self):
         meson = Meson(self)
         meson.install()
+        self._sign_shared_libs()
+
+    def _sign_shared_libs(self):
+        """OHOS loader rejects unsigned .so with 'Permission denied'. json-glib
+        ships a shared library consumed at runtime by libdbusmenu/gegl etc., so
+        codesign every installed .so after meson install (glib precedent)."""
+        libdir = os.path.join(self.package_folder, "lib")
+        sos = glob.glob(os.path.join(libdir, "**", "*.so"), recursive=True)
+        sos += glob.glob(os.path.join(libdir, "**", "*.so.*"), recursive=True)
+        if not sos:
+            return
+        candidates_objcopy = [
+            "/data/service/hnp/bin/llvm-objcopy",
+            shutil.which("llvm-objcopy") or "",
+        ]
+        ce = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict) or {}
+        cc = ce.get("c") or ""
+        if cc:
+            candidates_objcopy.insert(0, os.path.join(os.path.dirname(cc), "llvm-objcopy"))
+        objcopy = next((p for p in candidates_objcopy if p and os.path.isfile(p)), None)
+        signer = "/data/service/hnp/bin/binary-sign-tool"
+        if not os.path.isfile(signer):
+            self.output.warning("binary-sign-tool not found; skip OHOS codesign (cross/SDK env)")
+            return
+        for so in sos:
+            if objcopy:
+                self.run('{oc} --remove-section .codesign "{f}" 2>/dev/null || true'.format(oc=objcopy, f=so))
+            self.run('{sg} sign -inFile "{f}" -outFile "{f}" -selfSign 1'.format(sg=signer, f=so))
 
     def package_info(self):
         self.cpp_info.set_property("cmake_file_name", "json-glib")

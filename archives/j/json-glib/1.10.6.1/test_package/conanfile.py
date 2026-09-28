@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan test_package for json-glib 1.10.6.
+"""Conan test_package for json-glib 1.10.6.1.
 
 Uses PkgConfigDeps + direct compilation (same pattern as pango test_package)
 to reliably resolve transitive glib include directories.
@@ -76,15 +76,12 @@ class JsonGlibTestConan(ConanFile):
         if cross_building(self):
             self.output.info("cross-building: only verifying compile+link")
             return
-        # On HarmonyOS, unsigned ELF binaries may fail to execute.
-        # Verify compile+link succeeded; attempt runtime test but don't fail on exec issues.
+        # OHOS codesign 已由配方 package() 修复（_sign_shared_libs），
+        # test_probe 必须真实执行；失败即抛错（R9：禁止静默跳过）。
         libdirs = []
         for _ref, _d in self.dependencies.items():
             libdirs += _d.cpp_info.libdirs
         ldpath = os.pathsep.join(dict.fromkeys(libdirs))
         bash = os.environ.get("CONFIG_SHELL", "/data/service/hnp/bin/bash")
-        try:
-            self.run(f"{bash} -c 'export LD_LIBRARY_PATH=\"{ldpath}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"; ./test_probe'",
-                     env="conanrun")
-        except Exception:
-            self.output.info("Runtime test skipped (ELF signing/platform restriction). Compile+link verified OK.")
+        self.run(f"{bash} -c 'export LD_LIBRARY_PATH=\"{ldpath}${{LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}}\"; ./test_probe'",
+                 env="conanrun")
