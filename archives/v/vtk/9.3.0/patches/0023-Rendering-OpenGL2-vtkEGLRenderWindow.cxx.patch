@@ -1,0 +1,219 @@
+--- a/Rendering/OpenGL2/vtkEGLRenderWindow.cxx
++++ b/Rendering/OpenGL2/vtkEGLRenderWindow.cxx
+@@ -383,21 +383,33 @@
+       return false;
+     }
+   }
+ #if !defined(__ANDROID__) && !defined(ANDROID)
+   if (major <= 1 && minor < 4)
+   {
+     vtkErrorMacro("Only EGL 1.4 and greater allows OpenGL as client API. "
+                   "See eglBindAPI for more information.");
+     return false;
+   }
+-  eglBindAPI(EGL_OPENGL_API);
++#if VTK_MODULE_vtkglew_GLES3
++  if (eglBindAPI(EGL_OPENGL_ES_API) == EGL_FALSE)
++  {
++    vtkErrorMacro("Unable to bind the EGL OpenGL ES API: " << eglGetError());
++    return false;
++  }
++#else
++  if (eglBindAPI(EGL_OPENGL_API) == EGL_FALSE)
++  {
++    vtkErrorMacro("Unable to bind the EGL OpenGL API: " << eglGetError());
++    return false;
++  }
++#endif
+ #endif
+ 
+   return true;
+ }
+ 
+ void vtkEGLRenderWindow::SetShowWindow(bool val)
+ {
+   if (val == this->ShowWindow)
+   {
+     return;
+@@ -424,98 +436,177 @@
+   EGLint surfaceType, clientAPI;
+   const EGLint* contextAttribs;
+ #if defined(__ANDROID__) || defined(ANDROID)
+   surfaceType = EGL_WINDOW_BIT;
+   clientAPI = EGL_OPENGL_ES2_BIT;
+   const EGLint contextES2[] = { EGL_CONTEXT_CLIENT_VERSION, 2, EGL_NONE };
+   contextAttribs = contextES2;
+ #else
+   // arguably you could have EGL_WINDOW_BIT here as well
+   surfaceType = EGL_PBUFFER_BIT;
++#if VTK_MODULE_vtkglew_GLES3
++#  if defined(EGL_OPENGL_ES3_BIT)
++  clientAPI = EGL_OPENGL_ES3_BIT;
++#  elif defined(EGL_OPENGL_ES3_BIT_KHR)
++  clientAPI = EGL_OPENGL_ES3_BIT_KHR;
++#  else
++  // EGL headers predating ES3 may expose only the ES2 renderable bit.
++  // Such drivers can still accept an ES3 context request when supported.
++  clientAPI = EGL_OPENGL_ES2_BIT;
++#  endif
++  const EGLint contextES3[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
++  contextAttribs = contextES3;
++#else
+   clientAPI = EGL_OPENGL_BIT;
+   contextAttribs = nullptr;
+ #endif
+-
++#endif
++
++#if VTK_MODULE_vtkglew_GLES3 && !defined(__ANDROID__) && !defined(ANDROID)
++  // ES3 pbuffer implementations may expose only a minimal RGB config. Try
++  // the preferred depth/alpha format first, then relax optional buffers.
++  const EGLint configsDepth[] = { EGL_SURFACE_TYPE, surfaceType, EGL_BLUE_SIZE, 8,
++    EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 24,
++    EGL_RENDERABLE_TYPE, clientAPI, EGL_NONE };
++  const EGLint configsNoAlpha[] = { EGL_SURFACE_TYPE, surfaceType, EGL_BLUE_SIZE, 8,
++    EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_DEPTH_SIZE, 24, EGL_RENDERABLE_TYPE, clientAPI,
++    EGL_NONE };
++  const EGLint configsMinimal[] = { EGL_SURFACE_TYPE, surfaceType, EGL_BLUE_SIZE, 8,
++    EGL_GREEN_SIZE, 8, EGL_RED_SIZE, 8, EGL_RENDERABLE_TYPE, clientAPI, EGL_NONE };
++  const EGLint* configCandidates[] = { configsDepth, configsNoAlpha, configsMinimal };
++#else
+   const EGLint configs[] = { EGL_SURFACE_TYPE, surfaceType, EGL_BLUE_SIZE, 8, EGL_GREEN_SIZE, 8,
+     EGL_RED_SIZE, 8, EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE, 8, EGL_RENDERABLE_TYPE, clientAPI,
+     EGL_NONE };
++#endif
+ 
+ #if !defined(__ANDROID__) && !defined(ANDROID)
+   const EGLint surface_attribs[] = { EGL_WIDTH, width, EGL_HEIGHT, height, EGL_NONE };
++#if VTK_MODULE_vtkglew_GLES3 && !defined(__ANDROID__) && !defined(ANDROID)
++  // Some HarmonyOS EGL implementations accept only a 1x1 bootstrap pbuffer;
++  // VTK renders into its own offscreen FBO at the requested window size.
++  const EGLint surface_attribs_minimal[] = { EGL_WIDTH, 1, EGL_HEIGHT, 1, EGL_NONE };
++#endif
+ #endif
+ 
+   EGLint numConfigs = 0;
+-  EGLConfig config;
++  EGLConfig config = nullptr;
+ 
+   if (impl->Display == EGL_NO_DISPLAY)
+   {
+     if (!this->SetDeviceAsDisplay(this->DeviceIndex))
+     {
+       return;
+     }
+   }
+ 
+   /* Here, the application chooses the configuration it desires. In this
+    * sample, we have a very simplified selection process, where we pick
+    * the first EGLConfig that matches our criteria */
++#if VTK_MODULE_vtkglew_GLES3 && !defined(__ANDROID__) && !defined(ANDROID)
++  for (const EGLint* candidate : configCandidates)
++  {
++    numConfigs = 0;
++    config = nullptr;
++    if (eglChooseConfig(impl->Display, candidate, &config, 1, &numConfigs) == EGL_TRUE &&
++      numConfigs > 0)
++    {
++      break;
++    }
++  }
++#else
+   eglChooseConfig(impl->Display, configs, &config, 1, &numConfigs);
+-  if (numConfigs == 0)
++#endif
++  if (numConfigs == 0 || config == nullptr)
+   {
+     vtkErrorMacro("No matching EGL configuration found.");
+     return;
+   }
+ 
+ #if defined(__ANDROID__) || defined(ANDROID)
+   EGLint format = 0;
+   /* EGL_NATIVE_VISUAL_ID is an attribute of the EGLConfig that is
+    * guaranteed to be accepted by ANativeWindow_setBuffersGeometry().
+    * As soon as we picked a EGLConfig, we can safely reconfigure the
+    * ANativeWindow buffers to match, using EGL_NATIVE_VISUAL_ID. */
+   eglGetConfigAttrib(impl->Display, config, EGL_NATIVE_VISUAL_ID, &format);
+ 
+   ANativeWindow_setBuffersGeometry(impl->Window, 0, 0, format);
+ #endif
+ 
+   if (impl->Context == EGL_NO_CONTEXT)
+   {
+     impl->Context = eglCreateContext(impl->Display, config, EGL_NO_CONTEXT, contextAttribs);
++    if (impl->Context == EGL_NO_CONTEXT)
++    {
++      vtkErrorMacro("Unable to create an EGL context: " << eglGetError());
++      return;
++    }
+   }
+ 
+   if (impl->Surface != EGL_NO_SURFACE)
+   {
+     eglDestroySurface(impl->Display, impl->Surface);
+   }
+ 
+ #if defined(__ANDROID__) || defined(ANDROID)
+   impl->Surface = eglCreateWindowSurface(impl->Display, config, impl->Window, nullptr);
+ #else
+   impl->Surface = eglCreatePbufferSurface(impl->Display, config, surface_attribs);
+-#endif
++#if VTK_MODULE_vtkglew_GLES3 && !defined(__ANDROID__) && !defined(ANDROID)
++  if (impl->Surface == EGL_NO_SURFACE)
++  {
++    // Retry with the smallest legal pbuffer before reporting the failure.
++    (void)eglGetError();
++    impl->Surface = eglCreatePbufferSurface(impl->Display, config, surface_attribs_minimal);
++  }
++#endif
++#endif
++  if (impl->Surface == EGL_NO_SURFACE)
++  {
++    vtkErrorMacro("Unable to create an EGL surface: " << eglGetError());
++    return;
++  }
+   this->Mapped = this->ShowWindow;
+   this->OwnWindow = true;
+ 
+ #if defined(__ANDROID__) || defined(ANDROID)
+   vtkAndroidRenderWindowInteractor* interactor =
+     vtkAndroidRenderWindowInteractor::SafeDownCast(this->Interactor);
+   if (interactor)
+   {
+     interactor->SetOwnWindow(this->OwnWindow);
+   }
+ #endif
+ 
+   this->MakeCurrent();
++  if (eglGetCurrentContext() == EGL_NO_CONTEXT)
++  {
++    vtkErrorMacro("Unable to make the EGL context current: " << eglGetError());
++    return;
++  }
+ 
+   EGLint w, h;
+   eglQuerySurface(impl->Display, impl->Surface, EGL_WIDTH, &w);
+   eglQuerySurface(impl->Display, impl->Surface, EGL_HEIGHT, &h);
++#if VTK_MODULE_vtkglew_GLES3 && !defined(__ANDROID__) && !defined(ANDROID)
++  // The 1x1 pbuffer is only the EGL bootstrap surface. Keep the requested
++  // render-window size so VTK allocates its offscreen framebuffer at width x height.
++  if (!this->UseOffScreenBuffers)
++  {
++    this->Size[0] = w;
++    this->Size[1] = h;
++  }
++#else
+   this->Size[0] = w;
+   this->Size[1] = h;
++#endif
+ }
+ 
+ void vtkEGLRenderWindow::DestroyWindow()
+ {
+   vtkInternals* impl = this->Internals;
+   this->ReleaseGraphicsResources(this);
+   if (this->OwnWindow && impl->Display != EGL_NO_DISPLAY)
+   {
+     // make sure all other code knows we're not mapped anymore
+     this->Mapped = 0;

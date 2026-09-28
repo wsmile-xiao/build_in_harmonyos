@@ -1,0 +1,135 @@
+--- a/Rendering/VolumeOpenGL2/vtkOpenGLGPUVolumeRayCastMapper.cxx
++++ b/Rendering/VolumeOpenGL2/vtkOpenGLGPUVolumeRayCastMapper.cxx
+@@ -783,22 +783,28 @@
+   vtkOpenGLRenderWindow* orenWin = vtkOpenGLRenderWindow::SafeDownCast(ren->GetRenderWindow());
+   this->DepthTextureObject->SetContext(orenWin);
+   this->DepthCopyColorTextureObject->SetContext(orenWin);
+ 
+   //  this->DepthTextureObject->Activate();
+   if (!this->DepthTextureObject->GetHandle())
+   {
+     // First set the parameters
+     this->DepthTextureObject->SetWrapS(vtkTextureObject::Repeat);
+     this->DepthTextureObject->SetWrapT(vtkTextureObject::Repeat);
++#ifdef GL_ES_VERSION_3_0
++    // ES depth textures without comparison sampling require nearest filters.
++    this->DepthTextureObject->SetMagnificationFilter(vtkTextureObject::Nearest);
++    this->DepthTextureObject->SetMinificationFilter(vtkTextureObject::Nearest);
++#else
+     this->DepthTextureObject->SetMagnificationFilter(vtkTextureObject::Linear);
+     this->DepthTextureObject->SetMinificationFilter(vtkTextureObject::Linear);
++#endif
+     if (orenWin->GetStencilCapable())
+     {
+       this->DepthTextureObject->AllocateDepthStencil(this->WindowSize[0], this->WindowSize[1]);
+     }
+     else
+     {
+       this->DepthTextureObject->AllocateDepth(this->WindowSize[0], this->WindowSize[1], 4);
+     }
+   }
+ 
+@@ -808,20 +814,27 @@
+     this->DepthCopyColorTextureObject->SetWrapS(vtkTextureObject::Repeat);
+     this->DepthCopyColorTextureObject->SetWrapT(vtkTextureObject::Repeat);
+     this->DepthCopyColorTextureObject->SetMagnificationFilter(vtkTextureObject::Linear);
+     this->DepthCopyColorTextureObject->SetMinificationFilter(vtkTextureObject::Linear);
+     this->DepthCopyColorTextureObject->Allocate2D(
+       this->WindowSize[0], this->WindowSize[1], 4, VTK_UNSIGNED_CHAR);
+   }
+   this->DepthTextureObject->Resize(this->WindowSize[0], this->WindowSize[1]);
+   this->DepthCopyColorTextureObject->Resize(this->WindowSize[0], this->WindowSize[1]);
+ 
++#ifdef GL_ES_VERSION_3_0
++  // Resolve at the original viewport coordinates before cropping. ES does not
++  // allow an MSAA blit to translate the source rectangle to the origin.
++  this->DepthTextureObject->CopyFromFrameBuffer(this->WindowLowerLeft[0],
++    this->WindowLowerLeft[1], 0, 0, this->WindowSize[0], this->WindowSize[1]);
++  this->DepthTextureObject->Deactivate();
++#else
+   // copy depth with a blit
+   if (!this->DepthCopyFBO)
+   {
+     this->DepthCopyFBO = vtkOpenGLFramebufferObject::New();
+     this->DepthCopyFBO->SetContext(orenWin);
+     orenWin->GetState()->PushDrawFramebufferBinding();
+     this->DepthCopyFBO->Bind(GL_DRAW_FRAMEBUFFER);
+     this->DepthCopyFBO->AddDepthAttachment(this->DepthTextureObject);
+     this->DepthCopyFBO->AddColorAttachment(0, this->DepthCopyColorTextureObject);
+   }
+@@ -829,20 +842,21 @@
+   {
+     orenWin->GetState()->PushDrawFramebufferBinding();
+   }
+ 
+   this->DepthCopyFBO->Bind(GL_DRAW_FRAMEBUFFER);
+   orenWin->GetState()->vtkglBlitFramebuffer(this->WindowLowerLeft[0], this->WindowLowerLeft[1],
+     this->WindowLowerLeft[0] + this->WindowSize[0], this->WindowLowerLeft[1] + this->WindowSize[1],
+     0, 0, this->WindowSize[0], this->WindowSize[1], GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+ 
+   orenWin->GetState()->PopDrawFramebufferBinding();
++#endif
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLGPUVolumeRayCastMapper::vtkInternal::SetLightingShaderParameters(
+   vtkRenderer* ren, vtkShaderProgram* prog, vtkVolume* vol, int numberOfSamplers)
+ {
+   // Set basic lighting parameters (per component)
+   if (!ren || !prog || !vol)
+   {
+     return;
+@@ -2255,23 +2269,26 @@
+   }
+ 
+   if (this->Impl->DepthTextureObject && !this->Impl->SharedDepthTextureObject)
+   {
+     this->Impl->DepthTextureObject->ReleaseGraphicsResources(window);
+     this->Impl->DepthTextureObject->Delete();
+     this->Impl->DepthTextureObject = nullptr;
+     this->Impl->DepthCopyColorTextureObject->ReleaseGraphicsResources(window);
+     this->Impl->DepthCopyColorTextureObject->Delete();
+     this->Impl->DepthCopyColorTextureObject = nullptr;
+-    this->Impl->DepthCopyFBO->ReleaseGraphicsResources(window);
+-    this->Impl->DepthCopyFBO->Delete();
+-    this->Impl->DepthCopyFBO = nullptr;
++    if (this->Impl->DepthCopyFBO)
++    {
++      this->Impl->DepthCopyFBO->ReleaseGraphicsResources(window);
++      this->Impl->DepthCopyFBO->Delete();
++      this->Impl->DepthCopyFBO = nullptr;
++    }
+   }
+ 
+   this->Impl->ReleaseRenderToTextureGraphicsResources(window);
+   this->Impl->ReleaseDepthPassGraphicsResources(window);
+   this->Impl->ReleaseImageSampleGraphicsResources(window);
+ 
+   if (this->Impl->CurrentMask)
+   {
+     this->Impl->CurrentMask->ReleaseGraphicsResources(window);
+     this->Impl->CurrentMask = nullptr;
+@@ -2356,21 +2373,22 @@
+ 
+   vtkShaderProgram::Substitute(
+     fragmentShader, "//VTK::CallWorker::Impl", vtkvolume::WorkerImplementation(ren, this, vol));
+ 
+   vtkShaderProgram::Substitute(fragmentShader, "//VTK::Base::Dec",
+     vtkvolume::BaseDeclarationFragment(ren, this, this->AssembledInputs,
+       this->Impl->TotalNumberOfLights, this->Impl->NumberPositionalLights,
+       this->Impl->DefaultLighting, numComps, independentComponents));
+ 
+   vtkShaderProgram::Substitute(fragmentShader, "//VTK::Base::Init",
+-    vtkvolume::BaseInit(ren, this, this->AssembledInputs, this->Impl->DefaultLighting));
++    vtkvolume::BaseInit(ren, this, this->AssembledInputs, this->Impl->DefaultLighting,
++      this->Impl->TotalNumberOfLights));
+ 
+   vtkShaderProgram::Substitute(
+     fragmentShader, "//VTK::Base::Impl", vtkvolume::BaseImplementation(ren, this, vol));
+ 
+   vtkShaderProgram::Substitute(
+     fragmentShader, "//VTK::Base::Exit", vtkvolume::BaseExit(ren, this, vol));
+ }
+ 
+ //------------------------------------------------------------------------------
+ void vtkOpenGLGPUVolumeRayCastMapper::ReplaceShaderTermination(
