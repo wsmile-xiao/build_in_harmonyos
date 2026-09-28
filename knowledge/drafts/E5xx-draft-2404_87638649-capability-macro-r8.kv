@@ -1,0 +1,70 @@
+draft: E5xx-draft-2404_87638649-capability-macro-r8
+status: pending-editor-review
+title: "R8 合规的平台 API 缺失适配范式：AC_CHECK_FUNCS 能力宏探测替代 #ifdef __OHOS__ 平台宏（vlc pthread_cancel/posix_close 案例）"
+category: platform, build-system, autotools, conan
+match_keywords: >
+  R8, 平台宏, __OHOS__, ifdef __OHOS__, defined(__OHOS__), 平台条件编译,
+  能力宏, AC_CHECK_FUNCS, HAVE_PTHREAD_CANCEL, HAVE_POSIX_CLOSE,
+  pthread_cancel 缺失, pthread_setcancelstate, pthread_testcancel,
+  posix_close, POSIX_CLOSE_RESTART, 头实现不同步, musl 裁剪,
+  autoconf 探测, 链接探测, 符号存在性, capability macro, configure 探测,
+  fallback 分支, R8 违规, 平台分叉
+error_signature: >
+  R8.*平台.*宏.*禁止|#ifdef __OHOS__|defined\(__OHOS__\).*平台.*分叉|
+  源码和 patches.*不得引入平台条件编译宏|
+  undefined symbol: pthread_cancel|undefined symbol: pthread_setcancelstate|
+  undefined symbol: pthread_testcancel|undefined symbol: posix_close|
+  call to undeclared function 'pthread_cancel'|call to undeclared function 'posix_close'
+root_cause: >
+  两层问题的复合：
+  ① 平台层：OHOS musl libc 裁剪了 POSIX 线程取消（pthread_cancel/
+  pthread_setcancelstate/pthread_testcancel）与可重启关闭（posix_close）
+  的【实现】，但头文件保留了 POSIX_CLOSE_RESTART/PTHREAD_CANCEL_*
+  【宏定义】——头/实现不同步。直接按宏存在性分支（#ifdef
+  POSIX_CLOSE_RESTART）会编译过但链接失败。
+  ② 审查层：仓规范 R8 禁止在源码/patches/ 引入 #ifdef __OHOS__ 平台
+  条件宏（补丁等价源码），要求通过 POSIX 接口适配——历史条目 E102
+  推荐的 `!defined(__OHOS__)` 写法已被 R8 淘汰（本条是对 E102 的
+  修正性增量/范式升级）。
+solution: |
+  autoconf 能力宏探测范式（三步）：
+  1. configure.ac 对应 SYS 分支追加链接探测：
+     ```
+     AC_CHECK_FUNCS([posix_close pthread_cancel \
+       pthread_setcancelstate pthread_testcancel])
+     ```
+     链接探测按【符号存在性】决定（头文件有无声明不影响判定——
+     conftest 隐式声明仅告警，链接成败才是判据）。OHOS musl 无符号
+     → HAVE_PTHREAD_CANCEL 等宏不定义。
+  2. 源码守卫从平台宏改为能力宏（逻辑等价改写）：
+     ```
+     /* 原（R8 违规）：#ifdef __OHOS__ ... no-op ... #else pthread_xxx #endif */
+     #ifndef HAVE_PTHREAD_CANCEL
+         (void) th;              /* no-op fallback */
+     #else
+         pthread_cancel(th.handle);
+     #endif
+     ```
+     多函数依赖注意逐函数探测（pthread_cancel 与
+     pthread_setcancelstate 可能在不同 libc 中分别存在——OHOS 四个
+     全缺，musl 主线四个全有，但逐函数写守卫最稳）。
+  3. patch-ng 严格模式验证（conan 内置 apply fuzz=False）：
+     多补丁共改 configure.ac 时行号偏移必须精算（本例 0002 在
+     configure.ac 706 行附近插入 5 行 → 0004 的 configure.ac hunk
+     起始行 +5；GNU patch 容 fuzz 但 conan patch-ng 不容，hunk 头
+     行号必须与【前序补丁应用后】的实际行号一致）。
+fallback: |
+  若目标软件非 autotools（无 AC_CHECK_FUNCS 可用）：
+  - CMake：用 check_function_exists(pthread_cancel HAVE_PTHREAD_CANCEL)
+    + configure_file 注入 config.h
+  - meson：cc.has_function('pthread_cancel') + 配置头
+  - 手写 configure：模仿 AC_CHECK_FUNCS 的 conftest（编译+链接双探测）
+  若函数存在但语义不同（非缺失）：改用运行时探测（dlsym +
+  weak symbol），能力宏只覆盖"缺失"场景。
+verify_builds: "#61558（vlc/3.0.23 R8 修复轮，CI-037），#60773（首版，CI-020）"
+reference_impl: >
+  vlc 3.0.23 archives/v/vlc/3.0.23/patches/vlc-0002-ohos-capability-macros.patch
+  （configure.ac AC_CHECK_FUNCS + filesystem.c/thread.c 能力宏守卫）；
+  PR !12623 commit 697fed0f
+id: E5xx
+doc_file: doc/E5xx.md
