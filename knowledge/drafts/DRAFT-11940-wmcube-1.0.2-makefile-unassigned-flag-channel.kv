@@ -1,0 +1,98 @@
+#====================================================================
+# DRAFT-11940-wmcube-1.0.2-makefile-unassigned-flag-channel
+#   裸 Makefile 的依赖注入通道判别：*使用但从未赋值*的 CPPFLAGS/LDFLAGS
+#   是 conanbuild 环境的自由通道；被赋值的变量只能靠命令行接管，
+#   而命令行变量是整串替换而非追加。
+# 来源: 平台任务 11940 wmcube/1.0.2 适配（尚无 PR，故 source_pr 留空）
+# 状态: 路径 B 候选草稿，等待主编审核（未 promote）
+#====================================================================
+
+id:                     DRAFT-11940-wmcube-1.0.2-makefile-unassigned-flag-channel
+trigger_tool:           make|clang|ld.lld|conan
+phase:                  build|linking
+error_signature:        cannot find -l[A-Za-z0-9_]+|undefined reference to `X[A-Za-z]+'|`[A-Za-z_]+\.h` file not found|ld\.lld: error: unable to find library
+
+severity:               2
+category:               build-system, makefile, flag-injection, x11, conan-recipe
+match_keywords:         CPPFLAGS, LDFLAGS, CFLAGS, LIBDIR, INCDIR, make command line
+                        override, tentative assignment, conanbuild, AutotoolsDeps,
+                        -l before -L, cannot find -l, raw Makefile, no configure
+title:                  裸 Makefile 依赖注入通道判别：未赋值的 CPPFLAGS/LDFLAGS 走环境，已赋值的只能命令行整串接管
+prescan_pattern:        ^[A-Za-z_]+[[:space:]]*=[[:space:]]*(-[IL]|/usr/X11R|-l[AX])
+prescan_globs:          Makefile, Makefile.*, */Makefile
+
+# *** Layer 2: Diagnosis ***
+root_cause:             手写 Makefile 普遍把搜索路径写成变量再在规则里展开。判别这些变量
+                        能否被 Conan 的 conanbuild 环境注入，唯一依据是"该变量在 makefile 里
+                        有没有被赋值"：
+                          * 使用但从未赋值（典型 `CPPFLAGS`、`LDFLAGS`）=> make 直接取环境值，
+                            `-I/-L` 全部自动到位；且 `$(LDFLAGS)` 通常排在链接命令最前，
+                            天然把 `-L` 放在上游硬编码的 `-l<lib>` 之前。
+                          * 已被赋值（典型 `CC`、`CFLAGS`、`LIBDIR`、`INCDIR`、`LIBS`）=> 环境值被
+                            makefile 赋值覆盖，只能上 make 命令行；而 make 命令行变量是**接管**
+                            （整串替换）不是追加，接管 `CFLAGS` 会静默丢掉上游的 `-Wall -O2`。
+                        因此正确姿势是最小接管：只接管必须改的那几个（编译器、烧死的绝对路径），
+                        把它们置空或换新值，其余依赖路径全部交给未赋值的环境通道。
+
+affected_scope:         所有"无 configure/automake、直接 make"的上游（本仓 Makefile 类约 21%），
+                        特别是自带硬编码 `/usr/X11R6/lib`、`/usr/X11R6/include`、`-lXext` 之类
+                        检索路径与库序的 X11/图形小工具。
+                        反例边界：automake 的 per-target `*_CPPFLAGS =`（空赋值）与 VPATH 构建
+                        属另一机制（见 DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-
+                        cppflags-empty-override），那里变量**已被赋值**，环境进不去，必须逐个回填。
+
+# *** Layer 3: Solution Space * ***
+rec_priority:           1
+rec_approach:           classify-makefile-vars-then-minimal-cmdline-takeover
+rec_description:        先跑判据命令把变量分两类，再只对"必须改"的已赋值变量上命令行，
+                        并保留未赋值变量给 conanbuild 环境。
+rec_command:            grep -nE '^[[:space:]]*(CPPFLAGS|LDFLAGS|CFLAGS|CXXFLAGS|LIBS|LIBDIR|INCDIR|CC)[[:space:]]*[:+?]?=' Makefile
+                        # 无 CPPFLAGS/LDFLAGS 赋值行 => 走环境通道：
+                        make -j1 CC="$clang" LIBDIR= INCDIR=        # env="conanbuild"
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_description:   若判据显示 CPPFLAGS/LDFLAGS 也被赋值，则退回首条命令行接管，并把上游原有
+                        flags 一并抄全（避免接管丢 `-Wall -O2` 之类的既有定义）。
+fallback_command:       make -j1 CC="$clang" CFLAGS="-Wall -O2 $extra" LDFLAGS="$libdirs"
+fallback_auto_fix:      false
+fallback_impl:          make-cmdline-override
+
+forbid_1_pattern:       CFLAGS=.*-O[0-9s][^|]*$
+forbid_1_reason:        在已赋值 CFLAGS 上做命令行接管时只写自己那一份优化档，等于替上游决定编译选项。
+forbid_1_consequence:   上游 -Wall/-O2/定义宏被静默清除，产物行为与社区构建不一致且无人报错。
+
+forbid_2_pattern:       (-[IL])/usr/(X11R6|local)
+forbid_2_reason:        把 worker 的系统前缀/系统 X 目录写进配方，等于依赖构建机现装环境。
+forbid_2_consequence:   CI 干净环境与依赖包目录不一致，链接结果不可复现且污染系统目录（R49/E524）。
+
+principles:             P004, P006, P013
+
+# *** Relations ***
+# 关系说明：本条与 DRAFT-10251（automake per-target 空赋值）是同一根轴的**两端**，不是同一条：
+# 那条的触发形态 `^[A-Za-z_]*_(la_)?CPPFLAGS\s*=` 在本条适用对象里根本不出现。
+similar_to:             E213（draft-review 相似面 TOP1、score=0.58，其分值构成是 sig=1.0、kw=0.0、cat=0.0 ⇒ 相似全靠通用链接错误字符串的形状重叠，本条 :13 的 error_signature 含 cannot find -l 与 undefined reference to 两支即是重叠面。对照 knowledge/graph/E213.kv:9 签名专指 l64a、E213.kv:13 的 category 是 api、E213.kv:14 的 match_keywords 是 l64a 与 undefined reference 与 musl 与 libc、E213.kv:24 的 rec_approach 是 implement-locally；本条 :46 的 rec_approach 是 classify-makefile-vars-then-minimal-cmdline-takeover、:25-35 的 root_cause 讲的是哪个 make 变量构成可注入的自由通道 ⇒ root_cause 与 rec 两条均不重叠，故预审的 merge-into E213 建议不成立、不构成重复；上述四行原文与本条 :13、:46 均可由读者逐字复核）,knowledge/drafts/DRAFT-10251-libnfc-tools-1.8.0-automake-per-target-cppflags-empty-override.kv:17 与 :30 与 :34-40（真正的最近邻；draft-review 只扫 knowledge/graph/index.tsv、不扫 knowledge/drafts ⇒ 它看不见这条。那条的前提是该变量已被空赋值 ⇒ 环境进不去、必须命令行逐个回填；本条是从未赋值 ⇒ 环境通道自由、反而要刻意不接管。二者同处一根轴的两端、互斥且互补，属不同层次，其 error_signature 与 prescan_pattern 在本条适用对象里一条都不匹配）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# *** 本条来源实证 ***
+verification_cmd:       cd <wmcube build 目录> && make -j1 CC=/data/service/hnp/bin/clang LIBDIR= INCDIR= V=1 2>&1 | grep -E ' -I| -L'
+                        # 期望：-I/-L 来自环境，链接行 -L 段出现在 -lXext 之前，一次链接通过
+doc_file:               knowledge/drafts/DRAFT-11940-wmcube-1.0.2-makefile-unassigned-flag-channel.md
+last_updated:           2026-09-26
+source_event:           平台任务 11940 wmcube/1.0.2 HarmonyOS PC 适配：上游 Makefile 烧
+                        -L/usr/X11R6/lib 与 -I/usr/X11R6/share/include，且链接行把 -lXext 写在
+                        任何 -L 之前；实测 CPPFLAGS/LDFLAGS 在该 makefile 中从未赋值，
+                        于是只接管 CC/LIBDIR/INCDIR 三项，一次 conan create 通过，
+                        产物 DT_NEEDED = libXext.so.6 / libXpm.so.4 / libX11.so.6。
+authors:                主理-64
+source_pr:
+source_commit:
+
+# *** Quality Metrics ***
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.7
+metrics_last_used:      2026-09-26
