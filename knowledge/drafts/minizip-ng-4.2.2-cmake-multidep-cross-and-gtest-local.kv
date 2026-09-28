@@ -1,0 +1,74 @@
+# ═══ Draft knowledge entry — modern cmake multi-dep cross wiring (per-dep <Name>_DIR
+# preseed), SDK llvm-ranlib gap on static-lib targets, and gtest suite local execution
+# from source root (data-file CWD dependency)
+# Software: minizip-ng 4.2.2
+# Gate: conan-verify G2 (conan create, ohos-aarch64) + upstream gtest 42/42 + W3 local green
+# Status: DRAFT
+
+id: minizip-ng-4.2.2-cmake-multidep-cross-and-gtest-local
+severity: 2
+category: build-system|cmake|ohos|testing
+trigger_tool: cmake|conan|ctest|gtest
+phase: build
+
+keywords: find_package, CMAKE_PREFIX_PATH, FIND_ROOT_PATH, _DIR cache var, llvm-ranlib, llvm-ar, static library, gtest, FetchContent, CWD, data file, MZ_FETCH_LIBS, iconv, libbsd
+error_signature: Error running link command: no such file or directory|undefined symbol: mz_os_delete_file|Which is: -111|registry probe failed|Unable to find library
+match_keywords: find_package cross, _DIR preseed, llvm-ranlib missing, static lib ENOENT, gtest FetchContent offline, gtest data file CWD, monotonic, mz_os_unlink, MZ_ICONV musl
+
+root_cause: |
+  (1) Modern cmake packages that wire N dependencies through plain find_package(ZLIB /
+  LibLZMA / OpenSSL / zstd / BZip2) hit the OHOS cross chain's FIND_ROOT_PATH=ONLY:
+  each conan dep needs its own <Name>_DIR cache var preseeded with the real
+  <pkg>/lib/cmake/<name> path — a single CMAKE_PREFIX_PATH alone is not enough when
+  the toolchain sets the find modes to ONLY.
+  (2) Building STATIC library targets with the OHOS SDK toolchain fails with the
+  generic "Error running link command: no such file or directory": ohos.toolchain.cmake
+  points CMAKE_RANLIB at $SDK/llvm/bin/llvm-ranlib which does NOT exist (only llvm-ar
+  ships). The .so route (BUILD_SHARED_LIBS=ON) sidesteps ar/ranlib entirely; for
+  recipes that must produce .a, preseed -DCMAKE_RANLIB=$(which llvm-ranlib) from
+  /data/service/hnp/bin (the conan-verified recipe's _llvm_ranlib() helper).
+  (3) Upstream gtest suites fetched via FetchContent cannot build on the offline CI;
+  building them locally against the registry gtest/1.17.0 requires running the test
+  binary from the SOURCE ROOT — stream/crypt tests open data files ("LICENSE",
+  test.p12, uniform.bin) relative to CWD, and running from build/test/ returns
+  MZ_OPEN_ERROR (-111) for every file-backed case.
+  (4) API drift inside a lib family: minizip-ng 4.x renamed mz_os_delete_file to
+  mz_os_unlink — verify exact exported symbols with readelf before writing the test.
+
+rec_approach: per-dep-dir-preseed + so-route-or-ranlib-override + gtest-run-from-srcroot + readelf-symbol-verify
+rec_description: |
+  (1) In the recipe build(), for every requires() dependency resolve its package
+  folder, locate lib/cmake/<name>, and append '-D<Name>_DIR=<path>' (try name,
+  lower, upper variants; fall back to scanning lib/cmake entries). Combine with the
+  ohos-find-deps.cmake preload (CMAKE_FIND_ROOT_PATH/PREFIX_PATH + MODE_* BOTH) via
+  -DCMAKE_PROJECT_TOP_LEVEL_INCLUDES.
+  (2) Prefer BUILD_SHARED_LIBS=ON for the package itself; if the upstream test build
+  drags in a static libminizip.a, pass -DCMAKE_RANLIB=/data/service/hnp/bin/llvm-ranlib
+  AND clear the cmake cache (a stale CMakeCache keeps the old broken ranlib path in
+  link.txt even after the -D changes).
+  (3) For upstream gtest suites on CI-offline packages: build the test executable
+  locally against registry gtest (cmake -DGTEST_ROOT/-DGTEST_LIBRARY/-DGTest_DIR +
+  -DMZ_FETCH_LIBS=OFF style switches), then execute it with CWD = source root so the
+  data files resolve; LD_LIBRARY_PATH needs the SDK libc++ dir and the openssl conan
+  package lib dir.
+  (4) Before writing test_package sources, readelf --dyn-syms the built .so and match
+  every API you call against real exports.
+  (5) MZ_ICONV=OFF on musl (no iconv); MZ_LIBBSD=OFF to stop the cross find_package
+  from guessing bogus relative paths.
+
+rec_commands:
+  - "conan create archives/m/minizip-ng/4.2.2 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing"
+  - "readelf -W --dyn-syms <pkg>/lib/libminizip.so | grep mz_os_unlink  # verify before test"
+
+verification: |
+  conan create on ohos-aarch64 (clang 15) green: libminizip.so 4.9MB + include/minizip/
+  packaged and signed; test_package 9/9 (writer add_buffer deflate -> reader locate/
+  open/read roundtrip). Upstream gtest suite built from registry gtest/1.17.0 and run
+  from source root: 42/42 PASSED, 0 FAILED (exit 0), including stream/encrypt/compat/
+  path suites.
+
+related:
+  - archives/l/libzip/1.11.4/conanfile.py (ohos-find-deps + ranlib helper precedent)
+  - archives/l/libzippp/7.1-1.10.1/conanfile.py (per-dep cache preseed precedent)
+  - knowledge/graph/ (llvm-ranlib gap family, E-series)
+last_updated: 2026-09-20
