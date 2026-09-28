@@ -1,0 +1,99 @@
+#====================================================================
+# E543 草稿 — 上游 tarball 自带 ltmain.sh 与 aclocal.m4 声明的 libtool 版本错配
+# 触发事件: libydpdict 1.0.4 适配（conan create G2 失败 → G2 PASS）
+# 状态: draft（不索引、不校验；由主编审核后 promote 为 knowledge/graph/E543.kv）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E543
+trigger_tool:           configure|make|ld
+phase:                  linking
+error_signature:        libtool: Version mismatch error\.|Definition of this LT_INIT comes from libtool [0-9.]+|libtool\[[0-9]+\]: func_[a-z_]+: (inaccessible or not found|command not found)|func_opt_split: (inaccessible or not found|command not found)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               autotools, build-system, portability, compat
+prescan_pattern:        package_revision=1\.3017
+prescan_globs:          ltmain.sh, aclocal.m4
+match_keywords:         ltmain.sh, LT_INIT, aclocal.m4, func_opt_split, func_dirname,
+                        libtool Version mismatch, package_revision, macro_revision,
+                        libtoolize, 残缺 ltmain, libtool 版本错配, libtool 2.2.6b
+title:                  上游 tarball 自带 ltmain.sh 与 aclocal.m4 声明的 libtool 版本错配：生成的 libtool 缺 func_* 内建函数，链接期报 func_opt_split 不存在 / Version mismatch error
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             发行 tarball 内 ltmain.sh 与 aclocal.m4 不同源：libydpdict 1.0.4 的
+                        ltmain.sh 自称 libtool 2.2.6b（package_revision=1.3017），而 aclocal.m4
+                        声明 LT_INIT 来自 libtool 2.4（macro_revision=1.3293）。configure 生成
+                        libtool 主脚本时以内联的 LT_INIT 定义（2.4）为准，而 libtool 的内建函数
+                        （func_dirname/func_basename/func_stripname/func_opt_split/func_append
+                        等 9 个）只在 ltmain.sh 里——残缺/降级的 ltmain.sh 不提供它们，于是
+                        configure 与 make 阶段的 libtool 调用直接报函数不存在。
+                        本项目实测：configure 自检通过（自检不触发这些函数），make 链接阶段
+                        第一次调用 libtool --mode=link 时失败；tar 解包字节数核对已排除下载损坏。
+affected_scope:         autotools + libtool 项目，且发行 tarball 内 ltmain.sh 被降级/裁剪、
+                        或上游用旧 libtoolize 生成 configure.ac 后 aclocal.m4 又被更高版本
+                        automake/libtool 宏覆盖（Debian 重打包、手工 `cp ltmain.sh` 常见）。
+                        CI worker 无系统 libtoolize 可重建，必然命中；与包自身代码无关。
+verification_cmd:       grep -m1 'package_revision=' $SRC/ltmain.sh && grep -m1 'macro_revision=' $SRC/aclocal.m4
+                        # 两处版本必须同源（libtool 2.4 对应 package_revision=1.3293、macro_revision=1.3293）
+                        # 另: head -3 $SRC/ltmain.sh 里的 VERSION 与 aclocal.m4 的 `# libtool (GNU libtool) X.Y` 应一致
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           replace-ltmain-with-matching-libtool-release
+rec_description:        用与 aclocal.m4 声明版本同号的 GNU libtool 官方发行包里的 ltmain.sh
+                        覆盖源码内残缺件（libydpdict 1.0.4 → libtool 2.4 的 ltmain.sh，
+                        package_revision=1.3293），随后 configure/make/make install 全绿
+rec_command:            conandata.yml: libtool_source.url=https://ftpmirror.gnu.org/libtool/libtool-2.4.tar.gz
+                        conandata.yml: libtool_source.sha256=13df57ab63a94e196c5d6e95d64e53262834fe780d5e82c28f177f9f71ddf62e
+                        conanfile.py source(): 解包后取 libtool-2.4/libltdl/config/ltmain.sh
+                        覆盖 os.path.join(self.source_folder, "ltmain.sh")
+rec_auto_fix:           false
+rec_impl:               manual-file-replace
+
+fallback_priority:      2
+fallback_approach:      regenerate-ltmain-with-conan-libtool-toolchain
+fallback_description:   无法判定上游 ltmain.sh 应属哪个版本时，用 tool_requires 补齐
+                        autotools 工具链后重跑 autoreconf -fi，让 libtoolize 按 aclocal.m4
+                        重新生成 ltmain.sh（制品仓已有 libtool/2.5.4、automake/1.18、
+                        autoconf/2.72、m4/1.4.19 可 tool_requires）
+fallback_command:       tool_requires: libtool/2.5.4, automake/1.18, autoconf/2.72
+                        然后 autoreconf -fi（注意：会重生成 configure，若 configure 已打补丁需 E011 式核对）
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       ACLOCAL=/bin/true|AUTOMAKE=/bin/true|AUTOCONF=/bin/true|AUTOHEADER=/bin/true
+forbid_1_reason:        E041 式"绕过 autotools 重生成"只压掉 maintainer 规则，不能修复已损坏的
+                        ltmain.sh——缺失的 func_* 函数仍然不在生成出来的 libtool 里
+forbid_1_consequence:   make 链接阶段继续报 func_opt_split / func_dirname inaccessible，
+                        白跑一整轮 CI（本模式必须先核对两处 package_revision/macro_revision）
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E551, E041
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E543.md
+last_updated:           2026-09-25
+source_event:           libydpdict/1.0.4 conan create G2 失败（make 链接期 libtool func_* 缺失）
+                        → 替换 GNU libtool 2.4 官方 ltmain.sh 后 G2 PASS（2026-09-25）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                weijiapan <weijiapan@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-25
+
+draft: true
+contributor_id: A443
