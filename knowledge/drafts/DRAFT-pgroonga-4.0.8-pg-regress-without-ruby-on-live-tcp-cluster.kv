@@ -1,0 +1,173 @@
+# ═══ Draft knowledge entry — 上游回归入口依赖 ruby（prepare.rb 生成 pg_regress schedule）在 OHOS 不可用时，用 Python 等价复刻 schedule 生成、把 pg_regress 接到一个已启动的 TCP 集群上（HAVE_NO_UNIX_SOCKETS，不能用 --temp-instance），并复刻上游 CI 的集群参数以保住 oracle 可比性 ═══
+# Timestamp: 2026-09-20
+# Software: pgroonga 4.0.8
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pgroonga-4.0.8-pg-regress-without-ruby-on-live-tcp-cluster
+trigger_tool:           psql|postgres|sh|conan|meson
+phase:                  testing
+error_signature:        find_program\('ruby'\)|ruby.*not found|program 'ruby'
+                         not found|pg_regress.*could not connect|--temp-instance.*
+                         failed|no unix socket|connection to server on socket
+                         .* failed|regression\.diffs|test .* FAILED|unsupported
+                         tokenizer|unsupported token_filter
+severity:               3
+category:               testing, postgresql, conan, runtime, oracle
+match_keywords:         pg_regress, prepare.rb, ruby, schedule, --inputdir,
+                         --temp-instance, --host, --port, --load-extension,
+                         HAVE_NO_UNIX_SOCKETS, listen_addresses, unix socket,
+                         expected/*.out, _1.out alternative oracle, regression.diffs,
+                         PG_REGRESS_DIFF_OPTS, upstream CI postgresql.conf,
+                         random_page_cost, enable_partitionwise_join,
+                         max_prepared_transactions, test=false
+title:                  上游 pg_regress 入口依赖 ruby + 必须连既有 TCP 集群：
+                        用 Python 复刻 schedule，别顺手剪用例
+
+root_cause: >
+  三个独立的问题凑在一起，任何一个处理不当都会得到"看起来绿了但没真跑"或
+  "根本没跑"的结果：
+  (a) **入口依赖 ruby**。上游 `-Dtest=true` 会 `find_program('ruby')`，再用
+  `test/prepare.rb` 生成 pg_regress 的 schedule。OHOS 上没有 ruby，构建期
+  只能 `-Dtest=false`；但这意味着**上游回归根本不会在 build() 里跑**。
+  (b) **不能用 --temp-instance**。仓库打包的 PostgreSQL 定义了
+  `HAVE_NO_UNIX_SOCKETS`，pg_regress 的 --temp-instance 依赖 Unix domain
+  socket 做启动探测，必然失败。只能自己 initdb + pg_ctl start 一个
+  TCP 集群（`listen_addresses` + 显式端口），再让 pg_regress 用
+  `--host/--port` 接上去。
+  (c) **oracle 对环境极其敏感**。expected/*.out 是逐字节比对，计划类用例
+  （`EXPLAIN (COSTS OFF)`）的形状由 `random_page_cost` /
+  `enable_partitionwise_join` / `max_prepared_transactions` 这些参数决定；
+  不照抄上游 CI 的 `postgresql.conf` 追加项，必然一片 diff —— 而 diffs 会
+  被误读成"适配失败"。
+
+affected_scope: >
+  所有上游回归框架**本身需要额外运行时**（ruby/python/perl/特定 driver）或
+  **需要独占启动流程**的包，在 OHOS 上跑测试时都会遇到同一组问题：
+  PostgreSQL 扩展（pg_regress）、任何自带 harness 的大项目。
+  特别是 "上游 CI 用自己的 package manager 装好测试依赖、在宿主机上跑"
+  这一类：换到 CI worker 里那些依赖与启动方式全部要重新安排，而
+  **oracle 仍要求逐字节可比**，所以环境对齐不是可选项。
+
+verification_cmd: >
+  # (a) 入口依赖什么
+  grep -n "find_program\|get_option('test')" meson.build
+  # (b) 目标 PG 有没有 Unix socket
+  strings "$PG_PKG/bin/postgres" | grep HAVE_NO_UNIX_SOCKETS
+  # (c) oracle 总数与备用 oracle 数
+  find expected -name '*.out' | wc -l                    # 主 + 备用
+  find expected -name '*_1.out' -o -name '*_2.out' | wc -l
+  # (d) 上游 CI 往 postgresql.conf 里追加了什么
+  grep -n -A8 'postgresql.conf\|enable_partitionwise_join\|random_page_cost' \
+       .github/workflows/*.yml
+rec_priority:           1
+rec_approach:           reimplement-schedule-generation-in-python-and-attach-pg-regress-to-a-live-tcp-cluster
+rec_description: >
+  (1) **复刻 schedule 生成，而不是复刻测试**。prepare.rb 的全部行为只有三件
+  事：递归遍历 `sql/`、为每个目录预建 `results/<dir>`、每个 `*.sql` 写一行
+  `test: <相对路径去扩展名>`。用 Python 十几行等价实现即可。关键纪律是
+  **不在这里做任何"顺手过滤"** —— 不筛"oracle 是否存在"、不按 group 挑。
+  静默丢掉用例会得到"跑得全绿但用例集缩水"的假绿，比直接失败更糟。要排除
+  就写进一份**逐条注明原因**的清单（本包是 `regress-skip.txt`）。
+  (2) **自己起集群，让 pg_regress 接上去**：`initdb -D <pgdata>
+  --auth=trust --username=<role>` → `pg_ctl -D <pgdata> -l <log> -w start`，
+  集群参数写进 `postgresql.auto.conf`（`listen_addresses='localhost'`、
+  显式 `port`、以及上一份草稿里的扩展发现路径）。然后
+  `pg_regress --bindir <pg>/bin --host localhost --port <p> --user <role>
+  --dbname <db> --load-extension <ext> --inputdir <copy> --outputdir <out>
+  --dlpath <pkg>/lib --schedule <file>`。参数要**逐条对齐上游**（本包对齐
+  meson.build 的 `--launcher test/short-pgappname` 等），唯一多出来的就是
+  `--host/--port/--user/--dbname`，而它们是被 HAVE_NO_UNIX_SOCKETS 逼出来的。
+  (3) **`--inputdir` 必须可写**：pg_regress 会往 `<inputdir>/results/` 写实际
+  输出。Conan cache 只读，所以先把 vendored 的 `sql/`+`expected/` 复制到
+  build 目录再指过去。
+  (4) **环境对齐**：照抄上游 CI 的 `postgresql.conf` 追加项；**不要**设置上游
+  用来开关联网用例的环境变量（例如语言模型测试的 `PGRN_*_TEST`），让那些
+  用例走它们自带的 `\quit` 提前退出分支，由 `_1.out` 备用 oracle 兜底。
+  最后解析 pg_regress 的 `test <name> ... ok|FAILED` 行统计，失败时把
+  `regression.diffs` 尾部打到控制台（CI 只保留日志尾部），并让 test() raise。
+rec_command: >
+  # 1) schedule（复刻 prepare.rb）
+  for name in sorted(sql/**.sql 相对路径去 .sql):
+      os.makedirs(os.path.join(outdir, "results", os.path.dirname(name)), exist_ok=True)
+      lines.append("test: %s" % name)          # 只减 regress-skip.txt 里的
+  # 2) 起集群
+  initdb -D pgdata --auth=trust --no-instructions --user=hmbstest
+  pg_ctl -D pgdata -l postgresql.log -w start
+  # 3) 接上去跑
+  pg_regress --bindir <pg>/bin --host localhost --port <port> --user hmbstest \
+             --dbname regression --load-extension <ext> \
+             --inputdir <build>/upstream --outputdir <build>/regress \
+             --dlpath <pkg>/lib --launcher <upstream>/test/short-pgappname \
+             --schedule <build>/regress/schedule.txt
+  # 4) 解析
+  ^\s*test\s+(\S+)\s+\.\.\.\s+(ok|FAILED)\s*$
+rec_auto_fix:           true
+rec_impl:               recipe-side-test-package
+
+fallback_priority:      2
+fallback_approach:      run-the-suite-at-build-time-with-a-hand-written-schedule
+fallback_description: >
+  若把上游套件随包发布不合适（体积：本包的 sql/+expected/ 约 11MB），
+  可以在 `build()` 里就地跑：构建期复制一份源码树到可写目录、生成 schedule、
+  起集群、跑 pg_regress。优点是产物不带 11MB 测试数据；缺点是测试**不在
+  test_package 里**，而 CI 的 L0 门禁要求 test_package 目录下存在真测试源且
+  `def test` + `self.run` 同时出现 —— 于是仍然需要 test_package 保留一部分
+  可自证的行为断言（本包的做法：产物布局断言 + `assert_*.sql` 14 条真集群
+  断言）。等于两处都要维护，不如把全量回归放在 test_package 一处。
+fallback_command:       # build(): 复制源码树 -> 生成 schedule -> initdb/pg_ctl -> pg_regress
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-build
+
+forbid_1_pattern:       手工挑选用例|# 只跑|os\.path\.isfile\(.*\.out\)\s*\)?\s*:\s*$
+                         continue|len\(tests\)\s*>\s*\d+.*break|取前 \d+ 个用例
+forbid_1_reason:        在生成 schedule 的阶段做任何"顺手过滤"（筛 oracle 是否
+                          存在、只取某个 group、只取前 N 个）都会让用例集合
+                          静默缩水，而 pg_regress 仍然报全绿。oracle 缺失这类
+                          问题应该由 pg_regress 自己报 FAILED，而不是在生成
+                          schedule 时消失。真要排除必须写进一份逐条注明原因
+                          的清单，让人一眼能看到减了多少、为什么减。
+forbid_1_consequence:   出现"跑得全绿但用例集缩水"的假绿：rule4 里声明的
+                          上游用例数、通过率与实际执行集脱节；一旦 reviewer
+                          去比对上流 sql/ 目录就穿帮，且这一类属于规则 2/9
+                          的欺骗性行为区间，后果远重于"少跑了几条"。
+
+forbid_2_pattern:       --temp-instance|(?i)unix_socket_directories\s*=\s*['\"]?/tmp
+forbid_2_reason:        目标 PG 定义了 HAVE_NO_UNIX_SOCKETS，pg_regress 的
+                          --temp-instance 靠 Unix domain socket 做启动探测，
+                          必然失败；而 unix_socket_directories 在 OHOS 上
+                          也许可写但服务端根本不提供 AF_UNIX 监听。
+                          必须用 --host/--port 接一个自己起的 TCP 集群。
+forbid_2_consequence:   报错出现在 "could not connect" 这种与"测试内容"完全
+                          无关的位置，容易误判成"扩展没装好"或"pg_regress
+                          版本不对"；白跑一轮 CI（本赛事 CI 排队 ~2.5-3 小时）。
+
+forbid_3_pattern:       (?i)PG_REGRESS_DIFF_OPTS|只解析
+                         \d+% tests passed|忽略 test .* FAILED 行只看退出码
+forbid_3_reason:        pg_regress 的退出码与"逐用例结果"是两套信息：退出码非 0
+                          只说明有失败，具体哪几条要看 `test <name> ... FAILED`
+                          行。而失败时真正有用的东西在 `regression.diffs`
+                          里，它默认只写到 `<outputdir>/regression.diffs`，
+                          CI 日志里看不到 —— 不主动打印就永远只能看到
+                          "1 of 1600 tests failed"，无从下手。
+forbid_3_consequence:   失败不可归因：只知道"某条不快"，不知道 diff 是什么，
+                          下一轮只能盲改；而且 pg_regress 的汇总行格式在不同
+                          版本间有差异，只靠它统计容易漏计。
+
+principles:             P005, P014
+similar_to:
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-pgroonga-4.0.8-pg-regress-without-ruby-on-live-tcp-cluster.md
+last_updated:           2026-09-20
+source_event:           archives/p/pgroonga/4.0.8
+
+authors:                2301_76770579
+source_pr:              11628
+source_commit:          3cdf9f29a0ab
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20

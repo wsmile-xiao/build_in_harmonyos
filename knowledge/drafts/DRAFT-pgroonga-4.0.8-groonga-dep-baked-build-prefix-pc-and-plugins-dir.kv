@@ -1,0 +1,162 @@
+# ═══ Draft knowledge entry — 依赖包里烘焙了构建机前缀的两种形态：*.pc 里的 prefix（配置期，靠 Conan 重新生成解决）与 shared library 里编译期固化的资源目录（运行期，靠环境变量覆盖解决）——同源不同治 ═══
+# Timestamp: 2026-09-20
+# Software: pgroonga 4.0.8（依赖 groonga 16.0.8）
+# Gate: G2 (conan create)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pgroonga-4.0.8-groonga-dep-baked-build-prefix-pc-and-plugins-dir
+trigger_tool:           conan|meson|pkg-config|clang|sh
+phase:                  configuration|runtime
+error_signature:        Package '?\w+'? not found|pkg-config.*not
+                         found|/storage/Users/currentUser|/home/.*/\.conan2/p/b/|
+                         unsupported tokenizer|unsupported
+                         token_filter|plugin.*not found|GRN_PLUGINS_DIR
+severity:               3
+category:               conan, packaging, relocation, pkg-config, runtime, plugins
+match_keywords:         groonga, groonga.pc, baked build prefix, PkgConfigDeps,
+                         pkg_config_path, build-machine path, GRN_PLUGINS_DIR,
+                         plugin directory, dlopen, runtime resource path,
+                         messagepack, xxhash, feature auto, dependency('groonga'),
+                         tokenizer plugin, external plugin
+title:                  依赖包烘焙的构建机前缀有两副面孔：*.pc（配置期，重生成）
+                        与共享库里的资源目录（运行期，环境变量覆盖）
+
+root_cause: >
+  同一个源头的两类症状：(a) **配置期**——依赖包的 `*.pc` 里 `prefix=` 是**构建
+  机**的路径，`pkg-config --cflags/--libs groonga` 于是把 `-I/-L` 指到不存在的
+  目录，上游 `dependency('groonga')` 要么直接 `Package not found`，要么拿到
+  不存在路径后在编译期炸。这不是包没有重新定位，而是 `.pc` 这份**文本**没被
+  重新定位（它的内容是在构建机上生成的，写死了当时的 prefix）。
+  (b) **运行期**——共享库把资源目录**编译期固化**进二进制：groonga 把插件目录
+  记成 `<build_prefix>/lib/groonga/plugins`，实测硬编码的是
+  `/storage/Users/currentUser/.conan2/p/b/groonf04c74dc6be8e/p/lib/groonga/plugins`
+  （Conan 的临时 build 目录），设备上根本不存在。库能 dlopen 成功、基本功能
+  正常，只有在**用到插件**时才报 `unsupported tokenizer` /
+  `unsupported token_filter` —— 症状与"配置错误"完全不像，极易误判成功能缺陷。
+
+affected_scope: >
+  (a) 所有通过 pkg-config 暴露自己的 Conan 依赖包：只要上游 tarball 自带
+  `*.pc` 且被配方原样打包（很多 autotools/CMake 项目的 `*.pc.in` 会在
+  `install` 时展开成写死 prefix 的文件），消费方用 `dependency()` /
+  `PKG_CHECK_MODULES` / `pkg-config --cflags` 就会踩。CMakeDeps/PkgConfigDeps
+  生成的 `find_package` 与重新生成的 `.pc` 都是为了解决这一条。
+  (b) 所有"编译期固化资源目录 + 运行期 dlopen"的引擎：Groonga 的 plugins、
+  GLib/GIO 的 modules、GStreamer 的 plugins、PAM 的 modules、各种
+  `*_PLUGIN_PATH` 环境变量。这类包在 Conan 里只要没把目录名做成运行时
+  可覆盖的，就会带上构建机路径。
+
+verification_cmd: >
+  # (a) 看依赖包里的 .pc 前缀
+  grep -H '^prefix=' "$GROONGA_PKG"/lib/pkgconfig/*.pc "$GROONGA_PKG"/*.pc 2>/dev/null
+  #     期望：prefix= 指向 Conan cache 的 p/…/p 路径（构建机），而不是最终包目录
+  # (b) 看共享库里固化的字符串
+  strings "$GROONGA_PKG/lib/libgroonga.so" | grep -i 'groonga/plugins'
+  #     期望：/storage/Users/currentUser/.conan2/p/b/<hash>/p/lib/groonga/plugins
+  # 运行期判据：插件功能报 unsupported 时，先确认 GRN_PLUGINS_DIR 是否指向
+  #             真实存在的 <pkg>/lib/groonga/plugins
+rec_priority:           1
+rec_approach:           regenerate-pc-via-conan-generators-and-override-runtime-resource-dir-via-env
+rec_description: >
+  两条独立的修法，**不要混用**：
+  (a) 配置期用 Conan 的生成器重新生成 `.pc`，不要相信 tarball/依赖包里那份：
+  配方写 `generators = "PkgConfigDeps"`，Conan 会按**当前包目录**生成
+  `<name>.pc`；`MesonToolchain` 自动把 generators 目录写进 `pkg_config_path`
+  （CMakeToolchain / autotools 同理，把 generators 目录放进 `PKG_CONFIG_PATH`），
+  于是上游 `dependency('groonga', version: '>= 14.1.0')` 命中的是新那份，
+  版本约束也仍然是真版本。
+  (b) 运行期用环境变量把资源目录指回包内真实目录：在 test_package（以及
+  消费方的 conanrun）里设 `GRN_PLUGINS_DIR=<pkg>/lib/groonga/plugins`。
+  写法上不要写死包名 —— 沿依赖图递归收集 libdirs，再挑出含
+  `groonga/plugins` 子目录的那一个，依赖增删都自动跟上。
+  另有一条相关但不同的坑：上游把 message_pack / xxhash 这类特性做成
+  `feature` 且默认 `auto`（探测到就启用）。**不要把探测结果留给运气**：
+  在 requirements() 里显式钉依赖，并在 project_options 里把对应开关设成
+  explicit（enabled/disabled），否则同一份配方在不同 worker 上会产出特性
+  不同的产物（编译期探测 vs 运行期链接不一致 → 偶发符号缺失）。
+rec_command: >
+  # conanfile.py
+  generators = "PkgConfigDeps"                      # (a) 重新生成 *.pc
+  def requirements(self):
+      self.requires("groonga/16.0.8")
+      self.requires("msgpack/7.0.1")                # 钉住 auto 探测的结果
+      self.requires("libxxhash/0.8.3")
+  def generate(self):
+      tc = MesonToolchain(self)
+      tc.project_options["message_pack"] = "enabled"  # 与 requirements() 一致
+      tc.project_options["xxhash"] = "enabled"
+      tc.generate()
+
+  # test_package：沿依赖图找插件目录并按 groonga 的约定导出
+  for d in libdirs:
+      cand = os.path.join(d, "groonga", "plugins")
+      if os.path.isdir(cand):
+          env["GRN_PLUGINS_DIR"] = cand
+rec_auto_fix:           true
+rec_impl:               recipe-side-generate
+
+fallback_priority:      2
+fallback_approach:      patch-the-generated-pc-prefix-in-place-or-skip-pkg-config-entirely
+fallback_description: >
+  若上游是硬编码 `pkg-config` 又不接受 `PKG_CONFIG_PATH`（少见，通常发生在
+  上游自己 `setenv` 或用了 `PKG_CONFIG_PATH=` 覆写），可以在 `generate()` 后
+  用 tools.files.replace_in_file 把依赖包里那份 `.pc` 的 `prefix=` **复制到
+  build 目录**再改（绝不改 Conan cache 里的原件），然后把 PKG_CONFIG_PATH
+  指到副本。更退一步是绕过 pkg-config：meson 用
+  `dependency('groonga', method: 'cmake')` 或直接把它当库传
+  `-I/-L/-lgroonga`。两条都偏离上游探测逻辑（P005），只在没别的办法时用。
+  运行期那一半**没有**可接受的 fallback：资源目录只能靠环境变量或上游的
+  构建选项改，硬编码在 .so 里，改不了就得在设备上放一份同样路径的目录
+  （不可接受）。
+fallback_command:       cp "$GROONGA_PKG/lib/pkgconfig/groonga.pc" "$BUILD/groonga.pc" && sed -i "s|^prefix=.*|prefix=$GROONGA_PKG|" "$BUILD/groonga.pc"
+fallback_auto_fix:      false
+fallback_impl:          recipe-side-build
+
+forbid_1_pattern:       cp.*\.pc.*PKG_CONFIG_PATH|把依赖包里的 \.pc 原样拷进
+                         PKG_CONFIG_PATH
+forbid_1_reason:        依赖包里那份 .pc 的 prefix 就是**构建机路径**（这正是
+                          问题本身）。原样拷进去等于什么都没修，只是把"路径
+                          不存在"从 Conan cache 搬到 build 目录，症状一模一样。
+                          必须让 Conan 的生成器**按当前包目录重新生成**，
+                          或者拷贝后再改 prefix（见 fallback）。
+forbid_1_consequence:   白跑一轮 CI（本赛事 CI 排队 ~2.5-3 小时）；且因为
+                          PKG_CONFIG_PATH 确实是"被修过"的，下一轮很容易
+                          误判成"pkg-config 问题已解决，是别的原因"。
+
+forbid_2_pattern:       (?i)LD_PRELOAD.*libgroonga|(?i)LD_LIBRARY_PATH.*libgroonga
+                         当作"让 groonga 找到插件"的手段
+forbid_2_reason:        插件目录不是靠 loader 搜索路径找的：libgroonga.so 用
+                          的是编译期固化的绝对路径（GRN_PLUGINS_DIR 才覆盖），
+                          LD_PRELOAD/LD_LIBRARY_PATH 只影响"库能不能被找到"，
+                          不影响"库去哪找它的插件"。两者混淆会让排查停在
+                          "库已经加载成功，为什么还 unsupported"。
+forbid_2_consequence:   误诊为"插件包没编进去"，进而去改 groonga 的配方或
+                          放弃整组用例 —— 而真实原因只是环境变量没设。
+
+forbid_3_pattern:       (?i)message_pack\s*=\s*["']?auto|(?i)xxhash\s*=\s*["']?auto|
+                         把 feature 留成 auto 且不在 requirements\(\) 里钉依赖
+forbid_3_reason:        上游把这类特性做成 feature + auto（探测到就启用）。
+                          探测走 pkg-config/头文件查找，**结果是环境相关的**：
+                          同一份配方在不同 worker 上可能一份 enabled 一份
+                          disabled 而不报错。产物特性因此不可复现，且
+                          "编译期探测到、运行期链接不到"会退化成偶发符号缺失。
+forbid_3_consequence:   跨 worker 抖动（同一 commit 有时绿有时红），属最难
+                          归因的一类；且失败点在运行期而不是构建期，CI 日志
+                          里只有 dlopen 报错。
+
+principles:             P005, P014
+similar_to:             DRAFT-pgroonga-4.0.8-conan-postgresql-empty-prefix-pg-config-shim
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-pgroonga-4.0.8-groonga-dep-baked-build-prefix-pc-and-plugins-dir.md
+last_updated:           2026-09-20
+source_event:           archives/p/pgroonga/4.0.8
+
+authors:                2301_76770579
+source_pr:              11628
+source_commit:          3cdf9f29a0ab
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-20
