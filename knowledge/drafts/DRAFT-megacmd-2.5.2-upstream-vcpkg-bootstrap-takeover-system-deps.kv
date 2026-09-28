@@ -1,0 +1,128 @@
+#====================================================================
+# DRAFT - 上游 CMake 把 vcpkg 当默认依赖通道：空 VCPKG_ROOT 仍在线 clone，
+#         离线/OHOS configure 直接 FATAL；补丁短路 clone 并强制 system-deps
+# contributor: 主理-22
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-megacmd-2.5.2-upstream-vcpkg-bootstrap-takeover-system-deps
+trigger_tool:           cmake|conan
+phase:                  configuration
+error_signature:        vcpkg will be cloned into|clone_vcpkg_from_baseline|Failed to run the clone_vcpkg_from_baseline|You must specify a repository to clone
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, cmake, toolchain, portability, network
+match_keywords:         vcpkg, clone_vcpkg_from_baseline, VCPKG_ROOT, VCPKG_INSTALLED_DIR, builtin-baseline, Using system dependencies, manifest mode, git clone, 在线依赖管道, configure FATAL
+title:                  上游 CMake 默认在线 clone vcpkg 并以其 toolchain 接管依赖，空 VCPKG_ROOT 挡不住（离线 configure FATAL）⇒ 补丁短路 clone + 强制 system-deps
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游把 vcpkg 当作默认依赖通道：顶层 CMakeLists 在 VCPKG_ROOT（默认
+  ${CMAKE_CURRENT_LIST_DIR}/../vcpkg）不存在时直接
+  execute_process(bash build/clone_vcpkg_from_baseline.sh ${VCPKG_ROOT})；
+  脚本内 curl -s https://api.github.com/repos/microsoft/vcpkg/commits/<baseline>
+  取基线日期后 git clone --shallow-since <date> https://github.com/microsoft/vcpkg，
+  把 vcpkg 整仓克隆进源码树，再以 vcpkg toolchain 接管全部依赖
+  （README 原话：All dependencies are downloaded and installed automatically by vcpkg）。
+  离线/受限网络 worker 上这条路必然失败，且失败链很长——curl 带 -s 不带 -f，
+  网络不可达时静默返回空串 ⇒ commit_date 为空 ⇒ git clone --shallow-since 实参错位
+  ⇒ fatal：You must specify a repository to clone ⇒ 脚本 RC=128 ⇒ 上游
+  message(FATAL_ERROR Failed to run the clone_vcpkg_from_baseline) ⇒ configure 终止。
+  ★关键陷阱一：传 -DVCPKG_ROOT=（空串）挡不住。空串让 NOT EXISTS ${VCPKG_ROOT}
+  为真，clone 块照旧触发（cmake -P 语言级探测实测）。★关键陷阱二：把 VCPKG_ROOT
+  指向一个已存在目录虽然不 clone，却会进入 vcpkg 管理分支 process_vcpkg_libraries，
+  在缺 vcpkg.cmake 时同样 FATAL（实测死路），因此不能靠「给个目录」绕。
+  ★关键陷阱三：vcpkg 产物安装块 install(DIRECTORY ${vcpkg_lib_folder}) 在
+  VCPKG_INSTALLED_DIR 为空时路径退化为 /lib/，会把宿主系统 .so 打进包——
+  短路 clone 时必须一并给该块加守卫。
+  ★关键陷阱四（补丁打完后仍会踩）：置空必须走**命令行 -D**，不能只写
+  tc.variables["VCPKG_ROOT"]=""。上游第 29 行在 **project() 之前**就
+  set(VCPKG_ROOT "<src>/../vcpkg" CACHE PATH ...)，而 conan_toolchain.cmake 是
+  CMake 在 project() 时才读取的 ⇒ 上游先建立的 cache 条目把工具链里的空值吃掉，
+  补丁条件 if(VCPKG_ROOT AND ...) 判真、clone 块照旧执行（实测 configure 日志
+  仍打印 vcpkg will be cloned into <build>/../vcpkg）。命令行 -D 在任何
+  CMakeLists 之前写入 cache，set(...CACHE...) 不会覆盖已存在条目。
+  ★关键陷阱五（同一时序陷阱的普适形态）：上游在 project() 之前
+  include(megacmd_options)/include(sdklib_options)，里面用 option() 定义
+  FULL_REQS/USE_FFMPEG/USE_PDFIUM/USE_MEDIAINFO/ENABLE_MEDIA_FILE_METADATA 等
+  开关 ⇒ tc.variables 下发的值**全部无效**（实测 FULL_REQS 仍为默认 ON，
+  于是 ENABLE_MEDIA_FILE_METADATA=ON，system-deps 分支紧接着
+  pkg_check_modules(libmediainfo) FATAL）。凡"选项在 project() 之前被 option()
+  建立"的工程，Conan 侧必须把选项走 cli_args -D 而不是 toolchain 变量。
+  ★关键陷阱六（进了 system-deps 分支也可能照样炸）：该分支只用 pkg-config
+  （libcrypto++/libsodium/sqlite3/libcurl/libuv/readline、megacmd 侧 libpcre），
+  而 Conan 的 CMakeDeps 只产出 CMake config 包、不产 .pc；cryptopp 上游更是
+  根本没有 libcrypto++.pc ⇒ 必须把这两处宏改成「有 CMake config 包就用它
+  （cryptopp::cryptopp / pcre::pcre / sqlite3::sqlite3 / CURL::libcurl /
+  libuv::libuv / readline::readline），否则回退 pkg-config」，ICU/OpenSSL 按
+  target 是否存在选 ICU::uc+ICU::data 还是 icu::icu、OpenSSL::SSL+Crypto 还是
+  openssl::openssl。
+
+  ★关键陷阱七（补丁全打完后才暴露的下一层）：OHOS profile 的 triplet 令 CMake
+  把目标系统名推成 HarmonyOS，而 CMake 没有该 platform module ⇒ **UNIX 为假**，
+  上游 `#ifdef UNIX` 的公共头包含链整段失效（实测 sdk/include/mega/gfx.h:32
+  fatal error: 'megawaiter.h' file not found，14 处）⇒ 配方必须显式置
+  `CMAKE_SYSTEM_NAME=Linux` + `CMAKE_SYSTEM_PROCESSOR=aarch64`（仓库既有先例
+  E092，407 处）。判定信号：configure 通过但编译期公共头互相找不到。
+  ★关键陷阱八（Conan 侧的补丁生命周期）：`apply_conandata_patches` 只能调一次。
+  `source()` 与 `build()` 同时调用时，因 conan create 会把 source_folder 整体
+  拷进 build folder（日志 "Copying sources to build folder"），二次打补丁必报
+  `Failed to apply patch … source file is different`。该 bug 平时被 conan 的
+  source 缓存掩盖——`source()` 不重跑时只有 `build()` 那一处生效；一旦改
+  `conanfile.py` 使 recipe revision 变化、`source()` 重跑，就立刻暴露。
+  ★关键陷阱九（GTest 目标名）：Conan 的 gtest 包只声明 `gtest::gtest`
+  （`cmake_target_name`），而工程补丁里按 vcpkg 习惯用 `GTest::gtest`/`GTest::gmock`
+  ⇒ `find_package(GTest CONFIG)` 需显式钉 `GTest_DIR=<gtest.package_folder>/lib/cmake/GTest`
+  命中**包内自带的上游 GTestConfig.cmake**（该包确实装了它），否则 CMakeDeps 的
+  `gtest-config.cmake` 只有 gtest::gtest、gmock 目标缺失、链接期报未定义。
+
+affected_scope:         任何把 vcpkg manifest/toolchain 作为默认依赖通道、且在 CMake 顶层仅按「目录不存在」触发 clone/bootstrap 的工程；在离线/受限网络 worker 与 OHOS 交叉构建下必然 configure FATAL。对本机有外网且允许克隆 vcpkg 的开发机不命中（但会引入整仓克隆与 toolchain 接管，与 Conan 注入的依赖链冲突/重复）。与 E342 的分界：E342 是测试期 bootstrap 下载，本条是 toolchain 级依赖通道接管。
+
+verification_cmd:       '1) 上游触发点（判定是否命中本形态）: grep -n "clone_vcpkg_from_baseline\|vcpkg will be cloned" CMakeLists.txt; 2) 空 VCPKG_ROOT 仍会 clone（把顶层条件抄进 cmake -P 脚本，不编译，set(VCPKG_ROOT "" CACHE PATH "") 后 if((NOT WIN32) AND NOT EXISTS ${VCPKG_ROOT}) 为真）; 3) 真实症状复现（代理指向不可达端口即断网，无需改上游）: env https_proxy=http://127.0.0.1:9 GIT_TERMINAL_PROMPT=0 cmake -S <src> -B /tmp/probe-vcpkg -DVCPKG_ROOT= 2>&1 | tail -20 → 出现 -- vcpkg will be cloned into 与 Failed to run the clone_vcpkg_from_baseline，RC=1; 4) 打补丁后同一命令 → 不再出现 vcpkg will be cloned，改为出现 Using system dependencies; 5) 时序陷阱自检（判定"选项到底生没生效"）: grep -n "include(megacmd_options)\|^project(" CMakeLists.txt 看 include 是否在 project() 之前；若在之前，再 grep 生成物 <build>/generators/conan_toolchain.cmake 里同名 set(...CACHE...) 行与 configure 日志里该选项的实际取值，两者不一致即命中本陷阱，必须改走命令行 -D（Conan 配方侧即 tc.cache_variables）; 6) 依赖通道自检: pkg-config --list-all | grep -c . （本机为 0）与 ls <build>/generators/*.pc（Conan CMakeDeps 下为空）⇒ 证明 system-deps 分支的 pkg_check_modules 必挂，需 0002 类补丁'
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority:           1
+rec_approach:           patch-shortcircuit-vcpkg-clone-and-force-system-deps
+rec_description:        用补丁把上游 clone 条件前置 VCPKG_ROOT 真值判断（改成 if(VCPKG_ROOT AND (NOT WIN32 OR BASH_VERSION_RESULT EQUAL 0) AND NOT EXISTS ${VCPKG_ROOT})），并在 generate() 里用 **tc.cache_variables["VCPKG_ROOT"] = ""** 下发空值（cache_variables 正是由 conan 展开为命令行 -D 的路径）（⚠不能只用 tc.variables：上游在 project() 之前就 set(...CACHE...) 了默认值，toolchain 变量抢不到）；空值即短路整块在线 clone。同一补丁给 vcpkg 产物安装块加 if(VCPKG_INSTALLED_DIR) 守卫，防 VCPKG_INSTALLED_DIR 为空时把宿主 /lib 打进包。第二处补丁把无 vcpkg 分支的 pkg_check_modules 改成「有 CMake config 包就用它、否则回退 pkg-config」（cryptopp 上游无 .pc，Conan 只产 CMake config）。所有上游开关（FULL_REQS/WITH_FUSE/USE_*/ENABLE_*）同样经 tc.cache_variables 下发（conan 展开为命令行 -D），因为上游在 project() 之前 include 的 option() 模块会抢占 tc.variables。补丁后走上游自带的 else 分支（日志出现 Using system dependencies），依赖全部由 Conan 的 CMakeDeps 注入，构建不再依赖外网。补丁只加条件/加分支、不改既有语义，保持可向上游提交的形态（P005）。
+rec_command:            patches/000N-shortcircuit-vcpkg-clone.patch + patches/000N-system-deps-via-cmake-config.patch；conanfile.py generate()：tc.cache_variables["VCPKG_ROOT"]=""、tc.cache_variables["FULL_REQS"]="OFF" …（conan 展开为命令行 -D）
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      point-vcpkg-root-at-existing-empty-dir
+fallback_description:   不能改上游 CMakeLists 时，把 VCPKG_ROOT 指向一个已存在的空目录以跳过 clone。诚实权衡：这只挡住 clone，随后进入 vcpkg 管理分支 process_vcpkg_libraries，缺 vcpkg.cmake 时 FATAL（实测死路），通常还需同时关掉 vcpkg 管理面或补一个最小 vcpkg.cmake 桥；不建议作主方案。
+fallback_command:       cmake -DVCPKG_ROOT=<已存在的空目录>
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       让依赖获取留在 configure 期（curl|git clone|wget 取依赖）|以「本机有网能过」当作适配完成
+forbid_1_reason:        OHOS/离线 CI worker 无外网；把依赖获取放在 configure 期等于把构建结果绑在网络可用性上，本机通过不代表 CI 通过。E342 只覆盖测试期下载，不覆盖 toolchain 级 bootstrap。
+forbid_1_consequence:   CI 在 configure 阶段 FATAL、PR 红；即便侥幸联网成功，vcpkg toolchain 会接管依赖链，与 Conan 注入的依赖冲突或重复。
+
+forbid_2_pattern:       用 -DVCPKG_ROOT=<已存在目录> 假装绕过|只删 message 文本不改 if 条件|把 project() 之前定义的选项只写进 tc.variables
+forbid_2_reason:        实测前者进入 vcpkg 管理分支并在缺 vcpkg.cmake 时 FATAL；中间者 clone 照旧触发，只是看不到提示日志；后者会被上游先建立的 cache 条目吃掉（toolchain 在 project() 时才加载），选项静默不生效。
+forbid_2_consequence:   浪费一整轮长构建才发现 configure 根本没离开在线路径/选项根本没生效。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             [P005, P014]
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E342, E150]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-megacmd-2.5.2-upstream-vcpkg-bootstrap-takeover-system-deps.md
+last_updated:           2026-09-24
+source_event:           megacmd/2.5.2 HarmonyOS PC 首次适配（平台任务 8773，A 机构建机，主理-22）；2026-09-24 真实复现：断网代理下 cmake -DVCPKG_ROOT= 报 CMake Error at CMakeLists.txt:53 Failed to run the clone_vcpkg_from_baseline 128；打补丁后 configure 走 system dependencies。同日续证六层次生形态：①补丁打完仍 clone（tc.variables 空值被上游 project() 前的 set CACHE 默认值吃掉）⇒ 改命令行 -D；②上游 project() 前 include 的 option() 模块抢占全部 tc.variables ⇒ 12 个选项统一 cli_args -D；③无 vcpkg 分支 pkg_check_modules 在 Conan CMakeDeps 下必挂 ⇒ 补丁 0002 双文件改 config 优先 + 链接可见性 PRIVATE→PUBLIC；④CMake 不认 HarmonyOS ⇒ UNIX 为假 ⇒ 公共头链断（14 处 megawaiter.h not found）⇒ 置 CMAKE_SYSTEM_NAME=Linux；⑤apply_conandata_patches 双调用在 recipe revision 变化后必炸（source file is different）⇒ 只调一次；⑥GTest 目标名 gtest::gtest vs GTest::gtest/gmock ⇒ 钉 GTest_DIR 到包内上游 GTestConfig.cmake。最终 conan create 全绿：上游 tests/unit 全量真实执行 SUITES=8 TOTAL=70 PASS=47 FAIL=23（23 例平台受限逐条申报）；包内 5 个 ELF 完成重新自签名、68 个包装脚本完成 shebang 归一化（两项包内落地已实证，签名汇总行 w3-local-ci.log:5635、shebang 动作行 5604）；其运行时可执行性本轮仅 mega-cmd 一个目标在 conanrun 下被真实执行并出 banner（5692-5699），其余 4 个 ELF 与 68 个包装脚本未测、不作强结论（W3 的 L2 冒烟步不加载 runenv、全判失败不具证据力）；功能级可执行性另受 libcurl 无 TLS 与 path-form AF_UNIX 两项平台限制阻塞
+authors:                主理-22 <wanderlust_0823@noreply.gitcode.com>
+source_pr:              待建（本 PR 内提交）
+source_commit:          待推送（本 PR 分支 feat/megacmd-2.5.2）
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-24
+draft:                  true
+contributor_id:         主理-22
