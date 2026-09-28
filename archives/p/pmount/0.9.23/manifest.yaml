@@ -1,0 +1,72 @@
+# 版本级 manifest（DRAFT，16:5x 起草于 Windows 侧，设备失联期）
+# 目标落位: archives/p/pmount/0.9.23/manifest.yaml
+# 与 init-build 生成的骨架对账后再覆盖；设备恢复 + 首次真实 conan create 之前，
+# status / build_date / 测试执行数一律留空或标 pending —— 不许预写 built。
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "0.9.23"
+
+software: "pmount"
+
+# published | built | failed | archived —— create-11 CREATE_RC=0 实证（W3/finish 未跑前不写 published）
+status: built
+build_date: "2026-09-27"
+build_system: "autotools"
+
+source:
+  url: "https://alioth-archive.debian.org/releases/pmount/pmount/0.9.23/pmount-0.9.23.tar.bz2"
+  sha256: "db38fc290b710e8e9e9d442da2fb627d41e13b3ee80326c15cc2595ba00ea036"
+  tar_format: tar.bz2
+  # 官方位由 Debian 打包的 debian/watch 指认（alioth-archive 按版本目录发布），
+  # 与 pool 里的 pmount_0.9.23.orig.tar.bz2 逐字节同 sha（dsc Checksums-Sha256 一致），
+  # 故 conandata 用官方 URL 而非池件镜像。旧口径的 .orig.tar.gz 是 404。
+
+build:
+  system: autotools
+  configure_options:
+    - "--build=aarch64-unknown-linux-gnu"
+    - "--host=aarch64-unknown-linux-ohos"
+    - "--disable-maintainer-mode"
+    - "--disable-hal"
+    - "--disable-nls"
+    - "--disable-ruid-root-cryptsetup"
+    # 三元组必须显式写（-pr:b == -pr:h 时 conan 不下发，且 build==host 会诱导
+    # autoconf 去执行探测程序）；--prefix 由 AutotoolsToolchain 注入。
+  dependencies:
+    # W0 硬门：精确 `conan install --requires=<ref> -pr:h -pr:b --build=never`，
+    # 三条均 rc=0 且从 remote `ohpcd` 拉到 OHOS 制品（16:4x，日志
+    # ~/tmp/uc2/hw-2/pmount-0.9.23/w0_bin.out 与同名 *.log）。
+    - "libblkid/2.42.2 (pkg 21b17f8b2bc0e9511e276e3d57a23893067cefe5 / rev f4832263a73ebc49e3cb68b7446d3f6a) — configure.ac:20-24 缺 blkid/blkid.h 即 AC_MSG_ERROR；包内只有静态 libblkid.a"
+    - "gettext/0.22.5.1 (pkg 6b129b068851896169fae42d399fa922d239ce8a / rev f8f55be531b6b075174dd7b1766c09af) — 每个 .c 无条件 #include <libintl.h> 且 _()→gettext()，--disable-nls 也躲不掉链接期符号"
+    - "intltool/0.51.0 (pkg 6b129b068851896169fae42d399fa922d239ce8a / rev 2ff28a477ac55e6496fc70f3717e4335, tool_requires) — configure:3899-3909 无条件执行 intltool-update --version"
+    - "hal: 未打包（archives/h/hal 不存在）⇒ --disable-hal，pmount-hal.c 不进编译"
+  cc: clang
+  cxx: clang++
+
+patches_applied:
+  - 0001-config-sub-ohos.patch
+  - 0002-configure-xmlparser-not-fatal.patch
+  - 0003-src-include-limits-h.patch
+
+knowledge_gained:
+  - "2008 年 config.sub 交叉接受 aarch64 全写三元组却拒绝 *-linux-ohos，根因不在 CPU 白名单而在 maybe_os 的 KERNEL-OS 组合表：`aarch64-unknown-linux-gnu` 本地实测 rc=0（grep 全文 0 次 aarch64 仍能过，因走的是 cpu-vendor 两段式回退），而 `aarch64-unknown-linux-ohos` 报 `machine 'aarch64-unknown-linux' not recognized`——即 `linux-ohos` 未列进 maybe_os 导致切分错位。故补丁只需在 maybe_os(:122) 与 os 归一化表(:1253) 各加 `linux-ohos`，不必像 aalib 那样再补第三处 CPU hunk。同时 klavaro 用的简写形态 `aarch64-linux-ohos` 补丁后仍 rc=1（`machine 'aarch64' not recognized`）⇒ 老 config.sub 只认全写三元组，交叉参数必须用 conan OHOS 版 get_gnu_triplet 生成的 aarch64-unknown-linux-ohos"
+  - "autotools 包自带 configure 时，'禁用 autoreconf' 的判据是 configure.ac 里的宏是否已被新版工具链删除：pmount 同时命中 AM_CONFIG_HEADER(automake≥1.16 删)、AC_HEADER_STDC(autoconf≥2.70 删)、AC_PROG_INTLTOOL(intltool 宏已退役) 三处，重生成必炸；配方以 --disable-maintainer-mode 兜住 make 侧的隐式重建规则（待 create 实证）"
+  - "configure 期的 intltool 版本闸门与 NLS 开关无关：AC_PROG_INTLTOOL 展开出的 `INTLTOOL_APPLIED_VERSION=intltool-update --version | head -1 | cut -d' ' -f3`（本包 configure:3902）不受 --disable-nls 保护，因此 intltool 是 tool_requires 而非可省项；同族先例见 klavaro/3.14 build_requirements 注释"
+  - "上游测试夹具漏发（dist bug）的判法：tests/Makefile.am 无 EXTRA_DIST 且夹具目录不在 tarball，被测函数以 exit(100) 硬退而非返回失败，故 `make check` 在打印任何结果前即中断；Debian debian/rules `override_dh_auto_test: echo \"skipping tests (buggy in upstream tarball)\"` 提供同源外部佐证。此类不得记成 OHOS 适配缺陷，也不得缩分母——按 test_policy.c 四条断言 + policy.c:393-455（返回 entry->mnt_fsname、realpath 失败退回原串）反推夹具内容补回，归'补全测试用例说明'逐项交代"
+  - "PENDING（未证，设备恢复后先核）：gettext/0.22.5.1 包内是否同时提供 include/libintl.h 与可链接的 libintl；若无则退路是 glib 的 proxy-libintl（klavaro 的 `-L<glib libdir> -lintl` 手法）"
+
+patch_generation:
+  method: hand-written-diff-verified
+  generator: 'git diff --no-index（orig/new 两份 config.sub）+ sed 去掉临时目录前缀成 a/ b/；未走 refresh-patch --auto（编辑追踪器只认 work 树改动）'
+  generated_at: '2026-09-26T16:50:00'
+  patches_count: 3
+
+patch_classification:
+  - file: 0001-config-sub-ohos.patch
+    type: manual
+    platform_only: True
+    guard: 'verified(本地): git apply --check -p1 rc=0 且 patch -p1 --dry-run rc=0（对 pristine 解包树）；行为闭环=打补丁后 `sh config.sub aarch64-unknown-linux-ohos` 输出同名三元组 rc=0（打补丁前 rc=1）。设备侧 create 证据待补'
+  - file: 0002-configure-xmlparser-not-fatal.patch
+    type: manual
+    platform_only: True
+    guard: 'verified(本地): git apply --check -p1 rc=0 且 patch -p1 --dry-run rc=0（对 pristine configure）；来源=create-01 真机首错 `configure: error: XML::Parser perl module is required for intltool`（日志 ~/tmp/uc2/hw-2/pmount-0.9.23/create-01.log）。安全性=全树 0 个 .xml/.desktop/.server 模板、intltool-merge 仅出现在 EXTRA_DIST/CLEANFILES ⇒ -x 模式在本包从不被调用'
