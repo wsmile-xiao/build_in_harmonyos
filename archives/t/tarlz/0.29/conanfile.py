@@ -151,11 +151,16 @@ class TarlzConan(ConanFile):
             )
             # Diaz's Makefile hardcodes CXX=c++ (ignores env); override on
             # the make command line with the profile compilers (R33).
+            # Same for flags: the generated Makefile keeps only its own
+            # -O2, so dependency -I/-L must ride the command line too.
             compilers = self._compiler_environment_items()
+            cppflags, ldflags = self._dependency_flags()
             self._run_ohos(
                 f"make -j1 "
                 f"CC={shlex.quote(compilers.get('CC', 'cc'))} "
-                f"CXX={shlex.quote(compilers.get('CXX', 'c++'))}"
+                f"CXX={shlex.quote(compilers.get('CXX', 'c++'))} "
+                f"CXXFLAGS={shlex.quote('-O2 ' + ' '.join(cppflags))} "
+                f"LDFLAGS={shlex.quote(' '.join(ldflags))}"
             )
 
     def _unpack_upstream(self, shell):
@@ -252,6 +257,15 @@ class TarlzConan(ConanFile):
         for name, value in self._compiler_environment_items().items():
             environment.define(name, value)
         return environment
+
+    def _dependency_flags(self):
+        """(-I list, -L list) from direct host dependencies (lzlib)."""
+        cppflags, ldflags = [], []
+        for dep in self.dependencies.values():
+            info = dep.cpp_info
+            cppflags.extend(f"-I{d}" for d in info.includedirs)
+            ldflags.extend(f"-L{d}" for d in info.libdirs)
+        return cppflags, ldflags
 
     def _compiler_environment_items(self):
         """CC/CXX from the profile's tools.build:compiler_executables.
