@@ -1,0 +1,71 @@
+#====================================================================
+# DRAFT-cmake-cache-var-override-dropped-by-include — CMake include 模块内
+#   无条件 set() 回置会静默丢弃 -D 命令行 cache 覆盖，需 if(NOT DEFINED)
+#   守卫尊重显式输入
+# 最终编号 Exxx 由知识库主编确认后回填。
+#====================================================================
+
+# ═══ Layer 0: 错误面 ═══
+id:                     DRAFT-cmake-cache-var-override-dropped-by-include
+trigger_tool:           cmake
+phase:                  configuration
+error_signature:        CMake Error at .*AddLLVM\.cmake:.*\(add_dependencies\)|The dependency target .* does not exist
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               build-system, cmake, testing
+match_keywords:         cmake, include, set, cache variable, -D override, ENABLE_CHECK_TARGETS, OpenMPTesting.cmake, add_dependencies, check targets, lit, if(NOT DEFINED)
+title:                  CMake include 模块内无条件 set() 回置会静默丢弃 -D 命令行 cache 覆盖，需 if(NOT DEFINED) 守卫尊重显式输入
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             被 include() 的 CMake 模块在文件级无条件 set(<VAR> <默认值>) 时，会在当前目录作用域创建同名的普通变量并**遮蔽**同名的 -D 命令行 cache 输入——用户的显式覆盖被静默丢弃，且无任何警告。完整因果链（LLVM 18.1.8 实例）：openmp/cmake/OpenMPTesting.cmake 第 2 行 set(ENABLE_CHECK_TARGETS TRUE) 在每次 include 时无条件回置 → 上游文档推荐的 -DENABLE_CHECK_TARGETS=OFF（本包不构建 in-tree clang 时关闭 lit 测试套件的唯一正规途径）失效 → construct_check_openmp_target（openmp/CMakeLists.txt:154）→ add_openmp_testsuite（OpenMPTesting.cmake:243）→ add_lit_testsuite（OpenMPTesting.cmake:220）仍创建 check-openmp/check-libomp 等 check-* 目标并经 add_lit_target 调 add_dependencies(clang)（AddLLVM.cmake:1962）→ "The dependency target \"clang\" of target \"check-openmp\" does not exist" → configure 致命错误。工具实现证据：CMake 普通变量在目录作用域内遮蔽同名 cache 条目；触发命令：cmake ... -DENABLE_CHECK_TARGETS=OFF；失败点：AddLLVM.cmake:1962 add_dependencies；归类：构建系统变量作用域语义（include 内普通变量遮蔽 cache 输入），非平台问题。
+affected_scope:         任何在被 include() 的 CMake 模块内以无条件 set() 固化默认值、同时又在文档或惯例上允许用户以 -D cache 覆盖该开关的项目（LLVM openmp 的 OpenMPTesting.cmake 先例，以及一切"模块内写死默认值"模式：feature 开关、测试开关、安装开关），在不构建该开关依赖目标的上下文（如无 in-tree clang 的插件包）中配置即失败。与 E526（conan 工具层覆盖被默认语义丢弃）、E096（探测/默认值未尊重显式标准设定）、E100（组件禁用后残留引用）同属"显式输入被默认值压制"族。
+verification_cmd:       任意 llvm-project checkout 定位无条件回置：grep -n -A3 'Keep track if we have all dependencies' openmp/cmake/OpenMPTesting.cmake（预期：set(ENABLE_CHECK_TARGETS TRUE) 无 if(NOT DEFINED) 守卫）；定向复现（monorepo、从 llvm/ 父目录、不构建 clang 的上下文）：cmake -B /tmp/ovr-probe -S <llvm-project>/llvm -DLLVM_ENABLE_PROJECTS=openmp -DENABLE_CHECK_TARGETS=OFF -G Ninja → 预期 CMake Error at cmake/modules/AddLLVM.cmake:1962 (add_dependencies)：The dependency target "clang" of target "check-openmp" does not exist（调用栈经 OpenMPTesting.cmake:220/243，即 -D 覆盖已被回置丢弃）；应用 if(NOT DEFINED) 守卫补丁后同命令 configure 通过且不再创建依赖 clang 的 check-* 目标
+
+# ═══ Layer 3: 方案空间 ═══
+rec_priority:           1
+rec_approach:           not-defined-guard-in-include-module
+rec_description:        把 include 模块内的无条件 set(<VAR> TRUE) 改为 if(NOT DEFINED <VAR>) set(<VAR> TRUE) endif()：默认行为对全部默认构建零变化（变量仍未定义时照常赋默认值），而显式 -D cache 输入得以存活。这是对上游语义的正确修复——"命令行显式覆盖优先于模块默认值"，补丁最小、可向上游提交（先例：补丁 0001 对 OpenMPTesting.cmake 第 3 行加守卫）。
+rec_command:            补丁内容：-set(ENABLE_CHECK_TARGETS TRUE) 改为 if(NOT DEFINED ENABLE_CHECK_TARGETS)/  set(ENABLE_CHECK_TARGETS TRUE)/endif()（上游原版该 set 位于 OpenMPTesting.cmake 第 2 行）；验证：带 -DENABLE_CHECK_TARGETS=OFF 的 configure 通过、无 check-* 目标创建错误；不带该开关的 configure 行为与上游完全一致。
+rec_auto_fix:           true
+rec_impl:               patch-recipe-cmake
+
+fallback_priority:      2
+fallback_approach:      force-missing-test-dependency-degradation
+fallback_description:   无法修改上游 include 模块时，可故意钉死一个必缺的测试依赖（如 -DOPENMP_LLVM_LIT_EXECUTABLE=/nonexistent），让上游自身的依赖探测（find_standalone_test_dependencies 找不到 llvm-lit 即 set(ENABLE_CHECK_TARGETS FALSE PARENT_SCOPE)）走降级路径，check-* 目标不再创建、configure 不再死在 add_dependencies(clang)。诚实权衡：这是靠"弄缺一个探测"触发上游降级的绕道而非修复守卫语义——check 套件被整体禁用（本包场景本不构建它们，但该退路在需要测试的上下文不可用），且依赖上游探测顺序的稳定性，仅作退路。
+fallback_command:       cmake -B build -S <llvm-project>/llvm -DLLVM_ENABLE_PROJECTS=openmp -DOPENMP_LLVM_LIT_EXECUTABLE=/nonexistent -G Ninja（configure 输出预期出现 "The check targets will not be available!" 警告与 check-openmp does nothing，且无 AddLLVM.cmake:1962 错误）
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       重复传递.*-D.*期望.*覆盖回去|set\(ENABLE_CHECK_TARGETS.*CACHE.*FORCE\)
+forbid_1_reason:        重复传同一 -D 或用 CACHE FORCE 再压制，都是在丢弃语义之上叠掩盖，值的有效性依赖 include 顺序与作用域细节。
+forbid_1_consequence:   脆弱的顺序耦合，上游 include 结构一变即复发，且掩盖了真实的变量作用域缺陷。
+forbid_2_pattern:       删除.*OpenMPTesting\.cmake|整体剔除.*check.*目标
+forbid_2_reason:        直接剔除上游测试基建的 include/创建逻辑属于绕过，不是语义修复。
+forbid_2_consequence:   不可向上游提交，后续版本冲突，且丧失该开关在正常上下文的语义。
+
+# ═══ Layer 4: 原则 ═══
+principles:             P014,P005
+
+# ═══ Relations ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E526,E096,E100]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ Metadata ═══
+doc_file:               drafts/DRAFT-cmake-cache-var-override-dropped-by-include.md
+last_updated:           2026-09-15
+source_event:           libomptarget-rtl-amdgpu 18.1.8（LLVM openmp monorepo）HarmonyOS PC 真机适配：插件包不构建 in-tree clang，按上游文档以 -DENABLE_CHECK_TARGETS=OFF 关闭 lit 套件被 OpenMPTesting.cmake 无条件回置丢弃，configure 死于 AddLLVM.cmake:1962 add_dependencies（未打补丁探针日志 probe-configure.log :420-594 两簇 :420-462、:552-594 共 12 处同名错误，6 个 check-* 目标各 2 处，调用栈直指 AddLLVM.cmake:2028 与 OpenMPTesting.cmake:220/243）；以补丁 0001（if(NOT DEFINED) 守卫）修复，权威 CI run3 全绿。
+
+# ═══ Authorship and provenance ═══
+authors: why6666666
+source_pr: 交付 PR 后回填
+source_commit: 合并后回填
+
+# ═══ Quality metrics ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-15

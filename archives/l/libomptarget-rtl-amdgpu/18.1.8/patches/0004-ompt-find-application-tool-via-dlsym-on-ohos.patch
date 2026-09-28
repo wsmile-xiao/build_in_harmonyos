@@ -1,0 +1,46 @@
+From: OpenHarmony PC porting (libomptarget-rtl-amdgpu 18.1.8)
+Subject: [PATCH] ompt: consult the global namespace for the application tool on OHOS
+
+OMPT tools embedded in the application are found through the weak ompt_start_tool
+symbol in libomp: the tool's strong definition in the main executable is expected
+to preempt the runtime's weak definition when the loader binds the internal call.
+glibc does this, but the OHOS (musl) loader does not preempt a versioned weak
+definition in a DSO with an unversioned strong definition from the executable
+(libomp exports its symbols with a VERSION script), so the weak definition
+survives the bind and its dlsym(RTLD_NEXT) lookup can never see symbols defined
+by the executable, which precedes libomp in the search order. Net effect: an
+application-embedded OMPT tool is silently ignored on OHOS and its ompt_get_*
+inquiries return NULL (which then crashes the ompt test suite at the first
+dereference).
+
+On __OHOS__, consult the global namespace explicitly with dlsym(RTLD_DEFAULT,
+"ompt_start_tool") before falling back to the RTLD_NEXT chain, skipping libomp's
+own definition to avoid recursion. Behavior is unchanged on other platforms.
+
+diff --git a/openmp/runtime/src/ompt-general.cpp b/openmp/runtime/src/ompt-general.cpp
+index 95aab6c..3ebdb89 100644
+--- a/openmp/runtime/src/ompt-general.cpp
++++ b/openmp/runtime/src/ompt-general.cpp
+@@ -160,6 +160,22 @@ static ompt_start_tool_result_t *ompt_tool_darwin(unsigned int omp_version,
+ _OMP_EXTERN OMPT_WEAK_ATTRIBUTE ompt_start_tool_result_t *
+ ompt_start_tool(unsigned int omp_version, const char *runtime_version) {
+   ompt_start_tool_result_t *ret = NULL;
++#if defined(__OHOS__)
++  // The OHOS (musl) dynamic loader does not preempt libomp's versioned
++  // weak ompt_start_tool with an unversioned strong definition from the
++  // application, so the tool embedded in the executable would never be
++  // found through the bind. Look it up in the global namespace explicitly;
++  // skip libomp's own (weak) definition to avoid resolving to ourselves.
++  ompt_start_tool_t app_tool =
++      (ompt_start_tool_t)dlsym(RTLD_DEFAULT, "ompt_start_tool");
++  if (app_tool &&
++      app_tool != (ompt_start_tool_t)&ompt_start_tool) {
++    ret = app_tool(omp_version, runtime_version);
++    if (ret) {
++      return ret;
++    }
++  }
++#endif
+   // Search next symbol in the current address space. This can happen if the
+   // runtime library is linked before the tool. Since glibc 2.2 strong symbols
+   // don't override weak symbols that have been found before unless the user
