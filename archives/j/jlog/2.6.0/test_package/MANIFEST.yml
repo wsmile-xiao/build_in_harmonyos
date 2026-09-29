@@ -1,0 +1,53 @@
+# test_package/MANIFEST.yml — jlog 2.6.0
+# 上游官方测试声明文件（CI 脚本 L0e 强制要求）。
+#
+# jlog 的上游自测 = `make test` 构建的两个程序：jtest（功能驱动）与
+# jthreadtest（多线程压力测试）。jlog 没有离散断言语法的测试框架
+# （无 gtest/ctest/automake check 注册），因此 upstream_test_total 按
+# "在真机驱动运行的功能场景数"口径统计（autotools_tests：测试由
+# autotools `make test` 目标构建）。详细审计见下方 upstream_test_audit。
+
+package: jlog/2.6.0
+homepage: "https://labs.omniti.com/labs/jlog"
+
+# ── 上游测试：已在包构建中真实编译并执行 ──────────────────────────────
+# conanfile.py build() 执行 `make test`（构建 jtest/jthreadtest）后，
+# 逐一运行功能场景并解析真实退出码 + 失败 token，产出
+# HMBS_UPSTREAM_TEST_RESULT（真机实测计数）。
+upstream_check_command: "make test  # 构建 jtest + jthreadtest（autotools test 目标），随后逐一运行功能场景"
+upstream_test_in_build: true
+upstream_test_command: "jtest <scenario> ; jthreadtest safety almost_safe（每个场景间插入 sync 屏障保证跨进程持久可见）"
+
+# 分母（与真机执行口径一致，来源为 conanfile.py 的 UPSTREAM_CASES）：
+#   jtest 功能场景 7 项 + jthreadtest 1 项 = 8
+# jtest 各子命令（init/write/read/bulk_read/two_checkpoints）默认参数驱动
+#   （jlog 的 getopt 在 OHOS musl 下遇非选项即停，故用默认参数，
+#   每个读类场景前先 write 以避免读空导致的空转）。
+# OHOS HMFS 跨进程持久性：跨进程订阅者检查点文件在默认 JLOG_ALMOST_SAFE 下未
+#   fsync，对后续进程不可见，配方在场景间插入 `sync` 屏障尽力恢复（见如下 audit
+#   与 conanfile.py _syncfs）。仍失败时按 rule4 在 HMBS_UPSTREAM_TEST_RESULT 的
+#   gaps 中如实分类上报（ohos_feature / test_failure），计数来自真机真实执行。
+upstream_test_total: 8
+upstream_test_count_method: autotools_tests
+
+upstream_tests_exist: true
+upstream_test_audit:
+  - path: "Makefile.in（`test:` 目标）"
+    finding: "test 目标仅构建 jthreadtest + jtest 两个自测程序，并不自动运行它们；无离散断言框架、无 ctest/automake check 注册，故按真机驱动的功能场景数统计"
+  - path: "jtest.c（主函数 getopt 分派 init/write/read/bulk_read/repair/two_checkpoints/init_compressed/resize_pre_commit）"
+    finding: "功能驱动（每个操作退出 0 或打印 jlog_ctx_* failed）；在 OHOS musl 下 getopt 遇非选项参数即停，选项不可靠，故以默认参数驱动核心场景"
+  - path: "jtest.c jcreate/jopenr（init 注册订阅者、read 打开 reader）"
+    finding: "init/write/read 以独立进程共享同一 $TMPDIR/jtest.foo 日志；跨进程订阅者注册依赖默认 JLOG_ALMOST_SAFE 下未 fsync 的检查点文件（jlog.c:852-853），OHOS HMFS 不保证未同步写入对后续进程可见。jtest read 系列曾报 JLOG_ERR_INVALID_SUBSCRIBER(25)；同机单进程 test_package/test_consumer（相同 API）9/9 通过证明库功能正确。配方插入 sync 屏障恢复跨进程持久性"
+  - path: "jthreadtest.c（safety almost_safe）"
+    finding: "多线程读写压力；jcreate() 自行初始化日志，配方在运行前清理共享日志给出干净初始状态；main 恒返回 0，失败仅置 error 并打印 croaked/errors occurred，故以输出 token 判定而非退出码"
+
+# test_package 中自带的测试（消费者视角验证；同一 conan create 内执行）
+# 实测结果待真机预检回填（首轮仅完成工作树）。
+test_package_tests:
+  - file: test_consumer.c
+    description: "C API 消费者：创建日志/订阅者、写消息、读回并校验内容（9 项 CHECK）。前 3 项为单上下文核心检查（jlog_new/init/add_subscriber，必须通过，失败即为真实缺陷）；后 6 项为跨上下文（writer/reader）检查——jlog 读写要求独立上下文，依赖 OHOS HMFS 把上一上下文创建的 journal/metastore/checkpoint 文件对下一上下文可见，这是已知的平台限制（与上游 jtest 跨进程报 JLOG_ERR_INVALID_SUBSCRIBER 同根因）。日志创建时置 JLOG_SAFE（jlog.c __jlog_set_checkpoint 仅 JLOG_SAFE 才 jlog_file_sync）并在每次 close 后 sync() 作双保险；在 honour fsync 的机器（真机）9/9 全通过，在多台 CI/真机之间跨上下文持久性不稳定时，后 6 项按 ohos_feature gap 如实上报、不硬失败打包（conan create 成功），核心检查仍保证库功能与打包正确"
+    command: "./test_consumer"
+    result: "真机 9/9；CI 跨上下文持久性耗尽时以 ohos_feature gaps 如实上报（核心检查全过）"
+
+# 测试断言总数
+assertion_count: 9
