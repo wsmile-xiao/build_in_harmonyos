@@ -6,6 +6,8 @@ CMake-based build with no external dependencies (standalone).
 """
 import glob
 import os
+import re
+import shutil
 
 from conan import ConanFile
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
@@ -84,11 +86,11 @@ class Codec2Conan(ConanFile):
         # 其参数被转给 cmake --build；而 make test 目标中未加引号的正则会被 /bin/sh
         # 把 `|` 当管道符拆开执行（真机 CI 实测 Error 127）。self.run 显式引号可完整传参。
         if can_run(self):
-            # 上游 add_test 命令内嵌 ../../raw、../raw 等相对路径，假定二进制目录是
-            # <源码根>/build 一层；conan cmake_layout 为 <源码根>/build/<cfg> 两层，
-            # 相对路径会错指到 <源码根>/build/。故在 ctest 二进制目录及其上层补
-            # raw/wav/demo/octave 数据目录符号链接指向源码目录，使命令行原样可解析
-            # （不改任何上游用例与断言）。
+            # ===== 构建树兼容层（不改任何上游用例与断言）=====
+            # 上游 add_test/链接行内嵌 ../src、../../raw 等相对路径，假定二进制目录是
+            # <源码根>/build 一层布局；conan cmake_layout 为 <源码根>/build/<cfg> 两层。
+            # 真机 musl 动态装载器对含 "/" 的 DT_NEEDED 按“进程 CWD 相对”解析，跨目录
+            # 测试可因此找不到 libcodec2；数据文件同理。故在可能的 CWD 落点补真实副本：
             test_dir = self.build_folder
             if not os.path.isfile(os.path.join(test_dir, "CTestTestfile.cmake")):
                 hits = glob.glob(
@@ -96,21 +98,57 @@ class Codec2Conan(ConanFile):
                 )
                 test_dir = os.path.dirname(hits[0]) if hits else self.build_folder
             self.output.info("ctest dir: {}".format(test_dir))
+            lib_src = os.path.join(test_dir, "src")
+            for base in (os.path.dirname(test_dir), os.path.join(self.source_folder, "src")):
+                if os.path.abspath(base) == os.path.abspath(lib_src):
+                    continue
+                os.makedirs(base, exist_ok=True)
+                for fn in os.listdir(lib_src):
+                    if fn.startswith("libcodec2.so"):
+                        dst = os.path.join(base, fn)
+                        if os.path.islink(dst):
+                            os.remove(dst)
+                        if not os.path.exists(dst):
+                            with open(os.path.join(lib_src, fn), "rb") as fin, open(dst, "wb") as fout:
+                                fout.write(fin.read())
+                            self.output.info("lib compat copy: {}".format(dst))
             for name in ("raw", "wav", "demo", "octave"):
                 src_dir = os.path.join(self.source_folder, name)
                 if not os.path.isdir(src_dir):
                     continue
                 for base in (os.path.dirname(test_dir), test_dir):
-                    link = os.path.join(base, name)
-                    if os.path.lexists(link):
-                        self.output.info("data link exists: {}".format(link))
+                    dst = os.path.join(base, name)
+                    if os.path.lexists(dst):
+                        self.output.info("data compat exists: {}".format(dst))
                         continue
                     os.makedirs(base, exist_ok=True)
-                    os.symlink(src_dir, link)
-                    self.output.info("data link created: {} -> {}".format(link, src_dir))
-            self.run('ctest --test-dir "{}" -E "{}" --output-on-failure -j1'.format(test_dir, CTEST_EXCLUDE))
+                    shutil.copytree(src_dir, dst, symlinks=True)
+                    self.output.info("data compat copy: {}".format(dst))
+            try:
+                self.run('ctest --test-dir "{}" -E "{}" --output-on-failure -j1'.format(test_dir, CTEST_EXCLUDE))
+            except Exception:
+                self._dump_failures(test_dir)
+                raise
         else:
             self.output.info("cross-building: 上游 ctest 留待 qemu 运行根/真机执行")
+
+    def _dump_failures(self, test_dir):
+        """ctest 失败后把各失败用例的错误首行汇总打印到日志尾部（便于 CI 定位）。"""
+        log = os.path.join(test_dir, "Testing", "Temporary", "LastTest.log")
+        if not os.path.isfile(log):
+            return
+        try:
+            txt = open(log, encoding="utf-8", errors="replace").read()
+        except OSError:
+            return
+        self.output.info("===== failing tests summary =====")
+        for m in re.finditer(r"\d+/\d+ Test:\s+(\S+)(.*?)(?=\n\d+/\d+ Test:|\Z)", txt, re.S):
+            name, body = m.group(1), m.group(2)
+            lines = [l.strip() for l in body.splitlines() if l.strip()]
+            err = [l for l in lines if re.search(r"Error|not found|No such|differ|symbol", l)][:3]
+            if not err:
+                continue
+            self.output.info("{}: {}".format(name, " | ".join(err)[:300]))
 
     def package(self):
         cmake = CMake(self)
