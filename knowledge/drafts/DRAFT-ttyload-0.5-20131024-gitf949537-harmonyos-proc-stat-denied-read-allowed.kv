@@ -1,0 +1,76 @@
+#====================================================================
+# DRAFT-ttyload-0.5-20131024-gitf949537-harmonyos-proc-stat-denied-read-allowed.kv
+# HarmonyOS PC: /proc 单个文件的访问权限按 syscall 粒度分裂 —— /proc/loadavg
+# 与 /proc/uptime 允许 open()+read()，却对 stat()/lstat()/fstat() 返回
+# EACCES(13)。凡"先 stat 再读"的工具（GNU grep 3.12、gawk 5.4.0、ls、stat）
+# 会在**确实可读**的 /proc 文件上报 "Permission denied"，而 access(R_OK)
+# 又回答"可读"：三条探测互相矛盾，只有 open+read 是真相。
+#
+# 触发实例: ttyload 0.5-20131024-gitf949537（arch/Linux/getload.c 直接
+# fopen("/proc/loadavg")，消费者测试要拿它与内核值对账）。
+#
+# 注: 本文件所有字段均为单行值（value 到行尾），避免 kv 解析器差异。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ttyload-0.5-20131024-gitf949537-harmonyos-proc-stat-denied-read-allowed
+source_lib:             ttyload 0.5-20131024-gitf949537
+trigger_tool:           grep|awk|ls|stat|configure|make|test|runtime
+phase:                  testing|runtime|configuration
+error_signature:        grep: /proc/loadavg: Permission denied|awk: fatal: cannot open file `/proc/[a-z]+' for reading: No error information|stat: '/proc/loadavg': Permission denied|ls: /proc/(loadavg|uptime): Permission denied
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               selinux, syscall, filesystem, runtime, portability
+match_keywords:         /proc/loadavg, /proc/uptime, /proc/diskstats, stat, lstat, fstat, access, EACCES, errno=13, Permission denied, No error information, GNU grep, gawk, toybox, busybox, procfs, getattr, test -r, sed, cut, stat-before-read, 假不可读, loadavg, monitoring, 取数路径
+title:                  /proc 单文件按 syscall 粒度受限: open+read 可而 stat/lstat/fstat 返 EACCES, 先 stat 再读的工具误报 Permission denied
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             鸿蒙(HongMeng Kernel 1.12.0)的 /proc 实现与安全策略把"读内容"与"取属性"当作两种权限分别授权, 且粒度细到单个 proc 文件: 实测 /proc/loadavg 与 /proc/uptime 的 open(O_RDONLY)+read() 成功、access(R_OK) 成功, 但同一进程的 stat()/lstat() 与**对已成功打开的 fd 调 fstat()** 一律返回 EACCES(13); 因此 GNU grep 3.12 与 gawk 5.4.0 这类先 stat(判定常规文件/决定是否 mmap/预取 size) 再 open 的工具会在确实可读的文件上直接失败(gawk 甚至打印 "No error information", 因为 errno 是在 stat 分支被丢弃后才输出的, 说明它根本没走到 open), 而只做 open+read 的 toybox cat/sed/head/cut 与 busybox grep 同一路径 rc=0
+affected_scope:         所有读取 /proc 下"无长度语义"文件的库与脚本: 负载/CPU/内存/网络/uptime 类监控实现(getloadavg、sysstat、htop 家族、JVM/.NET/Go 的 runtime 指标)、configure/meson 里用 grep/awk 解析 /proc 的能力探测、以及任何 "stat 成功才 open" 的通用文件封装(含 C++ std::filesystem、Python pathlib.open 前的 exists/stat)。同一平台上 /proc/stat、/proc/meminfo、/proc/cpuinfo、/proc/vmstat、/proc/net/dev、/proc/self/* 的 stat 均正常, 故不能按目录一概而论, 必须逐路径探测
+verification_cmd:       设备侧一条命令即可复算(探针源码见 knowledge/drafts/DRAFT-ttyload-0.5-20131024-gitf949537-harmonyos-proc-stat-denied-read-allowed.md 与 ~/tmp/uc2/z75w-ttyload/probe2.c): clang -O0 -w -o /tmp-probe probe2.c && ./probe2 /proc/loadavg /proc/uptime /proc/stat —— 期望 loadavg/uptime 行 open=ok read=33/0 而 stat=FAIL/13 lstat=FAIL/13 fstat=FAIL/13, /proc/stat 行全 ok
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           open-read-without-stat-gate
+rec_description:        取 /proc 值只走 open+read 这条被证明可用的路径: C 侧直接 fopen()/read(), 绝不用 stat()/fstat() 的成功与否门控 open(需要长度就按 procfs 惯例读到底、把 EACCES 的 fstat 视为"size 未知"); 脚本侧用 sed -n 1p / head / cut / tr 取值, 必须用 GNU grep/awk 时改成 "cat /proc/X | grep/awk" 的管道形态(open 由 cat 完成, GNU 工具不再 stat 该路径)
+rec_command:            KERNEL=$(sed -n 1p /proc/loadavg | cut -f1 -d' '); 或 cat /proc/loadavg | awk '{print $1}'
+rec_auto_fix:           false
+rec_impl:               recipe-script
+
+fallback_priority:      2
+fallback_approach:      substitute-toybox-or-busybox-applet
+fallback_description:   不便改管道形态时, 显式调用不做 stat 预检的同名 applet: 实测 /usr/bin/grep(toybox) 与 /data/service/hnp/bin/busybox grep 对 /proc/loadavg 均 rc=0, 而同一路径上 /data/service/hnp/bin/grep(GNU 3.12) rc=2; 注意这是绕过症状, 平台脚本的 PATH 里 hnp 优先于 /usr/bin, 裸命令名拿到的是 GNU 版。⚠ 本条方向与 E161 的 avoid-pipe-use-files 相反: B 机实测管道形态可用(echo test | GNU grep rc=0)、而文件形态在 procfs 上被拒, 两条按"卡在 stdin 还是卡在 procfs 路径"分工使用(详见 md 的查重差异)
+fallback_command:       /usr/bin/grep -c . /proc/loadavg; /data/service/hnp/bin/busybox awk 1 /proc/loadavg
+fallback_auto_fix:      false
+fallback_impl:          recipe-script
+
+forbid_1_pattern:       test -r /proc/|\[ -r /proc/|stat -c [^\n]* /proc/loadavg
+forbid_1_reason:        用 access()/stat 的返回值推断 /proc 文件可读性在本平台会得出与 open+read 相反的结论: /proc/loadavg 上 access=ok 而 stat=EACCES, /proc/diskstats 上 stat=EACCES 而 lstat=ok; 以其中任一条当"可读"判据都会误判适配结论
+forbid_1_consequence:   把可读的文件判成平台不支持, 错误地放宽/删除断言、错误降级为 test_skipped, 甚至把已完成的包转成【等依赖】或"无法适配"上报
+forbid_2_pattern:       (grep|awk).*Permission denied.*(loadavg|uptime)|归因.*SELinux.*禁止读取
+forbid_2_reason:        工具报 "Permission denied" 不等于该路径不可读: 阴性对照显示同一 GNU 二进制经 stdin 读同一内容 rc=0, 且在 stat 被允许的 /proc/stat 上同一 GNU grep/gawk 以文件参数方式也 rc=0 —— 失败变量是"是否 stat", 不是"哪个进程/哪个域"
+forbid_2_consequence:   误定性为平台限制而放弃真实取数断言, 丢掉本可证明 arch 后端取数正确的实质证据(ttyload 的 T3 断言就是靠它证明 arch/Linux 后端在 HarmonyOS 上真的读到内核负载)
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [E031, E008, E076, E009, E161, E324, E429]
+conflicts_with:         [E161]
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ttyload-0.5-20131024-gitf949537-harmonyos-proc-stat-denied-read-allowed.md
+last_updated:           2026-09-27
+source_event:           ttyload 0.5-20131024-gitf949537 在 B 机(HarmonyOS aarch64 / HongMeng Kernel 1.12.0)适配期间的消费者测试取证。可复算命令: (1) clang -O0 -w -o ~/tmp/uc2/z75w-ttyload/probe2 ~/tmp/uc2/z75w-ttyload/probe2.c && ~/tmp/uc2/z75w-ttyload/probe2 /proc/loadavg /proc/uptime /proc/stat /proc/diskstats /proc/1/status; (2) /data/service/hnp/bin/grep -c . /proc/loadavg; /usr/bin/grep -c . /proc/loadavg; cat /proc/loadavg | /data/service/hnp/bin/grep -c . 实测读数: loadavg 行 open=ok/0 read=33/0 stat=FAIL/13 lstat=FAIL/13 fstat=FAIL/13 access=ok/0; uptime 同型(open=ok, stat=FAIL/13); /proc/stat 全 ok; /proc/diskstats stat=FAIL/13 而 lstat=ok/0、open=FAIL/13; /proc/1/status 全部 FAIL/13; GNU grep 对 loadavg rc=2 'Permission denied', toybox grep 与 busybox grep rc=0, GNU grep 经 stdin rc=0; GNU gawk 文件参数 rc=2 'No error information' 经 stdin rc=0; 原始日志 ~/tmp/uc2/z75w-ttyload/probe-proc-syscall.log 与 probe-proc.log
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                主理-74 <z74@local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-27
