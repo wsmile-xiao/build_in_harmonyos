@@ -1,0 +1,66 @@
+#====================================================================
+# DRAFT-eastl-3.27.01-cmake-transitive-include-and-debug-new-contract
+# EASTL（EA 系）在 OHOS/Conan2 下的两类消费者契约知识：
+#   C1 编译型 C++ 库的公开头文件依赖仅头文件依赖包时，CMakeDeps 的传递
+#      include 目录可能失效（eastl->eabase），需设置 recipe cpp_info.requires，
+#      并在 test_package 显式声明依赖；
+#   C2 非 DLL 构建下，EASTL debug operator new[] 需由应用/消费者按头文件
+#      契约提供（EAMain 未发布时，test_package 需自行定义）。
+# 适用范围：所有公开头文件包含依赖库头文件的编译型 C++ Conan 包（EA 系最典型）
+#====================================================================
+
+# ═══ Layer 0：错误表象 ═══
+id:                     DRAFT-eastl-3.27.01-cmake-transitive-include-and-debug-new-contract
+source_lib:             eastl 3.27.01 (Electronic Arts STL)
+trigger_tool:           conan|conan create|cmake|clang|ld
+phase:                  configuration|package-consumer|linking
+error_signature:        fatal error: 'EABase/eabase\.h' file not found|undefined symbol: operator new\[\]\(unsigned long, char const\*, int, unsigned int, char const\*, int\)|INTERFACE_LINK_LIBRARIES.*eabase::eabase|eabase_INCLUDE_DIRS_RELEASE
+
+# ═══ Layer 1：识别层 ═══
+severity:               2
+category:               cmake|conan|header-only|transitive-dependency|consumer-contract|ohos
+match_keywords:         EASTL, EABase, eabase, transitive dependency, header-only, cpp_info.requires, CMakeDeps, INTERFACE_INCLUDE_DIRECTORIES, include dir empty, test_package, debug operator new, EAMain, operator new[](size_t, const char*, int, unsigned, const char*, int), file not found, undefined symbol, consumer defines
+title:                  EA 系编译型库头文件依赖的传递 include 下发（cpp_info.requires + test_package 显式 find_package）与 debug operator new 消费者契约
+
+# ═══ Layer 2：诊断层 ═══
+root_cause: >
+  1) C1：消费者只执行 find_package(eastl) 时，CMakeDeps 生成的 eastl::eastl
+  INTERFACE_LINK_LIBRARIES 虽含 eabase::eabase，但 eabase（仅头文件包，
+  no_copy_source + cleared package_id）作为传递依赖生成的
+  eabase_INCLUDE_DIRS_RELEASE 为空，include 目录没有真正传递到编译命令行；
+  库本体构建（直接依赖）正常，只有消费者侧报 EABase/eabase.h not found。
+  2) C2：EASTL/allocator.h 声明 EA 风格 debug operator new[]（pName/flags/
+  debugFlags/file/line 签名），并注明“由应用定义”；上游通过 EAMain 提供定义，
+  EAMain 未发布时会在链接期报 undefined symbol。
+affected_scope:         公开头文件 #include 依赖库头文件的编译型 C++ conan 包（EA 系
+                        eastl/eabase 可直接复现，其他同类库也适用）；以及
+                        缺少 EAMain 时的 EASTL 使用者
+verification_cmd:       修复前：conan create . -pr:h=ci/conan/profiles/ohos-aarch64
+                        -> G2 FAIL (EABase/eabase.h file not found / undefined symbol);
+                        修复后：同一命令 G2 PASS，test_package ctest 2/2（test_eastl +
+                        harmonyos_specific_test）
+
+# ═══ Layer 3：方案层 ═══
+rec_priority:           1
+rec_approach:           explicit-requires-and-consumer-contract
+rec_description:        ① 在 recipe package_info() 中显式设置 self.cpp_info.requires =
+                        ["eabase::eabase"]（将仅头文件依赖的 include 目录接入传递链）；
+                        ② test_package 同时执行 find_package(eabase REQUIRED) 并链接
+                        eabase::eabase（在消费者侧显式声明直接依赖）；③ test_package/消费者
+                        在没有 EAMain 时，按 allocator.h 契约定义两个基于 malloc 的
+                        no-op debug operator new[] 重载。
+rec_command:            sed/手工修改 conanfile.py：self.cpp_info.requires = ["eabase::eabase"]；
+                        test_package CMakeLists：find_package(eabase REQUIRED) +
+                        target_link_libraries(test_xxx eastl::eastl eabase::eabase)；
+                        在 test.cpp 顶部提供 debug operator new[] 定义
+rec_auto_fix:           false
+rec_impl:               recipe-patch-and-consumer-test
+
+# ═══ Layer 4：语义层 ═══
+check_classification:   portability|packaging
+related_entries:        E447（类似：SDL2 Find module include 转发），
+                        E498（类似：无头文件包的 include 契约），
+                        E499（类似：运行时 libdirs 传递），
+                        E217（类似：includedirs 指向）
+layer:                  L2
+# EASTL 3.27.01
