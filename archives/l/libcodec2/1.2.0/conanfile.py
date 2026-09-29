@@ -183,20 +183,30 @@ class Codec2Conan(ConanFile):
         cmake = CMake(self)
         cmake.configure()
         cmake.build()
-        # 上游 CTest 套件真实执行。上游文本 add_test 155 例，本构建注册 142 例
-        # （13 例在未激活条件分支），排除 54 例后执行 88 例，串行 100% 通过
-        # （qemu + OHOS musl 运行根实测：100% tests passed, 0 tests failed out of 88）：
-        #   25 例 Octave/CML-mex/fading 样本/clang_format/CML 参考数据依赖
-        #   （OHOS 无 Octave 生态与主机 clang-format 工具）；
-        #   13 例 memory_leak 需 arm64-linux 版 valgrind memcheck（OHOS musl 平台无此工具）；
-        #   1 例 fsk_lib_4fsk_ldpc 依赖 octave CML 库（ldpc.m/init_cml）；
-        #   1 例 demo_700d_python 需同架构 python+ctypes 加载目标库（跨架构不可 dlopen）；
-        #   5 例跨平台数值分叉（3 LDPC PER、700D_burble 判据、800XA 往返字节）：
-        #   x86-glibc 宿主对照 14/14 全过，定性为 musl/jemalloc 与 glibc 差异暴露的
-        #   上游数值/未初始化内存问题，非适配引入；OHOS 真机同为 musl，结果一致；
-        #   9 例依赖主机工具：sox×8（7×test_codec2_mode、quisk_filter）、
-        #   python3-numpy/scipy×1（test_OFDM_modem_time_sync_700D）——真机工具链
-        #   未提供，本地补齐工具后 9/9 通过（补充验证）。
+        # 上游 CTest 套件真实执行。上游 CMakeLists 文本 add_test 155 例，本构建注册 142 例
+        # （13 例位于未激活的 Octave/CML 条件分支），排除 67 例后执行 75 例，串行 100% 通过
+        # （qemu + OHOS musl 运行根实测：100% tests passed, 0 tests failed out of 75,
+        #  Total Test time 693.39s；真机 CI 注册 141 例，执行 74 例，差 test_fifo 1 例）：
+        #   ① 25 例 Octave/CML 基准与断言依赖（OHOS 无 Octave 生态与 CML mex）：
+        #      CML ldpcut×2、octave 比对/端口类×18、fsk_lib_4fsk_ldpc（CML）、
+        #      real_comp/peak_levels（断言脚本内嵌 octave-cli）；
+        #   ② 1 例 datac0_compression 需 CML 生成参考数据；
+        #   ③ 1 例 clang_format 需主机 clang-format 工具；
+        #   ④ 4 例 fading 样本依赖（fading_BER、reliable_text_fade×3）：样本由 GNU Octave
+        #      signal 包（fir2/resample，randn('seed',1) 固定种子）生成；其中 fade×3 的
+        #      解码包数阈值 3/8/8 按上游固定样本实现调定（实测基准实现恰为 3/8/8，零余量），
+        #      替代信道实现实测 2/4/11，无法在无 Octave 环境复现上游输入；
+        #   ⑤ 13 例 memory_leak 需 arm64-linux 版 valgrind memcheck（OHOS musl 平台无此工具）；
+        #   ⑥ 1 例 demo_700d_python 需同架构 python+ctypes 加载目标库（跨架构不可 dlopen）；
+        #   ⑦ 5 例跨平台数值分叉（3 例 LDPC PER、700D_burble 判据、800XA 往返字节）：
+        #      x86-glibc 宿主对照 14/14 全过，定性为 musl/jemalloc 与 glibc 差异暴露的
+        #      上游数值/未初始化内存问题，非适配引入；OHOS 真机同为 musl，结果一致；
+        #   ⑧ 9 例依赖主机工具：sox×8（7×test_codec2_mode、quisk_filter）、
+        #      python3-numpy/scipy×1（test_OFDM_modem_time_sync_700D）——真机工具链
+        #      未提供，本地补齐工具后 9/9 通过（补充验证）；
+        #   ⑨ 8 例命令内嵌 octave-cli/sox（fdmdv 重采样对×4、esno_est_c、burst_acq_port、
+        #      fsk_lib、demo_datac0c1）。
+        #   合计 25+1+1+4+13+1+5+9+8 = 67。
         # 注：上游部分用例共用固定临时文件名，并行 -j 会互相覆盖产生假失败，故 -j1 串行。
         # 测试调用方式：直接执行 ctest 并以双引号包裹排除正则。不能走 cmake.test()：
         # 其参数被转给 cmake --build；而 make test 目标中未加引号的正则会被 /bin/sh
