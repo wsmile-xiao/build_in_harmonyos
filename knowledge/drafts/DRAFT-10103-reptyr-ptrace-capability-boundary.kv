@@ -1,0 +1,72 @@
+#====================================================================
+# DRAFT-10103-reptyr-ptrace-capability-boundary -
+# OHOS 非特权进程 ptrace/进程内存访问被系统策略整体禁用：
+# ptrace 类工具（attach/进程重挂载/调试）的适配前能力判定与可用子集
+# （reptyr 0.10.0 OHOS arm64 实测；任务 #10103）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-10103-reptyr-ptrace-capability-boundary
+trigger_tool:           reptyr|gdb|strace|ltrace|ptrace-based-tools
+phase:                  runtime
+error_signature:        Unable to attach to pid.*: Permission denied|process_vm_readv.*: Permission denied|PR_SET_PTRACER.*Invalid argument|PTRACE_ATTACH.*EPERM|PTRACE_TRACEME.*EPERM
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               ohos, security, ptrace, capability, runtime
+match_keywords:         ptrace, PTRACE_ATTACH, PTRACE_SEIZE, PTRACE_TRACEME, process_vm_readv, PR_SET_PTRACER, seccomp, pdebug_scope, yama, reptyr, attach, 进程重挂载, 能力探测
+title:                  OHOS 非特权进程 ptrace/进程内存访问被系统策略整体禁用：ptrace 类工具的适配前能力判定与可用子集
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 内核/安全域对非特权进程整体拒绝 ptrace 系能力：父→子、兄弟间、祖父→孙的 PTRACE_ATTACH/SEIZE 全部 EPERM；PTRACE_TRACEME 与 process_vm_readv 同为 EPERM；PR_SET_PTRACER 返回 EINVAL（未实现）；yama/pdebug_scope 策略接口存在但读取 ENOSYS（未向用户态开放）；进程处于 seccomp filter 模式（Seccomp:2, Seccomp_filters:1）且 CapEff 无 CAP_SYS_PTRACE。属系统安全策略，用户态无法绕过——与“未实现 syscall 返回 SIGSYS/ENOSYS”（E051/E246）不同：syscall 存在但被策略拒绝，进程不崩、调用方拿到干净 errno。
+affected_scope:         所有以 ptrace/process_vm 为能力前提的可执行工具与库（reptyr 进程重挂载、gdb/strace/ltrace attach、ptrace 型沙箱/模拟器、调试库 attach 模式）及其测试；其上游 E2E 若以 attach 为入口，会在首个 syscall 处失败（平台边界，非缺陷），影响适配验收与测试台账口径。reptyr 0.10.0 实测: 上游 2 用例 0/2，消费者可用子集 18/18。
+verification_cmd:       最小探针：每场景独立 fork，记录 ptrace/process_vm 调用的 ret 与 errno（ATTACH/SEIZE：父→子、兄弟、祖父→孙；TRACEME；process_vm_readv；PR_SET_PTRACER），并 grep Seccomp/CapEff /proc/self/status。OHOS 实测（uid=20020085 非特权，同一 SSH 会话）：ATTACH/SEIZE/TRACEME/process_vm_readv = -1/EPERM，PR_SET_PTRACER = -1/EINVAL，pdebug_scope 读取 = ENOSYS；reptyr 侧表现：Unable to attach to pid N: Permission denied
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pre-adaptation-capability-probe-and-usable-subset
+rec_description:        1) 适配前先跑 ptrace 能力探针（每项独立 fork，按 errno 区分“策略拒绝 EPERM”与“未实现 SIGSYS/ENOSYS”，两者降级口径不同）；2) EPERM 成立时盘点工具的“非 ptrace 子集”（如 reptyr -l/-L 的 pty 管理不依赖 ptrace），只对可用子集提供功能与消费者测试；3) 上游 attach 类 E2E：如实申报平台边界并附探针证据，禁止桩化/弱化断言（R34/R51）；4) test_package/CI 不依赖 ptrace 能力；5) 真实调试/附加需求标注平台不可用，并按止损口径说明。
+rec_command:            # 编译并运行探针（源码见触发实例归档）；期望 OHOS: ATTACH/SEIZE/TRACEME/process_vm_readv = -1/EPERM, PR_SET_PTRACER = -1/EINVAL
+                        clang -O0 -o ptrace-probe ptrace-probe.c && ./ptrace-probe; grep -E "Seccomp|CapEff" /proc/self/status
+rec_auto_fix:           false
+rec_impl:               manual-probe
+
+fallback_priority:      2
+fallback_approach:      document-platform-boundary
+fallback_description:   无法提供非 ptrace 子集的工具：在 notes/测试报告如实标注平台不可用，上游用例记为平台边界失败（附 errno 证据），消费者测试仅覆盖可用行为面。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          manual-doc
+
+forbid_1_pattern:       fake-success|stub-out-ptrace|LD_PRELOAD.*ptrace
+forbid_1_reason:        禁止把平台拒绝包装成“通过”（R34/R51 红线）
+forbid_1_consequence:   审计/评审判定欺骗，PR 拒绝
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:
+caused_by:
+similar_to:             E462, E222, E051, E246
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-10103-reptyr-ptrace-capability-boundary.md
+last_updated:           2026-09-27
+source_event:           reptyr 0.10.0 OHOS arm64 适配（任务 #10103）：上游 2 用例 PTRACE_ATTACH EPERM 平台边界 + 最小探针能力矩阵实测
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft:                  true
+contributor_id:         9C4A
