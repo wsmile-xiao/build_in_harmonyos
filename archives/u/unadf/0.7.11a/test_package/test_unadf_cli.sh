@@ -54,11 +54,44 @@ rout=$("$UNADF" -r "$IMG" 2>&1); rrc=$?
 if [ $rrc -eq 0 ]; then ok "unadf -r recursive listing exits 0"
 else no "unadf -r exited $rrc"; fi
 
-# --- 7. CLI: extraction to a directory ------------------------------------
+# --- 7. CLI: extraction must actually write the file we stored ------------
+# unadf's usage is `unadf [flags] dumpname.adf [files-with-path] [-d dir]`,
+# so -d has to come AFTER the image name. Passing `-d dir -l img` makes the
+# tool treat `dir` as the dump name and abort with
+# "adfDevType : unknown device type" / "Can't mount the dump device".
 mkdir -p "$WORK/out"
-eout=$("$UNADF" -d "$WORK/out" -l "$IMG" 2>&1); erc=$?
+eout=$("$UNADF" -l "$IMG" -d "$WORK/out" 2>&1); erc=$?
 if [ $erc -eq 0 ]; then ok "extraction listing exits 0"
 else no "extraction listing exited $erc"; fi
+
+if echo "$eout" | grep -q "roundtrip.bin"; then
+  ok "listing shows the file the library wrote"
+else
+  no "listing lacks roundtrip.bin: $eout"
+fi
+
+# Now extract for real (no -l) and compare byte-for-byte.
+mkdir -p "$WORK/x"
+"$UNADF" "$IMG" -d "$WORK/x" > "$WORK/x.log" 2>&1
+xrc=$?
+if [ $xrc -eq 0 ]; then ok "plain extraction exits 0"; else no "plain extraction exited $xrc"; fi
+if [ -f "$WORK/x/roundtrip.bin" ]; then
+  ok "extraction produced roundtrip.bin"
+  # 8 sectors x 512 bytes, byte i of sector s equals (s + i) mod 256.
+  if python3 - "$WORK/x/roundtrip.bin" <<'PY'
+import sys
+d = open(sys.argv[1], 'rb').read()
+assert len(d) == 8 * 512, f"length {len(d)}"
+for s in range(8):
+    for i in range(512):
+        if d[s * 512 + i] != (s + i) & 0xFF:
+            raise SystemExit(f"mismatch at sector {s} byte {i}")
+PY
+  then ok "extracted bytes match what the library wrote"
+  else no "extracted bytes differ from the written payload"; fi
+else
+  no "extraction did not produce roundtrip.bin"
+fi
 
 echo "----"
 echo "PASS=$PASS FAIL=$FAIL"
