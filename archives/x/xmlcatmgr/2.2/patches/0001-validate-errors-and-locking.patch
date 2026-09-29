@@ -1,0 +1,417 @@
+--- a/src/system.h
++++ b/src/system.h
+@@ -76,10 +76,15 @@
+ 
+ #if defined(HAVE_ERR_H)
+ #  include <err.h>
+-#else
++#endif
++
++#if !defined(HAVE_ERR_H) || !defined(HAVE_WARN)
+ #  define warn compat_warn
++void compat_warn(const char *, ...);
++#endif
++
++#if !defined(HAVE_ERR_H) || !defined(HAVE_WARNX)
+ #  define warnx compat_warnx
+-void compat_warn(const char *, ...);
+ void compat_warnx(const char *, ...);
+ #endif
+ 
+--- a/src/compat.c
++++ b/src/compat.c
+@@ -109,7 +109,7 @@
+ 
+ /* --------------------------------------------------------------------- */
+ 
+-#if !defined(HAVE_WARN)
++#if !defined(HAVE_ERR_H) || !defined(HAVE_WARN)
+ void
+ compat_warn(const char *fmt, ...)
+ {
+@@ -125,7 +125,7 @@
+ 
+ /* --------------------------------------------------------------------- */
+ 
+-#if !defined(HAVE_WARNX)
++#if !defined(HAVE_ERR_H) || !defined(HAVE_WARNX)
+ void
+ compat_warnx(const char *fmt, ...)
+ {
+--- a/src/generic.c
++++ b/src/generic.c
+@@ -68,10 +68,24 @@
+         warn("failed to open `%s'", catname);
+         res = false;
+     } else {
+-        (void)lockf(fileno(f), F_LOCK, 0);
+-        res = func(argc, argv, f, prepend);
+-        (void)lockf(fileno(f), F_ULOCK, 0);
+-        fclose(f);
++        if (lockf(fileno(f), F_LOCK, 0) == -1) {
++            warn("failed to lock `%s'", catname);
++            res = false;
++        } else {
++            res = func(argc, argv, f, prepend);
++            if (fflush(f) == EOF) {
++                warn("failed to flush `%s'", catname);
++                res = false;
++            }
++            if (lockf(fileno(f), F_ULOCK, 0) == -1) {
++                warn("failed to unlock `%s'", catname);
++                res = false;
++            }
++        }
++        if (fclose(f) == EOF) {
++            warn("failed to close `%s'", catname);
++            res = false;
++        }
+     }
+ 
+     return res;
+@@ -105,19 +119,32 @@
+         if (f == NULL) {
+             warn("failed to create `%s'", catname);
+             close(fd);
+-        } else {
+-            (void)lockf(fileno(f), F_LOCK, 0);
+-            fseek(f, 0, SEEK_END);
+-            if (ftell(f) != 0L) {
+-                warnx("failed to create `%s': modified by another process",
+-                      catname);
++            (void)generic_destroy(catname);
++        } else {
++            if (lockf(fileno(f), F_LOCK, 0) == -1) {
++                warn("failed to lock `%s'", catname);
+             } else {
+-                res = func(f);
+-                if (!res)
+-                    warn("failed to initialize `%s'", catname);
+-            }
+-            (void)lockf(fileno(f), F_ULOCK, 0);
+-            fclose(f);
++                if (fseek(f, 0, SEEK_END) != 0 || ftell(f) != 0L) {
++                    warnx("failed to create `%s': modified by another process",
++                          catname);
++                } else {
++                    res = func(f);
++                    if (!res)
++                        warn("failed to initialize `%s'", catname);
++                }
++                if (fflush(f) == EOF) {
++                    warn("failed to flush `%s'", catname);
++                    res = false;
++                }
++                if (lockf(fileno(f), F_ULOCK, 0) == -1) {
++                    warn("failed to unlock `%s'", catname);
++                    res = false;
++                }
++            }
++            if (fclose(f) == EOF) {
++                warn("failed to close `%s'", catname);
++                res = false;
++            }
+ 
+             if (!res)
+                 (void)generic_destroy(catname);
+@@ -200,10 +227,24 @@
+         warn("failed to open `%s'", catname);
+         res = false;
+     } else {
+-        (void)lockf(fileno(f), F_LOCK, 0);
+-        res = func(argc, argv, f);
+-        (void)lockf(fileno(f), F_ULOCK, 0);
+-        fclose(f);
++        if (lockf(fileno(f), F_LOCK, 0) == -1) {
++            warn("failed to lock `%s'", catname);
++            res = false;
++        } else {
++            res = func(argc, argv, f);
++            if (fflush(f) == EOF) {
++                warn("failed to flush `%s'", catname);
++                res = false;
++            }
++            if (lockf(fileno(f), F_ULOCK, 0) == -1) {
++                warn("failed to unlock `%s'", catname);
++                res = false;
++            }
++        }
++        if (fclose(f) == EOF) {
++            warn("failed to close `%s'", catname);
++            res = false;
++        }
+     }
+ 
+     return res;
+--- a/src/main.c
++++ b/src/main.c
+@@ -75,11 +75,11 @@
+                       "license.\n"
+                       "\nAvailable options:\n"
+                       "    -c catalog    Use `catalog' as the catalog file.\n"
+-                      "    -h            Show this help message.\n"
++                      "    -h, --help    Show this help message.\n"
+                       "    -p            Prepend new entries instead of append"
+                       " (add mode only).\n"
+                       "    -s            Switch to SGML mode.\n"
+-                      "    -v            Show version information and exit.\n"
++                      "    -v, --version Show version information and exit.\n"
+                       "\nAvailable actions:\n"
+                       "    add, create, destroy, lookup, remove.\n"
+                       "\nDefault SGML catalog: %s\n"
+@@ -117,7 +117,8 @@
+     bool res, pflag, sflag;
+     const char *catname;
+     char *const *argvorig;
+-    int argcorig, ch;
++    int argcorig, ch, i;
++    const char *shortopt;
+     bool (*ptr_add)(int, char *const *, FILE *, bool);
+     bool (*ptr_create)(FILE *);
+     bool (*ptr_lookup)(int, char *const *, FILE *);
+@@ -131,6 +132,26 @@
+     catname = DEFAULT_CATALOG_XML;
+     pflag = false;
+     sflag = false;
++
++    /* Normalize informational long options before getopt's option scan. */
++    for (i = 1; i < argc; i++) {
++        if (strcmp(argv[i], "--") == 0 || argv[i][0] != '-' ||
++            argv[i][1] == '\0')
++            break;
++        if (strcmp(argv[i], "--version") == 0)
++            argv[i] = "-v";
++        else if (strcmp(argv[i], "--help") == 0)
++            argv[i] = "-h";
++        else if (argv[i][1] != '-') {
++            for (shortopt = argv[i] + 1; *shortopt != '\0'; shortopt++) {
++                if (*shortopt == 'c') {
++                    if (shortopt[1] == '\0')
++                        i++; /* Skip the catalog path, which may start with --. */
++                    break;
++                }
++            }
++        }
++    }
+ 
+     while ((ch = getopt(argc, argv, "+c:hpsv")) != -1) {
+         switch (ch) {
+--- a/src/xml.c
++++ b/src/xml.c
+@@ -95,6 +95,11 @@
+     bool res;
+     struct xmldoc *catalog;
+ 
++    if (argc == 0) {
++        warnx("too few arguments for `add' action");
++        return false;
++    }
++
+     catalog = read_catalog(f);
+     if (catalog == NULL)
+         return false;
+@@ -122,7 +127,7 @@
+         }
+     }
+ 
+-    write_catalog(catalog, f);
++    res &= write_catalog(catalog, f);
+     xmldoc_free(catalog);
+ 
+     return res;
+@@ -138,6 +143,7 @@
+ xml_create(FILE *f)
+ {
+     char buf[] = " Created by " PACKAGE_STRING " ";
++    bool res;
+     struct xmlattr *xa;
+     struct xmldoc *catalog;
+     struct xmlnode *xn;
+@@ -157,10 +163,10 @@
+     XMLNODE_APPEND_ATTR(xn, xa);
+     xmldoc_append_node(catalog, xn);
+ 
+-    xmldoc_write(catalog, f);
++    res = xmldoc_write(catalog, f);
+     xmldoc_free(catalog);
+ 
+-    return true;
++    return res;
+ }
+ 
+ /* --------------------------------------------------------------------- */
+@@ -214,6 +220,11 @@
+     struct xmldoc *catalog;
+ 
+     assert(argv != NULL && f != NULL);
++
++    if (argc == 0) {
++        warnx("too few arguments for `remove' action");
++        return false;
++    }
+ 
+     catalog = read_catalog(f);
+     if (catalog == NULL)
+@@ -235,7 +246,7 @@
+         }
+     }
+ 
+-    write_catalog(catalog, f);
++    res &= write_catalog(catalog, f);
+     xmldoc_free(catalog);
+ 
+     return res;
+@@ -312,6 +323,12 @@
+     tdata = get_type_info(type);
+     if (tdata == NULL)
+         return false;
++    if (tdata->t_params == 0 ||
++        (tdata->t_params == 1 && replace != NULL) ||
++        (tdata->t_params == 2 && replace == NULL)) {
++        warnx("parameter count mismatch for type `%s'", type);
++        return false;
++    }
+ 
+     if (search_entry(XMLDOC_ROOT(c), type, orig, false) != NULL) {
+         warnx("entry already exists for `%s' of type `%s'", orig, type);
+@@ -409,9 +426,10 @@
+             XMLNODE_FOREACH_ATTR(aiter, xn) {
+                 if (strcmp(XMLATTR_NAME(aiter), tdata->t_origattr) == 0)
+                     seenorig = true;
+-                else if (strcmp(XMLATTR_NAME(aiter), tdata->t_replattr) == 0)
++                else if (tdata->t_replattr != NULL &&
++                         strcmp(XMLATTR_NAME(aiter), tdata->t_replattr) == 0)
+                     seenrepl = true;
+-                else if (!seenorig && !seenrepl) {
++                else {
+                     warnx("unknown attribute <%s>", XMLATTR_NAME(aiter));
+                     res = false;
+                 }
+@@ -508,9 +526,14 @@
+ {
+     assert(xd != NULL && f != NULL);
+ 
+-    rewind(f);
+-    fflush(f);
+-    ftruncate(fileno(f), 0);
++    if (fseek(f, 0, SEEK_SET) != 0) {
++        warn("cannot seek catalog");
++        return false;
++    }
++    if (ftruncate(fileno(f), 0) != 0) {
++        warn("cannot truncate catalog");
++        return false;
++    }
+ 
+     return xmldoc_write(xd, f);
+ }
+--- a/src/sgml.c
++++ b/src/sgml.c
+@@ -107,7 +107,7 @@
+ static bool read_token_comment(FILE *, struct grstr *);
+ static bool read_token_string(FILE *, struct grstr *);
+ static bool read_token_word(FILE *, struct grstr *);
+-static void write_catalog(FILE *, struct entries *);
++static bool write_catalog(FILE *, struct entries *);
+ 
+ /* --------------------------------------------------------------------- */
+ 
+@@ -120,6 +120,11 @@
+ {
+     bool res;
+     struct entries catalog;
++
++    if (argc == 0) {
++        warnx("too few arguments for `add' action");
++        return false;
++    }
+ 
+     read_catalog(f, &catalog);
+ 
+@@ -146,7 +151,7 @@
+         }
+     }
+ 
+-    write_catalog(f, &catalog);
++    res &= write_catalog(f, &catalog);
+     free_catalog(&catalog);
+ 
+     return res;
+@@ -162,6 +167,7 @@
+ sgml_create(FILE *f)
+ {
+     char buf[] = " Created by " PACKAGE_STRING " ";
++    bool res;
+     struct entry *e;
+     struct entries catalog;
+ 
+@@ -172,10 +178,10 @@
+     e->e_comment = strdup(buf); 
+     LINKLIST_APPEND(&catalog, e);
+ 
+-    write_catalog(f, &catalog);
++    res = write_catalog(f, &catalog);
+     free_catalog(&catalog);
+ 
+-    return true;
++    return res;
+ }
+ 
+ /* --------------------------------------------------------------------- */
+@@ -264,7 +270,7 @@
+         }
+     }
+ 
+-    write_catalog(f, &catalog);
++    res &= write_catalog(f, &catalog);
+     free_catalog(&catalog);
+ 
+     return res;
+@@ -698,26 +704,36 @@
+  * zero bytes before writing anything, to ensure the file contains no
+  * garbage.
+  */
+-static void
++static bool
+ write_catalog(FILE *f, struct entries *catalog)
+ {
++    bool res;
+     struct entry *iter;
+ 
+-    rewind(f);
+-    fflush(f);
+-    ftruncate(fileno(f), 0);
+-
++    if (fseek(f, 0, SEEK_SET) != 0) {
++        warn("cannot seek catalog");
++        return false;
++    }
++    if (ftruncate(fileno(f), 0) != 0) {
++        warn("cannot truncate catalog");
++        return false;
++    }
++
++    res = true;
+     LINKLIST_FOREACH(iter, catalog) {
+         if (iter->e_type == ENTRY_COMMENT) 
+-            fprintf(f, "--%s--\n", iter->e_comment);
++            res &= fprintf(f, "--%s--\n", iter->e_comment) >= 0;
+         else {
+             if (iter->e_field3 == NULL)
+-                fprintf(f, "%s \"%s\"\n\n", iter->e_field1, iter->e_field2);
++                res &= fprintf(f, "%s \"%s\"\n\n", iter->e_field1,
++                               iter->e_field2) >= 0;
+             else
+-                fprintf(f, "%s \"%s\"\n\t\"%s\"\n\n", iter->e_field1,
+-                        iter->e_field2, iter->e_field3);
+-        }
+-    }
++                res &= fprintf(f, "%s \"%s\"\n\t\"%s\"\n\n", iter->e_field1,
++                               iter->e_field2, iter->e_field3) >= 0;
++        }
++    }
++
++    return res;
+ }
+ 
+ /*

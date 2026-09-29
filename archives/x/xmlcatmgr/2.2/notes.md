@@ -1,0 +1,15 @@
+# xmlcatmgr 2.2 adaptation notes
+
+- Source: MacPorts mirror tarball, SHA256 `ea1142b6aef40fbd624fc3e2130cf10cf081b5fa88e5229c92b8f515779d6fdc`.
+- Build: Conan 2 Autotools recipe with OHOS Clang and two source patches.
+- Tests: eleven written consumer scenarios; no upstream automated cases in the release tarball.
+- H1 004: configure returned zero but `config.status` reported permission errors; Makefile and config.h were absent, so make failed. Functional and Conan tests were not run.
+- H1 005: the same source, recipe, patch, and profile were used with a probed private `/data` build root; configure generated Makefile and config.h.
+- H1 005 follow-up: native make succeeded on one retry; the AArch64 binary passed 11/11 functional scenarios. A separate fresh Conan create then failed at a Clang `Interrupted system call` during configure.
+- H1 006: a new private Conan cache completed forced source build and package creation; `test_package` passed 11/11 scenarios and recorded 63 commands. The package binary is ELF64 AArch64 PIE.
+- H1 007: the formal `finish` ran against the exact reviewed 11-file tree on upstream main `d47316a`. Its inner `conan-verify` built from source and ran `test_package` 11/11; W3 `setup.sh` and `build_and_test.sh` both returned zero, with 11/11 consumer scenarios and 63 command records. The tool generated `.ci-result.json` with exit code zero and a matching W3 log hash.
+- H1 007 `finish` itself returned one: the upstream knowledge completeness check reported existing graph fields and two unreferenced `knowledge_gained` entries, `gen_summary` raised `'str' object has no attribute 'append'`, and submit readiness lacked `packaging/` and `.staging-verified`. The two observations remain in these notes; `knowledge_gained` is empty because no reviewed knowledge entry is being contributed. Do not report the overall finish as passed. Raw 007 evidence is archived separately.
+- PR #12590 at head `46cb7a8` failed official CI builds #60791, #61593, and #61827: `config.status` could not write into a `confstat*` directory under the official Conan build cache. Consumer tests did not run in those builds.
+- H1-001 tested an initial write-probe patch. Its baseline showed permission errors and no Makefile/config.h, and its candidate exited early; that patch was discarded.
+- H1-002 tested the revised 0002 patch against a controlled non-writable `mktemp` directory. The baseline again produced no Makefile/config.h despite configure exit zero; the candidate generated both files with configure exit zero. A fresh private Conan cache then built the AArch64 package and passed 11/11 consumer scenarios (63 commands). This does not reproduce the official Worker's identity, ACL, mount, or `/storage` path.
+- The software-level `commands.json` is required by L0k/PF8; PF9 currently rejects that path shape in the local preflight. The revised tree still needs affected W3 and independent final review. A new-head official CI run is needed to establish whether the patch fixes the official Worker.
