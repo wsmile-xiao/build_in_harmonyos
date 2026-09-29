@@ -59,10 +59,11 @@ class UnadfConan(ConanFile):
 
     exports_sources = "patches/*", "*.txt"
 
-    def export(self):
-        # Both required for apply_conandata_patches() to find the patch files
-        # in the exported recipe: this copies them into the cache alongside
-        # conandata.yml, which is where build() looks for them.
+    def export_sources(self):
+        # Both halves are required for apply_conandata_patches() to work: this
+        # copies the patch files into the exported recipe (build() looks for
+        # them next to conandata.yml in the cache), and it is a no-op unless
+        # conandata's `patches` is the flat list form.
         export_conandata_patches(self)
 
     def layout(self):
