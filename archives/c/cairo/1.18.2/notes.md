@@ -1,56 +1,28 @@
-# cairo 1.18.2 适配笔记
+# cairo 1.18.2 HarmonyOS PC adaptation notes
 
-## 编译环境
-- 构建系统: meson
-- 编译日期: 2026-05-29
-- 编译器: clang/clang++
-- 状态: built
+## Source and build
 
-## 编译步骤
+- Official release: `https://cairographics.org/releases/cairo-1.18.2.tar.xz`
+- SHA-256: `a62b9bb42425e844cc3d6ddde043ff39dbabedd1542eba57a2eb79f85889d45a`
+- Upstream tag `1.18.2` resolves to commit `200441e6855854eb4dbf338e44d67b00ababe07f`.
+- Meson, OHOS AArch64, shared Cairo library. X11/XCB/Quartz/DWrite and cairo-gobject are disabled; PNG, FreeType, and zlib are enabled; Fontconfig is disabled.
+- Source patches preserve Cairo temporary-file behavior on the read-only OHOS `/tmp`: prefer `TMPDIR`, then fall back from `O_TMPFILE` to `mkstemp`.
 
-1. 设置环境变量：TMPDIR=/data/storage/el2/base/cache
-2. meson setup builddir --prefix=/storage/Users/currentUser/usr/local --buildtype=release -Dxlib=disabled -Dxcb=disabled -Dfontconfig=disabled
-3. meson compile -j4
-4. meson install
+## Knowledge captured
 
-## 遇到的问题与解决方案
+Cairo 1.18.2 registers one Meson test executable, but that executable runs hundreds of named Cairo image/rendering cases. `meson test --list` therefore understates the test corpus; count the runner's `results.txt` records and summary after running it. Optional Ghostscript, Poppler GLib, and librsvg integrations are detected independently when tests use Meson's `auto` mode.
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | 编译失败：FC_HINT_FULL 等常量未定义 | fontconfig 未安装，xlib 后端需要 fontconfig | 禁用 xlib/xcb/fontconfig 后端 |
+## Dependency revisions
 
-## 源码修改
+- `pixman/0.46.4`
+- `libpng/1.6.58`
+- `freetype/2.14.3`
+- `zlib/1.3.1.1`
 
-无补丁。cairo 1.18.2 已移除 GL/GLES 后端，直接使用 meson 构建。
+## Verification
 
-## 依赖版本
-
-- pixman: 0.46.4
-- freetype2: 26.6.20
-- libpng: 1.6.43
-- glib-2.0: 2.88.0
-- zlib: 1.3.1
-
-## 验证结果
-
-```bash
-pkg-config --modversion cairo
-1.18.2
-```
-
-## 交付物
-
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| libcairo.so.2.11802.2 | 1.8MB | 核心库 |
-| libcairo-gobject.so.2.11802.2 | 4.0MB | GObject 绑定 |
-| libcairo-script-interpreter.so.2.11802.2 | 174KB | 脚本解释器 |
-
-## 注意事项
-
-1. cairo 1.18.2 已移除 OpenGL/GLES 后端，无需 -Dgl-backend=disabled 等选项
-2. 如果需要 xlib/xcb 支持，需要先安装 fontconfig
----
-
-**编译结束**: 2026-05-29 22:14
-**最终状态**: built
+- OHOS AArch64 `conan create` completed successfully. Cairo built and packaged; the three non-slow Meson checks passed (3/3).
+- The real Conan test package compiled and ran through `self.run`; Cairo 1.18.2 painted and read back ARGB32 `0xffff0000` (1/1).
+- A separate upstream `CAIRO_TEST_TARGET=image` case run recorded 1,094 outcomes before `pthread-show-text` stalled in a child blocked on a futex: 909 PASS, 167 FAIL, 18 XFAIL, 0 ERROR, 0 UNTESTED. Excluding expected failures, pass rate was 909/1,076 (84.48%). This is a partial run, not a full-suite pass.
+- An earlier unfiltered attempt also stalled before Meson produced a summary. At interruption it had emitted 571 case outcomes (249 PASS, 305 FAIL, 15 UNTESTED, 1 ERROR, 1 XFAIL); disabled X backends and OHOS image differences are included in that diagnostic run.
+- The OHOS loader rejected Fontconfig from the Conan cache (`Permission denied`), so the package disables Fontconfig while retaining FreeType. Meson install also changes the linked Cairo library's RPATH and invalidates its linker signature; packaging restores the signed build-tree ELF when `binary-sign-tool` is unavailable.
