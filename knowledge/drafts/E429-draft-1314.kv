@@ -1,0 +1,104 @@
+# ═══ Draft knowledge entry — OHOS musl libc 无 shadow 口令 API（getspnam 族）═══
+# Timestamp: 2026-09-28
+# Software: polkit/124.1（依赖先行派生包，为 lomiri-polkit-agent 0.3.3 提供 polkit-agent-1）
+# Gate: conan create（ohos-aarch64 profile，clang 15）—— 首次失败于此模式，裁剪后通过
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the defect evidence below
+#   2. Rename to E4XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#
+# 一句话：musl 系 libc（含 OHOS）不实现 glibc 扩展的 shadow 口令数据库 API，
+#         依赖 getspnam/getspent/sgetspent 的组件必须裁剪或显式桩化，不存在"补依赖即可"的解法。
+#
+# 格式说明：多行字段的**首行必须紧跟冒号**（draft-review 只读冒号后首行判质量），
+#           续行以空格缩进；不使用 > / | 块标记（两种解析器均不识别）。
+
+id: E429
+trigger_tool: clang|meson|cmake|gcc|ld
+phase: compilation,linking
+error_signature: incompatible integer to pointer conversion initializing 'struct spwd|undefined symbol: getspnam|undefined reference to .getspnam|implicit declaration of function .getspnam|did you mean: .?getpwnam
+
+severity: 2
+category: libc,musl,headers,limitation,platform
+match_keywords: getspnam, getspent, sgetspent, shadow.h, struct spwd, /etc/shadow, shadow password database, musl, glibc extension, implicit declaration, int-conversion, -Werror, undefined symbol getspnam, polkitagenthelper-shadow, polkit agent helper, libpolkit-agent-1, privhelper, authenticate, musl missing API, fgetgrent, fgetpwent
+title: OHOS musl libc 无 shadow 口令 API（shadow.h 无 getspnam）——依赖该 API 的组件须裁剪或桩化
+
+root_cause: shadow 口令数据库 API（getspnam/getspent/sgetspent/getspnam_r）是 glibc 扩展，不属 POSIX。
+  OHOS 的 libc 基于 musl，musl 只实现 passwd/group 的 getpwnam/getpwuid/getpwent/getgrnam
+  等接口，不提供 /etc/shadow 读取。因此在 OHOS sysroot 上：shadow.h 无这些函数声明 →
+  C 代码隐式声明 → clang 15 默认按错误处理（-Wint-conversion）；即使强转也无实现 →
+  链接期 undefined symbol: getspnam。该缺口属 libc 本体，无法用 requires 依赖包补齐
+  （不存在可依赖的 shadow 库，且 /etc/shadow 语义在 OHOS 上不存在）。
+  同族现象：musl 亦缺 fgetgrent()/fgetpwent()，上游测试用的 mocklibc 需本地补实现（仅测试用途）。
+
+affected_scope: 判定口径=源码含 getspnam/getspent/sgetspent 或 #include <shadow.h> 且位于必需路径的组件。
+  OHOS 上不可能获得完整功能，只能裁剪或桩化。已实证 polkit（agent helper
+  polkitagenthelper-shadow.c，musl 路线下必须排除该 helper；包内明确不交付
+  polkit-agent-helper-1）。预期同类：提权/认证代理（sudo 系、polkit agent 消费方）、
+  账户与影子口令管理工具、打印/域认证后端（cups 的 PAM/shadow 后端）、任何硬依赖
+  /etc/shadow 的后端服务。不适用：只用 getpwnam/getpwuid/getgrouplist 的库（musl 有）。
+
+verification_cmd: 先探测能力，再验裁剪结果：
+  printf '#include <shadow.h>\nint main(void){return getspnam("root")!=0;}\n' > $HOME/tmp/probe.c
+  $OHOS_CC --sysroot=$SYSROOT -c $HOME/tmp/probe.c -o $HOME/tmp/probe.o   # 期望: 隐式声明/未知类型报错
+  $OHOS_NM -D $SYSROOT/usr/lib/libc.so | grep -c getspnam                 # 期望: 0（对照 getpwnam 非 0）
+  conan create archives/p/polkit/124.1 -pr:h=ci/conan/profiles/ohos-aarch64 \
+      -pr:b=ci/conan/profiles/ohos-aarch64
+  nm -D <pkg>/lib/libpolkit-agent-1.so | grep -c getspnam                # 期望: 0
+  test ! -e <pkg>/bin/polkit-agent-helper-1                              # 期望: helper 不交付
+
+rec_priority: 1
+rec_approach: disable-optional-component-via-upstream-switch
+rec_description: 先用上游/构建系统的能力探测（cmake check_symbol_exists、meson
+  cc.has_function，或 configure 的 AC_CHECK_FUNCS）确认 getspnam 缺失，再关掉依赖该 API
+  的上游可选组件，交付"能用的那部分"，并把缺口写进 notes.md/README.md 与包元数据
+  （下游据此决定运行期行为）。关键：只使用上游已存在的开关，不在补丁里引入平台宏（R8/PF5）。
+rec_command: cmake: include(CheckSymbolExists); check_symbol_exists(getspnam shadow.h HAVE_GETSPNAM)
+  meson: cc.has_function('getspnam', prefix: '#include <shadow.h>')  # 失败则不上 subdir('privhelper')
+  conan: conan create archives/p/polkit/124.1 -pr:h=ci/conan/profiles/ohos-aarch64 \
+             -pr:b=ci/conan/profiles/ohos-aarch64      # polkit 实例复用上游 -Dlibs-only=true
+  验收: nm -D <pkg>/lib/libpolkit-agent-1.so | grep -c getspnam   # 0
+rec_auto_fix: false
+
+fallback_priority: 2
+fallback_approach: explicit-failing-stub-with-errno-ENOSYS
+fallback_description: 组件不可裁剪（必须存在符号才能构建或被 dlopen）时，提供只让编译链接
+  通过、运行期显式失败的桩：返回 NULL 并置 errno=ENOSYS，配 #error/运行期告警保持下游可观测；
+  桩内不得返回"成功"，以免鉴权路径静默放行。
+fallback_command: #if !defined(HAVE_GETSPNAM)
+  struct spwd *getspnam(const char *name) { (void)name; errno = ENOSYS; return NULL; }
+  #endif
+fallback_auto_fix: false
+
+forbid_1_pattern: #ifdef\s+__OHOS__[\s\S]{0,200}(return\s+0|return\s+NULL|;\s*\})
+forbid_1_reason: R6/R8：平台宏守卫内必须有实质逻辑，空壳 stub 只为消除编译错误属明确禁止；
+  且补丁中出现平台宏会被 PF5 在建 PR 前机械拦截（例外须 PR 说明）。
+forbid_1_consequence: 掩盖能力缺口（功能静默不可用）、W4 审计与 PF5 拦截、PR 被退。
+forbid_2_pattern: -Wno-int-conversion|-Wno-implicit-function-declaration
+forbid_2_reason: 抑制告警只把失败从编译期推迟到链接期（undefined symbol），不解决能力缺失。
+forbid_2_consequence: 构建仍失败，且掩盖真实根因、浪费 CI 轮次。
+
+principles: P001,P004
+causes:                 []
+caused_by:              []
+similar_to:             [E093]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               doc/E429.md
+last_updated:           2026-09-28
+source_event: polkit/124.1 conan create 首次失败：polkitagenthelper-shadow.c 隐式声明 getspnam
+
+authors: weijiapan <weijiapan@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 1314
