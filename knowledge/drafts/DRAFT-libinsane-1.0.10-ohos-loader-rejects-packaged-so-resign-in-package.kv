@@ -1,0 +1,85 @@
+#====================================================================
+# DRAFT-libinsane-1.0.10-ohos-loader-rejects-packaged-so-resign-in-package
+# 路径 B（B判定=create，Issue #3549）— 成对草稿，随本 PR 的 knowledge/drafts/ 提交
+# 注：值一律用块标量（>- / |-），避免冒号+空格被 YAML 当成映射
+#====================================================================
+
+id: DRAFT-libinsane-1.0.10-ohos-loader-rejects-packaged-so-resign-in-package
+title: >-
+  OHOS 加载器拒收配方自己 install 出的 .so：.codesign 段在（4096B）、LD_LIBRARY_PATH 十二个目录全给对，
+  仍报 Error loading shared library <name>: (needed by <bin>) 且 errno 为空、rc=127；
+  生产者必须在 package() 里 remove-section → selfSign → chmod 重签
+trigger_tool: conan|meson|dynamic-loader|binary-sign-tool
+phase: packaging|testing|runtime
+error_signature: >-
+  Error loading shared library [a-z0-9_.+-]+\.so[0-9.]*: \(needed by [^)]*\)|
+  Error relocating [^:]+: [a-z_]+: symbol not found|
+  ConanException: Error 127 while executing
+severity: "1"
+category: platform, security, runtime, packaging, signing
+match_keywords: .codesign, binary-sign-tool, llvm-objcopy, selfSign, Error loading shared library, needed by, symbol not found, rc 127, errno 空, package 重签, loader 拒收, SONAME
+
+root_cause: >-
+  HarmonyOS 动态链接器只加载「对本机有效」的 ELF 签名。meson/autotools 装出来的 .so 带着链接期写入的
+  .codesign 占位段（实测 4096B），装载器判它无效 ⇒ 在解析 NEEDED 的第一步就拒绝，报文形如
+  Error loading shared library libinsane.so.1: (needed by ./test_libinsane)，**errno 位置是空的**
+  （不是 Permission denied、不是 No such file），随后连串 Error relocating … symbol not found，
+  外层 conan 记 Error 127 while executing。路径、权限、SONAME、LD_LIBRARY_PATH 全都正确也没用——
+  这一条与「库找不着」是两回事，按缺库去排查会白费整轮。
+
+affected_scope: >-
+  所有产出共享库（.so）的 Conan 配方在本平台的交付与消费两侧：生产者 package() 装出的 .so 若不重签，
+  本包自己的 test_package 跑不起来，下游引用方同样拒载。
+  不适用：纯可执行包（走 E077 的 strip 后重签族）、以及「从已签名父包拷贝出的私有副本」（走 E452）。
+
+verification_cmd: >-
+  四臂对照（同一台机、只换签名状态）：①原样 .so → rc=127；②只把 LD_LIBRARY_PATH 指对（十二个依赖目录
+  全给）→ 仍 rc=127；③把 .so 平铺成实体文件（排除 SONAME 软链/HMDFS 因素）→ 仍 rc=127；
+  ④ llvm-objcopy --remove-section .codesign F && binary-sign-tool sign -inFile F -outFile F
+  -selfSign 1 && chmod a+x F → rc=0 且断言全过。判据以 ④ 为决定性：能修好的只有「重新签名」。
+
+rec_priority: "1"
+rec_approach: resign-shared-libs-in-package
+rec_description: >-
+  在配方 package() 末尾对 package_folder/lib 下所有 *.so 与 *.so.* 逐个执行「去掉旧 .codesign →
+  binary-sign-tool -selfSign 1 重签 → 恢复属主执行位」。生产者签自己的产物，不碰 conan 缓存里他人的包
+  （与 E452 的任务私有副本、以及 forbid「不得改依赖缓存」不冲突）。
+  工具缺失（交叉 SDK 环境）时 warning 并跳过，不把配方判死。
+rec_command: >-
+  for f in <package_folder>/lib/*.so*; do llvm-objcopy --remove-section .codesign "$f" || true;
+  binary-sign-tool sign -inFile "$f" -outFile "$f" -selfSign 1; chmod a+x "$f"; done
+rec_auto_fix: "false"
+rec_impl: package-hook
+
+fallback_priority: "2"
+fallback_approach: sign-on-demand-in-test-package
+fallback_description: >-
+  若不便在 package() 改配方，可在 test_package 的 test() 前对拷出的副本重签后执行；
+  但不得往 conan 缓存里的依赖包目录写东西（跨任务污染），也不得以「跳过该断言」代替。
+fallback_command: >-
+  llvm-objcopy --remove-section .codesign <tmp>/lib.so.1 &&
+  binary-sign-tool sign -inFile <tmp>/lib.so.1 -outFile <tmp>/lib.so.1 -selfSign 1 &&
+  LD_LIBRARY_PATH=<tmp> ./test_bin
+fallback_auto_fix: "false"
+fallback_impl: test-package
+
+forbid_1_pattern: ln -sf.*\.so|cp .*\.so.* /storage/Users
+forbid_1_reason: HMDFS 对 .so 软链接与跨目录拷贝的加载支持不完整，且拷贝会掩盖「签名本身无效」这一根因
+forbid_1_consequence: 症状时好时坏，换台机或清缓存后复发，且根因未修
+forbid_2_pattern: llvm-objcopy.*conan.*cache|binary-sign-tool.*conan.*cache
+forbid_2_reason: 依赖包是共享不可变输入，替别人改缓存等于跨任务污染
+forbid_2_consequence: 其它任务读到被改过的包，制品身份不可核
+
+principles:
+causes:
+caused_by:
+similar_to: E077, E135, E452, E517
+conflicts_with:
+prerequisite_of:
+doc_file: doc/DRAFT-libinsane-1.0.10-ohos-loader-rejects-packaged-so-resign-in-package.md
+last_updated: "2026-09-28"
+source_event: >-
+  libinsane 1.0.10（任务 8230）2026-09-28 适配轮：G2 曾红在 test() 的 Error 127；
+  四臂对照见 verification_cmd，④臂修复后 G2 PASS、消费者 14/14 全绿
+source_commit: feat/libinsane-1.0.10 @ 07ddf1b7b9b067747d0591cc556e95dc13f73f18（B 机）
+authors: 收尾-7
