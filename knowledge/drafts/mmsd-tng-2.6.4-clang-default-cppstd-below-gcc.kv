@@ -1,0 +1,101 @@
+#====================================================================
+# Draft: clang 的默认 C++ 标准低于 gcc —— 只依赖"编译器默认值"的 meson 工程在 OHOS
+#        上编译第三方 C++ 头文件时直接失败（GCC 环境无症状）
+# 触发事件: mmsd-tng 2.6.4（meson 未声明 cpp_std，C++ 源引用 libphonenumber→abseil）
+# 日期: 2026-09-29
+#====================================================================
+
+id:                     mmsd-tng-2.6.4-clang-default-cppstd-below-gcc
+trigger_tool:           clang|meson|conan
+phase:                  compilation
+error_signature:        C\+\+ versions less than C\+\+17 are not supported|no member named '(conjunction|disjunction|negation|is_reference_v|is_same_v)' in namespace 'std'|unknown template name 'negation'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               compiler, clang, meson, portability, cxx-standard
+match_keywords:         cpp_std, C++17, gnu++14, gnu++17, abseil, absl, policy_checks.h, type_traits.h, conjunction, is_reference_v, meson project_options, compiler.cppstd, clang 15, GCC default, -std=c++17, HarmonyOS
+title:                  meson 工程未声明 cpp_std 时 clang 15 默认 gnu++14（gcc 同期默认 gnu++17）——依赖 abseil/新标准 header 的 C++ 源在 OHOS 上编译失败；由 profile 的 compiler.cppstd 经 MesonToolchain 映射 cpp_std=c++17 解决，并加兜底
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             编译器默认语言标准不同：
+                          gcc ≥11 默认 `-std=gnu++17`；clang 15 默认 **`gnu++14`**（clang 16 起才默认 gnu++17）。
+                        上游 meson.build 只写 `project('x','c','cpp')`、不声明 `cpp_std`，
+                        于是 meson 不下发 `-std=`，交给编译器默认值：
+                          - Debian/gcc 环境：C++17 → abseil 正常；
+                          - OHOS/clang 15：C++14 → abseil 头文件直接
+                            `#error "C++ versions less than C++17 are not supported."`，
+                            随后 `std::conjunction` / `std::is_reference_v` 等 C++17 符号
+                            级联报 `no member named ...`（**首错是那句 #error，不是这些级联**）。
+                        C 侧同理存在默认标准差异（clang 15 默认 gnu17，一般足够），主要风险在 C++ 侧。
+affected_scope:         用 meson/cmake 构建、**依赖第三方 C++ 头库要求新标准**（abseil、protobuf、
+                        range-v3、fmt ≥9、tl-expected 等）而不显式声明标准版本的工程；
+                        从 gcc 主环境迁到 clang 主环境（OHOS/macOS）时集中暴露。
+verification_cmd:       1) 确认编译命令里没有 -std=c++NN：
+                           `ninja -C build -t commands | grep '<file>.cpp'` → 无 `-std=`
+                        2) 看首错：编译日志最前面应出现
+                           `absl/base/policy_checks.h:…: error: "C++ versions less than C++17 are not supported."`
+                        3) 修复后复验：同一命令出现 `-std=c++17`，且上游单元测试全绿（本例 4/4 OK）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           let-profile-cppstd-drive-meson-cpp_std-plus-fallback
+rec_description:        优先让 conan 侧驱动：profile 里 `compiler.cppstd=17` 会被 MesonToolchain
+                        自动映射（`to_cppstd_flag()`）成 meson 的 `cpp_std=c++17`，无需改源码。
+                        在 generate() 里再加一层**兜底**：若 `tc.cpp_std` 为空（profile 未设
+                        cppstd / 非标准 profile），显式设 `tc.cpp_std = "c++17"`——
+                        避免"换个 profile 就退回 gnu++14 再炸一次"。
+                        若确认上游需要更高标准，用 `project_options["cpp_std"]="c++20"` 覆盖即可。
+rec_command:            tc = MesonToolchain(self)
+                        ...
+                        if not tc.cpp_std:
+                            tc.cpp_std = "c++17"      # abseil 等第三方头库的硬下限
+rec_auto_fix:           true
+rec_impl:               conan-recipe-helper (generate())
+
+fallback_priority:      2
+fallback_approach:      set-cpp_std-in-upstream-meson.build
+fallback_description:   在上游 meson.build 的 project() 里加 `default_options: ['cpp_std=c++17']`。
+                        可行但属改上游构建描述（需要补丁 + 在 PR 说明理由），
+                        能通过 conan profile 解决时不应动源码。
+fallback_command:       project('x','c','cpp', default_options: ['cpp_std=c++17'])
+fallback_auto_fix:      false
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       -Wno-error.*(conjunction|is_reference_v|C\+\+ versions)
+forbid_1_reason:        `#error "C++ versions less than C++17 are not supported."` 是预处理期
+                        主动 #error，不是警告；关警告无效，真正的问题是 -std 没下发。
+forbid_1_consequence:   编译依旧失败，误判为"abseil 版本不兼容"去换依赖版本。
+forbid_2_pattern:       CXXFLAGS=.*-std=c\+\+14   /  add_project_arguments\('-std=c\+\+11'\)
+forbid_2_reason:        降标准只会把故障从"头文件编译失败"推到"运行期 ABI 不一致"，
+                        且与依赖包（abseil/protobuf，按 C++17 构建）的 ABI 不匹配。
+forbid_2_consequence:   链接/运行期更隐蔽的崩溃。
+
+principles:             P004, P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/mmsd-tng-2.6.4-clang-default-cppstd-below-gcc.md
+last_updated:           2026-09-29
+source_event:           mmsd-tng 2.6.4 适配：只有 1 个 C++ 文件 src/phone-utils.cpp 引用
+                        <phonenumbers/...>（→ abseil），meson 未声明 cpp_std 时
+                        clang 15 报 "C++ versions less than C++17 are not supported."；
+                        profile compiler.cppstd=17 映射 cpp_std=c++17 后编译通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk Agent <agent@opendesk.local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+
+draft: true
+contributor_id: M5TN

@@ -1,0 +1,117 @@
+#====================================================================
+# Draft: OHOS libc 的 posix_spawn/execvp 不按 PATH 解析裸命令名 ——
+#        环境里 CC=clang / AR=llvm-ar 这类"名字"会让构建系统直接报找不到编译器
+# 触发事件: mmsd-tng 2.6.4（Meson）HarmonyOS PC 适配首个真实错误
+# 日期: 2026-09-29
+#====================================================================
+
+id:                     mmsd-tng-2.6.4-ohos-posix-spawn-bare-command-name
+trigger_tool:           meson|ninja|cmake|autotools|conan|clang
+phase:                  configuration|compilation
+error_signature:        Unknown compiler\(s\): \[\['clang'\]\]|Running `clang --version` gave .* No such file or directory|FileNotFoundError.*clang|sh: .*: not found.*(cc|gcc|clang)|compiler .* not found.*PATH
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               ohos-platform, toolchain, build-system, portability
+match_keywords:         posix_spawn, execvp, PATH resolution, bare command name, Unknown compiler, clang --version, Errno 2 No such file or directory, CC=clang, AR=llvm-ar, meson setup, harmonyos, HarmonyOS PC, 绝对路径, toolchain, shutil.which, subprocess
+title:                  OHOS libc 的 posix_spawn 不按 PATH 解析裸命令名：`CC=clang` 使 meson 报 Unknown compiler(s)（文件明明在 PATH 里、shell 里可直接执行）——构建工具链必须一律绝对路径
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 上 Python subprocess 走 `os.posix_spawn`；其 PATH 查找语义与
+                        POSIX shell 的 execvp 不同——传入不含 `/` 的裸命令名时不会（可靠地）
+                        在 PATH 中检索，直接以 ENOENT 失败。
+
+                        实测对照（同一 shell、同一 PATH=/data/service/hnp/bin:...）：
+                          shutil.which("clang")                  → '/data/service/hnp/bin/clang'   （Python 自己找得到）
+                          subprocess.run(["clang","--version"])   → FileNotFoundError(2)            （内核/loader 层找不到）
+                          subprocess.run(["/data/service/hnp/bin/clang","--version"]) → returncode 0
+                        且把 PATH 收窄成只有该目录仍然失败 → **确认不是 PATH 内容问题，而是查找机制问题**。
+
+                        影响面：所有把环境变量值原样拿去 Popen 的构建系统——
+                          - meson：读 `CC`/`CXX` 环境变量做编译器探测 → `Unknown compiler(s): [['clang']]`
+                          - meson native/cross 文件的 `[binaries] ar/strip/as/nm/ranlib`（来自 `AR=llvm-ar` 等裸名）
+                          - ninja 直接 execvp 命令行首个 token 时同理
+                        为什么本地"看起来没问题"：很多工具自己先做 which 解析（meson 对
+                        pkg-config/ninja 就是如此，能找到并打印绝对路径），**只有编译器探测
+                        这一步是原样使用环境变量值**——于是故障面非常窄、非常容易被误判成
+                        "工具链没装"。
+affected_scope:         所有在 HarmonyOS/OHOS 主机上做原生或交叉构建、且工具链通过
+                        CC/CXX/AR/AS/STRIP/NM/RANLIB 环境变量或构建系统 [binaries] 段的
+                        **裸命令名**传入的软件（Meson/Autotools/CMake/自研脚本皆然）。
+verification_cmd:       1) 证明机制（非 PATH 内容）：
+                          python3 -c "import shutil,subprocess;print(shutil.which('clang'));\
+                          print(subprocess.run(['clang','--version'],capture_output=True))"
+                          → 前者命中路径、后者 FileNotFoundError
+                        2) 证明修复：
+                          CC=/data/service/hnp/bin/clang CXX=/data/service/hnp/bin/clang++ \
+                          meson setup builddir src → 打印
+                          "C compiler for the host machine: /data/service/hnp/bin/clang (clang 15.0.4)"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           resolve-toolchain-to-absolute-paths-in-generate
+rec_description:        在 conanfile.py 的 generate() 里把工具链**全部解析成绝对路径**，双管齐下：
+                          ① buildenv_info.define("CC"/"CXX"/"AR"/"AS"/"STRIP"/"NM"/"RANLIB", <绝对路径>)
+                             —— 覆盖环境里的裸名（构建系统读 env 时拿到绝对路径）；
+                          ② MesonToolchain 的 binaries/ar/as_/strip/nm/ranlib 以及 tool_requires
+                             提供的 meson/ninja 也写成绝对路径 —— 覆盖构建系统自己写进
+                             native/cross 文件的 bare name。
+                        路径用 `shutil.which()` 从 PATH 解析（不要硬编码 /data/service/hnp/bin），
+                        缺失即报错（ConanException）而不是静默回退——避免 R33「裸用未定义
+                        shell 变量导致静默失败」。
+rec_command:            for env_var, exe in (("CC","clang"),("CXX","clang++"),("AR","llvm-ar"),
+                                               ("AS","llvm-as"),("STRIP","llvm-strip"),
+                                               ("NM","llvm-nm"),("RANLIB","llvm-ranlib")):
+                            path = shutil.which(exe) or raise ConanException(f"{exe} not found")
+                            self.buildenv_info.define(env_var, path)
+                        tc.binaries["c"] = shutil.which("clang"); tc.binaries["cpp"] = shutil.which("clang++")
+rec_auto_fix:           true
+rec_impl:               conan-recipe-helper (generate())
+
+fallback_priority:      2
+fallback_approach:      profile-conf-compiler-executables
+fallback_description:   profile 的 `[conf] tools.build:compiler_executables={"c":"/abs/clang","cpp":"/abs/clang++"}`
+                        能覆盖 c/cpp（conan 侧 conf 优先级高于 CC 环境变量），但 **AR/AS/STRIP/NM/RANLIB
+                        不在此配置项覆盖范围内**（仍取自 AR 等 env），所以只做这一层仍会在
+                        archiver/ranlib 步骤踩同一个坑；务必与主方案并用。
+fallback_command:       ci/conan/profiles/ohos-aarch64 的 [conf] 段（仓库已有）
+fallback_auto_fix:      false
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       yum install clang|apt install clang|ln -sf .*/clang /usr/local/bin/clang
+forbid_1_reason:        误判为"工具链缺失"→去装编译器/做软链。文件一直都在 PATH 里，
+                        问题是查找机制；装/软链并不能让 meson 找到它（软链仍是不带 `/` 的名字）。
+forbid_1_consequence:   在错误的根因上反复折腾，任务预算被吃掉（本例首错即属此陷阱）。
+forbid_2_pattern:       export PATH=.* && CC=clang   （只改 PATH 不改 CC）
+forbid_2_reason:        PATH 只要有值就不构成问题；不把裸名换成绝对路径，meson 仍拿 "clang" 去 spawn。
+forbid_2_consequence:   依旧 Unknown compiler(s)。
+
+principles:             P012, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/mmsd-tng-2.6.4-ohos-posix-spawn-bare-command-name.md
+last_updated:           2026-09-29
+source_event:           mmsd-tng 2.6.4 适配首个真实错误：meson setup 报
+                        "Unknown compiler(s): [['clang']] / Running clang --version gave
+                        [Errno 2] No such file or directory"；generate() 改绝对路径后
+                        正常识别 C compiler for the host machine: /data/service/hnp/bin/clang
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk Agent <agent@opendesk.local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+
+draft: true
+contributor_id: M5TN
