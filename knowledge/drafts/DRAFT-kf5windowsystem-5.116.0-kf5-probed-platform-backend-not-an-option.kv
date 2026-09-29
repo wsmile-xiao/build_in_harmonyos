@@ -1,0 +1,186 @@
+# ═══ Draft knowledge entry — KDE Frameworks 5 的窗口系统后端是「探测」出来的（X11_FOUND），
+#     不是 KF6 那样的选项：OHOS 上要用 CMAKE_DISABLE_FIND_PACKAGE_X11 关，而不是找 -DXXX_X11=OFF。
+#     同一处探测还决定上游测试面：门控目标不配置 + ecm_mark_as_test 不注册 CTest，
+#     于是「上游用例数」必须分三档口径声明。 ═══
+# Timestamp: 2026-09-28
+# Software: kwindowsystem 5.116.0（KDE Frameworks 5；通用：任何 KF5 分支的「探测型」平台后端）
+# Gate: L0（配方可解析）/ L1（上游测试 + test_package）/ L5（制品树）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-kf5windowsystem-5.116.0-kf5-probed-platform-backend-not-an-option
+trigger_tool:           cmake|find_package|conan
+phase:                  configure
+error_signature:        Could NOT find X11|
+                         X11_FOUND.*(NOTFOUND|FALSE)|
+                         Could not find a package configuration file provided by "X11"|
+                         KWINDOWSYSTEM_HAVE_X11|
+                         ecm_add_test\(.*XCB:: |
+                         CMake Error at autotests/CMakeLists.txt.*XCB
+
+severity:               2
+category:               cmake, kde-frameworks, cross-compile, configuration, ohos
+match_keywords:         KDE Frameworks 5, KF5, KWINDOWSYSTEM_X11, KWINDOWSYSTEM_WAYLAND,
+                         KWINDOWSYSTEM_HAVE_X11, find_package(X11), X11_FOUND, XCB::ICCCM,
+                         XCB::KEYSYMS, CMAKE_DISABLE_FIND_PACKAGE_X11, ecm_add_test,
+                         ecm_mark_as_test, EXCLUDE_FROM_ALL, dummy backend, kwindoweffects_dummy,
+                         KWindowSystemPrivateDummy, ctest -N, 上游用例数口径, OHOS
+
+title:                  KF5 的窗口系统后端由顶层 `find_package(X11)` 探测结果决定（没有 `KWINDOWSYSTEM_X11` 选项）：OHOS 用 `CMAKE_DISABLE_FIND_PACKAGE_X11=TRUE` 关断，并据此重算上游用例数口径
+
+root_cause: >
+  KDE Frameworks 5 与 KF6 在**同一上游仓库**（invent.kde.org/frameworks/kwindowsystem）
+  里对平台后端用了两套完全不同的机制：
+
+  * **KF6（6.14.0 起）**：显式选项 `KWINDOWSYSTEM_X11` / `KWINDOWSYSTEM_WAYLAND`，
+    关闭后端 = `-DXXX_X11=OFF`。
+  * **KF5（5.116.0）**：**没有任何后端选项**。顶层 CMakeLists.txt 自己探测——
+    `find_package(X11)` 之后 `set(KWINDOWSYSTEM_HAVE_X11 ${X11_FOUND})`（本例第 69 行），
+    后端由探测结果决定；`autotests/` 里还有**第二处** `find_package(X11)`
+    以及一处无条件的 `find_package(XCB COMPONENTS XCB ICCCM KEYSYMS)`。
+
+  于是在 OHOS（无 X11/Wayland 栈）上，照抄 KF6 配方的「关选项」做法无从下手：
+  没有选项可关。若直接让探测自然失败，`autotests/CMakeLists.txt` 的
+  `kwindowsystem_unit_tests()` 会把 `XCB::ICCCM` / `XCB::KEYSYMS` 当链接库塞进
+  `ecm_add_test(...)` 的 `LINK_LIBRARIES`，而这两个 imported target 在上游的
+  `if(X11_FOUND)` 为假时根本不存在，配置阶段即报「target was not found」。
+
+  正确的关断点是 CMake 内建变量 **`CMAKE_DISABLE_FIND_PACKAGE_X11=TRUE`**：
+  它让 `find_package(X11)` 直接以 not-found 返回（**不报错**），于是顶层与
+  `autotests/` 两处的 `X11_FOUND` 同时为假，`KWINDOWSYSTEM_HAVE_X11=0`，
+  `src/platforms/xcb` 不编译，库退回到**始终参与编译**的 dummy 后端
+  （`src/kwindoweffects_dummy.cpp` + `KWindowSystemPrivateDummy`）。
+  这与 KF6 配方把两个后端全关掉后的最终状态**一致**，但用的是不同的开关。
+
+  同一处探测还决定了**上游测试面**，进而决定「上游用例数」该怎么报：
+  `if(X11_FOUND)` 块内的目标根本不进入配置（本例 12 个 unit + 3 个 executable），
+  `tests/` 里 `if(KWINDOWSYSTEM_HAVE_X11)` 的 3 个不构建，而剩下的
+  `ecm_mark_as_test()` 目标（`tests/` 2 个交互式演示 + 1 个 helper）
+  **只设 `EXCLUDE_FROM_ALL`、不调用 `add_test`**，因此既不构建也不注册。
+  真正注册进 CTest 的只剩无条件的 `ecm_add_test(...)` 一条。
+  上游源码里声明的目标总数（本例 22）与 CTest 注册数（1）差了两个数量级，
+  任何「拿注册数当上游用例数」的写法都会被判少报。
+
+affected_scope: >
+  所有 KF5 分支（5.x）里用「探测」而非「选项」决定平台后端的框架，尤其是
+  kwindowsystem、kglobalaccel、knotifications 这类带 X11/Wayland 平台插件的库；
+  判据是三条同时成立：
+  ① 顶层 CMakeLists.txt 有 `find_package(X11)`（或 Wayland*）但**没有**
+     对应的 `option(...)`；
+  ② 存在形如 `set(<PREFIX>_HAVE_X11 ${X11_FOUND})` 的推导；
+  ③ 后端源码目录（如 `src/platforms/xcb`）被 `if(X11_FOUND)` 包着，且存在一个
+     **不被任何门控包住**的 dummy/fallback 实现。
+  三条齐备时，`CMAKE_DISABLE_FIND_PACKAGE_X11=TRUE` 是最小改动面的关断方式。
+  KF6 分支（6.x）请改走选项路线（`KWINDOWSYSTEM_X11=OFF`），不要套用本条。
+
+verification_cmd: >
+  # 1) 确认「没有后端选项、只有探测推导」（本条与 KF6 的分界）
+  grep -n "option(" CMakeLists.txt | grep -i -E "x11|wayland"        # → 无输出
+  grep -n "find_package(X11)\|KWINDOWSYSTEM_HAVE_X11" CMakeLists.txt autotests/CMakeLists.txt
+  # → CMakeLists.txt:69  set(KWINDOWSYSTEM_HAVE_X11 ${X11_FOUND})
+  # → autotests/CMakeLists.txt:14  find_package(X11)          ← 第二处探测
+
+  # 2) 关闭探测后正常构建（OHOS aarch64）
+  conan create archives/k/kf5windowsystem/5.116.0 \
+      -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+  # → 配置阶段不再出现 XCB::ICCCM / XCB::KEYSYMS not found
+  # → 1/1 Test #1: kwindowsystem-platform-kwindowsystemplatformwaylandtest ... Passed
+  # → 100% tests passed, 0 tests failed out of 1
+
+  # 3) 上游用例数的三档口径（报数前必须逐档核对）
+  grep -cE "add_executable\(|ecm_mark_as_test\(" -r --include=*.txt .   # 朴素扫描口径
+  ctest --test-dir build -N                                            # CTest 实际注册口径
+  grep -rn "if(X11_FOUND)\|if(KWINDOWSYSTEM_HAVE_X11)" autotests/CMakeLists.txt tests/CMakeLists.txt
+  # → 门控之外的目标数 = 源码层面目标上限
+
+  # 4) 上游 `find_package(XCB ...)` 是否也需要一并关掉？
+  curl -sL https://invent.kde.org/frameworks/extra-cmake-modules/-/raw/master/find-modules/FindXCB.cmake \
+    | grep -n "FATAL_ERROR\|find_package_handle_standard_args"
+  # → 只有 find_package_handle_standard_args ⇒ 找不到 XCB 是静默 not-found，
+  #   因此**不需要** CMAKE_DISABLE_FIND_PACKAGE_XCB
+
+rec_priority:           1
+rec_approach:           disable-the-probe-not-the-source
+rec_description: >
+  在配方的 `generate()` 里设 CMake 内建变量
+  `CMAKE_DISABLE_FIND_PACKAGE_X11=TRUE`（**不是**改 CMakeLists、**不是**打补丁、
+  **不是**伪造 X11 头/库）。要点：
+  ① 该变量对**所有**同名 `find_package(X11)` 生效——本例顶层与 `autotests/`
+     两处一次覆盖，不必分别处理；
+  ② 关闭后 `X11_FOUND` 为假，凡是 `if(X11_FOUND)` / `if(<PREFIX>_HAVE_X11)`
+     包住的目标自然不配置、不构建，无需逐个裁剪；
+  ③ 库的公开符号由上游**自带的** dummy 实现提供（不是本地 stub），
+     因此在 test_package 里断言的是「dummy 后端的可观测默认值」
+     （platform()==Unknown、isPlatformX11()/isPlatformWayland() 为 false、
+      showingDesktop() 为 false、KWindowEffects::isEffectAvailable() 为 false），
+     而不是「函数不存在」；
+  ④ 报「上游用例数」时分三档写清（源码目标上限 / 朴素文本扫描 / CTest 实际注册），
+     声明值取**最大**的一档，并逐类说明未执行的目标属于「门控不配置」还是
+     「无判定 oracle 的交互式演示」；
+  ⑤ `ecm_add_test()` 会注册 CTest，`ecm_mark_as_test()` **只**设
+     `EXCLUDE_FROM_ALL`、不注册——判断某目标会不会跑必须看用的哪个宏。
+rec_command:            >
+  # conanfile.py generate() 内
+  tc.variables["CMAKE_DISABLE_FIND_PACKAGE_X11"] = "TRUE"
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      patch-the-gates-into-options
+fallback_description:   >
+  仅在「上游还会在别处硬引用 X11 符号、关掉探测就编不过」时使用：打补丁把
+  `if(X11_FOUND)` 改成显式 `option(<PREFIX>_X11 "" OFF)`，与 KF6 的写法对齐。
+  不推荐作为首选：改动落在上游 CMakeLists 上，补丁面扩大，且与同族 KF5 配方
+  （ki18n5 等直接用 CMAKE_DISABLE_FIND_PACKAGE_*）不一致，后续升级 5.x 版本时
+  补丁行号还会漂移。
+fallback_command:       （补丁：`if(X11_FOUND)` → `option(KWINDOWSYSTEM_X11 "" OFF)` + 门控改写）
+fallback_auto_fix:      false
+fallback_impl:          patch
+
+forbid_1_pattern:       (touch|echo|cp).*\.(h|pc).*(X11|xcb)|-D(X11_)?FOUND=TRUE|set\(X11_FOUND TRUE
+forbid_1_reason:        伪造 X11 头 / .pc / 把 X11_FOUND 硬写成 TRUE，等于让构建去链一个
+                        目标环境里根本不存在的 X11，症状从「配置期干净失败」后移成
+                        「编译期找不到头」或「链接期 undefined symbol」，更难定位。
+forbid_1_consequence:   构建假象；后续真需要 X11 的包会踩到同一批伪制品。
+
+forbid_2_pattern:       sed -i.*CMakeLists\.txt.*(X11_FOUND|KWINDOWSYSTEM_HAVE_X11)
+forbid_2_reason:        直接改上游 CMakeLists 里的探测/门控，属于不必要的改动面扩大；
+                        `CMAKE_DISABLE_FIND_PACKAGE_X11` 是 CMake 为此提供的标准开关，
+                        改源码反而与同族 KF5 配方不一致、升级时补丁必漂移。
+forbid_2_consequence:   补丁面扩大、评审不可信、diff 不可读。
+
+forbid_3_pattern:       --no-tests=error.*(移除|删)|(移除|删).*--no-tests=error|BUILD_TESTING=OFF.*对外声明.*(通过率|用例数)
+forbid_3_reason:        为了让「注册集非空」而关掉 BUILD_TESTING，或为了让数字好看而
+                        摘掉 --no-tests=error，等于把「验证过」变成「没验证过」；
+                        门控导致注册集收缩是上游本态，应当如实分档声明，而不是把测试关掉。
+forbid_3_consequence:   空跑通过；评审无法区分「测过」与「没测」。
+
+principles:             P014, P005, P006
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-E5xx-qt5-conan-split-cmake-bridge（同仓 Qt5 链的另一个
+                        结构性差异：那条讲「Qt5 按模块拆包后伞形 find_package(Qt5
+                        COMPONENTS ...) / Qt5::Gui 目标怎么桥接」，本条讲「KF5 与 KF6
+                        在后端开关上的差异」——两者都是「同族配方照抄会失效」的坑，
+                        但层次不同：一条在 Qt 依赖解析层，一条在上游 CMake 探测层）、
+                        DRAFT-kio-kwallet-6.28.0-kwallettest-zero-ctest-display-guard
+                        （同族：`ecm_mark_as_test()` 不打 `add_test` ⇒ `ctest -N` 为 0
+                        是上游本态；本条把该事实并入门控收缩后「上游用例数」的三档口径）、
+                        DRAFT-cmakedeps-interface-defines-lost（同为「CMake 生成物与
+                        上游假设错位」族）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-kf5windowsystem-5.116.0-kf5-probed-platform-backend-not-an-option.md
+last_updated:           2026-09-28
+source_event:           archives/k/kf5windowsystem/5.116.0 适配（KF5/Qt5 分支无后端选项
+                        → CMAKE_DISABLE_FIND_PACKAGE_X11 → dummy 后端 → 上游 CTest
+                        注册集 1/1、源码目标上限 22、消费者断言 29/29）
+
+authors:                2301_76770579
+source_pr:              13567
+source_commit:          8c82b4e1d6da9a3e96b8a9edeccaa575d4d8ce23
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-28
