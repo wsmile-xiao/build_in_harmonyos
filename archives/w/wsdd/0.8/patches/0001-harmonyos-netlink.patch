@@ -1,0 +1,153 @@
+--- a/src/wsdd.py
++++ b/src/wsdd.py
+@@ -241,7 +241,7 @@ class MulticastHandler:
+         self.recv_socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+ 
+         # Could anyone ask the Linux folks for the rationale for this!?
+-        if platform.system() == 'Linux':
++        if platform.system() in ('Linux', 'HarmonyOS'):
+             try:
+                 # supported starting from Linux 4.20
+                 IPV6_MULTICAST_ALL = 29
+@@ -274,7 +274,7 @@ class MulticastHandler:
+         mreq = (socket.inet_pton(self.address.family, WSD_MCAST_GRP_V4) + self.address.raw + struct.pack('@I', idx))
+         self.recv_socket.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+ 
+-        if platform.system() == 'Linux':
++        if platform.system() in ('Linux', 'HarmonyOS'):
+             IP_MULTICAST_ALL = 49
+             self.recv_socket.setsockopt(socket.IPPROTO_IP, IP_MULTICAST_ALL, 0)
+ 
+@@ -1574,6 +1574,121 @@ class NetlinkAddressMonitor(NetworkAddressMonitor):
+ 
+ 
+ # from sys/net/route.h
++class GetifaddrsAddressMonitor(NetworkAddressMonitor):
++    """Address monitor for OHOS using libc getifaddrs() polling."""
++
++    _POLL_INTERVAL = 2.0
++    _IFF_UP = 0x1
++    _IFF_LOOPBACK = 0x8
++
++    class SockAddr(ctypes.Structure):
++        _fields_ = [('sa_family', ctypes.c_ushort), ('sa_data', ctypes.c_ubyte * 14)]
++
++    class SockAddrIn(ctypes.Structure):
++        _fields_ = [
++            ('sin_family', ctypes.c_ushort),
++            ('sin_port', ctypes.c_ushort),
++            ('sin_addr', ctypes.c_ubyte * 4),
++            ('sin_zero', ctypes.c_ubyte * 8),
++        ]
++
++    class SockAddrIn6(ctypes.Structure):
++        _fields_ = [
++            ('sin6_family', ctypes.c_ushort),
++            ('sin6_port', ctypes.c_ushort),
++            ('sin6_flowinfo', ctypes.c_uint32),
++            ('sin6_addr', ctypes.c_ubyte * 16),
++            ('sin6_scope_id', ctypes.c_uint32),
++        ]
++
++    class IfAddrs(ctypes.Structure):
++        pass
++
++    IfAddrs._fields_ = [
++        ('ifa_next', ctypes.POINTER(IfAddrs)),
++        ('ifa_name', ctypes.c_char_p),
++        ('ifa_flags', ctypes.c_uint),
++        ('ifa_addr', ctypes.POINTER(SockAddr)),
++        ('ifa_netmask', ctypes.POINTER(SockAddr)),
++        ('ifa_dstaddr', ctypes.POINTER(SockAddr)),
++        ('ifa_data', ctypes.c_void_p),
++    ]
++
++    def __init__(self, aio_loop: asyncio.AbstractEventLoop) -> None:
++        super().__init__(aio_loop)
++        libc_name = ctypes.util.find_library('c') or 'libc.so'
++        self._libc = ctypes.CDLL(libc_name, use_errno=True)
++        self._libc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(self.IfAddrs))]
++        self._libc.getifaddrs.restype = ctypes.c_int
++        self._libc.freeifaddrs.argtypes = [ctypes.POINTER(self.IfAddrs)]
++        self._known_addresses: Dict[Tuple[int, bytes, str], NetworkAddress] = {}
++        self._poll_handle: Optional[asyncio.TimerHandle] = None
++
++    def _snapshot(self) -> Dict[Tuple[int, bytes, str], NetworkAddress]:
++        first = ctypes.POINTER(self.IfAddrs)()
++        if self._libc.getifaddrs(ctypes.byref(first)) != 0:
++            errno = ctypes.get_errno()
++            raise OSError(errno, os.strerror(errno))
++
++        current: Dict[Tuple[int, bytes, str], NetworkAddress] = {}
++        try:
++            entry = first
++            while entry:
++                item = entry.contents
++                if item.ifa_addr and (item.ifa_flags & self._IFF_UP) and not (item.ifa_flags & self._IFF_LOOPBACK):
++                    family = item.ifa_addr.contents.sa_family
++                    raw: Optional[bytes] = None
++                    if family == socket.AF_INET:
++                        raw = bytes(ctypes.cast(item.ifa_addr, ctypes.POINTER(self.SockAddrIn)).contents.sin_addr)
++                    elif family == socket.AF_INET6:
++                        raw = bytes(ctypes.cast(item.ifa_addr, ctypes.POINTER(self.SockAddrIn6)).contents.sin6_addr)
++                    if raw is not None and item.ifa_name:
++                        name = item.ifa_name.decode('utf-8', 'replace')
++                        try:
++                            interface = NetworkInterface(name, 0, socket.if_nametoindex(name))
++                        except OSError:
++                            logger.debug('could not resolve OHOS interface index for %s', name)
++                        else:
++                            address = NetworkAddress(family, raw, interface)
++                            current[(family, raw, name)] = address
++                entry = item.ifa_next
++        finally:
++            self._libc.freeifaddrs(first)
++        return current
++
++    def _refresh(self) -> None:
++        if not self.active:
++            return
++        current = self._snapshot()
++        previous_keys = set(self._known_addresses)
++        current_keys = set(current)
++        for key in previous_keys - current_keys:
++            self.handle_deleted_address(self._known_addresses[key])
++        for key in current_keys - previous_keys:
++            self.handle_new_address(current[key])
++        self._known_addresses = current
++
++    def _poll(self) -> None:
++        try:
++            self._refresh()
++        except Exception as exc:
++            logger.warning('OHOS address enumeration failed: %s', exc)
++        finally:
++            if self.active:
++                self._poll_handle = self.aio_loop.call_later(self._POLL_INTERVAL, self._poll)
++
++    def do_enumerate(self) -> None:
++        super().do_enumerate()
++        self._refresh()
++        self._poll_handle = self.aio_loop.call_later(self._POLL_INTERVAL, self._poll)
++
++    def cleanup(self) -> None:
++        if self._poll_handle is not None:
++            self._poll_handle.cancel()
++            self._poll_handle = None
++        super().cleanup()
++
++
+ RTA_IFA: int = 0x20
+ 
+ # from sys/socket.h
+@@ -1968,7 +2083,9 @@ def drop_privileges(uid: int, gid: int) -> bool:
+ 
+ 
+ def create_address_monitor(system: str, aio_loop: asyncio.AbstractEventLoop) -> NetworkAddressMonitor:
+-    if system == 'Linux':
++    if system == 'HarmonyOS':
++        return GetifaddrsAddressMonitor(aio_loop)
++    elif system == 'Linux':
+         return NetlinkAddressMonitor(aio_loop)
+     elif system in ['FreeBSD', 'Darwin', 'OpenBSD']:
+         return RouteSocketAddressMonitor(aio_loop)
