@@ -1,9 +1,9 @@
-# libdisplay-info
+# libdisplay
 
 EDID and DisplayID library for parsing display metadata.
 
 ## Description
-libdisplay-info is a C library providing tools to parse EDID (Extended Display Identification Data) and DisplayID metadata from displays. It is primarily used by Wayland compositors and other display management software.
+libdisplay is a C library (upstream: libdisplay-info) providing tools to parse EDID (Extended Display Identification Data) and DisplayID metadata from displays. It is primarily used by Wayland compositors and other display management software.
 
 ## Project URL
 https://gitlab.freedesktop.org/emersion/libdisplay-info
@@ -38,7 +38,7 @@ MIT
 ### 使用方式
 ```bash
 # 安装预编译包
-curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- libdisplay-info 0.3.0
+curl -fsSL https://gitcode.com/OpenHarmonyPCDeveloper/cmd-pkgs/releases/download/pkgs/install.sh | sh -s -- libdisplay 0.3.0
 
 # 或手动设置环境
 export PKG_CONFIG_PATH=~/usr/local/lib/pkgconfig:~/usr/local/share/pkgconfig

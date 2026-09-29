@@ -1,31 +1,39 @@
 #!/usr/bin/env python3
-"""Conan recipe — libdisplay-info 0.3.0 (meson).
+"""Conan recipe — libdisplay 0.3.0 (meson).
 
 EDID and DisplayID library for parsing display metadata.
-Build-time dependency on hwdata (pnp.ids) is handled by downloading the
-data file during build since hwdata is not available as a conan package.
+OHOS adaptation:
+- hwdata (pnp.ids) is not packaged in OHOS; a bundled pnp.ids is added by
+  the 0002 patch and meson.build falls back to files('pnp.ids') (0001).
+- MesonToolchain: c_std c11, wrap_mode nodownload (no subproject fetch),
+  ar/ranlib full paths injected into the native file (llvm-ar not on PATH).
 """
 import os
 import glob
 
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.tools.meson import Meson, MesonToolchain
 
 
 class LibdisplayInfoConan(ConanFile):
-    name = "libdisplay-info"
+    name = "libdisplay"
     version = "0.3.0"
     description = "EDID and DisplayID library for parsing display metadata"
     license = "MIT"
     homepage = "https://gitlab.freedesktop.org/emersion/libdisplay-info"
-    url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
+    url = ""
 
     package_type = "library"
 
     settings = "os", "compiler", "build_type", "arch"
     options = {"shared": [True, False], "fPIC": [True, False]}
     default_options = {"shared": True, "fPIC": True}
+
+    def validate(self):
+        if self.settings.os not in ("Linux", "OHOS"):
+            raise ConanInvalidConfiguration(f"os={self.settings.os} not supported")
 
     def export_sources(self):
         export_conandata_patches(self)
@@ -39,6 +47,7 @@ class LibdisplayInfoConan(ConanFile):
             del self.options.fPIC
 
     def requirements(self):
+        # No external library deps; hwdata is a pure data file bundled via patch.
         pass
 
     def layout(self):
@@ -57,65 +66,70 @@ class LibdisplayInfoConan(ConanFile):
         tc.project_options["c_std"] = "c11"
         tc.project_options["wrap_mode"] = "nodownload"
         tc.generate()
-        self._inject_meson_archiver()
-        self._setup_hwdata_env()
+        self._inject_compiler_paths()
 
-    def _inject_meson_archiver(self):
-        # Inject ar/ranlib full paths into conan_meson_native.ini
-        _ce = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict) or {}
-        _ar, _rl = _ce.get("ar"), _ce.get("ranlib")
-        if not _ar:
-            _cc = _ce.get("c") or ""
-            _bindir = os.path.dirname(_cc) if os.path.sep in _cc else ""
-            if _bindir:
-                _cand = os.path.join(_bindir, "llvm-ar")
-                if os.path.isfile(_cand):
-                    _ar = _cand
-                    _rlc = os.path.join(_bindir, "llvm-ranlib")
-                    if os.path.isfile(_rlc):
-                        _rl = _rlc
+    def _inject_compiler_paths(self):
+        # Rewrite bare compiler names (c/cpp/ar/ranlib/strip) in the meson
+        # native file to absolute paths. The OHOS sandbox cannot exec bare
+        # 'clang'/'llvm-ar' via PATH (hmmac posix_spawn restriction), so meson
+        # must get absolute paths or configure fails with "Unknown compiler".
+        import shutil
         _nf = os.path.join(self.generators_folder, "conan_meson_native.ini")
-        if not (_ar and os.path.isfile(_nf)):
+        if not os.path.isfile(_nf):
             return
         with open(_nf, encoding="utf-8") as _f:
             _c = _f.read()
-        if "\nar =" in _c or "[binaries]" not in _c:
-            return
-        _ins = "[binaries]\nar = '%s'\n" % _ar
-        if _rl:
-            _ins += "ranlib = '%s'\n" % _rl
-        with open(_nf, "w", encoding="utf-8") as _f:
-            _f.write(_c.replace("[binaries]\n", _ins, 1))
-
-    def _setup_hwdata_env(self):
-        # Create hwdata.pc in the generators folder (meson's pkg_config_path)
-        # so meson's dependency('hwdata') finds pnp.ids at build time
-        hwdata_dir = os.path.join(self.generators_folder, "hwdata")
-        os.makedirs(hwdata_dir, exist_ok=True)
-
-        # Create hwdata.pc in generators folder (where meson looks for pkg-config files)
-        pc_path = os.path.join(self.generators_folder, "hwdata.pc")
-        with open(pc_path, "w") as f:
-            f.write(
-                "prefix={}\n"
-                "datadir=${{prefix}}\n"
-                "pkgdatadir=${{prefix}}\n\n"
-                "Name: hwdata\n"
-                "Description: Hardware identification data\n"
-                "Version: 0.366\n".format(hwdata_dir)
+        # Map meson key -> (bare name, preferred absolute binary)
+        _map = {
+            "c": ("clang", shutil.which("clang")),
+            "cpp": ("clang++", shutil.which("clang++")),
+            "ar": ("llvm-ar", shutil.which("llvm-ar") or shutil.which("ar")),
+            "ranlib": ("llvm-ranlib", shutil.which("llvm-ranlib") or shutil.which("ranlib")),
+            "strip": ("llvm-strip", shutil.which("llvm-strip") or shutil.which("strip")),
+        }
+        _changed = False
+        for _k, (_bare, _abs) in _map.items():
+            if not _abs:
+                continue
+            _old = "%s = '%s'" % (_k, _bare)
+            _new = "%s = '%s'" % (_k, _abs)
+            if _old in _c:
+                _c = _c.replace(_old, _new)
+                _changed = True
+        # MesonToolchain only writes c/cpp into [binaries]; ar/ranlib/strip
+        # must be appended with absolute paths or meson probes bare names
+        # ("Unknown linker(s): llvm-ar") and configure fails in the OHOS
+        # sandbox (cannot exec bare names via PATH).
+        if "[binaries]" in _c:
+            _missing = []
+            for _k in ("ar", "ranlib", "strip"):
+                if not _map[_k][1]:
+                    continue
+                if ("%s = " % _k) not in _c:
+                    _missing.append("%s = '%s'" % (_k, _map[_k][1]))
+            if _missing:
+                _c = _c.replace(
+                    "[binaries]",
+                    "[binaries]\n" + "\n".join(_missing),
+                    1,
+                )
+                _changed = True
+        if not _changed and "[binaries]" not in _c:
+            # No [binaries] section at all: prepend one with absolute paths
+            _ins = "[binaries]\n" + "".join(
+                "%s = '%s'\n" % (_k, _map[_k][1])
+                for _k in ("c", "cpp", "ar", "ranlib", "strip")
+                if _map[_k][1]
             )
+            _c = _ins + _c
+            _changed = True
+        if _changed:
+            with open(_nf, "w", encoding="utf-8") as _f:
+                _f.write(_c)
 
     def build(self):
-        # Download pnp.ids (hwdata is a pure data package, not in conan repo)
-        pnp_ids_path = os.path.join(self.generators_folder, "hwdata", "pnp.ids")
-        if not os.path.exists(pnp_ids_path):
-            import urllib.request
-            url = "https://raw.githubusercontent.com/vcrhonek/hwdata/master/pnp.ids"
-            try:
-                urllib.request.urlretrieve(url, pnp_ids_path)
-            except Exception:
-                # Fallback: curl with -k (skip SSL for public data file)
-                self.run("curl -kfsSL " + url + " -o " + pnp_ids_path)
+        # 0001 (meson.build pnp.ids fallback) + 0002 (bundled pnp.ids) applied
+        # here, before meson.configure(), so the data file is in the source tree.
         apply_conandata_patches(self)
         meson = Meson(self)
         meson.configure()
@@ -134,7 +148,7 @@ class LibdisplayInfoConan(ConanFile):
             return False
 
     def _sign_binaries(self):
-        # Sign ELF binaries (.so and executables) for HarmonyOS XPM
+        # Sign ELF binaries (.so and executables) for HarmonyOS
         targets = glob.glob(
             os.path.join(self.package_folder, "lib", "**", "*.so"), recursive=True
         )
