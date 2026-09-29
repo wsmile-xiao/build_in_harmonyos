@@ -1,0 +1,104 @@
+# conandata.yml — sensorfw 0.15.2
+#
+# 上游：sailfishos/sensorfw —— Sailfish OS 的传感器框架（守护进程 sensord +
+#       客户端库 + 可动态加载的 adaptor/chain/filter/sensor 插件）。
+#       GitHub 标签 0.15.2 为官方发布通道（R39：仅官方源 URL）。
+#
+# sha256 为本机实测值（sha256sum 源码包，与 conanfile.py 的 get() 校验一致）。
+
+sources:
+  url: "https://github.com/sailfishos/sensorfw/archive/refs/tags/0.15.2.tar.gz"
+  sha256: "2524879c480a64d8158352815c4186c0aae0d0f50d513018122181a8b4c271ac"
+  tar_format: tar.gz
+
+patches:
+  # ── 0001：libudev 由构建系统提供 ────────────────────────────────────────
+  # 现象：iioadaptor.pro 无条件 `PKGCONFIG += libudev`，而 qmake 的
+  #       pkgConfigExecutable() 在 cross_compile 分支下返回空（除非
+  #       QMAKE_PKG_CONFIG 非空或 PKG_CONFIG 已设置），于是干净构建环境里
+  #       直接报 `Project ERROR: libudev development package not found`。
+  # 补充：即使把 PKG_CONFIG 指到 libudev-zero 的 .pc，其 `prefix=` 仍是
+  #       打包机的陈旧构建路径（该路径在消费机上不存在），pkg-config 解析失败。
+  # 方案：允许构建系统通过环境变量直接提供头文件/库目录，未提供时保持原有
+  #       pkg-config 回退路径不变。用环境变量是因为 qmake 不会把命令行变量
+  #       赋值转发给递归构建的子工程 qmake。
+  - patch_file: "patches/0001-iioadaptor.pro.patch"
+    patch_type: "portability"
+    patch_description: >
+      iioadaptor.pro: take the libudev include/library directories from the
+      build environment when they are supplied (SENSORFW_LIBUDEV_INCLUDEPATH /
+      SENSORFW_LIBUDEV_LIBDIR) and keep the pkg-config lookup as the fallback.
+      Environment variables are used because qmake does not forward command
+      line assignments to the sub-project qmake runs of a recursive build.
+
+  # ── 0002 / 0003：systemd 集成改为可选 ──────────────────────────────────
+  # 现象：sensord.pro 无条件 `PKGCONFIG += libsystemd`，OHOS 无 systemd，
+  #       链接阶段失败。sensord/main.cpp 亦无条件包含 <systemd/sd-daemon.h>
+  #       并调用 sd_notify()。
+  # 方案：把 systemd 支持放到显式开关之后（CONFIG+=systemd），并给
+  #       sd_notify() 的就绪通知加同样的条件编译。sd_notify 只是「向
+  #       service manager 报告 READY=1」，缺失它不影响守护进程功能。
+  - patch_file: "patches/0002-sensord.pro.patch"
+    patch_type: "portability"
+    patch_description: >
+      sensord.pro: link libsystemd and define HAVE_SYSTEMD only when the build
+      explicitly asks for systemd integration (CONFIG+=systemd), so platforms
+      without systemd can be built from the same sources.
+  - patch_file: "patches/0003-sensord-main.cpp.patch"
+    patch_type: "portability"
+    patch_description: >
+      sensord/main.cpp: compile the sd-daemon.h include and the sd_notify()
+      readiness call only when HAVE_SYSTEMD is defined (see 0002).
+
+  # ── 0004：插件自带对框架库的 DT_NEEDED ─────────────────────────────────
+  # 现象：OHOS/musl 下 dlopen 的对象只在**自身的 DT_NEEDED 闭包**内解析未定义
+  #       符号；主程序的符号、主程序 DT_NEEDED 的库、RTLD_GLOBAL/dlopen 的库
+  #       都不可见（knowledge/drafts/DRAFT-ohos-dlopen-own-dt-needed-closure.md，
+  #       本包以 20 行非 Qt 最小实验复现）。sensorfw 的插件引用 libsensorfw-qt5
+  #       导出的 InputDevAdaptor / AbstractChain / AbstractSensor / PluginBase，
+  #       但上游**不链接**框架库，依赖宿主进程提供这些符号 —— 在 glibc 成立，
+  #       在 musl 上插件 100% 加载失败（Error relocating ... symbol not found），
+  #       即守护进程无法加载任何 adaptor/sensor/chain/filter。
+  # 方案：让每个插件记录 DT_NEEDED libsensorfw-qt5。四类插件共用各自的
+  #       *-config.pri，故只需改 4 个文件；同时把 core 提到 adaptors 之前，
+  #       否则插件链接时框架库尚未生成。glibc 上插件打开时该库已在内存中，
+  #       多出的 DT_NEEDED 由同一实例满足，改动是惰性的。
+  # 先例：archives/l/libnfsidmap-ldap/2.6.4（补丁 0005/0006，同因同解）。
+  - patch_file: "patches/0004-plugin-link-framework-library.patch"
+    patch_type: "portability"
+    patch_description: >
+      Make every plugin record DT_NEEDED on the framework library: link
+      -lsensorfw-qt5 from the four plugin *-config.pri files and move the core
+      sub-project ahead of adaptors in sensorfw.pro so the library exists when
+      the plugins link. Without it the plugins cannot be dlopen()ed on
+      HarmonyOS/musl, whose loader resolves a dlopen()ed object's undefined
+      symbols only inside its own DT_NEEDED closure.
+
+  # ── 0005：插件之间的跨模块 DT_NEEDED ───────────────────────────────────
+  # 现象：0004 之后，adaptor / sensor / filter 插件均可加载，但 compasschain
+  #       仍失败：
+  #         libcompasschain-qt5.so: _ZN16DownsampleFilter10setTimeoutEi:
+  #         symbol not found
+  #       这是同一根因的第二处表现：compasschain 直接实例化 AvgAccFilter /
+  #       DownsampleFilter / DeclinationFilter / MagCalibrationChain，而这些类
+  #       **不在 libsensorfw-qt5 里**，而是各自插件模块的实现（因此 0004 的
+  #       框架库链接无法覆盖）。上游依赖宿主进程把这些符号暴露为全局
+  #       （core/loader.cpp 的 QLibrary::ExportExternalSymbolsHint），只在
+  #       共享全局符号作用域的加载器（glibc）上成立。
+  #       实测：对 47 个插件做「未定义符号 ← 其它插件导出」的闭包分析，跨插件
+  #       引用只出现在 compasschain 上，共 4 个符号（见 notes.md 证据 5）。
+  # 方案：给 compasschain 显式记录这 4 个模块的 DT_NEEDED。filters/ 在 chains/
+  #       之前构建，且 magcalibrationchain 在 chains.pro 中排在 compasschain
+  #       之前，链接期依赖已就绪。glibc 上这些模块打开时已在内存中，多出的
+  #       DT_NEEDED 由同一实例满足，改动是惰性的。
+  # 先例：archives/l/libnfsidmap-ldap/2.6.4（补丁 0005/0006，同因同解）。
+  - patch_file: "patches/0005-plugin-cross-dependencies.patch"
+    patch_type: "portability"
+    patch_description: >
+      chains/compasschain.pro: record DT_NEEDED on the four plugin modules whose
+      classes compasschain instantiates directly (avgaccfilter,
+      downsamplefilter, declinationfilter, magcalibrationchain). Same root cause
+      as 0004 - HarmonyOS/musl resolves a dlopen()ed object's undefined symbols
+      only inside its own DT_NEEDED closure - but those implementations live in
+      other plugin modules rather than in libsensorfw-qt5, which is why 0004
+      alone is not sufficient.
