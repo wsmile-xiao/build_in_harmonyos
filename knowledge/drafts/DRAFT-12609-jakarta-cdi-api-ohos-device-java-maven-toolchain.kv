@@ -1,0 +1,63 @@
+#====================================================================
+# DRAFT-12609-jakarta-cdi-api-ohos-device-java-maven-toolchain - OHOS 真机 Java/Maven 构建链四坑（无 curl/无 CA/禁 shebang/JRuby gemspec）
+#====================================================================
+
+id:                     DRAFT-12609-jakarta-cdi-api-ohos-device-java-maven-toolchain
+trigger_tool:           maven|conan|shell
+phase:                  source|build|test
+error_signature:        curl: inaccessible or not found|CERTIFICATE_VERIFY_FAILED.*unable to get local issuer certificate|bad interpreter: Permission denied|concurrent-ruby-[0-9.]+\.gemspec.*ENOENT|Error 127 while executing|Error 126 while executing
+
+severity:               3
+category:               java|maven|ohos-device|tls|noexec|asciidoctor|jruby
+match_keywords:         curl missing, no CA bundle, CERTIFICATE_VERIFY_FAILED, ssl._create_unverified_context, bad interpreter, shebang, noexec, HMDFS, sh mvn, asciidoctor, JRuby, gemspec, ENOENT, concurrent-ruby, spec-doc, Maven self-fetch, repo1.maven.org, sha256 pin, python3 urllib fallback
+
+title:                  OHOS 真机（HarmonyOS PC）上 Java/Maven 配方构建链四坑：设备无 curl 且 python3 无 CA bundle（Maven 自取必须带 python3 urllib 免证书回退）；HMDFS 禁 shebang 直接 exec（启动脚本必须显式 sh 调用）；asciidoctor/JRuby 在真机报 gemspec ENOENT（纯文档模块需跳过）；真机验证期 ghfast.top 读超时可用本机 http.server 镜像通道（提交配方保持官方 URL）
+
+root_cause:             ①OHOS 真机 shell 环境无 curl 二进制（Error 127），且 python3 的 urllib 无 CA bundle——访问 https://repo1.maven.org 报 SSL: CERTIFICATE_VERIFY_FAILED (unable to get local issuer certificate)。Java 配方的 Maven 自取（上游无 mvnw wrapper）若只走 curl 单通道必然失败。②HMDFS 文件系统对带 shebang 的脚本禁止直接 exec()（报 bad interpreter: Permission denied，shell 错误 126）；ELF 二进制不受影响——java 可直接执行，但 mvn 启动脚本必须显式 sh {path}/bin/mvn 调用。③spec-doc 类文档模块的 asciidoctor-maven-plugin（JRuby）在真机 generate-pdf-doc 报 (ENOENT) file:.../concurrent-ruby-1.1.7.gemspec——JRuby 的 RubyGems 解析在 OHOS 文件系统布局下拿不到 gemspec 路径；该模块纯文档产物、不进包，OHOS 上应 -Dasciidoctor.skip=true 跳过（Linux CI 仍全量）。④真机验证期 ghfast.top 注入镜像可能读超时（ReadTimeoutError 30s×2）→ 设备侧临时把 conandata 源指向本机 http.server 镜像（sha256 不变）即可完成验证；提交配方必须保持官方原始 URL（R39）。
+
+affected_scope:         所有在 HarmonyOS PC (aarch64) 真机上以 Maven/JVM 构建的三方库（jakarta 全系列、jackson 等 Java API/库包）：Maven 自取下载、脚本启动、文档模块。jakarta-cdi-api 4.0.1 真机八门禁全绿实测覆盖。
+
+verification_cmd:       conan-verify jakarta-cdi-api 4.0.1 八门禁 Verdict PASS（G0-G4+L2/L4/L5）；真机 conan create 上游 56/56 TestNG（Tests run: 51+5=56，0 失败）构建时执行；test_package 消费者探针 19/19 + PASS。
+
+rec_priority:           1
+rec_approach:           python3-urllib-fallback-plus-sh-mvn-plus-asciidoctor-skip
+rec_description:        Maven 自取改双通道：先 curl -fsSL，捕获 ConanException 后回退 python3 -c 单行 urllib（ssl._create_unverified_context + build_opener(HTTPSHandler(context=ctx))，下载后 sha256 钉校验兜底完整性）；build() 里 mvn 调用显式 sh {maven_home}/bin/mvn（不放 PATH 依赖 shebang）；settings.os == "OHOS" 时追加 -Dasciidoctor.skip=true（纯文档模块不打包，Linux CI 全量构建不变）。
+
+rec_command:            self.run('curl -fsSL -o "{}" "{}"'.format(dest, MAVEN_URL)) 包 try/except ConanException → 回退 self.run('python3 -c "import ssl,urllib.request,shutil;ctx=ssl._create_unverified_context();o=urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx));r=o.open(\'{url}\',timeout=300);f=open(\'{dest}\',\'wb\');shutil.copyfileobj(r,f);f.close();r.close()"')；mvn 行: f'bash -c "cd {self.source_folder} && sh {maven_home}/bin/mvn clean package -B -DskipTests=false{skip_doc}"'（skip_doc = " -Dasciidoctor.skip=true" if self.settings.os == "OHOS" else ""）
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      preinstall-maven-tarball
+fallback_description:   若不想在配方里加回退逻辑，可预先在真机 ~/ 放置 apache-maven-<ver>（xfer tarball + tar 解包到 _ensure_maven 探测路径），配方命中 os.path.isfile(mvn) 即跳过下载；但官方八门禁重跑会清干净环境，回退逻辑仍是正解。
+fallback_command:       xfer apache-maven-3.9.11-bin.tar.gz 到 $HOME，tar -xzf --strip-components=1 到 ~/apache-maven-3.9.11
+fallback_auto_fix:      false
+fallback_impl:          device-env
+
+forbid_1_pattern:       self\.run\('curl -fsSL.*'\).*无 try/except 回退|_ensure_maven 只 curl 单通道
+forbid_1_reason:        OHOS 真机无 curl（Error 127）必然失败；即便未来装了 curl，无 CA bundle 也会 TLS 失败——单通道无回退 = G2 必挂。
+forbid_1_consequence:   G2 Error 127 while executing（curl: inaccessible or not found），Maven 自取阶段浪费一轮真机验证。
+forbid_2_pattern:       PATH 注入 maven bin 后直接调用 mvn（依赖 shebang exec）
+forbid_2_reason:        HMDFS 禁 shebang 直接 exec（bad interpreter: Permission denied，Error 126）；java 等 ELF 二进制不受影响，但 mvn/mvnDebug 等启动脚本必须显式 sh 包裹。
+forbid_2_consequence:   G2 Error 126，报 bad interpreter: Permission denied。
+forbid_3_pattern:       OHOS 真机上不跳过 asciidoctor/JRuby 文档生成（spec-doc 类模块）
+forbid_3_reason:        JRuby 的 RubyGems 在 OHOS 文件系统布局下 gemspec 解析失败（ENOENT concurrent-ruby）；文档模块产物不进包，硬跑只会拖垮 G2。
+forbid_3_consequence:   G2 BUILD FAILURE（asciidoctor-maven-plugin process-asciidoc generate-pdf-doc ENOENT），且文档模块耗时 5 分钟量级。
+forbid_4_pattern:       把本机 http.server 镜像 URL 提交进 conandata.yml
+forbid_4_reason:        镜像通道只用于真机验证期绕过 ghfast.top 读超时；提交配方必须保持官方原始 URL + sha256（R39），否则 CI 与审查员拉不到源码。
+forbid_4_consequence:   R39 官方 URL 口径被破坏，CI 构建失败或审查扣分。
+
+principles:             R34, R39
+causes:                 []
+caused_by:              []
+similar_to:             [E017, E046, E087, DRAFT-12608-ee4j-aggregator-snapshot-module-build]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-12609-jakarta-cdi-api-ohos-device-java-maven-toolchain.md
+last_updated:           2026-09-27
+source_event:           jakarta-cdi-api 4.0.1 HarmonyOS PC (aarch64) 真机 conan-verify 八门禁全绿（Maven 源码编译双 JAR）
+authors:                asus-05
+source_commit:          5c9a08bef9
+
+metrics_success_count:  0
