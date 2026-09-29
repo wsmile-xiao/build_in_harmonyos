@@ -1,0 +1,205 @@
+// OHOS compatibility shim for <memory_resource>.
+// The OHOS SDK (ohos-sdk_26.0.0.18) libcxx-ohos lacks the standard
+// <memory_resource> header and its compiled pmr symbols. It ships
+// experimental/memory_resource which DEFINES memory_resource +
+// polymorphic_allocator but only DECLARES monotonic_buffer_resource and the
+// global resource accessors. This shim:
+//   1. reuses the SDK's real memory_resource / polymorphic_allocator
+//   2. provides a self-contained inline monotonic_buffer_resource
+//   3. provides inline new_delete/null/get/set_default_resource
+//   4. patches the experimental::pmr::get_default_resource symbol that the
+//      SDK's polymorphic_allocator default constructor references (the SDK
+//      libc does not define it).
+// No platform macros; pure standard-C++ capability shim, portable.
+#pragma once
+
+#include <experimental/memory_resource>
+
+#include <cstddef>
+#include <cstdint>
+#include <memory>
+#include <new>
+
+namespace std {
+namespace pmr {
+
+using memory_resource = ::std::experimental::fundamentals_v1::pmr::memory_resource;
+
+template <class Tp>
+using polymorphic_allocator = ::std::experimental::fundamentals_v1::pmr::polymorphic_allocator<Tp>;
+
+struct pool_options {
+    std::size_t max_blocks_per_chunk = 0;
+    std::size_t largest_required_pool_block = 0;
+};
+
+// --- Global memory resources -------------------------------------------------
+// Implemented inline so we don't depend on the SDK's missing pmr symbols.
+
+inline memory_resource* new_delete_resource() noexcept {
+    struct new_delete_resource_impl final : memory_resource {
+        void* do_allocate(std::size_t bytes, std::size_t alignment) override {
+            return ::operator new(bytes, std::align_val_t{alignment});
+        }
+        void do_deallocate(void* p, std::size_t bytes, std::size_t alignment) override {
+            ::operator delete(p, bytes, std::align_val_t{alignment});
+        }
+        bool do_is_equal(memory_resource const& other) const noexcept override {
+            return this == &other;
+        }
+    };
+    static new_delete_resource_impl resource;
+    return &resource;
+}
+
+inline memory_resource* null_memory_resource() noexcept {
+    struct null_resource_impl final : memory_resource {
+        void* do_allocate(std::size_t, std::size_t) override {
+            throw std::bad_alloc();
+        }
+        void do_deallocate(void*, std::size_t, std::size_t) override {
+        }
+        bool do_is_equal(memory_resource const& other) const noexcept override {
+            return this == &other;
+        }
+    };
+    static null_resource_impl resource;
+    return &resource;
+}
+
+namespace detail {
+inline memory_resource*& default_resource_holder() noexcept {
+    static memory_resource* res = new_delete_resource();
+    return res;
+}
+} // namespace detail
+
+inline memory_resource* get_default_resource() noexcept {
+    return detail::default_resource_holder();
+}
+
+inline memory_resource* set_default_resource(memory_resource* r) noexcept {
+    memory_resource* old = detail::default_resource_holder();
+    detail::default_resource_holder() = r ? r : new_delete_resource();
+    return old;
+}
+
+// --- monotonic_buffer_resource ----------------------------------------------
+// Correct bump-pointer allocator. Each chunk starts with a small header
+// (previous chunk pointer + chunk size, so release() can walk and free), then
+// hands out allocations from a forward-aligning cursor. Every allocation is
+// aligned to the requested alignment up front.
+class monotonic_buffer_resource : public memory_resource {
+public:
+    explicit monotonic_buffer_resource(memory_resource* upstream = nullptr) noexcept
+        : resource(upstream ? upstream : get_default_resource()), data_(nullptr),
+          remaining_(0), current_(nullptr), next_chunk_size_(1024) {}
+
+    monotonic_buffer_resource(std::size_t initial_size, memory_resource* upstream = nullptr)
+        : resource(upstream ? upstream : get_default_resource()), data_(nullptr),
+          remaining_(0), current_(nullptr),
+          next_chunk_size_(align_up(initial_size ? initial_size : 1024)) {}
+
+    monotonic_buffer_resource(const monotonic_buffer_resource&) = delete;
+    monotonic_buffer_resource& operator=(const monotonic_buffer_resource&) = delete;
+
+    ~monotonic_buffer_resource() override { release(); }
+
+    memory_resource* upstream_resource() const noexcept { return resource; }
+
+    void release() noexcept {
+        for ( const unsigned char* next = current_; next != nullptr; ) {
+            const unsigned char* prev = *reinterpret_cast<const unsigned char* const*>(next);
+            resource->deallocate(const_cast<unsigned char*>(next), chunk_size(next),
+                                 alignof(std::max_align_t));
+            next = prev;
+        }
+        current_ = nullptr;
+        data_ = nullptr;
+        remaining_ = 0;
+        next_chunk_size_ = 1024;
+    }
+
+protected:
+    void* do_allocate(std::size_t bytes, std::size_t alignment) override {
+        if ( alignment < alignof(std::max_align_t) )
+            alignment = alignof(std::max_align_t);
+
+        std::uintptr_t cur = reinterpret_cast<std::uintptr_t>(data_);
+        std::uintptr_t aligned = (cur + alignment - 1) & ~(alignment - 1);
+        std::size_t need = bytes + (aligned - cur);
+
+        if ( need > remaining_ )
+            grow_chunk(need);
+
+        cur = reinterpret_cast<std::uintptr_t>(data_);
+        aligned = (cur + alignment - 1) & ~(alignment - 1);
+        auto* p = reinterpret_cast<unsigned char*>(aligned);
+        data_ = p + bytes;
+        remaining_ -= (bytes + (aligned - cur));
+        return p;
+    }
+
+    void do_deallocate(void*, std::size_t, std::size_t) override {
+        // monotonic_buffer_resource never frees individual allocations.
+    }
+
+    bool do_is_equal(memory_resource const& other) const noexcept override {
+        return this == &other;
+    }
+
+private:
+    static std::size_t align_up(std::size_t v) noexcept {
+        constexpr std::size_t a = alignof(std::max_align_t);
+        return (v + a - 1) & ~(a - 1);
+    }
+
+    static std::size_t chunk_size(const unsigned char* p) noexcept {
+        return *reinterpret_cast<const std::size_t*>(p + sizeof(const unsigned char*));
+    }
+
+    void grow_chunk(std::size_t need) {
+        static constexpr std::size_t header_size =
+            (sizeof(const unsigned char*) + sizeof(std::size_t) + alignof(std::max_align_t) - 1) &
+            ~(alignof(std::max_align_t) - 1);
+        std::size_t chunk =
+            next_chunk_size_ > (need + header_size) ? next_chunk_size_ : (need + header_size);
+        auto* raw = static_cast<unsigned char*>(
+            resource->allocate(chunk, alignof(std::max_align_t)));
+
+        *reinterpret_cast<const unsigned char**>(raw) = current_;
+        *reinterpret_cast<std::size_t*>(raw + sizeof(const unsigned char*)) = chunk;
+
+        current_ = raw;
+        data_ = raw + header_size;
+        remaining_ = chunk - header_size;
+        next_chunk_size_ = chunk * 2;
+    }
+
+    memory_resource* resource;
+    unsigned char* data_;
+    std::size_t remaining_;
+    unsigned char* current_;
+    std::size_t next_chunk_size_;
+};
+
+} // namespace pmr
+} // namespace std
+
+// The SDK's polymorphic_allocator<T> default constructor references the
+// experimental::pmr::get_default_resource() symbol, which the SDK libc does not
+// define. Provide a forwarding definition (strong) so those template
+// instantiations link. It lives in the same inline namespace the SDK headers
+// use, so both the SDK's instantiations and std::pmr aliases see it.
+namespace std {
+namespace experimental {
+inline namespace fundamentals_v1 {
+namespace pmr {
+    inline ::std::experimental::fundamentals_v1::pmr::memory_resource*
+    get_default_resource() noexcept {
+        return ::std::pmr::get_default_resource();
+    }
+} // namespace pmr
+} // namespace fundamentals_v1
+} // namespace experimental
+} // namespace std
