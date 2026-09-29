@@ -1,0 +1,57 @@
+--- a/src/test/TestAPI.c
++++ b/src/test/TestAPI.c
+@@ -47,15 +47,52 @@
+ // macOS does not have fmemopen, but has funopen
+ // BSD may not have fmemopen
+ // Most Linux distros do have fmemopen
++// OHOS/HarmonyOS portability: tmpfile() hardcodes /tmp which may be
++// missing or not writable in the HarmonyOS sandbox/CI workers, so it
++// returns NULL and the API test aborts at "fmemopen failed". Fall back
++// to a TMPDIR/TMP/TEMP-aware mkstemp file (unlinked immediately to keep
++// tmpfile anonymity) when tmpfile() fails. Semantics unchanged.
++#include <unistd.h>
++static inline FILE* kanzi_tmpfile_with_env(void)
++{
++    const char* d = getenv("TMPDIR");
++    if (d == NULL || *d == '\0')
++        d = getenv("TMP");
++    if (d == NULL || *d == '\0')
++        d = getenv("TEMP");
++    if (d == NULL || *d == '\0')
++        d = "/tmp";
++    char path[1024];
++    /* snprintf truncation still yields a usable template when the dir is
++       extremely long; mkstemp validates the result. */
++    snprintf(path, sizeof(path), "%s/kanzi_api_XXXXXX", d);
++    int fd = mkstemp(path);
++    if (fd < 0)
++        return NULL;
++    /* Keep tmpfile() anonymity: remove the directory entry, the FILE*
++       stays valid until fclose(). Ignore unlink errors (e.g. sandbox
++       restrictions); the fclose() still cleans the descriptor. */
++    unlink(path);
++    FILE* f = fdopen(fd, "w+b");
++    if (f == NULL)
++        close(fd);
++    return f;
++}
++
+ static inline FILE* portable_fmemopen(void* buf, size_t size, const char* mode)
+ {
+     (void)mode; // Only "wb" or "rb" used in tests
+ 
+     // Simple implementation: use a temporary file and preload the buffer
+     FILE* f = tmpfile();
+ 
+-    if (!f)
+-        return NULL;
++    if (!f) {
++        /* HarmonyOS fallback: tmpfile() ignores $TMPDIR and fails when
++           /tmp is unavailable; retry in the task temp directory. */
++        f = kanzi_tmpfile_with_env();
++        if (!f)
++            return NULL;
++    }
+ 
+     if (buf && size > 0 && strchr(mode, 'w') == NULL) {
+         // reading: preload buffer
