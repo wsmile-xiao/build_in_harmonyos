@@ -1,0 +1,382 @@
+--- a/configure.ac
++++ b/configure.ac
+@@ -150,6 +150,10 @@
+ sys/ioccom.h sys/ioctl.h sys/param.h sys/socket.h sys/stat.h sys/time.h \
+ sys/select.h glob.h ])
+ 
++AC_CHECK_HEADERS([linux/wireless.h], [], [], [[
++#include <sys/socket.h>
++]])
++
+ dnl set host_os variable
+ AC_CANONICAL_HOST
+ 
+@@ -312,7 +316,7 @@
+ 
+ 
+ dnl Checks for library functions.
+-AC_CHECK_FUNCS([cfmakeraw floor getpagesize getpagesize gettimeofday inet_ntoa \
++AC_CHECK_FUNCS([cfmakeraw floor getpagesize getpagesize gettimeofday inet_ntoa pthread_cancel \
+ ioctl memchr memmove memset pow rint select setitimer setlocale sigaction signal \
+ snprintf socket sqrt strchr strdup strerror strncasecmp strrchr strstr strtol \
+ glob socketpair ])
+--- a/src/network.c
++++ b/src/network.c
+@@ -1295,7 +1295,7 @@
+ }
+ 
+ 
+-#ifdef __linux__
++#if defined(HAVE_LINUX_WIRELESS_H) && HAVE_LINUX_WIRELESS_H
+ #include <linux/wireless.h>
+ int is_wireless_linux(const char *ifname)
+ {
+--- a/src/rig.c
++++ b/src/rig.c
+@@ -297,7 +297,8 @@
+ } async_data_handler_priv_data;
+ 
+ static int async_data_handler_start(RIG *rig);
+-static int async_data_handler_stop(RIG *rig);
++static int async_data_handler_request_stop(RIG *rig);
++static int async_data_handler_join(RIG *rig);
+ static void *async_data_handler(void *arg);
+ 
+ typedef struct morse_data_handler_args_s
+@@ -313,10 +314,21 @@
+ } morse_data_handler_priv_data;
+ 
+ static int morse_data_handler_start(RIG *rig);
+-static int morse_data_handler_stop(RIG *rig);
++static int morse_data_handler_request_stop(RIG *rig);
++static int morse_data_handler_join(RIG *rig);
+ int morse_data_handler_set_keyspd(RIG *rig, int keyspd);
+ static void *morse_data_handler(void *arg);
+ 
++static void thread_run_store(volatile int *run, int value)
++{
++    __atomic_store_n(run, value, __ATOMIC_RELEASE);
++}
++
++static int thread_run_load(const volatile int *run)
++{
++    return __atomic_load_n(run, __ATOMIC_ACQUIRE);
++}
++
+ /*
+  * track which rig is opened (with rig_open)
+  * needed at least for transceive mode
+@@ -1779,8 +1791,8 @@
+ 
+     if (!skip_init)
+     {
+-        morse_data_handler_stop(rig);
+-        async_data_handler_stop(rig);
++        morse_data_handler_request_stop(rig);
++        async_data_handler_request_stop(rig);
+         rig_poll_routine_stop(rig);
+         network_multicast_receiver_stop(rig);
+         network_multicast_publisher_stop(rig);
+@@ -1897,6 +1909,12 @@
+ 
+     port_close(rp, rp->type.rig);
+ 
++    if (!skip_init)
++    {
++        morse_data_handler_join(rig);
++        async_data_handler_join(rig);
++    }
++
+     // zero split so it will allow it to be set again on open for rigctld
+     CACHE(rig)->split = 0;
+     rs->comm_state = 0;
+@@ -8497,12 +8515,13 @@
+ 
+     sleep(2);  // give other things a chance to finish opening up the rig
+ 
+-    rs->async_data_handler_thread_run = 1;
++    thread_run_store(&rs->async_data_handler_thread_run, 1);
+     rs->async_data_handler_priv_data = calloc(1,
+                                        sizeof(async_data_handler_priv_data));
+ 
+     if (rs->async_data_handler_priv_data == NULL)
+     {
++        thread_run_store(&rs->async_data_handler_thread_run, 0);
+         RETURNFUNC(-RIG_ENOMEM);
+     }
+ 
+@@ -8516,6 +8535,9 @@
+     {
+         rig_debug(RIG_DEBUG_ERR, "%s: pthread_create error: %s\n", __func__,
+                   strerror(errno));
++        thread_run_store(&rs->async_data_handler_thread_run, 0);
++        free(rs->async_data_handler_priv_data);
++        rs->async_data_handler_priv_data = NULL;
+         RETURNFUNC(-RIG_EINTERNAL);
+     }
+ 
+@@ -8529,12 +8551,13 @@
+ 
+     ENTERFUNC;
+ 
+-    rs->morse_data_handler_thread_run = 1;
++    thread_run_store(&rs->morse_data_handler_thread_run, 1);
+     rs->morse_data_handler_priv_data = calloc(1,
+                                        sizeof(morse_data_handler_priv_data));
+ 
+     if (rs->morse_data_handler_priv_data == NULL)
+     {
++        thread_run_store(&rs->morse_data_handler_thread_run, 0);
+         RETURNFUNC(-RIG_ENOMEM);
+     }
+ 
+@@ -8554,6 +8577,9 @@
+     {
+         rig_debug(RIG_DEBUG_ERR, "%s: pthread_create error: %s\n", __func__,
+                   strerror(errno));
++        thread_run_store(&rs->morse_data_handler_thread_run, 0);
++        free(rs->morse_data_handler_priv_data);
++        rs->morse_data_handler_priv_data = NULL;
+         RETURNFUNC(-RIG_EINTERNAL);
+     }
+ 
+@@ -8561,32 +8587,47 @@
+ }
+ 
+ 
+-static int async_data_handler_stop(RIG *rig)
++static int async_data_handler_request_stop(RIG *rig)
+ {
+     struct rig_state *rs = STATE(rig);
+     async_data_handler_priv_data *async_data_handler_priv;
+ 
+     ENTERFUNC;
+ 
+-    rs->async_data_handler_thread_run = 0;
++    thread_run_store(&rs->async_data_handler_thread_run, 0);
+ 
+     async_data_handler_priv = (async_data_handler_priv_data *)
+                               rs->async_data_handler_priv_data;
+ 
++    if (async_data_handler_priv != NULL && async_data_handler_priv->thread_id != 0)
++    {
++#if defined(HAVE_PTHREAD_CANCEL) && HAVE_PTHREAD_CANCEL
++        pthread_cancel(async_data_handler_priv->thread_id);
++#endif
++    }
++
++    RETURNFUNC(RIG_OK);
++}
++
++static int async_data_handler_join(RIG *rig)
++{
++    struct rig_state *rs = STATE(rig);
++    async_data_handler_priv_data *async_data_handler_priv;
++
++    ENTERFUNC;
++
++    async_data_handler_priv = (async_data_handler_priv_data *)
++                              rs->async_data_handler_priv_data;
+     if (async_data_handler_priv != NULL)
+     {
+         if (async_data_handler_priv->thread_id != 0)
+         {
+-            // all cleanup is done in this function so we can kill thread
+-            // Windows was taking 30 seconds to stop without this
+-            pthread_cancel(async_data_handler_priv->thread_id);
+             int err = pthread_join(async_data_handler_priv->thread_id, NULL);
+ 
+             if (err)
+             {
+                 rig_debug(RIG_DEBUG_ERR, "%s: pthread_join error: %s\n", __func__,
+-                          strerror(errno));
+-                // just ignore the error
++                          strerror(err));
+             }
+ 
+             async_data_handler_priv->thread_id = 0;
+@@ -8596,52 +8637,61 @@
+         rs->async_data_handler_priv_data = NULL;
+     }
+ 
+-
+     RETURNFUNC(RIG_OK);
+ }
+ 
+-static int morse_data_handler_stop(RIG *rig)
++static int morse_data_handler_request_stop(RIG *rig)
+ {
+     struct rig_state *rs = STATE(rig);
+     morse_data_handler_priv_data *morse_data_handler_priv;
+ 
+     ENTERFUNC;
+ 
+-    rs->morse_data_handler_thread_run = 0;
++    thread_run_store(&rs->morse_data_handler_thread_run, 0);
+ 
+     morse_data_handler_priv = (morse_data_handler_priv_data *)
+                               rs->morse_data_handler_priv_data;
+ 
+-    // wait until fifo queue is flushed
+-    //HAMLIB_TRACE;
++    // Let the worker drain queued Morse data before cancellation/join.
+     hl_usleep(100 * 1000);
+ 
+-    //HAMLIB_TRACE;
+-    while (hl_peek(rs->fifo_morse) >= 0)
++    while (rs->fifo_morse != NULL && hl_peek(rs->fifo_morse) >= 0)
+     {
+-        HAMLIB_TRACE;
+         rig_debug(RIG_DEBUG_TRACE, "%s: waiting for fifo queue to flush\n", __func__);
+         hl_usleep(100 * 1000);
+     }
+ 
+-    //HAMLIB_TRACE;
+     hl_usleep(100 * 1000);
+ 
+-    //HAMLIB_TRACE;
++    if (morse_data_handler_priv != NULL && morse_data_handler_priv->thread_id != 0)
++    {
++#if defined(HAVE_PTHREAD_CANCEL) && HAVE_PTHREAD_CANCEL
++        pthread_cancel(morse_data_handler_priv->thread_id);
++#endif
++    }
++
++    RETURNFUNC(RIG_OK);
++}
++
++static int morse_data_handler_join(RIG *rig)
++{
++    struct rig_state *rs = STATE(rig);
++    morse_data_handler_priv_data *morse_data_handler_priv;
++
++    ENTERFUNC;
++
++    morse_data_handler_priv = (morse_data_handler_priv_data *)
++                              rs->morse_data_handler_priv_data;
+     if (morse_data_handler_priv != NULL)
+     {
+         if (morse_data_handler_priv->thread_id != 0)
+         {
+-            // all cleanup is done in this function so we can kill thread
+-            // Windows was taking 30 seconds to stop without this
+-            pthread_cancel(morse_data_handler_priv->thread_id);
+             int err = pthread_join(morse_data_handler_priv->thread_id, NULL);
+ 
+             if (err)
+             {
+                 rig_debug(RIG_DEBUG_ERR, "%s: pthread_join error: %s\n", __func__,
+-                          strerror(errno));
+-                // just ignore the error
++                          strerror(err));
+             }
+ 
+             morse_data_handler_priv->thread_id = 0;
+@@ -8669,7 +8719,7 @@
+     // TODO: add initial support for async in Kenwood kenwood_transaction (+one) functions -> add transaction_active flag usage
+     // TODO: add initial support for async in Yaesu newcat_get_cmd/set_cmd (+validate) functions -> add transaction_active flag usage
+ 
+-    while (rs->async_data_handler_thread_run)
++    while (thread_run_load(&rs->async_data_handler_thread_run))
+     {
+         int frame_length;
+         int async_frame;
+@@ -8677,6 +8727,11 @@
+ 
+         result = rig->caps->read_frame_direct(rig, sizeof(frame), frame);
+ 
++        if (!thread_run_load(&rs->async_data_handler_thread_run))
++        {
++            break;
++        }
++
+         if (result < 0)
+         {
+             // Timeouts occur always if there is nothing to receive, so they are not really errors in this case
+@@ -8774,7 +8829,8 @@
+ 
+     c = calloc(1, qsize + 1);
+ 
+-    while (rs->morse_data_handler_thread_run || (hl_peek(rs->fifo_morse) >= 0))
++    while (thread_run_load(&rs->morse_data_handler_thread_run)
++            || (rs->fifo_morse != NULL && hl_peek(rs->fifo_morse) >= 0))
+     {
+         int n = 0;
+         memset(c, 0, qsize);
+@@ -8880,7 +8936,10 @@
+             }
+         }
+ 
+-        rs->fifo_morse->flush = 0; // reset flush flag
++        if (rs->fifo_morse != NULL)
++        {
++            rs->fifo_morse->flush = 0; // reset flush flag
++        }
+         hl_usleep(100 * 1000);
+     }
+ 
+--- a/rotators/ars/ars.c
++++ b/rotators/ars/ars.c
+@@ -195,15 +195,19 @@
+         int retcode;
+ 
+         pthread_attr_init(&attr);
++#if defined(HAVE_PTHREAD_CANCEL) && HAVE_PTHREAD_CANCEL
+         pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
++#endif
+ 
+         /* create behind-the-scene thread doing the ars_set_position_sync() */
++        __atomic_store_n(&priv->thread_run, 1, __ATOMIC_RELEASE);
+         retcode = pthread_create(&priv->thread, &attr, handle_set_position, rot);
+ 
+         if (retcode != RIG_OK)
+         {
+             rig_debug(RIG_DEBUG_ERR, "%s: pthread_create: %s\n", __func__,
+                       strerror(retcode));
++            __atomic_store_n(&priv->thread_run, 0, __ATOMIC_RELEASE);
+             return -RIG_ENOMEM;
+         }
+     }
+@@ -216,7 +220,12 @@
+ {
+     struct ars_priv_data *priv = (struct ars_priv_data *)ROTSTATE(rot)->priv;
+ 
++    __atomic_store_n(&priv->thread_run, 0, __ATOMIC_RELEASE);
++#if defined(HAVE_PTHREAD_CANCEL) && HAVE_PTHREAD_CANCEL
+     pthread_cancel(priv->thread);
++#else
++    pthread_join(priv->thread, NULL);
++#endif
+ 
+     /* leave it in safe state */
+     ars_stop(rot);
+@@ -418,7 +427,7 @@
+     struct ars_priv_data *priv = (struct ars_priv_data *)ROTSTATE(rot)->priv;
+     int retcode;
+ 
+-    while (1)
++    while (__atomic_load_n(&priv->thread_run, __ATOMIC_ACQUIRE))
+     {
+ 
+         if (!priv->set_pos_active)
+--- a/rotators/ars/ars.h
++++ b/rotators/ars/ars.h
+@@ -31,6 +31,7 @@
+     unsigned char pp_control;
+     unsigned char pp_data;
+     pthread_t thread;
++    int thread_run;
+     int set_pos_active;
+     azimuth_t target_az;
+     elevation_t target_el;
+--- a/rigs/harris/harris.h
++++ b/rigs/harris/harris.h
+@@ -46,7 +46,7 @@
+ int harris_set_level(RIG *rig, vfo_t vfo, setting_t level, value_t val);
+ int harris_get_level(RIG *rig, vfo_t vfo, setting_t level, value_t *val);
+ int harris_set_func(RIG *rig, vfo_t vfo, setting_t func, int status);
+-int harris_get_bw(RIG *rig, vfo_t vfo, mode_t mode, pbwidth_t *width);
++int harris_get_bw(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t *width);
+ int harris_get_ptt(RIG *rig, vfo_t vfo, ptt_t *ptt);
+ int harris_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt);
+ 
