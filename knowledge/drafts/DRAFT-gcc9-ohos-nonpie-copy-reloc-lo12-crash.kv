@@ -1,0 +1,113 @@
+#====================================================================
+# DRAFT-gcc9-ohos-nonpie-copy-reloc-lo12-crash — 非 PIE 对象 + OHOS lld
+#   AArch64 COPY 重定位 LO12 未对齐段错误（gcc/9.5.0 包崩溃根因）
+# 对应人类文档: knowledge/drafts/DRAFT-gcc9-ohos-nonpie-copy-reloc-lo12-crash.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。
+# 触发事件: gcc/9.5.0@ohpcd/stable 功能性损坏 → 9.5.0.1 路线 B 修复
+#====================================================================
+
+id:                     DRAFT-gcc9-ohos-nonpie-copy-reloc-lo12-crash
+trigger_tool:           gcc|xgcc|ld.lld|collect2|linking|conan
+phase:                  build|test
+error_signature:        Segmentation fault \(core dumped\)|
+                         abort|SIGSEGV|段错误|
+                         nestfunc.*execution test.*FAIL|
+                         printf-2\.c.*FAIL|
+                         R_AARCH64_COPY
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               ohos, linking, gcc, pie, copy-relocation, aarch64
+match_keywords:         COPY 重定位, R_AARCH64_COPY, LO12, 未对齐, 段错误,
+                         enable-default-pie, NO_PIE_CFLAGS, gcc_cv_c_no_fpie,
+                         非PIE, gcc.c-torture, stderr, libc 数据符号
+title:                  非 PIE 对象经 OHOS lld 链接后引用 libc 数据符号（stderr 等）
+                        产生 R_AARCH64_COPY，LO12 字面量加载未对齐 → 段错误；根因修复为全链 PIE
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             非 PIE 目标对象中，对 libc `stderr` 等外部数据符号的引用产生
+                         R_AARCH64_COPY 重定位（链接器在可执行文件 .bss 建副本，符号
+                         装载地址取数据流地址）。OHOS lld 将 COPY 目标按 16 字节对齐
+                         布置 literal (LO12) 加载序列；非 PIE 可执行文件的加载基址无
+                         对齐保证，`ldr x0, [x0, :lo12:stderr]` 未对齐访问直接 SIGSEGV。
+                         gcc/9.5.0 包宿主生成器与目标对象均非 PIE，所编程序命中该 bug。
+affected_scope:         所有经 OHOS lld 链接且非 PIE 的 aarch64 对象（编译器自身宿主
+                         工具、测试程序、用户程序）；PIE 下该符号走 GOT，无 COPY 重定位
+verification_cmd:       # 1) 看崩溃程序是否非 PIE 且带 COPY 重定位
+                         llvm-readelf -h prog | grep Type        # ET_EXEC = 非 PIE
+                         llvm-readelf -rW prog | grep COPY       # 命中 R_AARCH64_COPY
+                         # 2) 复现最小用例（libc 数据符号引用）
+                         printf 'extern int puts(const char*); int main(){puts("x");return 0;}' > t.c
+                         <gcc> t.c -o t && ./t                    # 非 PIE + COPY → SIGSEGV
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           all-pie-toolchain
+rec_description:        根因修复 = 全链 PIE，而非在链接侧对齐补偿：
+                         1) gcc configure 加 `--enable-default-pie`（ENABLE_DEFAULT_PIE
+                            烘焙进驱动，目标链接默认 -fpie -pie）。
+                         2) **configure 后 sed 清空 gcc/Makefile 的 NO_PIE_CFLAGS /
+                            NO_PIE_FLAG（及 _FOR_BUILD 对）**——宿主生成器（cc1genattrs
+                            等构建机执行的程序）默认被剥 PIE，必须后置清空；
+                            BUILD_NO_PIE_* 经 $(NO_PIE_*) 间接引用自动联动。
+                         3) env 预置 gcc_cv_c_no_fpie / gcc_cv_no_pie **无效**（顶层
+                            configure 生态不消费该 cache 变量），不要走这条路。
+                         4) 修复后验证：产物 ET_DYN、重定位仅 RELATIVE/GLOB_DAT 无 COPY，
+                            stderr 引用程序可运行。
+rec_command:            # configure 阶段
+                         ../gcc-src/configure ... --enable-default-pie --with-ld=<SDK ld.lld> ...
+                         # configure 后、make 前
+                         sed -i 's/^NO_PIE_CFLAGS =.*/NO_PIE_CFLAGS =/' gcc/Makefile   # 同 NO_PIE_FLAG*
+                         # 修复后断言
+                         llvm-readelf -h prog | grep "Type:.*DYN"
+                         ! llvm-readelf -rW prog | grep -q COPY
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      align-copy-target-manually
+fallback_description:   无法全链 PIE 时的止血（不推荐）：手工对齐 COPY 目标或规避 libc
+                         数据符号引用；脆弱且只修表象，升级即复发
+fallback_command:       # 仅诊断用：定位 COPY 符号与加载基址
+                         llvm-readelf -rW prog | grep -E "COPY|stderr"
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       gcc_cv_c_no_fpie=.*预处理|export gcc_cv_no_pie
+forbid_1_reason:        顶层 configure 生态不消费该 cache 变量，预置无效；9.5.0 踩坑实证
+forbid_1_consequence:   自以为已 PIE，实际宿主生成器仍非 PIE，构建期随机段错误
+forbid_2_pattern:       只加 --enable-default-pie 即认为全链 PIE
+forbid_2_reason:        gcc/Makefile 的 NO_PIE_CFLAGS/NO_PIE_FLAG 会把宿主生成器剥回非 PIE
+forbid_2_consequence:   目标 PIE 而宿主非 PIE，构建期 genattr 等宿主工具段错误
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              DRAFT-gcc9-ohos-lld-autocodesign-toolchain-route
+similar_to:             E2188-draft-B94A, DRAFT-lld-shlib-undefined-host-contract
+conflicts_with:         []
+prerequisite_of:        DRAFT-gcc9-ohos-lld-autocodesign-toolchain-route
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-gcc9-ohos-nonpie-copy-reloc-lo12-crash.md
+last_updated:           2026-09-22
+source_event:           gcc/9.5.0.1@ohpcd/stable 适配（路线 B）；9.5.0 包
+                         gcc.c-torture execute nestfunc/printf-2 类段错误根因
+
+# ═══ 知识协作 ═══
+
+authors:                ohpcd <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-22
+
+draft:                  true
