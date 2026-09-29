@@ -1,0 +1,201 @@
+# ═══ Draft knowledge entry — 模板渲染表（@VAR@ + 替换 JSON）把某个宏槽位留成空串时，
+# 渲染器做的是「等值替换」而不是「保留占位符」，于是宏被整段抹掉：
+# 生成的头文件里 400 多处 __P((...)) 全在，而定义它的那两行没了 ═══
+# Timestamp: 2026-09-22
+# Software: libdb 5.3.35 (Berkeley DB 社区 fork, berkeleydb/libdb)
+# Gate: 构建准入（编译期第一单元即失败，Meson 线彻底产不出库）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-6818-libdb-5.3.35-meson-gen-header-empty-substitution-erases-macro
+trigger_tool:           meson|gen_header|custom_target|cc|gcc|clang
+phase:                  compilation
+error_signature:        expected ';' at end of declaration list|
+                         __P\(\(|
+                         dist/db.h:[0-9]+:.*error|
+                         too many errors emitted, stopping now \[-ferror-limit=\]|
+                         In file included from .*db_int\.h:[0-9]+:|
+                         unknown type name __P|expected declaration specifiers.*__P
+
+severity:               3
+category:               build, conan, meson, headers, substitution, portability
+match_keywords:         template substitution, @VAR@ placeholder, db_subs.json,
+                         gen_header.py, empty substitution value, macro erased not
+                         preserved, DB_PROTO1 DB_PROTO2, __P macro, ANSI C prototype
+                         macro, Berkeley DB db.h, generated header fails to compile,
+                         db_int.h includes db.h, two build lines disagree, autoconf vs
+                         meson, configure.ac substitutes but meson table does not,
+                         build_android/db.h as reference output, libdb
+
+title:                  模板渲染（`@VAR@` + 替换表 JSON）把某个宏槽位留成**空串**时，
+                        渲染器做的是「等值替换」而非「保留占位符」—— 宏被整段抹掉：
+                        生成的公开头里 400 多处 `__P((...))` 全在，
+                        而**定义 `__P` 的那两行**没了，于是每个包含它的编译单元都报
+                        `expected ';' at end of declaration list`
+
+root_cause: >
+  生成的头文件出语法错时，最容易走错的方向是「去看报错那一行」——因为它看起来完全合法。
+  真正的因果链是三步：
+
+  (1) **渲染语义是「查表值 or 原样保留占位符」，空串不是「保留」。**
+  dist/meson/gen_header.py 的核心就一行：
+      re.sub(r"@([A-Za-z0-9_]+)@", lambda m: subs.get(m.group(1), m.group(0)), text)
+  表里有这个键、值为空串 → 替换成空。所以「表里写 ""」= 「把这一段删掉」，
+  而不是「不管它」。这一点与很多模板引擎（未定义/空值保留占位符）直觉相反。
+
+  (2) **被删掉的不是可选项，而是某个宏的定义。**
+  src/dbinc/db.in 顶部的 @DB_CONST@ / @DB_PROTO1@ / @DB_PROTO2@ 三个槽位，
+  装的是「清掉并重定义 __P() 原型包装宏」的那几行。db.h **故意不包含 db_config.h**，
+  所以 __P 必须由模板自己给出。Autotools 线（dist/configure.ac:407-411）按
+  ac_cv_prog_cc_c89 算值：
+      DB_PROTO1="#undef __P"
+      DB_PROTO2="#define<TAB>__P(protos)<TAB>protos"     # ANSI C
+  但 Meson 线的 dist/meson/db_subs.json 把这三项都留成 ""。
+
+  (3) **报错形态极具误导性。** clang 对「未知标识符出现在声明列表里」的报错是
+      dist/db.h:529:14: error: expected ';' at end of declaration list
+              int (*close) __P((DB_LOGC *, u_int32_t));
+                          ^
+                          ;
+  光标停在那个标识符上、建议补分号 —— 而那一行的手写形式本身是合法的传统 C 写法。
+  **它就是「__P 未被定义」的指纹。** 又因为 dist/db_int.h:88 包含 db.h，
+  每个编译单元都以同样方式失败（本例 20 条后触发 -ferror-limit）。
+
+  另一个反直觉点：**map 里留空的键不都是错的。** 同一张表里
+  DB_CONST / DB_VERSION_UNIQUE_NAME / int16_decl / u_int32_t_decl / platform_header
+  等留空是**语义正确**的（类型由系统头提供、该构建线不做符号重命名、
+  configure.ac 也只在 pre-ANSI 编译器下才给 DB_CONST 赋值）。所以要逐键判断，
+  判据是「去另一条构建线或树里其它平台的构建产物看同一个键被代换成什么」。
+
+affected_scope: >
+  一切「模板 + 替换表（JSON/INI/属性文件）驱动代码生成」的构建线，尤其是同一个仓库
+  里**多条构建线共享同一批模板、但各自维护自己的替换表**的情况
+  （autoconf 的 AC_SUBST / configure + sed，vs meson/python 的 gen_header + JSON）。
+  判据一（表侧）：列出替换表里所有值为空串的键，逐个 `grep '@键@' <模板>`，
+  确认该占位符的用法是否「留空即合法」。
+  判据二（对照侧）：`grep -n '<键>' <另一条线的构建描述>` 直接给出定值；
+  若树里随包发布过别的平台构建产物（build_android/ build_windows/ 之类），
+  diff 生成的头是最快的对照。
+  判据三（症状侧）：**生成物（不在源树里、构建期才出现的头/源文件）报语法错，
+  且报错指向一个「本该由宏提供的标识符」** → 先怀疑「宏没被定义」，
+  不要顺着报错去改生成物，也不要怀疑 -std= / 系统头。
+  同族信号：`unknown type name X`、`expected declaration specifiers`、
+  `implicit declaration of function` 出现在**生成**的头/源里。
+
+verification_cmd: >
+  # 判据一：渲染语义（空串 = 删除，不是保留）
+  sed -n '1,25p' dist/meson/gen_header.py
+  #   关键：subs.get(name, m.group(0))  —— 表里有键就给值，空串也给空串
+
+  # 判据二：模板里那两个槽位的用途
+  grep -n '@DB_PROTO1@\|@DB_PROTO2@\|@DB_CONST@' src/dbinc/db.in
+  # 判据三：另一条构建线怎么代换的（定值来源）
+  grep -n 'DB_PROTO1\|DB_PROTO2' dist/configure.ac dist/configure
+  #   期望：DB_PROTO1="#undef __P" / DB_PROTO2="#define\t__P(protos)\tprotos"
+
+  # 判据四：本地复现（不需要真编译，渲染一次即可命中 CI 的同一条报错行）
+  python dist/meson/gen_header.py out_before.h dist/meson/db_subs.json \
+      src/dbinc/db.in src/dbinc_auto/api_flags.in \
+      src/dbinc_auto/ext_def.in src/dbinc_auto/ext_prot.in
+  sed -n '529p' out_before.h
+  #   → int (*close) __P((DB_LOGC *, u_int32_t));   与 CI 报错行号逐字一致
+
+  # 判据五：补丁后同一位置变成宏定义（此宏会被其后 470 处用法消费）
+  python dist/meson/gen_header.py out_after.h <patched>/db_subs.json <same inputs>
+  sed -n '30,40p' out_after.h
+  #   → #undef __P / #define	__P(protos)	protos
+
+rec_priority:           1
+rec_approach:           fill-the-empty-substitution-slots-with-the-values-the-other-build-line-computes
+rec_description: >
+  把替换表里那两个**漏填**的槽位补成另一条构建线（autoconf/configure）对同一编译器
+  所选的值；留空合法的键（DB_CONST、*_decl、platform_header 等）一个都不动。
+      "DB_PROTO1": "#undef __P",
+      "DB_PROTO2": "#define\t__P(protos)\tprotos",
+  JSON 里写 `\t`，json.load 后即真实制表符 —— 必须与 configure.ac/sed 线写进头文件的
+  内容逐字节一致（sed 那一路是把真实制表符写进去的）。
+  要点：
+    - **不要顺手把所有空串都填上**。逐键判断「留空是语义还是缺漏」，判据是去另一条
+      构建线看同一个键的取值；DB_CONST 留空恰是 configure.ac 的 ANSI-C 分支行为。
+    - **不要改生成物**（生成的 db.h 不在源树、下次构建即被覆盖），也不要改模板里
+      __P 的用法（那是上游刻意的传统写法，改动会让包含 db_config.h 的前提假设失效）。
+    - **同表相邻行的多处修改要拆成多条补丁文件时，注意应用顺序**：后一条补丁的上下文
+      行要特意选前一条不动的那两行，否则前一条先打会让后一条失配。Conan 的
+      apply_conandata_patches 按 conandata.yml 的列出顺序依次调用 patch()，
+      每条各扫一遍源文件，互不影响 —— 但顺序本身就是前提。
+rec_command:            >
+  # 补丁内容（patches/0002-*）
+  #   -  "DB_PROTO1": "",
+  #   -  "DB_PROTO2": "",
+  #   +  "DB_PROTO1": "#undef __P",
+  #   +  "DB_PROTO2": "#define\t__P(protos)\tprotos",
+  #
+  # 本地用 patch_ng 复验（注意 Conan 默认 strip=0，靠 patch_ng 的 a//b/ 前缀回退）：
+  python -c "import patch_ng;print(patch_ng.fromfile('patches/0002-*.patch').apply(strip=0, root='<src>'))"
+  #   → True；再跑 gen_header.py 确认 __P 的定义段出现在用法之前
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      inject-the-macro-on-the-compiler-command-line
+fallback_description:   >
+  不打上游补丁，在消费者配方的 generate()/build() 里把宏塞进 CFLAGS
+  （`-D__P(x)=x`，或 `-D'__P(protos)=protos'` 视编译器而定）。
+  只作为无法打补丁时的兜底：它把「上游 Meson 路径漏代换」这个事实藏进消费者配方，
+  一旦上游补齐就会变成重复定义告警；而且对别的消费者没有帮助（每个用这条 Meson 线
+  的人都会各自撞一遍）。
+fallback_command:       CFLAGS="-D__P(x)=x $CFLAGS"   # 仅兜底；OHOS clang 需确认参数化宏写法可过
+fallback_auto_fix:      false
+fallback_impl:          recipe
+
+forbid_1_pattern:       sed\s+-i.*db\.h|改\s*dist/db\.h|patch.*db\.h.*#define\s*__P|在生成物里补\s*#define\s*__P
+forbid_1_reason:        生成的头文件不在源树里、每次构建由 gen_header.py 覆盖，
+                        改它是无效改动（本机看似修好，CI 重新生成即打回）。
+                        正确位置是驱动渲染的**替换表**，即「源」而不是「产物」。
+forbid_1_consequence:   补丁在 CI 上等于没打；若误把生成物提交进补丁还会污染上游树。
+
+forbid_2_pattern:       sed\s+-i.*__P\(\(|把\s*__P\(\(.*\)\)\s*改成\s*\(|grep\s+-v\s+__P|s/__P\(\(/\(/g
+forbid_2_reason:        把 470 处 __P((...)) 用法改写成直接写参数列表，是把「宏没定义」
+                        这个根因替换成「上游传统写法不合我意」。db.h 不包含 db_config.h
+                        是上游刻意的布局（模板头注释有说明），__P 的 ANSI/K&R 双分支
+                        也是刻意的；改了用法会在所有还正常代换 __P 的平台上改变行为，
+                        且上游升级必冲突。
+forbid_2_consequence:   适配不可上游化（P005），补丁语义错误且成为长期维护负担。
+
+forbid_3_pattern:       一键把所有空串替换表项都填上|for\s+k,v\s+in\s+d\.items\(\).*if\s+v\s*==\s*""|把所有\s*""\s*填成默认值
+forbid_3_reason:        同一张表里留空的键分两类：**语义为空**（类型由系统头提供、
+                        该构建线不做符号重命名、configure.ac 在 ANSI C 下也不赋值）
+                        与**漏填**。批量填充会给前者塞进错误内容 —— 例如给
+                        `int16_decl` 硬塞一个 typedef，在系统头已提供该类型的平台上
+                        构成重复定义；给 `DB_VERSION_UNIQUE_NAME` 塞值会改变所有
+                        内部符号名。
+forbid_3_consequence:   修一个坏点引入一串新坏点，且症状远离原因（类型重复定义 /
+                        链接期符号名不匹配），排查成本极高。
+
+principles:             P005, P014
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-6818-libdb-5.3.35-fork-version-strings-drift-from-release
+                        （同一张 db_subs.json、相邻两行：那条是「表里填了旧值」，
+                         本条是「表里填了空值」—— 都是「两条构建线只代换了一条」的
+                         变体。两条补丁的上下文行互相错开，必须按 0001 → 0002 顺序应用）
+                        DRAFT-6818-libdb-5.3.35-meson-sidesteps-autotools-hmdfs-pits
+                        （为什么本包走 Meson —— 「两条构建线并存」这个前提本身）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-6818-libdb-5.3.35-meson-gen-header-empty-substitution-erases-macro.md
+last_updated:           2026-09-22
+source_event:           archives/l/libdb/5.3.35 CI #55671 conan create 失败
+                        （dist/db.h:529 起 20 条 expected ';' at end of declaration list）
+
+authors:                2301_76770579
+source_pr:              11637
+source_commit:          7c5e81e71af14e13a9a2fc5556ccdede7471d253
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-22
+
+draft:                  true
+contributor_id:         2301_76770579

@@ -1,0 +1,149 @@
+# ═══ Draft knowledge entry — fork 只代换了一条构建线的版本串时，另一条构建线会产出「版本漂移」的运行库：版本宏是 db_version() 的返回值，不是元数据 ═══
+# Timestamp: 2026-09-20
+# Software: libdb 5.3.35 (Berkeley DB 社区 fork, berkeleydb/libdb)
+# Gate: rule4 上游测试口径 / rule12 鸿蒙特有测试 / L5 产物基线
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-6818-libdb-5.3.35-fork-version-strings-drift-from-release
+trigger_tool:           meson|autoconf|gen_header|custom_target
+phase:                  build
+error_signature:        db_version\(\)|db_full_version\(\)|DB_VERSION_PATCH|
+                        DB_VERSION_STRING|DB_VERSION_FULL_STRING|
+                        region version mismatch|PACKAGE_VERSION|
+
+severity:               2
+category:               build, packaging, conan, versioning, observability
+match_keywords:         version drift, fork release script, CalVer, meson.build,
+                        db_subs.json, gen_header, PACKAGE_VERSION, configure.ac,
+                        substitution table, runtime version string, ABI identity,
+                        libdb, Berkeley DB
+
+title:                  fork 只代换了一条构建线的版本串时，另一条构建线会产出
+                        「版本漂移」的运行库 —— 版本宏是 db_version() 的运行时返回值，
+                        不是可忽略的元数据
+
+root_cause: >
+  libdb fork 的发布脚本只代换了 Autotools 线的版本（把 dist/configure.ac 的
+  PACKAGE_VERSION 刷成 5.3.35，生成 dist/configure），而 Meson 线的版本串分散在
+  另外三处、全部停留在旧值，且三处互不一致：
+
+    dist/configure  （autotools 代换产物）        5.3.35   ← 只有这一处被刷过
+    dist/meson/db_subs.json                       5.3.29   ← gen_header.py 的替换表
+    dist/meson.build                              5.3.34   ← cdata.set_quoted(PACKAGE_VERSION/STRING)
+    meson.build                                   5.3.34   ← project() 版本
+
+  第三列的差别不只是「数字不一样」，而是**谁来读**不一样：
+   - dist/meson/db_subs.json 被 dist/meson/gen_header.py 读取，用来把
+     src/dbinc/db.in 渲染成公开头 db.h。渲染出来的 DB_VERSION_PATCH /
+     DB_VERSION_STRING / DB_VERSION_FULL_STRING 会**编译进库**，并且正是
+     src/env/env_open.c 里 db_version() / db_full_version() 的返回值
+     （env_open.c:34-38、59-63）。也就是说：不补的话，用 Meson 构建出来的运行库
+     会向所有消费者自报 5.3.29 —— 这是**功能性**的版本漂移。
+   - src/env/env_region.c:253 的 region 版本一致性校验读的是同一批宏，漂移会
+     影响同一进程内不同来源 region 的一致性判定。
+   - dist/meson.build 的两处 PACKAGE_VERSION/PACKAGE_STRING 只进生成的
+     db_config.h（私有头、不安装），影响面小，但同样要与发布版本对齐。
+   - meson.build 的 project() 版本纯元数据。
+
+  识别信号是：**同一个仓库里同一个版本号在多处出现且取值不同**，而 fork 的发布
+  脚本（或维护者的手工操作）只更新了其中一条构建线。
+
+affected_scope: >
+  一切「上游以 fork/衍生分支发布、且发布脚本只代换其中一条构建线」的项目，尤其是
+  版本号既出现在 configure.ac 又出现在 meson.build / 自定义替换表（*.json / *.in /
+  *.tmpl）的仓库。判据：把版本号在各处 grep 出来，看取值是否一致，并逐处确认
+  「谁读它、读到的值进入哪个产物（公开头 / 私有头 / 二进制内嵌字符串 / 仅元数据）」。
+  BDB 具体实证：libdb 5.3.35 上，db_subs.json 停留在 5.3.29（落后 6 个 patch），
+  Meson 构建产出的 db.h 会让 db_version() 报 "Berkeley DB 5.3.29: (libdb fork)"。
+  同类风险面还包括测试用例对版本号的硬编码断言（若上游测试断言 5.3.34，对齐后
+  反而会红）。
+
+verification_cmd: >
+  # 1) 把同一个版本号在所有构建描述文件里揪出来，看是否一致：
+  grep -rn "5\.3\.[0-9]\+" dist/configure dist/meson/db_subs.json \
+                            dist/meson.build meson.build
+  # 2) 确认「谁读 db_subs.json」——它驱动公开头 db.h 的渲染：
+  grep -rn 'db_subs.json\|DB_VERSION_PATCH' dist/meson/gen_header.py
+  # 3) 确认版本宏真的会被消费者观测到：
+  grep -n 'db_version\|db_full_version' src/env/env_open.c
+  #    → 两个函数都 return DB_VERSION_* 宏
+  # 4) 补丁前后逐字节比对生成的头（应只有版本宏不同）：
+  diff <(gen_header 前) <(gen_header 后)
+  # 5) 端到端验收（消费者视角，必须三者同报）：
+  printf '#include <db.h>\n#include <stdio.h>\nint main(){int a,b,c;'
+  #    db.h 编译期宏 == db_version() 返回值 == db_full_version() 的 patch 段
+
+rec_priority:           1
+rec_approach:           align-all-build-lines-then-verify-end-to-end-from-the-consumer-side
+rec_description: >
+  补丁范围**只改版本字符串字面量**，不动任何替换项（类型声明、printf 格式、
+  平台头/尾）与任何代码，保证生成的头文件除版本宏外逐字节相同。补丁必须覆盖
+  全部不一致处（本例 3 个文件），不能只补「看起来最重要的那个」——只补 db_subs.json
+  会让 db_config.h 与 project() 继续漂移，反过来只补 meson.build 则运行库仍自报旧版。
+  验收必须从**消费者视角**做端到端断言：db.h 的编译期宏、db_version() 的返回值、
+  db_full_version() 的返回值三者同报目标版本，且 db_full_version() 的
+  family/release 段（本例 11 / 2）与全串（11.2.5.3.35）都对。只断言其中一者会漏掉
+  「改了但没生效」的假绿。
+rec_command: >
+  patch -p1 < patches/0001-meson-version-metadata-align.patch
+  # 生成物核对
+  grep -n 'DB_VERSION_PATCH\|DB_VERSION_STRING\|DB_VERSION_FULL_STRING' \
+       <builddir>/dist/meson/db_subs.json
+  #   → "35" / "Berkeley DB 5.3.35: (libdb fork)" / "... 11.2.5.3.35: (libdb fork)"
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      add-a-consumer-side-version-assertion-instead
+fallback_description:   >
+  若上游不接受版本补丁（例如 Meson 线是实验性的、维护者希望它保持独立版本线），
+  退而求其次：不做源码补丁，改为在 test_package 里把「运行库自报的版本」作为
+  **已知偏差**显式断言并写进 notes.md 与 MANIFEST.yml。这能防止漂移被静默，
+  但代价是消费者仍然拿到一个自报错误版本的库 —— 对本例这种「版本宏同时参与
+  region 一致性校验」的项目风险仍在，故仅作为无法打补丁时的兜底。
+fallback_command:       >
+  # test_package 中断言已知偏差（不推荐，仅兜底）
+  # CHECK(strstr(db_version(&a,&b,&c), "5.3.29") != NULL, "documented drift")
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       sed -i .*5\.3\.[0-9]\+.*src/|#define DB_VERSION_PATCH .*手动
+forbid_1_reason:        直接改库源码里的版本宏（而不是改驱动渲染的替换表）会让
+                        生成物与「源」脱节：下一次重新生成头文件时手工改动被覆盖，
+                        且改动位置不在补丁能长期维持的地方。
+forbid_1_consequence:   补丁在下次构建时失效，版本漂移静默复发。
+forbid_2_pattern:       #if 0.*version|if \(strcmp.*DB_VERSION.*\) return
+forbid_2_reason:        把版本断言短路掉等于放弃「改了但没生效」的检测，属于把
+                        验收手段废掉而不是修复缺陷。
+forbid_2_consequence:   假绿：补丁打没打上都看不出来。
+forbid_3_pattern:       skip.*version|--gtest_filter=-.*[Vv]ersion|SKIP.*VERSION
+forbid_3_reason:        跳过版本相关用例 = 伪造通过率；rule4 要求如实统计
+                        「执行集 X/X + 未执行 Z」并给出技术理由。
+forbid_3_consequence:   通过率造假，评审不可信，PR 驳回返工。
+
+principles:             P003, P005, P014
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-6818-libdb-5.3.35-meson-sidesteps-autotools-hmdfs-pits
+                        （同批 libdb 适配的另一条：为什么本包选 Meson 而不是
+                        Autotools —— 也正是「两条构建线并存」这个前提本身）、
+                        DRAFT-libgmobile-0.7.2-meson-not-installed-is-not-skipped-
+                        and-exit-code-is-not-coverage（同属「元数据/统计口径不一致
+                        导致看起来绿、实际没验到」家族）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-6818-libdb-5.3.35-fork-version-strings-drift-from-release.md
+last_updated:           2026-09-20
+source_event:           archives/l/libdb/5.3.35 适配（fork 只刷了 dist/configure 的版本，Meson 侧三处停留旧值）
+
+authors:                2301_76770579
+source_pr:              11637
+source_commit:          eb9b0149417ad33c81ccc4a3fd5ba57b46ade76c
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-20
+draft:                  true
+contributor_id:         2301_76770579
