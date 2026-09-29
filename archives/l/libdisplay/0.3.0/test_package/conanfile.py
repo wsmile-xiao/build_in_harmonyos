@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conan test_package — libdisplay-info 0.3.0
+"""Conan test_package — libdisplay 0.3.0
 
 L1 test: verify the library API (di_info_parse_edid, di_info_destroy)
 is callable and correctly rejects invalid EDID data.
@@ -27,5 +27,5 @@ class LibdisplayInfoTestConan(ConanFile):
 
     def test(self):
         # Run the test binary directly via self.run() (CI L0d requirement)
-        test_bin = os.path.join(self.cpp.build.bindirs[0], "test_libdisplay-info")
+        test_bin = os.path.join(self.cpp.build.bindirs[0], "test_libdisplay")
         self.run(test_bin, env="conanrun")
