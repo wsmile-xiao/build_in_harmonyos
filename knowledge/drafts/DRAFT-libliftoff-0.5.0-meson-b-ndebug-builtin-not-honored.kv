@@ -1,0 +1,132 @@
+# ═══ Draft knowledge entry — meson 内置选项 b_ndebug 被 --buildtype 重新推导 → 上游断言被编译掉、测试假通过 ═══
+# Timestamp: 2026-09-28
+# Software: libliftoff 0.5.0 (HarmonyOS PC / aarch64, meson)
+# Gate: 上游测试实际运行（58 项，需断言真实生效方有意义）
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-libliftoff-0.5.0-meson-b-ndebug-builtin-not-honored.md
+#
+# 与既有条目的关系（增量说明）:
+#   E259 = Conan Release 的 -DNDEBUG 让 assert(含副作用表达式) 不求值，触发上游 latent bug
+#     —— 机制相关但**不同根因**：E259 是「语法层副作用被抹掉」（autotools/CMake 的 -DNDEBUG），
+#     本条是「meson 内置选项 b_ndebug 的**设置途径**失效」——配方明明设了 false 却不生效，
+#     导致整个测试套件在断言被编译掉的情况下报「全绿」。E259 全文不含 meson/b_ndebug/introspect
+#     （实测 grep 计数 0），且 E259 的修法是改源码把副作用移出 assert，本条修法是改构建配置
+#     并**实测校验**生效值。
+#   DRAFT-taocpp-tuple-1.0.0-ndebug-werror-upstream-test-debug-build = CMake 侧同类现象，
+#     但表现为**编译期 -Werror unused variable**（构建直接失败，容易被发现）。本条更危险：
+#     构建与测试都「成功」，只是 57 个用例实际什么都没执行——**不会失败，只会静默失真**。
+#   DRAFT-libnih-1.0.3-ndebug-assert-sideeffect-hoist / embedmq-1.0.1-ndebug-assert-control-flow-test
+#     —— 均为 assert/NDEBUG 同族，但都属源码层处置；本条属构建配置层。
+#   本技法已在仓内 **两个**已入库配方中出现（archives/j/jose/14 与 15 的 _force_live_assertions、
+#   archives/l/libliftoff/0.5.0），但知识库此前无对应条目——本条补齐该沉淀缺口。
+# ═══
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-libliftoff-0.5.0-meson-b-ndebug-builtin-not-honored
+trigger_tool:           meson|conan|ninja
+phase:                  testing
+error_signature:        check_ndebug.*FAIL|NDEBUG is defined, cannot run tests|Ok:\s+[0-9]+\s+Fail:\s+1|b_ndebug\s*=\s*'true'|Summary of Failures:.*check_ndebug
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, meson, conan, testing, upstream-test
+match_keywords:         b_ndebug, NDEBUG, assert compiled out, MesonToolchain, project_options,
+                        --buildtype=release, buildtype, meson configure, meson introspect,
+                        --buildoptions, built-in option, check_ndebug, sentinel test,
+                        tests pass without executing, Release assertions
+
+title:                  meson 内置选项 b_ndebug 不能只靠 project_options 设置——conan 传 --buildtype=release 后 meson 会重新推导为 true，上游断言被编译掉致测试「假通过」，须 configure 后钉正并用 introspect 实测校验
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             b_ndebug 是 meson 的**内置（built-in）选项**，其值可由 buildtype 推导。
+                        MesonToolchain 会把配方在 tc.project_options 里请求的值写进 machine file，
+                        但 conan 同时还在 setup 命令行上传了 --buildtype=release；meson 处理顺序上
+                        buildtype 的推导覆盖了 machine file —— 于是请求的 false 被丢弃，最终生效
+                        值仍是 true。实测（libliftoff 0.5.0 构建内 meson introspect）：
+                            werror = False        ← 请求值生效
+                            default_library = 'shared'  ← 请求值生效
+                            c_std = 'c11'         ← 请求值生效
+                            b_ndebug = 'true'     ← **请求的 false 未生效**
+                        危害在于**静默**：上游把断言体（及其副作用）写在 assert() 里时，
+                        -DNDEBUG 下 assert 展开为 ((void)0)，用例体等于空执行，而测试框架
+                        仍报「通过」——计数完全失真。libliftoff 57/58 就是这个状态：
+                        唯一失败的 check_ndebug 恰是上游专门写的**哨兵**，用来抓「NDEBUG 已定义」。
+                        distinguishing 特征：测试结果里出现一个名字含 ndebug 的用例失败，
+                        而其余用例「全过」——那「全过」不可信，不是真通过。
+affected_scope:         任何用 meson 构建、且上游把断言体（含副作用）放在 assert() 内的 C/C++ 库，
+                        在 conan 的 Release 构建下运行上游测试套件时。上游自带 NDEBUG 哨兵用例的
+                        （如 libliftoff test/check_ndebug.c）会显式暴露；不带的则完全无感——
+                        表现为「测试全绿」，实际零验证。仓内已知同技法：jose/14、jose/15、libliftoff/0.5.0。
+verification_cmd:       meson configure <build_dir> -Db_ndebug=false
+                        meson introspect <build_dir> --buildoptions > opts.json
+                        # 断言 opts.json 中 b_ndebug 的 value 为字符串 "false"（combo 选项），
+                        # 而非 'true'；不为 false 即上游断言未生效、测试计数不可信。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pin-b-ndebug-after-configure-and-verify-by-introspect
+rec_description:        在 meson.configure() **之后**、meson.build() 之前显式执行
+                        `meson configure <build_dir> -Db_ndebug=false`，把生效值钉正；
+                        随即用 `meson introspect <build_dir> --buildoptions` 读取**实际生效值**
+                        并断言之为 false，不为 false 就 raise 中止构建。
+                        要点：①不能只写 tc.project_options["b_ndebug"]="false"（实测无效）；
+                        ②不能只发出 configure 命令而不校验——meson 的选项是 combo，
+                          introspect 返回的是字符串 "false"/"true"，必须按字符串比对；
+                        ③校验失败必须**硬失败**，否则回到「静默假通过」的老路。
+                        这是「让上游断言真实生效」，与「改测试让其通过」有本质区别：
+                        不修改、不跳过、不删除任何上游测试文件，58 项在断言生效后全部真实执行。
+rec_command:            meson configure "$build_dir" -Db_ndebug=false
+                        meson introspect "$build_dir" --buildoptions > "$build_dir/opts.json"
+                        # 解析 opts.json，取 name == "b_ndebug" 的 value，
+                        # str(value).strip().lower() != "false" → raise ConanException
+                        # 同时把 buildtype/b_ndebug/werror/default_library 打进构建日志留证。
+rec_auto_fix:           false
+rec_impl:               meson-configure-b-ndebug-then-introspect-verify
+
+fallback_priority:      2
+fallback_approach:      debug-buildtype-for-upstream-tests
+fallback_description:   仅当上游测试必须 Release 构建（依赖 Release 宏或优化行为）且哨兵/断言
+                        无法在 b_ndebug=false 下正确工作时，才把**测试**单独用 --buildtype=debug
+                        配置运行（assert 生效）。代价：测试环境与发布产物的构建类型不一致，
+                        测试语义偏离上游真实 Release 行为，仅作退路。
+                        （注意与 taocpp-tuple 条目的 CMake Debug 退路同思路，但本条的
+                        首选方案更强：保持 Release 构建类型，只钉正 b_ndebug。）
+fallback_command:       meson setup <test_build_dir> --buildtype=debug && meson test -C <test_build_dir>
+fallback_auto_fix:      false
+fallback_impl:          separate-debug-build-for-tests
+
+forbid_1_pattern:       删.*check_ndebug|deselect.*ndebug|skip.*check_ndebug|屏蔽.*哨兵
+forbid_1_reason:        check_ndebug 是上游**故意设计**的哨兵，它失败正是「其余用例的通过数不可信」
+                        的唯一信号。把它删掉/跳过/deselect，等于销毁唯一的告警装置，
+                        让 57 个空执行的用例冒充全绿——这是伪造测试结果。
+forbid_1_consequence:   整个上游套件零验证却报「58/58 通过」，Release 制品的断言路径缺陷完全未覆盖；
+                        PR 的测试通过率申报随之失真（违反 R51）。
+
+forbid_2_pattern:       把.*Ok:.*5[0-9].*Fail:.*1.*记为.*(用例失败|测试不通过|上游缺陷)
+forbid_2_reason:        该现象不是用例失败，而是**构建配置未生效**的信号——把配置问题误记成
+                        上游测试失败，会导向「跳过测试」或「给上游打补丁」等错误方向。
+forbid_2_consequence:   误判根因 → 错误修复（改测试/改源码）→ 真正的配置问题被掩盖。
+
+principles:             P010,P014
+
+# ═══ Layer 4: 关联层 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E259, DRAFT-taocpp-tuple-1.0.0-ndebug-werror-upstream-test-debug-build, DRAFT-libnih-1.0.3-ndebug-assert-sideeffect-hoist, embedmq-1.0.1-ndebug-assert-control-flow-test]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ Layer 5: 溯源层 (Provenance) ═══
+doc_file:               knowledge/drafts/DRAFT-libliftoff-0.5.0-meson-b-ndebug-builtin-not-honored.md
+last_updated:           2026-09-28
+source_event:           libliftoff 0.5.0 适配：首次 conan create 报 57 Ok / 1 Fail，唯一失败项为上游哨兵 test/check_ndebug.c；introspect 实测 b_ndebug='true'（同批请求的 werror/default_library/c_std 均已生效）；configure 后钉正并加 introspect 校验后 58/58 全过。仓内 jose/14、jose/15 配方为同技法先例。
+
+authors:                AtomCode <noreply@atomgit.com>
+source_pr:              13394
+source_commit:          def4d06c1
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft:                  true
