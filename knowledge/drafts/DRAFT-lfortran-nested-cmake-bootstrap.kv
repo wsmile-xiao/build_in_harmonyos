@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-lfortran-nested-cmake-bootstrap
+# 嵌套 cmake 以自建产物为编译器自举运行时：编译器透传缺口环境注入
+# 与自举产物动态库运行期解析（DT_RPATH 烘焙，禁 LD_LIBRARY_PATH 注入）
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: lfortran 0.64.0 HarmonyOS PC 适配（C 类，2026-09-27，真机 23 轮全绿 + CI 首跑暴露 LD_LIBRARY_PATH 注入污染）
+#====================================================================
+
+id:                     DRAFT-lfortran-nested-cmake-bootstrap
+trigger_tool:           cmake|conan|ld|clang
+phase:                  configure|build
+error_signature:        The C compiler.*is not able to compile a simple test program|CMAKE_C_COMPILER:FILEPATH=.*NOTFOUND|No CMAKE_Fortran_COMPILER could be found|error while loading shared libraries: libLLVM|configure_runtime|build_runtime
+severity:               2
+category:               toolchain, cmake, bootstrap, fortran, portability
+match_keywords:         lfortran, bootstrap, nested cmake, custom target, configure_runtime, build_runtime, CMAKE_Fortran_COMPILER, 自举, --backend=cpp, env injection, CMAKE_C_COMPILER, CMAKE_CXX_COMPILER, DT_RPATH, --disable-new-dtags, LD_LIBRARY_PATH, libLLVM.so, libc++_shared.so, symbol not found, 运行时模块
+title:                  嵌套 cmake 以自建产物为编译器自举运行时（CMAKE_Fortran_COMPILER=自建二进制）：编译器透传缺口经环境变量注入、自举产物动态库经链接期 DT_RPATH 解析（禁 LD_LIBRARY_PATH 注入）
+prescan_pattern:        CMAKE_Fortran_COMPILER|configure_runtime|build_runtime|add_custom_target.*cmake
+prescan_globs:          conanfile.py
+
+# Layer 2: Diagnosis
+root_cause:             子模式 A（编译器透传缺口）：lfortran 上游主构建产出 <build>/src/bin/lfortran 后，以嵌套 cmake（custom target configure_runtime/build_runtime）把它当作 CMAKE_Fortran_COMPILER 自举编译 Fortran 运行时模块（src/runtime/*.f90 → lfortran --backend=cpp 转 C++ → 再经 CXX 编译）。嵌套 configure 只透传有限参数（toolchain/prefix/CMAKE_INSTALL_*），**不带 -DCMAKE_C_COMPILER/-DCMAKE_CXX_COMPILER**；嵌套 project() enable_language(C/CXX) 的编译器检测在 OHOS 上找不到默认 cc/c++（无标准路径 gcc/cc 布局，HNP 工具链不在默认搜索）→ configure 失败。修复=外层 build() 以 env 注入 CMAKE_C_COMPILER/CMAKE_CXX_COMPILER（cmake 会把同名环境变量当初始缓存，嵌套 configure 继承外层 self.run 的 env）。子模式 B（自举产物动态库解析）：自建 lfortran 二进制动态链 libLLVM.so（制品仓 clang 包 lib/），嵌套 cmake 执行它编译 .f90 时 OHOS 无系统级动态库搜索（无 ld.so.conf 用户可写路径，SDK libc 不解析包路径）→ 自举产物起不来。修复=链接期烘焙 DT_RPATH 指向 clang 包 lib/（-DCMAKE_EXE_LINKER_FLAGS="-Wl,--disable-new-dtags -Wl,-rpath,<clang 包 lib/>"，与主链接期同源；--disable-new-dtags 强制 RPATH 先于 LD_LIBRARY_PATH，防 profile 的 SDK llvm/lib 里 SDK 版 libLLVM.so 抢先绑定→LLVM_22 版本失配）。禁 LD_LIBRARY_PATH 注入（lfortran #13591 CI 首跑实测）：把 clang 包 lib/ 前置进 LD_LIBRARY_PATH 会让 CI worker 的 HNP cmake 抢绑包内捆绑的 libc++_shared.so（比 worker 工具链旧）→ cmake 自身 relocation 符号风暴（Error relocating /data/service/hnp/bin/cmake: ... symbol not found，顶层/嵌套 cmake 进程均受污染）。真机不发作=真机 HNP 树较旧符号恰好够、CI 树更新即爆——动态库解析只作用于自建二进制本身才是安全界。
+affected_scope:         任何「自举型编译器/代码生成器落地 OHOS」的场景：①上游用嵌套 cmake/custom target 以自建产物为编译器再编译自身运行时/绑定（LLVM 系语言实现、lua/perl/ruby 类扩展生成器、IDL/代码生成工具链）；②自举产物动态链构建期依赖库（libLLVM/libgcc_s/libstdc++ 等）而 OHOS 无系统级搜索。同类可复用：odin（自举闭环）、flang-ohos（Fortran 编译链）、cling（C++ 解释器自举）。
+prescan_notes:          配方 build() 中 env= 同时含 CMAKE_C_COMPILER/CMAKE_CXX_COMPILER 与 LD_LIBRARY_PATH 的组合是最强预筛信号。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           env-injection-bootstrap
+rec_description:        不改上游源码，配方 build() 两件套：①env 注入 CMAKE_C_COMPILER/CMAKE_CXX_COMPILER=真机 HNP 工具链路径（或 tools.build:compiler_executables conf 值），嵌套 configure 的 project() 语言检测经环境变量初始缓存命中，无需上游透传 -D；②链接期烘焙 DT_RPATH（defs 加 -DCMAKE_EXE_LINKER_FLAGS="-Wl,--disable-new-dtags -Wl,-rpath,<依赖包 lib/>"），保证嵌套 cmake exec 自建 lfortran 编译 .f90 时 libLLVM.so 可解析且与链接期同源，cmake 进程环境零侵入（禁 LD_LIBRARY_PATH 注入——前置依赖包 lib/ 会让同环境工具链进程抢绑其捆绑 libc++_shared.so → 符号风暴，CI 实测）。主构建限 -j6（lfortran 主二进制链接 libLLVM.so 极吃内存）。
+rec_command:            defs += '-DCMAKE_EXE_LINKER_FLAGS="-Wl,--disable-new-dtags -Wl,-rpath,<dep-pkg>/lib"'；env={'CMAKE_C_COMPILER': cc, 'CMAKE_CXX_COMPILER': cxx}；self.run('cmake --build {bdir} -- -j6', env=env)
+rec_auto_fix:           true
+rec_impl:               conan-recipe（无源码补丁；env 注入在配方层）
+
+fallback_priority:      2
+fallback_approach:      nested-args-patch
+fallback_description:   若嵌套 configure 不尊重环境变量初始缓存（上游用了 -C 预载缓存或 toolchain 覆盖），配方级 patch 上游 CMakeLists：给 configure_runtime 的 cmake -S/-B 调用追加 -DCMAKE_C_COMPILER=... -DCMAKE_CXX_COMPILER=...。等价语义，代价是 patch 与上游 custom target 实现耦合。
+fallback_command:       patches/0001-nested-cmake-compiler-args.patch（git apply --check -p1 验证）
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe + 上游 patch
+
+forbid_1_pattern:       把 libLLVM.so 拷进系统路径/源码树|嵌套执行前置脚本 export LD_LIBRARY_PATH 且不随 self.run env 走|把构建期依赖包 lib/ 前置注入 LD_LIBRARY_PATH|sed 改嵌套命令跳过编译器检测
+forbid_1_reason:        系统路径不可写且破坏签名面；脚本 export 不跨 self.run 进程边界；LD_LIBRARY_PATH 前置会让同环境工具链进程（cmake/ld 等）抢绑依赖包捆绑的 libc++_shared.so → 自身 relocation 符号风暴（CI 实测 lfortran #13591）；跳过检测=假阳性适配（嵌套产物实际没编译出来）。
+forbid_1_consequence:   自举产物缺失或静默失败，test_package/消费者在运行期才暴露，审查按「空壳」打回。
+
+forbid_2_pattern:       嵌套 configure 用 -DCMAKE_SYSTEM_NAME=Linux 或改上游 enable_language 顺序绕过|把 C/CXX 检测关成 OFF 再手动补编译
+forbid_2_reason:        同上，绕过检测而非满足检测，语义破坏面大。
+forbid_2_consequence:   运行时模块 .mod/.so 与主产物 ABI 不一致，Fortran 程序编译期/运行期随机失败。
+
+# Layer 4: Principles
+principles:             P-TOOLCHAIN-001
+
+# Relations
+causes:                 []
+caused_by:              [上游嵌套 cmake 不透传 -DCMAKE_C/CXX_COMPILER, 自建 lfortran 动态链 libLLVM.so 且 OHOS 无系统级动态库搜索]
+similar_to:             [E109, E242, DRAFT-odin-llvm-constrained-toolchain-bootstrap, DRAFT-13536-libzmq-4.3.5-ohos-ldso-bundle-libs]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-lfortran-nested-cmake-bootstrap.md
+last_updated:           2026-09-29
+verification_cmd:       ①嵌套 configure 复验：conan create 日志 grep -E 'CMAKE_Fortran_COMPILER|lfortran --backend=cpp|configure_runtime'（编译器检测命中 HNP clang 且 .f90 转 C++ 编译记录在案）；②自举产物复验：<pkg>/lib/lfortran_runtime*.a/.so 与 include/lfortran/*.mod 存在且 llvm-nm 符号正常；③运行期复验：test_package 用产出的 lfortran 编译+运行 Fortran 程序（llvm 后端）ALL_OK
+source_event:           lfortran 0.64.0 适配（run lfortran-0.64.0，2026-09-27）：真机 conan create 全链 23 轮全绿（env 注入 CMAKE_C_COMPILER/CMAKE_CXX_COMPILER + LD_LIBRARY_PATH=clang 包 lib/）；CI 首跑暴露 LD_LIBRARY_PATH 前置污染 worker cmake（libc++ 符号风暴）→ 2026-09-29 改链接期 DT_RPATH（--disable-new-dtags），cmake 环境零侵入
+
+# Authorship and provenance
+authors:                Hawkninja21 <18964641073@163.com>
+source_pr:              13591
+source_commit:          回填
+
+# Quality metrics
+metrics_success_count:  23
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-29
+
+draft: true
+contributor_id:         Hawkninja21
