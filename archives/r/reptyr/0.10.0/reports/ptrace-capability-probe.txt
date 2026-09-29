@@ -1,0 +1,194 @@
+reptyr 0.10.0 / OHOS ptrace 能力边界探针（可复现证据）
+=====================================================================
+环境: HarmonyOS PC (HongMeng Kernel 1.12.0 aarch64, HAD-W32)
+执行: 2026-09-27, 真机 SSH 会话（uid=20020085 非特权用户），
+      编译器 OHOS SDK clang 15.0.4，探针源码见下（无平台宏）
+
+结论（先行）:
+  OHOS 内核对非特权进程禁用 ptrace：父→子、兄弟→兄弟、祖父→孙的
+  PTRACE_ATTACH / PTRACE_SEIZE 全部 EPERM；PTRACE_TRACEME 与
+  process_vm_readv 同样 EPERM；PR_SET_PTRACER 未实现（EINVAL）。
+  进程处于 seccomp filter 模式（Seccomp: 2, Seccomp_filters: 1）且
+  CapEff=0x2a 未含 CAP_SYS_PTRACE；内核提供 yama/pdebug_scope 策略
+  接口但读取返回 ENOSYS。任何用户态补丁均无法绕过该策略，
+  reptyr 的核心附加功能（PID / -T / -s）在该环境不可用。
+
+探针输出（原样）:
+---------------------------------------------------------------------
+[probe] uid=20020085 euid=20020085 pid=17042
+[1] parent -> direct child
+  parent->child                PTRACE_ATTACH ret=-1 errno=13 (Permission denied)
+  parent->child                PTRACE_SEIZE  ret=-1 errno=13 (Permission denied)
+[2] sibling -> sibling (both children of this process)
+  sibling->sibling             PTRACE_ATTACH ret=-1 errno=13 (Permission denied)
+  sibling->sibling             PTRACE_SEIZE  ret=-1 errno=13 (Permission denied)
+[3] grandparent -> grandchild
+  grandparent->grandchild      PTRACE_ATTACH ret=-1 errno=13 (Permission denied)
+  grandparent->grandchild      PTRACE_SEIZE  ret=-1 errno=13 (Permission denied)
+[4] child PTRACE_TRACEME
+  child TRACEME            ret=-1 errno=13 (Permission denied)
+[5] parent process_vm_readv(child)
+  process_vm_readv(child)  ret=-1 errno=13 (Permission denied)
+[6] child prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)
+  PR_SET_PTRACER           ret=-1 errno=22 (Invalid argument)
+[7] this process: seccomp / capabilities
+  CapEff:	000000000000002a
+  NoNewPrivs:	0
+  Seccomp:	2
+  Seccomp_filters:	1
+[8] /proc/sys/kernel/yama/pdebug_scope
+  read failed: errno=38 (Function not implemented)
+[probe] done
+---------------------------------------------------------------------
+
+与 reptyr 上游测试的对应关系:
+  test/basic.py    (reptyr <pid> 附加)      -> preflight PTRACE_ATTACH EPERM
+  test/tty-steal.py(reptyr -T 夺取会话)     -> 同一 EPERM；victim 的
+                                              PR_SET_PTRACER 打印 EINVAL
+  日志: reports/upstream-basic.log, reports/upstream-tty-steal.log
+
+探针源码（ptrace-final.c，-O0 -Wall 编译，本机运行）:
+---------------------------------------------------------------------
+#define _GNU_SOURCE
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <signal.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <sys/ptrace.h>
+#include <sys/uio.h>
+#include <sys/wait.h>
+#include <sys/prctl.h>
+
+static void msleep(int ms) { struct timespec ts = {0, (long)ms * 1000000L}; nanosleep(&ts, 0); }
+
+static int attach_probe(pid_t pid, const char *label) {
+    int st = 0;
+    errno = 0;
+    long r = ptrace(PTRACE_ATTACH, pid, NULL, NULL);
+    int e = errno;
+    printf("  %-28s PTRACE_ATTACH ret=%ld errno=%d (%s)\n", label, r, e, strerror(e));
+    if (r == 0) {
+        waitpid(pid, &st, 0);
+        errno = 0;
+        long d = ptrace(PTRACE_DETACH, pid, NULL, NULL);
+        printf("  %-28s   attached OK (st=0x%x); DETACH ret=%ld errno=%d\n", label, st, d, errno);
+        return 0;
+    }
+    errno = 0;
+    long s = ptrace(PTRACE_SEIZE, pid, NULL, NULL);
+    int se = errno;
+    printf("  %-28s PTRACE_SEIZE  ret=%ld errno=%d (%s)\n", label, s, se, strerror(se));
+    if (s == 0)
+        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+    return e;
+}
+
+int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);
+    printf("[probe] uid=%d euid=%d pid=%d\n", getuid(), geteuid(), getpid());
+
+    printf("[1] parent -> direct child\n");
+    pid_t c = fork();
+    if (c == 0) { while (1) pause(); }
+    msleep(200);
+    attach_probe(c, "parent->child");
+    kill(c, SIGKILL); waitpid(c, NULL, 0);
+
+    printf("[2] sibling -> sibling (both children of this process)\n");
+    int pfd[2]; pipe(pfd);
+    pid_t b = fork();
+    if (b == 0) { while (1) pause(); }
+    pid_t a = fork();
+    if (a == 0) {
+        close(pfd[1]);
+        pid_t target = 0;
+        if (read(pfd[0], &target, sizeof target) == (ssize_t)sizeof target)
+            attach_probe(target, "sibling->sibling");
+        else
+            printf("  sibling->sibling          choreography error\n");
+        _exit(0);
+    }
+    close(pfd[0]);
+    write(pfd[1], &b, sizeof b);
+    close(pfd[1]);
+    waitpid(a, NULL, 0);
+    kill(b, SIGKILL); waitpid(b, NULL, 0);
+
+    printf("[3] grandparent -> grandchild\n");
+    int pfd2[2]; pipe(pfd2);
+    pid_t g = fork();
+    if (g == 0) {
+        pid_t gg = fork();
+        if (gg == 0) { while (1) pause(); }
+        write(pfd2[1], &gg, sizeof gg);
+        close(pfd2[1]);
+        msleep(3000);
+        _exit(0);
+    }
+    close(pfd2[1]);
+    pid_t gg = 0;
+    read(pfd2[0], &gg, sizeof gg);
+    close(pfd2[0]);
+    msleep(300);
+    attach_probe(gg, "grandparent->grandchild");
+    kill(gg, SIGKILL);
+    waitpid(g, NULL, 0);
+
+    printf("[4] child PTRACE_TRACEME\n");
+    c = fork();
+    if (c == 0) {
+        errno = 0;
+        long r = ptrace(PTRACE_TRACEME, 0, NULL, NULL);
+        printf("  child TRACEME            ret=%ld errno=%d (%s)\n", r, errno, strerror(errno));
+        _exit(0);
+    }
+    waitpid(c, NULL, 0);
+
+    printf("[5] parent process_vm_readv(child)\n");
+    int pfd3[2]; pipe(pfd3);
+    c = fork();
+    if (c == 0) { char msg[16] = "probe-data-xyz", ack; write(pfd3[1], msg, sizeof msg); read(pfd3[0], &ack, 1); _exit(0); }
+    char buf[16] = {0};
+    read(pfd3[0], buf, sizeof buf);
+    struct iovec local = { .iov_base = buf, .iov_len = sizeof buf };
+    struct iovec remote = { .iov_base = buf, .iov_len = sizeof buf };
+    errno = 0;
+    ssize_t n = process_vm_readv(c, &local, 1, &remote, 1, 0);
+    printf("  process_vm_readv(child)  ret=%zd errno=%d (%s)\n", n, errno, strerror(errno));
+    write(pfd3[1], "x", 1);
+    waitpid(c, NULL, 0);
+
+    printf("[6] child prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)\n");
+    c = fork();
+    if (c == 0) {
+        long r = prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY);
+        printf("  PR_SET_PTRACER           ret=%ld errno=%d (%s)\n", r, errno, strerror(errno));
+        _exit(0);
+    }
+    waitpid(c, NULL, 0);
+
+    printf("[7] this process: seccomp / capabilities\n");
+    {
+        FILE *f = fopen("/proc/self/status", "r");
+        char line[256];
+        while (f && fgets(line, sizeof line, f))
+            if (!strncmp(line, "Seccomp", 7) || !strncmp(line, "CapEff", 6) ||
+                !strncmp(line, "NoNewPrivs", 10))
+                printf("  %s", line);
+        if (f) fclose(f);
+    }
+    printf("[8] /proc/sys/kernel/yama/pdebug_scope\n");
+    {
+        FILE *f = fopen("/proc/sys/kernel/yama/pdebug_scope", "r");
+        if (!f) printf("  open failed: errno=%d (%s)\n", errno, strerror(errno));
+        else { char v[32]; if (fgets(v, sizeof v, f)) printf("  value: %s", v);
+               else printf("  read failed: errno=%d (%s)\n", errno, strerror(errno)); fclose(f); }
+    }
+    printf("[probe] done\n");
+    return 0;
+}
+---------------------------------------------------------------------
+（结束）
