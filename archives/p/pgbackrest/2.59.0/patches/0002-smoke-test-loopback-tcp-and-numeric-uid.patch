@@ -1,0 +1,107 @@
+--- a/test/smoke.py
++++ b/test/smoke.py
+@@ -19,6 +19,7 @@
+ import pwd
+ import re
+ import shutil
++import socket
+ import subprocess
+ import sys
+ import tempfile
+@@ -27,9 +28,26 @@
+ # Stanza name used throughout the test
+ STANZA = "smoke"
+ 
+-# PostgreSQL port. There is no TCP listener (listen_addresses is empty) so this only names the socket file in the private socket
+-# directory and never collides with a system PostgreSQL.
+-PG_PORT = 5432
++# PostgreSQL port. A free port is requested so the smoke test never collides with a PostgreSQL already listening on the host.
++def free_port():
++    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
++        sock.bind(("127.0.0.1", 0))
++        return sock.getsockname()[1]
++
++
++# HarmonyOS denies bind() on unix domain sockets with EPERM even though the filesystem supports them. Probe once so PostgreSQL
++# can listen on loopback TCP when a private unix socket cannot be created.
++def unix_socket_supported(path):
++    try:
++        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
++            sock.bind(path)
++        os.unlink(path)
++        return True
++    except OSError:
++        return False
++
++
++PG_PORT = free_port()
+ 
+ # Per-command timeout (seconds). The clusters are tiny so every step is fast; this only guards against a hang.
+ COMMAND_TIMEOUT = 300
+@@ -279,7 +297,7 @@
+             [
+                 os.path.join(bin_dir, "psql"),
+                 "-h",
+-                socket,
++                host,
+                 "-p",
+                 str(PG_PORT),
+                 "-U",
+@@ -303,6 +321,16 @@
+         for path in (socket, log, lock):
+             os.makedirs(path, mode=0o700, exist_ok=True)
+ 
++        # A private unix socket is preferred, but HarmonyOS refuses AF_UNIX bind() with EPERM, so PostgreSQL is reached over
++        # loopback TCP there. The connection method does not change what the smoke test verifies. Probe a socket path inside
++        # the (already created) socket directory -- binding the directory itself would always fail with EADDRINUSE.
++        if unix_socket_supported(os.path.join(socket, ".pgbackrest-smoke-probe")):
++            host = socket
++            socket_settings = "unix_socket_directories = '%s'\nlisten_addresses = ''\n" % socket
++        else:
++            host = "127.0.0.1"
++            socket_settings = "unix_socket_directories = ''\nlisten_addresses = '127.0.0.1'\n"
++
+         runner.chown_tree(work)
+ 
+         # Initialize the cluster (checksums on, no fsync since it is throwaway, trust auth for local connections)
+@@ -311,13 +339,12 @@
+         # Append test configuration to postgresql.conf
+         conf = (
+             "\n"
+-            "unix_socket_directories = '%s'\n"
+-            "listen_addresses = ''\n"
++            "%s"
+             "port = %d\n"
+             "wal_level = replica\n"
+             "archive_mode = on\n"
+             "archive_command = '%s --config=%s --stanza=%s archive-push %%p'\n"
+-            "fsync = off\n" % (socket, PG_PORT, pgbackrest, config, STANZA)
++            "fsync = off\n" % (socket_settings, PG_PORT, pgbackrest, config, STANZA)
+         )
+         append_file(os.path.join(data, "postgresql.conf"), conf)
+ 
+@@ -337,7 +364,7 @@
+             "pg1-path=%s\n"
+             "pg1-port=%d\n"
+             "pg1-socket-path=%s\n"
+-            "pg1-user=%s\n" % (repo, log, lock, STANZA, data, PG_PORT, socket, runner.user),
++            "pg1-user=%s\n" % (repo, log, lock, STANZA, data, PG_PORT, host, runner.user),
+             runner,
+         )
+ 
+@@ -452,7 +479,14 @@
+ def resolve_runner(verbose, user_name):
+     # Not root: run everything as the current user
+     if os.geteuid() != 0:
+-        return Runner(verbose, user=pwd.getpwuid(os.geteuid()).pw_name)
++        try:
++            user = pwd.getpwuid(os.geteuid()).pw_name
++        except KeyError:
++            # HarmonyOS application uids have no /etc/passwd entry. PostgreSQL itself falls back to the numeric uid for the
++            # bootstrap superuser, so mirror that here.
++            user = str(os.geteuid())
++
++        return Runner(verbose, user=user)
+ 
+     # Root: PostgreSQL refuses to run as root, so drop to an unprivileged user
+     try:
