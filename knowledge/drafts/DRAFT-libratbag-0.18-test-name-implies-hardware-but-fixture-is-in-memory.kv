@@ -1,0 +1,136 @@
+# ═══ Draft knowledge entry — 按测试程序名推断「需要真实硬件」会大幅少报通过率；判据只能是夹具构造函数 ═══
+# Timestamp: 2026-09-20
+# Software: libratbag 0.18 (游戏鼠标配置栈: libratbag / liblur / ratbagd)
+# Gate: rule4（通过率不得少报）/ 测试可行性判定
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libratbag-0.18-test-name-implies-hardware-but-fixture-is-in-memory
+trigger_tool:           meson|check|ctest|gtest
+phase:                  testing
+error_signature:        test-device|test-receiver|_test_device_new|virtual device|
+                         no such device|hidraw|/dev/hidraw0.*No such file|ENOENT.*hidraw
+
+severity:               3
+category:               testing, portability, rule4, meson, check
+match_keywords:         test fixture, in-memory device, ratbag_test_device, hardware-free test,
+                         hidraw, udev enumeration, pass rate underreport, rule4, meson test,
+                         check framework, CI without peripherals, libratbag
+
+title:                  「测试程序名里有 device / receiver」不等于「需要真实硬件」——
+                        判据是夹具构造函数：内存内的虚拟设备让一整套「看起来要插硬件」的
+                        测试在无外设的 CI 上全绿；按名字推断会直接把通过率少报一大截
+
+root_cause: >
+  上游测试程序的**名字**描述的是被测对象（device、receiver、mouse），不是
+  运行它所需要的外部条件。为了在不接硬件的开发机上也能跑，这类项目的夹具
+  通常构造一个**纯内存的虚拟设备**，把所有协议交互短路掉。
+  libratbag 0.18 的现场：
+    * test/test-device.c 使用 ratbag_test_device_new()（实现见 src/driver-test.c /
+      libratbag-test.c），建出来的是纯软件设备，profile / 分辨率 / 按键 / LED
+      的读写全部落在内存结构上，不开 hidraw、不枚举 udev；
+    * test/test-context.c 同理；
+  于是这 4 个 C 测试程序（test-context 6 + test-device 23 + test-util 2 +
+  test-iconv-helper 4 = 35 个 check 用例）在一台**没有 /dev/hidraw 节点、
+  没有 udev 守护进程**的 OHOS CI 机器上全绿。
+  若按名字推断「test-device 要插鼠标」，就会把整个 35 用例的执行集判为
+  「平台受阻、0 通过」，把 70% 的程序口径 / 100% 的用例口径少报成 0% ——
+  这既是 rule4 意义上的少报，也让评审看不到真实的适配质量。
+
+affected_scope: >
+  一切「测试程序名 / 测试套件名描述了硬件或外部服务，但夹具实际构造内存内替身」
+  的上游测试套件。判据（必须读源码，不能读名字）：
+    1. 找到该测试程序的 main() / suite 初始化，看它构造的被测对象是从什么来的；
+    2. 若来自某个 *_test_* / *_mock_* / *_dummy_* / *_fake_* 工厂，且该工厂的
+       实现不 open()/ioctl()/connect() 任何真实设备或 socket，则该程序**不需要**
+       硬件；
+    3. 反向判据：夹具里出现 open("/dev/...")、ioctl(HIDIOCGRAWINFO)、
+       libudev 枚举、AF_UNIX/D-Bus 连接，才是真的需要外部资源。
+  libratbag 实证：需要外部资源的只有 3 个（ratbagctl-test 需私有 D-Bus +
+  ratbagd；python-black-check / python-ruff-check 需 pip 装好的 black/ruff），
+  另外 7 个（4 个 C + 3 个纯 Python 数据校验）都无外部依赖。
+  常见误判来源：把「包本身是驱动库」等同于「它的测试要连真设备」；把
+  「程序名/文件名里出现设备名词」等同于「运行它需要设备」。
+
+verification_cmd: >
+  # 判据一：夹具是不是内存替身（这是唯一可靠的判据）
+  grep -n "_test_device_new\|_test_device_\|static struct .*_device" test/test-device.c | head
+  sed -n '/ratbag_test_device_new/,+30p' src/libratbag-test.c
+  #   → 全程 zalloc/malloc + 字段赋值，无 open()/ioctl()/udev → 不需要硬件
+
+  # 判据二：夹具里有没有真正的外部资源调用
+  grep -n 'open(\|ioctl(\|udev_\|g_test_dbus\|socket(\|connect(' test/*.c
+  #   → 命中哪个程序，哪个程序才需要外部资源
+
+  # 判据三：这台机器上到底有没有那些资源
+  ls /dev/hidraw* 2>/dev/null ; echo "exit=$?"
+  command -v dbus-daemon ; echo "exit=$?"
+  command -v black ; command -v ruff
+
+  # 判据四：跑一遍看汇总块（不要看退出码）
+  meson test -C <builddir> --print-errorlogs
+  sed -n '/^Ok:/,/^Timeout:/p' <builddir>/meson-logs/testlog.txt
+
+rec_priority:           1
+rec_approach:           classify-tests-by-fixture-constructor-and-declare-only-truly-blocked-ones
+rec_description: >
+  在写配方之前，先把上游每个测试程序按**夹具构造函数**分成两组：
+    (A) 夹具构造内存替身 → 必须通过，配方里列进 REQUIRED_PASSING_PROGRAMS；
+    (B) 夹具要真实设备 / 守护进程 / 私有总线 → 如实声明受阻。
+  配方 build() 内全量执行上游套件，再回读 meson-logs/testlog.txt 的汇总块做
+  硬断言（Timeout==0、Unexpected Pass==0、Fail 的数量与身份恰好等于受阻集合、
+  Ok 的数量 ≥ 必须通过的集合且每个名字都出现在日志里）。声明时两个口径都要写：
+  程序数（本包 7/10 = 70%）与用例数（本包 35/35 = 100%）。
+  关键点：**受阻集合只能由读源码得到，不能由程序名得到**；把关口放在
+  「数量 + 身份」而不是失败文本上。
+rec_command:            >
+  meson test -C build --print-errorlogs
+  sed -n '/^Ok:/,/^Timeout:/p' build/meson-logs/testlog.txt   # Ok: 7  Fail: 3
+rec_auto_fix:           false
+rec_impl:               recipe
+
+fallback_priority:      2
+fallback_approach:      run-only-the-tests-that-do-not-need-hardware
+fallback_description:   >
+  用 meson 的 --no-suite / --suite 或 gtest 的 --gtest_filter 把受阻程序排除掉，
+  让退出码干净。不可取：这正是 rule4 判定的少报 —— 执行集被悄悄缩小，报表上
+  看不出少了什么，回归保护也一并丢失。仅在只想本地快速迭代时用，CI 不采用。
+  正确做法是**照常构建、照常执行、失败留在汇总块里**，再按身份+数量核对。
+fallback_command:       （不推荐）meson test --no-suite blocked
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       --gtest_filter=-.*device|--no-suite.*device|SKIP.*device|EXCLUDE_TESTS=.*device
+forbid_1_reason:        按名字过滤掉「看起来要硬件」的测试，等于用猜测把可能通过
+                        的用例一起删了；rule4 要求如实统计执行集。
+forbid_1_consequence:   通过率少报，评审无法判断适配质量；真实回归失去保护。
+forbid_2_pattern:       if\s*\(!access\("/dev/hidraw|mkdir.*hidraw|mknod.*hidraw|预造一个假设备节点
+forbid_2_reason:        在 CI 里伪造设备节点属于改变被测环境而非适配库；OHOS 沙箱
+                        下也做不到，做得到也与真机行为不一致。
+forbid_2_consequence:   测试假通过，且配方只在特权环境可用。
+forbid_3_pattern:       assert\s*\(\s*0\s*\)|return 0;?\s*//.*not supported|把断言改成直接 return
+forbid_3_reason:        把受阻程序的断言删掉换成直接返回，是把「已知不支持」伪装成
+                        「已验证正确」，比过滤更糟。
+forbid_3_consequence:   报表全绿但覆盖为零，评审驳回。
+
+principles:             P003, P014
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-libgsystemservice-0.3.0-session-bus-tests-cannot-run-in-the-ohos-sandbox
+                        （同族：受阻程序必须照常执行、按身份+数量硬核对、不得 SKIP；
+                         本条聚焦的是**先别把不需要外部资源的测试误判成受阻**这一步，
+                         即受阻集合本身的确定方法）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libratbag-0.18-test-name-implies-hardware-but-fixture-is-in-memory.md
+last_updated:           2026-09-20
+source_event:           archives/l/libratbag/0.18 适配（4 个 C 测试走 ratbag_test_device 内存替身，无 hidraw 的 CI 上 35/35 全绿）
+
+authors:                2301_76770579
+source_pr:              11581
+source_commit:          cbfe5c5d1
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
