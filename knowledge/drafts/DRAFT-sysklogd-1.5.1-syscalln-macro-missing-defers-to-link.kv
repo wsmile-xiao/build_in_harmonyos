@@ -1,0 +1,140 @@
+# ═══ 路径 B 草稿（sysklogd 1.5.1 真机实证）═══
+# 机制一句话：上游靠 glibc 时代的内核头宏 _syscallN() 自己拼裸 syscall 存根；OHOS musl sysroot
+#   里这类宏一个都没有，而 clang 把落空的宏调用**降级成警告**（编译 RC=0），故障点后移到链接期
+#   ⇒ 报"未定义符号 = 那个本该由宏生成出来的本地存根名"。能力其实齐全，正解是改调 libc 已有的
+#   包装函数（本包 sys/klog.h 的 klogctl()），不是自己补实现、更不是 -D 关掉功能。
+# 包：sysklogd 1.5.1（syslogd + klogd，纯 Makefile），归档 archives/s/sysklogd/1.5.1/
+# 补丁：patches/0001-klogd-use-klogctl.patch（patch_type portability，不含任何平台宏）
+# 取证：补丁 0001 的反向对照实跑（还原上游原写法）+ 41 行机制探针，全部在鸿蒙 PC 真机执行，
+#   日志 /storage/Users/currentUser/tmp/uc2/sysklogd/{b0-report.log,syscall3-mechanism-probe.log}
+# 复用面（仓内已有同类做法、但无知识条目）：archives/a/acorn-fdisk/3.0.6/patches/0002-blkio-64bit-lseek-and-errno.patch
+#   同样是删掉 _syscall5(...) 自造存根、改调 libc 的 lseek() ⇒ 该机制在仓库里已出现 2 次，知识库 0 条。
+
+id: DRAFT-sysklogd-1.5.1-syscalln-macro-missing-defers-to-link
+trigger_tool: clang|ld.lld|make
+phase: linking
+error_signature: "ld.lld: error: undefined symbol: ksyslog|clang-15: error: linker command failed with exit code 1|make: *** [Makefile:86: klogd] Error 1|type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int [-Wimplicit-int]|_syscall[0-9]"
+severity: 2
+category: portability, libc, musl, syscall, headers
+match_keywords: _syscall0, _syscall1, _syscall3, _syscall5, _syscall6, __LIBRARY__, ksyslog, klogctl, sys/klog.h, __NR_syslog, linux/unistd.h, undefined symbol, Wimplicit-int, 隐式 int, 自造 syscall 存根, syscall stub, musl, glibc, klogd, syslogd, util-linux fdisk, 链接期才失败, 故障点后移
+title: glibc 内核头宏 _syscallN() 在 OHOS musl sysroot 中完全不存在——上游"非 glibc 就自己拼 syscall 存根"的支路被 clang 解析成隐式 int 的函数**声明**（编译 RC=0、只给警告），失败点后移到链接期报未定义符号；而 libc 其实早已导出该能力的包装函数（本包 klogctl），故正解是"改调已有包装"，既不是补实现（E534 那条路）也不是关功能（E014 那条路）
+
+root_cause: 缺的不是内核能力也不是 libc 符号，而是"本该由 glibc 时代内核头宏 _syscallN() 展开生成的那个本地 syscall 存根的定义"——OHOS musl sysroot 无该宏族且不定义 __GLIBC__，上游遂落进自造存根支路，而该行被 clang 当成"返回隐式 int"的老式声明（编译 RC=0、只给警告），失败点后移到链接期，同时 libc 的 klogctl 包装其实一直都在。分层读数如下——
+  1) 上游 sysklogd 1.5.1 的 klogd.c:280-282 写的是
+  「#if !defined(__GLIBC__)」⇒「# define __NR_ksyslog __NR_syslog」⇒
+  「_syscall3(int,ksyslog,int, type, char *, buf, int, len);」，
+  即"只要不是 glibc，就用内核头宏自己生成一个裸 syscall 存根"。
+  2) OHOS sysroot（ohos-sdk_26.0.0.18，clang 15.0.4，aarch64-unknown-linux-ohos，musl 派生）里
+  _syscallN 系列宏**一个都没有**——整棵 usr/include 中 'define _syscall' 与 '_syscall3' 均 0 命中；
+  预处理器实测该目标不定义 __GLIBC__（「#ifdef __GLIBC__」探针输出 GLIBC_NO）。
+  ⇒ 上游必然落进第 1) 层那条上游自己从未测过的支路。
+  3) 决定性反差——**这项能力在 OHOS 上是齐全的**：bits/syscall.h 有 __NR_syslog 116，
+  sys/klog.h 第 8 行有「int klogctl (int, char *, int);」，libc.so 导出 T klogctl / T syslog / T vsyslog。
+  缺的从来不是 libc 导出符号，而是"本该由宏展开出来的那个本地存根函数 ksyslog 的定义"。
+  症状为什么骗人：宏不存在时「_syscall3(int,ksyslog,...);」被 clang 按"返回类型为隐式 int"的
+  老式声明解析，编译期只在该行报 5 条 -Wimplicit-int 警告且 RC=0；而调用点另有完整原型
+  「extern int ksyslog(int type, char *buf, int len);」（实测于对照树已打补丁的 klogd.c:338）
+  ⇒ 连隐式函数声明警告都不出现。
+  声明有、定义永远不生成 ⇒ 失败点后移到链接期，报未定义符号 ksyslog，并附 lld 的拼写建议
+  「did you mean：vsyslog / defined in：syslog.o」（原文为 ASCII 冒号，见 .md §1 与
+  error_signature）——这条建议会把人往
+  "libc 缺 syslog 符号"的方向带，从而误采 E014 的关功能修法。
+
+affected_scope: 任何在 C 源码里用「_syscall0()…_syscall6()」自造裸 syscall 存根的老代码
+  （2000 年前后的 Linux 工具族——sysklogd、util-linux/fdisk 系、busybox 早期分支、各类 kernel-tools 与守护进程）。
+  判据先跑两条（各约 1 秒）——grep -rn '_syscall[0-9]' <上游源码树>，
+  以及 grep -rn 'define _syscall' $SYSROOT/usr/include（后者为 0 即该宏族不存在）。
+  不适用：①宏缺失但同时 libc 也没有对应包装函数（那是 E245 的自造 shim 场景）；
+  ②缺的是 GNU 扩展**函数**而不是宏（E534 场景）；
+  ③工具链把 -Wimplicit-int 升级为错误时（更高版本 clang 或显式 -Werror），同一根因会在编译期现形、
+  签名不同但处置相同——本条只在 clang 15.0.4 上实测过，该分支未验证。
+
+verification_cmd: 三条只读判据（本包逐条实测成立）——
+  ① 能力核查：grep -rn 'define _syscall' $SYSROOT/usr/include 为 0 命中、
+  grep -n klogctl $SYSROOT/usr/include/sys/klog.h 命中第 8 行的原型、
+  nm -D --defined-only $SYSROOT/usr/lib/aarch64-linux-ohos/libc.so 里 grep klog 见 T klogctl；
+  ② 反向对照（最有说服力）：在已打补丁的复现树上用 patch -p1 -R 回退该补丁，再跑与配方逐字一致的
+  make 命令重编 ⇒ 得到链接期的未定义符号；然后 patch -p1 打回、同一命令 MAKE_RC=0，
+  产物字节数与正式构建一致（本包 klogd 43392 B）；
+  ③ 最小复现：41 行探针 ~/tmp/uc2/sysklogd/syscall3-mechanism-probe.c，
+  clang -O2 -Wall -c 得 COMPILE_RC=0（只有 -Wimplicit-int 与一处隐式函数声明警告）、
+  同一 .o 链接得 LINK_RC=1 且报未定义符号；换 -DUSE_WRAPPER（改走 sys/klog.h 的 klogctl）
+  编译与链接两支全 RC=0 ⇒ 症状与解法在同一个小程序里闭合。
+
+prescan_pattern: _syscall[0-9]
+prescan_globs: '*.c, *.h, patches/*.patch'
+
+rec_priority: 1
+rec_approach: call-existing-libc-wrapper-drop-syscalln-stub
+rec_description: 按"能力是否存在"分叉，而不是按"报错落在哪个阶段"分叉——
+  ①先跑 E014 自己的验证命令（nm -D libc.so 里查 syslog/klogctl 一类符号）；只要包装函数在导出表里，
+  就证明上面的反差成立，E014 的前提（内核未实现 / libc 未导出）即被排除；
+  ②再把上游「#if !defined(__GLIBC__)」那条自造存根支路整段换成上游 glibc 分支已在用的包装函数
+  （本补丁即「#include <sys/klog.h>」+「#define ksyslog klogctl」），**不改调用点、不裁剪功能**；
+  ③补丁写成**无条件**形式（判据是"libc 提供该包装"这一能力事实，不写平台宏），
+  因此对 glibc 与 musl 两侧语义同时成立，R8/PF5 天然过关。
+rec_command: patch -p1 -i patches/0001-klogd-use-klogctl.patch（把 _syscall3 支路替换为 sys/klog.h 的 klogctl），随后
+  make -j1 CC=/data/service/hnp/bin/clang prefix=<树>/prefix SKFLAGS='-O2 -DSYSV -Wall' LDFLAGS='' syslogd klogd
+  ⇒ 实测 MAKE_RC=0、日志内 error 计数 0、产物 syslogd 55744 B 与 klogd 43392 B
+rec_auto_fix: false
+rec_impl: source-patch
+
+fallback_priority: 2
+fallback_approach: own-syscall-shim-when-no-libc-wrapper
+fallback_description: 若同一位置查得"宏不存在**且** libc 也没有对应包装"（例如只剩裸 syscall 编号、
+  没有 POSIX 或扩展函数承载），才退到 E245 那条路——用 syscall(SYS_xxx) 自己写一个显式声明的 shim，
+  并保留真实失败语义。两条路的分界线是"libc 有没有现成包装"，不是"报错在编译期还是链接期"。
+fallback_command: 先跑两条能力核查——nm -D --defined-only $SYSROOT/usr/lib/aarch64-linux-ohos/libc.so 与
+  grep -rn <能力名> $SYSROOT/usr/include；两条皆空才写 shim，任一命中即回到推荐方案。
+fallback_auto_fix: false
+fallback_impl: source-patch
+
+forbid_1_pattern: -DNO_SYSLOG|NO_SYSLOG|-DNO_[A-Z_]*
+forbid_1_reason: E014 的 rec 前提正是"libc 未导出 syslog 符号或内核未实现该调用"，而本机制的实况相反——
+  sys/klog.h 有原型、libc.so 导出 T klogctl 与 T syslog、bits/syscall.h 有 __NR_syslog 116，
+  三项全在；缺的只是一个本地存根定义。照抄 E014 会把可修的分支问题伪装成平台不支持。
+forbid_1_consequence: klogd 唯一的内核日志读取通道被编译期裁掉，交付的 klogd 成为空壳（自断功能），
+  并按 R40 被判"适配完整性不足"；且该处置与真实根因无关，下个用 _syscallN 的包会重犯。
+
+safety_boundary: 申报本条前必须自己拿到"未打补丁的第一手失败读数"（反向对照或最小探针），
+  不能只凭 sysroot grep 推断——本包 notes.md 原先把症状预测成"编译期报宏未声明"，
+  真机对照实测证明该预测**不成立**（编译 RC=0，失败在链接期）；预测错一次就会把签名写错、
+  整条知识随之作废。适用面限"宏族缺失 + libc 已有包装"；若目标 libc 连包装都没有（E245 场景）、
+  或缺的是 GNU 扩展函数而非宏（E534 场景），都不适用本条。
+
+dedup_notes: 判重（2026-09-23 在主检出 knowledge/ 与归档语料上实测）——
+  ①knowledge/ 全量 grep 精确 token「_syscall[0-9]」= **0 命中**（此前 grep '_syscall' 的命中全是
+  si_syscall、missing_syscalls.c 这类子串假阳性）；「klogctl」在 knowledge/ 与 archives/ 均 **0 命中**。
+  ②E534（musl 缺 gethostid/strverscmp/sigisemptyset/getusershell）——缺的是 libc **函数**、
+  签名是这些函数名的未定义符号、解法是"自己补弱符号实现"；本条缺的是"由宏生成的本地存根"、
+  且 libc 已有包装 ⇒ 解法方向相反（不补实现，改用现成包装）。依 手册/03 hit 条件②
+  "同症状但用既有条目没写的另一条解法按 create 报"判 create。
+  ③E246（seccomp 拦 syscall 致 SIGSYS）——运行期信号问题，与编译/链接期签名和处置均不重叠，排除。
+  ④E014（签名 undefined reference.*syslog，rec 为 add-cflags-disable）——前提被本包实测证伪，
+  其 rec 对本包是自断功能，见 forbid_1。
+  ⑤E245（vhangup 三层缺失 ⇒ 自造 syscall shim）——与本条**方向相反**的姊妹机制，
+  作为对照写进 fallback，不是重复。
+  ⑥引擎实测（同一 worktree 内跑 ohc-run.py engine）——以真实链接错误原文查命中 E245（误），
+  以"call to undeclared function ksyslog _syscall3 implicit int"查命中 E093（getpass，误），
+  以"klogctl syslog klogd musl _syscall3 macro missing"查命中 E014（误）；三条命中项的 rec
+  对本包均为反效果或无效。
+  ⑦仓库 draft-review 实跑（2026-09-23，-p 指向本 worktree）——质量预检 signature ✅ /
+  root_cause ✅ / rec ✅，相似度 TOP3 = E123 0.23、E245 0.20、E015 0.18，全部低于 0.30 灰区下沿，
+  工具三态建议 = **create**（E123/E015 属 meson-libintl 家族，仅因 undefined symbol 词面相近）。
+  结论：既有库无覆盖，判 create。
+
+similar_to: [E014, E245, E534, E093]
+conflicts_with: [E014]
+caused_by: []
+causes: []
+prerequisite_of: []
+principles:
+
+doc_file: knowledge/drafts/DRAFT-sysklogd-1.5.1-syscalln-macro-missing-defers-to-link.md
+last_updated: 2026-09-23
+source_event: sysklogd 1.5.1 适配（任务 10982，分支 feat/sysklogd-1.5.1，取证基线 HEAD b66ab68b409edce7e3b49e2509d7a5705273d26a）——klogd 用 _syscall3 自造存根，OHOS musl sysroot 无该宏族，链接期才失败
+authors: 主理-9 <主理-9@local>
+source_pr:
+source_commit:
+draft: true
+contributor_id: 主理-9
