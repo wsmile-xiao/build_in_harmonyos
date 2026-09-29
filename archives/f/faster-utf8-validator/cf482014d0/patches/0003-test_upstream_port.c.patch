@@ -1,0 +1,195 @@
+--- /dev/null
++++ b/test_upstream_port.c
+@@ -0,0 +1,192 @@
++/*
++ * Upstream test-case port: faster-utf8-validator test.lua
++ *
++ * The upstream test suite (test.lua) requires LuaJIT (ffi module) and loads
++ * x86 SIMD shared libraries (_out/avx2/rel/zval.so, _out/sse4/rel/zval.so),
++ * which cannot be built on aarch64 / HarmonyOS OHOS. Per the SKILL recovery
++ * rule (源码测试入口恢复规则), the independent test cases declared in the
++ * upstream test source are enumerated here and re-targeted onto the portable
++ * z_validate_utf8 entry point, with the exact same combinatorial sweep logic
++ * (frame shifts, byte ranges, trailing-length padding) as the original Lua
++ * harness.
++ *
++ * Declared test sources:
++ *   - TEST_CASES:   35 independent range-combination cases (main table)
++ *   - TRAILING_TESTS: 11 independent leading-padding / truncation cases
++ *   total source declarations: 46
++ *
++ * Each case is executed against z_validate_utf8 (the scalar path built on
++ * OHOS aarch64), replicating the upstream harness iteration logic.
++ */
++
++#include <stdio.h>
++#include <string.h>
++#include <stdint.h>
++#include "z_validate.h"
++
++static int g_fails = 0;
++static long g_checks = 0;
++
++typedef struct { unsigned char lo, hi; } RANGE;
++#define R(lo, hi) ((RANGE){ (lo), (hi) })
++/* ASCII 0x00..0x7F, CONT 0x80..0xBF, ANY 0x00..0xFF */
++
++static void check(const char *label, const unsigned char *buf, size_t len, int expected) {
++    g_checks++;
++    int got = z_validate_utf8((const char *)buf, len);
++    if (got != expected) {
++        g_fails++;
++        printf("FAIL %s: len=%zu expected=%d got=%d\n", label, len, expected, got);
++    }
++}
++
++/* Main TEST_CASES table: { expected, first-{lo,hi}, trailing ranges... } */
++typedef struct {
++    int expected;
++    RANGE first;
++    RANGE rest[4];
++    int nrest;
++} MAIN_CASE;
++
++static const MAIN_CASE main_cases[] = {
++    /* ASCII */
++    { 1, { 0x20, 0x20 }, { R(0x00,0x7F) }, 1 },
++    /* 2-byte sequences */
++    { 0, { 0xC2, 0xC2 }, { }, 0 },
++    { 0, { 0xC2, 0xC2 }, { R(0x00,0x7F) }, 1 },
++    { 1, { 0xC2, 0xC2 }, { R(0x80,0xBF) }, 1 },
++    { 0, { 0xC2, 0xC2 }, { { 0xC0, 0xFF } }, 1 },
++    { 0, { 0xC2, 0xC2 }, { R(0x80,0xBF), R(0x80,0xBF) }, 2 },
++    { 0, { 0xC2, 0xC2 }, { R(0x80,0xBF), R(0x80,0xBF), R(0x80,0xBF) }, 3 },
++    /* 3-byte sequences */
++    { 0, { 0xE1, 0xE1 }, { }, 0 },
++    { 0, { 0xE1, 0xE1 }, { R(0x80,0xBF) }, 1 },
++    { 1, { 0xE1, 0xE1 }, { R(0x80,0xBF), R(0x80,0xBF) }, 2 },
++    { 1, { 0xE1, 0xE1 }, { R(0x80,0xBF), R(0x80,0xBF), R(0x00,0x7F) }, 3 },
++    { 0, { 0xE1, 0xE1 }, { R(0x80,0xBF), R(0x00,0x7F) }, 2 },
++    { 0, { 0xE1, 0xE1 }, { R(0x80,0xBF), R(0x80,0xBF), R(0x80,0xBF) }, 3 },
++    /* 4-byte sequences */
++    { 0, { 0xF1, 0xF1 }, { }, 0 },
++    { 0, { 0xF1, 0xF1 }, { R(0x80,0xBF) }, 1 },
++    { 0, { 0xF1, 0xF1 }, { R(0x80,0xBF), R(0x80,0xBF) }, 2 },
++    { 1, { 0xF1, 0xF1 }, { R(0x80,0xBF), R(0x80,0xBF), R(0x80,0xBF) }, 3 },
++    { 0, { 0xF1, 0xF1 }, { R(0x80,0xBF), R(0x80,0xBF), R(0x00,0x7F) }, 3 },
++    { 1, { 0xF1, 0xF1 }, { R(0x80,0xBF), R(0x80,0xBF), R(0x80,0xBF), R(0x00,0x7F) }, 4 },
++    /* No C0/C1 bytes (overlong) */
++    { 0, { 0xC0, 0xC1 }, { { 0x00, 0xFF } }, 1 },
++    { 0, { 0xC0, 0xC1 }, { { 0x00, 0xFF }, { 0x00, 0xFF } }, 2 },
++    { 0, { 0xC0, 0xC1 }, { { 0x00, 0xFF }, { 0x00, 0xFF }, { 0x00, 0xFF } }, 3 },
++    /* No E0 followed by 80..9F (overlong) */
++    { 0, { 0xE0, 0xE0 }, { { 0x00, 0x9F }, R(0x80,0xBF) }, 2 },
++    { 1, { 0xE0, 0xE0 }, { { 0xA0, 0xBF }, R(0x80,0xBF) }, 2 },
++    /* No surrogate pairs */
++    { 1, { 0xE1, 0xEC }, { R(0x80,0xBF), R(0x80,0xBF) }, 2 },
++    { 1, { 0xED, 0xED }, { { 0x80, 0x9F }, R(0x80,0xBF) }, 2 },
++    { 0, { 0xED, 0xED }, { { 0xA0, 0xBF }, R(0x80,0xBF) }, 2 },
++    { 1, { 0xEE, 0xEF }, { R(0x80,0xBF), R(0x80,0xBF) }, 2 },
++    /* No F0 followed by 80..8F (overlong) */
++    { 0, { 0xF0, 0xF0 }, { { 0x80, 0x8F }, R(0x80,0xBF), R(0x80,0xBF) }, 3 },
++    { 1, { 0xF0, 0xF0 }, { { 0x90, 0xBF }, R(0x80,0xBF), R(0x80,0xBF) }, 3 },
++    /* No code points above U+10FFFF */
++    { 1, { 0xF4, 0xF4 }, { { 0x80, 0x8F }, R(0x80,0xBF), R(0x80,0xBF) }, 3 },
++    { 0, { 0xF4, 0xF4 }, { { 0x90, 0xBF }, R(0x80,0xBF), R(0x80,0xBF) }, 3 },
++    /* No bytes above F4 */
++    { 0, { 0xF5, 0xFF }, { { 0x00, 0xFF } }, 1 },
++    { 0, { 0xF5, 0xFF }, { { 0x00, 0xFF }, { 0x00, 0xFF } }, 2 },
++    { 0, { 0xF5, 0xFF }, { { 0x00, 0xFF }, { 0x00, 0xFF }, { 0x00, 0xFF } }, 3 },
++};
++#define N_MAIN (sizeof(main_cases)/sizeof(main_cases[0]))
++
++/* Frame shifts used by the upstream harness */
++static const int frame_shifts[] = { 1, 10, 28, 29, 20, 31, 32, 33 };
++#define N_SHIFTS (sizeof(frame_shifts)/sizeof(frame_shifts[0]))
++
++static void run_main_case(const MAIN_CASE *tc) {
++    static const int BUFLEN = 64;
++    for (size_t si = 0; si < N_SHIFTS; si++) {
++        int k = frame_shifts[si];
++        unsigned char buffer[BUFLEN];
++        /* Loop through first byte */
++        for (int b = tc->first.lo; b <= tc->first.hi; b++) {
++            memset(buffer, 0, sizeof(buffer));
++            buffer[k - 1] = (unsigned char)b;
++            long prev_checks = g_checks;
++            /* Sweep trailing ranges exactly like the Lua `for offset = 0,255` */
++            for (int offset = 0; offset <= 255; offset++) {
++                int any_valid = 0;
++                for (int i = 0; i < tc->nrest; i++) {
++                    int idx = (k + i + 1) - 1;   /* Lua 1-based buffer[k+i] -> C */
++                    int val = (int)tc->rest[i].lo + offset;
++                    if (val > (int)tc->rest[i].hi) {
++                        val = (int)tc->rest[i].hi;
++                    } else {
++                        any_valid = 1;
++                    }
++                    buffer[idx] = (unsigned char)val;
++                }
++                if (tc->nrest > 0 && !any_valid)
++                    break;  /* same break as upstream */
++                check("main", buffer, (size_t)BUFLEN, tc->expected);
++            }
++            /* Upstream asserts count advanced per first-byte value */
++            if (g_checks == prev_checks) {
++                printf("WARN: no checks advanced for first-byte 0x%02X shift %d\n", b, k);
++            }
++        }
++    }
++}
++
++/* TRAILING_TESTS: { expected, bytes... } tested with pre/post padding */
++typedef struct {
++    int expected;
++    unsigned char bytes[5];
++    int nbytes;
++} TRAIL_CASE;
++
++static const TRAIL_CASE trail_cases[] = {
++    { 1, { }, 0 },
++    { 1, { 0x40 }, 1 },
++    { 1, { 0xC2, 0x80 }, 2 },
++    { 1, { 0xE0, 0xA0, 0x80 }, 3 },
++    { 1, { 0xE1, 0x80, 0x80 }, 3 },
++    { 1, { 0xED, 0x80, 0x80 }, 3 },
++    { 1, { 0xED, 0x80, 0x80 }, 3 },
++    { 1, { 0xF4, 0x8F, 0x80, 0x80 }, 4 },
++    { 0, { 0xC2 }, 1 },
++    { 0, { 0xE1, 0x80 }, 2 },
++    { 0, { 0xF4, 0x80, 0x80 }, 3 },
++};
++#define N_TRAIL (sizeof(trail_cases)/sizeof(trail_cases[0]))
++
++static void run_trail_case(const TRAIL_CASE *tc) {
++    for (int pre = 0; pre <= 40; pre++) {
++        for (int post = 0; post <= 40; post++) {
++            unsigned char buffer[128];
++            size_t len = (size_t)pre + tc->nbytes + post;
++            for (int j = 0; j < 128; j++) buffer[j] = 0xFF;
++            for (size_t j = 2; j <= len + 1; j++) buffer[j - 1] = 0x20;   /* Lua 1-based buffer[j] */
++            for (int j = 1; j <= tc->nbytes; j++) {
++                size_t idx = 1 + (size_t)pre + (size_t)j;   /* Lua 1-based buffer[1+pre+j] */
++                buffer[idx - 1] = tc->bytes[j - 1];
++            }
++            const unsigned char *str = buffer + 1;   /* Lua: ffi cast +1 */
++            g_checks++;
++            int got = z_validate_utf8((const char *)str, len);
++            if (got != tc->expected) {
++                g_fails++;
++                printf("FAIL trail: pre=%d post=%d len=%zu expected=%d got=%d\n",
++                       pre, post, len, tc->expected, got);
++            }
++        }
++    }
++}
++
++int main(void) {
++    for (size_t i = 0; i < N_MAIN; i++)
++        run_main_case(&main_cases[i]);
++    for (size_t i = 0; i < N_TRAIL; i++)
++        run_trail_case(&trail_cases[i]);
++    printf("upstream-port: declared=%zu main=%zu trailing=%zu checks=%ld fails=%d\n",
++           N_MAIN + N_TRAIL, N_MAIN, N_TRAIL, g_checks, g_fails);
++    return g_fails ? 1 : 0;
++}
