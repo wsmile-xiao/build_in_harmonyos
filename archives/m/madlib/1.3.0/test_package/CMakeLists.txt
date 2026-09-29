@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_madlib LANGUAGES CXX)
+find_package(madlib REQUIRED CONFIG)
+add_executable(test_madlib test_madlib.cpp)
+target_link_libraries(test_madlib PRIVATE madlib::madlib)
