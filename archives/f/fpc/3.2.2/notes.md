@@ -1,104 +1,75 @@
-# fpc 3.2.2 适配笔记
+# fpc 3.2.2 适配笔记（HarmonyOS PC / aarch64）
 
-## 编译环境
-- 构建系统: custom (FPC自举编译)
-- 编译日期: 2026-05-27
-- Bootstrap编译器: FPC 3.2.2预编译包 (aarch64-linux)
-- 状态: published
+## 结论
 
-## 编译步骤
+- **目标**：aarch64-linux（FPC 3.2.2 无 `ohos` 目标）。
+- **交付**：官方 aarch64-linux 发行（编译器 + RTL + 全部包单元）+ 上游源码 `rtl/` 子树 + 可重定位 `fpc` 启动器。
+- **无第三方 conan 依赖**：配方不含 `requires`/`tool_requires`。
 
-1. **下载预编译Bootstrap编译器**
-   - 从SourceForge下载 FPC 3.2.2 aarch64预编译包
-   - 解压并签名所有二进制文件 (ELF签名)
+## 为什么是「组装官方发行」而不是「源码自举构建」
 
-2. **自举编译尝试**
-   - 尝试使用预编译FPC 3.2.2编译源码
-   - 设置环境变量: `OVERRIDEVERSIONCHECK=1`
-   - 编译过程因安全机制限制而中止 (新生成编译器需要签名)
+1. FPC 是自举编译器：从源码构建需要一个能运行的引导编译器，并需要 **目标平台的 GNU `as`/`ld`**。
+2. 实测源码交叉构建（`make crossall CPU_TARGET=aarch64 OS_TARGET=linux PP=ppcx64`）在编译 aarch64 RTL 时失败：
 
-3. **最终方案**
-   - 使用预编译包作为编译结果
-   - 创建预编译包: fpc-3.2.2-ohos-aarch64.tar.gz (17.3MB)
-   - 安装到本地并验证功能
+~~~
+aarch64-linux-as  -o .../rtl/units/aarch64-linux/prt0.o aarch64/prt0.as
+make[5]: aarch64-linux-as: No such file or directory   → Error 127
+~~~
 
-## 遇到的问题与解决方案
+   本机 WSL 无法安装 `binutils-aarch64-linux-gnu`（无 sudo），CI 的 OHOS worker 也以 clang/lld 为主、不保证有 GNU `as`。
+3. FPC 官方 3.2.2 编译器二进制**静态链接**（`file` 实测 `statically linked`），aarch64 发行在 OHOS aarch64 可原生运行；
+   仓库历史归档 `archives/f/fpc/3.2.2`（设备原生）也是走预编译包这条路。
 
-| # | 问题 | 根因 | 解决方案 |
-|---|------|------|----------|
-| 1 | SSL证书验证失败下载源码 | 网络环境SSL证书问题 | 使用wget下载，添加引用页参数 |
-| 2 | 预编译包无法执行 | 鸿蒙ELF签名机制 | 使用binary-sign-tool签名 |
-| 3 | 版本检查失败 (3.2.2编译3.2.2) | FPC要求用旧版本编译新版本 | 设置OVERRIDEVERSIONCHECK=1 |
-| 4 | 自举编译中断 (ppc1无执行权限) | 新生成二进制需要签名才能执行 | 改用预编译包方案 |
-| 5 | 编译找不到system单元 | 缺少RTL单元文件 | 从预编译包复制完整RTL单元 |
+因此本配方 pin 官方两份输入（源码 tarball + aarch64-linux 发行 tarball，均带 sha256），组装后交付。
 
-## 源码修改
+## 打包与可重定位设计
 
-无源码修改，使用预编译包。
+- 官方发行分为外层 `fpc-3.2.2.aarch64-linux.tar` → 内层 `binary.aarch64-linux.tar` → `base.*` + `units-*` + `utils*` 多个 tarball；
+  配方按 base → units → utils 顺序解包到统一 prefix，再整体安装进 conan 包。
+- `bin/fpc` 被替换为 **shell 启动器**（官方 ELF driver 保留为 `bin/fpc-driver`）：启动器从自身路径推导包根，
+  设置 `-Fu` unit 搜索路径，并强制 `-Aelf -Xi`（FPC 内部 ELF 写入器 + 内部链接器），使编译/链接不依赖宿主的 GNU binutils。
+- `package_info()` 导出 `FPCDIR=<pkg>/share/fpc-3.2.2-src` 与 `PATH+=<pkg>/bin`，供下游 lazarus 使用。
 
-## 依赖版本
+## 上游测试（testsuite）
 
-- FPC Bootstrap: 3.2.2预编译包 (aarch64-linux)
-- GNU Make: 4.4.1
-- Clang: 15.0.4
+- 官方 aarch64-linux 发行**不含 `tests/`**，故从官方源码 tarball 取 `tests/` 执行。
+- 2026-09-26 在 **x86_64 Linux 原生**（官方 x86_64 FPC 3.2.2，同一 3.2.2 源码）执行 `make full TEST_FPC=<fpc> -j8`：
+  - `Total = 7908`；编译 4871（成功 3688 + 预期失败 1170 + 失败 9 + 本应失败却成功 4）；运行 3037（成功 3016 + 失败 21）；跳过 513。
+  - 通过率：运行 **3016/3037 = 99.3%**；编译符合预期 **4858/4871 = 99.7%**。
+  - 34 项偏差为宿主环境相关（缺 `libgcc`/`libz`/`__gxx_personality_v0` 等），非交付物缺陷；完整 `faillist`/`longlog` 见 task 目录 `logs/080-upstream-testsuite.log`。
+- aarch64 交付物为官方上游发行，由 CI 的编译+运行与下游 `lazarus/4.8` 构建验证。
 
-## 验证结果
+## 验证
 
-```bash
-# 版本验证
-$ ~/usr/local/lib/fpc/3.2.2/ppca64 -iV
-3.2.2
+- `test_package/test.sh`：`fpc -iV`、`fpc -iTP -iTO`、编译 `hello.pas`、执行产物（CI 原生 OHOS aarch64 上运行）。
+- 本地 W3（WSL 交叉 profile，`tools.build:skip_test=True`）验证 `conan create` 出包；执行验证在 CI / 鸿蒙电脑。
 
-# 目标平台验证
-$ ~/usr/local/lib/fpc/3.2.2/ppca64 -iTO
-linux
+## CI 源码下载（慢链路 + 源码缓存自播种）
 
-# 目标CPU验证
-$ ~/usr/local/lib/fpc/3.2.2/ppca64 -iTP
-aarch64
+两份输入合计约 190 MB。CI worker 到 `downloads.freepascal.org` 的链路实测只有
+~10 KB/s（#62104/#62108/#62109），到 `downloads.sourceforge.net` 约 22 KB/s 且中途
+断流（#62025 在 57 MB/138 MB 处 `IncompleteRead`）。因此配方不再直接对 https URL 调
+`tools.files.get()`，而是先自己取回输入：
 
-# 功能验证: 编译Hello World程序
-$ ~/usr/local/lib/fpc/3.2.2/ppca64 -Fu~/usr/local/lib/fpc/3.2.2/units/aarch64-linux/rtl test.pas
-$ ./test
-Hello from FPC 3.2.2 on HarmonyOS!
-```
+1. 先查 `DOWNLOAD_CACHE`（CI 导出 `/data/cache`）下的 `s/<sha256>`（Conan 源码下载
+   缓存布局），命中即零网络；
+2. 未命中时按候选 URL 表（官方 `downloads.freepascal.org` → 官方下载页登记备用
+   `downloads.sourceforge.net`）下载：HTTP `Range` 分块 ×8 并发（单条流的限速不再
+   约束整体吞吐）+ 每块重试/续传 + 组装后按 sha256 校验，通过后再原子 `os.replace`
+   写入 `s/<sha256>`；
+3. `tools.files.get()` 只用于解包本地缓存文件（`file://`，按真实文件名保留扩展名，
+   因为 Conan 依据扩展名选择解压器）；
+4. 分块临时文件保存在 `<cache>/parts/<sha256>/`，即使某次构建超时/断流，下一次构建
+   也能从断点续传。
 
-## 交付物
+本机 WSL 冷缓存实测：`conan create` 全程零外网（先下载入缓存，复跑命中缓存），
+`fpc -iV` = `3.2.2`，`hello from fpc on Linux/aarch64 = 903`，EXIT=0。
 
-| 文件 | 大小 | 说明 |
-|------|------|------|
-| fpc-3.2.2-ohos-aarch64.tar.gz | 17.3MB | 预编译包 |
-| ppca64 | 13.0MB | FPC编译器本体 |
-| fpc | 594KB | FPC前端脚本 |
-| RTL units | ~8MB | 运行时库单元文件 |
+## 与历史归档的关系
 
-## 注意事项
-
-1. **FPC自举编译特殊性**
-   - FPC是自举编译器，理论上需要用旧版本编译新版本
-   - FPC 3.2.2源码要求使用3.0.4版本编译器
-   - 可通过OVERRIDEVERSIONCHECK=1绕过版本检查（但不推荐）
-
-2. **鸿蒙安全机制限制**
-   - 所有ELF二进制文件必须签名才能执行
-   - 自举编译过程中生成的中间编译器(ppc1/ppc2/ppc3)都需要签名
-   - 建议直接使用预编译包，避免复杂的自举编译过程
-
-3. **RTL单元文件路径**
-   - 必须使用 -Fu 参数指定单元文件路径
-   - 路径: /usr/local/lib/fpc/3.2.2/units/aarch64-linux/rtl
-
-4. **编译器使用**
-   - 直接调用: ppca64 -Fu<unit_path> <source.pas>
-   - 或使用fpc前端脚本: fpc <source.pas>
-
-## 编译结束
-
-**编译时间**: 2026-05-27 14:13
-**最终状态**: published
-**预编译包**: fpc-3.2.2-ohos-aarch64.tar.gz (17.3MB)
-**安装验证**: 成功 - Hello World程序编译并运行正确
+旧 `archives/f/fpc/3.2.2`（2026-05-27）是设备原生预编译包，`source.url=file:///storage/...`、无 `conanfile.py`、从未发布到制品仓。
+本 PR 将其重建为正式 conan 包（并发往 `fpc/3.2.2`）。
 ---
 
-**编译结束**: 2026-05-27 14:15
+**编译结束**: 2026-09-26 01:09
 **最终状态**: built
