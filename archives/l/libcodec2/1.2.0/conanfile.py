@@ -20,7 +20,12 @@ CTEST_EXCLUDE = (
     "test_ldpc_enc_dec_HRA_56_56|test_ldpc_enc_dec_H_16200_9720|"
     "test_ldpc_enc_dec_H_2064_516_sparse|test_freedv_api_700D_burble|"
     "test_freedv_api_rawdata_800XA|"
-    "test_codec2_mode|test_quisk_filter|test_OFDM_modem_time_sync"
+    "test_codec2_mode|test_quisk_filter|test_OFDM_modem_time_sync|"
+    # 以下用例命令内直接调用 octave-cli/sox（名字不含 octave 故正则不覆盖），
+    # OHOS 无 Octave 生态与 sox 主机工具：4 例 fdmdv 重采样对（octave diff_fft_mag）、
+    # esno_est_c、burst_acq_port、fsk_lib（octave-cli），demo_datac0c1（sox 重采样）
+    "test_fdmdv_16to8|test_fdmdv_48to8|test_OFDM_modem_esno_est_c|"
+    "test_OFDM_modem_burst_acq_port|test_fsk_lib|test_demo_datac0c1"
 )
 
 
@@ -103,7 +108,7 @@ class Codec2Conan(ConanFile):
                     os.makedirs(base, exist_ok=True)
                     os.symlink(src_dir, link)
                     self.output.info("data link created: {} -> {}".format(link, src_dir))
-            self.run('ctest --test-dir "{}" -E "{}" -j1'.format(test_dir, CTEST_EXCLUDE))
+            self.run('ctest --test-dir "{}" -E "{}" --output-on-failure -j1'.format(test_dir, CTEST_EXCLUDE))
         else:
             self.output.info("cross-building: 上游 ctest 留待 qemu 运行根/真机执行")
 
