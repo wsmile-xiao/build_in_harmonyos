@@ -1,0 +1,123 @@
+#====================================================================
+# Draft: clang 拒绝 ISO C 之外的「标签后紧跟声明」——GCC 以 GNU 扩展容忍，
+#        clang 直接 error: expected expression（连带 cleanup 变量跨 case 跳转报错）
+# 触发事件: mmsd-tng 2.6.4（C + 1 个 C++ 文件，Meson）HarmonyOS PC(clang 15.0.4) 适配
+# 日期: 2026-09-29
+#
+# 与既有条目的关系（增量说明）:
+#   本条是"编译器方言差异导致 GCC 可编、clang 不可编"这一族的**解析层面**成员：
+#   不是 API 缺失、不是平台宏缺失，而是源码本身落在 ISO C 约束之外、只有 GCC 的
+#   GNU 扩展接受。修复不需要平台宏、不需要 stub，只需补一个块作用域。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     mmsd-tng-2.6.4-clang-case-label-followed-by-declaration
+trigger_tool:           clang|cc|conan|meson|ninja
+phase:                  compilation
+error_signature:        error: expected expression|cannot jump from switch statement to this case label|jump bypasses initialization of variable with __attribute__\(\(cleanup\)\)|error: use of undeclared identifier
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               compiler, clang, portability, c-language
+match_keywords:         case label, switch, declaration after label, expected expression, ISO C, label can only be part of a statement, g_autofree, g_autoptr, __attribute__((cleanup)), jump bypasses initialization, GCC extension, gnu99, clang 15, HarmonyOS, 声明, case 标签, undefined identifier
+title:                  clang 拒绝「case/default 标签后紧跟声明」（ISO C：标签只能标记语句，声明不是语句）——GCC GNU 扩展容忍、clang 报 expected expression；带 cleanup 属性的变量还会连带报「跳转绕过初始化」
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             ISO C 规定 label 只能作为**语句**的前缀，而声明（declaration）不是语句。
+                        因此 `case X:` / `default:` 之后直接写声明是约束违例：
+                          - GCC 在 GNU 模式下长期以扩展容忍（默认 -std=gnu17 也接受），
+                            因此上游在 Debian/gcc 环境完全无症状；
+                          - clang 严格按 ISO 处理，直接 `error: expected expression`，
+                            并把该声明视为解析失败，后续所有引用该变量的行级联报
+                            `use of undeclared identifier`（**误导性级联**，真正的首错在标签行）。
+                        次生错误：若该声明带 `__attribute__((cleanup))`（glib 的
+                        `g_autofree`/`g_autoptr` 等），clang 还会对后续其它 case 标签报
+                        `cannot jump from switch statement to this case label:
+                         jump bypasses initialization of variable with __attribute__((cleanup))`
+                        ——因为跳转进入 switch 会绕过该 cleanup 变量的初始化。
+affected_scope:         任何用 GCC 为主开发、源码存在「case/default 后直接声明」的 C 项目，
+                        在 clang 为主的平台（HarmonyOS/OHOS、macOS、Chromium/Android 工具链）上移植时。
+                        典型宿主：GLib 风格项目（g_autofree/g_autoptr 随处可见）。
+verification_cmd:       1) 复现最小例：printf 'int f(int c){switch(c){case 1: int x=0; return x;} return 0;}\n' > t.c
+                           && clang -c t.c   → error: expected expression
+                        2) 在源码树扫描同类写法（标签后紧跟声明）：
+                           grep -n -A1 -E '^[[:space:]]*(case[^:]*:|default[[:space:]]*:)[[:space:]]*$' src/**/*.c
+                        3) 编译通过后确认语义未变：上游单元测试全绿（本例 4/4 OK）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:          wrap-label-body-in-block-scope
+rec_description:        给该 case 分支加一层块作用域 `{ ... }`（同时解决两个报错）：
+                          ① 标签后紧跟的不再是声明，而是**复合语句** → 满足 ISO C；
+                          ② 变量作用域被限制在该分支内 → 跳到其它 case/default 不再
+                             "绕过初始化"，cleanup 属性报错一并消失。
+                        改动极小（+2 行：`{` 与 `}`），**不改变任何运行时语义**，
+                        比"把声明上提到 switch 之前"更安全（避免变量生命周期被拉长、
+                        避免与其它分支同名变量冲突），也不需要平台宏守卫（R8）。
+rec_command:            # src/xxx.c
+                        #     case TYPE_A:
+                        #     case TYPE_B:
+                        #       /* comment */
+                        # +     {
+                        #       gsize length;
+                        #       g_autofree gchar *contents = NULL;
+                        #       ...
+                        #       return result;
+                        # +     }
+                        #      default:
+                        #       ...
+                        patch_file: patches/0002-src-service.c.patch
+rec_auto_fix:           false
+rec_impl:               source-patch (refresh-patch --auto 生成)
+
+fallback_priority:      2
+fallback_approach:      hoist-declarations-before-switch
+fallback_description:   把分支内的声明全部上提到 switch 之前（并显式初始化），
+                        标签后只留语句。可行但会拉长变量生命周期、污染同一函数内
+                        其它分支的命名空间，且 g_autofree 的释放点会从"分支结束"
+                        变成"函数结束"，属于语义微调——仅在无法加块（如 C89 目标）时使用。
+fallback_command:       手动编辑源码（不推荐，需在 notes.md 记录理由）
+fallback_auto_fix:      false
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       #ifdef __OHOS__.*case|__OHOS__.*expected expression
+forbid_1_reason:        该问题是**编译器方言差异**而非平台差异：任何 clang 为主的平台
+                        （macOS/Android/OHOS）都会遇到，同一段代码在 OHOS 之外的 clang
+                        构建同样需要修复。用平台宏把它包起来会把可移植性修复降级为
+                        平台补丁，且违反 R8（patches/ 默认禁止平台宏）。
+forbid_1_consequence:   换平台/换工具链再次踩坑；评审以 R8 判 High 打回。
+forbid_2_pattern:       -Wno-error=expected-expression|-Wno-declaration-after-statement.*-Werror
+forbid_2_reason:        expected expression 是**硬错误**（parse error），不是 warning，
+                        没有任何 -Wno-* 能关掉；用 -Wno-* 掩盖只会把错误推到链接/运行期。
+forbid_2_consequence:   编译仍失败，误判为"工具链问题"绕圈。
+
+principles:             P004, P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/mmsd-tng-2.6.4-clang-case-label-followed-by-declaration.md
+last_updated:           2026-09-29
+source_event:           mmsd-tng 2.6.4 适配：src/service.c process_request() 的
+                        case MMS_REQUEST_TYPE_POST_TMP: 后紧跟 gsize length; /
+                        g_autofree gchar *contents; → clang 报 expected expression +
+                        cannot jump from switch statement to this case label；
+                        patches/0002 加块作用域后 4/4 上游测试通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk Agent <agent@opendesk.local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+
+draft: true
+contributor_id: M5TN

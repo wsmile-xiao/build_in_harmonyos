@@ -1,0 +1,141 @@
+#====================================================================
+# Draft: conan 依赖包的 pkg-config / 链接元数据缺口四类 —— 上游构建脚本"探测不到
+#        依赖"或"链接缺符号"，根因都在依赖包元数据而非本项目源码
+# 触发事件: mmsd-tng 2.6.4（Meson，依赖 10 个 conan 包）HarmonyOS PC 适配
+# 日期: 2026-09-29
+#====================================================================
+
+id:                     mmsd-tng-2.6.4-conan-dep-pkgconfig-metadata-gaps
+trigger_tool:           meson|pkg-config|ld.lld|conan
+phase:                  configuration|linking
+error_signature:        Could not get pkg-config variable and no default provided|Dependency "dbus-1" not found|fatal error: .*\.h file not found|undefined symbol: (g_file_new_for_path|g_io_error_quark|utf8_range_IsValid|utf8_range_ValidPrefix)|C shared or static library .* not found
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               conan, pkg-config, dependency, linking, portability
+match_keywords:         pkg-config, PkgConfigDeps, .pc, Requires, cpp_info.libs, find_library, dependency(), dbus-1, mm-glib, libphonenumber, protobuf, utf8_range, utf8_validity, shared/pkgconfig, database variable, get_variable, undefined symbol, file not found, static library
+title:                  conan 依赖包的 pkg-config / 链接元数据缺口四类：①.proc 变量缺（数据包 database）②包内无 .pc 需别名（dbus-1）③生成 .pc 丢 Requires（mm-glib 的 gio）④包内库未列入 cpp_info.libs（protobuf 的 utf8_range）——一律在 generate() 用"pc 补齐目录"修，不改上游源码
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游 meson.build 用 pkg-config 的名字/变量/传递依赖来描述依赖，
+                        而 conan 包的 PkgConfigDeps 产物是**由 cpp_info 反推**的，两者不等价。
+                        实测四类缺口（每类的判别特征与最小修复）：
+
+                        ① **.pc 自定义变量缺失**：上游
+                           `dependency('mobile-broadband-provider-info').get_variable(pkgconfig:'database')`
+                           → 报 `Could not get pkg-config variable and no default provided`。
+                           依赖包**自带** `share/pkgconfig/mobile-broadband-provider-info.pc`
+                           里才有 `database=${pkgdatadir}/serviceproviders.xml`；
+                           PkgConfigDeps 生成的同名 .pc 只有 prefix/Name/Version。
+                           → 把依赖包 `share/pkgconfig` 前置进 pkg_config_path。
+
+                        ② **包内完全没有 .pc，上游却用 pkg-config 名**：上游
+                           `dependency('dbus-1', version:'>1')`，而 conan dbus 包不提供任何 .pc
+                           （PkgConfigDeps 只按 cpp_info 的 pkg_config_name 生成 `dbus.pc`）
+                           → `Dependency "dbus-1" not found (tried pkg-config and cmake)`。
+                           → 在 pc 补齐目录里合成 `dbus-1.pc`（注意 include 目录是
+                             `<pkg>/include/dbus-1.0`，Libs 为 `-ldbus-1`）。
+
+                        ③ **生成的 .pc 丢 Requires（上游 .pc 有）**：conan libmm 的
+                           package_info 未声明 gio/gobject，PkgConfigDeps 生成
+                           `Requires: glib-2.0 dbus`；上游 mm-glib.pc 是
+                           `Requires: gio-unix-2.0, glib-2.0, gio-2.0, gobject-2.0`。
+                           于是**只在 unit 测试**（deps 只列 glib/mm-glib）暴露
+                           `undefined symbol: g_file_new_for_path`——链接缺 -lgio-2.0。
+                           → 按上游补齐 mm-glib.pc 的 Requires。
+
+                        ④ **包内有库但未列入 cpp_info.libs**：conan protobuf 包内含
+                           `libutf8_validity.a`/`libutf8_range.a`，`cpp_info.libs=["protobuf"]`
+                           却漏了它们；protobuf ≥33 的 parse_context.cc 引用
+                           `utf8_range_IsValid`/`utf8_range_ValidPrefix`
+                           → `ld.lld: error: undefined symbol: utf8_range_IsValid`。
+                           → 在补齐的 protobuf.pc 的 Libs 追加（**顺序必须在 -lprotobuf 之后**，
+                             静态库单遍扫描）。
+
+                        共同点：都是"依赖包元数据 ≠ 上游构建期望"，**不是本项目的 bug**，
+                        所以修在 generate()（生成期补齐），绝不改上游源码、也不在 build() 里
+                        硬编码 -l/-L。
+affected_scope:         用 conan 依赖 + 上游 meson/pkg-config 探测的 C/C++ 项目，尤其
+                        依赖里含「数据包（.pc 只有变量）」「静态库 + 自带 .pc」「包内附加库
+                        未被 recipe 声明」三类包时。同类现象也会出现在 CMake
+                        （find_package 的 component 名与包内实际 target 名不一致）。
+verification_cmd:       1) 枚举依赖包真实 .pc：`find <pkg_folder> -name '*.pc'`（含 share/pkgconfig），
+                          并 `pkg-config --print-variables <name>` 对照上游 get_variable() 用法；
+                        2) 逐条复现：meson setup 日志里的 not found / variable 报错；
+                          链接期 `ld.lld: error: undefined symbol: X` 后用
+                          `nm -g --defined-only <pkg>/lib/*.a | grep X` 定位到底在哪个包里；
+                        3) 修复后 meson setup 应全部 `found: YES`，链接零 undefined。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           generate-side-pkgconfig-overlay-dir
+rec_description:        在 generate() 里建一个"pc 补齐目录"（os.path.join(self.build_folder,
+                        "pkgconfig-fix")），把需要修正/合成的 .pc 写进去，然后
+                        `tc.pkg_config_path = 该目录 + 依赖包自带 share/pkgconfig + tc.pkg_config_path`，
+                        并同步 buildenv_info.append("PKG_CONFIG_PATH", ...)（meson 与
+                        pkg-config 两条路径都覆盖）。pc 内容从依赖包实测路径生成
+                        （self.dependencies["x"].package_folder），版本取 ref.version，
+                        不硬编码绝对路径、不污染依赖包。
+                        要点：①合成/覆盖的 .pc 必须**先于** generators 目录被搜索
+                        （顺序决定命中）；②增量库（libutf8_*）只能加在 -l<主库> 之后；
+                        ③数据包只前置 share/pkgconfig、不要覆盖其 .pc（免得丢变量）。
+rec_command:            pcfix = os.path.join(self.build_folder, "pkgconfig-fix"); os.makedirs(pcfix, exist_ok=True)
+                        # (1) 数据包：前置自带 share/pkgconfig
+                        # (2) 合成 dbus-1.pc（Libs: -L${libdir} -ldbus-1；Cflags: -I<pkg>/include/dbus-1.0）
+                        # (3) 覆盖 mm-glib.pc：Requires: glib-2.0 gio-2.0 gobject-2.0 dbus-1
+                        # (4) 覆盖 protobuf.pc：Libs 追加 -lutf8_validity -lutf8_range（在主库之后）
+                        tc.pkg_config_path = os.pathsep.join(extra_pc + [tc.pkg_config_path])
+rec_auto_fix:           false
+rec_impl:               conan-recipe-helper (generate() + _pc_text 模板)
+
+fallback_priority:      2
+fallback_approach:      patch-upstream-build-to-use-available-pc
+fallback_description:   当上游用的是 `cc.find_library('x')`（只给 -l、无 include、无传递依赖）
+                        且依赖包是**静态库 + 自带 .pc** 时，改用 `dependency('<pc name>')`
+                        才是正解（否则 include 目录与静态传递库都拿不到）——这属于**源码补丁**，
+                        仅在 pc 补齐无法覆盖时使用（本例 libphonenumber 属于此类，
+                        见 patches/0001、0003）。改 .pc 与改 meson.build 的选择口径：
+                        能靠 pc 补齐解决 → 不动源码；上游探测方式本身与包形态不匹配 → 打补丁。
+fallback_command:       -  cc.find_library('phonenumber', required: true)
+                        +  dependency('libphonenumber', required: true)
+fallback_auto_fix:      false
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       cp .*/lib/pkgconfig/.*\.pc .*/  （直接覆盖依赖包目录或全局 /usr/local 的 .pc）
+forbid_1_reason:        污染共享前缀（R49/E524）会在 CI worker 与本机之间互相串味，
+                        并发任务互相覆盖；且改动不在配方里、不可复现。
+forbid_2_pattern:       link_args=.*-lutf8_range.*-lprotobuf   /  -lprotobuf.*-lutf8_range 顺序颠倒
+forbid_2_reason:        静态库单遍扫描，被引用者必须在引用者之后；顺序错仍报 undefined。
+forbid_3_pattern:       #ifdef __OHOS__.*dbus-1|__OHOS__.*utf8_range
+forbid_3_reason:        这些缺口源于 conan 包元数据，与平台无关（Linux 上用同一批 conan 包同样复现），
+                        用平台宏包裹违反 R8 且掩盖真实问题。
+
+principles:             P004, P012, P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/mmsd-tng-2.6.4-conan-dep-pkgconfig-metadata-gaps.md
+last_updated:           2026-09-29
+source_event:           mmsd-tng 2.6.4 适配：先后命中 ①mbpi database 变量缺失
+                        ②dbus-1 not found ③unit/test_service_providers 缺 gio 符号
+                        ④protobuf utf8_range undefined symbol；全部在 generate() 的
+                        pc 补齐目录解决，上游源码零改动（除 libphonenumber 一项另打补丁）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk Agent <agent@opendesk.local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+
+draft: true
+contributor_id: M5TN

@@ -1,0 +1,112 @@
+#====================================================================
+# Draft: meson install 落地到 conan 包目录的可执行文件在 OHOS 上被拒执行（EPERM）——
+#        内容一模一样，重新 copy 一份就能跑
+# 触发事件: mmsd-tng 2.6.4（Meson application 包）HarmonyOS PC test_package 首次执行
+# 日期: 2026-09-29
+#====================================================================
+
+id:                     mmsd-tng-2.6.4-meson-install-executable-eperm
+trigger_tool:           meson|conan|runtime
+phase:                  packaging|runtime
+error_signature:        PermissionError.*Operation not permitted.*bin/|operation not permitted: .*/p/bin/|Error 1 while executing.*test\(\)|\[Errno 1\] Operation not permitted
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               ohos-platform, packaging, meson, conan, hmdfs
+match_keywords:         meson install, conan package_folder, Operation not permitted, EPERM, chmod 无效, 可执行文件, copy, package(), test_package, HMDFS, 权限归一化, bun/ 落地, distutils, shutil.copy2
+title:                  meson install 直接落地的可执行文件在 OHOS 上 exec 报 EPERM（chmod 770/755 无效、内容 md5 完全一致），从 build 目录重新 copy 一份（新 inode）即可运行——Meson/Autotools "安装后不可执行"类坑的通用识别与修复
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             `meson install`（以及任何"从构建目录把文件搬到安装目录"的安装逻辑）
+                        在 OHOS/HMDFS 上产生的目标文件，会带上某种**内核/文件系统层面的
+                        不可执行标记**（不是 POSIX 权限位问题）。实测判据链：
+
+                          1) 运行报错是 `PermissionError: [Errno 1] Operation not permitted`
+                             （EPERM，**不是** EACCES）——权限位不匹配通常是 EACCES；
+                          2) `chmod 770` / `chmod 755` 后仍 EPERM → 排除权限位；
+                          3) 用构建目录里的同名产物**覆盖**（`cp $builddir/mmsdtng $pkg/bin/`）后
+                             **立刻可运行**，且 `md5sum` 两者**完全相同** → 排除内容/ELF/签名问题，
+                             差异只在"这个文件是谁创建的"（inode/属性）；
+                          4) 同一路径下、同为 0750 的构建目录副本可直接执行 → 与路径、与 mode 无关。
+
+                        结论：这是安装动作引入的文件属性问题，不是代码问题，也不是用户权限问题。
+                        同类实测：account-utils 1.4.0 配方注释记录的"绕开 meson install 的 HMDFS
+                        符号链接坑"，本库是同一族现象的可执行文件版本。
+affected_scope:         所有在 OHOS 上打包 **可执行文件**（application 类 conan 包，
+                        `package_type="application"`，`cpp_info.bindirs` 非空）的配方，
+                        特别是用 meson/autotools/cmake install 直接落地 bin/ 的；
+                        test_package 只要真的运行被安装的二进制（R34），就会命中。
+verification_cmd:       1) 复现：`"$pkg_folder/bin/<exe>" --version` → Operation not permitted
+                        2) 排除权限位：`chmod 770 "$pkg_folder/bin/<exe>"` 后再跑 → 仍 EPERM
+                        3) 定位差异：`md5sum "$builddir/<exe>" "$pkg_folder/bin/<exe>"` → 相同 hash
+                        4) 验证修复：`cp "$builddir/<exe>" "$pkg_folder/bin/<exe>"` → 再跑 → exit 0
+                           且 test_package 的实跑用例（--version）转 PASS
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           re-copy-installed-executables-from-build-folder
+rec_description:        在 package() 里，`meson.install()` **之后**把需要可执行的产物
+                        从构建目录用 conan 的 `copy()` 重新复制到 `package_folder/bin`
+                        （新建 inode → 新属性）。只对可执行文件做，库文件不必（也不应：
+                        共享库需要保留 meson install 的 SONAME/符号链，且 libsoup3/telemetry
+                        已确认 **绝不能 strip**，否则 .codesign 哈希失配导致 dlopen Permission denied）。
+                        复制源要用构建目录里的真实产物路径（meson 的 mmsdtng 在 build 根、
+                        mmsctl 在 tools/ 子目录），逐个 copy 并 keep_path=False。
+rec_command:            def package(self):
+                            meson = Meson(self); meson.install()
+                            bin_dst = os.path.join(self.package_folder, "bin"); os.makedirs(bin_dst, exist_ok=True)
+                            for name, src_dir in (("mmsdtng", self.build_folder),
+                                                  ("mmsctl", os.path.join(self.build_folder, "tools"))):
+                                if os.path.isfile(os.path.join(src_dir, name)):
+                                    copy(self, name, src=src_dir, dst=bin_dst, keep_path=False)
+rec_auto_fix:           false
+rec_impl:               conan-recipe-helper (package())
+
+fallback_priority:      2
+fallback_approach:      chmod-plus-sign
+fallback_description:   若为 ELF 签名策略导致（CI 侧 sign.sh 未签名），可走签名流程；
+                        但本例已用 md5 相同 + chmod 无效两条证据排除了权限位与内容因素，
+                        签名不是根因，仅作对照排除项记录。
+fallback_command:       ci/artifacts/sign.sh（CI 流水线，本地不可用）
+fallback_auto_fix:      false
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       chmod \+x .*/p/bin/.* && .*--version   （只靠 chmod 收尾）
+forbid_1_reason:        chmod 已实测无效（EPERM 非权限位问题），把它写进配方/脚本会造成
+                        "本地偶发成功、CI 必然失败"的不稳定结论。
+forbid_1_consequence:   test_package 时好时坏，误判为环境脏。
+forbid_2_pattern:       strip .*/p/bin/.*
+forbid_2_reason:        OHOS loader 校验链接期写入的 .codesign 段哈希，strip 会使其失配
+                        （libsoup3/telemetry 已有 dlopen Permission denied 铁证）；
+                        本条的修复是"重新 copy"，与 strip 无关，更不能用 strip "重造"文件。
+forbid_2_consequence:   二进制彻底不可执行/不可 dlopen，比原问题更难排查。
+
+principles:             P012
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/mmsd-tng-2.6.4-meson-install-executable-eperm.md
+last_updated:           2026-09-29
+source_event:           mmsd-tng 2.6.4：conan create 的 test_package 首次运行
+                        [Errno 1] Operation not permitted on …/p/bin/mmsdtng；
+                        package() 增加从 build 目录 re-copy 后 conan create exit=0，
+                        test_package 4/4 通过（含 2 项 HarmonyOS 专属用例）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                OpenDesk Agent <agent@opendesk.local>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+
+draft: true
+contributor_id: M5TN
