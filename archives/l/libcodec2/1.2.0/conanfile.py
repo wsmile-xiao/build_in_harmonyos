@@ -4,10 +4,24 @@
 Codec2: Next-Generation Digital Voice for Two-Way Radio.
 CMake-based build with no external dependencies (standalone).
 """
+import glob
+import os
+
 from conan import ConanFile
 from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
 from conan.tools.build import can_run
 from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
+
+
+# 上游 ctest 排除清单（详见 build() 注释与 PR 描述的技术原因分类）
+CTEST_EXCLUDE = (
+    "octave|CML|clang_format|datac0_compression|fading|2020B_mpp|"
+    "memory_leak|fsk_lib_4fsk_ldpc|demo_700d_python|"
+    "test_ldpc_enc_dec_HRA_56_56|test_ldpc_enc_dec_H_16200_9720|"
+    "test_ldpc_enc_dec_H_2064_516_sparse|test_freedv_api_700D_burble|"
+    "test_freedv_api_rawdata_800XA|"
+    "test_codec2_mode|test_quisk_filter|test_OFDM_modem_time_sync"
+)
 
 
 class Codec2Conan(ConanFile):
@@ -39,18 +53,6 @@ class Codec2Conan(ConanFile):
         tc.variables["BUILD_SHARED_LIBS"] = "ON" if self.options.shared else "OFF"
         tc.variables["UNITTEST"] = "ON"
         tc.variables["LPCNET"] = "OFF"
-        # ctest 参数经 CMAKE_CTEST_ARGUMENTS 传递（cmake>=3.20）：conan 的
-        # cmake.test(cli_args=...) 实为 cmake --build 参数，无法转发 ctest 选项。
-        tc.variables["CMAKE_CTEST_ARGUMENTS"] = (
-            "-E;"
-            "octave|CML|clang_format|datac0_compression|fading|2020B_mpp|"
-            "memory_leak|fsk_lib_4fsk_ldpc|demo_700d_python|"
-            "test_ldpc_enc_dec_HRA_56_56|test_ldpc_enc_dec_H_16200_9720|"
-            "test_ldpc_enc_dec_H_2064_516_sparse|test_freedv_api_700D_burble|"
-            "test_freedv_api_rawdata_800XA|"
-            "test_codec2_mode|test_quisk_filter|test_OFDM_modem_time_sync;"
-            "-j1"
-        )
         tc.generate()
 
     def build(self):
@@ -73,8 +75,35 @@ class Codec2Conan(ConanFile):
         #   python3-numpy/scipy×1（test_OFDM_modem_time_sync_700D）——真机工具链
         #   未提供，本地补齐工具后 9/9 通过（补充验证）。
         # 注：上游部分用例共用固定临时文件名，并行 -j 会互相覆盖产生假失败，故 -j1 串行。
+        # 测试调用方式：直接执行 ctest 并以双引号包裹排除正则。不能走 cmake.test()：
+        # 其参数被转给 cmake --build；而 make test 目标中未加引号的正则会被 /bin/sh
+        # 把 `|` 当管道符拆开执行（真机 CI 实测 Error 127）。self.run 显式引号可完整传参。
         if can_run(self):
-            cmake.test()
+            # 上游 add_test 命令内嵌 ../../raw、../raw 等相对路径，假定二进制目录是
+            # <源码根>/build 一层；conan cmake_layout 为 <源码根>/build/<cfg> 两层，
+            # 相对路径会错指到 <源码根>/build/。故在 ctest 二进制目录及其上层补
+            # raw/wav/demo/octave 数据目录符号链接指向源码目录，使命令行原样可解析
+            # （不改任何上游用例与断言）。
+            test_dir = self.build_folder
+            if not os.path.isfile(os.path.join(test_dir, "CTestTestfile.cmake")):
+                hits = glob.glob(
+                    os.path.join(self.source_folder, "**", "CTestTestfile.cmake"), recursive=True
+                )
+                test_dir = os.path.dirname(hits[0]) if hits else self.build_folder
+            self.output.info("ctest dir: {}".format(test_dir))
+            for name in ("raw", "wav", "demo", "octave"):
+                src_dir = os.path.join(self.source_folder, name)
+                if not os.path.isdir(src_dir):
+                    continue
+                for base in (os.path.dirname(test_dir), test_dir):
+                    link = os.path.join(base, name)
+                    if os.path.lexists(link):
+                        self.output.info("data link exists: {}".format(link))
+                        continue
+                    os.makedirs(base, exist_ok=True)
+                    os.symlink(src_dir, link)
+                    self.output.info("data link created: {} -> {}".format(link, src_dir))
+            self.run('ctest --test-dir "{}" -E "{}" -j1'.format(test_dir, CTEST_EXCLUDE))
         else:
             self.output.info("cross-building: 上游 ctest 留待 qemu 运行根/真机执行")
 
