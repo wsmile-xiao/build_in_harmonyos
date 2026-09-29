@@ -1,0 +1,336 @@
+diff --git a/Makefile b/Makefile
+index 4090abb..95737b3 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,12 +1,12 @@
+ CC ?= gcc
+ CFLAGS ?= -Wall -Wstrict-prototypes
+-CFLAGS += -fPIC
++CFLAGS += -fPIC -I.
+ LIBRARY=libnss_cache.so.2
+ PREFIX=$(DESTDIR)/usr
+ LIBDIR=$(PREFIX)/lib
+ TESTDATA=.testdata
+ 
+-LIBNSSCACHE = nss_cache.o compat/getpwent_r.o compat/getgrent_r.o
++LIBNSSCACHE = nss_cache.o compat/getpwent_r.o compat/getgrent_r.o compat/fgetspent_r.o compat/fgetsgent_r.o
+ 
+ SOURCES = Makefile gen_getent.c lookup.c nss_cache.c nss_cache.h nss_test.h COPYING version libnss-cache.spec
+ VERSION = $(shell git describe --tags --always | sed -E 's@.*/([^-]*).*@\1@')
+diff --git a/compat/fgetsgent_r.c b/compat/fgetsgent_r.c
+new file mode 100644
+index 0000000..911c02d
+--- /dev/null
++++ b/compat/fgetsgent_r.c
+@@ -0,0 +1,119 @@
++/*
++ * fgetsgent_r() implementation for OHOS/musl.
++ * musl libc has no <gshadow.h>. Adapted in the style of
++ * compat/getpwent_r.c (musl-derived) for libnss-cache.
++ * Format: name:passwd:admin-list:member-list  (lists are comma separated)
++ *
++ * The char* arrays for the admin/member lists are placed immediately after
++ * the parsed line content inside the caller's buffer; pointers reference the
++ * in-place, comma-split items.
++ */
++
++#if defined(BSD) || (defined(__linux__) && !defined(__GLIBC__))
++
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "gshadow.h"
++
++/* Count comma-separated items in a NUL-terminated list. */
++static int count_items(const char *s) {
++  int n = 0;
++  if (s && *s) {
++    n = 1;
++    for (; *s; s++)
++      if (*s == ',') n++;
++  }
++  return n;
++}
++
++/* Split the comma list at start into nitems tokens and write the pointer
++ * array beginning at buf.  Returns NULL on ERANGE (region would overflow
++ * the caller's buffer). */
++static char **build_list(char *start, int nitems, char *buf, size_t buflen,
++                         char *limit) {
++  char **arr;
++  int i;
++
++  if ((size_t)(nitems + 1) * sizeof(char *) > (size_t)(limit - buf)) {
++    return NULL;
++  }
++  arr = (char **)buf;
++  for (i = 0; i < nitems; i++) {
++    arr[i] = start;
++    start = strchr(start, ',');
++    if (start) {
++      *start++ = 0;
++    }
++  }
++  arr[nitems] = NULL;
++  return arr;
++}
++
++int fgetsgent_r(FILE *f, struct sgrp *sg, char *line, size_t size,
++                struct sgrp **res) {
++  char *s, *adm_start, *mem_start;
++  char *name;
++  char *buf;   /* pointer array region after line content */
++  char *limit; /* end of caller buffer */
++  int n_adm, n_mem, rv = 0;
++  size_t linelen;
++
++  for (;;) {
++    line[size - 1] = '\xff';
++    if ((fgets(line, size, f) == NULL) || ferror(f) ||
++        line[size - 1] != '\xff') {
++      rv = (line[size - 1] != '\xff') ? ERANGE : ENOENT;
++      line = 0;
++      sg = 0;
++      break;
++    }
++    line[strcspn(line, "\n")] = 0;
++    linelen = strlen(line) + 1;
++
++    buf = line + linelen;
++    limit = line + size;
++
++    s = line;
++    name = s;
++    if (!(s = strchr(s, ':'))) continue;
++    *s++ = 0;
++    sg->sg_namp = name;
++    sg->sg_passwd = s;
++    if (!(s = strchr(s, ':'))) continue;
++    *s++ = 0;
++
++    /* admin list token runs until next ':' (or EOL) */
++    adm_start = s;
++    s = strchr(s, ':');
++    if (s) *s++ = 0;
++    mem_start = s; /* member list (NULL when no fourth field) */
++
++    n_adm = count_items(adm_start);
++    n_mem = mem_start ? count_items(mem_start) : 0;
++
++    sg->sg_adm = build_list(adm_start, n_adm, buf, size, limit);
++    if (sg->sg_adm == NULL) {
++      rv = ERANGE;
++      break;
++    }
++    buf += (size_t)(n_adm + 1) * sizeof(char *);
++
++    /* Always hand back a {NULL}-terminated array, even for empty lists:
++     * gen_getent dereferences sg_mem directly. */
++    sg->sg_mem = build_list(mem_start, n_mem, buf, size, limit);
++    if (sg->sg_mem == NULL) {
++      rv = ERANGE;
++      break;
++    }
++    buf += (size_t)(n_mem + 1) * sizeof(char *);
++
++    break;
++  }
++  *res = sg;
++  if (rv) errno = rv;
++  return rv;
++}
++#endif /* BSD || (linux && !glibc) */
+\ No newline at end of file
+diff --git a/compat/fgetspent_r.c b/compat/fgetspent_r.c
+new file mode 100644
+index 0000000..035b7e3
+--- /dev/null
++++ b/compat/fgetspent_r.c
+@@ -0,0 +1,72 @@
++/*
++ * fgetspent_r() implementation for OHOS/musl.
++ * musl libc ships <shadow.h> with struct spwd but no parsing functions.
++ * Adapted in the style of compat/getpwent_r.c (musl-derived) for libnss-cache.
++ * Format: name:passwd:lstchg:min:max:warn:inact:expire:flag
++ */
++
++#if defined(BSD) || (defined(__linux__) && !defined(__GLIBC__))
++
++#include <errno.h>
++#include <shadow.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++static long atol_field(char **s) {
++  char *p = *s;
++  /* Empty numeric field (end of line or ':' separator) means "not set" */
++  if (*p == '\0' || *p == ':') {
++    return -1;
++  }
++  return strtol(p, s, 10);
++}
++
++int fgetspent_r(FILE *f, struct spwd *sp, char *line, size_t size,
++                struct spwd **res) {
++  char *s;
++  int rv = 0;
++  for (;;) {
++    line[size - 1] = '\xff';
++    if ((fgets(line, size, f) == NULL) || ferror(f) ||
++        line[size - 1] != '\xff') {
++      rv = (line[size - 1] != '\xff') ? ERANGE : ENOENT;
++      line = 0;
++      sp = 0;
++      break;
++    }
++    line[strcspn(line, "\n")] = 0;
++
++    s = line;
++    sp->sp_namp = s;
++    if (!(s = strchr(s, ':'))) continue;
++    *s++ = 0;
++    sp->sp_pwdp = s;
++    if (!(s = strchr(s, ':'))) continue;
++    *s++ = 0;
++    sp->sp_lstchg = atol_field(&s);
++    if (*s != ':') continue;
++    *s++ = 0;
++    sp->sp_min = atol_field(&s);
++    if (*s != ':') continue;
++    *s++ = 0;
++    sp->sp_max = atol_field(&s);
++    if (*s != ':') continue;
++    *s++ = 0;
++    sp->sp_warn = atol_field(&s);
++    if (*s != ':') continue;
++    *s++ = 0;
++    sp->sp_inact = atol_field(&s);
++    if (*s != ':') continue;
++    *s++ = 0;
++    sp->sp_expire = atol_field(&s);
++    if (*s != ':') continue;
++    *s++ = 0;
++    sp->sp_flag = atol_field(&s);
++    break;
++  }
++  *res = sp;
++  if (rv) errno = rv;
++  return rv;
++}
++#endif /* BSD || (linux && !glibc) */
+\ No newline at end of file
+diff --git a/gshadow.h b/gshadow.h
+new file mode 100644
+index 0000000..9f73a7b
+--- /dev/null
++++ b/gshadow.h
+@@ -0,0 +1,21 @@
++/*
++ * Minimal gshadow.h compatibility header for OHOS/musl.
++ * musl libc does not ship <gshadow.h>. Define struct sgrp (glibc layout)
++ * and the fgetsgent_r() prototype used by libnss-cache.
++ */
++#ifndef _GSHADOW_COMPAT_H
++#define _GSHADOW_COMPAT_H
++
++#include <stdio.h>
++
++struct sgrp {
++  char *sg_namp;
++  char *sg_passwd;
++  char **sg_adm;
++  char **sg_mem;
++};
++
++int fgetsgent_r(FILE *stream, struct sgrp *sgrp, char *buffer,
++                size_t buflen, struct sgrp **result);
++
++#endif /* _GSHADOW_COMPAT_H */
+\ No newline at end of file
+diff --git a/nss.h b/nss.h
+new file mode 100644
+index 0000000..5543c36
+--- /dev/null
++++ b/nss.h
+@@ -0,0 +1,18 @@
++/*
++ * Minimal glibc NSS compatibility header for OHOS/musl.
++ * OHOS uses musl libc which has no NSS framework and does not ship <nss.h>.
++ * libnss-cache (a glibc NSS module) needs only the nss_status enum and the
++ * NSS_STATUS_* constants. Layout follows glibc nss/nss.h.
++ */
++#ifndef _NSS_COMPAT_H
++#define _NSS_COMPAT_H
++
++enum nss_status {
++  NSS_STATUS_TRYAGAIN = -2,
++  NSS_STATUS_UNAVAIL = -1,
++  NSS_STATUS_NOTFOUND = 0,
++  NSS_STATUS_SUCCESS = 1,
++  NSS_STATUS_RETURN = 2
++};
++
++#endif /* _NSS_COMPAT_H */
+\ No newline at end of file
+diff --git a/nss_cache.c b/nss_cache.c
+index 4e0190f..ad22820 100644
+--- a/nss_cache.c
++++ b/nss_cache.c
+@@ -41,6 +41,15 @@ static FILE *pw_file = NULL;
+ static FILE *gr_file = NULL;
+ static char pw_filename[NSS_CACHE_PATH_LENGTH] = "/etc/passwd.cache";
+ static char gr_filename[NSS_CACHE_PATH_LENGTH] = "/etc/group.cache";
++
++/* On Linux without glibc (OHOS/musl) fgetpwent_r/fgetgrent_r are provided by
++ * the compat/ layer (musl-derived), so declare them here. */
++#if !defined(BSD) && !defined(__GLIBC__)
++extern int fgetpwent_r(FILE *, struct passwd *, char *, size_t,
++                       struct passwd **);
++extern int fgetgrent_r(FILE *, struct group *, char *, size_t, struct group **);
++#endif /* !BSD && !GLIBC */
++
+ #ifndef BSD
+ static FILE *sp_file = NULL;
+ static FILE *sg_file = NULL;
+@@ -740,10 +749,10 @@ enum nss_status _nss_cache_getgrnam_r(const char *name, struct group *result,
+ //
+ //  Routines for shadow map defined here.
+ //
+-#if defined(__linux__) && defined(__GLIBC__)
+-// This is only built on GLIBC as caching the shadow file is generally
+-// not permissable from the perspective of other libc's, so the
+-// symbols are simply unused in those environments.
++#if defined(__linux__)
++// Shadow/gshadow caching. Upstream builds this only on GLIBC; on OHOS/musl
++// fgetspent_r/fgetsgent_r are provided by the compat/ layer so the same
++// functionality is available (test tools reference these symbols).
+ 
+ // _nss_cache_setspent_path()
+ // Helper function for testing
+diff --git a/shadow.h b/shadow.h
+new file mode 100644
+index 0000000..ce92ab2
+--- /dev/null
++++ b/shadow.h
+@@ -0,0 +1,17 @@
++/*
++ * Tree-local <shadow.h> wrapper for OHOS/musl.
++ * musl ships shadow.h with struct spwd but no parsing functions;
++ * libnss-cache needs fgetspent_r() which musl does not declare.
++ * Pull in the system header and add the missing prototype.
++ */
++#ifndef _SHADOW_WRAPPER_H
++#define _SHADOW_WRAPPER_H
++
++#include_next <shadow.h>
++
++#include <stdio.h>
++
++int fgetspent_r(FILE *stream, struct spwd *spbuf, char *buffer,
++                size_t buflen, struct spwd **result);
++
++#endif /* _SHADOW_WRAPPER_H */
+\ No newline at end of file
