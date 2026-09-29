@@ -1,0 +1,137 @@
+From: clancyxie <clancyxie@noreply.gitcode.com>
+Subject: [PATCH] trace-cmd: pin threads through sched_{get,set}affinity when
+ pthread_*_affinity_np is missing
+
+lib/trace-cmd/trace-timesync.c calls glibc's pthread_getaffinity_np() and
+pthread_setaffinity_np(); the OHOS libc has neither (llvm-nm on
+sysroot/usr/lib/aarch64-linux-ohos/libc.so only lists sched_getaffinity and
+sched_setaffinity), so libtracecmd.so ends up with undefined symbols that
+ld.lld then rejects while linking the trace-cmd driver:
+
+  ld.lld: error: undefined symbol: pthread_getaffinity_np
+  ld.lld: error: undefined symbol: pthread_setaffinity_np
+
+Add a compile/link probe next to the existing memfd_create probe and route the
+five call sites through two helpers. Where the _np() versions exist nothing
+changes; without them the calling thread uses the tid-0 sched_() form, which is
+the same operation, and pinning a *foreign* thread (the clock sync worker) is
+left to the thread's own affinity.
+--- a/Makefile
++++ b/Makefile
+@@ -190,6 +190,20 @@
+ # have memfd_create available
+ memfd-flags := $(call test-build,$(MEMFD_CREATE_SOURCE),-DHAVE_MEMFD_CREATE)
+ 
++define PTHREAD_AFFINITY_NP_SOURCE
++#include <pthread.h>
++#include <sched.h>
++int main(void) {
++\	cpu_set_t set;
++
++\	CPU_ZERO(&set);
++\	return pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
++}
++endef
++
++# have glibc's pthread_{get,set}affinity_np() (absent in the OHOS libc)?
++affinity-flags := $(call test-build,$(PTHREAD_AFFINITY_NP_SOURCE),-DHAVE_PTHREAD_AFFINITY_NP)
++
+ ifeq ("$(origin O)", "command line")
+ 
+   saved-output := $(O)
+@@ -377,7 +391,8 @@
+ # Append required CFLAGS
+ override CFLAGS += $(INCLUDES) $(VAR_DIR)
+ override CFLAGS += $(PLUGIN_DIR_TRACECMD_SQ)
+-override CFLAGS += $(udis86-flags) $(blk-flags) $(memfd-flags)
++override CFLAGS += $(udis86-flags) $(blk-flags) $(memfd-flags) \
++		       $(affinity-flags)
+ override LDFLAGS += $(udis86-ldflags)
+ 
+ CMD_TARGETS = trace-cmd $(BUILD_PYTHON)
+--- a/lib/trace-cmd/trace-timesync.c
++++ b/lib/trace-cmd/trace-timesync.c
+@@ -15,6 +15,7 @@
+ #include <dirent.h>
+ #include <errno.h>
+ #include <pthread.h>
++#include <sched.h>
+ 
+ #include "trace-cmd-private.h"
+ #include "trace-cmd-local.h"
+@@ -488,6 +489,35 @@
+ 	free(tsync);
+ }
+ 
++/*
++ * pthread_getaffinity_np() / pthread_setaffinity_np() are glibc extensions: the
++ * OHOS libc neither declares nor provides them. sched_getaffinity() /
++ * sched_setaffinity() with tid 0 cover the "this thread" cases on both C
++ * libraries; the Makefile probes for the _np() variants so that a glibc build
++ * keeps pinning the clock sync worker thread from the creating thread.
++ */
++static int tsync_pin_thread(pthread_t thread, size_t size, cpu_set_t *mask)
++{
++#ifdef HAVE_PTHREAD_AFFINITY_NP
++	return pthread_setaffinity_np(thread, size, mask);
++#else
++	if (!pthread_equal(thread, pthread_self()))
++		return 0;
++	return sched_setaffinity(0, size, mask);
++#endif
++}
++
++static int tsync_get_thread_affinity(pthread_t thread, size_t size, cpu_set_t *mask)
++{
++#ifdef HAVE_PTHREAD_AFFINITY_NP
++	return pthread_getaffinity_np(thread, size, mask);
++#else
++	if (!pthread_equal(thread, pthread_self()))
++		return -1;
++	return sched_getaffinity(0, size, mask);
++#endif
++}
++
+ static cpu_set_t *pin_to_cpu(int cpu)
+ {
+ 	static size_t size;
+@@ -511,9 +541,9 @@
+ 
+ 	CPU_ZERO_S(size, mask);
+ 	CPU_SET_S(cpu, size, mask);
+-	if (pthread_getaffinity_np(pthread_self(), size, old))
+-		goto error;
+-	if (pthread_setaffinity_np(pthread_self(), size, mask))
++	if (tsync_get_thread_affinity(pthread_self(), size, old))
++		goto error;
++	if (tsync_pin_thread(pthread_self(), size, mask))
+ 		goto error;
+ 
+ 	CPU_FREE(mask);
+@@ -534,7 +564,7 @@
+ 	if (!size)
+ 		size = CPU_ALLOC_SIZE(tracecmd_count_cpus());
+ 
+-	pthread_setaffinity_np(pthread_self(), size, mask);
++	tsync_pin_thread(pthread_self(), size, mask);
+ 	CPU_FREE(mask);
+ }
+ 
+@@ -791,7 +821,7 @@
+ 	tsync->thread_running = true;
+ 
+ 	if (!get_first_cpu(&pin_mask, &mask_size))
+-		pthread_setaffinity_np(tsync->thread, mask_size, pin_mask);
++		tsync_pin_thread(tsync->thread, mask_size, pin_mask);
+ 	pthread_barrier_wait(&tsync->first_sync);
+ 
+ 	if (pin_mask)
+@@ -987,7 +1017,7 @@
+ 	}
+ 	tsync->thread_running = true;
+ 	if (!get_first_cpu(&pin_mask, &mask_size))
+-		pthread_setaffinity_np(tsync->thread, mask_size, pin_mask);
++		tsync_pin_thread(tsync->thread, mask_size, pin_mask);
+ 
+ 	if (pin_mask)
+ 		CPU_FREE(pin_mask);
