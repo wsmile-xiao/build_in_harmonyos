@@ -45,4 +45,9 @@ class UnadfTestConan(ConanFile):
         # generate() here is a hard error ("VirtualRunEnv is declared in the
         # generators attribute, but was instantiated in the generate()
         # method too") -- the tool must appear in exactly one of the two.
-        self.run("bash test_unadf_cli.sh", env="conanrun")
+        #
+        # test() runs with the CWD set to the test_package *build* folder, so
+        # the script has to be addressed by absolute path. A bare
+        # "bash test_unadf_cli.sh" fails with "No such file or directory"
+        # even though the file is right there in source_folder.
+        self.run(f"bash {self.source_folder}/test_unadf_cli.sh", env="conanrun")
