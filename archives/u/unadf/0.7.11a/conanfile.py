@@ -99,6 +99,10 @@ class UnadfConan(ConanFile):
         ce = self.conf.get("tools.build:compiler_executables", default={},
                            check_type=dict) or {}
         return (ce.get("c") or "clang",
+                # The ohos-aarch64 profile only pins 'c' and 'cpp'; there is no
+                # 'ar'/'ranlib' key to read, so these fall back to the llvm
+                # binutils that ship next to the pinned clang. Keep the "rc"
+                # operation the Makefile needs -- see the note in build().
                 ce.get("ar") or "llvm-ar",
                 ce.get("ranlib") or "llvm-ranlib")
 
@@ -128,7 +132,25 @@ class UnadfConan(ConanFile):
         base = "-O2 -fcommon -std=gnu99 -Wno-strict-prototypes"
         lib_cflags = f"{base} -I./Generic -I.. -I."
         demo_cflags = f"{base} -I../Lib"
-        common = f"CC={cc} AR={ar} RANLIB={ranlib} DEPEND="
+
+        # Lib/Makefile declares `AR=ar rc` -- the archive operation is part of
+        # the variable, and the rule is `$(AR) $@ $(OBJS)`. Overriding AR with
+        # a bare `llvm-ar` therefore drops the operation and llvm-ar treats
+        # `libadf.a` as an option string ("error: unknown option f"). The
+        # override has to carry the operation too, as ONE make variable
+        # assignment -- hence the quotes. Unquoted, make would parse `rc` as
+        # a goal and fail with "No rule to make target 'rc'".
+        #
+        # The recipe also drops -Wall/-Wno-uninitialized/-pedantic from
+        # upstream CFLAGS and replaces -ggdb with -O2. The warnings are
+        # 2006-era noise under clang 15; the optimisation level is a package
+        # decision, and conan controls debug symbols via build_type.
+        #
+        # Demo/Makefile links with `$(CC) $(CFLAGS) -o $@ unadf.o $(LDFLAGS)`
+        # where LDFLAGS=-L../Lib -ladf, and its `unadf` target depends on the
+        # `lib` phony rule that recurses into Lib/. Both are already correct
+        # upstream, so only the toolchain and CFLAGS need overriding.
+        common = f"CC={cc} AR='{ar} rc' RANLIB={ranlib} DEPEND="
 
         # R9: -j1 only.
         self.run(f"make -C Lib {common} CFLAGS='{lib_cflags}' -j1",
