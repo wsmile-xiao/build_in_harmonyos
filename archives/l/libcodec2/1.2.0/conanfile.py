@@ -99,7 +99,11 @@ class Codec2Conan(ConanFile):
                 test_dir = os.path.dirname(hits[0]) if hits else self.build_folder
             self.output.info("ctest dir: {}".format(test_dir))
             lib_src = os.path.join(test_dir, "src")
-            for base in (os.path.dirname(test_dir), os.path.join(self.source_folder, "src")):
+            compat_bases = (
+                os.path.join(os.path.dirname(test_dir), "src"),
+                os.path.join(self.source_folder, "src"),
+            )
+            for base in compat_bases:
                 if os.path.abspath(base) == os.path.abspath(lib_src):
                     continue
                 os.makedirs(base, exist_ok=True)
@@ -124,8 +128,9 @@ class Codec2Conan(ConanFile):
                     os.makedirs(base, exist_ok=True)
                     shutil.copytree(src_dir, dst, symlinks=True)
                     self.output.info("data compat copy: {}".format(dst))
+            env_prefix = 'LD_LIBRARY_PATH="' + os.path.join(test_dir, "src") + ':$LD_LIBRARY_PATH" '
             try:
-                self.run('ctest --test-dir "{}" -E "{}" --output-on-failure -j1'.format(test_dir, CTEST_EXCLUDE))
+                self.run(env_prefix + 'ctest --test-dir "' + test_dir + '" -E "' + CTEST_EXCLUDE + '" --output-on-failure -j1')
             except Exception:
                 self._dump_failures(test_dir)
                 raise
@@ -141,14 +146,22 @@ class Codec2Conan(ConanFile):
             txt = open(log, encoding="utf-8", errors="replace").read()
         except OSError:
             return
+        failed = set()
+        flog = os.path.join(test_dir, "Testing", "Temporary", "LastTestsFailed.log")
+        if os.path.isfile(flog):
+            try:
+                failed = {l.strip() for l in open(flog, encoding="utf-8", errors="replace") if l.strip()}
+            except OSError:
+                pass
         self.output.info("===== failing tests summary =====")
         for m in re.finditer(r"\d+/\d+ Test:\s+(\S+)(.*?)(?=\n\d+/\d+ Test:|\Z)", txt, re.S):
             name, body = m.group(1), m.group(2)
             lines = [l.strip() for l in body.splitlines() if l.strip()]
             err = [l for l in lines if re.search(r"Error|not found|No such|differ|symbol", l)][:3]
-            if not err:
+            if name not in failed and not err:
                 continue
-            self.output.info("{}: {}".format(name, " | ".join(err)[:300]))
+            sel = err or lines[:2]
+            self.output.info("{}: {}".format(name, " | ".join(sel)[:300]))
 
     def package(self):
         cmake = CMake(self)
