@@ -1,0 +1,73 @@
+# ═══ DRAFT knowledge entry — 裸 Makefile 规则正文把编译器名写成字面量 ⇒ make 命令行覆盖无对象 ═══
+# Timestamp: 2026-09-27
+# Software: rifiuti 20040505（上游唯一构建入口 src/Makefile，10 行 215 字节，sha256 前缀 f3bb0732）
+# Gate: conan create 的 build()（W3）
+# Status: DRAFT — 需人工/AI 审核后 promote 为 E 条目
+# Issue: #3508 https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/3508
+# To promote: 1) 复核 root_cause 与 verification_cmd 读数 2) 另存 knowledge/graph/E0XX.kv
+#   3) knowledge/graph/index.tsv 补行 4) 写 knowledge/doc/E0XX.md
+
+id:                     DRAFT-rifiuti-20040505-makefile-baked-compiler-name-no-override-target
+trigger_tool:           make
+phase:                  compilation
+error_signature:        /bin/sh: (?:gcc|cc): inaccessible or not found|cp: bad '[^']*': No such file or directory|make: \*\*\* \[Makefile:[0-9]+: [A-Za-z][A-Za-z0-9_-]*\] Error 1(?![0-9])
+severity:               3
+category:               ohos, make, toolchain, conan, portability
+prescan_pattern:        ^[ \t]+(?:@|-)?(?:gcc|cc|g\+\+)[ \t](?!.*\$(?:\(|\{)C)
+prescan_globs:          Makefile*, *.mk
+match_keywords:         裸 Makefile, raw makefile, 字面量编译器名, baked compiler name, no CC assignment, make CC=, 命令行变量覆盖, override has no target, gcc: inaccessible or not found, Error 1, compiler_executables, R33, 复刻上游编译命令, 零补丁
+title:                  上游裸 Makefile 把编译器名写成规则正文字面量（全文件无 CC=/CFLAGS= 赋值）⇒ make 命令行变量覆盖无对象；解法是在配方里逐字复刻该条编译命令并把编译器取自 tools.build:compiler_executables
+
+root_cause:             GNU make 的标准交叉手法「命令行变量覆盖 makefile 内赋值」（make CC=<交叉编译器>）成立的前提是规则正文引用 $(CC)。本包上游 src/Makefile 全文 10 行、只有 all/install/installwin/clean 四目标，两条编译命令把编译器名写成字面量（:4 gcc -o rifiuti rifiuti.c -lm -lc;cp rifiuti ../bin、:7 gcc -DCYGWIN -o rifiuti.exe rifiuti.c -lm -lc;cp rifiuti.exe ../bin），
+                        全文件没有任何 CC= 或 CFLAGS= 赋值 ⇒ 命令行覆盖没有作用对象：实测 make -n CC=clang 打印的 recipe 仍以字面量 gcc 开头，make CC=<clang 全路径> 的 stderr 与裸 make 逐字节相同（cmp -s 判等、rc 均为 2）。
+                        失败点在 shell 解析命令名阶段（OHOS 用户态只有 /data/service/hnp/bin/clang，无 gcc、无 cc 别名）⇒ 首错 /bin/sh: gcc: inaccessible or not found；同一行分号后的 cp 再报一次，make 终码是 Error 1 而不是 Error 127。根因是「构建入口不可参数化」，不是「设备上缺 gcc」。
+affected_scope:         上游为手写裸 Makefile（无 configure/CMake/meson）、规则正文以字面量 gcc/cc/g++ 开头且行内不含 $(CC)/${CC}、编译命令只有 1–3 条（可逐字复刻）的软件，在 OHOS 设备侧无 gcc/cc 别名时必然触发。
+                        反例（不属本条适用范围）：Makefile 里有 CC :=/CC = 把手的裸 Makefile（suckless 族、cohomcalg、yosys）——那一族命令行或环境前缀覆盖有效，无需复刻；有 install 变量把手的安装行属 makefile-install-cmd-absent-makevar-override 那条线。
+verification_cmd:       grep -cE '^[[:space:]]*CC[[:space:]]*[:?]?=' src/Makefile; make -n -C src CC=clang 2>&1 | grep -cE '^[[:space:]]*gcc[[:space:]]'
+
+rec_priority:           1
+rec_approach:           replicate-recipe-command-with-conf-compiler
+rec_description:        不改上游文件、不打补丁：在配方 build() 内逐字复刻上游那条规则正文的编译命令（同一 argv 序列、同一产物名、同一组链接库 -lm -lc），只把命令名换成从 Conan conf 取到的 C 编译器
+                        —— self.conf.get("tools.build:compiler_executables", default={}, check_type=dict) 再 .get("c")（R33 禁止裸用 shell 环境变量里的 ${CC}）。
+                        上游 install 目标里分号后半句 cp rifiuti ../bin 属安装动作，改由配方 package() 完成；等价性由 test_package 的行为断言证明（消费者测试 22 执行 / 22 通过）。
+rec_command:            self.run('"{}" -o rifiuti rifiuti.c -lm -lc'.format(cc), cwd=self.source_folder + "/src", env="conanbuild")   # cc = self.conf.get("tools.build:compiler_executables", default={}, check_type=dict).get("c") or "clang"
+rec_auto_fix:           false
+rec_impl:               conanfile-build-replicate
+
+fallback_priority:      2
+fallback_approach:      patch-makefile-introduce-cc-variable
+fallback_description:   打 .patch 把规则正文的字面量 gcc 改成 $(CC)，此后 make CC=<交叉编译器> 的命令行覆盖才成立。代价：改动构建输入 ⇒ recipe revision 变化、既有 W3 证据整批作废，且需 track-edit 记录；
+                        只有当上游编译命令多于 3 条、或依赖 implicit rules 推导（无法逐字复刻）时才划算。
+fallback_command:       patch -p1 < 0001-makefile-cc-variable.patch; make CC=/data/service/hnp/bin/clang
+fallback_auto_fix:      false
+fallback_impl:          manual-patch
+
+forbid_1_pattern:       make\s+CC=\S+
+forbid_1_reason:        规则正文是字面量 gcc，命令行覆盖没有作用对象；实测 make CC=<clang> 的 stderr 与裸 make 逐字节相同（cmp -s 判等），继续调参数不会改变结果。
+forbid_1_consequence:   反复重试同一条失败命令白占构建槽位，并把「入口不可参数化」误判成「编译器参数没传对」或「设备缺 gcc」，进而错手申报工具链缺失。
+forbid_2_pattern:       造 gcc 转发件|ln -s .*clang .*gcc
+forbid_2_reason:        伪 gcc 别名会掩盖真实工具链来源，也不保证产物是 aarch64-OHOS 目标，与本仓「不造假编译器」的门禁精神冲突。
+forbid_2_consequence:   产物可能来自宿主编译器而无人察觉，签名与架构证据链断裂。
+
+causes:                 make: *** [Makefile:N: target] Error 1（命令名解析失败，不是编译失败）
+caused_by:              OHOS 用户态无 gcc/cc 别名（C 编译器只有 /data/service/hnp/bin/clang）+ 上游 Makefile 无 CC 把手
+similar_to:             E501（doc/E501.md:20 只覆盖解法「Mirror the upstream Makefile source list… compile with the profile compiler」；:11 签名要求字面 make: inaccessible、:15 根因是 PR runner 不向 conan 子进程暴露 make/cmake，与本包「make 可用而覆盖无对象」不同层）;
+                        E392（doc/E392.md:15/:20 raw makefile 三陷阱含 compiler_executables 的 dict 取法，未涉规则正文字面量编译器名）;
+                        E149（doc/E149.md:11 签名 socat.*HarmonyOS，direct_compile 另一形）;
+                        DRAFT-cohomcalg-0.32-makefile-gxx-override（:17-19 根因：Makefile 有 CC := g++ 赋值 ⇒ 命令行覆盖有效，本包无赋值 ⇒ 该解法失效）;
+                        DRAFT-yosys-0.66-custom-makefile-compiler-executables-host-objects（:9 根因是 CC := 自赋导致宿主对象、症状在链接期；本包在 shell 命令名解析期即失败）;
+                        drafts/E543-draft-F833（:22 签名含 gcc: inaccessible or not found、:42 根因是 build.sh 硬写 /bin/bash 与 gcc、:43 affected_scope 明写 no Makefile ⇒ 只同签名同解法形状，入口不是 make、无「覆盖无对象」这一半）
+conflicts_with:         （无冲突条目；与「命令行覆盖变量」一族是互补的两条分支，按 Makefile 有无 CC 赋值分流）
+prerequisite_of:
+doc_file:               knowledge/drafts/DRAFT-rifiuti-20040505-makefile-baked-compiler-name-no-override-target.md
+last_updated:           2026-09-27
+source_event:           rifiuti 20040505 适配（B 机 GNU Make 4.4.1、clang 在 /data/service/hnp/bin）：裸 make rc=2 三行 stderr；make CC=<clang 全路径> stderr 与之 cmp -s 逐字节相同；make -n 打印的 recipe 仍以字面量 gcc 开头；verification_cmd 实测读数 0 与 1
+authors:                主理-75
+source_pr:
+source_commit:
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-27
+draft:                  true
+contributor_id:         rifiuti-20040505
