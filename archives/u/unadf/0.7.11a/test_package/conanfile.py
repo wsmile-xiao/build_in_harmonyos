@@ -1,6 +1,5 @@
 from conan import ConanFile
 from conan.tools.build import can_run
-from conan.tools.env import VirtualRunEnv
 from conan.tools.layout import basic_layout
 
 
@@ -41,8 +40,9 @@ class UnadfTestConan(ConanFile):
     def test(self):
         if not can_run(self):
             return
-        vr = VirtualRunEnv(self)
-        vr.generate()
-        env = vr.vars
-        env.save()
+        # VirtualRunEnv is already declared in `generators`, so conan has
+        # written conanrun.sh for us. Instantiating it again and calling
+        # generate() here is a hard error ("VirtualRunEnv is declared in the
+        # generators attribute, but was instantiated in the generate()
+        # method too") -- the tool must appear in exactly one of the two.
         self.run("bash test_unadf_cli.sh", env="conanrun")
