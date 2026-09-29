@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-xdist-internalerror-swallows-summary — pytest-xdist worker 被信号杀死时
+#   抛 INTERNALERROR 并吞掉整个失败清单（汇总行有 N failed，却无任何 FAILED 行）
+# 触发事件: psutil 7.2.2 适配（PR #11263，2026-09-19 真机实测）
+#   并行"跑得飞快但清单归零"→ 无法逐项归因，是"看似跑通"的陷阱
+#====================================================================
+
+id:                     DRAFT-xdist-internalerror-swallows-summary
+trigger_tool:           pytest|xdist|python|ci
+phase:                  testing
+error_signature:        node down: Not properly terminated|
+                         worker 'gw[0-9]+' crashed while running|
+                         INTERNALERROR>.*xdist/scheduler|
+                         KeyError: <WorkerController gw[0-9]+>
+                         passed.*failed.*[0-9]+s.*(?!FAILED)
+
+severity:               2
+category:               ohos|testing|pytest|xdist|tooling
+match_keywords:         xdist, pytest-xdist, INTERNALERROR, node down, crashed while
+                         running, loadscope, WorkerController, short test summary,
+                         FAILED lines, 失败清单, 归因, worker 被杀死, SIGSYS
+
+title:                  pytest-xdist worker 被信号杀死 → 调度器内部错误 → 失败清单被吞（汇总行仍在，极具误导性）
+
+root_cause:             两层叠加：①套件中存在让进程被**信号杀死**的用例（如 OHOS 的
+                         time.clock_settime 触发 seccomp SIGSYS(31)，进程被终止而非抛
+                         异常）→ worker 意外消失；②xdist 调度器无法处理 worker 意外死亡
+                         —— loadscope.py:275 `_assign_work_unit` 访问
+                         `registered_collections[node]` 抛
+                         `KeyError: <WorkerController gwN>` → 主进程
+                         pytest_internalerror() → **在 summary 打印阶段之前异常退出**，
+                         于是 -rf / short test summary 的 `FAILED` 行根本没机会输出。
+                         关键误导点：汇总行（N failed）由各 worker 累计上报，**即使清单
+                         打印崩了也照样打印** → 出现"有汇总行 + 无 FAILED 行"的组合，
+                         极易被误读为"跑完了、能逐项看"。
+
+affected_scope:         使用 pytest-xdist（-n N / -n auto）跑上游套件、且套件中存在
+                         会杀死进程的用例（seccomp SIGSYS、abort、段错误、os._exit、
+                         被 OOM killer 杀）且需要逐项失败清单做归因（PR 描述要求列出
+                         失败项及根因）的所有场景
+
+rec_priority:           1
+rec_approach:           serial-run-for-attribution
+rec_description:        先用**串行**跑一遍取完整失败清单（串行无调度器、无该崩溃模式），
+                         并整体排除会杀死进程的用例（--ignore）与会挂死的用例
+                         （--deselect）。判据：看到"汇总行 failed>0 但 ^FAILED 行数为 0"
+                         或出现 INTERNALERROR ⟹ 该次并行结果**不可用于归因**。
+rec_command: >
+  # 取清单：串行 + 排除杀进程/挂死用例
+  python3 -m pytest tests -q --no-header -p no:cacheprovider -p instafail \
+    --ignore=tests/test_sudo.py \
+    --deselect "tests/test_linux.py::TestProcess::test_open_files_mode" -rf
+  # 判定结果可用性
+  grep -c '^FAILED' report.txt    # ==0 且汇总行 failed>0 → 结果不可用
+rec_auto_fix:           false
+rec_impl:               manual-command-line-flags
+
+forbid_1_pattern:       把"有汇总行（N failed）"当作"跑完且可逐项归因"
+forbid_1_reason:        失败清单可能已被吞（^FAILED 行数为 0），据此写 PR 描述即为编造
+forbid_1_consequence:   审计失真（R52）；管理员按清单核验时无法对账
+
+forbid_2_pattern:       在未排除"杀进程/挂死"用例的前提下反复重跑并行
+forbid_2_reason:        同一根因，恒同结果，纯耗预算
+forbid_2_consequence:   浪费构建轮次与预算；仍拿不到清单
+
+principles:             归因前先验证据完整性（^FAILED 计数）; 平台受限时串行优先;
+                        工具缺陷不掩盖，显式识别并绕开
+
+verification_cmd:       grep -c 'INTERNALERROR' report.txt
+                         grep -c '^FAILED' report.txt        # 与汇总行 failed 数对账
+                         grep -n "node down\|crashed while running" report.txt
+
+related_docs:           doc/E051.md, doc/E055.md
+
+source_event:           archives/p/psutil/7.2.2 PR#11263（同一构建目录对照：-n8 清单0行 vs 串行142行）
+first_seen_project:     psutil/7.2.2
+last_updated:           2026-09-20
