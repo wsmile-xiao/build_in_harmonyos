@@ -37,6 +37,10 @@ the hunk bodies are byte-identical to Debian's.
 
 The library is delivered static-only (R26/R35): the upstream shared target has
 no SONAME/versioning machinery, and OHOS ships its own process model.
+
+The package is nonetheless declared package_type="application", because it ships
+the unadf CLI in bin/ as well as libadf.a, and package_type is what makes the
+packaged bin/ reach the run trait. See the comment on the class attribute.
 """
 import os
 
@@ -59,11 +63,33 @@ class UnadfConan(ConanFile):
     license = "GPL-2.0-or-later"
     homepage = "http://lclevy.free.fr/adflib/unadf.html"
     url = "https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos"
-    package_type = "library"
+
+    # "application", not "library": the package ships the unadf CLI alongside
+    # libadf.a, and package_type is what makes CppInfo.deduce() propagate
+    # bindirs into the run trait. With "library" the explicit
+    # `self.cpp_info.bindirs = ["bin"]` in package_info() never reached the run
+    # trait, VirtualRunEnv generated an empty `for v in` list, and the
+    # consumer test died on "unadf binary not on PATH" even though p/bin/unadf
+    # was present and executable. Device-verified 2026-09-29: changing only
+    # this line to "application" moved the generated env from
+    # `for v in` (empty) to `for v in PATH LD_LIBRARY_PATH DYLD_LIBRARY_PATH`
+    # and took the suite from PASS=0 FAIL=1 to PASS=15 FAIL=0. The
+    # 33 package_type="application" recipes already in this repo are the same
+    # shape, and none of them carries a `shared` option.
+    package_type = "application"
 
     settings = "os", "compiler", "build_type", "arch"
-    options = {"shared": [True, False]}
-    default_options = {"shared": False}
+
+    # No `shared` option: this package is static-only by construction. The
+    # upstream Lib/Makefile shared rule builds libadf.so.0.7.11 with no SONAME
+    # or versioning machinery and is deliberately not used (see the module
+    # docstring), build() never reads options.shared, and package_id() below
+    # already deletes compiler and build_type. Keeping the option was dead
+    # weight that also made Conan warn
+    # "package_type 'application' is defined, but 'shared' and/or
+    # 'header_only' options are present" on every graph computation.
+    # Device-verified 2026-09-29: with the option removed, conan create is
+    # clean (no WARN) and still reports PASS=15 FAIL=0.
 
     no_copy_source = True
 
