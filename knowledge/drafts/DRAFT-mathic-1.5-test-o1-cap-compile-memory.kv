@@ -1,0 +1,96 @@
+# ═══ Draft knowledge entry — 受限 worker 上「模板 + gtest 头」测试可执行文件编译峰值内存超限（/bin/sh: Out of memory）⇒ 仅封顶非交付测试目标编译优化 -O1 ═══
+# Timestamp: 2026-09-28
+# Software: mathic 1.5
+# Gate: G2 (conan create) / W3 (本地 CI)
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-mathic-1.5-test-o1-cap-compile-memory
+trigger_tool:           clang|cmake|ctest|conan
+phase:                  compilation|testing
+error_signature:        /bin/sh: Out of memory|Signal 9|SIGKILL|clang: error: unable to
+                         execute command|gtest.*compilation|No space left on device
+severity:               2
+category:               build-system, cmake, testing, portability
+match_keywords:         Out of memory, /bin/sh, SIGKILL, signal 9, peak memory,
+                         -j1, serial build, target_compile_options, -O1, -O3,
+                         Release, test executable, gtest, gtest_discover_tests,
+                         template, shared worker, constrained worker, memory cap,
+                         compile optimization, non-shipped target
+title:                  受限 worker 上测试可执行文件（模板 + gtest 头）编译峰值内存超限；
+                        仅把非交付测试目标编译优化封顶 -O1，交付库保持 Release
+
+root_cause: >
+  (a) 上游测试目标 mathic-unit-tests 由 src/CMakeLists.txt 用 add_executable 定义，
+  gtest_discover_tests 展开，编译单元为模板密集的 4 个 TU + gtest 头；在共享受限
+  worker 上以 Release(-O3) 编译时单进程 clang 峰值内存超限，报 /bin/sh: Out of
+  memory（有时表现为 Signal 9 / SIGKILL，stdout/stderr 均空）。(b) 串行 -j1 只能
+  压住「多进程并发」的峰值，压不住单进程编译一个 TU 的峰值。(c) 交付的
+  libmathic.a 与测试可执行文件是两个不同目标，优化等级彼此独立，可分离设置。
+affected_scope: >
+  gtest_discover_tests / 测试框架头密集、模板密集的测试可执行文件目标，
+  在内存受限（共享 / 容器限额）OHOS worker 上用 clang/Release 编译时峰值内存
+  超限的配方。跨库可复用（baloo/6.28.0 的 -j1、E2168 的迭代降级同属「降峰值压力」
+  家族，本条是「仅封顶非交付目标优化等级」的具体对策）。
+verification_cmd: >
+  # 复现（受限 worker）：默认 Release 编译测试目标报内存超限
+  conan create . -pr:h=ohos-aarch64 --build=missing
+  # 对策：仅测试目标追加 -O1（后出现的 -O1 覆盖 Release -O3）
+  target_compile_options(mathic-unit-tests PRIVATE -O1)
+  # 复验：ctest 全量实跑，交付库仍为 Release
+  ctest --output-on-failure   # 14/14 Passed（mathic 1.5 实测）
+  readelf -p .comment lib/libmathic.a | grep -i release   # 交付物优化等级不变
+rec_priority:           1
+rec_approach:           cap-non-shipped-test-target-compile-optimization
+rec_description: >
+  三步：(a) 串行构建 cmake.build(build_tool_args=["-j1"]) 封顶多进程峰值；
+  (b) patch 用 target_compile_options(<测试目标> PRIVATE -O1) 只把非交付测试
+  可执行文件的编译优化封顶，后出现的 -O1 覆盖 Release -O3；(c) 交付的静态库
+  目标保持 Release 不动。测试源码与断言零改动，不引入平台宏，不伪造测试结果；
+  必须仍以 ctest 全量实跑（含 -N 对账）为准判定通过。
+rec_command: >
+  # src/CMakeLists.txt 末尾（mathic 1.5 patch 0003 实测）
+  target_compile_options(mathic-unit-tests PRIVATE -O1)
+  # conanfile.py build()
+  cmake.build(build_tool_args=["-j1"])
+  # 测试判定：ctest -N 对账 + ctest --output-on-failure 全量解析，不只看退出码
+rec_auto_fix:           false
+rec_impl:               conan-patch-recipe
+
+fallback_priority:      2
+fallback_approach:      timeout-upgrade
+fallback_description: >
+  若 -O1 封顶仍不足以压低内存（极端模板用例），先核对是否为构建超时预算问题而非
+  内存问题：ohc-run.py timeout set <name> <ver> <3600-57600>。内存仍有硬天花板时，
+  才考虑把测试移出 build() 或分阶段执行，并如实记录原因。
+fallback_command:       python3 scripts/ohc-run.py timeout set mathic 1.5 7200
+fallback_auto_fix:      false
+fallback_impl:          build-timeout-config
+
+forbid_1_pattern:       -O0|#pragma GCC optimize|__attribute__\(\(optimize
+forbid_1_reason:        直接降为 -O0 或源码级优化注解会改变被测代码行为面（-O1 已足够
+                        压内存，且保持与 Release 语义同族）。
+forbid_1_consequence:   测试与交付库语义偏差，掩盖真实回归。
+forbid_2_pattern:       ifdef __OHOS__.*(test|O1)|#ifdef.*__OHOS__
+forbid_2_reason:        平台宏守卫默认禁止（R8）；内存封顶是资源工程化对策，不需平台宏。
+forbid_2_consequence:   patch 引入平台宏被 PF5 拦截，且污染上游源码。
+forbid_3_pattern:       ctest.*returncode\s*==\s*0\s*$|self\.run\("ctest[^"]*"\)\s*$
+forbid_3_reason:        ctest 空套件 "No tests were found!!!" 退出码 0；只判退出码仍假绿。
+forbid_3_consequence:   零执行却记为通过（与 memtailor-1.4 草稿同根因）。
+
+principles:             P005
+similar_to:             [DRAFT-memtailor-1.4-subdir-ctest-false-pass-install-static-and-conan-gtest-targets, DRAFT-11327-ohos-cannot-fork-heavy-bootstrap-intermittent]
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-mathic-1.5-test-o1-cap-compile-memory.md
+last_updated:           2026-09-28
+source_event:           archives/m/mathic/1.5
+
+authors:                pc4-31
+source_pr:
+source_commit:
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-09-28
