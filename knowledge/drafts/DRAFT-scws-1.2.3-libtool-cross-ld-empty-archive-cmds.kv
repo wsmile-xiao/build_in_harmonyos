@@ -1,0 +1,92 @@
+#====================================================================
+# DRAFT-scws-1.2.3-libtool-cross-ld-empty-archive-cmds - macOS 交叉验证时 libtool 探测到宿主 /usr/bin/ld 导致 archive_cmds 为空、.so 静默缺失
+#====================================================================
+
+id:                     DRAFT-scws-1.2.3-libtool-cross-ld-empty-archive-cmds
+status:                 pending-editor-review
+title:                  "macOS 本地交叉验证 autotools+libtool 项目：LT_PATH_LD 经编译器驱动探测到宿主 /usr/bin/ld，with_gnu_ld=no 导致 archive_cmds 为空，libtool 只建 .so 符号链接而不生成实体，链接可执行文件时才报 no such file"
+
+severity:               2
+category:               autotools|libtool|cross-compile|ohos-local
+build_system:           autotools
+phase:                  build
+match_keywords:         libtool, archive_cmds, with_gnu_ld, LT_PATH_LD, /usr/bin/ld, ld.lld, llvm-ar, ohos-local, cross compile, .libs/lib*.so, no such file or directory, 只建符号链接, version-info, conan create
+error_signature:        "no such file or directory: '\\.\\./.*\\.libs/.*\\.so'|checking for ld used by .*clang.* /usr/bin/ld"
+error_signature_note:   >
+  最终报错出现在链接 CLI/测试程序时（clang: error: no such file or directory: '../libxxx/.libs/libxxx.so'），
+  而真正的根因在 configure 阶段（checking for ld used by ...clang... /usr/bin/ld）。
+  两个特征建议结合使用；单独看最终报错容易误判为 VPATH/路径问题。
+
+root_cause:             >
+  macOS 本机用 ohos-local profile 交叉验证（-pr:h=ohos-local -pr:b=ohos-local，conan buildenv 已把
+  ohos-sdk llvm/bin 放上 PATH）时，源码包预生成 configure 内嵌的 libtool 宏 LT_PATH_LD 通过
+  `$CC -print-prog-name=ld` 类机制探测链接器；OHOS 交叉 wrapper 未覆盖该探测，返回 macOS 宿主
+  /usr/bin/ld。/usr/bin/ld 不报 GNU 兼容信息 → with_gnu_ld=no → libtool.m4 的 linux* 分支无法生成
+  GNU 式 archive_cmds（生成脚本中 archive_cmds=""）。此后 libtool --mode=link ... -version-info
+  静默跳过实际 -shared 链接，只创建 .libs/lib*.so -> lib*.so.x.y.z 符号链接（make 输出无错误），
+  直到子目录链接可执行文件时才以 "no such file or directory: '../lib/.libs/lib.so'" 失败。
+affected_scope:         >
+  在 macOS 开发机上用 ohos-local（或任何异构 build profile）交叉构建、且使用源码包自带
+  预生成 configure + libtool（ltmain.sh）构建共享库的 autotools 项目；scws/1.2.3 实测受影响。
+  不适用于：CI OHOS worker 原生构建（worker 上 ld 解析正确，同仓 libopendbx/1.4.6 已验证产出 .so）；
+  CMake/Meson 项目；纯静态库配方（--disable-shared 时 archive_cmds 不参与）。
+verification_cmd:       >
+  修复前证据：生成 libtool 中 `grep '^archive_cmds' libtool` 为空字符串，config 日志含
+  "checking for ld used by ...clang... /usr/bin/ld"，make 日志中 libtool link 步骤只有 ln -s 无 -shared，
+  cli 链接报 clang: error: no such file or directory: '../libscws/.libs/libscws.so'。
+  修复后证据：configure 参数加 LD=ld.lld 后 `grep '^archive_cmds' libtool` =
+  "$CC -shared $pic_flag $libobjs $deplibs $compiler_flags $wl-soname $wl$soname -o $lib"，
+  .libs/libscws.so.1.1.0 实体生成（file: ELF 64-bit LSB shared object, ARM aarch64），
+  conan create 全绿（scws/1.2.3 W3 本地 CI 100% pass）。
+
+rec_priority:           1
+rec_approach:           pin-ld-lld-in-cross-configure-args
+rec_description:        >
+  在配方 generate() 的 OHOS 交叉分支（settings_build 非 OHOS 或 user.build:flex_bison_native=true
+  的本机模拟）向 configure_args 追加 LD=ld.lld（ld.lld --version 输出 "compatible with GNU linkers"，
+  命中 libtool 的 GNU 探测，生成正确 archive_cmds）；同时固定 AR=llvm-ar、RANLIB=llvm-ranlib 防止
+  静态归档误用宿主 /usr/bin/ar。CI 原生构建分支不要覆盖 LD，由 worker 环境自行探测。
+rec_command:            >
+  tc.configure_args.extend(["LD=ld.lld", "AR=llvm-ar", "RANLIB=llvm-ranlib"])
+  # 前提：ohos-local profile 的 [buildenv] 已把 ohos-sdk llvm/bin 加入 PATH（ld.lld/llvm-ar 可解析）
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      toolchain-env-ld
+fallback_description:   >
+  若配方不便改 configure_args，可在 generate() 用 tc.environment().define("LD", "ld.lld") 注入；
+  效果相同但不如 configure_args 显式（不出现在 configure RUN 日志行里，审计可读性略差）。
+fallback_command:       env = tc.environment(); env.define("LD", "ld.lld")
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       LD=/usr/bin/ld|ld\.old|真实链接器.*宿主
+forbid_1_reason:        把 macOS 宿主 ld 当作 OHOS 目标链接器探测结果会让 libtool 生成空 archive_cmds。
+forbid_1_consequence:   .so 实体静默缺失，直到链接可执行文件才报错，根因定位成本高。
+
+forbid_2_pattern:       只补 ln -s.*\.so|手动 cp.*\.so\..*\s.*\.libs
+forbid_2_reason:        手动补符号链接或复制产物绕过的是症状；archive_cmds 为空时 .so 实体从未编译链接。
+forbid_2_consequence:   产物不完整/不可复现，W3 L5 基线对比与消费者链接仍会失败。
+
+principles:             []
+causes:                 []
+caused_by:              []
+similar_to:             [E072, E122, E268]
+conflicts_with:         []
+prerequisite_of:        []
+
+difference_note:        >
+  与既有 E072/E122/E268（config.guess/config.sub 不识别 ohos 三元组，configure 响亮失败）不同：
+  本条发生在三元组已被正确识别之后，是 libtool 链接器探测阶段的静默失败（configure/make 前半程全绿，
+  只有符号链接无实体），错误特征、根因与修复手段均不重叠。
+
+doc_file:               knowledge/drafts/DRAFT-scws-1.2.3-libtool-cross-ld-empty-archive-cmds.md
+last_updated:           2026-09-27
+source_event:           scws/1.2.3 macOS ohos-local 交叉验证：libtool 空 archive_cmds → LD=ld.lld 修复后 W3 全绿
+authors:                codex
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
