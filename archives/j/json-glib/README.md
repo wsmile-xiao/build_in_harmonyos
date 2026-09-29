@@ -4,6 +4,7 @@ JSON library for GLib/GObject based applications. Provides parsing, generation, 
 
 ## 已编译版本
 
+- 1.10.8 (本机 OHOS 交叉构建通过；等待 HarmonyOS PC 真机验证)
 - 1.10.6 (2026-08-06)
 
 ## 依赖
