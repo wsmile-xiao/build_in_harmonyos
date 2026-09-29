@@ -1,0 +1,149 @@
+# ═══ Draft knowledge entry — 有 python3 解释器 ≠ 有 libpython（embed）；上游把两者混在一个无条件块里，配置期直接失败 ═══
+# Timestamp: 2026-09-20
+# Software: libratbag 0.18 (游戏鼠标配置栈: libratbag / liblur / ratbagd)
+# Gate: L0 (meson configure) / 构建可行性判定
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-libratbag-0.18-python3-interpreter-present-but-libpython-embed-absent
+trigger_tool:           meson|conan
+phase:                  configure
+error_signature:        find_program\('swig'\).*not found|swig\s*not found|
+                         python-.*-embed.*not found|Python\.h.*No such file|
+                         Run-time dependency python.*found: NO|run-time dependency python-\d+-\d+-embed
+
+severity:               2
+category:               build, meson, conan, portability, python
+match_keywords:         swig, libpython, python3-embed, py3.dependency(embed:true), pymod.find_installation,
+                         find_program, meson option, python-bindings, disable-swig, OHOS, HarmonyOS,
+                         interpreter vs development library, cross compile, conan recipe
+
+title:                  「机器上有 python3」与「机器上有 libpython 开发库」是两件独立的事 ——
+                        上游把解释器查找与 embed 依赖查找写在同一个无条件块里，
+                        于是只缺后者也会让整个配置期失败
+
+root_cause: >
+  上游 meson 项目常见的写法是把「找解释器」和「找可嵌入的 Python 库」当成一件事：
+
+      dep_python3 = dependency('', required : false)
+      pymod = import('python')
+      py3 = pymod.find_installation()                  # ← 只证明有解释器
+      if meson.version().version_compare('>= 0.53.0')
+        dep_python3 = py3.dependency(embed : true)     # ← 这里才需要 libpython
+      endif
+      ...
+      if not dep_python3.found()
+        dep_python3 = dependency('python-@0@@1@'.format(py_version, embed), required : false)
+        if not dep_python3.found()
+          dep_python3 = dependency('python3@0@'.format(embed))   # ← required=true，直接失败
+        endif
+      endif
+
+  这两步探测的对象完全不同：
+    * find_installation() 探测的是 **解释器可执行文件**（python3 在 PATH 里）；
+    * py3.dependency(embed : true) / dependency('python3-embed') 探测的是
+      **可嵌入开发库** —— pkg-config 的 python-3.x-embed.pc（或 python3-embed.pc）
+      以及 Python.h / libpython3.x.so。
+  一个发行版/CI 镜像完全可以「装了 python3 但没装 python3-dev / libpython3-dev」。
+  HarmonyOS/OHOS 的 worker 就是这种形态：python3 存在（meson 自身、以及上游那些
+  纯 Python 测试脚本都要它），但没有 libpython 开发库、也没有 swig。
+  上游的 third 分支是 required=true 的，所以「只缺 libpython」不是降级，是
+  配置期硬失败。
+  同一段代码里还有第二个无条件依赖：swig（find_program('swig')），它只服务于
+  可选的绑定目标，却挡在所有构建路径前面。
+
+affected_scope: >
+  一切「解释器查找与 libpython/embed 依赖查找写在同一无条件块、且最后一步是
+  required=true」的 meson 工程（python 绑定的库尤为常见），在只装解释器、
+  没装 python3-dev/libpython3-dev 的构建机上。判据是源码里同时出现
+  pymod.find_installation() 与 py3.dependency(embed : true)（或
+  dependency('python3-embed')/dependency('python-3.x-embed')），且两者之间没有
+  任何 get_option() 守卫。
+  关键推论：**「仓库里其它 meson 包能构建成功」不能反证 libpython 存在** ——
+  其它包可能只用 find_installation()（如 glib 用解释器跑 gdbus-codegen、
+  genmarshal），它们的成功只证明解释器在，不证明 embed 开发库在。用「同仓库
+  有 meson 包构建成功」来推断「本包也能过」，正是本条目最容易踩的推断错误。
+  swig 同理：find_program('swig') 失败与 python 无关，是独立的第二个坑。
+
+verification_cmd: >
+  # 判据一：解释器有没有（这一步几乎总是有）
+  command -v python3 ; python3 -c 'import sys; print(sys.version)'
+  # 判据二：embed 开发库有没有（这才是上游真正要的）—— 三者全空即没有
+  pkg-config --exists python-3.11-embed && echo has-embed-pc || echo no-embed-pc
+  pkg-config --exists python3-embed     && echo has-embed-pc || echo no-embed-pc
+  command -v python3-config ; python3-config --includes 2>/dev/null
+  ls /usr/include/python3*/Python.h 2>/dev/null   # 空 = 没有
+  # 判据三：swig 有没有（与 python 无关的第二个坑）
+  command -v swig
+  # 判据四：上游到底把两者绑在一起没有 —— 直接在源码里看有没有选项守卫
+  grep -n "find_installation\|dependency(embed\|python3-embed\|find_program('swig')" meson.build
+
+rec_priority:           1
+rec_approach:           add-a-default-true-option-that-gates-only-the-embed-and-swig-lookups
+rec_description: >
+  补丁新增一个默认 true 的布尔选项（本包叫 option('python-bindings')，声明在
+  meson_options.txt 里），把 **libpython 查找** 与 **swig 块**（find_program('swig')
+  到生成绑定目标的 custom_target）一起包进 `if enable_python_bindings` /
+  `endif`；配方配置时用 -Dpython-bindings=false。
+  三条必须同时做到的细节：
+    (1) **默认值保持 true** —— 非 OHOS 平台的行为逐字节不变，补丁是纯增量的；
+    (2) **find_installation() 保持无条件** —— meson 自身与上游那些纯 Python 的
+        测试脚本仍然需要解释器；把它一起关掉会把「缺 libpython」升级成
+        「连解释器都不找」，反而把可构建的平台也弄坏；
+    (3) 关掉的必须是 **整块**（包括 find_program('swig') 与它的 custom_target），
+        只关 libpython 会让配置过了、生成期再炸。
+  先例：仓库内 graphviz 的 --disable-swig 是同一模式（把可选的绑定排除在默认
+  构建之外，而不是去装 swig）。
+rec_command:            >
+  meson setup build -Dpython-bindings=false     # 期望：python/swig 段整块跳过
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      provide-a-stub-python3-embed-pc
+fallback_description:   >
+  不改上游，只在 generators_folder 里塞一个假的 python3-embed.pc 让 configure
+  过关。不可取：这只骗过了「找得到」，接下来 swig 生成的绑定要真的编 C 代码并
+  链接 libpython3.x.so，链接期照样失败，而且失败点离原因更远；如果假 .pc 里带了
+  -lpython3.x，就是把「配置失败」换成「链接失败」，没有变好。仅在只想单独验证
+  meson 配置阶段时作为本机调试手段，CI 不采用。
+fallback_command:       （不推荐）
+fallback_auto_fix:      false
+fallback_impl:          none
+
+forbid_1_pattern:       rm .*meson.build.*swig|sed -i.*find_program\('swig'\).*|删掉上游那几行
+forbid_1_reason:        直接删除上游代码而不是加守卫，等于把「这个平台不支持该特性」
+                        写成了「这个特性不存在」，非 OHOS 平台也会一起失去绑定；
+                        将来上游升级时补丁必然冲突。
+forbid_1_consequence:   适配不可上游化（P005），补丁无谓地变成长期维护负担。
+forbid_2_pattern:       pkg-config.*python3-embed.*fabricate|echo.*python3-embed.pc.*>.*/usr
+forbid_2_reason:        伪造 pkg-config 元数据让 configure 通过，是把失败推迟到
+                        链接期，不解决问题本身。
+forbid_2_consequence:   失败点远离原因，排查成本上升；且掩盖了真实的能力缺失。
+forbid_3_pattern:       pip install swig|apt-get install.*python3-dev|装个 swig 就好了
+forbid_3_reason:        OHOS 上无法安装宿主发行版软件包；而且即使装了，交叉编译场景下
+                        宿主的 swig/libpython 也不能代替目标平台的（python 绑定要
+                        链接目标平台的 libpython）。
+forbid_3_consequence:   本机改环境通过、CI 依旧失败，适配不可复现。
+
+principles:             P005, P003
+causes:                 []
+caused_by:              []
+similar_to:             graphviz 的 --disable-swig（同模式先例：把可选绑定排除在
+                        默认构建之外）、glib 的 MesonToolchain 注入（同仓库另一个
+                        meson 包，它只依赖解释器不依赖 libpython —— 正因为它成功，
+                        才更容易让人误判「libpython 也有」）
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libratbag-0.18-python3-interpreter-present-but-libpython-embed-absent.md
+last_updated:           2026-09-20
+source_event:           archives/l/libratbag/0.18 适配（上游 swig + py3.dependency(embed:true) 无条件，OHOS 上两者皆无）
+
+authors:                2301_76770579
+source_pr:              11581
+source_commit:          cbfe5c5d1
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-20
