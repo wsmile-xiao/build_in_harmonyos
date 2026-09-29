@@ -1,0 +1,79 @@
+# test_package/MANIFEST.yml
+# Upstream and consumer test declaration for knotifyconfig/6.26.0.
+# CI script (build_and_test.sh L0e) requires this file to exist.
+# See: docs/TEST_QUALITY_SPEC.md
+
+package: knotifyconfig/6.26.0
+homepage: https://invent.kde.org/frameworks/knotifyconfig
+
+# Upstream test commands (used for ctest -N analysis)
+upstream_check_command: "ctest -N"
+
+# Upstream tests are NOT integrated in this Conan build (BUILD_TESTING=OFF).
+upstream_test_in_build: false
+upstream_test_command: ""
+
+# 上游测试用例口径（rule2 / rule4）
+#
+# 上游 N=2 → 适配后 N'=0，减少 2，原因具体如下：
+#   1) tests/CMakeLists.txt 里唯一可执行文件是 knotifytest
+#      （add_executable(knotifytest main.cpp knotifytestwindow.cpp)），
+#      声明见上游 N=2 的朴素扫描口径：tests/ 目录中
+#      add_executable(1) + ecm_mark_as_test(1)。
+#   2) 经 ecm_mark_as_test(knotifytest) 真正注册进 CTest 的只有 1 个
+#      （测试名 knotifytest），master 默认分支与 6.26.0 tag 完全一致。
+#   3) 本适配基线设 BUILD_TESTING=OFF，故实际执行 0 个：
+#      tests/ 需要 KF6ConfigWidgets / KF6Notifications / KF6WidgetsAddons /
+#      KF6XmlGui 6.26 加 Qt6Test，而 ohpcd 上这四个 KF6 包只发布了
+#      6.14.0/6.18.0，没有 6.26.0，find_package 必然失败。
+# 上游 knotifytest 是手工 GUI 演示程序（tests/main.cpp 只有
+# QApplication + show() + exec()，无 QTest 断言），其验证价值已由
+# test_package 的 KNotifyConfigWidget 读改存往返测试覆盖。
+upstream_tests:
+  - file: tests/CMakeLists.txt
+    source: knotifyconfig-6.26.0/tests/CMakeLists.txt
+    description: "上游唯一测试目标 knotifytest（add_executable + ecm_mark_as_test）。朴素扫描口径 N=2，CTest 实际注册 1。"
+    command: "ctest --test-dir <build_folder> -N"
+    condition: "BUILD_TESTING=OFF，未构建未执行；依赖 KF6ConfigWidgets/KF6Notifications/KF6WidgetsAddons/KF6XmlGui 6.26 未发布到 ohpcd"
+
+# test_package tests (consumer-side verification)
+test_package_tests:
+  - file: test_package/test_knotifyconfig.cpp
+    description: "消费者行为验证：种子 $XDG_CONFIG_HOME/knotifyconfig-consumer.notifyrc（[Event/test-event] Action=Sound|Popup / Sound=bell.ogg），依次 setApplication → selectEvent → disableAllSounds → save，读回文件断言 Action 变为 Popup、Sound 仍为 bell.ogg、同组 Name 未被破坏；changed(bool) 信号断言证明事件确实被装载与保存（覆盖 OHOS 补丁 0004 的 QLineEdit::setText/text 两条路径）。"
+    command: "conan create (test_package builds and runs test_knotifyconfig)"
+  - file: test_package/test_knotifyconfig_elf.py
+    description: "OHOS 制品验证：lib/libKF6NotifyConfig.so* 恰有一个实体文件且 .so/.so.6 符号链接齐全；实体文件为 ELF64、小端、ET_DYN、EM_AARCH64；节表含 .text 与 .codesign（package() 重签步骤产物）。仅做结构化 ELF 头/节表读取，不对二进制做文本 grep。"
+    command: "python test_knotifyconfig_elf.py <package_folder>"
+
+# 鸿蒙特有测试条数 (rule12)：20 条中直接绑定鸿蒙产物形态的 9 条
+# （test_knotifyconfig_elf.py 的 11 条里，除去与平台无关的 2 条布局检查）
+ohos_specific_tests: 9
+ohos_specific_description: >
+  test_package/test_knotifyconfig_elf.py 的 11 条制品断言中，9 条直接绑定
+  鸿蒙产物形态，构成 rule12 的鸿蒙特有测试：
+    (1) EM_AARCH64(183) —— OHOS 只接受 AArch64 产物，宿主交叉编译器残留的
+        x86-64 会在这里立刻失败（断言的是字节级 ABI，不是文件名）；
+    (2) ET_DYN(3) —— OHOS 要求共享对象/PIE 形态；
+    (3) EI_CLASS = ELFCLASS64(2)、EI_DATA = ELFDATA2LSB(1)、
+        EI_VERSION = EV_CURRENT(1)、ELF magic \x7fELF —— 64 位小端 ELF，
+        32 位或大端产物在此失败；
+    (4) 节表含 .codesign —— package() 对每一个安装的 ELF 跑
+        llvm-objcopy --remove-section .codesign + binary-sign-tool
+        -selfSign 1；CMake 在 install 时会重写 RUNPATH，令构建期签名失效，
+        未重签的库会被 OHOS 加载器以 "Permission denied" 拒绝。节表里
+        看得见 .codesign 是这一步骤真的发生了的证据；
+    (5) libKF6NotifyConfig.so.6 与 libKF6NotifyConfig.so 两条安装期符号
+        链接存在 —— 原生 OHOS 构建落在 CMake 的 Generic 平台模块
+        （os_build == os_host == OHOS 时没有 CMAKE_SYSTEM_NAME），该模块
+        没有共享库 SONAME 规则，必须由配方手工设
+        CMAKE_SHARED_LIBRARY_SONAME_{CXX,C}_FLAG 才会产出带版本号的链接，
+        OHOS 加载器正是按 SONAME 解析依赖。
+  全部断言只做结构化 ELF 头/节表读取（纯 Python struct.unpack_from），
+  不对二进制做文本 grep，也不调用 readelf/file/nm/strings —— 那些工具在
+  OHOS 上不可用或不适合从测试里驱动。
+  另 2 条（恰好一个实体 .so* 文件、节表含 .text）是平台无关的安装布局
+  检查，不计入本条。
+
+# Test assertion count (approximate, for quality assessment)
+# 行为断言 9 条 + OHOS 制品断言 11 条 = 20
+assertion_count: 20
