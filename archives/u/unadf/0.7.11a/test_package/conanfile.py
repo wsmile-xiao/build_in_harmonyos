@@ -24,10 +24,13 @@ class UnadfTestConan(ConanFile):
         ce = self.conf.get("tools.build:compiler_executables", default={},
                            check_type=dict) or {}
         cc = ce.get("c") or "clang"
-        # Conan 2 exposes the dependency's layout through cpp_info; the
-        # self.deps_cpp_info["unadf"] shorthand was removed in conan 2.x and
-        # raises AttributeError on the device.
-        pkg = self.dependencies["unadf"].cpp_info.package_folder
+        # Conan 2 exposes a dependency's package folder as an attribute of the
+        # dependency object. `self.dependencies["x"].package_folder` is what
+        # main's merged test_package recipes use (1893 of them); the
+        # `self.deps_cpp_info["x"]` mapping was removed in conan 2.x, and
+        # `.cpp_info.package_folder` is a _Component without the attribute.
+        # Device runs Conan 2.29.1.
+        pkg = self.dependencies["unadf"].package_folder
         # Link against the packaged libadf.a and the packaged headers.
         self.run(
             f"{cc} -std=gnu99 -I{pkg}/include "
