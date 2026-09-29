@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-lfortran-llvm-dylib-component-fallback
+# 制品仓 LLVM dylib 聚合包无组件导入目标 + 真机 uname=HarmonyOS 无 cmake
+# Platform 模块：LLVM 系编译器在 OHOS 上的 configure 双失效与回退
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: lfortran 0.64.0 HarmonyOS PC 适配（C 类，2026-09-27，真机验证进行中）
+#====================================================================
+
+id:                     DRAFT-lfortran-llvm-dylib-component-fallback
+trigger_tool:           cmake|llvm-config|conan
+phase:                  configure
+error_signature:        Could NOT find TARGET LLVMCore|llvm_map_components_to_libnames.*(empty|not found)|LLVMConfig.cmake.*not found|FATAL_ERROR.*(UNIX|Unix)|LFortran.*only supports (Unix|Linux)|LLVM_TARGETS_TO_BUILD.*not.*built
+severity:               2
+category:               toolchain, llvm, cmake, portability
+match_keywords:         lfortran, LLVM, libLLVM.so, LLVMConfig, llvm_map_components_to_libnames, LLVM_BUILD_LLVM_DYLIB, dylib, component target, LLVMCore, Platform/HarmonyOS, CMAKE_MODULE_PATH, uname, CMAKE_SYSTEM_NAME, UNIX, #34593, WITH_TARGET_AARCH64
+title:                  制品仓 LLVM dylib 聚合包无组件导入目标 + 真机 uname=HarmonyOS 无 cmake Platform 模块：LLVM 系编译器在 OHOS 上的 configure 双失效与回退（libLLVM.so 直链 + Platform 桩）
+prescan_pattern:        LLVM_DIR|LLVMConfig|llvm_map_components_to_libnames|Platform/HarmonyOS
+prescan_globs:          conanfile.py
+
+# Layer 2: Diagnosis
+root_cause:             子模式 A（LLVM 组件目标缺失）：制品仓 clang/22.1.8 包以 LLVM_BUILD_LLVM_DYLIB=ON 构建，交付 LLVMConfig.cmake（LLVM_TARGETS_TO_BUILD=AArch64）+ 聚合 libLLVM.so，但不导出 LLVMCore 等 per-component 导入目标。上游 lfortran 的 LLVM 链接检测用 llvm_map_components_to_libnames 求组件库列表，dylib 模式下组件目标缺失即得空 → 传统组件链接路径失效（configure 期报 Could NOT find TARGET LLVMCore 或链接期空列表）。上游已内置 #34593 workaround 分支（检测 TARGET LLVMCore 缺失 → 回退链接 libLLVM.so 聚合库），因此适配动作=①LLVM_DIR 指向包内 lib/cmake/llvm（而非 SDK /data/service/hnp 的 LLVM 15，版本/布局均不同）②WITH_LLVM=yes + WITH_TARGET_AARCH64 与包 LLVM_TARGETS_TO_BUILD=AArch64 对齐（x86/wasm 全关，请求包未构建的后端会 configure/链接失败）。子模式 B（Platform 模块缺失）：真机 uname -s=HarmonyOS，cmake Modules/Platform 无 HarmonyOS 条目 → 原生编译（不设 CMAKE_SYSTEM_NAME，CMAKE_CROSSCOMPILING=FALSE）时 UNIX 等变量未置 → 上游 `if(NOT UNIX)` 判错 FATAL。修复=CMAKE_MODULE_PATH 注入配方生成的 Platform/HarmonyOS.cmake 桩（单行 include(Platform/Linux)，置 UNIX=1 与 Linux 链接/rpath 规则），与 clang/22.1.8 真机构建同款路线。
+affected_scope:         任何「消费制品仓 LLVM 包的编译器/代码生成器落地 OHOS」的场景：①上游用 llvm_map_components_to_libnames/LLVMConfig 组件目标的工程（cling、mlton、swift 类、其他 LLVM 后端语言实现）在 dylib-only 包上组件解析失败；②任何 cmake 工程在 OHOS 真机原生编译时 uname 非 Linux 导致的 Platform/UNIX 判定失真（不仅 LLVM 系，autotools 之外所有 cmake 上游均可能踩）。同类可复用：odin（LLVM 后端自举编译器，同走制品仓 LLVM 包）、flang-ohos（工具链路线）。
+prescan_notes:          配方 build() 中 LLVM_DIR 与 WITH_TARGET_* 的组合是最强预筛信号。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           dylib-fallback+platform-stub
+rec_description:        不改上游源码，配方级两动作：①LLVM_DIR 指向依赖包 clang 的 lib/cmake/llvm；后端开关与包 LLVM_TARGETS_TO_BUILD 严格对齐（本库=AArch64，WITH_TARGET_AARCH64=yes、x86/wasm=no）；链接靠上游 #34593 回退分支（TARGET LLVMCore 缺失 → 直链 libLLVM.so），保证 LLVMConfig 版本/布局与二进制同源。②build_folder 下生成 Platform/HarmonyOS.cmake 桩（include(Platform/Linux)）挂 CMAKE_MODULE_PATH，让原生编译的 UNIX 判定成立；不设 CMAKE_SYSTEM_NAME（避免交叉编译误判与 R26 静态系统库规则误触发）。运行期 libLLVM.so 解析见 [[DRAFT-lfortran-nested-cmake-bootstrap]]。
+rec_command:            cmake -B build-ohos -S <src> -DLLVM_DIR=<clang-pkg>/lib/cmake/llvm -DWITH_LLVM=yes -DWITH_TARGET_AARCH64=yes -DWITH_TARGET_X86=no -DWITH_TARGET_WASM=no -DCMAKE_MODULE_PATH=<bdir>/_cmake_modules（Platform/HarmonyOS.cmake 桩）
+rec_auto_fix:           true
+rec_impl:               conan-recipe（无源码补丁；平台桩为配方生成文件，不进上游）
+
+fallback_priority:      2
+fallback_approach:      component-list-replacement
+fallback_description:   若上游无 #34593 回退分支（旧版本/新分支回归），配方级 patch 上游 CMakeLists：把 llvm_map_components_to_libnames(REQ_LLVM_LIBRARIES ...) 替换为 set(REQ_LLVM_LIBRARIES LLVM)（dylib 包下 LLVM 即聚合库目标）。等价语义，代价是 patch 与上游版本耦合。
+fallback_command:       patches/0001-llvm-dylib-component-list.patch（git apply --check -p1 验证）
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe + 上游 patch
+
+forbid_1_pattern:       拉 LLVM 源码树自建组件目标|换装自建 LLVM 包|把 LLVM_DIR 指向真机 SDK /data/service/hnp 的 LLVM 15（版本/布局与制品包不同）
+forbid_1_reason:        自建 LLVM 数小时级构建且与制品仓重复造轮子；SDK LLVM 15 与包内 LLVM 22 ABI/组件布局不同，混用即链接期符号错乱。
+forbid_1_consequence:   构建时间爆炸、磁盘耗尽；或 configure 通过但链接失败/运行期 ABI 崩溃（odin bad_cast 误诊同款教训）。
+
+forbid_2_pattern:       -DCMAKE_SYSTEM_NAME=Linux 硬设|Platform 桩里塞系统库/签名路径|把 UNKNOWN 平台的 UNIX 判定改上游源码
+forbid_2_reason:        CMAKE_SYSTEM_NAME=Linux 会在 OHOS 上误触发 Linux 专属分支与 R26 静态系统库规则；桩只应复刻 Linux 平台规则框架，不夹带 OHOS 无关假设。
+forbid_2_consequence:   假阳性适配：编译过但链接/签名/运行期失败，审查按「空壳/未鸿蒙化」打回。
+
+# Layer 4: Principles
+principles:             P-TOOLCHAIN-001
+
+# Relations
+causes:                 []
+caused_by:              [制品仓 clang/22.1.8 为 dylib 聚合构建无组件目标, OHOS uname 非 Linux 且 cmake 无 HarmonyOS Platform 模块]
+similar_to:             [E218, E286, DRAFT-odin-llvm-constrained-toolchain-bootstrap]
+conflicts_with:         []
+prerequisite_of:        [DRAFT-lfortran-nested-cmake-bootstrap]
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-lfortran-llvm-dylib-component-fallback.md
+last_updated:           2026-09-27
+verification_cmd:       ①核对包 LLVMConfig：grep -E 'LLVM_TARGETS_TO_BUILD|add_library\(LLVM' <clang-pkg>/lib/cmake/llvm/LLVMConfig.cmake（AArch64-only、无 LLVMCore 组件目标、有聚合 LLVM 目标）；②configure 复验：conan create 日志 grep -E 'LLVM_CONFIG|TARGET LLVMCore|LLVM_DIR'（出现上游 #34593 回退分支消息且无 FATAL）；③产物复验：llvm-nm -D <pkg>/bin/lfortran | grep -c _ZN4llvm（libLLVM.so 符号解析正常）与 ldd/NEEDED 含 libLLVM.so
+source_event:           lfortran 0.64.0 适配（run lfortran-0.64.0，2026-09-27）：clang/22.1.8 包 LLVMConfig 已核对（dylib 聚合、AArch64-only）；真机 conan create 进行中，configure 结果与产物复验待回填
+
+# Authorship and provenance
+authors:                Hawkninja21 <18964641073@163.com>
+source_pr:              0
+source_commit:          回填
+
+# Quality metrics
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.7
+metrics_last_used:      2026-09-27
+
+draft: true
+contributor_id:         Hawkninja21

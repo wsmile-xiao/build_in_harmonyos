@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-lfortran-complex32-c99-hfa-abi
+# LLVM 系编译器复数按值传递 ABI：<2 x float> 向量 vs C99 HFA
+# (d0,d1 双寄存器) 在 aarch64 Linux 上的错位与统一方案
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: lfortran 0.64.0 HarmonyOS PC 适配（C 类，2026-09-28，真机集成套件 19 败 6 类中 11 条）
+#====================================================================
+
+id:                     DRAFT-lfortran-complex32-c99-hfa-abi
+trigger_tool:           clang|llvm|lfortran|cc
+phase:                  build|run
+error_signature:        ERROR STOP FAIL|C test failed with code: 18|bindc_iso_fb|_lfortran_ctan|_lfortran_csin|float_complex_t|<2 x float>|aimag.*0.00000000
+severity:               2
+category:               abi, codegen, llvm, fortran, portability
+match_keywords:         complex32, bind(c), by value, HFA, homogeneous float aggregate, aarch64, AAPCS64, C99 float _Complex, <2 x float>, vector ABI, d0 d1, ISO_C_BINDING, _lcompilers, float_complex_t, 按值传递复数, 实部虚部错位
+title:                  LLVM 系编译器复数按值传递 ABI 统一：非 Windows 平台 complex32 用 C99 float _Complex HFA（返回 {float,float}/实参 [2 x float]），禁用 <2 x float> 向量声明
+prescan_pattern:        FIXED_VECTOR_TYPE.*getFloatTy.*2|_lfortran_[cz].*complex|bind\(c\).*complex|float_complex_t
+prescan_globs:          *.cpp,*.h,*.c,*.f90
+
+# Layer 2: Diagnosis
+root_cause:             lfortran LLVM 后端在非 Windows/非 macOS_ARM 平台把 complex32(kind 4) 的函数实参/返回类型声明为 <2 x float> 固定向量（llvm_utils.cpp 实参/返回类型两处 + asr_to_llvm.cpp 函数体返回/调用点实参两处 + abi_to_internal 一处，共 5 处三路分支 Windows i64 / macOS_ARM struct / else vector）。而 aarch64 Linux 的 C99 float _Complex 按 AAPCS64 HFA（Homogeneous Float Aggregate）规则实参走 [2 x float]（d0,d1 双寄存器）、返回走 {float,float}——真机 clang 实测 C 侧签名 `define {float,float} @f25_conj([2 x float] %0)`。向量只占单个 d 寄存器，与 HFA 双寄存器错位 → 调用 C 运行时复数数学包装（_lfortran_ctan 等 30 个 C99 complex 包装）与 bind(c) 按值复数子程序时实部幸存（d0 低半）、虚部读到垃圾/被丢弃（d1 从未写入）。真机实录：tan((1.5,0.1))=(14.1014204,0.0) 且随 -O0/-O3 非确定（0.0/12.92/14.10）；bindc_iso_fb_05 f25_conj 断言 C test failed with code 18。x86-64 上向量与 C99 complex 恰好同落 xmm0 侥幸掩盖，aarch64 必然暴露。
+affected_scope:         任何「LLVM 系语言实现用固定向量声明 C 兼容复数类型」的 aarch64 Linux 移植：Fortran 复数 bind(c) 互操作、复数数学运行时包装（clang 系前端的 complex float 内建降级）、FFI 按值复数参数。同类可复用：flang（Fortran 复数 bind(c)）、lpython、基于 LLVM 的 C 兼容前端。判别标准=目标平台 C 编译器对 float _Complex 的函数签名（clang -S -emit-llvm 实参是否 [2 x float]）。
+prescan_notes:          代码树里 FIXED_VECTOR_TYPE::get(FloatTy,2) 出现在函数签名/ABI 分支（而非 SIMD 运算）是最强预筛信号；grep '_lfortran_c'（complex32 运行时包装前缀）+ bindc 失败测试名联合确认。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           c99-hfa-abi-unification
+rec_description:        把 kind-4 复数按值传递 ABI 分支的 else（非 Windows）统一为 C99 HFA：返回 getComplexType(4)= {float,float}、实参 [2 x float]、abi_to_internal 直通。与上游 macOS_ARM 既有分支逐字一致（Apple 打包聚合体故上游已用 struct），Windows i64 路径与 kind-8（{double,double} 结构体）路径不动。x86-64 SysV 对 {float,float}/[2 x float]/<2 x float> 三者 SSE 分类相同（均 xmm0），Linux x86 行为零变化。修复后与目标平台 C 编译器签名逐类型对齐，无需改 C 侧运行时源码。
+rec_command:            无运行时命令；验证=clang -S -emit-llvm 对比 C 侧 float _Complex 签名 + lfortran --show-llvm 对比声明类型
+rec_auto_fix:           true
+rec_impl:               conan-recipe 上游源码补丁（patches/0006-*.patch，5 处分支点）
+
+fallback_priority:      2
+fallback_approach:      runtime-vector-rewrite
+fallback_description:   不动 codegen，把 C 运行时复数包装（lfortran_intrinsics.c 约 30 个 float_complex_t 包装）改写为 packed 向量（__attribute__((vector_size(8)))）接收/返回并内部解包调 libm。缺点：只修运行时包装一侧，bind(c) 按值复数互操作仍错位；且把 C 源码耦合到 LLVM 向量布局，跨编译器脆弱。
+fallback_command:       __attribute__((vector_size(8))) 重写 lfortran_intrinsics.c 复数包装
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe 上游源码补丁（C 侧）
+
+forbid_1_pattern:       用 -fabi-compat 类编译器旗标或 Clang 侧改 complex ABI 绕过|把 bindc 复数测试整个排除而不修 ABI|按 -O 级选择性改分支
+forbid_1_reason:        ABI 由平台规范定（AAPCS64/SysV），编译器旗标不可移植且治标；排除=掩盖互操作缺陷（C 类任务扣分）；按优化级改=不确定性仍在。
+forbid_1_consequence:   bind(c) 复数互操作在消费者程序里随机错误（虚部丢失/垃圾），审查按「假绿」打回。
+
+forbid_2_pattern:       只改 5 处中的部分（如只改调用点不改签名）|把 Windows i64 路径一起改成 struct
+forbid_2_reason:        签名与调用点不一致 → LLVM IR 类型错配构建即炸（ret <2 x float> in struct-returning function）；Windows i64 是其平台既有正确 ABI。
+forbid_2_consequence:   编译期 IR 校验错误或 Windows 回归，补丁被拒。
+
+# Layer 4: Principles
+principles:             P-TOOLCHAIN-001
+
+# Relations
+causes:                 []
+caused_by:              [上游 codegen 平台分支把「非 Windows 非 macOS_ARM」一律当 x86 处理, aarch64 Linux 的 C99 complex ABI 是 HFA 双寄存器而非单向量寄存器]
+similar_to:             [DRAFT-lfortran-runtime-ohos-adaptation]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-lfortran-complex32-c99-hfa-abi.md
+last_updated:           2026-09-28
+verification_cmd:       ①签名对齐：clang -S -emit-llvm 编译 float _Complex 函数（实参 [2 x float]/返回 {float,float}）与 lfortran --show-llvm 声明逐类型比对；②行为复验：8 条复数数学内建（intrinsics_04s/18c/49/212/264/265/266/295）+ bindc_iso_fb_01/05 + modules_15 真机 RUN-RC=0；③回归防护：x86 构建 CI 结果不变（SSE 分类等价）
+source_event:           lfortran 0.64.0 适配（2026-09-28）：补丁 0006 已生成并经真机验证——修复 11 条复数相关失败全绿；集成套件全量复跑（llvm 3800 注册）排除 5 条文档化（intrinsics_291 musl tgamma / allocatable_cchar_01 strlen 恢复 / string_86+allocate_57+intrinsics_416 为 aarch64+LLVM22 新表现）
+
+# Authorship and provenance
+authors:                Hawkninja21 <18964641073@163.com>
+source_pr:              0
+source_commit:          回填
+
+# Quality metrics
+metrics_success_count:  11
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-28
+
+draft: true
+contributor_id:         Hawkninja21
