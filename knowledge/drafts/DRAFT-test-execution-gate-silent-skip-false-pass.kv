@@ -1,0 +1,105 @@
+#====================================================================
+# DRAFT-test-execution-gate-silent-skip-false-pass — 上游测试被“静默跳过”
+#   造成的假 PASS：空 CTest 套件退出码 0（注册缺失）与 CROSS=1 守卫跳过
+#   （平台探测误判）。判定“通过”前必须先证明测试真的执行了。
+#   完整叙事、两类成因与边界见同目录 .md
+#====================================================================
+
+id:                     DRAFT-test-execution-gate-silent-skip-false-pass
+trigger_tool:           ctest|cmake|make|c_check|conan
+phase:                  testing
+error_signature:        No tests were found!+|100% tests passed, 0 tests failed out of 0|test cases: 0|assertions: 0|CROSS=1
+severity:               3
+category:               testing, build-system, detection, autotools, cmake
+match_keywords:         ctest, No tests were found, empty suite, add_test, enable_testing, doctest, cross_building, CROSS=1, c_check, ifneq, 静默跳过, 假 PASS, 测试执行门, run_test, lapack-test, 用例计数
+
+title:                  上游测试被静默跳过导致的假 PASS：空 CTest 套件退出码 0（注册缺失）与 CROSS=1 守卫跳过（平台探测误判）——判定通过前必须先证明测试真的执行了
+
+root_cause:             判定口径错误是根，两类机制是表：把“构建或测试命令的退出码为 0”“粗扫输出没看到 FAIL”当作“测试通过”的证据，
+                        而上游测试的执行本身可能根本没有发生，且两种已实测成因都不产生错误输出：
+                        ① 注册缺失（CMake/CTest）：上游用独立测试可执行文件（如 doctest 编译出的 unit_test）但 CMakeLists 从不调用
+                        enable_testing()/add_test()，官方 CI 是直接运行该二进制而非 ctest。配方若改用 cmake.test()/ctest 驱动，
+                        ctest 对空套件打印 No tests were found!!! 且退出码为 0——“无测试可跑”与“测试全部通过”在退出码上不可区分，
+                        用例会被记成“已通过”却从未执行。
+                        ② 平台守卫跳过（autotools/GotoBLAS 谱系）：GotoBLAS 系 Makefile 用 ifneq ($(CROSS),1) 守卫就地测试执行段
+                        （Makefile:410 守卫 lapack-test 的 INSTALL 自检与 lapack_testing.py 执行；test/Makefile 与 ctest/Makefile 的就地执行门同理），
+                        而 CROSS 由 c_check 的平台探测写入 Makefile.conf：c_check:4 用 uname -s 得到 HarmonyOS，编译器探针却按
+                        *OS_LINUX* 判定 os=Linux，两者不一致即 cross=1（c_check:409/:492）。于是 OHOS 设备上的原生构建被误判成交叉编译，
+                        make test / ctest / lapack-test 正常运行、正常退出，日志里没有任何 run_test / PASS 块——整批测试静默未执行。
+                        两类成因的共同点：退出码是“执行门”的结果，不是“测试结论”的结果；必须先独立证明测试真的跑了，再谈通过率。
+affected_scope:         所有把退出码或粗扫输出当作测试证据的配方、CI 包装器与交付记录，覆盖 CMake/CTest、autotools/Makefile 两类构建系统。
+                        已实测：Box2D 2.4.1（doctest 未注册 CTest，ctest 空套件退出码 0；直接运行 unit_test 才是 5 用例 / 36 断言）与
+                        lapack-netlib/lapacke 0.3.30（设备原生构建下 CROSS=1，5,195,617 项 lapack-test 判定加 blat/ctest 全部未执行）。
+verification_cmd:       # 1) 先量化“到底有没有用例”（通用第一步）
+                        ctest -N                      # 期望 Total Tests >= 1；No tests were found!!! 说明零注册
+                        ctest ; echo "rc=$?"          # 空套件 rc=0 —— rc 为 0 不等于测试通过
+                        # 2) make 系：确认执行行是否真的展开
+                        grep ^CROSS <build>/Makefile.conf                          # =1 说明平台探测把原生构建判成交叉
+                        make -n lapack-test CROSS=1 | grep -c lapack_testing.py    # =0：执行段被静默跳过
+                        make -n lapack-test CROSS=0 | grep -c lapack_testing.py    # =1：执行段恢复展开
+                        # 3) 未注册 CTest 的上游：直接执行测试二进制作为对照
+                        ./bin/unit_test               # 期望 doctest 输出 test cases / assertions 的实际数字
+
+rec_priority:           1
+rec_approach:           prove-execution-then-fix-the-gate
+rec_description:        三步固定动作，顺序不可颠倒：
+                        (1) 证伪——把“测试真的执行了”当成独立断言：CTest 用 ctest -N/Total Tests 计数（为 0 即未执行），
+                            make 系用 make -n <test-target> 确认执行行展开；把真实执行的用例数/断言数写进交付记录。
+                        (2) 按成因修复执行门——上游未注册 CTest 时，配方在 build() 里直接执行上游测试二进制
+                            （cross_building() 守卫、多配置生成器补 build_type 子目录、Windows 补 .exe），不要用 cmake.test()/ctest 充当证据；
+                            被平台守卫跳过时，只在“设备原生构建（构建机=目标机）”前提下用命令行覆盖测试执行判定变量
+                            （make <target> CROSS=0），并保留 make -n 的前后对照作为证据。
+                        (3) 统一交付口径——上游用例数、实际执行数、通过数三个数字必须同时出现；禁止只报“构建成功/退出码 0”。
+rec_command:            # (a) 未注册 CTest 的上游：配方 build() 中直接执行测试二进制
+                        #     if not cross_building(self):
+                        #         executable = "unit_test.exe" if self.settings.os == "Windows" else "unit_test"
+                        #         configuration = str(self.settings.build_type) if cmake.is_multi_configuration else ""
+                        #         self.run(f'"{os.path.join(self.build_folder, "bin", configuration, executable)}"')
+                        # (b) 被平台守卫跳过：仅设备原生构建可在测试步骤覆盖判定变量
+                        #     make -j1 -C test all CROSS=0 ; make lapack-test CROSS=0
+                        # (c) 对照留证
+                        #     make -n lapack-test CROSS=1 | grep -c lapack_testing.py   # 0
+                        #     make -n lapack-test CROSS=0 | grep -c lapack_testing.py   # 1
+rec_auto_fix:           false
+rec_impl:               conan-recipe-build-test
+
+fallback_priority:      2
+fallback_approach:      record-unverified-and-defer-to-device
+fallback_description:   若测试在主机侧无法真实执行（真交叉构建、目标可执行依赖 OHOS 系统库），如实记录“目标执行未验证”，
+                        把测试交给设备侧或官方 CI 的 test_package；不得把“没跑”写成“通过”，也不得为了让数字好看而关闭上游测试开关。
+                        诚实权衡：交付记录里的通过率会暂时空缺，但证据链不掺假，回归缺陷不会被掩盖。
+fallback_command:       on device: zsh ci/conan/build_and_test.sh archives/<letter>/<name>/<version>
+fallback_auto_fix:      false
+fallback_impl:          device-native-runner
+
+forbid_1_pattern:       cmake\.test\(self\)|self\.run\(["']ctest|["']ctest["'].*--output-on-failure
+forbid_1_reason:        在上游没有 add_test() 注册时用 ctest/cmake.test() 充当测试证据：空套件打印 No tests were found!!! 且退出码为 0，会把“从未执行”记录成“全部通过”。
+forbid_1_consequence:   上游用例 0 执行却被计入通过率，回归缺陷无法被发现，评测数据被污染。
+forbid_2_pattern:       BUILD_UNIT_TESTS=OFF|BUILD_TESTING=OFF|ENABLE_TESTS=OFF|--disable-tests|--without-tests
+forbid_2_reason:        用关闭测试开关来“回避”测试执行问题，等于删除质量证据而不是解决执行机制。
+forbid_2_consequence:   适配后测试对比出现负增长（例如 -5），无法证明库在 HarmonyOS 上行为正确，积分赛的测试用例对比表不成立。
+forbid_3_pattern:       sed.*Makefile\.conf|echo .*CROSS=1.*>>.*Makefile\.conf|CROSS=0.*真交叉|修改.*c_check
+forbid_3_reason:        篡改上游生成的 Makefile.conf 或 c_check 探测脚本会掩盖机理并污染其他目标架构的构建；在真交叉构建（构建机不等于目标机）中盲目 CROSS=0，
+                        目标可执行本就不能在构建机运行，同样得到假结果。
+forbid_3_consequence:   上游平台探测语义被破坏、其他架构连带受损；或测试被标记为已执行而实际不可执行。
+
+principles:             P-BUILD-001, P-AUTOTOOLS-002, P-PATCH-003
+causes:                 []
+caused_by:              []
+similar_to:             [E363, E409, E064]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-test-execution-gate-silent-skip-false-pass.md
+last_updated:           2026-09-30
+source_event:           归纳两条已实测并已入库的草稿：Box2D 2.4.1（上游 doctest 未注册 CTest，PR #8849 适配）与 lapack-netlib/lapacke 0.3.30
+                        （设备原生构建下 CROSS=1 静默跳过，【高难度挑战】feat/liblapacke 适配）。本条把两者的共同机理抽象为“测试执行门”类条目，
+                        并按“先证伪、再修门、后报数”的统一处置流程表述。
+authors:                Quas
+source_pr:              13913 (https://gitcode.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/13913)
+source_commit:          57ff7e59d7（交付草稿时的 PR head；草稿随本 PR 的 knowledge/drafts 提交一并交付）
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:      2026-09-30
