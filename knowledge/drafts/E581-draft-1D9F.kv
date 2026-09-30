@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E581.kv，填写各字段
+# 对应的人类文档: doc/E581.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E581
+trigger_tool: cmake|ninja|clang|llvm-tblgen
+phase: configuration|compilation
+error_signature: llvm-tblgen.*(cannot execute|not found|Exec format error)|tablegen.*cross|LLVM.*host tool.*(cannot|failed)|交叉构建 LLVM 时构建期 host 工具无法运行
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: ohos, cmake, build-system, toolchain, portability
+match_keywords: llvm-project, LLVM_ENABLE_PROJECTS, LLVM_TARGETS_TO_BUILD, llvm-tblgen, clang-format, clangd, clang-ccache, CMAKE_SYSTEM_NAME, config.guess, Platform/HarmonyOS, 真机原生编译, llvm-lit
+title: LLVM 家族源码构建 OHOS 路线：真机原生（不设 CMAKE_SYSTEM_NAME）使 llvm-tblgen 当轮原生编+跑，避免交叉构建期 host 工具不可执行
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: LLVM 构建期必须运行 llvm-tblgen 等 host 工具生成 .inc；若按常规做法设 CMAKE_SYSTEM_NAME 触发交叉，host 工具需另建且在构建期无法执行。设备本身即 aarch64 OHOS，不设 CMAKE_SYSTEM_NAME 走原生编译即可当轮编+跑 tblgen（实测通过）；配套还需 config.guess stub（config-ix.cmake 无条件调用，uname -s=HarmonyOS 不认）与 Platform/HarmonyOS.cmake（cmake 无该平台模块，UNIX 变量未置），老版本 LLVM 另需 CMAKE_POLICY_VERSION_MINIMUM=3.5
+affected_scope: 从源码构建的 LLVM 家族包（clang-format / clang / clangd / clang-NN-ccache / llvm 系工具）在 OHOS 上的适配；同理适用于任何构建期需运行自产 host 工具的编译器类项目
+verification_cmd: cmake -S llvm -B build-ohos -G Ninja -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=AArch64 -DLLVM_ENABLE_PROJECTS=clang -DLLVM_INCLUDE_TESTS=ON && cmake --build build-ohos --target clang-format -j 4 && build-ohos/bin/clang-format --version
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: native-source-build-no-cross-toolchain
+rec_description: 不设 CMAKE_SYSTEM_NAME（真机原生，不触发交叉）→ llvm-tblgen 当轮原生编+跑；build() 覆盖 llvm/cmake/config.guess 为 stub（echo aarch64-unknown-linux-ohos）；提供 Platform/HarmonyOS.cmake（include(Platform/Linux)）挂 CMAKE_MODULE_PATH；cmake 4.x 下注入 CMAKE_POLICY_VERSION_MINIMUM=3.5；只构建所需 target（clang-format + 测试基础设施）以控制耗时
+rec_command: cmake -S llvm -B build-ohos -G Ninja -DCMAKE_MODULE_PATH=$PWD/_cmake_modules -DCMAKE_BUILD_TYPE=Release -DLLVM_TARGETS_TO_BUILD=AArch64 -DLLVM_ENABLE_PROJECTS=clang -DLLVM_INCLUDE_TESTS=ON -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_LIBXML2=OFF
+rec_auto_fix: false
+rec_impl: documentation
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: two-stage-cross-with-host-tblgen
+fallback_description: 交叉构建时先用 host 工具链构建 llvm-tblgen 再以 LLVM_TABLEGEN 指向外部可执行文件两阶段构建（本仓尚未实测，需真机验证）
+fallback_command:
+fallback_auto_fix: false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E007,E383,E321]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E581.md
+last_updated: 2026-09-18
+source_event:           clang-format-11 11.1.0 适配：llvm-project 11.1.0 官方源码（84,065,492 字节）真机原生编译，1377 个目标全量构建，clang-format/FileCheck/FormatTests/count/not/llvm-config 目标实测通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                openharmony-pc-adaptor <adaptor@openharmony.pc>
+source_pr:              "!10604"
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 1D9F

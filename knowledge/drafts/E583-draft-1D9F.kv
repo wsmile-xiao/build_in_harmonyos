@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E583.kv，填写各字段
+# 对应的人类文档: doc/E583.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E583
+trigger_tool: python
+phase: configuration
+error_signature: detected=mixed.*env_unsupported|语言不匹配: task=(c|cpp), detected=mixed|lang-preflight.*monorepo|manifest.*(skip|跳过).*mixed|无顶层.*CMakeLists
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 3
+category: detection, toolchain, ohos
+match_keywords: lang-preflight, lang_detect, source_stats, mixed, monorepo, llvm-project, 无顶层 CMakeLists, env_unsupported, R47, 主体裁定, 多子项目, 非构建子项目
+title: lang-preflight 对 monorepo 布局判 mixed 误报：根目录无顶层构建文件导致 c/cpp 族 manifest 判定被跳过，且源码统计覆盖非构建子项目
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: lang_detect 的判定优先级为 manifest>构建系统>源码统计(≥70%)。monorepo（如 llvm-project）根目录没有顶层 CMakeLists.txt，c/cpp 族 manifest 互认逻辑无从触发；同时 source_stats 会把仓库内所有子项目计入（lldb 的 python 脚本、compiler-rt/openmp 的 C 源码、clang-tools-extra 等），非构建子项目的语言计数稀释/冲突构建主体，最终判 mixed 并自动写 env_unsupported 终态——与 E543（辅助 rockspec 触发 manifest 优先级）、E552（文档资产劫持统计）的触发面不同，本条的触发面是“仓库级多子项目布局 + 无顶层构建文件”
+affected_scope: 单仓库含多个子项目/多语言的 monorepo（llvm-project、gcc、binutils、chromium 系、kodi 系等）；识别特征：根目录无构建入口文件、language_evidence.source_stats 中的语言计数分布与“构建相关子树”主体不一致、子项目各自带独立构建文件
+verification_cmd: for d in llvm clang clang-tools-extra; do echo -n "$d: "; find $d -name "*.cpp" | wc -l; done  # 构建相关子树 cpp 占比（llvm 95%、clang-tools-extra 96%）远高于全仓统计
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: monorepo-subtree-scoped-language-evidence
+rec_description: 按 R47 边界规则“C/C++ 混编按主体判不算 mixed”做子树级取证：①列出本次构建实际涉及的子项目（LLVM_ENABLE_PROJECTS 指定）；②对这些子树分别统计 c/cpp 占比，证明主体为 C++；③在 notes.md 留档误报证据（含 lang-preflight 原始 JSON 的 detected/source_stats），据证据继续按 cpp 适配；不得删除或改写 lang_detect 脚本规避统计
+rec_command: python3 scripts/ohc-run.py lang-preflight <软件名> <版本> --src $BUILD_SRC_DIR 2>&1 | tee lang-preflight.log
+rec_auto_fix: false
+rec_impl: evidence-review
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: env-unsupported-forward
+fallback_description: 若构建相关子树本身即多语言真实混合（构建系统与任务语言确实冲突），则属真实语言不匹配：保留 lang-preflight 输出与子树统计证据，按协议交平台语言迁移，不硬适配
+fallback_command:
+fallback_auto_fix: false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             [E543,E552]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E583.md
+last_updated: 2026-09-18
+source_event:           clang-format-11 11.1.0 适配：llvm-project monorepo 根无顶层 CMakeLists.txt，lang-preflight 判 mixed（exit 2）；子树取证（llvm ~95% cpp、clang-tools-extra ~96% cpp）后按 R47 主体裁定继续，最终上游测试 781/781 通过
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:                openharmony-pc-adaptor <adaptor@openharmony.pc>
+source_pr:              "!10604"
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 1D9F
