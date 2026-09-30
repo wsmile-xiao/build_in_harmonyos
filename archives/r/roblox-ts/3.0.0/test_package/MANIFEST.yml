@@ -1,0 +1,69 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件
+# CI 脚本 (build_and_test.sh L0e) 强制要求此文件存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+
+package: roblox-ts/3.0.0
+homepage: "https://github.com/roblox-ts/roblox-ts"
+
+# 上游测试总入口（package.json scripts.test）：
+#   npm run build && npm run test-compile && npm run test-rojo && npm run test-run
+# 其中 build / test-compile 已在 OHOS 真机实际执行；test-rojo / test-run 依赖
+# 上游 foreman.toml 声明的 Rust 外部二进制（rojo 7.4.4 / lune 0.8.8），
+# 目标环境无 Rust 工具链、制品仓亦无对应包 → 无法执行，见下方 external 说明。
+upstream_check_command: "npm run test-compile   # = nyc mocha --timeout 0 --recursive out/CLI/test.js"
+upstream_test_in_build: false
+upstream_test_command: "npm run test-compile"
+
+upstream_tests:
+  - name: "test-compile (mocha 单元测试)"
+    source: "src/CLI/test.ts → out/CLI/test.js"
+    description: "131 个用例（2 个 include/non-compiled 拷贝用例 + 85 个 diagnostic 用例 + 44 个源文件编译用例：main.server.ts 1 + helpers 5 + spec 38）。OHOS 真机实测 131/131 通过（mocha 10.7.3, node v24.13.0），日志见 reports/upstream-mocha.log。"
+    command: "cd <src> && npm ci && npm run build && ./node_modules/.bin/mocha --timeout 0 --recursive out/CLI/test.js"
+  - name: "test-rojo (Rojo 构建测试 Place)"
+    source: "tests/default.project.json"
+    description: "rojo build tests -o ./tests/test.rbxl —— 需 rojo 7.4.4（foreman 分发的 Rust 二进制）；目标环境无该二进制、无 Rust 工具链（CI 能力矩阵 Rust ❌）→ 未能执行。"
+    command: "rojo build tests -o ./tests/test.rbxl"
+  - name: "test-run (Lune + TestEZ 集成测试)"
+    source: "tests/src/tests/*.spec.ts (38 个 spec 文件)"
+    description: "lune run ./tests/runTestsWithLune.lua ./tests/test.rbxl —— 38 个 spec 文件、grep 统计 462 处 it()/12 处 describe()（TestEZ 用例），在 Roblox/Lune 运行时执行；需 lune 0.8.8（foreman 分发的 Rust 二进制），目标环境无 → 未能执行。"
+    command: "lune run ./tests/runTestsWithLune.lua ./tests/test.rbxl"
+
+external_integration_note: >-
+  上游测试分两层：① mocha 单元层（out/CLI/test.js，131 用例）——已在 OHOS 真机
+  实际执行，131/131 通过；② rojo + lune 集成层（tests/ 下 38 个 spec、462 处 it()）
+  ——依赖上游 foreman.toml 声明的两个 Rust 外部二进制（rojo-rbx/rojo =7.4.4、
+  filiptibell/lune =0.8.8）以及 run-in-roblox =0.3.0。目标环境（OHOS aarch64）
+  无 Rust 工具链（CI 能力矩阵：Rust ❌），conan 制品仓与 cmd-pkgs 均无这三个包的
+  OHOS 适配版本（cmd-pkgs 仅见 PORTS_PLAN 规划文档、无实际制品）→ 该层无法执行，
+  按 R51 如实清点申报，不虚报通过率。第二层所需类型依赖（@rbxts/compiler-types、
+  @rbxts/types、@rbxts/roact）在上游 tests/package-lock.json 中走 git+ssh，
+  无凭据环境下 npm install 会挂起（实测 900s 超时），已改为从 npm registry 安装
+  对应版本（3.0.0-types.0 / 1.0.805 / 3.0.0）。
+
+test_package_tests:
+  - file: test.sh
+    description: >-
+      消费者验证（POSIX sh）——断言位总数恒为 32（与 node 可用性无关，skip 逐条计数）。
+      本机 conan create 实测行 "=== Results: 27 passed, 0 failed, 5 skipped ==="。
+      构成：① 打包完整性 19 条：bin/rbxtsc 可执行、out/CLI/cli.js、out/CLI/index.js、
+      package.json 及其 bin.rbxtsc 映射、include/Promise.lua、include/RuntimeLib.lua、
+      README.md、licenses/LICENSE、预编译 js/d.ts 计数 ≥200、9 条运行时依赖闭包
+      （typescript/kleur/yargs/chokidar/fs-extra/resolve/@roblox-ts/luau-ast/
+      path-translator/rojo-resolver）；
+      ② 与 npm dist 逐字节一致 3 条：cli.js / index.js / RuntimeLib.lua 的 sha256；
+      ③ CLI 运行期 4 条（node 门槛）：rbxtsc --version==3.0.0、--help CLI 表面、
+      非法项目非 0 退出、node --jitless --check；
+      ④ [OHOS] 鸿蒙特有 6 条：POSIX sh 启动器加固、解释器候选解析
+      （RBXTSC_NODE > PATH > hnp node）、node --jitless（E400）、exec 语义（跨 UID
+      物化）、未设 RBXTSC_NODE 时 ${RBXTSC_NODE:-} 安全展开（CI #65252 回归项）
+      —— 以上 5 条始终执行并通过，另 1 条（PATH 首位为不可用 node 时的运行期解析）
+      为 node 门槛项。
+      环境性 skip 5 条 = CLI 4 条 + [OHOS] 门槛 1 条：本机 conan 派生 node 进程不稳定
+      （E400 + 沙箱），见 reports/test-report.md §2.4；CI（node 可用）应 32/32 全执行。
+    command: "conan create archives/r/roblox-ts/3.0.0 --build=missing"
+
+assertion_count: 32
+assertion_passed: 27
+assertion_skipped: 5
+ohos_specific_test_count: 5
