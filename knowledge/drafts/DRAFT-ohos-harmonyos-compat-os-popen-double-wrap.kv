@@ -1,0 +1,64 @@
+# ═══ Draft knowledge entry — 平台兼容层 os.popen 二次 TextIOWrapper 包装致 read() 必崩 ═══
+# Timestamp: 2026-09-18
+# Software: python/3.12.9（patches/0014 _harmonyos_compat.py）
+# Gate: PR #10408（greenlet 3.5.6 上游测试 test_version 失败，rule4 判定为「缺依赖」）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-ohos-harmonyos-compat-os-popen-double-wrap
+trigger_tool:           python|os.popen|_harmonyos_compat|pytest|conan create
+phase:                  runtime|testing
+error_signature:        TypeError: can't concat str to bytes|
+                           os\.popen\(.*\)\.read\(\)|
+                           test_version.*TypeError
+
+severity:               3
+category:               python|platform|ohos|compat|portability
+match_keywords:         os.popen, TextIOWrapper, _harmonyos_compat, text=True,
+                           double wrap, can't concat str to bytes, python 3.12.9,
+                           subprocess.PIPE, site.py, 双重包装
+
+title:                  平台 compat 层把 os.popen 包装成 subprocess 时既传 text=True 又对 proc.stdout 二次套 io.TextIOWrapper，双重解码使 read() 必抛 TypeError（平台自身缺陷，非消费者问题）
+
+root_cause: >
+    仓库 python/3.12.9 的补丁 0014（生成 Lib/_harmonyos_compat.py）为绕过
+    SELinux 域限制下的 fork+exec 不可用，把 os.system / os.popen 改写成
+    subprocess 实现。但 os.popen 的包装写成：
+
+        proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, text=True)  # ← 已是文本流
+        return _io.TextIOWrapper(proc.stdout)                         # ← 再包一层
+
+    text=True 时 proc.stdout 已经是 TextIOWrapper（文本流），再套一层
+    io.TextIOWrapper 会形成双重解码；read() 时内层已把字节解码为 str，外层再走
+    codecs 解码路径得到 str 片段，触发 "TypeError: can't concat str to bytes"。
+
+    因此该 wrapper 一旦被调用就必崩 —— 与调用方代码、与任何第三方依赖都无关。
+    典型触发：上游测试用 os.popen 执行外部命令并读其输出（greenlet
+    tests/test_version.py:36 的 `os.popen(setup.py --version)`），于是该用例从
+    skipTest 路径变成硬 failure，使套件永远无法达到 100% 通过率。
+
+    正确写法是直接返回 proc.stdout（text=True 已经给了文本流）：
+        return proc.stdout
+
+    注意：消费侧常见做法是改用 subprocess 字节捕获绕过（见 E226），但那是
+    workaround；根因在平台 compat 层自身。另一个易混点：3.9.x 的同类 compat
+    补丁**只包装 os.system、不碰 os.popen**，故本缺陷是 3.12.9 独有。
+
+affected_scope:         所有在 python/3.12.9 运行时下调用 os.popen 的三方库与测试
+                        （尤其上游测试用 os.popen 读取子进程输出的场景）；
+                        影响面为平台级，跨包复现。
+
+verification_cmd:       最小复现（不涉及任何三方库）：
+                          python3 -c "import os; os.popen('echo hi').read()"
+                        → TypeError: can't concat str to bytes
+                        判据：只复刻「text=True + 二次 TextIOWrapper」必崩；
+                        去掉二次包装（return p.stdout）即正常。
+
+refs:                   PR #10408（greenlet 3.5.6）、E226（消费者侧 workaround）、
+                        python/3.12.9 patches/0014 _harmonyos_compat.py:104-105

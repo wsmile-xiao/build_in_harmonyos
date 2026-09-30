@@ -1,0 +1,124 @@
+--- /dev/null	2026-03-26 09:26:33.352284687 +0800
++++ Python-3.12.9/Lib/_harmonyos_compat.py	2026-03-27 11:41:10.156164375 +0800
+@@ -0,1 +1,118 @@
++"""
++HarmonyOS Compatibility Layer for Python 3.12
++
++This module provides transparent compatibility for process execution
++on HarmonyOS/OpenHarmony systems where SELinux domain transitions prevent
++fork+exec-based child process creation.
++
++Problem:
++--------
++HarmonyOS SELinux policy enforces domain transitions:
++- Shell process: u:r:hishell_hap:s0 (can execute SDK tools)
++- Python process: u:r:adhoc_bin:s0 (cannot execute via fork+exec)
++
++The SELinux policy allows posix_spawn() (vfork-based) but blocks
++traditional fork+exec. Python 3.12's subprocess.Popen is patched
++to use posix_spawn() (patch 0013), so Popen works directly.
++
++However, os.system() and os.popen() still use the C library's
++system()/popen() functions which internally use fork+exec and
++are therefore broken on HarmonyOS.
++
++Solution:
++---------
++Replace os.system() and os.popen() with subprocess-based
++implementations that use posix_spawn() under the hood.
++
++Usage:
++------
++This module is automatically imported by site.py during Python startup.
++No user action required.
++
++Debug:
++------
++Set HARMONYOS_SUBPROCESS_DEBUG=1 to enable logging.
++"""
++
++import os
++import sys
++import subprocess
++
++# Configuration
++_DEBUG = os.environ.get('HARMONYOS_SUBPROCESS_DEBUG', '0') == '1'
++
++
++def _log(msg):
++    """Log debug messages if debugging is enabled."""
++    if _DEBUG:
++        print(f"[HarmonyOS-Compat] {msg}", file=sys.stderr)
++
++
++def _is_harmonyos():
++    """Detect if running on HarmonyOS/OpenHarmony."""
++    platform = sys.platform.lower()
++    return 'harmonyos' in platform or 'ohos' in platform
++
++
++def _apply_compat_layer():
++    """
++    Apply HarmonyOS compatibility patches to process execution functions.
++
++    In Python 3.12, subprocess.Popen already uses posix_spawn() on
++    HarmonyOS (via patch 0013), so we only need to wrap os.system()
++    and os.popen() which use the C library's fork+exec internally.
++    """
++    if not _is_harmonyos():
++        _log("Not HarmonyOS, skipping compatibility layer")
++        return
++
++    _log("Detected HarmonyOS, applying compatibility layer")
++
++    # ============================================================
++    # Patch os.system
++    # ============================================================
++    _original_os_system = os.system
++
++    def _wrapped_os_system(command):
++        """Use subprocess.call instead of C system() for HarmonyOS."""
++        _log(f"os.system: '{str(command)[:60]}...' -> subprocess.call")
++        try:
++            return subprocess.call(command, shell=True)
++        except Exception:
++            # Fallback to original if subprocess fails
++            return _original_os_system(command)
++
++    os.system = _wrapped_os_system
++    _log("Patched: os.system")
++
++    # ============================================================
++    # Patch os.popen
++    # ============================================================
++    _original_os_popen = os.popen
++
++    def _wrapped_os_popen(command, mode='r', buffering=-1):
++        """Use subprocess.Popen instead of C popen() for HarmonyOS."""
++        _log(f"os.popen: '{str(command)[:60]}...' -> subprocess.Popen")
++        if mode == 'r':
++            # text=True already yields a *text* stream: do NOT wrap
++            # proc.stdout in io.TextIOWrapper again — a second decode layer
++            # makes read() raise "TypeError: can't concat str to bytes".
++            proc = subprocess.Popen(command, shell=True,
++                                    stdout=subprocess.PIPE,
++                                    stderr=subprocess.STDOUT,
++                                    text=True)
++            return proc.stdout
++        else:
++            # mode == 'w' is rarely used, fall back to original
++            return _original_os_popen(command, mode, buffering)
++
++    os.popen = _wrapped_os_popen
++    _log("Patched: os.popen")
++
++    _log("Compatibility layer applied successfully")
++
++
++# Auto-apply when module is imported (called from site.py)
++def init():
++    """Initialize HarmonyOS compatibility layer."""
++    _apply_compat_layer()
+
+-- 
+2.25.1
