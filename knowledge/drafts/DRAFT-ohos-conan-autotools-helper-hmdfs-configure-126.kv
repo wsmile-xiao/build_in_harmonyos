@@ -1,0 +1,94 @@
+#====================================================================
+# Draft knowledge entry - Conan Autotools.configure() directly execs
+# ./configure which has no exec bit on HMDFS (Error 126); the manual
+# CONFIG_SHELL rewrite then fails because basic_layout's build_folder
+# is the generators dir, not the copied source tree root.
+# Source package: esekeyd/1.2.7 (device shadow CI r2/r3, fixed in r5)
+#====================================================================
+
+id:                     DRAFT-ohos-conan-autotools-helper-hmdfs-configure-126
+trigger_tool:           conan|configure|make
+phase:                  build
+error_signature:        Permission denied.*configure|Error 126 while executing.*configure|bash: \./configure: No such file or directory|autotools\.configure\(\)
+
+severity:               2
+category:               build-system|conan|hmdfs|ohos
+match_keywords:         autotools.configure, Autotools helper, Error 126, Permission denied configure, HMDFS 执行位, exec bit, CONFIG_SHELL, bash ./configure, basic_layout, build_folder, generators folder, source copy, configure not found, No such file or directory, DESTDIR, make install DESTDIR, ohos, esekeyd, conan build 缓存目录
+
+title:                  Conan Autotools helper 在 OHOS/HMDFS 的替代写法：autotools.configure() 直接 exec ./configure 报 126（无执行位）→ 手写 CONFIG_SHELL 调用 + configure 目录探测（basic_layout 的 build_folder 是 generators 目录不是源码副本根）
+
+root_cause:             >
+    两连环：(1) conan.tools.gnu.Autotools.configure() 以直接 exec 方式运行
+    configure；conan 构建缓存在 HMDFS（/storage/…/p/b/<hash>/b），脚本无
+    执行位（chmod 不生效，E046/E087），exec 报 Permission denied →
+    ConanException Error 126。用 "bash <configure>" 显式解释执行即通
+    （rotix r1 判例）。(2) 改为 self.run("bash ./configure",
+    cwd=self.build_folder) 后报 bash: ./configure: No such file or
+    directory —— basic_layout 的 self.build_folder 是 generators 目录
+    （…/b/build-release，conanbuild.sh 所在），conan create 复制的源码树
+    （含 configure）在其上一级 …/b；Autotools helper 内部会解析该位置，
+    手写时必须自己探测（build_folder / source_folder 双候选）。
+    configure/make/make install 需钉同一 conf_dir，配 DESTDIR 打包。
+
+affected_scope:         所有在 OHOS 真机 conan create 的 autotools 包，
+                        尤其从 Autotools helper 改手写调用（HMDFS exec 限制
+                        所迫）的配方；也适用于任何"脚本必须由 CONFIG_SHELL
+                        解释执行 + 需定位 conan 源码副本"的场景。
+
+verification_cmd:       |
+  # 真机三态实证（esekeyd/1.2.7，2026-09-29）：
+  # r2: autotools.configure() -> /system/bin/sh: .../configure: Permission denied, Error 126
+  # r3: self.run("bash ./configure", cwd=self.build_folder) -> bash: ./configure: No such file or directory
+  # r5: conf_dir 探测 + CONFIG_SHELL 调用 + umask 补丁 -> conan create 成功、
+  #     test_package 14/14、L0/L1/L4/L5 pass、exit 0
+
+rec_priority:           1
+rec_approach:           manual-configshell-run-with-confdir-probe
+rec_description:        >
+    build() 不用 autotools.configure()：os.path.isfile 探测 configure 所在
+    目录（候选顺序 self.build_folder → self.source_folder），用 profile
+    buildenv 注入的 CONFIG_SHELL 显式解释执行（默认 bash），
+    prefix=/ DESTDIR 风格，make -j1 与 make install DESTDIR=<package_folder>
+    钉同一目录，env="conanbuild" 携带 CC/CFLAGS/PATH。
+rec_command:            |
+  conf_dir = next((d for d in (self.build_folder, self.source_folder)
+                   if os.path.isfile(os.path.join(d, "configure"))), None)
+  self.run(f'{config_shell} ./configure --prefix=/ --bindir=//bin --sbindir=//bin ...',
+           cwd=conf_dir, env="conanbuild")
+  self.run("make -j1", cwd=conf_dir, env="conanbuild")
+  # package(): self.run(f'make install DESTDIR="{self.package_folder}"', cwd=conf_dir, env="conanbuild")
+rec_auto_fix:           false
+rec_impl:               conanfile-edit
+
+fallback_priority:      2
+fallback_approach:      pre-chmod-plus-autotools-helper
+fallback_description:   >
+    保留 autotools.configure()，先 os.chmod(configure, 0o755) —— HMDFS 上
+    chmod 基本不生效（E046），多数情况下仍 126；仅非 HMDFS 构建目录可用。
+fallback_command:       ""
+fallback_auto_fix:      false
+fallback_impl:          conanfile-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       cwd=self\.build_folder\s*\n?\s*self\.run\(.{0,40}configure   # 手写调用但 cwd 钉死 build_folder
+forbid_1_reason:        basic_layout 的 build_folder 是 generators 目录（…/b/build-release），configure 在上一级源码副本，必然 No such file or directory。
+forbid_1_consequence:   Error 127/126，或误判为"源码下载不完整"。
+
+forbid_2_pattern:       os\.chmod\(.*configure.*0o755\)   # 依赖 chmod 修执行位
+forbid_2_reason:        HMDFS 上 chmod 不生效（E046），执行位缺失是挂载语义不是文件模式问题。
+forbid_2_consequence:   本机/非 HMDFS 通过、真机仍 126，产生环境差异难排查。
+
+# Relations
+similar_to:             opencsg-1.8.2-shadow-ci-isolated-job-hnp-toolchain-path
+caused_by:              ""
+prerequisite_of:        ""
+conflicts_with:         ""
+complement:             E087, E046, E011, E052, E129, E037, E049, DRAFT-rotix-0.83-handwritten-configure-gcc-probe-shim, DRAFT-6487-classads-configshell-hmdfs-getcwd, cvsgraph-1.7.0-hnp-bash-getcwd-shell-probe
+
+# Provenance
+source_package:         esekeyd/1.2.7
+source_event:           device shadow CI r2 (Error 126) / r3 (build_folder) / r5 (green), 2026-09-29
+authors:                esekeyd 适配会话（worktree feat/esekeyd-1.2.7-codex）
+source_pr: ""
+source_commit: ""
+last_updated: 2026-09-29
