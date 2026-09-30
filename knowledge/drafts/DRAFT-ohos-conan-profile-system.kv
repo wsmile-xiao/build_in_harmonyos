@@ -1,0 +1,110 @@
+#====================================================================
+# DRAFT-ohos-conan-profile-system — OHOS Conan profile 体系
+#   CI 单 profile(host==build) 集成 / 本地 host=ohos-aarch64* 与 build=default(Linux) 分层
+#   -s:b os=Linux 构建上下文边界 / 产物架构与 cpp_info 聚合校准
+#====================================================================
+
+id:                     DRAFT-ohos-conan-profile-system
+trigger_tool:           conan|cmake|meson|ninja|autotools|readelf
+phase:                  environment|configure|build|testing|package
+error_signature:        Invalid setting 'OHOS' is not a valid 'settings.os' value|System is unknown to cmake.*Platform/OHOS|binary or interpreter not executable|incompatible with aarch64linux|Machine:.*X86-64|Library '.*' not found in package
+
+severity:               3
+category:               conan, profile, cross-compile, ohos, toolchain, cmake, meson, packaging
+match_keywords:         conan profile, -pr:h, -pr:b, -s:b, os=Linux, os=OHOS, settings.yml, ohos-aarch64, ohos-aarch64-run, ohos-aarch64-static, ohos-aarch64-local, get_gnu_triplet, aarch64-linux-ohos, CMAKE_SYSTEM_NAME, HarmonyOS, CMAKE_CROSSCOMPILING_EMULATOR, tools.cmake:cmake_program, Platform/OHOS.cmake, compiler_launcher, ccache, host==build, native build, cross-building, cpp_info.libs, cpp_info.components, CMakeDeps, readelf, 产物架构
+title:                  OHOS Conan profile 体系：CI 单 profile（host==build）集成、本地 host/build 分层与 -s:b os=Linux 边界、产物架构与 cpp_info 聚合口径
+
+root_cause:             OHOS 适配版 conan（基线 2.29.1）把 os=OHOS 作为有效枚举，并在内部把 OHOS 映射为
+                        GNU triplet aarch64-linux-ohos、CMake 的 CMAKE_SYSTEM_NAME=HarmonyOS、Meson 的 harmonyos。
+                        围绕该映射存在四类互相耦合、且只靠读配方看不出来的 profile 问题：
+                        (1) settings.yml 缓存过期：conan 首次运行会缓存 settings.yml；升级到含 OHOS 的适配版后
+                            旧缓存仍无 OHOS 枚举，conan 直接拒绝 os=OHOS（Invalid setting 'OHOS' ...）。
+                            ci/conan/setup.sh 的做法是先 grep settings.yml 是否含 OHOS，缺失则删除强制重建。
+                        (2) CI 用同一个 profile 同时作 host 与 build：ci/conan/build_and_test.sh 固定
+                            -pr:h=$PROFILE_FILE -pr:b=$PROFILE_FILE（CI worker 本身是鸿蒙 PC 真机，属原生构建）。
+                            在 x86_64 宿主上照抄这一写法，conan 因 host==build 判定为“原生构建”、不设
+                            CMAKE_CROSSCOMPILING，meson 随即直接执行 aarch64 sanity check 二进制 →
+                            binary or interpreter not executable。
+                        (3) 构建上下文（build context）必须是 Linux：本地验证用 -pr:h=ohos-aarch64-run -pr:b=default
+                            （default profile 的 os=Linux）。只有确实存在 OHOS 构建上下文工具链（为 OHOS 准备的
+                            tool_requires 等）时才用 -s:b os=OHOS；把 OHOS profile 塞给 -pr:b，会让 meson/cmake/
+                            代码生成器等构建期工具也被当成 aarch64 目标产物，在 x86_64 上不可执行。
+                        (4) 产物与元数据校准：profile 的 [buildenv] 不会自动作用于 conanfile 里的 self.run()
+                            （2.29.1 实测，宿主进程环境会泄漏），若不把裸名 CC/CXX/ar 指向交叉工具链，会静默
+                            产出“被标成 aarch64 的 x86_64 产物”，必须用 file/readelf 校验 Machine: AArch64；
+                            另外组件化配方（cpp_info.components 非空）的包级 cpp_info.libs 不是组件 libs 的并集
+                            （CMakeDeps 消费组件级数据），只用 {deps.cpp_info.libs} 聚合会漏掉组件库。
+affected_scope:         所有在 x86_64 宿主上用 Conan + OHOS profile 做 OHOS aarch64 交叉构建/本地测试的配方与
+                        CI 包装：本仓库 ci/conan/profiles/ohos-aarch64（设备路径版）与本地 default、ohos-aarch64、
+                        ohos-aarch64-run、ohos-aarch64-static、ohos-aarch64-local 五套 profile；组件化
+                        （cpp_info.components）的库在元数据聚合与消费者测试上尤其受影响。
+verification_cmd:       # 1) profile 分工与映射生效
+                        conan profile show -pr:h=ohos-aarch64-run -pr:b=default
+                        # 2) 交叉构建 + 本地执行（qemu + OHOS musl 运行根）
+                        conan create . -pr:h=ohos-aarch64-run -pr:b=default --build=missing
+                        # 3) 产物架构校准（不能只看 conan 输出的包名）
+                        file <package_folder>/lib/*.a | grep -c AArch64
+                        readelf -h <test_binary> | grep Machine
+                        # 4) 元数据聚合口径（包级 libs 不含组件 libs）：在消费者 conanfile 的 generate() 里
+                        #    同时遍历 self.dependencies["<dep>"].cpp_info.libs 与
+                        #    self.dependencies["<dep>"].cpp_info.components[*].libs，再交给 CMakeDeps
+
+rec_priority:           1
+rec_approach:           layered-profiles-host-ohos-build-linux
+rec_description:        采用“host=OHOS profile / build=Linux default profile”的交叉模型，并把 profile 按用途分层：
+                        纯构建用 ohos-aarch64（与官方语义一致、不含本地专用改动）；本地跑测试用
+                        ohos-aarch64-run（只把 CTest 执行器换成 qemu + OHOS musl 运行根，链接方式保持动态）；
+                        动态运行根跑不动时用 ohos-aarch64-static（tools.build:exelinkflags=["-static"]）；
+                        需要静态 + 显式 runroot 时用 ohos-aarch64-local。CMake 一律走 SDK 自带 3.28.2
+                        （tools.cmake:cmake_program），因为宿主 cmake 3.22 没有 Platform/OHOS.cmake；
+                        [buildenv] 把裸名 CC/CXX/AR/RANLIB 固定到交叉工具链（配合 ~/ohpc/bin 同名 shim，
+                        使裸名工具等价真机工具链）；各 profile 均挂 compiler_launcher=ccache 复用编译缓存。
+rec_command:            conan create . -pr:h=ohos-aarch64-run -pr:b=default --build=missing
+rec_auto_fix:           false
+rec_impl:               conan-profile-config
+
+fallback_priority:      2
+fallback_approach:      single-profile-native-only-with-explicit-emulator
+fallback_description:   若必须沿用 CI 的单 profile 写法（host==build），该 profile 必须显式给出
+                        CMAKE_CROSSCOMPILING_EMULATOR（qemu + 运行根），并让 meson 通过 exe_wrapper 之类机制
+                        执行目标产物，否则只能做“纯构建”，把测试交给真机/官方 CI。
+                        绝不能在 x86_64 宿主上把“没跑”声称为“测试通过”。
+fallback_command:       tools.cmake.cmaketoolchain:extra_variables={"CMAKE_CROSSCOMPILING_EMULATOR":"/root/ohpc/sdk/qemu/usr/bin/qemu-aarch64-static;-L;/root/ohpc/sdk/ohos-runroot"}
+fallback_auto_fix:      false
+fallback_impl:          conan-profile-config
+
+forbid_1_pattern:       -pr:b=.*ohos-aarch64|-pr:b=.*ohos\b|-s:b os=OHOS
+forbid_1_reason:        把 OHOS profile 用作构建上下文会让构建期工具（meson/cmake/代码生成器）被当成 aarch64
+                        目标产物；在 x86_64 宿主上不可执行，且 host==build 时 conan 判定为原生构建、不设交叉标志。
+forbid_1_consequence:   meson sanity check 报 binary or interpreter not executable，
+                        或构建期工具静默回退到宿主工具、产出错误架构产物。
+
+forbid_2_pattern:       tools\.cmake:cmake_program\s*=\s*/usr/bin/cmake|CC=cc\b|CXX=c\+\+\b
+forbid_2_reason:        宿主 cmake 3.22 没有 Platform/OHOS.cmake；裸名 cc/c++ 在宿主上会落到宿主编译器。
+forbid_2_consequence:   配置期 System is unknown to cmake, create: Platform/OHOS.cmake；
+                        或包被标成 aarch64 实际是 x86_64（只有 file/readelf 校验 Machine: X86-64 才暴露）。
+
+forbid_3_pattern:       聚合.*cpp_info\.libs.*(忽略|不含|未计).*components|cpp_info\.libs.*即.*全部库
+forbid_3_reason:        组件化包（cpp_info.components 非空）的包级 libs 不包含组件库；只用 {deps.cpp_info.libs}
+                        做聚合校验/消费者链接会漏库，形成“测试通过”的假象。
+forbid_3_consequence:   消费者链接报 undefined reference，或测试覆盖面被高估（组件库从未被链接执行）。
+
+principles:             P-TOOLCHAIN-001, P-ENV-001, P-LINKAGE-001, P-BUILD-001
+causes:                 []
+caused_by:              []
+similar_to:             [E012, E053, DRAFT-elfio-3.9-conan-profile-relative-path-shadowing, DRAFT-autotools-config-sub-silent-ohos-triplet, DRAFT-ohos-gotoblas-cross-silent-skip]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-conan-profile-system.md
+last_updated:           2026-09-29
+source_event:           OHOS 6.0 SDK + OHOS 适配版 conan 2.29.1 本地交叉验证环境搭建与 libsigc/zlib 等配方实测
+                        （host=ohos-aarch64-run / build=default；CI ci/conan/build_and_test.sh 单 profile 对照）
+authors:                Quas
+source_pr:              13897
+source_commit:          (随 PR !13897 提交时回填)
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:      2026-09-29
