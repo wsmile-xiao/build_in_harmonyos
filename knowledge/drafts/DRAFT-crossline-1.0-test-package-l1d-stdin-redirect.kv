@@ -1,0 +1,75 @@
+#====================================================================
+# DRAFT — test_package 消费者需 stdin 输入时：L1d 假测试正则误判
+#         （self.run echo/print 管道）与输入文件重定向方案
+# 触发事件: crossline 1.0（纯 C readline 替代库）HarmonyOS PC 适配
+# 日期: 2026-09-28
+#
+# 与既有条目的关系（增量说明）:
+#   E472（test_package 可执行测试需 ELF 签名 + self.run 真实逻辑）：
+#     只覆盖「test() 必须含 self.run 实际执行逻辑」与 SDL dummy 无头
+#     运行；未覆盖「CI L1d 正则 self\.run.*(echo|print|true) 会把
+#     echo 管道喂 stdin 的真实测试误判为假测试」这一触发面，也未提供
+#     「输入文件 + stdin 重定向」的替代写法。本条为 E472 之外的新增差异。
+#   E076/E161（pipe fstat/lseek EACCES）：内核侧 pipe 系统调用行为，
+#     与 test_package 测试写法无关，不重复。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     crossline-1.0-test-package-l1d-stdin-redirect
+trigger_tool:           conan|ci|build_and_test.sh
+phase:                  testing|packaging
+error_signature:        'L1_RESULT=fail: fake test detected|L1d: test\(\) method appears to be a fake test|self\.run.*echo.*\|.*consumer'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, testing, ohos, ci-gate, packaging
+match_keywords:         test_package, L1d, fake test, self.run, echo, print, pipe, stdin, redirect, readline, consumer, build_and_test.sh
+title:                  test_package 消费者测试喂 stdin 时禁用 echo/print 管道（CI L1d 正则误判），改用输入文件 + stdin 重定向
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             ci/conan/build_and_test.sh 的 L1d 门禁用
+                        grep -qE "self\.run.*(echo|print|true)" 判定 test()
+                        为「假测试」（R34 空壳测试前置拦截）。若 test_package
+                        的 test() 用 echo 'line' | <consumer> 给消费者喂
+                        stdin（readline 类库在非 TTY 路径用 fgets 读一行，
+                        消费者裸跑时 stdin=EOF 直接返回 NULL 导致失败），
+                        该写法命中 L1d 正则，W3/CI 把真实测试误判为假测试
+                        fake test detected，阻塞 finish。
+affected_scope:         所有 test_package 消费者二进制需要从 stdin 读取输入的
+                        Conan 配方（readline 替代库、交互式 CLI、SQL shell
+                        类库等）；以及 CI L1d 正则未升级前的同类配方。
+verification_cmd:       |
+  # 复现（crossline 1.0 实测）:
+  #   test() 写成 echo 'hello' | ./consumer
+  #   → conan-verify 通过但 W3 build_and_test.sh L1d 报 fake test detected
+  # 修复后（输入文件重定向）:
+  #   python3 scripts/ohc-run.py finish crossline 1.0 built
+  #   → W3 L1_RESULT=pass: test_package executed, 100% (1/1)
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           input-file-stdin-redirect
+rec_description:        test() 内先把需要喂入 stdin 的行写入构建目录下的输入
+                        文件，再以 < 重定向执行消费者二进制；命令串中不出现
+                        echo/print/true，避开 L1d 正则，同时仍是真实执行
+                        消费者并调用被测库公开 API（满足 R34）。
+rec_command:            |
+  def test(self):
+      if not cross_building(self):
+          consumer = os.path.join(self.cpp.build.bindir, "crossline_consumer")
+          input_file = os.path.join(self.build_folder, "stdin.input")
+          with open(input_file, "w", encoding="utf-8") as f:
+              f.write("hello-crossline\n")
+          self.run(f"{consumer} < {input_file}", env="conanrun")
+
+rec_auto_fix:           true
+rec_impl:               manual-recipe-edit
+
+# ═══ Layer 4: 关联 ═══
+similar_to:             E472
+caused_by:              none
+prerequisite_of:        none
+conflicts_with:         none
+boundary_notes:         仅适用于消费者需 stdin 输入的库；纯库（无 stdin 输入
+                        需求）不受 L1d 正则影响。若 CI L1d 正则未来改用
+                        结构性检查，本条方案仍是无害且更清晰的写法。
