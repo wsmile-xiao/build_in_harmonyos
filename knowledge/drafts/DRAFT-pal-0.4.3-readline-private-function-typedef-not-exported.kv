@@ -1,0 +1,93 @@
+#====================================================================
+# DRAFT-pal-0.4.3-readline-private-function-typedef-not-exported
+# 机制：上游把 readline 的老式（私有）函数指针 typedef「Function」当作
+#       rl_pre_input_hook 的类型使用。本仓依赖树里 conan readline/8.3 的公开头
+#       只在 opt-in 宏 WANT_OBSOLETE_TYPEDEFS 定义时才导出该名字，默认不可见，
+#       clang 遂报 use of undeclared identifier。正解是改用同族公开类型
+#       rl_hook_func_t，而不是把私有名重新焊回编译期。
+# Timestamp: 2026-09-26
+# Software: pal 0.4.3（以及一切沿用老式 readline typedef/宏的上游 C 包）
+# Gate: conan create build()
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#====================================================================
+
+id:                     DRAFT-pal-0.4.3-readline-private-function-typedef-not-exported
+title:                  readline 老式 typedef「Function」默认不再从公开头导出（8.3 起收进 WANT_OBSOLETE_TYPEDEFS 守卫），用作 hook 变量类型即编译失败；改用公开的 rl_hook_func_t
+trigger_tool:           clang
+phase:                  build
+error_signature:        use of undeclared identifier 'Function'|expected expression.*Function|rl_pre_input_hook.*Function
+severity:               3
+category:               compat, headers, api, third-party-library
+match_keywords:         Function, WANT_OBSOLETE_TYPEDEFS, rl_hook_func_t, rl_pre_input_hook, rl_event_hook, readline, undeclared identifier, rltypedefs.h, 老式 typedef 不可见, 函数指针强转, portability patch
+keywords:               readline 私有名字, 公开类型, 版本升级后符号不可见, pal, palcal, curses 行编辑器, rl_redisplay_function, conan readline/8.3, clang, 第三方库头文件, 老式接口, deprecated typedef
+approach:               编译错误停在「使用点」而不是定义点，且报错标识符是一个短得像类型名的老式名字（Function、VFunction、CPFunction 一族）时，
+                        先怀疑它来自依赖库的头文件可见性，而不是目标平台。核实办法是直接扫这份依赖安装出来的公开头目录，
+                        看该名字是否被条件编译守卫罩住、守卫需要哪个宏、以及有没有公开的替代类型。pal 实测：conan readline/8.3
+                        安装出的 rltypedefs.h 里 typedef int Function (void) 位于第 34 行，而它外面第 31 行的守卫是
+                        「#if !defined (_FUNCTION_DEF) && defined (WANT_OBSOLETE_TYPEDEFS)」；该宏在装出来的包里无人定义，
+                        于是这个名字对下游不可见。同一头文件第 64 行的公开类型「typedef int rl_hook_func_t (void);」
+                        正是第 63 行注释点名的「Type for input and pre-read hook functions like rl_event_hook」，
+                        readline.h:608 的 rl_pre_input_hook 也是按它声明的，把强转换成它即可。
+root_cause:             「Function / VFunction / CPFunction / CPPFunction」是 readline 早期的函数指针 typedef，从来不是它对外承诺的稳定 API。
+                        本仓构建统一使用 conan 中心的 readline/8.3：其安装头文件把这一族老式名字收进 opt-in 宏
+                        WANT_OBSOLETE_TYPEDEFS 之内并标 deprecated（rltypedefs.h:29 的注释原文即
+                        「Old-style, attempt to mark as deprecated in some way people will notice.」，守卫在 :31，
+                        typedef 在 :34-:37，endif 在 :39），默认不导出；对外可见的替代者是 :41 起「New style.」段的
+                        rl_*_func_t 一族。外围程序若把 hook 赋值强转成 Function，等于依赖一个默认不可见的私有名字，
+                        换成新版 readline 便在编译期失败。这与目标平台能力无关，任何平台任何工具链同样失败。
+affected_scope:         凡上游源码在类型位置使用 readline 老式/私有 typedef（典型是 (Function*) 这类强转）、或按老式 readline 接口
+                        给 rl_pre_input_hook、rl_event_hook 赋值并带强转的包，在本仓依赖树（readline/8.3）下都会撞同一条。
+                        旁证：同族老式宏与条件编译名字（USE_PROMPT_INVIS 一类）常与这批私有名一起出现在同一时代的代码里，
+                        但 pal 0.4.3 源码内该宏 0 命中（实测 grep 无结果），不要据此断言本包用到它。
+prescan_pattern:        \(Function\s*\*\s*\)|rl_pre_input_hook\s*=|rl_event_hook\s*=|VFunction|CPFunction
+prescan_globs:          **/*.c,**/*.h
+verification_cmd:       RLDIR=$(find "$CONAN_HOME/p" -path "*/include/readline/rltypedefs.h" | head -1); grep -nE "WANT_OBSOLETE_TYPEDEFS|typedef int Function|rl_hook_func_t" "$RLDIR" ; grep -rn "WANT_OBSOLETE_TYPEDEFS" "$CONAN_HOME/p" | grep -v "rltypedefs.h" ; echo 守卫之外无人定义该宏即命中本条
+rec_priority:           1
+rec_approach:           use-public-readline-hook-typedef
+rec_description:        把私有/老式类型换成 readline 公开的 hook 函数指针类型 rl_hook_func_t，只改类型名，不改回调实现与注册时序
+rec_command:            以 portability 补丁改出错行的强转类型名，本包即 src/manage.c:406 由 Function 指针改为 rl_hook_func_t 指针
+rec_auto_fix:           false
+rec_impl:               conandata patches 加 apply_conandata_patches，patch_type 取 portability
+fallback_priority:      2
+fallback_approach:      宏垫片（定义 WANT_OBSOLETE_TYPEDEFS 或 -DFunction）/ 自带一份去掉守卫的老式头
+fallback_description:   两条都被否决。一是编译期把老名字唤回：给构建参数加 -DWANT_OBSOLETE_TYPEDEFS（或直接 -DFunction）让 :31 的守卫成立，
+                        等于替上游继续依赖一个带 deprecated 标记、库方已声明不保证稳定的名字，签名与解法都不可复用，
+                        还会把「同类包在别处撞同一条」的事实抹掉。二是在包内 vendor 一份老 readline 头：本仓
+                        archives/b/bcal/2.5 与 archives/b/bitwise/0.50 的 res/headers/readline/rltypedefs.h 就是把 :31 的守卫
+                        写成「#if !defined (_FUNCTION_DEF)」（去掉 WANT_OBSOLETE_TYPEDEFS 条件）从而无条件再导出 Function（:35 与 :40），
+                        那是把那两包自己的路数、把 ABI 与版本一致性风险引进构建，属另一条路数而非本机制的修法，
+                        ⛔ 不要拿它们当本条的先例。
+fallback_command:       CFLAGS 追加 -DWANT_OBSOLETE_TYPEDEFS，或把去掉守卫的老式 readline 头拷进包内 res/headers —— 仅作对照，不推荐
+fallback_auto_fix:      false
+fallback_impl:          不推荐，仅记录以避免重复试错
+safety_boundary:        适用面限定在「编译期符号未声明」且该符号属第三方库的老式/私有 typedef 或宏的场合，判据是去依赖安装出的公开头里
+                        查这个名字是否被条件编译守卫罩住、守卫要哪个宏、同处有无公开替代类型。
+                        ⛔ 不要把它写成 OHOS/鸿蒙平台不兼容，也不要写成缺工具链或缺依赖：pal 这处失败点是纯符号可见性，
+                        与目标平台能力无关。⛔ 也不要拿它去套 libc/OpenSSL 侧的系统符号消失类条目（musl 少 clock_gettime 家族、
+                        pthread_*_np 别名、OpenSSL 3.5 移除的 API 等），那些条目各有各的处置，混引即错。
+                        解除条件：上游自行改用公开类型，或依赖树换成确实无条件导出该名字的 readline 版本。
+principles:             第三方库头文件里的私有/老式 typedef 不是稳定 API，新版可以把它收进 opt-in 守卫而事实上不再导出；
+                        编译错误出现在使用点而非定义点时，先去依赖安装出的公开头确认符号可见性与公开替代者，再决定改类型，
+                        而不是替上游把私有名焊回编译期。
+caused_by:              上游 pal 0.4.3 的 src/manage.c:406 把 rl_pre_input_hook 的赋值强转成 readline 老式 typedef Function，而本仓依赖的 conan readline/8.3 只在 WANT_OBSOLETE_TYPEDEFS 定义时才导出该名（rltypedefs.h:31 守卫、:34 typedef）；同包其余 hook 赋值点（src/rl.c:137、src/remind.c:96 与 :105、src/add.c:97 与 :264）早已写成公开的 rl_hook_func_t，manage.c 是唯一的孤点
+causes:                 conan create build() 阶段编译失败（error: use of undeclared identifier 'Function'），整包不出产物
+similar_to:             同签名形状的正式条目 E062(index.tsv:288)、E115(:341)、E127(:353)、E152(:378)、E162(:388)、E171(:397)、E211(:437) —— 七条的失效面全在 libc / OpenSSL / gnulib 侧的系统符号消失，没有一条覆盖「第三方库头里的老式/私有 typedef 被收进 opt-in 守卫而不再导出」这一层。其中 E127 的处方是 graph/E127.kv:24 的 rec_approach 即 undef-macro（配 :26 的宏守卫、:28 的 source-edit），走的是「补/删宏」路线，与本条「换公开类型」不同解，混引会把读者推向宏垫片。最近邻但不同机理的是 knowledge/drafts/DRAFT-tau-1.0.0-muon-assertion-macro-message-argument.kv:12，它的 expected expression 出自 __VA_ARGS__ 空展开——符号本身存在、失效层次在宏展开期；本条是类型名压根不在可见集合里。
+conflicts_with:
+prerequisite_of:
+doc_file:               knowledge/drafts/DRAFT-pal-0.4.3-readline-private-function-typedef-not-exported.md
+last_updated:           2026-09-26
+source_event:           pal 0.4.3 HarmonyOS PC 适配（构建机 B，CONAN_HOME=$HOME/tmp/ch/home-pal，readline/8.3）。首错
+                        ~/tmp/uc2/z71-pal/explore/make.log:157「manage.c:406:26: error: use of undeclared identifier 'Function'」，
+                        另一次复现 ~/tmp/uc2/z71-pal/explore-build2.log:70。按本条换公开类型后
+                        ~/tmp/uc2/z71-pal/explore-smoke.log:10 记 MAKE_RC=0，修改固化为单行 hunk 补丁
+                        archives/p/pal/0.4.3/patches/0002-manage.c-readline-public-hook-type.patch，
+                        conan create 与 W3 本地 CI 通过（判决件 archives/p/pal/0.4.3/reports/）
+authors:                主理-71
+source_pr:              feat/pal-0.4.3
+source_commit:          fe4e47d560dd801312564f135711b7a774563661
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-26
+draft:                  true
+contributor_id:         Z71
