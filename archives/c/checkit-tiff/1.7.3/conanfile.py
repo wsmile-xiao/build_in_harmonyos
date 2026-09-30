@@ -115,9 +115,12 @@ class CheckitTiffConan(ConanFile):
         # and merging back keeps those files intact.
         source = self.conan_data["sources"]
         clone_folder = os.path.join(self.source_folder, "_clone")
-        git = Git(self)
-        git.clone(url=source["url"], target="_clone")
-        git.run(f'-C _clone checkout {source["commit"]}')
+        git = Git(self, clone_folder)
+        git.clone(url=source["url"], target=".")
+        # On OHOS the Conan worker UID can differ from the cache directory
+        # owner. Trust only this just-cloned directory for this checkout;
+        # do not persist a global safe.directory exception.
+        git.run(f'-c safe.directory="{clone_folder}" checkout {source["commit"]}')
         for name in os.listdir(clone_folder):
             src = os.path.join(clone_folder, name)
             dst = os.path.join(self.source_folder, name)

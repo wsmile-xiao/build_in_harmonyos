@@ -11,23 +11,25 @@
 # 7) 反向对照: 合法语法必须仍被接受（防止工具不可用导致上面几条假通过）
 set -euo pipefail
 
-BIN="checkit_tiff"
-CFG_DIR="${CHECKIT_TIFF_CFG_DIR:-/usr/local/share/checkit_tiff/example_configs}"
-TIFF_PASS_DIR="${CHECKIT_TIFF_PASS_DIR:-/usr/local/share/checkit_tiff/tiffs_should_pass}"
-TIFF_FAIL_DIR="${CHECKIT_TIFF_FAIL_DIR:-/usr/local/share/checkit_tiff/tiffs_should_fail}"
-
-# 如果是 conan test_package 环境，路径在 package_folder/share/checkit_tiff/
-if [ -n "${CONAN_PACKAGE_FOLDER:-}" ]; then
-    CFG_DIR="${CONAN_PACKAGE_FOLDER}/share/checkit_tiff/example_configs"
-    TIFF_PASS_DIR="${CONAN_PACKAGE_FOLDER}/share/checkit_tiff/tiffs_should_pass"
-    TIFF_FAIL_DIR="${CONAN_PACKAGE_FOLDER}/share/checkit_tiff/tiffs_should_fail"
+# 必须使用包目录下的绝对路径二进制，否则 L1e 破坏性测试会误判为通过
+if [ -z "${CONAN_PACKAGE_FOLDER:-}" ]; then
+    echo "ERROR: CONAN_PACKAGE_FOLDER not set — cannot locate package binaries" >&2
+    exit 1
 fi
+BIN="${CONAN_PACKAGE_FOLDER}/bin/checkit_tiff"
+CHECK_CONFIG_BIN="${CONAN_PACKAGE_FOLDER}/bin/checkit_check_config"
+CFG_DIR="${CONAN_PACKAGE_FOLDER}/share/checkit_tiff/example_configs"
+TIFF_PASS_DIR="${CONAN_PACKAGE_FOLDER}/share/checkit_tiff/tiffs_should_pass"
+TIFF_FAIL_DIR="${CONAN_PACKAGE_FOLDER}/share/checkit_tiff/tiffs_should_fail"
 
 echo "=== checkit-tiff test_package E2E tests ==="
 echo "Binary: $BIN"
 echo "Config dir: $CFG_DIR"
 echo "Pass TIFF dir: $TIFF_PASS_DIR"
 echo "Fail TIFF dir: $TIFF_FAIL_DIR"
+echo "CONAN_PACKAGE_FOLDER: ${CONAN_PACKAGE_FOLDER:-unset}"
+echo "Binary exists: $( [ -f "$BIN" ] && echo yes || echo no )"
+ls -la "$BIN" 2>/dev/null || echo "Binary not found at $BIN"
 
 # OHOS worker 的 /tmp 是只读文件系统（实测：/tmp/test_*.cfg: Read-only file system），
 # 所以不能硬编码 /tmp。优先用环境提供的 TMPDIR，退回 $HOME，再退回包目录。
@@ -96,7 +98,7 @@ run_test "mandatory tag 270 缺失被拒绝 (PCRE2 规则生效)" \
 # 断言会变成永远为真的空壳测试。所以这里统一用 printf '%s\n' 管道输入。
 echo ""
 echo "--- Test: PCRE2 配置语法验证 (正匹配) ---"
-if printf '%s\n' '270; mandatory; regex("^test.*")' | checkit_check_config >/dev/null 2>&1; then
+if printf '%s\n' '270; mandatory; regex("^test.*")' | "$CHECK_CONFIG_BIN" >/dev/null 2>&1; then
     echo "PASS: regex config accepted"
 else
     echo "FAIL: regex config rejected"
@@ -127,7 +129,7 @@ run_test "PCRE2 负匹配 (ImageWidth 不匹配 regex)" \
 # 同样必须走 stdin + 换行：argv 会被忽略，缺换行则非法的 "[invalid" 会被误判为合法
 echo ""
 echo "--- Test: PCRE2 配置语法验证 (负匹配/无效 regex) ---"
-if printf '%s\n' '256; mandatory; regex("[invalid")' | checkit_check_config >/dev/null 2>&1; then
+if printf '%s\n' '256; mandatory; regex("[invalid")' | "$CHECK_CONFIG_BIN" >/dev/null 2>&1; then
     echo "FAIL: invalid regex should be rejected"
     exit 1
 else
@@ -137,7 +139,7 @@ fi
 # 反向对照: 确认上面的拒绝不是因为工具缺失/整体不可用，而是真的在校验语法
 echo ""
 echo "--- Test: checkit_check_config 可用性对照 (合法语法必须被接受) ---"
-if printf '%s\n' '256; mandatory; any' | checkit_check_config >/dev/null 2>&1; then
+if printf '%s\n' '256; mandatory; any' | "$CHECK_CONFIG_BIN" >/dev/null 2>&1; then
     echo "PASS: checkit_check_config is functioning"
 else
     echo "FAIL: checkit_check_config rejected a valid grammar"
