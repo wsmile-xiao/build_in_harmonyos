@@ -1,0 +1,127 @@
+# test_package/MANIFEST.yml
+# 上游官方测试声明文件 — CI 脚本 (build_and_test.sh L0e) 强制要求存在
+# 详见: docs/TEST_QUALITY_SPEC.md
+#
+# R51 上游测试清点（本包实测，见 notes.md 证据）：
+#   plasma-wayland-protocols 1.14.0 上游**确无任何测试套件**：
+#     * 源码树无 tests/ 目录
+#     - `tar tf plasma-wayland-protocols-1.14.0.tar.xz | grep -cE '/tests?/'` -> 0
+#     - `grep -rniE 'enable_testing|add_test|ctest' <src>` -> 0 命中
+#   上游 CMakeLists.txt 仅做 install()（XML 数据 + CMake 包配置），无 ctest 目标。
+#   因此 upstream_tests = 0；本 PR 的实质测试全部落在 test_package（消费者视角）。
+
+package: plasma-wayland-protocols/1.14.0
+homepage: "https://invent.kde.org/libraries/plasma-wayland-protocols"
+
+# 上游无测试：无 make check / ctest / meson test 可执行
+upstream_check_command: "n/a (upstream ships no test suite)"
+upstream_test_in_build: false
+upstream_test_command: "n/a (upstream ships no test suite)"
+
+# 上游实际测试程序：0（清点证据见上）
+upstream_tests: []
+
+# test_package 中自带的测试（消费者视角验证，R34 实质依赖被测包）
+test_package_tests:
+  - file: CMakeLists.txt
+    description: >-
+      真实消费者工程：find_package(PlasmaWaylandProtocols 1.9.0 CONFIG REQUIRED)
+      后断言 PLASMA_WAYLAND_PROTOCOLS_DIR 存在且 22 个 kwayland5 需要的协议 XML 全部存在
+      （CMake 配置期 FATAL_ERROR 兜底）。由 test_package/conanfile.py 的 build() 执行。
+    command: "cmake configure (find_package CONFIG REQUIRED)"
+  - file: test_protocols.sh
+    description: >-
+      定位包内原生 PlasmaWaylandProtocolsConfig.cmake，用 `cmake -P` 求值出
+      PLASMA_WAYLAND_PROTOCOLS_DIR，再交给 validate_protocols.py 做全量 XML 校验，
+      并把包目录一并传入以断言该目录确实位于包内。启用 `set -o pipefail`，
+      且用 `find -print -quit` 取代 `find | head -1`（后者在 set -e 下会让 find
+      的失败退出码被管道吞掉，启用 pipefail 后又会因 SIGPIPE 提前中止而不打印
+      assertions 汇总行）。
+    command: "bash test_protocols.sh <package_folder>"
+  - file: validate_protocols.py
+    description: >-
+      逐协议断言：文件存在 + 非空 + 合式 XML + 根元素 <protocol> + <protocol name=...>
+      非空 + 至少一个 <interface name=... version=...>。两处向后兼容重命名
+      （plasma-virtual-desktop.xml、screencast.xml）在独立的一遍中校验其
+      <protocol name> 与上游原名一致——两者都不是 kwayland5 直接消费的源文件名，
+      因此不能只靠遍历 PROTOCOLS 触发（否则装错文件仍会报 failures=0）。
+      打印 `assertions=N failures=0`，任一失败即非零退出。
+    command: "python3 validate_protocols.py <PLASMA_WAYLAND_PROTOCOLS_DIR>"
+  - file: e2e/plasma_e2e.c
+    description: >-
+      **鸿蒙特有测试 / 完整消费者用例（rule 12）**：一个真正跑通功能流程的端到端用例，
+      而非断言清单。数据包的真实消费方式就是「把协议描述变成代码、再说这个协议」——
+      该用例正是如此：
+      ① 构建期，本包安装的 <PLASMA_WAYLAND_PROTOCOLS_DIR>/keystate.xml（经包内原生
+      PlasmaWaylandProtocolsConfig.cmake 解析出的路径）被 e2e/gen_protocol.py 翻译成
+      wl_interface 表与客户端/服务端调用包装，编译进本二进制；
+      ② 运行期，生成的代码在真实 libwayland 上做一次完整的 client<->server 交换：
+      server = wl_display_create + wl_client_create(fd) + wl_global_create(org_kde_kwin_keystate v4)，
+      client = wl_display_connect_to_fd + wl_display_get_registry + wl_registry_bind +
+      生成的 fetchStates()，服务端 handler 被解出后经生成的事件发送器回 stateChanged(key,state)，
+      客户端监听器收到后**逐字节比对载荷**（numlock=1 / locked=2），最后生成的 destructor
+      请求也被服务端 handler 解出；
+      ③ 用例还校验「包内实际安装的 XML 与生成绑定所依据的 XML 是同一文件」
+      （内建 FNV-1a 指纹与生成期写入表头的 KEYSTATE_XML_FNV1A64 比对），
+      避免出现「测的不是本包交付的那份协议描述」。
+      实测输出（conan create 全流程）：
+        E2E STEP installed XML fingerprint=0xc9754fd4fb39165d, bindings built from 0xc9754fd4fb39165d
+        CLI: global org_kde_kwin_keystate name=1 version=4
+        SRV: global bound (version 4)
+        SRV: fetchStates() decoded from the generated protocol
+        CLI: stateChanged(key=1, state=2) received
+        SRV: destroy() decoded from the generated protocol
+        E2E STEP client events=1 key=1 state=2; server binds=1 fetchStates=1 destroys=1
+        hongmeng_e2e_flow=PASS
+      任一阶段失败即以非零码退出（ctest 记为真实失败）。
+    command: "ctest --test-dir <build> --output-on-failure (plasma_keystate_e2e)"
+  - file: e2e/gen_protocol.py
+    description: >-
+      构建期协议生成器：读取本包安装的 keystate.xml，产出 keystate-protocol.h/.c
+      （枚举、请求/事件 opcode、listener 结构、客户端调用包装、服务端 handler 结构、
+      事件发送器、wl_interface 表）。**严格失败**：XML 缺失、非合式、根元素不对、
+      接口数量/版本不符、含本生成器无法精确翻译的参数类型、产出空文件，任一条即让
+      构建失败——从根上排除「生成空壳仍通过」。
+      为什么测试自带生成器：本机 wayland/1.22.0 包内的 wayland-scanner 是可执行性被 OHOS
+      加载器拒绝的 ELF（PR #13500 修复），故测试构建期无法调用上游 scanner；生成规则与
+      上游一致，已用真实 wayland-scanner 1.22.0 对同一 XML 的输出逐项对齐核对
+      （消息签名表 `{"fetchStates",""}`/`{"destroy","4"}`/`{"stateChanged","uu"}`、
+      接口名与版本、2 requests / 1 event 完全一致）。
+    command: "cmake 构建期 add_custom_command 调用"
+  - file: conanfile.py
+    description: >-
+      测试驱动：generate() 声明 wayland/1.22.0 为**仅测试用**依赖并把 python 解释器与
+      wayland 的 include/lib 目录显式传给 CMake；build() 先跑消费者工程配置与协议完整性
+      断言，再编译端到端用例（其协议绑定在构建期由包内 XML 生成）；test() 先执行
+      test_protocols.sh（143 项 XML 断言），再组装 LD_LIBRARY_PATH + /system/lib64 后
+      执行 ctest 运行端到端流程。
+    command: "conan create (test() 阶段)"
+
+# ── 测试计数 ────────────────────────────────────────────────────────────────
+# 上游：0（上游确无测试套件，清点证据见上）
+# 适配后 XML 校验断言：143（test_protocols.sh + validate_protocols.py，实测 assertions=143 failures=0）
+# 适配后完整消费者用例：1（plasma_keystate_e2e，端到端真往返，实测 PASS，自身 22 条断言）
+# ctest 用例总数：1 —— 实测 `100% tests passed, 0 tests failed out of 1`（通过率 100%）
+#
+# 鸿蒙特有测试数 = 1（rule 12）：plasma_keystate_e2e 是完整流程用例（真 socketpair、
+# 见上），不是纯断言。
+hongmeng_specific_tests: 1
+ctest_cases: 1
+e2e_consumer_case:
+  name: plasma_keystate_e2e
+  kind: full-consumer-flow
+  transport: "socketpair(AF_UNIX, SOCK_STREAM) + wl_display_create/wl_client_create + wl_display_connect_to_fd"
+  evidence: "hongmeng_e2e_flow=PASS; stateChanged(key=1,state=2) 原样到达；destroy() 被服务端 handler 解出"
+  verified_output: "100% tests passed, 0 tests failed out of 1"
+
+# 断言总数：上游 0 + test_package 实测 143（`conan create` 端到端，validate_protocols.py 输出）。
+# 计数可核对（143 = 3 + 133 + 7）：
+#   3   = PLASMA_WAYLAND_PROTOCOLS_DIR 存在 + 位于包内(realpath 前缀) + 目录名 basename 正确
+#   133 = 22 个 kwayland5 消费的协议 XML：21 个各 6 条（存在/非空/根标签 <protocol>/
+#         name 非空/有 <interface>/interface 均有 name+version），plasma-virtual-desktop.xml
+#         另加 1 条重命名协议名断言 → 21×6 + 7
+#   7   = screencast.xml 在独立的第二遍校验：6 + 1 条重命名协议名断言
+# 该数字为实测值。此前记录的 156 含 1 条恒真占位断言 `check(True, "")`（已移除），
+# 且当时的重命名校验因 screencast 不在 PROTOCOLS 中而从未执行——现已修正并复核。
+assertion_count: 143
+assertion_count_status: "executed (143 passed, 0 failed, exit 0) + 1 end-to-end consumer case (22 assertions, PASS)"
