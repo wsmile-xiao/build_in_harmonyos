@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-10005-musl-strtol-einval-on-non-numeric-proc-entries
+# musl 的 strtol() 对无数字串置 errno=EINVAL，破坏 "errno != 0" 解析判据
+# 来源: memstat 1.2 适配 (2026-09-29)
+#====================================================================
+
+id:                     DRAFT-10005
+trigger_tool:           clang|conan create|make
+phase:                  compilation|runtime
+error_signature:        use of undeclared identifier 'PATH_MAX'|strtol: Invalid argument|Wfortify-source: destination buffer in argument 5 has size 4, but the corresponding specifier may require size 5|'sscanf' may overflow
+match_keywords:         PATH_MAX, limits.h, strtol, errno, EINVAL, readdir, /proc, perror, exit, Wfortify-source, sscanf, %ms, perm[4], musl, glibc, memstat, undeclared identifier, cascade
+category:               libc, porting, compilation
+severity:               2
+status:                 draft
+agent_id:               A7F3
+forbid_1_pattern:       _GNU_SOURCE
+forbid_1_reason:        本条目根因与特性测试宏无关；那属 E032 的领域（musl 需要 _BSD_SOURCE/_GNU_SOURCE 才暴露 dirent API）。
+forbid_2_pattern:       program_invocation_name|__progname
+forbid_2_reason:        本条目不涉及 glibc 专有符号；那是 E493 的领域。
+root_cause: >
+  照 glibc 写的 C 代码迁到 OHOS 的 musl libc 时，三个"glibc 上看不见"的点集中
+  出现在同一类小工具（读 /proc 的诊断/统计类程序，常见于 1990-2010 年代的手写
+  Makefile 项目）上：
+  (1) PATH_MAX 在 glibc 下由其它头文件传递引入（sys/stat.h -> bits/posix1_lim.h），
+  musl 不传递引入。源码没 #include <limits.h> 时，第一行缓冲区声明直接
+  "use of undeclared identifier 'PATH_MAX'"，随后同一声明语句里的 buff/path/perm
+  全部级联报错，clang 一次吐 20 条 "too many errors emitted"，真实根因只有 1 条；
+  (2) sscanf 的 "%4s" 写入 char perm[4] —— N 字符字段还需要结尾 NUL，共需 N+1 字节，
+  实际每次解析都越界写 1 字节。OHOS 工具链（clang 15 + fortify）报
+  -Wfortify-source: destination buffer ... has size 4, but the corresponding
+  specifier may require size 5；
+  (3) **最隐蔽也最致命**：readdir("/proc") 的第一个条目是 "."。上游常见写法
+  `errno = 0; pid = strtol(ent->d_name, NULL, 10); if (errno != 0) { perror("strtol"); exit(1); }`
+  把 errno 当作"解析成功"的判据。glibc 的 strtol 在无转换发生时不碰 errno，
+  所以该分支恒不触发；**musl 的 strtol() 对无数字字符串显式 errno = EINVAL**，
+  于是循环第一次迭代就 "strtol: Invalid argument" + exit(1)，程序一个字节都
+  输出不出来 —— 编译通过、功能全废，且在 glibc 开发机上完全无法复现。
+rec_approach: >
+  三处分别按"最小可移植改动"修，全部是纯 C，不引入任何平台宏（__OHOS__ 等），
+  且在 glibc 下同样编译通过、行为不变：
+  (1) 显式 #include <limits.h>（不是 #ifdef __OHOS__ 兜底 —— OHOS 的
+  <limits.h> 本来就提供 PATH_MAX 4096，glibc 亦然，纯粹是缺 include）；
+  (2) 把定长字段缓冲从 perm[4] 放大到 perm[5]（按 %Ns 的 N+1 定长），
+  而不是把 %4s 改成 %3s —— 后者会静默截断 perm 字段第 4 个字符
+  （/proc/<pid>/maps 的权限位恰好是 4 字符 rwxp/r--s，截断会改变 shared 判定）；
+  (3) 用 strtol 的 endptr 判别"没发生转换"与"真的溢出"，从而保留上游的溢出检测语义：
+      char *endp;
+      errno = 0;
+      pid = strtol(ent->d_name, &endp, 10);
+      if (endp == ent->d_name) { continue; }   /* "." ".." "self" "sys" 等非数字条目 */
+      if (errno != 0) { perror("strtol"); exit(1); }   /* 仅数值溢出才致命 */
+  排查口诀：读 /proc 的程序在 musl 上"编译干净但一跑就 strtol: Invalid argument"，
+  几乎一定是这一条；先在 musl 上单独验证 strtol 行为，别在 glibc 上复现。
+  附带确认：%ms（scanf 的分配修饰符 glibc 扩展）在 OHOS musl 上是**支持**的，
+  不需要为它打补丁 —— 不要凭"glibc 扩展"就预判要改。
+rec_command: >
+  conan create archives/m/memstat/1.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_cmd: >
+  conan create archives/m/memstat/1.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_expect: >
+  三段式证据链（本条已实测）：
+  (a) 不打补丁 -> 编译期即失败，"use of undeclared identifier 'PATH_MAX'" 级联 20 条；
+  (b) 只打 limits.h 那一段 -> 编译通过，但运行 `memstat -n -p 1` 立刻
+      "strtol: Invalid argument" exit 1 —— 证明 (3) 是独立的第三个缺陷；
+  (c) 三段全打 -> conan create rc=0，test_package 5/5 PASS，其中用例 3/4/5
+      （-p <self> 真扫 /proc、独占过滤、不存在 pid）正是 (3) 的回归测试。
+      反向验证：删除补丁后 (a)(b) 复现，确认测试对补丁敏感、非空壳。
+evidence:
+  - "archives/m/memstat/1.2/patches/0001-memstat-c-musl-strtol-errno-and-path-max.patch"
+  - "archives/m/memstat/1.2/notes.md（OHOS 适配要点 1/2/3 节）"
+  - "archives/m/memstat/1.2/test_package/test_memstat.c（用例 3/4/5 为回归测试）"
+  - "本地 conan create：prdiff 门禁 G0/KC/JC/L0/L1 全过，5/5 断言 PASS"
+  - "graph 引擎核验：E493（program_invocation_name）、E032（_BSD_SOURCE 暴露 dirent）
+     为邻近 musl 主题但根因不同，-Wfortify-source/sscanf 越界与 musl strtol errno 无命中"
+applies_to:
+  - "读 /proc/<pid>/maps、/proc/meminfo 的诊断/统计类 C 工具（memstat/pmap/smaps 类）"
+  - "1990-2010 年代手写 Makefile 的小 C 项目（无 autotools/cmake）"
+  - "任何用 readdir() 遍历目录再用 strtol/atol 解析条目名的程序"
+  - "任何在 scanf 家族用 %Ns 写定长 char buf[N] 的解析代码"
+principles:              P005, P011
+caused_by:

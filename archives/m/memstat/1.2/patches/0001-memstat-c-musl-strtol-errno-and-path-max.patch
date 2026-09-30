@@ -1,0 +1,64 @@
+From: memstat 1.2 OHOS adaptation
+Subject: [PATCH] memstat: make the /proc scanner portable to the OHOS (musl) libc
+
+memstat 1.2 was written against glibc.  Three constructs break when the
+same source is compiled against the musl-based OHOS libc:
+
+1. PATH_MAX sizes the /proc/<pid>/maps line buffer but <limits.h> is
+   never included, so it is only reachable on glibc where another header
+   pulls it in transitively.  On OHOS the declaration fails and every
+   later use of `buff` cascades into "undeclared identifier".
+
+2. sscanf() is given "%4s" writing into perm[4].  A 4-character field
+   plus the terminating NUL needs 5 bytes, so this is a one-byte
+   out-of-bounds write that the OHOS toolchain reports as
+   -Wfortify-source.  Size the buffer to match the field width.
+
+3. read_proc() treats "errno != 0" after strtol(ent->d_name, ...) as a
+   fatal parse error.  musl's strtol() sets errno to EINVAL when the
+   string holds no digits at all, so the first readdir() entry (".")
+   aborts the whole scan with "strtol: Invalid argument" and exit 1 --
+   memstat cannot report anything at all on OHOS.  glibc leaves errno
+   untouched in that case, which is why the bug is invisible upstream.
+   Distinguish "no conversion happened" (endptr still at the start,
+   i.e. a non-numeric /proc entry such as ".", "..", "self", "sys")
+   from a genuine numeric overflow.
+
+No platform macros are introduced; the changes are plain C and also
+compile and behave identically against glibc.
+
+diff --git a/memstat.c b/memstat.c
+index 5039fb0..873caed 100644
+--- a/memstat.c
++++ b/memstat.c
+@@ -19,6 +19,7 @@
+ #include <unistd.h>
+ #include <getopt.h>
+ #include <errno.h>
++#include <limits.h>
+
+ /* blacklist devices that just map physical memory */
+ char *blacklist[] = {
+@@ -64,7 +65,7 @@ static void read_proc(void)
+ {
+     unsigned int nread, pid;
+     unsigned long inode, lo, hi, offs;
+-    char *p, major[8], minor[8], buff[PATH_MAX + 300], *path, perm[4];
++    char *p, major[8], minor[8], buff[PATH_MAX + 300], *endp, *path, perm[5];
+     DIR *d;
+     struct dirent *ent;
+     FILE *f;
+@@ -80,8 +81,11 @@ static void read_proc(void)
+ 	if (ent == NULL)
+ 	    break;
+ 	errno = 0;
+-	pid = strtol(ent->d_name, NULL, 10);
+-	if (errno != 0) {
++	pid = strtol(ent->d_name, &endp, 10);
++	if (endp == ent->d_name) {	/* not a pid directory */
++		continue;
++	}
++	if (errno != 0) {		/* numeric overflow */
+ 		perror("strtol");
+ 		exit(1);
+ 	}
