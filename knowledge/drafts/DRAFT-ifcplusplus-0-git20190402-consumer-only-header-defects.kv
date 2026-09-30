@@ -1,0 +1,139 @@
+#====================================================================
+# DRAFT-ifcplusplus-0-git20190402-consumer-only-header-defects —
+#   上游测试数为 0 的库，缺陷只在下游消费者实例化公开头模板时才暴露：
+#   lambda 返回类型推导冲突（模板只在被调用时实例化）与 C++17 已移除设施
+#   （auto_ptr / bind1st / bind2nd）在 libc++ 下的硬失败。
+#   完整叙事与最小复现见同目录 .md
+#====================================================================
+
+id:                     DRAFT-ifcplusplus-0-git20190402-consumer-only-header-defects
+trigger_tool:           clang++|cmake|conan|ctest
+phase:                  build
+error_signature:        return type 'int' must match previous return type 'uint8_t' when lambda expression has unspecified explicit return type|no member named 'auto_ptr' in namespace 'std'|no member named 'bind2nd' in namespace 'std'|no member named 'bind1st' in namespace 'std'
+severity:               3
+category:               portability, build-system, cmake, detection, headers
+match_keywords:         lambda unspecified explicit return type, return type must match previous return type, uint8_t, int, auto_ptr, unique_ptr, bind1st, bind2nd, mem_fun, ptr_fun, libc++, C++17 removed, header-only template instantiation, 消费者端实例化, 上游零测试, 公开头缺陷, ifcplusplus, carve, BuildingGuid, decodeBase64Uuid
+
+title:                  上游零测试的库，编译期缺陷只在下游消费者实例化公开头模板时才暴露——lambda 返回类型推导冲突与 C++17 已移除设施（auto_ptr/bind1st/bind2nd）在 libc++ 下硬失败
+root_cause:             这类库“上游能编译通过”与“下游能编译通过”是两件不同的事，根因是缺陷位于公开头文件的模板体或内联函数体内，其编译只在被实例化时发生：
+                         ① 模板/内联体延迟实例化掩盖缺陷：IFC++ 快照 13744d5 的公开头 BuildingGuid.h 中，函数模板
+                         decodeBase64Uuid<T>() 内有一个不带尾置返回类型的 lambda，体内同时存在 `return i`（i 为 uint8_t 循环变量）
+                         与 not-found 分支的 `return 0`（int）。lambda 返回类型推导要求所有 return 一致，clang 直接报
+                         "return type 'int' must match previous return type 'uint8_t' when lambda expression has unspecified explicit return type"。
+                         上游自身从不调用这个函数，模板因此从不被实例化，仓库“编译正常”；配方若只构建库本身也同样是绿的——
+                         直到 test_package 里消费者真的调用 decodeBase64Uuid()，缺陷才第一次变成编译错误。
+                         ② C++17 已移除设施 + libc++ 严格执行：同快照内置的 Carve 几何内核（external/Carve）用
+                         std::auto_ptr（8 处）、std::bind1st（1 处）、std::bind2nd（2 处）。这些设施在 C++17 被移除，
+                         libc++ 按标准直接删除（不像 libstdc++ 在部分模式下保留）；profile 固定 compiler.cppstd=17，
+                         于是 carve 的 intersect.cpp / mesh.cpp / spacetree.hpp 编译失败。注意错误信息是
+                         "no member named 'auto_ptr' in namespace 'std'"——不是 deprecation 警告，没有任何渐进过渡余地。
+                         ③ 与 ① 的组合效应：因为上游没有测试（无 add_test、无测试框架、无 CI 配置），
+                         ①②都不会被上游自己发现；而仅做“库能编译”的验证同样发现不了 ①。
+                         判据：对零测试库，必须有一个真正实例化公开 API 的消费者用例，否则适配是未验证的。
+affected_scope:         所有上游无测试框架 / 无 add_test 注册的 C++ 库（尤其 header-only 与“静态库+公开头”形态），
+                         以及内置了老旧第三方源码的库。已实测：ifcplusplus 0-git20190402.13744d5
+                         （git 快照 13744d58f9b99ce3b4d49567b7085917cd7a6a3c，上游无任何测试用例，唯一可执行目标是 Qt viewer example）。
+verification_cmd:       # 1) 先确认“上游到底有没有测试”——决定验证策略
+                        grep -rn "add_test\|enable_testing" . --include=CMakeLists.txt   # 空 → 无 CTest 注册
+                        ls -d test tests unittest */*test* 2>/dev/null                     # 无测试目录
+                        grep -rniE "gtest|catch2|doctest|boost/test" . --include=CMakeLists.txt
+                        # 2) 关键一步：证明公开头模板是否“从未被实例化过”
+                        grep -rn "decodeBase64Uuid\|createBase64Uuid" <src>                # 上游内部零调用点
+                        # 3) 编译期缺陷最小复现（不依赖本库，纯语言规则）
+                        cat > /tmp/probe.cpp <<'EOF'
+                        #include <cstdint>
+                        template<typename T> int f(T const in) {
+                            static constexpr T a[4] = {'0','1','2','3'};
+                            auto idx = [](T const in){
+                                for (uint8_t i = 0; i < 4; i++) if (in == a[i]) return i;
+                                return 0;                       // int 0 vs uint8_t i
+                            };
+                            return idx(in);
+                        }
+                        int main(){ return f<char>('1'); }
+                        EOF
+                        clang++ -std=c++17 -c /tmp/probe.cpp -o /tmp/probe.o
+                        # 期望：error: return type 'int' must match previous return type 'uint8_t'
+                        # 4) C++17 移除设施清点（内置第三方源码也要扫）
+                        grep -rn "auto_ptr\|bind1st\|bind2nd\|mem_fun\|ptr_fun" <src>       # 逐条定位
+
+rec_priority:           1
+rec_approach:           instantiate-public-headers-before-declaring-portable
+rec_description:        四步，顺序不可颠倒：
+                        (1) 先定性——扫上游有无 add_test/enable_testing、有无测试框架、有无 CI 配置。结论为“零上游用例”时，
+                            把“存在真实实例化公开 API 的消费者用例”当成适配完成的先决条件，而不是可选项；
+                            只有库编译通过（绿色构建）不构成任何可移植性证据。
+                        (2) 修 ①（模板体内缺陷）——最小改动是给不带尾置返回类型的 lambda 补上显式返回类型
+                            （`[](T const in) -> uint8_t`），或在某条 return 上做显式转换使类型一致；
+                            不要改调用方，也不要把 lambda 整个重写成别的结构——显式返回类型是最贴近原意的修复。
+                        (3) 修 ②（C++17 移除设施）——按语义一对一替换，保持行为不变：
+                            std::auto_ptr<T> → std::unique_ptr<T>（仅当原用途是作用域内 RAII、只以 .get() 交出裸指针、无拷贝转移；
+                            有拷贝转移语义时必须逐处确认，不能盲替换）；std::bind2nd(f, x) → [x](const auto& v){ return f(v, x); }；
+                            std::bind1st(f, x) → [x](const auto& v){ return f(x, v); }；并补齐 <memory> 等直接依赖的头
+                            （原来靠间接包含 auto_ptr 的翻译单元在替换后可能缺 <memory>）。
+                        (4) 复用同一份消费者用例当回归门——test_package 里真实调用公开头模板（含边界与非法输入分支），
+                            让“模板被实例化”这件事在 CI 每次 conan create 时都被强制执行，避免同类缺陷再次静默存活。
+rec_command:            # (a) 缺陷最小修复：显式 lambda 返回类型
+                        #     auto index_of = [](T const in) -> uint8_t {
+                        #         for (uint8_t i = 0; i < base64Chars.size(); i++)
+                        #             if(in == base64Chars[i]) return i;
+                        #         return 0;
+                        #     };
+                        # (b) C++17 移除设施替换
+                        #     std::auto_ptr<face_rtree_t> a_rtree(...)          →  std::unique_ptr<face_rtree_t> a_rtree(...)
+                        #     std::bind2nd(std::not_equal_to<const vertex_t*>(), next)
+                        #       → [next](const vertex_t* v) { return v != next; }
+                        #     std::bind1st(intersection_test, children[i].aabb)
+                        #       → [&](const typename child_t::aabb_t& a) { return intersection_test(children[i].aabb, a); }
+                        # (c) 消费者用例必须真实实例化模板（不能只 #include）
+                        #     boost::uuids::uuid u = decodeBase64Uuid<char>(createBase64Uuid<char>());
+                        #     if (u.is_nil()) return 1;      // 走到实例化，才会触发编译期缺陷
+rec_auto_fix:           false
+rec_impl:               conan-recipe-build-test
+
+fallback_priority:      2
+fallback_approach:      bypass-in-tree-thirdparty-instead-of-patching
+fallback_description:   当内置第三方源码的 C++17 现代化改动面过大（例如数百处 auto_ptr 且存在拷贝转移语义）而不适合逐处补丁时，
+                        可改为让项目使用系统/Conan 提供的同名依赖（上游 CMake 常留 FIND_PACKAGE 开关），把内置副本排除出构建；
+                        但这会改变交付的库内容与依赖图，必须同步更新依赖清单、notes 与 PR 的依赖项字段，并说明为何选择绕过而非修复。
+                        诚实权衡：绕过让改动变小，但交付物不再自包含；若目标平台没有对应的 Conan 包，这条路直接不可用。
+fallback_command:       cmake -DCARVE_SYSTEM_BOOST=ON -DUSE_SYSTEM_CARVE=ON ...
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-build-test
+
+forbid_1_pattern:       build\(\):\s*pass|# *测试.*跳过|skip.*upstream test|无测试.*不需要验证
+forbid_1_reason:        因为“上游没有测试”就跳过消费者侧验证。零上游用例恰恰意味着缺陷只可能在下游暴露，
+                        跳过验证等于把最需要验证的类别排除在外。
+forbid_1_consequence:   模板体内缺陷与内置第三方源码不兼容继续静默存活到下游，适配结论无法成立。
+
+forbid_2_pattern:       -D?CARVE_NODEBUG|#define CARVE_NODEBUG|-DNDEBUG.*掩盖.*assert|define CARVE_ASSERT\(X\)$
+forbid_2_reason:        用关闭断言来“解决”运行时中止。Carve 的 CARVE_ASSERT 抛 carve::exception；测试中止的根因通常是
+                        调用约定写错（如 MeshSet 的 face_indices 是"每面一段 [N,i0..iN-1]"的扁平编码，不是三角形三元组），
+                        关掉断言只会让错误数据静默流过，掩盖真实的误用。
+forbid_2_consequence:   消费者误用被静默接受，几何结果错误且无法定位，回归缺陷被掩盖。
+
+forbid_3_pattern:       sed.*auto_ptr|perl.*auto_ptr|sed -i.*std::bind
+forbid_3_reason:        用无校验的批量文本替换改动源码。auto_ptr → unique_ptr 只有在“作用域内 RAII、无拷贝转移”时才语义等价，
+                        盲替换会引入编译错误或微妙的生命周期改变；必须逐处确认并把补丁纳入版本管理的 patches/。
+forbid_3_consequence:   修复引入新缺陷且不可审查，补丁无法按文件粒度复核。
+
+principles:             P-BUILD-001, P-PATCH-003, P-TEST-004
+causes:                 []
+caused_by:              []
+similar_to:             [E581, E363]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ifcplusplus-0-git20190402-consumer-only-header-defects.md
+last_updated:           2026-09-30
+source_event:           ifcplusplus 0-git20190402.13744d5（git 快照 13744d58f9b99ce3b4d49567b7085917cd7a6a3c，2019-04-02）
+                        鸿蒙 PC aarch64 适配。上游零测试用例；配方改造自同仓 2.5 版；两处编译期缺陷均只在
+                        test_package 消费者用例真实实例化公开头模板时才暴露。
+authors:                Quas
+source_pr:              (PR 建后回填)
+source_commit:          (commit 时回填)
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:      2026-09-30
