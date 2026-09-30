@@ -13,6 +13,7 @@
 import os
 import shutil
 import stat
+import struct
 import subprocess
 import tempfile
 
@@ -105,6 +106,7 @@ class GsettingsQtTestConan(ConanFile):
             os.chmod(path, original_mode)
 
     def test(self):
+        self._check_soname()
         self._check_pkg_config_metadata()
         if not can_run(self):
             self.output.info("Skipping execution: cross-build without emulator")
@@ -112,6 +114,68 @@ class GsettingsQtTestConan(ConanFile):
         os.environ["GSETTINGS_SCHEMA_DIR"] = self.build_folder
         os.environ["GSETTINGS_BACKEND"] = "memory"
         self.run(self._test_binary(), env="conanrun", ignore_errors=False)
+
+    def _check_soname(self):
+        """HarmonyOS L5a 门禁：验证库携带 DT_SONAME（下游链接器按名寻址）。
+        上游 src/CMakeLists.txt 的 SOVERSION=1 会正常传播为
+        'libgsettings-qt6.so.1'；解析 ELF .dynamic 段验证（纯 Python，
+        无 readelf 依赖）。"""
+        if str(self.settings.os) != "OHOS":
+            self.output.info("SONAME check skipped (non-OHOS)")
+            return
+        lib = os.path.join(
+            self.dependencies[self.tested_reference_str].package_folder,
+            "lib", "libgsettings-qt6.so",
+        )
+        with open(lib, "rb") as handle:
+            elf = handle.read()
+        soname = self._elf_soname(elf)
+        if not soname or not soname.startswith("libgsettings-qt6.so"):
+            raise ConanInvalidConfiguration(
+                "DT_SONAME missing or wrong in libgsettings-qt6.so: {!r}".format(soname)
+            )
+        self.output.info("DT_SONAME verified: {}".format(soname))
+
+    @staticmethod
+    def _elf_soname(elf):
+        """Parse DT_SONAME from an ELF64 little-endian binary (pure Python)."""
+        if elf[:4] != b"\x7fELF" or elf[4] != 2:
+            return None
+        e_phoff = struct.unpack_from("<Q", elf, 0x20)[0]
+        e_phentsize = struct.unpack_from("<H", elf, 0x36)[0]
+        e_phnum = struct.unpack_from("<H", elf, 0x38)[0]
+        loads = []
+        dyn_off = dyn_size = None
+        for i in range(e_phnum):
+            off = e_phoff + i * e_phentsize
+            p_type = struct.unpack_from("<I", elf, off)[0]
+            p_offset = struct.unpack_from("<Q", elf, off + 8)[0]
+            p_vaddr = struct.unpack_from("<Q", elf, off + 16)[0]
+            p_filesz = struct.unpack_from("<Q", elf, off + 32)[0]
+            if p_type == 2:  # PT_DYNAMIC
+                dyn_off, dyn_size = p_offset, p_filesz
+            elif p_type == 1:  # PT_LOAD
+                loads.append((p_vaddr, p_offset, p_filesz))
+        if dyn_off is None:
+            return None
+        strtab_vaddr = None
+        soname_off = None
+        for i in range(dyn_size // 16):
+            d_tag, d_val = struct.unpack_from("<qQ", elf, dyn_off + i * 16)
+            if d_tag == 0:  # DT_NULL
+                break
+            if d_tag == 5:  # DT_STRTAB
+                strtab_vaddr = d_val
+            elif d_tag == 14:  # DT_SONAME
+                soname_off = d_val
+        if strtab_vaddr is None or soname_off is None:
+            return None
+        for vaddr, offset, size in loads:
+            if vaddr <= strtab_vaddr < vaddr + size:
+                base = offset + (strtab_vaddr - vaddr)
+                end = elf.index(b"\x00", base + soname_off)
+                return elf[base + soname_off:end].decode("utf-8", "replace")
+        return None
 
     def _check_pkg_config_metadata(self):
         pc_file = os.path.join(
