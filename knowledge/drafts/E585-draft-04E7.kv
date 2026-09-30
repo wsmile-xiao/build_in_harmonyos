@@ -1,0 +1,78 @@
+#====================================================================
+# E585 草稿 — 严格 ANSI（-ansi / -std=c89）编译让 musl 隐藏 POSIX 声明，
+#              隐式 int + 显式 (char *) 强转截断 64 位指针，编译仅告警、运行即 SIGSEGV
+# 触发实例: tal/1.9（2026-09-24，HarmonyOS PC aarch64 适配）
+# 对应文档: knowledge/drafts/E585-draft-04E7.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E585
+trigger_tool:           runtime
+phase:                  runtime
+error_signature:        cast to 'char \*' from smaller integer type 'int' \[-Wint-to-pointer-cast\]|implicit declaration of function '(strdup|strndup|strcasecmp|strncasecmp|fdopen|popen|fileno)'.*\[-Wimplicit-function-declaration\]
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               3
+category:               musl, headers, portability, runtime, make
+prescan_pattern:        CFLAGS\s*[:+?]?=\s*"?[^#\n]*(-ansi\b|-std=(c89|c90|iso9899:1990)\b)
+match_keywords:         -ansi, __STRICT_ANSI__, strict ANSI, C89, -std=c89, implicit declaration, strdup, strcasecmp, int-to-pointer-cast, pointer truncation, SIGSEGV, Segmentation fault, make linux, platform target, features.h, _DEFAULT_SOURCE
+title:                  老式 Makefile/CFLAGS 固定 -ansi（-std=c89）：musl 在 __STRICT_ANSI__ 下隐藏 strdup/strcasecmp 等 POSIX 声明，C89 隐式 int 加显式 (char *) 强转把 64 位指针截断，编译只有告警、运行即 SIGSEGV
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             -ansi（等价 -std=c89）使编译器预定义 __STRICT_ANSI__；musl features.h 只在未定义 __STRICT_ANSI__ 时才默认开启 _BSD_SOURCE/_XOPEN_SOURCE，于是 string.h 不再声明 strdup 等 POSIX 扩展，也不再引入 strings.h（strcasecmp）。
+                        C89 允许隐式函数声明，调用被当作返回 int；源码里的显式 (char *) 强转又把 clang 本应报错的 int→指针隐式转换降级为仅 -Wint-to-pointer-cast 告警（不带 -Wall 时连 implicit-declaration 告警都不显示），构建看似成功。
+                        在 LP64 的 aarch64 上 musl 分配器返回的堆地址高于 32 位可表示范围，strdup 结果被截断为 32 位再符号扩展，首次解引用即 SIGSEGV（tal 1.9 实测：-static 与 -static-pie 两种链接方式均崩溃，qemu 退出码 139）。
+                        在 int 与指针同宽的 ILP32 平台上截断无害，这是上游多平台测试从未暴露的原因。
+affected_scope:         手写 Makefile 平台目标（make linux/sunos5/... 这类按 OS 分发的目标）或 CFLAGS 固定 -ansi、-std=c89/c90 的老 C 项目，同时调用 strdup/strndup/fdopen/popen 等返回指针的 POSIX 扩展、且未自行定义 _POSIX_C_SOURCE/_XOPEN_SOURCE/_DEFAULT_SOURCE/_GNU_SOURCE；返回指针的函数截断致崩，返回 int 的函数（strcasecmp）结果正确但同样被隐式声明。
+verification_cmd:       printf '#include <string.h>\nint main(void){return strdup("x") != 0;}\n' | clang -ansi -Werror=implicit-function-declaration -x c -c -o /dev/null - 2>&1 | grep -q "implicit declaration of function 'strdup'" && echo "strict ANSI hides strdup"
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           generic-target-default-dialect-werror-implicit-decl
+rec_description:        不走带 -ansi 的上游平台目标或 CFLAGS，改用通用目标并保持编译器默认 C 方言（或显式 -std=gnu99 及以上），同时加 -Werror=implicit-function-declaration，让任何隐式声明在编译期失败，而不是产出必崩的二进制；无需改源码。
+rec_command:            make -j1 <通用目标> CC=<conan tools.build:compiler_executables 的 c> CFLAGS='-O2 -Werror=implicit-function-declaration'
+rec_auto_fix:           false
+rec_impl:               recipe-make-cmdline-override
+
+fallback_priority:      2
+fallback_approach:      keep-c89-restore-feature-macros
+fallback_description:   上游确需保留 -ansi 的严格 C89 语义时，在同一 CFLAGS 追加 -D_DEFAULT_SOURCE（令 musl 打开 _BSD_SOURCE，string.h 重新声明 strdup 并引入 strings.h），仍配合 -Werror=implicit-function-declaration。只加 -D_XOPEN_SOURCE=700 不够：strcasecmp 依旧隐式（tal 1.9 实测）。
+fallback_command:       CFLAGS='-ansi -D_DEFAULT_SOURCE -O2 -Werror=implicit-function-declaration'
+fallback_auto_fix:      false
+fallback_impl:          recipe-make-cmdline-override
+
+forbid_1_pattern:       -Wno-int-to-pointer-cast|-Wno-implicit-function-declaration|-Wno-error=implicit-function-declaration|-Wno-error=int-conversion
+forbid_1_reason:        屏蔽这些诊断只会把指针截断藏起来，二进制照样在运行期崩溃
+forbid_1_consequence:   构建通过、test_package 若不真正执行产物，就会把必崩的二进制发布出去
+forbid_2_pattern:       make\s+(linux|sunos4|sunos5|osf1|irix5|irix6|hpux9|hpux10|aix41)\b
+forbid_2_reason:        上游平台目标内部用 $(MAKE) ... CC=gcc CFLAGS="-ansi -O" 递归调用，只在外层覆盖 CC 并不能可靠去掉 -ansi，且 gcc 与交叉工具链冲突
+forbid_2_consequence:   同 forbid_1：静默产出必崩二进制，或因 gcc 不存在而构建失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P006, P007
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E213, E420]
+conflicts_with:         [E063]
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E585.md
+last_updated: 2026-09-24
+source_event:           tal/1.9 build（2026-09-24，make linux 口径产物 SIGSEGV，改通用目标后 test_package 15/15）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 04E7
