@@ -1,0 +1,130 @@
+# ═══ Draft knowledge entry — 上游自带套件派生子解释器时依赖丢失：只靠 PYTHONPATH 传递必然失败 ═══
+# Timestamp: 2026-09-26
+# Software: pytest 9.1.1（任何在 build() 里跑上游套件、且套件会 spawn 子解释器的 Python/工具链包）
+# Gate: conan create build() pytest 套件 / 任何上游自测
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pytest-9.1.1-subprocess-dependency-loss
+title:                  Python 上游套件派生子解释器时依赖丢失：pytester 重定向 HOME + 测试覆盖 PYTHONPATH，只靠环境变量传依赖必崩，须改用 PYTHONUSERBASE 供给
+trigger_tool:           pytest|python|conan|cmake|meson
+phase:                  testing
+error_signature:        ModuleNotFoundError: No module named 'pluggy'|
+                        ModuleNotFoundError: No module named 'iniconfig'|
+                        No module named 'py'|
+                        INTERNALERROR.*conftest
+
+severity:               3
+category:               python|testing|conan|environment
+match_keywords:         subprocess, spawn, child pytest, pytester, runpytest_subprocess,
+                        setenv("HOME", tmphome), USERPROFILE, PYTHONPATH overwrite,
+                        test_debugging, user site, PYTHONNOUSERSITE, PYTHONUSERBASE,
+                        site-packages, ModuleNotFoundError pluggy, 141 failed, upstream suite
+keywords:               pytester.py, mp.setenv HOME, monkeypatch.setenv PYTHONPATH,
+                        subprocess dependency loss, PYTHONUSERBASE, user site directory,
+                        conan create, upstream test suite, site-packages,
+                        venv init_fs_encoding encodings
+
+approach:               不要在 build() 里给宿主解释器只拼 PYTHONPATH 跑上游套件，而是把包自身与
+                        **全部**运行时依赖铺进一个"自包含根"
+                        （<root>/lib/pythonX.Y/site-packages），套件的 dev 依赖按 **URL + sha256
+                        钉死为固定通用 wheel** 下载后 `pip install --no-deps --no-index` 装进同一
+                        目录，最后以 PYTHONUSERBASE=<root> 运行**宿主原装**解释器。PYTHONUSERBASE
+                        由 site.py 在每次解释器启动时解析，与 HOME、PYTHONPATH 都无关，因此子进程
+                        无论被怎样改环境都仍能看到依赖。
+                        dev 依赖**不能按名解析**：索引可能选中本机不可用的构建（实测
+                        hypothesis-6.165.3-cp310-abi3-ohos_aarch64.whl —— 该版不发布通用 wheel 且
+                        PyPI 不收录该文件，导入即 Permission denied），而本机标签恰好排除它、
+                        静默选了另一个版本，两台主机跑的代码不同；用 pip 平台标签约束又会因该索引
+                        给不出通用 wheel 而彻底解析失败（from versions: none）。
+                        不要用 venv：python -m venv 写的 pyvenv.cfg 依赖 sys._base_executable，
+                        在受限沙箱（CI worker）里生成的解释器会在执行任何代码前就死。
+                        另须按需供给外部命令：上游 test_argcomplete.py 直接 shell 调
+                        `bash -c "compgen ..."`，test_parseopt.py 无 bash 则
+                        pytest.skip("bash is not available")，而 CI worker 的 PATH 里没有
+                        bash（本地开发机有，故只在 CI 暴露）。
+                        **仅加 PATH 无效**：实测 PATH 前置 bash 软链后 CI 结果与未供给逐字相同
+                        （1 failed/4137 passed/67 skipped）——根因是 worker 解释器对裸名走
+                        posix_spawn 快路径直接调 os.posix_spawn("bash",...)，而本平台 musl 的
+                        posix_spawn 不搜 PATH（posix_spawnp 才搜）；本机能过是其 subprocess.py
+                        走 fork/exec 并按 os.get_exec_path 搜。故须 ①探测可用 bash 并前置只含
+                        bash 软链的目录到 PATH，②在该解释器 site-packages 放一个 .pth 把
+                        os.posix_spawn 包一层（裸名先按 PATH 解析），探不到则告警而非静默跳过。
+
+root_cause:             上游 pytest 自带套件里有两处会主动破坏"靠环境变量传依赖"的做法：
+                        ① `src/_pytest/pytester.py:710` 在每次 fixture 准备时执行
+                        `mp.setenv("HOME", tmphome)`（紧跟第 711 行 `USERPROFILE`），把 HOME
+                        改到临时目录——user site（$HOME/.local/lib/pythonX.Y/site-packages）
+                        因此从子进程的 sys.path 中消失，只装在 user site 的依赖（pluggy /
+                        iniconfig / pygments）在子进程中直接不可导入；
+                        ② `testing/test_debugging.py:949` 用
+                        `monkeypatch.setenv("PYTHONPATH", str(pytester.path))` **覆盖**
+                        PYTHONPATH（不是追加），于是任何依赖父进程 PYTHONPATH 才能被找到的
+                        模块在子进程里全部丢失。
+                        两者叠加的结果是：套件在子进程类用例上统一报
+                        `ModuleNotFoundError: No module named 'pluggy'`。这类失败与"包是否
+                        打包正确"完全无关，却会被读成打包缺陷，误导排查方向（本机实测：
+                        同一套件 PYTHONPATH 方案 141 项失败，改用 PYTHONUSERBASE 供给后
+                        0 失败，余 6 项为具名设备能力缺失）。
+
+affected_scope:         任何在 Conan `build()` 中执行上游自测、且该套件会 spawn 子解释器的
+                        Python 生态包或自带 Python 测试的工具链包。pytest 9.1.1 自身套件
+                        （4231 节点）实测受影响最重；同理适用于 setuptools / coverage /
+                        tox / pip 一类会派生子进程的套件。判定不依赖具体包，只依赖
+                        "套件是否 spawn 子解释器"与"依赖是否只经环境变量可见"两个条件同时成立。
+
+verification_cmd:       conan create . 观察 build() 中套件汇总行：PYTHONPATH 方案会出现
+                        "141 failed"（抽 `grep -c "No module named"` 可确认全部来自子进程）；
+                        改用 PYTHONUSERBASE 供给后同一命令汇总行应为 "4164 passed, 41 skipped,
+                        6 deselected, 13 xfailed, 7 xpassed ... rc=0"（合计 4231 = collect 数）。
+                        机制最小复现（双杀探针）：`HOME=<tmp> python3 -c "import pluggy"` 失败；
+                        `HOME=<tmp> PYTHONUSERBASE=<root> python3 -c "import pluggy"` 成功；
+                        再加 `PYTHONPATH=<tmp>`（test_debugging 的覆盖动作）仍成功。
+
+rec_approach:           stage-suite-root-and-supply-via-pythonuserbase
+rec_description:        build() 铺 <root>/lib/pythonX.Y/site-packages：被测包模块 + dist-info +
+                        各依赖 package_folder 的内容（布局按目录搜索而非硬编码）；dev 依赖按
+                        URL+sha256 钉死为通用 wheel 下载后 --no-index 装本地文件（不经索引解析）；
+                        运行时 env["PYTHONUSERBASE"]=root，并 pop PYTHONPATH。
+rec_command:            site_dir=<build>/suite-root/lib/python3.12/site-packages;
+                        cp -a <site>/pytest <site>/_pytest <site>/*.dist-info "$site_dir"/;
+                        for each (name, whl, path, sha256) in SUITE_WHEELS:
+                        download(self, [mirror+path for mirror in PYPI_MIRRORS], whl, sha256=sha256);
+                        python -m pip install --no-deps --no-index --target "$site_dir" <本地 whl...>;
+                        env["PYTHONUSERBASE"]=root; env.pop("PYTHONPATH", None);
+                        subprocess.run([sys.executable, "-m", "pytest", "testing/", ...], env=env)
+rec_auto_fix:           false
+rec_impl:               recipe-pythonuserbase
+
+fallback_priority:      2
+fallback_approach:      probe-and-report
+fallback_description:   若因体积或时长无法铺自包含根，则至少必须先探测"子解释器能否导入依赖"，
+                        再据此决定跑/不跑，并把未执行部分具名告警；绝不能把
+                        ModuleNotFoundError 计入"打包缺陷"或把未执行读成通过。
+fallback_command:       env -u PYTHONPATH PYTHONUSERBASE=<root> python3 -c "import pytest, pluggy, iniconfig"
+                        || echo "suite not runnable"
+fallback_auto_fix:      false
+fallback_impl:          recipe-guard
+
+forbid_1_pattern:       PYTHONPATH=.*\.conan2.*-m pytest|env\[.PYTHONPATH.\].*site-packages.*pytest
+forbid_1_reason:        仅靠 PYTHONPATH 传递依赖在派生子解释器的用例上必然失效（HOME 重定向
+                        与 PYTHONPATH 覆盖两条路径都会切断它），呈现为假的打包缺陷。
+forbid_1_consequence:   同一套件产出 141 项与本包无关的失败，浪费排查成本且可能掩盖真实缺陷。
+
+forbid_2_pattern:       \-\-ignore=tests/test_debugging\.py|\-k\s+"not subprocess"
+forbid_2_reason:        用排除整个测试文件来绕过子进程依赖问题，等于删掉被测能力（子进程调用
+                        正是 pytest 作为 runner 的核心行为）。
+forbid_2_consequence:   覆盖率被削但日志仍显示"通过"，形成静默降级。
+
+forbid_3_pattern:       python -m venv [^\n]*&&[^\n]*(bin/python|/bin/python3)
+forbid_3_reason:        venv 生成的解释器依赖 pyvenv.cfg 与 sys._base_executable，在受限沙箱
+                        （无 /proc 自省、HOME 被隔离、uid 无 passwd 记录）下可能于任何代码
+                        执行前失败：Fatal Python error: init_fs_encoding ... No module named
+                        'encodings' —— 此时连"导入是否可用"都无法探测。
+forbid_3_consequence:   配方在真正构建前就以解释器启动失败告终，且失败信息与配方逻辑无关，
+                        排查方向被误导到"依赖没装好"。
+
+related:                E427（shadow CI 隔离 HOME 后需给 Python 保留真实 site-packages——同源
+                        "HOME 一改、user site 就没了"，但 E427 讲 CI 自身跑 conan，本条讲被测
+                        套件派生的子 pytest，方向相反且修法不同）；DRAFT-ohos-pytest-host-py312-incompat
+                        （宿主 pytest 插件自动加载/py3.12 字节码不兼容——正交，那条讲"插件先崩"，
+                        本条讲"依赖找不到"）。
