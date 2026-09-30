@@ -1,0 +1,78 @@
+version: "2.0.2"
+software: rtl-sdr
+status: built
+build_date: "2026-09-30"
+build_system: cmake
+conan_ref: "rtl-sdr/2.0.2"
+
+source:
+  url: "https://github.com/osmocom/rtl-sdr/archive/refs/tags/v2.0.2.tar.gz"
+  sha256: "d69943eb32df742bc38a00ce6615e41250fd57851174e5ff916ec31e9e9e68e9"
+  tar_format: tar.gz
+  note: >-
+    上游 tag v2.0.2 的 GitHub 归档。下载双校验：sha256 一致（136512 字节）
+    + `tar tzf | wc -l` = 92。上游 quirk：根 CMakeLists.txt 里
+    VERSION_INFO_PATCH_VERSION 仍是 1（发布 v2.0.2 时忘了改），因此产物自报版本是
+    2.0.1（librtlsdr.pc 的 Version、rtlsdrConfigVersion.cmake 都是 2.0.1）。
+    本包不改上游源码，如实记录。
+
+build:
+  system: "CMake（上游 CMakeLists.txt + src/CMakeLists.txt；conan 的 CMakeToolchain/CMakeDeps）"
+  configure_options:
+    - "-DDETACH_KERNEL_DRIVER=ON -DINSTALL_UDEV_RULES=OFF -DENABLE_ZEROCOPY=OFF"
+    - "-DCMAKE_SHARED_LIBRARY_SONAME_C_FLAG=-Wl,-soname, 与 -DCMAKE_PLATFORM_NO_VERSIONED_SONAME=ON（OHOS 对 CMake 是未知平台，否则共享库缺 DT_SONAME 且 install 会建版本化符号链接）"
+    - "依赖发现走 pkg-config：上游 pkg_check_modules(LIBUSB libusb-1.0 IMPORTED_TARGET)，generate() 用 PkgConfigDeps 生成 libusb-1.0.pc 并把 generators 目录加入 PKG_CONFIG_PATH"
+  dependencies:
+    - "libusb/1.0.27（唯一外部依赖；上游在找不到 libusb-1.0 时直接 FATAL_ERROR）"
+  cc: clang
+
+patches_applied:
+  - file: "patches/0001-ohos-portable-demod-thread-exit.patch"
+    target: "src/rtl_adsb.c"
+    reason: >-
+      OHOS 的 musl libc 没有 pthread_cancel() 符号：CI #65385（worker CI-024）
+      里 8 个 CLI 只有 rtl_adsb 链接失败（ld.lld: undefined symbol: pthread_cancel）。
+      补丁把退出路径的 pthread_cancel(demod_thread) 换成上游线程自带的 do_exit
+      标志 + safe_cond_signal(&ready, &ready_m)，再 pthread_join → 语义等价、
+      无线程泄漏，musl/glibc 通用。库本体（src/librtlsdr.c 等）不改。
+    verified_locally: "patch_ng 应用成功；gcc -fsyntax-only -Wall 无新增警告；退出路径语义单测（cond_wait+do_exit+唤醒+join）join 正常返回"
+
+test_passed: 2
+test_failed: 0
+
+test_results:
+  upstream_suite: none
+  upstream_note: >-
+    上游 **没有任何测试套件**（如实声明）：顶层 CMakeLists.txt 没有 enable_testing()/
+    add_test，src/ 也没有测试目标；src/rtl_test.c 是需要真实 RTL2832U 电视棒的硬件
+    自检程序（CI 与开发机都没有该硬件，设备枚举恒为 0），不能当测试用。
+  cli_smoke_runs: 8
+  cli_smoke_passed: 8
+  cli_smoke_failed: 0
+  cli_smoke_note: >-
+    build() 内对 8 个 CLI 做启动冒烟（无参运行）：每个工具都必须在秒级退出并打印
+    usage / “No supported devices found.”，输出为空即判构建失败（证明可执行文件、
+    链接与 RPATH 完好）。实测 8/8 有输出。
+  test_package_registered: 1
+  test_package_executed: 1
+  test_package_passed: 1
+  test_package_failed: 0
+  assertion_count: 14
+  adapter_self_checks: 23
+  note: >-
+    消费者用例（rule12 端到端业务流程）走 **ELF 符号介入**：可执行文件开
+    ENABLE_EXPORTS/-Wl,--export-dynamic，自己定义 9 个 libusb 符号，在下层伪造一台
+    VID=0x0bda PID=0x2838 的电视棒；上层的 rtlsdr_* 公开 API、机型表匹配、索引遍历、
+    序列号反查与越界错误路径全部是交付库自己的代码。14 项显式比对全绿。
+
+knowledge_gained:
+  - "rtl-sdr 上游**完全没有测试**（无 enable_testing/add_test，src/ 无测试目标），rtl_test 只是需要真实电视棒的硬件自检程序 —— 这类包必须如实声明并自建证据：本包用「8 个 CLI 启动冒烟 + ELF 符号介入的设备枚举消费者用例」。"
+  - "上游用 **pkg-config 找 libusb**：`pkg_check_modules(LIBUSB libusb-1.0 IMPORTED_TARGET)`，PKG_CONFIG_FOUND 且找不到就 `message(FATAL_ERROR \"LibUSB 1.0 required to compile rtl-sdr\")`。conan 侧必须让 pkg-config 能看见依赖：PkgConfigDeps 按 libusb 包的 pkg_config_name 生成 libusb-1.0.pc 到 generators 目录，再把该目录塞进 PKG_CONFIG_PATH（仓库 rpm/6.0.2 同款先例），否则 CMake configure 直接 FATAL。"
+  - "OHOS 对 CMake 是未知平台（CMAKE_SYSTEM_NAME=HarmonyOS 没有 Platform 模块）⇒ CMAKE_SHARED_LIBRARY_SONAME_C_FLAG 未定义：共享库不带 DT_SONAME（CI L5a 门禁挂），且 install 会尝试建版本化符号链接（HMDFS 建链不可靠）。解法：显式 `-Wl,-soname,` + CMAKE_PLATFORM_NO_VERSIONED_SONAME=ON → 产出未版本化 librtlsdr.so，DT_SONAME/DT_NEEDED 都是相对名（hidapi/0.15.0 先例；实测 readelf：SONAME=librtlsdr.so、NEEDED=libusb-1.0.so.0）。"
+  - "上游 install(EXPORT) 的 rtlsdrConfig.cmake/rtlsdrTargets*.cmake 把**构建机**上 libusb 的绝对路径写进 INTERFACE_INCLUDE_DIRECTORIES/INTERFACE_LINK_LIBRARIES（conan 缓存路径），且引用同名的静态库 → 不可重定位，必须从包里剔除，消费者改用 conan CMakeDeps 的 rtlsdr::rtlsdr 或包内 .pc。"
+  - "上游 librtlsdr.pc 的 prefix 是 CMAKE_INSTALL_PREFIX（conan 包绝对路径），Cflags/Libs.private 还会带上构建机 libusb 的 -I/-L 绝对路径（上游只在 CMAKE_CROSSCOMPILING 时才 unset 它们，CI 是原生构建清不掉）→ package() 里统一改写成 `${pcfiledir}/../..` 相对形式。"
+  - "rtlsdr_get_device_usb_strings(index) 的越界行为是上游缺陷：函数体开头 `r = libusb_init(&ctx)` 覆盖掉了默认的 -2，越界索引时既不报错也**不写输出缓冲区**（返回 0），调用方无法区分成功与越界 → 消费者用例改用哨兵值验证缓冲区未被触碰；而 rtlsdr_get_device_name(9) 越界会回退返回**最后一个匹配机型名**（不是空串）。rtlsdr_open(&dev, 9) 则正常返回非 0 且不交出句柄。"
+  - "本包名带连字符（rtl-sdr），CMake 目标名不能用 '-' → package_info 里显式 set_property('cmake_file_name','rtlsdr')/'cmake_target_name','rtlsdr::rtlsdr'。"
+  - "R38 的 commands.json 在本仓有口径冲突：CI L0k/preflight PF8 只在 conanfile 出现 package_type=application 或非空 cpp_info.bindirs 时才要求它、且只认**包级目录**；而 preflight PF9 硬拦包级目录的变更（路径必须到 <版本>/ 层）。解法（仓库现有 d0-blind-id、kor、aggdraw、libtool 等 8 例同款）：commands.json 放 **版本目录**（archives/r/rtl-sdr/2.0.2/commands.json），且**不显式声明** cpp_info.bindirs（默认就是 bin，8 个工具照常交付）→ L0k 走库包分支、PF8/PF9 同时绿。"
+  - "OHOS 的 libc 是 musl，**不提供 pthread_cancel()**：编译期只给 -Wimplicit-function-declaration 警告，链接期才炸（ld.lld: undefined symbol: pthread_cancel）。rtl-sdr 2.0.2 里只有 rtl_adsb 用它（退出时强杀 demod 线程）。通用解法：该线程本来就有 do_exit 退出标志，把它置 1 并 safe_cond_signal 唤醒阻塞在 pthread_cond_wait 的线程，再 pthread_join —— 语义等价、无线程泄漏、musl/glibc 通用；比"给工具链加 --unresolved-symbols=ignore-all"（会产出运行期崩的二进制）或"删掉这个 CLI"都正确。"
+  - "conan 2 的 `apply_conandata_patches`/`export_conandata_patches` 只认 **dict** 条目（内部 `it.get(\"patch_file\")`）：conandata.yml 里写成裸字符串列表 `- \"patches/x.patch\"` 会在 `export_sources()` 阶段就抛 ConanException/AttributeError（本机 conan 2.29.1 实测）。正确形态：`- patch_file: \"patches/x.patch\"`（可附 patch_description/patch_type）；`strip` 可省略 —— patch_ng 对 `a/`、`b/` 前缀会自动处理（strip=0/1 实测都能应用）。"
