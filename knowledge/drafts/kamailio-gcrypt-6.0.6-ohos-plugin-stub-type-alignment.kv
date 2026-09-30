@@ -1,0 +1,139 @@
+#====================================================================
+# DRAFT — OHOS/musl 下「core 插件」类 .so 的 dlopen 消费测试：桩层类型必须
+#         逐字段对齐上游头文件，否则模块日志路径解引用野指针 → SIGSEGV，
+#         真实失败原因被掩盖（本次实测：编译通过、运行立即 core dumped）
+# 触发事件: kamailio-gcrypt 6.0.6（Alpine kamailio 子包 gcrypt 模块，core 插件）
+#           HarmonyOS PC 适配（积分赛任务，2026-09-29）
+#
+# 与既有条目的关系（增量说明）:
+#   本条目为**测试方法论**类知识，与构建类条目正交：
+#   - kamailio-extras-6.0.6-ohos-platform-defs-injection = 构建期（平台宏注入 + 只编 modules）
+#   - E074/E525 = OHOS SELinux 禁 FIFO → make 必须 -j1（本条测试编译同适用 -j1 到 make）
+#   - 本条解决的是「模块编出来了，怎么在 OHOS 上做真实消费者验证」的问题：
+#     OHOS musl 加载器不做惰性绑定（dlopen ≡ RTLD_NOW），core 插件引用的一批 core
+#     符号必须在测试可执行文件里可解析 → 需要桩层；而桩层**类型错位**会引入
+#     NULL 函数指针/野指针解引用，把真正的失败掩盖成 SIGSEGV。
+#   - 仓库内 kamailio-{kemix,extras,...} 同族配方此前已用桩层手法（kamailio_core_stub.c），
+#     但桩层类型口径错位导致的 SIGSEGV 是本条首次定位并固化。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     kamailio-gcrypt-6.0.6-ohos-plugin-stub-type-alignment
+trigger_tool:           clang|dlopen|make
+phase:                  testing|runtime
+error_signature:        'Signal 11 .core dumped.|Segmentation fault|dumped core|symbol lookup error|undefined symbol: (_km_log_func|get_debug_level|my_pid|dprint_color|log_level_info)'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, musl, runtime, testing, linking
+match_keywords:         core 插件, core plugin, dlopen, RTLD_NOW, 惰性绑定, lazy binding, musl, 未定义符号, undefined symbol, --export-dynamic, 桩层, stub, kamailio_core_stub.c, module_exports, dprint.h, _km_log_func, get_debug_level, my_pid, dprint_color, log_level_info, LM_ERR, signal 11, core dumped, SIGSEGV, rc=139, test_package, e2e, kamailio-gcrypt, kamailio-kemix, rule12
+title:                  OHOS/musl 下 core 插件 .so 的 dlopen 消费测试：桩层类型须逐字段对齐上游头文件（函数 vs 变量/数组、日志指针指向非空 sink），否则 LM_ERR 路径 SIGSEGV 掩盖真实失败
+prescan_pattern:        _km_log_func|get_debug_level\(|dprint_color|log_level_info|RTLD_NOW|--export-dynamic
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             core 插件（kamailio 模块 .so）在设计上不做独立可执行验证：
+                        它的未定义符号（sr_kemi_modules_add / fixup_spve2_pvar / dprint
+                        家族 / pvapi 等，本次实测 23 个 core 符号）由**宿主程序**
+                        （kamailio 主程序）在 loadmodule 时提供。OHOS 的 musl 加载器
+                        对 dlopen 的共享库**不做惰性绑定**（等价 RTLD_NOW）：dlopen
+                        那一刻全部未定义符号都必须解析成功，否则直接失败。
+                        因此消费者测试必须自带「core 符号桩层」（测试可执行文件里给出
+                        定义 + -Wl,--export-dynamic 导出）。
+                        陷阱在**桩层的类型口径**：若只保证「符号名存在」，把上游的
+                        函数/数组误写成变量/指针，模块在运行期读到的就是垃圾值。本次
+                        实测三处错位：
+                          (1) `my_pid` 上游是 `int my_pid(void)`（函数）→ 桩层写成变量；
+                          (2) `dprint_color` 上游是 `void dprint_color(int)`（函数）→ 写成变量；
+                          (3) `log_level_info` 上游是 `struct log_level_info[]`（数组）→ 写成标量指针；
+                        另有 `_km_log_func` 桩层置 NULL —— 模块内 `LM_ERR(...)` 走
+                        dprint.h 的 LOG_FX 宏链时判定 `dprint_crit == 0` 且
+                        `get_debug_level(...) >= L_ERR` 成立，于是调用该函数指针 →
+                        **空指针/野指针解引用，进程立即 SIGSEGV**。
+                        表现极具误导性：编译 100% 通过，运行第一行就 `Signal 11 (core dumped)`
+                        （rc=139），看起来像"AES 加密实现坏了"，实际与模块功能无关。
+affected_scope:         所有「宿主程序提供符号」的插件/扩展型 .so 在 OHOS 上的独立
+                        消费测试（kamailio 全家族模块、nginx 模块、gstreamer 插件、
+                        Apache 模块等）；以及任何在测试里手工声明上游符号类型
+                        （extern 变量 vs 函数）的桩层/桩库写法。
+verification_cmd: |
+  # 1) 症状确认：编译通过但运行立即崩溃（rc=139），且崩溃发生在第一次进入模块代码前后
+  clang -std=c11 test_<m>_e2e.c kamailio_core_stub.c -o /tmp/e2e -I. -Wl,--export-dynamic -ldl && echo "compile ok"
+  LD_LIBRARY_PATH=<模块目录>:<依赖包 lib> /tmp/e2e <m>.so; echo "rc=$?"   # 139 = SIGSEGV
+  # 2) 桩层类型自查：与上游头文件逐条比对（本次三处错位点）
+  grep -nE "my_pid|dprint_color|log_level_info|_km_log_func|get_debug_level" src/core/dprint.h | head
+  grep -nE "my_pid|dprint_color|log_level_info|_km_log_func|get_debug_level" test_package/kamailio_core_stub.*
+  # 3) 修好后确认：全部断言通过、无崩溃
+  LD_LIBRARY_PATH=<模块目录>:<依赖包 lib> /tmp/e2e <m>.so   # 期望 ALL OHOS E2E PASSED (N/N)
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           align-stub-types-with-upstream-headers
+rec_description:        桩层按「上游头文件声明形态」逐字段对齐，而不是「能编过就行」：
+                        (1) 变量 vs 函数：`my_pid`、`dprint_color` 必须写成函数定义
+                            （`int my_pid(void){return 1;}`、`void dprint_color(int){}`），
+                            数组按真实元素类型/长度给足（log_level_info[]）；
+                        (2) 日志函数指针**必须指向非空 sink**（`void sink(int,const char*,...)`
+                            内 vfprintf(stderr, ...)），绝不留 NULL —— 即使当前
+                            get_debug_level() 返回 0 使日志被抑制，将来任何一次级别变化
+                            都不会把"模块报错"变成"进程崩溃"；
+                        (3) 桩层文件头写明「类型口径来源」（如 `src/core/dprint.h:161/217/181`
+                            行号）与「哪些符号是真实语义实现、哪些仅需可解析」，便于复核；
+                        (4) 被测试路径真实调用的符号（如 sr_kemi_modules_add）给出真实
+                            语义实现 + 计数/记录，使断言能观察宿主行为。
+rec_command:            clang -std=c11 test_<m>_e2e.c kamailio_core_stub.c -o build/test_<m>_e2e -I. -Wl,--export-dynamic -ldl && ./build/test_<m>_e2e <m>.so
+rec_auto_fix:           false
+rec_impl:               test-package-c
+
+fallback_priority:      2
+fallback_approach:      link-test-against-real-host-symbols
+fallback_description:   不写桩层，改为让测试可执行文件链接宿主程序导出的符号表
+                        （如链接 kamailio 主程序的可执行文件副本或 -Wl,--unresolved-symbols=ignore-all
+                        + 运行期真宿主）。代价：需要构建/分发宿主程序本体（OHOS 上
+                        kamailio core 因 musl 差异需额外适配），验证成本远高于桩层；
+                        仅在「宿主本体已在同一次构建中可得」时采用。
+fallback_command:       （视宿主而定；本仓 kamailio 家族不采用此路）
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       _km_log_func *= *NULL|\(void *\) *get_debug_level|_km_log_func *= *get_debug_level
+forbid_1_reason:        日志函数指针置 NULL（或指向仅返回值的 getter）＝ 给模块留了一个
+                        「一切正常时看不见、出错时直接崩溃」的陷阱：dprint.h 的 LOG_FX
+                        宏在 dprint_crit==0 且 level 通过判定时**无条件调用**该指针。
+forbid_1_consequence:   模块一旦走 LM_ERR/LM_WARN 分支（正是需要看错误信息的时候）进程
+                        立即 SIGSEGV，把"模块报错原因"变成"崩溃谜题"，排查成本极高
+                        （本次实测耗时定位：编译成功 → Signal 11 → 逐层探针才确认根因）。
+
+forbid_2_pattern:       extern +(int|char *|str *|void *) +(my_pid|dprint_color|log_level_info)
+forbid_2_reason:        把上游的函数/数组声明成 extern 变量是**类型错位**（ABI 语义不同），
+                        编译期不报错（同名符号），运行期取值/调用即崩。必须先查上游头文件。
+forbid_2_consequence:   静默的未定义行为：崩溃点与真实缺陷位置不一致，误导排查方向。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004,P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             kamailio-extras-6.0.6-ohos-platform-defs-injection
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/kamailio-gcrypt-6.0.6-ohos-plugin-stub-type-alignment.md
+last_updated:           2026-09-29
+source_event:           kamailio-gcrypt 6.0.6 适配（gcrypt.so core 插件；test_package
+                        e2e 消费者用例 50/50 通过；conan create 全绿）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                bbzl <bbzl@noreply.gitcode.com>
+source_pr:              pending
+source_commit:          pending
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-29
+
+draft:                  true
+contributor_id:         B7D2

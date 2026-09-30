@@ -1,0 +1,141 @@
+#====================================================================
+# DRAFT — 插件模块携带「非系统同名库」的 DT_NEEDED 时的产物闭包校验与运行时
+#         定位口径：编译通过 ≠ 可加载，须证明「全部未定义符号 100% 由依赖包提供」
+#         + 「依赖链闭合」，且依赖 .so 由依赖链提供（不静态、不打 RPATH）
+# 触发事件: kamailio-gcrypt 6.0.6（gcrypt.so 依赖 libgcrypt.so.20）HarmonyOS PC 适配
+#           （积分赛任务，2026-09-29）
+#
+# 与既有条目的关系（增量说明）:
+#   - 本条是**产物侧**知识（编出来了、怎么证明它在目标机上真的能加载运行），
+#     与构建期条目（kamailio-extras 平台宏注入）正交。
+#   - R26 处理的是「**系统同名库**必须静态链接以避免污染 /lib、/lib64」；
+#     本条处理的是相反面：依赖库**不是**系统同名库（OHOS sysroot 与目标机 /lib
+#     都没有它），因此按仓库口径由 conan 依赖链提供运行时 .so，模块自身不带 RPATH。
+#   - 同族判例：kamailio-cnxcc（动态 libevent/hiredis）——模块级外部依赖、运行时定位。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     kamailio-gcrypt-6.0.6-ohos-plugin-external-dynlib-closure
+trigger_tool:           llvm-readelf|llvm-nm|ld|dlopen
+phase:                  compilation|linking|runtime
+error_signature:        'DT_NEEDED.*lib.*\.so|undefined symbol.*(gcry_|libgcrypt)|cannot open shared object file|error while loading shared libraries|RPATH|RUNPATH|libgcrypt\.so\.20|libgpg-error\.so\.0'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, linking, runtime, testing, compilation
+match_keywords:         DT_NEEDED, readelf -d, RPATH, RUNPATH, libgcrypt, libgpg-error, gcry_cipher_open, gcry_check_version, GCRYPT_1.6, 未定义符号, undefined symbol, 依赖闭包, closure, pkg-config, GCRYPT_BUILDER, LOCALBASE, LD_LIBRARY_PATH, conan 依赖链, 系统同名库, R26, 非系统同名库, kamailio-gcrypt, kamailio-cnxcc, gcrypt.so, plugin, core 插件
+title:                  插件 .so 依赖「非系统同名库」时的产物闭包校验：DT_NEEDED/RPATH/未定义符号逐项归类，依赖 .so 由 conan 依赖链提供运行时定位（不静态、不打 RPATH）
+prescan_pattern:        DT_NEEDED|RPATH|RUNPATH|pk?g-config --exists|LOCALBASE|LIBRARY_PATH
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             模块 Makefile（kamailio `src/modules/gcrypt/Makefile`）在
+                        CROSS_COMPILE 为空时用 `pkg-config --exists libgcrypt` 探测外部库，
+                        未命中则回退 `-I$(LOCALBASE)/include -L$(LOCALBASE)/lib -lgcrypt`。
+                        交叉编译场景下这一步有三种坏结局，且都**不会在编译链接期暴露**：
+                          (1) 探测到**构建机系统的** libgcrypt（版本/架构错配）→ 链接通过，
+                              目标机上加载即失败或行为异常；
+                          (2) 链接到静态库或带 RPATH 的写法 → 产物把构建机路径固化进去；
+                          (3) 依赖库在 OHOS sysroot/目标机 /lib 中**不存在**（libgcrypt 正是
+                              这种非系统同名库）→ 运行时 `cannot open shared object file`。
+                        因此"编译通过"对插件模块毫无说服力：必须对**产物**做三件证明：
+                          ① `DT_NEEDED` 是预期的依赖集合（本例仅 {libc.so, libgcrypt.so.20}）；
+                          ② 无 `RPATH`/`RUNPATH`（构建机路径未泄漏，运行时定位交给部署侧）；
+                          ③ **全部未定义符号 100% 可归属**：libc/CRT 若干 + 依赖包导出若干
+                             + 宿主 core 若干，逐符号交叉核验依赖包确实导出那些符号
+                             （本例 49 个：libc/CRT 9 + libgcrypt.so.20 17 + kamailio core 23）。
+                        另外须验证**依赖链闭合**：libgcrypt.so.20 自身还要 libgpg-error.so.0，
+                        该链在 conan 依赖图里必须完整（本例 `libgcrypt/1.12.2 → libgpg-error/1.55`）。
+affected_scope:         所有链接**非系统同名库**的插件/模块/共享库在 OHOS 上的适配
+                        （kamailio 各外部依赖模块 cnxcc/hiredis、gcrypt/libgcrypt、
+                        unixodbc 等）；以及任何"编过了就以为能跑"的协同工作
+                        ——CI/评审应要求产物侧闭包证据，而非仅编译日志。
+verification_cmd: |
+  # 1) 依赖集合与路径泄漏（期望：仅预期 .so；无 RPATH/RUNPATH）
+  llvm-readelf -d src/modules/gcrypt/gcrypt.so | grep -E "NEEDED|RPATH|RUNPATH"
+  # 2) 未定义符号面全量（逐符号归类：libc/CRT / 依赖包 / 宿主 core）
+  llvm-nm -D --undefined-only src/modules/gcrypt/gcrypt.so | wc -l
+  llvm-nm -D --undefined-only src/modules/gcrypt/gcrypt.so | grep -c "gcry_"
+  # 3) 依赖包是否真的导出这些符号（逐符号核验，非抽样）
+  llvm-nm -D --defined-only <libgcrypt 包>/lib/libgcrypt.so.20 | grep -E "gcry_(cipher|md|check_version|control|randomize|strerror|strsource)"
+  # 4) 依赖链闭合（libgcrypt 自身依赖是否在依赖图内且存在）
+  llvm-readelf -d <libgcrypt 包>/lib/libgcrypt.so.20 | grep NEEDED      # 期望含 libgpg-error.so.0
+  ls <libgpg-error 包>/lib/libgpg-error.so.0*
+  # 5) 加载可用性实测（本机即目标架构时）
+  LD_LIBRARY_PATH=<模块目录>:<libgcrypt lib>:<libgpg-error lib> ./test_<m>_e2e <m>.so
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pin-dependency-via-make-vars-and-verify-product-closure
+rec_description:        (A) 构建期**钉死**探测结果（不让构建机系统库有机会介入）：
+                            - make 命令行变量覆盖（命令行优先于 Makefile 内部赋值）：
+                              `GCRYPT_BUILDER="pkg-config libgcrypt"`（强制走 pkg-config 路径，
+                              而非 `-I/-L` 回退）并令 `PKG_CONFIG_PATH` 只含 conan 依赖包的
+                              `lib/pkgconfig`；同时 `LOCALBASE=<依赖包目录>` 让回退分支
+                              也指向依赖包；
+                            - `CPATH`/`LIBRARY_PATH` 指向依赖包 include/lib（无 pkg-config 时兜底）；
+                            - `CC`/`CXX` 由 Conan `tools.build:compiler_executables` 显式注入（不裸用 ${CC}）。
+                        (B) 产物期**证明**闭包（脚本化，随 PR 长期回归）：
+                            DT_NEEDED 集合断言、无 RPATH/RUNPATH、未定义符号逐符号归类、
+                            依赖包逐符号交叉核验、依赖链闭合（libgcrypt→libgpg-error）、
+                            许可证随包。本仓实现见 kamailio-gcrypt 的
+                            `test_package/check_gcrypt_module.py`（纯 Python ELF 解析，16 项断言，
+                            无外部工具依赖 → CI 干净环境可跑）。
+                        (C) 运行时定位口径：依赖 .so 由 conan 依赖链提供（不静态、不打 RPATH），
+                            部署时经 `LD_LIBRARY_PATH`（或等价加载路径）解析；
+                            `package_info()` 用 `libdirs` 声明模块目录、`libs=[]`（模块不被链接消费）。
+rec_command:            make modules modules="modules/<m>" -j1 extra_defs="<PLATFORM_DEFS>" GCRYPT_BUILDER="pkg-config libgcrypt" LOCALBASE=<dep_pkg> && python3 test_package/check_<m>_module.py
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      link-dependency-statically
+fallback_description:   把依赖库以静态形态链入模块（`.a`）以消除运行时定位需求。
+                        仅在依赖包同时提供静态库、且其许可证/仓库口径允许时可行；
+                        本例 libgcrypt conan 包仅发 `.so`，且属通用加密库、
+                        与 R26「系统同名库静态」的适用面不同（它不是系统同名库），
+                        故不作为本包方案，仅作存量/特殊场景备用。
+fallback_command:       （视依赖包是否发 .a 而定）
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       -Wl,-rpath|--rpath|-Wl,-R|-DYNAMIC_LINKER.*/usr/lib
+forbid_1_reason:        在产物里写入构建机/固定路径的 RPATH：鸿蒙上 `$ORIGIN/../lib`
+                        等相对形态不稳定，绝对路径则在目标机上必然失效（且属构建机路径泄漏）。
+                        仓库口径是由 conan 依赖链 + 部署侧加载路径定位，不打 RPATH。
+forbid_1_consequence:   目标机加载失败（cannot open shared object file）或加载到错误版本；
+                        CI 干净环境与目标机路径不一致时表现为"本地能跑、装机即挂"。
+
+forbid_2_pattern:       pkg-config --exists .* \|\| *(apt|yum|dnf|opkg)|apt-get install libgcrypt
+forbid_2_reason:        探测失败时去装构建机系统包 = 把宿主库混进交叉编译产物（架构/版本错配），
+                        且 CI 干净环境没有这些包（本地能过、CI 必挂）。
+forbid_2_consequence:   产出链接到宿主 libgcrypt 的模块 → 目标机加载失败；或 CI 直接找不到库。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004,P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             kamailio-gcrypt-6.0.6-ohos-plugin-stub-type-alignment
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/kamailio-gcrypt-6.0.6-ohos-plugin-external-dynlib-closure.md
+last_updated:           2026-09-29
+source_event:           kamailio-gcrypt 6.0.6 适配（gcrypt.so 依赖 libgcrypt/1.12.2→libgpg-error/1.55；
+                        产物闭包 16 项断言 + e2e 50 项断言全通过）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                bbzl <bbzl@noreply.gitcode.com>
+source_pr:              pending
+source_commit:          pending
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-29
+
+draft:                  true
+contributor_id:         B7D2
