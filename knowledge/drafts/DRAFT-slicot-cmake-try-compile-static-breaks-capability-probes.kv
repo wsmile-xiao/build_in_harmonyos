@@ -1,0 +1,68 @@
+#====================================================================
+# DRAFT-slicot-cmake-try-compile-static-breaks-capability-probes
+# SLICOT: OHOS 强制 CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY 使
+# Check_Fortran_Function_Exists 只编译不链接 → 误判老 LAPACK 例程"存在"
+# → 不补编自带副本 → examples 链接 undefined symbol
+#====================================================================
+
+id:                     DRAFT-slicot-cmake-try-compile-static-breaks-capability-probes
+trigger_tool:           cmake|flang|conan|ld
+phase:                  build
+error_signature:        ld.lld: error: undefined symbol: dgegv_|
+                         undefined symbol: dlatzm_|
+                         undefined symbol: zgegv_|
+                         undefined symbol: zlatzm_|
+                         undefined symbol: dgegs_
+
+severity:               3
+category:               cmake, fortran, conan, dependencies, api-semantics
+
+match_keywords:         SLICOT, CheckFortranFunctionExists, ADD_ROUTINE_IF_REQUIRED,
+                        HAVE_DGEGS, HAVE_ZGEGS, HAVE_DLAZTM, HAVE_ZLAZTM,
+                        HAVE_DGEGV, HAVE_ZGEGV, CMAKE_TRY_COMPILE_TARGET_TYPE,
+                        STATIC_LIBRARY, lapack_aux, LAPACK 3.12, flang-ohos,
+                        BLAS_LIBRARIES, LAPACK_LIBRARIES
+
+title:                  OHOS 下 CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY 会让所有链接型能力探测失真 —— 上游用 Check_Fortran_Function_Exists 判断 LAPACK 是否含老例程时误报"存在", 须显式钉住探测变量
+
+root_cause:             Fortran 交叉编译在 OHOS 必须设
+                        CMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY（flang 精简运行集
+                        无法完成链接探针）。副作用是 **所有依赖链接的 CMake 探测器
+                        都退化为"只编译"**：
+                        SLICOT 的 src/CMakeLists.txt 用
+                          Check_Fortran_Function_Exists(dgegv HAVE_DGEGV)
+                        判断 LAPACK 是否还带 dgegv/zgegv/dlatzm/zlatzm/dgegs/zgegs
+                        （LAPACK 3.12 已移除），**探测不到才编译自带的
+                        src/lapack_aux/*.f**。因为探测只编译不链接，任何符号都被
+                        判为"存在"，6 个副本全不编译 → examples 链接期
+                        undefined symbol。
+                        修法：既然 LAPACK 3.12 确实已移除，直接把探测结果钉为
+                        FALSE，强制上游编译自带实现：
+                          tc.cache_variables["HAVE_DGEGV"] = False   （等 6 个）
+                        并直接喂 BLAS_LIBRARIES/LAPACK_LIBRARIES 为包内 .a 路径。
+
+affected_scope:         slicot/5.9.1 及一切「用 Check_*_Exists 判断依赖能力」的
+                        CMake 工程在 OHOS 上的构建; fortran+cmake 组合尤甚
+
+verification_cmd:       conan create archives/s/slicot/5.9.1 \
+                          -pr:h=ci/conan/profiles/ohos-aarch64 \
+                          -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望: ctest 242/242 passed + test_package 输出
+                        # SLICOT-CONSUMER-OK
+
+rec_priority:           3
+rec_approach:           pin-capability-probe-results-false
+rec_description:        generate() 中:
+                          tc.cache_variables["CMAKE_TRY_COMPILE_TARGET_TYPE"]
+                              = "STATIC_LIBRARY"     # 仍需
+                          for v in (HAVE_DGEGS, HAVE_ZGEGS, HAVE_DLAZTM,
+                                    HAVE_ZLAZTM, HAVE_DGEGV, HAVE_ZGEGV):
+                              tc.cache_variables[v] = False
+                          tc.cache_variables["BLAS_LIBRARIES"] = <blas .a>
+                          tc.cache_variables["LAPACK_LIBRARIES"] = <lapack .a>
+                        另需 CMAKE_BUILD_PARALLEL_LEVEL=1（OHOS make jobserver FIFO 失败）
+
+related:
+  - archives/s/slicot/5.9.1/conanfile.py
+  - archives/s/slicot/5.9.1/test_package/test_slicot.py
+last_updated:           2026-09-29
