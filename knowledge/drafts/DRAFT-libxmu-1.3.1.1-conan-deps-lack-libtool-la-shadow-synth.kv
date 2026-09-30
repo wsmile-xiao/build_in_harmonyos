@@ -1,0 +1,51 @@
+#====================================================================
+# DRAFT-libxmu-1.3.1.1-conan-deps-lack-libtool-la-shadow-synth
+# Conan 提供的 X11 依赖制品不带 libtool .la，autotools/libtool 硬要求：
+# 在 generate() 里为直接依赖合成 .la shadow，缺失的从 .so 反推补出来
+#====================================================================
+# 来源: libxmu 1.3.1.1（X.Org libXmu，autotools，OHOS aarch64），source_pr 13894
+# 证据: 源码构建 libxext 时 libtool 在链接阶段找不到 libxcb.la；
+#       libx11/6.4.0 的 package() 执行 rm("*.la")，libx11/1.8.13 保留
+
+id:                     DRAFT-libxmu-1.3.1.1-conan-deps-lack-libtool-la-shadow-synth
+trigger_tool:           conan|autotools|libtool
+phase:                  build
+error_signature:       "cannot find the library '.*\\.la'|libtool: error: .*\\.la.* No such file|expected one installed .*\\.la, found 0|\\.la.*No such file or directory|references a missing non-Conan libdir|was moved"
+severity:               3
+category:               conan, autotools, libtool, build-system, dependency
+match_keywords:         libtool, .la, dependency_libs, libxcb.la, libX11.la, libtool-shadow, generate(), LDFLAGS -L, rm("*.la"), autotools conan
+title:                  Conan 制品只装 .so/.a 不带 libtool .la，而 autotools 依赖链靠 .la 递归解析：在 generate() 里为直接依赖合成 .la shadow 目录，并为被删掉的 .la 从 .so 反推补一个最小副本
+
+root_cause:             autotools 项目用 libtool 链接时，libtool 会顺着依赖的 .la 归档文件里的 dependency_libs 递归解析传递依赖。Conan 打包的依赖（尤其 X11 家族）只有 .so/.a 与头文件，通常不带 .la；当 conan 从源码构建本包、而某个依赖恰好也走源码构建（或用的是会删 .la 的修订版）时，libtool 找不到对方的 .la，链接阶段直接失败。更隐蔽的是同一个库的不同修订版行为不一致：libx11/6.4.0 的 package() 里执行 rm("*.la") 主动删掉，libx11/1.8.13 的 package() 保留——于是「同一个依赖名，换一个 revisions 就构建失败」，本地与 CI 表现还可能不同。
+affected_scope:         所有 autotools + libtool 构建、且依赖由 Conan 提供（或依赖由 Conan 源码重建）的包，尤其 X11 家族（libx11 / libxext / libxt / libxmu / libxaw 等）。也适用于依赖的某个 revisions 会删 .la 而另一个保留的情况。
+verification_cmd:       conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_priority:           1
+rec_approach:           generate-shadow-dir-with-synthesised-la
+rec_description:        在配方 generate() 里对每个直接 host 依赖的 libdir 收集所有 *.la，复制/重写到一个统一的 libtool-shadow 目录：把其中的 libdir= 与 dependency_libs= 改写成 shadow 目录下的绝对路径，再把该目录前置到 LDFLAGS（-L<shadow>），使 libtool 只看见这一份自洽的副本。若某个必需 .la 在依赖制品里根本不存在（对方 package() 删过），从同名 .so 反推合成一个最小可用 .la：dlname 取真实 .so 的 soname（读 DT_SONAME），library_names/old_library 填同名，dependency_libs 留空或只填已进入 shadow 的依赖，installed=yes。这样无论依赖走的是哪个 revisions，链接都能走通。
+rec_command:            conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+rec_auto_fix:           false
+rec_impl:               recipe-generate-config
+fallback_priority:      2
+fallback_approach:      force-dependency-to-la-retaining-revision
+fallback_description:   若能确认某个依赖 revisions 保留 .la（如 libx11/1.8.13 相对 6.4.0），用 self.requires("libx11/1.8.13", force=True) 把整张图钉到该 revisions，避免走会删 .la 的那条。注意 force=True 会让被钉的依赖在新轨道上变成「需源码重建」，要确认它的配方本身能构建成功。
+fallback_command:       conan graph info . -pr:h=<profile> -pr:b=<profile> -r=<remote>
+fallback_auto_fix:      false
+fallback_impl:          recipe-requires-force
+forbid_1_pattern:       直接把依赖包目录里的 .la 原样加进 -L 而不改写 libdir/dependency_libs
+forbid_1_reason:        原始 .la 的 libdir= 与 dependency_libs= 指向 Conan 缓存里的旧路径，libtool 会顺着它们走到别处，等于没修。
+forbid_1_consequence:   报错换个形式复现（library '...la' was moved），排查时间翻倍。
+forbid_2_pattern:       在 build() 里 cp *.la 到源码树根再 -L.
+forbid_2_reason:        污染源码树，且没有解决 libdir 指向问题；autotools 的 -L 搜索顺序也不保证命中该目录。
+forbid_2_consequence:   本地偶然能过、CI 换 worker 就失败。
+forbid_3_pattern:       shadow 构建器对系统目录只做精确匹配（只认 /usr/local/lib），不做 home 前缀后缀匹配
+forbid_3_reason:        依赖 .la 里常有裸的 -L/storage/Users/<user>/usr/local/lib（一次 make install 落到家目录的 stray 路径），精确匹配命中不了就 raise「references a missing non-Conan libdir」。
+forbid_3_consequence:   该 stray 目录存在于某台 worker 时靠「目录存在」分支侥幸通过、换一台没有该目录的 worker 就挂——典型跨 worker 抖动，误当网络抖动重跑而查不出。
+doc_file:               knowledge/drafts/DRAFT-libxmu-1.3.1.1-conan-deps-lack-libtool-la-shadow-synth.md
+similar_to:             DRAFT-libtool-la-cross-package-and-private-header-deps, DRAFT-10251-libnfc-tools-1.8.0-autotools-test-framework-guard
+caused_by:
+prerequisite_of:        DRAFT-libxmu-1.3.1.1-merged-but-unpublished-needs-recut
+conflicts_with:
+last_updated:           2026-09-30
+authors:                2301_76770579
+source_pr:              13894
+source_commit:          3b1ab03553
