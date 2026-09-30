@@ -1,0 +1,96 @@
+#====================================================================
+# E479 — conan test_package 端到端运行 GUI/CLI 二进制时动态库无法加载：
+# test() 显式注入依赖库 dirs 与 OHOS SDK libc++ 运行时路径
+# 来源事件: wmsmixer 0.5.1 OHOS 适配（test_package 执行 wmsmixer --version 报
+#           Error loading shared library libX11.so.6/libc++_shared.so）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E479
+trigger_tool:           test|runtime
+phase:                  testing
+error_signature:        Error loading shared library lib[^ ]+\.so|symbol not found.*X[A-Z]|wmsmixer --version.*Error 32512|Error 32512
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan|testing|runtime|ohos
+match_keywords:         test_package, test(), LD_LIBRARY_PATH, Error loading shared library,
+                        libc++_shared.so, package_folder, cpp_info.libdirs, conanrun,
+                        application 包, GUI 二进制, --version, SDK libc++, aarch64-linux-ohos,
+                        wmsmixer, asmix, 动态链接, 端到端消费者用例
+title:                  conan test_package 端到端运行 GUI/CLI 二进制时动态库无法加载：test() 显式注入依赖库 dirs 与 OHOS SDK libc++ 运行时路径
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             application 包（GUI/CLI 可执行文件）的 test_package 若在 test() 中端到端
+                        运行被测二进制（如 wmsmixer --version），二进制动态链接依赖库
+                        （libX11/libXpm/libXext，来自 conan 依赖）与 libc++_shared.so
+                        （OHOS SDK 工具链运行时，不在 conan 管理范围）。conanrun 环境的
+                        LD_LIBRARY_PATH 只覆盖 conan 依赖 libdirs，且未包含 SDK libc++
+                        目录；test() 直接运行二进制时加载器找不到这些库，报
+                        "Error loading shared library ..." 或符号重定位失败（exit 32512）。
+                        与链接期 lld 缺 libxml2（E120）、header-library bindirs 不进 PATH
+                        （E691 草稿）场景不同。
+affected_scope:         所有在 test_package test() 中端到端运行被测二进制（GUI/CLI、动态链接、
+                        依赖 OHOS SDK libc++ 运行时）的 application 包在 OHOS 的适配。
+verification_cmd:       conan create <recipe> -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                        # test() 前打印 LD_LIBRARY_PATH 并确认含依赖 libdirs + SDK libc++ 目录
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           test-inject-ld-library-path
+rec_description:        test_package/conanfile.py 的 test() 中遍历 self.dependencies 收集各依赖
+                        cpp_info.libdirs（跳过 package_folder 为 None 的依赖），前置注入
+                        OHOS SDK libc++ 运行时目录（/data/service/hnp/ohos-sdk.org/.../
+                        llvm/lib/aarch64-linux-ohos/c++），拼成 LD_LIBRARY_PATH 写入
+                        os.environ 后再 self.run() 执行测试程序（Conan 2 的 run env 参数
+                        须为 list，直接注入 os.environ 更稳）。
+rec_command:            ld_paths = [sdk_libcxx] + [os.path.join(d.package_folder, d2) for d in self.dependencies.values() if d.package_folder for d2 in (d.cpp_info.libdirs or [])]
+                        os.environ["LD_LIBRARY_PATH"] = ":".join(ld_paths); self.run("./test_wmsmixer")
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      elf-check-only
+fallback_description:   若目标环境确实无法运行被测二进制（无 X/显示/设备），test_package 退化为
+                        仅校验产物（ELF magic + e_machine == arm64 + 链接依赖列表 readelf -d），
+                        端到端运行用例标注为平台限制。
+fallback_command:       readelf -h <bin> && readelf -d <bin> | grep NEEDED
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       self\.run\(.*env=\{.*\}
+forbid_1_reason:        Conan 2 self.run() 的 env 参数要求 list 类型（错误信息 AssertionError: env argument should be a list），传 dict 直接报错
+forbid_1_consequence:   test() 抛 AssertionError，conan create 失败
+forbid_2_pattern:       test_package.*:.*pass|只打印字符串的空壳测试
+forbid_2_reason:        R34/PF3：test() 必须实质调用被测包（执行二进制/调用 API），禁止空壳
+forbid_2_consequence:   preflight PF3 拦截 / CI L0c 失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P007
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E120, E691, E449
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E479.md
+last_updated:           2026-09-29
+source_event:           wmsmixer 0.5.1 OHOS 适配（test_package 端到端 --version 用例动态库加载失败，test() 注入依赖 libdirs + SDK libc++ 修复，conan-verify G2 通过）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                B560
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-29
+
+draft: true
+contributor_id: B560
