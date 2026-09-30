@@ -1,0 +1,138 @@
+#====================================================================
+# DRAFT-conan-extra-cflags-quoted-path-silently-dropped -
+#   Conan CMakeToolchain 把 extra_cflags 包进 CMake quoted string，内层引号会截断该 flag
+#====================================================================
+# 与既有条目的关系（差异化定位，勿重复申报）:
+#
+#  E092（CMake 不识别 HarmonyOS）——讲平台识别，与 flag 传递无关。
+#  本条是 **Conan 生成层 → CMake 解析层**的引号转义问题：赋值本身没报错，
+#  flag 静默消失，表现为"头文件找不到"，很容易被误判成依赖包布局不对。
+#
+#  与 `DRAFT-ohos-fortify-source-defeats-libc-wrap-mock` 的区别：那条是
+#  _FORTIFY_SOURCE 改写调用点符号；本条是 flag 字符串在 CMake 里被提前截断。
+#====================================================================
+
+id:                     DRAFT-conan-extra-cflags-quoted-path-silently-dropped
+trigger_tool:           cmake|clang|conan
+phase:                  compilation
+error_signature:        'libusb-1\.0/libusb\.h' file not found
+                         |file not found.*libusb-1\.0
+                         |Syntax Warning in cmake code at column
+                         |Argument not separated from preceding token by whitespace
+
+severity:               2
+category:               conan, cmake, toolchain, build-system
+match_keywords:         extra_cflags, includedirs, -I with quotes, libusb-1.0,
+                         file not found, conan_toolchain.cmake, CMake Include
+                         path, silent flag drop
+title:                  tc.extra_cflags 里的 -I"path" 内层引号被 Conan 生成的
+                         CMake quoted string 提前截断，include 路径静默失效
+
+root_cause: |
+  Conan 的 `CMakeToolchain` 把 `extra_cflags` 追加进一段 **CMake 源码字符串**：
+
+      string(APPEND CONAN_C_FLAGS " -I"/path/to/include/libusb-1.0"")
+
+  这行本身是**非法的 CMake 语法**（`""` 之间的 `"` 提前终止了字符串），
+  CMake 只报一条 `Syntax Warning in cmake code at column N`（默认不致命），
+  然后继续解析。结果 `-I` 这个 flag **没有进入 CMAKE_C_FLAGS**，
+  于是编译时 include 路径缺失，表现为：
+
+      unix/libusb/libfli-usb-sys.c:46:10: fatal error: 'libusb-1.0/libusb.h' file not found
+
+  危险之处在于**双重静默**：
+    1. 传的是不存在的路径时没告警（CMake 只是照抄字符串）；
+    2. 路径里写了引号时，flag 被整段丢弃也只有一条 dev warning。
+
+  容易走错的两条岔路：
+    a) 以为是 Conan 包的 include 布局不对 → 去改包，其实包没问题；
+    b) 改 `tc.variables["CMAKE_INCLUDE_PATH"]` → 会**覆盖** toolchain 生成的
+       PREPEND 列表，把其它依赖的 include 路径挤掉，于是换成另一个依赖的
+       头文件找不到（比如 `Could not find INDI include directory`）。
+
+affected_scope: >
+  任何在 `tc.extra_cflags` / `tc.extra_cxxflags` / `tc.extra_ldflags` 里写
+  带引号路径的配方。Conan 把这些值原样嵌入 CMake 源码，不做引号转义。
+  路径含空格时确实需要引号，但必须用 CMake 语法而非 shell 语法。
+
+verification_cmd: |
+  # 1) 看 Conan 到底生成了什么（决定性证据）
+  grep -n 'CONAN_C_FLAGS' <build>/generators/conan_toolchain.cmake | head
+  #    若看到形如  string(APPEND CONAN_C_FLAGS " -I"/a/b"")
+  #    说明 flag 被截断
+  # 2) 看 CMake 有没有报语法告警
+  #    CMake Warning (dev) ... Syntax Warning in cmake code at column N
+  # 3) 对照实验：去掉引号重建
+  grep -n 'CMAKE_INCLUDE_PATH' <build>/generators/conan_toolchain.cmake | head
+
+rec_priority:           1
+rec_approach:           drop-inner-quotes-from-toolchain-extra-flags
+rec_description: >
+  直接去掉 `-I` 路径的内层引号。Conan 生成的 CMake 代码天然提供字符串边界，
+  包内的缓存路径不含空格时不需要 shell 式引号；这是最小改动且不覆盖任何
+  toolchain 生成的变量。
+rec_command: |
+  # 错误写法（flag 被 CMake 丢弃）
+  #   tc.extra_cflags.append(f'-I"{usb_inc}"')
+  # 正确写法
+  #   tc.extra_cflags.append(f"-I{usb_inc}")
+  #
+  # 配套：注入「包含版本子目录的那个根目录」，而不是子目录本身。
+  # libusb 的 Conan 布局是 include/libusb-1.0/libusb.h，而源码写的是
+  # <libusb-1.0/libusb.h>，所以需要 include 根目录：
+  usb_inc = self.dependencies["libusb"].cpp_info.includedirs[0]
+  if os.path.basename(usb_inc) == "libusb-1.0":
+      usb_inc = os.path.dirname(usb_inc)
+  tc.extra_cflags.append(f"-I{usb_inc}")
+rec_auto_fix:           false
+rec_impl:               toolchain-flag-fixup
+
+fallback_priority:      2
+fallback_approach:      append-to-cmake-include-path-instead-of-extra-flags
+fallback_description: >
+  改用 `tc.preprocessor_flags`（Conan 会自行处理引号与转义），或读
+  `CMakeToolchain.user_toolchain` 追加 `include_directories()`。
+  **不要**用 `tc.variables["CMAKE_INCLUDE_PATH"] = <path>`：那是赋值不是追加，
+  会覆盖 toolchain 生成的 `list(PREPEND CMAKE_INCLUDE_PATH ...)`，
+  把其它依赖的 include 路径顶掉，报错会漂移到毫不相干的依赖上。
+fallback_command: |
+  tc.preprocessor_flags.append(f"-I{usb_inc}")
+  # 或 user_toolchain:
+  #   set(CMAKE_INCLUDE_PATH "${CMAKE_INCLUDE_PATH};<path>")
+fallback_auto_fix:      false
+fallback_impl:          toolchain-variable-injection
+
+forbid_1_pattern:       tc\.variables\[.CMAKE_INCLUDE_PATH.\]\s*=
+forbid_1_reason:        赋值覆盖 toolchain 生成的 PREPEND 列表，导致其它依赖的
+                        头文件找不到（实测表现为 INDI include dir 丢失），
+                        故障点与真实原因错位，排查成本极高
+forbid_1_consequence:   引入难以定位的连锁失败
+
+forbid_2_pattern:       用 echo .*>> CMAKE_C_FLAGS 之类把 flag 拼进命令行字符串绕过
+forbid_2_reason:        绕过 Conan 的 toolchain，产物与 CI 不一致（本机绿 CI 红）
+forbid_2_consequence:   违反「本地可复现 CI」原则
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [E092]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-conan-extra-cflags-quoted-path-silently-dropped.md
+last_updated:           2026-09-28
+source_event:           archives/l/libfli/2.0-20221221182632：
+                        -I"<libusb include>" 写法下 libusb-1.0/libusb.h 找不到；
+                        改 tc.variables["CMAKE_INCLUDE_PATH"] 后变成
+                        "Could not find INDI include directory"（覆盖副作用）；
+                        最终去掉内层引号并注入 include 根目录后通过
+authors:                jumping_ggjjkk <jumping_ggjjkk@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-28
+
+draft:                  true

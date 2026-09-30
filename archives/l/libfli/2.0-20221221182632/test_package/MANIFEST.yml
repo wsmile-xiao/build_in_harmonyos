@@ -1,0 +1,119 @@
+# test_package — libfli 2.0-20221221182632 消费者端到端用例集
+#
+# libfli 是纯 C 库，所以测试也是 C 程序。上游（indilib/indi-3rdparty libfli）
+# 不提供任何自动化测试套件，且所有设备入口都需要真实 FLI 相机，因此这里落地
+# 的是**本次适配新增的消费者用例**，按具名端到端用例（case）组织，而不是
+# 一堆孤立断言。
+#
+# 统计口径：PR 描述「适配后测试用例统计」表的「鸿蒙特有测试」行按**用例数**
+# 填报，即下表的 6 个 HC-N；每个用例内部的 ok/FAIL 行只是该用例的检查项。
+
+files:
+  - test_libfli.c
+  - conanfile.py
+  - MANIFEST.yml
+
+requirements:
+  - libfli/2.0-20221221182632
+  # libusb-1.0 由 test_package/conanfile.py 显式 -L/-lusb-1.0 链接：制品仓里
+  # libusb 只有 .so，而 libfli 的 USB 后端要调 libusb_init。
+  - libusb/1.0.27
+
+upstream_tests_exist: false
+upstream_test_count: 0
+
+use_cases:
+  - id: HC-1
+    title: "版本自描述服务回环 / library self-description round-trip"
+    kind: consumer_e2e
+    description: >
+      消费者进程向库索取版本横幅并在最小缓冲尺寸上复现同一结果；同时走通
+      1 字节 / 0 长度缓冲区 → EOVERFLOW、NULL 缓冲区 → EINVAL 的降级契约。
+    checks: 7
+    status: pass
+
+  - id: HC-2
+    title: "设备清单迭代流程 / FLICreateList..FLIDeleteList iteration"
+    kind: consumer_e2e
+    description: >
+      真实走通上游迭代器 API：FLICreateList → FLIListFirst → FLIListNext
+      直到上游约定的 -EBADF 结束信号 → FLIDeleteList；连做两轮以证明库内
+      全局 firstdevice/currentdevice 状态可重入。无硬件时清单为空，结束信号
+      必须仍是 -EBADF；有硬件时每个条目必须同时带 filename 与 name。
+    checks: 11
+    status: pass
+
+  - id: HC-3
+    title: "设备清单落盘与回读 / enumerate every backend, write a report, re-read it"
+    kind: consumer_e2e
+    description: >
+      覆盖全部 6 个 domain 组合（USB 相机/滤轮/调焦器/raw、并口相机、串口
+      相机）打通 FLIList → FLIFreeList 三个后端，把 "filename;name" 条目写成
+      真实报告文件，再回读该文件校验字段结构与行数，并与 FLIList 的返回值对齐；
+      另验证未定义接口码被 dispatch 自身以 EINVAL 拒绝。报告文件是消费者产物。
+    checks: 18
+    status: pass
+
+  - id: HC-4
+    title: "诊断子系统端到端 / FLISetDebugLevel drives real library diagnostics"
+    kind: consumer_e2e
+    description: >
+      打开 FLIDEBUG_ALL 后驱动一次真实枚举，用 dup2 捕获进程真实 stderr，
+      校验确实产出了带 "libfli:" 前缀、且描述了本次枚举的诊断行；再关掉
+      debug 重跑同一条流程，校验输出归零。证明库自己的 fprintf(stderr) 诊断
+      链路在 OHOS 进程里可用。
+    checks: 5
+    status: pass
+
+  - id: HC-5
+    title: "设备句柄越界防护 / out-of-range handle rejection"
+    kind: consumer_e2e
+    description: >
+      MAX_OPEN_DEVICES 上游为 16，故句柄 -1 恒越界：9 个跨相机/滤轮/调焦器的
+      API 必须经 CHKDEVICE 拒绝而不是越界索引 devices[] 表；FLIGetModel(NULL)
+      拒绝；FLIOpen 对不存在的并口地址必须干净失败而不是交出可用句柄。
+    checks: 11
+    status: pass
+
+  - id: HC-6
+    title: "鸿蒙特有：包内制品在 OHOS 动态加载链路中的端到端消费"
+    kind: harmony_specific
+    description: >
+      断言全部落在**包内真实制品**上：
+      (a) 编译期 __aarch64__（__OHOS__ 只报告不断言）、运行期 uname().machine=aarch64、LP64；
+      (b) 解析包内 lib/libfli.a（GNU/BSD/plain 三种 ar 长名格式都支持），
+          逐成员校验 ELF64/LSB + ET_REL + EM_AARCH64；
+      (c) 用**该包内静态库**编出下游 .so（clang -shared --whole-archive），
+          由 OHOS 动态加载器 dlopen、dlsym 解析 FLIGetLibVersion/FLIList/
+          FLICreateList/FLIFreeList/FLIDeleteList，跨 .so 边界真实调用并与
+          静态链接副本比对横幅，随后 dlclose；
+      (d) 读包内 lib/udev/rules.d/99-fli.rules，校验 SUBSYSTEMS=="usb" 与
+          FLI 厂商 ID 0f18，并确认它没有落进共享系统前缀（R49）。
+    checks: 18
+    status: pass
+
+summary:
+  total_use_cases: 6
+  passed_use_cases: 6
+  total_checks: 71
+  passed_checks: 71
+  pass_rate: 1.0
+  observed: "== 6 cases, 0 failed == / == 71 checks, 0 failures == / RESULT: PASSED"
+
+# 防空壳的结构性保障（R34 / rule12）
+anti_hollow:
+  - "test_package/conanfile.py 的 test() 用 self.run 真实编译并执行测试程序"
+  - "缺任一包内制品（libfli.a / 99-fli.rules / 下游 .so）时直接抛 AssertionError，"
+    "HC-6 报 FAIL 而不是被跳过"
+  - "解析 'case HC-n PASS|FAIL' 行：任一用例 FAIL、缺少 HC-6、缺少用例行、"
+    "passed == 0、或缺 RESULT: PASSED，均抛 AssertionError"
+  - "L1e 负向实测：包内 libfli.a 缺失 → 编译期报 no such file；99-fli.rules 缺失 → "
+    "HC-6.d1-d3 FAIL；下游 .so 缺失 → HC-6.c1 FAIL；伪造非 ar 文件顶替 libfli.a → "
+    "HC-6.b1 FAIL；用 -fno-pic 重编 libfli.c.o 顶替归档成员后，下游 .so 链接报 "
+    "'relocation R_AARCH64_ADR_PREL_PG_HI21 cannot be used against symbol devices'"
+
+notes: >
+  上游（indilib/indi-3rdparty libfli）无自动化测试套件，所有设备入口都需要真实
+  FLI 硬件，因此不存在可清点的上游用例数（上游 N=0，清点证据见 notes.md 与
+  test_package/ 目录内容）。本次补全的 6 个消费者用例覆盖设备发现、清单产出、
+  诊断、句柄安全与鸿蒙平台消费链路，其中 HC-6 是鸿蒙特有用例。
