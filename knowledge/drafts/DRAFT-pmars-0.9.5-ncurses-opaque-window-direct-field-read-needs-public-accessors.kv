@@ -1,0 +1,102 @@
+# ═══ Draft knowledge entry — 制品仓 ncurses 以 NCURSES_OPAQUE=1 发布：直读 WINDOW 内部字段是硬编译错误，必须改用公共访问器（不要自造字段别名宏）═══
+# Timestamp: 2026-09-26
+# Software: pmars 0.9.5（通用：任何链本仓 ncurses/6.x 且源码直读 WINDOW 内部字段的归档）
+# Gate: 本地 conan create / W3 的编译阶段（build() 首错即签名），无需等平台判决
+# 用法：本条随 pmars 0.9.5 的 PR 原子提交于 knowledge/drafts/；其他包取用时把证据字段换成本包实测值，
+#       **只有本包真的报出 `incomplete definition of type 'struct _win_st'` 才配这条**。
+
+id: DRAFT-pmars-0.9.5-ncurses-opaque-window-direct-field-read-needs-public-accessors
+title: 制品仓 ncurses/6.x 把头文件里的 WINDOW 做成不透明类型（NCURSES_OPAQUE=1），上游按旧习惯直读 curwin->_curx/_cury 会撞硬编译错误 incomplete definition of type 'struct _win_st' —— 改用 ncurses 公共访问器 getcurx()/getcury()，不要自造字段别名宏
+trigger_tool: clang 15（交叉到 aarch64-linux-ohos）/ conan create 的 build 阶段
+phase: build-compile
+error_signature: "incomplete definition of type 'struct _win_st'"
+severity: 2
+category: ncurses|opaque-struct|build-compile|packaging-repo-shape
+root_cause: 本仓制品 ncurses/6.6 的 `include/curses.h:152` 就是 `#define NCURSES_OPAQUE 1`，
+  且 `:456` 只有 `typedef struct _win_st WINDOW;`（无成员声明）。因此任何按 K&R 时代习惯
+  直读 `WINDOW` 内部字段的上游源码，在此制品上都是**类型不完整的硬错误**，不是警告、
+  也不能靠补 `-I` 或放宽 `-Wno-*` 绕开。pmars 的 `src/curdisp.c` 有 5 处这种读法
+  （`curwin->_curx` / `curwin->_cury`），首编逐处报错行号 464/465/466/468/480。
+  两个强误导：a) 签名长得像"ncurses 头文件没装好"，会让人去查 include 路径而不是改代码；
+  b) 同一份上游源码在带老 ncurses 兼容声明的主机上能编，于是"本地编得过"不代表配方编得过。
+  触发面就锚在这枚制品上，**不是 OHOS 平台能力问题**——它是纯编译期类型可见性，碰不到
+  syscall、ioctl、设备节点，在任何 `NCURSES_OPAQUE=1` 的 ncurses 6 及以上（含普通 Linux 发行版）
+  都会报出同一签名 ⇒ 把它叙述成"鸿蒙特有"/"OHOS 独有能力面"属过度归因，它是上游与
+  ncurses 6 的通用兼容修复（2026-09-26 W4 r1 独立审计结论，本条据此收紧措辞）。
+affected_scope: |-
+  链本仓 ncurses/6.x 的全部归档：终端 UI / curses 家族（pmars、abook、libgnt、nwipe、mpd、
+  各类 TUI 监控器与游戏）。判据 = 源码里出现 `-> _curx`/`->_cury`/`->_pmouse_x`/`->_flags`
+  这类 WINDOW 成员直读，或 `grep -rn 'WINDOW *[*(].*->_' src/` 非空。
+  不适用：只用 ncurses 公共 API 的包；以及链到别的 curses 实现（pdcurses/净室实现）的包。
+  同一"不透明 struct → 公共访问器"的成因形状在 libpng（png_jmpbuf）、panel（panel_window）
+  上已各自出现过，但**签名与解法都不同**，那条形态未入库、本条也不覆盖它们。
+verification_cmd: |-
+  # 修复前（配方驱动编译，首错即签名）：
+  <worktree> 内 conan create 的 build 阶段 → 5 处 incomplete definition of type 'struct _win_st'
+  # 制品形态自查（决定性，一眼看清是不是不透明发布）：
+  grep -n 'NCURSES_OPAQUE' <CONAN_HOME>/p/<ncurses_pkg>/include/curses.h    # 期望 :#define NCURSES_OPAQUE 1
+  grep -n 'typedef struct _win_st WINDOW' <...>/include/curses.h            # 只有一行 typedef、无成员
+  # 公共访问器确在本包库里（不是靠头文件内联）：
+  nm --defined-only <...>/lib/libncursesw.a | grep -E ' T getcur(x|y)$'     # 期望 T getcurx / T getcury
+  # 修复后必须 0 命中该签名，且 build 退出码 0。
+match_keywords: incomplete definition of type, struct _win_st, NCURSES_OPAQUE, getcurx, getcury,
+  _curx, _cury, WINDOW 不透明, ncurses, curdisp, 公共访问器, 硬编译错误, 本地编得过配方编不过
+keywords: ncurses 不透明 WINDOW, 直读内部字段, getcurx/getcury 公共访问器, NCURSES_OPAQUE=1,
+  制品仓形态, 禁自造字段别名宏, -lncursesw
+prescan_pattern: "->\\s*_cur[xy]\\b|incomplete definition of type 'struct _win_st'"
+prescan_globs: "**/src/*disp*.c, **/*curses*.c, **/*ui*.c, **/*term*.c"
+safety_boundary: |-
+  ①只替换"读取"，不改控制流、不动坐标语义（pmars 的 5 处替换后行数不变，两个 hunk 各 11/7 行）；
+  ②⛔ 不要走上游/他包里的"自造别名宏"路线（先例 nwipe/0.39 在 conanfile 里塞
+    `int _cury, _curx;` + `#define getcurx(w) ((w)->_curx)`）——那是自己重新声明一个与制品
+    布局不一致的结构，等于把不透明性伪造成未定义行为，链接能过而读到的值是错的；
+  ③⛔ 不要用 `-DNCURSES_OPAQUE=0` 之类编译期开关去"解开"不透明性（那是在与制品对赌，
+    且会连带影响该 TU 里所有 curses 声明）；
+  ④本仓 curses 制品的链接名是 **`-lncursesw`**（wide 版），把它写成 `-lcurses` 会在链接期
+    以另一副面孔失败，别把两次失败混成同一条机制；
+  ⑤该机制是纯编译期类型可见性问题，不涉及 syscall/ioctl/设备能力，且在任意 `NCURSES_OPAQUE=1`
+    的 ncurses 6 及以上（含普通 Linux 发行版）同样发生 ⇒ ⛔ 不得在 PR 或 notes 里把它叙述成
+    "OHOS 平台能力缺失""鸿蒙特有"。本包真正的 OHOS 特有面只有两条：X11 只能编译期关闭，
+    以及运行期 terminfo 需要 requires 的 run=True（后者本仓已有 presage 先例，不另报新知识）。
+approach: replace-direct-field-read-with-public-accessor
+rec_priority: 1
+rec_auto_fix: false
+rec_impl: 把 WINDOW 成员直读改成 ncurses 公共访问器调用（getcurx/getcury），源码级最小补丁
+rec_description: |-
+  对每处 `win->_curx` / `win->_cury` 直读，替换为 `getcurx(win)` / `getcury(win)`；
+  单文件、少量 hunk、行数不变、不引平台宏、不加编译开关。访问器由本仓 libncursesw.a
+  以函数形式导出（nm 回读 T getcurx/T getcury），因此不需要额外的头文件或链接参数。
+  若上游某段依赖 `_cury` 参与算术（如 `oy = curwin->_cury - 1`），保持算术在访问器之外
+  （`oy = getcury(curwin) - 1`），不要把表达式塞进宏位。
+rec_command: |-
+  # 以 pmars 0.9.5 的实测补丁为准（patches/0001-curdisp-opaque-window-accessors.patch）
+  # hunk 1: @@ -461,11 +461,11 @@
+  #   -  if (ox = curwin->_curx) {
+  #   -    mvwaddch(curwin, curwin->_cury, --ox, ' ');
+  #   -    wmove(curwin, curwin->_cury, ox);
+  #   +  if (ox = getcurx(curwin)) {
+  #   +    mvwaddch(curwin, getcury(curwin), --ox, ' ');
+  #   +    wmove(curwin, getcury(curwin), ox);
+  #   -  oy = curwin->_cury - 1;
+  #   +  oy = getcury(curwin) - 1;
+  # hunk 2: @@ -477,7 +477,7 @@
+  #   -  mvwaddch(curwin, curwin->_cury, ox, ' ');
+  #   +  mvwaddch(curwin, getcury(curwin), ox, ' ');
+  # 之后 conan create 的 build 阶段该签名应为 0 命中、BUILD_RC=0
+principles: []
+causes: []
+caused_by: []
+similar_to: E020
+conflicts_with: []
+prerequisite_of: []
+doc_file: drafts/pmars-0.9.5-ncurses-opaque-window-direct-field-read-needs-public-accessors.md
+last_updated: 2026-09-26
+source_event: pmars 0.9.5 HarmonyOS PC 适配（智能任务平台任务 9605，B 机实测：首编 5 处签名 → 补丁后 BUILD_RC=0，并跑通 13 条消费者断言）
+authors: 主理-66
+source_pr: 13051
+source_commit: b8c40d5ff9f094577daf0c130a0881e2dd8c3a16
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.9
+metrics_last_used: 2026-09-26
+draft: true
