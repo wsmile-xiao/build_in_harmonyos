@@ -1,0 +1,137 @@
+#====================================================================
+# DRAFT-ocamlopt-lld-static-shadow-explicit-closure
+# ocamlopt 烘焙首位 -L × lld 目录内 .so→.a 选择 → 系统静态归档影子化
+# conan 共享库 → 供给 .so 必须以绝对路径列为显式链接输入
+#====================================================================
+
+# ═══ Draft knowledge entry — 工具链驱动器烘焙 -L 与链接器目录内归档选择语义叠加 ═══
+# Timestamp: 2026-09-28
+# Software: lablgtk3 3.1.5（案例库；机理为 ocamlopt+lld 工具链语义，不限该库）
+# Gate: 权威 CI（ohos-aarch64）round-02 链接失败 → round-04 显式 .so 闭包 PASS
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+# ═══ Layer 0: 错误面 ═══
+id:                     DRAFT-ocamlopt-lld-static-shadow-explicit-closure
+trigger_tool:           ocamlopt|lld|clang|dune|conan
+phase:                  linking
+error_signature:        ld\.lld: error: undefined symbol: (ffi_type_void|ffi_type_pointer|ffi_prep_cif|ffi_call|pcre2_)|in archive .*/usr/local/lib/libg[a-z]+-2\.0\.a|in archive .*/usr/local/lib/libintl\.a
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               linking, ocaml, lld, toolchain
+match_keywords:         ocamlopt, lld, baked -L, -L ordering, link closure, explicit .so, absolute path, shadow archive, static archive, libgobject-2.0.a, libglib-2.0.a, libintl.a, ffi_type_void, pcre2_, gclosure, pkg-config Libs
+title:                  编译驱动器烘焙的首位 -L 叠加 lld「目录内 .so 优先 .a」选择会使系统静态归档影子化 conan 共享库并暴露其未供给依赖：应把供给 .so 以 isfile 守卫的绝对路径列为显式链接输入，仅调 -L 顺序无效
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             完整因果链（工具实现证据 → 触发命令 → 失败点 → 归类）：
+                        ① 工具实现证据——该设备的 ocamlopt 驱动器把
+                        -L<用户前缀>/usr/local/lib 固定烘焙进每个原生链接 clang 行的
+                        首位（`ocamlopt -verbose` 实测：-L/storage/Users/currentUser/usr/local/lib
+                        先于 stdlib 自身 -L，配置期烘焙、配方无法改序）；lld 按目录顺序
+                        解析，同一目录内先试 lib<name>.so 再试 lib<name>.a。
+                        ② 触发命令——conan create 全程中 dune 驱动的 ocamlopt 原生链接
+                        （如 src/tools/gdk_pixbuf_mlsource.exe，r2:5628）。
+                        ③ 失败点——首位目录仅存另一套 glib 2.88 构建的静态归档
+                        （libglib/gobject/gio/gmodule/gthread-2.0.a、libintl.a，无同名
+                        .so），-lgobject-2.0 类裸名在该目录被解析到静态归档而非 -L 列表
+                        靠后的 conan glib 共享库；归档成员（gclosure.o 等）引用的
+                        ffi_type_void/ffi_type_pointer/ffi_prep_cif/ffi_call（libffi 侧）
+                        与 pcre2_* 无任何供给 → `ld.lld: error: undefined symbol`，
+                        lld 报出的供给者归档绝对路径就是系统目录 .a，影子化机理在失败
+                        日志内自证（r2:5629-5644）。
+                        ④ 归类——编译驱动器 + 链接器目录语义叠加的工具链链接失败
+                        （链接域/L1）；复发面由工具链保证：该设备一切 ocamlopt 原生
+                        链接、凡与首位目录静态归档同名的库均被影子化。
+affected_scope:         任何在该设备（或任何把固定 -L 烘焙进链接行的编译驱动器 × lld
+                        单目录 .so→.a 选择语义同构的环境）上用 ocamlopt 链接原生码并
+                        消费 conan 共享库的项目，不限语言与绑定类型；诊断口诀：
+                        `undefined symbol` 且 lld 报出供给者为系统目录 .a → 先查链接行
+                        首位 -L，而不是调 -L 顺序。
+verification_cmd:       设备新 shell 自包含探针（详见同名 .md「验证」节）：
+                        ① `OCAMLLIB=$P/lib/ocaml $P/bin/ocamlopt -verbose -o t.exe t.ml
+                        2>&1 | grep -oE '\-L[^ ]+' | head -2` → 首个 -L 为
+                        /storage/Users/currentUser/usr/local/lib（烘焙实证）；
+                        ② `ls /storage/Users/currentUser/usr/local/lib/ | grep
+                        '^lib(glib|gobject|gio|gmodule|gthread|intl)'` → 仅 6 个 .a、
+                        无同名 .so；conan glib 包内 `lib/libgobject-2.0.so` 存在于更靠后
+                        的搜索目录（被影子化的共享库确实存在）；
+                        ③ lld 目录内选择语义最小对照：sys/ 目录仅放「定义主符号但引用
+                        未供给依赖」的 .a，real/ 目录放全供给 .so，`clang m.c
+                        -Lsys -Lreal -lmine` 复现 undefined symbol（供给者=sys .a），
+                        改为把 real .so 以绝对路径列首位输入后链接通过 rc=0。
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_approach:           explicit-so-absolute-path-link-closure
+rec_description:        配方 generate() 遍历 host 依赖 libdir，对供给共享库名单逐个
+                        isfile 守卫，把命中的 .so 以绝对路径列为显式链接输入、置于一切
+                        -L/-l 之前，注入生成的顶层 .pc（gtk+-3.0.pc）的 `Libs:` 行首位
+                        （pkg-config 展开时顶层模块 Libs 最先输出，故先于任何 -l 裸名
+                        进入链接行）。显式 .so 的动态符号表先满足影子归档成员的未定义
+                        引用，其 DT_NEEDED 链再在显式 -L 目录内解析自身依赖（libffi 等）
+                        ——影子归档不再有被选中后暴露缺口的路径。isfile 守卫保证同配方
+                        在无该 .so 的 worker 上退回裸名搜索而非硬失败。
+rec_command:            conanfile.py generate()（lablgtk3/3.1.5 实装，round-04 PASS）：
+                          explicit_inputs = []
+                          for name in ("gio-2.0","girepository-2.0","glib-2.0",
+                                       "gmodule-2.0","gobject-2.0","gthread-2.0","intl"):
+                              so_path = os.path.join(glib_lib, "lib%s.so" % name)
+                              if os.path.isfile(so_path):
+                                  explicit_inputs.append(so_path)
+                          closure = " ".join(explicit_inputs + ["-L%s" % d for d in lib_dirs])
+                          pc_text = pc_text.replace("Libs:", "Libs: %s " % closure, 1)
+                        （lib_dirs=全部 host 依赖 libdir，同时保留 -L/-Wl,-rpath-link
+                        显式闭包；explicits 必须先于这些 -L。）
+rec_auto_fix:           false
+rec_impl:               conan-recipe-generate
+
+fallback_priority:      2
+fallback_approach:      full-static-closure-explicit-archives
+fallback_description:   若环境确实无供给 .so（首位目录只有 .a 且包内也无共享版），把被
+                        影子化的 .a 连同其 ffi/pcre2 静态供给者一并显式列为链接输入，
+                        构成全静态闭包。诚实权衡：放弃共享库语义（产物体积与符号解析
+                        面变大、与 conan 共享包运行时脱钩、多副本符号冲突风险），掩盖
+                        「共享库被影子化」的真实问题而非修复，仅作退路。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-generate
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       --allow-shlib-undefined|-Wl,--allow-shlib-undefined
+forbid_1_reason:        CI 门禁语义即拒绝该开关；它把「符号供给面缺口」掩盖成「允许
+                        共享库带未定义符号」，跨 worker 结果不可复现（同一配方在另一
+                        worker 可能「链接成功但产物不可运行」）。
+forbid_1_consequence:   链接虽过，运行期在缺失符号路径上崩溃；影子化根因未消除。
+forbid_2_pattern:       调整.*-L.*顺序|conan.*libdir.*排前|reorder.*-L
+forbid_2_reason:        工具链烘焙的首位 -L 恒先于配方注入的任何顺序（本 run round-02
+                        实证无效）：裸名 -l 在首位目录被同名 .a 截走，与后续 -L 排列
+                        无关。
+forbid_2_consequence:   徒耗迭代轮次，链接仍以同一 undefined symbol 失败。
+
+# ═══ Layer 4: 原则与关系 ═══
+principles:             P-ENV-001, P-TOOLCHAIN-001
+
+causes:                 []
+caused_by:              []
+similar_to:             E236, E508, E537, exp:ophs_ci_review@main link-error/libido3-13.10.0-libintl-link-closure.md(3fa0bff, 内部先例: generate() 显式绝对路径 .so 闭包同族)
+conflicts_with:         []
+prerequisite_of:        该设备一切消费 glib/GTK 系共享库的 OCaml 原生码包配方
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-ocamlopt-lld-static-shadow-explicit-closure.md
+last_updated:           2026-09-28
+source_event:           lablgtk3 3.1.5 OHOS PC 适配 round-02 链接失败（ld.lld undefined ffi_*/pcre2_*，供给者 /storage/Users/currentUser/usr/local/lib/libgobject-2.0.a）→ generate() 显式 .so 闭包后 round-04 PASS
+
+applicable_libs:        ocamlopt/dune 系 OCaml 原生包（lablgtk3, zarith, cairo2 OCaml
+                        侧等）及语义同构的「驱动器固定 -L × lld」组合
+reuse_existing:         false
+new_draft:              true
+
+authors:                GoliWie
+source_pr:              合并后回填
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-28
