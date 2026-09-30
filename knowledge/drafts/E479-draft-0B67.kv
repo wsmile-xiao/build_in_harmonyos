@@ -1,0 +1,72 @@
+#====================================================================
+# E479-draft-0B67.kv — 知识图谱草稿（路径 B 候选）
+# 主题: 依赖共享库以「符号链接链」装进 Conan 包，OHOS 动态加载器拒载（errno 为空）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E479
+trigger_tool:           runtime|test|ld|install
+phase:                  runtime
+error_signature: Error loading shared library .*\.so\.|Error relocating .*: .* symbol not found|needed by.*test_
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 2
+category: ohos, hmdfs, linking, runtime, soname
+match_keywords: Error loading shared library, errno empty, symlink, libxml2.so.16, realdep_libs, LD_LIBRARY_PATH, DT_RUNPATH, loader, SONAME symlink chain, copy2 follow symlinks, os.symlink
+title: Conan 依赖包以 SONAME 符号链接链安装时，OHOS 加载器拒载该 .so（同一实体文件改名即可加载）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: Conan 打包共享库时按上游 make install 结果保留 SONAME 符号链接链（如 libxml2.so -> libxml2.so.16 -> libxml2.so.16.1.3），真实 ELF 只在最末一级；OHOS 存储卷（HMDFS 族）上的动态加载器在解析“需要 libxml2.so.16”时会打开该符号链接并失败，报 `Error loading shared library libxml2.so.16: (needed by <exe>)` 且错因字段为空，随后连带打印该库全部 `symbol not found`。对照实验可确定性区分：把同一实体文件用 cp -L 复制成普通文件放进 LD_LIBRARY_PATH 即正常运行；而在自建目录里放一个指向该文件的符号链接则必败 —— 说明故障点是“符号链接本身”，与文件内容、签名、权限、属主均无关（该 .so 已由包自身签名）。
+affected_scope: 任何依赖共享库 Conan 包（尤其 libxml2、libpng 一类按 SONAME 链安装的包）在 OHOS 存储卷上运行的消费者；表现为「conan create 构建全绿、test_package 运行阶段 LoadSharedLibrary 失败」
+verification_cmd: readlink -f <pkg>/lib/lib<name>.so.* ; dlopen 探针（动态加载，勿用静态二进制裸 mmap）对比 实体文件 vs 符号链接
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: materialize-dependency-sos
+rec_description: 在 test_package 的 generate() 里遍历 self.dependencies.host 每个依赖的 cpp_info.libdirs，用 shutil.copy2（跟随符号链接）把 *.so* 实体化为 <build>/realdep_libs 下的普通文件，再用 Environment().prepend_path("LD_LIBRARY_PATH", real_dir).vars(self, scope="run").save_script(...) 保存为 run 作用域，test() 以 env="conanrun" 执行（LD_LIBRARY_PATH 优先于 DT_RUNPATH，实体目录必然命中）
+rec_command: shutil.copy2(os.path.join(folder, entry), os.path.join(real_dir, entry)) ; env.prepend_path("LD_LIBRARY_PATH", real_dir)
+rec_auto_fix: false
+rec_impl: manual
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: prefer-static-dependency
+fallback_description: 若该依赖包同时发布了静态变体（shared=False），改 options["<dep"].shared=False 让消费者静态链接，从根上避开运行时加载；仅在静态变体确有预编译二进制时可用（否则会退化为源码构建该依赖）
+fallback_command: self.options["libxml2"].shared = False
+fallback_auto_fix: false
+fallback_impl: none
+
+# ★ 禁止策略 ★
+forbid_1_pattern: ln -s.*lib|os\.symlink\(.*\.so|cp -d .*\.so
+forbid_1_reason: 在修复路径上再造符号链接等于把故障点搬个位置；OHOS 存储卷上必须落成实体文件（cp -L / shutil.copy2）
+forbid_1_consequence: 加载器仍拒载，test_package/CI L1 运行阶段持续失败
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P016, P017
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E274, E019, E073, E207]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+platform_only: true
+doc_file:               E479-draft-0B67.md
+last_updated: 2026-09-29
+source_event: libosmscout 2024.06.02.1 适配：消费者运行时报 libxml2.so.16 加载失败
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: kongling <308360610@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-29
+
+draft: true
+contributor_id: 0B67
