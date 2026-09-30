@@ -1,0 +1,189 @@
+# ═══ Draft knowledge entry — OHOS GLES 不提供立即模式 GL 符号，需改写 VAO 管线 ═══
+# Timestamp: 2026-09-28（v3：端到端 conan test 验证 + v2/v3 dispatcher 差异 + EGL/CMake 工具链陷阱）
+# Software: mupdf-gl 1.27.2（可复用于任何依赖立即模式 glBegin/glEnd/glVertex 的 GL 应用/库）
+# Gate: 本地 OHOS PC 真机（aarch64-unknown-linux-ohos, clang 15.0.4, SDK 26.0.0.18）探针 + conan test_package 编译包内真实补丁 gl-ui.c 端到端实测
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-mupdf-gl-1.27.2-immediate-mode-unavailable-vao-rewrite
+trigger_tool:           egl|GLES|clang|conan|make|ld.lld|cmake
+phase:                  link|test_package|build
+error_signature:        undefined symbol: glBegin|undefined symbol: glVertex2f|
+                           undefined symbol: glTexCoord2f|undefined symbol: glOrtho|
+                           undefined symbol: glNewList|
+                           undefined symbol: eglGetString|
+                           use of undeclared identifier 'GL_PROJECTION'|
+                           use of undeclared identifier 'GL_COMPILE'|
+                           eglGetProcAddress\("glBegin"\) == NULL|
+                           Parse error\.  Function missing ending|
+                           GL_VERSION.*null|
+                           immediate.mode.*NULL|
+                           glBegin.*segfault|NULL deref.*glBegin
+
+severity:               3
+category:               graphics, opengl, egl, runtime, platform, ohos, gl, gles
+match_keywords:         immediate mode, glBegin, glEnd, glVertex2f, glTexCoord2f,
+                           eglGetProcAddress NULL, GLES fixed function pipeline, deprecated GL,
+                           立即模式, VAO rewrite, glDrawArrays, glGenVertexArrays, shader,
+                           mupdf-gl, gl-ui.c, ui_draw_image, OHOS GLES, Maleoon, B301,
+                           undefined symbol, 显示列表, glNewList, glOrtho, 矩阵栈,
+                           libGLESv2 空桩, dispatcher, eglQueryString, FREEGLUT_GLES,
+                           CMake 3.16 注释括号
+title:                  OHOS GLES 驱动不导出立即模式/固定管线 GL 符号（glBegin/glVertex2f/glTexCoord2f/glOrtho/glNewList 等），依赖立即模式的 GL 应用（如 mupdf-gl platform/gl/gl-ui.c）在 OHOS 上无法链接，需改写为现代 VAO+shader 管线（已用包内真实补丁代码端到端验证）
+
+root_cause: >
+  OHOS 的 GLES 驱动（Maleoon/B301，EGL 1.4 vendor=OpenHarmony，GL_VERSION=
+  "OpenGL ES 3.2 B301"）基于 OpenGL ES 2.0/3.0 标准。**立即模式与固定管线
+  符号根本不存在于 libGLESv2.so / libGLESv3.so 的导出表**（llvm-nm -D 实测
+  0 命中）：glBegin / glEnd / glVertex2f / glVertex3f / glTexCoord2f /
+  glColor3f / glColor4f / glPointSize / glMatrixMode / glLoadIdentity /
+  glOrtho / glNewList / glCallList / glEndList / glDeleteLists / glGenLists /
+  glLineStipple 全部缺失；同时 eglGetProcAddress 对它们也返回 NULL。
+  后果比"运行时不可用"更强：**未移植的代码在 OHOS 上链接即失败**
+  （ld.lld: undefined symbol），根本到不了运行时。这是 ES 标准的必然结果
+  ——立即模式在 ES 2.0 被弃用、ES 3.0 起被移除；显示列表在 ES 中被完全
+  移除（无等价物）；固定管线矩阵栈被 shader 取代。
+
+  **v2/v3 库差异（⚠️ 高频陷阱，v3 新增）**：libGLESv2.so 的 673 个符号
+  **全部别名指向单一入口 0xa1b0，该 dispatcher 不工作**（实测：经 v2 绑定
+  的 glGetString 返回 NULL，绘制调用静默无效，framebuffer 全黑）；
+  libGLESv3.so 的 2942 个符号别名指向 0x5d70，**该 dispatcher 实际工作**
+  （probe-direct-gl.c：glCreateShader/glCompileShader/glGenVertexArrays
+  直连全部成功），且 v3 符号表是 ES2 核心的严格超集（24 个 ES2 核心符号
+  抽样全在）。**链接顺序敏感**：同时 -lGLESv2 -lGLESv3 时，GL 符号按
+  "首次出现"绑到 v2 → 渲染静默失败且无任何报错（glGetString 返 NULL 是
+  唯一线索）。**正确做法：只链 -lEGL -lGLESv3，不链 -lGLESv2。**
+
+  **EGL 符号集差异（v3 新增）**：libEGL.so **不导出已废弃的 eglGetString**
+  （EGL 1.0），只导出 eglQueryString（EGL 1.5）。调用 eglGetString →
+  链接错误 undefined symbol（lld 会误提示 "did you mean: glGetString
+  defined in libGLESv2.so"，极具误导性）。
+
+  **修正 v1/v2 的关键误判**：现代 GL 符号是**直接导出且直连可用**的
+  （经 v3 库）。DRAFT-ohos-gl-symbols-are-dispatcher-stubs 的"直连符号是
+  空桩、必须 eglGetProcAddress"结论**对现代函数不成立**——其观察很可能
+  正是撞上了 v2 空桩库（链了 -lGLESv2）或 ES1 上下文。本条与那条草稿的
+  关系修正为：现代符号经 v3 库直连可用（eglGetProcAddress 路径亦通）；
+  立即模式符号双路径皆无（.so 不导出 + eglGetProcAddress NULL）。
+
+  影响实例：mupdf-gl（platform/gl/gl-ui.c 的 ui_draw_image 用
+  glBegin(GL_TRIANGLE_STRIP)+glVertex2f+glTexCoord2f+glEnd 绘制页面纹理）
+  在 OHOS 上链接失败。
+
+rec_approach: >
+  将 GL 渲染路径从**立即模式改写为现代 VAO+shader 管线**（只链
+  -lEGL -lGLESv3 时直连可用）：
+
+  1. glCreateShader/glCreateProgram 建最小 passthrough shader
+     （VS: attribute vec2 a_pos; attribute vec2 a_uv; varying vec2 v_uv;
+       void main(){ v_uv=a_uv; gl_Position=vec4(a_pos,0.,1.);}
+       FS: **precision mediump float;**（ES fragment shader 无默认 float
+       精度，缺失报 S0032）varying vec2 v_uv; uniform sampler2D u_tex;
+       void main(){ gl_FragColor=texture2D(u_tex,v_uv);}）
+  2. glGenVertexArrays/glBindVertexArray 建 VAO（惰性一次性初始化）
+  3. glGenBuffers/glBindBuffer(GL_ARRAY_BUFFER) 后 **glBufferData**（不是
+     glBufferSubData：ES 中未分配的 VBO 上 sub-data 报 GL_INVALID_VALUE）
+  4. glVertexAttribPointer + glEnableVertexAttribArray 绑定 pos/uv
+  5. glDrawArrays(GL_TRIANGLE_STRIP, 0, 4) 取代 glBegin/glEnd
+  6. 纹理侧不变：glGenTextures/glBindTexture/glTexImage2D；**不要写
+     glEnable(GL_TEXTURE_2D)**（ES2/3 中不是合法 enable cap，报
+     GL_INVALID_ENUM；纹理单元由 glBindTexture 激活）
+
+  **坐标系（易漏）**：若原代码依赖固定管线矩阵（如 mupdf-gl 的 ui_begin
+  用 glOrtho(0, w, h, 0, -1, 1) 设 Y-DOWN 窗口坐标投影），VAO 路径无矩阵
+  栈，须在 CPU 侧对 GL_VIEWPORT（glGetIntegerv）做等价变换：
+     ndc_x = 2 * x / vp_w - 1
+     ndc_y = 1 - 2 * y / vp_h   （y-down；若原 glOrtho 是 y-up 则 2y/vp_h - 1）
+  顶点坐标直接传窗口像素值会当 NDC 用，真实窗口下渲染成角落碎屑。
+
+  **上下文版本**：OHOS 不指定 EGL_CONTEXT_CLIENT_VERSION 时默认建 **ES 1.1**
+  上下文（GL_VERSION="OpenGL ES-CM 1.1"），VAO/shader 是 ES2/ES3 特性，
+  必须显式 ctx_attribs={EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE}。
+
+  **编译未移植函数时的头文件兼容（⚠️ FREEGLUT_GLES 分支，v3 新增）**：
+  freeglut OHOS 适配包定义 -DFREEGLUT_GLES → freeglut_std.h 走 GLES 分支
+  只 include <GLES2/gl2.h>（不走 <GL/gl.h>+<GL/glu.h>）。gl-ui.c 里未移植
+  的函数仍引用固定管线常量 → 5 个编译错误：GL_STACK_UNDERFLOW /
+  GL_STACK_OVERFLOW / GL_PROJECTION / GL_MODELVIEW / GL_COMPILE（纯 ES2
+  头文件没有）。且 gl2.h 不声明 ES3 函数（glGenVertexArrays 等 →
+  implicit-declaration 警告，保留路径上 ABI 隐患）。解法：强制包含
+  兼容头（-include）：#include <GLES3/gl3.h> + 用标准值 #ifndef 补 5 个
+  常量（0x1700/0x1701/0x0F00/0x0503/0x0504）。参考
+  archives/m/mupdf-gl/1.27.2/test_package/CMakeLists.txt（glstub 生成 +
+  -include + gc-sections 完整方案）。
+
+  **CMake 3.16 解析陷阱（⚠️ 平台工具链版本，v3 新增）**：平台 CMake 是
+  3.16.2，其解析器在**未闭合的多行命令体内**会把**行内注释里的 `)`**
+  计入括号匹配 → "Parse error. Function missing ending ')'". 实测复现：
+  target_include_directories(t PRIVATE\n  "/x"  # for <a/b> stub)\n  "/y")
+  即挂。解法：未闭合命令体内不放行内注释（注释挪到命令上方）。另注：
+  CMakeDeps 的 INTERFACE_INCLUDE_DIRECTORIES 被包在
+  $<$<CONFIG:...>> generator expression 里，get_target_property 取到的是
+  未求值原串——取包根目录应改用 CMakeDeps 数据文件设置的
+  <name>_PACKAGE_FOLDER_<CONFIG> 变量。
+
+  对 mupdf-gl 的具体落点：改 platform/gl/gl-ui.c 的 ui_draw_image（VAO
+  补丁，见 archives/m/mupdf-gl/1.27.2/patches/vao-rewrite.patch），
+  ui_texture_from_pixmap（纹理上传）无需改。
+
+verification_evidence: >
+  **A. 符号表核验**（llvm-nm -D，SDK 26.0.0.18 sysroot）：
+    libGLESv2.so（673 符号，全部别名 0xa1b0 = 空桩 dispatcher）/
+    libGLESv3.so（2942 符号，别名 0x5d70 = 工作 dispatcher，ES2 超集）：
+      缺失（0 命中）：glBegin glEnd glVertex2f glVertex3f glTexCoord2f
+                      glColor4f glColor3f glPointSize glMatrixMode
+                      glLoadIdentity glOrtho glNewList glCallList glEndList
+                      glDeleteLists glGenLists glLineStipple
+    libEGL.so：导出 eglQueryString，**不导出 eglGetString**
+  **B. eglGetProcAddress 探针**（probe-gl-proc.c，ES pbuffer 真机）：
+    glBegin/glEnd/glVertex2f/glTexCoord2f 全 NULL；
+    glDrawArrays/glGenVertexArrays/glCreateShader/glTexImage2D 全 OK。
+  **C. 直连探针**（probe-direct-gl.c，-lEGL -lGLESv3 直连，ES3.2 pbuffer）：
+    glGenVertexArrays -> vao=1 err=0x0 / glCreateShader -> 1 err=0x0 /
+    glCompileShader -> status=1 err=0x0 / PROBE-RESULT: direct-link GL WORKS
+  **D. v2 空桩实证**：test 同时链 -lGLESv2 -lGLESv3 → GL 符号绑 v2 →
+    glGetString(GL_VERSION) 返回 NULL、glReadPixels 全黑（nonblack=0/40000）；
+    去掉 -lGLESv2 后同一代码 → GL_VERSION="OpenGL ES 3.2 B301"、渲染 100%。
+  **E. 端到端（最强证据，conan test_package）**：test 编译**包内真实打过
+    补丁的 platform/gl/gl-ui.c**（-ffunction-sections + -fdata-sections +
+    -Wl,--gc-sections 只保留 ui_draw_image 闭包；兼容头补 GLES3 声明+5 个
+    固定管线常量），在 OHOS 真机 ES3.2 pbuffer 上下文调用真实
+    ui_draw_image() 渲染合成 pixmap（红底+蓝块），glReadPixels 回读：
+    framebuffer nonblack=40000/40000 (100.0%), center=(51,102,204) 蓝块命中
+    → TEST-PASS。补丁代码非"示例复现"，是原文件改写后的真实运行。
+
+affected_scope: >
+  所有**依赖立即模式/显示列表/固定管线矩阵的 GL 调用**在 OHOS 上渲染的
+  库/应用。mupdf-gl（platform/gl/）是首个实证实例；同类风险覆盖任何沿用
+  OpenGL 1.x 固定管线 / GLUT 旧式渲染的移植目标（老式 GLUT/OpenGL 查看器、
+  遗留 3D 小工具等）。判别信号：源码里出现 glBegin/glEnd/glVertex/glNewList/
+  glOrtho 且目标平台是 OHOS（纯 ES 驱动）——先 llvm-nm -D 目标 .so 确认
+  符号缺失，链接期即暴露（undefined symbol），比运行时探针更早。
+  **次级影响面（与本条主问题无关但同环境，v3 新增）**：①任何在 OHOS 上
+  链接 GL 的包都应只链 -lGLESv3（不链 -lGLESv2）——freeglut 适配包
+  system_libs 里的 -lGLESv2 只应服务于 freeglut 内部引用，下游包不应
+  自行再加；②任何用 eglGetString 的代码需改 eglQueryString；③CMake 3.16
+  的注释括号陷阱影响所有 test_package/CMakeLists.txt 的作者。
+
+  **mupdf-gl 完整查看器移植缺口清单**（本 PR 只覆盖 ui_draw_image 主渲染
+  路径；完整 mupdf-gl 可执行文件还需移植以下，属后续任务，预估 5-10 人日）：
+    1. 字形/批注立即模式绘制：glBegin/glEnd/glVertex2f/glTexCoord2f/
+       glColor3f/glColor4f/glPointSize（gl-font.c/gl-annotate.c 等）→ VAO 批量
+    2. 显示列表：glNewList/glCallList/glEndList/glDeleteLists/glGenLists/
+       glLineStipple → ES 无显示列表，用 FBO 离屏缓存等价
+    3. 固定管线矩阵：glMatrixMode/glLoadIdentity/glOrtho（gl-ui.c ui_begin
+       的 Y-DOWN 投影）→ CPU 矩阵 + shader uniform
+    4. freeglut 剪贴板：glutGetClipboard/glutSetClipboard（OHOS 适配版
+       freeglut/3.6.0 未实现）→ stub 或补实现（需 freeglut 发 3.6.0.1）
+  前置说明：freeglut/3.6.0（OHOS EGL-pbuffer 离屏适配）已发布到制品仓；
+  但注意其为**离屏 pbuffer 后端**（OHOS 无窗口系统），完整查看器即便移植
+  完成也只渲染到离屏 buffer，真实窗口显示需另做 pbuffer→ArkUI/XComponent
+  桥接。
+
+cross_ref:               DRAFT-ohos-egl-headless-no-gles1-baseline, DRAFT-ohos-gl-symbols-are-dispatcher-stubs（本条已修正其"直连=空桩"结论：v3 库直连可用，v2 库才是空桩——其原始观察很可能源于链了 -lGLESv2）
+related_packages:        freeglut 3.6.0（已发布）, mupdf-gl 1.27.2
