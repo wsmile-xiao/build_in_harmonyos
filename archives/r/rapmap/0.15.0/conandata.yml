@@ -1,0 +1,139 @@
+sources:
+  # Two GitHub-official endpoints for byte-identical content (verified: both
+  # return 1161423 B and sha256 cf0537c9...).  `https://github.com/<o>/<r>/archive/...`
+  # 302-redirects to the codeload host, which is what actually serves it.
+  # Listing both lets Conan fall through if one endpoint is degraded; the
+  # sha256 below is the official value and is never relaxed to pass a check.
+  url:
+    - "https://codeload.github.com/COMBINE-lab/RapMap/tar.gz/refs/tags/salmon-v0.15.0"
+    - "https://github.com/COMBINE-lab/RapMap/archive/refs/tags/salmon-v0.15.0.tar.gz"
+  sha256: "cf0537c9cd4e8ce3b28ecca7eb78ee5c59e98a09f5390a5c548d0a5494bb54fc"
+
+patches:
+  - patch_file: "patches/0001-cmake-consume-conan-dependencies-offline.patch"
+    patch_description: >-
+      Top-level CMakeLists: consume cereal, libdivsufsort and jemalloc from the
+      Conan packages instead of building/fetching them.  Drops all three
+      ExternalProject_Add blocks (libdivsufsort from the in-tree tarball with a
+      nested CMake that ignores the toolchain file, cereal 1.2.2 and a forked
+      jemalloc 4.5.0 via `curl -k -L`), and replaces the jemalloc fallback with
+      a configure-time STATUS message that names the allocator decision:
+      HarmonyOS PC builds run rapmap on the system allocator because the
+      packaged jemalloc 5.3.0 binary segfaults every invocation here (measured,
+      see patch 0010), so nothing can silently reach the network either way.
+    patch_type: "portability"
+  - patch_file: "patches/0002-src-cmake-imported-targets-and-non-x86-ksw2pp.patch"
+    patch_description: >-
+      src/CMakeLists.txt: take the suffix-array archives from the
+      divsufsort::divsufsort / divsufsort64::divsufsort64 imported targets
+      (headers included) instead of hard-coded <source>/external/install paths,
+      link cereal::cereal for its include interface, drop the dangling
+      add_dependencies(rapmap libjemalloc), and build only the scalar ksw2pp
+      object library off x86 because the SIMD kernels compile to nothing there
+      and -msse2 / -msse4.1 are x86-only options.
+    patch_type: "portability"
+  - patch_file: "patches/0003-ksw2pp-guard-cpuid-and-simd-entry-points-by-arch.patch"
+    patch_description: >-
+      src/ksw2pp/KSW2Aligner.cpp: the cpuid helper used for runtime SIMD
+      detection is x86 assembly and cannot be assembled on aarch64, so it is
+      compiled only for i386/x86_64 with the probe reporting "no SIMD" elsewhere;
+      the ksw_extz2_sse2 / ksw_extz2_sse41 / ksw_gg2_sse call sites are guarded by
+      __SSE2__ because those definitions live inside #ifdef __SSE2__ blocks and do
+      not exist off x86.  The scalar kernels selected instead (ksw_extz, ksw_gg2)
+      are the ones upstream already uses in its own non-SIMD fallback branch, and
+      ksw_gg2 has ksw_gg2_sse's full parameter list including the CIGAR
+      out-parameters, so no algorithm semantics are invented here.
+    patch_type: "portability"
+  - patch_file: "patches/0004-runrapmap-use-env-shebang.patch"
+    patch_description: >-
+      scripts/RunRapMap.sh, which upstream installs into bin/, begins with
+      a hard-coded /bin/bash shebang.  HarmonyOS PC has no /bin/bash
+      interpreter path -- verified on the device that [ -e /bin/bash ] and
+      [ -e /usr/bin/bash ] both fail while /usr/bin/env and
+      /data/service/hnp/bin/bash do exist -- so the kernel resolves the shebang
+      literally and the installed helper dies with ENOENT no matter what PATH
+      contains.  Rewritten to use /usr/bin/env bash, which is verified to work
+      here (the probe file was first checked with od -c so that a malformed
+      probe could not be mistaken for a platform limitation).
+    patch_type: "portability"
+  - patch_file: "patches/0005-rapmapfilesystem-no-accessperms.patch"
+    patch_description: >-
+      src/RapMapFileSystem.cpp creates its output directory with mkdir(path,
+      ACCESSPERMS).  ACCESSPERMS is a BSD extension (FreeBSD/DragonFly and
+      macOS sys/stat.h); POSIX does not define it and the C library used by
+      this toolchain does not provide it, so the build stops with
+      "use of undeclared identifier 'ACCESSPERMS'".  The POSIX S_IRWXU /
+      S_IRWXG / S_IRWXO macros expand to exactly the same 0777 mode ACCESSPERMS
+      stands for, so the directory is still created with the same permissions
+      and still filtered by umask.
+    patch_type: "portability"
+  - patch_file: "patches/0006-boophf-use-stdint-uint64-t.patch"
+    patch_description: >-
+      include/BooPHF.hpp types its thread-handle helper u_int64_t, a BSD
+      typedef that this C library only exposes from sys/types.h when
+      _BSD_SOURCE or _GNU_SOURCE is requested; the header asks for neither, so
+      the compiler reports "unknown type name 'u_int64_t'; did you mean
+      'uint64_t'?"  Both uses become the standard uint64_t and <cstdint> is
+      included explicitly rather than through a transitive include.
+    patch_type: "portability"
+  - patch_file: "patches/0007-zstr-select-strerror-r-by-return-type.patch"
+    patch_description: >-
+      include/zstr/strict_fstream.hpp turns errno into a message with
+      strerror_r() and chooses between the two incompatible POSIX signatures
+      from feature-test macros.  In a libc++ translation unit _POSIX_C_SOURCE,
+      _XOPEN_SOURCE and _GNU_SOURCE are all undefined, so its test fell
+      through to the GNU branch even though the headers here declare the
+      XSI-compliant int-returning one; the failure is "cannot initialize a
+      parameter of type 'const char *' with an lvalue of type 'int'".  The two
+      forms are now selected by overloading on the return type the header
+      actually declares, so nothing is guessed: the XSI path still reads the
+      message out of the caller's buffer and still degrades to "Unknown error"
+      when it reports failure, the GNU path still copies the returned pointer.
+    patch_type: "portability"
+  - patch_file: "patches/0008-fastxparserthreadutils-guard-pause-by-arch.patch"
+    patch_description: >-
+      include/FastxParserThreadUtils.hpp backs its spin loop off with
+      asm("pause"), an x86 instruction that cannot be assembled on aarch64 --
+      "unrecognized instruction mnemonic", raised from eleven translation
+      units that include the header.  This is the site patch 0003 does not
+      cover: 0003 guards the cpuid probe and the SSE entry points in
+      src/ksw2pp/KSW2Aligner.cpp only.  The instruction is kept for
+      i386/x86_64 and, elsewhere, the hint becomes std::this_thread::yield(),
+      the portable way to say "we are spinning, let someone else run".
+    patch_type: "portability"
+  - patch_file: "patches/0009-drop-unused-gomp-link-after-conan-libdivsufsort.patch"
+    patch_description: >-
+      The top-level CMakeLists.txt initialises NON_APPLECLANG_LIBS to gomp and
+      clears it only for APPLE, so every non-Apple clang link of rapmap asks
+      for -lgomp.  Upstream needs OpenMP only because its in-tree libdivsufsort
+      ExternalProject is configured with -DUSE_OPENMP=TRUE; patch 0001 consumes
+      the published libdivsufsort package instead, whose exported cpp_info
+      carries no OpenMP requirement, and no translation unit under src/ or
+      include/ contains an OpenMP directive (grep for '#pragma omp', 'omp_get'
+      and '_OPENMP' returns nothing).  On the OHOS clang sysroot the library is
+      not present at all -- clang++ with -target aarch64-unknown-linux-ohos
+      fails with "ld.lld: error: unable to find library -lgomp", while -lomp
+      resolves -- so the list is emptied, which removes a dependency nothing
+      references rather than repointing it at a substitute OpenMP runtime.
+    patch_type: "portability"
+  - patch_file: "patches/0010-link-zlib-and-jemalloc-imported-targets.patch"
+    patch_description: >-
+      src/CMakeLists.txt links the executable through two legacy single-value
+      variables that both stay empty in this build.  The Conan zlib package,
+      consumed through CMakeDeps, exports only the imported target zlib::zlib
+      and leaves the legacy ZLIB_LIBRARY variable empty, so the seven
+      deflate/inflate/gz symbols stayed undefined at link time -- the first
+      error of the 2026-09-26 verify run was "ld.lld: error: undefined symbol:
+      deflateInit2_" followed by deflateReset, inflateEnd and deflateEnd; the
+      zlib call site now uses the imported target, which is exactly the name
+      CMakeDeps writes into the generated package config.  jemalloc is the
+      opposite call: the OHOS jemalloc 5.3.0 package links cleanly, but every
+      rapmap invocation built against it -- even "rapmap --version", before any
+      mapping code runs -- dies with SIGSEGV, while the same sources built
+      without the allocator pass the full upstream CTest suite (2/2) and the
+      27-assertion consumer test.  On HarmonyOS PC rapmap therefore keeps the
+      system allocator: FAST_MALLOC_LIB stays empty, patch 0001 turns the
+      absent-allocator branch into an explanatory STATUS message instead of an
+      error, and the allocator is dropped from requirements rather than shipped
+      broken.
+    patch_type: "portability"
