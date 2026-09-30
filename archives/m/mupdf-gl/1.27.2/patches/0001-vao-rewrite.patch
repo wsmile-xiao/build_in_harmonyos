@@ -1,0 +1,128 @@
+--- a/platform/gl/gl-ui.c
++++ b/platform/gl/gl-ui.c
+@@ -148,26 +148,110 @@
+ 	}
+ }
+ 
++/*
++ * OHOS adaptation (Path-B knowledge:
++ * DRAFT-mupdf-gl-1.27.2-immediate-mode-unavailable-vao-rewrite):
++ * the OHOS GLES driver (Maleoon/FreeBox, EGL 1.4 vendor=OpenHarmony) does not
++ * provide the immediate-mode entry points at all - glBegin/glEnd/glVertex2f/
++ * glTexCoord2f are not exported by libGLESv2.so/libGLESv3.so, so the stock
++ * ui_draw_image() does not even LINK on OHOS (undefined symbols), and
++ * eglGetProcAddress() returns NULL for them. The modern VAO + shader pipeline
++ * (glCreateShader / glGenVertexArrays / glVertexAttribPointer / glDrawArrays)
++ * IS exported and functional when linked directly. The helper below renders
++ * the same textured quad with that pipeline.
++ *
++ * Coordinate space: the viewer (ui_begin, gl-ui.c) sets up a Y-DOWN
++ * fixed-function ortho projection - glOrtho(0, w, h, 0, -1, 1) - so draw
++ * coordinates are window pixels (y=0 at top). The VAO pipeline has no
++ * fixed-function matrices, so the same transform is applied on the CPU
++ * against the current GL viewport (set by the app via glViewport):
++ *     ndc_x =  2 * x / vp_w - 1
++ *     ndc_y =  1 - 2 * y / vp_h
++ */
++static GLuint ui_vao_prog;
++static GLuint ui_vao_vao;
++static GLuint ui_vao_vbo;
++
++static void ui_ensure_vao(void)
++{
++	if (ui_vao_prog)
++		return;
++	static const char *vs =
++		"attribute vec2 a_pos;\n"
++		"attribute vec2 a_uv;\n"
++		"varying vec2 v_uv;\n"
++		"void main(void){ v_uv = a_uv; gl_Position = vec4(a_pos, 0.0, 1.0); }\n";
++	/* GLSL ES fragment shaders have no default float precision. */
++	static const char *fs =
++		"precision mediump float;\n"
++		"varying vec2 v_uv;\n"
++		"uniform sampler2D u_tex;\n"
++		"void main(void){ gl_FragColor = texture2D(u_tex, v_uv); }\n";
++	GLuint vs_id = glCreateShader(GL_VERTEX_SHADER);
++	glShaderSource(vs_id, 1, &vs, 0);
++	glCompileShader(vs_id);
++	GLuint fs_id = glCreateShader(GL_FRAGMENT_SHADER);
++	glShaderSource(fs_id, 1, &fs, 0);
++	glCompileShader(fs_id);
++	ui_vao_prog = glCreateProgram();
++	glAttachShader(ui_vao_prog, vs_id);
++	glAttachShader(ui_vao_prog, fs_id);
++	glBindAttribLocation(ui_vao_prog, 0, "a_pos");
++	glBindAttribLocation(ui_vao_prog, 1, "a_uv");
++	glLinkProgram(ui_vao_prog);
++	glUseProgram(ui_vao_prog);
++	glUniform1i(glGetUniformLocation(ui_vao_prog, "u_tex"), 0);
++	glGenVertexArrays(1, &ui_vao_vao);
++	glBindVertexArray(ui_vao_vao);
++	glGenBuffers(1, &ui_vao_vbo);
++	glBindBuffer(GL_ARRAY_BUFFER, ui_vao_vbo);
++	glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)0);
++	glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void *)(2 * sizeof(float)));
++	glEnableVertexAttribArray(0);
++	glEnableVertexAttribArray(1);
++	glBindVertexArray(0);
++}
++
++static void ui_draw_image_vao(struct texture *tex, float x, float y)
++{
++	ui_ensure_vao();
++	/* Window-pixel (y-down) -> NDC, matching the app's glOrtho(0, w, h, 0)
++	 * projection. The viewport is whatever the app set via glViewport. */
++	GLint vp[4];
++	glGetIntegerv(GL_VIEWPORT, vp);
++	if (vp[2] <= 0 || vp[3] <= 0)
++		return;
++	float invw = 2.0f / (float)vp[2];
++	float invh = 2.0f / (float)vp[3];
++	/* 4-vertex triangle strip: pos + uv, matching the immediate-mode
++	 * winding/texcoord order (top edge v=0, bottom edge v=tex->t).
++	 * glBufferData (not glBufferSubData): the VBO has no allocation yet, and
++	 * ES requires one before sub-data writes (else GL_INVALID_VALUE). */
++	static float verts[4][4];
++	verts[0][0] = (x + tex->x) * invw - 1.0f;           verts[0][1] = 1.0f - (y + tex->y + tex->h) * invh; verts[0][2] = 0;       verts[0][3] = tex->t;
++	verts[1][0] = (x + tex->x) * invw - 1.0f;           verts[1][1] = 1.0f - (y + tex->y) * invh;           verts[1][2] = 0;       verts[1][3] = 0;
++	verts[2][0] = (x + tex->x + tex->w) * invw - 1.0f;  verts[2][1] = 1.0f - (y + tex->y + tex->h) * invh; verts[2][2] = tex->s;  verts[2][3] = tex->t;
++	verts[3][0] = (x + tex->x + tex->w) * invw - 1.0f;  verts[3][1] = 1.0f - (y + tex->y) * invh;           verts[3][2] = tex->s;  verts[3][3] = 0;
++	glUseProgram(ui_vao_prog);
++	glBindVertexArray(ui_vao_vao);
++	glBindBuffer(GL_ARRAY_BUFFER, ui_vao_vbo);
++	glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_DYNAMIC_DRAW);
++	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
++	glBindVertexArray(0);
++}
++
+ void ui_draw_image(struct texture *tex, float x, float y)
+ {
+ 	glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+ 	glEnable(GL_BLEND);
+ 	glBindTexture(GL_TEXTURE_2D, tex->id);
+-	glEnable(GL_TEXTURE_2D);
+-	glBegin(GL_TRIANGLE_STRIP);
+-	{
+-		glColor4f(1, 1, 1, 1);
+-		glTexCoord2f(0, tex->t);
+-		glVertex2f(x + tex->x, y + tex->y + tex->h);
+-		glTexCoord2f(0, 0);
+-		glVertex2f(x + tex->x, y + tex->y);
+-		glTexCoord2f(tex->s, tex->t);
+-		glVertex2f(x + tex->x + tex->w, y + tex->y + tex->h);
+-		glTexCoord2f(tex->s, 0);
+-		glVertex2f(x + tex->x + tex->w, y + tex->y);
+-	}
+-	glEnd();
+-	glDisable(GL_TEXTURE_2D);
++	/* OHOS: no glEnable(GL_TEXTURE_2D) - in ES2/ES3 the 2D texture unit is
++	 * activated by glBindTexture, not glEnable (GL_TEXTURE_2D is not a valid
++	 * enable cap in ES2+, it is ES1 fixed-function syntax, and the symbol
++	 * path does not exist on the OHOS driver). The VAO pipeline below
++	 * replaces the immediate-mode glBegin/glEnd block, which cannot link on
++	 * OHOS (see ui_draw_image_vao). */
++	ui_draw_image_vao(tex, x, y);
+ 	glDisable(GL_BLEND);
+ }
+ 
