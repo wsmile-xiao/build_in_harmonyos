@@ -1,0 +1,586 @@
+diff --git a/libntldd.c b/libntldd.c
+index d9a850f..9996c35 100644
+--- a/libntldd.c
++++ b/libntldd.c
+@@ -23,11 +23,7 @@ Code is mostly written after
+ MSDN Magazine articles
+ */
+ 
+-#include <windows.h>
+-
+-#include <Imagehlp.h>
+-
+-#include <winnt.h>
++#include "pe_compat.h"
+ 
+ #include <string.h>
+ #include <stdio.h>
+@@ -432,8 +428,15 @@ int BuildDepTree (BuildTreeConfig* cfg, char *name, struct DepTreeElement *root,
+ {
+   LOADED_IMAGE loaded_image;
+   LOADED_IMAGE *img;
++#ifdef _WIN32
+   IMAGE_DOS_HEADER *dos;
+   HMODULE hmod;
++#else
++  IMAGE_DOS_HEADER *dos = NULL;
++  HMODULE hmod = NULL;
++  (void) dos;
++  (void) hmod;
++#endif
+   BOOL success;
+ 
+   DWORD i, j;
+@@ -445,6 +448,7 @@ int BuildDepTree (BuildTreeConfig* cfg, char *name, struct DepTreeElement *root,
+     return 0;
+   }
+ 
++#ifdef _WIN32
+   if (cfg->on_self)
+   {
+     char modpath[MAX_PATH];
+@@ -465,6 +469,15 @@ int BuildDepTree (BuildTreeConfig* cfg, char *name, struct DepTreeElement *root,
+         return 1;
+   }
+   else
++#else
++  if (cfg->on_self)
++  {
++    /* on_self inspects the running process through Win32 APIs
++       (GetModuleHandleExA/GetModuleFileNameA); it is not supported on
++       non-Windows hosts. ntldd itself never enables it. */
++    return 1;
++  }
++#endif
+   {
+     success = FALSE;
+     for (i = 0; i < cfg->searchPaths->count && !success; ++i)
+diff --git a/libntldd.h b/libntldd.h
+index 91d8ed3..f36da34 100644
+--- a/libntldd.h
++++ b/libntldd.h
+@@ -2,7 +2,7 @@
+ #define __LIBNTLDD_H__
+ 
+ #include <stdint.h>
+-#include <windows.h>
++#include "pe_compat.h"
+ 
+ #define NTLDD_VERSION_MAJOR 0
+ #define NTLDD_VERSION_MINOR 2
+diff --git a/ntldd.c b/ntldd.c
+index dc329ab..aa2e11f 100644
+--- a/ntldd.c
++++ b/ntldd.c
+@@ -23,11 +23,7 @@ Code is mostly written after
+ MSDN Magazine articles
+ */
+ 
+-#include <windows.h>
+-
+-#include <Imagehlp.h>
+-
+-#include <winnt.h>
++#include "pe_compat.h"
+ 
+ #include <string.h>
+ #include <stdio.h>
+diff --git a/pe_compat.c b/pe_compat.c
+new file mode 100644
+index 0000000..04aca65
+--- /dev/null
++++ b/pe_compat.c
+@@ -0,0 +1,169 @@
++/*
++ * pe_compat.c - MapAndLoad/UnMapAndLoad replacement for non-Windows builds.
++
++ * Copyright (C) 2010 LRN (ntldd)
++ * Compatibility layer for the HarmonyOS PC port.
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 3 of the License, or
++ * (at your option) any later version.
++ */
++
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++
++#include "pe_compat.h"
++
++#ifndef _WIN32
++
++static char *build_candidate (const char *dir, const char *name, int dot_dll)
++{
++  size_t len;
++  char *full;
++  size_t name_len = strlen (name);
++
++  if (dir != NULL)
++  {
++    size_t dir_len = strlen (dir);
++    int need_sep = dir_len > 0 && dir[dir_len - 1] != '/'
++                   && dir[dir_len - 1] != '\\';
++    len = dir_len + (need_sep ? 1 : 0) + name_len + (dot_dll ? 4 : 0) + 1;
++    full = (char *) malloc (len);
++    if (full == NULL)
++      return NULL;
++    memcpy (full, dir, dir_len);
++    len = dir_len;
++    if (need_sep)
++      full[len++] = '/';
++  }
++  else
++  {
++    full = (char *) malloc (name_len + (dot_dll ? 4 : 0) + 1);
++    if (full == NULL)
++      return NULL;
++    len = 0;
++  }
++  memcpy (full + len, name, name_len);
++  len += name_len;
++  if (dot_dll)
++  {
++    memcpy (full + len, ".dll", 4);
++    len += 4;
++  }
++  full[len] = '\0';
++  return full;
++}
++
++static BOOL load_pe_file (const char *path, PLOADED_IMAGE loadedImage)
++{
++  FILE *f;
++  long size;
++  unsigned char *buf;
++  IMAGE_DOS_HEADER *dos;
++  IMAGE_NT_HEADERS *nt;
++
++  f = fopen (path, "rb");
++  if (f == NULL)
++    return FALSE;
++  if (fseek (f, 0, SEEK_END) != 0)
++  {
++    fclose (f);
++    return FALSE;
++  }
++  size = ftell (f);
++  if (size < (long) (sizeof (IMAGE_DOS_HEADER) + sizeof (IMAGE_NT_HEADERS)))
++  {
++    fclose (f);
++    return FALSE;
++  }
++  rewind (f);
++  buf = (unsigned char *) malloc ((size_t) size);
++  if (buf == NULL)
++  {
++    fclose (f);
++    return FALSE;
++  }
++  if (fread (buf, 1, (size_t) size, f) != (size_t) size)
++  {
++    free (buf);
++    fclose (f);
++    return FALSE;
++  }
++  fclose (f);
++
++  dos = (IMAGE_DOS_HEADER *) buf;
++  if (dos->e_magic != IMAGE_DOS_SIGNATURE
++      || dos->e_lfanew <= 0
++      || (size_t) dos->e_lfanew + sizeof (IMAGE_NT_HEADERS) > (size_t) size)
++  {
++    free (buf);
++    return FALSE;
++  }
++  nt = (IMAGE_NT_HEADERS *) (buf + dos->e_lfanew);
++  if (nt->Signature != IMAGE_NT_SIGNATURE)
++  {
++    free (buf);
++    return FALSE;
++  }
++
++  loadedImage->MappedAddress = buf;
++  loadedImage->FileHeader = nt;
++  loadedImage->Sections = (IMAGE_SECTION_HEADER *)
++      ((unsigned char *) &nt->OptionalHeader
++       + nt->FileHeader.SizeOfOptionalHeader);
++  loadedImage->NumberOfSections = nt->FileHeader.NumberOfSections;
++  loadedImage->ModuleName = strdup (path);
++  return TRUE;
++}
++
++BOOL MapAndLoad (PCSTR name, PCSTR path, PLOADED_IMAGE loadedImage,
++                 BOOL dotDll, BOOL readOnly)
++{
++  char *candidate;
++  BOOL ok;
++
++  (void) readOnly;
++
++  if (name == NULL || loadedImage == NULL)
++    return FALSE;
++
++  /* Same lookup order imagehlp uses: name as given first, then with an
++   * implied ".dll" extension when dotDll is set. */
++  candidate = build_candidate (path, name, 0);
++  if (candidate != NULL)
++  {
++    ok = load_pe_file (candidate, loadedImage);
++    free (candidate);
++    if (ok)
++      return TRUE;
++  }
++  if (dotDll)
++  {
++    candidate = build_candidate (path, name, 1);
++    if (candidate != NULL)
++    {
++      ok = load_pe_file (candidate, loadedImage);
++      free (candidate);
++      if (ok)
++        return TRUE;
++    }
++  }
++  return FALSE;
++}
++
++BOOL UnMapAndLoad (PLOADED_IMAGE loadedImage)
++{
++  if (loadedImage == NULL)
++    return FALSE;
++  if (loadedImage->MappedAddress != NULL)
++    free (loadedImage->MappedAddress);
++  if (loadedImage->ModuleName != NULL)
++    free (loadedImage->ModuleName);
++  loadedImage->MappedAddress = NULL;
++  loadedImage->ModuleName = NULL;
++  return TRUE;
++}
++
++#endif /* !_WIN32 */
+diff --git a/pe_compat.h b/pe_compat.h
+new file mode 100644
+index 0000000..54b278d
+--- /dev/null
++++ b/pe_compat.h
+@@ -0,0 +1,318 @@
++#ifndef __PE_COMPAT_H__
++#define __PE_COMPAT_H__
++
++/*
++ * pe_compat.h - minimal Win32/imagehlp compatibility layer for non-Windows
++ * builds of ntldd (HarmonyOS PC / musl / LLVM).
++ *
++ * ntldd parses PE (Windows Portable Executable) files. The parsing code only
++ * needs the PE structure definitions from winnt.h plus three imagehlp entry
++ * points (MapAndLoad/UnMapAndLoad/LOADED_IMAGE) and a couple of Win32
++ * helpers. On non-Windows hosts this header supplies all of that from the
++ * public PE format specification, implemented in pe_compat.c.
++ */
++
++#ifdef _WIN32
++
++#include <windows.h>
++#include <Imagehlp.h>
++#include <winnt.h>
++
++#else /* !_WIN32 */
++
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <strings.h>
++
++typedef uint32_t DWORD;
++typedef uint64_t DWORD64;
++typedef uint16_t WORD;
++typedef uint8_t BYTE;
++typedef unsigned int UINT;
++typedef unsigned long ULONG;
++typedef int BOOL;
++typedef char *PSTR;
++typedef const char *PCSTR;
++typedef void *LPVOID;
++typedef unsigned char *PUCHAR;
++typedef void *HMODULE;
++
++#ifndef TRUE
++#define TRUE 1
++#endif
++#ifndef FALSE
++#define FALSE 0
++#endif
++
++#ifndef MAX_PATH
++#define MAX_PATH 4096
++#endif
++
++#define ERROR_FILE_NOT_FOUND 2L
++#define GetLastError() ((DWORD) 2) /* only "file not found" is produced here */
++
++#define stricmp strcasecmp
++#define strnicmp strncasecmp
++
++#define IMAGE_FILE_MACHINE_I386 0x014c
++
++#define IMAGE_DOS_SIGNATURE 0x5a4d /* "MZ" */
++#define IMAGE_NT_SIGNATURE 0x00004550 /* "PE\0\0" */
++
++#define IMAGE_NUMBEROF_DIRECTORY_ENTRIES 16
++
++#define IMAGE_DIRECTORY_ENTRY_EXPORT 0
++#define IMAGE_DIRECTORY_ENTRY_IMPORT 1
++#define IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT 13
++
++typedef struct _IMAGE_DOS_HEADER
++{
++  WORD e_magic;
++  WORD e_cblp;
++  WORD e_cp;
++  WORD e_crlc;
++  WORD e_cparhdr;
++  WORD e_minalloc;
++  WORD e_maxalloc;
++  WORD e_ss;
++  WORD e_sp;
++  WORD e_csum;
++  WORD e_ip;
++  WORD e_cs;
++  WORD e_lfarlc;
++  WORD e_ovno;
++  WORD e_res[4];
++  WORD e_oemid;
++  WORD e_oeminfo;
++  WORD e_res2[10];
++  DWORD e_lfanew;
++} IMAGE_DOS_HEADER;
++
++typedef struct _IMAGE_FILE_HEADER
++{
++  WORD Machine;
++  WORD NumberOfSections;
++  DWORD TimeDateStamp;
++  DWORD PointerToSymbolTable;
++  DWORD NumberOfSymbols;
++  WORD SizeOfOptionalHeader;
++  WORD Characteristics;
++} IMAGE_FILE_HEADER;
++
++typedef struct _IMAGE_DATA_DIRECTORY
++{
++  DWORD VirtualAddress;
++  DWORD Size;
++} IMAGE_DATA_DIRECTORY;
++
++typedef struct _IMAGE_OPTIONAL_HEADER32
++{
++  WORD Magic;
++  BYTE MajorLinkerVersion;
++  BYTE MinorLinkerVersion;
++  DWORD SizeOfCode;
++  DWORD SizeOfInitializedData;
++  DWORD SizeOfUninitializedData;
++  DWORD AddressOfEntryPoint;
++  DWORD BaseOfCode;
++  DWORD BaseOfData;
++  DWORD ImageBase;
++  DWORD SectionAlignment;
++  DWORD FileAlignment;
++  WORD MajorOperatingSystemVersion;
++  WORD MinorOperatingSystemVersion;
++  WORD MajorImageVersion;
++  WORD MinorImageVersion;
++  WORD MajorSubsystemVersion;
++  WORD MinorSubsystemVersion;
++  DWORD Win32VersionValue;
++  DWORD SizeOfImage;
++  DWORD SizeOfHeaders;
++  DWORD CheckSum;
++  WORD Subsystem;
++  WORD DllCharacteristics;
++  DWORD SizeOfStackReserve;
++  DWORD SizeOfStackCommit;
++  DWORD SizeOfHeapReserve;
++  DWORD SizeOfHeapCommit;
++  DWORD LoaderFlags;
++  DWORD NumberOfRvaAndSizes;
++  IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
++} IMAGE_OPTIONAL_HEADER32, *PIMAGE_OPTIONAL_HEADER32;
++
++typedef struct _IMAGE_OPTIONAL_HEADER64
++{
++  WORD Magic;
++  BYTE MajorLinkerVersion;
++  BYTE MinorLinkerVersion;
++  DWORD SizeOfCode;
++  DWORD SizeOfInitializedData;
++  DWORD SizeOfUninitializedData;
++  DWORD AddressOfEntryPoint;
++  DWORD BaseOfCode;
++  uint64_t ImageBase;
++  DWORD SectionAlignment;
++  DWORD FileAlignment;
++  WORD MajorOperatingSystemVersion;
++  WORD MinorOperatingSystemVersion;
++  WORD MajorImageVersion;
++  WORD MinorImageVersion;
++  WORD MajorSubsystemVersion;
++  WORD MinorSubsystemVersion;
++  DWORD Win32VersionValue;
++  DWORD SizeOfImage;
++  DWORD SizeOfHeaders;
++  DWORD CheckSum;
++  WORD Subsystem;
++  WORD DllCharacteristics;
++  uint64_t SizeOfStackReserve;
++  uint64_t SizeOfStackCommit;
++  uint64_t SizeOfHeapReserve;
++  uint64_t SizeOfHeapCommit;
++  DWORD LoaderFlags;
++  DWORD NumberOfRvaAndSizes;
++  IMAGE_DATA_DIRECTORY DataDirectory[IMAGE_NUMBEROF_DIRECTORY_ENTRIES];
++} IMAGE_OPTIONAL_HEADER64, *PIMAGE_OPTIONAL_HEADER64;
++
++typedef struct _IMAGE_NT_HEADERS64
++{
++  DWORD Signature;
++  IMAGE_FILE_HEADER FileHeader;
++  IMAGE_OPTIONAL_HEADER64 OptionalHeader;
++} IMAGE_NT_HEADERS64;
++
++typedef struct _IMAGE_NT_HEADERS32
++{
++  DWORD Signature;
++  IMAGE_FILE_HEADER FileHeader;
++  IMAGE_OPTIONAL_HEADER32 OptionalHeader;
++} IMAGE_NT_HEADERS32;
++
++/* ntldd casts OptionalHeader to 32/64-bit views itself, so the host word
++ * size only has to decide where the section table starts; both flavours are
++ * the same size here (224 bytes). Use the 64-bit one on 64-bit hosts. */
++#if defined(__x86_64__) || defined(__aarch64__) || defined(_M_X64) || defined(_M_ARM64)
++typedef IMAGE_NT_HEADERS64 IMAGE_NT_HEADERS;
++#else
++typedef IMAGE_NT_HEADERS32 IMAGE_NT_HEADERS;
++#endif
++
++#define IMAGE_SIZEOF_SHORT_NAME 8
++
++typedef struct _IMAGE_SECTION_HEADER
++{
++  BYTE Name[IMAGE_SIZEOF_SHORT_NAME];
++  union
++  {
++    DWORD PhysicalAddress;
++    DWORD VirtualSize;
++  } Misc;
++  DWORD VirtualAddress;
++  DWORD SizeOfRawData;
++  DWORD PointerToRawData;
++  DWORD PointerToRelocations;
++  DWORD PointerToLinenumbers;
++  WORD NumberOfRelocations;
++  WORD NumberOfLinenumbers;
++  DWORD Characteristics;
++} IMAGE_SECTION_HEADER, *PIMAGE_SECTION_HEADER;
++
++typedef struct _IMAGE_EXPORT_DIRECTORY
++{
++  DWORD Characteristics;
++  DWORD TimeDateStamp;
++  WORD MajorVersion;
++  WORD MinorVersion;
++  DWORD Name;
++  DWORD Base;
++  DWORD NumberOfFunctions;
++  DWORD NumberOfNames;
++  DWORD AddressOfFunctions;
++  DWORD AddressOfNames;
++  DWORD AddressOfNameOrdinals;
++} IMAGE_EXPORT_DIRECTORY;
++
++typedef struct _IMAGE_IMPORT_BY_NAME
++{
++  WORD Hint;
++  BYTE Name[1];
++} IMAGE_IMPORT_BY_NAME, *PIMAGE_IMPORT_BY_NAME;
++
++typedef struct _IMAGE_IMPORT_DESCRIPTOR
++{
++  union
++  {
++    DWORD Characteristics;
++    DWORD OriginalFirstThunk;
++  };
++  DWORD TimeDateStamp;
++  DWORD ForwarderChain;
++  DWORD Name;
++  DWORD FirstThunk;
++} IMAGE_IMPORT_DESCRIPTOR;
++
++typedef struct _IMAGE_DELAYLOAD_DESCRIPTOR
++{
++  union
++  {
++    DWORD AllAttributes;
++    struct
++    {
++      DWORD RvaBased : 1;
++      DWORD ReservedAttributes : 31;
++    } perAttribute;
++  } Attributes;
++  DWORD DllNameRVA;
++  DWORD ModuleHandleRVA;
++  DWORD ImportAddressTableRVA;
++  DWORD ImportNameTableRVA;
++  DWORD BoundImportAddressTableRVA;
++  DWORD UnloadInformationTableRVA;
++  DWORD TimeDateStamp;
++} IMAGE_DELAYLOAD_DESCRIPTOR;
++
++typedef struct _IMAGE_THUNK_DATA32
++{
++  union
++  {
++    DWORD ForwarderString;
++    DWORD Function;
++    DWORD Ordinal;
++    DWORD AddressOfData;
++  } u1;
++} IMAGE_THUNK_DATA32, *PIMAGE_THUNK_DATA32;
++
++typedef struct _IMAGE_THUNK_DATA64
++{
++  union
++  {
++    uint64_t ForwarderString;
++    uint64_t Function;
++    uint64_t Ordinal;
++    uint64_t AddressOfData;
++  } u1;
++} IMAGE_THUNK_DATA64, *PIMAGE_THUNK_DATA64;
++
++/*
++ * imagehlp LOADED_IMAGE + MapAndLoad/UnMapAndLoad, reduced to the fields
++ * ntldd actually uses. pe_compat.c loads the whole file into memory and
++ * points MappedAddress at the raw file image, exactly like imagehlp does
++ * when the image is not mapped as a section object.
++ */
++typedef struct _LOADED_IMAGE
++{
++  PUCHAR MappedAddress;
++  IMAGE_NT_HEADERS *FileHeader;
++  PIMAGE_SECTION_HEADER Sections;
++  ULONG NumberOfSections;
++  PSTR ModuleName;
++} LOADED_IMAGE, *PLOADED_IMAGE;
++
++BOOL MapAndLoad (PCSTR name, PCSTR path, PLOADED_IMAGE loadedImage,
++                 BOOL dotDll, BOOL readOnly);
++BOOL UnMapAndLoad (PLOADED_IMAGE loadedImage);
++
++#endif /* !_WIN32 */
++
++#endif /* __PE_COMPAT_H__ */
