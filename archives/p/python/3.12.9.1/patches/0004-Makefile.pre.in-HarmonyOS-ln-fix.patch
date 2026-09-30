@@ -1,0 +1,94 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HarmonyOS Porting <porting@harmonyos.org>
+Date: Fri, 27 Mar 2026 11:00:00 +0800
+Subject: [PATCH 04/10] Makefile.pre.in: HarmonyOS symlink and musl BIND_NOW
+ fixes
+
+- Add HARDLINK (cp -p fallback) and LN_FORCE (ln -s without -f) for
+  HarmonyOS toybox ln limitations and HMDFS symlink issues.
+- Fix libpython$(LDVERSION).so to use HARDLINK instead of ln -f.
+- Fix sharedmods target to use rm -f + LN_FORCE instead of ln -sf.
+- Fix altbininstall to use LN_FORCE for python and lib symlinks.
+- Add HARMONYOS_MODLIBS variable for musl BIND_NOW extension module
+  linking against libpython to resolve Python API symbols at load time.
+- Modify Modules/makesetup to append HARMONYOS_MODLIBS to shared module
+  link commands.
+diff -uNr a/Makefile.pre.in b/Makefile.pre.in
+--- a/Makefile.pre.in	2026-03-27 11:37:11.164166094 +0800
++++ b/Makefile.pre.in	2026-03-27 11:37:11.224162813 +0800
+@@ -65,6 +65,14 @@
+ # Use this to make a link between python$(VERSION) and python in $(BINDIR)
+ LN=		@LN@
+ 
++# On HarmonyOS, hard links are not supported due to SELinux/FS policy.
++# Use cp -p instead of ln for hard link operations.
++HARDLINK=	$(shell uname -s 2>/dev/null | grep -qi harmony && echo cp -p || echo ln)
++
++# On HarmonyOS, 'ln -sf' may not work as expected with HMDFS.
++# Use 'ln -s' and let callers 'rm -f' target beforehand if needed.
++LN_FORCE=	$(shell uname -s 2>/dev/null | grep -qi harmony && echo ln -s || echo ln -sf)
++
+ # Portable install script (configure doesn't always guess right)
+ INSTALL=	@INSTALL@
+ INSTALL_PROGRAM=@INSTALL_PROGRAM@
+@@ -168,6 +176,11 @@
+ LDSHARED=	@LDSHARED@ $(PY_LDFLAGS)
+ BLDSHARED=	@BLDSHARED@ $(PY_CORE_LDFLAGS)
+ LDCXXSHARED=	@LDCXXSHARED@ $(PY_LDFLAGS)
++
++# On HarmonyOS with musl libc, BIND_NOW requires extension modules to
++# resolve all symbols at load time. Extension modules must link against
++# libpython to access Python API symbols (e.g. _PyType_Name).
++HARMONYOS_MODLIBS = $(shell uname -s 2>/dev/null | grep -qi harmony && echo "-L. -lpython$(LDVERSION)" || echo "")
+ DESTSHARED=	$(BINLIBDEST)/lib-dynload
+ 
+ # List of exported symbols for AIX
+@@ -817,7 +830,7 @@
+ libpython$(LDVERSION).so: $(LIBRARY_OBJS) $(DTRACE_OBJS)
+ 	if test $(INSTSONAME) != $(LDLIBRARY); then \
+ 		$(BLDSHARED) -Wl,-h$(INSTSONAME) -o $(INSTSONAME) $(LIBRARY_OBJS) $(MODLIBS) $(SHLIBS) $(LIBC) $(LIBM); \
+-		$(LN) -f $(INSTSONAME) $@; \
++		$(HARDLINK) $(INSTSONAME) $@; \
+ 	else \
+ 		$(BLDSHARED) -o $@ $(LIBRARY_OBJS) $(MODLIBS) $(SHLIBS) $(LIBC) $(LIBM); \
+ 	fi
+@@ -988,7 +1001,8 @@
+ 	$(MKDIR_P) $$target; \
+ 	for mod in X $(SHAREDMODS); do \
+ 		if test $$mod != X; then \
+-			$(LN) -sf ../../$$mod $$target/`basename $$mod`; \
++			rm -f $$target/`basename $$mod`; \
++			$(LN_FORCE) ../../$$mod $$target/`basename $$mod`; \
+ 		fi; \
+ 	done
+ 
+@@ -1971,7 +1985,7 @@
+ 		if test -f $(DESTDIR)$(BINDIR)/python$(VERSION)$(EXE) -o -h $(DESTDIR)$(BINDIR)/python$(VERSION)$(EXE); \
+ 		then rm -f $(DESTDIR)$(BINDIR)/python$(VERSION)$(EXE); \
+ 		fi; \
+-		(cd $(DESTDIR)$(BINDIR); $(LN) python$(LDVERSION)$(EXE) python$(VERSION)$(EXE)); \
++		(cd $(DESTDIR)$(BINDIR); rm -f python$(VERSION)$(EXE); $(LN_FORCE) python$(LDVERSION)$(EXE) python$(VERSION)$(EXE)); \
+ 	fi
+ 	@if test "$(PY_ENABLE_SHARED)" = 1 -o "$(STATIC_LIBPYTHON)" = 1; then \
+ 		if test -f $(LDLIBRARY) && test "$(PYTHONFRAMEWORKDIR)" = "no-framework" ; then \
+@@ -1980,7 +1994,7 @@
+ 			else \
+ 				$(INSTALL_SHARED) $(LDLIBRARY) $(DESTDIR)$(LIBDIR)/$(INSTSONAME); \
+ 				if test $(LDLIBRARY) != $(INSTSONAME); then \
+-					(cd $(DESTDIR)$(LIBDIR); $(LN) -sf $(INSTSONAME) $(LDLIBRARY)) \
++					(cd $(DESTDIR)$(LIBDIR); rm -f $(LDLIBRARY); $(LN_FORCE) $(INSTSONAME) $(LDLIBRARY)) \
+ 				fi \
+ 			fi; \
+ 			if test -n "$(PY3LIBRARY)"; then \
+diff -uNr a/Modules/makesetup b/Modules/makesetup
+--- a/Modules/makesetup	2026-03-27 11:37:11.192165000 +0800
++++ b/Modules/makesetup	2026-03-27 11:37:11.252162813 +0800
+@@ -286,7 +286,7 @@
+ 				;;
+ 			esac
+ 			rule="$file: $objs"
+-			rule="$rule; \$(BLDSHARED) $objs $libs $ExtraLibs -o $file"
++			rule="$rule; \$(BLDSHARED) $objs $libs $ExtraLibs \$(HARMONYOS_MODLIBS) -o $file"
+ 			echo "$rule" >>$rulesf
+ 		done
+ 	done
