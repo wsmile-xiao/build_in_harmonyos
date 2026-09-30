@@ -1,0 +1,103 @@
+# ═══ Draft knowledge entry — 破坏性负向测试（移走产物后测试仍过）：test_package 从 user-site 误导入自己的同名副本 ═══
+# Timestamp: 2026-09-25
+# Software: pytest 9.1.1 / iniconfig 2.3.0（任何 python-require 类、或依赖名与系统可导入名相同的包）
+# Gate: CI L1e destructive negative test (R34) / W3 本地同口径预审
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-pytest-9.1.1-negative-test-false-pass
+title:                  纯 Python 包 test_package 被 user-site 同名副本救活：CI 移走产物后测试仍通过被判假测试（L1e/R34），修法是断言导入来源而非仅记录 realpath
+trigger_tool:           conan|python|pytest|pip
+phase:                  testing|packaging
+error_signature:        L1e: test passed WITHOUT package artifacts — fake test detected (R34)|
+                        test does not depend on [a-z-]+ — must call its API or execute its binary|
+                        negative test: test does not depend on package|
+                        L1_RESULT=fail: negative test
+
+severity:               3
+category:               testing|python|conan|ci-gate
+match_keywords:         L1e, R34, destructive negative test, fake test, sabotage, user site,
+                        PYTHONNOUSERSITE, package_folder, provenance, 来源校验, realpath,
+                        sys.path fallback, python-require, site-packages, conan test,
+                        test_package, .local/lib/python
+keywords:               L1e,R34,fake test,negative test,user site directory,PYTHONNOUSERSITE,
+                        package_folder,import provenance,test_package,conan test,
+                        .local/lib/python3.12/site-packages,sys.path fallback
+
+approach:               test_package 必须证明"被测模块/二进制来自本包"，而不是"环境里恰好能
+                        找到同名物"。做法：conanfile 把 `self.dependencies["<pkg>"].package_folder`
+                        作为 argv 传给测试脚本；脚本先断言被导入模块的 `__file__` 位于
+                        `<package_folder>/lib/pythonX.Y/site-packages/<pkg>/` 之下（先断言该
+                        路径存在，再断言前缀），再跑其余断言；对新解释器探针额外设置
+                        `PYTHONNOUSERSITE=1`，使"能导入"只可能来自打包的 PYTHONPATH。
+
+root_cause:             Python 包的 test_package 通常在 `env="conanrun"` 下运行，依赖 conanrun
+                        注入的 PYTHONPATH 指向包的 site-packages。但解释器的模块搜索顺序里，
+                        在 PYTHONPATH 之后仍会回落到 **user site**（`~/.local/lib/pythonX.Y/site-packages`）。
+                        当开发机/CI 恰好在 user site 装过同名包（本机对 pytest 与 iniconfig
+                        都成立）时，CI 的破坏性负向测试——把 `package_folder` 下的 `lib/`、`bin/`、
+                        `include/` 逐个 mv 走后重跑 `conan test`——会发现测试**依然通过**，
+                        于是判为"假测试"（faked test），L1 直接 fail。
+                        更隐蔽的是：只记录 `os.path.realpath(os.path.dirname(mod.__file__))`
+                        并不构成来源校验——realpath 只把路径规范化，任何来源都能通过；
+                        必须与期望前缀显式比较。本机实测：把 `PYTHONPATH` 指向一个不存在的
+                        目录，`import iniconfig` 仍然成功并从
+                        `~/.local/lib/python3.12/site-packages/iniconfig/__init__.py` 解析，
+                        而加 `-s` 后立刻 `ModuleNotFoundError`——两者并置即证明回落路径存在。
+                        注意该缺陷**只影响断言，不影响产物**：包本身是完好的，是"测试没有被
+                        真正绑到产物上"。
+
+affected_scope:         所有以 python-require / 纯脚本形式交付、且包名与开发机上可安装的同名
+                        分发相同的包（pytest、iniconfig、packaging、pluggy、pygments 一类
+                        测试基础设施包尤其必然命中——它们本来就是被 `pip install` 装进 user site
+                        的东西）。C/C++ 包若产物只在体系目录而测试用绝对路径调用二进制，则不受
+                        影响；但只要测试通过 `PATH`/`PYTHONPATH` 解析目标，同样可能被同名物救活。
+
+verification_cmd:       正向：test_package 输出 `PYTEST_CONSUMER=PASS assertions=41`（断言数
+                        含新增的来源校验两项）。
+                        负向（本机复演 CI 的破坏动作）：
+                        `mv <package_folder>/lib /tmp/backup && conan test test_package
+                        pytest/9.1.1 -pr <profile> --build=missing` 必须**失败**：
+                        `AssertionError: packaged module missing: <package_folder>/lib/...`、
+                        `ERROR: pytest/9.1.1 (test package): Error in test() method`，
+                        退出码 1；恢复 `lib/` 后同一命令回到 0。
+
+rec_approach:           assert-import-provenance-against-package-folder
+rec_description:        conanfile 传 package_folder 给测试脚本；脚本断言期望的
+                        site-packages 路径存在、且 `mod.__file__` 以该路径为前缀；
+                        子进程探针设 PYTHONNOUSERSITE=1。两条断言即可把"依赖产物"变成
+                        可被 CI 负向测试证伪的性质。
+rec_command:            conanfile: `pkg = self.dependencies["<pkg>"].package_folder`;
+                        `self.run(f'{py} "{script}" "{pkg}"', env="conanrun")`.
+                        script: `expected = os.path.join(pkg, "lib", "python3.12", "site-packages")`;
+                        `check(os.path.isfile(os.path.join(expected, "<m>", "__init__.py")), ...)`;
+                        `check(realpath(mod.__file__).startswith(realpath(expected) + os.sep), ...)`;
+                        subprocess env: `{**os.environ, "PYTHONNOUSERSITE": "1"}`.
+rec_auto_fix:           false
+rec_impl:               test-package-change
+
+fallback_priority:      2
+fallback_approach:      disable-user-site-per-run
+fallback_description:   若暂时无法改动 test_package 结构，可在运行测试的解释器上加
+                        `-s`（或设 PYTHONNOUSERSITE=1）以屏蔽 user site，使回落路径不存在，
+                        从而让负向测试自然生效。缺点是这依赖调用方记得加参数，属环境侧约束
+                        而非合同约束，故列作退路。
+fallback_command:       self.run(f'{py} -s "{script}"', env="conanrun")
+fallback_auto_fix:      false
+fallback_impl:          recipe-guard
+
+forbid_1_pattern:       realpath\(os\.path\.dirname\(.*__file__\)\)\s*\)?\s*$|assert .*os\.path\.isdir\(.*__file__.*\)\s*,?\s*$
+forbid_1_reason:        只把 realpath 结果记录/断言其存在，等于没有来源校验——任何来源（含
+                        user site 副本）都满足该条件，负向测试仍会判假测试。
+forbid_1_consequence:   CI L1e 继续 fail，或更糟：在某台机器上 user site 恰好没有同名包时
+                        "通过"，形成随环境漂移的测试。
+
+forbid_2_pattern:       pip install .*(pytest|iniconfig)|\-i https?://.*install
+forbid_2_reason:        在 test_package 里 pip 安装被测包（或从网络补装），会让测试验证的是
+                        刚下载的副本而非本包产物，破坏 R34 的本意。
+forbid_2_consequence:   测试与产物脱钩，负向测试失去意义；且引入网络依赖。
+
+related:                E427（shadow CI 隔离 HOME 后需给 Python 保留真实 site-packages——同一
+                        个 user-site 回落机制的另一面：E427 讲"隔离 HOME 会让工具找不到依赖"，
+                        本条讲"没隔离干净会让测试找到不该找的依赖"）；DRAFT-coreutils-sha512sum-...
+                        （CLI 包 test_package 须用包内二进制绝对路径避免 PATH 同名遮蔽——同族
+                        "同名物遮蔽"问题，那条走 PATH，本条走 sys.path）。
