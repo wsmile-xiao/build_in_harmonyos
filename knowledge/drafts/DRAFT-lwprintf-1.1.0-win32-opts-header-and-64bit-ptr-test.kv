@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-lwprintf-1.1.0-win32-opts-header-and-64bit-ptr-test — 顶层 CMake 无条件选用 win32 专用配置头 + 上游 %p 32 位指针断言
+# 触发事件: lwprintf 1.1.0 HarmonyOS PC 适配（archives/l/lwprintf/1.1.0）
+# 主从明确: 配置头（opts 模板）选择为主，%p 指针断言为测试侧补充；
+#           与 E375（win32 源文件正向选择）、E532（平台三分支 FATAL）部分重叠，
+#           载体不同（configure_file 生成的配置头 vs 源文件/平台分支）。
+#====================================================================
+
+id:                     DRAFT-lwprintf-1.1.0-win32-opts-header-and-64bit-ptr-test
+trigger_tool:           cmake|conan|clang|test
+phase:                  configuration|compilation|testing
+error_signature:        lwprintf_opts\.h.*fatal error.*windows\.h|set\(LWPRINTF_OPTS_FILE.*dev.*opts\.h|%.*p.*32-bit.*system|Test error on line.*%p
+
+severity:               3
+category:               platform, cmake, configuration-header, win32, testing, pointer-width
+match_keywords:         LWPRINTF_OPTS_FILE, lwprintf_opts.h, dev/lwprintf_opts.h, windows.h,
+                        configure_file, opts_template, win32, WIN32, %p, pointer, 32-bit system,
+                        aarch64, 64-bit pointer, upstream test assumption
+title:                  顶层 CMake 无条件 set() 含 windows.h 的 win32 专用配置头（configure_file 生成）导致 OHOS 编译失败；上游 %p 断言按 32 位指针假设在 64 位目标失败
+
+root_cause:             部分嵌入式 C 库把开发/测试用的 win32 专用配置头（如 dev/lwprintf_opts.h，
+                        内含 #include "windows.h" 与 OS 互斥句柄定义）在顶层 CMakeLists.txt 的
+                        顶层工程分支里无条件 set(LWPRINTF_OPTS_FILE ...)，library.cmake 随后
+                        configure_file 把它复制为生成态 lwprintf_opts.h；非 Windows 平台（OHOS/
+                        Linux）所有 include lwprintf_opt.h 的编译单元必然报 windows.h 缺失。
+                        同时顶层分支还无条件加入 win32 源文件（lwprintf_sys_win32.c）、注入
+                        WIN32/_DEBUG/CONSOLE 编译宏与 dev/ include 目录。配套地，上游测试
+                        tests/test.c 的 %p 断言按 32 位指针宽度写死（"Pointer, 32-bit system"），
+                        在 64 位 arm64 上输出 16 位十六进制，3 项断言长度不一致。
+
+affected_scope:         顶层 CMake 把平台专用配置头（而非仅源文件）无条件选为默认的嵌入式 C 库
+                        （printf/算法类，win32 dev harness 常见）；其上游测试按 32 位指针写 %p 断言。
+                        HarmonyOS arm64 为默认影响面；Linux/其他 POSIX 平台同样受影响。
+
+verification_cmd:       conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+
+# 真实证据: lwprintf 1.1.0 (2026-09-28) conan create G2 失败
+#   lwprintf_opts.h:39:10: fatal error: 'windows.h' file not found
+# 修复: patches/0001-win32-opts-only-on-win32.patch
+#   if(WIN32) set(LWPRINTF_OPTS_FILE ...)  →  非 WIN32 回落 lwprintf_opts_template.h
+#   target_sources(win32 port) / target_compile_definitions(WIN32 ...) / dev include 目录均加 if(WIN32)
+# 测试: patches/0002-portable-upstream-test.patch 使上游测试可移植编译；%p 3 项如实记录失败
+#   (148/170 全量, 148/151 执行集合)
+
+rec_priority:           1
+rec_approach:           win32-config-header-conditional-guard
+rec_description:        对顶层 CMake 的平台专用配置头选择加正向 WIN32 守卫：仅 WIN32 才 set 含
+                        windows.h 的 dev 配置头/加入 win32 源文件/注入 WIN32 宏/dev include 目录；
+                        其他平台回落到仓库自带的可移植模板（opts_template.h）或默认值。不修改
+                        模板内容、不注入 __OHOS__ 宏（R8/PF5）。上游测试按 32 位指针写死的 %p
+                        断言：不编辑断言、不改库，如实记录失败项与恢复条件（32 位目标或按
+                        PTR_WIDTH 计算），全量通过率以全部声明数为分母上报。
+rec_command:            CMakeLists.txt: set(LWPRINTF_OPTS_FILE ...) 与 win32 源文件/宏/include
+                        目录全部包进 if(WIN32) ... endif()；tests %p 断言保留原样，台账记录失败。
+rec_auto_fix:           false
+rec_impl:               source-patch-cmake-guard + test-ledger-accounting
+
+fallback_priority:      2
+fallback_approach:      generate-portable-config-header
+fallback_description:   若上游连可移植模板都没有，可在补丁中生成一个不含平台头的默认配置头，
+                        或由配方 generate() 注入默认 opts；但优先复用上游自带模板以减少改动面。
+fallback_command:       conanfile generate() 写 lwprintf_opts.h 默认内容
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe-generate
+
+forbid_1_pattern:       set\(LWPRINTF_OPTS_FILE.*\)(?!.*if\(WIN32)
+forbid_1_reason:        无条件 set 平台专用配置头是失败根因；再次出现等于未修复。
+forbid_1_consequence:   OHOS/Linux 编译必然 windows.h 缺失，G2 失败。
+
+forbid_2_pattern:       #include\s+["<]windows\.h[">]
+forbid_2_reason:        可移植配置头/模板不得引入 windows.h。
+forbid_2_consequence:   非 Windows 平台编译失败。
+
+forbid_3_pattern:       -D__OHOS__|__OHOS__
+forbid_3_reason:        PF5/R8 禁止在补丁中注入 __OHOS__ 平台宏；应使用上游自带的
+                        可移植模板/正向 WIN32 守卫。
+forbid_3_consequence:   PR 硬闸 PF5 拦截。
+
+forbid_4_pattern:       修改.*%p.*断言|do_test.*%p.*改成
+forbid_4_reason:        上游测试 32 位假设不得靠改写断言"通过"（test-tuning），须如实上报。
+forbid_4_consequence:   伪造测试通过，质量门禁与返工判定失败。
+
+principles:             P012, P014
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E375, DRAFT-gamelib-1.9.9-dual-backend-single-header-game-lib, DRAFT-E719-opt-3.19-aarch64-unsigned-ub-known-test-fail-gate, E532
+caused_by:              []
+prerequisite_of:        []
+conflicts_with:         []
+
+# ═══ 适用边界 / 反例 ═══
+boundary_novelty:       与 E375（win32 源文件正向选择 + POSIX 能力探测）载体不同：本模式是
+                        "无条件 set() 平台专用配置头 → configure_file 生成"（配置/选项头层面），
+                        E375 是源文件二选一（ProcessWin32.c/tif_win32.c）；与 gamelib 草稿
+                        （单头文件产品线、__has_include 自动探测）不同：本模式是编译型库 +
+                        顶层 CMake 显式无条件选择；与 E719 草稿（64 位不能通过的断言用
+                        known-failure 门禁）原则相同但 trigger 是 %p 指针宽度而非 atof/fcvtzu。
+                        %p 32 位指针宽度假设为测试侧新增 trigger。
+反例:                   上游已有正确平台条件化（if(WIN32)/if(NOT WIN32) 或模板不含平台头）的库
+                        不适用；%p 断言按 64 位/PTR_WIDTH 计算的库不适用。E375 的 POSIX 能力探测
+                        场景（未知系统误判 Windows）与本模式无交叉。
+
+knowledge_scope:        config-header-selection + upstream-test-accounting
+cross_library_reusable: true
+verified:               true
+evidence:               conan-verify G2 通过; upstream-test-ledger.md (148/170);
+                        ohos_specific_test.c 13/13; consumer_log_module.c exit 0
