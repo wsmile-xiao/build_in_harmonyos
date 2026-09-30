@@ -1,0 +1,100 @@
+#====================================================================
+# DRAFT-ohos-dayu200-device-test-constraints — DAYU200/OHOS 真机测试约束
+#   busybox 工具面（无 awk/curl/python）/ hdc 推送路径与 CRLF 退出码
+#   静态链接 / flock 单设备串行
+#====================================================================
+
+id:                     DRAFT-ohos-dayu200-device-test-constraints
+trigger_tool:           hdc|device_runner|shell|conan
+phase:                  testing|verification|deploy
+error_signature:        awk: not found|python3: not found|curl: not found|PUSH_FAIL|error while loading shared libraries: lib.*\.so|exit=(2|127)|not executable
+
+severity:               2
+category:               device-testing, hdc, ohos, runtime, test-harness, busybox
+match_keywords:         DAYU200, RK3568, hdc.exe, hdc file send, hdc file recv, DEVICE:READY, busybox, awk, curl, python3, CRLF, tr -d '\r', __RC__, flock, device lock, static link, BUILD_SHARED_LIBS=OFF, -static, _device_evidence.json, /data/local/tmp, D:\OHDev\device_stage
+title:                  OHOS 真机（DAYU200）测试约束：busybox 工具面、hdc 推送路径与 CRLF 退出码、静态链接、flock 单设备串行
+
+root_cause:             润和 DAYU200-RK3568（OpenHarmony 6.0.0.47, API20, aarch64）的设备侧用户态是 busybox/toybox
+                        精简工具集（本项目 device_runner 实测：无 awk/curl/python3，sh/cmp/ls/sed/tr 等基础工具可用），
+                        与宿主/CI 的假设不匹配，导致真机测试在四个环节各有一类固定失败：
+                        (1) 工具面缺失：设备无 awk/curl/python3；设备脚本一旦用 awk 解析、用 curl 取数据或用 python 断言，
+                            直接 awk: not found / python3: not found。设备侧只能用 busybox 基础工具（sh、cmp、ls、sed、tr、
+                            mkdir、chmod、cat 等）与 shell 内建。
+                        (2) hdc 路径/换行：Windows 版 hdc.exe（D:\Deveco\OHSDK\23\toolchains\hdc.exe）不认 WSL 路径，
+                            产物必须先暂存到 Windows 可见目录（D:\OHDev\device_stage\<job>\）再 hdc file send，
+                            否则 file send 静默失败（PUSH_FAIL）。Windows hdc 的 shell 输出带 CRLF，直接取 $? 会解析出
+                            2/127 之类的假退出码，必须 tr -d '\r' 并回传一个显式哨兵。
+                        (3) 运行库依赖：设备只保证系统自带库，交叉编译默认共享链接的测试程序会报
+                            error while loading shared libraries: lib*.so（实测 libbrotlienc.so），
+                            测试二进制应在交叉构建时静态链接（-static / BUILD_SHARED_LIBS=OFF），做到自包含。
+                        (4) 单设备串行：只有一台真机，多个任务 Agent 并发推送会互踩（覆盖 /data/local/tmp 同名目录、
+                            抢 hdc 会话），必须用 flock 全局设备锁排队，且测试目录按 <lib>_<用途> 命名。
+affected_scope:         所有经 hdc 推到 OpenHarmony/DAYU200 真机执行的消费者端到端测试（规则12 证据）；
+                        以及任何在设备侧运行 shell 测试脚本的验证流程（device_runner.sh 及其调用方）。
+verification_cmd:       # 0) 设备就绪（退出码 0 且打印 DEVICE:READY）
+                        bash automation/device_runner.sh check
+                        # 1) 上传 -> 执行 -> 采集退出码与证据
+                        bash automation/device_runner.sh run <lib>_e2e <localdir> "sh run_test.sh"
+                        # 2) 读取证据 JSON（exit_code 必须为 0）
+                        cat <localdir>/_device_evidence.json
+                        # 3) 设备侧脚本只用 busybox 可用的命令，例如：
+                        #    cmp text.txt text.back && echo "TEXT_ROUNDTRIP:OK"
+
+rec_priority:           1
+rec_approach:           stage-push-chmod-exec-with-sentinel-and-static-binaries
+rec_description:        真机测试统一走 device_runner.sh：
+                        (a) 产物先从 WSL 拷到 D:\OHDev\device_stage\<job>\（Windows hdc.exe 可见的路径），
+                            再 hdc file send 到 /data/local/tmp/ohpc_test/<job>/，随后 chmod -R 755；
+                        (b) 执行命令用 "sh <script>"（不依赖可执行位/解释器路径），输出统一 tr -d '\r'，
+                            并以 `; echo __RC__$?` 哨兵回传真实退出码，避免 CRLF 污染；
+                        (c) 测试二进制交叉编译时静态链接（-static 或 BUILD_SHARED_LIBS=OFF），
+                            避免设备缺 .so；
+                        (d) 整个上传-执行-取证过程放在 flock 全局锁内串行；
+                        (e) 结果既打印到 stdout，也写 _result.json 并回收到 _device_evidence.json（job/序列号/系统/命令/退出码/时间戳）。
+rec_command:            bash /mnt/d/OHDev/automation/device_runner.sh run brotli_test "$T" "sh run_test.sh"
+rec_auto_fix:           false
+rec_impl:               device-runner
+
+fallback_priority:      2
+fallback_approach:      host-side-precompute-plus-busybox-only-assert
+fallback_description:   若设备侧确实需要 awk/curl/python 才能完成的计算或断言，把该步骤前移到宿主/CI 侧预计算，
+                        设备上只做“执行 + 用 busybox 断言（cmp/ls/test）”；
+                        若共享库依赖不可避免，改为把依赖 .so 一并推送到同目录并设 LD_LIBRARY_PATH 后再执行。
+fallback_command:       hdc file send libfoo.so <remote>/libfoo.so ; hdc shell "cd <remote> && LD_LIBRARY_PATH=. ./test"
+fallback_auto_fix:      false
+fallback_impl:          device-runner
+
+forbid_1_pattern:       设备脚本.*awk|设备脚本.*curl|设备脚本.*python|hdc shell.*awk|hdc shell.*python3
+forbid_1_reason:        DAYU200 设备无 awk/curl/python3；把它们写进设备脚本必然 not found。
+forbid_1_consequence:   测试在设备上直接失败，或更糟——断言命令缺失被当成“无输出即通过”。
+
+forbid_2_pattern:       hdc file send\s+/mnt/|run.*\$\{?localdir\}?.*(不暂存|直接推送)|--version.*hdc
+forbid_2_reason:        Windows hdc.exe 不识别 WSL 路径（/mnt/d/...），必须先暂存到 D: 盘再推送。
+forbid_2_consequence:   hdc file send 静默失败（PUSH_FAIL），设备上执行到的是旧文件或空目录。
+
+forbid_3_pattern:       并发.*device_runner|device_runner.*并行|不加锁.*设备
+forbid_3_reason:        单台真机必须串行；多个 Agent 并发会互踩设备目录与 hdc 会话。
+forbid_3_consequence:   测试互相覆盖、退出码串台、证据 JSON 张冠李戴。
+
+forbid_4_pattern:       \.so.*设备.*(默认|假定存在)|测试二进制.*(动态链接|shared).*设备
+forbid_4_reason:        设备不保证携带交叉编译出的私有 .so；默认共享链接会 error while loading shared libraries。
+forbid_4_consequence:   端到端测试在设备上加载失败，无法形成有效的规则12 证据。
+
+principles:             P-LINKAGE-001, P-BUILD-001, P-ENV-001
+causes:                 []
+caused_by:              []
+similar_to:             [E540, DRAFT-util-linux-ts-runsh-ohos-bash-xargs-driver, DRAFT-bats-suite-ohos-runtime-shims]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ohos-dayu200-device-test-constraints.md
+last_updated:           2026-09-30
+source_event:           DAYU200-RK3568 真机自动化接入（device_runner.sh v3）、libbrotli 1.1.0 真机回环与 libalkimia 8.2.1 消费者端到端（真机 23/23、exit=0）实测
+authors:                Quas
+source_pr:              13837
+source_commit:          37754fbf53774246e7cfa774f852cda29d24791b
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:      2026-09-30
