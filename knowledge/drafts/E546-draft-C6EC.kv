@@ -1,0 +1,117 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E546.kv，填写各字段
+# 对应的人类文档: doc/E546.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E546
+trigger_tool: zsh|ci|finish|build_and_test
+phase: ci-gate|environment
+error_signature: can.t create temp file for here document: read-only file system|cannot touch .*/tmp|Read-only file system
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: ohos-platform|environment|ci-gate|shell
+match_keywords: /tmp read-only, TMPPREFIX, ZDOTDIR, zshenv, zsh, here-document, build_and_test.sh, L0i, L0m, AST 解析失败, W3, mktemp, temp file
+title: OHOS worker 上 /tmp 只读时 zsh 的 here-doc 临时文件会连带打挂 W3 闸门（L0i 谎报 conanfile.py AST 解析失败、L0m 结构检查失败），修法是 ZDOTDIR 里的 .zshenv 设 TMPPREFIX
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 本平台 /tmp 为只读挂载（E002）。ci/conan/build_and_test.sh 以 zsh 执行，脚本内多处 python3 - <<PYEOF 的 here-doc 需要落临时文件；zsh 的 here-doc 临时文件名取自 TMPPREFIX（默认 /tmp/zsh-），而 TMPPREFIX 是 PM_DONTIMPORT 参数——环境变量注入无效，TMPDIR 也不被 zsh 的 here-doc 采纳。临时文件建不出来时该行整体失败，L0i 便输出 conanfile.py AST 解析失败（还附带 BOM/语法错误的误导性 hint），L0m 同样失败，W3 阻塞；实测与 conanfile.py 内容完全无关（无 BOM、语法正确的 tlog 14 同样报）。
+affected_scope: 所有在 /tmp 只读的 OHOS worker 上跑本地 W3 模拟（ohc-run.py finish 的 step 5）或直接执行 ci/conan/build_and_test.sh 的适配任务；凡执行到含 here-doc 的 L0 检查（L0i/L0m/L0k）均会命中。
+verification_cmd: touch /tmp/ohc-tmp-probe   # 失败（Read-only file system）即命中本坑
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 2
+rec_approach: point-zsh-tmp-prefix-at-writable-dir-via-zdotdir
+rec_description: (1) 在可写目录建 zdot/.zshenv 写入 TMPPREFIX=<writable>/zsh/zsh- 并 export TMPDIR/TMP，然后以 ZDOTDIR=<该目录> 运行 ohc-run.py finish/submit（zsh 非交互启动会读 ZDOTDIR 下的 .zshenv；runner 用 os.environ.copy() 传环境，可透传到 zsh 子进程）；(2) 不要改 ci/ 框架脚本来绕过（框架文件只读，改动等于越权）；(3) 判据：L0i 报 AST 解析失败但 conanfile.py 无 BOM/语法错误时，先验证 here-doc 临时目录可否写，而不是去改配方；(4) 只设 TMPDIR 无效，必须让 zsh 参数 TMPPREFIX 生效。
+rec_command: mkdir -p ~/tmp/zdot ~/tmp/zsh && printf TMPPREFIX=~/tmp/zsh/zsh- > ~/tmp/zdot/.zshenv && ZDOTDIR=~/tmp/zdot ohc-run.py finish <pkg> <ver> published
+rec_auto_fix: false
+rec_impl:               impl-name                   # 内置实现名 (见 DESIGN §5)
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern:
+forbid_1_reason:
+forbid_1_consequence:
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+local_path: archives/t/tlog/14/notes.md
+doc_file:               doc/E546.md
+last_updated: 2026-09-27
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: C6EC
