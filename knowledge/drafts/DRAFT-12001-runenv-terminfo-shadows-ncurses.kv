@@ -1,0 +1,43 @@
+#====================================================================
+# Draft: runenv_info is last-writer-wins across the dependency graph -
+#        a package that re-declares an env var its dependency owns
+#        silently repoints consumers at a directory it never created
+#        (tmatrix 1.4 + ncurses/6.6 TERMINFO/TERMINFO_DIRS)
+#====================================================================
+
+id:                     DRAFT-12001-RUNENV-TERMINFO-SHADOW-BROKEN-PATH
+trigger_tool:           conan|conanfile
+phase:                  packaging|runtime
+error_signature:        ncurses: cannot initialize terminal type|unknown terminal|unable to open terminfo database|TERMINFO=.*No such file or directory
+
+severity:               1
+category:               conan, packaging, runenv, terminfo
+match_keywords:         runenv_info, define_path, last-writer-wins, TERMINFO, TERMINFO_DIRS, transitive dependency, package_folder None, consumer conanrunenv
+
+title:                  Declaring runenv_info for a variable a dependency already exports overrides the dependency's correct value for every consumer, and the path cannot be recomputed from the dependency in package_info(): when a consumer resolves the package from the cache, the dependency's package_folder is None and its includedirs are relative ("include"), so a path built from them resolves to "share/terminfo" relative to the consumer's cwd.
+
+root_cause:             Conan's runenv_info is merged across the whole graph, and the last package to define a variable wins. tmatrix 1.4 defined TERMINFO/TERMINFO_DIRS as <own package_folder>/share/terminfo - a directory its build never creates, because the terminfo database ships inside ncurses/6.6, not in tmatrix. That shadowed ncurses' own correct runenv, so a consumer requiring only tmatrix/1.4 got a TERMINFO pointing at a non-existent path. The obvious "fix" of re-pointing at the ncurses package also fails: during a consumer-side graph resolution the dependency object exposes package_folder=None (verified: DBG2 nc=ncurses/6.6 pkg_folder=None) and includedirs=['include'], so os.path.join(package_folder, ...) raises TypeError and os.path.dirname(includedirs[0]) yields a relative, wrong root. The variable can therefore only be exported correctly by the package that owns the file, and consumers must require that package directly to inherit it.
+
+affected_scope:         Any conan package that re-declares an environment variable owned by one of its dependencies (TERMINFO/TERMINFO_DIRS from ncurses, LD_LIBRARY_PATH, PKG_CONFIG_PATH, JAVA_HOME). Verified with tmatrix 1.4 against ncurses/6.6 on OHOS aarch64.
+
+verification_cmd:       mkdir -p /tmp/probe && cd /tmp/probe && conan install --requires=<pkg> -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl && cat conanrunenv-*.sh   # expect: no dangling path
+
+rec_priority:           1
+rec_approach:           do-not-redeclare-dependency-owned-runenv
+rec_description:        Do not declare runenv_info for a variable a dependency already owns. Let the owning package export it, and have consumers (including test_package) require that package directly so the runenv is inherited. If this package must guarantee the variable for its own consumers, it has to package the file itself (e.g. copy the terminfo database into this package) rather than point at another package's folder.
+rec_command:            grep -n runenv_info <recipe>/conanfile.py   # expect: no entry for a variable a dependency exports
+rec_auto_fix:           false
+rec_impl:               archives/t/tmatrix/1.4/conanfile.py (package_info documents why the override was removed)
+
+fallback_priority:      2
+fallback_approach:       package-the-data-file-locally
+fallback_description:   If consumers genuinely cannot require the dependency, copy the data (terminfo DB) into this package during package() and export the path pointing at this package's own folder, which is always resolvable.
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       self.runenv_info.define_path\("TERMINFO", os.path.join(self.package_folder|define_path\("TERMINFO".*dependencies.*package_folder
+forbid_1_reason:        The first form points at a directory the build never creates and silently shadows the dependency's correct value; the second form crashes with TypeError (package_folder is None) or produces a relative path, because the dependency's folders are only absolute while it is being built in the same run.
+forbid_1_consequence:   Consumers get a dangling TERMINFO and the packaged program aborts with "ncurses: cannot initialize terminal type", with no error at build time to hint at the cause.
+
+principles:             own-your-runenv, do-not-shadow-dependency-state, verify-consumer-side-not-build-side
