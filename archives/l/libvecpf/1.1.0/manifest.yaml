@@ -1,0 +1,149 @@
+# 版本级 manifest
+# 文件位置: archives/l/libvecpf/1.1.0/manifest.yaml
+# 遵循 ARCHIVE-SPEC v2.0
+
+# ============================================================
+# 必须字段
+# ============================================================
+
+version: "1.1.0"
+
+software: "libvecpf"
+
+# 编译状态
+# published | built | failed | archived
+status: built
+
+# 编译日期（YYYY-MM-DD）
+build_date: "2026-09-27"
+build_system: "autotools"
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  url: "https://github.com/Libvecpf/libvecpf/archive/refs/tags/v1.1.0.tar.gz"
+  sha256: "33ed7c13af882ea38ab7fa32e72f1e17e611378e74aadfad9c1301ed9a0019e7"
+  tar_format: tar.gz
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build:
+  system: autotools
+
+  # --build=<triple> 由 conanfile 按 settings.arch 推导（自带 config.guess(2014)
+  # 认不出 HarmonyOS，必须显式给 triple）；shared / static 由 conan 的 shared
+  # 选项决定，两种取值都已实测通过。下表为默认值（shared=True）对应的 configure 参数；
+  # 传 -o shared=False 时改为 --disable-shared --enable-static。
+  configure_options:
+    - "--build=aarch64-unknown-linux-gnu"
+    - "--enable-shared"
+    - "--disable-static"
+
+  # 无编译依赖
+  dependencies: []
+
+  # 编译器
+  cc: clang
+  cxx: clang++
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+patches_applied:
+  - "0001-ohos-musl-printf-hook-compat-layer.patch"
+  - "0002-ohos-build-tmpdir-umask.patch"
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - >-
+    「出现 altivec.h」不等于「依赖 AltiVec」：libvecpf 里 vec_* 全是它自己的函数名，
+    删掉无条件包含的 <altivec.h> 对编译毫无影响；PowerPC 专属的 vector 关键字用
+    __attribute__((vector_size(16))) 可等价替换（16 字节布局相同）。
+  - >-
+    musl 缺失 glibc 私有 printf hook 时，缺的是「挂载点」而非「功能」：llvm-nm -u
+    显示目标文件只缺 register_printf_type/_modifier/_specifier 三个注册函数，
+    fprintf/fputs/strcmp/strncpy 均由 musl 提供，且三者只在构造函数里被调用一次，
+    格式化引擎完全自洽 → 可在应用侧自建兼容层，而不是判定「无法适配」。
+  - >-
+    glibc printf hook 的回调约定：args[i] 不是「数据指针」而是「指向数据指针的指针」，
+    引擎内部写 *((void***)args)[0]；兼容层必须让 args[0] 指向一个 void* 槽位。
+  - >-
+    OHOS 这套 libc 的 open_memstream/fmemopen：写进去的数据只有在显式 fflush() 之后才可见，
+    走「写完直接 fclose()」这条路时捕获长度恒为 0，且反复这样用会破坏内存（循环 5 次后退出时
+    SIGSEGV）；tmpfile() 返回 NULL。把库内 fprintf/fputs 宏重定向到自建内存缓冲
+    （fp == NULL 时写缓冲，否则透传真实 FILE*）即可绕开这些收尾路径的边界行为。
+  - >-
+    自建 printf 后端时不要用固定栈缓冲承接单次转换：char tmp[1024] 会让 %1100vlu 这类大字段
+    宽度被静默截断（只输出 1023 字符）。正确做法是先试栈缓冲，返回值显示放不下时按精确长度
+    malloc 重做一次。
+  - >-
+    为 printf 钩子写兼容层时，输出汇必须是线程局部且必须释放。上游在 glibc 下是引擎直接写
+    调用方的 FILE*，库内没有共享可变状态；把汇写成进程级无锁 static 全局，会让并发调用在同一个
+    指针上竞争 realloc 直接破坏堆（实测 4 线程 × 20000 次必崩），并且如果在 sprintf 收尾只把指针
+    置 NULL 而不 free，每次调用还会泄漏约 132 字节 —— 上游测试只调约 1300 次，完全看不见这个泄漏。
+    对策：_Thread_local（C11，回退 __thread）+ reset/take 两个显式的释放/移交入口。
+  - >-
+    移植测试套件时只应改道「被测实现产出的一侧」，另一侧要留在宿主 libc：
+    上游 test_vecpf.c 用标量格式串经宿主 sprintf 构造期望值、用向量格式串产出实际值，
+    只把后者（15 处生效调用点）换成库入口，比较才仍是独立交叉验证；两侧一起改道会让测试退化成自证。
+  - >-
+    上游 config.guess(2014) 认不出 HarmonyOS（uname -s 为 HarmonyOS），
+    必须显式传 --build=aarch64-unknown-linux-gnu；不传 --host 即保持本机构建模式，
+    产物可在鸿蒙 PC 上直接执行，这也是上游测试套件能真跑的前提。
+  - >-
+    上游把由 git 历史生成的 ChangeLog.md 列进 dist_doc_DATA，但发布 tarball 里并没有
+    这个文件；在非 git 树中构建会因 generate-changelog.sh（#!/bin/bash 且依赖 git 与
+    GNU sort -V）失败 → 应从 dist_doc_DATA 移除。
+  - >-
+    -maltivec 在非 PowerPC 目标上被 clang 接受但静默忽略，还会让后续的 -Werror 探测
+    失败（警告被当错误），应把该选项限定到 PowerPC 目标。
+  - >-
+    musl 不提供 glibc 私有的 __int128_t / __uint128_t typedef；
+    且上游 configure 的 int128 探测（vector __int128_t）在非 PowerPC 上必然为 no，
+    因此 HAVE_INT128_T 不定义属于上游自身的正确行为，不是适配缺陷。
+  - >-
+    autoconf 在鸿蒙共享卷（hmfs）上会因 umask 077 自建的临时目录而失败：
+    config.status 用 (umask 077 && mktemp -d "./confXXXXXX") 建放 awk 脚本的临时目录，
+    得到 0700；该卷上新建目录还会继承父目录 setgid 位，最终是 drwx--S---（2700），
+    group 权限位被清空。而该卷上的进程是靠 group 授权写入、并不以记录到的 owner 身份写入，
+    于是紧接着的 echo 'BEGIN {' >"$ac_tmp/subs1.awk" 直接 EACCES
+    （./config.status: line 871: ./confXXXXXX/subs1.awk: Permission denied）。
+    同一进程在几秒前刚往构建目录 b/（mode 2771，group 有 rwx）写了一堆文件，
+    却写不进自己刚建的子目录 —— 差别只有这一个权限位。全树只有 autoconf 这一处强制 umask 077。
+    对策：把构建系统自建临时目录的 umask 统一放宽为 002（ltmain.sh 为 0002），
+    覆盖 configure / config.guess / Makefile.in(distcheck) / ltmain.sh 四处。
+    只改权限掩码、不动库代码，临时目录仍是一次性随机名且用完即删，并发安全性不变，产物不受影响。
+  - >-
+    这类「进程身份 / 文件属主」导致的权限问题在 WorkBuddy 沙箱里复现不出来：
+    两边 owner/group 映射不同，沙箱侧恰好能写进 2700 目录。实测把用户那份失败配置
+    （含 LDFLAGS/CPPFLAGS/CXX）原样在沙箱复跑是全绿，所以不能把「沙箱过了」当「用户能过」。
+    正确做法是交付一个 10 秒自助探针让用户在自己终端跑（对比 umask 077 与 002 下的写入结果）。
+
+patch_generation:
+  method: per-file-difflib
+  # 本机生成路径不入仓（原值泄漏构建者本地工作目录）；orig/work 为
+  # 「上游 pristine 解包目录 / 打完 0001 后的工作副本」两个临时目录。
+  generated_at: '2026-09-27T22:20:00'
+  patches_count: 2
+  files_changed: 10
+  files_added: 1
+  # 0001: 7 改 + 1 增（vecpf-ohos-compat.h）
+  # 0002: 4 改（configure / config.guess / Makefile.in / ltmain.sh），
+  #       按「pristine + 0001」为 orig 侧生成，确保与 0001 串行应用时零 offset、无 .rej
+
+patch_classification:
+  - file: 0001-ohos-musl-printf-hook-compat-layer.patch
+    type: manual
+    platform_only: true
+  - file: 0002-ohos-build-tmpdir-umask.patch
+    type: manual
+    platform_only: true
+    guard: '__GLIBC__'
