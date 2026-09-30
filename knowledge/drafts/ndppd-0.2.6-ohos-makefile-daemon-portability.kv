@@ -1,0 +1,61 @@
+# ═══ Draft knowledge entry — ndppd 0.2.6 OHOS 适配：strerror_r musl 语义、Makefile man 页硬编码 gzip、WITH_ND_NETLINK 规避 ═══
+# Software: ndppd 0.2.6（NDP Proxy Daemon，plain Makefile C++ 守护进程）
+# Gate: 本机 OHOS SDK clang++ aarch64 交叉编译 9/9 + 链接 PASS；真机 shadow CI 待执行
+# Status: DRAFT — path B candidate, same-stem .md/.kv pair
+
+id: ndppd-0.2.6-ohos-makefile-daemon-portability
+severity: 3
+category: libc|musl-compat|build-system|ohos
+trigger_tool: make|clang++|conan
+phase: compile|build
+
+keywords: strerror_r, _GNU_SOURCE, _POSIX_C_SOURCE, __GLIBC__, no viable conversion, musl, int return, char* return, Makefile, GZIP, /bin/gzip, man page, ndppd, WITH_ND_NETLINK, pthread_cancel, libnl, glib, NDP proxy, daemon, version string, NDPPD_VERSION
+
+error_signature: no viable conversion from returned value of type 'int' to 'std::string'|/bin/gzip.*No such file|undefined reference to.*pthread_cancel|ndppd \(NDP Proxy Daemon\) version
+
+match_keywords: strerror_r, no viable conversion, /bin/gzip, WITH_ND_NETLINK, pthread_cancel, NDPPD_VERSION, ndppd
+
+root_cause: |
+  (1) ndppd 的 logger.cc 按 glibc GNU 语义使用 strerror_r（期望返回 char* 可直接构造 std::string）：
+  `#if (_POSIX_C_SOURCE >= 200112L || ...) && ! _GNU_SOURCE` 分支选择。OHOS musl 的 strerror_r
+  恒为 POSIX int 签名——即使 _GNU_SOURCE 已定义（OHOS sysroot 的 features.h 默认开启该宏），
+  musl 也不会切换到 GNU 版本 → `no viable conversion from returned value of type 'int'`。
+  特征宏路径完全无法区分 glibc/musl，因为两边 _GNU_SOURCE 都为真。
+  (2) Makefile 的 `all` 目标用 `GZIP ?= /bin/gzip` 压缩 man 页（ndppd.1.gz / ndppd.conf.5.gz），
+  OHOS 无 /bin/gzip，`make all` 直接失败；但二进制目标 `make ndppd` 不依赖 man 页，可单独构建。
+  (3) 可选 netlink 监视路径（WITH_ND_NETLINK）需要 glib-2.0/libnl-3/libnl-route-3，且
+  nd-netlink.cc 使用 pthread_cancel（musl 不可用，E085/E127）。上游在 ndppd.cc/rule.cc/proxy.cc
+  已用 `#ifdef WITH_ND_NETLINK` 保护所有调用点——默认构建完全不编译该文件，无需补丁即规避。
+  (4) 上游 0.2.6 tag 的 src/ndppd.h 中 NDPPD_VERSION 仍为 "0.2.4"（上游疏忽）：运行时
+  `-v` 输出与包版本不一致，test 断言必须匹配 0.2.4 而非目录版本 0.2.6。
+
+rec_approach: branch-strerror-r-on-glibc-macro + build-single-binary-target + skip-optional-netlink-path
+rec_description: |
+  (1) 补丁把 logger::err() 的条件从 feature 宏改为 `#ifdef __GLIBC__`：glibc 走 char* 返回，
+  其余（musl/OHOS）走 POSIX int 调用（strerror_r(...) != 0 时返回 "Unknown error"）。glibc 与
+  musl 都能正确编译，比按 __OHOS__/__MUSL__ 特判更通用。
+  (2) conanfile build() 只跑 `make ndppd CXX=clang++ CXXFLAGS="-O2 -fPIC -Wall"`，
+  不跑 `make all`，man 页不打包（避免 GZIP 硬编码）；package() 用 copy() 手动装 bin/licenses/conf-dist。
+  (3) 不设置 WITH_ND_NETLINK，默认路径零外部依赖（无 libnl/glib/pthread），无需拆依赖适配。
+  (4) test_package 断言 grep "version 0.2.4"（按上游源码实际字符串），并在 notes/manifest 记录差异。
+rec_command: |
+  make -j1 ndppd CXX=clang++ CXXFLAGS="-O2 -fPIC -Wall"
+  # patch 0001-logger.cc-strerror_r-musl.patch:
+  # -#if (_POSIX_C_SOURCE >= 200112L || _XOPEN_SOURCE >= 600) && ! _GNU_SOURCE
+  # +#ifdef __GLIBC__
+  #      return strerror_r(errno, buf, sizeof(buf));
+  # +#else
+  # +    if (strerror_r(errno, buf, sizeof(buf)) != 0)
+  #          return "Unknown error";
+  #      return buf;
+rec_auto_fix: false
+
+affected_scope: 在 OHOS/musl 上构建按 glibc GNU 语义使用 strerror_r 的 C++ 项目；Makefile 在 all 目标中调用硬编码路径宿主工具（gzip 等）的守护进程项目；上游版本宏与发布 tag 不一致需要写测试断言的场景。
+
+verification_cmd: clang++ --target=aarch64-linux-ohos --sysroot=$OHOS_SDK/sysroot -O2 -fPIC -Wall -c src/logger.cc && python3 scripts/ohc-run.py conan-verify ndppd 0.2.6
+
+authors:
+  - codex
+source_pr: TBD
+source_commit: fa9140e41d
+draft_date: 2026-09-29
