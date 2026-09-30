@@ -1,0 +1,143 @@
+#====================================================================
+# DRAFT-libfli-findindi-version-regex-quoted-macro -
+#   项目自带 FindINDI.cmake 的版本正则不认 INDI 2.x 的 INDI_VERSION "x.y.z" 引号形式
+#====================================================================
+# 与既有条目的关系（差异化定位，勿重复申报）:
+#
+#  E999-draft-8FBE《OHOS libc 符号族 configure 误检的 ac_cv 禁用模式》——
+#  讲的是 OHOS libc 导出 fortify `__*_chk` 导致 AC_CHECK_FUNCS 误判 HAVE=1，
+#  是 **libc 符号族与 autoconf 探测**的交互。
+#
+#  E092（CMake 不识别 HarmonyOS 平台）——讲的是 CMake 平台识别，需要
+#  CMAKE_SYSTEM_NAME=Linux。症状同为 CMake configure FATAL_ERROR，但根因层次
+#  完全无关：那条是「平台不认识」，本条是「自带的 Find 模块版本解析逻辑过时」。
+#
+#  本条的独特性：**与平台无关**。Linux 上用 INDI >= 2.0 一样会挂，因为问题出在
+#  项目 snapshot 里的 FindINDI.cmake 早于 INDI 2.x 的 indiversion.h 格式变更。
+#  正因为跨平台，才必须走「回移上游修复」而不是「加平台宏绕过」。
+#====================================================================
+
+id:                     DRAFT-libfli-findindi-version-regex-quoted-macro
+trigger_tool:           cmake|configure
+phase:                  configuration
+error_signature:        failed to detect INDI version
+                         |Could not find INDI include directory
+                         |FindINDI\.cmake.*FATAL_ERROR
+                         |INDI_VERSION \[0-9\]
+
+severity:               3
+category:               cmake, portability, build-system, upstream-fix
+match_keywords:         FindINDI.cmake, INDI_VERSION, indiversion.h,
+                         failed to detect INDI version, indi-3rdparty, libfli,
+                         find_package(INDI REQUIRED)
+title:                  项目 snapshot 里的 FindINDI.cmake 用无引号正则解析
+                         INDI_VERSION，INDI >= 2.0 的 indiversion.h 写成带引号的
+                         "x.y.z" 后版本探测必失败
+
+root_cause: |
+  INDI 2.0 起 `indiversion.h` 把版本串写成带引号的字符串字面量：
+
+      #define INDI_VERSION_MAJOR   2
+      #define INDI_VERSION_MINOR   2
+      #define INDI_VERSION_RELEASE 2
+      #define INDI_VERSION "2.2.2"      ← 带引号
+
+  而项目 snapshot 里 vendored 的 `cmake_modules/FindINDI.cmake`（2022 年版）
+  用如下正则解析版本：
+
+      MATCHES ".*INDI_VERSION ([0-9]+).([0-9]+).([0-9]+)"
+
+  该正则要求 `INDI_VERSION` 与数字之间只有空格。实际文件里是 `INDI_VERSION "2.2.2"`，
+  空格后紧跟一个 `"`，正则匹配失败 → 走 else 分支
+  `message(FATAL_ERROR "failed to detect INDI version")` → configure 直接中止。
+
+  容易被误判为「INDI 没装好」或「Conan 的 libindi 包内容不对」，实则是
+  **探测正则与被探测头文件的格式不匹配**。因为 `find_package(INDI REQUIRED)` 是
+  硬依赖，configure 失败 → 整个包构建失败，且报错信息（"failed to detect INDI
+  version"）完全没提「正则」二字，排查成本高。
+
+  上游 indi-3rdparty master 已修复同一行，改为兼容引号与可选前缀的形式：
+
+      MATCHES "INDI_VERSION[ ]+\"?([0-9]+)\\.([0-9]+)\\.([0-9]+)\"?"
+
+affected_scope: >
+  任何 vendored 了旧版 `FindINDI.cmake` 的 INDI 3rdparty 子项目（libfli、
+  libfishcamp、libdarkness、lib ASI 等同仓子目录），在链接 INDI >= 2.0 时命中。
+  **与目标平台无关**（Linux 同样复现），因此不属 OHOS 专有问题，也不得用
+  平台宏绕过（铁律 R8）。
+
+verification_cmd: |
+  # 1) 直接看被探测的头文件格式（决定正则该长什么样）
+  grep -n 'INDI_VERSION' <libindi-package>/include/libindi/indiversion.h
+  # 2) 看项目里的正则假设
+  grep -n 'INDI_VERSION' <src>/cmake_modules/FindINDI.cmake
+  # 3) 看上游 master 是否已修（决定走回移还是自创）
+  curl -sS https://raw.githubusercontent.com/indilib/indi-3rdparty/master/cmake_modules/FindINDI.cmake \
+    | diff -u <src>/cmake_modules/FindINDI.cmake -
+
+rec_priority:           1
+rec_approach:           backport-upstream-fix-as-portability-patch
+rec_description: >
+  把上游 master 对同一行的修复逐字回移成 portability 补丁（补丁只改正则、
+  不含任何平台宏），并用 conandata.yml 的 patches 段注册、在 build() 里
+  apply_conandata_patches()。这是首选方案，因为回移的逻辑上游已验证，
+  不引入自创判断，且 Linux 上同样需要（不违反 R8）。
+rec_command: |
+  # 1) 取上游 master 的同名模块做 diff，确认只有这一处 hunk
+  curl -sS -o FindINDI-up.cmake \
+    https://raw.githubusercontent.com/indilib/indi-3rdparty/master/cmake_modules/FindINDI.cmake
+  diff -u <src>/cmake_modules/FindINDI.cmake FindINDI-up.cmake
+  # 2) 回移该 hunk 成补丁（-p1 可干净应用）
+  patch -p1 --dry-run < patches/0001-FindINDI.cmake.patch
+  # 3) conandata.yml 注册
+  #    patches:
+  #      - patch_file: "patches/0001-FindINDI.cmake.patch"
+  #        patch_type: "portability"
+rec_auto_fix:           false
+rec_impl:               portability-patch
+
+fallback_priority:      2
+fallback_approach:      inject-include-dir-and-skip-version-probe
+fallback_description: >
+  若无法打补丁（例如只允许改 conanfile.py），可在 generate() 里直接向
+  FindINDI 传入已定位的 include 目录与库路径，绕过其 find_path/版本探测：
+  `tc.variables["INDI_INCLUDE_DIR"] = <libindi>/include/libindi`。
+  注意这只解决「找不到」，**不解决版本正则与组件库检查**，仍可能撞
+  `INDI_LIBRARIES` 为空导致的 REQUIRED_VARS 失败，故只作退路。
+fallback_command:       grep -n 'REQUIRED_VARS' <src>/cmake_modules/FindINDI.cmake
+fallback_auto_fix:      false
+fallback_impl:          toolchain-variable-injection
+
+forbid_1_pattern:       在补丁里加 #ifdef __OHOS__ / #if defined\(__OHOS__\) 绕过
+forbid_1_reason:        该缺陷与平台无关（Linux + INDI 2.x 同样复现），用平台宏
+                        绕过等于把上游通用 bug 藏进平台分支，Linux 用户继续踩坑
+forbid_1_consequence:   违反 R8，评审打回
+
+forbid_2_pattern:       注释掉 find_package\(INDI REQUIRED\)|把 REQUIRED 改成可选
+forbid_2_reason:        libfli 的 libfli.c / libfli-camera-usb.c 真的 include 了
+                        indimacros.h（用 INDI_UNUSED），去掉依赖后编译直接失败；
+                        且这会掩盖「INDI 头文件到底装没装」的真实状态
+forbid_2_consequence:   编译失败或产出缺符号的库
+
+principles:
+causes:                 []
+caused_by:              []
+similar_to:             [E092, E999]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-libfli-findindi-version-regex-quoted-macro.md
+last_updated:           2026-09-28
+source_event:           archives/l/libfli/2.0-20221221182632：FindINDI.cmake:220
+                        FATAL_ERROR failed to detect INDI version，回移上游修复后
+                        configure 通过（Found INDI 2.2.2）
+authors:                jumping_ggjjkk <jumping_ggjjkk@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-28
+
+draft:                  true
