@@ -1,0 +1,141 @@
+# ═══════════════════════════════════════════════════════════════════
+# E671 BLAS++/LAPACK++ 族在 Conan 下消费 blaspp：find_package 取不到
+#      上游"私有"配置变量（blaspp_defines / blaspp_libraries），
+#      且 BLAS++ 公共头不在 include 路径上
+# 来源: feat/lapackpp-2024.10.26（conan create 实测，2026-09-28）
+# 路径: 依赖项任务 lapackpp/2024.10.26 首轮即红（configure 探针编译失败）
+# 状态: 草稿（待审核 promote）
+# ═══════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E671
+trigger_tool:           cmake|conan
+phase:                  configuration
+error_signature:        config/config\.h:[0-9]+:[0-9]+: error: "must define one of
+                        FORTRAN_ADD_, FORTRAN_LOWER, FORTRAN_UPPER"|
+                        'blas\.hh' file not found|
+                        BLAS\+\+ not found\. LAPACK\+\+ requires BLAS\+\+ to be installed first|
+                        Could not find a package configuration file provided by "blaspp"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, cmake, conan, blaspp, lapackpp
+match_keywords:         blaspp, lapackpp, blaspp_defines, blaspp_libraries,
+                        blasppConfig.cmake, CMakeDeps, blaspp-config.cmake,
+                        find_package(blaspp), blas.hh, CMAKE_PREFIX_PATH,
+                        BLAS_FORTRAN_ADD_, SLATE
+title:                  BLAS++/LAPACK++ 族在 Conan 下消费 blaspp 时，
+                        find_package 拿不到上游私有变量 blaspp_defines/blaspp_libraries，
+                        且 blas.hh 不在 include 路径（探针 config.h #error + 'blas.hh' not found）
+prescan_pattern:        find_package\(\s*blaspp|blaspp_defines|blaspp_libraries|#include "blas\.hh"
+prescan_globs:          conanfile.py, CMakeLists.txt, cmake/*.cmake
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上游（icl-utk-edu）SLATE 族对 blaspp 的消费有两个"只做一半"
+                        的设计，原生构建（blaspp 与 lapackpp 同前缀安装、且 blaspp
+                        常以 add_subdirectory 并入）下被隐式满足，换成 Conan 包
+                        布局后全部失效：
+                        ① 变量面：lapackpp 的 cmake/LAPACKFinder.cmake 与
+                           LAPACKConfig.cmake 用 try_run 探针，探针 include
+                           config/config.h，而 config.h 要求必须定义
+                           FORTRAN_ADD_/FORTRAN_LOWER/FORTRAN_UPPER 之一。这些
+                           定义与探针链接库由上游 blasppConfig.cmake.in 末尾
+                           "Export private variables used in LAPACK++" 两行导出：
+                             set( blaspp_defines   "@blaspp_defines@" )
+                             set( blaspp_libraries "@blaspp_libraries@" )
+                           但 Conan 的 CMakeDeps 生成的 blaspp-config.cmake **只导出
+                           导入目标 blaspp::blaspp 与 blaspp_INCLUDE_DIRS，不导出
+                           这两个变量** → 探针在 config.h 处 #error 编译失败。
+                        ② 头文件面：lapackpp 从不把 blaspp::blaspp 链到自身目标
+                           （它只 find_package 取变量），而
+                           include/lapack/util.hh 直接 #include "blas.hh"；
+                           引号包含只搜 includer 所在目录与 -I 路径，原生同前缀
+                           安装时该头在默认搜索路径上，Conan 下不在 → 200+ 个
+                           src/*.cc 全部 'blas.hh' file not found。
+affected_scope:         任何"以 Conan 消费 blaspp 的 SLATE 族包"（lapackpp、
+                        SLATE 本体、以及未来任何 find_package(blaspp) 的包）；
+                        特征是上游 blaspp 已发布为独立 Conan 包、而下游包需要
+                        上游那两个私有变量。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           bridge-blaspp-private-vars-and-include-dir
+rec_description:        全部在**配方侧**桥接，上游零改动、零补丁：
+                        (1) 配方类属性 `generators = "CMakeDeps"`——否则构建树内
+                            根本没有 blaspp-config.cmake，上游 find_package 直接
+                            FATAL_ERROR（配方里 `self.generators.append("CMakeDeps")`
+                            无效，必须写成类属性）。
+                        (2) `tc.variables["blaspp_defines"]`：从**已安装的 blaspp
+                            包的 include/blas/defines.h 反解**（跳过 include guard
+                            BLAS_DEFINES_H），而不是在配方里硬编码
+                            -DBLAS_FORTRAN_ADD_。defines.h 是 BLAS++ 构建期
+                            configure_file 生成的权威配置记录，携带命名修饰
+                            （BLAS_FORTRAN_ADD_/LOWER/UPPER）与能力位
+                            （BLAS_HAVE_CBLAS 等）；后端（LP64/ILP64、
+                            ADD_/LOWER/UPPER）变化时不会静默链错符号。文件缺失
+                            即抛 ConanException，禁止静默兜底。
+                        (3) `tc.variables["blaspp_libraries"]`：与 BLAS_LIBRARIES
+                            同源的库清单（探针链接用）。
+                        (4) include 路径：用 CMake 官方注入点
+                            `tc.variables["CMAKE_PROJECT_<PROJECT_NAME>_INCLUDE"]`
+                            = 源码树内一个短桥接片段，内容为
+                            `find_package(blaspp CONFIG REQUIRED)` +
+                            `include_directories(${blaspp_INCLUDE_DIRS})`。
+                            该变量在 project() 之后立即被 include，目录作用域，
+                            早于上游 add_library，故对 lapackpp 目标生效。
+                            ❌ 不要用 CMAKE_CXX_FLAGS 硬塞 -I（污染全量编译且
+                            会被 CI 静态闸当作环境耦合）。
+rec_command:            self.generators = ...  # 类属性 generators = "CMakeDeps"
+                        tc.variables["blaspp_defines"] = ";".join(self._blaspp_defines())
+                        tc.variables["blaspp_libraries"] = blas_libs
+                        tc.variables["CMAKE_PROJECT_lapackpp_INCLUDE"] = os.path.join(
+                            self.source_folder, "conan", "bridge_blaspp.cmake")
+rec_auto_fix:           false
+rec_impl:               conanfile-generate-toolchain-variables + cmake-project-include-bridge
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       tc\.variables\["blaspp_defines"\]\s*=\s*"-DBLAS_FORTRAN_ADD_"|硬编码\s*-DBLAS_FORTRAN_
+forbid_1_reason:        Fortran 命名修饰与整型宽度是**后端属性**（LP64/ILP64 ×
+                        ADD_/LOWER/UPPER 四种组合），硬编码等于把当前后端假设
+                        焊死；BLAS++ 自身换了后端后本配方会静默链错符号，且
+                        config.h 的 #error 不会触发（只校验"定义了一个"，
+                        不校验"定义对了"）
+forbid_1_consequence:   链接期 undefined reference（命名修饰不匹配）或静默算错
+                        （LP64 库当 ILP64 用），极难定位
+forbid_2_pattern:       find_package\(\s*blaspp\s*\).*blasppConfig|复用 blaspp 包内
+                        上游安装生成的 blasppConfig\.cmake
+forbid_2_reason:        上游安装生成的 blasppConfig.cmake 内嵌**构建机绝对路径**
+                        （实测 blaspp/2024.10.26 包内为
+                        /storage/Users/currentUser/.cache/conan2/... 的
+                        blaspp_libraries），换机/换 cache 根即失效
+forbid_2_consequence:   换机器后探针链接到不存在的库，或 include 路径错乱
+forbid_3_pattern:       self\.generators\.append\("CMakeDeps"\)
+forbid_3_reason:        配方里 append 不生效（generators 在 recipe 中须为类属性，
+                        否则 CMakeDeps 不会生成，表现为 build/ 下找不到
+                        blaspp-config.cmake）
+forbid_3_consequence:   上游 find_package(blaspp) FATAL_ERROR
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P012, P014
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E667（BLAS++/LAPACK++ 族库清单直通与静态链接序）、
+                        E447（conan 配方 cache-variable bridge）、
+                        E473（conan-recipe build-module imported-target injection）
+caused_by:
+conflicts_with:
+prerequisite_of:        SLATE 及任何以 Conan 消费 blaspp 的下游包
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/l/lapackpp/2024.10.26 -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing
+                        # 期望：configure 段出现 "Found BLAS++: …/generators"、
+                        # "Found LAPACK library: …liblapack.a;…"，且
+                        # build/…/include/lapack/defines.h 含 LAPACK_HAVE_LAPACK
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:              # PR 创建后由知识库主编回填
+source_commit:          # 随 PR 合并时由知识库主编回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
