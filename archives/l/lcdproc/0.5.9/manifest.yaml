@@ -1,0 +1,65 @@
+software: lcdproc
+# 版本级 manifest
+# 文件位置: archives/l/lcdproc/0.5.9/manifest.yaml
+# 遵循 ARCHIVE-SPEC v2.0
+
+version: "0.5.9"
+status: built
+build_system: autotools
+build_date: "2026-09-28"
+
+# ============================================================
+# 源码信息
+# ============================================================
+source:
+  # 上游项目自己的 GitHub release 制品（tag v0.5.9）。已实测下载并取哈希，
+  # 此处 sha256 即该次下载的摘要；未与任何其它源做比对，故不作"字节一致"声明。
+  url: "https://github.com/lcdproc/lcdproc/releases/download/v0.5.9/lcdproc-0.5.9.tar.gz"
+  sha256: "d48a915496c96ff775b377d2222de3150ae5172bfb84a6ec9f9ceab962f97b83"
+  tar_format: tar.gz
+
+# ============================================================
+# 构建配置
+# ============================================================
+build:
+  system: autotools
+  configure_options:
+    - "--prefix=${DEFAULT_PREFIX}"
+    - "--disable-libusb"
+    - "--disable-libusb-1-0"
+    - "--disable-libftdi"
+    - "--disable-libhid"
+    - "--disable-libpng"
+    - "--disable-freetype"
+    - "--disable-libX11"
+    - "--enable-drivers=bayrad,CFontz,CFontzPacket,CwLnx,glk,lb216,lcdm001,MtxOrb,pyramid,text"
+    - "ac_cv_mtab_file=/proc/mounts"
+  # 无外部 conan 依赖：configure 最终 LIBS = -ldl，套件可独立交叉编译。
+  # 详见 notes.md 的依赖矩阵与 ncurses 取舍。
+  dependencies: []
+  cc: clang
+  cxx: clang++
+
+# ============================================================
+# 补丁信息
+# ============================================================
+patches_applied:
+  - "0001-config-guess-ohos-triplet.patch"
+  - "0002-config-sub-linux-ohos.patch"
+  - "0003-iface-extern-definition.patch"
+  - "0004-configure-umask-022.patch"
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+knowledge_gained:
+  - "E007/E072: tarball 自带 2014-03-23 config.guess + 2014-09-11 config.sub，两者都不认识 ohos。仓库自带的 scripts/patch-autotools-ohos.pl 对这个年代的脚本**一个锚点都匹配不上**（android-linux / linux-uclibc / __ANDROID__ 全部缺失，脚本自评 Score 1/5），config.sub 零改动，必须自己写补丁"
+  - "E072 在 2014 版 config.sub 上是**两处**不是三处：`case $maybe_os` 的 kernel-OS 白名单（第 118 行那串）加 `linux-ohos*`，以及末尾 `case $os` 的 OS 白名单加 `-linux-ohos*`。只改第一处时 config.sub 会把 aarch64-unknown-linux-ohos 规范化成 aarch64-unknown-linux-gnu-ohos（不报错，但错的）"
+  - "E007 的正确修法不是加 uname 分支就完事：config.guess 的主 dispatch 是 `case ${UNAME_MACHINE}:${UNAME_SYSTEM}:...`，往里面加一个 `*:Linux:*:*` 分支会**吞掉所有非 OHOS 的 Linux 探测**（实测 no-CC 时直接 'unable to guess system type'）。编译器 target 探针必须放在主 dispatch **之前**的独立 case 里；探针用 `$CC_FOR_BUILD -dumpmachine`（config.guess 第 120 行 `CC_FOR_BUILD=$CC` 会自动采纳环境里的 CC）"
+  - "**-fno-common 是 2014 年 autotools 老代码的经典杀手**：clients/lcdproc/iface.h 在头文件里放了 tentative definition `IfaceInfo iface[MAX_INTERFACES];`，被 main.c 和 iface.c 同时 include。GCC 老版本靠 -fcommon 合并，clang>=11 默认 -fno-common 于是各自生成强 .bss 定义 → `ld.lld: error: duplicate symbol: iface`。正解是拆成 iface.h 的 extern + iface.c 的唯一定义（已验证这是全树唯一的头文件 tentative definition；server/drivers/*.h 里的 MODULE_EXPORT 是各驱动 .so 各自的模块 ABI，不是冲突）"
+  - "E011/E114: 生成的 configure 第 10477 行 `tmp=...(umask 077 && mktemp -d ...)` 与 config.guess 的 3 处 `umask 077`，在 HMDFS 上进程 UID 与映射属主不一致 → 属主也写不进去。改 umask 022（同 jpegoptim 1.4.7 的 0001）"
+  - "conan 的 AutotoolsToolchain._default_configure_install_flags() 从 `cpp_info.bindirs[0]` **同时**派生 `--bindir` 和 `--sbindir`。上游 server/Makefile.am 用 `sbin_PROGRAMS=LCDd`，所以只要 bindirs 写了 [\"bin\", \"sbin\"]，LCDd 也会被塞进 bin/。本包显式只声明 bindirs=[\"bin\"]，让守护进程与客户端同目录（commands.json 也按名字寻址）"
+  - "W0 口径：本包**无强制外部依赖**。所有重集成（libusb/libftdi/libhid/libpng/freetype/X11/glib2/pango/gd/libxml2）都在 --enable-* 后面且探测失败即优雅降级；制品仓里 libftdi/freetype/libpng/glib2/libxml2/libudev 均未发布，故显式 --disable-* 让本地与 CI 解析出同一套驱动"
+  - "ncurses 取舍：ohpcd 的 ncurses/6.5 **只提供 libncursesw.a**（宽字符版），而上游 LCD_DRIVERS_SELECT 里 curses 驱动探测的是 `AC_CHECK_LIB(ncurses, main)`（非宽字符），探测失败后落到 else 分支的 `AC_CHECK_LIB(curses, main, ...)` —— 那段**不是**被注释掉的，是活的 m4 代码（只有字面量 `else` 被 dnl 掉了），但同样探测不到 libncurses/libcurses，所以驱动仍进不来。要开 curses 驱动必须改上游 m4 把 -lncursesw 接进去（超出适配范围），故本包不带 ncurses，curses 驱动缺席"
+  - "确定性驱动的关键：`curses` 是上游 11 个默认驱动里**唯一没有 --enable/--disable 开关**的一个（configure --help 里既无 --enable-curses 也无 --disable-curses），它是否进 DRIVERS 取决于构建主机上有没有 ncurses。`--disable-*` 关不掉它，所以要在配方里消除主机依赖只能显式传 `--enable-drivers=<list>`（configure.ac:421 的 LCD_DRIVERS_SELECT / acinclude.m4:7 的 AC_ARG_ENABLE(drivers)）。本包传的就是「上游默认 11 个减去 curses」这 10 个，实测 `DRIVERS = bayrad.so CFontz.so CFontzPacket.so CwLnx.so glk.so lb216.so lcdm001.so MtxOrb.so pyramid.so text.so`"
+  - "本地 WSL 仿真运行环境的 guest libc 是**普通 musl**（/opt/ohos-guest/lib/libc.so），而 sysroot 头是 OHOS NDK 的——NDK 的 sys/select.h 让 FD_SET/FD_CLR 调用 `__fd_chk`，真机 libc 有这个符号，本地 musl guest 没有。所以 LCDd（server/sock.c 用 FD_SET）在 WSL 下无法执行，但 3 个客户端（不用 FD_SET）可以。**这是本地验证环境限制，不是包缺陷**；真机 CI 不受影响，测试因此只执行客户端，LCDd 只校验 ELF ABI"
