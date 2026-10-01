@@ -1,0 +1,196 @@
+# ═══ Draft knowledge entry — 上游「无条件探测在前、else 兜底在后」的自愈分支在 seccomp SIGSYS 下永不可达；同一道能力墙按子命令分面 ═══
+# Timestamp: 2026-09-25
+# Software: kma 1.4.21（通用：一切"先探测 SysV/被拦 syscall、再按其返回值回退普通路径"的 C 程序 —
+#           凡上游写了 if(xxxget(...) < 0) { 走普通文件/普通分配 } 的，都属本条射程）
+# Gate: 配方产物在设备真机执行（消费者测试 + 逐 syscall 号探针 fork-per-test，判决与对照组同树）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+# 用法：谁撞上"上游看起来有一条能救命的 else 兜底、但那条兜底一辈子没被执行"，
+#       谁复制为 DRAFT-<你的包>-<你的版本>-<slug>.{kv,md}，替换证据字段后随该包 PR 原子提交。
+# ⛔ 本条**不申报**"撞能力墙先找上游自带替代后端/开关"——那属池内既有条目
+#    knowledge/drafts/DRAFT-ohos-sysv-shmget-sigsys.md「可复用修复模式」第 1 条
+#    （fallback_approach: compile-time-mmap-switch）的覆盖面。⚠ 本包用的**不是**编译期开关、也不换 POSIX shm，而是上游自带的**运行期 argv 开关** -mmap（零补丁）——那是那两条都没写的**第三条解法**，按 经验文档/手册/03-路径B与C.md:83「既有条目没写的另一条解法 ⇒ 按 create 报」计入本条新增面，如实申报其适用面与代价。
+#    本条另写该条目与 radioclk 条目都没写的**组合层**两件事（兜底可达性判据、按子命令分面的披露口径）。
+
+id: DRAFT-kma-1.4.21-unconditional-sysv-probe-makes-upstream-file-fallback-unreachable-and-wall-is-per-subcommand
+title: 上游自愈不可达 + 能力墙按子命令分面：kma 的 hashMapKMA_load()（hashmapkma.c:275 起）在 :319/320、:349/350、:385/386、:416/417 **无条件**执行 ftok()+shmget()，紧随其后的 if(shmid < 0) { …普通文件读… }（:321-330 等同型）只在 shmget **返回**之后才被判定； 本平台 shmget 命中 seccomp-BPF SECCOMP_RET_TRAP ⇒ 进程在到达该判定之前就收到 SIGSYS(31) 而死（rc=159）⇒ **上游自带的文件回退分支永不可达**，"上游有兜底"不等于"兜底可达"。 同一份 bin/kma 里这堵墙还**按子命令分面**：kma map 默认路径不可用（rc=159、四个输出文件全 0 字节） 而带 -mmap 可用（rc=0、Score 300/Template_length 600/Template_Coverage 50.00/ Query_Identity 100.00/Query_Coverage 200.00）；kma db（db.c:59 直连 hashMapKMA_load）与 kma shm 整条不可用（rc=159）；kma index、kma dist、kma -v、kma -h 不受影响 ⇒ 判据两条：①"探测是否先于兜底、且探测本身终止进程"；②"可用/不可披露按子命令点名"。
+trigger_tool: clang|make|conan|kernel-seccomp
+phase: testing
+error_signature: 'rc=159|SIGSYS|Signal 31 \(core dumped\)|Bad system call|out_default.*\.\w+ 0 字节'
+severity: 1
+category: ohos|sysv-ipc|seccomp|upstream-selfheal|capability-disclosure|subcommand-facet
+root_cause: '组合层机制（不是"又一个 syscall 号被拦"，那部分归既有条目）： ① **探测在前、兜底在后**：上游把"共享内存段在不在"的判断写成 `key = ftok(...); shmid = shmget(key, size, 0666); if (shmid < 0) { …普通文件读… }`。 该 else 分支的进入条件是 **shmget 返回负值**；而本平台 shmget 被 seccomp 过滤器 以 SECCOMP_RET_TRAP 投递 SIGSYS，进程**根本不返回** ⇒ if 永不求值 ⇒ 兜底不可达。 上游其实知道这个形状需要桩化：hashmapkma.c:27-36 在 `#ifdef _WIN32` 下把 `ftok`/`shmget`/`shmat` **定义成恒失败宏**（`#define shmget(key,size,perm) ((size != 0) ? (-1) : (-key))`）， 正是"让探测返回值参与判定、从而走普通文件路径"的做法；OHOS 目标 （aarch64-unknown-linux-ohos，_WIN32 未定义）落进 `#else` 的真实 `<sys/shm.h>` 声明， **没有这层桩** ⇒ 同一份源码在 Windows 上自愈、在本平台上是终止型失败。 ⇒ 读码判据：看兜底分支的进入条件是"被拦调用的**返回值**"还是"被拦调用**本身**"； 后者在任何"命中即杀进程"的策略（SECCOMP_RET_TRAP/KILL）下永不可达，不得当退路。 ② **墙按子命令切分**：同一份产物里不同子命令的哈希表加载入口不同 —— 全树 `shm & 32`（-mmap 的运行期开关）只命中 kmers.c 与 sparse.c 两个文件 （kmers.c:85-87、sparse.c:380-382 转向 kmmap.c:33 的 hashMapKMAmmap 纯文件后端）， db.c 里根本没有该分支（db.c:59 直连 hashMapKMA_load）⇒ kma map 有出路、kma db 与 kma shm 没有出路。⇒ 披露判据：可用面/不可用面必须**按子命令**成表并各给依据行号， 写"本包整体可用/不可用"必然失真。'
+affected_scope: |-
+  ①凡"探测型 syscall + 按返回值 else 兜底"的 C 程序：SysV shm/msg/sem 装载器、
+    老式 mmap-or-read 双路径加载器、任何 `if (syscall(...) < 0) fallback();` 形态
+    在 SECCOMP_RET_TRAP 平台上都**自动失去兜底**（症状是 rc=159 而不是"走了回退分支"）；
+  ②多子命令 CLI（一个 bin 若干子命令共享加载器）的能力披露口径；
+  ③判"上游有没有自愈"时的静态读码面——补丁前先确认兜底是否可达。
+  **不受影响**：兜底由编译期分派决定（如上游给 _WIN32 桩、本平台无桩 ⇒ 要看目标三元组），
+  以及只走 POSIX shm / 匿名 mmap / AF_UNIX 抽象命名空间的包。
+verification_cmd: |-
+  # 一、证明"探测先于兜底、且探测终止进程"（读码 + 真机各一次）
+  grep -n "ftok\|shmget\|shmid < 0" hashmapkma.c        # 319/320/321、349/350/351、385/386/387、416/417/418
+  sed -n '27,36p' hashmapkma.c                              # _WIN32 桩宏就在这一屏
+  kma -i query.fa -t_db testdb -o out/default; echo rc=$?    # rc=159；out_default.* 四件全 0 字节
+  # 二、证明"墙按子命令分面"
+  grep -rl "shm & 32" *.c                                   # 只命中 kmers.c 与 sparse.c
+  grep -n "hashMapKMA_load" db.c kmers.c sparse.c           # db.c:59 无 -mmap 分支；kmers.c:89 / sparse.c:384 有
+  kma -i query.fa -t_db testdb -mmap -o out/mmap; echo rc=$?  # rc=0 且数值与上游语义一致
+  kma db -t_db testdb; echo rc=$?                            # rc=159
+  kma shm -t_db testdb; echo rc=$?                           # rc=159
+  # 三、被拦的号本身（对照组与逐号判决见 probe）
+  ./probe                                                   # fork-per-test：shmget/shmat/shmdt/msgget/semget 全 SIGSYS
+  grep -E "^Seccomp" /proc/self/status                      # Seccomp: 2 / Seccomp_filters: 1
+match_keywords: hashMapKMA_load, hashmapkma.c, unconditional probe, shmid < 0, else fallback,
+  兜底不可达, 探测先于兜底, _WIN32 桩宏, SECCOMP_RET_TRAP, rc=159, 子命令分面, db.c,
+  shm & 32, kma db, kma shm, -mmap, 能力披露按子命令
+keywords: 上游自愈不可达, 无条件 SysV 探测挡住文件回退, 探测终止型失败不参与判定,
+  能力墙按子命令分面, 同一份 bin 有的子命令能绕有的不能绕, 上游自带兜底不等于兜底可达,
+  _WIN32 恒失败宏对照, 可用面不可用面按子命令成表
+prescan_pattern: '\b(if|else if)\s*\(\s*(shm|msg|sem)[a-z]*\s*\([^)]*\)\s*(<|<=|==)\s*0'
+prescan_globs: "**/*.c, **/*.h, **/Makefile"
+safety_boundary: |-
+  ①**别把"上游有 else 兜底"读成"上游能自愈"**：先判兜底的进入条件是不是被拦调用的返回值；
+     若是，且本平台命中即 SIGSYS，则该分支恒不可达，不得据它免做能力披露。
+  ②**判能力一律用真实 syscall + fork-per-test + 同树对照组**（malloc / 文件 mmap /
+     shm_open 三件），禁 stat()//dev/shm/符号表推断（那是 POSIX 侧，另一码事）。
+  ③**SIGSYS 只能记在实际发出的那个号上**：本包默认路径 rc=159 归因到 shmget（:320），
+     不能顺手写成"ftok 也被拦"（实测 ftok 放行、返 key）。
+  ④**披露按子命令点名**并各给依据行号；不得写"本包整体可用/不可用"。
+  ⑤**不许为了绿灯改上游语义**：不 vendor 假 shm 层、不加空壳 stub、不把 SysV 悄悄换成
+     shm_open（kma 的对端 `kma shm` 常驻服务就是 SysV key 约定）；本包走上游自带
+     `-mmap` 运行期开关，属路径 A，未改上游一行代码。
+  ⑥**池内既有条目的错误陈述只提请修正、不代改**：见 similar_to 的"条目外偏差"。
+  ⑦定性归主代理：平台内核/安全策略面，不是配方缺陷，也不构成"无法适配"；
+     不得据此自行开路径 C 或建"无法适配"Issue。
+rec_priority: 1
+rec_approach: 先证兜底可达性（探测终止型 or 返回值型），再按子命令逐个点名能力面，最后按可达出路交付
+rec_description: |-
+  ①兜底是"返回值型"（探测失败但进程活着）⇒ 可以什么都不改，如实披露即可；
+  ②兜底是"终止型"（本平台命中即 SIGSYS）⇒ 上游 else 分支**不得当退路**，出路只能找
+     本平台可达的那条（本包是上游自带的 `-mmap` 运行期开关，属既有条目没写的第三条解法（其两条解法是编译期开关与手工换后端），故
+     计入本条新增面），并把它写成交付用法及其适用面与代价；
+  ③没有任何可达出路的子命令（本包 `kma db`、`kma shm`）⇒ 整条列不可用 + 依据行号 +
+     实测 rc，不缩测试分母、不以 skip 充通过；
+  ④**读码时顺手查上游有没有平台桩宏**（本包 `#ifdef _WIN32` 就把 shmget 桩成恒 -1）：
+     有，说明"让探测失败"在上游是既定做法，但**不得为本平台私自打开它**——那是改上游
+     语义，且本平台需要的不是"假装没有段"而是"走另一条后端"；只作判据与 Issue 素材。
+rec_command: |-
+  grep -n "shmid < 0" hashmapkma.c | head        # 兜底判定在被拦调用之后
+  grep -rl "shm & 32" *.c                        # 哪些子命令有替代后端
+  <bin> <子命令> ...; echo rc=$?                 # 逐子命令点名，各留一份日志
+rec_auto_fix: false
+rec_impl: 消费者测试用 -mmap 做真比对（12 条断言全过）；不可用面按子命令写进 README 表格与 notes 注意事项
+fallback_priority: 2
+fallback_approach: 若本平台存在可达的替代后端则按替代后端交付，否则停下报主代理定性
+fallback_description: |-
+  本条的回退选择发生在"出路"层面而不是"换后端"层面：kma 的 POSIX shm 替换（改上游
+  shmget→shm_open）会破坏 `kma shm` 常驻服务与 `kma db` 的 SysV key 约定 ⇒ **不得采用**；
+  可达出路是上游自带的 `-mmap` 运行期 argv 开关（既有条目未写这条，本条把它列为新增解法）。若某包连这样的自带出路都没有，
+  按 ③ 停下上报，不要自己发明兼容层。
+fallback_command: （本包不适用 POSIX shm 替换；见上）
+fallback_auto_fix: false
+principles: 上游自带兜底不等于兜底可达；探测终止型失败不参与判定；能力披露按子命令点名；分母不缩；纸面 ✅ 不等于真机可用
+causes: 上游 hashMapKMA_load 把 SysV 探测写成无条件前置步骤，且本平台 shmget 是终止型失败
+caused_by: HarmonyOS PC 会话进程的 seccomp-BPF 策略（SECCOMP_MODE_FILTER，shmget 命中 SECCOMP_RET_TRAP）
+similar_to: |-
+  **knowledge/drafts/DRAFT-ohos-sysv-shmget-sigsys.md**（池内既有条目，已合入 baseline 48d9cee684，
+  `git cat-file -e` 可证）：**机制层归它**（"OHOS 沙箱按 syscall 拦 SysV 共享内存 ⇒ SIGSYS"），
+  本条**不申报机制层**，只写它没写的组合层两件事（兜底可达性判据、按子命令分面的披露口径）。
+  ⚠ **条目外偏差（本条要求提请修正该条目，不代改）**：该条目「根因」节写"拦截
+  `shmget`/`shmat`/`shmctl`"；而 kma（`~/tmp/uc2/z33-kma/probe-summary.txt`）与 radioclk
+  （`~/tmp/uc2/sysv-shm-probe/probe_sysv_shm2.c` 判决 `~/tmp/uc2/z33-radioclk/shm-probe-run3.log`）
+  **两侧独立实测**都是 `shmctl`/`msgctl`/`semctl` 进内核返 `EINVAL`(22) ＝ **放行**、
+  `ftok` 放行，被拦的是创建/挂接类（shmget/shmat/shmdt/msgget/semget，radioclk 侧另含
+  msgsnd/msgrcv/semop）。⇒ 该句应改为"创建/挂接类被拦、控制类 `*ctl` 放行"，
+  否则照它写的读者会去拦 `shmctl`、或误以为"IPC 族整体不可用"。
+  该条目「可复用修复模式」第 1 条已写"若上游自带 mmap 共享内存编译开关则直接启用"
+  （fallback_approach: compile-time-mmap-switch）⇒ **"先找上游自带替代后端/开关"不是本条的新增**。
+  **radioclk 草稿对**（DRAFT-radioclk-1.0.pristine-sysv-ipc-seccomp-sigsys.{kv,md}，
+  属同机制的**另一面**——精确到 syscall 号的放行/拦截分界；**尚未合入 main**，在兄弟分支，
+  故本条不引用它的读数、只与本条互指）：radioclk 撞的是"对端进程约定就是 SysV key、
+  无替代后端可用"，本包撞的是"有替代后端、但上游兜底不可达 ⇒ 必须显式开启替代后端"。
+  **knowledge/drafts/DRAFT-E577-buffer-sysv-ipc-posix.md**（池内既有条目）：其第 31-36 行对照表
+  已把「按 errno 写的回退 | 生效 | **永不生效**（进程已死）」写成**一般性结论**，第 38-44 行给出
+  fork、pipe、shm_open+ftruncate+mmap、匿名 mmap 的旁证清单——但它**没有**把「上游把被拦调用写成
+  无条件前置探测、因而 else 兜底一生不被求值」这一**静态读码判据**写出来，也没有平台桩宏对照
+  （本包 `hashmapkma.c:27-36` 的 `#ifdef _WIN32` 恒失败宏）。层次差 = 一般结论 → 可执行判据；
+  本条不重申报它的表与旁证。
+  **knowledge/drafts/DRAFT-E584-bus-sysv-ipc-sigsys-catchable.md**（池内既有条目，全文 93 行）：
+  其第 51-60 行是按入口分列的处置清单、第 62-72 行是 `## 验证结果` 表（`bus_open` ENOENT、
+  `test_ohos`、CLI 冒烟、上游示例各占一行）——**分列形态是隐含的**：按 点名/披露/可用面/子命令/按入口
+  五个关键词 grep 该件 0 命中，条目本身没把「按子命令/API 面点名披露」写成规则句。本条把它写成
+  **显式判据**并给出同一份 bin 内三个面的分布读数，不重申报它的分流决策。
+  ⚠ **提请裁定（池内三件互斥，与本条无冲突）**：「DRAFT-E584-bus-sysv-ipc-sigsys-catchable」
+  第 1 行标题与第 28-29 行称该 SIGSYS **可捕获**（`sigaction` + `sigsetjmp`/`siglongjmp` 可捕获并
+  继续执行），而「DRAFT-ohos-sysv-shmget-sigsys.md」第 47 行称「OHOS 对部分被拦 syscall 的 SIGSYS
+  **不可捕获**，方案无效」、「DRAFT-E577-buffer-sysv-ipc-posix.md」第 36 行称「本族 syscall 的
+  SIGSYS 通常**不可恢复**」⇒ 三处措辞互斥，需条目所有者按包 / 按 syscall 号裁定边界。本包一手
+  读数只支持一句：默认路径命中 shmget 后**该进程以 rc=159 终止**、四个输出文件全 0 字节（未捕获、
+  未续跑）⇒ 本条不据任何一方定性，只把兜底不可达判据建立在「探测不返回因而判定不执行」这一
+  实测事实面上。`conflicts_with` 留空 = 本条与上述任何一条都不冲突。
+  E246 / E051（seccomp 拦 Linux 私有 syscall vs 内核未实现 syscall 的两型 SIGSYS）：
+  属机制层，已由上面两份条目处理，本条不重复申报。
+conflicts_with:
+prerequisite_of:
+doc_file: knowledge/drafts/DRAFT-kma-1.4.21-unconditional-sysv-probe-makes-upstream-file-fallback-unreachable-and-wall-is-per-subcommand.md
+last_updated: 2026-09-25
+source_event: |-
+  kma 1.4.21 适配实证（2026-09-25 主理-33，B 机 HarmonyOS PC / HongMeng Kernel 1.12.0 /
+  aarch64 / clang 15.0.4 target aarch64-unknown-linux-ohos / musl）：
+  P1 逐号探针 ~/tmp/uc2/z33-kma/probe.c（fork-per-test）+ probe.out（1184 B）+
+        probe-summary.txt（542 B）⇒ shmget/shmat/shmdt/msgget/semget/msgsnd/msgrcv/semop
+        全 SIGSYS(si_code=1 SYS_SECCOMP)；shmctl/msgctl/semctl 返 EINVAL(22)、ftok 返 key；
+        对照 malloc / 文件 mmap+msync / shm_open+ftruncate+mmap 全通过；Seccomp: 2、
+        Seccomp_filters: 1。
+  P2 读码（上游纯净树 ~/tmp/uc2/z33-kma/src/kma-1.4.21/）：
+        hashmapkma.c:319/320、349/350、385/386、416/417 无条件 ftok+shmget，
+        紧随 :321/:351/:387/:418 才是 if(shmid < 0) 文件兜底；
+        hashmapkma.c:27-36 `#ifdef _WIN32` 把 ftok/shmget/shmat 桩成恒失败宏（对照事实）；
+        grep -rl "shm & 32" ⇒ 只命中 kmers.c、sparse.c；db.c 无该分支（db.c:59 直连）；
+        sparse.c:380 hashMapKMA_load_shm / :381-382 `else if(shm & 32)` 转 kmmap.c:33 /
+        :384 默认 hashMapKMA_load（**不是 :84**，:84 是 while(i < end) 循环体）。
+  P3 真机读数：默认比对 rc=159 且 out_default.res/.aln/.fsa/.frag.gz 四件全 0 字节；
+        kma db -t_db rc=159；kma shm -t_db 与 -destroy 两式 rc=159；
+        kma -i query.fa -t_db testdb -mmap rc=0（t1 / Score 300 / Template_length 600 /
+        Template_Coverage 50.00 / Query_Identity 100.00 / Query_Coverage 200.00）；
+        kma index rc=0（testdb.comp.b 4208420 B）；kma dist rc=0；kma trim rc=0；
+        kma seq2fasta rc=0；kma -v 打印 KMA-1.4.21；kma update 无功能读数（未测）。
+  P4 交付侧：路径 A、零补丁（patches/ 空、patches_applied 为 []、L4_RESULT=pass），
+        消费者测试 1 个程序 12 条断言全过（~/tmp/uc2/z33-kma/r3-w3.log、
+        archives/k/kma/1.4.21/reports/w3-local-ci.log）。
+authors: 主理-33（kma 1.4.21 真机实证入池；组合层两条，机制层挂靠池内既有条目）
+source_pr: kma 1.4.21 交付 PR（证据随该 PR 的 archives/k/kma/1.4.21/notes.md 与 test_package/MANIFEST.yml）
+source_commit: 随本 PR 原子提交（B 判定 create 回升；本轮整改基线 HEAD 06a1d1a5cc3e61b87b4cba13f26212610283682b，草稿内容以本 PR 的 knowledge/drafts/ diff 为唯一有效载体，不再指向仓外副本或历史中间提交）
+draft_review: |-
+  工具侧复核（2026-09-25 B 机，日志 ~/tmp/uc2/z33-kma-fix/draft-review-r2.log）：
+  相似正式条目真实 TOP3 = E051 score=0.21（sig=0.33 kw=0.0 cat=0.29）/
+  E246 score=0.21（sig=0.33 kw=0.0 cat=0.29）/ E338 score=0.19（sig=0.33 kw=0.0 cat=0.0）；
+  质量预检 signature=✅ root_cause=✅ rec=✅；**预审建议 create**，三态阈值
+  （>=0.55 merge-into / 0.30-0.55 review-similar / <0.30 create）下**无 merge-into**。
+  首跑 ~/tmp/uc2/z33-kma-fix/draft-review-r1.log 同判 create，但当时 root_cause 用块标量
+  被预审器读成空（root_cause=缺）⇒ 压成单行后复跑取本次读数。
+  ⚠ 本工具不扫 knowledge/drafts/ ⇒ 草稿面查重按**文件名**逐份手工点名（drafts 里 E 编号被复用，
+  挂 E 号会指错，故本条一律不挂 E 号）：
+  ① **DRAFT-ohos-sysv-shmget-sigsys**（机制本体：本平台按 syscall 号把 SysV IPC 拦成 SIGSYS）——
+     本条挂靠、**不重申报机制层**；其「可复用修复模式」第 36-38 行是**编译期** mmap 开关
+     （fallback_approach: compile-time-mmap-switch）、第 39-45 行是手工重写 setup_shm/remove_shm 换
+     POSIX shm，两条都不覆盖本包「零补丁 + 上游自带运行期 argv 开关」的解法。
+  ② **DRAFT-E577-buffer-sysv-ipc-posix**——第 23-27 行根因（白名单式 seccomp）、第 31-36 行
+     「按 errno 写的回退 ⇒ 永不生效（进程已死）」一般结论、第 38-44 行旁证清单；无兜底可达性
+     读码判据、无平台桩宏对照 ⇒ 层次差为「一般结论 → 可执行判据」。
+  ③ **DRAFT-E584-bus-sysv-ipc-sigsys-catchable**——第 51-60、62-72 行按入口分列的两张台账（隐含
+     分列形态，条目未把按子命令点名披露写成规则句）、第 79 行分流桥句；无按子命令点名披露的
+     显式判据。
+  ⇒ **组合型知识不判重**（`经验文档/手册/03-路径B与C.md:89`：查重以完整条目为单位，A+B 组合成
+  新解题路径的适用面本身即新增价值）：**组分清单** = 上述三件已写的机制本体 / errno 回退一般结论 /
+  按入口分列台账；**组合后新增的解题路径与适用面** = 无条件 SysV 前置探测使 else 文件回退不可达这一
+  探测型结构判据（含 `#ifdef _WIN32` 恒失败桩宏对照）+ 同一道墙按子命令分面的分布读数 + 上游自带
+  运行期 argv 开关这条既有条目没写的解法及其代价（零补丁、不换后端、不改产品语义）。
+  另按 `经验文档/手册/03-路径B与C.md:82` 的条目外新行为偏差升 B 条件：池内条目第 22 行写
+  「拦截 shmget/shmat/shmctl」，本包与 radioclk 两侧独立探针实测 shmctl/msgctl/semctl 进内核返
+  EINVAL(22)＝放行、ftok 放行、POSIX shm 与文件 mmap 对照组全通过 ⇒ 见 similar_to 的提请修正句。
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-25
