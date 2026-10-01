@@ -1,0 +1,128 @@
+--- a/source/ThreadPool.cc
++++ b/source/ThreadPool.cc
+@@ -104,39 +104,50 @@
+ {
+     static size_type _v =
+         GetEnv<size_type>("PTL_NUM_THREADS", Thread::hardware_concurrency());
+     return _v;
+ }
+ 
+ //======================================================================================//
+ // static member function that calls the member function we want the thread to
+ // run
+ void
+-ThreadPool::start_thread(ThreadPool* tp, thread_data_t* _data, intmax_t _idx)
++ThreadPool::start_thread(ThreadPool* tp, thread_data_t* _data, intmax_t _idx,
++                         intmax_t _cpu)
+ {
+     if(tp->get_verbose() > 0)
+     {
+         AutoLock lock(TypeMutex<decltype(std::cerr)>());
+         std::cerr << "[PTL::ThreadPool] Starting thread " << _idx << "..." << std::endl;
+     }
+ 
+     auto _thr_data = std::make_shared<ThreadData>(tp);
+     {
+         AutoLock lock(TypeMutex<ThreadPool>(), std::defer_lock);
+         if(!lock.owns_lock())
+             lock.lock();
+         if(_idx < 0)
+             _idx = f_thread_ids().size();
+         f_thread_ids()[std::this_thread::get_id()] = _idx;
+         Threading::SetThreadId(_idx);
+         _data->emplace_back(_thr_data);
+     }
++#if !defined(PTL_HAVE_PTHREAD_SETAFFINITY_NP) && \
++    defined(PTL_HAVE_SCHED_SETAFFINITY)
++    // sched_setaffinity can only address a process/thread ID. Apply it from the
++    // worker itself so pid 0 denotes the correct native thread.
++    if(_cpu >= 0)
++        Threading::SetPinAffinity(_cpu);
++#else
++    ConsumeParameters(_cpu);
++#endif
++
+     thread_data() = _thr_data.get();
+     tp->record_entry();
+     tp->execute_thread(thread_data()->current_queue);
+     tp->record_exit();
+ 
+     if(tp->get_verbose() > 0)
+     {
+         AutoLock lock(TypeMutex<decltype(std::cerr)>());
+         std::cerr << "[PTL::ThreadPool] Thread " << _idx << " terminating..."
+                   << std::endl;
+@@ -340,36 +351,43 @@
+ {
+     if(m_thread_active)
+         --(*m_thread_active);
+ }
+ 
+ //======================================================================================//
+ 
+ void
+ ThreadPool::set_affinity(intmax_t i, Thread& _thread) const
+ {
++#if defined(PTL_HAVE_PTHREAD_SETAFFINITY_NP)
+     try
+     {
+         NativeThread native_thread = _thread.native_handle();
+         intmax_t     _pin          = m_affinity_func(i);
+         if(m_verbose > 0)
+         {
+             AutoLock lock(TypeMutex<decltype(std::cerr)>());
+             std::cerr << "[PTL::ThreadPool] Setting pin affinity for thread "
+                       << get_thread_id(_thread.get_id()) << " to " << _pin << std::endl;
+         }
+         Threading::SetPinAffinity(_pin, native_thread);
+     } catch(std::runtime_error& e)
+     {
+         std::cerr << "[PTL::ThreadPool] Error setting pin affinity: " << e.what()
+                   << std::endl;
+     }
++#else
++    // Platforms without pthread_setaffinity_np pin each worker from
++    // start_thread(), where sched_setaffinity(0, ...) applies to that worker.
++    ConsumeParameters(i);
++    (void) _thread;
++#endif
+ }
+ 
+ //======================================================================================//
+ 
+ void
+ ThreadPool::set_priority(int _prio, Thread& _thread) const
+ {
+     try
+     {
+         NativeThread native_thread = _thread.native_handle();
+@@ -499,22 +517,28 @@
+         m_task_queue        = new UserTaskQueue(proposed_size);
+     }
+ 
+     auto this_tid = get_this_thread_id();
+     for(size_type i = m_pool_size; i < proposed_size; ++i)
+     {
+         // add the threads
+         try
+         {
+             // create thread
++            intmax_t _pin = -1;
++#if !defined(PTL_HAVE_PTHREAD_SETAFFINITY_NP) && \
++    defined(PTL_HAVE_SCHED_SETAFFINITY)
++            if(m_use_affinity)
++                _pin = m_affinity_func(i);
++#endif
+             Thread thr{ ThreadPool::start_thread, this, &m_thread_data,
+-                        this_tid + i + 1 };
++                        this_tid + i + 1, _pin };
+             // only reaches here if successful creation of thread
+             ++m_pool_size;
+             // store thread
+             m_main_threads.push_back(thr.get_id());
+             // list of joined thread booleans
+             m_is_joined.push_back(false);
+             // set the affinity
+             if(m_use_affinity)
+                 set_affinity(i, thr);
+             set_priority(m_priority, thr);
