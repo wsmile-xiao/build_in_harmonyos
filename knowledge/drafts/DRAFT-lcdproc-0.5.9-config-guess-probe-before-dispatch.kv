@@ -1,0 +1,149 @@
+#====================================================================
+# DRAFT-lcdproc-0.5.9-config-guess-probe-before-dispatch
+#   config.guess 里做"可选命中"必须放在主 dispatch 之前；
+#   写成 `*:Linux:*:*` 分支会吞掉所有非 OHOS 的 Linux 探测
+# 来源: PR feat(lcdproc): 0.5.9 适配 HarmonyOS PC（分支 feat/lcdproc-0.5.9）
+# 路径: Path B（知识库扩展）—— E007 的实现层变体
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# 辨别性指纹：config.guess 在**普通 Linux 机器上**报 unable to guess system type
+# ——而不是在 OHOS 机器上。方向反了才是这个坑的签名。
+id:                     DRAFT-lcdproc-0.5.9-config-guess-probe-before-dispatch
+trigger_tool:           configure
+phase:                  configuration
+error_signature:        config\.guess:\s*unable to guess system type|
+                         cannot guess build type|
+                         checking build system type.*failed|
+                         checking host system type.*failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               autotools, configure, shell
+match_keywords:         config.guess, case 分支, 互斥, 吞掉, 宽 pattern,
+                        *:Linux:*:*, uname -s, 主 dispatch, CC_FOR_BUILD,
+                        -dumpmachine, 编译器 target 探针, 可选命中,
+                        shell case 无回溯, unable to guess system type
+title:                  config.guess 的"可选命中"必须放在主 dispatch 之前——写成 `*:Linux:*:*` 分支会吞掉所有非 OHOS 的 Linux 探测
+prescan_pattern:        case\s+"?\$\{UNAME_MACHINE\}:\$\{UNAME_SYSTEM\}|\*:Linux:\*:\*|CC_FOR_BUILD
+prescan_globs:          config.guess, build-aux/config.guess, config.sub
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             config.guess 的主 dispatch 是一条**互斥优先**的 shell case：
+                        `case "${UNAME_MACHINE}:${UNAME_SYSTEM}:..." in ... esac`。
+                        shell case 一旦某个 pattern 命中就**不再看后续分支**，
+                        而且**没有回溯**。所以往 dispatch 里加一条"宽"的
+                        `*:Linux:*:*` 想做条件判断，等于把后面所有更具体的
+                        Linux 探测分支全部吞掉：
+                        - uname -s 在 Linux 上恒为 Linux，`:Linux:` 这一段必然匹配
+                        - 命中后若条件不成立就 exit 走人，
+                          原来的 `*:Linux:*:*:*` 正常探测根本没机会跑
+                        - 表现是 `./config.guess` 在**没设 CC 的普通 Linux 上**
+                          直接 `unable to guess system type`
+                        这个坑**不能靠调整分支顺序救**：宽 pattern 无论放前放后
+                        都会吃掉一类探测。
+                        正解是把"可选命中"提到主 dispatch **之前**的独立 case，
+                        命中就 exit、不命中自然落回原 dispatch。
+affected_scope:         所有需要给 config.guess 增加"条件性" OHOS 逻辑的 autotools
+                        项目；尤以交叉构建场景为甚（需要按编译器 target 而非
+                        uname 来判定 host）。也适用于任何"往 shell case 里加
+                        条件分支"的场景。
+verification_cmd:       ./config.guess;                                   # 必须仍能猜出 <本机三元组>
+                         CC=<ohos-clang> ./config.guess;                   # 必须输出 aarch64-unknown-linux-ohos
+                         CC=<ohos-clang> ./configure 2>&1 | \
+                           grep -E 'host system type|cross compiling';    # 必须是 -ohos 且 cross compiling: no
+                         grep -n 'CC_FOR_BUILD' config.guess | head -2      # 确认它会自动采纳环境 CC
+
+# ═══ Layer 3: 方案层 (Solution) ★
+rec_priority:           1
+rec_approach:           probe-before-main-dispatch
+rec_description:        两条路都要留，各自覆盖一种场景：
+
+                        (a) dispatch **之前**的独立 case —— 编译器 target 探针，
+                            供**交叉构建**（普通 Linux 机器 + OHOS 工具链）：
+
+                            ohos_target=`$CC_FOR_BUILD -dumpmachine 2>/dev/null`
+                            case "$ohos_target" in
+                            *-linux-ohos)
+                                ohos_mach=`echo "$ohos_target" | sed 's/-.*//'`
+                                echo "${ohos_mach}-unknown-linux-ohos"
+                                exit ;;
+                            esac
+
+                        (b) dispatch **之内**的 `*:HarmonyOS:*:*` uname 分支，
+                            供**真机 CI worker**（uname -s = HarmonyOS）。
+
+                        关键细节：2014-03-23 版 config.guess 里有
+                        `CC_FOR_BUILD=${CC_FOR_BUILD-"$CC"}`，**它会自动采纳环境
+                        里的 CC**，所以探针直接用 `$CC_FOR_BUILD` 即可，不必自己
+                        which clang / 解析软链。CC 未设时该变量为空、`-dumpmachine`
+                        静默失败（务必 `2>/dev/null`）、case 全不匹配、自然落回
+                        原 dispatch —— 这正是要的"可选"语义。
+
+                        走这条探针**不会**触发 E007 forbid_1：forbid 禁的是显式
+                        传 `--build=`/`--host=`，而这里是"让 config.guess 自己
+                        猜对"，cross_compiling 仍是 no，AC_RUN_IFELSE 一个都不跳。
+rec_command:            |
+  # 1) 定位主 dispatch 的起始行
+  grep -n 'case "${UNAME_MACHINE}:${UNAME_SYSTEM}' config.guess
+  # 2) 在它**之前**插入探针（注意是 "之前"，不是 case 里的新分支）
+  #    插入后立刻验证两件事都必须成立：
+  #      ./config.guess                -> <本机三元组>            （探测未被破坏）
+  #      CC=<ohos-clang> ./config.guess -> aarch64-unknown-linux-ohos
+  # 3) 最后跑 configure 确认 cross compiling 仍为 no
+rec_auto_fix:           false
+rec_impl:               manual-patch
+
+fallback_priority:      2
+fallback_approach:      uname-branch-only
+fallback_description:   只加 dispatch 内的 `*:HarmonyOS:*:*` uname 分支，不加探针。
+                        在**真机 OHOS worker** 上够用（uname -s 就是 HarmonyOS），
+                        但**交叉构建**时 host 会被猜成构建机三元组，
+                        host_cpu/host_os 与原生构建不同，configure 会走不同分支
+                        （lcdproc 就在 configure.ac 里有 i386 port-I/O 探测这类
+                        分支），本地与 CI 得到不同的 host。
+                        仅在"只在真机跑、不做交叉构建"时可接受。
+fallback_auto_fix:      false
+fallback_impl:          partial-patch
+
+fallback_2_priority:    3
+fallback_2_approach:    set-host-triplet
+fallback_2_description:  直接 `./configure --host=aarch64-unknown-linux-ohos`。
+                        **不推荐**：触发 E007 forbid_1（cross_compiling=yes），
+                        全部 AC_RUN_IFELSE 被跳过，生成错误的 config.h。
+fallback_2_auto_fix:   false
+fallback_2_impl:       none
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P001, P003, P011
+
+# ═══ 关系图 ═══
+causes:
+caused_by:
+similar_to:             E007,
+                        DRAFT-lcdproc-0.5.9-legacy-autotools-config-anchor-miss
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               doc/DRAFT-lcdproc-0.5.9-config-guess-probe-before-dispatch.md
+last_updated:           2026-09-29
+source_event:           archives/l/lcdproc/0.5.9/manifest.yaml（lcdproc 0.5.9 适配，
+                        补丁 0001-config-guess-ohos-triplet.patch；
+                        第一版写成 dispatch 内的 *:Linux:*:* 分支，
+                        实测无 CC 时直接 unable to guess system type）
+author:                 lcdproc-0.5.9 适配
+related_packages:       lcdproc/0.5.9
+related_knowledge:      E007
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:
