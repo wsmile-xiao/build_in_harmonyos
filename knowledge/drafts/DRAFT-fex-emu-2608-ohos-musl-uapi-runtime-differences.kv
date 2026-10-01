@@ -1,0 +1,150 @@
+#====================================================================
+# DRAFT-fex-emu-2608-ohos-musl-uapi-runtime-differences
+#   OHOS（musl + 裁剪 uapi + toybox）与 glibc/GNU 的差异族：
+#   sigevent 布局、UAPI 常量缺失、sockaddr_storage 重定义、
+#   MAP_FIXED_NOREPLACE 返回 ENOSYS、sed '\r' 语义
+# 来源: feat/fex-emu-2608 适配 HarmonyOS PC（路径C 高难度挑战）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-fex-emu-2608-ohos-musl-uapi-runtime-differences
+trigger_tool:           clang++|gcc|sed|ld
+phase:                  build|test
+error_signature:        use of undeclared identifier '(SIGEV_THREAD_ID|UNAME26|MREMAP_DONTUNMAP)'|
+                         no member named '_sigev_un' in 'sigevent'|
+                         redefinition of 'sockaddr_storage'|
+                         Function not implemented.*MAP_FIXED_NOREPLACE|
+                         label .*not defined.*\\ret
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               musl, uapi, glibc-extension, signal, mmap, sed, toybox,
+                        ohos, portability
+match_keywords:         SIGEV_THREAD_ID, _sigev_un, sigevent, UNAME26,
+                        MREMAP_DONTUNMAP, sockaddr_storage, redefinition,
+                        MAP_FIXED_NOREPLACE, ENOSYS, Function not implemented,
+                        __GLIBC__, __MUSL__, toybox sed, P_tmpdir, read-only /tmp
+title:                  OHOS 与 glibc 的差异族（sigevent/UAPI 常量/头重定义/ENOSYS/sed 语义）：逐项定性而非"平台不支持"收尾
+prescan_pattern:        SIGEV_THREAD_ID|_sigev_un|UNAME26|MREMAP_DONTUNMAP|MAP_FIXED_NOREPLACE|linux/socket\.h
+prescan_globs:          **/*.h, **/*.cpp, **/*.c, **/CMakeLists.txt
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS PC 与"标准 Linux"之间有五类可分离的差异，混在一起看
+                        像"平台不支持"，逐项定性后每类都有确定修法：
+                        ① musl 的 struct sigevent 与 glibc 布局不同：OHOS 的
+                           <signal.h> 里 sigevent 是扁平字段（sigev_value/signo/
+                           notify/notify_function/notify_attributes/__pad），
+                           没有 glibc 的 `_sigev_un` 联合体、没有 thread-id 槽，
+                           也没有 `SIGEV_THREAD_ID` 宏。上游用
+                           `#ifndef sigev_notify_thread_id` 判断"是否需要自定义
+                           宏"，而 musl 下该名字是**结构体成员而非宏**，于是
+                           `#ifndef` 成立、宏被错误定义成 `_sigev_un._tid`，
+                           随后 `val.sigev_notify_thread_id` 展开成不存在的成员。
+                        ② 内核 uapi 常量裁剪：`UNAME26`、`MREMAP_DONTUNMAP`
+                           （Linux 5.7+）在 OHOS 头里没有。
+                        ③ sysroot 头无守卫：OHOS 的 `sys/socket.h` 用
+                           `#ifndef __MUSL__` 守卫 `sockaddr_storage`，但
+                           `__MUSL__` 默认未定义；`linux/socket.h` 完全无守卫 →
+                           先包含 libc 头再包含 `linux/wireless.h` 即重定义。
+                        ④ 内核/加载器不支持 `MAP_FIXED_NOREPLACE`：实测
+                           `mmap(..., MAP_FIXED_NOREPLACE, ...)` 返回 -1 且
+                           errno=38(ENOSYS)；同一地址用 `MAP_FIXED` 则成功。
+                           FEX 启动时用它"顶住 brk 不让 sbrk 生长"，拿不到就
+                           打印 Couldn't allocate page after SBRK 并 trap。
+                        ⑤ 用户态工具差异：`/usr/bin/sed` 是 toybox 0.8.12
+                           （非 GNU sed），其 `a\` 命令把 `\r` 解释成回车——
+                           FEX 测试用 `sed -e '$a\ret\n'` 追加 `ret`，实际写入
+                           的是 CR+'et'，污染汇编源并产生假标签。
+                        ⑥ `/tmp` 只读：`P_tmpdir` 在 OHOS 指向只读文件系统，
+                           `tmpfile()`/`mkstemp(P_tmpdir...)` 直接失败，测试里
+                           常被写成 `abort()`。
+
+affected_scope:         所有从 glibc/Linux 移植到 OHOS 的中大型原生项目。本题实证：
+                        FEX-Emu 2608（syscall 模拟层 + 测试框架 + 构建脚本三处
+                        命中）。同族实证：任何用 SIGEV_THREAD_ID 的定时器代码、
+                        任何 include <linux/*.h> + <sys/socket.h> 的网络代码、
+                        任何在 /tmp 建临时文件的测试。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           per-difference-classification-and-guarded-shims
+rec_description:        【定性纪律】每一类都必须先做"对照实验"再动手，禁止把
+                        编译错误笼统归因为"平台限制"：
+                        ① sigevent：读 $SDK/.../sysroot/usr/include/signal.h
+                           确认字段；用 `#if defined(__GLIBC__)` 分支——glibc 走
+                           `_sigev_un._tid`，非 glibc 走"无 thread-id 槽"路径
+                           （并如实记录 guest 的 SIGEV_THREAD_ID 无法映射）；
+                           `SIGEV_THREAD_ID` 缺失时补 4。
+                        ② 常量：`#ifndef UNAME26 #define UNAME26 0x0020000`、
+                           `#ifndef MREMAP_DONTUNMAP #define MREMAP_DONTUNMAP 4`。
+                        ③ 头重定义：在引入 `linux/wireless.h` 前
+                           `#define _UAPI_LINUX_SOCKET_H`（临时压制 uapi 副本），
+                           并核实没有别的符号依赖（实测 wireless.h/if.h 只用
+                           `struct sockaddr`，来自 libc 头），用完 `#undef`。
+                        ④ ENOSYS：先试 NOREPLACE，`errno==ENOSYS||EINVAL` 时
+                           回退 `MAP_FIXED`（该地址由当前 brk 推出、位于 brk 之上，
+                           单线程早启动阶段替换是安全的），并写注释说明前提。
+                        ⑤ sed：换成对实现不敏感的写法。`-e '$s/$/\nret/'`
+                           在 toybox 与 GNU sed 下都正确（CMake 侧注意 ninja 的
+                           `$$` 转义：`"\'\$\$s/\$\$/\\nret/\'"`）。
+                        ⑥ 临时文件：把 `P_tmpdir` 换成"优先 TMPDIR、否则 P_tmpdir"，
+                           `tmpfile()` 换成 `mkstemp(TMPDIR/prefixXXXXXX)+fdopen+unlink`。
+rec_command:            echo | clang -dM -E -x c - | grep -E '__MUSL__|__GLIBC__|__OHOS__'
+                        # OHOS: 只定义 __OHOS__/__OHOS_FAMILY__，不定义 __MUSL__/__GLIBC__
+                        # 复现脚本见 learninglog/20260929fex-emu-2608/reports/失败逐项归因表.md
+rec_auto_fix:           false
+rec_impl:               guarded-portability-fixes
+
+fallback_priority:      2
+fallback_approach:      sdk-sysroot-header-overlay
+fallback_description:   若头冲突扩散（多处 uapi/libc 重定义），可把 OHOS sysroot
+                        的 uapi 头做一份带守卫的叠加目录并前置 -isystem。风险：与
+                        SDK 版本绑定，升级 SDK 即失效；且改的是平台头而非项目码，
+                        不推荐作为首选。
+fallback_command:       见 notes.md「sysroot 叠加层评估」小节
+fallback_auto_fix:      false
+fallback_impl:          sysroot-header-overlay
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       平台不支持.*sigevent|OHOS.*没有.*所以不测|硬件.*限制.*跳过
+forbid_1_reason:        本差异族每一类都有确定修法（守卫/回退/替代表达式），
+                        "平台限制"不是可接受结论（审查规则明确不接受）
+forbid_1_consequence:   判 FAIL / REQUEST_CHANGES
+forbid_2_pattern:       改 /usr/bin/sed|替换系统头文件|chmod.*\/tmp
+forbid_2_reason:        不得修改平台自身；差异化必须落在项目代码或构建脚本里
+forbid_2_consequence:   CI/它机不可复现，审查拒收
+forbid_3_pattern:       直接删掉.*SIGEV_THREAD_ID.*分支|注释掉.*MAP_FIXED_NOREPLACE
+forbid_3_reason:        删分支会静默改变 guest ABI 语义；NOREPLACE 有安全回退路径
+forbid_3_consequence:   适配"通过"但行为不等价，且丢失可追溯性
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-fex-emu-2608-ohos-libcxx-missing-cxx-facilities
+                        （同一库的另一类 OHOS 差异）、
+                        knowledge/musl-compat.md（musl 兼容速查）
+caused_by:              E-musl-glibc-developer-impact（musl 与 glibc 的语义差族）
+conflicts_with:
+prerequisite_of:        信号/内存/测试框架类项目的 OHOS 移植定性能力
+
+# ═══ 元数据 ═══
+verification_cmd:       cd archives/f/fex-emu/2608 && conan create . \
+                        -pr:h=<repo>/ci/conan/profiles/ohos-aarch64 \
+                        -pr:b=<repo>/ci/conan/profiles/ohos-aarch64 --build=missing
+                        # 期望: rc=0；test.sh smoke 全过
+doc_file:               knowledge/drafts/DRAFT-fex-emu-2608-ohos-musl-uapi-runtime-differences.md
+last_updated:           2026-09-30
+source_event:           feat/fex-emu-2608 适配：F9/F10/F11/F12/F13/F14/F8 与
+                        sed /tmp 项，见 learninglog/20260929fex-emu-2608/reports/失败逐项归因表.md
+authors:                Hawkninja21
+source_pr:              （本单 PR 号待填）
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-30
