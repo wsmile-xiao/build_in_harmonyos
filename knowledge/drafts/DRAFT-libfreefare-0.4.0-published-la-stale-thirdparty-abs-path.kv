@@ -1,0 +1,61 @@
+# ═══ Draft knowledge entry — published autotools dep .la carries stale third-party
+# .la absolute path (old prefix) in dependency_libs; fix by sed-deleting the dead ref
+# and injecting all dep -l at the end of LIBS
+# Software: libfreefare 0.4.0
+# Gate: conan-verify G2 (conan create, ohos-aarch64-fixed) + test_package 1/1 + W3
+# Status: DRAFT
+
+id: libfreefare-0.4.0-published-la-stale-thirdparty-abs-path
+severity: 3
+category: build-system|libtool|linking|ohos
+trigger_tool: configure|make|libtool|conan
+phase: link
+
+keywords: libtool, .la, dependency_libs, stale prefix, /usr/local/lib, not a valid libtool archive, undefined symbol, libusb, LIBS, autotools
+error_signature: not a valid libtool archive|/usr/local/lib/.*\.la|undefined symbol: libusb_|is not a valid libtool archive
+match_keywords: libnfc.la, libusb-1.0.la, dependency_libs, absolute path, HMDFS, examples, undefined symbol, LIBS
+
+root_cause: |
+  (1) A published autotools dependency (libnfc/1.8.0) was built under prefix=/usr/local,
+  so its lib/libnfc.la dependency_libs line hardcodes the absolute path
+  /usr/local/lib/libusb-1.0.la (the libtool chain record of libusb-compat -> libusb-1.0).
+  On the OHOS device this absolute path does not exist (libusb-1.0 actually lives under a
+  conan-cache hash dir), so libtool sed-resolving dependency_libs hits a non-existent .la
+  and aborts with "is not a valid libtool archive".
+  (2) Separately, examples/ link fails with undefined symbol: libusb_* because
+  libusb-compat (the 0.1 shim) references libusb-1.0, but the default LIBS only carries
+  -lusb, not -lusb-1.0; and -lusb-1.0 must come AFTER -lusb to resolve symbols.
+  AutotoolsToolchain does not append every dependency's -l to LIBS.
+
+rec_approach: sed-dead-la-ref + inject-all-dep-libs-at-end
+rec_description: |
+  (1) Unlike DRAFT-ohos-la-libdir-hardcode (libdir='//lib', fix = copy .la to a staging dir
+  and inject -L staging into configure LDFLAGS), here the dead reference is a SINGLE third-party
+  .la absolute path while the actual library is still reachable via -L<pkg libdir> -lusb.
+  So the lighter fix is to sed-delete just that absolute .la token from the dependency's .la
+  in build() before configure:
+      sed 's# /usr/local/lib/libusb-1.0.la##g' <dep>/lib/libnfc.la
+  Keep the -L<dir> -lusb entries so libtool still resolves the real library.
+  (2) In generate() (BEFORE configure, so it is baked into the Makefile; doing it in build()
+  after configure has no effect), append EVERY dependency's -l to LIBS:
+      for dep in self.dependencies.values():
+          for lib in dep.cpp_info.libs:
+              env.append("LIBS", "-l" + lib)
+      env.append("LIBS", "-lcrypto")   # openssl not picked up by PKG_CHECK_MODULES
+  This guarantees libusb-compat -> libusb-1.0 -> libcrypto symbol order.
+  (3) Decision rule vs the staging recipe: if the dead .la reference can be backstopped by
+  -L<actual dir> -l<name>, sed-delete it; only copy-and-rewrite-to-staging when the whole
+  .la chain (libdir field itself) is wrong.
+
+rec_commands:
+  - "sed 's# /usr/local/lib/libusb-1.0.la##g' $CONAN_LIB/libnfc.la"
+  - "generate(): for dep in self.dependencies.values(): for lib in dep.cpp_info.libs: env.append('LIBS','-l'+lib)"
+
+verification: |
+  conan create on ohos-aarch64-fixed (clang 15) rc=0; libfreefare.la and all 13 bin/mifare-*
+  link; test_package 1/1 Passed (11 hardware-free assertions on sector geometry / AID / keys / MAD / TLV).
+
+related:
+  - knowledge/drafts/DRAFT-ohos-la-libdir-hardcode.md (//lib libdir hardcode, staging recipe)
+  - archives/l/libfreefare/0.4.0/notes.md (full device pit table, 9 issues)
+last_updated: 2026-09-23
