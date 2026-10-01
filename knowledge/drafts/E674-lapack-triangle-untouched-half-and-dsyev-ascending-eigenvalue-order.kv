@@ -1,0 +1,133 @@
+# ═══════════════════════════════════════════════════════════════════
+# E674 写 LAPACK 数值断言/自检时的四个必错点：uplo 三角形只写一半 +
+#      dsyev 特征值按【升序】返回 + dpocon 的 A 入参是 Cholesky 因子 +
+#      dgesvd 奇异值按【降序】返回
+# 来源: feat/lapackpp-2024.10.26（test_package 首轮 18 断言挂 3 条，2026-09-28；
+#       e2e 管线扩至 32 断言又踩 dpocon/dgesvd 两坑，2026-09-29）
+# 路径: 适配任务 lapackpp/2024.10.26 消费者测试排障
+# 状态: 草稿（待审核 promote）
+# ═══════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E674
+trigger_tool:           conan|cmake
+phase:                  testing
+error_signature:        FAIL .*L·Lᵀ == A|FAIL .*M·M⁻¹ == I|
+                        FAIL .*eigenvalues ==|数值断言.*(potrf|trtri|syev).*(false|FAIL)|
+                        FAIL .*rcond|FAIL .*σ.*λ|FAIL .*S\[.*\].*w\[
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               testing, lapack, blas, numerics
+match_keywords:         potrf, trtri, syev, dsyev, getrf, getrs, gesvd, pocon,
+                        dpocon, porfs, posv, lansy, rcond, uplo, Uplo::Lower,
+                        上三角, 下三角, 列主序, col-major, 升序, 降序,
+                        eigenvalues, singular values, LLT, triangular, LAPACK
+title:                  LAPACK 数值断言四个必错点：① uplo 例程只写指定三角形
+                        （另一半保留原值），回乘自检必须先清零；② dsyev/dsyevd
+                        特征值按【升序】返回；③ dpocon 的 A 入参必须是 Cholesky
+                        因子（dpotrf/dposv 的输出），而 anorm 是原阵范数——
+                        两个入参来自不同的矩阵；④ dgesvd 奇异值按【降序】返回，
+                        与 dsyev 交叉验证须反序对齐 S[i]↔W[n-1-i]
+prescan_pattern:        potrf|trtri|syev\(|pocon|porfs|gesvd\(|Uplo::(Lower|Upper)
+prescan_globs:          test_package/*.cpp, test_package/*.c
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             写 LAPACK 封装库的消费者数值断言时，四个高频误判叠加：
+                        ① **三角形语义**：LAPACK 例程只写 uplo 指定的三角形，
+                           另一半在返回时保留调用前的原值（不保证清零）。于是
+                           potrf(Uplo::Lower) 之后直接按整块数组做 L·Lᵀ 回乘，
+                           严格上三角里的"原始矩阵元素"被当成 L 的元素算进去 →
+                           回乘结果不等于原矩阵，断言假失败（本包实测 3 条失败中
+                           2 条即此因：对称矩阵 A=[[4,1,0],[1,5,2],[0,2,6]] 的上
+                           三角 {1,0,2} 全部被算进去）。trtri 同理。
+                           正确做法：回乘前显式清零严格上三角，或只按下三角取值。
+                        ② **特征值序**：LAPACK dsyev/dsyevd 文档规定特征值按
+                           **升序**返回（W[0] ≤ W[1] ≤ …），而社区常按"eig/eigh
+                           降序"的直觉写成降序断言 → 假失败。
+                           实测交叉验证：同一输入 [[2,1],[1,2]] 直连参考
+                           lapack/3.12.1 的 dsyev_ 得 W=[1,3]（升序），lapackpp
+                           的 syev 是薄封装，行为与后端一致 → 是断言写错，不是
+                           适配缺陷。（对照：dsyevr/dsyevx 亦升序；lapackpp 的
+                           包装层不做重排。）
+                        ③ **dpocon 入参矩阵不一致**：pocon(Uplo, n, const A, lda,
+                           anorm, &rcond) 里 **A 必须是 Cholesky 因子**
+                           （dpotrf/dposv 的分解输出），而 **anorm 是原阵**的
+                           范数（lansy 对原阵求）——两个入参来自不同的矩阵，
+                           是该例程最反直觉的设计。传原阵当 A 会得到 rcond>1
+                           的伪结果（本包 e2e 管线实测：断言 0<rcond≤1 失败，
+                           改传 posv 的分解输出后通过）。同理 porfs 的
+                           A/AF 双入参也是"原阵/因子"分离。
+                        ④ **奇异值序与特征值序相反**：dgesvd 奇异值按**降序**
+                           返回（S[0] ≥ S[1] ≥ …），与 dsyev 的升序正好相反。
+                           用 SPD 矩阵做 σᵢ==λᵢ 交叉验证（SVD 奇异值即对称
+                           特征值的绝对值）时必须反序对齐 S[i]↔W[n-1-i]，
+                           顺序写反断言必假失败。
+                        附带的第五个易错点（列主序三角阵构造）：列主序下
+                        {2,0,1,3} 实际是**上**三角、{2,1,0,3} 才是下三角；配
+                        Uplo::Lower 用前者时，LAPACK 只反解对角、另一半留原值，
+                        症状与 ① 相同但根因是入参构造错。
+affected_scope:         所有为 BLAS/LAPACK 封装库（lapackpp、blaspp、lapacke、
+                        cblas、SLATE）编写消费者测试或自检的场景；也适用于
+                        任何用「回乘验证分解正确性」或「多例程结果交叉验证」
+                        的测试写法。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           lapack-numeric-assertion-test-discipline
+rec_description:        ① 回乘前清零非 uplo 侧三角形（或按下三角显式取值）：
+                            for (j) for (i < j) A[i + j*n] = 0.0;   // 严格上三角
+                           然后再算 sum_k L[i+k*n]*L[j+k*n] 并与原 A 比较。
+                        ② syev 断言按升序写：W[0]≈min、W[1]≈max；如需与顺序
+                           无关，断言 max(W)≈λmax 且 min(W)≈λmin。
+                        ③ pocon：A 传 posv/potrf 的分解输出（AF），anorm 传
+                           lansy(原阵) 的结果；porfs 的 A/AF 同样分离，别共用
+                           一个缓冲还想当然。
+                        ④ SPD 交叉验证 gesvd vs syev：断言
+                            |S[i] − W[n-1-i]| < tol·λmax   （gesvd 降序、syev 升序）
+                        ⑤ 列主序三角阵入参：下三角用 {2,1,0,3}（Uplo::Lower），
+                           上三角用 {2,0,1,3}（Uplo::Upper），先确认再传。
+                        ⑥ 断言口径优先选**与顺序/三角形无关的不变量**：
+                           L·Lᵀ==A、QᵀQ==I、M·M⁻¹==I、A·x−b 残差≈0、
+                           ‖Av−λv‖≈0 —— 比"逐元素等于参考值"更稳、更抗实现差异。
+rec_command:            for (int j=0;j<n;++j) for (int i=0;i<j;++i) A[i+j*n]=0.0;  # 清零严格上三角
+rec_auto_fix:           false
+rec_impl:               test-source-numeric-assertion-discipline
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       potrf\([^)]*Uplo::Lower[^)]*\)[\s\S]{0,200}L·Lᵀ\s*==\s*A（未先清零上三角）
+forbid_1_reason:        LAPACK 不清零非 uplo 侧三角形，回乘必然把原矩阵元素算进去
+forbid_1_consequence:   数值断言假失败，误判为库缺陷并可能触发无谓的"改上游"动作
+forbid_2_pattern:       syev[\s\S]{0,120}W\[0\]\s*==\s*(最大|λmax|特征值最大)|eigenvalues == \{(\d+), *(\d+)\} 按降序
+forbid_2_reason:        dsyev/dsyevd 特征值升序返回，降序断言必假失败
+forbid_2_consequence:   假失败；若据此"修"包装层则引入真实回归
+forbid_3_pattern:       pocon\([^,]+,[^,]+,\s*(A0|原阵|orig)[\s\S]{0,80}rcond
+forbid_3_reason:        dpocon 的 A 入参必须是 Cholesky 因子（anorm 才对应原阵），
+                        传原阵得伪 rcond（常 >1，物理上不可能）
+forbid_3_consequence:   条件数断言假失败；或更糟——若断言写成 rcond>0 只查
+                        正性，伪结果反而通过，条件数估计完全失真
+forbid_4_pattern:       gesvd[\s\S]{0,200}S\[i\]\s*(==|<|≈)\s*W\[i\]（未反序对齐）
+forbid_4_reason:        dgesvd 奇异值降序、dsyev 特征值升序，同下标直比必错位
+forbid_4_consequence:   SPD 交叉验证假失败，误判为 SVD 或对称求解器缺陷
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P005, P013
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E667（BLAS++/LAPACK++ 族适配）、E677（同包上游测试
+                        LAPACKE 拓扑）、E678（同包工具链链接陷阱）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/l/lapackpp/2024.10.26 -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl
+                        # 期望 test_package 末行 "TOTAL assertions=32" + "ALL PASSED"
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:              # PR 创建后由知识库主编回填
+source_commit:          # 随 PR 合并时由知识库主编回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  2

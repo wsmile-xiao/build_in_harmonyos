@@ -1,0 +1,137 @@
+# ═══════════════════════════════════════════════════════════════════
+# E677 上游 tester 的 LAPACKE 硬依赖在 lapacke 包未发布时的传递解法：
+#      openblas 内嵌 LAPACKE 走上游 "in BLAS library" 探测路径；
+#      conan 2 测试专用依赖不可直连 require（direct requires 必须进 cpp_info.requires）
+# 来源: feat/lapackpp-2024.10.26（build_tests=ON 整改，2026-09-29）
+# 路径: 适配任务 lapackpp/2024.10.26 上游测试 0/181 → 177/177 打通
+# 状态: 草稿（待审核 promote）
+# ═══════════════════════════════════════════════════════════════════
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E677
+trigger_tool:           conan|cmake
+phase:                  build
+error_signature:        LAPACKE not found\. Tester cannot be built\.|
+                        CBLAS not found; tester cannot be built\.|
+                        The direct dependency '[^']+' is not used by any|
+                        Unable to find 'lapacke/[^']*' in remotes
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               build-system, cmake, conan, lapackpp, openblas, testing
+match_keywords:         LAPACKE, lapacke, openblas, tester, testsweeper,
+                        lapacke_found, blaspp_cblas_found, LAPACK_LIBRARIES,
+                        direct dependency, cpp_info.requires, visible,
+                        self.dependencies, package_id, CMakeDeps,
+                        build_tests, "Found LAPACKE library in BLAS library"
+title:                  上游 tester 硬依赖 LAPACKE 而 lapacke 包未发布制品仓时：
+                        用 openblas（内嵌 LAPACKE）追加到 LAPACK_LIBRARIES 末位走
+                        上游原生 "in BLAS library" 探测路径；且 conan 2 下该依赖
+                        不可直连 require（direct requires 必须进 cpp_info.requires，
+                        visible=False 也绕不过），须经既有传递边访问
+prescan_pattern:        lapacke_found|blaspp_cblas_found|LAPACK_LIBRARIES|requires\("openblas
+prescan_globs:          conanfile.py, cmake/*.cmake, CMakeLists.txt
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             三个独立机制叠加，缺一不可：
+                        ① **上游门禁**：lapackpp 的 test/CMakeLists.txt 有两个硬门禁，
+                           `if (NOT blaspp_cblas_found)` / `if (NOT lapacke_found)`
+                           任一为假即早退（"LAPACKE not found. Tester cannot be
+                           built."）。tester 的校验路径硬用 LAPACKE C 接口
+                           （test/lapacke_wrappers.hh include <lapacke.h>，
+                           test/test.cc 走 LAPACKE_*），且上游 cmake/LAPACKConfig.cmake
+                           用 **try_run**（真编译+真运行）探测 LAPACKE 存在性，
+                           没法靠预置变量蒙混。
+                        ② **依赖缺口**：官方 lapacke/3.12.1 配方虽合入仓库但未发布到
+                           制品仓（`conan install --requires=lapacke/3.12.1` 实测
+                           Unable to find，R35 要求用 install/download 判定存在性）。
+                           而 **openblas/0.3.34 本身内嵌全量 LAPACKE**：包内
+                           lapacke.h/lapacke_config.h/lapacke_mangling.h/lapacke_utils.h
+                           四个头 + libopenblas.a 内 LAPACKE_* 符号（nm 实核），
+                           且它已是 cblas/3.12.1 的既有传递依赖（经 cpp_info.requires
+                           进图）。上游 LAPACKConfig 自带 "LAPACKE in BLAS library"
+                           探测路径（lib_list 逐项 try_run 整串 LAPACK_LIBRARIES），
+                           故把 libopenblas.a **追加到 LAPACK_LIBRARIES 末位**即可让
+                           探针真实通过——上游探测逻辑原样生效，非预置结论。
+                        ③ **conan 2 拓扑校验**：conan 2.29 实测，`requirements()` 里
+                           出现的 direct require **必须**被 `cpp_info.requires`（或
+                           某 component 的 requires）引用，否则 package_info() 报
+                           "The direct dependency 'X' is not used by any component"；
+                           `dev=True` 属性不存在（TypeError）；`visible=False` 也
+                           绕不过——若该依赖同时经其他包的常规边进图，合并后节点
+                           仍是 visible=True。测试专用依赖直连必然污染交付拓扑
+                           （cpp_info.requires 是消费者的链接面）。
+affected_scope:         任何上游测试框架硬依赖"独立 LAPACKE 包"而该包未发布的场景
+                        （lapackpp 及未来 SLATE 族）；更一般地：**测试专用依赖
+                        需要进构建图但不能进交付拓扑**的一切 conan 2 配方。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           transitive-provider-via-lapack-libraries-append
+rec_description:        核心思路：**不改交付拓扑，让上游自己的探测逻辑找到传递
+                        提供方**。全部配方侧完成，上游零改动：
+                        (1) `tc.variables` 里把传递提供方库（libopenblas.a）追加到
+                            `LAPACK_LIBRARIES` **末位**——只影响测试/探针构建的
+                            链接行，交付库的链接面与 cpp_info.requires 不动；
+                            上游 LAPACKConfig 的 try_run 探针即走其内置
+                            "Found LAPACKE library in BLAS library" 路径真实通过。
+                        (2) **不直连 require**：经既有传递边访问——
+                            `self.dependencies["openblas"]` 对传递依赖同样可索引
+                            （openblas 经 cblas 的 requires 进图），取其
+                            cpp_info.bindirs/includedirs 拼桥接变量。
+                            direct require 一个都不加 → conan 校验不触发、
+                            package_id 不变（实测 8c816a29… 前后一致）。
+                        (3) tester 拓扑（无符号重复的关键）：参考 liblapack.a 在
+                            libopenblas.a **之前**扫描 → LAPACK_* 符号由参考实现
+                            提供，openblas 的 LAPACK 实现成员不被拉入；tester 的
+                            BLAS_*/cblas_*/LAPACKE_* 符号全部由 libopenblas.a
+                            单一提供，链接行上没有 libblas.a/libcblas.a →
+                            「参考 LAPACK + OpenBLAS BLAS 内核」是标准发行版组合
+                            形态，无重复定义。
+                        (4) 上游 cblas 门禁变量（blaspp_cblas_found/include/
+                            libraries，同为私有导出）由桥接片段指向 openblas 包。
+rec_command:            tc.variables["LAPACK_LIBRARIES"] = ";".join(lapack_libs + [openblas_lib])
+                        # openblas_lib 取自 self.dependencies["openblas"]（传递依赖可索引）
+rec_auto_fix:           false
+rec_impl:               conanfile-generate-transitive-provider-append
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       requirements\([^)]*\)[\s\S]{0,200}requires\("openblas[^)]*"\)（直连而不进 cpp_info.requires）
+forbid_1_reason:        conan 2 的 direct requires 必须被 cpp_info.requires 引用，
+                        否则 package_info() 直接报错；为过校验把它写进 cpp_info.requires
+                        则污染交付拓扑（消费者被迫链接 openblas）
+forbid_1_consequence:   conan create 失败（The direct dependency … not used by any
+                        component），或交付 package_id/链接面被改变
+forbid_2_pattern:       set\(\s*lapacke_found\s+TRUE\s*\)（无真实探针依据的预置门禁变量）
+forbid_2_reason:        上游用 try_run 真实探测；伪造门禁变量会让 tester 在无
+                        LAPACKE 头/符号的环境里编译，错误后移且更难定位
+forbid_2_consequence:   tester 编译期 'lapacke.h' file not found，或链接期
+                        undefined reference LAPACKE_*
+forbid_3_pattern:       把\s*openblas\s*整体顶替参考 LAPACK/BLAS 后端（修改 BLAS_LIBRARIES/cpp_info.requires）
+forbid_3_reason:                        交付包的后端拓扑是已评审事实；测试需求不应
+                        反向改变交付面（本错误模式的最小侵入解是"追加到测试链接行"）
+forbid_3_consequence:   消费者链接面改变、package_id 漂移，已过审依赖图被破坏
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P005, P012
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E671（同族 blaspp 私有变量桥接）、E667（BLAS++/LAPACK++
+                        族库清单直通与静态链接序）、E674（同包消费者测试数值断言纪律）
+caused_by:
+conflicts_with:
+prerequisite_of:        SLATE 及任何上游测试硬依赖 LAPACKE 的下游包
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/l/lapackpp/2024.10.26 -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl
+                        # 期望：configure 输出 "Found LAPACKE library in BLAS library"；
+                        # build/Release/test/lapackpp_host_quick.log 全 pass；
+                        # lapackpp_upstream_test_summary.txt：host_quick PASS=177 FAIL=0
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                ohc-worker <ohc-worker@local>
+source_pr:              # PR 创建后由知识库主编回填
+source_commit:          # 随 PR 合并时由知识库主编回填
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
