@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: xmill 0.8 (AT&T XMill) on OHOS aarch64 --
+#        WordAlignMemBlock() 的 32 位字面量掩码 0xFFFFFFFC 在 LP64 上截断指针
+#        编译全绿，解压（xdemill）第一步就 SIGSEGV
+#====================================================================
+
+id:                     DRAFT-XMILL-08-LP64-LITERAL-POINTER-MASK-TRUNCATION
+trigger_tool:           gcc|clang|ld|make|cmake|conan|runtime
+phase:                  compilation|linking|runtime
+error_signature:        Segmentation fault \(core dumped\)|SIGSEGV|0xFFFFFFFC|0xFFFFFFFCL|\(unsigned long\)[A-Za-z_]+\)\s*\+\s*3\)\s*&|&0xFFFFFFF|WordAlignMemBlock|WordAlign.*Mask
+
+severity:               1
+category:               portability|arch|64bit|lp64|undefined-behavior
+match_keywords:         LP64, pointer truncation, 32-bit mask, 0xFFFFFFFC, 0xFFFFFFFCL, WordAlign, align pointer, <<32>>, 1999 code, Win32 legacy, MSVC port, aarch64, SIGSEGV, core dumped, unsigned long cast, memory surface, alignment
+
+title:                 老 32 位代码里的字面量指针掩码（0xFFFFFFFC）在 aarch64/LP64 上把 64 位指针截断：编译与链接全绿，首错只在运行期以 SIGSEGV 出现
+
+root_cause:             1999 年前后的 Win32/MSVC 代码把"指针"等同于 32 位整数，于是直接用字面量做对齐/掩码运算，例如 XMill 的 MemMan.hpp: memoryalloc_curptr = (unsigned char *)(((unsigned long)memoryalloc_curptr+3)&0xFFFFFFFCL)。在 LP64（OHOS aarch64，LP64 模型下 unsigned long 与指针同为 64 位）上，0xFFFFFFFC 只保留低 32 位，指针被静默截断：实测 buf=0x5983e553c0 变成 curptr=0x83e553c0。该值随后被作为容器数据缓冲基址逐级传递，任何写入都落在未映射地址，表现为 memcpy 处 SIGSEGV。危险点在于它不产生任何编译/链接诊断（既非类型错误也非未定义符号），只有真正走到该内存路径才会崩；且崩溃点与根因相距很远（本例崩在 UncompressContainer::UncompressSmallContainer 的 memcpy，根因在 EnumCompress 的解压初始化里提前调用的 WordAlignMemBlock）。
+affected_scope:         任何"Win32 时代写的、后来直接拿 clang/gcc 编到 64 位 Unix/aarch64"的 C/C++ 包（压缩器、图形、音视频、嵌入式工具链），尤其是自带内存池/对齐分配器的库（自研 MemStreamer/MemMan/BlockAlloc 之类）；以及所有只做 conan create（编译+打包）而没有跑一次真实数据往返的验收流程。本条目与 32/64 位 ABI 问题不同——它不是结构体布局或类型宽度失配，而是"字面量掩码碰巧只在 32 位下正确"。
+verification_cmd:       od -An -tx1 <binary> ; strings <binary> | grep ld-musl ; ./xdemill t.xmi && cmp t.xml t.xml.orig && echo ROUNDTRIP_OK ; grep -rn "0xFFFFFFF" <src>/ | grep -i "ptr\|align\|pointer"
+
+rec_priority:           1
+rec_approach:           replace-literal-mask-with-pointer-width-mask
+rec_description:        (1) 源码预扫：对老项目（有 WIN32/MSVC 痕迹、无 64 位构建历史）grep 字面量掩码模式 0xFFFFFFF0/0xFFFFFFF8/0xFFFFFFFC/0xFFFFFFF8L 与 ((unsigned long)<ptr>...) 的组合，命中即为高危；PreScanner 已可据此派生 PSCAN-KB 规则。(2) 修法：掩码必须与指针同宽——(unsigned long)ptr & ~(unsigned long)3（或 uintptr_t + UINTPTR_MAX-3），禁止保留任何 32 位字面量掩码。(3) 同一文件/同一作者常有多处相同写法（本例 MemStreamer.hpp 还有一份被注释掉的副本），一次改全并 grep 复验。(4) 验收必须包含运行期往返：能编过、能 conan create 都不构成可用性证据，必须实际跑一次 解压/解码 并与原文件字节级 cmp。(5) 定位手段：本环境 gdb/lldb 因 SELinux 拒绝 ptrace（ptrace: Permission denied），可用"复制源码到独立目录 + 在要害处加 fprintf(stderr,...) 插桩"，用 buf 与 curptr 两个地址值的差值一眼认出截断（低 32 位相同即确诊）。
+rec_command:            grep -rnE "0xFFFFFFF[0-9A-F]*L?" <src>/ ; sed -i 's/((unsigned long)memoryalloc_curptr+3)\&0xFFFFFFFCL/((unsigned long)memoryalloc_curptr+3)\&~(unsigned long)3/' <src>/MemMan.hpp
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# PR 交付后回填（与仓内绝大多数草稿同阶段做法一致）
+source_pr:
+source_commit:
