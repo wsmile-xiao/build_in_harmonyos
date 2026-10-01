@@ -1,0 +1,146 @@
+#====================================================================
+# DRAFT — kamailio 家族（经典 Makefile 体系）在 OHOS 上：平台探测宏缺失时
+#         经 make 命令行注入 linux 等价宏集 + 「只编 modules 不编 core」规避
+#         musl 缺失符号（0 补丁）
+# 触发事件: kamailio-extras 6.0.6（Alpine kamailio 子包，31 个 extras 模块）
+#           HarmonyOS PC 适配（积分赛任务，2026-09-29）
+#
+# 与既有条目的关系（增量说明）:
+#   仓库内 kamailio-* 同族配方共 11 个（既有 10 个 tls/xml/snmpstats/uuid/unixodbc/
+#   slack/outbound/debugger/kemix/lrkproxy + 本条 kamailio-extras，均同源 kamailio 6.0.6），
+#   但知识图谱**此前无任何 kamailio 条目**
+#   （grep -ril kamailio knowledge/graph → 0）——本条为首个 kamailio 条目，
+#   汇聚同族既有 10 个已合入配方的平台结论 + 本次 31 模块全量核实。
+#   E074/E525 = OHOS SELinux 禁 FIFO → make 必须 -j1（本条 forbid_2 引用其结论，不重复）
+#   E538 = pangomm C++17/libc++ 依赖图；其 match_keywords 中的 extra_defs 指 glibmm 的
+#          gmmprocdir，与本条 make 命令行 extra_defs 同名不同义，注意勿混淆
+#   P004 = 平台隔离标准写法；P013 = 平台限制必须降级而非绕过
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     kamailio-extras-6.0.6-ohos-platform-defs-injection
+trigger_tool:           make|clang
+phase:                  configuration|compilation
+error_signature:        'No rule to make target .cfg-defs.|#error .*(HAVE_GETHOSTBYNAME2|HAVE_SCHED_YIELD|HAVE_MSG_NOSIGNAL|HAVE_MSGHDR_MSG_CONTROL|HAVE_TIMEGM)|undefined reference to .[_]?res.|use of undeclared identifier ._res.|union semun|release_connection|release_all_connections|conflicting types for .sockaddr_storage.'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, build-system, makefile, macro, portability
+match_keywords:         kamailio, OS=harmonyos, Makefile.defs, extra_defs, make cfg, cfg-defs, include_modules, modules=, HAVE_GETHOSTBYNAME2, HAVE_SCHED_YIELD, HAVE_MSG_NOSIGNAL, HAVE_UNION_SEMUN, HAVE_RESOLV_RES, _res, union semun, resolve.h, sched_yield.h, sockaddr_storage, loadmodule, sr_module.h, module_exports, kamailio-extras, kamailio-tls, kamailio-xml, GPL-2.0-or-later
+title:                  kamailio 家族（经典 Makefile 体系）在 OHOS 上：OS=harmonyos 不在 Makefile.defs 分支内 → make 命令行 extra_defs 注入 linux 分支等价宏集；只编 modules 可绕开 core 的 musl 缺失符号（0 补丁）
+prescan_pattern:        name = "makefile-os-branch-platform-defs"|OS=?harmonyos|extra_defs *=|Makefile\.defs
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             kamailio 的平台能力探测写在 src/Makefile.defs：
+                        其按 `uname -s` 结果落入 linux/solaris/freebsd/darwin 等
+                        分支，分支内才定义 HAVE_GETHOSTBYNAME2 / HAVE_SCHED_YIELD /
+                        HAVE_MSG_NOSIGNAL / HAVE_MSGHDR_MSG_CONTROL / HAVE_ALLOCA_H /
+                        HAVE_TIMEGM / HAVE_SCHED_SETSCHEDULER / HAVE_IP_MREQN 等
+                        HAVE_* 宏。OHOS 上 `uname -s` → Linux（且构建时显式 OS=harmonyos），
+                        **harmonyos 不在任何分支内** → 上述宏全部缺失 → core 头
+                        （resolve.h/sched_yield.h 等）直接 `#error`，模块编不出来。
+                        两个附带事实：
+                        (1) 必须先 `make cfg`（生成 src/config.mak），否则报
+                            `No rule to make target 'cfg-defs'`（同族先例实证）；
+                        (2) 若连 core 一起编，还会撞上 musl 语义差异：
+                            HAVE_RESOLV_RES 关掉后 `_res` 未定义（core/resolve.c）、
+                            HAVE_UNION_SEMUN 语义不同（core/lock_ops.h 自带兜底
+                            条件定义，注入反而冲突）。而模块 `.so` 由 kamailio 运行时
+                            loadmodule 加载、不需要 core 参与链接 → **只编 modules**
+                            即可完全绕开这两条路径，实现 0 补丁。
+affected_scope:         所有以 kamailio 源码包在 OHOS 上构建的配方（仓库内 11 个
+                        kamailio-* 包同源，含 tls/xml/snmpstats/unixodbc/slack/
+                        outbound/debugger/kemix/lrkproxy/uuid 与本次 kamailio-extras）；
+                        更广：平台探测只按 OS 名在 Makefile/shell 里分支的经典
+                        Makefile 项目（autotools 走 config.guess 的路径不同，不受影响）。
+verification_cmd: |
+  # 1) 平台分支缺失判定：无输出 = harmonyos 未被识别，需命令行注入
+  grep -n "harmonyos" src/Makefile.defs
+  # 2) 等价宏自查（应命中 linux 分支的定义行）
+  grep -nE "linux.*HAVE_GETHOSTBYNAME2|HAVE_SCHED_YIELD|HAVE_MSG_NOSIGNAL" src/Makefile.defs | head
+  # 3) 只编单个模块（不触 core 缺失符号路径）：以 xprint 为例
+  make cfg include_modules="xprint" extra_defs="-D_GNU_SOURCE -DHAVE_GETHOSTBYNAME2 -DHAVE_SCHED_YIELD -DHAVE_MSG_NOSIGNAL -DHAVE_MSGHDR_MSG_CONTROL -DHAVE_ALLOCA_H -DHAVE_TIMEGM -DHAVE_SCHED_SETSCHEDULER -DHAVE_IP_MREQN"
+  make modules modules="modules/xprint" -j1 extra_defs="<同上宏集>"
+  test -f src/modules/xprint/xprint.so && echo OK
+  # 4) 产物身份与依赖面（aarch64 共享模块、无宿主路径泄漏）
+  llvm-readelf -h src/modules/xprint/xprint.so | grep -E "Class|Machine|Type"
+  llvm-readelf -d src/modules/xprint/xprint.so | grep -E "NEEDED|RPATH|RUNPATH"
+  # 5) 模块加载契约（kamailio 期望的 exports->name）
+  python3 test_package/check_extras_modules.py
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           inject-platform-defs-via-make-commandline
+rec_description:        不改任何源文件：`make cfg` 与 `make modules modules="modules/<m> ..."`
+                        两次调用都追加 `extra_defs="<linux 分支等价宏集>"`（make 命令行
+                        变量优先于文件内赋值，且自动向递归子 make 传递）。
+                        宏集（每个符号均对照 OHOS SDK musl sysroot 头文件实证存在，
+                        与同族 kamailio-tls/kamailio-xml 一致）：
+                        -D_GNU_SOURCE -DHAVE_GETHOSTBYNAME2 -DHAVE_SCHED_YIELD
+                        -DHAVE_MSG_NOSIGNAL -DHAVE_MSGHDR_MSG_CONTROL -DHAVE_ALLOCA_H
+                        -DHAVE_TIMEGM -DHAVE_SCHED_SETSCHEDULER -DHAVE_IP_MREQN。
+                        同时**只编 modules 不编 core**（core 的 _res / union semun
+                        路径在 musl 下无对应符号），模块无需链接 core → 0 补丁。
+                        模块 Makefile 里 pkg-config 探测外部库的情形（如 cnxcc 探测
+                        hiredis/libevent）另用 make 命令行覆盖 HIREDISDEFS/HIREDISLIBS/
+                        LEVENTDEFS/LEVENTLIBS 钉死到 conan 依赖包目录。
+rec_command:            make cfg include_modules="<modules>" extra_defs="<PLATFORM_DEFS>" && make modules modules="modules/<m1> modules/<m2>" -j1 extra_defs="<PLATFORM_DEFS>"
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      patch-makefile-defs-add-harmonyos-branch
+fallback_description:   给 src/Makefile.defs 增加 harmonyos 分支（等价 linux 分支的宏
+                        定义），使后续任何 make 调用无需命令行传参。代价：引入补丁、
+                        随上游版本升级需 rebase 维护，且属修改构建系统（需按 R3/R11 走
+                        refresh-patch --auto 生成补丁文件，不手写）。仅当调用方无法控制
+                        make 命令行（如上游脚本内嵌套 make）时才用。
+fallback_command:       python3 $SKILL_ROOT/scripts/ohc-run.py refresh-patch --auto <软件名> <版本>
+fallback_auto_fix:      false
+fallback_impl:          patch-pipeline
+
+forbid_1_pattern:       sed -i .*Makefile\.defs|echo .*>> *src/Makefile\.defs|cp .*Makefile\.defs.*orig
+forbid_1_reason:        探索阶段禁止直接改构建/生成文件（R6/P003）；确需修改必须经
+                        refresh-patch --auto 产出补丁，否则改动不进补丁、CI 干净环境复现失败。
+forbid_1_consequence:   本地能编、CI（干净源码）编不出，PR 必然红。
+
+forbid_2_pattern:       make .*-j[2-9]|make .*-j *\$\(nproc\)
+forbid_2_reason:        OHOS SELinux 禁止用户进程创建 FIFO，GNU make jobserver 依赖
+                        FIFO 传令牌（E074/E525）——仓库统一要求 make -j1。
+forbid_2_consequence:   构建挂起或报 FIFO 权限错（易被误判为权限配置问题而反复重试）。
+
+forbid_3_pattern:       -DHAVE_UNION_SEMUN|-DHAVE_RESOLV_RES
+forbid_3_reason:        musl 下注入这两个宏不会带来 linux 语义：_res（resolv）在 musl
+                        无该符号；union semun 由 kamailio core/lock_ops.h 自带条件定义
+                        （定义时反而与该兜底逻辑冲突）。只编 modules 才是正解。
+forbid_3_consequence:   编译/链接报 _res 未定义或 union semun 重复定义，误判为需打补丁。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004,P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E538
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/kamailio-extras-6.0.6-ohos-platform-defs-injection.md
+last_updated:           2026-09-29
+source_event:           kamailio-extras 6.0.6 适配（31 个 extras 模块全量构建通过；
+                        conan create + test_package 端到端绿；0 补丁）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                bbzl <bbzl@noreply.gitcode.com>
+source_pr:              pending
+source_commit:          pending
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-29
+
+draft:                  true
+contributor_id:         B7D2
