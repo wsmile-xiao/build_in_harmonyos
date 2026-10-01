@@ -1,0 +1,83 @@
+#====================================================================
+# E544-draft-6EE2.kv — OHOS NDK libc.a 比 libc.so 多导出约 380 个全局符号：
+# 用 -static 做的本地探针/qemu 验证能链过，交付的动态构建却报 undefined symbol
+# （macutils 2.0b3 实证：rindex）
+# 对应的人类文档: knowledge/drafts/E544-draft-6EE2.md
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E544
+trigger_tool:           ld
+phase:                  linking
+error_signature:        ld\.lld: error: undefined symbol: (rindex|getw|cuserid|ecvt|fcvt|gcvt|getpass|lchmod|stime|setkey|encrypt)\b
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               libc, linking, musl, portability
+match_keywords:         undefined symbol, rindex, libc.a, libc.so, -static, static probe, qemu, binfmt, ld-musl-aarch64, legacy BSD, strrchr
+title:                  OHOS libc.a 比 libc.so 多导出 ~380 个符号：-static 探针链接成功掩盖交付动态构建的 undefined symbol（rindex 等）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS NDK sysroot 的 usr/lib/aarch64-linux-ohos/libc.a 与 libc.so 导出表不一致：libc.a 全局 T/W 符号 2319 个、libc.so 动态导出 1592 个，
+ 去掉 _ 前缀后仍有 380 个仅存在于 libc.a，其中含 BSD/SVID 遗留接口 rindex getw cuserid ecvt fcvt gcvt getpass lchmod stime setkey encrypt；
+ <strings.h> 只声明 index 不声明 rindex。x86_64 runner 上跑 OHOS 动态产物缺 /lib/ld-musl-aarch64.so.1，
+ 于是本地验证常改用 -static 构建经 qemu-user binfmt 运行——静态链接从 libc.a 取到这些符号，探针与功能测试全绿；
+ conan create 产出的默认动态链接产物则在链接期 ld.lld: error: undefined symbol。
+ 只有 K&R 代码（-std=gnu89，隐式声明只告警）或自行 extern 声明的代码才会走到链接期暴露。
+affected_scope:         老式 BSD/SVID C 代码（K&R 风格、自带 extern char *rindex(); 声明，或被 -DBSD 之类特性宏切到 BSD 分支）；
+ 在 x86_64 runner 上用 -static 副本 + qemu 做本地验证的所有 OHOS 适配（静态结论不能外推到交付的动态构建）
+verification_cmd:       NM=$NDK/llvm/bin/llvm-nm; S=$NDK/sysroot/usr/lib/aarch64-linux-ohos; $NM -D --defined-only $S/libc.so | grep -cw rindex （0）; $NM --defined-only $S/libc.a | grep -cw 'T rindex' （1）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           prefer-posix-branch-or-standard-api
+rec_description:        优先切到上游自带的 POSIX/SysV 分支（如 macutils 去掉 -DBSD，hexbin 的 search_last 走 strrchr、wrfile 走 memcpy/memset、curtime 走 <time.h>），
+ 不需要额外补丁；没有现成分支时用标准接口替换（rindex→strrchr、getw→fread、ecvt/fcvt/gcvt→snprintf）并以补丁提交。
+ 本地验证流程：先用默认（动态）配置跑通 conan create 链接，再对同源 .o 追加 -static 重链做 qemu 运行，二者都要过。
+rec_command:            _UPSTREAM_CF = "-DTYPES_H -DDIRENT_H -DTERMIOS_H -DNODOT -DAPPLEDOUBLE"  # 去掉 -DBSD
+rec_auto_fix:           false
+rec_impl:               conanfile-flags
+
+# 回退方案
+fallback_priority:      2
+fallback_approach:      source-patch-standard-api
+fallback_description:   以补丁把遗留调用改为标准函数（#define rindex strrchr 不可取：会与系统头里的 index/rindex 声明冲突时再单独处理）
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       tc.extra_ldflags.append("-static")
+forbid_1_reason:        为了让交付产物链过而把整包（交付的可执行/库）改成静态链接 libc：只是绕开导出表差异，产物偏离仓库默认动态链接约定，且掩盖了遗留接口依赖；只在构建机上运行、不进包的生成器（如 CC_FOR_BUILD="<clang> -static"）不在此列
+forbid_1_consequence:   交付件与其他包链接策略不一致；遗留接口问题延后到下游暴露
+forbid_2_pattern:       static probe passed => dynamic build ok
+forbid_2_reason:        -static 探针/qemu 测试通过不代表交付的动态构建能链接；两者使用的是不同的 libc 导出表
+forbid_2_consequence:   本地 W3 前以为已打通，conan create 或 CI 链接期失败，白跑一轮
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-cconv-0.6.3-rindex-strrchr, DRAFT-motif-2.3.8-musl-no-rindex-xpm-guard, DRAFT-irqbalance-1.9.4-rindex-strrchr, E430-draft-4235
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E544-draft-6EE2.md
+last_updated: 2026-09-26
+source_event:           macutils-2.0b3：-static 手工构建 + qemu 往返测试全绿，conan-verify G2 动态链接 hexbin 报 ld.lld: error: undefined symbol: rindex
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-26
+draft: true
+contributor_id: 6EE2
