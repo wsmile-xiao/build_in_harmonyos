@@ -1,0 +1,73 @@
+version: "1.16.2"
+software: libnvmemi
+status: built
+build_date: "2026-09-29"
+build_system: meson
+
+source:
+  url: "https://github.com/linux-nvme/libnvme/archive/refs/tags/v1.16.2.tar.gz"
+  sha256: "1d850d5a871559abf641d6e6b63bb86047e4cb26f3ad144597c2c64b3cff7231"
+  tar_format: tar.gz
+  note: "与 codeload.github.com/linux-nvme/libnvme/tar.gz/refs/tags/v1.16.2 同一份 tarball（sha256/文件数 1325 双校验一致）"
+
+build:
+  system: "meson（上游 meson.build；conan 的 MesonToolchain 生成 cross/native 文件）"
+  configure_options:
+    - "--prefix=/（conan DESTDIR 打包）"
+    - "-Dtests=true -Dexamples=false -Ddocs=false"
+    - "-Dpython=disabled -Djson-c=disabled -Dopenssl=disabled -Dkeyutils=disabled -Dliburing=disabled -Dlibdbus=disabled"
+    - "-Ddefault_library=shared"
+  dependencies: []
+  cc: clang
+  cxx: clang++
+
+patches_applied:
+  - "patches/0001-ohos-tmpdir-aware-test-tmpfile.patch"
+  # 只改上游 test/utils.c（测试辅助工具，不进 package 产物）：
+  # test_setup_log() 用 libc tmpfile()，musl 的 tmpfile() 硬编码只读的 /tmp
+  # （OHOS /tmp 只读挂载，CI 侧 ci/conan/build_and_test.sh 亦注明）
+  # → err(EXIT_FAILURE) 退出码 1（CI #65437：libnvme:mi / libnvme:mi-mctp FAIL exit 1）。
+  # 补丁新增 test_tmpfile()：$TMPDIR → $TMP → $TEMP → $HOME 依次试 mkstemp
+  # （不可写的候选用 mkstemp 失败自然跳过），成功后立即 unlink 保持匿名语义，
+  # 全不可用时才回退 libc tmpfile()；上游用例与断言一条未动。
+  # 真机实测：OHOS tmpfile() 无视 $TMPDIR（TMPDIR 指向可写目录仍 NULL/EACCES）。
+  # 仓库先例：enscript/1.6.6 patches/0003-ohos-tmpdir-aware-tmpfile.patch。
+
+test_passed: 2
+test_failed: 0
+
+test_results:
+  # 上游自有测试套件：meson test（31 个用例，含 MI 专属 test/mi、test/mi-mctp）
+  # ⚠️ 这里记的是本机原生复现（有 /bin/bash + perl）的数字。OHOS CI worker 上
+  #    无 /bin/bash（bash 只在 /data/service/hnp/bin）也无 perl：脚本型用例由
+  #    build() 生成的 --wrapper 转交真实 bash 后照常执行；唯一跑不了的是文档
+  #    lint `kdoc`（`#!/bin/bash` + perl），按 GNU 约定 exit 77 → meson 记 SKIP
+  #    （见 notes.md「OHOS shebang 适配」）。因此 CI 日志里 skipped 会是 1，
+  #    它是"跳过"而非"通过"，failure 仍为 0。
+  #    OHOS 侧最终数字（CI #65437 + 补丁 0001 后预期）：Ok 29 / Expected Fail 2 /
+  #    Fail 0 / Skipped 1（executed 31）；补丁前 mi、mi-mctp 两条因 tmpfile() 失败。
+  upstream_registered: 31
+  upstream_executed: 31
+  upstream_passed: 29
+  upstream_failed: 0
+  upstream_expected_fail: 2
+  upstream_skipped_on_ohos: 1
+  upstream_assertions: 378
+  # 完整消费者用例（平台 rule12）：32 项端到端可核对结果
+  test_package_registered: 1
+  test_package_executed: 1
+  test_package_passed: 1
+  test_package_failed: 0
+  assertion_count: 32
+  # 适配自检（M）：交付形态 21 条
+  adapter_self_checks: 21
+
+knowledge_gained:
+  - "libnvmemi 与 libnvme 是**同一份源码树**（v1.16.2 里没有独立的 libnvme-mi 仓库）：src/meson.build 同时产出 libnvme.so（A 面：sysfs/ioctl 直通）与 libnvme-mi.so（MI over MCTP），后者只 link_with libccan。实测 `nm -D -u libnvme-mi.so` 无任何 libnvme 符号引用 → MI 库自包含，本包零 requires 即可完整工作，也因此在 package() 里剔除同树装出来的 libnvme.so/.h/.pc。"
+  - "MI 库的可选依赖只有 libdbus（CONFIG_DBUS 分支，用于 dbus 版 MCTP 发现）；原始 AF_MCTP 路径不需要 dbus。json-c/openssl/keyutils/liburing 只服务 libnvme.so 的 A 面能力 → 本包全部 disabled，避免无意义的传递依赖（W0/R36）。"
+  - "OHOS 头里没有 <linux/mctp.h> 时上游会自动回退到仓库内 src/nvme/mi-mctp-compat.h，并 `#if !defined(AF_MCTP) #define AF_MCTP 45` → MI over MCTP 代码在鸿蒙上无需打补丁即可编译。"
+  - "MIC 校验算法是 **CRC-32C**（反射多项式 0x82F63B78），MIC = ~CRC32C(0xffffffff, [MCTP 类型字节][响应头][数据])，覆盖范围**包含类型字节**（库把 resp_buf[0] 自己填成 MCTP_TYPE_NVME|MCTP_TYPE_MIC=0x84），且协议层 nvme_mi_verify_resp_mic() 会强制校验 → 伪造端点的响应必须算对 MIC。"
+  - "Admin 响应的 NVMe 状态在 cdw3，库按 `cdw3 >> 17` 取状态字段（SF）；MI 响应状态在字节 4（enum nvme_mi_resp_status）。两者都用公共头里的 nvme_status_get_value()/NVME_MI_RESP_* 就能在消费者侧读回真值。"
+  - "nvme_mi_admin_admin_passthru() 在本地就按 `opcode & 0x3 == NVME_DATA_TFR_BIDIRECTIONAL` 拒绝双向命令（0x7f 属于双向，根本发不出去）→ 消费者用例的『不支持命令』错误路径要挑 0x0c（Get Features）这类方向位不是 3 的命令。"
+  - "无硬件验证 MI 链路的正解是 **ELF 符号介入**（可执行文件 ENABLE_EXPORTS/--export-dynamic + 自己定义 socket/sendmsg）：把 socket(AF_MCTP,…) 换成 AF_UNIX SOCK_DGRAM socketpair，再从设备侧注入响应，库自身的 poll()/recvmsg() 就能走真实内核路径 —— 不需要 LD_PRELOAD，也不需要库内部的 __nvme_mi_mctp_set_ops（该符号被版本脚本隐藏，仅上游 test 用的无版本脚本库可见）。"
+  - "**OHOS 上 meson test 里 C 用例报 `exit status 1` 而没有任何断言输出时，先怀疑测试辅助工具的 `tmpfile()`**：musl 的 tmpfile() 硬编码 P_tmpdir(\"/tmp\")、不查 $TMPDIR，而 OHOS /tmp 是只读挂载 → 上游 `err(EXIT_FAILURE, \"can't create temporary file…\")` 直接 exit 1（断言失败会是 134/signal 6，可据此排除断言因素）。判据：报错的用例是否共用同一个 temp-file helper（本包 test/mi.c、test/mi-mctp.c 是全仓仅有使用 test/utils.c 的两条）。修法：给 helper 打 `$TMPDIR`→`$HOME` + mkstemp+unlink 的回退（enscript 1.6.6 同款），既不改业务代码也不改用例集。本机可用 LD_PRELOAD 覆盖 `tmpfile`/`tmpfile64`（glibc 下 tmpfile 会绑到 tmpfile64@GLIBC_2.2.5，两个符号都要定义）复现出与 CI 完全一致的 exit 1 签名。真机（OpenDesk HarmonyOS PC）实测：`/tmp` 为 `drwxr-xr-x root root` 不可写，`tmpfile()` 在 TMPDIR 未设/设为可写目录两种情况下**都**返回 NULL(errno=13 EACCES) —— OHOS 的 tmpfile() 无视 TMPDIR，所以适配只能自己按环境变量找可写目录（$TMPDIR→$TMP→$TEMP→$HOME + mkstemp），不能只依赖 tmpfile() 的回退。"
