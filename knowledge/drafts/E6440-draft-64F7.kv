@@ -1,0 +1,71 @@
+#====================================================================
+# E6440-draft-64F7 —— 上游 `make test` 运行时用 curl|bash 拉取浮动引用的测试框架（shunt）：
+#   配方里不得 curl 下载；固定官方 tag 归档 + sha256 自包含，并防 shunt 的 "-h" 参数误判静默跳过
+#
+# 对应文档: knowledge/drafts/E6440-draft-64F7.md
+#
+# 本条目为 draft（草稿），尚未由主编审核合入。正式编号由 graph promote 分配。
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E6440-draft-64F7
+source_lib:             shml 1.1.0
+trigger_tool:           make|curl|bash|conan
+phase:                  testing
+error_signature:        curl -L https://raw\.githubusercontent\.com/[^ ]+/install\.sh \| bash|test/shunt\.sh: No such file or directory|No rule to make target ['"`]?test/shunt\.sh|L0o: conanfile\.py 使用外部命令 \(curl/wget\) 下载源码|Usage: .*shunt\.sh <test files>
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               testing, network, shell, packaging
+match_keywords:         shunt, make test, curl | bash, install.sh, 测试框架下载, 浮动引用, latest, raw.githubusercontent.com, L0o, 上游测试, assert_equal, --plain, --verbose, "-h", usage 静默跳过, 自包含, sha256, Bash 库, 172/172
+title:                  上游 `make test` 在运行时 curl|bash 拉取浮动引用的测试框架（shunt）：配方须固定官方 tag 归档 + sha256 自包含，且 shunt 遇到含 "-h" 的路径会打印 usage 并以 0 退出（测试被静默跳过）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             shml 的 Makefile 把测试框架当成运行时下载物：`test/shunt.sh` 目标执行 `curl -L https://raw.githubusercontent.com/odb/shunt/latest/install.sh | bash -s latest local`，而 install.sh 又从 `.../shunt/master/shunt.sh` 下载。引用是浮动的（latest 标签、master 分支）、无任何校验和，且需要出站网络。在 Conan 配方里这条路走不通：CI L0o 禁止 conanfile.py 用 curl/wget 下载；构建/测试机可能无网或无 curl；本地与 CI 拿到的框架版本也无法保证一致。另有一个会让「测试全过」变成假象的坑：shunt.sh 用 `echo "$options" | grep "\-h"` 判定 `--help`，`options` 里包含所有测试文件路径，因此任何路径含 "-h" 的片段（如目录 `my-http/`、`foo-hidden/`）都会触发 `__usage`——打印 Usage 后 `exit 0`，0 个测试被执行而退出码为 0。shunt 的退出码还是失败数（`exit $__failed`），失败数为 256 的倍数时同样退出 0。
+affected_scope:         所有把测试框架放在运行时下载（curl|bash、wget、git clone latest）的上游：shml（shunt）、以及同类的 bats-core 自举脚本、bashunit/shellspec 安装脚本、各类 `make test` 里先拉 `test/xxx.sh` 的 Bash/Zsh 库；凡是用 shunt 的项目（odb/shml、odb/shunt 自身）都受 "-h" 参数陷阱影响
+verification_cmd:       curl -fsSL https://raw.githubusercontent.com/odb/shunt/master/shunt.sh | sha256sum; curl -fsSL https://github.com/odb/shunt/archive/refs/tags/v0.3.1.tar.gz | tar xzO shunt-0.3.1/shunt.sh | sha256sum
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pin-official-tag-archive-of-test-framework
+rec_description:        不要在配方或测试脚本里 curl|bash。在 conandata.yml 里给测试框架单独加一段（如 `shunt: {url: 官方 tag 归档, sha256: ...}`，URL 只用官方 github.com/<owner>/<repo>/archive/refs/tags/<tag>.tar.gz），`source()` 里用 `get(self, **self.conan_data["shunt"], strip_root=True, destination=os.path.join(self.source_folder, "shunt"))` 自包含下载；先用 verification_cmd ① 证明固定 tag 与上游浮动引用字节一致再固定。`build()` 里用 `self.run` 以显式 bash 运行 `shunt/shunt.sh --plain --verbose <相对路径的测试文件…>`（cwd=源码根，路径务必相对，避开 "-h" 陷阱），解析汇总行 `Total: N  Passed: P  Failed: F`，并同时断言退出码为 0、F==0、N==预期的运行时断言数（shml 1.1.0 为 172，来自 9 个文件 142 处 assert_equal 调用点）——N 不符即说明测试被静默跳过。日志打印 `<PKG> UPSTREAM TEST PASS/FAIL: P/N`，并在 notes/PR 里如实回填 N 与通过率。
+rec_command:            cd $SRC && bash shunt/shunt.sh --plain --verbose test/*_tests.sh | tail -3   # 相对路径；期望 Total: 172  Passed: 172  Failed: 0
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      minimal-assert-shim-with-explicit-disclosure
+fallback_description:   框架无法固定（无 tag、无官方归档）时，只实现被测试文件真正用到的断言原语（shml 只用 assert_equal，一个 `[[ "$1" == "$2" ]]` 计数函数），逐字 source 上游测试文件并断言总数；必须在 notes 与 PR「上游测试用例修改说明」里写明「未改动任何上游测试文件，仅替换框架」，且不得把 shim 的通过数当成框架的通过数去美化。
+fallback_command:       bash -c 'n=0; assert_equal(){ [[ "$1" == "$2" ]] && n=$((n+1)) || echo "FAIL $3"; }; for f in test/*_tests.sh; do source "$f"; run_tests; done; echo passed=$n'
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       curl[^|\n]*\|\s*(ba)?sh|subprocess.*curl|self\.run\([^)]*curl
+forbid_1_reason:        配方里 curl|bash 拉浮动引用违反 CI L0o，无校验和无法复现，且把任意远端脚本直接喂给 shell（供应链风险）。
+forbid_1_consequence:   CI L0o 硬拦；或在无网构建机上因拿不到框架而误报「上游测试失败」；或本地/CI 框架版本漂移导致结果不可比。
+
+forbid_2_pattern:       shunt[^\n]*\$\{?(self\.)?source_folder|shunt[^\n]*/(p|b|s)/[^ ]*-h
+forbid_2_reason:        向 shunt 传绝对路径，路径中任何 "-h" 片段（目录名、包名、哈希前缀）都会让 shunt 只打印 usage 就以 0 退出。
+forbid_2_consequence:   构建日志看起来绿色，但 0 个上游断言被执行；R51 上游测试通过率就成了空口白话。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E6440-draft-64F7.md
+last_updated:           2026-09-29
+source_event:           shml 1.1.0 HarmonyOS PC 适配：本地 conan create 日志 "SHML UPSTREAM TEST PASS/FAIL: 172/172 (9 test files, rc=0)"；"-h" 陷阱在临时目录下以 my-http/ 目录实测复现
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:
+draft: true
+contributor_id: 64F7
