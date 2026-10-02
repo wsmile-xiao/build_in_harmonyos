@@ -1,0 +1,627 @@
+diff --git a/meson.build b/meson.build
+index d8e78ed..a3e4348 100644
+--- a/meson.build
++++ b/meson.build
+@@ -107,6 +107,54 @@ if cc.has_header_symbol('stdlib.h', 'secure_getenv', prefix : '#define _GNU_SOUR
+     config_h.set('HAVE_SECURE_GETENV', 1)
+ endif
+ 
++# Use posix_spawn when the clone3 syscall is unavailable or rejected by the
++# execution environment. Probe clone3 with the same namespace flags used by
++# Process; a successful compile alone is insufficient for syscall support.
++if cc.has_header_symbol('spawn.h', 'posix_spawn')
++    config_h.set('HAVE_POSIX_SPAWN', 1)
++endif
++
++clone3_probe = '''
++#include <linux/sched.h>
++#include <signal.h>
++#include <stdint.h>
++#include <sys/syscall.h>
++#include <sys/wait.h>
++#include <unistd.h>
++int main(void)
++{
++    struct clone_args args = { 0 };
++    int pidfd = -1;
++    args.flags = CLONE_PIDFD | CLONE_NEWUSER | CLONE_NEWNET;
++    args.pidfd = (uintptr_t)&pidfd;
++    args.exit_signal = SIGCHLD;
++    long child = syscall(SYS_clone3, &args, sizeof(args));
++    if (child < 0)
++        return 1;
++    if (child == 0)
++        _exit(0);
++    int status;
++    if (waitpid((pid_t)child, &status, 0) != (pid_t)child)
++        return 1;
++    if (pidfd >= 0)
++        close(pidfd);
++    return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
++}
++'''
++
++if not meson.is_cross_build()
++    clone3_result = cc.run(clone3_probe, name : 'working clone3')
++    if clone3_result.compiled() and clone3_result.returncode() == 0
++        config_h.set('HAVE_WORKING_CLONE3', 1)
++    endif
++endif
++
++# HarmonyOS libc does not expose pthread_setaffinity_np.  Detect the
++# optional API instead of assuming the Linux pthread interface is present.
++if cc.has_function('pthread_setaffinity_np')
++    config_h.set('HAVE_PTHREAD_SET_AFFINITY_NP', 1)
++endif
++
+ common_arguments = [
+     '-Wmissing-declarations',
+     '-Wshadow',
+diff --git a/src/libcamera/base/memfd.cpp b/src/libcamera/base/memfd.cpp
+index ed0b299..f2048b5 100644
+--- a/src/libcamera/base/memfd.cpp
++++ b/src/libcamera/base/memfd.cpp
+@@ -10,6 +10,9 @@
+ #include <fcntl.h>
+ #include <string.h>
+ #include <sys/mman.h>
++#include <stdlib.h>
++#include <string>
++#include <sys/stat.h>
+ #include <sys/syscall.h>
+ #include <unistd.h>
+ 
+@@ -84,6 +87,36 @@ LOG_DECLARE_CATEGORY(File)
+ UniqueFD MemFd::create(const char *name, std::size_t size, Seals seals)
+ {
+ 	int ret = memfd_create(name, MFD_ALLOW_SEALING | MFD_CLOEXEC);
++	/*
++	 * Some libc/kernel combinations expose memfd_create() in the headers
++	 * while returning an fd that cannot be inspected at runtime.  Keep the
++	 * anonymous-file semantics for callers that don't require seals by
++	 * falling back to an unlinked file in the configured temporary directory.
++	 * Sealed shared memory cannot be emulated safely, so retain the failure
++	 * for callers that request seals.
++	 */
++	if (ret >= 0 && !seals) {
++		struct stat statbuf;
++		if (fstat(ret, &statbuf) < 0) {
++			close(ret);
++			ret = -1;
++		}
++	}
++
++	if (ret < 0 && !seals) {
++		const char *tmpdir = getenv("TMPDIR");
++		if (!tmpdir || !*tmpdir)
++			tmpdir = "/tmp";
++
++		std::string path = std::string(tmpdir) + "/" + name + "-XXXXXX";
++		ret = mkstemp(path.data());
++		if (ret >= 0) {
++			unlink(path.c_str());
++			int fdFlags = fcntl(ret, F_GETFD);
++			if (fdFlags >= 0)
++				fcntl(ret, F_SETFD, fdFlags | FD_CLOEXEC);
++		}
++	}
+ 	if (ret < 0) {
+ 		ret = errno;
+ 		LOG(File, Error)
+diff --git a/src/libcamera/base/thread.cpp b/src/libcamera/base/thread.cpp
+index bcb25ba..f824041 100644
+--- a/src/libcamera/base/thread.cpp
++++ b/src/libcamera/base/thread.cpp
+@@ -461,8 +461,12 @@ void Thread::setThreadAffinityInternal()
+ 	if (!data_->cpuset_)
+ 		return;
+ 
++#if HAVE_PTHREAD_SET_AFFINITY_NP
+ 	const cpu_set_t &cpuset = data_->cpuset_.value();
+ 	pthread_setaffinity_np(thread_.native_handle(), sizeof(cpuset), &cpuset);
++#else
++	LOG(Thread, Warning) << "Thread affinity is not available on this platform";
++#endif
+ }
+ 
+ /**
+diff --git a/src/libcamera/process.cpp b/src/libcamera/process.cpp
+index 3090d75..35bceba 100644
+--- a/src/libcamera/process.cpp
++++ b/src/libcamera/process.cpp
+@@ -11,6 +11,9 @@
+ #include <dirent.h>
+ #include <fcntl.h>
+ #include <signal.h>
++#if HAVE_POSIX_SPAWN
++#include <spawn.h>
++#endif
+ #include <string.h>
+ #include <sys/socket.h>
+ #include <sys/syscall.h>
+@@ -27,6 +30,10 @@
+ #include <libcamera/base/log.h>
+ #include <libcamera/base/utils.h>
+ 
++#if HAVE_POSIX_SPAWN
++extern char **environ;
++#endif
++
+ /**
+  * \file process.h
+  * \brief Process object
+@@ -90,6 +97,66 @@ void closeAllFdsExcept(std::vector<int> v)
+ 	closedir(dir);
+ }
+ 
++#if HAVE_POSIX_SPAWN
++int addSpawnCloseActions(posix_spawn_file_actions_t *actions,
++				 Span<const int> keep)
++{
++	DIR *dir = opendir("/proc/self/fd");
++	if (!dir)
++		return 0;
++
++	const int directoryFd = dirfd(dir);
++	struct dirent *ent;
++	while ((ent = readdir(dir)) != nullptr) {
++		char *endp;
++		int fd = strtoul(ent->d_name, &endp, 10);
++		if (*endp || fd <= STDERR_FILENO || fd == directoryFd)
++			continue;
++
++		bool preserve = false;
++		for (int keepFd : keep) {
++			if (keepFd == fd) {
++				preserve = true;
++				break;
++			}
++		}
++		if (!preserve) {
++			int ret = posix_spawn_file_actions_addclose(actions, fd);
++			if (ret) {
++				closedir(dir);
++				return ret;
++			}
++		}
++	}
++
++	closedir(dir);
++	return 0;
++}
++
++int addSpawnStandardActions(posix_spawn_file_actions_t *actions)
++{
++	const int inputs[] = {
++		STDIN_FILENO,
++		STDOUT_FILENO,
++		STDERR_FILENO,
++	};
++	const int modes[] = {
++		O_RDONLY,
++		O_WRONLY,
++		O_WRONLY,
++	};
++
++	for (unsigned int i = 0; i < sizeof(inputs) / sizeof(inputs[0]); ++i) {
++		int ret = posix_spawn_file_actions_addopen(actions, inputs[i],
++							  "/dev/null", modes[i], 0);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++#endif
++
+ } /* namespace */
+ 
+ /**
+@@ -150,6 +217,83 @@ int Process::start(const std::string &path,
+ 			return -EINVAL;
+ 	}
+ 
++#if HAVE_POSIX_SPAWN
++	/*
++	 * Keep a posix_spawn fallback for systems where clone3 is exposed by the
++	 * headers but unavailable to applications at runtime.  The fallback is
++	 * selected from the syscall error, not from a platform identity macro.
++	 */
++	auto startWithPosixSpawn = [&]() -> int {
++		std::vector<char *> argv;
++		argv.reserve(args.size() + 2);
++		argv.push_back(const_cast<char *>(path.c_str()));
++		for (const std::string &arg : args)
++			argv.push_back(const_cast<char *>(arg.c_str()));
++		argv.push_back(nullptr);
++
++		posix_spawn_file_actions_t actions;
++		int ret = posix_spawn_file_actions_init(&actions);
++		if (ret)
++			return -ret;
++
++		ret = addSpawnCloseActions(&actions, fds);
++		if (ret) {
++			posix_spawn_file_actions_destroy(&actions);
++			return -ret;
++		}
++
++		/* Match the upstream child path: don't leak stdio or log-file state. */
++		ret = addSpawnStandardActions(&actions);
++		if (ret) {
++			posix_spawn_file_actions_destroy(&actions);
++			return -ret;
++		}
++
++		std::vector<char *> envp;
++		for (char **env = environ; *env; ++env) {
++			const char *entry = *env;
++			if (!strncmp(entry, "LIBCAMERA_LOG_FILE=", 19) &&
++			    strcmp(entry + 19, "syslog"))
++				continue;
++			envp.push_back(*env);
++		}
++		envp.push_back(nullptr);
++
++		pid_t child;
++		ret = posix_spawn(&child, path.c_str(), &actions, nullptr,
++				 argv.data(), envp.data());
++		posix_spawn_file_actions_destroy(&actions);
++		if (ret) {
++			LOG(Process, Error) << "Failed to spawn " << path << ": "
++					    << strerror(ret);
++			return -ret;
++		}
++
++		pid_ = child;
++		int pidfd = syscall(SYS_pidfd_open, pid_, 0);
++		if (pidfd < 0) {
++			int error = errno;
++			::kill(pid_, SIGKILL);
++			waitpid(pid_, nullptr, 0);
++			pid_ = -1;
++			LOG(Process, Error) << "Failed to open pidfd for " << path << ": "
++					    << strerror(error);
++			return -error;
++		}
++
++		pidfd_ = UniqueFD(pidfd);
++		pidfdNotify_ = std::make_unique<EventNotifier>(pidfd_.get(), EventNotifier::Type::Read);
++		pidfdNotify_->activated.connect(this, &Process::onPidfdNotify);
++
++		LOG(Process, Debug) << this << "[" << child << ':' << pidfd << "]"
++				    << " spawned";
++		return 0;
++	};
++#endif
++
++#if HAVE_POSIX_SPAWN && !HAVE_WORKING_CLONE3
++	return startWithPosixSpawn();
++#else
+ 	clone_args cargs = {};
+ 	int pidfd;
+ 
+@@ -160,6 +304,10 @@ int Process::start(const std::string &path,
+ 	long childPid = syscall(SYS_clone3, &cargs, sizeof(cargs));
+ 	if (childPid < 0) {
+ 		int ret = -errno;
++#if HAVE_POSIX_SPAWN
++		if (ret == -ENOSYS || ret == -EPERM || ret == -EINVAL)
++			return startWithPosixSpawn();
++#endif
+ 		LOG(Process, Error) << "Failed to fork: " << strerror(-ret);
+ 		return ret;
+ 	}
+@@ -207,6 +355,7 @@ int Process::start(const std::string &path,
+ 	}
+ 
+ 	return 0;
++#endif
+ }
+ 
+ void Process::onPidfdNotify()
+@@ -219,29 +368,24 @@ void Process::onPidfdNotify()
+ 	ASSERT(pidfd.isValid());
+ 	ASSERT(pid > 0);
+ 
+-	siginfo_t info;
+-
+ 	/*
+-	 * `static_cast` is needed because `P_PIDFD` is not defined in `sys/wait.h` if the C standard library
+-	 * is old enough. So `P_PIDFD` is taken from `linux/wait.h`, where it is just an integer #define.
++	 * Reap the known child with waitpid() after pidfd readiness.  This avoids
++	 * relying on libc waitid(P_PIDFD) details and preserves the terminating
++	 * signal for callers.
+ 	 */
+-	if (waitid(static_cast<idtype_t>(P_PIDFD), pidfd.get(), &info, WNOHANG | WEXITED) >= 0) {
+-		ASSERT(info.si_pid == pid);
+-
++	int status;
++	if (waitpid(pid, &status, 0) == pid) {
++		exitStatus_ = WIFEXITED(status) ? Process::NormalExit : Process::SignalExit;
++		exitCode_ = WIFEXITED(status) ? WEXITSTATUS(status) : WTERMSIG(status);
+ 		LOG(Process, Debug)
+ 			<< this << "[" << pid << ':' << pidfd.get() << "]"
+-			<< " code: " << info.si_code
+-			<< " status: " << info.si_status;
+-
+-		exitStatus_ = info.si_code == CLD_EXITED ? Process::NormalExit : Process::SignalExit;
+-		exitCode_ = info.si_code == CLD_EXITED ? info.si_status : -1;
+-
++			<< " status: " << status;
+ 		finished.emit(exitStatus_, exitCode_);
+ 	} else {
+ 		int err = errno;
+ 		LOG(Process, Warning)
+ 			<< this << "[" << pid << ":" << pidfd.get() << "]"
+-			<< " waitid() failed: " << strerror(err);
++			<< " waitpid() failed: " << strerror(err);
+ 	}
+ }
+ 
+diff --git a/src/libcamera/yaml_parser.cpp b/src/libcamera/yaml_parser.cpp
+index 64b7437..15ff46d 100644
+--- a/src/libcamera/yaml_parser.cpp
++++ b/src/libcamera/yaml_parser.cpp
+@@ -142,8 +142,8 @@ YamlParserContext::EventPtr YamlParserContext::nextEvent()
+ 		LOG(YamlParser, Error) << file->fileName() << ":"
+ 				       << parser_.problem_mark.line << ":"
+ 				       << parser_.problem_mark.column << " "
+-				       << parser_.problem << " "
+-				       << parser_.context;
++				       << (parser_.problem ? parser_.problem : "") << " "
++				       << (parser_.context ? parser_.context : "");
+ 
+ 		return nullptr;
+ 	}
+diff --git a/test/file.cpp b/test/file.cpp
+index 170e6cc..68d00a9 100644
+--- a/test/file.cpp
++++ b/test/file.cpp
+@@ -25,8 +25,11 @@ class FileTest : public Test
+ protected:
+ 	int init()
+ 	{
+-		fileName_ = "/tmp/libcamera.test.XXXXXX";
+-		int fd = mkstemp(&fileName_.front());
++		const char *tmpdir = getenv("TMPDIR");
++		if (!tmpdir || !*tmpdir)
++			tmpdir = "/tmp";
++		fileName_ = std::string(tmpdir) + "/libcamera.test.XXXXXX";
++		int fd = mkstemp(fileName_.data());
+ 		if (fd == -1)
+ 			return TestFail;
+ 
+diff --git a/test/ipc/unixsocket.cpp b/test/ipc/unixsocket.cpp
+index cd2d254..9e68542 100644
+--- a/test/ipc/unixsocket.cpp
++++ b/test/ipc/unixsocket.cpp
+@@ -14,6 +14,9 @@
+ #include <sys/stat.h>
+ #include <sys/types.h>
+ #include <sys/wait.h>
++#if HAVE_POSIX_SPAWN
++#include <spawn.h>
++#endif
+ #include <unistd.h>
+ #include <vector>
+ 
+@@ -35,6 +38,10 @@ using namespace libcamera;
+ using namespace std;
+ using namespace std::chrono_literals;
+ 
++#if HAVE_POSIX_SPAWN
++extern char **environ;
++#endif
++
+ namespace {
+ 
+ int calculateLength(int fd)
+@@ -206,10 +213,23 @@ protected:
+ 	{
+ 		pid_ = fork();
+ 
+-		if (pid_ == -1)
++		if (pid_ == -1) {
++#if HAVE_POSIX_SPAWN
++			/* Keep the argument storage alive through the synchronous call. */
++			std::string arg = std::to_string(fd);
++			char *argv[] = {
++				const_cast<char *>(self().c_str()),
++				const_cast<char *>(arg.c_str()),
++				nullptr,
++			};
++			int ret = posix_spawn(&pid_, self().c_str(), nullptr, nullptr,
++					      argv, environ);
++			if (ret)
++				return TestFail;
++#else
+ 			return TestFail;
+-
+-		if (!pid_) {
++#endif
++		} else if (!pid_) {
+ 			std::string arg = std::to_string(fd);
+ 			execl(self().c_str(), self().c_str(), arg.c_str(), nullptr);
+ 
+diff --git a/test/log/log_api.cpp b/test/log/log_api.cpp
+index 043de81..06dba5d 100644
+--- a/test/log/log_api.cpp
++++ b/test/log/log_api.cpp
+@@ -11,6 +11,7 @@
+ #include <list>
+ #include <sstream>
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -109,17 +110,20 @@ protected:
+ 
+ 	int testFile()
+ 	{
+-		UniqueFD fd = test::createTemporaryFile();
+-		if (!fd.isValid()) {
++		const char *tmpdir = getenv("TMPDIR");
++		if (!tmpdir || !*tmpdir)
++			tmpdir = "/tmp";
++		string path = string(tmpdir) + "/libcamera.log.XXXXXX";
++		int fd = mkstemp(path.data());
++		if (fd < 0) {
+ 			cerr << "Failed to open tmp log file" << endl;
+ 			return TestFail;
+ 		}
+ 
+-		char path[32];
+-		snprintf(path, sizeof(path), "/proc/self/fd/%u", fd.get());
+-
+-		if (logSetFile(path) < 0) {
++		if (logSetFile(path.c_str()) < 0) {
+ 			cerr << "Failed to set log file" << endl;
++			close(fd);
++			unlink(path.c_str());
+ 			return TestFail;
+ 		}
+ 
+@@ -127,12 +131,16 @@ protected:
+ 
+ 		char buf[1000];
+ 		memset(buf, 0, sizeof(buf));
+-		lseek(fd.get(), 0, SEEK_SET);
+-		if (read(fd.get(), buf, sizeof(buf)) < 0) {
++		lseek(fd, 0, SEEK_SET);
++		if (read(fd, buf, sizeof(buf)) < 0) {
+ 			cerr << "Failed to read tmp log file" << endl;
++			close(fd);
++			unlink(path.c_str());
+ 			return TestFail;
+ 		}
+ 
++		close(fd);
++		unlink(path.c_str());
+ 		istringstream iss(buf);
+ 		return verifyOutput(iss);
+ 	}
+diff --git a/test/log/log_process.cpp b/test/log/log_process.cpp
+index 367b788..6ec091b 100644
+--- a/test/log/log_process.cpp
++++ b/test/log/log_process.cpp
+@@ -8,6 +8,7 @@
+ #include <fcntl.h>
+ #include <iostream>
+ #include <random>
++#include <stdlib.h>
+ #include <string.h>
+ #include <sys/stat.h>
+ #include <sys/types.h>
+@@ -32,6 +33,15 @@ using namespace std::chrono_literals;
+ 
+ static const string message("hello from the child");
+ 
++static string logFilePath(unsigned int num)
++{
++	const char *tmpdir = getenv("TMPDIR");
++	if (!tmpdir || !*tmpdir)
++		tmpdir = "/tmp";
++	return string(tmpdir) + "/libcamera.worker.test." +
++		       to_string(num) + ".log";
++}
++
+ LOG_DEFINE_CATEGORY(LogProcessTest)
+ 
+ class LogProcessTestChild
+@@ -41,8 +51,7 @@ public:
+ 	{
+ 		usleep(50000);
+ 
+-		string logPath = "/tmp/libcamera.worker.test." +
+-				 to_string(num) + ".log";
++		string logPath = logFilePath(num);
+ 		if (logSetFile(logPath.c_str()) < 0)
+ 			return TestSkip;
+ 
+@@ -59,8 +68,7 @@ protected:
+ 	{
+ 		random_device random;
+ 		num_ = random();
+-		logPath_ = "/tmp/libcamera.worker.test." +
+-			   to_string(num_) + ".log";
++		logPath_ = logFilePath(num_);
+ 
+ 		proc_.finished.connect(this, &LogProcessTest::procFinished);
+ 		return 0;
+diff --git a/test/meson.build b/test/meson.build
+index e445062..345b5c1 100644
+--- a/test/meson.build
++++ b/test/meson.build
+@@ -68,7 +68,6 @@ internal_tests = [
+     {'name': 'pixel-format', 'sources': ['pixel-format.cpp']},
+     {'name': 'shared-fd', 'sources': ['shared-fd.cpp']},
+     {'name': 'signal-threads', 'sources': ['signal-threads.cpp']},
+-    {'name': 'threads', 'sources': 'threads.cpp', 'dependencies': [libthreads]},
+     {'name': 'timer', 'sources': ['timer.cpp']},
+     {'name': 'timer-fail', 'sources': ['timer-fail.cpp'], 'should_fail': true},
+     {'name': 'timer-thread', 'sources': ['timer-thread.cpp']},
+@@ -79,6 +78,12 @@ internal_tests = [
+     {'name': 'yaml-parser', 'sources': ['yaml-parser.cpp']},
+ ]
+ 
++# pthread cancellation is not exposed by the OpenHarmony libc.  Keep the
++# upstream source intact but do not compile the Linux-only test case there.
++if cc.has_function('pthread_cancel', dependencies : libthreads)
++    internal_tests += [{'name': 'threads', 'sources': 'threads.cpp', 'dependencies': [libthreads]}]
++endif
++
+ internal_non_parallel_tests = [
+     {'name': 'fence', 'sources': ['fence.cpp']},
+     {'name': 'mapped-buffer', 'sources': ['mapped-buffer.cpp']},
+diff --git a/test/yaml-parser.cpp b/test/yaml-parser.cpp
+index 307e4ee..c622a62 100644
+--- a/test/yaml-parser.cpp
++++ b/test/yaml-parser.cpp
+@@ -9,6 +9,7 @@
+ #include <iostream>
+ #include <map>
+ #include <string>
++#include <stdlib.h>
+ #include <unistd.h>
+ 
+ #include <libcamera/base/file.h>
+@@ -41,8 +42,11 @@ class YamlParserTest : public Test
+ protected:
+ 	bool createFile(const std::string &content, std::string &filename)
+ 	{
+-		filename = "/tmp/libcamera.test.XXXXXX";
+-		int fd = mkstemp(&filename.front());
++		const char *tmpdir = getenv("TMPDIR");
++		if (!tmpdir || !*tmpdir)
++			tmpdir = "/tmp";
++		filename = std::string(tmpdir) + "/libcamera.test.XXXXXX";
++		int fd = mkstemp(filename.data());
+ 		if (fd == -1)
+ 			return false;
+ 
+diff --git a/utils/codegen/gen-ipa-pub-key.py b/utils/codegen/gen-ipa-pub-key.py
+index dc3e7d5..2ad68c2 100755
+--- a/utils/codegen/gen-ipa-pub-key.py
++++ b/utils/codegen/gen-ipa-pub-key.py
+@@ -6,6 +6,7 @@
+ #
+ # Generate the IPA module signing public key
+ 
++import shutil
+ import string
+ import subprocess
+ import sys
+@@ -21,7 +22,10 @@ def main(argv):
+     output = argv[3]
+ 
+     try:
+-        ret = subprocess.run(['openssl', 'rsa', '-pubout', '-in', priv_key,
++        # On OpenHarmony, PATH lookup can find /system/bin/openssl while
++        # execvp of the bare name still fails.  Resolve the absolute path.
++        openssl = shutil.which('openssl') or '/system/bin/openssl'
++        ret = subprocess.run([openssl, 'rsa', '-pubout', '-in', priv_key,
+                               '-outform', 'DER'],
+                              stdout=subprocess.PIPE)
+     except FileNotFoundError:
