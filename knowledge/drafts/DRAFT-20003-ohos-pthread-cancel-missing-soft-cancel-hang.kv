@@ -1,0 +1,35 @@
+# ═══ Draft knowledge entry — OHOS pthread.h 定义 PTHREAD_CANCEL_* 宏常量但无 pthread_cancel 函数 → 硬取消分支不可用, 软取消关闭路径非确定性挂起 ═══
+# Timestamp: 2026-09-30
+# Software: yate 6.4.1（pthread 取消 API 依赖类平台缺口, E051 族）
+# Gate: 编译期（隐式声明/未定义符号）+ 运行期（-Dx 关闭挂起）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-ohos-pthread-cancel-missing-soft-cancel-hang
+title: OHOS musl 的 pthread.h 有 PTHREAD_CANCEL_ASYNCHRONOUS 宏常量但无 pthread_cancel/pthread_setcanceltype 函数：#ifdef 门控的硬取消分支编译必炸；补丁禁用后软取消关闭路径存在 s_tmutex FUTEX 挂起（非确定性, 进程不退出）
+trigger_tool: yate|make|clang
+phase: build
+error_signature: pthread_cancel.*undeclared|implicit declaration.*pthread_cancel|undefined.*pthread_cancel|Soft cancelling.*running threads
+severity: 2
+category: ohos|pthread|libc|yate
+match_keywords: pthread_cancel, PTHREAD_CANCEL_ASYNCHRONOUS, pthread_setcanceltype,
+  Soft cancelling, Hard cancelling, s_tmutex, FUTEX, killall, -Dx, yate
+keywords: pthread_cancel, PTHREAD_CANCEL_ASYNCHRONOUS, musl, soft cancel,
+  hard cancel, s_tmutex, FUTEX, killall, timeout guard, E051
+approach: 两层问题：①编译期——pthread.h（OHOS musl）定义 PTHREAD_CANCEL_ASYNCHRONOUS
+  等宏常量（L75-82）但不声明 pthread_cancel()/pthread_setcanceltype()；上游 yate
+  engine/Thread.cpp 用 #ifdef PTHREAD_CANCEL_ASYNCHRONOUS 门控 pthread_cancel(id) →
+  分支被选中但函数不存在 → 隐式声明/链接失败。修复：补丁改门控宏为永不定义的值
+  （#ifdef YATE_HAVE_PTHREAD_CANCEL）, 走软取消路径（cancel(false) 仅置 m_cancel 标志）。
+  ②运行期——软取消路径在 OHOS 上不可靠：实测 yate -Dx 完成全部初始化
+  （"Yate engine is initialized and starting up", 34 模块全加载）后, 关闭阶段
+  "Soft cancelling 4 running threads" 挂起 >4 分钟不退出；/proc 现场仅剩主线程
+  （State=S wchan=FUTEX）——4 个 pthread 已死但 s_threads 列表条目残留/s_tmutex 疑似
+  持锁未释放, 主线程阻塞在 s_tmutex.lock()（ThreadPrivate::killall 软循环）。退出行为
+  非确定性（本会话探索期同一命令曾 rc=0 正常退出——线程恰好都在取消点完成）。
+  工程对策：a) 冒烟测试勿断言干净退出码——用纯 POSIX 子 shell 超时守卫
+  （( cmd > file 2>&1 & p=$!; ( sleep 30; kill -9 $p 2>/dev/null ) & k=$!;
+  wait $p 2>/dev/null; kill $k 2>/dev/null; true; ）+ 断言输出中的功能状态标记
+  （初始化完成/模块加载, 均发生在 ~1s 内）；b) 系统 /bin/sh 拒绝 "VAR=x { }"
+  复合命令前缀语法（syntax error: unexpected '}'）——守卫勿用 VAR= 前缀+花括号组,
+  conan wrapper = ". conanrun.sh && <cmd>" 经 /bin/sh -c 执行；c) 平台补齐
+  pthread_cancel（E051 未实现 syscall 族）后可恢复硬取消分支。本会话 yate 6.4.1 实测。
