@@ -1,0 +1,134 @@
+--- a/src/kcodecs.cpp
++++ b/src/kcodecs.cpp
+@@ -23,6 +23,7 @@
+ 
+ #include <array>
+ #include <cassert>
++#include <cerrno>
+ #include <cstring>
+ #include <stdio.h>
+ #include <stdlib.h>
+@@ -32,6 +33,13 @@
+ #include <QStringDecoder>
+ #include <QStringEncoder>
+ 
++#if defined(KCODECS_USE_ICONV_FALLBACK)
++#include <iconv.h>
++#ifndef ICONV_CONST
++#define ICONV_CONST
++#endif
++#endif
++
+ #if defined(Q_OS_WIN)
+ #define strncasecmp _strnicmp
+ #endif
+@@ -92,6 +100,52 @@
+ 
+ } // namespace KCodecs
+ 
++#if defined(KCODECS_USE_ICONV_FALLBACK)
++namespace
++{
++bool decodeWithIconv(QByteArrayView input, const QByteArray &charset, QString *result)
++{
++    if (charset.isEmpty()) {
++        return false;
++    }
++
++    iconv_t cd = iconv_open("UTF-8", charset.constData());
++    if (cd == reinterpret_cast<iconv_t>(-1)) {
++        return false;
++    }
++
++    QByteArray output;
++    output.resize(static_cast<int>(input.size() * 4 + 16));
++
++    ICONV_CONST char *inBuf = const_cast<char *>(input.data());
++    size_t inBytesLeft = static_cast<size_t>(input.size());
++    char *outBuf = output.data();
++    size_t outBytesLeft = static_cast<size_t>(output.size());
++
++    while (true) {
++        const size_t rc = iconv(cd, &inBuf, &inBytesLeft, &outBuf, &outBytesLeft);
++        if (rc != static_cast<size_t>(-1)) {
++            break;
++        }
++        if (errno != E2BIG) {
++            iconv_close(cd);
++            return false;
++        }
++
++        const qsizetype used = outBuf - output.data();
++        output.resize(output.size() * 2);
++        outBuf = output.data() + used;
++        outBytesLeft = static_cast<size_t>(output.size() - used);
++    }
++
++    output.truncate(static_cast<int>(outBuf - output.data()));
++    iconv_close(cd);
++    *result = QString::fromUtf8(output);
++    return true;
++}
++} // namespace
++#endif
++
+ /******************************** KCodecs ********************************/
+ 
+ QByteArray KCodecs::quotedPrintableEncode(QByteArrayView in, bool useCRLF)
+@@ -300,15 +354,23 @@
+ 
+     // try if there's a (text)codec for the charset found:
+     QByteArray cs;
++    QByteArray conversionCharset;
+     QStringDecoder textCodec;
+     if (charsetOption == KCodecs::ForceDefaultCharset || maybeCharset.isEmpty()) {
+         textCodec = QStringDecoder(defaultCS);
++        conversionCharset = defaultCS;
+         cs = cachedCharset(defaultCS);
+     } else {
+         textCodec = QStringDecoder(maybeCharset);
++        conversionCharset = QByteArray(maybeCharset);
+         if (!textCodec.isValid()) { // no suitable codec found => use default charset
++#if !defined(KCODECS_USE_ICONV_FALLBACK)
+             textCodec = QStringDecoder(defaultCS);
++            conversionCharset = defaultCS;
+             cs = cachedCharset(defaultCS);
++#else
++            cs = cachedCharset(maybeCharset);
++#endif
+         } else {
+             cs = cachedCharset(maybeCharset);
+         }
+@@ -317,11 +379,13 @@
+         *usedCS = updateEncodingCharset(*usedCS, cs);
+     }
+ 
++#if !defined(KCODECS_USE_ICONV_FALLBACK)
+     if (!textCodec.isValid()) {
+         // qCDebug(KCODECS_LOG) << "Unknown charset" << maybeCharset;
+         delete dec;
+         return false;
+     };
++#endif
+ 
+     // qCDebug(KCODECS_LOG) << "mimeName(): \"" << textCodec->name() << "\"";
+ 
+@@ -341,7 +405,17 @@
+         qWarning() << codec->name() << "codec lies about its maxDecodedSizeFor(" << encodedTextLength << ")\nresult may be truncated";
+     }
+ 
+-    *result = textCodec.decode(QByteArrayView(buffer.data(), bbegin - buffer.data()));
++    const QByteArrayView decodedBytes(buffer.data(), bbegin - buffer.data());
++#if defined(KCODECS_USE_ICONV_FALLBACK)
++    if (textCodec.isValid()) {
++        *result = textCodec.decode(decodedBytes);
++    } else if (!decodeWithIconv(decodedBytes, conversionCharset, result)) {
++        delete dec;
++        return false;
++    }
++#else
++    *result = textCodec.decode(decodedBytes);
++#endif
+ 
+     // qCDebug(KCODECS_LOG) << "result now: \"" << result << "\"";
+     // cleanup:
