@@ -19,7 +19,7 @@
 id:                     E429
 trigger_tool: make
 phase: configuration
-error_signature: No rule to make target .cfg-defs.|cfg-defs|HAVE_GETHOSTBYNAME2|HAVE_SCHED_YIELD|no way to determine
+error_signature: No rule to make target .cfg-defs.|cfg-defs|HAVE_GETHOSTBYNAME2|HAVE_SCHED_YIELD|no way to determine|no locking method selected|undeclared identifier '_res'
 
 # ═══ Layer 1: 识别层 (Recognition) ═══
 # severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
@@ -32,23 +32,27 @@ error_signature: No rule to make target .cfg-defs.|cfg-defs|HAVE_GETHOSTBYNAME2|
 # title:         简短标题(一句话描述错误模式)
 severity: 2
 category: build-system, platform, compat
-match_keywords: kamailio, make cfg, cfg-defs, extra_defs, Makefile.defs, harmonyos, LOCALBASE, pkg-config, CROSS_COMPILE
-title: kamailio 模块（经典 Makefile）OHOS 交叉编译：OS=harmonyos 未被 Makefile.defs 识别 + 依赖探测回退 LOCALBASE
+match_keywords: kamailio, make cfg, cfg-defs, extra_defs, Makefile.defs, harmonyos, LOCALBASE, pkg-config, CROSS_COMPILE, lock_ops, USE_PTHREAD_MUTEX, HAVE_EPOLL, HAVE_RESOLV_RES, _res, musl
+title: kamailio（经典 Makefile）OHOS 交叉编译：OS=harmonyos 未被 Makefile.defs 识别 + 依赖探测回退 LOCALBASE + core 锁机制与 musl _res 缺失
 
 # ═══ Layer 2: 诊断层 (Diagnosis) ═══
 # root_cause:       一句话根因描述(逗号可分行)
 # affected_scope:   影响范围
 # verification_cmd: 验证诊断是否正确的命令
 root_cause: kamailio Makefile.defs 只识别 linux/solaris/freebsd/darwin 四分支，OS=harmonyos 落无名分支导致 HAVE_* 平台宏全缺，core 头 resolve.h/sched_yield.h 直接 #error；且未先 make cfg 时无 cfg-defs 规则；模块 Makefile 依赖探测在 CROSS_COMPILE 为空时走 pkg-config，未命中才回退 LOCALBASE
-affected_scope: kamailio 全模块（uuid/tls/...）及同族经典 Makefile 项目的 OHOS aarch64 交叉编译
+ core 相对模块另增两处 delta（6.1.3 实测）：(a) 无名分支不置位 found_lock_method，core lock_ops.h 报 no locking method selected，须 extra_defs 注入 -DUSE_PTHREAD_MUTEX；(b) -DHAVE_RESOLV_RES 在 Makefile.defs 无条件定义而 musl resolv.h 不导出 _res 全局，core/resolve.c 编译失败，须以环境变量（非 make 命令行）DEFS=-UHAVE_RESOLV_RES 后置撤销
+affected_scope: kamailio 全模块（uuid/tls/...）与 core 主二进制（6.1.3 实测）；同族经典 Makefile 项目的 OHOS aarch64 交叉编译
 verification_cmd: make cfg include_modules=<mod> LOCALBASE=<dep pkg folder> BUILDER= extra_defs=... && make modules modules=modules/<mod>
+ core 变体（6.1.3 实测）: env DEFS=-UHAVE_RESOLV_RES make 后 llvm-readelf -d src/kamailio 查 NEEDED 仅 libc.so，src/kamailio -v 查版本与 flags（应含 USE_PTHREAD_MUTEX 与 epoll 事件方法）
 
 # ═══ Layer 3: 方案层 (Solution Space) ★ ═══
 # 推荐方案 (priority 越小越优先, 从 1 开始)
 rec_priority: 1
 rec_approach: build-cli-macro-inject
 rec_description: 不改源码：先 make cfg，再用 make 命令行 extra_defs 注入 linux 分支等价平台宏集，并用 BUILDER=/SSL_BUILDER= 等空赋值钉死 LOCALBASE 回退分支（make 命令行变量优先于 Makefile 内部赋值）
+ core 构建（6.1.3 实测）另需：extra_defs 追加 -DUSE_PTHREAD_MUTEX 与 -DHAVE_EPOLL（事件循环对齐 linux，musl 可编译已实证）；_res 撤销走环境变量 DEFS=-UHAVE_RESOLV_RES（编译行 $(DEFS) 位于 $(C_DEFS) 之后，后置 -U 胜出；make 命令行 DEFS 会吞 main.o 目标特定 -DMODS_DIR，extra_defs 位于 -D 之前，均不可行）
 rec_command: make cfg include_modules=${MOD} LOCALBASE=${DEP_PKG} BUILDER= extra_defs='-D_GNU_SOURCE -DHAVE_GETHOSTBYNAME2 -DHAVE_SCHED_YIELD -DHAVE_MSG_NOSIGNAL -DHAVE_MSGHDR_MSG_CONTROL -DHAVE_ALLOCA_H -DHAVE_TIMEGM -DHAVE_SCHED_SETSCHEDULER -DHAVE_IP_MREQN' && make modules modules=modules/${MOD} -j1 LOCALBASE=${DEP_PKG} BUILDER=
+ core 变体（6.1.3 实测）: make cfg extra_defs='-D_GNU_SOURCE -DHAVE_GETHOSTBYNAME2 -DHAVE_SCHED_YIELD -DHAVE_MSG_NOSIGNAL -DHAVE_MSGHDR_MSG_CONTROL -DHAVE_ALLOCA_H -DHAVE_TIMEGM -DHAVE_SCHED_SETSCHEDULER -DHAVE_IP_MREQN -DUSE_PTHREAD_MUTEX -DHAVE_EPOLL' && env DEFS=-UHAVE_RESOLV_RES make -j4 extra_defs='（同前一行完整宏集）'
 rec_auto_fix: false
 rec_impl:
 
@@ -67,9 +71,9 @@ fallback_impl:
 forbid_1_pattern: make modules(?![^\n]*LOCALBASE)
 forbid_1_reason: 不传 LOCALBASE/不钉死 BUILDER 时模块 Makefile 会 pkg-config 探测构建机系统库（构建机 libuuid/libssl 劫持探测，产物随构建机漂移）
 forbid_1_consequence: CI 与本地结果不一致、静态/动态链接形态漂移，甚至链接到构建机系统库导致目标机加载失败
-# forbid_2_pattern:
-# forbid_2_reason:
-# forbid_2_consequence:
+forbid_2_pattern: make [^\n]*\bDEFS=
+forbid_2_reason: kamailio src/Makefile 的 main.o 有目标特定 DEFS+=-DMODS_DIR；make 命令行 DEFS 锁定变量会吞掉该赋值（_res 撤销必须走环境变量 DEFS）
+forbid_2_consequence: core 构建 main.c 报 MODS_DIR 未声明
 
 # ═══ Layer 4: 原则引用 ═══
 # principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
@@ -89,8 +93,8 @@ prerequisite_of:        []
 
 # ═══ 元数据 ═══
 doc_file:               doc/E429.md
-last_updated: 2026-09-25
-source_event:           kamailio-uuid 6.0.6 适配（uuid 模块 make cfg + make modules，OS=harmonyos 平台宏缺失）
+last_updated: 2026-09-29
+source_event:           kamailio-uuid 6.0.6 适配（uuid 模块 make cfg + make modules，OS=harmonyos 平台宏缺失）；kamailio core 6.1.3 适配（core 构建实测 lock_ops 锁机制与 musl _res 两处 delta，2026-09-29）
 
 # ═══ 知识协作 (Authorship & Provenance) ═══
 # authors: 作者列表 (格式: Name <email>, Name2 <email2>)
@@ -107,10 +111,10 @@ source_commit: 4100252fe5
 # metrics_fail_count:    该修复方案失败次数
 # metrics_confidence:    置信度 = success / (success + fail)
 # metrics_last_used:     最后使用时间
-metrics_success_count:  0
+metrics_success_count:  1
 metrics_fail_count:     0
-metrics_confidence:     0.0
-metrics_last_used:
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-29
 
 draft: true
 contributor_id: D35C

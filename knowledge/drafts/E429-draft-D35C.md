@@ -1,4 +1,4 @@
-# E429 — kamailio 模块（经典 Makefile）OHOS 交叉编译：OS=harmonyos 未被 Makefile.defs 识别 + 依赖探测回退 LOCALBASE
+# E429 — kamailio（经典 Makefile）OHOS 交叉编译：OS=harmonyos 未被 Makefile.defs 识别 + 依赖探测回退 LOCALBASE + core 锁机制与 musl _res 缺失
 
 > severity: 🟡 medium | category: build-system, platform, compat | 状态: 草稿（D35C）
 
@@ -15,6 +15,15 @@ make: *** No rule to make target '.cfg-defs'.  Stop.
 ```
 
 或模块 Makefile 探测阶段报 `no way to determine ...`（依赖库探测未命中）。
+
+core 主二进制构建（6.1.3 实测）另见两类：
+
+```
+/.../src/core/lock_ops.h:298:4: error: #error "no locking method selected"
+```
+```
+/.../src/core/resolve.c:190:5: error: use of undeclared identifier '_res'
+```
 
 ## 触发条件
 
@@ -36,6 +45,15 @@ make: *** No rule to make target '.cfg-defs'.  Stop.
    `BUILDER`/`SSL_BUILDER` 等变量解析依赖库；`CROSS_COMPILE` 为空时先走构建机
    pkg-config，未命中才回退 `LOCALBASE`/`SYSBASE`。交叉编译时构建机系统库
    （libuuid/libssl）可能被误命中，导致产物随构建机漂移。
+4. **core 锁机制（6.1.3 实测，模块不触达）**：`found_lock_method` 只由各平台分支
+   置位；`OS=harmonyos` 落无名分支后未置位，`src/core/lock_ops.h` 末尾
+   `#error "no locking method selected"`。须 `extra_defs` 注入 `-DUSE_PTHREAD_MUTEX`
+   （linux 分支默认值，musl 完整支持 pthread mutex）。
+5. **musl 不导出 _res 全局（6.1.3 实测，模块不编译 resolve.c）**：`-DHAVE_RESOLV_RES`
+   在 `Makefile.defs` 无条件定义（L729，非平台分支），但 OHOS sysroot（musl）
+   `resolv.h` 仅有 `struct __res_state` 类型、不导出 `_res` 全局实例 →
+   `core/resolve.c` 6 处（L190-197、L926）编译失败。撤销该宏后走上游自带
+   `#else` 回退分支（"no resolv options support" 警告），零源码改动。
 
 ## 解决方案
 
@@ -57,6 +75,28 @@ make modules modules=modules/${MOD} -j1 LOCALBASE=${DEP_PKG} BUILDER= \
 每个宏须先对照目标平台 sysroot 头文件实证（musl 语义下 `HAVE_UNION_SEMUN` 不注入：
 `sys/sem.h` 不导出 `union semun`，core `lock_ops.h` 在宏未定义时自带条件定义）。
 
+**core 主二进制构建变体（6.1.3 实测，见 archives/k/kamailio/6.1.3/notes.md）**：
+
+```bash
+DEFS='-D_GNU_SOURCE -DHAVE_GETHOSTBYNAME2 -DHAVE_SCHED_YIELD -DHAVE_MSG_NOSIGNAL \
+      -DHAVE_MSGHDR_MSG_CONTROL -DHAVE_ALLOCA_H -DHAVE_TIMEGM \
+      -DHAVE_SCHED_SETSCHEDULER -DHAVE_IP_MREQN -DUSE_PTHREAD_MUTEX -DHAVE_EPOLL'
+make cfg extra_defs="$DEFS"
+env DEFS=-UHAVE_RESOLV_RES make -j4 extra_defs="$DEFS"
+```
+
+要点：
+- `_res` 撤销必须走**环境变量** `DEFS`（编译行 `$(DEFS)` 位于 `$(C_DEFS)` 之后，
+  后置 `-U` 胜出）。make **命令行** `DEFS=` 会锁定变量、吞掉 `main.o` 的目标特定
+  `DEFS+=-DMODS_DIR`（main.c 报 `MODS_DIR` 未声明，实测复现）；`extra_defs` 位于
+  `-DHAVE_RESOLV_RES` 之前，`-U` 被 `-D` 覆盖——两者均不可行。
+- `-DHAVE_EPOLL` 注入后事件循环对齐 linux 构建（`kamailio -v` 显示
+  "poll, epoll_lt, epoll_et."，musl 可编译已实证）；不注入则回退 poll（可运行但
+  与 linux 行为不一致）。`HAVE_SIGIO_RT`/`USE_FUTEX` 按最小参数原则不注入。
+- core 无外部 conan 依赖：pcre2 仅被 modules（regex/dialplan/cnxcc/lcr）引用。
+- 产物为 `src/kamailio` 单二进制（ET_DYN/PIE，NEEDED 仅 `libc.so`）；无独立
+  libkamailio 库；`srved` 在 6.1.3 源码树已不存在（上游移除）。
+
 ### 回退方案（priority 2）
 
 在 `Makefile.defs` 增补 harmonyos 分支（复用 linux 分支语义），以补丁形式提交并在 PR
@@ -76,7 +116,19 @@ llvm-readelf -d src/modules/<mod>/<mod>.so | grep NEEDED   # 期望仅 libc.so�
 llvm-nm -D src/modules/<mod>/<mod>.so | grep <sym>          # 依赖符号应为 T（已定义）而非 U
 ```
 
+core 变体（6.1.3 实测通过）：
+
+```bash
+llvm-readelf -d src/kamailio | grep NEEDED   # 期望仅 libc.so
+./src/kamailio -v                            # 版本 6.1.3 + flags 含 USE_PTHREAD_MUTEX
+                                             # + "poll method support: poll, epoll_lt, epoll_et."
+```
+
 ## 关联条目
 
 - 相关: [E???]（待主编串接：同类“平台分支未覆盖导致平台宏缺失”条目）
+- 相关: [E257 草稿]（musl 不导出 glibc `_res` 全局的 libc 面 delta，见
+  `knowledge/drafts/DRAFT-E257-res-state-musl.kv`）
 - 先例: kamailio-snmpstats / kamailio-unixodbc / kamailio-tls / kamailio-uuid 6.0.6
+- 先例: kamailio core 6.1.3（core 主二进制，lock_ops 锁机制 + musl _res 两处 delta
+  实测，2026-09-29）
