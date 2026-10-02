@@ -1,0 +1,190 @@
+# ═══ Draft knowledge entry — 靠 ioctl(TIOCSTI) 往别的 tty 注入按键的工具（终端多路复用/广播/群控类），在鸿蒙上的可交付边界：TIOCSTI 必须先探测再断言；setuid-root 语义不成立，可交付形态是被 root 门控住的那部分面 ═══
+# Timestamp: 2026-09-30
+# Software: pconsole 1.2.0（任何用 ioctl(fd, TIOCSTI, &c) 把按键注入另一个终端输入队列的
+#   C/C++ 工具：终端多路复用器、按键广播/群控工具、批量运维输入器）
+# Gate: 设备实机运行（conan create 的 test_package）+ 补丁 A/B（strace 数特权 id syscall）
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+#
+# 知识缺口说明（查重结论）：
+#   1. `grep -rl TIOCSTI knowledge/drafts/` 命中数为 0 —— 本仓 drafts 里没有任何条目
+#      讨论过 TIOCSTI 这个 ioctl（既没有它可用的证据，也没有它被禁用的证据）。
+#   2. DRAFT-secpwgen-1.3-e051-* 已覆盖「特权 id syscall 的 POSIX 空操作守卫」，
+#      pconsole 直接使用了它的方案，不重复申报；本条目补的是**它的上游**问题：
+#      一旦按 E051 的方案让程序活下来，这个工具到底还能不能工作。
+#   3. DRAFT-E5xx-tui-app-pty-test-harness 已覆盖「TUI 用 pty 驱动测试」的方法论，
+#      pconsole 直接使用；本条目补的是「**能力探测决定断言形态**」这一层。
+#   4. DRAFT-8960-* 覆盖「被测 CLI 读 stdin 到 EOF 挂死」；本条目补的是同一族的另一个
+#      形态——驱动脚本的轮询循环在无 tty 时不收敛（见 forbid_1）。
+
+id: DRAFT-pconsole-1.2.0-tiocsti-multiplex-setuid-deployment-boundary
+title: 依赖 ioctl(TIOCSTI) 往别的 tty 注入按键的工具在鸿蒙上：TIOCSTI 是可被内核关闭的特权 legacy ioctl，必须先探测能力再决定断言形态；且 setuid-root 部署语义在鸿蒙不成立，可交付面被 root 门控
+trigger_tool: runtime / cc / conan
+phase: runtime / test_package
+error_signature: 'ioctl\(\) : (Invalid argument|Operation not permitted|Not a typewriter|EPERM|EINVAL|ENOTTY)|TIOCSTI|dev\.tty\.legacy_tiocsti|cannot create a pconsole loop|You must be root to run this program|already attached|exit code 159|Bad system call|SIGSYS'
+severity: 2
+category: platform|kernel|ioctl|tty|testing|security
+match_keywords: 'TIOCSTI, legacy_tiocsti, ioctl, tty injection, keystroke injection, terminal multiplexer, keystroke broadcast, pconsole, splitvt, tmux, screen, tty, /dev/pts, openpty, pty.openpty, setuid root, 4110, chmod 4110, seteuid, geteuid, getuid, SIGSYS, exit 159, E051, capability probe, pty master, canonical mode, ECHOCTL, ^X'
+approach: |
+  适配「把一个终端的输入复制到另一个终端」这类工具时，先做两件事，再决定断言怎么写：
+
+  一、**先探测 TIOCSTI 能力，再选断言形态**。TIOCSTI 是从 SysV 时代留下来的特权 ioctl，
+  需要调用者对目标 tty 有控制权；现代内核提供 `dev.tty.legacy_tiocsti` 开关
+  （Linux 6.2 起默认 0，即关闭），关掉时 ioctl 返回 EINVAL/EPERM 而不是成功。
+  所以不要假设它可用，也不要假设它不可用。harness 里用一次性的探针 pty 测能力：
+
+      import ctypes, pty
+      TIOCSTI = 0x5412
+      m, s = pty.openpty()                      # 一次性探针，不复用被测的 pty
+      try:
+          libc = ctypes.CDLL("libc.so.6", use_errno=True)
+          buf = ctypes.c_char(b"\x01")
+          ctypes.set_errno(0)
+          ok = libc.ioctl(s, TIOCSTI, ctypes.byref(buf)) == 0
+      finally:
+          os.close(m); os.close(s)
+
+  然后按能力分两条**都非恒真**的断言：
+    * 可用   → 断言注入的字节真的出现在目标终端（从 pty **master** 侧读回：被注入的字符
+              进入 slave 的输入队列，行规程回显后从 master 读出）
+    * 不可用 → 断言程序报出 ioctl 错误并干净 detach（`ioctl() : ...` + 连接列表变空），
+              进程不崩、退出码正常
+
+  两个易踩的细节：
+    - 探针必须用**另一个** pty。往被测 pty 注入探针字节会污染后面"字节有没有送达"的判据。
+    - 注入**可打印字符**做判据，不要用 Ctrl-X 之类的控制字符：canonical 行规程对它们
+      做 ECHOCTL 展开，master 侧读到的是 `^X`（两个字符）而不是原始字节。
+
+  二、**认清 setuid 语义在鸿蒙上不成立，把可交付面划在 root 门控之内**。这类工具的
+  README 通常建议 `chmod 4110` 后由普通用户运行；鸿蒙应用沙箱既不给应用进程 root，
+  setuid 位也绕不过 seccomp 白名单。所以真实可交付形态只有"以 root 身份运行"。
+  harness 要**先判 euid**：非 root 时断言程序自己的门控消息 + 非 0 退出（即 E051 面
+  的那条门），root 时才跑完整功能面。这样两种宿主环境下断言都非空、都不伪造。
+root_cause: |
+  两层独立的机制，都会让"看起来能编译、跑起来就废"：
+
+  1) **TIOCSTI 的可用性不是编译期属性，是内核运行期开关**。它从未被 POSIX 标准化，
+     只是一直被实现着；因为它等价于「绕过终端输入检查直接往别人的 tty 塞字符」，
+     内核后来加了 `dev.tty.legacy_tiocsti` 开关并在 6.2 起默认关闭，同时要求调用方
+     对目标 tty 有相应权限。于是同一个二进制在两台机器上，一个能把按键注入出去，
+     一个只能报 `ioctl() : Invalid argument`。源码里 `#ifndef TIOCSTI #define TIOCSTI
+     0x5412` 这种自备兜底定义（pconsole.c 就有）只保证**能编译**，不保证**能用**。
+
+  2) **root 门控 + 特权 id syscall 的组合**。这类工具 `main()` 开头几乎都是
+     `if (geteuid()) { 用法提示; return -1; }`，紧接着为了「保险」无条件调用
+     `seteuid(getuid())` 丢权。鸿蒙的白名单 seccomp 会让这个在非特权进程上被不可捕获的
+     SIGSYS 打死（exit 159，E051），连错误分支都走不到。两者叠加的结果是：
+     **门控本身在鸿蒙上永远过不去**（沙箱不是 root），而**绕过门控的路径又被 seccomp 封死**。
+     这不是可以靠打补丁"修好"的东西——它是平台能力边界，适配方能做的是：把补丁做成
+     语义等价的空操作消除（让 root 身份下能跑），然后把测试断言钉在**真实可达的那部分面**
+     上，并对不可达的部分如实说明，而不是把功能砍掉冒充通过。
+affected_scope: |
+  一切用 ioctl(TIOCSTI) 或等价手段往别的 tty 注入输入的程序：终端多路复用器
+  （pconsole、splitvt、tmux 类的自定义实现、screen）、按键广播/群控工具、
+  批量运维输入器、教学/演示用的"一个键盘多台机器"脚本。
+  判据只有一条：**程序的核心功能是否建立在「我能往那个终端的输入队列里写字节」之上**。
+  与发行版无关，与 glibc/musl 无关。
+  注意与 DRAFT-E5xx-tui-app-pty-test-harness 区分：那条讲的是"怎么用 pty 驱动交互式程序"，
+  本条讲的是"驱动进去之后，断言该写成什么形态、以及功能边界在哪"。
+verification_cmd: |
+  1) 能力探测（任何 Linux 宿主，5 秒）：
+       python3 -c 'import ctypes,os,pty; m,s=pty.openpty(); \
+         l=ctypes.CDLL("libc.so.6",use_errno=True); b=ctypes.c_char(b"\x01"); \
+         print("rc=%d errno=%s" % (l.ioctl(s,0x5412,ctypes.byref(b)), os.strerror(ctypes.get_errno())))'
+     rc=0 → 该内核允许注入；rc<0 → 被 legacy_tiocsti 关掉了（EINVAL），
+     或调用方对目标 tty 无权限（EPERM）。两种结果都**不**代表配方有问题。
+  2) 送达验证（rc=0 的宿主）：把程序 attach 到一个 `pty.openpty()` 的 slave，
+     在主控 pty 上敲一个可打印字符，然后从 **master** 读——应当读到该字符
+     （以及程序自己写过去的 attach banner）。
+  3) 补丁 A/B（本包实证，不依赖真机 seccomp）：`strace -f -e trace=setuid,setresuid,
+     setreuid,getuid,geteuid` 跑同一份源码的未打补丁 / 已打补丁两个构建，
+     数特权 id syscall 次数：未打补丁 1 次（`setresuid(-1,0,-1)`），打补丁后 0 次。
+     注意**不要**用符号表做判据：守卫是运行期判定，`seteuid` 符号在两个构建里都在。
+  4) 反证（CI L1e 口径）：把产物换成空目录或 `echo stub` 假壳，测试必须 FAIL。
+  5) 设备侧终态证据：在真实 HarmonyOS PC worker 上跑 conan create 的 test_package，
+     确认启动路径退出码 ≠ 159（E051 边界）且 root 门控行为符合预期。
+rec_priority: 1
+rec_approach: probe-tiocsti-capability-then-assert-branch
+rec_description: |
+  配方：test_package 的 harness 里**先探测 TIOCSTI 能力，再按能力选断言形态**，
+  并把 euid 分支显式写出来。任何一条分支都必须是"能单独判定成败"的真断言。
+
+  ```python
+  # 一次性探针 pty（不复用被测 pty，避免污染送达判据）
+  m, s = pty.openpty()
+  try:
+      libc = ctypes.CDLL("libc.so.6", use_errno=True)
+      buf = ctypes.c_char(b"\x01")            # 探针字节，与被注入的判据字节区分开
+      ctypes.set_errno(0)
+      tiocsti_ok = libc.ioctl(s, TIOCSTI, ctypes.byref(buf)) == 0
+  finally:
+      os.close(m); os.close(s)
+
+  if os.geteuid() != 0:
+      assert ROOT_GATE_MSG in out and rc != 0      # 门控本身就是真断言
+  elif tiocsti_ok:
+      assert probe_byte in delivered                # 真的注入到了目标终端
+  else:
+      assert "ioctl()" in out and rc == 0          # 干净报错 + detach
+  ```
+
+  配套三条实现要点：
+  - 探针字节用 `\x01`，被测的送达判据用**可打印**字符（如 `Z`）。控制字符会被
+    canonical 行规程做 ECHOCTL 展开（`^X`），字节比对会假失败。
+  - 送达判据从 pty **master** 侧读：TIOCSTI 把字符塞进 slave 的输入队列，
+    行规程回显后才从 master 读出；只从 slave 读会读不到。
+  - 命令模式的输入**不会被注入**：这类工具的 Ctrl-A 是"进命令模式"，命令模式里敲的
+    字符被 fgets 吃掉，只有 `connect`/`exit` 才会回到注入循环。想测注入必须先让程序
+    处于注入态（attach 之后它默认就在注入态），别在命令模式里敲。
+rec_command: |
+  见 archives/p/pconsole/1.2.0：
+  - 配方 patches/0001-pconsole.c-seteuid-noop-guard.patch（+2/-2，2 hunk，无平台宏）
+  - test_package/pconsole_pty_test.py（M1/M1b/H3/H4 四项断言按能力分支）
+  - test_package/test.sh（注释里写明"带参数调用驱动脚本会自旋，不要这样测"）
+rec_auto_fix: false
+rec_impl: test-harness-capability-probe
+
+fallback_priority: 2
+fallback_approach: assert-command-mode-surface-only
+fallback_description: |
+  若连 pty 都不可用（宿主没有 /dev/ptmx），退化为"只断言命令模式可达的面"
+  （help/version/list/attach 用法/未知命令）+ 纯 Python 解析 ELF 的架构与 DT_NEEDED 检查，
+  并在输出里显式打印"注入面未验证"。**不要**静默跳过——静默跳过等于恒真断言。
+  代价：核心注入功能在该环境下没有被覆盖，必须在 notes.md / PR 正文里如实写明。
+fallback_command: 只保留 F*/H1/H2/H4 分支，输出 PCONSOLE_*_RESULT 里加 "mux": "unverified"
+fallback_auto_fix: false
+fallback_impl: degraded-consumer-test
+
+forbid_1_pattern: 'pconsole\.sh\s+\S|get_tty\(\).*while|while \[ -z "\$TTY" \]'
+forbid_1_reason: 驱动脚本在无控制终端时轮询循环不收敛（`tty` 失败 → 判定条件恒假 → 子 shell 无限自旋），自动化测试里带参数调用会把构建拖到超时
+forbid_1_consequence: CI 表现为"构建超时/疑似交互式测试卡住"，排查成本极高且与真实缺陷无关（本包 test.sh 注释与 notes.md 已明确只测无参数路径）
+
+forbid_2_pattern: '#ifndef\s+TIOCSTI\s*\n\s*#define\s+TIOCSTI\s+0x[0-9a-fA-F]+'
+forbid_2_reason: 源码自带的 ioctl 请求号兜底只保证能编译，不保证该 ioctl 在目标内核上可用；用它推出"功能可用"的结论是错的
+forbid_2_consequence: 测试写成恒真断言，CI 绿但功能在真机上早已失效
+
+forbid_3_pattern: 'if\s*\(\s*ioctl\([^)]*TIOCSTI[^)]*\)\s*(!=|==)\s*-1\s*\)\s*(\{\s*\}|\)\s*;\s*/\*\s*ignore)'
+forbid_3_reason: 把注入失败静默吞掉等于把核心功能砍掉冒充通过（本包依赖它报 `ioctl() : ...` 并 detach，正是可验证的真实行为）
+forbid_3_consequence: 审计判定为「裁剪软件」，PR 会被驳回
+
+forbid_4_pattern: 'chmod\s+[04]?110|chown\s+root'
+forbid_4_reason: 在配方 install 阶段替用户做 setuid root 会改变制品安全属性；README 的 chmod 4110 是**部署建议**，不是包管理职责
+forbid_4_consequence: 制品被以 setuid 投放，审计判定为高危权限变更
+
+principles: P-RUNTIME-001, P-SYSCALL-001, P-PATCH-002, P-PATCH-003
+similar_to: DRAFT-E5xx-tui-app-pty-test-harness, DRAFT-secpwgen-1.3-e051-privileged-id-noop-guard, DRAFT-8960-conan-test-package-cli-reads-stdin-to-eof, DRAFT-10861-splitvt-1.6.6-tioccsctty-needs-session-leader, E051
+conflicts_with: —
+prerequisite_of:
+
+doc_file: knowledge/drafts/DRAFT-pconsole-1.2.0-tiocsti-multiplex-setuid-deployment-boundary.md
+last_updated: 2026-09-30
+source_event: 任务卡 pconsole 1.2.0（开源鸿蒙 PC 专项积分赛，分支 feat/pconsole-1.2.0）；本机 OHOS 交叉 conan create rc=0 + test_package 29/29 + strace A/B（未打补丁 1 次特权 id syscall / 打补丁后 0 次）
+authors: pconsole-1.2.0 适配任务
+source_pr:
+source_commit:
+
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 0.8
+metrics_last_used: 2026-09-30
+
+draft: true
