@@ -1,0 +1,19 @@
+#====================================================================
+# DRAFT-kea-hook-legal-log-3.0.3-ohos-runtime-command-spawn-interpreter-prefix
+# — OHOS 内核拒 shebang execve 的运行时层修法：fork+execve 型命令 spawn
+#   （无 shell 回退）把用户可配置的脚本命令经 /bin/sh 路由（OHOS/kea-hook-legal-log 3.0.3 实测）
+# 触发事件: kea-hook-legal-log 3.0.3 适配（RotatingFile prerotate/postrotate 脚本 spawn）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-kea-hook-legal-log-3.0.3-ohos-runtime-command-spawn-interpreter-prefix
+trigger_tool:           cxx|conan|gtest
+phase:                  test|runtime
+error_signature: "waitForFile.*timeout|gtest.*FAILED.*prerotateActions|script side-effect file not created|execve.*EACCES|ProcessSpawn.*spawn"
+root_cause: "The HarmonyOS PC kernel refuses shebang script execve at the syscall level (EACCES/Error 13) regardless of executable bits. This bites not only build-time/configure-time script execution but also RUNTIME command spawning: libraries that fork()+execve() user-configurable commands (logrotate-style prerotate/postrotate, hook commands, notify scripts) with no shell fallback silently lose those commands, because the child's execve of the script path fails and the child exits without any reporting channel (async spawn). Kea's ProcessSpawn (src/lib/asiolink/process_spawn.cc) is exactly this shape: ProcessSpawnImpl::spawn() = fork + execve(executable, args, vars) + _exit(EXIT_FAILURE); the legal-log hook's RotatingFile::rotateFiles() calls it with the user-configured prerotate/postrotate commands, which are shell scripts (upstream's own tests run forensic_prerotate_test.sh / forensic_postrotate_test.sh). On OHOS every such spawn dies in the child: the gtest cases prerotateActions/postrotateActions/prerotateAndPostrotateActions fail because the script side-effect files never appear. Unlike configure-time scripts there is no meson run_command indirection to patch at the call-site layer — the fix must live in the code that owns the spawn, with a compile-time guard so glibc/Linux (upstream CI) keeps the original direct-execve path (where non-script binary commands also work)."
+rec_approach: "Route the spawned command through /bin/sh under a musl-Linux compile guard: #if defined(__linux__) && !defined(__GLIBC__) — push the command itself as the first argument (script path becomes $1 to the shell, preserving the original argv semantics byte-for-byte), push the original args after it, and change the spawn executable to /bin/sh; keep the direct execve in the #else branch. The guard keyed on !__GLIBC__ (not on the OS name) keeps upstream CI on glibc/Linux untouched and matches the family convention used for header conflicts. Verify with the upstream tests that actually execute the scripts (side-effect-file assertions), not just compile. Also check the library for OTHER spawn sites (grep ProcessSpawn across the tree) before declaring the patch complete — the same class of call can hide in adjacent components."
+match_keywords: ["script execve", "EACCES", "ProcessSpawn", "fork execve", "prerotate", "postrotate", "shell fallback", "/bin/sh route", "runtime command spawn", "logrotate hook", "async spawn", "HarmonyOS kernel script exec"]
+error_excerpt: "dhcp-forensic-log-tests: RotatingFileTest.prerotateActions FAILED: waitForFile(<dir>/<name>-prerotate-completed) timed out | RotatingFileTest.postrotateActions FAILED | RotatingFileTest.prerotateAndPostrotateActions FAILED | src/lib/asiolink/process_spawn.cc:350: execve(executable_.c_str(), args_.get(), vars_.get()); _exit(EXIT_FAILURE) — no shell fallback"
+severity:               2
+category:               cxx, runtime, spawn, shell, gtest, portability, ohos
+last_updated: 2026-09-29
