@@ -1,0 +1,146 @@
+--- a/relacy/platform.hpp
++++ b/relacy/platform.hpp
+@@ -162,6 +162,134 @@
+ 
+ #else
+ 
++#if defined(RELACY_USE_PTHREAD_FIBERS)
++
++#include <pthread.h>
++
++struct fiber_t
++{
++    pthread_t thread_;
++    void (*fnc_)(void*);
++    void* context_;
++    fiber_t* parent_;
++    bool created_;
++    bool shutdown_;
++};
++
++inline pthread_mutex_t& rl_fiber_mutex()
++{
++    static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
++    return mutex;
++}
++
++inline pthread_cond_t& rl_fiber_condition()
++{
++    static pthread_cond_t condition = PTHREAD_COND_INITIALIZER;
++    return condition;
++}
++
++inline fiber_t*& rl_active_fiber()
++{
++    static fiber_t* active = 0;
++    return active;
++}
++
++inline void rl_fiber_unlock(void* mutex)
++{
++    pthread_mutex_unlock((pthread_mutex_t*)mutex);
++}
++
++inline bool rl_wait_for_fiber(fiber_t& target)
++{
++    pthread_mutex_t* mutex = &rl_fiber_mutex();
++    bool run = false;
++    pthread_mutex_lock(mutex);
++    pthread_cleanup_push(rl_fiber_unlock, mutex);
++    while (rl_active_fiber() != &target && !target.shutdown_)
++        pthread_cond_wait(&rl_fiber_condition(), mutex);
++    run = !target.shutdown_;
++    pthread_cleanup_pop(1);
++    return run;
++}
++
++inline void* rl_fiber_start(void* value)
++{
++    fiber_t* fiber = (fiber_t*)value;
++    if (rl_wait_for_fiber(*fiber))
++        fiber->fnc_(fiber->context_);
++
++    pthread_mutex_t* mutex = &rl_fiber_mutex();
++    pthread_mutex_lock(mutex);
++    if (rl_active_fiber() == fiber)
++        rl_active_fiber() = fiber->parent_;
++    pthread_cond_broadcast(&rl_fiber_condition());
++    pthread_mutex_unlock(mutex);
++    return 0;
++}
++
++inline void create_main_fiber(fiber_t& fiber)
++{
++    memset(&fiber, 0, sizeof(fiber));
++    fiber.thread_ = pthread_self();
++    pthread_mutex_lock(&rl_fiber_mutex());
++    rl_active_fiber() = &fiber;
++    pthread_mutex_unlock(&rl_fiber_mutex());
++}
++
++inline void delete_main_fiber(fiber_t& fiber)
++{
++    pthread_mutex_lock(&rl_fiber_mutex());
++    if (rl_active_fiber() == &fiber)
++        rl_active_fiber() = 0;
++    pthread_cond_broadcast(&rl_fiber_condition());
++    pthread_mutex_unlock(&rl_fiber_mutex());
++}
++
++inline void create_fiber(fiber_t& fiber, void(*fnc)(void*), void* context)
++{
++    fiber.fnc_ = fnc;
++    fiber.context_ = context;
++    fiber.shutdown_ = false;
++    fiber.created_ = false;
++    pthread_mutex_lock(&rl_fiber_mutex());
++    fiber.parent_ = rl_active_fiber();
++    pthread_mutex_unlock(&rl_fiber_mutex());
++    int error = pthread_create(&fiber.thread_, 0, rl_fiber_start, &fiber);
++    if (error != 0)
++        throw std::runtime_error("pthread_create failed while creating a Relacy fiber");
++    fiber.created_ = true;
++}
++
++inline void delete_fiber(fiber_t& fiber)
++{
++    if (!fiber.created_)
++        return;
++    pthread_mutex_lock(&rl_fiber_mutex());
++    fiber.shutdown_ = true;
++    pthread_cond_broadcast(&rl_fiber_condition());
++    pthread_mutex_unlock(&rl_fiber_mutex());
++    pthread_join(fiber.thread_, 0);
++    fiber.created_ = false;
++}
++
++inline void switch_to_fiber(fiber_t& fiber, fiber_t& previous)
++{
++    pthread_mutex_t* mutex = &rl_fiber_mutex();
++    bool shutdown = false;
++    pthread_mutex_lock(mutex);
++    rl_active_fiber() = &fiber;
++    pthread_cond_broadcast(&rl_fiber_condition());
++    pthread_cleanup_push(rl_fiber_unlock, mutex);
++    while (rl_active_fiber() != &previous && !previous.shutdown_)
++        pthread_cond_wait(&rl_fiber_condition(), mutex);
++    shutdown = previous.shutdown_;
++    pthread_cleanup_pop(1);
++    if (shutdown)
++        pthread_exit(0);
++}
++
++#else
++
+ struct fiber_t
+ {
+     ucontext_t  fib;
+@@ -223,6 +351,8 @@
+         _longjmp(fib.jmp, 1);
+ }
+ 
++#endif // RELACY_USE_PTHREAD_FIBERS
++
+ #endif
+ 
+ #endif
