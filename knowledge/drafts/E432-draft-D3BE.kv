@@ -1,0 +1,116 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E432.kv，填写各字段
+# 对应的人类文档: doc/E432.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id:                     E432
+trigger_tool: python|pip|pytest|lit|install
+phase: testing
+error_signature: ERROR: file or directory not found: (tests|tests/)|no tests ran in .*s|404.*archive/refs/tags|Passed: 0|Testing: 0 tests
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: python, source-acquisition, test_package, conan, detection
+match_keywords: PyPI sdist 不含测试, 测试目录名单数 test/, pytest 与 lit 双套件, GitHub tag archive, refs/tags, sha256 固定, 上游 CI 工作流, poetry, test_package/tests, snitch 未随 wheel 发布, 测试副本逐字节
+title: 上游测试目录名可能是单数 test/ 且同时含两套测试框架（pytest + lit/filecheck）：source 必须用 GitHub 官方 tag archive（sdist 常不含测试），test_package 内两套都要跑并分别落标记；包外工具（snitch）需随副本提供
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: PyPI sdist 与 GitHub tag archive 由不同打包规则产出：poetry 只按 pyproject 收文件，riscemu 2.2.7 的 sdist 完全不含 test/（pytest 用例与 lit/filecheck 用例都只在仓库里）；且上游测试目录名是单数 test/（不是惯例 tests/），并含两套框架——.github/workflows/ci-pytest.yml 同时跑 pytest -W error 与 lit --timeout=5 -v test/filecheck；此外 riscemu 的 pyproject 只打包 riscemu/ 包，snitch/（lit 的 snitch 用例要用 python3 -m snitch）不在 wheel 内，且 lit.cfg 把 cwd 设为 test/filecheck 的上两级以便从源码树 import snitch
+affected_scope: 所有『上游测试只在仓库不在 sdist』且测试目录名/框架不遵循惯例的纯 Python 包适配；以及只想跑一套框架就宣称接入上游测试（丢掉 lit 套件）导致覆盖不全的配方
+verification_cmd: tar tzf riscemu-2.2.7-py3-none-any.whl/ sdist 列表 | grep -c '/test/'  # sdist 期望 0；tar tzf v2.2.7.tar.gz | grep -c 'test/'  # tag archive 期望 >0；conan create 日志中 grep HMBS_UPSTREAM_TEST_RESULT  # 期望 pytest 49 + lit 11 全 pass
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: github-tag-archive-pinned-sha-and-run-both-suites
+rec_description: conandata.yml 用 https://github.com/<owner>/<repo>/archive/refs/tags/<tag>.tar.gz（tag 名逐字核对，本例 v2.2.7）并固定 sha256；把 test/*.py 逐字节复制到 test_package/tests/ 跑 pytest（与上游同参 -W error），把 test/filecheck/ 逐字节复制到 test_package/filecheck/ 跑 lit（同参 --timeout=5 -v）；lit 需要的包外模块（snitch）随副本放进 test_package 并加进 PYTHONPATH，两套结果聚合进一条 HMBS_UPSTREAM_TEST_RESULT 标记
+rec_command: python3 -m pytest test_package/tests/ -q --no-header -o addopts= -W error ; lit --timeout=5 -v test_package/filecheck
+rec_auto_fix: false
+rec_impl: conan-recipe
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority:      2
+fallback_approach:
+fallback_description:
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: test_package/.*(cp|mv|sed|patch).*upstream|只跑一套框架却记为上游测试通过
+forbid_1_reason: 测试副本必须逐字节等于上游（可用 sha256 复核）；漏跑一套框架会让『上游测试通过』的结论失真
+forbid_1_consequence: 上游行为基线不完整、报告数字与上游 CI 不可比，PR 审查时无法复核
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               doc/E432.md
+last_updated: 2026-09-29
+source_event:           # 触发此条目创建的编译事件(如有)
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors:
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.0
+metrics_last_used:
+
+draft: true
+contributor_id: D3BE
