@@ -1,0 +1,47 @@
+# 知识图谱草稿 — gtest 1.17 × LLVM/lldb 类型不兼容（Message 流式 + 容器匹配器）
+# 来源: lldb/0.0.1 鸿蒙 PC 适配（2026-09-27），本地 3481 测试实测（V5 构建失败链）
+# 草稿编号待主编分配正式 E 编号（graph promote 自动分配）
+id: DRAFT-lldb001-gtest117-llvm-streaming-container-matcher
+trigger_tool: conan-verify
+phase: build
+error_signature: "invalid operands to binary expression ('std::stringstream' and 'const llvm::StringRef')"
+severity: high
+category: testing,cmake
+match_keywords:
+  - llvm::StringRef
+  - testing::Message
+  - operator<<
+  - value_type
+  - RangeVector
+  - ElementsAre
+  - gtest
+  - gmock
+title: 纯 googletest 1.17 头与 LLVM 22.x 类型不兼容：Message 流式缺 std::ostream<<（.str() 族类型）+ gmock 容器匹配器硬依赖 value_type（自定义容器缺失）
+root_cause: 两条独立根因：①gtest 1.17 testing::Message::operator<<（gtest-message.h:148 `*ss_ << val`）无 SFINAE 保护，靠 ADL 在调用点找 operator<<(std::ostream&, T)；LLVM 22.x 头仅 raw_ostream 重载（llvm/ADT/Twine.h:544），StringRef/Twine/SmallString 无 std::ostream<< → 任何流式它们的 gtest 断言（如 lldb unittests FormatEntityTest.cpp:177）硬错误；LLVM 侧无 PrintTo 注册（SupportHelpers.h 仅 matcher/PrintTo 局部）。②gmock 1.17 容器匹配器 ElementsAre/ContainerEq 经 internal::StlContainerView 后 `typedef typename View::value_type Element`（gmock-matchers.h:3947）硬要求标准容器 typedef；lldb 自定义容器 RangeVector（RangeMap.h:136，Collection=SmallVector）无 value_type → 硬错误并级联出 clang 错误恢复噪声（假 std::equal_to<>()(Range,int) 实例化错误，补 value_type 后消失，勿被带偏去改 operator==）。注：LLVM 22.x monorepo 的 gtest 从 llvm/third-party 迁至顶层 third-party/unittest（LLVM-patched googletest，随 22.1.0 官方 release tarball 内置）；独立构建消费标准 googletest 1.17（如 conan 包）必现此类不兼容，应优先消费 vendored 树（见 rec_approach）。
+affected_scope: 独立构建（非 monorepo）lldb/clang 等 LLVM 子项目的 unittests 且使用标准 googletest≥1.13 头
+verification_cmd: grep -n "LLVM_HAS_GTEST" <src>/lldb/cmake/modules/LLDBStandalone.cmake && grep -n "third-party/unittest" <src>/lldb/cmake/modules/LLDBStandalone.cmake
+rec_priority: 1
+rec_approach: vendored-llvm-patched-gtest
+rec_description: standalone 构建优先消费归档内置 vendored 树（LLVM-patched googletest，monorepo CI 同源）：①set(LLVM_HAS_GTEST ON)；②get_filename_component(_root "${LLVM_MAIN_SRC_DIR}" DIRECTORY) 解析 monorepo 根，EXISTS ${_root}/third-party/unittest/CMakeLists.txt 则源树优先 add_subdirectory（binary dir 用 third-party/unittest）；③LLVM_THIRD_PARTY_DIR 包内回退（指向构建机，standalone 消费方 EXISTS 守卫静默 no-op）。vendored wrapper LLVM_HAS_GTEST 模式构建合并 llvm_gtest/llvm_gtest_main（gtest-all.cc+gmock-all.cc），内置 printable raw_ostream 流式桥（根因①不出现），gmock 容器匹配器可编译（根因②不出现，单 TU 双实验实证无需 value_type）。lldb/0.0.1 V9 全量实测：946/946 构建边 + 31387 gtest 用例（31359 pass/28 fail 全部设备沙箱归因）
+rec_command: 见 archives/l/lldb/0.0.1/patches/0004-lldb-cmake-modules-LLDBStandalone.cmake.patch
+rec_auto_fix: false
+rec_impl: none
+fallback_priority: 2
+fallback_approach: build-time-shim-file-write
+fallback_description: 仅当 vendored 树不可用时（非 22.1.0 归档源）：①unittests/CMakeLists.txt 目录级 file(WRITE) 生成 SFINAE shim 头至构建目录（对 .str() 可转 std::string 的类型提供 std::ostream<<，llvm 命名空间 ADL 命中）+ -include 强制包含（仅 unittest TU，liblldb 编译标志零污染）；②RangeVector 补 `typedef Entry value_type;`（1 行，无语义变化）。注：lldb/0.0.1 最终方案已弃用此路线（补丁 0009/0010 仅存 git 历史）——vendored 树覆盖两条根因且 monorepo 同源
+fallback_command: ''
+fallback_auto_fix: false
+fallback_impl: none
+forbid_1_pattern: 'sed.*-i.*RangeMap.h'
+forbid_1_reason: 补丁必须走 refresh-patch --auto（R1），禁止手工编辑补丁/绕道改源后不记档
+forbid_1_consequence: 补丁与源树漂移，CI 复现失败
+principles: P001
+causes: []
+caused_by: []
+similar_to: []
+conflicts_with: []
+prerequisite_of: []
+doc_file: ''
+last_updated: '2026-09-27'
+source_event: lldb/0.0.1 本地 V5 LLDBUnitTests 构建失败（FormatEntityTest.cpp:177 流式 + RangeMapTest.cpp:24 容器匹配器）；最终解 = vendored 树（0004），V9 全量 946/946 + 31387 gtest 实测绿
+authors: ''
