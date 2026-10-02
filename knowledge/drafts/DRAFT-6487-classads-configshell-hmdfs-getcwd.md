@@ -48,6 +48,15 @@ self.run(f'cd "{src}" && CONFIG_SHELL=/bin/sh CC={cc} ... ./configure ... && mak
 
 classads/1.0.10（2026-09-09），修复后 conan-verify G2 全绿。
 
+补充实例：hamlib/4.7.1（2026-09-28）——同一现象出现在 `clean-verify` 的 **G0**
+（不是 `conan create`）：`clean_verify.py` 默认 `config_shell=/data/service/hnp/bin/bash`，
+在 `$HOME` 根目录下 getcwd 正常、进入任何**子目录**即失败，于是 configure 第 1445 行
+`ac_pwd=\`pwd\`` 报 `working directory cannot be determined`。
+处理：`CONFIG_SHELL=/bin/sh python3 scripts/ohc-run.py clean-verify <pkg> <ver>`，
+随后 G0 通过（5 补丁应用 + configure/make/install，14 bin / 11 lib）。
+说明该默认值对 G0 与 G2（conan 子进程）都有影响，凡走 autotools configure 的门禁
+都应显式内联 `CONFIG_SHELL=/bin/sh`。
+
 ## 相关
 
 DRAFT-E551（CONFIG_SHELL=bash 老 ltmain.sh 丢引号转义）——解法手段相同

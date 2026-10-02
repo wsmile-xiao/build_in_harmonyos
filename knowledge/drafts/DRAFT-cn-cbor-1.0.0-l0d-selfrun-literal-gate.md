@@ -119,6 +119,46 @@ cn-cbor 的 `test.c` 覆盖编码/解码往返 12 项 CHECK 断言。
 - **上游测试**: `./cbor_test` → `RESULTS: 11 tests (11 ok, 0 failed,
   0 skipped)`（exit 0）
 
+## 补充实例：hamlib/4.7.1（2026-09-28，PR #13597）
+
+同一 L0d 在**本地** `ci/conan/build_and_test.sh` 上也能复现（不只远端 CI）：
+autotools C 库 hamlib 的 test_package 用 CMake/CTest 驱动真实断言
+（`test_package/test.c` 12 处断言，`test()` 仅调 `cmake.test()`），
+本地 `conan-verify` G0–G4 全绿，但跑本地 CI 脚本时：
+
+```text
+[fail] L0d: test() method has no self.run() call — likely a stub
+L0_RESULT=fail: stub_test_method
+L1/L2/L4/L5 = skip: blocked_by_L0
+```
+
+两点补充：
+
+1. **`conan-verify` 绿 ≠ CI 绿**：`conan-verify` 走 `conan create`，只按行为执行
+   `test()`，所以 `cmake.test()` 形态在它那里全绿；L0d 是 `build_and_test.sh` 里的
+   静态文本检查，只在跑本地/远端 CI 脚本时才暴露。推之前务必跑一次
+   `ci/conan/build_and_test.sh`，不能只凭 `conan-verify` 绿下推断。
+2. 因为是纯 `grep`，**注释掉的 `self.run(...)` 同样能过 L0d**（假阴性），而
+   `cmake.test()` 这种真实执行形态反被拦（假阳性）——方向相反的两个误判同源于
+   文本判定。修 L0d 时应先把注释剥离再判定，或改为“至少一次真实执行”的结构化检查。
+
+修复（与 cn-cbor 同形，但保留 CTest 双证据）：
+
+```python
+import os
+from conan.tools.cmake import CMake
+...
+    def test(self):
+        cmake = CMake(self)
+        cmake.test()                      # CTest 摘要
+        self.run(os.path.join(self.cpp.build.bindirs[0], "test_hamlib"),
+                 env="conanrun")          # 直接执行安装后的二进制
+```
+
+（`generate()` 需加 `VirtualRunEnv`。）修复后 L0 pass，L1a/L1b/L1c/L1e、L2、L4、L5
+全部解锁并通过；`conan create` 日志同时给出 `1/1 Test #1: test_hamlib ... Passed`
+与 `RUN: ./test_hamlib` → `PASS: 310 rig models enumerated` 两份证据。
+
 ## 适用边界 (Boundary)
 
 - 适用：所有 `test_package test()` 仅用 `cmake.test()` / 无 `self.run` 字面量

@@ -101,6 +101,34 @@ L0k 误判），走路径 B 新建草稿对。
 - `package_type = "library"` 却不声明 shared option（Conan2 报错，E277）。
 - test_package test() 无 self.run() 真实执行（L0d stub_test_method）。
 
+## 补充实例：hamlib/4.7.1（2026-09-28，PR #13597）——反方向的 L0k 误判（真实 bin 产物未被识别）
+
+picosha2 的 L0k 是「无 bin 的库因模板注释被误判为 CLI 工具」；hamlib 是相反的
+方向：**真实有 bin 产物、但门禁识别不到**。
+
+autotools 库 hamlib 把 14 个 CLI 工具装到 `bin/`，`archives/h/hamlib/commands.json`
+（`type: "tool"`）也已就位，但 `package_info()` 未声明 `cpp_info.bindirs`，于是
+本地 `ci/conan/build_and_test.sh` 的 L0k 告警：
+
+```text
+[warn] L0k: commands.json exists but package looks like a library (no bindirs/bin install)
+```
+
+根因：`ci/conan/detect_bindirs.py` 只识别 `self.cpp_info.bindirs`、CMake 的
+`RUNTIME DESTINATION bin`、`self.copy(..., dst="bin")`、`package_type="application"`；
+autotools 的 `bin_PROGRAMS` + `make install` 不在识别范围内。
+
+修复：`package_info()` 内显式声明（仓库 2621 个配方惯例）
+
+```python
+self.cpp_info.bindirs = ["bin"]   # 14 个 CLI 工具（R38 commands.json type=tool）
+```
+
+修复后 `[ok] L0: ... commands.json valid (type=tool)`，L0 pass，L1–L5 全部解锁。
+注：`rigtestmcast`/`rigtestmcastrx`（上游 `tests/Makefile.am` 里 `bin_PROGRAMS`
+一并安装的多播测试小程序，不响应 `--version`/`--help`）会让 L2 给出非阻塞告警，
+属已知诚实边界而非缺陷。
+
 ## 适用边界
 
 - 适用：OHOS/CI 下所有 header-only（无构建族 A）C/C++ 库的 Conan 2.x 配方。
