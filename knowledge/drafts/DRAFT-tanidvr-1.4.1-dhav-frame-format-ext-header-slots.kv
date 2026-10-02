@@ -1,0 +1,48 @@
+# ═══ Draft knowledge entry — DHAV（Dahua DVR 录像）私有容器帧格式与 dhav2mkv 测试数据构造 ═══
+# Timestamp: 2026-10-01
+# Software: tanidvr 1.4.1（任何需要构造/解析 .dhav .dav 录像流的包：dhav2mkv、DVR-IP 工具链）
+# Gate: test_package 消费者用例 / conan create test 阶段
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-tanidvr-1.4.1-dhav-frame-format-ext-header-slots
+title: DHAV 容器帧格式（24 字节头 + 偏移 12 总长 + 偏移 22 扩展头长度 + 尾部 dhav+总长）与 4 字节子字段组的槽位映射：构造测试流时槽位错位一字节会静默产出 480x0 废分辨率，须用产物 MKV 头 0x170/0x174 反查
+trigger_tool: dhav2mkv / configure+make (autotools)
+phase: testing
+error_signature: PixelHeight=0|floating point exception \(core dumped\)|FPE on `(v_width \* 1000) / v_height`|unable to identify media container format from incoming stream|DHAV header with 0 fps defined|Media container: DHAV
+severity: 3
+category: testing|protocol|media|portability
+match_keywords: DHAV, dhav, dhav2mkv, PixelWidth, PixelHeight, MKV_HOFF_PixelWidth,
+  v_width, v_height, dhav_sf_parse_ext_head, DHAV_SF_DATA, EBML, Matroska, cluster,
+  DVR-IP, Dahua
+keywords: DHAV, dhav, dhav2mkv, PixelWidth, PixelHeight, MKV_HOFF_PixelWidth, v_width,
+  v_height, dhav_sf_parse_ext_head, DHAV_SF_DATA, EBML, Matroska, DVR-IP, Dahua, 0x170, 0x174
+approach: 按 src/mctools.c 的实现反向构造最小合法 DHAV 流喂给 dhav2mkv：
+  ①帧 = 24 字节头 + 扩展头 + body(H.264 Annex-B) + 尾部；头内 magic "DHAV"@0、帧类型@4
+  （0xfd=带几何信息的 I 帧 / 0xfc=普通视频帧，必须排在 I 帧之后）、epoch(u32 LE)@16、
+  相对时间戳 ms(u16 LE)@20、扩展头长度@22、帧总长度(u32 LE)@12（与尾部冗余重复）；
+  ②尾部 8 字节 = "dhav" + 同一 u32 总长度，dstf_process_dhav_stream_to_frames() 会校验
+  这三处一致，不一致就当垃圾跳过；③扩展头 dhav_sf_parse_ext_head() 按「每组 4 字节 =
+  [id, s0, s1, s2]」填 dhav_subfields_array[(id<<3)+子位]（**只有 id==0x88 是 8 字节**），
+  读取端 width=array[0x80<<3+2]*8、height=array[0x80<<3+3]*8、fps=array[0x81<<3+3]，
+  所以 640x480@25 的扩展头是 0x80 0x00 80 60 0x81 0x00 0x00 0x25 —— 错位一字节就得到
+  480x0，工具不报错也不崩（见 draft-aarch64-udiv-by-zero-no-trap），只有产物分辨率不对；
+  ④验证手段：产物 MKV 头把宽高以大端 uint16 写在固定偏移 MKV_HOFF_PixelWidth=0x170 /
+  MKV_HOFF_PixelHeight=0x174，直接反查这两个值即可确认上游真按你给的扩展头解析了
+  （比读日志可靠）；⑤dhav2mkv 识别容器靠「同时出现 DHAV 与 dhav」或 "Dahua_ZH"（raw H.264），
+  都不匹配时 fallback 当 DHAV 继续跑、只打 WARNING、最终 0 字节输出且退出码 0 —— 脚本化
+  断言必须检查输出内容而非退出码。
+root_cause: DHAV 是达智私有容器，格式只存在于 src/mctools.c 的字节操作里（无头文件文档、
+  无样例数据），且扩展头是「按组填充的稀疏数组」而非 TLV：组内 4 字节被整体当作
+  [id, 子位0, 子位1, 子位2] 写入 array[id<<3 + 子位]，因此「id 自己占掉子位 0」这个隐含
+  约定极易被忽略 —— 常见错法是把 0x80 0x50 0x3C 当成 id+width/8+height/8，得到 width=480、
+  height=0（因为高实际落在子位 3）。而 height=0 会走到 (v_width*1000)/v_height 的无保护整数除法
+  （见 draft-aarch64-udiv-by-zero-no-trap 的架构差异），在 aarch64 上不陷阱，于是「转换成功、
+  文件能播不了」这类缺陷可以一路绿灯通过自动化测试。
+rec_approach: synth-dhav-frame-by-reading-mctools + assert-mkv-header-geometry
+doc: 无（待 promote 后生成）
+
+verification: tanidvr/1.4.1 conan create（OHOS aarch64，profile ohos-aarch64-wsl）test 阶段
+  25/25 断言全绿，其中两条即反查产物 MKV 头 0x170/0x174 == 640/480；CI 本地同源门禁 L1e
+  破坏性反向验证通过；CI 侧 L2 冒烟（dhav2mkv --help）通过。
+related: draft-aarch64-udiv-by-zero-no-trap（height=0 触发的跨架构除零 UB）；
+  E002（/tmp 只读）；draft-sourceforge-cdn-blocked-use-alpine-distfiles（本包源码获取路径）
