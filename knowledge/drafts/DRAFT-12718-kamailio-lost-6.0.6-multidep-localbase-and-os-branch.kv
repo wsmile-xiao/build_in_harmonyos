@@ -1,0 +1,84 @@
+#====================================================================
+# DRAFT-12718-kamailio-lost-6.0.6-multidep-localbase-and-os-branch
+#   经典 Makefile 的两个静默退化：
+#   ① 第三方库探测的兜底变量 $(LOCALBASE) 是单值标量，多依赖模块（同模块需
+#      >=2 个外部库）在交叉编译下结构性无法同时满足；
+#   ② $(OS) 由构建机 uname -s 推导，非枚举平台（HarmonyOS）使全部
+#      ifeq ($(OS), ...) 判决静默为假，平台能力宏 / 条件链接标志 / 安装目录同时错位。
+# 来源: 平台任务 12718  feat(kamailio-lost): 6.0.6 适配 HarmonyOS PC（A 配方 + B 知识，同一 PR）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待主编审核 promote）
+# 证据口径: 下列断言均可核查 —— 源码行号取自 kamailio 6.0.6 官方源码包；
+#           真机结论取自 HarmonyOS PC（OHOS clang 15.0.4, aarch64）上实跑的
+#           四组受控实验与一次完整 conan create；未实测处均已显式标注。
+#====================================================================
+
+id:                     DRAFT-12718-kamailio-lost-6.0.6-multidep-localbase-and-os-branch
+trigger_tool:           make|pkg-config|configure|linking|runtime
+phase:                  configuration|compilation|linking
+error_signature:        neither gethostbyname2 or getipnodebyname present|cannot find -lxml2|cannot find -lcurl|undefined reference to .sctp_sendmsg|No rule to make target .cfg-defs.
+severity:               3
+category:               build-system, cross-compile, ohos, toolchain, linking
+match_keywords:         LOCALBASE, XML2CFG, CURL_BUILDER, CROSS_COMPILE, make cfg, config.mak, uname 平台探测, OS 条件分支, HAVE_GETHOSTBYNAME2, resolve.h, 多依赖模块, 兜底分支, 交叉编译探测污染, kamailio, loadmodule
+title:                  单值兜底变量 $(LOCALBASE) 在多依赖模块上结构性失配，且 $(OS) 由 uname 推导致平台条件分支静默失效——kamailio 6.0.6 lost（libxml2 + curl）适配
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             【现象】多依赖模块（同一模块需两个以上外部库）沿既有先例手法适配时，总有一侧 -lX 找不到；同时 OS=harmonyos 不落在构建系统任何 OS 分支，平台相关判决全部静默失效（配置期不报错，只在编译/链接/运行期以无关报错形式出现）。【机制一：单值兜底 vs N 个依赖】kamailio 模块 Makefile 的第三方库探测（pkg-config 类与 *-config 脚本类）整体包在 ifeq ($(CROSS_COMPILE),) 内——交叉编译时上游自己就跳过宿主探测，两类依赖都直接落到各自 else 分支，而这两个 else 分支共用同一个 $(LOCALBASE)（src/modules/lost/Makefile：libxml2 段 -I$(LOCALBASE)/include/libxml2 -L$(LOCALBASE)/lib -lxml2；curl 段 -L$(LOCALBASE)/lib -lcurl）。$(LOCALBASE) 在 src/Makefile.defs 是按 OS 赋值的单值标量（:483/490/497/504/511/518/527/529/533，最终 ?= /usr/local），只能指向一个前缀；而 Conan 2 给每个依赖一个独立包目录，libxml2 与 curl 不共享前缀，于是「两个 -lX 共用一个前缀」在结构上不可满足。单依赖模块（kamailio-tls 只有 openssl、kamailio-slack 只有 curl、kamailio-snmpstats 只有 net-snmp）恰好吃得下该手法，故先例手法无法迁移到 lost。【机制二：$(OS) 来自构建机 uname】src/Makefile.defs:125 用 OS := $(shell uname -s | sed ... | tr "[A-Z]" "[a-z]") 推导平台；kamailio 6.0.6 源码树内 harmonyos/ohos 出现 0 次，20 处 ifeq ($(OS), ...) 列举的只有 linux/gnu_kfreebsd/freebsd/openbsd/netbsd/dragonfly/solaris/darwin，设备 uname -s 返回 HarmonyOS，于是 OS=harmonyos，全部 OS 判决为假：平台能力宏整体缺失（Makefile.defs:1844-1849 的 linux 分支不给，core/resolve.h:290 直接 #error 硬失败）、模块级条件链接标志被静默丢弃（sctp/Makefile 的 -lsctp 只在链接期才暴露）、安装目录（doc_dir/man_dir/data_dir）也与 linux 分叉。【为什么两者同类】都属静默退化：配置期不报错，错误在两三跳之后以无关形式出现（缺头文件 / 缺宏 / 缺 -l），排查者极易误判为「依赖没装」。【关键补充：两阶段必须同值】make cfg 会把 OS/C_DEFS/LOCALBASE 烘进 src/config.mak，而模块 Makefile 经 src/Makefile.defs:41 include $(COREPATH)/config.mak 读取它，因此只在 make modules 命令行传 OS=linux 不生效（真机实测见正文受控实验 B2）。
+affected_scope:         kamailio 全模块族的多依赖模块（lost、nghttp2、rabbitmq、websocket、db_mysql 等）；以及任何「以单一 LOCALBASE 类变量做多依赖兜底 + 以 uname/枚举表做平台探测」的经典 Makefile 构建系统。反例与不适用面见正文「边界」。verification_cmd: cd kamailio-6.0.6 && make cfg include_modules=<mod> OS=linux && make modules modules=modules/<mod> -j1 OS=linux（若两阶段都不传 OS=linux，同一命令在 HarmonyOS PC 上以 neither gethostbyname2 or getipnodebyname present 失败）
+
+# ═══ Layer 3: 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           neutralize-shared-localbase-fallback-and-inject-per-dependency-search-paths-with-os-override
+rec_description:        ① 多依赖模块不沿用 $(LOCALBASE) 兜底：命令行显式置空两侧探测变量（XML2CFG= CURL_BUILDER=，与上游 CROSS_COMPILE 交叉编译语义一致，同时阻止宿主 xml2-config/pkg-config 在交叉编译期把宿主路径混入产物），再把 LOCALBASE 指向一个不存在的目录，使兜底分支产生的 -I/-L 全部落空，改由 CPATH / LIBRARY_PATH 按依赖逐个给出各自的 include/lib —— 每个 -lxml2 / -lcurl 只可能解析到自己那个依赖包（R33：显式注入，不依赖未定义 shell 变量）。② 平台条件失效用命令行变量一次覆盖：make cfg 与 make modules 都要传 OS=linux（命令行赋值优先于 Makefile 内 :=；两阶段必须同值，因为 make cfg 把 OS/C_DEFS 烘进 src/config.mak，模块侧经 Makefile.defs:41 读取）。不要按当前报错逐个复刻 -DHAVE_* 清单。
+rec_command:            CPATH=<dep1>/include:<dep1>/include/libxml2:<dep2>/include LIBRARY_PATH=<dep1>/lib:<dep2>/lib make cfg include_modules=lost OS=linux LOCALBASE=<build>/no-single-localbase-retired XML2CFG= CURL_BUILDER= && make modules modules=modules/lost -j1 OS=linux LOCALBASE=<build>/no-single-localbase-retired XML2CFG= CURL_BUILDER=（同一 CPATH/LIBRARY_PATH 环境）
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      pkgconfig-dir-aggregation
+fallback_description:   把各依赖包的 lib/pkgconfig 一并加入 PKG_CONFIG_PATH，让模块自身的 pkg-config --exists libxml-2.0 / libcurl 探测按设计命中（与 E468 同向、但不依赖 Conan 的 generators 目录）。前提是每个依赖包的 .pc 自洽 —— 本任务实测不成立：libcurl.pc 带 Requires.private: openssl,zlib，pkg-config libcurl --cflags 直接 rc=1（Package openssl was not found）；libxml-2.0.pc 的 prefix=/usr/local 也需 --define-variable=prefix= 修正。故仅在依赖 .pc 自洽时作回退。
+fallback_command:       PKG_CONFIG_PATH=<dep1>/lib/pkgconfig:<dep2>/lib/pkgconfig make cfg/include_modules=lost OS=linux && 同上 make modules
+fallback_auto_fix:      false
+fallback_impl:          static-analysis
+
+fallback_2_priority:    3
+fallback_2_approach:    symlink-farm-joint-prefix
+fallback_2_description: 造一个「联合前缀」目录：其 include/ 与 lib/ 下用符号链接分别指向两个依赖包的对应目录，再把单个 $(LOCALBASE) 指向它——不需改上游、不需 CPATH/LIBRARY_PATH。代价是要维护链接农场（每新增一个依赖就要补链），且符号链接在 HMDFS 上的行为需另行确认（本任务未走该路线，未实测）。
+fallback_2_command:     mkdir -p joint/{include,lib} && ln -s <dep1>/include/* joint/include/ && ln -s <dep1>/lib/* joint/lib/ && ... make ... LOCALBASE=<abs>/joint
+fallback_2_auto_fix:    false
+fallback_2_impl:        manual
+
+forbid_1_pattern:       (?i)LOCALBASE\s*=\s*<(dep|curl|xml)[^>]*>|把单依赖兜底手法直接套用到多依赖模块
+forbid_1_reason:        用单个 $(LOCALBASE) 指向某一个依赖包目录，指望另一依赖靠系统路径命中
+forbid_1_consequence:   交叉编译下另一依赖的 -lX 在链接期找不到（或误命构建机同库），产物缺失或带上宿主路径依赖
+forbid_2_pattern:       (?i)extra_defs\s*=.*-DHAVE_|逐个补\s*-DHAVE_(GETHOSTBYNAME2|EPOLL|SELECT|SIGIO_RT)
+forbid_2_reason:        按当前报错逐个复刻 -DHAVE_* 宏清单来「绕过」OS=harmonyos（症状级）
+forbid_2_consequence:   同一根因下的其他平台宏与模块级 OS 条件仍缺失，且每适配一个新模块都要重新试错一轮；错在下一跳才暴露
+forbid_3_pattern:       (?i)make\s+cfg(?![^\n]*OS=linux)|仅(在)?\s*make\s+modules.*传\s*OS
+forbid_3_reason:        make cfg 生成的 src/config.mak 已把 OS/C_DEFS/LOCALBASE 烘死，模块构建经 src/Makefile.defs:41 读它；只在 make modules 传 OS=linux 无效
+forbid_3_consequence:   真机实测（B2 组）与完全不传 OS 等价：仍以 harmonyos 宏集编译，报同一个 core/resolve.h:290 #error，白跑一轮
+
+# ═══ Layer 4: 原则引用 / 关系图 / 元数据 ═══
+principles:             P014, P013
+causes:                 []
+caused_by:              []
+conflicts_with:         []
+prerequisite_of:        []
+similar_to:             E090（meson host_machine/host_system 把 HarmonyOS 判为非 linux——同属「平台名未枚举导致平台判决失效」，但载体是 meson 主机三元组而非 Makefile $(OS)，且 E090 的症状面是 undefined symbol: _g_fd_is_journal）；E355（OHOS meson 适配三步法：harmonyos 平台映射 + conan 制品 .pc 的 prefix=/ 修正——同属「平台名映射 + 依赖前缀修正」，但不含「单值兜底变量承载多依赖」这一机制，也不涉及两阶段构建的变量烘焙）；E468（PkgConfigDeps 写出 .pc 但未把 generators 目录加入 PKG_CONFIG_PATH——与本条回退方案同向：都是把依赖元数据目录纳入探测搜索路径；但 E468 的对象是 Conan 生成物目录，本条对象是上游 Makefile 的兜底变量语义与 $(OS) 分支，且主方案根本不经过 pkg-config）
+
+prescan_pattern:        \$\(LOCALBASE\)/(lib|include)
+prescan_globs:          Makefile*,**/Makefile*
+prescan_severity:       2
+
+doc_file:               knowledge/drafts/DRAFT-12718-kamailio-lost-6.0.6-multidep-localbase-and-os-branch.md
+last_updated:           2026-09-28
+source_event:           平台任务 12718：kamailio-lost 6.0.6 适配 HarmonyOS PC；lost 是 kamailio 6.0.6 源码树内首个同时依赖 libxml2 与 curl 的模块（同族先例 kamailio-tls/slack/snmpstats/debugger 均为单依赖，故该失配此前未被知识库覆盖）
+
+authors:                Yukinoshitaqwq
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-28
