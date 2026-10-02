@@ -1,0 +1,100 @@
+#====================================================================
+# DRAFT-conan-buildenv-user-conf-ohos — OHOS Conan 2.29.1 buildenv 不进 recipe
+# 进程 + 单段 user:<name> conf 被静默丢弃 + recipe 层 copy() 替代 install(1)
+# 触发事件: input-utils 1.3 HarmonyOS PC 适配（archives/i/input-utils/1.3）
+# 主从明确：Conan 2.x profile 环境与 user conf 命名契约
+#====================================================================
+
+id:                     DRAFT-conan-buildenv-user-conf-ohos
+trigger_tool:           conan|profile|conf
+phase:                  build|package
+error_signature:        os.environ.*empty|meson.*not found|pkg-config.*not found|
+                        conf.*silently.*dropped|user:.*ignored|install.*not found|
+                        input-event-codes.h.*No such file|
+                        sysroot.*not.*export|auto-detected.*sysroot
+
+severity:               3
+category:               conan|profile|environment
+match_keywords:         conan buildenv, [buildenv], user conf, user.org, [conf],
+                        OHOS_SDK_SYSROOT, OHOS_SDK_NATIVE, OHOS_INPUT_CODES,
+                        sysroot, os.environ, install(1), copy,
+                        compiler_executables, print-sysroot, print-file-name,
+                        auto-detect
+title:                  OHOS Conan 2.29.1 变体：profile [buildenv] 不传播进 recipe 进程、单段 user:<name> conf 被静默丢弃，须 user.<org>:<key> 写于 [conf] 段
+
+root_cause: >
+  (a) Conan 2 的 [buildenv] 仅在 build 阶段的 conanbuild 环境脚本及其子进程
+  中生效；recipe 进程自身的 os.environ 不含这些值。generate()/build() 顶层
+  直接读 os.environ 不可依赖（bare subprocess/shutil.which 读到的同样是
+  recipe 原始 PATH）。OHOS 设备 CI 的 Conan 2.29.1 变体上该行为一致，且设备
+  无 /usr/include，PATH/env 缺失直接表现为上游脚本找不到 uapi 头或 install(1)。
+  (b) 单段 user:<name>:<key> 形式的 conf 键在 profile [conf] 段被静默丢弃
+  （无告警）；必须写成两段式 user.<org>:<key> 才被 Conan 保留并可在
+  self.conf.get 读取。静默丢弃使"配了但没生效"类问题极难诊断。
+  (c) 官方 buildbot（conan-pr-check）不导出 OHOS_SDK_SYSROOT/OHOS_SDK_NATIVE
+  （官方仓 ci/conan/ 全目录 grep 零命中）→ sysroot 获取必须在 recipe 内
+  具备不依赖注入 env 的降级路径。
+affected_scope: >
+  所有 OHOS 设备上 Conan 2.x 配方适配：依赖 profile [buildenv] 注入 sysroot/
+  工具路径的场景、使用 user conf 传递组织自定义参数的场景、上游 Makefile
+  依赖 install(1)（toybox 缺失，见 E098）或 /usr/include 头文件假设的场景、
+  以及官方 CI 不注入专用 env 时需自主发现 sysroot 的场景。
+verification_cmd: >
+  conan create 后在 recipe 内打印 sorted(os.environ) 与 conf.get 结果对照；
+  grep CI 日志确认 user conf 是否进入；conan config show 查看生效 conf。
+  双口径：Run A 官方入口原样（rc=0 + auto-detected 证据行）、Run B export
+  env 优先（rc=0 且零 auto-detected 行）。
+
+rec_priority:           1
+rec_approach:           env-contract-plus-user-conf-naming-plus-sysroot-probe
+rec_description: >
+  1) sysroot 获取为三级降级契约（能力探测，不写平台名硬编码）：
+     第 1 级专用 env OHOS_SDK_SYSROOT → 第 2 级 OHOS_SDK_NATIVE 布局探测
+     （<sdk>/native/sysroot/usr/include 存在才采纳）→ 第 3 级 build() 内
+     cc 自探测：cc 取 profile conf 整键 tools.build:compiler_executables
+     （isinstance(dict) 守卫）否则 which(clang)/which(cc) 兜底；优先
+     <cc> -print-sysroot（rc=0 且为真实目录），clang<16 回退
+     -print-file-name=include 资源目录逐级上溯（≤8 级）找兄弟 sysroot/，
+     且仅当 <sysroot>/usr/include/linux/input-event-codes.h 实际存在才
+     采纳。探测失败仅 info 日志、安全回退上游默认查找，env 优先级设计
+     不变。2) user conf 必须写 user.<org>:<key> 于 profile [conf] 段，
+     禁止单段 user:<name> 形式。3) 上游脚本头文件路径假设用 env-var
+     hook patch（OHOS_INPUT_CODES/OHOS_INPUT_BUS_CODES），未设 env 回退
+     上游原逻辑。4) 上游 install 目标依赖 install(1) 时在 recipe
+     package() 用 conan.tools.files.copy 复现同一文件集
+     （bin/share/man/licenses），受 DRAFT-conan-copy-keep-path-nesting
+     的 pattern/keep_path 语义约束。
+rec_command: >
+  profile: [conf] 段写 user.sea_crab:ohos_sdk_sysroot=...；
+  recipe: self.conf.get("user.sea_crab:ohos_sdk_sysroot")；
+  package: copy(self, "*", src=os.path.join(src_folder,"bin"), dst=bin_dir)
+rec_auto_fix:           false
+rec_impl:               ohos-conan-env-contract
+
+forbid_1_pattern:       os.environ\[.OHOS_.*\]|shutil\.which\(.*\)(?![\s\S]*conanbuild)
+forbid_1_reason: >
+  recipe 进程顶层 os.environ 不含 profile [buildenv] 值；shutil.which 观测
+  同一不完整 PATH。禁止以其作为 buildenv 值来源（另见 E330 禁令）。
+forbid_1_consequence:   找不到工具/头文件，构建间歇性失败且难以复现
+forbid_2_pattern:       ^user:[a-zA-Z0-9_-]+:
+forbid_2_reason: >
+  单段 user:<name>:<key> conf 在 [conf] 段被静默丢弃，必须 user.<org>:<key>。
+forbid_2_consequence:   配置静默失效，self.conf.get 返回 None
+
+principles:             P016
+similar_to:             E098,E219,E2150,E238,E296,E328,E330
+conflicts_with:
+prerequisite_of:
+
+doc_file:               knowledge/drafts/DRAFT-conan-buildenv-user-conf-ohos.md
+last_updated:           2026-09-26
+source_event:           archives/i/input-utils/1.3
+
+authors:
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-09-26
