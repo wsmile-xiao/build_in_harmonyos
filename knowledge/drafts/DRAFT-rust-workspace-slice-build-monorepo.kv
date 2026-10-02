@@ -1,0 +1,103 @@
+# ═══ Draft knowledge entry — Rust monorepo workspace 切片构建（-p 选成员 + 隐式成员识别 + git 补丁源规避） ═══
+# Timestamp: 2026-09-28
+# Software: 任何 workspace 根在仓库根、目标 crate 不在 [workspace].members 显式列表、
+#   经 workspace.dependencies path 依赖隐式入图的 Cargo monorepo
+#   （实例：libsignal-core/0.103.1 适配，signalapp/libsignal 25 成员 monorepo；
+#   先例：argc/1.24.0 等 8 个已合入 Rust 包均为单 crate 仓库，无此问题）
+# Gate: 真机 conan create（build() 内 cargo build）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-rust-workspace-slice-build-monorepo
+trigger_tool:           cargo|conan
+phase:                  building
+error_signature:        Updating git repository `https://github\.com/.*`|
+                        Updating git submodule https://github\.com/.*\.git|
+                        error: package `.*` depends on crate `.*`, but it is
+                        part of workspace members that do not build
+
+severity:               2
+category:               rust, cargo, workspace, monorepo, patch-crates-io
+match_keywords:         workspace, members, default-members, -p, slice, monorepo,
+                        path dependency, [patch.crates-io], git dependency, Updating git
+title:                  Rust monorepo 适配必须 -p 切片选建：workspace 根在仓库根时目标 crate 常不在 members 列表（path 依赖隐式入图），裸 cargo build 会构建全部成员并 fetch 各成员的 git 依赖
+
+root_cause: >
+  Cargo workspace 的 [workspace] 表在仓库根时，成员识别分两类：
+  ① members 显式列表；② 被 workspace.dependencies 以 path 形式引用的 crate
+  隐式入图（不在 members 列表也不影响入图）。大型 monorepo（如 signalapp/
+  libsignal 25 成员）的裸 cargo build 会构建全部成员——每个成员各自的 git
+  依赖（bridge/* 的 boring-signal/spqr 等）都会被 fetch，OHOS 设备/CI 沙盒
+  无法访问 github，卡死在 "Updating git repository/submodule"。另：
+  [patch.crates-io] 段的 git 补丁源在每次依赖解析时都执行 git fetch（即使
+  本次构建不需要该补丁 crate），是切片构建的第二大 git 卡点。
+
+affected_scope:         一切 workspace 根不在 crate 自身目录、目标 crate 非 members
+                        显式成员的 Cargo monorepo 配方；与包类型（应用/库）无关。
+
+verification_cmd:       ①members 检查：grep -A2 '\[workspace\]' Cargo.toml |
+                        确认目标 crate 不在 members；②行为面：同一构建环境分别
+                        执行裸 cargo build（必现 Updating git ... 卡死/超时）与
+                        cargo build -p <crate>（仅该 crate 闭包入图），对比
+                        cargo fetch 的 git 源数量。
+
+rec_priority:           1
+rec_approach:           workspace-slice-build
+rec_description:        构建命令显式切片：cargo build --release -p <crate>；
+                        若 workspace 其他成员的 workspace.dependencies git
+                        依赖仍污染解析图（Cargo.lock 重解析时必读），在补丁中
+                        把 members/default-members 缩容到 ["<crate>"] 并删除
+                        [patch.crates-io] 的 git 源（改 registry 源或整体删段），
+                        使解析图零 git 依赖。仓内先例：libsignal-core/0.103.1
+                        （25→1 成员 + 删 3 个 git workspace 依赖 + 删 patch 段，
+                        真机第 6 轮 cargo 零 git 解析实证）。
+rec_command:            cargo build --release -p <crate> --locked
+rec_auto_fix:           true
+rec_impl:               conan-recipe-cargo-workspace-slice
+
+fallback_priority:      2
+fallback_approach:      vendored-git-dependency-offline
+fallback_description:   若 git 依赖确为构建必需且无法删（目标 crate 直接依赖），
+                        只能将 git 仓库内容以本地 path 依赖替换（vendor 进源码
+                        树并在补丁中改写依赖声明为 path），离线化解析图。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          cargo-vendor-path-rewrite
+
+forbid_1_pattern:       cargo +build(?!( +--release)?( +-p| +--package))
+forbid_1_reason:        裸 cargo build 在 monorepo 根构建全部成员，git 依赖 fetch
+                        在 OHOS 环境必卡死（github 不可达，无超时上限）
+forbid_1_consequence:   一整轮真机/CI 卡死在 "Updating git submodule"，无任何
+                        报错可诊断，只能超时强杀
+
+forbid_2_pattern:       \[patch\.crates-io\][\s\S]*git\s*=
+forbid_2_reason:        git 补丁源的 fetch 发生在依赖解析期而非编译期，即使该
+                        补丁 crate 不在目标切片内也会卡死解析
+forbid_2_consequence:   构建 0 进度挂起，且补丁段常被误判为"无害配置"而漏查
+
+principles:             P-TOOLCHAIN-001
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-rust-toolchain-no-rustdoc-skip-doctests, wagyu-0.6.1-rust-legacy-lockfile-ohos-port, DRAFT-below-ohos-unsigned-rust-toolchain
+conflicts_with:
+prerequisite_of:        DRAFT-rust-workspace-lockfile-desync-git-clone-hang
+
+doc_file:               drafts/DRAFT-rust-workspace-slice-build-monorepo.md
+last_updated:           2026-09-28
+source_event:           libsignal-core/0.103.1 适配：真机第 1 轮裸 build 卡死在
+                        Updating git repository signalapp/boring；-p 切片后第 2 轮
+                        仍被 [patch.crates-io] git 源在解析期 fetch 卡死；缩容
+                        members + 删 patch 段后解析图零 git 依赖（第 6 轮实证）
+authors:                Awstme <noreply@gitcode.com>
+source_pr:
+source_commit:           2114c0792f
+
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-28

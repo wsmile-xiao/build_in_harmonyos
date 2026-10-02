@@ -1,0 +1,127 @@
+# ═══ Draft knowledge entry — Rust 库包 rlib 闭包交付：哈希后缀 rlib 必须平铺进单一 libdir ═══
+# Timestamp: 2026-09-28
+# Software: 任何以 rlib 交付的 Rust「库」包（cargo 构建产物为 target/<profile>/
+#   deps/ 下哈希后缀 rlib 闭包；实例：libsignal-core/0.103.1，仓库首个 Rust
+#   库包，此前 argc 等 8 个已合入 Rust 包均为 application 不交付库产物）
+# Gate: 真机 test_package 消费者 probe（rustc 直链打包 rlib 编译 probe.rs）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-rust-rlib-closure-flat-libdir
+trigger_tool:           rustc|conan
+phase:                  packaging, testing
+error_signature:        can't find crate for `.*`|
+                        error\[E0463\]: can't find crate for `.*`|
+                        rlib closure incomplete under .*p/lib|
+                        can't find crate for `.*_derive` which `.*` depends on
+
+severity:               2
+category:               rust, cargo, rlib, packaging, library, proc-macro
+match_keywords:         rlib, deps, hash suffix, --extern, -L dependency, libdir,
+                        closure, static archive, rustc link, proc-macro, .so,
+                        derive, metadata graph
+title:                  Rust 库包 rlib 闭包交付须把 target/deps/ 的哈希后缀 rlib 平铺进 lib/（-L dependency 不搜子目录）且一并交付 proc-macro crate 的 .so（元数据在 .so 内、消费者全图元数据加载必需）
+
+root_cause: >
+  cargo 构建 Rust 库产出的 rlib 分两层：目标 crate 的 lib<crate>.rlib 在
+  target/<profile>/ 顶层，全部传递依赖 rlib（哈希后缀名，如
+  librand-39d9d4e268a0c61a.rlib）在 deps/ 子目录。rustc 的 -L dependency
+  只在参数给定的**单一目录**内按 crate 名解析哈希后缀 rlib，不会递归搜索
+  子目录。conan 的 copy() 按相对路径保序拷贝：若把 src 设为 target 目录
+  递归收集 *.rlib，deps/ 子目录结构会原样带进 package 的 lib/，哈希 rlib
+  落在 lib/deps/ 而非 lib/ 顶层——消费者 probe 的 glob 找不到，rustc
+  --extern 解析传递依赖时同样失败（can't find crate）。第二层坑：deps/ 里
+  还有 proc-macro crate（zerocopy_derive/derive_more_derive/thiserror_impl
+  等）的哈希后缀 .so（--crate-type proc-macro 只产 .so、元数据嵌在 .so
+  内）；消费者 rustc 解析 rlib 闭包时对**每个传递依赖**（含 proc-macro）
+  做全图元数据加载，只拷 *.rlib 时 probe 报 "can't find crate for
+  `zerocopy_derive` which `libsignal_core` depends on"——且 use 式代码里
+  该错误被掩蔽成顶层 crate 名（E0463 指向 use 首段），须用 extern crate
+  改写 + RUSTC_LOG=rustc_metadata 逐层定位。这是仓库首个 Rust 库包的交付
+  形态坑：application 包只交付 bin/ 可执行文件，从未暴露。
+
+affected_scope:         一切以 rlib 形态交付的 Rust 库包配方（cargo 构建、crate
+                        类型 rlib）；消费者为 rustc 直链或任何 -L dependency
+                        方式的集成（含 hmbs 预检的 test_package probe）。
+
+verification_cmd:       ①布局面：ls <pkg>/lib | grep '^librand-' 应命中且
+                        直接位于 lib/ 顶层（不得出现 lib/deps/librand-*）；
+                        ls <pkg>/lib | grep -c '\.so$' 应 > 0（proc-macro
+                        闭包随档）；②行为面：rustc --edition 2024 --extern
+                        libsignal_core=<pkg>/lib/liblibsignal_core.rlib
+                        -L dependency=<pkg>/lib probe.rs 编译通过并跑通断言；
+                        ③排障面：probe 报 E0463 时用 extern crate 改写 +
+                        RUSTC_LOG=rustc_metadata=info 看 "resolving dep" 链
+                        定位真正的缺失 crate。
+
+rec_priority:           1
+rec_approach:           rlib-closure-flat-libdir-with-proc-macro-so
+rec_description:        package() 三段拷贝：顶层 rlib 进 lib/；deps/ 的
+                        *.rlib 平铺进 lib/；deps/ 的 *.so（proc-macro crate）
+                        一并平铺进 lib/。消费者 probe 用 --extern
+                        <crate>=lib/lib<crate>.rlib + -L dependency=<pkg>/lib
+                        直链。C/C++ 消费者不能直接链 rlib（需 Rust 运行时/
+                        panic 处理），package_info 仅声明 libdirs。实例：
+                        libsignal-core/0.103.1 第 6 轮 probe 报 rlib closure
+                        incomplete（deps/ 子目录坑）→ 第 7 轮平铺后报
+                        can't find crate for `zerocopy_derive`（proc-macro
+                        .so 坑）→ 第 8 轮 *.so 随档平铺后全过。
+rec_command:            copy(self, "*.so", src=os.path.join(target_dir, "deps"), dst=lib)
+rec_auto_fix:           true
+rec_impl:               conan-recipe-cargo-rlib-flat-libdir
+
+fallback_priority:      2
+fallback_approach:      rustc-explicit-transitive-extern
+fallback_description:   若交付布局已固化无法平铺，消费者只能对每个传递依赖
+                        （含 proc-macro .so）逐一 --extern <crate>=<path>
+                        枚举（脆弱，随依赖版本漂移），仅应急。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          rustc-extern-enumeration
+
+forbid_1_pattern:       copy\([^\n]*\*\.rlib[^\n]*src\s*=\s*target_dir(?![\s\S]*deps)
+forbid_1_reason:        只拷贝顶层 rlib 会把全部传递依赖遗留在构建目录，
+                        交付闭包残缺
+forbid_1_consequence:   消费者 rustc 链接报 can't find crate，probe 必挂
+
+forbid_2_pattern:       (cp|mv|install).*-r\s+deps[/\\].*lib[/\\]$
+forbid_2_reason:        保序递归拷贝 deps/ 子目录进 lib/ 不解决解析问题：
+                        rustc -L dependency 不递归搜索子目录
+forbid_2_consequence:   交付布局"看似完整"（rlib 都在包里）但消费者链接仍
+                        失败，且 probe 报错与实际根因分离、误导排障
+
+forbid_3_pattern:       copy\([^\n]*\*\.rlib[^\n]*(?![\s\S]*\*\.so)
+forbid_3_reason:        只拷 rlib 漏掉 proc-macro crate 的 .so：消费者全图
+                        元数据加载会因缺失 *_derive 类 crate 失败
+forbid_3_consequence:   probe 报 "can't find crate for `*_derive` which X
+                        depends on"（use 式掩蔽成 X 本身），排障走错方向
+
+principles:             P-PACKAGING-001
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-rust-toolchain-no-rustdoc-skip-doctests, wagyu-0.6.1-rust-legacy-lockfile-ohos-port
+conflicts_with:
+prerequisite_of:
+
+doc_file:               drafts/DRAFT-rust-rlib-closure-flat-libdir.md
+last_updated:           2026-09-28
+source_event:           libsignal-core/0.103.1 适配（仓库首个 Rust 库包）：
+                        真机第 6 轮 probe 报 "rlib closure incomplete"
+                        （conan copy 保序把 deps/ 子目录带进 lib/）；第 7 轮
+                        平铺 rlib 后报 "can't find crate for `zerocopy_derive`"
+                        （proc-macro .so 未随档；use 式掩蔽为顶层 crate 名，
+                        用 extern crate 改写 + RUSTC_LOG 定位）；第 8 轮
+                        *.so 随档平铺后全过
+authors:                Awstme <noreply@gitcode.com>
+source_pr:
+source_commit:           2114c0792f
+
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-28

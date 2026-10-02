@@ -1,0 +1,112 @@
+# ═══ Draft knowledge entry — Cargo.lock 是 workspace 级锁：manifest 任何失配 → 全 workspace 重解析 → git 依赖克隆卡死 ═══
+# Timestamp: 2026-09-28
+# Software: 任何打补丁改 Cargo.toml 后随附上游原版 Cargo.lock 的 Cargo
+#   monorepo 配方（实例：libsignal-core/0.103.1，第 5 轮真机实证：patch 段
+#   与 dev-deps 已删，cargo build 仍去拉 signalapp/boring + boringssl 子模块）
+# Gate: 真机 conan create（补丁应用后 build() 内 cargo build --locked）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review the error excerpt below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-rust-workspace-lockfile-desync-git-clone-hang
+trigger_tool:           cargo|conan
+phase:                  building
+error_signature:        Updating git submodule https://github\.com/.*\.git|
+                        Updating git repository `https://github\.com/.*`|
+                        (error: the lock file .* needs to be updated but
+                        --locked was passed)
+
+severity:               2
+category:               rust, cargo, workspace, lockfile, git-dependency
+match_keywords:         Cargo.lock, workspace lock, desync, re-resolve,
+                        Updating git submodule, boringssl, --locked, --frozen,
+                        patch section, dev-dependencies
+title:                  Cargo.lock 是 workspace 级锁——打补丁改 manifest 后随附原版锁必失配，cargo 静默重解析整个 workspace 并克隆其他成员的 git 依赖读 manifest；对策 = 缩 workspace + 随附重生成锁逐包钉回上游 + --locked 快速失败
+
+root_cause: >
+  Cargo.lock 记录的是**整个 workspace** 的解析图，不是单个 crate。只要任一
+  成员 manifest 与锁有任何失配（增删成员、改 dev-deps、动 [patch.crates-io]
+  段……），cargo 就放弃锁、重解析整个 workspace。重解析时解析器必须读取
+  **其他成员**（含本次构建根本不需要的成员）的 manifest——若这些成员经
+  workspace.dependencies 直连 git 依赖（signalapp/boring 含 boringssl 子
+  模块、SparsePostQuantumRatchet），解析器就会克隆这些 git 仓库。OHOS
+  设备/CI 无法访问 github，卡死在 "Updating git submodule"，无超时上限。
+  关键误判点：补丁删掉了 git 依赖本身（patch 段/无关成员），但**随附的原
+  版锁与改动后 manifest 失配**，失配本身就是重解析触发器——真机第 5 轮
+  实证：patch 段已删、dev-deps 已删，cargo build 仍去拉 boring。
+
+affected_scope:         一切"打补丁改 manifest + 随附上游原版 Cargo.lock"的
+                        Cargo monorepo 配方；单 crate 仓库失配只重解析自身
+                        闭包（无其他成员的 git 依赖），风险低一档。
+
+verification_cmd:       ①失配检测：对补丁后的树跑 cargo metadata --locked
+                        --offline，失配必现 "needs to be updated but --locked
+                        was passed"（而非去 fetch）；②行为面对照：同树裸
+                        cargo build 若出现 Updating git submodule，即实证
+                        重解析触发；③修复验证：cargo check --locked -p
+                        <crate> 零重解析通过。
+
+rec_priority:           1
+rec_approach:           shrink-workspace-plus-regenerated-lock-plus-locked
+rec_description:        三件套缺一不可：①补丁把 workspace 缩容到目标切片
+                        （members=["<crate>"]+ 删其他成员的 git workspace
+                        依赖 + 删 [patch.crates-io] git 源）→ 解析图零 git
+                        依赖；②随附对缩容后 manifest **重生成**的 Cargo.lock
+                        ——从上游原锁抽目标 crate 依赖闭包，再 cargo update
+                        --precise 把 cargo 抬高的包逐包钉回上游原锁版本，
+                        保证依赖版本零漂移（cargo check --locked 实证锁即
+                        当前）；③全链 --locked：一旦失配立即报错，而不是
+                        静默去克隆 github 卡死。实例：libsignal-core/0.103.1
+                        补丁 0001（98 包闭包 + 27 包 --precise 钉回 + 18 包
+                        feature 收缩正当剔除），真机第 6 轮零 git 解析。
+rec_command:            cargo check --locked -p <crate> && cargo update -p <pkg> --precise <ver>
+rec_auto_fix:           true
+rec_impl:               conan-recipe-cargo-lock-regeneration
+
+fallback_priority:      2
+fallback_approach:      vendored-git-dependency-offline
+fallback_description:   若 git 依赖删不掉（目标切片直接依赖）：git 仓库内容
+                        vendor 进源码树、补丁把依赖声明改写为 path，锁随
+                        path 依赖重新生成，解析图完全离线。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          cargo-vendor-path-rewrite
+
+forbid_1_pattern:       (sed|patch|perl).*Cargo\.toml(?![\s\S]*Cargo\.lock)
+forbid_1_reason:        改 manifest 不改/不重生成锁 → 失配触发全 workspace
+                        重解析 → 克隆 git 依赖卡死（或 registry 侧二次解析
+                        漂移版本）
+forbid_1_consequence:   真机/CI 一整轮挂起在 Updating git submodule，且
+                        "patch 已删 git 依赖"的直觉让排障完全走错方向
+
+forbid_2_pattern:       cargo +(build|test|check)(?!( +--locked| +--frozen))
+forbid_2_reason:        无 --locked 时失配被静默消化（重解析+克隆），错误
+                        表现为无输出的挂起而非快速失败
+forbid_2_consequence:   无法区分"锁失配"与"网络不通"，每次排查成本一整轮
+
+principles:             P-TOOLCHAIN-001
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-rust-workspace-slice-build-monorepo, wagyu-0.6.1-rust-legacy-lockfile-ohos-port, DRAFT-rust-toolchain-file-vs-msrv-pinning
+conflicts_with:
+prerequisite_of:
+
+doc_file:               drafts/DRAFT-rust-workspace-lockfile-desync-git-clone-hang.md
+last_updated:           2026-09-28
+source_event:           libsignal-core/0.103.1 适配真机第 5 轮：patch 段与
+                        dev-deps 已删，cargo build 仍去拉 boring 并卡死在
+                        "Updating git submodule boringssl"；根因 = 随附原版
+                        锁与改动后 manifest 失配触发全 workspace 重解析。
+                        三件套修复后第 6 轮零 git 解析实证
+authors:                Awstme <noreply@gitcode.com>
+source_pr:
+source_commit:           2114c0792f
+
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-28
