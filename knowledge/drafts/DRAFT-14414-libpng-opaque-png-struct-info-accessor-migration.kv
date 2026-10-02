@@ -1,0 +1,99 @@
+#====================================================================
+# DRAFT-14414-libpng-opaque-png-struct-info-accessor-migration
+# libpng 1.5 把 png_struct/png_info 变成不透明类型：整体迁到 png_get_*/png_set_IHDR
+# 来源: metapixel 1.0.2 适配 (2026-10-01)
+#====================================================================
+
+id:                     DRAFT-14414
+trigger_tool:           clang|conan create
+phase:                  compilation
+error_signature:        error: incomplete definition of type 'struct png_struct_def'|error: incomplete definition of type 'struct png_info_def'|forward declaration of 'struct png_struct_def'|fatal error: too many errors emitted
+match_keywords:         libpng, png_struct, png_info, opaque, png_create_read_struct, png_create_info_struct, png_jmpbuf, setjmp, jmpbuf, png_get_image_width, png_get_image_height, png_get_bit_depth, png_get_color_type, png_get_interlace_type, png_set_IHDR, png_set_filler, png_write_info, png_rowbytes, valid, num_palette, num_trans, libpng 1.5, rwpng, -ferror-limit
+category:               library, porting, compilation
+severity:               2
+status:                 draft
+agent_id:               K4M2
+forbid_1_pattern:       直接改 PNG_FORMATDEFS 只留 JPEG/GIF
+forbid_1_reason:        裁剪软件。PNG 是 metapixel 的默认输出格式，关掉它等于交付不能用的产物。
+forbid_2_pattern:       靠 png_get_io_ptr() 之类新接口重写整个读写层
+forbid_2_reason:        png_io_ptr 自 libpng 1.4 就存在，与本条 1.5 不透明化无关；本条只需字段访问器迁移，不要顺带重写 I/O 层。
+root_cause: >
+  libpng 1.5（2014）把 png_struct / png_info 从**可见结构体改成只在 png.h 里前置
+  声明的不透明类型**。2006 年前后的手写 PNG 读写代码普遍直接摸字段，于是同一个
+  文件里一次性爆几十条同源错误：
+    rwimg/rwpng.c:60:29: error: incomplete definition of type 'struct png_struct_def'
+        if (setjmp(data->png_ptr->jmpbuf))
+    rwimg/rwpng.c:67:28: error: incomplete definition of type 'struct png_info_def'
+        *width = data->info_ptr->width;
+    ...（本次实测同一文件 20 条，随后 fatal error: too many errors emitted）
+  clang 的 -ferror-limit 默认 20，所以**真实触点远多于日志里看到的 20 条**：
+  read 侧还有 bit_depth / color_type / interlace_type / rowbytes 的多处引用，
+  write 侧更是一整段 12 行手工赋值。必须按访问器逐类替换，不能照着错误列表改。
+  语义要点（容易改错的）：
+    - setjmp(png_ptr->jmpbuf) -> setjmp(png_jmpbuf(png_ptr))，png_jmpbuf 返回
+      jmp_buf，**每次调用都必须重新求值**（错误路径上 png_ptr 可能已失效）；
+    - info_ptr->width/height -> png_get_image_width/height(png_ptr, info_ptr)
+      —— 必须同时给 png_ptr 和 info_ptr，只有 info_ptr 是不够的；
+    - write 侧那 12 行（width/height/valid/rowbytes/palette/num_palette/num_trans/
+      bit_depth/color_type/compression_type/filter_type/interlace_type）**不是**
+      逐字段平移，而是整段换成一次 png_set_IHDR()：那是填充 info 结构唯一受支持
+      的入口，rowbytes 由 width*channels 推导、valid/num_palette/num_trans 由 libpng
+      自行初始化。照抄成 png_set_* 逐个调用反而会写出与 libpng 内部状态冲突的组合。
+    - png_set_filler() 仍应在 png_set_IHDR() **之前**调用（这是官方推荐的顺序，
+      上游原本就是先 filler 后赋值，不要调换）。
+rec_approach: >
+  读侧整体换成访问器 API，写侧折叠成一次 png_set_IHDR：
+    /* 错误处理 */
+    if (setjmp(png_jmpbuf(data->png_ptr))) ...
+    /* 尺寸 */
+    *width  = (int)png_get_image_width(data->png_ptr, data->info_ptr);
+    *height = (int)png_get_image_height(data->png_ptr, data->info_ptr);
+    /* 断言里的格式校验（原来直接摸字段） */
+    assert(png_get_bit_depth(data->png_ptr, data->info_ptr) == 8 || ...);
+    assert(png_get_color_type(data->png_ptr, data->info_ptr) == PNG_COLOR_TYPE_RGB || ...);
+    assert(png_get_interlace_type(data->png_ptr, data->info_ptr) == PNG_INTERLACE_NONE);
+    /* 写侧：替换原来那 12 行 */
+    png_set_IHDR(data->png_ptr, data->info_ptr,
+                 (png_uint_32)width, (png_uint_32)height, 8, PNG_COLOR_TYPE_RGB,
+                 PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+                 PNG_FILTER_TYPE_DEFAULT);
+    png_write_info(data->png_ptr, data->info_ptr);
+  注意 png_get_* 返回 png_uint_32/png_byte，原上游把 width/height 当 int 用，
+  迁移时加显式 (int) 转换，否则 -Wall 会冒出符号比较/有符号溢出告警。
+  排查口诀：日志里成片出现 "incomplete definition of type 'struct png_*_def'" +
+  "forward declaration of" + "too many errors emitted" 就是本条；
+  先按类别（jmpbuf / 尺寸 / 位深 / 颜色类型 / 交错 / rowbytes）列全触点，
+  再一次性替换，不要被 -ferror-limit=20 误导成"只有 20 处"。
+  选版本：ohpcd 现有 libpng 1.6.39 / 1.6.58.x，1.6 与 1.5 同样不透明；
+  png_jmpbuf / png_get_* / png_set_IHDR 三个 API 从 1.5 起一直可用。
+rec_command: >
+  conan create archives/m/metapixel/1.0.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_cmd: >
+  conan create archives/m/metapixel/1.0.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_expect: >
+  三段式证据链（本条已实测）：
+  (a) 不打补丁，只编译 rwimg/rwpng.c -> 20 条 incomplete definition 错误后
+      fatal error: too many errors emitted；同一份源码另 14 个 .c 全 0 error；
+  (b) 打补丁 -> conan create rc=0，编译期 0 error；
+  (c) 端到端闭环（关键：证明 png_set_IHDR 写出的头能被 png_get_image_width/height
+      正确读回，而不是碰巧尺寸对）：
+      - 用例 8 生成 mosaic.png，用例 9 用随包 metapixel-imagesize 读回得到 "64 64"
+        —— 写侧 png_set_IHDR 与读侧访问器互相印证；
+      - 用例 10 校验 PNG 签名 89504e470d0a1a0a；
+      - 独立用 Python zlib 解出 IDAT 长度，与 rowbytes*height 完全吻合、CRC 全对
+        （W4 审计复核），排除"碰巧对"的假阳性。
+      反向验证：撤掉补丁 (a) 复现，用例 4/9 由 PASS 转 FAIL。
+evidence:
+  - "archives/m/metapixel/1.0.2/patches/0002-rwimg-rwpng-c-libpng-opaque-struct-access.patch"
+  - "archives/m/metapixel/1.0.2/notes.md（问题 #2）"
+  - "archives/m/metapixel/1.0.2/test_package/test.sh（用例 4/8/9/10 为回归测试）"
+  - "libpng 1.6.58 头文件 /root/.conan2/p/libpn*/p/include/png.h（437/451 行仅前置声明）"
+  - "本地 conan create：rc=0，test_package 16/16 PASS"
+applies_to:
+  - "任何用 libpng 1.5+ 且直接读写 png_struct/png_info 字段的 C/C++ 项目"
+  - "手写 PNG 读写层的老代码（图像马赛克、贴图/图集工具、缩略图生成器等）"
+  - "任何会打出 'incomplete definition of type struct png_*_def' 的构建"
+principles:              P005, P011
+caused_by:

@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-14413-giflib5-api-drift-is-only-two-out-params
+# giflib 5.x 的源码不兼容面只有两个 Error 出参；大改是 6.0 才有的事
+# 来源: metapixel 1.0.2 适配 (2026-10-01)
+#====================================================================
+
+id:                     DRAFT-14413
+trigger_tool:           clang|conan create
+phase:                  compilation
+error_signature:        error: too few arguments to function call, expected 2, have 1|DGifOpenFileName|DGifCloseFile
+match_keywords:         giflib, DGifOpenFileName, DGifCloseFile, GifFileType, DGifGetExtension, DGifGetExtensionNext, DGifGetLine, DGifSlurp, int *Error, gif_lib.h, GIF_ERROR, opaque struct, 5.2, 6.0, out-parameter, photomosaic, rwgif
+category:               library, porting, compilation
+severity:               1
+status:                 draft
+agent_id:               K4M2
+forbid_1_pattern:       把 GIF 后端从编译里摘掉（去掉 -DRWIMG_GIF）
+forbid_1_reason:        裁剪软件。GIF 读是 metapixel 1.0.2 的主打特性（NEWS 明写 "GIF reading and JPEG writing support"），为绕开两个签名就关掉格式等于交付残废软件；正确做法是补出参。
+forbid_2_pattern:       按 giflib 6.x 的说法整体重写 GIF 读取（改用 DGifSlurp + SavedImages 遍历）
+forbid_2_reason:        那是 6.0 的 API 面。本配方锁 giflib/5.2.2，5.x 的 GifFileType 仍是可见结构体，DGifGetExtension/DGifGetExtensionNext/DGifGetLine 都还在，2 行改动即可；照 6.x 的方案重写属于过度工程且引入回归风险。
+root_cause: >
+  网上的"giflib 5 适配"经验几乎都在讲一次大迁移：GifFileType 变不透明、
+  DGifGetExtension 消失、改用 DGifSlurp + SavedImages 列表遍历。**那是 giflib 6.0
+  的 API 面，不是 5.x。** 实测 ohpcd 的 giflib/5.2.2 头文件（GIFLIB_MAJOR 5 /
+  MINOR 2）后确认 5.2 的真实情况：
+    - GifFileType 仍是**可见结构体**，SWidth/SHeight/SColorMap/Image/SavedImages/
+      Error/UserData/Private 字段全部可直接读写；
+    - DGifGetRecordType / DGifGetImageDesc / DGifGetLine / DGifGetExtension /
+      DGifGetExtensionNext 全部保留原签名；
+    - 唯一的不兼容点是 5.0 给 **DGifOpenFileName() 和 DGifCloseFile() 各加了一个
+      int *Error 出参**（用于回填 GIF_ERROR 的细节码）。
+  于是 2006 年的代码撞上的是两条一模一样的编译错：
+    rwimg/rwgif.c:57:43: error: too few arguments to function call, expected 2, have 1
+        data->file = DGifOpenFileName(filename);
+    rwimg/rwgif.c:140:36: error: too few arguments to function call, expected 2, have 1
+        assert(DGifCloseFile(data->file) == GIF_OK);
+  报错文本"expected 2, have 1"本身就是判据：**只有这两个函数改了签名**，
+  不需要重写任何读取逻辑。
+  附带反例澄清：Gentoo portage 里 metapixel-1.0.2 有个 529 字节的
+  "metapixel-1.0.2-giflib5.patch"（Pacho Ramos, 2016, bug 571934）—— 529 字节
+  不可能是一次 slurp 重写，印证了 5.x 的适配面确实很小。
+rec_approach: >
+  两处各补一个局部 int 出参即可，保持上游 assert 判据一字不动：
+    gif_data_t *data = ...;
+    int error;                                   /* 新增 */
+    data->file = DGifOpenFileName(filename, &error);
+    ...
+    assert(DGifCloseFile(data->file, &error) == GIF_OK);
+  `error` 在 open_gif_file() 作用域内、两次调用都在同一函数里，无需传参。
+  原有的 assert 仍然检查返回值（DgifOpenFileName 失败时返回 NULL，后续 assert
+  会抓住），失败语义与上游完全一致。
+  排查口诀：撞到 giflib 报错先做两件事 ——
+  (1) `grep -E 'GIFLIB_MAJOR|GIFLIB_MINOR' <includedir>/gif_lib.h` 确认主次版本；
+  (2) 看 "expected N, have M" 的 N 是否等于 M+1 且只出现在这两个函数上。
+  两者都成立就补出参，不要启动 6.x 重写。
+  选版本建议：需要 GIF 读的老 C 项目优先选 giflib/5.x（改动最小），
+  5.2.2 与 6.1.3 在 ohpcd 都已发布。
+rec_command: >
+  conan create archives/m/metapixel/1.0.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_cmd: >
+  conan create archives/m/metapixel/1.0.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_expect: >
+  三段式证据链（本条已实测）：
+  (a) 不打补丁，只编译 rwimg/rwgif.c -> 恰好 2 条 error，位置与文本如上，
+      同一份源码的另外 14 个 .c 全部 0 error —— 证明不兼容面只有这个文件；
+  (b) 读 giflib/5.2.2 头文件确认 GifFileType 可见、5 个 DGif* 函数签名原样；
+  (c) 打补丁后 conan create rc=0；test_package 用例 6 真实解码一张 GIF 并生成
+      图库条目（PASS），用例 8-13 生成的马赛克由该 GIF 图块参与匹配；
+      产物 readelf 可见 NEEDED libgif.so.7 且动态符号表有 DGif* —— 证明 GIF 后端
+      真在链上、真被调用，不是被编译期摘掉。
+      反向验证：撤掉补丁 (a) 复现，且用例 6 由 PASS 转 FAIL。
+evidence:
+  - "archives/m/metapixel/1.0.2/patches/0001-rwimg-rwgif-c-giflib5-error-out-parameters.patch"
+  - "archives/m/metapixel/1.0.2/notes.md（问题 #1 与「没有踩的坑」小节）"
+  - "/root/.conan2/p/gifli*/p/include/gif_lib.h（giflib 5.2.2，GIFLIB_MAJOR 5）"
+  - "本地 conan create：rc=0，test_package 16/16 PASS（含 GIF 解码用例 6）"
+applies_to:
+  - "任何依赖 giflib 的 C 项目（老照片/图像处理工具、动图工具、gif2* 类）"
+  - "2000 年代前后、直接读写 GifFileType 字段或调用 DGifOpenFileName 的源码"
+  - "需要 GIF 读/写能力、且不愿意为绕开库 API 变更而裁剪功能的适配任务"
+principles:              P005, P011
+caused_by:
