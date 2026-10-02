@@ -1,0 +1,90 @@
+#====================================================================
+# DRAFT-librtas-2.0.4-foreign-arch-syscall-lib-dual-delivery — 外架构 syscall 封装库：主库不可运行 + 副库架构中立时的双库交付与测试处置
+# 触发事件: librtas 2.0.4 适配 HarmonyOS PC（conan create 全通过后的适配完整性判断）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-librtas-2.0.4-foreign-arch-syscall-lib-dual-delivery
+trigger_tool:           conan|configure|make
+phase:                  configuration|build
+error_signature:        __NR_rtas undefined|OS `ohos' not recognized|
+                        no such file or directory: /proc/device-tree/rtas|
+                        RTAS_KERNEL_INT|RTAS_PERM|Architecture: powerpc ppc64 ppc64el
+
+severity:               2
+category:               platform, limitation, api, adaptation-decision
+match_keywords:         foreign architecture, ppc64, powerpc, PAPR, RTAS, rtas syscall,
+                        __NR_rtas, device-tree, /proc/device-tree, arch-specific syscall,
+                        lib wrapping foreign ABI, dual library delivery, librtasevent,
+                        E237, E245, runtime degradation, do not crop software
+title:                  外架构 syscall 封装库（主库绑定他架构内核 ABI）应双库原样交付、只对架构中立副库做功能断言，禁止裁剪或造桩
+
+topic: >
+  遇到「一个包同时交付主库与副库，主库整体封装另一 CPU 架构的内核 syscall/firmware ABI，
+  副库是纯数据解析器」的组合时，如何在不裁剪软件、不伪造可用的前提下判定与交付。
+  本条以 librtas 2.0.4（ppc64 RTAS 封装 + 架构中立 RTAS 事件解析）为一手案例，
+  补齐 E237（接口缺失但主体可用）与 E245（内核 syscall 存在、仅 libc 未封装）
+  之外的第三种形态：内核能力在目标架构上**根本不存在**，且失效面覆盖主库的全部入口。
+
+root_cause: >
+  librtas 主库 librtas.so 的每个公开入口最终都走
+  syscall(__NR_rtas=255, &args) 与 PowerPC RTAS firmware token（ibm,* 系列），
+  并从 /proc/device-tree/rtas（PowerPC OFDT 节点）取 token。Linux 仅在
+  arch/powerpc 实现 rtas syscall；OHOS aarch64 sysroot 中 __NR_rtas 出现 0 次，
+  实测 rtas_get_time() / rtas_delay_timeout() 一律返回 librtas 自有负码。
+  与 E245 的关键差异：E245 的 vhangup 在 aarch64 内核**存在**（SYS_vhangup=58），
+  只是 libc 未封装，故可 shim；此处 aarch64 内核无 rtas，**没有可 shim 的目标**，
+  任何 shim 都只能是伪造。Debian 打包 Architecture 仅 powerpc/ppc64/ppc64el 亦为佐证。
+
+durable_solution: >
+  ① 交付判定：不裁剪、不造桩。Makefile.am 的 lib_LTLIBRARIES 全部安装，
+     两个库都进包（librtas.so + librtasevent.so + 4 头文件）。
+  ② 如实声明：notes.md 单列「平台语义判定」小节，给出 6 条证据链
+     （上游 README 自述 ppc64 / __NR_rtas 硬编码 / aarch64 sysroot 无该宏 /
+     device-tree 路径 / 发行版 Architecture 限制 / 运行期实测返回码），
+     明确写「编译通过 ≠ 适配完成」，对齐 E237 的 forbid_1_pattern（禁止声称可运行）。
+  ③ 测试分层：副库（架构中立）做足真实功能断言——本例 parse_rtas_event() 解析
+     合成事件头、断言 version/event_length/节链表形状/位域解码/渲染文本/cleanup
+     + 负向用例；主库只断言**上游文档化的失败路径**（见姊妹条
+     DRAFT-librtas-2.0.4-ohos-no-ppctree-documented-failure-assertions）。
+  ④ 后续演进（不阻塞本次合并）：若社区确需 librtasevent 的解析能力，可另起
+     独立包交付，保持「一个 PR 一个软件」（W2/JC6）。
+
+impact: >
+  适用于所有「库整体封装非本架构内核/firmware ABI」的移植判定，可避免两种误判：
+  （a）误判为 env_unsupported 而白白放弃可用的架构中立副库；
+  （b）误判为「编译通过即适配完成」而交付一个 100% 入口失效的主库（R40）。
+  本条同时给出「不采用 E245 syscall shim」的判据：先确认目标架构内核是否存在
+  该 syscall，存在才可 shim，不存在只能如实声明。
+
+forbid_1_pattern:   声称.*librtas.*(可运行|正常工作).*OHOS|为.*rtas.*加.*返回 0.*桩|
+                     删除.*librtas\.so.*只保留.*librtasevent
+forbid_1_reason:    aarch64 无 ppc64 rtas 内核接口，主库入口必然失败；造桩或裁剪
+                     会让下游集成方误以为功能完整（E237 forbid_1 同类）。
+
+verification_cmd: >
+  clang -target aarch64-linux-ohos -E -dM -x c /dev/null | grep -c __NR_rtas   # 期望 0
+  ls /proc/device-tree/rtas 2>&1 || echo "MISSING: /proc/device-tree/rtas"
+  cat /usr/share/doc/librtas*/copyright 2>/dev/null | head   # 或查 Debian dsc 的 Architecture 字段
+
+rec_priority:           1
+rec_approach:           dual-library-uncropped-delivery-with-tiered-assertions
+rec_auto_fix:           false
+rec_impl:               manual
+
+related:                 E237, E245, E007, E015
+causes:                 []
+caused_by:              []
+similar_to:             [E237, E245]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               DRAFT-librtas-2.0.4-foreign-arch-syscall-lib-dual-delivery.md
+last_updated:           2026-09-30
+source_event:           librtas 2.0.4 HarmonyOS PC 适配，ppc64 syscall 能力缺口判定
+draft:                  true
+
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:
