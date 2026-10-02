@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-14412-raw-makefile-ccopts-string-literal-macro-quoting
+# 手写 Makefile 项目：CCOPTS 里的字符串字面量宏被三层 shell 吃掉引号
+# 来源: metapixel 1.0.2 适配 (2026-10-01)
+#====================================================================
+
+id:                     DRAFT-14412
+trigger_tool:           conan create|make
+phase:                  compilation
+error_signature:        error: expected ')'|expanded from here: #define [A-Z_]+ [0-9]+$|too few arguments to function call, expected 2, have 1
+match_keywords:         CCOPTS, LDOPTS, CFLAGS, shlex.quote, shlex.join, -D, string literal macro, METAPIXEL_VERSION, make variable, recipe shell, expected ')', backslash quote, raw Makefile, autotools-free, quoting, three shell layers
+category:               build, compilation, quoting
+severity:               2
+status:                 draft
+agent_id:               K4M2
+forbid_1_pattern:       平台宏兜底（#ifdef __OHOS__ 之类）
+forbid_1_reason:        本条目根因是 shell/make 转义层数，与平台无关；R8 禁止在补丁里引入平台宏，且本修复对任何 POSIX shell + GNU make 都成立。
+forbid_2_pattern:       直接改上游 Makefile 规则
+forbid_2_reason:        能改，但优先用命令行覆盖 make 变量（零补丁、零上游侵入）；只有当 Makefile 不导出该变量或用 `?=` 时才落补丁。
+root_cause: >
+  手写 Makefile 项目（无 autotools/cmake）要注入依赖的 include/lib 目录，标准做法
+  是在 make 命令行上覆盖上游 Makefile 已经用到的编译变量（CCOPTS / CFLAGS /
+  LDOPTS / CPPFLAGS）。这本身没问题，**问题出��带字符串字面量的 -D 宏上**。
+  一个 -DXXX="1.0.2" 形式的宏要穿过**三层 shell**才能到达编译器：
+    L1 conan self.run -> /bin/sh -c <整条 make 命令行>
+    L2 make 把 CCOPTS 展开进 recipe 文本
+    L3 recipe 文本再交给 recipe 自己的 /bin/sh
+    -> 最后才是 clang
+  L1 就把引号处理掉了：CCOPTS 外层若用双引号包裹（CCOPTS="... -DXXX=\"1.0.2\" ..."），
+  sh 解析到外层的 " 就认为 CCOPTS 的值结束，内层 \" 被解转义成真引号，后续内容全部
+  逃逸成 make 的额外参数。典型症状是编译日志里 recipe 行看起来完全正确
+  （-DMETAPIXEL_VERSION=\"1.0.2\"），但 clang 的命令行已经变成
+  -DMETAPIXEL_VERSION="1.0.2"（引号被 L3 剥掉），宏展开成裸数字 1.0.2，
+  于是源码里的 printf("x " METAPIXEL_VERSION "y") 报
+  `error: expected ')'` + `note: expanded from here: #define METAPIXEL_VERSION 1.0.2`。
+  **迷惑性极强**：make 的 echo 行是对的，错误只在 .o 的编译行里出现，容易误判为
+  源码问题而去改上游代码。
+  附带：同一层里如果 LDFLAGS/LDOPTS 也手工加双引号包裹，路径中的空格与 $ORIGIN
+  展开同样会被吃掉。
+rec_approach: >
+  用 shlex.quote() / shlex.join() 让 Python 负责引号，不要手写包裹。原理：
+  shlex.quote 对"含空格但不含单引号"的字符串一律选**单引号**包裹，于是 L1 的 sh
+  把内容**原样透传**给 make（反斜杠不被解释），反斜杠留到 L3 才由 recipe shell
+  去掉，clang 最终收到 -DMETAPIXEL_VERSION="1.0.2"，宏展开为真正的字符串字面量。
+    import shlex
+    ccopts = " ".join(["-I.", "-Irwimg", "-O2",
+                       '-DMETAPIXEL_VERSION=\\"1.0.2\\"',   # 值里保留反斜杠
+                       include_flags])
+    self.run(shlex.join(["make", f"CC={cc}", f"CCOPTS={ccopts}",
+                         f"LDOPTS={ldopts}", "-j1", "metapixel"]),
+             cwd=self.source_folder)
+  关键点：反斜杠是 **Python 字符串的字面内容**，由 shlex.quote 的单引号保护过 L1，
+  在 L3 才消失。不要用 f'CCOPTS=\\"{ccopts}\\"' 这种手工双引号包裹 —— 那正是本条目的成因。
+  自检：把 self.run 的命令行打印出来，CCOPTS 的值必须显示为
+  '... -DMETAPIXEL_VERSION=\"1.0.2\" ...'（单引号 + 反斜杠可见）才正确。
+  排查口诀：日志里 make 的 RUN: 行看着对、错误却出在 .o 的编译行，且错误是
+  "expected ')'" / 宏展开成裸数字 —— 就是引号在 L1 或 L3 被吃掉了，先数 shell 层数，
+  不要改上游源码。
+rec_command: >
+  conan create archives/m/metapixel/1.0.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_cmd: >
+  conan create archives/m/metapixel/1.0.2 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_expect: >
+  两段式证据链（本条已实测）：
+  (a) 手工拼 f'CCOPTS=\\"{ccopts}\\"' -> 编译失败，metapixel.c 报
+      "error: expected ')'"，note 明确显示
+      "#define METAPIXEL_VERSION 1.0.2"（引号已丢，宏成了裸数字）；
+  (b) 改用 shlex.quote 后同一个包 conan create rc=0，test_package 16/16 PASS，
+      日志 RUN: 行为 'CCOPTS=-I. ... -DMETAPIXEL_VERSION=\"1.0.2\" ...'，
+      recipe 行 clang 收到 -DMETAPIXEL_VERSION=\"1.0.2\"，
+      程序 --version 正常打印 "metapixel 1.0.2"。
+      反向验证：把 shlex.quote 换回手工包裹，(a) 立刻复现，确认对转义敏感。
+evidence:
+  - "archives/m/metapixel/1.0.2/conanfile.py（build() 用 shlex.join 注入 CCOPTS/LDOPTS）"
+  - "archives/m/metapixel/1.0.2/notes.md（问题 #3：三层 shell 引号转义）"
+  - "本地 conan create：rc=0，test_package 16/16 PASS"
+  - "graph 引擎核验：与 DRAFT-10005（musl strtol errno）、DRAFT-10035（autotools bootstrap）
+     同为编译期条目但 error_signature 完全不同，本条未被图谱命中"
+applies_to:
+  - "手写 Makefile 的 C/C++ 项目（无 autotools/cmake/meson），靠命令行覆盖 CCOPTS/CFLAGS/LDOPTS 注入依赖的配方"
+  - "任何在 -D 宏里带字符串字面量（-DNAME=\"value\"）的构建"
+  - "conanfile.py 里手写 f-string 拼 make/cmake 命令行的场景"
+principles:              P005, P011
+caused_by:
