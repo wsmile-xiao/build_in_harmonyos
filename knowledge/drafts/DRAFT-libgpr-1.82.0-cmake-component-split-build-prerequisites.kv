@@ -1,0 +1,64 @@
+#====================================================================
+# DRAFT-libgpr-1.82.0-cmake-component-split-build-prerequisites
+# 把上游单一 CMake 巨型工程拆成多个 conan 组件包（module split）时，
+# 「构建前提」四条会连环咬人：
+#   ① CMake generate 期 $<TARGET_FILE:...> 求值 → 可选 target 变硬前提
+#   ② 上游 install() 要求全量 target → 拆分件必须 INSTALL=OFF + target 闭包
+#   ③ release tarball 的 third_party 测试子模块为空 → BUILD_TESTS 的 configure 引用它
+#   ④ 运行期依赖 vs 配置期 find_package 必须分开判定
+#
+# 本条目为 draft，不预占正式 E 编号，禁止直接 promote。
+# 触发事件: libgpr 1.82.0（= grpc 1.82.0 的 gpr 组件拆分，task #8219，PR !13983）
+#           同族先例: libgrpc_unsecure/1.82.0、libgrpc_authorization_provider/1.82.0
+#====================================================================
+
+id:                     DRAFT-libgpr-1.82.0-cmake-component-split-build-prerequisites
+trigger_tool:           cmake|conan|clang
+phase:                  source|configuration|build|packaging
+error_signature:        Error evaluating generator expression|No target \"(grpc_cpp_plugin|graph_plugin)\"|file COPY cannot find.*third_party/.*\.proto|CMake Generate step failed
+severity:               2
+category:               build-system, cmake, packaging, dependency, portability
+match_keywords:         CMake 组件拆分件, module split, --target 闭包, gRPC_INSTALL=OFF, install 脚本全量 target, TARGET_FILE generator expression, gRPC_BUILD_TESTS, gRPC_BUILD_CODEGEN, grpc_cpp_plugin, third_party 测试子模块为空, 运行期依赖 vs 配置期 find_package, gRPC_*_PROVIDER=package
+title:                  CMake 巨型工程拆成多 conan 组件包的生产端构建前提：generate 期 $<TARGET_FILE:> 把可选 target 变硬前提、上游 install() 要求全量 target、测试子模块为空、运行期与配置期依赖需分开判定
+prescan_pattern:        gRPC_INSTALL|gRPC_BUILD_CODEGEN|gRPC_BUILD_TESTS|--build --target
+prescan_globs:          conanfile.py|CMakeLists.txt
+
+# Layer 2: Diagnosis
+root_cause:             把上游单一 CMake 工程拆成多个 conan 组件包（每个只交付一个 target）时，上游构建系统里四个「按全量构建写死」的隐含前提会依次掀翻「只 build 子 target」的做法。①【generate 期 target 硬前提】CMakeLists 用 $<TARGET_FILE:grpc_cpp_plugin> 这类生成器表达式做 add_custom_command 的 COMMAND/DEPENDS；只要该 target 在本次 configure 里未定义（把 gRPC_BUILD_CODEGEN 关掉，或把插件 target 关掉），CMake generate 阶段（不是 build 阶段）就对每个引用点报 `Error evaluating generator expression ... No target "grpc_cpp_plugin"`，整个工程一个 target 都 generate 不出来。上游对选项耦合的注释是「Codegen must be ON when gRPC_BUILD_TESTS=ON」——BUILD_TESTS 打开了会引用插件 target 的代码生成规则，必须同时开 CODEGEN 才能让 generate 通过；而实际 build 时并不需要真去编这个插件（只要不列进 --target）。②【install 脚本要求全量 target】上游 install(TARGETS ... EXPORT ...) 覆盖全量 target；拆分件只存在其中一部分，gRPC_INSTALL=ON 时 install 阶段因缺 target 失败；拆分件必须 INSTALL=OFF，自己 copy 产物。③【测试子模块为空】GitHub release tarball（archive/refs/tags/*.tar.gz）不打包 git submodule，third_party/* 是空目录，而 gRPC_BUILD_TESTS=ON 的 CMakeLists 会 file COPY 这些子模块里的 .proto；缺一个就 `file COPY cannot find ... typed_struct.proto`；必须按 pin 的 commit 下载并放进 third_party/<name> 槽位。④【依赖圈层不清】gRPC_*_PROVIDER=package 时顶层 CMakeLists 无条件 find_package() protobuf / c-ares / re2 / openssl / zlib，但它们不一定被交付 target 引用；照抄「配置期 schema」当 requires 会把一大串包塞进运行期闭包（体积、ABI、rebase 面全膨胀）；判据只能是「该 target 的 target_link_libraries 里有没有它」——gpr 的答案只有 abseil（22 个 absl 组件）。
+affected_scope:         一切「上游单一 CMake 工程 → 多个只交付单个 target 的 conan 组件包」的拆分件，尤其：上游 install(TARGETS) 针对全量 target、构建系统里有 $<TARGET_FILE:> 引用的可选/插件 target、release tarball 带空 third_party 子模块、顶层 find_package 与交付 target 引用不重合的工程。仓内同族：libgrpc_unsecure/1.82.0、libgrpc_authorization_provider/1.82.0、libgpr/1.82.0（本质是同一手法在 grpc 上的三次应用）。
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           split-build-target-closure-with-option-coupling-and-dep-layer-separation
+rec_description:        四步一起做：①【保 generate 过】把所有被 $<TARGET_FILE:> 引用的插件/codegen target 的选项打开（grpc 例：gRPC_BUILD_CODEGEN=ON，即便不打算编它），保证 generate 期 target 存在；真正 build 时只 `cmake --build --target <需要的 target>`，不列插件。上游注释（BUILD_TESTS ⟹ CODEGEN）是权威判据。②【手动打包】gRPC_INSTALL=OFF，package() copy 产物（lib*.a/.so、公开头、LICENSE）；公开头清单以上游 CMakeLists 里该 target 的 _hdr foreach 列表为准。③【测试子模块物化】conandata 写每个 third_party 子模块的 pin commit tarball + sha256，source() 解包后 move 进 third_party/<name> 槽位。④【依赖分层】requires 只写交付 target 真正链接的包；纯 find_package 的包标注为「配置期依赖 / 不取符号」；ABI 相关包（abseil vs protobuf）必须锁同一 lts。
+rec_command:            grep -n '\$<TARGET_FILE:' CMakeLists.txt | head; cmake --build <build> --target gpr -j$(nproc); conanfile.py source(): get(self, **self.conan_data['sources']['xds']); shutil.move(glob.glob('xds-*')[0], 'third_party/xds'); awk '/add_library\(gpr/,/^\)/' CMakeLists.txt | grep -A40 target_link_libraries | grep -oE 'absl::[a-z_]+' | sort -u | wc -l  # → 22，只有 abseil
+rec_auto_fix:           false
+rec_impl:               conan-recipe（target 闭包收敛 + INSTALL=OFF 手动打包 + 子模块物化）
+
+fallback_priority:      2
+fallback_approach:      full-build-and-ship-subset
+fallback_description:   若 generate 期无法在拆分条件下通过（插件 target 与代码生成深度耦合、关不掉），退路是照全量构建（含插件）后只打包目标产物——代价是构建时间与依赖面回到全量；必须如实记录「实际构建了全量、只交付子集」，不得声称是轻量拆分件。
+fallback_command:       cmake --build <build> -j$(nproc)   # 全量（含插件），仅交付子集
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe（全量构建子集交付）
+
+forbid_1_pattern:       关掉 CODEGEN/插件选项后仍期望 --target 单个库能 build|把 generate 期失败当成「清理缓存/重跑就好」
+forbid_1_reason:        $<TARGET_FILE:> 在 generate 期求值，target 不存在是确定性失败，重跑不会变。
+forbid_1_consequence:   configure/generate 反复失败，误诊为环境问题，浪费大量 CI 轮次。
+
+forbid_2_pattern:       平台能力缺失写成 #ifdef __OHOS__ 源码宏|只交付 .a 不交付该 target 的公开头
+forbid_2_reason:        平台开关应通过构建系统特性宏传入（禁平台名宏观）；缺头文件会让消费者无法编译。
+forbid_2_consequence:   产物不可消费，或把平台适配写进上游源码，评审不通过。
+
+# Layer 4: Principles
+principles:             P014, P016
+
+# Relations
+causes:                 []
+caused_by:              [上游 install() 针对全量 target, 上游用 $<TARGET_FILE:> 引用可选/插件 target, GitHub release tarball 不含 submodule, 顶层 find_package 与交付 target 引用不重合]
+similar_to:             [DRAFT-E998-boost-component-split-methodology, DRAFT-itsy_bitsy-0.8-upstream-test-materialization, DRAFT-ohos-distro-subproject-standalone-packaging, DRAFT-grpc-component-rich-integration]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-libgpr-1.82.0-cmake-component-split-build-prerequisites.md
