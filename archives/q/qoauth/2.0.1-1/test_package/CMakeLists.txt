@@ -1,0 +1,12 @@
+cmake_minimum_required(VERSION 3.16)
+project(test_qoauth LANGUAGES CXX)
+set(CMAKE_BUILD_TYPE Release)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_AUTOMOC ON)
+find_package(Qt6 REQUIRED COMPONENTS Core Network)
+# qoauth 不提供 CMake config，使用 conanfile generate() 注入的 include/lib 路径
+add_executable(test_qoauth test_qoauth.cpp)
+target_include_directories(test_qoauth PRIVATE "${QOAUTH_INCLUDE_DIR}" "${QCA_INCLUDE_DIR}" "${QCA_INCLUDE_DIR}/QtCrypto")
+target_link_directories(test_qoauth PRIVATE "${QOAUTH_LIBRARY_DIR}" "${QCA_LIBRARY_DIR}")
+target_link_libraries(test_qoauth PRIVATE Qt6::Core Qt6::Network qoauth qca-qt6)
