@@ -41,3 +41,12 @@ KColorScheme color/metrics theme helpers. Ships `libKF6WidgetsAddons.so`.
 
 - Homepage: https://invent.kde.org/frameworks/kwidgetsaddons
 - Sources: https://download.kde.org/stable/frameworks/
+
+## Versions
+
+| Version | Status | Notes |
+|---|---|---|
+| [6.26.0.1](6.26.0.1/) | built | KF6 6.26 baseline + DT_SONAME toolchain fix (`.1` suffix, R37) |
+| [6.26.0](6.26.0/) | built | KF6 6.26 baseline |
+| [6.18.0](6.18.0/) | built | KF6 6.18 baseline |
+| [6.14.0](6.14.0/) | built | First KF6 adaptation |
