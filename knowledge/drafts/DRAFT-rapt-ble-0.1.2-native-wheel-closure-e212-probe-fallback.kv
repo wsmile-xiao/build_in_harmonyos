@@ -1,0 +1,132 @@
+# ═══ Draft knowledge entry — pip 装的 OHOS 原生 wheel 闭包在 CI worker 上 import 必被
+#     hmmac 拒（E212/E502）：test_package 须多解释器探测 + 静态产物校验回退，
+#     并用 blocked_e212 诚实标记上游套件（绝不伪造 live 计数） ═══
+# Timestamp: 2026-09-29
+# Software: rapt-ble 0.1.2（案例位；本包 Python 侧纯 Python，但 pip 装的运行时闭包带
+#           14 个 OHOS aarch64 原生 wheel 扩展）
+# Gate: 本地 W3 conan create（live 路径 27+7 通过）；CI build #65061 复现 E212 后
+#       以模拟沙箱验证回退分支（8/8 + 两条破坏性负测）
+# 相关: E212（hmmac dlopen 拒绝用户路径 .so）、E219（不要硬依赖非 HNP python 作 gate）、
+#       E502（worker 对用户目录 .so 的 dlopen/LD_PRELOAD 一律拒，与签名无关；
+#             forbid_1 禁头部截断、forbid_2 禁改缓存 .so、forbid_3 禁 skip/stub/无条件通过）、
+#       DRAFT-7939-gpgmepy-python-ext-selfsign-hmdfs（signature-based 假设，本条实测不适用：
+#             本包 14 个 .so 全部自带 .codesign，仍被拒）、
+#       cccolutils 1.5 / nanobind 2.13.0 / pillow 10.4.0 / jupyter-events 0.12.0
+#             （已合并的同类静态校验回退先例）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+#
+# To promote:
+#   1. Review content 与 paired .md 的判据（尤其与 E502 的边界：签名无关性）
+#   2. Rename to E0XX.kv 并移入 knowledge/graph/（doc_file 同步改指 doc/E0XX.md）
+#   3. 在 knowledge/graph/index.tsv 追加一行
+
+id:                     DRAFT-rapt-ble-0.1.2-native-wheel-closure-e212-probe-fallback
+trigger_tool:           conan|python3|pytest|import|ld|build_and_test.sh
+phase:                  test_package|testing|runtime
+error_signature:        ImportError: Error loading shared library .*\.so: Permission denied|
+                        HMBS_TEST_PACKAGE_RESULT.*(passed.*true)|
+                        Error loading shared library .*cpython-312.*\.so
+severity:               3
+category:               python, ohos, sandbox, hmmac, test_package, conan, porting
+match_keywords:         python-require, 原生 wheel, native wheel, dlopen, Permission denied,
+                        hmmac, E212, E502, 用户路径 .so, hmdfs, .codesign, 解释器探测,
+                        E212PROBE, 静态产物校验, elf-static-fallback, blocked_e212,
+                        L1e, R34, 破坏性负测, conan create 本地绿 CI 红, pip --prefix,
+                        site-packages, package_folder, HNP python
+title:                  pip 装的运行时依赖带 OHOS 原生 wheel 时，CI worker 的 hmmac 会拒
+                        每个解释器对该 .so 闭包的 dlopen（Permission denied）——test_package
+                        必须逐解释器探测并把静态产物校验作为回退，同时保留 R34 负测语义
+root_cause:             |
+  纯 Python 包（rapt-ble 自身 0 个 C/C++ 源文件）一旦依赖原生 wheel，产物就不再是
+  纯 site-packages 文本：pip install 从 pypi.cnb.cool 镜像解析闭包时，会装入
+  14 个 `*.cpython-312-aarch64-linux-ohos.so`（bluetooth_data_tools/gap、
+  _cffi_backend、cryptography/_rust.abi3、habluetooth/* 等）。`import rapt_ble`
+  → `rapt_ble.parser` → `bluetooth_data_tools` → dlopen gap*.so，必然触碰
+  E212/E502 边界：worker 对**进程启动后映射的用户目录 .so**（缓存 package_folder
+  在 /storage/Users/currentUser 下，label `u:object_r:hmdfs:s0`）一律返回
+  Permission denied，**与 ELF 是否带 .codesign 无关**。
+  两处环境差异导致"本地绿、CI 红"：
+    (1) 交互式真机运行环境比 worker 宽松（本机同一 site-packages 直接 import OK）；
+    (2) worker 上没有开发机那种非 HNP python（yarl 1.24.5 记录该路径不存在），
+        而 HNP/sandbox 解释器被 hmmac 拒。
+  因此**构建阶段成功**（pip 把闭包装好了）而 **test 阶段首个 import 就失败**，
+  conan-build-test 步骤红、CI 判"未知"。
+affected_scope:         所有 package_type=python-require / pip staging 的配方，只要运行时
+                        依赖闭包包含 OHOS 原生 wheel（cffi、cryptography、pydantic-core、
+                        numpy 类扩展、habluetooth 等）；以及任何把"本地 conan create 绿"
+                        当作"CI 必绿"的证据。
+verification_cmd:       |
+  # 1) 产物里到底有几个原生 .so（决定是否会撞 E212）
+  find <pkg>/lib/python3.12/site-packages -name '*.so' | wc -l        # rapt-ble: 14
+  ls -Z <pkg>/lib/python3.12/site-packages/bluetooth_data_tools/gap*.so
+  #   -> u:object_r:hmdfs:s0（非 hnp_file）＝worker dlopen 必被拒
+  # 2) 签名不是原因（排除 DRAFT-7939 假设）
+  python3 - <<'EOF'
+  import glob;print([p for p in glob.glob("<pkg>/lib/python3.12/site-packages/**/*.so",recursive=True)
+                     if b".codesign" not in open(p,"rb").read()])   # rapt-ble: []
+  EOF
+  # 3) 模拟沙箱：强制探测全失败 → 回退分支必须 8/8 且不伪造 live 计数
+  #    （本机用 harness 桩掉 _probe 返回 Permission denied，实测见 .md）
+  # 4) 破坏性负测必须仍然失败（R34/L1e）：删掉 .so → 回退 raise；搬走 lib/ → 早 raise
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           interpreter-probe-matrix-then-static-artifact-verify
+rec_description:        |
+  test() 分两段：
+  ① **逐解释器探测**（候选项按"越不像沙箱越优先"排：RAPT_BLE_PYTHON/HMBS_PYTHON3 环境变量
+     → ~/usr/local/bin/python3 → /usr/local/bin/python3 → /usr/bin/python3 →
+     which(python3.12) → which(python3) → sys.executable → /data/service/hnp/bin/python3 →
+     /data/app/bin/python3），每个候选跑一次
+     `PYTHONPATH=<site-packages> python -c "import rapt_ble, bluetooth_data_tools"`，
+     并**每个候选输出一行短结构化证据**（`E212PROBE interpreter=… verdict=… tail=…`，
+     tail 只截消息**尾部**，因 loader 原因骑在 OSError 行末尾 —— E502 forbid_1）。
+     第一个能 import 的解释器即跑**真·live 测试**（消费者脚本 + 上游 pytest）。
+  ② **回退**：仅当 os==OHOS 且所有候选的探测输出都含 "Permission denied" 时，做静态产物校验
+     （纯字节检查，不依赖 readelf，与已合并的 cccolutils 1.5 同风格）：闭包 import 目录齐全 /
+     dist-info 计数自包含 / .so 数量 / 每个 .so 是 ELF / 每个 .so 带 .codesign /
+     每个 cpython 扩展导出 PyInit_<mod> / 每个 .so 动态串含 libc|libc++|libpython /
+     rapt_ble-<ver>.dist-info METADATA 的 Name+Version。任一失败即 raise。
+     标记须诚实：消费者标记带 `"mode":"static-elf-verify-e212"`，上游 pytest 标记
+     `"status":"blocked_e212"` 且 passed/executed 记 0（不伪造计数，E502 forbid_3）。
+  ③ **保住 R34/L1e**：site-packages 或 rapt_ble 目录缺失时**在探测之前**直接 raise，
+     否则 CI 的破坏性负测（搬走 lib/ 后期望失败）会被回退分支"救活"，门禁失真。
+rec_command:            # 关键三行：探测 → 回退判定 → 诚实标记
+                        for cand in candidates: ok, tail = probe(cand, sp); log("E212PROBE", cand, "ok" if ok else "blocked", tail)
+                        if interpreter: run_consumer(); run_upstream_pytest()
+                        elif os == "OHOS" and "Permission denied" in tails: static_verify_8_checks()
+rec_auto_fix:           false
+rec_impl:               archives/r/rapt-ble/0.1.2/test_package/conanfile.py
+                        （参考实现：_candidates/_probe/_static_verify/_run_upstream_tests/test）
+
+fallback_priority:      2
+fallback_approach:      escalate-platform-boundary-with-worker-evidence
+fallback_description:   |
+  若静态校验也无法通过（产物真坏）或 CI 上探测输出不是 Permission denied（例如解释器缺失、
+  site-packages 布局变化），**不要**把结论写成 E212：按 E502 fallback 风格带 worker id +
+  build number + 每解释器探测行上报平台边界/环境问题（R41/R43 证据风格），交人工。
+fallback_command:       # 把 CI 控制台里的 E212PROBE 行与 worker/build 号贴到 PR 评论或 issue
+fallback_auto_fix:      false
+
+forbid_1_pattern:      探测输出.*\[:[0-9]+\].*(stdout|stderr|traceback)|except.*Permission denied.*:\s*(pass|return)
+forbid_1_reason:       头部截断会丢掉骑在 OSError 行末尾的 loader 原因；而"遇 Permission denied
+                        就 pass/返回成功"会把平台边界伪装成通过。
+forbid_1_consequence:   白烧 CI 轮次也拿不到文件名/原因；或交付一个"测试通过"的假绿归档。
+
+forbid_2_pattern:       把"本地 conan create 通过"当作"CI 必通过"的唯一证据
+forbid_2_reason:        E212/E502 的差别正是**环境**（交互式真机宽松 vs worker 拒绝）；
+                        本地绿只证明产物正确，不证明 worker 能 dlopen。
+forbid_2_consequence:   反复 /rebuild 同一配方（E518/DRAFT-11327 已明文禁止），把环境问题
+                        转嫁成"配方反复修"。
+
+principles:             reproducible-build-test, no-fabricated-results,
+                        probe-before-verdict, keep-negative-test-meaningful
+similar_to:             [E212, E219, E502, DRAFT-7939-gpgmepy-python-ext-selfsign-hmdfs]
+
+doc_file:               DRAFT-rapt-ble-0.1.2-native-wheel-closure-e212-probe-fallback.md
+last_updated:           2026-09-29
+source_event:           rapt-ble 0.1.2 适配：CI build #65061（worker CI-039）conan-build-test
+                        在 test_package import 阶段 Permission denied；本地 conan create 27+7 全绿
+authors:                AtomCode
+source_pr:
+source_commit:
