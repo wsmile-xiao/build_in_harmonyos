@@ -1,0 +1,133 @@
+#====================================================================
+# DRAFT-pd-external-host-sdk-header-resolution.kv
+# 宿主应用（Conan application，如 puredata）用 make install 把插件 SDK 头
+# (m_pd.h) 装进了包目录，却在 package_info() 里 includedirs=[] → 依赖方拿不到 -I；
+# 插件外部对象必须显式解析宿主头与目标扩展名（路径 B 草稿，一/二之一）
+# 来源: pd-maxlib 1.6.0 OHOS aarch64 适配（feat/pd-maxlib-1.6.0，PR #13770）
+# 状态: 草稿（待主编审核 promote 为正式 E 条目）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-pd-external-host-sdk-header-resolution
+trigger_tool:           make|clang|conan
+phase:                  configuration|compilation
+error_signature:        fatal error: 'm_pd\.h' file not found|
+                         m_pd\.h: No such file or directory|
+                         PDINCLUDEDIR.*(not|empty|missing)|
+                         \.pd_linux.*No such file
+
+# ═══ Layer 1: 识别面 (Recognition) ═══
+severity:               2
+category:               ohos, conan, build-system, headers, packaging, portability
+match_keywords:         m_pd.h, PDINCLUDEDIR, pd-lib-builder, pd_linux, puredata,
+                         Pd external, 宿主应用, application package, cpp_info.includedirs,
+                         package_folder, 插件开发头, SDK header, -dumpmachine
+title:                  宿主应用包把插件 SDK 头装进了包目录却不经 Conan 接口暴露
+                         （package_info().includedirs=[]）：依赖方必须显式解析宿主头
+                         与目标扩展名，不能assume依赖会给出 -I
+prescan_pattern:        PDINCLUDEDIR|m_pd\.h|pd-lib-builder|\.pd_linux|includedirs\s*=\s*\[\]
+prescan_globs:          Makefile*, *.mk, conanfile.py, *.pd, *.c, *.h
+
+# ═══ Layer 2: 诊断面 (Diagnosis) ═══
+root_cause:             存在一类「宿主/插件」生态：宿主运行时被单独打包成 Conan
+                         application（本仓 puredata/0.54.1），插件的构建系统再通过一个
+                         显式的 SDK 头目录编译出可被宿主在运行时加载的模块（Pd 的
+                         pd-lib-builder 用 PDINCLUDEDIR 找 m_pd.h，产出 <class>.pd_linux）。
+                         两个反直觉点：
+                         (1) 头「装进了包」但「没暴露给依赖」：puredata 的 package() 走
+                         上游 `make install`，所以包目录里**确实有** include/m_pd.h 与
+                         include/pd/*.h（conanmanifest.txt 可见），但 package_info() 把
+                         cpp_info.includedirs 设成 []，于是 self.dependencies["puredata"]
+                         不会给消费者任何 -I。只看「包里有头」或只看「cpp_info」都会误判，
+                         必须两边都查。
+                         (2) 插件扩展名由编译器三元组决定：pd-lib-builder 执行
+                         `$(CC) -dumpmachine` 得到 aarch64-unknown-linux-ohos，代码里
+                         只识别 darwin*/mingw*/cygwin*，其余落 generic Linux 分支 →
+                         extension = pd_linux（不是 `.so`、也无需自定义 OHOS 扩展名），
+                         这与 Pd 在 OHOS 上按平台扩展名加载对象的行为正好一致。
+affected_scope:         所有「宿主运行时单独打包 + 插件按 SDK 头编译为可加载模块」的
+                         生态（Pure Data externals 最典型，同类还有 GIMP/LV2/VST 插件宿主）。
+                         适配实证：pd-maxlib 1.6.0（58 个 .pd_linux）+ pd-mjlib 0.2.0
+                         （8 个 .pd_linux，独立上游仓，第二库验证）。
+verification_cmd:       # A. 头「在包里、但依赖不暴露」
+                         P=$(conan cache path puredata/0.54.1); echo "$P"
+                         conan list "puredata/0.54.1:*"                       # 取 package id
+                         grep -n 'include/m_pd.h' "$P/p/conanmanifest.txt"    # 存在
+                         grep -n 'includedirs' archives/p/puredata/0.54.1/conanfile.py
+                         #   -> self.cpp_info.includedirs = []        （依赖不给 -I）
+                         # B. 直接用依赖编译插件（无显式 PDINCLUDEDIR）会失败
+                         #   fatal error: 'm_pd.h' file not found
+                         # C. 扩展名来源
+                         $(command -v clang) -dumpmachine                      # aarch64-unknown-linux-ohos
+                         grep -n 'dumpmachine\|pd_linux' <pd-lib-builder>/Makefile.pdlibbuilder
+                         #   -> 473 target.triplet ...  559 extension = pd_linux
+
+# ═══ Layer 3: 方案空间 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           resolve-host-sdk-header-and-extension-explicitly
+rec_description:        把「宿主 SDK 头」和「插件扩展名」都当成**显式输入**，不要
+                         指望依赖的 Conan 接口给出：
+                         (a) 头目录解析顺序：先查 `<host_dep>.package_folder/include`
+                         （本仓 puredata 用 make install 装了它，可直接用）；若宿主包
+                         确实没有，再取**同一上游版本**的源码树（示例用
+                         codeload.github.com/pure-data/pure-data/tag 0.54-1，sha256 固定）；
+                         把结果作为 make 变量 PDINCLUDEDIR 传入。
+                         (b) 扩展名：显式用 `tools.build:compiler_executables` 的 C 编译器作
+                         CC，让 pd-lib-builder 自己按 `$(CC) -dumpmachine` 判定；不要硬编码。
+                         (c) 包只装 `*.pd_linux` 与帮助补丁，package_info() 里
+                         includedirs/libdirs/bindirs 全空（插件包本身不对外暴露头/库）。
+rec_command:            make -j1 CC="<clang>" PDINCLUDEDIR="<host_dep>/include"
+                         # 或用同版本源码树：PDINCLUDEDIR=<source>/pd-api/src
+rec_auto_fix:           false
+rec_impl:               conan-recipe source() 解析 + make 变量注入
+
+fallback_priority:      2
+fallback_approach:      fetch-matching-upstream-source
+fallback_description:   宿主包目录里没有 SDK 头时，在配方 source() 里额外拉取与宿主
+                         同版本的**上游源码树**，把 PDINCLUDEDIR 指向其 src/。本仓
+                         pd-maxlib/pd-mjlib 即采用此回退路径（sha256 与 puredata 一致）。
+fallback_auto_fix:      false
+fallback_impl:          codeload 源码树 + 固定 sha256
+
+# ★ 禁止策略（均以实测为依据）★
+forbid_1_pattern:       依赖.*puredata.*直接.*#include\s*[<"]m_pd\.h|仅靠 cpp_info 传 -I.*m_pd\.h
+forbid_1_reason:        puredata 的 package_info() 里 includedirs=[]，依赖不会给 -I；
+                        即使头在包目录里，不显式传 PDINCLUDEDIR 也会
+                        `fatal error: 'm_pd.h' file not found`。
+forbid_1_consequence:   误判为「依赖没装头」，去改依赖或塞错路径，浪费轮次。
+forbid_2_pattern:       自造 stub\s+m_pd\.h|写一个最小\s+m_pd\.h\s+顶替
+forbid_2_reason:        m_pd.h 定义了 t_symbol/t_atom/t_class 等主机 ABI 结构体；
+                        stub 尺寸/布局不符，pd 加载对象时会崩。
+forbid_2_consequence:   编译通过但运行时 dlopen/对象注册栈损坏，表现为 pd 段错误。
+forbid_3_pattern:       扩展名硬编码为\s*\.so|pd_ohos|手动改\s+extension
+forbid_3_reason:        Pd 按平台扩展名搜索对象；OHOS clang 三元组含 linux，
+                        pd-lib-builder 应产出 pd_linux，硬改成 .so 会导致 pd 找不到类。
+forbid_3_consequence:   对象编出来了但 `pd -path <dir>` 仍报 couldn't create [divide]。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             R34, R51
+
+# ═══ 关系图 (Relations) ═══
+causes:                 插件编译期 m_pd.h 找不到；对象加载失败
+caused_by:              宿主 application 包的 cpp_info 未暴露已安装的 SDK 头 +
+                         插件构建系统要求显式头目录
+similar_to:             E442
+conflicts_with:         []
+prerequisite_of:        DRAFT-pd-external-headless-host-load-verification
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-pd-external-host-sdk-header-resolution.md
+last_updated:           2026-09-29
+source_event:           pd-maxlib 1.6.0（58 .pd_linux）+ pd-mjlib 0.2.0（8 .pd_linux）
+                         OHOS aarch64 conan create；两库同机制、第二库独立上游
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                frj__
+source_pr:              (本分支 feat/pd-maxlib-1.6.0，PR #13770；第二库 pd-mjlib #13771)
+source_commit:
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-29
+draft:                  true
+contributor_id:         frj__
