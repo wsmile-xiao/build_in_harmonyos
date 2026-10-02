@@ -1,0 +1,89 @@
+#====================================================================
+# DRAFT-pktstat-185-musl-iport-userreserved-missing
+# musl 移除历史宏 IPPORT_USERRESERVED，导致按端口做 getservbyport() 名称
+# 解析的老 C 程序编译失败
+# 来源: pktstat 1.8.5 适配 (2026-10-01)
+#====================================================================
+
+id:                     DRAFT-pktstat-185-musl-iport-userreserved-missing
+trigger_tool:           clang|conan create|make
+phase:                  compilation
+error_signature:        "use of undeclared identifier 'IPPORT_USERRESERVED'" | "error: use of undeclared identifier 'IPPORT_'"
+match_keywords:         IPPORT_USERRESERVED, IPPORT_RESERVED, netinet/in.h, getservbyport, undeclared identifier, musl, glibc, BSD, tcp_lookup, port range, 1023, pktstat, compile error
+category:               libc, porting, compilation
+severity:               2
+status:                 draft
+agent_id:               OHC
+forbid_1_pattern:       __OHOS__
+forbid_1_reason:        本条目根因是"musl 的宏集合与 BSD/glibc 不同"，与"是否在 OHOS 上"无关；用 #ifndef IPPORT_USERRESERVED 即可对任意 libc 生效，无需、也不应引入平台宏
+forbid_2_pattern:       __MUSL__
+forbid_2_reason:        同上：探测 libc 是否提供该宏，应读宏本身而不是探测 libc 身份
+root_cause: >
+  OpenHarmony 的 libc 是 musl。musl 的 <netinet/in.h> 只定义 IPPORT_RESERVED(1024)，
+  **删掉了历史宏 IPPORT_USERRESERVED**，而 BSD 与 glibc 一直把它定义为 1023
+  （保留区之下的最高端口）。1990-2010 年代写成的、按端口号决定是否去 /etc/services
+  查服务名的 C 程序——典型如 pktstat 的 tcp_lookup()：
+
+      else if (port > IPPORT_USERRESERVED)
+          se = NULL;
+      else
+          se = getservbyport(htons(port), "tcp");
+
+  在 glibc 上完全正常，迁到 musl 后直接编译失败：
+
+      tcp.c:121:19: error: use of undeclared identifier 'IPPORT_USERRESERVED'
+
+  这类报错有三个让 AI 容易走偏的特征：
+  (1) 它是一个**孤立的单行报错**，不像 PATH_MAX 那样级联出 20 条，
+      `clang ... 2>&1 | tail` 很容易刚好把它截断掉而误判为构建成功；
+  (2) 报错行在函数体中间、离 include 区很远，容易被误判成"逻辑写错了"
+      而去改比较逻辑或加 cast；
+  (3) 它的正确修法只有一个（把宏补回来），任何"绕开这条路径"的改法
+      （例如把整个 getservbyport 分支删掉）都会静默丢功能，而功能表面
+      看不出变化——只是服务名不再显示为 http/ssh 而是显示成端口号。
+rec_approach: >
+  在使用该宏的源文件 include 区补一个由 libc 宏集合驱动的兜底定义，
+  **不引入任何平台宏**：
+
+      /* IPPORT_USERRESERVED is not provided by musl's <netinet/in.h> ... */
+      #ifndef IPPORT_USERRESERVED
+      # define IPPORT_USERRESERVED 1023
+      #endif
+
+  三条要点：
+  (1) 守卫条件是"libc 有没有给这个宏"，而不是"当前是不是 musl/OHOS"。
+      这样在 BSD/glibc 上补丁是 no-op（宏存在，走 libc 自己的值），
+      在 musl 上才生效——同一个补丁在所有目标上都正确；
+  (2) 取值必须是历史值 1023 而不是 IPPORT_RESERVED-1 之类推导式：
+      语义是"保留区之下的最高端口"，写死常量最不容易被上游的宏改动带偏；
+  (3) 不要把比较改成 `port >= 1024` 之类。原始表达式 `port > IPPORT_USERRESERVED`
+      的语义（≤1023 才查 /etc/services）必须逐字保留，否则改动就变成
+      "重写上游逻辑"而非"补齐平台缺失"。
+  排查口诀：老网络工具在 musl 上只报 IPPORT_USERRESERVED 一个错 ⇒
+  直接补宏，不要动逻辑；同类可一并检查的兄弟宏还有 IPPORT_HIGHSERVERS。
+rec_command: >
+  conan create archives/p/pktstat/1.8.5 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_cmd: >
+  conan create archives/p/pktstat/1.8.5 -pr:h=ci/conan/profiles/ohos-aarch64 \
+  -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing
+verification_expect: >
+  三段式证据链（本条已实测）：
+  (a) 不打补丁 -> tcp.c 编译期失败，单行
+      "use of undeclared identifier 'IPPORT_USERRESERVED'"，tcp.o 不生成；
+  (b) 打上补丁 -> conan create rc=0，产出 bin/pktstat（aarch64 PIE，
+      DT_NEEDED 仅 libc.so，因为 libpcap/ncurses 仓内均为纯静态包）；
+  (c) 反向验证 -> 移除补丁后 (a) 精确复现，证明该补丁是必要且充分的，
+      且测试对补丁敏感、非空壳。
+  实测补丁前后行为不变：tcp_lookup() 仍只对端口 ≤ 1023 查 /etc/services。
+evidence:
+  - "archives/p/pktstat/1.8.5/patches/0001-tcp-port-reserved-constant.patch"
+  - "archives/p/pktstat/1.8.5/notes.md（遇到的问题与解决方案 #1）"
+  - "archives/p/pktstat/1.8.5/manifest.yaml（knowledge_gained）"
+  - "本地 conan create：20 条断言（12 交付面 + 8 消费者，其中 7 通过 / 1 按技术原因 skip）全绿"
+applies_to:
+  - "任何用 IPPORT_USERRESERVED 判断是否解析服务名的 C 程序（pktstat/nmap/scan 类老工具）"
+  - "1990-2010 年代 BSD 血统的小 C 网络工具"
+  - "任何靠 BSD/glibc 隐含宏集合才能编译的老代码（同类兄弟：IPPORT_HIGHSERVERS）"
+principles:              P005, P011
+caused_by:
