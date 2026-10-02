@@ -2118,6 +2118,7 @@
 | **qtshadertools** | 6.11.1 | ✅ 已编译 |  | CMake | 1 | - | [📄](archives/q/qtshadertools/6.11.1/) |
 | **quilt** | 0.69 | ✅ 已发布 |  | autoconf | 1 | GNU patch >= 2.5,bash,gawk,sed (GNU),diff (GNU) | [📄](archives/q/quilt/0.69/) |
 | **qxlsx** | 1.4.7 | ✅ 已编译 |  |  | - | - | [📄](archives/q/qxlsx/1.4.7/) |
+| **qzxing** | 3.3.0 | ✅ 已编译 |  | CMake | 1 | qt5-qtbase 5.15.2 | [📄](archives/q/qzxing/3.3.0/) |
 | **rabbitmq-c** | 0.13.0、0.15.0 | ✅ 已编译 |  | CMake | - | openssl/1.1.1w | [📄](archives/r/rabbitmq-c/0.15.0/) |
 | **radare2** | 6.0.7 | ✅ 已编译 |  | Autotools | 3 | name: capstone | [📄](archives/r/radare2/6.0.7/) |
 | **radsecproxy** | 1.11.2 | ✅ 已发布 |  |  | - | - | [📄](archives/r/radsecproxy/1.11.2/) |

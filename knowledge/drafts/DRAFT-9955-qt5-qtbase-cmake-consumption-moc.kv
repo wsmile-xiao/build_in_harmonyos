@@ -1,0 +1,133 @@
+#====================================================================
+# DRAFT-9955-qt5-qtbase-cmake-consumption-moc
+# — qt5-qtbase 消费方库在 OHOS conan 环境的 CMake 集成三坑：CMakeDeps 无
+#   按模块 config、原生伞形 config 不可重定位、AUTOMOC 静默禁用（加载期才
+#   炸），附上游选项门控默认差（打包库静默缺解码器）——四坑全部"链接成功、
+#   运行期才爆"（OHOS/qzxing 3.3.0 真机实测）
+# 触发事件: qzxing 3.3.0 适配（打包库消费侧 decodeImage 全灭排查 → 四坑逐个
+#   真机复现与修复闭环）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-9955-qt5-qtbase-cmake-consumption-moc
+trigger_tool:           cmake|conan|cmakedeps|automoc|moc
+phase:                  configuration|build|testing|runtime
+error_signature:        Could not find a package configuration file provided by "Qt5Core"|
+                         imported target "Qt5::Core" references the file .*mkspecs/linux-clang|
+                         .*but this file does not exist|AUTOMOC.*disabled|
+                         undefined symbol: QZXing::staticMetaObject|
+                         getLastDecodeOperationSucceded.*false（打包库消费侧）
+
+severity:               3
+category:               cmake, conan, dependency, linking, relocatable, ohos
+match_keywords:         qt5-qtbase, Qt5Core-config.cmake, CMakeDeps, 根 config, 组件 config,
+                         cmake_file_name, 伞形 config, Qt5Config.cmake, 不可重定位, mkspecs,
+                         linux-clang, Qt5_DIR, Qt6_DIR, AUTOMOC, QT_VERSION_MAJOR,
+                         staticMetaObject, Q_OBJECT, 显式 moc, QZXING_MOC_PATH, bin/moc,
+                         ENABLE_DECODER, QZXING_USE_DECODER, MultiFormatReader, 零解码器,
+                         特征门控, .pro 对齐, find_package(qt5-qtbase)
+title:                  qt5-qtbase 消费方库在 OHOS conan 环境的 CMake 集成：根 config 消费 + 显式 moc + 按 .pro 特征集显式全开选项，否则打包库链接成功、运行期全灭
+
+topic: >
+  qzxing 3.3.0（C++/Qt 条码库）在 OHOS 真机 conan create 的消费侧
+  test_package 中 decodeImage 全部失败，而上游测试 harness（把同一批源码
+  按 .pri 宏直接编进测试二进制）1110 图语料 851 成功。排查出四个坑，全部
+  属于"Qt5 系三方库以 CMake 交付 conan 包"的通用消费链问题，且都表现为
+  链接成功、运行期才爆。
+
+root_cause:            四层消费链断裂，单点都不在 configure 报错：①conan 2 CMakeDeps
+                        （2.29 模板源码实测）对组件只输出根 config（qt5-qtbase-config.cmake）
+                        + 共享 Targets 文件，模板代码中组件级 cmake_file_name 零引用——
+                        不存在按模块 Qt5Core/Qt5Gui-config.cmake，find_package(Qt5Core)
+                        必败；唯一入口是 find_package(qt5-qtbase) 根 config（声明全部
+                        Qt5::* 组件 target，链接行不变）。②qt5-qtbase 包内原生伞形
+                        Qt5Config.cmake 不可重定位：Qt5CoreConfig.cmake 引用构建机
+                        $PREFIX/../b//mkspecs/linux-clang，二进制包无该目录 → imported
+                        target 引用文件不存在；Qt6 伞形可重定位（qscintilla2 Qt6_DIR
+                        范式），Qt5 不可，勿混用。③AUTOMOC 靠 QT_VERSION_MAJOR 判 Qt
+                        版本，CMakeDeps 不设 → AUTOMOC 静默禁用；共享库默认允许未定义
+                        符号，无 metaobject 也链接成功，QZXing::staticMetaObject 留空在
+                        加载期才爆；修复: 显式 moc，配方经 cache 变量传 qt5-qtbase
+                        bin/moc，moc 运行期需 LD_LIBRARY_PATH。④上游 QZXING_USE_DECODER_*
+                        选项默认关 → ENABLE_DECODER_* 宏缺失 → MultiFormatReader 零注册
+                        解码器，打包库消费侧 decodeImage 全灭；而 .pro/.pri 无条件定义
+                        全部宏，按 .pri 对齐的 harness 851/1110；配方须在 generate()
+                        按 .pro 特征集显式全开。
+
+durable_solution: >
+  实测配方形态（qzxing/3.3.0，可直接复用于同类 Qt5 消费方库）：
+  1) 补丁把库的 CMakeLists 改为 find_package(qt5-qtbase)（不设 Qt5_DIR、
+     不消费原生伞形 config），链接行保持 Qt5::Core/Qt5::Gui/…；
+  2) 补丁对含 Q_OBJECT 的头显式 moc（QZXING_MOC_PATH cache 变量由配方
+     指向 qt5-qtbase bin/moc；构建期 LD_LIBRARY_PATH 加 qt5-qtbase/lib
+     供 moc 运行期加载）；Linux 开发机无该变量时回退 find_program(moc)；
+  3) generate() 显式设上游被门控的编译选项为 ON（本例
+     QZXING_USE_DECODER_{QR_CODE,1D_BARCODES,DATA_MATRIX,AZTEC,PDF17}），
+     与上游 .pro 特征集对齐——凡上游 CMake 选项默认关而 .pro/.pri 无条件
+     开的宏门控，一律按 .pro 全开。
+
+impact: >
+  适用所有依赖 qt5-qtbase 并以 CMake 构建/交付的三方库（Qt5 系消费方）。
+  按本条目范式，配方的 CMake 消费、moc、特征开关三处一次到位，规避
+  "链接成功、运行期全灭"的四连坑；修复前打包库消费侧 decodeImage
+  100% 失败（真机复现）。
+
+recovery: >
+  若目标库上游 CMakeLists 无 QZXING_USE_* 类选项（宏无条件定义或无条件
+  不定义），则跳过第 4 坑，仅需 1-3；若库不依赖 Qt5Gui（纯 Qt5Core），
+  moc 仅对 Q_OBJECT 头执行即可；若消费方同时兼容 Qt6，注意 Qt6 伞形
+  config 可重定位、与 Qt5 路径相反，按 qscintilla2 Qt6_DIR 范式分开处理。
+
+evidence_chain: >
+  task qzxing-3.3.0 适配（feat/qzxing-3.3.0 分支，OHOS PC aarch64 真机）
+    - find_package(Qt5 COMPONENTS Core Gui) 首跑: Could not find a package
+      configuration file provided by "Qt5Core"（conan 2.29 CMakeDeps 无按
+      模块 config，模板 cmake_file_name 零引用）；
+    - 改消费原生伞形 config: imported target "Qt5::Core" references
+      .../b//mkspecs/linux-clang ... does not exist（不可重定位实证）；
+    - AUTOMOC 静默禁用 → 共享库加载期 undefined symbol:
+      QZXing::staticMetaObject（显式 moc 修复）；
+    - 打包库消费侧探针 8 项中 4 项解码失败 100% 复现；getTryHarderBehaviour
+      返回垃圾值 126 一度误导（QZXing(DecoderFormat) 构造器不初始化
+      tryHarderType，为库本身 API 缺陷，与消费链无关）；真根因=第 4 坑，
+      选项全开后 test_package 8/8 PASS；
+    - create15 全绿: 上游 1110 图 851/237/22（12/17 格式与上游参考日志
+      逐字一致）+ 编码 46 方法全执行 + libqzxing.so.3.3.0 + 8/8。
+      详见 archives/q/qzxing/3.3.0/reports/ohos-device-verification.md。
+
+verification_cmd: >
+  QZXING_RESOURCES_DIR=<qzxing-test-resources checkout> conan create ./3.3.0
+  --user ohpcd --channel stable -pr ohos-aarch64.profile -b missing
+  （真机 2026-09-30 全绿；消费侧 test_package 8 断言 0 失败）
+
+limitations: >
+  1) 本条目针对 Qt5（qt5-qtbase/5.15.2）；Qt6 消费范式相反（伞形可
+     重定位），勿混用；
+  2) 第 4 坑的存在性取决于上游 CMakeLists 是否用选项门控宏，须逐库核验
+     上游 .pro/.pri 与 CMakeLists 的特征集是否一致；
+  3) 显式 moc 需要 qt5-qtbase 包携带 bin/moc（该包实测携带）。
+
+rec_priority:           1
+rec_approach:           qt5-root-config-explicit-moc-pro-feature-alignment
+rec_description: >
+  Qt5 消费方库在 OHOS conan 环境：CMake 消费走 find_package(qt5-qtbase)
+  根 config（Qt5::* 组件 target 由根 config 声明），Q_OBJECT 头显式 moc
+  （配方 cache 变量传 bin/moc + moc 运行期库路径），generate() 按上游
+  .pro 特征集显式全开被 CMake 选项门控的编译宏（默认关的必须全开）。
+rec_command:            find_package(qt5-qtbase)；tc.cache_variables["QZXING_MOC_PATH"]=<pkg>/bin/moc；tc.cache_variables["QZXING_USE_DECODER_*"]="ON"
+rec_auto_fix:           false
+rec_impl:               conan-recipe-qt5-cmake-consumption
+
+doc_file:               knowledge/drafts/DRAFT-9955-qt5-qtbase-cmake-consumption-moc.md
+last_updated:           2026-09-30
+source_event:           qzxing 3.3.0 适配，消费侧解码全灭排查（四坑真机闭环）
+authors:                atomcode-executor
+source_pr:
+source_commit:          97bfc921d4
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-30
+
+draft:                  true
