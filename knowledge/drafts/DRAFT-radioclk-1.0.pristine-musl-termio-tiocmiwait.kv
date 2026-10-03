@@ -1,0 +1,63 @@
+#====================================================================
+# DRAFT knowledge entry - radioclk 1.0.pristine: musl 无 <termio.h>（死包含）+ TIOCMIWAIT 在 aarch64/asm-generic 头缺失
+# Source package: radioclk/1.0.pristine；模式可推广到任意 vintage C 串口工具
+#====================================================================
+
+id: DRAFT-radioclk-1.0.pristine-musl-termio-tiocmiwait
+trigger_tool: clang|make|musl-gcc
+phase: compilation
+error_signature: termio\.h: No such file or directory|use of undeclared identifier 'TIOCMIWAIT'
+severity: 2
+category: compat, libc, musl, serial-port, ioctl
+match_keywords: termio.h, struct termio, TIOCMIWAIT, TIOCMGET, TIOCMSET, modem line, 串口, 轮询, 0x5452, asm-generic ioctls, aarch64 ioctl, musl 头文件缺失, 死包含, unused include
+
+title: musl 无遗留 <termio.h>（多为死包含可直接删）且 TIOCMIWAIT 是 x86 专属 ioctl 号——aarch64/OHOS 编译 vintage 串口代码的两连坑
+
+root_cause: >
+  1) <termio.h> 是 SVR3 时代被 <termios.h> 取代的 glibc 遗留头，musl 不提供。
+  注意并非纯死包含：r2 真机实测删除后报 19 个 TIOCM_CD/TIOCM_CTS/TIOCM_DSR/
+  TIOCMGET undeclared——上游靠 glibc 头文件链间接获得这些 modem 线宏，
+  musl 把 TIOCM_* 放在 <termios.h>（ioctl() 原型在 <sys/ioctl.h>）。
+  2) TIOCMIWAIT（等待 modem 线变化中断）由 arch/x86 的 uapi ioctls.h 定义
+  为 0x5452；aarch64 uapi 走 asm-generic ioctls.h，不含该宏，musl aarch64
+  bits/ioctl.h 同样没有，编译直接报 use of undeclared identifier。
+
+affected_scope: >
+  所有迁 musl/aarch64 的 vintage C 串口工具（radio clock、GPS NMEA、
+  古老拨号程序等）。判据：grep -n termio 全文只命中 include 行 → 死包含；
+  grep TIOCMIWAIT 命中且目标为 aarch64 → 需要回退定义。
+
+verification_cmd: >
+  grep -n 'termio' radioclkd.c            # 只有一行 #include<termio.h> → 死包含
+  grep -n 'TIOCMIWAIT' radioclkd.c        # 使用处 + 无 #define → 需回退
+  # 修复后 aarch64/ohos clang 编译通过；运行期 -p 轮询模式为功能降级路径
+
+rec_priority: 1
+rec_approach: remove-dead-include-plus-ifndef-ioctl-fallback
+rec_description: >
+  #include<termio.h> 替换为 #include<termios.h> + #include<sys/ioctl.h>
+  （musl 的 TIOCM_* 在 termios.h；sys/ioctl.h 补 ioctl 原型）；
+  TIOCMIWAIT 用 #ifndef 守卫回退定义历史值 0x5452，保证 x86/glibc 零影响。
+  必须同时确认运行期降级：ioctl 失败路径返回 -1 且上游有轮询模式
+  （radioclkd 的 -p/--poll 每 5ms TIOCMGET 轮询），并在 notes 记录功能影响。
+rec_command: >
+  replace_in_file("#include<termio.h>\n", "#include<termios.h>\n#include<sys/ioctl.h>\n")
+  append after last include:
+  #ifndef TIOCMIWAIT
+  #define TIOCMIWAIT 0x5452
+  #endif
+rec_auto_fix: true
+rec_impl: conan-recipe-source
+similar_to: [E092, E098]
+conflicts_with: []
+notes: >
+  关联：E098（OHOS 无 /usr/bin/install，radioclk 的 Makefile install 目标被
+  package() copy 替代；Makefile CC=/usr/bin/gcc 硬编码用 make 命令行变量覆盖）。
+  TIOCMGET/TIOCMSET/TIOCM_CD/TIOCM_CTS/TIOCM_DSR 在 asm-generic 中存在，无需处理。
+verify_builds: >
+  radioclk/1.0.pristine：锚点唯一性本机验证 6/6；真机 shadow CI r3
+  （2026-10-02）全绿——conan create 成功、test_package 5 组断言全过、
+  L0/L1/L2/L4/L5 全 pass、L1e 破坏性反向验证确认。
+authors: codex
+source_pr: pending
+source_commit: 9548529ace (feat/radioclk-1.0.pristine-codex)
