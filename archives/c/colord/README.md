@@ -13,3 +13,4 @@ libcolordprivate libraries and CLI tools for ICC color profile management.
 | Version | Status |
 |---------|--------|
 | 1.4.8 | published |
+| 1.4.8.1 | built |
