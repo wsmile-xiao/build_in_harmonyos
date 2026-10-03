@@ -1,0 +1,60 @@
+#====================================================================
+# sockstat-0.4.2-abort-signal-triage-139-vs-134
+# 崩溃断言不得用「信号类区间」概括：SIGABRT(134) 与 SIGSEGV(139) 根因不同
+# 来源: sockstat 0.4.2 适配 W4 独立审计 P1 (2026-10-02)
+#====================================================================
+
+id:                     DRAFT-sockstat-0.4.2-abort-signal-triage-139-vs-134
+trigger_tool:           test|runtime
+phase:                  testing|runtime
+error_signature:        rc=13[4-9]|Signal 11|SIGSEGV|SIGABRT|program will be aborted|unrecognized signal
+match_keywords:         SIGSEGV, SIGABRT, 134, 139, signal, abort, triage, crash, restricted, false evidence
+category:               testing, runtime, posix, detection
+severity:               2
+status:                 draft
+agent_id:               A7F3
+root_cause: >
+  为上游缺陷写「崩溃取证」断言时，常见写法是按退出码区间概括，例如
+  `elif [ $rc -ge 128 ] && [ $rc -le 139 ]; then defect "上游 NULL deref"`。
+  这在开发机上成立，一旦换到受限平台就会**把平台权限崩溃冒充成上游缺陷证据**。
+  sockstat 0.4.2 的实测反例：同一个 `-G root` 调用有两条崩溃路径，根因完全不同——
+  (a) rc=139 SIGSEGV：main() 之后的显示循环里
+      `while ((pwd = getpwnam(*((grp->gr_mem)++))) != NULL)` 把 gr_mem 的
+      NULL 终止项解引用后传给 getpwnam()（sockstat.c:731），这是真·上游缺陷；
+  (b) rc=134 SIGABRT：main() 读表阶段 `handle_missing_file()` 因 /proc/net
+      EACCES 触发 abort()（sockstat.c:590-591），比 (a) 早约 140 行，
+      **根本走不到缺陷代码**。
+  开发机 /proc/net 可读 -> 只看到 139，于是区间断言通过；OHOS 真机 /proc/net
+  被沙箱拒 -> 只看到 134，区间断言照样通过，但结论已是假的：它把平台权限问题
+  记成了上游 bug 的证据。这类错误不会让 CI 变红，只会让结论悄悄失真。
+rec_approach: >
+  崩溃取证断言必须按**信号**分流，不能按区间：
+  (1) 先用 grep 定位每条 abort/crash 路径的源码行号，算出先后顺序，
+      确认「哪条路径在受限平台上会先触发」；
+  (2) 断言里先判**受限特征串**（如 can not open file /proc/net/）命中即归
+      RESTRICTED 并说明「本环境无法证明该缺陷」；再判具体信号
+      （139=SIGSEGV 上游缺陷 / 134=SIGABRT 上游主动 abort）；
+  (3) 兜底分支一律 `fail`，绝不放行到 defect 计数——否则取证断言永远不可能失败，
+      是一条假断言（同一轮审计还发现「三个分支全调 defect()」的同类问题）；
+  (4) 若缺陷在受限平台上确实不可达，就把源码级论证写进 notes.md，
+      并让测试如实记 RESTRICTED，而不是伪造一条跑不出来的证据。
+rec_command: >
+  grep -n "abort()\|SIGSEGV\|raise(\|handle_missing_file" <src>/sockstat.c
+verification_cmd: >
+  qemu-aarch64 -L <OHOS_SYSROOT> <pkg>/bin/sockstat -G root; echo "rc=$?"
+verification_expect: >
+  开发机（/proc/net 可读）期望 rc=139；受限环境期望 rc=134 且 stderr 含
+  can not open file /proc/net/。两者必须被断言分流，且受限分支记 RESTRICTED
+  而非 KNOWN_UPSTREAM_DEFECT。本条已在 sockstat/0.4.2 落地修正，
+  修正后真受限分支输出：
+  RESTRICTED: -G 取证被 /proc/net 沙箱前置拦截（rc=134 abort 发生在读表阶段，早于 gr_mem 解引用）。
+evidence:
+  - "W4 独立审计 P1：test.sh 原写 [ $rc -ge 128 ] && [ $rc -le 139 ] 吞掉 134"
+  - "archives/s/sockstat/0.4.2/notes.md（上游已知缺陷 A 的信号甄别说明）"
+  - "archives/s/sockstat/0.4.2/test_package/test.sh（T6 断言，现按信号分流）"
+  - "archives/s/sockstat/0.4.2/test_package/MANIFEST.yml（assertion_policy.fail_on）"
+applies_to:
+  - "为上游已知崩溃/NULL deref 写取证断言的 test_package"
+  - "同一程序存在多条 abort 路径（读表失败 + 逻辑缺陷）的诊断类工具"
+  - "需要在真机与开发机之间复用同一套测试脚本的适配任务"
+principles:              P011
