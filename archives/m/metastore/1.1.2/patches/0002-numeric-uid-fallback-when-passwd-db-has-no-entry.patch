@@ -1,0 +1,235 @@
+Subject: [PATCH] tolerate a passwd/group DB with no entry for the id
+
+HarmonyOS has no passwd database entry for application uids (e.g. 20001006),
+so getpwuid(3) and getgrgid(3) legitimately return NULL.  Upstream treats
+that as fatal for the whole entry: mentry_create() returns NULL, so the
+caller records nothing at all.  On this platform that makes every action a
+no-op for every file the process can see -- save writes an empty metafile,
+compare reports nothing, dump prints nothing and apply restores nothing --
+and the only symptom is one "getpwuid failed for ...: uid ... not found"
+line per path.
+
+Fall back to the numeric id instead of discarding the entry, and teach the
+apply path to accept that decimal form back, so a metafile written on one
+host still applies on another.  This is the same numeric-owner convention
+tar(1) offers, it is what every container/sandbox image with a sparse
+passwd DB needs, and the metafile format is unchanged (the owner and group
+fields stay CSTRINGs -- they just may now hold digits).
+
+Purely POSIX: no platform macro is involved and nothing is stubbed out, so
+behaviour on a host with a complete passwd database is bit-for-bit
+unchanged.  The decision is driven purely by "does the database have this
+id", never by which platform we are on.
+
+Without this, every test assertion on a real HarmonyOS device fails while
+the same test passes when run as a user that does exist in /etc/passwd --
+which is exactly the device-vs-CI semantic gap the adaptation has to close.
+
+NOTE: this hunk set is diffed against the tree with patches/0001 already
+applied, because Conan applies conandata patches in order with `git apply`,
+which is strict about line numbers.
+
+---
+--- a/src/utils.h
++++ b/src/utils.h
+@@ -87,4 +87,15 @@
+ /* Caching version of getpwuid */
+ struct passwd *xgetpwuid(uid_t uid);
+ 
++/* Name of a uid/gid, falling back to its decimal form when the passwd/group
++ * database has no entry for it.  Callers own the returned string. */
++char *xgetpwuid_name_or_num(uid_t uid);
++char *xgetgrgid_name_or_num(gid_t gid);
++
++/* Inverse of the above: resolve a stored name to a uid/gid, also accepting
++ * the decimal form emitted by the fallback.  Returns 1 on success, 0 if the
++ * name is neither a known name nor a number. */
++int xgetpwnam_uid(const char *name, uid_t *out);
++int xgetgrnam_gid(const char *name, gid_t *out);
++
+ #endif /* UTILS_H */
+--- a/src/utils.c
++++ b/src/utils.c
+@@ -301,3 +301,89 @@
+ 
+ 	return NULL;
+ }
++
++/* True when the whole string is a plain decimal number.  POSIX login names
++ * cannot start with a digit, so this is unambiguous in practice. */
++static int
++is_decimal(const char *s)
++{
++	if (!s || !*s)
++		return 0;
++
++	for (; *s; s++) {
++		if (*s < '0' || *s > '9')
++			return 0;
++	}
++
++	return 1;
++}
++
++char *
++xgetpwuid_name_or_num(uid_t uid)
++{
++	struct passwd *pbuf = xgetpwuid(uid);
++	char buf[32];
++
++	if (pbuf)
++		return xstrdup(pbuf->pw_name);
++
++	/* No passwd DB entry for this uid (HarmonyOS application uids have
++	 * none): record the numeric id so the entry is still usable. */
++	snprintf(buf, sizeof(buf), "%lu", (unsigned long)uid);
++	return xstrdup(buf);
++}
++
++char *
++xgetgrgid_name_or_num(gid_t gid)
++{
++	struct group *gbuf = xgetgrgid(gid);
++	char buf[32];
++
++	if (gbuf)
++		return xstrdup(gbuf->gr_name);
++
++	snprintf(buf, sizeof(buf), "%lu", (unsigned long)gid);
++	return xstrdup(buf);
++}
++
++int
++xgetpwnam_uid(const char *name, uid_t *out)
++{
++	struct passwd *pbuf;
++
++	if (!name || !out)
++		return 0;
++
++	if (is_decimal(name)) {
++		*out = (uid_t)strtoul(name, NULL, 10);
++		return 1;
++	}
++
++	pbuf = xgetpwnam(name);
++	if (!pbuf)
++		return 0;
++
++	*out = pbuf->pw_uid;
++	return 1;
++}
++
++int
++xgetgrnam_gid(const char *name, gid_t *out)
++{
++	struct group *gbuf;
++
++	if (!name || !out)
++		return 0;
++
++	if (is_decimal(name)) {
++		*out = (gid_t)strtoul(name, NULL, 10);
++		return 1;
++	}
++
++	gbuf = xgetgrnam(name);
++	if (!gbuf)
++		return 0;
++
++	*out = gbuf->gr_gid;
++	return 1;
++}
+--- a/src/metaentry.c
++++ b/src/metaentry.c
+@@ -247,8 +247,8 @@
+ 	ssize_t lsize, vsize;
+ 	char *list, *attr;
+ 	struct stat sbuf;
+-	struct passwd *pbuf;
+-	struct group *gbuf;
++	char *owner_name;
++	char *group_name;
+ 	int i;
+ 	struct metaentry *mentry;
+ 
+@@ -258,25 +258,25 @@
+ 		return NULL;
+ 	}
+ 
+-	pbuf = xgetpwuid(sbuf.st_uid);
+-	if (!pbuf) {
+-		msg(MSG_ERROR, "getpwuid failed for %s: uid %i not found\n",
+-		    path, (int)sbuf.st_uid);
+-		return NULL;
+-	}
+-
+-	gbuf = xgetgrgid(sbuf.st_gid);
+-	if (!gbuf) {
+-		msg(MSG_ERROR, "getgrgid failed for %s: gid %i not found\n",
+-		    path, (int)sbuf.st_gid);
++	/* Resolve the owner/group by name, but do not give up when the
++	 * passwd/group database has no entry for the id: HarmonyOS has none for
++	 * application uids, and discarding the entry would make every action a
++	 * no-op for every file this process can see.  The numeric id is used
++	 * instead and is accepted verbatim by the apply path. */
++	owner_name = xgetpwuid_name_or_num(sbuf.st_uid);
++	group_name = xgetgrgid_name_or_num(sbuf.st_gid);
++	if (!owner_name || !group_name) {
++		msg(MSG_ERROR, "failed to resolve owner/group for %s\n", path);
++		free(owner_name);
++		free(group_name);
+ 		return NULL;
+ 	}
+ 
+ 	mentry = mentry_alloc();
+ 	mentry->path = xstrdup(path);
+ 	mentry->pathlen = strlen(mentry->path);
+-	mentry->owner = xstrdup(pbuf->pw_name);
+-	mentry->group = xstrdup(gbuf->gr_name);
++	mentry->owner = owner_name;
++	mentry->group = group_name;
+ 	mentry->mode = sbuf.st_mode & 0177777;
+ 	mentry->mtime = sbuf.st_mtim.tv_sec;
+ 	mentry->mtimensec = sbuf.st_mtim.tv_nsec;
+--- a/src/metastore.c
++++ b/src/metastore.c
+@@ -129,8 +129,6 @@
+ static void
+ compare_fix(struct metaentry *real, struct metaentry *stored, int cmp)
+ {
+-	struct group *group;
+-	struct passwd *owner;
+ 	gid_t gid = -1;
+ 	uid_t uid = -1;
+ 	struct utimbuf tbuf;
+@@ -175,25 +173,21 @@
+ 		if (cmp & DIFF_OWNER) {
+ 			msg(MSG_NORMAL, "%s:\tchanging owner from %s to %s\n",
+ 			    real->path, real->group, stored->group);
+-			owner = xgetpwnam(stored->owner);
+-			if (!owner) {
++			if (!xgetpwnam_uid(stored->owner, &uid)) {
+ 				msg(MSG_DEBUG, "\tgetpwnam failed: %s\n",
+-				    strerror(errno));
++				    stored->owner);
+ 				break;
+ 			}
+-			uid = owner->pw_uid;
+ 		}
+ 
+ 		if (cmp & DIFF_GROUP) {
+ 			msg(MSG_NORMAL, "%s:\tchanging group from %s to %s\n",
+ 			    real->path, real->group, stored->group);
+-			group = xgetgrnam(stored->group);
+-			if (!group) {
++			if (!xgetgrnam_gid(stored->group, &gid)) {
+ 				msg(MSG_DEBUG, "\tgetgrnam failed: %s\n",
+-				    strerror(errno));
++				    stored->group);
+ 				break;
+ 			}
+-			gid = group->gr_gid;
+ 		}
+ 
+ 		if (lchown(real->path, uid, gid)) {

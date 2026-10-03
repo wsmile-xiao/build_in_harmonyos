@@ -1,0 +1,167 @@
+Subject: [PATCH] read xattrs with a real buffer and skip the unreadable ones
+
+Seen only on a real device (CI build #66665): "getxattr failed for ./tree:
+Invalid argument", and a metafile of exactly 18 bytes -- the signature and
+version header with zero entries, i.e. the tool recorded nothing at all.
+
+Upstream makes two POSIX-legal assumptions that HMDFS breaks:
+
+1. It asks for an attribute's size with getxattr(path, attr, NULL, 0).  That
+   is the documented way to size a buffer, but HMDFS rejects the NULL-buffer
+   form with EINVAL even though listxattr() reports the attribute name
+   perfectly well.
+
+2. It treats any failure to read one attribute as fatal for the whole entry
+   and returns NULL, which makes the caller drop the file entirely.  Mode,
+   mtime and every other attribute are unaffected by an unreadable xattr, so
+   one bad name costs far more than it should.
+
+Read each attribute through a real buffer, growing it on ERANGE, and turn an
+attribute that still cannot be read into a reported skip.  The entry then
+always keeps its mode, mtime and the attributes that did work, and the count
+written to the metafile is the number actually read.
+
+No platform macro is involved: the NULL-size probe is merely treated as
+advisory, and growing on ERANGE is what the man page already permits.  On a
+filesystem that answers the NULL-size query the fast path is unchanged.
+
+NOTE: these hunk offsets are relative to the tree with patches/0001 and
+patches/0002 already applied, and the patch applies with --fuzz=0 and no
+offset.  Conan applies conandata patches in order and does not tolerate a
+patch that only lands via an offset -- a first attempt diffed against the
+pristine tree applied locally but was rejected by the build.
+
+---
+--- a/src/metaentry.c
++++ b/src/metaentry.c
+@@ -240,12 +240,71 @@
+ }
+ #endif
+ 
++/* Reads one extended attribute into a freshly allocated buffer.
++ *
++ * Asking for the size with a NULL buffer is the POSIX idiom, but HMDFS
++ * rejects that form with EINVAL even though listxattr() reports the name
++ * just fine, so the size is probed with a real buffer and grown on ERANGE
++ * instead.  Either way an attribute that genuinely cannot be read is
++ * reported to the caller rather than treated as fatal here.
++ *
++ * Returns the attribute length, or -1 with errno set. */
++static ssize_t
++read_xattr(const char *path, const char *name, char **value)
++{
++	char stackbuf[256];
++	char *buf = stackbuf;
++	size_t cap = sizeof(stackbuf);
++	ssize_t vsize;
++
++	*value = NULL;
++
++	vsize = getxattr(path, name, NULL, 0);
++	if (vsize < 0) {
++		/* EINVAL means this filesystem will not answer the NULL-size
++		 * query; the grow loop below still determines the size. */
++		if (errno != EINVAL)
++			return -1;
++	} else {
++		cap = (size_t)(vsize > 0 ? vsize : 1);
++		if (cap > sizeof(stackbuf))
++			buf = xmalloc(cap);
++	}
++
++	for (;;) {
++		vsize = getxattr(path, name, buf, cap);
++		if (vsize >= 0) {
++			if (buf == stackbuf) {
++				*value = xmalloc(vsize > 0 ? vsize : 1);
++				memcpy(*value, stackbuf, vsize);
++			} else {
++				*value = buf;
++			}
++			return vsize;
++		}
++
++		if (errno != ERANGE)
++			break;
++
++		if (buf != stackbuf)
++			free(buf);
++		cap *= 2;
++		buf = xmalloc(cap);
++	}
++
++	if (buf != stackbuf)
++		free(buf);
++
++	*value = NULL;
++	return -1;
++}
++
+ /* Creates a metaentry for the file/dir/etc at path */
+ struct metaentry *
+ mentry_create(const char *path)
+ {
+ 	ssize_t lsize, vsize;
+-	char *list, *attr;
++	char *list, *attr, *value;
+ 	struct stat sbuf;
+ 	char *owner_name;
+ 	char *group_name;
+@@ -325,35 +384,36 @@
+ 		if (*attr == '\0')
+ 			continue;
+ 
+-		mentry->xattr_names[i] = xstrdup(attr);
+-		mentry->xattr_values[i] = NULL;
+-
+-		vsize = getxattr(path, attr, NULL, 0);
++		vsize = read_xattr(path, attr, &value);
+ 		if (vsize < 0) {
+-			msg(MSG_ERROR, "getxattr failed for %s: %s\n",
+-			    path, strerror(errno));
+-			free(list);
+-			mentry->xattrs = i + 1;
+-			mentry_free(mentry);
+-			return NULL;
++			/* One unreadable attribute is no reason to drop the whole
++			 * entry: the mode, the mtime and the other attributes are
++			 * all still worth recording.  Report which one was lost and
++			 * carry on. */
++			msg(MSG_DEBUG, "getxattr failed for %s: %s (skipping xattr %s)\n",
++			    path, strerror(errno), attr);
++			continue;
+ 		}
+ 
++		mentry->xattr_names[i] = xstrdup(attr);
++		mentry->xattr_values[i] = value;
+ 		mentry->xattr_lvalues[i] = vsize;
+-		mentry->xattr_values[i] = xmalloc(vsize);
+-
+-		vsize = getxattr(path, attr, mentry->xattr_values[i], vsize);
+-		if (vsize < 0) {
+-			msg(MSG_ERROR, "getxattr failed for %s: %s\n",
+-			    path, strerror(errno));
+-			free(list);
+-			mentry->xattrs = i + 1;
+-			mentry_free(mentry);
+-			return NULL;
+-		}
+ 		i++;
+ 	}
+ 
+ 	free(list);
++
++	/* Only the attributes we actually managed to read are recorded. */
++	if (i == 0) {
++		free(mentry->xattr_names);
++		free(mentry->xattr_values);
++		free(mentry->xattr_lvalues);
++		mentry->xattr_names = NULL;
++		mentry->xattr_values = NULL;
++		mentry->xattr_lvalues = NULL;
++	}
++
++	mentry->xattrs = i;
+ 	return mentry;
+ }
+ 
