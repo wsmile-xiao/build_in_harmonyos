@@ -1,0 +1,62 @@
+draft: DRAFT-14412-snowball
+status: pending-editor-review
+id: DRAFT-14412
+doc_file: DRAFT-14412-snowball-2.2.0-testdata-release-date-snapshot.md
+title: 上游测试期望数据存于无 tag 的滚动 main 数据仓（snowball-data 型）时，对发布 tarball 跑 make check 产生系统性假失败（28/48 目标 diff）——必须锁定"发布日前最后提交"数据快照验证，CI 内改跑自包含子集并用消费者测试锁行为
+category: testing, test-data, version-skew, portability
+match_keywords: >
+  snowball, snowball-data, STEMMING_DATA, stemmer, stemwords, libstemmer,
+  check_stemtest, check_utf8, check_iso_8859_1, check_iso_8859_2, check_koi8r,
+  test data repo, expected output, moving main, no tags, release date snapshot,
+  data drift, voc.txt, output.txt, stems differ, external testdata
+error_signature: >
+  snowball-data|STEMMING_DATA|make: \*\*\* \[[^]]*:5[0-9][0-9]: check_(utf8|iso_8859_[12]|koi8r)_[a-z]+\] Error 1|diff -u.*output\.txt
+
+severity:               2
+trigger_tool:           make|conan
+phase:                  testing
+
+root_cause:             snowball 上游 49 个测试注册目标中 48 个是数据驱动（check_utf8_×29 / check_iso_8859_1_×16 / check_iso_8859_2_×2 / check_koi8r_×1），期望输出存于独立仓 snowball-data（~500MB、无任何 tag）。该仓 main 分支随算法演进重新生成全部期望文件：danish 的撇号-s 规则（bbc's→bbc）是 v2.2.0 之后的算法增强，main HEAD 期望文件已按新版算法重生成。对 v2.2.0 tarball 用 main HEAD 数据验证，28/48 目标 diff 失败——失败按语言整组聚集、逐词 diff 形态与算法移植 bug 完全同构，极易误诊为平台差异并进入无意义排查。CI 侧抓 main 数据同样得到假失败。
+affected_scope:         所有「测试期望数据在独立滚动仓」的项目（snowball-data 型），以及大数据集 CI 无法复现、需在适配机离线完成全量验证的场景。诊断特征：失败按语言/数据组整组聚集而非按代码路径；tarball 内算法源（.sbl）与数据期望语义对不上；库本体编译全绿、自包含回归全过。
+verification_cmd:       cd <src> && STEMMING_DATA=<snapshot> make check && echo OK   # main HEAD 会 Error 1（28/48 假失败），发布日快照 exit 0
+
+solution: |
+  # 三步锁定发布日快照（snowball v2.2.0 实测全程）：
+  # 1) 取发布日：tarball 内 NEWS/ChangeLog 首行（v2.2.0 = 2021-11-10）
+  # 2) 定位数据仓"发布日前最后提交"：GitHub HTML commits 页
+  #    https://github.com/<org>/<data-repo>/commits/main/?until=<date>T00:00:00Z
+  #    （API 限流时的可靠通道；本例 snowball-data@
+  #     0703f1d6a21802c3ff00c2c8b31bd255b74b2aec "Update german2 test data"）
+  # 3) raw.githubusercontent.com 逐文件下载该 SHA 的数据（git clone/整包
+  #    tarball 在低速通道必断连 early EOF）：纯文本优先、仅 .gz 变体回退
+  #    （Makefile 原生支持 gz 输入）
+  #
+  # 截断双校验（防下载截断产生假 diff）：
+  #   - 每语言 voc 与 output 行数必须相等（swedish 实锤：截断期望文件
+  #     14475/30623 行，产生"尾部整段缺失"型 diff 假失败）
+  #   - gz 用 gzip -t 校验
+  #
+  # 验证与落配方：
+  #   STEMMING_DATA=<snapshot> make check   # → 48/48 + stemtest 全过，exit 0
+  #   conanfile build() 集成自包含 check_stemtest（CI 内可复现）；
+  #   test_package 断言值全部由该快照实测输出锚定（不手写猜测）；
+  #   PR 统计表如实标注：数据仓不入库（~500MB）、CI 不复现、适配机实测。
+
+fallback: >
+  拿不到发布日快照时（数据仓不可达/无法定位历史提交）：退化为自包含目标
+  （check_stemtest 类）+ 消费者测试，统计表如实标注数据驱动目标未跑及
+  原因（环境限制：数据仓不可达）；禁用 main HEAD 数据冒充验证——假失败
+  比不跑更糟（会触发对正确代码的错误排查与无意义"平台差异"修复）。
+
+rec_priority:           1
+rec_approach:           pin-release-date-datasnapshot-and-verify-offline
+rec_description:        三步走：(1) 从 tarball 内 NEWS/ChangeLog 取发布日期，用 GitHub HTML commits 页 until= 日期过滤（API 限流时可靠）取数据仓"发布日前最后提交" SHA；(2) raw.githubusercontent.com 逐文件下载该 SHA 的数据（git clone/tarball 整包在低速通道必断连），纯文本优先、仅 .gz 变体回退；(3) 完整性双校验防截断——voc 与 output 行数必须相等、gz 用 gzip -t，截断的期望文件会产生"尾部整段缺失"型 diff 假失败。验证结果：48/48 数据目标 + stemtest 全过，make check 整体 exit 0。统计口径：CI 内只能跑自包含目标（check_stemtest 进 conanfile build()），数据驱动目标在适配机对快照实测并如实标注"数据仓不入库、CI 不复现"。
+rec_command:            conan create archives/s/snowball/2.2.0 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --build=missing -nr
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              14412
+source_commit:          c736c0d3f38
+author:                 j669539
+date:                   2026-10-03
+task:                   "14770"
