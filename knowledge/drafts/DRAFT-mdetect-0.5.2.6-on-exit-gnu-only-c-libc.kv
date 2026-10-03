@@ -1,0 +1,79 @@
+#====================================================================
+# DRAFT-mdetect-0.5.2.6-on-exit-gnu-only-c-libc
+#   OHOS/musl libc 没有 GNU 扩展 on_exit()（头文件无声明 + 链接 undefined symbol）
+#   → 改 POSIX atexit()，并用文件级静态变量承载原第 2 个参数
+# 来源: mdetect 0.5.2.6 适配（Debian orig tarball；任务 8750）
+# 路径: Path B（知识库扩展）本包首建
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id: DRAFT-mdetect-0.5.2.6-on-exit-gnu-only-c-libc
+trigger_tool: clang|ld.lld|conan
+phase: building
+error_signature: 'ld\.lld: error: undefined symbol: on_exit| undefined reference to .*on_exit| call to undeclared function ''on_exit'''
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category: compat, libc, compiler, linker
+match_keywords: on_exit, atexit, undefined symbol, undefined reference, implicit function declaration, glibc extension, musl, OHOS libc, exit handler, 清理钩子, 退出回调, 链接失败
+title: 'OHOS/musl libc 缺 GNU 扩展 on_exit()：头文件不声明（implicit-function-declaration 警告）且动态库无该符号 ⇒ 编译过、链接期 ld.lld 报 undefined symbol: on_exit；改 POSIX atexit() 并以文件级静态变量承载原第 2 个参数'
+prescan_pattern: on_exit\s*\(
+prescan_globs: '*.c'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: 'on_exit(void (*function)(int, void *), void *arg) 是 glibc/GNU C 库的 扩展（注册退出回调时把 status 与调用方的 arg 一并回传），POSIX 只标准化了 atexit(void (*)(void))（无参数）。OHOS PC 的 C 库基于 musl：头文件不声明 on_exit（clang 报 implicit-function-declaration 警告），动态库里也没有该符号 ⇒ 编译阶段能过，链接阶段 ld.lld 报 "undefined symbol: on_exit"。与平台 签名/执行权限无关，是纯 libc API 差异。'
+affected_scope: 任何在 OHOS/musl 上编译、调用 on_exit() 的 C 源码（glibc 扩展族）。具象实证： mdetect 0.5.2.6 源码 mdetect.c:88 `on_exit(restore_serial_settings, (void *)dev)`， 未改时链接失败、改为 atexit 后 arm64 musl 二进制链接通过（63936B）。与同族条目 E020（_IO_FILE 不透明）、E026（TLS/__thread）、E029（--without-bash-malloc）、 E032（_GNU_SOURCE + dirent unknown type）、E033（ncurses wide char）签名与解法 均不同，不构成重复。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority: 1
+rec_approach: replace-on-exit-with-atexit
+rec_description: 把 on_exit(cb, arg) 改为 atexit(cb_wrapper)：因为 atexit 的回调不带参数， 用文件级静态变量承载原 arg（单注册点场景），回调签名由 `void cb(int status, void *arg)` 改为 `void cb_wrapper(void)`，回调内读该 静态变量。改动只落在源文件，不引入平台宏、不动 libc、不加 stub；语义等价 （本例回调并不使用 status 参数）。
+rec_command: 见 .md 的 before/after 代码块；补丁落点 archives/<首字母>/<包>/<版本>/patches/*.patch 并在 conandata.yml 以 patch_file 引用
+rec_auto_fix: false
+rec_impl: source-patch
+
+fallback_priority: 2
+fallback_approach: local-on-exit-shim
+fallback_description: 不改调用点：在源码内实现本地 on_exit() shim（内部用 atexit + 静态槽位保存 handler 与 arg），适合多注册点或不便改语义处。代价：atexit 拿不到退出 status，回调里的 status 只能取近似值，必须先确认调用点是否依赖 status。
+fallback_command: static void (*g_hdl)(int, void *); static void *g_arg; static void g_wrap(void) { g_hdl(0, g_arg); } static int on_exit_local(void (*f)(int, void *), void *a) { g_hdl = f; g_arg = a; return atexit(g_wrap); }
+fallback_auto_fix: false
+fallback_impl: source-shim
+
+# ★ 禁止策略 ★
+forbid_1_pattern: '#ifdef __OHOS__[\s\S]{0,80}on_exit|on_exit\s*\([^)]*\)\s*;\s*$.*stub'
+forbid_1_reason: 禁止用空壳 stub / 平台宏把调用静默丢弃（R6/R8：平台宏必须有实质逻辑）， 否则注册的清理回调永不执行，退出时不清理串口/设备状态，属隐性行为回归
+forbid_1_consequence: 链接绿了但退出清理语义丢失；审查按空壳 stub 打回，PF5 也拦 conanfile 里的 -D__OHOS__ 注入
+forbid_2_pattern: \.weak\s+on_exit|weak.*on_exit|on_exit.*return 0.*占位
+forbid_2_reason: 弱符号/假实现只是压制链接错误，没有解决 API 语义缺失，跨库复用会把错误处方扩散
+forbid_2_consequence: 问题换位置重现，知识库被污染成"能链接就行"的错误口径
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P004
+
+# ═══ 关系图 (Relations) ═══
+similar_to: E213（l64a() 同样缺失于 musl，draft-review 判 review-similar 灰区；函数/签名/主解法均不同）、
+                        E020（musl/glibc _IO_FILE 不透明，同族不同签名与解法）、 E026（TLS/__thread glibc 扩展）、E029（bash malloc）、 E032（_GNU_SOURCE + DIR/dirent unknown type）、E033（ncurses wide char）
+causes:
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd: '探针（负例）: printf ''extern int on_exit(void (*)(int, void *), void *);\nint main(void){ return on_exit(0, 0); }\n'' > p.c && clang p.c -o p # 期望: ld.lld: error: undefined symbol: on_exit（exit=1），另有 implicit-function-declaration 警告 # 符号面核对: nm -D /lib/ld-musl-aarch64.so.1 | grep -w on_exit  → 空 正例（修复后）: CI_PACKAGES="archives/m/mdetect/0.5.2.6" zsh ci/conan/build_and_test.sh # 期望: conan create passed，且 conanfile 的 build() 里 grep 不到 on_exit'
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: 主理-1 <主理-1@local>
+source_pr: (待回填)
+source_commit: (待回填)
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 1
+metrics_fail_count: 0
+metrics_confidence: 1.0
+metrics_last_used: 2026-09-30
+
+draft: true
+contributor_id: 8750-MDT
+last_updated: 2026-09-30
+doc_file: knowledge/drafts/DRAFT-mdetect-0.5.2.6-on-exit-gnu-only-c-libc.md
