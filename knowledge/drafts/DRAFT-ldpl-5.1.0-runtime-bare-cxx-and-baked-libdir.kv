@@ -1,0 +1,121 @@
+#====================================================================
+# Draft knowledge entry - 转译器/编译器驱动型 CLI 的「运行期两层外部依赖」
+# 一个包自己不需要编译器，但它在运行期 fork 一个 C++ 前端，并要读本包的
+# 随包资源；上游把「前端名字」和「资源目录」都写成常量，OHOS PC 上
+# 前者根本不存在（PATH 里没有 c++/g++/cc 任何一个），后者被 conan 的
+# package_folder 烧成构建机路径。conan create 全绿也照不出这两层。
+# Source package: ldpl/5.1.0  (archives/l/ldpl/5.1.0)
+#====================================================================
+
+id:                     DRAFT-ldpl-5.1.0-runtime-bare-cxx-and-baked-libdir
+draft:                  true
+trigger_tool:           runtime|clang|sh|test
+phase:                  runtime
+error_signature:        'sh: c\+\+: inaccessible or not found|sh: g\+\+: inaccessible or not found|LDPL Error: compilation failed|ldpl_lib\.cpp.*No such file or directory|Error 127'
+
+severity:               3
+category:               ohos|toolchain|runtime|portability|packaging
+match_keywords:         bare c++, no g++ alias, LDPL_CXX, LDPL_LIB_LOCATION, system() fork, transpiler, compiler driver, baked package_folder, relocated package, runenv_info, conanrun, false green, Error 127, clang-only toolchain, OHOS PC, R33, patch required
+
+title:                  '工具包在运行期 fork 一个裸名外部程序并读随包资源：两处都写成常量时，env 与 PATH 都救不了，且 conan create 全绿仍是假绿'
+
+prescan_pattern:        'system\(|popen\(|popens|\bsystem *\("'
+prescan_globs:          '*.c, *.cpp, *.cc, *.cxx, *.h, *.hpp'
+
+root_cause:             >
+    LDPL 是转译器：ldpl 自己不需要编译器，但每编译一个 .ldpl 程序，它就在
+    main() 末尾拼一条命令并 fork 出去执行 —— 上游 src/ldpl.cpp:350 写的是
+    字面量 "c++ ldpl-temp.cpp -std=c++11 -w -O3 -o ..."，同时用编译期宏
+    LDPLLIBLOCATION（上游 makefile 里等于 $(PREFIX)/lib/ldpl）拼出
+    `#include "<目录>/ldpl_lib.cpp"`（ldpl.cpp:309/323）。5.1.0 既没有
+    -c=<编译器> 选项，也完全不调用 getenv()，所以：
+
+    1) 前端层：OpenHarmony PC 的 PATH 上不存在 c++/g++/cc 任何一个名字
+       （真机实测 command -v 三者全部 MISSING，只有 harmonybrew/SDK 的
+       clang++）。toybox sh 报 "sh: c++: inaccessible or not found"，
+       ldpl 随后打印 "LDPL Error: compilation failed." 并 exit 1。
+       导出 CXX 或 LDPL_CXX 一律无效 —— 上游根本不读环境变量。
+    2) 资源层：按 conan 习惯把 self.package_folder 填进 -DLDPLLIBLOCATION
+       就把**构建机的缓存路径**烧进了二进制。制品仓把包发到另一台机器后
+       该目录不存在，报错只出现在被 fork 的 clang 端：
+       `#include "<旧路径>/ldpl_lib.cpp"` → No such file or directory。
+       readelf/nm 上看不出任何异常，因此这类缺陷不会被 L0/L1/L4/L5 抓住。
+
+    两层相互独立，必须分别对照实验证明（见 verification_cmd 的矩阵）：
+    把烧死目录指对，前端层照样失败（A3/A4）；把前端指对，资源目录指空
+    照样失败（B2/B5）。只有两处都走运行期解析才可用（B1/B4）。
+
+affected_scope:         >
+    一切「自身产出可执行文件、运行期还要 fork 外部工具（编译器/解释器/打包器）
+    并依赖随包资源」的 CLI 包：转译器、语言前端、代码生成器、需要子进程的
+    构建辅助工具。判据是源码里出现 system()/popen() 调用裸名程序，或
+    -DPATH/PREFIX/LOCATION 类宏被用于运行期资源定位。
+    不适用：外部程序名保存在 Makefile 变量里的构建期场景（见 jnoise/cohomcalg
+    两条草稿）；也不适用 Python 侧 posix_spawn 不查 PATH 的 E405。
+
+verification_cmd:       |
+  command -v c++ g++ cc; echo "RC=$?"                      # 预期三者全 MISSING
+  grep -n '"c++ \|LDPLLIBLOCATION' src/ldpl.cpp            # 裸名 + 烧死目录的字面量
+  grep -c getenv src/ldpl.cpp                              # 0 = 上游不读任何 env
+  # 对照矩阵（真机 HarmonyOS HongMeng Kernel 1.12.0 / SDK clang 15.0.4）
+  # A1/A2/A3/A4 = 未打补丁；B1/B2/B3/B4/B5 = 打补丁；real = 存在资源目录，ghost = 空目录
+  LDPL_CXX=<clang++> ldpl-pristine-bakedreal -n -f=-pthread hello.ldpl   # 仍失败 = env 惰性
+  LDPL_LIB_LOCATION=<real> LDPL_CXX=<clang++> ldpl-patched-bakedghost -n -f=-pthread hello.ldpl  # 成功
+
+rec_priority:           1
+rec_approach:           demote-compiled-in-constants-to-runtime-env-defaults
+rec_description:        >
+    一个 portability 补丁把两处常量各改成「运行期环境变量优先，编译期值退为默认」：
+    getenv("LDPL_CXX") ?: "c++"、getenv("LDPL_LIB_LOCATION") ?: LDPLLIBLOCATION。
+    配方侧再由 package_info() 的 runenv_info.define_path 把 LDPL_LIB_LOCATION
+    指向本机真实安装目录，于是包可重定位；前端名交给消费者/测试显式给出，
+    不伪造 c++ 这个名字（R33 禁止 PATH shim）。补丁不含任何平台条件编译宏，
+    非 OHOS 上默认值行为与上游完全一致。
+rec_command:            |
+  # conanfile.py
+  self.runenv_info.define_path("LDPL_LIB_LOCATION", os.path.join(self.package_folder, "lib", "ldpl"))
+  # test_package/conanfile.py
+  cxx = (self.conf.get("tools.build:compiler_executables", default={}) or {}).get("cpp")
+  self.run('LDPL_CXX="%s" sh test_ldpl.sh "%s" "%s"' % (cxx, ldpl, samples), env="conanrun")
+rec_auto_fix:           false
+rec_impl:               patch
+
+fallback_priority:      2
+fallback_approach:      enumerate-runtime-externals-before-first-create
+fallback_description:   >
+    在没有补丁能力（或不允许改上游）时，唯一可行的替代是让工具包自带一个
+    **只在包内存在**的前端别名并在 runenv_info 里 prepend 该目录，同时把
+    「fork 成功」写进消费者断言（断言产物真实生成、真实运行），否则失败会
+    被 test_package 的宽松断言吞掉。代价是 PATH 污染风险，必须限定目录内。
+fallback_command:       >-
+  copy(self, "*", src=<shim_dir>, dst=os.path.join(self.package_folder, "runtime-bin")); self.runenv_info.prepend_path("PATH", os.path.join(self.package_folder, "runtime-bin"))
+fallback_auto_fix:      false
+fallback_impl:          shim
+
+forbid_1_pattern:       'ln -s clang++ <dir>/c++ 并把 <dir> 加进全局 PATH / buildenv，来"满足"上游对 c++ 的要求'
+forbid_1_reason:        '该别名会遮蔽消费机自己的编译器：同一 runenv 里其它包（含需要 g++ 语义的构建）都会拿到 clang 冒充的 c++。R33 要求编译器来自 profile 的 tools.build:compiler_executables，PATH shim 绕过审计。'
+forbid_1_consequence:   '本包测试通过，但同环境里其它 C++ 包的编译选项被悄悄改写；CI 与本机行为不一致，且评审无法从配方看出编译器真实来源。'
+
+forbid_2_pattern:       '只在 build() 里把 -DLDPLLIBLOCATION 填成 self.package_folder，认为 create 成功即适配完成'
+forbid_2_reason:        'package_folder 是构建机/CI worker 上的缓存路径。上传制品仓后消费机路径不同，运行期才在 fork 出的编译器里爆出来。'
+forbid_2_consequence:   '本地与 CI 全绿、消费即坏；缺陷不在任何 ELF 元数据里，readelf/nm/L0~L5 全部无感。'
+
+forbid_3_pattern:       'test_package 只断言 bin/ldpl -v / -h（版本与帮助）就声称工具可用'
+forbid_3_reason:        '上游在 fork 失败时仍正常打印自己的横幅并 exit(1)，只测 argv 解析路径等于没测这条包的核心能力（把 .ldpl 变成可执行文件）。'
+forbid_3_consequence:   'rule4/rule12 意义上"消费者测试"存在但为空壳：真正的第一次用户调用即失败，问题外溢到下游。'
+
+similar_to:             [E529, E405, E428, E518, DRAFT-jnoise-0.6.0-makefile-linkline-literal-cxx-name, DRAFT-cohomcalg-0.32-makefile-gxx-override]
+causes:                 []
+caused_by:              []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-ldpl-5.1.0-runtime-bare-cxx-and-baked-libdir.md
+last_updated:           2026-10-03
+source_event:           ldpl/5.1.0 first OHOS adaptation - transpiler forks bare "c++" (absent on OHOS) and includes ldpl_lib.cpp from a compiled-in path; fixed by runtime env override + runenv_info injection
+contributor_id:         iKalous_OscarP
+authors:                iKalous <2040466963@qq.com>
+source_pr:             14393
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
