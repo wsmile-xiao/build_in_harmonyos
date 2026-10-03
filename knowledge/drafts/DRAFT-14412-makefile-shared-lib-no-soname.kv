@@ -1,0 +1,61 @@
+#====================================================================
+# DRAFT-14412-makefile-shared-lib-no-soname
+# 手写 Makefile 的共享库链接规则缺 -Wl,-soname → 产物无 DT_SONAME，CI L5a 门禁失败
+# 来源: tomlc99 0.0-git20260130 适配 (2026-10-03, j669539)
+#====================================================================
+
+draft: E14412-draft-j669539
+status: pending-editor-review
+id: E14412
+doc_file: doc/E14412.md
+title: 手写 Makefile 共享库链接规则不带 -Wl,-soname，产物缺 DT_SONAME 触发 CI L5a 门禁（E383 的 Makefile 侧镜像）
+category: build-system, linking, ohos, packaging, portability
+severity: 2
+trigger_tool: make|ld|conan create
+phase: linking|packaging
+error_signature: L5a: .*缺少 DT_SONAME|soname_gate_failed|readelf -d .*\| grep SONAME.*为空|Library soname
+match_keywords: Makefile, -shared, soname, DT_SONAME, L5a, libtoml, readelf, 共享库, 手写 Makefile, $(CC) -shared, LIB_VERSION, 相对 SONAME
+root_cause: >
+  上游手写 Makefile（非 CMake/autotools）的共享库规则形如 `$(CC) -shared -o $@ $^`
+  ——链接命令行从未带 -Wl,-soname，产物 .so 在任何平台（含 glibc Linux）都没有
+  DT_SONAME 字段。CMake 工程靠 Platform/Linux.cmake 的
+  CMAKE_SHARED_LIBRARY_SONAME_C_FLAG="-Wl,-soname," 自动注入 SONAME（E383 已覆盖
+  OHOS 无 Platform/HarmonyOS.cmake 的 CMake 侧路径），手写 Makefile 既无平台模块
+  兜底也无 soname 约定，CI L5a（可链接共享库必须有相对 DT_SONAME）必挂。
+  tomlc99 的 libtoml.so.1.0 即实测案例：打补丁前 readelf -d 无 SONAME 条目。
+solution: |
+  在补丁中给共享库链接规则显式注入相对 SONAME（版本号复用 Makefile 自己的
+  LIB_VERSION 变量，避免双源漂移）：
+  ```makefile
+  # 上游原始规则:
+  libtoml.so.$(LIB_VERSION): toml.o
+  	$(CC) -shared -o $@ $^
+  # 适配后:
+  libtoml.so.$(LIB_VERSION): toml.o
+  	$(CC) -shared -Wl,-soname,libtoml.so.$(LIB_VERSION) -o $@ $^
+  ```
+  配方 package() 侧配套生成开发符号链接（供 -ltoml 链接解析；R5: rm -f && ln -s）：
+  ```python
+  copy(self, "libtoml.so.1.0", src=self.source_folder,
+       dst=os.path.join(self.package_folder, "lib"))
+  link = os.path.join(self.package_folder, "lib", "libtoml.so")
+  if os.path.lexists(link):
+      os.remove(link)
+  os.symlink("libtoml.so.1.0", link)
+  ```
+  验证命令：`readelf -d lib/libtoml.so.1.0 | grep SONAME` 应输出
+  `Library soname: [libtoml.so.1.0]`（相对路径，L5a/L5b 合规）。
+fallback: >
+  若上游 Makefile 把链接变量（LDFLAGS）接进了共享库规则，可在 conanfile build()
+  用 `make LDFLAGS="-Wl,-soname,libxxx.so.N"` 免补丁注入（tomlc99 的规则未用
+  $(LDFLAGS)，故只能走 patch）。最后手段 shared=False 纯静态打包绕开 L5a——
+  但失去动态库能力，仅当上游 Makefile 完全不可改时使用。
+verify_builds: tomlc99 0.0-git20260130 本地 conan create（ohos-aarch64）：readelf -d 含 SONAME=libtoml.so.1.0，L5 pass
+reference_impl: >
+  archives/t/tomlc99/0.0-git20260130/patches/0001-makefile-soname.patch；
+  CMake 侧镜像条目：E383（libyajl CMAKE_SHARED_LIBRARY_SONAME_C_FLAG）、
+  E330（expat CMAKE_PLATFORM_NO_VERSIONED_SONAME）
+applies_to:
+  - "任何用手写 Makefile 直接 $(CC) -shared 产 .so 的 C/C++ 项目"
+  - "Makefile 共享库规则未引用 $(LDFLAGS) 的项目（免补丁注入不可行）"
+  - "产物为 lib<name>.so.<version> 版本化命名的库"
