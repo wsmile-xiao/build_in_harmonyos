@@ -1,0 +1,139 @@
+#====================================================================
+# DRAFT-medusa-autotools-platform-triplet-and-probe
+# autotools OHOS 平台判定的三处缺口：config.guess 插桩缺 echo/exit、
+# config.sub 归一化顺序、以及「假定式」降级探测
+#
+# 编号说明：本文件不预占 E 编号（曾拟用 E259，该号已被
+#   knowledge/doc/E259.md 占用）。草稿期的编号由维护者在合入时分配；
+#   仓库主流写法即以文件名/主题为标题，机器可读标识见下方 id: 字段。
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     MEDUSA-AUTOTOOLS-PLATFORM-TRIPLET-AND-PROBE
+trigger_tool:           configure|config.guess|config.sub
+phase:                  configuration
+error_signature:        cannot guess build type; you must specify one|unable to guess system type|Invalid configuration .*ohos.*not recognized|aarch64-unknown-linux-gnu-ohos|WARNING: .*Assuming it was|is required for installed version of|module will NOT be built
+
+# Layer 1: Recognition
+severity:               3
+category:               autotools-config|ohos|platform-detection
+match_keywords:         config.guess, config.sub, HarmonyOS, linux-ohos, linux-gnu, patch-autotools-ohos.pl, GUESS, exit, triplet, canonicalisation, ldd, otool, assume, silent-disable, libgcrypt, gnutls
+title:                  Three gaps in autotools OHOS platform detection: the standard config.guess patch does not print, config.sub rewrites linux-ohos to linux-gnu-ohos, and assume-based probes silently disable features
+
+# Layer 2: Diagnosis
+root_cause:             (1) scripts/patch-autotools-ohos.pl inserts a HarmonyOS
+                        branch into config.guess that only assigns
+                        `GUESS=${MACHINE}-unknown-linux-ohos` and ends with `;;`.
+                        Every other branch in config.guess both prints its result and
+                        exits (`echo "$x-y-z"; exit ;;` - 230 such branches in the
+                        medusa copy), because the main `case` has nothing after it but
+                        the failure path.  The inserted branch therefore falls through
+                        to `unable to guess system type`, and configure stops with
+                        `cannot guess build type; you must specify one`.  The script is
+                        the repository's own recommended fix (P001 suggests it), so the
+                        defect affects every autotools package that follows the advice.
+
+                        (2) In the 2018-era config.sub shipped by some projects the
+                        generic rule `-linux*) os=$(echo $os | sed -e 's|linux|linux-gnu|')`
+                        runs after the OS whitelist.  Simply adding `linux-ohos*` to the
+                        whitelists is not enough: the canonicalisation still rewrites the
+                        OS, and `aarch64-linux-ohos` comes back as
+                        `aarch64-unknown-linux-gnu-ohos`.  A dedicated
+                        `-linux-ohos*) os=-linux-ohos` branch must be inserted BEFORE the
+                        generic `-linux*)` rule.
+
+                        (3) A configure script that cannot run its preferred probing
+                        tool may "assume" the answer instead of failing, then require an
+                        additional dependency based on that assumption and silently
+                        disable the feature.  medusa's libssh2 chain is the worked
+                        example: `AC_CHECK_LIB(ssh2)` succeeds, `ld --verbose`/`ldd`/`otool`
+                        are absent on OHOS, so it assumes libssh2 was built against
+                        libgcrypt, then additionally demands gnutls - which is not
+                        published for OHOS - and disables the whole SSH module without
+                        any error.  The build stays green while a feature is missing, so
+                        only a runtime/module-level assertion catches it.
+
+affected_scope:         Any autotools project on OHOS that uses config.guess/config.sub
+                        patching (all of them, per E007/E072), and any configure script
+                        whose capability probe degrades to an assumption when host tools
+                        are missing.
+verification_cmd:       UNAME_SYSTEM=HarmonyOS sh ./config.guess;      # must print a triplet, not fall through
+                        sh ./config.sub aarch64-linux-ohos;              # must stay aarch64-unknown-linux-ohos
+                        grep -n 'GUESS=' <patched config.guess>;          # a branch that only assigns is broken
+                        grep -nE 'Assuming it was|module will NOT be built' <build>/config.log
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           complete-the-platform-branch
+rec_description:        After running patch-autotools-ohos.pl, do not trust its output
+                        blindly:
+                        1) rewrite the inserted config.guess branch to
+                           `echo "${MACHINE}-unknown-linux-ohos"; exit ;;` (verify by
+                           running config.guess with a stubbed uname, and confirm a
+                           glibc/Linux stub still returns the original triplet);
+                        2) in config.sub insert `-linux-ohos*) os=-linux-ohos ;;`
+                           immediately BEFORE the generic `-linux*)` rule, in addition
+                           to adding `linux-ohos*` to the maybe_os and OS whitelists;
+                        3) for assume-based probes, prefer supplying the dependency the
+                           fallback asks for, and when that dependency is unavailable
+                           (or the assumption is factually wrong for the OHOS package),
+                           make the probe skip the fallback for `*ohos*` targets rather
+                           than letting it disable the feature silently.
+rec_command:            # config.guess branch must end with:
+                        echo "${MACHINE}-unknown-linux-ohos"
+                        exit ;;
+                        # config.sub, before the generic -linux*) rule:
+                        -linux-ohos*)
+                                os=-linux-ohos
+                                ;;
+rec_auto_fix:           false
+rec_impl:               patch-autotools-script
+
+fallback_priority:      2
+fallback_approach:      supply-the-assumed-dependency
+fallback_description:   When the assume-branch demands an extra library that IS
+                        published, provide it so the probe passes honestly instead of
+                        patching the probe.
+fallback_command:       add the demanded dependency to requirements() and its -I/-L to the build flags
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       GUESS=\$\{MACHINE\}-unknown-linux-ohos\s*\n\s*;;
+forbid_1_reason:        A config.guess branch that only assigns never prints; the script
+                        falls through to the failure path.
+forbid_1_consequence:   configure stops at "cannot guess build type", and the platform
+                        stays undetected even though the file "contains HarmonyOS".
+
+forbid_2_pattern:       linux-ohos.*(?!.*-linux-ohos\*\))
+forbid_2_reason:        Adding linux-ohos only to the whitelists leaves the generic
+                        `-linux*)` -> `linux-gnu` rewrite in effect.
+forbid_2_consequence:   Silent triplet corruption to aarch64-unknown-linux-gnu-ohos;
+                        downstream platform branches and link flags follow the wrong OS.
+
+forbid_3_pattern:       disable.*module.*(no test|untested)|silently.*disable
+forbid_3_reason:         Accepting a silently disabled feature is how "builds green,
+                         feature missing" ships.  Either enable it or record it as a
+                         declared cut with evidence.
+forbid_3_consequence:    A capability disappears from the product while every gate stays
+                         green.
+
+# Layer 4: Principles
+principles:             P003, P013
+
+# Relations
+causes:                 []
+caused_by:              []
+similar_to:             [E007, E072, E011, E112]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-medusa-autotools-platform-triplet-and-probe.md
+last_updated:           2026-09-29
+source_event:           medusa 2.3 native OHOS Conan build (PR #13807):
+                        config.guess fall-through and config.sub triplet corruption on
+                        runs conan7/conan8; SSH module silently disabled on runs
+                        conan9-conan19; fixed and verified on conan20/conan21/final
+
+# Authorship and provenance
+authors:                gcw_hL6s3dcK
