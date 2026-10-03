@@ -1,0 +1,77 @@
+draft: DRAFT-13952-libwps-0.4.11-pkg-check-modules-var-shortcut
+status: pending-editor-review
+title: "无 pkg-config 环境下 PKG_CHECK_MODULES 的环境变量短路三件套（变量导出 + .la-free 干净链接目录 + 静态闭包）"
+category: build-system, autotools, conan, linking
+match_keywords: >
+  PKG_CHECK_MODULES, pkg-config not found, REVENGE_CFLAGS, PREFIX_LIBS 环境变量短路,
+  libtool la was moved, clean link directory, 静态依赖闭包, -lz, librevenge, libwpd,
+  autotools cross compile OHOS, test() 直跑, /system/lib64
+error_signature: >
+  Package \S+ was not found in the pkg-config search path|checking for \w+\.\.\. no|No package '\S+' found|libtool: error: cannot find the library '//lib/\S+\.la'|libtool: warning: library '\S+\.la' was moved|archive member \S+\.a is neither ET_REL nor LLVM bitcode|undefined reference to `inflate'
+root_cause: "OHOS 设备/CI 无 pkg-config，PKG_CHECK_MODULES 默认探测整体失效。伴生两陷阱：(1) conan 依赖包 .la 记录安装期 libdir（prefix=/ + DESTDIR = //lib 绝对路径），-L 指向包目录时 libtool 优先解析 .la 报 was moved；改 .a 绝对路径直传又被 libtool 当输入成员嵌入正在构建的静态库（neither ET_REL nor LLVM bitcode）。(2) 静态依赖内部链接闭包不进 .pc 递归（librevenge 流层链 zlib），只喂 -lrevenge 不带 -lz 时消费者链接报 undefined reference to inflate。"
+rec_approach: "三件套组合：① configure 环境导出 <PREFIX>_CFLAGS/_LIBS 三组变量短路 PKG_CHECK_MODULES（pkg.m4 对非空环境变量直接采信）；② 依赖 .a 复制到构建私有 .la-free 干净目录（E236 同款）供 -L 解析；③ _LIBS 尾部手工补静态闭包 -lz；④ test() 直跑 OHOS 目标二进制时 conanrun env 缺 profile LD_LIBRARY_PATH，需前置 /system/lib64。"
+solution: |
+  三件套组合（conanfile.py，libwps 0.4.11 实证，继承 libwpd 0.10.3 设备实证经验）：
+
+  1) PKG 变量短路——configure 环境显式导出 <PREFIX>_CFLAGS/_LIBS 三组变量，PKG_CHECK_MODULES
+     对非空环境变量直接采信、跳过 pkg-config 探测（autoconf pkg.m4 设计行为）：
+
+  ```python
+  def _pkg_vars(self):
+      revenge = self.dependencies["librevenge"].package_folder
+      zlib = self.dependencies["zlib"].package_folder
+      include = f"-I{revenge}/include/librevenge-0.0"
+      link_zlib = f"-L{zlib}/lib -lz"          # 静态闭包：librevenge 流层链 zlib
+      link_dir = self._clean_link_dir()
+      link = f"-L{link_dir}"
+      return {
+          "REVENGE_CFLAGS": include,
+          "REVENGE_LIBS": f"{link} -lrevenge-0.0 {link_zlib}",
+          "REVENGE_GENERATORS_CFLAGS": include,
+          "REVENGE_GENERATORS_LIBS":
+              f"{link} -lrevenge-generators-0.0 -lrevenge-0.0 {link_zlib}",
+          "REVENGE_STREAM_CFLAGS": include,
+          "REVENGE_STREAM_LIBS":
+              f"{link} -lrevenge-stream-0.0 -lrevenge-0.0 {link_zlib}",
+      }
+  ```
+
+  2) .la-free 干净链接目录——把依赖 .a 复制到构建私有目录（不含 .la），-L 指向它，
+  libtool 走纯 -L/-l 解析无 .la 可误读（E236 scoped-la-free-static-archive-directory 同款方案复用）：
+
+  ```python
+  def _clean_link_dir(self):
+      clean = Path(self.build_folder, ".revenge-libs")
+      clean.mkdir(parents=True, exist_ok=True)
+      for name in ("revenge-0.0", "revenge-generators-0.0", "revenge-stream-0.0"):
+          source = Path(self._revenge_archive(name))
+          destination = clean / source.name
+          if not destination.exists():
+              copy(self, source.name, src=str(source.parent),
+                   dst=str(clean), keep_path=False)
+      return clean
+  ```
+
+  3) test() 直跑 OHOS 目标二进制补 /system/lib64——conanrun env 不携带 profile 的
+  LD_LIBRARY_PATH，而 OHOS 目标二进制的 libc++.so（__h-namespace 构建）在 /system/lib64：
+
+  ```python
+  def test(self):
+      cmake = CMake(self); cmake.test()
+      environment = Environment()
+      if os.path.isdir("/system/lib64"):
+          environment.prepend_path("LD_LIBRARY_PATH", "/system/lib64")
+      with environment.vars(self).apply():
+          ...  # 直跑测试二进制与转换工具（wps2text 等）
+  ```
+fallback: >
+  上游 configure.ac 不用 PKG_CHECK_MODULES 标准变量名（AC_ARG_VAR 自定义探测）时：
+  (a) patch configure.ac 换 AC_CHECK_HEADERS/AC_CHECK_LIB 显式探测；
+  (b) 写 host 侧 pkg-config 包装脚本并挂 PKG_CONFIG 环境变量（要求 host 有真 pkg-config 可复用）。
+  .la 规避不可行时（依赖只发 .la 无 .a）：按 E236 在打包阶段清理/重写 .la 的 libdir 字段。
+verify_builds: "#13952（CI 构建 #65484 PASSED；本机 conan create 全绿 RC=0）"
+reference_impl: >
+  libwps 0.4.11 PR #13952 archives/l/libwps/0.4.11/conanfile.py（继承 libwpd 0.10.3 先例）；
+  .la 规避复用 E236（PCRE2/SQLite3 LIBADD 案例，scoped-la-free-static-archive-directory）
+id: DRAFT-13952
+doc_file: doc/DRAFT-13952.md
