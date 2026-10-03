@@ -1,0 +1,89 @@
+#====================================================================
+# Draft: CMake tests registered in a subdirectory with EXCLUDE_FROM_ALL
+#        executables (libcorrect 0.0-git20260204): root-level ctest
+#        reports "No tests were found" and plain `cmake --build` never
+#        compiles the runners — build the aggregate target explicitly
+#        and run ctest from the subdirectory.
+#====================================================================
+
+draft: libcorrect-0.0-git20260204-ctest-subdir-exclude-from-all
+status: pending-editor-review
+
+id:                     DRAFT-LIBCORRECT-CTEST-SUBDIR-EXCLUDE-FROM-ALL
+trigger_tool:           cmake|ctest|conan
+phase:                  testing
+error_signature:        No tests were found!!!|test_runners EXCLUDE_FROM_ALL|enable_testing.*subdirectory|add_test.*not registered at root
+
+severity:               3
+category:               testing|cmake|ci-gate
+match_keywords:         ctest, No tests were found, EXCLUDE_FROM_ALL, test_runners, enable_testing, add_subdirectory, tests/CMakeLists.txt, CTestTestfile.cmake, aggregate target, LastTest.log, ctest_entries
+
+title:                  上游把 enable_testing() 放在 tests/ 子目录、且测试可执行文件全部 EXCLUDE_FROM_ALL 时（libcorrect 模式），根目录 `ctest` 报 "No tests were found"、默认构建也不产 runner——须显式构建上游聚合目标（如 test_runners）再进子目录跑 ctest，计数仍以子目录 LastTest.log 为唯一来源
+
+root_cause:             CMake 的测试注册是按目录的：enable_testing() 写在哪个目录的 CMakeLists.txt，CTestTestfile.cmake 就生成在哪个目录（含其子目录），顶层没有该文件时根级 ctest 扫不到任何条目，输出 "No tests were found!!!" 并以退出码 0 结束（假绿）。同时此类项目的测试可执行文件通常声明为 EXCLUDE_FROM_ALL（libcorrect tests/CMakeLists.txt 每个 add_executable 均如此），默认 cmake --build 根本不编译它们，只有上游提供的聚合目标（add_custom_target(test_runners DEPENDS ...)，即上游 make check 的入口）才会构建。两件事叠加：只做其一，要么 runner 不存在，要么 ctest 假绿。
+affected_scope:         所有 enable_testing() 不在顶层、测试 runner EXCLUDE_FROM_ALL 的 CMake 项目（libcorrect 0.0-git20260204 实证；上游 GitHub README 推荐 `make check` 的项目多为该形态）。conan 配方里直接 self.run("ctest", cwd=self.build_folder) 的写法会中招。
+verification_cmd:       grep -n "enable_testing" CMakeLists.txt tests/CMakeLists.txt; grep -n "EXCLUDE_FROM_ALL" tests/CMakeLists.txt; grep -n "add_custom_target(test" tests/CMakeLists.txt; ctest 2>&1 | grep "No tests"
+
+solution: |
+  配方 build() 内三步（libcorrect 0.0-git20260204 实证 4/4 passed）：
+
+  1) 适配前先 grep 三样东西定形态：
+     grep -n "enable_testing" CMakeLists.txt tests/CMakeLists.txt   # 位置：顶层 vs 子目录
+     grep -n "EXCLUDE_FROM_ALL" tests/CMakeLists.txt                # runner 是否排除在 all 外
+     grep -n "add_custom_target(test" tests/CMakeLists.txt          # 聚合目标名（test_runners/check）
+
+  2) build() 里默认构建之后显式构建聚合目标（上游 make check 的等价物，零测试代码改动）：
+
+     def build(self):
+         cmake = CMake(self)
+         cmake.configure()
+         cmake.build()
+         cmake.build(target="test_runners")   # <- 关键：EXCLUDE_FROM_ALL 的 runner 只有聚合目标会编
+
+  3) ctest 工作目录选含 CTestTestfile.cmake 的目录（通常 build/tests/），逐候选探测后运行；
+     根目录 "No tests were found" 不可作为通过依据（该路径退出码为 0，经典假绿）：
+
+     dirs = [d for d in (join(build_folder, "tests"), build_folder)
+             if isfile(join(d, "CTestTestfile.cmake"))]
+     for ctest_dir in dirs:
+         self.run("ctest --output-on-failure", cwd=ctest_dir, env="conanrun", ignore_errors=True)
+         marker = self._parse_ctest_log(build_folder, ...)   # LastTest.log fail-closed 解析
+         if marker["status"] == "passed":
+             return
+     raise ConanException("upstream ctest failed: ...")
+
+  计数唯一来源仍是 ctest 写的 Testing/Temporary/LastTest.log（fail-closed：N/M 分母一致性
+  + Test Passed./***Test Failed. 判决行 + 恒等式自检），LastTest.log 要在 build 树里递归找
+  （cmake_layout 单配置在 build/Release，子目录测试再深一层，walk 限深 6 防炸）。
+
+fallback: >
+  若上游没有聚合目标（无 add_custom_target(test_runners)），用显式目标列表逐个构建：
+  cmake.build(target="convolutional_test_runner") 等；或直接 cmake --build --target help
+  列出可用目标后挑全部 *_test_runner。若 ctest 子目录探测失败（无 CTestTestfile.cmake），
+  退回直接执行测试二进制并断言退出码 + 输出特征行，但统计表须如实标注口径为
+  direct-exec 而非 ctest_entries。禁止用根级 ctest 退出码 0 当通过证据。
+
+verify_builds: "#68073, #68167 (PR #14383, libcorrect 0.0-git20260204, OHOS aarch64, ctest 4/4 passed)"
+reference_impl: >
+  libcorrect 0.0-git20260204 conanfile.py build()/_run_upstream_tests()
+  （archives/l/libcorrect/0.0-git20260204/）；LastTest.log fail-closed 解析器沿用
+  libbgcode 0.0-git20260521 先例；草稿布局参照 E257-draft-E542（xxhash PR 带入）。
+
+rec_priority:           3
+rec_approach:           build-aggregate-target-then-ctest-in-subdir
+rec_description:        (1) 先 grep 三样东西：enable_testing() 的位置（顶层 vs tests/ 子目录）、测试 add_executable 是否带 EXCLUDE_FROM_ALL、是否存在 add_custom_target 聚合目标（test_runners / check 之类）；(2) 配方 build() 里 cmake.build() 之后显式 cmake.build(target="<聚合目标>")——这是上游自己 `make check` 的等价物，不引入任何测试代码改动；(3) ctest 的工作目录选含 CTestTestfile.cmake 的目录（通常 build/tests/），逐候选探测 os.path.isfile(join(dir, "CTestTestfile.cmake")) 后运行，根目录 "No tests were found" 不可作为通过依据（ctest 该路径退出码为 0，是经典假绿）；(4) 计数唯一来源仍是 ctest 写的 Testing/Temporary/LastTest.log（fail-closed 解析：N/M 分母一致性 + Test Passed/Failed 判决行 + 恒等式自检），不要对 stdout 做正则数数；(5) LastTest.log 要在 build 树里递归找（cmake_layout 单配置在 build/Release，子目录测试再深一层），walk 限深防炸。
+rec_command:            cmake --build <build_dir> --target test_runners && (cd <build_dir>/tests && ctest --output-on-failure)
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# PR 交付后回填（与仓内绝大多数草稿同阶段做法一致）
+source_pr: 14383
+source_commit: e0908a3469
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-10-02
+
+contributor_id: A6F2
