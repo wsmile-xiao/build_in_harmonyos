@@ -1,0 +1,142 @@
+--- a/src/vmime/net/tls/openssl/TLSSocket_OpenSSL.cpp
++++ b/src/vmime/net/tls/openssl/TLSSocket_OpenSSL.cpp
+@@ -29,6 +29,7 @@
+ 
+ #include <openssl/ssl.h>
+ #include <openssl/err.h>
++#include <openssl/bio.h>
+ 
+ #include "vmime/net/tls/openssl/TLSSocket_OpenSSL.hpp"
+ #include "vmime/net/tls/openssl/TLSSession_OpenSSL.hpp"
+@@ -53,19 +54,36 @@
+ 
+ 
+ // static
+-BIO_METHOD TLSSocket_OpenSSL::sm_customBIOMethod =
++BIO_METHOD* TLSSocket_OpenSSL::sm_customBIOMethod = NULL;
++
++
++// static
++void TLSSocket_OpenSSL::ensureCustomBIOMethod()
+ {
+-	100 | BIO_TYPE_SOURCE_SINK,
+-	"vmime::socket glue",
+-	TLSSocket_OpenSSL::bio_write,
+-	TLSSocket_OpenSSL::bio_read,
+-	TLSSocket_OpenSSL::bio_puts,
+-	NULL,  // gets
+-	TLSSocket_OpenSSL::bio_ctrl,
+-	TLSSocket_OpenSSL::bio_create,
+-	TLSSocket_OpenSSL::bio_destroy,
+-	0
+-};
++	// C++11 "magic static" guarantees thread-safe one-time initialization:
++	// the BIO_METHOD is fully populated before it is ever published, so a
++	// concurrent caller can never observe a partially initialized method.
++	// The single allocation intentionally lives for the whole process,
++	// matching the lifetime semantics of the upstream static struct.
++	static BIO_METHOD* const method = []() -> BIO_METHOD* {
++		BIO_METHOD* m = BIO_meth_new(100 | BIO_TYPE_SOURCE_SINK, "vmime::socket glue");
++		if (m == NULL)
++			return NULL;
++
++		BIO_meth_set_write(m, TLSSocket_OpenSSL::bio_write);
++		BIO_meth_set_read(m, TLSSocket_OpenSSL::bio_read);
++		BIO_meth_set_puts(m, TLSSocket_OpenSSL::bio_puts);
++		BIO_meth_set_ctrl(m, TLSSocket_OpenSSL::bio_ctrl);
++		BIO_meth_set_create(m, TLSSocket_OpenSSL::bio_create);
++		BIO_meth_set_destroy(m, TLSSocket_OpenSSL::bio_destroy);
++
++		return m;
++	}();
++	if (method == NULL)
++		throw exceptions::tls_exception("Cannot create custom BIO_METHOD");
++
++	sm_customBIOMethod = method;
++}
+ 
+ 
+ // static
+@@ -99,9 +117,10 @@
+ {
+ 	if (m_wrapped->isConnected())
+ 	{
+-		BIO* sockBio = BIO_new(&sm_customBIOMethod);
+-		sockBio->ptr = this;
+-		sockBio->init = 1;
++		ensureCustomBIOMethod();
++		BIO* sockBio = BIO_new(sm_customBIOMethod);
++		BIO_set_data(sockBio, this);
++		BIO_set_init(sockBio, 1);
+ 
+ 		m_ssl = SSL_new(m_session->getContext());
+ 
+@@ -531,9 +550,9 @@
+ 	if (buf == NULL || len <= 0)
+ 		return -1;
+ 
+-	TLSSocket_OpenSSL *sok = reinterpret_cast <TLSSocket_OpenSSL*>(bio->ptr);
++	TLSSocket_OpenSSL *sok = reinterpret_cast <TLSSocket_OpenSSL*>(BIO_get_data(bio));
+ 
+-	if (!bio->init || !sok)
++	if (!BIO_get_init(bio) || !sok)
+ 		return -1;
+ 
+ 	try
+@@ -566,9 +585,9 @@
+ 	if (buf == NULL || len <= 0)
+ 		return -1;
+ 
+-	TLSSocket_OpenSSL *sok = reinterpret_cast <TLSSocket_OpenSSL*>(bio->ptr);
++	TLSSocket_OpenSSL *sok = reinterpret_cast <TLSSocket_OpenSSL*>(BIO_get_data(bio));
+ 
+-	if (!bio->init || !sok)
++	if (!BIO_get_init(bio) || !sok)
+ 		return -1;
+ 
+ 	try
+@@ -614,12 +633,12 @@
+ 
+ 	case BIO_CTRL_GET_CLOSE:
+ 
+-		ret = bio->shutdown;
++		ret = BIO_get_shutdown(bio);
+ 		break;
+ 
+ 	case BIO_CTRL_SET_CLOSE:
+ 
+-		bio->shutdown = static_cast <int>(num);
++		BIO_set_shutdown(bio, static_cast <int>(num));
+ 		break;
+ 
+ 	case BIO_CTRL_PENDING:
+@@ -647,10 +666,9 @@
+ // static
+ int TLSSocket_OpenSSL::bio_create(BIO* bio)
+ {
+-	bio->init = 0;
+-	bio->num = 0;
+-	bio->ptr = NULL;
+-	bio->flags = 0;
++	BIO_set_init(bio, 0);
++	BIO_set_data(bio, NULL);
++	BIO_set_flags(bio, 0);
+ 
+ 	return 1;
+ }
+@@ -662,11 +680,11 @@
+ 	if (bio == NULL)
+ 		return 0;
+ 
+-	if (bio->shutdown)
++	if (BIO_get_shutdown(bio))
+ 	{
+-		bio->ptr = NULL;
+-		bio->init = 0;
+-		bio->flags = 0;
++		BIO_set_data(bio, NULL);
++		BIO_set_init(bio, 0);
++		BIO_set_flags(bio, 0);
+ 	}
+ 
+ 	return 1;
