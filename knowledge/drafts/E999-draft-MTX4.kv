@@ -1,0 +1,91 @@
+#====================================================================
+# E999-draft-MTX4.kv — 知识图谱草稿（路径 B 候选）
+# 主题: 用 conan download 的退出码判断依赖是否已发布不可靠（会静默给出反向结论）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E999
+trigger_tool:           conan
+phase:                  dependency-check|preflight
+error_signature: No packages found for this revision|error:system acceleration policy not enabled|Missing prebuilt package for '\w+'
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: 3
+category: conan|preflight|dependency|methodology|false-negative
+match_keywords: conan download, 退出码, exit code, W0, R35, R36, preflight_check, graph info, binary 字段, No packages found, acceleration policy, 依赖发布检查
+title: 判断依赖是否已发布必须读 conan graph info 的 binary 字段，conan download 的退出码会给出反向结论
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: |
+  `conan download <ref> -r=<remote> --only-recipe` 不能用退出码判断依赖是否已发布，因为它有两类失真：
+  (a) 远端只匹配到 recipe、没有匹配当前 profile 的 binary 时，它会打印
+      `packages: No packages found for this revision` 而**仍然 exit 0**；
+  (b) 网关/网络抖动时会返回 `ERROR: error:system acceleration policy not enabled` 并 exit≠0，
+      同一 ref 重试即可成功。
+  两者叠加的后果是：一个**已经发布**的依赖会被判成「未发布」并 exit≠0，
+  从而把整个任务误判为「W0 阻塞」，而真实情况是依赖齐备。
+  仓库内的两个预检工具都基于制品仓 search API
+  （`ci/scripts/preflight_check.sh` 与 `scripts/ohc/preflight.py`），而 R35 已指出该 API
+  对 binary 返回不完整（"显示没有但实际已上传"），因此它们给出的结论同样不能反推 binary 齐全。
+affected_scope: 所有按 W0/R36 做依赖发布检查的适配任务；多层依赖链场景下会直接把可推进的任务判成阻塞
+verification_cmd: conan graph info --requires=<ref> -pr:h=<profile> -pr:b=<profile> -f=json   # 读 nodes[*].binary
+
+# ═══ Layer 3: 方案层 (Solution Space) ═══
+rec_priority: 1
+rec_approach: 用 conan graph info / conan install 读节点 binary 字段作为唯一判据
+rec_description: |
+  conan graph info --requires=<ref> -pr:h=<profile> -pr:b=<profile> -f=json
+  # nodes["<ref>"].binary: Cache / Download = 有制品；Missing = 没有
+  对整包则直接:
+  conan graph info <conanfile> -pr:h=<profile> -pr:b=<profile> -f=json
+  并检查 graph.error 与每个节点的 binary；只有出现 Missing 才是真缺依赖。
+  注意 build 上下文的 tool_requires 在「宿主与构建 profile 不同」时会显示 Missing
+  （例如 Windows 上查 OHOS build 上下文），这不代表未发布——需在目标平台上复核。
+  若必须用 download 类命令做兜底，应同时读取其输出文本而非只看退出码，
+  并对 `acceleration policy` 类瞬时错误做有限重试。
+rec_command: conan graph info --requires=<ref> -pr:h=<profile> -pr:b=<profile> -f=json | python3 -c "import sys,json; d=json.load(sys.stdin); print([(v.get('ref'),v.get('binary')) for v in d['graph']['nodes'].values() if v.get('ref')])"
+rec_auto_fix: false
+rec_impl: command-substitution
+
+# 回退方案
+fallback_priority: 2
+fallback_approach: 若 CI 环境无法运行 graph info，则对同一 ref 做带间隔的多次 download，并以「是否出现 downloaded/package 行」而非退出码判定
+fallback_description: 仅作兜底；仍需注意 (a) 类失真会持续存在，最好同时打印完整输出供人工判断。
+fallback_command: conan download <ref> -r=<remote> --only-recipe 2>&1 | tee /tmp/dl.log
+fallback_auto_fix: false
+fallback_impl: manual
+
+# ★ 禁止策略 ★
+forbid_1_pattern: conan list .*\*/\*|conan search.*binary|if conan download.*; then.*else.*未发布
+forbid_1_reason: R35 明确禁止用 list/search 判断 binary 是否存在；仅以 download 退出码分支判断会产出反向结论
+forbid_1_consequence: 把可推进任务误判为阻塞，浪费整轮适配
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P001
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E216]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+platform_only: false
+doc_file:               E999-draft-MTX4.md
+last_updated: 2026-10-01
+source_event: mtxclient 0.10.1 适配（W0 首轮误判 coeurl 未发布、判定 blocked，复测后更正为已发布）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: DSH agent session (mtxclient 0.10.1)
+source_pr: 13832
+source_commit: c22afd92f4
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     1
+metrics_confidence:     0.95
+metrics_last_used: 2026-10-01
+
+draft: true
+contributor_id: MTX4
