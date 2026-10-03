@@ -1,0 +1,62 @@
+#====================================================================
+# DRAFT-secure-access-fence-exec-policy - HarmonyOS SecureAccessFence：外来预编译 ELF 禁 exec（.note.ohos.ident 门槛）；官方签名工具 selfSign 对外来工具 ELF 实测失败，注入/签名组合均不可行
+#====================================================================
+
+id:                     DRAFT-secure-access-fence-exec-policy
+trigger_tool:           exec|conan|node|esbuild|gradle|make|binary-sign-tool
+phase:                  build|test
+error_signature:        Permission denied|Operation not permitted|Failed to save 4K data to \.codesign section|WriteCodeSignBlock error|sign elf failed|inaccessible or not found
+
+severity:               3
+category:               ohos-device|exec-policy|secure-access-fence|elf-note|prebuilt-binary|toolchain|negative-knowledge
+match_keywords:         SecureAccessFence, .note.ohos.ident, .codesign, binary-sign-tool, selfSign, exec denied, EACCES, EPERM, Permission denied, Operation not permitted, prebuilt, esbuild, node arm64, unofficial-builds, musl, glibc, android NDK, OHOS clang, 工具链自建, 预编译二进制
+
+title:                  HarmonyOS PC SecureAccessFence 只放行携带 OHOS 工具链注入的 .note.ohos.ident section 的 ELF：外来预编译二进制（glibc/android/Go 静态）exec 一律被拒，且实验性 note/section 注入与设备签名工具 binary-sign-tool selfSign 组合均实测失败——预编译工具链制品在真机不可用，需要原生二进制的构建必须用 OHOS clang 设备自建（经验事实，签名失败根因未定）
+
+root_cause:             HarmonyOS PC 设备的 SecureAccessFence（const.SystemCapability.Security.SecureAccessFence=true）在 exec() 路径校验 ELF 是否携带 OHOS 工具链自动注入的 .note.ohos.ident section（SHT_NOTE + PT_NOTE；本机实测 note 载荷 28 字节：namesz=12/descsz=4/type=1/name="OHOS"+8NUL/desc=0x00000001）。外来预编译 aarch64 二进制（glibc 动态、android NDK、Go 全静态）一律缺该 section，exec 报 EACCES（Permission denied）；对可运行二进制做「shstrtab 改名 section / 清零 note 内容 / 抹掉 section 表」任一操作即被拒（EPERM），说明校验同时依赖 section 名与内容。手工注入该 section（含 PT_NOTE 重指、section 表重建等多种变体）后仍被拒——校验强度高于已知可注入面。设备自带的官方签名工具 binary-sign-tool selfSign（kubeadm 同款配方）在本机实测：对 OHOS 构建的对照 ELF 报 add codesign section success + write code sign data success（签名后可执行，探针 exit 42）；对 esbuild 官方 linux-arm64 制品报 "[Error] [sign_elf.cpp] [WriteCodeSignBlock] [146] Failed to save 4K data to .codesign section" → sign failed，不产出文件。签名失败根因未定（候选因素：esbuild 的 ELF 布局无可安放 .codesign 的空间/结构、签名工具版本行为、kubeadm CI 环境的配方前提），故上述失败应视为「设备签名工具对外来工具 ELF 的实测行为」，不是普适定律。
+
+affected_scope:         所有需要在 HarmonyOS PC 真机上运行第三方原生二进制工具链的场景：Node.js（vite/esbuild）、esbuild、bun/deno、Go 工具链、任何 glibc 预编译 aarch64 制品。对这些库的"直接用官方预编译工具跑构建"类方案在真机一律不可行；纯 JVM（BiSheng JDK）、OHOS hnp 工具链（git/clang/make）与设备 OHOS clang 自建产物不受影响。
+
+verification_cmd:       自包含命令序列（样本 <elf> 为待测 ELF，逐条在设备 shell 执行）：①识别——readelf -S <elf> | grep -c ohos.ident（外来预编译=0，OHOS clang 构建>=1）；②exec 探针——cd <elf> 所在目录 && ./<elf>; echo $?（被拒=126 EACCES，或 Operation not permitted=EPERM；对照 OHOS 构建样本 exit 42）；③binary-sign-tool 双向实测——对 OHOS 构建对照物：binary-sign-tool sign -selfSign 1 -i <ohos_built> -o signed_out（预期 add codesign section success + write code sign data success，运行 signed_out exit 42）；对外来工具 ELF：binary-sign-tool sign -selfSign 1 -i <foreign_elf> -o signed_f（预期 [Error][sign_elf.cpp][WriteCodeSignBlock][146] Failed to save 4K data to .codesign section → sign elf failed，无输出文件，后续 exec 报 inaccessible or not found rc=127）；④注入组合复核——先注入 .note.ohos.ident 再 selfSign，exec 仍 126/127。本 run 全新 shell 实测记录（2026-09-29/30）：reports/curator/probe/auditor-exec-policy.txt 与 auditor-sign-combo.txt。
+
+rec_priority:           1
+rec_approach:           ohos-clang-selfbuild-or-pure-jvm
+rec_description:        在真机上需要原生二进制构建工具时：①优先选纯 JVM/纯资源构建路径（如 keycloak-archlinux 2.0.1 放弃 keycloakify/vite 路径改走上游 gradle 经典路径）；②确需 Node 等原生工具时用 OHOS clang（/data/service/hnp/bin/clang）从源码自建（fully-static + musl，产物自动带 .note.ohos.ident 可执行）；③不要试图通过注入 .note.ohos.ident 或 binary-sign-tool selfSign 令外来预编译制品可执行——注入实测仍被拒、selfSign 对外来工具 ELF 实测失败；④预取通道（unofficial-builds/Towartz nodejs-arm 等）可在 x86 构建机用，真机上无效。残差边界：binary-sign-tool 的 localSign 需要应用签名材料，对无签名材料的工具 ELF 不适用；selfSign 失败根因未定，若未来换工具版本或对布局可容纳 .codesign 的外来 ELF（非 Go 静态）可能有不同结果——用前需按 verification_cmd 复测，不得视为已解。
+
+rec_command:           "探测：readelf -S <elf> | grep -c ohos.ident（外来=0，OHOS 构建>=1）；exec 探针：./<elf>; echo $?（被拒=126/127 或 Operation not permitted）；签名实测：binary-sign-tool sign -selfSign 1 -i <elf> -o <out>（OHOS 构建对照物 add codesign section success → 运行 out 可执行 exit 42；esbuild 官方制品报 Failed to save 4K data to .codesign section）"
+rec_auto_fix:           false
+rec_impl:               platform-policy
+fallback_priority:      2
+fallback_approach:      pure-jvm-or-ohos-clang-selfbuild
+fallback_description:   平台策略级阻塞无直接解法，只能在构建路径上绕开——改用纯 JVM/纯资源上游构建路径（如 keycloak-archlinux 2.0.1 的 gradle 经典路径），或用 OHOS clang 从源码自建所需原生工具（产物自动携带 .note.ohos.ident 可执行）。预取外来预编译制品、note/section 注入、binary-sign-tool selfSign 组合均实测不可行。
+
+forbid_1_pattern:       真机构建中直接使用外来预编译 aarch64 二进制工具（官方 nodejs.org linux-arm64 glibc、unofficial-builds x64-musl 之外的 arm64 制品、Towartz/nodejs-arm android NDK 静态 node、npm @esbuild/linux-arm64 官方制品等）
+forbid_1_reason:        SecureAccessFence 只放行带 .note.ohos.ident section 的 ELF；外来预编译制品一律缺该 section，exec 报 EACCES（实测 rc=126），浪费整轮真机验证。适配仍须满足 R34 消费者级实质验证——改走纯 JVM/纯资源路径后由 test_package 承担。
+forbid_1_consequence:   build() 中工具启动即 Permission denied / Error 126/127，conan create 失败且日志只有 exec 拒绝信息，难定位。
+
+forbid_2_pattern:       对外来预编译 ELF 手工注入 .note.ohos.ident（改 PT_NOTE/重建 section 表/EOF 追加等任一变体）后投入真机构建
+forbid_2_reason:        校验强度覆盖 section 名+内容且注入后仍被拒（实测五类变体全部 EACCES；注入+binary-sign-tool selfSign 组合同样失败）；且规避设备安全策略不是适配的正确形态。
+forbid_2_consequence:   看似注入成功（readelf 可见 note）但 exec 仍 rc=126，或签名失败（Failed to save 4K data to .codesign section）无输出文件，白耗数小时。
+
+forbid_3_pattern:       期望 binary-sign-tool localSign 签发工具 ELF 以通过 SecureAccessFence
+forbid_3_reason:        localSign 需要应用签名材料（面向 HarmonyOS 应用发布链），工具类 ELF 无该材料，不适用；官方可用通道 selfSign 对外来工具 ELF 实测失败（残差：根因未定，复测前不得假设可用）。
+forbid_3_consequence:   签名失败或产物不被放行，构建计划整体不可达。
+
+forbid_4_pattern:       在 x86 构建机验证预编译工具可运行后，直接假定真机同样可用
+forbid_4_reason:        glibc/musl 静态/android 制品的可运行性结论不可跨平台迁移；该约束仅真机 exec 路径触发，Linux x86_64 CI/容器全部正常。真机验证期的镜像/临时通道不得写回 conandata（R39：提交配方保持官方原始 URL + sha256）。
+forbid_4_consequence:   路径选择阶段误判可行性，把依赖外来原生工具的构建方案带进真机验证才暴露阻塞。
+
+principles:             P017, P019
+causes:                 []
+caused_by:              []
+similar_to:             [E077, DRAFT-E653-isospec-ohos-dlopen-ndk-shared-library-permission-denied, DRAFT-kubeadm-go-toolchain-sign, DRAFT-10038-workbuddy-sandbox-exec-allowlist, DRAFT-12609-jakarta-cdi-api-ohos-device-java-maven-toolchain, DRAFT-rjj666-libmysofa-node-v8-musl-signal5-python-comparator]
+conflicts_with:         []
+prerequisite_of:        [keycloak-archlinux/2.0.1 构建路径偏离（gradle 经典路径替代 keycloakify/vite）]
+
+doc_file:               knowledge/drafts/DRAFT-secure-access-fence-exec-policy.md
+last_updated:           2026-09-30
+source_event:           keycloak-archlinux 2.0.1 真机适配：keycloakify 路径硬阻塞调查（node v26.8.2/v24.18.1 android-NDK 制品、esbuild 0.21.5 官方制品、五类 ELF 注入变体、binary-sign-tool selfSign/localSign）+ Auditor 全新 shell 复测
+authors:                builder(keycloak-archlinux-2.0.1)
+source_commit:          1efc715948
+
+metrics_success_count:  0
