@@ -1,0 +1,39 @@
+# Yapsy 1.12.2 adaptation notes
+
+## Source and package
+
+The fixed upstream PyPI sdist is 83,986 bytes with SHA-256 `d8113d9f9c74eacf65b4663c9c037d278c9cb273b5eee5f0e1803baeedb23f8b`. It includes the upstream `runtests.py` and 43 files under `test/`, including 26 Python files and fixtures; package metadata declares no runtime dependencies. Yapsy is pure Python and has no native build step. The Python modules carry BSD-2-Clause and ISC notices; artwork with a separate CC BY-SA notice is not packaged.
+
+## Candidate changes
+
+The portability patch replaces plugin loading through `imp.load_module` with `importlib.util` on modern Python, retaining the old `imp` path for Python 2, and supplies a small dependency-free `StrictVersion` implementation for the exact strict version syntax used by Yapsy. This avoids relying on `imp` and `distutils` removed from Python 3.12. The source label on the contest task is `cpp` while the package is Python; the label is left unchanged and the discrepancy remains disclosed.
+
+The Conan recipe declares an explicit no-op `build()` method because this package contains no native build step. Conan packages and copies the Python modules during `package()`.
+
+## Local validation
+
+### r14 CI diff checkout repair (2026-10-03)
+
+Official CI build #68314 (internal ID 79527, CI033) failed in checkout-pr before package build or tests. The platform PR diff omitted binary patch data for two original upstream ZIP fixtures; both git apply attempts failed, and the fallback patch rejected --fuzz=3. This is a diff transport failure, not evidence of a main conflict or a software test failure.
+
+The two fixtures are stored as ASCII Base64 text in this candidate. The existing functional.py entry strictly decodes them, checks their fixed SHA-256 values, and restores their original filenames before importing the upstream suite. autoinstallWRONGzipplugin.zip is 1,122 bytes, SHA-256 40887b7dbc2242203e5f6a1ea8e6d8872b42a88907b67188fb5b444f7495283e; autoinstallZIPplugin.zip is 1,113 bytes, SHA-256 89322eb703a8363b9c3b60486c79fcdc5aca8189621f1e2dc3aa8266cf07b29d. Both decoded files are byte-identical to the fixed upstream sdist and r6/r13 fixtures, including the deliberately invalid plugin descriptor in the negative fixture. No precompiled library or executable is added. Upstream test modules, assertions, package recipe and portability patch are unchanged from r13. The fixture preparation adds no test case to the declared 97 + 3 + 1 counts.
+
+Only the changed transport and fixture restoration path receives targeted host checks. The historical r6 OpenHarmony test results below are retained; r14 has not rerun H1, full finish, W3 or the unchanged consumer suite on OpenHarmony. Current-head official CI remains required.
+
+The untouched upstream suite on Windows Python 3.11.0rc2 ran 97 tests: 96 passed and the multiprocessing test errored while Windows `multiprocessing.Pipe()` was denied (`PermissionError [WinError 5]`); the following `UnboundLocalError` is that test's cascade. The runner returned process code 0 while printing `FAILED`, so this is recorded as a failed suite.
+
+The patched candidate on Windows Python 3.14 ran 100 tests. 97 completed without failure; 3 errors were environment-related: two upstream fixture tests could not create/remove temporary directories under the restricted Windows runtime, and the multiprocessing test could not create its Windows pipe and then raised its existing cascade. No other test failure was reported. The three new strict-version compatibility tests passed after the final repr-compatibility adjustment. The full-suite log predates that repr-only adjustment; the targeted regression module was rerun afterward. These Windows results remain separate from the H1 result below.
+
+## OpenHarmony validation history
+
+H1-001 on OpenHarmony aarch64 used Python 3.12.9 and Conan 2.29.1. The fixed candidate's `conan create` returned RC 0; its consumer imported Yapsy from the Conan package and ran 97/97 original upstream cases plus 3/3 compatibility regressions (100/100 total, no failures, errors, or skips). The original receipt and logs are in `work/yapsy-1.12.2/evidence/h1-001/RESULT.md`.
+
+H1 W3 request r3 ran once on 2026-09-29 against the then-final candidate and fixed framework base `517a276af55d3f513805ef86191b0338e81f4d1a`. The original `finish` process returned RC 1. G0 stopped because the generic clean-verify step could not locate a source tarball in its expected build context. The versioned clean-verify implementation is Autotools-oriented (`./configure`, `make`, `make install`) and has no pure-Python branch; the Yapsy source root has no `configure` or `Makefile` (the sdist has `doc/Makefile` only). This is recorded as a legacy tool conflict, not suppressed or represented as a pass. The r3 recipe also failed its static G1 check for lacking `build()`; this candidate now declares a no-op method truthfully describing the absence of a native build step.
+
+In the same r3 run, W3 setup returned RC 0 and `build_and_test.sh` returned RC 1 before Conan create or consumer tests ran. Full-mode JC1/JC5 scanned five hidden runtime-state files already tracked in the fixed framework base: `.build-closed` and `.staging-verified` under cloog, and `.staging-verified` under kics, libbfio, and thc. They are unrelated to Yapsy and were not removed or modified. The next W3 request must represent the Yapsy candidate as a local commit based on a current clean main so the supported incremental junk-check mode examines the actual candidate diff without altering those baseline files.
+
+H1 W3 request r6 ran on 2026-09-30 against the 55-file candidate ZIP whose SHA-256 was `783aef87efc3c8319699918c0c0eb67cd3cc060f24dce9422352a71960f54ab9`. The official `finish` returned RC 1. Its G0 log says `找不到原始 tarball`, but inspection of the fixed runner and raw archive shows the source sdist was present at `input/Yapsy-1.12.2.tar.gz` with the expected SHA; the runner did not create the framework `.build-context-yapsy-1.12.2` file that supplies `BUILD_TARBALL` to `clean_verify.py`. Thus this r6 G0 result is a missing build-context handoff, not a missing or mismatched source archive. The fixed `clean_verify.py` then runs `./configure`, `make`, and `make install` in the extracted source root; the Yapsy root has no `configure` or `Makefile` (the sdist contains `doc/Makefile` only). Fixing the context alone therefore does not make this legacy gate applicable to the pure-Python package. No marker or passing result was fabricated.
+
+In the same r6 run, official G1/G2/G3 passed; Conan produced the package, and the consumer imported Yapsy from that package and ran 100 tests (97 upstream plus 3 compatibility regressions): 100 passed, 0 failures, 0 errors, 0 skips. The internal W3 `setup.sh` and `build_and_test.sh` both returned RC 0 and the archived `.ci-result.json` reported `exit_code=0`. These component results do not change the overall `finish` RC 1. The full test result and logs remain in the local r6 evidence archive; the raw receipt is `work/yapsy-1.12.2/evidence/h1-w3-r6/RESULT.md`, and the archive SHA-256 is `be24619085accc1934fb97b34e3a0e1fd8dd46cf81093f0c7df173b8520fde2b`.
+
+Other r6 finish steps remain unresolved: `finalize-archive` returned RC 2 for absent release/debug tarballs and packaging directory; W5 reported existing knowledge fields without required values; `gen_summary` failed with `str` lacking `append`; and submit precheck reported the absent test report, packaging directory, and `.staging-verified`; the report remains in the local workspace outside this candidate, consistent with official rule 19. This candidate does not create obsolete packaging tarballs or staging markers. Official CI, PR creation/submission, and platform score readback remain outstanding. The task is labeled `cpp` although the fixed source is Python; the label is unchanged and eligibility remains for the official gate to decide.
