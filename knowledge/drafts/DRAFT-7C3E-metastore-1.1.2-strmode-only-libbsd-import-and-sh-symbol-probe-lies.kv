@@ -1,0 +1,51 @@
+#====================================================================
+# Draft: libbsd 假依赖必须核到符号级 ——
+#        (1) metastore 1.1.2 对 libbsd 的真实依赖面只有 1 个符号 strmode(3)，
+#            而 Makefile 里 -lbsd 名义上伺候的 strlcpy/strlcat 其实是 musl 原生自带；
+#        (2) 符号存在性探针若链 -shared .so，会把「不存在」误判成「存在」
+#            （动态库链接默认放行未定义符号）
+#====================================================================
+
+id:                     DRAFT-7C3E-METASTORE-STRMODE-ONLY-LIBBSD-IMPORT-AND-SH-PROBE-LIES
+trigger_tool:           metastore|clang|c|patch
+phase:                  build|link
+error_signature:        fatal error: 'bsd/string.h' file not found|undefined symbol: strmode|cannot find -lbsd|metastore_DLIBS
+
+severity:               1
+category:               ohos, libc, build, link, portability
+match_keywords:         libbsd, bsd/string.h, strmode, strlcpy, strlcat, reallocarray, strtonum, -lbsd, musl, undefined symbol, symbol probe, shared library probe, bsd shim
+
+title:                  libbsd 假依赖必须核到符号级：metastore 1.1.2 对 libbsd 的真实依赖面只有 1 个符号 strmode(3)，而 Makefile 里 -lbsd 名义上伺候的 strlcpy/strlcat 其实是 musl 原生自带；且符号存在性探针若链 -shared .so 会把「不存在」误判成「存在」
+
+root_cause:             两层，且第一层直接决定第二层的方法。
+(1) 依赖面误判（台账级 vs 符号级）：metastore README 的 Requirements 列 libbsd，Makefile 又按 `uname -s` 在非 BSD 平台追加 `-lbsd`，两个信号都指向「需要一整个兼容库」。但全树 grep `strmode` 只有一处命中 `src/metaentry.c:656`（`mentries_dump()` 渲染 `--dump` 的 mode 列），且树内无任何定义 ⇒ 纯外部导入，这就是唯一的 libbsd 消费点。其余 string 系调用全是 ISO C：memset/strcmp/strerror/strlen/strchr/strncmp/strcat/snprintf/strrchr/strdup/memcpy/strftime/bcmp（bcmp 亦由 musl 原生提供，单独链接探针 rc=0）。而 `-lbsd` 名义上伺候的那对 strlcpy/strlcat，在 OHOS libc.so 上 `nm -D` 实测均为 `T`（musl 原生导出，地址同为 0x11d80）——它们根本不是 libbsd 依赖。strmode 则双重不可得：`nm -D` 在 OHOS libc.so 上查无此符号，且 `<bsd/string.h>` 头文件本身不存在，未打补丁时 `metaentry.o` 第一个就 `fatal error: 'bsd/string.h' file not found`。制品仓侧也无路可走：`conan download "libbsd/*" -r=ohpcd --only-recipe` → `Found 0 pkg/version recipes`，精确检索 libbsd/0.11.2 与 0.12.2 均回 `system acceleration policy not enabled`。
+(2) 探针方法论错误（本次实测踩中，值得单列）：首次用 `-shared -fPIC` 链接探针判断符号存在性，得出 strmode / strlcpy / reallocarray / strtonum / explicit_bzero / setprogname 全部「RESOLVES / musl provides」的结论。根因是**动态库链接默认允许未定义符号**——探针压根没去 libc 里找符号，ld 也不报错。改为链接**可执行文件**（必须解析全部符号）后真相才出来：只有 strlcpy / strlcat / arc4random / getopt_long / listxattr / bcmp 解析成功，strmode / reallocarray / strtonum / explicit_bzero / setprogname 全部 `undefined symbol`。若当时据此判定「musl 有 strmode，libbsd 是纯假依赖，什么都不用改」，产出的就是一个必然红 CI 的 PR。
+
+affected_scope:         任何在 OHOS/musl 上把 libbsd 当 requirement 的包，尤其是只用到 strmode / strlcpy / strlcat / reallocarray / strtonum / explicit_bzero / setprogname 等少数 BSD 便利函数的 C99 工具；以及任何用共享库链接探针判断符号存在性的适配脚本与诊断流程。同族已验证两例：rdate 1.11（libbsd 假依赖，configure.ac 硬检 bsd/stdlib.h + Makefile.am 硬编码 -lbsd，为一次 arc4random() 而设）与 metastore 1.1.2（本条目，真依赖面 1 个符号）。
+
+verification_cmd:       nm -D <ohos-sysroot>/usr/lib/aarch64-linux-ohos/libc.so | grep -E ' (strmode|strlcpy|strlcat)$'
+                        # 实测：strlcpy/strlcat 有 T（0x11d80），strmode 无任何输出
+
+rec_priority:           1
+rec_approach:           verify-dep-at-symbol-level-then-in-tree-bsd-shim
+rec_description:        (a) 先把依赖核到符号级再决定策略，不要信台账也不要信 Makefile 的 -l 行：全树 grep 目标 BSD 函数 → 确认树内无定义（即纯导入）→ `nm -D` OHOS libc.so 确认该符号是否已由 musl 提供 → 再 `conan download --only-recipe` 看制品仓是否已发布该兼容库。只有当真实依赖面是「一堆符号」时才值得走 R36 先适配发布 libbsd；只有 1-2 个符号时一律走树内 shim。
+                        (b) 树内 shim 沿用 OpenSSH `openbsd-compat/strmode.c` 的 `#ifndef HAVE_STRMODE` 惯例守卫——**不是** `__OHOS__` 平台宏（R8 允许前者、硬闸拦后者），真实 libc 若自带该函数则 `-DHAVE_STRMODE` 即可选系统的。逐字节对齐 BSD 语义：类型位 `-/d/l/c/b/s/p/?`、九个权限位、setuid(`S`/`s`)/setgid(`S`/`s`)/sticky(`T`/`t`) 的双字形分支。
+                        (c) **必须核对调用方缓冲尺寸**（本条目最容易写错的一处）：BSD strmode 写 10 字符（1 类型 + 9 权限）+ 1 字符 ACL 占位符 + 1 字符 NUL = **12 字节**；metastore 调用方是 `char mode[11 + 1]`，恰好等大，无溢出。误以为只写 11 字符+NUL 而省掉 ACL 占位符，会让 `--dump` 的列宽与上游不一致。
+                        (d) 符号确已由 musl 提供的一律不要摘：只摘真正无解的部分。本例 strmode 树内化后 `-lbsd` 已无任何符号需要，连 `-lbsd` 一起摘（连同 Makefile 里三层 `ifeq BSD / ifneq DragonFly / ifneq Darwin` 条件），原地留注释。
+                        (e) 测试必须验证 shim **行为正确**而非仅「能跑」：让 `--dump` 的 mode 列与 `ls -ld` 逐条对拍（一个完全独立的实现），覆盖 `-`/`d`/`l`/`p` 四种文件类型与 setuid `s` / setuid-noexec `S` / setgid `s` / sticky `t` 四个分支，并额外硬编码断言 `-rwsr-xr-x`、`-rwSr--r--`、`drwxr-sr-x`、`drwxrwxrwt` 四个字形——任一分支写错都会红。
+rec_command:            grep -rn 'strmode' src/ ; nm -D "$OHOS_SYSROOT/usr/lib/aarch64-linux-ohos/libc.so" | grep -c strmode
+rec_auto_fix:           false
+rec_impl:               archives/m/metastore/1.1.2/patches/0001-strmode-shim-drop-libbsd.patch
+
+fallback_priority:      2
+fallback_approach:      adapt-and-publish-libbsd-first
+fallback_description:   若真实依赖面确实是大量 BSD 符号（而非一两个），则按 R36 先走完整流程把 libbsd 适配并发布到制品仓，再回来构建下游包。此路径代价高（多一个 PR + 一轮 CI + release 流水线 + conan upload），仅在符号面确实庞大时采用；本仓先例 rdate 1.11 明确记录过「libbsd 未发布 ⇒ 卸除假依赖是唯一正解」。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       keep -lbsd and ship a stub libbsd|link the symbol probe against -shared .so|#ifdef __OHOS__ in the shim|write the shim without checking the caller buffer size|assert only "the binary runs" for a shim replacement
+forbid_1_reason:        stub libbsd 是伪造交付物；-shared .so 探针放行未定义符号，会把「musl 没有 strmode」误判成「有」，据此不动依赖就会产出红 CI 的 PR；__OHOS__ 平台宏被 PF5/R8 硬闸拦截；不核对缓冲尺寸的 shim 可能越界写 13 字节到 char[12]；只测「能跑」无法发现 shim 的任何一个字形分支写错——而 shim 正是本包唯一的适配点
+forbid_1_consequence:   Preflight PF5 hard block, R8/R9 deceptive-adaptation finding, stack buffer overflow in --dump, or a consumer test that passes while the substitution is behaviourally wrong
+
+principles:             verify-dependencies-at-symbol-level, shared-library-link-probes-lie, no-platform-macros-in-patches, prove-the-shim-not-just-that-it-runs, honest-test-accounting

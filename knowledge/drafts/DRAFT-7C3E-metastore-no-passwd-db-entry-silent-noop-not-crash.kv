@@ -1,0 +1,49 @@
+#====================================================================
+# Draft: HarmonyOS 不为应用 uid 建 passwd/group 条目 ——
+#        上游把 getpwuid()==NULL 当致命错误时，工具会静默退化为空操作
+#        （metastore 1.1.2：save/compare/dump/apply 全部 no-op），
+#        且该缺陷在以 root 运行的本地构建里完全不可见
+#====================================================================
+
+id:                     DRAFT-7C3E-METASTORE-NO-PASSWD-DB-ENTRY-SILENT-NOOP-NOT-CRASH
+trigger_tool:           metastore|clang|c|conan
+phase:                  runtime
+error_signature:        getpwuid failed for .*: uid [0-9]+ not found|getgrgid failed for .*: gid [0-9]+ not found
+
+severity:               1
+category:               ohos, libc, runtime, posix, testing
+match_keywords:         getpwuid, getgrgid, getpwnam, getgrnam, passwd DB, group DB, numeric owner, uid, gid, app uid, 20001006, no passwd entry, silent no-op, lchown, numeric-owner, setpriv --reuid, metastore, tar --numeric-owner
+
+title:                  HarmonyOS 不为应用 uid（如 20001006）建 passwd/group 条目，getpwuid/getgrgid 合法返回 NULL：上游若把这当致命错误 return NULL，整条 metaentry 被丢弃，工具在平台上静默退化为空操作（save 存出空 metafile、compare/dump 无输出、apply 不还原），而该缺陷在以 root 运行的本地构建里完全不可见——只有测试用户本身不在 passwd DB 里才暴露
+
+root_cause:             两层。
+(1) 平台事实：HarmonyOS 的 /etc/passwd、/etc/group 不为应用 uid 建条目（CI worker 上实测 uid/gid 20001006 均无条目，CI 日志里 USER=100 而应用 uid 是 20001006），故 getpwuid(3)/getgrgid(3) 合法返回 NULL。这不是缺陷而是沙箱设计，任何稀疏 passwd DB 的容器镜像同理。
+(2) 上游的错误处理把「查不到名字」升级成了「这条记录作废」：metastore 1.1.2 的 mentry_create()（src/metaentry.c:205-213）在 xgetpwuid()/xgetgrgid() 返回 NULL 时 msg(MSG_ERROR,...) 后 return NULL，调用方 mentries_recurse() 只在 !mentry 时静默 return，于是该子树整个被跳过。后果是平台级的静默降级而非崩溃：--save 写出的 metafile 是空的（实测 0 条目），--compare 无差异输出，--dump 什么都不打印，--apply 不还原任何 mode/mtime/xattr。唯一症状是每个路径一行 "getpwuid failed for ...: uid ... not found"。注意 apply 路径同样有问题：它用 xgetpwnam(stored->owner)/xgetgrnam() 反查，即便存储端修好了，写进去的名字在稀疏 DB 上也解析不回来。
+(3) 为什么本地全绿：本地以 root 跑，uid 0 在 /etc/passwd 里有条目，xgetpwuid() 正常返回，12/12 断言通过。**判定条件是「运行测试的用户在不在 passwd DB 里」，而不是代码对不对**。这是「设备与 CI 语义差异」里最难在本地自查的一类——CI build #66657 真机跑出 6 PASS/23 FAIL，本地 conan create 同一 commit 却是 12/12。
+
+affected_scope:         任何在 OHOS 上调用 getpwuid/getgrgid/getpwnam/getgrnam 的包（用户/属主显示、权限与属主备份类工具、tar/快照类、quota 工具、"bad uid" 告警）。与 DRAFT-10175-rmlint-getpwuid-null-no-passwd-db-segfault 同源但**表现相反**：那次是解引用 NULL 直接 SIGSEGV（症状明显、本地易复现），这次是上游主动 return NULL 导致静默空操作（症状隐蔽、本地不可见）。兄弟案例：tar(1) 的 --numeric-owner 开关正是为稀疏 passwd DB 的沙箱/容器准备的。
+
+verification_cmd:       setpriv --reuid=20001006 --regid=20001006 --clear-groups <被测工具> --save --file m.bin ./tree   # 该 uid 无 passwd 条目；修前 metafile 0 条目，修后条目里 owner/group 字段为十进制 "20001006"
+
+rec_priority:           1
+rec_approach:           numeric-id-fallback-when-name-lookup-misses
+rec_description:        (a) 把「查不到名字」降级为「用数字表示」，而不是丢弃整条记录：uid/gid 查不到时把十进制数字当作 owner/group 名写进 metafile，并让 apply 路径反过来接受这个十进制形式（先判断整串是否都是数字，是则直接 strtoul 当 id 用，否则走名字查询）。这与 tar(1) 的 numeric-owner 同思路。判据必须是「数据库里有没有这个 id」这种平台无关的事实，绝不能用 __OHOS__ 之类平台宏（PF5/R8 硬闸），这样 passwd DB 完整的主机行为逐字节不变。metastore 的 metafile 里 owner/group 是 CSTRING，内容变数字不影响格式，A 机存的 metafile 仍能在 B 机 apply。
+                        (b) 审计/自查时**显式区分两种失败模式**：解引用 NULL → 崩溃（本地可见易修）；上游主动 return NULL → 静默空操作（本地不可见，必须在真机或伪造条件下验证）。凡是「以文件属主/用户名为核心语义」的工具，都要问一句：测试用户自己有没有 passwd 条目？
+                        (c) 本地等价复现不需要真机：setpriv --reuid=<一个本机也不存在的 uid> --regid=<同上> --clear-groups 直接把进程切到稀疏 DB 条件下跑完整测试脚本。本例用 20001006 与真机同值。配套注意：工作目录要放在 uid 可达的路径（/root 是 0700，uid 20001006 进不去），先把被测脚本与二进制复制到 /var/tmp 并 chmod a+rX。
+                        (d) 回归验证要同时跑两个身份：稀疏 DB 身份（证明修复生效）+ 有条目身份（如 root，证明无回归）。本例实测：仅补丁 0001 时稀疏身份 6 PASS/25 FAIL（精确复现真机），加 0002 后稀疏身份 12/12、root 身份 12/12。
+rec_command:            getent passwd 20001006 || echo "no entry (== HarmonyOS app uid)"; setpriv --reuid=20001006 --regid=20001006 --clear-groups sh test.sh
+rec_auto_fix:           false
+rec_impl:               archives/m/metastore/1.1.2/patches/0002-numeric-uid-fallback-when-passwd-db-has-no-entry.patch
+
+fallback_priority:      2
+fallback_approach:      degrade-gracefully-and-say-so
+fallback_description:   若无法改动上游（例如库而非工具、且调用点不可改），至少把「查不到名字」从致命降级为可观测的警告并继续处理其余元数据维度（mode/mtime/xattr 与属主无关），让工具在稀疏 DB 上仍能完成主要工作；并在文档与测试中显式声明属主/属组维度在该平台不可用。绝不用 dummy 名字或硬编码 "nobody" 伪造属主（那会让 compare/apply 静默写错属主）。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       return NULL on getpwuid miss|#ifdef __OHOS__ around the passwd lookup|make the consumer test skip when the uid has no passwd entry|assert only \"the tool exits 0\" for a metadata tool
+forbid_1_reason:        平台宏被 PF5/R8 硬闸拦，且会让行为在两个平台间分叉而不是解决根因；把测试 skip 掉正是把真机红灯藏起来（本例 23 条 FAIL 会变成 0 条 FAIL 但工具仍是坏的）；对元数据类工具只断言「退出码为 0」会被空操作完全骗过——空操作也返回 0
+forbid_1_consequence:   Preflight PF5 hard block, R8/R9 deceptive-adaptation finding, or a green test suite over a tool that records nothing
+
+principles:             verify-under-the-real-uid, silent-degradation-is-worse-than-crash, numeric-owner-convention, no-platform-macros-in-patches, test-must-assert-artifacts-not-exit-codes

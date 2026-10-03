@@ -1,0 +1,119 @@
+Subject: [PATCH] metaentry.c: in-tree strmode(3) shim, drop the libbsd link
+
+metastore is a C99 program whose only libbsd import is strmode(3), used
+once at src/metaentry.c:656 to render the mode column of the --dump
+output.  On OHOS the header is absent (no libbsd package is published to
+the ohpcd registry) and the symbol is undefined in musl, so the tree
+neither compiles nor links.
+
+Rather than pull a whole compatibility library in for a single
+formatter, carry the BSD implementation in-tree behind the conventional
+HAVE_STRMODE guard, exactly as OpenSSH's openbsd-compat/strmode.c does.
+It is a byte-for-byte behavioural copy: 11 characters of type and
+permission plus the ACL placeholder and a trailing NUL, which is exactly
+the 12 bytes the caller already reserves (char mode[11 + 1]).
+
+The strlcpy/strlcat pair the Makefile's libbsd line was nominally there
+for is already satisfied by musl (nm on the OHOS libc.so shows both
+defined there), so once strmode is in-tree the -lbsd in
+metastore_DLIBS has nothing left to resolve and is dropped as well.  No
+platform macro (__OHOS__ or otherwise) is involved.
+
+---
+--- a/src/metaentry.c
++++ b/src/metaentry.c
+@@ -35,9 +35,6 @@
+ #include <time.h>
+ 
+ #include <sys/param.h>
+-#ifndef BSD
+-# include <bsd/string.h>
+-#endif
+ 
+ #include "metastore.h"
+ #include "metaentry.h"
+@@ -47,6 +44,65 @@
+ # define PATH_MAX 4096
+ #endif
+ 
++#ifndef HAVE_STRMODE
++/*
++ * strmode(3): convert inode status (type + permissions) into an
++ * 11-character symbolic string plus a trailing NUL, stored at bp.
++ * The 12th character is reserved for an ACL indicator ('+' when the
++ * filesystem has extended ACLs, a space otherwise); metastore passes a
++ * plain char[11 + 1] buffer, so the full 12 bytes are written.
++ *
++ * This is a byte-for-byte behavioural copy of the BSD implementation
++ * (libbsd / OpenBSD libc) so that the tree builds without libbsd.
++ */
++static void
++strmode(mode_t mode, char *p)
++{
++	/* file type */
++	switch (mode & S_IFMT) {
++	case S_IFDIR: *p++ = 'd'; break;
++	case S_IFCHR: *p++ = 'c'; break;
++	case S_IFBLK: *p++ = 'b'; break;
++	case S_IFREG: *p++ = '-'; break;
++	case S_IFLNK: *p++ = 'l'; break;
++	case S_IFSOCK: *p++ = 's'; break;
++#ifdef S_IFIFO
++	case S_IFIFO: *p++ = 'p'; break;
++#endif
++	default: *p++ = '?'; break;
++	}
++	/* user */
++	*p++ = (mode & S_IRUSR) ? 'r' : '-';
++	*p++ = (mode & S_IWUSR) ? 'w' : '-';
++	switch (mode & (S_IXUSR | S_ISUID)) {
++	case 0:                *p++ = '-'; break;
++	case S_IXUSR:          *p++ = 'x'; break;
++	case S_ISUID:          *p++ = 'S'; break;
++	case S_IXUSR | S_ISUID: *p++ = 's'; break;
++	}
++	/* group */
++	*p++ = (mode & S_IRGRP) ? 'r' : '-';
++	*p++ = (mode & S_IWGRP) ? 'w' : '-';
++	switch (mode & (S_IXGRP | S_ISGID)) {
++	case 0:                *p++ = '-'; break;
++	case S_IXGRP:          *p++ = 'x'; break;
++	case S_ISGID:          *p++ = 'S'; break;
++	case S_IXGRP | S_ISGID: *p++ = 's'; break;
++	}
++	/* other */
++	*p++ = (mode & S_IROTH) ? 'r' : '-';
++	*p++ = (mode & S_IWOTH) ? 'w' : '-';
++	switch (mode & (S_IXOTH | S_ISVTX)) {
++	case 0:                *p++ = '-'; break;
++	case S_IXOTH:          *p++ = 'x'; break;
++	case S_ISVTX:          *p++ = 'T'; break;
++	case S_IXOTH | S_ISVTX: *p++ = 't'; break;
++	}
++	*p++ = ' ';  /* would be '+' if ACLs were implemented */
++	*p = '\0';
++}
++#endif /* !HAVE_STRMODE */
++
+ /* Free's a metaentry and all its parameters */
+ static void
+ mentry_free(struct metaentry *m)
+--- a/Makefile
++++ b/Makefile
+@@ -45,13 +45,9 @@
+ metastore_MANS := \
+  man1/metastore.1 \
+ 
+-ifeq ($(findstring BSD,$(UNAME_S)),)
+-ifneq (DragonFly,$(UNAME_S))
+-ifneq (Darwin,$(UNAME_S))
+-metastore_DLIBS += -lbsd
+-endif
+-endif
+-endif
++# libbsd is no longer needed: src/metaentry.c carries an in-tree
++# strmode(3) equivalent (see the HAVE_STRMODE guard there), so there
++# is nothing left for -lbsd to resolve on non-BSD hosts.
+ 
+ PVER := $(PROJ_DIR)Makefile.ver
+ 
