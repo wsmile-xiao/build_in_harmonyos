@@ -1,0 +1,93 @@
+id: DRAFT-E5xx-cmakedeps-shadowing-and-export-baked-flags
+draft: DRAFT-E5xx-cmakedeps-shadowing-and-export-baked-flags
+status: pending-editor-review
+title: CMakeDeps 包级 config 遮蔽原生 Qt5Config + install(EXPORT) 烤入构建期 target 状态导致消费端 find_dependency 失败
+category: cmake, conan, packaging, cross-compile
+severity: 2
+match_keywords:
+  - CMakeDeps
+  - Qt5Config.cmake
+  - cmake_find_mode
+  - qt5-qtbase
+  - generators = "CMakeDeps"
+  - find_dependency(Qt5
+  - Could not find a package configuration file provided by "Qt5DBus"
+  - could not find package configuration file
+  - install(EXPORT)
+  - HAVE_DBUS
+  - if (TARGET Qt5::DBus)
+  - qt5-qtbase_Qt5_Core_INCLUDE_DIRS_RELEASE
+  - QList file not found
+error_signature:
+  - 'Could not find a package configuration file provided by "Qt5DBus" (requested version 5.15.2)'
+  - "KF5NotificationsConfig.cmake:35 (find_dependency)"
+  - "fatal error: 'QList' file not found"
+  - "Error loading shared library libKF5CoreAddons.so.5"
+error_excerpt: |
+  CMake Error at .../lib/cmake/KF5Notifications/KF5NotificationsConfig.cmake:35 (find_dependency):
+    Could not find a package configuration file provided by "Qt5DBus"
+    (requested version 5.15.2) with any of the following names:
+      Qt5DBusConfig.cmake
+  -- or --
+  fatal error: 'QList' file not found
+  (consumer flags.make carries no Qt include dirs although Qt5::Core was linked)
+root_cause: |
+  两个叠加的坑（KF5/Qt5 链，qt5-qtbase + qt/5.15.19 双包生态）：
+  1. CMakeDeps 生成的包级 Qt5Config.cmake（qt5-qtbase，位于 test_package
+     的 generators/ 目录，被 conan_toolchain.cmake 以
+     list(PREPEND CMAKE_PREFIX_PATH ${CMAKE_CURRENT_LIST_DIR}) 置于搜索路径
+     最前）遮蔽了 qt5-qtbase 包内自带的原生 lib/cmake/Qt5/Qt5Config.cmake。
+     CMakeDeps 版本只定义 INTERFACE IMPORTED 组件 target，且组件
+     include 变量（qt5-qtbase_Qt5_Core_INCLUDE_DIRS_RELEASE）为空——
+     消费端 find_package(Qt5 COMPONENTS Core) 命中它后拿不到 Qt 头文件
+     路径（QList not found）。
+  2. KDE 项目顶层 CMakeLists 的 `if (TARGET Qt5::DBus) set(HAVE_DBUS TRUE)`
+     在构建期为真（CMakeDeps 定义了 Qt5::DBus 组件 target，即使真实
+     Qt5DBus 库不存在），install(EXPORT) 用的 KF5NotificationsConfig.cmake.in
+     模板把 `if (@HAVE_DBUS@)` 烤成 `if (TRUE)`，消费端 find_package
+     (KF5Notifications) 触发 find_dependency(Qt5DBus 5.15.2)——CMakeDeps
+     不生成 Qt5DBusConfig.cmake（组件级文件名），configure 直接红。
+solution: |
+  1. 消费端（主配方与 test_package）不声明 generators = "CMakeDeps" 处理
+     Qt5 线；手写 conan_cmakedeps_paths.cmake 把 qt5-qtbase 包内原生
+     lib/cmake 目录 PREPEND 到 CMAKE_PREFIX_PATH（kconfig5 5.116.0
+     test_package 先例）。若确需 CMakeDeps（其他非 Qt 依赖），接受的
+     代价是 Qt5 组件 include 变量为空，需手动补 include。
+  2. patch 构建期状态源：把顶层 CMakeLists 的 `if (TARGET Qt5::DBus)`
+     （HAVE_DBUS 赋值段）强制 `if (FALSE)`，使导出的 Config.cmake 里
+     DBus find_dependency 条件为 FALSE；同时把 src/CMakeLists 的
+     `if (TARGET Qt5::DBus)` 源码/链接守卫一并强制 FALSE（CMakeDeps
+     的组件 target 会误开这些守卫，拉入 DBus-only 源码但缺头文件）。
+  3. 运行时宏守卫（QT_DBUS_LIB）上游已自带的地方不用 patch，只有
+     无条件 `#else` 分支（假定非 Android/Mac/Win 必有 DBus）需要补
+     `#elif defined(QT_DBUS_LIB)` 守卫并给出降级实现。
+  4. 附带实锤（CI 诊断侧）：conandata.yml 只写官方原始 URL 单条——
+     CI Pre-download 阶段会自动"还原为官方 URL"并处理镜像回退，
+     手动加镜像列表对 CI 无效且违反 R39；CI "源码下载超时"若日志
+     尾为 `SSH bridge exec failed: connection refused`（elapsedTime
+     毫秒级）则是 worker 基础设施病机，纯 /rebuild 撞健康机即可，
+     不要动 conandata。
+rec_approach: |
+  1. 消费端（主配方与 test_package）**不声明 generators = "CMakeDeps"**
+     处理 Qt5 线；手写 conan_cmakedeps_paths.cmake 把 qt5-qtbase 包内
+     原生 lib/cmake 目录 PREPEND 到 CMAKE_PREFIX_PATH（kconfig5 5.116.0
+     test_package 先例）。若确需 CMakeDeps（其他非 Qt 依赖），接受的
+     代价是 Qt5 组件 include 变量为空，需手动补 include。
+  2. patch 构建期状态源：把顶层 CMakeLists 的 `if (TARGET Qt5::DBus)`
+     （HAVE_DBUS 赋值段）强制 `if (FALSE)`，使导出的 Config.cmake 里
+     DBus find_dependency 条件为 FALSE；同时把 src/CMakeLists 的
+     `if (TARGET Qt5::DBus)` 源码/链接守卫一并强制 FALSE（CMakeDeps
+     的组件 target 会误开这些守卫，拉入 DBus-only 源码但缺头文件）。
+  3. 运行时宏守卫（QT_DBUS_LIB）上游已自带的地方不用 patch，只有
+     无条件 `#else` 分支（假定非 Android/Mac/Win 必有 DBus）需要补
+     `#elif defined(QT_DBUS_LIB)` 守卫并给出降级实现。
+fallback: |
+  若不能 patch 上游：在消费端 conanfile generate() 里写一个空的
+  Qt5DBusConfig.cmake（伪造 Qt5::DBus INTERFACE target 指向不存在的
+  库）骗过 find_dependency——不推荐，掩盖真实链接失败。
+verify_builds:
+  - "knotifications5 5.116.0 本地 conan create（package_id 6da5865a）"
+  - "CI #66637（head 899cbfb5，2026-09-24 全绿）"
+  - "CI #68010（head fd3ad8d46c，2026-10-03 00:37:41 全绿，L0/L1 门禁+test_package 执行通过）"
+last_updated: 2026-09-24
+prescan_pattern: 'generators\s*=\s*"CMakeDeps".*qt5-qtbase|if\s*\(TARGET\s+Qt\$\{QT_MAJOR_VERSION\}::DBus\)'
