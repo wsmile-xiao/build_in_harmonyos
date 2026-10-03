@@ -1,0 +1,49 @@
+# Layer 0: 错误面
+id: DRAFT-21001
+trigger_tool:           runtime
+phase:                  runtime
+error_signature:        SIGSEGV.*invalid memory reference|signal: 11, SIGSEGV|Segmentation fault \(core dumped\)|process didn't exit successfully.*signal: 11
+
+# Layer 1: 识别层
+severity:               3
+category:               platform, ohos, threading, portability
+match_keywords:         jemalloc, tikv-jemallocator, SIGSEGV, signal 11, tokio runtime, shutdown, TSD, thread cache, cargo test
+
+# Layer 2: 诊断层
+root_cause:             HarmonyOS 上 jemalloc（tikv-jemallocator）的线程缓存/TSD 析构路径不可用：
+                        进程退出、tokio 多线程运行时析构（Runtime::drop）、libtest 回收测试线程三个
+                        场景均触发 SIGSEGV（rc=139）。表现为“输出正确但进程崩溃退出”，因此常规
+                        panic/错误处理无法捕获；--version/--help 这类 clap 提前 process::exit 的
+                        路径不触发。--enable-initial-exec-tls 关闭（disable_initial_exec_tls）不足
+                        以免除，只有移除 jemalloc 全局分配器才彻底消失。
+affected_scope:         所有以 tikv-jemallocator/jemallocator 作为 #[global_allocator] 的 Rust 程序
+                        （尤其 cargo 测试二进制、以 tokio 多线程运行时的 CLI）
+verification_cmd:       |
+  # 崩溃复现（rc=139）
+  zizmor --no-progress --offline <workflow.yml>; echo "rc=$?"
+  # 测试二进制逐用例复现
+  cargo test --release --target aarch64-unknown-linux-ohos -p <pkg> --bin <bin> -- --exact <case>
+
+# Layer 3: 方案层 ★
+rec_priority:           1
+rec_approach:           drop-jemalloc-allocator-on-ohos
+rec_description:        在目标依赖表与 #[global_allocator] 的 cfg 中排除 target_env="ohos"
+                        （两者必须同步，否则符号解析/编译失败）。OHOS 使用平台分配器，
+                        功能等价；不要试图只关 TLS 模型（实测无效）。
+rec_command:            |
+  # Cargo.toml
+  [target.'cfg(all(not(any(target_family = "windows", target_os = "openbsd")), not(target_env = "ohos")))'.dependencies]
+  tikv-jemallocator.workspace = true
+  # main.rs
+  #[cfg(all(not(target_family = "windows"), not(target_os = "openbsd"),
+          not(target_env = "ohos"), any(target_arch = "x86_64", target_arch = "aarch64")))]
+  #[global_allocator]
+  static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+fallback_approach:      forget-tokio-runtime（std::mem::forget(rt)）只能规避 CLI 退出路径崩溃，
+                        测试二进制（libtest 线程回收）仍会崩溃，不作为通用修复
+
+# Layer 4: 元数据
+evidence:               zizmor/1.27.0：修复前 CLI 审计 10/10 rc=139、zizmor bin 单测 93/148 SIGSEGV；
+                        修复后 CLI 8/8 rc=0、上游套件 562 passed / 0 failed
+applies_to:             rust, ohos, harmonyos
+last_updated:           2026-10-02
