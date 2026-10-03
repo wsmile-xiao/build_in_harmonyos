@@ -1,0 +1,120 @@
+#====================================================================
+# Draft: lexd 1.3.5 — autotools 包在 OHOS 上的自举死路：
+#        tool_requires(autoconf/automake) 会拖入 musl 链接的
+#        perl/5.42.2（qemu 下 signal 11 / 真机 ABI 损坏），
+#        而 CI worker 又缺 automake → 内置 autoreconf 产物；
+#        并用 <PKG>_CFLAGS/<PKG>_LIBS 短路 pkg-config
+#====================================================================
+
+id:                     DRAFT-LEXD-135-AUTOTOOLS-BOOTSTRAP-NO-PERL
+trigger_tool:           conan|autoreconf|aclocal|perl|qemu-aarch64
+phase:                  configuration
+error_signature:        qemu: uncaught target signal 11 \(Segmentation fault\) - core dumped|
+                         Segmentation fault \(core dumped\)|
+                         Can't exec "aclocal"|aclocal-1.16: command not found|
+                         Error 127|make: \*\*\* \[Makefile:400\] Error|
+                         Cwd.so: Perl_my_cxt_init: symbol not found|
+                         interpreter /lib/ld-musl-aarch64.so.1|
+                         configure: error: You don't have .*\.h? installed|
+                         checking for .*\.h\.\.\. no\s*$|
+                         os.environ flags silently dropped by conanbuild.sh
+
+severity:               2
+category:               autotools|toolchain|perl|cross-compile|pkg-config|conan|ohos
+match_keywords:         autoreconf, aclocal, automake, autoconf, perl 5.42.2, ABI broken,
+                         musl dynamic loader, qemu signal 11, vendored configure,
+                         Makefile.in, aclocal.m4, PKG_CHECK_MODULES, pkg.m4, pkg-config
+                         binary absent, prefix=/, -I//include, E178, E355, E468, E114,
+                         no configure in release tarball, lttoolbox pattern
+title:                  autotools 包在 OHOS 上的自举两条路都断：tool_requires 拉到的 perl/5.42.2 是 musl 链接（qemu/真机均崩），CI worker 又无 automake → 内置一次 autoreconf 产物；顺带用 <PKG>_CFLAGS/<PKG>_LIBS 短路 pkg-config，绕开制品 .pc 的 prefix=/ 与 worker 缺 pkg-config 二进制
+
+root_cause:             发布包只有 configure.ac/Makefile.am（无 configure、无 autogen.sh）时，
+                        OHOS 上生成 configure 只有两条路，两条都实测走不通：
+                        ① `tool_requires("autoconf/…") + tool_requires("automake/…")`
+                           → 依赖图把 **perl/5.42.2** 拉进 build context。
+                           该 perl 是 **musl 动态链接**
+                           （`interpreter /lib/ld-musl-aarch64.so.1`），在本地
+                           交叉验证环境下 `qemu-aarch64 perl -e 'print 1'` 直接
+                           **signal 11**（autoreconf 第一步就崩，conan create rc=139）；
+                           apertures/3.9.12 记录了同一 perl 在真机上
+                           `Cwd.so: Perl_my_cxt_init: symbol not found` 的 ABI 损坏。
+                           注意：即使不主动 tool_require("perl")，autoconf/automake
+                           也会传递引入它。
+                        ② 依赖 CI worker 自带的 autotools → worker 只有 autoconf 2.72，
+                           **没有 automake/aclocal/m4/pkg-config**（lttoolbox/3.7.6
+                           就是因此才内置了 autotools 产物）。
+                        另有一个叠加坑：若用 pkg-config 解析依赖，制品仓里的
+                        `.pc` 以 `--prefix=/` 安装 → 输出 `-I/include`/`-L/lib`
+                        （E355）；而 worker 上没有可依赖的系统 pkg-config 二进制
+                        （E468），照抄别处配方的 `tool_requires("pkg-config")`
+                        在本仓实测拿不到可执行文件。
+
+affected_scope:         所有「发布包无预生成 configure」的 autotools 包在本仓的适配。
+                        本仓既有两派：lttoolbox/3.7.6 内置产物（与本条目同策）、
+                        apertium/3.9.12 走 tool_requires（依赖 worker 原生 perl
+                        能跑，风险更高）。凡 tarball 里没有 configure 的包都适用。
+
+verification_cmd:       # 1) 确认 tarball 真的没有 configure
+                        tar tjf <tarball> | grep -cE '/configure$'        # 0
+                        # 2) 确认 perl 是死路（别猜，实测）
+                        PERL=$(ls -d ~/.conan2/p/perl*/p/bin/perl | head -1)
+                        file "$PERL" | grep -o 'ld-musl[^ ]*'
+                        qemu-aarch64 "$PERL" -e 'print "ok\n"'; echo "rc=$?"   # 139 = signal 11
+                        # 3) 确认 worker 缺 automake（否则可走 tool_requires）
+                        command -v aclocal automake m4 pkg-config || echo "incomplete"
+                        # 4) 确认 pkg.m4 短路语义（不调 pkg-config 也能过 PKG_CHECK_MODULES）
+                        grep -n 'user gave' /usr/share/aclocal/pkg.m4 | head -3
+                        # 5) 修法：内置 autoreconf 产物 + 以 argv 形式传 <PKG>_CFLAGS/<PKG>_LIBS
+                        # 6) 验证 argv 与工具链参数真的到位（别信 self.run 的回显）
+                        grep -m1 '\$ ./configure' build/config.log | grep -- '--build=aarch64-unknown-linux-ohos'
+                        grep -E 'S\["build_alias"\]' build/config.status
+
+rec_priority:           1
+rec_approach:           vendor-autotools-products-and-bypass-pkg-config
+rec_description:        ① **内置 autoreconf 产物**（lttoolbox/3.7.6 同策）：
+                        在有完整 autotools 的机器上对**未修改**的 tarball 跑一次
+                        `autoreconf -fi`，把 `configure`、`aclocal.m4`、
+                        `Makefile.in`、各子目录 `Makefile.in` 与 automake 辅助脚本
+                        （`install-sh`/`missing`/`depcomp`）放进
+                        `patches/autotools/`，在 `source()` 里（**不是 build()**）
+                        覆盖进源码树。放 source() 的原因：lttoolbox 实测在
+                        build() 里复制会被 Conan 的 source 目录管理还原成陈旧
+                        configure（configure() 与 make() 之间回退）。
+                        build() 保留 `if not os.path.isfile(configure):
+                        autoreconf -fi` 作为本地兜底。
+                        收益：**本地与 CI 走完全相同的代码路径**（W0b 要求的
+                        「历史命令在 CI clean 环境逐字可执行」），且不引入 perl。
+                        ② **短路 pkg-config，且必须走 argv**：`PKG_CHECK_MODULES` 在
+                        `<PKG>_CFLAGS` 与 `<PKG>_LIBS` 都已设置时**不再调用
+                        pkg-config**（pkg.m4 的 user-gave 分支）。但**不要只用
+                        os.environ**：`self.run(..., env="conanbuild")` 会先 source
+                        conanbuild.sh，而它自己定义了 CPPFLAGS/LDFLAGS，从而覆盖
+                        进程里的 os.environ（lexd 实测：一次 CI profile 跑因此丢掉
+                        -I<utf8cpp>/include，configure 报 "You don't have utfcpp
+                        installed"，而另一套本地 profile 却能过）。正确做法是把
+                        `<PKG>_CFLAGS/_LIBS` 与 `CPPFLAGS`/`LDFLAGS` 一起作为
+                        `./configure` 的 `VAR=value` 命令行参数（autoconf 的
+                        ac_precious_vars 会 eval+export，优先级最高）。既绕开
+                        `.pc` 的 `prefix=/`（E355），也不依赖 worker 上的
+                        pkg-config 二进制（E468）。
+                        附：手写 configure 命令行时**必须回放工具链自己的参数**——
+                        `tc.configure_args`（如 E007/E205 的
+                        `--build=aarch64-unknown-linux-ohos`）不会被自动消费，
+                        漏掉就等于没有该护栏（lexd 首版即如此，护栏成死代码，
+                        原生 HarmonyOS 机器上 config.guess 仍会失败）。验证：
+                        `grep S[\"build_alias\"] config.status`。
+                        ③ **E114**：`configure` 里 `umask 077 && mktemp -d` 在
+                        HMDFS setgid 目录下产生不可写的 `drwx--S---` → 去掉 umask。
+                        ④ **E041/E248**：`ACLOCAL/AUTOMAKE/AUTOCONF/AUTOHEADER/
+                        AUTOM4TE=':'` 中和 automake maintainer 规则（内置产物已是
+                        最新，属空操作），避免 make 去调 worker 上不存在的 automake。
+                        ⑤ 交付前把 L4 静态扫描的噪声在 notes.md 里解释清楚：
+                        内置文件里的 `strcpy/sprintf` 命中来自 autoconf 自身模板的
+                        C 代码片段，不是本包代码（L4 是 warn，不阻塞）。
+
+rec_command:            ACLOCAL_PATH=/usr/share/aclocal autoreconf -fi && cp configure aclocal.m4 Makefile.in src/Makefile.in install-sh missing depcomp patches/autotools/
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              PENDING
+source_commit:          PENDING
