@@ -1,0 +1,138 @@
+#====================================================================
+# DRAFT-medusa-conan-generate-dep-paths
+# Conan 2 generate() 中依赖包目录不可用，Autotools 标志必须从已物化数据推导
+#
+# 编号说明：本文件不预占 E 编号（曾拟用 E258，该号已被
+#   knowledge/doc/E258.md 占用）。草稿期的编号由维护者在合入时分配；
+#   仓库主流写法即以文件名/主题为标题，机器可读标识见下方 id: 字段。
+#====================================================================
+
+# Layer 0: Error Surface
+id:                     MEDUSA-CONAN-GENERATE-DEP-PATHS
+trigger_tool:           conan|autotools|configure
+phase:                  generate|configuration
+error_signature:        --with-ssl=None|checking None/include/.*\.h|ConanException: cannot resolve the package prefix of dependency|AttributeError: 'AutotoolsToolchain' object has no attribute 'extra_cppflags'|configure: error: cannot run C compiled programs|Error loading shared library libgcrypt\.so.*needed by \./conftest
+
+# Layer 1: Recognition
+severity:               3
+category:               conan|recipe|autotools|ohos
+match_keywords:         conanfile.py, generate, package_folder, cpp_info.location, AutotoolsToolchain, AutotoolsDeps, extra_cflags, extra_ldflags, CPPFLAGS, LIBS, conftest, rpath, conanbuild.conf, conanautotoolsdeps.sh, Conan 2.29.1
+title:                  Dependency package folders are unavailable in Conan 2 generate(); derive Autotools flags from already-materialised data
+
+# Layer 2: Diagnosis
+root_cause:             In Conan 2.29.1 (the OHOS-adapted build) a dependency's
+                        package folder is not bound yet while the consumer recipe's
+                        generate() runs, so both
+                        `self.dependencies[name].package_folder` and
+                        `self.dependencies[name].cpp_info.location` evaluate to None.
+                        `cpp_info.includedirs` / `libdirs` are present but are only
+                        package-relative ('include', 'lib'), which cannot be turned
+                        into compiler flags on their own.  A recipe that builds an
+                        absolute path in generate() therefore silently emits
+                        `--with-ssl=None` (or raises on any explicit None check), and
+                        the failure surfaces much later as a missing header/library.
+                        Repository impact: 1304 of the archived recipes read
+                        `package_folder` inside generate(), so the API boundary - not
+                        the individual library - is what needs to be documented.
+
+                        Two further Autotools-specific facts belong to the same
+                        boundary and cost additional runs to isolate:
+                        (a) AutotoolsToolchain exposes only `extra_cflags`,
+                            `extra_cxxflags`, `extra_ldflags` (no `extra_cppflags`),
+                            and some upstream configure scripts reset CPPFLAGS
+                            themselves, so dependency include paths only survive in
+                            CFLAGS/CXXFLAGS;
+                        (b) AutotoolsToolchain exports the dependency LIBS
+                            (e.g. `-lgcrypt -lgpg-error -lssh2`) into the conanbuild
+                            environment, configure appends them to every conftest
+                            link, and those shared libraries are not on the loader
+                            path - so configure reports the misleading
+                            "cannot run C compiled programs" even though compiling
+                            and linking succeeded.
+
+affected_scope:         Any Conan 2 recipe whose generate() needs an absolute path
+                        into a dependency package (typically --with-<lib>=PREFIX or
+                        explicit -I/-L injection), and any Autotools recipe on OHOS
+                        that consumes shared-library dependencies on the host.
+verification_cmd:       grep -n 'with-ssl=' <build>/conan/conanbuild.conf;
+                        grep -n 'None/include' <build>/config.log;
+                        grep -nE 'cannot run C compiled programs|Error loading shared library' <build>/config.log;
+                        grep -nE '^export (CPPFLAGS|LDFLAGS|LIBS)' <build>/conan/conanautotoolsdeps.sh
+
+# Layer 3: Solution Space
+rec_priority:           1
+rec_approach:           derive-paths-from-materialised-data
+rec_description:        Never read package_folder for an absolute path in generate().
+                        Recover it from data that is already materialised:
+                        1) Conan's own AutotoolsDeps generator resolves transitive
+                           dependency paths, so run `AutotoolsDeps(self).generate()`
+                           and parse the `-I` / `-L` flags back out of the
+                           `conanautotoolsdeps.sh` it writes;
+                        2) the Conan package store root is the part of those absolute
+                           paths before `/p/`;
+                        3) look a package up by its truncated store name - Conan
+                           keeps only the first five characters plus a hash
+                           (`openssl` -> `opens<16 hex>`) - and confirm the hit by the
+                           package's own directory layout;
+                        4) a dependency consumed under `override=True` does not appear
+                           in the generated deps script at all, so add it explicitly.
+                        Keep every flag inside the toolchain attributes that actually
+                        exist: include paths in extra_cflags/extra_cxxflags, search
+                        paths in extra_ldflags.
+rec_command:            tc = AutotoolsToolchain(self)
+                        tc.extra_cflags.extend(includes); tc.extra_cxxflags.extend(includes)
+                        tc.extra_ldflags.extend(libdirs)
+                        # conftest links the inherited LIBS; give it the same rpath
+                        for libdir in libdirs:
+                            tc.extra_ldflags.append(f"-Wl,-rpath,{libdir[2:]}")
+rec_auto_fix:           false
+rec_impl:               conan-recipe-platform-branch
+
+fallback_priority:      2
+fallback_approach:      defer-to-build-phase
+fallback_description:   When a path is only consumed during build() (not by
+                        configure), read it there instead: in build() the dependency
+                        packages are materialised and package_folder is populated.
+fallback_command:       read self.dependencies[name].package_folder inside build(), not generate()
+fallback_auto_fix:      false
+fallback_impl:          manual-recipe-edit
+
+forbid_1_pattern:       generate\(.*package_folder(?!.*None)
+forbid_1_reason:        package_folder is frequently None during generate(); using it
+                        unconditionally either raises or silently degrades the flag to
+                        `None` and fails much later with an unrelated-looking error.
+forbid_1_consequence:   Misleading late failure (missing header / "cannot run C
+                        compiled programs") that costs full rebuild-debug cycles.
+
+forbid_2_pattern:       extra_cppflags
+forbid_2_reason:        Conan 2.29.1's AutotoolsToolchain has no such attribute; and
+                        upstream configure scripts that rebuild CPPFLAGS would discard
+                        it anyway.
+forbid_2_consequence:   AttributeError at generate(), or silently dropped include paths.
+
+forbid_3_pattern:       LIBS=.*-lgcrypt.*conftest
+forbid_3_reason:        Inherited dependency LIBS leak into every conftest link; without
+                        an rpath the loader cannot find them and configure misreads the
+                        result as an unusable compiler.
+forbid_3_consequence:   "cannot run C compiled programs" false positive; the real fix is
+                        an rpath (or dropping LIBS), not a compiler/toolchain change.
+
+# Layer 4: Principles
+principles:             P002, P014
+
+# Relations
+causes:                 []
+caused_by:              []
+similar_to:             [E002, E137]
+conflicts_with:         []
+prerequisite_of:        []
+
+# Metadata
+doc_file:               knowledge/drafts/DRAFT-medusa-conan-generate-dep-paths.md
+last_updated:           2026-09-29
+source_event:           medusa 2.3 native OHOS Conan build (PR #13807):
+                        --with-ssl=None then "cannot run C compiled programs" across
+                        runs conan9-conan12; verified on runs conan13-conan21/final
+
+# Authorship and provenance
+authors:                gcw_hL6s3dcK
