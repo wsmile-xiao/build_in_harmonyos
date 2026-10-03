@@ -1,0 +1,54 @@
+draft: DRAFT-12915-geocode-glib-3.26.4-pcflags-subdir-musl-locale
+status: pending-editor-review
+title: "PkgConfigDeps .pc 单一 -Iincludedir 对版本化多级 include 布局的 Cflags 补丁 + musl 无 locale 库的 g_test setlocale 断言中止豁免"
+category: packaging, meson, pkg-config, testing, ohos
+match_keywords: >
+  PkgConfigDeps, glib-2.0.pc, Cflags, includedir 子目录, libsoup-3.0, soup.h file not found,
+  setlocale, musl, locale 数据库, g_test, 断言中止, 环境限制, 上游测试直跑,
+  geocode-glib, GNOME, meson 交叉
+error_signature: "fatal error: 'libsoup/soup\\.h' file not found|'setlocale \\(LC_ALL, \"[a-z_A-Z]+\\.UTF-?8\"\\)' should not be NULL|Cflags: -I\"\\$\\{includedir\\}\""
+root_cause: "两个独立缺口：(1) conan PkgConfigDeps 生成的 .pc 只写 Cflags: -I\"${includedir}\"，但 GNOME 系库上游布局把头文件放在版本化多级子目录（include/libsoup-3.0/libsoup/soup.h，消费者 #include <libsoup/soup.h>），单 -I 解析不到子目录导致 fatal error file not found；(2) OHOS musl 无 locale 数据库，上游测试调 setlocale(LC_ALL, \"en_GB.UTF-8\") 等返回 NULL，g_test 断言 'setlocale should not be NULL' 直接中止测试进程（不是行为差异而是数据缺失，无法通过代码修补绕开）。"
+rec_approach: "(1) build() 前定位生成的 libsoup-3.0.pc，把 Cflags 替换为 -I\"${includedir}/libsoup-3.0\" -I\"${includedir}\" 双路径（幂等判断：不含子目录串才替换）；(2) locale 依赖测试项按环境限制豁免如实申报（断言原文+行号在案），其余上游测试二进制以 OHOS 原生 ELF 直跑（LD_LIBRARY_PATH 注入依赖 libdir，libshumate 先例）保证真跑覆盖率。"
+solution: |
+  1) .pc Cflags 版本化子目录补丁（conanfile.py build() 内，generate 后 configure 前）：
+
+  ```python
+  _soup_pc = None
+  for _root in [self.build_folder, os.path.dirname(self.build_folder)]:
+      _c = _glob.glob(os.path.join(_root, "libsoup-3.0.pc"))
+      if _c:
+          _soup_pc = _c[0]; break
+  if _soup_pc and os.path.isfile(_soup_pc):
+      with open(_soup_pc) as _f:
+          _t = _f.read()
+      if "include/libsoup-3.0" not in _t:   # 幂等
+          _t = _t.replace(
+              "Cflags: -I\"${includedir}\"",
+              "Cflags: -I\"${includedir}/libsoup-3.0\" -I\"${includedir}\"", 1)
+          with open(_soup_pc, "w") as _f:
+              _f.write(_t)
+  ```
+
+  2) musl locale 豁免（PR 正文如实申报模式）：
+
+  ```
+  上游测试用例减少原因（-4 项环境限制）：
+  test_pi / test_search / test_locale_format / test_locale_name 依赖
+  setlocale(en_GB.UTF-8 / cs_CZ.UTF-8 / sv_SE.utf8)——OHOS musl 无 locale 数据库，
+  setlocale 返回 NULL 触发 g_test 断言中止
+  （断言原文：'setlocale (LC_ALL, "en_GB.UTF-8")' should not be NULL，
+  geocode-glib.c:419/:506/:701/:752）
+  ```
+  其余 24/28 上游用例真跑：meson 构建的测试二进制为 OHOS 原生 ELF，
+  直跑 + LD_LIBRARY_PATH 注入依赖 libdir（libshumate 1.7.0 先例）。
+fallback: >
+  .pc 补丁不可行时（.pc 生成时机不同）：package_info 的 cppinfo.includedirs 直接指
+  版本化基目录（include/geocode-glib-2.0 而非叶子），消费者 -I 自带子目录；
+  locale 类测试无法豁免时（审核要求 100%）：改用 HOST 环境跑测试二进制并显式声明宿主平台差异。
+verify_builds: "#12915（CI passed / AI review passed / approved；上游 24/28 真跑 + test_package 8/8）"
+reference_impl: >
+  geocode-glib 3.26.4 PR #12915 archives/g/geocode-glib/3.26.4/conanfile.py；
+  复用：E545（meson detect_ninja OHOS pin）、E348（glib 模块 forwarding pc）、
+  E443（glib 工具 native launcher）、libshumate 1.7.0（ELF 测试直跑先例）
+id: DRAFT-12915
+doc_file: doc/DRAFT-12915.md
