@@ -1,0 +1,86 @@
+# ═══ Draft knowledge entry — 动态链接的 gcc-ada 二进制在 OHOS 上首次 stdio stderr 访问即 SIGSEGV ═══
+# Timestamp: 2026-09-27
+# Software: libflorist 2025.1.0 构建期生成器 c-posix / c-posix-signals / gcc-ada 9.5.0
+# Gate: conan create -> build() -> 执行自建构建期工具
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-libflorist-2025.1.0-gcc-ada-dynamic-stderr-sigsegv.md
+
+id: DRAFT-libflorist-2025.1.0-gcc-ada-dynamic-stderr-sigsegv
+trigger_tool: gcc|gcc-ada|gnatmake|conan|make
+phase: build|toolchain|runtime
+error_signature: ^$|Segmentation fault|exit 139|Error 139 while executing|terminate called.*stderr|fputs.*stderr.*segv
+severity: 3
+category: ada, gnat, gcc-ada, runtime, stdio, dynamic-linking, build-tool
+match_keywords: gcc-ada, c-posix, build-time tool, code generator, SIGSEGV, 139, stderr,
+                 fprintf, fputs, stdio, dynamic linking, -static, OHOS, segfault, 段错误
+
+title: 用 gcc-ada/9.5.0 动态链接编译出的构建期小工具，在本机 OHOS 上首次访问 stdio stderr 即 SIGSEGV（139），且崩溃发生在 main() 首行输出之前；改为 -static 链接即恢复正常
+
+root_cause: 现象具有强误导性——程序"立即段错误"且**在任何输出之前**退出（stdout/stderr 全空），
+            分阶段探针（在 main 内逐步 fprintf 阶段名）同样无输出，看起来像启动期/加载期崩溃
+            或逻辑分支越界。逐项对照实验（同一 OHOS aarch64 真机、同一 gcc-ada 9.5.0）：
+              | 程序                                        | 结果        |
+              | printf(...) → stdout，动态链接               | 正常输出    |
+              | fprintf(stderr, ...) / fputs(..., stderr)    | SIGSEGV 139 |
+              | write(2, ...) 原生调用                       | 正常        |
+              | 同一程序用 OHOS clang 编译                    | 正常        |
+              | 同一程序加 -static（gcc-ada 编译）            | 正常        |
+            结论指向"gcc-ada 动态链接产物在本运行时的 stdio stderr 初始化/首次写入路径"，
+            而非程序逻辑；`write(2,...)` 与 `-static` 均正常，说明是动态链接态下的
+            库初始化问题（注意：未获取到可用的 backtrace——本机 gdb 无法 ptrace，
+            报 "Could not trace the inferior process / ptrace: Permission denied"，
+            故根因描述限于可观测行为，不臆测具体符号）。
+            实用判据：**"任何输出前即退出且 exit=139" + "write(2) 正常" + "-static 正常"
+            ⇒ 高度疑似本条**。注意未签名 ELF 的失败形态不同（126 Permission denied），
+            不能把 126 与本条混为一谈。
+
+affected_scope: 所有用 gcc-ada/9.5.0 编译、并在 OHOS 设备上**执行**的构建期工具/生成器
+                （configure 探针、代码生成器、版本提取器等）；libflorist 的
+                c-posix 与 c-posix-signals 两个生成器为实例；
+                交叉引用 DRAFT-ada-gnats-native-only-toolchain-cross-build-trap
+                （该条讲"只有 OHOS 制品、必须原生构建"），本条讲"原生构建出的动态产物也跑不起来"
+
+verification_cmd: ①建立对照矩阵（最小复现）：
+                 printf '#include <stdio.h>\nint main(void){fprintf(stderr,"E\\n");return 0;}\n' > a.c
+                 gcc -o a_dyn a.c  && binary-sign-tool sign -inFile a_dyn  -outFile a_dyn  -selfSign 1 && ./a_dyn ;  echo $?   # 期望 139
+                 gcc -static -o a_st a.c && binary-sign-tool sign -inFile a_st -outFile a_st -selfSign 1 && ./a_st ; echo $?   # 期望 0
+                 ②库侧现象：./c-posix 立即退出且 c-posix.log 为空、gensrc/ 无产物
+                 ③确认非加载期已成功：`echo $?` 恒为 139（SIGSEGV），非 126（未签名）
+rec_priority: 1
+rec_approach: link-build-time-tools-statically
+rec_command: 配方内对构建期工具一律加 -static：
+                 gcc -O2 -static -DGENDIR="gensrc" -o c-posix c-posix.c -lpthread
+                 gcc -O2 -static -DGENDIR="gensrc" -o c-posix-signals c-posix-signals.c
+             并注意**执行前必须签名**（OHOS 拒绝未签名 ELF，报 126）：
+                 llvm-objcopy --remove-section .codesign <tool>
+                 binary-sign-tool sign -inFile <tool> -outFile <tool> -selfSign 1
+rec_description: 不要被"启动期崩溃"的外观带偏去查静态初始化/构造器/大 BSS（本例已排除：
+             大静态数组程序正常、最小只写 stderr 的程序也崩溃）。正确思路是把
+             "首次 stdio stderr 访问"作为自变量做对照实验，一旦确认 -static 可解即固化。
+             另需注意两个易混形态：未签名 = 126 Permission denied（必须签名才能 exec）；
+             动态链接 stdio stderr = 139 SIGSEGV（须 -static）。二者常同时出现在同一次调试中。
+rec_auto_fix: false
+rec_impl: conanfile: _build_c_generators() 统一加 -static；_sign_executable() 用
+          llvm-objcopy + binary-sign-tool 签名后恢复 mode
+
+fallback_priority: 2
+fallback_approach: compile-build-tools-with-ohos-clang-instead
+fallback_description: 若某构建期工具因依赖 g++ 或其他原因无法用 gcc-ada 静态链接，
+             可改用 OHOS 自带 clang 编译该工具（对照实验证明 clang 动态链接产物正常）。
+             局限：与库本体（Ada）跨工具链，必须确认该工具不与 Ada 对象混链；
+             libflorist 的 C 胶水（posix-macros.c）属库内单元，**不适用**本条，必须与 Ada 同源。
+
+forbid_1_pattern: 因"启动期段错误"就去排查全局构造器/大 BSS/栈大小，或给程序加大量日志反复重试
+forbid_1_reason: 对照实验已把自变量锁定在「动态链接 + stdio stderr」；沿错误方向排查
+                 会消耗多轮 CI 而始终无法收敛（本库实际耗时多轮探针才定位）
+forbid_2_pattern: 把构建期工具也编进最终交付物，或让消费者承担 stderr 崩溃风险
+forbid_2_reason: 生成器是构建期工具，不应进入 package()；且其崩溃形态会影响任何
+                 调用者，交付出去等于把缺陷外溢
+
+similar_to: DRAFT-ada-gnats-native-only-toolchain-cross-build-trap (仅 OHOS 制品/原生构建),
+            DRAFT-gcc-ada-ohos-link-only-libunwind (gcc-ada 链接契约),
+            DRAFT-ohos-module-ctor-eager-dlopen-sigsegv (同为 SIGSEGV 但为模块构造器 dlopen)
+
+source_event: task libflorist 2025.1.0 适配（feat/libflorist-2025.1.0），2026-09-27 真机实测；
+              对照矩阵 5 组、每组均签名后执行
+authors: ohpcd
+doc_file: DRAFT-libflorist-2025.1.0-gcc-ada-dynamic-stderr-sigsegv.md
