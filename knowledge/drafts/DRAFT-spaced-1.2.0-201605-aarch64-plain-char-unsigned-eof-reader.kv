@@ -1,0 +1,164 @@
+# ═══ Draft knowledge entry — AAPCS64 plain char 无符号让 EOF(-1) 判定失效：字符流解析器在 aarch64 上静默吞掉整个输入文件 ═══
+# Timestamp: 2026-10-03
+# Software: spaced 1.2.0-201605（以及任何把 std::ifstream::get() 收进 plain char 的 C/C++ 包）
+# Gate: aarch64 OHOS clang15+libc++ 与 x86_64 g+++libstdc++ 同源码同输入对照实测 + test_package A6 钉死
+# Status: DRAFT — 待主编审核 promote
+
+id: DRAFT-spaced-aarch64-char-eof
+title: "AAPCS64 规定 plain char 无符号：把 std::ifstream::get() 的 int_type 收进 char 后 EOF(-1) 变成 0xff，`-1 == (int)c` 永不命中，任何以 EOF 为终止条件的字符流解析器在 aarch64 上静默把整个输入判为非法——退出码仍是 0"
+trigger_tool: spaced / consumer-test / any-port
+phase: testing
+error_signature: "fatal error: .* file not found|error: no type named '.*' in namespace 'std'|error: call to '.*' is ambiguous|Pattern containes illegal characters|is an empty file"
+severity: 2
+category: upstream-bug|arch-portability|libcxx
+match_keywords: aarch64, AAPCS64, plain char, char 无符号, unsigned char, char signedness, ifstream, get(), int_type, EOF, -1, 0xff, eof 判定, 静默失效, 退出码 0, read pattern file, spaced, clang15, libc++, arm64
+keywords: AAPCS64 plain char 无符号, 字符流 EOF 判定, ifstream get 收窄, arm64 专属缺陷, 静默吞输入, 退出码仍为 0, 架构才暴露, tr1/unordered_map, std::abs uint32_t 歧义, 传递包含
+prescan_pattern: "char[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*;[[:space:]]*$|-1[[:space:]]*==[[:space:]]*\\([[:space:]]*int[[:space:]]*\\)[[:space:]]*[a-zA-Z_]"
+prescan_globs: "*.c, *.h, *.cc, *.cpp, *.hpp"
+prescan_severity: 2
+root_cause: |
+  AAPCS64（AArch64 的 ARM 过程调用标准）规定 **plain `char` 无符号**，这与 AArch32 相反，也与
+  x86_64 的 gcc/clang 默认（有符号）相反。于是同一份源码在 x86_64 上完全正常、在 aarch64 上
+  静默走错分支，是典型的「跨架构才暴露」缺陷。
+
+  spaced 1.2.0-201605 的 `patternset::ReadPattern()`（src/patternset.cpp）：
+
+      char tokens[6] = {'.', ' ', ',', ';', '\n', '\t'};
+      char c;                              // ← plain char，aarch64 上无符号
+      ...
+      c = fasta.get();                     // ← int_type（EOF = -1）被收窄
+      token = false;
+      for (i...) if (c == tokens[i]) token = true;
+      if (token || -1 == (int)c) { ...push... }        // ← aarch64 上永不命中 EOF
+      else if (c == '1' || c == '0') { pattern.push_back(c); }
+      else { bad = true; SecureMessage("format", -1); } // ← EOF 落到这里
+
+  aarch64 上 `EOF(-1)` 收进 plain `char` 变成 `0xff`，`char 0xff` 转 `int` 得 **255 ≠ -1**，
+  于是 EOF 掉进最后的 `else`，被当成「非法字符」。读文件循环 `while(!fasta.eof())` 因此
+  永远走不到正常收尾，整份模式文件被判非法。
+
+  **危险之处在于它不报错**：上游打完 `FORMAT-ERROR: Pattern containes illegal characters!`
+  与 `ERROR! File 'x' is an empty file!` 之后 `read_error=true`，`Init()` 随即
+  `pattern_set.clear(); update = true;` —— 工具**回退到随机种子集照常输出距离矩阵，
+  退出码仍是 0**。调用方（以及只看退出码的 CI）完全看不出 `-f` 参数被丢弃了。
+
+  反向对照（把结论钉死在符号性上）：给未打补丁的二进制加 `-fsigned-char`（把 plain char
+  变回有符号），同一个模式文件立刻被正常读取、stderr 变空 ⇒ 根因是符号性，不是别的什么。
+
+同一次适配里另外三条 C++ 标准库侧的移植障碍（与本条同源：老代码依赖标准库实现细节）。
+  注意归因要精确，**只有第一条是 libc++ 专属**：
+  - `#include <tr1/unordered_map>`：libstdc++ 专有的 TR1 遗留头，**libc++ 不提供**；
+    整棵树从未使用 `tr1::` 命名空间，是纯粹的移植障碍。
+  - `std::default_random_engine` 需要显式 `#include <random>`：**实测 libc++ 与
+    libstdc++ 11 都不传递包含它**（g++ 11.4 在未 include 的原始树上同样报
+    does not name a type）。「libstdc++ 曾经传递包含」这类经验在新工具链上不成立。
+  - `std::abs()` 作用在 `uint32_t` 成员上：C 库的 `int abs(int)`（OHOS sysroot
+    `<stdlib.h>:58`、glibc `<stdlib.h>:848`）与 C++ 的 `long abs(long)` 等对
+    `unsigned int` 实参**都是同秩转换**，而「有符号类型能容纳另一有符号类型」这条
+    打破平局的规则在实参无符号时不适用 ⇒ 重载决议失败。
+    **实测 aarch64 clang15+libc++ 与 x86_64 g++ 11.4+glibc 报同一批错**，
+    所以这一条不是 libc++/OHOS 专属缺陷。
+rec_approach: keep-int-type-in-stream-readers + drop-tr1-include + explicit-random-include + remove-unreachable-abs-on-unsigned
+rec_description: |
+  适配层的处理（spaced 1.2.0-201605 实证，全部无平台宏）：
+  1) **不要用 `-fsigned-char` 绕**。它对有符号目标行为零影响，但会被任何自行重建源码的
+     下游漏掉；改源码才能保证行为一致。做法：把字符流解析循环里的接收变量从 plain `char`
+     改成流自己的 `std::char_traits<char>::int_type`（等价写法：`int` + 与
+     `std::char_traits<char>::eof()` 显式比较）。这样 `token || c == eof` 的判定在任何
+     架构上都成立。
+  2) **审计面**：凡是 `char c;` 紧跟 `ifstream/istream ... get()` 或 `fgetc()`，且用
+     `-1` / `EOF` 做终止或哨兵判定的，都要逐个核对；这类写法往往同时出现在
+     「解析配置/模式/词表」的小函数里，编译期完全无感。
+  3) 顺手清掉同一次失败里暴露的 libc++ 障碍：删未使用的 `<tr1/unordered_map>`；
+     为 `std::default_random_engine`/`std::mt19937` 等显式 `#include <random>`。
+  4) `std::abs(unsigned)` 分支：先确认条件是否恒假（成员是 `uint32_t` 时 `x < 0` 恒假、
+     分支不可达）；不可达就删掉整个分支（Debian 的 quilt 补丁
+     `0004-signed.patch` / `0005-fix-absolute-value-of-unsigned.patch` 做的正是这件事），
+     而不是加 `static_cast` —— 加转换会留下 `-Wtype-limits` 类死代码警告，且掩盖
+     「这里本来就该用有符号类型」的作者意图。
+  5) **断言要钉在静默失效上，不能只钉在编译通过上**：本包消费者测试的 A6 就是
+     「stderr 不得出现 `FORMAT-ERROR` / `is an empty file`」——只断言「编译过 + 退出码 0」
+     会让这个缺陷 100% 漏网。
+rec_command: |
+  # 三面取证：同一 tarball、同一模式文件，只换目标架构
+  # SRC 指向 spaced_1.2.0-201605+dfsg.orig.tar.xz 解包后的顶层目录
+  SRC=./spaced-1.2.0-201605+dfsg      # 或 $REPO/archives/s/spaced/1.2.0-201605 下的源码树
+  cd "$SRC"
+  printf '11001' > seed.pattern                 # 长度 5 权重 3、首尾为匹配位的 spaced seed
+  printf '>s1\nACGTACGTACGTACGTACGT\n' > one.fasta
+  # aarch64 OHOS / clang15+libc++，未打补丁的二进制（用 conandata 里的 patch 列表反向还原，
+  # 或直接对未打补丁的构建产物操作）
+  echo '--- aarch64 OHOS（期望：FORMAT-ERROR + 退出码仍为 0）---'
+  ./spaced-ohos -o a.mat -f seed.pattern -t 2 one.fasta 2>&1 | head -3; echo "rc=$?"
+  echo '--- x86_64 / 有符号 char 目标（期望：stderr 空）---'
+  ./spaced-x86 -o b.mat -f seed.pattern -t 2 one.fasta 2>&1 | head -3; echo "rc=$?"
+  echo '--- 反证：同一 aarch64 源码补 -fsigned-char（期望：stderr 也变空）---'
+  $CXX -O3 -fopenmp -static-openmp -std=c++17 -fsigned-char \
+      src/spaced.cc src/variance.cpp src/patternset.cpp -o ./spaced-ohos-signed
+  ./spaced-ohos-signed -o c.mat -f seed.pattern -t 2 one.fasta 2>&1 | head -3
+  echo '--- 编译面取证：g++ 11.4 + glibc 在同一未打补丁的树上同样失败 ---'
+  g++ -O2 -fopenmp -std=c++17 -c src/patternset.cpp -o /dev/null 2>&1 | grep -E "error" | head -5
+rec_auto_fix: false
+rec_impl: 配方侧补丁（源码 1 行类型修正 + 3 处 libc++ 障碍清理）+ test_package 增加 stderr 断言
+affected_scope: |
+  任何「把 std::ifstream::get() / fgetc() / getchar() 的返回值收进 plain char 再用 -1 或
+  EOF 做判定」的 C/C++ 源码，在 aarch64（AAPCS64：plain char 无符号）上都要复核。
+  典型受害面：模式/词表/配置解析器、简单的 tokenizer、把 char 当哨兵用的状态机。
+  **反向边界**：真正依赖 plain char 有符号做算术/比较的代码在 aarch64 上同样会错，只是症状
+  不同（数值翻转），本条不覆盖那种形态；显式写 `signed char` 的代码不受影响。
+  x86_64 / armv7 目标不受影响（本条是 aarch64 专属）。
+verification_cmd: |
+  # 交付验证：conan create 干净轮 + 消费者测试（spaced 18 断言，A6 为本条的回归钉子）
+  conan create archives/s/spaced/1.2.0-201605 --name=spaced --version=1.2.0-201605 \
+      -pr:h=ohos-aarch64-wsl -pr:b=ohos-aarch64-wsl --build=missing
+  #   => [A6] pass: OHOS/aarch64: the -f pattern file is accepted
+  #      ASSERTS=18 PASS=18 FAIL=0
+  # 反向破坏：把 <pkg>/bin/spaced 移走再跑同一测试命令
+  #   => ASSERTS=18 PASS=2 FAIL=16, rc=1（确认测试真依赖产物，非空壳）
+evidence: |
+  aarch64 OHOS / clang 15 / libc++，未打补丁，stderr 逐字：
+    FORMAT-ERROR: Pattern containes illegal characters!
+    Allowed characters: '0','1' for pattern; ','|'.'|';'|' ' to seperate patterns
+    Go on to next pattern.
+    ERROR! File 'seed.pattern' is an empty file!
+    Return to submitted or default values
+    ERROR! Wrong values for weight, pattern number or pattern length!
+    Return to default values
+    1 DNA sequences read of total length 96
+    退出码 = 0（工具照常输出矩阵，调用方看不出 -f 被丢弃）
+
+  有符号 char 目标（x86_64 / 任意打了本条补丁的有符号目标），同一模式文件：stderr 为空。
+
+  aarch64 + libc++ + `-fsigned-char`（未打补丁），同一模式文件：stderr 为空
+  ⇒ 根因锁定在 plain char 符号性，而非 libc++ 本身。
+
+  编译面（未打补丁的原始树，两条工具链都失败，故补丁 0001 的后两 hunk 非 libc++ 专属）：
+    $ g++ -O2 -fopenmp -std=c++17 src/spaced.cc src/variance.cpp src/patternset.cpp -o spaced
+      patternset.cpp:25:6: error: 'default_random_engine' in namespace 'std' does not name a type
+      patternset.cpp:188:32: error: call of overloaded 'abs(uint32_t&)' is ambiguous
+      patternset.cpp:195:40: error: call of overloaded 'abs(uint32_t&)' is ambiguous
+      patternset.cpp:196:40: error: call of overloaded 'abs(uint32_t&)' is ambiguous
+      patternset.cpp:203:42: error: call of overloaded 'abs(uint32_t&)' is ambiguous
+      g++ (Ubuntu 11.4.0-1ubuntu1~22.04.3)，rc=1
+    $ clang++-15 -O2 -fopenmp -std=c++17 src/... -o spaced        # x86_64 + libstdc++
+      patternset.cpp:25:6: error: no type named 'default_random_engine' in namespace 'std'
+      patternset.cpp:188:10: error: call to 'abs' is ambiguous
+      ...（同一批 4 处 abs + 1 处 random）rc=1
+
+  plain char 符号性直接实测：
+    $ /opt/lpk-fixed/clang --target=aarch64-linux-ohos ...
+      (char)-1 < 0  =>  0        # 无符号
+    $ 同上 + -fsigned-char
+      (char)-1 < 0  =>  1        # 有符号
+
+  打上本条补丁后（0001 + 0002），conan create 干净轮：
+    RUN: <cxx from conf> -O3 -std=c++17 -fopenmp -static-openmp \
+        src/spaced.cc src/variance.cpp src/patternset.cpp -o <build>/spaced
+    编译 0 error（仅上游遗留的 while 空体警告）
+    test_package: ASSERTS=18 PASS=18 FAIL=0，其中 [A6] pass
+    矩阵确定性：-t 1 / -t 2 / -t 4（以及 -t 8 / -t 16）三次以上输出 cmp 逐字节相同
+authors:
+  - wzp780028
+source_pr: (本 PR)
+source_commit: (待提交后回填)
+draft_date: 2026-10-03
