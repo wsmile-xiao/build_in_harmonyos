@@ -1,0 +1,111 @@
+# 版本级 manifest — libflorist 2025.1.0
+# 遵循 knowledge/ARCHIVE-SPEC.md (v3.0)
+
+version: "2025.1.0"
+software: "libflorist"
+status: built
+build_date: "2026-09-27"
+conan_ref: "libflorist/2025.1.0"
+build_system: "autotools"
+
+# ============================================================
+# 源码信息（须与 conandata.yml 一致，冲突时以 conandata.yml 为准）
+# ============================================================
+source:
+  url: "https://github.com/AdaCore/florist/archive/d28d09a618e9439e58ebc0368d100fe3b2992697.tar.gz"
+  sha256: "267efe8a3fd63eb1dcdebaec1cc10fad678c11bd5beb7056e81541b2ff38f387"
+  tar_format: tar.gz
+  # 上游不发布 GitHub Release，也无 2025.1.0 tag；固定到 25.1 分支提交快照。
+  # 取证：该提交与 libflorist_2025.1.0.orig.tar.gz 内容仅差 2 个打包附带文件。
+
+# ============================================================
+# 构建配置（与 conanfile.py 一致）
+# ============================================================
+build:
+  system: autotools
+  native_only: true            # gcc-ada/binutils 仅 OHOS/armv8，无 Linux 交叉 Ada 编译器
+  shared: false                # Ada 运行库为静态非 PIC，只能产出静态库
+  configure_options:
+    - "--build=x86_64-unknown-linux-gnu"     # 与 host 取不同三元组以触发交叉路径（E064）
+    - "--host=aarch64-unknown-linux-ohos"
+    - "cross_compiling=yes"
+    - "ac_cv_c_compile_works=yes"
+    - "ac_cv_prog_cc_cross=yes"
+  dependencies:
+    - gcc-ada/9.5.0            # tool_requires：GNAT 编译器（OHOS/armv8）
+    - binutils/2.46.0          # tool_requires：as/ld（OHOS/armv8）
+  cc: gcc                      # gcc-ada 提供的 C 驱动（与 Ada 同源，避免混链）
+  cxx: g++
+  # 上游 Makefile 默认以 gprbuild/gprinstall 构建与安装，ohpcd 的 gcc-ada
+  # 不含这两个工具；本配方改用 gnatmake 直编 + 显式安装布局。
+
+# ============================================================
+# 补丁
+# ============================================================
+patches_applied:
+  - "patches/0001-musl-signal-range.patch"
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+knowledge_gained:
+  - "ohpcd 的 gcc-ada/9.5.0 不提供 gprbuild/gprinstall/gnatprep：Ada 库需退化为 gnatmake 直编 + 显式安装布局，并自备最小 gnatprep 替身"
+  - "动态链接的 gcc-ada 二进制在 OHOS 上首次 stdio stderr 访问即段错误（raw write(2) 正常）；生成器类小工具须 -static 链接"
+  - "musl 的 sigismember() 对越界信号返回 0（glibc 返回 -1），使 c-posix 信号区间推导失效并生成 NSIGS := -2，最终产出非法 Ada（dynamic or empty choice in aggregate）"
+  - "configure/config.status 以 umask 077 建临时目录，HMDFS 下该模式目录不可写（config.status: could not setup config files machinery）；以 mktemp 垫片规避，避免改动生成文件（R6）"
+  - "Ada 与 C 胶水必须同源：gcc-ada 的 gcc 驱动同时编译 Ada 与 posix-macros*.c，混用 clang 会产生跨工具链对象"
+  - "florist.gpr 声明 Languages=(\"C\",\"Ada\")：库内 posix-macros.c（fetch_errno/store_errno）必须一并编译入静态库，否则链接报 undefined reference"
+
+# ============================================================
+# 测试结果（如实填写，口径见 notes.md §11 与
+# reports/adaptation-analysis-report.md §2.2）
+# 复审轮：2026-09-29（响应评审意见"非系统限制项须验证通过"）
+# ============================================================
+test_results:
+  type: official                # 上游官方 POSIX.5b Validation Test Suite
+  total: 61                     # 上游测试入口总数 N（TESTS 44 ∪ SPECIAL_TESTS 17）
+  helper: 8                     # 辅助子程序（父用例按裸名 exec 的子进程，上游从不独立运行）
+  not_linked: 1                 # 不产出独立可执行文件（p030300a）
+  executed: 52                  # 实际执行 N′ = 61 − 8 − 1
+  passed: 17                    # 上游打出 "Test Completed Successfully" 的项数
+  failed: 19                    # 上游打出 !!TEST FAILED 的用例数
+  not_applicable: 10            # 上游自行判定"平台不支持该可选特性"，不计为失败
+  other: 6                      # 无裁决语句者：TIMEOUT 4 + CRASH 2
+  timeout: 4                    # p030301 p030304 p030306 p030300
+  crash: 2                      # p120300(CRASH_1) p140101(CRASH_-31 / SIGSYS)
+  # 口径自洽：passed 17 + failed 19 + other 6 + not_applicable 10 = executed 52
+  #           total 61 = executed 52 + helper 8 + not_linked 1
+  strict_pass_rate: "17/52 (32.7%)"
+  adjusted_pass_rate: "17/42 (40.5%)"   # 剔除 not_applicable 后
+  consumer_assertions: "5/5 (100%)"     # test_package 消费者视角断言
+  previous_round:                       # 首轮（2026-09-27），保留对比
+    passed: 14
+    failed: 33
+    executed: 60
+    strict_pass_rate: "14/60 (23.3%)"
+  verdict: "部分适配 / 平台受限"
+  root_cause: >-
+    分为两组：(A) 系统限制——OHOS 未实现的可选 POSIX 服务
+    （SYNCHRONIZED_IO / MUTEX_PRIORITY_CEILING / XTI-TLI）、未实现 syscall(SIGSYS)、
+    共享内存与栈边界语义差异、受限信号集、GNAT 运行时 s-intman.adb:136 显式 raise；
+    (B) 非系统限制——仍在修复中（终端特性/umask、信号时序、errno 映射、
+    用例前置条件），共 6 项，不作豁免。
+  non_system_limited_fixed: >-
+    本轮修复 4 项 FAIL→PASS（p030100 p030101 p030102 p120502），
+    根因为驱动脚本未复现上游 run_tests_1 的 test.dir 软链布局与运行环境；
+    另更正 8 项误判（辅助子程序被当作独立测试）。
+  non_system_limited_pending: >-
+    B 组 6 项未修复（p030301/p030304/p030306 信号时序、p050200/p050300/p060100
+    终端与 umask、p070200 ioctl 错误码映射、p110100 线程语义、p120500 前置文件、
+    p020400 未定位），如实列为待修。
+  report: "reports/adaptation-analysis-report.md"
+
+# ============================================================
+# 知识引用（R17/W5：L1/L2 候选，待主编审核后编号）
+# ============================================================
+knowledge_ref:
+  - "musl 的 sigismember() 对越界信号返回 0（glibc 返回 -1）—— L1 平台真理"
+  - "动态链接的 gcc-ada 二进制在 OHOS 上首次 stdio stderr 访问即段错误 —— L1 平台真理"
+  - "HMDFS 下 umask 077 建出的目录不可写（ACL 覆盖 chmod）—— L1 平台真理"
+  - "OHOS 拒绝执行未签名 ELF（conftest/生成器均需签名）—— L1 平台真理"
+  - "gcc-ada 缺 gprbuild/gprinstall/gnatprep 时 Ada 库的构建范式 —— L2 模式经验"

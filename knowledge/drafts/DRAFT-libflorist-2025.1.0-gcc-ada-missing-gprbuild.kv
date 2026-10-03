@@ -1,0 +1,89 @@
+# ═══ Draft knowledge entry — gcc-ada 缺 gprbuild/gprinstall，GPR 驱动型 Ada 库无法按上游路径构建 ═══
+# Timestamp: 2026-09-27
+# Software: libflorist 2025.1.0 (AdaCore/florist, HEAD d28d09a6) / gcc-ada 9.5.0
+# Gate: conan create -> build() -> 上游 Makefile 的 floristlib-% / install-% 目标
+# Status: DRAFT — 同 stem 配对 knowledge/drafts/DRAFT-libflorist-2025.1.0-gcc-ada-missing-gprbuild.md
+
+id: DRAFT-libflorist-2025.1.0-gcc-ada-missing-gprbuild
+trigger_tool: gprbuild|gprinstall|gcc-ada|conan|make
+phase: build|packaging|installation
+error_signature: gprbuild: (command )?not found|gprinstall: (command )?not found|Error 127.*gprbuild|No such file or directory.*gprinstall
+severity: 3
+category: ada, gnat, toolchain, gpr-project, build-driver, gcc-ada
+match_keywords: gprbuild, gprinstall, gprconfig-kb, gcc-ada, florist, libflorist, florist.gpr,
+                 Ada, GNAT, tool_requires, Error 127, GPR project, LIBRARY_TYPE
+
+title: ohpcd 的 gcc-ada/9.5.0 不含 gprbuild/gprinstall；凡上游用 GPR 工程（.gpr）驱动构建与安装的 Ada 库，均需退化为 gnatmake 直编 + 显式安装布局
+
+root_cause: gcc-ada/9.5.0 的 bin/ 实测只有 gnatbind、gnatchop、gnatclean、gnatlink、
+            gnatls、gnatmake 六个 GNAT 工具，外加 gcc/g++/cpp/gcov* 等 C 侧驱动；
+            既无 gprbuild（GPR 工程构建驱动）也无 gprinstall（GPR 安装器）。
+            而 libflorist 的上游 Makefile.in 把构建与安装完全交给二者：
+              floristlib-%: force
+                  $(GPRBUILD) -p $(GPRBUILD_FLAGS) -XLIBRARY_TYPE=$* -Pflorist
+              install-%:
+                  gprinstall -Pflorist $(PROJECT_FLAGS) -XLIBRARY_TYPE=$* -a -p -f \
+                      --prefix=$(PREFIX) --sources-subdir=floristlib \
+                      --lib-subdir=floristlib --link-lib-subdir=floristlib --build-name=$*
+            因此上游默认路径（make → gprbuild；make install → gprinstall）在 OHOS 上
+            直接不可用，且不是"PATH 没配好"能解决的——制品内确实没有这两个可执行文件。
+            佐证：conan list "gprbuild/*" -r=ohpcd 返回 0 条；全仓 grep 亦无 gprbuild 配方。
+
+affected_scope: 所有以 GPR 工程（*.gpr）为构建入口的 Ada 库/工具（florist 及 AdaLib 生态多数库、
+                AdaCore 系库）；凡 tool_requires 到 ohpcd gcc-ada 的原生 OHOS 构建；
+                与 DRAFT-gcc-ada-missing-gnatprep-adb-p-preprocess 同源（后者只覆盖 gnatprep 单点），
+                本条覆盖构建驱动与安装器两个更大的缺口
+
+verification_cmd: ls <gcc-ada包>/bin | grep -cE '^gpr(build|install)$'   # 期望 0
+                  ls <gcc-ada包>/libexec/gcc/aarch64-linux-ohos/9.5.0/    # 无 gprbuild
+                  timeout 60 conan list "gprbuild/*" -r=ohpcd              # 期望 0 条
+                  grep -n 'GPRBUILD\|gprinstall' <源码>/Makefile.in        # 确认上游依赖点
+
+rec_priority: 1
+rec_approach: replace-gpr-driver-with-gnatmake-plus-explicit-layout
+rec_command: ①库编译：gnatmake -c -f -gnat95 -gnatp -O2 -Dobj \
+                -Ilibsrc -Ilibsrc/threads -Igensrc -Igensrc/threads -Iconfsrc <all .adb>
+             ②归档：llvm-ar rcs lib/libflorist.a obj/*.o
+             ③安装：显式复制到 <prefix>/floristlib，并生成可用的 florist.gpr
+             （按上游 README 承诺的布局：<prefix>/floristlib + <prefix>/share/gpr/florist.gpr）
+rec_description: 不要试图用 tool_requires 补 gprbuild（ohpcd 没有该包，且其依赖
+                 gprconfig-kb/libgnatprj 亦缺），也不要改上游 Makefile 把目标删掉以绕开。
+                 正确做法是**在配方内接管构建与安装两个阶段**：
+                 (a) 用 gnatmake 直接编译全部 Ada 单元（-Dobj 汇总对象与 ALI），
+                     开关取自 .gpr 中的 Ada_Flags（本例 -O2 -gnatp -gnat95）；
+                 (b) 安装阶段自行实现 gprinstall 的语义——把 Ada 源规格（.ads/.adb）、
+                     ALI 与静态库放到 gprinstall 原本会放置的 subdir，并安装一份
+                     Source_Dirs 指向该 subdir 的可用 .gpr，否则消费者 `with "florist.gpr"`
+                     会因 Source_Dirs 指向构建树而失败。
+                 (c) 上游 .gpr 中 for Languages use ("C","Ada") 时必须一并编译库内 C 单元
+                     （参见 notes.md 中 fetch_errno/store_errno 的 undefined reference）。
+rec_auto_fix: false
+rec_impl: conanfile: _compile_florist() 用 gnatmake 遍历 5 类目录的 .adb；
+          _archive_library() 用 llvm-ar 归档；_install_gpr() 生成重定向到 floristlib 的 .gpr
+
+fallback_priority: 2
+fallback_approach: provide-gprbuild-as-a-separate-toolchain-package
+fallback_description: 若上游 .gpr 逻辑复杂到无法用 gnatmake 复现（多 target、复杂
+                      scenario 变量、嵌套 project import），则应先立项在 ohpcd 增补
+                      gprbuild（含 gprconfig-kb、libgnatprj 等传递依赖）作为独立工具链包，
+                      再回到该库适配。代价大，但可一次性解锁整个 AdaLib 生态。
+                      局限：gprbuild 自身也是 Ada 程序，自举需先有可用 GNAT（鸡生蛋问题）。
+
+forbid_1_pattern: 把 Makefile 里的 floristlib-%/install-% 目标注释掉或改写上游 Makefile 以绕开 gprbuild/gprinstall
+forbid_1_reason: 属篡改上游交付物，且会丢掉 LIBRARY_TYPE 静态/共享分支与 gprinstall 的
+                 布局语义（--sources-subdir/--lib-subdir），消费者按上游文档找不到
+                 规格与库，属于把"构建失败"换成"交付物不可用"
+forbid_2_pattern: 因为报错是 'not found' 就反复调整 PATH / 往 buildenv 里塞 gcc-ada 目录
+forbid_2_reason: 根因是 gcc-ada 制品内不存在这两个可执行文件，PATH 永远补不出来，
+                 只会浪费 CI 轮次（与 gnatprep 条目的 forbid_2 同型）
+
+similar_to: DRAFT-gcc-ada-missing-gnatprep-adb-p-preprocess (gcc-ada 缺 gnatprep),
+            DRAFT-ada-gnats-native-only-toolchain-cross-build-trap (gcc-ada 仅 OHOS/armv8),
+            DRAFT-adacgi-ada-source-library-conan-pattern (Ada 源码库适配模式),
+            DRAFT-libgmpada-1.6-libgnat-static-non-pic (libgnat 非 PIC)
+
+source_event: task libflorist 2025.1.0 适配（feat/libflorist-2025.1.0），
+              2026-09-27 真机 conan create 实测；gcc-ada 9.5.0 bin/ 清单与
+              conan list "gprbuild/*" -r=ohpcd 返回 0 条为直接证据
+authors: ohpcd
+doc_file: DRAFT-libflorist-2025.1.0-gcc-ada-missing-gprbuild.md
