@@ -1,0 +1,117 @@
+# 版本级 manifest
+# 文件位置: archives/s/spaced/1.2.0-201605/manifest.yaml
+# 遵循 ARCHIVE-SPEC v2.0
+
+# ============================================================
+# 必须字段
+# ============================================================
+
+version: "1.2.0-201605"
+
+software: spaced
+
+# published | built | failed | archived
+status: built
+
+build_date: "2026-10-03"
+build_system: "handwritten-makefile"
+
+# ============================================================
+# 源码信息
+# ============================================================
+
+source:
+  # 上游自建站点 http://spaced.gobics.de/content/spaced.tar.gz 已下线（Goettingen
+  # 组撤掉了该页，且它提供的是「预编译 x86 二进制 + 源码」而非干净的发布包，
+  # Debian 因此用 debian/get-orig-source 重新打包为 +dfsg：只重命名顶层目录、
+  # 删掉 Files-Excluded 声明的预编译二进制，源码文件与上游逐字节一致）。
+  # 下面这个地址是 Debian pool（该包 1.0.2 -> 1.2.0-201605 全版本历史的权威
+  # 发行镜像）；Ubuntu universe 携带同名同 sha256 的 orig.tar.xz，属二次交叉核对。
+  url: "https://deb.debian.org/debian/pool/main/s/spaced/spaced_1.2.0-201605+dfsg.orig.tar.xz"
+
+  # 本机实测：sha256sum spaced.tar.xz（http 与 https 两次独立下载同值）
+  # 交叉核对：Ubuntu archive.ubuntu.com/ubuntu/pool/universe/s/spaced/
+  #           spaced_1.2.0-201605+dfsg.orig.tar.xz 同值
+  sha256: "c539e92072b3ca2c79f3841616525ff75366fe1a84b7ff12209b25e788e9979d"
+
+  tar_format: tar.xz
+
+  # 版本号来源：+dfsg 顶层目录名 spaced-1.2.0-201605+dfsg，由 Debian 的
+  # get-orig-source 从 src/variance.h 的 `@version: 1.2.0 05/2016` 推导；
+  # 与平台任务版本号、Debian 源包名一致。
+  version_provenance: "@version: 1.2.0 05/2016 in src/variance.h"
+
+# ============================================================
+# 构建配置
+# ============================================================
+
+build:
+  # 上游没有值得称为构建系统的东西：整棵树 9 个文件，唯一的 Makefile 有 100 字节、
+  # 只有 all 一个目标，写死 `g++ -O3 -fopenmp -std=c++11 src/spaced.cc
+  # src/variance.cpp src/patternset.cpp -o spaced`，既没有 install 也没有 check。
+  # 因此 conanfile.py 的 build() 直接驱动 clang++，package() 自己捡产物
+  # （与 archives/s/smem/1.5 同一写法）。
+  system: "manual-clang++"
+
+  upstream_makefile_all: "g++ -O3 -fopenmp -std=c++11 src/spaced.cc src/variance.cpp src/patternset.cpp -o spaced"
+
+  conan_equivalent_command: >-
+    <cxx from tools.build:compiler_executables.cpp> -O3 -std=c++<compiler.cppstd>
+    -fopenmp -static-openmp src/spaced.cc src/variance.cpp src/patternset.cpp
+    -o <build_folder>/spaced
+
+  # 无 Conan 主机依赖（R26/R36）：只链 OHOS NDK 的 libc++ 与 OpenMP 运行时，
+  # 不链接任何系统同名库，也不需要预编译依赖。
+  dependencies: []
+
+  cc: clang
+  cxx: clang++
+
+  # 必需的编译期开关（不属于上游 Makefile，但缺了就出不了正确结果）：
+  required_cflags:
+    - "-fopenmp"          # sort.h 有 7 处 #pragma omp parallel for + omp_get_thread_num()；
+                          # 不加不会编译失败，而是静默退化成串行/错误结果
+    - "-static-openmp"    # 见 notes.md 问题 4：动态链 libomp.so 时二进制带一个
+                          # OHOS loader 找不到的 DT_NEEDED，本地直接起不来
+    - "-O3"               # 上游 Makefile 的选择
+
+# ============================================================
+# 补丁信息
+# ============================================================
+
+patches_applied:
+  - "0001-libcxx-portability.patch"                # 移植：去 <tr1/unordered_map>、补 <random>、删三段不可达的 std::abs(uint32_t) 分支
+  - "0002-aarch64-char-signedness-eof.patch"       # AAPCS64 plain char 无符号 ⇒ ReadPattern 的 EOF 判定失效，`-f` 模式文件全被拒（须在 0001 之后应用）
+
+# ============================================================
+# 知识沉淀
+# ============================================================
+
+knowledge_gained:
+  - "AAPCS64 规定 plain char 无符号（与 AArch32 相反）。把 std::ifstream::get() 的 int_type 收进 char 后，EOF(-1) 变成 0xff，`-1 == (int)c` 不再命中 ⇒ 任何以 EOF 为终止条件的字符流解析在 aarch64 上静默退化。同一份源码在 x86_64 上完全正常，属典型的「跨架构才暴露」类缺陷"
+  - "std::abs(uint32_t) 的歧义不是 libc++ 专属：C 的 int abs(int) 与 C++ 的 long/long long/float/double 重载对 unsigned int 实参同为同秩转换，而「有符号类型能容纳另一有符号类型」这条打破平局的规则在实参无符号时不适用。实测 g++ 11.4 + glibc 与 clang 15 + libc++ 报同一批错 ⇒ 遇到此错先查实参类型是否为无符号，别直接归因到 libc++"
+  - "std::default_random_engine 需要显式 #include <random>：libc++ 不会传递包含，libstdc++ 11 也不会（实测 g++ 11.4 在未 include 的原始树上同样报 does not name a type）。「libstdc++ 曾经传递包含」这类经验在新工具链上不成立"
+  - "<tr1/unordered_map> 是 libstdc++ 专有头，libc++ 不提供；很多老代码包含它却从不使用（真正用的是 C++11 的 <unordered_map>），这类包含是纯粹的移植障碍"
+  - "clang 的 RUNPATH 默认写宿主工具链的 resource dir（/usr/lib/llvm-15/lib），不是交叉 sysroot；因此 -fopenmp 动态链出来的 libomp.so 在目标设备上会被 loader 判为找不到。CLI 工具要能被消费者测试真跑起来时，-static-openmp 把 DT_NEEDED 收敛到只剩 libc.so 是最省事也最稳的做法"
+  - "没有 install 目标、只有一行 all 的百字节 Makefile 是本仓常见形态：build() 直接调编译器、package() 自己 copy 产物，不要试图用 make install（conanfile.py 同族先例 archives/s/smem/1.5）"
+  - "spaced 1.2.0-201605 发布树内 0 个测试程序：Makefile 只有 all 目标（make check 无目标）、无任何 test/spec/example 文件、无 assert/EXPECT_/TEST( 宏、无测试框架依赖（唯一非标准头是 <omp.h>）"
+  - "上游把随机种子绑在 time(0) 上（patternset.cpp 顶层 std::default_random_engine generator(time(0))），不给 -f 模式文件时输出每次都不同；要写可复现的消费者测试必须用 -f <pattern> 固定 spaced seed"
+  - "spaced 1.2.0-201605 的上游站点 spaced.gobics.de 仍在解析 DNS 但 HTTP 返回 503，且其历史 tarball 是「预编译 x86 二进制 + 源码」；Debian 用 get-orig-source 重打包为 +dfsg（只删掉 Files-Excluded 声明的预编译二进制）。适配这类已停更的小项目时，先确认发行镜像的 orig 包是否等于上游源码"
+
+patch_generation:
+  method: unified-diff，逐个补丁对上一补丁应用后的累积状态生成（与 Conan / quilt 的顺序应用语义一致）
+  source_orig_dir: "<spaced_1.2.0-201605+dfsg.orig.tar.xz 解包后的顶层目录>"
+  source_orig_sha256: "c539e92072b3ca2c79f3841616525ff75366fe1a84b7ff12209b25e788e9979d"
+  patches_count: 2
+  series_order_note: "0002 的 hunk 行号对应 0001 应用后的源码，必须在 0001 之后应用（conandata.yml 的列表顺序即应用顺序）"
+
+patch_classification:
+  - file: 0001-libcxx-portability.patch
+    type: portability
+    platform_only: false        # <tr1/...> 那一条 libc++ 专属；<random> 与 std::abs 两条在
+                                # g++ 11.4 + glibc 上同样必需（已实测）
+    guard: 'covered by test_package A1-A18 (build must succeed)'
+  - file: 0002-aarch64-char-signedness-eof.patch
+    type: portability
+    platform_only: true         # 仅 AAPCS64（plain char 无符号）暴露
+    guard: 'covered by test_package A6 (stderr must not contain FORMAT-ERROR)'
