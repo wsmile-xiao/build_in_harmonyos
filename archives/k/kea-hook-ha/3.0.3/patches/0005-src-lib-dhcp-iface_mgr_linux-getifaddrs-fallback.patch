@@ -1,0 +1,99 @@
+--- a/src/lib/dhcp/iface_mgr_linux.cc
++++ b/src/lib/dhcp/iface_mgr_linux.cc
+@@ -37,6 +37,8 @@
+ #include <fcntl.h>
+ #include <stdint.h>
+ #include <net/if.h>
++#include <ifaddrs.h>
++#include <netpacket/packet.h>
+ // Some musl-based Linux sysroots (OpenHarmony/HarmonyOS) ship a bionic-derived
+ // <linux/socket.h> that defines struct sockaddr_storage, which musl's
+ // <sys/socket.h> already provides, so including the netlink headers collides.
+@@ -446,8 +448,85 @@
+     std::fill(attribs_table.begin(), attribs_table.end(),
+               static_cast<struct rtattr*>(NULL));
+ 
+-    // Open socket
+-    nl.rtnl_open_socket();
++    // Open socket. In some sandboxed environments the netlink socket cannot
++    // be opened, e.g. binding it is not permitted. In such a case fall back
++    // to the getifaddrs() enumeration used by the BSD and Solaris ports.
++    try {
++        nl.rtnl_open_socket();
++    } catch (const std::exception& ex) {
++        struct ifaddrs* iflist = 0;
++        if (getifaddrs(&iflist) != 0) {
++            isc_throw(Unexpected, "Network interfaces detection failed (netlink: "
++                      << ex.what() << ").");
++        }
++
++        typedef map<string, IfacePtr> IfaceLst;
++        IfaceLst ifaces;
++
++        try {
++            // First pass: create the interfaces and set their flags.
++            for (struct ifaddrs* ifptr = iflist; ifptr != 0; ifptr = ifptr->ifa_next) {
++                if (ifaces.find(ifptr->ifa_name) != ifaces.end()) {
++                    continue;
++                }
++                unsigned int ifindex = if_nametoindex(ifptr->ifa_name);
++                if (!ifindex) {
++                    isc_throw(Unexpected, "Interface " << ifptr->ifa_name << " has no index");
++                }
++                IfacePtr iface;
++                if (update_only) {
++                    iface = getIface(ifptr->ifa_name);
++                }
++                if (!iface) {
++                    iface.reset(new Iface(ifptr->ifa_name, ifindex));
++                }
++                iface->setFlags(ifptr->ifa_flags);
++                ifaces.insert(pair<string, IfacePtr>(ifptr->ifa_name, iface));
++            }
++
++            // Second pass: set the hardware addresses (reported by the packet
++            // socket entries) and add the assigned IPv4 and IPv6 addresses.
++            for (struct ifaddrs* ifptr = iflist; ifptr != 0; ifptr = ifptr->ifa_next) {
++                IfaceLst::iterator iface_iter = ifaces.find(ifptr->ifa_name);
++                if ((iface_iter == ifaces.end()) || (ifptr->ifa_addr == 0)) {
++                    continue;
++                }
++                if (ifptr->ifa_addr->sa_family == AF_PACKET) {
++                    struct sockaddr_ll* ldata =
++                        reinterpret_cast<struct sockaddr_ll*>(ifptr->ifa_addr);
++                    iface_iter->second->setHWType(ldata->sll_hatype);
++                    iface_iter->second->setMac(ldata->sll_addr, ldata->sll_halen);
++                } else if (ifptr->ifa_addr->sa_family == AF_INET6) {
++                    struct sockaddr_in6* adata =
++                        reinterpret_cast<struct sockaddr_in6*>(ifptr->ifa_addr);
++                    iface_iter->second->addAddress(IOAddress::fromBytes(AF_INET6,
++                        reinterpret_cast<uint8_t*>(&adata->sin6_addr)));
++                } else if (ifptr->ifa_addr->sa_family == AF_INET) {
++                    struct sockaddr_in* adata =
++                        reinterpret_cast<struct sockaddr_in*>(ifptr->ifa_addr);
++                    iface_iter->second->addAddress(IOAddress::fromBytes(AF_INET,
++                        reinterpret_cast<uint8_t*>(&adata->sin_addr)));
++                }
++            }
++        } catch (...) {
++            freeifaddrs(iflist);
++            throw;
++        }
++
++        freeifaddrs(iflist);
++
++        // Register the newly detected interfaces.
++        for (IfaceLst::iterator iface_it = ifaces.begin(); iface_it != ifaces.end(); ++iface_it) {
++            IfacePtr iface;
++            if (update_only) {
++                iface = getIface(iface_it->first);
++            }
++            if (!iface) {
++                addInterface(iface_it->second);
++            }
++        }
++        return;
++    }
+ 
+     // Now we have open functional socket, let's use it!
+     // Ask for list of network interfaces...
