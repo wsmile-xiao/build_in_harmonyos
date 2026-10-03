@@ -1,0 +1,195 @@
+--- a/test/test_All.py
++++ b/test/test_All.py
+@@ -25,6 +25,7 @@
+ from . import test_PluginFileLocator
+ from . import test_PluginInfo
+ from . import test_SimpleMultiprocessPlugin
++from . import test_version_compat
+ 
+ # add them to a common test suite
+ MainTestSuite = unittest.TestSuite(
+@@ -39,5 +40,5 @@
+ 		test_PluginFileLocator.suite,
+ 		test_PluginInfo.suite,
+ 		test_SimpleMultiprocessPlugin.suite,
++		test_version_compat.suite,
+ 		])
+-
+--- /dev/null
++++ b/test/test_version_compat.py
+@@ -0,0 +1,28 @@
++"""Tests for Yapsy's dependency-free StrictVersion replacement."""
++
++import unittest
++
++from yapsy._version import StrictVersion
++
++
++class StrictVersionCompatibilityTests(unittest.TestCase):
++
++    def test_release_and_prerelease_order(self):
++        self.assertEqual(StrictVersion("1.2"), StrictVersion("1.2.0"))
++        self.assertLess(StrictVersion("1.2a1"), StrictVersion("1.2b1"))
++        self.assertLess(StrictVersion("1.2b1"), StrictVersion("1.2"))
++        self.assertGreater(StrictVersion("1.2.1"), StrictVersion("1.2"))
++
++    def test_string_form_preserves_metadata(self):
++        self.assertEqual("1.2", str(StrictVersion("1.2")))
++        self.assertEqual("1.2a1", str(StrictVersion("1.2a1")))
++        self.assertEqual("StrictVersion ('1.2')", repr(StrictVersion("1.2")))
++
++    def test_rejects_non_strict_release_suffix(self):
++        with self.assertRaises(ValueError):
++            StrictVersion("1.2.3rc1")
++
++
++suite = unittest.TestSuite([
++    unittest.TestLoader().loadTestsFromTestCase(StrictVersionCompatibilityTests),
++])
+--- /dev/null
++++ b/yapsy/_version.py
+@@ -0,0 +1,64 @@
++"""Strict dotted versions used by Yapsy's versioned plugin manager.
++
++This keeps the small subset of ``distutils.version.StrictVersion`` that Yapsy
++uses, without depending on distutils (removed from Python 3.12) or an optional
++third-party package.
++"""
++
++import re
++
++
++_VERSION_RE = re.compile(r"^([0-9]+)\.([0-9]+)(?:\.([0-9]+))?([ab])?([0-9]+)?$")
++
++
++class StrictVersion(object):
++    """Parse and compare ``major.minor[.patch][aN|bN]`` versions."""
++
++    def __init__(self, vstring):
++        match = _VERSION_RE.match(vstring)
++        if match is None or (match.group(4) is None) != (match.group(5) is None):
++            raise ValueError("invalid version number '%s'" % vstring)
++        self.vstring = vstring
++        self.version = tuple(int(part or 0) for part in match.group(1, 2, 3))
++        self.prerelease = ((match.group(4), int(match.group(5)))
++                           if match.group(4) is not None else None)
++
++    def __str__(self):
++        return self.vstring
++
++    def __repr__(self):
++        return "StrictVersion ('%s')" % self
++
++    def _compare(self, other):
++        if not isinstance(other, StrictVersion):
++            other = StrictVersion(other)
++        if self.version != other.version:
++            return (self.version > other.version) - (self.version < other.version)
++        if self.prerelease is None:
++            return 0 if other.prerelease is None else 1
++        if other.prerelease is None:
++            return -1
++        return (self.prerelease > other.prerelease) - (self.prerelease < other.prerelease)
++
++    def __eq__(self, other):
++        result = self._compare(other)
++        return NotImplemented if result is NotImplemented else result == 0
++
++    def __lt__(self, other):
++        result = self._compare(other)
++        return NotImplemented if result is NotImplemented else result < 0
++
++    def __le__(self, other):
++        result = self._compare(other)
++        return NotImplemented if result is NotImplemented else result <= 0
++
++    def __gt__(self, other):
++        result = self._compare(other)
++        return NotImplemented if result is NotImplemented else result > 0
++
++    def __ge__(self, other):
++        result = self._compare(other)
++        return NotImplemented if result is NotImplemented else result >= 0
++
++    def __cmp__(self, other):
++        return self._compare(other)
+--- a/yapsy/PluginInfo.py
++++ b/yapsy/PluginInfo.py
+@@ -12,7 +12,7 @@
+ """
+ 
+ from yapsy.compat import ConfigParser
+-from distutils.version import StrictVersion
++from yapsy._version import StrictVersion
+ 
+ 
+ class PluginInfo(object):
+--- a/yapsy/PluginManager.py
++++ b/yapsy/PluginManager.py
+@@ -129,8 +129,9 @@
+ import sys
+ import os
+ try:
+-	import importlib.abc.Loader as imp
++	from importlib import util as importlib_util
+ except ImportError:
++	importlib_util = None
+ 	import imp
+ 
+ from yapsy import log
+@@ -576,12 +577,31 @@
+ 
+ 		.. note:: Isolated and provided to be reused, but not to be reimplemented !
+ 		"""
+-		# use imp to correctly load the plugin as a module
+-		if os.path.isdir(candidate_filepath):
+-			candidate_module = imp.load_module(plugin_module_name,None,candidate_filepath,("py","r",imp.PKG_DIRECTORY))
+-		else:
+-			with open(candidate_filepath+".py","r") as plugin_file:
+-				candidate_module = imp.load_module(plugin_module_name,plugin_file,candidate_filepath+".py",("py","r",imp.PY_SOURCE))
++		if importlib_util is None:
++			if os.path.isdir(candidate_filepath):
++				return imp.load_module(plugin_module_name, None, candidate_filepath,
++									   ("py", "r", imp.PKG_DIRECTORY))
++			with open(candidate_filepath + ".py", "r") as plugin_file:
++				return imp.load_module(plugin_module_name, plugin_file,
++									   candidate_filepath + ".py", ("py", "r", imp.PY_SOURCE))
++
++		is_package = os.path.isdir(candidate_filepath)
++		module_path = (os.path.join(candidate_filepath, "__init__.py") if is_package
++					   else candidate_filepath + ".py")
++		package_paths = [candidate_filepath] if is_package else None
++		spec = importlib_util.spec_from_file_location(
++			plugin_module_name, module_path, submodule_search_locations=package_paths)
++		if spec is None or spec.loader is None:
++			raise ImportError("cannot load plugin module %s from %s" %
++						  (plugin_module_name, module_path))
++		candidate_module = importlib_util.module_from_spec(spec)
++		sys.modules.pop(plugin_module_name, None)
++		sys.modules[plugin_module_name] = candidate_module
++		try:
++			spec.loader.exec_module(candidate_module)
++		except Exception:
++			sys.modules.pop(plugin_module_name, None)
++			raise
+ 		return candidate_module
+ 	
+ 	def instanciateElementWithImportInfo(self, element, element_name,
+@@ -737,4 +757,3 @@
+ # For backward compatility import the most basic decorator (it changed
+ # place as of v1.8)
+ from yapsy.PluginManagerDecorator import PluginManagerDecorator
+-
+--- a/yapsy/VersionedPluginManager.py
++++ b/yapsy/VersionedPluginManager.py
+@@ -12,9 +12,8 @@
+ """
+ 
+ 
+-from distutils.version import StrictVersion
+-
+ from yapsy.PluginInfo import PluginInfo
++from yapsy._version import StrictVersion
+ from yapsy.IPlugin import IPlugin
+ from yapsy.PluginManagerDecorator import PluginManagerDecorator
+ 
