@@ -1,0 +1,98 @@
+#====================================================================
+# DRAFT — 上游测试脚本依赖宿主机专有外部二进制（bedtools），在目标/CI 上不可执行
+#
+# 场景：HarmonyOS PC (OHOS aarch64) 交叉编译
+# 来源：mashmap 3.1.3 适配（feat/mashmap-3.1.3）
+#====================================================================
+
+id:                     DRAFT-mashmap-3.1.3-upstream-test-external-bedtools-unrunnable
+trigger_tool:           test
+phase:                  testing
+error_signature:        bedtools: (command not found|No such file or directory)|test\.sh: line [0-9]+: bedtools|Cannot exec|Exec format error
+
+severity:               2
+category:               testing
+match_keywords:         bedtools, samtools, scripts/test.sh, upstream test script, external tool dependency, host-only binary, x86_64 Linux binary, CI 能力矩阵, 覆盖度复算, coverage threshold, equivalent assertion, data-dependent upstream test
+
+title:                  "上游测试脚本 shell out 到宿主机专有二进制（bedtools/samtools 等），目标与 CI 上都不可执行：断言应按原算术复算而非跳过或改上游脚本"
+
+root_cause: >
+  上游项目的「测试」常常不是自包含的：mashmap 3.1.3 的第三个 CI 步骤是
+  `scripts/test.sh data/scerevisiae8.fa.gz.fai scerevisiae8.paf 0.92`，
+  脚本内部用 `bedtools sort` / `bedtools merge` / `bedtools intersect` 做区间并集与求交。
+  bedtools 是 x86_64 Linux 专用发行版二进制，既不在 OpenHarmony SDK/NDK 里，
+  也不能在 aarch64 目标上运行；把它做成 conan 包既无源码也无跨平台构建脚本。
+  于是「照抄上游命令」在 CI clean 环境里逐字不可执行（W0b 的可迁移性口径）。
+  但要注意：脚本本身承载的是**可复算的断言**（每条序列的覆盖度 ≥ 阈值），
+  而不是不可复现的黑盒——这一点决定了正确解法是复算而不是删用例。
+affected_scope:         所有「上游测试脚本依赖未随包分发的宿主工具」的适配：
+                        生信（bedtools/samtools/bgzip）、音视频（ffmpeg/sox）、
+                        GIS（ogr2ogr）、文档（pdflatex/pandoc）类项目最常见；
+                        直接表现是 W3 或 CI 的「上游测试未执行」红灯，
+                        而红灯文案往往只说命令找不到，看不出是上游脚本自身的问题。
+
+verification_cmd:       grep -nE '\b(bedtools|samtools|ffmpeg|ogr2ogr|pandoc)\b' <src>/scripts/*.sh
+                        # 再确认该工具不是 conan 配方（本仓 archives/ 下有无同名目录）
+
+rec_priority:           1
+rec_approach:           reproduce-assertion-arithmetic-declare-deviation
+rec_description: >
+  三步：
+  (1) **逐字核验**上游测试命令在 CI clean 环境里能否执行；不可执行时逐条写下
+      「具体技术原因」（哪个工具、为什么拿不到、为什么不能交叉构建）。
+  (2) **保留断言、复算算术**。bedtools 在这里做的两件事都可以在配方语言里直接做：
+      把 PAF 的 query 区间按序列名分组求并集长度，除以 .fai 里的序列长度，
+      再与脚本传入的同一阈值（此处 0.92）比较。不要改上游脚本，也不要把阈值改松。
+  (3) **如实声明**：MANIFEST.yml 的该条 upstream_tests 里写明「等价复算，未直接执行脚本」
+      及原因，PR 正文按 R51 如实回填实测 N/N′ 与通过率。
+      「没环境」不是理由，「外部 x86_64 专用二进制 + 已 1:1 复算断言」才是理由。
+rec_command:            python3 - <<'EOF'
+                        # 合并 PAF query 区间 / .fai 长度，逐序列判阈值
+                        EOF
+rec_auto_fix:           false
+rec_impl:               test-assertion-reimplementation
+
+fallback_priority:      2
+fallback_approach:      declare-upstream-case-not-run
+fallback_description: >
+  若断言不可复算（例如依赖外部参考数据库或不可获得的黄金数据），就老老实实把该条
+  标成「未执行」并在 MANIFEST.yml 的 upstream_test_in_build / upstream_tests 里写明原因，
+  同时用消费者用例补上等价的功能覆盖。绝不能删掉用例假装通过，也绝不能改上游脚本让它
+  「看起来通过」。
+fallback_command:       # 在 test_package/MANIFEST.yml 标注 not_run + 原因
+fallback_auto_fix:      false
+fallback_impl:          honest-not-run-declaration
+
+forbid_1_pattern:       self\.run\([^)]*bedtools|apt(-get)?[[:space:]]+install[[:space:]].*bedtools|pip[[:space:]]+install[[:space:]]+bedtools
+forbid_1_reason:        在配方或 test_package 里安装/调用 bedtools 会让 W3 本地与 CI 行为不一致，
+                        且 CI worker 上无包管理器、无 root，命令必然不存在
+forbid_1_consequence:   W3 本地 conan create 或 CI 在 test() 阶段以
+                        "bedtools: command not found" 失败；而这类失败在 PR 阶段
+                        不会被识别为「上游测试环境依赖问题」，容易被反复盲推
+
+forbid_2_pattern:       self\.output\.info\(.*upstream.*(skip|not run|omitted)
+forbid_2_reason:        以「跳过」冒充「执行」是伪造：断言被静默跳过时 conan create 仍返回 0，
+                        L1 系列门禁也看不出问题
+forbid_2_consequence:   PR 声称的上游测试通过率与事实不符；一旦复算后发现断言本该失败，
+                        就是「门禁未绿却报 success」的红线违规
+
+principles:             P001, P003
+similar_to:
+conflicts_with:
+prerequisite_of:
+caused_by:
+causes:
+requires:
+solved_by:
+
+doc_file:               knowledge/drafts/DRAFT-mashmap-3.1.3-upstream-test-external-bedtools-unrunnable.md
+last_updated:           2026-10-02
+source_event:           mashmap 3.1.3 适配 W0b/CI 能力矩阵核验，判定上游第三个测试步骤在 CI 上不可执行
+authors:                OHPCD-CODEX
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-10-02
