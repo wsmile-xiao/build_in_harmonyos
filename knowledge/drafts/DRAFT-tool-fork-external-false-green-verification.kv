@@ -1,0 +1,103 @@
+#====================================================================
+# Draft knowledge entry - 「会 fork 外部程序的 CLI」包的真假绿判定与差分取证法
+# 与机制稿 DRAFT-ldpl-5.1.0-runtime-bare-cxx-and-baked-libdir 同 PR 提交：
+# 那一条讲「为什么坏」，本条讲「怎么在提交前就把它抓出来」。
+# Source package: ldpl/5.1.0  (archives/l/ldpl/5.1.0)
+#====================================================================
+
+id:                     DRAFT-tool-fork-external-false-green-verification
+draft:                  true
+trigger_tool:           test|conan|runtime
+phase:                  testing
+error_signature:        'conan create 退出码 0 但消费者只断言 -v/-h|--version|No such file or directory.*inaccessible or not found|assertion_count 与产物是否真实生成无关'
+
+severity:               2
+category:               ohos|testing|portability|packaging|runtime
+match_keywords:         false green, consumer test, fork external program, artifact must exist, run the produced binary, IR diff, behavior diff, pristine control, upstream docs corpus, R51 三步法, 0/0 上游用例, relocation proof
+
+title:                  '会 fork 外部程序的 CLI：只断言"命令退出码/横幅"就是假绿；判据必须是产物真实生成 + 真实运行，并用 pristine/双配置差分固定因果链'
+
+root_cause:             >
+    这类包的 failure mode 不在自己的进程里，而在它 fork 出去的子进程里；父进程
+    照常打印横幅、以非 0 退出，`test_package` 若只跑 `bin/<tool> -v` 或 `-h`
+    就永远看不到失败。conan 的门禁（L0c 测试源文件 / L0d self.run / L1b 编译痕迹 /
+    L1c 上游套件痕迹 / L5 产物非空）全部只看日志与目录，不校验「这条包声明的能力
+    是否真的发生」，因此 create 全绿与该包完全不可用可以同时成立。
+    修好之后还需要第二件事：证明修复**只改了资源来源、没改行为**——这要靠
+    同一份上游语料在两种配置下的差分，而不是再加几条断言。
+
+affected_scope:         >
+    所有 package_type=application 且运行期依赖外部程序或随包资源的包：
+    转译器、编译器驱动、解释器包装器、代码生成器、需要子进程的构建工具。
+
+verification_cmd:       |
+  # 1) 这条包声明的"能力"是什么？找出它 fork 的外部程序与依赖的随包资源
+  grep -rnE 'system\(|popen\(' src/ | head
+  # 2) 消费者断言里必须出现"产物存在 + 产物运行 + 输出比对"三件事
+  grep -nE '\-x .*bin|cmp -s|\[ -x ' test_package/test_*.sh
+  # 3) 双配置差分（正常安装形态 vs 运行期覆盖）+ pristine 对照
+  for f in $SAMPLES; do a=$(<cfg A> -r $f | md5sum); b=$(<cfg B> -r $f | md5sum); [ "$a" = "$b" ] || echo "DIFF $f"; done
+
+rec_priority:           1
+rec_approach:           three-proof-consumer-suite-for-forking-tools
+rec_description:        >
+    消费者套件必须同时给出三类证据，缺一即视为空壳：
+    (a) 负向——语法/依赖错误必须非 0 退出并报出上游错误前缀（证明它真的在做事）；
+    (b) 产物——断言被 fork 的程序**确实产出了可执行文件**并校验其 ELF magic，
+        然后**运行它**并比对 stdout（不是只看工具自己的返回码）；
+    (c) 重定位——把随包资源复制到另一目录、用运行期覆盖指向它再跑一遍，
+        证明行为不依赖构建机路径。
+    通用性另立一节：用**同版本坐标的上游自写语料**（文档示例、README 样例）
+    做「代码生成差分 + 行为差分」，配置为 正常安装 / 运行期覆盖 / 未打补丁 三列。
+rec_command:            |
+  # 真机执行清单（本次实测数字，全部来自 ldpl/5.1.0）
+  conan create archives/l/ldpl/5.1.0 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64 --build=missing   # CREATE_EXIT:0
+  # 消费者 26 项断言，含 4 项负向、1 项 ELF magic、2 项重定位反证
+  # 语料差分：docs/*.md 提取 50 个上游示例 -> 39 个可转译
+  #   IR md5 A vs B：39/39 相同，差异 0 行
+  #   行为（-O0 真编译+真运行，输出截 4KB 护栏）：6 对全部相同；未打补丁 6/6 失败
+rec_auto_fix:           false
+rec_impl:               test_package
+
+fallback_priority:      2
+fallback_approach:      upstream-corpus-extraction-when-tag-has-no-tests
+fallback_description:   >
+    上游在该 tag 内没有测试目录时（本例 `tar tzf` 84 个条目、tests/ 命中 0），
+    R51 的清点结果就是 0/0，但**不能**因此把「跑没跑起来」的判断也一并放弃：
+    改从同 tag 的 docs/README/man 里提取上游自己写的示例程序当独立语料，
+    既满足「上游用例数如实为 0」，又给出一条不依赖自写用例的行为证据。
+    禁止把后续版本（master）的 tests/ 充当本版本用例数——本例实测 master 的
+    21 个程序在 5.1.0 上 0 个可转译，语言已演进。
+fallback_command:       >-
+  tar tzf ldpl-5.1.0.tar.gz | grep -cE '/(tests?|test)/';   # 0 = 该 tag 无测试目录
+  grep -rlc '^procedure:' docs/*.md README.md              # 上游自写示例程序所在的文档
+fallback_auto_fix:      false
+fallback_impl:          test_package
+
+forbid_1_pattern:       'test_package 里只有 self.run("<tool> -v") / --version / -h 之类的横幅断言'
+forbid_1_reason:        'fork 失败时父进程仍正常输出横幅；这类断言与"包能不能用"无关，等于把核心能力外包给运气。'
+forbid_1_consequence:   'CI 与本地全绿、消费者第一次调用即失败；评审按 rule12 也只看到"有鸿蒙特有用例"，抓不到空壳。'
+
+forbid_2_pattern:       '用后续版本或 master 的 tests/ 目录数量充当本版本的上游用例数'
+forbid_2_reason:        '版本坐标被顶替（§2.2 明确禁止用 master/main 顶替 git/gbp 后缀），且实测这些样例在本版本上根本转译不过去。'
+forbid_2_consequence:   '声明 N 与实测 N 关系失控，rule4 的"少报/多报"直接判 FAIL；更糟的是给出一份永远跑不出来的证据。'
+
+forbid_3_pattern:       '对语料样例"直接运行、不管输出量"做差分'
+forbid_3_reason:        '上游文档示例里存在无限打印循环（本例 d00_arithmetic-md.ldpl 单次运行写出 616 MB）；差分必须在运行侧加 timeout 与输出截断。'
+forbid_3_consequence:   '真机磁盘被写满、作业被杀，还会连带影响同机其它会话的 conan create。'
+
+similar_to:             [DRAFT-ldpl-5.1.0-runtime-bare-cxx-and-baked-libdir, E529, E428]
+causes:                 []
+caused_by:              []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-tool-fork-external-false-green-verification.md
+last_updated:           2026-10-03
+source_event:           ldpl/5.1.0 verification design - 26 consumer assertions + 50-sample docs corpus differential (39 IR-equal, 0 mismatch) + pristine control
+contributor_id:         iKalous_OscarP
+authors:                iKalous <2040466963@qq.com>
+source_pr:             14393
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
