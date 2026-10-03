@@ -1,0 +1,104 @@
+--- a/src/oomd/util/Fs.cpp
++++ b/src/oomd/util/Fs.cpp
+@@ -204,14 +204,62 @@
+   return false;
+ }
+ 
++#ifndef GLOB_BRACE
++// GLOB_BRACE (brace expansion) is a GNU extension that musl/OHOS <glob.h>
++// does not define. Expand brace groups ourselves so upstream patterns such as
++// "{a,b}" keep their meaning on those libcs (OomdContextTest.SortContext
++// relies on it).
++static void expandBraces(
++    const std::string& pattern,
++    std::vector<std::string>& out) {
++  auto open = pattern.find('{');
++  auto close = open == std::string::npos ? std::string::npos
++                                         : pattern.find('}', open);
++  if (open == std::string::npos || close == std::string::npos) {
++    out.push_back(pattern);
++    return;
++  }
++  const std::string head = pattern.substr(0, open);
++  const std::string body = pattern.substr(open + 1, close - open - 1);
++  const std::string tail = pattern.substr(close + 1);
++
++  std::vector<std::string> parts;
++  std::string cur;
++  int depth = 0;
++  for (char c : body) {
++    if (c == '{') {
++      depth++;
++    } else if (c == '}') {
++      depth--;
++    }
++    if (c == ',' && depth == 0) {
++      parts.push_back(cur);
++      cur.clear();
++    } else {
++      cur.push_back(c);
++    }
++  }
++  parts.push_back(cur);
++
++  for (const auto& part : parts) {
++    expandBraces(head + part + tail, out);
++  }
++}
++#endif
++
+ SystemMaybe<std::vector<std::string>> Fs::glob(
+     const std::string& pattern,
+     bool dir_only) {
+-  glob_t globbuf;
+   std::vector<std::string> ret;
+-  // GLOB_BRACE (brace expansion) and GLOB_ONLYDIR are GNU extensions that
+-  // musl/OHOS <glob.h> does not define; the dir_only hint is optional anyway
+-  // because results are re-checked with isDir() below.
++  std::vector<std::string> patterns;
++#ifdef GLOB_BRACE
++  patterns.push_back(pattern);
++#else
++  expandBraces(pattern, patterns);
++#endif
++
++  // GLOB_ONLYDIR is a GNU extension that musl/OHOS <glob.h> does not define;
++  // it is only a hint anyway because results are re-checked with isDir() below.
+   int flags = GLOB_NOSORT | GLOB_ERR;
+ #ifdef GLOB_BRACE
+   flags |= GLOB_BRACE;
+@@ -221,13 +269,29 @@
+     flags |= GLOB_ONLYDIR;
+ #endif
+   }
+-  auto ec = ::glob(pattern.c_str(), flags, nullptr, &globbuf);
+-  OOMD_SCOPE_EXIT {
++
++  // Run glob once per (possibly brace-expanded) pattern and merge the hits:
++  // GLOB_NOMATCH on one branch only means that branch contributed nothing.
++  std::vector<std::string> paths;
++  int ec = GLOB_NOMATCH;
++  for (const auto& p : patterns) {
++    glob_t globbuf;
++    int g = ::glob(p.c_str(), flags, nullptr, &globbuf);
++    if (g == 0) {
++      for (size_t i = 0; i < globbuf.gl_pathc; i++) {
++        paths.emplace_back(globbuf.gl_pathv[i]);
++      }
++      ec = 0;
++    } else if (g != GLOB_NOMATCH) {
++      ::globfree(&globbuf);
++      ec = g;
++      break;
++    }
+     ::globfree(&globbuf);
+-  };
++  }
++
+   if (!ec) {
+-    for (size_t i = 0; i < globbuf.gl_pathc; i++) {
+-      std::string path(globbuf.gl_pathv[i]);
++    for (auto& path : paths) {
+       // GLOB_ONLYDIR is a hint and we need to double check
+       if (dir_only && !isDir(path)) {
+         continue;

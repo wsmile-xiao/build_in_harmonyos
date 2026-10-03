@@ -1,0 +1,149 @@
+--- a/src/oomd/Stats.h
++++ b/src/oomd/Stats.h
+@@ -17,13 +17,47 @@
+ 
+ #pragma once
+ 
++#include <sys/socket.h>
+ #include <sys/un.h>
+ #include <atomic>
++#include <cstddef>
++#include <cstring>
++#include <string>
+ #include <unordered_map>
+ #include "oomd/Log.h"
+ 
+ namespace Oomd {
+ 
++// OpenHarmony's sandbox denies filesystem AF_UNIX sockets: on-device probing
++// shows bind()/connect() failing with EPERM in every writable directory while
++// the abstract namespace (sun_path[0] == '\0' followed by the name) succeeds.
++// fillAbstractUnixAddr() builds that address and returns the addrlen both ends
++// must use; unixAddrLen() returns the right length for an address that may
++// already be abstract (a longer addrlen would append NUL bytes and change the
++// abstract name, so the peer would not match). Callers still try the regular
++// filesystem address first, keeping ordinary Linux behaviour unchanged.
++inline socklen_t fillAbstractUnixAddr(
++    sockaddr_un& addr,
++    const std::string& name) {
++  std::memset(&addr, 0, sizeof(addr));
++  addr.sun_family = AF_UNIX;
++  size_t n = name.size();
++  if (n > sizeof(addr.sun_path) - 2) {
++    n = sizeof(addr.sun_path) - 2;
++  }
++  addr.sun_path[0] = '\0';
++  std::memcpy(addr.sun_path + 1, name.data(), n);
++  return static_cast<socklen_t>(offsetof(sockaddr_un, sun_path) + 1 + n);
++}
++
++inline socklen_t unixAddrLen(const sockaddr_un& addr) {
++  if (addr.sun_path[0] != '\0') {
++    return static_cast<socklen_t>(sizeof(addr));
++  }
++  return static_cast<socklen_t>(
++      offsetof(sockaddr_un, sun_path) + 1 + std::strlen(addr.sun_path + 1));
++}
++
+ class Stats {
+  public:
+   Stats(const Stats& other) = delete;
+--- a/src/oomd/Stats.cpp
++++ b/src/oomd/Stats.cpp
+@@ -63,7 +63,8 @@
+   if (stats_thread_.joinable()) {
+     stats_thread_.join();
+   }
+-  if (::unlink(serv_addr_.sun_path) < 0) {
++  // An abstract socket never had a filesystem node to remove.
++  if (serv_addr_.sun_path[0] != '\0' && ::unlink(serv_addr_.sun_path) < 0) {
+     OLOG << "Closing stats error: unlinking socket path: "
+          << Util::strerror_r();
+   }
+@@ -119,12 +120,29 @@
+          << ". Errno: " << Util::strerror_r();
+     return false;
+   }
++  bool use_abstract = false;
+   if (::bind(sockfd_, (struct sockaddr*)&serv_addr_, sizeof(serv_addr_)) < 0) {
+-    OLOG << "Error binding stats collection socket: "
+-         << Util::strerror_r();
+-    return false;
++    if (errno != EPERM) {
++      OLOG << "Error binding stats collection socket: "
++           << Util::strerror_r();
++      return false;
++    }
++    // Filesystem AF_UNIX sockets are denied by the sandbox (EPERM in every
++    // writable directory). Retry in the abstract namespace; StatsClient falls
++    // back the same way, so both ends still meet.
++    fillAbstractUnixAddr(serv_addr_, stats_socket_path_);
++    if (::bind(
++            sockfd_,
++            (struct sockaddr*)&serv_addr_,
++            unixAddrLen(serv_addr_)) < 0) {
++      OLOG << "Error binding stats collection socket: "
++           << Util::strerror_r();
++      return false;
++    }
++    use_abstract = true;
+   }
+-  if (::chmod(stats_socket_path_.c_str(), 0666) < 0) {
++  // An abstract socket has no filesystem node, so there is nothing to chmod.
++  if (!use_abstract && ::chmod(stats_socket_path_.c_str(), 0666) < 0) {
+     OLOG << "Unable to set permissions on " << stats_socket_path_;
+     return false;
+   }
+--- a/src/oomd/StatsClient.cpp
++++ b/src/oomd/StatsClient.cpp
+@@ -144,12 +144,19 @@
+   const void* time_ptr = static_cast<const void*>(&io_timeout);
+   ::setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, time_ptr, sizeof io_timeout);
+   ::setsockopt(sockfd, SOL_SOCKET, SO_SNDTIMEO, time_ptr, sizeof io_timeout);
+-  if (::connect(sockfd, (struct sockaddr*)&serv_addr_, sizeof(serv_addr_)) <
+-      0) {
+-    std::cerr << "Error: connecting to stats socket: "
+-              << Util::strerror_r()
+-              << "\nSocket path: " << serv_addr_.sun_path << std::endl;
+-    return std::nullopt;
++  socklen_t addr_len = unixAddrLen(serv_addr_);
++  if (::connect(sockfd, (struct sockaddr*)&serv_addr_, addr_len) < 0) {
++    // Filesystem connect failed: either the sandbox denies it (EPERM) or there
++    // is no node at all because the server already fell back to the abstract
++    // namespace (ENOENT). Retry abstract either way — the server falls back on
++    // EPERM and both ends derive the address from the same path.
++    addr_len = fillAbstractUnixAddr(serv_addr_, stats_socket_path_);
++    if (::connect(sockfd, (struct sockaddr*)&serv_addr_, addr_len) < 0) {
++      std::cerr << "Error: connecting to stats socket: "
++                << Util::strerror_r()
++                << "\nSocket path: " << stats_socket_path_ << std::endl;
++      return std::nullopt;
++    }
+   }
+   msg += '\n';
+   if (Util::writeFull(sockfd, msg.c_str(), strlen(msg.c_str())) < 0) {
+--- a/src/oomd/StatsTest.cpp
++++ b/src/oomd/StatsTest.cpp
+@@ -218,6 +218,7 @@
+   auto stats = get_instance();
+   serv_addr_.sun_family = AF_UNIX;
+   ::strcpy(serv_addr_.sun_path, socket_path.c_str());
++  socklen_t addr_len = unixAddrLen(serv_addr_);
+ 
+   const int num_threads = 50;
+   std::array<int, num_threads> sockfds;
+@@ -226,7 +227,13 @@
+     sockfds[i] = sockfd;
+     EXPECT_GE(sockfd, 0);
+     int connected =
+-        ::connect(sockfd, (struct sockaddr*)&serv_addr_, sizeof(serv_addr_));
++        ::connect(sockfd, (struct sockaddr*)&serv_addr_, addr_len);
++    if (connected < 0) {
++      // Filesystem connect failed (EPERM in the sandbox, or ENOENT because the
++      // server already bound abstract) — retry in the abstract namespace.
++      addr_len = fillAbstractUnixAddr(serv_addr_, socket_path);
++      connected = ::connect(sockfd, (struct sockaddr*)&serv_addr_, addr_len);
++    }
+     EXPECT_GE(connected, 0);
+     std::string msg = "g\n";
+     int res = Util::writeFull(sockfd, msg.c_str(), strlen(msg.c_str()));
