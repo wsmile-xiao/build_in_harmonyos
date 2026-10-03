@@ -1,0 +1,112 @@
+#====================================================================
+# DRAFT-plink-1.07-conan2-patch-apply-order-and-malformed-diff.kv
+# 配对文档: knowledge/drafts/DRAFT-plink-1.07-conan2-patch-apply-order-and-malformed-diff.md
+# 来源: archives/p/plink/1.07 (PLINK 1.07 适配)
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-plink-1.07-conan2-patch-apply-order-and-malformed-diff
+trigger_tool:           conan|patch|make|clang
+phase:                  build|source-export
+error_signature:        Apply patch|redefinition of 'i' with a different type|source file is
+                         different|Failed to apply patch|make: *** No rule to make target
+
+# ═══ Layer 1: 识别层 ═══
+severity:               2
+category:               conan, packaging, build-system, patch, toolchain
+match_keywords:         apply_conandata_patches, export_conandata_patches, source(),
+                         build(), folders.source, folders.build, self.build_folder,
+                         unified diff, --label, diff -u, patch -p1, redefinition of
+title:                  Conan 2 里补丁「看起来生效了但源码没变」的两种成因与判定法
+
+# ═══ Layer 2: 诊断层 ═══
+root_cause:             两种独立成因常被误判成同一个「补丁没生效」。(1) 调用位置：
+                         apply_conandata_patches() 写在 build() 里时，它改的是导出树
+                         p/<recipe_id>/s/<source>，而 Conan 的顺序是
+                         source() → 把源码复制进构建树 p/b/<pkg_id>/b → build()，
+                         于是 make 编到的是未打补丁的副本。写 source() 里才对。
+                         (2) diff 本身畸形：手写 unified diff 时描述段末尾缺换行，
+                         cat 把散文最后一行与 "--- a/<file>" 粘成
+                         "byte-identical.--- a/sets.cpp"；GNU patch 能容错照样打上，
+                         Conan 的解析器却直接当无事发生，只在日志打一行
+                         "Apply patch (<type>): <description>"。
+affected_scope:         任何用 export_conandata_patches + apply_conandata_patches 且
+                         需要打补丁的 Conan 2 配方（手写 diff 时尤其高发）
+verification_cmd:       grep -cE '^--- a/<file>$' <patch> && grep -cE '^\+\+\+ b/<file>$' <patch>
+                         # 两个计数都必须 >0；再在解包后的源码里 grep 补丁的标识串确认落地
+
+# ═══ Layer 3: 方案层 ═══
+rec_priority:           1
+rec_description:        补丁一律写进 source()；补丁文件一律用 diff -u --label a/<f>
+                         --label b/<f> 机器生成，不手写；生成后逐文件校验 ^--- 与 ^+++
+                         成对存在，且第一处 ^--- 的上一行为空行
+rec_command:            ( cd a && cd b && patch -p1 ) ; diff -u --label a/f.cpp --label
+                         b/f.cpp a/f.cpp b/f.cpp >> 0001-xxx.patch
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_description:   若补丁确实必须相对构建副本生效，则让 make 跑在
+                         self.build_folder，并确认 source() 已打过补丁（Conan 复制的是
+                         已打补丁的树）；若配方是 in-tree Makefile，显式写
+                         self.folders.source = "src" / self.folders.build = "src"
+fallback_command:       def layout(self): self.folders.source = "src"; self.folders.build = "src"
+                         # build() 内 self.run(make..., cwd=self.build_folder)
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       在 build() 里调用 apply_conandata_patches
+forbid_1_reason:        改的是导出树，make 编的是复制品；日志照样打 "Apply patch"，
+                         极具误导性
+forbid_1_consequence:   补丁对编译零作用，报错与未打补丁时逐字相同，排查方向被带偏
+forbid_2_pattern:       手写 unified diff（或描述段末尾无换行）
+forbid_2_reason:        散文行与 "--- a/<f>" 粘连 → 缺文件对行 → 解析器静默跳过
+forbid_2_consequence:   同上，且 GNU patch 与 Conan 解析器行为不一致，无法互相验证
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P008, P021
+
+# ═══ 关系图 ═══
+causes:                 []
+caused_by:              []
+similar_to:             DRAFT-no-tail-newline-hunk-unappliable,
+                         DRAFT-conan-patch-hunk-exact-line-offset,
+                         DRAFT-6380-nuvie-0.5-patch-ng-overlapping-hunks-indexerror,
+                         DRAFT-probcons-1.12-toybox-patch-cannot-apply-unified-diff-use-conan-patchng,
+                         DRAFT-toybox-patch-pure-insert-hunk-unappliable,
+                         DRAFT-8543-refresh-patch-rename-conandata-desync
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               drafts/DRAFT-plink-1.07-conan2-patch-apply-order-and-malformed-diff.md
+last_updated:           2026-10-03
+source_event:           archives/p/plink/1.07/manifest.yaml
+
+# ═══ 知识协作 ═══
+authors:                OpenHarmonyPCDeveloper <ohpcd@localhost>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-03
+
+#====================================================================
+# 附加陷阱（同源误判高发，单列备查）
+#====================================================================
+# 1) CI 的 "Pre-download: extracting source URLs from conandata.yml" 会正则抓
+#    conandata 里任何 http(s):// 串当源码地址去下载。注释里写一条裸链接
+#    （例如 Bug-Closed: http://bugs.debian.org/667325）会被当成第二个待下载
+#    文件，下载到一张 HTML 错误页并写进 content-addressed 缓存，
+#    日志出现 "[ok] 667325... (10KB) via mirror 1" 的怪行。
+#    对策：conandata.yml 的注释里不要留裸 URL，出处写进 patches/ 文件头或 notes.md。
+#
+# 2) 该步骤会把 conandata.yml 临时改写成 file:// 列表再"还原"。别信还原声明，
+#    一律用 git diff 判定（T006/T011/T025）。
+#
+# 3) conan create 会在 test_package/ 里留下 conanbuild.sh / conanrun.sh /
+#    deactivate_*.sh 等生成物；提交前必须删掉，否则 JC4 临时构建产物会拦。
+#====================================================================
