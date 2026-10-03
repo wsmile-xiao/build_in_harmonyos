@@ -1,0 +1,64 @@
+draft: DRAFT-14257-registry-glib-bin-tools-stale-codesign
+status: pending-editor-review
+title: "registry 依赖包构建期 ELF 工具 .codesign 过期致 exec 126——generate() 就位重签"
+category: conan, meson, elfsign
+match_keywords: >
+  glib-compile-resources, glib-compile-schemas, gio-querymodules, gobject-query,
+  code=126, Operation not permitted, gnome.compile_resources, vteresources,
+  stale codesign, registry package bin tools, build-time exec, XPM
+error_signature: >
+  FAILED: \[code=126\] src/.*resources|/bin/sh: .*/p/bin/glib-compile-resources: Operation not permitted|FAILED: \[code=126\].*gresource|glib-compile-(resources|schemas): Operation not permitted
+root_cause: >
+  registry 的 glib 包把构建期工具（glib-compile-resources / glib-compile-schemas /
+  gio-querymodules / gobject-query / gtester 等）作为 OHOS aarch64 ELF 可执行体随包分发，
+  其链接期写入的 .codesign 段对当前内核/worker 已过期——OHOS XPM exec 拒绝加载
+  （exit 126 "Operation not permitted"）。凡构建流程 exec 这些工具的自定义命令全部失败
+  （meson gnome.compile_resources / gnome.compile_schemas 生成的 ninja 规则、
+  pkg-config 工具变量解析后的直接调用）。与 E077（自家产物 post-install 重签）、
+  E452（task-private 运行时副本）、E472（test_package 产物签名）不同，本条发生在
+  "构建期 exec registry 依赖包内工具"这一层。工具还无 RPATH，exec 时需 glib 自身
+  lib 目录在 LD_LIBRARY_PATH 上（否则 Error loading shared library libgio-2.0.so.0）。
+solution: |
+  在配方的 generate() 阶段（任何 build exec 发生前）对解析到的 glib 依赖包 bin/ 下全部
+  ELF 文件就位重签（shebang 脚本跳过），并把 glib lib 目录前置到 LD_LIBRARY_PATH：
+
+  ```python
+  def _re_sign_glib_tools(self):
+      g = None
+      for ref, dep in self.dependencies.items():
+          if ref.ref and ref.ref.name == "glib":
+              g = dep
+              break
+      if not g or not getattr(g, "package_folder", None):
+          return
+      gbin = os.path.join(g.package_folder, "bin")
+      glib_lib = os.path.join(g.package_folder, "lib")
+      if not os.path.isdir(gbin):
+          return
+      if os.path.isdir(glib_lib):
+          os.environ["LD_LIBRARY_PATH"] = (
+              glib_lib + os.pathsep + os.environ.get("LD_LIBRARY_PATH", ""))
+      objcopy = "/data/service/hnp/bin/llvm-objcopy"
+      signer = "/data/service/hnp/bin/binary-sign-tool"
+      for tool in os.listdir(gbin):
+          tp = os.path.join(gbin, tool)
+          if not os.path.isfile(tp):
+              continue
+          with open(tp, "rb") as f:
+              if f.read(4)[:4] != b"\x7fELF":
+                  continue  # glib-mkenums 等 shebang 脚本不动
+          self.run('{oc} --remove-section .codesign "{f}" 2>/dev/null || true'
+                   .format(oc=objcopy, f=tp))
+          self.run('{sg} sign -inFile "{f}" -outFile "{f}" -selfSign 1 2>/dev/null || true'
+                   .format(sg=signer, f=tp))
+  # generate() 里在 PkgConfigDeps(self).generate() 之后调用
+  ```
+fallback: >
+  不可改配方时可用系统侧 /data/service/hnp/bin/glib-compile-resources 等同名工具
+  （meson native [binaries] 钉路径）——但 hnp 工具版本不受配方控制（2.84 vs 2.88
+  行为差异风险），且仅在 worker 预装了该工具时成立；配方内就位重签是确定性方案。
+verify_builds: "#66314, #66320"
+reference_impl: >
+  gtk4/4.22.4 配方 R85/R86（同机制先例，已合入 main，gdk/gdkresources.c 场景）；
+  vte/0.84.1 commit f9a4be4b（src/vteresources*.c/h 场景，三台 worker 同款 126 实锤）
+id: DRAFT-14257
