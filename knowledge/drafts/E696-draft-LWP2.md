@@ -1,0 +1,39 @@
+# E696：未知系统的编译器白名单不等于缺少语言能力
+
+## 场景与通用触发特征
+
+CMake 项目已经设置所需的 C++ 标准，但其 `compiler ID + CMAKE_SYSTEM_NAME` 白名单在未列出的系统直接报告 `Your C++ compiler does not support C++17.`。此时先检查报错控制流是否真正执行过编译／链接探测，不要把未知系统警告或未命中分支当作能力缺失。
+
+## 精确根因
+
+原 ANTLR 4.12.0 顶层源码已设置 C++17、required 和 extensions OFF；Clang 分支却只接受 Android、Apple、Linux 或 FreeBSD，HarmonyOS 未命中任何分支便进入最终 FATAL_ERROR。这与缺少标准库、老版本编译器和 `try_compile` 本身失败是不同机制。
+
+## 可复用修复步骤
+
+1. 保留原来已支持平台的版本检查和特殊编译参数。
+2. 只给原白名单未命中的真实 Clang 系统加入 `CheckCXXSourceCompiles`；实际编译链接包含 `<optional>`、`<string_view>`、`<variant>` 和 `static_assert(__cplusplus >= 201703L)` 的程序。
+3. 探测不成功仍立即 FATAL_ERROR；不得预置探测成功、伪装其他 OS、降低标准或排除上游测试。
+4. 随后构建并实际运行完整原测试。配置接受性只是一个门禁，不是全部产品能力。
+
+## 真实验证与失败边界
+
+libwebp 官方固定 FuzzTest 的 ANTLR 前置源码在 r001 configure 真实 RC1，随后 r002 的实际能力探测成功、configure RC0。对应独立终态报告：
+
+- `libwebp-native-observed-r001.json` SHA-256 `47d6aac14094e3db2d2c7a0d3e4d6f59528da9adcfcf8a750c62a77690ca1a99`。
+- `libwebp-native-observed-r002.json` SHA-256 `63e960a1f8876b00170b19a4088e7916caeb57731d1435effeeab287aa2f1507`。
+
+证据根为 `F:/HarmonyPC/pr-review-closure-20261004-r1`。r002 后续全量构建在语法生成器运行时因 CMake 未知系统的路径型 DT_NEEDED 失败，测试执行数仍为 0。该失败说明语言能力探测的真实成功不能冒充 ELF 装载、上游测试、正式 Conan 或 W3 的成功；不跨事务拼接结果。
+
+修复相对路径 NEEDED 后，独立新 r004 同一事务原生完整构建 RC0、原 libwebp/FuzzTest 十二项和 ANTLR 六十四项合计 76/76、零跳过。`libwebp-native-observed-r004.json` SHA-256 `457dc4a8702a92c9196a58f927b294e18009a6d12066e443170376dd9983ab17`；原源码 case IDs／参数独立对应报告 `libwebp-source-case-observed-r001.json` SHA-256 `edfe8ad81e079838ddcb60ba2631d95f15994d3cb21f51ece50950e984a8abd4`。此终态证实能力探测修复允许保留完整测试；仍不将探索运行提升为正式 Conan、W3 或 PR PASS。
+
+随后独立正式 Conan r005 实际 verifier RC0、原上游76/76零skip、消费者4/4与鸿蒙1/1；观察SHA `5bb410b2b7eab1e098606f343b9d77fb7d042d244e7d0c4000c7ecbca78792c5`。现行官方本地CI `FinishPipeline.step35_local_ci()` 的新r001同样实际完整执行76+4+1，L0/L1通过，原方法生成结果及日志哈希完整核验；观察SHA `9c44182d456b890bf788d9c0dc151320809ee11c9ce2bf11902f0dfb9c27cd0d`，源码用例观察SHA `10f3be25105582c22a1c8db1c3571a8960e4ea67e8f3487658a3186061a69025`。每个完整运行使用自己的单一分母、输入和回执链，禁止跨run拼接；该结论仍非平台CI、Review或提审通过。
+
+## 查重与实质增量
+
+现行知识树 `E096` 处理 CMake 的自动标准检测与显式 CMAKE_CXX_STANDARD，`E130` 处理 SDK 标准库需要更高标准。本次的反例是“标准已经正确、编译器能力真实存在，但上游在探测之前按 OS 白名单拒绝”。修复必须改变对应的源码控制流并执行真实能力检测，单独添加 `-std=c++17` 不能修复这个分支，也不能把 `System is unknown to cmake` 当作唯一根因。此机制独立于库名称、版本及路径，可用于其他依赖同类白名单的 CMake 工程。
+
+当前四范围实际查重另命中E267/E140平台名和feature-macro路由、E375的Windows/POSIX实现选择及enchantum的format头假阳性。这些都不覆盖语言标准已启用但名称白名单未执行能力测试即拒绝的反例。本次不是复述“探测比名字可靠”，而是保留已有平台版本分支、只补未知真实Clang的标准库编译链接集合，并以完整目标原用例验证这一控制流修复。查重原始记录SHA `d647fe0cea9bc622110fc0bffe30667909f2280914b6ac260de9e805d3be0eb9`，逐条语义差异结论SHA `7afc9f3da9cde21024123abbba7f37722a40c624155c01c8ed7f64526fbeab44`。
+
+## 适用与安全边界
+
+仅适用于未列出的系统和经真实编译链接可证明的编译器／标准库组合。原平台版本约束、实际缺少的头文件／符号／ABI、交叉编译不可运行条件、系统调用或认证能力不足不在此结论的覆盖范围；不能清除它们的失败或跳过状态。正式补丁必须由官方生成器生成并真实回放，不将源文件编辑本身称作配方自包含。

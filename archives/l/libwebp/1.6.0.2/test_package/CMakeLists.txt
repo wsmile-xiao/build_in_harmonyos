@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.21)
+project(libwebp_actual_consumer C)
+find_package(WebP REQUIRED CONFIG)
+add_executable(consumer consumer.c)
+target_link_libraries(consumer PRIVATE WebP::webp WebP::webpmux WebP::webpdemux)
+set_target_properties(consumer PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
