@@ -1,0 +1,135 @@
+#====================================================================
+# Draft knowledge entry - local hardcoded env fallbacks must never override
+#   the variables a tool_requires (automake/libtool) already provides
+# Source package: qatlib/26.02.0 (PERL5LIB clobbered automake/1.18's value)
+#====================================================================
+
+id:                     DRAFT-ohos-tool-requires-buildenv-must-not-be-overridden-by-local-fallbacks
+trigger_tool:           conan|autoconf|automake|aclocal|autoreconf|perl
+phase:                  configuration|build
+
+error_signature:        Can't locate Automake/Config\.pm in @INC|Can't locate .*\.pm in @INC.*automake|automake-1\.16: not found|autoreconf: error: .*aclocal failed|BEGIN failed--compilation aborted at .*aclocal
+
+severity:               2
+category:               autotools, conan, packaging, environment, build-system
+match_keywords:         OHOS, conan, tool_requires, buildenv_info, VirtualBuildEnv, PERL5LIB, ACLOCAL_PATH, AUTOMAKE, ACLOCAL, automake, libtool, aclocal, autoreconf, hardcoded fallback, clobber, override, @INC, qatlib
+
+title:                  When a recipe declares tool_requires(automake), its buildenv_info is authoritative - local hardcoded fallbacks must be applied only for variables it did not set
+
+root_cause:             A recipe that bootstraps autotools (sdist has no configure, so
+                        autoreconf must run) declares tool_requires("automake/1.18") and
+                        tool_requires("libtool/2.5.4"), then expands VirtualBuildEnv into
+                        the subprocess environment because it uses subprocess.run(env=...)
+                        instead of self.run(env="conanbuild").  The trap is a second layer
+                        of "safety" fallbacks left over from before the tool_requires were
+                        added: unconditional assignments such as
+                        env["PERL5LIB"] = ".../usr/local/share/automake-1.16" and
+                        env["AUTOMAKE"] / env["ACLOCAL"] = /storage/.../usr/local/bin/...
+                        That directory belongs to the CI image, is version-skewed (1.16 vs
+                        the tool_require's 1.18) and - decisively - it REPLACES the value
+                        the automake package itself supplied.  automake/1.18 ships
+                        relocatable wrapper scripts whose @INC is installed with a broken
+                        prefix (the log shows a literal `//share/automake-1.18`), and it is
+                        precisely its own PERL5LIB (pointing at its real
+                        share/automake-1.18) that makes those scripts load their modules.
+                        Overwriting it breaks aclocal, which then cannot find its own
+                        modules: "Can't locate Automake/Config.pm in @INC".
+
+affected_scope:         Any recipe that (a) obtains autotools from tool_requires rather
+                        than from the host image, and (b) still carries hardcoded absolute
+                        paths for the same variables (PERL5LIB, AUTOMAKE, ACLOCAL,
+                        ACLOCAL_PATH, AUTOCONF, ...).  Measured on qatlib 26.02.0
+                        (CI #65764): declaring the tool_requires fixed the earlier
+                        "Can't exec aclocal" failure, and the leftover PERL5LIB assignment
+                        immediately produced a new failure inside aclocal itself.
+
+verification_cmd:       grep -nE 'env\["(PERL5LIB|AUTOMAKE|ACLOCAL|ACLOCAL_PATH)"\] *=' archives/<pkg>/*/conanfile.py
+
+rec_priority:           1
+rec_approach:           tool-requires-values-authoritative-fallbacks-guarded
+rec_description:        Expand the tool_requires' environment first and record which keys
+                        it actually provided, then apply every local fallback ONLY for keys
+                        that are absent - never assign over a provided value:
+                          vbe = VirtualBuildEnv(self).vars()
+                          env.update(vbe.items())
+                          provided = set(vbe.keys())
+                          if "PERL5LIB" not in provided:        # guarded
+                              ... set the local fallback ...
+                          for k, v in (...local per-tool paths...):
+                              if k in provided:                 # guarded
+                                  continue
+                              ... set only if the file exists ...
+                        autoconf/m4 may legitimately stay SDK-provided (declaring
+                        autoconf/2.72 pulls an OHOS perl whose XS conflicts with the SDK
+                        perl used by autoreconf), so the guard - not the fallback's
+                        deletion - is what keeps both paths working.
+rec_command:            python -c "from conan.tools.env import VirtualBuildEnv; vbe=VirtualBuildEnv(conanfile).vars(); env.update(vbe.items()); provided=set(vbe.keys())"
+rec_auto_fix:           false
+rec_impl:               recipe-source-layout
+
+fallback_priority:      2
+fallback_approach:      drop-the-fallbacks-entirely-once-tool-requires-are-declared
+fallback_description:   If the tool_requires is reliably resolvable in every build
+                        environment (it is in the registry and L0i verifies it), the
+                        hardcoded fallbacks can be removed outright rather than guarded.
+                        Keeping them guarded is the safer default because the fallbacks
+                        also cover the SDK-provided autoconf/m4, which are deliberately
+                        NOT declared as tool_requires.
+fallback_command:       conan search automake/* -r=ohpcd
+fallback_auto_fix:      false
+fallback_impl:          dependency-resolution
+
+forbid_1_pattern:       env\["PERL5LIB"\] *= *["'].*usr/local/share/automake|env\["(AUTOMAKE|ACLOCAL)"\] *= *["']/storage
+forbid_1_reason:        An unguarded assignment silently replaces the value the automake
+                        tool_require contributed; its relocated scripts then cannot load
+                        their own modules, and the error surfaces inside aclocal - far from
+                        the line that caused it.
+forbid_1_consequence:   A new failure immediately after the tool_requires were added,
+                        easily misread as 'the tool_requires did not work / automake is
+                        broken', leading to reverting a correct fix.
+
+forbid_2_pattern:       hardcode .*/storage/Users/currentUser/usr/local/.*automake|rely on the CI image's automake version
+forbid_2_reason:        The image's automake is version-skewed relative to the declared
+                        tool_require (1.16 vs 1.18) and is not part of the recipe's
+                        dependency graph, so the build is not reproducible across workers.
+forbid_2_consequence:   Builds that pass on one worker and fail on another, or after the
+                        image is updated, with no recipe change to explain it.
+
+forbid_3_pattern:       remove tool_requires\(automake|revert.*tool_requires.*because.*aclocal|blame automake/1\.18
+forbid_3_reason:        The tool_requires is the correct fix; the failure was caused by the
+                        local override defeating it.  Reverting reintroduces the original
+                        'Can't exec aclocal' problem.
+forbid_3_consequence:   Oscillation between two failures without converging, each round
+                        attributed to the wrong cause.
+
+similar_to:             [DRAFT-perl-buildenv-info-missing-dependency-injection, DRAFT-cpdb-libs-1.2.0-autotools-git-archive-tool-requires-bootstrap, DRAFT-remctl-3.18-conan-buildenv-save-order]
+conflicts_with:         []
+prerequisite_of:        []
+
+notes_diff_vs_perl_buildenv:  DRAFT-perl-buildenv-info-missing-dependency-injection is the
+                        OPPOSITE direction: there the dependency declares only runenv_info,
+                        so PERL5LIB never reaches the build context and the consumer must
+                        inject it itself.  Here the variable IS provided (buildenv_info)
+                        and the consumer must be careful not to overwrite it.  Together
+                        they bracket the same variable: missing -> inject; provided ->
+                        do not clobber.
+notes_diff_vs_cpdb:     DRAFT-cpdb-libs-1.2.0-autotools-git-archive-tool-requires-bootstrap
+                        establishes that git-archive/no-dist tarballs need
+                        tool_requires automake+libtool.  This entry starts after that is
+                        done: what happens to the leftover host-image fallbacks once the
+                        tool_requires are in place.
+notes_diff_vs_remctl:   DRAFT-remctl-3.18-conan-buildenv-save-order is about the ORDER in
+                        which conan saves buildenv files; this entry is about a hand-written
+                        assignment defeating a tool_require's contribution.
+notes_diagnosis_order:  Read the @INC entries in the error literally - they list which
+                        directories were searched and in which order.  Seeing the
+                        tool_require's own share dir AND a foreign usr/local/share/automake-1.16
+                        side by side is the tell that a local assignment is competing with
+                        the tool_require.
+notes_qatlib:           qatlib 26.02.0: after tool_requires("automake/1.18") fixed
+                        'Can't exec "aclocal"', the leftover
+                        env["PERL5LIB"] = "/storage/Users/currentUser/usr/local/share/automake-1.16"
+                        caused "Can't locate Automake/Config.pm in @INC (@INC entries
+                        checked: //share/automake-1.18 /storage/.../usr/local/share/
+                        automake-1.16 ...) at .../bin/.aclocal-real line 33".
+                        Guarding each fallback with `if k not in provided` fixed it.

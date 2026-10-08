@@ -1,0 +1,126 @@
+#====================================================================
+# Draft knowledge entry - a patch file that exists under patches/ but is not
+#   listed in conandata.yml is NEVER applied, silently
+# Source package: qatlib/26.02.0 (patch 04-add-ax_pthread-m4.patch)
+#====================================================================
+
+id:                     DRAFT-ohos-conandata-patch-file-present-but-unregistered
+trigger_tool:           conan|autoconf|autoreconf|make|cmake
+phase:                  source|configuration
+
+error_signature:        Patch file does not exist|error: AX_PTHREAD not found|Please install autoconf-archive or place ax_pthread.*in m4|AC_.*_NOT_FOUND.*m4|apply_conandata_patches.*no patch applied
+
+severity:               2
+category:               patch, conan, build-system, packaging, dependency
+match_keywords:         OHOS, conan, conandata.yml, patches, apply_conandata_patches, exports_sources, unregistered patch, never applied, silent no-op, autoreconf, aclocal, m4 macro, autoconf-archive, AX_PTHREAD, qatlib
+
+title:                  A patch sitting in patches/ but absent from conandata.yml is never applied - the build then fails on the very bug the patch fixes
+
+root_cause:             conan applies patches listed in the `patches:` section of
+                        conandata.yml (via apply_conandata_patches in source()); the mere
+                        presence of a file under patches/ has no effect.  A patch that
+                        was authored but not registered is therefore never applied, and
+                        because conan has nothing to look up it raises no error at all -
+                        the failure surfaces much later as the ORIGINAL problem the patch
+                        was written to fix.  On qatlib 26.02.0 the vendored
+                        patches/04-add-ax_pthread-m4.patch (autoconf-archive's AX_PTHREAD)
+                        was on disk but missing from conandata.yml, so configure.ac:29
+                        died with "AX_PTHREAD not found. Please install autoconf-archive
+                        or place ax_pthread.m4 in m4/" - a message that points at a
+                        missing system package, not at the unregistered patch, even though
+                        the macro was already sitting in the recipe.
+
+affected_scope:         Any recipe whose patches/ directory contains a file that is not
+                        enumerated in conandata.yml.  Measured on qatlib 26.02.0, where
+                        the recipe shipped 4 patch files while conandata.yml listed only
+                        3, so the AX_PTHREAD patch was inert.  Extra risk after any
+                        operation that adds or renames patches (git format-patch, a
+                        patch-refresh tool, a manual split), where the file is created
+                        but the YAML is not updated in the same step.
+
+verification_cmd:       for f in $(grep -oE 'patches/[^"]+' archives/<pkg>/*/conandata.yml); do test -f archives/<pkg>/*/$f || echo "listed but missing: $f"; done; for f in archives/<pkg>/*/patches/*.patch; do grep -q "$(basename $f)" archives/<pkg>/*/conandata.yml || echo "present but NOT registered: $f"; done
+
+rec_priority:           1
+rec_approach:           reconcile-patches-dir-with-conandata-yml
+rec_description:        Treat conandata.yml's `patches:` list as the single source of
+                        truth and make it complete.  Before concluding that a patch is
+                        ineffective, enumerate BOTH directions - every entry in the YAML
+                        must exist on disk, and every *.patch on disk must appear in the
+                        YAML.  Register each missing patch with patch_file,
+                        patch_description and patch_type (the repo convention is
+                        patch_type: portability for these OHOS adaptations), then verify
+                        the count matches.  When a macro must be found by autoreconf,
+                        also pass an explicit -I <dir> to autoreconf (e.g. -I m4) instead
+                        of relying on an AC_CONFIG_MACRO_DIR declaration that the upstream
+                        configure.ac may not have.
+rec_command:            # 1) register the missing patch in conandata.yml, then:
+                        #    autoreconf -fi -I m4        # in build()
+                        # 2) sanity check both directions:
+                        #    for f in archives/<pkg>/*/patches/*.patch; do
+                        #      grep -q "$(basename $f)" archives/<pkg>/*/conandata.yml \
+                        #        || echo "present but NOT registered: $f"; done
+rec_auto_fix:           false
+rec_impl:               recipe-source-layout
+
+fallback_priority:      2
+fallback_approach:      install-the-providing-system-package
+fallback_description:   If the missing macro/header is genuinely provided by a packaged
+                        build dependency already available in the registry (for instance
+                        autoconf-archive), depending on it is cleaner than vendoring the
+                        macro.  For AX_PTHREAD this was not available in the CI build
+                        environment, so vendoring remained the answer - but the choice
+                        should be made explicitly rather than by leaving the patch
+                        unregistered.
+fallback_command:       conan search autoconf-archive/* -r=ohpcd
+fallback_auto_fix:      false
+fallback_impl:          dependency-resolution
+
+forbid_1_pattern:       install autoconf-archive.*on the CI worker|apt.*install autoconf-archive|assume the worker has .*m4 macro
+forbid_1_reason:        The build must be self-contained in the recipe; CI workers are
+                        ephemeral and are not provisioned with extra system packages, so
+                        a fix that depends on a host install is unreproducible and fails
+                        again on the next worker.
+forbid_1_consequence:   A green local run and a red CI run, with the discrepancy
+                        attributed to the wrong cause.
+
+forbid_2_pattern:       write the patch file and stop|add patches/.*without conandata|commit patch without registering
+forbid_2_reason:        A patch that is not enumerated in conandata.yml is dead weight:
+                        conan never applies it and never complains, so the recipe carries
+                        a fix that does nothing.
+forbid_2_consequence:   The defect the patch was written for reappears later in the build
+                        and is misdiagnosed as an upstream/platform problem, costing a
+                        full debugging cycle.
+
+forbid_3_pattern:       delete the failing m4 macro check|patch configure\.ac.*to skip AX_|remove AC_.*_ from configure\.ac
+forbid_3_reason:        The macro performs a real capability check (threading flags); the
+                        correct fix is to make the macro available, not to delete the check.
+forbid_3_consequence:   Quietly drops a real configuration check, so the build becomes
+                        dependent on defaults rather than measured capabilities.
+
+similar_to:             [DRAFT-8543-refresh-patch-rename-conandata-desync, DRAFT-celero-2.10.0-conandata-patches-export-sources-hook, DRAFT-13619-mklibs-0.1.46-conandata-patch-strip-default-zero]
+conflicts_with:         []
+prerequisite_of:        []
+
+notes_diff_vs_8543:     DRAFT-8543-refresh-patch-rename-conandata-desync covers a tool
+                        RENAMING patches so conandata.yml points at a name that no longer
+                        exists - conan then raises loudly ("Patch file does not exist") at
+                        export_sources(), and the G2/W3 gates fail.  The direction is
+                        opposite and the symptom differs: there the patch is registered but
+                        gone; here it is present but unregistered, so conan stays silent
+                        and the build fails later on the original defect.  Both are
+                        reconciled by checking patches/ against conandata.yml in both
+                        directions.
+notes_diff_vs_celero:   DRAFT-celero-2.10.0-conandata-patches-export-sources-hook is about
+                        WHICH hook exports the patches (exports vs export vs
+                        export_sources); this entry assumes the hook is already correct and
+                        the patch is simply not listed.
+notes_qatlib:           qatlib 26.02.0 shipped patches/01..04 while conandata.yml listed
+                        only 01..03.  patch 04 vendors autoconf-archive's ax_pthread.m4;
+                        unregistered, it did nothing, and CI failed with "configure.ac:29:
+                        error: AX_PTHREAD not found. Please install autoconf-archive or
+                        place ax_pthread.m4 in m4/".  Registering it plus `autoreconf -fi
+                        -I m4` fixed the build.
+notes_autoreconf_include:  The -I flag is worth adding even once the macro is registered:
+                        it makes the source-tree m4/ directory an explicit aclocal search
+                        path, so the macro is found without depending on the upstream
+                        configure.ac declaring AC_CONFIG_MACRO_DIR.
