@@ -1,0 +1,174 @@
+diff --git a/ncpd/link.h b/ncpd/link.h
+--- a/ncpd/link.h
++++ b/ncpd/link.h
+@@ -22,6 +22,7 @@
+ #define _link_h_
+ 
+ #include "config.h"
++#include <atomic>
+ #include <pthread.h>
+ #include <sys/time.h>
+ 
+@@ -175,6 +176,8 @@ private:
+     unsigned long retransTimeout();
+ 
+     pthread_t checkthread;
++    std::atomic<bool> stopCheck;
++    bool checkthreadStarted;
+     pthread_mutex_t queueMutex;
+ 
+     ncp *theNCP;
+diff --git a/ncpd/link.cc b/ncpd/link.cc
+--- a/ncpd/link.cc
++++ b/ncpd/link.cc
+@@ -40,8 +40,7 @@ extern "C" {
+     static void *expire_check(void *arg)
+     {
+ 	Link *l = (Link *)arg;
+-	pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+-	while (1) {
++	while (!l->stopCheck.load()) {
+ 	    usleep(l->retransTimeout() * 500);
+ 	    l->retransmit();
+ 	}
+@@ -57,7 +56,7 @@ ENUM_DEFINITION_BEGIN(Link::link_type, Link::LINK_TYPE_UNKNOWN)
+ ENUM_DEFINITION_END(Link::link_type)
+ 
+ Link::Link(const char *fname, int baud, ncp *_ncp, unsigned short _verbose)
+-    : p(0)
++    : stopCheck(false), checkthreadStarted(false), p(0)
+ {
+     theNCP = _ncp;
+     verbose = _verbose;
+@@ -76,7 +75,10 @@ Link::Link(const char *fname, int baud, ncp *_ncp, unsigned short _verbose)
+     p = new packet(fname, baud, this, _verbose);
+ 
+     pthread_mutex_init(&queueMutex, NULL);
+-    pthread_create(&checkthread, NULL, expire_check, this);
++    if (pthread_create(&checkthread, NULL, expire_check, this) == 0)
++	checkthreadStarted = true;
++    else
++	failed = true;
+ 
+     // submit a link request
+     sendReqReq();
+@@ -85,7 +87,9 @@ Link::Link(const char *fname, int baud, ncp *_ncp, unsigned short _verbose)
+ Link::~Link()
+ {
+     flush();
+-    pthread_cancel(checkthread);
++    stopCheck.store(true);
++    if (checkthreadStarted)
++	pthread_join(checkthread, NULL);
+     pthread_mutex_destroy(&queueMutex);
+     delete p;
+ }
+diff --git a/ncpd/packet.h b/ncpd/packet.h
+--- a/ncpd/packet.h
++++ b/ncpd/packet.h
+@@ -22,6 +22,7 @@
+ #define _packet_h
+ 
+ #include "config.h"
++#include <atomic>
+ #include <stdio.h>
+ #include <pthread.h>
+ 
+@@ -71,6 +72,8 @@ private:
+ 
+     Link *theLINK;
+     pthread_t datapump;
++    std::atomic<bool> stopPump;
++    bool pumpStarted;
+     pthread_t thisThread;
+     unsigned int   crc_table[256];
+ 
+diff --git a/ncpd/packet.cc b/ncpd/packet.cc
+--- a/ncpd/packet.cc
++++ b/ncpd/packet.cc
+@@ -67,8 +67,7 @@ static void usr1handler(int sig)
+ static void *pump_run(void *arg)
+ {
+     packet *p = (packet *)arg;
+-    pthread_setcanceltype(PTHREAD_CANCEL_ASYNCHRONOUS, NULL);
+-    while (1) {
++    while (!p->stopPump.load()) {
+ 	if (p->fd != -1) {
+ 	    fd_set r_set;
+ 	    fd_set w_set;
+@@ -151,6 +150,8 @@ packet::
+ packet(const char *fname, int _baud, Link *_link, unsigned short _verbose)
+ {
+     verbose = pumpverbose = _verbose;
++    stopPump.store(false);
++    pumpStarted = false;
+     devname = strdup(fname);
+     assert(devname);
+     baud = _baud;
+@@ -190,18 +191,23 @@ packet(const char *fname, int _baud, Link *_link, unsigned short _verbose)
+ 	lastFatal = true;
+     else {
+ 	signal(SIGUSR1, usr1handler);
+-	pthread_create(&datapump, NULL, pump_run, this);
++	if (pthread_create(&datapump, NULL, pump_run, this) == 0)
++	    pumpStarted = true;
++	else
++	    lastFatal = true;
+     }
+ }
+ 
+ packet::
+ ~packet()
+ {
+-    if (fd != -1) {
+-	pthread_cancel(datapump);
++    if (pumpStarted) {
++	stopPump.store(true);
++	pthread_kill(datapump, SIGUSR1);
+ 	pthread_join(datapump, NULL);
+-	ser_exit(fd);
+     }
++    if (fd != -1)
++	ser_exit(fd);
+     fd = -1;
+     delete []inBuffer;
+     delete []outBuffer;
+@@ -211,15 +217,22 @@ packet::
+ void packet::
+ reset()
+ {
+-    if (fd != -1) {
+-	pthread_cancel(datapump);
++    if (pumpStarted) {
++	stopPump.store(true);
++	pthread_kill(datapump, SIGUSR1);
+ 	pthread_join(datapump, NULL);
++	pumpStarted = false;
+     }
+     outRead = outWrite = 0;
+     internalReset();
+     if (fd != -1) {
+-	pthread_create(&datapump, NULL, pump_run, this);
+-	realWrite();
++	stopPump.store(false);
++	if (pthread_create(&datapump, NULL, pump_run, this) == 0) {
++	    pumpStarted = true;
++	    realWrite();
++	} else {
++	    lastFatal = true;
++	}
+     }
+ }
+ 
+@@ -462,5 +475,8 @@ packet::
+-	    if (rx_amount > 15)
+-		reset();
++	    if (rx_amount > 15) {
++		// Already on datapump: reset() would join this thread.
++		outRead = outWrite = 0;
++		internalReset();
++	    }
+-	}
++	}
+     }
+ }
