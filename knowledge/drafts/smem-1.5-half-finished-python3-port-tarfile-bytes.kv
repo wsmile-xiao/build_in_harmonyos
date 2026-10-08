@@ -1,0 +1,40 @@
+#====================================================================
+# Draft: smem 1.5 —— 上游 tag 自称"已切 Python 3"但移植只做了一半，
+#        tarfile 的 bytes 直接泄漏给 str 逻辑，整条 --source 链路在 py3 下必崩
+#====================================================================
+
+id:                     DRAFT-SMEM-15-HALF-FINISHED-PYTHON3-PORT
+trigger_tool:           python|python3|conan|test|runtime
+phase:                  runtime|testing
+error_signature:        TypeError: cannot use a string pattern on a bytes-like object|cannot use a string pattern|extractfile\(.*\)\.read\(\)|\.readlines\(\)|xrange|NameError: name 'xrange' is not defined|#!/usr/bin/env python$
+
+severity:               2
+category:               portability|python|build-system|testing
+match_keywords:         python3 port, half finished port, tarfile bytes, extractfile read, tardata, smaps, proc, shebang python, xrange, decode utf-8, single file python script, --source, script-only CLI
+
+title:                 上游只把 shebang 换成 python3 就叫"支持 python3"：tarfile 的 bytes 未解码 → 整条 --source/解析链路在 python3 下 TypeError（附字节级重写归档格式时的 bytearray 切片位移坑）
+root_cause:            tarfile.extractfile().read()/.readlines() 在 python3 返回 bytes，而消费方（正则 re.compile('(\S+):\s+(\d+) kB')、逐行 split 后与 str 字面量比较、bytes.replace('\0',' ')）全按 str 写；上游只改了 shebang，没有在数据入口解码，于是错误不在 import/编译期而在第一次真正解析数据时暴露，且表现为 TypeError 而非"未支持"。同一次移植还常漏掉 xrange() 这类 python2 内建。发行版（Debian/Gentoo/OpenEmbedded）的通行做法是 sed 换 shebang + 只给 --source 补一条补丁，其余路径照旧坏着。
+affected_scope:         所有"主体是单文件 Python 脚本、C 部分极小"的命令行工具（2008-2020 年的运维/诊断类工具尤甚）；判断口径是 conanfile.py 里 build() 只编译一两个 .c、package() 把 .py/.pl 当脚本原样安装的包
+verification_cmd:       python3 <script> --help ; python3 <script> -S <fixture.tar> -c 'pid pss' ; python3 -c "compile(open('<script>','rb').read(),'s','exec')"
+
+rec_priority:           1
+rec_approach:           decode-at-the-single-io-boundary-then-py3-audit
+rec_description:        (1) 先 grep 出全部 I/O 边界：tarfile / zipfile / os.popen / subprocess / open(...,'rb')，凡是把 bytes 直接交给上层解析的地方，在边界处统一 decode（'utf-8','replace'），并让 _readlines() 从 _read() 派生，避免两个入口行为不一致；(2) py3 语义普查：xrange/map/has_key/iteritems/`<>`、print 语句、dict.keys() 索引、整除、sort(cmp)、except X, e —— 逐项改成 py3 写法；(3) shebang 显式写 python3；(4) 验收不要停在 --help：造一份能触发完整数据通路的输入（这里是按工具自有的归档格式合成一份采集归档），断言真实数值，否则 bytes 泄漏型缺陷会被 --help 全绿掩盖
+rec_command:            grep -n "extractfile\|\.readlines()\|xrange\|iteritems\|has_key" <script> ; python3 -c "compile(open('<script>','rb').read(),'<script>','exec')"
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      keep-upstream-and-document-unsupported-paths
+fallback_description:   若上游把 bytes→str 的修复面铺得很大（多处直读），不 patches 而在 package() 里对脚本做等价的字节级重写（把 decode 插进入口）——但必须逐条列出未覆盖的调用点，且 notes.md 写明"该路径在 python3 下不可用"
+fallback_command:       python3 - <<'EOF'
+import re,io
+p="<script>"; s=io.open(p,encoding="utf-8").read()
+s=s.replace("return self.tar.extractfile(f).read()","return self.tar.extractfile(f).read().decode('utf-8','replace')")
+io.open(p,"w",encoding="utf-8",newline="").write(s)
+EOF
+fallback_auto_fix:      false
+
+# ══ 知识协作 (Authorship & Provenance) ══
+# PR 交付后回填（与仓内绝大多数草稿同阶段做法一致）
+source_pr:
+source_commit:

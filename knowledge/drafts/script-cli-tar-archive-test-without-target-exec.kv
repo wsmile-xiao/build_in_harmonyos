@@ -1,0 +1,36 @@
+#====================================================================
+# Draft: 交付物拆成"纯脚本主体 + 小 C 助手"时，怎么在 x86 本地与 aarch64 CI
+#        两边都拿到真实断言 —— 合成工具自有输入格式 + 把目标架构正确性降级为
+#        文件级断言，不要让它绑死在"能在本机执行"上
+#====================================================================
+
+id:                     DRAFT-SCRIPT-CLI-TAR-ARCHIVE-TEST-WITHOUT-TARGET-EXEC
+trigger_tool:           conan|python3|qemu-aarch64|readelf
+phase:                  testing
+
+error_signature:        SKIP.*build machine is|only run.*when.*machine|can_run.*False|skip.*target execution|no writable scratch directory
+
+severity:               1
+category:               testing|build-system|arch|ohos-platform
+match_keywords:         script-only CLI, no library API, single translation unit, arch guard, platform.machine, ELF header assertion, e_machine, PT_INTERP, synthetic capture archive, hand-computed PSS, test_package workdir leaks into archives, git add picks up .tar
+
+title:                 脚本型 CLI（无库 API、无构建系统、只有一个 C 助手）：合成"助手自有格式"的输入来驱动脚本，目标架构正确性改用 ELF 头纯文件断言 —— 别让整段测试被架构守卫跳过
+root_cause:            交付物被拆成架构相关与架构无关两部分时，只有前者受"本机跑不了目标产物"限制，但实践中两者常被同一个 arch 守卫一起跳过：脚本主体是纯解释器代码、在任何主机上都能真跑，却白丢断言；C 助手若只能靠目标机原生执行验证，本地门禁对这段逻辑零覆盖。更隐蔽的一层是"测试自己往源码树里写产物"：test_package 没有自己的 layout 时 Conan 把 build_folder 指到 archives/<l>/<pkg>/<ver>/test_package/ 本身，驱动写出的采集归档(.tar)会留在树里，被下一次 git add 连同配方一起提交（JC3/PF2 事后才拦）。
+affected_scope:         build() 只编译一两个 .c、package() 把 .py/.pl 当脚本安装的包（运维/诊断类老工具）；交付物是动态链接 OHOS AArch64 ELF 而本地或 CI runner 不是 aarch64 的场景；CI 强制 test_package/test() 有真实 self.run + 有测试源（L0c/L0d/L1d/R34/L1e）的场景
+verification_cmd:       python3 -c "import struct;d=open('<pkg>/bin/<tool>','rb').read();print(struct.unpack('<H',d[18:20])[0])"   # 期望 183 = EM_AARCH64 ; python3 test_package/test_<tool>.py <pkg>/bin
+
+rec_priority:           1
+rec_approach:           synthesize-the-tool-own-input-format-then-split-assertions-into-file-level-and-exec-level
+rec_description:        (1) **先给断言分类**：文件级（存在性、可执行位、shebang、脚本能否被目标解释器 compile()、ELF class / e_machine / PT_INTERP、man 与许可证齐全）无条件执行，x86 与 aarch64 都跑；执行级（真跑目标产物）才加 platform.machine() 守卫，SKIP 时打印明确原因。这样"只能目标机跑"不再等于"本地零断言"。(2) **给脚本主体合成确定性输入**：读助手 C 源码，照它的 writeheader()/归档写出顺序用 Python 逐字节复刻一份输入，数值字段填成手算得出���期望值，再逐列断言——不必依赖目标机的 /proc 与 /etc。(3) **交付产物的运行取证按 macutils 先例做**：静态重链 + qemu-aarch64 实跑，并在 notes.md 写明"静态副本不等于交付产物，动态产物由 AArch64 CI worker 原生执行"。(4) **测试产物一律别落进 archives/**：驱动自选暂存目录（优先 $SMEM_TEST_WORKDIR，其次 tempfile.gettempdir()，最后才退回自身目录），三条都不通才报错——既不假设 /tmp 可写，也不会污染源码树。
+rec_command:            python3 test_package/test_<tool>.py <pkg>/bin   # 驱动自选暂存目录；跑完 git status 必须为空
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      recipe-picks-workdir-outside-repo
+fallback_description:   若驱动无法自选目录，则在 test_package 里显式传一个仓库外路径（conan 的 cache 目录 / 用户 cache 目录），不要用 self.build_folder；同时提交前用 git status 核对 archives/ 下没有 .tar / build/ / metadata/ 残留
+fallback_command:       git status --short archives/ ; git check-ignore -v archives/<l>/<pkg>/<ver>/test_package/<artifact>
+fallback_auto_fix:      false
+
+# ══ 知识协作 (Authorship & Provenance) ══
+source_pr:
+source_commit:
