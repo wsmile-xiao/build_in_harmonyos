@@ -1,0 +1,119 @@
+#====================================================================
+# Draft knowledge entry - test_package inner script overwrites PYTHONPATH,
+#   clobbering the dependency paths conanrun injected -> ModuleNotFoundError
+# Source package: beniget/0.5.0 (same defect measured in meson-python/0.22.0
+#   and latent in biopython/1.88)
+#====================================================================
+
+id:                     DRAFT-ohos-conan-test-package-pythonpath-overwrite-clobbers-runenv
+trigger_tool:           conan|python|pytest|test
+phase:                  testing|runtime
+
+error_signature:        ModuleNotFoundError: No module named '(gast|pyproject_metadata|numpy|packaging|meson)'|FAIL: .* API: Traceback.*ModuleNotFoundError|Error in test\(\) method.*conanrun
+
+severity:               2
+category:               python, testing, conan, packaging, environment
+match_keywords:         OHOS, conan, test_package, consumer test, conanrun, runenv_info, PYTHONPATH, overwrite, append, ModuleNotFoundError, python-require, dependency path, beniget, meson-python, biopython
+
+title:                  conan test_package scripts must APPEND to PYTHONPATH - assigning it discards the dependency paths conanrun injected
+
+root_cause:             In this repo's Python recipes the consumer test is a two-layer
+                        construct: test_package/conanfile.py runs the real test body via
+                        self.run(..., env="conanrun"), and an inner Python script
+                        (test_package/test_<pkg>.py) spawns the interpreter.  That inner
+                        script typically does `env["PYTHONPATH"] = site` to make the
+                        package under test importable.  A plain assignment REPLACES the
+                        whole variable, throwing away everything conanrun just injected
+                        from the recipe's runenv_info - above all the site-packages of
+                        the runtime dependencies (gast for beniget, pyproject-metadata /
+                        packaging / meson for meson-python, numpy for biopython).  The
+                        subprocess then fails with ModuleNotFoundError for a dependency
+                        even though the dependency is correctly declared, built, and
+                        present in the graph.  Note the asymmetry that hides the bug: the
+                        paths are injected by the OUTER layer (conanrun) and destroyed by
+                        the INNER layer, so grepping either file alone looks correct.
+
+affected_scope:         Any recipe whose test_package inner script mutates PYTHONPATH by
+                        assignment while the tested package imports a runtime dependency.
+                        Measured on beniget 0.5.0 (CI #65761, `No module named 'gast'`)
+                        and meson-python 0.22.0 (CI #65762, `No module named
+                        'pyproject_metadata'`); the same shape is latent in biopython
+                        1.88 (`No module named 'numpy'` once reached).
+
+verification_cmd:       grep -n 'env\["PYTHONPATH"\] *=' archives/<pkg>/*/test_package/test_*.py
+
+rec_priority:           1
+rec_approach:           append-not-assign-pythonpath
+rec_description:        In the inner test script, read the inherited value and PREPEND
+                        the package's own site-packages to it, instead of assigning:
+                          env["PYTHONPATH"] = os.pathsep.join(
+                              [site] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
+                        which mirrors what the smoke script already does to sys.path
+                        (sys.path[0:0] = [...]) and is exactly how the repo's own
+                        test_package/conanfile.py injects dependency paths.  When the
+                        dependency paths are NOT on the inherited PYTHONPATH (their
+                        package_info only sets Conan 1.x env_info, which is inert on
+                        Conan 2), inject them explicitly in test_package/conanfile.py
+                        and still append.
+rec_command:            python -c "import os;site='<pkg>/lib/python3.12/site-packages';os.environ['PYTHONPATH']=os.pathsep.join([site]+[p for p in os.environ.get('PYTHONPATH','').split(os.pathsep) if p])"
+rec_auto_fix:           false
+rec_impl:               recipe-source-layout
+
+fallback_priority:      2
+fallback_approach:      explicit-dependency-injection-in-test-conanfile
+fallback_description:   When the dependency's package_info uses Conan 1.x env_info (the
+                        CI log shows `deprecated: 'env_info' used in: packaging/26.3,
+                        pyproject-metadata/0.12.1`) the paths never reach conanrun at
+                        all, so appending alone is not enough.  Inject the dependency
+                        site-packages explicitly from test_package/conanfile.py - look up
+                        each dependency via self.dependencies.get(name) and join their
+                        package_folder/lib/python3.X/site-packages onto os.environ
+                        - then let the inner script append (aiohttp precedent).
+fallback_command:       # in test_package/conanfile.py test():
+                        #   for dep in ("meson", "packaging"): d = self.dependencies.get(dep) ...
+                        #   os.environ["PYTHONPATH"] = os.pathsep.join(paths + inherited)
+fallback_auto_fix:      false
+fallback_impl:          recipe-source-layout
+
+forbid_1_pattern:       env\["PYTHONPATH"\] *= *site($|[^+])|os\.environ\["PYTHONPATH"\] *= *site($|[^+])
+forbid_1_reason:        A bare assignment discards the conanrun-injected dependency
+                        paths; the module the package imports is then reported missing
+                        even though it is declared and present, sending the author after
+                        a non-existent dependency problem.
+forbid_1_consequence:   A whole CI cycle lost to a spurious 'ModuleNotFoundError /
+                        缺依赖' diagnosis, then a fix that touches requirements() and
+                        does not help.
+
+forbid_2_pattern:       drop the dependency from test_package.*to make it import|remove gast.*to satisfy|skip the consumer test.*ModuleNotFoundError
+forbid_2_reason:        The dependency is genuinely required at runtime; deleting it
+                        from the recipe or weakening the consumer test hides a real
+                        packaging defect rather than fixing the import path.
+forbid_2_consequence:   The consumer test stops proving the package is usable, and the
+                        same break resurfaces for the next consumer (pythran, scipy).
+
+similar_to:             [DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv, DRAFT-ohos-python-require-no-host-so, DRAFT-pypi-wheel-vendor-python-dep-closure]
+conflicts_with:         []
+prerequisite_of:        []
+
+notes_diff_vs_subprocess:  DRAFT-ohos-test-subprocess-overrides-pythonpath-needs-venv
+                        covers the UPSTREAM test suite spawning a service child process
+                        and overwriting PYTHONPATH (env={**os.environ, "PYTHONPATH": ...});
+                        its remedy is a dedicated venv.  Its full text contains neither
+                        'test_package' nor 'conanrun'.  This entry is about OUR OWN
+                        consumer test scripts (test_package/test_*.py) discarding what
+                        conanrun injected; the remedy is to append, not to build a venv.
+                        Different location, different fix.
+notes_env_info:         The two defects co-occur: when the dependency declares only
+                        Conan 1.x env_info, conanrun carries nothing and the assignment
+                        destroys nothing - the import fails anyway.  Diagnose in that
+                        order: (1) is the path on the inherited PYTHONPATH? if yes ->
+                        assignment bug (this entry); if no -> env_info/packaging bug
+                        (runenv_info vs env_info, or missing propagation).
+notes_beniget:          beniget test_package → `No module named 'gast'` (CI #65761).
+                        gast is declared in requirements() and its site-packages IS on
+                        the conanrun PYTHONPATH; the sole cause was `env["PYTHONPATH"]
+                        = site` in tests/test_beniget.py:88.
+notes_meson_python:     meson-python test_package → `No module named
+                        'pyproject_metadata'` (CI #65762).  Both defects present:
+                        pyproject-metadata/packaging use env_info (so conanrun carried
+                        nothing) AND the inner script assigned instead of appended.
