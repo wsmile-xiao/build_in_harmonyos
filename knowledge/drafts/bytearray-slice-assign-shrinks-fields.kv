@@ -1,0 +1,34 @@
+#====================================================================
+# Draft: 用 Python 逐字节复刻 C 代码手写的归档/tar 头时，bytearray 切片赋值
+#        长度不足会整体左移 —— 表现为 tarfile "invalid header"，与 C 语义相反
+#====================================================================
+
+id:                     DRAFT-BYTEARRAY-SLICE-ASSIGN-SHRINKS-FIELDS
+trigger_tool:           python3|test
+phase:                  testing|compilation
+error_signature:        ReadError\('invalid header'\)|tarfile.BadHeaderFile|InvalidHeaderError|unexpected end of data|HeaderError|invalid header
+
+severity:               2
+category:               testing|python|portability
+match_keywords:         bytearray, slice assignment, shrinks, invalid header, tar header, 512-byte header, checksum field, typeflag, octal field, reimplement C in Python, ljust, memmove
+
+title:                 Python 复刻 C 的定长二进制头（tar 512 字节头等）时 bytearray 切片赋值长度不足会左移整块缓冲 —— tarfile 报 invalid header，且不会报"长度不对"
+root_cause:            C 的 sprintf(header + 124, "%011o", size) 永远原地写入 12 字节字段（11 位八进制 + NUL），字段长度恒定；而 Python 里 hdr[124:136] = 11 字节 的切片赋值语义是"删除这 7 个字节再插入 11 个"，bytearray 整体缩短 1 字节，156 处的 typeflag 及其后所有字段前移一位。表现为偏移 156 不再是类型符、校验和字段错位，最终 tarfile/python-magic 报 invalid header，而代码里没有任何长度断言，越靠后的字段越晚暴露。另一个同源错误：把校验和写成 sum % 4096（误以为八进制字段会截断），而 C 的 sprintf("%06o", sum) 在超 6 位时是照抄全部位数、不截断。
+affected_scope:         所有"用 Python 重写/校验 C 生成的二进制结构"的测试与工具：tar/zip 归档合成、固件镜像、ELF 头解析、协议帧构造、固件/bootloader 校验脚本
+verification_cmd:       python3 -c "h=bytearray(512);h[124:136]=b'0'*11;print(len(h),h[156:157])"   # 期望 512，且 typeflag 位置未被移动
+
+rec_priority:           1
+rec_approach:           fixed-width-writer-with-assert-len
+rec_description:        (1) 不要裸写切片赋值，统一走一个定宽写入器：field = value.ljust(width, pad)[:width]（或 struct.pack_into），写完立即 assert len(buf) == TOTAL；(2) 先跑一次"空 buf 全字段写入"的自检，把每个字段的起止偏移打印出来与 C 源码逐个对齐，再填真实数据；(3) 校验和按 C 的真实语义算，不要自行取模/截断；用"把校验和字段当 8 个空格"的 tar 规则或参考真实产物反证；(4) 最省事的兜底是拿真产物做 ground truth：用宿主 gcc 编译同一个 .c 生成一份真实归档，dump 前两个 512 字节头与自写版本逐字段比对
+rec_command:            python3 -c "h=bytearray(512);h[124:136]=b'0'*11;print(len(h),repr(h[156:157]))"
+rec_auto_fix:           false
+
+fallback_priority:      2
+fallback_approach:      reuse-the-tools-own-writer-via-ctypes
+fallback_description:   若 C 助手可为目标/宿主编译，测试里直接用它生成输入（宿主 gcc 编译一份跑真实 /proc），避免在 Python 里复刻格式；此时测试仍需对"归档结构"做独立 reader 校验，否则等于自证
+fallback_command:      gcc -O2 -o /tmp/helper_host <helper>.c && /tmp/helper_host > /tmp/fixture.tar
+fallback_auto_fix:      false
+
+# ══ 知识协作 (Authorship & Provenance) ══
+source_pr:
+source_commit:
