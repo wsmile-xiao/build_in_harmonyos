@@ -4,7 +4,7 @@
 - **上游版本**：官方 1.6.0；本次适配修复版本 1.6.0.2，不冒称新上游标签
 - **上游仓库地址**：https://github.com/webmproject/libwebp
 - **适配路径**：路径 A（基础适配）+ 路径 B（贡献创新）；已按当前完整证据逐项重判HD1—HD4，四项均未匹配
-- **使用知识库**：E096、E130；本次实质增量配对草稿 E696-draft-LWP2
+- **使用知识库**：E096、E130；本次实质增量配对草稿 E2026100907-draft-LWP2。旧 E696 已被主线其他贡献占用，本次只迁移本 PR 草稿对，保留他人条目不变。
 
 ---
 
@@ -58,7 +58,7 @@
 - 上游测试用例通过率：76/76（100%）
 - 新增测试用例通过率：5/5（100%）
 
-本文件为待创建新 PR 的六节正文。Issue #3565 已经一次纠正并权威回读，真实修复任务14927（libwebp1.6.0.2，fix/libwebp-1.6.0.2）已导入并领取，账号2301_80739235，活动为开源鸿蒙PC专项积分赛-依赖。正式证据绑定当前实际配方、完整 HEAD/tree、唯一 run、boot/UID、输入 SHA-256、真实 stdout/stderr/RC、原 source case IDs 和完整 WAL/receipt 链。探索 libwebp-native-observed-r004.json 的 76/76 不拼接正式结果；旧 PR #13623 的 Review/CI 不冒充新修复版本的当前 HEAD 门禁。
+本文件为 PR #14954 的六节正文。Issue #3565 与本 PR 双向唯一关联，真实修复任务14927（libwebp1.6.0.2，fix/libwebp-1.6.0.2）已领取，账号2301_80739235，活动为开源鸿蒙PC专项积分赛-依赖。正式证据绑定实际配方、完整 HEAD/tree、唯一 run、boot/UID、输入 SHA-256、真实 stdout/stderr/RC、原 source case IDs 和完整 WAL/receipt 链。本次知识编号和正文纠正不改动配方、补丁、测试入口或十二项运行输入哈希，不重放已消费事务。探索 libwebp-native-observed-r004.json 的 76/76 不拼接正式结果；旧 PR #13623 的 Review/CI 不冒充新修复版本的当前 HEAD 门禁。
 
 正式同run证据：libwebp-conan-observed-r005.json SHA-256 `5bb410b2b7eab1e098606f343b9d77fb7d042d244e7d0c4000c7ecbca78792c5`；libwebp-conan-source-cases-observed-r005.json SHA-256 `3c53696cefb28e66b42124da8bd508449cdd89db97bddfbfe63158f8aa22cc48`。当前官方step35 r001使用新增专项目录、清单与固定marker实际执行，原setup/build_and_test RC0、76+4+1和L0/L1通过；原`.ci-result.json`实际由官方方法生成、原日志SHA `b6cf02d05e27386b18038b674b8beb034f23fa14c85a3ca4de8b8d6ed7c0e18f`独立核对。`reports/official-step35-observed.json` SHA `9c44182d456b890bf788d9c0dc151320809ee11c9ce2bf11902f0dfb9c27cd0d`、`reports/upstream-source-cases-observed.json` SHA `10f3be25105582c22a1c8db1c3571a8960e4ea67e8f3487658a3186061a69025`。各run唯一launch/release/postrelease/自有进程0均独立核对，不将任一探索结果冒充正式阶段，也不将本地CI冒充平台CI。
 
@@ -66,9 +66,9 @@
 
 ## 补充说明
 
-- 关联 Issue：[Issue #3565](https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/3565)，已权威回读为本账号唯一 OPEN 的真实1.6.0.2修复申请；旧版本历史关联已一次解除并双向回读为空，旧PR保持OPEN且代码HEAD不变。真实任务14927已领取；PRE_CREATE和新PR的POST_CREATE仍须逐阶段实际验证。
+- 关联 Issue：[Issue #3565](https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/3565)，已权威回读为本账号唯一 OPEN 的真实1.6.0.2修复申请；当前唯一关联为 [PR #14954](https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/14954)。真实任务14927已领取；知识编号纠正后的当前候选仍须重新通过 POST_CREATE，不复用旧 HEAD 合同。
 - 队伍名称：天天开心
 - 申请人显示标识：2301_80739235
 - 源分支：fix/libwebp-1.6.0.2
 - 目标分支：OpenHarmonyPCDeveloper/build_in_harmonyos:main
-- 其他说明：此为真实更高修复版本，修复旧配方禁用原测试、缺少鸿蒙专项以及未知平台 C++ 标准/ELF 链接行为；不是同版本重复导入。知识草稿必须配对提交并通过当前门禁。平台正式 Review/CI 未触发，不能称仅等待 CI。
+- 其他说明：此为真实更高修复版本，修复旧配方禁用原测试、缺少鸿蒙专项以及未知平台 C++ 标准/ELF 链接行为；不是同版本重复导入。知识草稿配对提交并重新绑定当前候选门禁。平台 Review/CI 已在旧 HEAD 触发；知识编号纠正后以新 HEAD 的实际 Review/CI 为准，不把未领取或未完成的 CI 请求当作通过，也不冒称已提审。
