@@ -1,0 +1,72 @@
+# ═══ Draft knowledge entry — hmdfs O_DIRECT ═══
+# 主题: HMDFS 对 O_DIRECT 的非对称支持——新文件 O_CREAT|O_DIRECT 成功、
+#       已存在文件 open(O_DIRECT) 返回 EINVAL；给出探测法与回退补丁模板
+# 来源: randomio 1.4 真机 r2（2026-10-03，job randomio-1.4-20261004）
+# 状态: DRAFT — 需人工/AI 审核后 promote 为 E 条目
+#
+# To promote:
+#   1. Review evidence below
+#   2. Rename to E0XX.kv and move to knowledge/graph/
+#   3. Add a row to knowledge/graph/index.tsv
+#   4. Write knowledge/doc/E0XX.md
+
+id:                     DRAFT-hmdfs-odirect-existing-file-open-einval
+trigger_tool:           open|O_DIRECT|posix io|benchmark
+phase:                  runtime|test_package
+error_signature:        open: Invalid argument|OSError\(22|errno.*EINVAL.*O_DIRECT
+severity:               2
+category:               platform|hmdfs|filesystem|odirect|io
+match_keywords:         O_DIRECT, EINVAL, Invalid argument, HMDFS, buffered I/O fallback,
+                        直 IO, 缓冲回退, direct io benchmark, open O_CREAT
+title:                  HMDFS 对 O_DIRECT 非对称支持（新文件 OK/已存在文件 EINVAL）：探测法 + 回退补丁模板
+
+root_cause: >
+  HarmonyOS PC 的 HMDFS 文件系统接受 open(path, O_CREAT|O_RDWR|O_DIRECT)
+  创建新文件，但对已存在文件 open(path, O_RDWR|O_DIRECT) 返回 EINVAL。
+  仅用"创建探测"会误判 O_DIRECT 可用；真实数据面工具（基准测试等）打开
+  既有文件时立即失败。musl 定义 O_DIRECT，编译期 #error 守卫全部通过，
+  问题只在运行时暴露。
+
+affected_scope: >
+  所有源码含 open(..., O_DIRECT ...) 的 C/C++ 包（IO 基准、数据库存储引擎
+  工具、直 IO 拷贝工具等）在 HarmonyOS PC 真机的 test_package/运行阶段。
+  ext4/f2fs 数据分区不受影响；对块设备(/dev/block/...)的真直 IO 不适用回退。
+
+verification_cmd: >
+  # 设备端（base64 传 python3 脚本，/tmp 只读勿用 heredoc）
+  # 新文件: os.open(p, O_CREAT|O_RDWR|0x4000) -> OK
+  # 已存在: os.open(p, O_RDWR|0x4000) -> OSError(22, EINVAL)
+  # 修复后运行包二进制，stderr 应出现 warning: O_DIRECT unsupported ... falling back
+
+rec_priority:           1
+rec_approach:           einval-buffered-fallback-patch
+rec_description: >
+  在 open 失败且 errno==EINVAL 时用 #ifdef O_DIRECT 守卫的回退分支重开为
+  缓冲 IO 并向 stderr 打 warning（镜像上游常见 __APPLE__ OPEN_FLAGS=0 可移植
+  分支）。语义变化（延迟含页缓存、非直 IO）必须写入 manifest/notes；测试
+  断言只针对功能结构，不断言直 IO 数值。对块设备路径不回退。
+
+rec_command: >
+  #ifdef O_DIRECT
+  if (fd == -1 && errno == EINVAL) {
+      fprintf(stderr, "warning: O_DIRECT unsupported on %s, falling back to buffered I/O\n", filename);
+      fd = open(filename, flags & ~O_DIRECT);
+  }
+  #endif
+rec_auto_fix:           false
+rec_impl:               manual-patch
+
+# 适用边界（何时使用本条目）
+applicable_when: >
+  真机运行报 open: Invalid argument、编译期无问题、数据面目标是普通文件、
+  且上游存在可镜像的"关直 IO"可移植分支（__APPLE__/F_NOCACHE 等）。
+# 反例（何时不适用）
+counterexamples: >
+  块设备/裸盘真直 IO 场景（EINVAL 是合法报错，不应掩盖）；测试若需要直 IO
+  语义本身（如 fio 类校验）则应换数据面路径而非回退；ext4/f2fs 分区上出现
+  EINVAL 另寻他因。
+# 限制（已知局限）
+limitations: >
+  回退改变基准语义（含页缓存），不能与真直 IO 数字混用；EINVAL 判定未区分
+  "文件系统不支持"与"对齐错误"（本场景对齐由上游 512 字节约束保证）；
+  证据来自 randomio 1.4 单包两次独立复现，HMDFS 版本相关行为可能变化。
