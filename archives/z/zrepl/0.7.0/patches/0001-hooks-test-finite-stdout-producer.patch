@@ -1,0 +1,59 @@
+From: OHOS porting run zrepl-0.7.0
+Subject: [PATCH] hooks test fixture: finite stdout producer - unbounded
+ `while printf` never terminates under OHOS toybox /bin/sh
+
+The fixture's unbounded `while printf ... | head -c $((2<<20))` producer
+terminates on POSIX shells only because the writer process itself dies of
+SIGPIPE: mainstream /bin/sh (bash/dash/mksh) run printf as a builtin, so
+the loop process is the writer and its SIGPIPE death ends the loop once
+head exits.
+
+OHOS /bin/sh is toybox and has no printf builtin ("type printf" reports
+an alias for the external applet), so every loop iteration forks a fresh
+writer process; a single writer's SIGPIPE death does not end the `while :`
+loop. The pipeline never reaches EOF, the zrepl hook's cmd.Wait() blocks
+forever, and TestHooks/exceed_buffer_limit panicked at the 10m go-test
+timeout on the OHOS device (authoritative CI run2: FAIL 600.612s).
+
+Bounded control probes on the same device confirm SIGPIPE/EPIPE delivery
+itself is normal for simple pipelines (bash builtin writer loop and
+external `seq` writers all terminate same-second once the reader exits):
+the deciding variable is whether the writer executes inside the loop
+process (shell builtin) or is forked as an external applet. The exact
+switch between the two observed hang forms (fork-regeneration spin vs a
+writer blocked in write(), the latter TERM/timeout-immune) is not yet
+fully characterized and is recorded as an open point.
+
+Replace the producer with a finite `dd` emitting the same 2<<20 bytes.
+The Go-side assertions only check the captured buffer length (circular
+log capped at 1<<20), not content, so test semantics are preserved on
+both POSIX systems and OHOS.
+diff --git a/internal/daemon/hooks/test/test-large-stdout.sh b/internal/daemon/hooks/test/test-large-stdout.sh
+index fa95b39..49dae3e 100644
+--- a/internal/daemon/hooks/test/test-large-stdout.sh
++++ b/internal/daemon/hooks/test/test-large-stdout.sh
+@@ -4,9 +4,21 @@
+ # The Go test should fail if buffer size exceeds 1MB
+ 
+ pre_testing() {
+-	ln=0
+-	while :; do printf '%06d: 012345678901234567890123456789012345678901234567890123456789012345678901\n' "$ln"; ln="$(($ln + 1))"; done \
+-	| head -c$(( 2 << 20 ))
++	# OHOS port: the original unbounded `while printf` producer terminates
++	# only because the writer process itself dies of SIGPIPE once `head -c`
++	# exits; mainstream /bin/sh run printf as a builtin, so the loop process
++	# is the writer. OHOS /bin/sh (toybox) has no printf builtin, so every
++	# iteration forks an external writer whose SIGPIPE death never ends the
++	# `while :` loop: the pipeline never reaches EOF and the hook's
++	# cmd.Wait() hangs (TestHooks/exceed_buffer_limit panicked at the 10m
++	# go-test timeout). Bounded probes confirm SIGPIPE/EPIPE delivery itself
++	# works for simple pipelines here (bash builtin writer and external seq
++	# writers terminate same-second); the defect is the fork-per-iteration
++	# writer shape. Emit the same 2<<20 bytes from a finite producer
++	# instead; the Go-side assertions only check the captured buffer length
++	# (circular log capped at 1<<20), so test semantics are preserved on
++	# POSIX shells and OHOS alike.
++	dd if=/dev/zero bs=$(( 2 << 20 )) count=1 2>/dev/null
+ }
+ 
+ case "$ZREPL_HOOKTYPE" in

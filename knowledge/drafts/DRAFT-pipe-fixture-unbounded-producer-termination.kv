@@ -1,0 +1,77 @@
+#====================================================================
+# DRAFT-pipe-fixture-unbounded-producer-termination.kv
+# 对应的人类文档: knowledge/drafts/DRAFT-pipe-fixture-unbounded-producer-termination.md
+# 申报域: musl/libc 与 toybox 差异（shell 能力差异）；相邻: 系统调用限制（open point 部分）
+# 分层: L1 平台/工具链/构建系统语义层（阻塞面: 运行失败，真实 FAIL 日志与探针为证）
+# 状态: 草稿（B 配额 1/2，PENDING_PAYLOAD；最终编号 Exxx 由知识库主编确认）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-PIPE-FIXTURE-UNBOUNDED-PRODUCER-TERMINATION
+trigger_tool: test
+phase: test
+error_signature: panic: test timed out after .*m0s|os/exec \(\*Cmd\)\.awaitGoroutines|test binary.*hang|conan create failed
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity: blocking
+category: portability,platform,posix,libc
+match_keywords: printf,head -c,SIGPIPE,EPIPE,pipe,fixture,go test,timeout,toybox,sh,builtin,builtin,fork,无界生产者,管线挂死
+title: 无界 `while printf` 管线 fixture 依赖写端进程自身死于 SIGPIPE 才能终止；OHOS /bin/sh（toybox）无 printf 内建导致每轮 fork 外部写端、循环永不终结——应改有限输出生产者（或内建写端 shell）
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause: `无界生产者 | head -c N` 形态的测试 fixture 在 POSIX 系统上能终止，是因为主流 /bin/sh（bash/dash/mksh）把 printf/echo 作为内建命令执行——循环进程自己就是写端，head 退出后内建写端死于 SIGPIPE，`while` 循环随之终结。OHOS 的 /bin/sh 是 toybox 且无 printf 内建（`sh -c 'type printf'` 输出 "printf is an alias for printf"，指向外部 applet），每轮循环 fork 一个新的外部写端进程；单个写端进程死于 SIGPIPE 不会终止 `while :` 循环，写端无界再生 → 管线永不达到 EOF → 消费方的 cmd.Wait()（os/exec）永不见管道关闭 → go test 默认 10 分钟超时 panic。有界控制探针证实同设备简单管线的 EPIPE/SIGPIPE 投递本身正常（bash 内建写端循环、登录 shell 建管的外部 seq、toybox sh -c 建管的 seq 在读端退出后全部同秒终结；toybox sh 裸 echo 循环因内建执行也同秒终结，而 /bin/echo、/bin/printf 外部循环同样挂死）——决定变量是写端在循环进程内（内建）还是每次 fork 外部 applet，不是内核级 EPIPE 缺失。实测存在两种挂死形态：fork 再生 spin，以及写端阻塞在 write()（D 态、TERM/timeout 免疫，活体残留可存活数小时）；两种形态的确切切换条件（内核满缓冲写与读端可见性的交互、toybox sh 管线 fd 布线）尚未完全定性——作为 open point 如实记录，不得写成已证实的内核级结论。
+affected_scope: 任何测试 fixture / CI 脚本在 OHOS /bin/sh 下使用『无界生产者 | head -c N』形态（终止依赖 SIGPIPE 杀死写端进程）的项目；同类风险覆盖 shell hook、管线式测试数据生产器、conan test_package 包装脚本
+verification_cmd: 全部命令在设备新 shell 直接可跑，逐条有界 ≤6s。P1 对照（timeout/KILL 机制正常）: timeout -s KILL 5 bash -c 'while :; do :; done'（耗整 5s 被杀）。P2 内建写端（EPIPE/SIGPIPE 投递正常）: timeout -s KILL 5 bash -c 'while :; do echo xxxxxxxxxx; done' | head -c 10（同秒完成）。P3 登录 shell 建管外部写端: timeout -s KILL 5 sh -c 'seq 1 2000000' | head -c 10（同秒完成，无残留）。P4 toybox sh 建管外部写端: timeout -s KILL 5 sh -c 'seq 1 2000000 | head -c 10'（同秒完成，无残留）。P2-P4 后建议 ps -ef | grep -E 'seq|while :' 复核无残留。P5 机理复现（危险，必须 KILL 包裹）: timeout -s KILL 5 sh -c 'while :; do printf x; done | head -c 10'（挂满 5s 被 KILL = 复现；timeout 只杀顶层 sh，while 子壳/printf 子进程会残留且对 TERM 免疫——事后必须 kill -9 清理全部残留并 ps -ef | grep -E 'printf x|while :' 复核清零）
+shell_type_note: /bin/sh = toybox（无 printf 内建；type 对 echo 也报 alias 但裸 echo 为进程内执行——勿据 type 输出推断内外建，以 P2/P5 循环形态探针为准）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: 有限输出生产者重写 fixture
+rec_description: 用 dd/seq 等有限生产者产出等量字节，彻底消除对"SIGPIPE 杀死写端进程"的终止依赖；不触碰消费方断言，POSIX 与 OHOS 双侧语义保持，且可上游提交（对齐 P005）。
+rec_command: dd if=/dev/zero bs=$(( 2 << 20 )) count=1
+rec_auto_fix: false
+rec_impl: archives/z/zrepl/0.7.0/patches/0001-hooks-test-finite-stdout-producer.patch
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: fixture 改用带内建写端的 shell 执行
+fallback_description: 将 fixture 改为 #!/data/service/hnp/bin/bash（或把管线段交给 bash -c 执行）保留无界形态——诚实权衡：这是退路而非修复，依赖设备上非标准 bash 路径，可移植性差且掩盖兼容性问题；优先用推荐方案。
+fallback_command: sed -i '1s|.*|#!/data/service/hnp/bin/bash -eu|' test/test-large-stdout.sh
+fallback_auto_fix: false
+fallback_impl: -
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+forbid_1_pattern: skip.*TestHooks|t\.Skip\(.*hooks|禁用.*hooks 测试|修改.*断言长度
+forbid_1_reason: 为绕过挂死而跳过/禁用上游测试或修改 Go 断言，属于污染上游判定（态度审计红线；平台限制应降级记录而非绕过，对齐 P013）。
+forbid_1_consequence: 上游测试语义漂移，适配结论失真，无法向上游提交，违背知识库与赛事评审的诚实性要求。
+forbid_2_pattern: while :; do printf|while :; do .*/bin/echo|while true.*printf.*\| *head
+forbid_2_reason: 禁止新增"终止依赖 SIGPIPE 杀死写端进程且写端为 fork 外部 applet"的无界生产者 fixture（OHOS /bin/sh 下必挂）；也禁止按 `type` 输出做 printf→echo 互换的"假修复"——type 对 echo 同样报 alias，/bin/echo 外部循环同样挂死，仅裸 echo（toybox sh 内建执行）才同秒终结。
+forbid_2_consequence: fixture 在 OHOS 上再次挂死到 go test 超时（实测 600s panic），且假修复让错误机理进入代码注释与知识库。
+
+# ═══ Layer 4: 原则引用 ═══
+principles: P005,P013
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             E010,E402,E074
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-pipe-fixture-unbounded-producer-termination.md
+last_updated: 2026-09-30
+source_event: 某 Go 项目 hook 管线 fixture（test-large-stdout.sh）在 OHOS 设备权威 CI 中 TestHooks/exceed_buffer_limit 挂死至 go test 10m 超时 panic（FAIL 600.612s）；有限生产者修复后 hooks 包 3.018s ok
+authors: why6666666 <why6666666@atomgit.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used: 2026-09-30
+
+draft: true
+contributor_id: why6666666
