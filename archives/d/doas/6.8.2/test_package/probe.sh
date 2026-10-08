@@ -1,4 +1,7 @@
 #!/bin/bash
+# Historical unused probe retained verbatim below for traceability. Current
+# test_package invokes probe.py and harmony_safety.py, not this script. Its
+# broad nonzero parser oracle is not accepted as current product evidence.
 # doas 消费者探针 — 调用已安装二进制(doas 在 conanrun PATH 中)
 # 三项断言,全部免 root:
 #   P1  -C 合法配置   → 退出码 0(真跑 parse.y 解析器)
