@@ -1,0 +1,91 @@
+#====================================================================
+# E900-draft-F4EE
+#   旧式 C 源码缺 <time.h>：ctime/gmtime 隐式声明返回 int，LP64(aarch64)
+#   指针被截断——clang 仅告警、编译链接全过，运行时 SIGSEGV
+# 来源: 积分赛路径 B（知识库扩展）sysnews 0.9-ds.1，2026-09-30
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E900
+trigger_tool:           clang|make|test
+phase:                  compilation|runtime
+error_signature:        call to undeclared function '(ctime|gmtime|localtime|time|strftime|mktime)'|
+                        implicit declaration of function '(ctime|gmtime|localtime|time|strftime|mktime)'|
+                        uncaught target signal 11.*Segmentation fault|
+                        Segmentation fault.*(ctime|gmtime|strftime)
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               portability, headers, compat, libc
+match_keywords:         implicit declaration, undeclared function, ctime, gmtime, strftime, time.h,
+                        Wimplicit-function-declaration, pointer truncation, LP64, implicit int,
+                        segmentation fault, SIGSEGV, aarch64, legacy C, void main
+title:                  旧式 C 源码缺 <time.h>：ctime/gmtime 隐式声明返回 int，aarch64 上指针被截断，编译仅告警、运行时段错误
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             上世纪 90 年代 C 源码（sysnews news.c）调用 ctime()/gmtime()/time()/strftime() 却没有
+                        #include <time.h>（只包含了 sys/time.h、utime.h 等）。C89 允许隐式声明，返回值按 int 处理；
+                        clang 15 对此只给 -Wimplicit-function-declaration 告警而不报错。在 ILP32 或 x86
+                        非 PIE 静态链接（地址 <4GB）时指针被截断后仍然有效，程序“碰巧正常”；在 aarch64
+                        LP64 的 PIE/动态可执行文件上，libc 返回的高位地址（0x55…/0x7f…）被截断成 32 位，
+                        作为 %s 参数或 struct tm* 使用时立即 SIGSEGV。表现为：配方编译通过、smoke
+                        test（--version/--help）通过，只有走到 -a/-d 等真正调用这些函数的路径才崩溃。
+                        x86_64 PIE 下同样复现，因此不是 OHOS 独有，但在 OHOS 交叉构建/真机上必现。
+affected_scope:         所有未包含 <time.h>（或其它 libc 头）而调用返回指针的 libc 函数的旧式 C/Autotools/Makefile
+                        项目（ctime/gmtime/localtime/getenv/strdup/malloc 等），尤其是 -std=gnu89 时代的
+                        小型 Unix 工具；编译日志里有 implicit-function-declaration 告警的 C 项目都应核对。
+verification_cmd:       cd $SRC && clang -Wall -O2 -c news.c 2>&1 | grep -c "undeclared function"; 补丁后应为 0；
+                        aarch64 上对同源 .o 用 -static-pie -Wl,-z,muldefs 重链并在 qemu-aarch64 下运行
+                        `news -f DIR -n -l -d`：补丁前 qemu: uncaught target signal 11，补丁后输出 NEWS 行且 rc=0
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           include-missing-libc-header
+rec_description:        用 refresh-patch 给对应 .c 增加缺失的标准头（<time.h>），不使用任何平台宏，对所有平台都是正确修复
+rec_command:            sed -i 's|#include <limits.h>|#include <limits.h>\n#include <time.h>|' news.c && clang -Wall -O2 -c news.c 2>&1 | grep -c undeclared
+rec_auto_fix:           false
+rec_impl:               source-patch
+
+fallback_priority:      2
+fallback_approach:      force-include-header
+fallback_description:   源码文件过多无法逐个加头时，仅对该项目 CFLAGS 加 -include time.h；必须配合消费者用例验证实际调用路径
+fallback_command:       make CFLAGS='-Wall -O2 -include time.h'
+fallback_auto_fix:      false
+fallback_impl:          configure-arg
+
+forbid_1_pattern:       -Wno-implicit-function-declaration|-Wno-error=implicit-function-declaration|-std=gnu89|-std=c89
+forbid_1_reason:        只是压掉告警或退回 C89，隐式 int 返回值仍然存在，指针截断问题原样保留
+forbid_1_consequence:   构建绿、--version/--help 冒烟通过，但 -a/-d 等路径在 aarch64 上运行时 SIGSEGV，CI 与用户现场才暴露
+forbid_2_pattern:       extern (char|struct tm) ?\*.*(ctime|gmtime)|#ifdef __OHOS__.*time\.h
+forbid_2_reason:        手写原型或用 __OHOS__ 守卫都会复制 libc ABI 细节并使补丁带平台宏，违背 R8；缺头本身对所有 LP64 平台都是缺陷
+forbid_2_consequence:   补丁难以上游化，且 PF5 平台宏闸会拦截
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              []
+similar_to:             [E420, E063, E093]
+conflicts_with:         []
+prerequisite_of:        []
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/E900-draft-F4EE.md
+last_updated:           2026-09-30
+source_event:           sysnews 0.9-ds.1 适配：qemu-aarch64 下同源 .o static-pie 重链，test_package/test.sh 补丁前在 [4] -d 段错误 rc=1，补丁后 ALL PASS rc=0
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors:                nyaco3 <aqjCItYW1QmEJQuF.gcw_XDpqZ8sO@noreply.gitcode.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-30
+
+draft: true
+contributor_id: F4EE
