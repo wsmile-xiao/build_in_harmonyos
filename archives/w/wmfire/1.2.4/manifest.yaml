@@ -1,0 +1,51 @@
+# 版本级 manifest
+# wmfire 1.2.4
+
+version: "1.2.4"
+software: "wmfire"
+status: built
+build_date: "2026-09-30"
+build_system: autotools
+
+source:
+  url: "https://httpredir.debian.org/debian/pool/main/w/wmfire/wmfire_1.2.4.orig.tar.gz"
+  sha256: "e38b508519faf132273a9eaf75db56f1b14a5912667dd6843fc902d4a0ca2f80"
+  tar_format: tar.gz
+
+build:
+  system: autotools
+  configure_options:
+    - "--host=aarch64-linux-ohos"
+  dependencies:
+    - "gtk2/2.24.33"
+    - "libgtop/2.41.3"
+    - "libx11/6.4.0"
+    - "libxext/6.4.0"
+    - "glib/2.84.0.1 (force=True)"
+    - "pango/1.50.14.1.1.1 (force=True)"
+  cc: clang
+
+patches_applied:
+  - "0001-remove-hardcoded-x11-paths.patch"
+
+upstream_tests:
+  command: "make check"
+  test_count: 0
+  notes: "上游 Makefile.am 未声明 TESTS、也无 test suite 目录，make check 是成功的空操作；仍在 build() 中执行该入口以证明它在 OHOS 上可运行。"
+
+test_package:
+  assertion_count: 21
+  description: "鸿蒙具名端到端消费者用例 src/hc_consumer.c（HC-1..HC-4）：产物 ELF 契约；无 DISPLAY 下 exec 已安装的 bin/wmfire 验证加载器解析完整 DT_NEEDED 闭包且 main() 被真正执行到（GDK init failed / exit 255）；真实调用 XParseGeometry；真实调用 glibtop_get_cpu（wmfire 的真实刷新路径，不额外调 glibtop_init）并读 server->ncpu——判据锚定在消费者本进程域读到的 /proc/stat 原始内容上做三态交叉校验（原始计数非零→采样须非零、非递减且落在该文件界定的窗口内：idle 取聚合行第 4 字段且只能增长，total 须命中该行两种合法解析之一；被 MAC 拒绝→须按 /proc/stat+Permission denied 显性拒绝；文件可读但无计数→须如实返回零而不凭空造数），子进程里 libgtop 的诊断输出在任何结论下都会回显。全部只走 exec-time 加载路径，不使用 dlopen。"
+
+knowledge_gained:
+  - "仓库把同一份上游 libgtop 源码打成 libgtop/2.41.3（glib 2.84 轨道，cpp_info.libs 含 intl）与 libgtop2/2.41.3（glib 2.88 轨道，cpp_info.libs 缺 intl）两个包：在 gtk2 强制 glib/2.84.0.1 的图中必须选前者，否则依赖会被判 Missing 而触发源码重建，且重建时静态归档所需的 g_libintl_ngettext 无人提供、链接必失败 (ref: E508)"
+  - "glib 的 libintl.h 把 gettext 宏映射成 g_libintl_*；glib/2.84.0.1 的 libglib-2.0.so 不导出该符号，提供它的是 glib 包自带的 lib/libintl.so，因此静态链接 libgtop-2.0.a 的消费者必须同时链接 -lintl (ref: E508)"
+  - "OHOS musl 加载器不跟随符号链接解析 DT_NEEDED，且 LD_LIBRARY_PATH 优先于 DT_RPATH：依赖包必须把版本化 soname 摊平成实体文件，消费者侧只能依赖 LD_LIBRARY_PATH；本包据此移除安装产物的 build RPATH 并用 HC-2 的 exec 探针兜住该回归 (ref: E505)"
+  - "OHOS CI 运行器拒绝 dlopen/LD_PRELOAD 用户目录下的任何 .so（与签名无关），但 exec 时按 DT_NEEDED 加载同一文件是允许的；因此运行期验证必须走 exec-time 路径，不能用 dlopen 探测闭包，否则在 CI 上必然假失败 (ref: E502)"
+  - "autoconf/automake 生成的 configure、config.guess、install-sh 等辅助脚本从 tarball 重打包后常丢失可执行位，必须在 configure 前恢复，否则 OHOS 上 execve 被拒 (ref: E490)"
+  - "对已带 .codesign 段的 OHOS ELF 重新签名时，必须先 llvm-objcopy --remove-section .codesign 去掉旧段再签，存在旧段就跳过签名会让加载器拒绝该产物 (ref: E452)"
+  - "OHOS /proc 挂载含 hidepid=invisible / hmmac=genfs，用户目录可执行文件被 MAC 拒绝读取 /proc/stat、/proc/version 等（同 uid 的系统二进制可读，签名不改变这一行为）；glibtop 的任一 API 首次调用都会先经 glibtop_open_s() 读 /proc/stat，被拒时 libgtop 走 glibtop_error_io_r() → abort，因此用户目录二进制上所有 glibtop API 都 SIGABRT（实测 stderr：`glibtop(c=N): [ERROR] open (/proc/stat): Permission denied` 后 signal 6）——运行期验证必须 fork 子进程采样并按平台能力交叉校验（可读→递增计数，拒绝→显性报错且不上报伪造计数）(ref: E031)"
+  - "OHOS musl 不跟随符号链接解析 DT_NEEDED 且 LD_LIBRARY_PATH 优先于 DT_RPATH，因此消费者侧必须把依赖闭包 cp -L 摊平成实体文件再前置到 LD_LIBRARY_PATH；但平铺会摧毁 LD_LIBRARY_PATH 搜索顺序——VirtualRunEnv 写的 <conan libdirs>:<环境原有值> 尾巴里含 /data/storage/el1/bundle/libs/arm64，其中有同名但不可加载的 libc++_shared.so（7519624 B，无 .codesign），后到先得覆盖会破坏工具链那份可加载的（1267392 B）；修法是先播工具链自带的 libc++_shared.so 再改用 cp -nL（先到先得，还原加载器搜索顺序）——platform cp 支持 -n（实测 FIRST 保留、rc=0）(ref: E505)"
+  - "autoconf 2.72 生成的 config.status 用 (umask 077 && mktemp -d \"./confXXXXXX\") 建私有临时目录；HMDFS 把它映射成 drwx--S---（2700+setgid，chmod 无效），只有目录映射 owner 可写。本地 shell 恰落在可写域（W3 全绿），CI worker 落在另一 uid 域 → ./config.status[N]: can't create ./confXXXXXXXX/subs1.awk: Permission denied / could not setup config files machinery。修法：build() 生成 configure 后把该处 umask 放宽为 000（显式取组可写，不依赖 CI 环境 umask 值），configure 与其派生的 config.status 两处同时生效；同类先例 archives/a/abiword-plugin-clarisworks/3.0.8 (ref: E011)"
+  - "OHOS 的 /proc/stat 在不同 CI worker 容器之间形态不一致，同一 PR 的两台 worker 就可能一台「可读但所有计数恒为 0」（同环境 CMake 亦打印 Problem parsing /proc/meminfo）、另一台「可读且带真实计数」，而本地用户机器上是第三种「被 MAC 全拒」。因此依赖 glibtop 采样的运行期用例不能写成二态（可读→递增 / 拒绝→报错），必须把判据锚定在消费者本进程域读到的原始文件内容上并做数值交叉校验：idle 取聚合行第 4 字段（只能是增长），total 用该行两种合法解析界定窗口——注意 OHOS uname release 为 `HongMeng Kernel 1.12.0`，libgtop 的 sscanf(\"%u.%u.%u\") 解析成 0.0.0，故其 >=2.6 分支不会执行，total 只含 user+nice+sys+idle (ref: E031)"
+  - "运行期用例把采样结果经管道回传时，必须在 dup2() 之后保留一个专用写端：先 close(fds[1]) 再 write(fds[1], …) 只会得到 EBADF 并被静默丢弃，父进程解析不到结果行即认为采样值为 0。这种缺陷最危险之处在于它只在**真值分支**暴露——拒绝分支只看子进程退出状态与 stderr，照样通过，于是本地「全绿」掩盖了真值分支从未被验证过。修法：结果行与诊断输出走两条独立管道，且无条件回显子进程诊断（exit/signal + libgtop 原文）(ref: E502)"
