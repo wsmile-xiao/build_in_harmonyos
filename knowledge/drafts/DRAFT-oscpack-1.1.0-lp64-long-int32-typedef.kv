@@ -1,0 +1,75 @@
+#====================================================================
+# DRAFT — aarch64 LP64: 上游头文件用 "非 x86_64 => 32 位" 假设把 int32
+# typedef 成 long，sizeof(int32)==8 导致缓冲区管理内部状态被静默破坏
+# （Release 构建下 sanity assert 被 NDEBUG 编译掉，故障延迟到后续
+# 操作以 SIGSEGV 暴露）。oscpack 1.1.0 OscUnitTests 实证。
+#====================================================================
+
+id:                     DRAFT-oscpack-1.1.0-lp64-long-int32-typedef
+trigger_tool:           cmake|clang++
+phase:                  building
+error_signature:        (SIGSEGV|Segmentation fault).*(test|OscUnitTests)|sizeof\(osc::int32\) ?[!=]= ?4|assert\( sizeof\(osc::int32\) == 4 \)
+severity:               1
+category:               ohos, aarch64, lp64, portability, cmake, silent-corruption
+match_keywords:         LP64, int32, long, typedef, x86_64 guard, NDEBUG, sanity assert, OutboundPacketStream, OscTypes.h, segfault, 端到端, bundle, EndBundle
+title:                  aarch64 LP64 下非 x86_64 平台被假设为 32 位（typedef long int32），类型错乱静默破坏内部状态并段错误
+
+root_cause:             部分上游库（oscpack 1.1.0 OscTypes.h 等）用 #if defined(__x86_64__)/#else 分支选择整型 typedef，
+                        #else 分支写成 typedef signed long int32——这在 32 位平台正确（long==4 字节），
+                        但 aarch64/riscv64 等 LP64 平台 long==8 字节，sizeof(int32)==8。
+                        Release（-DNDEBUG）构建把构造函数里的 sanity assert（assert(sizeof(osc::int32)==4)）编译掉，
+                        错误不立即暴露：缓冲区偏移/尺寸算术以 8 字节类型参与 4 字节序列化协议，
+                        内部指针链被破坏，故障延迟到后续操作以 SIGSEGV 形式出现，且崩溃点与真实出错点分离。
+affected_scope:         所有带 "非 x86_64 即 32 位" 预处理分支的 C/C++ 库在 aarch64 上的首次适配；尤其序列化/编解码/网络协议库。
+verification_cmd:       printf '#include "osc/OscTypes.h"\n#include <cstdio>\nint main(){return sizeof(osc::int32)==4?0:1;}' > s.cpp && clang++ -I<src> s.cpp && ./a.out; echo rc=$?   # 坏的 typedef 下 rc=1
+
+rec_priority:           1
+rec_approach:           patch-typedef-to-int-plus-lp64-guard-elim
+rec_description:        ① 把 #else 分支的 typedef signed long/unsigned long 改为 signed int/unsigned int（LP32/LP64 通用，32 位行为不变）；
+                        ② 同文件族里其余 "#if !(defined(__x86_64__)||defined(_M_X64))" 守卫（为 32 位补充的 int 重载，
+                        如 operator<<(int)、ReceivedPacket(int)）需追加 "&& !defined(__LP64__) && !defined(_LP64)"，
+                        否则 int32 变 int 后与原 int32 重载签名重复，编译报 duplicate。
+                        注意：预处理指令里不能写 sizeof(void*)==8 这类运行期表达式，只能用 __LP64__/_LP64 宏。
+rec_command:            diff -u orig/osc/OscTypes.h work/osc/OscTypes.h   # 逐项核对 typedef 与守卫两处修改
+rec_auto_fix:           false
+rec_impl:               manual-header-patch
+
+fallback_priority:      2
+fallback_approach:      asan-unbuffered-diagnosis
+fallback_description:   定位这类"崩溃点≠出错点"的问题：先用 ASan 或 -O0 重编上游测试（sanity assert 会立即生效），
+                        再用 LD_PRELOAD 注入 setvbuf(stdout,_IONBF) 构造函数库消除缓冲干扰——
+                        管道/重定向输出全缓冲时，SIGSEGV 会丢掉最后 ~4KB 输出，看到的输出边界不是崩溃点。
+                        设备无 stdbuf，可用 clang -shared -fPIC 生成 6 行构造函数库替代。
+fallback_command:       printf '#include <stdio.h>\n__attribute__((constructor)) static void u(void){setvbuf(stdout,NULL,_IONBF,0);}\n' > unbuf.c && clang -shared -fPIC unbuf.c -o unbuf.so && LD_PRELOAD=$PWD/unbuf.so ./OscUnitTests
+fallback_auto_fix:      false
+fallback_impl:          manual-diagnosis
+
+forbid_1_pattern:       -D__x86_64__|define__x86_64__
+forbid_1_reason:        用假宏把 aarch64 伪装成 x86_64 会连带启用 x86 专属代码路径（ intrinsics、约定假设），埋下更深的雷。
+forbid_1_consequence:   编译可能通过，但语义错误更隐蔽，后续维护者无从排查。
+forbid_2_pattern:       删除.*assert|NDEBUG.*assert|移除.*sanity
+forbid_2_reason:        删掉上游 sanity assert 会掩盖类型错误，失去 LP64 移植的自动检出点。
+forbid_2_consequence:   错误以运行期静默破坏形式存在，测试越少越难发现。
+
+principles:             P005
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-oscpack-1.1.0-lp64-long-int32-typedef.md
+last_updated:           2026-09-29
+source_event:           oscpack 1.1.0 on OHOS aarch64: OscUnitTests 通过 /a_bool 单消息断言后于 bundle 解析段 SIGSEGV（exit 139）；
+                        Release 构建无编译告警；ASan 构建直接触发 assert(sizeof(osc::int32)==4) 定位根因；修复后 91/91 用例通过。
+
+authors:                workbuddy-agent <noreply@workbuddy.local>
+source_pr:              ""
+source_commit:          ""
+metrics_success_count:  0
+metrics_fail_count:     0
+metrics_confidence:     0.6
+metrics_last_used:      2026-09-29
+
+draft:                  true
+contributor_id:         workbuddy-oscpack
