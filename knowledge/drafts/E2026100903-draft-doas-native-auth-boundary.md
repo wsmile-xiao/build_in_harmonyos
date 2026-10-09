@@ -4,6 +4,10 @@
 
 状态：草稿。软件功能仍 FAIL；该知识是证据支持的新能力边界，不是豁免。
 
+## 当前平台宏意见的修复（目标验证待完成）
+
+PR15075 的 AI 意见192795310指出纯语法分派只在平台宏下生效。本次去掉该宏，所有平台都以同一 `confpath && argc == 0` 真实模式进入原 `checkconfig`，不是以构建 OS 推断账户能力。原真实 UID 降权、解析器、退出行为及带命令/普通执行账户保护不变。官方 `refresh-patch --auto` 生成的0005补丁经字节重放，SHA256 `e77ff09882cf594f23454679e042cffc58a49cad8a4b9cfc25788540ffaef2cc`。此处仅证明源表示，当前新候选需要新目标事务；不沿用r018为新输入的通过结果，也不宣称认证或身份转换已完成。
+
 ## 真部署安全拒绝与正向认证必须分开统计（2026-10-08）
 
 不能把“预期权限能力不可用”混进解析消费者的失败，亦不能把任意非零冒称安全行为通过。明确只测实际受限部署的产品保护时，应先核对真实平台、UID/EUID、安装模式和真实NSS，再要求对应原控制流的精确退出码/诊断，保留正常认证和身份转换的独立缺口。
@@ -66,3 +70,9 @@ fresh r010 以正确官方6.8.2五补丁生产配方执行真实Conan create RC0
 新独立r008真实configure/build/sign0，当前production probe在同目标3/3：合法-C RC0、非法-C RC1且原syntax error、usage RC1。带命令-C及普通-n执行仍各RC1/no passwd entry for self；不是正负认证或身份转换PASS。完整原WAL/receipt、唯一launch1及release/postrelease own0：doas-native-pure-syntax-observed-r008.json SHA4958deb65de433b544be37d90c540346426734035ad6a0182df3730ef540b125。新的doas.c第五补丁原官方refresh+1/1精确字节回放已绑定r008源；a1d27c21dff204ddab9520456a7eeaa044c4bc6e4c4e5c96ea02143e465b1d8a是doas-official-refresh-oct08-r004/result.json的SHA。旧四补丁不重复，旧r006/HDC失败未追认。
 
 可复用判据：先读原模式控制流，证明身份/权限状态在此模式不用，且必须保留原真实降权和参数拒绝。只延迟该独立纯解析路径的初始化；凡实际执行、权限检查或策略计算所需身份不得省略。模式仍需要真实账户时不适用；本结论不能泛化为doas全功能可用。
+
+## PR15075 平台宏评审修复补充（2026-10-09）
+
+上述r008的guard是历史实现。当前补充针对AI评论192795310：仅独立纯语法模式按`confpath && !argc`分派，不再依赖平台宏。原真实UID降权、parser、参数冲突拒绝和fail-safe均保留，带命令策略与普通执行仍走原账户检查。
+
+官方refresh-patch生成新0005，SHA256 e77ff09882cf594f23454679e042cffc58a49cad8a4b9cfc25788540ffaef2cc，精确回放匹配源字节。fresh r019独立观察doas-official-local-ci-observed-oct08-r019.json SHA256 999a0bd302154b579ef8b409b958496584b492a4382c280ee2d79315b71d7ffb：官方step35/create RC0，CLI3/3、鸿蒙安全拒绝1/1；唯一launch1、12回执/24WAL、release/postrelease own0。认证和真实权限切换仍未证明；不将历史r018或局部语法成功提升为完整权限功能、平台CI或提审PASS。
