@@ -1,0 +1,64 @@
+#====================================================================
+# E429 — 非 worker OHOS 环境上 OCaml 原生链接工具链闭包（draft）
+# 适配案例: menhir 20260209（PR #14711）；机理为 ocamlopt + registry ocaml 包
+#           + OHOS 设备环境语义，不限于该库
+#====================================================================
+
+id:                     E429
+trigger_tool:           ocamlopt|dune|clang|as|ld
+phase:                  compilation|linking|testing
+error_signature:        sh: as: inaccessible or not found|Error: I/O error: as .*camlasm.*\.s|Error: I/O error: /data/service/hnp/bin/clang|ld\.lld: error: undefined symbol: main|undefined symbol: caml_(call_gc|alloc1|raise_exn)|Scrt1\.o
+
+severity:               2
+category:               ohos, toolchain, linking, environment, ocaml
+match_keywords:         ocamlopt, ocaml, GNU as, binutils, as, native_c_compiler, -cc, OCAMLPARAM, ccwrap, -shared, -Wl,-E, lld, undefined symbol: main, Scrt1.o, camlasm, /data/service/hnp
+title:                  非 worker OHOS 设备上 OCaml（Conan registry 包）原生链接的工具链闭包：GNU as 缺失、编译器程序路径烘焙与 -cc 覆盖丢参的诊断与设备侧修复
+
+root_cause:             (1) 制品仓 ocaml/4.14.1.1.x 由 CI worker 构建，Config.native_c_compiler 烘焙了 worker 绝对路径 /data/service/hnp/bin/clang，无 worker 工具链的设备上该路径不存在，ocamlopt 原生链接报 Error: I/O error: /data/service/hnp/bin/clang ...；(2) OHOS 镜像通常只有 LLVM 集成汇编器（clang -c），没有 GNU binutils 的 as，ocamlopt 把 aarch64 汇编交给裸命令 as，报 sh: as: inaccessible or not found / Error: I/O error: as ... camlasm*.s；(3) 以 -cc / OCAMLPARAM=_,cc=<cmd> 覆盖 C 编译器时，驱动用该命令整体替换 native_c_compiler 字符串，驱动追加的链接参数随之中断：.cmxs 共享链接丢 -shared（lld 按可执行方式链接并拉入 Scrt1.o，报 undefined symbol: main），可执行链接丢 -Wl,-E（宿主不再导出 OCaml 运行时符号，运行时插件 caml_* 解析失败）。
+affected_scope:         在缺少 /data/service/hnp worker 工具链与 GNU as 的 OHOS 设备上，以 Conan tool_requires("ocaml/...") 构建的一切 OCaml 原生包（dune/findlib/cairo2/zarith/lablgtk3/menhir 等）；平台 CI worker 具备完整工具链不受影响，本问题只影响本地/真机门禁路径。
+verification_cmd:       P=<ocaml_pkg>; $P/bin/ocamlopt -config | grep -E "c_compiler|native_c_compiler|asm"; command -v as || echo "as missing"; OCAMLLIB=$P/lib/ocaml $P/bin/ocamlopt t.ml -o t.exe; OCAMLPARAM='_,cc=clang' $P/bin/ocamlopt -shared a.cmx -o a.cmxs
+
+rec_priority:           1
+rec_approach:           device-local-ocaml-link-toolchain-closure
+rec_description:        设备侧三步闭包：(a) as shim：exec "${CC:-clang}" -c "$@"；(b) ccwrap：-c 编译透传，*.cmxs/.so 补 -shared，可执行链接补 -Wl,-E；(c) profile [buildenv]/[runenv] 前置 shim 目录到 PATH 并导出 OCAMLPARAM=_,cc=<shim_dir>/ccwrap（runenv 覆盖 conan test 环境）。配套：配方侧 OCAMLLIB=<ocaml_prefix>/lib/ocaml；dune 安装树跟随符号链接复制。要点：闭包属设备侧工装，不写入归档（CI worker 原样可构建）。
+rec_command:            printf '#!/bin/sh\nexec "${CC:-clang}" -c "$@"\n' > ~/local/bin/as && chmod +x ~/local/bin/as；ccwrap（cmxs→-shared；exe→-Wl,-E；-c 透传）；~/.conan2/profiles/ohos-aarch64{-device} 的 [buildenv]/[runenv] 设 OCAMLPARAM=_,cc=<shim_dir>/ccwrap 且 PATH=+(path)/<shim_dir>
+rec_auto_fix:           false
+rec_impl:               device-tooling
+
+fallback_priority:      2
+fallback_approach:      worker-only-native-link-evidence
+fallback_description:   若设备侧闭包不可行，本地仅做配方静态检查，把原生链接证据交由平台 CI worker（具备 /data/service/hnp 与 GNU as）产出；代价是失去本地可复现性，不推荐作为常规路径。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       patch.*\.conan2.*ocaml|binary.?patch.*ocaml.*package|修改.*共享.*缓存
+forbid_1_reason:        共享 conan cache 与已发布包属全局资源，二进制打补丁不可复现且破坏其他任务
+forbid_1_consequence:   全局缓存污染，其他任务构建结果不可信
+forbid_2_pattern:       -Wl,--allow-shlib-undefined|conanfile.*data/service/hnp|patch.*data/service/hnp
+forbid_2_reason:        前者掩盖链接参数丢失为允许未定义符号，产物运行期崩；后者把 worker 专属路径写进归档（违反 R33/R39，CI 之外不可移植）
+forbid_2_consequence:   产物不可运行/跨环境不可复现，评审拒绝
+
+principles:
+
+causes:                 []
+caused_by:              []
+similar_to:             E253, DRAFT-ocaml-downstream-bytecode-shebang-stublibs, DRAFT-ocamlopt-lld-static-shadow-explicit-closure
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E429-draft-9C4A-menhir-ocaml-native-link-closure.md
+last_updated:           2026-10-04
+source_event:           menhir 20260209 本地门禁（2026-10-04）：conan create 原生链接 sh: as 缺失 → as shim → baked clang 路径 → ccwrap 恢复 -shared/-Wl,-E 后 conan-verify G0-G4 与 test_package 13/13 通过
+
+authors:                9C4A <kasumizawa@ohpc.local>
+source_pr:              14711
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-04
+
+draft: true
+contributor_id: 9C4A
