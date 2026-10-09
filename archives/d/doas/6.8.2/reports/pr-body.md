@@ -24,8 +24,8 @@
 | 测试类型 | 适配后用例数 | 与上游对比 | 说明 |
 |----------|---------------:|------------|------|
 | 单元测试 | 0 | 不变 | 源码盘点不计执行用例 |
-| 集成测试 | 3 | +3 | 调用已安装ELF：合法纯-C、非法纯-C、usage；fresh正式官方r018实际3/3 |
-| 鸿蒙特有测试 | 1 | +1 | 实际HarmonyOS、非root UID/EUID和0755部署下普通执行精确安全拒绝；同r018实际1/1 |
+| 集成测试 | 3 | +3 | 调用已安装ELF：合法纯-C、非法纯-C、usage；fresh正式官方r020实际3/3 |
+| 鸿蒙特有测试 | 1 | +1 | 实际HarmonyOS、非root UID/EUID和真实非SUID安全权限属性下普通执行精确拒绝；同r020实际1/1 |
 | **合计** | **4** | **新增4** | 产品验证4/4；不包含认证成功、SUID或权限跃迁 |
 
 ## 上游测试用例修改说明
@@ -44,7 +44,7 @@
 - [ ] **否**，上游已有覆盖。
 - [x] **是**，补三项真实CLI消费者及一项鸿蒙安全部署行为。
 
-合法配置要求实际RC0；非法配置同时要求原语法诊断和RC1，NSS失败、签名拒执、信号、RC126或任意非零退出均不能冒充负向通过。usage要求实际横幅。鸿蒙专项先核验运行平台、非root UID=EUID和已安装ELF的0755模式，再要求原普通执行精确RC1/`no passwd entry for self`或`not installed setuid`。安全拒绝测试通过不等于认证成功或提权成功。
+合法配置要求实际RC0；非法配置同时要求原语法诊断和RC1，NSS失败、签名拒执、信号、RC126或任意非零退出均不能冒充负向通过。usage要求实际横幅。鸿蒙专项先核验运行平台、非root UID=EUID和已安装ELF的真实模式，要求普通文件、owner可执行、无SUID/SGID和group/world写位，再要求原普通执行精确RC1/`no passwd entry for self`或`not installed setuid`。模式在断言前记录；不以chmod成功代替回读，不把可选group/other读执行位等同安全条件。安全拒绝测试通过不等于认证成功或提权成功。
 
 ## 验证结果
 
@@ -74,3 +74,7 @@
 本次纠正真实6.8.2身份，不沿用错误旧版本分支。当前尚未提审；按最新用户目标，在当前完整HEAD的平台CI真实PASS、评审真实问题实际解决及身份门禁满足后提审，不执行合并。
 
 最新AI评论192795310的实际代码修复：0005纯语法路径已移除平台宏，以相同模式条件在各平台进入原checkconfig；保留真实UID降权、parser、参数校验与原失败保护。新补丁由官方refresh-patch生成并精确回放，SHA256 e77ff09882cf594f23454679e042cffc58a49cad8a4b9cfc25788540ffaef2cc。fresh官方r019真实create RC0、CLI3/3、鸿蒙安全拒绝1/1，无跳过；observer SHA256 999a0bd302154b579ef8b409b958496584b492a4382c280ee2d79315b71d7ffb，唯一launch1、12回执/24WAL、release/postrelease own0。当前能力限制仍如上公开保留，不把安全拒绝或官方构建成功当成认证/权限切换成功。
+
+当前真实CI请求104526/build91205在旧HEAD `2476a0b435e3f2274165d6afb2776ef58a29b1d8` 已进入产品测试，失败于安全测试的mode恰等0755断言；失败日志尚未打印actual mode，不能据此声称该CI实际读到0710或已证明文件系统根因。修复只改变测试的权限属性契约，原产品、认证和精确拒绝保护不变。实际10组正/负模式和非普通文件控制保留SUID/SGID、可写、不可执行拒绝。
+
+fresh原官方r020的setup/build/create均RC0，CLI3/3与鸿蒙负向安全1/1，无跳过。真实mode输出0755、UID/EUID20020084、原命令RC1/`no passwd entry for self`；不宣称模式变换或正向认证。独立observer SHA256 `f58bce885e1a08d22a548291bb76d2b21ce774f0ef0128bb21e623be4176c18e`；原完整日志SHA256 `9503561f80376766e8d75af75f32728c41b1d6e6f06939fcb93fe9521b76eb2f`，自动原marker SHA256 `4a899b4674633a6b1841a6235644c689e1c673986a7d9ed05f5aa14fa29a57e4`。唯一launch1、12回执/24WAL、release/postrelease own0。新提交仍须重新取得当前HEAD平台Review和CI；旧失败和历史记录不覆盖、不拼成当前CI PASS。
