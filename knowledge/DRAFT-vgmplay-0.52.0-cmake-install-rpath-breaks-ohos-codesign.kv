@@ -1,0 +1,56 @@
+#====================================================================
+# DRAFT-vgmplay-0.52.0-cmake-install-rpath-breaks-ohos-codesign - CMake install clears RUNPATH and breaks OHOS ELF code signing
+#====================================================================
+
+id:                     DRAFT-vgmplay-0.52.0-cmake-install-rpath-breaks-ohos-codesign
+trigger_tool:           cmake|conan|llvm-readobj
+phase:                  packaging|testing
+error_signature:        Operation not permitted.*vgmplay|exit 126.*bin/|RUNPATH.*missing.*package|sha256.*different.*build.*package
+
+severity:               4
+category:               cmake|conan|cli-tool|elf-signing|rpath|package
+match_keywords:         --code-sign, CMake install, RUNPATH, DT_RUNPATH, CMAKE_INSTALL_RPATH, cmake.install(), Operation not permitted, exit 126, binary-sign-tool, hmdfs, package_type application, conan package sha256, llvm-readobj -d
+title:                  CMake install 清除 RUNPATH 会破坏 OHOS --code-sign 嵌入的 ELF 签名，导致内核拒绝 execve
+
+root_cause:             OHOS clang wrapper 在链接时自动传 -Wl,--code-sign，把代码签名数据嵌入 ELF 本身。CMake install(TARGETS) 在 install 阶段根据 CMAKE_INSTALL_RPATH（Conan CMakeToolchain 默认设为空）清除 ELF 的 DT_RUNPATH 条目，这个 .dynamic 段改写操作破坏了签名与 ELF 内容的绑定，导致内核在 execve 时返回 EPERM（"Operation not permitted", exit 126）。build 目录的 ELF 保留链接时的 RUNPATH 和签名，能正常运行；package 目录的 ELF 被 CMake install 改写过，不能运行。两者大小相同但 sha256 不同。
+affected_scope:         在 HarmonyOS PC（clang-15 wrapper 自动 --code-sign）上用 Conan CMakeToolchain 构建、package_type=application、且在 package() 中调用 cmake.install() 的所有 CLI 工具包。vgmplay 0.52.0 实测受影响。
+verification_cmd:       llvm-readobj -d build_dir/vgmplay | grep RUNPATH; llvm-readobj -d package_dir/bin/vgmplay | grep RUNPATH（package 产物 RUNPATH 消失即确认）; 直接运行 build_dir/vgmplay --version（能跑）和 package_dir/bin/vgmplay --version（Operation not permitted）对比。
+
+rec_priority:           1
+rec_approach:           package-direct-copy-no-cmake-install
+rec_description:        package() 中不调用 cmake.install()，改用 conan.tools.files.copy 直接从 build_folder 复制最终 ELF 和数据文件到 package_folder/bin，保持 ELF 字节不变，避免 CMake install 改写 .dynamic 段破坏签名。
+rec_command:            from conan.tools.files import copy; def package(self): bin_dir=os.path.join(self.package_folder,"bin"); copy(self,"vgmplay",src=self.build_folder,dst=bin_dir); copy data files
+rec_auto_fix:           false
+rec_impl:               conan-recipe-package-direct-copy
+
+fallback_priority:      2
+fallback_approach:      post-install-re-sign-with-binary-sign-tool
+fallback_description:   如果必须用 cmake.install()（例如复杂的 install 规则），则在 install 后用 binary-sign-tool 对最终 ELF 重新签名（参考 cronutils 草稿）。该方式需要真机或 CI runner 上有 binary-sign-tool，且会增加构建时间。
+fallback_command:      binary-sign-tool sign -inFile "$binary" -outFile "$binary.signed" -selfSign 1; mv "$binary.signed" "$binary"; chmod 755 "$binary"
+fallback_auto_fix:      false
+fallback_impl:          post-build-signing
+
+forbid_1_pattern:       cmake\.install\(\).*(?=.*application|bin/)
+forbid_1_reason:        对 OHOS 自动签名的 application 包调用 cmake.install() 会触发 RUNPATH 清除，破坏 ELF 签名。
+forbid_1_consequence:   conan create 编译成功但 test_package 在真机报 Operation not permitted (exit 126)，build 产物能跑但 package 产物不能跑。
+
+forbid_2_pattern:       llvm-objcopy.*strip|patchelf|chrpath
+forbid_2_reason:        对已 --code-sign 的 OHOS ELF 做 strip 或 rpath 修改会破坏签名。
+forbid_2_consequence:   被修改的 ELF 在内核 execve 时返回 EPERM。
+
+principles:             P010, P020, P030
+causes:                 []
+caused_by:              []
+similar_to:             [E092, E118]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/DRAFT-vgmplay-0.52.0-cmake-install-rpath-breaks-ohos-codesign.md
+last_updated:           2026-09-29
+source_event:           vgmplay 0.52.0 HarmonyOS PC 适配（cmake install rpath 清除破坏 OHOS 代码签名）
+authors:                gcw_6YxinkyD
+source_pr:              ""
+source_commit:          ""
+
+metrics_success_count:  0
+metrics_fail_count:     0
