@@ -1,0 +1,29 @@
+#====================================================================
+# Draft: 1990s C 代码自带的 getline() 与 OHOS sysroot 的 POSIX
+#        getline(3) 符号冲突 —— 交叉编译期必炸，且 -D 宏绕不过
+#====================================================================
+
+id:                     DRAFT-LEGACY-GETLINE-SYMBOL-CLASH-POSIX2008
+trigger_tool:           conan|clang|make
+phase:                  compilation
+
+error_signature:        error: conflicting types for 'getline'|error: conflicting types for 'mailto_getline'|previous declaration is here|ssize_t getline\(char \*\*__restrict|int getline\(char \*s, int n, FILE \*f\)
+
+severity:               2
+category:               portability|headers|symbol-conflict
+match_keywords:         getline, POSIX.1-2008, stdio.h, conflicting types, sysroot, cross-compile, util.c, legacy C, gnu89, mailto, rename symbol, apply_conandata_patches, conandata patches, bad_patch_format, L0f, patch_file, patch_description, patch_type, silent skip
+
+title:                  1990 年代 C 代码里自定义的 getline()/index()/bcopy() 等老名字，会与 OHOS musl sysroot 收录的 POSIX.1-2008 标准库同名词冲突，交叉编译期直接报 conflicting types；用 -Dname=other 宏绕不过（定义处同样被替换，冲突只是换名继续报），必须真改名或删函数
+
+root_cause:             POSIX.1-2008 把 getline()、getdelim()、mempcpy()、strndup() 等一批函数收进标准库，OHOS 的 musl sysroot（<stdio.h> 等）已按新标准声明它们，签名是 ssize_t getline(char **restrict, size_t *restrict, FILE *restrict)。而 1990 年代的 C 程序习惯在 util.c 之类的工具文件里自带同名辅助函数（本例：int getline(char *s, int n, FILE *f)，读一行并把 CR/LF 折叠，返回 feof）。这类旧代码写于 POSIX.1-2008 之前，函数签名与新标准完全不同。交叉编译时源文件与 sysroot 头同处一个翻译单元，默认可见性下 Clang 直接报 conflicting types。关键坑点：想用 -Dgetline=mailto_getline 这类宏改名是**无效**的——预处理器会同时替换函数**定义处**的标识符，于是 <stdio.h> 里的声明也变成 mailto_getline，冲突只是换了个名字继续报（实测报错：error: conflicting types for 'mailto_getline'）。唯一可行的是真改名（改定义处并同步调用点）或删除该函数。
+affected_scope:         所有 1990–2005 年间的 C/C++ 源码在 OHOS aarch64 上交叉编译；典型命中点是自带 util.c / compat.c / xmalloc.c 的老工程。具体可检索的冲突名：getline、getdelim、mempcpy、strndup、strcasestr、rawmemchr、fgetws、asprintf（在某些老 libc 声明下）、index、bcopy、bcmp、random、srandom、wait3。触发条件是「老代码自定义了同名全局函数」且「该名字在新 POSIX/OHOS sysroot 中已有声明」；只在交叉编译（host != target）时暴露，本机 glibc 老版本上常常不报，因此本地 Linux 编译通过不能作为证据。
+verification_cmd:       grep -nE '^\s*(int|ssize_t|char\s*\*)\s+(getline|getdelim|mempcpy|strndup|rawmemchr|index|bcopy|random)\s*\(' <src>/*.c ; qemu-aarch64 -L <ohos-sysroot> ./a.out -v
+rec_priority:           1
+rec_approach:           pre-scan-symbol-clash-then-rename-or-drop
+rec_description:        (1) 拿到老源码后，先 grep 出所有自定义的"与标准库同名的函数定义"（见 match_keywords 与 affected_scope 的名单），这一步比直接编译更快定位；(2) 逐个判断该函数是否**真的被调用**——很多老工程里这类 util.c 辅助函数（getline/rind/getword/send_fd 之类）只有定义、没有调用点（上游没提供对应 .h，靠隐式声明），删掉最省事；确实被调用则保留函数体、只把符号改名（如 getline -> mailto_getline），并在 patch 注释里写明"签名与 POSIX 版本不同、保留函数体不改行为、为何无调用点需要同步"；(3) **不要用 -D 做改名**（见 root_cause）；(4) ⚠ **conandata.yml 的 patches 必须是「列表」格式**（`patches:` 下每项含 patch_file/patch_description/patch_type）——若误写成 dict-by-filename（key 为补丁文件名），conan 2.x 的 apply_conandata_patches 按 self.version 查找，patches.get(version) 返回空列表，**补丁被静默跳过且不报错**，现象是"补丁明明写了却没生效、编译错误仍是原来的 conflicting types"，极易误判为"apply_conandata_patches 在本环境失效"而绕道手工 self.run("patch ...")，结果同时踩中 CI 门禁 L0f（该门禁专验此格式，直接判 bad_patch_format 拦截合并）。正确做法：按 docs/ADAPTATION_GUIDE.md 的列表格式写 conandata，conanfile 用标准 apply_conandata_patches(self)；(5) 若确需手工 patch，unified diff 必须用 difflib/diff 从真实原文**自动生成**——手写 @@ 头部行数与实际内容不匹配时 GNU patch 报 malformed patch 并静默不生效；(6) 改完配方要 conan remove "<pkg>/<ver>:*" -c 清缓存，否则复用旧 build 目录里未打补丁的源码；(7) 本地验证必须在 qemu-aarch64 + OHOS sysroot 下**真跑一次**，只做 conan create 不足以证明可用。
+rec_command:            grep -nE '^\s*(int|ssize_t|char\s*\*)\s+(getline|getdelim|mempcpy|strndup|rawmemchr|index|bcopy|random)\s*\(' util.c mailto.c && conan remove "mailto/1.3.2:*" -c && conan create archives/m/mailto/1.3.2 -pr:h=ohos-aarch64 -pr:b=ohos-aarch64
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:
+source_commit:
