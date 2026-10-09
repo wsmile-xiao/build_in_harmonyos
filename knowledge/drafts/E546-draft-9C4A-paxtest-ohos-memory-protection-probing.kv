@@ -1,0 +1,65 @@
+# ═══ E546 草稿 — OHOS 内核内存保护/ASLR 的探针测量与解读口径 ═══
+# 来源: paxtest 0.9.15 适配（task #9339, feat/paxtest-0.9.15, 2026-09-27）
+# 关联: E045（W^X 事实）、DRAFT-boxfort-ohos-code-page-integrity（代码页完整性 XPM）、
+#       DRAFT-gas-arm64-clang-integrated-as（匿名 PROT_EXEC 实测可用）——边界见 md
+id: E546
+trigger_tool: security/probe/test suite|paxtest|clang
+phase: runtime
+error_signature: Executable .*: (Killed|Vulnerable)|No randomization|getvdso: No error information|Wrong architecture|blackhat mode not supported
+severity: 2
+category: platform|kernel|security|memory
+match_keywords: paxtest,memory protection,W^X,NX,exec stack,exec heap,mprotect,PROT_EXEC,ASLR,randomization,shellcode,aarch64,VDSO,rettofunc,blackhat,chpax,Killed
+title: OHOS 内核内存保护/ASLR 的探针测量与解读口径（含非 x86 探针适配）：先补目标架构最小 shellcode 恢复判定力，再按"内存类别×操作"矩阵实测，用"不可利用≠保护存在"口径解读并列明判定盲区
+root_cause: 安全探针套件的判定力依赖目标架构最小 shellcode（上游 paxtest 的 shellcode.h 无 aarch64 分支时回退 x86 RET，ARM64 上可执行/不可执行内存都表现为 Killed，15 项 exec 探测退化为盲判）；同时 Killed/No randomization 等结果语义容易被误读为"保护存在"；OHOS 的 W^X/XPM、procfs（无 [vdso]）、aarch64 返回地址语义（x30）与 clang（无嵌套函数→blackhat 回落）造成若干测试项不可测或语义失效，需要显式列明
+affected_scope: 移植安全回归/探针/基准类套件（paxtest 等）与一切需要判定 OHOS 内存保护/ASLR 能力的场景：安全评估与取证、加固假设验证、JIT/trampoline/沙箱等依赖"可执行内存"能力的可行性预判（与 E045、DRAFT-boxfort 互补）
+verification_cmd: cd <pkg>/bin/paxtest && ./paxtest kiddie "$LOG"；期望：攻击探测 15/15 Killed、随机化 12 项出 quality bits、VDSO 项中止（/proc/self/maps 无 [vdso]）、rettofunc memcpy 无输出；conan test_package 21/21 断言通过
+rec_priority: 1
+rec_approach: fix-probe-arch-then-run-matrix
+rec_description: 第一步先恢复探针判定力：为目标架构补齐最小"执行后正常返回"shellcode（aarch64 用 ret, 0xd65f03c0；ARM32/PPC/SPARC 上游已有分支可参照），此时可执行页应返回 Vulnerable、不可执行页 Killed，判定重新有正反两向。第二步按"内存类别 × 操作"矩阵实测并逐项留证：exec 系（anon/bss/data/heap/stack/shlib）× {直接执行, mprotect 后执行} + writetext + 随机化（多类各 1500 次采样）+ rettofunc。第三步按"不可利用≠保护存在"口径解读并显式列明盲区（无 arch shellcode 时的盲判、VDSO 不可测、rettofunc 的体系结构差异、blackhat 在 clang 下的回落）。
+rec_command: |
+  # 1) 判定力恢复（补丁示例，paxtest 0.9.15）
+  #    shellcode.h 增分支：#elif defined(__aarch64__)
+  #                       #define SHELLCODE_RETURN "\xc0\x03\x5f\xd6" /* ARM64: ret */
+  # 2) 矩阵实测（真机，逐项留日志；kiddie 与 blackhat 各一轮）
+  ./paxtest kiddie  "$LOG.kiddie"
+  ./paxtest blackhat "$LOG.blackhat"
+  # 3) 对照验证：可执行内存应能返回（Vulnerable），不可执行内存 Killed
+  #    （对匿名映射可另做 mmap(PROT_READ|PROT_EXEC) 直接映射探针作对照）
+rec_auto_fix: false
+rec_impl: patch-source-portability
+fallback_priority: 2
+fallback_approach: dedicated-probe-harness
+fallback_description: 若不能改动上游探针（零补丁/不宜补），改用独立最小探针做等价判定：mmap(PROT_READ|PROT_WRITE) 写入 ARM64 ret 序列 → mprotect(PROT_READ|PROT_EXEC) → fork 子进程内执行并按 WIFEXITED/信号判定；并用 /proc/self/maps 交叉核对目标页的可执行位。报告中必须声明与上游套件口径的差异（独立探针不等于 paxtest 语义）
+fallback_command: |
+  # 独立探针要点（aarch64）：
+  #   buf = mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+  #   write ret(0xd65f03c0) into buf; fork(); in child: mprotect(buf,4096,PROT_READ|PROT_EXEC); ((void(*)())buf)();
+  #   parent waitpid: WIFEXITED&rc==0 → 可执行；被信号终止 → 不可执行（注意须在一次性子进程内探测）
+fallback_auto_fix: false
+fallback_impl: aux-probe
+forbid_1_pattern: Killed.*(说明|证明|意味着).*(保护|NX|W\^X).*(存在|启用|有效)|Killed\s*[=→]\s*(有|存在).*保护
+forbid_1_reason: Killed 只表示"攻击尝试未成功"，与"保护存在"无必然因果——探针在缺少目标架构 shellcode 时对可执行/不可执行内存一律 Killed（盲判），此时任何"Killed→保护存在"的断言都是过度解读
+forbid_1_consequence: 安全评估结论失真，后续依赖该结论的加固/兼容决策被误导（例如误判 NX/W^X 已启用而省略防护，或误判 JIT 不可行而放弃可行方案）
+forbid_2_pattern: (放宽|屏蔽|吞掉|忽略).*(Vulnerable|Killed|断言|判定)|修改(测试|断言).*(通过|掩盖)
+forbid_2_reason: 为让适配"通过"而修改探针的判定/断言（放宽断言、屏蔽 Vulnerable、改动通过口径）属于伪造测试结果；正确做法是修正探针架构语义或如实记录盲区
+forbid_2_consequence: 适配结论与安全结论均不可信，触发评审拒绝（R34/R51/R52 红线）
+principles:
+causes: []
+caused_by: []
+similar_to: E045, DRAFT-boxfort-ohos-code-page-integrity
+conflicts_with: []
+prerequisite_of: []
+approach: probe-matrix-then-interpret
+doc_file: doc/E546.md
+last_updated: 2026-09-27
+source_event: paxtest 0.9.15 适配（task #9339, feat/paxtest-0.9.15；真机 kiddie+blackhat 全量 rc=0）
+authors: kasumizawa-miyuu <241250031@smail.nju.edu.cn>
+source_pr:
+source_commit:
+metrics_success_count: 0
+metrics_fail_count: 0
+metrics_confidence: 0.0
+metrics_last_used:
+
+draft: true
+contributor_id: 9C4A
