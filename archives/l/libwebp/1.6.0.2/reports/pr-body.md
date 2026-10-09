@@ -17,7 +17,7 @@
 | 单元测试 | 64 | 官方固定 ANTLR 4.12.0 默认启用原用例，原参数化 IDs 分别 32+32；不关闭 BUILD_TESTING |
 | 集成测试 | 12 | 官方 libwebp 1.6.0 原 tests/fuzzer 入口，含原基础 7、mux 4、info 1；执行其固定 FuzzTest harness，非只统计注册 |
 | 其他测试 | 0 | 该原 CMake 路径未发现独立额外运行入口；精确清单与源审计将附正式证据 |
-| **合计** | **76** | 正式 Conan r005 同一事务实际 76/76、零 skip，独立源码 IDs 和 ANTLR 原参数核对通过；不沿用探索 PASS |
+| **合计** | **76** | 正式 Conan r006、官方 step35 r002 分别在各自同一事务实际 76/76、零 skip，独立源码 IDs 和 ANTLR 原参数核对通过；不拼跨run分母 |
 
 ### 适配后测试用例统计
 
@@ -26,7 +26,7 @@
 | 单元测试 | 64 | 不变 | 原 ANTLR 测试与断言未修改；仅构建平台能力探测修复 |
 | 集成测试 | 16 | +4 | 原 libwebp 12；另有消费者真实无损 RGBA、元数据 mux/demux、有损尺寸/alpha 和坏码流拒绝 4 项 |
 | 鸿蒙特有测试 | 1 | 新增 | HarmonyOS PC AArch64 ELF codesign、实际 SONAME/NEEDED 与自有包运行时命名空间、真实 codec 调用的独立专项 |
-| **合计** | **81** | **+5** | 正式 Conan r005 与现行官方本地 CI r001 各自同一事务实际 76+4+1 全通过，不拼跨run分母 |
+| **合计** | **81** | **+5** | 正式 Conan r006 与现行官方本地 CI r002 各自同一事务实际 76+4+1 全通过，不拼跨run分母 |
 
 ---
 
@@ -58,13 +58,17 @@
 - 上游测试用例通过率：76/76（100%）
 - 新增测试用例通过率：5/5（100%）
 
-本文件为 PR #14954 的六节正文。Issue #3565 与本 PR 双向唯一关联，真实修复任务14927（libwebp1.6.0.2，fix/libwebp-1.6.0.2）已领取，账号2301_80739235，活动为开源鸿蒙PC专项积分赛-依赖。正式证据绑定实际配方、完整 HEAD/tree、唯一 run、boot/UID、输入 SHA-256、真实 stdout/stderr/RC、原 source case IDs 和完整 WAL/receipt 链。本次知识编号和正文纠正不改动配方、补丁、测试入口或十二项运行输入哈希，不重放已消费事务。探索 libwebp-native-observed-r004.json 的 76/76 不拼接正式结果；旧 PR #13623 的 Review/CI 不冒充新修复版本的当前 HEAD 门禁。
+2026-10-09 后续整改：完整 AtomCode 报告192792991已公开，真实非OHOS编译器覆盖问题已修复。新候选分别通过 fresh 正式 Conan r006 和官方 FinishPipeline.step35_local_ci r002，原测试、消费者、鸿蒙专项均在各自同run真实执行。上述为本地/真机验证，不是平台 CI；推送后仍以当前完整 HEAD 的最新 Review 和平台 CI 为准。
 
-正式同run证据：libwebp-conan-observed-r005.json SHA-256 `5bb410b2b7eab1e098606f343b9d77fb7d042d244e7d0c4000c7ecbca78792c5`；libwebp-conan-source-cases-observed-r005.json SHA-256 `3c53696cefb28e66b42124da8bd508449cdd89db97bddfbfe63158f8aa22cc48`。当前官方step35 r001使用新增专项目录、清单与固定marker实际执行，原setup/build_and_test RC0、76+4+1和L0/L1通过；原`.ci-result.json`实际由官方方法生成、原日志SHA `b6cf02d05e27386b18038b674b8beb034f23fa14c85a3ca4de8b8d6ed7c0e18f`独立核对。`reports/official-step35-observed.json` SHA `9c44182d456b890bf788d9c0dc151320809ee11c9ce2bf11902f0dfb9c27cd0d`、`reports/upstream-source-cases-observed.json` SHA `10f3be25105582c22a1c8db1c3571a8960e4ea67e8f3487658a3186061a69025`。各run唯一launch/release/postrelease/自有进程0均独立核对，不将任一探索结果冒充正式阶段，也不将本地CI冒充平台CI。
+本文件为 PR #14954 的六节正文。Issue #3565 与本 PR 双向唯一关联，真实修复任务14927（libwebp1.6.0.2，fix/libwebp-1.6.0.2）已领取，账号2301_80739235，活动为开源鸿蒙PC专项积分赛-依赖。正式证据绑定实际配方、完整 HEAD/tree、唯一 run、boot/UID、输入 SHA-256、真实 stdout/stderr/RC、原 source case IDs 和完整 WAL/receipt 链。修复配方仅在 OHOS 路径配置实际 Clang 与签名工具，非 OHOS 保留 Conan toolchain 的编译器选择；新 recipe SHA256 为5c01bbe198dc2735f6af6bfc426e311692a503004a80e0d384bb6e04e658e199。新事务测试候选tree为1f561d3e25f7cc1bcb759ecdb074f1fe13e7bbe0，后续仅刷新真实证据与正文，运行输入不变。探索结果和旧 PR #13623 的 Review/CI 不冒充当前 HEAD 门禁。
+
+正式同run证据：libwebp-conan-observed-r006.json SHA-256 `5c588d5b0433e6c63c7f2d74b7fb2fd12ba5debd522b4a60d404358e947468d2`；libwebp-conan-source-cases-observed-r006.json SHA-256 `0c1c62564b2b2f539c51fe397357036b090f2fbc91c3d25df30c60242b6c7cc4`。官方step35 r002原setup/build_and_test RC0、76+4+1和L0/L1通过；新`.ci-result.json`实际由官方方法生成、原日志SHA `1cff1cf7b5315e96fd1ca0d02434f99b1c0802220d0fe82c0c570da3d7871b8d`独立核对。`reports/official-step35-observed.json` SHA `b7cf658765973d34eb27d4f8048f2b5f5f24ab3cca1179895a68ff8acd304bb1`、`reports/upstream-source-cases-observed.json` SHA `25a16a8f75bbe09397893264394d31c9fc55c103235a7d12c24d1031a1f5be65`。各run唯一launch/release/postrelease/自有进程0均独立核对；旧证据全部保留，不将本地CI冒充平台CI。
 
 ---
 
 ## 补充说明
+
+观察 SHA 字节集：任务原始 CRLF 副本为9c44182d456b890bf788d9c0dc151320809ee11c9ce2bf11902f0dfb9c27cd0d（48727字节）及10f3be25105582c22a1c8db1c3571a8960e4ea67e8f3487658a3186061a69025（7839字节）；仓内 Git LF blob 为d248ac7cb328d2a55fe40a8676f6d0934335c6bd73ef7d3fb3283de6e45326ac及b46560f37ff58aabde82889ca9eba41ae7b03694ab0c80daae153d8adb14dfd3，JSON 值一致。没有重写旧 observer/receipt 或剔除自指字段。
 
 - 关联 Issue：[Issue #3565](https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/issues/3565)，已权威回读为本账号唯一 OPEN 的真实1.6.0.2修复申请；当前唯一关联为 [PR #14954](https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/pull/14954)。真实任务14927已领取；知识编号纠正后的当前候选仍须重新通过 POST_CREATE，不复用旧 HEAD 合同。
 - 队伍名称：天天开心

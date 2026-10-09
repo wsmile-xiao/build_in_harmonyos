@@ -17,6 +17,10 @@ r001：C++17 白名单 configure 失败；r002：完整原生构建在语法生�
 
 ## 当前状态
 
+2026-10-09 当前整改覆盖下述历史状态：PR14954 已真实创建，HEAD c3c08c461fa921b76f0d466178e812c22f8b6b57。完整 AtomCode 报告已在评论192792991公开并源码核实；Linux 默认 GCC profile 被无条件替换为 Clang wrapper 是真实配方边界问题。仅在 OHOS 创建签名 wrapper 和覆盖 CMake 编译器，其他已允许系统保留 Conan profile。直接方法三项控制（Linux 不查询 Clang、OHOS 保留 wrapper、缺 signer fail closed）通过；这不是实际 GCC 构建，也不是新原生 PASS。新配方 SHA 5c01bbe198dc2735f6af6bfc426e311692a503004a80e0d384bb6e04e658e199 尚待 fresh 正式目标验证，旧 r005/r001 不自动认证新输入。
+
+观察文件 SHA 的字节集：现存 task 原观察与仓库工作文件精确相同，CRLF 原字节 official-step35-observed 为48727字节/SHA 9c44182d456b890bf788d9c0dc151320809ee11c9ce2bf11902f0dfb9c27cd0d，源用例观察为7839字节/SHA 10f3be25105582c22a1c8db1c3571a8960e4ea67e8f3487658a3186061a69025。Git LF 规范化 blob 分别为 d248ac7cb328d2a55fe40a8676f6d0934335c6bd73ef7d3fb3283de6e45326ac 和 b46560f37ff58aabde82889ca9eba41ae7b03694ab0c80daae153d8adb14dfd3；JSON 解析值一致，不是剔除自指字段的哈希。原观察、WAL、回执均未改写。HARMONY_TESTS.yml 现在用显式占位符，生产 test_package.test() 仍传真实包根和工具路径。
+
 探索 r004 同一事务原生全量构建 RC0，原上游76/76、零失败、零跳过，只保留为探索证据。新正式 r005 实际官方 ConanVerifier RC0，原上游76/76、消费者4/4、鸿蒙专项1/1，同 run 源码 IDs／参数、哈希、WAL／完整回执链均独立核验。
 
 现行官方 `FinishPipeline.step35_local_ci()` 在全新 r001 真实执行原 setup.sh 与 build_and_test.sh，RC0，原上游76/76、消费者4/4、鸿蒙专项1/1、L0/L1全部通过；原方法实际生成 `.ci-result.json` 与原日志，其 SHA-256逐字节核对后导出，未手工构造或改写结果。当前新专项目录/清单/固定marker已实际覆盖。`reports/official-step35-observed.json` SHA-256 `9c44182d456b890bf788d9c0dc151320809ee11c9ce2bf11902f0dfb9c27cd0d`；`reports/upstream-source-cases-observed.json` SHA-256 `10f3be25105582c22a1c8db1c3571a8960e4ea67e8f3487658a3186061a69025`。r005与r001分别release/postrelease、自有进程0，永不重放。

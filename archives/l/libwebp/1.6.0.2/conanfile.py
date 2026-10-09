@@ -71,36 +71,37 @@ class LibwebpConan(ConanFile):
         config = dict(root=str(Path(self.build_folder).resolve()), ohos=self.settings.os == "OHOS", **tools)
         path = Path(self.generators_folder) / "signing-tools.json"
         path.write_text(json.dumps(config), encoding="utf-8")
-        wrappers = {}
-        shell = shutil.which("sh")
-        if not shell:
-            raise ConanInvalidConfiguration("Missing real POSIX shell")
-        for name, language in (("cc", "c"), ("cxx", "cpp")):
-            real = self._compiler_paths.get(language) or shutil.which("clang" if language == "c" else "clang++")
-            if not real:
-                raise ConanInvalidConfiguration("Missing real " + language + " compiler")
-            wrapper = Path(self.generators_folder) / name
-            script = Path(self.source_folder) / "sign_link.py"
-            wrapper.write_text("#!" + shell + "\nexec " + " ".join(shlex.quote(v) for v in (sys.executable, str(script), str(path), real)) + " \"$@\"\n", encoding="utf-8")
-            wrapper.chmod(0o755)
-            wrappers[language] = str(wrapper)
-        self._native_compilers = wrappers
-        # The official CompilersBlock emits unconditional normal variables;
-        # command-line -D compiler cache entries alone would not override it.
-        tc.blocks["compilers"].values["compilers"].update(
-            {"C": wrappers["c"], "CXX": wrappers["cpp"]})
+        if self.settings.os == "OHOS":
+            wrappers = {}
+            shell = shutil.which("sh")
+            if not shell:
+                raise ConanInvalidConfiguration("Missing real POSIX shell")
+            for name, language in (("cc", "c"), ("cxx", "cpp")):
+                real = self._compiler_paths.get(language) or shutil.which("clang" if language == "c" else "clang++")
+                if not real:
+                    raise ConanInvalidConfiguration("Missing real " + language + " compiler")
+                wrapper = Path(self.generators_folder) / name
+                script = Path(self.source_folder) / "sign_link.py"
+                wrapper.write_text("#!" + shell + "\nexec " + " ".join(shlex.quote(v) for v in (sys.executable, str(script), str(path), real)) + " \"$@\"\n", encoding="utf-8")
+                wrapper.chmod(0o755)
+                wrappers[language] = str(wrapper)
+            # Keep the signed OHOS link/discovery path; other OSes retain the
+            # compiler selected by their actual Conan profile/toolchain.
+            tc.blocks["compilers"].values["compilers"].update(
+                {"C": wrappers["c"], "CXX": wrappers["cpp"]})
         tc.generate()
 
     def _definitions(self, tests):
-        compilers = {k: str(Path(self.generators_folder) / v) for k, v in (("c", "cc"), ("cpp", "cxx"))}
         values = {
-            "CMAKE_C_COMPILER": compilers["c"], "CMAKE_CXX_COMPILER": compilers["cpp"],
             "CMAKE_BUILD_TYPE": str(self.settings.build_type), "CMAKE_INSTALL_LIBDIR": "lib",
             "BUILD_SHARED_LIBS:BOOL": "ON" if self.options.shared else "OFF",
             "WEBP_BUILD_FUZZTEST:BOOL": "ON" if tests else "OFF",
             "WEBP_BUILD_LIBWEBPMUX:BOOL": "ON", "WEBP_BUILD_WEBPINFO:BOOL": "ON" if tests else "OFF",
             "CMAKE_POLICY_VERSION_MINIMUM": "3.10", "CMAKE_EXPORT_COMPILE_COMMANDS:BOOL": "ON",
         }
+        if self.settings.os == "OHOS":
+            values["CMAKE_C_COMPILER"] = str(Path(self.generators_folder) / "cc")
+            values["CMAKE_CXX_COMPILER"] = str(Path(self.generators_folder) / "cxx")
         for name in ("CWEBP", "DWEBP", "GIF2WEBP", "IMG2WEBP", "VWEBP", "WEBPMUX", "ANIM_UTILS", "EXTRAS"):
             values["WEBP_BUILD_" + name + ":BOOL"] = "OFF"
         if tests:
