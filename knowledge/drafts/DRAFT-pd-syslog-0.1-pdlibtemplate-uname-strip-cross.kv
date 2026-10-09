@@ -1,0 +1,36 @@
+# ══ Draft knowledge entry — Pd library template Makefile 按 uname 全串匹配选平台 + make install 硬编码宿主 strip，交叉编译 OHOS aarch64 双双失效 ══
+# Timestamp: 2026-10-04
+# Software: pd-syslog 0.1（以及所有用 Pd library template Makefile 的 Pd externals）
+# Gate: conan create build() / package()
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-pd-syslog-0.1-pdlibtemplate-uname-strip-cross
+title: Pd library template Makefile 按 uname -s 全串匹配选平台（无 OHOS 分支）且 make install 硬编码宿主 strip，交叉编译 OHOS aarch64 时链接退化 + 安装阶段 strip 失败；六项 make 命令行覆盖修复
+trigger_tool: make / Pd library template (Makefile 1.0.14)
+phase: build
+error_signature: undefined symbol: main|Unable to recognise the format of the input file|ld.lld: error: undefined symbol
+severity: 3
+category: build|cross-compile
+match_keywords: pd library template, MakefileTemplate, UNAME, uname -s, HarmonyOS, EXTENSION, pd_linux, PD_INCLUDE, PD_PATH,
+  STRIP, strip --strip-unneeded, Unable to recognise the format, objectsdir, pd-externals, syslog.pd_linux, m_pd.h
+keywords: pd library template, Makefile 1.0.14, UNAME=Linux, uname -s, HarmonyOS, EXTENSION=pd_linux, PD_INCLUDE, PD_PATH=/usr,
+  STRIP=:, -Wl,-s, -Wl,-soname, objectsdir, pkglibdir, pd-externals, binutils strip, aarch64 ELF, cross-compile
+approach: 不打任何平台补丁，改为在 make 命令行覆盖 6 个变量（make 命令行赋值优先级高于文件内任何 `=`，含 `:=`），上游 Makefile 保持原样：
+  `make all UNAME=Linux CC="<profile 的 tools.build:compiler_executables.c>" PD_INCLUDE="<puredata 包>/include/pd" prefix="<package_folder>" LDFLAGS="-Wl,-soname,syslog.pd_linux -Wl,-s" STRIP=: -j1`
+  `make install` 复用同一组变量。
+  六个覆盖点与各自必要性：
+  ①`UNAME=Linux` **必需**——模板用 `UNAME := $(shell uname -s)` 后按全串匹配 `ifeq ($(UNAME),Linux)` 等 7 个分支，没有 OHOS。HarmonyOS 全串不命中 ⇒ Linux 整块被跳过 ⇒ `EXTENSION` 空、`PD_PATH` 不赋值、链接退化。
+  ②`CC` 用 profile 的 tools.build:compiler_executables.c（R33），不用裸 ${CC}；模板默认 `gcc`。
+  ③`PD_INCLUDE` 直接覆盖（而不是 PD_PATH）——模板的 `ALL_CFLAGS = -I"$(PD_INCLUDE)"` 且 `PD_INCLUDE = $(PD_PATH)/include/pd`、默认 `PD_PATH = /usr` 只对系统级 Pd 安装成立；直接给 PD_INCLUDE 可免去反推依赖包目录布局。
+  ④`prefix=<package_folder>`（R49 私有 prefix，不用 /usr/local）：模板 `libdir = $(prefix)/lib`、`objectsdir = $(pkglibdir)`，故落 `lib/pd-externals/syslog/`（= 上游默认布局，也是 Pd 找 extra library 的位置）；用 prefix 而非 DESTDIR，因为 install 目标是 `$(DESTDIR)$(objectsdir)/$(LIBRARY_NAME)`，两者同时给会重复拼路径。
+  ⑤`LDFLAGS=-Wl,-soname,<plugin> -Wl,-s`——上游链接行无 DT_SONAME，本地 SONAME 门禁 L5a 会判红；`-Wl,-s` 见 ⑥。
+  ⑥`STRIP=:`——见 root_cause 的 ②；strip 改由链接期 `-Wl,-s` 完成。
+  ⚠️ **本地复现不出 ①**：WSL2 开发机 `uname` 就是 Linux，会自动走 Linux 分分支。本地要复现需在 PATH 前置一个返回 HarmonyOS 的假 uname 脚本。
+root_cause: Pd library template Makefile 1.0.14 有两处硬绑定「构建机 == 目标机」的假设，交叉编译时同时失效：
+  ①`UNAME := $(shell uname -s)` + 一串 `ifeq ($(UNAME),<平台>)` 全串匹配（Linux/Darwin/Android/CYGWIN/MINGW/GNU/GNU/kFreeBSD），**无 OHOS/HarmonyOS 分支**。HarmonyOS 不命中任何分支 ⇒
+    `:65 PD_INCLUDE = $(PD_PATH)/include/pd` 的 `PD_PATH = /usr`（在 Linux 块内）从未赋值、`EXTENSION` 保持为空、`OPT_CFLAGS`/`ALL_CFLAGS += -fPIC`/`ALL_LDFLAGS += -rdynamic -shared -fPIC`/`ALL_LIBS += -lc` 全丢，
+    于是 `all: $(SOURCES:.c=.$(EXTENSION))` 变成目标 `syslog.`，链接按可执行文件走且无 `-shared` ⇒ `ld.lld: error: undefined symbol: main` + 全部 Pd 符号。
+    （与 pd-libdir/1.11 的 `system=Linux` 是同一类坑，先例：MR #14157 / CI #66208。）
+  ②`STRIP = strip --strip-unneeded -R .note -R .comment`，libdir_install 末尾无条件执行。这是**宿主 binutils 的 strip**，交叉编译产物是 aarch64 ELF，宿主 strip 读不了 ⇒
+    `strip: Unable to recognise the format of the input file '<...>/syslog.pd_linux'` ⇒ make install 在产物已就位后失败。宿主 strip 能否处理目标架构取决于发行版 binutils 的 BFD target 配置，不能假设。
+    正确做法是让 strip 与编译走同一个工具链：链接期 `-Wl,-s`（产物实测 `stripped`，6400 字节），或把 STRIP 指向工具链自带的 llvm-strip——但后者路径在 CI worker 上不存在，不可硬编码。

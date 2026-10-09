@@ -1,0 +1,33 @@
+# ══ Draft knowledge entry — 无 syslogd 的平台上测「转发到 libc syslog(3)」的 Pd 插件：靠可执行文件 interpose + 自带 Pd 运行时 shim ══
+# Timestamp: 2026-10-04
+# Software: pd-syslog 0.1（方法适用于任何「唯一可观测副作用是 libc syslog(3) 调用」的库）
+# Gate: conan create test_package/test()
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-pd-syslog-0.1-pd-plugin-syslog-interpose-test
+title: HarmonyOS PC 无 syslogd、/dev/log 不存在且 musl syslog() 静默失败 ⇒ 测「转发到 syslog(3)」的库必须由测试可执行文件 interpose openlog/syslog/closelog；Pd 插件另需自带 9 符号运行时 shim，且 m_pd.h 有两个 shim 陷阱
+trigger_tool: dlopen / -rdynamic / Pure Data plugin
+phase: test
+error_signature: function cannot return function type|use of undeclared identifier|Too many arguments to function call
+severity: 2
+category: test|pd
+match_keywords: dlopen, RTLD_NOW, -rdynamic, interpose, symbol interposition, syslog, openlog, closelog, /dev/log, syslogd,
+  m_pd.h, t_symbol, s_, PDINSTANCE, gensym, class_new, class_addanything, pd_new, floatinlet_new, getbytes, freebytes, atom_string
+keywords: dlopen, RTLD_NOW, rdynamic, interposition, syslogd, /dev/log, musl silent failure, m_pd.h, PDINSTANCE, s_,
+  class_addanything macro, t_newmethod, Pure Data plugin shim, gensym interning
+approach: 把测试可执行文件本身当成「最小运行时」：`-rdynamic` 编译，于是它定义的符号进入 .dynsym、能被 dlopen 进来的插件解析。
+  ①interpose libc 侧：`openlog` / `syslog` / `closelog` 三个函数由测试自己定义，记录 ident/option/facility、priority、格式化后的完整文本、close 次数。断言因此落在「插件实际转发了什么」上，而不是「日志里出现了什么」。
+     依据：动态符号查找序里可执行文件优先于 libc，故插件对 `syslog` 的未定义引用会绑定到测试的定义。
+  ②Pd 侧 shim：定义插件 GLOBAL UND 的 9 个符号——`gensym` / `class_new` / `class_addanything` / `floatinlet_new` / `getbytes` / `freebytes` / `atom_string` / `pd_new` / 全局 `s_`；
+     用 `class_new` 收到的 size 给 `pd_new` 分配（镜像真实 Pd），`getbytes` 记录请求字节数以断言缓冲区算术。
+  ③`dlopen(plugin, RTLD_NOW)`：让「装载本身」证明所有导入可解析；再断言 `dlsym(handle,"<name>_setup")` 非空且 `dlsym(handle,"setup")` 为空（Pd 先找 `setup`、回退 `<classname>_setup`）。
+  ④按真实 Pd 分发路径驱动：`setup()` → 记录到的构造函数（用真实签名转换后传入创建 selector）→ 通过 `floatinlet_new` 记下的 float 指针写 severity（模拟 Pd 的 float 消息）→ 记录到的 anything 方法 → 析构。
+  ⚠️ 两个 m_pd.h shim 陷阱见 root_cause。
+root_cause: ①**平台侧无 syslogd**：HarmonyOS PC 没有 syslogd、`/dev/log` 不存在，而 musl 的 `syslog()` 在 `socket()/connect()` 失败时静默返回（不报错、不 abort）。所以任何「等一条真实日志行再断言」的测试在该平台上永远不可能通过——这不是被测代码的缺陷，而是测试设计与平台能力不匹配。openlog() 本身是惰性的（只有 ident 被记录，不建立连接），所以拦截点选在 openlog/syslog/closelog 三个入口最完整。
+  ②**m_pd.h 的 `s_` 有两个分支**：未定义 `PDINSTANCE`（Pd library template 只加 `-DPD -DVERSION`）时，`m_pd.h` 声明 `EXTERN t_symbol s_pointer, s_float, ..., s_;`——普通全局**结构体**变量，于是业务代码里的 `&s_` 就是取它的地址；定义 `PDINSTANCE` 后同名标识符变成宏 `(pd_this->pd_s_)`（`pd_this` 展开为 `&pd_maininstance`），此时**不应**再为 `s_` 定义符号。写 shim 前必须确认目标包编译时有没有 `PDINSTANCE`，否则会出现「符号多余」或「符号缺失」两种相反的失败。
+  ③**m_pd.h 带一个自引用的 legacy 宏**：`#define class_addanything(x, y) class_addanything((x), (t_method)(y))`。它的两个形参正好匹配这个宏的两个参数，所以在测试里写 `void class_addanything(t_class *c, t_method fn) {...}` 时，**函数定义自身被宏改写**，报
+    `error: function cannot return function type 'int (t_method)'` + `error: use of undeclared identifier 'fn'` + `warning: type specifier missing, defaults to 'int'`。
+    处置：定义前 `#ifdef class_addanything` / `#undef class_addanything` / `#endif`。
+  ④**`t_newmethod` 的声明与实参不符**：`m_pd.h` 声明 `typedef void *(*t_newmethod)(void);`（无参），但 Pd 实际调用类构造函数时**传创建 selector**，业务构造函数签名是 `void *(t_symbol *)`。按 `t_newmethod` 直接调用会得到 `error: Too many arguments to function call, expected 0, have 1`；shim 里必须显式转换成真实签名再调。
+  ⑤**`gensym` 必须按名驻留**：Pd 的 `gensym` interning 且不释放。shim 若每次调用发新的槽位，后续 `gensym()` 会覆盖插件已存进 atom 的 `t_symbol *`（pd-libdir/1.11 实测过同类问题），导致断言在非确定性时刻失败。
+  ⑥`struct _class` / `struct _pd` 在 m_pd.h 里是不完整类型，不能 `sizeof`；shim 用 `long` 字节数组充当再转型返回。
