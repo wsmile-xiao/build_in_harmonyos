@@ -1,0 +1,123 @@
+#====================================================================
+# _template.kv — 知识图谱条目模板
+# 用法: 复制此文件为 E750.kv，填写各字段
+# 对应的人类文档: doc/E750.md
+#
+# 格式规则:
+#   - key: value（冒号后一个空格，value 到行尾）
+#   - 多行值: 下一行以空格开头 = 续行
+#   - 列表值: 逗号分隔
+#   - 正则值: | 分隔多个模式
+#   - 以 # 开头的行为注释
+#   - 空行忽略
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+# trigger_tool: 出错的工具 (configure/cmake/meson/make/gcc/clang/ld/python/pip/install/test/runtime)
+# phase:         出错阶段 (configuration/compilation/linking/installation/testing/runtime)
+# error_signature: 正则表达式(|分隔), 用于精确匹配日志文本
+id: E750
+trigger_tool: make|sh
+phase: testing
+error_signature: "ip: not found|ip: command not found|testgetifaddr test FAILED|command -v ip.*exit 1"
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+# severity:      3=🔴blocking  2=🟡medium  1=🟢minor  0=✅resolved
+# category:      分类标签（受控词表 64 词，逗号分隔，最多 5 个；add/promote 自动归一化）
+# prescan_pattern: （可选）预编译源码扫描正则——写入后 PreScanner 运行时自动派生
+#                   PSCAN-KB-{id} 规则，无需改 pre-scan-rules.yaml（知识增长即扫描能力增长）
+# prescan_globs:   （可选）扫描范围 glob 列表，默认 '*.c, *.h, *.cc, *.cpp, *.sh, Makefile*, *.mk'
+# 词表: platform, compat, limitation, detection, hmdfs, ohos, selinux, kernel, portability, libc, musl, posix, syscall, headers, threading, socket, network, build-system, cmake, autotools ...（全表见 scripts/ohc/kb_taxonomy.py）
+# match_keywords: 纯文本关键词(逗号分隔), 用于粗筛(固定字符串匹配F)
+# title:         简短标题(一句话描述错误模式)
+severity: 2
+category: platform, tools, testing, portability
+match_keywords: ip, iproute2, ip applet, toybox, busybox, command -v, testgetifaddr.sh, ip addr, ip route, 上游测试脚本, 无 ip 命令, busybox ip, PATH 前置, OHOS 无 iproute2, exit 1, 测试脚本提前退出
+title: OHOS 未随附 iproute2 的 ip（toybox 未编 ip applet）：上游测试脚本 `command -v ip || exit 1` 直接退出
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+# root_cause:       一句话根因描述(逗号可分行)
+# affected_scope:   影响范围
+# verification_cmd: 验证诊断是否正确的命令
+root_cause: 鸿蒙 PC 的 toybox 未编入 ip applet（/bin/toybox --list 只有 install 无 ip），PATH 内也无 iproute2，因此上游测试脚本里 `IP=`command -v ip` || exit 1` 一类的工具探测在取到空值后直接 exit 1：测试用例本身一行没跑，脚本却以失败/未运行形态出现（miniupnpd 2.3.10 的 testgetifaddr.sh 即此形态，实测 make check 的 validategetifaddr 目标因此无法执行）。设备上 busybox（/data/service/hnp/bin/busybox）带完整 ip applet（`busybox ip -4 route`/`ip -4 addr show` 实测可用），可直接补齐该工具而无需改动上游测试脚本。
+affected_scope: 所有上游测试/构建脚本用 `ip` 查询路由与网卡地址的 C/C++ 包（iproute2 依赖的测试夹具、default-route 探测、`ip addr show` 取网卡 IP 的 harness）；凡 `command -v ip` 或 `ip -4 route|addr` 形态的探测都会命中。与 §一.14（裸命令名无 PATH）、§一.26（toybox sh PATH 搜索）同族：名字对、实现不对或根本没编入。
+verification_cmd: cd /storage/Users/currentUser/tmp/miniupnpd-2.3.10/w0/trial/b2 && PATH=/storage/Users/currentUser/tmp/miniupnpd-2.3.10/w0/bin:$PATH sh /storage/Users/currentUser/tmp/miniupnpd-2.3.10/w0/src/miniupnpd-2.3.10/testgetifaddr.sh  # 该目录须含 ./testgetifaddr（测试程序所在构建目录）→ 输出 testgetifaddr test OK rc=0；把 bin/ip 从 PATH 摘掉重跑同一命令则无任何输出直接 rc=1（command -v ip || exit 1 提前退出）
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+# 推荐方案 (priority 越小越优先, 从 1 开始)
+rec_priority: 1
+rec_approach: provide-busybox-ip-applet-on-path
+rec_description: 在配方 build()/测试执行环境里先 `command -v ip`，缺失时用 busybox 挂一个 ip 链接到任务本地 bin 目录并前置到 PATH（`ln -sf "$(command -v busybox)" "$BINDIR/ip"; export PATH="$BINDIR:$PATH"`）。busybox 的 ip 是真实 iproute2 兼容实现，测试语义不变、上游脚本零改动；测试前打印一行说明来源便于审方复核。
+rec_command: B="$PWD/.tools"; mkdir -p "$B"; command -v ip >/dev/null || ln -sf "$(command -v busybox)" "$B/ip"; PATH="$B:$PATH" make check
+rec_auto_fix: false
+rec_impl: env-path-setup
+
+# 回退方案 (当推荐方案不可用时尝试)
+fallback_priority: 2
+fallback_approach: report-as-tool-not-installed
+fallback_description: 既无 ip 也无 busybox 时，不得伪造 PASS：把该用例按「工具未装」计入 NOT_RUN/SKIP 并在 PR 正文写明缺失工具、受影响用例与替代验证（如直接以已知网卡名运行底层测试程序）。
+fallback_command: "command -v ip >/dev/null || command -v busybox >/dev/null || echo 'NOT_RUN: iproute2 missing'"
+fallback_auto_fix: false
+fallback_impl: manual-report
+
+# ★ 禁止策略 (与推荐方案同等重要) ★
+# forbid_N_pattern:     正则(|分隔), 匹配则拒绝/警告
+# forbid_N_reason:      为什么禁止
+# forbid_N_consequence: 违反后的后果
+forbid_1_pattern: sed -i .*command -v ip|把 .*\|\| exit 1.* 改成 \|\| true
+forbid_1_reason: 改上游测试脚本的判定逻辑等于把工具缺失变成静默通过，破坏上游用例的可比性
+forbid_1_consequence: 测试结论不可复现，评审按少报/假 PASS 处理
+# forbid_2_pattern:
+# forbid_2_reason:
+# forbid_2_consequence:
+
+# ═══ Layer 4: 原则引用 ═══
+# principles:    适用的原则 ID 列表(逗号分隔), 在 graph/principles.kv 中定义
+principles:
+
+# ═══ 关系图 (Relations) ═══
+# causes:          本模式是这些模式的根因 (修好本模式可能同时解决它们)
+# caused_by:       本模式的根因是这些模式 (应先修它们)
+# similar_to:      特征相似可能混淆的模式
+# conflicts_with:  解决方案互相冲突的模式
+# prerequisite_of: 本模式是修复这些模式的前置条件
+causes: "                []"
+caused_by: "             []"
+similar_to: "            []"
+conflicts_with: "        []"
+prerequisite_of: "       []"
+
+# ═══ 元数据 ═══
+source_lib: miniupnpd 2.3.10
+forbid_2_pattern: testgetifaddr test FAILED|exit 1.*PASS|跳过 validategetifaddr 且不写归因
+forbid_2_reason: 脚本提前退出时必须如实记为未执行并给出具体技术原因
+forbid_2_consequence: 违反 R51 三步法与 §3.5 四分项统计，硬性不通过
+prescan_pattern: "command -v ip|ip: (not found|command not found)|testgetifaddr test FAILED"
+prescan_globs: "**/*.sh, **/configure, **/Makefile*"
+prescan_severity: warning
+doc_file: knowledge/drafts/E750-draft-A09D.md
+last_updated: 2026-10-01
+source_event: miniupnpd 2.3.10 OHOS 适配：testgetifaddr.sh 的 `command -v ip || exit 1` 在设备上取空退出（toybox 无 ip applet；busybox 提供 ip，挂 PATH 后 test OK）
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+# authors: 作者列表 (格式: Name <email>, Name2 <email2>)
+#          草稿生成时自动从 git config 填入；主编合入时保留原作者
+#          合并到已有条目时追加为第二/第三作者
+# source_pr:            添加该条目的 PR 编号
+# source_commit:        添加时的 commit SHA (短)
+authors: Awstme <awstme@qq.com>
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics, 方案 D) ═══
+# metrics_success_count: 该修复方案成功次数
+# metrics_fail_count:    该修复方案失败次数
+# metrics_confidence:    置信度 = success / (success + fail)
+# metrics_last_used:     最后使用时间
+metrics_success_count: " 0"
+metrics_fail_count: "    0"
+metrics_confidence: "    0.0"
+metrics_last_used:
+
+draft: true
+contributor_id: A09D
