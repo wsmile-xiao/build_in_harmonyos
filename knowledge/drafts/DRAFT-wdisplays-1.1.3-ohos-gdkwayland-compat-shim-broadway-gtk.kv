@@ -1,0 +1,127 @@
+#====================================================================
+# DRAFT-wdisplays-1.1.3-ohos-gdkwayland-compat-shim-broadway-gtk
+#   依赖 GDK Wayland 访问器的 GTK 客户端在 OHOS（broadway-only GTK）上的
+#   编译适配：自建 gdkwayland 兼容层 + 放宽 meson 的 GDK 后端断言
+# 来源: PR feat/wdisplays-1.1.3（wdisplays 1.1.3 适配 HarmonyOS PC）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-wdisplays-1.1.3-ohos-gdkwayland-compat-shim-broadway-gtk
+trigger_tool:           meson|clang|ninja|ld|pkg-config
+phase:                  configuration|compilation|linking
+error_signature:        gdk/gdkwayland\.h.*(No such file|file not found)|
+                        undefined symbol: GDK_IS_WAYLAND_DISPLAY|
+                        gdk_wayland_(display_get_wl_display|monitor_get_wl_output|window_get_wl_surface)|
+                        Wayland GDK backend not present|
+                        targets=broadway
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, gtk, meson, portability, display
+match_keywords:         gdkwayland.h, gdk/gdkwayland.h, GDK_IS_WAYLAND_DISPLAY,
+                        gdk_wayland_display_get_wl_display,
+                        gdk_wayland_monitor_get_wl_output,
+                        gdk_wayland_window_get_wl_surface,
+                        targets=broadway, broadway, wayland_backend,
+                        Wayland GDK backend not present,
+                        gtk+-3.0, gdk-3.0, wayland-client, meson assert,
+                        wl_display_connect, wl_surface
+title:                  OHOS GTK3 仅 broadway 后端：依赖 <gdk/gdkwayland.h> 的 Wayland GTK 客户端无法编译，需自建 gdkwayland 访问器兼容层
+prescan_pattern:        ^#include\s*[<"]gdk/gdkwayland\.h[">]|GDK_IS_WAYLAND_DISPLAY|gdk_wayland_[a-z_]+\s*\(
+prescan_globs:          *.c, *.h, *.cc, *.cpp, meson.build, */meson.build, **/meson.build
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OHOS 制品仓的 gtk/3.24.43 以 broadway(HTML5) 后端构建，
+                        gdk-3.0.pc 的 targets=broadway，既不安装 GDK Wayland 后端
+                        也不安装 <gdk/gdkwayland.h>。而 Wayland 专有 GTK 客户端
+                        （wlr-output-management / layer-shell / screencopy 一类
+                        工具）必须靠 GDK 的 Wayland 私有访问器拿到 wl_display /
+                        wl_output / wl_surface。于是出现两重失败：编译期头文件
+                        缺失 + 链接期 GDK_IS_WAYLAND_DISPLAY 等宏展开的未定义，
+                        外加上游 meson.build 的
+                        assert(gdk targets contains 'wayland') 直接 abort。
+                        注意：这不是"缺依赖"，wayland-client 包在 OHOS 可用，
+                        缺的是 GDK 到 Wayland 的连接面。
+affected_scope:         所有依赖 <gdk/gdkwayland.h> 或 GDK_IS_WAYLAND_DISPLAY
+                        的 GTK3 客户端（Wayland 显示管理/覆盖层/截屏类工具），
+                        在 OHOS PC（broadway-only GTK）上复现。已在 wdisplays
+                        1.1.3 实证（src/main.c、src/overlay.c 共 6 处调用）。
+verification_cmd:       pkg-config --variable=targets gdk-3.0   # OHOS 输出 broadway
+                        ls <gtk_pkg>/include/gtk-3.0/gdk/gdkwayland.h   # 不存在
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           wayland-client-backed-gdkwayland-shim
+rec_description:        在配方补丁里新增一个极小的兼容层（.h/.c），用
+                        wayland-client（OHOS 制品仓可用）实现上游真正使用的
+                        GDK 访问器：
+                        ① gdk_wayland_display_get_wl_display() → 进程级缓存的
+                           wl_display_connect(NULL)（真连接，不是空壳）；
+                        ② gdk_wayland_monitor_get_wl_output() → wl_registry
+                           绑定 wl_output 后按 GdkMonitor 序号映射；
+                        ③ gdk_wayland_window_get_wl_surface() → broadway 窗口背后
+                           没有 wl_surface，如实返回 NULL，调用方对 NULL 降级；
+                        ④ GDK_IS_WAYLAND_DISPLAY 宏语义化为"本进程是否建立了
+                           Wayland 连接"。
+                        同时把 meson 的 GDK 后端断言放宽为
+                        "wayland 或 broadway 二者之一"，并把新 .c 加入源列表。
+                        关键纪律：**不要用空壳 stub 假装成功**——wl_surface 无
+                        法伪造，返回 NULL + 调用点 NULL 守卫才是诚实降级；
+                        补丁不得含平台宏（__OHOS__），平台差异经运行期探测表达。
+rec_command:            patches/000X-src-gdkwayland-compat.{c,h}.patch +
+                        patches/000X-src-meson.build.patch +
+                        patches/000X-src-main.c.patch + patches/000X-src-overlay.c.patch
+rec_auto_fix:           false
+rec_impl:               recipe-patch
+
+fallback_priority:      2
+fallback_approach:      conditionalize-wayland-only-features
+fallback_description:   若该库/工具的 Wayland 专有功能在 OHOS 上本就不可用，且
+                        上游允许裁剪，则在补丁里用构建开关把相关源文件/功能
+                        整体裁掉（保留核心可用部分），并在 notes.md 与 PR 说明
+                        里标注"某功能在 OHOS 不可用"。侵入面大但语义更干净。
+fallback_command:       patches/000X-drop-wayland-only-sources.patch
+fallback_auto_fix:      false
+fallback_impl:          source-patch
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       gdk_wayland_window_get_wl_surface.*return\s+\(void\s*\*\s*\)\s*0|
+                        空壳.*stub.*gdk_wayland|#define\s+GDK_IS_WAYLAND_DISPLAY\s*\(.*\)\s*\(TRUE\)
+forbid_1_reason:         把 GDK_IS_WAYLAND_DISPLAY 恒真、或让 wl_surface 访问器
+                        返回假值，会让程序在无 compositor 的系统上继续往下走，
+                        最终以段错误/协议错误崩溃；属于 R40 明令禁止的空壳 stub。
+forbid_1_consequence:   编译"通过"，运行期崩溃且误导后续适配者
+forbid_2_pattern:       gtk.*wayland_backend.*=.*true|重新编译\s*gtk.*启用\s*wayland
+forbid_2_reason:         为适配消费方去改已发布依赖（gtk）的后端配置，违反 R36
+                        "依赖先发布再构建下游"；且 OHOS 无 X11/Wayland 原生显示面，
+                        broadway 是本平台既定后端。
+forbid_2_consequence:   依赖重编导致版本/二进制分叉，下游不可消费
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004, P006
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E527（OHOS GTK3 broadway 后端选择 + 工具包装；本条是"消费方
+                        需要 GDK Wayland 面"的下游延伸，签名不同）、
+                        E463（broadway + 已签名私有工具副本 + 无显示消费方探针；
+                        本条不含工具包装，重点是 GDK 访问器实现）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+doc_file:               knowledge/drafts/DRAFT-wdisplays-1.1.3-ohos-gdkwayland-compat-shim-broadway-gtk.md
+last_updated:           2026-09-24
+source_event:           wdisplays 1.1.3 适配（feat/wdisplays-1.1.3）；
+                        OHOS gtk/3.24.43 broadway-only，上游 6 处 gdk_wayland_* 调用
+                        + meson GDK 后端硬断言；补丁 0001-0005 后 conan create 通过、
+                        test_package 9/9（含符号级证据：兼容层符号已编入产物）
+authors:                OpenDesk
+source_pr:              -
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.85
+metrics_last_used:      2026-09-24
