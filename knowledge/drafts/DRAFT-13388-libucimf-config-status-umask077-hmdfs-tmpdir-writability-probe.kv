@@ -1,0 +1,40 @@
+#====================================================================
+# DRAFT-13388-libucimf-config-status-umask077-hmdfs-tmpdir-writability-probe - config.status temp dir unwritable on HMDFS /storage (chmod/EPERM, writability probe paradigm)
+#====================================================================
+
+id:                     DRAFT-13388-libucimf-config-status-umask077-hmdfs-tmpdir-writability-probe
+trigger_tool:           autotools|config.status
+phase:                  configure
+error_signature:        can't create \./conf[a-zA-Z]{6}/subs1\.awk: Permission denied|could not setup config files machinery
+
+severity:               3
+category:               autotools|build-system|hmdfs|tmp-permission|conan-ci
+match_keywords:         config.status, subs1.awk, confXXXXXX, umask 077, mktemp -d, Permission denied, could not setup config files machinery, HMDFS, chmod EPERM, TMPDIR, writability probe
+
+title:                  autoconf 2.69 config.status 在 HMDFS /storage 卷 build 目录用 umask 077 建的 700 临时目录对 CI worker 不可写（写/chmod 双 EPERM），报 can't create .../subs1.awk: Permission denied
+
+root_cause:             autoconf 2.69 生成的 config.status 以 `(umask 077 && mktemp -d "./confXXXXXX")` 在 build 目录创建 mode 700 临时目录，随后向其中写 subs1.awk/subs2.sed。CI worker（uid 100）与 HMDFS /storage 卷新目录的映射属主（20001006）不同：build 目录本身是 drwxrws--x（组内可写）所以多数写入正常，但 700 临时目录对组完全关闭 → 目录内写文件 EACCES；且 chmod 需属主身份，worker 连 `chmod 0770` 都 EPERM（v1 补丁实测失败，build #63278）。configure 阶段不向 $tmp 内写文件所以能跑完，config.status 一写即炸。依赖 $TMPDIR 也不可靠：CI 实际构建进程的 TMPDIR 可能被（zsh/conan 侧）改写回 /storage 卷（v2 失败，build #63288 报错路径 /storage/Users/currentUser/.cache/tmp/confXXXXXX）。本地构建全绿是因为 CONAN_HOME/build 目录在 /data 卷（正常 ext4 语义）。
+affected_scope:         HMDFS /storage 卷上运行 autotools（autoconf 2.69 生成）config.status 的所有包；libucimf/2.3.8（CI #63227/#63278/#63288/#63314 四轮实证）。/data 卷构建不受影响。
+verification_cmd:       打补丁后 CI conan-build-test 应通过 config.status 阶段；本地可用 ro 目录模拟：TMPDIR 指向 555 目录跑探测块单测。
+
+rec_priority:           1
+rec_approach:           writability-probe-candidate-dirs-plus-umask000-fallback
+rec_description:        补丁 configure 的临时目录创建块（该块文本会整体复制进生成的 config.status，改一处即覆盖两者）：候选目录 ${TMPDIR} → /data/storage/el2/base/cache → /data/cache → /data/local/tmp 逐个 mktemp 后，用子 shell 真实写入探针 `(echo probe > "$t/.writable") 2>/dev/null` 判可写、取第一个可用者；全败后在 build 目录用 `(umask 000 && mkdir "$t")` 兜底建 0777 目录——HMDFS 属主映射下 777 目录任何 uid 可写，必然成功。注意：探针必须写进候选目录内部（HMDFS 下父目录可写不代表我们建的 700 目录可写，mktemp 成功≠可用）。libucimf/2.3.8 PR #13388 补丁 0005 v4 为成熟实现。
+rec_command:            见补丁 0005-configure-tmpdir-group-perms.patch（libucimf/2.3.8，archives/l/libucimf/2.3.8/patches/）
+rec_auto_fix:           false
+rec_impl:               patch-configure-tmpdir-probe
+
+fallback_priority:      2
+fallback_approach:      export-TMPDIR-to-data-volume
+fallback_description:   若能控制构建环境（conanfile build() 或 CI wrapper），在 configure/config.status 前显式 `export TMPDIR=/data/storage/el2/base/cache/<可写子目录>`（/data 卷正常语义）。但不可单独依赖：CI 实际构建进程的 TMPDIR 已被实证可能被改写回 /storage（build #63288），须配合探测式补丁兜底。
+fallback_command:       export TMPDIR=/data/storage/el2/base/cache && ./configure ...
+fallback_auto_fix:      false
+fallback_impl:          env-tmpdir-override
+
+forbid_1_pattern:       chmod\s+0?770.*tmp
+forbid_1_reason:        HMDFS 属主映射下 worker 对 20001006 属主的目录连 chmod 都 EPERM，chmod 0770 补丁静默失败（2>/dev/null 吞掉），700 目录依旧不可写。
+forbid_1_consequence:   CI 同点失败（build #63278，libucimf），浪费一轮构建。
+
+ref_pr:                 13388
+ref_package:            libucimf/2.3.8
+ref_ci_run:             63227, 63278, 63288, 63314
