@@ -4,7 +4,7 @@
 - 构建系统: autotools
 - 编译日期: 2026-05-29
 - 编译器: clang/clang++
-- 状态: published
+- 状态: built（2026-10-06 新 Conan 配方已真机验证，尚未通过比赛 PR CI）
 
 ## 编译步骤
 
@@ -78,10 +78,44 @@ tar -tzf libmpeg2-0.5.1-ohos-aarch64.tar.gz
 1. 补丁 `0002-configure.patch` 修复了 HMDFS 文件系统的 umask 问题，这是 OpenHarmony 环境特有的问题
 2. 补丁 `0001-.auto-config.guess.patch` 更新了 config.guess 脚本以正确识别 OHOS 平台
 
+## 2026-10-06 Conan 适配与上游测试
+
+旧归档只证明手动安装，且源码 URL 是目标机本地文件。本次新增 Conan 2
+配方，改用官方 VideoLAN 源码 URL 与 SHA-256；在 `source()` 中应用
+`config.guess`/`config.sub` 的 `linux-ohos` 补丁后再让 Conan 复制源码。
+旧版 `config.sub` 需要同时识别 kernel-OS、CPU 类型和 OS 白名单；不能把
+HarmonyOS 假报为普通 `linux-gnu`。此外，真机工具位于用户目录，和比赛
+worker profile 的 `/data/service/hnp/bin` 不同，真机验证只使用任务私有
+profile，不修改 CI profile。
+
+上游 `test/tests` 共 73 条，外部测试素材由 SHA-256 固定的项目 CVS 快照
+恢复，并在 `build()` 中完整执行：68 条检查 MD5 与 dump，5 条遵循上游
+`IGNORE-MD5` 只检查 dump。严格脚本要求 73/73，不能靠上游 shell 的
+退出码掩盖缺文件。`libmpeg2-w3-20261006T031522Z` 的同一次
+`conan create` 中，73/73 回归和独立 C 消费者均通过；12 个事务阶段也
+通过。比赛 worker 的 PR CI 尚未执行，不能标为 published。
+
 ---
 **编译结束**: 2026-05-29 14:30
-**最终状态**: published
+**旧版手动归档当时状态**: published（仅指 2026-05-29 手动产物；2026-10-06 Conan 配方仍为 built，比赛发布待 PR 合并后执行）
 ---
 
 **编译结束**: 2026-05-29 14:31
 **最终状态**: built
+
+## 2026-10-10 rule12 消费者补强
+
+此前消费者只检查 API 初始化，且 PR 将其全部列入集成测试，使鸿蒙特有
+测试行为 0。当前以同一官方 CVS 快照中的 605 字节完整码流为输入，在
+已安装包上执行文件读取、12 帧解码、RGB24 转换、参考像素摘要校验、PPM
+输出和回读、资源清理。源码内嵌素材不需要消费者运行时下载，完整流程
+只计 1 个用例；上游仍为 73 条，合计 74 条。
+
+独立 x86 上游构建提供可移植 C 解码路径的参考像素；该消费者固定
+mpeg2_accel(0)，默认加速路径仍由上游回归验证。实际图像 12×12，转换
+缓冲宽度对齐到 16，逐行按真实步长拷贝有效像素，不能按显示宽度连续取帧。
+
+新真机事务 libmpeg2-w3-20261010T023245Z 的独立 Conan create、上游
+73/73 和完整消费者 1/1 均 PASS，12 阶段含 release/postrelease 完成。
+日志 SHA-256 为 379cc3ce8749d03385489b00162453e630dbdf6b314e86dcbb45affa8554c9bf。
+本轮不触发 CI rebuild，不宣称审核通过或制品已发布。
