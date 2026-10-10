@@ -1,0 +1,57 @@
+#====================================================================
+# DRAFT-xmcd-3.3.2-ohos-musl-missing-pthread-cancel - OHOS musl 缺 POSIX 线程取消 API:特性宏间接层(自中止回退 pthread_exit)+跨线程取消点语义降级,禁用 -lpthread 空壳与弱符号 stub(xmcd 案例)
+#====================================================================
+
+id:                     DRAFT-xmcd-3.3.2-ohos-musl-missing-pthread-cancel
+trigger_tool:           clang|ld|make|conan
+phase:                  compilation
+error_signature:        undefined symbol: pthread_cancel|undefined symbol: pthread_setcancelstate|implicit declaration of function 'pthread_cancel'|undefined reference to .pthread_cancel.
+
+severity:               2
+category:               libc|musl|compat|compilation|cross-compile
+match_keywords:         pthread_cancel, pthread_setcancelstate, pthread_setcanceltype, PTHREAD_CANCELED, musl missing symbol, empty libpthread, thread cancellation, pthread_exit fallback, OHOS libc
+
+title:                  OHOS musl 缺 POSIX 线程取消 API——特性宏间接层(自中止回退 pthread_exit)+跨线程取消点语义降级,禁用 -lpthread 空壳/弱符号 stub
+
+root_cause:             OHOS 的 musl libc(SDK 26.0.0.18 sysroot)不导出 POSIX 线程取消 API:对 libc.so 跑 `nm -D --defined-only` 时 pthread_cancel/pthread_setcancelstate/pthread_setcanceltype 命中均为 0,而同族的 pthread_exit/pthread_detach/pthread_cond_timedwait 各命中 1;sysroot 的 libpthread.a 是空壳(0 个定义符号),因此 -lpthread/-pthread 无法补齐缺口。老代码把 pthread_cancel 当"线程自杀"(错误分支里 pthread_cancel(pthread_self()))或跨线程取消点(配合 pthread_cleanup_push 清理链)使用,在无替代路径时编译/链接失败。
+
+affected_scope:         使用 POSIX 取消点 API 的老一代 C/C++ 库:cdparanoia 系音频抓轨、2000 年代 GUI/多媒体/打印后台、把 pthread_cancel 当自中止用的代码;仅用 pthread_create/join/mutex/cond 的库不受影响。
+
+verification_cmd:       `python3 knowledge/drafts/musl-pthread-cancel-gap/detect_pthread_cancel_gap.py --src <源码>` 判 HIT(缺 SDK sysroot 时判 PROBE_UNAVAILABLE,退码 2,不落 HIT/MISS);`nm -D --defined-only <libc.so> | grep -cw pthread_cancel` → 0(实测);`nm --defined-only <sysroot>/usr/lib/*/libpthread.a | grep -c '\b[TDBRWV] '` → 0(空壳实测);修复后 conan create 全绿且 headless 消费者用例通过(xmcd 3.3.2 实测,2026-10-04);反向验证:去掉 -DHAVE_PTHREAD_CANCEL=0 恢复 undefined symbol。
+
+rec_priority:           1
+rec_approach:           feature-macro-indirection-with-graceful-degradation
+rec_description:        源码侧引入特性宏(缺省保持上游语义,由配方以 -DHAVE_PTHREAD_CANCEL=0 切换):①自中止路径 pthread_cancel(pthread_self())改用 PTHR_SELF_ABORT(t) 间接层,=0 时 pthread_exit(NULL)——语义等价且语句形状一致,调用点无需改写;②跨线程取消点 pthread_cancel(other)降级为"记录日志+空操作",由随后的 stop/join/标志位收管线(必须先确认该取消点之后确有收管线路径);③pthread_setcancelstate/type 等配置性调用由特性宏分支整体旁路。补丁内只含特性宏、不含平台宏,同一配方在 Linux 与 OHOS 均可构建。
+rec_command:            CFLAGS="$CFLAGS -DHAVE_PTHREAD_CANCEL=0";patch(pthr.h): #if !defined(HAVE_PTHREAD_CANCEL) || HAVE_PTHREAD_CANCEL / #define PTHR_SELF_ABORT(t) pthread_cancel(t) / #else / #define PTHR_SELF_ABORT(t) pthread_exit(NULL) / #endif ;patch(pthr.c): 自中止/跨线程取消点调用点改经 PTHR_SELF_ABORT(t),跨线程取消降级为记录+空操作(由紧随的 stop/join 收管线)
+rec_auto_fix:           false
+rec_impl:               patch-based
+
+fallback_priority:      2
+fallback_approach:      static-shim-wrapper
+fallback_description:   源码无特性宏切口时,在目标库内提供 pthread_cancel 包装实现(转发到 pthread_exit 或置标志位),以静态 shim 形式随补丁携带;代价是语义近似(立即退出 vs 取消点退出),须在 PR 说明理由与影响面。
+fallback_command:       patch(xxx.c): static int cancel_shim(pthread_t t) { if (pthread_equal(t, pthread_self())) pthread_exit(NULL); return 0; } #define pthread_cancel cancel_shim
+fallback_auto_fix:      false
+fallback_impl:          patch-based
+
+forbid_1_pattern:       -lpthread\b|-pthread\b
+forbid_1_reason:        sysroot 的 libpthread.a 是空壳(0 定义符号),加链接选项解不了符号,只会把失败点从编译/链接阶段推到同一处,并掩盖真实缺口。
+forbid_1_consequence:   看似"补了库",实际仍报同一 undefined symbol;排查时间被浪费在链接选项上而非缺口本身。
+forbid_2_pattern:       __attribute__\s*\(\(\s*weak\s*\)\)
+forbid_2_reason:        弱符号 stub 把"取消线程"静默变成"什么都不做":无日志、无收管线,而调用方依赖取消后线程退出的前置假设。
+forbid_2_consequence:   运行期线程不收线/资源泄漏/句柄耗尽,且无任何错误信号,问题后移到运行期后极难定位。
+
+principles:             P005, P006
+causes:                 []
+caused_by:              []
+similar_to:             []
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/DRAFT-xmcd-3.3.2-ohos-musl-missing-pthread-cancel.md
+last_updated:           2026-10-04
+source_event:           xmcd 3.3.2 HarmonyOS PC 适配(musl libc 缺 pthread_cancel 族;样例补丁 cdda_d/pthr.{h,c})
+authors:                weijiapan
+source_commit:          pending-pr-commit
+
+metrics_success_count:  0
+metrics_fail_count:     0
