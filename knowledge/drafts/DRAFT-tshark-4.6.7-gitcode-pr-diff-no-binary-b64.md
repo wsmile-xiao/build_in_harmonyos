@@ -1,0 +1,30 @@
+# DRAFT-tshark-4.6.7-gitcode-pr-diff-no-binary-b64：GitCode PR .diff 端点无二进制 payload，CI checkout-pr 无法应用二进制文件
+
+> Status: **Draft**（待审核 promote）| severity: `P1` | category: `platform` | Updated: 2026-10-02
+> 对应: `knowledge/drafts/DRAFT-tshark-4.6.7-gitcode-pr-diff-no-binary-b64.kv`
+
+---
+
+**匹配关键词**：missing binary patch data, binary patch does not apply, git apply, .diff, GitCode, checkout-pr, base64, b64, Binary files
+
+## 错误签名（error_signature）
+
+```text
+missing binary patch data for
+```
+
+## 错误摘录（error_excerpt）
+
+```text
+PR #13579 构建 #67201 checkout-pr: error: missing binary patch data for 'archives/t/tshark/4.6.7/test_package/dissectors/data/case_01.pcap'（27 个二进制测试文件全中；实测 .diff 996KB 中 GIT binary patch=0、Binary files differ=27，文本段 112 文件 apply 正常）
+```
+
+## 根因（root_cause）
+
+GitCode PR .diff 端点不以 --binary 生成 diff：二进制文件只有 index 哈希、无数据体（PR #13579 实测 996KB diff 中 GIT binary patch 段=0、'Binary files ... differ' 行=27）。CI checkout-pr 步骤下载该 .diff 后 git apply，二进制文件无法物化，逐文件报 missing binary patch data / binary patch does not apply / patch does not apply 三行错误。与 main 冲突无关——同一 diff 的文本段全部 apply 正常，日志 HINT『PR 与 main 分支存在冲突，请 rebase』具有误导性。所有新增二进制文件的 PR 均受影响。
+
+## 推荐方案（rec_approach: `二进制测试数据文本化：base64 转 .b64 入仓（仓库先例 packetq/sngrep .pcap.b64），test runner 运行期 base64 -d 解码到 scratch 目录再消费；CI clean 环境 base64 属 coreutils 无新增依赖。遇到 checkout-pr 该错误时先核实 PR 是否新增二进制文件、下载 .diff 检查二进制段，勿按 HINT 盲目 rebase；可向上游平台建议 .diff 端点补 --binary（Issue #3688 已报）。`）
+
+---
+
+*本文件为人工创建草稿（tshark 4.6.7 OHOS PC 适配实测经验）；内容与 kv 一致，待主编审核 promote 后转入 `knowledge/doc/`。*
