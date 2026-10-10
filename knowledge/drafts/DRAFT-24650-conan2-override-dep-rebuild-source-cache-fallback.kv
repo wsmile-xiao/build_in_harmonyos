@@ -1,0 +1,134 @@
+#====================================================================
+# DRAFT-24650-conan2-override-dep-rebuild-source-cache-fallback
+#   conan 2 override 改变被覆盖依赖的 package_id → 无预编译 binary →
+#   --build=missing 回落源码重建；若该依赖 conandata 只有官方源且本机
+#   不可达，用 core.sources:download_cache + 官方镜像按 sha256 预取兜底
+# 来源: pangomm 2.46.5 适配 HarmonyOS PC（本 PR）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-24650-conan2-override-dep-rebuild-source-cache-fallback
+trigger_tool:           conan
+phase:                  dependency-resolution|installation
+error_signature:        Version conflict: Conflict between .+ and .+ in the graph|
+                         Error in source\(\) method.*Connection reset by peer|
+                         Max retries exceeded with url.*ConnectionResetError
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               conan, dependency, build-system, network, reuse
+match_keywords:         conan 2, override, Version conflict, package_id,
+                        prebuilt binary, Missing, build=missing, rebuild from source,
+                        core.sources:download_cache, sources download cache,
+                        mirror fallback, conandata, download.gnome.org,
+                        glibmm, cairomm, libsigc, ABI line
+title:                  conan 2 override 会改掉被覆盖依赖的 package_id（制品仓 binary 失配→源码重建），该依赖官源不可达时用 conan 源缓存按 sha256 预取官方镜像兜底
+prescan_pattern:        self\.requires\("[^"]+",\s*override=True\)|core\.sources:download_cache
+prescan_globs:          **/conanfile.py, **/global.conf
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             两个精确 pin 落在同一包名不同版本时（GNOME mm 家族
+                        最典型：glibmm/2.66.9 钉 libsigc/2.10.8 而
+                        cairomm/1.14.5.1 钉 libsigc/2.12.1），conan 2 不会
+                        自动归一化，必须 self.requires(..., override=True)。
+                        **override 不只是选版本**：它改变了被覆盖侧依赖的
+                        package_id（requires 里嵌了被覆盖包的 package_id），
+                        于是 `conan download` 到的制品仓 binary 与该 package_id
+                        不再匹配 —— `conan graph info --format=json` 显示该
+                        节点 binary=Missing，`conan create --build=missing`
+                        回落**源码构建**。若这个依赖的 conandata 只写了官方源
+                        （如 glibmm 只有 download.gnome.org），而该源在本机
+                        不可达（Connection reset by peer / Max retries），
+                        source() 直接失败，表现为"依赖明明已发布却装不上"。
+                        关键认知：**依赖"已发布"≠"该 package_id 有 binary"**，
+                        override 会把范围收敛到一个需要重建的变体。
+affected_scope:         任何需要在同一 conan 2 图内 override 跨 ABI 族/跨版本
+                        pin 的 recipe（C++ 生态尤甚：GNOME mm 家族的
+                        glibmm/cairomm/pangomm/atkmm/gtkmm，以及任何依赖链里
+                        两个上游各自钉死同一基础库不同版本的场景）。仓内实证：
+                        pangomm/2.46.5（本 PR）、pangomm-2.46/2.46.5、
+                        gtkmm/pangomm 2.50/2.56 线同款 override。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           prefetch-dep-source-into-conan-source-cache
+rec_description:        先判"是否真的需要重建"：conan graph info . -pr:h=<p>
+                        -pr:b=<p> -r=<remote> --format=json，读被 override
+                        依赖节点的 binary 字段；Missing 即需源码构建。
+                        需要重建时，**不动依赖的 recipe/conandata**，改为把
+                        官方 tarball 预取进 conan 的源码下载缓存：
+                        ① 查依赖 conandata 的 sha256（recipe pin）；
+                        ② 从**官方镜像**下载同名 tarball（GNOME 项目用
+                        mirror.nju.edu.cn/gnome/... 等；不得用平台黑名单镜像
+                        gh-proxy/ghfast/cnb.cool）；
+                        ③ sha256sum 逐字节校验等于 recipe pin；
+                        ④ 落到 $(conan config get core.sources:download_cache)/s/<sha256>
+                        （download_cache 未配置时可临时 `conan config set
+                        core.sources:download_cache=<绝对路径>` 或用默认
+                        ~/.conan2/... backup sources 目录）；
+                        ⑤ 重跑 conan create --build=missing，source() 命中
+                        本地缓存（日志出现 "Source ... retrieved from local
+                        download cache"）。
+
+rec_command:            graph_check='conan graph info . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 -r=ohpcd --format=json'
+                        # 依赖 tarball 预取（以 glibmm/2.66.9 为例）
+                        sha=5a026e5602085307c7dcb72b71b07261c40f80914277bef5f8d7f2ecab739bec
+                        curl -L "https://mirror.nju.edu.cn/gnome/sources/glibmm/2.66/glibmm-2.66.9.tar.xz" -o /tmp/dep.tar.xz
+                        echo "$sha  /tmp/dep.tar.xz" | sha256sum -c -
+                        cache="$(conan config get core.sources:download_cache)"; mkdir -p "$cache/s"; cp /tmp/dep.tar.xz "$cache/s/$sha"
+                        conan create <pkg-dir> -pr:h=<p> -pr:b=<p> --build=missing
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      override-to-other-side
+fallback_description:   若该依赖的官方镜像也不可达，可反过来把 override 指向
+                        **另一侧**（让被重建的是另一个依赖），选择其 conandata
+                        源可达者；两侧源都不可达、且允许联网窗口内无法获取时，
+                        按 R36/R41 上报依赖阻塞（dependency_missing/env_unsupported），
+                        不得用 dummy 包/伪造产物绕过。
+fallback_command:       self.requires("<other-side>/<ver>", override=True)
+fallback_auto_fix:      false
+fallback_impl:          human-clarification
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       修改.*(archives/[a-z]/<dep>|依赖).*conandata.*加.*(gh-proxy|ghfast|cnb\.cool|gitclone)
+forbid_1_reason:         为了让自己好装就去改**别人的** recipe/conandata，
+                        既越权（W2/R16）又把平台黑名单镜像写进制品仓（R39/PF7）
+forbid_1_consequence:   破坏他人配方 + CI JC/L0 门禁失败 + 制品源污染
+forbid_2_pattern:       --build=\*|伪造.*\.ci-result\.json|dummy 包顶替
+forbid_2_reason:         用 `--build=*` 全量重建或伪造产物来"绕过"缺 binary，
+                        掩盖真实的依赖可消费性问题
+forbid_2_consequence:   构建时间爆炸 + 结果不可复现 + 上报失真
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P003, P011
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             DRAFT-13572-pangomm-2.46-legacy-mm-abi-line-matching
+                        （该草稿定"override 到哪个版本"，本草稿定"override 之后
+                        依赖要重建、源码怎么合法拿到"，是同一条链的相邻环节）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan graph info . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 -r=ohpcd --format=json | python3 -c "import json,sys;[print((v.get('binary') or '?'), v.get('ref') or v.get('name')) for v in json.load(sys.stdin)['graph']['nodes'].values()]"
+doc_file:               knowledge/drafts/DRAFT-24650-conan2-override-dep-rebuild-source-cache-fallback.md
+last_updated:           2026-10-08
+source_event:           pangomm 2.46.5 适配：libsigc override（2.10.8 vs 2.12.1）
+                        → glibmm/2.66.9 binary Missing → --build=missing 源码重建
+                        → download.gnome.org Connection reset → 官方 GNOME 镜像
+                        预取入 core.sources:download_cache（sha256 5a026e56…
+                        与 recipe pin 一致）→ conan create exit=0
+authors:                Rz114514
+source_pr:
+source_commit:          9484229514
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.8
+metrics_last_used:      2026-10-08
