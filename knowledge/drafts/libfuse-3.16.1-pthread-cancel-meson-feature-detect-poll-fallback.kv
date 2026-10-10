@@ -1,0 +1,31 @@
+#====================================================================
+# Draft: libfuse 3.16.1 - OHOS musl libc 既不声明也不导出 pthread_cancel，
+#        必须用 meson cc.has_function() 特性探测 + 有界 poll 替代；
+#        附带两个陷阱：meson 布尔 configuration_data 生成「无值 #define」，
+#        以及「另一线程 close(fd) 唤醒阻塞 read()」在 OHOS 上不成立
+#====================================================================
+
+id:                     DRAFT-LIBFUSE-3161-PTHREAD-CANCEL-MESON-FEATURE-DETECT-POLL
+trigger_tool:           conan|clang|meson|ninja|ld.lld
+phase:                  linking|runtime
+error_signature:        undefined symbol: pthread_cancel|pthread_cancel|pthread_setcancelstate|pthread_setcanceltype|pthread_testcancel|HAVE_PTHREAD_CANCEL|fuse_loop_wait_for_input|fuse_prune_nodes|fuse_stop_cleanup_thread|prune_thread_stop|fuse_session_loop_mt
+
+severity:               2
+category:               compat|libc|musl|threading|meson|ohos-platform
+match_keywords:         libfuse, fuse3, fuse_loop_mt.c, fuse.c, pthread_cancel, pthread_setcancelstate, pthread_setcanceltype, pthread_testcancel, musl, thread cancellation, worker thread, prune thread, read blocking, close does not wake, poll, O_NONBLOCK, EAGAIN, meson, cc.has_function, configuration_data, HAVE_PTHREAD_CANCEL, no-value define, harmonyos, mount.c, mount_bsd.c
+
+title:                  OHOS musl 缺 pthread_cancel：用 meson cc.has_function() 特性探测 + 有界 poll 建立可打断等点（不要写平台宏，也不要指望 close() 唤醒阻塞 read）
+
+root_cause:             OHOS musl libc 不实现 POSIX 线程取消，pthread_cancel / pthread_setcancelstate / pthread_setcanceltype / pthread_testcancel 四个符号在 sysroot 里既不声明也不导出（E085）。libfuse 依赖其中两处语义：lib/fuse.c 的 LRU 清理线程用 pthread_cancel 打断 sleep()，否则 fuse_stop_cleanup_thread() 后的 pthread_join 永久挂死；lib/fuse_loop_mt.c 的 worker 用 pthread_cancel 把阻塞在 read() 的线程拽出来，否则 fuse_session_loop_mt() 退出路径无法 join。很自然的兜底想法是「主线程 close(se->fd) 让 worker 的 read() 返回」——在 OHOS 上实测不成立：另一线程 close(fd) 不会唤醒已阻塞在同一 fd 的 read()，reader 永不返回，join 依然挂死。因此必须在进入阻塞调用之前就存在一个可被打断的等点。第二个独立陷阱在守卫写法：meson 的 configuration_data.set() 对布尔为真时写出的是「无值」#define HAVE_X（假时写 #undef HAVE_X），于是从 autotools（#define HAVE_X 1）迁来的代码若写成 #if HAVE_PTHREAD_CANCEL，在探测为真时会展开成 `# if` 并直接预处理报错——只能用 #ifdef/#ifndef。
+affected_scope:         所有依赖 POSIX 线程取消做「打断阻塞调用以优雅退出」的库（libfuse/fuse3 及任何 Rust/C 绑定层的 FUSE 生态、需要 cancel 语义的线程池与事件循环）；以及在 OHOS 上用 meson configuration_data 做特性探测、但按 autotools 习惯写 #if 守卫的移植。另含 meson host_machine.system() 判定：OHOS 上报 'harmonyos'，startswith('linux') 为假，lib/meson.build 会错选 mount_bsd.c（E090）。
+verification_cmd:       grep -c "pthread_cancel" $(OHOS_SDK_DIR)/usr/lib/aarch64-linux-ohos/libc.so; grep -q "HAVE_PTHREAD_CANCEL" build/fuse_config.h
+
+rec_priority:           1
+rec_approach:           meson-feature-detect-plus-bounded-poll-instead-of-cancel
+rec_description:        按四条落点改造：(1) 特性探测而非平台宏（R8）——在 meson 里用 private_cfg.set('HAVE_PTHREAD_CANCEL', cc.has_function('pthread_cancel', prefix: '#include <pthread.h>'))，C 侧一律 #ifdef/#ifndef 守卫，禁止写 #ifdef __OHOS__ 或假设「非 Linux 就没取消」；(2) 有界 poll 作为可打断等点——worker 在真正 read() 之前先 poll(fd, POLLIN, 100ms)，循环中每次检查 fuse_session_exited()，同时把 channel fd 置 O_NONBLOCK，使「poll 可读但 read 抢不到」的竞态表现为 -EAGAIN（当 continue 处理），退出时用 saved_flags 恢复原 flags；注意无 fd（fd < 0）时 poll 立即返回，函数应视 exited 状态返回，实测 fuse_session_loop_mt() 在无 channel 时约 23ms 返回 -EBADF；(3) 清理线程用停止标志——sleep() 无法被「取消」，改成按 1 秒切片睡眠并在每片检查 volatile int prune_thread_stop，停止函数置位后 pthread_join 正常收敛；(4) 验收方式——OHOS 无 /dev/fuse 不能真挂载，改在 test_package 里 fuse_session_new()（不 mount）+ fuse_session_loop_mt() 断言其能在无 channel 时自行收敛并返回 -EBADF，这条断言正好覆盖「无 pthread_cancel 的释放路径不会死锁」。另须修 lib/meson.build 的 host_machine.system() 判定把 'harmonyos' 与 linux 并列纳入 mount.c（E090）。任何 OHOS 移植遇到「另一线程阻塞在 read/accept」的释放问题，都先建立有界等点，不要指望 close()。
+rec_command:            env -i HOME=$HOME TMPDIR=$TMPDIR PATH=/data/service/hnp/bin:/usr/bin:/bin:$HOME/.local/bin:$HOME/usr/local/bin PYTHONPATH=/data/storage/el2/base/cache/ohc-shim /data/storage/el1/bundle/libs/arm64/python/bin/python3 scripts/ohc-run.py conan-verify libfuse 3.16.1 --project-dir $PWD
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              (pending)
+source_commit:          (pending)

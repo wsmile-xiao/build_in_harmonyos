@@ -1,0 +1,215 @@
+--- a/lib/fuse_loop_mt.c
++++ b/lib/fuse_loop_mt.c
+@@ -14,20 +14,22 @@
+ #include "fuse_kernel.h"
+ #include "fuse_i.h"
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <unistd.h>
+ #include <signal.h>
+ #include <semaphore.h>
+ #include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
+ #include <sys/time.h>
+ #include <sys/ioctl.h>
+ #include <assert.h>
+ #include <limits.h>
+ 
+ /* Environment var controlling the thread stack size */
+ #define ENVNAME_THREAD_STACK "FUSE_THREAD_STACK"
+ 
+ #define FUSE_LOOP_MT_V2_IDENTIFIER	 INT_MAX - 2
+ #define FUSE_LOOP_MT_DEF_CLONE_FD	 0
+@@ -117,34 +119,89 @@
+ static void list_del_worker(struct fuse_worker *w)
+ {
+ 	struct fuse_worker *prev = w->prev;
+ 	struct fuse_worker *next = w->next;
+ 	prev->next = next;
+ 	next->prev = prev;
+ }
+ 
+ static int fuse_loop_start_thread(struct fuse_mt *mt);
+ 
++#ifndef HAVE_PTHREAD_CANCEL
++/*
++ * Bounded wait for input on the FUSE channel.
++ *
++ * The multi-threaded loop relies on pthread_cancel() to release worker
++ * threads that are parked in read(), because closing the channel descriptor
++ * from another thread does not wake a read() that is already in progress.
++ * Where pthread_cancel() is unavailable, poll the channel instead: a timed
++ * wait lets every worker re-check the session-exit flag and leave the loop
++ * by itself, so fuse_session_loop_mt() can still join its workers.
++ */
++#define FUSE_LOOP_MT_POLL_TIMEOUT_MS 100
++
++static int fuse_loop_wait_for_input(struct fuse_session *se,
++				    struct fuse_chan *ch)
++{
++	struct pollfd pfd;
++	int res;
++
++	pfd.fd = ch ? ch->fd : se->fd;
++	if (pfd.fd < 0) {
++		/*
++		 * Custom I/O without a pollable descriptor: there is nothing
++		 * to wait on, so keep the plain blocking read behaviour.
++		 */
++		return !fuse_session_exited(se);
++	}
++
++	pfd.events = POLLIN;
++	do {
++		if (fuse_session_exited(se))
++			return 0;
++		pfd.revents = 0;
++		res = poll(&pfd, 1, FUSE_LOOP_MT_POLL_TIMEOUT_MS);
++	} while (res == 0 || (res < 0 && errno == EINTR));
++
++	if (res < 0)
++		return 0;
++
++	return !fuse_session_exited(se);
++}
++#endif /* !HAVE_PTHREAD_CANCEL */
++
+ static void *fuse_do_work(void *data)
+ {
+ 	struct fuse_worker *w = (struct fuse_worker *) data;
+ 	struct fuse_mt *mt = w->mt;
+ 
+ 	while (!fuse_session_exited(mt->se)) {
+ 		int isforget = 0;
+ 		int res;
+ 
++#ifdef HAVE_PTHREAD_CANCEL
+ 		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
++#else
++		if (!fuse_loop_wait_for_input(mt->se, w->ch))
++			break;
++#endif
+ 		res = fuse_session_receive_buf_int(mt->se, &w->fbuf, w->ch);
++#ifdef HAVE_PTHREAD_CANCEL
+ 		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
++#endif
+ 		if (res == -EINTR)
+ 			continue;
++#ifndef HAVE_PTHREAD_CANCEL
++		/* The channel is polled, so a lost race surfaces as EAGAIN */
++		if (res == -EAGAIN)
++			continue;
++#endif
+ 		if (res <= 0) {
+ 			if (res < 0) {
+ 				fuse_session_exit(mt->se);
+ 				mt->error = res;
+ 			}
+ 			break;
+ 		}
+ 
+ 		pthread_mutex_lock(&mt->lock);
+ 		if (mt->exit) {
+@@ -325,70 +382,99 @@
+ }
+ 
+ int fuse_session_loop_mt_312(struct fuse_session *se, struct fuse_loop_config *config);
+ FUSE_SYMVER("fuse_session_loop_mt_312", "fuse_session_loop_mt@@FUSE_3.12")
+ int fuse_session_loop_mt_312(struct fuse_session *se, struct fuse_loop_config *config)
+ {
+ int err;
+ 	struct fuse_mt mt;
+ 	struct fuse_worker *w;
+ 	int created_config = 0;
++#ifndef HAVE_PTHREAD_CANCEL
++	int saved_flags = -1;
++#endif
+ 
+ 	if (config) {
+ 		err = fuse_loop_cfg_verify(config);
+ 		if (err)
+ 			return err;
+ 	} else {
+ 		/* The caller does not care about parameters - use the default */
+ 		config = fuse_loop_cfg_create();
+ 		created_config = 1;
+ 	}
+ 
+ 
+ 	memset(&mt, 0, sizeof(struct fuse_mt));
+ 	mt.se = se;
+ 	mt.clone_fd = config->clone_fd;
+ 	mt.error = 0;
+ 	mt.numworker = 0;
+ 	mt.numavail = 0;
+ 	mt.max_idle = config->max_idle_threads;
+ 	mt.max_threads = config->max_threads;
++#ifndef HAVE_PTHREAD_CANCEL
++	/*
++	 * The workers are released by polling for input with a bounded
++	 * timeout instead of being cancelled, so make the channel
++	 * non-blocking as well: a worker that loses the race for a poll()
++	 * event must not end up parked in read() forever.
++	 */
++	if (se->fd >= 0) {
++		saved_flags = fcntl(se->fd, F_GETFL);
++		if (saved_flags >= 0)
++			fcntl(se->fd, F_SETFL, saved_flags | O_NONBLOCK);
++	}
++#endif
+ 	mt.main.thread_id = pthread_self();
+ 	mt.main.prev = mt.main.next = &mt.main;
+ 	sem_init(&mt.finish, 0, 0);
+ 	pthread_mutex_init(&mt.lock, NULL);
+ 
+ 	pthread_mutex_lock(&mt.lock);
+ 	err = fuse_loop_start_thread(&mt);
+ 	pthread_mutex_unlock(&mt.lock);
+ 	if (!err) {
+ 		/* sem_wait() is interruptible */
+ 		while (!fuse_session_exited(se))
+ 			sem_wait(&mt.finish);
+ 
+ 		pthread_mutex_lock(&mt.lock);
++#ifdef HAVE_PTHREAD_CANCEL
+ 		for (w = mt.main.next; w != &mt.main; w = w->next)
+ 			pthread_cancel(w->thread_id);
++#else
++		/*
++		 * Without pthread_cancel() there is nothing to cancel: the
++		 * workers are released by the bounded poll in fuse_do_work(),
++		 * which makes them notice the session exit flag set above.
++		 */
++		(void) w;
++#endif
+ 		mt.exit = 1;
+ 		pthread_mutex_unlock(&mt.lock);
+ 
+ 		while (mt.main.next != &mt.main)
+ 			fuse_join_worker(&mt, mt.main.next);
+ 
+ 		err = mt.error;
+ 	}
+ 
+ 	pthread_mutex_destroy(&mt.lock);
+ 	sem_destroy(&mt.finish);
+ 	if(se->error != 0)
+ 		err = se->error;
+ 	fuse_session_reset(se);
++#ifndef HAVE_PTHREAD_CANCEL
++	if (saved_flags >= 0)
++		fcntl(se->fd, F_SETFL, saved_flags);
++#endif
+ 
+ 	if (created_config) {
+ 		fuse_loop_cfg_destroy(config);
+ 		config = NULL;
+ 	}
+ 
+ 	return err;
+ }
+ 
+ int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config_v1 *config_v1);
