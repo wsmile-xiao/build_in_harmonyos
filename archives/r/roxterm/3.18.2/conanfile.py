@@ -1,0 +1,282 @@
+#!/usr/bin/env python3
+"""Conan recipe for roxterm 3.18.2 — VTE/GTK3 terminal emulator (CMake, C).
+
+roxterm is a GTK3 terminal emulator application built with CMake.  It links
+against the GTK3 stack (broadway backend on OHOS, see gtk/3.24.43), VTE
+(libvte-2.91), D-Bus (libdbus-1 + libdbus-glib-1), gmodule and libpcre2-8.
+
+Upstream resolves every external dependency through CMake `pkg_check_modules`
+(src/CMakeLists.txt) with these pkg-config module names:
+
+    gtk+-3.0>=3.22  dbus-1>=1.0  dbus-glib-1>=0.22   (RTCOMMON)
+    gmodule-export-2.0                              (GMODULE_EXPORT)
+    vte-2.91>=0.52  libpcre2-8                      (VTE)
+
+Conan's PkgConfigDeps emits pc files named after pkg_config_name properties:
+
+    gtk+-3.0.pc   -> gtk/3.24.43 (upstream property)
+    vte-2.91.pc   -> vte/0.74.2 (upstream property)
+    dbus-glib-1.pc-> dbus-glib/0.114.1 (upstream property)
+    gmodule-2.0.pc-> glib/2.84.0.1 component (upstream property)
+    dbus.pc       -> dbus/1.14.10 (NO upstream property -> dbus.pc, not dbus-1.pc)
+    pcre2.pc      -> pcre2/10.45 (NO upstream property -> pcre2.pc, not libpcre2-8.pc)
+
+Therefore generate() creates three forwarding aliases (same technique as
+E527/E463/accountsservice/vte recipes):
+    dbus-1.pc            <- dbus.pc            (verbatim alias)
+    libpcre2-8.pc        <- pcre2.pc           (verbatim alias)
+    gmodule-export-2.0.pc<- gmodule-2.0.pc + "-Wl,--export-dynamic"
+                            (upstream semantics: GtkBuilder needs the
+                            roxterm-config signal handlers exported)
+
+Version pins are locked to vte/0.74.2's dependency tree to avoid conflicts:
+gtk/3.24.43, glib/2.84.0.1, pcre2/10.45, dbus/1.14.10, dbus-glib/0.114.1.
+
+NLS: CMakeLists.txt `find_package(Gettext REQUIRED)` needs msgfmt/xgettext at
+configure/build time -> tool_requires gettext.  `find_package(Intl)` decides
+ENABLE_NLS; the SDK ships libintl.h without an implementation, so Intl_ROOT /
+CMAKE_INCLUDE_PATH / CMAKE_LIBRARY_PATH are pointed at glib's shipped
+proxy-libintl (lib/libintl.so + include/libintl.h, the same files the
+"-lintl" glib-2.0.pc patch resolves against) so roxterm keeps translations.
+"""
+import os
+import shlex
+import shutil
+
+from conan import ConanFile
+from conan.tools.cmake import CMake, CMakeToolchain, cmake_layout
+from conan.tools.env import Environment
+from conan.tools.files import get, apply_conandata_patches, export_conandata_patches
+from conan.tools.gnu import PkgConfigDeps
+
+HNP_BIN = "/data/service/hnp/bin"
+SIGN_TOOL = os.path.join(HNP_BIN, "binary-sign-tool")
+OBJCOPY = os.path.join(HNP_BIN, "llvm-objcopy")
+
+
+class RoxtermConan(ConanFile):
+    name = "roxterm"
+    version = "3.18.2"
+    description = "roxterm - VTE/GTK terminal emulator with tabs"
+    license = ("GPL-2.0-or-later", "LGPL-2.1-or-later")
+    homepage = "https://github.com/realh/roxterm"
+    url = ""  # CI fills this
+
+    package_type = "application"
+    settings = "os", "compiler", "build_type", "arch"
+    # no options: single GUI application, no static/shared switch
+
+    def export_sources(self):
+        export_conandata_patches(self)
+
+    def requirements(self):
+        # Pinned to vte/0.74.2's published dependency tree (no conflicts)
+        self.requires("vte/0.74.2", transitive_headers=True, transitive_libs=True)
+        self.requires("gtk/3.24.43", transitive_headers=True, transitive_libs=True)
+        self.requires("dbus-glib/0.114.1", transitive_headers=True, transitive_libs=True)
+        self.requires("dbus/1.14.10", transitive_headers=True, transitive_libs=True)
+        self.requires("glib/2.84.0.1", transitive_headers=True, transitive_libs=True)
+        self.requires("pcre2/10.45", transitive_headers=True, transitive_libs=True)
+        # dbus/1.14.10 pins expat/2.8.2, dbus-glib/0.114.1 overrides to 2.8.2.1
+        # — align the graph on the newer one (same alignment dbus-glib uses).
+        self.requires("expat/2.8.2.1", override=True)
+
+    def build_requirements(self):
+        # po/CMakeLists.txt: find_package(Gettext REQUIRED) -> msgfmt/msgmerge;
+        # xgettext regenerates messages.pot from src/*.c at build time.
+        self.tool_requires("gettext/0.22.5.1")
+
+    def layout(self):
+        cmake_layout(self)
+
+    def source(self):
+        get(self, **self.conan_data["sources"], strip_root=True)
+
+    # ------------------------------------------------------------------ #
+    # generate                                                            #
+    # ------------------------------------------------------------------ #
+    def generate(self):
+        PkgConfigDeps(self).generate()
+        self._fix_glib_intl_link()
+        self._create_dbus_pc_alias()
+        self._create_libpcre2_pc_alias()
+        self._create_gmodule_export_pc_alias()
+
+        self._stage_glib_build_tools()
+
+        tc = CMakeToolchain(self)
+        # Man pages are generated by xsltproc fetching docbook.xsl over HTTP
+        # (unavailable in the offline/sandboxed CI worker) — disable them.
+        tc.variables["BUILD_MANPAGES"] = False
+        # Keep NLS: point FindIntl at glib's shipped proxy-libintl
+        # (SDK libintl.h has no implementation; gettext tool package is
+        # build-context only so its runtime lib must not be relied on).
+        glib_dep = self.dependencies["glib"]
+        tc.variables["Intl_ROOT"] = glib_dep.package_folder
+        tc.variables["CMAKE_INCLUDE_PATH"] = ";".join(glib_dep.cpp_info.includedirs)
+        tc.variables["CMAKE_LIBRARY_PATH"] = ";".join(glib_dep.cpp_info.libdirs)
+        # roxterm-config exports symbols for GtkBuilder signal handlers
+        # (upstream relies on gmodule-export-2.0.pc's -Wl,--export-dynamic).
+        tc.variables["CMAKE_POLICY_VERSION_MINIMUM"] = "3.10"
+        # src/CMakeLists.txt add_custom_command uses the bare command
+        # `glib-compile-resources`, which CMake resolves via find_program AT
+        # CONFIGURE time — so the search path must point at the signed staged
+        # copy (E527: conan-cache ELF tools not executable on HMFS; ambient
+        # /data/service/hnp/bin copy breaks on libffi.so.8 — E463).
+        tc.variables["CMAKE_PROGRAM_PATH"] = self._glib_tools_folder()
+        tc.generate()
+
+        # Belt-and-braces: also expose the staged tool + dependency libdirs to
+        # the build-time environment in case any rule resolves at build time.
+        env = Environment()
+        env.prepend_path("PATH", self._glib_tools_folder())
+        for dep in self.dependencies.values():
+            for libdir in dep.cpp_info.libdirs:
+                env.prepend_path("LD_LIBRARY_PATH", libdir)
+            for component in dep.cpp_info.components.values():
+                for libdir in component.libdirs:
+                    env.prepend_path("LD_LIBRARY_PATH", libdir)
+        # SONAME clash: gettext and glib's proxy-libintl both ship
+        # libintl.so.8 but with disjoint symbol sets (gettext: gettext();
+        # glib proxy: g_libintl_*()).  gettext's libdir must NOT shadow
+        # glib's, so glib's libdir is prepended LAST (= first in the path).
+        for libdir in glib_dep.cpp_info.libdirs:
+            env.prepend_path("LD_LIBRARY_PATH", libdir)
+        # NOTE: the conanbuild.sh aggregate sources env scripts in
+        # alphabetical order; conanbuildenv-release-armv8.sh REWRITES
+        # LD_LIBRARY_PATH wholesale, so this script must sort AFTER it
+        # (hence the "conanbuildz_" prefix) to keep glib's libintl.so.8
+        # ahead of gettext's.
+        env.vars(self, scope="build").save_script("conanbuildz_glib_tools")
+
+    def _glib_tools_folder(self):
+        return os.path.join(self.build_folder, "conan-native-tools")
+
+    def _sign_elf(self, binary):
+        """HMFS execution restriction: strip .codesign then selfSign re-sign."""
+        if os.path.isfile(OBJCOPY):
+            self.run(f"{shlex.quote(OBJCOPY)} --remove-section .codesign "
+                     f"{shlex.quote(binary)} 2>/dev/null || true")
+        if os.path.isfile(SIGN_TOOL):
+            self.run(shlex.join([SIGN_TOOL, "sign", "-inFile", binary,
+                                 "-outFile", binary, "-selfSign", "1"]))
+
+    def _stage_glib_build_tools(self):
+        """Stage glib-compile-resources from the glib package into the build
+        folder, chmod +x and re-sign (gspell/1.14.4 technique, E527/E463).
+
+        src/CMakeLists.txt invokes the bare command `glib-compile-resources`,
+        which CMake resolves via find_program at configure time steered by
+        CMAKE_PROGRAM_PATH.  The staged entry is a shell WRAPPER that forces
+        glib's libdir to the front of LD_LIBRARY_PATH before exec'ing the
+        re-signed binary copy: gettext and glib's proxy-libintl both ship a
+        libintl.so.8 with disjoint symbol sets (gettext: gettext(); glib
+        proxy: g_libintl_*()), and the aggregated conanbuild env always has
+        gettext's libdir first — the wrapper is the only reliable way to
+        un-shadow it (patchelf cannot write on HMFS).
+        """
+        glib_dep = self.dependencies["glib"]
+        glib_bin = os.path.join(glib_dep.package_folder, "bin")
+        glib_libdir = os.path.join(glib_dep.package_folder, "lib")
+        tools_folder = self._glib_tools_folder()
+        os.makedirs(tools_folder, exist_ok=True)
+        quote = lambda s: "'" + str(s).replace("'", "'\\''") + "'"
+        for tool in ("glib-compile-resources",):
+            src = os.path.join(glib_bin, tool)
+            if not os.path.isfile(src):
+                self.output.warning(f"{tool} not found in glib package bin/; "
+                                    "gresources generation will fail")
+                continue
+            binary = os.path.join(tools_folder, tool + ".bin")
+            shutil.copyfile(src, binary)
+            os.chmod(binary, 0o755)
+            if self.settings.os == "OHOS":
+                self._sign_elf(binary)
+            wrapper = os.path.join(tools_folder, tool)
+            with open(wrapper, "w", encoding="utf-8", newline="\n") as handle:
+                handle.write("#!/bin/sh\n"
+                             f"LD_LIBRARY_PATH={quote(glib_libdir)}"
+                             "${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH} "
+                             f"exec {quote(binary)} \"$@\"\n")
+            os.chmod(wrapper, 0o755)
+            self.output.info(f"staged {tool} (wrapper + signed .bin) -> "
+                             f"{tools_folder}")
+
+    def _fix_glib_intl_link(self):
+        """Add -lintl to glib-2.0.pc's Libs line.
+
+        Same fix (and same reason) as gtk/3.24.43, vte/0.74.2 and gspell/1.14.4:
+        libglib-2.0.so references g_libintl_* proxy symbols; the pkg-config
+        link line must resolve them against glib's own shipped libintl.
+        """
+        pc = os.path.join(self.generators_folder, "glib-2.0.pc")
+        if not os.path.isfile(pc):
+            self.output.warning("glib-2.0.pc not generated; skipping -lintl fix")
+            return
+        text = open(pc, encoding="utf-8").read()
+        if "-lintl" in text:
+            return
+        lines = text.splitlines(True)
+        for i, line in enumerate(lines):
+            if line.startswith("Libs:"):
+                lines[i] = line.rstrip("\r\n") + " -lintl\n"
+                break
+        with open(pc, "w", encoding="utf-8", newline="\n") as f:
+            f.write("".join(lines))
+        self.output.info("patched glib-2.0.pc: added -lintl to Libs")
+
+    def _alias_pc(self, src_name, dst_name, extra_libs=None):
+        """Create a forwarding .pc alias from an existing generated file."""
+        gens = self.generators_folder
+        src = os.path.join(gens, src_name)
+        dst = os.path.join(gens, dst_name)
+        if not os.path.isfile(src):
+            self.output.warning(f"{src_name} not generated; skipping {dst_name} alias")
+            return
+        content = open(src, encoding="utf-8").read()
+        if extra_libs:
+            lines = content.splitlines(True)
+            for i, line in enumerate(lines):
+                if line.startswith("Libs:"):
+                    lines[i] = line.rstrip("\r\n") + " " + extra_libs + "\n"
+                    break
+            content = "".join(lines)
+        with open(dst, "w", encoding="utf-8", newline="\n") as f:
+            f.write(content)
+        self.output.info(f"created {dst_name} alias from {src_name}")
+
+    def _create_dbus_pc_alias(self):
+        # dbus recipe emits dbus.pc but upstream pkg_check_modules asks for
+        # dbus-1 (verbatim alias, accountsservice technique).
+        self._alias_pc("dbus.pc", "dbus-1.pc")
+
+    def _create_libpcre2_pc_alias(self):
+        # pcre2 recipe emits pcre2.pc but upstream pkg_check_modules asks for
+        # libpcre2-8 (verbatim alias, vte/0.74.2 technique).
+        self._alias_pc("pcre2.pc", "libpcre2-8.pc")
+
+    def _create_gmodule_export_pc_alias(self):
+        # gmodule-export-2.0 differs from gmodule-2.0 only by exporting the
+        # executable's symbols to GtkBuilder/GModule signal resolution.
+        self._alias_pc("gmodule-2.0.pc", "gmodule-export-2.0.pc",
+                       extra_libs="-Wl,--export-dynamic")
+
+    # ------------------------------------------------------------------ #
+    # build / package                                                     #
+    # ------------------------------------------------------------------ #
+    def build(self):
+        apply_conandata_patches(self)
+        cmake = CMake(self)
+        cmake.configure()
+        cmake.build()
+
+    def package(self):
+        cmake = CMake(self)
+        cmake.install()
+
+    def package_info(self):
+        # GUI application: two executables, no headers/libs to consume.
+        self.cpp_info.includedirs = []
+        self.cpp_info.libdirs = []
+        self.cpp_info.bindirs = ["bin"]
+        self.cpp_info.libs = []
