@@ -1,0 +1,804 @@
+--- a/include/cpp_yyjson.hpp
++++ b/include/cpp_yyjson.hpp
+@@ -14,23 +14,117 @@
+ #include <cassert>
+ #include <cstring>
+ #include <memory>
+ #include <optional>
+ #include <ranges>
+ #include <span>
+ #include <variant>
+ #include <vector>
+ 
+ #include <yyjson.h>
+-#include <format>
++#if defined(__has_include)
++#  if __has_include(<format>)
++#    include <format>
++#  endif
++#endif
+ #include <string_view>
+ #include "field_reflection.hpp"
++
++#if defined(__cpp_lib_format)
++namespace yyjson::detail
++{
++    using std::format;
++}
++#else
++#include <charconv>
++#include <concepts>
++#include <sstream>
++#include <string>
++namespace yyjson::detail
++{
++    inline void append_arg_fmt(std::string& out, bool value) { out += value ? "true" : "false"; }
++
++    template <typename T>
++    requires (!std::same_as<std::remove_cvref_t<T>, bool>) && std::integral<std::remove_cvref_t<T>> &&
++             (!std::same_as<std::remove_cvref_t<T>, char>)
++    void append_arg_fmt(std::string& out, T value) { out += std::to_string(value); }
++
++    inline void append_arg_fmt(std::string& out, char value) { out += value; }
++
++    template <typename T>
++    requires std::floating_point<std::remove_cvref_t<T>>
++    void append_arg_fmt(std::string& out, T value)
++    {
++        char buffer[64];
++        const auto result = std::to_chars(buffer, buffer + sizeof(buffer), static_cast<double>(value));
++        out.append(buffer, result.ptr - buffer);
++    }
++
++    template <typename T>
++    requires (!std::same_as<std::remove_cvref_t<T>, bool>) && (!std::integral<std::remove_cvref_t<T>>) &&
++             (!std::floating_point<std::remove_cvref_t<T>>) &&
++             std::convertible_to<std::remove_cvref_t<T>, std::string_view>
++    void append_arg_fmt(std::string& out, const T& value) { out += std::string_view(value); }
++
++    template <typename T>
++    requires requires(const T& value) { { value.write() } -> std::convertible_to<std::string_view>; }
++    void append_arg_fmt(std::string& out, const T& value) { out += std::string_view(value.write()); }
++
++    template <typename T>
++    requires (!std::same_as<std::remove_cvref_t<T>, bool>) && (!std::integral<std::remove_cvref_t<T>>) &&
++             (!std::floating_point<std::remove_cvref_t<T>>) &&
++             (!std::convertible_to<std::remove_cvref_t<T>, std::string_view>) &&
++             (!requires(const T& value) { value.write(); })
++    void append_arg_fmt(std::string& out, const T& value)
++    {
++        std::ostringstream stream;
++        stream << value;
++        out += stream.str();
++    }
++
++    template <typename... Args>
++    std::string format(std::string_view pattern, const Args&... args)
++    {
++        std::string result;
++        result.reserve(pattern.size() + 32);
++        const char* cursor = pattern.data();
++        const char* const end = cursor + pattern.size();
++        const auto append = [&](const auto& value) {
++            const char* placeholder = nullptr;
++            for (const char* pos = cursor; pos + 1 < end; ++pos)
++            {
++                if (pos[0] == '{' && pos[1] == '}')
++                {
++                    placeholder = pos;
++                    break;
++                }
++            }
++            if (placeholder == nullptr)
++            {
++                result.append(cursor, end - cursor);
++                cursor = end;
++                return;
++            }
++            result.append(cursor, placeholder - cursor);
++            append_arg_fmt(result, value);
++            cursor = placeholder + 2;
++        };
++        (append(args), ...);
++        if (cursor < end)
++        {
++            result.append(cursor, end - cursor);
++        }
++        return result;
++    }
++}
++#endif
++
+ 
+ namespace yyjson
+ {
+     inline constexpr auto yyjson_required_version = 0x000600;
+     static_assert(YYJSON_VERSION_HEX >= yyjson_required_version, "Minimum required yyjson version is 0.6.0");
+ 
+     class bad_cast : public std::runtime_error
+     {
+         using std::runtime_error::runtime_error;
+     };
+@@ -422,21 +516,21 @@
+         auto init()
+         {
+             buf_ = nullptr;
+             size_ = 0;
+             return std::shared_ptr<yyjson_alc>();
+         }
+         auto init(std::size_t size)
+         {
+             if (size == 0) return init();
+             buf_ = std::allocator<char_like>().allocate(size);
+-            std::ranges::uninitialized_default_construct(buf_, buf_ + size);
++            std::uninitialized_default_construct(buf_, buf_ + size);
+             size_ = size;
+ 
+             // allocate memory pool
+             auto alc = new yyjson_alc;
+             yyjson_alc_pool_init(alc, buf_, size);
+             return std::shared_ptr<yyjson_alc>(alc, [b = buf_, s = size_](auto* a) {
+                 std::allocator<char_like>().deallocate(b, s);
+                 delete a;
+             });
+         }
+@@ -2157,21 +2251,21 @@
+                                          : yyjson_mut_val_write_opts(val_, std::forward<Args>(args)...);
+                     };
+ 
+                     auto err = yyjson_write_err();
+                     auto len = static_cast<std::size_t>(0);
+                     auto result = write_func(to_underlying(write_flag), nullptr, &len, &err);
+                     if (result != nullptr) [[likely]]
+                     {
+                         return json_string(result, len);
+                     }
+-                    throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                    throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+                 }
+                 template <yyjson_allocator Alloc>
+                 [[nodiscard]] auto write(Alloc& alc, WriteFlag write_flag = WriteFlag::NoFlag) const
+                 {
+                     const auto write_func = [this]<typename... Args>(Args&&... args) {
+                         const auto write_doc =
+                             doc_.ptrs->self != nullptr && val_ == yyjson_mut_doc_get_root(doc_.ptrs->self);
+                         return write_doc ? yyjson_mut_write_opts(doc_.ptrs->self, std::forward<Args>(args)...)
+                                          : yyjson_mut_val_write_opts(val_, std::forward<Args>(args)...);
+                     };
+@@ -2184,39 +2278,39 @@
+                     {
+                         if (result != nullptr) [[likely]]
+                             return json_string(result, len, alc.ptr());
+                     }
+                     else
+                     {
+                         if (result != nullptr) [[likely]]
+                             return json_string(result, len, detail::get_allocator_pointer(alc));
+                     }
+ 
+-                    throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                    throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+                 }
+ #if YYJSON_VERSION_HEX >= 0x000D00
+                 [[nodiscard]] std::string_view write(std::span<char> buffer,
+                                                      WriteFlag write_flag = WriteFlag::NoFlag) const
+                 {
+                     const auto write_doc =
+                         doc_.ptrs->self != nullptr && val_ == yyjson_mut_doc_get_root(doc_.ptrs->self);
+ 
+                     auto err = yyjson_write_err();
+                     const auto len = write_doc ? yyjson_mut_write_buf(buffer.data(), buffer.size(), doc_.ptrs->self,
+                                                                       to_underlying(write_flag), &err)
+                                                : yyjson_mut_val_write_buf(buffer.data(), buffer.size(), val_,
+                                                                           to_underlying(write_flag), &err);
+                     if (len != 0) [[likely]]
+                     {
+                         return {buffer.data(), len};
+                     }
+-                    throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                    throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+                 }
+                 [[nodiscard]] std::size_t write_max_memory_usage(WriteFlag write_flag = WriteFlag::NoFlag) const
+                 {
+                     return yyjson::detail::write_max_memory_usage_impl(val_, write_flag);
+                 }
+ #endif
+             };
+ 
+             template <typename DocType>
+             class const_value_base : public abstract_value<DocType>
+@@ -3268,21 +3362,21 @@
+                     {
+                         iter = object_iter_end();
+                     }
+                 }
+                 [[nodiscard]] auto object_size() const noexcept { return yyjson_mut_obj_size(base::val_); }
+                 [[nodiscard]] auto object_empty() const noexcept { return yyjson_mut_obj_size(base::val_) == 0; }
+                 [[nodiscard]] auto object_get(std::string_view key) const
+                 {
+                     auto result = yyjson_mut_obj_getn(base::val_, key.data(), key.size());
+                     if (result == nullptr) [[unlikely]]
+-                        throw std::out_of_range(std::format("JSON object key not found: {}", key));
++                        throw std::out_of_range(detail::format("JSON object key not found: {}", key));
+                     return result;
+                 }
+                 [[nodiscard]] bool object_contains(std::string_view key) const noexcept
+                 {
+                     return yyjson_mut_obj_getn(base::val_, key.data(), key.size()) != nullptr;
+                 }
+ 
+                 template <typename D>
+                 const_object_base(D&& doc, yyjson_mut_val* val) : base(std::forward<D>(doc), val)
+                 {
+@@ -3835,53 +3929,53 @@
+             }
+             [[nodiscard]] auto write(const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 auto err = yyjson_write_err();
+                 auto len = static_cast<std::size_t>(0);
+                 auto result = yyjson_val_write_opts(val_, to_underlying(write_flag), nullptr, &len, &err);
+                 if (result != nullptr)
+                 {
+                     return json_string(result, len);
+                 }
+-                throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+             }
+             template <yyjson_allocator Alloc>
+             [[nodiscard]] auto write(Alloc& alc, const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 auto err = yyjson_write_err();
+                 auto len = static_cast<std::size_t>(0);
+                 auto result = yyjson_val_write_opts(val_, to_underlying(write_flag), detail::get_allocator_pointer(alc),
+                                                     &len, &err);
+                 if constexpr (std::same_as<std::shared_ptr<yyjson_alc>, std::remove_cvref_t<decltype(alc.ptr())>>)
+                 {
+                     if (result != nullptr) [[likely]]
+                         return json_string(result, len, alc.ptr());
+                 }
+                 else
+                 {
+                     if (result != nullptr) [[likely]]
+                         return json_string(result, len, detail::get_allocator_pointer(alc));
+                 }
+-                throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+             }
+ #if YYJSON_VERSION_HEX >= 0x000D00
+             [[nodiscard]] std::string_view write(std::span<char> buffer,
+                                                  const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 auto err = yyjson_write_err();
+                 const auto len =
+                     yyjson_val_write_buf(buffer.data(), buffer.size(), val_, to_underlying(write_flag), &err);
+                 if (len != 0) [[likely]]
+                 {
+                     return {buffer.data(), len};
+                 }
+-                throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+             }
+             [[nodiscard]] std::size_t write_max_memory_usage(const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 return yyjson::detail::write_max_memory_usage_impl(val_, write_flag);
+             }
+ #endif
+         };
+ 
+         class const_value_ref : public abstract_value_ref
+         {
+@@ -4168,21 +4262,21 @@
+                 assert(success);
+                 return iter;
+             }
+             static void object_iter_next(yyjson_obj_iter& iter) noexcept { yyjson_obj_iter_next(&iter); }
+             [[nodiscard]] auto object_size() const noexcept { return yyjson_obj_size(base::val_); }
+             [[nodiscard]] auto object_empty() const noexcept { return yyjson_obj_size(base::val_) == 0; }
+             [[nodiscard]] auto object_get(std::string_view key) const
+             {
+                 auto result = yyjson_obj_getn(base::val_, key.data(), key.size());
+                 if (result == nullptr) [[unlikely]]
+-                    throw std::out_of_range(std::format("JSON object key not found: {}", key));
++                    throw std::out_of_range(detail::format("JSON object key not found: {}", key));
+                 return result;
+             }
+             [[nodiscard]] bool object_contains(std::string_view key) const noexcept
+             {
+                 return yyjson_obj_getn(base::val_, key.data(), key.size()) != nullptr;
+             }
+ 
+             explicit const_object_ref(yyjson_val* val) : base(val) {}
+ 
+             const_object_ref& operator=(const const_object_ref&) = default;
+@@ -4311,55 +4405,55 @@
+ 
+             [[nodiscard]] auto write(const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 auto err = yyjson_write_err();
+                 auto len = static_cast<std::size_t>(0);
+                 auto result = yyjson_write_opts(doc_.get(), to_underlying(write_flag), nullptr, &len, &err);
+                 if (result != nullptr)
+                 {
+                     return json_string(result, len);
+                 }
+-                throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+             }
+ 
+             template <yyjson_allocator Alloc>
+             [[nodiscard]] auto write(Alloc& alc, const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 auto err = yyjson_write_err();
+                 auto len = static_cast<std::size_t>(0);
+                 auto result = yyjson_write_opts(doc_.get(), to_underlying(write_flag),
+                                                 detail::get_allocator_pointer(alc), &len, &err);
+                 if constexpr (std::same_as<std::shared_ptr<yyjson_alc>, std::remove_cvref_t<decltype(alc.ptr())>>)
+                 {
+                     if (result != nullptr) [[likely]]
+                         return json_string(result, len, alc.ptr());
+                 }
+                 else
+                 {
+                     if (result != nullptr) [[likely]]
+                         return json_string(result, len, detail::get_allocator_pointer(alc));
+                 }
+-                throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+             }
+ 
+ #if YYJSON_VERSION_HEX >= 0x000D00
+             [[nodiscard]] std::string_view write(std::span<char> buffer,
+                                                  const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 auto err = yyjson_write_err();
+                 const auto len =
+                     yyjson_write_buf(buffer.data(), buffer.size(), doc_.get(), to_underlying(write_flag), &err);
+                 if (len != 0) [[likely]]
+                 {
+                     return {buffer.data(), len};
+                 }
+-                throw write_error(std::format("write JSON error: {}", err.msg), err.code);
++                throw write_error(detail::format("write JSON error: {}", err.msg), err.code);
+             }
+             [[nodiscard]] std::size_t write_max_memory_usage(const WriteFlag write_flag = WriteFlag::NoFlag) const
+             {
+                 return yyjson::detail::write_max_memory_usage_impl(yyjson_doc_get_root(doc_.get()), write_flag);
+             }
+ #endif
+ 
+             template <yyjson_allocator Alloc>
+             friend value read(char*, std::size_t, Alloc&, ReadFlag);
+             friend value read(char* str, std::size_t len, ReadFlag);
+@@ -4440,42 +4534,42 @@
+ #pragma region read
+         [[nodiscard]] inline read_error make_read_error(const char* str, std::size_t len, const yyjson_read_err& err)
+         {
+ #if YYJSON_VERSION_HEX >= 0x000A00
+             auto line = std::size_t{0};
+             auto col = std::size_t{0};
+             auto chr = std::size_t{0};
+             auto success = yyjson_locate_pos(str, len, err.pos, &line, &col, &chr);
+             if (success)
+                 return read_error(
+-                    std::format("Read JSON error: {} at line {}, column {}, pos {}", err.msg, line, col, err.pos),
++                    detail::format("Read JSON error: {} at line {}, column {}, pos {}", err.msg, line, col, err.pos),
+                     err.code);
+ #endif
+-            return read_error(std::format("Read JSON error: {} at pos {}", err.msg, err.pos), err.code);
++            return read_error(detail::format("Read JSON error: {} at pos {}", err.msg, err.pos), err.code);
+         }
+ 
+         template <yyjson_allocator Alloc>
+         value read(char* str, std::size_t len, Alloc& alc, ReadFlag read_flag)
+         {
+             auto err = yyjson_read_err();
+             yyjson_doc* result;
+ 
+             if constexpr (requires { alc.allocate({str, len}, read_flag); })
+             {
+                 alc.allocate({str, len}, read_flag);
+             }
+             else if constexpr (requires { alc.check_capacity({str, len}, read_flag); })
+             {
+                 if (!alc.check_capacity({str, len}, read_flag))
+                 {
+                     throw read_error(
+-                        std::format("Insufficient capacity in the pool allocator for {}", detail::type_name<Alloc>()),
++                        detail::format("Insufficient capacity in the pool allocator for {}", detail::type_name<Alloc>()),
+                         YYJSON_READ_ERROR_MEMORY_ALLOCATION);
+                 }
+             }
+             result = yyjson_read_opts(str, len, to_underlying(read_flag), detail::get_allocator_pointer(alc), &err);
+ 
+             if constexpr (std::same_as<std::shared_ptr<yyjson_alc>, std::remove_cvref_t<decltype(alc.ptr())>>)
+             {
+                 if (result != nullptr) return value(result, alc.ptr());
+             }
+             else
+@@ -4738,49 +4832,51 @@
+             return result;
+         }
+         template <json_object Json>
+         requires std::default_initializable<T> && (!visitable<T>) && (!std::ranges::input_range<T>) &&
+                  all_fields_castable<Json, T>
+         static auto from_json(const Json& obj)
+         {
+             auto result = T();
+             for (auto&& [key, value] : obj)
+             {
++                auto&& ref_key = key;
++                auto&& ref_value = value;
+                 field_reflection::any_of_field(result, [&](auto field_name, auto& field_value) {
+-                    if (key == field_name)
+-                    {
+-                        detail::assign_reflected_field(field_value, value);
++                    if (ref_key == field_name)
++                    {
++                        detail::assign_reflected_field(field_value, ref_value);
+                         return true;
+                     }
+                     return false;
+                 });
+             }
+             return result;
+         }
+         template <json_array Json>
+         requires array_castable_range<T, Json>
+         static auto from_json(const Json& arr)
+         {
+             auto result = T();
+ 
+             if constexpr (back_insertable<T>)
+             {
+                 reserve_if_possible(result, arr.size());
+-                std::ranges::transform(arr, std::back_inserter(result),
++                std::transform(std::ranges::begin(arr), std::ranges::end(arr), std::back_inserter(result),
+                                        [](const auto& e) { return cast<std::ranges::range_value_t<T>>(e); });
+             }
+             else  // TODO: fixed size range concept
+             {
+                 if (arr.size() > std::ranges::size(result))
+                     throw bad_cast(
+-                        std::format("the size of JSON array is greater than the size of {}", detail::type_name<T>()));
+-                std::ranges::transform(arr, std::ranges::begin(result),
++                        detail::format("the size of JSON array is greater than the size of {}", detail::type_name<T>()));
++                std::transform(std::ranges::begin(arr), std::ranges::end(arr), std::ranges::begin(result),
+                                        [](const auto& e) { return cast<std::ranges::range_value_t<T>>(e); });
+             }
+ 
+             return result;
+         }
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wnonnull"
+ #pragma GCC diagnostic ignored "-Wconversion"
+ #pragma GCC diagnostic ignored "-Wfloat-conversion"
+@@ -4794,132 +4890,132 @@
+         {
+             if constexpr (std::constructible_from<U, std::nullptr_t>)
+             {
+                 return U(nullptr);
+             }
+             else if constexpr (std::constructible_from<U, std::nullopt_t>)
+                 return U(std::nullopt);
+             else if constexpr (std::constructible_from<U, std::monostate>)
+                 return U(std::monostate());
+             else
+-                throw bad_cast(std::format("{} is not constructible from JSON null", detail::type_name<U>()));
++                throw bad_cast(detail::format("{} is not constructible from JSON null", detail::type_name<U>()));
+         }
+ 
+         template <typename U = T>
+         static U from_json_bool(bool value)
+         {
+             if constexpr (json_scalar_constructible<U, bool>)
+                 return U(value);
+             else
+-                throw bad_cast(std::format("{} is not constructible from JSON bool", detail::type_name<U>()));
++                throw bad_cast(detail::format("{} is not constructible from JSON bool", detail::type_name<U>()));
+         }
+ 
+         template <typename U = T>
+         static U from_json_real(double value)
+         {
+             if constexpr (json_scalar_constructible<U, double>)
+             {
+                 return U(value);
+             }
+             else
+-                throw bad_cast(std::format("{} is not constructible from JSON number", detail::type_name<U>()));
++                throw bad_cast(detail::format("{} is not constructible from JSON number", detail::type_name<U>()));
+         }
+ 
+         template <typename U = T>
+         static U from_json_string(std::string_view value)
+         {
+             if constexpr (std::constructible_from<U, std::string_view>)
+                 return U(value);
+             else if constexpr (std::constructible_from<U, std::string>)
+                 return U(std::string(value));
+             else if constexpr (std::constructible_from<U, const char*>)
+                 return U(value.data());
+             else
+-                throw bad_cast(std::format("{} is not constructible from JSON string", detail::type_name<U>()));
++                throw bad_cast(detail::format("{} is not constructible from JSON string", detail::type_name<U>()));
+         }
+ 
+         template <typename U = T>
+         static U from_json_uint(std::uint64_t value)
+         {
+             if constexpr (std::integral<U>)
+             {
+                 if (value <= std::numeric_limits<U>::max())
+                 {
+                     return static_cast<U>(value);
+                 }
+-                throw bad_cast(std::format("overflow detected: {} is not constructible from JSON integer {}",
++                throw bad_cast(detail::format("overflow detected: {} is not constructible from JSON integer {}",
+                                            detail::type_name<U>(), value));
+             }
+             else if constexpr (json_scalar_constructible<U, std::uint64_t>)
+             {
+                 return U(value);
+             }
+             else
+-                throw bad_cast(std::format("{} is not constructible from JSON integer", detail::type_name<U>()));
++                throw bad_cast(detail::format("{} is not constructible from JSON integer", detail::type_name<U>()));
+         }
+ 
+         template <typename U = T>
+         static U from_json_sint(std::int64_t value)
+         {
+             if constexpr (std::unsigned_integral<U>)
+             {
+                 if (value >= 0 && static_cast<std::uint64_t>(value) <= std::numeric_limits<U>::max())
+                 {
+                     return static_cast<U>(value);
+                 }
+-                throw bad_cast(std::format("overflow detected: {} is not constructible from JSON integer {}",
++                throw bad_cast(detail::format("overflow detected: {} is not constructible from JSON integer {}",
+                                            detail::type_name<U>(), value));
+             }
+             else if constexpr (std::signed_integral<U>)
+             {
+                 if (value >= std::numeric_limits<U>::min() && value <= std::numeric_limits<U>::max())
+                 {
+                     return static_cast<U>(value);
+                 }
+-                throw bad_cast(std::format("overflow detected: {} is not constructible from JSON integer {}",
++                throw bad_cast(detail::format("overflow detected: {} is not constructible from JSON integer {}",
+                                            detail::type_name<U>(), value));
+             }
+             else if constexpr (json_scalar_constructible<U, std::int64_t>)
+             {
+                 return U(value);
+             }
+             else
+-                throw bad_cast(std::format("{} is not constructible from JSON integer", detail::type_name<U>()));
++                throw bad_cast(detail::format("{} is not constructible from JSON integer", detail::type_name<U>()));
+         }
+ 
+         template <typename Json>
+         requires (std::same_as<reader::const_value_ref, Json> || writer::detail::base_of_const_value<Json>)
+         static auto from_json(const Json& json)
+         {
+             if constexpr (requires { json.inspect(); })
+             {
+                 return json.inspect([](const auto& value) -> T {
+                     using value_type = std::remove_cvref_t<decltype(value)>;
+                     if constexpr (std::same_as<value_type, reader::const_object_ref>)
+                     {
+                         if constexpr (writer::detail::from_json_def_obj_defined<T>)
+                         {
+                             return from_json(value);
+                         }
+                         else
+                             throw bad_cast(
+-                                std::format("{} is not constructible from JSON object", detail::type_name<T>()));
++                                detail::format("{} is not constructible from JSON object", detail::type_name<T>()));
+                     }
+                     else if constexpr (std::same_as<value_type, reader::const_array_ref>)
+                     {
+                         if constexpr (writer::detail::from_json_def_arr_defined<T>)
+                         {
+                             return from_json(value);
+                         }
+                         else
+                             throw bad_cast(
+-                                std::format("{} is not constructible from JSON array", detail::type_name<T>()));
++                                detail::format("{} is not constructible from JSON array", detail::type_name<T>()));
+                     }
+                     else if constexpr (std::same_as<value_type, std::nullptr_t>)
+                     {
+                         return from_json_null();
+                     }
+                     else if constexpr (std::same_as<value_type, bool>)
+                     {
+                         return from_json_bool(value);
+                     }
+                     else if constexpr (std::same_as<value_type, double>)
+@@ -4940,30 +5036,30 @@
+                     }
+                 });
+             }
+             else if (const auto obj = json.as_object(); obj.has_value())
+             {
+                 if constexpr (writer::detail::from_json_def_obj_defined<T>)
+                 {
+                     return from_json(*obj);
+                 }
+                 else
+-                    throw bad_cast(std::format("{} is not constructible from JSON object", detail::type_name<T>()));
++                    throw bad_cast(detail::format("{} is not constructible from JSON object", detail::type_name<T>()));
+             }
+             else if (const auto arr = json.as_array(); arr.has_value())
+             {
+                 if constexpr (writer::detail::from_json_def_arr_defined<T>)
+                 {
+                     return from_json(*arr);
+                 }
+                 else
+-                    throw bad_cast(std::format("{} is not constructible from JSON array", detail::type_name<T>()));
++                    throw bad_cast(detail::format("{} is not constructible from JSON array", detail::type_name<T>()));
+             }
+             else if (json.is_null())
+             {
+                 return from_json_null();
+             }
+             else if (json.is_bool())
+             {
+                 return from_json_bool(*json.as_bool());
+             }
+             else if (json.is_real())
+@@ -4975,21 +5071,21 @@
+                 return from_json_string(*json.as_string());
+             }
+             else if (const auto vui = json.as_uint(); vui.has_value())
+             {
+                 return from_json_uint(*vui);
+             }
+             else if (const auto vsi = json.as_sint(); vsi.has_value())
+             {
+                 return from_json_sint(*vsi);
+             }
+-            throw bad_cast(std::format("{} is not constructible from raw json", detail::type_name<T>()));
++            throw bad_cast(detail::format("{} is not constructible from raw json", detail::type_name<T>()));
+         }
+ #if defined(__GNUC__)
+ #pragma GCC diagnostic pop
+ #endif
+ 
+         template <copy_string_args... Ts>
+         requires visitable<T>
+         static auto to_json(writer::object_ref& obj, const T& t, Ts... ts)
+         {
+             visit_struct<T>::to_json_impl(obj, t, ts...);
+@@ -5126,21 +5222,21 @@
+ #if defined(__GNUC__) or defined(__clang__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wunused-value"
+ #endif
+         template <typename Json>
+         static std::variant<Ts...> from_json(const Json& json)
+         {
+             auto result = std::optional<std::variant<Ts...>>();
+             ((result = cast_no_except<Ts>(json)).has_value() || ...);
+             if (result.has_value()) return *result;
+-            throw bad_cast(std::format("{} is not constructible from JSON", detail::type_name<std::variant<Ts...>>()));
++            throw bad_cast(detail::format("{} is not constructible from JSON", detail::type_name<std::variant<Ts...>>()));
+         }
+ #if defined(__GNUC__) or defined(__clang__)
+ #pragma GCC diagnostic pop
+ #endif
+ 
+         template <detail::copy_string_args... Args>
+         requires requires(writer::value_ref& val) { ((val = std::declval<Ts>()), ...); }
+         static auto to_json(writer::value_ref& val, const std::variant<Ts...>& t, Args...)
+         {
+             constexpr auto copy = (sizeof...(Args) != 0);
+@@ -5202,21 +5298,21 @@
+                               (static_cast<std::tuple_element_t<0, Ts>>(std::get<0>(*(json.as_object()->begin()))),
+                                ...);
+                               (cast<std::tuple_element_t<1, Ts>>(std::get<1>(*(json.as_object()->begin()))), ...);
+                           })
+             {
+                 if (const auto obj = json.as_object(); obj.has_value())
+                 {
+                     auto result = Tuple<Ts...>();
+ 
+                     if (obj->size() > std::tuple_size_v<Tuple<Ts...>>)
+-                        throw bad_cast(std::format("the size of JSON object is greater than the size of {}",
++                        throw bad_cast(detail::format("the size of JSON object is greater than the size of {}",
+                                                    detail::type_name<Tuple<Ts...>>()));
+ 
+                     using indices = std::make_index_sequence<std::tuple_size_v<Tuple<Ts...>>>;
+                     auto it = obj->begin();
+                     [&result, &it]<std::size_t... N>(std::index_sequence<N...>) {
+                         (((std::get<N>(result) = std::tuple_element_t<N, Tuple<Ts...>>(
+                                static_cast<std::tuple_element_t<0, Ts>>(std::get<0>(*it)),
+                                cast<std::tuple_element_t<1, Ts>>(std::get<1>(*it)))),
+                           ++it),
+                          ...);
+@@ -5225,34 +5321,34 @@
+                     return result;
+                 }
+             }
+             if constexpr (requires { (cast<Ts>(json), ...); })
+             {
+                 if (const auto arr = json.as_array(); arr.has_value())
+                 {
+                     auto result = Tuple<Ts...>();
+ 
+                     if (arr->size() > std::tuple_size_v<Tuple<Ts...>>)
+-                        throw bad_cast(std::format("the size of JSON array is greater than the size of {}",
++                        throw bad_cast(detail::format("the size of JSON array is greater than the size of {}",
+                                                    detail::type_name<Tuple<Ts...>>()));
+ 
+                     using indices = std::make_index_sequence<std::tuple_size_v<Tuple<Ts...>>>;
+                     auto it = arr->begin();
+                     [&result, &it]<std::size_t... N>(std::index_sequence<N...>) {
+                         ((std::get<N>(result) = cast<std::tuple_element_t<N, Tuple<Ts...>>>(*(it++))), ...);
+                     }(indices{});
+ 
+                     return result;
+                 }
+             }
+ 
+-            throw bad_cast(std::format("{} is not constructible from JSON", detail::type_name<Tuple<Ts...>>()));
++            throw bad_cast(detail::format("{} is not constructible from JSON", detail::type_name<Tuple<Ts...>>()));
+         }
+ 
+         template <detail::copy_string_args... Args>
+         requires requires(writer::array_ref& arr) { (arr.emplace_back(std::declval<Ts>()), ...); }
+         static auto to_json(writer::array_ref& arr, const Tuple<Ts...>& t, Args... args)
+         {
+             using indices = std::make_index_sequence<std::tuple_size_v<Tuple<Ts...>>>;
+             [&arr, &t, args...]<std::size_t... N>(std::index_sequence<N...>) {
+                 (arr.emplace_back_no_iter(std::get<N>(t), args...), ...);
+             }(indices{});
+@@ -5306,20 +5402,22 @@
+     template <>
+     struct caster<std::vector<bool>::reference>
+     {
+         template <detail::copy_string_args... Ts>
+         static auto to_json(const std::vector<bool>::reference& v, Ts...)
+         {
+             return static_cast<bool>(v);
+         }
+     };
+ }  // namespace yyjson
++
++#if defined(__cpp_lib_format)
+ 
+ template <>
+ struct std::formatter<yyjson::json_string>
+ {
+     constexpr auto parse(std::format_parse_context& ctx) -> std::format_parse_context::iterator
+     {
+         const auto i = ctx.begin();
+         if (i != ctx.end() && *i != '}')
+         {
+             throw std::format_error("invalid format");
+@@ -5347,20 +5445,22 @@
+         const auto i = ctx.begin();
+         if (i != ctx.end() && *i != '}')
+         {
+             throw std::format_error("invalid format");
+         }
+         return i;
+     }
+ 
+     auto format(const T& t, auto& ctx) const { return std::format_to(ctx.out(), "{}", std::string_view(t.write())); }
+ };
++
++#endif  // defined(__cpp_lib_format)
+ 
+ #define CPPYYJSON_STRIGIFY_IMPL(x) #x
+ #define STRIGIFY(x) CPPYYJSON_STRIGIFY_IMPL(x)
+ #define CPPYYJSON_CONCAT_IMPL(x, y) x##y
+ #define CPPYYJSON_CONCAT(x, y) CPPYYJSON_CONCAT_IMPL(x, y)
+ #define CPPYYJSON_INDEX_SEQ()                                                                                        \
+     32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, \
+         2, 1, 0
+ #define CPPYYJSON_VA_ARGS_SIZE_IMPL_(_1, _2, _3, _4, _5, _6, _7, _8, _9, _10, _11, _12, _13, _14, _15, _16, _17, _18, \
+                                      _19, _20, _21, _22, _23, _24, _25, _26, _27, _28, _29, _30, _31, _32, N, ...)    \
