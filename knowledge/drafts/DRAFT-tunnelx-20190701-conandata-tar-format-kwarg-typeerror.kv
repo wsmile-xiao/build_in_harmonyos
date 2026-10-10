@@ -1,0 +1,119 @@
+#====================================================================
+# DRAFT-tunnelx-20190701-conandata-tar-format-kwarg-typeerror
+#   conandata.yml 的 tar_format 键被 ** 直接展开传给 conan get()，
+#   触发 TypeError（get() 不识该 kwarg），source() 阶段即失败
+# 来源: tunnelx 20190701 适配（Java，HarmonyOS PC）
+# 路径: 配方首稿（conan-init/conandata 模板 → 手写 conanfile）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-tunnelx-20190701-conandata-tar-format-kwarg-typeerror
+trigger_tool:           conan|conan create|conan-verify
+phase:                  source
+error_signature:        TypeError: get\(\) got an unexpected keyword argument 'tar_format'|
+                        get\(\).*unexpected keyword argument|
+                        Error in source\(\) method.*get\(self, \*\*self\.conan_data
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               1
+category:               conan, packaging, source-download, recipe, template
+match_keywords:         tar_format, get(), unexpected keyword argument, TypeError,
+                        conan_data, sources, source(), conandata.yml, strip_root,
+                        conan create, conan-verify G2
+title:                  conandata.yml 的 tar_format 被直接 ** 展开传给 conan get()，source() 报 TypeError
+prescan_pattern:        get\(self,\s*\*\*self\.conan_data\[.sources.\]
+prescan_globs:          conanfile.py, */conanfile.py, **/conanfile.py
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             归档规范的 conandata.yml 模板在 sources.<version> 下声明三个键
+                        url / sha256 / tar_format，而 conan.tools.files.get() 只接受
+                        url / sha256 / destination / strip_root / verify / filename。
+                        写成 get(self, **self.conan_data["sources"][<ver>], strip_root=True)
+                        时 tar_format 作为未知 kwarg 被传入，Python 层直接抛
+                        TypeError，source() 阶段失败（G2 干净构建必红）。
+                        tar_format 是**归档规范/校验用字段**（供 CI/索引与人工核对），
+                        既不被 get() 读取（对比 E483：get() 也不据它推断压缩格式），
+                        也不能作为 kwarg 透传——两个方向都不能依赖它。
+                        这是「规范模板字段 × 框架 API 签名」不一致造成的必然踩坑，
+                        与语言/平台无关，任何用该模板生成 conandata.yml 的新配方都会命中。
+
+affected_scope:         任何 conandata.yml sources 段含 tar_format、且 source() 用
+                        ** 展开整个 sources dict 传给 get() 的 Conan 配方（首次适配
+                        的新包最常见）。仓内既有配方多以显式传参或 pop("tar_format")
+                        规避（archives/m/motif、archives/a/accountsservice、
+                        archives/d/dbus、archives/p/polkit 均带同一注释）。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pop-tar-format-before-get
+rec_description:        在 source() 内复制 dict 并剔除 tar_format 后再展开——保留
+                        conandata.yml 的规范字段（归档/校验仍可读），只让 get() 收到
+                        它认识的参数。改动最小、语义最清晰，且不修改 conandata.yml。
+                        判别三行：
+                        ① grep -n 'tar_format' archives/<l>/<pkg>/<ver>/conandata.yml
+                        ② grep -n 'def source' -A5 archives/<l>/<pkg>/<ver>/conanfile.py
+                        ③ conan create archives/<l>/<pkg>/<ver> -pr:h=<profile> -pr:b=<profile>
+rec_command:            python3 - <<'PY'
+                        import re, pathlib
+                        p = pathlib.Path("archives/<l>/<pkg>/<ver>/conanfile.py")
+                        s = p.read_text()
+                        s = s.replace(
+                            'get(self, **self.conan_data["sources"]["<ver>"], strip_root=True)',
+                            'source_data = dict(self.conan_data["sources"]["<ver>"])\n'
+                            '        source_data.pop("tar_format", None)\n'
+                            '        get(self, **source_data, strip_root=True)')
+                        p.write_text(s)
+                        PY
+rec_auto_fix:           false
+rec_impl:               conanfile-edit
+
+fallback_priority:      2
+fallback_approach:      explicit-params-in-get
+fallback_description:   不展开 dict，改为显式传 url/sha256（get(self, url=..., sha256=...,
+                        strip_root=True)）。同样规避 TypeError，但版本升级时需同步改
+                        conanfile（多版本 conandata 场景维护成本更高）。
+fallback_command:       get(self, url=self.conan_data["sources"]["<ver>"]["url"], sha256=self.conan_data["sources"]["<ver>"]["sha256"], strip_root=True)
+fallback_auto_fix:      false
+fallback_impl:          conanfile-edit
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       sed.*-i.*删除.*tar_format|conandata.yml.*去掉.*tar_format
+forbid_1_reason:         删除 conandata.yml 的 tar_format 会丢归档规范字段（CI 索引/
+                        人工核对依赖它），用治标掩盖「模板字段 ≠ get() 参数」的真因
+forbid_1_consequence:   下次升级版本重新生成 conandata.yml 时问题复现，且归档元数据不完整
+forbid_2_pattern:       --build=missing|跳过.*source.*阶段|本地缓存.*绕过
+forbid_2_reason:         这是配方缺陷而非依赖/下载问题，绕过 source() 不会产生可复现的
+                        CI 结果（G2 干净构建仍必红）
+forbid_2_consequence:   本地假绿、CI 红，浪费一轮 CI 与环境
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P004
+
+# ═══ 关系图 (Relations) ═══
+# 签名家族相近但根因不同，非重复条目：
+#   E483 = get() 无法从「无扩展名 URL」推断格式（BadZipFile，缺少扩展名提示）；
+#   本条 = tar_format 作为未知 kwarg 被 ** 透传（TypeError，参数签名不符）。
+similar_to:             E483（同为「get() 不读 conandata 的 tar_format」这一事实的不同表现；签名与失败阶段不同）、
+                        E505（conan 配方 export/source 阶段参数类错误，模板字段误用家族）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/t/tunnelx/20190701 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+                        # 期望：source() 不再抛 TypeError；包正常构建（rc=0）
+doc_file:               knowledge/drafts/DRAFT-tunnelx-20190701-conandata-tar-format-kwarg-typeerror.md
+last_updated:           2026-10-04
+source_event:           tunnelx 20190701 适配（Java / HarmonyOS PC，PR 待提）；
+                        conan create 首个真实错误 TypeError: get() got an unexpected
+                        keyword argument 'tar_format'（conanfile.py source() 第 94 行）
+authors:                1748
+source_pr:              pending
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-04
