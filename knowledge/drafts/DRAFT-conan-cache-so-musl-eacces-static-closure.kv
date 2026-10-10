@@ -1,0 +1,90 @@
+# ═══ Draft knowledge entry — conan 缓存构建的 .so 在 hmdfs 上被 musl loader EACCES 拒载：Rust GUI 件改用 Harmonybrew 静态闭包 ═══
+# Timestamp: 2026-10-08
+# Software: alacritty/0.17.0（适配实测：fontconfig）；适用一切需要链接
+#   conan 制品仓 C 库（fontconfig/freetype 等）的 OHOS Rust 件与原生件
+# Gate: 本地受控 A/B/C/D 对照实验（ctypes.CDLL + musl loader 双通道）
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id:                     DRAFT-conan-cache-so-musl-eacces-static-closure
+trigger_tool:           conan|cargo|rustc|ld
+phase:                  runtime
+error_signature:        Error loading shared library libfontconfig\.so\.1: \(needed by .*\)|
+                        Error relocating .*: FcCharSetDestroy: symbol not found|
+                        OSError: Error loading shared library .*: Permission denied|
+                        dlopen failed.*EACCES.*hmdfs
+
+severity:               3
+category:               loader, musl, hmdfs, conan-cache, fontconfig, static-link, rust, gui
+match_keywords:         musl loader, EACCES, Permission denied, hmdfs, HMDFS,
+                        conan cache, libfontconfig, .so.1, Error relocating,
+                        symbol not found, static closure, bottle, Harmonybrew,
+                        LD_LIBRARY_PATH, ctypes.CDLL, DT_RUNPATH, GNU_STACK
+
+title:                  conan 缓存（hmdfs）构建的共享库被 musl loader 以 EACCES 拒载（Harmonybrew 同名库正常）——Rust/原生消费者改用 Harmonybrew bottle 静态归档闭包，链接期静态化、运行期零依赖
+
+root_cause: >
+  受控对照实验（alacritty 0.17.0 适配，2026-10-08）：
+  - A（对照）：Harmonybrew Cellar 的 libfontconfig.so.1.16.0 → ctypes.CDLL
+    加载成功；挂 LD_LIBRARY_PATH 后 alacritty 二进制正常运行；
+  - B（拷贝隔离）：把 conan 仓库制品 fontconfig/2.18.3 的
+    libfontconfig.so.1.17.0 拷贝到本地目录 → EACCES Permission denied；
+  - C（chmod 隔离）：chmod 755 / 777 后依然 EACCES（排除权限位因素）；
+  - D（内容隔离）：conan .so 放进 brew 库目录、brew .so 放进 conan 缓存
+    目录交叉验证——加载结果跟文件走不跟目录走：conan 构建的 ELF 本身
+    被 musl loader 拒绝。
+  同目录、同权限位、同 SONAME（libfontconfig.so.1）、同架构、无 symbol
+  versioning、GNU_STACK 段一致的两组 .so，唯一差异是构建产物来源
+  （conan 缓存 hmdfs 路径上由 OHOS conan 工具链产物 vs Harmonybrew
+  bottle 内产物），musl loader（/lib/ld-musl-aarch64.so.1，对动态库的
+  映射含 SELinux/hmdfs 挂载上下文）对前者返回 EACCES。ld-musl 的报错
+  形态有迷惑性：先报 "Error loading shared library libfontconfig.so.1"，
+  随后把缺库连锁成数十行 "Error relocating ...: FcXxx: symbol not
+  found"，容易误判为符号不匹配。
+
+affected_scope:         一切消费者（Rust -sys crate / 原生 dlopen / 直接
+                        NEEDED）试图在运行时加载 conan 制品仓分发的 .so
+                        且构建发生在 hmdfs 挂载路径上的场景；fontconfig/
+                        freetype 等基础 GUI 库的 Rust 消费者（crossfont/
+                        yeslogic-fontconfig-sys 走 pkg-config 动态链接）首当
+                        其冲。链接期（ld/lld 用 .so 或 .a 均可）不受影响，
+                        纯运行期加载问题。
+
+solution: |
+  Rust GUI 件（crossfont→fontconfig 这类链接期依赖）绕开动态库，改用
+  Harmonybrew bottle 静态归档闭包（配方内自举，非 conan 依赖）：
+  1. 选瓶：fontconfig/freetype/expat/gettext/libpng/bzip2/zlib-ng-compat
+     （libfontconfig.a 引用 XML_* / libintl_dgettext / FT_*；freetype.a
+     又引用 png_/BZ2_/zlib 符号——闭包必须一次配齐，缺 libintl.a 会报
+     "undefined symbol: libintl_dgettext"）；
+  2. 收集：解包后把 7 个 .a 归集到 build/fontconfig-closure/；
+  3. 合成自包含 fontconfig.pc（无 Requires，Libs 列全闭包依赖序）：
+       Libs: -L${prefix} -lfontconfig -lexpat -lintl -lfreetype -lz -lbz2 -lpng16
+  4. 注入：PKG_CONFIG_PATH=<closure>/pkgconfig + RUSTFLAGS 追加
+     "-L <closure>"（链接搜索先到先得，闭包 .a 优先于系统 .so）；
+  5. freetype 本体对 Rust 侧由 freetype-sys 对 ohos target 自动 vendored
+     编译（build.rs 显式分支），无需额外处理。
+  效果（alacritty 0.17.0 实测）：产物 NEEDED 仅 libc++_shared.so +
+  libc.so（/system/lib64 系统自带），消费者零 LD_LIBRARY_PATH；
+  且彻底消除 conan .so 的 EACCES 运行期风险。
+
+fallback: >
+  纯 C/C++ conan 消费者（无法静态化或必须共享）可尝试：把制品仓 .so
+  拷贝到本地非 hmdfs 目录（实验 B 显示拷贝无效时此路不通，需逐库实测）；
+  或消费者配方内 brew install 对应库并用 opt/lib 路径（alligator/alkimia
+  等 GUI 件的 /system/lib64 + 依赖 lib 目录先例）。彻底规避仍是优先选
+  静态闭包（本条 solution）。
+
+verify_builds:          本地实验存档（2026-10-08 设备）：
+                        probe_load.py（ctypes 加载 A/B/C/D 四组对照）；
+                        build6.log（静态闭包构建 rc=0，NEEDED 仅 libc++
+                        _shared/libc）；build7.log（缺 libintl 的最小闭包
+                        undefined symbol 反证）。conan create 与 CI #待建
+                        PR 复核。
+
+rec_priority:           1
+rec_approach:           harmonybrew-static-closure-link
+rec_description:        Harmonybrew bottle 静态归档闭包 + 合成自包含
+                        fontconfig.pc + RUSTFLAGS -L 前置
+rec_command:            PKG_CONFIG_PATH=<closure>/pkgconfig RUSTFLAGS="-C linker=clang -L <closure>" cargo build --release
+rec_auto_fix:           true
+rec_impl:               conan-recipe-bottle-static-closure
