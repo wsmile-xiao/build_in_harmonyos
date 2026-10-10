@@ -1,0 +1,83 @@
+#====================================================================
+# DRAFT-yaku-ns-0.2-ohos-fd-set-fd-chk-musl-guest.kv — 草稿
+# OHOS <sys/select.h> 把 FD_SET 定义成调用 __fd_chk()，WSL guest musl 无此符号
+#====================================================================
+# 来源: yaku-ns 0.2 OHOS aarch64 适配, 2026-10-03
+# 状态: 草稿（待人工审核后 promote 为正式条目）
+
+id:                     DRAFT-yaku-ns-0.2-ohos-fd-set-fd-chk-musl-guest
+trigger_tool:           clang|ld|test
+phase:                  runtime
+error_signature:        'Error relocating [^ ]+: __fd_chk: symbol not found|__fd_chk: symbol not found'
+
+severity:               2
+category:               libc, musl, runtime, ohos, false-failure, cross-build
+match_keywords:         __fd_chk, FD_SET, sys/select.h, symbol not found, Error relocating, ohos-guest, guest musl, 1.2.6, exit 127, aarch64, qemu, LD_PRELOAD
+title:                  OHOS 的 FD_SET 依赖 __fd_chk()，WSL guest musl 1.2.6 无此符号 → 交叉产物在本地恒 exit 127（真机正常）
+
+root_cause: |
+  OHOS 的 <sys/select.h>（musl 派生）把 fd_set 操作改写为带边界检查的调用：
+      void __fd_chk(int fd);
+      #define FD_SET(d, s) do { __fd_chk(d); ... } while(0)
+  因此任何调用 FD_SET/FD_CLR 的 aarch64 OHOS 产物都会带上 `U __fd_chk` 未定义符号。
+
+  两端 libc 不同：
+  * **真机 / CI worker**：OHOS 自己的 musl 分支导出了该符号。实测 DevEco SDK
+    sysroot 的 aarch64-linux-ohos libc.so：
+        readelf --dyn-syms libc.so | grep __fd_chk
+        → 69: 0000000000011d80 4 FUNC GLOBAL DEFAULT 13 __fd_chk
+  * **本机 WSL guest**（/opt/ohos-guest）：通用 musl 1.2.6，**没有**该符号。
+        nm -D --defined-only /opt/ohos-guest/lib/libc.so | grep -c __fd_chk → 0
+    于是 binfmt/qemu 加载产物时直接失败：
+        Error relocating .../bin/yaku-ns: __fd_chk: symbol not found   (exit 127)
+
+  即：同一份二进制在「真机 OHOS libc」与「本地 guest musl」下行为不同，属
+  **跨宿主产物差异**，与配方、与上游代码、与用例数都无关。
+  判别要点：exit=127 + 输出仅一行 `Error relocating ... symbol not found`
+  ⇒ loader/符号解析类；真实内容失败通常带具体 diff 或断言信息。
+
+affected_scope:         所有在 OHOS 上使用 FD_SET/FD_CLR/FD_ZERO 的 aarch64 产物
+                        （事件循环、DNS/网络守护进程、select() 循环类程序），本地
+                        WSL 交叉验证时都可能命中。T017（arc4random）是同族但符号不同。
+
+verification_cmd:       readelf --dyn-syms --wide <packaged-elf> | grep __fd_chk
+rec_priority:           1
+rec_approach:           local-guest-symbol-shim
+rec_description: |
+  **先分层，再动手**：看到 exit 127 + `Error relocating ...: <sym>: symbol not found`，
+  先 `readelf --dyn-syms <产物>` 确认是 `U <sym>`（未定义、由 libc 提供），
+  再分别查真机 libc 与本地 guest libc 是否导出该符号。两端都查，才知道是
+  「产物缺符号」还是「宿主缺符号」。
+
+  - 真机缺 → 真实移植缺陷，需在配方/依赖侧解决。
+  - 仅本地 guest 缺 → 环境类，**不要改配方**。在**容器侧**造一个只含该符号的空
+    shim，用 LD_PRELOAD 仅供本地自证；shim 不进配方、不进 test_package、不随 PR 提交。
+    x86 宿主会刷 `cannot be preloaded` 噪声，属正常。
+
+rec_command: |
+  # 本地自证用 shim（不提交）
+  cat > /tmp/fdchk.c <<'EOF'
+  void __fd_chk(int fd) { (void)fd; }
+  EOF
+  /opt/lpk-fixed/clang -shared -fPIC /tmp/fdchk.c -o /tmp/fdchk.so
+  nm -D --defined-only /tmp/fdchk.so | grep __fd_chk   # 确认已导出
+  LD_PRELOAD=/tmp/fdchk.so <packaged-binary> --version  # 应当正常输出
+  # 真机侧无需任何改动：确认 OHOS libc 已导出该符号即可
+  readelf --dyn-syms "/mnt/d/apps/DevEco Studio/sdk/default/openharmony/native/sysroot/usr/lib/aarch64-linux-ohos/libc.so" | grep __fd_chk
+rec_auto_fix:           false
+rec_impl:               host-side LD_PRELOAD shim
+
+prescan_pattern:        FD_SET\(|FD_CLR\(|__fd_chk
+prescan_globs:          *.c, *.h, *.cpp
+
+forbid_1_pattern:       conanfile.*__fd_chk|LD_PRELOAD.*conanfile
+forbid_1_reason:        把运行期 shim 塞进配方是用环境补丁伪装产品行为，同时踩 R33/R49 与「不许降低标准换绿」红线
+forbid_2_pattern:       test_package.*LD_PRELOAD|test_package.*__fd_chk
+forbid_2_reason:        消费者测试必须验证真实产物；往测试里注入 shim 会让 L1e 反向破坏测试失去意义（移走产物后仍可能通过）
+principles:             P002, P003, P011
+similar_to:             E235
+caused_by:
+prerequisite_of:
+conflicts_with:
+
+doc_file:               DRAFT-yaku-ns-0.2-ohos-fd-set-fd-chk-musl-guest.md
