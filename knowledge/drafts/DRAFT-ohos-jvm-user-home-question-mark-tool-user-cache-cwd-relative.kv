@@ -1,0 +1,123 @@
+#====================================================================
+# DRAFT-ohos-jvm-user-home-question-mark-tool-user-cache-cwd-relative
+#   OHOS 设备 JVM user.home 为 "?"（uid 不在 /etc/passwd），
+#   Maven/Gradle 等按 user.home 落盘的工具把缓存写到 cwd 相对路径
+# 来源: feat(jline3): 3.3.1 适配 HarmonyOS PC（jline3 Maven 构建）
+# 路径: Path B（知识库扩展）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     DRAFT-ohos-jvm-user-home-question-mark-tool-user-cache-cwd-relative
+trigger_tool:           java|maven|gradle|build|test|runtime
+phase:                  configuration|compilation|testing
+error_signature:        user\.home\s*=\s*\?|\.m2/wrapper/dists|/\?/\.m2|
+                        Could\s+not\s+transfer|maven\.repo\.local
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               ohos, java, build-system, maven, environment
+match_keywords:         user.home, .m2, maven, gradle, wrapper, dists,
+                        BiSheng JDK, bishengjdk, /etc/passwd, getpwuid,
+                        maven.repo.local, 缓存目录,HMDFS, conan build,
+                        MavenWrapperMain, surefire
+title:                  OHOS 设备 JVM user.home 为 "?"：Maven/Gradle 用户级缓存落到 cwd 相对 "?/.m2"，缓存失效且污染源码树
+prescan_pattern:        user\.home
+prescan_globs:          '*.java', '*.py', '*.sh', '*.gradle', 'pom.xml'
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             OpenJDK 在 Linux 上由 getpwuid_r(getuid()) 取
+                        pw_dir 作为 user.home，取不到时回退为字面量 "?"；
+                        OHOS 设备的应用侧 uid（如 20001006）不在
+                        /etc/passwd 中，且 JVM 不再回退读 HOME 环境变量
+                        （export HOME 无效，-XshowSettings:properties 可
+                        实证 user.home = "?"）。所有按 user.home 拼用户级
+                        路径的构建工具因此得到一个 cwd 相对路径
+                        "?/..."：Maven 本地仓库变 <cwd>/?/.m2/repository、
+                        Maven Wrapper 发行版变 <cwd>/?/.m2/wrapper/dists、
+                        Gradle 用户家目录同理。后果是缓存按 cwd 割裂（每
+                        个构建目录各下一份）、无法复用，且在源码树内留下
+                        名为 "?" 的垃圾目录；HOME 环境变量被设了也不被
+                        JVM 采用，常见"我明明 export 了 HOME"的排查歧义。
+
+affected_scope:         OHOS PC 设备上一切基于 user.home 的 JVM 构建工具
+                        （Maven ~/.m2、Maven Wrapper 发行版缓存、Gradle
+                        ~/.gradle、sbt、leiningen 等）与读取 user.home 的
+                        应用代码。桌面 Linux/WSL 不复现；属 OHOS 设备
+                        环境特性而非某库缺陷。
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           pin-user-home-and-cache-dir-explicitly
+rec_description:        构建命令显式指定全部用户级路径，不依赖 user.home：
+                        Maven 用 java -Duser.home=<可写目录>（对 wrapper
+                        与 Maven 同时生效，二者继承同一 JVM 属性）+
+                        -Dmaven.repo.local=<可写目录>/m2-repository；
+                        Gradle 用 --gradle-user-home 或 GRADLE_USER_HOME。
+                        <可写目录> 取 conan build 目录（自包含、可重现，
+                        每轮 CI 冷缓存）或设备上稳定的非 HMDFS 敏感目录。
+                        conan 配方中禁止把设备绝对路径写进交付文件，故
+                        首选 build 目录相对定位。
+                        判别两行：
+                        ① java -XshowSettings:properties -version 2>&1 |
+                           grep user.home    → 期望看到 user.home = ?
+                        ② 构建日志出现 <项目目录>/?/.m2/... 即命中
+rec_command:            java -Duser.home=<build_dir> -classpath .mvn/wrapper/maven-wrapper.jar -Dmaven.multiModuleProjectDirectory=<src_dir> org.apache.maven.wrapper.MavenWrapperMain -Dmaven.repo.local=<build_dir>/m2-repository clean verify
+rec_auto_fix:           false
+rec_impl:               jvm-property-override
+
+fallback_priority:      2
+fallback_approach:      per-invocation-tool-flags-only
+fallback_description:   只传 -Dmaven.repo.local 而不传 -Duser.home：仓库不再
+                        落 "?"，但 Maven Wrapper 的发行版缓存仍写
+                        "?/.m2/wrapper/dists"（残留 "?" 目录，每轮重下
+                        ~10MB）。作为最小改动兜底可用。
+fallback_command:       mvn -Dmaven.repo.local=<build_dir>/m2-repository ...
+fallback_auto_fix:      false
+fallback_impl:          tool-flag-only
+
+# ★ 禁止策略 ★
+forbid_1_pattern:       ln\s+-s|cp\s+-r.*\.m2|把.*\.m2.*拷到|软链.*\.m2
+forbid_1_reason:        禁止用软链/拷贝伪用户目录到固定路径绕过——掩盖
+                        user.home 异常这一环境事实，且跨 worker/多 run 时
+                        该路径语义不成立
+forbid_1_consequence:   缓存互踩、权限问题被推迟暴露，配方不可迁移
+forbid_2_pattern:       export\s+HOME=.*即可|已设置\s*HOME.*因此没问题
+forbid_2_reason:        JVM 的 user.home 不回退读 HOME 环境变量（getpwuid
+                        失败即字面量 "?"），设 HOME 不生效，不能作为判据
+forbid_2_consequence:   误判已修复，构建仍写 cwd 相对 "?/" 目录
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P-ENV-001
+
+# ═══ 关系图 (Relations) ═══
+similar_to:             E338（同平台事实的 native 侧兄弟条目：同一 getpwuid
+                        缺陷在 C/C++ 侧表现为 homedir() NULL/启动 SIGSEGV，本条
+                        为 JVM 侧 user.home='?' 字面量回退；机制同源、语言层
+                        表现不同，互链不去重）、
+                        E184（构建工具缺失需手动安装；同属 Java 构建环境类，
+                        根因不同）、E390（无 unzip；同为 OHOS 环境缺口）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       java -XshowSettings:properties -version 2>&1 | grep user.home
+                        # 期望（OHOS 设备实机）：user.home = ?
+                        # 修复后构建日志：不再出现 /?/.m2/
+doc_file:               knowledge/drafts/DRAFT-ohos-jvm-user-home-question-mark-tool-user-cache-cwd-relative.md
+last_updated:           2026-09-25
+source_event:           feat(jline3): 3.3.1 适配 HarmonyOS PC；BiSheng JDK
+                        17.0.13 下 Maven 3.3.9 wrapper 首跑即把发行版与本地
+                        仓库落到项目目录 /?/.m2/，-XshowSettings:properties
+                        实证 user.home = "?"；-Duser.home + -Dmaven.repo.local
+                        固定到 conan build 目录后全量构建+上游测试通过
+authors:                GoliWie
+source_pr:
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.95
+metrics_last_used:      2026-09-25
