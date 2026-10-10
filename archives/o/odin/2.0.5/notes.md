@@ -1,9 +1,10 @@
-# odin dev-2026-08 适配笔记（HarmonyOS PC · aarch64）
+# odin 2.0.5 适配笔记（上游 tag dev-2026-08；HarmonyOS PC · aarch64）
 
 ## 定位
 - Odin 编程语言编译器（LLVM 后端），产出 `bin/odin` 可执行文件 + 运行时库目录
   （base/core/shared/vendor/examples）。
-- 登记版本 `dev-2026-08` = 上游 tag `dev-2026-08`（commit 8412dc37，2026-08-06 发布）。
+- 包版本 `2.0.5`（平台任务 9121 登记）对应**上游 tag `dev-2026-08`**（commit 8412dc37，2026-08-06 发布）；
+  Odin 上游采用 `dev-YYYY-MM` 滚动发布，不存在 `2.0.5` tag，故源码取自 `dev-2026-08`。
 
 ## 上游构建系统剖析
 - `build_odin.sh`：直接编译 `src/main.cpp src/libtommath.cpp`（unity build，main.cpp
@@ -71,7 +72,7 @@
 
 ## 验证命令
 ```bash
-conan create archives/o/odin/dev-2026-08 -pr:h ci/conan/profiles/ohos-aarch64 --build=missing
+conan create archives/o/odin/2.0.5 -pr:h ci/conan/profiles/ohos-aarch64 --build=missing
 # CI 等价（强制重建）：-pr:h=... -pr:b=... --build=odin/*
 # 结果：rc=0；build() 内冒烟 `odin version` → "odin version dev-2026-08"；
 #       build() 内上游测试子集真跑，日志出现
