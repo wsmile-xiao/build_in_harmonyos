@@ -1,0 +1,52 @@
+# ═══ Draft knowledge entry — npm 纯 JS 包 peer 依赖被 prune 删除，devDependencies 双重声明的打包修复（ts/ts-node 10.9.2 实证） ═══
+# Software: ts (upstream ts-node) 10.9.2
+# Gate: 本机 conan create + sh wrapper 端到端实测
+# Status: DRAFT — same-stem .md/.kv pair
+
+id: ts-10.9.2-npm-peer-deps-pruned
+severity: 2
+category: npm|nodejs|packaging|dependency
+trigger_tool: npm|node
+phase: packaging
+
+keywords: npm prune, peerDependencies, devDependencies, --omit=dev, Cannot find module typescript, TS2591, Cannot find name process, npm install --no-save reinstalls devdeps, dprint postinstall, ERESOLVE, legacy-peer-deps, typedoc peer typescript, ts-node, pure javascript package, node_modules self-contained
+
+error_signature: |
+  1) Error: Cannot find module 'typescript' (requireStack: .../dist/util.js)
+  2) error TS2591: Cannot find name 'process'. Do you need to install type definitions for node?
+  3) npm error command failed ... dprint install.ps1 Invoke-WebRequest (postinstall 下载平台二进制失败)
+
+match_keywords: npm prune, peer dependency removed, Cannot find module typescript, TS2591, no-save, legacy-peer-deps, ERESOLVE, dprint, ts-node, typescript
+
+root_cause: |
+  npm 把根项目中仅声明为 devDependencies + peerDependencies 的包（ts-node 的 typescript、
+  @types/node）视为 dev 依赖：`npm prune --omit=dev` 会将其删除，导致打包后的 node_modules
+  无法 resolve TypeScript 编译器、也无法自动加载 @types 环境类型。
+  直觉修法 `npm install <pkg> --no-save` 在 node_modules 不完整时会按 package.json 重建
+  整棵树（含全部 devDeps），并运行其 native postinstall（dprint/@swc 下载平台二进制）
+  ——在 OpenHarmony 上必现失败。
+
+rec_approach: |
+  1) 构建目录内动态修改 package.json：把 typescript 与 @types/node 从 devDependencies
+     移到 dependencies（Python json 读写，构建期-only，不作为源码补丁提交）。
+  2) 再执行 `npm prune --omit=dev --legacy-peer-deps`：prune 只删不装、不跑 postinstall，
+     node_modules 收敛为纯运行时集合（实测 25 个纯 JS 包）。
+  3) 安装阶段统一用 `npm ci --ignore-scripts --legacy-peer-deps`：
+     --ignore-scripts 跳过 dprint/husky 等 native postinstall；--legacy-peer-deps 绕过
+     devDep typedoc@0.22.10 (peer typescript<=4.5) 与项目固定 4.7.4 的 ERESOLVE。
+  4) wrapper 生成禁用 str.format()（shell ${VAR:-...} 会被当作 Python 占位符抛 KeyError，
+     bin 目录静默为空）——改用字符串拼接。
+
+verification: |
+  本机（Windows node 24.9 / npm 11.17 / Conan 2.29）端到端：npm ci 579 包 -> tsc dist ->
+  本地 typescript-json-schema -> package.json 调整 + prune 收敛 25 包 -> conan create 成功；
+  sh 执行 bin/ts-node --version=v10.9.2、smoke.ts 输出 ts-node-ok:42:hello ohos、
+  类型错误被拒（exit 1）；bin/ts-node-transpile-only 同样通过。
+
+boundary: |
+  适用：npm 纯 JS 项目（无 native addon）按 Conan 打包、且 peer 依赖在根项目仅以
+  devDep+peer 形式出现的场景（ts-node、codecov-cli 同模式）。
+  反例：有 native addon 的包（需要二进制签名与平台检查）；peer 依赖已由消费方提供的
+  场景（不应随包分发 typescript 时需另行设计 NODE_PATH 方案）。
+  上游 build-configSchema 的 create-merged-schema 依赖 json.schemastore.org（403），
+  属外网依赖降级，与本条根因无关。
