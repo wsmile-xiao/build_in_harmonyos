@@ -1,0 +1,107 @@
+#====================================================================
+# DRAFT-12592-ohos-conan-application-pkgtype-strips-cppinfo
+# — Conan package_type=application 时 CMakeDeps 给消费者生成空 include/libs
+#   （cpp_info 剥离），"服务器二进制+可链接库"双形态包必须用 library 包型；
+#   附 meson 产物 lib 前缀与 cpp_info.libs 裸名匹配坑（isc-kea 3.0.3 实测）
+# 触发事件: isc-kea 3.0.3 适配（test_package 两连败：io_address.h not found
+#           / Library 'kea-asiodns' not found in package）
+# 路径: Path B（知识库扩展）
+#====================================================================
+
+id:                     DRAFT-12592-ohos-conan-application-pkgtype-strips-cppinfo
+trigger_tool:           conan|cmake|cmakedeps
+phase:                  test_package|packaging
+error_signature:        fatal error: '[a-z]+/[a-z_]+\.h' file not found|
+                         Library '[a-z-]+' not found in package\.  If '[a-z-]+' is a system library, declare it with 'cpp_info\.system_libs'|
+                         set\([a-zA-Z0-9_-]+_INCLUDE_DIRS_[A-Z]+ \)$
+
+severity:               2
+category:               conan, packaging, test_package, portability, ohos
+match_keywords:         package_type application, cpp_info stripped, CMakeDeps empty include dirs, consumer link failure, server binary plus libraries, mysql-8.4 precedent, meson lib prefix, libkea-dhcp.so, soname symlink recreation, shared option required, library package shared option, conan_package_library_targets
+
+title:                  A Conan package shipping server executables AND linkable libraries must declare package_type="library" (with a "shared" option): package_type="application" makes CMakeDeps generate EMPTY include dirs/libs for every consumer, so the test_package consumer cannot find headers or link targets; and the meson artifact matcher must compare with the platform "lib" prefix (libkea-dhcp.so.109.0.0) while cpp_info.libs keeps bare names
+
+root_cause:             Two independent packaging traps, both hit during isc-kea 3.0.3 test_package bring-up. (1) Conan strips cpp_info propagation for package_type="application" packages on the consumer side: CMakeDeps writes isc-kea_INCLUDE_DIRS_RELEASE / isc-kea_LIBS_RELEASE as empty lists (BIN_DIRS/LIB_DIRS still filled), so find_package() succeeds but the consumer compile dies with 'asiolink/io_address.h' file not found, and after fixing headers the link dies with "Library 'kea-asiodns' not found in package" from conan_package_library_targets — the packaged lib/ folder was never populated either because the meson output matcher compared bare names ('kea-dhcp.so') against the real platform-prefixed artifacts ('libkea-dhcp.so.109.0.0'). (2) package_type="library" additionally REQUIRES a "shared" option in the recipe (conan errors with "Package type is 'library', but no 'shared' option declared" otherwise).
+
+affected_scope:         any recipe delivering executables plus a runtime library closure meant to stay linkable by consumers (server/daemon suites). Verified: isc-kea 3.0.3 (5 daemons + 23 libkea-* + include/kea). Repo precedent: mysql-8.4 (binaries + mysqlclient) already declares package_type="library" for exactly this shape.
+
+solution: |
+  1) 双形态包（可执行 + 可链接库）一律 package_type="library" 并声明
+     shared 选项（Kea 只产共享库，默认 shared=True）：
+
+  ```python
+  package_type = "library"
+  options = {"shared": [True, False], "tests": [True, False]}
+  default_options = {"shared": True, "tests": True}
+  ```
+
+  2) meson 产物匹配必须带平台 lib 前缀；cpp_info.libs 保持裸名（Conan
+     消费端自动解析回 lib<name>.so）：
+
+  ```python
+  def _is_packaged_lib(self, name):
+      if name.endswith(".symbols"):      # meson SHSYM 中间产物
+          return False
+      return any(name == "lib{}.so".format(lib)
+                 or name.startswith("lib{}.so.".format(lib))
+                 for lib, _ in self.kea_libs)
+  ```
+
+  3) 判定后本地复核消费者侧生成物（问题在第 5 步才暴露，越早查越省
+     一轮 30 分钟的全量重建）：
+
+  ```bash
+  # conan create 失败在 test_package 时，直接看生成数据（不用重建）：
+  grep "INCLUDE_DIRS_RELEASE\|LIBS_RELEASE" \
+    test_package/build/*/generators/<pkg>-*-data.cmake
+  # 空 = application 剥离生效；非空 = cpp_info 已正确传播
+  ```
+
+  4) 三步排障序列（本次实测踩坑顺序，供复用）：
+     a) 'xxx.h' file not found        → 包型剥离（本条根因 1）
+     b) Library 'yyy' not found       → lib/ 未打包（前缀匹配错，根因 2）
+     c) 'shared' option not declared  → library 包型硬性要求（直接补）
+
+fallback: >
+  若坚持 application 包型（纯工具件、库仅运行期随附）：test_package 只能
+  走"运行验证"（执行包内二进制）而无法做链接验证，消费者测试不得出现
+  find_package + target_link_libraries；或拆两个包（库一个、应用一个），
+  依赖链由应用包 requires 库包。两法都比 library 包型+共享闭包多一层
+  维护，服务器件不推荐。
+
+verify_builds: "#PR-pending（isc-kea 3.0.3，本 PR）"
+verification_cmd: >
+  conan create . -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64
+  （test_package：find_package(isc-kea) + target_link_libraries 编译链接通过，
+  test_isc_kea PASS + test_ohos_platform PASS + 五守护进程 -v 实跑 rc=0）
+
+limitations: >
+  1) library 包型会把包计入"库依赖图"（下游 conan install 会拉它），对
+     纯工具件是噪音——本方案只适用于"库本身就该被消费"的双形态件。
+  2) shared=True 与 OHOS 环境的 libc++_shared.so 运行库解析（LD_LIBRARY_PATH）
+     是另一个独立坑（meson sanity check），见本任务日志，不在此条范围。
+  3) CMakeDeps 数据文件路径随 build_type 命名（-release- 段），复核命令
+     需按实际 build folder 展开。
+
+rec_priority:           1
+rec_approach:           library-pkgtype-for-executable-plus-library-packages
+rec_description:        服务器"二进制+库闭包"双形态包必须 package_type="library"+shared 选项；application 包型导致 CMakeDeps 对消费者生成空 include/libs（cpp_info 剥离）；meson 产物匹配带 lib 前缀而 cpp_info.libs 用裸名；三步排障序列与生成数据复核命令
+rec_command:            grep -n "package_type" archives/i/isc-kea/3.0.3/conanfile.py && grep -n "lib{}\.so" archives/i/isc-kea/3.0.3/conanfile.py
+rec_auto_fix:           false
+rec_impl:               archives/i/isc-kea/3.0.3/conanfile.py (package_type/options/_is_packaged_lib)
+
+doc_file:               knowledge/drafts/DRAFT-12592-ohos-conan-application-pkgtype-strips-cppinfo.md
+last_updated:           2026-10-08
+source_event:           isc-kea 3.0.3 test_package 两连败（io_address.h not found → Library 'kea-asiodns' not found → shared option 未声明）
+authors:                atomcode-executor
+source_pr:
+source_commit:
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-10-08
+
+draft:                  true
+contributor_id:         2404
+status:                 draft
