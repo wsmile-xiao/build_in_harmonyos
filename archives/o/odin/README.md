@@ -1,7 +1,7 @@
 # Odin
 
 Odin 是一种通用编程语言，具有独特类型系统，专为高性能、现代系统和面向数据编程而设计。
-本适配将 Odin 编译器（dev-2026-08 版本）构建到 HarmonyOS PC（aarch64-linux-ohos）平台。
+本适配将 Odin 编译器（包版本 2.0.5，上游 tag dev-2026-08）构建到 HarmonyOS PC（aarch64-linux-ohos）平台。
 
 ## 特性
 - 编译器本体为 C++（`src/main.cpp` unity build + `src/libtommath.cpp`），依赖 LLVM 的 C++ API 生成机器码。
@@ -11,7 +11,8 @@ Odin 是一种通用编程语言，具有独特类型系统，专为高性能、
 ## 构建要点
 - 依赖：`llvm/22.1.0`（制品仓已发布，shared 聚合库 `libLLVM-22.so`）。
 - 上游 `build_odin.sh` 的 `uname -s` 分支不支持 `HarmonyOS`，配方内显式构造 Linux 分支等价编译命令并适配聚合库链接。
-- 非 git 构建时显式注入 `-DODIN_VERSION_RAW="dev-2026-08"` 对齐登记版本。
+- 非 git 构建时显式注入上游 tag 版本 `-DODIN_VERSION_RAW="dev-2026-08"`（与本包 conan 版本 2.0.5 对应）。
 
 ## 版本
-- dev-2026-08（tag `8412dc37aa91def0c2fa90f89eade29056b4e608`，2026-08-06 发布）
+- 包版本 `2.0.5`（平台任务登记版本）对应上游滚动 tag `dev-2026-08`
+  （commit `8412dc37aa91def0c2fa90f89eade29056b4e608`，2026-08-06 发布）；上游无 `2.0.5` tag
