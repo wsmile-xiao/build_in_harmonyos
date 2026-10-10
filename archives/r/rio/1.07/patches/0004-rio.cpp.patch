@@ -1,0 +1,174 @@
+--- a/rio.cpp
++++ b/rio.cpp
+@@ -56,28 +56,103 @@
+ 	// MS VC++ v5.0 for Win9x
+ 	#include	<conio.h>
+ 	#define		OUTPORT( p, v )			_outp( p, v )
+ 	#define		INPORT( p )				_inp( p )
+ 	#define		CLOCK_SECOND			CLOCKS_PER_SEC
+ 	#define		DELETEARRAY				delete[]
+ 
+ #elif defined(__linux__)
+ 	// linux g++
+ 	#include	<unistd.h>
+-	#if defined(__alpha)
++	#include	<fcntl.h>
++	#include	<stdlib.h>
++	#if defined(__i386__) || defined(__x86_64__)
++		// x86 CPUs expose the ISA I/O port space: the C library provides the
++		// inb()/outb() intrinsics and ioperm() to obtain the access right.
+ 		#include	<sys/io.h>
++		#include	<asm/io.h>
++		#define		OUTPORT(p,v)			outb( v, p )
++		#define		INPORT(p)				inb( p )
+ 	#else
+-		#include	<sys/perm.h>
++		// Other architectures (aarch64, arm, riscv, ...) have no ISA I/O port
++		// instructions, so the ports are reached through the portable byte
++		// stream interface exported by /dev/port.  RIO_PORT_DEVICE may point
++		// at another byte addressable file instead (diagnostics, or hardware
++		// that is not exposed through /dev/port).
++		static int g_iPortFile = -1;
++		static char g_szPortFile[ 256 ] = "";
++
++		static const char* RioPortPath( void )
++		{
++			const char* pszPortFile;
++
++			if ( g_szPortFile[ 0 ] )
++				return g_szPortFile;
++
++			pszPortFile = getenv( "RIO_PORT_DEVICE" );
++			if ( !pszPortFile || !pszPortFile[ 0 ] )
++				pszPortFile = "/dev/port";
++
++			strncpy( g_szPortFile, pszPortFile, sizeof(g_szPortFile) - 1 );
++			g_szPortFile[ sizeof(g_szPortFile) - 1 ] = '\0';
++
++			return g_szPortFile;
++		}
++
++		static BOOL RioPortOpen( void )
++		{
++			if ( g_iPortFile < 0 )
++				g_iPortFile = open( RioPortPath(), O_RDWR );
++			return ( g_iPortFile >= 0 );
++		}
++
++		static void RioPortClose( void )
++		{
++			if ( g_iPortFile >= 0 )
++			{
++				close( g_iPortFile );
++				g_iPortFile = -1;
++			}
++		}
++
++		static void RioPortOut( int iPort, int iValue )
++		{
++			unsigned char ucValue = (unsigned char)iValue;
++			ssize_t iCount;
++
++			RioPortOpen();
++			if ( g_iPortFile < 0 )
++				return;
++
++			iCount = pwrite( g_iPortFile, &ucValue, 1, (off_t)iPort );
++			(void)iCount;
++		}
++
++		static int RioPortIn( int iPort )
++		{
++			unsigned char ucValue = 0xff;
++			ssize_t iCount;
++
++			RioPortOpen();
++			if ( g_iPortFile < 0 )
++				return 0xff;
++
++			iCount = pread( g_iPortFile, &ucValue, 1, (off_t)iPort );
++			if ( iCount != 1 )
++				return 0xff;
++
++			return (int)ucValue;
++		}
++
++		#define		OUTPORT(p,v)			RioPortOut( p, v )
++		#define		INPORT(p)				RioPortIn( p )
+ 	#endif
+-	#include	<asm/io.h>
+-	#define		OUTPORT(p,v)			outb( v, p )
+-	#define		INPORT(p)				inb( p )
+ 	#define		CLOCK_SECOND			CLOCKS_PER_SEC
+ 	#define		DELETEARRAY				delete[]
+ 
+ #elif defined(__FreeBSD__)
+ 	// FreeBSD g++
+ 	#include	<fcntl.h>
+ 	#include	<unistd.h>
+ 	#include	<machine/cpufunc.h>
+ 	#define		OUTPORT(p,v)			outb( p, v )
+ 	#define		INPORT(p)				inb( p )
+@@ -205,41 +280,56 @@
+ {
+ 	// if WinNT
+ 	#if defined(_WINNT)
+ 		// close device file
+ 		if ( m_hDriver )
+ 		{
+ 			CloseHandle( m_hDriver );
+ 			m_hDriver = NULL;
+ 		}
+ 	#endif
++
++	// if linux without ISA I/O port space
++	#if defined(__linux__) && !defined(__i386__) && !defined(__x86_64__)
++		// release the /dev/port handle
++		RioPortClose();
++	#endif
+ }
+ 
+ BOOL CRio::Set( int iPortBase )
+ {
+ 	// cleanup any previous Set()
+ 	Unset();
+ 
+ 	// determine ports
+ 	m_iPortBase = iPortBase;
+ 	m_iPortData = m_iPortBase + OFFSET_PORT_DATA;
+ 	m_iPortStatus = m_iPortBase + OFFSET_PORT_STATUS;
+ 	m_iPortControl = m_iPortBase + OFFSET_PORT_CONTROL;
+ 
+ 	// if linux
+ 	#if defined(__linux__)
+-		// request access to required ports
+-		if ( ioperm(m_iPortBase, 3, 1) )
+-		{
+-			LogError( CRIO_ERROR_IOPRERM, "ioperm() failed, reason '%s'", SZERROR );
+-			return FALSE;
+-		}
++		#if defined(__i386__) || defined(__x86_64__)
++			// request access to required ports
++			if ( ioperm(m_iPortBase, 3, 1) )
++			{
++				LogError( CRIO_ERROR_IOPRERM, "ioperm() failed, reason '%s'", SZERROR );
++				return FALSE;
++			}
++		#else
++			// request access to the portable port byte-stream interface
++			if ( !RioPortOpen() )
++			{
++				LogError( CRIO_ERROR_IOPRERM, "open( %s ) failed, reason '%s'", RioPortPath(), SZERROR );
++				return FALSE;
++			}
++		#endif
+ 	#endif
+ 
+ 	// if FreeBSD
+ 	#if defined(__FreeBSD__)
+ 		// request direct access to memory addresses
+ 		if ( open("/dev/io", O_RDONLY) == -1 )
+ 		{
+ 			LogError( CRIO_ERROR_IOPRERM, "open() failed, reason '%s'\n", SZERROR );
+ 			return FALSE;
+ 		}

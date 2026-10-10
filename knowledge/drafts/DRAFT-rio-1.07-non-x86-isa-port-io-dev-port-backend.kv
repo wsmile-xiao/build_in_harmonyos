@@ -1,0 +1,76 @@
+# ═══ Draft knowledge entry — 无 ISA I/O 端口空间的架构（aarch64/OHOS）上移植 x86 端口 I/O 程序
+# rio 1.07 的并口协议栈用 ioperm()/outb()/inb() 访问 0x378 起的 3 个寄存器（数据/状态/控制，
+# 读状态口还被用作微秒级延时）。OHOS（musl + aarch64）既没有 <sys/perm.h>（x86 专有）、
+# <asm/io.h>（glibc/内核头），也不存在 ISA 端口空间指令；<sys/io.h> 虽存在但 bits/io.h 为空壳，
+# 因此 ioperm/outb/inb 全部未声明 —— 用 __has_include(<sys/io.h>) 探测端口能力会得到假阳性。
+# Software: rio 1.07（2026-09-29 HarmonyOS PC 真机实测，conan 2.29.1 + clang 15）
+# Gate: conan create（ohos-aarch64）G0-G4 全绿；G0 clean-verify（configure && make && make install）
+#       在 pristine tarball + 6 补丁上跑通；test_package 消费者测试 21/21
+# Status: DRAFT
+
+id: rio-1.07-non-x86-isa-port-io-dev-port-backend
+severity: 2
+category: 'platform|portability|ohos|musl|headers'
+trigger_tool: 'clang|clang++|gcc|g++|make|configure'
+phase: compilation
+keywords: ISA 端口 I/O, port I/O, ioperm, outb, inb, sys/perm.h, asm/io.h, sys/io.h 空壳, /dev/port, 端口偏移 pread/pwrite, aarch64 无端口空间, 并口, 0x378, 外设直访, outb 内联汇编
+error_signature: 'sys/perm\.h.*file not found|asm/io\.h.*file not found|use of undeclared identifier ''(ioperm|outb|inb)''|''bits/io\.h'' file not found'
+match_keywords: 架构无 ISA 端口空间, sys/perm.h 不存在, asm/io.h 不存在, sys/io.h 存在但为空, ioperm/outb/inb 未声明, /dev/port 字节流替代, 端口号即文件偏移, 并口外设工具移植
+
+root_cause: 'x86 用 ioperm()+inb/outb 内联汇编访问 ISA 端口空间，aarch64/riscv 等架构根本不存在该指令与地址空间，且 OHOS/musl 连相关头文件都不提供（sys/perm.h 缺失、asm/io.h 缺失、sys/io.h 是空壳）。（1）编译期第一错是 fork 中第一个 #include <sys/perm.h> 或 <asm/io.h> 报 file not found；（2）即使把头文件问题绕开，outb/inb 在 aarch64 上无对应指令；（3）用 __has_include(<sys/io.h>) 探测会假阳性（OHOS 的 sys/io.h 只 include features.h 与空的 bits/io.h），必须按架构判（__i386__/__x86_64__）。'
+affected_scope: '任何直接在用户态做端口 I/O 的老程序：并口/串口外设工具、DOS 时代硬件工具、inb/outb 型驱动辅助程序、工业 I/O 工具。判别口诀：日志里同时出现 ioperm/outb/inb 与缺失的 sys/perm.h 或 asm/io.h。反例：只做内存映射 I/O（/dev/mem、mmap）或走内核驱动的程序不适用。'
+verification_cmd: 'grep -rn "#include.*sys/perm.h\|#include.*asm/io.h\|ioperm\|outb(\|inb(" src/'
+
+rec_priority: 1
+rec_approach: architecture-gated-dev-port-byte-stream-backend
+rec_description: '按架构分派端口后端：x86（__i386__/__x86_64__）保留原生 sys/io.h + ioperm() + outb/inb；其余架构（含 OHOS aarch64）改用 /dev/port 的字节流接口——/dev/port 是字节可寻址字符设备，文件偏移即端口号，用 pread/pwrite 单字节即完成端口读写，无需任何内联汇编或架构宏。Set()/初始化阶段用 open("/dev/port", O_RDWR) 的成败作为“端口能力/权限”探测，失败时按原有错误码（如 CRIO_ERROR_IOPRERM）上报并给出 strerror() 文案；设备不可用时必须优雅降级（清晰诊断 + 正常退出），不得崩溃或挂死。'
+rec_command: '# 见 archives/r/rio/1.07/patches/0004-rio.cpp.patch 要点：
+# #elif defined(__linux__)
+#     #include <unistd.h>
+#     #include <fcntl.h>
+#     #include <stdlib.h>
+# #if defined(__i386__) || defined(__x86_64__)
+#     #include <sys/io.h>
+#     #include <asm/io.h>
+#     #define OUTPORT(p,v) outb( v, p )
+#     #define INPORT(p)    inb( p )
+# #else
+#     static int g_iPortFile = -1;
+#     static const char* RioPortPath(void){ /* getenv("RIO_PORT_DEVICE") 或 "/dev/port" */ }
+#     static void RioPortOut(int port,int val){ unsigned char c=(unsigned char)val; RioPortOpen(); if(g_iPortFile>=0) (void)pwrite(g_iPortFile,&c,1,(off_t)port); }
+#     static int  RioPortIn (int port){ unsigned char c=0xff; RioPortOpen(); if(g_iPortFile<0) return 0xff; if(pread(g_iPortFile,&c,1,(off_t)port)!=1) return 0xff; return (int)c; }
+#     #define OUTPORT(p,v) RioPortOut( p, v )
+#     #define INPORT(p)    RioPortIn( p )
+# #endif
+# x86 分支的 ioperm(m_iPortBase,3,1) 保持原样；非 x86 分支把 Set() 的权限申请换成 RioPortOpen()
+# 注意：不要用 __has_include(<sys/io.h>) 判能力（OHOS 上为真但头是空的）'
+rec_auto_fix: false
+rec_impl: source-patch
+
+fallback_priority: 2
+fallback_approach: userspace-device-file-or-adapter-instead-of-raw-ports
+fallback_description: '若目标平台既无端口空间也无 /dev/port（OHOS 常见），把“端口”抽象成可注入的设备文件/适配器：默认 /dev/port，允许用环境变量指向其它字节可寻址文件（诊断、USB-并口桥、用户态模拟器）。这层注入同时让端口后端在没有硬件的机器上可被真实执行与验证（例如用普通文件充当端口映像，断言写入落在 端口号==文件偏移 处），否则该后端在 CI 上是死代码。'
+fallback_command: 'RIO_PORT_DEVICE=<file> ./rio -d  # 端口映像文件被写入 <base+0>=数据口、<base+2>=控制口'
+fallback_auto_fix: false
+fallback_impl: env-configurable-device-path
+
+prescan_pattern: '\b(ioperm|outb|outw|outl|inb|inw|inl)\s*\(|#\s*include\s*<(sys/perm\.h|asm/io\.h)>'
+prescan_globs: '**/*.c,**/*.cc,**/*.cpp,**/*.h,**/*.hpp'
+
+safety_boundary: '适用：用户态程序直接读写 ISA I/O 端口（并口/串口/工业 I/O/老硬件工具）。 不适用/反例：内存映射 I/O（/dev/mem、mmap）、经内核驱动或 libusb/libgpiod 的访问（走设备路径即可，不需要端口后端）。 风险：x86 分支必须逐字保留原有 ioperm/outb/inb 语义（否则改动会在真正有并口的 Linux 机器上回归）；/dev/port 需要 CAP_SYS_RAWIO/root 且 OHOS 上通常不存在，因此“优雅降级 + 清晰诊断”是必须的交付面，不是可选项。 解除条件：上游自行支持非 x86 端口抽象后删除补丁。'
+
+similar_to: E484, E526, E254
+conflicts_with:
+caused_by:
+
+doc_file: knowledge/drafts/DRAFT-rio-1.07-non-x86-isa-port-io-dev-port-backend.md
+last_updated: 2026-09-29
+source_event: archives/r/rio/1.07 HarmonyOS PC 适配
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+authors: Rz114514
+source_pr: (本 PR)
+source_commit:
+
+# ═══ 质量度量 (Quality Metrics) ═══
+metrics_success_count: 0
