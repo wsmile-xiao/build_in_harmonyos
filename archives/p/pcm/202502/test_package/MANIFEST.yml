@@ -1,0 +1,111 @@
+# test_package/MANIFEST.yml
+# Upstream-test and consumer-test declaration for Intel(R) PCM 202502.
+
+package: pcm/202502
+homepage: "https://github.com/intel/pcm"
+
+# Upstream source audit: the official GitHub tag archive 202502.
+upstream_tests_exist: true
+upstream_test_audit:
+  source_tarball: "202502.tar.gz"
+  source_sha256: "431bd5f7122ec909634b02a05ce1eb898834f5c2b19d2804e27f5496cc6eba49"
+  source_origin: "https://github.com/intel/pcm/archive/refs/tags/202502.tar.gz"
+  source_tree: "CMakeLists.txt, src/, examples/, tests/, doc/, scripts/, LICENSE, README.md"
+  scan_commands:
+    - "ls tests/"
+    - "cat tests/CMakeLists.txt"
+    - "grep -RniE 'add_test|enable_testing|daemon_alignment_test' tests/ CMakeLists.txt"
+    - "bash tests/test.sh"
+  scan_result: >-
+    tests/ contains four files: CMakeLists.txt registers two real test programs
+    (daemon_alignment_test from daemon_alignment_test.cpp, and urltest from
+    urltest.cpp), test.sh is a shell driver, and four *-fuzz.cpp harnesses that
+    are only built when PCM_FUZZ=ON.  daemon_alignment_test is architecture
+    independent: it allocates a PCMDaemon::SharedPCMState with aligned_alloc()
+    and verifies that every member stays 64-byte aligned, calling exit(EXIT_FAILURE)
+    on the first misalignment.  urltest opens a loopback HTTP connection, and
+    test.sh starts with `modprobe msr`, writes to /proc/sys/kernel/nmi_watchdog and
+    then runs `./pcm -r -- sleep 1`, so it needs an Intel x86 PMU plus root.
+  make_check_output: >-
+    CMake registers no ctest test and no `make check` target; the upstream test
+    programs are plain executables under bin/tests/.  tests/test.sh cannot run on
+    HarmonyOS PC aarch64 because modprobe msr, /proc/sys/kernel/nmi_watchdog and
+    the Intel core PMU do not exist there.
+  reason: >-
+    One of the two upstream test programs is portable and is executed inside
+    build(); the other two entry points are bound to Intel x86 PMU hardware or to
+    loopback networking and are documented here instead of being claimed as passed.
+
+upstream_check_command: ""
+upstream_test_in_build: true
+upstream_test_command: "bin/tests/daemon_alignment_test"
+upstream_tests:
+  - file: "tests/daemon_alignment_test.cpp"
+    built_as: "bin/tests/daemon_alignment_test"
+    executed_in: "conanfile.py build()"
+    portable: true
+    assertions: "one 64-byte alignment check per SharedPCMState member; exit(EXIT_FAILURE) on the first mismatch"
+  - file: "tests/urltest.cpp"
+    built_as: "bin/tests/urltest"
+    executed_in: "not executed"
+    portable: false
+    reason: "opens a loopback HTTP connection to the sensor server"
+  - file: "tests/test.sh"
+    built_as: "n/a"
+    executed_in: "not executed"
+    portable: false
+    reason: "requires `modprobe msr`, /proc/sys/kernel/nmi_watchdog and an Intel x86 PMU"
+
+test_package_tests:
+  - file: test.sh
+    description: >-
+      Runs the packaged pcm, pcm-memory, pcm-power, pcm-raw, pcm-client binaries
+      and inspects the packaged ELF images and share/ payload.
+    command: "bash test.sh"
+  - file: conanfile.py
+    description: "Resolves the Conan application package by package folder and executes test.sh."
+    command: "conan test"
+
+harmonyos_specific_tests:
+  - id: 7
+    description: >-
+      Running pcm with no arguments must print "Error: unsupported processor.
+      Only Intel(R) processors are supported": on aarch64 there is no CPUID
+      instruction, so pcm_cpuid() returns the reserved zero leaf and the
+      delivery reports the limitation instead of fabricating Intel CPU
+      identity.
+  - id: 8
+    description: >-
+      The same run must report its real PMU access outcome ("no MSR or PCI CFG
+      space access") rather than printing invented counter values.
+  - id: 9
+    description: >-
+      pcm-power, a second independently compiled tool, reaches the uarch dispatch
+      and reports the processor model it really read ("Unsupported processor
+      model").
+  - id: 10
+    description: "readelf -h on the packaged pcm reports Machine: AArch64."
+  - id: 11
+    description: "Every packaged ELF executable is AArch64; no host x86_64 image leaks in."
+  - id: 13
+    description: >-
+      pcm-client is executed on the OHOS musl runtime and prints its own usage
+      line, proving the daemon/client pair loads and runs on HarmonyOS PC.
+
+local_execution_environment:
+  disclosure: >-
+    The delivered binaries need only libc.so and are linked against the real
+    HarmonyOS libc, which exports the __*_chk fortify helpers and the
+    backtrace()/backtrace_symbols() pair that upstream src/utils.cpp uses.  An
+    x86 build host that executes those aarch64 images through an older musl
+    guest runtime aborts with exit 127 before main().  test.sh therefore
+    injects local forwarding stubs *only when the files exist* and *only into
+    the single aarch64 process being launched* (function wrapper, never an
+    exported LD_PRELOAD).  The stubs call the real memset()/memcpy()/send() and
+    report "no unwinder available" for backtrace(), matching upstream's
+    if (backtrace_strings == NULL) branch.  They are not part of the recipe and
+    are not shipped in the package; a native OHOS CI worker has neither file
+    and takes the identical plain-exec branch.
+  affected: "assertions 1-9 and 13 (the ones that execute a packaged binary)"
+
+assertion_count: 16
