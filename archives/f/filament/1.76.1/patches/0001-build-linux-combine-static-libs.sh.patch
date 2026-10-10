@@ -1,0 +1,185 @@
+--- a/build/linux/combine-static-libs.sh
++++ b/build/linux/combine-static-libs.sh
+@@ -13,7 +13,8 @@
+     echo "    <archives> must be a list of absolute paths to static library archives."
+     echo "    Mach-O universal binaries are supported, but all archives must be homogeneous: either"
+     echo "    all universal, or none."
+-    echo "    This script creates temporary working directories inside the current directory."
++    echo "    This script extracts into absolute directories under \$COMBINE_WORK_ROOT"
++    echo "    (default: \$TMPDIR, else /tmp) and never changes the working directory."
+ }
+ 
+ if [[ "$#" -lt 3 ]]; then
+@@ -27,48 +28,106 @@
+ shift
+ ARCHIVES=("$@")
+ 
++# ── OHOS portability ────────────────────────────────────────────────────────
++# Two things upstream gets wrong on this toolchain, both fatal for filamat:
++#
++# 1. Object-file extension.  Upstream only ever looks for `*.o`, but CMake
++#    emits ".obj" here (every archive this step receives -- glslang, SPIRV,
++#    SPIRV-Tools, spirv-cross, filamat, zstd -- has .obj members).  `ar -x`
++#    succeeds and then the `*.o` rename loop finds nothing and dies with
++#    `mv: bad '*.o'`.  The extension is therefore taken from the archive
++#    contents rather than hard-coded.
++#
++# 2. The working directory.  Upstream extracted with `cd <dir> && ar -x`, so
++#    the object files landed relative to the process cwd, and the fallback
++#    cleanup used `$(pwd)`.  During the filamat POST_BUILD this device's cwd
++#    can become unreadable (getcwd -> ENOTSUP).  The archiver already supports
++#    writing to an explicit directory (`--output=DIR`, present both in the
++#    LLVM 15 ar this build uses and in GNU ar), so every path here is absolute
++#    and the working directory is never changed.
++#
++# The archiving itself is unchanged: the same ar tool, the same
++# extract/rename/create operations, the same `dir_name_` object-prefix rule,
++# the same output path.
++COMBINE_WORK_ROOT="${COMBINE_WORK_ROOT:-${TMPDIR:-/tmp}}"
++mkdir -p "${COMBINE_WORK_ROOT}" 2>/dev/null || {
++    echo "$SELF_NAME: scratch root '${COMBINE_WORK_ROOT}' cannot be created" >&2
++    exit 1
++}
++# Canonicalise it once; this resolves the given directory, it does not read the
++# process cwd (the process cwd is still the original one here).
++case "${COMBINE_WORK_ROOT}" in
++    /*) ;;
++    *) COMBINE_WORK_ROOT="$(cd "${COMBINE_WORK_ROOT}" && pwd)" ;;
++esac
++
++# Resolve the output path before extracting anything, so a relative argument
++# can never later be re-interpreted against a different directory.
++case "${OUTPUT_PATH}" in
++    /*) ;;
++    *) OUTPUT_PATH="$(cd "$(dirname "${OUTPUT_PATH}")" && pwd)/$(basename "${OUTPUT_PATH}")" ;;
++esac
++
++# Every regular file under the scratch tree that is an object file.  Accepts
++# both extensions so the same script works on a ".o" and on a ".obj" platform.
++object_files() {
++    local dir="$1"
++    shift
++    find "$dir" -type f \( -name '*.o' -o -name '*.obj' \) "$@"
++}
++
+ function combine_static_libs {
+     local output_path="$1"
+     shift
+     local archives=("$@")
+ 
+     # Create a temporary working directory named after the destination library.
+-    local temp_dir="${output_path##*/}"   # remove leading path, if any
+-    temp_dir="_${temp_dir%.a}"            # remove '.a' extension
++    local temp_name="$(basename "${output_path}")"   # remove leading path, if any
++    temp_name="_${temp_name%.a}"                     # remove '.a' extension
++    local temp_dir="${COMBINE_WORK_ROOT}/${temp_name}"
++    # Start every invocation from a clean scratch.  temp_dir is derived from the
++    # OUTPUT name, so each run of the same combine reuses the same directory; a
++    # run that fails part-way leaves extracted objects behind and the rename
++    # loop below would prefix them a second time.  Long member names then grow
++    # past NAME_MAX and mv dies with ENAMETOOLONG.  Clearing once, before the
++    # archive loop, keeps every archive's objects available for the final
++    # `ar -qc` (they must all coexist) while making this script idempotent.
++    case "${temp_dir}" in
++        "${COMBINE_WORK_ROOT}"/_?*) rm -rf "${temp_dir}" ;;
++        *) echo "$SELF_NAME: refusing to clean unexpected scratch '${temp_dir}'" >&2; exit 1 ;;
++    esac
+     mkdir -p "${temp_dir}"
+ 
+-    pushd "${temp_dir}" >/dev/null
+-
+     for a in "${archives[@]}"; do
+         # Create a separate directory for each archive to combine. This is necessary to avoid
+         # overriding object files from seprate archives that have the same name.
+         dir_name="${a##*/}"         # remove leading path, if any
+         dir_name="${dir_name%.a}"   # remove '.a' extension
+-        mkdir -p "${dir_name}"
+-
+-        pushd "${dir_name}" >/dev/null
++        local extract_dir="${temp_dir}/${dir_name}"
++        mkdir -p "${extract_dir}"
+ 
+-        # Extract object files from each archive.
+-        "${AR_TOOL}" -x "$a"
++        # Extract object files from each archive straight into the absolute
++        # extract_dir -- the archiver writes them there, so this process never
++        # needs a usable working directory.
++        "${AR_TOOL}" -x --output="${extract_dir}" "$a"
+ 
+         # Prepend the library name to the object file to ensure each object file has a unique name.
+-        for o in *.o; do
+-            mv "$o" "${dir_name}_${o}"
++        # The extension is whatever the archiver wrote (.o or .obj), so match on
++        # the extracted files themselves rather than on a hard-coded suffix.
++        for o in "${extract_dir}"/*; do
++            [ -f "$o" ] || continue
++            mv "$o" "${extract_dir}/${dir_name}_$(basename "$o")"
+         done
+-
+-        popd >/dev/null
+     done
+ 
+-    popd >/dev/null
+-
+     # Combine the library files into a single static library archive.
+     rm -f "${output_path}"
+-    "${AR_TOOL}" -qc "${output_path}" $(find "${temp_dir}" -iname '*.o')
++    "${AR_TOOL}" -qc "${output_path}" $(object_files "${temp_dir}")
+ 
+     # Clean up. Delete objects in the temporary working directory. In theory we could leave the
+     # directory as a "cache" of extracted object files, but it complicates the logic to handle cases
+     # where object files are removed from a library.
+-    find "${temp_dir}" -iname "*.o" -delete
++    object_files "${temp_dir}" -delete
+ }
+ 
+ function universal_error {
+@@ -99,11 +158,11 @@
+     # - for each architecture, combine the single-architecture static libraries
+     # - create a final universal binary from the static libraries
+ 
+-    archs_temp_dir="${OUTPUT_PATH##*/}"               # remove leading path, if any
+-    archs_temp_dir="_${archs_temp_dir%.a}_archs"      # remove '.a' extension
++    archs_name="$(basename "${OUTPUT_PATH}")"         # remove leading path, if any
++    archs_name="${archs_name%.a}"                     # remove '.a' extension
++    archs_temp_dir="${COMBINE_WORK_ROOT}/_${archs_name}_archs"
+ 
+     mkdir -p "${archs_temp_dir}"
+-    pushd "${archs_temp_dir}" >/dev/null
+ 
+     # Thin each archive into its architectures.
+     for a in "${ARCHIVES[@]}"; do
+@@ -111,13 +170,11 @@
+         archs=$(lipo -archs "${a}")
+ 
+         for arch in ${archs}; do
+-            mkdir -p "${arch}"
+-            lipo -thin "${arch}" -output "${arch}/${a##*/}" "$a"
++            mkdir -p "${archs_temp_dir}/${arch}"
++            lipo -thin "${arch}" -output "${archs_temp_dir}/${arch}/${a##*/}" "$a"
+         done
+     done
+ 
+-    popd >/dev/null
+-
+     # Combine each set of single-architecture archives.
+     arch_outputs=()
+     for arch_dir in "${archs_temp_dir}"/*/ ; do
+@@ -129,7 +186,7 @@
+         archives=()
+         while IFS=  read -r -d $'\0'; do
+             archives+=("$REPLY")
+-        done < <(find "$(pwd)/${archs_temp_dir}/${arch}" -iname '*.a' -print0)
++        done < <(find "${archs_temp_dir}/${arch}" -type f -name '*.a' -print0)
+ 
+         combine_static_libs "$arch_output" "${archives[@]}"
+     done
+@@ -139,7 +196,7 @@
+ 
+     # Clean up.
+     rm "${arch_outputs[@]}"
+-    find "${archs_temp_dir}" -iname "*.a" -delete
++    find "${archs_temp_dir}" -type f -name "*.a" -delete
+ 
+ else
+ 
