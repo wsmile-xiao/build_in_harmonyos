@@ -1,0 +1,40 @@
+# DRAFT - Cython self-bootstrap: pure-Python form compiles its own extensions
+
+id:                     DRAFT-cython-3.3.0-selfboot-pure-python-hybrid
+trigger_tool:           conan create|setup.py build_ext
+phase:                  build
+error_signature:        no such file or directory.*\.c|Permission denied.*\.so|ImportError: Error loading shared library
+
+severity:               2
+category:               ohos, conan, python, c-extension, bootstrap, elf-signing
+match_keywords:         cython, self-bootstrap, pyx, pre-generated C, build_ext, NO_CYTHON_COMPILE, ELF signing, E212, dlopen, Permission denied, clang
+title:                  Self-bootstrapping a Python C-extension package from an sdist that ships no generated C
+
+root_cause:             Cython 3.3.0 is self-bootstrapping: setup.py's compiled_modules reference .pyx sources, but the PyPI sdist deliberately ships no pre-generated .c (only wheels do), so build_ext fails looking for Cython/Plex/Actions.c etc. The fix is not to skip compilation (NO_CYTHON_COMPILE=true degrades the package to a slow pure-Python build) but to exploit the fact that Cython's pure-Python form can itself compile .pyx: putting the unbuilt tree on PYTHONPATH makes "from Cython.Compiler.Main import compile" work and transpile .pyx to .c, after which clang produces the .so. Separately, every produced .so is a foreign ELF that OHOS dlopen refuses unless signed, and conan's copy() invalidates an existing signature, so signing must happen after the final file placement.
+affected_scope:         Conan recipes for self-hosting Python C-extension projects whose sdist omits generated C (Cython and similar transpiler/toolchain packages), and any recipe packaging foreign .so files on OHOS.
+verification_cmd:       conan create archives/c/cython/3.3.0 --build=missing && python3 archives/c/cython/3.3.0/test_package/test_cython.py <pkg>
+
+rec_priority:           1
+rec_approach:           pure-python-selfboot-then-sign-after-copy
+rec_description:        In build(): set PYTHONPATH to the source tree and run "<conan-python> setup.py build_ext --inplace" so the pure-Python Cython transpiles its own .pyx to .c and clang links them; sign every .so immediately after (so upstream tests can dlopen them); then sign the tree AGAIN in package() after copytree, because copy() breaks the signature. Ship the CLI entry points (cython/cythonize/cygdb) to bin/ with a rewritten shebang pointing at the conan python interpreter, and provide a software-level commands.json (R38/L0k).
+rec_command:            PYTHONPATH=<src> <conan-python> setup.py build_ext --inplace
+rec_auto_fix:           false
+rec_impl:               conan-recipe
+
+fallback_priority:      2
+fallback_approach:      pure-python-only-no-compile
+fallback_description:   If the self-bootstrap cannot work on the target, set NO_CYTHON_COMPILE=true / pass the no-cython-compile option and package the pure-Python form. It builds and imports, but it is substantially slower and gives up Cython's value as a C-extension compiler for downstream builds (scipy/scikit-learn).
+fallback_command:       NO_CYTHON_COMPILE=true <conan-python> setup.py build_ext --inplace
+fallback_auto_fix:      false
+fallback_impl:          conan-recipe
+
+forbid_1_pattern:       NO_CYTHON_COMPILE.*=.*true.*default|skip.*build_ext
+forbid_1_reason:        Silently degrading a C-extension compiler to pure Python hides the real bootstrap problem and slows every downstream build; it must be an explicit, documented fallback.
+forbid_1_consequence:   scipy/scikit-learn builds become far slower and the package no longer provides what its consumers require.
+forbid_2_pattern:       sign.*\.so.*before.*copy|copy\(.*\).*then.*sign
+forbid_2_reason:        conan's copy() rewrites the files and drops the .codesign section, so a pre-copy signature is void (E212 family: lxml/pillow/gpgmepy/psutil).
+forbid_2_consequence:   Consumers get "Error loading shared library ...: Permission denied" at dlopen time even though the .so exists with mode 755.
+
+principles:             P010,P014
+causes:                 []
+caused_by:              []

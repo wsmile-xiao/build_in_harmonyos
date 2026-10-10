@@ -1,0 +1,60 @@
+# ═══ Draft knowledge entry — Conan 配方 package() 只拷同名包目录，漏掉上游 py_modules 声明的顶层模块 ═══
+# Timestamp: 2026-10-01
+# Software: cython 3.3.0（推广到所有上游同时用 packages=[...] 与 py_modules=[...] 的 Python 包）
+# Gate: conan create → test_package / 消费者 import
+# Status: UNMATCHED — needs human/AI review to promote to E-entry
+
+id: draft-cython-3.3.0-conan-package-missing-top-level-pymodules
+title: Conan 配方 package() 只 copytree 同名包目录，漏掉上游 py_modules 声明的顶层模块，导致包内自身 import 失败（Cython 场景：ModuleNotFoundError: No module named 'cython'）
+trigger_tool: python -c "import <pkg>" / test_package / conan create
+phase: packaging
+error_signature: ModuleNotFoundError: No module named '<包名小写>'|ModuleNotFoundError: No module named 'cython'|import cython
+severity: 3
+category: conan|python|packaging|recipe
+match_keywords: py_modules, packages, setup.py, top-level module, site-packages, copytree,
+  package(), conanfile.py, ModuleNotFoundError, Cython, Shadow, 顶层模块, 交付不完整,
+  distribution, wheel, flap
+keywords: py_modules, packages, setup.py, top-level module, site-packages, copytree,
+  package(), conanfile.py, ModuleNotFoundError, Cython.Compiler.Nodes, Cython.Shadow,
+  import cython, __init__.py, console_scripts, bin, shebang, self-locating sys.path
+approach: package() 里交付 site-packages 时，**不能只 copytree 与包同名的那个目录**；必须对照上游
+  构建配置逐一交付顶层模块。判定顺序：①读 setup.py / pyproject.toml，看 packages=（或
+  [tool.setuptools.packages]）与 py_modules=（或 py-modules）**两个**清单——配方通常只照抄了
+  packages 那半；②对 py_modules 列出的每个模块名，从源码树复制 <mod>.py 到 site-packages 根；
+  ③补一条存在性断言（源缺失即 raise，不静默产出残缺包）；④用**消费者视角**验证而不是只看
+  build 退出码：以制品 site-packages 为 PYTHONPATH 实际 import 包内最深层的子模块（如
+  Cython.Compiler.Scanning / Visitor），仅 import 顶层包名往往不触发。
+root_cause: Python 发行物的 import 拓扑是**两部分之和**：packages（目录形式的包，如 Cython/）与
+  py_modules（源码树根的**单文件顶层模块**，如 cython.py）。二者在 setup.py 里并列声明
+  （cython 3.3.0 为 setup.py:515 py_modules=["cython"]），安装后同处 site-packages 根目录。
+  手工写 package() 的 Conan 配方很容易只覆盖 packages 那一半（因为目录名显眼、且 copytree 一行就
+  完事），于是 site-packages 里只有 Cython/ 而没有 cython.py。偏偏 Cython 自身有多处
+  Cython/Compiler/*.py 在做 `import cython`（如 Nodes.py:6、Visitor.py），它们要的正是这个顶层
+  模块（作为模块导入时执行 from Cython.Shadow import *，作为 __main__ 时才是 CLI 入口），于是
+  加载包内任意子系统模块都会抛 ModuleNotFoundError，而错误信息里的模块名与被适配的包名
+  （cython 3.3.0）**大小写不同、看起来像另一个包**，极易被误诊为「依赖缺失/装错包」而走错方向。
+  一个强迷惑信号：bin/ 下的 CLI 入口**照常工作**——因为那些脚本自带自定位
+  sys.path.insert(0, os.path.dirname(__file__))，而 site-packages 形态没有这层兜底。
+rec_approach: deliver-py-modules-alongside-packages
+doc: 无（待 promote 后生成）
+
+forbid_2: 只用 shutil.copytree(源码树/<包名>, site-packages/<包名>) 就算交付完成
+forbid_2_consequence: 交付物缺顶层模块，消费者 import 包内子模块即 ModuleNotFoundError；且错误
+  模块名与包名不同，浪费时间往「依赖没装」方向排查。
+forbid_3: 只以 conan create 的 build 退出码判定交付正确
+forbid_3_consequence: build 成功掩盖包内容残缺；必须消费者视角 import 深层子模块或跑 test_package
+  才能暴露。
+rec_auto_fix: true
+
+verification: cython/3.3.0 实测：修复前以制品 site-packages 为 PYTHONPATH、
+  conan python 解释器执行 `from Cython.Compiler import Scanning` →
+  ModuleNotFoundError: No module named 'cython'（报错栈指向包内
+  Cython/Compiler/Visitor.py:13 → Nodes.py:6）；把源码树的 cython.py 复制进
+  site-packages 后同一命令通过（Scanning + cython 均 OK，cython.__file__ 为
+  site-packages/cython.py）。制品内容对照：修复前 site-packages 仅 Cython/，修复后
+  Cython/ 与 cython.py 并存。
+related: E283（Conan library 包的 shared 选项契约——同属「配方与上游打包契约不一致」族，但
+  本条是**内容拓扑**缺失而非包类型契约）；E556（专测遗漏致包交付不完整——其判别点在测试
+  覆盖，本条在 package() 的交付清单本身）；DRAFT-conan-glob-packaging-loses-interpreter-library-scripts
+  （通配符后缀剥离致漏拷运行期脚本——机理是 glob 模式失配，本条是清单只读了一半，
+  判定入口不同：那条看 install 规则，本条看 py_modules）。
