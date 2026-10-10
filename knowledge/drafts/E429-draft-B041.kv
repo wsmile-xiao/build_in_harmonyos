@@ -1,0 +1,105 @@
+#====================================================================
+# E429-draft-B041 — HMDFS 大小写不敏感：仅大小写不同的改名被「目标已存在」
+# 检查误判为冲突，且 rename(2) 在同一文件的两个名字间是 no-op
+#====================================================================
+
+# ═══ Layer 0: 错误面 (Error Surface) ═══
+id:                     E429
+trigger_tool:           runtime|test|shell
+phase:                  runtime|testing
+error_signature:        ^conflict: .*[A-Z]|mv: '[^']+' and '[^']+' are the same file
+
+# ═══ Layer 1: 识别层 (Recognition) ═══
+severity:               2
+category:               hmdfs, filesystem, portability, shell, runtime
+match_keywords:         case-insensitive, 大小写不敏感, HMDFS, /storage, case-only rename,
+                         仅大小写改名, conflict, are the same file, rename no-op, same inode,
+                         -ef, 两步改名, temporary name, slugify, OSTYPE, darwin
+title:                  HMDFS 大小写不敏感：按「目标已存在」防覆盖的改名工具把仅大小写不同的改名一律判 conflict，且同一文件两个名字间 rename(2) 是 no-op，须按 inode 识别别名并经临时名两步改名
+
+# ═══ Layer 2: 诊断层 (Diagnosis) ═══
+root_cause:             鸿蒙 PC 用户存储 /storage/Users/currentUser（HMDFS）大小写不敏感，README.md 与
+                         readme.md 解析到同一目录项。改名类脚本（slugify 1.0.1 等）改名前用
+                         [ -e "$target" ] 防覆盖，而仅大小写不同的目标在这里恒「存在」——它就是源文件自身
+                         ——于是一律报 conflict、从不改名；上游只按 $OSTYPE 对 darwin 特判，鸿蒙 bash 的
+                         OSTYPE 为 linux-gnu，走不到。即便跳过检查直接改名也无效：新旧名指向同一 inode 时
+                         内核 rename(2) 按 POSIX 直接返回成功而不改目录项，GNU mv 更是先报
+                         "are the same file" 拒绝（vfat 回环挂载实测：mv rc=1；python os.rename 成功但名字
+                         仍为 README.md）；只有经临时名两步改名生效。
+affected_scope:         在鸿蒙 PC 用户存储（HMDFS）上做「仅大小写不同」改名/规范化的脚本与程序：文件名
+                         slug 化/小写化工具（slugify 等）、以 [ -e target ] 或 stat 目标防覆盖的批量改名
+                         脚本、用 $OSTYPE/uname 推断大小写敏感性的脚本（鸿蒙 bash 报 linux-gnu；大小写语义
+                         取决于挂载点而非平台）。大小写敏感的 Linux 构建机（ext4）上完全不可见。
+verification_cmd:       # 大小写不敏感目录（真机 /storage，或本地 vfat 回环挂载）中：
+                         touch CaseProbe && ls caseprobe          # 命中 = 大小写不敏感
+                         touch README.md && mv README.md readme.md; ls   # mv 报 are the same file，名字不变
+                         bash slugify -v README.md               # 上游 1.0.1 输出 conflict: README.md
+
+# ═══ Layer 3: 方案层 (Solution Space) ★ ═══
+rec_priority:           1
+rec_approach:           same-inode-alias-two-step-rename
+rec_description:        不按平台名、按文件身份判断：目标存在且 [ "$source" -ef "$target" ]（同一 inode）时
+                         视为大小写别名而非冲突；真正改名时先 mv 到同目录临时名（${source%/}.slugify.$$，
+                         去掉尾斜杠以兼容 Tab 补全的目录参数），若此刻目标名仍存在，说明它是独立的硬链接/
+                         符号链接目录项，立即还原并照旧报 conflict，否则再 mv 到目标名。大小写敏感 FS 上
+                         结果与上游一致；唯一差异是 dry-run 对「目标恰为源的硬链接」预演为 rename（实跑仍
+                         报 conflict）。
+rec_command:            case_alias=0
+                         if [ "$source" -ef "$target" ]; then case_alias=1; fi
+                         ...
+                         if [ $case_alias -eq 1 ]; then
+                           tmp_name="${source%/}.slugify.$$"
+                           if [ -e "$tmp_name" -o -L "$tmp_name" ]; then echo "conflict: $source"; continue; fi
+                           mv "$source" "$tmp_name" || continue
+                           if [ -e "$target" -o -L "$target" ]; then
+                             mv "$tmp_name" "$source"; echo "conflict: $source"; continue
+                           fi
+                           mv "$tmp_name" "$target" || { mv "$tmp_name" "$source"; continue; }
+                         fi
+rec_auto_fix:           false
+rec_impl:               archives/s/slugify/1.0.1/patches/0001-slugify.patch
+
+fallback_priority:      2
+fallback_approach:      probe-directory-case-sensitivity
+fallback_description:   在源所在目录建探针（touch CaseProbe; [ -e caseprobe ]）判定该目录是否大小写不敏感，
+                         不敏感时仅对「转小写后与源相同」的目标走两步改名。缺点：dry-run 也要写探针文件、
+                         目录必须可写，且逐目录探测开销更大，故仅在 -ef 不可用的 shell 中使用。
+fallback_command:       touch "$dir/CaseProbe.$$" && [ -e "$dir/caseprobe.$$" ]; ci=$?; rm -f "$dir/CaseProbe.$$"
+fallback_auto_fix:      false
+fallback_impl:          manual-patch
+
+forbid_1_pattern:       case \$OSTYPE in.*linux.*case_sensitive_filesystem=0|按 OSTYPE/uname 把整个平台判为大小写不敏感
+forbid_1_reason:        大小写语义取决于具体挂载点（/storage 用户存储为 HMDFS，大小写不敏感），平台级开关
+                         判断不了具体目录；上游 darwin 分支还同时关掉了全部冲突检查，照搬到鸿蒙会让真冲突
+                         （My File.txt 与已有的另一个 my_file.txt）被 mv 静默覆盖。
+forbid_1_consequence:   真冲突时另一个文件被覆盖，数据丢失。
+forbid_2_pattern:       mv "\$source" "\$target"  # 仅大小写不同时直接改名且不核对结果
+forbid_2_reason:        同一 inode 的两个名字间 rename(2) 是 no-op、GNU mv 报 are the same file，看似执行实则
+                         名字没变。
+forbid_2_consequence:   改名静默无效，下游按新名字（大小写敏感的 URL、清单、Linux 同步端）引用失败。
+
+# ═══ Layer 4: 原则引用 ═══
+principles:             P013, P016
+
+# ═══ 关系图 (Relations) ═══
+causes:                 []
+caused_by:              [E193]
+similar_to:             [E193, E416, DRAFT-inform6-compiler-6.42-case-insensitive-alias-samefile, E999-draft-35E4]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E429-draft-B041.md
+last_updated:           2026-09-28
+source_event:           slugify 1.0.1 HarmonyOS PC 适配：vfat 回环挂载 + OHOS bash/5.3(qemu) 复现上游 conflict，补丁后
+                         鸿蒙特有用例 5/5；未打补丁的上游在同一环境 1/5
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:              (本 PR)
+source_commit:          (本分支 HEAD)
+
+metrics_success_count:  1
+metrics_fail_count:     0
+metrics_confidence:     0.9
+metrics_last_used:      2026-09-28
+
+draft: true
+contributor_id: B041
