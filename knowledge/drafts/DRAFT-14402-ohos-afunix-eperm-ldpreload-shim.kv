@@ -1,0 +1,42 @@
+id:                     DRAFT-14402
+trigger_tool:           test|runtime
+phase:                  testing|runtime
+error_signature:        bind.*Operation not permitted|Operation not permitted.*bind|Failed to open server socket|EPERM.*AF_UNIX|socket.*EPERM
+severity:               3
+category:               ohos, kernel, socket, platform
+match_keywords:         AF_UNIX, unix socket, bind, EPERM, Operation not permitted, filesystem socket, abstract, LD_PRELOAD, shim, libwayland, wl_display_add_socket, KWayland
+title:                  OHOS 内核/LSM 拒绝 filesystem AF_UNIX bind（EPERM）；不可改源码的依赖库用 LD_PRELOAD shim 重映射 abstract namespace
+
+root_cause:             OHOS 用户态无允许 filesystem AF_UNIX bind 的目录（/tmp EROFS、HMDFS EPERM、/dev/shm EACCES；abstract namespace 与 socketpair 可用，探测矩阵见 DRAFT-libdsme-0.67.0-ohos-abstract-af-unix-socket）。libwayland wl_display_add_socket* 只接受 filesystem 名且不可修改（上游库源码级固定）→ in-process wayland 服务端（KWayland 测试等）全部不可用；且两 namespace 可用性实时震荡（2026-10-01 同机实测周期~10-40min：20:16-20:21 abs-OK → 20:32-20:38 abs-EPERM（29/29 QFATAL）→ 21:00-21:03 fs-EPERM/abs-OK → 21:33 fs-OK），静态选择（硬编码 shim 或无 shim）必在某一窗口失效
+affected_scope:         所有依赖"不可改源码库走 filesystem unix socket"的 OHOS 软件（wayland 协议服务端、KWayland 测试、同类 IPC 库）
+verification_cmd:       python3 -c 'import socket; s=socket.socket(socket.AF_UNIX); s.bind("/tmp/x.sock")'  # EPERM = 命中；s.bind("\0x".lstrip("\0")) 用 abstract 名 = OK
+
+rec_priority:           1
+rec_approach:           ld-preload-abstract-socket-remap
+rec_description:        LD_PRELOAD shim 拦截 AF_UNIX bind/connect：filesystem 名 → abstract 名 "@"+basename（服务端 XDG 前缀名与客户端裸名归一到同一 abstract 名，两侧必然相遇）；bind 时在原路径建存根普通文件（满足测试的 socket 文件存在性断言，服务端 release unlink 时一并清掉）；dlsym(RTLD_NEXT) 必须在 constructor 初始化（懒初始化在 QThread bind/connect 首调竞争 → 非确定性 SIGSEGV，实测两轮复现）；shim 必须条件启用——运行时探测 fs/abstract bind，filesystem 可用则走原生路径（不 preload），仅 fs=EPERM 时 LD_PRELOAD，ctest 失败后 re-probe 重试一次（conanfile build(): _afunix_namespace_probe + 2 attempts）
+rec_command:            clang -shared -fPIC -O2 -o libshim.so shim.c -ldl; LD_PRELOAD=$PWD/libshim.so ctest --output-on-failure
+rec_auto_fix:           false
+rec_impl:               manual
+
+fallback_priority:      2
+fallback_approach:      source-side-abstract-convention
+fallback_description:   可改源码时走库侧 '@' 前缀 = abstract 约定（systemd 惯例，见 DRAFT-libdsme-0.67.0-ohos-abstract-af-unix-socket）；不可改源码且 shim 不可用（static/secure-exec 环境）→ 排除 socket 依赖测试并声明平台边界
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          manual
+
+forbid_1_pattern:       dlsym.*RTLD_NEXT
+forbid_1_reason:        懒初始化（bind/connect 首调时才 dlsym）在多线程首调竞争下非确定性 SIGSEGV
+forbid_1_consequence:   测试二进制随机崩溃，难定位（kf5wayland v3 两轮实证）
+forbid_2_pattern:       LD_PRELOAD.*bindshim
+forbid_2_reason:        无条件硬编码 shim——在 fs-OK/abs-EPERM 策略窗口失效（2026-10-01 20:32-20:38 实测：29/29 QFATAL）
+forbid_2_consequence:   反向策略窗口 socket 测试全灭；CI worker 策略状态独立于开发机，同风险
+
+causes:                 []
+caused_by:              []
+similar_to:             [DRAFT-libdsme-0.67.0-ohos-abstract-af-unix-socket]
+conflicts_with:         []
+prerequisite_of:        []
+
+verify_builds:          kf5wayland/5.116.0 PR #13869（ctest 29/29 全过；v3 懒初始化两轮 SIGSEGV 实证后改 constructor；2026-10-01 升级为运行时 namespace 探测 + 条件 shim + re-probe 重试，v4 conan create 复验中）
+source_pr:              https://atomgit.com/OpenHarmonyPCDeveloper/build_in_harmonyos/merge_requests/13869
