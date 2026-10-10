@@ -1,0 +1,87 @@
+#====================================================================
+# Draft: Pure Data externals never link libpd - they resolve every Pd
+#        runtime symbol (17 API functions + the data symbol s_) from the
+#        hosting Pd process at dlopen time. A test binary that exports
+#        none of those symbols can never load a correct external on OHOS:
+#        musl there has no lazy binding, so RTLD_LAZY defers nothing and
+#        dlopen fails with "Error relocating ...: <sym>: symbol not
+#        found". The test must play the Pd host (define the imported
+#        symbols, link with -rdynamic) and load with RTLD_NOW. The
+#        upstream "Pd Makefile template" install path is
+#        $(objectsdir)/$(LIBRARY_NAME), not $(objectsdir).
+#        (pd-log 0.1; applies to every Pd external library)
+#====================================================================
+
+id:                     DRAFT-PD-EXTERNALS-DLOPEN-RUNTIME-SYMBOLS
+trigger_tool:           conan|clang|make
+phase:                  testing|runtime
+error_signature:        undefined symbol: logpost|dlopen failed: undefined symbol|Error relocating.*symbol not found|RPATH library not found|objectdir.*library_name|No such file or directory.*lib/pd-externals/.*/.*/|undefined symbol: main|make.*\[Makefile:[0-9]+: [a-z_]+\.\] Error 1|UNAME.*uname -s|ifeq \(\$\(UNAME\),Linux\)
+
+severity:               2
+category:               ohos, conan, build-system, testing, puredata
+match_keywords:         Pure Data, Pd external, .pd_linux, logpost, gensym, dlopen, RTLD_LAZY, RTLD_NOW, PD_PATH, PD_INCLUDE, objectsdir, pd-externals, Makefile template, Makefile.pdlibbuilder, m_pd.h, uname -s, UNAME=Linux, EXTENSION empty, undefined symbol: main, -shared missing, HarmonyOS kernel name, musl lazy binding, eager relocation, -rdynamic, stub host, R_AARCH64_JUMP_SLOT, GLOB_DAT
+
+title:                  A packaged Pd external has no link-time dependency on Pd: it exports <name>_setup and imports the whole Pd API (17 functions plus the data symbol s_) from the hosting process. A test that dlopen()s it without providing those host symbols fails on OHOS even though the artefact is perfect (musl binds every relocation eagerly), and the upstream template appends the library name to objectsdir itself, so passing objectsdir=/lib/pd-externals/log yields lib/pd-externals/log/log.
+
+root_cause:             Pd externals are position-independent plugins loaded by Pd with dlopen(), not libraries linked against libpd. Verified on pd-log 0.1 / puredata 0.54.1: `readelf --dyn-syms` on each *.pd_linux shows one defined GLOBAL symbol (<name>_setup) plus 18 imports - 17 GLOBAL UND Pd functions (gensym, class_new, class_doaddfloat, class_addbang, class_addpointer, class_addanything, pd_new, logpost, atom_getfloatarg, atom_getsymbolarg, binbuf_new, binbuf_add, binbuf_gettext, binbuf_free, resizebytes, freebytes, floatinlet_new) and the data symbol s_ - and `readelf -d` shows a single NEEDED of libc.so. logpost(3) is declared in puredata's m_pd.h:579 as `EXTERN void logpost(const void *object, int level, const char *fmt, ...)`; all of them are exported by the Pd binary (pd links itself with -rdynamic), so the references are satisfied by the process-global symbol table, not by a DT_NEEDED entry. Two loader behaviours follow. (1) s_ goes through an eager R_*_GLOB_DAT relocation, so even glibc RTLD_LAZY cannot defer it - a loader without host exports always fails there. (2) The 17 functions go through R_*_JUMP_SLOT: glibc defers them under RTLD_LAZY, but OHOS musl has no lazy binding (RTLD_LAZY behaves like RTLD_NOW), so on the device every one of them must resolve at dlopen() time - CI build #73602 failed with "dlopen failed: Error relocating logpost.pd_linux: gensym: symbol not found" for all five externals of a perfectly correct package because the test binary exported nothing. Second, the stock "Pd Makefile template" derives objectsdir from prefix/lib/pd-externals and its install rule appends $(LIBRARY_NAME) itself ($(INSTALL_DIR) $(DESTDIR)$(objectsdir)/$(LIBRARY_NAME)), so a recipe must pass the *parent* (objectsdir=/lib/pd-externals) to land files in lib/pd-externals/<name>/.
+
+affected_scope:         Every Pure Data external library packaged as a Conan recipe (pd-log 0.1, pd-creb 0.10.0, pd-smlib, pd-compos, ...), on any platform; the host-export requirement is OHOS-mandatory and glibc-relevant (s_ is eager everywhere), and the objectsdir rule is platform-independent. The dlopen-mode rule is what makes an automated test_package possible for a package that ships no executable and no linkable library.
+
+verification_cmd:       llvm-readelf --dyn-syms <pkg>/lib/pd-externals/log/debug.pd_linux | grep -E 'debug_setup|logpost|UND'
+                        # expect: "debug_setup" defined GLOBAL plus 18 UND (17 Pd functions + s_)
+                        llvm-readelf -r <same> | grep -E 'GLOB_DAT|JUMP_SLOT'
+                        # expect: R_AARCH64_GLOB_DAT for s_ in .rela.dyn; 17 strong R_AARCH64_JUMP_SLOT in .rela.plt
+                        llvm-readelf -d <same> | grep NEEDED
+                        # expect: only libc.so (no libpd)
+
+rec_priority:           1
+rec_approach:           test-with-rdynamic-stub-host-and-rtld-now
+rec_description:        (a) In test_package, compile a small native C program for the target that plays the Pd host: it defines every Pd symbol the externals import (the 17 functions as no-op stubs plus an s_ data object - enumerate them from the artefacts with readelf, not from memory) and is linked with -rdynamic so the stubs reach the process-global symbol table, exactly like the pd binary itself. Then dlopen() each packaged *.pd_linux with RTLD_NOW and dlsym() "<name>_setup", asserting non-NULL; also assert the ELF is ELFCLASS64 and its e_machine matches the target (183 = EM_AARCH64) so a stray host build is caught. RTLD_NOW, not RTLD_LAZY: OHOS musl defers nothing anyway, and on glibc RTLD_NOW forces the same full resolution instead of hiding missing host exports behind lazy PLT slots. Pass the expected machine number in from the recipe (armv8 -> 183, x86_64 -> 62) rather than hardcoding, so the same test also works on a Linux profile. (b) Assert the packaged layout is <package>/lib/pd-externals/<name>/ so the loader path matches what Pd searches. (c) In the recipe pass objectsdir=/lib/pd-externals (the parent), never the full per-library path.
+rec_command:            grep -c -- '-rdynamic -o pdlog_dlopen_test' archives/p/pd-log/0.1/test_package/conanfile.py
+rec_auto_fix:           false
+rec_impl:               archives/p/pd-log/0.1/test_package/pdlog_dlopen_test.c
+
+fallback_priority:      2
+fallback_approach:      fall-back-to-static-elf-inspection
+fallback_description:   If the target cannot execute the test binary (no qemu binfmt locally, no runnable device), degrade to asserting the ELF identity from the outside: e_machine == EM_AARCH64, type == ET_DYN, and that "<name>_setup" appears as a defined GLOBAL dynamic symbol while the Pd imports appear as UND. This still fails for text placeholders and for host-arch artefacts, but it cannot catch a genuinely unloadable object - say so in the PR notes instead of claiming the stronger coverage.
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:
+
+forbid_1_pattern:       add -lpd|-lpd\b.*LINK
+forbid_1_reason:        Linking -lpd is the wrong fix in every direction: no Pd shared library is packaged (or needed) and the imports are meant to be resolved by the hosting process, so the link either fails or hides the host-export contract. The mirror-image trap (hit on CI build #73602) is not regex-detectable: a bare RTLD_NOW load from a binary that exports no Pd host symbols is red for correct artefacts on every libc (s_ is an eager GLOB_DAT even under glibc), while an RTLD_LAZY load looks green on glibc and then fails on the OHOS device, where musl defers nothing. The only correct pairing is stub host + -rdynamic + RTLD_NOW; treat any RTLD_LAZY-only rationale in a review as a glibc assumption that must be re-checked against the device loader.
+forbid_1_consequence:   Permanently red CI, or a recipe that quietly starts depending on a Pd shared library that does not exist on OHOS, or a test that passes on glibc only because lazy binding hides the missing host exports (and then breaks on the OHOS device, as in CI build #73602).
+
+principles:             real-evidence-over-assumption, honest-test-accounting, verify-the-artefact-not-the-file-list, posix-correct-minimal-change
+
+# SECOND TRAP (same template family, hit on CI builds #70269 / #70276 of pd-log):
+#   UNAME := $(shell uname -s)
+#   ifeq ($(UNAME),Linux)
+#     EXTENSION = pd_linux ; ALL_CFLAGS += -fPIC
+#     ALL_LDFLAGS += -rdynamic -shared -fPIC -Wl,-rpath,"\$$ORIGIN",--enable-new-dtags
+#   endif
+# On HarmonyOS uname -s is the kernel name, so the branch is skipped: EXTENSION
+# stays empty (targets become "logpost."), -shared never reaches the link, and
+# the object is linked as an executable -> "undefined symbol: main" followed by
+# every Pd symbol. Fix: pass UNAME=Linux on the make command line (upstream itself
+# documents fake-uname as its Android cross-compile mechanism, Makefile:127-129).
+#   make UNAME=HarmonyOS ...   # reproduces the failure offline
+#   make UNAME=Linux    ...    # 5x .pd_linux
+#
+# THIRD TRAP (CI build #73602, after SECOND TRAP was fixed - first build that
+# ever reached test_package on the device): the dlopen test binary exported no
+# Pd symbols and loaded with RTLD_LAZY. glibc (and the WSL qemu loader) defers
+# the JUMP_SLOT slots, so the same test looked green locally; OHOS musl has no
+# lazy binding, so on the device dlopen failed five times with
+#   "Error relocating .../logpost.pd_linux: gensym: symbol not found"
+# The lesson generalises (see E545 / kamailio modules): on OHOS, RTLD_LAZY is
+# RTLD_NOW, and any test that dlopen()s a plugin with host-provided symbols
+# must itself export those symbols (define + -rdynamic). Do not trust a local
+# glibc RTLD_LAZY pass as evidence that the device will load the artefact.
+#
+# Pd Makefile template, install rule (upstream log-0.1/Makefile):
+#   objectsdir = $(pkglibdir)                       # pkglibdir = $(prefix)/lib/pd-externals
+#   libdir_install: $(INSTALL_DIR) $(DESTDIR)$(objectsdir)/$(LIBRARY_NAME)
+# => recipe passes objectsdir=/lib/pd-externals, files land in lib/pd-externals/log/
+# pd-log 0.1 conandata: no patches needed; STRIP=: because a strip would
+# invalidate the OHOS ELF code signature (abduco / jamnntpd / tty-clock precedent).
