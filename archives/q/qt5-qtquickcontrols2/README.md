@@ -1,6 +1,6 @@
 # qt5-qtquickcontrols2
 
-Qt Quick Controls 2 — Qt 5.15.2 官方控件库模块。
+Qt Quick Controls 2 — Qt 5.15 官方控件库模块（已适配 5.15.2 / 5.15.19）。
 
 ## 内容
 - **C++ 库**：`libQt5QuickTemplates2.so`（模板控件基类）、`libQt5QuickControls2.so`（QQuickStyle 等公共 API）
@@ -29,4 +29,5 @@ engine.addImportPath("<qtdeclarative_pkg>/qml");
 - 下游解锁：kirigami2 5.116.0（libkirigami 硬依赖 `Qt5::QuickControls2`）
 
 ## 版本
+- 5.15.19（2026-10-04 适配，HarmonyOS PC aarch64；含 1 个 accessibility 编译守卫补丁）
 - 5.15.2（2026-09-19 首次适配，HarmonyOS PC aarch64）
