@@ -1,0 +1,97 @@
+# ═══ Draft knowledge entry — OHOS <utmp.h> 只有 utmp API 子集：getutline()/getutid() 无声明、libc.so 不导出 ═══
+# Timestamp: 2026-09-27
+# Software: ttysnoop 0.12d（ttysnoops.c cleanup_utmp()）
+# Gate: 本机交叉编译首轮失败 → 补丁 → conan create 通过；qemu 静态重链对照复现 SIGSEGV
+# Status: DRAFT — needs human/AI review to promote to E-entry
+
+id:                     E639
+trigger_tool:           clang|ld
+phase:                  compilation|linking|runtime
+error_signature:        call to undeclared function 'getutline'|
+                        call to undeclared function 'getutid'|
+                        indirection requires pointer operand \('int' invalid\)|
+                        undefined symbol: getutline|
+                        undefined symbol: getutid
+
+severity:               2
+category:               musl, libc, portability, headers
+match_keywords:         getutline, getutid, getutent, pututline, utmp.h, utmpx.h, cleanup_utmp,
+                        indirection requires pointer operand, implicit function declaration,
+                        libc.so missing symbol, libc.a only, utmp stub returns NULL, _PATH_UTMP,
+                        /dev/null/utmp, login wrapper, getty, telnetd
+title:                  OHOS <utmp.h> 只声明 setutent/getutent/pututline/endutent/utmpname：getutline()/getutid() 无声明、libc.so 不导出（仅 libc.a 有），老代码 `u = *getutline(&ut)` 编译报 "indirection requires pointer operand ('int' invalid)"，补 prototype 后动态链接 undefined symbol，改静态链接又因 musl utmp 桩恒返回 NULL 而在退出时 SIGSEGV
+
+root_cause:             OHOS SDK（clang 15.0.4，aarch64-unknown-linux-ohos）的 sysroot/usr/include/utmp.h
+  把 utmp 映射为 utmpx（#define utmp utmpx），但只声明 endutent/getutent/pututline/
+  setutent/utmpname/login_tty 六个函数；getutline() 与 getutid() 既不在 utmp.h 也不在
+  utmpx.h 里声明。libc.so 的动态导出表同样只有 setutent/getutent/pututline/endutent/
+  utmpname（getutline/getutid/getutxline/pututxline/setutxent/endutxent 全部缺失），
+  这些符号只存在于静态归档 libc.a。于是 1990 年代登录包装器里常见的
+  `utmp = *(getutline(&utmp));` 连续踩三层：
+  ① 编译期：getutline 被隐式声明为返回 int，对 int 解引用，clang 报
+     "error: indirection requires pointer operand ('int' invalid)"——报错点在解引用，
+     极易被误读成类型问题；
+  ② 链接期：手工补 prototype 后，动态链接 libc.so 报 "ld.lld: error: undefined symbol:
+     getutline"；
+  ③ 运行期：改 -static 链 libc.a 能过，但 musl 的 utmp 实现是桩（_PATH_UTMP 为
+     "/dev/null/utmp"，getut* 恒返回 NULL），解引用 NULL，进程在 atexit 清理路径被
+     SIGSEGV 杀死。glibc 上同一写法在“找不到匹配项”时同样会崩，只是平时不触发。
+
+affected_scope:         已验证：ttysnoop 0.12d（ttysnoops.c cleanup_utmp，退出时清理 utmp 记录）。
+  同病人群：调用 getutline()/getutid() 且不检查 NULL 的登录包装器、getty/telnetd 周边工具、
+  会话记录类程序（1990 年代 BSD/Linux 血统 C 代码）。
+  与既有条目的边界：E121 覆盖 utmpx 族（setutxent/pututxline/endutxent）链接失败并走
+  OMIT_UTMP 路线；E429 草稿覆盖 utmpx.h 只声明 struct；本条是 utmp 族里“能用的只有
+  getutent 这一个读接口”的子集问题及其 NULL 语义，修法不同（保留功能、换 API）。
+
+verification_cmd:       SR=$NDK/sysroot; L=$SR/usr/lib/aarch64-linux-ohos
+  grep -n 'getut' $SR/usr/include/utmp.h $SR/usr/include/utmpx.h   # 只有 getutent
+  llvm-nm -D --defined-only $L/libc.so | grep -wE 'getutline|getutid|getutent'   # 仅 getutent
+  llvm-nm --defined-only $L/libc.a | grep -wE 'getutline|getutid'                # 静态归档里有
+  # 对照：补 prototype 后 clang ttysnoops.o common.o -lcrypt → ld.lld: error: undefined symbol: getutline
+  #      -static 链接 + qemu-aarch64 运行 → 退出时 killed by signal 11
+
+rec_priority:           1
+rec_approach:           getutent-scan-with-null-check
+rec_description:        用已声明且 libc.so 导出的 getutent() 顺序扫描替代 getutline()/getutid()：
+  setutent(); while ((ut = getutent()) != NULL) if ((ut->ut_type == LOGIN_PROCESS ||
+  ut->ut_type == USER_PROCESS) && strncmp(ut->ut_line, line, sizeof(ut->ut_line)) == 0)
+  { copy = *ut; ...; pututline(&copy); break; } endutent();
+  语义与 getutline() 等价（同样只匹配 LOGIN/USER_PROCESS），NULL 时自然跳过；不引入平台宏，
+  glibc/musl 通用，可向上游提交。utmp 在 musl/OHOS 上本就是桩，功能损失为零。
+rec_command:            python3 scripts/ohc-run.py refresh-patch --auto <软件> <版本>
+rec_auto_fix:           false
+rec_impl:               manual-source-patch
+
+fallback_priority:      2
+fallback_approach:      drop-utmp-bookkeeping
+fallback_description:   上游 utmp 逻辑与核心功能无关且改写成本高时，整段删去 utmp 记账（等价于上游的 OMIT_UTMP 开关，见 E121），并在 notes 写明平台 utmp 为桩。
+fallback_command:
+fallback_auto_fix:      false
+fallback_impl:          manual-source-patch
+
+forbid_1_pattern:       extern\s+struct\s+utmp\s*\*\s*getutline\s*\(|struct\s+utmp\s*\*\s*getutline\s*\(\s*const
+forbid_1_reason:        手工补 prototype 只消除编译期错误；符号不在 libc.so，动态链接必失败
+forbid_1_consequence:   故障后移到链接期（ld.lld undefined symbol: getutline）
+forbid_2_pattern:       -static|LDFLAGS.*-static
+forbid_2_reason:        为让 getutline 从 libc.a 解析而整体静态链接，交付物脱离系统 libc.so，且 musl 桩返回 NULL
+forbid_2_consequence:   能链接能启动，退出清理时解引用 NULL 被 SIGSEGV 杀死（本包对照实测 killed by signal 11）
+
+principles:             P005, P013
+
+causes:                 []
+caused_by:              []
+similar_to:             [E121, E579]
+conflicts_with:         []
+prerequisite_of:        []
+
+doc_file:               knowledge/drafts/E639-draft-788E.md
+last_updated: 2026-09-27
+source_event:           ttysnoop 0.12d 适配（archives/t/ttysnoop/0.12d）
+
+authors:                lkjing2021345 <1908499668@qq.com>
+source_pr:
+source_commit:
+
+draft: true
+contributor_id: 788E
