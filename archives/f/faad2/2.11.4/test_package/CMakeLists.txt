@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.15)
+project(test_faad2 C)
+find_package(faad2 CONFIG REQUIRED)
+add_executable(test_faad2 test_faad2.c)
+target_link_libraries(test_faad2 PRIVATE faad2::faad2)
