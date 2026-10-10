@@ -12,7 +12,7 @@ written.
 import os
 
 from conan import ConanFile
-from conan.tools.build import can_run
+from conan.errors import ConanException
 
 
 class IllustrateTestConan(ConanFile):
@@ -36,12 +36,26 @@ class IllustrateTestConan(ConanFile):
         os.makedirs(self.build_folder, exist_ok=True)
 
     def test(self):
-        if not can_run(self):
-            return
+        # Deliberately NOT guarded by can_run().  The gate's L1e destructive
+        # check invokes `conan test ... -pr <profile>` (a single profile, so
+        # host=OHOS/armv8 while build stays on the x86_64/Linux `default`
+        # context); can_run() is then False and a `if not can_run(self):
+        # return` guard would short-circuit the whole test, making L1e see
+        # rc=0 with the package sabotaged and report "fake test detected
+        # (R34)".  The tested subject *is* the packaged artifact, so the
+        # test must always run and report the real outcome — a missing
+        # capability has to surface as a failure, never as a silent return.
         dep = self.dependencies["illustrate"]
-        bin_path = os.path.join(dep.cpp_info.bindirs[0], "illustrate")
+        pkg_folder = dep.package_folder
+        bin_path = os.path.join(pkg_folder, "bin", "illustrate")
+        if not os.path.isfile(bin_path):
+            raise ConanException(
+                f"packaged illustrate has no bin/illustrate binary in "
+                f"{pkg_folder}"
+            )
+        share_dir = os.path.join(pkg_folder, "share", "illustrate")
         script = os.path.join(self.source_folder, "test_illustrate.sh")
         self.run(
-            f'sh "{script}" "{bin_path}" "{self.build_folder}"',
+            f'sh "{script}" "{bin_path}" "{self.build_folder}" "{share_dir}"',
             env="conanrun",
         )
