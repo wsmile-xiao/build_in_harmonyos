@@ -4,7 +4,7 @@
 Apache Kafka C/C++ client library
 
 ## OHOS 适配
-- 构建系统: autotools
+- 构建系统: cmake
 - 详见各版本 notes.md 获取适配详情
 
 ## 依赖
