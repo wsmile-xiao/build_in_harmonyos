@@ -1,0 +1,86 @@
+#====================================================================
+# DRAFT-kamailio-6.0.6-module-core-build-parity
+#   kamailio 系（自有 make 体系）在 OHOS 上：模块必须与 core 同口径构建
+#   —— OS=linux（uname 判定无 harmonyos 分支）+ 编译标志集合一致
+#   → 否则 kamailio 加载模块时报 "module version mismatch" / "module compile flags mismatch"
+# 来源: kamailio-lua 6.0.6 适配（上游 kamailio src/modules/app_lua）
+# 状态: 草稿（待审核 promote）
+#====================================================================
+
+id:                     DRAFT-kamailio-6.0.6-module-core-build-parity
+trigger_tool:           make|conan
+phase:                  configuration|building|runtime
+error_signature:        module version mismatch|
+                        module compile flags mismatch|
+                        ksr_version_control|
+
+# ═══ 识别层 ═══
+severity:               P1
+category:               platform, build-system, make, ohos
+title:                  kamailio（自有 make 体系）在 OHOS 上模块与 core 构建口径必须一致：OS=linux 且编译标志集合相同，否则加载被拒
+match_keywords:         kamailio, module version mismatch, compile flags mismatch, ksr_version_control,
+                        uname, HarmonyOS, harmonyos, OS=linux, SCTP, HAVE_RESOLV_RES, gethostbyname2,
+                        _res, module load, app_lua
+prescan_pattern:        OS := \$\(shell uname -s|ksr_version_control|ksr_locate_module
+prescan_globs:          Makefile.defs|conanfile.py
+
+# ═══ 诊断层 ═══
+root_cause:             kamailio 的 OS 判定为 `OS := $(shell uname -s | sed ...)`（Makefile.defs:125），
+                        OHOS 上 `uname -s` = `HarmonyOS` → 落到无专属分支的默认值，
+                        缺失 linux 分支的一整套定义（-DHAVE_GETHOSTBYNAME2 / USE_PTHREAD_MUTEX 等）
+                        → core 编译首个错误 `core/resolve.h:290: #error neither gethostbyname2 or
+                        getipnodebyname present`；故 OHOS 上必须显式 `OS=linux`（Linux ABI）。
+                        同时 OHOS 还需 `SCTP=0`（sysroot 无 netinet/sctp.h）与
+                        `DEFS_RM=-DHAVE_RESOLV_RES`（OHOS libc 无 _res）。
+                        关键：kamailio 在加载模块时做**双重**校验（core/sr_module.c
+                        ksr_version_control）：① 目标标识 `kamailio <ver> (<arch>/<os>)`；
+                        ② 由 C_DEFS 派生的**编译标志集合**。模块与 core 任一项不同即拒绝加载。
+                        因此模块不能"只求能编译"——必须与 core 完全同口径。
+affected_scope:         kamailio 及其所有子包（发行版按模块拆分的 kamailio-* 包）；
+                        具象实证：kamailio-lua 6.0.6（app_lua 模块）——模块以 OS 自动探测构建
+                        → `core: kamailio 6.0.6 (aarch64/linux); module: kamailio 6.0.6 (aarch64/harmonyos)`；
+                        模块仅 OS=linux 而 core 用了 SCTP=0/DEFS_RM → `module compile flags mismatch`。
+
+# ═══ 方案层 ★ ═══
+rec_priority:           1
+rec_approach:           module-build-parity-with-core
+rec_description:        模块的 make 变量与 OHOS 上 core 的构建口径**逐项对齐**：
+                        `make cfg OS=linux SCTP=0 DEFS_RM="-DHAVE_RESOLV_RES" LOCALBASE=<lua 依赖>`
+                        + `make modules modules=modules/app_lua`，并在 test_package 中断言
+                        模块 `strings` 含 `aarch64/linux`、不含 `USE_SCTP` / `HAVE_RESOLV_RES`，
+                        再用真实 kamailio core 做一次 dlopen/端到端加载验证。
+rec_command:            make cfg OS=linux SCTP=0 DEFS_RM="-DHAVE_RESOLV_RES"
+                        make modules modules=modules/app_lua OS=linux SCTP=0 DEFS_RM="-DHAVE_RESOLV_RES"
+rec_auto_fix:           false
+rec_impl:               make-vars-parity
+
+fallback_priority:      2
+fallback_approach:      patch-makefile-defs-uname-mapping
+fallback_description:   在上游 Makefile.defs 的 `uname -s` sed 处补 HarmonyOS→linux 映射，
+                        使 OS 判定在 core/模块两侧自动一致（代价：改上游源码，属平台补丁）。
+fallback_command:       OS := $(shell uname -s | sed -e s/HarmonyOS/linux/ ...)
+fallback_auto_fix:      false
+fallback_impl:          patch-build-file
+
+forbid_1_pattern:       只保证模块能编译.*不校验.*core.*标志|模块.*单独适配.*忽略 core
+forbid_1_reason:        模块能编译 ≠ 能被加载；kamailio 双重校验（目标标识 + 编译标志集合）
+forbid_1_consequence:   产物装到设备后被 kamailio 拒绝加载，功能全废（本地编译通过的最坏情况）
+
+# ═══ 关系图 ═══
+similar_to:             E091（OHOS 内核头与 musl 冲突族）、E119（sockaddr_storage 重定义）
+caused_by:
+conflicts_with:
+prerequisite_of:
+
+# ═══ 元数据 ═══
+verification_cmd:       conan create archives/k/kamailio-lua/6.0.6 -pr:h=ci/conan/profiles/ohos-aarch64 -pr:b=ci/conan/profiles/ohos-aarch64 --user=ohpcd --channel=stable
+                        # 期望 rc=0；再用 OHOS 构建的 kamailio core 加载包内 app_lua.so 跑上游 61 场景
+authors:                ohc-worker <ohc-worker@local>
+source_commit:          0
+metrics_success_count:  1
+metrics_fail_count:     2
+metrics_confidence:     1.0
+metrics_last_used:      2026-10-02
+
+draft: true
+contributor_id:         KML-LUA
