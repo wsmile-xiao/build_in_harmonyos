@@ -1,0 +1,98 @@
+#====================================================================
+# Draft: USB device-access libraries (libusb lineage) die at init on
+#        OHOS HAP sandbox: default libusb_init() walks sysfs/netlink
+#        device discovery, both blocked by SELinux neverallow ->
+#        LIBUSB_ERROR_IO(-1). The ONLY working init path is
+#        libusb_init_context() + LIBUSB_OPTION_NO_DEVICE_DISCOVERY.
+#        Upstream test programs (stress/stress_mt/set_option/
+#        init_context) all call default libusb_init -> 0/4 pass.
+#====================================================================
+
+id:                     DRAFT-14966-libusb-1.0.29-sandbox-usb-device-discovery-block
+draft:                  DRAFT-14966-libusb-1.0.29-sandbox-usb-device-discovery-block
+status:                 pending-editor-review
+title:                  libusb 系 USB 访问库在 OHOS HAP 沙箱的初始化路径替代：默认 libusb_init() 走 sysfs/netlink 设备发现全灭（LIBUSB_ERROR_IO），必须 libusb_init_context + LIBUSB_OPTION_NO_DEVICE_DISCOVERY；上游测试程序 0/4 全死的运行态豁免定性方法
+category:               platform, limitation, testing
+trigger_tool:           conan|clang|runtime
+phase:                  runtime|testing
+severity:               2
+last_updated:           2026-10-08
+
+match_keywords:         libusb, usb device access, libusb_init, LIBUSB_ERROR_IO, init failed, NO_DEVICE_DISCOVERY, libusb_init_context, sysfs, /sys/bus/usb/devices, netlink, hotplug, SELinux, neverallow, HAP sandbox, stress, stress_mt, set_option, init_context, make check, FAIL: stress, Failed to init libusb, device discovery, hotplug callback, errno 13, Permission denied
+
+error_signature:        Failed to init libusb.*-1|libusb_init_context failed: -[0-9]+ \(LIBUSB_ERROR_IO\)|FAIL: stress_mt|ls: /sys/bus/usb/devices/: Permission denied|Thread [0-9]+ failed \(iteration [0-9]+\): LIBUSB_ERROR_IO
+
+error_excerpt:          stress: "Failed to init libusb on iteration 0: -1" (x4 runs); stress_mt: "Thread N failed (iteration 0): LIBUSB_ERROR_IO" (8 threads x 2 rounds); testsuite: # TOTAL: 4 / # PASS: 0 / # FAIL: 4; host probe: ls /sys/bus/usb/devices/ -> Permission denied (errno=13)
+
+root_cause: |
+  libusb's default initialization (libusb_init / libusb_init(NULL)) unconditionally
+  walks the Linux backend device-discovery path: enumerate /sys/bus/usb/devices/
+  (sysfs) for the device list and open a kernel netlink socket (kobject_uevent)
+  for hotplug. On OpenHarmony PC the HAP application sandbox is confined by
+  SELinux policy where BOTH paths are hard-blocked by neverallow rules (not
+  tunable AVC denials):
+    (allow hishell_hap sysfs (dir (search)))                       — NOT granted
+    (neverallowx hap_domain dev_bus_usb_file (ioctl chr_file ...)) — ioctl range ban
+    (neverallow hap_domain domain (netlink_kobject_uevent_socket (write append)))
+  Consequences at runtime:
+    - libusb_init(NULL) returns -1 (LIBUSB_ERROR_IO) before any device work
+    - every upstream test binary that boots a default context dies on iteration 0
+      (stress/stress_mt/set_option/init_context all FAIL, 0/4)
+    - consumer apps that link libusb and call plain libusb_init crash the same way
+  This is a platform policy boundary, NOT a code defect: the library compiles,
+  links, and its API surface (version/error strings/context with
+  NO_DEVICE_DISCOVERY) works. Domains allowed to touch USB (udevd,
+  hdf_ext_devmgr, sane_service, ...) are system services, not HAP sandbox.
+  Version-independent across libusb 1.0.24..1.0.29 (Linux backend unchanged);
+  re-verified on 1.0.29 (2026-10-08): --enable-tests-build run gives 4x FAIL
+  with identical signatures.
+
+affected_scope:         All libusb-dependent packages and their upstream test
+                       suites on OHOS (libusb, libusbsio, rtl-sdr, libdfu-ahp,
+                       libam7xxx, sispmctl, knxd, pcsclite USB readers, ...);
+                       any conan recipe whose build() runs `make check` on a
+                       libusb test binary calling default libusb_init().
+
+verification_cmd:       ls /sys/bus/usb/devices/ 2>&1 | grep -q Permission denied && echo BLOCKED; nm -D ~/.conan2/.../lib/libusb-1.0.so | grep libusb_init_context
+
+rec_priority:           1
+rec_approach:           no-device-discovery-init-context-plus-test-exemption
+
+solution: |
+  Two-part recipe, both parts shipped in archives/l/libusb/1.0.29:
+  1) CONSUMER/TEST INIT PATH (code-level): replace default-context usage with an
+     explicit context that opts out of device discovery:
+       const struct libusb_init_option options[] = {
+           { LIBUSB_OPTION_NO_DEVICE_DISCOVERY, { .ival = 1 } },
+       };
+       libusb_context *ctx = NULL;
+       int rc = libusb_init_context(&ctx, options, 1);
+  NOTE the .ival = 1 (not 0) — passing 0 is a no-op equal to default behavior
+  and still walks the blocked sysfs path (real AI-review finding on the 1.0.27.1
+  branch, commit 2688668e94). test_package/test_libusb.c carries this exact
+  form as its platform-init assertion (5/5 pass on device).
+  2) UPSTREAM TEST STATS (reporting-level): do NOT enable tests-build for the
+  sandbox profile and do NOT claim the 4 upstream programs as passed. Keep the
+  recipe at upstream-default (tests-build=no, tests/ not in SUBDIRS -> make
+  check has no failing entry), report upstream registered-N = 4 with a
+  per-item exemption line each carrying the platform keyword:
+     环境限制: OHOS HAP 沙箱 SELinux neverallow 阻断 sysfs/netlink 设备发现
+     (报错定位: `Failed to init libusb on iteration 0: -1 (LIBUSB_ERROR_IO)`)
+  Evidence bundle for reviewers: run once with --enable-tests-build locally,
+  attach the 0/4 suite summary + host probe `ls /sys/bus/usb/devices/ ->
+  Permission denied` to notes.md; the consumer smoke (NO_DEVICE_DISCOVERY path)
+  is the genuine runtime verification carrier.
+
+fallback: >
+  If a future OHOS build grants the sandbox read-only sysfs USB tree
+  (policy change), re-enable tests-build and report real numbers; on worker
+  environments without a USB stack at all (containers), the same
+  NO_DEVICE_DISCOVERY consumer smoke still validates link + API + context
+  lifecycle without any device. For apps that DO need real device I/O on
+  OHOS, the correct upstream route is the USB Manager NDK API
+  (usb_usb_manager), not libusb sysfs enumeration — the 1.0.27 archive's
+  capability assessment documents the full neverallow CIL analysis.
+
+verify_builds:          libusb/1.0.29 local conan create -pr=ohos-aarch64 RC=0 (make check no-fail + test_package 5/5, 2026-10-08); --enable-tests-build probe run 4x FAIL LIBUSB_ERROR_IO (evidence in notes.md §4); consumer smoke prints "libusb consumer smoke passed: 1.0.29"
+
+reference_impl:         archives/l/libusb/1.0.29 (recipe + enhanced test_libusb.c); historical R8-clean form 8c2162e850 + P2 ival fix 2688668e94 on feat/libusb-1.0.27.1 branch
