@@ -3,7 +3,7 @@
 - **三方库名称**：libwebp
 - **上游版本**：官方 1.6.0；本次适配修复版本 1.6.0.2，不冒称新上游标签
 - **上游仓库地址**：https://github.com/webmproject/libwebp
-- **适配路径**：路径 A（基础适配）+ 路径 B（贡献创新）；已按当前完整证据逐项重判HD1—HD4，四项均未匹配
+- **适配路径**：路径 A（基础适配）+ 路径 B（贡献创新）+ 路径 C（GUI 图像链高难度挑战候选申请）；HD1—HD4 四项仍未证明匹配，候选申请不等于官方认定或分值批准，详见唯一关联 Issue #3565。
 - **使用知识库**：E096、E130；本次实质增量配对草稿 E2026100907-draft-LWP2。旧 E696 已被主线其他贡献占用，本次只迁移本 PR 草稿对，保留他人条目不变。
 
 ---
@@ -17,7 +17,7 @@
 | 单元测试 | 64 | 官方固定 ANTLR 4.12.0 默认启用原用例，原参数化 IDs 分别 32+32；不关闭 BUILD_TESTING |
 | 集成测试 | 12 | 官方 libwebp 1.6.0 原 tests/fuzzer 入口，含原基础 7、mux 4、info 1；执行其固定 FuzzTest harness，非只统计注册 |
 | 其他测试 | 0 | 该原 CMake 路径未发现独立额外运行入口；精确清单与源审计将附正式证据 |
-| **合计** | **76** | 正式 Conan r006、官方 step35 r002 分别在各自同一事务实际 76/76、零 skip，独立源码 IDs 和 ANTLR 原参数核对通过；不拼跨run分母 |
+| **合计** | **76** | 当前签名入口修复候选在官方 step35 r003 同一事务实际 76/76、零 skip；逐项核对原 FuzzTest IDs 和 ANTLR 原参数，不拼跨run分母 |
 
 ### 适配后测试用例统计
 
@@ -26,7 +26,7 @@
 | 单元测试 | 64 | 不变 | 原 ANTLR 测试与断言未修改；仅构建平台能力探测修复 |
 | 集成测试 | 16 | +4 | 原 libwebp 12；另有消费者真实无损 RGBA、元数据 mux/demux、有损尺寸/alpha 和坏码流拒绝 4 项 |
 | 鸿蒙特有测试 | 1 | 新增 | HarmonyOS PC AArch64 ELF codesign、实际 SONAME/NEEDED 与自有包运行时命名空间、真实 codec 调用的独立专项 |
-| **合计** | **81** | **+5** | 正式 Conan r006 与现行官方本地 CI r002 各自同一事务实际 76+4+1 全通过，不拼跨run分母 |
+| **合计** | **81** | **+5** | 当前修复候选在官方本地 CI r003 同一事务实际 76+4+1 全通过，不拼跨run分母 |
 
 ---
 
@@ -58,11 +58,11 @@
 - 上游测试用例通过率：76/76（100%）
 - 新增测试用例通过率：5/5（100%）
 
-2026-10-09 后续整改：完整 AtomCode 报告192792991已公开，真实非OHOS编译器覆盖问题已修复。新候选分别通过 fresh 正式 Conan r006 和官方 FinishPipeline.step35_local_ci r002，原测试、消费者、鸿蒙专项均在各自同run真实执行。上述为本地/真机验证，不是平台 CI；推送后仍以当前完整 HEAD 的最新 Review 和平台 CI 为准。
+2026-10-11 后续整改：实际完整 AtomCode 检视发现 sign_link.py 混淆 EI_CLASS 与 EI_DATA，并对短 ELF 头缺乏边界检查；已分别核对 ELF64 类、小端编码、最小头长度及执行/共享对象类型。MANIFEST 中的实际动态路径已明确与 Conan test_package 参数绑定。本机定向控制 7/7，随后 fresh 官方 FinishPipeline.step35_local_ci r003 执行干净 Conan 构建及原测试，76+4+1 同run全通过。上述不是平台 CI；新提交后重新核验该完整 HEAD 的评审和平台 CI。
 
-本文件为 PR #14954 的六节正文。Issue #3565 与本 PR 双向唯一关联，真实修复任务14927（libwebp1.6.0.2，fix/libwebp-1.6.0.2）已领取，账号2301_80739235，活动为开源鸿蒙PC专项积分赛-依赖。正式证据绑定实际配方、完整 HEAD/tree、唯一 run、boot/UID、输入 SHA-256、真实 stdout/stderr/RC、原 source case IDs 和完整 WAL/receipt 链。修复配方仅在 OHOS 路径配置实际 Clang 与签名工具，非 OHOS 保留 Conan toolchain 的编译器选择；新 recipe SHA256 为5c01bbe198dc2735f6af6bfc426e311692a503004a80e0d384bb6e04e658e199。新事务测试候选tree为1f561d3e25f7cc1bcb759ecdb074f1fe13e7bbe0，后续仅刷新真实证据与正文，运行输入不变。探索结果和旧 PR #13623 的 Review/CI 不冒充当前 HEAD 门禁。
+本文件为 PR #14954 的六节正文。Issue #3565 与本 PR 双向唯一关联，真实修复任务14927（libwebp1.6.0.2，fix/libwebp-1.6.0.2）已领取，账号2301_80739235，活动为开源鸿蒙PC专项积分赛-依赖。当前唯一 run 为 libwebp-1.6.0.2-finish-step5-20261011-r003，测试候选 tree 为60a42a85e46a084b0b0c8f553c7fcf05ff28a0e3。配方仅在 OHOS 路径配置真实 Clang 与签名工具，非 OHOS 保留 Conan toolchain；recipe SHA256 5c01bbe198dc2735f6af6bfc426e311692a503004a80e0d384bb6e04e658e199，签名入口 SHA256 fcc25252ce530a52fc24304c14b5caf02915cd757d76127d6fd1147824f322f7。后续仅刷新正式生成的证据与正文，运行输入保持测试时字节。探索结果、旧事务和旧 PR #13623 的 Review/CI 不冒充当前 HEAD 门禁。
 
-正式同run证据：libwebp-conan-observed-r006.json SHA-256 `5c588d5b0433e6c63c7f2d74b7fb2fd12ba5debd522b4a60d404358e947468d2`；libwebp-conan-source-cases-observed-r006.json SHA-256 `0c1c62564b2b2f539c51fe397357036b090f2fbc91c3d25df30c60242b6c7cc4`。官方step35 r002原setup/build_and_test RC0、76+4+1和L0/L1通过；新`.ci-result.json`实际由官方方法生成、原日志SHA `1cff1cf7b5315e96fd1ca0d02434f99b1c0802220d0fe82c0c570da3d7871b8d`独立核对。`reports/official-step35-observed.json` SHA `b7cf658765973d34eb27d4f8048f2b5f5f24ab3cca1179895a68ff8acd304bb1`、`reports/upstream-source-cases-observed.json` SHA `25a16a8f75bbe09397893264394d31c9fc55c103235a7d12c24d1031a1f5be65`。各run唯一launch/release/postrelease/自有进程0均独立核对；旧证据全部保留，不将本地CI冒充平台CI。
+当前正式同run证据：`reports/official-step35-observed.json` SHA256 `be3130012439dd2e96afb927b14977aa2df597c35bce4c33f3a912f87b03a35f`；`reports/upstream-source-cases-observed.json` SHA256 `8bda363c2d3b904ed1b0346589bb026876f5ed6cc947ce85b02e3d6e5b989bfa`。r003 原 setup/build_and_test 和官方 step35 实际 RC0，Conan create、原76项、消费者4项、鸿蒙1项均通过。官方生成的结果按原字节保存在本地，不纳入 Git；不手工制造或修改结果文件。完整 WAL/receipt 哈希链、唯一 launch、release/postrelease、自有进程0和清理后工作根不存在已独立核对。历史失败与旧证据全部保留，不将本地 CI 冒充平台 CI。
 
 ---
 

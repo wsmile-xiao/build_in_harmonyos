@@ -7,7 +7,7 @@ def sign(path,cfg,allowed):
     if not path.is_relative_to(Path(allowed).resolve()) or not path.is_file():
         raise RuntimeError("Signing path outside the exact build/package root")
     with path.open('rb') as stream:header=stream.read(20)
-    if header[:4]!=b'\x7fELF' or header[5]!=1 or struct.unpack_from('<H',header,16)[0] not in (2,3):
+    if len(header)<20 or header[:4]!=b'\x7fELF' or header[4]!=2 or header[5]!=1 or struct.unpack_from('<H',header,16)[0] not in (2,3):
         return
     if not cfg['ohos']:return
     env=dict(os.environ);env.pop('LD_LIBRARY_PATH',None)
