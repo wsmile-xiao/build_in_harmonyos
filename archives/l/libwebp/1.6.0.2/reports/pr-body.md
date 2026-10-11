@@ -17,7 +17,7 @@
 | 单元测试 | 64 | 官方固定 ANTLR 4.12.0 默认启用原用例，原参数化 IDs 分别 32+32；不关闭 BUILD_TESTING |
 | 集成测试 | 12 | 官方 libwebp 1.6.0 原 tests/fuzzer 入口，含原基础 7、mux 4、info 1；执行其固定 FuzzTest harness，非只统计注册 |
 | 其他测试 | 0 | 该原 CMake 路径未发现独立额外运行入口；精确清单与源审计将附正式证据 |
-| **合计** | **76** | 当前候选在官方 step35 r007 同一事务实际 76/76、零 skip；逐项核对原 FuzzTest IDs 和 ANTLR 原参数，不拼跨run分母 |
+| **合计** | **76** | 当前候选在官方 step35 r008 同一事务实际 76/76、零 skip；逐项核对原 FuzzTest IDs 和 ANTLR 原参数，不拼跨run分母 |
 
 ### 适配后测试用例统计
 
@@ -26,7 +26,7 @@
 | 单元测试 | 64 | 不变 | 原 ANTLR 测试与断言未修改；仅构建平台能力探测修复 |
 | 集成测试 | 16 | +4 | 原 libwebp 12；另有消费者真实无损 RGBA、元数据 mux/demux、有损尺寸/alpha 和坏码流拒绝 4 项 |
 | 鸿蒙特有测试 | 1 | 新增 | HarmonyOS PC AArch64 ELF codesign、实际 SONAME/NEEDED 与自有包运行时命名空间、真实 codec 调用的独立专项 |
-| **合计** | **81** | **+5** | 当前修复候选在官方本地 CI r007 同一事务实际 76+4+1 全通过，不拼跨run分母 |
+| **合计** | **81** | **+5** | 当前修复候选在官方本地 CI r008 同一事务实际 76+4+1 全通过，不拼跨run分母 |
 
 ---
 
@@ -58,7 +58,15 @@
 - 上游测试用例通过率：76/76（100%）
 - 新增测试用例通过率：5/5（100%）
 
-### 当前验证权威（2026-10-11，r007）
+### 当前验证权威（2026-10-12，r008）
+
+本轮唯一事务 `libwebp-1.6.0.2-finish-step5-20261012-r008`：官方 step35、干净 Conan create 真实 RC0；原测试76/76（FuzzTest12、ANTLR64）、消费者4/4、鸿蒙1/1，零失败/跳过。测试tree为5efc5e0ac4da2bd4bd79ace788ab591c88db1632，父HEAD为caf27fea727eab79895128111aaaad2ce4665efd；独立观察SHA256为bd00bcc29fc5eee4af31524ef97c79ae85b62989640f6e2e9db72751ad7d1481，源码匹配SHA256为6b915055c56707d2a786d28f5e30e723873f6cccba56bc15c7d358751c94fa5f，完整原日志SHA256为2a85cbca3192ee7a6e3cc1562abd85588129c65c070545bbec6dc39bfaab5143。完整WAL/receipt链、release/postrelease和自有进程0已独立核验。仅为当前真机正式验证，不冒称平台CI。
+
+worker真实日志显示maps为内核HMDFS backing路径，当前命名空间realpath返回ENOENT。本轮以canonical实际dl_iterate_phdr对象、文件型PT_LOAD地址/偏移和非零inode完整见证核对映射；实际dev字段仅解析，不单独作为来源证明。重复/外来对象、未知错误或不匹配区间仍拒绝。不按basename或路径前缀放行，不移除codec、签名和dladdr断言。当前修复已在r008同run验证；新完整HEAD仍需平台Review/CI。
+
+以下r007及更早均为保全的历史，不拼跨run结果。
+
+### 历史 r007
 
 本轮唯一事务 `libwebp-1.6.0.2-finish-step5-20261011-r007`：官方 step35、干净 Conan create 真实 RC0；原测试76/76（FuzzTest12、ANTLR64）、消费者4/4、鸿蒙1/1，零失败/跳过。测试tree为7da2a158453f89f09f3ea299defe4e8ae779282c，父HEAD为8e964cf639e8eae0663254077e9856b49e8c1c23；独立观察SHA256为69ec44c1f5fe4c12213d2650537c235bd37bc6cde21c9897a7fb7349d84f0ce1，源码匹配SHA256为83c7bfa98574d51c94f5c6b9db872ccf29b625d8b6d24a457e7ebe5f7beeb5e1，完整原日志SHA256为48f73b073fbd63b701c29f6a3d0bd577f81b47c5be265b8677a705ab1819aa07。完整WAL/receipt链、release/postrelease和自有进程0已独立核验。上述固定结果指本真机事务，非平台CI。
 
