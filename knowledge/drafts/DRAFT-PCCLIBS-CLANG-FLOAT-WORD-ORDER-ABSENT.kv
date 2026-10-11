@@ -1,0 +1,103 @@
+#====================================================================
+# Draft: clang 不定义 __FLOAT_WORD_ORDER__ → 字序判断静默退化为
+#        "非小端" → 符号位提取读到尾数位 → 复数例程在普通有限输入上段错误
+#====================================================================
+
+id:                     DRAFT-PCC-LIBS-CLANG-FLOAT-WORD-ORDER-ABSENT
+trigger_tool:           clang|gcc|make|conan
+phase:                  runtime|testing
+error_signature:        __signbitl|__signbitd|__signbitf .* wrong|
+                        segfault in __mulxc3|__divxc3|__muldc3|
+                        complex long double crash|complex multiply SIGSEGV|
+                        Signbit returns wrong value|
+                        Signal 11 .* mulxc3|divxc3
+
+severity:               2
+category:               platform|portability|clang|byte-order|signbit|legacy-c
+match_keywords:         __FLOAT_WORD_ORDER__, __BYTE_ORDER__, FLOAT_WORD_ORDER,
+                        signbit, __signbitl, __signbitd, complex routines,
+                        mulxc3, divxc3, muldc3, SIGSEGV, clang vs gcc macro,
+                        float word order, little endian, mantissa vs sign,
+                        pcc-libs, libpcc signbit.c
+title:                  clang 不定义 __FLOAT_WORD_ORDER__（gcc 定义），据此选择字序的代码在 clang 下静默退化为"非小端"，__signbit{l,d} 读到尾数位而非符号位，使复数例程把普通有限输入当成"负无穷/特殊值"处理并段错误
+
+root_cause:             上游代码用编译器内建宏 `__FLOAT_WORD_ORDER__` 判断浮点数的
+                        字序，以便定位符号位：
+
+                            #if __FLOAT_WORD_ORDER__ == __ORDER_LITTLE_ENDIAN__
+                            #  define SIGNBIT_IS_HIGH_WORD   0
+                            #else
+                            #  define SIGNBIT_IS_HIGH_WORD   1   /* 非小端 → 高字 */
+                            #endif
+
+                        `__FLOAT_WORD_ORDER__` 是 **GCC 的内建宏**，clang 在多数版本
+                        （含本次 OHOS SDK clang 15）**并不定义**它。未定义标识符在
+                        `#if` 中按 **0** 参与计算，于是 `0 == __ORDER_LITTLE_ENDIAN__`
+                        为假（`__ORDER_LITTLE_ENDIAN__` 在 clang 中通常为 1234），
+                        恒等于"**非小端**"分支被选中——即认为符号位在高字。
+
+                        真实目标是小端（AArch64 little-endian）：符号位在**高字**这一
+                        判断本身对 double 恰好没错，但代码据此做的**取字选择**
+                        （读低字当符号 → 实为尾数位）错误，`__signbitl`/`__signbitd`
+                        读回了尾数而不是符号，符号判定结果随机化。
+
+affected_scope:         所有依赖 `__FLOAT_WORD_ORDER__`（或同类"编译器内建字序宏"）
+                        而未提供回退的浮点/位操作代码，在用 clang 构建时都会命中。
+                        本次 pcc-libs 的 `libpcc/signbit.c` 即此形态；影响面为复数
+                        运算族：`__mulxc3`/`__divxc3`（long double complex）与
+                        `__muldc3`（double complex）。
+
+                        危害形态与上一条（FPA 字交换）**互补但不同**：
+                          - 本条：**取不到字序信息**（宏缺失）→ 回退分支写错；
+                          - 上一条：**错误地认为需要交换**（arm32 宏误判）。
+                        两者都只在运行时暴露，二者叠加时更难二分定位。
+                        `__signbitl(-inf)` 是很好的探针：期望 1。
+
+verification_cmd:       # 1) 免费信号：确认目标编译器是否定义该宏
+                        clang -dM -E -x c /dev/null | grep FLOAT_WORD_ORDER
+                        # clang 无输出（不定义）→ 所有 `#if __FLOAT_WORD_ORDER__`
+                        #   都按 0 计算，必然落入"非小端"分支
+                        # gcc 对照：gcc -dM -E -x c /dev/null | grep FLOAT_WORD_ORDER
+                        #   会输出 __FLOAT_WORD_ORDER__ 1234
+                        # 2) 宏的整数值本身容易误判
+                        clang -dM -E -x c /dev/null | grep -E "__ORDER_LITTLE_ENDIAN__|__BYTE_ORDER__"
+                        # 注意 __ORDER_LITTLE_ENDIAN__ 通常为 1234（不是 0）
+                        # 3) 运行时探针（本次实际采用）
+                        #    对 __signbitf/__signbitd/__signbitl 断言
+                        #    (+1.5)->0, (-1.5)->1, (-0.0)->1, (-inf)->1
+                        #    再调用 __mulxc3/__divxc3 确认不再段错误
+
+rec_priority:           1
+rec_approach:           fallback-float-word-order-to-byte-order
+rec_description:        不要依赖单一编译器内建宏；给出**带回退的派生宏**，优先专用宏、
+                        缺失时退回更普及的 `__BYTE_ORDER__`：
+
+                            #if defined(__FLOAT_WORD_ORDER__)
+                            #  define PCC_FLOAT_WORD_ORDER  __FLOAT_WORD_ORDER__
+                            #elif defined(__BYTE_ORDER__)
+                            #  define PCC_FLOAT_WORD_ORDER  __BYTE_ORDER__   /* 浮点跟随字节序 */
+                            #else
+                            #  error "cannot determine float word order"
+                            #endif
+
+                        并在比较处使用 `PCC_FLOAT_WORD_ORDER` 而非裸宏。
+
+                        要点：
+                        ① **浮点字序在绝大多数（含 AArch64/OHOS）平台与字节序一致**，
+                           回退到 `__BYTE_ORDER__` 是安全且最小的修复；
+                        ② 不要用 `#ifdef` 直接判定"小端"——`__ORDER_LITTLE_ENDIAN__`
+                           的值（1234）不是 0，必须与宏值比较而非与 0/1 比较；
+                        ③ 若确实存在字序与字节序不一致的平台（罕见），可在派生宏处
+                           单独特判该平台，而不是让通用路径承担风险；
+                        ④ 排查纪律同前：`-dM -E` 先确认宏存在性，再上运行时断言，
+                           **不要**因为"代码里写了 #if/#else 看起来周全"就跳过验证。
+
+                        排查判据：
+                          clang -dM -E -x c /dev/null | grep FLOAT_WORD_ORDER  → 无输出即命中
+                          grep -rn "__FLOAT_WORD_ORDER__" <src>                → 定位使用点
+rec_command:            clang -dM -E -x c /dev/null | grep FLOAT_WORD_ORDER
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              PENDING
+source_commit:          PENDING

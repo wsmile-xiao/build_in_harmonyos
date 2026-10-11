@@ -1,0 +1,135 @@
+diff --git a/libpcc/cxmuldiv.c b/libpcc/cxmuldiv.c
+--- a/libpcc/cxmuldiv.c
++++ b/libpcc/cxmuldiv.c
+@@ -408,6 +408,10 @@
+ union ul {
+ 	long double f;
+ 	unsigned int i[4];
++#if __LDBL_MANT_DIG__ == 113
++	unsigned long long q[2];
++	unsigned long long mantic;	/* binary128 has no separate dil3 word */
++#endif
+ };
+ 
+ #if defined(mach_amd64) || defined(mach_i386)
+@@ -416,6 +420,11 @@
+ #define	dil2	i[0]
+ #define	dil1	i[1]
+ #define	dlh	i[2]
++#elif __LDBL_MANT_DIG__ == 113
++#define	dlh	q[1]
++#define	dil1	q[1]
++#define	dil2	q[0]
++#define	dil3	mantic
+ #elif __FLOAT_WORD_ORDER__ == __ORDER_BIG_ENDIAN__
+ #define	dlh	i[0]
+ #define	dil1	i[1]
+@@ -435,16 +444,81 @@
+ #define	LDBL_MANTEXP	(LDBL_EXP|LDBL_MANT)
+ #define	LDBL_INF	LDBL_EXP
+ #define	LDBL_HIDDEN	0x80000000U
++#elif __LDBL_MANT_DIG__ == 113
++/*
++ * IEEE 754 binary128.  There is no x87-style explicit integer bit and the
++ * exponent is a packed 15-bit field, so the classification macros below take
++ * the compiler-builtin path instead of decoding dlh by hand.
++ */
++#define	LDBL_SIGN	0x8000000000000000ULL
++#define	LDBL_EXP	0x7fff000000000000ULL
++#define	LDBL_MANT	0x0000ffffffffffffULL
++#define	LDBL_MANTEXP	(LDBL_EXP|LDBL_MANT)
+ #else
+ #error FIXME long double
+ #endif
+ 
++#if __LDBL_MANT_DIG__ == 113
++#define	LDBL_ISFIN(x)	__builtin_isfinite(x.f)
++#define	LDBL_ISINF(x)	__builtin_isinf(x.f)
++#define	LDBL_ISNAN(x)	__builtin_isnan(x.f)
++#else
+ #define	LDBL_ISFIN(x)	((x.dlh & LDBL_MANTEXP) != LDBL_INF)
+ #define	LDBL_ISINF(x)	(((x.dlh & LDBL_MANTEXP) == LDBL_INF) && \
+ 		(x.dil1 == 0 && x.dil2 == 0 && x.dil3 == 0))
+ #define	LDBL_ISNAN(x)	(((x.dlh & LDBL_MANTEXP) == LDBL_INF) && \
+ 		(x.dil1 != 0 || x.dil2 != 0 || x.dil3 != 0))
++#endif
++
++#if __LDBL_MANT_DIG__ == 113
++/*
++ * binary128 flavour of the two long-double helpers.  The x87 versions below
++ * build the exponent and an explicit integer bit by hand, which has no
++ * binary128 equivalent, so these operate on the packed q[] view instead.
++ */
++static long double
++pcc_copysignl(long double x, long double y)
++{
++	union ul ux, uy;
++
++	ux.f = x;
++	uy.f = y;
++
++	ux.q[1] = (ux.q[1] & LDBL_MANTEXP) | (uy.q[1] & LDBL_SIGN);
++	return ux.f;
++}
++
++/*
++ * Rescale by a power of two by rewriting the binary128 exponent field
++ * directly, so no libm long-double helper is needed.  Out-of-range results
++ * clamp to the nearest representable exponent, matching the tolerance of the
++ * x87 implementation below.
++ */
++static long double
++pcc_scalbnl(long double x, int exp)
++{
++	union ul x1, z1;
++	unsigned int biased;
++
++	x1.f = x;
++	if (LDBL_ISINF(x1) || LDBL_ISNAN(x1) || x1.f == 0.0L)
++		return x;
++
++	biased = (unsigned int)((x1.q[1] & LDBL_EXP) >> 48);
++	if (biased == 0)
++		return x;
+ 
++	exp += (int)biased;
++	if (exp <= 0)
++		exp = 1;
++	else if (exp >= 0x7fff)
++		exp = 0x7ffe;
++
++	z1 = x1;
++	z1.q[1] = (x1.q[1] & ~LDBL_EXP) | ((unsigned long long)exp << 48);
++	return z1.f;
++}
++#else
+ static long double
+ pcc_copysignl(long double x, long double y)
+ {
+@@ -486,6 +560,7 @@
+ 	x *= z1.f;
+ 	return x;
+ }
++#endif /* __LDBL_MANT_DIG__ == 113 */
+ 
+ long double _Complex
+ __divxc3(long double ax, long double bx, long double cx, long double dx)
+@@ -513,13 +588,14 @@
+ 	else
+ 		urp = &ud;
+ 
+-	ur.dlh = urp->dlh;
+-	ur.dil1 = urp->dil1;
+-	ur.dil2 = urp->dil2;
+-	ur.dil3 = urp->dil3;
++	ur = *urp;
+ 
+ 	/* logbf */
++#if __LDBL_MANT_DIG__ == 113
++	res = (int)((ur.q[1] & LDBL_EXP) >> 48);
++#else
+ 	res = ur.dlh;
++#endif
+ 	if (res == 0 && ur.dil1 == 0 && ur.dil2 == 0 && ur.dil3 == 0)
+ 		ulogbw.f = (long double)-1.0/ur.f;
+ 	else if (res == 32767)

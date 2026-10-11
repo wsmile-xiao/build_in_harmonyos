@@ -1,0 +1,95 @@
+#====================================================================
+# Draft: aarch64 上误用 32 位 ARM 宏 __VFP_FP__/__ARMEB__ 判断 FPA
+#        双字序 → 所有 double 位模式被前后 32 位对调，双精度算术全错
+#        （adddf3/muldf3/divdf3 静默返回垃圾值；单精度与比较函数幸存）
+#====================================================================
+
+id:                     DRAFT-PCC-LIBS-AARCH64-SOFTFLOAT-FPA-WORD-SWAP
+trigger_tool:           clang|gcc|make|conan
+phase:                  runtime|testing
+error_signature:        addsf3 OK but adddf3 wrong|
+                        __adddf3|__muldf3|__divdf3|__subdf3 .* wrong result|
+                        double arithmetic returns garbage|
+                        softfloat .* double .* incorrect|
+                        word swap|FPA|__VFP_FP__|__ARMEB__|
+                        libgcc soft float wrong on aarch64
+
+severity:               2
+category:               platform|portability|aarch64|word-order|softfloat|abi
+match_keywords:         softfloat, libgcc soft-float, FPA, word swap, byte order,
+                        __VFP_FP__, __ARMEB__, float word order, aarch64 double
+                        broken, arm32 macro on arm64, adddf3 wrong, mulsf3 OK,
+                        IEEE754 bit pattern swapped, pcc-libs, libpccsoftfloat
+title:                  aarch64 编译器不定义 32 位 ARM 宏 __VFP_FP__/__ARMEB__，软浮点库据此选中的 FPA 字交换分支被误入，所有 double 位模式前后 32 位对调（单精度与比较函数恰好幸存），表现为双精度算术静默返回垃圾值
+
+root_cause:             某些为 32 位 ARM 编写的软浮点实现，用 `__VFP_FP__`（VFP 浮点
+                        字序）或 `__ARMEB__`（大端）这两个 **32 位 ARM 专属宏** 判断
+                        是否需要对 double 做 FPA 风格的 32 位字交换：
+
+                            #if defined(__VFP_FP__) || defined(__ARMEB__)
+                            #define FLOAT_WORD_ORDER_SWAPPED   /* FPA：高字在前 */
+                            #else
+                            #define FLOAT_WORD_ORDER_NATURAL
+                            #endif
+
+                        AArch64 编译器（clang/gcc for aarch64）**不定义**这两个宏——它们
+                        属于 armv7/arm32 的 ABI 宏集合（AAPCS 的历史遗留）。preprocessor
+                        的 `#if defined(...)` 结果为假，于是误入"需要字交换"分支，把每个
+                        double 位模式的高 32 位与低 32 位对调后再做运算。
+
+affected_scope:         任何从 32 位 ARM 移植到 AArch64 的软浮点/位操作代码，只要用
+                        `__VFP_FP__`/`__ARMEB__`/`__ARMEL__` 之类 arm32 宏判断字序或
+                        浮点布局，就会在 aarch64 上静默走错分支。命中面极隐蔽：
+
+                          ① 单精度不受影响——float 只有 32 位，字交换是恒等操作；
+                          ② 比较类函数（__ltdf2/__gtdf2/__eqdf2）可能恰好正确，
+                             因为符号位位于高字，交换后仍参与符号判定；
+                          ③ 所以**编译期一切正常、静态审查看不出问题，只有真机运行
+                             数值断言才暴露**。本次 pcc-libs 1.2.0-devel-20211015 在
+                             HarmonyOS PC (aarch64) 上的 `libsoftfloat/arch/aarch64/
+                             aarch64-gcc.h` 即此形态。
+
+verification_cmd:       # 1) 确认目标编译器不定义这两个宏（免费信号）
+                        clang -dM -E -x c /dev/null | grep -E "__VFP_FP__|__ARMEB__|__ARMEL__"
+                        # aarch64 上无输出 → 代码里的 defined() 判断必为假
+                        # 对照：armv7 交叉编译同一命令会命中
+                        # 2) 位模式往返验证（区分"逻辑错"与"字序错"）
+                        #    取 1.5 的 IEEE754 双精度位模式 0x3FF8000000000000，
+                        #    若实现的 add/mul 结果恰为其 32 位字对调形态，即确诊字序
+                        # 3) 运行时断言（本次实际采用，也是唯一能暴露该问题的手段）
+                        #    conan create ... --build='<pkg>/*'  → test_package 断言
+                        #    adddf3/muldf3/divdf3/extendsfdf2/truncdfsf2 全部数值比对
+
+rec_priority:           1
+rec_approach:           treat-arm32-word-order-macros-as-absent-on-aarch64
+rec_description:        修复方式是**把 __aarch64__ 显式加入"自然序（不做 FPA 字交换）"
+                        的条件**，而不是顺着宏的定义去补 switch：
+
+                            #if defined(__VFP_FP__) || defined(__ARMEB__)
+                            #  if !defined(__aarch64__)        /* ← 新增 */
+                            #  define FLOAT_WORD_ORDER_SWAPPED
+                            #  endif
+                            #endif
+                            /* 其余情况保持 NATURAL */
+
+                        为什么选"排除 aarch64"而不是"定义缺失的宏"：
+                        ① `__VFP_FP__`/`__ARMEB__` 的语义是 arm32 ABI 的浮点寄存器
+                           字序，AArch64 的 AAPCS64 就是自然序，强行 define 会污染其他
+                           依赖该宏的上游代码（同一头文件常被多处 include）；
+                        ② 排除写法是**最小且局部的**，只影响这一处判断，不改变任何
+                           平台的既有行为（32 位 ARM 路径完全不变）；
+                        ③ 与另一类同族修复（编译器不定义 `__FLOAT_WORD_ORDER__` 时
+                           回退到 `__BYTE_ORDER__`）互补：前者治"错误地认为需要交换"，
+                           后者治"拿不到字序信息"。
+
+                        排查判据（先做这两步再动手）：
+                          grep -rn "__VFP_FP__\|__ARMEB__\|__ARMEL__" <src>
+                          若命中且目标为 aarch64 → 高度可疑；
+                          再用真机数值断言确认，**不要**仅凭代码审查下结论（单精度与
+                          比较函数会掩盖问题）。
+rec_command:            clang -dM -E -x c /dev/null | grep -E "__VFP_FP__|__ARMEB__"
+rec_auto_fix:           false
+
+# ═══ 知识协作 (Authorship & Provenance) ═══
+source_pr:              PENDING
+source_commit:          PENDING
